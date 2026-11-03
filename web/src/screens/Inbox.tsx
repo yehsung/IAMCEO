@@ -626,7 +626,9 @@ export default function Inbox() {
     });
   const fileTitleOf = (d: Decision) => state.files.find((f) => f.id === d.fileId)?.title ?? null;
 
-  const decisions = [...state.decisions].sort(byCreated);
+  // 최신 결재가 맨 위. 미뤄 둔 옛 결재가 위를 차지하면 새로 온 것을 놓친다.
+  // 목록은 올라온 차례(서버: 시각·등록 순)라 뒤집은 뒤 정렬한다. 같은 ms 에 올라온 것도 나중 것이 위다.
+  const decisions = [...state.decisions].reverse().sort((a, b) => byCreated(b, a));
   const live = decisions.filter((d) => d.status === "open" || kept.has(d.id));
   const openCount = decisions.filter((d) => d.status === "open").length;
   const doneDecisions = state.decisions
@@ -641,7 +643,7 @@ export default function Inbox() {
       <AnsweredCard key={d.id} decision={d} />
     );
 
-  // 묶음은 맨 처음 카드 자리에 모아 둔다. 카드가 하나뿐이어도 트리는 같게 둔다(머리줄만 숨긴다). 낱장으로 두면 둘째 카드가 올 때 다시 마운트되어 쓰던 메모의 초점을 잃는다.
+  // 묶음은 가장 새 카드 자리에 모아 두고, 묶음 안은 물어본 차례(오래된 것부터)로 둔다. 카드가 하나뿐이어도 트리는 같게 둔다(머리줄만 숨긴다). 낱장으로 두면 둘째 카드가 올 때 다시 마운트되어 쓰던 메모의 초점을 잃는다.
   const groupCounts = new Map<string, number>();
   for (const d of live) if (d.group) groupCounts.set(d.group, (groupCounts.get(d.group) ?? 0) + 1);
   const seen = new Set<string>();
@@ -650,7 +652,7 @@ export default function Inbox() {
     if (seen.has(d.group)) return [];
     seen.add(d.group);
     const group = d.group;
-    return [<DecisionGroup key={`group:${group}`} name={group} decisions={live.filter((x) => x.group === group)} picks={picks} locked={!gate.ok} render={renderCard} onKeep={keep} single={(groupCounts.get(group) ?? 0) < 2} />];
+    return [<DecisionGroup key={`group:${group}`} name={group} decisions={live.filter((x) => x.group === group).reverse().sort(byCreated)} picks={picks} locked={!gate.ok} render={renderCard} onKeep={keep} single={(groupCounts.get(group) ?? 0) < 2} />];
   });
 
   const working = state.members.some((m) => m.status === "working");

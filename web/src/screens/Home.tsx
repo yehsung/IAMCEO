@@ -482,7 +482,8 @@ function TidyBar({ project }: { project: Project }) {
 function HomeBody({ state }: { state: ProjectState }) {
   const wide = useMediaQuery(MQ_DESKTOP);
   const projectId = state.project.id;
-  const decisions = state.decisions.filter((d) => d.status === "open").sort(byCreated);
+  // 결재함과 같이 최신이 위(같은 ms 면 나중에 올라온 것이 위).
+  const decisions = state.decisions.filter((d) => d.status === "open").reverse().sort((a, b) => byCreated(b, a));
   const blocked = state.members.filter((m) => m.status === "blocked");
   const nothingToDo = !state.todos.some((t) => !t.done) && decisions.length === 0 && blocked.length === 0;
   const working = state.members.some((m) => m.status === "working");

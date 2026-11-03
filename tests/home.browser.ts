@@ -276,11 +276,11 @@ describe("내가 할 일", () => {
 });
 
 describe("칸", () => {
-  test("결재 대기: 건수·맨 위 3건·승인 창 앞, 눌러서 해당 카드로", async () => {
+  test("결재 대기: 건수·맨 위 3건(최신부터)·승인 창 앞, 눌러서 해당 카드로", async () => {
     const page = await home(desktop, full.p.id);
     const card = page.getByRole("region", { name: "결재 대기" });
     await expect(card.locator(".hm-count").textContent()).resolves.toBe("5");
-    expect(await card.locator(".hm-row__title").allTextContents()).toEqual(["영희", "색 방향 정하기", "가격표 문구 고르기", "출시 날짜 정하기"]);
+    expect(await card.locator(".hm-row__title").allTextContents()).toEqual(["영희", "넷째 결재", "출시 날짜 정하기", "가격표 문구 고르기"]);
     await card.getByText("승인 창 앞").waitFor();
     await card.getByText("외 1건").waitFor();
     await card.getByRole("link", { name: /가격표 문구/ }).click();
@@ -292,6 +292,13 @@ describe("칸", () => {
     await until("직원 상세로", async () => page.url().endsWith(`/team/${full.d.member.id}`));
     await page.close();
   }, 20_000);
+
+  test("결재함: 최신 결재가 맨 위(미뤄 둔 옛 결재가 위를 차지하지 않는다)", async () => {
+    const page = await open(desktop, `#/p/${full.p.id}/inbox`);
+    await page.locator(".ibx-card .ibx-title").first().waitFor();
+    expect(await page.locator(".ibx-card .ibx-title").allTextContents()).toEqual(["넷째 결재", "출시 날짜 정하기", "가격표 문구 고르기", "색 방향 정하기"]);
+    await page.close();
+  }, 15_000);
 
   test("팀: 0 인 칩은 숨고 일하는 직원은 3명까지, 눌러서 상세로", async () => {
     const page = await home(desktop, full.p.id);

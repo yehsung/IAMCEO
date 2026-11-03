@@ -403,6 +403,8 @@ interface Runtime {
   /** 새 설정으로 다시 열기를 실패한 횟수와, 포기한 설정. 설정이 또 바뀌면 다시 시도한다. */
   configFails: number;
   configGaveUp: string | null;
+  /** 턴을 마치고 뒤 작업(워크플로 등)을 기다리는 중이면 그 작업. 그 팀은 일하는 중이고 세션은 글을 바로 받는다(herdr). */
+  background: string | null;
 }
 
 const HOLD_NOTES: Record<string, string> = {
@@ -1218,6 +1220,8 @@ export class Orchestrator implements OrchestratorApi {
         wake: false,
       });
     }
+    // 대표가 답했으니 그 직원은 더 이상 '내 답 기다림'이 아니다(턴이 끝날 때까지 남겨 두지 않는다).
+    if (asker && asker.origin !== "manual") this.refreshWaiting(asker.id);
     return this.store.requireDecision(decisionId);
   }
 
@@ -2031,10 +2035,7 @@ export class Orchestrator implements OrchestratorApi {
     if (asker && asker.id !== member.id && asker.origin !== "manual") {
       await this.deliver({ projectId: decision.projectId, memberId: asker.id, kind: "system", text: formatSystem(`결재 #${decision.id} 가 닫혔습니다: ${why}. 질문 '${quotedInline(decision.title)}' 의 답은 오지 않습니다`), wake: false });
     }
-    if (asker && asker.origin !== "manual") {
-      const fresh = this.store.getMember(asker.id);
-      if (fresh?.status === "waiting" && !this.isBusy(fresh)) this.settle(fresh);
-    }
+    if (asker && asker.origin !== "manual") this.refreshWaiting(asker.id);
     // 직원이 스스로 닫았으면 총괄의 판도 맞춘다.
     const lead = this.store.getConductor(decision.projectId);
     if (lead && lead.id !== member.id && lead.id !== asker?.id) {
@@ -2653,6 +2654,8 @@ export class Orchestrator implements OrchestratorApi {
       case "subagents":
         this.store.patchMember(member.id, { subagents: e.count });
         return;
+      case "background":
+        return this.onBackground(member, e.label);
       case "session":
         if (e.sessionId !== member.sessionId) this.store.patchMember(member.id, { sessionId: e.sessionId });
         return;
@@ -2699,8 +2702,8 @@ export class Orchestrator implements OrchestratorApi {
           rt.direct = true;
           rt.posted = false;
         }
-        // waiting 은 이번 턴에 ask 한 것이다. 턴이 끝날 때 정한다.
-        if (member.status !== "waiting" && member.status !== "working") this.store.patchMember(member.id, { status: "working" });
+        // waiting 은 답하지 않은 결재가 있을 때만 남긴다(이번 턴에 ask 했으면 턴이 끝날 때 정한다). 답이 끝난 waiting 은 지금 일하는 대로 고친다.
+        if (member.status !== "working" && !(member.status === "waiting" && this.hasOpenAsk(member))) this.store.patchMember(member.id, { status: "working" });
         break;
       case "idle":
         // turn_end 가 뒤따른다. 그때 정한다.
@@ -2712,6 +2715,7 @@ export class Orchestrator implements OrchestratorApi {
       case "gone":
         this.store.patchMember(member.id, { status: "offline", paneId: null, subagents: 0 });
         rt.turn = null;
+        rt.background = null;
         this.releaseSlots();
         return;
     }
@@ -2889,12 +2893,40 @@ export class Orchestrator implements OrchestratorApi {
     this.releaseSlots();
   }
 
-  /** 열린 결재가 있으면 waiting, 아니면 idle. */
+  /**
+   * 턴 밖의 상태. 뒤 작업(워크플로 등)을 기다리면 그 팀이 일하는 중이라 working, 아니면 답하지 않은 결재가 있으면 waiting, 없으면 idle.
+   */
   private settle(member: Member, clearError = false): void {
     const open = member.origin !== "manual" && this.store.listOpenDecisionsByMember(member.id).length > 0;
-    const status = open ? "waiting" : "idle";
+    const status = this.runtime(member.id).background ? "working" : open ? "waiting" : "idle";
     if (member.status === status && !clearError) return;
     this.store.patchMember(member.id, { status, ...(clearError ? { lastError: null } : {}) });
+  }
+
+  private hasOpenAsk(member: Member): boolean {
+    return member.origin !== "manual" && this.store.listOpenDecisionsByMember(member.id).length > 0;
+  }
+
+  /** waiting 인데 답하지 않은 결재가 남지 않았으면 지금 하는 대로(일하는 중·쉼) 바로 고친다. */
+  private refreshWaiting(memberId: string): void {
+    const member = this.store.getMember(memberId);
+    if (!member || member.status !== "waiting" || member.origin === "manual" || this.hasOpenAsk(member)) return;
+    if (this.isBusy(member)) this.store.patchMember(member.id, { status: "working" });
+    else this.settle(member);
+  }
+
+  /**
+   * 뒤 작업 기다림이 시작되거나 끝났다(herdr). 기다리는 동안은 그 팀이 일하는 중이라 working 으로 두고, 묶인 글은 곧바로 넣는다.
+   * 턴 안에서 들어오면 곧이어 오는 turn_end 가 상태를 정한다.
+   */
+  private onBackground(member: Member, label: string | null): void {
+    const rt = this.runtime(member.id);
+    if (rt.background === label) return;
+    rt.background = label;
+    if (label) this.store.appendActivity(member.id, "system", `턴을 마치고 뒤 작업(${label})을 기다립니다. 그동안 온 글은 바로 넣습니다`);
+    const fresh = this.store.requireMember(member.id);
+    if ((fresh.status === "working" || fresh.status === "waiting" || fresh.status === "idle") && !this.isBusy(fresh)) this.settle(fresh);
+    if (label) void this.pump(member.id);
   }
 
   /** 깨어 있는 직원이 상한을 넘으면 총괄에게 후보만 알린다. 잠재우기는 총괄 판단(§6). */
@@ -2928,7 +2960,7 @@ export class Orchestrator implements OrchestratorApi {
   private runtime(memberId: string): Runtime {
     let rt = this.runtimes.get(memberId);
     if (!rt) {
-      rt = { turn: null, pumping: null, again: false, posted: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, reattaching: false, holdUntil: 0, configFails: 0, configGaveUp: null };
+      rt = { turn: null, pumping: null, again: false, posted: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, reattaching: false, holdUntil: 0, configFails: 0, configGaveUp: null, background: null };
       this.runtimes.set(memberId, rt);
     }
     return rt;

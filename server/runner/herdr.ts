@@ -37,6 +37,10 @@ const CLEAR_SETTLE_MS = 300;
 const CLEAR_WAIT_MS = 500;
 const CLEAR_POLL_MS = 100;
 const NO_INPUT_BOX = "입력칸을 찾지 못했습니다(선택 창·승인 창·셸 모드 등)";
+/** herdr 가 working 이라는 동안 '턴은 끝났고 뒤 작업만 기다림'인지 살피는 간격 */
+const BG_CHECK_MS = 3000;
+/** 뒤 작업 판정에 읽는 세션 기록 끝부분 */
+const BG_TAIL_BYTES = 256 * 1024;
 
 type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 type Reported = "working" | "idle" | "blocked";
@@ -77,6 +81,18 @@ interface Track {
   grantPending: boolean;
   /** 세션 기록을 이어 읽어 도구·서브에이전트를 알린다. */
   tail: { offset: number; poll: ReturnType<typeof setInterval>; subagents: Set<string> } | null;
+  /**
+   * 턴을 마치고 뒤 작업(워크플로 등)을 기다리는 중이면 화면에 적힌 그 작업(예: "1 dynamic workflow").
+   * herdr 는 이때도 working 이라 하지만 주 세션은 비어 있어 넣은 글을 곧바로 받는다(실측).
+   */
+  bg: string | null;
+  /** herdr 가 working 인 동안만 도는 뒤 작업 판정 타이머 */
+  bgPoll: ReturnType<typeof setInterval> | null;
+  bgChecking: boolean;
+  /** 뒤 작업 중에 시작한 턴: 그 끝은 이 위치(기록 바이트) 뒤에 써진 턴 끝이어야 한다. 넣은 시각은 시작 안 됨을 가른다. */
+  bgTurn: { from: number; at: number } | null;
+  /** 지난 판정의 기록 크기와 결과. 기록이 그대로면 다시 읽지 않는다. */
+  bgSeen: { size: number; ended: boolean } | null;
 }
 
 export interface HerdrDeps {
@@ -90,13 +106,14 @@ export interface HerdrDeps {
   promptTimeoutMs?: number;
   compactGraceMs?: number;
   compactTimeoutMs?: number;
+  bgCheckMs?: number;
 }
 
 const TAIL_BYTES = 4 * 1024 * 1024;
 
-function readTail(path: string): string {
+function readTail(path: string, maxBytes = TAIL_BYTES): string {
   const size = statSync(path).size;
-  const length = Math.min(size, TAIL_BYTES);
+  const length = Math.min(size, maxBytes);
   const buf = Buffer.alloc(length);
   const fd = openSync(path, "r");
   try { readSync(fd, buf, 0, length, size - length); } finally { closeSync(fd); }
@@ -200,6 +217,71 @@ export function exitHintShown(screen: string): boolean {
   const lines = scanDim(screen).map((l) => l.text);
   const box = inputBox(lines);
   return lines.slice(box ? box.bottom + 1 : 0).some((l) => /Press Ctrl-C again to exit/i.test(l));
+}
+
+/** Claude 의 상태 줄 머리(도는 별). 일할 때는 모양이 바뀌며 돌고, 끝난 턴의 줄과 뒤 작업 기다림 줄에도 붙는다. */
+const SPINNER_HEAD = /^\s*[·✢✳✶✻✽]\s+\S/;
+/** 대화 글 머리(입력 되풀이·답·도구 결과). 상태 줄보다 이것이 입력칸에 가까우면 그 위의 상태 줄은 지난 것이다. */
+const CONVERSATION_HEAD = /^\s*[❯>⏺⎿]/;
+
+/** 입력칸 아래 뒤 작업 표시: 이름과 진행 막대(실측 "◯ mahjong-…  ▰▰▰▰▰▰▱▱"). */
+const BACKGROUND_BAR = /^\s*\S\s+(\S.*?)\s+[▰▱]{3,}\s*$/;
+
+/**
+ * 턴을 마치고 뒤 작업만 기다리는 화면이면 그 작업(예: "1 dynamic workflow"), 아니면 null. herdr 는 이 동안 working 이라 하지만
+ * 넣은 글은 곧바로 처리된다(실측 Claude Code 2.1.316). 두 모양이 있다:
+ * - 입력칸 바로 위 상태 줄 "✻ Waiting for 1 dynamic workflow to finish"(좁은 칸에서는 다음 줄로 접힌다).
+ * - 상태 줄 없이(또는 끝난 턴의 줄만 있고) 입력칸 아래에 뒤 작업 막대 "◯ 이름  ▰▰▰▱"만 있다.
+ * 일하는 중의 상태 줄(Thinking… (esc to interrupt) 등)이 있거나, 넣은 글의 되풀이(❯)가 가장 가까우면 아니다.
+ * 기록이 턴 끝인지는 따로 본다(transcriptTurnEnded).
+ */
+export function backgroundWait(screen: string): string | null {
+  const lines = scanDim(screen).map((l) => l.text);
+  const box = inputBox(lines);
+  if (!box) return null;
+  let seen = 0;
+  for (let i = box.top - 1; i >= 0 && seen < 8; i--) {
+    const line = lines[i]!;
+    if (!line.trim()) continue;
+    seen++;
+    // 넣은 글의 되풀이가 가장 가깝다: 곧 일을 시작한다.
+    if (/^\s*[❯>]/.test(line)) return null;
+    if (CONVERSATION_HEAD.test(line)) break;
+    if (!SPINNER_HEAD.test(line)) continue;
+    const joined = lines.slice(i, box.top).map((l) => l.trim()).filter(Boolean).join(" ");
+    const m = /^[·✢✳✶✻✽]\s+Waiting for (\d+ .+?) to finish\b/.exec(joined);
+    if (m) return m[1]!.replace(/\s+/g, " ");
+    // 도는 상태 줄: 일하는 중이다. 끝난 턴의 줄(Worked for 3m · Cogitated for 13s · done …)이면 아래 막대를 본다.
+    if (/esc to interrupt|…\s*\(|\.\.\.\s*\(/i.test(joined)) return null;
+    break;
+  }
+  for (const line of lines.slice(box.bottom + 1)) {
+    const bar = BACKGROUND_BAR.exec(line);
+    if (bar) return bar[1]!.replace(/\s+/g, " ");
+  }
+  return null;
+}
+
+/**
+ * 세션 기록의 주 대화가 턴 끝에 와 있는가. 마지막 대화 줄이 턴 끝 표지(turn_duration)이거나 도구를 부르지 않은 assistant 글이면 끝이다.
+ * 입력·도구 결과·도구를 부르는 글이면 아직 일하는 중이다. 넣은 글의 턴을 볼 때는 넣은 위치 뒤에 써진 부분만 넘긴다.
+ */
+export function transcriptTurnEnded(text: string): boolean {
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (!line.includes('"type":"assistant"') && !line.includes('"type":"user"') && !line.includes('"turn_duration"')) continue;
+    let entry: any;
+    try { entry = JSON.parse(line); } catch { continue; } // 잘라 읽은 첫 줄
+    if (entry?.isSidechain) continue;
+    if (entry?.type === "system") { if (entry.subtype === "turn_duration") return true; continue; }
+    if (entry?.type === "user") return false;
+    if (entry?.type !== "assistant") continue;
+    const content = entry.message?.content;
+    if (Array.isArray(content) && content.some((b: { type?: string }) => b?.type === "tool_use")) return false;
+    return entry.message?.stop_reason !== "tool_use";
+  }
+  return false;
 }
 
 /** git 저장소를 처음 열 때 뜨는 폴더 신뢰 창. 기본 선택이 "No, exit" 라 Enter 만 치면 세션이 끝난다. */
@@ -381,6 +463,7 @@ export class HerdrRunner implements Runner {
   private readonly promptTimeoutMs: number;
   private readonly compactGraceMs: number;
   private readonly compactTimeoutMs: number;
+  private readonly bgCheckMs: number;
   private readonly tracks = new Map<string, Track>();
   private readonly byPane = new Map<string, string>();
   private readonly projectTabs = new Map<string, string>();
@@ -411,6 +494,7 @@ export class HerdrRunner implements Runner {
     this.promptTimeoutMs = deps.promptTimeoutMs ?? 15_000;
     this.compactGraceMs = deps.compactGraceMs ?? 20_000;
     this.compactTimeoutMs = deps.compactTimeoutMs ?? 15 * 60_000;
+    this.bgCheckMs = deps.bgCheckMs ?? BG_CHECK_MS;
     this.resyncTimer = setInterval(() => void this.resync(), deps.resyncMs ?? 60_000);
     this.resyncTimer.unref?.();
   }
@@ -435,7 +519,8 @@ export class HerdrRunner implements Runner {
 
   isBusy(memberId: string): boolean {
     const t = this.tracks.get(memberId);
-    return !!t && (t.status === "working" || t.inTurn || t.awaiting !== null || t.compact !== null);
+    // 뒤 작업만 기다리는 세션은 herdr 가 working 이라 해도 글을 받는다.
+    return !!t && ((t.status === "working" && t.bg === null) || t.inTurn || t.awaiting !== null || t.compact !== null);
   }
 
   // 같은 프로젝트의 칸 배치가 겹치면 트리가 어긋나므로 한 줄로 세운다.
@@ -707,12 +792,16 @@ export class HerdrRunner implements Runner {
       m, paneId: a.pane_id, tabId: a.tab_id ?? null, sessionId: a.agent_session?.value ?? m.sessionId,
       status: a.agent_status, reported: null, inTurn: a.agent_status === "working", awaiting: null,
       settle: null, stall: null, compact: null, muteUntil: 0, turnGen: existing?.turnGen ?? 0, sawBlocked: false, argsOk: false, grantPending: false, tail: null,
+      bg: null, bgPoll: null, bgChecking: false, bgTurn: null, bgSeen: null,
     };
+    if (existing?.bg) this.emit({ type: "background", memberId: m.id, label: null });
     this.tracks.set(m.id, t);
     this.byPane.set(t.paneId, m.id);
     this.scheduleResubscribe();
     this.reportStatus(t);
     if (t.inTurn) this.startTail(t);
+    // 다시 붙은 칸이 이미 뒤 작업을 기다리고 있을 수 있다(서버를 다시 켰을 때).
+    this.syncBgPoll(t);
     return t;
   }
 
@@ -1001,10 +1090,13 @@ export class HerdrRunner implements Runner {
     t.compact = null;
     if (t.tail) clearInterval(t.tail.poll);
     t.tail = null;
+    if (t.bgPoll) clearInterval(t.bgPoll);
+    t.bgPoll = null;
   }
 
   private forget(t: Track): void {
     this.dropTimers(t);
+    this.setBg(t, null);
     if (this.tracks.get(t.m.id) === t) this.tracks.delete(t.m.id);
     this.byPane.delete(t.paneId);
     this.scheduleResubscribe();
@@ -1048,11 +1140,11 @@ export class HerdrRunner implements Runner {
   }
 
   /** 세션 기록을 이어 읽어 도구 호출과 서브에이전트 수를 headless 와 같게 알린다. */
-  private startTail(t: Track): void {
+  private startTail(t: Track, from?: number): void {
     if (t.tail) return;
     const poll = setInterval(() => this.pollTail(t), TAIL_POLL_MS);
     poll.unref?.();
-    t.tail = { offset: Math.max(0, t.awaiting?.size ?? this.transcriptSize(t)), poll, subagents: new Set() };
+    t.tail = { offset: Math.max(0, from ?? t.awaiting?.size ?? this.transcriptSize(t)), poll, subagents: new Set() };
   }
 
   private stopTail(t: Track): void {
@@ -1293,8 +1385,8 @@ export class HerdrRunner implements Runner {
       if (!t) return { ok: false, reason: "gone", retryable: false };
       const blocked = await this.precheck(t, false);
       if (blocked) return blocked;
-      // 일하는 중으로 안 보여도 턴 안이면 끊지 않는다.
-      if (t.inTurn) return { ok: false, reason: "busy", retryable: true };
+      // 일하는 중으로 안 보여도 턴 안이면 끊지 않는다. 뒤 작업을 기다리는 칸을 닫으면 그 작업이 죽는다.
+      if (t.inTurn || t.bg) return { ok: false, reason: "busy", retryable: true };
       const { paneId, tabId } = t;
       await this.lock(m.projectId, async () => {
         this.forget(t);
@@ -1336,7 +1428,9 @@ export class HerdrRunner implements Runner {
     }
     if (info.agent_status !== t.status && info.agent_status !== "unknown") this.applyStatus(t, info.agent_status);
     if (info.agent_status === "blocked") return { ok: false, reason: "blocked", retryable: true };
-    if ((info.agent_status === "working" || t.compact !== null || t.awaiting !== null) && !urgent) return { ok: false, reason: "busy", retryable: true };
+    // 뒤 작업만 기다리는 세션은 working 이라도 넣는다. 넣기 직전 화면으로 다시 확인한다.
+    const background = info.agent_status === "working" && t.bg !== null && this.quiet(t) && (await this.stillBackground(t));
+    if (((info.agent_status === "working" && !background) || t.compact !== null || t.awaiting !== null) && !urgent) return { ok: false, reason: "busy", retryable: true };
     // 입력칸을 못 찾으면(셸 모드 `!`, 선택 창, 다른 프로그램) 넣은 글이 명령으로 실행되거나 선택이 된다. 남은 글은 지우고 넣는다.
     // urgent 는 일하는 중에도 넣는다. 그때 남은 글을 지우는 키는 턴을 끊으므로 누르지 않는다.
     const idle = (info.agent_status === "idle" || info.agent_status === "done") && this.quiet(t);
@@ -1448,8 +1542,17 @@ export class HerdrRunner implements Runner {
       t.sawBlocked = false;
       // 무음은 슬래시 명령 자체에만 쓴다. 일 글의 working 까지 묻히면 턴 시작을 놓쳐 turn_end 가 영영 안 난다.
       t.muteUntil = 0;
+      const background = t.bg !== null && t.status === "working" && this.quiet(t);
       const sent = await this.prompt(t, this.spillIfLong(marked, m), urgent);
       if (!sent.ok) return sent;
+      if (background) {
+        // herdr 는 이미 working 이라 턴 시작 신호가 오지 않는다. 넣은 것으로 턴을 연다. 끝은 checkBackground 가 기록과 화면으로 본다.
+        t.inTurn = true;
+        t.bgTurn = { from: Math.max(0, size), at: Date.now() };
+        t.bgSeen = null;
+        this.startTail(t, size);
+        return { ok: true };
+      }
       // 응답이 늦어 그 사이 턴 시작을 봤거나 턴이 이미 끝났으면 다시 기다리지 않는다. 안 그러면 turn_end 가 두 번 나거나 스톨까지 늦어진다.
       // status 만 working 이고 inTurn 이 아니면 슬래시 명령의 남은 working 이다. 이번 글의 턴은 아직 못 봤다.
       if (!t.inTurn && t.turnGen === gen) {
@@ -1468,6 +1571,8 @@ export class HerdrRunner implements Runner {
       if (!t) return { ok: false, reason: "gone", retryable: false };
       const blocked = await this.precheck(t, false);
       if (blocked) return blocked;
+      // 압축 끝은 쉬는 상태로 가른다. 뒤 작업이 도는 동안은 하지 않는다.
+      if (t.bg) return { ok: false, reason: "busy", detail: "뒤 작업을 기다리는 중이라 압축하지 않았습니다", retryable: true };
       if (!t.sessionId) return { ok: false, reason: "error", detail: "세션 ID 를 몰라 압축 끝을 알 수 없습니다", retryable: false };
       const baseline = this.compactBoundaries(t);
       const poll = setInterval(() => this.pollCompact(t), 500);
@@ -1580,9 +1685,112 @@ export class HerdrRunner implements Runner {
     this.emit({ type: "turn_end", memberId: t.m.id, finalText: "", isError: true, errorText, noOutput: true });
   }
 
+  // ---- 뒤 작업 기다림 ----
+  // Claude 가 워크플로를 뒤에 걸고 턴을 마치면 화면에 'Waiting for … to finish' 가 뜨고 herdr 는 그 작업이 끝날 때까지(몇 시간이라도) working 이라 한다.
+  // 그 동안 턴이 안 끝난 것으로 보면 대표의 답과 지시가 묶인다. 기록과 화면으로 턴 끝을 가려 turn_end 를 내고, 들어온 글은 곧바로 넣는다.
+
+  /** herdr 가 working 인 동안만 판정한다. */
+  private syncBgPoll(t: Track): void {
+    const want = t.status === "working" && this.tracks.get(t.m.id) === t && !this.stopped;
+    if (want && !t.bgPoll) {
+      t.bgPoll = setInterval(() => void this.checkBackground(t), this.bgCheckMs);
+      t.bgPoll.unref?.();
+    } else if (!want && t.bgPoll) {
+      clearInterval(t.bgPoll);
+      t.bgPoll = null;
+    }
+  }
+
+  private setBg(t: Track, label: string | null): void {
+    if (t.bg === label) return;
+    t.bg = label;
+    this.emit({ type: "background", memberId: t.m.id, label });
+  }
+
+  /** 기록의 주 대화가 턴 끝에 와 있는가. 넣은 글의 턴이면 넣은 위치 뒤만 본다. 기록이 그대로면 지난 판정을 쓴다. */
+  private turnEndedInTranscript(t: Track): { ended: boolean; grew: boolean } {
+    const path = this.sessionPath(t);
+    if (!path) return { ended: false, grew: false };
+    const size = statSync(path).size;
+    const from = t.bgTurn?.from ?? 0;
+    const grew = size > from;
+    if (t.bgSeen?.size === size) return { ended: t.bgSeen.ended, grew };
+    let ended = false;
+    if (grew) {
+      const text = readTail(path, Math.min(BG_TAIL_BYTES, size - from));
+      ended = transcriptTurnEnded(text);
+    }
+    t.bgSeen = { size, ended };
+    return { ended, grew };
+  }
+
+  /** 넣기 직전: 지금도 뒤 작업만 기다리고 있는가. */
+  private async stillBackground(t: Track): Promise<boolean> {
+    try {
+      if (!this.turnEndedInTranscript(t).ended) return false;
+      const screen = await this.readInputScreen(t.paneId);
+      return backgroundWait(screen) !== null;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * herdr 가 working 이라는데 턴은 끝났고 뒤 작업만 기다리는가: 기록이 턴 끝이고, 입력칸 위 상태 줄이 'Waiting for … to finish' 이며 입력칸이 비었다.
+   * 그러면 턴을 끝낸다(turn_end). 그 사이 넣은 글은 곧바로 처리되고(실측) 끝나면 다시 이 상태로 온다.
+   * 뒤 작업이 끝나 Claude 가 알림을 받고 스스로 이어 일하면(기록에 새 입력) 그 일을 턴으로 센다.
+   */
+  private async checkBackground(t: Track): Promise<void> {
+    if (t.bgChecking || this.tracks.get(t.m.id) !== t) return;
+    if (t.status !== "working" || t.compact || t.awaiting) return;
+    t.bgChecking = true;
+    try {
+      const { ended, grew } = this.turnEndedInTranscript(t);
+      if (!ended) {
+        if (t.bg && !t.inTurn) this.selfTurn(t);
+        // 뒤 작업 중에 넣은 글이 기록에 끝내 안 나타나면 들어가지 않은 것이다.
+        else if (t.inTurn && t.bgTurn && !grew && Date.now() - t.bgTurn.at > this.stallMs) this.bgTurnNeverStarted(t);
+        return;
+      }
+      const screen = await this.readInputScreen(t.paneId);
+      if (this.tracks.get(t.m.id) !== t || t.status !== "working" || t.awaiting || t.compact) return;
+      const label = inputLooksEmpty(screen) === true ? backgroundWait(screen) : null;
+      if (!label) return;
+      this.setBg(t, label);
+      if (t.inTurn) await this.finishTurn(t);
+      else this.report(t, "idle");
+    } catch {
+      // 기록·화면을 못 읽었다. 다음 차례에 다시 본다.
+    } finally {
+      t.bgChecking = false;
+    }
+  }
+
+  /** 뒤 작업을 기다리던 세션이 스스로 다시 일한다(뒤 작업이 끝나 알림을 받음). 서버가 넣은 글이 아니다. */
+  private selfTurn(t: Track): void {
+    this.setBg(t, null);
+    t.inTurn = true;
+    t.bgTurn = { from: this.transcriptSize(t), at: Date.now() };
+    t.bgSeen = null;
+    this.startTail(t);
+    this.report(t, "working");
+  }
+
+  private bgTurnNeverStarted(t: Track): void {
+    t.inTurn = false;
+    t.bgTurn = null;
+    t.turnGen++;
+    this.stopTail(t);
+    this.report(t, "idle");
+    const errorText = "글을 넣었지만 턴이 시작되지 않았습니다";
+    this.emit({ type: "activity", memberId: t.m.id, kind: "error", text: errorText });
+    this.emit({ type: "turn_end", memberId: t.m.id, finalText: "", isError: true, errorText, noOutput: true });
+  }
+
   private applyStatus(t: Track, status: AgentStatus): void {
     if (status === "unknown") return;
     t.status = status;
+    this.syncBgPoll(t);
     if (status === "working" || status === "blocked") {
       if (t.settle) { clearTimeout(t.settle); t.settle = null; }
       const muted = status === "working" && Date.now() < t.muteUntil;
@@ -1605,6 +1813,9 @@ export class HerdrRunner implements Runner {
     t.settle = null;
     if (this.tracks.get(t.m.id) !== t) return;
     if (t.status !== "idle" && t.status !== "done") return;
+    // 정말 쉰다: 기다리던 뒤 작업도 끝났다.
+    this.setBg(t, null);
+    t.bgTurn = null;
     if (t.compact) return;
     if (t.awaiting) {
       if (!t.sawBlocked) return;
@@ -1621,6 +1832,7 @@ export class HerdrRunner implements Runner {
 
   private async finishTurn(t: Track): Promise<void> {
     t.inTurn = false;
+    t.bgTurn = null;
     t.turnGen++;
     this.stopTail(t);
     let turn = this.lastTurn(t);

@@ -132,7 +132,8 @@ export interface Runner {
 - pump: runnerEnabled=false 또는 멤버 없음 → `held(runner_disabled)`. asleep → 먼저 resume. 일하는 중(urgent 아님) → queued. idle·waiting → 쌓인 것을 한 글로 묶어 send. blocked→`held(blocked)`, 상태 바뀌면 재시도. input_busy(입력칸을 못 찾음, 일하는 중이라 남은 글을 못 지움 등) → 60초 안에서 재시도 뒤 held. 성공하면 delivered, 관련 Message.delivery·Decision.status 갱신.
 - 보내기 직전 contextPct ≥ compactAtPct 면 먼저 `compact`(focus = `이어갈 일: now · next · 대기 질문 · 대기열 앞부분`), compacted 뒤 전달. 일하는 중인 세션은 끊지 않는다.
 - 병렬 설정(`/effort`)이 일시적으로 실패하면 지시를 되살리고 일도 미룬다. 끝내 안 되면 총괄에게 알리고 일을 내보낸다.
-- turn_end: 직원에 열린 결재가 있으면 status=waiting, 아니면 idle → 큐 pump.
+- turn_end: 뒤 작업(워크플로 등)을 기다리면 status=working(그 팀이 일하는 중), 아니면 직원에 열린(답하지 않은) 결재가 있으면 waiting, 없으면 idle → 큐 pump. waiting 은 답하지 않은 결재가 있을 때만이다: 대표가 답하거나 결재가 닫혀 하나도 안 남으면 그 자리에서 working(바쁨)·idle 로 바꾸고, working 신호가 오면 working 으로 바꾼다.
+- 뒤 작업 기다림(herdr): Claude 가 워크플로를 뒤에 걸고 턴을 마치면 입력칸 위에 `✻ Waiting for N … to finish` 가 뜨고 herdr 는 그 작업이 끝날 때까지 working 이라 한다(실측 2.1.316, 몇 시간일 수 있다). 실행기는 working 동안 3초마다 세션 기록의 턴 끝(turn_duration·도구를 부르지 않은 assistant 글)과 그 상태 줄·빈 입력칸을 함께 보고 턴을 끝낸다(turn_end, `background` 이벤트). 이 상태의 세션은 넣은 글을 곧바로 처리하므로(실측) 바쁨으로 치지 않고 전달한다. 넣은 글의 턴 끝은 넣은 위치 뒤의 기록으로 가른다. 뒤 작업이 끝나 Claude 가 알림을 받고 스스로 이어 일하면 그 일을 턴으로 센다(대표의 직접 입력으로 보지 않는다). 기다리는 동안 칸 다시 열기(applyConfig)·압축은 하지 않는다(작업이 죽는다).
   - 이번 턴에 post 를 안 부른 **직원**: finalText 를 `(자동)` 표시로 대화에 남기고 총괄에게 보고 전달.
   - 이번 턴에 post 를 안 부른 **총괄·본사 AI**: finalText 를 그대로 대화에 올린다(대표에게 하는 말).
   - isError: Member.lastError, status=error, 대화에 시스템 글. 입력을 읽기 전에 끝났으면(noOutput) 그 묶음을 대기로 되돌려 시간을 두고 다시 보낸다. 횟수는 전달마다 따로 세고, 3번을 넘으면 메시지는 failed, 결재는 다시 연다(대표에게 돌아간다). 돌려줄 대표 글이 없는 전달(보고·지시·알림·할 일 완료)은 실패시키지 않고 보류해 간격을 넓혀 다시 보낸다. 전달 자체가 재시도 불가로 실패할 때도 같다.

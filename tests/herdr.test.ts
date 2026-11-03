@@ -7,7 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MemberKind } from "../shared/types.ts";
 import { rpc } from "../server/runner/herdr-client.ts";
-import { HerdrRunner, conductorTraces, detectHerdr, exitHintShown, inputLooksEmpty, inputText, inspectPane, listAgents, screenContextPct } from "../server/runner/herdr.ts";
+import { HerdrRunner, backgroundWait, conductorTraces, detectHerdr, exitHintShown, inputLooksEmpty, inputText, inspectPane, listAgents, screenContextPct, transcriptTurnEnded } from "../server/runner/herdr.ts";
 import type { RunnerEvent, RunnerMember, StartOpts } from "../server/runner/types.ts";
 import { assertIsolatedSocket, startIsolatedHerdr, type IsolatedHerdr } from "./fixtures/herdr-harness.ts";
 
@@ -17,6 +17,52 @@ const SCREEN = (input: string, tail = "") => [
 ].join("\n");
 
 describe("화면 해석", () => {
+  test("뒤 작업 기다림 줄: 입력칸 바로 위의 상태 줄일 때만, 좁은 칸에서 접혀도 읽는다", () => {
+    const rule = "─".repeat(30);
+    const screen = (...above: string[]) => ["⏺ 워크플로를 걸었습니다", ...above, rule, "❯ ", rule, "  ⏵⏵ bypass permissions on"].join("\n");
+    // 실측(2.1.316) 넓은 칸
+    expect(backgroundWait(screen("", "✻ Waiting for 1 dynamic workflow to finish", ""))).toBe("1 dynamic workflow");
+    // 실측 좁은 칸: 접히고 그 아래 안내 줄이 붙는다
+    expect(backgroundWait(screen("✻ Waiting for 1 dynamic", "  workflow to finish", "  new tas… · Update av…"))).toBe("1 dynamic workflow");
+    expect(backgroundWait(screen("✶ Waiting for 2 background agents to finish"))).toBe("2 background agents");
+    // 일하는 중·끝난 턴의 상태 줄은 아니다
+    expect(backgroundWait(screen("✶ Thinking… (esc to interrupt · 12s)"))).toBe(null);
+    expect(backgroundWait(screen("✻ Cogitated for 13s · done 10:56 PM"))).toBe(null);
+    // 기다림 줄 아래로 새 대화(넣은 글의 되풀이·답)가 오면 그 줄은 지난 것이다
+    expect(backgroundWait(screen("✻ Waiting for 1 dynamic workflow to finish", "❯ 대표 답이 들어옴"))).toBe(null);
+    expect(backgroundWait(screen("✻ Waiting for 1 dynamic workflow to finish", "⏺ 답했습니다"))).toBe(null);
+    // 대화 글에 인용된 같은 말이나 입력칸이 없는 화면
+    expect(backgroundWait("✻ Waiting for 1 dynamic workflow to finish\nuser@host % ")).toBe(null);
+
+    // 실측 둘째 모양: 기다림 줄 없이 입력칸 아래 뒤 작업 막대만 있다(끝난 답 글과 안내 줄이 입력칸 위에 있다).
+    const withBar = (...above: string[]) => ["⏺ 머지·푸시 전에는 다시 묻겠습니다.", "  before any merge, push,", ...above, rule, "❯ ", rule, "  ◆ Opus(X) │ ██░░░░░░…", "  ⏵⏵ bypass permissions", "", "  ◯ mahjong-…  ▰▰▰▰▰▰▱▱"].join("\n");
+    expect(backgroundWait(withBar("   Update available! R…"))).toBe("mahjong-…");
+    expect(backgroundWait(withBar("✻ Worked for 3m 2s"))).toBe("mahjong-…");
+    // 막대가 있어도 지금 도는 상태 줄이 있거나 넣은 글이 막 들어왔으면 일하는 중이다
+    expect(backgroundWait(withBar("✶ Working… (esc to interrupt)"))).toBe(null);
+    expect(backgroundWait(withBar("✢ Thinking… (12s · ↓ 1.2k tokens)"))).toBe(null);
+    expect(backgroundWait(withBar("❯ 대표 답"))).toBe(null);
+  });
+
+  test("기록의 턴 끝: turn_duration 이나 도구를 부르지 않은 assistant 글이면 끝, 입력·도구 결과·도구 호출이면 아직이다", () => {
+    const j = (...entries: object[]) => entries.map((e) => JSON.stringify(e)).join("\n");
+    const toolUse = { type: "assistant", message: { stop_reason: "tool_use", content: [{ type: "tool_use", name: "Bash" }] } };
+    const thinking = { type: "assistant", message: { stop_reason: "tool_use", content: [{ type: "thinking" }] } };
+    const final = { type: "assistant", message: { stop_reason: "end_turn", content: [{ type: "text", text: "끝" }] } };
+    const result = { type: "user", message: { content: [{ type: "tool_result" }] } };
+    const typed = { type: "user", message: { content: "대표 답" } };
+    const duration = { type: "system", subtype: "turn_duration" };
+    expect(transcriptTurnEnded(j(toolUse, result, final, duration, { type: "api-request" }))).toBe(true);
+    expect(transcriptTurnEnded(j(toolUse, result, final))).toBe(true);
+    expect(transcriptTurnEnded(j(final, duration, typed))).toBe(false);
+    expect(transcriptTurnEnded(j(final, toolUse))).toBe(false);
+    expect(transcriptTurnEnded(j(result, thinking))).toBe(false);
+    expect(transcriptTurnEnded(j(final, result))).toBe(false);
+    // 서브에이전트(사이드체인) 줄과 잘린 첫 줄은 보지 않는다
+    expect(transcriptTurnEnded(`{"type":"user","mess\n${j(final, { ...typed, isSidechain: true })}`)).toBe(true);
+    expect(transcriptTurnEnded("")).toBe(false);
+  });
+
   test("입력칸", () => {
     expect(inputLooksEmpty(SCREEN(""))).toBe(true);
     expect(inputLooksEmpty(SCREEN("쓰다 만 글"))).toBe(false);
@@ -858,7 +904,7 @@ describe("격리 herdr 서버", () => {
   const startedRunners: HerdrRunner[] = [];
 
   const newRunner = () => {
-    const r = new HerdrRunner({ socketPath: h.socketPath }, { inboxDir: inbox, claudeHome, settleMs: 400, stallMs: 5000, startTimeoutMs: 25_000, compactGraceMs: 6000 });
+    const r = new HerdrRunner({ socketPath: h.socketPath }, { inboxDir: inbox, claudeHome, settleMs: 400, stallMs: 5000, startTimeoutMs: 25_000, compactGraceMs: 6000, bgCheckMs: 300 });
     startedRunners.push(r);
     return r;
   };
@@ -1270,6 +1316,34 @@ describe("격리 herdr 서버", () => {
     expect(await runner.answerApproval(m, b.fingerprint, 3)).toMatchObject({ ok: true, chosen: { n: 3, label: "No", reject: true } });
     await waitEvent(statusIs(m.id, "idle"), "거절 뒤 idle");
     expect(approvals().map((x) => x.option)).toEqual([1, 3]);
+  }, 60_000);
+
+  test("뒤 작업 기다림: herdr 가 working 이어도 턴을 끝내고 그 사이 온 글은 바로 넣는다. 뒤 작업이 끝나면 스스로 한 턴 하고 쉰다", async () => {
+    const m = await started(runner, newMember("worker", "bg1", "p_bg"), opts("뒤 작업"));
+    await idleNow(runner, m);
+    clear();
+    expect(await runner.send(m, "BGWAIT 7000 워크플로 걸기 #msg_bg1", opts("뒤 작업"))).toEqual({ ok: true });
+    await waitEvent((e) => e.type === "background" && e.memberId === m.id && e.label === "1 dynamic workflow", "뒤 작업 기다림");
+    await waitEvent((e) => e.type === "turn_end" && e.memberId === m.id && e.finalText.includes("워크플로 걸기"), "첫 턴 끝");
+    // herdr 는 여전히 working 이라 한다. 그래도 글을 받는다.
+    expect((await raw("agent.get", { target: m.paneId })).agent.agent_status).toBe("working");
+    expect(runner.isBusy(m.id)).toBe(false);
+    expect(events.filter((e) => e.type === "turn_end" && e.memberId === m.id)).toHaveLength(1);
+
+    clear();
+    expect(await runner.send(m, "기다리는 동안 온 대표 답 #msg_bg2", opts("뒤 작업"))).toEqual({ ok: true });
+    expect(runner.isBusy(m.id)).toBe(true);
+    await waitEvent((e) => e.type === "turn_end" && e.memberId === m.id && e.finalText.includes("기다리는 동안 온 대표 답"), "기다리는 중 넣은 글의 턴 끝");
+    expect(runner.isBusy(m.id)).toBe(false);
+    expect(events.some((e) => e.type === "turn_end" && e.memberId === m.id && e.isError)).toBe(false);
+    expect(promptLog().filter((p) => p.sessionId === m.sessionId).map((p) => p.text.split(" #")[0])).toEqual(["BGWAIT 7000 워크플로 걸기", "기다리는 동안 온 대표 답"]);
+
+    // 뒤 작업이 끝나면 알림을 받아 스스로 한 턴 더 하고 쉰다.
+    clear();
+    await waitEvent((e) => e.type === "background" && e.memberId === m.id && e.label === null, "뒤 작업 끝", 15_000);
+    await waitEvent((e) => e.type === "turn_end" && e.memberId === m.id && e.finalText.includes("워크플로 결과"), "스스로 한 턴", 15_000);
+    await waitEvent(statusIs(m.id, "idle"), "쉼");
+    expect(runner.isBusy(m.id)).toBe(false);
   }, 60_000);
 
   test("interrupt 는 일을 끊는다", async () => {

@@ -841,6 +841,52 @@ async function pendingOf(t: ReturnType<typeof scripted>, id: string): Promise<De
   return t.store.listPending(id);
 }
 
+describe("뒤 작업 기다림과 '내 답 기다림'", () => {
+  test("턴을 마치고 뒤 작업을 기다리면 일하는 중으로 두고, 그사이 대표가 답하면 곧바로 넣는다. 뒤 작업이 끝나면 쉰다", async () => {
+    const t = scripted();
+    const w = (await t.orch.addMember(t.project.id, { name: "영희", handle: "yh" })).member;
+    t.runner.busy = true;
+    t.runner.emit({ type: "status", memberId: w.id, status: "working" });
+    const { decision } = await t.orch.registerAsk(t.store.requireMember(w.id), { title: "술 답을 다시 낼까요?", options: [{ k: "a", label: "네" }] });
+    expect(t.store.requireMember(w.id).status).toBe("waiting");
+
+    // 워크플로를 뒤에 걸고 턴을 마쳤다. herdr 는 여전히 working 이지만 세션은 글을 받는다. 그 팀은 일하는 중이다.
+    t.runner.emit({ type: "background", memberId: w.id, label: "1 dynamic workflow" });
+    t.runner.busy = false;
+    t.runner.emit({ type: "turn_end", memberId: w.id, finalText: "질문을 올렸습니다", isError: false });
+    await waitFor("일하는 중", () => t.store.requireMember(w.id).status === "working" && t.store.listActivity(w.id).some((a) => a.kind === "turn_end"));
+    expect(t.store.listActivity(w.id).map((a) => a.text)).toContain("턴을 마치고 뒤 작업(1 dynamic workflow)을 기다립니다. 그동안 온 글은 바로 넣습니다");
+
+    // 대표가 답하면 몇 시간씩 묶이지 않고 곧바로 들어간다.
+    await t.orch.answerDecision(decision.id, { choice: "a" });
+    await waitFor("답 전달", () => t.runner.sent.find((x) => x.text.includes("[대표 답(원문)")));
+    expect(t.store.requireMember(w.id).status).toBe("working");
+
+    // 답한 턴이 끝나도 뒤 작업이 남았으면 일하는 중, 뒤 작업이 끝나 쉬면 대기.
+    t.runner.emit({ type: "turn_end", memberId: w.id, finalText: "답 받았습니다", isError: false });
+    await waitFor("여전히 일하는 중", () => t.store.requireMember(w.id).status === "working");
+    t.runner.emit({ type: "background", memberId: w.id, label: null });
+    await waitFor("쉼", () => t.store.requireMember(w.id).status === "idle");
+  });
+
+  test("'내 답 기다림'은 답하지 않은 결재가 있을 때만: 답하거나 닫으면 지금 하는 대로 바로 바뀐다", async () => {
+    const t = scripted();
+    const w = (await t.orch.addMember(t.project.id, { name: "민수", handle: "ms" })).member;
+    t.runner.busy = true;
+    t.runner.emit({ type: "status", memberId: w.id, status: "working" });
+    const first = (await t.orch.registerAsk(t.store.requireMember(w.id), { title: "첫 물음", options: [{ k: "a", label: "네" }] })).decision;
+    const second = (await t.orch.registerAsk(t.store.requireMember(w.id), { title: "둘째 물음", options: [{ k: "a", label: "네" }] })).decision;
+    // 답하지 않은 결재가 있는 동안은 working 신호가 와도 waiting 을 지킨다.
+    t.runner.emit({ type: "status", memberId: w.id, status: "working" });
+    expect(t.store.requireMember(w.id).status).toBe("waiting");
+    await t.orch.answerDecision(first.id, { choice: "a" });
+    expect(t.store.requireMember(w.id).status).toBe("waiting");
+    // 마지막 결재가 닫히면 일하는 중(실행기가 바쁨)으로 바로 바뀐다. 턴이 끝날 때까지 남지 않는다.
+    await t.orch.closeAsk(t.store.requireMember(w.id), { id: second.id, kind: "obsolete", reason: "필요 없어짐" });
+    expect(t.store.requireMember(w.id).status).toBe("working");
+  });
+});
+
 describe("승인 창 답", () => {
   const prompt: ApprovalPrompt = {
     title: "Bash command",

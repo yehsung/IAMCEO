@@ -56,6 +56,11 @@ export type RunnerEvent =
   | { type: "activity"; memberId: string; kind: ActivityKind; text: string }
   | { type: "context"; memberId: string; pct: number }
   | { type: "subagents"; memberId: string; count: number }
+  /**
+   * 턴을 마치고 뒤 작업(워크플로 등)을 기다린다(label: 화면에 적힌 그 작업), 또는 그 기다림이 끝났다(null).
+   * 기다리는 동안 그 팀은 일하는 중이고, 세션은 넣은 글을 곧바로 받는다.
+   */
+  | { type: "background"; memberId: string; label: string | null }
   | { type: "session"; memberId: string; sessionId: string }
   | { type: "compacted"; memberId: string }
   | { type: "pane"; memberId: string; paneId: string; tabId?: string };

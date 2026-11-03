@@ -1,6 +1,7 @@
 // herdr 칸 안에서 `claude` 처럼 도는 가짜 TUI. 실제 claude 를 절대 부르지 않는다.
 // bun build --compile 로 이름이 claude 인 실행 파일을 만들어야 herdr 가 에이전트로 인식한다.
 // 입력 글에 따라 움직인다: SLOW(오래 일함) · BLOCK(승인 창, 숫자 1·2 승인 3 거절) · EXIT(종료) · GHOST(턴 뒤 흐린 다음 말 추천) · /effort · /compact.
+// BGWAIT [ms](턴을 마치고 뒤 작업을 기다림: 제목은 일하는 중, 입력칸 위에 "✻ Waiting for 1 dynamic workflow to finish". 그동안 넣은 글은 곧바로 처리. ms 뒤 알림을 받아 한 번 더 일하고 쉼).
 // 키는 Claude Code 2.1.316 실측과 같게: Ctrl+C 는 입력칸의 글을 한 번에 다 지우고(여러 줄도) 약 0.8초 종료 창을 연다.
 // 그 창 안에 빈 입력칸에서 또 누르면 끝난다. 일하는 중이면 턴을 끊는다. 쉬는 칸의 Esc 한 번은 글을 지우지 않는다.
 // 누른 Ctrl+C 는 keys.jsonl 에 남긴다.
@@ -36,6 +37,8 @@ let exitTimer: ReturnType<typeof setTimeout> | null = null;
 let ghost: string | null = null;
 /** 승인 창에 보일 명령. 들어온 글에서 따온다. */
 let blockCmd = "";
+/** 뒤 작업을 기다리는 중(BGWAIT). 실측(2.1.316)처럼 이 동안 제목의 도는 표시가 남아 herdr 는 working 으로 본다. */
+let bgActive = false;
 
 function report(method: string, params: Record<string, unknown>) {
   if (!socket) return;
@@ -55,9 +58,11 @@ function render() {
   // 실측(2.1.316) 승인 창 모양. 숫자 키가 고르고 바로 확정한다.
   const footer = state === "blocked"
     ? [rule, " Bash command", "", ` ${blockCmd}`, " 가짜 명령", "", " Do you want to proceed?", " ❯ 1. Yes", "   2. Yes, and don't ask again for touch commands in", "      /tmp/fake", "   3. No", "", " Esc to cancel · Tab to amend"]
-    : [rule, ...box, rule, `  ◆ Fake │ ███░░░░░░░ │ 27% │ 54K/200K`, hint];
+    : [rule, ...box, rule, `  ◆ Fake │ ███░░░░░░░ │ 27% │ 54K/200K`, hint, ...(bgActive ? ["", "  ◯ fake-flow…  ▰▰▰▱▱"] : [])];
   const room = Math.max(1, rows - footer.length);
-  const body = log.slice(-room);
+  // 뒤 작업 기다림: 입력칸 바로 위 상태 줄. 그 사이 넣은 글을 처리하는 동안은 일하는 상태 줄이 그 자리에 온다.
+  const status = bgActive && state !== "blocked" ? [state === "working" ? "✶ Working… (esc to interrupt)" : "✻ Waiting for 1 dynamic workflow to finish"] : [];
+  const body = [...log, ...status].slice(-room);
   // 지우고 다시 그린다. 진짜 Claude 처럼 칸 크기에 맞춘다(흐린 글씨의 제어 문자는 너비에 넣지 않는다).
   const fit = (l: string) => (l.includes("\x1b") ? l : l.slice(0, cols - 1));
   out("\x1b[2J\x1b[H" + [...body, ...Array(room - body.length).fill(""), ...footer].map(fit).join("\r\n"));
@@ -65,7 +70,7 @@ function render() {
 
 function setState(next: typeof state) {
   state = next;
-  out(next === "working" ? "\x1b]0;⠋ fake\x07" : "\x1b]0;✳ fake\x07");
+  out(next === "working" || bgActive ? "\x1b]0;⠋ fake\x07" : "\x1b]0;✳ fake\x07");
   render();
 }
 
@@ -102,11 +107,29 @@ function submit(raw: string) {
   }
   if (text.includes("BLOCK")) { blockCmd = text.replace(/\s+/g, " ").slice(0, 60); setState("blocked"); return; }
   const answer = `답변: ${text.replace(/\s+/g, " ").slice(0, 60)}`;
+  const bg = /BGWAIT(?:\s+(\d+))?/.exec(text);
   work(text.includes("SLOW") ? 4000 : 800, () => {
     log.push(answer);
     if (text.includes("GHOST")) ghost = "다음에 할 말 추천";
-    append({ type: "assistant", timestamp: new Date().toISOString(), message: { role: "assistant", model: "fake-model", content: [{ type: "text", text: answer }], usage: { input_tokens: 1000, cache_read_input_tokens: 53000, cache_creation_input_tokens: 0 } } });
+    append({ type: "assistant", timestamp: new Date().toISOString(), message: { role: "assistant", model: "fake-model", content: [{ type: "text", text: answer }], stop_reason: "end_turn", usage: { input_tokens: 1000, cache_read_input_tokens: 53000, cache_creation_input_tokens: 0 } } });
+    append({ type: "system", subtype: "turn_duration", timestamp: new Date().toISOString() });
+    if (bg) startBackground(Number(bg[1] ?? 6000));
   });
+}
+
+/** 뒤 작업을 기다린다. 끝나면 진짜처럼 알림(입력)을 받아 스스로 한 번 더 일하고 쉰다. */
+function startBackground(ms: number) {
+  bgActive = true;
+  setTimeout(() => {
+    bgActive = false;
+    append({ type: "user", timestamp: new Date().toISOString(), message: { role: "user", content: "<task-notification>워크플로 끝</task-notification>" } });
+    log.push("⏺ Dynamic workflow completed");
+    work(800, () => {
+      const answer = "워크플로 결과: 끝";
+      log.push(answer);
+      append({ type: "assistant", timestamp: new Date().toISOString(), message: { role: "assistant", model: "fake-model", content: [{ type: "text", text: answer }], stop_reason: "end_turn", usage: { input_tokens: 1000, cache_read_input_tokens: 53000, cache_creation_input_tokens: 0 } } });
+    });
+  }, ms);
 }
 
 /** 승인 창의 숫자 키. 1·2 는 승인하고 이어서 일한 뒤 답한다. 3(No)은 실측처럼 끊기고 쉰다. */

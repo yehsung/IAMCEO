@@ -17,6 +17,8 @@ jobs:
       - name: 태그와 package.json 버전이 같은지
         run: test "v$(bun -e 'console.log(require("./package.json").version)')" = "$GITHUB_REF_NAME"
       - run: bun run typecheck
+      # 화면 시험(*.browser.ts)이 쓰는 브라우저
+      - run: bunx playwright install chromium webkit
       # herdr 시험은 herdr 실행 파일이 있어야 해서 여기서는 뺀다(로컬에서 돌린다).
       - run: bun test $(ls tests/*.test.ts | grep -v herdr.test.ts)
       - run: bun run build:release

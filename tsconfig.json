@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "target": "ESNext", "module": "ESNext", "moduleResolution": "bundler",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"], "jsx": "react-jsx",
+    "strict": true, "noUncheckedIndexedAccess": false, "skipLibCheck": true, "noEmit": true,
+    "allowImportingTsExtensions": true, "verbatimModuleSyntax": true, "esModuleInterop": true,
+    "types": ["bun"], "baseUrl": ".", "paths": { "@shared/*": ["shared/*"] }
+  },
+  "include": ["shared", "server", "bin", "web/src", "tests", "scripts"]
+}

@@ -1,0 +1,5 @@
+/* 연결 게이트 안내 판. 번들 순서상 glass.css 보다 앞에 올 수 있어 유리 값을 덮을 때는 클래스 둘로 쓴다. */
+.glass.gate { --g-r:20px; --g-tint:rgb(12 9 28 / .72); display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; min-width:0; padding:10px 10px 10px 16px; }
+.gate__text { flex:1 1 240px; min-width:0; font-size:14px; line-height:1.5; color:var(--ink-2); }
+.gate__text strong { font-weight:650; color:var(--ink-1); }
+.gbtn.gate__action { flex:none; }

@@ -1,0 +1,457 @@
+// bin/iamceo.ts 와 가져오기. 시험 소켓·임시 폴더만 쓰고 launchctl·claude 는 부르지 않는다.
+import { afterAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import type { Backend, Member, Project, ProjectState } from "../shared/types.ts";
+import { launchdPlist, servicePath } from "../bin/iamceo.ts";
+import { Bus } from "../server/bus.ts";
+import { loadConfig, updateConfigFile } from "../server/config.ts";
+import { openDb } from "../server/db.ts";
+import { startServer } from "../server/http.ts";
+import { Orchestrator, type HerdrCapable, type HerdrQueries } from "../server/orchestrator.ts";
+import { renderRole } from "../server/roles.ts";
+import type { RunnerEvent } from "../server/runner/types.ts";
+import { Store } from "../server/store.ts";
+import { importArtifact, normalizeCollection, parseWhen } from "../scripts/import-artifact.ts";
+
+const CLI = resolve(import.meta.dir, "..", "bin", "iamceo.ts");
+const REAL_HOME = process.env.HOME ?? "";
+
+function cliEnv(home: string, extra: Record<string, string> = {}): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined && !/^(HERDR_|CLAUDE|IAMCEO_)/.test(k)) env[k] = v;
+  }
+  return { ...env, IAMCEO_HOME: home, IAMCEO_HERDR_SOCKET: join(home, "no-herdr.sock"), IAMCEO_TEST: "1", ...extra };
+}
+
+async function cli(home: string, args: string[], opts: { stdin?: string; env?: Record<string, string>; cwd?: string } = {}) {
+  const p = Bun.spawn([process.execPath, CLI, ...args], {
+    stdin: opts.stdin === undefined ? "ignore" : new TextEncoder().encode(opts.stdin),
+    stdout: "pipe",
+    stderr: "pipe",
+    cwd: opts.cwd,
+    env: cliEnv(home, opts.env),
+  });
+  const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  return { stdout, stderr, code };
+}
+
+const newHome = () => mkdtempSync(join(tmpdir(), "iamceo-cli-"));
+const stops: (() => void | Promise<void>)[] = [];
+afterAll(async () => {
+  for (const stop of stops) await stop();
+});
+
+async function freePort(): Promise<number> {
+  const probe = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
+  const port = probe.port!;
+  await probe.stop(true);
+  return port;
+}
+
+async function serve(home: string, port: number) {
+  updateConfigFile({ hosts: ["127.0.0.1"] }, { IAMCEO_HOME: home });
+  const p = Bun.spawn([process.execPath, CLI, "serve"], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: cliEnv(home, { IAMCEO_PORT: String(port) }) });
+  stops.push(() => {
+    p.kill("SIGTERM");
+  });
+  const base = `http://127.0.0.1:${port}`;
+  const end = Date.now() + 15_000;
+  for (;;) {
+    const ok = await fetch(`${base}/api/health`).then((r) => r.ok, () => false);
+    if (ok) return { base, proc: p };
+    if (Date.now() > end) throw new Error(`서버가 뜨지 않았습니다: ${await new Response(p.stderr).text()}`);
+    await Bun.sleep(50);
+  }
+}
+
+describe("접근 범위", () => {
+  test("setup --hosts: lan·직접 적기·기본, 0.0.0.0 은 거부", async () => {
+    const home = mkdtempSync(join(tmpdir(), "iamceo-cli-hosts-"));
+    const readHosts = () => (JSON.parse(readFileSync(join(home, "config.json"), "utf8")) as { hosts?: string[] }).hosts;
+    const bad = await cli(home, ["setup", "--backend", "headless", "--port", "7878", "--hosts", "0.0.0.0"]);
+    expect(bad.code).toBe(1);
+    expect(bad.stderr).toContain("0.0.0.0");
+    const custom = await cli(home, ["setup", "--backend", "headless", "--port", "7878", "--hosts", "127.0.0.1,192.168.0.9"]);
+    expect(custom.code).toBe(0);
+    expect(readHosts()).toEqual(["127.0.0.1", "192.168.0.9"]);
+    expect(custom.stdout).toContain("http://192.168.0.9:7878");
+    const local = await cli(home, ["setup", "--backend", "headless", "--port", "7878", "--hosts", "local"]);
+    expect(local.code).toBe(0);
+    expect(readHosts()).toBeUndefined();
+  });
+});
+
+describe("serve·status·open·join", () => {
+  test("실제 서버를 띄우고 health·status·join 을 거친 뒤 SIGTERM 으로 끝난다", async () => {
+    const home = newHome();
+    const port = await freePort();
+    const { base, proc } = await serve(home, port);
+    expect(await (await fetch(`${base}/api/health`)).json()).toMatchObject({ ok: true, version: "0.1.0" });
+
+    const opened = await cli(home, ["open"], { env: { IAMCEO_PORT: String(port) } });
+    const code = /접속 코드: (\S+)/.exec(opened.stdout)![1]!;
+    expect(opened.stdout).toContain(base);
+    expect(code).toBe(loadConfig({ IAMCEO_HOME: home }).accessCode);
+    const headers = { Authorization: `Bearer ${code}`, "Content-Type": "application/json" };
+
+    const status = await cli(home, ["status"], { env: { IAMCEO_PORT: String(port) } });
+    expect(status.code).toBe(0);
+    expect(status.stdout).toContain("실행 중");
+    expect(status.stdout).toContain("본사 (hq)");
+
+    const project = (await (await fetch(`${base}/api/projects`, { method: "POST", headers, body: JSON.stringify({ name: "합류 시험", cwd: home }) })).json()) as Project;
+
+    const missing = await cli(home, ["join"], { env: { IAMCEO_PORT: String(port) } });
+    expect(missing.code).toBe(1);
+    const joined = await cli(home, ["join", "--project", project.id, "--name", "내 세션", "--role", "조사"], { env: { IAMCEO_PORT: String(port) } });
+    expect(joined.code).toBe(0);
+    const token = /IAMCEO_TOKEN=(tk_\S+)/.exec(joined.stdout)![1]!;
+    expect(joined.stdout).toContain(`IAMCEO_URL=${base}`);
+    // --env 는 값을 여러 개 받는 옵션이라 서버 이름이 그 뒤에 오면 claude 가 거부한다(실측). 이름이 옵션보다 앞이어야 한다.
+    expect(joined.stdout).toContain("claude mcp add iamceo --transport stdio --scope local --env IAMCEO_URL=");
+    expect(joined.stdout).toMatch(/--env IAMCEO_TOKEN=tk_\S+ -- \S+ \S*iamceo\.ts mcp/);
+    const rulesFile = /규칙 파일: (.+)/.exec(joined.stdout)![1]!.trim();
+    expect(readFileSync(rulesFile, "utf8")).toContain("'합류 시험' 프로젝트의 직원 내 세션");
+
+    const tools = (await (await fetch(`${base}/agent/tools`, { headers: { Authorization: `Bearer ${token}` } })).json()) as { name: string }[];
+    expect(tools.map((t) => t.name)).toContain("wait");
+    const state = (await (await fetch(`${base}/api/projects/${project.id}/state`, { headers })).json()) as ProjectState;
+    expect(state.members.find((m: Member) => m.name === "내 세션")).toMatchObject({ origin: "manual", role: "조사" });
+
+    const web = await fetch(`${base}/`);
+    expect(web.status).toBe(200);
+    expect(await web.text()).toContain("<html");
+
+    proc.kill("SIGTERM");
+    expect(await proc.exited).toBe(0);
+
+    const down = await cli(home, ["status"], { env: { IAMCEO_PORT: String(port) } });
+    expect(down.code).toBe(1);
+    expect(down.stderr).toContain("서버가 꺼져 있습니다");
+  }, 40_000);
+
+  test("같은 포트로 또 켜면 이유를 말하고 끝난다", async () => {
+    const home = newHome();
+    const port = await freePort();
+    await serve(home, port);
+    const other = newHome();
+    updateConfigFile({ hosts: ["127.0.0.1"] }, { IAMCEO_HOME: other });
+    const second = await cli(other, ["serve"], { env: { IAMCEO_PORT: String(port) } });
+    expect(second.code).toBe(1);
+    expect(second.stderr).toContain(`포트 ${port}`);
+  }, 30_000);
+
+  test("모르는 명령·잘못된 인자", async () => {
+    const home = newHome();
+    expect((await cli(home, ["없는명령"])).code).toBe(1);
+    expect((await cli(home, ["help"])).stdout).toContain("쓰는 법");
+    const bad = await cli(home, ["setup", "--모름"]);
+    expect(bad.code).toBe(1);
+    expect(bad.stderr).not.toContain("at ");
+  });
+});
+
+describe("setup", () => {
+  test("입력으로 고른 실행 방식·포트를 저장한다", async () => {
+    const home = newHome();
+    const r = await cli(home, ["setup"], { stdin: "headless\n7999\n" });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("설정했습니다: headless, 포트 7999");
+    expect(/접속 코드: (\S+)/.exec(r.stdout)![1]).toBe(loadConfig({ IAMCEO_HOME: home }).accessCode);
+    expect(JSON.parse(readFileSync(join(home, "config.json"), "utf8")).port).toBe(7999);
+    const store = new Store(openDb(join(home, "iamceo.db")), new Bus());
+    expect(store.getSettings().backend).toBe("headless");
+  });
+
+  test("인자로도, 입력 없이 기본값으로도 끝난다", async () => {
+    const home = newHome();
+    expect((await cli(home, ["setup", "--backend", "herdr", "--port", "7001"])).code).toBe(0);
+    expect(new Store(openDb(join(home, "iamceo.db")), new Bus()).getSettings().backend).toBe("herdr");
+    expect((await cli(newHome(), ["setup"], { stdin: "" })).code).toBe(0);
+    const bad = await cli(newHome(), ["setup", "--backend", "tmux"]);
+    expect(bad.code).toBe(1);
+    expect(bad.stderr).toContain("herdr 또는 headless");
+  });
+});
+
+describe("service", () => {
+  test("plist: 경로·PATH·KeepAlive·이스케이프, plutil 통과", async () => {
+    const plist = launchdPlist({ program: ["/bin/bun", "/a&b/iamceo.ts", "serve"], home: "/Users/u", logDir: "/Users/u/.iamceo/logs", workingDir: "/Users/u", env: { IAMCEO_HOME: "/x<y" } });
+    expect(plist).toContain("<string>com.iamceo.server</string>");
+    expect(plist).toContain("/Users/u/.bun/bin:/opt/homebrew/bin:/Users/u/.local/bin:");
+    expect(plist).toContain("/Users/u/.iamceo/logs/server.log");
+    expect(plist).toContain("/a&amp;b/iamceo.ts");
+    expect(plist).toContain("/x&lt;y");
+    const file = join(newHome(), "t.plist");
+    writeFileSync(file, plist);
+    const lint = Bun.spawnSync(["plutil", "-lint", file]);
+    expect(lint.exitCode).toBe(0);
+  });
+
+  test("--dry-run 은 아무것도 등록하지 않고, IAMCEO_TEST 에서는 실제 등록을 거부한다", async () => {
+    const home = newHome();
+    const plistPath = join(REAL_HOME, "Library", "LaunchAgents", "com.iamceo.server.plist");
+    const before = existsSync(plistPath);
+    const dry = await cli(home, ["service", "install", "--dry-run"]);
+    expect(dry.code).toBe(0);
+    expect(dry.stdout).toContain("launchctl bootstrap gui/");
+    expect(dry.stdout).toContain(join(home, "logs", "server.log"));
+    expect(dry.stdout).toMatch(/iamceo\.ts<\/string>\s+<string>serve<\/string>/);
+    const refused = await cli(home, ["service", "install"]);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain("IAMCEO_TEST");
+    expect((await cli(home, ["service", "uninstall"])).code).toBe(1);
+    expect((await cli(home, ["service", "uninstall", "--dry-run"])).stdout).toContain("launchctl bootout");
+    expect((await cli(home, ["service", "모름"])).code).toBe(1);
+    expect(existsSync(plistPath)).toBe(before);
+  });
+
+  test("서비스 PATH: 등록할 때 찾은 claude·herdr 폴더를 앞에 두고, 겹치거나 없는 것은 뺀다", () => {
+    const path = servicePath("/Users/u", ["/Users/u/.nvm/versions/node/v22/bin/claude", null, "/opt/homebrew/bin/herdr", "claude"]).split(":");
+    expect(path[0]).toBe("/Users/u/.nvm/versions/node/v22/bin");
+    expect(path.filter((p) => p === "/opt/homebrew/bin")).toHaveLength(1);
+    expect(path).toContain("/Users/u/.local/bin");
+    expect(path).not.toContain(".");
+  });
+});
+
+test("version 은 package.json 의 버전을 찍는다", async () => {
+  const out = await cli(newHome(), ["version"]);
+  expect(out.code).toBe(0);
+  expect(out.stdout.trim()).toBe(JSON.parse(readFileSync(resolve(import.meta.dir, "..", "package.json"), "utf8")).version);
+});
+
+describe("역할 템플릿", () => {
+  const vars = { PROJECT: "랜딩", NAME: "철수", ROLE: "개발", CONDUCTOR: "총괄" };
+
+  test("자리표시가 다 치환되고 쓸 도구만 가리킨다", () => {
+    for (const kind of ["worker", "conductor", "root"] as const) {
+      const text = renderRole(kind, vars);
+      expect(text).not.toMatch(/\{\{/);
+      expect(text).not.toMatch(/herdr agent|SendMessage|ArtifactData|CronCreate|운영판|registry|row\.py/);
+    }
+  });
+
+  test("핵심 규칙이 빠지지 않았다", () => {
+    const worker = renderRole("worker", vars);
+    for (const rule of ["[대표 직접]", "[대표 답(원문)", "[총괄]", "[시스템]", "AskUserQuestion", "서버 확인", "총괄 인용(미확인)", "승인이 아니다", "`post`", "`ask`", "`file`", "rm -rf", "이름을 바꾸지", "병렬"]) {
+      expect(worker).toContain(rule);
+    }
+    const conductor = renderRole("conductor", vars);
+    for (const rule of ["직접 하지 않는다", "대기열", "2호", "끼어들지", "user_quote", "대신 답하지", "`parallel`", "상한", "`team_sleep`", "`team_resume`", "압축은 서버가 자동", "`post`", "임시 폴더", "[보고 "]) {
+      expect(conductor).toContain(rule);
+    }
+    const root = renderRole("root", vars);
+    for (const rule of ["`project_create`", "`project_list`", "mkdir -p", "잡다한 일", "임시 폴더"]) {
+      expect(root).toContain(rule);
+    }
+  });
+});
+
+describe("가져오기", () => {
+  const DUMP = {
+    meta: { board: { asof: "2026-11-01T00:00:00Z", by: "총괄", now: "지금 상황 글", title: "내 운영판" }, inbox: { at: "x" } },
+    sessions: {
+      insta: { order: 2, name: "인스타", role: "콘텐츠", state: "작업 중", now: "릴스 3편", queue: "4편", updated: "10-17 03:10" },
+      "대문자": { order: 1, name: "조사", role: "경쟁사", state: "대기", now: "", queue: "—" },
+    },
+    docs: {
+      d1: { order: 1, title: "옛 보고서", who: "인스타", when: "10-15", summary: "요약", body: "본문", path: "/x/old.md", images: [{ url: "/_blob/a", caption: "캡처" }] },
+      d2: { order: 2, title: "새 보고서", who: "조사", body: "본문2" },
+    },
+    items: {
+      q1: { sec: "decide", order: 1, title: "톤 정하기", detail: "배경", who: "인스타", group: "콘텐츠", options: [{ k: "a", label: "밝게", desc: "조회수" }, { k: "b", label: "차분하게" }], rec: "a", docId: "d1", when: "10-20" },
+      q2: { sec: "decide", order: 2, title: "열린 결정", detail: "배경2", who: "조사", options: [{ k: "x", label: "예" }], rec: "없는값" },
+      q3: { sec: "decide", order: 3, title: "메모로만 답함", detail: "", who: "모르는 사람" },
+      t1: { sec: "todo", order: 4, title: "로그인 해 주세요", detail: "폰", group: "직접 하실 일", who: "인스타" },
+      t2: { sec: "todo", order: 5, title: "다음 릴스", group: "콘텐츠", who: "인스타", link: "https://e.com", linkLabel: "참고" },
+      w1: { sec: "doing", order: 6, title: "하는 일", who: "조사", docId: "d2" },
+      h1: { sec: "hold", order: 7, title: "멈춘 일" },
+      f1: { sec: "done", order: 8, title: "끝난 일", group: "10-30", who: "인스타" },
+      u1: { sec: "이상함", order: 9, title: "모르는 칸" },
+    },
+    answers: {
+      q1: { choice: "a", note: "좋아요", at: "2026-10-21T01:00:00Z", batch: true },
+      q3: { note: "알아서", at: "2026-10-22T01:00:00Z" },
+    },
+    feed: {
+      n2: { at: "2026-10-20T02:00:00Z", who: "조사", kind: "질문", title: "물음", body: "b", itemId: "q2" },
+      n1: { at: "2026-10-19T02:00:00Z", who: "인스타", kind: "완료", title: "릴스 끝", body: "b", docId: "d1", images: [{ url: "https://e.com/a.png", caption: "시안" }] },
+      n3: { at: "2026-10-23T02:00:00Z", who: "총괄", kind: "모름", title: "이상한 종류" },
+    },
+    messages: {
+      m1: { text: "처리된 말", at: "2026-10-24T00:00:00Z", seen: "2026-10-24T00:05:00Z" },
+      m2: { text: "아직 안 본 말", at: "2026-10-25T00:00:00Z" },
+    },
+  };
+  const NOW = new Date("2026-11-02T00:00:00Z");
+
+  function fresh() {
+    const home = newHome();
+    return { home, store: new Store(openDb(join(home, "iamceo.db")), new Bus()) };
+  }
+
+  test("덤프 모양: 맵·배열·문서 포장 모두 읽는다", () => {
+    expect(normalizeCollection({ a: { x: 1 } })).toEqual([{ x: 1, id: "a" }]);
+    expect(normalizeCollection([{ id: "a", x: 1 }])).toEqual([{ id: "a", x: 1 }]);
+    expect(normalizeCollection([{ id: "a", data: { x: 1 }, updatedAt: "t" }])[0]).toMatchObject({ id: "a", x: 1, updatedAt: "t" });
+    expect(normalizeCollection(undefined)).toEqual([]);
+  });
+
+  test("짧은 날짜는 가장 가까운 과거 해의 KST 로 읽는다", () => {
+    expect(parseWhen("10-30", NOW)).toBe("2026-10-29T15:00:00.000Z");
+    expect(parseWhen("12-25 03:10", NOW)).toBe("2025-12-24T18:10:00.000Z");
+    expect(parseWhen("2026-10-21T01:00:00Z", NOW)).toBe("2026-10-21T01:00:00.000Z");
+    expect(parseWhen("어제", NOW)).toBeNull();
+    expect(parseWhen(undefined, NOW)).toBeNull();
+  });
+
+  test("도메인으로 변환하고 실행은 꺼 둔다", () => {
+    const { home, store } = fresh();
+    const s = importArtifact(store, DUMP, { cwd: home, fallbackName: "파일 이름", now: NOW });
+    expect(s).toMatchObject({ name: "내 운영판", members: 2, decisions: 3, answered: 2, todos: 1, work: 5, files: 2, feed: 3, userMessages: 2, heldMessages: 1 });
+
+    const state = store.projectState(s.projectId);
+    expect(state.project).toMatchObject({ runnerEnabled: false, now: "지금 상황 글", cwd: home });
+
+    expect(state.members.map((m) => m.handle).sort()).toEqual(["insta", "s1"]);
+    const insta = store.findMember(s.projectId, "인스타")!;
+    expect(insta).toMatchObject({ origin: "adopted", kind: "worker", status: "offline", role: "콘텐츠", now: "릴스 3편", next: "대기열: 4편", paneId: null, sessionId: null });
+    expect(store.findMember(s.projectId, "조사")!.next).toBe("");
+
+    const byTitle = (t: string) => state.decisions.find((d) => d.title === t)!;
+    const tone = byTitle("톤 정하기");
+    expect(tone).toMatchObject({ status: "delivered", choice: "a", note: "좋아요", batch: true, rec: "a", group: "콘텐츠", memberId: insta.id, who: "인스타", answeredAt: "2026-10-21T01:00:00.000Z" });
+    expect(tone.options[0]).toEqual({ k: "a", label: "밝게", desc: "조회수" });
+    expect(tone.createdAt).toBe("2026-10-19T15:00:00.000Z");
+    expect(store.getFile(tone.fileId!)!.title).toBe("옛 보고서");
+    expect(byTitle("열린 결정")).toMatchObject({ status: "open", rec: null, choice: null });
+    expect(byTitle("메모로만 답함")).toMatchObject({ status: "delivered", choice: null, note: "알아서", memberId: null });
+
+    expect(state.todos).toHaveLength(1);
+    expect(state.todos[0]).toMatchObject({ title: "로그인 해 주세요", who: "인스타", memberId: insta.id, done: false });
+
+    const work = Object.fromEntries(state.work.map((w) => [w.title, w]));
+    expect(work["다음 릴스"]!.sec).toBe("next");
+    expect(work["다음 릴스"]!.detail).toContain("[참고](https://e.com)");
+    expect(work["다음 릴스"]!.detail).toContain("영역: 콘텐츠");
+    expect(work["하는 일"]!.sec).toBe("doing");
+    expect(work["멈춘 일"]!.sec).toBe("hold");
+    expect(work["모르는 칸"]!.sec).toBe("hold");
+    expect(work["끝난 일"]).toMatchObject({ sec: "done", doneAt: "2026-10-29T15:00:00.000Z" });
+
+    expect(state.files.map((f) => f.title)).toEqual(["새 보고서", "옛 보고서"]);
+    const old = state.files[1]!;
+    expect(old).toMatchObject({ summary: "요약", path: "/x/old.md", who: "인스타", memberId: insta.id, createdAt: "2026-10-14T15:00:00.000Z" });
+    expect(old.body).toContain("본문");
+    expect(old.body).toContain("(이미지: 캡처, 원본 /_blob/a)");
+
+    const messages = state.messages;
+    expect(messages.map((m) => m.title || m.body)).toEqual(["릴스 끝", "물음", "이상한 종류", "처리된 말", "아직 안 본 말"]);
+    expect(messages[0]).toMatchObject({ kind: "완료", fileId: old.id, at: "2026-10-19T02:00:00.000Z", memberId: insta.id });
+    expect(messages[0]!.body).toContain("![시안](https://e.com/a.png)");
+    expect(messages[1]).toMatchObject({ kind: "질문", decisionId: byTitle("열린 결정").id });
+    expect(messages[2]!.kind).toBe("알림");
+    expect(messages[3]).toMatchObject({ mine: true, kind: "나", delivery: "delivered" });
+    expect(messages[4]).toMatchObject({ mine: true, delivery: "held", deliveryNote: "총괄을 시작하면 전달됩니다" });
+    expect(store.listUndelivered(s.projectId)).toHaveLength(0);
+  });
+
+  test("같은 이름을 다시 가져오면 거부, 실패하면 아무것도 안 남는다", () => {
+    const { home, store } = fresh();
+    importArtifact(store, DUMP, { cwd: home, fallbackName: "x", now: NOW });
+    expect(() => importArtifact(store, DUMP, { cwd: home, fallbackName: "x", now: NOW })).toThrow("이미 있습니다");
+    const count = store.listProjects().length;
+    const broken = { ...DUMP, meta: {}, sessions: { a: { name: "같은 이름" }, b: { name: "같은 이름" } } };
+    expect(() => importArtifact(store, broken, { cwd: home, fallbackName: "새 이름", now: NOW })).toThrow("이미 있는 이름");
+    expect(store.listProjects()).toHaveLength(count);
+    expect(() => importArtifact(store, [1], { cwd: home, fallbackName: "y" })).toThrow("JSON 객체");
+  });
+
+  test("CLI: iamceo import, 폴더·파일 오류", async () => {
+    const home = newHome();
+    const file = join(home, "운영판.json");
+    writeFileSync(file, JSON.stringify({ ...DUMP, meta: {} }));
+    const r = await cli(home, ["import", file, "--cwd", home]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("가져왔습니다: '운영판'");
+    expect(r.stdout).toContain("실행 꺼짐");
+    expect((await cli(home, ["import"])).code).toBe(1);
+    expect((await cli(home, ["import", file, "--name", "다른", "--cwd", join(home, "없음")])).stderr).toContain("폴더가 없습니다");
+    expect((await cli(home, ["import", join(home, "없음.json")])).stderr).toContain("덤프를 읽을 수 없습니다");
+    const store = new Store(openDb(join(home, "iamceo.db")), new Bus());
+    expect(store.listProjects().map((p) => p.name)).toEqual(["본사", "운영판"]);
+  });
+
+  test("예약된 이름·핸들의 세션을 가져와도 바꿔 받아 나중에 총괄이 뜰 수 있다", () => {
+    const home = newHome();
+    const store = new Store(openDb(join(home, "iamceo.db")), new Bus());
+    const dump = { meta: { board: { title: "예약" } }, sessions: { lead: { name: "총괄", role: "x" }, root: { name: "대표", role: "y" } } };
+    const s = importArtifact(store, dump, { cwd: home, fallbackName: "x", now: NOW });
+    const members = store.listMembers(s.projectId);
+    expect(members.map((m) => m.handle).sort()).toEqual(["s1", "s2"]);
+    expect(members.map((m) => m.name).sort()).toEqual(["직원 대표", "직원 총괄"]);
+  });
+
+  test("roles export 가 기본 템플릿을 example 로 꺼내고 사용법에 있다", async () => {
+    const home = newHome();
+    const out = await cli(home, ["roles", "export"]);
+    expect(out.stdout).toContain("worker.example.md");
+    expect(readFileSync(join(home, "roles", "worker.example.md"), "utf8")).toContain("## 승인");
+    expect((await cli(home, ["help"])).stdout).toContain("roles export");
+  });
+
+  test("가져온 프로젝트는 대표 말·서버 복구로 세션을 띄우지 않고, 편입은 그 직원 자리를 잇는다", async () => {
+    const home = newHome();
+    const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
+    updateConfigFile({ accessCode: "code", hosts: ["127.0.0.1"] }, env);
+    const config = loadConfig(env);
+    const bus = new Bus();
+    const store = new Store(openDb(config.dbPath), bus);
+    const calls: string[] = [];
+    const runner: HerdrCapable = {
+      kind: "herdr",
+      available: async () => ({ ok: true }),
+      start: async () => (calls.push("start"), { sessionId: "s", paneId: "p" }),
+      send: async (_m, text) => (calls.push(`send:${text.split("\n")[0]}`), { ok: true }),
+      isBusy: () => false,
+      compact: async () => ({ ok: true }),
+      setParallel: async () => ({ ok: true }),
+      interrupt: async () => {},
+      stop: async () => {},
+      screen: async () => "",
+      on: (_cb: (e: RunnerEvent) => void) => {},
+      shutdown: async () => {},
+      reattach: async () => (calls.push("reattach"), null),
+      adopt: async (_m, paneId) => (calls.push("adopt"), { sessionId: "sess-live", paneId, tabId: null }),
+      release: async () => ({ notified: true }),
+    };
+    const herdr: HerdrQueries = {
+      info: async () => ({ installed: true, running: true, version: "1", protocol: 22, compatible: true, warning: null }),
+      agents: async () => [{ paneId: "live", name: "insta", agent: "claude", status: "idle", cwd: home, sessionId: "sess-live", workspaceId: "w", tabId: "t", adopted: false }],
+    };
+    const orch = new Orchestrator({ config, store, runners: new Map<Backend, HerdrCapable>([["herdr", runner]]), herdr, agentTools: { listAgentTools: () => [], handleAgentTool: async () => ({ text: "" }) } });
+    const server = await startServer({ config, store, bus, orch });
+    stops.push(async () => {
+      await orch.shutdown();
+      await server.stop();
+    });
+
+    store.patchSettings({ backend: "herdr" });
+    const { projectId } = importArtifact(store, DUMP, { cwd: home, fallbackName: "x", now: NOW });
+    await orch.recover();
+    const message = await orch.sendUserMessage(projectId, { text: "안녕" });
+    expect(message.delivery).toBe("held");
+    expect(calls).toEqual([]);
+    expect(store.getConductor(projectId)).toBeNull();
+
+    const adopted = await orch.adopt(projectId, { paneId: "live", name: "인스타", role: "콘텐츠", handle: "insta" });
+    expect(adopted).toMatchObject({ handle: "insta", origin: "adopted", paneId: "live", sessionId: "sess-live", now: "릴스 3편" });
+    expect(store.listMembers(projectId).filter((m) => m.name === "인스타")).toHaveLength(1);
+    expect(calls[0]).toBe("adopt");
+    await expect(orch.adopt(projectId, { paneId: "live", name: "또", role: "" })).rejects.toMatchObject({ status: 409 });
+  }, 15_000);
+});

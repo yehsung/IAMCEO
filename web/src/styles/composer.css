@@ -1,0 +1,46 @@
+/* 입력칸. 번들 순서상 glass.css 보다 앞에 올 수 있어, 유리·버튼 값을 덮을 때는 클래스 둘로 쓴다. */
+.cmp { position:relative; min-width:0; }
+.glass.cmp__panel { --g-r:20px; --g-tint:rgb(12 9 28 / .58); display:flex; flex-direction:column; padding:6px; }
+.cmp__panel:has(.cmp__input:focus-visible) { outline:1.5px solid rgb(var(--violet-rgb) / .85); outline-offset:0; }
+.cmp__panel[data-drag] { outline:2px dashed var(--focus); outline-offset:1px; }
+
+/* 첨부가 많아도 입력칸이 화면을 다 먹지 않게 칩 영역만 스크롤한다 */
+.cmp__meta { display:flex; flex-wrap:wrap; align-items:center; gap:6px; min-width:0; padding:2px 4px 2px; max-height:112px; overflow-y:auto; overscroll-behavior:contain; }
+@media (max-height:500px) { .cmp__meta { max-height:44px; } }
+.cmp__hint { min-width:0; padding:0 4px; font-size:12.5px; line-height:1.4; color:var(--ink-2); }
+.cmp__link { color:var(--focus); text-decoration:underline; text-underline-offset:3px; }
+.cmp__kept { padding:6px 16px 0; font-size:12.5px; line-height:1.4; color:var(--ink-2); }
+.cmp__error { padding:4px 8px; font-size:13px; line-height:1.4; color:var(--danger); }
+
+.cmp-chip { position:relative; display:inline-flex; align-items:center; gap:6px; min-width:0; max-width:100%; height:28px; padding:0 9px; border-radius:999px; font-size:12.5px; font-weight:600; line-height:1; color:var(--ink-1);
+  background:rgb(255 255 255 / .08); box-shadow:inset 0 0 0 1px rgb(255 255 255 / .1); }
+.cmp-chip__label { min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.cmp-chip svg { flex:none; }
+.cmp-chip--target { flex:none; max-width:min(100%, 220px); color:var(--ink-2); }
+.cmp-chip--target::after { content:""; position:absolute; inset:-8px -2px; }
+.cmp-chip--target:hover { color:var(--ink-1); background:rgb(255 255 255 / .13); }
+.cmp-chip--target[data-direct] { color:#fff; background:rgb(var(--violet-rgb) / .42); box-shadow:inset 0 0 0 1px rgb(var(--violet-rgb) / .95); }
+.cmp-chip--file { padding-right:0; max-width:min(100%, 260px); font-weight:500; }
+.cmp-chip--file[data-state="failed"] { color:var(--danger); box-shadow:inset 0 0 0 1px rgb(var(--danger-rgb) / .6); }
+.cmp-chip__thumb { flex:none; width:20px; height:20px; margin-left:-5px; border-radius:50%; object-fit:cover; }
+.cmp-chip__state { flex:none; font-weight:400; color:var(--ink-2); }
+.cmp-chip--file[data-state="failed"] .cmp-chip__state { color:inherit; }
+.cmp-chip__x { position:relative; flex:none; display:grid; place-items:center; width:28px; height:28px; border-radius:50%; color:var(--ink-2); }
+.cmp-chip__x:hover { color:var(--ink-1); background:rgb(255 255 255 / .1); }
+.cmp-chip__x::after { content:""; position:absolute; inset:-8px -4px; }
+
+.cmp__row { display:flex; align-items:flex-end; gap:2px; min-width:0; }
+.cmp__input { flex:1; min-width:0; min-height:44px; max-height:min(168px, calc(var(--app-h) * .3)); padding:11px 6px; border:0; outline:0; resize:none; overflow-y:auto; background:transparent; line-height:22px; }
+/* 초점 표시는 판 전체가 맡는다. 전역 :focus-visible 보다 앞에 번들될 수 있어 클래스 둘로 쓴다 */
+.cmp__input.cmp__input:focus-visible { outline:0; }
+.cmp__input::placeholder { color:var(--ink-2); opacity:1; }
+.cmp__input:placeholder-shown { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.gbtn.cmp__icon { --b-px:0px; flex:none; width:44px; }
+
+.cmp-menu { position:absolute; left:0; right:0; bottom:calc(100% + 8px); z-index:5; max-height:min(292px, calc(var(--app-h) * .42)); overflow-y:auto; padding:6px; border-radius:18px;
+  background:rgb(18 14 38 / .98); box-shadow:inset 0 0 0 1px rgb(255 255 255 / .12), 0 18px 44px -12px rgb(4 2 14 / .9); }
+.cmp-menu__item { display:flex; align-items:center; gap:12px; min-height:48px; padding:6px 12px; border-radius:12px; cursor:pointer; }
+.cmp-menu__item[aria-selected="true"] { background:rgb(var(--violet-rgb) / .3); }
+.cmp-menu__main { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
+.cmp-menu__name { font-size:14.5px; font-weight:600; line-height:1.3; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.cmp-menu__sub { font-size:12.5px; line-height:1.3; color:var(--ink-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }

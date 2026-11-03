@@ -1,0 +1,49 @@
+/* 승인 창 답하기(결재함·팀 화면 공용). 접두어 apv-. 번들 순서상 glass.css·shell.css 보다 앞에 올 수 있어, 그쪽 값을 덮을 때는 클래스 둘로 쓴다. */
+.apv { display:flex; flex-direction:column; gap:10px; min-width:0; }
+/* 카드 밖(팀 화면 직원 상세)에 놓일 때: 승인 창 앞 빨강 계열 테두리 */
+.apv--boxed { padding:12px 14px; border-radius:16px; background:rgb(255 138 128 / .07); box-shadow:inset 0 0 0 1px rgb(255 138 128 / .32); }
+.apv-head { display:flex; align-items:center; justify-content:space-between; gap:8px; min-width:0; }
+.apv-kicker { font-size:12.5px; font-weight:650; color:var(--st-block); }
+.gbtn.apv-reread { flex:none; margin-block:-6px; }
+.apv-title { font-size:15.5px; font-weight:650; line-height:1.4; letter-spacing:-.01em; overflow-wrap:anywhere; }
+/* 명령·미리보기: 줄바꿈을 지키고, 길면 판 안에서 스크롤. 폰에서 옆으로 밀리지 않게 긴 줄은 접는다 */
+.apv-body { max-height:min(40vh, 280px); padding:10px 12px; overflow:auto; border-radius:12px; background:rgb(5 4 11 / .72); box-shadow:inset 0 0 0 1px var(--line);
+  font-size:12.5px; line-height:1.5; white-space:pre-wrap; word-break:normal; overflow-wrap:anywhere; color:var(--ink-1); }
+.apv-question { font-size:14.5px; font-weight:600; line-height:1.45; }
+
+/* 선택지: 원문 그대로 한 줄씩 */
+.apv-opts { display:grid; grid-template-columns:minmax(0, 1fr); gap:8px; }
+.apv-opt { display:flex; align-items:flex-start; gap:10px; min-width:0; min-height:48px; padding:11px 14px; border-radius:14px; text-align:left;
+  background:rgb(255 255 255 / .06); box-shadow:inset 0 0 0 1px rgb(255 255 255 / .14); transition:background-color 120ms linear, box-shadow 120ms linear; }
+.apv-opt:hover:not(:disabled) { background:rgb(255 255 255 / .11); }
+.apv-opt:disabled { cursor:default; }
+.apv-opt:disabled:not([aria-pressed="true"]) { color:var(--ink-2); }
+.apv-opt.apv-opt[aria-pressed="true"] { background:rgb(var(--violet-rgb) / .5); box-shadow:inset 0 0 0 2px var(--focus); }
+.apv-opt.apv-opt[data-reject][aria-pressed="true"] { background:rgb(var(--danger-rgb) / .2); box-shadow:inset 0 0 0 2px var(--danger); }
+.apv-opt__n { flex:none; min-width:1.3em; font-family:var(--font-code); font-size:13px; line-height:21px; color:var(--ink-3); }
+.apv-opt__main { flex:1; display:flex; flex-direction:column; gap:5px; min-width:0; }
+.apv-opt__label { font-size:14.5px; font-weight:600; line-height:1.45; overflow-wrap:anywhere; }
+.apv-opt__tags { display:flex; flex-wrap:wrap; align-items:center; gap:4px 8px; }
+.apv-opt__tags:empty { display:none; }
+.apv-opt__persist { font-size:12.5px; line-height:1.4; color:var(--ink-3); }
+.apv-opt__check { flex:none; margin-top:3px; color:#fff; }
+
+.apv-note { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.apv-note__label { font-size:12.5px; font-weight:600; color:var(--ink-2); }
+.input.apv-note__input { min-width:0; max-height:160px; resize:none; overflow-y:auto; }
+.input.apv-note__input:disabled { opacity:.7; cursor:not-allowed; }
+
+.apv-confirm { display:flex; flex-direction:column; gap:6px; min-width:0; scroll-margin-block:calc(var(--top-h, 0px) + 12px) calc(var(--bottom-h, 0px) + 12px); }
+.apv-confirm__hint { padding:0 2px; font-size:13px; line-height:1.45; color:var(--ink-2); }
+.apv-confirm__row { display:flex; align-items:center; gap:8px; min-width:0; }
+.gbtn.apv-confirm__go { flex:0 1 auto; min-width:0; }
+
+.apv-wait { font-size:13.5px; line-height:1.45; color:var(--ink-2); }
+.apv-sent { font-size:13.5px; line-height:1.45; color:var(--ok); overflow-wrap:anywhere; }
+.apv-error { font-size:13.5px; line-height:1.45; color:var(--danger); overflow-wrap:anywhere; }
+.apv-foot { display:flex; justify-content:flex-end; }
+
+/* 폰: 확인 버튼을 넓게 */
+@media (max-width:1023.98px) {
+  .gbtn.apv-confirm__go { flex:1 1 0; }
+}

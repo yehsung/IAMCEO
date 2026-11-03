@@ -1,0 +1,206 @@
+/* 앱 틀과 공용 조각. 유리 조상 규칙 때문에 여기서 opacity·filter·mask 를 조상에 걸지 않는다. */
+
+/* ── 틀 ── */
+.shell { --top-h:0px; --bottom-h:0px; position:relative; isolation:isolate; height:var(--app-h); overflow:clip; }
+/* 본문 판은 왼쪽 패널 밑까지 전체 폭이다: 위아래 짙은 띠와 빛이 패널 경계에서 끊겨 세로 솔기가 생기지 않게 */
+.shell--desk { --rail-space:296px; }
+.shell__stage { position:absolute; inset:0; isolation:isolate; overflow:clip; }
+.shell--desk .shell__body { left:var(--rail-space); }
+.shell__body { position:absolute; inset:0; overflow-y:auto; overscroll-behavior:contain; scroll-padding-top:var(--top-h); scroll-padding-bottom:var(--bottom-h);
+  padding:var(--top-h) 0 var(--bottom-h); -webkit-overflow-scrolling:touch; }
+/* 아래 44px: 맨 끝까지 내려도 마지막 줄이 입력칸 위 띠에 흐려지지 않게 */
+.shell__column { width:min(100%, 880px); min-height:100%; margin-inline:auto; padding:8px 24px 44px; }
+
+/* 위아래 판 뒤의 짙은 띠: 지나가는 본문 글이 탭·입력칸 옆에서 부딪혀 보이지 않게 한다(mask 는 안쪽 유리의 backdrop root 가 되어 못 쓴다) */
+.shell__top, .shell__bottom { position:absolute; left:0; right:0; z-index:2; pointer-events:none; }
+.shell__top > *, .shell__bottom > * { pointer-events:auto; }
+.shell__top { top:0; }
+.shell__bottom { bottom:0; }
+.shell__top::before { content:""; position:absolute; inset:0 0 -40px; z-index:-1; pointer-events:none; opacity:0; transition:opacity 180ms linear;
+  background:linear-gradient(180deg, rgb(9 7 19 / .985) calc(100% - 44px), rgb(9 7 19 / .6) calc(100% - 22px), rgb(9 7 19 / 0)); }
+/* 위쪽 띠는 글이 올라왔을 때만: 맨 위에서는 바탕 빛이 유리 뒤로 그대로 비치게 */
+.shell[data-scrolled] .shell__top::before { opacity:1; }
+/* 띠만으로는 지나가는 글이 비쳐 겹쳐 읽힌다. 유리가 아닌 글자 줄에만 받침을 깐다 */
+.shell[data-scrolled] .shell__headline, .shell[data-scrolled] .ph-now { background:rgb(9 7 19 / .86); box-shadow:0 0 0 4px rgb(9 7 19 / .86); border-radius:6px; -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px); }
+.shell__bottom::before { content:""; position:absolute; inset:-64px 0 0; z-index:-1; pointer-events:none;
+  background:linear-gradient(0deg, rgb(9 7 19 / .985) calc(100% - 72px), rgb(9 7 19 / .72) calc(100% - 46px), rgb(9 7 19 / .26) calc(100% - 20px), rgb(9 7 19 / 0)); }
+/* 짙은 띠가 바탕 빛을 가리니 입력칸·아래 탭 유리 뒤에 빛을 다시 둔다 */
+.shell__bottom::after { content:""; position:absolute; z-index:-1; left:calc(var(--rail-space, 0px) + (100% - var(--rail-space, 0px)) / 2); bottom:-30px; width:min(760px, 110%); height:calc(100% + 30px); translate:-50% 0; border-radius:50%; pointer-events:none;
+  background:radial-gradient(closest-side, rgb(var(--violet-rgb) / .3), rgb(var(--violet-rgb) / .12) 55%, rgb(var(--violet-rgb) / 0)); }
+
+/* 데스크톱: 제목 | 탭 | 빈칸. 탭은 언제나 가운데 */
+.shell--desk .shell__top { display:grid; grid-template-columns:minmax(0, 1fr) auto minmax(0, 1fr); align-items:center; column-gap:20px; padding:12px 24px 12px calc(var(--rail-space) + 24px); }
+.shell--desk .shell__top > .offline-band { grid-column:1 / -1; margin-top:10px; }
+.shell--desk .shell__bottom { padding:6px 24px 14px calc(var(--rail-space) + 24px); }
+.shell--desk .shell__bottom > * { width:min(100%, 832px); margin-inline:auto; }
+.shell__headline { min-width:0; justify-self:start; max-width:100%; }
+.shell__title { font-size:17px; font-weight:650; line-height:1.3; letter-spacing:-.015em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.shell__now { margin-top:1px; font-size:12.5px; line-height:1.4; color:var(--ink-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.shell--desk .shell-tabs { --tab-h:40px; width:calc(var(--n) * 108px); }
+/* 좁은 데스크톱: 세 칸으로 가운데 맞추면 제목이 너무 좁아진다. 탭을 오른쪽으로 */
+@media (max-width:1279.98px) {
+  .shell--desk .shell__top { grid-template-columns:minmax(0, 1fr) auto; }
+  .shell--desk .shell-tabs { width:calc(var(--n) * 92px); }
+  .shell__top-spacer { display:none; }
+}
+
+/* ── 왼쪽 패널 ── */
+.rail { position:absolute; left:12px; top:12px; bottom:12px; z-index:3; width:272px; display:flex; flex-direction:column; min-height:0; padding:6px; }
+.rail__brand { display:flex; align-items:center; gap:9px; padding:14px 12px 12px; font-size:13.5px; font-weight:700; letter-spacing:.06em; }
+.rail__scroll { flex:1; min-height:0; overflow-y:auto; padding:2px; }
+.rail__foot { display:flex; flex-direction:column; gap:2px; padding:6px 2px 4px; border-top:1px solid var(--line); margin-top:4px; }
+.rail__foot .conn { padding:6px 12px 8px; }
+
+.pj-nav { display:flex; flex-direction:column; gap:2px; }
+.pj-list { display:flex; flex-direction:column; gap:2px; }
+.pj-heading { padding:14px 12px 6px; font-size:12px; font-weight:600; color:var(--ink-3); }
+.pj { position:relative; display:flex; align-items:center; gap:10px; width:100%; min-height:48px; padding:7px 12px; border-radius:13px; text-align:left;
+  transition:background-color 120ms linear, color 120ms linear; color:var(--ink-1); }
+.pj:hover { background:rgb(255 255 255 / .06); }
+.pj[aria-current] { background:linear-gradient(180deg, rgb(var(--violet-rgb) / .32), rgb(var(--violet-rgb) / .2));
+  box-shadow:inset 0 1px .5px -.5px rgb(255 255 255 / .45), inset 0 0 0 1px rgb(255 255 255 / .05); }
+.pj__main { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
+.pj__name { font-size:14.5px; font-weight:600; line-height:1.3; letter-spacing:-.01em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.pj__sub { font-size:12px; line-height:1.3; color:var(--ink-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.pj--add { min-height:42px; margin-top:6px; color:var(--ink-2); font-size:14px; font-weight:500; }
+.pj--add:hover { color:var(--ink-1); }
+.pj--foot { min-height:40px; font-size:14px; font-weight:500; color:var(--ink-2); }
+.pj--foot:hover, .pj--foot[aria-current] { color:var(--ink-1); }
+
+.conn { display:inline-flex; align-items:center; gap:7px; font-size:12.5px; line-height:1; color:var(--ink-2); white-space:nowrap; }
+.conn i { width:7px; height:7px; border-radius:50%; background:var(--warn); }
+.conn[data-state="online"] i { background:var(--ok); box-shadow:0 0 8px rgb(var(--ok-rgb) / .7); }
+.conn[data-state="offline"] i { background:var(--danger); }
+.conn[data-state="offline"] { color:var(--danger); }
+
+/* ── 연결 끊김 띠 ── 유리 아닌 짙은 경고 판: 어떤 빛 위에서도 읽혀야 한다 */
+.offline-band { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 8px 8px 14px; border-radius:12px;
+  background:rgb(58 28 16 / .94); box-shadow:inset 0 0 0 1px rgb(var(--warn-rgb) / .34), 0 8px 24px -12px rgb(4 2 14 / .8);
+  color:#FFE3BC; font-size:13.5px; line-height:1.35; }
+.offline-band__retry::after { content:""; position:absolute; inset:-6px 0; }
+.offline-band__retry { position:relative; flex:none; min-height:32px; padding:0 12px; border-radius:999px; background:rgb(255 255 255 / .1); font-size:13px; font-weight:600; color:#FFF3E2; }
+.offline-band__retry:hover { background:rgb(255 255 255 / .17); }
+
+.gtabs__label { display:inline-flex; align-items:center; gap:6px; }
+.gtabs__count { min-width:18px; height:18px; padding:0 5px; border-radius:999px; background:var(--accent-fill); color:#fff; font-size:11.5px; font-weight:700; line-height:18px; text-align:center; letter-spacing:0; }
+
+/* ── 폰·태블릿 ── */
+.shell--phone .shell__top { padding:calc(var(--safe-t) + 8px) calc(var(--safe-r) + 12px) 8px calc(var(--safe-l) + 12px); }
+.shell--phone .shell__top > .offline-band { margin-top:8px; }
+.shell--phone .shell__bottom { display:flex; flex-direction:column; gap:8px; padding:6px calc(var(--safe-r) + 12px) calc(var(--safe-b) + 10px) calc(var(--safe-l) + 12px); }
+.shell--phone[data-keyboard] .shell__bottom { padding-bottom:8px; }
+.shell--phone .shell-tabs { --tab-h:42px; width:100%; }
+.shell--phone .gtabs__link { font-size:14px; padding:0 2px; }
+/* 다섯 칸이 320px 에서도 들어가게: 건수는 옆이 아니라 글자 오른쪽 위에 얹는다(글자 자리가 건수에 따라 움직이지 않는다) */
+.shell--phone .gtabs__label { position:relative; display:inline-block; }
+.shell--phone .gtabs__count { position:absolute; left:100%; bottom:calc(100% - 3px); margin-left:-3px; min-width:16px; height:16px; padding:0 4px; font-size:10.5px; line-height:16px; }
+@media (max-width:359.98px) { .shell--phone .gtabs__link { font-size:13.5px; } }
+.shell--phone .shell__column { padding:6px calc(var(--safe-r) + 14px) 44px calc(var(--safe-l) + 14px); }
+.ph-head { --g-r:18px; display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:46px; padding:1px 14px 1px 1px; }
+.ph-switch { display:inline-flex; align-items:center; gap:8px; min-width:0; min-height:44px; padding:0 8px 0 13px; border-radius:17px;
+  font-size:16px; font-weight:650; letter-spacing:-.015em; }
+.ph-switch__name { min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ph-switch svg { flex:none; color:var(--ink-2); }
+.ph-now { width:fit-content; max-width:calc(100% - 8px); margin:7px 4px 0; font-size:12.5px; line-height:1.4; color:var(--ink-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.sheet-foot { margin-top:6px; padding-top:6px; border-top:1px solid var(--line); }
+@media (min-width:768px) {
+  .shell--phone .shell__bottom > *, .shell--phone .shell__top > * { width:min(100%, 720px); margin-inline:auto; }
+}
+
+/* ── 자리표시·안내 ── */
+.body-note { padding:48px 0; text-align:center; color:var(--ink-2); font-size:14px; min-height:1em; }
+.splash { display:grid; place-items:center; height:var(--app-h); color:var(--ink-2); font-size:14px; }
+
+/* ── 상태 점 · 배지 ── */
+/* 상태 색은 여기 한 곳에서 정한다(spec §10). 일함 보라 · 내 답 기다림 주황 · 대기 회색 · 승인 창 앞 빨강 계열 · 잠듦 흐림 · 오류 빨강. 어느 화면이든 점과 글자가 같다. */
+.status { --st:var(--st-idle); display:inline-flex; align-items:center; gap:6px; font-size:12.5px; line-height:1.2; color:var(--st); white-space:nowrap; }
+.status__dot { flex:none; width:8px; height:8px; border-radius:50%; background:var(--st); }
+.status[data-status="idle"] { --st:var(--st-idle); }
+.status[data-status="working"] { --st:var(--st-work); }
+.status[data-status="working"] .status__dot { box-shadow:0 0 8px rgb(var(--violet-rgb) / .95); animation:status-pulse 1.8s ease-in-out infinite; }
+.status[data-status="waiting"] { --st:var(--st-wait); }
+.status[data-status="waiting"] .status__dot { box-shadow:0 0 8px rgb(255 176 112 / .7); }
+.status[data-status="blocked"] { --st:var(--st-block); }
+.status[data-status="blocked"] .status__dot { box-shadow:0 0 8px rgb(255 138 128 / .75); }
+.status[data-status="error"] { --st:var(--st-error); }
+.status[data-status="asleep"], .status[data-status="offline"] { --st:var(--st-asleep); }
+.status[data-status="asleep"] .status__dot, .status[data-status="offline"] .status__dot { background:transparent; box-shadow:inset 0 0 0 1.5px var(--st-asleep); }
+@keyframes status-pulse { 50% { box-shadow:0 0 3px rgb(var(--violet-rgb) / .4); } }
+@media (prefers-reduced-motion: reduce) { .status[data-status="working"] .status__dot { animation:none; } }
+
+.badge { display:inline-flex; align-items:center; justify-content:center; flex:none; min-width:20px; height:20px; padding:0 7px; border-radius:999px; font-size:12px; font-weight:650; line-height:1; white-space:nowrap;
+  background:rgb(255 255 255 / .1); color:var(--ink-1); }
+.badge[data-tone="accent"] { background:var(--accent-fill); color:#fff; }
+.badge[data-tone="ok"] { background:rgb(var(--ok-rgb) / .16); color:var(--ok); }
+.badge[data-tone="warn"] { background:rgb(var(--warn-rgb) / .16); color:var(--warn); }
+/* 고른 줄의 보라 위에서도 읽히게 짙은 바닥을 깐다 */
+.badge[data-tone="danger"] { background:linear-gradient(rgb(var(--danger-rgb) / .16), rgb(var(--danger-rgb) / .16)), rgb(9 7 19 / .72); color:var(--danger); }
+
+/* ── 빈 화면 ── */
+.empty { padding:64px 16px; text-align:center; }
+.empty__title { font-size:16px; font-weight:600; color:var(--ink-1); letter-spacing:-.01em; }
+.empty__body { margin-top:8px; font-size:14px; color:var(--ink-2); }
+
+/* ── 마크다운 ── */
+/* 글이 자기 칸 밖으로 그려지지 않게 한다(방어선 둘째. 첫째는 sanitize 의 style 금지) */
+.md { font-size:15px; line-height:1.65; color:var(--ink-1); contain:paint; }
+.md > * + * { margin-top:.7em; }
+.md h1, .md h2, .md h3, .md h4 { font-weight:650; line-height:1.35; letter-spacing:-.012em; margin-top:1.1em; }
+.md > :first-child { margin-top:0; }
+.md h1 { font-size:1.3em; } .md h2 { font-size:1.18em; } .md h3 { font-size:1.06em; } .md h4 { font-size:1em; color:var(--ink-2); }
+.md ul, .md ol { padding-left:1.35em; }
+.md ul { list-style:disc; } .md ol { list-style:decimal; }
+.md li + li { margin-top:.25em; }
+.md a { color:var(--focus); text-decoration:underline; text-decoration-thickness:1px; text-underline-offset:3px; }
+.md code { font-family:var(--font-code); font-size:.9em; padding:.1em .35em; border-radius:6px; background:rgb(255 255 255 / .08); }
+.md pre { padding:12px 14px; border-radius:12px; background:rgb(5 4 11 / .55); overflow-x:auto; box-shadow:inset 0 0 0 1px var(--line); }
+.md pre code { padding:0; background:none; font-size:13px; line-height:1.55; }
+.md blockquote { margin:0; padding-left:12px; border-left:2px solid rgb(var(--violet-rgb) / .7); color:var(--ink-2); }
+.md img { border-radius:10px; }
+.md hr { border:0; border-top:1px solid var(--line); }
+.md table { display:block; max-width:100%; overflow-x:auto; border-collapse:collapse; font-size:.93em; }
+/* 본문의 overflow-wrap:anywhere 를 물려받으면 넓은 표가 스크롤 대신 글자 단위로 찌그러진다 */
+.md th, .md td { padding:6px 10px; border:1px solid var(--line); text-align:left; overflow-wrap:normal; min-width:4em; }
+.md th { font-weight:600; background:rgb(255 255 255 / .04); }
+
+/* ── 대화 상자 ── .glass 를 안쪽 판에 두어 dialog 자체의 위치 지정과 부딪히지 않게 한다 */
+.dialog:focus-visible { outline:0; }
+.dialog { padding:0; margin:0; border:0; background:none; color:inherit; max-width:none; max-height:none; overflow:visible; }
+.dialog::backdrop { background:rgb(5 4 11 / .55); }
+/* 행 높이를 잠가야 안쪽 판의 max-height:100% 가 먹는다. auto 행이면 판이 내용만큼 자라 화면 밖으로 나간다. */
+.dialog--modal[open] { position:fixed; inset:0; display:grid; grid-template-rows:minmax(0, 1fr); place-items:center; width:100%; height:100%; padding:20px; }
+.dialog--sheet[open] { position:fixed; inset:0; display:flex; align-items:flex-end; width:100%; height:100%; padding:calc(var(--safe-t) + 48px) 8px calc(var(--safe-b) + 8px); }
+/* 격자 칸의 %는 내용에 따라 풀릴 때가 있어(place-items:center) 화면 높이로 직접 막는다. 아니면 긴 내용의 판이 화면 밖으로 나가 머리줄·닫기 버튼을 잃는다. */
+.dialog__panel { --g-tint:rgb(14 10 32 / .72); --g-r:26px; display:flex; flex-direction:column; width:min(100%, 480px); max-height:calc(var(--app-h) - 40px); padding:2px; }
+.dialog--sheet .dialog__panel { width:min(100%, 560px); margin-inline:auto; max-height:min(100%, 76vh); }
+.dialog__head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 8px 6px 18px; }
+.dialog__title { font-size:16px; font-weight:650; letter-spacing:-.012em; }
+.dialog__close { display:grid; place-items:center; width:44px; height:44px; border-radius:50%; color:var(--ink-2); }
+.dialog__close:hover { background:rgb(255 255 255 / .08); color:var(--ink-1); }
+.dialog__body { flex:1; min-height:0; overflow-y:auto; padding:6px 14px 14px; }
+.dialog__foot { display:flex; justify-content:flex-end; gap:8px; padding:6px 14px 14px; }
+@media (prefers-reduced-motion: no-preference) {
+  .dialog--modal[open] .dialog__panel { animation:dialog-in 360ms var(--ease-spring) both; }
+  .dialog--sheet[open] .dialog__panel { animation:sheet-in 420ms var(--ease-out) both; }
+  @keyframes dialog-in { from { scale:.96; translate:0 10px; } }
+  @keyframes sheet-in { from { translate:0 60%; } }
+}
+
+/* ── 입력 양식 ── 공용 */
+.form { display:flex; flex-direction:column; gap:14px; padding:0 4px 2px; }
+.field { display:flex; flex-direction:column; gap:6px; margin:0; padding:0; border:0; min-width:0; }
+.field__label { padding:0; font-size:13px; font-weight:600; color:var(--ink-2); }
+.input { width:100%; min-height:44px; padding:10px 13px; border:0; border-radius:12px; outline-offset:1px; background:rgb(5 4 11 / .5); box-shadow:inset 0 0 0 1px rgb(255 255 255 / .12); }
+.input::placeholder { color:var(--ink-3); }
+textarea.input { resize:vertical; line-height:1.5; }
+.choice-row { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:8px; }
+.choice { position:relative; display:flex; flex-direction:column; gap:3px; padding:11px 13px; border-radius:13px; cursor:pointer; font-size:14px; font-weight:600;
+  background:rgb(255 255 255 / .04); box-shadow:inset 0 0 0 1px rgb(255 255 255 / .1); transition:background-color 120ms linear, box-shadow 120ms linear; }
+.choice small { font-size:12.5px; font-weight:400; line-height:1.4; color:var(--ink-2); }
+.choice input { position:absolute; opacity:0; inset:0; margin:0; cursor:inherit; }
+.choice:has(input:focus-visible) { outline:2px solid var(--focus); outline-offset:2px; }
+.choice[data-on] { background:rgb(var(--violet-rgb) / .24); box-shadow:inset 0 0 0 1.5px rgb(var(--violet-rgb) / .9); }
+.choice[data-off] { cursor:default; color:var(--ink-3); }
+.choice[data-off] small { color:var(--ink-3); }
+.form__error { font-size:13.5px; color:var(--danger); }
+.form__actions { display:flex; justify-content:flex-end; gap:8px; padding-top:4px; }

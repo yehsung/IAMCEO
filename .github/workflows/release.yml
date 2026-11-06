@@ -26,7 +26,7 @@ jobs:
       - name: 릴리스
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/release/iamceo-darwin-arm64 dist/release/iamceo-darwin-x64 dist/release/SHA256SUMS --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" dist/release/iamceo-darwin-arm64 dist/release/iamceo-darwin-x64 dist/release/SHA256SUMS LICENSE THIRD-PARTY-NOTICES.md --title "$GITHUB_REF_NAME" --generate-notes
 
   screens:
     runs-on: macos-latest

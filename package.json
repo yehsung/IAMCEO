@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "AI 팀을 운영하는 사람의 창구 — CLI AI 세션을 홈·결재함·팀·대화·자료로 지휘한다",
-  "license": "AGPL-3.0-only",
+  "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
     "url": "https://github.com/yehsung/IAMCEO.git"

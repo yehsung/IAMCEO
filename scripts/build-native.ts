@@ -49,6 +49,7 @@ try {
   for (const entry of ["LICENSE", "THIRD-PARTY-NOTICES", "verified.json"]) cpSync(join(coreSource, entry), join(runtime, entry));
   cpSync(join(root, "vendor", "herdr-core", "release-lock.json"), join(runtime, "release-lock.json"));
   cpSync(join(root, "LICENSE"), join(runtime, "IAMCEO-LICENSE"));
+  cpSync(join(root, "THIRD-PARTY-NOTICES.md"), join(runtime, "IAMCEO-THIRD-PARTY-NOTICES.md"));
   writeFileSync(join(runtime, "README.txt"), `IAMCEO bundled local runtime\nherdr-core ${lock.version}\n\nThe app registers its local daemon only after you choose “이 Mac에서 시작”.\nProvider CLIs and their existing login/configuration remain user-managed.\nHerdr Core.app retains its upstream code signature. See LICENSE and THIRD-PARTY-NOTICES.\n`);
   run(["/usr/bin/codesign", "--force", "--sign", "-", app]);
   run(["/usr/bin/codesign", "--verify", "--strict", "-R", signatureRequirement, bundledCore]);

@@ -71,4 +71,12 @@ Automated tests use temporary homes and fake providers. Separate real CLI smoke 
 
 ## License
 
-IAMCEO retains [AGPL-3.0-only](LICENSE). This implementation does not change its license. Bundled herdr-core is Apache-2.0; its license, third-party notices and upstream signature are preserved.
+IAMCEO is **source-available**, not open source. It is licensed under the [IAMCEO License](LICENSE): the Sustainable Use License 1.0 plus IAMCEO Additional Permissions.
+
+- **Allowed:** you may read, learn from, use, modify and share IAMCEO free of charge for non-commercial purposes, and use it inside your company.
+- **Tool use is allowed:** you may use IAMCEO as a tool for paid client work, sell what you make with it, and charge for installation or support services.
+- **Not allowed without separate written permission:** selling IAMCEO or a modified version, offering it as a paid hosted or SaaS service, and distributing it as part of a commercial product.
+
+Plain-language explanation (Korean): [docs/LICENSING.ko.md](docs/LICENSING.ko.md). Contributions: [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Versions published before 7 November 2026, including v0.1.0, were released under AGPL-3.0-only and remain so for whoever received them. Bundled third-party components keep their own licenses: herdr-core is Apache-2.0, and its license, notices and upstream signature are preserved. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

@@ -64,4 +64,14 @@ bun run native:test
 
 [전체 구조](docs/architecture.md) · [운영 모델](docs/operating-model.md) · [빌드·연결 상세](native/README.md) · [herdr-core 출처](vendor/herdr-core/README.md)
 
-라이선스는 기존 [AGPL-3.0-only](LICENSE)를 유지합니다. 포함한 herdr-core의 Apache-2.0 라이선스·고지·공식 서명을 보존하며, 이번 구현에서 라이선스를 변경하지 않았습니다.
+## 라이선스
+
+IAMCEO는 오픈소스가 아니라 **소스 공개형(source-available)** 소프트웨어입니다. [IAMCEO 라이선스](LICENSE)는 Sustainable Use License 1.0에 IAMCEO 추가 허락을 더한 것입니다.
+
+- **허용:** 코드를 보고 배우고, 쓰고, 고치고, 무료로 비상업적으로 나눌 수 있습니다. 회사 안에서 업무에 써도 됩니다.
+- **도구로 쓰는 일도 허용:** 고객 일을 처리하는 도구로 쓰고, 그 결과물을 팔고, 설치·지원 대행 요금을 받을 수 있습니다.
+- **별도 허락 필요:** IAMCEO나 고친 판을 판매하는 것, 유료 호스팅·SaaS로 제공하는 것, 상업 제품에 넣어 배포하는 것입니다.
+
+쉬운 설명은 [docs/LICENSING.ko.md](docs/LICENSING.ko.md)에, 기여 안내는 [CONTRIBUTING.md](CONTRIBUTING.md)에 있습니다.
+
+2026년 11월 7일 이전에 공개된 버전(v0.1.0 포함)은 AGPL-3.0-only로 배포됐고, 받은 사람에게는 그대로 남습니다. 포함된 외부 구성요소는 각자의 라이선스를 따릅니다. herdr-core는 Apache-2.0이며, 그 라이선스·고지·공식 서명을 보존합니다. 자세한 목록은 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)에 있습니다.

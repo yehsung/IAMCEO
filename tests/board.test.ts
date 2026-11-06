@@ -66,6 +66,17 @@ afterAll(async () => {
 const HOUR = 3_600_000;
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
 
+/** 본문 계약과 실제 송신한 영속 봉투를 함께 검증한다. */
+function deliveryBody(store: Store, sent: { memberId: string; text: string }): string {
+  const dispatch = store.listDispatches(sent.memberId).find(d => d.wireText === sent.text)!;
+  expect(dispatch).toBeDefined();
+  expect(dispatch.items).toHaveLength(1);
+  const delivery = store.requireDelivery(dispatch.items[0]!.deliveryId);
+  expect(dispatch.markers).toEqual([{ deliveryId: delivery.id, marker: store.getDeliveryRecovery(delivery.id)!.marker! }]);
+  expect(sent.text).toBe(`${delivery.text}\n${dispatch.markers[0]!.marker}\n${dispatch.bundleMarker}`);
+  return delivery.text;
+}
+
 async function setup() {
   const home = mkdtempSync(join(tmpdir(), "iamceo-board-"));
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
@@ -349,7 +360,7 @@ describe("주기 판 정리", () => {
     await Bun.sleep(20);
     expect(tidies(t)).toHaveLength(1);
     expect(tidies(t)[0]).toMatchObject({ memberId: t.lead.id });
-    expect(tidies(t)[0]!.text).toBe(formatTidy("conductor", false));
+    expect(deliveryBody(t.store, tidies(t)[0]!)).toBe(formatTidy("conductor", false));
     expect(tidies(t)[0]!.text).toContain("`ask_close`");
     expect(tidies(t)[0]!.text).toContain("직원은 깨우지 않는다");
     expect(Date.now() - Date.parse(t.store.requireProject(t.project.id).tidiedAt!)).toBeLessThan(5000);
@@ -441,7 +452,8 @@ describe("지금 판 정리 API·설정", () => {
     const res = await t.api("POST", `/api/projects/${t.project.id}/tidy`);
     expect(res).toEqual({ status: 200, body: { already: false } });
     await Bun.sleep(20);
-    expect(t.runner.sent.at(-1)).toMatchObject({ memberId: t.lead.id, text: formatTidy("conductor", true) });
+    expect(t.runner.sent.at(-1)!.memberId).toBe(t.lead.id);
+    expect(deliveryBody(t.store, t.runner.sent.at(-1)!)).toBe(formatTidy("conductor", true));
     expect((await t.api("POST", `/api/projects/${t.project.id}/tidy`)).body).toEqual({ already: true });
     expect(t.runner.sent.filter((s) => s.text.includes(TIDY_HEAD))).toHaveLength(1);
     // 총괄이 없는 프로젝트는 띄워서 맡긴다. 본사는 본사 AI.
@@ -450,7 +462,7 @@ describe("지금 판 정리 API·설정", () => {
     expect(root.kind).toBe("root");
     await Bun.sleep(20);
     const sent = t.runner.sent.find((s) => s.memberId === root.id)!;
-    expect(sent.text).toBe(formatTidy("root", true));
+    expect(deliveryBody(t.store, sent)).toBe(formatTidy("root", true));
     expect(sent.text).not.toContain("work_set");
   });
 

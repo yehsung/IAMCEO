@@ -21,7 +21,7 @@ import {
 } from "../server/orchestrator.ts";
 import { HeadlessRunner } from "../server/runner/headless.ts";
 import { HerdrError } from "../server/runner/herdr-client.ts";
-import type { ApprovalAnswer, Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "../server/runner/types.ts";
+import type { ApprovalAnswer, Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, DeliveryProbe, DeliveryInspection } from "../server/runner/types.ts";
 import { ApiError, Store } from "../server/store.ts";
 
 const FAKE = resolve(import.meta.dir, "fixtures", "fake-claude.ts");
@@ -168,7 +168,7 @@ describe("턴 왕복", () => {
     await t.idle(lead.id);
 
     const first = t.starts()[0]!;
-    expect(first.prompt).toBe('[대표] "안녕 @fake:text=첫답변"\n#msgclient1');
+    expect(first.prompt).toMatch(/^\[대표\] "안녕 @fake:text=첫답변"\n#msgclient1\n#iamceo_[A-Za-z0-9_-]{22}\n#iamceo_b_[A-Za-z0-9_-]{22}$/);
     expect(first.sessionFlag).toBe(t.member(lead.id).sessionId);
     const answer = t.texts().find((m) => m.kind === "답변")!;
     expect(answer).toMatchObject({ body: "첫답변", memberId: lead.id, who: lead.name, mine: false });
@@ -451,60 +451,28 @@ describe("자동 압축", () => {
 });
 
 describe("재시작 복구", () => {
-  test("working 은 idle 로, 시스템 글, 큐 재개(--resume)", async () => {
+  test("재시작의 delivering은 부재로 추정하지 않고 뒤 지시도 막는다", async () => {
     const t = await setup();
-    await conductor(t);
     const w = await worker(t);
-    await t.orch.assign(t.project.id, w.handle, { text: "@fake:silent" });
-    await t.idle(w.id);
-    const sessionId = t.member(w.id).sessionId;
-    await t.close();
-
-    // 서버가 죽은 뒤 남는 모양을 만든다.
-    const db = openDb(join(t.home, "iamceo.db"));
-    const store = new Store(db, new Bus());
-    store.patchMember(w.id, { status: "working", subagents: 2 });
-    const stuck = store.enqueue({ projectId: t.project.id, memberId: w.id, kind: "instruction", text: "[총괄] 철수에게\n할 일: 재개할 일 @fake:silent" });
-    store.setDeliveryStatus(stuck.id, "delivering");
-    store.enqueue({ projectId: t.project.id, memberId: w.id, kind: "instruction", text: "[총괄] 철수에게\n할 일: 다음 일" });
-    db.close();
-
-    const again = await setup({ home: t.home });
-    const before = again.starts().length;
-    await again.orch.recover();
-    await waitFor("재개 턴", () => again.starts().length > before && again.starts().at(-1)!.prompt.includes("재개할 일"));
-    const turn = again.starts().at(-1)!;
-    expect(turn.prompt).toContain("다음 일");
-    expect(turn.resumeFlag).toBe(sessionId);
-    await again.idle(w.id);
-    expect(again.member(w.id).subagents).toBe(0);
-    expect(again.store.listMessages(t.project.id).some((m) => m.kind === "시스템" && m.body.includes("끊겼습니다"))).toBe(true);
-    const lead = again.store.getConductor(t.project.id)!;
-    expect(again.store.listPending(lead.id).some((d) => d.text.includes("끊겼습니다") && !d.wake)).toBe(true);
+    const stuck = t.store.enqueue({ projectId: t.project.id, memberId: w.id, kind: "instruction", text: "미확인 입력" });
+    t.store.setDeliveryStatus(stuck.id, "delivering");
+    const next = t.store.enqueue({ projectId: t.project.id, memberId: w.id, kind: "instruction", text: "뒤 지시" });
+    await t.orch.recover();
+    expect(t.store.requireDelivery(stuck.id)).toMatchObject({ status: "held", holdReason: "delivery_unknown" });
+    expect(t.store.requireDelivery(next.id).attempts).toBe(0);
+    expect(t.starts()).toHaveLength(0);
   });
 
-  test("세션 파일이 없어 --resume 이 실패하면 같은 직원의 새 세션에 마지막 일과 함께 다시 보낸다", async () => {
+  test("수신 ACK 뒤 세션 없음 오류는 원문을 새 세션에 재입력하지 않는다", async () => {
     const t = await setup();
     const w = await worker(t);
     const oldSession = crypto.randomUUID();
-    t.store.patchMember(w.id, { sessionId: oldSession, now: "결제 고치기", contextPct: 90 });
-    // 메모리에 없는 세션인 재시작 뒤 상황을 흉내 내려 새 실행기로 간다.
-    await t.close();
-    const again = await setup({ home: t.home });
-    again.store.patchMember(w.id, { contextPct: null });
-    await again.orch.assign(t.project.id, w.handle, { text: "@fake:text=이어감" });
-    await waitFor("새 세션 턴", () => again.starts().some((c) => c.sessionFlag && c.prompt.includes("이전 세션을 찾지 못해")));
-    const retry = again.starts().find((c) => c.sessionFlag)!;
-    expect(retry.prompt).toContain("결제 고치기");
-    expect(retry.prompt).toContain("@fake:text=이어감");
-    expect(retry.sessionFlag).not.toBe(oldSession);
-    await again.idle(w.id);
-    const fresh = again.member(w.id);
-    expect(fresh.handle).toBe("chulsu");
-    expect(fresh.sessionId).toBe(retry.sessionFlag);
-    expect(fresh.status).toBe("idle");
-    expect(fresh.lastError).toBeNull();
-    expect(again.store.listMessages(t.project.id).some((m) => m.body.includes("새 세션으로 이어갑니다"))).toBe(true);
+    t.store.patchMember(w.id, { sessionId: oldSession });
+    await t.orch.assign(t.project.id, w.handle, { text: "@fake:text=이어감" });
+    await waitFor("세션 오류", () => t.member(w.id).status === "error");
+    expect(t.starts()).toHaveLength(1);
+    expect(t.member(w.id).sessionId).toBe(oldSession);
+    expect(t.store.listDeliveries(t.project.id)[0]!.status).toBe("delivered");
   });
 });
 
@@ -685,7 +653,7 @@ describe("ask", () => {
     const answered = await t.orch.answerDecision(decision.id, { choice: "a", note: "조심해서" });
     expect(answered.status).toBe("delivered");
     const turn = await waitFor("답 전달", () => t.starts().find((c) => c.prompt.includes("[대표 답(원문)")));
-    expect(turn.prompt).toBe(`[대표 답(원문) '배포할까요'] "그렇게 하세요"(추천) 메모 "조심해서" #${decision.id}`);
+    expect(turn.prompt).toStartWith(`[대표 답(원문) '배포할까요'] "그렇게 하세요"(추천) 메모 "조심해서" #${decision.id}\n#iamceo_`);
     // 총괄에게는 wake=false 알림.
     // 총괄의 다른 턴에 묶여 이미 나갔을 수 있어 대기 목록이 아니라 전달 기록 전체를 본다.
     const notices = t.store.db.query<{ text: string; wake: number }, [string]>("SELECT text, wake FROM deliveries WHERE member_id = ?").all(lead.id);
@@ -741,6 +709,7 @@ describe("ask", () => {
 
 // 실패 사유는 headless 로 만들 수 없어 herdr 자리에 가짜 실행기를 끼운다.
 class ScriptedRunner implements Runner {
+  store: Store | null = null;
   readonly kind = "herdr" as const;
   results: SendResult[] = [];
   sent: { text: string; urgent: boolean }[] = [];
@@ -764,7 +733,8 @@ class ScriptedRunner implements Runner {
   async send(_m: RunnerMember, text: string, _o: StartOpts, urgent = false): Promise<SendResult> {
     const next = this.results.shift() ?? { ok: true as const };
     if (next.ok) this.sent.push({ text, urgent });
-    return next;
+    const dispatch = this.store?.listDispatches(_m.id).find(d => d.wireText === text && d.transportState === "write_started");
+    return next.ok && dispatch ? { ...next, receipt: { dispatchId: dispatch.dispatchId, receivedAt: new Date().toISOString(), source: "transport" } } : next;
   }
   isBusy() {
     return this.busy;
@@ -818,6 +788,7 @@ function scripted(timings: Partial<OrchestratorTimings> = {}) {
   const config = loadConfig(env);
   const store = new Store(openDb(config.dbPath), new Bus());
   const runner = new ScriptedRunner();
+  runner.store = store;
   const orch = new Orchestrator({
     config,
     store,
@@ -937,71 +908,18 @@ describe("전달 실패 사유(herdr 자리)", () => {
     return (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
   }
 
-  test("blocked → held(blocked), 상태가 바뀌면 다시 보낸다", async () => {
+  test.each(["blocked", "input_busy", "down", "gone", "error"] as const)("%s 결과만으로 재전송하지 않고 직원 fence를 유지한다", async reason => {
     const t = scripted();
     const w = await ready(t);
-    t.runner.results = [{ ok: false, reason: "blocked", retryable: true }];
-    const m = await t.orch.sendUserMessage(t.project.id, { text: "승인 대기", targetMemberId: w.id });
-    expect(t.store.requireMember(w.id).status).toBe("blocked");
-    expect(m.delivery).toBe("held");
-    expect(m.deliveryNote).toBe("승인 창 앞에서 멈춤");
+    t.runner.results = [{ ok: false, reason, retryable: true }];
+    const message = await t.orch.sendUserMessage(t.project.id, { text: "미확인", targetMemberId: w.id });
+    expect(message.delivery).toBe("held");
+    expect(t.store.listPending(w.id)[0]!.holdReason).toBe("delivery_unknown");
     t.runner.emit({ type: "status", memberId: w.id, status: "idle" });
-    await waitFor("재전달", () => t.runner.sent.length === 1);
-    await waitFor("받음", () => t.store.requireMessage(m.id).delivery === "delivered");
-  });
-
-  test("input_busy → 제한 시간 안에서 재시도 뒤 held", async () => {
-    const t = scripted({ inputBusyRetryMs: 10, inputBusyLimitMs: 60 });
-    const w = await ready(t);
-    t.runner.results = Array.from({ length: 500 }, () => ({ ok: false as const, reason: "input_busy" as const, retryable: true }));
-    const m = await t.orch.sendUserMessage(t.project.id, { text: "입력칸", targetMemberId: w.id });
-    expect(m.delivery).toBe("queued");
-    const held = await waitFor("보류", () => t.store.listPending(w.id).find((d) => d.status === "held"));
-    expect(held.holdReason).toBe("input_busy");
-    expect(held.attempts).toBeGreaterThan(1);
-    t.runner.results = [];
     await t.orch.pump(w.id);
-    expect(t.runner.sent.length).toBe(1);
-  });
-
-  test("input_busy 뒤 곧 비면 전달된다", async () => {
-    const t = scripted({ inputBusyRetryMs: 10 });
-    const w = await ready(t);
-    t.runner.results = [{ ok: false, reason: "input_busy", retryable: true }];
-    await t.orch.sendUserMessage(t.project.id, { text: "곧", targetMemberId: w.id });
-    await waitFor("전달", () => t.runner.sent.length === 1);
-  });
-
-  test("down → held(backend_down), gone → offline·held(offline), 복구되면 자동 재전달", async () => {
-    const t = scripted();
-    const w = await ready(t);
-    t.runner.results = [{ ok: false, reason: "down", detail: "소켓 끊김", retryable: true }];
-    await t.orch.sendUserMessage(t.project.id, { text: "하나", targetMemberId: w.id });
-    expect((await pendingOf(t, w.id))[0]).toMatchObject({ status: "held", holdReason: "backend_down" });
-    expect(t.store.requireMember(w.id).lastError).toBe("소켓 끊김");
-
-    t.runner.results = [{ ok: false, reason: "gone", retryable: false }];
-    await t.orch.pump(w.id);
-    expect(t.store.requireMember(w.id)).toMatchObject({ status: "offline", paneId: null });
-    expect((await pendingOf(t, w.id))[0]).toMatchObject({ status: "held", holdReason: "offline" });
-
-    // offline 은 다시 열어 본다.
-    const starts = t.runner.starts.length;
-    await t.orch.pump(w.id);
-    expect(t.runner.starts.length).toBe(starts + 1);
-    expect(t.runner.starts.at(-1)!.resume).toBe(true);
-    expect(t.runner.sent.length).toBe(1);
-    expect(t.store.requireMember(w.id).paneId).toBe("p9");
-  });
-
-  test("되돌릴 수 없는 error → failed·status=error·시스템 글", async () => {
-    const t = scripted();
-    const w = await ready(t);
-    t.runner.results = [{ ok: false, reason: "error", detail: "망가짐", retryable: false }];
-    const m = await t.orch.sendUserMessage(t.project.id, { text: "하나", targetMemberId: w.id });
-    expect(m.delivery).toBe("failed");
-    expect(t.store.requireMember(w.id)).toMatchObject({ status: "error", lastError: "망가짐" });
-    expect(t.store.listMessages(t.project.id).some((x) => x.kind === "시스템" && x.body.includes("망가짐"))).toBe(true);
+    await t.orch.deliveryRecovery.tick();
+    expect(t.runner.sent).toHaveLength(0);
+    expect(t.orch.deliveryRecovery.fenced(w.id)).toBe(true);
   });
 
   test("urgent 는 일하는 중에도 넣고, 일반은 기다린다", async () => {

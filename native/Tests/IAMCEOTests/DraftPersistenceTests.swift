@@ -165,6 +165,26 @@ final class DraftPersistenceTests: XCTestCase {
         await missing.close()
     }
 
+    @MainActor func testLegacyExplicitRetryRestoresImmutableAttemptWithoutWeakeningV2Default() throws {
+        let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("attempts.json")
+        let drafts = DraftStore(persist: false, namespace: "legacy")
+        drafts.setText("original", for: "key"); drafts.addFile(file("one"), for: "key")
+        let store = try SubmissionStore(storageURL: url)
+        let attempt = try store.prepareMessage(projectID: "p", targetMemberID: nil, draft: drafts.snapshot(for: "key"))
+        _ = try store.beginMessage(id: attempt.id)
+        let restored = try SubmissionStore(storageURL: url)
+        XCTAssertThrowsError(try restored.beginMessage(id: attempt.id))
+        let retry = try restored.beginMessage(id: attempt.id, allowUnconfirmedRetry: true)
+        XCTAssertEqual(retry.id, attempt.id)
+        XCTAssertEqual(retry.text, "original")
+        XCTAssertEqual(retry.attachmentIds, ["one"])
+        drafts.setText("edited", for: "key")
+        XCTAssertThrowsError(try restored.prepareMessage(projectID: "p", targetMemberID: nil, draft: drafts.snapshot(for: "key")))
+        XCTAssertEqual(restored.messages(namespace: "legacy").count, 1)
+        XCTAssertEqual(restored.messageAttempt(id: attempt.id)?.status, .checking)
+    }
+
     @MainActor func testTerminalClaimUnknownAndInputRevisionSurviveRestart() throws {
         let directory = try temporaryDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("terminal.json")

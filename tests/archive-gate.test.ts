@@ -151,22 +151,54 @@ describe("보관", () => {
     expect((await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: false, runnerEnabled: true })).status).toBe(200);
   });
 
-  test("입력칸이 차서 대기 중인 대표 글은 보관했다 꺼내면 나간다", async () => {
+  test("아직 전송을 시도하지 않은 대표 글은 보관했다 꺼내면 한 번 전달된다", async () => {
+    const t = await setup({ timings: { tickMs: 60_000 } });
+    const lead = await t.orch.ensureConductor(t.project.id);
+    t.runner.cb({ type: "turn_end", memberId: lead.id, finalText: "", isError: false });
+    await until(() => t.store.requireMember(lead.id).status === "idle", "총괄 대기");
+    t.runner.busy.add(lead.id);
+    const res = await t.api("POST", `/api/projects/${t.project.id}/messages`, { text: "대기 중 지시" });
+    expect(res.status).toBe(200);
+    const message = (await res.json()) as { id: string };
+    const delivery = t.store.listPending(lead.id).find(d => d.refId === message.id)!;
+    expect(delivery.attempts).toBe(0);
+    expect(t.store.listDispatches(lead.id)).toHaveLength(0);
+    // 다음 틱 전에 쉬게 된 뒤 보관한다. 일하는 직원은 보관할 수 없다.
+    t.runner.busy.delete(lead.id);
+    expect((await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: true })).status).toBe(200);
+    expect(t.store.requireDelivery(delivery.id)).toMatchObject({ status: "held", holdReason: "archived" });
+    expect((await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: false })).status).toBe(200);
+    await until(() => t.store.requireMessage(message.id).delivery === "delivered", "꺼낸 뒤 전달");
+    expect(t.runner.sent.filter(s => s.text.includes("대기 중 지시"))).toHaveLength(1);
+    expect(t.store.requireDelivery(delivery.id).attempts).toBe(1);
+  });
+
+  test("input_busy만으로 미수신을 확정하지 않고 보관했다 꺼내도 재전송을 막는다", async () => {
     const t = await setup();
     const lead = await t.orch.ensureConductor(t.project.id);
     t.runner.cb({ type: "turn_end", memberId: lead.id, finalText: "", isError: false });
     await until(() => t.store.requireMember(lead.id).status === "idle", "총괄 대기");
     t.runner.sendResult = { ok: false, reason: "input_busy", retryable: true };
     const res = await t.api("POST", `/api/projects/${t.project.id}/messages`, { text: "옛 지시" });
+    expect(res.status).toBe(200);
     const message = (await res.json()) as { id: string };
+    const dispatches = t.store.listDispatches(lead.id);
+    const delivery = t.store.listPending(lead.id).find(d => d.refId === message.id)!;
+    expect(delivery.attempts).toBe(1);
+    expect(t.orch.deliveryRecovery.fenced(lead.id)).toBe(true);
     expect((await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: true })).status).toBe(200);
     expect(t.store.listPending(lead.id).find((d) => d.refId === message.id)).toMatchObject({ status: "held", holdReason: "archived" });
     t.runner.sendResult = { ok: true };
     await Bun.sleep(50);
     expect(t.runner.sent.some((s) => s.text.includes("옛 지시"))).toBe(false);
     expect((await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: false })).status).toBe(200);
-    await until(() => t.runner.sent.some((s) => s.text.includes("옛 지시")), "꺼낸 뒤 전달");
-    await until(() => t.store.requireMessage(message.id).delivery === "delivered", "전달됨");
+    await t.orch.deliveryRecovery.tick();
+    await t.orch.pump(lead.id);
+    expect(t.runner.sent.some(s => s.text.includes("옛 지시"))).toBe(false);
+    expect(t.store.requireDelivery(delivery.id).attempts).toBe(1);
+    expect(t.store.listDispatches(lead.id)).toEqual(dispatches);
+    expect(t.store.requireMessage(message.id).delivery).toBe("held");
+    expect(t.orch.deliveryRecovery.fenced(lead.id)).toBe(true);
   });
 
   test("보관된 프로젝트의 ask 는 카드를 만들지 않고 도구 오류로 끝난다", async () => {

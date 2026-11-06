@@ -257,10 +257,23 @@ describe("연결 상태", () => {
     await expect(t.orch.resendMessage(t.store.requireMessage(m1.id))).rejects.toThrow("연결");
     await t.api("PATCH", `/api/projects/${pid}`, { runnerEnabled: true });
     t.store.patchMember(lead.id, { origin: "runner", status: "asleep" });
+    // 옛 전달 행이 사라진 메시지는 현재 총괄을 옛 수신자로 추정하지 않는다.
+    const sentBefore = t.herdr.sent.length;
     const resent = await t.api("POST", `/api/projects/${pid}/messages`, { id: m1.id, text: "총괄에게" });
-    expect(resent.status).toBe(200);
-    t.herdr.end(lead.id);
-    await until(() => t.herdr.sent.some((s) => s.text.includes(m1.id)), "재전송");
+    expect(resent.status).toBe(409);
+    expect(t.store.requireMessage(m1.id).delivery).toBe("failed");
+    // 수신자가 저장된 옛 failed는 같은 ID의 확인 경로로 합치고 새 입력은 하지 않는다.
+    const targeted = t.store.createMessage({ projectId: pid, mine: true, who: "나", kind: "나", body: "저장된 원문", targetMemberId: lead.id, delivery: "failed" });
+    for (let i = 0; i < 2; i++) {
+      const checked = await t.api("POST", `/api/projects/${pid}/messages`, { id: targeted.id, text: "덮어쓰면 안 됨" });
+      expect(checked.status).toBe(200);
+      expect(checked.body).toMatchObject({ id: targeted.id, body: "저장된 원문", delivery: "held" });
+    }
+    const deliveries = t.store.listDeliveries(pid).filter(d => d.refId === targeted.id);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]!.attempts).toBe(0);
+    expect(t.orch.deliveryRecovery.fenced(lead.id)).toBe(true);
+    expect(t.herdr.sent).toHaveLength(sentBefore);
     expect(t.store.listMessages(pid).filter((m) => m.id === m1.id)).toHaveLength(1);
   });
 

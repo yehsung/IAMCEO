@@ -11,7 +11,7 @@ import { openDb } from "../server/db.ts";
 import { startServer, type RunningServer } from "../server/http.ts";
 import { formatAnswer, formatInstruction, formatReport, formatTodoDone, formatUserMessage, guardLines, Orchestrator, type OrchestratorTimings } from "../server/orchestrator.ts";
 import { HeadlessRunner, StreamParser } from "../server/runner/headless.ts";
-import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "../server/runner/types.ts";
+import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, DeliveryProbe, DeliveryInspection, DeliveryRepair } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
 import { cleanName, workerNameProblem } from "../server/text.ts";
 import { sanitizeName } from "../server/files.ts";
@@ -19,6 +19,16 @@ import { sanitizeName } from "../server/files.ts";
 const SID = "11111111-1111-4111-8111-111111111111";
 
 class FakeRunner implements Runner {
+  store: Store | null = null;
+  inspections: DeliveryProbe[] = [];
+  inspectImpl: ((m: RunnerMember, query: DeliveryProbe) => Promise<DeliveryInspection>) | null = null;
+  async inspectDelivery(m: RunnerMember, query: DeliveryProbe): Promise<DeliveryInspection> {
+    this.inspections.push(query);
+    return this.inspectImpl ? this.inspectImpl(m, query) : { finding: "unknown", evidence: [], receivedDeliveryIds: [], snapshot: null, quiescence: "unresolved" };
+  }
+  async repairDelivery(_m: RunnerMember, _request: DeliveryRepair): Promise<SendResult> {
+    return { ok: false, reason: "error", retryable: false, deliveryEffect: "not_written" };
+  }
   kind: Backend = "herdr";
   sent: { memberId: string; text: string }[] = [];
   starts: { memberId: string; at: number; resume: boolean }[] = [];
@@ -54,7 +64,8 @@ class FakeRunner implements Runner {
   async send(m: RunnerMember, text: string): Promise<SendResult> {
     this.sent.push({ memberId: m.id, text });
     if (this.autoBusy) this.busy.add(m.id);
-    return { ok: true };
+    const dispatch = this.store?.listDispatches(m.id).find(d => d.wireText === text && d.transportState === "write_started");
+    return { ok: true, ...(dispatch ? { receipt: { dispatchId: dispatch.dispatchId, receivedAt: new Date().toISOString(), source: "transport" as const } } : {}) };
   }
   isBusy(id: string) {
     return this.busy.has(id);
@@ -117,6 +128,7 @@ async function setup(opts: { timings?: Partial<OrchestratorTimings>; runnerEnabl
   const bus = new Bus();
   const store = new Store(openDb(config.dbPath), bus);
   const runner = new FakeRunner();
+  runner.store = store;
   if (opts.kind) runner.kind = opts.kind;
   const runners = new Map<Backend, Runner>([[runner.kind, runner]]);
   if (opts.second) runners.set(opts.second.kind, opts.second);
@@ -417,25 +429,17 @@ describe("턴 정리", () => {
     expect(t.store.requireMember(w.id).status).toBe("working");
   });
 
-  test("입력을 읽기 전에 오류로 끝난 턴: 대기로 되돌려 다시 보내고, 상한을 넘으면 실패·재답변", async () => {
-    const t = await setup({ timings: { turnErrorRetryMs: 15 } });
-    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
+  test("noOutput는 수신된 결재 답을 재전송하거나 다시 열지 않는다", async () => {
+    const t = await setup({ timings: { turnErrorRetryMs: 5 } });
+    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
     const d = t.store.createDecision({ projectId: t.project.id, memberId: w.id, who: "철수", title: "배포?", options: [{ k: "a", label: "예" }] });
-    await t.orch.answerDecision(d.id, { choice: "a" });
-    expect(t.store.requireDecision(d.id).status).toBe("delivered");
+    await t.orch.answerDecision(d.id, { choice: "a", note: "검토한 답" });
     t.runner.end(w.id, { isError: true, errorText: "사용량 한도", noOutput: true });
-    await until(() => t.store.requireDecision(d.id).status === "answered", "되돌림");
-    await until(() => t.runner.sent.filter((s) => s.memberId === w.id).length === 2, "재전달");
-    expect(t.store.requireDecision(d.id).status).toBe("delivered");
-    t.runner.end(w.id, { isError: true, errorText: "사용량 한도", noOutput: true });
-    await until(() => t.runner.sent.filter((s) => s.memberId === w.id).length === 3, "재전달2");
-    t.runner.end(w.id, { isError: true, errorText: "사용량 한도", noOutput: true });
-    await until(() => t.store.requireDecision(d.id).status === "open", "다시 답할 수 있게");
-    expect(t.store.requireMember(w.id).status).toBe("error");
-    expect(t.store.requireDecision(d.id).choice).toBe(null);
-    // 다시 답하면 나간다.
-    await t.orch.answerDecision(d.id, { choice: "a" });
-    await until(() => t.runner.sent.filter((s) => s.memberId === w.id).length === 4, "재답변 전달");
+    await until(() => t.store.requireMember(w.id).status === "error");
+    await t.orch.pump(w.id);
+    expect(t.runner.sent.filter(s => s.memberId === w.id)).toHaveLength(1);
+    expect(t.store.requireDecision(d.id)).toMatchObject({ status: "delivered", choice: "a", note: "검토한 답" });
+    expect(t.store.listDeliveries(t.project.id)[0]!.attempts).toBe(1);
   });
 
   test("일하다 오류로 끝난 턴은 되돌리지 않는다(중복 실행 방지)", async () => {
@@ -1006,57 +1010,40 @@ describe("2차 검수 회귀: 폴더·파일 경계", () => {
 });
 
 describe("2차 검수 회귀: 전달", () => {
-  test("입력을 못 읽은 턴이 상한을 넘어도 보고·지시·완료를 잃지 않는다. 상한은 전달마다 센다", async () => {
-    const t = await setup({ timings: { turnErrorRetryMs: 10 } });
+  test("noOutput 뒤 받은 보고는 보존하고 새로운 보고만 다음 턴에 보낸다", async () => {
+    const t = await setup();
     const lead = await t.orch.ensureConductor(t.project.id);
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
-    await t.orch.recordPost(t.store.requireMember(w.id), { kind: "완료", title: "로그인 고침" });
-    await until(() => t.runner.sent.some((s) => s.memberId === lead.id));
-    for (let i = 0; i < 3; i++) {
-      await until(() => t.runner.busy.has(lead.id), `시도 ${i}`);
-      if (i === 2) await t.orch.recordPost(t.store.requireMember(w.id), { kind: "알림", title: "나중 보고" });
-      t.runner.end(lead.id, { isError: true, noOutput: true, errorText: "사용량 한도" });
-      await Bun.sleep(5);
-    }
-    const rows = t.store.db.query("SELECT status, attempts, text FROM deliveries WHERE member_id = ? AND kind = 'report'").all(lead.id) as { status: string; attempts: number; text: string }[];
-    expect(rows.every((r) => r.status === "held" || r.status === "queued" || r.status === "delivered" || r.status === "delivering")).toBe(true);
-    expect(rows.some((r) => r.status === "failed")).toBe(false);
-    // 한도가 풀리면 보류해 둔 보고가 그대로 나간다.
-    await until(() => t.runner.busy.has(lead.id), "다시 보내기");
-    expect(t.runner.sent.at(-1)!.text).toContain("로그인 고침");
-    t.runner.end(lead.id);
-    await until(() => t.store.listPending(lead.id).length === 0 && !t.runner.busy.has(lead.id), "대기열 비움");
-    const all = t.runner.sent.filter((s) => s.memberId === lead.id).map((s) => s.text).join("\n");
-    expect(all).toContain("나중 보고");
+    await t.orch.recordPost(w, { kind: "완료", title: "로그인 고침" });
+    await t.orch.recordPost(w, { kind: "완료", title: "나중 보고" });
+    t.runner.end(lead.id, { isError: true, noOutput: true, errorText: "사용량 한도" });
+    await until(() => t.runner.sent.filter(s => s.memberId === lead.id).length === 2);
+    const sent = t.runner.sent.filter(s => s.memberId === lead.id);
+    expect(sent[1]!.text).toContain("나중 보고");
+    expect(sent[1]!.text).not.toContain("로그인 고침");
+    expect(t.store.listDeliveries(t.project.id).filter(d => d.kind === "report").every(d => d.status === "delivered" && d.attempts === 1)).toBe(true);
   });
 
-  test("상한을 넘은 대표 글은 실패로 돌려주되 함께 온 새 글은 끌려가지 않는다", async () => {
-    const t = await setup({ timings: { turnErrorRetryMs: 10 } });
+  test("noOutput 뒤에도 대표 글의 수신은 보존하고 새 글은 독립 전달한다", async () => {
+    const t = await setup();
     const lead = await t.orch.ensureConductor(t.project.id);
     const first = await t.orch.sendUserMessage(t.project.id, { text: "첫째" });
-    for (let i = 0; i < 2; i++) {
-      await until(() => t.runner.busy.has(lead.id));
-      t.runner.end(lead.id, { isError: true, noOutput: true, errorText: "한도" });
-      await until(() => !t.runner.busy.has(lead.id));
-    }
-    await until(() => t.runner.busy.has(lead.id));
     const second = await t.orch.sendUserMessage(t.project.id, { text: "둘째" });
     t.runner.end(lead.id, { isError: true, noOutput: true, errorText: "한도" });
-    await until(() => t.store.requireMessage(first.id).delivery === "failed");
-    expect(t.store.requireMessage(second.id).delivery).not.toBe("failed");
+    await until(() => t.store.requireMessage(second.id).delivery === "delivered");
+    expect(t.store.requireMessage(first.id).delivery).toBe("delivered");
+    expect(t.runner.sent.filter(s => s.text.includes("첫째"))).toHaveLength(1);
   });
 
-  test("재시도 불가 전달 오류도 ref 없는 전달은 실패시키지 않는다", async () => {
-    const t = await setup({ timings: { retryMs: 5 } });
+  test("원인 불명 전달 오류는 ref 없는 지시도 보존하며 자동 재입력하지 않는다", async () => {
+    const t = await setup();
     const lead = await t.orch.ensureConductor(t.project.id);
-    const send = t.runner.send.bind(t.runner);
-    let fail = true;
-    t.runner.send = async (m, text) => (fail ? { ok: false, reason: "error", detail: "폴더가 없습니다", retryable: false } : send(m, text));
-    await t.orch.assign(t.project.id, lead.handle, { text: "일" }).catch(() => {});
-    await until(() => t.store.listPending(lead.id).some((d) => d.status === "held"));
-    expect(t.store.db.query("SELECT COUNT(*) AS n FROM deliveries WHERE status = 'failed'").get()).toEqual({ n: 0 });
-    fail = false;
-    await until(() => t.runner.sent.some((s) => s.text.includes("할 일: 일")), "회복 뒤 전달");
+    t.runner.send = async () => ({ ok: false, reason: "error", detail: "응답 유실", retryable: true });
+    const { delivery } = await t.orch.assign(t.project.id, lead.handle, { text: "일" });
+    await t.orch.pump(lead.id);
+    await t.orch.deliveryRecovery.tick();
+    expect(t.store.requireDelivery(delivery.id)).toMatchObject({ status: "held", attempts: 1, holdReason: "delivery_unknown" });
+    expect(t.orch.deliveryRecovery.fenced(lead.id)).toBe(true);
   });
 
   test("총괄 시작이 겹쳐도 보류된 말·결재 답·할 일 완료는 한 번만 넘어간다", async () => {
@@ -1120,7 +1107,7 @@ describe("2차 검수 회귀: 전달", () => {
     expect(mine.map((m) => m.title)).toEqual(["로그인 고침"]);
   });
 
-  test("재시작: 넣다가 죽은 글이 칸에 이미 있으면 다시 넣지 않는다", async () => {
+  test("재시작: 옛 원본 표식은 전체 묶음의 수신 증거가 아니다", async () => {
     const t = await setup();
     const lead = await t.orch.ensureConductor(t.project.id);
     t.runner.autoBusy = false;
@@ -1132,11 +1119,11 @@ describe("2차 검수 회귀: 전달", () => {
     await t.orch.recover();
     await Bun.sleep(20);
     expect(t.runner.sent.length).toBe(before);
-    expect(t.store.requireMessage(m.id).delivery).toBe("delivered");
-    expect(t.store.requireDelivery(d.id).status).toBe("delivered");
+    expect(t.store.requireMessage(m.id).delivery).toBe("held");
+    expect(t.store.requireDelivery(d.id).status).toBe("held");
   });
 
-  test("재시작: 칸에서 표지를 못 찾으면 다시 넣는다", async () => {
+  test("재시작: 칸에서 표지를 못 찾아도 불명 입력을 다시 넣지 않는다", async () => {
     const t = await setup();
     const lead = await t.orch.ensureConductor(t.project.id);
     t.runner.autoBusy = false;
@@ -1144,7 +1131,8 @@ describe("2차 검수 회귀: 전달", () => {
     t.store.setDeliveryStatus(d.id, "delivering", { attempt: true });
     t.runner.seen = [];
     await t.orch.recover();
-    await until(() => t.runner.sent.some((s) => s.text.includes("[총괄] 지시")));
+    expect(t.runner.sent).toHaveLength(0);
+    expect(t.store.requireDelivery(d.id)).toMatchObject({ status: "held", attempts: 1 });
   });
 
   test("병렬 설정이 일시 오류면 지시를 되살리고 일을 미룬다. 끝내 안 되면 총괄에게 알리고 내보낸다", async () => {
@@ -1278,9 +1266,9 @@ describe("2차 검수 회귀: 전달", () => {
     const t = await setup({ notifier: (title) => seen.push(title) });
     t.store.patchSettings({ notifyMac: true });
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
-    t.runner.cb({ type: "status", memberId: w.id, status: "blocked" });
+    t.runner.cb({ type: "status", memberId: w.id, status: "blocked", blockedReason: "permission" });
     await until(() => t.store.requireMember(w.id).status === "blocked");
-    t.runner.cb({ type: "status", memberId: w.id, status: "blocked" });
+    t.runner.cb({ type: "status", memberId: w.id, status: "blocked", blockedReason: "permission" });
     await Bun.sleep(5);
     expect(seen.filter((s) => s.includes("승인 대기"))).toHaveLength(1);
     expect(t.store.projectSummaries().find((p) => p.id === t.project.id)).toMatchObject({ blockedCount: 1, errorCount: 0 });
@@ -1339,7 +1327,7 @@ describe("2차 검수 회귀: REST", () => {
     expect(((await (await authed(t, "GET", "/api/projects/archived")).json()) as unknown[]).length).toBe(0);
   });
 
-  test("끝내 실패한 글을 같은 id 로 다시 보내면 그 글이 다시 나가고, 또 눌러도 하나다", async () => {
+  test("옛 실패 글을 같은 id 로 다시 요청해도 임의 수신자에게 재전송하지 않는다", async () => {
     const t = await setup({ serve: true });
     const lead = await t.orch.ensureConductor(t.project.id);
     t.runner.autoBusy = false;
@@ -1347,11 +1335,11 @@ describe("2차 검수 회귀: REST", () => {
     const first = t.store.createMessage({ id, projectId: t.project.id, mine: true, who: "나", kind: "나", body: "배포 진행해", delivery: "queued" });
     t.store.setMessageDelivery(first.id, "failed", "시험 실패");
     const before = t.runner.sent.filter((s) => s.memberId === lead.id).length;
-    const again = (await (await authed(t, "POST", `/api/projects/${t.project.id}/messages`, { id, text: "배포 진행해" })).json()) as { id: string; delivery: string };
-    expect(again).toMatchObject({ id, delivery: "delivered" });
-    const twice = (await (await authed(t, "POST", `/api/projects/${t.project.id}/messages`, { id, text: "배포 진행해" })).json()) as { id: string };
-    expect(twice.id).toBe(id);
-    expect(t.runner.sent.filter((s) => s.memberId === lead.id).length).toBe(before + 1);
+    const again = await authed(t, "POST", `/api/projects/${t.project.id}/messages`, { id, text: "배포 진행해" });
+    expect(again.status).toBe(409);
+    const twice = await authed(t, "POST", `/api/projects/${t.project.id}/messages`, { id, text: "배포 진행해" });
+    expect(twice.status).toBe(409);
+    expect(t.runner.sent.filter((s) => s.memberId === lead.id).length).toBe(before);
     expect(t.store.listMessages(t.project.id, { limit: 50 }).filter((m) => m.mine)).toHaveLength(1);
   });
 
@@ -1419,4 +1407,193 @@ describe("재시작 뒤 effort 유지", () => {
     const { ranks } = store.getSettings();
     expect([ranks.manager.effort, ranks.lead.effort, ranks.staff.effort]).toEqual(["xhigh", "max", "xhigh"]);
   });
+});
+
+
+function deliveryObservation(query: DeliveryProbe, receivedDeliveryIds: string[] = []): DeliveryInspection {
+  return { finding: receivedDeliveryIds.length ? "received" : "unknown", receivedDeliveryIds,
+    evidence: [{ source: "claude_log", verdict: receivedDeliveryIds.length ? "present" : "unknown", location: "received_input", code: "fixture_user_input", complete: true, checkedAt: new Date().toISOString() }],
+    quiescence: "settled", snapshot: { identity: query.identity, observedAt: new Date().toISOString(), turn: 1, inputEpoch: 1, ownership: "verified", status: "idle",
+      blockedReason: null, leaseActive: false, mutation: "none", composer: "empty", originalWrite: "settled", externalInput: false } };
+}
+
+describe("W5 전달 통합", () => {
+  test("첫 지시도 commit 뒤 start하며 모든 send에 저장 봉투와 고유 표식을 쓴다", async () => {
+    const t = await setup();
+    const start = t.runner.start.bind(t.runner);
+    let firstIntent = false;
+    t.runner.start = async (m, opts) => {
+      firstIntent = t.store.listPending(m.id).some(d => d.text.includes("첫 업무"));
+      expect(t.store.db.inTransaction).toBe(false);
+      return start(m, opts);
+    };
+    const send = t.runner.send.bind(t.runner);
+    t.runner.send = async (m, text) => {
+      expect(t.store.db.inTransaction).toBe(false);
+      const dispatch = t.store.listDispatches(m.id).at(-1)!;
+      expect(dispatch.transportState).toBe("write_started");
+      expect(dispatch.wireText).toBe(text);
+      expect(dispatch.markers.every(marker => text.includes(`\n${marker.marker}\n`) && t.store.requireDelivery(marker.deliveryId).status === "delivering")).toBe(true);
+      expect(text.endsWith(dispatch.bundleMarker)).toBe(true);
+      expect(dispatch.wireSha256).toBe(new Bun.CryptoHasher("sha256").update(text).digest("hex"));
+      return send(m, text);
+    };
+    const { member, assigned } = await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", firstInstruction: "첫 업무" });
+    expect(firstIntent).toBe(true);
+    expect(assigned?.delivery.status).toBe("delivered");
+    await t.orch.assign(t.project.id, member.handle, { text: "긴급", urgent: true });
+    const dispatches = t.store.listDispatches(member.id);
+    expect(dispatches).toHaveLength(2);
+    expect(dispatches[0]!.bundleMarker).not.toBe(dispatches[1]!.bundleMarker);
+    expect(dispatches[0]!.markers[0]!.marker).not.toBe(dispatches[1]!.markers[0]!.marker);
+  });
+
+  test.each(["message", "answer", "report", "ask"] as const)("%s 원본과 outbox 실패는 함께 rollback하며 입력·방송은 없다", async kind => {
+    const t = await setup();
+    const lead = await t.orch.ensureConductor(t.project.id);
+    const worker = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
+    const decision = t.store.createDecision({ projectId: t.project.id, memberId: worker.id, who: worker.name, title: "검토", options: [{ k: "a", label: "승인" }] });
+    const before = t.store.listMessages(t.project.id).length;
+    const decisions = t.store.listDecisions(t.project.id).length;
+    const enqueue = t.store.enqueue.bind(t.store);
+    const events: string[] = [];
+    t.bus.subscribe(e => events.push(e.type));
+    t.store.enqueue = () => { throw new Error("주입 outbox 실패"); };
+    const action = kind === "message" ? () => t.orch.sendUserMessage(t.project.id, { id: "atomic-message", text: "원자 지시", targetMemberId: worker.id }) :
+      kind === "answer" ? () => t.orch.answerDecision(decision.id, { choice: "a" }) :
+      kind === "report" ? () => t.orch.recordPost(worker, { kind: "완료", title: "원자 보고" }) :
+      () => t.orch.registerAsk(worker, { title: "원자 질문" });
+    try { await expect(action()).rejects.toThrow("주입 outbox 실패"); }
+    finally { t.store.enqueue = enqueue; }
+    expect(t.store.listMessages(t.project.id)).toHaveLength(before);
+    expect(t.store.listDecisions(t.project.id)).toHaveLength(decisions);
+    expect(t.store.requireDecision(decision.id)).toMatchObject({ status: "open", choice: null });
+    expect(t.store.listDeliveries(t.project.id)).toHaveLength(0);
+    expect(t.runner.sent).toHaveLength(0);
+    expect(events).toHaveLength(0);
+    expect(t.store.listPending(lead.id)).toHaveLength(0);
+  });
+
+  test("봉투 일부만 수신되면 나머지와 urgent는 fence, 다른 직원은 계속 진행한다", async () => {
+    const t = await setup();
+    const a = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
+    const b = (await t.orch.addMember(t.project.id, { name: "영희", handle: "yh" })).member;
+    const first = t.store.enqueue({ projectId: t.project.id, memberId: a.id, kind: "instruction", text: "첫 입력", wake: false });
+    const send = t.runner.send.bind(t.runner);
+    t.runner.send = async (m, text) => m.id === a.id ? { ok: false, reason: "error", retryable: true, deliveryEffect: "unknown" } : send(m, text);
+    const second = (await t.orch.assign(t.project.id, a.handle, { text: "둘째 입력" })).delivery;
+    const dispatch = t.store.listDispatches(a.id)[0]!;
+    expect(dispatch.items.map(item => item.deliveryId)).toEqual([first.id, second.id]);
+    t.runner.inspectImpl = async (_m, query) => deliveryObservation(query, [first.id]);
+    await t.orch.deliveryRecovery.tick();
+    expect(t.store.requireDelivery(first.id).status).toBe("delivered");
+    expect(t.store.requireDelivery(second.id).status).toBe("held");
+    const urgent = await t.orch.assign(t.project.id, a.handle, { text: "긴급", urgent: true });
+    expect(urgent.delivery.attempts).toBe(0);
+    await t.orch.assign(t.project.id, b.handle, { text: "독립 업무" });
+    expect(t.runner.sent).toHaveLength(1);
+    expect(t.runner.sent[0]!.memberId).toBe(b.id);
+    const r = t.store.getDeliveryRecovery(second.id)!;
+    t.store.updateDeliveryRecovery(second.id, r.version, { nextCheckAt: null });
+    t.runner.inspectImpl = async (_m, query) => deliveryObservation(query, [second.id]);
+    await t.orch.deliveryRecovery.tick();
+    await t.orch.pump(a.id);
+    // The old items were corrected by evidence, never passed through send again.
+    expect(t.store.requireDelivery(first.id).attempts).toBe(1);
+    expect(t.store.requireDelivery(second.id).attempts).toBe(1);
+    expect(t.store.listDispatches(a.id)).toHaveLength(2);
+    expect(t.store.listDispatches(a.id)[1]!.wireText).not.toContain("첫 입력");
+    expect(t.store.listDispatches(a.id)[1]!.wireText).not.toContain("둘째 입력");
+  });
+
+  test("검증된 쓰기 전 실패 복구는 같은 delivery와 표식으로 repair 포트를 거친다", async () => {
+    const t = await setup();
+    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
+    let sends = 0;
+    t.runner.send = async () => { sends++; return { ok: false, reason: "down", retryable: true, deliveryEffect: "not_written" }; };
+    const { delivery } = await t.orch.assign(t.project.id, w.handle, { text: "안전 재시도" });
+    const original = t.store.listDispatches(w.id)[0]!;
+    t.runner.inspectImpl = async (_m, query) => {
+      const result = deliveryObservation(query);
+      result.finding = "not_received";
+      result.snapshot!.originalWrite = "rejected";
+      return result;
+    };
+    let repairs = 0;
+    t.runner.repairDelivery = async (m, request) => {
+      const dispatch = t.orch.deliveryRecovery.repair.load(m.id, request)!;
+      expect(dispatch.items.map(item => item.deliveryId)).toEqual([delivery.id]);
+      expect(dispatch.markers).toEqual(original.markers);
+      expect(dispatch.dispatchId).not.toBe(original.dispatchId);
+      expect(t.orch.deliveryRecovery.repair.prepare(m.id, request, dispatch)).toBe(true);
+      repairs++;
+      return { ok: true, started: false, receipt: { dispatchId: dispatch.dispatchId, receivedAt: new Date().toISOString(), source: "transport" } };
+    };
+    await t.orch.deliveryRecovery.tick();
+    expect(repairs).toBe(0);
+    const r = t.store.getDeliveryRecovery(delivery.id)!;
+    expect(r.phase).toBe("retry_wait");
+    t.store.patchDeliveryRetry(delivery.id, { nextAttemptAt: new Date(0).toISOString() });
+    t.store.updateDeliveryRecovery(delivery.id, r.version, { nextCheckAt: null });
+    await t.orch.deliveryRecovery.tick();
+    expect(sends).toBe(1);
+    expect(repairs).toBe(1);
+    expect(t.store.requireDelivery(delivery.id)).toMatchObject({ status: "delivered", attempts: 2 });
+  });
+
+  test("다른 봉투의 성공은 unknown, 유효 lease 동안 전달 기록 scan도 없다", async () => {
+    const t = await setup();
+    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
+    t.runner.send = async () => ({ ok: true, receipt: { dispatchId: "다른 봉투", receivedAt: new Date().toISOString(), source: "transport" } });
+    const { delivery } = await t.orch.assign(t.project.id, w.handle, { text: "모호한 성공" });
+    expect(t.store.requireDelivery(delivery.id).status).toBe("held");
+    const dispatch = t.store.listDispatches(w.id)[0]!;
+    t.store.saveLease({ memberId: w.id, claimId: "claim", leaseId: "lease", identity: dispatch.identity, expiresAt: Date.now() + 60_000, lastInputSequence: 0 });
+    await t.orch.deliveryRecovery.tick();
+    expect(t.runner.inspections).toHaveLength(0);
+    await t.orch.assign(t.project.id, w.handle, { text: "urgent", urgent: true });
+    expect(t.store.listDispatches(w.id)).toHaveLength(1);
+    t.store.removeLease(w.id, "claim");
+  });
+
+  test("동일 ID 재요청은 stopped 전달과 원래 RPC의 물리 fence를 되살리거나 우회하지 않는다", async () => {
+    const t = await setup();
+    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
+    t.runner.send = async () => ({ ok: false, reason: "error", retryable: true, deliveryEffect: "unknown" });
+    const message = await t.orch.sendUserMessage(t.project.id, { text: "한 번만", targetMemberId: w.id });
+    const delivery = t.store.listDeliveries(t.project.id)[0]!;
+    const r = t.store.getDeliveryRecovery(delivery.id)!;
+    const needsOwner = t.store.updateDeliveryRecovery(delivery.id, r.version, { phase: "needs_owner", reason: "inflight_unsettled" });
+    await t.orch.deliveryRecovery.recover(delivery.id, { operationId: crypto.randomUUID(), expectedVersion: needsOwner.version, action: "stop_retry" });
+    const stopped = t.store.requireMessage(message.id);
+    expect(stopped.delivery).toBe("failed");
+    expect(await t.orch.resendMessage(stopped)).toEqual(stopped);
+    expect(t.store.getDeliveryRecovery(delivery.id)!.phase).toBe("stopped");
+    expect(t.orch.deliveryRecovery.fenced(w.id)).toBe(true);
+    await t.orch.assign(t.project.id, w.handle, { text: "다음 긴급", urgent: true });
+    expect(t.store.listDispatches(w.id)).toHaveLength(1);
+    expect(t.store.requireDelivery(delivery.id).attempts).toBe(1);
+  });
+
+  test("한 직원의 느린 증거 조회 동안 다른 직원의 새 입력은 진행한다", async () => {
+    const t = await setup();
+    const a = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
+    const b = (await t.orch.addMember(t.project.id, { name: "영희", handle: "yh" })).member;
+    const send = t.runner.send.bind(t.runner);
+    t.runner.send = async (m, text) => m.id === a.id ? { ok: false, reason: "error", retryable: true, deliveryEffect: "unknown" } : send(m, text);
+    await t.orch.assign(t.project.id, a.handle, { text: "불명 입력" });
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    t.runner.inspectImpl = async (_m, query) => { entered(); await barrier; return deliveryObservation(query); };
+    const checking = t.orch.deliveryRecovery.tick();
+    try {
+      await waiting;
+      await t.orch.assign(t.project.id, b.handle, { text: "독립 입력" });
+      expect(t.runner.sent).toHaveLength(1);
+      expect(t.runner.sent[0]!.memberId).toBe(b.id);
+    } finally { release(); await checking; }
+  });
+
 });

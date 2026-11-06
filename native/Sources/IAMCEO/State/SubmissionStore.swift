@@ -100,8 +100,10 @@ final class SubmissionStore {
     }
 
     /// Call immediately before sending the returned immutable body. A crash from here requires a receipt query.
-    func beginMessage(id: String) throws -> SendMessageRequest {
-        guard var attempt = state.messages[id], [.prepared, .notAccepted].contains(attempt.status) else {
+    /// Only an explicit v1 retry may bypass the query; it still returns the original ID and body.
+    func beginMessage(id: String, allowUnconfirmedRetry: Bool = false) throws -> SendMessageRequest {
+        guard var attempt = state.messages[id], [.prepared, .notAccepted].contains(attempt.status)
+                || (allowUnconfirmedRetry && attempt.status == .checking) else {
             throw SubmissionError.invalidTransition
         }
         attempt.status = .checking

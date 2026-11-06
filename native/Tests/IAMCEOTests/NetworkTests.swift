@@ -23,7 +23,9 @@ final class NetworkTests: XCTestCase {
             case "/api/runtime": text = "{}"
             case "/api/projects/p/messages":
                 if capture.matching("/messages").count == 1 { throw URLError(.networkConnectionLost) }
-                text = #"{"id":"sent","projectId":"p","mine":true,"body":"Hello"}"#
+                let body = try WriteTestServer.body(request)
+                let id = try XCTUnwrap(body["id"] as? String)
+                return IsolatedTestHTTPReply(data: try JSONEncoder().encode(Message(id: id, projectId: "p", mine: true, body: "Hello")))
             case "/forbidden":
                 return IsolatedTestHTTPReply(status: 401, data: Data(#"{"error":"Access code rejected","code":"AUTH_REJECTED"}"#.utf8))
             case "/bad-json": text = "not json"
@@ -69,6 +71,8 @@ final class NetworkTests: XCTestCase {
         XCTAssertTrue(second)
         let sends = fixture.requests.filter { $0.url?.path == "/api/projects/p/messages" }
         XCTAssertEqual(sends.count, 2)
+        XCTAssertFalse(fixture.requests.contains { $0.url?.path.hasPrefix("/api/messages/") == true })
+        XCTAssertTrue(sends.allSatisfy { $0.value(forHTTPHeaderField: "X-IAMCEO-Contract") == nil })
         // URLSession may move a body to a stream; the original request body remains available in the protocol request on Darwin.
         let bodies = try sends.map { request -> [String: Any] in
             let data: Data
@@ -81,8 +85,10 @@ final class NetworkTests: XCTestCase {
             } else { throw APIError(status: 0, message: "No request body") }
             return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         }
-        XCTAssertEqual(bodies[0]["id"] as? String, bodies[1]["id"] as? String)
-        XCTAssertEqual(bodies[0]["text"] as? String, "Hello")
+        let original = try XCTUnwrap(bodies.first)
+        let retry = try XCTUnwrap(bodies.dropFirst().first)
+        XCTAssertEqual(original["id"] as? String, retry["id"] as? String)
+        XCTAssertEqual(original["text"] as? String, "Hello")
         store.disconnect()
     }
     @MainActor func testRejectedConnectionNeverShowsOfflineWorkspace() async throws {

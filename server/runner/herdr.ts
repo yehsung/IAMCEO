@@ -1,6 +1,7 @@
 import { capturedContext } from "./statusline.ts";
 // herdr 어댑터. 칸 안의 대화형 Claude 세션을 소켓으로 부린다.
-import { closeSync, existsSync, mkdirSync, openSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { adoptRefusal, type ApprovalPrompt, type Backend, type HerdrInfo, type LiveAgent } from "../../shared/types.ts";
@@ -9,7 +10,9 @@ import { cleanText, SESSION_ID_RE } from "../text.ts";
 import { subagentEnv } from "./headless.ts";
 import { readTranscriptTail, transcriptPath } from "./transcript.ts";
 import { parseApproval } from "./approval.ts";
-import type { ApprovalAnswer, Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "./types.ts";
+import type { ApprovalAnswer, DeliveryInspection, DeliveryProbe, DeliveryRepair, Runner, RunnerEvent, RunnerMember, RunnerTerminalIdentity, SendResult, StartOpts } from "./types.ts";
+import type { DeliveryDispatch, RunnerRecoveryStore } from "../service-contracts.ts";
+import { hasExactMarker, readDeliveryEvidence, type DeliveryEvidenceCursor } from "./delivery-evidence.ts";
 
 const SUPPORTED_PROTOCOL = 22;
 const CONDUCTOR_RATIO = 0.3;
@@ -64,7 +67,9 @@ interface Track {
   reported: Reported | null;
   inTurn: boolean;
   /** 글을 넣었지만 아직 working 을 못 봄. */
-  awaiting: { size: number; at: number; marker: string; markerCount: number } | null;
+  awaiting: { size: number; at: number; marker: string } | null;
+  epoch: number;
+  evidence: Map<string, DeliveryEvidenceCursor>;
   settle: ReturnType<typeof setTimeout> | null;
   stall: ReturnType<typeof setTimeout> | null;
   compact: { baseline: number; startedAt: number; idleSince: number | null; poll: ReturnType<typeof setInterval> } | null;
@@ -107,6 +112,11 @@ export interface HerdrDeps {
   compactGraceMs?: number;
   compactTimeoutMs?: number;
   bgCheckMs?: number;
+  recoveryStore?: RunnerRecoveryStore;
+  repair?: { load(memberId: string, request: DeliveryRepair): DeliveryDispatch | null; prepare(memberId: string, request: DeliveryRepair, dispatch: DeliveryDispatch): boolean };
+  /** Only a verified request/drain barrier may resolve a timed-out write. */
+  quiescence?: (memberId: string, dispatch: DeliveryDispatch) => { originalWrite: "not_written" | "rejected" | "settled" | "unresolved"; externalInput: boolean | null };
+  submitKeyVerified?: boolean;
 }
 
 const TAIL_BYTES = 4 * 1024 * 1024;
@@ -187,6 +197,18 @@ export function inputText(screen: string): string | null {
   const rest: string[] = [];
   for (let i = box.top + 2; i < box.bottom; i++) rest.push(typed(i).replace(/[│┃]/g, "").trim());
   return [hint ? "" : first, ...rest].join("\n").trim();
+}
+
+/** Conservative full composer comparison. Do not trim, unwrap, or expand pasted-text placeholders. */
+function exactInputText(screen: string): string | null {
+  const lines = scanDim(screen);
+  const box = inputBox(lines.map(line => line.text));
+  if (!box) return null;
+  const content = lines.slice(box.top + 1, box.bottom).map((line, index) => {
+    const from = index === 0 ? box.prefix : 0;
+    return Array.from({ length: line.text.length - from }, (_, offset) => line.dim[from + offset] ? "" : line.text[from + offset]).join("");
+  }).join("\n");
+  return /\[Pasted text|[│┃]/.test(content) ? null : content;
 }
 
 /** 화면 아래에서부터 찾은 입력칸: 위·아래 가로줄 줄 번호와 첫 줄 `❯ ` 머리의 길이. */
@@ -400,23 +422,14 @@ const GONE_CODES = new Set(["pane_not_found", "agent_not_found", "agent_pane_not
 function isGone(e: unknown): boolean { return e instanceof HerdrError && GONE_CODES.has(e.code); }
 function isDown(e: unknown): boolean { return e instanceof HerdrError && (e.code === "down" || e.code === "closed"); }
 
-/** 시간 초과 때 화면·기록에서 찾을 표지. 서버 전달 글은 끝에 #id 가 붙는다. */
-// 메시지 id 는 화면이 보낸 UUID 일 수 있다(§3).
-const ID_MARK = /#(?:[a-z]+_[A-Za-z0-9_-]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/g;
 function markerOf(text: string): string {
-  const ids = [...text.matchAll(ID_MARK)];
-  return ids.length ? ids[ids.length - 1]![0] : text.trim().split("\n")[0]!.slice(0, 24);
+  return text.split("\n").at(-1) ?? "";
 }
 
-/** 글 끝에 그 글만의 표지가 없으면 붙인다. 머리글만으로는 어제 같은 글과 가를 수 없다. */
+/** Source IDs can repeat. Only the caller's saved marker or a fresh 128-bit marker identifies this delivery. */
 function withMarker(text: string, marker?: string): string {
-  const lastLine = text.trimEnd().split("\n").at(-1) ?? "";
-  if (new RegExp(`${ID_MARK.source}$`).test(lastLine)) return text;
-  return `${text}\n${marker ?? `#dl_${crypto.randomUUID().slice(0, 12)}`}`;
-}
-
-function countOf(text: string, needle: string): number {
-  return needle ? text.split(needle).length - 1 : 0;
+  if (marker && /^#iamceo_(?:b_)?[A-Za-z0-9_-]{22}$/.test(marker)) return text.endsWith(`\n${marker}`) ? text : `${text}\n${marker}`;
+  return `${text}\n#iamceo_${randomBytes(16).toString("base64url")}`;
 }
 
 function brief(value: unknown): string {
@@ -467,6 +480,9 @@ export class HerdrRunner implements Runner {
   /** 손을 뗀 직원. 직원 id 는 다시 쓰이지 않는다. */
   private readonly letGo = new Set<string>();
   private readonly locks = new Map<string, Promise<unknown>>();
+  /** Kept outside Track: rebind/disconnect must not release physical uncertainty. */
+  private readonly uncertain = new Map<string, { query: DeliveryProbe; wireText: string }>();
+  private readonly attemptedDispatches = new Set<string>();
   /** 칸마다 지우는 키를 마지막으로 누른 시각. 종료 창 안에 두 번 누르지 않게 한다(직원을 놓아도 칸 기준으로 남긴다). */
   private readonly lastClear = new Map<string, number>();
   private readonly listeners: Array<(e: RunnerEvent) => void> = [];
@@ -480,7 +496,7 @@ export class HerdrRunner implements Runner {
   private connected = true;
   private stopped = false;
 
-  constructor(config: { socketPath: string }, deps: HerdrDeps) {
+  constructor(config: { socketPath: string }, private readonly deps: HerdrDeps) {
     if (isForbiddenTestSocket(config.socketPath)) throw new Error(`IAMCEO_TEST=1 인데 시험 소켓이 아닙니다: ${config.socketPath}`);
     this.socketPath = config.socketPath;
     this.inboxDir = deps.inboxDir;
@@ -518,7 +534,7 @@ export class HerdrRunner implements Runner {
   isBusy(memberId: string): boolean {
     const t = this.tracks.get(memberId);
     // 뒤 작업만 기다리는 세션은 herdr 가 working 이라 해도 글을 받는다.
-    return !!t && ((t.status === "working" && t.bg === null) || t.inTurn || t.awaiting !== null || t.compact !== null);
+    return this.inputFenced(memberId) || !!t && ((t.status === "working" && t.bg === null) || t.inTurn || t.awaiting !== null || t.compact !== null);
   }
 
   // 같은 프로젝트의 칸 배치가 겹치면 트리가 어긋나므로 한 줄로 세운다.
@@ -529,10 +545,167 @@ export class HerdrRunner implements Runner {
     return next;
   }
 
+  private manualLease(memberId: string): boolean {
+    const lease = this.deps.recoveryStore?.inputState(memberId).lease;
+    return !!lease && lease.expiresAt > Date.now();
+  }
+
+  private inputFenced(memberId: string, first?: DeliveryDispatch): boolean {
+    if (this.manualLease(memberId) || this.uncertain.has(memberId) || first && this.attemptedDispatches.has(first.dispatchId)) return true;
+    return (this.deps.recoveryStore?.inputState(memberId).unresolvedDispatches ?? []).some(d =>
+      d.dispatchId !== first?.dispatchId || !["prepared", "write_started"].includes(d.transportState));
+  }
+
+  private identity(t: Track): RunnerTerminalIdentity {
+    return { terminalId: t.paneId, sessionId: t.sessionId, sessionGeneration: t.m.sessionGeneration ?? -1, process: null };
+  }
+
+  private sameIdentity(a: RunnerTerminalIdentity, b: RunnerTerminalIdentity): boolean {
+    return a.terminalId === b.terminalId && a.sessionId === b.sessionId && a.sessionGeneration === b.sessionGeneration &&
+      a.process?.pid === b.process?.pid && a.process?.startedAt === b.process?.startedAt;
+  }
+
+  private validateTrack(t: Track, m: RunnerMember): void {
+    if (this.stopped || this.tracks.get(m.id) !== t || t.m.projectId !== m.projectId || t.m.cwd !== m.cwd ||
+      t.m.sessionGeneration !== m.sessionGeneration || (m.sessionId && t.sessionId !== m.sessionId) || (m.cli && m.cli !== "claude")) {
+      throw new HerdrError("identity_changed", "세션 식별이 바뀌었습니다", "not_written");
+    }
+  }
+
+  private unknownInspection(code: string, finding: "unknown" | "wait" = "unknown"): DeliveryInspection {
+    return { evidence: [{ source: "transport", verdict: "unknown", location: "none", code, complete: false, checkedAt: new Date().toISOString() }],
+      finding, receivedDeliveryIds: [], snapshot: null, quiescence: "unresolved" };
+  }
+
+  async inspectDelivery(m: RunnerMember, query: DeliveryProbe): Promise<DeliveryInspection> {
+    return this.lock(`input:${m.id}`, async () => {
+      try { return await this.inspectLocked(m, query); }
+      catch { return this.unknownInspection("observation_failed"); }
+    });
+  }
+
+  private async inspectLocked(m: RunnerMember, query: DeliveryProbe): Promise<DeliveryInspection> {
+    if (this.manualLease(m.id)) return this.unknownInspection("manual_control", "wait"); // No log scan under lease.
+    const t = await this.trackOf(m);
+    if (!t) return this.unknownInspection("not_attached");
+    this.validateTrack(t, m);
+    if (query.cli !== "claude" || query.backend !== "herdr" || !this.sameIdentity(query.identity, this.identity(t))) return this.unknownInspection("identity_changed");
+    const epoch = t.epoch;
+    let { agent } = await this.call<{ agent: AgentInfo }>("agent.get", { target: t.paneId });
+    if (agent.pane_id !== t.paneId || agent.agent !== "claude" || agent.agent_session?.value !== t.sessionId || this.isForeign(agent, t)) return this.unknownInspection("ownership_changed");
+    const screen = await this.readInputScreen(t.paneId);
+    const after = (await this.call<{ agent: AgentInfo }>("agent.get", { target: t.paneId })).agent;
+    if (after.pane_id !== agent.pane_id || after.agent !== agent.agent || after.agent_session?.value !== agent.agent_session?.value) return this.unknownInspection("ownership_changed");
+    agent = after;
+    this.validateTrack(t, m);
+    if (this.manualLease(m.id)) return this.unknownInspection("manual_control", "wait");
+    if (t.epoch !== epoch) return this.unknownInspection("input_epoch_changed");
+    const dispatch = this.deps.recoveryStore?.inputState(m.id).unresolvedDispatches.find(d => d.dispatchId === query.dispatchId && d.wireSha256 === query.wireSha256);
+    const barrier = dispatch && this.deps.quiescence?.(m.id, dispatch);
+    // A successful RPC is a receipt. A lost reply is never a drain barrier.
+    const originalWrite = barrier?.originalWrite ?? (dispatch?.transportState === "accepted" ? "settled" : dispatch?.transportState === "rejected" ? "rejected" : "unresolved");
+    const externalInput = barrier?.externalInput ?? null;
+    const draft = inputText(screen);
+    const exact = exactInputText(screen);
+    const composer = draft === null ? "unknown" : draft === "" ? "empty" : dispatch && exact === dispatch.wireText ? "matches" : "different";
+    const mutation = t.compact ? "compact" : t.inTurn || t.awaiting ? "send" : "none";
+    const snapshot: NonNullable<DeliveryInspection["snapshot"]> = { identity: this.identity(t), observedAt: new Date().toISOString(), turn: null, inputEpoch: epoch,
+      ownership: "verified", status: agent.agent_status, blockedReason: agent.agent_status === "blocked" ? "status_unknown" : null,
+      leaseActive: false, mutation, composer, originalWrite, externalInput };
+    const settled = originalWrite !== "unresolved";
+    const safe = ["idle", "done"].includes(agent.agent_status) && mutation === "none" && externalInput === false;
+    const historyMarker = query.markers.some(({ marker }) => hasExactMarker(screen, marker)) || !!query.bundleMarker && hasExactMarker(screen, query.bundleMarker);
+    const path = this.sessionPath(t);
+    if (!path || !t.sessionId) {
+      // A verified pre-write failure needs no as-yet-uncreated provider log.
+      // It must not conceal another envelope whose original write can still run.
+      const other = this.uncertain.get(m.id);
+      const priorUnknown = this.deps.recoveryStore?.inputState(m.id).unresolvedDispatches.some(d => d.dispatchId !== query.dispatchId && ["prepared", "write_started", "unknown"].includes(d.transportState));
+      if (t.sessionId && dispatch && safe && composer === "empty" && !historyMarker && !priorUnknown && (!other || other.query.dispatchId === query.dispatchId) &&
+        ["not_written", "rejected"].includes(originalWrite)) {
+        if (other) this.uncertain.delete(m.id);
+        return { finding: "not_received", receivedDeliveryIds: [], snapshot, quiescence: "settled", evidence: [{ source: "transport", verdict: "absent", location: "none",
+          code: "verified_prewrite_failure", complete: true, checkedAt: snapshot.observedAt }] };
+      }
+      return { ...this.unknownInspection("session_unbound"), snapshot };
+    }
+    const baseline = query.baseline.logs.find(log => log.path === path);
+    const evidenceKey = createHash("sha256").update(JSON.stringify([query.dispatchId, query.wireSha256, query.identity, query.markers, query.bundleMarker, query.baseline])).digest("hex");
+    const read = readDeliveryEvidence({ cli: "claude", home: this.claudeHome, path, cwd: m.cwd, sessionId: t.sessionId,
+      sessionGeneration: query.identity.sessionGeneration, markers: query.markers, bundleMarker: query.bundleMarker || undefined, baseline,
+      since: baseline ? undefined : query.baseline.capturedAt, cursor: t.evidence.get(evidenceKey) });
+    if (read.cursor) t.evidence.set(evidenceKey, read.cursor);
+    const received = query.markers.length > 0 && query.markers.every(marker => read.receivedDeliveryIds.includes(marker.deliveryId));
+    const absent = read.evidence.complete && read.evidence.verdict === "absent";
+    const finding = received ? "received" : ["working", "blocked"].includes(agent.agent_status) || mutation !== "none" ? "wait" : safe && absent && settled && composer === "matches" ? "draft_only" :
+      safe && absent && ["not_written", "rejected"].includes(originalWrite) && composer === "empty" && !historyMarker ? "not_received" : "unknown";
+    // Only a verified barrier can release a physical write fence, including after stop_retry.
+    if (settled && composer === "empty" && externalInput === false && (received || originalWrite === "not_written" || originalWrite === "rejected") &&
+      this.uncertain.get(m.id)?.query.dispatchId === query.dispatchId) this.uncertain.delete(m.id);
+    return { evidence: [read.evidence, { source: "herdr_screen", verdict: composer === "unknown" ? "unknown" : "present", location: "composer", code: composer,
+      complete: composer !== "unknown", checkedAt: snapshot.observedAt }], finding, receivedDeliveryIds: read.receivedDeliveryIds, snapshot, quiescence: settled ? "settled" : "unresolved" };
+  }
+
+  async repairDelivery(m: RunnerMember, request: DeliveryRepair): Promise<SendResult> {
+    return this.lock(`input:${m.id}`, async () => {
+      try {
+        const loaded = this.deps.repair?.load(m.id, request);
+        const dispatch = loaded ? structuredClone(loaded) : null;
+        const t = this.tracks.get(m.id);
+        const otherWrite = this.uncertain.get(m.id);
+        if (otherWrite && otherWrite.query.dispatchId !== request.dispatchId) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written" };
+        if (this.deps.recoveryStore?.inputState(m.id).unresolvedDispatches.some(d => d.dispatchId !== request.dispatchId && ["prepared", "write_started", "unknown"].includes(d.transportState))) {
+          return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written" };
+        }
+        if (!t || !dispatch || dispatch.memberId !== m.id || dispatch.projectId !== m.projectId || dispatch.dispatchId !== request.dispatchId ||
+          createHash("sha256").update(dispatch.wireText).digest("hex") !== dispatch.wireSha256 || cleanText(dispatch.wireText) !== dispatch.wireText) {
+          return { ok: false, reason: "error", retryable: false, deliveryEffect: "not_written", detail: "저장 봉투 또는 검토한 판을 확인할 수 없습니다" };
+        }
+        const safe = (inspection: DeliveryInspection): boolean => {
+          const s = inspection.snapshot;
+          return !!s && this.sameIdentity(s.identity, dispatch.identity) && s.identity.sessionGeneration === request.expectedSessionGeneration &&
+            s.identity.sessionId === request.expectedSessionId && s.identity.terminalId === request.expectedTerminalId && s.inputEpoch === request.expectedInputEpoch &&
+            s.ownership === "verified" && ["idle", "done"].includes(s.status) && !s.leaseActive && !s.blockedReason && s.mutation === "none" &&
+            s.externalInput === false && inspection.quiescence === "settled" && !inspection.receivedDeliveryIds.length &&
+            (request.action === "resend" ? inspection.finding === "not_received" : inspection.finding === "draft_only" && !!this.deps.submitKeyVerified && dispatch.submitAttempts === 0);
+        };
+        if (!safe(await this.inspectLocked(m, dispatch)) || !safe(await this.inspectLocked(m, dispatch)) || this.manualLease(m.id)) {
+          return { ok: false, reason: "input_busy", retryable: false, deliveryEffect: "not_written", detail: "재전송 또는 제출의 안전 조건이 바뀌었습니다" };
+        }
+        const wire = request.action === "resend" ? this.spillIfLong(dispatch.wireText, m) : null;
+        const latest = this.deps.repair!.load(m.id, request);
+        if (!latest || latest.wireSha256 !== dispatch.wireSha256 || latest.wireText !== dispatch.wireText ||
+          !this.sameIdentity(latest.identity, dispatch.identity) || latest.transportState !== dispatch.transportState || this.manualLease(m.id)) {
+          return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written" };
+        }
+        // prepare rechecks source revisions, cancellation and recovery CAS synchronously.
+        if (!this.deps.repair!.prepare(m.id, request, dispatch)) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written" };
+        this.validateTrack(t, m);
+        if (this.manualLease(m.id) || t.epoch !== request.expectedInputEpoch) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written" };
+        t.epoch++;
+        this.uncertain.set(m.id, { query: dispatch, wireText: dispatch.wireText });
+        if (request.action === "submit_only") {
+          await this.call("agent.send_keys", { target: t.paneId, keys: ["Enter"] }, this.promptTimeoutMs);
+          return { ok: false, reason: "error", retryable: false, deliveryEffect: "unknown", detail: "제출 키를 한 번 보냈습니다. user 수신 기록을 확인합니다" };
+        }
+        const sent = await this.prompt(t, wire!, dispatch);
+        if (sent.ok) {
+          t.awaiting = { size: this.transcriptSize(t), at: Date.now(), marker: dispatch.markers[0]?.marker ?? "" };
+          this.armStall(t);
+        }
+        return sent;
+      } catch (e) { return this.failure(e); }
+    });
+  }
+
   async start(m: RunnerMember, o: StartOpts): Promise<{ sessionId: string | null; paneId: string | null; tabId?: string | null; rejoined?: boolean }> {
+    return this.lock(`input:${m.id}`, () => this.startWithPrompt(m, o));
+  }
+
+  private async startWithPrompt(m: RunnerMember, o: StartOpts): Promise<{ sessionId: string | null; paneId: string | null; tabId?: string | null; rejoined?: boolean }> {
     const result = await this.lock(m.projectId, () => this.startLocked(m, o));
     if (o.firstPrompt && !result.rejoined) {
-      const sent = await this.send({ ...m, paneId: result.paneId, sessionId: result.sessionId }, o.firstPrompt, o);
+      const sent = await this.sendLocked({ ...m, paneId: result.paneId, sessionId: result.sessionId }, o.firstPrompt, o);
       if (!sent.ok) this.emit({ type: "activity", memberId: m.id, kind: "error", text: `첫 지시 전달 실패: ${sent.reason}${sent.detail ? ` (${sent.detail})` : ""}` });
     }
     return { sessionId: result.sessionId, paneId: result.paneId, tabId: result.tabId, rejoined: result.rejoined };
@@ -551,6 +724,7 @@ export class HerdrRunner implements Runner {
       return { sessionId: t.sessionId, paneId: t.paneId, tabId: null, rejoined: true };
     }
 
+    if (this.inputFenced(m.id)) throw new HerdrError("input_fenced", "이전 입력의 종료 또는 직접 조작을 확인해야 합니다", "not_written");
     // 값이 '--플래그' 면 --resume 뒤에서 옵션으로 해석된다.
     if (m.sessionId && !SESSION_ID_RE.test(m.sessionId)) throw new HerdrError("invalid_session", `세션 ID 형식이 잘못되었습니다: ${m.sessionId.slice(0, 80)}`);
     const sessionId = m.sessionId ?? crypto.randomUUID();
@@ -629,16 +803,14 @@ export class HerdrRunner implements Runner {
     await this.call("agent.rename", { target: t.paneId, name: this.uniqueName(t.m, snap, t.paneId) }).catch(() => {});
   }
 
-  /** 재시작 복구: 넣다가 죽은 글이 이미 칸에 들어갔는가. 세션 기록과 그 칸의 화면을 본다. */
+  /** Legacy source IDs lack a unique delivery attempt; they cannot prove receipt. */
   async promptSeen(m: RunnerMember, markers: string[]): Promise<boolean> {
-    if (!m.sessionId) return false;
-    const path = this.sessionFile(m.cwd, m.sessionId);
-    const recorded = path ? readTail(path) : "";
-    if (markers.some((marker) => recorded.includes(marker))) return true;
-    const { live } = this.findLive(await snapshot(this.socketPath), m, true);
-    if (!live) return false;
-    const screen = await this.readPane(live.pane_id, "recent_unwrapped", 200).catch(() => "");
-    return markers.some((marker) => screen.includes(marker));
+    if (!markers.length || markers.some(marker => !/^#iamceo_[A-Za-z0-9_-]{22}$/.test(marker)) || this.manualLease(m.id)) return false;
+    const path = m.sessionId ? this.sessionFile(m.cwd, m.sessionId) : null;
+    if (!path || !m.sessionId || m.sessionGeneration === undefined) return false;
+    const read = readDeliveryEvidence({ cli: "claude", home: this.claudeHome, path, cwd: m.cwd, sessionId: m.sessionId,
+      sessionGeneration: m.sessionGeneration, markers: markers.map(marker => ({ marker, deliveryId: marker })) });
+    return markers.every(marker => read.receivedDeliveryIds.includes(marker));
   }
 
   sessionExists(m: RunnerMember): boolean {
@@ -650,6 +822,10 @@ export class HerdrRunner implements Runner {
    * 칸은 대표의 것이다: 옮기지도(pane.move 는 번호를 바꾸고 row.py 같은 도구의 탭 구조를 깬다), 이름을 바꾸지도 않는다. 세션으로 알아본다.
    */
   async adopt(m: RunnerMember, paneId: string, _o: StartOpts): Promise<{ sessionId: string | null; paneId: string; tabId: null }> {
+    return this.lock(`input:${m.id}`, () => this.adoptLocked(m, paneId, _o));
+  }
+
+  private async adoptLocked(m: RunnerMember, paneId: string, _o: StartOpts): Promise<{ sessionId: string | null; paneId: string; tabId: null }> {
     return this.lock(m.projectId, async () => {
       this.letGo.delete(m.id);
       const snap = await snapshot(this.socketPath);
@@ -671,6 +847,10 @@ export class HerdrRunner implements Runner {
    * 입력칸을 못 찾으면(선택 창 등) 알리지 않는다.
    */
   async release(m: RunnerMember, notice: string | null): Promise<{ notified: boolean }> {
+    return this.lock(`input:${m.id}`, () => this.releaseLocked(m, notice));
+  }
+
+  private async releaseLocked(m: RunnerMember, notice: string | null): Promise<{ notified: boolean }> {
     // 알리는 동안 화면 폴링 등이 칸을 다시 묶으면, 명부에서 빠진 뒤에도 칸이 죽은 직원 것으로 남아 다시 넘겨받을 수 없다.
     this.letGo.add(m.id);
     return this.lock(m.projectId, async () => {
@@ -682,7 +862,7 @@ export class HerdrRunner implements Runner {
       if (!t) return { notified: false };
       const { paneId, inTurn, awaiting, compact } = t;
       this.forget(t);
-      if (!notice || inTurn || awaiting || compact) return { notified: false };
+      if (!notice || inTurn || awaiting || compact || this.inputFenced(m.id)) return { notified: false };
       try {
         const { agent } = await this.call<{ agent: AgentInfo }>("agent.get", { target: paneId });
         if (agent.agent_status !== "idle" && agent.agent_status !== "done") return { notified: false };
@@ -708,6 +888,7 @@ export class HerdrRunner implements Runner {
    * 입력칸에 남은 글은 지우고 넣는다(합쳐져 전송되지 않게). 일하는 중이거나 입력칸을 못 찾으면(선택 창 등) 다음 전달 때로 미룬다.
    */
   private async grantDirs(t: Track): Promise<void> {
+    if (this.inputFenced(t.m.id)) { t.grantPending = true; return; }
     const dir = this.memberInbox(t.m);
     t.grantPending = false;
     try {
@@ -720,7 +901,8 @@ export class HerdrRunner implements Runner {
         return;
       }
       t.muteUntil = Date.now() + 5000;
-      await this.call("agent.prompt", { target: t.paneId, text: `/add-dir ${dir}` }, this.promptTimeoutMs);
+      const sent = await this.prompt(t, `/add-dir ${dir}`);
+      if (!sent.ok) { t.grantPending = true; return; }
       const deadline = Date.now() + 5000;
       let confirmed = false;
       while (Date.now() < deadline) {
@@ -784,6 +966,9 @@ export class HerdrRunner implements Runner {
     const holder = this.byPane.get(a.pane_id);
     if (holder !== undefined && holder !== m.id) throw new HerdrError("pane_taken", `칸 ${a.pane_id} 은 이미 다른 직원의 칸입니다`);
     const existing = this.tracks.get(m.id);
+    // Every envelope already present at bind may have been written by the previous
+    // process. Only inspect/repair may act on it; ordinary send cannot replay it.
+    for (const dispatch of this.deps.recoveryStore?.inputState(m.id).unresolvedDispatches ?? []) this.attemptedDispatches.add(dispatch.dispatchId);
     if (existing) this.dropTimers(existing);
     if (existing) this.byPane.delete(existing.paneId);
     const t: Track = {
@@ -791,6 +976,7 @@ export class HerdrRunner implements Runner {
       status: a.agent_status, reported: null, inTurn: a.agent_status === "working", awaiting: null,
       settle: null, stall: null, compact: null, muteUntil: 0, turnGen: existing?.turnGen ?? 0, sawBlocked: false, argsOk: false, grantPending: false, tail: null,
       bg: null, bgPoll: null, bgChecking: false, bgTurn: null, bgSeen: null,
+      epoch: existing?.epoch ?? 0, evidence: existing?.evidence ?? new Map(),
     };
     if (existing?.bg) this.emit({ type: "background", memberId: m.id, label: null });
     this.tracks.set(m.id, t);
@@ -1002,6 +1188,10 @@ export class HerdrRunner implements Runner {
   }
 
   async stop(m: RunnerMember): Promise<void> {
+    return this.lock(`input:${m.id}`, () => this.stopLocked(m));
+  }
+
+  private async stopLocked(m: RunnerMember): Promise<void> {
     await this.lock(m.projectId, async () => {
       let t = this.tracks.get(m.id);
       if (!t && (m.paneId || m.sessionId)) {
@@ -1118,11 +1308,6 @@ export class HerdrRunner implements Runner {
     return path ? readTail(path).split('"compact_boundary"').length - 1 : 0;
   }
 
-  private transcriptCount(t: Track, needle: string): number {
-    const path = this.sessionPath(t);
-    return path ? countOf(readTail(path), needle) : 0;
-  }
-
   private lastTurn(t: Track): { finalText: string; contextTokens: number | null; model: string | null; isError: boolean; noOutput: boolean } {
     const path = this.sessionPath(t);
     const tail = path ? readTranscriptTail(path) : null;
@@ -1139,6 +1324,7 @@ export class HerdrRunner implements Runner {
 
   /** 세션 기록을 이어 읽어 도구 호출과 서브에이전트 수를 headless 와 같게 알린다. */
   private startTail(t: Track, from?: number): void {
+    if (this.manualLease(t.m.id)) return;
     if (t.tail) return;
     const poll = setInterval(() => this.pollTail(t), TAIL_POLL_MS);
     poll.unref?.();
@@ -1155,6 +1341,7 @@ export class HerdrRunner implements Runner {
   }
 
   private pollTail(t: Track): void {
+    if (this.manualLease(t.m.id)) return;
     const tail = t.tail;
     const path = tail ? this.sessionPath(t) : null;
     if (!tail || !path) return;
@@ -1194,6 +1381,7 @@ export class HerdrRunner implements Runner {
 
   /** 서버가 꺼진 사이 끝난 턴. since(입력을 넣은 시각) 뒤에 쓰인 마지막 글이 있을 때만 준다. */
   finishedWhileAway(m: RunnerMember, since: string): { finalText: string; isError: boolean } | null {
+    if (this.manualLease(m.id)) return null;
     const t = this.tracks.get(m.id);
     if (!t || t.status === "working" || t.status === "blocked") return null;
     const path = this.sessionPath(t);
@@ -1305,7 +1493,10 @@ export class HerdrRunner implements Runner {
   async answerApproval(m: RunnerMember, fingerprint: string, option: number): Promise<ApprovalAnswer> {
     const paneId = await this.verifiedPane(m);
     if (!paneId) return { ok: false, reason: "gone" };
-    return this.lock(`approval:${paneId}`, async (): Promise<ApprovalAnswer> => {
+    return this.lock(`input:${m.id}`, async (): Promise<ApprovalAnswer> => {
+      if (this.inputFenced(m.id)) return { ok: false, reason: "no_effect" };
+      const track = this.tracks.get(m.id);
+      if (track) track.epoch++;
       const state = async (): Promise<ApprovalPrompt | null | "not_blocked"> => {
         const { agent } = await this.call<{ agent: AgentInfo }>("agent.get", { target: paneId });
         if (agent.agent_status !== "blocked") return "not_blocked";
@@ -1334,6 +1525,12 @@ export class HerdrRunner implements Runner {
   }
 
   async interrupt(m: RunnerMember): Promise<void> {
+    return this.lock(`input:${m.id}`, () => this.interruptLocked(m));
+  }
+
+  private async interruptLocked(m: RunnerMember): Promise<void> {
+    const track = this.tracks.get(m.id);
+    if (track) track.epoch++;
     const paneId = await this.verifiedPane(m);
     if (!paneId) return;
     try { await this.call("agent.send_keys", { target: paneId, keys: ["Escape"] }); }
@@ -1378,6 +1575,13 @@ export class HerdrRunner implements Runner {
    * 그래서 쉴 때 입력칸을 확인하고 칸을 닫은 뒤 --resume 으로 새 인자와 환경으로 다시 연다. 기록은 그대로 이어진다.
    */
   async applyConfig(m: RunnerMember, o: StartOpts): Promise<SendResult> {
+    return this.lock(`input:${m.id}`, async () => {
+      if (this.inputFenced(m.id)) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written" };
+      return this.applyConfigLocked(m, o);
+    });
+  }
+
+  private async applyConfigLocked(m: RunnerMember, o: StartOpts): Promise<SendResult> {
     try {
       const t = await this.trackOf(m);
       if (!t) return { ok: false, reason: "gone", retryable: false };
@@ -1412,12 +1616,12 @@ export class HerdrRunner implements Runner {
   }
 
   /** 넣기 전 공통 점검. 넣어도 되면 null. */
-  private async precheck(t: Track, urgent: boolean): Promise<SendResult | null> {
+  private async precheck(t: Track, urgent: boolean): Promise<Extract<SendResult, { ok: false }> | null> {
     let info: AgentInfo;
     try {
       info = (await this.call<{ agent: AgentInfo }>("agent.get", { target: t.paneId })).agent;
     } catch (e) {
-      return this.failure(e);
+      return { ...this.failure(e), deliveryEffect: "not_written" };
     }
     this.connected = true;
     if (this.isForeign(info, t)) {
@@ -1425,15 +1629,15 @@ export class HerdrRunner implements Runner {
       return { ok: false, reason: "gone", detail: `칸 ${t.paneId} 에 다른 세션이 들어와 있습니다`, retryable: false };
     }
     if (info.agent_status !== t.status && info.agent_status !== "unknown") this.applyStatus(t, info.agent_status);
-    if (info.agent_status === "blocked") return { ok: false, reason: "blocked", retryable: true };
+    if (info.agent_status === "blocked") return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written" };
+    if (info.agent_status === "unknown") return { ok: false, reason: "input_busy", retryable: true, deliveryEffect: "not_written" };
+    if (t.compact) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
     // 뒤 작업만 기다리는 세션은 working 이라도 넣는다. 넣기 직전 화면으로 다시 확인한다.
     const background = info.agent_status === "working" && t.bg !== null && this.quiet(t) && (await this.stillBackground(t));
     if (((info.agent_status === "working" && !background) || t.compact !== null || t.awaiting !== null) && !urgent) return { ok: false, reason: "busy", retryable: true };
-    // 입력칸을 못 찾으면(셸 모드 `!`, 선택 창, 다른 프로그램) 넣은 글이 명령으로 실행되거나 선택이 된다. 남은 글은 지우고 넣는다.
-    // urgent 는 일하는 중에도 넣는다. 그때 남은 글을 지우는 키는 턴을 끊으므로 누르지 않는다.
-    const idle = (info.agent_status === "idle" || info.agent_status === "done") && this.quiet(t);
-    const problem = await this.clearInput(t.paneId, idle, t.m.id);
-    if (problem) return { ok: false, reason: "input_busy", detail: problem, retryable: true };
+    // Unknown screens and existing drafts are left untouched, including urgent delivery.
+    const draft = inputText(await this.readInputScreen(t.paneId));
+    if (draft !== "") return { ok: false, reason: "input_busy", detail: draft === null ? NO_INPUT_BOX : "입력칸의 초안을 보존했습니다", retryable: true, deliveryEffect: "not_written" };
     return null;
   }
 
@@ -1448,100 +1652,102 @@ export class HerdrRunner implements Runner {
     return !!session || !!a.name;
   }
 
-  private failure(e: unknown): SendResult {
-    if (isDown(e)) { this.connected = false; return { ok: false, reason: "down", detail: String(e), retryable: true }; }
-    if (isGone(e)) return { ok: false, reason: "gone", detail: String(e), retryable: false };
+  private failure(e: unknown): Extract<SendResult, { ok: false }> {
+    const deliveryEffect = e instanceof HerdrError ? e.deliveryEffect : "unknown";
+    if (isDown(e)) { this.connected = false; return { ok: false, reason: "down", detail: String(e), retryable: deliveryEffect === "not_written", deliveryEffect }; }
+    if (isGone(e)) return { ok: false, reason: "gone", detail: String(e), retryable: false, deliveryEffect };
     if (e instanceof HerdrError) {
-      if (e.code === "agent_blocked") return { ok: false, reason: "blocked", retryable: true };
-      if (e.code === "agent_not_ready") return { ok: false, reason: "busy", detail: e.message, retryable: true };
-      return { ok: false, reason: "error", detail: `${e.code}: ${e.message}`, retryable: e.code === "timeout" };
+      if (e.code === "agent_blocked") return { ok: false, reason: "blocked", retryable: true, deliveryEffect };
+      if (e.code === "agent_not_ready") return { ok: false, reason: "busy", detail: e.message, retryable: true, deliveryEffect };
+      return { ok: false, reason: "error", detail: `${e.code}: ${e.message}`, retryable: deliveryEffect === "not_written", deliveryEffect };
     }
-    return { ok: false, reason: "error", detail: String(e), retryable: false };
+    return { ok: false, reason: "error", detail: String(e), retryable: false, deliveryEffect };
   }
 
   private spillIfLong(text: string, m: RunnerMember): string {
     if (text.length <= LONG_TEXT) return text;
     const dir = this.memberInbox(m);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const marker = [...text.matchAll(ID_MARK)].at(-1)?.[0].slice(1);
-    const path = join(dir, `${marker ?? crypto.randomUUID()}.md`);
-    writeFileSync(path, text, { mode: 0o600 });
-    // 첫 줄의 접두어가 출처이므로 그대로 남긴다.
+    // The immutable envelope hash maps the saved wire text to its full-text file.
+    const path = join(dir, `${createHash("sha256").update(text).digest("hex")}.md`);
+    try { writeFileSync(path, text, { mode: 0o600, flag: "wx" }); }
+    catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST" || readFileSync(path, "utf8") !== text) throw e;
+    }
     const first = text.split("\n")[0]!;
     const head = first.length > 300 ? `${first.slice(0, 300)}…` : first;
-    return `${head}\n(전문이 길어 파일로 두었습니다. 먼저 읽으세요: ${path})${marker ? ` #${marker}` : ""}`;
+    const markers = text.split("\n").filter(line => /^#iamceo_(?:b_)?[A-Za-z0-9_-]{22}$/.test(line));
+    return `${head}\n(전문이 길어 파일로 두었습니다. 먼저 읽으세요: ${path})\n${markers.join("\n")}`;
   }
 
-  /** 넣기 전 화면·기록의 표지 수. timeout 뒤 이번 글의 흔적과 지난 글의 흔적을 가른다. */
-  private async promptBaseline(t: Track, marker: string): Promise<{ marks: number; pasted: number; recorded: number }> {
-    const screen = await this.readPane(t.paneId, "recent_unwrapped", 200).catch(() => "");
-    return { marks: countOf(screen, marker), pasted: countOf(screen, "[Pasted text"), recorded: this.transcriptCount(t, marker) };
-  }
-
-  /** timeout 은 안 들어갔다는 증거가 아니다. 들어갔으면 true. 넣기 전보다 늘었을 때만 이번 글의 증거로 친다. */
-  private async delivered(t: Track, marker: string, base: { marks: number; pasted: number; recorded: number }, urgent: boolean): Promise<boolean> {
-    try {
-      const { agent } = await this.call<{ agent: AgentInfo }>("agent.get", { target: t.paneId });
-      if (agent.agent_status === "working" && !urgent) return true;
-      const screen = await this.readPane(t.paneId, "recent_unwrapped", 200);
-      if (countOf(screen, marker) > base.marks || countOf(screen, "[Pasted text") > base.pasted) return true;
-    } catch (e) {
-      if (isDown(e)) return true; // 확인할 수 없을 때 다시 넣으면 두 번 들어갈 수 있다.
-    }
-    return this.transcriptCount(t, marker) > base.recorded;
-  }
-
-  private async prompt(t: Track, raw: string, urgent = false): Promise<SendResult> {
-    // 칸에 넣기 전 마지막 관문. herdr 는 ESC·DEL 을 그대로 터미널로 보내 붙여넣기를 끝내고 입력을 고칠 수 있다.
+  private async prompt(t: Track, raw: string, query?: DeliveryProbe): Promise<SendResult> {
     const text = cleanText(raw);
-    const marker = markerOf(text);
-    const base = await this.promptBaseline(t, marker);
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await this.call("agent.prompt", { target: t.paneId, text }, this.promptTimeoutMs);
-        return { ok: true };
-      } catch (e) {
-        if (e instanceof HerdrError && e.code === "timeout") {
-          if (await this.delivered(t, marker, base, urgent)) return { ok: true };
-          if (attempt === 0) {
-            // 입력칸에 이번 글이 반쯤 들어갔거나 다른 글이 남았을 수 있다. 그대로 넣으면 합쳐져 제출된다.
-            // 넣을 때와 같은 규칙: 쉬고 있을 때만 지우고 다시 넣는다. 일하는 중이면 다시 넣지 않는다(지우는 키는 턴을 끊고, 넣던 글이 늦게 들어갈 수 있다).
-            let problem: string | null;
-            try {
-              const { agent } = await this.call<{ agent: AgentInfo }>("agent.get", { target: t.paneId });
-              if (agent.agent_status === "blocked") return { ok: false, reason: "blocked", retryable: true };
-              if (agent.agent_status !== "idle" && agent.agent_status !== "done") return { ok: false, reason: "busy", detail: "시간 초과 뒤 일하는 중이라 다시 넣지 않았습니다", retryable: true };
-              problem = await this.clearInput(t.paneId, !t.inTurn, t.m.id);
-            } catch (err) {
-              return this.failure(err);
-            }
-            if (problem) return { ok: false, reason: "input_busy", detail: `시간 초과 뒤 다시 넣지 않았습니다: ${problem}`, retryable: true };
-            continue;
-          }
-        }
-        return this.failure(e);
+    const probe: DeliveryProbe = query ?? { dispatchId: crypto.randomUUID(), cli: "claude", backend: "herdr", markers: [], bundleMarker: "",
+      identity: this.identity(t), baseline: { serverEpoch: "herdr-local", turn: null, inputEpoch: t.epoch, logs: [], capturedAt: new Date().toISOString() },
+      wireSha256: createHash("sha256").update(text).digest("hex") };
+    if (query) this.attemptedDispatches.add(query.dispatchId);
+    t.epoch++;
+    this.uncertain.set(t.m.id, { query: probe, wireText: text });
+    try {
+      // Protocol 22's receipt is agent_prompted with the addressed agent,
+      // not an arbitrary JSON-RPC success or a subsequent working observation.
+      const receipt = await this.call<{ type: string; agent?: AgentInfo }>("agent.prompt", { target: t.paneId, text }, this.promptTimeoutMs);
+      if (receipt?.type !== "agent_prompted" || !receipt.agent || receipt.agent.pane_id !== t.paneId || receipt.agent.agent !== "claude" ||
+        receipt.agent.agent_session?.value !== t.sessionId || this.isForeign(receipt.agent, t)) {
+        throw new HerdrError("protocol", "agent.prompt 수신 영수증의 대상 또는 형식을 확인할 수 없습니다", "unknown");
       }
+      this.uncertain.delete(t.m.id);
+      return { ok: true, ...(query ? { receipt: { dispatchId: query.dispatchId, receivedAt: new Date().toISOString(), source: "transport" as const } } : {}) };
+    } catch (e) {
+      if (e instanceof HerdrError && e.deliveryEffect !== "unknown") this.uncertain.delete(t.m.id);
+      // Read-only user evidence can correct the result; never clear or replay after timeout.
+      if (query && !this.manualLease(t.m.id)) {
+        try {
+          const read = await this.inspectLocked(t.m, query);
+          if (read.finding === "received") return { ok: true, receipt: { dispatchId: query.dispatchId, receivedAt: new Date().toISOString(), source: "claude_log" } };
+        } catch { /* Observation failure is unknown, never success. */ }
+      }
+      return this.failure(e);
     }
   }
 
   async send(m: RunnerMember, text: string, o: StartOpts, urgent = false): Promise<SendResult> {
+    return this.lock(`input:${m.id}`, () => this.sendLocked(m, text, o, urgent));
+  }
+
+  private async sendLocked(m: RunnerMember, text: string, o: StartOpts, urgent = false): Promise<SendResult> {
+    let attempted = false;
     try {
+      const dispatch = this.deps.recoveryStore?.inputState(m.id).unresolvedDispatches.find(d => d.wireText === text && d.memberId === m.id && d.projectId === m.projectId);
+      if (this.inputFenced(m.id, dispatch)) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written", detail: "이전 입력의 확인 또는 직접 조작이 끝나기를 기다립니다" };
       const found = await this.trackOf(m);
-      if (!found) return { ok: false, reason: "gone", retryable: false };
+      if (!found) return { ok: false, reason: "gone", retryable: false, deliveryEffect: "not_written" };
+      if (this.inputFenced(m.id, dispatch)) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written" };
+      this.validateTrack(found, m);
       const blocked = await this.precheck(found, urgent);
-      if (blocked) return blocked;
+      if (blocked) return { ...blocked, deliveryEffect: "not_written" };
       const t = await this.ensureServerArgs(found, m, o);
       if (t.grantPending) await this.grantDirs(t);
-      const marked = withMarker(cleanText(text), o.marker);
+      this.validateTrack(t, m);
+      if (dispatch && (!this.sameIdentity(dispatch.identity, this.identity(t)) || createHash("sha256").update(text).digest("hex") !== dispatch.wireSha256 || cleanText(text) !== text)) return { ok: false, reason: "error", retryable: false, deliveryEffect: "not_written", detail: "저장 봉투의 신원 또는 본문이 바뀌었습니다" };
+      const marked = dispatch ? text : withMarker(cleanText(text), o.marker);
       const marker = markerOf(marked);
       const size = this.transcriptSize(t);
-      const markerCount = this.transcriptCount(t, marker);
       const gen = t.turnGen;
       t.sawBlocked = false;
       // 무음은 슬래시 명령 자체에만 쓴다. 일 글의 working 까지 묻히면 턴 시작을 놓쳐 turn_end 가 영영 안 난다.
       t.muteUntil = 0;
       const background = t.bg !== null && t.status === "working" && this.quiet(t);
-      const sent = await this.prompt(t, this.spillIfLong(marked, m), urgent);
+      const wire = this.spillIfLong(marked, m);
+      const probe: DeliveryProbe = dispatch ?? { dispatchId: crypto.randomUUID(), cli: "claude", backend: "herdr", markers: [{ deliveryId: marker, marker }], bundleMarker: "",
+        identity: this.identity(t), baseline: { serverEpoch: "herdr-local", turn: null, inputEpoch: t.epoch, logs: [], capturedAt: new Date().toISOString() },
+        wireSha256: createHash("sha256").update(marked).digest("hex") };
+      const final = await this.precheck(t, urgent);
+      if (final) return { ...final, deliveryEffect: "not_written" };
+      this.validateTrack(t, m);
+      if (this.inputFenced(m.id, dispatch)) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written" };
+      attempted = true;
+      const sent = await this.prompt(t, wire, probe);
       if (!sent.ok) return sent;
       if (background) {
         // herdr 는 이미 working 이라 턴 시작 신호가 오지 않는다. 넣은 것으로 턴을 연다. 끝은 checkBackground 가 기록과 화면으로 본다.
@@ -1549,21 +1755,28 @@ export class HerdrRunner implements Runner {
         t.bgTurn = { from: Math.max(0, size), at: Date.now() };
         t.bgSeen = null;
         this.startTail(t, size);
-        return { ok: true };
+        return sent;
       }
       // 응답이 늦어 그 사이 턴 시작을 봤거나 턴이 이미 끝났으면 다시 기다리지 않는다. 안 그러면 turn_end 가 두 번 나거나 스톨까지 늦어진다.
       // status 만 working 이고 inTurn 이 아니면 슬래시 명령의 남은 working 이다. 이번 글의 턴은 아직 못 봤다.
       if (!t.inTurn && t.turnGen === gen) {
-        t.awaiting = { size, at: Date.now(), marker, markerCount };
+        t.awaiting = { size, at: Date.now(), marker };
         this.armStall(t);
       }
-      return { ok: true };
+      return sent;
     } catch (e) {
-      return this.failure(e);
+      return attempted ? this.failure(e) : { ...this.failure(e), deliveryEffect: "not_written" };
     }
   }
 
   async compact(m: RunnerMember, focus: string, _o: StartOpts): Promise<SendResult> {
+    return this.lock(`input:${m.id}`, async () => {
+      if (this.inputFenced(m.id)) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written" };
+      return this.compactLocked(m, focus, _o);
+    });
+  }
+
+  private async compactLocked(m: RunnerMember, focus: string, _o: StartOpts): Promise<SendResult> {
     try {
       const t = await this.trackOf(m);
       if (!t) return { ok: false, reason: "gone", retryable: false };
@@ -1591,6 +1804,7 @@ export class HerdrRunner implements Runner {
   }
 
   private pollCompact(t: Track): void {
+    if (this.manualLease(t.m.id)) return;
     const c = t.compact;
     if (!c || !t.sessionId) return;
     const now = Date.now();
@@ -1624,6 +1838,13 @@ export class HerdrRunner implements Runner {
   }
 
   async setParallel(m: RunnerMember, on: boolean, _o: StartOpts): Promise<SendResult> {
+    return this.lock(`input:${m.id}`, async () => {
+      if (this.inputFenced(m.id)) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written" };
+      return this.setParallelLocked(m, on, _o);
+    });
+  }
+
+  private async setParallelLocked(m: RunnerMember, on: boolean, _o: StartOpts): Promise<SendResult> {
     try {
       const t = await this.trackOf(m);
       if (!t) return { ok: false, reason: "gone", retryable: false };
@@ -1658,6 +1879,7 @@ export class HerdrRunner implements Runner {
 
   private async checkStall(t: Track): Promise<void> {
     t.stall = null;
+    if (this.manualLease(t.m.id)) { this.armStall(t); return; }
     const waiting = t.awaiting;
     if (!waiting || this.tracks.get(t.m.id) !== t) return;
     try {
@@ -1674,7 +1896,7 @@ export class HerdrRunner implements Runner {
     }
     t.awaiting = null;
     // working 을 보기 전에 턴이 끝났을 수 있다. 기록에 이번 글이 있으면 정상 종료로 친다.
-    if (this.transcriptCount(t, waiting.marker) > waiting.markerCount) { await this.finishTurn(t); return; }
+    if (await this.promptSeen(t.m, [waiting.marker])) { await this.finishTurn(t); return; }
     t.inTurn = false;
     t.turnGen++;
     this.report(t, "idle");
@@ -1739,6 +1961,7 @@ export class HerdrRunner implements Runner {
    * 뒤 작업이 끝나 Claude 가 알림을 받고 스스로 이어 일하면(기록에 새 입력) 그 일을 턴으로 센다.
    */
   private async checkBackground(t: Track): Promise<void> {
+    if (this.manualLease(t.m.id)) return;
     if (t.bgChecking || this.tracks.get(t.m.id) !== t) return;
     if (t.status !== "working" || t.compact || t.awaiting) return;
     t.bgChecking = true;
@@ -1810,6 +2033,11 @@ export class HerdrRunner implements Runner {
   private async settled(t: Track): Promise<void> {
     t.settle = null;
     if (this.tracks.get(t.m.id) !== t) return;
+    if (this.manualLease(t.m.id)) {
+      t.settle = setTimeout(() => void this.settled(t), this.settleMs);
+      t.settle.unref?.();
+      return;
+    }
     if (t.status !== "idle" && t.status !== "done") return;
     // 정말 쉰다: 기다리던 뒤 작업도 끝났다.
     this.setBg(t, null);

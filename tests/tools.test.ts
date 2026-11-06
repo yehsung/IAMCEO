@@ -94,6 +94,17 @@ async function setup() {
   return { home, store, bus, orch, runner, server, project, lead, call };
 }
 
+/** 표식을 제거해 비교하는 대신, 저장 봉투와 송신 문자열도 일치해야 한다. */
+function deliveryBody(store: Store, sent: { memberId: string; text: string }): string {
+  const dispatch = store.listDispatches(sent.memberId).find(d => d.wireText === sent.text)!;
+  expect(dispatch).toBeDefined();
+  expect(dispatch.items).toHaveLength(1);
+  const delivery = store.requireDelivery(dispatch.items[0]!.deliveryId);
+  expect(dispatch.markers).toEqual([{ deliveryId: delivery.id, marker: store.getDeliveryRecovery(delivery.id)!.marker! }]);
+  expect(sent.text).toBe(`${delivery.text}\n${dispatch.markers[0]!.marker}\n${dispatch.bundleMarker}`);
+  return delivery.text;
+}
+
 describe("도구 목록", () => {
   test("역할마다 다르고 MCP 입력 스키마 모양이다", async () => {
     const { store, project, lead } = await setup();
@@ -305,7 +316,7 @@ describe("공통 도구", () => {
     const todo = store.listTodos(project.id)[0]!;
     expect(todo).toMatchObject({ title: "로그인", detail: "폰으로", who: "철수", memberId: w.id, done: false });
     await orch.setTodoDone(todo.id, true);
-    expect(runner.sent.at(-1)!.text).toBe(`[대표] '로그인' 했음 #${todo.id}`);
+    expect(deliveryBody(store, runner.sent.at(-1)!)).toBe(`[대표] '로그인' 했음 #${todo.id}`);
   });
 });
 
@@ -316,7 +327,8 @@ describe("총괄 도구", () => {
     expect(r.text).toContain("철수(cs)");
     const w = store.findMember(project.id, "cs")!;
     expect(w).toMatchObject({ role: "개발", kind: "worker", origin: "runner", status: "working" });
-    expect(runner.sent[0]).toEqual({ memberId: w.id, text: "[총괄] 철수에게\n할 일: 로그인 고치기" });
+    expect(runner.sent[0]!.memberId).toBe(w.id);
+    expect(deliveryBody(store, runner.sent[0]!)).toBe("[총괄] 철수에게\n할 일: 로그인 고치기");
     expect(await call(lead, "team_add", { name: "철수", role: "또" })).toMatchObject({ isError: true });
     expect(await call(lead, "team_add", { name: "영희", role: "또", handle: "cs" })).toMatchObject({ isError: true });
     expect(await call(lead, "team_add", { name: "민수", role: "개발", cwd: "없는/폴더" })).toMatchObject({ isError: true });
@@ -330,7 +342,7 @@ describe("총괄 도구", () => {
 
     const ok = await call(lead, "team_assign", { member: "cs", text: "고치고 배포", user_quote: "로그인 고쳐서 배포까지 진행해 주세요" });
     expect(ok.text).toContain("서버 확인");
-    expect(runner.sent.at(-1)!.text).toMatch(/^\[총괄\] 철수에게\n사용자 요청\(원문, 서버 확인\): "로그인 고쳐서 배포까지 진행해 주세요" #msg_\S+ \d{4}-\d{2}-\d{2}T\S+\n할 일: 고치고 배포$/);
+    expect(deliveryBody(store, runner.sent.at(-1)!)).toMatch(/^\[총괄\] 철수에게\n사용자 요청\(원문, 서버 확인\): "로그인 고쳐서 배포까지 진행해 주세요" #msg_\S+ \d{4}-\d{2}-\d{2}T\S+\n할 일: 고치고 배포$/);
 
     const worker = store.findMember(project.id, "cs")!;
     runner.end(worker.id);

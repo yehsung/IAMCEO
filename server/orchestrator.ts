@@ -1,3 +1,5 @@
+import { createHash, randomUUID } from "node:crypto";
+import { DeliveryRecovery } from "./delivery-recovery.ts";
 import { writeStatuslineWrapper } from "./runner/statusline.ts";
 // Orchestrator: 전달 펌프, 턴 종료 처리, 압축 판단, 띄우기·잠재우기·다시 열기, 승인 근거 확인(spec §4·§6·§7).
 //
@@ -288,7 +290,7 @@ const DEFAULT_TIMINGS: OrchestratorTimings = {
   healthMs: 5000,
 };
 
-/** 입력을 읽지 못하고 끝난 턴을 다시 보내는 횟수 상한. 넘으면 실패로 알린다. */
+/** 설정·병렬 제어 오류의 제한된 재시도 상한. 업무 입력은 전달 복구만 재시도한다. */
 const MAX_TURN_ERROR_ATTEMPTS = 3;
 /** 실행 방식을 바꿀 때 이미 돌던 전달을 기다리는 시간. 넘으면 거부한다. */
 const SWITCH_SETTLE_MS = 5000;
@@ -303,6 +305,7 @@ export interface OrchestratorDeps {
   timings?: Partial<OrchestratorTimings>;
   /** 맥 알림. 시험에서는 넣지 않으면 아무것도 안 한다. */
   notifier?: (title: string, body: string) => void;
+  deliveryRecovery?: DeliveryRecovery;
 }
 
 export interface NewMemberInput {
@@ -381,8 +384,7 @@ interface Turn {
   headless: boolean;
   text: string;
   interrupted: boolean;
-  sessionRetried: boolean;
-  /** 이 턴으로 나간 전달. 입력을 읽기 전에 끝나면 되돌린다. */
+  /** 이 턴으로 나간 전달. 수신 여부는 별도 복구 증거로만 판단한다. */
   deliveries?: Delivery[];
 }
 
@@ -436,13 +438,44 @@ const HELD_RETRY_FACTOR = 5;
 
 const WAKE_POST_KINDS = new Set<string>(["완료", "막힘", "질문"]);
 
+/** Domain references also include orphan answers and todo correction notices. */
+class OrchestratorDeliveryRecovery extends DeliveryRecovery {
+  constructor(private readonly sourceStore: Store, runner: (member: Member) => Runner | null) {
+    super({ store: sourceStore, runner });
+  }
+  override sourceRevision(delivery: Delivery): string | null {
+    const revision = super.sourceRevision(delivery);
+    if (revision !== null) return revision;
+    if (delivery.refType === "decision" && delivery.refId) {
+      const decision = this.sourceStore.getDecision(delivery.refId);
+      if (decision && decision.projectId === delivery.projectId && ["answered", "delivered"].includes(decision.status) &&
+        (!decision.memberId || !this.sourceStore.getMember(decision.memberId)) && this.sourceStore.getConductor(delivery.projectId)?.id === delivery.memberId) {
+        return createHash("sha256").update(JSON.stringify({ decision, memberId: delivery.memberId })).digest("hex");
+      }
+    }
+    if (delivery.refType === "todo" && delivery.refId) {
+      const todo = this.sourceStore.getTodo(delivery.refId);
+      if (todo && todo.projectId === delivery.projectId && (delivery.kind === "system" || delivery.text === formatTodoUndone(todo))) {
+        return createHash("sha256").update(JSON.stringify({ todo, revision: this.sourceStore.todoRevision(todo.id), text: delivery.text, memberId: delivery.memberId })).digest("hex");
+      }
+    }
+    return null;
+  }
+}
+
 /** 실제 실행기로 조립한다. herdr 는 설정의 소켓만 쓴다. */
 export function createOrchestrator(config: Config, store: Store): Orchestrator {
-  const runners = new Map<Backend, Runner>([
-    ["core", new CoreRunner({ contextHome: config.home, coreBin: config.coreBin, socketPath: config.coreSocket, session: "iamceo", stateDir: join(config.home, "core-state"), configDir: join(config.home, "core-config"), claudeBin: config.claudeBin, codexBin: config.codexBin })],
-  ]);
+  const runners = new Map<Backend, Runner>();
+  const deliveryRecovery = new OrchestratorDeliveryRecovery(store, member => runners.get(member.backend ?? store.effectiveBackend()) ?? null);
+  runners.set("core", new CoreRunner({ contextHome: config.home, coreBin: config.coreBin, socketPath: config.coreSocket, session: "iamceo", stateDir: join(config.home, "core-state"), configDir: join(config.home, "core-config"), claudeBin: config.claudeBin, codexBin: config.codexBin }, {
+    recoveryStore: store,
+    repair: deliveryRecovery.repair,
+    // Generation 1 has no post-write drain or external-attach barrier. Unknown
+    // writes stay unresolved; do not manufacture externalInput:false here.
+    quiescence: (_memberId, dispatch) => ({ originalWrite: dispatch.transportState === "rejected" ? "rejected" : dispatch.transportState === "accepted" ? "settled" : "unresolved", externalInput: null }),
+  }));
   const herdr: HerdrQueries = { info: () => detectHerdr(config.herdrSocket), agents: () => listAgents(config.herdrSocket), inspect: (a) => inspectPane(config.herdrSocket, a) };
-  return new Orchestrator({ config, store, runners, herdr, notifier: macNotifier() });
+  return new Orchestrator({ config, store, runners, herdr, deliveryRecovery, notifier: macNotifier() });
 }
 
 /** 인자로 넘기므로 글에 무엇이 있어도 AppleScript 로 해석되지 않는다. */
@@ -463,6 +496,8 @@ function macNotifier(): ((title: string, body: string) => void) | undefined {
 
 export class Orchestrator implements OrchestratorApi {
   readonly store: Store;
+  readonly deliveryRecovery: DeliveryRecovery;
+  private readonly deliveryEpoch = randomUUID();
   private readonly config: OrchestratorDeps["config"];
   private readonly runners: Map<Backend, Runner>;
   private readonly timings: OrchestratorTimings;
@@ -490,6 +525,7 @@ export class Orchestrator implements OrchestratorApi {
     this.store = deps.store;
     this.config = deps.config;
     this.runners = deps.runners;
+    this.deliveryRecovery = deps.deliveryRecovery ?? new OrchestratorDeliveryRecovery(this.store, member => this.runners.get(this.backendOf(member)) ?? null);
     if (!this.runners.has("core")) {
       const selected = this.store.getSettings().backend;
       this.store.setRuntimeBackend(selected && this.runners.has(selected) ? selected : this.runners.has("headless") ? "headless" : "herdr");
@@ -575,12 +611,9 @@ export class Orchestrator implements OrchestratorApi {
   async recover(): Promise<void> {
     // 서버가 강제로 죽었으면 전 턴의 자식이 살아 있다. 먼저 끝내야 같은 세션을 둘이 쓰지 않는다.
     await Promise.all([...this.runners.values()].map((r) => r.reapOrphans?.().catch((e) => console.warn("남은 자식 정리 실패:", (e as Error).message))));
+    for (const d of this.store.listDelivering()) this.deliveryRecovery.beginRecovery(d.id);
     this.store.releaseHeldBeforeConnection();
     await this.refreshConnection();
-    await this.settleInFlight();
-    if (this.runners.has("core")) {
-      for (const d of this.store.listDelivering()) this.hold(d, "delivery_unknown");
-    } else this.store.requeueDelivering();
     const herdrMembers: Member[] = [];
     for (const member of this.store.listAllMembers()) {
       if (member.subagents !== 0) this.store.patchMember(member.id, { subagents: 0 });
@@ -624,33 +657,15 @@ export class Orchestrator implements OrchestratorApi {
     }
     await Promise.all(herdrMembers.map((m) => this.reattachHerdr(m)));
     this.startTick();
+    const checking = this.settleInFlight();
     const ids = new Set(this.store.listUndelivered().map((d) => d.memberId));
-    await Promise.all([...ids].map((id) => this.pump(id)));
+    await Promise.all([checking, ...[...ids].map(id => this.pump(id))]);
     await this.retryOrphans();
   }
 
-  /**
-   * 글을 넣는 도중 서버가 죽으면 전달이 delivering 으로 남는다. 칸에는 이미 들어갔을 수 있어 무조건 되돌리면 같은 입력이 두 번 간다.
-   * herdr 는 세션 기록·화면에서 표지를 찾아, 있으면 받은 것으로 친다. 한 직원의 delivering 은 한 묶음이다.
-   */
+  /** Every backend uses persisted item evidence; legacy missing envelopes stay fenced. */
   private async settleInFlight(): Promise<void> {
-    const runner = this.runners.get("herdr") as HerdrCapable | undefined;
-    if (!runner?.promptSeen) return;
-    const groups = new Map<string, Delivery[]>();
-    for (const d of this.store.listDelivering()) groups.set(d.memberId, [...(groups.get(d.memberId) ?? []), d]);
-    await Promise.all(
-      [...groups].map(async ([memberId, deliveries]) => {
-        const member = this.store.getMember(memberId);
-        if (!member || !member.sessionId) return;
-        const project = this.store.requireProject(member.projectId);
-        if (this.backendOf(member) !== "herdr") return;
-        const markers = deliveries.flatMap((d) => [`#${d.id}`, ...(d.text.match(/#(?:msg|d|t)_[A-Za-z0-9_-]+$|#[0-9a-f]{8}-[0-9a-f-]{27}$/) ?? [])]);
-        const seen = await runner.promptSeen!(this.runnerMember(member, project), markers).catch(() => false);
-        if (!seen) return;
-        for (const d of deliveries) this.markDelivered(d);
-        this.store.appendActivity(memberId, "turn_start", normalizeSpace(deliveries.map((d) => d.text).join(" ")).slice(0, 300));
-      }),
-    );
+    await this.deliveryRecovery.tick();
   }
 
   /** 일하던 칸을 잃었거나 턴이 끊겼다. 대기열이 없으면 아무도 깨우지 않아 팀이 조용히 멈춘다. 총괄이 기다리는 일이라 깨운다. */
@@ -738,6 +753,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private onTick(): void {
+    void this.deliveryRecovery.tick().catch(e => console.warn("전달 확인 실패:", e));
     for (const id of [...this.unattached]) {
       const member = this.store.getMember(id);
       if (member && member.status !== "asleep") void this.reattachHerdr(member);
@@ -855,6 +871,7 @@ export class Orchestrator implements OrchestratorApi {
     for (const waiters of [...this.askWaiters.values(), ...this.inboxWaiters.values()]) {
       for (const wake of waiters) wake();
     }
+    await this.deliveryRecovery.shutdown();
     await Promise.all([...this.runners.values()].map((r) => r.shutdown()));
   }
 
@@ -1244,85 +1261,52 @@ export class Orchestrator implements OrchestratorApi {
     return this.store.listTodoNoticesPending(projectId);
   }
 
-  /** 실패한 글을 같은 id 로 다시 넣는다. 대화의 그 줄이 그대로 바뀌므로 지시가 둘로 늘지 않는다. */
+  /** Legacy retry requests schedule evidence collection and never bypass a fence. */
   async resendMessage(existing: Message): Promise<Message> {
-    if (existing.delivery !== "failed") return existing;
-    const target = existing.targetMemberId ? this.store.getMember(existing.targetMemberId) : null;
-    if (existing.targetMemberId && !target) throw new ApiError(409, "그 직원이 닫혀 다시 보낼 수 없습니다. 새 글로 보내세요");
+    const current = this.store.requireMessage(existing.id);
+    if (current.delivery !== "failed") return current;
+    const target = current.targetMemberId ? this.store.getMember(current.targetMemberId) : null;
+    if (current.targetMemberId && !target) throw new ApiError(409, "그 직원이 닫혀 다시 보낼 수 없습니다. 새 글로 보내세요");
     await this.refreshConnection();
-    this.store.requireReachable(existing.projectId, target);
-    this.store.setMessageDelivery(existing.id, "queued", null);
-    return this.routeUserMessage(this.store.requireProject(existing.projectId), this.store.requireMessage(existing.id), existing.attachments, target);
+    this.store.requireReachable(current.projectId, target);
+    let deliveries = this.store.listDeliveries(current.projectId).filter(d => d.refType === "message" && d.refId === current.id);
+    if (!deliveries.length) deliveries = [this.deliveryRecovery.materializeLegacyMessage(current.id)];
+    for (const d of deliveries) {
+      if (d.status !== "delivered") this.deliveryRecovery.beginRecovery(d.id);
+    }
+    await this.deliveryRecovery.tick();
+    return this.store.requireMessage(current.id);
   }
 
   async sendUserMessage(projectId: string, req: SendMessageReq): Promise<Message> {
     const project = this.store.requireProject(projectId);
     if (project.archived) throw new ApiError(409, "보관된 프로젝트에는 보낼 수 없습니다");
-    const attachments = (req.attachmentIds ?? []).map((id) => this.store.getAttachment(id)).filter((a): a is Attachment => a !== null);
+    const attachments = (req.attachmentIds ?? []).map(id => this.store.getAttachment(id)).filter((a): a is Attachment => a !== null);
     const target = req.targetMemberId ? this.store.requireMember(req.targetMemberId) : null;
     if (target && target.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 직원이 아닙니다");
-
-    const message = this.store.createMessage({
-      id: req.id,
-      projectId,
-      mine: true,
-      who: "나",
-      kind: "나",
-      body: req.text,
-      targetMemberId: target?.id ?? null,
-      targetName: target?.name ?? null,
-      attachments,
-      delivery: "queued",
-    });
-    return this.routeUserMessage(project, message, attachments, target);
-  }
-
-  private async routeUserMessage(project: Project, message: Message, attachments: Attachment[], target: Member | null): Promise<Message> {
-    const projectId = project.id;
-    if (target) {
-      const conductor = this.store.getConductor(projectId);
-      if (conductor && conductor.id !== target.id) {
-        this.store.enqueue({
-          projectId,
-          memberId: conductor.id,
-          kind: "system",
-          text: formatSystem(`대표가 ${target.name}에게 직접 지시했습니다 #${message.id}`),
-          wake: false,
-        });
-      }
-      await this.deliver({
-        projectId,
-        memberId: target.id,
-        kind: "user_message",
-        text: formatUserMessage(message.body, this.attachmentsFor(target, attachments), message.id, true),
-        refType: "message",
-        refId: message.id,
-      });
-      return this.store.requireMessage(message.id);
-    }
-
-    let conductor = this.store.getConductor(projectId);
+    let recipient = target ?? this.store.getConductor(projectId);
     let booting: Promise<void> | null = null;
-    if (!conductor) {
-      if (!project.runnerEnabled) return this.store.setMessageDelivery(message.id, "held", HOLD_NOTES.runner_disabled);
-      // 띄우기를 기다리기 전에 줄을 세운다. 그 사이 온 둘째 말이 첫째를 앞지르지 못한다.
-      const spawn = this.beginConductor(project);
-      conductor = spawn.member;
-      booting = spawn.ready;
-    }
-    this.store.enqueue({
-      projectId,
-      memberId: conductor.id,
-      kind: "user_message",
-      text: formatUserMessage(message.body, this.attachmentsFor(conductor, attachments), message.id, false),
-      refType: "message",
-      refId: message.id,
+    const { value: message, deliveries } = this.store.withDeliveryIntents(() => {
+      const message = this.store.createMessage({ id: req.id, projectId, mine: true, who: "나", kind: "나", body: req.text,
+        targetMemberId: target?.id ?? null, targetName: target?.name ?? null, attachments, delivery: "queued" });
+      if (!recipient && project.runnerEnabled) {
+        const spawn = this.beginConductor(project);
+        recipient = spawn.member;
+        booting = spawn.ready;
+      }
+      if (!recipient) return this.store.setMessageDelivery(message.id, "held", HOLD_NOTES.runner_disabled);
+      return message;
+    }, message => {
+      if (!recipient) return [];
+      const intents: NewDelivery[] = [{ projectId, memberId: recipient.id, kind: "user_message",
+        text: formatUserMessage(message.body, this.attachmentsFor(recipient, attachments), message.id, !!target), refType: "message", refId: message.id }];
+      const conductor = this.store.getConductor(projectId);
+      if (target && conductor && conductor.id !== target.id) intents.push({ projectId, memberId: conductor.id, kind: "system",
+        text: formatSystem(`대표가 ${target.name}에게 직접 지시했습니다 #${message.id}`), wake: false });
+      return intents;
     });
-    if (booting) {
-      // 실패해도 말은 잃지 않는다. 보류로 남겨 실행기가 돌아오면 다시 띄운다.
-      await booting.catch((e) => console.warn(`${project.name} 총괄을 띄우지 못했습니다:`, (e as Error).message));
-    }
-    await this.pump(conductor.id);
+    if (booting) await (booting as Promise<void>).catch(e => console.warn(`${project.name} 총괄을 띄우지 못했습니다:`, (e as Error).message));
+    await Promise.all([...new Set(deliveries.map(d => d.memberId))].map(id => this.pump(id)));
     return this.store.requireMessage(message.id);
   }
 
@@ -1350,42 +1334,29 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   async answerDecision(decisionId: string, req: AnswerReq): Promise<Decision> {
-    const { decision, changed } = this.store.answerDecision(decisionId, req);
+    let booting: Promise<void> | null = null;
+    const { value: { decision, changed }, deliveries } = this.store.withDeliveryIntents(() => this.store.answerDecision(decisionId, req), ({ decision, changed }) => {
+      if (!changed) return [];
+      const asker = decision.memberId ? this.store.getMember(decision.memberId) : null;
+      let conductor = this.store.getConductor(decision.projectId);
+      const project = this.store.requireProject(decision.projectId);
+      if (!asker && !conductor && project.runnerEnabled && !this.store.runnerByAdopt(project.id)) {
+        const spawn = this.beginConductor(project);
+        conductor = spawn.member;
+        booting = spawn.ready;
+      }
+      const recipient = asker ?? conductor;
+      const intents: NewDelivery[] = [];
+      if (recipient && asker?.origin !== "manual") intents.push({ projectId: project.id, memberId: recipient.id, kind: "answer", text: formatAnswer(decision), refType: "decision", refId: decision.id });
+      if (conductor && recipient && conductor.id !== recipient.id) intents.push({ projectId: project.id, memberId: conductor.id, kind: "system",
+        text: formatSystem(`대표가 ${decision.who}의 결재에 답했습니다.\n${formatAnswer(decision)}`), wake: false });
+      return intents;
+    });
     if (!changed) return decision;
+    if (booting) await (booting as Promise<void>).catch(e => console.warn("결재 답을 받을 총괄을 띄우지 못했습니다:", (e as Error).message));
+    this.wakeAll(this.askWaiters, decisionId);
+    await Promise.all([...new Set(deliveries.map(d => d.memberId))].map(id => this.pump(id)));
     const asker = decision.memberId ? this.store.getMember(decision.memberId) : null;
-    let conductor = this.store.getConductor(decision.projectId);
-    if (!asker && !conductor && this.store.requireProject(decision.projectId).runnerEnabled && !this.store.runnerByAdopt(decision.projectId)) {
-      // 받을 사람이 없으면 답이 영영 멈춘다. 못 띄우면 틱이 다시 시도한다.
-      conductor = await this.ensureConductor(decision.projectId).catch((e) => {
-        console.warn("결재 답을 받을 총괄을 띄우지 못했습니다:", (e as Error).message);
-        return null;
-      });
-    }
-    const recipient = asker ?? conductor;
-
-    if (asker?.origin === "manual") {
-      // 직접 띄운 CLI 는 롱폴이나 다음 wait 로 받는다.
-      this.wakeAll(this.askWaiters, decisionId);
-    } else if (recipient) {
-      await this.deliver({
-        projectId: decision.projectId,
-        memberId: recipient.id,
-        kind: "answer",
-        text: formatAnswer(decision),
-        refType: "decision",
-        refId: decision.id,
-      });
-    }
-    if (conductor && recipient && conductor.id !== recipient.id) {
-      await this.deliver({
-        projectId: decision.projectId,
-        memberId: conductor.id,
-        kind: "system",
-        text: formatSystem(`대표가 ${decision.who}의 결재에 답했습니다.\n${formatAnswer(decision)}`),
-        wake: false,
-      });
-    }
-    // 대표가 답했으니 그 직원은 더 이상 '내 답 기다림'이 아니다(턴이 끝날 때까지 남겨 두지 않는다).
     if (asker && asker.origin !== "manual") this.refreshWaiting(asker.id);
     return this.store.requireDecision(decisionId);
   }
@@ -1716,7 +1687,9 @@ export class Orchestrator implements OrchestratorApi {
     if (!project.runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다");
     const name = input.name.trim();
     if (!name) throw new ApiError(400, "이름이 필요합니다");
-    const { member, ready } = this.beginSpawn(project, {
+    const source = input.userQuote?.trim() ? this.findQuoteSource(projectId, input.userQuote) : null;
+    const quote = input.userQuote?.trim() ? { text: input.userQuote, verified: source !== null, source } : null;
+    const { value: { member, ready }, deliveries } = this.store.withDeliveryIntents(() => this.beginSpawn(project, {
       kind: input.kind ?? "worker",
       handle: input.handle ?? this.deriveHandle(projectId, name),
       name,
@@ -1724,10 +1697,15 @@ export class Orchestrator implements OrchestratorApi {
       cli: input.cli ?? "claude",
       modelOverride: input.modelOverride,
       cwd: input.cwd ? this.resolveCwd(project, input.cwd) : undefined,
+    }), ({ member }) => {
+      if (!input.firstInstruction) return [];
+      return [{ projectId, memberId: member.id, kind: "instruction", text: formatInstruction(member.name, input.firstInstruction, quote) }];
     });
-    await ready;
     if (input.parallel) this.runtime(member.id).wantParallel = true;
-    const assigned = input.firstInstruction ? await this.assign(projectId, member.handle, { text: input.firstInstruction, userQuote: input.userQuote, parallel: input.parallel }) : null;
+    await ready;
+    await this.pump(member.id);
+    const assigned = deliveries[0] ? { delivery: this.store.requireDelivery(deliveries[0].id), position: 0,
+      verified: quote?.verified ?? null, needsContext: quote ? quoteNeedsContext(quote) : false } : null;
     this.checkAwakeLimit(projectId);
     return { member: this.store.requireMember(member.id), assigned };
   }
@@ -1738,14 +1716,19 @@ export class Orchestrator implements OrchestratorApi {
     const member = this.store.createMember({ projectId: project.id, ...input, origin: "runner", status: "idle" });
     if (!project.runnerEnabled) return { member, ready: Promise.resolve() };
     const rt = this.runtime(member.id);
-    const ready = (async () => {
-      const runner = this.openRunner(member);
-      const sent = this.desiredConfig(member);
-      const started = await runner.start(this.runnerMember(member, project), this.writeRunFiles(member, project));
-      this.applyStarted(member.id, project, started, sent);
-    })().catch((e) => {
-      this.abandonSpawn(member.id);
-      throw new ApiError(502, `세션을 띄우지 못했습니다: ${(e as Error).message}`);
+    // No external start can observe a source transaction that may still roll back.
+    const ready = new Promise<void>((resolve, reject) => {
+      this.store.afterCommit(() => {
+        void (async () => {
+          const runner = this.openRunner(member);
+          const sent = this.desiredConfig(member);
+          const started = await runner.start(this.runnerMember(member, project), this.writeRunFiles(member, project));
+          this.applyStarted(member.id, project, started, sent);
+        })().then(resolve, e => {
+          this.abandonSpawn(member.id);
+          reject(new ApiError(502, `세션을 띄우지 못했습니다: ${(e as Error).message}`));
+        });
+      });
     });
     rt.starting = ready.then(
       () => {
@@ -2100,26 +2083,20 @@ export class Orchestrator implements OrchestratorApi {
       throw new ApiError(404, `결재를 찾을 수 없습니다: ${input.decisionId}`);
     }
     // 거부된 호출은 보고가 아니다. 턴 마지막 글의 자동 보고를 막으면 안 된다.
-    rt.posted = true;
     // Message 는 자료 하나만 잇는다. 나머지는 본문의 앱 안 링크로 잇는다.
     const extra = files
       .slice(1)
       .map((f) => `[자료: ${f.title.replace(/[\[\]\\]/g, "\\$&")}](#/p/${encodeURIComponent(member.projectId)}/files/${encodeURIComponent(f.id)})`)
       .join("\n\n");
-    const message = this.store.createMessage({
-      projectId: member.projectId,
-      memberId: member.id,
-      who: member.name,
-      kind: input.kind,
+    const conductor = member.kind === "worker" ? this.store.getConductor(member.projectId) : null;
+    const { value: message, deliveries } = this.store.withDeliveryIntents(() => this.store.createMessage({
+      projectId: member.projectId, memberId: member.id, who: member.name, kind: input.kind,
       title: rt.direct ? `(직접) ${input.title}` : input.title,
-      body: [input.body ?? "", extra].filter(Boolean).join("\n\n"),
-      decisionId: input.decisionId ?? null,
-      fileId: files[0]?.id ?? null,
-    });
-    if (member.kind === "worker") {
-      const kindLabel = rt.direct ? `(직접) ${input.kind}` : input.kind;
-      await this.reportToConductor(member, kindLabel, input.title, input.body ?? "", WAKE_POST_KINDS.has(input.kind));
-    }
+      body: [input.body ?? "", extra].filter(Boolean).join("\n\n"), decisionId: input.decisionId ?? null, fileId: files[0]?.id ?? null,
+    }), message => conductor && conductor.id !== member.id ? [{ projectId: member.projectId, memberId: conductor.id, kind: "report",
+      text: formatReport(member.name, rt.direct ? `(직접) ${input.kind}` : input.kind, input.title, message.body), wake: WAKE_POST_KINDS.has(input.kind), refType: "message", refId: message.id }] : []);
+    rt.posted = true;
+    await Promise.all(deliveries.map(d => this.pump(d.memberId)));
     return message;
   }
 
@@ -2133,44 +2110,40 @@ export class Orchestrator implements OrchestratorApi {
   async registerAsk(member: Member, input: AskInput): Promise<{ decision: Decision; blocking: boolean; text: string }> {
     // 보관한 프로젝트의 카드는 화면에 없고 답도 409 다. 올리면 세션이 답 없는 대기에 묶인다.
     if (this.store.requireProject(member.projectId).archived) throw new ApiError(409, "프로젝트가 보관되어 대표가 답할 수 없습니다. 묻지 말고 턴을 끝내세요");
-    const decision = this.store.createDecision({
-      projectId: member.projectId,
-      memberId: member.id,
-      who: member.name,
-      title: input.title,
-      detail: input.detail,
-      options: input.options,
-      rec: input.rec,
-      group: input.group,
-      fileId: input.fileId,
-      images: input.images,
-    });
-    this.store.createMessage({
-      projectId: member.projectId,
-      memberId: member.id,
-      who: member.name,
-      kind: "질문",
-      title: input.title,
-      body: input.detail ?? "",
-      decisionId: decision.id,
-      fileId: input.fileId ?? null,
-      attachments: input.images,
+    const { value: decision, deliveries } = this.store.withDeliveryIntents(() => {
+      const decision = this.store.createDecision({
+        projectId: member.projectId,
+        memberId: member.id,
+        who: member.name,
+        title: input.title,
+        detail: input.detail,
+        options: input.options,
+        rec: input.rec,
+        group: input.group,
+        fileId: input.fileId,
+        images: input.images,
+      });
+      this.store.createMessage({
+        projectId: member.projectId,
+        memberId: member.id,
+        who: member.name,
+        kind: "질문",
+        title: input.title,
+        body: input.detail ?? "",
+        decisionId: decision.id,
+        fileId: input.fileId ?? null,
+        attachments: input.images,
+      });
+      this.store.patchMember(member.id, { status: "waiting" });
+      return decision;
+    }, decision => {
+      const conductor = member.kind === "worker" ? this.store.getConductor(member.projectId) : null;
+      return conductor ? [{ projectId: member.projectId, memberId: conductor.id, kind: "system",
+        text: formatSystem(`${josa(member.name, "이")} 대표에게 질문했습니다: ${normalizeSpace(input.title)} #${decision.id}`), wake: false }] : [];
     });
     this.runtime(member.id).posted = true;
-    this.store.patchMember(member.id, { status: "waiting" });
     this.notifyInbox(`${member.name}의 결재`, input.title);
-    if (member.kind === "worker") {
-      const conductor = this.store.getConductor(member.projectId);
-      if (conductor) {
-        await this.deliver({
-          projectId: member.projectId,
-          memberId: conductor.id,
-          kind: "system",
-          text: formatSystem(`${josa(member.name, "이")} 대표에게 질문했습니다: ${normalizeSpace(input.title)} #${decision.id}`),
-          wake: false,
-        });
-      }
-    }
+    await Promise.all(deliveries.map(d => this.pump(d.memberId)));
     if (member.origin === "manual") return { decision, blocking: true, text: `질문 #${decision.id} 등록됨. 답을 기다립니다` };
     return { decision, blocking: false, text: `질문 #${decision.id} 등록됨. 턴을 끝내세요. 답은 다음 입력으로 옵니다` };
   }
@@ -2364,8 +2337,9 @@ export class Orchestrator implements OrchestratorApi {
       for (const d of pending) this.hold(d, "legacy_session");
       return;
     }
-    // Unknown delivery outcomes require human reconciliation, never a timer-driven retry.
-    if (pending.some((d) => d.holdReason === "delivery_unknown")) return;
+    // Previously attempted entries must be inspected, including legacy held rows.
+    for (const d of pending) if (d.attempts > 0 && this.store.getDeliveryRecovery(d.id)?.phase === "none") this.deliveryRecovery.beginRecovery(d.id);
+    if (this.deliveryRecovery.fenced(memberId)) return;
     const rt = this.runtime(memberId);
     if (rt.closing) return; // 닫는 중에 다시 열면 명부 밖 칸이 남는다.
     if (this.switching) return; // 끝나면 updateSettings 가 다시 민다.
@@ -2468,7 +2442,7 @@ export class Orchestrator implements OrchestratorApi {
     }
     if (!hasWake) return;
 
-    const turn: Turn = { kind: "work", headless: runner.kind === "headless", text: "", interrupted: false, sessionRetried: false };
+    const turn: Turn = { kind: "work", headless: runner.kind === "headless", text: "", interrupted: false };
     rt.turn = turn;
     if (rt.wantParallel !== null) {
       const go = await this.applyParallel(member, project, runner, rt, this.store.listPending(memberId));
@@ -2485,24 +2459,24 @@ export class Orchestrator implements OrchestratorApi {
     rt.posted = false;
     rt.direct = ordered.some((d) => d.kind === "user_message" && d.text.startsWith("[대표 직접]"));
     turn.deliveries = ordered;
-    for (const d of ordered) this.store.setDeliveryStatus(d.id, "delivering", { attempt: true });
-
     const current = this.store.requireMember(memberId);
-    // 재시작 복구에서 이번 글이 칸에 들어갔는지 찾을 표지. 글 끝에 #id 가 없을 때만 쓰인다.
-    const sendOpts = { ...this.writeRunFiles(current, project), marker: `#${ordered.at(-1)!.id}` };
     const sender = runner;
     const sentConfig = this.desiredConfig(current);
-    const result = await this.safeSend(() => sender.send(this.runnerMember(current, project), turn.text, sendOpts, false));
+    let result: SendResult;
+    try { result = await this.sendEnvelope(current, project, sender, ordered, false); }
+    catch (error) {
+      if (rt.turn === turn) rt.turn = null;
+      this.releaseSlots();
+      throw error;
+    }
     if (!result.ok) {
       if (rt.turn === turn) rt.turn = null;
-      this.onSendFailed(current, rt, ordered, result);
       this.releaseSlots();
       return;
     }
     rt.inputBusySince = null;
     // headless 는 턴마다 인자를 새로 정한다. 방금 나간 인자가 곧 지금 설정이다.
     if (!sender.applyConfig && this.store.getMember(memberId)) this.store.setAppliedConfig(memberId, sentConfig);
-    for (const d of ordered) this.markDelivered(d);
     this.store.appendActivity(memberId, "turn_start", normalizeSpace(turn.text).slice(0, 300));
     // 아주 빠른 턴은 send 가 돌아오기 전에 끝날 수 있다. 그때는 이미 정리되어 있다.
     if (rt.turn === turn && this.store.requireMember(memberId).status !== "asleep") this.store.patchMember(memberId, { status: "working", lastError: null });
@@ -2538,7 +2512,7 @@ export class Orchestrator implements OrchestratorApi {
       }
     }
     const held = rt.turn;
-    const control: Turn = { kind: "control", headless: false, text: "", interrupted: false, sessionRetried: false };
+    const control: Turn = { kind: "control", headless: false, text: "", interrupted: false };
     rt.turn = control;
     const result = await this.safeSend(() => runner.applyConfig!(this.runnerMember(member, project), this.writeRunFiles(member, project, true)));
     if (rt.turn === control) rt.turn = held;
@@ -2583,14 +2557,27 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private async sendUrgent(member: Member, project: Project, runner: Runner, urgent: Delivery[]): Promise<void> {
-    const text = urgent.map((d) => d.text).join("\n\n");
-    for (const d of urgent) this.store.setDeliveryStatus(d.id, "delivering", { attempt: true });
-    const result = await this.safeSend(() => runner.send(this.runnerMember(member, project), text, this.writeRunFiles(member, project), true));
-    if (result.ok) {
-      for (const d of urgent) this.markDelivered(d);
-    } else {
-      this.onSendFailed(member, this.runtime(member.id), urgent, result);
-    }
+    await this.sendEnvelope(member, project, runner, orderForBundle(urgent), true);
+  }
+
+  /** Commit the exact envelope before I/O; all ambiguous results belong to recovery. */
+  private async sendEnvelope(member: Member, project: Project, runner: Runner, deliveries: Delivery[], urgent: boolean): Promise<SendResult> {
+    if (!deliveries.length || this.deliveryRecovery.fenced(member.id)) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written" };
+    const observed = runner instanceof CoreRunner ? runner.observationState(member.id) : null;
+    const dispatch = this.deliveryRecovery.prepareDispatch(deliveries.map(d => d.id), observed?.identity ?? {
+      terminalId: member.paneId, sessionId: member.sessionId, sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration, process: null,
+    }, { serverEpoch: this.deliveryEpoch, turn: null, inputEpoch: observed?.inputEpoch ?? null, logs: [], capturedAt: new Date().toISOString() });
+    this.store.transaction(() => {
+      this.store.updateDispatch(dispatch.dispatchId, "prepared", "write_started");
+      for (const d of deliveries) this.store.setDeliveryStatus(d.id, "delivering", { attempt: true });
+    });
+    let result = await this.safeSend(() => runner.send(this.runnerMember(member, project), dispatch.wireText, { ...this.writeRunFiles(member, project), marker: dispatch.bundleMarker }, urgent));
+    if (result.ok && result.receipt && result.receipt.dispatchId !== dispatch.dispatchId) result = { ok: false, reason: "error", retryable: false, deliveryEffect: "unknown", detail: "다른 봉투의 수신 영수증입니다" };
+    // The existing Runner.send success contract guarantees received input,
+    // including core started:false. Bind legacy ACKs to the submitted envelope;
+    // adapters with explicit receipts must identify this exact dispatch.
+    this.deliveryRecovery.recordResult(dispatch.dispatchId, result.ok ? { ...result, receipt: result.receipt ?? { dispatchId: dispatch.dispatchId, receivedAt: new Date().toISOString(), source: "transport" } } : result);
+    return result;
   }
 
   private async safeSend(send: () => Promise<SendResult>): Promise<SendResult> {
@@ -2607,7 +2594,7 @@ export class Orchestrator implements OrchestratorApi {
     rt.wantParallel = null;
     if (want === member.parallel) return true;
     const held = rt.turn;
-    rt.turn = { kind: "control", headless: runner.kind === "headless", text: "", interrupted: false, sessionRetried: false };
+    rt.turn = { kind: "control", headless: runner.kind === "headless", text: "", interrupted: false };
     const result = await this.safeSend(() => runner.setParallel(this.runnerMember(member, project), want, this.writeRunFiles(member, project)));
     rt.turn = held;
     if (result.ok) {
@@ -2761,7 +2748,7 @@ export class Orchestrator implements OrchestratorApi {
   // ---- 압축 ----
   private async beginCompact(member: Member, project: Project, runner: Runner, rt: Runtime, focus: string): Promise<void> {
     rt.compactRequest = null;
-    const turn: Turn = { kind: "compact", headless: runner.kind === "headless", text: "", interrupted: false, sessionRetried: false };
+    const turn: Turn = { kind: "compact", headless: runner.kind === "headless", text: "", interrupted: false };
     rt.turn = turn;
     this.store.patchMember(member.id, { status: "working" });
     this.store.appendActivity(member.id, "compact", `압축 시작 (문맥 ${member.contextPct ?? "?"}%)`);
@@ -2832,7 +2819,11 @@ export class Orchestrator implements OrchestratorApi {
     }
     switch (e.type) {
       case "status":
-        return this.onStatus(member, e.status);
+        if (e.blockedReason !== undefined || e.observation !== undefined) this.store.patchMember(member.id, {
+          ...(e.blockedReason !== undefined ? { blockedReason: e.blockedReason } : {}),
+          ...(e.observation !== undefined ? { observation: e.observation } : {}),
+        });
+        return this.onStatus(this.store.requireMember(member.id), e.status);
       case "turn_end":
         return this.onTurnEnd(member, e);
       case "activity":
@@ -2939,11 +2930,6 @@ export class Orchestrator implements OrchestratorApi {
       return;
     }
 
-    if (e.isError && turn && !turn.interrupted && !turn.sessionRetried && isMissingSessionError(e.errorText)) {
-      await this.retryInNewSession(member, rt, turn);
-      return;
-    }
-
     rt.turn = null;
     const { posted, direct } = rt;
     rt.posted = false;
@@ -2984,56 +2970,12 @@ export class Orchestrator implements OrchestratorApi {
     if (member.kind === "worker") await this.reportToConductor(member, "막힘", "(자동) 턴 오류", errorText, true);
   }
 
-  /**
-   * 턴이 입력을 읽고 일하기 전에 오류로 끝났다(사용량 한도 등). 받은 것으로 표시하면 대표의 답이 사라진다.
-   * 대기로 되돌려 시간을 두고 다시 보내고, 상한을 넘으면 대표에게 돌려준다.
-   */
-  private async onTurnUnread(member: Member, rt: Runtime, deliveries: Delivery[], errorText: string): Promise<void> {
-    this.store.patchMember(member.id, { status: "error", lastError: errorText });
-    // 상한은 전달마다 따로 센다. 방금 들어온 전달이 앞선 전달의 횟수에 끌려 실패하면 안 된다.
-    const live = deliveries.flatMap((d) => this.store.getDelivery(d.id) ?? []);
-    const maxAttempts = Math.max(0, ...live.map((d) => d.attempts));
-    let givenUp = false;
-    let keptRefless = false;
-    for (const d of live) {
-      const giveBack = d.attempts >= MAX_TURN_ERROR_ATTEMPTS && (d.refType === "message" || d.refType === "decision");
-      if (giveBack && d.refId) {
-        givenUp = true;
-        this.store.markFailed(d.id, errorText);
-        if (d.refType === "message") this.store.setMessageDelivery(d.refId, "failed", errorText);
-        else {
-          this.store.reopenDecision(d.refId);
-          this.systemMessage(member.projectId, `${member.name}에게 결재 답을 전하지 못했습니다. 결재함에서 다시 답해 주세요`);
-        }
-        continue;
-      }
-      // 대표에게 돌려줄 글이 없는 전달(보고·지시·알림·완료)은 실패시키면 받을 사람이 영영 모른다. 상한을 넘어도 잃지 않고 다시 보낸다.
-      this.store.requeueDelivered(d.id);
-      if (d.attempts >= MAX_TURN_ERROR_ATTEMPTS) {
-        keptRefless = true;
-        this.hold(d, "turn_error");
-      }
-      if (d.refType === "message" && d.refId) this.store.setMessageDelivery(d.refId, "queued", `턴 오류로 다시 보낼 예정입니다: ${errorText.slice(0, 80)}`);
-      if (d.refType === "decision" && d.refId && this.store.getDecision(d.refId)?.status === "delivered") this.store.setDecisionStatus(d.refId, "answered");
+  /** noOutput diagnoses execution, never whether an input was received. */
+  private async onTurnUnread(member: Member, _rt: Runtime, deliveries: Delivery[], errorText: string): Promise<void> {
+    for (const d of deliveries) {
+      if (this.store.getDelivery(d.id)?.status !== "delivered") this.deliveryRecovery.beginRecovery(d.id);
     }
-    const wait = this.timings.turnErrorRetryMs * Math.max(1, Math.min(maxAttempts, MAX_TURN_ERROR_ATTEMPTS));
-    if (maxAttempts < MAX_TURN_ERROR_ATTEMPTS) {
-      this.systemMessage(member.projectId, `${member.name} 턴이 시작하자마자 끝나 입력을 다시 보냅니다(${maxAttempts}/${MAX_TURN_ERROR_ATTEMPTS}): ${errorText}`);
-      if (rt.retryTimer) clearTimeout(rt.retryTimer);
-      rt.retryTimer = null;
-      rt.holdUntil = Date.now() + wait;
-      this.retryLater(member.id, rt, wait);
-      return;
-    }
-    // 방금 들어온 전달이 섞여 있으면 평소 간격으로, 상한을 넘은 것만 남았으면 멀리 두고 다시 보낸다.
-    if (live.some((d) => d.attempts < MAX_TURN_ERROR_ATTEMPTS && d.refType !== null)) {
-      rt.holdUntil = Date.now() + wait;
-      this.retryLater(member.id, rt, wait);
-    } else if (keptRefless || this.store.listPending(member.id).length > 0) {
-      this.holdHeld(member.id, rt, this.timings.turnErrorRetryMs);
-    }
-    // 상한을 처음 넘길 때만 알린다. 그 뒤의 재시도마다 대화와 총괄을 깨우지 않는다.
-    if (givenUp || maxAttempts === MAX_TURN_ERROR_ATTEMPTS) await this.onTurnError(member, errorText);
+    await this.onTurnError(member, errorText);
   }
 
   /** post 를 안 부른 턴의 마지막 글(§6). 직원은 총괄에게 보고, 총괄·본사 AI 는 대표에게 하는 말. */
@@ -3044,8 +2986,11 @@ export class Orchestrator implements OrchestratorApi {
     }
     const firstLine = normalizeSpace(finalText.split("\n")[0] ?? "").slice(0, 60);
     const title = `${direct ? "(직접) " : ""}(자동) ${firstLine}`;
-    this.store.createMessage({ projectId: member.projectId, memberId: member.id, who: member.name, kind: "알림", title, body: finalText });
-    await this.reportToConductor(member, direct ? "(직접) (자동) 알림" : "(자동) 알림", firstLine, finalText.trim() === firstLine ? "" : finalText, true);
+    const conductor = this.store.getConductor(member.projectId);
+    const { deliveries } = this.store.withDeliveryIntents(() => this.store.createMessage({ projectId: member.projectId, memberId: member.id, who: member.name, kind: "알림", title, body: finalText }), message => conductor && conductor.id !== member.id ? [{
+      projectId: member.projectId, memberId: conductor.id, kind: "report", text: formatReport(member.name, direct ? "(직접) (자동) 알림" : "(자동) 알림", firstLine, finalText.trim() === firstLine ? "" : finalText), wake: true, refType: "message", refId: message.id,
+    }] : []);
+    await Promise.all(deliveries.map(d => this.pump(d.memberId)));
   }
 
   private async resetSession(member: Member): Promise<Member> {
@@ -3057,34 +3002,6 @@ export class Orchestrator implements OrchestratorApi {
     const started = await runner.start(this.runnerMember(fresh, project), this.writeRunFiles(fresh, project, false));
     this.applyStarted(member.id, project, started, sent);
     return this.store.requireMember(member.id);
-  }
-
-  /** --resume 이 세션을 못 찾았다. 턴 자리는 그대로 두고 새 세션에 같은 글을 넣는다. */
-  private async retryInNewSession(member: Member, rt: Runtime, turn: Turn): Promise<void> {
-    const project = this.store.requireProject(member.projectId);
-    const runner = this.runnerOf(member);
-    const note = this.newSessionNote(member);
-    turn.sessionRetried = true;
-    turn.text = `${note}\n\n${turn.text}`;
-    this.systemMessage(member.projectId, `${member.name}의 이전 세션을 찾지 못해 새 세션으로 이어갑니다`);
-    let result: SendResult;
-    try {
-      const fresh = await this.resetSession(member);
-      if (fresh.parallel) {
-        this.store.patchMember(member.id, { parallel: false });
-        rt.wantParallel = true;
-      }
-      const ready = this.store.requireMember(member.id);
-      if (rt.wantParallel !== null) await this.applyParallel(ready, project, runner, rt);
-      const current = this.store.requireMember(member.id);
-      result = await this.safeSend(() => runner.send(this.runnerMember(current, project), turn.text, this.writeRunFiles(current, project), false));
-    } catch (e) {
-      result = { ok: false, reason: "error", detail: (e as Error).message, retryable: false };
-    }
-    if (result.ok) return;
-    rt.turn = null;
-    await this.onTurnError(member, result.detail ?? "새 세션을 띄우지 못했습니다");
-    this.releaseSlots();
   }
 
   /**
@@ -3241,6 +3158,7 @@ export class Orchestrator implements OrchestratorApi {
       permissionMode: settings.permissionMode,
       kind: member.kind,
       origin: member.origin,
+      sessionGeneration: this.store.getMember(member.id) ? this.store.memberRevisions(member.id).sessionGeneration : undefined,
     };
   }
 

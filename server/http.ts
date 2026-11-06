@@ -6,7 +6,8 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { z } from "zod";
 import { EFFORTS, fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type HerdrInfo, type Member, type MessagePageOptions, type SyncCursor, type SyncSnapshot } from "../shared/types.ts";
-import type { ServerCapabilities } from "../shared/operations.ts";
+import type { OperationReceipt, ServerCapabilities } from "../shared/operations.ts";
+import type { DeliveryRecoveryService } from "./service-contracts.ts";
 import { ARTIFACT_CSP } from "../shared/artifact-kit.ts";
 import type { Bus } from "./bus.ts";
 import { VERSION, type Config } from "./config.ts";
@@ -21,6 +22,8 @@ export interface ServerContext {
   store: Store;
   bus: Bus;
   orch: OrchestratorApi;
+  /** 읽기 전용 notice와 복구 예약 포트. 호스트가 소유한 엔진만 주입한다. */
+  delivery?: Pick<DeliveryRecoveryService, "notices" | "memberNotices" | "recover">;
   /** 시험용. 기본은 Tailscale 주소 감지. */
   detectHosts?: () => string[];
 }
@@ -211,6 +214,26 @@ const SettingsSchema = z
   .strict();
 const AgentToolSchema = z.object({ name: nonEmpty, args: z.record(z.string(), z.unknown()).optional() });
 const AskWaitSchema = z.object({ decisionId: nonEmpty, timeoutMs: z.number().int().positive().optional() });
+const revision = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const operationIdSchema = z.uuid();
+const FreshSessionSchema = z.strictObject({ operationId: operationIdSchema, expectedSessionGeneration: revision });
+const terminalIdentity = { operationId: operationIdSchema, expectedSessionGeneration: revision, claimId: z.string().min(1).max(256) };
+const terminalKey = z.enum(["enter", "up", "down", "esc", "tab", "ctrl+c", "backspace"]);
+const TerminalControlV2Schema = z.discriminatedUnion("action", [
+  z.strictObject({ ...terminalIdentity, action: z.literal("claim") }),
+  z.strictObject({ ...terminalIdentity, action: z.literal("release") }),
+  z.strictObject({ ...terminalIdentity, action: z.literal("input"), inputSequence: revision, text: z.string().min(1).max(131072) }),
+  z.strictObject({ ...terminalIdentity, action: z.literal("key"), inputSequence: revision, key: terminalKey }),
+]);
+const RecoverySchema = z.discriminatedUnion("action", [
+  z.strictObject({ operationId: operationIdSchema, expectedVersion: revision.min(1), action: z.literal("recheck") }),
+  z.strictObject({ operationId: operationIdSchema, expectedVersion: revision.min(1), action: z.literal("stop_retry") }),
+  z.strictObject({ operationId: operationIdSchema, expectedVersion: revision.min(1), action: z.literal("retry_with_risk"), acceptDuplicateRisk: z.literal(true) }),
+]);
+const AgentOperationSchema = AgentToolSchema.extend({ operationId: operationIdSchema }).strict();
+const ManualInboxSchema = z.strictObject({ timeoutMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional() });
+const ManualAckSchema = z.strictObject({ batchId: z.string().min(1).max(256) });
+const AnswerV2Schema = AnswerSchema.extend({ expectedVersion: nonEmpty }).strict();
 const JoinSchema = z.object({
   project: z.string().optional(),
   cwd: z.string().optional(),
@@ -223,6 +246,51 @@ const JoinSchema = z.object({
 
 const ASK_WAIT_MAX_MS = 50_000;
 
+function contractV2(req: Request): boolean {
+  const contract = req.headers.get("X-IAMCEO-Contract");
+  if (contract !== null && contract !== "1" && contract !== "2") throw new ApiError(400, "쓰기 계약 버전이 잘못되었습니다", "INVALID_CONTRACT");
+  return contract === "2";
+}
+
+function precondition(req: Request): { expectedRevision: number } {
+  const value = req.headers.get("If-Match");
+  if (!value || !/^"[0-9]+"$/.test(value) || !Number.isSafeInteger(Number(value.slice(1, -1)))) {
+    throw new ApiError(400, "If-Match에 검토한 정수 revision이 필요합니다", "INVALID_REVISION");
+  }
+  return { expectedRevision: Number(value.slice(1, -1)) };
+}
+
+function publicFields<T extends object>(value: T, keys: readonly (keyof T)[]): object {
+  return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
+}
+
+function receiptMember(member: Member): object {
+  return publicFields(member, ["id", "projectId", "handle", "name", "role", "kind", "origin", "wasAdopted", "cli", "backend",
+    "modelOverride", "effortOverride", "appliedModel", "appliedEffort", "status", "now", "next", "cwd", "sessionId", "paneId",
+    "contextPct", "contextWindow", "contextWindowSource", "subagents", "parallel", "queuedCount", "lastError", "updatedAt", "createdAt",
+    "statusObservation", "blockedReason", "subagentState", "nowAt", "manualActivityAt", "executionState", "lifecycleState", "contextState"]);
+}
+
+/** receipt의 내부 request/token 등 임의 필드를 직렬화하지 않는다. */
+function operationResponse(receipt: OperationReceipt): Response {
+  const { operationId, kind, projectId, memberId, createdAt, updatedAt, status } = receipt;
+  const base = { operationId, kind, projectId, memberId, createdAt, updatedAt, status };
+  if (receipt.status === "pending") return Response.json(base);
+  if (receipt.status !== "applied") return Response.json({ ...base, code: receipt.code, error: receipt.error });
+  let result;
+  switch (receipt.kind) {
+    case "fresh_session": result = { member: receiptMember(receipt.result.member), sessionGeneration: receipt.result.sessionGeneration }; break;
+    case "terminal_control": {
+      const { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt } = receipt.result;
+      result = { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt }; break;
+    }
+    case "settings": result = { settings: publicFields(receipt.result.settings, ["backend", "permissionMode", "ranks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault", "contextWindows", "maxAwakeWorkers", "notifyMac", "boardTidyHours"]), revision: receipt.result.revision }; break;
+    case "member_config": result = { member: receiptMember(receipt.result.member), configRevision: receipt.result.configRevision, sessionGeneration: receipt.result.sessionGeneration }; break;
+    case "todo_done": result = { todo: publicFields(receipt.result.todo, ["id", "projectId", "memberId", "who", "title", "detail", "done", "doneAt", "createdAt", "outcome", "closeReason", "closedBy"]), revision: receipt.result.revision }; break;
+  }
+  return Response.json({ ...base, result });
+}
+
 async function parseBody<S extends z.ZodType>(req: Request, schema: S): Promise<z.output<S>> {
   let raw: unknown;
   try {
@@ -230,6 +298,10 @@ async function parseBody<S extends z.ZodType>(req: Request, schema: S): Promise<
   } catch {
     throw new ApiError(400, "JSON 본문이 필요합니다");
   }
+  return validateBody(raw, schema);
+}
+
+function validateBody<S extends z.ZodType>(raw: unknown, schema: S): z.output<S> {
   const parsed = schema.safeParse(raw);
   if (parsed.success) return parsed.data;
   const issue = parsed.error.issues[0];
@@ -385,8 +457,38 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       return Response.json(store.getMember(id!) ?? { ok: true });
     };
   };
+  const activeProject = (id: string): void => {
+    if (store.requireProject(id).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+  };
 
   return [
+    route("GET", "/api/operations/:id", async (_req, url, [id]) => {
+      strictQuery(url, []);
+      if (!operationIdSchema.safeParse(id).success) throw new ApiError(400, "operationId가 잘못되었습니다");
+      if (!orch.operation) throw new ApiError(501, "작업 결과 조회를 지원하지 않습니다");
+      const receipt = await orch.operation(id!);
+      if (receipt.projectId !== null) store.requireProject(receipt.projectId);
+      if (receipt.memberId !== null && store.requireMember(receipt.memberId).projectId !== receipt.projectId) throw new ApiError(404, "작업을 찾을 수 없습니다");
+      return operationResponse(receipt);
+    }),
+    route("GET", "/api/members/:id/delivery-notices", (_req, url, [id]) => {
+      activeProject(store.requireMember(id!).projectId);
+      strictQuery(url, ["limit", "before"]);
+      const rawLimit = url.searchParams.get("limit");
+      if (rawLimit !== null && (!/^[0-9]+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 100)) throw new ApiError(400, "조회 개수가 올바르지 않습니다");
+      const before = url.searchParams.get("before");
+      if (before !== null && (!before || before.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(before))) throw new ApiError(400, "전달 조회 위치가 올바르지 않습니다");
+      if (!ctx.delivery) throw new ApiError(501, "전달 조회를 지원하지 않습니다");
+      return Response.json(ctx.delivery.memberNotices(id!, { limit: rawLimit === null ? 50 : Number(rawLimit), before: before ?? undefined }));
+    }),
+    route("POST", "/api/deliveries/:id/recovery", async (req, url, [id]) => {
+      activeProject(store.requireDelivery(id!).projectId);
+      strictQuery(url, []);
+      const body = await parseBody(req, RecoverySchema);
+      const result = orch.recoverDelivery ? await orch.recoverDelivery(id!, body) : ctx.delivery ? await ctx.delivery.recover(id!, body) : null;
+      if (!result) throw new ApiError(501, "전달 복구를 지원하지 않습니다");
+      return Response.json(result, { status: result.outcome === "stopped" ? 200 : 202 });
+    }),
     route("GET", "/api/capabilities", (_req, url) => {
       strictQuery(url, []);
       const body: ServerCapabilities = { contractVersion: 2, capabilities: {
@@ -409,7 +511,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
         protocol: 2, requestedProjectId, projectStatus,
         bootstrap: { version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr,
           home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides },
-        state: projectStatus === "ok" ? store.projectState(requestedProjectId!) : null,
+        state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!), ...(ctx.delivery ? { deliveryNotices: ctx.delivery.notices(requestedProjectId!) } : {}) } : null,
         revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },
         cursor: bus.cursor,
       };
@@ -449,7 +551,8 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     route("GET", "/api/projects/:id/state", (_req, _url, [id]) => {
       // 보관한 프로젝트는 없는 것으로 친다. 화면이 본사로 돌아간다.
       if (store.requireProject(id!).archived) throw new ApiError(404, "보관된 프로젝트입니다");
-      return Response.json(store.projectState(id!));
+      const state = store.projectState(id!);
+      return Response.json(ctx.delivery ? { ...state, deliveryNotices: ctx.delivery.notices(id!) } : state);
     }),
     route("GET", "/api/projects/:id/messages", (_req, url, [id]) => {
       store.requireProject(id!);
@@ -542,7 +645,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     }),
     route("POST", "/api/decisions/:id/answer", async (req, _url, [id]) => {
       store.requireDecision(id!);
-      const body = await parseBody(req, AnswerSchema);
+      const body = await parseBody(req, contractV2(req) ? AnswerV2Schema : AnswerSchema);
       const duplicate = store.checkAnswer(id!, body);
       if (duplicate) return Response.json(duplicate);
       const decision = store.requireDecision(id!);
@@ -566,6 +669,12 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     }),
     route("POST", "/api/todos/:id/done", async (req, _url, [id]) => {
       const todo = store.requireTodo(id!);
+      if (contractV2(req)) {
+        const expected = precondition(req);
+        const body = await parseBody(req, TodoDoneSchema.strict());
+        if (!orch.setTodoDoneV2) throw new ApiError(501, "검토 버전이 있는 업무 변경을 지원하지 않습니다");
+        return Response.json(await orch.setTodoDoneV2(id!, body, expected));
+      }
       const { done } = await parseBody(req, TodoDoneSchema);
       if (todo.done === done) return Response.json(todo);
       return Response.json(await orch.setTodoDone(id!, done));
@@ -576,12 +685,23 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     }),
     route("POST", "/api/members/:id/terminal/control", async (req, _url, [id]) => {
       store.requireMember(id!);
+      if (contractV2(req)) {
+        const body = await parseBody(req, TerminalControlV2Schema);
+        if (!orch.terminalControlV2) throw new ApiError(501, "작업 ID가 있는 터미널 조작을 지원하지 않습니다");
+        return operationResponse(await orch.terminalControlV2(id!, body));
+      }
       if (!orch.terminalControl) throw new ApiError(501, "터미널 조작을 지원하지 않습니다");
       return Response.json(await orch.terminalControl(id!, await parseBody(req, TerminalControlSchema)));
     }),
     route("GET", "/api/members/:id", (_req, _url, [id]) => Response.json(store.requireMember(id!))),
     route("PATCH", "/api/members/:id", async (req, _url, [id]) => {
       store.requireMember(id!);
+      if (contractV2(req)) {
+        const expected = precondition(req);
+        const body = await parseBody(req, PatchMemberSchema);
+        if (!orch.patchMemberConfigV2) throw new ApiError(501, "검토 버전이 있는 직원 설정을 지원하지 않습니다");
+        return Response.json(await orch.patchMemberConfigV2(id!, body, expected));
+      }
       return Response.json(await orch.patchMemberConfig(id!, await parseBody(req, PatchMemberSchema)));
     }),
     route("GET", "/api/members/:id/activity", (_req, url, [id]) => {
@@ -608,10 +728,19 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       const body = (await req.clone().text()).trim() ? await parseBody(req, SleepSchema) : {};
       return memberAction((id) => orch.memberSleep(id, { force: body.force }))(req, url, params);
     }),
-    route("POST", "/api/members/:id/fresh-session", memberAction(async (id) => {
-      if (!orch.freshMemberSession) throw new ApiError(501, "새 세션 시작을 지원하지 않습니다");
-      return orch.freshMemberSession(id);
-    })),
+    route("POST", "/api/members/:id/fresh-session", async (req, url, params) => {
+      const id = params[0]!;
+      store.requireMember(id);
+      if (contractV2(req)) {
+        const body = await parseBody(req, FreshSessionSchema);
+        if (!orch.freshMemberSessionV2) throw new ApiError(501, "작업 ID가 있는 새 세션을 지원하지 않습니다");
+        return operationResponse(await orch.freshMemberSessionV2(id, body));
+      }
+      return memberAction(async (id) => {
+        if (!orch.freshMemberSession) throw new ApiError(501, "새 세션 시작을 지원하지 않습니다");
+        return orch.freshMemberSession(id);
+      })(req, url, params);
+    }),
     route("POST", "/api/members/:id/resume", memberAction((id) => orch.memberResume(id))),
     route("POST", "/api/members/:id/compact", memberAction((id) => orch.memberCompact(id))),
     route("POST", "/api/members/:id/interrupt", memberAction((id) => orch.memberInterrupt(id))),
@@ -641,19 +770,54 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       store.requireProject(id!);
       return Response.json(await orch.adopt(id!, await parseBody(req, AdoptSchema)));
     }),
-    route("PUT", "/api/settings", async (req) => Response.json(await orch.updateSettings(await parseBody(req, SettingsSchema)))),
+    route("PUT", "/api/settings", async (req) => {
+      if (contractV2(req)) {
+        const expected = precondition(req);
+        const body = await parseBody(req, SettingsSchema);
+        if (!orch.updateSettingsV2) throw new ApiError(501, "검토 버전이 있는 설정 변경을 지원하지 않습니다");
+        return Response.json(await orch.updateSettingsV2(body, expected));
+      }
+      return Response.json(await orch.updateSettings(await parseBody(req, SettingsSchema)));
+    }),
   ];
 }
 
 function agentRoutes({ store, orch }: ServerContext, member: Member): Route[] {
   const route = (method: string, path: string, handler: Handler): Route => ({ method, pattern: new RegExp(`^${path}$`), handler });
+  const requireManualInbox = (): void => {
+    if (member.origin !== "manual") throw new ApiError(403, "직접 실행한 직원만 수신함을 사용할 수 있습니다");
+    if (store.requireProject(member.projectId).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+  };
   return [
     route("GET", "/agent/tools", async () => Response.json(await orch.listAgentTools(member))),
     route("POST", "/agent/tool", async (req) => {
-      const { name, args } = await parseBody(req, AgentToolSchema);
+      const body = await parseBody(req, contractV2(req) ? AgentOperationSchema : AgentToolSchema.extend({ operationId: operationIdSchema.optional() }).passthrough());
+      const { name, args, operationId } = body.operationId ? validateBody(body, AgentOperationSchema) : body;
+      if (operationId) {
+        if (!orch.handleAgentOperation) throw new ApiError(501, "작업 ID가 있는 도구 호출을 지원하지 않습니다");
+        store.touchMember(member.id);
+        orch.noteManualCall?.(member, name);
+        return Response.json(await orch.handleAgentOperation(member, name, args ?? {}, { operationId }, req.signal));
+      }
       store.touchMember(member.id);
       orch.noteManualCall?.(member, name);
       return Response.json(await orch.handleAgentTool(member, name, args ?? {}, req.signal));
+    }),
+    route("POST", "/agent/inbox/wait", async (req, url) => {
+      requireManualInbox();
+      strictQuery(url, []);
+      const { timeoutMs } = await parseBody(req, ManualInboxSchema);
+      if (!orch.manualInbox) throw new ApiError(501, "수신함 batch 조회를 지원하지 않습니다");
+      store.touchMember(member.id);
+      orch.noteManualCall?.(member, "inbox_wait");
+      return Response.json(await orch.manualInbox(member.id, Math.min(timeoutMs ?? ASK_WAIT_MAX_MS, ASK_WAIT_MAX_MS), req.signal));
+    }),
+    route("POST", "/agent/inbox/ack", async (req, url) => {
+      requireManualInbox();
+      strictQuery(url, []);
+      const body = await parseBody(req, ManualAckSchema);
+      if (!orch.acknowledgeManualInbox) throw new ApiError(501, "수신함 ACK를 지원하지 않습니다");
+      return Response.json(await orch.acknowledgeManualInbox(member.id, body));
     }),
     route("POST", "/agent/ask/wait", async (req) => {
       const { decisionId, timeoutMs } = await parseBody(req, AskWaitSchema);
@@ -926,7 +1090,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     const url = new URL(req.url);
     // 인증 실패와 검증 오류도 사용자 데이터처럼 캐시에 남기지 않는다.
     const noStore = (response: Response | undefined): Response | undefined => {
-      if (response && (url.pathname.startsWith("/api/") || url.pathname === "/ws")) response.headers.set("Cache-Control", "no-store");
+      if (response && (url.pathname.startsWith("/api/") || url.pathname.startsWith("/agent/") || url.pathname === "/ws")) response.headers.set("Cache-Control", "no-store");
       return response;
     };
     if (!isIpAllowed(server.requestIP(req)?.address, ipRule)) return noStore(fail(403, "허용되지 않은 주소입니다"));

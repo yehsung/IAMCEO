@@ -45,7 +45,7 @@ import type {
 } from "../shared/types.ts";
 import { DEFAULT_RANKS, fileKindOf } from "../shared/types.ts";
 import type { MemberRevisions, OperationKind, OperationReceipt, OperationStatus, SyncRevisions, ManualInboxBatch } from "../shared/operations.ts";
-import type { DeliveryDispatch, DeliveryIntentResult, DeliveryRecoveryRecord, LifecycleJournal, DecisionFollowUp, MessageReadStore, ProjectPatchStore, RunnerRecoveryStore, TerminalLease, RunnerRecoveryState, ReportReferences, BoardReview } from "./service-contracts.ts";
+import type { DeliveryDispatch, DeliveryIntentResult, DeliveryRecoveryRecord, DomainRecorder, LifecycleJournal, DecisionFollowUp, MessageReadStore, ProjectPatchStore, RunnerRecoveryStore, TerminalLease, RunnerRecoveryState, ReportReferences, BoardReview } from "./service-contracts.ts";
 import type { RunnerTerminalIdentity } from "./runner/types.ts";
 import type { Bus } from "./bus.ts";
 import { newId, nowIso } from "./db.ts";
@@ -100,7 +100,7 @@ export interface NewMember {
 export type MemberPatch = Partial<
   Pick<
     Member,
-    "name" | "role" | "cli" | "origin" | "backend" | "modelOverride" | "effortOverride" | "status" | "now" | "next" | "cwd" | "sessionId" | "paneId" | "contextPct" | "contextWindow" | "contextWindowSource" | "subagents" | "parallel" | "lastError"
+    "name" | "role" | "cli" | "origin" | "backend" | "modelOverride" | "effortOverride" | "status" | "now" | "next" | "cwd" | "sessionId" | "paneId" | "contextPct" | "contextWindow" | "contextWindowSource" | "subagents" | "parallel" | "lastError" | "statusObservation" | "blockedReason" | "subagentState" | "nowAt" | "manualActivityAt"
   >
 >;
 
@@ -302,6 +302,11 @@ function toMember(r: Row): Member {
     lastError: r.last_error,
     updatedAt: r.updated_at,
     createdAt: r.created_at,
+    statusObservation: r.status_observation_json === null ? null : json<Member["statusObservation"]>(r.status_observation_json),
+    blockedReason: r.blocked_reason,
+    subagentState: r.subagent_state_json === null ? null : json<Member["subagentState"]>(r.subagent_state_json),
+    nowAt: r.now_at,
+    manualActivityAt: r.manual_activity_at,
     ...(r.context_member_id ? { contextState: { measurement: r.measurement_json === null ? null : json<CoreContextState["measurement"]>(r.measurement_json), compaction: r.compaction_json === null ? null : json<CoreContextState["compaction"]>(r.compaction_json) } } : {}),
   };
 }
@@ -497,6 +502,11 @@ const MEMBER_COLUMNS: Record<keyof MemberPatch, string> = {
   subagents: "subagents",
   parallel: "parallel",
   lastError: "last_error",
+  statusObservation: "status_observation_json",
+  blockedReason: "blocked_reason",
+  subagentState: "subagent_state_json",
+  nowAt: "now_at",
+  manualActivityAt: "manual_activity_at",
 };
 
 function checkMemberText(name: string | undefined, role: string | undefined, kind: MemberKind): void {
@@ -568,6 +578,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   constructor(
     db: Database,
     private readonly bus: Bus,
+    private readonly recorder?: DomainRecorder,
   ) {
     this.sqlTransaction = db.transaction.bind(db);
     // 기존 import의 store.db.transaction도 같은 commit 큐를 사용한다.
@@ -914,7 +925,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
          (SELECT COUNT(*) FROM decisions d WHERE d.project_id = p.id AND d.status = 'open') AS decision_count,
          (SELECT COUNT(*) FROM todos t WHERE t.project_id = p.id AND t.done = 0) AS todo_count,
          (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id AND m.status = 'working') AS working_count,
-         (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id AND m.status = 'blocked') AS blocked_count,
+         (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id AND m.status = 'blocked' AND m.blocked_reason = 'permission') AS blocked_count,
          (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id AND m.status = 'error') AS error_count,
          (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id) AS member_count
        FROM projects p WHERE p.archived = 0 ORDER BY p.is_hq DESC, p.created_at, p.rowid`,
@@ -1065,18 +1076,28 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       if (!sessionChanged && exactSource(before.contextWindowSource) && patch.contextWindowSource === "screen") {
         patch = { ...patch, contextWindow: before.contextWindow, contextWindowSource: before.contextWindowSource };
       }
-      const { set, values } = buildSet(patch, MEMBER_COLUMNS);
+      // blocked 자체는 입력 보류다. 새 진입에서 이전 승인의 증거를 재사용하지 않는다.
+      if (patch.status !== undefined && patch.status !== "blocked") patch = { ...patch, blockedReason: null };
+      else if (patch.status === "blocked" && before.status !== "blocked" && patch.blockedReason === undefined) patch = { ...patch, blockedReason: "status_unknown" };
+      const at = nowIso();
+      if (patch.now !== undefined && patch.nowAt === undefined) patch = { ...patch, nowAt: at };
+      const { set, values } = buildSet({
+        ...patch,
+        statusObservation: patch.statusObservation == null ? patch.statusObservation : JSON.stringify(patch.statusObservation),
+        subagentState: patch.subagentState == null ? patch.subagentState : JSON.stringify(patch.subagentState),
+      }, MEMBER_COLUMNS);
       if (set.length === 0) return before;
       if (["name", "role", "cli", "modelOverride", "effortOverride", "cwd", "backend"].some((key) => patch[key as keyof MemberPatch] !== undefined && patch[key as keyof MemberPatch] !== before[key as keyof MemberPatch])) set.push("config_revision = config_revision + 1");
       set.push("updated_at = ?");
-      values.push(nowIso());
+      values.push(at);
       this.run(`UPDATE members SET ${set.join(", ")} WHERE id = ?`, ...values, id);
       if ((patch.modelOverride !== undefined && patch.modelOverride !== before.modelOverride) || (patch.sessionId !== undefined && before.sessionId !== null && patch.sessionId !== before.sessionId) || (patch.cli !== undefined && patch.cli !== before.cli)) {
         this.run("UPDATE member_context_state SET measurement_json = NULL, updated_at = ? WHERE member_id = ?", nowIso(), id);
       }
       const member = this.requireMember(id);
+      this.recorder?.member(before, member);
       this.emit({ type: "member", member });
-      if (member.status !== before.status) this.emitProjects();
+      if (member.status !== before.status || member.blockedReason !== before.blockedReason) this.emitProjects();
       return member;
     });
   }
@@ -1120,9 +1141,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return raw ? json<AdoptedInfo>(raw) : null;
   }
 
-  /** 도구 호출 때 updatedAt 만 갱신한다. 잦아서 방송하지 않는다. */
+  /** 도구 활동 시각은 일반 수정 시각과 분리한다. 잦아서 방송하지 않는다. */
   touchMember(id: string): void {
-    this.run("UPDATE members SET updated_at = ? WHERE id = ?", nowIso(), id);
+    const at = nowIso();
+    this.run("UPDATE members SET updated_at = ?, manual_activity_at = CASE WHEN origin = 'manual' THEN ? ELSE manual_activity_at END WHERE id = ?", at, at, id);
   }
 
   /** 그 직원의 전달·활동도 함께 사라진다(CASCADE). 대화·결재 기록은 남는다. */
@@ -1209,6 +1231,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         nowIso(),
       );
       const decision = this.requireDecision(id);
+      this.recorder?.decision(null, decision);
       this.bumpBoard(decision.projectId);
       this.emit({ type: "decision", decision });
       this.emitProjects();
@@ -1245,7 +1268,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.transaction(() => {
       const existing = this.checkAnswer(id, req);
       if (existing) return { decision: existing, changed: false };
-      const a = this.normalizeAnswer(this.requireDecision(id), req);
+      const before = this.requireDecision(id);
+      const a = this.normalizeAnswer(before, req);
       this.run(
         "UPDATE decisions SET status = 'answered', choice = ?, note = ?, batch = ?, answered_at = ?, updated_at = ?, last_choice = NULL, last_note = NULL, reopen_note = NULL WHERE id = ?",
         a.choice,
@@ -1256,6 +1280,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         id,
       );
       const decision = this.requireDecision(id);
+      this.recorder?.decision(before, decision);
       this.bumpBoard(decision.projectId);
       this.emit({ type: "decision", decision });
       this.emitProjects();
@@ -1266,7 +1291,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   /** 전달됨·닫힘으로 옮기거나, 전달이 실패하면 answered 로 되돌린다. 닫으면 inbox 에서 빠진다. */
   setDecisionStatus(id: string, status: Extract<DecisionStatus, "answered" | "delivered" | "closed">): Decision {
     return this.transaction(() => {
-      this.requireDecision(id);
+      const before = this.requireDecision(id);
       const stamp = this.nextDecisionStamp(id);
       if (status === "delivered") {
         this.run("UPDATE decisions SET status = 'delivered', delivered_at = COALESCE(delivered_at, ?), updated_at = ? WHERE id = ?", nowIso(), stamp, id);
@@ -1276,6 +1301,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         this.run("UPDATE decisions SET status = 'closed', updated_at = ? WHERE id = ?", stamp, id);
       }
       const decision = this.requireDecision(id);
+      this.recorder?.decision(before, decision);
       this.bumpBoard(decision.projectId);
       this.emit({ type: "decision", decision });
       this.emitProjects();
@@ -1303,6 +1329,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         id,
       );
       const decision = this.requireDecision(id);
+      this.recorder?.decision(before, decision);
       this.bumpBoard(decision.projectId);
       this.emit({ type: "decision", decision });
       this.emitProjects();
@@ -1313,7 +1340,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   /** 끝내 전달하지 못한 답은 대표가 다시 답할 수 있게 카드를 연다. 메모의 사본은 전달 글뿐이었으니 직전 답을 카드에 남긴다. 닫힌 카드를 다시 열 때도 쓴다(닫은 이유는 지운다). */
   reopenDecision(id: string, why = "전달하지 못했습니다. 다시 결정해 주세요"): Decision {
     return this.transaction(() => {
-      this.requireDecision(id);
+      const before = this.requireDecision(id);
       this.run(
         "UPDATE decisions SET status = 'open', last_choice = COALESCE(choice, last_choice), last_note = COALESCE(note, last_note), reopen_note = ?, choice = NULL, note = NULL, batch = 0, answered_at = NULL, delivered_at = NULL, close_kind = NULL, close_reason = NULL, close_quote = NULL, closed_by = NULL, closed_at = NULL, updated_at = ? WHERE id = ?",
         why,
@@ -1321,6 +1348,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         id,
       );
       const decision = this.requireDecision(id);
+      this.recorder?.decision(before, decision);
       this.bumpBoard(decision.projectId);
       this.emit({ type: "decision", decision });
       this.emitProjects();
@@ -1663,6 +1691,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         input.deliveryNote ?? null,
       );
       const message = this.requireMessage(id);
+      // 보관 중 늦은 manual 보고도 저장한다. 푸시는 활성 프로젝트의 실제 작성자만 대상이다.
+      if (this.recorder && !this.requireProject(message.projectId).archived && (!message.memberId || this.getMember(message.memberId)?.projectId === message.projectId)) this.recorder.message(message);
       this.bumpBoard(message.projectId);
       this.emit({ type: "message", message });
       return message;

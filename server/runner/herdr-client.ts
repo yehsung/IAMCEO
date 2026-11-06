@@ -2,9 +2,10 @@
 // events.subscribe 만 연결을 유지하며 줄마다 이벤트를 보낸다.
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import type { DeliveryEffect } from "./types.ts";
 
 export class HerdrError extends Error {
-  constructor(readonly code: string, message: string) { super(message); this.name = "HerdrError"; }
+  constructor(readonly code: string, message: string, readonly deliveryEffect: DeliveryEffect = "unknown") { super(message); this.name = "HerdrError"; }
 }
 
 export const DEFAULT_SOCKET = () => join(homedir(), ".config", "herdr", "herdr.sock");
@@ -18,18 +19,17 @@ export function isForbiddenTestSocket(socketPath: string): boolean {
   return path.startsWith(herdrHome) && !/\/sessions\/iamceo-test-[^/]+\/herdr\.sock$/.test(path);
 }
 
-const READ_ONLY = new Set(["ping", "session.snapshot", "agent.list", "agent.get", "agent.read", "pane.read", "pane.get", "pane.list", "tab.get", "tab.list", "workspace.get", "workspace.list", "layout.export", "pane.layout", "pane.process_info", "server.agent_manifests", "events.subscribe"]);
-
 let seq = 0;
 
 export function rpc<T = any>(socketPath: string, method: string, params: Record<string, unknown> = {}, timeoutMs = 8000): Promise<T> {
-  if (!READ_ONLY.has(method) && isForbiddenTestSocket(socketPath)) {
-    return Promise.reject(new Error(`시험 중 라이브 herdr 쓰기 차단: ${method} → ${socketPath}`));
+  if (isForbiddenTestSocket(socketPath)) {
+    return Promise.reject(new HerdrError("forbidden", `시험 중 라이브 herdr 읽기·쓰기 차단: ${method}`, "not_written"));
   }
   const id = `iamceo-${++seq}`;
   return new Promise<T>((res, rej) => {
     let buf = "";
     let settled = false;
+    let written = false;
     let sock: { end(): void } | null = null;
     const decoder = new TextDecoder();
     const finish = (fn: () => void) => {
@@ -39,25 +39,41 @@ export function rpc<T = any>(socketPath: string, method: string, params: Record<
       fn();
       try { sock?.end(); } catch { /* 이미 닫힘 */ }
     };
-    const timer = setTimeout(() => finish(() => rej(new HerdrError("timeout", `${method}: ${timeoutMs}ms 안에 답 없음`))), timeoutMs);
-    const down = (e: unknown) => finish(() => rej(new HerdrError("down", `herdr 소켓 연결 실패: ${String(e)}`)));
+    const fail = (code: string, detail: string) => finish(() => rej(new HerdrError(code, detail, written ? "unknown" : "not_written")));
+    const timer = setTimeout(() => fail("timeout", `${method}: ${timeoutMs}ms 안에 답 없음`), timeoutMs);
+    const down = (e: unknown) => fail("down", `herdr 소켓 연결 실패: ${String(e)}`);
     Bun.connect({
       unix: socketPath,
       socket: {
-        open(s) { sock = s; s.write(JSON.stringify({ id, method, params }) + "\n"); },
+        open(s) {
+          sock = s;
+          if (settled) { s.end(); return; }
+          written = true; // A partial write is already an uncertain external effect.
+          try { s.write(JSON.stringify({ id, method, params }) + "\n"); } catch (e) { down(e); }
+        },
         data(_s, chunk) {
           buf += decoder.decode(chunk, { stream: true });
-          const nl = buf.indexOf("\n");
-          if (nl < 0) return;
-          const line = buf.slice(0, nl);
-          let msg: any;
-          try { msg = JSON.parse(line); }
-          catch { return finish(() => rej(new HerdrError("bad_json", line.slice(0, 200)))); }
-          if (msg.error) return finish(() => rej(new HerdrError(String(msg.error.code ?? "error"), String(msg.error.message ?? "herdr 오류"))));
-          finish(() => res(msg.result as T));
+          let nl: number;
+          while (!settled && (nl = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nl);
+            buf = buf.slice(nl + 1);
+            if (!line.trim()) continue;
+            let msg: any;
+            try { msg = JSON.parse(line); }
+            catch { return fail("bad_json", `${method}: 잘못된 응답`); }
+            if (!msg || typeof msg !== "object" || Array.isArray(msg)) return fail("protocol", `${method}: 잘못된 응답`);
+            if (msg.id !== id) continue;
+            if (msg.error) {
+              const code = String(msg.error.code ?? "error");
+              const rejected = ["agent_blocked", "agent_not_ready", "pane_not_found", "agent_not_found", "agent_pane_not_found", "agent_not_running", "invalid_params", "invalid_argument"].includes(code);
+              return finish(() => rej(new HerdrError(code, String(msg.error.message ?? "herdr 오류"), rejected ? "rejected" : "unknown")));
+            }
+            if (!("result" in msg)) return fail("protocol", `${method}: result 누락`);
+            finish(() => res(msg.result as T));
+          }
         },
-        close() { finish(() => rej(new HerdrError("closed", `${method}: 답 없이 연결이 닫힘`))); },
-        error(_s, e) { finish(() => rej(new HerdrError("down", String(e)))); },
+        close() { fail("closed", `${method}: 답 없이 연결이 닫힘`); },
+        error(_s, e) { down(e); },
         connectError(_s, e) { down(e); },
       },
     }).catch(down);
@@ -73,6 +89,7 @@ export function subscribe(socketPath: string, subscriptions: Array<Record<string
   onEvent(e: HerdrEvent): void;
   onClose(reason: string): void;
 }): Subscription {
+  if (isForbiddenTestSocket(socketPath)) throw new HerdrError("forbidden", "시험 중 라이브 herdr 구독 차단", "not_written");
   const id = `iamceo-sub-${++seq}`;
   const decoder = new TextDecoder();
   let buf = "";

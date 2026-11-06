@@ -1,54 +1,106 @@
-// rollout 은 읽기만 한다. 누적 total_token_usage 는 문맥 크기가 아니므로 쓰지 않는다.
-import { closeSync, openSync, readSync, statSync } from "node:fs";
-import { join } from "node:path";
+// Context may start at a bounded tail. Never use this collector to prove delivery absence.
+import { constants, closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { CONTEXT_SESSION_RE } from "./statusline.ts";
 import { validWindow, type ContextReading } from "./context.ts";
+import { jsonObject, parseCodexSessionMeta, providerLogPath, readJsonlRange, type JsonlCursor } from "./delivery-evidence.ts";
 
-const paths = new Map<string, string>();
-const TAIL_BYTES = 128 * 1024;
-// session_meta 는 지침도 담아 첫 줄이 길 수 있다. 경로 확인 때 한 번만 읽는다.
-const META_BYTES = 1024 * 1024;
-function slice(path: string, tail: boolean): string {
-  const fd = openSync(path, "r");
-  try {
-    const size = statSync(path).size;
-    const start = tail ? Math.max(0, size - TAIL_BYTES) : 0;
-    const bytes = Buffer.alloc(Math.min(size, tail ? TAIL_BYTES : META_BYTES));
-    const text = bytes.subarray(0, readSync(fd, bytes, 0, bytes.length, start)).toString("utf8");
-    return start ? text.slice(text.indexOf("\n") + 1) : text;
-  } finally { closeSync(fd); }
+/** Only current-request usage; cached_input is already included in input_tokens. */
+export function parseCodexTokenCount(value: unknown, sessionId: string, model: string | null = null): ContextReading | null {
+  const entry = jsonObject(value), payload = jsonObject(entry?.payload), info = jsonObject(payload?.info);
+  if (entry?.type !== "event_msg" || payload?.type !== "token_count") return null;
+  if (!info) return { sessionId, tokens: null, shownPct: null, model, exact: null };
+  const usage = jsonObject(info.last_token_usage);
+  const validTokens = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0;
+  // A malformed explicit total must not be replaced by a different interpretation.
+  const tokens = usage?.total_tokens !== undefined ? usage.total_tokens :
+    validTokens(usage?.input_tokens) && validTokens(usage?.output_tokens) ? usage.input_tokens + usage.output_tokens : null;
+  return { sessionId, tokens: validTokens(tokens) ? tokens : null, shownPct: null, model,
+    exact: validWindow(info.model_context_window) ? { window: info.model_context_window, source: "codex" } : null };
+}
+export interface CodexContextCursor {
+  log: JsonlCursor;
+  sessionId: string;
+  model: string | null;
+  reading: ContextReading | null;
+  measuredAt: string | null;
+}
+export interface CodexContextSample {
+  reading: ContextReading | null;
+  measuredAt: string | null;
+  cursor: CodexContextCursor | null;
+  complete: boolean;
+  code: string;
+}
+/** First tick: metadata + at most 1MiB tail; later ticks: at most 1MiB of new bytes. */
+export function readCodexContextFile(home: string, path: string, sessionId: string, previous?: CodexContextCursor | null): CodexContextSample {
+  const unknown = (code: string): CodexContextSample => ({ reading: null, measuredAt: null, cursor: null, complete: false, code });
+  if (!CONTEXT_SESSION_RE.test(sessionId)) return unknown("session_unbound");
+  const target = providerLogPath(join(home, "sessions"), path);
+  if (!target) return unknown("path_unavailable");
+  // Revalidate metadata even for a cached path: filenames and prior cache entries are not identity.
+  const head = readJsonlRange(join(home, "sessions"), target, null, { maxBytes: 1024 * 1024 });
+  const meta = parseCodexSessionMeta(head.records[0]?.value);
+  if (!meta || meta.sessionId !== sessionId || head.records[0]?.start !== 0 || !head.cursor) return unknown("session_conflict");
+  if (previous && (previous.sessionId !== sessionId || previous.log.fileIdentity !== head.cursor.fileIdentity)) previous = null;
+  let start = 0;
+  if (!previous) {
+    let fd: number;
+    try { fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    catch { return unknown("file_unreadable"); }
+    try {
+      const stat = fstatSync(fd);
+      if (`${stat.dev}:${stat.ino}:${stat.birthtimeMs}` !== head.cursor.fileIdentity) return unknown("file_changed");
+      start = Math.max(0, stat.size - 1024 * 1024);
+      if (start) {
+        const bytes = Buffer.alloc(Math.min(1024 * 1024, stat.size - start));
+        const length = readSync(fd, bytes, 0, bytes.length, start);
+        const newline = bytes.subarray(0, length).indexOf(10);
+        if (newline < 0) return unknown("partial_log");
+        start += newline + 1;
+      }
+    } finally { closeSync(fd); }
+  }
+  const range = readJsonlRange(join(home, "sessions"), target, previous?.log, { maxBytes: 1024 * 1024, startOffset: start, fileIdentity: head.cursor.fileIdentity });
+  if (range.code === "file_changed" && previous) return readCodexContextFile(home, path, sessionId);
+  if (!range.cursor || !["complete_range", "corrupt_log", "partial_log", "scan_pending"].includes(range.code)) return unknown(range.code);
+  let model = previous?.model ?? meta.model;
+  let reading = previous?.reading ?? null;
+  let measuredAt = previous?.measuredAt ?? null;
+  for (const record of range.records) {
+    const entry = jsonObject(record.value), payload = jsonObject(entry?.payload);
+    if (entry?.type === "turn_context" || (entry?.type === "response_item" && payload?.type === "message" && payload.role === "user") || (entry?.type === "event_msg" && payload?.type === "user_message")) {
+      if (entry.type === "turn_context" && typeof payload?.model === "string") model = payload.model;
+      reading = null;
+      measuredAt = null;
+    }
+    if (entry?.type === "compacted") { reading = null; measuredAt = null; }
+    const parsed = parseCodexTokenCount(entry, sessionId, model);
+    if (parsed) {
+      reading = parsed;
+      measuredAt = typeof entry?.timestamp === "string" && Number.isFinite(Date.parse(entry.timestamp)) ? entry.timestamp : null;
+    }
+  }
+  return { reading, measuredAt, cursor: { log: range.cursor, sessionId, model, reading, measuredAt }, complete: range.complete, code: range.code };
 }
 
+const cache = new Map<string, { path: string; cursor: CodexContextCursor | null }>();
+/** W0-compatible entry point. Provider home is always an explicit argument. */
 export function readCodexContext(home: string, sessionId: string): ContextReading | null {
-  if (!CONTEXT_SESSION_RE.test(sessionId)) return null;
+  if (!isAbsolute(home) || !CONTEXT_SESSION_RE.test(sessionId)) return null;
   const key = `${home}\0${sessionId}`;
   try {
-    let path = paths.get(key);
-    if (!path) {
-      const glob = new Bun.Glob(`*/*/*/rollout-*-${sessionId}.jsonl`);
-      for (const candidate of glob.scanSync({ cwd: join(home, "sessions"), absolute: true, onlyFiles: true })) {
-        try {
-          const meta = JSON.parse(slice(candidate, false).split("\n")[0]!);
-          if (meta.type === "session_meta" && meta.payload?.id === sessionId) { path = candidate; break; }
-        } catch { /* 부분 기록·다른 세션 */ }
-      }
-      if (!path) return null;
-      paths.set(key, path);
+    const paths: string[] = [];
+    for (const candidate of new Bun.Glob(`**/rollout-*-${sessionId}.jsonl`).scanSync({ cwd: join(home, "sessions"), absolute: true, onlyFiles: true, followSymlinks: false })) {
+      const head = readJsonlRange(join(home, "sessions"), candidate, null, { maxBytes: 1024 * 1024 });
+      if (parseCodexSessionMeta(head.records[0]?.value)?.sessionId === sessionId) paths.push(candidate);
     }
-    const lines = slice(path, true).split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const line = JSON.parse(lines[i]!);
-        if (line.type !== "event_msg" || line.payload?.type !== "token_count") continue;
-        const info = line.payload.info;
-        if (!validWindow(info?.model_context_window)) continue;
-        const usage = info.last_token_usage;
-        const tokens = usage?.total_tokens ?? (typeof usage?.input_tokens === "number" && typeof usage?.output_tokens === "number" ? usage.input_tokens + usage.output_tokens : null);
-        const lastTokens = typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0 ? tokens : null;
-        // TUI 예약량 계산을 가정하지 않는다. 마지막 요청 토큰 / 실측 창 크기.
-        return { sessionId, tokens: lastTokens, shownPct: null, model: null, exact: { window: info.model_context_window, source: "codex" } };
-      } catch { /* 마지막 줄이 아직 덜 써졌으면 앞의 완성된 이벤트를 쓴다. */ }
-    }
-  } catch { paths.delete(key); }
-  return null;
+    if (paths.length !== 1) { cache.delete(key); return null; }
+    const path = paths[0]!;
+    const previous = cache.get(key);
+    const sample = readCodexContextFile(home, path, sessionId, previous?.path === path ? previous.cursor : null);
+    if (cache.size >= 128 && !cache.has(key)) cache.delete(cache.keys().next().value!);
+    cache.set(key, { path, cursor: sample.cursor });
+    return sample.reading;
+  } catch { cache.delete(key); return null; }
 }

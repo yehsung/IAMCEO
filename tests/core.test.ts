@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { deflateSync } from "node:zlib";
 import { DEFAULT_RANKS, type WsEvent } from "../shared/types.ts";
 import { Bus } from "../server/bus.ts";
 import { generateAccessCode, loadConfig, updateConfigFile } from "../server/config.ts";
@@ -468,11 +467,9 @@ describe("files", () => {
 
   test.skipIf(process.platform !== "darwin")("HEIC→JPEG: 진짜 HEIC 는 sips 로 바꾼다", async () => {
     const dir = tempDir();
-    const png = join(dir, "src.png");
-    await Bun.write(png, makePng(16, 16));
     const heic = join(dir, "photo.heic");
-    const proc = Bun.spawn(["sips", "-s", "format", "heic", png, "--out", heic], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-    expect(await proc.exited).toBe(0);
+    // 미리 소프트웨어 인코딩한 32×32 빨간 HEIC. 샌드박스의 하드웨어 인코더에 의존하지 않는다.
+    await Bun.write(heic, Buffer.from("AAAAGGZ0eXBoZWljAAAAAG1pZjFoZWljAAABP21ldGEAAAAAAAAAIWhkbHIAAAAAAAAAAHBpY3QAAAAAAAAAAAAAAAAAAAAADnBpdG0AAAAAAAEAAAAeaWxvYwAAAABEAAABAAEAAAABAAABXwAAABcAAAAoaWluZgAAAAAAAQAAABppbmZlAgAAAAABAABodmMxSW1hZ2UAAAAAvmlwcnAAAACgaXBjbwAAAHRodmNDAQFgAAAAkAAAAAAAHvAA/P34+AAADwOgAAEAGEABDAH//wFgAAADAJAAAAMAAAMAHpWYCaEAAQAoQgEBAWAAAAMAkAAAAwAAAwAeoEIIWWVmuTK8BaAgAAADACAAAAMAIaIAAQAGRAHBc9CJAAAAFGlzcGUAAAAAAAAAIAAAACAAAAAQcGl4aQAAAAADCAgIAAAAFmlwbWEAAAAAAAAAAQABA4GCAwAAAB9tZGF0AAAAEygBrxOA9SSj/+SVH/2F54eu6uA=", "base64"));
 
     const saved = await importPath(tempDir(), heic);
     expect(saved).toMatchObject({ name: "photo.jpg", mime: "image/jpeg" });
@@ -481,32 +478,6 @@ describe("files", () => {
     expect([...head]).toEqual([0xff, 0xd8]);
   });
 });
-
-function makePng(w: number, h: number): Uint8Array {
-  const crcTable = Array.from({ length: 256 }, (_, n) => {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    return c >>> 0;
-  });
-  const crc = (b: Uint8Array) => {
-    let c = 0xffffffff;
-    for (const x of b) c = crcTable[(c ^ x) & 0xff]! ^ (c >>> 8);
-    return (c ^ 0xffffffff) >>> 0;
-  };
-  const u32 = (n: number) => new Uint8Array([n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]);
-  const chunk = (type: string, data: Uint8Array) => {
-    const typed = Buffer.concat([Buffer.from(type), data]);
-    return Buffer.concat([u32(data.length), typed, u32(crc(typed))]);
-  };
-  const raw = Buffer.alloc((w * 3 + 1) * h);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) raw[y * (w * 3 + 1) + 1 + x * 3] = 255;
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    chunk("IHDR", Buffer.concat([u32(w), u32(h), Buffer.from([8, 2, 0, 0, 0])])),
-    chunk("IDAT", deflateSync(raw)),
-    chunk("IEND", new Uint8Array()),
-  ]);
-}
 
 
 test("Finder PATH discovers installed user CLIs without a login shell and honors explicit paths", async () => {

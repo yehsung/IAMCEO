@@ -189,10 +189,10 @@ describe("저장과 초기화", () => {
     expect(t.s.requireMember(t.m.id)).toMatchObject({ contextWindow: null, contextPct: null, sessionId: null });
   });
 
-  for (const fromHead of [false, true]) test(`마이그레이션 ${fromHead ? "HEAD" : "N-1"}: 창 크기 칸을 더하고, herdr 가 부풀려 적은 % 는 비운다(headless 값은 둔다)`, () => {
+  for (const beforeProvider of [false, true]) test(`마이그레이션 ${beforeProvider ? "provider 이력 전" : "context window 전"}: 창 크기 칸을 더하고, herdr 가 부풀려 적은 % 는 비운다(headless 값은 둔다)`, () => {
     const path = join(mkdtempSync(join(tmpdir(), "iamceo-ctx-migrate-")), "old.db");
-    const before = MIGRATIONS.findIndex((m) => m.includes(fromHead ? "chief_cli" : "context_window"));
-    expect(before).toBe(fromHead ? 12 : MIGRATIONS.length - 1);
+    const before = MIGRATIONS.findIndex((m) => m.includes(beforeProvider ? "ADD COLUMN chief_cli" : "ADD COLUMN context_window "));
+    expect(before).toBeGreaterThan(0);
     const db = new Database(path, { create: true });
     db.exec("PRAGMA foreign_keys = ON");
     for (let v = 0; v < before; v++) db.exec(MIGRATIONS[v]!);

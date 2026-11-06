@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, statSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Member, Backend } from "../shared/types.ts";
@@ -164,27 +165,34 @@ test("member creation and optimistic decisions use authenticated REST contracts"
 test("pre-migration backup preserves old rows, provider and session without mutating the snapshot", () => {
   const home = mkdtempSync(join(tmpdir(), "iamceo-migration-backup-"));
   const path = join(home, "iamceo.db");
-  const db = openDb(path);
-  const store = new Store(db, new Bus());
-  const member = store.createMember({ projectId: "hq", name: "이전 직원", handle: "legacy", kind: "worker", backend: "headless", cli: "codex", sessionId: "old-native-session", paneId: "old:p7" });
-  // Reconstruct the production schema before the provider-history migration (and the context-window one after it).
-  const providerMigration = MIGRATIONS.findIndex((m) => m.includes("member_session_history"));
-  expect(providerMigration).toBe(MIGRATIONS.length - 2);
-  db.exec("DROP TABLE member_session_history; ALTER TABLE projects DROP COLUMN chief_cli; ALTER TABLE members DROP COLUMN session_generation; ALTER TABLE members DROP COLUMN context_window; ALTER TABLE members DROP COLUMN context_window_source;");
+  // Build the actual historical prefix; later migrations may add dependent indexes/triggers.
+  const providerMigration = MIGRATIONS.findIndex((m) => m.includes("CREATE TABLE member_session_history"));
+  expect(providerMigration).toBeGreaterThan(0);
+  const db = new Database(path, { create: true });
+  db.exec("PRAGMA foreign_keys = ON");
+  for (let v = 0; v < providerMigration; v++) db.exec(MIGRATIONS[v]!);
   db.exec(`PRAGMA user_version = ${providerMigration}`);
+  const at = "2026-01-01T00:00:00.000Z";
+  db.query("INSERT INTO projects (id,name,is_hq,cwd,runner_enabled,created_at,updated_at) VALUES ('hq','본사',1,?,1,?,?)").run(home, at, at);
+  db.query(`INSERT INTO members (id,project_id,name,handle,kind,origin,status,cwd,backend,cli,session_id,pane_id,token,created_at,updated_at)
+    VALUES ('m_legacy','hq','이전 직원','legacy','worker','runner','idle',?,'headless','codex','old-native-session','old:p7','legacy-token',?,?)`).run(home, at, at);
   db.close();
   const upgraded = openDb(path);
   const migrated = new Store(upgraded, new Bus());
-  expect(migrated.requireMember(member.id)).toMatchObject({ cli: "codex", backend: "headless", sessionId: "old-native-session", paneId: "old:p7" });
+  expect(migrated.requireMember("m_legacy")).toMatchObject({ cli: "codex", backend: "headless", sessionId: "old-native-session", paneId: "old:p7" });
   const backups = readdirSync(home).filter((name) => name.includes(".pre-v"));
   expect(backups).toHaveLength(1);
   expect(statSync(join(home, backups[0]!)).mode & 0o777).toBe(0o600);
   // Read the snapshot without openDb (which would itself migrate it).
-  const { Database } = require("bun:sqlite");
-  const snapshot = new Database(join(home, backups[0]!), { readonly: true });
+  const backupPath = join(home, backups[0]!);
+  const before = readFileSync(backupPath);
+  const snapshot = new Database(backupPath, { readonly: true });
   expect(snapshot.query("PRAGMA user_version").get()).toEqual({ user_version: providerMigration });
-  expect(snapshot.query("SELECT cli,session_id,pane_id FROM members WHERE id=?").get(member.id)).toEqual({ cli: "codex", session_id: "old-native-session", pane_id: "old:p7" });
+  expect(snapshot.query("SELECT cli,session_id,pane_id FROM members WHERE id='m_legacy'").get()).toEqual({ cli: "codex", session_id: "old-native-session", pane_id: "old:p7" });
+  expect(snapshot.query("SELECT name FROM sqlite_schema WHERE name IN ('member_session_history','delivery_recovery','push_devices')").all()).toEqual([]);
+  expect(snapshot.query<{ name: string }, []>("PRAGMA table_info(members)").all().map((column) => column.name)).not.toContain("context_window");
   snapshot.close();
+  expect(readFileSync(backupPath)).toEqual(before);
   upgraded.close();
 });
 

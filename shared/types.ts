@@ -56,6 +56,72 @@ export interface ProjectSummary extends Pick<Project, "id" | "name" | "isHq" | "
 
 export type ContextWindowSource = "statusline" | "codex" | "headless" | "screen";
 
+/** blocked는 입력 보류다. permission만 증거로 확인된 승인 대기로 집계한다. */
+export type BlockedReason = "permission" | "selection" | "setup" | "status_unknown";
+export interface StatusObservation {
+  source: Backend | "manual";
+  observedAt: string | null;
+  freshness: "fresh" | "stale" | "unknown";
+  ownership: "verified" | "conflict" | "unknown";
+  consecutiveFailures: number;
+  error: { code: string; note: string } | null;
+}
+/** 미수집/추정은 기존 subagents=0과 다르며 실제 자식 lifecycle 수집을 약속하지 않는다. */
+export interface SubagentState {
+  quality: "exact" | "estimated" | "unknown" | "unsupported";
+  count: number | null;
+  observedAt: string | null;
+  sessionGeneration: number;
+}
+export interface MemberExecutionState {
+  runId: string;
+  sessionGeneration: number;
+  turn: number | null;
+  deliveryIds: string[];
+  phase: "received" | "starting" | "running" | "ended" | "interrupted" | "unknown";
+  inputReceivedAt: string | null;
+  startedAt: string | null;
+  lastProgressAt: string | null;
+  endedAt: string | null;
+  result: "success" | "error" | "interrupted" | null;
+  /** 제한된 진단 code이며 원시 화면/프롬프트가 아니다. */
+  reason: string | null;
+  exitCode: number | null;
+}
+export interface MemberLifecycleState {
+  operationId: string;
+  sessionGeneration: number;
+  phase: "starting" | "starting_unknown" | "stopping" | "stopping_unknown" | "reconnecting" | "quarantined";
+  reason: string | null;
+  updatedAt: string;
+}
+export interface ContextMeasurement {
+  sessionId: string;
+  sessionGeneration: number;
+  turn: number | null;
+  model: string | null;
+  tokens: number | null;
+  window: number | null;
+  source: ContextWindowSource | "stored" | "model" | "default";
+  quality: "exact" | "estimated";
+  measuredAt: string;
+  /** 같은 세션/세대/모델/완료 턴의 표본. 단순 경과시간으로 결정하지 않는다. */
+  fresh: boolean;
+}
+export interface ContextCompaction {
+  id: string;
+  trigger: "auto" | "manual";
+  phase: "queued" | "sending" | "running" | "succeeded" | "failed" | "uncertain";
+  reason: "working" | "manual_control" | "draft" | "blocked" | "backend_down" | "measurement_pending" | "send_uncertain" | "completion_timeout" | "provider_error" | "interrupted" | "session_changed" | "user_resolved" | null;
+  requestedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+export interface CoreContextState {
+  measurement: ContextMeasurement | null;
+  compaction: ContextCompaction | null;
+}
+
 export interface Member {
   id: string;
   projectId: string;
@@ -91,6 +157,16 @@ export interface Member {
   lastError: string | null;
   updatedAt: string;
   createdAt: string;
+  /** 추가 메타데이터의 누락은 구형/미지원이다. 기존 status/문맥 창 필드는 유지한다. */
+  statusObservation?: StatusObservation | null;
+  blockedReason?: BlockedReason | null;
+  subagentState?: SubagentState | null;
+  /** now는 마지막 자기 보고이며 일반 updatedAt과 별도로 기록한다. next 생략 시 보존한다. */
+  nowAt?: string | null;
+  manualActivityAt?: string | null;
+  executionState?: MemberExecutionState | null;
+  lifecycleState?: MemberLifecycleState | null;
+  contextState?: CoreContextState | null;
 }
 
 export interface DecisionOption { k: string; label: string; desc?: string }
@@ -190,6 +266,17 @@ export interface Message {
   deliveryNote: string | null;
 }
 
+export type MessageScope = { kind: "project" } | { kind: "member"; memberId: string };
+export interface MessagePageOptions { scope?: MessageScope; cursor?: string; limit?: number }
+/** items는(at BINARY,id BINARY) 오름차순. cursor는 불투명하며 hasOlder=false이면 null. */
+export interface MessagePage {
+  projectId: string;
+  scope: MessageScope;
+  items: Message[];
+  nextCursor: string | null;
+  hasOlder: boolean;
+}
+
 /** 자료의 모양. artifact 는 GET /api/files/:id/artifact 의 html 을 격리 칸에 그린다. table·code 는 body 에 원문이 있다(1MB 이하). */
 export type FileKind = "document" | "artifact" | "image" | "pdf" | "table" | "code" | "video" | "audio" | "file";
 export interface FileDoc {
@@ -225,6 +312,82 @@ export interface Delivery {
   lastError: string | null;
   createdAt: string;
   deliveredAt: string | null;
+  /** 실제 재시도 큐의 예약 시각. 미지원/예약 없음은 누락 또는 null. */
+  nextAttemptAt?: string | null;
+}
+
+export type EvidenceVerdict = "present" | "absent" | "unknown";
+/** 공개 증거 요약. 원시 화면/프롬프트/로그 경로/lease ID는 포함하지 않는다. */
+export interface DeliveryEvidence {
+  source: "claude_log" | "codex_log" | "core_screen" | "herdr_screen" | "transport";
+  verdict: EvidenceVerdict;
+  location: "received_input" | "composer" | "history" | "none";
+  code: string;
+  complete: boolean;
+  checkedAt: string;
+}
+export type DeliveryFinding = "received" | "not_received" | "draft_only" | "wait" | "unknown";
+export type DeliveryRecoveryPhase = "none" | "checking" | "waiting" | "retry_wait" | "needs_owner" | "resolved" | "stopped";
+export type DeliveryRecoveryAction = "recheck" | "retry_with_risk" | "stop_retry";
+export interface MemberDeliverySummary {
+  memberId: string;
+  /** undelivered/unknown/delivering은 배타적. 나머지는 보조 집합이므로 더하지 않는다. */
+  undeliveredCount: number;
+  unknownCount: number;
+  deliveringCount: number;
+  checkingCount: number;
+  needsOwnerCount: number;
+  waitingBehindCount: number;
+  oldestAt: string | null;
+  reasons: { code: string; count: number; note: string }[];
+}
+export interface DeliveryNotices {
+  version: 2;
+  /** state.members와 같은 순서, 0건도 포함. 최근 메시지가 아닌 전체 DB 집계. */
+  members: MemberDeliverySummary[];
+  unassigned: { undeliveredCount: number; unknownCount: number; needsOwnerCount: number };
+}
+export interface DeliveryNoticeItem {
+  id: string;
+  deliveryId: string | null;
+  messageId: string | null;
+  memberId: string;
+  projectId: string;
+  kind: DeliveryKind;
+  status: DeliveryStatus;
+  phase: Exclude<DeliveryRecoveryPhase, "resolved" | "stopped">;
+  holdReason: string | null;
+  reason: string | null;
+  note: string;
+  /** 실제 recovery는 양의 안전 정수, 가상 message:<id> 항목은 0. */
+  version: number;
+  createdAt: string;
+  lastCheckedAt: string | null;
+  nextCheckAt: string | null;
+  autoAttempts: number;
+  evidence: DeliveryEvidence[];
+  recommendation: { code: string; text: string } | null;
+  allowedActions: DeliveryRecoveryAction[];
+  ref: { type: "message" | "decision" | "todo"; id: string } | null;
+  preview: string;
+}
+export interface DeliveryNoticePage {
+  memberId: string;
+  summary: MemberDeliverySummary;
+  items: DeliveryNoticeItem[];
+  nextBefore: string | null;
+}
+export interface DeliveryNoticePageOptions { limit?: number; before?: string }
+/** retry만 중복 위험 동의를 요구한다. 나머지 action에는 해당 키를 보내지 않는다. */
+export type DeliveryRecoveryRequest = { operationId: string; expectedVersion: number } & (
+  | { action: "retry_with_risk"; acceptDuplicateRisk: true }
+  | { action: "recheck" | "stop_retry"; acceptDuplicateRisk?: never }
+);
+export interface DeliveryRecoveryResult {
+  operationId: string;
+  deliveryId: string;
+  outcome: "check_scheduled" | "retry_scheduled" | "stopped";
+  committedVersion: number;
 }
 
 export type ActivityKind = "text" | "tool" | "tool_result" | "turn_start" | "turn_end" | "compact" | "error" | "system";
@@ -298,6 +461,24 @@ export interface ProjectState {
   work: WorkItem[];
   messages: Message[]; // 최근 200, 오래된 → 최신
   files: FileDoc[];
+  deliveryNotices?: DeliveryNotices;
+}
+
+/** 보관함 GET 전용 DTO. 늦은 manual 기록이 가능하므로 불변 DB snapshot은 아니다. */
+export interface ArchiveProjectState extends ProjectState { project: Project & { archived: true } }
+/** 일반 page와 같은 strict query 4개/정렬. 없는/활성 프로젝트는 404. */
+export type ArchiveMessagePage = MessagePage;
+
+export interface SyncCursor { epoch: string; seq: number }
+export interface SyncSnapshot {
+  protocol: 2;
+  cursor: SyncCursor;
+  requestedProjectId: string | null;
+  projectStatus: "none" | "ok" | "not_found" | "archived";
+  bootstrap: Omit<Bootstrap, "runtime">;
+  state: ProjectState | null;
+  /** state/cursor와 같은 동기 읽기 경계. 선택 프로젝트가 없으면 members/todos는 빈 map. */
+  revisions: import("./operations.ts").SyncRevisions;
 }
 
 /** WebSocket 서버→화면. 화면은 받으면 해당 조각만 고치거나 state 를 다시 받는다. */
@@ -317,6 +498,13 @@ export type WsEvent =
   | { type: "activity"; projectId: string; activity: Activity }
   | { type: "settings"; settings: Settings }
   | { type: "herdr"; herdr: HerdrInfo };
+
+export type WsChangeEvent = Exclude<WsEvent, { type: "hello" } | { type: "ping" }>;
+/** 별도 v2 wire. 기존 WsEvent를 수정하거나 v1 객체에 cursor를 덧붙이지 않는다. */
+export type RealtimeEvent =
+  | ({ type: "hello"; protocol: 2; heartbeatMs: 15000; staleAfterMs: 45000 } & SyncCursor)
+  | ({ type: "ping" } & SyncCursor)
+  | (WsChangeEvent & SyncCursor);
 
 // ---- REST 요청 ----
 export interface CreateProjectReq { name: string; cwd: string; goal?: string; startConductor?: boolean; chiefCli?: CliProvider }

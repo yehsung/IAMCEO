@@ -55,7 +55,7 @@ final class ContractTests: XCTestCase {
         do { _ = try await api.authorizedURL("https://mac.tailnet.ts.net:444/file"); XCTFail("Foreign port accepted") } catch {}
     }
     @MainActor func testDemoIsExplicitAndReadOnly() async {
-        let store = AppStore(demo: true)
+        let store = AppStore(demo: true, persistCredentials: false)
         XCTAssertTrue(store.isDemo)
         XCTAssertEqual(store.connectionStatus, .demo)
         XCTAssertFalse(store.canWrite)
@@ -138,5 +138,219 @@ final class ContractTests: XCTestCase {
         let link = PairingLink(code: "AB23CD45", urls: [URL(string: "http://mac-mini.tail6b5aa2.ts.net:7878")!])
         let image = try XCTUnwrap(QRCodeImage.render(link.url.absoluteString))
         XCTAssertGreaterThan(image.width, 200)
+    }
+}
+
+extension ContractTests {
+    private func decode<T: Decodable>(_ type: T.Type, _ text: String) throws -> T {
+        try JSONDecoder().decode(type, from: Data(text.utf8))
+    }
+    private func object<T: Encodable>(_ value: T) throws -> [String: Any] {
+        let data = try JSONEncoder().encode(value)
+        let json = try JSONSerialization.jsonObject(with: data)
+        return try XCTUnwrap(json as? [String: Any])
+    }
+
+    func testOptionalMetadataPreservesW0WindowsAndUnknownValues() throws {
+        let old = try decode(Member.self, #"{"id":"m"}"#)
+        XCTAssertNil(old.contextWindow)
+        XCTAssertNil(old.contextState)
+        XCTAssertNil(old.statusObservation)
+        XCTAssertNil(old.subagentState)
+        let member = try decode(Member.self, #"{"id":"m","status":"future_status","contextPct":0,"contextWindow":1000000,"contextWindowSource":"future_source","blockedReason":"status_unknown","statusObservation":{"freshness":"stale","ownership":"conflict"},"subagentState":{"quality":"unknown","count":null},"contextState":{"measurement":{"tokens":0,"fresh":false,"sessionGeneration":7},"compaction":{"id":"c","phase":"future_phase"}},"executionState":{"runId":"r","result":"error","exitCode":3}}"#)
+        XCTAssertEqual(member.status, "future_status")
+        XCTAssertEqual(member.contextPct, 0)
+        XCTAssertEqual(member.contextWindow, 1_000_000)
+        XCTAssertEqual(member.contextWindowSource, "future_source")
+        XCTAssertEqual(member.blockedReason, "status_unknown")
+        XCTAssertNil(member.subagentState?.count)
+        XCTAssertEqual(member.statusObservation?.ownership, "conflict")
+        XCTAssertEqual(member.contextState?.measurement?.fresh, false)
+        XCTAssertEqual(member.contextState?.measurement?.sessionGeneration, 7)
+        XCTAssertEqual(member.contextState?.compaction?.phase, .unknown)
+        XCTAssertEqual(member.executionState?.exitCode, 3)
+        let settings = try decode(Settings.self, #"{"contextWindowDefault":1000000,"contextWindows":{"model":190000}}"#)
+        XCTAssertEqual(settings.contextWindows?["model"], 190_000)
+        XCTAssertEqual(try object(settings)["contextWindowDefault"] as? Int, 1_000_000)
+        XCTAssertThrowsError(try decode(Member.self, #"{"id":"m","contextWindow":"many"}"#))
+    }
+
+    func testProjectPatchOmitsNilAndKeepsFalse() throws {
+        XCTAssertEqual(try object(PatchProjectRequest()).count, 0)
+        let patch = try object(PatchProjectRequest(name: "New", runnerEnabled: false, archived: false))
+        XCTAssertEqual(Set(patch.keys), ["name", "runnerEnabled", "archived"])
+        XCTAssertEqual(patch["archived"] as? Bool, false)
+        XCTAssertEqual(patch["runnerEnabled"] as? Bool, false)
+        XCTAssertNil(patch["cwd"])
+    }
+
+    func testMessageScopeAndPageKeepOpaqueCursorAndFullMessages() throws {
+        let member = MessageScope.member(memberId: "m/한글")
+        XCTAssertEqual(try decode(MessageScope.self, String(decoding: JSONEncoder().encode(member), as: UTF8.self)), member)
+        let page = try decode(MessagePage.self, #"{"projectId":"p","scope":{"kind":"member","memberId":"m"},"items":[{"id":"msg","delivery":"future","attachments":[{"id":"file","size":42}]}],"nextCursor":"opaque_-123","hasOlder":true}"#)
+        XCTAssertEqual(page.scope, .member(memberId: "m"))
+        XCTAssertEqual(page.items.first?.delivery, "future")
+        XCTAssertEqual(page.items.first?.attachments.first?.size, 42)
+        XCTAssertEqual(page.nextCursor, "opaque_-123")
+        XCTAssertTrue(page.hasOlder)
+        XCTAssertThrowsError(try decode(MessagePage.self, #"{"projectId":"p","scope":{"kind":"project"},"items":[]}"#))
+        XCTAssertEqual(try decode(MessageScope.self, #"{"kind":"future"}"#), .unknown("future"))
+        XCTAssertThrowsError(try decode(MessageScope.self, #"{"kind":"member"}"#))
+    }
+
+    func testSettingsPatchDistinguishesPreserveAndReset() throws {
+        let patch = SettingsPatchRequest(ranks: ["manager": RankConfigPatch(model: .null)])
+        let json = try object(patch)
+        XCTAssertEqual(Set(json.keys), ["ranks"])
+        let ranks = try XCTUnwrap(json["ranks"] as? [String: [String: Any]])
+        XCTAssertTrue(ranks["manager"]?["model"] is NSNull)
+        XCTAssertNil(ranks["manager"]?["effort"])
+        XCTAssertEqual(try object(FreshSessionRequest(operationId: "op", expectedSessionGeneration: 4))["expectedSessionGeneration"] as? Int, 4)
+    }
+
+    func testV2TerminalRequestShapeAndClaimIdentity() throws {
+        let claim = TerminalControlV2Request(action: .claim, operationId: "op", expectedSessionGeneration: 2, claimId: "stable")
+        let json = try object(claim)
+        XCTAssertEqual(json["claimId"] as? String, "stable")
+        XCTAssertNil(json["inputSequence"])
+        XCTAssertNil(json["leaseId"])
+        let key = TerminalControlV2Request(action: .key, operationId: "op2", expectedSessionGeneration: 2, claimId: "stable", inputSequence: 1, key: .enter)
+        XCTAssertEqual(try object(key)["inputSequence"] as? Int, 1)
+        XCTAssertEqual(try object(key)["key"] as? String, "enter")
+        XCTAssertThrowsError(try object(TerminalControlV2Request(action: .input, operationId: "op", expectedSessionGeneration: 2, claimId: "stable")))
+        XCTAssertThrowsError(try object(TerminalControlV2Request(action: .release, operationId: "op", expectedSessionGeneration: 2, claimId: "stable", inputSequence: 1)))
+    }
+
+    func testOperationReceiptsDoNotTurnUnknownOrPendingIntoApplied() throws {
+        let applied = try decode(OperationReceipt.self, #"{"operationId":"op","kind":"terminal_control","status":"applied","result":{"memberId":"m","action":"claim","claimId":"c","sessionGeneration":4,"leaseId":"l","expiresAt":1234567890123}}"#)
+        XCTAssertEqual(applied.status, .applied)
+        guard case .terminalControl(let result) = applied.result else { return XCTFail("Missing typed result") }
+        XCTAssertEqual(result.expiresAt, 1_234_567_890_123)
+        XCTAssertEqual(result.claimId, "c")
+        let roundTrip = try JSONDecoder().decode(OperationReceipt.self, from: JSONEncoder().encode(applied))
+        XCTAssertEqual(roundTrip.status, .applied)
+        for status in ["pending", "refused", "unknown", "future_status"] {
+            let receipt = try decode(OperationReceipt.self, "{\"operationId\":\"op\",\"kind\":\"fresh_session\",\"status\":\"\(status)\",\"code\":\"CODE\",\"result\":{\"privateBody\":\"ignored\"}}")
+            XCTAssertNotEqual(receipt.status, .applied)
+            XCTAssertNil(receipt.result)
+            XCTAssertEqual(receipt.code, "CODE")
+        }
+        XCTAssertEqual(try decode(OperationReceipt.self, #"{"operationId":"op"}"#).status, .unknown)
+        XCTAssertEqual(try decode(OperationReceipt.self, #"{"operationId":"op","kind":"future","status":"applied"}"#).status, .unknown)
+        XCTAssertThrowsError(try decode(OperationReceipt.self, #"{"operationId":"op","kind":"fresh_session","status":"applied"}"#))
+    }
+
+    func testErrorBodyKeepsCodesAndLegacyErrors() throws {
+        let error = try decode(APIErrorResponse.self, #"{"error":"Changed","code":"MESSAGE_SCOPE_CHANGED"}"#)
+        XCTAssertEqual(error.code, "MESSAGE_SCOPE_CHANGED")
+        XCTAssertEqual(error.error, "Changed")
+        XCTAssertNil(try decode(APIErrorResponse.self, #"{"error":"Legacy"}"#).code)
+        XCTAssertThrowsError(try decode(APIErrorResponse.self, #"{"code":3}"#))
+        XCTAssertEqual(APIError(status: 409, message: "Legacy").status, 409)
+    }
+
+    func testDeliveryMissingSupportAndFutureReasonsFailClosed() throws {
+        XCTAssertNil(try decode(ProjectState.self, #"{"project":{"id":"p"}}"#).deliveryNotices)
+        let unknown = try decode(DeliveryNoticeItem.self, #"{"id":"d","phase":"needs_owner","reason":"future","allowedActions":["recheck","retry_with_risk","future"]}"#)
+        XCTAssertEqual(unknown.safeAllowedActions, [.recheck])
+        XCTAssertEqual(unknown.reasonDescription, "상세 내용을 확인해 주세요")
+        XCTAssertTrue(try decode(DeliveryNoticeItem.self, #"{"id":"d"}"#).safeAllowedActions.isEmpty)
+        XCTAssertThrowsError(try object(DeliveryRecoveryRequest(operationId: "op", expectedVersion: 1, action: .retryWithRisk)))
+        XCTAssertThrowsError(try object(DeliveryRecoveryRequest(operationId: "op", expectedVersion: 0, action: .recheck)))
+        XCTAssertThrowsError(try object(DeliveryRecoveryRequest(operationId: "op", expectedVersion: 1, action: .recheck, acceptDuplicateRisk: true)))
+        let retry = try object(DeliveryRecoveryRequest(operationId: "op", expectedVersion: 2, action: .retryWithRisk, acceptDuplicateRisk: true))
+        XCTAssertEqual(retry["acceptDuplicateRisk"] as? Bool, true)
+        XCTAssertEqual(try decode(DeliveryRecoveryResult.self, #"{"operationId":"op","deliveryId":"d","outcome":"check_scheduled","committedVersion":3}"#).outcome, .checkScheduled)
+    }
+
+    func testRealtimeLegacyV2AndUnknownEvents() throws {
+        let hello = try decode(RealtimeEvent.self, #"{"type":"hello","protocol":2,"epoch":"e","seq":42,"heartbeatMs":15000,"staleAfterMs":45000}"#)
+        XCTAssertEqual(hello.cursor, try SyncCursor(epoch: "e", seq: 42))
+        let legacy = try decode(RealtimeEvent.self, #"{"type":"hello","seq":2}"#)
+        XCTAssertNil(legacy.cursor)
+        XCTAssertEqual(legacy.seq, 2)
+        XCTAssertNil(try decode(RealtimeEvent.self, #"{"type":"ping"}"#).cursor)
+        let unknown = try decode(RealtimeEvent.self, #"{"type":"future","epoch":"e","seq":43}"#)
+        XCTAssertEqual(unknown.type, "future")
+        XCTAssertEqual(unknown.cursor?.seq, 43)
+        let message = try decode(RealtimeEvent.self, #"{"type":"message","epoch":"e","seq":44,"message":{"id":"msg","body":"Hello"}}"#)
+        XCTAssertEqual(message.message?.body, "Hello")
+        for malformed in [#"{"type":"hello"}"#, #"{"type":"member","epoch":"e","seq":3}"#, #"{"type":"ping","epoch":"e"}"#, #"{"type":"ping","epoch":"","seq":1}"#, #"{"type":"ping","epoch":"e","seq":-1}"#, #"{"type":"ping","epoch":"e","seq":9007199254740992}"#] {
+            XCTAssertThrowsError(try decode(RealtimeEvent.self, malformed))
+        }
+    }
+
+    func testSyncStatusRevisionsAndCapabilities() throws {
+        let snapshot = try decode(SyncSnapshot.self, #"{"protocol":2,"cursor":{"epoch":"e","seq":4},"requestedProjectId":"p","projectStatus":"ok","bootstrap":{"projects":[]},"state":{"project":{"id":"p"}},"revisions":{"settings":2,"members":{"m":{"configRevision":3,"sessionGeneration":4}},"todos":{"t":5}}}"#)
+        XCTAssertEqual(snapshot.revisions?.members?["m"]?.sessionGeneration, 4)
+        XCTAssertEqual(snapshot.revisions?.todos?["t"], 5)
+        XCTAssertNil(snapshot.bootstrap.runtime)
+        let archived = try decode(SyncSnapshot.self, #"{"protocol":2,"cursor":{"epoch":"e","seq":4},"requestedProjectId":"p","projectStatus":"archived","bootstrap":{"projects":[]},"state":null}"#)
+        XCTAssertNil(archived.state)
+        XCTAssertNil(archived.revisions)
+        let missing = try decode(SyncSnapshot.self, #"{"protocol":2,"cursor":{"epoch":"e","seq":4},"bootstrap":{"projects":[]}}"#)
+        XCTAssertEqual(missing.projectStatus, .unknown)
+        XCTAssertThrowsError(try decode(SyncSnapshot.self, #"{"protocol":2,"cursor":{"epoch":"e","seq":4},"requestedProjectId":"p","projectStatus":"ok","bootstrap":{"projects":[]},"state":{"project":{"id":"other"}}}"#))
+        let caps = try decode(ServerCapabilities.self, #"{"contractVersion":2,"capabilities":{"paging":true,"operations":false}}"#)
+        XCTAssertEqual(caps.capabilities?.paging, true)
+        XCTAssertEqual(caps.capabilities?.operations, false)
+        XCTAssertNil(caps.capabilities?.push)
+        XCTAssertNil(try decode(ServerCapabilities.self, "{}").capabilities)
+    }
+
+    func testPushDefaultsRegistrationAndPartialPreferences() throws {
+        XCTAssertEqual(PushKind.supported.map(\.rawValue), ["decision", "approval_wait", "error", "report_complete"])
+        let defaults = try object(PushPreferences())
+        XCTAssertEqual(defaults.count, 4)
+        XCTAssertTrue(defaults.values.allSatisfy { ($0 as? Bool) == true })
+        XCTAssertEqual(PushContract.reportGroupWindowMilliseconds, 120_000)
+        let decoded = try decode(PushPreferences.self, #"{"decision":true}"#)
+        XCTAssertFalse(decoded.reportComplete)
+        XCTAssertFalse(decoded.approvalWait)
+        let registration = PushRegistrationRequest(expectedRevision: nil, environment: .sandbox, deviceToken: "ab", authorization: .authorized)
+        let json = try object(registration)
+        XCTAssertTrue(json["expectedRevision"] is NSNull)
+        XCTAssertEqual(json["bundleId"] as? String, "com.yehsung.iamceo")
+        XCTAssertNil(json["enabled"])
+        let patch = try object(PushPreferencesPatch(reportComplete: false))
+        XCTAssertEqual(Set(patch.keys), ["report_complete"])
+        XCTAssertEqual(patch["report_complete"] as? Bool, false)
+        XCTAssertFalse(PushAuthorization.unknown.permitsNotifications)
+    }
+
+    func testPushUnknownsTargetsAndTokenRedaction() throws {
+        let device = try decode(PushDevice.self, #"{"id":"i","state":"future","authorization":"future","deviceToken":"do-not-retain"}"#)
+        XCTAssertEqual(device.state, .unknown)
+        XCTAssertEqual(device.authorization, .unknown)
+        XCTAssertNil(device.enabled)
+        XCTAssertNil(try object(device)["deviceToken"])
+        let target = PushTarget.chat(projectId: "p", memberId: nil, messageId: "last", groupId: "g")
+        let targetJSON = try object(target)
+        XCTAssertTrue(targetJSON["memberId"] is NSNull)
+        XCTAssertEqual(try JSONDecoder().decode(PushTarget.self, from: JSONEncoder().encode(target)), target)
+        XCTAssertEqual(try decode(PushTarget.self, #"{"screen":"future"}"#), .unknown("future"))
+        XCTAssertThrowsError(try decode(PushTarget.self, #"{"screen":"inbox","projectId":"p"}"#))
+        let event = try decode(PushEventTarget.self, #"{"serverId":"s","eventId":"e","target":{"screen":"home"},"reportGroup":{"id":"g","projectId":"p","memberId":"m","openedAt":"t","closesAt":"t120","lastMessageId":"last","reportIds":["first","last"]}}"#)
+        XCTAssertEqual(event.reportGroup?.reportIds, ["first", "last"])
+    }
+}
+
+extension ContractTests {
+    func testEveryAppliedReceiptUsesTheServerResultShape() throws {
+        let samples = [
+            ("fresh_session", #"{"member":{"id":"m"},"sessionGeneration":3}"#),
+            ("settings", #"{"settings":{"notifyMac":true},"revision":4}"#),
+            ("member_config", #"{"member":{"id":"m"},"configRevision":5,"sessionGeneration":3}"#),
+            ("todo_done", #"{"todo":{"id":"t","done":true},"revision":6}"#)
+        ]
+        for (kind, result) in samples {
+            let receipt = try decode(OperationReceipt.self, "{\"operationId\":\"op\",\"kind\":\"\(kind)\",\"status\":\"applied\",\"result\":\(result)}")
+            XCTAssertEqual(receipt.status, .applied)
+            XCTAssertNotNil(receipt.result)
+            let encoded = try object(receipt)
+            XCTAssertEqual(encoded["kind"] as? String, kind)
+            XCTAssertNil(encoded["outcome"])
+            XCTAssertEqual(try JSONDecoder().decode(OperationReceipt.self, from: JSONEncoder().encode(receipt)).status, .applied)
+        }
     }
 }

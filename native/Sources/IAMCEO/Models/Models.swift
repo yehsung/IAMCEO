@@ -112,6 +112,16 @@ struct Member: Codable, Sendable, Identifiable {
     var lastError: String? = nil
     var updatedAt: String = ""
     var createdAt: String = ""
+    var contextWindow: Int? = nil
+    var contextWindowSource: String? = nil
+    var contextState: CoreContextState? = nil
+    var blockedReason: String? = nil
+    var nowAt: String? = nil
+    var manualActivityAt: String? = nil
+    var statusObservation: StatusObservation? = nil
+    var subagentState: SubagentState? = nil
+    var executionState: MemberExecutionState? = nil
+    var lifecycleState: MemberLifecycleState? = nil
 }
 extension Member {
     init(from decoder: Decoder) throws {
@@ -143,6 +153,16 @@ extension Member {
         lastError = try c.decodeIfPresent(String.self, forKey: ModelKey("lastError"))
         updatedAt = try c.decodeIfPresent(String.self, forKey: ModelKey("updatedAt")) ?? ""
         createdAt = try c.decodeIfPresent(String.self, forKey: ModelKey("createdAt")) ?? ""
+        contextWindow = try c.decodeIfPresent(Int.self, forKey: ModelKey("contextWindow"))
+        contextWindowSource = try c.decodeIfPresent(String.self, forKey: ModelKey("contextWindowSource"))
+        contextState = try c.decodeIfPresent(CoreContextState.self, forKey: ModelKey("contextState"))
+        blockedReason = try c.decodeIfPresent(String.self, forKey: ModelKey("blockedReason"))
+        nowAt = try c.decodeIfPresent(String.self, forKey: ModelKey("nowAt"))
+        manualActivityAt = try c.decodeIfPresent(String.self, forKey: ModelKey("manualActivityAt"))
+        statusObservation = try c.decodeIfPresent(StatusObservation.self, forKey: ModelKey("statusObservation"))
+        subagentState = try c.decodeIfPresent(SubagentState.self, forKey: ModelKey("subagentState"))
+        executionState = try c.decodeIfPresent(MemberExecutionState.self, forKey: ModelKey("executionState"))
+        lifecycleState = try c.decodeIfPresent(MemberLifecycleState.self, forKey: ModelKey("lifecycleState"))
     }
 }
 
@@ -415,6 +435,8 @@ struct Settings: Codable, Sendable {
     var maxAwakeWorkers: Int = 8
     var notifyMac: Bool = false
     var boardTidyHours: Double = 6
+    var contextWindowDefault: Int? = nil
+    var contextWindows: [String: Int]? = nil
 }
 extension Settings {
     init(from decoder: Decoder) throws {
@@ -427,6 +449,8 @@ extension Settings {
         maxAwakeWorkers = try c.decodeIfPresent(Int.self, forKey: ModelKey("maxAwakeWorkers")) ?? 8
         notifyMac = try c.decodeIfPresent(Bool.self, forKey: ModelKey("notifyMac")) ?? false
         boardTidyHours = try c.decodeIfPresent(Double.self, forKey: ModelKey("boardTidyHours")) ?? 6
+        contextWindowDefault = try c.decodeIfPresent(Int.self, forKey: ModelKey("contextWindowDefault"))
+        contextWindows = try c.decodeIfPresent([String: Int].self, forKey: ModelKey("contextWindows"))
     }
 }
 
@@ -483,6 +507,7 @@ struct ProjectState: Codable, Sendable {
     var work: [WorkItem] = []
     var messages: [Message] = []
     var files: [FileDoc] = []
+    var deliveryNotices: DeliveryNotices? = nil
 }
 extension ProjectState {
     init(from decoder: Decoder) throws {
@@ -495,6 +520,7 @@ extension ProjectState {
         work = try c.decodeIfPresent([WorkItem].self, forKey: ModelKey("work")) ?? []
         messages = try c.decodeIfPresent([Message].self, forKey: ModelKey("messages")) ?? []
         files = try c.decodeIfPresent([FileDoc].self, forKey: ModelKey("files")) ?? []
+        deliveryNotices = try c.decodeIfPresent(DeliveryNotices.self, forKey: ModelKey("deliveryNotices"))
     }
 }
 
@@ -554,4 +580,328 @@ extension RankConfig {
         try container.encode(model, forKey: .model)
         try container.encode(effort, forKey: .effort)
     }
+}
+
+// New response enums fail closed on future string values. Invalid JSON types still fail decoding.
+protocol SafeStringEnum: RawRepresentable, Codable, Sendable where RawValue == String {
+    static var unknown: Self { get }
+}
+extension SafeStringEnum {
+    init(from decoder: Decoder) throws {
+        self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? Self.unknown
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(rawValue)
+    }
+}
+
+enum MessageScope: Codable, Sendable, Equatable, Hashable {
+    case project
+    case member(memberId: String)
+    case unknown(String)
+
+    private enum CodingKeys: String, CodingKey { case kind, memberId }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decodeIfPresent(String.self, forKey: .kind) {
+        case "project": self = .project
+        case "member": self = .member(memberId: try c.decode(String.self, forKey: .memberId))
+        case let kind: self = .unknown(kind ?? "unknown")
+        }
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .project: try c.encode("project", forKey: .kind)
+        case .member(let id):
+            try c.encode("member", forKey: .kind)
+            try c.encode(id, forKey: .memberId)
+        case .unknown(let kind): try c.encode(kind, forKey: .kind)
+        }
+    }
+}
+
+struct MessagePage: Codable, Sendable {
+    let projectId: String
+    let scope: MessageScope
+    let items: [Message]
+    let nextCursor: String?
+    // Required: a truncated/malformed page must never be interpreted as the end of history.
+    let hasOlder: Bool
+}
+
+enum OperationStatus: String, SafeStringEnum {
+    case pending, applied, refused, unknown
+}
+enum OperationKind: String, SafeStringEnum {
+    case freshSession = "fresh_session", terminalControl = "terminal_control"
+    case settings, memberConfig = "member_config", todoDone = "todo_done", unknown
+}
+
+struct OperationReceipt: Codable, Sendable {
+    let operationId: String
+    let kind: OperationKind
+    var projectId: String? = nil
+    var memberId: String? = nil
+    var createdAt: String? = nil
+    var updatedAt: String? = nil
+    var status: OperationStatus = .unknown
+    var code: String? = nil
+    var error: String? = nil
+    var result: OperationResult? = nil
+
+    private enum CodingKeys: String, CodingKey {
+        case operationId, kind, projectId, memberId, createdAt, updatedAt, status, code, error, result
+    }
+}
+extension OperationReceipt {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        operationId = try c.decode(String.self, forKey: .operationId)
+        kind = try c.decodeIfPresent(OperationKind.self, forKey: .kind) ?? .unknown
+        projectId = try c.decodeIfPresent(String.self, forKey: .projectId)
+        memberId = try c.decodeIfPresent(String.self, forKey: .memberId)
+        createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt)
+        updatedAt = try c.decodeIfPresent(String.self, forKey: .updatedAt)
+        status = try c.decodeIfPresent(OperationStatus.self, forKey: .status) ?? .unknown
+        code = try c.decodeIfPresent(String.self, forKey: .code)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        // Unrecognized operations cannot authorize success or replay.
+        if kind == .unknown { status = .unknown }
+        if status == .applied {
+            let resultDecoder = try c.superDecoder(forKey: .result)
+            switch kind {
+            case .freshSession: result = .freshSession(try FreshSessionResult(from: resultDecoder))
+            case .terminalControl: result = .terminalControl(try TerminalControlResultV2(from: resultDecoder))
+            case .settings: result = .settings(try SettingsWriteResult(from: resultDecoder))
+            case .memberConfig: result = .memberConfig(try MemberConfigWriteResult(from: resultDecoder))
+            case .todoDone: result = .todoDone(try TodoWriteResult(from: resultDecoder))
+            case .unknown: break
+            }
+        }
+    }
+}
+
+enum OperationResult: Encodable, Sendable {
+    case freshSession(FreshSessionResult)
+    case terminalControl(TerminalControlResultV2)
+    case settings(SettingsWriteResult)
+    case memberConfig(MemberConfigWriteResult)
+    case todoDone(TodoWriteResult)
+    func encode(to encoder: Encoder) throws {
+        switch self {
+        case .freshSession(let value): try value.encode(to: encoder)
+        case .terminalControl(let value): try value.encode(to: encoder)
+        case .settings(let value): try value.encode(to: encoder)
+        case .memberConfig(let value): try value.encode(to: encoder)
+        case .todoDone(let value): try value.encode(to: encoder)
+        }
+    }
+}
+struct FreshSessionResult: Codable, Sendable { let member: Member; let sessionGeneration: Int }
+struct SettingsWriteResult: Codable, Sendable { let settings: Settings; let revision: Int }
+struct MemberConfigWriteResult: Codable, Sendable {
+    let member: Member
+    let configRevision: Int
+    let sessionGeneration: Int
+}
+struct TodoWriteResult: Codable, Sendable { let todo: Todo; let revision: Int }
+struct TerminalControlResultV2: Codable, Sendable {
+    let memberId: String
+    let action: String
+    let claimId: String
+    let sessionGeneration: Int
+    var inputSequence: Int? = nil
+    var leaseId: String? = nil
+    /// Unix milliseconds, matching the existing TerminalLease wire contract.
+    var expiresAt: Double? = nil
+}
+
+enum DeliveryRecoveryPhase: String, SafeStringEnum {
+    case none, checking, waiting, retryWait = "retry_wait", needsOwner = "needs_owner"
+    case resolved, stopped, unknown
+}
+enum DeliveryRecoveryAction: String, SafeStringEnum {
+    case recheck, retryWithRisk = "retry_with_risk", stopRetry = "stop_retry", unknown
+}
+enum DeliveryRecoveryOutcome: String, SafeStringEnum {
+    case checkScheduled = "check_scheduled", retryScheduled = "retry_scheduled", stopped, unknown
+}
+enum EvidenceVerdict: String, SafeStringEnum { case present, absent, unknown }
+
+struct DeliveryEvidence: Codable, Sendable {
+    let source: String
+    let verdict: EvidenceVerdict
+    let location: String
+    let code: String
+    let complete: Bool
+    let checkedAt: String
+}
+
+struct DeliveryNotices: Codable, Sendable {
+    let version: Int
+    let members: [MemberDeliverySummary]
+    let unassigned: UnassignedDeliverySummary
+}
+struct UnassignedDeliverySummary: Codable, Sendable {
+    let undeliveredCount: Int
+    let unknownCount: Int
+    let needsOwnerCount: Int
+}
+struct MemberDeliverySummary: Codable, Sendable {
+    let memberId: String
+    let undeliveredCount: Int
+    let unknownCount: Int
+    let deliveringCount: Int
+    let checkingCount: Int
+    let needsOwnerCount: Int
+    let waitingBehindCount: Int
+    let oldestAt: String?
+    let reasons: [DeliveryReasonCount]
+}
+struct DeliveryReasonCount: Codable, Sendable {
+    let code: String
+    let count: Int
+    let note: String
+}
+struct DeliveryNoticePage: Codable, Sendable {
+    let memberId: String
+    let summary: MemberDeliverySummary
+    let items: [DeliveryNoticeItem]
+    let nextBefore: String?
+}
+struct DeliveryNoticeItem: Codable, Sendable, Identifiable {
+    let id: String
+    var deliveryId: String? = nil
+    var messageId: String? = nil
+    var memberId: String? = nil
+    var projectId: String? = nil
+    var kind: String? = nil
+    var status: String? = nil
+    var phase: DeliveryRecoveryPhase? = nil
+    var holdReason: String? = nil
+    var reason: String? = nil
+    var note: String? = nil
+    var version: Int? = nil
+    var createdAt: String? = nil
+    var lastCheckedAt: String? = nil
+    var nextCheckAt: String? = nil
+    var autoAttempts: Int? = nil
+    var evidence: [DeliveryEvidence]? = nil
+    var recommendation: DeliveryRecommendation? = nil
+    var allowedActions: [DeliveryRecoveryAction]? = nil
+    var ref: DeliveryReference? = nil
+    var preview: String? = nil
+
+    /// Future reasons cannot authorize another physical input even if an action is advertised.
+    var safeAllowedActions: [DeliveryRecoveryAction] {
+        guard let reason, Self.knownReasons.contains(reason), let phase, phase != .unknown else {
+            return (allowedActions ?? []).filter { $0 == .recheck }
+        }
+        return (allowedActions ?? []).filter { $0 != .unknown }
+    }
+    var reasonDescription: String {
+        guard let reason, Self.knownReasons.contains(reason) else { return "상세 내용을 확인해 주세요" }
+        return note ?? recommendation?.text ?? "상세 내용을 확인해 주세요"
+    }
+    private static let knownReasons: Set<String> = [
+        "blocked", "input_busy", "asleep", "offline", "backend_down", "runner_disabled",
+        "archived", "legacy_session", "send_error", "turn_error", "manual_control", "busy",
+        "draft_pending", "duplicate_draft", "log_missing", "log_incomplete", "session_unbound",
+        "session_lost", "inflight_unsettled", "unsupported_schema", "source_changed", "retry_exhausted"
+    ]
+}
+struct DeliveryRecommendation: Codable, Sendable { let code: String; let text: String }
+struct DeliveryReference: Codable, Sendable { let type: String; let id: String }
+struct DeliveryRecoveryRequest: Encodable, Sendable {
+    let operationId: String
+    let expectedVersion: Int
+    let action: DeliveryRecoveryAction
+    var acceptDuplicateRisk: Bool? = nil
+
+    private enum CodingKeys: String, CodingKey { case operationId, expectedVersion, action, acceptDuplicateRisk }
+    func encode(to encoder: Encoder) throws {
+        guard expectedVersion > 0, action != .unknown,
+              action == .retryWithRisk ? acceptDuplicateRisk == true : acceptDuplicateRisk == nil else {
+            throw EncodingError.invalidValue(self, .init(codingPath: encoder.codingPath, debugDescription: "Invalid recovery action or precondition"))
+        }
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(operationId, forKey: .operationId)
+        try c.encode(expectedVersion, forKey: .expectedVersion)
+        try c.encode(action, forKey: .action)
+        try c.encodeIfPresent(acceptDuplicateRisk, forKey: .acceptDuplicateRisk)
+    }
+}
+struct DeliveryRecoveryResult: Codable, Sendable {
+    let operationId: String
+    let deliveryId: String
+    let outcome: DeliveryRecoveryOutcome
+    let committedVersion: Int
+}
+
+struct CoreContextState: Codable, Sendable {
+    var measurement: ContextMeasurement? = nil
+    var compaction: ContextCompaction? = nil
+}
+struct ContextMeasurement: Codable, Sendable {
+    var sessionId: String? = nil
+    var sessionGeneration: Int? = nil
+    var turn: Int? = nil
+    var model: String? = nil
+    var tokens: Int? = nil
+    var window: Int? = nil
+    var source: String? = nil
+    var quality: String? = nil
+    var measuredAt: String? = nil
+    var fresh: Bool? = nil
+}
+enum ContextCompactionPhase: String, SafeStringEnum {
+    case queued, sending, running, succeeded, failed, uncertain, unknown
+}
+struct ContextCompaction: Codable, Sendable {
+    let id: String
+    var trigger: String? = nil
+    var phase: ContextCompactionPhase? = nil
+    var reason: String? = nil
+    var requestedAt: String? = nil
+    var startedAt: String? = nil
+    var finishedAt: String? = nil
+}
+
+struct StatusObservation: Codable, Sendable {
+    var source: String? = nil
+    var observedAt: String? = nil
+    var freshness: String? = nil
+    var ownership: String? = nil
+    var consecutiveFailures: Int? = nil
+    var error: ObservationError? = nil
+}
+struct ObservationError: Codable, Sendable { let code: String; let note: String }
+struct SubagentState: Codable, Sendable {
+    var quality: String? = nil
+    var count: Int? = nil
+    var observedAt: String? = nil
+    var sessionGeneration: Int? = nil
+}
+struct MemberExecutionState: Codable, Sendable {
+    let runId: String
+    var sessionGeneration: Int? = nil
+    var turn: Int? = nil
+    var deliveryIds: [String]? = nil
+    var phase: String? = nil
+    var inputReceivedAt: String? = nil
+    var startedAt: String? = nil
+    var lastProgressAt: String? = nil
+    var endedAt: String? = nil
+    var result: String? = nil
+    var reason: String? = nil
+    var exitCode: Int? = nil
+}
+struct MemberLifecycleState: Codable, Sendable {
+    let operationId: String
+    var sessionGeneration: Int? = nil
+    var phase: String? = nil
+    var reason: String? = nil
+    var updatedAt: String? = nil
 }

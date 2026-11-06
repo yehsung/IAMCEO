@@ -23,7 +23,26 @@ import type {
   SettingsPatch,
   TidyResult,
   Todo,
+  DeliveryRecoveryRequest,
+  DeliveryRecoveryResult,
 } from "../shared/types.ts";
+
+import type {
+  AgentOperationContext,
+  FreshSessionRequest,
+  ManualInboxAckRequest,
+  ManualInboxAckResult,
+  ManualInboxBatch,
+  MemberConfigWriteRequest,
+  MemberConfigWriteResult,
+  OperationReceipt,
+  RevisionPrecondition,
+  SettingsWriteRequest,
+  SettingsWriteResult,
+  TerminalControlRequestV2,
+  TodoDoneRequest,
+  TodoWriteResult,
+} from "../shared/operations.ts";
 
 import type { TerminalControlAction, TerminalControlResult } from "./runner/types.ts";
 
@@ -50,6 +69,8 @@ export type AskWaitResult = { done: false } | { done: true; text: string; decisi
 export interface OrchestratorApi {
   /** Store 로 프로젝트를 만들고 goal·startConductor 를 처리한다. */
   createProject(req: CreateProjectReq): Promise<Project>;
+  /** W9의 실제 HTTP 전환 때 required로 바꾼다. 현재 hook 경로는 유지한다. */
+  patchProject?(projectId: string, patch: PatchProjectReq): Promise<Project>;
   createMember?(projectId: string, req: CreateMemberReq): Promise<Member>;
   runtimeInfo?(): Promise<RuntimeInfo>;
   terminalControl?(memberId: string, action: TerminalControlAction): Promise<TerminalControlResult>;
@@ -62,6 +83,14 @@ export interface OrchestratorApi {
   /** 직원별 모델·effort. */
   patchMemberConfig(memberId: string, patch: PatchMemberReq): Promise<Member>;
   freshMemberSession?(memberId: string): Promise<Member>;
+  /** 별도 v2 포트. 미지원이면 501/capability=false이며 v1로 쓰기를 내려 보내지 않는다. */
+  updateSettingsV2?(patch: SettingsWriteRequest, precondition: RevisionPrecondition): Promise<SettingsWriteResult>;
+  patchMemberConfigV2?(memberId: string, patch: MemberConfigWriteRequest, precondition: RevisionPrecondition): Promise<MemberConfigWriteResult>;
+  setTodoDoneV2?(todoId: string, request: TodoDoneRequest, precondition: RevisionPrecondition): Promise<TodoWriteResult>;
+  freshMemberSessionV2?(memberId: string, request: FreshSessionRequest): Promise<OperationReceipt<"fresh_session">>;
+  terminalControlV2?(memberId: string, request: TerminalControlRequestV2): Promise<OperationReceipt<"terminal_control">>;
+  operation?(operationId: string): Promise<OperationReceipt>;
+  recoverDelivery?(deliveryId: string, request: DeliveryRecoveryRequest): Promise<DeliveryRecoveryResult>;
   /** 실행기를 지금 다시 본다. 입력을 받기 전에 부른다. */
   refreshConnection?(): Promise<void>;
   startConductor(projectId: string): Promise<Member>;
@@ -105,6 +134,9 @@ export interface OrchestratorApi {
   listAgentTools(member: Member): AgentToolDef[] | Promise<AgentToolDef[]>;
   /** signal: 호출한 쪽 연결이 끊기면 기다리던 도구(wait)를 그만둔다. */
   handleAgentTool(member: Member, name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<AgentToolResult>;
+  handleAgentOperation?(member: Member, name: string, args: Record<string, unknown>, context: AgentOperationContext, signal?: AbortSignal): Promise<AgentToolResult>;
+  manualInbox?(memberId: string, timeoutMs: number, signal?: AbortSignal): Promise<ManualInboxBatch | null>;
+  acknowledgeManualInbox?(memberId: string, request: ManualInboxAckRequest): Promise<ManualInboxAckResult>;
   /** 답이 오거나 timeoutMs(최대 50초)가 지나면 돌아온다. */
   askWait(member: Member, decisionId: string, timeoutMs: number, signal?: AbortSignal): Promise<AskWaitResult>;
 }

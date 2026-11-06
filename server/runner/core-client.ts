@@ -13,7 +13,7 @@ export interface CoreTerminal {
 }
 export interface CoreHello { generation: number; version: string; methods: string[]; features: string[] }
 export class CoreError extends Error {
-  constructor(readonly kind: string, message: string, readonly uncertain = false) { super(message); this.name = "CoreError"; }
+  constructor(readonly kind: string, message: string, readonly uncertain = false, readonly deliveryEffect: "not_written" | "rejected" | "unknown" = uncertain ? "unknown" : "rejected", readonly causeCode?: string) { super(message); this.name = "CoreError"; }
 }
 
 export function coreSocketPath(session = process.env.HC_SESSION || "default"): string {
@@ -41,7 +41,7 @@ export function coreRpc<T>(socketPath: string, method: string, params: Record<st
       socket.destroy();
       if (error) reject(error); else resolve(result as T);
     };
-    const fail = (kind: string, message: string) => finish(new CoreError(kind, `${method}: ${message}`, sent));
+    const fail = (kind: string, message: string, causeCode?: string) => finish(new CoreError(kind, `${method}: ${message}`, sent, sent ? "unknown" : "not_written", causeCode));
     const timer = setTimeout(() => fail("timeout", `no reply within ${timeoutMs}ms`), timeoutMs);
     socket.on("connect", () => {
       // Once a write is attempted, transport failure is ambiguous. Never retry it.
@@ -60,6 +60,7 @@ export function coreRpc<T>(socketPath: string, method: string, params: Record<st
         if (!line.trim()) continue;
         let message: { id?: unknown; jsonrpc?: string; result?: T; error?: { message?: string; data?: { kind?: string; hint?: string } } };
         try { message = JSON.parse(line); } catch { return fail("protocol", "invalid JSON response"); }
+        if (!message || typeof message !== "object" || Array.isArray(message)) return fail("protocol", "invalid JSON-RPC response");
         if (message.id !== id) continue;
         if (message.jsonrpc !== "2.0") return fail("protocol", "invalid JSON-RPC version");
         if (message.error) {
@@ -70,10 +71,10 @@ export function coreRpc<T>(socketPath: string, method: string, params: Record<st
         return finish(undefined, message.result);
       }
     });
-    socket.on("error", (error) => fail("down", error.message));
+    socket.on("error", (error: NodeJS.ErrnoException) => fail("down", error.message, error.code));
     socket.on("close", () => { if (!settled) fail("closed", "connection closed without a reply"); });
     // Bun may report an unavailable Unix endpoint during connect itself.
     // Install all listeners before initiating that connection.
-    socket.connect({ path: socketPath });
+    try { socket.connect({ path: socketPath }); } catch (error) { fail("down", error instanceof Error ? error.message : String(error)); }
   });
 }

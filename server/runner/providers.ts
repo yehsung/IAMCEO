@@ -4,18 +4,18 @@ import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import type { RunnerMember, StartOpts } from "./types.ts";
 import { CoreError } from "./core-client.ts";
+import { writeStatuslineWrapper } from "./statusline.ts";
 import { subagentEnv } from "./headless.ts";
 
 export type CoreProvider = "claude" | "codex";
 export interface ProviderLaunch { argv: string[]; env: Record<string, string>; sessionId: string | null }
-export interface ProviderBins { claudeBin?: string; codexBin?: string }
-const sessionPattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
+export interface ProviderBins { claudeBin?: string; codexBin?: string; contextHome?: string }
 const toml = (value: unknown) => JSON.stringify(value);
 
 export function providerFor(member: RunnerMember): CoreProvider { return member.cli ?? "claude"; }
 export function providerLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins = {}): ProviderLaunch {
   const provider = providerFor(member);
-  if (member.sessionId && !sessionPattern.test(member.sessionId)) throw new CoreError("invalid_session", "Invalid CLI session id");
+  if (member.sessionId && !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(member.sessionId)) throw new CoreError("invalid_session", "Invalid CLI session id");
   const configured = provider === "claude" ? bins.claudeBin || "claude" : bins.codexBin || "codex";
   const bin = configured.includes("/") ? configured : Bun.which(configured);
   if (!bin) throw new CoreError("unavailable", `${provider} executable not found: ${configured}`);
@@ -28,7 +28,10 @@ export function providerLaunch(member: RunnerMember, opts: StartOpts, bins: Prov
       "--permission-mode", member.permissionMode, "--allowedTools", "mcp__iamceo", "-n", member.name);
     if (member.model) args.push("--model", member.model);
     if (member.effort) args.push("--effort", member.effort);
-    if (opts.settingsFile) args.push("--settings", opts.settingsFile);
+    if (bins.contextHome) {
+      const settings = opts.settingsFile ? JSON.parse(readFileSync(opts.settingsFile, "utf8")) : {};
+      args.push("--settings", JSON.stringify({ ...settings, statusLine: writeStatuslineWrapper(bins.contextHome) }));
+    } else if (opts.settingsFile) args.push("--settings", opts.settingsFile);
     Object.assign(env, subagentEnv(member.subagentModel));
     return { argv: [bin, ...args], env, sessionId };
   }

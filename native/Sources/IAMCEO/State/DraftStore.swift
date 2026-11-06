@@ -1,71 +1,226 @@
 import Foundation
 import Observation
 
-/// Unsent text that must survive navigation:
-/// - instruction drafts per project + target (shared by every composer), so a draft never moves to another recipient;
-/// - decision memos per decision, so switching cards or refreshing never loses a half-written answer.
+/// Shared persistence boundary. Tests inject a file URL (or disable persistence), never the user's defaults.
+struct LocalStateStorage {
+    let enabled: Bool
+    let url: URL?
+    let defaults: UserDefaults
+    let key: String
+
+    func read<T: Decodable>(_ type: T.Type) throws -> T? {
+        guard enabled else { return nil }
+        let data: Data?
+        if let url {
+            data = FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil
+        } else { data = defaults.data(forKey: key) }
+        return try data.map { try JSONDecoder().decode(type, from: $0) }
+    }
+
+    func write<T: Encodable>(_ value: T) throws {
+        guard enabled else { return }
+        let data = try JSONEncoder().encode(value)
+        if let url {
+            #if os(iOS)
+            try data.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
+            #else
+            try data.write(to: url, options: .atomic)
+            #endif
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.synchronize()
+        } else {
+            defaults.set(data, forKey: key)
+            guard defaults.synchronize() else { throw CocoaError(.fileWriteUnknown) }
+        }
+    }
+}
+
+struct DraftSnapshot: Codable, Sendable {
+    let namespace: String
+    let key: String
+    let generation: UUID
+    let revision: Int
+    let textRevision: Int
+    let text: String
+    let attachments: [Attachment]
+    let attachmentRevisions: [String: Int]
+}
+
+struct DraftUploadToken: Sendable {
+    let namespace: String
+    let connectionGeneration: UUID
+    let key: String
+    let draftGeneration: UUID
+}
+
 @MainActor @Observable
 final class DraftStore {
-    private(set) var texts: [String: String]
-    private(set) var attachments: [String: [Attachment]] = [:]
-    private(set) var memos: [String: String]
-    @ObservationIgnored private let persist: Bool
+    private struct Record: Codable {
+        var text = ""
+        var attachments: [Attachment] = []
+        var revision = 0
+        var textRevision = 0
+        var attachmentRevisions: [String: Int] = [:]
+        var generation = UUID()
+    }
+    private struct Host: Codable {
+        var records: [String: Record] = [:]
+        var memos: [String: String] = [:]
+    }
+    private(set) var namespace: String
+    private(set) var connectionGeneration = UUID()
+    private(set) var persistenceError: String?
+    private var hosts: [String: Host] = [:]
+    @ObservationIgnored private let storage: LocalStateStorage
+    @ObservationIgnored private var canPersist = true
 
-    init(persist: Bool = true) {
-        self.persist = persist
-        texts = persist ? (UserDefaults.standard.dictionary(forKey: "iamceo.chatDrafts") as? [String: String] ?? [:]) : [:]
-        memos = persist ? (UserDefaults.standard.dictionary(forKey: "iamceo.decisionMemos") as? [String: String] ?? [:]) : [:]
+    init(persist: Bool = true, namespace: String = "unassigned", storageURL: URL? = nil, defaults: UserDefaults? = nil) {
+        self.namespace = namespace
+        storage = LocalStateStorage(enabled: persist, url: storageURL, defaults: defaults ?? .standard, key: "iamceo.drafts.v2")
+        do {
+            if let saved = try storage.read([String: Host].self) { hosts = saved }
+            else if persist, storageURL == nil {
+                // Legacy drafts have no proven host. Keep them quarantined until explicitly selected, never copy into a host.
+                let source = defaults ?? .standard
+                var legacy = Host()
+                for (key, text) in source.dictionary(forKey: "iamceo.chatDrafts") as? [String: String] ?? [:] {
+                    let parts = key.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                    let migratedKey = parts.count == 2
+                        ? Self.key(project: parts[0] == "none" ? nil : String(parts[0]), target: parts[1] == "chief" ? nil : String(parts[1]))
+                        : key
+                    legacy.records[migratedKey] = Record(text: text)
+                }
+                legacy.memos = source.dictionary(forKey: "iamceo.decisionMemos") as? [String: String] ?? [:]
+                hosts["unassigned"] = legacy
+                save()
+            }
+        } catch { persistenceError = error.localizedDescription; canPersist = false }
     }
 
-    static func key(project: String?, target: String?) -> String { "\(project ?? "none"):\(target ?? "chief")" }
+    /// Length prefixes distinguish nil from literal IDs, and prevent delimiter collisions.
+    static func key(project: String?, target: String?) -> String {
+        [project, target].map { $0.map { "\($0.utf8.count):\($0)" } ?? "-" }.joined(separator: "|")
+    }
 
-    func text(for key: String) -> String { texts[key] ?? "" }
+    /// Use serverId plus repository generation when available; otherwise use a verified endpoint's canonical origin.
+    static func endpointNamespace(_ endpoint: ServerEndpoint) -> String {
+        var parts = URLComponents(url: endpoint.url, resolvingAgainstBaseURL: false)!
+        parts.scheme = parts.scheme?.lowercased()
+        parts.host = parts.host?.lowercased()
+        if (parts.scheme == "https" && parts.port == 443) || (parts.scheme == "http" && parts.port == 80) { parts.port = nil }
+        parts.path = ""
+        return parts.string!
+    }
+
+    func selectNamespace(_ value: String) {
+        namespace = value
+        connectionGeneration = UUID() // A → B → A must also invalidate old callbacks.
+    }
+
+    var texts: [String: String] { (hosts[namespace]?.records ?? [:]).mapValues(\.text) }
+    var attachments: [String: [Attachment]] { (hosts[namespace]?.records ?? [:]).mapValues(\.attachments) }
+    var memos: [String: String] { hosts[namespace]?.memos ?? [:] }
+    func text(for key: String) -> String { hosts[namespace]?.records[key]?.text ?? "" }
+    func files(for key: String) -> [Attachment] { hosts[namespace]?.records[key]?.attachments ?? [] }
+    func revision(for key: String) -> Int { hosts[namespace]?.records[key]?.revision ?? 0 }
+
     func setText(_ value: String, for key: String) {
-        texts[key] = value
-        save()
+        guard !value.utf8.elementsEqual(text(for: key).utf8) else { return }
+        edit(key) { record in record.text = value; record.textRevision = record.revision }
     }
-    func files(for key: String) -> [Attachment] { attachments[key] ?? [] }
-    func addFile(_ file: Attachment, for key: String) { attachments[key, default: []].append(file) }
-    func removeFile(_ id: String, for key: String) { attachments[key]?.removeAll { $0.id == id } }
-    func clear(_ key: String) {
-        texts[key] = ""
-        attachments[key] = []
-        save()
-    }
-    /// After a send was accepted, remove only what was sent: text typed or files attached while the request was in
-    /// flight stay in the draft. If the sent text was edited meanwhile, the draft is left as it is.
-    func consumeSent(text sent: String, attachmentIDs: [String], for key: String) {
-        let current = texts[key] ?? ""
-        if current == sent {
-            texts[key] = ""
-        } else if !sent.isEmpty, current.hasPrefix(sent) {
-            texts[key] = String(current.dropFirst(sent.count).drop(while: \.isWhitespace))
+    func addFile(_ file: Attachment, for key: String) {
+        guard !files(for: key).contains(where: { $0.id == file.id }) else { return }
+        edit(key) { record in
+            record.attachments.append(file)
+            record.attachmentRevisions[file.id] = record.revision
         }
-        let sentIDs = Set(attachmentIDs)
-        attachments[key]?.removeAll { sentIDs.contains($0.id) }
+    }
+    func removeFile(_ id: String, for key: String) {
+        guard files(for: key).contains(where: { $0.id == id }) else { return }
+        edit(key) { record in
+            record.attachments.removeAll { $0.id == id }
+            record.attachmentRevisions.removeValue(forKey: id)
+        }
+    }
+    func clear(_ key: String) {
+        edit(key) { record in
+            record.text = ""; record.attachments = []; record.attachmentRevisions = [:]
+            record.textRevision = record.revision; record.generation = UUID()
+        }
+    }
+    func snapshot(for key: String) -> DraftSnapshot {
+        if hosts[namespace]?.records[key] == nil { edit(key) { _ in } }
+        let record = hosts[namespace]!.records[key]!
+        return DraftSnapshot(namespace: namespace, key: key, generation: record.generation, revision: record.revision,
+                             textRevision: record.textRevision, text: record.text, attachments: record.attachments,
+                             attachmentRevisions: record.attachmentRevisions)
+    }
+
+    /// Revision comparisons preserve even edit → undo, and remove/re-attach of the same ID.
+    func consumeSent(_ sent: DraftSnapshot) {
+        guard let record = hosts[sent.namespace]?.records[sent.key], record.generation == sent.generation else { return }
+        var updated = record
+        updated.revision += 1
+        if record.textRevision == sent.textRevision {
+            updated.text = ""; updated.textRevision = updated.revision
+        }
+        let ids = Set(sent.attachments.filter { record.attachmentRevisions[$0.id] == sent.attachmentRevisions[$0.id] }.map(\.id))
+        updated.attachments.removeAll { ids.contains($0.id) }
+        for id in ids { updated.attachmentRevisions.removeValue(forKey: id) }
+        hosts[sent.namespace]?.records[sent.key] = updated
         save()
     }
-    /// Number of unsent drafts and memos, shown before signing out.
-    var pendingCount: Int { texts.values.filter { !$0.isEmpty }.count + memos.values.filter { !$0.isEmpty }.count }
 
-    /// nil = never edited on this device (use the server's lastNote); "" = deliberately cleared.
-    func memo(for decisionID: String) -> String? { memos[decisionID] }
+    /// Legacy callers retain their previous behavior until the composer adopts captured revisions.
+    func consumeSent(text sent: String, attachmentIDs: [String], for key: String) {
+        edit(key) { record in
+            if record.text == sent { record.text = ""; record.textRevision = record.revision }
+            else if !sent.isEmpty, record.text.hasPrefix(sent) {
+                record.text = String(record.text.dropFirst(sent.count).drop(while: \.isWhitespace))
+                record.textRevision = record.revision
+            }
+            record.attachments.removeAll { attachmentIDs.contains($0.id) }
+            for id in attachmentIDs { record.attachmentRevisions.removeValue(forKey: id) }
+        }
+    }
+
+    func uploadToken(for key: String) -> DraftUploadToken {
+        let sent = snapshot(for: key)
+        return DraftUploadToken(namespace: namespace, connectionGeneration: connectionGeneration, key: key, draftGeneration: sent.generation)
+    }
+    @discardableResult func completeUpload(_ file: Attachment, token: DraftUploadToken) -> Bool {
+        guard token.namespace == namespace, token.connectionGeneration == connectionGeneration,
+              token.draftGeneration == hosts[namespace]?.records[token.key]?.generation else { return false }
+        addFile(file, for: token.key)
+        return true
+    }
+
+    var pendingCount: Int {
+        (hosts[namespace]?.records.values.filter { !$0.text.isEmpty || !$0.attachments.isEmpty }.count ?? 0)
+            + memos.values.filter { !$0.isEmpty }.count
+    }
+    func memo(for decisionID: String) -> String? { hosts[namespace]?.memos[decisionID] }
     func setMemo(_ value: String, for decisionID: String) {
-        memos[decisionID] = value
-        save()
+        hosts[namespace, default: Host()].memos[decisionID] = value; save()
     }
-    func clearMemo(_ decisionID: String) {
-        memos.removeValue(forKey: decisionID)
-        save()
-    }
+    func clearMemo(_ decisionID: String) { hosts[namespace]?.memos.removeValue(forKey: decisionID); save() }
     func removeAll() {
-        texts = [:]; attachments = [:]; memos = [:]
+        hosts[namespace] = Host()
+        connectionGeneration = UUID()
         save()
     }
-
+    private func edit(_ key: String, _ change: (inout Record) -> Void) {
+        var record = hosts[namespace]?.records[key] ?? Record()
+        record.revision += 1
+        change(&record)
+        hosts[namespace, default: Host()].records[key] = record
+        save()
+    }
     private func save() {
-        guard persist else { return }
-        UserDefaults.standard.set(texts.filter { !$0.value.isEmpty }, forKey: "iamceo.chatDrafts")
-        UserDefaults.standard.set(memos, forKey: "iamceo.decisionMemos")
+        guard canPersist else { return }
+        do { try storage.write(hosts); persistenceError = nil }
+        catch { persistenceError = error.localizedDescription }
     }
 }

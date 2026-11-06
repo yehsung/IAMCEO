@@ -1,6 +1,13 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
+import { createHash } from "node:crypto";
+import { z } from "zod";
 import { homedir } from "node:os";
 import type {
+  ArchiveProjectState,
+  CoreContextState,
+  MessagePage,
+  MessagePageOptions,
+  MessageScope,
   ActivityKind,
   Activity,
   AnswerReq,
@@ -37,17 +44,21 @@ import type {
   WsEvent,
 } from "../shared/types.ts";
 import { DEFAULT_RANKS, fileKindOf } from "../shared/types.ts";
+import type { MemberRevisions, OperationKind, OperationReceipt, OperationStatus, SyncRevisions, ManualInboxBatch } from "../shared/operations.ts";
+import type { DeliveryDispatch, DeliveryIntentResult, DeliveryRecoveryRecord, LifecycleJournal, DecisionFollowUp, MessageReadStore, ProjectPatchStore, RunnerRecoveryStore, TerminalLease, RunnerRecoveryState, ReportReferences, BoardReview } from "./service-contracts.ts";
+import type { RunnerTerminalIdentity } from "./runner/types.ts";
 import type { Bus } from "./bus.ts";
 import { newId, nowIso } from "./db.ts";
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOWS, exactSource } from "./runner/context.ts";
 import { MAX_PROJECT_NAME, MAX_ROLE, nameProblem, oneLineProblem, RESERVED_HANDLES, workerNameProblem } from "./text.ts";
-import { conductorName } from "./text.ts";
+import { cleanName, conductorName } from "./text.ts";
 
 /** status 가 그대로 HTTP 응답 코드가 되는 오류. */
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly code?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -167,6 +178,8 @@ export interface NewFile {
 }
 
 export interface NewDelivery {
+  sourceRevision?: string | null;
+  nextAttemptAt?: string | null;
   projectId: string;
   memberId: string;
   kind: DeliveryKind;
@@ -214,13 +227,21 @@ const HANDLE_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 export const MAX_ACTIVITY_PER_MEMBER = 500;
 // 도구 결과 하나가 수 MB 일 수 있다. 활동 판은 훑어보는 용도라 잘라도 된다.
 const MAX_ACTIVITY_TEXT = 4000;
-const MEMBER_SELECT = `SELECT m.*, (SELECT COUNT(*) FROM deliveries d WHERE d.member_id = m.id AND d.status IN ('queued','held')) AS queued_count FROM members m`;
+const MEMBER_SELECT = `SELECT m.*, (SELECT COUNT(*) FROM deliveries d WHERE d.member_id = m.id AND d.status IN ('queued','held')) AS queued_count,
+  (SELECT c.measurement_json FROM member_context_state c WHERE c.member_id = m.id AND c.generation = m.session_generation) AS measurement_json,
+  (SELECT c.compaction_json FROM member_context_state c WHERE c.member_id = m.id AND c.generation = m.session_generation) AS compaction_json,
+  (SELECT c.member_id FROM member_context_state c WHERE c.member_id = m.id AND c.generation = m.session_generation) AS context_member_id
+  FROM members m`;
 
 // SQL 행은 컬럼 이름이 곧 스키마(db.ts)다. 아래 toX 함수가 타입 경계다.
 type Row = Record<string, any>;
 
 function json<T>(raw: string): T {
   return JSON.parse(raw) as T;
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) => item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item);
 }
 
 export function attachmentUrl(id: string, name: string): string {
@@ -281,6 +302,7 @@ function toMember(r: Row): Member {
     lastError: r.last_error,
     updatedAt: r.updated_at,
     createdAt: r.created_at,
+    ...(r.context_member_id ? { contextState: { measurement: r.measurement_json === null ? null : json<CoreContextState["measurement"]>(r.measurement_json), compaction: r.compaction_json === null ? null : json<CoreContextState["compaction"]>(r.compaction_json) } } : {}),
   };
 }
 
@@ -426,6 +448,7 @@ function toDelivery(r: Row): Delivery {
     lastError: r.last_error,
     createdAt: r.created_at,
     deliveredAt: r.delivered_at,
+    ...(r.next_attempt_at !== null && r.next_attempt_at !== undefined ? { nextAttemptAt: r.next_attempt_at } : {}),
   };
 }
 
@@ -495,16 +518,135 @@ export interface RunnerHealth {
   detail?: string | null;
 }
 
-export class Store {
+export interface StoredContextState extends CoreContextState {
+  memberId: string;
+  generation: number;
+  bindingNonce: string;
+  rolloutPath: string | null;
+  rolloutOffset: number;
+  baseline: Record<string, unknown> | null;
+  updatedAt: string;
+}
+
+export interface ExecutionJournal {
+  runId: string;
+  memberId: string;
+  projectId: string;
+  identity: RunnerTerminalIdentity;
+  turn: number | null;
+  deliveryIds: string[];
+  phase: "received" | "starting" | "running" | "ended" | "interrupted" | "unknown";
+  inputReceivedAt: string | null;
+  startedAt: string | null;
+  lastProgressAt: string | null;
+  endedAt: string | null;
+  result: "success" | "error" | "interrupted" | null;
+  reason: string | null;
+  exitCode: number | null;
+  interruptionNotifiedAt: string | null;
+  reportRequestedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DeliveryRetryState {
+  nextAttemptAt: string | null;
+  sourceRevision: string | null;
+  retryScope: string | null;
+  retryReason: string | null;
+  correctionRevision: number | null;
+}
+
+export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecoveryStore {
+  readonly db: Database;
+  private readonly sqlTransaction: Database["transaction"];
+  private commitFrames: (() => void)[][] = [];
   private lastMessageMs = 0;
   private runnerHealth = new Map<Backend, RunnerHealth>();
   private lastConnections = new Map<string, string>();
 
   constructor(
-    readonly db: Database,
+    db: Database,
     private readonly bus: Bus,
   ) {
+    this.sqlTransaction = db.transaction.bind(db);
+    // 기존 import의 store.db.transaction도 같은 commit 큐를 사용한다.
+    // 원래 DB 객체/다른 저장소는 변조하지 않고 이 Store의 호환 facade만 제공한다.
+    const transaction = <A extends unknown[], T>(write: (...args: A) => T) => {
+      const run = (mode: "deferred" | "immediate" | "exclusive") => (...args: A) => this.transaction(() => write(...args), mode);
+      return Object.assign(run("deferred"), { deferred: run("deferred"), immediate: run("immediate"), exclusive: run("exclusive") });
+    };
+    this.db = new Proxy(db, {
+      get(target, key) {
+        if (key === "transaction") return transaction;
+        const value: unknown = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
     this.ensureHq();
+  }
+
+  /** 동기 SQL 전용. await/외부 I/O는 이 경계 밖에서 한다. 중첩 실패는 해당 savepoint의 알림도 버린다. */
+  transaction<T>(write: () => T, mode: "deferred" | "immediate" | "exclusive" = "deferred"): T {
+    if (this.db.inTransaction && this.commitFrames.length === 0) {
+      throw new Error("Store.transaction must own the outer transaction");
+    }
+    const frame: (() => void)[] = [];
+    const messageMs = this.lastMessageMs;
+    const backend = this.runtimeBackend;
+    this.commitFrames.push(frame);
+    let result: T;
+    try {
+      result = this.sqlTransaction(() => {
+        const value = write();
+        if (value instanceof Promise) throw new Error("Store.transaction requires a synchronous callback");
+        return value;
+      })[mode]();
+    } catch (error) {
+      this.commitFrames.pop();
+      this.lastMessageMs = messageMs;
+      this.runtimeBackend = backend;
+      throw error;
+    }
+    this.commitFrames.pop();
+    const parent = this.commitFrames.at(-1);
+    if (parent) parent.push(...frame);
+    else for (const effect of frame) {
+      // commit은 이미 성공했다. 알림 실패를 쓰기 실패로 오인해 재실행하지 않는다.
+      try { effect(); } catch (error) { console.error("Store afterCommit 오류:", error); }
+    }
+    return result;
+  }
+
+  afterCommit(effect: () => void): void {
+    const frame = this.commitFrames.at(-1);
+    if (frame) frame.push(effect);
+    else {
+      if (this.db.inTransaction) throw new Error("Use Store.transaction for commit effects");
+      effect();
+    }
+  }
+
+  private emit(event: WsEvent): void {
+    this.afterCommit(() => this.bus.emit(event));
+  }
+
+  /** 원본과 outbox를 하나로 접수한다. pump도 최외곽 commit 이후에만 실행한다. */
+  withDeliveryIntents<T>(write: () => T, intents: (value: T) => NewDelivery[], pump?: (memberId: string) => void): DeliveryIntentResult<T> {
+    return this.transaction(() => {
+      const value = write();
+      const pumpMembers = new Set<string>();
+      const deliveries = intents(value).map((intent) => {
+        if (intent.refType && intent.refId) {
+          const existing = this.row("SELECT * FROM deliveries WHERE project_id = ? AND member_id = ? AND kind = ? AND ref_type = ? AND ref_id = ? AND source_revision IS ? ORDER BY rowid DESC LIMIT 1", intent.projectId, intent.memberId, intent.kind, intent.refType, intent.refId, intent.sourceRevision ?? null);
+          if (existing) return toDelivery(existing);
+        }
+        pumpMembers.add(intent.memberId);
+        return this.enqueue(intent);
+      });
+      if (pump) for (const id of pumpMembers) this.afterCommit(() => pump(id));
+      return { value, deliveries };
+    });
   }
 
   private ensureHq(): void {
@@ -525,15 +667,17 @@ export class Store {
   }
 
   private emitProjects(): void {
-    this.bus.emit({ type: "projects", projects: this.projectSummaries() });
-    // 연결 상태는 설정·실행기·직접 띄운 세션에 따라 저절로 바뀐다. 여는 화면이 보던 Project 도 고쳐 준다.
-    for (const r of this.rows("SELECT * FROM projects")) {
-      const project = this.projectFrom(r);
-      const key = JSON.stringify(project.connection);
-      const before = this.lastConnections.get(project.id);
-      this.lastConnections.set(project.id, key);
-      if (before !== undefined && before !== key) this.bus.emit({ type: "project", project });
-    }
+    this.afterCommit(() => {
+      this.emit({ type: "projects", projects: this.projectSummaries() });
+      // 연결 상태는 설정·실행기·직접 띄운 세션에 따라 저절로 바뀐다. 여는 화면이 보던 Project 도 고쳐 준다.
+      for (const r of this.rows("SELECT * FROM projects")) {
+        const project = this.projectFrom(r);
+        const key = JSON.stringify(project.connection);
+        const before = this.lastConnections.get(project.id);
+        this.lastConnections.set(project.id, key);
+        if (before !== undefined && before !== key) this.emit({ type: "project", project });
+      }
+    });
   }
 
   // ---- 연결 ----
@@ -553,13 +697,15 @@ export class Store {
   }
 
   archiveAndRotateSession(memberId: string, cli: CliProvider, reason = "provider_switch"): void {
-    this.requireMember(memberId);
-    this.db.transaction(() => {
-      this.run(`INSERT INTO member_session_history (id, member_id, cli, backend, session_id, pane_id, generation, applied_config, archived_at, reason)
-        SELECT ?, id, cli, backend, session_id, pane_id, session_generation, applied_config, ?, ? FROM members WHERE id = ?`, newId("hist_"), nowIso(), reason, memberId);
-      this.run(`UPDATE members SET cli = ?, token = ?, session_id = NULL, pane_id = NULL, context_pct = NULL, context_window = NULL, context_window_source = NULL,
-        applied_config = NULL, parallel = 0, subagents = 0, session_generation = session_generation + 1 WHERE id = ?`, cli, `tk_${newId("")}${newId("")}`, memberId);
-    })();
+    return this.transaction(() => {
+      this.requireMember(memberId);
+      this.transaction(() => {
+        this.run(`INSERT INTO member_session_history (id, member_id, cli, backend, session_id, pane_id, generation, applied_config, archived_at, reason)
+          SELECT ?, id, cli, backend, session_id, pane_id, session_generation, applied_config, ?, ? FROM members WHERE id = ?`, newId("hist_"), nowIso(), reason, memberId);
+        this.run(`UPDATE members SET cli = ?, token = ?, session_id = NULL, pane_id = NULL, context_pct = NULL, context_window = NULL, context_window_source = NULL,
+          applied_config = NULL, parallel = 0, subagents = 0, config_revision = config_revision + 1, session_generation = session_generation + 1 WHERE id = ?`, cli, `tk_${newId("")}${newId("")}`, memberId);
+      });
+    });
   }
 
   /** 실행기 상태를 적는다. 달라졌으면 화면에 알리고 true. */
@@ -618,13 +764,13 @@ export class Store {
       if (d.refType === "decision" && d.refId) {
         const decisionId = d.refId;
         // 지우고 다시 여는 사이에 죽으면 답도 전달도 사라진다. 한 번에 한다.
-        this.db.transaction(() => {
+        this.transaction(() => {
           this.run("DELETE FROM deliveries WHERE id = ?", d.id);
           if (this.getDecision(decisionId)?.status === "answered") {
             this.reopenDecision(decisionId, reopenNote);
             out.decisions++;
           }
-        })();
+        });
         released.push(decisionId);
         this.emitMember(d.memberId);
       } else if (d.refType === "message" && d.refId) {
@@ -677,51 +823,80 @@ export class Store {
   }
 
   createProject(input: NewProject): Project {
-    checkProjectName(input.name);
-    const at = nowIso();
-    const id = input.id ?? newId("p_");
-    const now = input.now ?? "";
-    this.run(
-      `INSERT INTO projects (id, name, is_hq, cwd, runner_enabled, now, now_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id,
-      input.name,
-      id === "hq" ? 1 : 0,
-      input.cwd,
-      (input.runnerEnabled ?? true) ? 1 : 0,
-      now,
-      now ? at : null,
-      at,
-      at,
-    );
-    if (input.chiefCli) this.setChiefCli(id, input.chiefCli);
+    return this.transaction(() => {
+      checkProjectName(input.name);
+      const at = nowIso();
+      const id = input.id ?? newId("p_");
+      const now = input.now ?? "";
+      this.run(
+        `INSERT INTO projects (id, name, is_hq, cwd, runner_enabled, now, now_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id,
+        input.name,
+        id === "hq" ? 1 : 0,
+        input.cwd,
+        (input.runnerEnabled ?? true) ? 1 : 0,
+        now,
+        now ? at : null,
+        at,
+        at,
+      );
+      if (input.chiefCli) this.setChiefCli(id, input.chiefCli);
+      const project = this.requireProject(id);
+      this.emit({ type: "project", project });
+      this.emitProjects();
+      return project;
+    });
+  }
+
+  private projectConductorName(name: string): string {
+    return cleanName(conductorName(name), "총괄");
+  }
+
+  validateProjectPatch(id: string, patch: ProjectPatch): ProjectPatch {
     const project = this.requireProject(id);
-    this.bus.emit({ type: "project", project });
-    this.emitProjects();
-    return project;
+    if (patch.archived === true && patch.runnerEnabled === true) throw new ApiError(400, "보관과 실행 켜기를 함께 요청할 수 없습니다");
+    if (project.isHq && patch.archived === true) throw new ApiError(400, "본사는 보관할 수 없습니다");
+    if (patch.name !== undefined) {
+      // trim 전에도 줄바꿈/제어문자는 거부한다.
+      const problem = oneLineProblem(patch.name, Number.MAX_SAFE_INTEGER);
+      if (problem) throw new ApiError(400, problem);
+      patch = { ...patch, name: patch.name.trim() };
+      checkProjectName(patch.name);
+      if (!patch.name) throw new ApiError(400, "프로젝트 이름이 필요합니다");
+      const lead = this.getConductor(id);
+      const name = this.projectConductorName(patch.name);
+      if (lead?.kind === "conductor" && (lead.name === conductorName(project.name) || lead.name === this.projectConductorName(project.name)) && this.row("SELECT 1 FROM members WHERE project_id = ? AND id != ? AND name = ?", id, lead.id, name)) {
+        throw new ApiError(409, "새 총괄 이름과 같은 직원이 있습니다");
+      }
+    }
+    return { ...patch };
   }
 
   patchProject(id: string, patch: ProjectPatch): Project {
-    checkProjectName(patch.name);
-    const before = this.requireProject(id);
-    const { set, values } = buildSet(patch, PROJECT_COLUMNS);
-    if (set.length === 0) return before;
-    const at = nowIso();
-    set.push("updated_at = ?");
-    values.push(at);
-    if (patch.now !== undefined && patch.now !== before.now) {
-      set.push("now_at = ?");
+    return this.transaction(() => {
+      patch = this.validateProjectPatch(id, patch);
+      const before = this.requireProject(id);
+      patch = Object.fromEntries(Object.entries(patch).filter(([key, value]) => value !== undefined && value !== before[key as keyof ProjectPatch]));
+      const { set, values } = buildSet(patch, PROJECT_COLUMNS);
+      if (set.length === 0) return before;
+      const at = nowIso();
+      set.push("updated_at = ?");
       values.push(at);
-    }
-    this.run(`UPDATE projects SET ${set.join(", ")} WHERE id = ?`, ...values, id);
-    const project = this.requireProject(id);
-    if (patch.name !== undefined && patch.name !== before.name) {
-      const lead = this.getConductor(id);
-      if (lead && lead.name === conductorName(before.name)) this.patchMember(lead.id, { name: conductorName(project.name) });
-    }
-    this.bus.emit({ type: "project", project });
-    this.emitProjects();
-    return project;
+      if (patch.now !== undefined && patch.now !== before.now) {
+        set.push("now_at = ?");
+        values.push(at);
+      }
+      this.run(`UPDATE projects SET ${set.join(", ")} WHERE id = ?`, ...values, id);
+      const project = this.requireProject(id);
+      if (patch.name !== undefined && patch.name !== before.name) {
+        const lead = this.getConductor(id);
+        if (lead?.kind === "conductor" && (lead.name === conductorName(before.name) || lead.name === this.projectConductorName(before.name))) this.patchMember(lead.id, { name: this.projectConductorName(project.name) });
+      }
+      this.emit({ type: "project", project });
+      this.emitProjects();
+      return project;
+    });
   }
 
   /** 실행을 켠 것이 편입인가. 맞으면 대표가 시키지 않은 총괄을 띄우지 않고, 남은 세션이 없을 때 실행을 끈다. */
@@ -837,65 +1012,73 @@ export class Store {
   }
 
   createMember(input: NewMember): Member {
-    const project = this.requireProject(input.projectId);
-    checkMemberText(input.name, input.role, input.kind);
-    if (input.kind === "worker" && RESERVED_HANDLES.has(input.handle)) throw new ApiError(400, `총괄 자리의 핸들이라 직원에게 쓸 수 없습니다: ${input.handle}`);
-    if (!HANDLE_RE.test(input.handle)) throw new ApiError(400, "핸들은 영문 소문자로 시작하고 영문 소문자·숫자·_·- 만 쓸 수 있습니다(32자 이내)");
-    if (this.getMemberByHandle(input.projectId, input.handle)) throw new ApiError(409, `이미 있는 핸들입니다: ${input.handle}`);
-    if (this.row("SELECT 1 FROM members WHERE project_id = ? AND name = ?", input.projectId, input.name)) {
-      throw new ApiError(409, `이미 있는 이름입니다: ${input.name}`);
-    }
-    const id = newId("m_");
-    const at = nowIso();
-    this.run(
-      `INSERT INTO members (id, project_id, handle, name, role, kind, origin, backend, status, cwd, session_id, pane_id, parallel, token, updated_at, created_at, cli, model_override)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id,
-      input.projectId,
-      input.handle,
-      input.name,
-      input.role ?? "",
-      input.kind,
-      input.origin ?? "runner",
-      input.backend ?? null,
-      input.status ?? "idle",
-      input.cwd ?? project.cwd,
-      input.sessionId ?? null,
-      input.paneId ?? null,
-      input.parallel ? 1 : 0,
-      `tk_${newId("")}${newId("")}`,
-      at,
-      at,
-      input.cli ?? "claude",
-      input.modelOverride ?? null,
-    );
-    const member = this.requireMember(id);
-    this.bus.emit({ type: "member", member });
-    this.emitProjects();
-    return member;
+    return this.transaction(() => {
+      const project = this.requireProject(input.projectId);
+      checkMemberText(input.name, input.role, input.kind);
+      if (input.kind === "worker" && RESERVED_HANDLES.has(input.handle)) throw new ApiError(400, `총괄 자리의 핸들이라 직원에게 쓸 수 없습니다: ${input.handle}`);
+      if (!HANDLE_RE.test(input.handle)) throw new ApiError(400, "핸들은 영문 소문자로 시작하고 영문 소문자·숫자·_·- 만 쓸 수 있습니다(32자 이내)");
+      if (this.getMemberByHandle(input.projectId, input.handle)) throw new ApiError(409, `이미 있는 핸들입니다: ${input.handle}`);
+      if (this.row("SELECT 1 FROM members WHERE project_id = ? AND name = ?", input.projectId, input.name)) {
+        throw new ApiError(409, `이미 있는 이름입니다: ${input.name}`);
+      }
+      const id = newId("m_");
+      const at = nowIso();
+      this.run(
+        `INSERT INTO members (id, project_id, handle, name, role, kind, origin, backend, status, cwd, session_id, pane_id, parallel, token, updated_at, created_at, cli, model_override)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id,
+        input.projectId,
+        input.handle,
+        input.name,
+        input.role ?? "",
+        input.kind,
+        input.origin ?? "runner",
+        input.backend ?? null,
+        input.status ?? "idle",
+        input.cwd ?? project.cwd,
+        input.sessionId ?? null,
+        input.paneId ?? null,
+        input.parallel ? 1 : 0,
+        `tk_${newId("")}${newId("")}`,
+        at,
+        at,
+        input.cli ?? "claude",
+        input.modelOverride ?? null,
+      );
+      const member = this.requireMember(id);
+      this.emit({ type: "member", member });
+      this.emitProjects();
+      return member;
+    });
   }
 
   patchMember(id: string, patch: MemberPatch): Member {
-    const before = this.requireMember(id);
-    checkMemberText(patch.name, patch.role, before.kind);
-    // 배운 창 크기는 그 세션·CLI 의 것이다. 세션이나 CLI 가 바뀌면 다음 턴 끝에 다시 배운다.
-    const sessionChanged = (patch.sessionId !== undefined && patch.sessionId !== before.sessionId) || (patch.cli !== undefined && patch.cli !== before.cli);
-    if (sessionChanged && patch.contextWindow === undefined) patch = { ...patch, contextWindow: null, contextWindowSource: null };
-    if (patch.contextWindow === null) patch = { ...patch, contextWindowSource: null };
-    if (sessionChanged && patch.contextWindowSource === undefined) patch = { ...patch, contextWindowSource: null };
-    // 같은 세션의 실측 창은 화면 추정으로 덮지 않는다.
-    if (!sessionChanged && exactSource(before.contextWindowSource) && patch.contextWindowSource === "screen") {
-      patch = { ...patch, contextWindow: before.contextWindow, contextWindowSource: before.contextWindowSource };
-    }
-    const { set, values } = buildSet(patch, MEMBER_COLUMNS);
-    if (set.length === 0) return before;
-    set.push("updated_at = ?");
-    values.push(nowIso());
-    this.run(`UPDATE members SET ${set.join(", ")} WHERE id = ?`, ...values, id);
-    const member = this.requireMember(id);
-    this.bus.emit({ type: "member", member });
-    if (member.status !== before.status) this.emitProjects();
-    return member;
+    return this.transaction(() => {
+      const before = this.requireMember(id);
+      checkMemberText(patch.name, patch.role, before.kind);
+      // 배운 창 크기는 그 세션·CLI 의 것이다. 세션이나 CLI 가 바뀌면 다음 턴 끝에 다시 배운다.
+      const sessionChanged = (patch.sessionId !== undefined && patch.sessionId !== before.sessionId) || (patch.cli !== undefined && patch.cli !== before.cli);
+      if (sessionChanged && patch.contextWindow === undefined) patch = { ...patch, contextWindow: null, contextWindowSource: null };
+      if (patch.contextWindow === null) patch = { ...patch, contextWindowSource: null };
+      if (sessionChanged && patch.contextWindowSource === undefined) patch = { ...patch, contextWindowSource: null };
+      // 같은 세션의 실측 창은 화면 추정으로 덮지 않는다.
+      if (!sessionChanged && exactSource(before.contextWindowSource) && patch.contextWindowSource === "screen") {
+        patch = { ...patch, contextWindow: before.contextWindow, contextWindowSource: before.contextWindowSource };
+      }
+      const { set, values } = buildSet(patch, MEMBER_COLUMNS);
+      if (set.length === 0) return before;
+      if (["name", "role", "cli", "modelOverride", "effortOverride", "cwd", "backend"].some((key) => patch[key as keyof MemberPatch] !== undefined && patch[key as keyof MemberPatch] !== before[key as keyof MemberPatch])) set.push("config_revision = config_revision + 1");
+      set.push("updated_at = ?");
+      values.push(nowIso());
+      this.run(`UPDATE members SET ${set.join(", ")} WHERE id = ?`, ...values, id);
+      if ((patch.modelOverride !== undefined && patch.modelOverride !== before.modelOverride) || (patch.sessionId !== undefined && before.sessionId !== null && patch.sessionId !== before.sessionId) || (patch.cli !== undefined && patch.cli !== before.cli)) {
+        this.run("UPDATE member_context_state SET measurement_json = NULL, updated_at = ? WHERE member_id = ?", nowIso(), id);
+      }
+      const member = this.requireMember(id);
+      this.emit({ type: "member", member });
+      if (member.status !== before.status) this.emitProjects();
+      return member;
+    });
   }
 
   getAppliedConfig(id: string): AppliedConfig | null {
@@ -913,13 +1096,17 @@ export class Store {
   }
 
   setAppliedConfig(id: string, config: AppliedConfig | null): void {
-    const value = config ? JSON.stringify(config) : null;
-    const before = this.row("SELECT applied_config FROM members WHERE id = ?", id);
-    if ((before?.applied_config ?? null) === value) return;
-    // 세션에 들어간 모델이 바뀌면 배운 창 크기도 그 모델의 것이 아니다.
-    const modelChanged = (before ? appliedOf(before)?.model ?? null : null) !== (config?.model ?? null);
-    this.run(`UPDATE members SET applied_config = ?${modelChanged ? ", context_window = NULL, context_window_source = NULL" : ""} WHERE id = ?`, value, id);
-    this.emitMember(id);
+
+    this.transaction(() => {
+      const value = config ? JSON.stringify(config) : null;
+      const before = this.row("SELECT applied_config FROM members WHERE id = ?", id);
+      if ((before?.applied_config ?? null) === value) return;
+      // 세션에 들어간 모델이 바뀌면 배운 창 크기도 그 모델의 것이 아니다.
+      const modelChanged = (before ? appliedOf(before)?.model ?? null : null) !== (config?.model ?? null);
+      this.run(`UPDATE members SET applied_config = ?${modelChanged ? ", context_window = NULL, context_window_source = NULL" : ""} WHERE id = ?`, value, id);
+      if (modelChanged) this.run("UPDATE member_context_state SET measurement_json = NULL, updated_at = ? WHERE member_id = ?", nowIso(), id);
+      this.emitMember(id);
+    });
   }
 
   /** 편입 표시. turnedOnRunner: 이 편입이 프로젝트 실행을 켰다(해제할 때 되돌린다). */
@@ -940,10 +1127,12 @@ export class Store {
 
   /** 그 직원의 전달·활동도 함께 사라진다(CASCADE). 대화·결재 기록은 남는다. */
   removeMember(id: string): void {
-    const member = this.requireMember(id);
-    this.run("DELETE FROM members WHERE id = ?", id);
-    this.bus.emit({ type: "member_removed", projectId: member.projectId, memberId: id });
-    this.emitProjects();
+    return this.transaction(() => {
+      const member = this.requireMember(id);
+      this.run("DELETE FROM members WHERE id = ?", id);
+      this.emit({ type: "member_removed", projectId: member.projectId, memberId: id });
+      this.emitProjects();
+    });
   }
 
   // ---- 결재 ----
@@ -999,29 +1188,32 @@ export class Store {
   }
 
   createDecision(input: NewDecision): Decision {
-    this.requireProject(input.projectId);
-    const id = newId("d_");
-    this.run(
-      `INSERT INTO decisions (id, project_id, member_id, who, title, detail, options, rec, grp, file_id, images, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
-      id,
-      input.projectId,
-      input.memberId ?? null,
-      input.who,
-      input.title,
-      input.detail ?? "",
-      JSON.stringify(input.options ?? []),
-      input.rec ?? null,
-      input.group ?? null,
-      input.fileId ?? null,
-      JSON.stringify(input.images ?? []),
-      nowIso(),
-      nowIso(),
-    );
-    const decision = this.requireDecision(id);
-    this.bus.emit({ type: "decision", decision });
-    this.emitProjects();
-    return decision;
+    return this.transaction(() => {
+      this.requireProject(input.projectId);
+      const id = newId("d_");
+      this.run(
+        `INSERT INTO decisions (id, project_id, member_id, who, title, detail, options, rec, grp, file_id, images, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+        id,
+        input.projectId,
+        input.memberId ?? null,
+        input.who,
+        input.title,
+        input.detail ?? "",
+        JSON.stringify(input.options ?? []),
+        input.rec ?? null,
+        input.group ?? null,
+        input.fileId ?? null,
+        JSON.stringify(input.images ?? []),
+        nowIso(),
+        nowIso(),
+      );
+      const decision = this.requireDecision(id);
+      this.bumpBoard(decision.projectId);
+      this.emit({ type: "decision", decision });
+      this.emitProjects();
+      return decision;
+    });
   }
 
   private normalizeAnswer(d: Decision, req: AnswerReq): { choice: string | null; note: string | null; batch: boolean } {
@@ -1050,39 +1242,45 @@ export class Store {
 
   /** 멱등: changed=false 면 같은 답이 이미 기록되어 있어 아무것도 안 했다. 다른 답이면 409. */
   answerDecision(id: string, req: AnswerReq): { decision: Decision; changed: boolean } {
-    const existing = this.checkAnswer(id, req);
-    if (existing) return { decision: existing, changed: false };
-    const a = this.normalizeAnswer(this.requireDecision(id), req);
-    this.run(
-      "UPDATE decisions SET status = 'answered', choice = ?, note = ?, batch = ?, answered_at = ?, updated_at = ?, last_choice = NULL, last_note = NULL, reopen_note = NULL WHERE id = ?",
-      a.choice,
-      a.note,
-      a.batch ? 1 : 0,
-      nowIso(),
-      this.nextDecisionStamp(id),
-      id,
-    );
-    const decision = this.requireDecision(id);
-    this.bus.emit({ type: "decision", decision });
-    this.emitProjects();
-    return { decision, changed: true };
+    return this.transaction(() => {
+      const existing = this.checkAnswer(id, req);
+      if (existing) return { decision: existing, changed: false };
+      const a = this.normalizeAnswer(this.requireDecision(id), req);
+      this.run(
+        "UPDATE decisions SET status = 'answered', choice = ?, note = ?, batch = ?, answered_at = ?, updated_at = ?, last_choice = NULL, last_note = NULL, reopen_note = NULL WHERE id = ?",
+        a.choice,
+        a.note,
+        a.batch ? 1 : 0,
+        nowIso(),
+        this.nextDecisionStamp(id),
+        id,
+      );
+      const decision = this.requireDecision(id);
+      this.bumpBoard(decision.projectId);
+      this.emit({ type: "decision", decision });
+      this.emitProjects();
+      return { decision, changed: true };
+    });
   }
 
   /** 전달됨·닫힘으로 옮기거나, 전달이 실패하면 answered 로 되돌린다. 닫으면 inbox 에서 빠진다. */
   setDecisionStatus(id: string, status: Extract<DecisionStatus, "answered" | "delivered" | "closed">): Decision {
-    this.requireDecision(id);
-    const stamp = this.nextDecisionStamp(id);
-    if (status === "delivered") {
-      this.run("UPDATE decisions SET status = 'delivered', delivered_at = COALESCE(delivered_at, ?), updated_at = ? WHERE id = ?", nowIso(), stamp, id);
-    } else if (status === "answered") {
-      this.run("UPDATE decisions SET status = 'answered', delivered_at = NULL, updated_at = ? WHERE id = ?", stamp, id);
-    } else {
-      this.run("UPDATE decisions SET status = 'closed', updated_at = ? WHERE id = ?", stamp, id);
-    }
-    const decision = this.requireDecision(id);
-    this.bus.emit({ type: "decision", decision });
-    this.emitProjects();
-    return decision;
+    return this.transaction(() => {
+      this.requireDecision(id);
+      const stamp = this.nextDecisionStamp(id);
+      if (status === "delivered") {
+        this.run("UPDATE decisions SET status = 'delivered', delivered_at = COALESCE(delivered_at, ?), updated_at = ? WHERE id = ?", nowIso(), stamp, id);
+      } else if (status === "answered") {
+        this.run("UPDATE decisions SET status = 'answered', delivered_at = NULL, updated_at = ? WHERE id = ?", stamp, id);
+      } else {
+        this.run("UPDATE decisions SET status = 'closed', updated_at = ? WHERE id = ?", stamp, id);
+      }
+      const decision = this.requireDecision(id);
+      this.bumpBoard(decision.projectId);
+      this.emit({ type: "decision", decision });
+      this.emitProjects();
+      return decision;
+    });
   }
 
   /**
@@ -1090,38 +1288,44 @@ export class Store {
    * 열려 있지 않으면 409(대표가 이미 답했거나 닫혔다). 닫힌 카드는 결재된 항목으로 간다.
    */
   closeDecision(id: string, input: { kind: DecisionCloseKind | null; reason: string; by: string; quote?: string | null }): Decision {
-    const before = this.requireDecision(id);
-    if (before.status !== "open") throw new ApiError(409, before.status === "closed" ? "이미 닫힌 결재입니다" : "대표가 이미 답한 결재입니다");
-    const at = nowIso();
-    this.run(
-      "UPDATE decisions SET status = 'closed', close_kind = ?, close_reason = ?, close_quote = ?, closed_by = ?, closed_at = ?, updated_at = ? WHERE id = ? AND status = 'open'",
-      input.kind,
-      input.reason,
-      input.quote ?? null,
-      input.by,
-      at,
-      this.nextDecisionStamp(id),
-      id,
-    );
-    const decision = this.requireDecision(id);
-    this.bus.emit({ type: "decision", decision });
-    this.emitProjects();
-    return decision;
+    return this.transaction(() => {
+      const before = this.requireDecision(id);
+      if (before.status !== "open") throw new ApiError(409, before.status === "closed" ? "이미 닫힌 결재입니다" : "대표가 이미 답한 결재입니다");
+      const at = nowIso();
+      this.run(
+        "UPDATE decisions SET status = 'closed', close_kind = ?, close_reason = ?, close_quote = ?, closed_by = ?, closed_at = ?, updated_at = ? WHERE id = ? AND status = 'open'",
+        input.kind,
+        input.reason,
+        input.quote ?? null,
+        input.by,
+        at,
+        this.nextDecisionStamp(id),
+        id,
+      );
+      const decision = this.requireDecision(id);
+      this.bumpBoard(decision.projectId);
+      this.emit({ type: "decision", decision });
+      this.emitProjects();
+      return decision;
+    });
   }
 
   /** 끝내 전달하지 못한 답은 대표가 다시 답할 수 있게 카드를 연다. 메모의 사본은 전달 글뿐이었으니 직전 답을 카드에 남긴다. 닫힌 카드를 다시 열 때도 쓴다(닫은 이유는 지운다). */
   reopenDecision(id: string, why = "전달하지 못했습니다. 다시 결정해 주세요"): Decision {
-    this.requireDecision(id);
-    this.run(
-      "UPDATE decisions SET status = 'open', last_choice = COALESCE(choice, last_choice), last_note = COALESCE(note, last_note), reopen_note = ?, choice = NULL, note = NULL, batch = 0, answered_at = NULL, delivered_at = NULL, close_kind = NULL, close_reason = NULL, close_quote = NULL, closed_by = NULL, closed_at = NULL, updated_at = ? WHERE id = ?",
-      why,
-      this.nextDecisionStamp(id),
-      id,
-    );
-    const decision = this.requireDecision(id);
-    this.bus.emit({ type: "decision", decision });
-    this.emitProjects();
-    return decision;
+    return this.transaction(() => {
+      this.requireDecision(id);
+      this.run(
+        "UPDATE decisions SET status = 'open', last_choice = COALESCE(choice, last_choice), last_note = COALESCE(note, last_note), reopen_note = ?, choice = NULL, note = NULL, batch = 0, answered_at = NULL, delivered_at = NULL, close_kind = NULL, close_reason = NULL, close_quote = NULL, closed_by = NULL, closed_at = NULL, updated_at = ? WHERE id = ?",
+        why,
+        this.nextDecisionStamp(id),
+        id,
+      );
+      const decision = this.requireDecision(id);
+      this.bumpBoard(decision.projectId);
+      this.emit({ type: "decision", decision });
+      this.emitProjects();
+      return decision;
+    });
   }
 
   /** 답했지만 아직 누구에게도 가지 않은 결재. */
@@ -1146,24 +1350,27 @@ export class Store {
   }
 
   createTodo(input: NewTodo): Todo {
-    this.requireProject(input.projectId);
-    const id = newId("t_");
-    const at = nowIso();
-    this.run(
-      "INSERT INTO todos (id, project_id, member_id, who, title, detail, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      id,
-      input.projectId,
-      input.memberId ?? null,
-      input.who ?? "",
-      input.title,
-      input.detail ?? "",
-      at,
-      at,
-    );
-    const todo = this.requireTodo(id);
-    this.bus.emit({ type: "todo", todo });
-    this.emitProjects();
-    return todo;
+    return this.transaction(() => {
+      this.requireProject(input.projectId);
+      const id = newId("t_");
+      const at = nowIso();
+      this.run(
+        "INSERT INTO todos (id, project_id, member_id, who, title, detail, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        id,
+        input.projectId,
+        input.memberId ?? null,
+        input.who ?? "",
+        input.title,
+        input.detail ?? "",
+        at,
+        at,
+      );
+      const todo = this.requireTodo(id);
+      this.bumpBoard(todo.projectId);
+      this.emit({ type: "todo", todo });
+      this.emitProjects();
+      return todo;
+    });
   }
 
   /** 받을 사람이 없어 '했음'을 못 알린 할 일. 총괄이 뜨면 전한다. */
@@ -1177,41 +1384,47 @@ export class Store {
 
   /** 대표의 체크. changed=false 면 이미 그 값이었다. 체크를 풀면 AI 가 정리한 이유도 지운다. */
   setTodoDone(id: string, done: boolean): { todo: Todo; changed: boolean } {
-    const before = this.requireTodo(id);
-    if (before.done === done) return { todo: before, changed: false };
-    const at = nowIso();
-    this.run(
-      "UPDATE todos SET done = ?, done_at = ?, outcome = ?, close_reason = NULL, closed_by = NULL, updated_at = ? WHERE id = ?",
-      done ? 1 : 0,
-      done ? at : null,
-      done ? "done" : null,
-      at,
-      id,
-    );
-    const todo = this.requireTodo(id);
-    this.bus.emit({ type: "todo", todo });
-    this.emitProjects();
-    return { todo, changed: true };
+    return this.transaction(() => {
+      const before = this.requireTodo(id);
+      if (before.done === done) return { todo: before, changed: false };
+      const at = nowIso();
+      this.run(
+        "UPDATE todos SET revision = revision + 1, done = ?, done_at = ?, outcome = ?, close_reason = NULL, closed_by = NULL, updated_at = ? WHERE id = ?",
+        done ? 1 : 0,
+        done ? at : null,
+        done ? "done" : null,
+        at,
+        id,
+      );
+      const todo = this.requireTodo(id);
+      this.bumpBoard(todo.projectId);
+      this.emit({ type: "todo", todo });
+      this.emitProjects();
+      return { todo, changed: true };
+    });
   }
 
   /** AI 의 todo_close. 안 끝난 할 일만. 끝남·필요 없어짐 모두 안 한 할 일 수에서 빠진다. */
   closeTodo(id: string, input: { outcome: TodoOutcome; reason: string; by: string }): Todo {
-    const before = this.requireTodo(id);
-    if (before.done) throw new ApiError(409, "이미 끝났거나 정리된 할 일입니다");
-    const at = nowIso();
-    this.run(
-      "UPDATE todos SET done = 1, done_at = ?, outcome = ?, close_reason = ?, closed_by = ?, updated_at = ? WHERE id = ? AND done = 0",
-      at,
-      input.outcome,
-      input.reason,
-      input.by,
-      at,
-      id,
-    );
-    const todo = this.requireTodo(id);
-    this.bus.emit({ type: "todo", todo });
-    this.emitProjects();
-    return todo;
+    return this.transaction(() => {
+      const before = this.requireTodo(id);
+      if (before.done) throw new ApiError(409, "이미 끝났거나 정리된 할 일입니다");
+      const at = nowIso();
+      this.run(
+        "UPDATE todos SET revision = revision + 1, done = 1, done_at = ?, outcome = ?, close_reason = ?, closed_by = ?, updated_at = ? WHERE id = ? AND done = 0",
+        at,
+        input.outcome,
+        input.reason,
+        input.by,
+        at,
+        id,
+      );
+      const todo = this.requireTodo(id);
+      this.bumpBoard(todo.projectId);
+      this.emit({ type: "todo", todo });
+      this.emitProjects();
+      return todo;
+    });
   }
 
   // ---- 판 정리 ----
@@ -1219,7 +1432,7 @@ export class Store {
   setBoardTidiedAt(projectId: string, at: string): void {
     this.run("UPDATE projects SET board_tidied_at = ? WHERE id = ?", at, projectId);
     const project = this.getProject(projectId);
-    if (project) this.bus.emit({ type: "project", project });
+    if (project) this.emit({ type: "project", project });
   }
 
   /** 결재·할 일·진행판·대화에서 가장 늦게 바뀐 시각. 아무것도 없으면 null. */
@@ -1246,54 +1459,59 @@ export class Store {
   }
 
   private emitWork(projectId: string): void {
-    this.bus.emit({ type: "work", projectId, work: this.listWork(projectId) });
+    this.bumpBoard(projectId);
+    this.emit({ type: "work", projectId, work: this.listWork(projectId) });
   }
 
   /** id 가 있으면 고치고(다른 프로젝트 항목이면 거부), 없으면 만든다. */
   upsertWork(input: WorkInput): WorkItem {
-    this.requireProject(input.projectId);
-    const at = nowIso();
-    const doneAt = input.sec === "done" ? at : null;
-    if (input.id) {
-      const existing = this.getWork(input.id);
-      if (!existing || existing.projectId !== input.projectId) throw new ApiError(404, `일 항목을 찾을 수 없습니다: ${input.id}`);
+    return this.transaction(() => {
+      this.requireProject(input.projectId);
+      const at = nowIso();
+      const doneAt = input.sec === "done" ? at : null;
+      if (input.id) {
+        const existing = this.getWork(input.id);
+        if (!existing || existing.projectId !== input.projectId) throw new ApiError(404, `일 항목을 찾을 수 없습니다: ${input.id}`);
+        this.run(
+          "UPDATE work SET sec = ?, title = ?, detail = ?, who = ?, done_at = ?, updated_at = ? WHERE id = ?",
+          input.sec,
+          input.title,
+          input.detail ?? existing.detail,
+          input.who ?? existing.who,
+          input.sec === "done" ? (existing.doneAt ?? at) : null,
+          at,
+          input.id,
+        );
+        this.emitWork(input.projectId);
+        return this.getWork(input.id)!;
+      }
+      const id = newId("w_");
+      const order = this.row("SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM work WHERE project_id = ?", input.projectId)!.n as number;
       this.run(
-        "UPDATE work SET sec = ?, title = ?, detail = ?, who = ?, done_at = ?, updated_at = ? WHERE id = ?",
+        "INSERT INTO work (id, project_id, sec, title, detail, who, sort_order, done_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        id,
+        input.projectId,
         input.sec,
         input.title,
-        input.detail ?? existing.detail,
-        input.who ?? existing.who,
-        input.sec === "done" ? (existing.doneAt ?? at) : null,
+        input.detail ?? "",
+        input.who ?? "",
+        order,
+        doneAt,
         at,
-        input.id,
+        at,
       );
       this.emitWork(input.projectId);
-      return this.getWork(input.id)!;
-    }
-    const id = newId("w_");
-    const order = this.row("SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM work WHERE project_id = ?", input.projectId)!.n as number;
-    this.run(
-      "INSERT INTO work (id, project_id, sec, title, detail, who, sort_order, done_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      id,
-      input.projectId,
-      input.sec,
-      input.title,
-      input.detail ?? "",
-      input.who ?? "",
-      order,
-      doneAt,
-      at,
-      at,
-    );
-    this.emitWork(input.projectId);
-    return this.getWork(id)!;
+      return this.getWork(id)!;
+    });
   }
 
   removeWork(id: string): void {
-    const item = this.getWork(id);
-    if (!item) return;
-    this.run("DELETE FROM work WHERE id = ?", id);
-    this.emitWork(item.projectId);
+    return this.transaction(() => {
+      const item = this.getWork(id);
+      if (!item) return;
+      this.run("DELETE FROM work WHERE id = ?", id);
+      this.emitWork(item.projectId);
+    });
   }
 
   // ---- 대화 ----
@@ -1317,6 +1535,94 @@ export class Store {
     return rows.reverse().map(toMessage);
   }
 
+  private messageScope(projectId: string, scope: MessageScope = { kind: "project" }): MessageScope {
+    if (scope.kind === "project") return { kind: "project" };
+    if (!scope.memberId || Buffer.byteLength(scope.memberId) > 256) throw new ApiError(400, "대화 조회 조건이 잘못되었습니다", "INVALID_MESSAGE_PAGE_QUERY");
+    const lead = this.listMembers(projectId).find((m) => m.kind === "root" || m.kind === "conductor");
+    return lead?.id === scope.memberId ? { kind: "project" } : { kind: "member", memberId: scope.memberId };
+  }
+
+  private messagePage(projectId: string, opts: MessagePageOptions, archived: boolean): MessagePage {
+    const project = this.requireProject(projectId);
+    if (project.archived !== archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+    const limit = opts.limit ?? 200;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500 || !projectId || Buffer.byteLength(projectId) > 256) throw new ApiError(400, "대화 조회 조건이 잘못되었습니다", "INVALID_MESSAGE_PAGE_QUERY");
+    const scope = this.messageScope(projectId, opts.scope);
+    let before: { at: string; id: string } | null = null;
+    if (opts.cursor !== undefined) {
+      try {
+        if (!opts.cursor || opts.cursor.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(opts.cursor)) throw new Error("encoding");
+        const bytes = Buffer.from(opts.cursor, "base64url");
+        if (bytes.toString("base64url") !== opts.cursor) throw new Error("encoding");
+        const bounded = (max: number) => z.string().min(1).refine((value) => Buffer.byteLength(value) <= max);
+        const cursor = z.strictObject({
+          v: z.literal(1), projectId: bounded(256),
+          scope: z.discriminatedUnion("kind", [z.strictObject({ kind: z.literal("project") }), z.strictObject({ kind: z.literal("member"), memberId: bounded(256) })]),
+          before: z.strictObject({ at: bounded(128), id: bounded(256) }),
+        }).parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
+        if (cursor.projectId !== projectId) throw new Error("project");
+        if (JSON.stringify(cursor.scope) !== JSON.stringify(scope)) {
+          if (opts.scope?.kind === "member" && (cursor.scope.kind === "project" || (scope.kind === "project" && cursor.scope.memberId === opts.scope.memberId))) {
+            throw new ApiError(409, "대화 대상이 변경되었습니다", "MESSAGE_SCOPE_CHANGED");
+          }
+          throw new Error("scope");
+        }
+        before = cursor.before;
+      } catch (error) {
+        if (error instanceof ApiError) throw error;
+        throw new ApiError(400, "이전 기록의 위치 정보가 올바르지 않습니다", "INVALID_MESSAGE_CURSOR");
+      }
+    }
+    const seek = before ? " AND (at, id) < ($at, $id)" : "";
+    const params = { $project: projectId, $limit: limit + 1, ...(before ? { $at: before.at, $id: before.id } : {}) };
+    const rows = scope.kind === "project"
+      ? this.db.query<Row, typeof params>(`SELECT * FROM messages WHERE project_id = $project${seek} ORDER BY at COLLATE BINARY DESC, id COLLATE BINARY DESC LIMIT $limit`).all(params)
+      : this.db.query<Row, typeof params & { $member: string }>(`WITH authored AS (
+          SELECT id, at FROM messages WHERE project_id = $project AND member_id = $member${seek}
+          ORDER BY at COLLATE BINARY DESC, id COLLATE BINARY DESC LIMIT $limit
+        ), targeted AS (
+          SELECT id, at FROM messages WHERE project_id = $project AND target_member_id = $member${seek}
+          ORDER BY at COLLATE BINARY DESC, id COLLATE BINARY DESC LIMIT $limit
+        ), candidates AS (SELECT id, at FROM authored UNION SELECT id, at FROM targeted), page_keys AS (
+          SELECT id, at FROM candidates ORDER BY at COLLATE BINARY DESC, id COLLATE BINARY DESC LIMIT $limit
+        ) SELECT m.* FROM page_keys k JOIN messages m ON m.id = k.id ORDER BY k.at COLLATE BINARY DESC, k.id COLLATE BINARY DESC`).all({ ...params, $member: scope.memberId });
+    const hasOlder = rows.length > limit;
+    const items = rows.slice(0, limit).reverse().map(toMessage);
+    const first = items[0];
+    if (hasOlder && first && (Buffer.byteLength(first.at) > 128 || Buffer.byteLength(first.id) > 256 || !first.at || !first.id)) throw new ApiError(500, "저장된 메시지의 위치 정보가 올바르지 않습니다");
+    return { projectId, scope, items, hasOlder, nextCursor: hasOlder && first ? Buffer.from(JSON.stringify({ v: 1, projectId, scope, before: { at: first.at, id: first.id } })).toString("base64url") : null };
+  }
+
+  listMessagePage(projectId: string, opts: MessagePageOptions = {}): MessagePage {
+    return this.messagePage(projectId, opts, false);
+  }
+
+  listArchiveMessagePage(projectId: string, opts: MessagePageOptions = {}): MessagePage {
+    return this.messagePage(projectId, opts, true);
+  }
+
+  archiveState(projectId: string): ArchiveProjectState {
+    return this.transaction(() => {
+      const state = this.projectState(projectId);
+      if (!state.project.archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+      return { ...state, project: { ...state.project, archived: true } };
+    });
+  }
+
+  listArchivedProjects(): Project[] {
+    return this.rows("SELECT * FROM projects WHERE archived = 1 ORDER BY created_at, rowid").map((r) => this.projectFrom(r));
+  }
+
+  listMessagesAround(projectId: string, messageId: string, limit = 41): Message[] {
+    this.requireProject(projectId);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new ApiError(400, "대화 조회 조건이 잘못되었습니다", "INVALID_MESSAGE_PAGE_QUERY");
+    const anchor = this.requireMessage(messageId);
+    if (anchor.projectId !== projectId) throw new ApiError(404, "메시지를 찾을 수 없습니다");
+    const older = this.rows("SELECT * FROM messages WHERE project_id = ? AND (at, id) < (?, ?) ORDER BY at COLLATE BINARY DESC, id COLLATE BINARY DESC LIMIT ?", projectId, anchor.at, anchor.id, Math.floor((limit - 1) / 2));
+    const newer = this.rows("SELECT * FROM messages WHERE project_id = ? AND (at, id) > (?, ?) ORDER BY at COLLATE BINARY, id COLLATE BINARY LIMIT ?", projectId, anchor.at, anchor.id, limit - 1 - older.length);
+    return [...older.reverse().map(toMessage), anchor, ...newer.map(toMessage)];
+  }
+
   // before 페이징이 같은 at 의 글을 건너뛰지 않도록 at 을 프로세스 안에서 단조 증가시킨다.
   private nextMessageAt(): string {
     const ms = Math.max(Date.now(), this.lastMessageMs + 1);
@@ -1326,43 +1632,52 @@ export class Store {
 
   /** 멱등: 같은 id 가 이미 있으면 새로 쓰지 않고 그 글을 돌려준다. */
   createMessage(input: NewMessage): Message {
-    if (input.id) {
-      const existing = this.getMessage(input.id);
-      if (existing) return existing;
-    }
-    this.requireProject(input.projectId);
-    const id = input.id ?? newId("msg_");
-    this.run(
-      `INSERT INTO messages (id, project_id, at, mine, member_id, who, kind, title, body, target_member_id, target_name, decision_id, file_id, attachments, delivery, delivery_note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id,
-      input.projectId,
-      input.at ?? this.nextMessageAt(),
-      input.mine ? 1 : 0,
-      input.memberId ?? null,
-      input.who ?? "",
-      input.kind,
-      input.title ?? "",
-      input.body ?? "",
-      input.targetMemberId ?? null,
-      input.targetName ?? null,
-      input.decisionId ?? null,
-      input.fileId ?? null,
-      JSON.stringify(input.attachments ?? []),
-      input.delivery ?? null,
-      input.deliveryNote ?? null,
-    );
-    const message = this.requireMessage(id);
-    this.bus.emit({ type: "message", message });
-    return message;
+    return this.transaction(() => {
+      if (input.id) {
+        const existing = this.getMessage(input.id);
+        if (existing) {
+          if (existing.projectId !== input.projectId) throw new ApiError(409, "다른 프로젝트에서 사용된 메시지 ID입니다");
+          return existing;
+        }
+      }
+      this.requireProject(input.projectId);
+      const id = input.id ?? newId("msg_");
+      this.run(
+        `INSERT INTO messages (id, project_id, at, mine, member_id, who, kind, title, body, target_member_id, target_name, decision_id, file_id, attachments, delivery, delivery_note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id,
+        input.projectId,
+        input.at ?? this.nextMessageAt(),
+        input.mine ? 1 : 0,
+        input.memberId ?? null,
+        input.who ?? "",
+        input.kind,
+        input.title ?? "",
+        input.body ?? "",
+        input.targetMemberId ?? null,
+        input.targetName ?? null,
+        input.decisionId ?? null,
+        input.fileId ?? null,
+        JSON.stringify(input.attachments ?? []),
+        input.delivery ?? null,
+        input.deliveryNote ?? null,
+      );
+      const message = this.requireMessage(id);
+      this.bumpBoard(message.projectId);
+      this.emit({ type: "message", message });
+      return message;
+    });
   }
 
   setMessageDelivery(id: string, delivery: DeliveryStatus | null, note: string | null = null): Message {
-    this.requireMessage(id);
-    this.run("UPDATE messages SET delivery = ?, delivery_note = ? WHERE id = ?", delivery, note, id);
-    const message = this.requireMessage(id);
-    this.bus.emit({ type: "message", message });
-    return message;
+    return this.transaction(() => {
+      this.requireMessage(id);
+      this.run("UPDATE messages SET delivery = ?, delivery_note = ? WHERE id = ?", delivery, note, id);
+      const message = this.requireMessage(id);
+      this.bumpBoard(message.projectId);
+      this.emit({ type: "message", message });
+      return message;
+    });
   }
 
   // ---- 자료 ----
@@ -1381,28 +1696,30 @@ export class Store {
   }
 
   createFile(input: NewFile): FileDoc {
-    this.requireProject(input.projectId);
-    const id = newId("f_");
-    const order = this.row("SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM files WHERE project_id = ?", input.projectId)!.n as number;
-    this.run(
-      "INSERT INTO files (id, project_id, title, who, member_id, summary, body, path, attachments, created_at, sort_order, kind, html) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      id,
-      input.projectId,
-      input.title,
-      input.who ?? "",
-      input.memberId ?? null,
-      input.summary ?? "",
-      input.body ?? "",
-      input.path ?? null,
-      JSON.stringify(input.attachments ?? []),
-      nowIso(),
-      order,
-      input.kind ?? null,
-      input.html ?? null,
-    );
-    const file = this.getFile(id)!;
-    this.bus.emit({ type: "file", file });
-    return file;
+    return this.transaction(() => {
+      this.requireProject(input.projectId);
+      const id = newId("f_");
+      const order = this.row("SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM files WHERE project_id = ?", input.projectId)!.n as number;
+      this.run(
+        "INSERT INTO files (id, project_id, title, who, member_id, summary, body, path, attachments, created_at, sort_order, kind, html) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        id,
+        input.projectId,
+        input.title,
+        input.who ?? "",
+        input.memberId ?? null,
+        input.summary ?? "",
+        input.body ?? "",
+        input.path ?? null,
+        JSON.stringify(input.attachments ?? []),
+        nowIso(),
+        order,
+        input.kind ?? null,
+        input.html ?? null,
+      );
+      const file = this.getFile(id)!;
+      this.emit({ type: "file", file });
+      return file;
+    });
   }
 
   // ---- 첨부 ----
@@ -1446,31 +1763,35 @@ export class Store {
 
   private emitMember(memberId: string): void {
     const member = this.getMember(memberId);
-    if (member) this.bus.emit({ type: "member", member });
+    if (member) this.emit({ type: "member", member });
   }
 
   enqueue(input: NewDelivery): Delivery {
-    const member = this.requireMember(input.memberId);
-    if (member.projectId !== input.projectId) throw new ApiError(400, "다른 프로젝트의 직원입니다");
-    const id = newId("dl_");
-    this.run(
-      `INSERT INTO deliveries (id, project_id, member_id, kind, text, wake, urgent, status, hold_reason, ref_type, ref_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id,
-      input.projectId,
-      input.memberId,
-      input.kind,
-      input.text,
-      (input.wake ?? true) ? 1 : 0,
-      input.urgent ? 1 : 0,
-      input.status ?? "queued",
-      input.holdReason ?? null,
-      input.refType ?? null,
-      input.refId ?? null,
-      nowIso(),
-    );
-    this.emitMember(input.memberId);
-    return this.requireDelivery(id);
+    return this.transaction(() => {
+      const member = this.requireMember(input.memberId);
+      if (member.projectId !== input.projectId) throw new ApiError(400, "다른 프로젝트의 직원입니다");
+      const id = newId("dl_");
+      this.run(
+        `INSERT INTO deliveries (id, project_id, member_id, kind, text, wake, urgent, status, hold_reason, ref_type, ref_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id,
+        input.projectId,
+        input.memberId,
+        input.kind,
+        input.text,
+        (input.wake ?? true) ? 1 : 0,
+        input.urgent ? 1 : 0,
+        input.status ?? "queued",
+        input.holdReason ?? null,
+        input.refType ?? null,
+        input.refId ?? null,
+        nowIso(),
+      );
+      this.run("UPDATE deliveries SET source_revision = ?, next_attempt_at = ? WHERE id = ?", input.sourceRevision ?? null, input.nextAttemptAt ?? null, id);
+      this.run("INSERT INTO delivery_recovery (delivery_id, updated_at) VALUES (?, ?)", id, nowIso());
+      this.emitMember(input.memberId);
+      return this.requireDelivery(id);
+    });
   }
 
   /** 아직 전달되지 않은 것(queued·held), 넣은 순서대로. */
@@ -1499,12 +1820,17 @@ export class Store {
 
   /** 아직 나가지 않은 전달을 거둔다. 거둔 수를 돌려준다. */
   cancelPendingFor(refType: NonNullable<Delivery["refType"]>, refId: string): number {
-    const rows = this.rows("SELECT id, member_id FROM deliveries WHERE ref_type = ? AND ref_id = ? AND status IN ('queued','held')", refType, refId);
-    for (const r of rows) {
-      this.run("DELETE FROM deliveries WHERE id = ?", r.id);
-      this.emitMember(r.member_id);
-    }
-    return rows.length;
+    return this.transaction(() => {
+      const rows = this.rows(`SELECT id, member_id FROM deliveries WHERE ref_type = ? AND ref_id = ? AND status IN ('queued','held')
+        AND NOT EXISTS (SELECT 1 FROM delivery_recovery r WHERE r.delivery_id = deliveries.id AND r.phase NOT IN ('none','resolved','stopped'))
+        AND NOT EXISTS (SELECT 1 FROM delivery_dispatch_items i JOIN delivery_dispatches x ON x.id = i.dispatch_id WHERE i.delivery_id = deliveries.id AND x.transport_state != 'rejected')
+        AND NOT EXISTS (SELECT 1 FROM manual_inbox_items i JOIN manual_inbox_batches b ON b.id = i.batch_id WHERE i.delivery_id = deliveries.id AND b.acknowledged_at IS NULL)`, refType, refId);
+      for (const r of rows) {
+        this.run("DELETE FROM deliveries WHERE id = ?", r.id);
+        this.emitMember(r.member_id);
+      }
+      return rows.length;
+    });
   }
 
   /** 받은 줄 알았는데 턴이 입력을 읽기 전에 끝났다. 대기로 되돌린다. */
@@ -1521,21 +1847,23 @@ export class Store {
   }
 
   setDeliveryStatus(id: string, status: DeliveryStatus, update: DeliveryUpdate = {}): Delivery {
-    const before = this.requireDelivery(id);
-    this.run(
-      `UPDATE deliveries SET status = ?, hold_reason = ?, last_error = ?, attempts = attempts + ?,
-         delivered_at = CASE WHEN ? = 'delivered' THEN COALESCE(delivered_at, ?) ELSE delivered_at END
-       WHERE id = ?`,
-      status,
-      status === "held" ? (update.holdReason ?? before.holdReason) : null,
-      update.lastError !== undefined ? update.lastError : before.lastError,
-      update.attempt ? 1 : 0,
-      status,
-      nowIso(),
-      id,
-    );
-    this.emitMember(before.memberId);
-    return this.requireDelivery(id);
+    return this.transaction(() => {
+      const before = this.requireDelivery(id);
+      this.run(
+        `UPDATE deliveries SET status = ?, hold_reason = ?, last_error = ?, attempts = attempts + ?,
+           delivered_at = CASE WHEN ? = 'delivered' THEN COALESCE(delivered_at, ?) ELSE delivered_at END
+         WHERE id = ?`,
+        status,
+        status === "held" ? (update.holdReason ?? before.holdReason) : null,
+        update.lastError !== undefined ? update.lastError : before.lastError,
+        update.attempt ? 1 : 0,
+        status,
+        nowIso(),
+        id,
+      );
+      this.emitMember(before.memberId);
+      return this.requireDelivery(id);
+    });
   }
 
   markDelivered(id: string): Delivery {
@@ -1552,23 +1880,32 @@ export class Store {
 
   // ---- 활동 ----
   /** 직원당 최근 MAX_ACTIVITY_PER_MEMBER 개만 남긴다. */
-  appendActivity(memberId: string, kind: ActivityKind, text: string): Activity {
-    const member = this.requireMember(memberId);
-    const clipped = text.length > MAX_ACTIVITY_TEXT ? `${text.slice(0, MAX_ACTIVITY_TEXT)}…` : text;
-    const inserted = this.row("INSERT INTO activity (member_id, at, kind, text) VALUES (?, ?, ?, ?) RETURNING *", memberId, nowIso(), kind, clipped)!;
-    // 마지막 턴 시작은 남긴다. 긴 턴이 500줄을 넘어도 재시작 뒤 '이번 턴'의 시작을 알아야 보고를 살린다.
-    this.run(
-      `DELETE FROM activity WHERE member_id = ? AND id <= COALESCE(
-         (SELECT id FROM activity WHERE member_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?), 0)
-         AND id != COALESCE((SELECT MAX(id) FROM activity WHERE member_id = ? AND kind = 'turn_start'), 0)`,
-      memberId,
-      memberId,
-      MAX_ACTIVITY_PER_MEMBER,
-      memberId,
-    );
-    const activity = toActivity(inserted);
-    this.bus.emit({ type: "activity", projectId: member.projectId, activity });
-    return activity;
+  appendActivity(memberId: string, kind: ActivityKind, text: string, eventKey?: string): Activity {
+    return this.transaction(() => {
+      if (eventKey !== undefined) {
+        const before = this.row("SELECT * FROM activity WHERE delivery_event_key = ?", eventKey);
+        if (before) {
+          if (before.member_id !== memberId) throw new ApiError(409, "다른 직원의 활동 표식입니다");
+          return toActivity(before);
+        }
+      }
+      const member = this.requireMember(memberId);
+      const clipped = text.length > MAX_ACTIVITY_TEXT ? `${text.slice(0, MAX_ACTIVITY_TEXT)}…` : text;
+      const inserted = this.row("INSERT INTO activity (member_id, at, kind, text, delivery_event_key) VALUES (?, ?, ?, ?, ?) RETURNING *", memberId, nowIso(), kind, clipped, eventKey ?? null)!;
+      // 마지막 턴 시작은 남긴다. 긴 턴이 500줄을 넘어도 재시작 뒤 '이번 턴'의 시작을 알아야 보고를 살린다.
+      this.run(
+        `DELETE FROM activity WHERE member_id = ? AND id <= COALESCE(
+           (SELECT id FROM activity WHERE member_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?), 0)
+           AND id != COALESCE((SELECT MAX(id) FROM activity WHERE member_id = ? AND kind = 'turn_start'), 0)`,
+        memberId,
+        memberId,
+        MAX_ACTIVITY_PER_MEMBER,
+        memberId,
+      );
+      const activity = toActivity(inserted);
+      this.emit({ type: "activity", projectId: member.projectId, activity });
+      return activity;
+    });
   }
 
   /** 최신 limit 개를 오래된 → 최신으로. */
@@ -1594,7 +1931,7 @@ export class Store {
 
   /** Store 를 거치지 않는 값(herdr 연결 상태 등)을 화면에 알린다. */
   broadcast(event: WsEvent): void {
-    this.bus.emit(event);
+    this.emit(event);
   }
 
   // ---- 설정 ----
@@ -1610,21 +1947,455 @@ export class Store {
   }
 
   patchSettings(patch: SettingsPatch): Settings {
-    const before = this.getSettings();
-    if (this.runtimeBackend !== "core" && patch.backend) this.runtimeBackend = patch.backend;
-    const next: Record<string, unknown> = { ...patch };
-    if (patch.ranks) {
-      next.ranks = Object.fromEntries((Object.keys(DEFAULT_RANKS) as Rank[]).map((rank) => [rank, { ...before.ranks[rank], ...patch.ranks![rank] }]));
-    }
-    this.db.transaction(() => {
-      for (const key of Object.keys(DEFAULT_SETTINGS)) {
-        if (next[key] === undefined) continue;
-        this.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key, JSON.stringify(next[key]));
+    return this.transaction(() => {
+      const before = this.getSettings();
+      if (this.runtimeBackend !== "core" && patch.backend) this.runtimeBackend = patch.backend;
+      const next: Record<string, unknown> = { ...patch };
+      if (patch.ranks) {
+        next.ranks = Object.fromEntries((Object.keys(DEFAULT_RANKS) as Rank[]).map((rank) => [rank, { ...before.ranks[rank], ...patch.ranks![rank] }]));
       }
-    })();
-    const settings = this.getSettings();
-    this.bus.emit({ type: "settings", settings });
-    if (settings.backend !== before.backend) this.emitProjects();
-    return settings;
+      this.transaction(() => {
+        for (const key of Object.keys(DEFAULT_SETTINGS)) {
+          if (next[key] === undefined) continue;
+          this.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key, JSON.stringify(next[key]));
+        }
+      });
+      if (Object.keys(next).some((key) => next[key] !== undefined && key in DEFAULT_SETTINGS)) this.run("UPDATE domain_revisions SET revision = revision + 1 WHERE domain = 'settings'");
+      const settings = this.getSettings();
+      this.emit({ type: "settings", settings });
+      if (settings.backend !== before.backend) this.emitProjects();
+      return settings;
+    });
+  }
+
+  // ---- 전체 DB 복구 조회: 화면의 50/200/500개 제한을 재사용하지 않는다 ----
+  listMessagesMissingDeliveries(projectId?: string): Message[] {
+    return this.rows(`SELECT m.* FROM messages m WHERE m.mine = 1 AND m.delivery IN ('queued','held')
+      ${projectId === undefined ? "" : "AND m.project_id = ?"}
+      AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.ref_type = 'message' AND d.ref_id = m.id)
+      ORDER BY m.at COLLATE BINARY, m.id COLLATE BINARY`, ...(projectId === undefined ? [] : [projectId])).map(toMessage);
+  }
+
+  listReportsMissingDeliveries(projectId?: string): Message[] {
+    return this.rows(`SELECT m.* FROM messages m WHERE m.mine = 0 AND m.member_id IS NOT NULL AND m.kind IN ('완료','진행','막힘','알림')
+      ${projectId === undefined ? "" : "AND m.project_id = ?"}
+      AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.ref_type = 'message' AND d.ref_id = m.id AND d.kind = 'report')
+      ORDER BY m.at COLLATE BINARY, m.id COLLATE BINARY`, ...(projectId === undefined ? [] : [projectId])).map(toMessage);
+  }
+
+  listAnswersMissingDeliveries(projectId?: string): Decision[] {
+    return this.rows(`SELECT a.* FROM decisions a WHERE a.status = 'answered'
+      ${projectId === undefined ? "" : "AND a.project_id = ?"}
+      AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.ref_type = 'decision' AND d.ref_id = a.id)
+      ORDER BY a.answered_at, a.rowid`, ...(projectId === undefined ? [] : [projectId])).map(toDecision);
+  }
+
+  listUnreceivedAnswers(memberId: string): Decision[] {
+    const member = this.requireMember(memberId);
+    return this.rows("SELECT * FROM decisions WHERE project_id = ? AND member_id = ? AND status = 'answered' AND delivered_at IS NULL ORDER BY answered_at, rowid", member.projectId, memberId).map(toDecision);
+  }
+
+  listDeliveries(projectId?: string): Delivery[] {
+    return this.rows(`SELECT * FROM deliveries ${projectId === undefined ? "" : "WHERE project_id = ?"} ORDER BY rowid`, ...(projectId === undefined ? [] : [projectId])).map(toDelivery);
+  }
+
+  // ---- revision / CAS ----
+  settingsRevision(): number {
+    return this.row("SELECT revision FROM domain_revisions WHERE domain = 'settings'")!.revision;
+  }
+
+  memberRevisions(memberId: string): MemberRevisions {
+    this.requireMember(memberId);
+    const r = this.row("SELECT config_revision, session_generation FROM members WHERE id = ?", memberId)!;
+    return { configRevision: r.config_revision, sessionGeneration: r.session_generation };
+  }
+
+  todoRevision(id: string): number {
+    this.requireTodo(id);
+    return this.row("SELECT revision FROM todos WHERE id = ?", id)!.revision;
+  }
+
+  syncRevisions(projectId: string): SyncRevisions {
+    this.requireProject(projectId);
+    return { settings: this.settingsRevision(), members: Object.fromEntries(this.rows("SELECT id, config_revision, session_generation FROM members WHERE project_id = ?", projectId).map((r) => [r.id, { configRevision: r.config_revision, sessionGeneration: r.session_generation }])), todos: Object.fromEntries(this.rows("SELECT id, revision FROM todos WHERE project_id = ?", projectId).map((r) => [r.id, r.revision])) };
+  }
+
+  private checkRevision(actual: number, expected: number): void {
+    if (!Number.isSafeInteger(expected) || expected < 0) throw new ApiError(400, "revision이 올바르지 않습니다");
+    if (actual !== expected) throw new ApiError(409, "내용이 변경되었습니다. 다시 검토해 주세요", "REVISION_CONFLICT");
+  }
+
+  patchSettingsCas(patch: SettingsPatch, expectedRevision: number): { settings: Settings; revision: number } {
+    return this.transaction(() => {
+      this.checkRevision(this.settingsRevision(), expectedRevision);
+      const settings = this.patchSettings(patch);
+      return { settings, revision: this.settingsRevision() };
+    });
+  }
+
+  patchMemberCas(id: string, patch: MemberPatch, expectedRevision: number): { member: Member } & MemberRevisions {
+    return this.transaction(() => {
+      this.checkRevision(this.memberRevisions(id).configRevision, expectedRevision);
+      const member = this.patchMember(id, patch);
+      return { member, ...this.memberRevisions(id) };
+    });
+  }
+
+  setTodoDoneCas(id: string, done: boolean, expectedRevision: number): { todo: Todo; revision: number } {
+    return this.transaction(() => {
+      this.checkRevision(this.todoRevision(id), expectedRevision);
+      const { todo } = this.setTodoDone(id, done);
+      return { todo, revision: this.todoRevision(id) };
+    });
+  }
+
+  // ---- 작업 영수증: 같은 ID/요청만 합치고 결과에는 내부 요청을 싣지 않는다 ----
+  getOperation(operationId: string): OperationReceipt | null {
+    const r = this.row("SELECT * FROM operation_receipts WHERE operation_id = ?", operationId);
+    if (!r) return null;
+    const base = { operationId: r.operation_id, kind: r.kind, projectId: r.project_id, memberId: r.member_id, status: r.status, createdAt: r.created_at, updatedAt: r.updated_at };
+    return { ...base, ...(r.status === "applied" ? { result: json(r.result_json) } : r.status === "pending" ? {} : { code: r.code, error: r.error }) } as OperationReceipt;
+  }
+
+  beginOperation(input: { operationId: string; kind: OperationKind; projectId: string | null; memberId: string | null; request: unknown }): OperationReceipt {
+    return this.transaction(() => {
+      if (input.projectId !== null) this.requireProject(input.projectId);
+      if (input.memberId !== null && this.requireMember(input.memberId).projectId !== input.projectId) throw new ApiError(400, "다른 프로젝트의 직원입니다");
+      const r = this.row("SELECT * FROM operation_receipts WHERE operation_id = ?", input.operationId);
+      if (r) {
+        if (r.kind !== input.kind || r.project_id !== input.projectId || r.member_id !== input.memberId || r.request_json !== stableJson(input.request)) throw new ApiError(409, "다른 요청에 사용된 operationId입니다", "OPERATION_CONFLICT");
+        return this.getOperation(input.operationId)!;
+      }
+      const at = nowIso();
+      this.run("INSERT INTO operation_receipts (operation_id, kind, project_id, member_id, status, request_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)", input.operationId, input.kind, input.projectId, input.memberId, stableJson(input.request), at, at);
+      return this.getOperation(input.operationId)!;
+    });
+  }
+
+  finishOperation(receipt: OperationReceipt, expectedStatus: OperationStatus = "pending"): OperationReceipt {
+    return this.transaction(() => {
+      const before = this.getOperation(receipt.operationId);
+      if (!before) throw new ApiError(404, "작업을 찾을 수 없습니다");
+      if (before.kind !== receipt.kind || before.projectId !== receipt.projectId || before.memberId !== receipt.memberId) throw new ApiError(409, "작업 범위가 다릅니다");
+      if (before.status !== expectedStatus || before.status === "applied" || before.status === "refused") throw new ApiError(409, "작업 결과가 변경되었습니다", "OPERATION_CONFLICT");
+      this.run("UPDATE operation_receipts SET status = ?, result_json = ?, code = ?, error = ?, updated_at = ? WHERE operation_id = ? AND status = ?", receipt.status, receipt.status === "applied" ? JSON.stringify(receipt.result) : null, receipt.status === "unknown" || receipt.status === "refused" ? receipt.code : null, receipt.status === "unknown" || receipt.status === "refused" ? receipt.error : null, nowIso(), receipt.operationId, expectedStatus);
+      return this.getOperation(receipt.operationId)!;
+    });
+  }
+
+  listPendingOperations(): OperationReceipt[] {
+    return this.rows("SELECT operation_id FROM operation_receipts WHERE status = 'pending' ORDER BY created_at, rowid").map((r) => this.getOperation(r.operation_id)!);
+  }
+
+  agentOperation<T>(memberId: string, toolName: string, operationId: string, request: unknown, execute: () => T): T {
+    return this.transaction(() => {
+      const member = this.requireMember(memberId);
+      const r = this.row("SELECT * FROM agent_operation_receipts WHERE operation_id = ?", operationId);
+      if (r) {
+        if (r.member_id !== memberId || r.project_id !== member.projectId || r.tool_name !== toolName || r.request_json !== stableJson(request)) throw new ApiError(409, "다른 요청에 사용된 operationId입니다", "OPERATION_CONFLICT");
+        return json<T>(r.result_json);
+      }
+      const result = execute();
+      if (result instanceof Promise) throw new Error("agentOperation requires synchronous Store writes");
+      this.run("INSERT INTO agent_operation_receipts (operation_id, member_id, project_id, tool_name, request_json, result_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", operationId, memberId, member.projectId, toolName, stableJson(request), JSON.stringify(result), nowIso());
+      return result;
+    });
+  }
+
+  // ---- lease / 입력 fence ----
+  saveLease(lease: TerminalLease): void {
+    this.transaction(() => {
+      this.checkRevision(this.memberRevisions(lease.memberId).sessionGeneration, lease.identity.sessionGeneration);
+      const r = this.row("SELECT * FROM terminal_leases WHERE member_id = ?", lease.memberId);
+      if (r && r.expires_at > Date.now() && (r.claim_id !== lease.claimId || r.lease_id !== lease.leaseId || r.terminal_identity_json !== stableJson(lease.identity))) throw new ApiError(409, "다른 조작권이 있습니다");
+      if (r && r.claim_id === lease.claimId && lease.lastInputSequence < r.last_input_sequence) throw new ApiError(409, "입력 순번이 오래되었습니다");
+      this.run(`INSERT INTO terminal_leases (member_id, claim_id, lease_id, generation, terminal_identity_json, expires_at, last_input_sequence) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(member_id) DO UPDATE SET claim_id = excluded.claim_id, lease_id = excluded.lease_id, generation = excluded.generation, terminal_identity_json = excluded.terminal_identity_json, expires_at = excluded.expires_at, last_input_sequence = excluded.last_input_sequence`, lease.memberId, lease.claimId, lease.leaseId, lease.identity.sessionGeneration, stableJson(lease.identity), lease.expiresAt, lease.lastInputSequence);
+    });
+  }
+
+  removeLease(memberId: string, claimId: string): void {
+    this.run("DELETE FROM terminal_leases WHERE member_id = ? AND claim_id = ?", memberId, claimId);
+  }
+
+  inputState(memberId: string): RunnerRecoveryState {
+    const generation = this.memberRevisions(memberId).sessionGeneration;
+    const r = this.row("SELECT * FROM terminal_leases WHERE member_id = ? AND generation = ? AND expires_at > ?", memberId, generation, Date.now());
+    return { lease: r ? { memberId, claimId: r.claim_id, leaseId: r.lease_id, identity: json(r.terminal_identity_json), expiresAt: r.expires_at, lastInputSequence: r.last_input_sequence } : null, unresolvedDispatches: this.listDispatches(memberId).filter((d) => ["prepared", "write_started", "unknown"].includes(d.transportState) || d.items.some((item) => { const phase = this.getDeliveryRecovery(item.deliveryId)?.phase; return phase !== undefined && !["none", "resolved", "stopped"].includes(phase); })) };
+  }
+
+  // ---- 전달 복구 CAS / 봉투 ----
+  getDeliveryRecovery(deliveryId: string): DeliveryRecoveryRecord | null {
+    const r = this.row("SELECT * FROM delivery_recovery WHERE delivery_id = ?", deliveryId);
+    return r ? { deliveryId, marker: r.marker, phase: r.phase, reason: r.reason, version: r.version, autoAttempts: r.auto_attempts, checkCount: r.check_count, activeCheckMs: r.active_check_ms, nextCheckAt: r.next_check_at, lastCheckedAt: r.last_checked_at, evidence: json(r.evidence_json), updatedAt: r.updated_at } : null;
+  }
+
+  updateDeliveryRecovery(deliveryId: string, expectedVersion: number, patch: Partial<Omit<DeliveryRecoveryRecord, "deliveryId" | "version" | "updatedAt">>): DeliveryRecoveryRecord {
+    return this.transaction(() => {
+      this.requireDelivery(deliveryId);
+      const before = this.getDeliveryRecovery(deliveryId);
+      if (!before) throw new ApiError(404, "전달 복구 상태를 찾을 수 없습니다");
+      this.checkRevision(before.version, expectedVersion);
+      if (before.marker !== null && patch.marker !== undefined && patch.marker !== before.marker) throw new ApiError(409, "저장된 전달 표식은 바꿀 수 없습니다");
+      const { set, values } = buildSet({ ...patch, evidence: patch.evidence === undefined ? undefined : JSON.stringify(patch.evidence) }, { marker: "marker", phase: "phase", reason: "reason", autoAttempts: "auto_attempts", checkCount: "check_count", activeCheckMs: "active_check_ms", nextCheckAt: "next_check_at", lastCheckedAt: "last_checked_at", evidence: "evidence_json" });
+      this.run(`UPDATE delivery_recovery SET ${[...set, "version = version + 1", "updated_at = ?"].join(", ")} WHERE delivery_id = ? AND version = ?`, ...values, nowIso(), deliveryId, expectedVersion);
+      return this.getDeliveryRecovery(deliveryId)!;
+    });
+  }
+
+  listDeliveryRecoveries(projectId?: string): DeliveryRecoveryRecord[] {
+    return this.rows(`SELECT r.delivery_id FROM delivery_recovery r JOIN deliveries d ON d.id = r.delivery_id ${projectId === undefined ? "" : "WHERE d.project_id = ?"} ORDER BY d.rowid`, ...(projectId === undefined ? [] : [projectId])).map((r) => this.getDeliveryRecovery(r.delivery_id)!);
+  }
+
+  saveDispatch(dispatch: DeliveryDispatch): void {
+    this.transaction(() => {
+      if (this.requireMember(dispatch.memberId).projectId !== dispatch.projectId) throw new ApiError(400, "다른 프로젝트의 직원입니다");
+      this.checkRevision(this.memberRevisions(dispatch.memberId).sessionGeneration, dispatch.identity.sessionGeneration);
+      if (this.getDispatch(dispatch.dispatchId)) throw new ApiError(409, "이미 저장된 봉투입니다");
+      if (!dispatch.items.length || dispatch.items.length !== dispatch.markers.length) throw new ApiError(400, "봉투 항목이 올바르지 않습니다");
+      if (createHash("sha256").update(dispatch.wireText).digest("hex") !== dispatch.wireSha256) throw new ApiError(400, "봉투의 해시가 다릅니다");
+      const at = dispatch.createdAt;
+      this.run(`INSERT INTO delivery_dispatches (id, project_id, member_id, bundle_marker, cli, backend, generation, native_session_id, terminal_identity_json, baseline_json, wire_text, wire_sha256, transport_state, submit_attempts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, dispatch.dispatchId, dispatch.projectId, dispatch.memberId, dispatch.bundleMarker, dispatch.cli, dispatch.backend, dispatch.identity.sessionGeneration, dispatch.identity.sessionId, JSON.stringify(dispatch.identity), JSON.stringify(dispatch.baseline), dispatch.wireText, dispatch.wireSha256, dispatch.transportState, dispatch.submitAttempts, at, dispatch.updatedAt);
+      for (const item of dispatch.items) {
+        const delivery = this.requireDelivery(item.deliveryId);
+        const marker = dispatch.markers.find((m) => m.deliveryId === item.deliveryId)?.marker;
+        if (delivery.memberId !== dispatch.memberId || delivery.projectId !== dispatch.projectId || !marker) throw new ApiError(400, "봉투 항목의 대상이 다릅니다");
+        this.run("INSERT INTO delivery_dispatch_items (dispatch_id, delivery_id, ordinal, source_revision) VALUES (?, ?, ?, ?)", dispatch.dispatchId, item.deliveryId, item.ordinal, item.sourceRevision);
+        this.updateDeliveryRecovery(item.deliveryId, this.getDeliveryRecovery(item.deliveryId)!.version, { marker });
+      }
+    });
+  }
+
+  getDispatch(id: string): DeliveryDispatch | null {
+    const r = this.row("SELECT * FROM delivery_dispatches WHERE id = ?", id);
+    if (!r) return null;
+    const items = this.rows("SELECT i.*, r.marker FROM delivery_dispatch_items i JOIN delivery_recovery r ON r.delivery_id = i.delivery_id WHERE dispatch_id = ? ORDER BY ordinal", id);
+    return { dispatchId: id, projectId: r.project_id, memberId: r.member_id, cli: r.cli, backend: r.backend, bundleMarker: r.bundle_marker, identity: json(r.terminal_identity_json), baseline: json(r.baseline_json), wireText: r.wire_text, wireSha256: r.wire_sha256, transportState: r.transport_state, submitAttempts: r.submit_attempts, createdAt: r.created_at, updatedAt: r.updated_at, items: items.map((i) => ({ deliveryId: i.delivery_id, ordinal: i.ordinal, sourceRevision: i.source_revision })), markers: items.map((i) => ({ deliveryId: i.delivery_id, marker: i.marker })) };
+  }
+
+  listDispatches(memberId: string): DeliveryDispatch[] {
+    return this.rows("SELECT id FROM delivery_dispatches WHERE member_id = ? ORDER BY created_at, rowid", memberId).map((r) => this.getDispatch(r.id)!);
+  }
+
+  updateDispatch(id: string, expected: DeliveryDispatch["transportState"], state: DeliveryDispatch["transportState"], submit = false): DeliveryDispatch {
+    return this.transaction(() => {
+      const result = this.db.query("UPDATE delivery_dispatches SET transport_state = ?, submit_attempts = submit_attempts + ?, updated_at = ? WHERE id = ? AND transport_state = ? AND submit_attempts + ? <= 1").run(state, submit ? 1 : 0, nowIso(), id, expected, submit ? 1 : 0);
+      if (result.changes !== 1) throw new ApiError(409, "봉투 상태가 변경되었습니다");
+      return this.getDispatch(id)!;
+    });
+  }
+
+  deliveryRecoveryOperation<T>(deliveryId: string, operationId: string, request: unknown, execute: () => T): T {
+    return this.transaction(() => {
+      this.requireDelivery(deliveryId);
+      const r = this.row("SELECT * FROM delivery_recovery_operations WHERE operation_id = ?", operationId);
+      if (r) {
+        if (r.delivery_id !== deliveryId || r.request_json !== stableJson(request)) throw new ApiError(409, "다른 요청에 사용된 operationId입니다");
+        return json<T>(r.result_json);
+      }
+      const result = execute();
+      if (result instanceof Promise) throw new Error("deliveryRecoveryOperation requires synchronous Store writes");
+      this.run("INSERT INTO delivery_recovery_operations (operation_id, delivery_id, request_json, result_json, created_at) VALUES (?, ?, ?, ?, ?)", operationId, deliveryId, stableJson(request), JSON.stringify(result), nowIso());
+      return result;
+    });
+  }
+
+  getDeliveryRetry(id: string): DeliveryRetryState {
+    this.requireDelivery(id);
+    const r = this.row("SELECT * FROM deliveries WHERE id = ?", id)!;
+    return { nextAttemptAt: r.next_attempt_at, sourceRevision: r.source_revision, retryScope: r.retry_scope, retryReason: r.retry_reason, correctionRevision: r.correction_revision };
+  }
+
+  patchDeliveryRetry(id: string, patch: Partial<DeliveryRetryState>): void {
+    this.requireDelivery(id);
+    const { set, values } = buildSet(patch, { nextAttemptAt: "next_attempt_at", sourceRevision: "source_revision", retryScope: "retry_scope", retryReason: "retry_reason", correctionRevision: "correction_revision" });
+    if (set.length) this.run(`UPDATE deliveries SET ${set.join(", ")} WHERE id = ?`, ...values, id);
+  }
+
+  // ---- lifecycle / execution journal ----
+  saveLifecycleJournal(entry: LifecycleJournal): void {
+    this.transaction(() => {
+      const before = this.getLifecycleJournal(entry.operationId);
+      if (before && (before.memberId !== entry.memberId || before.projectId !== entry.projectId || before.intent !== entry.intent || before.identity.sessionGeneration !== entry.identity.sessionGeneration)) throw new ApiError(409, "종료/생성 의도의 신원이 다릅니다");
+      if (before && ["confirmed", "refused"].includes(before.phase) && stableJson(before) !== stableJson(entry)) throw new ApiError(409, "이미 끝난 생성/종료 의도입니다");
+      this.run(`INSERT INTO lifecycle_journal (operation_id, member_id, project_id, intent, phase, generation, terminal_identity_json, run_id, delivery_ids_json, baseline_json, reason, exit_code, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(operation_id) DO UPDATE SET phase = excluded.phase, terminal_identity_json = excluded.terminal_identity_json, run_id = excluded.run_id, delivery_ids_json = excluded.delivery_ids_json, baseline_json = excluded.baseline_json, reason = excluded.reason, exit_code = excluded.exit_code, updated_at = excluded.updated_at`, entry.operationId, entry.memberId, entry.projectId, entry.intent, entry.phase, entry.identity.sessionGeneration, JSON.stringify(entry.identity), entry.runId, JSON.stringify(entry.deliveryIds), entry.baseline === null ? null : JSON.stringify(entry.baseline), entry.reason, entry.exitCode, entry.createdAt, entry.updatedAt);
+    });
+  }
+
+  getLifecycleJournal(operationId: string): LifecycleJournal | null {
+    const r = this.row("SELECT * FROM lifecycle_journal WHERE operation_id = ?", operationId);
+    return r ? { operationId, memberId: r.member_id, projectId: r.project_id, intent: r.intent, phase: r.phase, identity: json(r.terminal_identity_json), runId: r.run_id, deliveryIds: json(r.delivery_ids_json), baseline: r.baseline_json === null ? null : json(r.baseline_json), reason: r.reason, exitCode: r.exit_code, createdAt: r.created_at, updatedAt: r.updated_at } : null;
+  }
+
+  listPendingLifecycleJournals(): LifecycleJournal[] {
+    return this.rows("SELECT operation_id FROM lifecycle_journal WHERE phase IN ('prepared','started','unknown') ORDER BY created_at, rowid").map((r) => this.getLifecycleJournal(r.operation_id)!);
+  }
+
+  saveExecutionJournal(entry: ExecutionJournal): void {
+    this.transaction(() => {
+      const before = this.getExecutionJournal(entry.runId);
+      if (before && (before.memberId !== entry.memberId || before.projectId !== entry.projectId || before.identity.sessionGeneration !== entry.identity.sessionGeneration)) throw new ApiError(409, "실행 신원이 다릅니다");
+      if (before && (before.phase === "ended" || before.phase === "interrupted") && stableJson(before) !== stableJson(entry)) throw new ApiError(409, "이미 끝난 실행입니다");
+      this.run(`INSERT INTO execution_journal (run_id, member_id, project_id, generation, terminal_identity_json, turn, delivery_ids_json, phase, input_received_at, started_at, last_progress_at, ended_at, result, reason, exit_code, interruption_notified_at, report_requested_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run_id) DO UPDATE SET terminal_identity_json = excluded.terminal_identity_json, turn = excluded.turn, delivery_ids_json = excluded.delivery_ids_json, phase = excluded.phase, input_received_at = excluded.input_received_at, started_at = excluded.started_at, last_progress_at = excluded.last_progress_at, ended_at = excluded.ended_at, result = excluded.result, reason = excluded.reason, exit_code = excluded.exit_code, updated_at = excluded.updated_at`, entry.runId, entry.memberId, entry.projectId, entry.identity.sessionGeneration, JSON.stringify(entry.identity), entry.turn, JSON.stringify(entry.deliveryIds), entry.phase, entry.inputReceivedAt, entry.startedAt, entry.lastProgressAt, entry.endedAt, entry.result, entry.reason, entry.exitCode, entry.interruptionNotifiedAt, entry.reportRequestedAt, entry.createdAt, entry.updatedAt);
+    });
+  }
+
+  getExecutionJournal(runId: string): ExecutionJournal | null {
+    const r = this.row("SELECT * FROM execution_journal WHERE run_id = ?", runId);
+    return r ? { runId, memberId: r.member_id, projectId: r.project_id, identity: json(r.terminal_identity_json), turn: r.turn, deliveryIds: json(r.delivery_ids_json), phase: r.phase, inputReceivedAt: r.input_received_at, startedAt: r.started_at, lastProgressAt: r.last_progress_at, endedAt: r.ended_at, result: r.result, reason: r.reason, exitCode: r.exit_code, interruptionNotifiedAt: r.interruption_notified_at, reportRequestedAt: r.report_requested_at, createdAt: r.created_at, updatedAt: r.updated_at } : null;
+  }
+
+  listPendingExecutions(): ExecutionJournal[] {
+    return this.rows("SELECT run_id FROM execution_journal WHERE phase NOT IN ('ended','interrupted') ORDER BY created_at, rowid").map((r) => this.getExecutionJournal(r.run_id)!);
+  }
+
+  claimExecutionNotice(runId: string, kind: "interruption" | "report", write: () => void): boolean {
+    return this.transaction(() => {
+      const column = kind === "interruption" ? "interruption_notified_at" : "report_requested_at";
+      if (this.db.query(`UPDATE execution_journal SET ${column} = ? WHERE run_id = ? AND ${column} IS NULL`).run(nowIso(), runId).changes !== 1) return false;
+      write();
+      return true;
+    });
+  }
+
+  // ---- 문맥: nonce는 같은 세대에서 재사용하고 늦은 세대 갱신은 거부한다 ----
+  getContextState(memberId: string): StoredContextState | null {
+    const r = this.row("SELECT c.* FROM member_context_state c JOIN members m ON m.id = c.member_id AND m.session_generation = c.generation WHERE c.member_id = ?", memberId);
+    if (!r) return null;
+    try {
+      return { memberId, generation: r.generation, bindingNonce: r.binding_nonce, rolloutPath: r.rollout_path, rolloutOffset: r.rollout_offset, measurement: r.measurement_json === null ? null : json(r.measurement_json), compaction: r.compaction_json === null ? null : json(r.compaction_json), baseline: r.baseline_json === null ? null : json(r.baseline_json), updatedAt: r.updated_at };
+    } catch { throw new ApiError(409, "문맥 상태를 읽을 수 없어 자동 입력을 보류합니다", "CONTEXT_STATE_CORRUPT"); }
+  }
+
+  ensureContextState(memberId: string): StoredContextState {
+    return this.transaction(() => {
+      const existing = this.getContextState(memberId);
+      if (existing) return existing;
+      const generation = this.memberRevisions(memberId).sessionGeneration;
+      this.run(`INSERT INTO member_context_state (member_id, generation, binding_nonce, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(member_id) DO UPDATE SET generation = excluded.generation, binding_nonce = excluded.binding_nonce, rollout_path = NULL, rollout_offset = 0, measurement_json = NULL, compaction_json = NULL, baseline_json = NULL, updated_at = excluded.updated_at`, memberId, generation, crypto.randomUUID().replaceAll("-", ""), nowIso());
+      return this.getContextState(memberId)!;
+    });
+  }
+
+  saveContextState(state: StoredContextState, memberPatch: Pick<MemberPatch, "contextPct" | "contextWindow" | "contextWindowSource"> = {}): void {
+    this.transaction(() => {
+      this.checkRevision(this.memberRevisions(state.memberId).sessionGeneration, state.generation);
+      const before = this.ensureContextState(state.memberId);
+      if (before.bindingNonce !== state.bindingNonce || (state.measurement && state.measurement.sessionGeneration !== state.generation)) throw new ApiError(409, "문맥 세대가 변경되었습니다");
+      this.run("UPDATE member_context_state SET rollout_path = ?, rollout_offset = ?, measurement_json = ?, compaction_json = ?, baseline_json = ?, updated_at = ? WHERE member_id = ? AND generation = ? AND binding_nonce = ?", state.rolloutPath, state.rolloutOffset, state.measurement === null ? null : JSON.stringify(state.measurement), state.compaction === null ? null : JSON.stringify(state.compaction), state.baseline === null ? null : JSON.stringify(state.baseline), nowIso(), state.memberId, state.generation, state.bindingNonce);
+      if (Object.keys(memberPatch).length) this.patchMember(state.memberId, memberPatch);
+      else this.emitMember(state.memberId);
+    });
+  }
+
+  getDecisionFollowUp(id: string): DecisionFollowUp | null {
+    this.requireDecision(id);
+    const r = this.row("SELECT follow_up_json FROM decisions WHERE id = ?", id)!;
+    return r.follow_up_json === null ? null : json(r.follow_up_json);
+  }
+
+  setDecisionFollowUp(id: string, followUp: DecisionFollowUp): void {
+    this.transaction(() => {
+      const decision = this.requireDecision(id);
+      if (followUp.kind === "instruction" && (this.requireMember(followUp.memberId).projectId !== decision.projectId || this.requireMessage(followUp.sourceMessageId).projectId !== decision.projectId)) throw new ApiError(400, "후속 지시의 프로젝트가 다릅니다");
+      const before = this.getDecisionFollowUp(id);
+      if (before !== null && stableJson(before) !== stableJson(followUp)) throw new ApiError(409, "이미 기록된 후속 지시가 다릅니다");
+      this.run("UPDATE decisions SET follow_up_json = ? WHERE id = ?", JSON.stringify(followUp), id);
+    });
+  }
+
+  // ---- board 검토와 보고 출처 ----
+  boardRevision(projectId: string): number {
+    this.requireProject(projectId);
+    return this.row("SELECT board_revision FROM projects WHERE id = ?", projectId)!.board_revision;
+  }
+
+  private bumpBoard(projectId: string): void {
+    this.run("UPDATE projects SET board_revision = board_revision + 1 WHERE id = ?", projectId);
+  }
+
+  requestBoardReview(projectId: string, at = nowIso()): BoardReview {
+    this.requireProject(projectId);
+    this.run("UPDATE projects SET board_requested_revision = board_revision, board_requested_at = ? WHERE id = ?", at, projectId);
+    return this.getBoardReview(projectId)!;
+  }
+
+  getBoardReview(projectId: string): BoardReview | null {
+    this.requireProject(projectId);
+    const r = this.row("SELECT * FROM projects WHERE id = ?", projectId)!;
+    return r.board_requested_revision === null ? null : { requestedRevision: r.board_requested_revision, reviewedRevision: r.board_reviewed_revision, requestedAt: r.board_requested_at, completedAt: r.board_completed_at };
+  }
+
+  completeBoardReview(projectId: string, requestedRevision: number, reviewedRevision: number, at = nowIso()): void {
+    this.transaction(() => {
+      const review = this.getBoardReview(projectId);
+      if (!review || review.requestedRevision !== requestedRevision || reviewedRevision < 0 || reviewedRevision > requestedRevision || !Number.isSafeInteger(reviewedRevision)) throw new ApiError(409, "검토한 업무판이 변경되었습니다");
+      this.run("UPDATE projects SET board_completed_revision = ?, board_reviewed_revision = ?, board_completed_at = ? WHERE id = ?", requestedRevision, reviewedRevision, at, projectId);
+    });
+  }
+
+  saveReportReferences(projectId: string, refs: ReportReferences): void {
+    this.transaction(() => {
+      if (this.requireMessage(refs.sourceMessageId).projectId !== projectId || (refs.correctsMessageId && this.requireMessage(refs.correctsMessageId).projectId !== projectId)) throw new ApiError(400, "다른 프로젝트의 메시지입니다");
+      for (const id of refs.fileIds) if (this.getFile(id)?.projectId !== projectId) throw new ApiError(400, "자료의 프로젝트가 다릅니다");
+      for (const id of refs.decisionIds) if (this.requireDecision(id).projectId !== projectId) throw new ApiError(400, "결재의 프로젝트가 다릅니다");
+      const before = this.getReportReferences(projectId, refs.sourceMessageId);
+      if (before) {
+        if (stableJson(before) !== stableJson(refs)) throw new ApiError(409, "이미 기록된 보고 출처가 다릅니다");
+        return;
+      }
+      this.run("INSERT INTO report_references (source_message_id, project_id, file_ids_json, decision_ids_json, authored_at, sequence, corrects_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)", refs.sourceMessageId, projectId, JSON.stringify(refs.fileIds), JSON.stringify(refs.decisionIds), refs.authoredAt, refs.sequence, refs.correctsMessageId);
+    });
+  }
+
+  getReportReferences(projectId: string, messageId: string): ReportReferences | null {
+    const r = this.row("SELECT * FROM report_references WHERE project_id = ? AND source_message_id = ?", projectId, messageId);
+    return r ? { sourceMessageId: r.source_message_id, fileIds: json(r.file_ids_json), decisionIds: json(r.decision_ids_json), authoredAt: r.authored_at, sequence: r.sequence, correctsMessageId: r.corrects_message_id } : null;
+  }
+
+  // ---- manual ACK 전 batch 재조회. askWait도 이 소비 경계를 사용한다 ----
+  manualInbox(memberId: string, deliveryIds?: string[]): ManualInboxBatch | null {
+    return this.transaction(() => {
+      const member = this.requireMember(memberId);
+      if (this.requireProject(member.projectId).archived) return null;
+      const existing = this.row("SELECT id FROM manual_inbox_batches WHERE member_id = ? AND acknowledged_at IS NULL", memberId);
+      if (existing) return this.getManualInboxBatch(memberId, existing.id);
+      const deliveries = deliveryIds === undefined ? this.listPending(memberId) : deliveryIds.map((id) => this.requireDelivery(id));
+      if (!deliveries.length) return null;
+      const id = newId("batch_");
+      this.run("INSERT INTO manual_inbox_batches (id, member_id, created_at) VALUES (?, ?, ?)", id, memberId, nowIso());
+      for (const [ordinal, d] of deliveries.entries()) {
+        if (d.memberId !== memberId || d.projectId !== member.projectId || !["queued", "held"].includes(d.status)) throw new ApiError(409, "받을 전달 항목이 변경되었습니다");
+        this.run("INSERT INTO manual_inbox_items (batch_id, delivery_id, ordinal) VALUES (?, ?, ?)", id, d.id, ordinal);
+      }
+      return this.getManualInboxBatch(memberId, id);
+    });
+  }
+
+  getManualInboxBatch(memberId: string, batchId: string): ManualInboxBatch | null {
+    const batch = this.row("SELECT * FROM manual_inbox_batches WHERE id = ? AND member_id = ?", batchId, memberId);
+    if (!batch) return null;
+    return { id: batchId, memberId, createdAt: batch.created_at, items: this.rows("SELECT d.* FROM manual_inbox_items i JOIN deliveries d ON d.id = i.delivery_id WHERE i.batch_id = ? ORDER BY i.ordinal", batchId).map((d) => ({ deliveryId: d.id, text: d.text, ref: d.ref_type && d.ref_id ? { type: d.ref_type, id: d.ref_id } : null })) };
+  }
+
+  acknowledgeManualInbox(memberId: string, batchId: string): { batchId: string; acknowledged: true } {
+    return this.transaction(() => {
+      const member = this.requireMember(memberId);
+      if (this.requireProject(member.projectId).archived) throw new ApiError(409, "보관 중에는 지시를 소비할 수 없습니다");
+      const batch = this.getManualInboxBatch(memberId, batchId);
+      if (!batch) throw new ApiError(404, "수신 묶음을 찾을 수 없습니다");
+      const r = this.row("SELECT acknowledged_at FROM manual_inbox_batches WHERE id = ?", batchId)!;
+      if (r.acknowledged_at !== null) return { batchId, acknowledged: true };
+      for (const item of batch.items) {
+        this.markDelivered(item.deliveryId);
+        if (item.ref?.type === "decision" && this.getDecision(item.ref.id)?.status === "answered") this.setDecisionStatus(item.ref.id, "delivered");
+        if (item.ref?.type === "message" && this.getMessage(item.ref.id)) this.setMessageDelivery(item.ref.id, "delivered");
+      }
+      this.run("UPDATE manual_inbox_batches SET acknowledged_at = ? WHERE id = ? AND acknowledged_at IS NULL", nowIso(), batchId);
+      return { batchId, acknowledged: true };
+    });
   }
 }

@@ -497,3 +497,264 @@ test("Finder PATH discovers installed user CLIs without a login shell and honors
   const explicit = loadConfig({ IAMCEO_HOME: appHome, HOME: userHome, PATH: "/usr/bin:/bin", IAMCEO_CODEX_BIN: "/missing/explicit-codex" });
   expect(explicit.codexBin).toBe("/missing/explicit-codex");
 });
+
+describe("Store 영속 포트", () => {
+  test("최외곽 rollback은 원본/outbox/recovery/Bus/pump를 모두 취소한다", () => {
+    const { store, db, events, bus } = makeStore();
+    try {
+      const p = store.createProject({ name: "원자", cwd: "/fixture" });
+      const m = store.createMember({ projectId: p.id, handle: "worker", name: "직원", kind: "worker" });
+      events.length = 0;
+      const seq = bus.seq;
+      let pumps = 0;
+      expect(() => store.transaction(() => {
+        store.withDeliveryIntents(() => store.createMessage({ id: "atomic", projectId: p.id, kind: "나", mine: true, delivery: "queued" }), (message) => [{ projectId: p.id, memberId: m.id, kind: "user_message", text: "지시", refType: "message", refId: message.id }], () => { pumps++; });
+        expect(events).toEqual([]);
+        expect(pumps).toBe(0);
+        throw new Error("outer rollback");
+      })).toThrow("outer rollback");
+      expect(store.getMessage("atomic")).toBeNull();
+      expect(store.listDeliveries()).toEqual([]);
+      expect(store.listDeliveryRecoveries()).toEqual([]);
+      expect(store.boardRevision(p.id)).toBe(0);
+      expect(bus.seq).toBe(seq);
+      expect(pumps).toBe(0);
+      expect(events).toEqual([]);
+      // DB trigger가 outbox 삽입을 거부해도 원본이 남지 않는다.
+      db.exec("CREATE TRIGGER fail_outbox BEFORE INSERT ON deliveries BEGIN SELECT RAISE(ABORT, 'outbox failed'); END");
+      expect(() => store.withDeliveryIntents(() => store.createMessage({ id: "failed", projectId: p.id, kind: "나" }), (message) => [{ projectId: p.id, memberId: m.id, kind: "user_message", text: "지시", refType: "message", refId: message.id }], () => { pumps++; })).toThrow("outbox failed");
+      expect(store.getMessage("failed")).toBeNull();
+      expect(events).toEqual([]);
+      expect(pumps).toBe(0);
+    } finally { db.close(); }
+  });
+
+  test("중첩 savepoint만 실패하면 그 이벤트만 버리고 commit 뒤 pump는 수신자당 한 번", () => {
+    const { store, db, events } = makeStore();
+    try {
+      const p = store.createProject({ name: "중첩", cwd: "/fixture" });
+      const m = store.createMember({ projectId: p.id, handle: "worker", name: "직원", kind: "worker" });
+      events.length = 0;
+      let pumps = 0;
+      store.transaction(() => {
+        expect(() => store.transaction(() => {
+          store.createMessage({ id: "rollback", projectId: p.id, kind: "나" });
+          store.afterCommit(() => { pumps += 100; });
+          throw new Error("inner rollback");
+        })).toThrow("inner rollback");
+        store.withDeliveryIntents(() => store.createMessage({ id: "kept", projectId: p.id, kind: "나" }), (message) => ["one", "two"].map((text) => ({ projectId: p.id, memberId: m.id, kind: "system" as const, text, refType: "message" as const, refId: message.id, sourceRevision: text })), () => {
+          expect(db.inTransaction).toBe(false);
+          expect(store.listDeliveries()).toHaveLength(2);
+          pumps++;
+        });
+        expect(events).toEqual([]);
+      });
+      expect(pumps).toBe(1);
+      expect(store.getMessage("rollback")).toBeNull();
+      expect(events.filter((e) => e.type === "message").map((e) => e.type === "message" && e.message.id)).toEqual(["kept"]);
+      expect(store.listDeliveryRecoveries()).toHaveLength(2);
+      expect(() => store.transaction(async () => "invalid")).toThrow("synchronous");
+    } finally { db.close(); }
+  });
+
+  test("전체 누락/미수신 조회는 500개 메시지·50개 처리 카드 밖도 찾는다", () => {
+    const { store, db } = makeStore();
+    try {
+      const p = store.createProject({ name: "누락", cwd: "/fixture" });
+      const m = store.createMember({ projectId: p.id, handle: "worker", name: "직원", kind: "worker", origin: "manual" });
+      const old = store.createMessage({ projectId: p.id, kind: "나", mine: true, delivery: "queued" });
+      const direct = store.createMessage({ projectId: p.id, kind: "나", mine: true, targetMemberId: m.id, delivery: "held" });
+      const d = store.createDecision({ projectId: p.id, memberId: m.id, who: m.name, title: "옛 질문" });
+      store.answerDecision(d.id, { note: "답" });
+      store.transaction(() => {
+        for (let i = 0; i < 550; i++) store.createMessage({ projectId: p.id, kind: "시스템" });
+        for (let i = 0; i < 60; i++) { const next = store.createDecision({ projectId: p.id, who: "총괄", title: "처리" }); store.closeDecision(next.id, { kind: "obsolete", reason: "정리", by: "총괄" }); }
+      });
+      expect(store.listMessagesMissingDeliveries(p.id).map((m) => m.id)).toEqual([old.id, direct.id]);
+      expect(store.listUnreceivedAnswers(m.id).map((a) => a.id)).toEqual([d.id]);
+      expect(store.listAnswersMissingDeliveries().map((a) => a.id)).toEqual([d.id]);
+      const delivery = store.enqueue({ projectId: p.id, memberId: m.id, kind: "user_message", text: "x", refType: "message", refId: old.id });
+      store.markDelivered(delivery.id);
+      // 전달 행이 이미 있으면 원본 상태가 낡았어도 누락으로 재생하지 않는다.
+      expect(store.listMessagesMissingDeliveries(p.id).map((m) => m.id)).toEqual([direct.id]);
+    } finally { db.close(); }
+  });
+
+  test("v1 쓰기도 revision을 올리고 CAS 실패/rollback은 값과 이벤트를 보존", () => {
+    const { store, db, events } = makeStore();
+    try {
+      const p = store.createProject({ name: "CAS", cwd: "/fixture" });
+      const m = store.createMember({ projectId: p.id, handle: "worker", name: "직원", kind: "worker" });
+      const todo = store.createTodo({ projectId: p.id, title: "일" });
+      const start = store.syncRevisions(p.id);
+      store.patchSettings({ ranks: { lead: { model: "sonnet" } } });
+      expectApiError(() => store.patchSettingsCas({ notifyMac: true }, start.settings), 409);
+      expect(store.patchSettingsCas({ notifyMac: true }, store.settingsRevision()).settings.ranks.lead.model).toBe("sonnet");
+      store.patchMember(m.id, { status: "working" });
+      expect(store.memberRevisions(m.id).configRevision).toBe(0);
+      const member = store.patchMemberCas(m.id, { modelOverride: "model" }, 0);
+      expect(member.configRevision).toBe(1);
+      expectApiError(() => store.patchMemberCas(m.id, { modelOverride: "old" }, 0), 409);
+      expect(store.setTodoDoneCas(todo.id, true, 0).revision).toBe(1);
+      expectApiError(() => store.setTodoDoneCas(todo.id, false, 0), 409);
+      const revision = store.settingsRevision();
+      events.length = 0;
+      expect(() => store.transaction(() => { store.patchSettingsCas({ notifyMac: false }, revision); throw new Error("rollback"); })).toThrow();
+      expect(store.settingsRevision()).toBe(revision);
+      expect(store.getSettings().notifyMac).toBe(true);
+      expect(events).toEqual([]);
+    } finally { db.close(); }
+  });
+
+  test("receipt은 같은 operation의 요청만 합치고 unknown은 재실행하지 않는다", () => {
+    const { store, db } = makeStore();
+    try {
+      const p = store.createProject({ name: "receipt", cwd: "/fixture" });
+      const m = store.createMember({ projectId: p.id, handle: "worker", name: "직원", kind: "worker" });
+      const input = { operationId: "input", kind: "terminal_control" as const, projectId: p.id, memberId: m.id, request: { text: "private-canary", sequence: 1 } };
+      const pending = store.beginOperation(input);
+      expect(JSON.stringify(pending)).not.toContain("private-canary");
+      if (pending.status !== "pending" || pending.kind !== "terminal_control") throw new Error("expected pending terminal receipt");
+      const unknown = store.finishOperation({ ...pending, kind: "terminal_control", status: "unknown", code: "WRITE_UNKNOWN", error: "결과 확인 중" });
+      expect(store.beginOperation({ ...input, request: { sequence: 1, text: "private-canary" } })).toEqual(unknown);
+      expectApiError(() => store.beginOperation({ ...input, request: { sequence: 2 } }), 409);
+      expectApiError(() => store.finishOperation({ ...pending, kind: "terminal_control", status: "refused", code: "NO", error: "stale" }), 409);
+      let calls = 0;
+      const execute = () => { calls++; return { id: store.createDecision({ projectId: p.id, who: m.name, title: "질문" }).id }; };
+      expect(store.agentOperation(m.id, "ask", "agent1", { title: "질문" }, execute)).toEqual(store.agentOperation(m.id, "ask", "agent1", { title: "질문" }, execute));
+      expect(calls).toBe(1);
+      store.agentOperation(m.id, "ask", "agent2", { title: "질문" }, execute);
+      expect(calls).toBe(2);
+      expectApiError(() => store.agentOperation(m.id, "post", "agent1", {}, execute), 409);
+    } finally { db.close(); }
+  });
+
+  test("lease·journal·문맥·봉투·nextAttemptAt은 재오픈 뒤 유지하고 세대/CAS를 검사", () => {
+    const path = join(tempDir(), "persistent.db");
+    let db = openDb(path);
+    try {
+      let store = new Store(db, new Bus());
+      const p = store.createProject({ name: "영속", cwd: "/fixture" });
+      const m = store.createMember({ projectId: p.id, handle: "worker", name: "직원", kind: "worker", sessionId: "session", paneId: "terminal" });
+      const identity = { terminalId: "terminal", sessionId: "session", sessionGeneration: 0, process: null };
+      const at = new Date().toISOString();
+      const baseline = { serverEpoch: "epoch", turn: 1, inputEpoch: 0, logs: [], capturedAt: at };
+      const lease = { memberId: m.id, claimId: "claim", leaseId: "lease", identity, expiresAt: Date.now() + 60_000, lastInputSequence: 1 };
+      store.saveLease(lease);
+      expectApiError(() => store.saveLease({ ...lease, claimId: "other" }), 409);
+      expectApiError(() => store.saveLease({ ...lease, lastInputSequence: 0 }), 409);
+      const delivery = store.enqueue({ projectId: p.id, memberId: m.id, kind: "system", text: "wire" });
+      store.patchDeliveryRetry(delivery.id, { nextAttemptAt: at, sourceRevision: "revision" });
+      const recovery = store.getDeliveryRecovery(delivery.id)!;
+      store.updateDeliveryRecovery(delivery.id, recovery.version, { phase: "checking", checkCount: 1, evidence: [] });
+      expectApiError(() => store.updateDeliveryRecovery(delivery.id, recovery.version, { phase: "resolved" }), 409);
+      store.saveDispatch({ dispatchId: "dispatch", projectId: p.id, memberId: m.id, cli: "claude", backend: "core", markers: [{ deliveryId: delivery.id, marker: "marker" }], bundleMarker: "bundle", identity, baseline, wireSha256: new Bun.CryptoHasher("sha256").update("wire").digest("hex"), wireText: "wire", items: [{ deliveryId: delivery.id, ordinal: 0, sourceRevision: "revision" }], transportState: "prepared", submitAttempts: 0, createdAt: at, updatedAt: at });
+      store.updateDispatch("dispatch", "prepared", "unknown", true);
+      expectApiError(() => store.updateDispatch("dispatch", "unknown", "unknown", true), 409);
+      store.saveLifecycleJournal({ operationId: "start", memberId: m.id, projectId: p.id, intent: "start", phase: "unknown", identity, runId: "run", deliveryIds: [delivery.id], baseline, reason: "timeout", exitCode: null, createdAt: at, updatedAt: at });
+      store.saveExecutionJournal({ runId: "run", memberId: m.id, projectId: p.id, identity, turn: 1, deliveryIds: [delivery.id], phase: "unknown", inputReceivedAt: at, startedAt: null, lastProgressAt: null, endedAt: null, result: null, reason: "timeout", exitCode: 1, interruptionNotifiedAt: null, reportRequestedAt: null, createdAt: at, updatedAt: at });
+      const context = store.ensureContextState(m.id);
+      store.saveContextState({ ...context, rolloutPath: "/fixture/rollout.jsonl", rolloutOffset: 10 });
+      db.close();
+      db = openDb(path);
+      store = new Store(db, new Bus());
+      expect(store.inputState(m.id).lease).toEqual(lease);
+      expect(store.inputState(m.id).unresolvedDispatches[0]!.submitAttempts).toBe(1);
+      expect(store.listPendingLifecycleJournals()[0]!.reason).toBe("timeout");
+      expect(store.listPendingExecutions()[0]!.exitCode).toBe(1);
+      expect(store.getContextState(m.id)).toMatchObject({ bindingNonce: context.bindingNonce, rolloutOffset: 10 });
+      expect(store.getDeliveryRetry(delivery.id).nextAttemptAt).toBe(at);
+      expect(store.getDeliveryRecovery(delivery.id)!.checkCount).toBe(1);
+      let notices = 0;
+      expect(() => store.claimExecutionNotice("run", "interruption", () => { throw new Error("notice fail"); })).toThrow();
+      expect(store.claimExecutionNotice("run", "interruption", () => { notices++; })).toBe(true);
+      expect(store.claimExecutionNotice("run", "interruption", () => { notices++; })).toBe(false);
+      expect(notices).toBe(1);
+      store.removeLease(m.id, "wrong");
+      expect(store.inputState(m.id).lease).not.toBeNull();
+      store.archiveAndRotateSession(m.id, "codex");
+      expect(store.inputState(m.id).lease).toBeNull();
+      expectApiError(() => store.saveContextState(context), 409);
+      expect(store.ensureContextState(m.id).bindingNonce).not.toBe(context.bindingNonce);
+    } finally { db.close(); }
+  });
+
+  test("보고 출처·board 검토는 원본과 함께 저장하며 실행 중 새 revision을 덮지 않는다", () => {
+    const { store, db } = makeStore();
+    try {
+      const p = store.createProject({ name: "board", cwd: "/fixture" });
+      const first = store.createMessage({ projectId: p.id, kind: "진행" });
+      const requested = store.requestBoardReview(p.id);
+      store.createTodo({ projectId: p.id, title: "새 일" });
+      store.completeBoardReview(p.id, requested.requestedRevision, requested.requestedRevision);
+      expect(store.boardRevision(p.id)).toBeGreaterThan(store.getBoardReview(p.id)!.reviewedRevision!);
+      const file = store.createFile({ projectId: p.id, title: "자료" });
+      const refs = { sourceMessageId: first.id, fileIds: [file.id], decisionIds: [], authoredAt: first.at, sequence: 0, correctsMessageId: null };
+      store.saveReportReferences(p.id, refs);
+      expect(store.getReportReferences(p.id, first.id)).toEqual(refs);
+      expectApiError(() => store.saveReportReferences(p.id, { ...refs, fileIds: [] }), 409);
+    } finally { db.close(); }
+  });
+});
+
+test("Store의 기존 db.transaction 진입점도 중첩 rollback/인자/SQL 모드와 commit 이벤트를 보존한다", () => {
+  const { store, db, events } = makeStore();
+  try {
+    for (const mode of ["deferred", "immediate", "exclusive"] as const) {
+      events.length = 0;
+      const write = store.db.transaction((id: string) => {
+        store.createMessage({ id, projectId: "hq", kind: "시스템" });
+        expect(events).toEqual([]);
+        return id;
+      });
+      expect(write[mode](`committed-${mode}`)).toBe(`committed-${mode}`);
+      expect(events.filter((e) => e.type === "message")).toHaveLength(1);
+      events.length = 0;
+      expect(() => store.db.transaction(() => {
+        write[mode](`rollback-${mode}`);
+        store.afterCommit(() => { throw new Error("must not run"); });
+        throw new Error("rollback");
+      })()).toThrow("rollback");
+      expect(store.getMessage(`rollback-${mode}`)).toBeNull();
+      expect(events).toEqual([]);
+    }
+    // 다른 저장소가 쓰는 원래 Database는 교체하거나 transaction 함수를 변조하지 않는다.
+    expect(db).not.toBe(store.db);
+    expect(db.inTransaction).toBe(false);
+  } finally { db.close(); }
+});
+
+test("원본 ID+수신자+sourceRevision 재접수는 outbox/pump를 중복 생성하지 않는다", () => {
+  const { store, db, events } = makeStore();
+  try {
+    const p = store.createProject({ name: "접수", cwd: "/fixture" });
+    const member = store.createMember({ projectId: p.id, handle: "worker", name: "직원", kind: "worker" });
+    let pumps = 0;
+    const accept = () => store.withDeliveryIntents(() => store.createMessage({ id: "same-source", projectId: p.id, kind: "나", mine: true }), (message) => [{ projectId: p.id, memberId: member.id, kind: "user_message", text: "지시", refType: "message", refId: message.id }], () => { pumps++; });
+    const first = accept();
+    events.length = 0;
+    expect(accept()).toEqual(first);
+    expect(pumps).toBe(1);
+    expect(events).toEqual([]);
+    expect(store.listDeliveries()).toHaveLength(1);
+  } finally { db.close(); }
+});
+
+test("취소는 수신 결과 불명·ACK 대기 batch의 원본과 물리 fence를 삭제하지 않는다", () => {
+  const { store, db } = makeStore();
+  try {
+    const p = store.createProject({ name: "취소", cwd: "/fixture" });
+    const member = store.createMember({ projectId: p.id, handle: "worker", name: "직원", kind: "worker", origin: "manual" });
+    const unknown = store.enqueue({ projectId: p.id, memberId: member.id, kind: "system", text: "unknown", refType: "todo", refId: "unknown" });
+    store.updateDeliveryRecovery(unknown.id, 1, { phase: "checking" });
+    expect(store.cancelPendingFor("todo", "unknown")).toBe(0);
+    expect(store.requireDelivery(unknown.id).text).toBe("unknown");
+    const pending = store.enqueue({ projectId: p.id, memberId: member.id, kind: "system", text: "manual", refType: "todo", refId: "manual" });
+    const batch = store.manualInbox(member.id, [pending.id])!;
+    expect(store.cancelPendingFor("todo", "manual")).toBe(0);
+    expect(store.manualInbox(member.id)).toEqual(batch);
+    const safe = store.enqueue({ projectId: p.id, memberId: member.id, kind: "system", text: "safe", refType: "todo", refId: "safe" });
+    expect(store.cancelPendingFor("todo", "safe")).toBe(1);
+    expect(store.getDelivery(safe.id)).toBeNull();
+  } finally { db.close(); }
+});

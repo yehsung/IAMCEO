@@ -16,7 +16,8 @@ import { Orchestrator } from "../server/orchestrator.ts";
 import { renderRole } from "../server/roles.ts";
 import { buildClaudeArgs, childEnv, HeadlessRunner, StreamParser } from "../server/runner/headless.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "../server/runner/types.ts";
-import { Store } from "../server/store.ts";
+import { ApiError, Store } from "../server/store.ts";
+import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
 const FAKE = resolve(import.meta.dir, "fixtures", "fake-claude.ts");
 
@@ -109,6 +110,7 @@ async function setup(opts: { backend?: Backend | null; runnerEnabled?: boolean }
   closers.push(() => orch.shutdown());
   const server = await startServer({ config, store, bus, orch });
   closers.push(() => server.stop());
+  if (server.port === 7878) { await server.stop(); throw new Error("Fixture allocated live port"); }
   orch.setServerUrl(server.urls[0]!);
   const base = server.urls[0]!;
   const project = store.createProject({ name: "시험", cwd: work, runnerEnabled: opts.runnerEnabled ?? true });
@@ -955,10 +957,11 @@ describe("실행기 인자", () => {
   });
 
   test("headless 자식에게 서브에이전트 모델 환경을 주고, 값이 없으면 안 준다. 막힌 도구는 활동에 남는다", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "iamceo-env-"));
-    const log = join(dir, "calls.jsonl");
-    const runner = new HeadlessRunner({ claudeBin: FAKE }, { env: { ...process.env, FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_SESSIONS: join(dir, "s"), CLAUDE_CODE_SUBAGENT_MODEL: "바깥값", CLAUDE_CODE_EFFORT_LEVEL: "max" } });
-    closers.push(() => runner.shutdown());
+    const runtime = createIsolatedRuntime();
+    const dir = runtime.paths.work;
+    const log = join(runtime.dir, "fake.jsonl");
+    const runner = new HeadlessRunner({ claudeBin: runtime.bins.claudeBin }, { env: { ...runtime.childEnv(), CLAUDE_CODE_SUBAGENT_MODEL: "바깥값", CLAUDE_CODE_EFFORT_LEVEL: "max" } });
+    closers.push(async () => { await runner.shutdown(); await runtime.stop(); });
     const events: RunnerEvent[] = [];
     runner.on((e) => events.push(e));
     const m = member({ id: `m_${Date.now()}`, cwd: dir, sessionId: null, subagentModel: "haiku", effort: "low" });
@@ -999,5 +1002,109 @@ describe("실행기 인자", () => {
     expect(settings.statusLine.type).toBe("command");
     expect(settings.skipDangerousModePermissionPrompt).toBeUndefined();
     expect(existsSync(join(t.home, "run"))).toBe(true);
+  });
+});
+
+describe("Store 프로젝트 관리·manual 영속 경계", () => {
+  test("rename은 trim/길이/HQ/자동 총괄 규칙을 검증하고 세션·ID·토큰을 유지한다", () => {
+    const db = openDb(":memory:");
+    const bus = new Bus();
+    const events: WsEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+    const store = new Store(db, bus);
+    try {
+      const project = store.createProject({ name: "기존", cwd: "/fixture" });
+      const lead = store.createMember({ projectId: project.id, handle: "lead", name: "기존 총괄", kind: "conductor", sessionId: "native-session", paneId: "terminal" });
+      const token = store.getMemberToken(lead.id);
+      const generation = store.memberRevisions(lead.id).sessionGeneration;
+      events.length = 0;
+      expect(store.validateProjectPatch(project.id, { name: "  새 이름  " })).toEqual({ name: "새 이름" });
+      expect(events).toEqual([]);
+      const changed = store.patchProject(project.id, { name: "  새 이름  " });
+      expect(changed.id).toBe(project.id);
+      expect(changed.name).toBe("새 이름");
+      expect(store.requireMember(lead.id)).toMatchObject({ name: "새 이름 총괄", sessionId: "native-session", paneId: "terminal" });
+      expect(store.getMemberToken(lead.id)).toBe(token);
+      expect(store.memberRevisions(lead.id).sessionGeneration).toBe(generation);
+      expect(events.map((e) => e.type)).toEqual(["member", "project", "projects"]);
+      events.length = 0;
+      expect(store.patchProject(project.id, { name: "새 이름" }).updatedAt).toBe(changed.updatedAt);
+      expect(events).toEqual([]);
+      store.patchProject(project.id, { name: "[자료] <검토>" });
+      expect(store.requireMember(lead.id).name).toBe("자료 검토 총괄");
+      store.patchProject(project.id, { name: "한".repeat(100) });
+      store.patchProject(project.id, { name: "😀".repeat(50) });
+      for (const name of ["", "  ", "한".repeat(101), "😀".repeat(51), "개행\n", "제어\u0000문자", "탭\t"]) expect(() => store.validateProjectPatch(project.id, { name })).toThrow(ApiError);
+      const root = store.createMember({ projectId: "hq", handle: "root", name: "본사 AI", kind: "root" });
+      store.patchProject("hq", { name: "본사 이름" });
+      expect(store.requireMember(root.id).name).toBe("본사 AI");
+      expect(() => store.patchProject("hq", { archived: true })).toThrow(ApiError);
+      expect(store.patchProject("hq", { archived: false }).archived).toBe(false);
+      expect(() => store.validateProjectPatch(project.id, { archived: true, runnerEnabled: true })).toThrow(ApiError);
+    } finally { db.close(); }
+  });
+
+  test("총괄 UPDATE 실패·이름 충돌은 프로젝트와 이벤트를 함께 rollback하고 별도 이름은 유지", () => {
+    const db = openDb(":memory:");
+    const bus = new Bus();
+    const events: WsEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+    const store = new Store(db, bus);
+    try {
+      const project = store.createProject({ name: "기존", cwd: "/fixture" });
+      const lead = store.createMember({ projectId: project.id, handle: "lead", name: "기존 총괄", kind: "conductor" });
+      const worker = store.createMember({ projectId: project.id, handle: "worker", name: "직원", kind: "worker" });
+      // 과거 DB에 허용되었던 이름도 파생 이름과 충돌할 수 있다.
+      db.query("UPDATE members SET name = '겹침 총괄' WHERE id = ?").run(worker.id);
+      events.length = 0;
+      expect(() => store.patchProject(project.id, { name: "겹침" })).toThrow(ApiError);
+      expect(store.requireProject(project.id)).toEqual(project);
+      expect(events).toEqual([]);
+      db.exec("CREATE TRIGGER reject_rename BEFORE UPDATE OF name ON members BEGIN SELECT RAISE(ABORT, 'rename failed'); END");
+      expect(() => store.patchProject(project.id, { name: "새 이름" })).toThrow("rename failed");
+      expect(store.requireProject(project.id)).toEqual(project);
+      expect(store.requireMember(lead.id).name).toBe("기존 총괄");
+      expect(events).toEqual([]);
+      db.exec("DROP TRIGGER reject_rename");
+      store.patchMember(lead.id, { name: "전담 총괄" });
+      store.patchProject(project.id, { name: "별도" });
+      expect(store.requireMember(lead.id).name).toBe("전담 총괄");
+    } finally { db.close(); }
+  });
+
+  test("manual batch는 ACK 전 재조회되고 보관 중 소비하지 않으며 ACK rollback도 원자적", () => {
+    const dir = mkdtempSync(join(tmpdir(), "iamceo-manual-store-"));
+    const path = join(dir, "store.db");
+    let db = openDb(path);
+    try {
+      let store = new Store(db, new Bus());
+      const p = store.createProject({ name: "직접 세션", cwd: dir });
+      const m = store.createMember({ projectId: p.id, handle: "manual", name: "직원", kind: "worker", origin: "manual" });
+      const decision = store.createDecision({ projectId: p.id, memberId: m.id, who: m.name, title: "질문" });
+      store.answerDecision(decision.id, { note: "답" });
+      const delivery = store.enqueue({ projectId: p.id, memberId: m.id, kind: "answer", text: "답", refType: "decision", refId: decision.id });
+      const batch = store.manualInbox(m.id)!;
+      expect(store.requireDelivery(delivery.id).status).toBe("queued");
+      expect(store.manualInbox(m.id)).toEqual(batch);
+      db.close();
+      db = openDb(path);
+      store = new Store(db, new Bus());
+      expect(store.manualInbox(m.id)).toEqual(batch);
+      store.patchProject(p.id, { archived: true });
+      expect(store.manualInbox(m.id)).toBeNull();
+      expect(() => store.acknowledgeManualInbox(m.id, batch.id)).toThrow(ApiError);
+      expect(store.requireDelivery(delivery.id).status).toBe("queued");
+      store.patchProject(p.id, { archived: false });
+      db.exec("CREATE TRIGGER reject_ack BEFORE UPDATE ON decisions BEGIN SELECT RAISE(ABORT, 'ACK failed'); END");
+      expect(() => store.acknowledgeManualInbox(m.id, batch.id)).toThrow("ACK failed");
+      expect(store.requireDelivery(delivery.id).status).toBe("queued");
+      expect(store.manualInbox(m.id)).toEqual(batch);
+      db.exec("DROP TRIGGER reject_ack");
+      expect(store.acknowledgeManualInbox(m.id, batch.id)).toEqual({ batchId: batch.id, acknowledged: true });
+      expect(store.acknowledgeManualInbox(m.id, batch.id)).toEqual({ batchId: batch.id, acknowledged: true });
+      expect(store.requireDecision(decision.id).status).toBe("delivered");
+      expect(store.listUnreceivedAnswers(m.id)).toEqual([]);
+      expect(store.manualInbox(m.id)).toBeNull();
+    } finally { db.close(); }
   });
 });

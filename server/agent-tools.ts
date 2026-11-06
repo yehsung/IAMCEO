@@ -4,7 +4,9 @@ import { homedir } from "node:os";
 import { basename, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
 import { CONDUCTOR_TOOLS, fileKindOf, MANUAL_TOOLS, ROOT_TOOLS, WORKER_TOOLS, type Attachment, type FileKind, type Member } from "../shared/types.ts";
-import { importPath, MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES } from "./files.ts";
+import { FilePublication, importPath, prepareImport, MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES, type PreparedImport, type SavedFile } from "./files.ts";
+import { createStorageReferences } from "./storage-maintenance.ts";
+import { toStorageError } from "./storage-errors.ts";
 import type { AgentToolDef, AgentToolResult } from "./orchestrator-api.ts";
 import type { AssignResult, Orchestrator } from "./orchestrator.ts";
 import { josa } from "./roles.ts";
@@ -127,12 +129,17 @@ function requireMemberCwd(orch: Orchestrator, member: Member, raw: string, quote
   throw new ApiError(403, `프로젝트 폴더 밖입니다: ${path}. 필요하면 ask 로 대표에게 묻고, 대표가 그 경로를 글로 답하면 그 글을 user_quote 에 실어 다시 부르세요`);
 }
 
-async function attach(orch: Orchestrator, member: Member, raw: string): Promise<Attachment> {
+function prepareAttachment(orch: Orchestrator, member: Member, raw: string): PreparedImport {
   const path = requireReadable(orch, member, raw);
   const stat = statOrNull(path);
   if (!stat?.isFile()) throw new ApiError(400, `파일이 없습니다: ${path}`);
   if (stat.size > MAX_UPLOAD_BYTES) throw new ApiError(413, `파일은 50MB 까지 올릴 수 있습니다: ${path}`);
-  return orch.store.createAttachment(await importPath(orch.uploadsDir, path));
+  return prepareImport(path);
+}
+
+async function attach(orch: Orchestrator, member: Member, raw: string): Promise<Attachment> {
+  const input = prepareAttachment(orch, member, raw);
+  return orch.store.createAttachment(await importPath(orch.uploadsDir, input.source));
 }
 
 /** 다른 직원에게 시키는 도구가 자기 자신을 가리키면 턴이 안 끝나는 대기열이나 자기 종료가 된다. */
@@ -241,40 +248,56 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       if (a.html !== undefined && !a.html.trim()) throw new ApiError(400, "html 이 비어 있습니다");
       if (!a.path && a.content === undefined && a.html === undefined && !a.images?.length) throw new ApiError(400, "path·content·html·images 중 하나가 필요합니다");
       if (a.html !== undefined && artifactBytes(a.html) > MAX_ARTIFACT_BYTES) throw new ApiError(413, "html 은 2MB 까지 올릴 수 있습니다");
-      const attachments: Attachment[] = [];
+      // Validate and read all inputs before creating a staging directory or attachment row.
+      const inputs: PreparedImport[] = [];
       let body: string = a.content ?? "";
       let html: string | null = a.html ?? null;
       let path: string | null = null;
       let kind: FileKind | undefined = html !== null ? "artifact" : a.content !== undefined ? "document" : undefined;
-      if (a.path) {
-        // 읽는 것은 검사한 진짜 경로, 자료에 적는 것은 직원이 준 경로다.
+      if (a.path !== undefined) {
         const real = requireReadable(orch, member, a.path);
         path = expandPath(a.path, member.cwd);
         const stat = statOrNull(real);
+        if (!stat?.isFile()) throw new ApiError(400, `파일이 없습니다: ${real}`);
         kind = fileKindOf(basename(real));
         if (kind === "artifact") {
-          if (!stat?.isFile()) throw new ApiError(400, `파일이 없습니다: ${real}`);
           if (stat.size > MAX_ARTIFACT_BYTES) throw new ApiError(413, `html 은 2MB 까지 올릴 수 있습니다: ${real}`);
           html = readFileSync(real, "utf8");
-        } else if (stat?.isFile() && MARKDOWN_EXT.has(extname(real).toLowerCase()) && stat.size <= MARKDOWN_BODY_MAX_BYTES) {
+          if (artifactBytes(html) > MAX_ARTIFACT_BYTES) throw new ApiError(413, "html 은 2MB 까지 올릴 수 있습니다");
+        } else if (MARKDOWN_EXT.has(extname(real).toLowerCase()) && stat.size <= MARKDOWN_BODY_MAX_BYTES) {
           body = readFileSync(real, "utf8");
         } else {
-          const attachment = await attach(orch, member, real);
-          attachments.push(attachment);
-          kind = fileKindOf(attachment.name, attachment.mime);
-          // 1MB 를 넘는 md 는 글로 싣지 않는다. 그릴 본문이 없으니 파일로 보여 준다.
+          const input = prepareAttachment(orch, member, real);
+          inputs.push(input);
+          kind = fileKindOf(input.name, input.mime);
           if (kind === "document") kind = "file";
-          // 표·코드는 화면이 바로 그리도록 본문에도 싣는다. 원본은 첨부로 내려받는다.
-          if (TEXT_BODY_KINDS.has(kind) && stat && stat.size <= MARKDOWN_BODY_MAX_BYTES) body = readFileSync(real, "utf8");
+          if (TEXT_BODY_KINDS.has(kind) && stat.size <= MARKDOWN_BODY_MAX_BYTES) body = readFileSync(real, "utf8");
         }
       }
       for (const image of a.images ?? []) {
-        const attachment = await attach(orch, member, image);
-        if (!attachment.isImage) throw new ApiError(400, `이미지가 아닙니다: ${image}`);
-        attachments.push(attachment);
+        const input = prepareAttachment(orch, member, image);
+        if (!input.mime.startsWith("image/")) throw new ApiError(400, `이미지가 아닙니다: ${image}`);
+        inputs.push(input);
       }
       kind ??= "image";
-      const file = orch.store.createFile({ projectId: member.projectId, title: a.title, who: member.name, memberId: member.id, summary: a.summary, body, path, attachments, kind, html });
+      let publication: FilePublication | undefined;
+      let file;
+      try {
+        const saved: SavedFile[] = [];
+        if (inputs.length) {
+          publication = new FilePublication(orch.uploadsDir);
+          for (const input of inputs) saved.push(await publication.stagePath(input));
+          publication.publish();
+        }
+        file = orch.store.transaction(() => {
+          const attachments = saved.map((entry) => orch.store.createAttachment(entry));
+          return orch.store.createFile({ projectId: member.projectId, title: a.title, who: member.name, memberId: member.id, summary: a.summary, body, path, attachments, kind, html });
+        });
+        publication?.complete();
+      } catch (error) {
+        try { publication?.fail(createStorageReferences(orch.store, join(orch.dataDir, "inbox"))); } catch { /* Unknown cleanup stays active and protected. */ }
+        throw toStorageError(error, "자료 게시");
+      }
       return reply(`자료를 올렸습니다 #${file.id}. post 의 file_ids 에 ${file.id} 를 넣으면 대화에 이어집니다`);
     },
   ),

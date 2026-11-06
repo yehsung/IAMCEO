@@ -3,9 +3,10 @@ import { statSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { detectTailscaleIp } from "./config.ts";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import type { Server } from "bun";
+import type { Server, ServerWebSocket } from "bun";
 import { z } from "zod";
-import { EFFORTS, fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type Member } from "../shared/types.ts";
+import { EFFORTS, fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type HerdrInfo, type Member, type MessagePageOptions, type SyncCursor, type SyncSnapshot } from "../shared/types.ts";
+import type { ServerCapabilities } from "../shared/operations.ts";
 import { ARTIFACT_CSP } from "../shared/artifact-kit.ts";
 import type { Bus } from "./bus.ts";
 import { VERSION, type Config } from "./config.ts";
@@ -243,6 +244,32 @@ function parseLimit(url: URL): number | undefined {
   return n;
 }
 
+function strictQuery(url: URL, allowed: string[], code?: string): void {
+  const seen = new Set<string>();
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.includes(key) || seen.has(key)) throw new ApiError(400, "조회 조건이 잘못되었습니다", code);
+    seen.add(key);
+  }
+}
+
+function strictLimit(raw: string | null, fallback: number, max: number): number {
+  if (raw === null) return fallback;
+  if (!/^[0-9]+$/.test(raw) || Number(raw) < 1 || Number(raw) > max) throw new ApiError(400, "대화 조회 조건이 잘못되었습니다", "INVALID_MESSAGE_PAGE_QUERY");
+  return Number(raw);
+}
+
+function messagePageQuery(url: URL): MessagePageOptions {
+  strictQuery(url, ["scope", "memberId", "limit", "cursor"], "INVALID_MESSAGE_PAGE_QUERY");
+  const scope = url.searchParams.get("scope") ?? "project";
+  const memberId = url.searchParams.get("memberId");
+  if ((scope !== "project" && scope !== "member") || (scope === "project" && memberId !== null) ||
+      (scope === "member" && (!memberId || Buffer.byteLength(memberId) > 256))) {
+    throw new ApiError(400, "대화 조회 조건이 잘못되었습니다", "INVALID_MESSAGE_PAGE_QUERY");
+  }
+  return { scope: scope === "project" ? { kind: "project" } : { kind: "member", memberId: memberId! },
+    limit: strictLimit(url.searchParams.get("limit"), 200, 500), cursor: url.searchParams.get("cursor") ?? undefined };
+}
+
 function expandDir(raw: string): string {
   const path = raw === "~" ? homedir() : raw.startsWith("~/") ? join(homedir(), raw.slice(2)) : raw;
   if (!isAbsolute(path)) throw new ApiError(400, "폴더는 절대 경로여야 합니다");
@@ -277,8 +304,8 @@ interface Route {
   handler: Handler;
 }
 
-function fail(status: number, message: string): Response {
-  return Response.json({ error: message }, { status });
+function fail(status: number, message: string, code?: string): Response {
+  return Response.json({ error: message, ...(code ? { code } : {}) }, { status });
 }
 
 function decodeParams(match: RegExpExecArray): string[] {
@@ -327,8 +354,8 @@ async function artifactHtml({ config, store }: ServerContext, id: string): Promi
   return source.text();
 }
 
-function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing): Route[] {
-  const { config, store, orch } = ctx;
+function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, readHerdr: () => Promise<HerdrInfo>, currentHerdr: () => HerdrInfo): Route[] {
+  const { config, store, orch, bus } = ctx;
   // 재전송이 앞 요청의 orch 처리가 끝나기 전에 와도 두 번 전달되지 않게 한다.
   const inFlight = new Map<string, Promise<unknown>>();
   const once = <T>(key: string, run: () => Promise<T>): Promise<T> => {
@@ -360,6 +387,34 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing): 
   };
 
   return [
+    route("GET", "/api/capabilities", (_req, url) => {
+      strictQuery(url, []);
+      const body: ServerCapabilities = { contractVersion: 2, capabilities: {
+        paging: true, archive: true, realtime: true, delivery: false, push: false, operations: false,
+      } };
+      return Response.json(body);
+    }),
+    route("GET", "/api/sync", async (_req, url) => {
+      strictQuery(url, ["projectId"]);
+      const requestedProjectId = url.searchParams.get("projectId");
+      if (requestedProjectId !== null && (!requestedProjectId.trim() || Buffer.byteLength(requestedProjectId) > 256)) throw new ApiError(400, "프로젝트 ID가 잘못되었습니다");
+      await readHerdr();
+      // 이 뒤 직렬화까지 await가 없다. 도메인 쓰기는 이 데몬의 Store가 소유한다.
+      const herdr = currentHerdr();
+      const project = requestedProjectId === null ? null : store.getProject(requestedProjectId);
+      const projectStatus = requestedProjectId === null ? "none" : !project ? "not_found" : project.archived ? "archived" : "ok";
+      const rankOverrides = { manager: 0, lead: 0 };
+      for (const m of store.listAllMembers()) if (m.origin !== "manual" && (m.modelOverride || m.effortOverride)) rankOverrides[memberRank(m.kind)]++;
+      const body: SyncSnapshot = {
+        protocol: 2, requestedProjectId, projectStatus,
+        bootstrap: { version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr,
+          home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides },
+        state: projectStatus === "ok" ? store.projectState(requestedProjectId!) : null,
+        revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },
+        cursor: bus.cursor,
+      };
+      return Response.json(body);
+    }),
     route("GET", "/api/bootstrap", async () => {
       await orch.refreshConnection?.();
       const rankOverrides = { manager: 0, lead: 0 };
@@ -398,14 +453,30 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing): 
     }),
     route("GET", "/api/projects/:id/messages", (_req, url, [id]) => {
       store.requireProject(id!);
+      if (url.searchParams.has("around")) {
+        strictQuery(url, ["around", "limit"], "INVALID_MESSAGE_PAGE_QUERY");
+        const around = url.searchParams.get("around")!;
+        if (!around || Buffer.byteLength(around) > 256) throw new ApiError(400, "대화 조회 조건이 잘못되었습니다", "INVALID_MESSAGE_PAGE_QUERY");
+        return Response.json(store.listMessagesAround(id!, around, strictLimit(url.searchParams.get("limit"), 41, 100)));
+      }
       const before = url.searchParams.get("before") ?? undefined;
       return Response.json(store.listMessages(id!, { before, limit: parseLimit(url) }));
+    }),
+    route("GET", "/api/projects/:id/messages/page", (_req, url, [id]) => Response.json(store.listMessagePage(id!, messagePageQuery(url)))),
+    route("GET", "/api/projects/:id/archive/state", (_req, url, [id]) => {
+      strictQuery(url, []);
+      return Response.json(store.archiveState(id!));
+    }),
+    route("GET", "/api/projects/:id/archive/messages/page", (_req, url, [id]) => Response.json(store.listArchiveMessagePage(id!, messagePageQuery(url)))),
+    route("GET", "/api/messages/:id", (_req, url, [id]) => {
+      strictQuery(url, []);
+      return Response.json(store.requireMessage(id!));
     }),
     route("POST", "/api/projects", async (req) => {
       const body = await parseBody(req, CreateProjectSchema);
       return Response.json(await orch.createProject({ ...body, cwd: expandDir(body.cwd) }));
     }),
-    route("GET", "/api/projects/archived", () => Response.json(store.listProjects({ includeArchived: true }).filter((p) => p.archived))),
+    route("GET", "/api/projects/archived", () => Response.json(store.listArchivedProjects())),
     route("GET", "/api/projects/:id/decisions", (_req, url, [id]) => {
       store.requireProject(id!);
       const status = url.searchParams.get("status") ?? "done";
@@ -756,6 +827,8 @@ async function loadWebIndex(): Promise<Bun.HTMLBundle | null> {
 }
 
 const WS_TOPIC = "events";
+const WS_V2_TOPIC = "events-v2";
+interface SocketData { protocol: 1 | 2 }
 
 export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   const { config, store, bus } = ctx;
@@ -763,7 +836,20 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   const hosts: string[] = [];
   let boundPort = 0;
   const pairing = new Pairing();
-  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing);
+  let herdrCache: HerdrInfo | undefined;
+  let herdrPending: Promise<HerdrInfo> | undefined;
+  let herdrCursor: Readonly<SyncCursor> | undefined;
+  const readHerdr = (): Promise<HerdrInfo> => {
+    if (herdrCache) return Promise.resolve(herdrCache);
+    return herdrPending ??= ctx.orch.herdrInfo().then((info) => herdrCache ??= info).finally(() => { herdrPending = undefined; });
+  };
+  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, readHerdr, () => herdrCache!);
+  const sockets = new Set<ServerWebSocket<SocketData>>();
+  const v2Sockets = new Set<ServerWebSocket<SocketData>>();
+  const requests = new Set<Promise<Response | undefined>>();
+  let socketsDrained: (() => void) | undefined;
+  let stopPromise: Promise<void> | undefined;
+  let closedEpochSockets = false;
   const webIndex = await loadWebIndex();
   const development = process.env.IAMCEO_DEV === "1";
   // 개발 모드는 HMR 소켓까지 Bun 이 직접 맡아야 해서 그대로 둔다.
@@ -778,14 +864,18 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     return given !== null && safeEqual(given, config.accessCode);
   };
 
-  const route = (req: Request, url: URL, server: Server<undefined>): Response | Promise<Response> | undefined => {
+  const route = (req: Request, url: URL, server: Server<SocketData>): Response | Promise<Response> | undefined => {
     const path = url.pathname;
     if (path === "/api/health") return Response.json({ ok: true, version: VERSION });
     // 짝 맺기 코드를 낸 폰에만 접속 코드를 준다. 코드 자체가 인증이라 접속 코드 검사 앞에 둔다.
     if (path === "/pair/claim") return handlePairClaim(req, server);
     if (path === "/ws") {
-      if (!hasAccessCode(req, url, true)) return fail(401, "인증이 필요합니다");
-      return server.upgrade(req) ? undefined : fail(400, "WebSocket 요청이 아닙니다");
+      strictQuery(url, ["v", "t"]);
+      const version = url.searchParams.get("v");
+      if (version !== null && version !== "2") return fail(400, "실시간 연결 버전이 잘못되었습니다");
+      if (version === "2" && url.searchParams.has("t")) return fail(400, "실시간 연결 주소에 접속 코드를 넣지 마세요");
+      if (!hasAccessCode(req, url, version === null)) return fail(401, "인증이 필요합니다");
+      return server.upgrade(req, { data: { protocol: version === "2" ? 2 : 1 } }) ? undefined : fail(400, "WebSocket 요청이 아닙니다");
     }
     // 코드가 틀려 나가는 기기도 지울 수 있어야 하므로 인증 앞에 둔다. 지우기뿐이고 바깥 사이트는 Origin 검사에 걸린다.
     if (path === "/api/files-session" && req.method === "DELETE") {
@@ -819,7 +909,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     return fail(404, "없는 경로입니다");
   };
 
-  const handlePairClaim = async (req: Request, server: Server<undefined>): Promise<Response> => {
+  const handlePairClaim = async (req: Request, server: Server<SocketData>): Promise<Response> => {
     if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다");
     const body = (await req.json().catch(() => null)) as { code?: unknown; device?: unknown } | null;
     if (!body || typeof body.code !== "string") return fail(400, "짝 맺기 코드가 필요합니다");
@@ -832,21 +922,34 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     return Response.json({ accessCode: config.accessCode, version: VERSION });
   };
 
-  const handle = async (req: Request, server: Server<undefined>): Promise<Response | undefined> => {
-    if (!isIpAllowed(server.requestIP(req)?.address, ipRule)) return fail(403, "허용되지 않은 주소입니다");
-    if (!isHostAllowed(req.headers.get("host"), config.hosts)) return fail(403, "허용되지 않은 주소입니다");
-    if (!originMatchesHost(req)) return fail(403, "허용되지 않은 출처입니다");
+  const handleRequest = async (req: Request, server: Server<SocketData>): Promise<Response | undefined> => {
+    const url = new URL(req.url);
+    // 인증 실패와 검증 오류도 사용자 데이터처럼 캐시에 남기지 않는다.
+    const noStore = (response: Response | undefined): Response | undefined => {
+      if (response && (url.pathname.startsWith("/api/") || url.pathname === "/ws")) response.headers.set("Cache-Control", "no-store");
+      return response;
+    };
+    if (!isIpAllowed(server.requestIP(req)?.address, ipRule)) return noStore(fail(403, "허용되지 않은 주소입니다"));
+    if (!isHostAllowed(req.headers.get("host"), config.hosts)) return noStore(fail(403, "허용되지 않은 주소입니다"));
+    if (!originMatchesHost(req)) return noStore(fail(403, "허용되지 않은 출처입니다"));
     try {
-      const url = new URL(req.url);
-      return await route(req, url, server);
+      return noStore(await route(req, url, server));
     } catch (e) {
-      if (e instanceof ApiError) return fail(e.status, e.message);
-      console.error("요청 처리 오류:", req.method, req.url, e);
-      return fail(500, e instanceof Error ? e.message : "서버 오류");
+      if (e instanceof ApiError) return noStore(fail(e.status, e.message, e.code));
+      // 오류 객체도 요청 URL/헤더를 품을 수 있다. 경로와 오류 종류만 남긴다.
+      console.error("요청 처리 오류:", req.method, url.pathname, e instanceof Error ? e.name : "unknown");
+      return noStore(fail(500, e instanceof Error ? e.message : "서버 오류"));
     }
   };
 
-  const serve = (hostname: string, port: number): Server<undefined> =>
+  const handle = (req: Request, server: Server<SocketData>): Promise<Response | undefined> => {
+    const pending = handleRequest(req, server);
+    requests.add(pending);
+    void pending.then(() => requests.delete(pending), () => requests.delete(pending));
+    return pending;
+  };
+
+  const serve = (hostname: string, port: number): Server<SocketData> =>
     Bun.serve({
       hostname,
       port,
@@ -863,11 +966,24 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
         "/ws": handle,
         ...(webIndex && !webOrigin ? { "/*": webIndex } : {}),
       } as Record<string, Bun.HTMLBundle | typeof handle>,
-      fetch: handle as (req: Request, server: Server<undefined>) => Promise<Response>,
+      fetch: handle as (req: Request, server: Server<SocketData>) => Promise<Response>,
       websocket: {
+        backpressureLimit: 16 * 1024 * 1024,
+        closeOnBackpressureLimit: true,
         open(ws) {
-          ws.subscribe(WS_TOPIC);
-          ws.send(JSON.stringify({ type: "hello", seq: bus.seq }));
+          sockets.add(ws);
+          ws.subscribe(ws.data.protocol === 2 ? WS_V2_TOPIC : WS_TOPIC);
+          if (ws.data.protocol === 2) {
+            v2Sockets.add(ws);
+            ws.send(JSON.stringify({ type: "hello", protocol: 2, ...bus.cursor, heartbeatMs: WS_PING_MS, staleAfterMs: 45_000 }));
+          } else {
+            ws.send(JSON.stringify({ type: "hello", seq: bus.seq }));
+          }
+        },
+        close(ws) {
+          sockets.delete(ws);
+          v2Sockets.delete(ws);
+          if (sockets.size === 0) socketsDrained?.();
         },
         // 서버→화면 단방향이다.
         message() {},
@@ -905,13 +1021,35 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   // 화면이 조용히 죽은 소켓을 알아채는 신호. 망이 바뀌면 소켓은 닫히지 않고 그냥 멈춘다.
   const pingTimer = setInterval(() => {
     const payload = JSON.stringify({ type: "ping" });
-    for (const server of servers) server.publish(WS_TOPIC, payload);
+    const v2Payload = JSON.stringify({ type: "ping", ...bus.cursor });
+    for (const server of servers) {
+      server.publish(WS_TOPIC, payload);
+      server.publish(WS_V2_TOPIC, v2Payload);
+    }
   }, WS_PING_MS);
   pingTimer.unref?.();
 
-  const unsubscribe = bus.subscribe((event) => {
+  let publishedEpoch = bus.epoch;
+  const unsubscribe = bus.subscribe((event, cursor) => {
+    if (event.type === "herdr" && cursor.epoch === bus.epoch && (!herdrCursor || herdrCursor.epoch !== cursor.epoch || herdrCursor.seq < cursor.seq)) {
+      herdrCache = event.herdr;
+      herdrCursor = cursor;
+    }
+    const epochChanged = publishedEpoch !== bus.epoch;
+    if (epochChanged) {
+      publishedEpoch = bus.epoch;
+      closedEpochSockets ||= v2Sockets.size > 0;
+      for (const ws of v2Sockets) {
+        ws.unsubscribe(WS_V2_TOPIC);
+        ws.close(1012, "실시간 동기화를 다시 시작하세요");
+      }
+    }
     const payload = JSON.stringify(event);
-    for (const server of servers) server.publish(WS_TOPIC, payload);
+    const v2Payload = epochChanged || event.type === "hello" || event.type === "ping" ? null : JSON.stringify({ ...event, ...cursor });
+    for (const server of servers) {
+      server.publish(WS_TOPIC, payload);
+      if (v2Payload) server.publish(WS_V2_TOPIC, v2Payload);
+    }
   });
 
   return {
@@ -919,12 +1057,18 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     hosts,
     urls: hosts.map((h) => `http://${h.includes(":") ? `[${h}]` : h}:${port}`),
     syncHosts,
-    async stop() {
-      clearInterval(hostTimer);
-      clearInterval(pingTimer);
-      unsubscribe();
-      await Promise.all(servers.map((s) => s.stop(true)));
-      await webServer?.stop(true);
+    stop() {
+      return stopPromise ??= (async () => {
+        clearInterval(hostTimer);
+        clearInterval(pingTimer);
+        unsubscribe();
+        const drained = sockets.size === 0 ? Promise.resolve() : new Promise<void>((resolve) => { socketsDrained = resolve; });
+        const stopped = servers.map((s) => s.stop(true));
+        // Bun 1.3.14는 서버가 먼저 닫은 WS를 pendingWebSockets에 남긴다.
+        // force stop은 한 번만 호출하고 실제 요청/소켓의 종료를 직접 기다린다.
+        await (closedEpochSockets ? Promise.all([drained, ...requests]) : Promise.all(stopped));
+        await webServer?.stop(true);
+      })();
     },
   };
 }

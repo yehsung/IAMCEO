@@ -1,0 +1,169 @@
+import Foundation
+
+protocol RealtimeClock: Sendable {
+    func now() async -> Duration
+    func sleep(for duration: Duration) async throws
+}
+
+struct SystemRealtimeClock: RealtimeClock {
+    func now() async -> Duration { .seconds(ProcessInfo.processInfo.systemUptime) }
+    func sleep(for duration: Duration) async throws { try await Task.sleep(for: duration) }
+}
+
+enum RealtimeClientError: Error, Equatable {
+    case helloTimeout, stale, invalidFrame, messageTooLarge, consumerTooSlow
+}
+
+private final class RealtimeRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
+/// Each socket owns a session. Closing it also invalidates the session; reconnect creates a new one.
+struct URLSessionRealtimeTransportFactory: RealtimeTransportFactory {
+    func connect(request: URLRequest) async throws -> any RealtimeTransport {
+        try Task.checkCancellation()
+        let config = URLSessionConfiguration.ephemeral
+        config.httpCookieStorage = nil
+        config.urlCredentialStorage = nil
+        config.httpShouldSetCookies = false
+        config.timeoutIntervalForRequest = 10
+        config.timeoutIntervalForResource = 0
+        let session = URLSession(configuration: config, delegate: RealtimeRedirectDelegate(), delegateQueue: nil)
+        var request = request
+        request.timeoutInterval = 10
+        let task = session.webSocketTask(with: request)
+        task.maximumMessageSize = RealtimeClient.maximumMessageSize
+        task.resume()
+        return URLSessionRealtimeTransport(session: session, task: task)
+    }
+}
+
+private actor URLSessionRealtimeTransport: RealtimeTransport {
+    let session: URLSession
+    let task: URLSessionWebSocketTask
+    init(session: URLSession, task: URLSessionWebSocketTask) { self.session = session; self.task = task }
+    func receive() async throws -> Data {
+        switch try await task.receive() {
+        case .data(let data): return data
+        case .string(let text): return Data(text.utf8)
+        @unknown default: throw RealtimeClientError.invalidFrame
+        }
+    }
+    func close() async {
+        task.cancel(with: .goingAway, reason: nil)
+        session.invalidateAndCancel()
+    }
+}
+
+/// Transport only: the host coordinator owns cursor reconciliation, snapshots and reconnect policy.
+actor RealtimeClient {
+    static let maximumMessageSize = 16 * 1024 * 1024
+    private let factory: any RealtimeTransportFactory
+    private let clock: any RealtimeClock
+    private var generation = UUID()
+    private var transport: (any RealtimeTransport)?
+    private var receiver: Task<Void, Never>?
+    private var watchdog: Task<Void, Never>?
+    private var continuation: AsyncThrowingStream<RealtimeEvent, Error>.Continuation?
+    private var lastMessage: Duration = .zero
+    private var receivedHello = false
+    private var version2 = false
+
+    init(factory: any RealtimeTransportFactory = URLSessionRealtimeTransportFactory(), clock: any RealtimeClock = SystemRealtimeClock()) {
+        self.factory = factory; self.clock = clock
+    }
+
+    /// Only APIClient may construct the authenticated, origin-checked request.
+    func connect(api: APIClient, version: Int = 2) async throws -> AsyncThrowingStream<RealtimeEvent, Error> {
+        let old = reset()
+        let id = generation
+        await old?.close()
+        guard id == generation else { throw CancellationError() }
+        let request = try await api.webSocketRequest(version: version)
+        try Task.checkCancellation()
+        guard id == generation else { throw CancellationError() }
+        lastMessage = await clock.now()
+        guard id == generation else { throw CancellationError() }
+        let (stream, sink) = AsyncThrowingStream<RealtimeEvent, Error>.makeStream(bufferingPolicy: .bufferingOldest(256))
+        continuation = sink
+        sink.onTermination = { [weak self] _ in Task { await self?.stop(id: id) } }
+        receiver = Task { await self.receive(request: request, id: id) }
+        watchdog = Task { await self.watch(id: id) }
+        return stream
+    }
+
+    func disconnect() async { let old = reset(); await old?.close() }
+
+    private func stop(id: UUID, error: (any Error)? = nil) async {
+        guard id == generation else { return }
+        let old = reset(error: error)
+        await old?.close()
+    }
+
+    /// Invalidate synchronously before any close await, including competing connect calls.
+    private func reset(error: (any Error)? = nil) -> (any RealtimeTransport)? {
+        generation = UUID()
+        receiver?.cancel(); watchdog?.cancel()
+        receiver = nil; watchdog = nil
+        let old = transport
+        transport = nil
+        let sink = continuation
+        continuation = nil
+        receivedHello = false; version2 = false
+        if let error { sink?.finish(throwing: error) } else { sink?.finish() }
+        return old
+    }
+
+    private func receive(request: URLRequest, id: UUID) async {
+        do {
+            let socket = try await factory.connect(request: request)
+            guard id == generation, !Task.isCancelled else { await socket.close(); return }
+            transport = socket
+            while !Task.isCancelled {
+                let data = try await socket.receive()
+                guard id == generation, !Task.isCancelled else { return }
+                guard data.count <= Self.maximumMessageSize else { throw RealtimeClientError.messageTooLarge }
+                let event: RealtimeEvent
+                do { event = try JSONDecoder().decode(RealtimeEvent.self, from: data) }
+                catch { throw RealtimeClientError.invalidFrame }
+                guard !event.type.isEmpty else { throw RealtimeClientError.invalidFrame }
+                if !receivedHello {
+                    guard event.type == "hello" else { throw RealtimeClientError.invalidFrame }
+                    receivedHello = true
+                    version2 = event.protocolVersion == 2
+                } else {
+                    guard event.type != "hello", (event.cursor != nil) == version2,
+                          event.protocolVersion == nil else { throw RealtimeClientError.invalidFrame }
+                    if !version2 && !Self.legacyTypes.contains(event.type) { throw RealtimeClientError.invalidFrame }
+                }
+                lastMessage = await clock.now()
+                guard id == generation, !Task.isCancelled else { return }
+                if case .dropped = continuation?.yield(event) { throw RealtimeClientError.consumerTooSlow }
+            }
+        } catch {
+            // Never expose URLSession errors containing authenticated requests or URLs.
+            let safe = (error as? RealtimeClientError) ?? APIError(status: (error as? APIError)?.status ?? 0, message: "실시간 연결이 끊겼습니다.") as any Error
+            await stop(id: id, error: safe)
+        }
+    }
+
+    private static let legacyTypes: Set<String> = ["ping", "projects", "project", "member", "member_removed", "decision", "todo", "work", "message", "file", "activity", "settings", "herdr"]
+
+    private func watch(id: UUID) async {
+        do {
+            while id == generation, !Task.isCancelled {
+                let now = await clock.now()
+                guard id == generation, !Task.isCancelled else { return }
+                let remaining = lastMessage + (receivedHello ? .seconds(45) : .seconds(10)) - now
+                if remaining <= .zero {
+                    await stop(id: id, error: receivedHello ? RealtimeClientError.stale : RealtimeClientError.helloTimeout)
+                    return
+                }
+                try await clock.sleep(for: remaining)
+            }
+        } catch { /* Cancellation ends the only watchdog. */ }
+    }
+}

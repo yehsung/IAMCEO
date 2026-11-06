@@ -1,5 +1,5 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONDUCTOR_TOOLS, MANUAL_TOOLS, ROOT_TOOLS, WORKER_TOOLS, type Backend, type Member } from "../shared/types.ts";
@@ -12,6 +12,8 @@ import type { AgentToolResult } from "../server/orchestrator-api.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
 import type { Runner, RunnerEvent, SendResult } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
+import { FilePublication } from "../server/files.ts";
+import { StorageError } from "../server/storage-errors.ts";
 
 /** 세션을 띄우지 않고 받은 글만 기록한다. 턴은 end() 로 끝낸다. */
 class FakeRunner implements Runner {
@@ -89,7 +91,7 @@ async function setup() {
     expect(res.status).toBe(200);
     return (await res.json()) as AgentToolResult;
   };
-  return { home, store, orch, runner, server, project, lead, call };
+  return { home, store, bus, orch, runner, server, project, lead, call };
 }
 
 describe("도구 목록", () => {
@@ -216,6 +218,84 @@ describe("공통 도구", () => {
     expect(await call(lead, "file", { title: "없는 파일", path: "없다.png" })).toMatchObject({ isError: true });
     expect(await call(lead, "file", { title: "그림 아님", images: [join(docs, "d.csv")] })).toMatchObject({ isError: true });
     expect(store.listFiles(project.id)).toHaveLength(3);
+  });
+
+  test("file: 후반의 잘못된 이미지·없는 경로는 첨부와 staging을 전혀 만들지 않는다", async () => {
+    const { home, store, lead, call } = await setup();
+    const image = join(home, "ok.png");
+    const csv = join(home, "data.csv");
+    writeFileSync(image, "image");
+    writeFileSync(csv, "a,b");
+    const before = existsSync(join(home, "uploads")) ? readdirSync(join(home, "uploads")) : [];
+    for (const images of [[image, csv], [image, join(home, "missing.png")]]) {
+      expect(await call(lead, "file", { title: "거부", path: csv, images })).toMatchObject({ isError: true });
+    }
+    expect(store.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
+    expect(readdirSync(join(home, "uploads"))).toEqual(before);
+  });
+
+  test("file: 두 번째 복사 실패는 게시하지 않고 실패 staging만 남긴다", async () => {
+    const { home, store, lead, orch, project } = await setup();
+    const images = [join(home, "first.png"), join(home, "second.png")];
+    for (const path of images) writeFileSync(path, "image");
+    const original = FilePublication.prototype.stagePath;
+    let count = 0;
+    const stage = spyOn(FilePublication.prototype, "stagePath").mockImplementation(async function (this: FilePublication, input) {
+      const saved = await original.call(this, input);
+      if (++count === 1) unlinkSync(images[1]!);
+      return saved;
+    });
+    try { await expect(handleAgentTool(orch, lead, "file", { title: "실패", images })).rejects.toThrow(); }
+    finally { stage.mockRestore(); }
+    expect(store.listFiles(project.id)).toHaveLength(0);
+    expect(store.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
+    expect(readdirSync(join(home, "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
+    const staging = join(home, "uploads", ".staging");
+    const manifest = JSON.parse(readFileSync(join(staging, readdirSync(staging)[0]!, "manifest.json"), "utf8"));
+    expect(manifest.state).toBe("failed");
+    expect(manifest.files).toHaveLength(2);
+  });
+
+  test("file: 자료 INSERT 실패는 첨부 INSERT도 rollback하고 기존 초안을 보존한다", async () => {
+    const { home, store, bus, lead, orch, project } = await setup();
+    const priorPath = join(home, "prior.png");
+    writeFileSync(priorPath, "draft");
+    const prior = store.createAttachment({ id: "a_draft", name: "prior.png", path: priorPath, size: 5, mime: "image/png" });
+    const images = [join(home, "first.png"), join(home, "second.png")];
+    for (const path of images) writeFileSync(path, "image");
+    const events: unknown[] = [];
+    const emit = spyOn(bus, "emit").mockImplementation((event) => { events.push(event); });
+    store.db.exec("CREATE TRIGGER fail_file BEFORE INSERT ON files BEGIN SELECT RAISE(ABORT, 'publication failure'); END");
+    try { await expect(handleAgentTool(orch, lead, "file", { title: "실패", images })).rejects.toThrow("publication failure"); }
+    finally { emit.mockRestore(); }
+    expect(events).toEqual([]);
+    expect(store.listFiles(project.id)).toHaveLength(0);
+    expect(store.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 1 });
+    expect(store.getAttachment(prior.id)).toEqual(prior);
+    expect(readFileSync(priorPath, "utf8")).toBe("draft");
+    expect(readdirSync(join(home, "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
+  });
+
+  test("file: 두 번째 첨부 INSERT 실패도 앞 첨부와 자료를 모두 rollback한다", async () => {
+    const { home, store, lead, orch } = await setup();
+    const images = [join(home, "one.png"), join(home, "two.png")];
+    for (const path of images) writeFileSync(path, "image");
+    store.db.exec("CREATE TRIGGER fail_second_attachment BEFORE INSERT ON attachments WHEN (SELECT COUNT(*) FROM attachments) > 0 BEGIN SELECT RAISE(ABORT, 'second attachment failure'); END");
+    await expect(handleAgentTool(orch, lead, "file", { title: "실패", images })).rejects.toThrow("second attachment failure");
+    expect(store.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
+    expect(readdirSync(join(home, "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
+  });
+
+  test("file: SQLITE_FULL은 성공이 아닌 storage_full로 남고 새 파일은 staging으로 복귀한다", async () => {
+    const { home, store, lead, orch } = await setup();
+    const path = join(home, "full.png");
+    writeFileSync(path, "image");
+    const insert = spyOn(store, "createFile").mockImplementation(() => { throw Object.assign(new Error("full"), { code: "SQLITE_FULL" }); });
+    try {
+      await expect(handleAgentTool(orch, lead, "file", { title: "실패", path })).rejects.toBeInstanceOf(StorageError);
+    } finally { insert.mockRestore(); }
+    expect(store.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
+    expect(readdirSync(join(home, "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
   });
 
   test("todo: 내 할 일에 오르고 끝내면 요청자에게 전달", async () => {

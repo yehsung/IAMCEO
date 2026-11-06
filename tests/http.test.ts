@@ -1,8 +1,8 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, symlinkSync } from "node:fs";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Attachment, Bootstrap, Decision, Member, Message, Project, ProjectState, Settings, Todo, WsEvent } from "../shared/types.ts";
+import type { Attachment, Bootstrap, Decision, Member, Message, MessagePage, Project, ProjectState, Settings, Todo, WsEvent } from "../shared/types.ts";
 import { Bus } from "../server/bus.ts";
 import { type Config, isTailscaleV4, loadConfig, updateConfigFile, VERSION } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
@@ -143,6 +143,10 @@ beforeAll(async () => {
   const fake = fakeOrch(store);
   calls = fake.calls;
   server = await startServer({ config, store, bus, orch: fake.orch });
+  while (server.port === 7878) {
+    await server.stop();
+    server = await startServer({ config, store, bus, orch: fake.orch });
+  }
   base = `http://127.0.0.1:${server.port}`;
   cwd = mkdtempSync(join(tmpdir(), "iamceo-cwd-"));
   projectId = store.createProject({ name: "시험", cwd }).id;
@@ -150,6 +154,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await server.stop();
+  store.db.close();
 });
 
 const auth = { Authorization: `Bearer ${CODE}` };
@@ -478,6 +483,81 @@ describe("REST", () => {
     console.error = original;
     expect(boom.status).toBe(500);
     expect(await boom.json()).toEqual({ error: "도구 터짐" });
+  });
+});
+
+describe("새 읽기 계약", () => {
+  test("strict page·커서 오류 code·총괄 정규화·v1 배열 호환", async () => {
+    const p = store.createProject({ name: "paging HTTP", cwd, runnerEnabled: false });
+    const worker = store.createMember({ projectId: p.id, handle: "worker", name: "worker", kind: "worker" });
+    const lead = store.createMember({ projectId: p.id, handle: "lead", name: "lead", kind: "conductor" });
+    for (let i = 0; i < 205; i++) store.createMessage({ id: `http_page_${String(i).padStart(3, "0")}`, projectId: p.id, at: "same", kind: "알림", memberId: worker.id });
+    const beforeCalls = calls.length;
+    const path = `/api/projects/${p.id}/messages/page`;
+    const response = await api(path);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const first = await response.json() as MessagePage;
+    expect(first.items).toHaveLength(200);
+    expect(first.hasOlder).toBe(true);
+    const older = await json<MessagePage>(api(`${path}?cursor=${first.nextCursor}&limit=100`));
+    expect(older.items.map((m) => m.id)).toEqual(Array.from({ length: 5 }, (_, i) => `http_page_00${i}`));
+    expect(older).toMatchObject({ hasOlder: false, nextCursor: null });
+    expect(await json<MessagePage>(api(`${path}?scope=member&memberId=${lead.id}&limit=1`))).toMatchObject({ scope: { kind: "project" } });
+    expect((await json<MessagePage>(api(`${path}?scope=member&memberId=${worker.id}`))).items).toHaveLength(200);
+    expect((await json<MessagePage>(api(`${path}?scope=member&memberId=removed`))).items).toEqual([]);
+    for (const query of ["limit=", "limit=0", "limit=-1", "limit=1.5", "limit=1e2", "limit=Infinity", "limit=501", "limit=1&limit=2", "scope=", "scope=other", "scope=member", "scope=member&memberId=", "memberId=x", "scope=project&memberId=x", "before=x", "offset=0", "after=x", "order=asc", "scope=project&scope=member", `scope=member&memberId=${encodeURIComponent("가".repeat(86))}`]) {
+      const r = await api(`${path}?${query}`);
+      expect([query, r.status]).toEqual([query, 400]);
+      expect(await r.json()).toMatchObject({ code: "INVALID_MESSAGE_PAGE_QUERY" });
+      expect(r.headers.get("cache-control")).toBe("no-store");
+    }
+    for (const cursor of ["", "%", "a".repeat(4097), "eyJ", first.nextCursor + "x"]) {
+      expect(await json(api(`${path}?cursor=${encodeURIComponent(cursor!)}`), 400)).toMatchObject({ code: "INVALID_MESSAGE_CURSOR" });
+    }
+    expect((await json<Message[]>(api(`/api/projects/${p.id}/messages`))).length).toBe(200);
+    expect((await json<ProjectState>(api(`/api/projects/${p.id}/state`))).messages).toHaveLength(200);
+    expect(calls.length).toBe(beforeCalls);
+    await json(api("/api/projects/no-such/messages/page"), 404);
+    const foreign = store.createProject({ name: "다른", cwd });
+    expect(await json(api(`/api/projects/${foreign.id}/messages/page?cursor=${first.nextCursor}`), 400)).toMatchObject({ code: "INVALID_MESSAGE_CURSOR" });
+  });
+
+  test("메시지 단건 접수 확인과 과거 around·다른 프로젝트 경계", async () => {
+    const p = store.createProject({ name: "around", cwd, runnerEnabled: false });
+    const made = Array.from({ length: 250 }, (_, i) => store.createMessage({ id: `around_${String(i).padStart(3, "0")}`, projectId: p.id, at: "same", kind: "완료" }));
+    expect(await json<Message>(api(`/api/messages/${made[20]!.id}`))).toEqual(made[20]);
+    const path = `/api/projects/${p.id}/messages`;
+    expect((await json<Message[]>(api(`${path}?around=${made[20]!.id}`))).map((m) => m.id)).toEqual(made.slice(0, 41).map((m) => m.id));
+    expect(await json<Message[]>(api(`${path}?around=${made[0]!.id}&limit=1`))).toEqual([made[0]!]);
+    for (const query of ["around=", "around=x&before=a", "around=x&limit=101", "around=x&limit=0", "around=x&limit=1e2", "around=x&around=x", "around=x&offset=0", "around=x&limit=2&limit=3"]) await json(api(`${path}?${query}`), 400);
+    await json(api(`${path}?around=missing`), 404);
+    await json(api(`/api/projects/hq/messages?around=${made[20]!.id}`), 404);
+    await json(api("/api/messages/missing"), 404);
+    await json(api(`/api/messages/${made[20]!.id}?x=1`), 400);
+  });
+
+  test("새 조회는 Bearer만 허용하고 인증 오류도 no-store", async () => {
+    const m = store.createMember({ projectId, handle: "read_auth", name: "읽기 인증", kind: "worker" });
+    const attempts: RequestInit[] = [{}, { headers: { Authorization: `Bearer ${store.getMemberToken(m.id)}` } }, { headers: { Cookie: `iamceo_files_${server.port}=x` } }];
+    for (const path of ["/api/capabilities", "/api/sync", `/api/projects/${projectId}/messages/page`, `/api/projects/${projectId}/archive/state`, "/api/messages/missing"]) {
+      for (const init of attempts) {
+        const res = await fetch(base + path + `?t=${CODE}`, init);
+        expect(res.status).toBe(401);
+        expect(res.headers.get("cache-control")).toBe("no-store");
+      }
+    }
+    const capabilities = await json(api("/api/capabilities"));
+    expect(capabilities).toEqual({ contractVersion: 2, capabilities: { paging: true, archive: true, realtime: true, delivery: false, push: false, operations: false } });
+  });
+
+  test("예외 로그에 비밀 query·헤더·오류 본문이 남지 않는다", async () => {
+    const m = store.createMember({ projectId, handle: "log_auth", name: "로그", kind: "worker" });
+    const log = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await fetch(`${base}/agent/tool?t=query-secret-canary`, { method: "POST", headers: { Authorization: `Bearer ${store.getMemberToken(m.id)}`, "Content-Type": "application/json" }, body: JSON.stringify({ name: "boom" }) });
+      expect(response.status).toBe(500);
+      expect(log.mock.calls).toEqual([["요청 처리 오류:", "POST", "/agent/tool", "Error"]]);
+    } finally { log.mockRestore(); }
   });
 });
 

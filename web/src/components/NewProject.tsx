@@ -1,15 +1,19 @@
 // 새 프로젝트: 데스크톱은 가운데 판, 폰은 아래 시트. 안쪽 양식은 열릴 때마다 새로 그려져 값이 남지 않는다.
 import { useState, type FormEvent } from "react";
-import type { Project } from "@shared/types";
+import type { CliProvider, Project } from "@shared/types";
 import { GlassButton } from "../glass";
 import { api, errorText } from "../lib/api";
 import { navigate, useBootstrap } from "../lib/store";
+import { ProviderSelect, RuntimeDetails, runtimeBlock, useRuntime } from "./RuntimeStatus";
 import { MQ_DESKTOP, Modal, Sheet, useMediaQuery } from "./ui";
 
 function NewProjectForm({ onClose }: { onClose: () => void }) {
   const bootstrap = useBootstrap();
   const [name, setName] = useState("");
   const [cwd, setCwd] = useState("");
+  const [chiefCli, setChiefCli] = useState<CliProvider>("claude");
+  const diagnostics = useRuntime();
+  const blocked = runtimeBlock(diagnostics.runtime, chiefCli);
   const [startNow, setStartNow] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,7 +28,7 @@ function NewProjectForm({ onClose }: { onClose: () => void }) {
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (busy) return;
+    if (busy || (startNow && blocked)) return;
     if (!name.trim() || !cwd.trim()) {
       setError("이름과 폴더를 넣어 주세요");
       return;
@@ -33,7 +37,7 @@ function NewProjectForm({ onClose }: { onClose: () => void }) {
     setError(null);
     let project = created;
     try {
-      project ??= await api.createProject({ name: name.trim(), cwd: cwd.trim() });
+      project ??= await api.createProject({ name: name.trim(), cwd: cwd.trim(), chiefCli });
       setCreated(project);
       if (startNow) await api.startConductor(project.id);
       finish(project);
@@ -65,13 +69,15 @@ function NewProjectForm({ onClose }: { onClose: () => void }) {
         />
         <span className="su-hint">서버 컴퓨터에 이미 있는 폴더</span>
       </label>
+      <ProviderSelect label="총괄 AI CLI" value={chiefCli} onChange={setChiefCli} runtime={diagnostics.runtime} disabled={!!created || busy} />
       <label className="su-check">
         <input type="checkbox" checked={startNow} onChange={(e) => setStartNow(e.target.checked)} />
         <span>
           총괄 바로 시작
-          <small>{startNow ? "만들자마자 총괄이 일할 준비를 합니다" : "첫 말을 보내면 그때 총괄이 뜹니다"}</small>
+          <small>{startNow ? "만들자마자 총괄이 일할 준비를 합니다" : "팀 화면에서 준비된 뒤 총괄을 시작할 수 있습니다"}</small>
         </span>
       </label>
+      {blocked ? <><p className="su-hint" role="status">{blocked} 총괄 바로 시작을 끄면 프로젝트만 만들 수 있습니다.</p><RuntimeDetails diagnostics={diagnostics} /></> : null}
       {error ? (
         <p className="form__error" role="alert">
           {error}
@@ -81,7 +87,7 @@ function NewProjectForm({ onClose }: { onClose: () => void }) {
         <GlassButton variant="ghost" size="m" onClick={created ? () => finish(created) : onClose}>
           {created ? "프로젝트로 가기" : "취소"}
         </GlassButton>
-        <GlassButton variant="primary" size="m" type="submit" disabled={busy}>
+        <GlassButton variant="primary" size="m" type="submit" disabled={busy || (startNow && !!blocked)}>
           {busy ? "만드는 중" : idleLabel}
         </GlassButton>
       </div>

@@ -1,9 +1,9 @@
 // 설정: 전체 설정 하나다(#/settings). 고친 칸만 초안에 두고 나머지는 서버 값을 그대로 보여 준다(다른 기기에서 바꿔도 맞게).
-// 실행 방식·권한·직급·숫자·맥 알림은 아래 저장 띠 하나로 함께 저장한다. 프로젝트는 줄마다 따로 고친다.
+// 권한·직급·숫자·맥 알림은 아래 저장 띠 하나로 함께 저장한다. 프로젝트는 줄마다 따로 고친다.
 import { useEffect, useState, type FormEvent, type KeyboardEvent } from "react";
 import { EFFORTS } from "@shared/types";
-import type { Backend, Bootstrap, Effort, HerdrInfo, PermissionMode, Project, ProjectSummary, Rank, Settings as SettingsT, SettingsPatch } from "@shared/types";
-import { BackendChoice, herdrLine, usableBackend } from "../components/BackendChoice";
+import type { Bootstrap, Effort, PermissionMode, Project, ProjectSummary, Rank, Settings as SettingsT, SettingsPatch } from "@shared/types";
+import RuntimeStatus from "../components/RuntimeStatus";
 import { Badge, Modal } from "../components/ui";
 import { Glass, GlassButton } from "../glass";
 import { api, errorText } from "../lib/api";
@@ -27,7 +27,7 @@ const CUSTOM = "custom";
 type NumberKey = "maxConcurrentTurns" | "compactAtPct" | "maxAwakeWorkers";
 const NUMBERS: { key: NumberKey; label: string; unit: string; min: number; max: number; hint: string }[] = [
   { key: "maxConcurrentTurns", label: "동시 턴", unit: "개", min: 1, max: 64, hint: "넘치면 차례를 기다립니다" },
-  { key: "compactAtPct", label: "압축 기준", unit: "%", min: 1, max: 100, hint: "문맥이 이만큼 차면 자동으로 압축합니다" },
+  { key: "compactAtPct", label: "압축 기준", unit: "%", min: 1, max: 100, hint: "문맥 표시 기준입니다. core 자동 압축은 지원하지 않으며 터미널에서 /compact를 사용합니다" },
   { key: "maxAwakeWorkers", label: "직원 상한", unit: "명", min: 1, max: 256, hint: "넘으면 총괄에게 잠재울 후보를 알립니다" },
 ];
 
@@ -47,7 +47,6 @@ interface RankDraft {
   effort?: Effort | null;
 }
 interface Draft {
-  backend?: Backend;
   permissionMode?: PermissionMode;
   notifyMac?: boolean;
   boardTidyHours?: number;
@@ -74,7 +73,6 @@ const numberText = (s: SettingsT, d: Draft, k: NumberKey): string => d.numbers[k
 function buildPatch(s: SettingsT, d: Draft): { patch: SettingsPatch; error: string | null } {
   const patch: SettingsPatch = {};
   let error: string | null = null;
-  if (d.backend !== undefined && d.backend !== s.backend) patch.backend = d.backend;
   if (d.permissionMode !== undefined && d.permissionMode !== s.permissionMode) patch.permissionMode = d.permissionMode;
   if (d.notifyMac !== undefined && d.notifyMac !== s.notifyMac) patch.notifyMac = d.notifyMac;
   if (d.boardTidyHours !== undefined && d.boardTidyHours !== s.boardTidyHours) patch.boardTidyHours = d.boardTidyHours;
@@ -390,7 +388,7 @@ function ProjectsPanel({ projects }: { projects: ProjectSummary[] }) {
   );
 }
 
-function ConnectionPanel({ version, herdr, urls }: { version: string; herdr: HerdrInfo; urls: string[] }) {
+function ConnectionPanel({ version, urls }: { version: string; urls: string[] }) {
   const connection = useStore((s) => s.connection);
   const [leaving, setLeaving] = useState(false);
   const drafts = leaving ? savedDraftCount() : 0;
@@ -417,16 +415,7 @@ function ConnectionPanel({ version, herdr, urls }: { version: string; herdr: Her
           <dt>버전</dt>
           <dd className="t-tabular">{version}</dd>
         </div>
-        <div>
-          <dt>herdr</dt>
-          <dd>{herdrLine(herdr)}</dd>
-        </div>
       </dl>
-      {herdr.warning ? (
-        <p className="su-hint" data-tone="warn">
-          {herdr.warning}
-        </p>
-      ) : null}
       <p className="su-hint">
         폰에서는 Tailscale 주소(100.으로 시작)로 들어옵니다. 같은 망의 기기까지 열려면 서버 컴퓨터에서 <code className="t-code">iamceo setup --hosts lan</code> 뒤 서버를 다시 켭니다.
       </p>
@@ -458,7 +447,7 @@ function ConnectionPanel({ version, herdr, urls }: { version: string; herdr: Her
   );
 }
 
-function SettingsForm({ settings, overrides, herdr, projects, version, urls }: { settings: SettingsT; overrides: Bootstrap["rankOverrides"]; herdr: HerdrInfo; projects: ProjectSummary[]; version: string; urls: string[] }) {
+function SettingsForm({ settings, overrides, projects, version, urls }: { settings: SettingsT; overrides: Bootstrap["rankOverrides"]; projects: ProjectSummary[]; version: string; urls: string[] }) {
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -483,7 +472,6 @@ function SettingsForm({ settings, overrides, herdr, projects, version, urls }: {
   };
   const editRank = (rank: Rank, patch: RankDraft) => touch((d) => ({ ...d, ranks: { ...d.ranks, [rank]: { ...d.ranks[rank], ...patch } } }));
 
-  const backend = draft.backend ?? usableBackend(settings.backend, herdr);
   const permission = draft.permissionMode ?? settings.permissionMode;
   const notify = draft.notifyMac ?? settings.notifyMac;
   const tidyHours = draft.boardTidyHours ?? settings.boardTidyHours;
@@ -504,10 +492,7 @@ function SettingsForm({ settings, overrides, herdr, projects, version, urls }: {
       const next = await api.putSettings(patch);
       applyLocal({ type: "settings", settings: next });
       setDraft(EMPTY_DRAFT);
-      const herdrOn = next.backend === "herdr";
-      setSaved(
-        ["저장했습니다", herdrOn && patch.ranks ? "herdr 세션은 쉴 때 적용됩니다" : "", herdrOn && patch.permissionMode ? "권한은 칸을 새로 열 때 적용됩니다" : ""].filter(Boolean).join(". "),
-      );
+      setSaved("저장했습니다. 모델·effort는 다음 실행에 적용됩니다.");
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -520,24 +505,13 @@ function SettingsForm({ settings, overrides, herdr, projects, version, urls }: {
 
   return (
     <>
-      <Glass as="section" level="regular" tint className="st-panel" aria-labelledby="st-backend">
-        <h2 id="st-backend" className="st-panel__title">
-          실행 방식
-        </h2>
-        <BackendChoice name="st-default-backend" value={backend} herdr={herdr} onChange={(b) => touch((d) => ({ ...d, backend: b }))} />
-        <p className="su-hint">일하는 직원이 없을 때만 바꿀 수 있습니다.</p>
-      </Glass>
+      <RuntimeStatus />
 
       <Glass as="section" level="regular" tint className="st-panel" aria-labelledby="st-permission">
         <h2 id="st-permission" className="st-panel__title">
           권한
         </h2>
         <PermissionChoices value={permission} onChange={(mode) => touch((d) => ({ ...d, permissionMode: mode }))} />
-        {permission === "default" && backend === "headless" ? (
-          <p className="su-hint" data-tone="warn">
-            herdr 없이는 승인 창이 없어 승인이 필요한 도구가 막힙니다.
-          </p>
-        ) : null}
       </Glass>
 
       <Glass as="section" level="regular" tint className="st-panel" aria-labelledby="st-ranks">
@@ -591,7 +565,7 @@ function SettingsForm({ settings, overrides, herdr, projects, version, urls }: {
         </label>
       </Glass>
 
-      <ConnectionPanel version={version} herdr={herdr} urls={urls} />
+      <ConnectionPanel version={version} urls={urls} />
 
       {dirty || error || saved ? (
         <Glass level="regular" tint className="st-bar">
@@ -636,7 +610,7 @@ export default function Settings() {
         </svg>
         {summary?.name ?? "본사"}
       </a>
-      {bootstrap ? <SettingsForm settings={bootstrap.settings} overrides={bootstrap.rankOverrides} herdr={bootstrap.herdr} projects={bootstrap.projects} version={bootstrap.version} urls={bootstrap.urls} /> : null}
+      {bootstrap ? <SettingsForm settings={bootstrap.settings} overrides={bootstrap.rankOverrides} projects={bootstrap.projects} version={bootstrap.version} urls={bootstrap.urls} /> : null}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 // IAMCEO 공유 계약: 서버·웹·MCP가 함께 쓰는 타입. 바꾸려면 docs/spec.md 와 같이 바꾼다.
 
-export type Backend = "herdr" | "headless";
+export type Backend = "core" | "herdr" | "headless";
+export type CliProvider = "claude" | "codex";
 /** bypassPermissions 묻지 않음(기본) · auto 위험한 것만 멈춤 · default 전부 승인 필요(herdr 는 승인 창, headless 는 창이 없어 막히고 활동에 남는다) */
 export type PermissionMode = "bypassPermissions" | "auto" | "default";
 export const PERMISSION_MODES = ["bypassPermissions", "auto", "default"] as const;
@@ -53,6 +54,8 @@ export interface ProjectSummary extends Pick<Project, "id" | "name" | "isHq" | "
   memberCount: number;
 }
 
+export type ContextWindowSource = "statusline" | "codex" | "headless" | "screen";
+
 export interface Member {
   id: string;
   projectId: string;
@@ -63,7 +66,7 @@ export interface Member {
   origin: MemberOrigin;
   /** 편입으로 들어온 세션. 다시 열어 origin 이 runner 가 되어도 남는다. 편입 해제의 근거다. */
   wasAdopted: boolean;
-  cli: "claude";
+  cli: CliProvider;
   /** 이 직원의 세션을 다루는 실행기. 띄울 때 기억한다. 세션이 없으면 null(다음에 띄울 때 전역 설정을 따른다). */
   backend: Backend | null;
   /** null 이면 직급 기본(Settings.ranks) */
@@ -79,6 +82,9 @@ export interface Member {
   sessionId: string | null; // CLI 세션 UUID
   paneId: string | null; // herdr pane
   contextPct: number | null;
+  /** 이 세션에서 실측하거나 상태줄로 추정한 문맥 창 크기(토큰). 모르면 null. 세션·CLI·모델이 바뀌면 지운다. */
+  contextWindow: number | null;
+  contextWindowSource: ContextWindowSource | null;
   subagents: number; // 지금 돌고 있는 서브에이전트 수
   parallel: boolean; // ultracode 켬
   queuedCount: number; // 전달 대기 중 입력 수
@@ -249,6 +255,13 @@ export interface Settings {
   ranks: Ranks;
   maxConcurrentTurns: number;
   compactAtPct: number; // 기본 70
+  /**
+   * 문맥 창 크기(토큰)를 모를 때 쓰는 값. 기본 1000000. 상태줄이 잘려 % 가 안 보이고 아직 그 직원의 창 크기를 배우지 못했을 때
+   * 토큰 수를 이것으로 나눠 문맥 %(와 자동 압축)를 정한다. 실측값·저장값·상태줄 추정·모델별 표가 이보다 먼저다.
+   */
+  contextWindowDefault: number;
+  /** 모델 id → 문맥 창 크기(토큰). 기본 표와 병합하며 세션 실측값이 항상 우선한다. */
+  contextWindows: Record<string, number>;
   maxAwakeWorkers: number; // 기본 8
   /** 결재·할 일이 올라오면 서버 컴퓨터(맥)에 알림을 띄운다. */
   notifyMac: boolean;
@@ -256,11 +269,14 @@ export interface Settings {
   boardTidyHours: number;
 }
 
+export interface RuntimeInfo { backend: "core"; core: { installed: boolean; available: boolean; version: string | null; detail: string | null }; providers: Record<CliProvider, { installed: boolean }> }
+
 export interface HerdrInfo { installed: boolean; running: boolean; version: string | null; protocol: number | null; compatible: boolean; warning: string | null }
 export interface LiveAgent { paneId: string; name: string | null; agent: string | null; status: string; cwd: string | null; sessionId: string | null; workspaceId: string | null; tabId: string | null; adopted: boolean }
 
 export interface Bootstrap {
   version: string;
+  runtime?: RuntimeInfo;
   settings: Settings;
   projects: ProjectSummary[];
   herdr: HerdrInfo;
@@ -303,14 +319,15 @@ export type WsEvent =
   | { type: "herdr"; herdr: HerdrInfo };
 
 // ---- REST 요청 ----
-export interface CreateProjectReq { name: string; cwd: string; goal?: string; startConductor?: boolean }
+export interface CreateProjectReq { name: string; cwd: string; goal?: string; startConductor?: boolean; chiefCli?: CliProvider }
+export interface CreateMemberReq { name: string; role?: string; cli?: CliProvider; modelOverride?: string | null }
 export interface PatchProjectReq { name?: string; cwd?: string; runnerEnabled?: boolean; now?: string; archived?: boolean }
 /** PUT /api/settings. ranks 는 고친 칸만 보내도 된다(나머지 유지). */
 export type SettingsPatch = Partial<Omit<Settings, "ranks">> & { ranks?: Partial<Record<Rank, Partial<RankConfig>>> };
 /** PATCH /api/members/:id. null 이면 직급 기본으로 돌아간다. */
-export interface PatchMemberReq { modelOverride?: string | null; effortOverride?: Effort | null }
+export interface PatchMemberReq { cli?: CliProvider; modelOverride?: string | null; effortOverride?: Effort | null }
 export interface SendMessageReq { id?: string; text: string; targetMemberId?: string | null; attachmentIds?: string[] }
-export interface AnswerReq { choice?: string | null; note?: string | null; batch?: boolean }
+export interface AnswerReq { expectedVersion?: string; choice?: string | null; note?: string | null; batch?: boolean }
 export interface AdoptReq { paneId: string; name: string; role: string; handle?: string; kind?: "conductor" | "worker" }
 /** conductor 다른 지휘자의 흔적 · folder 프로젝트 밖 폴더 · input 입력칸에 쓰던 글(넘겨받을 때 지운다). 편입을 막지는 않는다. */
 export interface AdoptWarning { kind: "conductor" | "folder" | "input"; text: string }
@@ -342,7 +359,8 @@ export function memberRank(kind: MemberKind): Exclude<Rank, "staff"> {
 }
 
 /** 이 직원이 써야 할 값. 직원별 지정이 직급 기본을 이긴다. */
-export function memberConfig(m: Pick<Member, "kind" | "modelOverride" | "effortOverride">, ranks: Ranks): RankConfig {
+export function memberConfig(m: Pick<Member, "kind" | "modelOverride" | "effortOverride"> & Partial<Pick<Member, "cli">>, ranks: Ranks): RankConfig {
+  if (m.cli === "codex") return { model: m.modelOverride, effort: m.effortOverride };
   const rank = ranks[memberRank(m.kind)];
   return { model: m.modelOverride ?? rank.model, effort: m.effortOverride ?? rank.effort };
 }

@@ -1,148 +1,106 @@
 # 아키텍처
 
-## 구조
+현재 제품의 실행기는 `herdr-core`, 작업자는 공식 대화형 Claude Code·Codex CLI다. Bun 서버가 도메인 상태와 전달을 맡고, SwiftUI macOS·iOS 앱과 React 웹은 같은 API를 쓴다. `herdr`·`headless` 어댑터는 과거 데이터와 회귀 시험을 위해 소스에 남아 있으며 새 제품 실행의 선택지가 아니다.
 
+## 구성과 소유권
+
+```text
+SwiftUI macOS / iOS ── REST, 전경 폴링 ─┐
+React 웹 ───────────── REST + WS ──────┼─ Bun 서버 ─ SQLite / 첨부
+세션 안의 iamceo mcp ─ HTTP /agent/* ──┘      │
+                                     Orchestrator
+                                           │ CoreRunner / Unix JSON-RPC
+                                     herdr-core daemon
+                                           │ holder / PTY
+                                  공식 Claude Code / Codex CLI
 ```
-브라우저(React) ──REST·WS──▶ 서버(Bun) ──▶ SQLite, 첨부 파일
-                              ▲   │
- 세션 안의 iamceo mcp ──HTTP──┘   └─ Orchestrator ─▶ 실행기: herdr | headless
-                                                       │
-                                                  Claude Code 세션
-```
 
-- 서버 한 개가 프로젝트 전부를 맡는다. 외부 서비스 없이 내 컴퓨터에서 돈다.
-- 세션은 MCP 도구로 서버에 말한다. `iamceo mcp` 는 stdio MCP 서버이고, 도구 목록과 호출을 `/agent/*` 로 중계한다. 멤버마다 토큰이 따로다.
-- 화면은 `/api/*` 와 `/ws` 를 쓴다. 쓰기가 끝나면 서버가 WS 로 방송한다.
+- 도메인 상태의 원본은 Bun 서버와 SQLite다. 네이티브 앱은 두 번째 조정자나 모델 프록시를 실행하지 않는다.
+- core holder가 PTY와 CLI 수명을 소유한다. IAMCEO 서버·앱의 종료와 연결 해제는 CLI를 죽이지 않는다. 명시적인 잠재우기·종료·세션 교체만 해당 멤버의 터미널을 끝낸다.
+- 일반 `serve` 시작은 IAMCEO 전용 core를 준비한다. 진단 API는 core를 설치·시작·업데이트하지 않는다. 앱의 로컬 서비스 등록도 사용자가 `이 Mac에서 시작`을 선택했을 때만 한다.
+- macOS 앱의 로컬 호스트 기능은 번들에 든 daemon/core 또는 명시적 QA 경로를 사용한다. 다른 설치의 서비스·이미 쓰는 포트·인증 오류를 발견하면 교체하지 않고 오류를 보인다. 빌드는 서비스를 등록하거나 시작하지 않는다.
 
-| 경로 | 내용 |
+| 경로 | 역할 |
 |---|---|
-| `bin/iamceo.ts` | CLI |
-| `bin/mcp-bridge.ts` | MCP 브리지 |
-| `server/http.ts` | REST·WS·정적 파일·접근 제어 |
-| `server/orchestrator.ts` | 전달, 턴 종료, 압축, 띄우기·잠재우기, 승인 근거 확인 |
-| `server/agent-tools.ts` | 에이전트 도구 정의와 처리 |
-| `server/store.ts`, `db.ts` | 데이터 읽기·쓰기(SQL 은 여기만), 스키마 |
-| `server/roles/*.md` | 역할 템플릿 |
-| `server/runner/` | 실행기 두 종과 세션 기록 읽기 |
-| `web/` | React 화면 |
-| `shared/types.ts` | 서버·화면 공통 타입 |
-| `shared/artifact-kit.ts` | 아티팩트 스타일 키트와 문서 조립. 서버·화면이 함께 쓰고 빌드본에 함께 묶인다 |
+| `server/orchestrator.ts` | 전달 큐, 멤버 수명, 제공자·설정 교체, MCP 업무 흐름 |
+| `server/runner/core-client.ts` | generation 1 NDJSON JSON-RPC, 제한 시간, 오류·전달 불확실성 |
+| `server/runner/core.ts` | 소유권 라벨, 재결합, OSC 상태 폴링, 안전한 입력·수동 조작 |
+| `server/runner/providers.ts` | 공식 CLI의 인자·환경과 호출별 MCP 설정 |
+| `server/http.ts`, `orchestrator-api.ts` | 인증된 REST·웹 WS 계약 |
+| `server/db.ts`, `store.ts` | 마이그레이션, 백업, 도메인 데이터·세션 이력 |
+| `bin/iamceo.ts`, `bin/mcp-bridge.ts` | 서비스·attach·MCP CLI와 stdio 브리지 |
+| `native/` | SwiftUI 앱, REST 클라이언트, Keychain, 로컬 호스트 준비 |
+| `web/` | 기존 React 클라이언트와 웹 WS 동기화 |
+| `shared/types.ts` | 서버·웹 공통 계약, 네이티브 모델의 원본 |
+| `vendor/herdr-core/` | upstream 버전 잠금과 라이선스·서드파티 고지 |
 
-## 화면
+## core와 공식 CLI
 
-탭은 홈·결재함·팀·대화·자료 다섯 개다(본사는 팀 없이 넷). 기본 진입과 잘못된 주소는 홈이다. 데스크톱은 왼쪽 프로젝트 목록과 위 탭, 폰은 아래 탭이다.
+기본 소켓은 `$IAMCEO_HOME/run/core.sock`, 세션은 `HC_SESSION=iamceo`다. core 자체의 XDG state/config는 `$IAMCEO_HOME/core-state`·`core-config`에 격리한다. `IAMCEO_CORE_BIN`·`IAMCEO_CORE_SOCKET`으로 명시적으로 바꿀 수 있다. core는 제공자 CLI의 일반 설정·인증·도구를 대체하지 않는다. 터미널 시작 환경은 원래 HOME과 사용자 XDG 경로를 되살리고 부모의 외부 `HC_*`·`HERDR_*` 및 Claude 중첩 세션 변수를 제거한다.
 
-- `web/src/screens/Home.tsx`: 내가 할 일(한 줄, 펼침, 체크. AI 가 '필요 없어짐'으로 정리한 할 일은 빠진다), 결재 대기, 팀, AI가 곧 할 일, 최근 보고·자료, 지금 판 정리 버튼(연결 게이트를 따른다). 빈 칸은 그리지 않는다.
-- `web/src/screens/Inbox.tsx`: 결재할 항목(`#/p/<id>/inbox`)과 결재된 항목(`#/p/<id>/inbox/done`). 선택지를 눌러도 나가지 않고 확인 버튼을 눌러야 보낸다. 닫힌 카드는 '닫힘 · 이유'를 보이고, AI 가 닫은 카드에는 다시 열기 버튼이 있다.
-- `web/src/components/ConnectGate.tsx`: 연결 상태 판단(`useGate`)과 안내 판. 입력을 가진 화면이 읽는다.
-- `web/src/components/viewers/`, `ArtifactFrame.tsx`: 자료 종류별 보기.
-- `web/src/screens/Settings.tsx`: 전체 설정 하나(`#/settings`). 옛 `#/settings/<id>` 도 이 화면으로 온다.
+`terminal.run`은 셸 문자열 대신 argv를 받는다. `no_parent`, `outlive_parent`, `no_notify`를 사용하며 종료된 명령을 자동 재실행하는 keep는 켜지 않는다. 멤버·프로젝트·CLI 라벨과 고정 이름으로 재시작 시 같은 live 터미널을 찾는다. 중복 소유권, 다른 제공자, 다른 알려진 세션을 발견하면 오류다. 소켓 단절만으로 터미널 사망을 단정하거나 새 CLI를 띄우지 않는다.
 
-## 연결 상태
+Claude는 `--session-id` 또는 `--resume`, 시스템 프롬프트 파일·MCP 파일·선택한 모델·effort·권한을 받는다. Codex는 대화형 CLI와 호출별 `-c` 설정으로 지시·MCP·모델·effort·native subagent 설정을 받는다. MCP bearer는 argv에 넣지 않고 환경과 `env_vars`로 전달한다. 전역 CLI 설정 파일을 수정하지 않는다.
 
-프로젝트의 `connection` 은 `{ok, reason, detail}` 이다. ok 는 보관 아님이고, 실행이 켜져 있으면서 전역 실행기가 살아 있거나 살아 있는 직접 띄운 세션이 있을 때다. 서버가 5초마다, 그리고 입력을 받기 직전에 실행기를 다시 본다. 메시지·결재 답·재전송·첨부는 ok 가 아니면 409 다. 화면은 같은 값으로 잠근다. 세션 쪽 도구와 내 할 일 체크는 막지 않는다.
+Claude의 native 세션 UUID와 core 터미널 주소는 다른 식별자다. 새 Codex의 native ID는 CLI에서 미리 지정할 수 없어 `sessionId=null`로 남을 수 있다. 살아 있는 core 터미널은 계속 재결합할 수 있다. 그 터미널을 잃었고 native ID도 모르면 자동으로 새 대화를 만들어 재개했다고 하지 않는다.
 
-## 설정
+## 상태·전달·수동 조작
 
-프로젝트별 설정은 없다. `Settings` 한 벌이 전부다(실행 방식, 권한 3종, 직급별 모델·effort, 동시 턴, 압축 기준, 직원 상한, 맥 알림, 판 정리 주기). 옛 프로젝트별 값은 `project_settings_v4` 표에 남겨 둔다. 마이그레이션만 읽고 실행 중에는 읽지 않는다.
+- 상태는 `terminal.get` 폴링의 OSC 7501 root record와 turn counter만 따른다. 화면에서 working·idle을 추측하지 않는다. 알 수 없는 상태는 자동 입력을 막고 설정·신뢰·인증 확인을 안내한다.
+- 한 멤버에 한 번만 전달한다. idle은 core의 `if:idle` 조건을 쓰고, done은 upstream 조건 열거형이 idle·working만 받으므로 그 조건 없이 `force:false`로 보낸다. 모든 자동 입력은 blocked 창을 통과하지 않는다.
+- `terminal.read`는 `lines:0`으로 현재 화면만 읽는다. 이 화면은 입력칸과 초안을 보호하는 데 쓰며 최종 답변이나 실행 상태로 바꾸지 않는다. 초안이 있거나 입력칸을 식별할 수 없으면 지우지 않고 보류한다. Codex plain text의 고정 placeholder와 같은 문장을 사용자가 직접 친 경우는 구별할 수 없다.
+- 응답을 잃은 PTY 입력은 실제로 전달됐을 수 있다. `delivery_unknown`으로 보류하고 자동 재전송하지 않는다. `turn_end`의 `finalText`는 빈 문자열이다. CLI 화면을 긁어 자동 완료 보고로 만들지 않으며 업무 결과는 `post`·`file` 등 MCP 도구로 남긴다.
+- `POST /api/members/:id/terminal/control`은 명시적인 사람 조작이다. 5분 token lease를 claim하면 자동 전달이 멈춘다. 같은 token만 갱신·입력·키·release할 수 있다. input은 최대 128 KiB, 키는 enter/up/down/esc/tab/ctrl+c/backspace다. 사람의 input만 `force:true`를 사용할 수 있다. 종료·교체는 lease를 무효화한다.
+- `iamceo attach <memberId>`는 실제 PTY에 붙는 터미널 경로다. 네이티브·웹의 수동 조작과 달리 외부 attach의 모든 입력을 앱 lease와 원자적으로 묶을 수는 없다. 직접 조작할 때는 앱의 조작권을 먼저 잡아 자동 전달을 멈추는 것이 안전하다.
 
-세션의 값은 `직원별 덮어쓰기 > 직급 값 > CLI 기본` 순이다(`memberConfig`). headless 는 턴마다 새 프로세스라 다음 턴부터 자동으로 들어간다. herdr 는 서버가 띄운 세션이 쉴 때 칸을 닫고 `--resume` 으로 새 인자·환경으로 다시 열고, 실제 들어간 값을 `members.applied_config` 에 적는다. 칸에 `/model`·`/effort` 를 치지 않는다. 사용자 전체 기본값까지 바뀌기 때문이다. 넘겨받은 세션은 건드리지 않는다.
+`deliveries`가 대표 메시지·결재 답·보고·지시의 대기열이다. 연결 게이트, 프로젝트 보관, 실행 중인 턴, 승인 창, 수동 lease를 거친 뒤 보내고 결과를 저장한다. 서버 재시작 때 미완료 delivering은 보수적으로 보류한다. OSC 턴 종료는 다음 전달을 진행시키는 신호이며 업무 완료의 증거가 아니다.
 
-## 아티팩트
+## 제공자·모델·병렬 설정
+
+프로젝트 생성의 `chiefCli`, 멤버 생성·수정의 `cli`는 `claude|codex`다. 멤버별 제공자는 독립적이며 기본은 Claude다. 실행 backend는 core로 고정되어 있고 과거 저장 backend는 이력으로 읽는다.
+
+제공자나 실행 중 세션의 모델·effort를 바꾸면 작업 중·blocked·전달 불확실 상태를 거부한다. 목표 CLI 인자를 먼저 검증하고 이전 터미널 종료가 확인된 뒤 세션 이력을 보관하고 MCP 토큰과 세대를 바꾼다. 멤버 id·역할·업무·대화는 유지한다. Claude의 같은 제공자 설정 변경은 native UUID를 이어 열고, 제공자가 달라지거나 native ID를 모르는 Codex 변경은 새 세션과 역할·현재·다음·프로젝트 상태 인계문을 만든다. 제공자 사이의 숨은 추론·대화 문맥 전송은 구현되어 있지 않다. 이전 종료 실패는 제공자·토큰을 바꾸지 않고, 새 시작 실패는 오류로 남긴다.
+
+모델은 멤버 덮어쓰기, 적용 가능한 직급 값, CLI 기본 순이다. Claude 직급 모델·staff 설정을 Codex에 그대로 물려주지 않는다. Claude 병렬은 `/effort ultracode on|off`의 실제 응답을 확인한다. Codex는 native subagent 기능과 각 다음 과제의 명시적 병렬·순차 선호를 사용한다. 이는 실제 subagent 실행 개수의 보장이나 Claude Ultracode 모드가 아니다. core의 자동 compact는 지원하지 않으며 CLI의 수동 명령을 쓴다.
+
+## 클라이언트
+
+SwiftUI 앱은 홈·결재함·팀·대화·자료·설정을 제공한다. macOS 14+/iOS 17+와 Swift 6을 대상으로 하며 탭·도구 모음은 OS의 네이티브 스타일을 따르고, 업무 카드는 다크 바이올렛 반투명 material로 구성한다. 전경에서 3초마다 bootstrap·프로젝트 상태를 폴링하고 백그라운드에서는 멈춘다. 터미널 화면은 열려 있을 때 2초마다 읽는다. 네이티브 WS, APNs, 백그라운드 갱신·푸시는 구현되어 있지 않다. 서버의 선택적 macOS 알림은 기존 osascript 경로다.
+
+접속 코드는 endpoint별 Keychain, endpoint는 UserDefaults에 저장한다. 원격 서버는 HTTPS만, 같은 Mac loopback은 HTTP도 받는다. iPhone의 loopback은 Mac이 아니므로 Mac의 Tailscale Serve HTTPS origin을 사용한다. REST Bearer를 다른 origin이나 HTTP redirect에 넘기지 않는다. 제출 acknowledgement를 잃은 메시지 재시도는 같은 id를 유지한다. 결재는 읽었던 `updatedAt`을 `expectedVersion`으로 보내 바뀐 카드를 덮어쓰지 않는다. 쓰기 실패를 로컬 성공으로 꾸미지 않는다. `--demo`는 명시적 읽기 전용 예시 모드다.
+
+React 웹은 같은 REST와 기존 `/ws` 방송을 사용한다. 새 실행기 선택 UI는 없고 core·제공자 진단과 멤버별 CLI 설정을 보여 준다. 두 클라이언트의 자료·첨부 렌더링 능력은 같지 않다. 네이티브 HTML 미리보기는 비영속 WKWebView, JavaScript 비활성화, CSP와 외부 연결 차단을 사용한다.
+
+## 웹 아티팩트
 
 `file` 의 `html`(2MB 이하) 또는 `.html` 경로로 올린 자료다. 원본은 `files.html` 에 두고 `GET /api/files/:id/artifact` 로 받는다. 서버 출처의 문서로 내주지 않는다.
 
 그릴 때 `<iframe sandbox="allow-scripts" src="/artifact-frame">` 을 만들고 칸이 준비되면 `buildArtifactSrcdoc` 으로 조립한 문서를 postMessage 로 넣는다. srcdoc 은 부모의 CSP 를 물려받아 인라인 스크립트가 안 돌아서 쓰지 않는다. 칸은 대표가 실행을 눌러야 만들어진다(WebKit 은 칸과 부모가 메인 스레드를 함께 써서 루프 하나로 앱이 멈춘다). 칸은 불투명 출처라 접속 코드·저장소·서버 API 에 닿지 못하고 일반 바깥 요청도 막힌다. WebRTC(STUN UDP)와 WebKit 의 preconnect 는 CSP 로 막지 못해 앞머리에서 생성자를 지우고 중첩 칸·link 를 없애지만, WebKit 에서 스크립트가 넣은 link 의 접속은 남으므로 민감한 데이터는 싣지 않는다. 칸이 보내는 높이·링크·닫기 신호는 `e.source` 와 값을 확인한 뒤에만 쓴다.
 
-## 전달 흐름
+## 인증·파일 안전
 
-세션에 들어가는 모든 글은 `deliveries` 표를 거친다.
+사용자 API는 접속 코드, `/agent/*`는 멤버별 MCP 토큰으로 구분한다. 토큰은 멤버 JSON에 내보내지 않는다. 기본 서버는 loopback과 사용 가능한 Tailscale 주소를 듣고 Host·Origin·요청 IP를 검증한다. 웹 첨부 쿠키는 `/files`에만 통하고 API 인증을 대신하지 않는다. 자세한 경계와 아티팩트 제한은 [구현 계약](spec.md)에 있다.
 
-```
-대표의 말 · 결재 답 · 할 일 완료 · 총괄 지시 · 직원 보고 · 시스템 알림
-  │ enqueue
-  ▼
-deliveries ─ pump(직원) ─▶ 실행기.send ─▶ 세션
-                                           │ 턴 끝
-                                           ▼
-                             turn_end: 상태 갱신, 다음 전달
-```
+`file`·`ask` 도구 경로는 symlink를 따라간 실제 작업 폴더 경계를 확인하고 비밀 폴더·환경 파일·개인 키·IAMCEO 데이터·다중 hard link를 거부한다. 이 검사로 동일 OS 사용자의 CLI Bash나 사용자가 선택한 bypass 권한까지 sandbox하는 것은 아니다. 제공자 CLI의 실제 도구 권한과 승인은 그 CLI가 처리한다.
 
-- **대기**: 일하는 중이면 줄을 선다. 쉬고 있으면 쌓인 것을 한 글로 묶어 보낸다. 잠들어 있으면 먼저 깨운다.
-- **보류**: 실행이 꺼졌거나, 실행기가 안 닿거나, 승인 창 앞이거나, 입력칸을 못 찾으면(선택 창 등) 보류하고 나중에 다시 시도한다. 입력칸에 남은 글은 보류 사유가 아니다. 지우고 넣는다.
-- **자동 압축**: 보내기 직전 문맥이 기준(기본 70%)을 넘으면 먼저 압축한다. 일하는 중인 세션은 끊지 않는다.
-- **깨움**: 완료·막힘·질문 보고는 총괄을 깨운다. 진행·알림은 다음에 깨어날 때 함께 간다.
-- **실패**: 입력을 읽기 전에 오류로 끝나면 간격을 두고 다시 보낸다. 3번을 넘으면 대표의 글은 실패로 표시하고, 결재는 다시 연다. 돌려줄 글이 없는 전달은 보류해서 계속 시도한다.
-- **턴 끝 보고**: `post` 를 안 부른 턴의 마지막 글을 쓴다. 직원 글은 `(자동)` 표시로 대화에 올리고 총괄에게 보고한다. 총괄·본사 AI 글은 그대로 대화에 올린다. 판 정리 지시(와 시스템 알림)만 받은 턴의 마지막 글은 올리지 않고 활동에만 남긴다.
-- **판 정리**: 틱마다 `checkBoardTidy` 가 프로젝트를 본다. 주기(`boardTidyHours`, 기본 6, 0 이면 끔)가 지났고, `projects.board_tidied_at`(없으면 총괄이 뜬 때) 뒤로 결재·할 일·진행판·대화가 바뀌었고, 총괄이 이미 떠 있고 쉬는 중이며 기다리는 정리 지시가 없으면 `[시스템] 판 정리` 를 깨움으로 넣는다. 넣을 때와 그 턴이 끝날 때 시각을 적어, 정리하며 바꾼 것이 다음 정리를 부르지 않는다. `POST /api/projects/:id/tidy` 는 조건 없이 넣는다(연결 없으면 409, 총괄이 없거나 잠들었으면 띄운다).
+## 데이터와 마이그레이션
 
-### 출처 표시
-
-글 첫 줄의 접두어가 출처이고, 서버만 붙인다.
-
-| 접두어 | 뜻 |
-|---|---|
-| `[대표] "..."` | 대표가 총괄·본사 AI 에게 |
-| `[대표 직접] "..."` | 대표가 직원에게 바로 |
-| `[대표 답(원문) '<제목>'] "..."` | 결재 답 |
-| `[총괄] <이름>에게` | 총괄 지시 |
-| `[보고 <이름>] <종류>: <제목>` | 직원 보고 |
-| `[시스템]` | 서버 알림 |
-
-서버는 글을 넣기 전에 제어문자·제로폭·양방향 문자를 지운다. 줄 머리가 접두어처럼 보이면 `> ` 를 붙인다. 총괄 지시에 실린 대표 말은 서버가 원문과 대조해 `서버 확인` 또는 `미확인` 으로 표시한다.
-
-## 두 실행 방식
-
-둘 다 같은 `Runner` 인터페이스(`server/runner/types.ts`)를 구현한다.
-
-**headless** (`server/runner/headless.ts`)
-
-- 턴마다 `claude -p` 를 새로 띄운다. `--session-id` 로 시작하고 `--resume` 으로 잇는다.
-- 글은 stdin 으로 넣고, `stream-json` 출력을 읽어 상태·활동·문맥 %를 낸다.
-- 동시 턴 수는 Orchestrator 가 제한한다(기본 4).
-- 서버가 꺼질 때 자식을 끝낸다. 비정상 종료에 대비해 턴마다 pid 를 `run/` 에 남겨 다음 시작 때 치운다.
-
-**herdr** (`server/runner/herdr.ts`, `herdr-client.ts`)
-
-- 소켓으로 herdr 에 말한다. 프로젝트마다 워크스페이스 하나, 직원마다 칸 하나다.
-- 글은 `agent.prompt` 로 넣는다. IAMCEO 로 보낸 말은 넣는다. 먼저 화면을 글자 모양까지(`format: ansi`) 읽어 지금 떠 있는 것이 Claude 입력칸인지 본다. 못 찾으면(선택 창·승인 창·셸 모드 `!`) 넣지 않고 보류한다. 흐린 글씨(다음 말 추천·안내 글)는 친 글이 아니다. 입력칸에 남은 글은 실수로 남은 것으로 보고, 쉬는 세션(idle·done)이면 Ctrl+C 를 한 번 눌러 지운 뒤 넣는다. 누른 뒤 0.3~0.5초에 다시 읽어 비었으면 넣고, 아니면 다시 누르지 않고 보류한다. 일하는 중이면 Ctrl+C 가 턴을 끊으므로 누르지 않는다. Ctrl+C 는 약 0.8초 종료 창을 열고 그 안에 빈 칸에서 또 누르면 세션이 끝나므로, 칸마다 1.5초 안에 두 번 누르지 않고 종료 안내가 떠 있으면 누르지 않는다(Claude Code 2.1.316 실측). 시간 초과 뒤 다시 넣을 때도 같은 규칙이고, 일하는 중이면 다시 넣지 않는다. Ctrl+U 는 여러 줄을 못 지우고 Esc 한 번은 안 지워 쓰지 않는다.
-- 상태는 `events.subscribe` 와 60초마다 `session.snapshot` 으로 안다.
-- 턴이 끝나면 세션 기록 파일(`transcript.ts`)에서 마지막 글과 사용량을 읽는다.
-- 서버를 다시 켜면 세션 id 로 칸에 다시 붙는다. 대표가 직접 연 칸이나 남의 칸에는 붙지 않는다.
-- 긴 글(1500자 초과)과 첨부는 `inbox/<직원 id>/` 에 두고 경로를 넣는다.
-
-어느 쪽이든 자식 환경에서 `HERDR_*`·`CLAUDECODE` 등을 지우고 `IAMCEO_*` 만 더한다.
-
-`iamceo join` 으로 붙은 CLI 는 실행기 밖이다. 서버는 프로세스를 띄우지도 입력을 넣지도 않고, 세션이 `wait` 로 지시를 가져간다.
-
-## 도구
-
-`POST /agent/tool`. 받는 도구는 멤버 종류로 정해진다.
-
-| 대상 | 도구 |
-|---|---|
-| 모두 | `status` `ask` `post` `file` `todo` `ask_close` `todo_close`(직원은 자기가 올린 결재·할 일만) |
-| 총괄 | `team_add` `team_assign` `team_compact` `team_sleep` `team_resume` `team_close` `roster` `project_now` `work_set` `work_list` `work_remove` `board` |
-| 본사 AI | `project_create` `project_list` `board` |
-| 직접 띄운 CLI | `wait` |
-
-- `ask`: 실행기 세션은 카드를 올린 뒤 바로 돌아오고, 턴을 끝낸다. 답은 다음 입력으로 온다. 직접 띄운 CLI 는 답이 올 때까지 도구 호출이 이어진다.
-- `ask_close`: 결재를 이유와 함께 닫는다(`decisions.close_kind·close_reason·close_quote·closed_by·closed_at`). `decided` 는 `user_quote` 가 대표 글과 맞아야 하고(버튼 글·짧은 글은 거부), `obsolete` 는 이유만. 물은 직원에게 wake=false 로 알리고, 직접 띄운 CLI 의 `ask` 대기는 풀린다. 대표는 `POST /api/decisions/:id/reopen` 으로 되돌린다.
-- `todo_close`: 할 일을 `done`·`dropped` 로 정리한다(`todos.outcome·close_reason·closed_by`). 부탁한 직원에게 wake=false 로 알린다.
-- `file`·`ask` 의 경로: 심볼릭 링크를 따라간 실제 경로가 작업 폴더 안이어야 한다. 비밀 폴더·`.env`·개인 키·IAMCEO 데이터는 어디서든 거부한다. 세션의 Bash 까지 막지는 않는다.
-
-## 데이터
-
-`~/.iamceo/` (`IAMCEO_HOME` 으로 변경):
+기본 데이터 폴더는 `~/.iamceo`, `IAMCEO_HOME`으로 격리할 수 있다.
 
 | 경로 | 내용 |
 |---|---|
-| `config.json` | 접속 코드·포트·주소(권한 600) |
-| `iamceo.db` | SQLite(WAL). projects, members, decisions, todos, work, messages, files(아티팩트 원본 포함), attachments, deliveries, activity, settings |
-| `uploads/` | 첨부 원본 |
-| `inbox/<직원 id>/` | 직원이 읽을 긴 글과 첨부. 세션에 `--add-dir` 로 열어 준다 |
-| `roles/` | 고쳐 쓴 역할 템플릿 |
-| `run/` | 세션별 규칙 파일·MCP 설정·진행 중인 턴 표시 |
-| `logs/` | 서비스 로그 |
+| `config.json` | 접속 코드·포트·주소·실행 파일 경로, mode 600 |
+| `iamceo.db` | WAL SQLite: projects/members/decisions/todos/work/messages/files/attachments/deliveries/activity/settings |
+| `member_session_history` | DB 테이블: 이전 CLI·backend·native session·pane·세대·설정·교체 이유 |
+| `iamceo.db.pre-v*.bak` | 기존 DB 마이그레이션 전 `VACUUM INTO` 백업, mode 600; 실패하면 마이그레이션 중단 |
+| `uploads/`, `inbox/<member>/` | 첨부 원본과 멤버에게 전달하는 파일 |
+| `roles/`, `run/`, `logs/` | 역할 템플릿, 호출별 규칙·MCP 설정·core 소켓, 서비스 로그 |
+| `core-state/`, `core-config/` | IAMCEO 전용 core state/config 홈 |
 
-대화 기록의 원본은 Claude Code 의 세션 파일에 있다. IAMCEO 는 세션 id 만 들고 있다가 이어서 연다. 직원 활동 기록은 직원당 최근 500건만 남긴다.
+native 제공자의 세션 원본과 로그인·일반 설정은 각 CLI가 관리한다. IAMCEO는 알려진 native ID와 core 주소를 별도로 보관한다. 기존 herdr/headless 세션·토큰·업무 자료를 새 core 세션으로 해석하지 않는다. 복구는 과거 세션을 이력으로 남기고 명시적 전환 전까지 전달을 보류한다. 활동은 멤버당 최근 500건을 유지한다.
+
+## 시험과 배포 경계
+
+core 단위·서버 계약 시험은 가짜 Unix 소켓을 사용하고 실제 유료 모델을 부르지 않는다. 실제 PTY 시작·재시작 검증도 IAMCEO_HOME·HC_SESSION·HC_SOCKET·XDG 경로를 격리한다. 네이티브 계약·네트워크 시험은 URLSession mock으로 인증·오래된 결재·멱등 메시지·origin 제한을 검사한다. 앱 빌드 성공은 개발자 서명·공증·App Store 배포 완료를 뜻하지 않는다.
+
+herdr-core의 잠금 버전·출처·서명 보존·업데이트 절차는 [vendor 문서](../vendor/herdr-core/README.md), 네이티브 실행·빌드는 [native 문서](../native/README.md)를 따른다.

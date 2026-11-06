@@ -482,7 +482,8 @@ describe("마이그레이션", () => {
   test("닫힌 결재에 이유를, 끝낸 할 일에 끝남을 채우고 나머지는 그대로 둔다", () => {
     const path = join(mkdtempSync(join(tmpdir(), "iamceo-board-migrate-")), "old.db");
     const before = MIGRATIONS.findIndex((m) => m.includes("board_tidied_at"));
-    expect(before).toBe(MIGRATIONS.length - 1);
+    expect(before).toBeGreaterThanOrEqual(0);
+    expect(before).toBeLessThan(MIGRATIONS.length);
     const db = new Database(path, { create: true });
     for (let v = 0; v < before; v++) db.exec(MIGRATIONS[v]!);
     db.exec(`PRAGMA user_version = ${before}`);

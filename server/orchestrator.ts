@@ -1,3 +1,4 @@
+import { writeStatuslineWrapper } from "./runner/statusline.ts";
 // Orchestrator: 전달 펌프, 턴 종료 처리, 압축 판단, 띄우기·잠재우기·다시 열기, 승인 근거 확인(spec §4·§6·§7).
 //
 // server/agent-tools.ts 가 쓰는 공개 메서드:
@@ -22,6 +23,9 @@ import type {
   AnswerReq,
   Attachment,
   Backend,
+  CliProvider,
+  CreateMemberReq,
+  RuntimeInfo,
   CreateProjectReq,
   Decision,
   DecisionCloseKind,
@@ -52,11 +56,15 @@ import type { Config } from "./config.ts";
 import type { AgentToolDef, AgentToolResult, AskWaitResult, OrchestratorApi } from "./orchestrator-api.ts";
 import { sanitizeName } from "./files.ts";
 import { josa, renderRole } from "./roles.ts";
-import { HeadlessRunner, isMissingSessionError } from "./runner/headless.ts";
+import { CoreError } from "./runner/core-client.ts";
+import { providerLaunch } from "./runner/providers.ts";
+import { CoreRunner, ensureCoreServer } from "./runner/core.ts";
+import { isMissingSessionError } from "./runner/headless.ts";
 import { HerdrError } from "./runner/herdr-client.ts";
 import { detectHerdr, HerdrRunner, inspectPane, listAgents, type PaneInspection } from "./runner/herdr.ts";
 import { approvalSummary } from "./runner/approval.ts";
-import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "./runner/types.ts";
+import { exactSource, measureContext, validWindow } from "./runner/context.ts";
+import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult } from "./runner/types.ts";
 import { ApiError, type AppliedConfig, type NewDelivery, type Store } from "./store.ts";
 import { cleanText, RESERVED_HANDLES } from "./text.ts";
 import { conductorHandle, conductorName } from "./text.ts";
@@ -286,7 +294,7 @@ const MAX_TURN_ERROR_ATTEMPTS = 3;
 const SWITCH_SETTLE_MS = 5000;
 
 export interface OrchestratorDeps {
-  config: Pick<Config, "home" | "rolesDir" | "port">;
+  config: Pick<Config, "home" | "rolesDir" | "port"> & Partial<Pick<Config, "claudeBin" | "codexBin" | "coreBin" | "coreSocket">>;
   store: Store;
   runners: Map<Backend, Runner>;
   herdr?: HerdrQueries;
@@ -298,6 +306,8 @@ export interface OrchestratorDeps {
 }
 
 export interface NewMemberInput {
+  cli?: CliProvider;
+  modelOverride?: string | null;
   name: string;
   role?: string;
   handle?: string;
@@ -377,6 +387,8 @@ interface Turn {
 }
 
 interface Runtime {
+  /** 화면 추정은 토큰이 달라진 다음 읽기와 맞아야 저장한다. */
+  contextCandidate: { sessionId: string | null; window: number; tokens: number } | null;
   turn: Turn | null;
   pumping: Promise<void> | null;
   again: boolean;
@@ -408,6 +420,8 @@ interface Runtime {
 }
 
 const HOLD_NOTES: Record<string, string> = {
+  delivery_unknown: "전달 여부를 확인할 수 없어 보류했습니다. 중복 실행 방지를 위해 자동 재전송하지 않습니다",
+  legacy_session: "이전 실행기의 세션입니다. 새 core 세션이 필요합니다",
   blocked: "승인 창 앞에서 멈춤",
   input_busy: "입력칸에 넣지 못함(선택 창 등)",
   asleep: "잠듦",
@@ -425,8 +439,7 @@ const WAKE_POST_KINDS = new Set<string>(["완료", "막힘", "질문"]);
 /** 실제 실행기로 조립한다. herdr 는 설정의 소켓만 쓴다. */
 export function createOrchestrator(config: Config, store: Store): Orchestrator {
   const runners = new Map<Backend, Runner>([
-    ["headless", new HeadlessRunner({ claudeBin: config.claudeBin, runDir: join(config.home, "run"), inboxDir: config.inboxDir })],
-    ["herdr", new HerdrRunner({ socketPath: config.herdrSocket }, { inboxDir: config.inboxDir })],
+    ["core", new CoreRunner({ contextHome: config.home, coreBin: config.coreBin, socketPath: config.coreSocket, session: "iamceo", stateDir: join(config.home, "core-state"), configDir: join(config.home, "core-config"), claudeBin: config.claudeBin, codexBin: config.codexBin })],
   ]);
   const herdr: HerdrQueries = { info: () => detectHerdr(config.herdrSocket), agents: () => listAgents(config.herdrSocket), inspect: (a) => inspectPane(config.herdrSocket, a) };
   return new Orchestrator({ config, store, runners, herdr, notifier: macNotifier() });
@@ -477,6 +490,10 @@ export class Orchestrator implements OrchestratorApi {
     this.store = deps.store;
     this.config = deps.config;
     this.runners = deps.runners;
+    if (!this.runners.has("core")) {
+      const selected = this.store.getSettings().backend;
+      this.store.setRuntimeBackend(selected && this.runners.has(selected) ? selected : this.runners.has("headless") ? "headless" : "herdr");
+    }
     this.timings = { ...DEFAULT_TIMINGS, ...deps.timings };
     this.herdr = deps.herdr ?? null;
     this.agentTools = deps.agentTools ?? null;
@@ -484,9 +501,58 @@ export class Orchestrator implements OrchestratorApi {
     this.serverUrl = deps.serverUrl ?? `http://127.0.0.1:${deps.config.port}`;
     for (const runner of this.runners.values()) {
       runner.on((event) => {
+        const member = this.store.getMember(event.memberId);
+        if (member && member.backend && member.backend !== runner.kind) return;
+        if (this.runtimes.get(event.memberId)?.closing && (event.type !== "status" || event.status === "gone")) return;
         void this.onRunnerEvent(event).catch((e) => console.error("실행기 이벤트 처리 오류:", event.type, e));
       });
     }
+  }
+
+  /** Serve startup owns a private daemon; diagnostics remain read-only and shutdown leaves it alive. */
+  async initializeRuntime(): Promise<void> {
+    if (!this.runners.has("core")) return;
+    try {
+      await ensureCoreServer({ coreBin: this.config.coreBin, socketPath: this.config.coreSocket ?? join(this.config.home, "run", "core.sock"), session: "iamceo", stateDir: join(this.config.home, "core-state"), configDir: join(this.config.home, "core-config") });
+    } catch (e) {
+      console.warn(`core 시작 보류: ${(e as Error).message}`);
+    }
+    await this.refreshConnection();
+  }
+
+  async terminalControl(memberId: string, action: TerminalControlAction): Promise<TerminalControlResult> {
+    const member = this.store.requireMember(memberId);
+    if (member.backend !== "core") throw new ApiError(409, "core 터미널만 조작할 수 있습니다");
+    const rt = this.runtime(memberId);
+    if (rt.closing || rt.starting || rt.reopening || rt.pumping) throw new ApiError(409, "세션을 처리하는 중입니다. 잠시 뒤 다시 여세요");
+    const runner = this.runnerOf(member);
+    if (!runner.terminalControl) throw new ApiError(501, "터미널 조작을 지원하지 않습니다");
+    try {
+      const result = await runner.terminalControl(this.runnerMember(member, this.store.requireProject(member.projectId)), action);
+      if (action.action === "release") void this.pump(memberId);
+      return result;
+    } catch (e) { throw new ApiError(409, (e as Error).message); }
+  }
+
+  async runtimeInfo(): Promise<RuntimeInfo> {
+    const runner = this.runners.get("core");
+    const available = runner ? await runner.available().catch((e: Error) => ({ ok: false, detail: e.message })) : { ok: false, detail: "core 실행기가 없습니다" };
+    const configured = this.config as OrchestratorDeps["config"] & Partial<Config>;
+    const binary = configured.coreBin ?? "herdr-core";
+    const installed = !!Bun.which(binary);
+    let version: string | null = null;
+    if (installed) {
+      try {
+        const result = Bun.spawn([binary, "--version"], { stdout: "pipe", stderr: "ignore" });
+        const timer = setTimeout(() => result.kill(), 2000);
+        const output = await new Response(result.stdout).text();
+        if (await result.exited === 0) version = output.trim().slice(0, 200) || null;
+        clearTimeout(timer);
+      } catch {}
+    }
+    return { backend: "core", core: { installed, available: available.ok, version, detail: available.ok ? null : available.detail ?? null }, providers: {
+      claude: { installed: !!Bun.which(configured.claudeBin ?? "claude") }, codex: { installed: !!Bun.which(configured.codexBin ?? "codex") },
+    } };
   }
 
   /** 접속 코드·토큰이 있는 폴더. file 도구가 읽지 못하게 막는다. */
@@ -512,12 +578,30 @@ export class Orchestrator implements OrchestratorApi {
     this.store.releaseHeldBeforeConnection();
     await this.refreshConnection();
     await this.settleInFlight();
-    this.store.requeueDelivering();
+    if (this.runners.has("core")) {
+      for (const d of this.store.listDelivering()) this.hold(d, "delivery_unknown");
+    } else this.store.requeueDelivering();
     const herdrMembers: Member[] = [];
     for (const member of this.store.listAllMembers()) {
       if (member.subagents !== 0) this.store.patchMember(member.id, { subagents: 0 });
       if (member.origin === "manual") continue;
       const project = this.store.requireProject(member.projectId);
+      if (this.runners.has("core")) {
+        if (member.backend !== "core" && (member.sessionId || member.paneId)) {
+          for (const d of this.store.listPending(member.id)) this.hold(d, "legacy_session");
+          this.store.patchMember(member.id, { lastError: "이전 실행기의 세션입니다. 새 core 세션으로 명시적으로 전환해야 합니다" });
+          continue;
+        }
+        if (member.backend === "core" && member.paneId && member.status !== "asleep") {
+          try {
+            const started = await this.runnerOf(member).start(this.runnerMember(member, project), this.writeRunFiles(member, project));
+            this.applyStarted(member.id, project, started);
+          } catch (e) {
+            this.store.patchMember(member.id, { lastError: `core 재연결 보류: ${(e as Error).message}` });
+          }
+        }
+        continue;
+      }
       if (this.backendOf(member) === "herdr") {
         // 가져온 명부의 직원은 세션도 칸도 없어 재결합할 것이 없다.
         if (member.status !== "asleep" && (member.sessionId || member.paneId)) herdrMembers.push(member);
@@ -778,6 +862,7 @@ export class Orchestrator implements OrchestratorApi {
   async createProject(req: CreateProjectReq): Promise<Project> {
     const goal = req.goal?.trim();
     const project = this.store.createProject({ name: req.name, cwd: req.cwd, now: goal });
+    this.store.setChiefCli(project.id, req.chiefCli ?? "claude");
     if (req.startConductor) {
       const conductor = await this.ensureConductor(project.id);
       if (goal) await this.deliver({ projectId: project.id, memberId: conductor.id, kind: "system", text: formatSystem(`프로젝트 목표: ${guardLines(goal)}`) });
@@ -854,6 +939,74 @@ export class Orchestrator implements OrchestratorApi {
     return this.isCannotExit(e) ? new ApiError(409, `${m.name}의 칸을 끝내지 못해 보관할 수 없습니다: ${why}`) : new ApiError(503, `${m.name}의 칸을 확인하지 못해 보관할 수 없습니다: ${why}`);
   }
 
+  async createMember(projectId: string, req: CreateMemberReq): Promise<Member> {
+    return (await this.addMember(projectId, req)).member;
+  }
+
+  async freshMemberSession(memberId: string): Promise<Member> {
+    const member = this.store.requireMember(memberId);
+    if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 새로 열 수 없습니다");
+    return this.switchProvider(member, { cli: member.cli }, false, true);
+  }
+
+  private async switchProvider(member: Member, patch: PatchMemberReq, fromPump = false, freshSession = false): Promise<Member> {
+    const project = this.store.requireProject(member.projectId);
+    this.requireActive(project);
+    const rt = this.runtime(member.id);
+    if (rt.closing || rt.starting || (!fromPump && rt.pumping) || rt.reopening || rt.turn || this.isBusy(member) || member.status === "working" || member.status === "blocked") {
+      throw new ApiError(409, "일하거나 세션을 처리하는 중입니다. 턴이 끝난 뒤 CLI를 바꾸세요");
+    }
+    if (this.store.listDelivering().some((d) => d.memberId === member.id) || this.store.listPending(member.id).some((d) => d.holdReason === "delivery_unknown")) {
+      throw new ApiError(409, "전달 여부가 확인되지 않은 입력이 있어 CLI를 바꿀 수 없습니다");
+    }
+    rt.closing = true;
+    let changedSession = false;
+    let sessionReady = false;
+    try {
+      // Validate the target invocation before stopping a working installation.
+      const target = { ...member, ...patch, cli: patch.cli!, sessionId: !freshSession && patch.cli === member.cli && member.cli === "claude" ? member.sessionId : null, paneId: null };
+      const targetRunner = this.runners.get(this.store.effectiveBackend());
+      if (targetRunner instanceof CoreRunner) {
+        const model = this.desiredConfig(target).model;
+        if (target.cli === "codex" && model && /^(?:claude[-:]|opus(?:-|$)|sonnet(?:-|$)|haiku(?:-|$))/i.test(model)) throw new ApiError(400, "Codex용 모델을 고르거나 직원 모델 지정을 기본값으로 되돌리세요");
+        try { providerLaunch(this.runnerMember(target, project), this.writeRunFiles(target, project, !!target.sessionId), this.config); }
+        catch (e) { throw new ApiError(400, `CLI 설정을 적용할 수 없습니다: ${(e as Error).message}`); }
+      }
+      // Complete the old session before rotating credentials. Failure leaves the original identity intact.
+      if ((member.sessionId || member.paneId) && !(freshSession && member.backend !== "core" && this.runners.has("core"))) {
+        try { await this.runnerOf(member).stop(this.runnerMember(member, project)); }
+        catch (e) {
+          if (!(freshSession && member.status === "offline" && e instanceof CoreError && e.kind === "not_found")) throw e;
+        }
+      }
+      changedSession = true;
+      const sameProvider = patch.cli === member.cli;
+      this.store.archiveAndRotateSession(member.id, patch.cli!, freshSession ? "fresh_session" : sameProvider ? "settings_change" : "provider_switch");
+      if (!freshSession && sameProvider && member.cli === "claude") this.store.patchMember(member.id, { sessionId: member.sessionId });
+      this.store.patchMember(member.id, { ...patch, ...(freshSession ? { origin: "runner" as const } : {}), backend: this.store.effectiveBackend(), status: "idle", lastError: null });
+      if (member.kind !== "worker") this.store.setChiefCli(project.id, patch.cli!);
+      const handoff = [
+        `CLI 설정 변경: ${member.cli} → ${patch.cli}. ${!freshSession && sameProvider && member.cli === "claude" ? "같은 Claude 세션을 새 설정으로 이어 열었습니다" : "이전 제공자의 세션을 재개하지 않는 새 세션입니다"}.`,
+        `역할: ${member.role}. 현재 상황: ${member.now}. 다음: ${member.next}.`,
+        `프로젝트 상황: ${project.now}. board 도구로 대화·결재·작업을 확인하고 계속하세요.`,
+      ].join("\n");
+      this.store.enqueue({ projectId: project.id, memberId: member.id, kind: "system", text: formatSystem(handoff), wake: false });
+      const fresh = this.store.requireMember(member.id);
+      const runner = this.openRunner(fresh);
+      const started = await runner.start(this.runnerMember(fresh, project), this.writeRunFiles(fresh, project, !!fresh.sessionId));
+      this.applyStarted(member.id, project, started, this.desiredConfig(fresh));
+      sessionReady = true;
+      this.store.appendActivity(member.id, "system", handoff);
+      return this.store.requireMember(member.id);
+    } catch (e) {
+      if (changedSession) this.store.patchMember(member.id, { status: "error", lastError: `새 세션 시작 실패: ${(e as Error).message}` });
+      throw e;
+    } finally {
+      rt.closing = false;
+      if (sessionReady && !fromPump) void this.pump(member.id);
+    }
+  }
+
   /** 보관한 프로젝트는 화면에 없어 멈출 수 없다. 세션을 새로 띄우거나 깨우는 길은 모두 여기서 막는다. */
   private requireActive(project: Project): void {
     if (project.archived) throw new ApiError(409, "보관된 프로젝트입니다. 보관함에서 꺼낸 뒤 다시 하세요");
@@ -862,6 +1015,13 @@ export class Orchestrator implements OrchestratorApi {
   /** 전체 설정을 고친다. 실행 방식은 일하는 직원이 있으면 거부하고, 아니면 이전 실행기의 칸을 닫은 뒤 다음 전달부터 새 방식으로 잇는다. */
   async updateSettings(patch: SettingsPatch): Promise<Settings> {
     const before = this.store.getSettings();
+    if (this.runners.has("core")) {
+      if (patch.backend && patch.backend !== "core") throw new ApiError(400, "실행기는 herdr-core 하나입니다");
+      const settings = this.store.patchSettings({ ...patch, backend: "core" });
+      await this.refreshConnection();
+      for (const member of this.store.listAllMembers()) if (this.configPending(member)) void this.pump(member.id);
+      return settings;
+    }
     let settings: Settings;
     if (patch.backend && patch.backend !== before.backend) {
       this.requireNotSwitching();
@@ -965,6 +1125,11 @@ export class Orchestrator implements OrchestratorApi {
   async patchMemberConfig(memberId: string, patch: PatchMemberReq): Promise<Member> {
     const member = this.store.requireMember(memberId);
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 설정을 바꿀 수 없습니다");
+    if (patch.cli && patch.cli !== member.cli) return this.switchProvider(member, patch);
+    if (this.runners.has("core") && member.backend === "core" && (member.sessionId || member.paneId) &&
+        ((patch.modelOverride !== undefined && patch.modelOverride !== member.modelOverride) || (patch.effortOverride !== undefined && patch.effortOverride !== member.effortOverride))) {
+      return this.switchProvider(member, { ...patch, cli: member.cli });
+    }
     const updated = this.store.patchMember(memberId, patch);
     if (this.configPending(updated)) void this.pump(memberId);
     return updated;
@@ -1538,6 +1703,7 @@ export class Orchestrator implements OrchestratorApi {
       handle: free(project.isHq ? "root" : conductorHandle(project.name), "-"),
       name: free(project.isHq ? "본사 AI" : conductorName(project.name), " "),
       role: project.isHq ? "프로젝트 만들기와 잡다한 일" : "총괄",
+      cli: this.store.chiefCli(project.id),
     });
     if (project.now) {
       this.store.enqueue({ projectId: project.id, memberId: spawn.member.id, kind: "system", text: formatSystem(`지금 상황: ${guardLines(project.now)}`), wake: false });
@@ -1555,6 +1721,8 @@ export class Orchestrator implements OrchestratorApi {
       handle: input.handle ?? this.deriveHandle(projectId, name),
       name,
       role: input.role ?? "",
+      cli: input.cli ?? "claude",
+      modelOverride: input.modelOverride,
       cwd: input.cwd ? this.resolveCwd(project, input.cwd) : undefined,
     });
     await ready;
@@ -1565,7 +1733,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   /** 명부에 올리고 세션을 띄우기 시작한다. 끝나기 전에는 pump 가 건너뛰고, 끝나면 다시 민다. */
-  private beginSpawn(project: Project, input: { kind: MemberKind; handle: string; name: string; role: string; cwd?: string }): { member: Member; ready: Promise<void> } {
+  private beginSpawn(project: Project, input: { kind: MemberKind; handle: string; name: string; role: string; cwd?: string; cli?: CliProvider; modelOverride?: string | null }): { member: Member; ready: Promise<void> } {
     this.requireNotSwitching(); // 옮기는 명단에 없는 칸이 옛 실행기에 남는다.
     const member = this.store.createMember({ projectId: project.id, ...input, origin: "runner", status: "idle" });
     if (!project.runnerEnabled) return { member, ready: Promise.resolve() };
@@ -1689,6 +1857,7 @@ export class Orchestrator implements OrchestratorApi {
   async compactMember(memberId: string, focus?: string): Promise<Member> {
     const member = this.store.requireMember(memberId);
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 압축할 수 없습니다");
+    if (this.backendOf(member) === "core") throw new ApiError(409, "터미널을 열어 CLI의 /compact 명령을 사용하세요");
     if (!member.sessionId) throw new ApiError(400, "아직 세션이 없습니다");
     if (member.status === "asleep") throw new ApiError(409, "잠든 직원은 압축할 수 없습니다");
     // 입력칸에 그대로 들어간다. 제어문자·줄바꿈이 있으면 붙여넣기를 끝내고 입력을 고칠 수 있다.
@@ -1766,6 +1935,7 @@ export class Orchestrator implements OrchestratorApi {
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 다시 열 수 없습니다");
     this.requireActive(this.store.requireProject(member.projectId));
     this.requireNotSwitching();
+    if (this.runners.has("core") && member.backend !== "core" && (member.sessionId || member.paneId)) throw new ApiError(409, "이전 실행기의 세션은 자동으로 다시 열지 않습니다");
     if (member.status === "asleep" || member.status === "offline") {
       // 가져온 프로젝트는 총괄을 시작하거나 편입하기 전에는 어떤 세션도 움직이지 않는다고 약속했다.
       if (!this.store.requireProject(member.projectId).runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다. 총괄을 시작하거나 기존 세션을 편입하세요");
@@ -2190,6 +2360,12 @@ export class Orchestrator implements OrchestratorApi {
     }
     const project = this.store.requireProject(member.projectId);
     const pending = this.store.listPending(memberId);
+    if (this.runners.has("core") && member.backend && member.backend !== "core" && (member.sessionId || member.paneId)) {
+      for (const d of pending) this.hold(d, "legacy_session");
+      return;
+    }
+    // Unknown delivery outcomes require human reconciliation, never a timer-driven retry.
+    if (pending.some((d) => d.holdReason === "delivery_unknown")) return;
     const rt = this.runtime(memberId);
     if (rt.closing) return; // 닫는 중에 다시 열면 명부 밖 칸이 남는다.
     if (this.switching) return; // 끝나면 updateSettings 가 다시 민다.
@@ -2206,7 +2382,7 @@ export class Orchestrator implements OrchestratorApi {
       return;
     }
     // 세션이 없거나 잠들었으면 새로 연다: 전역 실행 방식을 따른다. 살아 있는 세션은 시작한 실행기로 계속 다룬다.
-    const opening = member.status === "asleep" || member.status === "offline" || !member.sessionId;
+    const opening = member.status === "asleep" || member.status === "offline" || (!member.sessionId && !member.paneId);
     let runner = this.runners.get(opening ? this.store.effectiveBackend() : this.backendOf(member));
     if (!runner) {
       for (const d of pending) this.hold(d, "backend_down");
@@ -2252,7 +2428,7 @@ export class Orchestrator implements OrchestratorApi {
     }
 
     // 상한 검사와 자리 잡기(rt.turn) 사이에 await 가 끼면 상한을 넘을 수 있어 세션부터 마련한다.
-    if (!member.sessionId) {
+    if (!member.sessionId && !member.paneId) {
       let failure: Error | null = null;
       const current = member;
       runner = this.openRunner(current);
@@ -2285,7 +2461,7 @@ export class Orchestrator implements OrchestratorApi {
     }
 
     const compactAt = this.store.getSettings().compactAtPct;
-    const autoCompact = hasWake && !rt.skipCompact && member.contextPct !== null && member.contextPct >= compactAt;
+    const autoCompact = runner.kind !== "core" && hasWake && !rt.skipCompact && member.contextPct !== null && member.contextPct >= compactAt;
     if (rt.compactRequest !== null || autoCompact) {
       await this.beginCompact(member, project, runner, rt, rt.compactRequest ?? this.compactFocus(member));
       return;
@@ -2336,12 +2512,12 @@ export class Orchestrator implements OrchestratorApi {
   private desiredConfig(member: Member): AppliedConfig {
     const { ranks } = this.store.getSettings();
     const { model, effort } = memberConfig(member, ranks);
-    return { model, effort, staffModel: ranks.staff.model, staffEffort: ranks.staff.effort };
+    return { model, effort, staffModel: member.cli === "codex" ? null : ranks.staff.model, staffEffort: member.cli === "codex" ? null : ranks.staff.effort };
   }
 
   /** 서버가 띄운 세션이 지금 설정과 다른가. 넘겨받은 세션은 대표가 쓰던 칸이라 스스로 닫지 않는다(깨울 때 맞춰진다). 잠든 세션은 깨울 때 맞춰진다. */
   private configPending(member: Member): boolean {
-    if (member.origin !== "runner" || !member.sessionId || member.status === "asleep" || member.status === "offline") return false;
+    if (member.origin !== "runner" || (!member.sessionId && !member.paneId) || member.status === "asleep" || member.status === "offline") return false;
     if (!this.runners.get(this.backendOf(member))?.applyConfig) return false;
     const want = this.desiredConfig(member);
     if (this.runtime(member.id).configGaveUp === JSON.stringify(want)) return false;
@@ -2352,6 +2528,15 @@ export class Orchestrator implements OrchestratorApi {
   /** 쉬는 세션을 새 설정으로 다시 연다. 이번 전달을 그대로 이어가도 되면 true. */
   private async syncConfig(member: Member, project: Project, runner: Runner, rt: Runtime): Promise<boolean> {
     const want = this.desiredConfig(member);
+    if (runner.kind === "core") {
+      try {
+        await this.switchProvider(member, { cli: member.cli }, true);
+        return true;
+      } catch (e) {
+        this.store.patchMember(member.id, { lastError: `설정 적용 보류: ${(e as Error).message}` });
+        return false;
+      }
+    }
     const held = rt.turn;
     const control: Turn = { kind: "control", headless: false, text: "", interrupted: false, sessionRetried: false };
     rt.turn = control;
@@ -2462,6 +2647,11 @@ export class Orchestrator implements OrchestratorApi {
 
   private onSendFailed(member: Member, rt: Runtime, deliveries: Delivery[], result: Extract<SendResult, { ok: false }>): void {
     const memberId = member.id;
+    if (this.backendOf(member) === "core" && (result.reason === "error" || (result as { reason: string }).reason === "unknown")) {
+      for (const d of deliveries) this.hold(d, "delivery_unknown");
+      this.store.patchMember(memberId, { lastError: result.detail ?? "전달 여부를 확인할 수 없습니다" });
+      return;
+    }
     switch (result.reason) {
       case "busy":
         for (const d of deliveries) this.requeue(d);
@@ -2649,7 +2839,11 @@ export class Orchestrator implements OrchestratorApi {
         this.store.appendActivity(member.id, e.kind, e.text);
         return;
       case "context":
-        this.store.patchMember(member.id, { contextPct: e.pct });
+        if (validWindow(e.window)) this.runtime(member.id).contextCandidate = null;
+        this.store.patchMember(member.id, { contextPct: e.pct, ...(validWindow(e.window) ? { contextWindow: e.window, contextWindowSource: "headless" as const } : {}) });
+        return;
+      case "context_usage":
+        this.onContextUsage(member, e);
         return;
       case "subagents":
         this.store.patchMember(member.id, { subagents: e.count });
@@ -2916,6 +3110,36 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   /**
+   * 화면 % 는 바로 표시하고, 창 추정은 두 읽기가 맞아야 저장한다.
+   */
+  private onContextUsage(member: Member, e: Extract<RunnerEvent, { type: "context_usage" }>): void {
+    const rt = this.runtime(member.id);
+    if (rt.contextCandidate?.sessionId !== member.sessionId) rt.contextCandidate = null;
+    if (e.sessionId && e.sessionId !== member.sessionId) return;
+    const settings = this.store.getSettings();
+    const measured = measureContext(e, { learned: member.contextWindow, source: member.contextWindowSource, fallback: settings.contextWindowDefault, windows: settings.contextWindows });
+    if (!measured) return;
+    if (exactSource(measured.source)) rt.contextCandidate = null;
+    let learned: Partial<Member> = {};
+    if (measured.learned !== null) {
+      if (measured.source === "screen") {
+        const candidate = rt.contextCandidate;
+        if (member.contextWindow === measured.learned) {
+          rt.contextCandidate = null;
+        } else if (candidate && candidate.tokens !== e.tokens && Math.abs(candidate.window - measured.learned) / candidate.window <= 0.05) {
+          learned = { contextWindow: measured.learned, contextWindowSource: "screen" };
+          rt.contextCandidate = null;
+        } else {
+          rt.contextCandidate = { sessionId: member.sessionId, window: measured.learned, tokens: e.tokens! };
+        }
+      } else {
+        learned = { contextWindow: measured.learned, contextWindowSource: measured.source ?? null };
+      }
+    }
+    this.store.patchMember(member.id, { ...(measured.pct !== null ? { contextPct: measured.pct } : {}), ...learned });
+  }
+
+  /**
    * 뒤 작업 기다림이 시작되거나 끝났다(herdr). 기다리는 동안은 그 팀이 일하는 중이라 working 으로 두고, 묶인 글은 곧바로 넣는다.
    * 턴 안에서 들어오면 곧이어 오는 turn_end 가 상태를 정한다.
    */
@@ -2960,7 +3184,7 @@ export class Orchestrator implements OrchestratorApi {
   private runtime(memberId: string): Runtime {
     let rt = this.runtimes.get(memberId);
     if (!rt) {
-      rt = { turn: null, pumping: null, again: false, posted: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, reattaching: false, holdUntil: 0, configFails: 0, configGaveUp: null, background: null };
+      rt = { contextCandidate: null, turn: null, pumping: null, again: false, posted: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, reattaching: false, holdUntil: 0, configFails: 0, configGaveUp: null, background: null };
       this.runtimes.set(memberId, rt);
     }
     return rt;
@@ -2987,6 +3211,9 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 세션을 새로 띄우거나 다시 열 때. 전역 실행 방식을 따르고 그것을 기억한다. */
   private openRunner(member: Member): Runner {
+    if (this.runners.has("core") && member.backend !== "core" && (member.sessionId || member.paneId)) {
+      throw new ApiError(409, "이전 실행기의 세션은 자동 전환하지 않습니다. 새 직원을 만들거나 CLI 전환으로 새 세션을 시작하세요");
+    }
     const backend = this.store.effectiveBackend();
     const runner = this.runners.get(backend);
     if (!runner) throw new ApiError(503, `실행기가 없습니다: ${backend}`);
@@ -3004,11 +3231,13 @@ export class Orchestrator implements OrchestratorApi {
       projectId: member.projectId,
       handle: member.handle,
       name: member.name,
+      cli: member.cli,
+      parallel: member.parallel,
       cwd: member.cwd,
       sessionId: member.sessionId,
       paneId: member.paneId,
       ...memberConfig(member, settings.ranks),
-      subagentModel: settings.ranks.staff.model,
+      subagentModel: member.cli === "codex" ? null : settings.ranks.staff.model,
       permissionMode: settings.permissionMode,
       kind: member.kind,
       origin: member.origin,
@@ -3017,7 +3246,7 @@ export class Orchestrator implements OrchestratorApi {
 
   private rulesFor(member: Member, project: Project): string {
     const conductor = this.store.getConductor(project.id);
-    const staffEffort = this.store.getSettings().ranks.staff.effort;
+    const staffEffort = member.cli === "codex" ? null : this.store.getSettings().ranks.staff.effort;
     return renderRole(member.kind, { PROJECT: project.name, NAME: member.name, ROLE: member.role, CONDUCTOR: conductor?.name ?? "총괄", SUBAGENT_EFFORT: staffEffort ? `- 서브에이전트·워크플로를 부를 때 effort=${staffEffort} 을 넘긴다.` : "" }, this.config.rolesDir);
   }
 
@@ -3035,9 +3264,11 @@ export class Orchestrator implements OrchestratorApi {
     const projectSessions = this.store.listMembers(project.id).flatMap((m) => (m.origin === "adopted" ? [] : (m.sessionId ?? [])));
     // 바이패스는 대표가 설정에서 고른 모드다. 첫 경고 창이 아무도 안 보는 칸에서 일을 막지 않게 한다.
     let settingsFile: string | undefined;
-    if (this.store.getSettings().permissionMode === "bypassPermissions") {
+    if (member.cli !== "codex") {
       settingsFile = join(dir, `${member.id}.settings.json`);
-      writeFileSync(settingsFile, `${JSON.stringify({ skipDangerousModePermissionPrompt: true })}\n`, { mode: 0o600 });
+      const settings = { statusLine: writeStatuslineWrapper(this.config.home),
+        ...(this.store.getSettings().permissionMode === "bypassPermissions" ? { skipDangerousModePermissionPrompt: true } : {}) };
+      writeFileSync(settingsFile, `${JSON.stringify(settings)}\n`, { mode: 0o600 });
     }
     return { systemPromptFile, mcpConfigFile, resume, herdrTabId: project.herdrTabId, projectName: project.name, projectSessions, settingsFile };
   }

@@ -2,6 +2,8 @@
 // 실제 서버 프로세스 + Playwright chromium + 가짜 claude. 가짜가 받은 argv·환경을 로그에서 직접 본다. 라이브 herdr·실제 ~/.iamceo·실제 claude 는 쓰지 않는다.
 // IAMCEO_SHOTS=<폴더> 를 주면 docs/shots 이름 그대로 캡처를 남긴다(가짜 데이터). 없으면 임시 폴더에 남긴다.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { startBrowserCore } from "./fixtures/core-browser-harness";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,6 +11,9 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import type { Bootstrap, Decision, FileDoc, Member, ProjectState } from "../shared/types.ts";
 import { updateConfigFile } from "../server/config.ts";
 import { auditLayout } from "./fixtures/layout-audit.ts";
+
+const core = await startBrowserCore();
+afterAll(async () => { await core.stop(); });
 
 const ROOT = resolve(import.meta.dir, "..");
 const CLI = join(ROOT, "bin", "iamceo.ts");
@@ -42,7 +47,6 @@ const COMPARE_HTML = `<h1>결제 방식 두 안 비교</h1>
 <button id="ping" onclick="this.textContent='스크립트 돎'">눌러 보기</button>`;
 
 const SCRIPT = [
-  { when: "[보고 ", text: "보고를 확인했습니다." },
   { when: "다시 봐 주세요", text: "다시 확인했습니다. 바뀐 점은 없습니다." },
   {
     when: "[총괄] 서윤에게",
@@ -58,7 +62,7 @@ const SCRIPT = [
     silent: true,
   },
   {
-    when: "두 안 비교표",
+    when: '[대표] "두 안 비교표를 자료로 올려 줘"',
     tools: [
       { name: "project_now", args: { text: "**서윤**이 결제 방식 비교표를 정리했습니다. 대표의 결정을 기다립니다." } },
       { name: "work_set", args: { sec: "doing", title: "결제 방식 비교", detail: "두 안의 일정·비용 정리", who: "서윤" } },
@@ -68,6 +72,7 @@ const SCRIPT = [
     ],
     text: "서윤에게 두 안 비교표를 맡겼습니다.",
   },
+  { when: "[보고 ", text: "보고를 확인했습니다." },
   { when: "[대표 답(원문)", tools: [{ name: "status", args: { now: "받은 결정대로 화면을 고치는 중", next: "결과 보고" } }], text: "결정대로 진행합니다." },
   { when: "했음", text: "받았습니다." },
 ];
@@ -96,7 +101,7 @@ const DUMP = {
 function childEnv(extra: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !/^(HERDR_|CLAUDE|IAMCEO_)/.test(k)) env[k] = v;
-  return { ...env, HOME: USER_HOME, IAMCEO_TEST: "1", IAMCEO_HOME: HOME, IAMCEO_CLAUDE_BIN: FAKE, IAMCEO_HERDR_SOCKET: join(WORK, "none.sock"), FAKE_CLAUDE_LOG: FAKE_LOG, FAKE_CLAUDE_SCRIPT: join(WORK, "script.json"), ...extra };
+  return { ...env, ...core.env, HOME: USER_HOME, IAMCEO_TEST: "1", IAMCEO_HOME: HOME, IAMCEO_CLAUDE_BIN: FAKE, IAMCEO_HERDR_SOCKET: join(WORK, "none.sock"), FAKE_CLAUDE_LOG: FAKE_LOG, FAKE_CLAUDE_SCRIPT: join(WORK, "script.json"), ...extra };
 }
 
 let server: ReturnType<typeof Bun.spawn>;
@@ -129,7 +134,14 @@ async function until<T>(what: string, read: () => Promise<T>, ok: (value: T) => 
 }
 
 /** 모든 세션이 일을 끝냈고 전달 대기도 없다. */
-const settled = () => until("모두 쉼", projectState, (s) => s.members.every((m) => m.status !== "working" && m.queuedCount === 0));
+const settled = () => until("모두 쉼 (깨우지 않는 인계 메모는 다음 지시까지 대기)", async () => {
+  const snapshot = await projectState();
+  const db = new Database(join(HOME, "iamceo.db"), { readonly: true });
+  try {
+    const pending = db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM deliveries WHERE project_id = ? AND wake = 1 AND status IN ('queued','held','delivering')").get(projectId)!.n;
+    return { members: snapshot.members.map((m) => ({ name: m.name, status: m.status })), pending };
+  } finally { db.close(); }
+}, (s) => s.pending === 0 && s.members.every((m) => m.status !== "working"));
 
 interface FakeCall { event: string; prompt: string; args: string[]; subagentModel: string | null; subagentForce: string | null; env: string[] }
 function fakeCalls(name?: string): FakeCall[] {
@@ -225,17 +237,14 @@ afterAll(async () => {
 });
 
 describe("전체 통합", () => {
-  test("첫 실행: 실행 방식을 고른다. 기본 권한은 바이패스다", async () => {
+  test("첫 실행: core 고정, 기본 권한은 바이패스, 실행 방식 선택 없이 홈", async () => {
     const boot = await api<Bootstrap>("GET", "/api/bootstrap");
-    expect(boot.settings.backend).toBeNull();
+    expect(boot.settings.backend).toBe("core");
     expect(boot.settings.permissionMode).toBe("bypassPermissions");
     const page = await open(deskCtx, "");
-    await page.locator(".su-card__pick", { hasText: "herdr 없이" }).waitFor();
-    await shot(page, "desk-setup");
-    await page.locator(".su-card__pick", { hasText: "herdr 없이" }).click();
-    await page.getByRole("button", { name: "herdr 없이 시작" }).click();
     await composer(page).waitFor();
-    expect((await api<Bootstrap>("GET", "/api/bootstrap")).settings.backend).toBe("headless");
+    expect(await page.locator(".su-card__pick").count()).toBe(0);
+    await shot(page, "desk-setup");
     await page.close();
   }, 30_000);
 
@@ -290,6 +299,14 @@ describe("전체 통합", () => {
     expect(await phone.locator(".gate").count()).toBe(0);
     expect((await projectState()).project.connection).toEqual({ ok: true, reason: null, detail: null });
     expect((await projectState()).members.some((m) => m.kind === "conductor")).toBe(true);
+    // Imported terminal identities are legacy data. Explicitly hand them to fresh owned core sessions.
+    for (const imported of (await projectState()).members.filter((member) => member.origin === "adopted")) {
+      await page.goto(`${base}/${hash("team", imported.id)}`);
+      await page.getByRole("button", { name: "새 세션으로 이어가기" }).click();
+      await until("명시적 core 인계", () => memberNamed(imported.name), (member) => member.backend === "core" && member.origin === "runner");
+      await settled();
+    }
+
     await phone.close();
     await page.close();
   }, 30_000);
@@ -322,9 +339,10 @@ describe("전체 통합", () => {
     expect(answers).toHaveLength(1);
     const answered = await until("결재 전달", () => decisionNamed("결제 수단 범위를 정해 주세요"), (d) => d.status === "delivered");
     expect(answered).toMatchObject({ choice: "card", note: "간편결제는 다음 분기에" });
-    const got = await until("물은 직원에게 전달", async () => fakeCalls("민수"), (c) => c.length > 0);
-    expect(got[0]!.prompt).toContain("[대표 답(원문) '결제 수단 범위를 정해 주세요'] \"카드만 먼저\"");
-    expect(got[0]!.prompt).toContain("간편결제는 다음 분기에");
+    const calls = await until("물은 직원에게 전달", async () => fakeCalls("민수"), (c) => c.some((call) => call.prompt.includes("[대표 답(원문)")));
+    const got = calls.find((call) => call.prompt.includes("[대표 답(원문)"))!;
+    expect(got.prompt).toContain("[대표 답(원문) '결제 수단 범위를 정해 주세요'] \"카드만 먼저\"");
+    expect(got.prompt).toContain("간편결제는 다음 분기에");
     await settled();
     await page.close();
   }, 40_000);
@@ -422,63 +440,25 @@ describe("전체 통합", () => {
     await page.close();
   }, 60_000);
 
-  test("편입 창: headless 면 터미널 안내만, herdr 면 세션 목록·바뀌는 것·경고가 나온다", async () => {
-    const guide = await open(deskCtx, hash("team"));
-    await guide.locator(".tm-adopt-entry").getByRole("button", { name: "기존 세션 편입" }).click();
-    await guide.locator(".tm-join").waitFor();
-    expect(await guide.locator(".tm-adopt").innerText()).toContain("실행 방식이 herdr 일 때만");
-    await guide.close();
-
-    const page = await deskCtx.newPage();
-    watch(page, "데스크톱");
-    await page.addInitScript((code) => {
-    // 아티팩트 칸(불투명 출처)에서도 돌므로 맨 위 문서에서만 적는다.
-    if (window.top === window) localStorage.setItem("iamceo.accessCode", code);
-  }, CODE);
-    await page.route("**/api/bootstrap", async (route) => {
-      const res = await route.fetch();
-      const body = (await res.json()) as Bootstrap;
-      await route.fulfill({ response: res, json: { ...body, cli: "iamceo", settings: { ...body.settings, backend: "herdr" }, herdr: { ...body.herdr, installed: true, running: true, compatible: true, version: "0.5.0", protocol: 22, warning: null } } });
-    });
-    await page.route("**/api/herdr/agents", (route) =>
-      route.fulfill({ json: [
-        { paneId: "w2:p1", name: "결제 조사", agent: "claude", status: "idle", cwd: "~/work/payment", sessionId: "11111111", workspaceId: "w2", tabId: "w2:t1", adopted: false },
-        { paneId: "w2:p2", name: "로그 분석", agent: "claude", status: "working", cwd: "~/work/logs", sessionId: "22222222", workspaceId: "w2", tabId: "w2:t1", adopted: false },
-        { paneId: "w2:p3", name: "코덱스", agent: "codex", status: "idle", cwd: "~/work", sessionId: null, workspaceId: "w2", tabId: "w2:t1", adopted: false },
-      ] }),
-    );
-    await page.route("**/adopt/preview*", (route) => {
-      const busy = new URL(route.request().url()).searchParams.get("pane") === "w2:p2";
-      route.fulfill({ json: {
-        paneId: busy ? "w2:p2" : "w2:p1", name: busy ? "로그 분석" : "결제 조사", cwd: "~/work/payment", status: busy ? "working" : "idle", sessionId: "11111111",
-        screen: "> PG사 문서 요약해 줘\n\n요약을 끝냈습니다. 수수료는 카드 2.5% 입니다.\n\n> ",
-        refuse: busy ? "일하는 중입니다. 지금 턴이 끝나면 다시 시도하세요" : null,
-        warnings: busy ? [] : [{ kind: "conductor", text: "다른 지휘자의 흔적이 있습니다. 이 세션의 규칙이 다른 지휘자와 겹칠 수 있습니다." }, { kind: "folder", text: "이 프로젝트 폴더가 아닙니다." }],
-      } });
-    });
-    await page.goto(`${base}/${hash("team")}`);
-    await page.locator(".tm-adopt-entry").getByRole("button", { name: "기존 세션 편입" }).click();
-    const form = page.locator(".tm-adopt");
-    await form.waitFor();
-    const what = await form.locator(".tm-adopt__what").innerText();
-    expect(what).toContain("칸은 그대로입니다");
-    expect(what).toContain("편입 해제");
-    expect(await form.innerText()).toContain("다른 CLI 세션 1개는 받을 수 없습니다");
-    await form.locator("label.choice", { hasText: "로그 분석" }).click();
-    await form.locator(".tm-hint", { hasText: "일하는 중입니다" }).waitFor();
-    expect(await form.getByRole("button", { name: "편입", exact: true }).isDisabled()).toBe(true);
-    await form.locator("label.choice", { hasText: "결제 조사" }).click();
-    await form.getByText("요약을 끝냈습니다").waitFor();
-    expect(await form.getByText("다른 지휘자의 흔적").count()).toBe(1);
-    expect(await form.getByRole("button", { name: "편입", exact: true }).isDisabled()).toBe(false);
-    await form.getByRole("textbox", { name: "이름" }).fill("결제 조사");
-    await form.getByRole("textbox", { name: "역할" }).fill("PG사 문서 조사");
-    await page.waitForTimeout(300);
-    await page.screenshot({ path: join(SHOTS, "desk-adopt.png") });
+  test("팀: 기존 편입을 노출하지 않고 CLI·모델을 정해 직원을 만든다", async () => {
+    const page = await open(deskCtx, hash("team"));
+    expect(await page.getByRole("button", { name: "기존 세션 편입" }).count()).toBe(0);
+    await page.getByRole("button", { name: "직원 추가" }).click();
+    const form = page.locator("form.form");
+    await form.getByLabel("이름", { exact: true }).fill("결제 조사");
+    await form.getByLabel("역할 · 선택").fill("PG사 문서 조사");
+    await form.getByLabel(/AI CLI/).selectOption("claude");
+    await form.getByLabel("모델 · 선택").fill("haiku");
+    await page.screenshot({ path: join(SHOTS, "desk-add-member.png") });
+    await form.getByRole("button", { name: "추가", exact: true }).click();
+    await until("직원 생성", projectState, (state) => state.members.some((member) => member.name === "결제 조사"));
+    const added = await memberNamed("결제 조사");
+    expect(added).toMatchObject({ role: "PG사 문서 조사", cli: "claude", modelOverride: "haiku", backend: "core" });
+    await page.locator(".tm-card", { hasText: "결제 조사" }).getByText("Claude Code", { exact: true }).waitFor();
     await page.close();
   }, 40_000);
 
-  test("설정 하나: 권한 3종·직급 모델을 바꾸면 다음 턴 인자와 서브에이전트 환경변수에 바로 들어간다", async () => {
+  test("설정 하나: 권한 3종·직급 모델을 바꾸면 다시 연 세션의 인자와 서브에이전트 환경변수에 바로 들어간다", async () => {
     // 바꾸기 전: 바이패스, 모델 인자 없음, 서브에이전트 변수 없음.
     await settled();
     const plain = fakeCalls("총괄").at(-1)!;
@@ -548,6 +528,9 @@ describe("전체 통합", () => {
 
     // 세 번째 모드도 그대로 넘어간다.
     await api("PUT", "/api/settings", { permissionMode: "default" });
+    // Permission mode is a provider launch option; explicitly reopen this idle holder.
+    await api("POST", `/api/members/${seoyun.id}/sleep`);
+    await api("POST", `/api/members/${seoyun.id}/resume`);
     const strict = await turnArgs("서윤", "표 제목을 다시 봐 주세요", seoyun.id);
     expect(argOf(strict, "--permission-mode")).toBe("default");
     await settled();
@@ -555,14 +538,19 @@ describe("전체 통합", () => {
   }, 60_000);
 
   test("직원별 덮어쓰기: 그 직원만 바뀌고, 지우면 직급 값으로 돌아간다", async () => {
+    await settled();
     const seoyun = await memberNamed("서윤");
     const page = await open(deskCtx, hash("team", seoyun.id));
-    const model = page.getByRole("combobox", { name: "모델" });
+    const model = page.getByLabel("모델", { exact: true });
     await model.waitFor();
-    expect(await model.locator("option").first().innerText()).toContain("sonnet");
+    expect(await model.getAttribute("placeholder")).toContain("sonnet");
     const settledSelect = (label: string) => page.waitForFunction((l) => !(document.querySelector(`select[aria-label="${l}"]`) as HTMLSelectElement).disabled, label);
-    await model.selectOption("haiku");
-    await settledSelect("모델");
+    await model.fill("haiku");
+    const savedModel = page.waitForResponse((response) => response.request().method() === "PATCH" && response.url().includes(`/members/${seoyun.id}`));
+    await page.getByRole("button", { name: "모델 저장" }).click();
+    const response = await savedModel;
+    expect({ status: response.status(), body: await response.text() }).toMatchObject({ status: 200 });
+    await until("모델 저장", () => memberNamed("서윤"), (m) => m.modelOverride === "haiku");
     await page.getByRole("combobox", { name: "effort" }).selectOption("xhigh");
     await settledSelect("effort");
     await until("덮어쓰기 저장", () => memberNamed("서윤"), (m) => m.modelOverride === "haiku" && m.effortOverride === "xhigh");
@@ -579,8 +567,9 @@ describe("전체 통합", () => {
     expect(argOf(conductor, "--effort")).toBe("high");
     await settled();
 
-    await model.selectOption("");
-    await settledSelect("모델");
+    await model.fill("");
+    await page.getByRole("button", { name: "모델 저장" }).click();
+    await until("모델 해제", () => memberNamed("서윤"), (m) => m.modelOverride === null);
     await page.getByRole("combobox", { name: "effort" }).selectOption("");
     await settledSelect("effort");
     await until("덮어쓰기 해제", () => memberNamed("서윤"), (m) => m.modelOverride === null && m.effortOverride === null);
@@ -627,7 +616,7 @@ describe("전체 통합", () => {
       await shot(page, name);
       await page.close();
     }
-    for (const name of ["desk-gate", "desk-inbox-done", "desk-adopt", "desk-setup"]) expect(existsSync(join(SHOTS, `${name}.png`))).toBe(true);
+    for (const name of ["desk-gate", "desk-inbox-done", "desk-add-member", "desk-setup"]) expect(existsSync(join(SHOTS, `${name}.png`))).toBe(true);
   }, 90_000);
 
   test("전체 점검: 브라우저 오류가 없다", () => {

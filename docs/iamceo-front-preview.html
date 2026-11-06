@@ -1,0 +1,330 @@
+<!doctype html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>IAMCEO · Liquid Glass 프론트 시안</title><style>/* 토큰·기본값. 랜딩(aing-check v3)의 색·움직임을 그대로 옮겼다. 글꼴만 시스템 글꼴로 바꿨다. */
+
+@property --spec { syntax:"<number>"; inherits:true; initial-value:0; }
+@property --g-blur { syntax:"<length>"; inherits:false; initial-value:28px; }
+
+:root {
+  /* 상태 색. 전 화면 공통 */
+  --st-work:#B9A8FF; --st-wait:#FFB070; --st-idle:#A6A6AE; --st-block:#FF8A80; --st-error:#FF5A62; --st-asleep:#8F88B2;
+  --bg:#090713; --bg-deep:#05040B;
+  --accent-fill:#6D4DF2; /* 흰 글자가 놓이는 작은 표시. --light-violet 은 흰 글자 대비가 4.5 에 모자란다 */
+  --light-violet:#7A5BFF; --light-orchid:#B35CFF; --light-indigo:#3D45FF; --light-rose:#FF6FB8; --ice:#A8ECFF;
+  --violet-rgb:122 91 255; --orchid-rgb:179 92 255; --indigo-rgb:61 69 255; --rose-rgb:255 111 184; --ice-rgb:168 236 255;
+  --ink-1:#F5F2FF; --ink-2:#C2BBDF; --ink-3:#8F88B2;
+  --focus:#B9A8FF;
+  --line:rgb(255 255 255 / .08);
+
+  /* 상태색: 글로 쓰일 때 어두운 판 위 대비 4.5 이상 */
+  --ok:#6FE3B2; --ok-rgb:111 227 178;
+  --warn:#FFC773; --warn-rgb:255 199 115;
+  --danger:#FF8A9B; --danger-rgb:255 138 155;
+
+  --t-quick:120ms; --t-resize:200ms;
+  --ease-out:cubic-bezier(.2,.8,.2,1);
+  --ease-spring:cubic-bezier(.34,1.56,.64,1);
+
+  --font-sans:-apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", system-ui, "Malgun Gothic", "Noto Sans KR", sans-serif;
+  --font-heading:var(--font-sans);
+  --font-code:ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* 랜딩보다 바탕 빛을 낮춘다: 카드 밖 글자(대화 줄기 등)가 빛 위에 바로 놓이기 때문이다 */
+  --aurora-k:.85;
+
+  --safe-t:env(safe-area-inset-top, 0px);
+  --safe-b:env(safe-area-inset-bottom, 0px);
+  --safe-l:env(safe-area-inset-left, 0px);
+  --safe-r:env(safe-area-inset-right, 0px);
+  --app-h:100dvh;
+}
+@supports (transition-timing-function: linear(0, 1)) {
+  :root { --ease-spring:linear(0, .009, .035 2.1%, .141, .281 6.7%, .723 12.9%, .938 16.7%, 1.017, 1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%, 1.051 39.6%, 1.017 43.1%, .991, .977 51%, .974 53.8%, .975 57.1%, .997 69.8%, 1.003 76.9%, 1); }
+}
+
+*, *::before, *::after { box-sizing:border-box; }
+html { height:100%; background:var(--bg); color:var(--ink-1); color-scheme:dark; font-family:var(--font-sans);
+       word-break:keep-all; overflow-wrap:anywhere; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
+       -webkit-text-size-adjust:100%; text-size-adjust:100%; }
+/* 문서 전체는 스크롤하지 않는다. 각 판이 자기 스크롤을 갖고, iOS 고무줄 때문에 고정 유리가 흔들리지 않게 한다 */
+body { height:100%; margin:0; overflow:hidden; overscroll-behavior:none; font-size:15px; line-height:1.55; }
+#root { height:100%; }
+h1, h2, h3, h4, p, ul, ol, figure, pre { margin:0; }
+ul, ol { padding:0; list-style:none; }
+a { color:inherit; text-decoration:none; }
+button, input, textarea, select { font:inherit; color:inherit; }
+button { background:none; border:0; padding:0; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+img, svg { display:block; max-width:100%; }
+[hidden] { display:none !important; }
+:focus-visible { outline:2px solid var(--focus); outline-offset:3px; }
+::selection { background:rgb(var(--violet-rgb) / .45); color:var(--ink-1); }
+/* iOS 는 16px 미만 입력칸에 초점이 가면 화면을 확대한다 */
+@media (max-width:1023.98px) { input, textarea, select { font-size:16px; } }
+* { scrollbar-width:thin; scrollbar-color:rgb(255 255 255 / .16) transparent; }
+
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border-width:0; }
+.t-tabular { font-variant-numeric:tabular-nums; }
+.t-code { font-family:var(--font-code); }
+/* 고정폭 입력칸의 안내 글은 한국어다. 고정폭으로 그리면 낱말 사이가 벌어진다 */
+.t-code::placeholder { font-family:var(--font-sans); }
+.ink-1 { color:var(--ink-1); } .ink-2 { color:var(--ink-2); } .ink-3 { color:var(--ink-3); }
+
+/* 유리 재질. 원본: aing-check 랜딩 app/globals.css · docs/v3/glass-api.md. 값은 고치지 않고 그대로 옮겼다(달라진 곳은 주석).
+   규칙
+   · 유리 판 뒤에는 늘 빛이 있어야 한다(AuroraField + LocalLight 1–2개).
+   · 글 많은 판은 tint(.glass-tint), 굴절은 화면당 판 3개까지(상단 탭 물방울 · 입력칸).
+   · .glass 의 ::before/::after 는 유리가 쓴다(링·광택, z 3). 다른 용도로 쓰지 말 것.
+   · 유리 판의 조상에 opacity<1 · filter · mask · clip-path · mix-blend-mode 금지(그 조상이 backdrop root 가 되어 뒤가 빈다). 페이드는 유리 자신에.
+   · 유리 안의 유리는 바깥 판의 채움만 흐린다. 겹침은 버튼·칩·탭 물방울 정도만. */
+
+.glass {
+  --g-blur:28px; --g-sat:175%; --g-a1:.045; --g-a2:.012; --g-r:22px; --g-tint:transparent;
+  --g-depth:inset 0 1px .5px -.5px rgb(255 255 255 / .6), inset 0 0 0 1px rgb(255 255 255 / .035),
+            inset 0 0 7px 1px rgb(6 3 20 / .22), inset 0 14px 26px -18px rgb(255 255 255 / .1),
+            inset 0 -12px 22px -16px rgb(255 255 255 / .06);
+  --g-shadow:0 24px 60px -24px rgb(4 2 14 / .8), 0 22px 56px -30px rgb(var(--violet-rgb) / .32);
+  --spec:0; --mx:50%; --my:-40%;
+  position:relative; isolation:isolate; border-radius:var(--g-r);
+  background:linear-gradient(180deg, rgb(255 255 255 / var(--g-a1)), rgb(255 255 255 / var(--g-a2)) 62%), var(--g-tint);
+  -webkit-backdrop-filter:blur(var(--g-blur)) saturate(var(--g-sat));
+  backdrop-filter:blur(var(--g-blur)) saturate(var(--g-sat));
+  box-shadow:var(--g-depth), var(--g-shadow);
+  transition:--spec 420ms var(--ease-out);
+}
+.glass::before {
+  content:""; position:absolute; inset:0; z-index:3; border-radius:inherit; padding:1.25px; pointer-events:none;
+  background:
+    radial-gradient(170px circle at var(--mx) var(--my), rgb(255 255 255 / calc(var(--spec) * .9)), transparent 70%),
+    radial-gradient(62% 58% at 34% 0%, rgb(255 255 255 / .95), rgb(255 255 255 / .42) 34%, rgb(255 255 255 / 0) 68%),
+    radial-gradient(46% 52% at 0% 12%, rgb(255 255 255 / .6), rgb(255 255 255 / 0) 62%),
+    radial-gradient(58% 54% at 100% 100%, rgb(var(--ice-rgb) / .34), rgb(196 168 255 / .16) 38%, rgb(255 255 255 / 0) 68%),
+    linear-gradient(rgb(255 255 255 / .07), rgb(255 255 255 / .07));
+  -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;
+  mask:linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+}
+.glass::after {
+  content:""; position:absolute; inset:0; z-index:3; border-radius:inherit; pointer-events:none;
+  background:
+    radial-gradient(340px circle at var(--mx) var(--my), rgb(255 255 255 / calc(var(--spec) * .07)), transparent 68%),
+    linear-gradient(180deg, rgb(255 255 255 / .035), transparent 22%);
+}
+.glass--thin {
+  --g-blur:18px; --g-sat:170%; --g-a1:.06; --g-a2:.022; --g-r:999px;
+  --g-depth:inset 0 1px .5px -.5px rgb(255 255 255 / .55), inset 0 0 0 1px rgb(255 255 255 / .03),
+            inset 0 0 5px rgb(6 3 20 / .2), inset 0 -6px 12px -10px rgb(255 255 255 / .07);
+  --g-shadow:0 10px 30px -14px rgb(4 2 14 / .75);
+}
+.glass--thick::before { padding:1.5px; }
+.glass--regular { --g-blur:28px; --g-sat:175%; --g-a1:.045; --g-a2:.012; --g-r:22px; }
+.glass--thick {
+  --g-blur:36px; --g-sat:170%; --g-a1:.05; --g-a2:.014; --g-r:30px;
+  --g-depth:inset 0 1px .5px -.5px rgb(255 255 255 / .7), inset 0 0 0 1px rgb(255 255 255 / .035),
+            inset 0 0 9px 1px rgb(6 3 20 / .26), inset 0 18px 30px -20px rgb(255 255 255 / .12),
+            inset 0 -14px 26px -18px rgb(255 255 255 / .07);
+  --g-shadow:0 44px 100px -34px rgb(4 2 14 / .9), 0 34px 90px -44px rgb(var(--violet-rgb) / .42);
+}
+.glass[data-refract="on"] { backdrop-filter:var(--g-refract) saturate(var(--g-sat)); }
+/* 랜딩 tint 는 .38. 여기는 판 위 글이 본문이라 더 짙게 둔다(화면 시험의 대비 검사가 4.5 이상을 지킨다) */
+.glass-tint { --g-tint:rgb(9 7 19 / .52); }
+.glass-tint-soft { --g-tint:rgb(9 7 19 / .3); }
+
+/* ── 유리 버튼 ── */
+.gbtn {
+  --b-h:48px; --b-px:24px; --g-tint:transparent; --b-tint:transparent; --spec:0; --mx:50%; --my:-60%;
+  position:relative; isolation:isolate; display:inline-flex; flex-shrink:0; align-items:center; justify-content:center; gap:8px;
+  height:var(--b-h); padding:0 var(--b-px); border-radius:999px; white-space:nowrap; user-select:none; cursor:pointer;
+  font-family:var(--font-heading); font-weight:600; font-size:16px; line-height:1; letter-spacing:-.01em;
+  -webkit-tap-highlight-color:transparent;
+  transition:scale 520ms var(--ease-spring), background-color 160ms linear, color 160ms linear, box-shadow 200ms linear, filter 160ms linear, --spec 360ms var(--ease-out);
+}
+.gbtn:active { scale:.97; transition-duration:90ms, 160ms, 160ms, 200ms, 160ms, 360ms; transition-timing-function:var(--ease-out); }
+.gbtn--l { --b-h:52px; --b-px:26px; font-size:16px; }
+.gbtn--m { --b-h:44px; --b-px:20px; font-size:15px; }
+.gbtn--s { --b-h:32px; --b-px:14px; font-size:13.5px; }
+.gbtn--s::after { content:""; position:absolute; inset:-6px 0; }
+.gbtn--primary, .gbtn--glass, .gbtn--chip {
+  -webkit-backdrop-filter:blur(16px) saturate(170%); backdrop-filter:blur(16px) saturate(170%);
+}
+.gbtn--primary::before, .gbtn--glass::before, .gbtn--chip::before {
+  content:""; position:absolute; inset:0; border-radius:inherit; padding:1px; pointer-events:none;
+  -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite:xor;
+  mask:linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+}
+.gbtn--primary {
+  color:#fff; text-shadow:0 1px 1px rgb(28 8 92 / .45);
+  background:
+    radial-gradient(150px circle at var(--mx) var(--my), rgb(255 255 255 / calc(var(--spec) * .3)), transparent 70%),
+    linear-gradient(180deg, rgb(255 255 255 / .14), rgb(255 255 255 / .025) 44%, rgb(255 255 255 / 0) 52%),
+    linear-gradient(180deg, rgb(134 104 252 / .88), rgb(104 68 246 / .84) 55%, rgb(92 54 234 / .88)),
+    var(--b-tint);
+  box-shadow:inset 0 1px .5px rgb(255 255 255 / .7), inset 0 -1px 1px rgb(255 255 255 / .18),
+             inset 0 -10px 16px -9px rgb(222 208 255 / .62), inset 0 0 14px rgb(200 182 255 / .25), inset 0 0 0 1px rgb(255 255 255 / .06),
+             0 12px 32px -10px rgb(var(--violet-rgb) / .78), 0 2px 8px -2px rgb(16 6 52 / .55);
+}
+.gbtn--primary::before {
+  background:radial-gradient(60% 90% at 30% 0%, rgb(255 255 255 / .9), rgb(255 255 255 / .3) 45%, rgb(255 255 255 / 0) 75%),
+             radial-gradient(60% 90% at 100% 100%, rgb(var(--ice-rgb) / .45), rgb(255 255 255 / 0) 70%),
+             linear-gradient(rgb(255 255 255 / .16), rgb(255 255 255 / .16));
+}
+.gbtn--primary.gbtn--s {
+  background:
+    radial-gradient(150px circle at var(--mx) var(--my), rgb(255 255 255 / calc(var(--spec) * .3)), transparent 70%),
+    linear-gradient(180deg, rgb(255 255 255 / .12), rgb(255 255 255 / 0) 30%),
+    linear-gradient(180deg, rgb(134 104 252 / .88), rgb(104 68 246 / .84) 55%, rgb(92 54 234 / .88)),
+    var(--b-tint);
+}
+.gbtn--primary:hover { filter:brightness(1.07) saturate(1.06); }
+.gbtn--glass, .gbtn--chip {
+  color:var(--ink-1);
+  background:
+    radial-gradient(130px circle at var(--mx) var(--my), rgb(255 255 255 / calc(var(--spec) * .16)), transparent 70%),
+    linear-gradient(180deg, rgb(255 255 255 / .1), rgb(255 255 255 / .03)), var(--g-tint);
+  box-shadow:inset 0 1px .5px rgb(255 255 255 / .45), inset 0 0 6px rgb(6 3 20 / .18), 0 8px 22px -10px rgb(4 2 14 / .7);
+}
+.gbtn--glass::before, .gbtn--chip::before {
+  background:radial-gradient(60% 90% at 30% 0%, rgb(255 255 255 / .75), rgb(255 255 255 / .2) 45%, rgb(255 255 255 / 0) 75%),
+             radial-gradient(60% 90% at 100% 100%, rgb(var(--ice-rgb) / .3), rgb(255 255 255 / 0) 70%),
+             linear-gradient(rgb(255 255 255 / .09), rgb(255 255 255 / .09));
+}
+.gbtn--glass:hover, .gbtn--chip:hover {
+  background:
+    radial-gradient(130px circle at var(--mx) var(--my), rgb(255 255 255 / calc(var(--spec) * .16)), transparent 70%),
+    linear-gradient(180deg, rgb(255 255 255 / .16), rgb(255 255 255 / .06)), var(--g-tint);
+}
+.gbtn--chip { --b-h:36px; --b-px:13px; font-size:13.5px; gap:6px; }
+.gbtn--ghost { color:var(--ink-2); background:transparent; }
+.gbtn--ghost:hover { color:var(--ink-1); background:rgb(255 255 255 / .07); }
+.gbtn[aria-disabled="true"], .gbtn:disabled { pointer-events:none; cursor:default; opacity:.4; }
+@media (prefers-reduced-motion: reduce) { .gbtn, .gbtn:active { transition:none; scale:none; } }
+
+/* ── 물방울 유리 탭(랜딩 기능 세그먼트 .fx-seg · .fx-drop) ──
+   판 = regular 유리 + 어두운 보라 바닥. 물방울 = 칸 하나 크기의 볼록한 유리, 글자 위에 얹혀(pointer-events 없음) 가장자리 렌즈가 지나가는 칸 글자를 휜다.
+   가운데 서리는 거의 0 이라 활성 칸 글자는 또렷하다. 굴절을 못 켜는 환경은 같은 채움·테두리·그림자의 맑은 알약이다. */
+.gtabs-wrap { --n:4; --active:0; --tab-h:40px; position:relative; isolation:isolate; display:block; }
+/* 판 뒤로 번지는 보라 빛(랜딩은 절의 LocalLight 가 맡던 몫). 활성 칸을 따라 움직인다 */
+.gtabs-glow {
+  position:absolute; z-index:-1; top:50%; left:calc(4px + (100% - 8px) * (var(--active) + .5) / var(--n));
+  width:calc(200% / var(--n) + 90px); height:calc(var(--tab-h) * 3.1); translate:-50% -50%; border-radius:50%; pointer-events:none;
+  background:radial-gradient(closest-side, rgb(var(--violet-rgb) / .56), rgb(var(--violet-rgb) / .22) 48%, rgb(var(--violet-rgb) / 0) 100%);
+  transition:left 620ms var(--ease-spring);
+}
+.gtabs { --g-r:999px; --g-tint:rgb(24 16 56 / .5); position:relative; padding:4px; }
+.gtabs__list { position:relative; display:grid; grid-template-columns:repeat(var(--n), minmax(0, 1fr)); margin:0; padding:0; list-style:none; }
+.gtabs__link {
+  display:flex; align-items:center; justify-content:center; gap:6px; height:var(--tab-h); padding:0 6px; border-radius:999px; white-space:nowrap;
+  font-family:var(--font-heading); font-weight:600; font-size:14.5px; line-height:1; letter-spacing:-.01em;
+  color:var(--ink-2); transition:color 200ms linear; -webkit-tap-highlight-color:transparent;
+}
+.gtabs__link:hover, .gtabs__link[aria-current] { color:var(--ink-1); }
+/* 활성 칸 글자는 물방울 위로 올린다: 물방울 채움이 글자를 덮으면 흐려진다. 다른 칸 글자는 아래에 있어 물방울이 지날 때 렌즈로 휜다 */
+.gtabs__link[aria-current] { position:relative; z-index:2; }
+.gtabs__link:focus-visible { outline-offset:-2px; }
+.gtabs__drop {
+  /* 판이 어두운 틴트라 랜딩의 흰 채움만으로는 회색으로 보인다. 보라를 약간 더해 뒤 빛을 머금은 물방울로 */
+  --g-r:999px; --g-blur:.01px; --g-a1:.22; --g-a2:.09; --g-tint:rgb(var(--violet-rgb) / .1);
+  --g-shadow:0 6px 18px -6px rgb(var(--violet-rgb) / .75), 0 0 16px -2px rgb(var(--violet-rgb) / .45), 0 2px 6px -2px rgb(4 2 14 / .5);
+  position:absolute; top:4px; left:4px; z-index:1; display:block;
+  width:calc((100% - 8px) / var(--n)); height:var(--tab-h); pointer-events:none;
+  translate:calc(var(--active) * 100%) 0;
+  transition:translate 620ms var(--ease-spring);
+}
+@media (prefers-reduced-motion: reduce) { .gtabs__drop, .gtabs-glow { transition:none; } }
+
+/* ── 바탕 오로라: fixed 전체 화면 층. filter:blur 없이 방사 그라디언트만 ── */
+.aurora { position:fixed; inset:0; z-index:-1; overflow:hidden; pointer-events:none; contain:strict;
+  background:radial-gradient(130% 70% at 50% 115%, rgb(var(--indigo-rgb) / .14), transparent 70%), var(--bg); }
+.aurora__blob { position:absolute; left:var(--x); top:var(--y); width:var(--w); height:var(--h); translate:-50% -50%; border-radius:50%;
+  background:radial-gradient(closest-side, rgb(var(--c) / var(--a)), rgb(var(--c) / calc(var(--a) * .5)) 40%,
+                             rgb(var(--c) / calc(var(--a) * .16)) 68%, rgb(var(--c) / 0) 100%);
+  animation:var(--drift, aurora-a) var(--dur, 56s) ease-in-out infinite alternate; animation-delay:var(--delay, 0s); will-change:transform; }
+.aurora::after { content:""; position:absolute; inset:0; opacity:.05; background-size:180px 180px;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+html[data-tab-hidden] .aurora__blob { animation-play-state:paused; }
+@keyframes aurora-a { from { transform:translate3d(-3%, -2%, 0) scale(1); } to { transform:translate3d(4%, 3%, 0) scale(1.08); } }
+@keyframes aurora-b { from { transform:translate3d(3%, -3%, 0) scale(1.05); } to { transform:translate3d(-4%, 4%, 0) scale(.96); } }
+@keyframes aurora-c { from { transform:translate3d(-2%, 3%, 0) scale(.97); } to { transform:translate3d(3%, -3%, 0) scale(1.06); } }
+@media (prefers-reduced-motion: reduce) { .aurora__blob { animation:none; } }
+
+/* 국소 빛: 부모는 relative + isolate */
+.local-light { position:absolute; left:var(--x, 50%); top:var(--y, 50%); z-index:-1; width:var(--s, 900px); height:calc(var(--s, 900px) * var(--ar, .7));
+  translate:-50% -50%; border-radius:50%; pointer-events:none;
+  background:radial-gradient(closest-side, rgb(var(--c) / var(--a)), rgb(var(--c) / calc(var(--a) * .42)) 45%, rgb(var(--c) / 0) 100%); }
+
+/* backdrop-filter 를 못 그리는 환경·투명도 줄이기 = 불투명에 가까운 판(같은 링·그림자). 기본값 뒤에 둔다 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass, .gbtn--glass, .gbtn--chip { --g-tint:rgb(22 17 44 / .86); }
+  .gbtn--primary { --b-tint:rgb(96 66 236 / .92); }
+  .gtabs__drop { --g-tint:rgb(var(--violet-rgb) / .34); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .glass, .gbtn--glass, .gbtn--chip { --g-tint:rgb(22 17 44 / .92); }
+  .gbtn--primary { --b-tint:rgb(96 66 236 / .95); }
+  .gtabs__drop { --g-tint:rgb(var(--violet-rgb) / .34); }
+}
+/* Prototype-specific layout. Material and palette reuse web/src/styles/{tokens,glass}.css. */
+body{font-size:14px}.prototype-bar{height:36px;padding:0 24px;display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--ink-2);background:#080610;border-bottom:1px solid var(--line);letter-spacing:.03em}.prototype-bar a{color:var(--focus)}.app{height:calc(100dvh - 36px);container-type:inline-size;position:relative;isolation:isolate;overflow:hidden;background:radial-gradient(ellipse at 77% 23%,#522c724d,transparent 51%),radial-gradient(ellipse at 32% 84%,#39238a55,transparent 55%),var(--bg)}.app:before{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at 100% 100%,#3d45ff22,transparent 60%)}.sidebar{position:absolute;inset:12px auto 12px 12px;width:224px;display:flex;flex-direction:column;padding:18px 10px;--g-r:24px;--g-tint:rgb(16 12 34 / .42)}.brand{display:flex;align-items:center;gap:10px;font-weight:750;letter-spacing:.12em;font-size:12px;padding:7px 12px 26px}.brand-mark{width:19px;height:9px;border-radius:8px;background:linear-gradient(160deg,#decbff,#8060ff);box-shadow:0 0 17px #9f79ff70}.subtle{color:var(--ink-3);font-size:12px}.side-label{padding:24px 12px 8px;font-size:11px;color:var(--ink-3)}.project{padding:12px;border-radius:13px;text-align:left;width:100%;display:flex;gap:10px;align-items:center;min-height:60px}.project strong{font-weight:550;font-size:13px}.project small{display:block;color:var(--ink-2);font-size:11px;margin-top:3px}.project.active{background:linear-gradient(120deg,#7961bc50,#5b3c8540);box-shadow:inset 0 1px #d3bbff38,inset 0 0 0 1px #d3bbff17}.project:not(.active):hover{background:#ffffff08}.proj-icon{display:grid;place-items:center;width:30px;height:32px;border-radius:9px;background:#ffffff0b;color:#c7b5ff;font-size:17px}.side-foot{margin-top:auto;border-top:1px solid var(--line);padding-top:12px;display:grid;gap:7px}.text-button{padding:10px 12px;text-align:left;color:var(--ink-2);font-size:12px;min-height:40px}.text-button:hover{color:white}.connection{font-size:11px;color:var(--ink-2);display:flex;align-items:center;gap:7px}.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 9px #6fe3b256}.sidebar .connection{padding:5px 12px}.top{position:absolute;top:20px;left:268px;right:32px;display:flex;align-items:center;justify-content:space-between;gap:20px;height:46px}.top-title{display:flex;flex-direction:column;gap:3px}.top-title strong{font-size:15px}.top-title small{font-size:11px;color:var(--ink-3)}.mobile-switch{display:none}.tabs{position:absolute;top:18px;left:calc(50% + 112px);translate:-50% 0;width:480px;z-index:4;--n:5;--active:0;--tab-h:40px}.gtabs__link{font-size:13px;width:100%}.badge{display:inline-grid;place-items:center;min-width:17px;height:17px;padding:0 5px;border-radius:20px;background:var(--accent-fill);font-size:10px;color:white}.workspace{position:absolute;left:260px;right:16px;top:91px;bottom:136px;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}.content{max-width:1170px;margin:auto;padding:14px 26px 40px}.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:26px}.eyebrow{font-size:10px;color:#b9a8ff;letter-spacing:.14em;margin-bottom:8px;font-weight:600}.page-head h1{font-size:29px;font-weight:600;letter-spacing:-.05em;line-height:1.3}.page-head p{font-size:12px;color:var(--ink-2);margin-top:8px}.gbtn{font-size:12px}.gbtn--s{font-size:12px;--b-h:34px}.gbtn--m{font-size:12px;--b-h:40px}.row{display:flex;align-items:center;gap:10px}.between{justify-content:space-between}.grow{flex:1;min-width:0}.stack{display:grid;gap:14px}.dashboard{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,1fr);gap:18px;align-items:start}.panel{--g-r:20px;--g-tint:rgb(12 9 28 / .56);padding:20px;min-width:0}.panel-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:17px}.panel-title h2{font-size:13px;font-weight:600}.panel-title button{color:var(--focus);font-size:11px;min-height:32px}.panel-title .subtle{font-size:10px}.intro-panel{background:linear-gradient(110deg,#8261bb33,#50307c12);padding:20px 22px;border:1px solid #c5a7ff26;border-radius:19px;margin-bottom:22px;display:flex;gap:15px;align-items:center}.avatar{width:35px;height:35px;border-radius:12px;background:linear-gradient(150deg,#65518d,#30283f);display:grid;place-items:center;font-size:14px;flex:none;border:1px solid #ffffff16}.avatar.codex{background:linear-gradient(150deg,#316b69,#1b333e);color:#a8eee0}.avatar.chief{background:linear-gradient(150deg,#9b80ec,#5a3e92);color:white}.intro-panel p{font-size:13px;margin-top:4px;color:var(--ink-2);line-height:1.7}.intro-panel b{font-size:13px}.pill{display:inline-flex;align-items:center;gap:5px;font-size:10px;padding:4px 8px;border-radius:20px;background:#ffffff09;color:var(--ink-2);white-space:nowrap}.pill.warn{color:var(--warn);background:#ffc77312}.pill.ok{color:var(--ok);background:#6fe3b212}.pill.purple{color:#cbb8ff;background:#aa85ff18}.request{padding:16px 0;border-top:1px solid var(--line)}.request:first-of-type{padding-top:0;border-top:0}.request h3{font-size:14px;font-weight:550;margin:9px 0 6px}.request p{color:var(--ink-2);font-size:12px;line-height:1.8}.request .row:last-child{margin-top:12px}.request-meta{font-size:10px;color:var(--ink-3)}.task-row{padding:15px 0;border-top:1px solid var(--line);display:flex;gap:12px;align-items:center}.task-row:first-of-type{border-top:0}.task-row strong{font-size:12px;font-weight:550}.task-row small{display:block;font-size:11px;color:var(--ink-3);margin-top:4px}.task-row button{font-size:12px;color:var(--ink-2)}.progress{height:3px;border-radius:2px;background:#ffffff0c;margin-top:10px;overflow:hidden}.progress i{display:block;height:100%;background:linear-gradient(90deg,#7154cd,#b79af9);border-radius:2px}.metrics{display:flex;gap:24px;padding:6px 0 18px}.metrics strong{font-size:23px;font-weight:500}.metrics small{display:block;color:var(--ink-3);font-size:10px}.file-link{display:flex;align-items:center;width:100%;gap:12px;padding:12px 0;text-align:left;border-top:1px solid var(--line)}.file-link strong{font-size:12px;font-weight:550;display:block}.file-link small{font-size:10px;color:var(--ink-3)}.file-icon{width:36px;height:42px;border:1px solid #d8c9ff25;border-radius:9px;background:linear-gradient(140deg,#a47bff22,#32264c33);display:grid;place-items:center;color:#c0a5ff;font-size:11px}.timeline{font-size:11px;color:var(--ink-2);display:grid;gap:13px}.timeline span{color:var(--ink-3);font-size:10px;margin-right:12px}.bottom{position:absolute;left:286px;right:42px;bottom:18px;z-index:5;max-width:1120px;margin:auto}.composer{--g-r:22px;--g-tint:rgb(17 12 36 / .75);padding:10px 13px}.composer-top{display:flex;gap:8px;align-items:center;font-size:10px;color:var(--ink-3)}select{max-width:100%;background:#262039;border:1px solid #ffffff12;border-radius:20px;font-size:11px;padding:5px 10px;color:var(--ink-2)}.composer-input{display:flex;align-items:flex-end;gap:10px;margin-top:6px}.composer textarea{flex:1;min-width:0;resize:none;background:none;border:0;outline:none;min-height:42px;max-height:110px;padding:10px 2px;font-size:13px;color:var(--ink-1);line-height:22px}.composer textarea::placeholder{color:#a99dc5}.icon-btn{display:grid;place-items:center;min-width:38px;min-height:38px;border-radius:50%;font-size:20px;color:var(--ink-2)}.send{color:white;background:linear-gradient(160deg,#a28ae599,#7155cfaa);box-shadow:inset 0 1px #eadcff88,0 0 20px #8860ff22}.composer-foot{font-size:9px;color:var(--ink-3);margin:4px 2px 0}.filterbar{display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap}.filter{min-height:34px;border-radius:20px;padding:5px 14px;font-size:11px;color:var(--ink-2);border:1px solid var(--line);background:#ffffff03}.filter.active{color:#e2d6ff;background:#8c68ed29;border-color:#af8aff50}.inbox-layout{display:grid;grid-template-columns:1fr 300px;gap:20px}.note{font-size:12px;color:var(--ink-2);line-height:1.9}.note strong{color:var(--ink-1);font-weight:500}.divider{height:1px;background:var(--line);margin:18px 0}.chief-card{display:flex;align-items:center;gap:14px}.team-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:18px}.member h2{font-size:15px;margin-top:17px}.member p{font-size:12px;color:var(--ink-2);line-height:1.8;margin:10px 0 18px}.member .actions{display:flex;gap:6px;flex-wrap:wrap}.team-queue{margin-top:20px}.chat-layout{display:grid;grid-template-columns:230px 1fr;gap:26px}.thread-list{padding:8px;align-self:start}.thread-option{padding:14px 10px;border-radius:12px;width:100%;display:flex;gap:10px;text-align:left}.thread-option.active{background:#9370df25}.thread-option b{display:block;font-size:12px;font-weight:550}.thread-option small{font-size:10px;color:var(--ink-3)}.chat-head{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:18px}.chat-head strong{font-size:13px}.chat-head small{display:block;font-size:10px;color:var(--ink-3);margin-top:3px}.message{background:#0f0b21c9;border:1px solid #ffffff12;border-radius:19px;padding:17px 19px;margin:20px 32px 8px 0;font-size:13px;line-height:1.9}.message.mine{background:linear-gradient(130deg,#744de661,#6742bd61);margin:20px 0 8px 70px}.message .meta{font-size:10px;color:#b8a7d6;margin-bottom:9px;display:flex;justify-content:space-between}.message button{font-size:12px;color:var(--focus);margin-top:10px;text-decoration:underline;text-underline-offset:4px}.date-line{text-align:center;font-size:10px;color:var(--ink-3);margin-top:22px}.files-layout{display:grid;grid-template-columns:260px 1fr;gap:22px}.file-list .file-link{padding:15px 10px;border-radius:12px;border:0}.file-list .file-link.active{background:#8562d228}.artifact{padding:24px}.artifact h2{font-size:19px;letter-spacing:-.03em}.artifact p{color:var(--ink-2);font-size:12px;line-height:1.8}.artifact-stage{border-radius:15px;background:radial-gradient(ellipse at top,#64538533,transparent 75%),#080710;min-height:270px;padding:24px;display:grid;place-items:center;margin:22px 0}.mini-app{width:200px;background:#f4f2fa;color:#221936;border-radius:24px;padding:22px 15px;box-shadow:0 16px 50px #0006;border:4px solid #393144}.mini-app h3{font-size:17px;margin:17px 0 12px}.mini-app small{font-size:8px;color:#746681}.mini-app .mini-card{background:white;border-radius:10px;padding:12px;margin-top:9px;font-size:10px;border:1px solid #e8e1ef}.mini-app .mini-card p{font-size:8px;color:#7c708b;margin-top:5px}.mini-app .mini-nav{margin-top:25px;font-size:8px;word-spacing:14px;color:#685781}.checklist{display:grid;gap:10px;font-size:12px;color:var(--ink-2)}.checklist span{color:var(--ok);margin-right:8px}.setting-row{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:18px 0;border-top:1px solid var(--line)}.setting-row b{display:block;font-size:13px;font-weight:550}.setting-row small{font-size:11px;color:var(--ink-3)}.toggle{width:38px;height:23px;appearance:none;border-radius:20px;background:#353044;position:relative;cursor:pointer;flex:none}.toggle:checked{background:#8a68da}.toggle:after{content:'';position:absolute;top:3px;left:3px;width:17px;height:17px;background:#f3effb;border-radius:50%;transition:transform .2s}.toggle:checked:after{transform:translateX(15px)}.empty{padding:35px 10px;text-align:center;color:var(--ink-2);line-height:2}.empty b{color:var(--ok);display:block;font-size:18px}.toast{position:absolute;left:50%;bottom:146px;translate:-50%;z-index:20;padding:12px 20px;border:1px solid #c2a8ff44;border-radius:14px;background:#261c3ff2;font-size:12px;box-shadow:0 10px 40px #0005;max-width:90%;text-align:center}.modal{position:fixed;inset:0;width:min(500px,calc(100vw - 28px));border:1px solid #d4c3ff38;border-radius:25px;padding:26px;background:linear-gradient(145deg,#302640f5,#151021fa);color:var(--ink-1);box-shadow:0 30px 100px #0009;max-height:85dvh;overflow:auto}.modal::backdrop{background:#05030b99;backdrop-filter:blur(8px)}.modal h2{font-size:21px;letter-spacing:-.03em}.modal p{font-size:12px;color:var(--ink-2);margin:14px 0;line-height:1.9}.modal label{display:block;font-size:12px;margin-top:17px;color:var(--ink-2)}.modal input:not([type=radio]),.modal textarea,.modal select{width:100%;border:1px solid #ffffff22;border-radius:10px;padding:12px;background:#0a071a70;font-size:14px;margin-top:7px}.modal textarea{min-height:90px;resize:vertical}.modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:23px}.modal .detail-line{padding:12px 0;border-bottom:1px solid var(--line);font-size:12px;color:var(--ink-2)}.modal .detail-line b{color:white;font-weight:500}.modal .close{float:right;font-size:22px;min-width:30px}.radio-option{padding:12px;border:1px solid var(--line);border-radius:10px}.attachment-chip{font-size:10px;color:#d1befb;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.terminal{background:#07060c;border:1px solid #ffffff12;border-radius:12px;padding:16px;font:11px/2 ui-monospace,monospace;white-space:pre-wrap;color:#b8d5c7}.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}.mobile-thread-select{display:none}.app[data-page=settings] .workspace{bottom:20px}.app[data-page=settings] .bottom{display:none}.top .connection{white-space:nowrap}.proto-hint{display:none}
+@container(max-width:1150px){.top-title small{display:none}.tabs{width:400px;left:auto;right:25px;translate:0}.top .connection{display:none}.dashboard{grid-template-columns:1.2fr 1fr}.content{padding-inline:12px}.team-grid{grid-template-columns:1fr 1fr}.inbox-layout{grid-template-columns:1fr}.inbox-layout>aside{display:block}.files-layout{grid-template-columns:200px 1fr}.chat-layout{grid-template-columns:180px 1fr;gap:14px}}
+@container(max-width:760px){.sidebar{display:none}.top{top:12px;left:14px;right:14px;height:46px;border-radius:17px;background:linear-gradient(#ffffff09,#ffffff02);box-shadow:inset 0 1px #ffffff55,inset 0 0 0 1px #ffffff0d;padding:0 12px;backdrop-filter:blur(25px)}.top-title{display:none}.mobile-switch{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;min-height:44px}.top .connection{display:flex;font-size:9px}.tabs{position:absolute;top:auto;bottom:12px;left:14px;right:14px;translate:none;width:auto;--tab-h:42px}.gtabs__link{font-size:12px;gap:4px}.badge{font-size:9px;min-width:15px;height:15px;padding:0 4px}.workspace{left:0;right:0;top:75px;bottom:185px;scrollbar-gutter:auto}.content{padding:12px 16px 25px}.page-head{margin-bottom:20px;gap:10px}.page-head h1{font-size:25px}.page-head p{font-size:11px}.page-head>.gbtn{--b-px:13px}.eyebrow{font-size:9px;margin-bottom:6px}.dashboard{grid-template-columns:1fr;gap:14px}.intro-panel{margin-bottom:16px;padding:16px}.intro-panel p{font-size:12px}.panel{padding:17px;--g-r:19px}.panel-title{margin-bottom:14px}.bottom{left:14px;right:14px;bottom:73px}.composer{padding:8px 11px;--g-r:20px}.composer textarea{font-size:16px;min-height:40px;padding:7px 0;line-height:23px}.composer-foot{display:none}.composer-top select{font-size:11px;max-width:180px}.composer-top{font-size:9px}.composer-input{margin-top:2px}.icon-btn{min-width:34px;min-height:36px}.team-grid{grid-template-columns:1fr}.team-grid .member{padding:20px}.chief-card{display:grid;grid-template-columns:35px minmax(0,1fr) auto;gap:12px}.chief-card .gbtn{margin:0}.chief-card .gbtn:nth-last-child(2){grid-column:2}.chief-card .gbtn:last-child{grid-column:3}.chat-layout{display:block}.thread-list{display:none}.mobile-thread-select{display:block;margin-bottom:16px;width:100%;font-size:12px;padding:10px}.chat-head{padding-bottom:14px}.message{margin-right:15px;font-size:12px;padding:15px}.message.mine{margin-left:32px}.files-layout{grid-template-columns:1fr}.file-list{display:flex;gap:8px;overflow:auto;padding-bottom:8px}.file-list .file-link{min-width:180px;width:180px;flex:none;padding:10px}.file-list .file-icon{width:26px;height:32px}.artifact{padding:18px}.artifact-stage{padding:20px 10px}.settings-grid{grid-template-columns:1fr}.toast{bottom:190px;width:max-content;max-width:90%}.app[data-page=settings] .workspace{bottom:75px}.filterbar{gap:5px}.filter{padding:5px 11px}.request h3{font-size:14px}.metrics{justify-content:space-between;gap:16px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}@media(max-width:600px){.prototype-bar{padding:0 14px;font-size:9px}.prototype-bar .proto-desktop{display:none}}
+</style></head><body><div class="prototype-bar"><span>IAMCEO <span class="proto-desktop">/ LIQUID GLASS</span> · 인터랙티브 시안 · 예시 데이터</span><a href="iamceo-front-gallery.html" target="_top">전체 시안 ↗</a></div>
+<div class="app" id="app" data-page="home">
+<aside class="sidebar glass"><div class="brand"><span class="brand-mark"></span>IAMCEO</div><button class="project" data-action="hq"><span class="proj-icon">⌂</span><span><strong>본사</strong><small>전체 프로젝트 살펴보기</small></span></button><div class="side-label">프로젝트</div><button class="project active" data-action="project"><span class="proj-icon">◈</span><span class="grow"><strong>서비스 출시</strong><small>3개 업무 · 병렬 진행 중</small></span><span class="badge" data-count>2</span></button><button class="project" data-action="research"><span class="proj-icon">⌕</span><span><strong>리서치</strong><small>새 프로젝트 준비</small></span></button><button class="text-button" data-action="new-project">＋ 새 프로젝트</button><div class="side-foot"><button class="text-button" data-nav="settings">⚙ &nbsp; 설정</button><div class="connection"><span class="dot"></span>Mac Studio 연결됨</div><div class="subtle" style="padding:0 12px;font-size:9px">마지막 동기화 · 방금 전</div></div></aside>
+<header class="top"><div class="top-title"><strong>서비스 출시</strong><small>한 곳에서 지시하고, 어디서든 이어가세요.</small></div><button class="mobile-switch" data-action="projects">서비스 출시 ⌄</button><div class="connection"><span class="dot"></span>호스트 연결됨</div></header>
+<div class="gtabs-wrap tabs" id="tabs"><span class="gtabs-glow" aria-hidden="true"></span><nav class="glass gtabs" aria-label="주요 메뉴"><span class="glass gtabs__drop" aria-hidden="true"></span><ol class="gtabs__list"><li><button class="gtabs__link" data-nav="home">홈</button></li><li><button class="gtabs__link" data-nav="inbox">결재함 <span class="badge" data-count>2</span></button></li><li><button class="gtabs__link" data-nav="team">팀</button></li><li><button class="gtabs__link" data-nav="chat">대화</button></li><li><button class="gtabs__link" data-nav="files">자료</button></li></ol></nav></div>
+<main class="workspace" id="workspace"><div class="content" id="content"></div></main>
+<footer class="bottom"><form class="glass composer" id="composer"><div class="composer-top"><select id="recipient" aria-label="보낼 대상"><option value="chief">총괄 · Claude</option><option value="design">앱 화면 개편 담당 · Claude</option><option value="login">로그인 개선 담당 · Codex</option><option value="research">시장 조사 담당 · Claude</option></select><span id="scope">프로젝트 전체</span><span class="attachment-chip" id="attachment"></span></div><div class="composer-input"><button class="icon-btn" type="button" data-action="attach" aria-label="파일 첨부">⌁</button><textarea id="draft" rows="1" aria-label="지시나 질문" placeholder="지시나 질문을 남겨주세요"></textarea><button class="icon-btn send" type="submit" aria-label="메시지 보내기">↑</button></div><div class="composer-foot">총괄 또는 담당자에게 직접 보냅니다. 작업과 대화 기록이 함께 남습니다.</div><input type="file" id="attachment-file" hidden></form></footer>
+<div class="toast" id="toast" role="status" hidden></div></div><dialog class="modal" id="modal" aria-labelledby="modal-title"></dialog>
+<script>// Review-only state: no network calls, real approvals, agents, or file uploads.
+const $=s=>document.querySelector(s), esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const state={page:'home',filter:'pending',approved:false,answered:false,answer:'',target:'chief',file:'screen',version:'v2',chief:'Claude',models:{design:'Claude',login:'Codex',research:'Claude'},paused:{},messages:{chief:[],design:[],login:[],research:[]},extra:[],attachment:''};
+const people={chief:'총괄',design:'앱 화면 개편 담당',login:'로그인 개선 담당',research:'시장 조사 담당'};
+const taskNames={chief:'프로젝트 전체',design:'앱 화면 개편',login:'로그인 개선',research:'시장 조사'};
+const model=k=>k==='chief'?state.chief:state.models[k];const count=()=>Number(!state.approved)+Number(!state.answered);
+const button=(label,action,primary=false)=>`<button class="gbtn gbtn--s gbtn--${primary?'primary':'glass'}" data-action="${action}">${label}</button>`;
+const panel=(title,body,link='')=>`<section class="glass panel"><div class="panel-title"><h2>${title}</h2>${link}</div>${body}</section>`;
+const head=(label,title,desc,action='')=>`<div class="page-head"><div><div class="eyebrow">${label}</div><h1>${title}</h1><p>${desc}</p></div>${action}</div>`;
+const badge=(text,cls='purple')=>`<span class="pill ${cls}">${text}</span>`;
+function requests(){return (!state.approved?`<article class="request"><div class="row between">${badge('승인 요청','warn')}<span class="request-meta">로그인 개선 · Codex</span></div><h3>로그인 개선을 배포해도 될까요?</h3><p>검증을 마쳤습니다. 변경 내용과 배포 영향을 확인해 주세요.</p><div class="row between"><span class="request-meta">검증 12/12 통과 · 변경 파일 4개</span>${button('검토하기 ↗','approval',true)}</div></article>`:'')+(!state.answered?`<article class="request"><div class="row between">${badge('질문 · 정보 요청','warn')}<span class="request-meta">시장 조사 · Claude</span></div><h3>어떤 고객을 중심으로 조사할까요?</h3><p>대상 고객을 정해주시면 비교 조사를 이어갑니다.</p><div class="row between"><span class="request-meta">응답하면 계속 진행</span>${button('답변하기 ↗','question')}</div></article>`:'')+(count()?'':'<div class="empty"><b>모두 확인했어요.</b>새 요청이 오면 이곳에서 알려드릴게요.</div>');}
+function tasks(){return ['login','design','research'].map((k,i)=>`<div class="task-row"><span class="avatar ${k==='login'?'codex':''}">${k==='login'?'⌘':'✳'}</span><div class="grow"><div class="row between"><strong>${taskNames[k]}</strong>${badge(state.paused[k]?'일시 중단':k==='login'?(state.approved?'배포 준비':'승인 대기'):k==='design'?'검토 가능':state.answered?'조사 중':'답변 대기',k==='design'?'ok':'purple')}</div><small>${model(k)} · ${k==='design'?'새 실행 캡처가 도착했습니다':k==='login'?'구현과 검증을 마쳤습니다':state.answered?'선택한 범위로 조사합니다':'조사 범위를 확인하고 있습니다'}</small><div class="progress"><i style="width:${[100,85,35][i]}%"></i></div></div><button data-action="task:${k}" aria-label="${taskNames[k]} 상세">↗</button></div>`).join('');}
+function filesList(){return [['screen','PNG','앱 화면 개편 · 실행 캡처','시뮬레이터 · 최신 v2'],['tests','LOG','로그인 개선 · 검증 결과','테스트 12/12 · 변경 파일 4개'],['research','DOC','시장 조사 · 비교표 초안','참고 자료 8개 · 작성 중']].map(([id,ext,title,sub])=>`<button class="file-link ${state.file===id?'active':''}" data-action="file:${id}"><span class="file-icon">${ext}</span><span class="grow"><strong>${title}</strong><small>${sub}</small></span><span>↗</span></button>`).join('');}
+function home(){return head('YOUR WORKSPACE','오늘도, 일은 이어지고 있어요.','필요한 결정은 모아두고, 나머지 업무는 각 담당자가 진행합니다.',button('＋ 업무 맡기기','new-task',true))+`<div class="intro-panel"><span class="avatar chief">✳</span><div class="grow"><b>서비스 출시를 준비하고 있어요.</b><p>${count()?`대표님의 응답 ${count()}개가 필요합니다. `:'요청을 모두 처리했습니다. '}앱 화면 개편은 결과를 확인할 수 있습니다.</p></div><span class="pill">총괄 · ${state.chief}</span></div><div class="dashboard"><div class="stack">${panel(`지금 응답할 일 <span class="badge">${count()}</span>`,requests(),'<button data-nav="inbox">결재함 ↗</button>')}${panel('업무 현황',tasks()+state.extra.map(x=>`<div class="task-row"><span class="avatar">＋</span><div><strong>${esc(x)}</strong><small>총괄 · 담당 배정 대기</small></div></div>`).join(''),'<button data-nav="team">팀 보기 ↗</button>')}</div><div class="stack">${panel('함께 일하는 팀',`<div class="metrics"><div><strong>3</strong><small>업무 담당자</small></div><div><strong>${count()}</strong><small>응답 대기</small></div><div><strong>1</strong><small>검토 가능한 결과</small></div></div><div class="row"><span class="avatar chief">✳</span><div class="grow"><strong style="font-size:12px">총괄 · ${state.chief}</strong><div class="subtle" style="font-size:11px">업무 분배와 우선순위 조율</div></div><button class="text-button" data-action="chat:chief">대화 ↗</button></div>`)}${panel('최근 자료',filesList(),'<button data-nav="files">전체 보기 ↗</button>')}${panel('최근 변경',`<div class="timeline"><div><span>방금</span>앱 화면 개편 · 실행 캡처 v2 도착</div><div><span>8분 전</span>로그인 개선 · 검증 완료</div><div><span>12분 전</span>시장 조사 · 범위 질문 등록</div></div>`)}</div></div>`;}
+function inbox(){return head('DECISIONS','결재함','승인, 선택, 질문. 나의 응답이 필요한 일을 한곳에서.')+`<div class="filterbar"><button class="filter ${state.filter==='pending'?'active':''}" data-action="filter:pending">응답 대기 ${count()}</button><button class="filter ${state.filter==='done'?'active':''}" data-action="filter:done">처리한 요청 ${2-count()}</button></div><div class="inbox-layout">${panel(state.filter==='pending'?'확인하고 이어가기':'처리 이력',state.filter==='pending'?requests():`${state.approved?'<div class="request"><span class="pill ok">승인 완료</span><h3>로그인 개선 배포</h3><p>사용자가 승인했습니다. 배포 준비 상태로 변경되었습니다.</p></div>':''}${state.answered?`<div class="request"><span class="pill ok">답변 완료</span><h3>시장 조사 대상 고객</h3><p>${esc(state.answer)}</p></div>`:''}${count()===2?'<div class="empty">아직 처리한 요청이 없습니다.</div>':''}`)}<aside>${panel('결정에 필요한 맥락',`<p class="note">요청을 열면 <strong>관련 업무, 요청 이유, 근거와 다음 행동</strong>을 함께 확인할 수 있습니다.</p><div class="divider"></div><p class="note">답변은 해당 담당자와 업무 기록에 연결됩니다. 질문에 답한 것을 실행 승인으로 처리하지 않습니다.</p>`)}</aside></div>`;}
+function team(){return head('PEOPLE & WORK','팀','부서 대신 업무를 중심으로. 각 담당자가 자신의 일을 책임집니다.',button('＋ 담당자 추가','add-member'))+`<section class="glass panel chief-card"><span class="avatar chief">✳</span><div class="grow"><strong>총괄</strong><p class="note">업무 분배 · 우선순위 · 의존성 조율</p></div>${badge(state.chief)}${button('대화','chat:chief')}${button('모델 변경','model:chief')}</section><div class="team-grid">${['login','design','research'].map(k=>`<article class="glass panel member"><div class="row between"><span class="avatar ${k==='login'?'codex':''}">${k==='login'?'⌘':'✳'}</span>${badge(model(k))}</div><h2>${taskNames[k]} 담당</h2><p>${k==='login'?'로그인 흐름을 개선하고 변경과 검증을 책임집니다.':k==='design'?'앱 화면을 수정하고 실행 결과를 확인합니다.':'자료와 대안을 조사하고 근거를 정리합니다.'}</p><div class="actions">${button('업무 상세','task:'+k)}${button('대화','chat:'+k)}${button('모델 변경','model:'+k)}</div></article>`).join('')}</div><div class="team-queue">${panel('전체 업무',tasks())}</div>`;}
+function chat(){const k=state.target;return head('CONVERSATIONS','대화','총괄에게 새 일을 맡기거나, 담당자와 바로 이야기하세요.')+`<select class="mobile-thread-select" aria-label="대화 선택">${Object.keys(people).map(id=>`<option value="${id}" ${id===k?'selected':''}>${people[id]} · ${model(id)}</option>`).join('')}</select><div class="chat-layout"><aside class="glass panel thread-list">${Object.keys(people).map(id=>`<button class="thread-option ${id===k?'active':''}" data-action="chat:${id}"><span class="avatar ${id==='login'?'codex':''}">${id==='login'?'⌘':'✳'}</span><span><b>${people[id]}</b><small>${model(id)} · ${taskNames[id]}</small></span></button>`).join('')}</aside><section><div class="chat-head"><div><strong>${people[k]} · ${model(k)}</strong><small>연결된 업무 · ${taskNames[k]}</small></div>${button('업무 보기',k==='chief'?'overview':'task:'+k)}</div><div class="date-line">오늘 · 11월 6일</div><div class="message mine"><div class="meta"><span>나</span><span>오전 1:03</span></div>${k==='chief'?'로그인 개선, 앱 화면 개편, 시장 조사를 병렬로 진행해줘. 내 결정이 필요한 건 결재함에 모아줘.':k==='design'?'결재함에 질문도 함께 보이게 해줘. 수정한 앱 화면도 보여줘.':k==='login'?'로그인 오류를 수정하고, 테스트 결과와 변경 내용을 정리해줘.':'서비스 출시 전에 경쟁 제품과 대상 고객을 조사해줘.'}</div><div class="message"><div class="meta"><span>${people[k]} · ${model(k)}</span><span>오전 1:05</span></div>${k==='chief'?'업무별 담당자를 배정했습니다. 로그인 개선은 배포 승인, 시장 조사는 고객 범위 답변을 기다리고 있습니다. 앱 화면 개편의 실행 캡처도 도착했습니다.':k==='design'?'승인과 질문을 한곳에 모았습니다. 수정한 화면을 시뮬레이터에서 확인하고, 실행 캡처와 검증 결과를 자료에 연결했습니다.':k==='login'?'로그인 예외 처리를 수정했습니다. 테스트 12개를 통과했고, 배포 승인 요청을 올렸습니다.':'초기 자료를 모았습니다. 조사할 고객 범위가 필요해서 결재함에 질문을 남겼습니다.'}<br><button data-action="${k==='design'?'file:screen':k==='login'?'approval':k==='research'?'question':'overview'}">${k==='design'?'실행 캡처와 검증 결과 보기 ↗':k==='login'?'배포 승인 요청 보기 ↗':k==='research'?'범위 질문에 답하기 ↗':'업무 현황 보기 ↗'}</button></div>${state.messages[k].map(m=>`<div class="message mine"><div class="meta"><span>나 · 시안 입력</span><span>방금</span></div>${esc(m)}</div>`).join('')}${state.messages[k].length?'<p class="subtle" style="text-align:right;margin-top:10px">시안에 저장됨 · 실제 에이전트에게 전송되지 않음</p>':''}</section></div>`;}
+function files(){let body=state.file==='screen'?`<div class="row between"><div><span class="pill ok">실행 캡처</span><h2 style="margin-top:10px">응답 요청을 한곳에</h2></div><select aria-label="자료 버전" id="version"><option ${state.version==='v2'?'selected':''}>v2</option><option ${state.version==='v1'?'selected':''}>v1</option></select></div><p style="margin-top:10px">앱 화면 개편 · iPhone 시뮬레이터 · ${state.version}</p><div class="artifact-stage"><div class="mini-app"><div class="row between"><small>9:41</small><small>● ▰</small></div><small style="display:block;margin-top:20px">서비스 출시</small><h3>결재함 <span style="color:#8861c9">${state.version==='v2'?'2':'1'}</span></h3><div class="mini-card">배포를 진행해도 될까요?<p>로그인 개선 · 승인 요청</p></div>${state.version==='v2'?'<div class="mini-card">어떤 고객을 조사할까요?<p>시장 조사 · 질문</p></div>':''}<div class="mini-nav">홈 결재함 팀 대화 자료</div></div></div><div class="checklist"><div><span>✓</span>승인·질문을 같은 목록에서 확인</div><div><span>✓</span>관련 업무와 요청자 표시</div><div><span>✓</span>작은 화면에서 응답 버튼 접근</div></div>`:state.file==='tests'?`<span class="pill ok">검증 완료</span><h2 style="margin:16px 0">로그인 개선 검증 결과</h2><p>관련 업무 · 로그인 개선 / 담당 Codex</p><div class="divider"></div><div class="terminal">PASS  login / valid credentials\nPASS  login / invalid credentials\nPASS  login / expired session\nPASS  login / network retry\n\nTest Suites: 3 passed\nTests:       12 passed\nChanged:     4 files</div><p style="margin-top:20px">시안용 검증 데이터입니다. 실제 결과에는 커밋·실행 환경·원본 로그를 연결합니다.</p>`:`<span class="pill purple">작성 중</span><h2 style="margin:16px 0">시장 조사 · 비교표 초안</h2><p>대상 고객 범위를 정한 뒤 대안별 가격과 기능을 비교합니다.</p><div class="divider"></div><div class="checklist"><div>01 &nbsp; 핵심 고객과 사용 목적</div><div>02 &nbsp; 경쟁 제품의 작업 흐름</div><div>03 &nbsp; 가격과 구매 기준</div><div>04 &nbsp; 추천 방향과 출처</div></div><div class="divider"></div>${button('조사 범위 답변하기','question',true)}`;return head('ARTIFACTS','자료','결과물, 검증 근거, 이전 버전을 업무별로 모았습니다.')+`<div class="files-layout"><aside class="file-list">${filesList()}</aside><section class="glass panel artifact">${body}<div class="divider"></div><div class="row between"><span class="subtle">예시 자료 · ${state.file==='screen'?'앱 화면 개편':state.file==='tests'?'로그인 개선':'시장 조사'}</span>${button('이 자료로 수정 요청 ↗','feedback',true)}</div></section></div>`;}
+function settings(){return head('PREFERENCES','설정','어느 기기에서든 같은 작업 환경을 관리합니다.')+`<div class="settings-grid">${panel('연결된 호스트',`<div class="row"><span class="avatar">▣</span><div class="grow"><b>Mac Studio</b><div class="connection" style="margin-top:5px"><span class="dot"></span>연결됨 · Tailscale</div></div>${badge('실행 호스트','ok')}</div><div class="divider"></div><p class="note">Mac 앱과 iPhone이 이 호스트에 각각 접속합니다. 앱을 닫아도 호스트의 작업은 계속됩니다.</p><div class="setting-row"><span><b>연결된 기기</b><small>MacBook Pro · iPhone</small></span>${button('관리','devices')}</div>`)}${panel('계정과 모델',`<div class="setting-row" style="border:0;padding-top:0"><span><b>Claude</b><small>계정 로그인 · 예시 상태</small></span>${badge('연결됨','ok')}</div><div class="setting-row"><span><b>Codex</b><small>계정 로그인 · 예시 상태</small></span>${badge('연결됨','ok')}</div><div class="setting-row"><span><b>총괄 모델</b><small>새 프로젝트의 기본값</small></span>${button(state.chief+' · 변경','model:chief')}</div>`)}${panel('알림',`<label class="setting-row" style="border:0;padding-top:0"><span><b>내 응답이 필요한 요청</b><small>승인 · 선택 · 질문 · 정보 요청</small></span><input type="checkbox" class="toggle" checked aria-label="응답 요청 알림"></label><label class="setting-row"><span><b>중요 결과와 실패</b><small>작업 완료 · 검증 실패 · 연결 오류</small></span><input type="checkbox" class="toggle" checked aria-label="결과 알림"></label>`)}${panel('실행과 기록',`<div class="setting-row" style="border:0;padding-top:0"><span><b>권한 정책</b><small>승인이 필요한 실행은 결재함에서 확인</small></span>${button('보기','permissions')}</div><div class="setting-row"><span><b>실행 기록과 진단</b><small>호스트 · 도구 · 세션 상태</small></span>${button('진단','diagnostics')}</div><div class="setting-row"><span><b>시안 초기화</b><small>승인·답변·메시지를 처음 상태로</small></span>${button('초기화','reset')}</div>`)}</div>`;}
+const views={home,inbox,team,chat,files,settings};
+function render(){ $('#app').dataset.page=state.page;$('#content').innerHTML=views[state.page](); const index=['home','inbox','team','chat','files'].indexOf(state.page);$('#tabs').style.setProperty('--active',Math.max(index,0));document.querySelectorAll('[data-nav]').forEach(b=>{if(b.dataset.nav===state.page)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});document.querySelectorAll('[data-count]').forEach(b=>{b.textContent=count();b.hidden=!count()});syncRecipient();}
+function nav(page){state.page=views[page]?page:'home';render();$('#workspace').scrollTop=0;if(location.hash!=='#'+state.page)history.replaceState(null,'','#'+state.page);}
+function syncRecipient(){for(const o of $('#recipient').options)o.textContent=people[o.value]+' · '+model(o.value);$('#recipient').value=state.target;$('#scope').textContent=taskNames[state.target];}
+let toastTimer;function toast(msg){clearTimeout(toastTimer);$('#toast').textContent=msg;$('#toast').hidden=false;toastTimer=setTimeout(()=>$('#toast').hidden=true,3500);}
+function modal(title,body,actions=''){const d=$('#modal');d.innerHTML=`<button class="close" data-action="close" aria-label="닫기">×</button><h2 id="modal-title">${title}</h2>${body}<div class="modal-actions">${button('닫기','close')}${actions}</div>`;if(!d.open)d.showModal();}
+function act(a){const [type,id]=a.split(':');if(type==='close')return $('#modal').close();if(type==='overview'||type==='project')return nav('home');if(type==='chat'){state.target=id;return nav('chat')}if(type==='file'){state.file=id;return nav('files')}if(type==='filter'){state.filter=id;return render()}
+if(type==='approval')return modal(state.approved?'처리된 승인 요청':'로그인 개선 · 배포 승인',`<p>로그인 오류 수정과 검증을 마쳤습니다. 아래 범위의 배포를 요청합니다.</p><div class="detail-line"><b>요청자</b> &nbsp; 로그인 개선 담당 · ${model('login')}</div><div class="detail-line"><b>대상</b> &nbsp; 서비스 출시 프로젝트의 로그인 기능</div><div class="detail-line"><b>검증</b> &nbsp; 테스트 12/12 통과 · 변경 파일 4개</div><div class="detail-line"><b>영향</b> &nbsp; 로그인 시 세션 갱신·오류 처리 변경</div><p>승인하면 이 작업의 배포 준비를 진행합니다. 시안에서는 상태만 변경됩니다.</p>`,state.approved?'':button('수정 요청','revise')+button('배포 승인','approve',true));
+if(type==='approve'){state.approved=true;$('#modal').close();render();return toast('시안에서 승인했습니다. 처리 이력에 기록되었습니다.')}
+if(type==='revise'){state.target='login';$('#modal').close();nav('chat');$('#draft').value='배포 전에 다음 부분을 수정해 주세요: ';return $('#draft').focus()}
+if(type==='question')return modal('어떤 고객을 중심으로 조사할까요?',`<p>고객군에 따라 비교 제품과 가격 기준이 달라집니다. 하나를 선택하거나 추가 조건을 남겨주세요.</p><label class="radio-option"><input type="radio" name="audience" value="AI를 많이 사용하는 개인 사용자" checked> AI를 많이 사용하는 개인 사용자</label><label class="radio-option"><input type="radio" name="audience" value="소규모 개발팀과 스타트업"> 소규모 개발팀과 스타트업</label><label for="answer">추가 조건</label><textarea id="answer" placeholder="중점적으로 확인할 내용을 적어주세요">${esc(state.answer)}</textarea><p>이 답변은 시장 조사 업무에 연결됩니다.</p>`,button('답변 전달','answer',true));
+if(type==='answer'){state.answered=true;state.answer=$('input[name=audience]:checked').value+($('#answer').value?' · '+$('#answer').value:'');$('#modal').close();render();return toast('답변을 기록했습니다. 시장 조사 상태가 변경되었습니다.')}
+if(type==='model'){return modal(`${people[id]} · 모델 변경`,`<p>현재 ${model(id)}를 사용하고 있습니다. 다른 제공자로 바꾸면 새 세션에 업무를 인계합니다.</p><label for="new-model">새 담당 모델</label><select id="new-model"><option ${model(id)==='Claude'?'selected':''}>Claude</option><option ${model(id)==='Codex'?'selected':''}>Codex</option></select><div class="detail-line">함께 전달: 목표 · 결정 · 자료 · 검증 결과 · 다음 행동</div><p>진행 중인 작업은 안전한 지점에서 인계하고, 이전 담당과 새 담당이 동시에 수정하지 않게 합니다.</p>`,button('인계 후 변경','handoff:'+id,true))}
+if(type==='handoff'){const m=$('#new-model').value;if(id==='chief')state.chief=m;else state.models[id]=m;$('#modal').close();render();return toast('시안의 모델을 '+m+'로 변경했습니다. 실제 세션은 생성하지 않습니다.')}
+if(type==='task')return modal(taskNames[id],`<p>${people[id]} · ${model(id)}가 맡고 있습니다.</p><div class="detail-line"><b>완료 조건</b> &nbsp; 변경 내용·검증 근거·결과물을 함께 전달</div><div class="detail-line"><b>진행</b> &nbsp; ${state.paused[id]?'일시 중단':'업무 상태와 자료에 연결됨'}</div><div class="detail-line"><b>관련 기록</b> &nbsp; 지시 · 결재 · 결과물 · 실행 로그</div>`,button('실행 기록','logs:'+id)+button(state.paused[id]?'재개':'일시 중단','pause:'+id)+button('담당자와 대화','task-chat:'+id,true));
+if(type==='pause'){state.paused[id]=!state.paused[id];$('#modal').close();render();return toast('시안에서 업무 상태를 변경했습니다.')}
+if(type==='task-chat'){ $('#modal').close();return act('chat:'+id)}
+if(type==='logs')return modal('실행 기록',`<p>${taskNames[id]} · 예시 로그</p><pre class="terminal">[01:00] Task accepted\n[01:02] Files updated\n[01:04] Verification completed\n[01:05] Artifacts registered\n[01:05] Waiting for next instruction</pre><p>실제 앱에서는 동일 세션의 로그와 터미널에 접근합니다.</p>`);
+if(type==='feedback'){state.target=state.file==='screen'?'design':state.file==='tests'?'login':'research';const f=state.file;nav('chat');$('#draft').value=`[${f==='screen'?'실행 캡처 '+state.version:f==='tests'?'검증 결과':'조사 초안'}] 이 자료를 기준으로 `;return $('#draft').focus()}
+if(type==='new-task'||type==='add-member')return modal(type==='new-task'?'새 업무 맡기기':'업무 담당자 추가',`<p>어떤 일을 맡길지 알려주세요. 총괄이 범위와 담당자를 정리합니다.</p><label for="task-title">업무 제목</label><input id="task-title" placeholder="예: 온보딩 화면 개선"><label for="task-goal">목표와 완료 조건</label><textarea id="task-goal" placeholder="원하는 결과와 지켜야 할 조건"></textarea>`,button('업무 등록','create-task',true));
+if(type==='create-task'){const title=$('#task-title').value.trim();if(!title)return $('#task-title').focus();state.extra.push(title);state.messages.chief.push(title+': '+$('#task-goal').value);$('#modal').close();nav('home');return toast('시안에 업무를 등록했습니다. 총괄 대화에도 연결되었습니다.')}
+if(['projects','hq','research','new-project'].includes(type))return modal('프로젝트',`<p>기기를 바꿔도 같은 프로젝트와 업무에 접근합니다.</p><button class="project active" data-action="select-project"><span class="proj-icon">◈</span><span><strong>서비스 출시</strong><small>이 시안에서 탐색할 수 있는 프로젝트</small></span></button><div class="detail-line">리서치 · 준비 중인 프로젝트 예시</div><p>설정에서 호스트와 연결된 기기를 관리할 수 있습니다.</p>`,button('설정 열기','open-settings'));
+if(type==='select-project'){ $('#modal').close();return nav('home')}if(type==='open-settings'){ $('#modal').close();return nav('settings')}
+if(type==='devices')return modal('연결된 기기',`<div class="detail-line"><b>Mac Studio</b> · 실행 호스트</div><div class="detail-line">MacBook Pro · Mac 클라이언트</div><div class="detail-line">iPhone · 모바일 클라이언트</div><p>두 클라이언트는 실행 호스트의 데몬에 직접 접속합니다.</p>`);
+if(type==='permissions')return modal('실행 권한 정책',`<p>배포·외부 전송 등 승인이 필요한 작업은 대상과 영향을 확인한 뒤 실행합니다. 필요한 사용자 응답은 결재함에서 처리합니다.</p><div class="detail-line">질문 답변 ≠ 실행 승인</div><div class="detail-line">앱·도구 접근 권한은 실행 호스트에서 관리</div>`);
+if(type==='diagnostics')return modal('호스트 진단 · 예시',`<div class="checklist"><div><span>✓</span>호스트 연결</div><div><span>✓</span>Claude · Codex 로그인</div><div><span>✓</span>자료 저장소</div><div><span>✓</span>이벤트 동기화</div></div><p>실제 호스트에 접속하지 않은 시안 데이터입니다.</p>`);
+if(type==='attach')return $('#attachment-file').click();if(type==='reset')location.reload();}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-nav],[data-action]');if(!b)return;b.dataset.nav?nav(b.dataset.nav):act(b.dataset.action)});
+$('#recipient').addEventListener('change',e=>{state.target=e.target.value;syncRecipient();if(state.page==='chat')render()});
+document.addEventListener('change',e=>{if(e.target.matches('.mobile-thread-select')){state.target=e.target.value;render()}if(e.target.id==='version'){state.version=e.target.value;render()}if(e.target.matches('.toggle'))toast('시안의 알림 설정을 변경했습니다.')});
+$('#composer').addEventListener('submit',e=>{e.preventDefault();const t=$('#draft').value.trim();if(!t&&!state.attachment)return $('#draft').focus();state.messages[state.target].push(t+(state.attachment?' [첨부: '+state.attachment+']':''));$('#draft').value='';state.attachment='';$('#attachment').textContent='';nav('chat');$('#workspace').scrollTop=$('#workspace').scrollHeight;toast('시안에 메시지를 기록했습니다. 실제 전송은 하지 않습니다.')});
+$('#attachment-file').addEventListener('change',e=>{state.attachment=e.target.files[0]?.name||'';$('#attachment').textContent=state.attachment});
+$('#modal').addEventListener('click',e=>{if(e.target===$('#modal')){const r=e.target.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)e.target.close()}});
+window.addEventListener('hashchange',()=>nav(location.hash.slice(1)));
+nav(location.hash.slice(1)||'home');
+</script></body></html>

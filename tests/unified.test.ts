@@ -983,7 +983,7 @@ describe("실행기 인자", () => {
     expect(events).toHaveLength(0);
   });
 
-  test("바이패스 모드는 경고 창을 건너뛰는 설정 파일을 만들고, 다른 모드는 안 만든다", async () => {
+  test("Claude 설정은 항상 상태줄을 수집하고, 바이패스 모드만 경고 창을 건너뛴다", async () => {
     const t = await setup();
     const opened: StartOpts[] = [];
     const start = t.herdr.start.bind(t.herdr);
@@ -992,10 +992,12 @@ describe("실행기 인자", () => {
       return start(m);
     };
     await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" });
-    expect(JSON.parse(readFileSync(opened[0]!.settingsFile!, "utf8"))).toEqual({ skipDangerousModePermissionPrompt: true });
+    expect(JSON.parse(readFileSync(opened[0]!.settingsFile!, "utf8"))).toMatchObject({ skipDangerousModePermissionPrompt: true, statusLine: { type: "command", command: expect.stringContaining("iamceo-context-statusline") } });
     await t.api("PUT", "/api/settings", { permissionMode: "auto" });
     await t.orch.addMember(t.project.id, { name: "영희", handle: "yh", role: "개발" });
-    expect(opened[1]!.settingsFile).toBeUndefined();
+    const settings = JSON.parse(readFileSync(opened[1]!.settingsFile!, "utf8"));
+    expect(settings.statusLine.type).toBe("command");
+    expect(settings.skipDangerousModePermissionPrompt).toBeUndefined();
     expect(existsSync(join(t.home, "run"))).toBe(true);
   });
 });

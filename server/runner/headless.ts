@@ -1,3 +1,4 @@
+import { validWindow } from "./context.ts";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -5,7 +6,6 @@ import type { Subprocess } from "bun";
 import { cleanText, SESSION_ID_RE } from "../text.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "./types.ts";
 
-export const DEFAULT_CONTEXT_WINDOW = 200_000;
 // 뒤쪽 변수들은 서버를 Claude Code 안에서 띄웠을 때 바깥 세션의 신원·설정이 새는 것을 막는다.
 const STRIPPED_ENV = /^(HERDR_.*|CLAUDECODE|CLAUDE_CODE_ENTRYPOINT|CLAUDE_CODE_SSE_PORT|CLAUDE_CODE_SESSION_.*|CLAUDE_CODE_CHILD_SESSION|CLAUDE_CODE_MESSAGING_.*|CLAUDE_CODE_EXECPATH|CLAUDE_PID|CLAUDE_EFFORT|CLAUDE_CODE_EFFORT_LEVEL|CLAUDE_CODE_SUBAGENT_MODEL|CLAUDE_CODE_SUBAGENT_MODEL_FORCE)$/;
 const SUBAGENT_TOOLS = new Set(["Agent", "Task"]);
@@ -238,7 +238,11 @@ export class StreamParser {
     }
     const window = this.windowFrom(asRecord(o.modelUsage));
     if (window) this.contextWindow = window;
-    if (this.contextTokens !== null) this.emitContext(this.contextWindow ?? DEFAULT_CONTEXT_WINDOW);
+    if (this.contextTokens === null) return;
+    const exactWindow = this.model ? Number(asRecord(asRecord(o.modelUsage)?.[this.model])?.contextWindow) : NaN;
+    if (this.contextWindow) this.emitContext(this.contextWindow, validWindow(exactWindow) ? exactWindow : undefined);
+    // modelUsage 에 창 크기가 없으면 herdr 처럼 서버가 정한다(설정 기본값 등).
+    else if (this.opts.reportContext) this.emit({ type: "context_usage", memberId: this.memberId, tokens: this.contextTokens, shownPct: null, model: this.model });
   }
 
   private windowFrom(usage: Record<string, any> | null): number | null {
@@ -250,9 +254,9 @@ export class StreamParser {
     return all.length ? Math.max(...all) : null;
   }
 
-  private emitContext(window: number): void {
+  private emitContext(window: number, exactWindow?: number): void {
     if (!this.opts.reportContext || this.contextTokens === null) return;
-    this.emit({ type: "context", memberId: this.memberId, pct: Math.min(100, Math.round((this.contextTokens / window) * 100)) });
+    this.emit({ type: "context", memberId: this.memberId, pct: Math.min(100, Math.round((this.contextTokens / window) * 100)), ...(exactWindow !== undefined ? { window: exactWindow } : {}) });
   }
 }
 

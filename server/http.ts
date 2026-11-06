@@ -13,6 +13,7 @@ import { MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES, resolveInside, saveUpload } from 
 import type { OrchestratorApi } from "./orchestrator-api.ts";
 import { ApiError, type Store } from "./store.ts";
 import { SESSION_ID_RE } from "./text.ts";
+import { Pairing, PAIR_CODE_TTL_MS, tailnetUrls, withMagicDnsNames } from "./pairing.ts";
 
 export interface ServerContext {
   config: Config;
@@ -128,7 +129,8 @@ function bearer(req: Request): string | null {
 
 // ---- 요청 검증 ----
 const nonEmpty = z.string().trim().min(1);
-const backend = z.enum(["herdr", "headless"]);
+const backend = z.enum(["core", "herdr", "headless"]);
+const cliProvider = z.enum(["claude", "codex"]);
 const permissionMode = z.enum(PERMISSION_MODES);
 const effort = z.enum(EFFORTS);
 // 그대로 --model 뒤에 들어간다. '--플래그' 나 공백이 들어오면 안 된다. 별칭(haiku)·전체 이름·[1m] 을 받는다.
@@ -142,6 +144,7 @@ const CreateProjectSchema = z.strictObject({
   cwd: nonEmpty,
   goal: z.string().optional(),
   startConductor: z.boolean().optional(),
+  chiefCli: cliProvider.optional(),
 });
 const PatchProjectSchema = z.strictObject({
   name: nonEmpty.optional(),
@@ -155,7 +158,18 @@ const AnswerApprovalSchema = z.strictObject({
   option: z.number().int().min(1).max(9),
   note: z.string().max(4000).optional(),
 });
-const PatchMemberSchema = z.strictObject({ modelOverride: modelName.nullable().optional(), effortOverride: effort.nullable().optional() });
+const CreateMemberSchema = z.strictObject({ name: nonEmpty, role: z.string().optional(), cli: cliProvider.optional(), modelOverride: modelName.nullable().optional() });
+const PatchMemberSchema = z.strictObject({ cli: cliProvider.optional(), modelOverride: modelName.nullable().optional(), effortOverride: effort.nullable().optional() });
+const TerminalControlSchema = z.strictObject({
+  action: z.enum(["claim", "release", "input", "key"]),
+  leaseId: nonEmpty.max(256).optional(),
+  text: z.string().min(1).max(131072).optional(),
+  key: z.enum(["enter", "up", "down", "esc", "tab", "ctrl+c", "backspace"]).optional(),
+}).superRefine((value, ctx) => {
+  if (value.action !== "claim" && !value.leaseId) ctx.addIssue({ code: "custom", message: "leaseId가 필요합니다" });
+  if (value.action === "input" && !value.text) ctx.addIssue({ code: "custom", message: "text가 필요합니다" });
+  if (value.action === "key" && !value.key) ctx.addIssue({ code: "custom", message: "key가 필요합니다" });
+});
 const SendMessageSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).optional(),
   text: z.string(),
@@ -163,6 +177,7 @@ const SendMessageSchema = z.object({
   attachmentIds: z.array(z.string()).max(50).optional(),
 });
 const AnswerSchema = z.object({
+  expectedVersion: nonEmpty.optional(),
   choice: z.string().nullable().optional(),
   note: z.string().nullable().optional(),
   batch: z.boolean().optional(),
@@ -183,6 +198,9 @@ const SettingsSchema = z
     ranks: z.object({ manager: rankPatch, lead: rankPatch, staff: rankPatch }).partial().strict(),
     maxConcurrentTurns: z.number().int().min(1).max(64),
     compactAtPct: z.number().int().min(1).max(100),
+    // 창 크기(토큰)를 모를 때의 값. 1k~10M.
+    contextWindowDefault: z.number().int().min(1_000).max(10_000_000),
+    contextWindows: z.record(z.string().min(1).max(200), z.number().int().min(1_000).max(10_000_000)),
     maxAwakeWorkers: z.number().int().min(1).max(256),
     notifyMac: z.boolean(),
     // 0 이면 끈다. 화면은 끔·3·6·12·24 를 고르게 한다.
@@ -309,7 +327,7 @@ async function artifactHtml({ config, store }: ServerContext, id: string): Promi
   return source.text();
 }
 
-function apiRoutes(ctx: ServerContext, urls: () => string[]): Route[] {
+function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing): Route[] {
   const { config, store, orch } = ctx;
   // 재전송이 앞 요청의 orch 처리가 끝나기 전에 와도 두 번 전달되지 않게 한다.
   const inFlight = new Map<string, Promise<unknown>>();
@@ -348,6 +366,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[]): Route[] {
       for (const m of store.listAllMembers()) if (m.origin !== "manual" && (m.modelOverride || m.effortOverride)) rankOverrides[memberRank(m.kind)]++;
       const body: Bootstrap = {
         version: VERSION,
+        runtime: await orch.runtimeInfo?.(),
         settings: store.getSettings(),
         projects: store.projectSummaries(),
         herdr: await orch.herdrInfo(),
@@ -357,6 +376,20 @@ function apiRoutes(ctx: ServerContext, urls: () => string[]): Route[] {
         rankOverrides,
       };
       return Response.json(body);
+    }),
+    // 폰 짝 맺기: Mac 화면이 QR 로 보여 줄 일회용 코드와 폰이 닿을 Tailscale 주소.
+    route("POST", "/api/pair/start", async () => {
+      const { code, expiresAt } = pairing.start();
+      return Response.json({ code, expiresAt: new Date(expiresAt).toISOString(), ttlSeconds: PAIR_CODE_TTL_MS / 1000, urls: await withMagicDnsNames(tailnetUrls(urls())), version: VERSION });
+    }),
+    route("GET", "/api/runtime", async () => {
+      if (!orch.runtimeInfo) throw new ApiError(501, "실행기 진단을 지원하지 않습니다");
+      return Response.json(await orch.runtimeInfo());
+    }),
+    route("POST", "/api/projects/:id/members", async (req, _url, [id]) => {
+      store.requireProject(id!);
+      if (!orch.createMember) throw new ApiError(501, "직원 만들기를 지원하지 않습니다");
+      return Response.json(await orch.createMember(id!, await parseBody(req, CreateMemberSchema)));
     }),
     route("GET", "/api/projects/:id/state", (_req, _url, [id]) => {
       // 보관한 프로젝트는 없는 것으로 친다. 화면이 본사로 돌아간다.
@@ -470,6 +503,12 @@ function apiRoutes(ctx: ServerContext, urls: () => string[]): Route[] {
       // JSON 으로만 준다. 이 출처의 문서로 열리면 스크립트가 접속 코드에 닿는다. 화면은 /artifact-frame 격리 칸에 넣는다.
       return Response.json({ html: await artifactHtml(ctx, id!) }, { headers: { "Cache-Control": "no-store" } });
     }),
+    route("POST", "/api/members/:id/terminal/control", async (req, _url, [id]) => {
+      store.requireMember(id!);
+      if (!orch.terminalControl) throw new ApiError(501, "터미널 조작을 지원하지 않습니다");
+      return Response.json(await orch.terminalControl(id!, await parseBody(req, TerminalControlSchema)));
+    }),
+    route("GET", "/api/members/:id", (_req, _url, [id]) => Response.json(store.requireMember(id!))),
     route("PATCH", "/api/members/:id", async (req, _url, [id]) => {
       store.requireMember(id!);
       return Response.json(await orch.patchMemberConfig(id!, await parseBody(req, PatchMemberSchema)));
@@ -498,6 +537,10 @@ function apiRoutes(ctx: ServerContext, urls: () => string[]): Route[] {
       const body = (await req.clone().text()).trim() ? await parseBody(req, SleepSchema) : {};
       return memberAction((id) => orch.memberSleep(id, { force: body.force }))(req, url, params);
     }),
+    route("POST", "/api/members/:id/fresh-session", memberAction(async (id) => {
+      if (!orch.freshMemberSession) throw new ApiError(501, "새 세션 시작을 지원하지 않습니다");
+      return orch.freshMemberSession(id);
+    })),
     route("POST", "/api/members/:id/resume", memberAction((id) => orch.memberResume(id))),
     route("POST", "/api/members/:id/compact", memberAction((id) => orch.memberCompact(id))),
     route("POST", "/api/members/:id/interrupt", memberAction((id) => orch.memberInterrupt(id))),
@@ -719,7 +762,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   const ipRule = buildIpRule(config.hosts);
   const hosts: string[] = [];
   let boundPort = 0;
-  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort));
+  const pairing = new Pairing();
+  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing);
   const webIndex = await loadWebIndex();
   const development = process.env.IAMCEO_DEV === "1";
   // 개발 모드는 HMR 소켓까지 Bun 이 직접 맡아야 해서 그대로 둔다.
@@ -737,6 +781,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   const route = (req: Request, url: URL, server: Server<undefined>): Response | Promise<Response> | undefined => {
     const path = url.pathname;
     if (path === "/api/health") return Response.json({ ok: true, version: VERSION });
+    // 짝 맺기 코드를 낸 폰에만 접속 코드를 준다. 코드 자체가 인증이라 접속 코드 검사 앞에 둔다.
+    if (path === "/pair/claim") return handlePairClaim(req, server);
     if (path === "/ws") {
       if (!hasAccessCode(req, url, true)) return fail(401, "인증이 필요합니다");
       return server.upgrade(req) ? undefined : fail(400, "WebSocket 요청이 아닙니다");
@@ -773,6 +819,19 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     return fail(404, "없는 경로입니다");
   };
 
+  const handlePairClaim = async (req: Request, server: Server<undefined>): Promise<Response> => {
+    if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다");
+    const body = (await req.json().catch(() => null)) as { code?: unknown; device?: unknown } | null;
+    if (!body || typeof body.code !== "string") return fail(400, "짝 맺기 코드가 필요합니다");
+    const from = server.requestIP(req)?.address ?? "unknown";
+    const result = pairing.claim(body.code, from);
+    if (result === "limited") return fail(429, "너무 많이 시도했습니다. 잠시 뒤 Mac에서 새 QR을 만들어 다시 찍어 주세요");
+    if (result === "invalid") return fail(401, "QR이 맞지 않거나 시간이 지났습니다. Mac에서 새 QR을 만들어 주세요");
+    const device = typeof body.device === "string" ? body.device.slice(0, 60).replace(/[\r\n]/g, " ") : "기기";
+    console.info(`짝 맺기: ${device} (${from})`);
+    return Response.json({ accessCode: config.accessCode, version: VERSION });
+  };
+
   const handle = async (req: Request, server: Server<undefined>): Promise<Response | undefined> => {
     if (!isIpAllowed(server.requestIP(req)?.address, ipRule)) return fail(403, "허용되지 않은 주소입니다");
     if (!isHostAllowed(req.headers.get("host"), config.hosts)) return fail(403, "허용되지 않은 주소입니다");
@@ -800,6 +859,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
         "/agent/*": handle,
         "/files/*": handle,
         "/artifact-frame": handle,
+        "/pair/*": handle,
         "/ws": handle,
         ...(webIndex && !webOrigin ? { "/*": webIndex } : {}),
       } as Record<string, Bun.HTMLBundle | typeof handle>,

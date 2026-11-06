@@ -21,7 +21,11 @@
     "test": "bun test tests",
     "typecheck": "tsc --noEmit",
     "build": "bun build bin/iamceo.ts --compile --outfile dist/iamceo",
-    "build:release": "bun scripts/build-release.ts"
+    "build:release": "bun scripts/build-release.ts",
+    "setup:core": "bun scripts/setup-core.ts",
+    "native:build": "swift build --package-path native",
+    "native:test": "swift test --package-path native",
+    "build:native": "bun scripts/build-native.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

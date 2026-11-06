@@ -13,6 +13,9 @@ export interface ConfigFile {
   port?: number;
   hosts?: string[];
   claudeBin?: string;
+  codexBin?: string;
+  coreBin?: string;
+  coreSocket?: string;
   herdrSocket?: string;
 }
 
@@ -29,6 +32,9 @@ export interface Config {
   /** config.json 에 hosts 를 안 적었다. Tailscale 이 나중에 올라오면 서버가 그 주소도 연다. */
   hostsAuto?: boolean;
   claudeBin: string;
+  codexBin?: string;
+  coreBin?: string;
+  coreSocket?: string;
   herdrSocket: string;
 }
 
@@ -94,6 +100,25 @@ function parsePort(raw: unknown, source: string): number | undefined {
   return n;
 }
 
+/** Finder/launchd has a small PATH; discover common user CLI locations without executing a shell. */
+export function resolveCliExecutable(command: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  if (command.includes("/")) return Bun.which(command);
+  const userHome = env.HOME || homedir();
+  const extra = [join(userHome, ".npm-global", "bin"), join(userHome, ".npm", "bin"), join(userHome, ".local", "bin"), join(userHome, ".bun", "bin"), join(userHome, ".volta", "bin"), join(userHome, ".asdf", "shims"), join(userHome, ".nvm", "current", "bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
+  const path = [...new Set([...(env.PATH ?? process.env.PATH ?? "").split(":"), ...extra].filter(Boolean))].join(":");
+  return Bun.which(command, { PATH: path });
+}
+
+/** Prefer a packaged companion or the explicit, pinned local installation. Never install at startup. */
+export function defaultCoreBin(): string {
+  const candidates = [
+    resolve(process.execPath, "..", "herdr-core"),
+    resolve(import.meta.dir, "..", ".runtime", "herdr-core", "0.1.18", "Herdr Core.app", "Contents", "MacOS", "herdr-core"),
+    resolve(import.meta.dir, "..", ".runtime", "herdr-core", "0.1.18", "herdr-core"),
+  ];
+  return candidates.find((path) => existsSync(path)) ?? "herdr-core";
+}
+
 /** 폴더를 만들고 설정을 읽는다. 접속 코드가 없으면 만들어 저장한다. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const home = homeDir(env);
@@ -120,7 +145,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port: parsePort(env.IAMCEO_PORT, "IAMCEO_PORT") ?? parsePort(file.port, "config.json") ?? DEFAULT_PORT,
     hosts: Array.isArray(file.hosts) && file.hosts.length > 0 ? file.hosts : defaultHosts(),
     hostsAuto: !(Array.isArray(file.hosts) && file.hosts.length > 0),
-    claudeBin: env.IAMCEO_CLAUDE_BIN || file.claudeBin || "claude",
+    claudeBin: resolveCliExecutable(env.IAMCEO_CLAUDE_BIN || file.claudeBin || "claude", env) ?? env.IAMCEO_CLAUDE_BIN ?? file.claudeBin ?? "claude",
+    codexBin: resolveCliExecutable(env.IAMCEO_CODEX_BIN || file.codexBin || "codex", env) ?? env.IAMCEO_CODEX_BIN ?? file.codexBin ?? "codex",
+    coreBin: env.IAMCEO_CORE_BIN || file.coreBin || defaultCoreBin(),
+    coreSocket: env.IAMCEO_CORE_SOCKET || file.coreSocket || join(home, "run", "core.sock"),
     // $HERDR_SOCKET_PATH 는 일부러 보지 않는다: 라이브 세션 서버를 건드리면 안 된다(spec §5).
     herdrSocket: env.IAMCEO_HERDR_SOCKET || file.herdrSocket || join(homedir(), ".config", "herdr", "herdr.sock"),
   };

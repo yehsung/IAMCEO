@@ -1,5 +1,6 @@
 // 홈 화면과 5칸 탭: 실제 서버 + Playwright chromium + 가짜 claude. 라이브 herdr·실제 ~/.iamceo 를 쓰지 않는다.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { startBrowserCore } from "./fixtures/core-browser-harness";
 import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,6 +9,9 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import type { Member, MemberStatus, Project, ProjectState } from "../shared/types.ts";
 import { updateConfigFile } from "../server/config.ts";
 import { auditContrast, auditLayout } from "./fixtures/layout-audit.ts";
+
+const core = await startBrowserCore();
+afterAll(async () => { await core.stop(); });
 
 const ROOT = resolve(import.meta.dir, "..");
 const CLI = join(ROOT, "bin", "iamceo.ts");
@@ -24,7 +28,7 @@ const STRIP = /^(HERDR_.*|CLAUDECODE|CLAUDE_CODE_.*)$/;
 function env(extra: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !STRIP.test(k)) out[k] = v;
-  return { ...out, IAMCEO_HOME: HOME, IAMCEO_TEST: "1", IAMCEO_CLAUDE_BIN: FAKE, IAMCEO_HERDR_SOCKET: join(WORK, "none.sock"), FAKE_CLAUDE_LOG: join(WORK, "fake.jsonl"), FAKE_CLAUDE_SESSIONS: join(WORK, "sessions"), ...extra };
+  return { ...out, ...core.env, IAMCEO_HOME: HOME, IAMCEO_TEST: "1", IAMCEO_CLAUDE_BIN: FAKE, IAMCEO_HERDR_SOCKET: join(WORK, "none.sock"), FAKE_CLAUDE_LOG: join(WORK, "fake.jsonl"), FAKE_CLAUDE_SESSIONS: join(WORK, "sessions"), ...extra };
 }
 
 let server: ReturnType<typeof Bun.spawn> | null = null;
@@ -124,7 +128,7 @@ beforeAll(async () => {
   server = Bun.spawn([process.execPath, CLI, "serve"], { cwd: ROOT, env: env({ IAMCEO_PORT: String(port) }), stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   base = `http://127.0.0.1:${port}`;
   await until("서버", () => fetch(`${base}/api/health`).then((r) => r.ok, () => false), 15000);
-  await api("PUT", "/api/settings", { backend: "headless" });
+  await api("PUT", "/api/settings", { backend: "core" });
   browser = await chromium.launch();
   desktop = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   phone = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });

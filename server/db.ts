@@ -291,6 +291,19 @@ export const MIGRATIONS: string[] = [
    UPDATE todos SET outcome = 'done' WHERE done = 1;
    UPDATE todos SET updated_at = COALESCE(done_at, created_at);
    ALTER TABLE projects ADD COLUMN board_tidied_at TEXT;`,
+  // Keep previous CLI generations for audit and handoff without reusing another provider's session.
+  `ALTER TABLE projects ADD COLUMN chief_cli TEXT NOT NULL DEFAULT 'claude';
+   ALTER TABLE members ADD COLUMN session_generation INTEGER NOT NULL DEFAULT 0;
+   CREATE TABLE member_session_history (
+     id TEXT PRIMARY KEY, member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+     cli TEXT NOT NULL, backend TEXT, session_id TEXT, pane_id TEXT, generation INTEGER NOT NULL,
+     applied_config TEXT, archived_at TEXT NOT NULL, reason TEXT NOT NULL
+   );`,
+  // 직원별로 상태줄에서 배운 문맥 창 크기. herdr 는 상태줄이 잘리면 토큰을 200k 로 나눠 1M 세션의 % 를 5배로 부풀렸다.
+  // 그렇게 적힌 값이 다음 전달 때 압축을 부르지 않게 비운다(다음 턴 끝에 바로 다시 잰다). headless 값은 실제 창 크기로 잰 것이라 둔다.
+  `ALTER TABLE members ADD COLUMN context_window INTEGER;
+   ALTER TABLE members ADD COLUMN context_window_source TEXT;
+   UPDATE members SET context_pct = NULL WHERE backend IS NOT 'headless';`,
 ];
 
 export function openDb(path: string): Database {
@@ -305,6 +318,18 @@ export function openDb(path: string): Database {
   db.exec("PRAGMA foreign_keys = ON");
   db.exec("PRAGMA synchronous = NORMAL");
   db.exec("PRAGMA busy_timeout = 5000");
+  const { user_version: current } = db.query<{ user_version: number }, []>("PRAGMA user_version").get()!;
+  if (current > 0 && current < MIGRATIONS.length && path !== ":memory:") {
+    // VACUUM INTO includes committed WAL contents and produces an independent SQLite snapshot.
+    const backup = `${path}.pre-v${current}-${Date.now()}-${randomBytes(4).toString("hex")}.bak`;
+    try {
+      db.query("VACUUM INTO ?").run(backup);
+      chmodSync(backup, 0o600);
+    } catch (e) {
+      db.close();
+      throw new Error(`마이그레이션 전 백업을 만들지 못했습니다. 원본은 변경하지 않았습니다: ${(e as Error).message}`);
+    }
+  }
   migrate(db);
   return db;
 }

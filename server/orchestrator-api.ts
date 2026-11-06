@@ -8,6 +8,8 @@ import type {
   AnswerReq,
   ApprovalPrompt,
   CreateProjectReq,
+  CreateMemberReq,
+  RuntimeInfo,
   Decision,
   HerdrInfo,
   LiveAgent,
@@ -22,6 +24,8 @@ import type {
   TidyResult,
   Todo,
 } from "../shared/types.ts";
+
+import type { TerminalControlAction, TerminalControlResult } from "./runner/types.ts";
 
 export { ApiError } from "./store.ts";
 
@@ -46,6 +50,9 @@ export type AskWaitResult = { done: false } | { done: true; text: string; decisi
 export interface OrchestratorApi {
   /** Store 로 프로젝트를 만들고 goal·startConductor 를 처리한다. */
   createProject(req: CreateProjectReq): Promise<Project>;
+  createMember?(projectId: string, req: CreateMemberReq): Promise<Member>;
+  runtimeInfo?(): Promise<RuntimeInfo>;
+  terminalControl?(memberId: string, action: TerminalControlAction): Promise<TerminalControlResult>;
   /** http.ts 가 store.patchProject 를 끝낸 뒤 부른다(runnerEnabled 변화 등에 반응). */
   onProjectPatched(project: Project, patch: PatchProjectReq): void | Promise<void>;
   /** 저장 전에 부른다. 보관할 수 없으면 ApiError 를 던진다. */
@@ -54,6 +61,7 @@ export interface OrchestratorApi {
   updateSettings(patch: SettingsPatch): Promise<Settings>;
   /** 직원별 모델·effort. */
   patchMemberConfig(memberId: string, patch: PatchMemberReq): Promise<Member>;
+  freshMemberSession?(memberId: string): Promise<Member>;
   /** 실행기를 지금 다시 본다. 입력을 받기 전에 부른다. */
   refreshConnection?(): Promise<void>;
   startConductor(projectId: string): Promise<Member>;

@@ -6,6 +6,7 @@ import type {
   AnswerReq,
   Attachment,
   Backend,
+  CliProvider,
   Decision,
   DecisionCloseKind,
   DecisionOption,
@@ -38,6 +39,7 @@ import type {
 import { DEFAULT_RANKS, fileKindOf } from "../shared/types.ts";
 import type { Bus } from "./bus.ts";
 import { newId, nowIso } from "./db.ts";
+import { DEFAULT_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOWS, exactSource } from "./runner/context.ts";
 import { MAX_PROJECT_NAME, MAX_ROLE, nameProblem, oneLineProblem, RESERVED_HANDLES, workerNameProblem } from "./text.ts";
 import { conductorName } from "./text.ts";
 
@@ -57,6 +59,7 @@ export interface NewProject {
   id?: string;
   name: string;
   cwd: string;
+  chiefCli?: CliProvider;
   runnerEnabled?: boolean;
   now?: string;
 }
@@ -68,6 +71,8 @@ export type ProjectPatch = Partial<
 >;
 
 export interface NewMember {
+  cli?: CliProvider;
+  modelOverride?: string | null;
   projectId: string;
   handle: string;
   name: string;
@@ -84,7 +89,7 @@ export interface NewMember {
 export type MemberPatch = Partial<
   Pick<
     Member,
-    "name" | "role" | "origin" | "backend" | "modelOverride" | "effortOverride" | "status" | "now" | "next" | "cwd" | "sessionId" | "paneId" | "contextPct" | "subagents" | "parallel" | "lastError"
+    "name" | "role" | "cli" | "origin" | "backend" | "modelOverride" | "effortOverride" | "status" | "now" | "next" | "cwd" | "sessionId" | "paneId" | "contextPct" | "contextWindow" | "contextWindowSource" | "subagents" | "parallel" | "lastError"
   >
 >;
 
@@ -185,11 +190,13 @@ export interface DeliveryUpdate {
 export const IMPORT_HOLD_NOTE = "총괄을 시작하면 전달됩니다";
 
 export const DEFAULT_SETTINGS: Settings = {
-  backend: null,
+  backend: "core",
   permissionMode: "bypassPermissions",
   ranks: DEFAULT_RANKS,
   maxConcurrentTurns: 4,
   compactAtPct: 70,
+  contextWindowDefault: DEFAULT_CONTEXT_WINDOW,
+  contextWindows: { ...DEFAULT_CONTEXT_WINDOWS },
   maxAwakeWorkers: 8,
   notifyMac: false,
   boardTidyHours: 6,
@@ -266,6 +273,8 @@ function toMember(r: Row): Member {
     sessionId: r.session_id,
     paneId: r.pane_id,
     contextPct: r.context_pct,
+    contextWindow: r.context_window ?? null,
+    contextWindowSource: r.context_window_source ?? null,
     subagents: r.subagents,
     parallel: !!r.parallel,
     queuedCount: r.queued_count,
@@ -449,6 +458,7 @@ const MEMBER_COLUMNS: Record<keyof MemberPatch, string> = {
   name: "name",
   role: "role",
   origin: "origin",
+  cli: "cli",
   backend: "backend",
   modelOverride: "model_override",
   effortOverride: "effort_override",
@@ -459,6 +469,8 @@ const MEMBER_COLUMNS: Record<keyof MemberPatch, string> = {
   sessionId: "session_id",
   paneId: "pane_id",
   contextPct: "context_pct",
+  contextWindow: "context_window",
+  contextWindowSource: "context_window_source",
   subagents: "subagents",
   parallel: "parallel",
   lastError: "last_error",
@@ -525,9 +537,29 @@ export class Store {
   }
 
   // ---- 연결 ----
-  /** 전역 실행 방식. 첫 실행 선택 전에는 headless 로 친다. */
-  effectiveBackend(): Backend {
-    return this.getSettings().backend ?? "headless";
+  /** Production runtime is fixed to core. Historical backend values remain readable for migration. */
+  private runtimeBackend: Backend = "core";
+  /** Runtime is fixed in production; injected legacy runners can select their isolated test adapter. */
+  setRuntimeBackend(backend: Backend): void { this.runtimeBackend = backend; }
+  effectiveBackend(): Backend { return this.runtimeBackend; }
+
+  chiefCli(projectId: string): CliProvider {
+    return this.row("SELECT chief_cli FROM projects WHERE id = ?", projectId)?.chief_cli === "codex" ? "codex" : "claude";
+  }
+
+  setChiefCli(projectId: string, cli: CliProvider): void {
+    this.requireProject(projectId);
+    this.run("UPDATE projects SET chief_cli = ? WHERE id = ?", cli, projectId);
+  }
+
+  archiveAndRotateSession(memberId: string, cli: CliProvider, reason = "provider_switch"): void {
+    this.requireMember(memberId);
+    this.db.transaction(() => {
+      this.run(`INSERT INTO member_session_history (id, member_id, cli, backend, session_id, pane_id, generation, applied_config, archived_at, reason)
+        SELECT ?, id, cli, backend, session_id, pane_id, session_generation, applied_config, ?, ? FROM members WHERE id = ?`, newId("hist_"), nowIso(), reason, memberId);
+      this.run(`UPDATE members SET cli = ?, token = ?, session_id = NULL, pane_id = NULL, context_pct = NULL, context_window = NULL, context_window_source = NULL,
+        applied_config = NULL, parallel = 0, subagents = 0, session_generation = session_generation + 1 WHERE id = ?`, cli, `tk_${newId("")}${newId("")}`, memberId);
+    })();
   }
 
   /** 실행기 상태를 적는다. 달라졌으면 화면에 알리고 true. */
@@ -553,7 +585,7 @@ export class Store {
     if (!runnerEnabled) return { ok: false, reason: "runner_off", detail: "AI가 아직 연결되지 않았습니다. 총괄을 시작하거나 기존 세션을 편입하세요" };
     const backend = this.effectiveBackend();
     const health = this.runnerHealth.get(backend);
-    return { ok: false, reason: "backend_down", detail: `${backend === "herdr" ? "herdr" : "claude"}에 연결할 수 없습니다. 연결되면 쓸 수 있습니다${health?.detail ? ` (${health.detail})` : ""}` };
+    return { ok: false, reason: "backend_down", detail: `${backend === "core" ? "herdr-core" : backend === "herdr" ? "herdr" : "claude"}에 연결할 수 없습니다. 연결되면 쓸 수 있습니다${health?.detail ? ` (${health.detail})` : ""}` };
   }
 
   private projectFrom(r: Row): Project {
@@ -662,6 +694,7 @@ export class Store {
       at,
       at,
     );
+    if (input.chiefCli) this.setChiefCli(id, input.chiefCli);
     const project = this.requireProject(id);
     this.bus.emit({ type: "project", project });
     this.emitProjects();
@@ -815,8 +848,8 @@ export class Store {
     const id = newId("m_");
     const at = nowIso();
     this.run(
-      `INSERT INTO members (id, project_id, handle, name, role, kind, origin, backend, status, cwd, session_id, pane_id, parallel, token, updated_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO members (id, project_id, handle, name, role, kind, origin, backend, status, cwd, session_id, pane_id, parallel, token, updated_at, created_at, cli, model_override)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       input.projectId,
       input.handle,
@@ -833,6 +866,8 @@ export class Store {
       `tk_${newId("")}${newId("")}`,
       at,
       at,
+      input.cli ?? "claude",
+      input.modelOverride ?? null,
     );
     const member = this.requireMember(id);
     this.bus.emit({ type: "member", member });
@@ -843,6 +878,15 @@ export class Store {
   patchMember(id: string, patch: MemberPatch): Member {
     const before = this.requireMember(id);
     checkMemberText(patch.name, patch.role, before.kind);
+    // 배운 창 크기는 그 세션·CLI 의 것이다. 세션이나 CLI 가 바뀌면 다음 턴 끝에 다시 배운다.
+    const sessionChanged = (patch.sessionId !== undefined && patch.sessionId !== before.sessionId) || (patch.cli !== undefined && patch.cli !== before.cli);
+    if (sessionChanged && patch.contextWindow === undefined) patch = { ...patch, contextWindow: null, contextWindowSource: null };
+    if (patch.contextWindow === null) patch = { ...patch, contextWindowSource: null };
+    if (sessionChanged && patch.contextWindowSource === undefined) patch = { ...patch, contextWindowSource: null };
+    // 같은 세션의 실측 창은 화면 추정으로 덮지 않는다.
+    if (!sessionChanged && exactSource(before.contextWindowSource) && patch.contextWindowSource === "screen") {
+      patch = { ...patch, contextWindow: before.contextWindow, contextWindowSource: before.contextWindowSource };
+    }
     const { set, values } = buildSet(patch, MEMBER_COLUMNS);
     if (set.length === 0) return before;
     set.push("updated_at = ?");
@@ -870,8 +914,11 @@ export class Store {
 
   setAppliedConfig(id: string, config: AppliedConfig | null): void {
     const value = config ? JSON.stringify(config) : null;
-    if ((this.row("SELECT applied_config FROM members WHERE id = ?", id)?.applied_config ?? null) === value) return;
-    this.run("UPDATE members SET applied_config = ? WHERE id = ?", value, id);
+    const before = this.row("SELECT applied_config FROM members WHERE id = ?", id);
+    if ((before?.applied_config ?? null) === value) return;
+    // 세션에 들어간 모델이 바뀌면 배운 창 크기도 그 모델의 것이 아니다.
+    const modelChanged = (before ? appliedOf(before)?.model ?? null : null) !== (config?.model ?? null);
+    this.run(`UPDATE members SET applied_config = ?${modelChanged ? ", context_window = NULL, context_window_source = NULL" : ""} WHERE id = ?`, value, id);
     this.emitMember(id);
   }
 
@@ -993,7 +1040,10 @@ export class Store {
   checkAnswer(id: string, req: AnswerReq): Decision | null {
     const d = this.requireDecision(id);
     const a = this.normalizeAnswer(d, req);
-    if (d.status === "open") return null;
+    if (d.status === "open") {
+      if (req.expectedVersion && req.expectedVersion !== d.updatedAt) throw new ApiError(409, "결재가 변경되었습니다. 새로 불러온 뒤 다시 답하세요");
+      return null;
+    }
     if (d.choice === a.choice && d.note === a.note && d.batch === a.batch) return d;
     throw new ApiError(409, "이미 처리한 결재입니다");
   }
@@ -1555,11 +1605,13 @@ export class Store {
     }
     // 나중에 생긴 직급이 저장값에 없어도 칸은 늘 있어야 한다.
     settings.ranks = Object.fromEntries((Object.keys(DEFAULT_RANKS) as Rank[]).map((rank) => [rank, { ...DEFAULT_RANKS[rank], ...settings.ranks[rank] }])) as Settings["ranks"];
+    settings.contextWindows = { ...DEFAULT_CONTEXT_WINDOWS, ...settings.contextWindows };
     return settings;
   }
 
   patchSettings(patch: SettingsPatch): Settings {
     const before = this.getSettings();
+    if (this.runtimeBackend !== "core" && patch.backend) this.runtimeBackend = patch.backend;
     const next: Record<string, unknown> = { ...patch };
     if (patch.ranks) {
       next.ranks = Object.fromEntries((Object.keys(DEFAULT_RANKS) as Rank[]).map((rank) => [rank, { ...before.ranks[rank], ...patch.ranks![rank] }]));

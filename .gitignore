@@ -4,3 +4,14 @@ dist/
 *.log
 tests/.tmp/
 .handoff/
+
+.runtime/
+native/.build/
+native/build/
+native/*.xcodeproj/
+native/DerivedData*/
+
+# local working files (Claude/Codex orchestration, generated images)
+.pumasi/
+.imagen/
+images/

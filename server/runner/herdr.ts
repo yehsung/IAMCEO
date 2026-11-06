@@ -1,7 +1,8 @@
+import { capturedContext } from "./statusline.ts";
 // herdr 어댑터. 칸 안의 대화형 Claude 세션을 소켓으로 부린다.
 import { closeSync, existsSync, mkdirSync, openSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { adoptRefusal, type ApprovalPrompt, type Backend, type HerdrInfo, type LiveAgent } from "../../shared/types.ts";
 import { HerdrError, isForbiddenTestSocket, rpc, subscribe, type HerdrEvent, type Subscription } from "./herdr-client.ts";
 import { cleanText, SESSION_ID_RE } from "../text.ts";
@@ -15,8 +16,6 @@ const CONDUCTOR_RATIO = 0.3;
 const LONG_TEXT = 1500;
 const SHELL_GRACE_MS = 8000;
 const SHELL_WAIT_MS = 15_000;
-const DEFAULT_WINDOW = 200_000;
-const LARGE_WINDOW = 1_000_000;
 const TAIL_POLL_MS = 1500;
 const SUBAGENT_TOOLS = new Set(["Agent", "Task"]);
 const BRIEF = 300;
@@ -99,6 +98,7 @@ export interface HerdrDeps {
   inboxDir: string;
   /** 기본은 CLAUDE_CONFIG_DIR 또는 ~/.claude. 세션 jsonl 위치를 정한다. */
   claudeHome?: string;
+  contextHome?: string;
   settleMs?: number;
   resyncMs?: number;
   stallMs?: number;
@@ -299,24 +299,20 @@ function paneEnv(m: RunnerMember): { env?: Record<string, string> } {
   return m.subagentModel ? { env: subagentEnv(m.subagentModel) } : {};
 }
 
-/** 상태줄의 문맥 %(`│ 27% │`). 실제 창 크기를 반영하므로 토큰 계산보다 먼저 쓴다. */
+/**
+ * 상태줄의 문맥 %(`│ ███░░░░░░░ │ 27% │`). 실제 창 크기를 반영하므로 토큰 계산보다 먼저 쓴다.
+ * 상태줄은 입력칸 바로 아래에 있다. 입력칸 아래에서 막대(█░)가 있는 첫 줄이 상태줄이고, 그 줄의 막대 바로 다음 칸 % 만 읽는다.
+ * 좁은 칸에서는 상태줄이 잘린다(`│ ██░░░░░░…`, `│ ███░░░░░░░ │ 2…`). 그때는 null 이고, 다른 줄로 넘어가지 않는다:
+ * 더 올라가면 대화에 그린 표·막대를, 더 내려가면 다른 % 칸(사용량 한도 등)을 문맥 %로 잘못 읽는다. 입력칸을 못 찾아도 null.
+ */
 export function screenContextPct(screen: string): number | null {
   const lines = stripAnsi(screen).split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i]!;
-    if (!line.includes("│") || !/[█░]/.test(line)) continue;
-    const m = /│\s*(\d{1,3})%/.exec(line);
-    if (m) return Math.min(100, Number(m[1]));
-  }
-  return null;
-}
-
-function contextPct(screen: string, tokens: number | null, model: string | null): number | null {
-  const shown = screenContextPct(screen);
-  if (shown !== null) return shown;
-  if (tokens === null) return null;
-  const window = /\[1m\]/i.test(model ?? "") || tokens > DEFAULT_WINDOW ? LARGE_WINDOW : DEFAULT_WINDOW;
-  return Math.min(100, Math.round((tokens / window) * 100));
+  const box = inputBox(lines);
+  if (!box) return null;
+  const status = lines.slice(box.bottom + 1).find((l) => /[█░]/.test(l));
+  if (!status) return null;
+  const m = /[█░]+\s*│\s*(\d{1,3})%/.exec(status);
+  return m ? Math.min(100, Number(m[1])) : null;
 }
 
 export async function detectHerdr(socketPath: string): Promise<HerdrInfo> {
@@ -356,7 +352,7 @@ export async function listAgents(socketPath: string): Promise<LiveAgent[]> {
 }
 
 /** 세션 기록 위치. 세션 안에서 cd 하면 다른 폴더 아래에 기록된다. */
-function findSessionFile(claudeHome: string, cwd: string, sessionId: string): string | null {
+export function findSessionFile(claudeHome: string, cwd: string, sessionId: string): string | null {
   const direct = transcriptPath(cwd, sessionId, claudeHome);
   if (existsSync(direct)) return direct;
   const projects = join(claudeHome, "projects");
@@ -457,6 +453,7 @@ export class HerdrRunner implements Runner {
   private readonly socketPath: string;
   private readonly inboxDir: string;
   private readonly claudeHome: string;
+  private readonly contextHome: string;
   private readonly settleMs: number;
   private readonly stallMs: number;
   private readonly startTimeoutMs: number;
@@ -488,6 +485,7 @@ export class HerdrRunner implements Runner {
     this.socketPath = config.socketPath;
     this.inboxDir = deps.inboxDir;
     this.claudeHome = deps.claudeHome ?? defaultClaudeHome();
+    this.contextHome = deps.contextHome ?? dirname(deps.inboxDir);
     this.settleMs = deps.settleMs ?? 1200;
     this.stallMs = deps.stallMs ?? 20_000;
     this.startTimeoutMs = deps.startTimeoutMs ?? 120_000;
@@ -1831,6 +1829,8 @@ export class HerdrRunner implements Runner {
   }
 
   private async finishTurn(t: Track): Promise<void> {
+    const endedAt = Date.now();
+    const sessionId = t.sessionId;
     t.inTurn = false;
     t.bgTurn = null;
     t.turnGen++;
@@ -1843,8 +1843,14 @@ export class HerdrRunner implements Runner {
     const screen = await this.readPane(t.paneId, "visible").catch(() => "");
     // 턴 처리에서 waiting 으로 갈 수 있으므로 idle 을 먼저 낸다.
     this.report(t, "idle");
-    const pct = contextPct(screen, turn.contextTokens, t.m.model ?? turn.model);
-    if (pct !== null) this.emit({ type: "context", memberId: t.m.id, pct });
+    // 창 크기는 서버가 정한다(직원별로 배운 값·설정 기본값). 턴 처리가 압축을 고르기 전에 알린다.
+    const shownPct = screenContextPct(screen);
+    const base = { tokens: turn.contextTokens, shownPct, model: t.m.model ?? turn.model };
+    const reading = sessionId ? await capturedContext(this.contextHome, sessionId, base, endedAt) : base;
+    const current = !this.stopped && this.tracks.get(t.m.id) === t && t.sessionId === sessionId;
+    if (current && (reading.shownPct !== null || reading.tokens !== null || ("exact" in reading && reading.exact))) {
+      this.emit({ type: "context_usage", memberId: t.m.id, ...(sessionId ? { sessionId } : {}), ...reading });
+    }
     this.emit({ type: "turn_end", memberId: t.m.id, finalText: turn.finalText, isError: turn.isError, ...(turn.isError ? { errorText: turn.finalText, noOutput: turn.noOutput } : {}) });
   }
 

@@ -2,6 +2,7 @@
 // 가짜 세션의 도구 호출은 브리지 없이 HTTP 로 간다. 브리지와 컴파일 실행 파일은 맨 아래 묶음에서 따로 본다.
 // 라이브 herdr·실제 ~/.iamceo·실제 claude 는 쓰지 않는다. 캡처는 임시 폴더에 남긴다(IAMCEO_E2E_SHOTS 로 바꿀 수 있다).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { startBrowserCore } from "./fixtures/core-browser-harness";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -10,6 +11,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
 import type { Bootstrap, Member, ProjectState } from "../shared/types.ts";
 import { updateConfigFile } from "../server/config.ts";
+
+const core = await startBrowserCore();
+afterAll(async () => { await core.stop(); });
 
 const ROOT = resolve(import.meta.dir, "..");
 const CLI = join(ROOT, "bin", "iamceo.ts");
@@ -104,7 +108,7 @@ function childEnv(extra: Record<string, string>): Record<string, string> {
   for (const [k, v] of Object.entries(process.env)) {
     if (v !== undefined && !/^(HERDR_|CLAUDE|IAMCEO_)/.test(k)) env[k] = v;
   }
-  return { ...env, IAMCEO_TEST: "1", ...extra };
+  return { ...env, ...core.env, IAMCEO_TEST: "1", ...extra };
 }
 
 async function freePort(): Promise<number> {
@@ -393,17 +397,14 @@ describe("전 과정(가짜 claude, 데스크톱+폰)", () => {
     await phone.getByRole("button", { name: "들어가기" }).click();
     await desk.getByPlaceholder("접속 코드").fill(code);
     await desk.getByRole("button", { name: "들어가기" }).click();
-    for (const page of [desk, phone]) await page.getByRole("heading", { name: "직원을 어떻게 돌릴까요?" }).waitFor();
+    for (const page of [desk, phone]) await page.getByRole("textbox", { name: "입력칸" }).waitFor();
     expect(await desk.evaluate(() => localStorage.getItem("iamceo.accessCode"))).toBe(code);
   }, STEP_MS);
 
-  test("실행 방식: herdr 없이 고르면 다른 기기도 함께 넘어간다", async () => {
-    await shotBoth("03-backend-choice");
-    await desk.locator(".su-card__pick", { hasText: "herdr 없이" }).click();
-    await desk.getByRole("button", { name: "herdr 없이 시작" }).click();
+  test("실행기는 core로 고정되고 두 기기가 바로 홈으로 들어간다", async () => {
     for (const page of [desk, phone]) await page.getByRole("textbox", { name: "입력칸" }).waitFor();
-    expect((await apiGet<Bootstrap>("/api/bootstrap")).settings.backend).toBe("headless");
-    await desk.getByRole("heading", { name: "본사" }).waitFor();
+    expect((await apiGet<Bootstrap>("/api/bootstrap")).settings.backend).toBe("core");
+    expect(await desk.locator(".su-card__pick").count()).toBe(0);
     await desk.getByText("지금 하실 일이 없습니다").waitFor();
     await phone.getByText("지금 하실 일이 없습니다").waitFor();
     await shotBoth("04-hq-home-empty");
@@ -488,7 +489,7 @@ describe("전 과정(가짜 claude, 데스크톱+폰)", () => {
       await page.locator(".tm-wi", { hasText: "랜딩 시안" }).first().waitFor();
     }
     // 문맥 75%(150000/200000)면 압축 예정 표시가 나온다.
-    await memberCard(desk, "민수").getByText("압축 예정").waitFor();
+    expect(await memberCard(desk, "민수").locator(".tm-ctx").count()).toBe(0); // core는 토큰 사용량을 추측하지 않는다.
     await shotBoth("10-team-waiting");
 
     await goBoth("inbox");
@@ -584,7 +585,7 @@ describe("전 과정(가짜 claude, 데스크톱+폰)", () => {
       await page.locator(".tm-copy__cmd").waitFor();
     }
     await shotBoth("17-member-detail");
-    expect(await desk.locator(".tm-copy__cmd").textContent()).toContain(`claude --resume ${minsu.sessionId}`);
+    expect(await desk.locator(".tm-copy__cmd").textContent()).toContain(`attach ${minsu.id}`);
 
     const input = desk.locator(".tm-send__input");
     await input.fill("머리말을 두 줄로 줄여 주세요");
@@ -887,7 +888,7 @@ describe("컴파일 실행 파일", () => {
   };
 
   test("웹 화면이 임베드되어 뜨고 CSS·스크립트가 적용된다", async () => {
-    await fetch(`${url}/api/settings`, { method: "PUT", headers: binHeaders(), body: JSON.stringify({ backend: "headless" }) });
+    await fetch(`${url}/api/settings`, { method: "PUT", headers: binHeaders(), body: JSON.stringify({ backend: "core" }) });
     const ctx = await browser.newContext({ viewport: PHONE, isMobile: true, hasTouch: true, locale: "ko-KR" });
     const page = await ctx.newPage();
     const errors: string[] = [];

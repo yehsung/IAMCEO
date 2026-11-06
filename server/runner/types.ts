@@ -1,4 +1,5 @@
 import type { ActivityKind, ApprovalOption, ApprovalPrompt, Backend, Effort, MemberKind, MemberOrigin, PermissionMode } from "../../shared/types.ts";
+import type { ContextReading } from "./context.ts";
 
 /**
  * not_blocked: 승인 창 앞이 아니다. unrecognized: 창은 있으나 승인 창으로 못 읽었다. changed: 보여 준 창과 지금 창이 다르다(current 에 새 창).
@@ -9,6 +10,10 @@ export type ApprovalAnswer =
   | { ok: false; reason: "not_blocked" | "unrecognized" | "changed" | "no_option" | "no_effect" | "gone"; current?: ApprovalPrompt | null };
 
 export interface RunnerMember {
+  /** Official interactive provider; absent for legacy Claude members. */
+  cli?: "claude" | "codex";
+  /** Native subagent preference, retained across core reconnects. */
+  parallel?: boolean;
   id: string;
   projectId: string;
   handle: string;
@@ -54,7 +59,12 @@ export type RunnerEvent =
   /** noOutput: 입력을 읽고 일한 흔적 없이 오류로 끝났다(사용량 한도 등). 서버가 그 입력을 다시 보낸다. */
   | { type: "turn_end"; memberId: string; finalText: string; isError: boolean; errorText?: string; noOutput?: boolean }
   | { type: "activity"; memberId: string; kind: ActivityKind; text: string }
-  | { type: "context"; memberId: string; pct: number }
+  /** 실제 창 크기로 잰 문맥 %(headless 의 modelUsage, 압축 직후 0). */
+  | { type: "context"; memberId: string; pct: number; /** headless 주 모델의 modelUsage 실측값일 때만 전달. */ window?: number }
+  /**
+   * 턴 끝 실측 창·사용량 또는 화면 추정. 서버가 출처와 함께 저장하고 문맥 % 를 정한다.
+   */
+  | ({ type: "context_usage"; memberId: string } & ContextReading)
   | { type: "subagents"; memberId: string; count: number }
   /**
    * 턴을 마치고 뒤 작업(워크플로 등)을 기다린다(label: 화면에 적힌 그 작업), 또는 그 기다림이 끝났다(null).
@@ -65,7 +75,13 @@ export type RunnerEvent =
   | { type: "compacted"; memberId: string }
   | { type: "pane"; memberId: string; paneId: string; tabId?: string };
 
+export interface TerminalControlAction { action: "claim" | "release" | "input" | "key"; leaseId?: string; text?: string; key?: string }
+export type TerminalControlRequest = TerminalControlAction;
+export interface TerminalControlResult { leaseId?: string; expiresAt?: number }
+
 export interface Runner {
+  /** Explicit human terminal control; claim pauses automatic delivery. */
+  terminalControl?(m: RunnerMember, action: TerminalControlAction): Promise<TerminalControlResult>;
   readonly kind: Backend;
   available(): Promise<{ ok: boolean; detail?: string }>;
   /** 세션을 만들거나 이어서 연다. headless 는 sessionId 만 정한다. */

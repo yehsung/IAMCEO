@@ -1,6 +1,7 @@
 // 자료 화면: 종류별 보기를 실제 서버(가짜 claude)와 브라우저로 본다. 악성 아티팩트는 진짜 화면 안에서 격리를 뚫지 못해야 한다.
 // IAMCEO_SHOTS=<폴더> 를 주면 캡처를 남긴다.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { startBrowserCore } from "./fixtures/core-browser-harness";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,6 +10,9 @@ import type { FileDoc, Member, Project, ProjectState } from "../shared/types.ts"
 import { updateConfigFile } from "../server/config.ts";
 import { cellNumber, isNumericColumn, parseDelimited, sniffDelimiter, sortRows } from "../web/src/components/viewers/delimited.ts";
 import { decodeText } from "../web/src/components/viewers/source.ts";
+
+const core = await startBrowserCore();
+afterAll(async () => { await core.stop(); });
 
 const ROOT = resolve(import.meta.dir, "..");
 const CLI = join(ROOT, "bin", "iamceo.ts");
@@ -25,7 +29,7 @@ const STRIP = /^(HERDR_.*|CLAUDECODE|CLAUDE_CODE_.*)$/;
 function env(extra: Record<string, string> = {}): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !STRIP.test(k)) out[k] = v;
-  return { ...out, IAMCEO_HOME: HOME, IAMCEO_TEST: "1", IAMCEO_CLAUDE_BIN: FAKE, IAMCEO_HERDR_SOCKET: join(WORK, "none.sock"), FAKE_CLAUDE_LOG: join(WORK, "fake.jsonl"), FAKE_CLAUDE_SESSIONS: join(WORK, "sessions"), ...extra };
+  return { ...out, ...core.env, IAMCEO_HOME: HOME, IAMCEO_TEST: "1", IAMCEO_CLAUDE_BIN: FAKE, IAMCEO_HERDR_SOCKET: join(WORK, "none.sock"), FAKE_CLAUDE_LOG: join(WORK, "fake.jsonl"), FAKE_CLAUDE_SESSIONS: join(WORK, "sessions"), ...extra };
 }
 
 function freePort(): number {
@@ -139,7 +143,7 @@ beforeAll(async () => {
     if (Date.now() > end) throw new Error("서버가 뜨지 않음");
     await Bun.sleep(80);
   }
-  await api("PUT", "/api/settings", { backend: "headless" });
+  await api("PUT", "/api/settings", { backend: "core" });
   project = await api<Project>("POST", "/api/projects", { name: "자료 시험", cwd: DIR });
   const joined = await api<{ member: Member; token: string }>("POST", "/agent/join", { project: project.id, name: "자료담당", handle: "writer", cwd: DIR });
   token = joined.token;

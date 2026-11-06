@@ -1,4 +1,4 @@
-// 첫 화면 분기: 접속 코드가 없거나 실행 방식을 아직 안 골랐으면 Setup, 아니면 Shell.
+// 첫 화면 분기: 접속 코드가 없으면 Setup, 아니면 Shell.
 import { useEffect } from "react";
 import { AuroraField, GlassDefs } from "./glass";
 import Shell from "./components/Shell";
@@ -7,10 +7,9 @@ import Setup from "./screens/Setup";
 
 function Root() {
   const auth = useStore((s) => s.auth);
-  const needsChoice = useStore((s) => s.bootstrap?.settings.backend === null);
   const error = useStore((s) => s.projectError);
   if (auth === "checking") return <div className="splash">{error ?? "불러오는 중입니다"}</div>;
-  if (auth === "need_code" || needsChoice) return <Setup />;
+  if (auth === "need_code") return <Setup />;
   return <Shell />;
 }
 

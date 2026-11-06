@@ -1,6 +1,7 @@
 // 팀 화면(spec §10): 지금 상황 · 총괄 · 직원 · 잠든 직원 · 일 목록. 직원 상세는 주소의 <sub>(직원 id)로 열린다.
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
-import { adoptRefusal, EFFORTS, memberRank, type Activity, type ActivityKind, type AdoptPreview, type Backend, type Effort, type LiveAgent, type Member, type MemberStatus, type Project, type ReleaseResult, type WorkItem, type WorkSec } from "@shared/types";
+import { EFFORTS, memberRank, type Activity, type ActivityKind, type CliProvider, type Effort, type Member, type MemberStatus, type PatchMemberReq, type Project, type WorkItem, type WorkSec } from "@shared/types";
+import { ProviderSelect, RuntimeDetails, providerName, runtimeBlock, useRuntime } from "../components/RuntimeStatus";
 import ApprovalPanel from "../components/ApprovalPanel";
 import { enterSends, isComposing } from "../components/Composer";
 import ConnectGate, { isGateRejection, useGate } from "../components/ConnectGate";
@@ -37,7 +38,7 @@ const DELIVERY_LABEL = { queued: "전달 대기", delivering: "전달 중", held
 /** 작은따옴표 안에서는 작은따옴표만 끊어 넣으면 어떤 경로도 안전하다. 안전한 글자뿐이면 그대로 둔다. */
 const shellQuote = (s: string) => (/^[A-Za-z0-9_\-./:=@]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 // sessionId 도 인용한다: 붙여 넣는 곳은 대표의 셸이다.
-const resumeCommand = (m: Member) => `cd ${shellQuote(m.cwd)} && claude --resume ${shellQuote(m.sessionId ?? "")}`;
+const resumeCommand = (m: Member) => `cd ${shellQuote(m.cwd)} && ${m.cli === "codex" ? "codex resume" : "claude --resume"} ${shellQuote(m.sessionId ?? "")}`;
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
 
 function useAction() {
@@ -68,255 +69,66 @@ function ErrorLine({ children }: { children: ReactNode }) {
 
 // ---- 시작 안내 ----
 
-/** 전체 실행 방식이 herdr 일 때만 넘겨받을 수 있다(서버와 같은 조건). */
-function canAdoptInto(backend: Backend | null | undefined, herdrRunning: boolean): boolean {
-  return herdrRunning && backend === "herdr";
-}
-
-/** 팀이 돌기 시작한 뒤에도 세션을 하나씩 더 옮겨 올 수 있다. */
-function AdoptEntry({ project }: { project: Project }) {
-  const [adopting, setAdopting] = useState(false);
-  return (
-    <div className="tm-adopt-entry">
-      <GlassButton variant="ghost" size="m" onClick={() => setAdopting(true)}>
-        기존 세션 편입
-      </GlassButton>
-      <AdoptDialog open={adopting} onClose={() => setAdopting(false)} project={project} />
-    </div>
-  );
-}
-
 function StartPanel({ project, hasMembers }: { project: Project; hasMembers: boolean }) {
   const { busy, error, run } = useAction();
-  const [adopting, setAdopting] = useState(false);
   const gate = useGate();
-  const canStart = gate.ok || gate.kind === "runner_off";
-  const start = () =>
-    run("start", async () => {
-      applyLocal({ type: "member", member: await api.startConductor(project.id) });
-      await refresh();
-    });
+  const diagnostics = useRuntime();
+  const blocked = runtimeBlock(diagnostics.runtime);
+  const canStart = (gate.ok || gate.kind === "runner_off") && !blocked;
+  const start = () => run("start", async () => {
+    applyLocal({ type: "member", member: await api.startConductor(project.id) });
+    await refresh();
+  });
   return (
     <Glass as="section" level="regular" tint className="tm-start">
-      <h2 className="tm-start__title">{project.runnerEnabled ? "아직 팀이 없습니다" : "아직 연결되지 않았습니다"}</h2>
-      <p className="tm-start__text">
-        {!canStart
-          ? "실행기가 돌아오면 총괄을 시작할 수 있습니다."
-          : project.runnerEnabled
-            ? "총괄을 시작하면 일을 받아 직원을 꾸립니다."
-            : hasMembers
-              ? "명부만 있고 세션은 깨어 있지 않습니다. 총괄을 시작하거나 쓰던 세션을 넘겨받으면 말과 결정을 쓸 수 있습니다."
-              : "총괄을 시작하거나 쓰던 세션을 넘겨받으면 말과 결정을 쓸 수 있습니다."}
-      </p>
+      <h2 className="tm-start__title">{project.runnerEnabled ? "아직 팀이 없습니다" : "총괄을 시작하세요"}</h2>
+      <p className="tm-start__text">{blocked ?? (!gate.ok && gate.kind !== "runner_off" ? gate.detail : hasMembers ? "총괄을 시작하면 팀이 다시 일을 이어갑니다." : "총괄이 일을 받아 Claude Code와 Codex 직원을 꾸립니다.")}</p>
       <div className="tm-start__actions">
-        {canStart ? (
-          <GlassButton variant="primary" size="m" disabled={busy !== null} onClick={start}>
-            {busy === "start" ? "시작하는 중" : "총괄 시작"}
-          </GlassButton>
-        ) : null}
-        {!project.isHq ? (
-          <GlassButton variant="glass" size="m" onClick={() => setAdopting(true)}>
-            기존 세션 편입
-          </GlassButton>
-        ) : null}
+        <GlassButton variant="primary" size="m" disabled={busy !== null || !canStart} onClick={start}>{busy === "start" ? "시작하는 중" : "총괄 시작"}</GlassButton>
       </div>
+      {blocked ? <RuntimeDetails diagnostics={diagnostics} /> : null}
       <ErrorLine>{error}</ErrorLine>
-      {!project.isHq ? <AdoptDialog open={adopting} onClose={() => setAdopting(false)} project={project} /> : null}
     </Glass>
   );
 }
 
-function AdoptDialog({ open, onClose, project }: { open: boolean; onClose: () => void; project: Project }) {
-  const desktop = useMediaQuery(MQ_DESKTOP);
-  const boot = useBootstrap();
-  const canAdopt = canAdoptInto(boot?.settings.backend, boot?.herdr.running ?? false);
-  const Overlay = desktop ? Modal : Sheet;
-  const why = boot?.settings.backend !== "herdr" ? "실행 방식이 herdr 일 때만 편입할 수 있습니다." : "herdr 가 켜져 있지 않아 편입할 수 없습니다.";
-  return (
-    <Overlay open={open} onClose={onClose} title={canAdopt ? "기존 세션 편입" : "기존 세션 붙이기"}>
-      {!open ? null : canAdopt ? (
-        <AdoptForm onClose={onClose} project={project} />
-      ) : (
-        <div className="form tm-adopt">
-          <p className="tm-note tm-note--left">{why} 대신 터미널에서 붙일 수 있습니다.</p>
-          <JoinGuide project={project} />
-        </div>
-      )}
-    </Overlay>
-  );
-}
-
-const ADOPT_POLL_MS = 3000;
-
-/** herdr 칸이 아닌 세션(tmux·일반 터미널·IDE)은 그 세션 쪽에서 붙는다. */
-function JoinGuide({ project }: { project: Project }) {
-  const cli = useBootstrap()?.cli ?? "iamceo";
-  const [name, setName] = useState("내 세션");
-  const command = `${cli} join --project ${shellQuote(project.name)} --name ${shellQuote(name.trim() || "내 세션")}`;
-  return (
-    <div className="tm-join">
-      <p className="tm-label">터미널에서 붙이기 (tmux·일반 터미널·IDE)</p>
-      <ol className="tm-join__steps">
-        <li>서버 컴퓨터에서, 그 세션을 쓰는 폴더의 터미널에 아래 명령을 넣습니다.</li>
-        <li>출력되는 MCP 연결 명령을 실행합니다.</li>
-        <li>세션에서 /mcp 로 다시 연결하고, 출력된 규칙 파일을 읽고 따르라고 입력합니다.</li>
-      </ol>
-      <label className="field">
-        <span className="field__label">이름</span>
-        <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
-      </label>
-      <CopyBox command={command} label="연결 명령 복사" />
-      <p className="tm-note tm-note--left">칸을 옮기거나 세션을 끝내지 않습니다. Claude Code 세션만 됩니다. 다른 CLI 는 아직 지원하지 않습니다.</p>
-    </div>
-  );
-}
-
-function AdoptForm({ onClose, project }: { onClose: () => void; project: Project }) {
-  const [rows, setRows] = useState<LiveAgent[] | null>(null);
-  const [paneId, setPaneId] = useState<string | null>(null);
-  const [preview, setPreview] = useState<AdoptPreview | null>(null);
+function CreateMember({ project }: { project: Project }) {
+  const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
+  const [cli, setCli] = useState<CliProvider>("claude");
+  const [model, setModel] = useState("");
   const { busy, error, run, setError } = useAction();
-
-  // 대기 뒤 다시 시도할 수 있게 열어 둔 동안 상태를 따라간다. 고른 칸의 화면도 함께 새로 본다.
-  useEffect(() => {
-    let live = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const tick = async () => {
-      try {
-        const list = await api.herdrAgents();
-        if (live) setRows(list);
-        if (live && paneId && list.some((a) => a.paneId === paneId)) {
-          const seen = await api.adoptPreview(project.id, paneId);
-          if (live) setPreview(seen);
-        }
-      } catch (e) {
-        if (!live) return;
-        setRows((old) => old ?? []);
-        setError(errorText(e));
-      }
-      if (live) timer = setTimeout(tick, ADOPT_POLL_MS);
-    };
-    void tick();
-    return () => {
-      live = false;
-      clearTimeout(timer);
-    };
-  }, [project.id, paneId, setError]);
-
-  // 다른 CLI 는 세션 기록을 못 읽고, 깨우면 Claude 로 뜬다. 이 프로젝트 폴더에서 도는 세션이 고를 확률이 가장 높다.
-  const agents = useMemo(() => (rows ?? []).filter((a) => !a.adopted && a.agent === "claude").sort((a, b) => Number(b.cwd === project.cwd) - Number(a.cwd === project.cwd)), [rows, project.cwd]);
-  const others = (rows ?? []).filter((a) => a.agent && a.agent !== "claude").length;
-  const chosen = agents.find((a) => a.paneId === paneId) ?? null;
-  const shown = preview?.paneId === paneId ? preview : null;
-  const refuse = chosen ? (shown?.refuse ?? adoptRefusal(chosen)) : null;
-
-  const pick = (a: LiveAgent) => {
-    setPaneId(a.paneId);
-    setPreview(null);
-    setError(null);
-    if (!name.trim() && a.name) setName(a.name);
-  };
-
+  const diagnostics = useRuntime();
+  const gate = useGate();
+  const blocked = runtimeBlock(diagnostics.runtime, cli) ?? (!gate.ok ? gate.detail : null);
+  const Overlay = useMediaQuery(MQ_DESKTOP) ? Modal : Sheet;
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (!paneId) return setError("편입할 세션을 고르세요");
-    if (!name.trim() || !role.trim()) return setError("이름과 역할을 넣어 주세요");
-    void run("adopt", async () => {
-      // 떠 있는 세션에는 도구를 붙일 수 없다. team_* 없는 총괄은 지휘할 수단이 없어 직원 자리로만 받는다.
-      applyLocal({ type: "member", member: await api.adopt(project.id, { paneId, name: name.trim(), role: role.trim(), kind: "worker" }) });
+    if (blocked || busy) return;
+    if (!name.trim()) return setError("직원 이름을 넣어 주세요");
+    void run("create", async () => {
+      applyLocal({ type: "member", member: await api.createMember(project.id, { name: name.trim(), role: role.trim() || undefined, cli, modelOverride: model.trim() || null }) });
       await refresh();
-      onClose();
+      setOpen(false);
+      setName(""); setRole(""); setModel("");
     });
   };
-
-  if (rows === null) return <p className="tm-note">세션을 찾는 중입니다</p>;
-  const summary = (
-    <div className="tm-adopt__what">
-      <p className="tm-label">무엇이 바뀌나</p>
-      <ul>
-        <li>칸은 그대로입니다. 탭·배치·칸 이름을 옮기거나 바꾸지 않습니다.</li>
-        <li>운영 규칙을 첫 지시로 보내고 프로젝트 실행을 켭니다. 이후 턴 마지막 글은 터미널에 직접 친 일까지 대화와 총괄에게 보고됩니다.</li>
-        <li>떠 있는 세션에는 도구를 못 붙여 결재 카드·자료를 못 올립니다. '도구 붙여 다시 열기'로 붙이고, '편입 해제'로 되돌립니다.</li>
-      </ul>
-    </div>
-  );
-  if (agents.length === 0) {
-    return (
-      <div className="form tm-adopt">
-        <p className="tm-note tm-note--left">{others > 0 ? `편입할 수 있는 Claude 세션이 없습니다. 다른 CLI 세션 ${others}개는 받을 수 없습니다.` : "편입할 수 있는 세션이 없습니다. herdr 에서 세션을 띄우면 여기에 나타납니다."}</p>
-        <ErrorLine>{error}</ErrorLine>
-        <JoinGuide project={project} />
-      </div>
-    );
-  }
   return (
-    <form className="form tm-adopt" onSubmit={submit}>
-      {summary}
-      <fieldset className="field">
-        <legend className="field__label">세션</legend>
-        <div className="tm-adopt__list">
-          {agents.map((a) => {
-            const why = adoptRefusal(a);
-            return (
-              <label key={a.paneId} className="choice" data-on={paneId === a.paneId ? "" : undefined}>
-                <input type="radio" name="tm-adopt-pane" checked={paneId === a.paneId} onChange={() => pick(a)} />
-                <span>{a.name ?? a.paneId}</span>
-                <small>
-                  {why ?? (a.cwd === project.cwd ? "이 프로젝트 폴더" : "대기 중")}
-                  {a.cwd ? <span className="tm-adopt__cwd t-code">{a.cwd}</span> : null}
-                </small>
-              </label>
-            );
-          })}
-        </div>
-        {others > 0 ? <p className="tm-note tm-note--left">다른 CLI 세션 {others}개는 받을 수 없습니다. Claude 세션만 됩니다.</p> : null}
-      </fieldset>
-      {chosen ? (
-        <div className="tm-adopt__preview">
-          {refuse ? (
-            <p className="tm-hint" role="status">
-              {refuse}
-            </p>
-          ) : null}
-          {shown?.warnings.map((w) => (
-            <p key={w.kind} className="tm-adopt__warn" data-kind={w.kind}>
-              {w.text}
-            </p>
-          ))}
-          <p className="tm-label">세션 화면</p>
-          {shown ? (
-            <pre className="tm-screen tm-adopt__screen t-code" tabIndex={0} aria-label="세션 화면">
-              {shown.screen.split("\n").filter((l) => l.trim()).slice(-12).join("\n") || "화면을 읽지 못했습니다"}
-            </pre>
-          ) : (
-            <p className="tm-note tm-note--left">화면을 읽는 중입니다</p>
-          )}
-        </div>
-      ) : null}
-      <label className="field">
-        <span className="field__label">이름</span>
-        <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="개발 담당" />
-      </label>
-      <label className="field">
-        <span className="field__label">역할</span>
-        <input className="input" value={role} onChange={(e) => setRole(e.target.value)} placeholder="결제 화면 구현" />
-      </label>
-      <ErrorLine>{error}</ErrorLine>
-      <div className="form__actions">
-        <GlassButton variant="ghost" size="m" onClick={onClose}>
-          취소
-        </GlassButton>
-        <GlassButton variant="primary" size="m" type="submit" disabled={busy !== null || !!refuse}>
-          {busy ? "편입하는 중" : "편입"}
-        </GlassButton>
-      </div>
-      <details className="tm-adopt__other">
-        <summary>herdr 칸이 아닌 세션이면</summary>
-        <JoinGuide project={project} />
-      </details>
-    </form>
+    <div className="tm-adopt-entry">
+      <GlassButton variant="glass" size="m" onClick={() => { setError(null); setOpen(true); }}>직원 추가</GlassButton>
+      <Overlay open={open} onClose={() => { if (!busy) setOpen(false); }} title="직원 추가">
+        <form className="form" onSubmit={submit}>
+          <label className="field"><span className="field__label">이름</span><input className="input" value={name} disabled={!!busy} onChange={(e) => setName(e.target.value)} placeholder="개발 담당" data-autofocus="" /></label>
+          <label className="field"><span className="field__label">역할 · 선택</span><input className="input" value={role} disabled={!!busy} onChange={(e) => setRole(e.target.value)} placeholder="결제 화면 구현" /></label>
+          <ProviderSelect value={cli} onChange={setCli} runtime={diagnostics.runtime} disabled={!!busy} />
+          <label className="field"><span className="field__label">모델 · 선택</span><input className="input t-code" value={model} disabled={!!busy} onChange={(e) => setModel(e.target.value)} placeholder="CLI 기본값" autoCapitalize="off" autoCorrect="off" spellCheck={false} /></label>
+          {blocked ? <><p className="su-hint" role="status">{blocked}</p><RuntimeDetails diagnostics={diagnostics} /></> : null}
+          <ErrorLine>{error}</ErrorLine>
+          <div className="form__actions"><GlassButton variant="ghost" size="m" disabled={!!busy} onClick={() => setOpen(false)}>취소</GlassButton><GlassButton variant="primary" size="m" type="submit" disabled={!!busy || !!blocked || !name.trim()}>{busy ? "추가하는 중" : "추가"}</GlassButton></div>
+        </form>
+      </Overlay>
+    </div>
   );
 }
 
@@ -331,7 +143,7 @@ function ContextMeter({ pct, compactAt }: { pct: number; compactAt: number }) {
         <b style={{ width: `${Math.min(100, Math.max(0, value))}%` }} />
       </i>
       <span className="t-tabular">{value}%</span>
-      {due ? <Badge tone="warn">압축 예정</Badge> : null}
+      {due ? <Badge tone="warn">압축 기준 도달</Badge> : null}
     </span>
   );
 }
@@ -390,6 +202,7 @@ function MemberCard({ m, compactAt, openAsks, extra, lead }: { m: Member; compac
           <a className="tm-card__link" href={memberHref(m)}>
             {m.name}
           </a>
+          <Badge>{providerName(m.cli ?? "claude")}</Badge>
           {lead && m.kind === "conductor" && m.name !== "총괄" ? <span className="tm-card__tag">총괄</span> : null}
         </h3>
         <span className="tm-card__status">
@@ -408,34 +221,10 @@ function MemberCard({ m, compactAt, openAsks, extra, lead }: { m: Member; compac
   );
 }
 
-/** 넘겨받은 세션에는 도구가 없다. 칸에서 세션을 끝내고 프로젝트 탭에 도구를 붙여 다시 연다. */
+/** 이전 실행기의 편입 세션을 새 core 세션인 것처럼 조작하지 않는다. */
 function NoTools({ m }: { m: Member }) {
-  const { busy, error, run } = useAction();
-  const confirm = useConfirmPress();
-  if (m.origin !== "adopted" || !m.sessionId || m.status === "asleep") return null;
-  const working = m.status === "working" || m.status === "blocked";
-  return (
-    <div className="tm-notools">
-      <div className="tm-notools__row">
-        <Badge tone="warn">도구 없음</Badge>
-        <GlassButton
-          variant="glass"
-          size="m"
-          className="tm-notools__btn"
-          disabled={busy !== null || working}
-          onClick={() =>
-            confirm.press(() => {
-              void run("reopen", async () => applyLocal({ type: "member", member: await api.reopenWithTools(m.id) }));
-            })
-          }
-        >
-          {busy ? "여는 중" : confirm.armed ? "한 번 더 누르면 다시 엽니다" : "도구 붙여 다시 열기"}
-        </GlassButton>
-      </div>
-      <p className="tm-notools__text">{confirm.armed ? "지금 칸의 세션을 끝내고 프로젝트 탭에 다시 엽니다. 기록은 이어지고 쓰던 칸은 셸로 남습니다." : working ? "턴이 끝나면 다시 열 수 있습니다." : "턴 마지막 글로만 보고합니다. 결재 카드·자료를 못 올립니다."}</p>
-      <ErrorLine>{error}</ErrorLine>
-    </div>
-  );
+  if (m.origin !== "adopted" && (!m.backend || m.backend === "core")) return null;
+  return <p className="tm-notools tm-notools__text" role="status">이전 실행기의 세션입니다. 기존 터미널에서 확인하세요. herdr-core에서는 기존 세션 편입과 도구를 붙여 다시 열기를 지원하지 않습니다.</p>;
 }
 
 function AsleepGroup({ members, runnerEnabled }: { members: Member[]; runnerEnabled: boolean }) {
@@ -463,6 +252,7 @@ function AsleepRow({ m, runnerEnabled }: { m: Member; runnerEnabled: boolean }) 
         <span className="tm-asleep__name">
           <StatusDot status={m.status} className="tm-status" />
           {m.name}
+          <Badge>{providerName(m.cli ?? "claude")}</Badge>
           {m.role ? <span className="tm-asleep__role">{m.role}</span> : null}
         </span>
         {m.now ? <span className="tm-asleep__last">마지막 일: {m.now}</span> : null}
@@ -472,12 +262,13 @@ function AsleepRow({ m, runnerEnabled }: { m: Member; runnerEnabled: boolean }) 
           variant="glass"
           size="m"
           className="tm-asleep__btn"
-          disabled={busy !== null}
+          disabled={busy !== null || (!!m.backend && m.backend !== "core")}
           onClick={() => run("resume", async () => applyLocal({ type: "member", member: await api.resume(m.id) }))}
         >
           {busy ? "여는 중" : "다시 열기"}
         </GlassButton>
       )}
+      {m.backend && m.backend !== "core" ? <p className="tm-note">이전 실행기 세션 · 기존 터미널에서 확인하세요</p> : null}
       {error ? (
         <p className="tm-error tm-asleep__err" role="alert">
           {error}
@@ -661,102 +452,62 @@ function CopyBox({ command, label, onCopied }: { command: string; label: string;
 function CopyCommand({ m }: { m: Member }) {
   const [copied, setCopied] = useState(false);
   const running = m.status !== "asleep" && m.status !== "offline";
+  const cli = useBootstrap()?.cli ?? "iamceo";
+  const attached = m.backend === "core" && !!m.paneId;
+  const command = attached ? `${cli} attach ${shellQuote(m.id)}` : resumeCommand(m);
   return (
     <div className="tm-copy">
-      <p className="tm-label">터미널로 열기</p>
-      <CopyBox command={resumeCommand(m)} label="터미널로 열기 명령 복사" onCopied={() => setCopied(true)} />
-      {copied && running ? <p className="tm-note tm-note--left">지금 도는 세션입니다. 두 곳에서 함께 쓰면 꼬이니 먼저 잠재우고 여세요.</p> : null}
+      <p className="tm-label">{attached ? "연결된 터미널 열기" : "터미널로 열기"}</p>
+      <CopyBox command={command} label="터미널로 열기 명령 복사" onCopied={() => setCopied(true)} />
+      {attached ? <p className="tm-note tm-note--left">서버 컴퓨터에서 실행하면 같은 CLI 터미널을 엽니다. 웹의 화면 탭은 읽기 전용입니다.</p> : null}
+      {copied && running && !attached ? <p className="tm-note tm-note--left">지금 도는 세션입니다. 두 곳에서 함께 쓰면 꼬이니 먼저 잠재우고 여세요.</p> : null}
     </div>
   );
 }
 
 const MODELS = ["fable", "opus", "sonnet", "haiku"];
 
-/** 직원별 모델·effort. 기본은 직급 값이고, 고르는 대로 저장한다. 세션에는 쉴 때 들어간다. */
+/** 제공자 전환은 서버가 이전 세션을 닫고 새 세션에 인계한다. */
 function MemberConfig({ m }: { m: Member }) {
   const rank = useBootstrap()?.settings.ranks[memberRank(m.kind)];
+  const diagnostics = useRuntime();
   const { busy, error, run } = useAction();
-  const save = (patch: { modelOverride?: string | null; effortOverride?: Effort | null }) =>
-    run("config", async () => applyLocal({ type: "member", member: await api.patchMember(m.id, patch) }));
-  const models = m.modelOverride && !MODELS.includes(m.modelOverride) ? [...MODELS, m.modelOverride] : MODELS;
+  const [model, setModel] = useState(m.modelOverride ?? "");
+  useEffect(() => setModel(m.modelOverride ?? ""), [m.modelOverride]);
+  const save = (patch: PatchMemberReq) => run("config", async () => {
+    applyLocal({ type: "member", member: await api.patchMember(m.id, patch) });
+    await refresh();
+  });
+  const changing = m.status === "working" || m.status === "blocked" || m.queuedCount > 0;
+  const legacy = !!m.backend && m.backend !== "core";
+  const blocked = runtimeBlock(diagnostics.runtime);
   const base = (v: string | null | undefined) => `직급 기본값${v ? ` (${v})` : ""}`;
   return (
     <div className="tm-config">
-      <p className="tm-label">모델 · effort</p>
+      <p className="tm-label">AI CLI · 모델 · effort</p>
+      <label className="field">
+        <span className="field__label">AI CLI</span>
+        <select className="input tm-select" aria-label="직원 AI CLI" disabled={busy !== null || !!changing || legacy || !!blocked} value={m.cli ?? "claude"} onChange={(e) => void save({ cli: e.target.value as CliProvider })}>
+          {(["claude", "codex"] as const).map((cli) => <option key={cli} value={cli} disabled={!!runtimeBlock(diagnostics.runtime, cli)}>{providerName(cli)}{diagnostics.runtime && !diagnostics.runtime.providers[cli]?.installed ? " · 설치 필요" : ""}</option>)}
+        </select>
+      </label>
+      <p className="tm-note tm-note--left">{legacy ? "이전 실행기의 세션은 여기서 CLI를 전환할 수 없습니다." : changing ? "일이나 전달 대기가 끝나면 CLI를 바꿀 수 있습니다." : blocked ?? "CLI를 바꾸면 이전 세션을 닫고 현재 일과 상황을 새 세션에 인계합니다."}</p>
       <div className="tm-config__row">
-        <select className="input tm-select" aria-label="모델" disabled={busy !== null} value={m.modelOverride ?? ""} onChange={(e) => save({ modelOverride: e.target.value || null })}>
-          <option value="">{base(rank?.model)}</option>
-          {models.map((x) => (
-            <option key={x} value={x}>
-              {x}
-            </option>
-          ))}
-        </select>
-        <select className="input tm-select" aria-label="effort" disabled={busy !== null} value={m.effortOverride ?? ""} onChange={(e) => save({ effortOverride: (e.target.value || null) as Effort | null })}>
+        <label className="field"><span className="field__label">모델</span><input className="input t-code" aria-label="모델" disabled={busy !== null || legacy} value={model} onChange={(e) => setModel(e.target.value)} placeholder={base(rank?.model)} list={`models-${m.id}`} autoCapitalize="off" autoCorrect="off" spellCheck={false} /><datalist id={`models-${m.id}`}>{(m.cli === "codex" ? [] : MODELS).map((x) => <option key={x} value={x} />)}</datalist></label>
+        <label className="field"><span className="field__label">effort</span><select className="input tm-select" aria-label="effort" disabled={busy !== null || legacy} value={m.effortOverride ?? ""} onChange={(e) => void save({ effortOverride: (e.target.value || null) as Effort | null })}>
           <option value="">{base(rank?.effort)}</option>
-          {EFFORTS.map((x) => (
-            <option key={x} value={x}>
-              {x}
-            </option>
-          ))}
-        </select>
+          {EFFORTS.map((x) => <option key={x} value={x} disabled={m.cli === "codex" && x === "max"}>{x}{m.cli === "codex" && x === "max" ? " · Codex 미지원" : ""}</option>)}
+        </select></label>
       </div>
-      {m.origin === "adopted" ? <p className="tm-note tm-note--left">넘겨받은 세션은 다시 열 때 적용됩니다.</p> : null}
+      <GlassButton variant="glass" size="m" disabled={busy !== null || legacy || (model.trim() || null) === m.modelOverride} onClick={() => void save({ modelOverride: model.trim() || null })}>{busy ? "저장하는 중" : "모델 저장"}</GlassButton>
+      <p className="tm-note tm-note--left">모델·effort 변경은 세션을 잠재운 뒤 다시 열 때 적용됩니다. 빈 모델은 직급 기본값을 씁니다.</p>
       <ErrorLine>{error}</ErrorLine>
     </div>
   );
 }
 
-/** 편입 해제: 대화와 세션은 그대로 두고 관리에서 뺀다. */
-function ReleaseButton({ m, onReleased }: { m: Member; onReleased: (name: string, r: ReleaseResult) => void }) {
-  const { busy, error, run } = useAction();
-  const confirm = useConfirmPress();
-  return (
-    <>
-      <GlassButton
-        variant="glass"
-        size="m"
-        disabled={busy !== null}
-        onClick={() =>
-          confirm.press(() => {
-            void run("release", async () => {
-              const result = await api.release(m.id);
-              onReleased(m.name, result);
-              applyLocal({ type: "member_removed", projectId: m.projectId, memberId: m.id });
-            });
-          })
-        }
-      >
-        {busy ? "해제하는 중" : confirm.armed ? "한 번 더 누르면 해제합니다" : "편입 해제"}
-      </GlassButton>
-      <ErrorLine>{error}</ErrorLine>
-    </>
-  );
-}
-
-function ReleasedNotice({ name, result, onClose }: { name: string; result: ReleaseResult; onClose: () => void }) {
-  return (
-    <Glass as="section" level="regular" tint className="tm-start tm-released" role="status">
-      <p className="tm-start__text">
-        {name} 편입을 해제했습니다.{" "}
-        {!result.paneKept
-          ? "IAMCEO 칸을 닫았고 세션 기록은 그대로입니다. 이어 쓰려면 아래 명령으로 여세요."
-          : result.notified
-            ? "칸과 세션은 그대로이고, 규칙이 풀렸다고 세션에 알렸습니다."
-            : "칸과 세션은 그대로입니다. 세션이 쉬고 있지 않아 알리지 못했습니다. 운영 규칙을 따르지 않아도 된다고 세션에 직접 말해 주세요."}
-      </p>
-      {result.resumeCommand ? <CopyBox command={result.resumeCommand} label="이어 열기 명령 복사" /> : null}
-      <div className="tm-start__actions">
-        <GlassButton variant="ghost" size="m" onClick={onClose}>
-          닫기
-        </GlassButton>
-      </div>
-    </Glass>
-  );
-}
-
-function MemberDetailBody({ m, project, compactAt, openAsks, onReleased }: { m: Member; project: Project; compactAt: number; openAsks: number; onReleased: (name: string, r: ReleaseResult) => void }) {
-  const hasScreen = m.backend === "herdr" && !!m.paneId && m.status !== "asleep" && m.status !== "offline";
+function MemberDetailBody({ m, project, compactAt, openAsks }: { m: Member; project: Project; compactAt: number; openAsks: number }) {
+  const hasScreen = m.backend === "core" && !!m.paneId && m.status !== "asleep" && m.status !== "offline";
   const [pane, setPane] = useState<"activity" | "screen" | null>(null);
   const shownPane = hasScreen ? (pane ?? (m.status === "blocked" ? "screen" : "activity")) : "activity";
   const { busy, error, run } = useAction();
@@ -767,7 +518,7 @@ function MemberDetailBody({ m, project, compactAt, openAsks, onReleased }: { m: 
   const [sleepRefused, setSleepRefused] = useState<string | null>(null);
   const manual = m.origin === "manual";
   const asleep = m.status === "asleep" || m.status === "offline";
-  const canRelease = m.wasAdopted && m.kind === "worker";
+  const legacy = !!m.backend && m.backend !== "core";
 
   const memberAct = (key: string, call: (id: string) => Promise<Member>, done?: string) =>
     run(key, async () => {
@@ -780,16 +531,17 @@ function MemberDetailBody({ m, project, compactAt, openAsks, onReleased }: { m: 
     <div className="tm tm-detail">
       <div className="tm-detail__top">
         <StatusDot status={m.status} label className="tm-status" />
+        <Badge>{providerName(m.cli ?? "claude")}</Badge>
         {m.role ? <span className="tm-detail__role">{m.role}</span> : null}
         <Subagents n={m.subagents} />
         <Time iso={m.updatedAt} relative className="tm-detail__time" />
       </div>
       {/* 승인 창을 읽을 수 있으면 여기서 승인·거절한다. 못 읽으면(폴더 신뢰 창 등) 화면을 보고 터미널에서 푼다. */}
       {m.status === "blocked" ? <ApprovalPanel member={m} boxed fallback={<p className="tm-hint">승인 창 앞에서 멈췄습니다. 화면을 보고 터미널에서 승인하거나 거절하세요.</p>} /> : null}
+      {m.status === "blocked" && m.backend === "core" && m.paneId ? <CopyCommand m={m} /> : null}
       <MemberFacts m={m} compactAt={compactAt} openAsks={openAsks} />
       {m.lastError ? <p className="tm-error">{m.lastError}</p> : null}
       <NoTools m={m} />
-      {m.origin === "adopted" && !asleep ? <p className="tm-note tm-note--left">쓰던 칸 그대로입니다. 잠재우면 세션만 끝나고 칸은 셸로 남습니다.</p> : null}
 
       {manual ? (
         <>
@@ -798,7 +550,7 @@ function MemberDetailBody({ m, project, compactAt, openAsks, onReleased }: { m: 
             <GlassButton
               variant="glass"
               size="m"
-              disabled={busy !== null}
+              disabled={busy !== null || legacy}
               onClick={() =>
                 closeConfirm.press(() => {
                   void run("close", async () => {
@@ -816,23 +568,23 @@ function MemberDetailBody({ m, project, compactAt, openAsks, onReleased }: { m: 
         <div className="tm-actions">
           {asleep ? (
             project.runnerEnabled ? (
-              <GlassButton variant="glass" size="m" disabled={busy !== null} onClick={() => memberAct("resume", api.resume)}>
+              <GlassButton variant="glass" size="m" disabled={busy !== null || legacy} onClick={() => memberAct("resume", api.resume)}>
                 {busy === "resume" ? "깨우는 중" : "깨우기"}
               </GlassButton>
             ) : (
-              <p className="tm-note tm-note--left">실행이 꺼져 있어 깨울 수 없습니다. 팀 화면에서 총괄을 시작하거나 기존 세션을 편입하세요.</p>
+              <p className="tm-note tm-note--left">실행이 꺼져 있어 깨울 수 없습니다. 팀 화면에서 총괄을 시작하세요.</p>
             )
           ) : (
             <>
               {m.status === "working" || m.status === "blocked" ? (
-                <GlassButton variant="glass" size="m" disabled={busy !== null} onClick={() => memberAct("interrupt", api.interrupt, "멈추라고 보냈습니다. 지금 턴이 끊기면 쉼으로 바뀝니다.")}>
+                <GlassButton variant="glass" size="m" disabled={busy !== null || legacy} onClick={() => memberAct("interrupt", api.interrupt, "멈추라고 보냈습니다. 지금 턴이 끊기면 쉼으로 바뀝니다.")}>
                   {busy === "interrupt" ? "멈추는 중" : "중단"}
                 </GlassButton>
               ) : null}
               <GlassButton
                 variant="glass"
                 size="m"
-                disabled={busy !== null || !m.sessionId}
+                disabled={busy !== null || !m.sessionId || m.backend === "core" || legacy}
                 onClick={() => memberAct("compact", api.compact, m.status === "working" ? "압축을 예약했습니다. 지금 턴이 끝나면 실행합니다." : "압축을 요청했습니다.")}
               >
                 {busy === "compact" ? "요청하는 중" : "압축"}
@@ -840,7 +592,7 @@ function MemberDetailBody({ m, project, compactAt, openAsks, onReleased }: { m: 
               <GlassButton
                 variant="glass"
                 size="m"
-                disabled={busy !== null}
+                disabled={busy !== null || legacy}
                 onClick={() =>
                   run("sleep", async () => {
                     setNotice(null);
@@ -861,7 +613,7 @@ function MemberDetailBody({ m, project, compactAt, openAsks, onReleased }: { m: 
                 <GlassButton
                   variant="glass"
                   size="m"
-                  disabled={busy !== null}
+                  disabled={busy !== null || legacy}
                   onClick={() =>
                     forceConfirm.press(() => {
                       void run("sleep", async () => {
@@ -876,9 +628,15 @@ function MemberDetailBody({ m, project, compactAt, openAsks, onReleased }: { m: 
               ) : null}
             </>
           )}
-          {canRelease ? <ReleaseButton m={m} onReleased={onReleased} /> : null}
         </div>
       )}
+      {!manual ? <div className="tm-config">
+        <GlassButton variant="glass" size="m" disabled={busy !== null || m.status === "working" || m.status === "blocked"} onClick={() => memberAct("fresh", api.freshSession, "이전 세션의 기록을 보관하고 새 세션에 현재 일을 인계했습니다.")}>
+          {busy === "fresh" ? "새 세션을 준비하는 중" : "새 세션으로 이어가기"}
+        </GlassButton>
+        <p className="tm-note tm-note--left">이전 제공자의 세션을 다시 쓰지 않고 역할·현재 일·다음을 새 세션에 인계합니다. 일하거나 승인 창 앞이면 끝난 뒤 시작하세요. 이전 실행기의 터미널은 직접 종료할 때까지 그대로 둡니다.</p>
+      </div> : null}
+      {m.backend === "core" ? <p className="tm-note tm-note--left">자동 압축은 지원하지 않습니다. 연결된 터미널에서 CLI의 /compact 명령을 사용하세요.</p> : null}
       <ErrorLine>{error ?? (sleepRefused && !asleep ? `${sleepRefused}. 그래도 재우면 돌던 턴이 끊기고 대기열은 깨울 때까지 멈춥니다.` : null)}</ErrorLine>
       {notice ? (
         <p className="tm-note tm-note--left" role="status">
@@ -887,7 +645,7 @@ function MemberDetailBody({ m, project, compactAt, openAsks, onReleased }: { m: 
       ) : null}
 
       {manual ? null : <MemberConfig m={m} />}
-      {m.sessionId ? <CopyCommand m={m} /> : null}
+      {(m.sessionId || (m.backend === "core" && m.paneId)) && m.status !== "blocked" ? <CopyCommand m={m} /> : null}
 
       <div className="tm-panes">
         {hasScreen ? (
@@ -1028,7 +786,7 @@ function DirectInput({ m }: { m: Member }) {
   );
 }
 
-function MemberDetail({ memberId, compactAt, onReleased }: { memberId: string | null; compactAt: number; onReleased: (name: string, r: ReleaseResult) => void }) {
+function MemberDetail({ memberId, compactAt }: { memberId: string | null; compactAt: number }) {
   const desktop = useMediaQuery(MQ_DESKTOP);
   const project = useProject();
   const member = findMember(project, memberId);
@@ -1048,7 +806,7 @@ function MemberDetail({ memberId, compactAt, onReleased }: { memberId: string | 
       title={member ? `${member.name}${member.kind === "conductor" ? " · 총괄" : ""}` : undefined}
       footer={member && project ? <DirectInput key={member.id} m={member} /> : undefined}
     >
-      {member && project ? <MemberDetailBody key={member.id} m={member} project={project.project} compactAt={compactAt} openAsks={openAsks} onReleased={onReleased} /> : null}
+      {member && project ? <MemberDetailBody key={member.id} m={member} project={project.project} compactAt={compactAt} openAsks={openAsks} /> : null}
     </Overlay>
   );
 }
@@ -1069,7 +827,6 @@ export default function Team() {
   const route = useRoute();
   const bootstrap = useBootstrap();
   const compactAt = bootstrap?.settings.compactAtPct ?? 70;
-  const [released, setReleased] = useState<{ name: string; result: ReleaseResult } | null>(null);
   useClockTick();
   if (!state) return null;
   const { project, members, work, decisions } = state;
@@ -1084,7 +841,6 @@ export default function Team() {
 
   return (
     <div className="tm">
-      {released ? <ReleasedNotice name={released.name} result={released.result} onClose={() => setReleased(null)} /> : null}
       {!project.runnerEnabled || members.length === 0 ? <StartPanel project={project} hasMembers={members.length > 0} /> : null}
 
       {project.now ? (
@@ -1123,8 +879,8 @@ export default function Team() {
 
       {asleep.length > 0 ? <AsleepGroup members={asleep} runnerEnabled={project.runnerEnabled} /> : null}
       {work.length > 0 ? <WorkList work={work} /> : null}
-      {members.length > 0 && project.runnerEnabled && !project.isHq ? <AdoptEntry project={project} /> : null}
-      <MemberDetail memberId={route.sub} compactAt={compactAt} onReleased={(name, result) => setReleased({ name, result })} />
+      {!project.isHq ? <CreateMember project={project} /> : null}
+      <MemberDetail memberId={route.sub} compactAt={compactAt} />
     </div>
   );
 }

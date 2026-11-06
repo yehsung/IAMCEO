@@ -1,0 +1,86 @@
+{
+  "date": "2026-11-06",
+  "scope": "Native macOS/iOS clients and herdr-core single-runtime migration",
+  "automated": {
+    "typescript": "PASS",
+    "server_and_logic": {
+      "passed": 553,
+      "failed": 0,
+      "assertions": 3080,
+      "files": 18
+    },
+    "web_browser": {
+      "passed": 165,
+      "failed": 0,
+      "suites": 6
+    },
+    "swift": {
+      "passed": 14,
+      "failed": 0
+    }
+  },
+  "builds": {
+    "macOS": "PASS; final Release bundle ad-hoc signed",
+    "iOS_simulator": "PASS; unsigned simulator build",
+    "vendor_signature": "PASS; original Herdr Core identity and Team ID preserved"
+  },
+  "live_checks": {
+    "core_version": "0.1.18",
+    "core_restart": "Both actual Claude and Codex CLI PIDs survived core server restart",
+    "codex": "PASS: REST message -> official CLI -> native MCP status and post -> stored completion report",
+    "claude": "PASS on retry: REST delivery -> official Claude CLI -> native MCP status/post -> stored completion and idle",
+    "native_api": "PASS: actual Swift URLSession -> isolated bundled daemon/private core; projects, decision version conflict, answer idempotency, message idempotency, attachment upload/download, artifact, auth rejection"
+  },
+  "visual_checks": {
+    "macOS": "PASS on retry: final app directly operated in read-only demo mode (tabs, decision detail/selection, member settings, recipient navigation, file detail); real backend writes tested separately",
+    "iOS": "Actual simulator screenshots reviewed for all five tabs",
+    "gallery": "iamceo-native-implementation.html; desktop1440/mobile390 layout checked"
+  },
+  "cleanup": {
+    "test_terminals": "Only owned QA terminals terminated",
+    "isolated_test_daemons": "Stopped",
+    "global_service_installed": false,
+    "user_data_migrated": false,
+    "final_app": "Opened explicit read-only demo"
+  },
+  "limits": [
+    "APNs background push is not implemented",
+    "Physical iOS device/distribution signing and notarization not performed",
+    "Codex native session IDs not auto-discovered; lost terminal recovery uses explicit fresh-session handoff",
+    "Cross-provider hidden context/cache transfer is not provided",
+    "Native clients currently poll while foregrounded",
+    "Native artifact scripts and external requests are disabled",
+    "No Windows/Android implementation in this iteration"
+  ],
+  "retry": {
+    "at": "2026-11-06T03:07:40.976Z",
+    "claude": {
+      "result": "PASS",
+      "model": "haiku",
+      "delivery": "delivered",
+      "status": "연결 재검증",
+      "completion": "공식 CLI에서 IAMCEO MCP 완료 보고가 도착했습니다.",
+      "memberSettled": true
+    },
+    "macOS": {
+      "result": "PASS",
+      "scope": "Direct interaction with final native app in read-only demo mode",
+      "checks": [
+        "Inbox detail opens/closes",
+        "Option selection visible; demo submit disabled",
+        "Team navigation and member settings show provider/model",
+        "Member detail opens correct recipient chat",
+        "Files list and document detail open/close",
+        "Return to Home"
+      ],
+      "initialIssue": "Initial app access timed out; subsequent full-path retry succeeded"
+    },
+    "cleanup": {
+      "daemonStopped": true,
+      "coreStopExit": 0,
+      "socketRemoved": true,
+      "workFiles": [],
+      "globalServiceChanged": false
+    }
+  }
+}

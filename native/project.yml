@@ -1,0 +1,82 @@
+name: IAMCEO
+options:
+  bundleIdPrefix: com.iamceo
+  deploymentTarget:
+    macOS: '14.0'
+    iOS: '17.0'
+settings:
+  base:
+    SWIFT_VERSION: '6.0'
+    DEVELOPMENT_TEAM: ''
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_STRICT_CONCURRENCY: complete
+targets:
+  IAMCEO-macOS:
+    type: application
+    platform: macOS
+    sources: [Sources/IAMCEO, Resources/macOS]
+    info:
+      path: Configuration/macOS-Info.plist
+      properties:
+        CFBundleDisplayName: IAMCEO
+        LSApplicationCategoryType: public.app-category.productivity
+        NSLocalNetworkUsageDescription: Connect to your IAMCEO daemon on your own network.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSExceptionDomains:
+            ts.net:
+              NSIncludesSubdomains: true
+              NSExceptionAllowsInsecureHTTPLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.iamceo.native.mac
+        PRODUCT_NAME: IAMCEO
+        CODE_SIGN_ENTITLEMENTS: Configuration/macOS.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_APP_SANDBOX: NO
+        GENERATE_INFOPLIST_FILE: NO
+  IAMCEO-iOS:
+    type: application
+    platform: iOS
+    sources: [Sources/IAMCEO, Resources/iOS]
+    info:
+      path: Configuration/iOS-Info.plist
+      properties:
+        CFBundleDisplayName: IAMCEO
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ITSAppUsesNonExemptEncryption: false
+        NSCameraUsageDescription: Mac에 표시된 연결 QR을 읽습니다.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.iamceo.pair
+            CFBundleURLSchemes: [iamceo]
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+        NSLocalNetworkUsageDescription: Connect to your IAMCEO daemon on your own network.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSExceptionDomains:
+            ts.net:
+              NSIncludesSubdomains: true
+              NSExceptionAllowsInsecureHTTPLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yehsung.iamceo
+        PRODUCT_NAME: IAMCEO
+        TARGETED_DEVICE_FAMILY: '1,2'
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: Configuration/iOS.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        MARKETING_VERSION: '0.1.0'
+        CURRENT_PROJECT_VERSION: '1'
+schemes:
+  IAMCEO-macOS:
+    build:
+      targets:
+        IAMCEO-macOS: all
+  IAMCEO-iOS:
+    build:
+      targets:
+        IAMCEO-iOS: all

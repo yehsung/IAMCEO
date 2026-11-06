@@ -1,0 +1,93 @@
+import SwiftUI
+
+/// Launch arguments: `--demo` (read-only sample workspace), `--screen <destination>` and, in demo only, `--open <id>`.
+enum LaunchOptions {
+    static let arguments = ProcessInfo.processInfo.arguments
+    static let demo = arguments.contains("--demo")
+
+    static func value(after flag: String) -> String? {
+        guard let index = arguments.firstIndex(of: flag), arguments.indices.contains(index + 1) else { return nil }
+        return arguments[index + 1]
+    }
+
+    @MainActor static func makeRouter() -> Router {
+        let initial = value(after: "--screen").flatMap(Destination.init(rawValue:)) ?? .home
+        let router = Router(destination: initial)
+        // Screenshot/review hooks for the read-only sample workspace only.
+        if demo, let value = value(after: "--open") {
+            switch initial {
+            case .inbox: router.decisionID = value
+            case .team: router.memberID = value
+            case .files: router.fileID = value
+            case .chat: router.chatTarget = value
+            case .home: break
+            }
+        }
+        return router
+    }
+}
+
+@main
+struct IAMCEOApp: App {
+    /// Read at the App level this is the aggregate of every window: polling stops only when no window is active.
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var store: AppStore
+    @State private var drafts: DraftStore
+    init() {
+        _store = State(initialValue: AppStore(demo: LaunchOptions.demo))
+        _drafts = State(initialValue: DraftStore(persist: !LaunchOptions.demo))
+    }
+    var body: some Scene {
+        // A fixed id keeps the scene identity stable across builds (the default id is derived from the root view type).
+        WindowGroup(id: "main") {
+            MainWindow(store: store, drafts: drafts)
+        }
+        .onChange(of: scenePhase) { _, phase in store.setForeground(phase == .active) }
+        #if os(macOS)
+        .defaultSize(width: 1440, height: 920)
+        .windowToolbarStyle(.unified)
+        .commands { CommandGroup(replacing: .newItem) {} }
+        #endif
+        #if os(macOS)
+        SwiftUI.Settings {
+            SettingsWindow(store: store, drafts: drafts)
+        }
+        #endif
+    }
+}
+
+/// One window. The store and drafts are shared; navigation (tab, selection, open sheets) belongs to the window, so a
+/// second iPad window neither mirrors nor resets the first.
+private struct MainWindow: View {
+    let store: AppStore
+    let drafts: DraftStore
+    @State private var router = LaunchOptions.makeRouter()
+    var body: some View {
+        AppShell()
+            .environment(store)
+            .environment(router)
+            .environment(drafts)
+            .preferredColorScheme(.dark)
+            .tint(CE.accent)
+            #if os(macOS)
+            // Sidebar ≤320 + detail ≥560 fit inside this minimum (see AppShell.desk).
+            .frame(minWidth: 1040, minHeight: 680)
+            #endif
+    }
+}
+
+#if os(macOS)
+private struct SettingsWindow: View {
+    let store: AppStore
+    let drafts: DraftStore
+    @State private var router = Router()
+    var body: some View {
+        SettingsView()
+            .environment(store)
+            .environment(router)
+            .environment(drafts)
+            .preferredColorScheme(.dark)
+            .tint(CE.accent)
+    }
+}
+#endif

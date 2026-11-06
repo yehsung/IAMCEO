@@ -117,6 +117,30 @@ describe("화면 해석", () => {
     expect(screenContextPct("아무 글")).toBe(null);
     expect(screenContextPct("│ 50% │ 표 안의 숫자")).toBe(null);
   });
+
+  test("잘린 상태줄은 %로 읽지 않는다: 위의 대화·아래의 다른 % 칸으로 넘어가지 않는다", () => {
+    const rule = "─".repeat(40);
+    // 대화에 그린 막대 표(상태줄과 같은 모양). 입력칸 위에 있다.
+    const chart = ["⏺ 진행 상황입니다", "  │ ████████░░ │ 80% │ 결제", "  │ ██░░░░░░░░ │ 20% │ 배포"];
+    const screen = (...status: string[]) => [...chart, rule, "❯ ", rule, ...status, "  ⏵⏵ bypass permissions on"].join("\n");
+    expect(screenContextPct(screen("  ◆ Opus(X) │ ███░░░░░░░ │ 27% │ 268K/1.0M │ $38.35"))).toBe(27);
+    // 실측 좁은 칸: 막대에서 잘렸다
+    expect(screenContextPct(screen("  ◆ Opus(X) │ ██░░░░░░…"))).toBe(null);
+    // 숫자 중간에서 잘렸다
+    expect(screenContextPct(screen("  ◆ Opus(X) │ ███░░░░░░░ │ 2…"))).toBe(null);
+    expect(screenContextPct(screen("  ◆ Opus(X) │ ███░░░░░░░ │ 27…"))).toBe(null);
+    // 막대 앞에서 잘렸다. 둘째 줄의 다른 % 칸(사용량 한도)이나 위 대화의 표를 문맥으로 읽지 않는다
+    expect(screenContextPct(screen("  ◆ Opus(X) │ …", "  5h: 45% │ 7d: 12%"))).toBe(null);
+    expect(screenContextPct(screen("  ◆ Opus(X) │ ███░░░░░░░ │ 2…", "  5h: 45% │ 7d: 12%"))).toBe(null);
+    // 막대 칸 바로 다음이 % 가 아니면(다른 칸) 읽지 않는다
+    expect(screenContextPct(screen("  ◆ Opus(X) │ ███░░░░░░░ │ $3.20 │ 5h: 45%"))).toBe(null);
+    // 상태줄이 없는 칸(설정 안 함)
+    expect(screenContextPct(screen())).toBe(null);
+    // 입력칸을 못 찾으면(승인 창 등) 아무 줄도 믿지 않는다
+    expect(screenContextPct(["  │ ███░░░░░░░ │ 27%", "Do you want to proceed?", "❯ 1. Yes"].join("\n"))).toBe(null);
+    // 색 코드가 섞인 화면
+    expect(screenContextPct(screen("  \x1b[36m◆ Opus\x1b[0m │ \x1b[32m███\x1b[2m░░░░░░░\x1b[0m │ \x1b[32m27%\x1b[0m"))).toBe(27);
+  });
 });
 
 describe("안전장치", () => {
@@ -1144,7 +1168,10 @@ describe("격리 herdr 서버", () => {
     const end = events.find((e) => e.type === "turn_end" && e.memberId === m.id) as Extract<RunnerEvent, { type: "turn_end" }>;
     expect(end.isError).toBe(false);
     expect(end.finalText).toContain("#msg_turn1");
-    expect(events.find((e) => e.type === "context" && e.memberId === m.id)).toMatchObject({ pct: 27 });
+    // 창 크기는 서버가 정한다. 실행기는 상태줄 %와 기록의 토큰 수(1000+53000)를 알린다.
+    expect(events.find((e) => e.type === "context_usage" && e.memberId === m.id)).toMatchObject({ shownPct: 27, tokens: 54_000 });
+    const order0 = events.filter((e) => e.memberId === m.id).map((e) => e.type);
+    expect(order0.indexOf("context_usage")).toBeLessThan(order0.indexOf("turn_end"));
     // idle 은 turn_end 앞에 와야 Orchestrator 의 waiting 을 덮지 않는다.
     const order = events.filter((e) => e.memberId === m.id).map((e) => e.type === "status" ? e.status : e.type);
     expect(order.indexOf("idle")).toBeLessThan(order.indexOf("turn_end"));

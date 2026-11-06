@@ -8,7 +8,11 @@ const ROOT = resolve(import.meta.dir, "..");
 
 async function runFile(file: string): Promise<void> {
   const proc = Bun.spawn([process.execPath, "test", `./tests/${file}`], { cwd: ROOT, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: process.env });
-  const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  // A failed UI wait must not leave a child browser suite running after the wrapper times out.
+  const timer = setTimeout(() => proc.kill("SIGKILL"), 270_000);
+  let out: string, err: string, code: number;
+  try { [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]); }
+  finally { clearTimeout(timer); }
   // bun test 는 결과를 stderr 로 낸다. 실패 때만 전부 보여 주고, 평소에는 요약만 남긴다.
   const text = `${out}${err}`;
   const summary = text.split("\n").filter((l) => /^\s*\d+ (pass|fail)$|^Ran \d+ tests/.test(l)).join(" · ");

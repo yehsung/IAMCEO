@@ -23,7 +23,7 @@ function cliEnv(home: string, extra: Record<string, string> = {}): Record<string
   for (const [k, v] of Object.entries(process.env)) {
     if (v !== undefined && !/^(HERDR_|CLAUDE|IAMCEO_)/.test(k)) env[k] = v;
   }
-  return { ...env, IAMCEO_HOME: home, IAMCEO_HERDR_SOCKET: join(home, "no-herdr.sock"), IAMCEO_TEST: "1", ...extra };
+  return { ...env, IAMCEO_HOME: home, IAMCEO_HERDR_SOCKET: join(home, "no-herdr.sock"), IAMCEO_CORE_BIN: join(home, "no-core-binary"), IAMCEO_TEST: "1", ...extra };
 }
 
 async function cli(home: string, args: string[], opts: { stdin?: string; env?: Record<string, string>; cwd?: string } = {}) {
@@ -71,14 +71,14 @@ describe("접근 범위", () => {
   test("setup --hosts: lan·직접 적기·기본, 0.0.0.0 은 거부", async () => {
     const home = mkdtempSync(join(tmpdir(), "iamceo-cli-hosts-"));
     const readHosts = () => (JSON.parse(readFileSync(join(home, "config.json"), "utf8")) as { hosts?: string[] }).hosts;
-    const bad = await cli(home, ["setup", "--backend", "headless", "--port", "7878", "--hosts", "0.0.0.0"]);
+    const bad = await cli(home, ["setup", "--backend", "core", "--port", "7878", "--hosts", "0.0.0.0"]);
     expect(bad.code).toBe(1);
     expect(bad.stderr).toContain("0.0.0.0");
-    const custom = await cli(home, ["setup", "--backend", "headless", "--port", "7878", "--hosts", "127.0.0.1,192.168.0.9"]);
+    const custom = await cli(home, ["setup", "--backend", "core", "--port", "7878", "--hosts", "127.0.0.1,192.168.0.9"]);
     expect(custom.code).toBe(0);
     expect(readHosts()).toEqual(["127.0.0.1", "192.168.0.9"]);
     expect(custom.stdout).toContain("http://192.168.0.9:7878");
-    const local = await cli(home, ["setup", "--backend", "headless", "--port", "7878", "--hosts", "local"]);
+    const local = await cli(home, ["setup", "--backend", "core", "--port", "7878", "--hosts", "local"]);
     expect(local.code).toBe(0);
     expect(readHosts()).toBeUndefined();
   });
@@ -157,23 +157,23 @@ describe("serve·status·open·join", () => {
 describe("setup", () => {
   test("입력으로 고른 실행 방식·포트를 저장한다", async () => {
     const home = newHome();
-    const r = await cli(home, ["setup"], { stdin: "headless\n7999\n" });
+    const r = await cli(home, ["setup"], { stdin: "7999\n" });
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("설정했습니다: headless, 포트 7999");
+    expect(r.stdout).toContain("설정했습니다: herdr-core, 포트 7999");
     expect(/접속 코드: (\S+)/.exec(r.stdout)![1]).toBe(loadConfig({ IAMCEO_HOME: home }).accessCode);
     expect(JSON.parse(readFileSync(join(home, "config.json"), "utf8")).port).toBe(7999);
     const store = new Store(openDb(join(home, "iamceo.db")), new Bus());
-    expect(store.getSettings().backend).toBe("headless");
+    expect(store.getSettings().backend).toBe("core");
   });
 
   test("인자로도, 입력 없이 기본값으로도 끝난다", async () => {
     const home = newHome();
-    expect((await cli(home, ["setup", "--backend", "herdr", "--port", "7001"])).code).toBe(0);
-    expect(new Store(openDb(join(home, "iamceo.db")), new Bus()).getSettings().backend).toBe("herdr");
+    expect((await cli(home, ["setup", "--backend", "core", "--port", "7001"])).code).toBe(0);
+    expect(new Store(openDb(join(home, "iamceo.db")), new Bus()).getSettings().backend).toBe("core");
     expect((await cli(newHome(), ["setup"], { stdin: "" })).code).toBe(0);
     const bad = await cli(newHome(), ["setup", "--backend", "tmux"]);
     expect(bad.code).toBe(1);
-    expect(bad.stderr).toContain("herdr 또는 headless");
+    expect(bad.stderr).toContain("herdr-core 하나");
   });
 });
 
@@ -181,7 +181,9 @@ describe("service", () => {
   test("plist: 경로·PATH·KeepAlive·이스케이프, plutil 통과", async () => {
     const plist = launchdPlist({ program: ["/bin/bun", "/a&b/iamceo.ts", "serve"], home: "/Users/u", logDir: "/Users/u/.iamceo/logs", workingDir: "/Users/u", env: { IAMCEO_HOME: "/x<y" } });
     expect(plist).toContain("<string>com.iamceo.server</string>");
-    expect(plist).toContain("/Users/u/.bun/bin:/opt/homebrew/bin:/Users/u/.local/bin:");
+    expect(plist).toContain("/Users/u/.npm-global/bin");
+    expect(plist).toContain("/opt/homebrew/bin");
+    expect(plist).toContain("/Users/u/.local/bin");
     expect(plist).toContain("/Users/u/.iamceo/logs/server.log");
     expect(plist).toContain("/a&amp;b/iamceo.ts");
     expect(plist).toContain("/x&lt;y");

@@ -325,8 +325,9 @@ const TOOLS: Record<ToolName, Tool<any>> = {
   team_add: tool(
     "직원을 새로 띄운다. 역할이 맞는 직원이 없을 때만. 잠든 직원의 역할이 맞으면 team_resume 을 쓴다.",
     z.strictObject({
-      name: oneLine(40).describe("화면 이름(한국어, 프로젝트 안에서 유일, 한 줄). 같은 역할이 더 필요하면 뒤에 2, 3"),
+      name: oneLine(40).describe("화면 이름: 맡은 일(예: 결제 연동). 사람 이름은 쓰지 않는다. 한국어, 프로젝트 안에서 유일, 한 줄. 같은 역할이 더 필요하면 뒤에 2, 3"),
       role: oneLine(300).describe("맡을 역할(한 줄)"),
+      cli: z.enum(["claude", "codex"]).optional().describe("직원이 쓸 CLI, 기본 claude"),
       handle: z.string().optional().describe("영문 소문자 핸들"),
       cwd: z.string().optional().describe("작업 폴더. 기본은 프로젝트 폴더. 프로젝트 폴더 안이어야 한다. 밖이 꼭 필요하면 ask 로 묻고, 대표가 그 경로를 쓴 글을 user_quote 에 싣는다"),
       first_instruction: z.string().optional().describe("첫 지시. 끝났다고 볼 기준 포함"),
@@ -337,6 +338,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       const { member: added, assigned } = await orch.addMember(member.projectId, {
         name: a.name,
         role: a.role,
+        cli: a.cli,
         handle: a.handle,
         cwd: a.cwd ? requireMemberCwd(orch, member, a.cwd, a.user_quote) : undefined,
         firstInstruction: a.first_instruction,
@@ -440,6 +442,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       cwd: text.describe("이미 있는 프로젝트 폴더"),
       goal: z.string().optional().describe("프로젝트 목표. 대표의 말 그대로"),
       start_conductor: z.boolean().optional().describe("총괄을 바로 띄운다"),
+      chief_cli: z.enum(["claude", "codex"]).optional(),
     }),
     async (orch, member, a) => {
       const cwd = expandPath(a.cwd, member.cwd);
@@ -447,7 +450,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       // 총괄 띄우기가 실패해도 프로젝트는 남는다. 다시 불렀을 때 둘이 되지 않게 한다.
       const same = orch.store.listProjects().find((p) => p.name === a.name && p.cwd === cwd);
       if (same) throw new ApiError(409, `같은 이름·폴더의 프로젝트가 이미 있습니다 #${same.id}`);
-      const project = await orch.createProject({ name: a.name, cwd, goal: a.goal, startConductor: a.start_conductor });
+      const project = await orch.createProject({ name: a.name, cwd, goal: a.goal, startConductor: a.start_conductor, chiefCli: a.chief_cli });
       return reply(`프로젝트를 만들었습니다 #${project.id} '${project.name}' (${project.cwd})${a.start_conductor ? ", 총괄을 띄웠습니다" : ""}`);
     },
   ),

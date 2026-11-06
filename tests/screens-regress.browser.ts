@@ -1,5 +1,6 @@
 // 화면 쪽 회귀 시험: 실제 서버 + Playwright chromium + 가짜 claude. 라이브 herdr·실제 ~/.iamceo·실제 claude 를 쓰지 않는다.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { startBrowserCore } from "./fixtures/core-browser-harness";
 import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { networkInterfaces, tmpdir } from "node:os";
@@ -7,6 +8,9 @@ import { join, resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import type { Decision, Member, Message, Project, ProjectState } from "../shared/types.ts";
 import { updateConfigFile } from "../server/config.ts";
+
+const core = await startBrowserCore();
+afterAll(async () => { await core.stop(); });
 
 const ROOT = resolve(import.meta.dir, "..");
 const CLI = join(ROOT, "bin", "iamceo.ts");
@@ -21,7 +25,7 @@ const STRIP = /^(HERDR_.*|CLAUDECODE|CLAUDE_CODE_.*)$/;
 function env(extra: Record<string, string> = {}): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !STRIP.test(k)) out[k] = v;
-  return { ...out, IAMCEO_HOME: HOME, IAMCEO_TEST: "1", IAMCEO_CLAUDE_BIN: FAKE, IAMCEO_HERDR_SOCKET: join(WORK, "none.sock"), FAKE_CLAUDE_LOG: join(WORK, "fake.jsonl"), FAKE_CLAUDE_SESSIONS: join(WORK, "sessions"), ...extra };
+  return { ...out, ...core.env, IAMCEO_HOME: HOME, IAMCEO_TEST: "1", IAMCEO_CLAUDE_BIN: FAKE, IAMCEO_HERDR_SOCKET: join(WORK, "none.sock"), FAKE_CLAUDE_LOG: join(WORK, "fake.jsonl"), FAKE_CLAUDE_SESSIONS: join(WORK, "sessions"), ...extra };
 }
 
 let server: ReturnType<typeof Bun.spawn> | null = null;
@@ -127,7 +131,7 @@ beforeAll(async () => {
   const started = await startServer(port);
   server = started.proc;
   base = started.url;
-  await api("PUT", "/api/settings", { backend: "headless" });
+  await api("PUT", "/api/settings", { backend: "core" });
   browser = await chromium.launch();
   desktop = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   phone = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
@@ -511,7 +515,7 @@ describe("연결", () => {
     const spawn = () => Bun.spawn([process.execPath, CLI, "serve"], { cwd: ROOT, env: env({ ...homeEnv, IAMCEO_PORT: String(port) }), stdin: "ignore", stdout: "ignore", stderr: "ignore" });
     const first = { proc: spawn(), url: `http://127.0.0.1:${port}` };
     await until("서버", () => fetch(`${first.url}/api/health`).then((r) => r.ok, () => false), 15000);
-    await fetch(`${first.url}/api/settings`, { method: "PUT", headers: { Authorization: `Bearer ${CODE}`, "Content-Type": "application/json" }, body: JSON.stringify({ backend: "headless" }) });
+    await fetch(`${first.url}/api/settings`, { method: "PUT", headers: { Authorization: `Bearer ${CODE}`, "Content-Type": "application/json" }, body: JSON.stringify({ backend: "core" }) });
     const page = await desktop.newPage();
     await page.addInitScript((code) => {
       if (!sessionStorage.getItem("seeded")) {
@@ -757,76 +761,39 @@ describe("팀 화면", () => {
   }, 30_000);
 });
 
-describe("편입·설정 화면", () => {
-  async function stubHerdr(page: Page, backend: "herdr" | "headless" = "herdr") {
-    await page.route("**/api/bootstrap", async (route) => {
-      const res = await route.fetch();
-      const body = await res.json();
-      await route.fulfill({ response: res, json: { ...body, settings: { ...body.settings, backend }, herdr: { ...body.herdr, installed: true, running: true, compatible: true } } });
-    });
-    await page.route("**/api/herdr/agents", (route) =>
-      route.fulfill({ json: [
-        { paneId: "w9:p1", name: "옛 세션", agent: "claude", status: "idle", cwd: "/다른/폴더", sessionId: "s1", workspaceId: "w9", tabId: "w9:t1", adopted: false },
-        { paneId: "w9:p2", name: "바쁜 세션", agent: "claude", status: "working", cwd: "/다른/폴더", sessionId: "s2", workspaceId: "w9", tabId: "w9:t1", adopted: false },
-        { paneId: "w9:p3", name: "코덱스", agent: "codex", status: "idle", cwd: null, sessionId: null, workspaceId: "w9", tabId: "w9:t1", adopted: false },
-      ] }),
-    );
-    await page.route("**/adopt/preview*", (route) => {
-      const busy = new URL(route.request().url()).searchParams.get("pane") === "w9:p2";
-      route.fulfill({ json: {
-        paneId: busy ? "w9:p2" : "w9:p1", name: "옛 세션", cwd: "/다른/폴더", status: busy ? "working" : "idle", sessionId: "s1", screen: "화면 첫 줄\n화면 끝 줄",
-        refuse: busy ? "일하는 중입니다. 지금 턴이 끝나면 다시 시도하세요" : null,
-        warnings: busy ? [] : [{ kind: "conductor", text: "다른 지휘자가 있을 수 있습니다. 칸 이름이 'lead' 입니다" }, { kind: "folder", text: "이 프로젝트 폴더가 아닙니다." }],
-      } });
-    });
-  }
-
-  test("팀이 돌기 시작해도 편입 버튼이 있고, 무엇이 바뀌는지·화면·경고를 보여 주며 일하는 세션은 못 받는다", async () => {
-    const dir = join(PROJECT_DIR, `adopt-${++counter}`);
-    mkdirSync(dir);
-    const p = await api<Project>("POST", "/api/projects", { name: "편입 시험", cwd: dir });
-    await joinWorker(p.id, "이미 있는 직원");
-    const page = await desktop.newPage();
-    await page.addInitScript((code) => localStorage.setItem("iamceo.accessCode", code), CODE);
-    await stubHerdr(page);
-    await page.goto(`${base}/#/p/${p.id}/team`);
-    await page.locator(".tm-adopt-entry").getByRole("button", { name: "기존 세션 편입" }).click();
-    const form = page.locator(".tm-adopt");
-    await form.waitFor();
-    expect(await form.getByText("총괄", { exact: true }).count()).toBe(0);
-    const what = await form.locator(".tm-adopt__what").innerText();
-    expect(what).toContain("칸은 그대로입니다");
-    expect(what).toContain("도구를 못 붙여");
-    expect(await form.innerText()).toContain("다른 CLI 세션 1개는 받을 수 없습니다");
-    await form.locator("label.choice", { hasText: "옛 세션" }).click();
-    await form.getByText("화면 끝 줄").waitFor();
-    expect(await form.getByText("다른 지휘자가 있을 수 있습니다").count()).toBe(1);
-    expect(await form.getByText("이 프로젝트 폴더가 아닙니다").count()).toBe(1);
-    expect(await form.getByRole("button", { name: "편입", exact: true }).isDisabled()).toBe(false);
-    await form.locator("label.choice", { hasText: "바쁜 세션" }).click();
-    await form.locator(".tm-hint", { hasText: "일하는 중입니다" }).waitFor();
-    expect(await form.getByRole("button", { name: "편입", exact: true }).isDisabled()).toBe(true);
-    await form.locator(".tm-adopt__other > summary").click();
-    expect(await form.locator(".tm-copy__cmd").innerText()).toContain("join --project");
+describe("core 실행 환경·설정 화면", () => {
+  test("직원 추가는 이름·역할·CLI·모델을 서버에 저장하고 편입은 숨긴다", async () => {
+    const p = await newProject();
+    await api("POST", `/api/projects/${p.id}/conductor/start`);
+    const page = await open(desktop, `#/p/${p.id}/team`);
+    expect(await page.getByRole("button", { name: "기존 세션 편입" }).count()).toBe(0);
+    await page.getByRole("button", { name: "직원 추가" }).click();
+    const form = page.locator("form.form");
+    await form.getByLabel("이름", { exact: true }).fill("새 조사 직원");
+    await form.getByLabel("역할 · 선택").fill("문서 조사");
+    await form.getByLabel(/AI CLI/).selectOption("claude");
+    await form.getByLabel("모델 · 선택").fill("haiku");
+    await form.getByRole("button", { name: "추가", exact: true }).click();
+    await until("직원 추가", async () => (await state(p.id)).members.some((m) => m.name === "새 조사 직원"));
+    expect((await state(p.id)).members.find((m) => m.name === "새 조사 직원")).toMatchObject({ role: "문서 조사", cli: "claude", modelOverride: "haiku", backend: "core" });
     await page.close();
   }, 30_000);
 
-  test("전체 실행 방식이 headless 면 편입 대신 터미널에서 붙는 방법을 안내한다", async () => {
+  test("core를 쓸 수 없으면 새 직원 시작을 막고 설치 안내와 재확인을 보여 준다", async () => {
     const p = await newProject();
     await api("POST", `/api/projects/${p.id}/conductor/start`);
     const page = await desktop.newPage();
     await page.addInitScript((code) => localStorage.setItem("iamceo.accessCode", code), CODE);
-    await stubHerdr(page, "headless");
+    await page.route("**/api/runtime", (route) => route.fulfill({ json: { backend: "core", core: { installed: false, available: false, version: null, detail: "격리 실행기 연결 실패" }, providers: { claude: { installed: true }, codex: { installed: false } } } }));
+    await page.route("**/api/bootstrap", async (route) => { const response = await route.fetch(); const body = await response.json(); await route.fulfill({ response, json: { ...body, runtime: { backend: "core", core: { installed: false, available: false, version: null, detail: "격리 실행기 연결 실패" }, providers: { claude: { installed: true }, codex: { installed: false } } } } }); });
     await page.goto(`${base}/#/p/${p.id}/team`);
-    await page.locator(".tm-card").first().waitFor();
-    await page.getByRole("button", { name: "기존 세션 편입" }).click();
-    const guide = page.locator(".tm-join");
-    await guide.waitFor();
-    expect(await page.locator(".tm-adopt__list").count()).toBe(0);
-    expect(await page.locator(".tm-adopt").innerText()).toContain("실행 방식이 herdr 일 때만");
-    const command = await guide.locator(".tm-copy__cmd").innerText();
-    expect(command).toContain("--project");
-    expect(command).toContain("--name");
+    await page.getByRole("button", { name: "직원 추가" }).click();
+    const form = page.locator("form.form");
+    await form.getByLabel("이름", { exact: true }).fill("시작할 수 없음");
+    await form.getByText("bun run setup:core", { exact: true }).waitFor();
+    expect(await form.getByRole("button", { name: "추가", exact: true }).isDisabled()).toBe(true);
+    expect(await form.getByRole("button", { name: "다시 확인" }).count()).toBe(1);
+    expect((await state(p.id)).members.some((m) => m.name === "시작할 수 없음")).toBe(false);
     await page.close();
   }, 30_000);
 
@@ -835,19 +802,21 @@ describe("편입·설정 화면", () => {
     await api("POST", `/api/projects/${p.id}/conductor/start`);
     const lead = (await api<ProjectState>("GET", `/api/projects/${p.id}/state`)).members[0]!;
     const page = await open(desktop, `#/p/${p.id}/team/${lead.id}`);
-    const model = page.getByRole("combobox", { name: "모델" });
+    const model = page.getByLabel("모델", { exact: true });
     await model.waitFor();
     expect(await model.inputValue()).toBe("");
-    expect(await model.locator("option").first().innerText()).toContain("직급 기본값");
+    expect(await model.getAttribute("placeholder")).toContain("직급 기본값");
     const settled = (label: string) => page.waitForFunction((l) => !(document.querySelector(`select[aria-label="${l}"]`) as HTMLSelectElement).disabled, label);
-    await model.selectOption("haiku");
-    await settled("모델");
+    await model.fill("haiku");
+    await page.getByRole("button", { name: "모델 저장" }).click();
+    await until("모델 저장", async () => (await state(p.id)).members[0]?.modelOverride === "haiku");
     await page.getByRole("combobox", { name: "effort" }).selectOption("low");
     await settled("effort");
     await page.waitForTimeout(100);
     expect((await api<ProjectState>("GET", `/api/projects/${p.id}/state`)).members[0]).toMatchObject({ modelOverride: "haiku", effortOverride: "low" });
-    await model.selectOption("");
-    await settled("모델");
+    await model.fill("");
+    await page.getByRole("button", { name: "모델 저장" }).click();
+    await until("모델 해제", async () => (await state(p.id)).members[0]?.modelOverride === null);
     await page.waitForTimeout(100);
     expect((await api<ProjectState>("GET", `/api/projects/${p.id}/state`)).members[0]!.modelOverride).toBeNull();
     await page.close();
@@ -913,7 +882,7 @@ describe("편입·설정 화면", () => {
 });
 
 describe("서버 강제 종료", () => {
-  test("SIGHUP 은 자식까지 정리하고 끝난다", async () => {
+  test("SIGHUP은 IAMCEO만 끝내고 core가 소유한 진행 세션은 유지한다", async () => {
     const port = freePort();
     const home = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-hup-")));
     const log = join(home, "fake.jsonl");
@@ -922,7 +891,7 @@ describe("서버 강제 종료", () => {
     const url = `http://127.0.0.1:${port}`;
     const h = { Authorization: `Bearer ${CODE}`, "Content-Type": "application/json" };
     await until("서버", () => fetch(`${url}/api/health`).then((r) => r.ok, () => false), 15000);
-    await fetch(`${url}/api/settings`, { method: "PUT", headers: h, body: JSON.stringify({ backend: "headless" }) });
+    await fetch(`${url}/api/settings`, { method: "PUT", headers: h, body: JSON.stringify({ backend: "core" }) });
     await fetch(`${url}/api/projects/hq/messages`, { method: "POST", headers: h, body: JSON.stringify({ text: "오래 걸림 @fake:delay=40000" }) });
     let pid = 0;
     await until("자식", async () => {
@@ -936,10 +905,11 @@ describe("서버 강제 종료", () => {
     proc.kill("SIGHUP");
     expect(await proc.exited).toBe(0);
     await Bun.sleep(100);
-    expect(() => process.kill(pid, 0)).toThrow();
+    expect(() => process.kill(pid, 0)).not.toThrow();
+    process.kill(pid, "SIGKILL");
   }, 40_000);
 
-  test("SIGKILL 뒤 남은 claude -p 자식을 재시작이 끝내고, 같은 세션을 함께 쓰지 않는다", async () => {
+  test("SIGKILL 뒤 재시작은 core의 같은 세션을 다시 연결하고 중복 실행하지 않는다", async () => {
     const port = freePort();
     const home = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-orphan-")));
     const log = join(home, "fake.jsonl");
@@ -950,7 +920,7 @@ describe("서버 강제 종료", () => {
     const h = { Authorization: `Bearer ${CODE}`, "Content-Type": "application/json" };
     const proc = spawn();
     await until("서버", () => fetch(`${url}/api/health`).then((r) => r.ok, () => false), 15000);
-    await fetch(`${url}/api/settings`, { method: "PUT", headers: h, body: JSON.stringify({ backend: "headless" }) });
+    await fetch(`${url}/api/settings`, { method: "PUT", headers: h, body: JSON.stringify({ backend: "core" }) });
     await fetch(`${url}/api/projects/hq/messages`, { method: "POST", headers: h, body: JSON.stringify({ text: "오래 걸림 @fake:delay=40000" }) });
     const child = async () => {
       const lines = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { pid: number });
@@ -979,10 +949,15 @@ describe("서버 강제 종료", () => {
     const again = spawn();
     try {
       await until("서버 재시작", () => fetch(`${url}/api/health`).then((r) => r.ok, () => false), 15000);
-      await until("고아 정리", async () => !alive(pid), 8000);
+      await Bun.sleep(1200);
+      expect(alive(pid)).toBe(true);
+      const snapshot = await fetch(`${url}/api/projects/hq/state`, { headers: h }).then((r) => r.json()) as ProjectState;
+      expect(snapshot.members[0]?.backend).toBe("core");
+      expect([...core.holders.values()].filter((holder) => holder.terminal.pid === pid)).toHaveLength(1);
     } finally {
       again.kill("SIGTERM");
       await again.exited;
+      if (alive(pid)) process.kill(pid, "SIGKILL");
     }
   }, 60_000);
 
@@ -1537,7 +1512,7 @@ describe("연결 게이트", () => {
     // 시작 카드가 같은 안내를 하므로 입력칸 자리의 게이트는 숨긴다.
     expect(await page.locator(".shell__bottom .gate").isVisible()).toBe(false);
     const text = await page.locator(".tm-start").innerText();
-    expect(text).toContain("넘겨받으면");
+    expect(text).toContain("총괄을 시작하면");
     expect(text).not.toContain("저장만");
     await page.close();
   }, 30_000);

@@ -1,23 +1,21 @@
 // REST 클라이언트 + 접속 코드 저장. 계약: docs/spec.md §3. 접속 코드는 이 기기 localStorage 에만 둔다.
 import type {
   Activity,
-  AdoptPreview,
-  AdoptReq,
   AnswerApprovalReq,
   AnswerReq,
   ApprovalPrompt,
   Attachment,
   Bootstrap,
   CreateProjectReq,
+  CreateMemberReq,
+  RuntimeInfo,
   Decision,
-  LiveAgent,
   Member,
   Message,
   PatchMemberReq,
   PatchProjectReq,
   Project,
   ProjectState,
-  ReleaseResult,
   SendMessageReq,
   Settings,
   SettingsPatch,
@@ -133,6 +131,7 @@ const get = <T>(path: string) => request<T>("GET", path);
 
 export const api = {
   bootstrap: () => get<Bootstrap>("/api/bootstrap"),
+  runtime: () => get<RuntimeInfo>("/api/runtime"),
   /** <img>·<video> 가 쓸 첨부 쿠키를 받는다. 화면을 그리기 전에 부른다. */
   filesSession: () => post<void>("/api/files-session"),
 
@@ -140,8 +139,8 @@ export const api = {
   archivedProjects: () => get<Project[]>("/api/projects/archived"),
   createProject: (req: CreateProjectReq) => slowPost<Project>("/api/projects", req),
   patchProject: (id: string, req: PatchProjectReq) => request<Project>("PATCH", `/api/projects/${seg(id)}`, req, SLOW_TIMEOUT_MS),
+  createMember: (id: string, req: CreateMemberReq) => slowPost<Member>(`/api/projects/${seg(id)}/members`, req),
   startConductor: (id: string) => slowPost<Member>(`/api/projects/${seg(id)}/conductor/start`),
-  adopt: (id: string, req: AdoptReq) => slowPost<Member>(`/api/projects/${seg(id)}/adopt`, req),
 
   messages: (id: string, opts: { before?: string; limit?: number } = {}) => {
     const q = new URLSearchParams();
@@ -183,6 +182,7 @@ export const api = {
     get<Activity[]>(`/api/members/${seg(memberId)}/activity${limit ? `?limit=${limit}` : ""}`),
   screen: (memberId: string) => get<{ text: string }>(`/api/members/${seg(memberId)}/screen`),
   sleep: (memberId: string, force = false) => slowPost<Member>(`/api/members/${seg(memberId)}/sleep`, force ? { force: true } : undefined),
+  freshSession: (memberId: string) => slowPost<Member>(`/api/members/${seg(memberId)}/fresh-session`),
   resume: (memberId: string) => slowPost<Member>(`/api/members/${seg(memberId)}/resume`),
   compact: (memberId: string) => post<Member>(`/api/members/${seg(memberId)}/compact`),
   interrupt: (memberId: string) => post<Member>(`/api/members/${seg(memberId)}/interrupt`),
@@ -195,11 +195,7 @@ export const api = {
   /** 아티팩트 원본. 격리 칸(ArtifactFrame)에만 넣는다. */
   artifact: (fileId: string) => get<{ html: string }>(`/api/files/${seg(fileId)}/artifact`),
 
-  herdrAgents: () => get<LiveAgent[]>("/api/herdr/agents"),
-  adoptPreview: (projectId: string, paneId: string) => get<AdoptPreview>(`/api/projects/${seg(projectId)}/adopt/preview?pane=${encodeURIComponent(paneId)}`),
-  patchMember: (memberId: string, patch: PatchMemberReq) => request<Member>("PATCH", `/api/members/${seg(memberId)}`, patch),
-  release: (memberId: string) => post<ReleaseResult>(`/api/members/${seg(memberId)}/release`),
-  reopenWithTools: (memberId: string) => slowPost<Member>(`/api/members/${seg(memberId)}/reopen-with-tools`),
+  patchMember: (memberId: string, patch: PatchMemberReq) => request<Member>("PATCH", `/api/members/${seg(memberId)}`, patch, SLOW_TIMEOUT_MS),
   putSettings: (patch: SettingsPatch) => request<Settings>("PUT", "/api/settings", patch),
 };
 

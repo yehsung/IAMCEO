@@ -108,11 +108,11 @@ describe("store", () => {
     expect(s.listProjects().filter((p) => p.isHq).length).toBe(1);
   });
 
-  test("실행 방식은 전역 하나이고 첫 선택 전에는 headless 로 친다", () => {
-    expect(store.getSettings().backend).toBeNull();
-    expect(store.effectiveBackend()).toBe("headless");
+  test("실행기는 core로 고정하고 저장된 이전 방식은 실행하지 않는다", () => {
+    expect(store.getSettings().backend).toBe("core");
+    expect(store.effectiveBackend()).toBe("core");
     store.patchSettings({ backend: "herdr" });
-    expect(store.effectiveBackend()).toBe("herdr");
+    expect(store.effectiveBackend()).toBe("core");
     expect(store.getProject("hq")).not.toHaveProperty("backend");
     expect(store.createProject({ name: "새", cwd: "/tmp/y" })).not.toHaveProperty("permissionMode");
   });
@@ -390,7 +390,7 @@ describe("store", () => {
 
   test("설정: 기본값, 일부만 고치기, 다시 열어도 유지, 방송", () => {
     const { store: s, bus, db, events: ev } = makeStore();
-    expect(s.getSettings()).toEqual({ backend: null, permissionMode: "bypassPermissions", ranks: DEFAULT_RANKS, maxConcurrentTurns: 4, compactAtPct: 70, maxAwakeWorkers: 8, notifyMac: false, boardTidyHours: 6 });
+    expect(s.getSettings()).toEqual({ backend: "core", permissionMode: "bypassPermissions", ranks: DEFAULT_RANKS, maxConcurrentTurns: 4, compactAtPct: 70, contextWindowDefault: 1_000_000, contextWindows: { "gpt-6-astra": 475_000 }, maxAwakeWorkers: 8, notifyMac: false, boardTidyHours: 6 });
     expect(s.patchSettings({ compactAtPct: 60 }).compactAtPct).toBe(60);
     expect(ev.at(-1)).toMatchObject({ type: "settings" });
     expect(new Store(db, bus).getSettings().compactAtPct).toBe(60);
@@ -507,3 +507,22 @@ function makePng(w: number, h: number): Uint8Array {
     chunk("IEND", new Uint8Array()),
   ]);
 }
+
+
+test("Finder PATH discovers installed user CLIs without a login shell and honors explicit paths", async () => {
+  const { chmodSync, mkdirSync } = await import("node:fs");
+  const userHome = mkdtempSync(join(tmpdir(), "iamceo-finder-home-"));
+  const appHome = join(userHome, "app");
+  const codex = join(userHome, ".npm-global", "bin", "codex");
+  const claude = join(userHome, ".local", "bin", "claude");
+  for (const executable of [codex, claude]) {
+    mkdirSync(join(executable, ".."), { recursive: true });
+    writeFileSync(executable, "#!/bin/sh\nexit 0\n");
+    chmodSync(executable, 0o755);
+  }
+  const config = loadConfig({ IAMCEO_HOME: appHome, HOME: userHome, PATH: "/usr/bin:/bin" });
+  expect(config.codexBin).toBe(codex);
+  expect(config.claudeBin).toBe(claude);
+  const explicit = loadConfig({ IAMCEO_HOME: appHome, HOME: userHome, PATH: "/usr/bin:/bin", IAMCEO_CODEX_BIN: "/missing/explicit-codex" });
+  expect(explicit.codexBin).toBe("/missing/explicit-codex");
+});

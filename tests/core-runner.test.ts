@@ -242,6 +242,8 @@ describe("delivery safety and OSC7501 turns", () => {
   test("Codex uses official interactive command and scoped TOML MCP; unknown native id is not invented", async () => {
     const f = await fixture(); const codex = member({ cli: "codex", model: "gpt-test", effort: "xhigh" }); const launch = providerLaunch(codex, f.opts, { codexBin: "/fake/codex" });
     expect(launch.argv[0]).toBe("/fake/codex"); expect(launch.argv).not.toContain("exec"); expect(launch.argv).toContain('model_reasoning_effort="xhigh"'); expect(launch.argv).toContain('mcp_servers.iamceo.command="/bin/echo"'); expect(launch.argv).toContain('mcp_servers.iamceo.env_vars=["IAMCEO_TOKEN","IAMCEO_URL"]'); expect(launch.env.IAMCEO_TOKEN).toBe("secret"); expect(launch.argv.join(" ")).not.toContain("secret"); expect(launch.sessionId).toBeNull();
+    // Codex 0.166's start-up update menu defaults to `npm install -g`; IAMCEO launches never show it.
+    expect(launch.argv).toContain("check_for_update_on_startup=false");
     expect(() => providerLaunch(codex, { ...f.opts, resume: true }, { codexBin: "/fake/codex" })).toThrow("unknown");
     const runner = f.runner(); await runner.start(codex, f.opts); f.setScreen("prior output\n› \n  ? for shortcuts\n"); expect(await runner.send(codex, "hello", f.opts)).toMatchObject({ ok: true });
   });
@@ -468,6 +470,19 @@ describe("serialized observations and generation protection", () => {
 });
 
 describe("persistent input safety and transport effects", () => {
+  test("an unknown write on an observed-idle CLI fences delivery but does not hold a turn slot", async () => {
+    // Real 2026-11-07 run: such a phantom turn kept maxConcurrentTurns=2 at an effective 1 for every other member.
+    const f = await fixture(), runner = f.runner(); await runner.start(member(), f.opts);
+    const track = (runner as unknown as { tracks: Map<string, { uncertain: boolean; status: string; pending: boolean }> }).tracks.get(member().id)!;
+    track.uncertain = true; track.status = "idle"; track.pending = false;
+    expect(runner.isBusy(member().id)).toBe(true);
+    expect(runner.occupiesTurnSlot(member().id)).toBe(false);
+    track.status = "working"; expect(runner.occupiesTurnSlot(member().id)).toBe(true);
+    track.status = "blocked"; expect(runner.occupiesTurnSlot(member().id)).toBe(true);
+    track.uncertain = false; track.status = "idle"; expect(runner.occupiesTurnSlot(member().id)).toBe(false);
+    track.pending = true; expect(runner.occupiesTurnSlot(member().id)).toBe(true);
+    await runner.shutdown();
+  });
   test("lease survives restart and same claim id is reclaimable before automated input", async () => {
     const f = await fixture(), recovery = recoveryStore(), first = f.runner(10000, { recoveryStore: recovery.port }); const started = await first.start(member(), f.opts);
     const lease = await first.terminalControl(member(), { action: "claim", leaseId: "client-claim" }); expect(lease.leaseId).toBe("client-claim"); await first.shutdown();

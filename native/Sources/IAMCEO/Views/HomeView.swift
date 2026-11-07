@@ -187,7 +187,7 @@ struct HomeView: View {
                             .font(CEFont.rowTitle)
                             .foregroundStyle(reason == "backend_down" ? CE.danger : CE.attention)
                             .accessibilityHidden(true)
-                        Text(project.connection.detail.flatMap { $0.isEmpty ? nil : $0 } ?? gateFallback(reason))
+                        Text(project.connection.ownerDetail ?? gateFallback(reason))
                             .font(CEFont.rowTitle).foregroundStyle(CE.ink)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         gateAction(reason)

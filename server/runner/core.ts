@@ -361,6 +361,16 @@ export class CoreRunner implements Runner {
     const track = this.tracks.get(memberId);
     return !!track && (track.pending || track.uncertain || track.completing || track.status === "working" || !!track.compact && !["failed", "succeeded"].includes(track.compact.phase));
   }
+  occupiesTurnSlot(memberId: string): boolean {
+    const track = this.tracks.get(memberId);
+    if (!track) return false;
+    const compacting = !!track.compact && !["failed", "succeeded"].includes(track.compact.phase);
+    // Real 2026-11-07 run: one needs_owner delivery left its track "uncertain" while the CLI sat idle, and that
+    // phantom turn halved maxConcurrentTurns=2 for every other member. Unknown input on an observed-idle CLI
+    // stays fenced for delivery, but it is not a running turn.
+    const observedQuiet = track.status === "idle"; // includes done; a blocked CLI may be paused mid-turn and still counts
+    return track.pending || track.completing || track.status === "working" || compacting || (track.uncertain && !observedQuiet);
+  }
   async send(member: RunnerMember, text: string, opts: StartOpts, _urgent = false): Promise<SendResult> {
     if (!cleanText(text).trim()) return unsupported("Message is empty");
     if (this.configuring.has(member.id)) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written", detail: "CLI configuration is being reloaded" };

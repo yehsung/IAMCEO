@@ -108,7 +108,7 @@ struct ComposerBar: View {
         if store.isDemo { return ("샘플 데이터 · 읽기 전용", .dim) }
         if store.connectionStatus != .connected { return ("서버 연결이 끊겨 보낼 수 없습니다 · 쓴 글은 남아 있습니다", .attention) }
         if let connection = store.state?.project.connection, !connection.ok {
-            return (connection.detail ?? "이 프로젝트의 실행 연결에 문제가 있어 보낼 수 없습니다", .attention)
+            return (connection.ownerDetail ?? "이 프로젝트의 실행 연결에 문제가 있어 보낼 수 없습니다", .attention)
         }
         return nil
     }

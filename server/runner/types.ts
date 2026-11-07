@@ -192,6 +192,12 @@ export interface Runner {
   inspectDelivery?(m: RunnerMember, query: DeliveryProbe): Promise<DeliveryInspection>;
   repairDelivery?(m: RunnerMember, request: DeliveryRepair): Promise<SendResult>;
   isBusy(memberId: string): boolean;
+  /**
+   * Whether this member is actually running (or may be running) a CLI turn and so holds one of maxConcurrentTurns.
+   * A write whose result is unknown on a CLI that is observed idle/done is a delivery fence, not a running turn.
+   * Absent: isBusy is used.
+   */
+  occupiesTurnSlot?(memberId: string): boolean;
   compact(m: RunnerMember, focus: string, o: StartOpts): Promise<SendResult>;
   setParallel(m: RunnerMember, on: boolean, o: StartOpts): Promise<SendResult>; // /effort ultracode on|off
   interrupt(m: RunnerMember): Promise<void>;

@@ -233,7 +233,7 @@ struct InboxView: View {
     @ViewBuilder private var connectionNotice: some View {
         if !store.isDemo, store.connectionStatus == .connected, let connection = store.state?.project.connection, !connection.ok {
             InlineNotice(tone: .attention, icon: "bolt.horizontal.circle", title: "지금은 결재에 답할 수 없습니다",
-                         detail: connection.detail ?? "이 프로젝트의 실행 연결에 문제가 있습니다. 연결되면 답할 수 있습니다.",
+                         detail: connection.ownerDetail ?? "이 프로젝트의 실행 연결에 문제가 있습니다. 연결되면 답할 수 있습니다.",
                          actionTitle: connection.reason == "runner_off" ? "팀 화면으로" : nil,
                          action: connection.reason == "runner_off" ? { router.go(.team) } : nil)
         }

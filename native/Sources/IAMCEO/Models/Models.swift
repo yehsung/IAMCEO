@@ -6,6 +6,15 @@ struct ProjectConnection: Codable, Sendable {
     var ok: Bool = false
     var reason: String? = nil
     var detail: String? = nil
+
+    /// What the owner reads. A runner-down detail ends with the raw transport error in parentheses
+    /// ("… (hello: connect ENOENT /…/core.sock. Start herdr-core with …)"); that belongs in 실행 환경 보기, not in a banner.
+    var ownerDetail: String? {
+        guard let detail, !detail.isEmpty else { return nil }
+        guard reason == "backend_down", let open = detail.range(of: " (", options: .backwards), detail.hasSuffix(")") else { return detail }
+        let head = detail[..<open.lowerBound].trimmingCharacters(in: .whitespaces)
+        return head.isEmpty ? detail : head + " · 원인은 실행 환경 보기에서 확인할 수 있습니다"
+    }
 }
 extension ProjectConnection {
     init(from decoder: Decoder) throws {

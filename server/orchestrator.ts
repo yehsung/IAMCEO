@@ -3685,8 +3685,13 @@ export class Orchestrator implements OrchestratorApi {
       if (member && ["core", "headless"].includes(this.backendOf(member)) && this.store.memberRevisions(member.id).sessionGeneration === run.identity.sessionGeneration) ids.add(member.id);
     }
     for (const [id, rt] of this.runtimes) if (rt.turn?.admitted) ids.add(id);
-    for (const member of this.store.listAllMembers()) if (member.origin !== "manual" && member.status !== "offline" && member.status !== "asleep" && this.backendOf(member) === "core" && this.runners.get("core")?.isBusy(member.id)) ids.add(member.id);
+    for (const member of this.store.listAllMembers()) if (member.origin !== "manual" && member.status !== "offline" && member.status !== "asleep" && this.backendOf(member) === "core" && this.coreOccupiesSlot(member.id)) ids.add(member.id);
     return ids.size;
+  }
+
+  private coreOccupiesSlot(memberId: string): boolean {
+    const runner = this.runners.get("core");
+    return !!runner && (runner.occupiesTurnSlot ? runner.occupiesTurnSlot(memberId) : runner.isBusy(memberId));
   }
 
   private resumePumps(): void {

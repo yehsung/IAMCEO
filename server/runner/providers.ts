@@ -42,6 +42,9 @@ export function providerLaunch(member: RunnerMember, opts: StartOpts, bins: Prov
   if (opts.resume && !member.sessionId) throw new CoreError("session_unknown", "Codex session id is unknown; reattach the existing core terminal or explicitly start a fresh session");
   if (member.subagentModel) args.push("-c", `agents.default_subagent_model=${toml(member.subagentModel)}`);
   args.push("-c", "features.multi_agent=true");
+  // Codex 0.166 opens an "Update available" menu on start whose default item runs `npm install -g @openai/codex`.
+  // Under IAMCEO that menu only stalls the member (and one stray Enter would upgrade a global CLI). Off per process.
+  args.push("-c", "check_for_update_on_startup=false");
   if (member.permissionMode === "bypassPermissions") args.push("--dangerously-bypass-approvals-and-sandbox");
   else if (member.permissionMode === "auto") args.push("--approve-for-me");
   else args.push("--ask-for-approval", "on-request");

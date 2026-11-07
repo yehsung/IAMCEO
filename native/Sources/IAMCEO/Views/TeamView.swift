@@ -63,7 +63,7 @@ struct TeamView: View {
 
         if !store.isDemo, !project.connection.ok, project.connection.reason != "runner_off" {
             InlineNotice(tone: .attention, icon: "bolt.horizontal.circle", title: "실행 연결에 문제가 있습니다",
-                         detail: project.connection.detail ?? "이 프로젝트의 실행 연결을 확인하세요.")
+                         detail: project.connection.ownerDetail ?? "이 프로젝트의 실행 연결을 확인하세요.")
         }
         if needsStart {
             TeamStartPanel(project: project, hasMembers: !members.isEmpty)
@@ -120,7 +120,7 @@ private struct TeamStartPanel: View {
 
     private var message: String {
         if let runtimeBlock { return runtimeBlock }
-        if !project.connection.ok, project.connection.reason != "runner_off", let detail = project.connection.detail, !detail.isEmpty { return detail }
+        if !project.connection.ok, project.connection.reason != "runner_off", let detail = project.connection.ownerDetail, !detail.isEmpty { return detail }
         return hasMembers ? "총괄을 시작하면 팀이 다시 일을 이어갑니다." : "총괄이 일을 받아 Claude Code와 Codex 팀장을 꾸립니다."
     }
 

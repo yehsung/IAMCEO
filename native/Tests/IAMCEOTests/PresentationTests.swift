@@ -246,4 +246,16 @@ final class PresentationTests: XCTestCase {
         item.version = 2; item.deliveryId = nil
         XCTAssertTrue(deliveryPanelActions(item).isEmpty)
     }
+    /// Real rehearsal screen (2026-11-07): the runner-down banner showed the raw socket error and CLI hint.
+    func testRunnerDownDetailHidesTransportError() {
+        var c = ProjectConnection(ok: false, reason: "backend_down", detail: "herdr-core에 연결할 수 없습니다. 연결되면 쓸 수 있습니다 (hello: connect ENOENT /tmp/no-core.sock. Start herdr-core with /usr/bin/false server start)")
+        XCTAssertEqual(c.ownerDetail, "herdr-core에 연결할 수 없습니다. 연결되면 쓸 수 있습니다 · 원인은 실행 환경 보기에서 확인할 수 있습니다")
+        c.detail = "herdr-core에 연결할 수 없습니다. 연결되면 쓸 수 있습니다"
+        XCTAssertEqual(c.ownerDetail, "herdr-core에 연결할 수 없습니다. 연결되면 쓸 수 있습니다")
+        c.reason = "archived"; c.detail = "보관된 프로젝트입니다 (보관함)"
+        XCTAssertEqual(c.ownerDetail, "보관된 프로젝트입니다 (보관함)")
+        c.detail = ""
+        XCTAssertNil(c.ownerDetail)
+    }
 }
+

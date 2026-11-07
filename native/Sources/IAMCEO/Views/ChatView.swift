@@ -113,7 +113,7 @@ struct ChatMineRow: View {
         if store.isDemo { return "샘플은 읽기 전용입니다" }
         if store.connectionStatus != .connected { return "서버에 연결되지 않아 지금은 다시 보낼 수 없습니다" }
         if let connection = store.state?.project.connection, !connection.ok {
-            return connection.detail ?? "이 프로젝트의 실행 연결에 문제가 있어 지금은 다시 보낼 수 없습니다"
+            return connection.ownerDetail ?? "이 프로젝트의 실행 연결에 문제가 있어 지금은 다시 보낼 수 없습니다"
         }
         if store.pendingActions.contains(where: { $0.hasPrefix("send:") }) { return "보내는 중입니다" }
         return nil

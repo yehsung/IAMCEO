@@ -546,7 +546,10 @@ export class CoreRunner implements Runner {
       this.assertMember(track, member);
       if (this.manualLease(member.id) || this.isBusy(member.id)) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
       const terminal = await this.refresh(track);
-      if (terminal.state !== "live" || terminal.status?.state !== "idle") return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: "Compact requires exact idle; generation 1 cannot condition on done" };
+      // After any turn core reports "done" until the next input, so "idle only" meant a compact requested after the
+      // first turn never ran and fenced the member's queue forever (real 2026-11-07 run). Use the same rule as a
+      // normal delivery: idle is sent with the core-side if:"idle" guard, done after the same client-side checks.
+      if (terminal.state !== "live" || !["idle", "done"].includes(terminal.status?.state || "")) return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: "Compact requires an idle or finished CLI" };
       const epoch = track.epoch;
       const screen = await this.screen(member);
       if ((providerFor(member) === "claude" ? inputText(screen) : codexDraft(screen)) !== "") return { ok: false, reason: "input_busy", retryable: true, deliveryEffect: "not_written" };
@@ -556,12 +559,13 @@ export class CoreRunner implements Runner {
       const baseline = compactLogBaseline(root, path);
       if (!baseline) return { ...unsupported("Compact log baseline is incomplete"), deliveryEffect: "not_written" };
       const current = await this.refresh(track);
-      if (current.state !== "live" || current.status?.state !== "idle" || track.epoch !== epoch || this.manualLease(member.id) || !readJsonlRange(root, path, baseline, { maxBytes: 0 }).complete) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
+      const currentState = current.status?.state;
+      if (current.state !== "live" || !["idle", "done"].includes(currentState || "") || track.epoch !== epoch || this.manualLease(member.id) || !readJsonlRange(root, path, baseline, { maxBytes: 0 }).complete) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
       this.saveCompact(track, { id: crypto.randomUUID(), phase: "sending", startedAt: Date.now(), cursor: null, baseline: { path, fileIdentity: baseline.fileIdentity, offset: baseline.offset,
         sessionId: track.sessionId, terminalId: current.address, generation: member.sessionGeneration, turn: current.turn ?? null, model: member.model } });
       this.bump(track); track.pending = true; attempted = true;
       const command = providerFor(member) === "codex" ? "/compact" : `/compact ${cleanText(focus).replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim()}`.trim();
-      const result = await this.call<{ turn: number; started?: boolean }>("terminal.send", { terminal: current.address, text: command, if: "idle", force: false, wait: false }, this.sendTimeoutMs);
+      const result = await this.call<{ turn: number; started?: boolean }>("terminal.send", { terminal: current.address, text: command, ...(currentState === "idle" ? { if: "idle" } : {}), force: false, wait: false }, this.sendTimeoutMs);
       if (!Number.isSafeInteger(result.turn)) throw new CoreError("protocol", "Invalid compact receipt", true);
       this.saveCompact(track, { ...track.compact!, phase: "running" });
       return { ok: true, started: result.started ?? null, turn: result.turn };

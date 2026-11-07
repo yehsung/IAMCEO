@@ -644,13 +644,23 @@ describe("compact control and shared native binding", () => {
     expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: false, deliveryEffect: "not_written" });
     expect(store.states.size).toBe(0); expect(d.f.calls.some(c => c.method === "terminal.send")).toBe(false);
   });
-  test("done, drafts, working and unavailable persistence send no compact input", async () => {
+  test("drafts, working and unavailable persistence send no compact input; a finished (done) CLI compacts like a delivery", async () => {
+    // Real 2026-11-07 run: core keeps a CLI in "done" after every turn, so an idle-only compact never ran and its
+    // pending state fenced the member's queue. done now follows the normal delivery rule (client-side checks, no if:"idle").
     const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
     const runner = d.f.runner(10000, { compactStore: store.port }); await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts); const terminal = d.f.terminals.get(d.started.paneId)!;
-    terminal.status = { state: "done" }; expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: false, deliveryEffect: "not_written" });
+    terminal.status = { state: "done" }; d.f.setScreen(composer("user draft")); expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: false, reason: "input_busy", deliveryEffect: "not_written" });
     terminal.status = { state: "idle" }; d.f.setScreen(composer("user draft")); expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: false, reason: "input_busy" });
     d.f.setScreen(composer()); terminal.status = { state: "working" }; expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: false });
     expect(d.f.calls.some(c => c.method === "terminal.send")).toBe(false);
+    await runner.shutdown();
+    const e = await deliveryFixture(), store2 = compactStore(); await e.runner.shutdown(); e.recovery.dispatches([]);
+    const fresh = e.f.runner(10000, { compactStore: store2.port }); const finished = e.f.terminals.get(e.started.paneId)!;
+    finished.status = { state: "done" }; e.f.setScreen(composer());
+    await fresh.start(member({ paneId: e.started.paneId, sessionId: e.started.sessionId }), e.f.opts);
+    expect(await fresh.compact(member(), "focus", e.f.opts)).toMatchObject({ ok: true });
+    const sends = e.f.calls.filter(c => c.method === "terminal.send");
+    expect(sends).toHaveLength(1); expect(sends[0]!.params.text).toBe("/compact focus"); expect(sends[0]!.params.if).toBeUndefined();
   });
   test("compact persistence failure prevents input; ACK loss survives restart without another slash", async () => {
     const d = await deliveryFixture(); await d.runner.shutdown(); d.recovery.dispatches([]);

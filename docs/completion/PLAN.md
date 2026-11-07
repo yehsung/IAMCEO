@@ -301,7 +301,7 @@ W1-Q와 각 시험 소유자는 위의 **기존 시험도** import/자식 환경
 | WS gap/중복/heartbeat 앞섬·epoch 교체·옛 snapshot 후착·flapping·403/401 | 최신 snapshot으로 수렴하고 다른 세대는 적용하지 않는다. WS만 실패하면 REST 쓰기는 가능하며 확인된 401만 인증을 종료한다. 정상 5분에 heartbeat 외 정기 상태/history GET은 0개다. |
 | iPhone 10분 잠금·Mac sleep/wake·여러 창 활성/비활성·Wi-Fi↔셀룰러·Tailscale 전환 | 배경 10분 클라이언트 요청은 0개이며 호스트 작업은 계속된다. 복귀하면 새 세대로 즉시 sync하고 coordinator/소켓은 하나다. 불통을 정상으로 표시하지 않는다. |
 | Claude/Codex 문맥 0/null/190k÷1M·누적/현재 usage·모델 변경·늦은 세대 표본 | 실측/추정/갱신 대기를 구분하고 19%가 정확하다. cache 이중 계산과 타 세대 오염은 없다. nonce는 유일한 주 세션에만 연결한다. |
-| threshold 이상+idle+wake, working 중 수동 압축 예약, lease/draft/approval/done, timeout/crash | fresh exact만 auto 1회이며 wake가 없으면 0회다. slash에 nonce/marker/prefix가 없다. boundary+settled만 성공이며 done 조건 미지원은 보류한다. uncertain은 재송신하지 않고 뒤 업무를 차단한다. |
+| threshold 이상+idle+wake, working 중 수동 압축 예약, lease/draft/approval/done, timeout/crash | fresh exact만 auto 1회이며 wake가 없으면 0회다. slash에 nonce/marker/prefix가 없다. boundary+settled만 성공이다. done(턴 직후 core가 유지하는 상태)은 일반 전달과 같은 클라이언트 측 확인(입력칸 비어 있음·epoch·lease·기록 기준점) 뒤 보낸다(2026-11-07 실측: idle 전용이면 첫 턴 이후 압축이 영영 실행되지 않고 대기열이 막힘). uncertain은 재송신하지 않고 뒤 업무를 차단한다. |
 | 이름 변경·본사 예외·보관/꺼내기·다른 기기 열린 프로젝트·보관 중 늦은 manual 자료 | ID·초안·이력을 유지하고 HQ 보관은 400, 삭제 경로는 없다. 보관함에서 대화/결재/업무/자료를 읽되 쓰기 UI는 없다. 보관 후 자동 start는 없고 꺼내기는 archived-held만 검사한다. 실제 같은 세션 이어가기를 확인한다. |
 | APNs 4종·질문 ask·같은 직원 120초 마감/재시작·다른 직원·opt-out/re-enable | ask는 1사건이며 질문 메시지 중복은 없다. 전체 opt-in 뒤 기본 4종이 켜진다. 같은 창은 1개/고정 마감, 타 직원은 분리하며 새 기기에 소급하지 않는다. unknown을 승인으로 단정하지 않는다. |
 | APNs TLS/JWT/400/403/410/429/5xx/GOAWAY/쓰기 뒤 timeout·해지·token 교체 | source/compile 모두 HTTP2 계약을 통과한다. 옛 generation의 410이 새 토큰을 무효화하지 않는다. 확정 실패만 TTL 내 재시도하고 unknown은 재발신하지 않는다. API/로그/payload에 비밀 canary가 없다. |

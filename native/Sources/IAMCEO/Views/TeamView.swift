@@ -698,8 +698,8 @@ struct MemberDetailView: View {
                     }
                     HStack(spacing: 5) {
                         Tag(providerName(m.cli))
-                        if let applied = m.appliedModel, !applied.isEmpty { Text(applied).font(CEFont.meta).foregroundStyle(CE.ink3) }
-                        if let requested = m.modelOverride, !requested.isEmpty, requested != m.appliedModel {
+                        if let applied = m.appliedModel ?? store.bootstrap?.settings.memberConfig(m).model, !applied.isEmpty { Text(applied).font(CEFont.meta).foregroundStyle(CE.ink3) }
+                        if let requested = store.bootstrap?.settings.memberConfig(m).model, !requested.isEmpty, let applied = m.appliedModel, requested != applied {
                             Text("→ \(requested)").font(CEFont.meta).foregroundStyle(CE.attention).help("요청한 모델 · 세션을 다시 열 때 적용")
                         }
                     }
@@ -925,7 +925,7 @@ struct MemberDetailView: View {
         let block = configBlock(m, target: target, reopens: reopens)
         let busy = running == "config"
         let rank = m.kind == "worker" ? "lead" : "manager"
-        let rankConfig = store.bootstrap?.settings.ranks[rank]
+        let rankConfig = store.bootstrap?.settings.rankConfig(rank, cli: target == "codex" ? .codex : .claude)
         return VStack(alignment: .leading, spacing: 10) {
             TeamFactRow(label: "AI CLI", alignment: .center) {
                 Picker("AI CLI", selection: Binding(get: { switchAllowed ? provider : m.cli }, set: { provider = $0 })) {
@@ -971,9 +971,8 @@ struct MemberDetailView: View {
             TeamFactRow(label: "effort", alignment: .center) {
                 Picker("effort", selection: $effort) {
                     Text(rankConfig?.effort.map { "직급 기본값 (\($0))" } ?? "직급 기본값").tag("")
-                    ForEach(["low", "medium", "high", "xhigh"], id: \.self) { Text($0).tag($0) }
-                    Text(target == "codex" ? "max · Codex 미지원" : "max").tag("max").disabled(target == "codex")
-                    if !["", "low", "medium", "high", "xhigh", "max"].contains(effort) { Text(effort).tag(effort) }
+                    ForEach((target == "codex" ? RankSettingsCLI.codex : .claude).efforts, id: \.self) { Text($0).tag($0) }
+                    if !([""] + (target == "codex" ? RankSettingsCLI.codex : .claude).efforts).contains(effort) { Text(effort).tag(effort).disabled(true) }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
@@ -1155,7 +1154,8 @@ struct MemberDetailView: View {
     }
 
     private func configSummary(_ m: Member) -> String {
-        [providerFullName(m.cli), m.appliedModel ?? m.modelOverride, (m.appliedEffort ?? m.effortOverride).map { "effort \($0)" }]
+        let desired = store.bootstrap?.settings.memberConfig(m)
+        return [providerFullName(m.cli), m.appliedModel ?? desired?.model, (m.appliedEffort ?? desired?.effort).map { "effort \($0)" }]
             .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
@@ -1218,7 +1218,7 @@ struct MemberDetailView: View {
     }
 
     private func configBlock(_ m: Member, target: String, reopens: Bool) -> String? {
-        if target == "codex" && effort == "max" { return "Codex는 max effort를 쓰지 않습니다. 다른 값을 고르세요." }
+        if !effort.isEmpty && !(target == "codex" ? RankSettingsCLI.codex : .claude).efforts.contains(effort) { return "선택한 CLI에서 지원하지 않는 effort입니다. 다른 값을 고르세요." }
         if target != m.cli, store.runtime?.providers[target]?.installed == false {
             return "\(providerFullName(target))가 실행 호스트에 설치돼 있지 않습니다. 설정의 실행 환경을 확인하세요."
         }

@@ -44,7 +44,7 @@ import type {
   WorkSec,
   WsEvent,
 } from "../shared/types.ts";
-import { DEFAULT_RANKS, fileKindOf } from "../shared/types.ts";
+import { DEFAULT_CODEX_RANKS, DEFAULT_RANKS, fileKindOf } from "../shared/types.ts";
 import type { MemberRevisions, OperationKind, OperationReceipt, OperationStatus, SyncRevisions, ManualInboxBatch } from "../shared/operations.ts";
 import type { DeliveryDispatch, DeliveryIntentResult, DeliveryRecoveryRecord, DomainRecorder, LifecycleJournal, DecisionFollowUp, MessageReadStore, ProjectPatchStore, RunnerRecoveryStore, TerminalLease, RunnerRecoveryState, ReportReferences, BoardReview } from "./service-contracts.ts";
 import type { RunnerTerminalIdentity } from "./runner/types.ts";
@@ -207,6 +207,7 @@ export const DEFAULT_SETTINGS: Settings = {
   backend: "core",
   permissionMode: "bypassPermissions",
   ranks: DEFAULT_RANKS,
+  codexRanks: DEFAULT_CODEX_RANKS,
   maxConcurrentTurns: 4,
   compactAtPct: 70,
   contextWindowDefault: DEFAULT_CONTEXT_WINDOW,
@@ -2021,6 +2022,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     }
     // 나중에 생긴 직급이 저장값에 없어도 칸은 늘 있어야 한다.
     settings.ranks = Object.fromEntries((Object.keys(DEFAULT_RANKS) as Rank[]).map((rank) => [rank, { ...DEFAULT_RANKS[rank], ...settings.ranks[rank] }])) as Settings["ranks"];
+    settings.codexRanks = Object.fromEntries((Object.keys(DEFAULT_CODEX_RANKS) as Rank[]).map((rank) => [rank, { ...DEFAULT_CODEX_RANKS[rank], ...settings.codexRanks[rank] }])) as Settings["codexRanks"];
     settings.contextWindows = { ...DEFAULT_CONTEXT_WINDOWS, ...settings.contextWindows };
     return settings;
   }
@@ -2032,6 +2034,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const next: Record<string, unknown> = { ...patch };
       if (patch.ranks) {
         next.ranks = Object.fromEntries((Object.keys(DEFAULT_RANKS) as Rank[]).map((rank) => [rank, { ...before.ranks[rank], ...patch.ranks![rank] }]));
+      }
+      if (patch.codexRanks) {
+        next.codexRanks = Object.fromEntries((Object.keys(DEFAULT_CODEX_RANKS) as Rank[]).map((rank) => [rank, { ...before.codexRanks[rank], ...patch.codexRanks![rank] }]));
       }
       this.transaction(() => {
         for (const key of Object.keys(DEFAULT_SETTINGS)) {

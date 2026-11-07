@@ -47,6 +47,35 @@ import XCTest
         store.disconnect()
     }
 
+    func testCodexSettingsDirtyPatchAndConflictPreservesDraft() async throws {
+        let server = WriteTestServer()
+        server.change { $0.bootstrap.settings.codexRanks = ["lead": RankConfig(model: "gpt-6-astra", effort: "high")] }
+        let network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connect(network)
+        var draft = try XCTUnwrap(store.beginSettingsEditing()).draft
+        draft.codexRanks["lead"]?.model = nil
+        let accepted = await store.updateSettings(draft)
+        XCTAssertTrue(accepted)
+        let body = try XCTUnwrap(server.read { $0.settingsBodies.last })
+        XCTAssertEqual(Set(body.keys), ["codexRanks"])
+        let ranks = try XCTUnwrap(body["codexRanks"] as? [String: [String: Any]])
+        XCTAssertEqual(Set(ranks["lead"]!.keys), ["model"])
+        XCTAssertTrue(ranks["lead"]?["model"] is NSNull)
+
+        draft = try XCTUnwrap(store.beginSettingsEditing()).draft
+        draft.codexRanks["lead"]?.effort = "minimal"
+        server.change { $0.revisions.settings! += 1; $0.bootstrap.settings.codexRanks["lead"]?.model = "gpt-6-luna" }
+        await store.refresh()
+        let conflicted = await store.updateSettings(draft)
+        XCTAssertFalse(conflicted)
+        XCTAssertEqual(store.settingsEdit?.draft.codexRanks["lead"]?.effort, "minimal")
+        XCTAssertEqual(store.settingsConflict?.codexRanks["lead"]?.model, "gpt-6-luna")
+        let conflictBody = try XCTUnwrap(server.read { $0.settingsBodies.last })
+        let conflictRanks = try XCTUnwrap(conflictBody["codexRanks"] as? [String: [String: Any]])
+        XCTAssertEqual(Set(conflictRanks["lead"]!.keys), ["effort"])
+        store.disconnect()
+    }
+
     func testBatchClassifiesEachCardAndConsumesOnlyOwnAcceptedMemo() async throws {
         let server = WriteTestServer()
         server.change { $0.decisionStatuses = ["conflict": 409, "unknown": 0] }

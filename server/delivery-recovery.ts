@@ -91,8 +91,8 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   }
   private member(member: Member): RunnerMember {
     const settings = this.store.getSettings();
-    return { ...member, ...memberConfig(member, settings.ranks), sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration,
-      subagentModel: member.cli === "codex" ? null : settings.ranks.staff.model, permissionMode: settings.permissionMode };
+    return { ...member, ...memberConfig(member, settings.ranks, settings.codexRanks), sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration,
+      subagentModel: (member.cli === "codex" ? settings.codexRanks : settings.ranks).staff.model, permissionMode: settings.permissionMode };
   }
 
   /** Capture before the first external write; never infer a source version during retry. */

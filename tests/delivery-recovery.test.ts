@@ -466,3 +466,14 @@ describe("원본 판, operation과 읽기 집계", () => {
     expect(f.store.requireDelivery(d.id).status).toBe("held"); await f.service.tick(); expect(f.calls).toHaveLength(1); expect(f.writes).toHaveLength(0);
   });
 });
+
+test.each(["claude", "codex"] as const)("%s delivery recovery resolves provider ranks and subagent model", async cli => {
+  const f = setup();
+  f.store.patchMember(f.member.id, { cli });
+  f.store.patchSettings({ ranks: { lead: { model: "sonnet", effort: "high" }, staff: { model: "haiku" } }, codexRanks: { lead: { model: "gpt-6-luna", effort: "low" }, staff: { model: "gpt-6.1-terra", effort: "minimal" } } });
+  const d = f.enqueue(); f.envelope([d]);
+  let observed: RunnerMember | undefined;
+  f.inspect = async (m, q) => { observed = m; return f.observation(q); };
+  await f.service.tick();
+  expect(observed).toMatchObject(cli === "codex" ? { model: "gpt-6-luna", effort: "low", subagentModel: "gpt-6.1-terra" } : { model: "sonnet", effort: "high", subagentModel: "haiku" });
+});

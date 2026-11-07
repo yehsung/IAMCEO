@@ -593,19 +593,18 @@ struct SettingsView: View {
     ]
 
     private struct RankRow: Identifiable {
-        let id: String
+        let key: String
         let title: String
         let scope: String
-        /// bootstrap.rankOverrides only counts manager and lead.
-        let countsOverrides: Bool
+        let cli: RankSettingsCLI
+        var id: String { "\(cli.rawValue).\(key)" }
+        var showsEffort: Bool { cli != .codex || key != "staff" }
     }
-    private static let rankRows = [
-        RankRow(id: "manager", title: "부장", scope: "총괄·본사 AI", countsOverrides: true),
-        RankRow(id: "lead", title: "팀장", scope: "직원 세션", countsOverrides: true),
-        RankRow(id: "staff", title: "직원", scope: "서브에이전트", countsOverrides: false)
-    ]
-    private static let efforts = ["low", "medium", "high", "xhigh", "max"]
-    private static let modelSuggestions = ["fable", "opus", "sonnet", "haiku"]
+    private static let rankRows = RankSettingsCLI.allCases.flatMap { cli in [
+        RankRow(key: "manager", title: "부장", scope: "총괄·본사 AI", cli: cli),
+        RankRow(key: "lead", title: "팀장", scope: "직원 세션", cli: cli),
+        RankRow(key: "staff", title: "직원", scope: "서브에이전트", cli: cli)
+    ] }
     private static let tidyChoices = [0, 3, 6, 12, 24]
 
     // MARK: State
@@ -613,7 +612,7 @@ struct SettingsView: View {
     private var editable: Bool { store.canWrite && store.bootstrap != nil }
     private var saving: Bool { store.pendingActions.contains("settings") }
     /// A rank switched to "직접 입력" with nothing typed yet counts as an unsaved (and invalid) change, as on the web.
-    private var pendingEmptyCustom: Bool { Self.rankRows.contains { customRanks.contains($0.id) && model(of: $0.id).isEmpty } }
+    private var pendingEmptyCustom: Bool { Self.rankRows.contains { customRanks.contains($0.id) && model(of: $0).isEmpty } }
     private var isDirty: Bool { loaded && (Self.signature(draft) != Self.signature(base) || pendingEmptyCustom) }
     private var firstModelError: String? { Self.rankRows.lazy.compactMap { modelError(for: $0) }.first }
     private var canSave: Bool { editable && isDirty && firstModelError == nil && !saving && store.settingsConflict == nil }
@@ -790,20 +789,24 @@ struct SettingsView: View {
 
     private var rankPanel: some View {
         SetupPanel("직급별 모델·effort") {
-            VStack(alignment: .leading, spacing: 0) {
-                #if os(macOS)
-                HStack(spacing: 10) {
-                    Text("직급").frame(width: 150, alignment: .leading)
-                    Text("모델").frame(maxWidth: .infinity, alignment: .leading)
-                    Text("effort").frame(width: 150, alignment: .leading)
-                }
-                .font(SetupFont.label).foregroundStyle(CE.ink3)
-                .padding(.bottom, 4)
-                .accessibilityHidden(true)
-                #endif
-                ForEach(Array(Self.rankRows.enumerated()), id: \.element.id) { index, rank in
-                    if index > 0 { RowDivider(inset: 0) }
-                    rankRow(rank).padding(.vertical, isMac ? 8 : 10)
+            ForEach(RankSettingsCLI.allCases, id: \.self) { cli in
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(cli.title).font(SetupFont.choice).foregroundStyle(CE.ink)
+                        .padding(.bottom, 8)
+                    #if os(macOS)
+                    HStack(spacing: 10) {
+                        Text("직급").frame(width: 150, alignment: .leading)
+                        Text("모델").frame(maxWidth: .infinity, alignment: .leading)
+                        Text("effort").frame(width: 150, alignment: .leading)
+                    }
+                    .font(SetupFont.label).foregroundStyle(CE.ink3)
+                    .padding(.bottom, 4)
+                    .accessibilityHidden(true)
+                    #endif
+                    ForEach(Array(Self.rankRows.filter { $0.cli == cli }.enumerated()), id: \.element.id) { index, rank in
+                        if index > 0 { RowDivider(inset: 0) }
+                        rankRow(rank).padding(.vertical, isMac ? 8 : 10)
+                    }
                 }
             }
             hint("직원별로 지정한 값이 먼저입니다. 바꾼 값은 세션을 다시 열 때 적용됩니다.")
@@ -811,8 +814,8 @@ struct SettingsView: View {
     }
 
     private func rankRow(_ rank: RankRow) -> some View {
-        let overrides = rank.countsOverrides ? (store.bootstrap?.rankOverrides[rank.id] ?? 0) : 0
-        let custom = isCustom(rank.id)
+        let overrides = rank.cli == .claude && rank.key != "staff" ? (store.bootstrap?.rankOverrides[rank.key] ?? 0) : 0
+        let custom = isCustom(rank)
         let invalid = modelError(for: rank)
         #if os(macOS)
         return HStack(alignment: .top, spacing: 10) {
@@ -829,7 +832,10 @@ struct SettingsView: View {
                 if let invalid { Text(invalid).font(SetupFont.hint).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true) }
             }
             .frame(maxWidth: .infinity)
-            effortMenu(rank).frame(width: 150)
+            Group {
+                if rank.showsEffort { effortMenu(rank) }
+                else { Text("CLI 기본").font(SetupFont.hint).foregroundStyle(CE.ink3).frame(maxWidth: .infinity, alignment: .leading) }
+            }.frame(width: 150)
         }
         #else
         return VStack(alignment: .leading, spacing: 8) {
@@ -841,7 +847,7 @@ struct SettingsView: View {
             }
             HStack(spacing: 8) {
                 modelMenu(rank)
-                effortMenu(rank).frame(width: 118)
+                if rank.showsEffort { effortMenu(rank).frame(width: 118) }
             }
             if custom { customModelField(rank) }
             if let invalid { Text(invalid).font(SetupFont.hint).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true) }
@@ -849,21 +855,22 @@ struct SettingsView: View {
         #endif
     }
 
-    private func model(of rank: String) -> String { settingsTrim(draft.ranks[rank]?.model ?? "") }
+    private func model(of rank: RankRow) -> String { settingsTrim(draft.rankConfig(rank.key, cli: rank.cli)?.model ?? "") }
 
-    private func isCustom(_ rank: String) -> Bool {
+    private func isCustom(_ rank: RankRow) -> Bool {
         let value = model(of: rank)
-        return customRanks.contains(rank) || (!value.isEmpty && !Self.modelSuggestions.contains(value))
+        return customRanks.contains(rank.id) || (!value.isEmpty && !rank.cli.models.contains(value))
     }
 
     private func modelMenu(_ rank: RankRow) -> some View {
-        let value = model(of: rank.id)
-        let custom = isCustom(rank.id)
-        return SetupMenu(custom ? "직접 입력" : (value.isEmpty ? "CLI 기본" : value), mono: !custom && !value.isEmpty, label: "\(rank.title) 모델") {
-            Toggle("CLI 기본", isOn: menuCheck(!custom && value.isEmpty) { customRanks.remove(rank.id); setModel(nil, for: rank.id) })
+        let value = model(of: rank)
+        let custom = isCustom(rank)
+        let defaultLabel = rank.cli == .codex ? "기본(CLI 설정)" : "CLI 기본"
+        return SetupMenu(custom ? "직접 입력" : (value.isEmpty ? defaultLabel : value), mono: !custom && !value.isEmpty, label: "\(rank.title) 모델") {
+            Toggle(defaultLabel, isOn: menuCheck(!custom && value.isEmpty) { customRanks.remove(rank.id); setModel(nil, for: rank) })
             Divider()
-            ForEach(Self.modelSuggestions, id: \.self) { name in
-                Toggle(name, isOn: menuCheck(!custom && value == name) { customRanks.remove(rank.id); setModel(name, for: rank.id) })
+            ForEach(rank.cli.models, id: \.self) { name in
+                Toggle(name, isOn: menuCheck(!custom && value == name) { customRanks.remove(rank.id); setModel(name, for: rank) })
             }
             Divider()
             // Starts from the current name so a variant ("opus[1m]") is one edit away.
@@ -872,9 +879,9 @@ struct SettingsView: View {
     }
 
     private func customModelField(_ rank: RankRow) -> some View {
-        TextField("\(rank.title) 모델 이름", text: Binding(get: { draft.ranks[rank.id]?.model ?? "" }, set: { value in
+        TextField("\(rank.title) 모델 이름", text: Binding(get: { draft.rankConfig(rank.key, cli: rank.cli)?.model ?? "" }, set: { value in
             customRanks.insert(rank.id)
-            setModel(value.isEmpty ? nil : value, for: rank.id)
+            setModel(value.isEmpty ? nil : value, for: rank)
         }), prompt: Text("모델 이름"))
             .labelsHidden()
             .font(CEFont.mono)
@@ -887,37 +894,33 @@ struct SettingsView: View {
     }
 
     private func effortMenu(_ rank: RankRow) -> some View {
-        let current = draft.ranks[rank.id]?.effort
-        let options = Self.efforts + (current.map { Self.efforts.contains($0) ? [] : [$0] } ?? [])
-        return SetupMenu(current ?? "기본", label: "\(rank.title) effort") {
-            Toggle("기본", isOn: menuCheck(current == nil) { setEffort(nil, for: rank.id) })
+        let current = draft.rankConfig(rank.key, cli: rank.cli)?.effort
+        let options = rank.cli.efforts + (current.map { rank.cli.efforts.contains($0) ? [] : [$0] } ?? [])
+        let defaultLabel = rank.cli == .codex ? "기본(CLI 설정)" : "기본"
+        return SetupMenu(current ?? defaultLabel, label: "\(rank.title) effort") {
+            Toggle(defaultLabel, isOn: menuCheck(current == nil) { setEffort(nil, for: rank) })
             Divider()
             ForEach(options, id: \.self) { effort in
-                Toggle(effort, isOn: menuCheck(current == effort) { setEffort(effort, for: rank.id) })
+                Toggle(effort, isOn: menuCheck(current == effort) { setEffort(effort, for: rank) })
             }
         }
     }
 
-    private func setModel(_ value: String?, for rank: String) {
-        var config = draft.ranks[rank] ?? RankConfig()
+    private func setModel(_ value: String?, for rank: RankRow) {
+        var config = draft.rankConfig(rank.key, cli: rank.cli) ?? RankConfig()
         config.model = value
-        draft.ranks[rank] = config
+        draft[keyPath: rank.cli.ranksKeyPath][rank.key] = config
     }
 
-    private func setEffort(_ value: String?, for rank: String) {
-        var config = draft.ranks[rank] ?? RankConfig()
+    private func setEffort(_ value: String?, for rank: RankRow) {
+        var config = draft.rankConfig(rank.key, cli: rank.cli) ?? RankConfig()
         config.effort = value
-        draft.ranks[rank] = config
+        draft[keyPath: rank.cli.ranksKeyPath][rank.key] = config
     }
 
     /// Same rule as the daemon: the name goes straight after `--model`, so no flags or spaces.
     private func modelError(for rank: RankRow) -> String? {
-        let value = model(of: rank.id)
-        guard !value.isEmpty else { return customRanks.contains(rank.id) ? "\(rank.title) 모델 이름을 넣어 주세요" : nil }
-        if value.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,127}$"#, options: .regularExpression) == nil {
-            return "\(rank.title) 모델 이름이 잘못되었습니다. 영문·숫자와 . _ : - [ ] 만 씁니다."
-        }
-        return nil
+        RankSettingsEditing.modelError(model(of: rank), custom: customRanks.contains(rank.id), title: rank.title)
     }
 
     // MARK: 운영
@@ -1163,12 +1166,7 @@ struct SettingsView: View {
         if mine.maxAwakeWorkers != previous.maxAwakeWorkers { next.maxAwakeWorkers = mine.maxAwakeWorkers }
         if mine.notifyMac != previous.notifyMac { next.notifyMac = mine.notifyMac }
         if mine.boardTidyHours != previous.boardTidyHours { next.boardTidyHours = mine.boardTidyHours }
-        for rank in Self.rankRows {
-            var config = next.ranks[rank.id] ?? RankConfig()
-            if mine.ranks[rank.id]?.model != previous.ranks[rank.id]?.model { config.model = mine.ranks[rank.id]?.model }
-            if mine.ranks[rank.id]?.effort != previous.ranks[rank.id]?.effort { config.effort = mine.ranks[rank.id]?.effort }
-            next.ranks[rank.id] = config
-        }
+        next = RankSettingsEditing.rebase(previous: previous, mine: mine, onto: next)
         base = edit.base; draft = next; store.setSettingsDraft(next)
         saveError = "새 설정과 내 변경을 확인한 뒤 저장해 주세요."
     }
@@ -1179,11 +1177,13 @@ struct SettingsView: View {
         var next = draft
         // This screen never chooses the runner. Omitting the key leaves the daemon's value untouched.
         next.backend = nil
-        for (key, config) in next.ranks {
-            var cleaned = config
-            let model = settingsTrim(config.model ?? "")
-            cleaned.model = model.isEmpty ? nil : model
-            next.ranks[key] = cleaned
+        for cli in RankSettingsCLI.allCases {
+            for (key, config) in next[keyPath: cli.ranksKeyPath] {
+                var cleaned = config
+                let model = settingsTrim(config.model ?? "")
+                cleaned.model = model.isEmpty ? nil : model
+                next[keyPath: cli.ranksKeyPath][key] = cleaned
+            }
         }
         let namespace = editedNamespace
         let accepted = await store.updateSettings(next)
@@ -1230,10 +1230,7 @@ struct SettingsView: View {
     /// Compares only what this screen edits, with model names normalized the way they are saved.
     private static func signature(_ settings: Settings) -> String {
         var parts = [settings.permissionMode, "\(settings.maxConcurrentTurns)", "\(settings.compactAtPct)", "\(settings.maxAwakeWorkers)", "\(settings.notifyMac)", "\(Int(settings.boardTidyHours.rounded()))"]
-        for rank in rankRows {
-            let config = settings.ranks[rank.id]
-            parts.append("\(rank.id)=\(settingsTrim(config?.model ?? ""))/\(config?.effort ?? "")")
-        }
+        parts += RankSettingsEditing.signature(settings)
         return parts.joined(separator: "|")
     }
 }

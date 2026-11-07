@@ -6,7 +6,8 @@ export type CliProvider = "claude" | "codex";
 export type PermissionMode = "bypassPermissions" | "auto" | "default";
 export const PERMISSION_MODES = ["bypassPermissions", "auto", "default"] as const;
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
-export type Effort = (typeof EFFORTS)[number];
+export const CODEX_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+export type Effort = (typeof EFFORTS)[number] | (typeof CODEX_EFFORTS)[number];
 /** manager 부장(총괄·본사 AI) · lead 팀장(직원 세션) · staff 직원(서브에이전트) */
 export type Rank = "manager" | "lead" | "staff";
 /** null 이면 CLI 기본값 */
@@ -419,6 +420,7 @@ export interface Settings {
   backend: Backend | null;
   permissionMode: PermissionMode;
   ranks: Ranks;
+  codexRanks: Ranks;
   maxConcurrentTurns: number;
   compactAtPct: number; // 기본 70
   /**
@@ -513,8 +515,11 @@ export type RealtimeEvent =
 export interface CreateProjectReq { name: string; cwd: string; goal?: string; startConductor?: boolean; chiefCli?: CliProvider }
 export interface CreateMemberReq { name: string; role?: string; cli?: CliProvider; modelOverride?: string | null }
 export interface PatchProjectReq { name?: string; cwd?: string; runnerEnabled?: boolean; now?: string; archived?: boolean }
-/** PUT /api/settings. ranks 는 고친 칸만 보내도 된다(나머지 유지). */
-export type SettingsPatch = Partial<Omit<Settings, "ranks">> & { ranks?: Partial<Record<Rank, Partial<RankConfig>>> };
+/** PUT /api/settings. ranks·codexRanks 는 고친 칸만 보내도 된다(나머지 유지). */
+export type SettingsPatch = Partial<Omit<Settings, "ranks" | "codexRanks">> & {
+  ranks?: Partial<Record<Rank, Partial<RankConfig>>>;
+  codexRanks?: Partial<Record<Rank, Partial<RankConfig>>>;
+};
 /** PATCH /api/members/:id. null 이면 직급 기본으로 돌아간다. */
 export interface PatchMemberReq { cli?: CliProvider; modelOverride?: string | null; effortOverride?: Effort | null }
 export interface SendMessageReq { id?: string; text: string; targetMemberId?: string | null; attachmentIds?: string[] }
@@ -543,6 +548,7 @@ export function adoptRefusal(a: Pick<LiveAgent, "agent" | "status" | "sessionId"
 
 // ---- 직급 ----
 export const DEFAULT_RANKS: Ranks = { manager: { model: null, effort: null }, lead: { model: null, effort: null }, staff: { model: null, effort: null } };
+export const DEFAULT_CODEX_RANKS: Ranks = { manager: { model: null, effort: null }, lead: { model: null, effort: null }, staff: { model: null, effort: null } };
 
 /** 세션의 직급. 총괄·본사 AI 는 부장, 직원 세션은 팀장. 서브에이전트(직원)는 세션이 없다. */
 export function memberRank(kind: MemberKind): Exclude<Rank, "staff"> {
@@ -550,9 +556,8 @@ export function memberRank(kind: MemberKind): Exclude<Rank, "staff"> {
 }
 
 /** 이 직원이 써야 할 값. 직원별 지정이 직급 기본을 이긴다. */
-export function memberConfig(m: Pick<Member, "kind" | "modelOverride" | "effortOverride"> & Partial<Pick<Member, "cli">>, ranks: Ranks): RankConfig {
-  if (m.cli === "codex") return { model: m.modelOverride, effort: m.effortOverride };
-  const rank = ranks[memberRank(m.kind)];
+export function memberConfig(m: Pick<Member, "kind" | "modelOverride" | "effortOverride"> & Partial<Pick<Member, "cli">>, ranks: Ranks, codexRanks: Ranks = DEFAULT_CODEX_RANKS): RankConfig {
+  const rank = (m.cli === "codex" ? codexRanks : ranks)[memberRank(m.kind)];
   return { model: m.modelOverride ?? rank.model, effort: m.effortOverride ?? rank.effort };
 }
 

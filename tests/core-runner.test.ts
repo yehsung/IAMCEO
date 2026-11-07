@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CoreRunner, codexDraft, ensureCoreServer, type CoreRunnerDeps, type CoreCompactState } from "../server/runner/core.ts";
 import { CoreError, coreRpc, type CoreTerminal } from "../server/runner/core-client.ts";
+import { DEFAULT_RANKS, memberConfig } from "../shared/types.ts";
 import { providerLaunch } from "../server/runner/providers.ts";
 import { createHash } from "node:crypto";
 import type { DeliveryDispatch, RunnerRecoveryStore, TerminalLease } from "../server/service-contracts.ts";
@@ -698,4 +699,19 @@ test("malformed creation receipt leaves a start fence instead of authorizing a s
   await expect(runner.start(member(), f.opts)).rejects.toMatchObject({ uncertain: true, kind: "protocol" }); f.setHook(null);
   await expect(runner.start(member(), f.opts)).rejects.toMatchObject({ kind: "starting_unknown" });
   expect(f.calls.filter(c => c.method === "terminal.run")).toHaveLength(1);
+});
+
+ test("Codex rank config reaches provider argv and null preserves CLI defaults", async () => {
+  const f = await fixture();
+  const codexRanks = { ...DEFAULT_RANKS, lead: { model: "gpt-6-luna", effort: "low" as const }, staff: { model: "gpt-6.1-terra", effort: "minimal" as const } };
+  const m = member({ cli: "codex" });
+  const configured = { ...m, ...memberConfig({ ...m, modelOverride: null, effortOverride: null }, DEFAULT_RANKS, codexRanks), subagentModel: codexRanks.staff.model };
+  const launch = providerLaunch(configured, f.opts, { codexBin: "/fake/codex" });
+  expect(launch.argv.slice(launch.argv.indexOf("--model"), launch.argv.indexOf("--model") + 2)).toEqual(["--model", "gpt-6-luna"]);
+  expect(launch.argv).toContain('model_reasoning_effort="low"');
+  expect(launch.argv).toContain('agents.default_subagent_model="gpt-6.1-terra"');
+  expect(launch.argv.some(arg => arg.includes("minimal"))).toBe(false);
+  const defaults = providerLaunch(m, f.opts, { codexBin: "/fake/codex" });
+  expect(defaults.argv).not.toContain("--model");
+  expect(defaults.argv.some(arg => /model_reasoning_effort|default_subagent_model/.test(arg))).toBe(false);
 });

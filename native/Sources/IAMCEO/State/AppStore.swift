@@ -2116,6 +2116,15 @@ final class AppStore: ProjectManagementStore {
             if rank.model != nil || rank.effort != nil { ranks[key] = rank }
         }
         if !ranks.isEmpty { patch.ranks = ranks }
+        var codexRanks: [String: RankConfigPatch] = [:]
+        for key in Set(base.codexRanks.keys).union(draft.codexRanks.keys) {
+            let before = base.codexRanks[key], after = draft.codexRanks[key]
+            var rank = RankConfigPatch()
+            if before?.model != after?.model { rank.model = after?.model.map { .value($0) } ?? .null }
+            if before?.effort != after?.effort { rank.effort = after?.effort.map { .value($0) } ?? .null }
+            if rank.model != nil || rank.effort != nil { codexRanks[key] = rank }
+        }
+        if !codexRanks.isEmpty { patch.codexRanks = codexRanks }
         return patch
     }
 }

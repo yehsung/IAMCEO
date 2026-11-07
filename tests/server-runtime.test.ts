@@ -305,3 +305,111 @@ test("v2 stale settings and todo revisions cannot overwrite a newer value", asyn
   await expect(f.orch.setTodoDoneV2(todo.id, { done: false }, { expectedRevision: revision })).rejects.toMatchObject({ status: 409 });
   expect(f.store.requireTodo(todo.id).done).toBe(true);
 });
+
+test("Codex rank precedence resolves each leaf independently and keeps Claude isolated", () => {
+  const ranks = { ...DEFAULT_RANKS, manager: { model: "opus", effort: "max" as const }, lead: { model: "sonnet", effort: "high" as const } };
+  const codexRanks = { ...DEFAULT_RANKS, manager: { model: "gpt-6.1-sol", effort: "xhigh" as const }, lead: { model: "gpt-6-luna", effort: "low" as const } };
+  const worker = { kind: "worker" as const, cli: "codex" as const, modelOverride: null, effortOverride: null };
+  expect(memberConfig(worker, ranks, DEFAULT_RANKS)).toEqual({ model: null, effort: null });
+  expect(memberConfig(worker, ranks, codexRanks)).toEqual(codexRanks.lead);
+  expect(memberConfig({ ...worker, kind: "conductor" }, ranks, codexRanks)).toEqual(codexRanks.manager);
+  expect(memberConfig({ ...worker, kind: "root" }, ranks, codexRanks)).toEqual(codexRanks.manager);
+  expect(memberConfig({ ...worker, modelOverride: "gpt-6-astra" }, ranks, codexRanks)).toEqual({ model: "gpt-6-astra", effort: "low" });
+  expect(memberConfig({ ...worker, effortOverride: "minimal" }, ranks, codexRanks)).toEqual({ model: "gpt-6-luna", effort: "minimal" });
+  expect(memberConfig({ ...worker, modelOverride: "gpt-6-astra", effortOverride: "high" }, ranks, codexRanks)).toEqual({ model: "gpt-6-astra", effort: "high" });
+  expect(memberConfig({ ...worker, cli: "claude" }, ranks, codexRanks)).toEqual(ranks.lead);
+});
+
+test("Codex ranks merge persisted partial values, patch only leaves, survive legacy saves and never fill efforts", () => {
+  const f = fixture();
+  expect(f.store.getSettings().codexRanks).toEqual(DEFAULT_RANKS);
+  f.db.query("INSERT INTO settings(key,value) VALUES (?,?)").run("codexRanks", JSON.stringify({ lead: { model: "gpt-6-luna" } }));
+  expect(f.store.getSettings().codexRanks).toEqual({ ...DEFAULT_RANKS, lead: { model: "gpt-6-luna", effort: null } });
+  f.store.fillRankEfforts("high");
+  expect(f.store.getSettings().codexRanks.lead.effort).toBeNull();
+  f.store.patchSettings({ codexRanks: { lead: { effort: "low" }, staff: { model: "gpt-6.1-terra", effort: "minimal" } } });
+  const saved = f.store.getSettings().codexRanks;
+  expect(saved.lead).toEqual({ model: "gpt-6-luna", effort: "low" });
+  const { codexRanks: _omitted, ...legacy } = f.store.getSettings();
+  f.store.patchSettings(legacy);
+  expect(new Store(f.db, f.bus).getSettings().codexRanks).toEqual(saved);
+  expect(f.store.patchSettings({ codexRanks: { lead: { model: null } } }).codexRanks.lead).toEqual({ model: null, effort: "low" });
+  expect(f.store.getSettings().codexRanks.staff).toEqual(saved.staff);
+});
+
+test("Codex startup and roster use their own ranks and staff model while staff effort is stored only", async () => {
+  const f = fixture();
+  f.store.patchSettings({ ranks: { lead: { model: "sonnet", effort: "high" }, staff: { model: "haiku", effort: "low" } }, codexRanks: { manager: { model: "gpt-6.1-sol", effort: "medium" }, lead: { model: "gpt-6-luna", effort: "low" }, staff: { model: "gpt-6.1-terra", effort: "minimal" } } });
+  const chiefProject = await f.orch.createProject({ name: "Codex 총괄", cwd: f.config.home, chiefCli: "codex" });
+  await f.orch.ensureConductor(chiefProject.id);
+  expect(f.runner.starts.at(-1)).toMatchObject({ model: "gpt-6.1-sol", effort: "medium", subagentModel: "gpt-6.1-terra" });
+  const codex = await f.orch.createMember(f.project.id, { name: "Codex 팀장", cli: "codex" });
+  expect(f.runner.starts.at(-1)).toMatchObject({ model: "gpt-6-luna", effort: "low", subagentModel: "gpt-6.1-terra" });
+  expect(f.store.getAppliedConfig(codex.id)).toMatchObject({ model: "gpt-6-luna", effort: "low", staffModel: "gpt-6.1-terra", staffEffort: null });
+  const claude = await f.orch.createMember(f.project.id, { name: "Claude 팀장", cli: "claude" });
+  expect(f.runner.starts.at(-1)).toMatchObject({ model: "sonnet", effort: "high", subagentModel: "haiku" });
+  expect(f.orch.roster(f.project.id).find(m => m.handle === codex.handle)).toMatchObject({ model: "gpt-6-luna", effort: "low", subagentModel: "gpt-6.1-terra", subagentEffort: null });
+  expect(f.orch.roster(f.project.id).find(m => m.handle === claude.handle)).toMatchObject({ model: "sonnet", effort: "high", subagentModel: "haiku", subagentEffort: "low" });
+});
+
+test("Codex rank HTTP validation, legacy save, v2 CAS and all settings responses preserve the new field", async () => {
+  const f = fixture();
+  const server = await startServer({ ...f, orch: f.orch });
+  cleanup.unshift(() => server.stop());
+  const headers = { Authorization: `Bearer ${f.config.accessCode}`, "Content-Type": "application/json" };
+  const put = (body: unknown, extra = {}) => fetch(`${server.urls[0]}/api/settings`, { method: "PUT", headers: { ...headers, ...extra }, body: JSON.stringify(body) });
+  const saved = await put({ codexRanks: { lead: { model: "gpt-6-luna", effort: "minimal" } } });
+  expect(saved.status).toBe(200);
+  expect((await saved.json()).codexRanks.lead).toEqual({ model: "gpt-6-luna", effort: "minimal" });
+  for (const value of ["max", "auto", "", "HIGH"]) expect((await put({ codexRanks: { lead: { effort: value } } })).status).toBe(400);
+  for (const model of ["", " ", "--model", "bad model"]) expect((await put({ codexRanks: { lead: { model } } })).status).toBe(400);
+  expect((await put({ codexRanks: { lead: { extra: true } } })).status).toBe(400);
+  expect((await put({ codexRanks: { other: {} } })).status).toBe(400);
+  expect((await put({ ranks: { lead: { effort: "max" } } })).status).toBe(200);
+  expect((await put({ ranks: { lead: { effort: "minimal" } } })).status).toBe(400);
+  const revision = f.store.settingsRevision();
+  const v2headers = { "X-IAMCEO-Contract": "2", "If-Match": `"${revision}"` };
+  const v2 = await put({ codexRanks: { lead: { effort: "low" } } }, v2headers);
+  expect(v2.status).toBe(200);
+  expect(await v2.json()).toMatchObject({ settings: { codexRanks: { lead: { model: "gpt-6-luna", effort: "low" } } }, revision: revision + 1 });
+  expect((await put({ codexRanks: { lead: { model: null } } }, v2headers)).status).toBe(409);
+  const { codexRanks: _omitted, ...legacy } = f.store.getSettings();
+  expect((await put(legacy)).status).toBe(200);
+  const bootstrap = await (await fetch(`${server.urls[0]}/api/bootstrap`, { headers })).json();
+  expect(bootstrap.settings.codexRanks.lead).toEqual({ model: "gpt-6-luna", effort: "low" });
+  const sync = await (await fetch(`${server.urls[0]}/api/sync`, { headers })).json();
+  expect(sync.bootstrap.settings.codexRanks).toEqual(f.store.getSettings().codexRanks);
+  const pending = f.store.beginOperation({ operationId: crypto.randomUUID(), kind: "settings", projectId: null, memberId: null, request: {} });
+  if (pending.status !== "pending") throw new Error("expected pending settings operation");
+  f.store.finishOperation({ ...pending, kind: "settings", status: "applied", result: { settings: f.store.getSettings(), revision: f.store.settingsRevision() } });
+  const receipt = await (await fetch(`${server.urls[0]}/api/operations/${pending.operationId}`, { headers: { ...headers, "X-IAMCEO-Contract": "2" } })).json();
+  expect(receipt.result.settings.codexRanks).toEqual(f.store.getSettings().codexRanks);
+});
+
+test("Codex rank updates preserve a running turn and apply on its next fresh launch", async () => {
+  const f = fixture();
+  const member = await f.orch.createMember(f.project.id, { name: "Codex", cli: "codex" });
+  f.runner.busy = true;
+  f.store.patchMember(member.id, { status: "working" });
+  await f.orch.updateSettings({ codexRanks: { lead: { model: "gpt-6-luna", effort: "low" } } });
+  expect(f.runner.stops).toHaveLength(0);
+  expect(f.runner.starts).toHaveLength(1);
+  f.runner.busy = false;
+  f.store.patchMember(member.id, { status: "idle" });
+  await f.orch.freshMemberSession(member.id);
+  expect(f.runner.starts.at(-1)).toMatchObject({ model: "gpt-6-luna", effort: "low" });
+});
+
+
+test("member effort HTTP uses the same Codex effort choices and keeps Claude validation", async () => {
+  const f = fixture();
+  const codex = f.store.createMember({ projectId: f.project.id, name: "Codex", handle: "codex", kind: "worker", cli: "codex" });
+  const claude = f.store.createMember({ projectId: f.project.id, name: "Claude", handle: "claude", kind: "worker", cli: "claude" });
+  const server = await startServer({ ...f, orch: f.orch });
+  cleanup.unshift(() => server.stop());
+  const patch = (id: string, effortOverride: string) => fetch(`${server.urls[0]}/api/members/${id}`, { method: "PATCH", headers: { Authorization: `Bearer ${f.config.accessCode}`, "Content-Type": "application/json" }, body: JSON.stringify({ effortOverride }) });
+  expect((await patch(codex.id, "minimal")).status).toBe(200);
+  expect((await patch(codex.id, "max")).status).toBe(400);
+  expect((await patch(claude.id, "minimal")).status).toBe(400);
+  expect((await patch(claude.id, "max")).status).toBe(200);
+});

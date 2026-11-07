@@ -89,6 +89,7 @@ struct RankConfigPatch: Encodable, Sendable {
 struct SettingsPatchRequest: Encodable, Sendable {
     var permissionMode: String? = nil
     var ranks: [String: RankConfigPatch]? = nil
+    var codexRanks: [String: RankConfigPatch]? = nil
     var maxConcurrentTurns: Int? = nil
     var compactAtPct: Int? = nil
     var contextWindowDefault: Int? = nil

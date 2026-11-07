@@ -430,6 +430,7 @@ struct Settings: Codable, Sendable {
     var backend: String? = nil
     var permissionMode: String = "default"
     var ranks: [String: RankConfig] = [:]
+    var codexRanks: [String: RankConfig] = [:]
     var maxConcurrentTurns: Int = 4
     var compactAtPct: Int = 70
     var maxAwakeWorkers: Int = 8
@@ -444,6 +445,7 @@ extension Settings {
         backend = try c.decodeIfPresent(String.self, forKey: ModelKey("backend"))
         permissionMode = try c.decodeIfPresent(String.self, forKey: ModelKey("permissionMode")) ?? "default"
         ranks = try c.decodeIfPresent([String: RankConfig].self, forKey: ModelKey("ranks")) ?? [:]
+        codexRanks = try c.decodeIfPresent([String: RankConfig].self, forKey: ModelKey("codexRanks")) ?? [:]
         maxConcurrentTurns = try c.decodeIfPresent(Int.self, forKey: ModelKey("maxConcurrentTurns")) ?? 4
         compactAtPct = try c.decodeIfPresent(Int.self, forKey: ModelKey("compactAtPct")) ?? 70
         maxAwakeWorkers = try c.decodeIfPresent(Int.self, forKey: ModelKey("maxAwakeWorkers")) ?? 8

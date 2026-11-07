@@ -54,7 +54,7 @@ import type {
   WorkItem,
   WorkSec,
 } from "../shared/types.ts";
-import { adoptRefusal, memberConfig } from "../shared/types.ts";
+import { CODEX_EFFORTS, EFFORTS, adoptRefusal, memberConfig } from "../shared/types.ts";
 import type { Config } from "./config.ts";
 import type { AgentToolDef, AgentToolResult, AskWaitResult, OrchestratorApi } from "./orchestrator-api.ts";
 import { sanitizeName } from "./files.ts";
@@ -1656,6 +1656,11 @@ export class Orchestrator implements OrchestratorApi {
     this.requireActive(this.store.requireProject(member.projectId));
     if (this.runtime(memberId).closing || this.runtime(memberId).starting || this.runtime(memberId).reopening || this.pendingLifecycle(memberId)) throw new ApiError(409, "세션을 처리하는 중입니다");
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 설정을 바꿀 수 없습니다");
+    const targetCli = patch.cli ?? member.cli;
+    const requestedEffort = patch.effortOverride === undefined ? member.effortOverride : patch.effortOverride;
+    if (requestedEffort && !(targetCli === "codex" ? CODEX_EFFORTS : EFFORTS).some(value => value === requestedEffort)) {
+      throw new ApiError(400, `${targetCli}에서 지원하지 않는 effort입니다`);
+    }
     if (patch.cli && patch.cli !== member.cli) return this.switchProvider(member, patch);
     if (this.runners.has("core") && member.backend === "core" && (member.sessionId || member.paneId) &&
         ((patch.modelOverride !== undefined && patch.modelOverride !== member.modelOverride) || (patch.effortOverride !== undefined && patch.effortOverride !== member.effortOverride))) {
@@ -2787,7 +2792,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   roster(projectId: string): RosterEntry[] {
-    const { ranks } = this.store.getSettings();
+    const { ranks, codexRanks } = this.store.getSettings();
     return this.store.listMembers(projectId).map((m) => ({
       handle: m.handle,
       name: m.name,
@@ -2802,9 +2807,9 @@ export class Orchestrator implements OrchestratorApi {
       subagents: m.subagents,
       parallel: m.parallel,
       updatedAt: m.updatedAt,
-      ...memberConfig(m, ranks),
-      subagentModel: ranks.staff.model,
-      subagentEffort: ranks.staff.effort,
+      ...memberConfig(m, ranks, codexRanks),
+      subagentModel: (m.cli === "codex" ? codexRanks : ranks).staff.model,
+      subagentEffort: m.cli === "codex" ? null : ranks.staff.effort,
     }));
   }
 
@@ -3334,9 +3339,9 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 이 직원의 세션에 들어가 있어야 할 설정. */
   private desiredConfig(member: Member): AppliedConfig {
-    const { ranks } = this.store.getSettings();
-    const { model, effort } = memberConfig(member, ranks);
-    return { model, effort, staffModel: member.cli === "codex" ? null : ranks.staff.model, staffEffort: member.cli === "codex" ? null : ranks.staff.effort };
+    const { ranks, codexRanks } = this.store.getSettings();
+    const { model, effort } = memberConfig(member, ranks, codexRanks);
+    return { model, effort, staffModel: (member.cli === "codex" ? codexRanks : ranks).staff.model, staffEffort: member.cli === "codex" ? null : ranks.staff.effort };
   }
 
   /** 서버가 띄운 세션이 지금 설정과 다른가. 넘겨받은 세션은 대표가 쓰던 칸이라 스스로 닫지 않는다(깨울 때 맞춰진다). 잠든 세션은 깨울 때 맞춰진다. */
@@ -4198,8 +4203,8 @@ export class Orchestrator implements OrchestratorApi {
       cwd: member.cwd,
       sessionId: member.sessionId,
       paneId: member.paneId,
-      ...memberConfig(member, settings.ranks),
-      subagentModel: member.cli === "codex" ? null : settings.ranks.staff.model,
+      ...memberConfig(member, settings.ranks, settings.codexRanks),
+      subagentModel: (member.cli === "codex" ? settings.codexRanks : settings.ranks).staff.model,
       permissionMode: settings.permissionMode,
       kind: member.kind,
       origin: member.origin,

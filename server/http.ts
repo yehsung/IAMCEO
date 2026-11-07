@@ -6,7 +6,7 @@ import { MIGRATIONS } from "./db.ts";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { z } from "zod";
-import { EFFORTS, fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type HerdrInfo, type Member, type MessagePageOptions, type SyncCursor, type SyncSnapshot } from "../shared/types.ts";
+import { CODEX_EFFORTS, EFFORTS, fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type HerdrInfo, type Member, type MessagePageOptions, type SyncCursor, type SyncSnapshot } from "../shared/types.ts";
 import type { OperationReceipt, ServerCapabilities } from "../shared/operations.ts";
 import type { DeliveryRecoveryService } from "./service-contracts.ts";
 import { ARTIFACT_CSP } from "../shared/artifact-kit.ts";
@@ -165,7 +165,9 @@ const permissionMode = z.enum(PERMISSION_MODES);
 const effort = z.enum(EFFORTS);
 // 그대로 --model 뒤에 들어간다. '--플래그' 나 공백이 들어오면 안 된다. 별칭(haiku)·전체 이름·[1m] 을 받는다.
 const modelName = z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,127}$/, "모델 이름이 잘못되었습니다");
+const codexEffort = z.enum(CODEX_EFFORTS);
 const rankPatch = z.object({ model: modelName.nullable(), effort: effort.nullable() }).partial().strict();
+const codexRankPatch = rankPatch.extend({ effort: codexEffort.nullable().optional() });
 const handle = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/);
 
 // 실행 방식·권한·모델은 전체 설정 하나다. 옛 화면이 보낸 값을 조용히 버리지 않고 거부한다.
@@ -189,7 +191,7 @@ const AnswerApprovalSchema = z.strictObject({
   note: z.string().max(4000).optional(),
 });
 const CreateMemberSchema = z.strictObject({ name: nonEmpty, role: z.string().optional(), cli: cliProvider.optional(), modelOverride: modelName.nullable().optional() });
-const PatchMemberSchema = z.strictObject({ cli: cliProvider.optional(), modelOverride: modelName.nullable().optional(), effortOverride: effort.nullable().optional() });
+const PatchMemberSchema = z.strictObject({ cli: cliProvider.optional(), modelOverride: modelName.nullable().optional(), effortOverride: z.union([effort, codexEffort]).nullable().optional() });
 const TerminalControlSchema = z.strictObject({
   action: z.enum(["claim", "release", "input", "key"]),
   leaseId: nonEmpty.max(256).optional(),
@@ -226,6 +228,7 @@ const SettingsSchema = z
     backend,
     permissionMode,
     ranks: z.object({ manager: rankPatch, lead: rankPatch, staff: rankPatch }).partial().strict(),
+    codexRanks: z.object({ manager: codexRankPatch, lead: codexRankPatch, staff: codexRankPatch }).partial().strict(),
     maxConcurrentTurns: z.number().int().min(1).max(64),
     compactAtPct: z.number().int().min(1).max(100),
     // 창 크기(토큰)를 모를 때의 값. 1k~10M.
@@ -310,7 +313,7 @@ function operationResponse(receipt: OperationReceipt): Response {
       const { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt } = receipt.result;
       result = { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt }; break;
     }
-    case "settings": result = { settings: publicFields(receipt.result.settings, ["backend", "permissionMode", "ranks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault", "contextWindows", "maxAwakeWorkers", "notifyMac", "boardTidyHours"]), revision: receipt.result.revision }; break;
+    case "settings": result = { settings: publicFields(receipt.result.settings, ["backend", "permissionMode", "ranks", "codexRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault", "contextWindows", "maxAwakeWorkers", "notifyMac", "boardTidyHours"]), revision: receipt.result.revision }; break;
     case "member_config": result = { member: receiptMember(receipt.result.member), configRevision: receipt.result.configRevision, sessionGeneration: receipt.result.sessionGeneration }; break;
     case "todo_done": result = { todo: publicFields(receipt.result.todo, ["id", "projectId", "memberId", "who", "title", "detail", "done", "doneAt", "createdAt", "outcome", "closeReason", "closedBy"]), revision: receipt.result.revision }; break;
   }

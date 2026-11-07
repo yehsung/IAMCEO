@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_RANKS, type WsEvent } from "../shared/types.ts";
+import { DEFAULT_CODEX_RANKS, DEFAULT_RANKS, type WsEvent } from "../shared/types.ts";
 import { Bus } from "../server/bus.ts";
 import { generateAccessCode, loadConfig, updateConfigFile } from "../server/config.ts";
 import { newId, openDb } from "../server/db.ts";
@@ -389,7 +389,7 @@ describe("store", () => {
 
   test("설정: 기본값, 일부만 고치기, 다시 열어도 유지, 방송", () => {
     const { store: s, bus, db, events: ev } = makeStore();
-    expect(s.getSettings()).toEqual({ backend: "core", permissionMode: "bypassPermissions", ranks: DEFAULT_RANKS, maxConcurrentTurns: 4, compactAtPct: 70, contextWindowDefault: 1_000_000, contextWindows: { "gpt-6-astra": 475_000 }, maxAwakeWorkers: 8, notifyMac: false, boardTidyHours: 6 });
+    expect(s.getSettings()).toEqual({ backend: "core", permissionMode: "bypassPermissions", ranks: DEFAULT_RANKS, codexRanks: DEFAULT_CODEX_RANKS, maxConcurrentTurns: 4, compactAtPct: 70, contextWindowDefault: 1_000_000, contextWindows: { "gpt-6-astra": 475_000 }, maxAwakeWorkers: 8, notifyMac: false, boardTidyHours: 6 });
     expect(s.patchSettings({ compactAtPct: 60 }).compactAtPct).toBe(60);
     expect(ev.at(-1)).toMatchObject({ type: "settings" });
     expect(new Store(db, bus).getSettings().compactAtPct).toBe(60);

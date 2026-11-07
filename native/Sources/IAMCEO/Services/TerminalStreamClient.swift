@@ -103,11 +103,13 @@ final class TerminalStreamClient {
     @ObservationIgnored private var connection = UUID()
     @ObservationIgnored private var outputOwner: UUID?
     @ObservationIgnored private var sizePolicy: TerminalSizePolicy = .fit
+    @ObservationIgnored private let resizeSender: ((String) async throws -> Void)?
 
     func attachOutput(owner: UUID, handler: @escaping (Data) -> Void) { outputOwner = owner; onOutput = handler }
     func detachOutput(owner: UUID) { if outputOwner == owner { onOutput = nil; outputOwner = nil } }
 
-    init(session: URLSession? = nil) {
+    init(session: URLSession? = nil, resizeSender: ((String) async throws -> Void)? = nil) {
+        self.resizeSender = resizeSender
         let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false
         config.httpCookieStorage = nil
@@ -218,14 +220,17 @@ final class TerminalStreamClient {
     }
     func resize(cols: Int, rows: Int) {
         resizeTask?.cancel()
-        guard sizePolicy == .fit, case .live(mode: .control, cols: _, rows: _) = state, let socket else { return }
+        guard sizePolicy == .fit, case .live(mode: .control, cols: _, rows: _) = state, socket != nil || resizeSender != nil else { return }
+        let socket = socket
         let token = connection
         resizeTask = Task { [weak self] in
             do {
                 try await Task.sleep(for: .milliseconds(150))
                 guard let self, self.connection == token else { return }
                 let data = try JSONSerialization.data(withJSONObject: ["type": "resize", "cols": cols, "rows": rows])
-                try await socket.send(.string(String(decoding: data, as: UTF8.self)))
+                let text = String(decoding: data, as: UTF8.self)
+                if let sender = self.resizeSender { try await sender(text) }
+                else if let socket { try await socket.send(.string(text)) }
             } catch { /* cancellation or receive loop will handle disconnect */ }
         }
     }

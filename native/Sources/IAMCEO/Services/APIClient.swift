@@ -136,6 +136,10 @@ actor APIClient {
         return result.html
     }
     func activity(memberID: String) async throws -> [Activity] { try await request("/api/members/\(Self.segment(memberID))/activity?limit=100") }
+    func models() async throws -> ModelCatalog {
+        do { return try await request("/api/models") }
+        catch let error as APIError where error.status == 404 { return .fallback }
+    }
     func screen(memberID: String) async throws -> String {
         struct Result: Decodable, Sendable { let text: String }
         let result: Result = try await request("/api/members/\(Self.segment(memberID))/screen")

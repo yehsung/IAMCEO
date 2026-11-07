@@ -1133,6 +1133,10 @@ struct MemberDetailView: View {
         let busy = running == "config"
         let rank = m.kind == "worker" ? "lead" : "manager"
         let rankConfig = store.bootstrap?.settings.rankConfig(rank, cli: target == "codex" ? .codex : .claude)
+        let cli: RankSettingsCLI = target == "codex" ? .codex : .claude
+        let list = store.modelCatalog.list(for: cli)
+        let selected = list.option(for: trimmed)
+        let efforts = list.efforts(for: trimmed.isEmpty ? (rankConfig?.model ?? "") : trimmed, cli: cli)
         return VStack(alignment: .leading, spacing: 10) {
             TeamFactRow(label: "AI CLI", alignment: .center) {
                 Picker("AI CLI", selection: Binding(get: { switchAllowed ? provider : m.cli }, set: { provider = $0 })) {
@@ -1145,41 +1149,24 @@ struct MemberDetailView: View {
             }
             if let reason = switchBlockReason(m) { teamNote(reason) }
             TeamFactRow(label: "모델", alignment: .center) {
-                HStack(spacing: 6) {
-                    TextField("모델", text: $model, prompt: Text(rankConfig?.model.map { "직급 기본값 (\($0))" } ?? "직급 기본값"))
-                        .font(CEFont.mono)
-                        .detailField()
-                        .autocorrectionDisabled()
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        #endif
-                        .disabled(!store.canWrite)
-                        .accessibilityLabel("모델")
-                    if target == "claude" {
-                        Menu {
-                            ForEach(["fable", "opus", "sonnet", "haiku"], id: \.self) { name in
-                                Button(name) { model = name }
-                            }
-                            Button("직급 기본값") { model = "" }
-                        } label: {
-                            Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold)).frame(width: 28, height: 28)
-                                .contentShape(Rectangle())
-                        }
-                        .menuStyle(.button)
-                        .buttonStyle(.borderless)
-                        .menuIndicator(.hidden)
-                        .fixedSize()
-                        .disabled(!store.canWrite)
-                        .help("모델 고르기")
-                        .accessibilityLabel("모델 고르기")
+                Picker("모델", selection: $model) {
+                    Text(rankConfig?.model.map { "직급 기본값 (\($0))" } ?? "직급 기본값").tag("")
+                    ForEach(list.models) { option in
+                        Text(option.label).tag(selected?.value == option.value ? trimmed : option.value)
                     }
+                    if let unknown = list.unknownCurrent(trimmed) { Text(unknown).tag(trimmed).disabled(true) }
                 }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .font(CEFont.mono)
+                .disabled(!store.canWrite)
+                .accessibilityLabel("모델")
             }
             TeamFactRow(label: "effort", alignment: .center) {
                 Picker("effort", selection: $effort) {
                     Text(rankConfig?.effort.map { "직급 기본값 (\($0))" } ?? "직급 기본값").tag("")
-                    ForEach((target == "codex" ? RankSettingsCLI.codex : .claude).efforts, id: \.self) { Text($0).tag($0) }
-                    if !([""] + (target == "codex" ? RankSettingsCLI.codex : .claude).efforts).contains(effort) { Text(effort).tag(effort).disabled(true) }
+                    ForEach(efforts, id: \.self) { Text($0).tag($0) }
+                    if !([""] + efforts).contains(effort) { Text("현재: \(effort)").tag(effort).disabled(true) }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
@@ -1215,7 +1202,7 @@ struct MemberDetailView: View {
                 }
                 .ceProminentButton()
                 .controlSize(.small)
-                .disabled(!dirty || configChanged(m) || block != nil || !store.canWrite || running != nil || store.pendingActions.contains("member:\(m.id)"))
+                .disabled(list.unknownCurrent(trimmed) != nil || !dirty || configChanged(m) || block != nil || !store.canWrite || running != nil || store.pendingActions.contains("member:\(m.id)"))
             }
             if let configNote {
                 Label(configNote, systemImage: configHandoff ? "tray.full" : "checkmark.circle").font(CEFont.meta).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
@@ -1227,6 +1214,9 @@ struct MemberDetailView: View {
             if let configFailure {
                 Label(configFailure, systemImage: "exclamationmark.circle").font(CEFont.meta).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true)
             }
+        }
+        .task(id: "\(store.writeNamespace)|\(configOpen)") {
+            if configOpen { await store.refreshModels() }
         }
     }
 

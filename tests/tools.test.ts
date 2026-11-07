@@ -67,7 +67,8 @@ afterAll(async () => {
 
 async function setup() {
   const home = mkdtempSync(join(tmpdir(), "iamceo-tools-"));
-  const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
+  const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0", CLAUDE_CONFIG_DIR: join(home, "claude"), CODEX_HOME: join(home, "codex") };
+  mkdirSync(env.CLAUDE_CONFIG_DIR); mkdirSync(env.CODEX_HOME);
   updateConfigFile({ accessCode: "code", hosts: ["127.0.0.1"] }, env);
   const config = loadConfig(env);
   const bus = new Bus();
@@ -104,6 +105,37 @@ function deliveryBody(store: Store, sent: { memberId: string; text: string }): s
   expect(sent.text).toBe(`${delivery.text}\n${dispatch.markers[0]!.marker}\n${dispatch.bundleMarker}`);
   return delivery.text;
 }
+
+test("team_add and config writes accept catalog models/null and reject unlisted values", async () => {
+  const f = await setup();
+  for (const cli of ["claude", "codex"] as const) {
+    const valid = cli === "claude" ? "opus" : "gpt-6.1-sol";
+    const before = f.store.listMembers(f.project.id).length;
+    const bad = await f.call(f.lead, "team_add", { name: "거절", role: "시험", cli, model: "unlisted" });
+    expect(bad.isError).toBe(true); expect(bad.text).toContain("목록에 없는 모델입니다");
+    expect(f.store.listMembers(f.project.id)).toHaveLength(before);
+    for (const value of [valid, null]) {
+      const name = `${cli}-${value ?? "default"}`;
+      expect((await f.call(f.lead, "team_add", { name, role: "시험", cli, model: value })).isError).toBeUndefined();
+      const member = f.store.listMembers(f.project.id).find(m => m.name === name)!;
+      expect(member.modelOverride).toBe(value);
+      await expect(f.orch.patchMemberConfig(member.id, { modelOverride: "unlisted" })).rejects.toMatchObject({ status: 400, message: "목록에 없는 모델입니다" });
+      await f.orch.patchMemberConfig(member.id, { modelOverride: valid });
+      await f.orch.patchMemberConfig(member.id, { modelOverride: null });
+    }
+    const key = cli === "claude" ? "ranks" : "codexRanks";
+    await expect(f.orch.updateSettings({ [key]: { lead: { model: "unlisted" } } })).rejects.toMatchObject({ status: 400, message: "목록에 없는 모델입니다" });
+    expect((await f.orch.updateSettings({ [key]: { lead: { model: valid } } }))[key].lead.model).toBe(valid);
+    expect((await f.orch.updateSettings({ [key]: { lead: { model: null } } }))[key].lead.model).toBeNull();
+  }
+  // Updates to the same fake CLI cache immediately affect both tool/config writes.
+  writeFileSync(join(f.home, "claude", ".claude.json"), JSON.stringify({ additionalModelOptionsCache: [{ value: "claude-fable-5-1[1m]", label: "Fable" }] }));
+  for (const model of ["fable", "claude-fable-5-1[1m]"]) {
+    const added = await f.call(f.lead, "team_add", { name: model === "fable" ? "추가 별칭" : "추가 전체 이름", handle: model === "fable" ? "fable-short" : "fable-full", role: "시험", model });
+    expect(added.isError, added.text).toBeUndefined();
+    expect((await f.orch.updateSettings({ ranks: { lead: { model } } })).ranks.lead.model).toBe(model);
+  }
+});
 
 describe("도구 목록", () => {
   test("역할마다 다르고 MCP 입력 스키마 모양이다", async () => {

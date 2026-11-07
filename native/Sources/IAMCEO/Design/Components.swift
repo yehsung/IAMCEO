@@ -508,6 +508,7 @@ struct CESheet<Content: View, Footer: View>: View {
     var width: CGFloat
     var maxBodyHeight: CGFloat
     var scrolls: Bool
+    var flexibleWidth: Bool
     var escapeCloses: Bool
     var onClose: (() -> Void)?
     private let content: Content
@@ -515,10 +516,10 @@ struct CESheet<Content: View, Footer: View>: View {
     @State private var bodyHeight: CGFloat = 0
 
     init(_ title: String, subtitle: String? = nil, icon: String? = nil, width: CGFloat = 520, maxBodyHeight: CGFloat = 620,
-         scrolls: Bool = true, escapeCloses: Bool = true, onClose: (() -> Void)? = nil,
+         scrolls: Bool = true, flexibleWidth: Bool = false, escapeCloses: Bool = true, onClose: (() -> Void)? = nil,
          @ViewBuilder content: () -> Content, @ViewBuilder footer: () -> Footer) {
         self.title = title; self.subtitle = subtitle; self.icon = icon; self.width = width
-        self.maxBodyHeight = maxBodyHeight; self.scrolls = scrolls; self.escapeCloses = escapeCloses; self.onClose = onClose
+        self.maxBodyHeight = maxBodyHeight; self.scrolls = scrolls; self.flexibleWidth = flexibleWidth; self.escapeCloses = escapeCloses; self.onClose = onClose
         self.content = content(); self.footer = footer()
     }
 
@@ -551,7 +552,8 @@ struct CESheet<Content: View, Footer: View>: View {
             }
             if hasFooter { footerBar }
         }
-        .frame(width: width)
+        .frame(width: flexibleWidth ? nil : width)
+        .frame(maxWidth: flexibleWidth ? .infinity : nil)
         .foregroundStyle(CE.ink)
         .background { CESheetBackground() }
         #else

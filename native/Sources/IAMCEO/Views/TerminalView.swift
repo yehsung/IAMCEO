@@ -15,17 +15,22 @@ struct TerminalView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     let member: Member
-    @State private var session = TerminalSession()
+    @State private var session: TerminalSession
+
+    init(member: Member, session: TerminalSession = TerminalSession()) {
+        self.member = member
+        _session = State(initialValue: session)
+    }
 
     private var client: TerminalStreamClient { session.client }
     private var current: Member { store.members.first { $0.id == member.id } ?? member }
     private var controlling: Bool { session.controlling }
     private var unsupported: Bool { client.state == .unsupported }
 
-    // CESheet has a fixed width. Match its outer minimum and ideal to avoid clipping.
+    // Resolve the presenting window’s screen; width is an ideal, never a fixed frame.
     #if os(macOS)
     private var sheetSize: CGSize {
-        TerminalSheetLayout.size(visibleFrame: NSScreen.main?.visibleFrame.size ?? CGSize(width: 1280, height: 880))
+        TerminalSheetLayout.size(visibleFrame: (NSApp.keyWindow?.screen ?? NSApp.mainWindow?.screen ?? NSScreen.main)?.visibleFrame.size ?? CGSize(width: 1280, height: 880))
     }
     private var sheetWidth: CGFloat { sheetSize.width }
     #else
@@ -39,11 +44,20 @@ struct TerminalView: View {
         }
         .onAppear { session.appear(store: store, member: member, active: scenePhase == .active) }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background { session.setActive(false, store: store, member: member) }
+            if phase == .background || (TerminalPlatform.current == .mac && phase == .inactive) { session.setActive(false, store: store, member: member) }
             else if phase == .active { session.setActive(true, store: store, member: member) }
         }
         .onDisappear { session.disappear(store: store, member: member) }
         #if os(macOS)
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)) { _ in
+            session.setActive(false, store: store, member: member)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            session.setActive(false, store: store, member: member)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            session.setActive(true, store: store, member: member)
+        }
         .background {
             Button("닫기") { dismiss() }.keyboardShortcut("w", modifiers: .command)
                 .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
@@ -52,7 +66,7 @@ struct TerminalView: View {
     }
 
     private var liveSheet: some View {
-        CESheet("\(current.name) 터미널", icon: "terminal", width: sheetWidth, scrolls: false, escapeCloses: false,
+        CESheet("\(current.name) 터미널", icon: "terminal", width: sheetWidth, scrolls: false, flexibleWidth: true, escapeCloses: false,
                 onClose: { dismiss() }) {
             VStack(alignment: .leading, spacing: 10) {
                 TimelineView(.periodic(from: .now, by: 1)) { context in statusRow(now: context.date) }
@@ -91,7 +105,8 @@ struct TerminalView: View {
             #endif
         }
         #if os(macOS)
-        .frame(minWidth: sheetWidth, idealWidth: sheetWidth, maxWidth: sheetWidth, minHeight: sheetSize.height, idealHeight: sheetSize.height)
+        .frame(minWidth: min(640, sheetWidth - 80), idealWidth: sheetWidth, maxWidth: .infinity,
+               minHeight: min(400, sheetSize.height - 60), idealHeight: sheetSize.height, maxHeight: .infinity)
         #endif
     }
 

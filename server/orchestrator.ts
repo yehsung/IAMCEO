@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { ModelCatalogReader } from "./models.ts";
 import { DeliveryRecovery } from "./delivery-recovery.ts";
 import { writeStatuslineWrapper } from "./runner/statusline.ts";
 // Orchestrator: 전달 펌프, 턴 종료 처리, 압축 판단, 띄우기·잠재우기·다시 열기, 승인 근거 확인(spec §4·§6·§7).
@@ -306,7 +307,7 @@ const MAX_TURN_ERROR_ATTEMPTS = 3;
 const SWITCH_SETTLE_MS = 5000;
 
 export interface OrchestratorDeps {
-  config: Pick<Config, "home" | "rolesDir" | "port"> & Partial<Pick<Config, "claudeBin" | "codexBin" | "coreBin" | "coreSocket">>;
+  config: Pick<Config, "home" | "rolesDir" | "port"> & Partial<Pick<Config, "claudeBin" | "codexBin" | "coreBin" | "coreSocket" | "claudeHome" | "codexHome">>;
   store: Store;
   runners: Map<Backend, Runner>;
   herdr?: HerdrQueries;
@@ -594,7 +595,10 @@ export class Orchestrator implements OrchestratorApi {
   private readonly agentOperations = new Map<string, Promise<AgentToolResult>>();
   private readonly providerHomes: OrchestratorDeps["providerHomes"];
 
+  private readonly models: ModelCatalogReader;
+
   constructor(deps: OrchestratorDeps) {
+    this.models = new ModelCatalogReader(deps.config);
     this.store = deps.store;
     this.providerHomes = deps.providerHomes;
     this.config = deps.config;
@@ -688,8 +692,8 @@ export class Orchestrator implements OrchestratorApi {
   private coreSocket(): string { return this.config.coreSocket ?? join(this.config.home, "run", "core.sock"); }
 
   private readonly terminalStreamClosers = new Set<() => Promise<void>>();
-  private readonly terminalLeaseListeners = new Set<(memberId: string, leaseId: string) => void>();
-  onTerminalLeaseEnded(ended: (memberId: string, leaseId: string) => void): () => void {
+  private readonly terminalLeaseListeners = new Set<(memberId: string, leaseId: string | null) => Promise<void>>();
+  onTerminalLeaseEnded(ended: (memberId: string, leaseId: string | null) => Promise<void>): () => void {
     this.terminalLeaseListeners.add(ended);
     return () => { this.terminalLeaseListeners.delete(ended); };
   }
@@ -759,14 +763,16 @@ export class Orchestrator implements OrchestratorApi {
       const previousLease = runner.terminalLease?.(memberId);
       const result = await runner.terminalControl(this.runnerMember(member, this.store.requireProject(member.projectId)), action);
       if (previousLease && (action.action === "release" || (action.action === "claim" && result.leaseId !== previousLease.leaseId))) {
-        for (const ended of this.terminalLeaseListeners) ended(memberId, previousLease.leaseId);
+        await Promise.all([...this.terminalLeaseListeners].map(ended => ended(memberId, previousLease.leaseId)));
       }
-      if (action.action === "release") void this.pump(memberId);
       return result;
     } catch (e) {
       if (e instanceof CoreError && !e.uncertain) throw new ApiError(409, e.message, "TERMINAL_REFUSED");
       throw e;
-    } finally { this.terminalMutations.delete(memberId); }
+    } finally {
+      this.terminalMutations.delete(memberId);
+      if (action.action === "release" && this.store.listPending(memberId).length > 0) void this.pump(memberId);
+    }
   }
 
   async runtimeInfo(): Promise<RuntimeInfo> {
@@ -1641,6 +1647,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private async updateSettingsOnce(patch: SettingsPatch): Promise<Settings> {
+    this.models.requireSettings(patch);
     if (this.archiving.size) throw new ApiError(409, "프로젝트 보관을 처리하는 중입니다");
     const before = this.store.getSettings();
     if (this.runners.has("core")) {
@@ -1769,6 +1776,7 @@ export class Orchestrator implements OrchestratorApi {
     if (this.runtime(memberId).closing || this.runtime(memberId).starting || this.runtime(memberId).reopening || this.pendingLifecycle(memberId)) throw new ApiError(409, "세션을 처리하는 중입니다");
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 설정을 바꿀 수 없습니다");
     const targetCli = patch.cli ?? member.cli;
+    this.models.requireModel(targetCli, patch.modelOverride);
     const requestedEffort = patch.effortOverride === undefined ? member.effortOverride : patch.effortOverride;
     if (requestedEffort && !(targetCli === "codex" ? CODEX_EFFORTS : EFFORTS).some(value => value === requestedEffort)) {
       throw new ApiError(400, `${targetCli}에서 지원하지 않는 effort입니다`);
@@ -2437,6 +2445,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   async addMember(projectId: string, input: NewMemberInput): Promise<{ member: Member; assigned: AssignResult | null }> {
+    this.models.requireModel(input.cli ?? "claude", input.modelOverride);
     const project = this.store.requireProject(projectId);
     if (!project.runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다");
     const name = input.name.trim();
@@ -3304,8 +3313,14 @@ export class Orchestrator implements OrchestratorApi {
     // Previously attempted entries must be inspected, including legacy held rows.
     for (const d of pending) if (d.attempts > 0 && !this.deliveryRecovery.requeueRejected(d.id) && this.store.getDeliveryRecovery(d.id)?.phase === "none") this.deliveryRecovery.beginRecovery(d.id);
     pending = this.store.listPending(memberId).filter(d => this.store.getDeliveryRetry(d.id).retryReason !== "rejected_limit");
-    if (this.recovering || this.configWrites.has(memberId) || this.pendingLifecycle(memberId)) return;
+    if (this.recovering || this.configWrites.has(memberId) || this.terminalMutations.has(memberId) || this.pendingLifecycle(memberId)) return;
     if (this.store.inputState(memberId).lease) { this.deferCoreCompact(member, "manual_control"); return; }
+    // Expiry/replacement can be discovered by the runner/store before the socket timer.
+    // Fence every delivery until old control attaches have detached and restored core.
+    if (member.backend === "core" && this.terminalLeaseListeners.size) {
+      await Promise.all([...this.terminalLeaseListeners].map(ended => ended(memberId, null)));
+    }
+    if (this.terminalMutations.has(memberId) || this.store.inputState(memberId).lease) return;
     if (member.backend === "core" && member.statusObservation && member.statusObservation.ownership !== "verified" && !(member.status === "offline" && member.statusObservation.error?.code === "no_owned_terminal")) return;
     if (member.backend === "core" && this.store.listPendingExecutions().some(run => run.memberId === memberId && run.identity.sessionGeneration === this.store.memberRevisions(memberId).sessionGeneration) && !this.runtime(memberId).turn) return;
     if (this.deliveryRecovery.fenced(memberId)) return;

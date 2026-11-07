@@ -821,6 +821,7 @@ struct SettingsView: View {
         #endif
         return container
             .projectManagementSheets()
+            .task { await store.refreshModels() }
             .onAppear {
                 editedNamespace = store.writeNamespace; syncFromStore()
                 #if os(macOS)
@@ -1212,11 +1213,10 @@ struct SettingsView: View {
 
     private func rankRow(_ rank: RankRow) -> some View {
         let overrides = rank.cli == .claude && rank.key != "staff" ? (store.bootstrap?.rankOverrides[rank.key] ?? 0) : 0
-        let custom = isCustom(rank)
         let invalid = modelError(for: rank)
         let scope = overrides > 0 ? "\(rank.scope) · 직원별 지정 \(overrides)명" : rank.scope
         #if os(macOS)
-        return HStack(alignment: custom || invalid != nil ? .top : .center, spacing: 16) {
+        return HStack(alignment: invalid != nil ? .top : .center, spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(rank.title).font(SetupFont.row).foregroundStyle(CE.ink)
                 Text(scope).font(SetupFont.hint).foregroundStyle(CE.ink3)
@@ -1234,7 +1234,6 @@ struct SettingsView: View {
                     }
                     .frame(width: Self.effortWidth)
                 }
-                if custom { customModelField(rank) }
                 if let invalid {
                     Text(invalid).font(SetupFont.hint).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true)
                 }
@@ -1254,7 +1253,6 @@ struct SettingsView: View {
                 modelMenu(rank)
                 if rank.showsEffort { effortMenu(rank).frame(width: 118) }
             }
-            if custom { customModelField(rank) }
             if let invalid { Text(invalid).font(SetupFont.hint).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true) }
         }
         .padding(.vertical, 12)
@@ -1263,45 +1261,25 @@ struct SettingsView: View {
 
     private func model(of rank: RankRow) -> String { settingsTrim(draft.rankConfig(rank.key, cli: rank.cli)?.model ?? "") }
 
-    private func isCustom(_ rank: RankRow) -> Bool {
-        let value = model(of: rank)
-        return customRanks.contains(rank.id) || (!value.isEmpty && !rank.cli.models.contains(value))
-    }
-
     private func modelMenu(_ rank: RankRow) -> some View {
         let value = model(of: rank)
-        let custom = isCustom(rank)
+        let list = store.modelCatalog.list(for: rank.cli)
+        let selected = list.option(for: value)
         let defaultLabel = "CLI 기본"
-        return SetupMenu(custom ? "직접 입력" : (value.isEmpty ? defaultLabel : value), mono: !custom && !value.isEmpty, compact: true, label: "\(rank.title) 모델") {
-            Toggle(defaultLabel, isOn: menuCheck(!custom && value.isEmpty) { customRanks.remove(rank.id); setModel(nil, for: rank) })
+        let label = list.unknownCurrent(value) ?? selected?.label ?? defaultLabel
+        return SetupMenu(label, mono: !value.isEmpty, compact: true, label: "\(rank.title) 모델") {
+            Toggle(defaultLabel, isOn: menuCheck(value.isEmpty) { customRanks.remove(rank.id); setModel(nil, for: rank) })
             Divider()
-            ForEach(rank.cli.models, id: \.self) { name in
-                Toggle(name, isOn: menuCheck(!custom && value == name) { customRanks.remove(rank.id); setModel(name, for: rank) })
+            ForEach(list.models) { option in
+                Toggle(option.label, isOn: menuCheck(selected?.value == option.value) { customRanks.remove(rank.id); setModel(option.value, for: rank) })
             }
-            Divider()
-            // Starts from the current name so a variant ("opus[1m]") is one edit away.
-            Toggle("직접 입력", isOn: menuCheck(custom) { customRanks.insert(rank.id) })
+            if let unknown = list.unknownCurrent(value) { Text(unknown).disabled(true) }
         }
-    }
-
-    private func customModelField(_ rank: RankRow) -> some View {
-        TextField("\(rank.title) 모델 이름", text: Binding(get: { draft.rankConfig(rank.key, cli: rank.cli)?.model ?? "" }, set: { value in
-            customRanks.insert(rank.id)
-            setModel(value.isEmpty ? nil : value, for: rank)
-        }), prompt: Text("모델 이름"))
-            .labelsHidden()
-            .font(CEFont.mono)
-            .autocorrectionDisabled()
-            #if os(iOS)
-            .textInputAutocapitalization(.never)
-            #endif
-            .onSubmit { Task { await save() } }
-            .settingsWell()
     }
 
     private func effortMenu(_ rank: RankRow) -> some View {
         let current = draft.rankConfig(rank.key, cli: rank.cli)?.effort
-        let options = rank.cli.efforts + (current.map { rank.cli.efforts.contains($0) ? [] : [$0] } ?? [])
+        let options = store.modelCatalog.list(for: rank.cli).efforts(for: model(of: rank), cli: rank.cli)
         let defaultLabel = "CLI 기본"
         return SetupMenu(current ?? defaultLabel, compact: true, label: "\(rank.title) effort") {
             Toggle(defaultLabel, isOn: menuCheck(current == nil) { setEffort(nil, for: rank) })
@@ -1309,6 +1287,7 @@ struct SettingsView: View {
             ForEach(options, id: \.self) { effort in
                 Toggle(effort, isOn: menuCheck(current == effort) { setEffort(effort, for: rank) })
             }
+            if let current, !options.contains(current) { Text("현재: \(current)").disabled(true) }
         }
     }
 
@@ -1326,7 +1305,10 @@ struct SettingsView: View {
 
     /// Same rule as the daemon: the name goes straight after `--model`, so no flags or spaces.
     private func modelError(for rank: RankRow) -> String? {
-        RankSettingsEditing.modelError(model(of: rank), custom: customRanks.contains(rank.id), title: rank.title)
+        if store.modelCatalog.list(for: rank.cli).unknownCurrent(model(of: rank)) != nil {
+            return "\(rank.title): 목록에서 모델을 선택해 주세요"
+        }
+        return RankSettingsEditing.modelError(model(of: rank), custom: customRanks.contains(rank.id), title: rank.title)
     }
 
     // MARK: 알림
@@ -1720,7 +1702,6 @@ struct NewProjectView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var cwd = ""
-    @State private var goal = ""
     @State private var provider = "claude"
     @State private var working = false
     @State private var error: String?
@@ -1728,7 +1709,7 @@ struct NewProjectView: View {
     @State private var partial: Partial?
     @FocusState private var focus: Field?
 
-    private enum Field: Hashable { case name, cwd, goal }
+    private enum Field: Hashable { case name, cwd }
     private struct Partial { let id: String; var detail: String }
 
     private var canCreate: Bool {
@@ -1765,7 +1746,7 @@ struct NewProjectView: View {
             }
         }
         #if os(iOS)
-        // Flows through the environment to CESheet's ScrollView: a swipe puts the keyboard away from the 목표 field.
+        // Flows through the environment to CESheet's ScrollView: a swipe puts the keyboard away.
         .scrollDismissesKeyboard(.interactively)
         #endif
         .interactiveDismissDisabled(working)
@@ -1799,14 +1780,6 @@ struct NewProjectView: View {
                         #endif
                         .onSubmit { Task { await create() } }
                         .setupInput(active: focus == .cwd)
-                }
-                SetupField("목표", hint: "지금 상황에 남기고 총괄에게 프로젝트 목표로 전합니다.") {
-                    TextField("목표", text: $goal, prompt: Text("선택 · 이루려는 결과와 끝났다고 볼 기준"), axis: .vertical)
-                        .labelsHidden()
-                        .font(SetupFont.input)
-                        .lineLimit(3...6)
-                        .focused($focus, equals: .goal)
-                        .setupInput(active: focus == .goal)
                 }
                 SetupField("총괄 AI CLI") {
                     SettingsSegments(options: ["claude", "codex"].map { SettingsSegments.Option(id: $0, title: providerLabel($0)) },
@@ -1846,7 +1819,8 @@ struct NewProjectView: View {
         working = true
         defer { working = false }
         let before = Set(store.projects.map(\.id))
-        if await store.createProject(name: projectName, cwd: settingsTrim(cwd), goal: settingsTrim(goal), provider: provider) {
+        // No goal at creation: the lead sets the aim of each piece of work when the owner hands it over.
+        if await store.createProject(name: projectName, cwd: settingsTrim(cwd), goal: "", provider: provider) {
             router.go(.team)
             dismiss()
             return

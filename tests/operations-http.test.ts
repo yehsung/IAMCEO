@@ -58,7 +58,7 @@ test("미지원 v2는 501이며 v1 포트로 쓰지 않는다; capability는 fal
   const matching = { ...v2, "If-Match": '"0"' };
   const entries: [string, unknown, Record<string, string>, string?][] = [
     ["/api/settings", { notifyMac: false }, matching, "PUT"],
-    [`/api/members/${memberId}`, { modelOverride: "model" }, matching, "PATCH"],
+    [`/api/members/${memberId}`, { modelOverride: "opus" }, matching, "PATCH"],
     [`/api/todos/${todoId}/done`, { done: false }, matching],
     [`/api/members/${memberId}/fresh-session`, { operationId: randomUUID(), expectedSessionGeneration: 0 }, v2],
     [`/api/members/${memberId}/terminal/control`, { operationId: randomUUID(), expectedSessionGeneration: 0, claimId: "claim", action: "claim" }, v2],
@@ -102,9 +102,9 @@ test("v2 CAS 포트는 검토 revision을 그대로 받고 같은 done도 우회
   orch.patchMemberConfigV2 = async (id, patch, precondition) => store.patchMemberCas(id, patch, precondition.expectedRevision);
   orch.setTodoDoneV2 = async (id, body, precondition) => store.setTodoDoneCas(id, body.done, precondition.expectedRevision);
   const revision = store.settingsRevision();
-  const response = await request("/api/settings", { ranks: { manager: { model: "new-model" } } }, { ...v2, "If-Match": `"${revision}"` }, "PUT");
+  const response = await request("/api/settings", { ranks: { manager: { model: "opus" } } }, { ...v2, "If-Match": `"${revision}"` }, "PUT");
   expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({ settings: { ranks: { manager: { model: "new-model" } } }, revision: revision + 1 });
+  expect(await response.json()).toMatchObject({ settings: { ranks: { manager: { model: "opus" } } }, revision: revision + 1 });
   const stale = await request("/api/settings", { notifyMac: false }, { ...v2, "If-Match": `"${revision}"` }, "PUT");
   expect(stale.status).toBe(409);
   expect(await stale.json()).toMatchObject({ code: "REVISION_CONFLICT" });

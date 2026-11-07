@@ -95,7 +95,9 @@ afterAll(async () => {
 async function setup(opts: { backend?: Backend | null; runnerEnabled?: boolean } = {}) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-unified-")));
   const work = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-unified-work-")));
-  const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
+  const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0", CLAUDE_CONFIG_DIR: join(home, "claude"), CODEX_HOME: join(home, "codex") };
+  mkdirSync(env.CLAUDE_CONFIG_DIR); mkdirSync(env.CODEX_HOME);
+  writeFileSync(join(env.CLAUDE_CONFIG_DIR, ".claude.json"), JSON.stringify({ additionalModelOptionsCache: [{ value: "claude-fable-5-1[1m]", label: "Fable" }] }));
   updateConfigFile({ accessCode: "code", hosts: ["127.0.0.1"], claudeBin: "/bin/false" }, env);
   const config = loadConfig(env);
   const bus = new Bus();
@@ -839,10 +841,11 @@ describe("직급별 모델·effort", () => {
     expect((await t.api("GET", "/api/bootstrap")).body.rankOverrides).toEqual({ manager: 1, lead: 1 });
   });
 
-  test("team_add 에 모델 인자가 없다", async () => {
+  test("team_add 는 목록 모델만 받고 effort 인자는 받지 않는다", async () => {
     const t = await setup();
     const lead = await t.orch.ensureConductor(t.project.id);
-    expect(await t.call(lead, "team_add", { name: "철수", role: "개발", model: "opus" })).toMatchObject({ isError: true });
+    expect((await t.call(lead, "team_add", { name: "철수", role: "개발", model: "opus" })).isError).toBeUndefined();
+    expect(await t.call(lead, "team_add", { name: "거절", role: "개발", model: "unlisted" })).toMatchObject({ isError: true });
     expect(await t.call(lead, "team_add", { name: "철수", role: "개발", effort: "max" })).toMatchObject({ isError: true });
   });
 

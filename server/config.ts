@@ -16,6 +16,8 @@ export interface ConfigFile {
   hosts?: string[];
   claudeBin?: string;
   codexBin?: string;
+  claudeHome?: string;
+  codexHome?: string;
   coreBin?: string;
   coreSocket?: string;
   herdrSocket?: string;
@@ -35,6 +37,8 @@ export interface Config {
   hostsAuto?: boolean;
   claudeBin: string;
   codexBin?: string;
+  claudeHome?: string;
+  codexHome?: string;
   coreBin?: string;
   coreSocket?: string;
   herdrSocket: string;
@@ -242,6 +246,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     uploadsDir,
     inboxDir,
     rolesDir,
+    claudeHome: env.CLAUDE_CONFIG_DIR || file.claudeHome,
+    codexHome: env.CODEX_HOME || file.codexHome,
     accessCode: file.accessCode!,
     port: parsePort(env.IAMCEO_PORT, "IAMCEO_PORT") ?? parsePort(file.port, "config.json") ?? DEFAULT_PORT,
     hosts: Array.isArray(file.hosts) && file.hosts.length > 0 ? file.hosts : defaultHosts(),

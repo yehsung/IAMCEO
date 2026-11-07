@@ -172,12 +172,12 @@ final class SubmissionStore {
     }
 
     func prepareTerminal(namespace: String, memberID: String, sessionGeneration: Int,
-                         action: TerminalAction, key: TerminalKey? = nil) throws -> TerminalSubmission {
+                         action: TerminalAction, key: TerminalKey? = nil, claimID: String? = nil) throws -> TerminalSubmission {
         guard sessionGeneration >= 0, (action == .key) == (key != nil) else { throw SubmissionError.invalidTransition }
         if let pending = state.terminals.values.first(where: {
             $0.namespace == namespace && $0.memberID == memberID && ($0.status == .pending || $0.status == .unknown)
         }) { throw SubmissionError.unresolvedAttempt(pending.id) }
-        let claim = try terminalClaim(namespace: namespace, memberID: memberID, sessionGeneration: sessionGeneration)
+        let claim = try claimID ?? terminalClaim(namespace: namespace, memberID: memberID, sessionGeneration: sessionGeneration)
         let counter = claimKey(namespace: namespace, memberID: memberID, generation: sessionGeneration)
         let hasInput = action == .input || action == .key
         let sequence = hasInput ? (state.sequences[counter] ?? 0) + 1 : nil
@@ -185,6 +185,10 @@ final class SubmissionStore {
                                          sessionGeneration: sessionGeneration, claimID: claim, action: action,
                                          inputSequence: sequence, input: action == .input ? terminalInput(namespace: namespace, memberID: memberID) : nil, key: key)
         try update {
+            if action == .claim, let claimID {
+                if $0.claims[counter] != claimID { $0.sequences[counter] = 0 }
+                $0.claims[counter] = claimID
+            }
             $0.terminals[attempt.id] = attempt
             if let sequence { $0.sequences[counter] = sequence }
         }

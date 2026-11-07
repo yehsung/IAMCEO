@@ -19,6 +19,7 @@ import { SESSION_ID_RE } from "./text.ts";
 import { Pairing, PAIR_CODE_TTL_MS, tailnetUrls, withMagicDnsNames } from "./pairing.ts";
 import { createPushHandler, type PushRoutesContext } from "./push/routes.ts";
 import { TerminalStreams, type SocketData } from "./terminal-stream.ts";
+import { ModelCatalogReader } from "./models.ts";
 
 export interface ServerContext {
   config: Config;
@@ -166,8 +167,9 @@ const permissionMode = z.enum(PERMISSION_MODES);
 const effort = z.enum(EFFORTS);
 // 그대로 --model 뒤에 들어간다. '--플래그' 나 공백이 들어오면 안 된다. 별칭(haiku)·전체 이름·[1m] 을 받는다.
 const modelName = z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,127}$/, "모델 이름이 잘못되었습니다");
+const listedModel = z.string().trim(); // Membership validation supplies the same 400 reason for every unlisted string.
 const codexEffort = z.enum(CODEX_EFFORTS);
-const rankPatch = z.object({ model: modelName.nullable(), effort: effort.nullable() }).partial().strict();
+const rankPatch = z.object({ model: listedModel.nullable(), effort: effort.nullable() }).partial().strict();
 const codexRankPatch = rankPatch.extend({ effort: codexEffort.nullable().optional() });
 const handle = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/);
 
@@ -192,7 +194,7 @@ const AnswerApprovalSchema = z.strictObject({
   note: z.string().max(4000).optional(),
 });
 const CreateMemberSchema = z.strictObject({ name: nonEmpty, role: z.string().optional(), cli: cliProvider.optional(), modelOverride: modelName.nullable().optional() });
-const PatchMemberSchema = z.strictObject({ cli: cliProvider.optional(), modelOverride: modelName.nullable().optional(), effortOverride: z.union([effort, codexEffort]).nullable().optional() });
+const PatchMemberSchema = z.strictObject({ cli: cliProvider.optional(), modelOverride: listedModel.nullable().optional(), effortOverride: z.union([effort, codexEffort]).nullable().optional() });
 const TerminalControlSchema = z.strictObject({
   action: z.enum(["claim", "release", "input", "key"]),
   leaseId: nonEmpty.max(256).optional(),
@@ -458,6 +460,7 @@ async function artifactHtml({ config, store }: ServerContext, id: string): Promi
 
 function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, readHerdr: () => Promise<HerdrInfo>, currentHerdr: () => HerdrInfo): Route[] {
   const { config, store, orch, bus } = ctx;
+  const models = new ModelCatalogReader(config);
   const legacyProjectPatches = new Set<string>();
   // 재전송이 앞 요청의 orch 처리가 끝나기 전에 와도 두 번 전달되지 않게 한다.
   const inFlight = new Map<string, Promise<unknown>>();
@@ -541,6 +544,10 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
           .every(port => port in orch && !!orch[port]),
       } };
       return Response.json(body);
+    }),
+    route("GET", "/api/models", (_req, url) => {
+      strictQuery(url, []);
+      return Response.json(models.read());
     }),
     route("GET", "/api/sync", async (_req, url) => {
       strictQuery(url, ["projectId"]);
@@ -765,10 +772,13 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       if (contractV2(req)) {
         const expected = precondition(req);
         const body = await parseBody(req, PatchMemberSchema);
+        models.requireModel(body.cli ?? store.requireMember(id!).cli, body.modelOverride);
         if (!orch.patchMemberConfigV2) throw new ApiError(501, "검토 버전이 있는 직원 설정을 지원하지 않습니다");
         return Response.json(await orch.patchMemberConfigV2(id!, body, expected));
       }
-      return Response.json(await orch.patchMemberConfig(id!, await parseBody(req, PatchMemberSchema)));
+      const body = await parseBody(req, PatchMemberSchema);
+      models.requireModel(body.cli ?? store.requireMember(id!).cli, body.modelOverride);
+      return Response.json(await orch.patchMemberConfig(id!, body));
     }),
     route("GET", "/api/members/:id/activity", (_req, url, [id]) => {
       store.requireMember(id!);
@@ -840,10 +850,13 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       if (contractV2(req)) {
         const expected = precondition(req);
         const body = await parseBody(req, SettingsSchema);
+        models.requireSettings(body);
         if (!orch.updateSettingsV2) throw new ApiError(501, "검토 버전이 있는 설정 변경을 지원하지 않습니다");
         return Response.json(await orch.updateSettingsV2(body, expected));
       }
-      return Response.json(await orch.updateSettings(await parseBody(req, SettingsSchema)));
+      const body = await parseBody(req, SettingsSchema);
+      models.requireSettings(body);
+      return Response.json(await orch.updateSettings(body));
     }),
   ];
 }

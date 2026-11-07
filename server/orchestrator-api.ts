@@ -72,7 +72,7 @@ export interface OrchestratorApi {
   renewTerminalStreamLease?(memberId: string, leaseId: string): number;
   terminalStreamInput?(memberId: string, write: () => void): Promise<void>;
   onTerminalStreamShutdown?(close: () => Promise<void>): () => void;
-  onTerminalLeaseEnded?(ended: (memberId: string, leaseId: string) => void): () => void;
+  onTerminalLeaseEnded?(ended: (memberId: string, leaseId: string | null) => Promise<void>): () => void;
   /** Store 로 프로젝트를 만들고 goal·startConductor 를 처리한다. */
   createProject(req: CreateProjectReq): Promise<Project>;
   /** 프로젝트 변경 단일 진입점. W9 HTTP 전환 전 fake/v1 hook은 호환한다. */

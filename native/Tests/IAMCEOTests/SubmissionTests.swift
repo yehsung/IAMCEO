@@ -20,6 +20,7 @@ final class WriteTestServer: @unchecked Sendable {
     var messageLookupStatus: Int?
     var dropTerminal = false
     var terminalUnknown = false
+    var uniqueTerminalLeases = false
     var storeTerminalReceipt = true
     var freshUnknown = false
     var dropFresh = false
@@ -99,7 +100,7 @@ final class WriteTestServer: @unchecked Sendable {
             let action = try XCTUnwrap(body["action"] as? String)
             let result = TerminalControlResultV2(memberId: "m", action: action, claimId: body["claimId"] as! String,
                                                  sessionGeneration: body["expectedSessionGeneration"] as! Int,
-                                                 inputSequence: body["inputSequence"] as? Int, leaseId: action == "release" ? nil : "lease",
+                                                 inputSequence: body["inputSequence"] as? Int, leaseId: action == "release" ? nil : (uniqueTerminalLeases ? body["claimId"] as? String : "lease"),
                                                  expiresAt: 9_999_999_999_999)
             let receipt = OperationReceipt(operationId: id, kind: .terminalControl, memberId: "m", status: terminalUnknown ? .unknown : .applied,
                                            result: terminalUnknown ? nil : .terminalControl(result))

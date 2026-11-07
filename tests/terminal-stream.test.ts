@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { createServer, type Socket } from "node:net";
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { loadConfig } from "../server/config.ts";
@@ -21,7 +21,7 @@ const until = async (predicate: () => boolean) => {
   expect(predicate()).toBe(true);
 };
 
-async function fixture() {
+async function fixture(simulateDetach = false, restoreDelay = 150) {
   const dir = mkdtempSync("/private/tmp/iamceo-terminal-test-");
   const binary = join(dir, "fake-core");
   const script = join(dir, "fake-core.ts");
@@ -37,7 +37,7 @@ else {
  setTimeout(() => { process.stdin.setRawMode(true); process.stdout.write('PTY_READY\\r\\n'); }, 150);
  // Bun caches stdout.rows after its first write; stty reads the actual PTY grid.
  process.on('SIGWINCH',()=>{ const [rows,cols]=Bun.spawnSync(['/bin/stty','size'],{stdin:0}).stdout.toString().trim().split(/\\s+/).map(Number); process.stdout.write('SIZE:'+cols+'x'+rows+'\\r\\n'); });
- process.stdin.on('data', bytes => { if (bytes.includes(28)) { process.stdout.write('DETACHED\\r\\n'); process.exit(0); } process.stdout.write('IN:'+Buffer.from(bytes).toString('hex')+'\\r\\n'); });
+ process.stdin.on('data', bytes => { if (bytes.includes(28)) { process.stdout.write('DETACHED\\r\\n'); if (${simulateDetach}) { writeFileSync(${JSON.stringify(dir)} + '/detaching', String(Date.now())); setTimeout(() => { writeFileSync(${JSON.stringify(dir)} + '/restore-at', String(Date.now()+${restoreDelay})); process.exit(0); }, 180); } else process.exit(0); return; } process.stdout.write('IN:'+Buffer.from(bytes).toString('hex')+'\\r\\n'); });
 }
 setInterval(()=>{},1000);
 `);
@@ -54,6 +54,7 @@ exec ${quote(process.execPath)} ${quote(script)} "$@"
   const socketPath = join(dir, "core.sock");
   const terminals = new Map<string, any>();
   const peers = new Set<Socket>();
+  const sent: { detached: boolean; restored: boolean }[] = [];
   const rpc = createServer(socket => {
     peers.add(socket); socket.on("close", () => peers.delete(socket)); socket.setEncoding("utf8");
     let text = "";
@@ -70,9 +71,18 @@ exec ${quote(process.execPath)} ${quote(script)} "$@"
             terminals.set((result as any).address, result); break;
           }
           case "terminal.list": result = { terminals: [...terminals.values()].filter(t => Object.entries(p.labels || {}).every(([k,v]) => t.labels[k] === v)) }; break;
-          case "terminal.get": result = terminals.get(p.terminal); break;
+          case "terminal.get": {
+            const t = terminals.get(p.terminal);
+            if (simulateDetach && t && existsSync(join(dir, "detaching"))) {
+              const restored = existsSync(join(dir, "restore-at")) && Date.now() >= Number(readFileSync(join(dir, "restore-at"), "utf8"));
+              t.cols = restored ? 200 : 91; t.rows = restored ? 120 : 31;
+            }
+            result = t; break;
+          }
           case "terminal.read": result = { text: "─".repeat(30)+"\n❯ \n"+"─".repeat(30) }; break;
-          case "terminal.send": case "terminal.keys": result = { turn: 0, started: true, status: "idle" }; break;
+          case "terminal.send": case "terminal.keys":
+            sent.push({ detached: pids().filter(p => !p.observe).every(p => !alive(p.pid)), restored: terminals.get(p.terminal)?.cols === 200 });
+            result = { turn: 0, started: true, status: "idle" }; break;
         }
         socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, ...(result ? { result } : { error: { message: "not owned", data: { kind: "not_found" } } }) })+"\n");
       }
@@ -109,7 +119,7 @@ exec ${quote(process.execPath)} ${quote(script)} "$@"
     ws.addEventListener("close", () => { closed = true; });
     return { ws, events, output, get text() { return Buffer.concat(output).toString(); }, get closed() { return closed; } };
   }
-  return { dir, config, store, runner, orch, server, project, member, terminals, status, connect, pids, origin, headers };
+  return { dir, config, store, runner, orch, server, project, member, terminals, status, connect, pids, sent, origin, headers };
 }
 function alive(pid: number) { try { process.kill(pid,0); return true; } catch { return false; } }
 
@@ -350,6 +360,53 @@ describe("terminal stream", () => {
       const next=await f.orch.terminalControl(f.member.id,{action:"claim",leaseId:"stable-claim"});
       expect(next.leaseId).not.toBe(lease.leaseId); expect(f.store.inputState(f.member.id).lease!.lastInputSequence).toBe(0);
     } finally { now.mockRestore(); }
+  });
+  test.each(["release", "expiry", "replacement"])("%s fences queued delivery until attach exit AND core restoration", async ending => {
+    const f = await fixture(true);
+    const lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const control = f.connect(`mode=control&size=fit&cols=91&rows=31&lease=${lease.leaseId}`);
+    await until(() => control.text.includes("PTY_READY"));
+    f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "instruction", text: "queued-after-control", wake: true });
+    await f.orch.pump(f.member.id);
+    expect(f.sent).toHaveLength(0);
+    let release: Promise<unknown>;
+    if (ending === "release") release = f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId });
+    else {
+      const saved = f.store.inputState(f.member.id).lease!;
+      if (ending === "expiry") f.store.saveLease({ ...saved, expiresAt: Date.now() - 1 });
+      else {
+        f.store.removeLease(f.member.id, saved.claimId);
+        // The cached stream still carries the old incarnation, even though core's holder was replaced and removed.
+        f.store.saveLease({ ...saved, claimId: "replacement", leaseId: "replacement" });
+        f.store.removeLease(f.member.id, "replacement");
+      }
+      release = f.orch.pump(f.member.id);
+    }
+    await until(() => existsSync(join(f.dir, "detaching")));
+    // A concurrent pump (e.g. queue event/health tick) must obey the same fence.
+    void f.orch.pump(f.member.id);
+    await Bun.sleep(70);
+    expect(f.sent).toHaveLength(0);
+    expect(f.pids().some(p => !p.observe && alive(p.pid))).toBe(true);
+    await release;
+    await until(() => f.sent.length > 0);
+    expect(f.sent.every(s => s.detached && s.restored)).toBe(true);
+  });
+  test("unverified restoration times out and keeps delivery fenced until a later core check succeeds", async () => {
+    const f = await fixture(true, 60_000);
+    const lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const control = f.connect(`mode=control&size=fit&cols=91&rows=31&lease=${lease.leaseId}`);
+    await until(() => control.text.includes("PTY_READY"));
+    f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "instruction", text: "wait-for-restoration", wake: true });
+    const started = performance.now();
+    await expect(f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId })).rejects.toMatchObject({ status: 409, message: "터미널 크기 복원을 확인하지 못했습니다" });
+    expect(performance.now() - started).toBeLessThan(3000);
+    expect(f.sent).toHaveLength(0);
+    expect(f.pids().every(p => !alive(p.pid))).toBe(true);
+    writeFileSync(join(f.dir, "restore-at"), "0");
+    await f.orch.pump(f.member.id);
+    await until(() => f.sent.length > 0);
+    expect(f.sent.every(s => s.detached && s.restored)).toBe(true);
   });
   test("release immediately revokes a socket and queued input across the same claim's reacquisition", async () => {
     const f = await fixture(), claimId = "persistent-claim";

@@ -30,12 +30,38 @@ export class TerminalStreams {
   private readonly unsubscribe?: () => void;
   private readonly unsubscribeLease?: () => void;
   private stopped = false;
+  private readonly restores = new Map<string, { paneId: string; cols: number; rows: number }>();
+  async restore(memberId: string): Promise<void> {
+    const target = this.restores.get(memberId);
+    if (!target) return;
+    const deadline = performance.now() + 2000;
+    do {
+      if (this.store.getMember(memberId)?.paneId !== target.paneId) { this.restores.delete(memberId); return; }
+      try {
+        const remaining = Math.max(1, deadline - performance.now());
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const size = await Promise.race([
+          this.orch.terminalStreamInfo!(memberId),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Core size check timed out")), remaining); }),
+        ]).finally(() => clearTimeout(timer));
+        if (size.cols === target.cols && size.rows === target.rows) { this.restores.delete(memberId); return; }
+      } catch { /* Keep delivery fenced until core can be verified. */ }
+      await Bun.sleep(25);
+    } while (performance.now() < deadline);
+    throw new ApiError(409, "터미널 크기 복원을 확인하지 못했습니다", "TERMINAL_REFUSED");
+  }
+  detached(stream: TerminalStream): void {
+    if (stream.restoreSize) this.restores.set(stream.memberId, { paneId: stream.paneId, ...stream.restoreSize });
+    // Retain this fence even after the socket is forgotten. Release, expiry and
+    // the next attach await restore(); a timeout keeps delivery fenced.
+  }
   constructor(readonly config: Config, readonly store: Store, readonly orch: OrchestratorApi) {
     this.timer = setInterval(() => { for (const stream of this.streams) stream.check(); }, 1000);
     this.timer.unref();
     if ("onTerminalStreamShutdown" in orch) this.unsubscribe = orch.onTerminalStreamShutdown?.(() => this.close());
-    if ("onTerminalLeaseEnded" in orch) this.unsubscribeLease = orch.onTerminalLeaseEnded?.((memberId, leaseId) => {
-      for (const stream of this.streams) stream.endLease(memberId, leaseId);
+    if ("onTerminalLeaseEnded" in orch) this.unsubscribeLease = orch.onTerminalLeaseEnded?.(async (memberId, leaseId) => {
+      await Promise.all([...this.streams].map(stream => stream.endLease(memberId, leaseId)));
+      await this.restore(memberId);
     });
   }
   async prepare(memberId: string, url: URL): Promise<TerminalStream> {
@@ -57,6 +83,7 @@ export class TerminalStreams {
       if (mode === "control") {
         // Only an authenticated current lease holder may replace an orphan.
         await Promise.all([...this.streams].filter(s => s !== stream && s.memberId === memberId && s.mode === "control").map(s => s.replace()));
+        await this.restore(memberId);
         stream.requireLease();
       }
       const peers = [...this.streams].filter(s => s.memberId === memberId && s.mode === mode);
@@ -65,6 +92,7 @@ export class TerminalStreams {
       if (this.stopped || this.store.requireMember(memberId).paneId !== member.paneId) throw new ApiError(409, "세션이 바뀌었습니다", "TERMINAL_REFUSED");
       stream.requireLease();
       if (mode === "observe" || sizePolicy === "core") stream.size = currentSize;
+      if (mode === "control") stream.restoreSize = currentSize;
       return stream;
     } catch (error) { this.forget(stream); throw error; }
   }
@@ -95,6 +123,7 @@ export class TerminalStream {
   private pendingInput = Buffer.alloc(0);
   private inputChain = Promise.resolve();
   private sizeCheck = false;
+  restoreSize?: { cols: number; rows: number };
   private lastSizeCheck = 0;
   private lastPong = Date.now();
   private lastPing = Date.now();
@@ -109,8 +138,13 @@ export class TerminalStream {
     if (!lease || lease.expiresAt <= Date.now() || lease.leaseId !== this.leaseId) throw new LeaseEnded();
     this.expiresAt = lease.expiresAt;
   }
-  endLease(memberId: string, leaseId: string): void {
-    if (this.mode === "control" && this.memberId === memberId && this.leaseId === leaseId) void this.close("lease_ended");
+  async endLease(memberId: string, leaseId: string | null): Promise<void> {
+    if (this.mode !== "control" || this.memberId !== memberId) return;
+    if (leaseId !== null && this.leaseId !== leaseId) return;
+    if (leaseId === null && !this.ended) {
+      try { this.requireLease(); return; } catch { /* expired or replaced */ }
+    }
+    await this.close("lease_ended");
   }
   open(ws: ServerWebSocket<SocketData>): void {
     this.ws = ws;
@@ -286,6 +320,7 @@ export class TerminalStream {
       try { this.terminal?.setRawMode(false); } catch { /* master already closed */ }
       this.terminal?.close();
       this.pendingInput = Buffer.alloc(0);
+      if (this.started && this.mode === "control") this.owner.detached(this);
       this.owner.forget(this);
       if (this.mode === "control") this.owner.refreshObservers(this.memberId);
     })();

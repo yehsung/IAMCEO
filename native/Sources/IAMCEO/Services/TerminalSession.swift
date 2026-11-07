@@ -19,6 +19,9 @@ final class TerminalSession {
     @ObservationIgnored private var requestID = UUID()
     @ObservationIgnored private var hasNaturalSize = false
     @ObservationIgnored private var pendingControl: (api: APIClient, memberID: String, leaseID: String)?
+    @ObservationIgnored private var claimOwner: UUID?
+    private(set) var ownedLeaseID: String?
+    @ObservationIgnored private var revalidationTask: Task<Void, Never>?
     @ObservationIgnored private let connect: Connect
 
     init(platform: TerminalPlatform = .current, client: TerminalStreamClient = TerminalStreamClient(), connect: Connect? = nil) {
@@ -39,7 +42,7 @@ final class TerminalSession {
         visible = true; self.active = active
         client.onReady = { [weak self] mode in
             guard let self, mode == .control else { return }
-            if let expiry = self.client.expiresAt { store.updateTerminalStreamLease(memberID: member.id, expiresAt: expiry) }
+            if let expiry = self.client.expiresAt, store.terminalLeases[member.id]?.leaseId == self.ownedLeaseID { store.updateTerminalStreamLease(memberID: member.id, expiresAt: expiry) }
             self.starting = false
             if self.platform.buffersStartingInput {
                 if let bytes = self.startBuffer.take(), !bytes.isEmpty { self.client.send(bytes) }
@@ -48,12 +51,15 @@ final class TerminalSession {
                 self.client.resize(cols: self.naturalCols, rows: self.naturalRows)
             }
         }
-        client.onLease = { expiry in store.updateTerminalStreamLease(memberID: member.id, expiresAt: expiry) }
+        client.onLease = { [weak self] expiry in
+            guard let self, let id = self.ownedLeaseID, store.terminalLeases[member.id]?.leaseId == id else { return }
+            store.updateTerminalStreamLease(memberID: member.id, expiresAt: expiry)
+        }
         client.onControlEnded = { [weak self] in
             guard let self else { return }
             var message = self.platform == .mac ? "직접 입력 연결이 끝났습니다." : "직접 입력 연결이 끝났습니다. 보는 중으로 돌아갑니다."
             if case let .closed(reason, serverMessage) = self.client.state {
-                if reason == "lease_ended" { store.terminalStreamLeaseEnded(memberID: member.id) }
+                if reason == "lease_ended", let id = self.ownedLeaseID, store.terminalLeases[member.id]?.leaseId == id { store.terminalStreamLeaseEnded(memberID: member.id) }
                 message = serverMessage ?? (reason == "lease_ended" ? "조작권이 끝났습니다." : message)
             }
             self.fallback(store: store, member: member, message: message, release: self.platform == .mac)
@@ -85,6 +91,21 @@ final class TerminalSession {
 
     func beginInput(store: AppStore, member: Member) {
         guard visible, active, !starting, !ending, !controlling else { return }
+        if !store.isDemo, !store.canWrite, store.isRevalidating, store.api != nil,
+           store.connectionStatus == .connected || store.connectionLost {
+            starting = true; readOnly = false; notice = "서버 연결을 확인하고 있습니다."
+            let token = UUID(); requestID = token
+            revalidationTask?.cancel()
+            revalidationTask = Task {
+                while store.isRevalidating && store.api != nil && (store.connectionStatus == .connected || store.connectionLost) && !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+                guard !Task.isCancelled, requestID == token, visible, active else { return }
+                starting = false
+                beginInput(store: store, member: member)
+            }
+            return
+        }
         guard !store.isDemo, store.canWrite else {
             fallback(store: store, member: member, message: store.isDemo ? "샘플은 읽기 전용입니다." : "서버에 연결되지 않아 조작할 수 없습니다.")
             return
@@ -93,16 +114,25 @@ final class TerminalSession {
         if platform.buffersStartingInput { startBuffer.begin() }
         // Retrying from the read-only fallback must stop that socket before claiming.
         if platform == .mac { client.close() }
-        let token = UUID(); requestID = token
+        let previousOwner = takeOwner()
+        let token = UUID(); requestID = token; claimOwner = token
         Task {
+            if let previousOwner { _ = await store.releaseTerminalSession(member, owner: previousOwner) }
+            guard requestID == token, visible, active else { return }
             let previousResults = store.operationResults
             let namespace = store.writeNamespace
-            let claimed = await store.claimTerminal(member)
+            let acquired = await store.claimTerminalSession(member, owner: token)
+            let claimed = acquired != nil
             guard requestID == token, visible, active else {
-                if claimed { _ = await store.releaseTerminal(member) }
+                _ = await store.releaseTerminalSession(member, owner: token)
                 return
             }
-            guard claimed, let lease = store.terminalLeases[member.id]?.leaseId, let api = store.api else {
+            guard claimed, let lease = acquired?.leaseId, let api = store.api else {
+                if store.isRevalidating, store.api != nil, store.connectionStatus == .connected || store.connectionLost {
+                    starting = false
+                    beginInput(store: store, member: member)
+                    return
+                }
                 // A refused v2 claim is recorded before receipt reconciliation, whose
                 // missing/failed lookup can overwrite the shared errorMessage. Keep
                 // the claim's own server reason, excluding earlier refusals and input.
@@ -116,6 +146,7 @@ final class TerminalSession {
                 fallback(store: store, member: member, message: refusal?.error ?? store.errorMessage ?? "조작권을 받지 못했습니다. 다른 기기나 세션 상태를 확인해 주세요.")
                 return
             }
+            ownedLeaseID = lease
             pendingControl = (api, member.id, lease)
             attachControlIfSized()
         }
@@ -129,13 +160,25 @@ final class TerminalSession {
         connect(api, member.id, .observe, 100, 30, nil, platform.controlSizePolicy)
     }
 
+    private func takeOwner() -> UUID? {
+        let owner = claimOwner
+        claimOwner = nil; ownedLeaseID = nil
+        return owner
+    }
+
+    private func release(store: AppStore, member: Member, owner: UUID?) async -> Bool {
+        guard let owner else { return true }
+        return await store.releaseTerminalSession(member, owner: owner)
+    }
+
     private func fallback(store: AppStore, member: Member, message: String, release: Bool = false) {
         starting = false; readOnly = true; pendingControl = nil; startBuffer.clear(); notice = message
         if release {
             // Disable retry and invalidate the old attach before yielding to the release.
             ending = true; requestID = UUID(); client.close()
+            let owner = takeOwner()
             Task {
-                if !(await store.releaseTerminal(member)) { notice = store.errorMessage ?? "조작권을 놓지 못했습니다. 다시 닫아 주세요." }
+                if !(await self.release(store: store, member: member, owner: owner)) { notice = store.errorMessage ?? "조작권을 놓지 못했습니다. 다시 닫아 주세요." }
                 ending = false
                 observe(store: store, member: member)
             }
@@ -148,25 +191,28 @@ final class TerminalSession {
 
     func finishInput(store: AppStore, member: Member, resume: Bool) async {
         guard !ending else { return }
-        ending = true; requestID = UUID(); pendingControl = nil
+        ending = true; requestID = UUID(); pendingControl = nil; revalidationTask?.cancel()
+        let owner = takeOwner()
         client.close(); starting = false; startBuffer.clear()
-        if !(await store.releaseTerminal(member)) { notice = store.errorMessage ?? "조작권을 놓지 못했습니다. 다시 닫아 주세요." }
+        if !(await release(store: store, member: member, owner: owner)) { notice = store.errorMessage ?? "조작권을 놓지 못했습니다. 다시 닫아 주세요." }
         ending = false
         if resume { observe(store: store, member: member) }
         else if visible && active { open(store: store, member: member) }
     }
 
     func setActive(_ active: Bool, store: AppStore, member: Member) {
+        guard self.active != active else { return }
         self.active = active
         if !active {
-            if client.state == .unsupported { Task { _ = await store.releaseTerminal(member) } }
-            else { Task { await finishInput(store: store, member: member, resume: false) } }
+            revalidationTask?.cancel()
+            Task { await finishInput(store: store, member: member, resume: false) }
         } else { open(store: store, member: member) }
     }
 
     func disappear(store: AppStore, member: Member) {
         visible = false; active = false; requestID = UUID(); pendingControl = nil
-        starting = false; startBuffer.clear(); client.dispose()
-        Task { _ = await store.releaseTerminal(member) }
+        starting = false; startBuffer.clear(); revalidationTask?.cancel(); client.dispose()
+        let owner = takeOwner()
+        Task { _ = await self.release(store: store, member: member, owner: owner) }
     }
 }

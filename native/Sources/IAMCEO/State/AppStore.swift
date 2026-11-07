@@ -50,6 +50,9 @@ final class AppStore: ProjectManagementStore {
     private(set) var state: ProjectState?
     private(set) var lastUpdated: Date?
     private(set) var api: APIClient?
+    private(set) var modelCatalog: ModelCatalog = .fallback
+    @ObservationIgnored private var modelsTask: Task<ModelCatalog, Error>?
+    @ObservationIgnored private var modelsRequestID = UUID()
     let isDemo: Bool
     var projects: [ProjectSummary] { bootstrap?.projects ?? [] }
     var messages: [Message] { state?.messages ?? [] }
@@ -252,6 +255,7 @@ final class AppStore: ProjectManagementStore {
         endpoint = savedEndpoint
         accessCode = persistCredentials ? (KeychainStore.accessCode(for: savedEndpoint) ?? "") : ""
         if demo {
+            modelCatalog = .demo
             let fixture = DemoFixtures.workspace()
             bootstrap = fixture.0
             state = fixture.1
@@ -283,6 +287,7 @@ final class AppStore: ProjectManagementStore {
                 startSocket()
             }
             await refresh()
+            await refreshModels()
             await refreshPushConnection()
             return
         }
@@ -291,6 +296,7 @@ final class AppStore: ProjectManagementStore {
         generation = UUID()
         let connectionEpoch = generation
         clearHostNavigation()
+        modelCatalog = .fallback
         api = nil; connectionStatus = .connecting
         if pushLogoutTask == nil { pushNotifications?.setHost(nil); pushSettings.setHost(nil) }
         await pushLogoutTask?.value
@@ -335,6 +341,8 @@ final class AppStore: ProjectManagementStore {
             catch { errorMessage = error.localizedDescription }
             connectedCredentials = (endpoint, accessCode.trimmingCharacters(in: .whitespacesAndNewlines))
             connectionStatus = .connected
+            await refreshModels()
+            guard epoch == generation, foreground else { return }
             await discoverCapabilities()
             guard epoch == generation, foreground else { return }
             if let first = initial.projects.first { await selectProject(id: first.id) }
@@ -365,6 +373,7 @@ final class AppStore: ProjectManagementStore {
         if persistCredentials { KeychainStore.remove(for: endpoint) }
         realtimeStatus = .paused; isRevalidating = false
         receivedCursor = nil; appliedSnapshotCursor = nil
+        modelCatalog = .fallback
         api = nil; accessCode = ""; bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil
         connectedCredentials = nil; transportFailures = 0; connectionIssue = nil
         pendingConnect = false
@@ -420,6 +429,22 @@ final class AppStore: ProjectManagementStore {
     }
 
     func refreshDiagnostics() async { await enqueueRefresh(.diagnostics, immediate: true) }
+
+    func refreshModels() async {
+        guard !isDemo, let api else { return }
+        let epoch = generation
+        if let modelsTask { _ = try? await modelsTask.value; return }
+        let requestID = UUID()
+        modelsRequestID = requestID
+        let task = Task { try await api.models() }
+        modelsTask = task
+        defer { if modelsRequestID == requestID { modelsTask = nil } }
+        do {
+            let catalog = try await task.value
+            guard epoch == generation, modelsRequestID == requestID, !task.isCancelled else { return }
+            modelCatalog = catalog
+        } catch { /* Keep the last list (or defaults) during a transient failure. */ }
+    }
 
     func setForeground(_ active: Bool) {
         guard foreground != active else { return }
@@ -834,6 +859,8 @@ final class AppStore: ProjectManagementStore {
         }
     }
     private func stopRequests() {
+        modelsTask?.cancel(); modelsTask = nil
+        modelsRequestID = UUID()
         cancelHistoryLoad(); invalidateCoordinator(); stopSocket()
         fallbackTask?.cancel(); fallbackTask = nil
         reconnectTask?.cancel(); reconnectTask = nil
@@ -1280,16 +1307,94 @@ final class AppStore: ProjectManagementStore {
         return result?.ok == true
     }
 
+    // Sheet ownership is independent of the employee's shared status strip. Queue
+    // handoffs so a late claim/close can never release the next sheet's lease.
+    @ObservationIgnored private var terminalSessionTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var terminalSessionWanted: [String: UUID] = [:]
+    @ObservationIgnored private var terminalSessionHeld: [String: (owner: UUID, leaseID: String, namespace: String)] = [:]
+    @ObservationIgnored private var cancelledTerminalClaims: Set<String> = []
+    @ObservationIgnored private var cancelledTerminalLeases: [String: (claimID: String, leaseID: String)] = [:]
+
+    func claimTerminalSession(_ member: Member, owner: UUID) async -> TerminalLease? {
+        guard !cancelledTerminalClaims.contains(owner.uuidString) else { return nil }
+        let namespace = writeNamespace
+        terminalSessionWanted[member.id] = owner
+        let previous = terminalSessionTasks[member.id]
+        let task = Task<TerminalLease?, Never> {
+            await previous?.value
+            guard self.writeNamespace == namespace, self.terminalSessionWanted[member.id] == owner else { return nil }
+            if let held = self.terminalSessionHeld[member.id], held.namespace == namespace, held.owner != owner {
+                guard await self.releaseTerminal(member, expectedLeaseID: held.leaseID) else { return nil }
+                self.terminalSessionHeld.removeValue(forKey: member.id)
+            }
+            guard self.writeNamespace == namespace, self.terminalSessionWanted[member.id] == owner else { return nil }
+            guard await self.claimTerminal(member, claimID: owner.uuidString),
+                  let lease = self.terminalLeases[member.id], let id = lease.leaseId else { return nil }
+            guard self.writeNamespace == namespace else { return nil }
+            self.terminalSessionHeld[member.id] = (owner, id, namespace)
+            guard self.terminalSessionWanted[member.id] == owner else {
+                _ = await self.releaseTerminal(member, expectedLeaseID: id)
+                if self.terminalSessionHeld[member.id]?.owner == owner { self.terminalSessionHeld.removeValue(forKey: member.id) }
+                return nil
+            }
+            return lease
+        }
+        terminalSessionTasks[member.id] = Task { _ = await task.value }
+        return await task.value
+    }
+
+    func releaseTerminalSession(_ member: Member, owner: UUID) async -> Bool {
+        cancelledTerminalClaims.insert(owner.uuidString)
+        do {
+            let ids = journal.operations.values.filter {
+                $0.namespace == writeNamespace && $0.memberID == member.id && $0.action == .claim &&
+                submissions?.terminalAttempt(id: $0.id)?.claimID == owner.uuidString
+            }.map(\.id)
+            if !ids.isEmpty { try saveJournal { journal in for id in ids { journal.operations[id]?.cancelledClaim = true } } }
+        } catch { handle(error) }
+        if terminalSessionWanted[member.id] == owner { terminalSessionWanted.removeValue(forKey: member.id) }
+        let previous = terminalSessionTasks[member.id]
+        let task = Task<Bool, Never> {
+            await previous?.value
+            guard let held = self.terminalSessionHeld[member.id], held.owner == owner, held.namespace == self.writeNamespace else {
+                // A receipt may have recovered the claim while this sheet was in
+                // fallback, before it registered its close intent.
+                for receipt in self.operationResults.values {
+                    guard case .terminalControl(let result) = receipt.result,
+                          result.action == "claim", result.claimId == owner.uuidString,
+                          let lease = result.leaseId,
+                          let tracked = self.journal.operations[receipt.operationId],
+                          tracked.namespace == self.writeNamespace,
+                          tracked.order == self.leaseReceiptOrder[member.id] else { continue }
+                    return await self.releaseTerminal(member, expectedLeaseID: lease)
+                }
+                return true
+            }
+            let released = await self.releaseTerminal(member, expectedLeaseID: held.leaseID)
+            if released, self.terminalSessionHeld[member.id]?.owner == owner { self.terminalSessionHeld.removeValue(forKey: member.id) }
+            return released
+        }
+        terminalSessionTasks[member.id] = Task { _ = await task.value }
+        return await task.value
+    }
+
+    private func releaseCancelledTerminalClaim(_ member: Member) async -> Bool {
+        guard let cancelled = cancelledTerminalLeases[member.id] else { return true }
+        let released = await releaseTerminal(member, expectedLeaseID: cancelled.leaseID)
+        if released, cancelledTerminalLeases[member.id]?.leaseID == cancelled.leaseID { cancelledTerminalLeases.removeValue(forKey: member.id) }
+        return released
+    }
+
     func updateTerminalStreamLease(memberID: String, expiresAt: Double) {
         guard let lease = terminalLeases[memberID], let leaseId = lease.leaseId else { return }
         terminalLeases[memberID] = TerminalLease(leaseId: leaseId, expiresAt: expiresAt)
     }
     func terminalStreamLeaseEnded(memberID: String) { terminalLeases.removeValue(forKey: memberID) }
 
-    @discardableResult func claimTerminal(_ member: Member) async -> Bool {
-        if strictWriteContract { return await terminalOperation(member, action: .claim) }
+    @discardableResult func claimTerminal(_ member: Member, claimID: String? = nil) async -> Bool {
+        if strictWriteContract { return await terminalOperation(member, action: .claim, claimID: claimID) }
         // Passing the lease we still hold renews it; a lost input reply may have extended it on the server past our copy.
-        let known = terminalLeases[member.id]?.leaseId
+        let known = claimID == nil ? terminalLeases[member.id]?.leaseId : nil
         let outcome: (value: TerminalLease?, error: Error?) = await perform("terminal:\(member.id)", refreshAfter: false) { api in
             try await api.terminalControl(memberID: member.id, request: TerminalControlRequest(action: "claim", leaseId: known))
         }
@@ -1301,9 +1406,10 @@ final class AppStore: ProjectManagementStore {
         return true
     }
     @ObservationIgnored private var terminalReleases: [String: Task<Bool, Never>] = [:]
-    @discardableResult func releaseTerminal(_ member: Member) async -> Bool {
+    @discardableResult func releaseTerminal(_ member: Member, expectedLeaseID: String? = nil) async -> Bool {
+        if let expectedLeaseID, terminalLeases[member.id]?.leaseId != expectedLeaseID { return true }
         if let pending = terminalReleases[member.id] { return await pending.value }
-        guard terminalLeases[member.id]?.leaseId != nil else { return true }
+        guard let releasingLeaseID = terminalLeases[member.id]?.leaseId else { return true }
         #if os(iOS)
         let background = TerminalReleaseBackgroundTask()
         #endif
@@ -1311,6 +1417,7 @@ final class AppStore: ProjectManagementStore {
             #if os(iOS)
             defer { background.end() }
             #endif
+            guard self.terminalLeases[member.id]?.leaseId == releasingLeaseID else { return true }
             return await self.performTerminalRelease(member)
         }
         terminalReleases[member.id] = task
@@ -1398,7 +1505,7 @@ final class AppStore: ProjectManagementStore {
         }
     }
 
-    private func terminalOperation(_ member: Member, action: TerminalAction, text: String? = nil, key: TerminalKey? = nil) async -> Bool {
+    private func terminalOperation(_ member: Member, action: TerminalAction, text: String? = nil, key: TerminalKey? = nil, claimID: String? = nil) async -> Bool {
         guard canWrite, let submissions, let version = writeRevisions?.members?[member.id],
               !pendingActions.contains("terminal:\(member.id)") else { return false }
         if let text, text.utf8.count > 131072 { errorMessage = "터미널 입력은 128KB까지입니다."; return false }
@@ -1416,6 +1523,7 @@ final class AppStore: ProjectManagementStore {
             // A claim has no physical input. After an explicit retry and a missing receipt,
             // reuse both durable IDs so a lost first claim can recover the same holder.
             if action == .claim, previous.action == .claim, absentOperations.contains(previous.id),
+               claimID == nil || submissions.terminalAttempt(id: previous.id)?.claimID == claimID,
                let attempt = submissions.terminalAttempt(id: previous.id) {
                 let result = await perform("terminal:\(member.id)", refreshAfter: false) { api in
                     try await api.terminalControl(memberID: member.id, request: attempt.request)
@@ -1427,13 +1535,16 @@ final class AppStore: ProjectManagementStore {
                 return operationResults[previous.id]?.status == .applied
             }
             // A repeated click observes the original input; it never becomes another physical write.
-            if previous.action == action {
+            if previous.action == action, claimID == nil || submissions.terminalAttempt(id: previous.id)?.claimID == claimID {
                 let sent = submissions.terminalAttempt(id: previous.id)
                 return operationResults[previous.id]?.status == .applied && sent?.input?.text == text && sent?.key == key
             }
             guard let status = operationResults[previous.id]?.status, status == .applied || status == .refused else {
                 errorMessage = "직접 조작 결과 확인 중입니다. 미확인 입력을 다시 보내지 않습니다."; return false
             }
+        }
+        if action == .claim, let cancelled = cancelledTerminalLeases[member.id], claimID != cancelled.claimID {
+            guard await releaseCancelledTerminalClaim(member) else { return false }
         }
         if action == .input || action == .key || action == .release {
             guard let lease = terminalLeases[member.id], lease.leaseId != nil else {
@@ -1445,7 +1556,7 @@ final class AppStore: ProjectManagementStore {
         }
         do {
             let attempt = try submissions.prepareTerminal(namespace: writeNamespace, memberID: member.id,
-                                                         sessionGeneration: version.sessionGeneration, action: action, key: key)
+                                                         sessionGeneration: version.sessionGeneration, action: action, key: key, claimID: claimID)
             let tracked = TrackedOperation(id: attempt.id, namespace: writeNamespace, memberID: member.id,
                                            kind: .terminalControl, sessionGeneration: version.sessionGeneration,
                                            order: journal.operations.count, action: action)
@@ -1470,7 +1581,7 @@ final class AppStore: ProjectManagementStore {
         return false
     }
 
-    /// Query-only recovery, also called after reconnect. No message or terminal write is replayed here.
+    /// Reconcile without replaying physical input. A cancelled sheet claim is released after its receipt is recovered.
     func recoverWrites() async {
         guard canWrite, !recoveryInFlight else { return }
         recoveryInFlight = true
@@ -1528,6 +1639,13 @@ final class AppStore: ProjectManagementStore {
                 if tracked.action == .release { terminalLeases.removeValue(forKey: tracked.memberID) }
                 else if let lease = result.leaseId {
                     terminalLeases[tracked.memberID] = TerminalLease(leaseId: lease, expiresAt: result.expiresAt)
+                    if tracked.action == .claim, (cancelledTerminalClaims.contains(result.claimId) || journal.operations[tracked.id]?.cancelledClaim == true),
+                       let member = members.first(where: { $0.id == tracked.memberID }) {
+                        // Recovery can learn about a claim after its sheet disappeared.
+                        // Expected incarnation prevents this cleanup from touching a newer holder.
+                        cancelledTerminalLeases[tracked.memberID] = (result.claimId, lease)
+                        Task { _ = await self.releaseCancelledTerminalClaim(member) }
+                    }
                 }
             }
         } else if receipt.status == .applied {
@@ -2214,6 +2332,7 @@ private struct TrackedOperation: Codable {
     let sessionGeneration: Int
     let order: Int
     var action: TerminalAction? = nil
+    var cancelledClaim: Bool? = nil
     var status: OperationStatus = .unknown
 }
 private struct PendingTodo: Codable {

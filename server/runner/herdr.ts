@@ -65,6 +65,9 @@ interface Track {
   sessionId: string | null;
   status: AgentStatus;
   reported: Reported | null;
+  observedAt: string | null;
+  observationVersion: number;
+  observationFailures: number;
   inTurn: boolean;
   /** 글을 넣었지만 아직 working 을 못 봄. */
   awaiting: { size: number; at: number; marker: string } | null;
@@ -974,6 +977,7 @@ export class HerdrRunner implements Runner {
     const t: Track = {
       m, paneId: a.pane_id, tabId: a.tab_id ?? null, sessionId: a.agent_session?.value ?? m.sessionId,
       status: a.agent_status, reported: null, inTurn: a.agent_status === "working", awaiting: null,
+      observedAt: null, observationVersion: 0, observationFailures: 0,
       settle: null, stall: null, compact: null, muteUntil: 0, turnGen: existing?.turnGen ?? 0, sawBlocked: false, argsOk: false, grantPending: false, tail: null,
       bg: null, bgPoll: null, bgChecking: false, bgTurn: null, bgSeen: null,
       epoch: existing?.epoch ?? 0, evidence: existing?.evidence ?? new Map(),
@@ -994,15 +998,39 @@ export class HerdrRunner implements Runner {
   }
 
   private reportStatus(t: Track): void {
-    if (t.status === "working") this.report(t, "working");
-    else if (t.status === "blocked") this.report(t, "blocked");
-    else if (t.status === "idle" || t.status === "done") this.report(t, "idle");
+    if (t.status === "working") this.report(t, "working", true);
+    else if (t.status === "blocked") this.report(t, "blocked", true);
+    else if (t.status === "idle" || t.status === "done") this.report(t, "idle", true);
+    else this.observationFailed(t, "status_unknown");
   }
 
-  private report(t: Track, status: Reported): void {
-    if (t.reported === status) return;
+  private report(t: Track, status: Reported, observed = false): void {
+    // Deferred turn/composer work cannot heal a failed status observation.
+    if (t.observationFailures > 0 && !observed) return;
+    if (t.reported === status && t.observationFailures === 0) return;
     t.reported = status;
-    this.emit({ type: "status", memberId: t.m.id, status });
+    t.observedAt = new Date().toISOString();
+    t.observationFailures = 0;
+    const version = ++t.observationVersion;
+    const observation = { source: "herdr" as const, observedAt: t.observedAt, freshness: "fresh" as const, ownership: "verified" as const, consecutiveFailures: 0, error: null };
+    // herdr's blocked is itself a screen observation of an approval/selection dialog.
+    this.emit({ type: "status", memberId: t.m.id, status, blockedReason: status === "blocked" ? "permission" : null, observation });
+    if (status === "blocked") void this.readPane(t.paneId, "visible").then(screen => {
+      if (this.stopped || this.tracks.get(t.m.id) !== t || t.observationVersion !== version || t.status !== "blocked") return;
+      // Only refine explicit selection menus. Unrecognized dialogs retain the herdr approval observation.
+      const text = stripAnsi(screen);
+      if (!parseApproval(screen) && /\b(?:select|choose)\b[^\n]*(?:option|answer|one)|(?:선택해 주세요|선택하세요)/i.test(text) && /^\s*❯?\s*1[.)]\s+\S/m.test(text) && /Esc to cancel/i.test(text)) {
+        this.emit({ type: "status", memberId: t.m.id, status, blockedReason: "selection", observation });
+      }
+    }).catch(() => { /* Classification is optional: the blocked observation came from herdr. */ });
+  }
+
+  private observationFailed(t: Track, code: string): void {
+    ++t.observationVersion; // Discard any screen classification from before this failure.
+    ++t.observationFailures;
+    this.emit({ type: "status", memberId: t.m.id, status: t.reported ?? "blocked", blockedReason: "status_unknown",
+      observation: { source: "herdr", observedAt: t.observedAt, freshness: "stale", ownership: "unknown", consecutiveFailures: t.observationFailures,
+        error: { code, note: "herdr 상태를 확인할 수 없습니다. 마지막 관측을 보존하며 다시 확인합니다." } } });
   }
 
   private uniqueName(m: RunnerMember, snap: Snapshot, ownPane: string): string {
@@ -2009,7 +2037,7 @@ export class HerdrRunner implements Runner {
   }
 
   private applyStatus(t: Track, status: AgentStatus): void {
-    if (status === "unknown") return;
+    if (status === "unknown") { this.observationFailed(t, "status_unknown"); return; }
     t.status = status;
     this.syncBgPoll(t);
     if (status === "working" || status === "blocked") {
@@ -2021,9 +2049,10 @@ export class HerdrRunner implements Runner {
         t.awaiting = null;
         if (!t.compact) { t.inTurn = true; this.startTail(t); }
       }
-      if (!muted) this.report(t, status);
+      if (!muted) this.report(t, status, true);
       return;
     }
+    if (t.observationFailures > 0) this.report(t, "idle", true);
     if (t.settle) return;
     // 도구 사이에 잠깐 idle 이 끼므로 잠시 지켜본 뒤 끝으로 판단한다.
     t.settle = setTimeout(() => void this.settled(t), this.settleMs);
@@ -2103,7 +2132,11 @@ export class HerdrRunner implements Runner {
     if (this.stopped || this.tracks.size === 0) return;
     let snap: Snapshot;
     try { snap = await snapshot(this.socketPath); }
-    catch { this.connected = false; return; }
+    catch {
+      this.connected = false;
+      for (const t of this.tracks.values()) this.observationFailed(t, "snapshot_failed");
+      return;
+    }
     this.connected = true;
     for (const t of [...this.tracks.values()]) {
       let agent = snap.agents.find((a) => a.pane_id === t.paneId) ?? null;
@@ -2124,6 +2157,7 @@ export class HerdrRunner implements Runner {
         this.emit({ type: "session", memberId: t.m.id, sessionId: live });
       }
       if (agent.agent_status !== t.status) this.applyStatus(t, agent.agent_status);
+      else if (t.observationFailures > 0) this.reportStatus(t);
     }
   }
 
@@ -2191,7 +2225,10 @@ export class HerdrRunner implements Runner {
         this.connected = false;
         // 다시 이어졌을 때 herdr 가 새로 켜진 것일 수 있다. 번호를 믿지 않고 다시 확인한다.
         this.projectTabs.clear();
-        for (const t of this.tracks.values()) t.argsOk = false;
+        for (const t of this.tracks.values()) {
+          t.argsOk = false;
+          this.observationFailed(t, "disconnected");
+        }
         this.retryTimer = setTimeout(() => { this.retryTimer = null; this.openEvents(); }, this.backoff);
         this.retryTimer.unref?.();
         this.backoff = Math.min(this.backoff * 2, 10_000);

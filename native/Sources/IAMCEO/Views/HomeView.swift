@@ -63,7 +63,7 @@ struct HomeView: View {
     private var glyphGap: CGFloat { titleInset - 22 }
 
     private var openDecisions: [Decision] { newestFirst(store.decisions.filter { $0.status == "open" }) }
-    private var attention: HomeAttention { HomeAttention(members: store.members, notices: store.deliveryNotices) }
+    private var attention: HomeAttention { HomeAttention(members: store.members, notices: store.deliveryNotices, messages: store.messages) }
 
     private func todoBusy(_ id: String) -> Bool {
         store.pendingActions.contains("todo:\(id)") || [.sending, .checking].contains(store.todoWrites[id])
@@ -398,6 +398,7 @@ struct HomeView: View {
         var rows: [HomeTurnRow] = attention.members.map { .member($0.member, $0.delivery) }
         rows += attention.missingMembers.map(HomeTurnRow.delivery)
         if attention.unassigned > 0 { rows.append(.unassigned(attention.unassigned)) }
+        rows += attention.failedMessages.map(HomeTurnRow.failedMessage)
         let open = openDecisions
         rows += open.prefix(Self.topDecisions).map(HomeTurnRow.decision)
         if open.count > Self.topDecisions { rows.append(.moreDecisions(open.count - Self.topDecisions)) }
@@ -429,6 +430,21 @@ struct HomeView: View {
                                  detail: deliveryDetail(summary))
         case .unassigned(let count):
             deliveryAttentionRow(title: "담당 미배정", count: count, detail: "받을 팀원이 정해지지 않았습니다")
+        case .failedMessage(let message):
+            HStack(spacing: 8) {
+                HomeRowButton(bleedTrailing: false, action: { router.openChat(chatTarget(for: message.targetMemberId)) }) {
+                    turnLine("exclamationmark.bubble", tint: CE.danger) {
+                        Text(homePlainLine(message.body)).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(2)
+                        Text(["전달 실패", message.deliveryNote].compactMap { $0 }.joined(separator: " · "))
+                            .font(CEFont.secondary).foregroundStyle(CE.ink3).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                // The existing retry endpoint schedules evidence collection and preserves recovery fences.
+                Button("다시 보내기") { Task { await store.resend(message) } }
+                .ceSecondaryButton().ceCompactControl()
+                .disabled(!store.uiCanWrite || store.pendingActions.contains { $0.hasPrefix("send:") })
+                .help(store.isDemo ? Self.readOnlyHelp : "같은 글·대상·첨부의 전달 근거를 다시 확인합니다")
+            }
         case .decision(let decision): decisionRow(decision)
         case .moreDecisions(let count):
             HomeQuietLink(text: "결재함에서 \(count)건 더") { router.go(.inbox) }
@@ -951,13 +967,20 @@ struct HomeView: View {
 // MARK: - Private model helpers
 
 /// Recovery totals are authoritative. Automatic checking never creates an intervention.
-private struct HomeAttention {
+struct HomeAttention {
     var members: [(member: Member, delivery: MemberDeliverySummary?)] = []
     var missingMembers: [MemberDeliverySummary] = []
     var unassigned = 0
+    var failedMessages: [Message] = []
 
-    init(members: [Member], notices: DeliveryNotices?) {
+    init(members: [Member], notices: DeliveryNotices?, messages: [Message] = []) {
         let summaries = notices?.members ?? []
+        failedMessages = unresolvedDeliveries(messages, status: "failed").filter { message in
+            if let id = message.targetMemberId {
+                return summaries.contains { $0.memberId == id && $0.needsOwnerCount > 0 }
+            }
+            return (notices?.unassigned.needsOwnerCount ?? 0) > 0
+        }
         for member in members {
             let info = MemberStatusInfo(member)
             let delivery = summaries.first { $0.memberId == member.id && $0.needsOwnerCount > 0 }
@@ -982,6 +1005,7 @@ private enum HomeTurnRow: Identifiable {
     case member(Member, MemberDeliverySummary?)
     case delivery(MemberDeliverySummary)
     case unassigned(Int)
+    case failedMessage(Message)
     case decision(Decision)
     case moreDecisions(Int)
     case todo(Todo)
@@ -993,6 +1017,7 @@ private enum HomeTurnRow: Identifiable {
         case .member(let member, _): "member:\(member.id)"
         case .delivery(let summary): "delivery:\(summary.memberId)"
         case .unassigned: "delivery-unassigned"
+        case .failedMessage(let message): "failed-message:\(message.id)"
         case .decision(let decision): "decision:\(decision.id)"
         case .moreDecisions: "more-decisions"
         // Open and done rows of the same todo share an id, so a checked row moves into the fold.

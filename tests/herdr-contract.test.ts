@@ -37,13 +37,14 @@ async function fixture() {
   };
   const calls: Request[] = [];
   const sockets = new Set<Socket>();
+  const subscribers = new Set<Socket>();
   let screen = composer();
   let hook: ((request: Request, socket: Socket) => boolean) | null = null;
   const reply = (socket: Socket, request: Request, result: unknown) => socket.write(JSON.stringify({ id: request.id, result }) + "\n");
   const reject = (socket: Socket, request: Request, code = "timeout") => socket.write(JSON.stringify({ id: request.id, error: { code, message: "synthetic failure" } }) + "\n");
   const server = createServer(socket => {
     sockets.add(socket);
-    socket.on("close", () => sockets.delete(socket));
+    socket.on("close", () => { sockets.delete(socket); subscribers.delete(socket); });
     socket.setEncoding("utf8");
     let buffer = "";
     socket.on("data", chunk => {
@@ -57,7 +58,7 @@ async function fixture() {
         const current = agents.find(a => a.pane_id === (request.params.target ?? request.params.pane_id)) ?? agent;
         switch (request.method) {
           case "session.snapshot": reply(socket, request, { snapshot: { protocol: 22, version: "fake", agents, panes: agents } }); break;
-          case "events.subscribe": reply(socket, request, {}); break;
+          case "events.subscribe": subscribers.add(socket); reply(socket, request, {}); break;
           case "agent.get": reply(socket, request, { agent: current }); break;
           case "pane.read": reply(socket, request, { read: { text: screen } }); break;
           case "pane.process_info": reply(socket, request, { process_info: { foreground_processes: [{ argv: ["fake-claude", "--mcp-config", "fake.json"] }] } }); break;
@@ -103,7 +104,11 @@ async function fixture() {
     states.get(member.id)!.lease = { memberId: member.id, claimId: "claim", leaseId: "lease", expiresAt: Date.now() + 60_000, lastInputSequence: 0,
       identity: { terminalId: member.paneId, sessionId: member.sessionId, sessionGeneration: 3, process: null } };
   }
-  return { runtime, member, agent, agents, opts, calls, states, recoveryStore, path, row, events, runner, envelope, lease, reply, reject,
+  return { runtime, member, agent, agents, opts, calls, states, recoveryStore, path, row, events, runner, envelope, lease, reply, reject, subscribers,
+    status(value: Agent["agent_status"]) {
+      agent.agent_status = value;
+      for (const socket of subscribers) socket.write(JSON.stringify({ event: "pane.agent_status_changed", data: { pane_id: agent.pane_id, agent_status: value } }) + "\n");
+    },
     append(content: unknown, extra: Record<string, unknown> = {}) { appendFileSync(path, JSON.stringify(row(content, extra)) + "\n"); },
     setScreen(value: string) { screen = value; }, setHook(value: typeof hook) { hook = value; },
     prompts() { return calls.filter(c => c.method === "agent.prompt"); }, keys() { return calls.filter(c => c.method === "agent.send_keys"); } };
@@ -118,6 +123,108 @@ afterEach(async () => {
 });
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
+async function waitFor(check: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (!check() && Date.now() < deadline) await Bun.sleep(5);
+  expect(check()).toBe(true);
+}
+
+describe("herdr status observations", () => {
+  const selection = "Choose one option\n❯ 1. First\n  2. Second\nEsc to cancel";
+  const approval = "Bash command\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel";
+  for (const [screen, reason] of [[approval, "permission"], [selection, "selection"], ["unrecognized dialog", "permission"], ["read_failure", "permission"]]) {
+    test(`blocked ${screen} is an observed ${reason} wait`, async () => {
+      const f = await fixture();
+      f.agent.agent_status = "blocked";
+      f.setScreen(screen!);
+      if (screen === "read_failure") f.setHook((request, socket) => {
+        if (request.method !== "pane.read") return false;
+        f.reject(socket, request); return true;
+      });
+      const startedAt = Date.now();
+      await f.runner().reattach(f.member);
+      await waitFor(() => f.events.some(e => e.type === "status" && e.blockedReason === reason));
+      const event = f.events.filter(e => e.type === "status").at(-1)!;
+      expect(event).toMatchObject({ type: "status", memberId: f.member.id, status: "blocked", blockedReason: reason,
+        observation: { source: "herdr", freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: null } });
+      if (event.type === "status") expect(Date.parse(event.observation!.observedAt!)).toBeGreaterThanOrEqual(startedAt);
+      expect(f.prompts()).toHaveLength(0); expect(f.keys()).toHaveLength(0);
+    });
+  }
+
+  test("events retain unknown observations and recover the same blocked state after snapshot failure", async () => {
+    const f = await fixture(); const runner = f.runner({ resyncMs: 25 });
+    await runner.reattach(f.member);
+    await waitFor(() => f.subscribers.size > 0);
+    f.status("blocked");
+    await waitFor(() => f.events.some(e => e.type === "status" && e.blockedReason === "permission"));
+    const observedAt = f.events.filter(e => e.type === "status").at(-1)!;
+    f.status("unknown");
+    await waitFor(() => f.events.some(e => e.type === "status" && e.observation?.error?.code === "status_unknown"));
+    const failed = f.events.filter(e => e.type === "status").at(-1)!;
+    expect(failed).toMatchObject({ status: "blocked", blockedReason: "status_unknown", observation: { freshness: "stale", ownership: "unknown" } });
+    if (observedAt.type === "status" && failed.type === "status") expect(failed.observation!.observedAt).toBe(observedAt.observation!.observedAt);
+    f.setHook((request, socket) => {
+      if (request.method !== "session.snapshot") return false;
+      f.reject(socket, request); return true;
+    });
+    await waitFor(() => f.events.some(e => e.type === "status" && e.observation?.error?.code === "snapshot_failed"));
+    f.agent.agent_status = "blocked";
+    f.setHook(null);
+    await waitFor(() => {
+      const last = f.events.filter(e => e.type === "status").at(-1);
+      return last?.type === "status" && last.blockedReason === "permission" && last.observation?.freshness === "fresh";
+    });
+    f.status("working");
+    await waitFor(() => f.events.some(e => e.type === "status" && e.status === "working" && e.blockedReason === null));
+    f.status("idle");
+    await waitFor(() => {
+      const last = f.events.filter(e => e.type === "status").at(-1);
+      return last?.type === "status" && last.status === "idle" && last.observation?.freshness === "fresh";
+    });
+  });
+
+  test("subscription loss invalidates blocked approval and fences delayed screen refinement", async () => {
+    const f = await fixture();
+    let pending: { request: Request; socket: Socket } | null = null;
+    f.setHook((request, socket) => {
+      if (request.method === "pane.read") { pending = { request, socket }; return true; }
+      if (request.method === "session.snapshot" && pending) { f.reject(socket, request); return true; }
+      return false;
+    });
+    const runner = f.runner();
+    await runner.reattach(f.member);
+    await waitFor(() => f.subscribers.size > 0);
+    f.status("blocked");
+    await waitFor(() => pending !== null);
+    for (const socket of f.subscribers) socket.destroy();
+    await waitFor(() => f.events.some(e => e.type === "status" && e.observation?.error?.code === "disconnected"));
+    const last = f.events.filter(e => e.type === "status").at(-1)!;
+    expect(last).toMatchObject({ status: "blocked", blockedReason: "status_unknown", observation: { freshness: "stale", ownership: "unknown" } });
+    const held = pending! as { request: Request; socket: Socket };
+    f.reply(held.socket, held.request, { read: { text: selection } });
+    await Bun.sleep(20);
+    expect(f.events.some(e => e.type === "status" && e.blockedReason === "selection")).toBe(false);
+    expect(f.prompts()).toHaveLength(0); expect(f.keys()).toHaveLength(0);
+  });
+
+  test("a deferred idle report cannot clear an observation failure; a new idle signal can", async () => {
+    const f = await fixture();
+    await f.runner({ settleMs: 100 }).reattach(f.member);
+    await waitFor(() => f.subscribers.size > 0);
+    f.status("idle");
+    f.status("unknown");
+    await waitFor(() => f.events.some(e => e.type === "status" && e.observation?.error?.code === "status_unknown"));
+    await Bun.sleep(150);
+    expect(f.events.filter(e => e.type === "status").at(-1)).toMatchObject({ status: "idle", observation: { freshness: "stale" } });
+    f.status("idle");
+    await waitFor(() => {
+      const last = f.events.filter(e => e.type === "status").at(-1);
+      return last?.type === "status" && last.status === "idle" && last.observation?.freshness === "fresh";
+    });
+  });
+});
+
 function repairPorts(f: Fixture, dispatch: DeliveryDispatch) {
   let version = 7;
   let prepared = 0;

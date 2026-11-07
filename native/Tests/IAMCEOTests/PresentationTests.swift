@@ -2,6 +2,59 @@ import XCTest
 @testable import IAMCEO
 
 final class PresentationTests: XCTestCase {
+    func testDemoHomeKeepsApprovalErrorAndOwnerDeliveryVisible() throws {
+        let (_, state) = DemoFixtures.workspace(now: Date(timeIntervalSince1970: 1_800_000_000))
+        for member in state.members {
+            XCTAssertEqual(member.statusObservation?.freshness, "fresh", member.id)
+            XCTAssertEqual(member.statusObservation?.ownership, "verified", member.id)
+            XCTAssertNotNil(member.statusObservation?.observedAt, member.id)
+            XCTAssertNil(member.statusObservation?.error, member.id)
+            XCTAssertNotEqual(MemberStatusInfo(member).label, "상태 확인 불가", member.id)
+        }
+        let attention = HomeAttention(members: state.members, notices: state.deliveryNotices, messages: state.messages)
+        XCTAssertEqual(attention.members.map { $0.member.id }, ["m-card", "m-funnel"])
+        let card = try XCTUnwrap(attention.members.first?.member)
+        XCTAssertEqual(MemberStatusInfo(card).label, "승인 창 앞")
+        XCTAssertEqual(MemberStatusInfo(card).tone, .approval)
+        XCTAssertEqual(MemberStatusInfo(attention.members[1].member).label, "오류")
+        XCTAssertEqual(attention.failedMessages.map(\.id), ["x7"])
+        let failed = try XCTUnwrap(attention.failedMessages.first)
+        XCTAssertEqual(failed.body, "이탈 이벤트 이름부터 정리해 주세요.")
+        XCTAssertEqual(failed.delivery, "failed")
+        XCTAssertEqual(failed.deliveryNote, "자동 재시도로 해결 안 됨 → 대표 확인 필요")
+        XCTAssertEqual(state.deliveryNotices?.version, 2)
+        XCTAssertEqual(state.deliveryNotices?.members.first?.reasons.first?.code, "retry_exhausted")
+    }
+
+    func testHomeOnlyAddsFailedMessageWhenRecoveryNeedsOwner() {
+        let member = Member(id: "m", status: "working")
+        let failed = Message(id: "failed", mine: true, body: "지시", targetMemberId: "m", delivery: "failed")
+        func attention(_ value: MemberDeliverySummary, messages: [Message] = [failed]) -> HomeAttention {
+            HomeAttention(members: [member], notices: DeliveryNotices(version: 2, members: [value],
+                          unassigned: UnassignedDeliverySummary(undeliveredCount: 0, unknownCount: 0, needsOwnerCount: 0)), messages: messages)
+        }
+        for value in [summary(checking: 123), summary(unknown: 10), summary()] {
+            XCTAssertTrue(attention(value).failedMessages.isEmpty)
+            XCTAssertTrue(attention(value).members.isEmpty)
+        }
+        XCTAssertEqual(attention(summary(needsOwner: 1)).failedMessages.map(\.id), [failed.id])
+        let delivered = Message(id: "delivered", mine: true, body: "지시", targetMemberId: "m", delivery: "delivered")
+        XCTAssertTrue(attention(summary(needsOwner: 1), messages: [failed, delivered]).failedMessages.isEmpty)
+        XCTAssertTrue(HomeAttention(members: [member], notices: nil, messages: [failed]).failedMessages.isEmpty)
+    }
+
+    @MainActor func testDemoDeliveryStaysReadOnly() async {
+        let store = AppStore(demo: true, persistCredentials: false)
+        XCTAssertFalse(store.canWrite)
+        XCTAssertFalse(store.uiCanWrite)
+        guard let message = store.messages.first(where: { $0.id == "x7" }) else {
+            return XCTFail("샘플 전달 실패 지시가 없습니다")
+        }
+        let sent = await store.resend(message)
+        XCTAssertFalse(sent)
+        XCTAssertEqual(store.messages.first(where: { $0.id == message.id })?.delivery, "failed")
+    }
+
     func testObservationFailureKeepsLastStateAndDedicatedTimestamp() {
         let member = Member(status: "working", lastError: "지난 턴 오류", updatedAt: "new-db-time",
                             statusObservation: StatusObservation(source: "core", observedAt: "last-observation", freshness: "stale",
@@ -25,6 +78,16 @@ final class PresentationTests: XCTestCase {
         for reason in ["permission", "selection"] {
             XCTAssertEqual(MemberStatusInfo(Member(status: "blocked", blockedReason: reason)).label, "승인 창 앞")
             XCTAssertTrue(MemberStatusInfo(Member(status: "blocked", blockedReason: reason)).needsMe)
+            var observed = Member(status: "blocked", blockedReason: reason,
+                                  statusObservation: StatusObservation(source: "herdr", observedAt: "observed", freshness: "fresh",
+                                                                       ownership: "verified", consecutiveFailures: 0))
+            XCTAssertEqual(MemberStatusInfo(observed).label, "승인 창 앞")
+            XCTAssertTrue(MemberStatusInfo(observed).needsMe)
+            observed.statusObservation?.freshness = "stale"
+            observed.statusObservation?.ownership = "unknown"
+            observed.statusObservation?.error = ObservationError(code: "disconnected", note: "연결 끊김")
+            XCTAssertEqual(MemberStatusInfo(observed).label, "상태 확인 불가")
+            XCTAssertFalse(MemberStatusInfo(observed).needsMe)
         }
         XCTAssertEqual(MemberStatusInfo("blocked").label, "승인 창 앞") // Existing string initializer remains compatible.
         let conflict = MemberStatusInfo(Member(status: "idle", statusObservation: StatusObservation(ownership: "conflict")))

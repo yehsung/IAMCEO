@@ -21,7 +21,7 @@ enum DemoFixtures {
             Member(id: "m-copy", projectId: pid, handle: "copy", name: "화면 문구", role: "완료·실패 화면 문구", cli: "claude", appliedModel: "sonnet", status: "working",
                    now: "완료 화면 문구를 다듬는 중", next: "실패 화면 문구", cwd: "~/Projects/shop-web", contextPct: 51, subagents: 2, updatedAt: ago(0.5)),
             Member(id: "m-card", projectId: pid, handle: "card", name: "카드 결제 구현", role: "카드 결제 화면", cli: "codex", appliedModel: "gpt-6-astra", status: "blocked",
-                   now: "카드 결제 화면 구현 — 테스트 실행 권한 메뉴에서 멈춤", next: "시험 통과 후 결과 보고", cwd: "~/Projects/shop-web", contextPct: 64, queuedCount: 1, updatedAt: ago(14)),
+                   now: "카드 결제 화면 구현 — 테스트 실행 권한 메뉴에서 멈춤", next: "시험 통과 후 결과 보고", cwd: "~/Projects/shop-web", contextPct: 64, queuedCount: 1, updatedAt: ago(14), blockedReason: "permission"),
             Member(id: "m-research", projectId: pid, handle: "research", name: "자료 조사", role: "PG 비교 · 계약 조건", cli: "claude", appliedModel: "sonnet", status: "idle",
                    now: "결제 방식 비교표를 정리했다고 보고", next: "PG 결정 뒤 계약 조건 요약", cwd: "~/Projects/shop-web", contextPct: 17, updatedAt: ago(20)),
             Member(id: "m-funnel", projectId: pid, handle: "funnel", name: "이탈률 측정", role: "결제 단계별 이벤트", cli: "codex", modelOverride: "gpt-6-sol", appliedModel: "gpt-6-astra", status: "error",
@@ -32,7 +32,15 @@ enum DemoFixtures {
                    now: "영수증 메일 템플릿 초안을 올렸다고 보고", next: "", cwd: "~/Projects/shop-web", contextPct: 12, updatedAt: ago(30)),
             Member(id: "m-settle", projectId: pid, handle: "settle", name: "정산 리포트", role: "일별 정산 요약", cli: "codex", status: "asleep",
                    now: "지난주 정산 요약을 보고", next: "", cwd: "~/Projects/shop-web", updatedAt: ago(60 * 20))
-        ]
+        ].map { member in
+            var member = member
+            member.backend = "core"
+            member.nowAt = member.now.isEmpty ? nil : member.updatedAt
+            member.statusObservation = StatusObservation(source: "core", observedAt: ago(0), freshness: "fresh",
+                                                         ownership: "verified", consecutiveFailures: 0)
+            member.subagentState = SubagentState(quality: "exact", count: member.subagents, observedAt: ago(0), sessionGeneration: 1)
+            return member
+        }
 
         let fee = FileDoc(id: "f-fee", kind: "document", projectId: pid, title: "결제 수단별 수수료 비교", who: "자료 조사", memberId: "m-research",
                           summary: "토스페이먼츠·KG이니시스의 수수료, 정산 주기, 연동 난이도를 비교했습니다.",
@@ -98,7 +106,7 @@ enum DemoFixtures {
             Message(id: "x4", projectId: pid, at: ago(14), memberId: "m-card", who: "카드 결제 구현", kind: "알림", title: "테스트 실행 권한이 필요합니다", body: "Codex가 `bun test` 실행 승인을 묻고 있습니다. 터미널에서 직접 승인해 주세요."),
             Message(id: "x5", projectId: pid, at: ago(12), memberId: "m-pg", who: "결제 연동", kind: "질문", title: "결제 완료 문구 결정 요청", body: "두 안 중 하나를 골라 주세요.", decisionId: "d-done-copy"),
             Message(id: "x6", projectId: pid, at: ago(8), mine: true, who: "나", kind: "나", body: "실패 화면에는 고객센터 번호도 넣어 주세요.", targetMemberId: "m-copy", targetName: "화면 문구", delivery: "delivered"),
-            Message(id: "x7", projectId: pid, at: ago(6), mine: true, who: "나", kind: "나", body: "이탈 이벤트 이름부터 정리해 주세요.", targetMemberId: "m-funnel", targetName: "이탈률 측정", delivery: "failed", deliveryNote: "세션 오류로 CLI에 넣지 못했습니다."),
+            Message(id: "x7", projectId: pid, at: ago(6), mine: true, who: "나", kind: "나", body: "이탈 이벤트 이름부터 정리해 주세요.", targetMemberId: "m-funnel", targetName: "이탈률 측정", delivery: "failed", deliveryNote: "자동 재시도로 해결 안 됨 → 대표 확인 필요"),
             Message(id: "x8", projectId: pid, at: ago(4), memberId: "m-copy", who: "화면 문구", kind: "진행", title: "완료 화면 문구 초안", body: "- 짧게 한 줄\n- 다음 행동 안내 한 줄\n- 영수증 링크는 버튼으로"),
             Message(id: "x9", projectId: pid, at: ago(2), mine: true, who: "나", kind: "나", body: "권한 메뉴 처리됐나요?", targetMemberId: "m-card", targetName: "카드 결제 구현", delivery: "held", deliveryNote: "승인 메뉴가 떠 있어 자동 전달을 멈췄습니다."),
             Message(id: "x10", projectId: pid, at: ago(1), mine: true, who: "나", kind: "나", body: "문구 결정은 오늘 오후에 할게요.", delivery: "queued")
@@ -112,7 +120,17 @@ enum DemoFixtures {
                            decisionCount: 1, todoCount: 0, inboxCount: 1, workingCount: 1, memberCount: 3)
         ]
         let bootstrap = Bootstrap(version: "sample", settings: Settings(backend: "core"), projects: summaries)
-        let state = ProjectState(project: project, members: members, decisions: decisions, doneDecisionCount: 3, todos: todos, work: work, messages: messages, files: files)
+        let deliveryNotices = DeliveryNotices(version: 2, members: [
+            MemberDeliverySummary(memberId: "m-funnel", undeliveredCount: 1, unknownCount: 0, deliveringCount: 0,
+                                  checkingCount: 0, needsOwnerCount: 1, waitingBehindCount: 0, oldestAt: ago(6),
+                                  reasons: [DeliveryReasonCount(code: "retry_exhausted", count: 1, note: "자동 재시도로 해결 안 됨 → 대표 확인 필요")]),
+            MemberDeliverySummary(memberId: "m-card", undeliveredCount: 1, unknownCount: 0, deliveringCount: 0,
+                                  checkingCount: 0, needsOwnerCount: 0, waitingBehindCount: 0, oldestAt: ago(2),
+                                  reasons: [DeliveryReasonCount(code: "blocked", count: 1, note: "승인 메뉴가 떠 있어 자동 전달을 멈췄습니다.")]),
+            MemberDeliverySummary(memberId: "m-chief", undeliveredCount: 1, unknownCount: 0, deliveringCount: 0,
+                                  checkingCount: 0, needsOwnerCount: 0, waitingBehindCount: 0, oldestAt: ago(1), reasons: [])
+        ], unassigned: UnassignedDeliverySummary(undeliveredCount: 0, unknownCount: 0, needsOwnerCount: 0))
+        let state = ProjectState(project: project, members: members, decisions: decisions, doneDecisionCount: 3, todos: todos, work: work, messages: messages, files: files, deliveryNotices: deliveryNotices)
         return (bootstrap, state)
     }
 }

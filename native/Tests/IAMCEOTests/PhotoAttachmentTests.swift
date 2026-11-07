@@ -58,12 +58,12 @@ final class PhotoAttachmentTests: XCTestCase {
         let decoded = CGImageSourceCreateImageAtIndex(originalSource, 0,
             [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
         if decoded?.dataProvider?.data == nil {
-            XCTAssertThrowsError(try PhotoAttachment.prepare(source: input.url, video: false, date: date, index: 1)) { error in
+            XCTAssertThrowsError(try PhotoAttachment.prepare(data: data, date: date, index: 1)) { error in
                 XCTAssertEqual(error.localizedDescription, "사진을 변환하지 못했습니다")
             }
             throw XCTSkip("HEVC decoder cannot supply pixels in this sandbox; invalid conversion rejection verified")
         }
-        let output = try PhotoAttachment.prepare(source: input.url, video: false, date: date, index: 1)
+        let output = try PhotoAttachment.prepare(data: data, date: date, index: 1)
         defer { output.cleanup() }
         let source = try XCTUnwrap(CGImageSourceCreateWithURL(output.url as CFURL, nil))
         XCTAssertEqual(CGImageSourceGetType(source) as String?, UTType.jpeg.identifier)
@@ -75,6 +75,27 @@ final class PhotoAttachmentTests: XCTestCase {
                        originalProperties[kCGImagePropertyOrientation] as? Int ?? 1)
         XCTAssertEqual(props[kCGImagePropertyPixelWidth] as? Int, originalProperties[kCGImagePropertyPixelWidth] as? Int)
         XCTAssertEqual(props[kCGImagePropertyPixelHeight] as? Int, originalProperties[kCGImagePropertyPixelHeight] as? Int)
+    }
+
+    func testImageDataFormatsFollowPhotoRulesAndCleanUp() throws {
+        for type in [UTType.png, .jpeg, .tiff] {
+            let input = try fixture(type: type, width: 4100, height: 32, gps: true)
+            defer { input.cleanup() }
+            let output = try PhotoAttachment.prepare(data: Data(contentsOf: input.url), date: date, index: 7)
+            let url = output.url
+            XCTAssertEqual(url.pathExtension, type == .png ? "png" : "jpg")
+            XCTAssertTrue(url.lastPathComponent.hasPrefix("사진-"))
+            XCTAssertTrue(url.lastPathComponent.hasSuffix("-7.\(url.pathExtension)"))
+            let props = try properties(url)
+            XCTAssertEqual(props[kCGImagePropertyPixelWidth] as? Int, 4096)
+            XCTAssertNil(props[kCGImagePropertyGPSDictionary])
+            XCTAssertNotNil(CGImageSourceCreateWithURL(url as CFURL, nil))
+            output.cleanup()
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: input.url.path))
+        }
+        XCTAssertThrowsError(try PhotoAttachment.prepare(data: Data("invalid".utf8), date: date, index: 1))
     }
 
     func testLargePNGStaysPNGAndCameraForcesJPEG() throws {

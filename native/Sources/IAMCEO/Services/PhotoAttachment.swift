@@ -69,6 +69,13 @@ enum PhotoAttachment {
         return "\(video ? "동영상" : "사진")-\(formatter.string(from: date))-\(index).\(ext)"
     }
 
+    /// Pixel paste/drop representations follow exactly the same rules as library photos.
+    static func prepare(data: Data, date: Date, index: Int) throws -> PhotoAttachmentFile {
+        let original = try PhotoAttachmentFile.write(data, filename: "image-data")
+        defer { original.cleanup() }
+        return try prepare(source: original.url, video: false, date: date, index: index)
+    }
+
     /// Runs off the main actor. Re-encoding starts from pixels, so no EXIF/XMP/GPS metadata is inherited.
     /// Untouched small PNG/JPEG images and all videos retain their original bytes.
     static func prepare(source: URL, video: Bool, date: Date, index: Int,

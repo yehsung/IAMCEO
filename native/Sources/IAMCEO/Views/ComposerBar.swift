@@ -45,6 +45,9 @@ struct ComposerBar: View {
     @Environment(AppStore.self) private var store
     @Environment(DraftStore.self) private var drafts
     @Environment(Router.self) private var router
+    #if os(macOS)
+    @Environment(MacAttachmentIntake.self) private var attachmentIntake
+    #endif
     @Binding var target: String?
     var showsTargetPicker = true
     var autoFocus = false
@@ -74,7 +77,11 @@ struct ComposerBar: View {
     @State private var sendingLocally = false
     /// Mac: the recipient list (web .cmp-menu) is open.
     @State private var showTargets = false
+    #if os(macOS)
+    @State private var focused = false
+    #else
     @FocusState private var focused: Bool
+    #endif
 
     private var key: String { DraftStore.key(project: store.selectedProjectID, target: target) }
     private var recipient: Member? { target.flatMap { id in store.members.first { $0.id == id } } }
@@ -177,12 +184,14 @@ struct ComposerBar: View {
             onSwipeDown?()
         })
         #endif
+        #if os(iOS)
         .dropDestination(for: URL.self) { urls, _ in
             let local = urls.filter(\.isFileURL)
             guard !local.isEmpty, let context = uploadContext() else { return false }
             Task { await upload(local, context: context) }
             return true
         } isTargeted: { dropTargeted = $0 && canAttach }
+        #endif
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             switch result {
             case .success(let urls):
@@ -208,7 +217,15 @@ struct ComposerBar: View {
             .ignoresSafeArea()
         }
         #endif
-        .onAppear { if autoFocus { focusSoon() } }
+        .onAppear {
+            if autoFocus { focusSoon() }
+            #if os(macOS)
+            attachmentIntake.receive = receiveMacAttachments
+            #endif
+        }
+        #if os(macOS)
+        .onDisappear { attachmentIntake.receive = nil }
+        #endif
         .onChange(of: router.focusComposer) { _, _ in focusSoon() }
         .onChange(of: key) { _, _ in uploadError = nil; sendError = nil; sentTo = nil }
         .onChange(of: store.selectedProjectID) { _, _ in showTargets = false }
@@ -454,6 +471,22 @@ struct ComposerBar: View {
         HStack(alignment: .bottom, spacing: 2) {
             attachmentButton
 
+            #if os(macOS)
+            MacComposerTextView(text: text, focused: Binding(get: { focused }, set: { focused = $0 }),
+                                placeholder: "\(recipientName)에게 보낼 글", intake: attachmentIntake,
+                                canReceive: { canAttach && router.memberID == nil },
+                                receive: receiveMacAttachments, submit: { Task { await send() } })
+                .id(key)
+                .overlay(alignment: .topLeading) {
+                    if draftText.isEmpty {
+                        Text(placeholder).font(.system(size: 15)).foregroundStyle(CE.ink2)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .padding(.horizontal, 6).padding(.vertical, 11)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .disabled(store.isDemo)
+            #else
             TextField("\(recipientName)에게 보낼 글", text: text, prompt: Text(placeholder).foregroundStyle(CE.ink2), axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(isMac ? .system(size: 15) : CEFont.body)
@@ -464,9 +497,7 @@ struct ComposerBar: View {
                 .padding(.horizontal, 6).padding(.vertical, 11)
                 .frame(minHeight: 44)
                 .disabled(store.isDemo)
-                #if os(macOS)
-                .onSubmit { Task { await send() } }
-                #endif
+            #endif
 
             Button { Task { await send() } } label: {
                 Group {
@@ -548,7 +579,7 @@ struct ComposerBar: View {
             }
             defer { media.file.cleanup() }
             return try await Task.detached(priority: .userInitiated) {
-                try PhotoAttachment.prepare(source: media.file.url, video: media.video, date: date, index: index + 1)
+                [try PhotoAttachment.prepare(source: media.file.url, video: media.video, date: date, index: index + 1)]
             }.value
         }
     }
@@ -560,14 +591,16 @@ struct ComposerBar: View {
             return try await Task.detached(priority: .userInitiated) {
                 let original = try PhotoAttachmentFile.write(data, filename: "capture.jpg")
                 defer { original.cleanup() }
-                return try PhotoAttachment.prepare(source: original.url, video: false, date: date, index: 1, forceJPEG: true)
+                return [try PhotoAttachment.prepare(source: original.url, video: false, date: date, index: 1, forceJPEG: true)]
             }.value
         }
     }
 
+    #endif
+
     /// Register every load before the first suspension, keeping send disabled throughout import and upload.
     private func loadMedia(names: [String], context: ComposerUploadContext,
-                           load: @escaping @MainActor (Int) async throws -> PhotoAttachmentFile) {
+                           load: @escaping @MainActor (Int) async throws -> [PhotoAttachmentFile]) {
         let batch = names.map { ComposerUpload(name: $0, token: context.token) }
         let placeholders = batch.map {
             FileManager.default.temporaryDirectory.appendingPathComponent("iamceo-load-\($0.id)").appendingPathComponent($0.name)
@@ -581,19 +614,29 @@ struct ComposerBar: View {
                 defer { uploads.removeAll { $0.id == batch[index].id } }
                 guard uploadIsCurrent(context) else { return }
                 do {
-                    let file = try await load(index)
-                    defer { file.cleanup() }
+                    let files = try await load(index)
+                    defer { files.forEach { $0.cleanup() } }
                     guard uploadIsCurrent(context), store.api != nil else { return }
                     // The existing upload path takes over both the success chip and failure bookkeeping.
                     failedUploads.removeAll { $0.url == placeholders[index] }
                     uploads.removeAll { $0.id == batch[index].id }
-                    await upload([file.url], context: context)
+                    await upload(files.map(\.url), context: context)
                 } catch {
                     guard uploadIsCurrent(context) else { return }
                     failUpload(placeholders[index], token: context.token, detail: error.localizedDescription)
                 }
             }
         }
+    }
+
+    #if os(macOS)
+    private func receiveMacAttachments(_ items: [MacAttachmentItem]) -> Bool {
+        guard router.memberID == nil, !items.isEmpty, let context = uploadContext() else { return false }
+        let date = Date()
+        loadMedia(names: items.map(\.name), context: context) { index in
+            try await items[index].prepare(date: date, index: index + 1)
+        }
+        return true
     }
     #endif
 
@@ -653,7 +696,7 @@ struct ComposerBar: View {
 
     private func uploadIsCurrent(_ context: ComposerUploadContext) -> Bool {
         let token = context.token
-        return store.canWrite && context.projectID == store.selectedProjectID
+        return store.uiCanWrite && context.projectID == store.selectedProjectID
             && token.namespace == drafts.namespace && token.connectionGeneration == drafts.connectionGeneration
             && token.draftGeneration == drafts.snapshot(for: token.key).generation
     }
@@ -662,7 +705,7 @@ struct ComposerBar: View {
         let token = context.token
         let project = context.projectID
         let uploadTarget = context.targetMemberID
-        guard store.api != nil, store.canWrite, project == store.selectedProjectID,
+        guard store.api != nil, store.uiCanWrite, project == store.selectedProjectID,
               token.namespace == drafts.namespace, token.connectionGeneration == drafts.connectionGeneration,
               token.draftGeneration == drafts.snapshot(for: token.key).generation else { return }
         if key == token.key { uploadError = nil }
@@ -674,7 +717,7 @@ struct ComposerBar: View {
         for url in urls {
             guard token.namespace == drafts.namespace, token.connectionGeneration == drafts.connectionGeneration,
                   token.draftGeneration == drafts.snapshot(for: token.key).generation,
-                  project == store.selectedProjectID, store.canWrite else { return }
+                  project == store.selectedProjectID, store.uiCanWrite else { return }
             let access = url.startAccessingSecurityScopedResource()
             defer { if access { url.stopAccessingSecurityScopedResource() } }
             do {

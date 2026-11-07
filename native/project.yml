@@ -1,5 +1,6 @@
 name: IAMCEO
 options:
+  developmentLanguage: ko
   bundleIdPrefix: com.iamceo
   deploymentTarget:
     macOS: '14.0'
@@ -25,6 +26,8 @@ targets:
     info:
       path: Configuration/macOS-Info.plist
       properties:
+        CFBundleDevelopmentRegion: ko
+        CFBundleLocalizations: [ko]
         CFBundleDisplayName: IAMCEO
         CFBundleURLTypes:
           - CFBundleURLName: com.iamceo.open
@@ -58,6 +61,8 @@ targets:
     info:
       path: Configuration/iOS-Info.plist
       properties:
+        CFBundleDevelopmentRegion: ko
+        CFBundleLocalizations: [ko]
         CFBundleDisplayName: IAMCEO
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)

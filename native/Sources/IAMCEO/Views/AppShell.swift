@@ -19,6 +19,7 @@ struct AppShell: View {
     @State private var keyBarPreview = false
     #endif
     #if os(macOS)
+    @State private var attachmentIntake = MacAttachmentIntake()
     @Environment(\.openSettings) private var openSettings
     /// Window width, for the member drawer's width (40% of the window, 440…560).
     @State private var windowWidth: CGFloat = 1440
@@ -227,8 +228,39 @@ struct AppShell: View {
                     }
                 }
                 .background { shortcuts }
+                .overlay { MacAttachmentDropSurface(intake: attachmentIntake, policy: attachmentPolicy) }
+                .overlay {
+                    if attachmentIntake.targeted {
+                        let shape = RoundedRectangle(cornerRadius: 22)
+                        VStack(spacing: 12) {
+                            Image(systemName: attachmentPolicy.canAccept ? "paperclip.circle" : "lock.circle")
+                                .font(.system(size: 32))
+                            Text(attachmentPolicy.reason ?? "여기에 놓으면 \(attachmentRecipient)에게 보낼 첨부로 올립니다")
+                                .font(.system(size: 15, weight: .semibold))
+                                .multilineTextAlignment(.center)
+                        }
+                        .foregroundStyle(CE.accent)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(CE.violet.opacity(0.14), in: shape)
+                        .overlay { shape.strokeBorder(CE.accent, style: StrokeStyle(lineWidth: 2, dash: [6, 4])) }
+                        .padding(8)
+                        .allowsHitTesting(false)
+                    }
+                }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { windowWidth = $0 }
+    }
+
+    private var attachmentRecipient: String {
+        router.chatTarget.flatMap { id in store.members.first { $0.id == id }?.name } ?? store.leadRankName
+    }
+
+    private var attachmentPolicy: MacAttachmentPolicy {
+        MacAttachmentPolicy(archived: store.isArchive || store.state?.project.archived == true,
+                            demo: store.isDemo, connected: store.connectionStatus == .connected,
+                            writable: store.uiCanWrite && store.selectedProjectID != nil,
+                            missingTarget: router.chatTarget != nil && !store.members.contains { $0.id == router.chatTarget },
+                            composerCovered: router.memberID != nil)
     }
 
     /// Web: 108pt tab cells from a 1280pt window up, 92 below (the headline keeps its room).
@@ -262,6 +294,7 @@ struct AppShell: View {
         let leading: CGFloat = router.destination == .chat && store.state != nil ? 231 : 0
         if !store.isArchive {
             ComposerBar(target: $router.chatTarget, onOpenChat: router.destination == .chat ? nil : { router.go(.chat) })
+            .environment(attachmentIntake)
             .disabled(router.memberID != nil)
             .frame(maxWidth: 832)
             .padding(.horizontal, 24).padding(.top, 6).padding(.bottom, 14)

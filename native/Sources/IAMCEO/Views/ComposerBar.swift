@@ -1,6 +1,11 @@
 import SwiftUI
 import ImageIO
 import UniformTypeIdentifiers
+#if os(iOS)
+import PhotosUI
+import UIKit
+import AVFoundation
+#endif
 
 /// One file being uploaded into a draft (shown as an "올리는 중" chip under its own draft key).
 private struct ComposerUpload: Identifiable {
@@ -50,6 +55,13 @@ struct ComposerBar: View {
     var onSwipeDown: (() -> Void)? = nil
     @State private var importing = false
     @State private var importContext: ComposerUploadContext?
+    #if os(iOS)
+    @State private var choosingPhotos = false
+    @State private var photoSelection: [PhotosPickerItem] = []
+    @State private var photoContext: ComposerUploadContext?
+    @State private var takingPhoto = false
+    @State private var cameraContext: ComposerUploadContext?
+    #endif
     @State private var uploads: [ComposerUpload] = []
     @State private var failedUploads: [ComposerUploadFailure] = []
     @State private var uploadError: String?
@@ -178,6 +190,24 @@ struct ComposerBar: View {
             case .failure(let error): uploadError = error.localizedDescription
             }
         }
+        #if os(iOS)
+        .photosPicker(isPresented: $choosingPhotos, selection: $photoSelection, maxSelectionCount: 10,
+                      selectionBehavior: .ordered, matching: .any(of: [.images, .videos]),
+                      preferredItemEncoding: .current)
+        .onChange(of: photoSelection) { _, items in
+            guard !items.isEmpty, let context = photoContext else { return }
+            photoSelection = []
+            loadPhotos(items, context: context)
+        }
+        .fullScreenCover(isPresented: $takingPhoto) {
+            ComposerCameraPicker { result in
+                takingPhoto = false
+                guard let result, let context = cameraContext else { return }
+                loadCameraPhoto(result, context: context)
+            }
+            .ignoresSafeArea()
+        }
+        #endif
         .onAppear { if autoFocus { focusSoon() } }
         .onChange(of: router.focusComposer) { _, _ in focusSoon() }
         .onChange(of: key) { _, _ in uploadError = nil; sendError = nil; sentTo = nil }
@@ -422,14 +452,7 @@ struct ComposerBar: View {
 
     private var inputRow: some View {
         HStack(alignment: .bottom, spacing: 2) {
-            Button { importContext = uploadContext(); importing = importContext != nil } label: {
-                Image(systemName: "paperclip").font(.system(size: 17))
-                    .frame(width: 44, height: 44)
-            }
-            .buttonStyle(ComposerGhostStyle())
-            .disabled(!canAttach)
-            .help("첨부 (50MB까지)")
-            .accessibilityLabel("첨부")
+            attachmentButton
 
             TextField("\(recipientName)에게 보낼 글", text: text, prompt: Text(placeholder).foregroundStyle(CE.ink2), axis: .vertical)
                 .textFieldStyle(.plain)
@@ -462,6 +485,117 @@ struct ComposerBar: View {
     }
 
     // MARK: Actions
+
+    private var attachmentIcon: some View {
+        Image(systemName: "paperclip").font(.system(size: 17)).frame(width: 44, height: 44)
+    }
+
+    @ViewBuilder private var attachmentButton: some View {
+        #if os(iOS)
+        Menu {
+            Button {
+                photoContext = uploadContext()
+                choosingPhotos = photoContext != nil
+            } label: { Label("사진 보관함", systemImage: "photo.on.rectangle") }
+            if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                Button { openCamera() } label: { Label("사진 찍기", systemImage: "camera") }
+            }
+            Button { importContext = uploadContext(); importing = importContext != nil } label: {
+                Label("파일", systemImage: "folder")
+            }
+        } label: { attachmentIcon }
+        .menuStyle(.button)
+        .menuOrder(.fixed)
+        .menuIndicator(.hidden)
+        .buttonStyle(ComposerGhostStyle())
+        .disabled(!canAttach)
+        .help("첨부 (50MB까지)")
+        .accessibilityLabel("첨부")
+        #else
+        Button { importContext = uploadContext(); importing = importContext != nil } label: { attachmentIcon }
+            .buttonStyle(ComposerGhostStyle())
+            .disabled(!canAttach)
+            .help("첨부 (50MB까지)")
+            .accessibilityLabel("첨부")
+        #endif
+    }
+
+    #if os(iOS)
+    private func openCamera() {
+        guard let context = uploadContext() else { return }
+        Task {
+            let allowed = await AVCaptureDevice.requestAccess(for: .video)
+            guard allowed else {
+                if key == context.token.key { uploadError = "설정에서 카메라 접근을 허용해 주세요" }
+                return
+            }
+            guard uploadIsCurrent(context) else { return }
+            cameraContext = context
+            takingPhoto = true
+        }
+    }
+
+    private func loadPhotos(_ items: [PhotosPickerItem], context: ComposerUploadContext) {
+        let date = Date()
+        let names = items.enumerated().map { index, item in
+            PhotoAttachment.filename(date: date, index: index + 1, extension: item.supportedContentTypes.contains {
+                $0.conforms(to: .movie)
+            } ? "mov" : "jpg", video: item.supportedContentTypes.contains { $0.conforms(to: .movie) })
+        }
+        loadMedia(names: names, context: context) { index in
+            guard let media = try await items[index].loadTransferable(type: ComposerPickedMedia.self) else {
+                throw PhotoAttachmentError.unavailable
+            }
+            defer { media.file.cleanup() }
+            return try await Task.detached(priority: .userInitiated) {
+                try PhotoAttachment.prepare(source: media.file.url, video: media.video, date: date, index: index + 1)
+            }.value
+        }
+    }
+
+    private func loadCameraPhoto(_ result: Result<Data, Error>, context: ComposerUploadContext) {
+        let date = Date()
+        loadMedia(names: [PhotoAttachment.filename(date: date, index: 1, extension: "jpg")], context: context) { _ in
+            let data = try result.get()
+            return try await Task.detached(priority: .userInitiated) {
+                let original = try PhotoAttachmentFile.write(data, filename: "capture.jpg")
+                defer { original.cleanup() }
+                return try PhotoAttachment.prepare(source: original.url, video: false, date: date, index: 1, forceJPEG: true)
+            }.value
+        }
+    }
+
+    /// Register every load before the first suspension, keeping send disabled throughout import and upload.
+    private func loadMedia(names: [String], context: ComposerUploadContext,
+                           load: @escaping @MainActor (Int) async throws -> PhotoAttachmentFile) {
+        let batch = names.map { ComposerUpload(name: $0, token: context.token) }
+        let placeholders = batch.map {
+            FileManager.default.temporaryDirectory.appendingPathComponent("iamceo-load-\($0.id)").appendingPathComponent($0.name)
+        }
+        uploads.append(contentsOf: batch)
+        if key == context.token.key { uploadError = nil }
+        for url in placeholders { failUpload(url, token: context.token, detail: "아직 첨부하지 못했습니다") }
+        Task {
+            defer { uploads.removeAll { item in batch.contains { $0.id == item.id } } }
+            for index in names.indices {
+                defer { uploads.removeAll { $0.id == batch[index].id } }
+                guard uploadIsCurrent(context) else { return }
+                do {
+                    let file = try await load(index)
+                    defer { file.cleanup() }
+                    guard uploadIsCurrent(context), store.api != nil else { return }
+                    // The existing upload path takes over both the success chip and failure bookkeeping.
+                    failedUploads.removeAll { $0.url == placeholders[index] }
+                    uploads.removeAll { $0.id == batch[index].id }
+                    await upload([file.url], context: context)
+                } catch {
+                    guard uploadIsCurrent(context) else { return }
+                    failUpload(placeholders[index], token: context.token, detail: error.localizedDescription)
+                }
+            }
+        }
+    }
+    #endif
 
     /// Focus now, and once more after a sheet that asked for it (member detail on Mac) has finished closing.
     private func focusSoon() {
@@ -517,6 +651,13 @@ struct ComposerBar: View {
         return ComposerUploadContext(projectID: project, targetMemberID: target, token: drafts.uploadToken(for: key))
     }
 
+    private func uploadIsCurrent(_ context: ComposerUploadContext) -> Bool {
+        let token = context.token
+        return store.canWrite && context.projectID == store.selectedProjectID
+            && token.namespace == drafts.namespace && token.connectionGeneration == drafts.connectionGeneration
+            && token.draftGeneration == drafts.snapshot(for: token.key).generation
+    }
+
     private func upload(_ urls: [URL], context: ComposerUploadContext) async {
         let token = context.token
         let project = context.projectID
@@ -537,11 +678,7 @@ struct ComposerBar: View {
             let access = url.startAccessingSecurityScopedResource()
             defer { if access { url.stopAccessingSecurityScopedResource() } }
             do {
-                let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                guard size <= 50 * 1024 * 1024 else {
-                    failUpload(url, token: token, detail: "파일은 50MB까지 올릴 수 있습니다")
-                    continue
-                }
+                try PhotoAttachment.validateSize(url)
                 let data = try Data(contentsOf: url, options: .mappedIfSafe)
                 let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
                 // AppStore checks connection/project and deletion generations and persists the completed attachment.

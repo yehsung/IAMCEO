@@ -209,7 +209,10 @@ struct AppShell: View {
                 .overlay { if !store.isArchive { MemberDrawerHost(windowWidth: windowWidth) } }
                 // Kept for the Window menu and Mission Control; the toolbar shows `headline` instead (macOS 15+).
                 .navigationTitle(store.state?.project.name ?? "IAMCEO")
-                .modifier(DeskTitle(subtitle: headlineNow ?? ""))
+                .modifier(DeskTitle(subtitle: ""))
+                // One look on every tab: the window's aurora shows through the toolbar. Without this, macOS paints its
+                // own grey toolbar wherever the content under it is not a scrolled page (대화, 자료).
+                .modifier(TransparentWindowToolbar())
                 .toolbar {
                     if #available(macOS 26.0, *) {
                         ToolbarItem(placement: .navigation) { headline }
@@ -231,33 +234,20 @@ struct AppShell: View {
     /// Web: 108pt tab cells from a 1280pt window up, 92 below (the headline keeps its room).
     private var compactTabs: Bool { windowWidth < 1280 }
 
-    /// Web .shell__now: the project's current situation under the title on 결재함 · 대화 · 자료 (홈 and 팀 show it
-    /// large on the page), one markdown-free line.
-    private var headlineNow: String? {
-        guard [.inbox, .chat, .files].contains(router.destination) else { return nil }
-        let now = plainOneLine(store.state?.project.now ?? "")
-        return now.isEmpty ? nil : now
-    }
-
     /// Room left of the centred tab pill: half of what the pill leaves, less the toolbar's edge and a gap.
     private var headlineWidth: CGFloat {
         let pill = CGFloat(Destination.allCases.count) * DestinationSwitcher.tabWidth(compact: compactTabs) + 8
         return min(440, max(96, (detailWidth - pill) / 2 - 56))
     }
 
-    /// Web .shell__headline: project name 17/650 (line-height 1.3, −.015em), the now line 12.5 ink-2 under it.
+    /// The project name alone (17/650). The owner asked for no summary line under it on any tab: the current
+    /// situation lives on 홈.
     private var headline: some View {
         let name = store.state?.project.name ?? "IAMCEO"
-        let now = headlineNow
-        return VStack(alignment: .leading, spacing: 1) {
-            Text(name).font(.system(size: 17, weight: .semibold)).tracking(-0.25)
-                .foregroundStyle(CE.ink).lineLimit(1).truncationMode(.tail)
-            if let now {
-                Text(now).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1).truncationMode(.tail)
-            }
-        }
+        return Text(name).font(.system(size: 17, weight: .semibold)).tracking(-0.25)
+            .foregroundStyle(CE.ink).lineLimit(1).truncationMode(.tail)
         .frame(width: headlineWidth, alignment: .leading)
-        .help(now.map { "\(name)\n\($0)" } ?? name)
+        .help(name)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
     }
@@ -383,27 +373,14 @@ struct AppShell: View {
         return (others.map { $0.inboxCount + $0.blockedCount }.reduce(0, +), others.contains { $0.blockedCount > 0 })
     }
 
-    /// Web .ph-now: on 결재함 · 대화 · 자료 the project's current situation sits under the title, one line.
-    private func phoneNow(_ tab: Destination) -> String? {
-        guard [.inbox, .chat, .files].contains(tab) else { return nil }
-        let now = plainOneLine(store.state?.project.now ?? "")
-        return now.isEmpty ? nil : now
-    }
-
     private func projectSwitcherLabel(_ tab: Destination) -> some View {
         let name = store.state?.project.name ?? "IAMCEO"
         let others = otherProjectsNeeds
-        let now = phoneNow(tab)
         return Menu { projectMenuItems } label: {
-            VStack(spacing: 1) {
-                HStack(spacing: 7) {
-                    Text(name).font(.headline).foregroundStyle(CE.ink).lineLimit(1)
-                    CountBadge(count: others.count, tone: others.blocked ? .danger : .accent)
-                    Image(systemName: "chevron.down").font(.caption.weight(.semibold)).foregroundStyle(CE.ink2)
-                }
-                if let now {
-                    Text(now).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1).truncationMode(.tail)
-                }
+            HStack(spacing: 7) {
+                Text(name).font(.headline).foregroundStyle(CE.ink).lineLimit(1)
+                CountBadge(count: others.count, tone: others.blocked ? .danger : .accent)
+                Image(systemName: "chevron.down").font(.caption.weight(.semibold)).foregroundStyle(CE.ink2)
             }
             .frame(minHeight: 44)
             .contentShape(Rectangle())
@@ -1302,5 +1279,20 @@ extension AppStore {
             return todos > 0 ? "내 할 일 \(todos)건" : nil
         default: return nil
         }
+    }
+}
+
+/// The window toolbar draws no background of its own (macOS 15+), so every tab shows the same aurora under it.
+private struct TransparentWindowToolbar: ViewModifier {
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        if #available(macOS 15.0, *) {
+            content.toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
     }
 }

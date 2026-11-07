@@ -47,7 +47,7 @@
 		</dict>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Mac에 표시된 연결 QR을 읽습니다.</string>
+	<string>연결 QR을 읽고, 대화에 붙일 사진을 찍습니다.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connect to your IAMCEO daemon on your own network.</string>
 	<key>UIApplicationSceneManifest</key>

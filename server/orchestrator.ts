@@ -272,6 +272,8 @@ export interface HerdrQueries {
 
 export interface OrchestratorTimings {
   inputBusyRetryMs: number;
+  /** A pump still running after this long is reported once (diagnostics only). */
+  stuckPumpMs: number;
   inputBusyLimitMs: number;
   retryMs: number;
   tickMs: number;
@@ -287,6 +289,7 @@ export interface OrchestratorTimings {
 
 const DEFAULT_TIMINGS: OrchestratorTimings = {
   inputBusyRetryMs: 5000,
+  stuckPumpMs: 60_000,
   inputBusyLimitMs: 60_000,
   retryMs: 5000,
   tickMs: 30_000,
@@ -404,6 +407,10 @@ interface Runtime {
   contextCandidate: { sessionId: string | null; window: number; tokens: number } | null;
   turn: Turn | null;
   pumping: Promise<void> | null;
+  /** Where the current pump is waiting and since when (diagnostics only; never used to send or interrupt). */
+  pumpStage: string | null;
+  pumpSince: number | null;
+  pumpReported: boolean;
   again: boolean;
   posted: boolean;
   delegated: boolean;
@@ -1192,6 +1199,25 @@ export class Orchestrator implements OrchestratorApi {
     return this.healthProbe;
   }
 
+  /**
+   * Real 2026-11-07 run: one member's pump never settled (queue stuck for minutes, other members fine, gone after a
+   * daemon restart) and nothing said where it waited. Report the stage once per pump. Diagnostics only: this never
+   * sends, presses Enter, interrupts or resets the pump.
+   */
+  private reportStuckPumps(): void {
+    const now = Date.now();
+    for (const [memberId, rt] of this.runtimes) {
+      if (!rt.pumping || rt.pumpReported || rt.pumpSince === null || now - rt.pumpSince < this.timings.stuckPumpMs) continue;
+      const member = this.store.getMember(memberId);
+      if (!member) continue;
+      rt.pumpReported = true;
+      const seconds = Math.round((now - rt.pumpSince) / 1000);
+      const text = `전달 처리가 ${seconds}초째 끝나지 않았습니다(대기 단계: ${rt.pumpStage ?? "알 수 없음"}). 자동으로 다시 넣거나 중단하지 않습니다`;
+      this.store.appendActivity(memberId, "error", text, `pump-stuck:${rt.pumpSince}`);
+      console.warn("전달 펌프 정체:", memberId, rt.pumpStage, `${seconds}s`);
+    }
+  }
+
   private async probeHealth(): Promise<void> {
     const backend = this.store.effectiveBackend();
     const runner = this.runners.get(backend);
@@ -1206,6 +1232,7 @@ export class Orchestrator implements OrchestratorApi {
     }
     await this.coreSupervisor?.tick();
     await this.reconcileExecutions();
+    this.reportStuckPumps();
     if (!changed) return;
     await this.broadcastHerdr();
     if (!state.ok) return;
@@ -3158,6 +3185,7 @@ export class Orchestrator implements OrchestratorApi {
       rt.again = true;
       return rt.pumping;
     }
+    rt.pumpSince = Date.now(); rt.pumpStage = "start"; rt.pumpReported = false;
     rt.pumping = (async () => {
       try {
         do {
@@ -3170,7 +3198,7 @@ export class Orchestrator implements OrchestratorApi {
         this.releaseSlots();
         console.error("전달 펌프 오류:", memberId, e);
       } finally {
-        rt.pumping = null;
+        rt.pumping = null; rt.pumpStage = null; rt.pumpSince = null;
       }
     })();
     return rt.pumping;
@@ -3239,6 +3267,7 @@ export class Orchestrator implements OrchestratorApi {
       // 잠들 때 보류된 것만 있으면 깨우지 않는다. 새 깨움이 와야 함께 나간다.
       const wakes = pending.some((d) => d.wake && !(d.status === "held" && d.holdReason === "asleep"));
       if (!wakes) return;
+      rt.pumpStage = "reopen";
       const reopened = await this.reopen(member);
       if (!reopened) {
         for (const d of pending) this.hold(d, member.status === "offline" ? "offline" : "backend_down");
@@ -3259,12 +3288,13 @@ export class Orchestrator implements OrchestratorApi {
       this.deferCoreCompact(member, "working");
       const urgent = pending.filter((d) => d.urgent);
       // headless 는 돌고 있는 턴에 끼워 넣을 수 없다. 끝나면 묶어서 나간다.
-      if (urgent.length > 0 && runner.kind !== "headless") await this.sendUrgent(member, project, runner, urgent);
+      if (urgent.length > 0 && runner.kind !== "headless") { rt.pumpStage = "send_urgent"; await this.sendUrgent(member, project, runner, urgent); }
       return;
     }
 
     // 쉬는 동안 바뀐 설정을 먼저 맞춘다. 일을 넣고 나면 턴이 끝날 때까지 못 맞춘다.
     if (runner.applyConfig && this.configPending(member)) {
+      rt.pumpStage = "sync_config";
       if (!(await this.syncConfig(member, project, runner, rt))) return;
       member = this.store.requireMember(memberId);
     }
@@ -3292,6 +3322,7 @@ export class Orchestrator implements OrchestratorApi {
         }
       })();
       rt.starting = started;
+      rt.pumpStage = "start_session";
       await started;
       if (failure) {
         this.store.patchMember(member.id, { lastError: (failure as Error).message });
@@ -3317,6 +3348,7 @@ export class Orchestrator implements OrchestratorApi {
     const autoCompact = hasWake && !rt.skipCompact && member.contextPct !== null && member.contextPct >= compactAt && (runner.kind !== "core" || exact);
     if (autoCompact && runner.kind === "core") this.queueCoreCompact(member, "auto", this.compactFocus(member));
     if (rt.compactRequest !== null || autoCompact) {
+      rt.pumpStage = "compact";
       await this.beginCompact(member, project, runner, rt, rt.compactRequest ?? this.compactFocus(member));
       return;
     }
@@ -3325,6 +3357,7 @@ export class Orchestrator implements OrchestratorApi {
     const turn: Turn = { kind: "work", admitted: runner.kind === "headless" || runner.kind === "core", text: "", interrupted: false };
     rt.turn = turn;
     if (rt.wantParallel !== null) {
+      rt.pumpStage = "parallel";
       const go = await this.applyParallel(member, project, runner, rt, this.store.listPending(memberId));
       if (!go || this.store.requireMember(memberId).status === "asleep") {
         rt.turn = null;
@@ -3353,6 +3386,7 @@ export class Orchestrator implements OrchestratorApi {
     const sender = runner;
     const sentConfig = this.desiredConfig(current);
     let result: SendResult;
+    rt.pumpStage = "send";
     try { result = await this.sendEnvelope(current, project, sender, ordered, false); }
     catch (error) {
       if (rt.turn === turn) rt.turn = null;
@@ -4200,7 +4234,7 @@ export class Orchestrator implements OrchestratorApi {
   private runtime(memberId: string): Runtime {
     let rt = this.runtimes.get(memberId);
     if (!rt) {
-      rt = { contextCandidate: null, turn: null, pumping: null, again: false, posted: false, delegated: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, reattaching: false, holdUntil: 0, configFails: 0, configGaveUp: null, background: null };
+      rt = { contextCandidate: null, turn: null, pumping: null, pumpStage: null, pumpSince: null, pumpReported: false, again: false, posted: false, delegated: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, reattaching: false, holdUntil: 0, configFails: 0, configGaveUp: null, background: null };
       this.runtimes.set(memberId, rt);
     }
     return rt;

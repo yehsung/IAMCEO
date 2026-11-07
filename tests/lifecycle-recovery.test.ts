@@ -297,6 +297,19 @@ test("a recovered start with no later turn stays received and fenced; time alone
   expect(f.count("terminal.send")).toBe(1);
 });
 
+test("a pump that never settles is reported once with its waiting stage and nothing is sent", async () => {
+  // Real 2026-11-07 run: one member's queue stayed stuck for minutes with no clue where its pump waited.
+  const f = await fixture(); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  const sendsBefore = f.count("terminal.send");
+  const rt = (f.orch as unknown as { runtime(id: string): { pumping: Promise<void> | null; pumpSince: number | null; pumpStage: string | null; pumpReported: boolean } }).runtime(member.id);
+  rt.pumping = new Promise<void>(() => {}); rt.pumpSince = Date.now() - 120_000; rt.pumpStage = "sync_config"; rt.pumpReported = false;
+  await f.orch.refreshConnection(); await f.orch.refreshConnection();
+  const reports = f.store.listActivity(member.id).filter(a => a.text.includes("전달 처리가") && a.text.includes("sync_config"));
+  expect(reports).toHaveLength(1);
+  expect(f.count("terminal.send")).toBe(sendsBefore); expect(f.count("terminal.interrupt")).toBe(0); expect(f.count("terminal.keys")).toBe(0);
+  rt.pumping = null; rt.pumpSince = null; rt.pumpStage = null;
+});
+
 test("same-turn idle after restart leaves the received execution fenced", async () => {
   const f = await fixture(); const member = await f.orch.createMember(f.project.id, { name: "Worker" }); f.started(false);
   await f.orch.assign(f.project.id, member.handle, { text: "Received but not started" });

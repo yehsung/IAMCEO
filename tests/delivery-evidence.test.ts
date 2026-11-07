@@ -79,6 +79,43 @@ describe("direct user evidence", () => {
   });
 });
 
+describe("Claude Code 2.1.31x transcript layout (observed in a real 2.1.319 session)", () => {
+  const cwdOf = () => runtime.paths.work;
+  const metaRows = () => [
+    { type: "mode", mode: "normal", sessionId: "session" },
+    { type: "permission-mode", permissionMode: "bypassPermissions", sessionId: "session" },
+    { type: "session-owner", accountUuid: "a", organizationUuid: "o", sessionId: "session" },
+    { type: "atis-latch", atis: "", sessionId: "session" },
+    { type: "attachment", sessionId: "session", cwd: cwdOf(), uuid: "att", attachment: { type: "hook_success", hookName: "SessionStart:startup", content: "" } },
+    { type: "attachment", sessionId: "session", cwd: cwdOf(), uuid: "att2", attachment: { type: "prompt_snapshot", systemPrompt: [marker] } },
+    { type: "api-request-shape", sessionId: "session", shape: { system: [] }, shapeHash: "h" },
+    { type: "api-request", sessionId: "session", id: "r", params: { model: "claude-haiku-5-5" }, tail: ["h1"] },
+    { type: "tools-used", sessionId: "session", tools: ["ToolSearch"] },
+  ];
+  const pasted = (text: string) => `\n\n<pasted_content id="a135">\n[시스템] 지금 상황: 연습\n${text}\n</pasted_content>`;
+  test("metadata records do not hide a marker in the user record, including the pasted_content wrapper", () => {
+    const result = readDeliveryEvidence(fixture("claude", [...metaRows(), claude(pasted(marker))]));
+    expect(result.receivedDeliveryIds).toEqual(["d1"]);
+    expect(result.evidence).toMatchObject({ verdict: "present", code: "marker_in_user_input" });
+  });
+  test("metadata-only range plus a recognized user record without the marker proves absence", () => {
+    const result = readDeliveryEvidence(fixture("claude", [...metaRows(), claude(pasted("다른 지시 #iamceo_zzzzzzzzzzzzzzzzzzzzzz"))]));
+    expect(result.evidence).toMatchObject({ verdict: "absent", complete: true, code: "complete_range_without_marker" });
+  });
+  test("a marker only in an API request copy is never absence", () => {
+    const blob = { type: "api-request-blob", sessionId: "session", hash: "h1", message: { role: "user", content: [{ type: "text", text: pasted(marker) }] } };
+    const result = readDeliveryEvidence(fixture("claude", [...metaRows(), claude(pasted("다른 글")), blob]));
+    expect(result.receivedDeliveryIds).toEqual([]);
+    expect(result.evidence).toMatchObject({ verdict: "unknown", complete: false, code: "marker_outside_user_input" });
+    const both = readDeliveryEvidence(fixture("claude", [...metaRows(), claude(pasted(marker)), blob]));
+    expect(both.evidence).toMatchObject({ verdict: "present", code: "marker_in_user_input" });
+  });
+  test("a still-unknown record type keeps the range unsupported", () => {
+    const result = readDeliveryEvidence(fixture("claude", [...metaRows(), { type: "queued-input-v9", sessionId: "session", text: marker }, claude("다른 글")]));
+    expect(result.evidence).toMatchObject({ verdict: "unknown", code: "unrecognized_layout" });
+  });
+});
+
 describe("range and identity safety", () => {
   test("baseline byte offset and event id exclude old/replayed inputs", () => {
     const opts = fixture("claude", [claude()]);

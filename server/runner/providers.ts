@@ -33,6 +33,9 @@ export function providerLaunch(member: RunnerMember, opts: StartOpts, bins: Prov
       args.push("--settings", JSON.stringify({ ...settings, statusLine: writeStatuslineWrapper(bins.contextHome) }));
     } else if (opts.settingsFile) args.push("--settings", opts.settingsFile);
     Object.assign(env, subagentEnv(member.subagentModel));
+    // Claude Code 2.1.3xx shows a dim follow-up suggestion inside an empty composer. core's terminal.read is plain
+    // text, so the suggestion reads exactly like a half-typed draft and blocks safe input. Off for this process only.
+    env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = "false";
     return { argv: [bin, ...args], env, sessionId };
   }
   // Codex owns its native id; inventing one would make resume silently wrong.

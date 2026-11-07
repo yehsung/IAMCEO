@@ -178,6 +178,19 @@ export function supportedUserTextLayout(cli: CliProvider, value: unknown): boole
     return (cli === "claude" ? ["tool_result", "image", "document"] : ["input_image", "image", "tool_result"]).includes(item.type as string);
   });
 }
+/**
+ * Claude transcript record types. Everything except "user" is metadata for evidence purposes. Claude Code 2.1.31x
+ * added the second row (observed in a real 2.1.319 session: hooks/context attachments, request shapes and
+ * per-message request blobs, mode/owner/tool bookkeeping). An unknown type still makes the range unsupported.
+ */
+const CLAUDE_RECORD_TYPES = ["user", "assistant", "system", "progress", "summary", "file-history-snapshot", "queue-operation", "last-prompt", "custom-title", "agent-name", "agent-color", "pr-link",
+  "attachment", "api-request", "api-request-blob", "api-request-shape", "mode", "permission-mode", "session-owner", "atis-latch", "tools-used"];
+function blobHasMarker(entry: Record<string, unknown>, marker: string): boolean {
+  const message = jsonObject(entry.message);
+  if (!message || message.role !== "user") return false;
+  const texts = typeof message.content === "string" ? [message.content] : textBlocks(message.content, ["text"]);
+  return texts.some((text) => hasExactMarker(text, marker));
+}
 /** No trimming, normalization, or matching inside a longer token. */
 export function hasExactMarker(text: string, marker: string): boolean {
   if (!marker) return false;
@@ -199,6 +212,8 @@ export interface DeliveryEvidenceCursor {
   meta: CodexSessionMeta | null;
   receivedDeliveryIds: string[];
   seenEventIds: string[];
+  /** Markers seen only in an API request copy, never in a user record (Claude). Absent in older cursors. */
+  blobOnlyDeliveryIds?: string[];
   conflict: boolean;
   unsupported: boolean;
   recognized: boolean;
@@ -257,13 +272,21 @@ export function readDeliveryEvidence(options: DeliveryEvidenceOptions): Delivery
   const range = readJsonlRange(root, path, state.log, { maxBytes: Math.max(0, budget - headerBytes), startOffset: baseline?.offset, fileIdentity: baseline?.fileIdentity });
   if (!["complete_range", "corrupt_log", "partial_log", "scan_pending"].includes(range.code)) return unknown(range.code);
   state.log = range.cursor;
-  const received = new Set(state.receivedDeliveryIds), seen = new Set(state.seenEventIds);
+  const received = new Set(state.receivedDeliveryIds), seen = new Set(state.seenEventIds), blobOnly = new Set(state.blobOnlyDeliveryIds ?? []);
   for (const record of range.records) {
     const entry = jsonObject(record.value);
     if (!entry || typeof entry.type !== "string") { state.unsupported = true; continue; }
     if (!supportedUserTextLayout(cli, entry)) state.unsupported = true;
     if (cli === "claude" && entry.sessionId === sessionId && entry.cwd === cwd && !entry.isSidechain) state.recognized = true;
-    if (!(cli === "claude" ? ["user", "assistant", "system", "progress", "summary", "file-history-snapshot", "queue-operation", "last-prompt", "custom-title", "agent-name", "agent-color", "pr-link"] : ["session_meta", "response_item", "event_msg", "turn_context", "compacted"]).includes(entry.type)) state.unsupported = true;
+    if (!(cli === "claude" ? CLAUDE_RECORD_TYPES : ["session_meta", "response_item", "event_msg", "turn_context", "compacted"]).includes(entry.type)) state.unsupported = true;
+    // An API request copy is not the session's received input, but a marker that appears only there means the
+    // user-record layout changed under us: never let it read as absence.
+    if (cli === "claude" && entry.type === "api-request-blob") {
+      for (const { deliveryId, marker } of markers) {
+        if ((options.bundleMarker && blobHasMarker(entry, options.bundleMarker)) || blobHasMarker(entry, marker)) blobOnly.add(deliveryId);
+      }
+      continue;
+    }
     if (cli === "codex" && entry.type === "session_meta") {
       const meta = parseCodexSessionMeta(entry);
       if (!meta || record.start !== 0 || (state.meta && (meta.sessionId !== state.meta.sessionId || meta.cwd !== state.meta.cwd))) state.unsupported = true;
@@ -284,8 +307,10 @@ export function readDeliveryEvidence(options: DeliveryEvidenceOptions): Delivery
   }
   state.receivedDeliveryIds = [...received];
   state.seenEventIds = [...seen];
-  const complete = range.complete && !state.conflict && !state.unsupported && (cli === "claude" ? state.recognized : state.meta?.sessionId === sessionId && state.meta.cwd === cwd);
+  state.blobOnlyDeliveryIds = [...blobOnly].filter((id) => !received.has(id));
+  const blobMismatch = state.blobOnlyDeliveryIds.length > 0;
+  const complete = range.complete && !state.conflict && !state.unsupported && !blobMismatch && (cli === "claude" ? state.recognized : state.meta?.sessionId === sessionId && state.meta.cwd === cwd);
   // Positive evidence survives an unrelated corrupt/partial line; conflicts do not authorize input.
-  const code = state.conflict ? "session_conflict" : received.size ? "marker_in_user_input" : state.unsupported ? "unrecognized_layout" : complete ? "complete_range_without_marker" : range.code;
+  const code = state.conflict ? "session_conflict" : received.size ? "marker_in_user_input" : state.unsupported ? "unrecognized_layout" : blobMismatch ? "marker_outside_user_input" : complete ? "complete_range_without_marker" : range.code;
   return { evidence: { source: cli === "claude" ? "claude_log" : "codex_log", verdict: received.size ? "present" : complete ? "absent" : "unknown", location: received.size ? "received_input" : "none", code, complete, checkedAt: new Date().toISOString() }, receivedDeliveryIds: [...received], cursor: state };
 }

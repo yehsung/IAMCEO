@@ -445,6 +445,9 @@ describe("compact control and shared native binding", () => {
     const launched = providerLaunch(member(), { ...f.opts, settingsFile }, { claudeBin: "/fake/claude", contextHome: f.dir });
     const settings = JSON.parse(launched.argv[launched.argv.indexOf("--settings") + 1]);
     expect(settings.permissions).toEqual({ allow: ["Read"] }); expect(settings.statusLine.command).toContain("iamceo-context-statusline"); expect(settings.statusLine.command).toContain(f.dir);
+    // The dim follow-up suggestion would read as a draft on core's plain-text screen; off for this process only.
+    expect(launched.env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION).toBe("false");
+    expect(launched.argv.join(" ")).not.toContain("PROMPT_SUGGESTION");
   });
   test("Claude compact sends one clean command; only new boundary plus settled emits compacted", async () => {
     const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);

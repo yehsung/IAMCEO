@@ -6,75 +6,111 @@ import SwiftTerm
 
 final class TerminalStreamTests: XCTestCase {
     func testPlatformPoliciesAndPureGridSelection() {
-        XCTAssertEqual(TerminalPlatform.mac.controlSizePolicy, .core)
+        XCTAssertEqual(TerminalPlatform.mac.openingMode, .control)
+        XCTAssertEqual(TerminalPlatform.iPhone.openingMode, .observe)
+        XCTAssertEqual(TerminalPlatform.mac.controlSizePolicy, .fit)
         XCTAssertEqual(TerminalPlatform.iPhone.controlSizePolicy, .fit)
-        XCTAssertTrue(TerminalPlatform.mac.startsOnTyping)
-        XCTAssertFalse(TerminalPlatform.iPhone.startsOnTyping)
-        XCTAssertTrue(TerminalPlatform.mac.acceptsKeyboard(mode: .observe))
-        XCTAssertFalse(TerminalPlatform.iPhone.acceptsKeyboard(mode: .observe))
-        XCTAssertTrue(TerminalPlatform.iPhone.acceptsKeyboard(mode: .control))
-        XCTAssertEqual(TerminalPlatform.iPhone.observeHint, "입력하려면 '입력 시작'을 누르세요")
-        XCTAssertEqual(TerminalPlatform.mac.observeHint, "키를 누르면 바로 입력합니다")
-        for viewport in [CGSize(width: 800, height: 500), CGSize(width: 390, height: 300)] {
-            for mode in [TerminalStreamMode.observe, .control] {
-                let grid = TerminalGridLayout.grid(platform: .mac, mode: mode, cols: 160, rows: 50,
-                    viewport: viewport, cellWidth: 7.2, cellHeight: 15)
-                XCTAssertEqual(grid.cols, 160); XCTAssertEqual(grid.rows, 50)
+        XCTAssertTrue(TerminalPlatform.mac.buffersStartingInput)
+        XCTAssertFalse(TerminalPlatform.iPhone.buffersStartingInput)
+        for platform in [TerminalPlatform.mac, .iPhone] {
+            XCTAssertFalse(platform.acceptsKeyboard(mode: .observe))
+            XCTAssertTrue(platform.acceptsKeyboard(mode: .control))
+            for viewport in [CGSize(width: 800, height: 500), CGSize(width: 390, height: 300)] {
+                let observing = TerminalGridLayout.grid(platform: platform, mode: .observe, cols: 160, rows: 50,
+                    viewport: viewport, cellWidth: 6, cellHeight: 12)
+                XCTAssertEqual(observing.cols, 160); XCTAssertEqual(observing.rows, 50)
+                let control = TerminalGridLayout.grid(platform: platform, mode: .control, cols: 160, rows: 50,
+                    viewport: viewport, cellWidth: 6, cellHeight: 12)
+                XCTAssertEqual(control.cols, Int(viewport.width / 6)); XCTAssertEqual(control.rows, Int(viewport.height / 12))
             }
-            let observing = TerminalGridLayout.grid(platform: .iPhone, mode: .observe, cols: 160, rows: 50,
-                viewport: viewport, cellWidth: 6, cellHeight: 12)
-            XCTAssertEqual(observing.cols, 160); XCTAssertEqual(observing.rows, 50)
-            let control = TerminalGridLayout.grid(platform: .iPhone, mode: .control, cols: 160, rows: 50,
-                viewport: viewport, cellWidth: 6, cellHeight: 12)
-            XCTAssertEqual(control.cols, Int(viewport.width / 6)); XCTAssertEqual(control.rows, Int(viewport.height / 12))
         }
+        XCTAssertEqual(TerminalPlatform.iPhone.observeHint, "입력하려면 '입력 시작'을 누르세요")
+        XCTAssertEqual(TerminalPlatform.mac.observeHint, "읽기 전용 화면입니다")
     }
     func testPlatformSizePolicyIsSentInRequest() async throws {
         let api = APIClient(endpoint: try ServerEndpoint("http://127.0.0.1:7881"), accessCode: "test")
         for platform in [TerminalPlatform.mac, .iPhone] {
             let request = try await api.terminalStreamRequest(memberID: "m", mode: .control, cols: 65, rows: 25,
                 leaseID: "lease", sizePolicy: platform.controlSizePolicy)
-            let url = try XCTUnwrap(request.url)
-            let items = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
-            XCTAssertEqual(items.first { $0.name == "size" }?.value, platform == .mac ? "core" : "fit")
+            let items = try XCTUnwrap(URLComponents(url: XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems)
+            XCTAssertEqual(items.first { $0.name == "size" }?.value, "fit")
         }
     }
-    @MainActor func testMacControlKeepsObserveGridFontAndScaleAcrossWindowAndCoreResize() {
+    func testSheetSizeFitsScreenWithDefaultAndMinimum() {
+        XCTAssertEqual(TerminalSheetLayout.size(visibleFrame: CGSize(width: 1920, height: 1080)), CGSize(width: 1120, height: 760))
+        XCTAssertEqual(TerminalSheetLayout.size(visibleFrame: CGSize(width: 1280, height: 800)), CGSize(width: 1120, height: 680))
+        XCTAssertEqual(TerminalSheetLayout.size(visibleFrame: CGSize(width: 1024, height: 768)), CGSize(width: 864, height: 648))
+        XCTAssertEqual(TerminalSheetLayout.size(visibleFrame: CGSize(width: 800, height: 600)), CGSize(width: 720, height: 480))
+        XCTAssertEqual(TerminalSheetLayout.size(visibleFrame: CGSize(width: 640, height: 480)), CGSize(width: 720, height: 460))
+    }
+    func testNaturalGridRoundsDownAndClampsExtremeViewports() {
+        let natural = TerminalGridLayout.control(viewport: CGSize(width: 799, height: 499), cellWidth: 7.5, cellHeight: 16)
+        XCTAssertEqual(natural.cols, 106); XCTAssertEqual(natural.rows, 31)
+        let minimum = TerminalGridLayout.control(viewport: .zero, cellWidth: 8, cellHeight: 16)
+        XCTAssertEqual(minimum.cols, 40); XCTAssertEqual(minimum.rows, 10)
+        let maximum = TerminalGridLayout.control(viewport: CGSize(width: 10000, height: 10000), cellWidth: 8, cellHeight: 16)
+        XCTAssertEqual(maximum.cols, 320); XCTAssertEqual(maximum.rows, 200)
+    }
+    @MainActor func testMacControlUsesActualFontCellsWithoutScalingAndFollowsViewportResize() {
+        #if os(macOS)
+        let client = TerminalStreamClient()
+        let parent = TerminalRepresentable(client: client, mode: .control, cols: 160, rows: 50,
+            following: .constant(true), onPendingInput: { _ in }, onSize: { _,_ in })
+        let coordinator = TerminalSurfaceCoordinator(parent)
+        let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 500), coordinator: coordinator)
+        coordinator.host = host
+        defer { host.teardown(); client.dispose() }
+        for size in [CGSize(width: 800, height: 500), CGSize(width: 640, height: 400), CGSize(width: 1000, height: 650)] {
+            host.frame.size = size; host.layoutSubtreeIfNeeded(); host.layout()
+            let canvas = host.documentView!
+            XCTAssertEqual(canvas.frame.size, canvas.bounds.size, "Control must never scale its canvas")
+            XCTAssertEqual(host.terminal.font.pointSize, 13)
+            let expected = TerminalGridLayout.control(
+                viewport: CGSize(width: host.contentSize.width - host.terminalGutter, height: host.contentSize.height),
+                cellWidth: host.cellSize.width, cellHeight: host.cellSize.height)
+            XCTAssertEqual(host.terminal.getTerminal().cols, expected.cols)
+            XCTAssertEqual(host.terminal.getTerminal().rows, expected.rows)
+            XCTAssertNotEqual(expected.cols, 160, "Ignore the core grid in control")
+        }
+        client.accept(.ready(mode: .control, cols: 180, rows: 60, expiresAt: nil))
+        client.accept(.resize(cols: 160, rows: 50))
+        let before = host.terminal.getTerminal().getDims()
+        host.feed(Data("paint after server resize".utf8))
+        XCTAssertEqual(host.terminal.getTerminal().cols, before.cols)
+        XCTAssertEqual(host.terminal.getTerminal().rows, before.rows)
+        #endif
+    }
+    @MainActor func testMacReadOnlyFallbackScalesCoreGridAndCannotType() {
         #if os(macOS)
         let client = TerminalStreamClient()
         let parent = TerminalRepresentable(client: client, mode: .observe, cols: 160, rows: 50,
-            following: .constant(true), onTypeWhileObserving: { _ in }, onSize: { _,_ in XCTFail("Mac must not propose a fit grid") })
+            following: .constant(true), onPendingInput: { _ in XCTFail("Read-only input must not claim control") }, onSize: { _,_ in })
         let coordinator = TerminalSurfaceCoordinator(parent)
         let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 500), coordinator: coordinator)
         coordinator.host = host
         defer { host.teardown(); client.dispose() }
         host.layoutSubtreeIfNeeded(); host.layout()
-        let canvas = host.documentView!
-        let observeFrame = canvas.frame.size, observeBounds = canvas.bounds.size
-        let font = host.terminal.font
-        coordinator.parent = TerminalRepresentable(client: client, mode: .control, cols: 160, rows: 50,
-            following: .constant(true), onTypeWhileObserving: { _ in XCTFail("Already controlling") }, onSize: { _,_ in XCTFail("No fit resize") })
-        host.layout()
-        XCTAssertEqual(canvas.frame.size, observeFrame); XCTAssertEqual(canvas.bounds.size, observeBounds)
-        XCTAssertEqual(host.terminal.font, font)
         XCTAssertEqual(host.terminal.getTerminal().cols, 160); XCTAssertEqual(host.terminal.getTerminal().rows, 50)
-        host.frame.size = CGSize(width: 640, height: 400); host.layout()
-        XCTAssertEqual(host.terminal.getTerminal().cols, 160); XCTAssertEqual(host.terminal.getTerminal().rows, 50)
-        coordinator.parent = TerminalRepresentable(client: client, mode: .control, cols: 180, rows: 60,
-            following: .constant(true), onTypeWhileObserving: { _ in }, onSize: { _,_ in XCTFail("No fit resize") })
-        host.layout()
-        XCTAssertEqual(host.terminal.getTerminal().cols, 180); XCTAssertEqual(host.terminal.getTerminal().rows, 60)
-        client.accept(.ready(mode: .control, cols: 180, rows: 60, expiresAt: nil))
-        client.accept(.resize(cols: 160, rows: 50))
-        host.feed(Data("paint after server resize".utf8)) // Before SwiftUI updates coordinator.parent.
-        XCTAssertEqual(host.terminal.getTerminal().cols, 160); XCTAssertEqual(host.terminal.getTerminal().rows, 50)
+        XCTAssertLessThan(host.documentView!.frame.width, host.documentView!.bounds.width)
+        coordinator.send(source: host.terminal, data: Array("ignored".utf8)[...])
+        #endif
+    }
+    @MainActor func testMacBackingScaleTracksOneAndTwoTimesWithoutExtraMagnification() {
+        #if os(macOS)
+        let canvas = TerminalDocumentCanvas(), child = NSView()
+        canvas.wantsLayer = true; child.wantsLayer = true; canvas.addSubview(child)
+        for scale: CGFloat in [2, 1, 2] {
+            TerminalSurfaceHost.applyBackingScale(to: canvas, scale: scale)
+            XCTAssertEqual(canvas.layer?.contentsScale, scale)
+            XCTAssertEqual(child.layer?.contentsScale, scale)
+        }
         #endif
     }
     @MainActor func testIOSObserverCannotFocusOrShowAccessoryOrStartInput() {
         #if os(iOS)
         let client = TerminalStreamClient()
         let parent = TerminalRepresentable(client: client, mode: .observe, cols: 160, rows: 50,
-            following: .constant(true), onTypeWhileObserving: { _ in XCTFail("iPhone input requires the button") }, onSize: { _,_ in })
+            following: .constant(true), onPendingInput: { _ in XCTFail("iPhone input requires the button") }, onSize: { _,_ in })
         let coordinator = TerminalSurfaceCoordinator(parent)
         let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 390, height: 500), coordinator: coordinator)
         coordinator.host = host
@@ -84,7 +120,7 @@ final class TerminalStreamTests: XCTestCase {
         XCTAssertNil(host.terminal.inputAccessoryView)
         coordinator.send(source: host.terminal, data: Array("ignored".utf8)[...])
         coordinator.parent = TerminalRepresentable(client: client, mode: .control, cols: 65, rows: 25,
-            following: .constant(true), onTypeWhileObserving: { _ in XCTFail() }, onSize: { _,_ in })
+            following: .constant(true), onPendingInput: { _ in XCTFail() }, onSize: { _,_ in })
         host.updateInputMode()
         XCTAssertTrue(host.terminal.canBecomeFirstResponder); XCTAssertNotNil(host.terminal.inputAccessoryView)
         coordinator.parent = parent; host.updateInputMode()
@@ -268,7 +304,8 @@ final class TerminalStreamTests: XCTestCase {
     @MainActor func testMacCanvasStartsAtTopSystemFontAndResizePreservesApplicationCursor() {
         #if os(macOS)
         XCTAssertTrue(TerminalDocumentCanvas().isFlipped)
-        XCTAssertEqual(TerminalSurfaceHost.font(12).fontName, NSFont.monospacedSystemFont(ofSize: 12, weight: .regular).fontName)
+        let expected = NSFont(name: "SFMono-Regular", size: 13) ?? NSFont(name: "Menlo-Regular", size: 13)!
+        XCTAssertEqual(TerminalSurfaceHost.font(13).fontName, expected.fontName)
         let view = SwiftTerm.TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 500), font: TerminalSurfaceHost.font(12))
         view.feed(text: "\u{1b}[?1h\u{1b}[?25l\u{1b}[31m")
         XCTAssertTrue(view.getTerminal().applicationCursor)
@@ -282,7 +319,7 @@ final class TerminalStreamTests: XCTestCase {
         let client = TerminalStreamClient()
         var following = true
         let parent = TerminalRepresentable(client: client, mode: .observe, cols: 100, rows: 30,
-            following: Binding(get: { following }, set: { following = $0 }), onTypeWhileObserving: { _ in }, onSize: { _,_ in })
+            following: Binding(get: { following }, set: { following = $0 }), onPendingInput: { _ in }, onSize: { _,_ in })
         let coordinator = TerminalSurfaceCoordinator(parent)
         let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 500), coordinator: coordinator)
         coordinator.host = host
@@ -315,7 +352,7 @@ final class TerminalStreamTests: XCTestCase {
         let client = TerminalStreamClient()
         var following = true
         let parent = TerminalRepresentable(client: client, mode: .observe, cols: 100, rows: 30,
-            following: Binding(get: { following }, set: { following = $0 }), onTypeWhileObserving: { _ in }, onSize: { _,_ in })
+            following: Binding(get: { following }, set: { following = $0 }), onPendingInput: { _ in }, onSize: { _,_ in })
         let coordinator = TerminalSurfaceCoordinator(parent)
         let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 500), coordinator: coordinator)
         coordinator.host = host
@@ -340,11 +377,11 @@ final class TerminalStreamTests: XCTestCase {
     @MainActor func testUserScrollInEitherModeKeepsBothHistoryAndViewportAcrossOutputAndCanResume() async throws {
         #if os(macOS)
         for mode in [TerminalStreamMode.observe, .control] {
-            for internalHistory in [true, false] {
+            for internalHistory in (mode == .control ? [true] : [true, false]) {
                 let client = TerminalStreamClient()
                 var following = true
                 let parent = TerminalRepresentable(client: client, mode: mode, cols: 160, rows: 50,
-                    following: Binding(get: { following }, set: { following = $0 }), onTypeWhileObserving: { _ in }, onSize: { _,_ in })
+                    following: Binding(get: { following }, set: { following = $0 }), onPendingInput: { _ in }, onSize: { _,_ in })
                 let coordinator = TerminalSurfaceCoordinator(parent)
                 let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 300), coordinator: coordinator)
                 coordinator.host = host
@@ -353,7 +390,8 @@ final class TerminalStreamTests: XCTestCase {
                 host.followCursor()
                 XCTAssertTrue(following, "Output and programmatic scrolling preserve following in \(mode)")
                 let before = host.scrollLocation
-                XCTAssertGreaterThan(before.viewportY, 0, "Following must reach the cursor before the display timer runs")
+                if mode == .observe { XCTAssertGreaterThan(before.viewportY, 0, "Following must reach the cursor before the display timer runs") }
+                else { XCTAssertEqual(before.viewportY, 0, "Fit control has no outer vertical overflow") }
                 XCTAssertGreaterThan(before.historyRow, 0, "Exercise a terminal with real scrollback")
                 let wiredScroller = internalHistory
                     ? host.terminal.subviews.compactMap { $0 as? NSScroller }.first : host.verticalScroller
@@ -386,19 +424,20 @@ final class TerminalStreamTests: XCTestCase {
                 following = true // The shared '맨 아래로' button resumes either mode.
                 host.followCursor()
                 XCTAssertGreaterThan(host.scrollLocation.historyRow, paused.historyRow)
-                XCTAssertGreaterThan(host.scrollLocation.viewportY, 0)
+                if mode == .observe { XCTAssertGreaterThan(host.scrollLocation.viewportY, 0) }
             }
         }
         #endif
     }
     @MainActor func testOuterScrollPreservesVisibleTextWhenHistoryFillsAndRecycles() async throws {
         #if os(macOS)
-        for mode in [TerminalStreamMode.observe, .control] {
+        // Only the scaled read-only fallback has an outer viewport scroll axis.
+        for mode in [TerminalStreamMode.observe] {
             for initialLines in [4980, 5200] {
                 let client = TerminalStreamClient()
                 var following = true
                 let parent = TerminalRepresentable(client: client, mode: mode, cols: 160, rows: 50,
-                    following: Binding(get: { following }, set: { following = $0 }), onTypeWhileObserving: { _ in }, onSize: { _,_ in })
+                    following: Binding(get: { following }, set: { following = $0 }), onPendingInput: { _ in }, onSize: { _,_ in })
                 let coordinator = TerminalSurfaceCoordinator(parent)
                 let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 300), coordinator: coordinator)
                 coordinator.host = host
@@ -455,7 +494,7 @@ final class TerminalStreamTests: XCTestCase {
             for timeout in [false, true] {
                 let client = TerminalStreamClient()
                 let parent = TerminalRepresentable(client: client, mode: mode, cols: 160, rows: 50,
-                    following: .constant(true), onTypeWhileObserving: { _ in }, onSize: { _,_ in })
+                    following: .constant(true), onPendingInput: { _ in }, onSize: { _,_ in })
                 let coordinator = TerminalSurfaceCoordinator(parent)
                 let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 300), coordinator: coordinator)
                 coordinator.host = host
@@ -465,7 +504,7 @@ final class TerminalStreamTests: XCTestCase {
                 try? await Task.sleep(for: .milliseconds(60))
                 let displayedCaret = host.terminal.caretFrame
                 let displayed = host.scrollLocation.viewportY
-                XCTAssertGreaterThan(displayed, 0)
+                if mode == .observe { XCTAssertGreaterThan(displayed, 0) }
                 host.feed(Data("\u{1b}[?2026h\u{1b}[1;1H".utf8))
                 host.followCursor() // All callers must honor the synchronized-output guard.
                 try? await Task.sleep(for: .milliseconds(80))
@@ -489,20 +528,21 @@ final class TerminalStreamTests: XCTestCase {
         for mode in [TerminalStreamMode.observe, .control] {
             let client = TerminalStreamClient()
             let parent = TerminalRepresentable(client: client, mode: mode, cols: 160, rows: 50,
-                following: .constant(true), onTypeWhileObserving: { _ in }, onSize: { _,_ in })
+                following: .constant(true), onPendingInput: { _ in }, onSize: { _,_ in })
             let coordinator = TerminalSurfaceCoordinator(parent)
             let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 300), coordinator: coordinator)
             coordinator.host = host
             defer { host.teardown(); client.dispose() }
             host.feed(Data((0..<150).map { "line \($0)\r\n" }.joined().utf8))
             host.followCursor()
-            XCTAssertGreaterThan(host.scrollLocation.viewportY, 0)
+            if mode == .observe { XCTAssertGreaterThan(host.scrollLocation.viewportY, 0) }
             host.feed(Data("\u{1b}[1;1H".utf8))
             host.followCursor()
             XCTAssertEqual(host.scrollLocation.viewportY, 0, accuracy: 0.5, "Follow the new cursor row synchronously")
             host.feed(Data("\u{1b}[50;1H".utf8))
             host.followCursor()
-            XCTAssertGreaterThan(host.scrollLocation.viewportY, 0, "Resume at the bottom without waiting for paint")
+            if mode == .observe { XCTAssertGreaterThan(host.scrollLocation.viewportY, 0, "Resume at the bottom without waiting for paint") }
+            else { XCTAssertEqual(host.scrollLocation.viewportY, 0) }
         }
         #endif
     }
@@ -512,7 +552,7 @@ final class TerminalStreamTests: XCTestCase {
             let client = TerminalStreamClient()
             var following = true
             let parent = TerminalRepresentable(client: client, mode: .observe, cols: 100, rows: 30,
-                following: Binding(get: { following }, set: { following = $0 }), onTypeWhileObserving: { _ in }, onSize: { _,_ in })
+                following: Binding(get: { following }, set: { following = $0 }), onPendingInput: { _ in }, onSize: { _,_ in })
             let coordinator = TerminalSurfaceCoordinator(parent)
             let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 500), coordinator: coordinator)
             coordinator.host = host
@@ -540,11 +580,11 @@ final class TerminalStreamTests: XCTestCase {
         XCTAssertEqual(TerminalScrollLocation.viewportY(-10, minimum: 0, maximum: 100), 0)
         XCTAssertEqual(TerminalScrollLocation.viewportY(0, minimum: 0, maximum: -50), 0)
     }
-    @MainActor func testMacEscAndTabAreTerminalInputWhileObserving() {
+    @MainActor func testMacEscAndTabAreBufferedTerminalInputWhileConnecting() {
         #if os(macOS)
         let client = TerminalStreamClient()
         var typed = Data()
-        let parent = TerminalRepresentable(client: client, mode: .observe, cols: 100, rows: 30, following: .constant(true), onTypeWhileObserving: { typed.append($0) }, onSize: { _,_ in })
+        let parent = TerminalRepresentable(client: client, mode: .control, cols: 100, rows: 30, following: .constant(true), onPendingInput: { typed.append($0) }, onSize: { _,_ in })
         let coordinator = TerminalSurfaceCoordinator(parent)
         let view = TerminalCanvas(frame: CGRect(x: 0,y: 0,width: 800,height: 500), font: TerminalSurfaceHost.font(12))
         view.terminalDelegate = coordinator

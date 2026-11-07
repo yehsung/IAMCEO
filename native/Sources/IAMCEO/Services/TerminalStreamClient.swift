@@ -13,11 +13,12 @@ enum TerminalPlatform: Sendable {
         .iPhone
         #endif
     }
-    var controlSizePolicy: TerminalSizePolicy { self == .mac ? .core : .fit }
-    var startsOnTyping: Bool { self == .mac }
-    var observeHint: String { self == .mac ? "키를 누르면 바로 입력합니다" : "입력하려면 '입력 시작'을 누르세요" }
+    var controlSizePolicy: TerminalSizePolicy { .fit }
+    var openingMode: TerminalStreamMode { self == .mac ? .control : .observe }
+    var buffersStartingInput: Bool { self == .mac }
+    var observeHint: String { self == .mac ? "읽기 전용 화면입니다" : "입력하려면 '입력 시작'을 누르세요" }
     func usesCoreGrid(mode: TerminalStreamMode) -> Bool { mode == .observe || controlSizePolicy == .core }
-    func acceptsKeyboard(mode: TerminalStreamMode) -> Bool { mode == .control || startsOnTyping }
+    func acceptsKeyboard(mode: TerminalStreamMode) -> Bool { mode == .control }
 }
 enum TerminalStreamState: Equatable, Sendable {
     case connecting
@@ -261,6 +262,12 @@ struct TerminalReconnectPolicy {
 }
 
 struct TerminalPresentation {
+    static func controlStatus(expiresAt: Double?, now: Date) -> String {
+        let status = "직접 입력 중 · 이 직원의 자동 전달이 멈춰 있습니다"
+        guard let expiresAt else { return status }
+        let seconds = max(0, Int(ceil(expiresAt / 1000 - now.timeIntervalSince1970)))
+        return seconds < 60 ? "\(status) · \(seconds)초 남음" : status
+    }
     static func holdsLease(_ lease: TerminalLease?, now: Date = Date()) -> Bool {
         lease?.leaseId != nil && (lease?.expiresAt.map { $0 > now.timeIntervalSince1970 * 1000 } ?? true)
     }

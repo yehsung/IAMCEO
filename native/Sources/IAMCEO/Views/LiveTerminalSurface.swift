@@ -28,12 +28,12 @@ struct LiveTerminalSurface: View {
     let mode: TerminalStreamMode
     let cols: Int
     let rows: Int
-    var onTypeWhileObserving: (Data) -> Void
+    var onPendingInput: (Data) -> Void
     var onSize: (Int, Int) -> Void
     @State private var following = true
     var body: some View {
         TerminalRepresentable(client: client, mode: mode, cols: cols, rows: rows, following: $following,
-                              onTypeWhileObserving: onTypeWhileObserving, onSize: onSize)
+                              onPendingInput: onPendingInput, onSize: onSize)
             .overlay(alignment: .bottomTrailing) {
                 if !following && (mode == .observe || TerminalPlatform.current == .mac) {
                     Button("새 출력이 있습니다 · 맨 아래로", systemImage: "arrow.down.to.line") { following = true }
@@ -48,19 +48,18 @@ final class TerminalSurfaceCoordinator: NSObject, @preconcurrency TerminalViewDe
     var parent: TerminalRepresentable
     let outputID = UUID()
     weak var host: TerminalSurfaceHost?
+    private var reportedSize: [Int] = []
     init(_ parent: TerminalRepresentable) { self.parent = parent }
     func sizeChanged(source: SwiftTerm.TerminalView, newCols: Int, newRows: Int) {
         guard parent.mode == .control, TerminalPlatform.current.controlSizePolicy == .fit else { return }
-        Task { [weak self] in
-            guard let self, self.parent.mode == .control else { return }
-            self.parent.onSize(newCols, newRows)
-        }
+        reportSize(cols: newCols, rows: newRows)
         parent.client.resize(cols: newCols, rows: newRows)
     }
     func send(source: SwiftTerm.TerminalView, data: ArraySlice<UInt8>) {
         guard host?.feeding != true else { return } // VT device reports never claim human control.
-        if parent.mode == .control { parent.client.send(Data(data)) }
-        else if TerminalPlatform.current.startsOnTyping { parent.onTypeWhileObserving(Data(data)) }
+        guard parent.mode == .control else { return }
+        if case .live(mode: .control, cols: _, rows: _) = parent.client.state { parent.client.send(Data(data)) }
+        else if TerminalPlatform.current.buffersStartingInput { parent.onPendingInput(Data(data)) }
     }
     func setTerminalTitle(source: SwiftTerm.TerminalView, title: String) {}
     func hostCurrentDirectoryUpdate(source: SwiftTerm.TerminalView, directory: String?) {}
@@ -91,23 +90,38 @@ final class TerminalSurfaceCoordinator: NSObject, @preconcurrency TerminalViewDe
         parent.following = false
     }
     func displayGrid(viewport: CGSize) -> (cols: Int, rows: Int) {
-        guard let terminal = host?.terminal else { return (parent.cols, parent.rows) }
+        guard let host else { return (parent.cols, parent.rows) }
+        #if os(iOS)
+        let terminal = host.terminal
         let dimensions = terminal.getTerminal().getDims()
         let ideal = terminal.getOptimalFrameSize().size
+        #endif
         // A resize event can precede SwiftUI's representable update and its next
         // binary paint. Read the live grid here so that paint uses the new grid.
         let core: (cols: Int, rows: Int)
         if parent.mode == .control, case .live(mode: .control, cols: _, rows: _) = parent.client.state {
             core = parent.client.grid
         } else { core = (parent.cols, parent.rows) }
-        return TerminalGridLayout.grid(platform: .current, mode: parent.mode, cols: core.cols, rows: core.rows,
+        #if os(macOS)
+        let cell = host.cellSize
+        return TerminalGridLayout.grid(platform: .mac, mode: parent.mode, cols: core.cols, rows: core.rows,
+            viewport: CGSize(width: max(0, viewport.width - host.terminalGutter), height: viewport.height),
+            cellWidth: cell.width, cellHeight: cell.height)
+        #else
+        return TerminalGridLayout.grid(platform: .iPhone, mode: parent.mode, cols: core.cols, rows: core.rows,
             viewport: viewport, cellWidth: ideal.width / CGFloat(max(1, dimensions.cols)),
             cellHeight: ideal.height / CGFloat(max(1, dimensions.rows)))
+        #endif
     }
     func naturalGrid(viewport: CGSize, ideal: CGSize, cols: Int, rows: Int) -> (cols: Int, rows: Int) {
         let grid = TerminalGridLayout.control(viewport: viewport, cellWidth: ideal.width / CGFloat(max(1, cols)), cellHeight: ideal.height / CGFloat(max(1, rows)))
-        Task { [weak self] in self?.parent.onSize(grid.cols, grid.rows) }
+        reportSize(cols: grid.cols, rows: grid.rows)
         return grid
+    }
+    private func reportSize(cols: Int, rows: Int) {
+        guard reportedSize != [cols, rows] else { return }
+        reportedSize = [cols, rows]
+        Task { [weak self] in self?.parent.onSize(cols, rows) }
     }
 }
 
@@ -168,7 +182,7 @@ struct TerminalRepresentable: NSViewRepresentable {
     let cols: Int
     let rows: Int
     @Binding var following: Bool
-    let onTypeWhileObserving: (Data) -> Void
+    let onPendingInput: (Data) -> Void
     let onSize: (Int, Int) -> Void
     func makeCoordinator() -> TerminalSurfaceCoordinator { TerminalSurfaceCoordinator(self) }
     func makeNSView(context: Context) -> TerminalSurfaceHost {
@@ -219,13 +233,14 @@ final class TerminalSurfaceHost: NSScrollView {
         var options = TerminalOptions.default
         options.cols = coordinator.parent.cols; options.rows = coordinator.parent.rows
         options.scrollback = 5000
-        terminal = TerminalCanvas(frame: CGRect(x: 0, y: 0, width: 800, height: 500), font: Self.font(12), options: options)
+        terminal = TerminalCanvas(frame: CGRect(x: 0, y: 0, width: 800, height: 500), font: Self.font(13), options: options)
         super.init(frame: frame)
         drawsBackground = true; backgroundColor = NSColor(red: 11/255, green: 9/255, blue: 24/255, alpha: 1)
         hasVerticalScroller = true; hasHorizontalScroller = true; autohidesScrollers = true
         terminal.nativeBackgroundColor = backgroundColor
         terminal.nativeForegroundColor = NSColor(CE.ink); terminal.caretColor = NSColor(CE.accent)
         terminal.terminalDelegate = coordinator; terminal.surface = self
+        canvas.wantsLayer = true
         canvas.addSubview(terminal); documentView = canvas
         let scrollers = [verticalScroller].compactMap { $0 } + terminal.subviews.compactMap { $0 as? NSScroller }
         scrollActions = scrollers.filter { $0.action != nil }.map { TerminalScrollAction(scroller: $0, coordinator: coordinator) }
@@ -246,7 +261,30 @@ final class TerminalSurfaceHost: NSScrollView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     static func font(_ size: CGFloat) -> NSFont {
-        .monospacedSystemFont(ofSize: size, weight: .regular)
+        NSFont(name: "SFMono-Regular", size: size) ?? NSFont(name: "Menlo-Regular", size: size)
+            ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+    var terminalGutter: CGFloat {
+        guard let scroller = terminal.subviews.compactMap({ $0 as? NSScroller }).first, !scroller.isHidden else { return 0 }
+        return NSScroller.scrollerWidth(for: .regular, scrollerStyle: scroller.scrollerStyle)
+    }
+    var cellSize: CGSize {
+        let dims = terminal.getTerminal().getDims(), ideal = terminal.getOptimalFrameSize().size
+        return CGSize(width: (ideal.width - terminalGutter) / CGFloat(max(1, dims.cols)),
+                      height: ideal.height / CGFloat(max(1, dims.rows)))
+    }
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateBackingScale()
+    }
+    private func updateBackingScale() {
+        guard let scale = window?.backingScaleFactor else { return }
+        Self.applyBackingScale(to: canvas, scale: scale)
+    }
+    static func applyBackingScale(to view: NSView, scale: CGFloat) {
+        view.layer?.contentsScale = scale
+        view.needsDisplay = true
+        view.subviews.forEach { applyBackingScale(to: $0, scale: scale) }
     }
     func teardown() {
         followTask?.cancel(); followTask = nil
@@ -258,6 +296,7 @@ final class TerminalSurfaceHost: NSScrollView {
         super.viewDidMoveToWindow()
         if let inputMonitor { NSEvent.removeMonitor(inputMonitor); self.inputMonitor = nil }
         if window != nil {
+            updateBackingScale()
             window?.makeFirstResponder(terminal)
             inputMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .keyDown]) { [weak self] event in
                 guard let self, event.window === self.window else { return event }
@@ -285,6 +324,9 @@ final class TerminalSurfaceHost: NSScrollView {
         }
         let parent = coordinator.parent
         terminal.allowMouseReporting = parent.mode == .control
+        let cell = cellSize
+        _ = coordinator.naturalGrid(viewport: CGSize(width: max(0, contentSize.width - terminalGutter), height: contentSize.height),
+            ideal: cell, cols: 1, rows: 1)
         let grid = coordinator.displayGrid(viewport: contentSize)
         let key = [contentSize.width, contentSize.height, CGFloat(grid.cols), CGFloat(grid.rows), parent.mode == .control ? 1 : 0]
         guard key != layoutKey else { return }; layoutKey = key
@@ -295,10 +337,15 @@ final class TerminalSurfaceHost: NSScrollView {
             fixedGrid = [grid.cols, grid.rows]
         }
         let ideal = terminal.getOptimalFrameSize().size
-        let fit = TerminalGridLayout.observe(cols: grid.cols, rows: grid.rows, viewportWidth: contentSize.width,
-                                              baseFont: 12, minimumFont: 8, cellWidth: ideal.width / CGFloat(grid.cols), cellHeight: ideal.height / CGFloat(grid.rows))
-        // Both modes scale the same core grid without reflowing SwiftTerm.
-        canvas.setFrameSize(CGSize(width: fit.width, height: fit.height)); canvas.setBoundsSize(ideal)
+        if parent.mode == .control {
+            // Actual 13pt cells, with identical frame/bounds: no scale transform.
+            canvas.setFrameSize(ideal); canvas.setBoundsSize(ideal)
+        } else {
+            let fit = TerminalGridLayout.observe(cols: grid.cols, rows: grid.rows, viewportWidth: contentSize.width,
+                baseFont: 13, minimumFont: 8, cellWidth: ideal.width / CGFloat(grid.cols), cellHeight: ideal.height / CGFloat(grid.rows))
+            canvas.setFrameSize(CGSize(width: fit.width, height: fit.height)); canvas.setBoundsSize(ideal)
+        }
+        updateBackingScale()
     }
 
     func handleObservedKey(_ event: NSEvent) {
@@ -386,7 +433,7 @@ struct TerminalRepresentable: UIViewRepresentable {
     let cols: Int
     let rows: Int
     @Binding var following: Bool
-    let onTypeWhileObserving: (Data) -> Void
+    let onPendingInput: (Data) -> Void
     let onSize: (Int, Int) -> Void
     func makeCoordinator() -> TerminalSurfaceCoordinator { TerminalSurfaceCoordinator(self) }
     func makeUIView(context: Context) -> TerminalSurfaceHost {

@@ -939,9 +939,9 @@ struct MemberDetailView: View {
                     .ceSecondaryButton().controlSize(.small)
                     .help("\(m.name)와 주고받은 대화")
                 if showsTerminal {
-                    Button { openTerminal(m) } label: { Label("터미널", systemImage: "terminal") }
+                    Button { openTerminal(m) } label: { Label(isMac ? "터미널 직접 열기" : "터미널", systemImage: "terminal") }
                         .ceSecondaryButton().controlSize(.small)
-                        .help(terminalHelp(m))
+                        .help(isMac ? "이 CLI 터미널을 열고 바로 직접 입력합니다. 여는 동안 자동 전달이 멈춥니다." : terminalHelp(m))
                         .accessibilityLabel("\(m.name) 터미널 열기")
                 }
                 if !manual && busyTurn {

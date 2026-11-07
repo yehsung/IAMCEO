@@ -29,8 +29,8 @@ struct TerminalView: View {
     /// content is centred in a narrower window and clipped on both sides. Wide enough for the core grid at a
     /// readable size, never wider than the screen.
     #if os(macOS)
-    private var sheetWidth: CGFloat { min(1040, max(720, (NSScreen.main?.visibleFrame.width ?? 1280) - 160)) }
-    private var sheetHeight: CGFloat { min(720, max(460, (NSScreen.main?.visibleFrame.height ?? 900) - 140)) }
+    private var sheetWidth: CGFloat { min(1280, max(720, (NSScreen.main?.visibleFrame.width ?? 1280) - 160)) }
+    private var sheetHeight: CGFloat { min(940, max(460, (NSScreen.main?.visibleFrame.height ?? 900) - 120)) }
     #else
     private let sheetWidth: CGFloat = 1040
     #endif

@@ -18,7 +18,7 @@ import SwiftUI
 // CECloseButton { }                               round quiet ×, Esc
 // Avatar(name:, cli:, size:)                      neutral session glyph (no person initials)
 // ContextMeter(pct:)                              tiny bar + "문맥 n%"
-// MarkdownText(text:)                             paragraphs, headings, lists, code fences
+// MarkdownText(text:size:)                        the web board's markdown: tables, quotes, lists, code
 // relativeTime(_ iso:) / clockTime(_ iso:)        "방금", "3분 전", "14:20", "어제 14:20", "11월 4일"
 
 private struct InsideGlassKey: EnvironmentKey { static let defaultValue = false }
@@ -678,36 +678,67 @@ struct ContextMeter: View {
     }
 }
 
+/// Markdown as the old web board drew it (GitHub style), with its typography: body text at `size` (15 by default)
+/// with a 1.65 line height, 0.7em between blocks, headings at 1.3 / 1.18 / 1.06em with room above them. Blocks:
+/// headings, paragraphs, nested and numbered lists with task boxes, block quotes, rules, fenced code, and pipe tables
+/// drawn as a real grid. Inline: bold, italic, `code` (a faint chip), links and ~~strikethrough~~; a single `~` stays a
+/// tilde ("0.0~3.9" is a range, never a strike). Sizes follow Dynamic Type on iPhone.
 struct MarkdownText: View {
     let text: String
-    var font: Font = CEFont.body
     /// When the body opens with `# <this title>` (documents repeat their own title), that heading is not drawn again.
-    var omitTitle: String? = nil
+    var omitTitle: String?
+    @ScaledMetric private var size: CGFloat
+
+    init(text: String, size: CGFloat = 15, omitTitle: String? = nil) {
+        self.text = text
+        self.omitTitle = omitTitle
+        _size = ScaledMetric(wrappedValue: size, relativeTo: .subheadline)
+    }
+
+    /// Extra space between two lines of one paragraph: a 1.65 line height over the system font's own ~1.2.
+    private var leading: CGFloat { (size * 0.45).rounded() }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: (size * 0.7).rounded()) {
             ForEach(Array(visibleBlocks.enumerated()), id: \.offset) { index, block in
                 switch block {
                 case .heading(let level, let value):
-                    Text(inline(value)).font(headingFont(level)).foregroundStyle(CE.ink)
-                        .padding(.top, index == 0 ? 0 : level == 2 ? 6 : level == 3 ? 4 : 2)
+                    Text(markdownInline(value))
+                        .font(.system(size: headingSize(level), weight: .semibold))
+                        .tracking(-0.15)
+                        .lineSpacing((size * 0.2).rounded())
+                        .foregroundStyle(level >= 4 ? CE.ink2 : CE.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, index == 0 ? 0 : (size * (level <= 2 ? 0.55 : 0.4)).rounded())
                         .accessibilityAddTraits(.isHeader)
                 case .code(let value):
+                    let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
                     ScrollView(.horizontal, showsIndicators: false) {
-                        Text(value).font(CEFont.mono).foregroundStyle(CE.ink2).padding(10)
+                        Text(value).font(.system(size: (size * 0.87).rounded(), design: .monospaced))
+                            .lineSpacing((size * 0.3).rounded())
+                            .foregroundStyle(CE.ink2)
+                            .padding(.horizontal, 14).padding(.vertical, 12)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
+                    .background(Color(red: 5 / 255, green: 4 / 255, blue: 11 / 255).opacity(0.55), in: shape)
+                    .overlay { shape.strokeBorder(CE.line) }
                 case .list(let items):
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                                Text(item.marker).font(font).foregroundStyle(CE.ink3)
-                                Text(inline(item.text)).font(font).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
+                    VStack(alignment: .leading, spacing: (size * 0.25).rounded()) {
+                        ForEach(Array(items.enumerated()), id: \.offset) { _, item in listRow(item) }
                     }
+                case .quote(let value):
+                    HStack(alignment: .top, spacing: 12) {
+                        RoundedRectangle(cornerRadius: 1).fill(CE.accent.opacity(0.7)).frame(width: 2)
+                        MarkdownText(text: value, size: size).foregroundStyle(CE.ink2)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                case .rule:
+                    Rectangle().fill(CE.line).frame(height: 1).padding(.vertical, (size * 0.2).rounded())
+                case .table(let table):
+                    MarkdownTableView(table: table, size: (size * 0.93).rounded())
                 case .paragraph(let value):
-                    Text(inline(value)).font(font).lineSpacing(4).fixedSize(horizontal: false, vertical: true)
+                    Text(markdownInline(value)).font(.system(size: size)).lineSpacing(leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -715,51 +746,127 @@ struct MarkdownText: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func headingFont(_ level: Int) -> Font {
-        switch level { case 1: CEFont.heading1; case 2: CEFont.heading2; default: CEFont.heading3 }
+    /// One item: the marker in a gutter (1.35em, like the web list padding), the text wrapping beside it.
+    @ViewBuilder private func listRow(_ item: ListItem) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
+            Group {
+                if let done = item.task {
+                    Image(systemName: done ? "checkmark.square.fill" : "square")
+                        .font(.system(size: size * 0.9)).foregroundStyle(done ? CE.accent : CE.ink3)
+                } else {
+                    Text(item.marker).font(.system(size: item.marker.count > 1 ? size * 0.93 : size)).foregroundStyle(CE.ink3)
+                        .monospacedDigit()
+                }
+            }
+            .frame(minWidth: (size * 1.35).rounded(), alignment: .leading)
+            .padding(.trailing, item.marker.count > 2 ? 4 : 0)
+            Text(markdownInline(item.text)).font(.system(size: size)).lineSpacing(leading)
+                .foregroundStyle(item.task == true ? CE.ink2 : CE.ink)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.leading, CGFloat(item.level) * (size * 1.35).rounded())
     }
 
-    private var visibleBlocks: [Block] {
-        let all = blocks
+    private func headingSize(_ level: Int) -> CGFloat {
+        switch level { case 1: (size * 1.3).rounded(); case 2: (size * 1.18).rounded(); case 3: (size * 1.06).rounded(); default: size }
+    }
+
+    private var visibleBlocks: [MarkdownBlock] {
+        let all = MarkdownBlock.parse(text)
         guard let title = omitTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
               case .heading(1, let first)? = all.first,
               first.trimmingCharacters(in: .whitespacesAndNewlines) == title else { return all }
         return Array(all.dropFirst())
     }
+}
 
-    private enum Block { case heading(Int, String), code(String), list([ListItem]), paragraph(String) }
-    private struct ListItem { let marker: String; let text: String }
+struct MarkdownListItem: Equatable {
+    let marker: String
+    let text: String
+    /// Nesting depth (two spaces or a tab per level).
+    var level = 0
+    /// A task box: nil for a plain item, else whether it is ticked.
+    var task: Bool? = nil
+}
+private typealias ListItem = MarkdownListItem
 
-    private var blocks: [Block] {
-        var result: [Block] = []
+struct MarkdownTable: Equatable {
+    enum Align: Equatable { case leading, center, trailing }
+    var header: [String]
+    var align: [Align]
+    var rows: [[String]]
+}
+
+enum MarkdownBlock: Equatable {
+    case heading(Int, String), code(String), list([MarkdownListItem]), quote(String), rule, table(MarkdownTable), paragraph(String)
+
+    static func parse(_ text: String) -> [MarkdownBlock] {
+        var result: [MarkdownBlock] = []
         var paragraph: [String] = []
-        var list: [ListItem] = []
+        var list: [MarkdownListItem] = []
+        var quote: [String] = []
         var code: [String]? = nil
         func flush() {
             if !paragraph.isEmpty { result.append(.paragraph(paragraph.joined(separator: "\n"))); paragraph = [] }
             if !list.isEmpty { result.append(.list(list)); list = [] }
+            if !quote.isEmpty { result.append(.quote(quote.joined(separator: "\n"))); quote = [] }
         }
-        for raw in text.components(separatedBy: "\n") {
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        var i = 0
+        while i < lines.count {
+            let raw = lines[i]
             let line = raw.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("```") {
+            defer { i += 1 }
+            if line.hasPrefix("```") || line.hasPrefix("~~~") {
                 if let current = code { result.append(.code(current.joined(separator: "\n"))); code = nil }
                 else { flush(); code = [] }
                 continue
             }
             if code != nil { code?.append(raw); continue }
             if line.isEmpty { flush(); continue }
-            if line.hasPrefix("### ") { flush(); result.append(.heading(3, String(line.dropFirst(4)))); continue }
-            if line.hasPrefix("## ") { flush(); result.append(.heading(2, String(line.dropFirst(3)))); continue }
-            if line.hasPrefix("# ") { flush(); result.append(.heading(1, String(line.dropFirst(2)))); continue }
-            if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("• ") {
-                if !paragraph.isEmpty { result.append(.paragraph(paragraph.joined(separator: "\n"))); paragraph = [] }
-                list.append(ListItem(marker: "•", text: String(line.dropFirst(2)))); continue
+            // A pipe table: a row of cells, then a separator row of dashes.
+            if line.contains("|"), i + 1 < lines.count, let align = separator(lines[i + 1]) {
+                let header = cells(line)
+                if header.count == align.count || (header.count > 0 && align.count > 0) {
+                    flush()
+                    let width = max(header.count, align.count)
+                    var rows: [[String]] = []
+                    var j = i + 2
+                    while j < lines.count {
+                        let next = lines[j].trimmingCharacters(in: .whitespaces)
+                        guard !next.isEmpty, next.contains("|") else { break }
+                        rows.append(pad(cells(next), to: width))
+                        j += 1
+                    }
+                    result.append(.table(MarkdownTable(header: pad(header, to: width), align: pad(align, to: width, with: .leading), rows: rows)))
+                    i = j - 1
+                    continue
+                }
             }
-            if let dot = line.firstIndex(of: "."), line[..<dot].allSatisfy(\.isNumber), !line[..<dot].isEmpty, line[line.index(after: dot)...].hasPrefix(" ") {
-                if !paragraph.isEmpty { result.append(.paragraph(paragraph.joined(separator: "\n"))); paragraph = [] }
-                list.append(ListItem(marker: String(line[...dot]), text: String(line[line.index(dot, offsetBy: 2)...]))); continue
+            if line.hasPrefix(">") {
+                if !paragraph.isEmpty || !list.isEmpty { flush() }
+                var inner = String(line.dropFirst())
+                if inner.hasPrefix(" ") { inner.removeFirst() }
+                quote.append(inner)
+                continue
             }
-            if !list.isEmpty { result.append(.list(list)); list = [] }
+            if !quote.isEmpty { flush() }
+            if isRule(line) { flush(); result.append(.rule); continue }
+            if let heading = heading(line) { flush(); result.append(heading); continue }
+            if let item = listItem(raw) {
+                if !paragraph.isEmpty { result.append(.paragraph(paragraph.joined(separator: "\n"))); paragraph = [] }
+                list.append(item)
+                continue
+            }
+            if !list.isEmpty {
+                // An indented line under a list item continues that item.
+                if raw.hasPrefix("  ") || raw.hasPrefix("\t"), var last = list.popLast() {
+                    last = MarkdownListItem(marker: last.marker, text: last.text + "\n" + line, level: last.level, task: last.task)
+                    list.append(last)
+                    continue
+                }
+                result.append(.list(list)); list = []
+            }
             paragraph.append(line)
         }
         if let code { result.append(.code(code.joined(separator: "\n"))) }
@@ -767,8 +874,259 @@ struct MarkdownText: View {
         return result
     }
 
-    private func inline(_ value: String) -> AttributedString {
-        (try? AttributedString(markdown: value, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(value)
+    private static func heading(_ line: String) -> MarkdownBlock? {
+        let hashes = line.prefix { $0 == "#" }.count
+        guard (1...6).contains(hashes), line.dropFirst(hashes).hasPrefix(" ") else { return nil }
+        var title = line.dropFirst(hashes + 1).trimmingCharacters(in: .whitespaces)
+        // Closing hashes ("## Title ##") are not part of the title.
+        while title.hasSuffix("#") { title.removeLast() }
+        return .heading(hashes, title.trimmingCharacters(in: .whitespaces))
+    }
+
+    private static func isRule(_ line: String) -> Bool {
+        let compact = line.replacingOccurrences(of: " ", with: "")
+        guard compact.count >= 3, let first = compact.first, "-*_".contains(first) else { return false }
+        return compact.allSatisfy { $0 == first }
+    }
+
+    private static func listItem(_ raw: String) -> MarkdownListItem? {
+        let indent = raw.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $0 + ($1 == "\t" ? 2 : 1) }
+        let line = raw.trimmingCharacters(in: .whitespaces)
+        let level = min(indent / 2, 4)
+        var marker: String
+        var rest: Substring
+        if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") || line.hasPrefix("• ") {
+            marker = ["•", "◦", "▪"][min(level, 2)]
+            rest = line.dropFirst(2)
+        } else if let dot = line.firstIndex(where: { $0 == "." || $0 == ")" }), !line[..<dot].isEmpty, line[..<dot].count <= 3,
+                  line[..<dot].allSatisfy(\.isNumber), line[line.index(after: dot)...].hasPrefix(" ") {
+            marker = String(line[..<dot]) + "."
+            rest = line[line.index(dot, offsetBy: 2)...]
+        } else {
+            return nil
+        }
+        var task: Bool?
+        let lower = rest.lowercased()
+        if lower.hasPrefix("[ ] ") || lower.hasPrefix("[x] ") {
+            task = lower.hasPrefix("[x]")
+            rest = rest.dropFirst(4)
+            marker = ""
+        }
+        return MarkdownListItem(marker: marker, text: String(rest), level: level, task: task)
+    }
+
+    /// The alignment row of a pipe table ("|---|:-:|--:|"), or nil when the line is not one.
+    private static func separator(_ raw: String) -> [MarkdownTable.Align]? {
+        let line = raw.trimmingCharacters(in: .whitespaces)
+        guard line.contains("-"), line.allSatisfy({ "|-: \t".contains($0) }) else { return nil }
+        let parts = cells(line)
+        guard !parts.isEmpty, parts.allSatisfy({ $0.contains("-") }) else { return nil }
+        if !line.contains("|") && parts.count < 2 { return nil }
+        return parts.map { part in
+            let left = part.hasPrefix(":"), right = part.hasSuffix(":")
+            return left && right ? .center : right ? .trailing : .leading
+        }
+    }
+
+    /// The cells of a table row: split on `|` outside `code` and not escaped (`\|`), outer pipes dropped.
+    private static func cells(_ line: String) -> [String] {
+        var trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("|") { trimmed.removeFirst() }
+        if trimmed.hasSuffix("|") && !trimmed.hasSuffix("\\|") { trimmed.removeLast() }
+        var result: [String] = []
+        var current = ""
+        var inCode = false
+        var escaped = false
+        for ch in trimmed {
+            if escaped { current.append(ch == "|" ? "|" : "\\\(ch)"); escaped = false; continue }
+            if ch == "\\" { escaped = true; continue }
+            if ch == "`" { inCode.toggle() }
+            if ch == "|" && !inCode { result.append(current.trimmingCharacters(in: .whitespaces)); current = ""; continue }
+            current.append(ch)
+        }
+        if escaped { current.append("\\") }
+        result.append(current.trimmingCharacters(in: .whitespaces))
+        return result
+    }
+
+    private static func pad<T>(_ values: [T], to count: Int, with filler: T) -> [T] {
+        values.count >= count ? Array(values.prefix(count)) : values + Array(repeating: filler, count: count - values.count)
+    }
+    private static func pad(_ values: [String], to count: Int) -> [String] { pad(values, to: count, with: "") }
+}
+
+/// Inline markdown for Text: bold, italic, `code` (monospaced on a faint chip), links and ~~strikethrough~~. A single
+/// `~` is kept as a tilde: Apple's parser would strike out everything between two of them ("0.0~3.9 ... 3.9~7.3").
+func markdownInline(_ value: String) -> AttributedString {
+    let source = markdownEscapingSingleTildes(value)
+    var result = (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+        ?? AttributedString(value)
+    for run in result.runs where run.inlinePresentationIntent?.contains(.code) == true {
+        result[run.range].backgroundColor = Color.white.opacity(0.08)
+        result[run.range].foregroundColor = CE.ink
+    }
+    return result
+}
+
+/// `\~` for every tilde that is not part of a `~~` pair, outside `code` spans (where a backslash would show).
+func markdownEscapingSingleTildes(_ value: String) -> String {
+    guard value.contains("~") else { return value }
+    let chars = Array(value)
+    var out = ""
+    out.reserveCapacity(chars.count + 8)
+    var codeFence = 0
+    var i = 0
+    while i < chars.count {
+        let ch = chars[i]
+        if ch == "`" {
+            var run = 0
+            while i < chars.count, chars[i] == "`" { run += 1; i += 1 }
+            out.append(String(repeating: "`", count: run))
+            if codeFence == 0 { codeFence = run } else if codeFence == run { codeFence = 0 }
+            continue
+        }
+        if ch == "\\", i + 1 < chars.count {
+            out.append(ch); out.append(chars[i + 1]); i += 2
+            continue
+        }
+        if ch == "~" && codeFence == 0 {
+            let paired = (i + 1 < chars.count && chars[i + 1] == "~") || (i > 0 && chars[i - 1] == "~")
+            out.append(paired ? "~" : "\\~")
+            i += 1
+            continue
+        }
+        out.append(ch)
+        i += 1
+    }
+    return out
+}
+
+/// A pipe table as a grid: a tinted header row, hairlines between rows and columns, cells wrapping inside columns sized
+/// to their content (shrunk in proportion when the table is wider than the space, stretched to fill it otherwise).
+private struct MarkdownTableView: View {
+    let table: MarkdownTable
+    /// Cell text size (the web's .93em).
+    let size: CGFloat
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
+        let columns = table.header.count
+        MarkdownTableLayout(columns: columns, floor: (size * 4).rounded()) {
+            ForEach(0..<columns, id: \.self) { c in
+                cell(table.header[c], row: 0, column: c, header: true)
+            }
+            ForEach(Array(table.rows.enumerated()), id: \.offset) { r, row in
+                ForEach(0..<columns, id: \.self) { c in
+                    cell(row[c], row: r + 1, column: c, header: false)
+                }
+            }
+        }
+        .background(Color.white.opacity(0.02))
+        .clipShape(shape)
+        .overlay { shape.strokeBorder(CE.line) }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("표, \(table.rows.count)행 \(columns)열")
+    }
+
+    private func cell(_ value: String, row: Int, column: Int, header: Bool) -> some View {
+        let align = table.align.indices.contains(column) ? table.align[column] : .leading
+        let frameAlign: Alignment = align == .center ? .top : align == .trailing ? .topTrailing : .topLeading
+        let textAlign: TextAlignment = align == .center ? .center : align == .trailing ? .trailing : .leading
+        return Text(markdownInline(value))
+            .font(.system(size: size, weight: header ? .semibold : .regular))
+            .foregroundStyle(CE.ink)
+            .multilineTextAlignment(textAlign)
+            .lineSpacing((size * 0.35).rounded())
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: frameAlign)
+            .background(header ? Color.white.opacity(0.04) : Color.clear)
+            .overlay(alignment: .top) { if row > 0 { Rectangle().fill(CE.line).frame(height: 1) } }
+            .overlay(alignment: .leading) { if column > 0 { Rectangle().fill(CE.line).frame(width: 1) } }
+    }
+}
+
+/// Lays out table cells (row-major, `columns` per row). Column widths follow the widest cell of each column (capped),
+/// stretched to fill the width or shrunk in proportion down to a floor; each row is as tall as its tallest cell.
+private struct MarkdownTableLayout: Layout {
+    let columns: Int
+    /// The narrowest a column gets (the web's min-width 4em), and the widest its natural size counts as.
+    var floor: CGFloat = 56
+    private let cap: CGFloat = 460
+
+    struct Cache { var ideal: [CGFloat] = [] }
+
+    func makeCache(subviews: Subviews) -> Cache {
+        var ideal = Array(repeating: CGFloat(0), count: max(columns, 1))
+        for (i, subview) in subviews.enumerated() where columns > 0 {
+            let w = subview.sizeThatFits(.unspecified).width
+            ideal[i % columns] = max(ideal[i % columns], min(w, cap))
+        }
+        return Cache(ideal: ideal)
+    }
+
+    private func widths(_ available: CGFloat?, cache: Cache) -> [CGFloat] {
+        let ideal = cache.ideal.map { max($0, floor) }
+        guard let available, available.isFinite, available > 0 else { return ideal }
+        let total = ideal.reduce(0, +)
+        if total <= available {
+            // Stretch to fill the width, in proportion to each column's natural size.
+            return ideal.map { $0 * available / max(total, 1) }
+        }
+        let base = CGFloat(ideal.count) * floor
+        guard available > base else { return ideal.map { _ in available / CGFloat(max(ideal.count, 1)) } }
+        // Like a browser's auto table layout: a column that fits within an even share keeps its natural width (a short
+        // "15.6~18.0" never wraps); the wide ones split what is left in proportion to their natural widths.
+        var result = Array(repeating: CGFloat(0), count: ideal.count)
+        var open = Set(ideal.indices)
+        var remaining = available
+        var settled = true
+        while settled && !open.isEmpty {
+            settled = false
+            let share = remaining / CGFloat(open.count)
+            for i in open.sorted() where ideal[i] <= share {
+                result[i] = ideal[i]
+                remaining -= ideal[i]
+                open.remove(i)
+                settled = true
+            }
+        }
+        let openIdeal = max(open.reduce(CGFloat(0)) { $0 + ideal[$1] }, 1)
+        for i in open { result[i] = max(floor, remaining * ideal[i] / openIdeal) }
+        return result
+    }
+
+    private func rowHeights(_ widths: [CGFloat], subviews: Subviews) -> [CGFloat] {
+        guard columns > 0 else { return [] }
+        let rows = (subviews.count + columns - 1) / columns
+        var heights = Array(repeating: CGFloat(0), count: rows)
+        for (i, subview) in subviews.enumerated() {
+            let h = subview.sizeThatFits(ProposedViewSize(width: widths[i % columns], height: nil)).height
+            heights[i / columns] = max(heights[i / columns], h)
+        }
+        return heights
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        let w = widths(proposal.width, cache: cache)
+        return CGSize(width: w.reduce(0, +), height: rowHeights(w, subviews: subviews).reduce(0, +))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        let w = widths(bounds.width, cache: cache)
+        let h = rowHeights(w, subviews: subviews)
+        var y = bounds.minY
+        for row in h.indices {
+            var x = bounds.minX
+            for column in 0..<columns {
+                let i = row * columns + column
+                guard i < subviews.count else { break }
+                subviews[i].place(at: CGPoint(x: x, y: y), anchor: .topLeading,
+                                  proposal: ProposedViewSize(width: w[column], height: h[row]))
+                x += w[column]
+            }
+            y += h[row]
+        }
     }
 }
 

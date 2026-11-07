@@ -195,8 +195,8 @@ struct ArchiveView: View {
         Plate {
             VStack(alignment: .leading, spacing: CESpace.s) {
                 HStack { Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink); Spacer(); Tag(status) }
-                if !detail.isEmpty { MarkdownText(text: detail) }
-                if let result, !result.isEmpty { MarkdownText(text: result) }
+                if !detail.isEmpty { MarkdownText(text: detail, size: 14.5) }
+                if let result, !result.isEmpty { MarkdownText(text: result, size: 14.5) }
             }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
         }
     }

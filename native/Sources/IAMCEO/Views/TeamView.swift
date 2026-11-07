@@ -2058,9 +2058,7 @@ private func teamNowLabel(_ member: Member) -> String {
     ["asleep", "offline"].contains(member.status) && !member.now.isEmpty ? "마지막 일" : "지금"
 }
 
-private func teamInlineMarkdown(_ value: String) -> AttributedString {
-    (try? AttributedString(markdown: value, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(value)
-}
+private func teamInlineMarkdown(_ value: String) -> AttributedString { markdownInline(value) }
 
 private func teamCopy(_ text: String) {
     #if os(macOS)

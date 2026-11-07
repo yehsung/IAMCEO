@@ -568,7 +568,7 @@ private struct FileReaderContent: View {
                 .accessibilityAddTraits(.isHeader)
             if !file.summary.isEmpty {
                 Text(file.summary)
-                    .font(summaryFont).foregroundStyle(CE.ink2).lineSpacing(3)
+                    .font(summaryFont).foregroundStyle(CE.ink.opacity(0.9)).lineSpacing(6)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1207,6 +1207,8 @@ private struct ArtifactViewer: View {
     @State private var loading = false
     @State private var error: String?
     @State private var enlarged = false
+    /// The page height reported by the fitted preview (0 until measured).
+    @State private var pageHeight: CGFloat = 0
 
     private var unavailableReason: String? {
         if store.isDemo { return "샘플 자료에는 연결된 실행 호스트가 없습니다." }
@@ -1274,8 +1276,10 @@ private struct ArtifactViewer: View {
                 }
                 .buttonStyle(ViewerButtonStyle())
             }
-            SandboxedHTML(html: artifact.html, rule: artifact.rule)
-                .frame(maxWidth: .infinity, minHeight: 520, idealHeight: wide ? 640 : 520)
+            // As tall as the page once measured (the web's frame grows the same way); 520 until then.
+            SandboxedHTML(html: artifact.html, rule: artifact.rule, title: file.title, height: $pageHeight)
+                .frame(maxWidth: .infinity)
+                .frame(height: pageHeight > 0 ? max(pageHeight, 120) : 520)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CE.line) }
                 .accessibilityLabel("\(file.title) 미리보기")
@@ -1324,7 +1328,7 @@ private struct ArtifactFullView: View {
 
     private func sheet(width: CGFloat) -> some View {
         CESheet(title.isEmpty ? "제목 없는 자료" : title, icon: "macwindow", width: width, scrolls: false) {
-            SandboxedHTML(html: artifact.html, rule: artifact.rule)
+            SandboxedHTML(html: artifact.html, rule: artifact.rule, title: title)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CE.line) }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1730,6 +1734,8 @@ func artifactAllowsNavigation(firstAction: Bool, url: URL?, mainFrame: Bool, typ
 @MainActor
 private final class ArtifactNavigationDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     private var firstAction = true
+    /// Reports the page's content height (fitted previews only).
+    var onHeight: ((CGFloat) -> Void)?
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         let allow = artifactAllowsNavigation(firstAction: firstAction, url: navigationAction.request.url,
@@ -1739,36 +1745,106 @@ private final class ArtifactNavigationDelegate: NSObject, WKNavigationDelegate, 
     }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { measure(webView) }
+
+    /// The page height as the web measures it (the body's scroll height plus its margins), read from the app's own
+    /// isolated script world: page scripts stay off, and nothing the page defines can answer for it.
+    func measure(_ webView: WKWebView) {
+        guard let onHeight else { return }
+        let script = "(function(){var b=document.body;if(!b)return 0;var c=getComputedStyle(b);return Math.ceil(b.scrollHeight+(parseFloat(c.marginTop)||0)+(parseFloat(c.marginBottom)||0))})()"
+        webView.evaluateJavaScript(script, in: nil, in: .defaultClient) { result in
+            if case .success(let value) = result, let height = (value as? NSNumber)?.doubleValue, height > 0 {
+                onHeight(CGFloat(height))
+            }
+        }
+    }
 }
 
-/// Requires the compiled block layer before loading any artifact HTML.
+/// The artifact web view. A fitted preview is as tall as its page, like the web's frame: it re-measures when its width
+/// changes, and on Mac hands vertical scrolling to the page around it (a sideways swipe still scrolls a wide table).
+private final class ArtifactWebView: WKWebView {
+    var fitted = false
+    weak var measurer: ArtifactNavigationDelegate?
+    private var measuredWidth: CGFloat = -1
+
+    #if os(macOS)
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        widthChanged(newSize.width)
+    }
+    override func scrollWheel(with event: NSEvent) {
+        if fitted && abs(event.scrollingDeltaY) >= abs(event.scrollingDeltaX) { nextResponder?.scrollWheel(with: event) }
+        else { super.scrollWheel(with: event) }
+    }
+    #else
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        widthChanged(bounds.width)
+    }
+    #endif
+
+    private func widthChanged(_ width: CGFloat) {
+        guard fitted, abs(width - measuredWidth) > 0.5 else { return }
+        measuredWidth = width
+        // After WebKit has laid the page out at the new width.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self, !self.isLoading else { return }
+            self.measurer?.measure(self)
+        }
+    }
+}
+
+/// Requires the compiled block layer before loading any artifact HTML. The page gets the web's artifact kit (dark page,
+/// type scale, cards, grids, callouts) under the same protected policy; page scripts stay off.
 @MainActor
-private func makeArtifactWebView(html: String, rule: WKContentRuleList, delegate: ArtifactNavigationDelegate) -> WKWebView {
+private func makeArtifactWebView(html: String, title: String?, rule: WKContentRuleList, delegate: ArtifactNavigationDelegate,
+                                 fitted: Bool) -> WKWebView {
     let configuration = WKWebViewConfiguration()
     configuration.websiteDataStore = .nonPersistent()
     configuration.defaultWebpagePreferences.allowsContentJavaScript = false
     configuration.userContentController.add(rule)
-    let view = WKWebView(frame: .zero, configuration: configuration)
+    let view = ArtifactWebView(frame: .zero, configuration: configuration)
+    view.fitted = fitted
+    view.measurer = delegate
     view.navigationDelegate = delegate
     view.uiDelegate = delegate
-    let policy = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'\">"
-    view.loadHTMLString(policy + html, baseURL: nil)
+    // No white flash before the kit's dark page paints.
+    #if os(macOS)
+    view.setValue(false, forKey: "drawsBackground")
+    #else
+    view.isOpaque = false
+    view.backgroundColor = .clear
+    view.scrollView.backgroundColor = .clear
+    if fitted { view.scrollView.isScrollEnabled = false }
+    #endif
+    view.loadHTMLString(ArtifactKit.document(html, title: title), baseURL: nil)
     return view
 }
 #if os(macOS)
 private struct SandboxedHTML: NSViewRepresentable {
     let html: String
     let rule: WKContentRuleList
+    var title: String? = nil
+    /// Fitted: as tall as the page (reported here); otherwise the page scrolls inside the view.
+    var height: Binding<CGFloat>? = nil
     func makeCoordinator() -> ArtifactNavigationDelegate { ArtifactNavigationDelegate() }
-    func makeNSView(context: Context) -> WKWebView { makeArtifactWebView(html: html, rule: rule, delegate: context.coordinator) }
+    func makeNSView(context: Context) -> WKWebView {
+        if let height { context.coordinator.onHeight = { value in if abs(height.wrappedValue - value) > 0.5 { height.wrappedValue = value } } }
+        return makeArtifactWebView(html: html, title: title, rule: rule, delegate: context.coordinator, fitted: height != nil)
+    }
     func updateNSView(_ nsView: WKWebView, context: Context) {}
 }
 #else
 private struct SandboxedHTML: UIViewRepresentable {
     let html: String
     let rule: WKContentRuleList
+    var title: String? = nil
+    var height: Binding<CGFloat>? = nil
     func makeCoordinator() -> ArtifactNavigationDelegate { ArtifactNavigationDelegate() }
-    func makeUIView(context: Context) -> WKWebView { makeArtifactWebView(html: html, rule: rule, delegate: context.coordinator) }
+    func makeUIView(context: Context) -> WKWebView {
+        if let height { context.coordinator.onHeight = { value in if abs(height.wrappedValue - value) > 0.5 { height.wrappedValue = value } } }
+        return makeArtifactWebView(html: html, title: title, rule: rule, delegate: context.coordinator, fitted: height != nil)
+    }
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
 #endif

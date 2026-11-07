@@ -504,7 +504,7 @@ struct InboxView: View {
             if let error = reopenErrors[id] { ErrorLine(text: error) }
             if expanded && hasMore {
                 VStack(alignment: .leading, spacing: 10) {
-                    if !decision.detail.isEmpty { MarkdownText(text: decision.detail, font: CEFont.secondary).foregroundStyle(CE.ink) }
+                    if !decision.detail.isEmpty { MarkdownText(text: decision.detail, size: 13.5).foregroundStyle(CE.ink) }
                     if !decision.images.isEmpty { ImageStrip(images: decision.images) }
                     if let fileID = decision.fileId {
                         FileChip(title: store.files.first { $0.id == fileID }?.title) { router.openFile(fileID) }
@@ -1318,7 +1318,7 @@ private struct ClampedDetail: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if expanded {
-                MarkdownText(text: text).foregroundStyle(CE.ink)
+                MarkdownText(text: text, size: 14.5).foregroundStyle(CE.ink)
             } else {
                 let preview = previewText
                 Text(preview).font(CEFont.body).foregroundStyle(CE.ink).lineSpacing(4).lineLimit(lines)
@@ -1446,9 +1446,7 @@ private func particleIGa(_ word: String) -> String {
     return jong == 0 ? "가" : "이"
 }
 
-private func inlineMarkdown(_ value: String) -> AttributedString {
-    (try? AttributedString(markdown: value, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(value)
-}
+private func inlineMarkdown(_ value: String) -> AttributedString { markdownInline(value) }
 
 /// An answer must refer to the exact content the person reviewed, even while polling updates the store.
 struct DecisionReview {

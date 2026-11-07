@@ -315,7 +315,7 @@ struct HomeView: View {
         let overflows = nowFullHeight > nowClampHeight + 4
         let collapsed = overflows && !nowExpanded
         return VStack(alignment: .leading, spacing: 2) {
-            MarkdownText(text: now)
+            MarkdownText(text: now, size: 14.5)
                 .fixedSize(horizontal: false, vertical: true)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { nowFullHeight = $0 }
                 .frame(maxHeight: collapsed ? nowClampHeight : nil, alignment: .top)
@@ -596,7 +596,7 @@ struct HomeView: View {
         let time = relativeTime(checked ? (todo.doneAt ?? todo.createdAt) : todo.createdAt)
         return VStack(alignment: .leading, spacing: 6) {
             if !todo.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownText(text: todo.detail, font: CEFont.body)
+                MarkdownText(text: todo.detail, size: 14)
             }
             if !closedBy.isEmpty {
                 Text(reason.isEmpty ? "\(closedBy) 정리" : "\(closedBy) 정리: \(reason)")

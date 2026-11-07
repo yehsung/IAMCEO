@@ -1411,9 +1411,7 @@ private struct ChatBodyText: View {
         }
         return false
     }
-    static func inline(_ value: String) -> AttributedString {
-        (try? AttributedString(markdown: value, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(value)
-    }
+    static func inline(_ value: String) -> AttributedString { markdownInline(value) }
 }
 
 /// Web thread colours that are not foundation tokens.

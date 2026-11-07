@@ -420,6 +420,25 @@ struct InlineNotice: View {
     }
 }
 
+// MARK: - Brand
+
+/// The app icon as a small tile next to the IAMCEO wordmark (sidebar, connection screen). `BrandMark` is an image set
+/// made from the app icon; app icon sets themselves cannot be loaded by name on iOS.
+struct BrandMark: View {
+    var size: CGFloat = 22
+    var body: some View {
+        let tile = RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
+        Image("BrandMark")
+            .resizable()
+            .interpolation(.high)
+            .frame(width: size, height: size)
+            .clipShape(tile)
+            .overlay { tile.strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5) }
+            .shadow(color: CE.violet.opacity(0.45), radius: 5, y: 1)
+            .accessibilityHidden(true)
+    }
+}
+
 // MARK: - Sheet (popup) frame
 
 /// The one quiet round close button (×) of drawers and sheets: 26pt white-tint circle, no focus ring, Esc closes.

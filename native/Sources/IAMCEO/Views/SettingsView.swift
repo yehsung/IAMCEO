@@ -377,9 +377,7 @@ private struct SetupError: View {
 private struct SetupBrand: View {
     var body: some View {
         HStack(spacing: 8) {
-            Capsule()
-                .fill(LinearGradient(colors: [CE.ink, CE.accent, CE.violet], startPoint: .leading, endPoint: .trailing))
-                .frame(width: 18, height: 10)
+            BrandMark(size: 20)
             Text("IAMCEO").font(SetupFont.brand).tracking(1.2).foregroundStyle(CE.ink2)
         }
         .accessibilityElement(children: .ignore)

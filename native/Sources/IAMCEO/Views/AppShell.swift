@@ -436,10 +436,7 @@ struct ProjectSidebar: View {
 
     private var brand: some View {
         HStack(spacing: 9) {
-            Capsule()
-                .fill(LinearGradient(colors: [Color(hex: 0xCDBEFF), Color(hex: 0x7A5BFF)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                .frame(width: 18, height: 10)
-                .shadow(color: CE.violet.opacity(0.6), radius: 6)
+            BrandMark(size: 22)
             Text("IAMCEO").font(.system(size: 13.5, weight: .bold)).tracking(0.8).foregroundStyle(CE.ink)
         }
         .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 12)

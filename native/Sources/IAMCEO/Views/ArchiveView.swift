@@ -31,10 +31,12 @@ struct ArchiveLibraryView: View {
                   detail: "프로젝트 메뉴의 ‘보관…’으로 끝난 프로젝트를 여기로 옮길 수 있습니다.")
     }
 
-    /// One archived project: name and folder open its read-only record; rename/restore sit at the right.
+    /// One archived project: name and folder open its read-only record (hover-lit like a list row); 꺼내기 sits in sight
+    /// at the right (web .st-pj: name 14.5/620, folder in code 12.5 ink-2, a visible 꺼내기), 이름 바꾸기 in the ⋯ menu.
     private func row(_ project: Project) -> some View {
-        let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
-        return HStack(alignment: .center, spacing: 12) {
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let canManage = !(store.isDemo || store.connectionStatus != .connected || store.isRevalidating)
+        return HStack(alignment: .center, spacing: 8) {
             Button {
                 Task {
                     await store.selectArchivedProject(id: project.id)
@@ -42,33 +44,45 @@ struct ArchiveLibraryView: View {
                     router.go(.home); router.showSettings = false; dismiss()
                 }
             } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "archivebox").font(CEFont.secondary).foregroundStyle(CE.ink3).frame(width: 18)
+                HStack(spacing: 11) {
+                    Image(systemName: "archivebox").font(.system(size: 14, weight: .medium)).foregroundStyle(CE.ink2).frame(width: 20)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(project.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
-                        Text(project.cwd).font(CEFont.mono).foregroundStyle(CE.ink3).lineLimit(1).truncationMode(.middle)
+                        Text(project.cwd).font(CEFont.mono).foregroundStyle(CE.ink2)
+                            .ceLineHeight(12.5, 1.45)
+                            .lineLimit(2).truncationMode(.middle)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 0)
                 }
+                .padding(.horizontal, 10).padding(.vertical, 10)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(RowButtonStyle(radius: 10))
             .help("기록 읽기")
             .accessibilityLabel("\(project.name) 기록 읽기")
+            Button("꺼내기") { management = ProjectManagementSelection(projectID: project.id, mode: .restore) }
+                .ceSecondaryButton()
+                .controlSize(.small)
+                .fixedSize()
+                .disabled(!canManage)
+                .accessibilityLabel("\(project.name) 다시 꺼내기")
             Menu {
                 Button("이름 바꾸기…") { management = ProjectManagementSelection(projectID: project.id, mode: .rename) }
-                Button("꺼내기…") { management = ProjectManagementSelection(projectID: project.id, mode: .restore) }
             } label: {
-                Image(systemName: "ellipsis").font(.system(size: 13, weight: .semibold)).foregroundStyle(CE.ink2)
-                    .frame(width: 28, height: 28).contentShape(Rectangle())
+                Image(systemName: "ellipsis").font(.system(size: 13, weight: .semibold)).foregroundStyle(canManage ? CE.ink2 : CE.ink3)
+                    .frame(width: 30, height: 30)
+                    .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
+                    .contentShape(Rectangle())
             }
             .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
-            .disabled(store.isDemo || store.connectionStatus != .connected || store.isRevalidating)
+            .disabled(!canManage)
+            .help("이름 바꾸기")
             .accessibilityLabel("\(project.name) 관리")
         }
-        .padding(.horizontal, 12).padding(.vertical, 10)
+        .padding(.leading, 4).padding(.trailing, 8).padding(.vertical, 4)
         .background(Color.white.opacity(0.04), in: shape)
-        .overlay { shape.strokeBorder(CE.line) }
+        .overlay { shape.strokeBorder(Color.white.opacity(0.09)) }
     }
 }
 
@@ -157,7 +171,8 @@ struct ArchiveView: View {
                                         .id(decision.id)
                                 }
                                 if state.doneDecisionCount > state.decisions.filter({ $0.status != "open" }).count {
-                                    Text("처리된 결재는 최근 기록부터 표시합니다.").font(CEFont.meta).foregroundStyle(CE.ink3)
+                                    Text("처리된 결재는 최근 기록부터 표시합니다.").font(CEFont.meta).foregroundStyle(CE.ink2)
+                                        .padding(.horizontal, 4)
                                 }
                             } else if destination == .team {
                                 if state.members.isEmpty { empty("직원 기록이 없습니다") }
@@ -167,7 +182,9 @@ struct ArchiveView: View {
                                 }
                             } else {
                                 if !state.project.now.isEmpty { record("마지막 상황", detail: state.project.now, status: "기록", result: nil) }
-                                Text("업무 기록").font(CEFont.title).foregroundStyle(CE.ink)
+                                Text("업무 기록").font(CEFont.title).tracking(isMac ? -0.2 : 0).foregroundStyle(CE.ink)
+                                    .padding(.top, 8).padding(.horizontal, 4)
+                                    .accessibilityAddTraits(.isHeader)
                                 if state.todos.isEmpty && state.work.isEmpty { empty("업무 기록이 없습니다") }
                                 ForEach(state.todos) { todo in
                                     record(todo.title, detail: todo.detail, status: todo.done ? "완료" : "미완료", result: todo.closeReason)
@@ -183,7 +200,9 @@ struct ArchiveView: View {
                                 InlineNotice(title: "기록을 불러오지 못했습니다", actionTitle: "다시 확인", action: { Task { await store.refresh() } })
                             }
                         }
-                    }.frame(maxWidth: 880).padding(CESpace.l).frame(maxWidth: .infinity)
+                    }
+                    // web .shell__column: 880 wide, padding 8 24 44.
+                    .ceContentColumn(top: 8)
                 }
                 .onChange(of: router.decisionID ?? router.memberID, initial: true) { _, id in
                     if let id { proxy.scrollTo(id, anchor: .top) }
@@ -197,11 +216,20 @@ struct ArchiveView: View {
         EmptyTile(icon: "archivebox", title: title, detail: "보관한 프로젝트는 읽기 전용입니다.")
     }
     private func record(_ title: String, detail: String, status: String, result: String?) -> some View {
-        Plate {
-            VStack(alignment: .leading, spacing: CESpace.s) {
-                HStack { Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink); Spacer(); Tag(status) }
+        Plate(padding: isMac ? 18 : CESpace.l) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                        .lineSpacing(CELeading.spacing(14.5, 1.35))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    Tag(status)
+                }
                 if !detail.isEmpty { MarkdownText(text: detail, size: 14.5) }
-                if let result, !result.isEmpty { MarkdownText(text: result, size: 14.5) }
+                if let result, !result.isEmpty {
+                    MarkdownText(text: result, size: 14.5)
+                        .padding(.top, 2)
+                }
             }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
         }
     }

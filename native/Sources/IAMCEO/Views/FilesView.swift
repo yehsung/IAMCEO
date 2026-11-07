@@ -3,6 +3,7 @@ import WebKit
 import PDFKit
 import QuickLook
 import ImageIO
+import AVKit
 #if os(macOS)
 import AppKit
 #else
@@ -10,8 +11,9 @@ import UIKit
 #endif
 
 // 자료 (web Files): wide (Mac, iPad regular) = a 300pt list beside the reader, both on glass plates and scrolling on
-// their own; iPhone = list → pushed reader. Rows stay short (glyph · title · who · time); the summary, links and the
-// original path live in the reader.
+// their own; iPhone = list → pushed reader on a glass panel. Rows follow the web .fl-row: title, two lines of summary,
+// kind tag · who · time, and the first picture as a thumbnail on the right. Links and the original path live in the
+// reader; each kind has its own viewer (code, table, pictures, PDF, video/audio, file cards).
 // Binaries always come through APIClient (Bearer header, same origin only); artifacts render in a locked-down WKWebView.
 
 // MARK: - Kind names (shared with Home, Inbox, Chat)
@@ -56,6 +58,11 @@ struct FilesView: View {
     @Environment(\.ceWide) private var wide
     @State private var search = ""
     @State private var kind: String?
+    @FocusState private var searchFocused: Bool
+    #if os(macOS)
+    /// The list takes ↑/↓ once a row was clicked (Mail-style paging through the reader).
+    @FocusState private var listFocused: Bool
+    #endif
 
     /// Newest first: server order desc, then creation time desc.
     private var allFiles: [FileDoc] {
@@ -127,33 +134,33 @@ struct FilesView: View {
                     EmptyTile(icon: "folder", title: "열린 프로젝트가 없습니다", detail: "연결과 프로젝트를 확인한 뒤 다시 동기화하세요.")
                 }
             }
-            .modifier(EmptyColumn(wide: wide))
+            .ceContentColumn()
         }
     }
 
     private var emptyLibrary: some View {
         ScrollView {
             EmptyTile(icon: "folder", title: "아직 올린 자료가 없습니다", detail: "직원이 자료를 올리면 여기에 모입니다.")
-                .modifier(EmptyColumn(wide: wide))
+                .ceContentColumn()
         }
         #if os(iOS)
         .refreshable { await store.refresh() }
         #endif
     }
 
-    private var outerPadding: CGFloat { isMac ? CESpace.xl : CESpace.l }
-
     // MARK: Wide: 300pt list + reader
 
+    /// Web .shell__column around .fl--desk: 24 at the sides inside a 1180 cap (1480 while an artifact is open, so only
+    /// the reader grows), and the panels stop well clear of the docked composer.
     private var desk: some View {
-        HStack(alignment: .top, spacing: CESpace.m) {
+        HStack(alignment: .top, spacing: 12) {
             listPane.frame(width: 300)
             readerPane
         }
-        .frame(maxWidth: 1180)
-        .padding(.horizontal, outerPadding)
+        .padding(.horizontal, isMac ? 24 : CESpace.l)
+        .frame(maxWidth: selectedFile?.kind == "artifact" ? 1480 : 1180)
         .padding(.top, CESpace.m)
-        .padding(.bottom, isMac ? CESpace.xs : CESpace.l)
+        .padding(.bottom, isMac ? 24 : CESpace.l)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
@@ -163,6 +170,7 @@ struct FilesView: View {
         return Plate(padding: 0) {
             VStack(spacing: 0) {
                 if showsSearch || showsChips {
+                    // web .fl-chips: 10 at the top and sides, 4 below; the list's own 6 makes the gap to the first row.
                     VStack(alignment: .leading, spacing: CESpace.s) {
                         if showsSearch { searchField }
                         if showsChips {
@@ -172,18 +180,23 @@ struct FilesView: View {
                                 .accessibilityLabel("종류로 거르기")
                         }
                     }
-                    .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, CESpace.s)
-                    Rectangle().fill(CE.line).frame(height: 1)
+                    .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 4)
                 }
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(spacing: 2) {
+                        LazyVStack(spacing: 0) {
                             ForEach(shown) { file in
                                 let selected = file.id == selectedID
-                                Button { router.fileID = file.id } label: {
+                                Button {
+                                    router.fileID = file.id
+                                    #if os(macOS)
+                                    listFocused = true
+                                    #endif
+                                } label: {
                                     FileRow(file: file, openDecisions: counts[file.id] ?? 0, selected: selected)
                                 }
-                                .buttonStyle(FileRowStyle(selected: selected))
+                                // web .fl-row: radius 15, hover white .06, the selected row is the rail's violet drop.
+                                .buttonStyle(RowButtonStyle(selected: selected, radius: 15))
                                 .id(file.id)
                             }
                         }
@@ -194,12 +207,31 @@ struct FilesView: View {
                     .onChange(of: router.fileID) { _, id in
                         if let id { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id) } }
                     }
+                    #if os(macOS)
+                    .focusable()
+                    .focusEffectDisabled()
+                    .focused($listFocused)
+                    .onKeyPress(.upArrow) { step(-1) }
+                    .onKeyPress(.downArrow) { step(1) }
+                    #endif
                 }
             }
             .frame(maxHeight: .infinity, alignment: .top)
         }
         .clipShape(RoundedRectangle(cornerRadius: CERadius.plate, style: .continuous))
     }
+
+    #if os(macOS)
+    /// ↑/↓ in the focused list: the previous or next visible file (the list scrolls to it through `router.fileID`).
+    private func step(_ delta: Int) -> KeyPress.Result {
+        let ids = shown.map(\.id)
+        guard !ids.isEmpty else { return .ignored }
+        let current = selectedFile.flatMap { file in ids.firstIndex(of: file.id) }
+        let next = current.map { min(max($0 + delta, 0), ids.count - 1) } ?? 0
+        if next != current { router.fileID = ids[next] }
+        return .handled
+    }
+    #endif
 
     private var readerPane: some View {
         Plate(padding: 0) {
@@ -238,18 +270,18 @@ struct FilesView: View {
                     Plate(padding: 0) {
                         LazyVStack(spacing: 0) {
                             ForEach(Array(shown.enumerated()), id: \.element.id) { index, file in
-                                if index > 0 { RowDivider(inset: 14 + FileGlyph.phoneSize + 12) }
+                                if index > 0 { RowDivider(inset: 14) }
                                 Button { router.fileID = file.id } label: {
                                     FileRow(file: file, openDecisions: counts[file.id] ?? 0, chevron: true)
                                 }
-                                .buttonStyle(FileRowStyle(radius: 0))
+                                .buttonStyle(RowButtonStyle(radius: 0))
                             }
                         }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: CERadius.plate, style: .continuous))
                 }
             }
-            .padding(.horizontal, CESpace.l).padding(.vertical, CESpace.m)
+            .ceContentColumn(top: CESpace.s)
         }
         #if os(iOS)
         .refreshable { await store.refresh() }
@@ -258,11 +290,12 @@ struct FilesView: View {
 
     // MARK: Pieces
 
+    /// Web .input (the shared field: 44 tall, 15pt, accent ring while typing).
     private var searchField: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "magnifyingglass").font(CEFont.meta).foregroundStyle(CE.ink3)
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").font(.system(size: 13, weight: .medium)).foregroundStyle(CE.ink3)
             TextField("제목·요약·작성자 검색", text: $search)
-                .font(CEFont.secondary)
+                .focused($searchFocused)
                 .autocorrectionDisabled()
             if !search.isEmpty {
                 Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(CE.ink3) }
@@ -270,7 +303,7 @@ struct FilesView: View {
                     .accessibilityLabel("검색 지우기")
             }
         }
-        .ceField()
+        .ceField(focused: searchFocused)
     }
 
     /// Phone: one horizontally scrolling line (web behaviour); a second row would push the files down.
@@ -290,25 +323,16 @@ struct FilesView: View {
         }
     }
 
-    /// Web .fl-chip: quiet capsule; the chosen one is a violet drop with white text.
+    /// Web .fl-chip: quiet capsule that lightens on hover; the chosen one is a violet drop with white text.
     private func chip(_ value: String?, title: String, count: Int) -> some View {
         let on = activeKind == value
         return Button { kind = value } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: 5) {
                 Text(title)
-                Text("\(count)").monospacedDigit().opacity(0.8)
+                Text("\(count)").monospacedDigit().opacity(0.85)
             }
-            .font(isMac ? .system(size: 12.5, weight: .medium) : CEFont.secondary.weight(.medium))
-            .foregroundStyle(on ? Color.white : CE.ink2)
-            .padding(.horizontal, isMac ? 10 : 13)
-            .frame(height: isMac ? 26 : 34)
-            .background(on ? CE.violet.opacity(0.42) : Color.white.opacity(0.05), in: Capsule())
-            .overlay { Capsule().strokeBorder(on ? Color.white.opacity(0.16) : CE.line) }
-            // iPhone: 44pt touch target around the 34pt capsule.
-            .padding(.vertical, isMac ? 0 : 5)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FilterChipStyle(on: on))
         .accessibilityLabel("\(title) \(count)개")
         .accessibilityAddTraits(on ? .isSelected : [])
     }
@@ -318,51 +342,53 @@ struct FilesView: View {
     }
 }
 
-/// The column an empty or loading 자료 screen draws in: the same centred 880 column and paddings as 결재함, so the
-/// note sits in the middle of the screen instead of at the left of a wide area.
-private struct EmptyColumn: ViewModifier {
-    let wide: Bool
-    func body(content: Content) -> some View {
-        content
-            .padding(.horizontal, wide ? 24 : CESpace.l)
-            .padding(.top, CESpace.m)
-            .padding(.bottom, wide ? 24 : 28)
-            .frame(maxWidth: 880)
-            .frame(maxWidth: .infinity)
-    }
-}
-
 // MARK: - List row
 
-/// glyph · title · "who · time". Kind is told by the glyph (violet for artifacts, like the web tag); the summary is
-/// read in the reader. An open decision that cites the file is the one extra fact a row carries.
+/// Web .fl-row: title (14.5/600 at 1.35), up to two lines of summary (13 at 1.45, ink-2), then the kind tag · who ·
+/// time; the first picture sits on the right as a 52pt thumbnail. An open decision that cites the file is the one
+/// extra fact a row carries.
 private struct FileRow: View {
     let file: FileDoc
     var openDecisions = 0
     var selected = false
     var chevron = false
 
+    private var title: String { file.title.isEmpty ? "제목 없는 자료" : file.title }
+    private var imageAttachment: Attachment? { file.attachments.first(where: \.isImage) }
+    private var byline: String { [file.who, fileTime(file.createdAt)].filter { !$0.isEmpty }.joined(separator: " · ") }
+
     var body: some View {
-        HStack(spacing: 12) {
-            FileGlyph(file: file, size: isMac ? FileGlyph.macSize : FileGlyph.phoneSize)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(file.title.isEmpty ? "제목 없는 자료" : file.title)
-                    .font(CEFont.rowTitle).foregroundStyle(CE.ink)
-                    .lineLimit(2).multilineTextAlignment(.leading)
-                HStack(spacing: 6) {
-                    Text([file.who, relativeTime(file.createdAt)].filter { !$0.isEmpty }.joined(separator: " · "))
-                        .font(CEFont.meta).foregroundStyle(selected ? CE.ink2 : CE.ink3).lineLimit(1)
-                    if openDecisions > 0 { Tag("결재 \(openDecisions)", tone: .attention) }
+        HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(CEFont.rowTitle).tracking(-0.15).foregroundStyle(CE.ink)
+                        .lineSpacing(CELeading.spacing(14.5, 1.35))
+                        .lineLimit(2).multilineTextAlignment(.leading)
+                    if !file.summary.isEmpty {
+                        Text(file.summary)
+                            .font(CEFont.secondary).foregroundStyle(CE.ink2)
+                            .lineSpacing(CELeading.secondary)
+                            .lineLimit(2).multilineTextAlignment(.leading)
+                    }
+                    // web .fl-row__meta: wraps under the tag when the name and time do not fit beside it.
+                    ChipFlow(spacing: 7, lineSpacing: 3) {
+                        KindTag(kind: file.kind)
+                        Text(byline).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1)
+                        if openDecisions > 0 { Tag("결재 \(openDecisions)", tone: .attention) }
+                    }
+                    .padding(.top, 2)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if let imageAttachment { RowThumb(attachment: imageAttachment) }
             }
-            Spacer(minLength: 0)
             if chevron {
                 Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(CE.ink3)
             }
         }
-        .padding(.horizontal, chevron ? 14 : 10)
-        .padding(.vertical, chevron ? 10 : 8)
-        .frame(maxWidth: .infinity, minHeight: isMac ? 0 : 56, alignment: .leading)
+        .padding(.horizontal, chevron ? 14 : 12)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityText)
@@ -370,46 +396,35 @@ private struct FileRow: View {
     }
 
     private var accessibilityText: String {
-        var parts = [fileKindName(file.kind), file.title.isEmpty ? "제목 없는 자료" : file.title, file.who, relativeTime(file.createdAt)]
+        var parts = [fileKindName(file.kind), title, file.summary, file.who, relativeTime(file.createdAt)]
         if openDecisions > 0 { parts.append("결재 \(openDecisions)건 대기") }
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 }
 
-/// Leading tile: the first image attachment as a thumbnail (web .fl-row__thumb), otherwise the kind icon.
-private struct FileGlyph: View {
-    static let macSize: CGFloat = 30
-    static let phoneSize: CGFloat = 36
+/// Web .fl-row__thumb: the file's first picture, 52pt square, cover, on a dark well.
+private struct RowThumb: View {
     @Environment(AppStore.self) private var store
-    let file: FileDoc
-    var size: CGFloat
+    let attachment: Attachment
     @State private var thumb: Image?
 
-    private var imageAttachment: Attachment? { file.attachments.first(where: \.isImage) }
-    private var isArtifact: Bool { file.kind == "artifact" }
-
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-        ZStack {
-            if let thumb {
-                thumb.resizable().scaledToFill()
-            } else {
-                shape.fill(isArtifact ? CE.violet.opacity(0.45) : Color.white.opacity(0.07))
-                Image(systemName: fileKindIcon(file.kind))
-                    .font(.system(size: size * 0.4, weight: .medium))
-                    .foregroundStyle(isArtifact ? Color.white : CE.ink2)
+        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        shape.fill(CE.bgDeep.opacity(0.5))
+            .frame(width: 52, height: 52)
+            .overlay {
+                if let thumb {
+                    thumb.resizable().scaledToFill()
+                } else {
+                    Image(systemName: "photo").font(.system(size: 15)).foregroundStyle(CE.ink3)
+                }
             }
-        }
-        .frame(width: size, height: size)
-        .clipShape(shape)
-        .overlay { shape.strokeBorder(Color.white.opacity(0.1)) }
-        .help(fileKindName(file.kind))
-        .task(id: imageAttachment?.id) { await loadThumb() }
-        .accessibilityHidden(true)
+            .clipShape(shape)
+            .task(id: attachment.id) { await loadThumb() }
+            .accessibilityHidden(true)
     }
 
     private func loadThumb() async {
-        guard let attachment = imageAttachment else { thumb = nil; return }
         if let cached = rowThumbCache[attachment.id] { thumb = cached; return }
         guard let api = store.api, !store.isDemo,
               let data = try? await api.attachmentData(attachment),
@@ -423,37 +438,6 @@ private struct FileGlyph: View {
 /// Small decoded thumbnails by attachment id, so scrolling the list does not fetch them again.
 @MainActor private var rowThumbCache: [String: Image] = [:]
 
-/// Web .fl-row: hover lightens; the selected row is a violet gradient with a bright top edge.
-private struct FileRowStyle: ButtonStyle {
-    var selected = false
-    var radius: CGFloat = CERadius.row
-    func makeBody(configuration: Configuration) -> some View {
-        RowBody(configuration: configuration, selected: selected, radius: radius)
-    }
-    private struct RowBody: View {
-        let configuration: ButtonStyleConfiguration
-        let selected: Bool
-        let radius: CGFloat
-        @State private var hovering = false
-        var body: some View {
-            let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-            configuration.label
-                .contentShape(shape)
-                .background {
-                    if selected {
-                        shape.fill(LinearGradient(colors: [CE.violet.opacity(0.34), CE.violet.opacity(0.22)], startPoint: .top, endPoint: .bottom))
-                            .overlay {
-                                shape.strokeBorder(LinearGradient(colors: [Color.white.opacity(0.24), Color.white.opacity(0.05)], startPoint: .top, endPoint: .bottom), lineWidth: 1)
-                            }
-                    } else {
-                        shape.fill(Color.white.opacity(configuration.isPressed ? 0.09 : hovering ? 0.06 : 0))
-                    }
-                }
-                .onHover { hovering = $0 }
-        }
-    }
-}
-
 #if os(iOS)
 /// iPhone push target. Looks the file up live so polling updates (and removals) show.
 private struct FileDetailScreen: View {
@@ -463,11 +447,12 @@ private struct FileDetailScreen: View {
         let file = store.files.first { $0.id == fileID }
         Group {
             if let file {
-                FileReader(file: file)
+                // web .fl-panel--phone: the reader sits on a glass panel, not straight on the aurora.
+                FileReader(file: file, framed: true)
             } else {
                 ScrollView {
                     EmptyTile(icon: "questionmark.folder", title: "찾을 수 없는 자료입니다", detail: "목록에서 다시 골라 주세요.")
-                        .modifier(EmptyColumn(wide: false))
+                        .ceContentColumn()
                 }
             }
         }
@@ -485,20 +470,43 @@ private struct FileDetailScreen: View {
 /// it scrolls by itself and has no NavigationStack, so do not wrap it in another vertical ScrollView.
 struct FileReader: View {
     let file: FileDoc
-    init(file: FileDoc) { self.file = file }
+    /// iPhone: the reader draws its own glass panel (web .fl-panel--phone); the desk puts it in the reader plate.
+    var framed = false
+    init(file: FileDoc, framed: Bool = false) { self.file = file; self.framed = framed }
     var body: some View {
         // A different file starts from the top with fresh viewer state (gate, loaded originals, sort).
-        FileReaderContent(file: file).id(file.id)
+        FileReaderContent(file: file, framed: framed).id(file.id)
     }
 }
 
-/// Web .fl-doc: meta (kind tag · who · time), title 22 (artifact 19), summary 15, links, path box, then the viewer.
+/// Visible height of the reader, for the viewers' height caps (the web's vh limits on pictures, tables, PDF, video).
+private struct ReaderViewportKey: EnvironmentKey { static let defaultValue: CGFloat = 0 }
+private extension EnvironmentValues {
+    var readerViewport: CGFloat {
+        get { self[ReaderViewportKey.self] }
+        set { self[ReaderViewportKey.self] = newValue }
+    }
+}
+
+/// `fraction` of the reader's visible height, kept between `floor` and `cap` (web min(Nvh, cap)).
+private func viewportLimit(_ viewport: CGFloat, _ fraction: CGFloat, cap: CGFloat, floor: CGFloat = 240) -> CGFloat {
+    min(cap, max(floor, (viewport > 0 ? viewport : 760) * fraction))
+}
+
+/// Web .fl-doc: meta (kind tag · who · time), title 22 (artifact 19), summary 15, links, path box, then the viewer,
+/// every block 12 apart (artifact 8, with a tighter frame so the page gets the width).
 private struct FileReaderContent: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
     @Environment(\.ceWide) private var wide
     let file: FileDoc
+    var framed = false
     @State private var copiedPath = false
+    /// The protected artifact preview once opened. The reader holds it so 크게 보기 can sit beside the title (web
+    /// .afr-bar); it is only ever set together with the compiled block rule (see `ArtifactViewer.load`).
+    @State private var artifact: LoadedArtifact?
+    @State private var enlarged = false
+    @State private var viewport: CGFloat = 0
 
     /// Attachments that are the file itself (web `split`); `file` kind owns all of them.
     private var mainAttachments: [Attachment] {
@@ -534,44 +542,89 @@ private struct FileReaderContent: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: CESpace.m) {
-                header
-                if !relatedDecisions.isEmpty || !relatedMessages.isEmpty { related }
-                if let path, !isArtifact { pathBox(path) }
-                content
-                // An artifact leads with its page (web hides the path); where it lives on the host comes last.
-                if let path, isArtifact { pathBox(path) }
+            if framed {
+                Plate(padding: 0) { column }
+                    .padding(.horizontal, 14).padding(.top, 6).padding(.bottom, 28)
+            } else {
+                column
             }
-            .frame(maxWidth: readingWidth, alignment: .leading)
-            .padding(.horizontal, wide ? 26 : CESpace.l)
-            .padding(.top, wide ? 22 : CESpace.m)
-            .padding(.bottom, wide ? 28 : CESpace.xl)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewport = $0 }
+        .environment(\.readerViewport, viewport)
     }
+
+    private var column: some View {
+        VStack(alignment: .leading, spacing: isArtifact ? 8 : 12) {
+            header
+            if !relatedDecisions.isEmpty || !relatedMessages.isEmpty { related.padding(.horizontal, isArtifact ? 6 : 0) }
+            if let path, !isArtifact { pathBox(path) }
+            content
+            // An artifact leads with its page (web hides the path); where it lives on the host comes last.
+            if let path, isArtifact { pathBox(path) }
+        }
+        .frame(maxWidth: readingWidth, alignment: .leading)
+        .padding(.horizontal, horizontalPadding)
+        .padding(.top, topPadding)
+        .padding(.bottom, bottomPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // web .fl-doc 22 26 28 (artifact 16 14 16); phone 18 16 22 (artifact 14 8 10).
+    private var horizontalPadding: CGFloat { isArtifact ? (wide ? 14 : 8) : (wide ? 26 : 16) }
+    private var topPadding: CGFloat { isArtifact ? (wide ? 16 : 14) : (wide ? 22 : 18) }
+    private var bottomPadding: CGFloat { isArtifact ? (wide ? 16 : 10) : (wide ? 28 : 22) }
 
     // MARK: Header
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: CESpace.s) {
-            HStack(spacing: CESpace.s) {
+        VStack(alignment: .leading, spacing: isArtifact ? 8 : 12) {
+            HStack(spacing: 8) {
                 KindTag(kind: file.kind)
                 whoLabel
-                Text(relativeTime(file.createdAt)).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
-                    .help(parseISODate(file.createdAt).map(koDateTime) ?? "")
+                timeLabel
                 Spacer(minLength: 0)
             }
+            .padding(.trailing, enlargeReserve)
             Text(file.title.isEmpty ? "제목 없는 자료" : file.title)
-                .font(titleFont).tracking(-0.3).foregroundStyle(CE.ink)
+                .font(titleFont).tracking(isArtifact ? -0.34 : -0.4).foregroundStyle(CE.ink)
+                .lineSpacing(CELeading.spacing(isArtifact ? 19 : 22, 1.3))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
+                .padding(.trailing, enlargeReserve)
                 .accessibilityAddTraits(.isHeader)
             if !file.summary.isEmpty {
                 Text(file.summary)
-                    .font(summaryFont).foregroundStyle(CE.ink.opacity(0.9)).lineSpacing(6)
+                    .font(summaryFont).foregroundStyle(CE.ink).lineSpacing(CELeading.spacing(15, 1.6))
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+        .padding(.horizontal, isArtifact ? 6 : 0)
+        .overlay(alignment: .topTrailing) {
+            // web .afr-bar: the open page's 크게 보기 sits at the top right, beside the meta line and title.
+            if isArtifact, artifact != nil {
+                Button { enlarged = true } label: {
+                    Label("크게 보기", systemImage: "arrow.up.left.and.arrow.down.right")
+                }
+                .buttonStyle(ViewerButtonStyle())
+                .help("보호된 미리보기 · 스크립트와 외부 연결을 끈 채로 그렸습니다")
+                .accessibilityHint("보호된 미리보기를 크게 엽니다")
+                .offset(y: isMac ? -4 : -8)
+            }
+        }
+    }
+
+    /// Room beside the meta line and title for the 크게 보기 button (web padding-right 112).
+    private var enlargeReserve: CGFloat { isArtifact && artifact != nil ? 106 : 0 }
+
+    private var metaFont: Font { isMac ? .system(size: 13) : CEFont.secondary }
+
+    /// web Time: "14:20", "11월 4일 14:20", tabular, the full date on hover.
+    @ViewBuilder private var timeLabel: some View {
+        let text = fileTime(file.createdAt)
+        if !text.isEmpty {
+            Text(text).font(metaFont).foregroundStyle(CE.ink2).monospacedDigit().lineLimit(1)
+                .help(parseISODate(file.createdAt).map(koDateTime) ?? "")
         }
     }
 
@@ -596,7 +649,7 @@ private struct FileReaderContent: View {
         let name = file.who.isEmpty ? author?.name ?? "" : file.who
         if let author {
             Button { router.openMember(author.id) } label: {
-                Text(name).font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
+                Text(name).font(metaFont.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
                     // iPhone: a 44pt touch target without making the meta line taller.
                     .padding(.vertical, isMac ? 0 : 12).contentShape(Rectangle()).padding(.vertical, isMac ? 0 : -12)
             }
@@ -604,7 +657,7 @@ private struct FileReaderContent: View {
             .help("팀에서 보기")
             .accessibilityHint("팀에서 엽니다")
         } else if !name.isEmpty {
-            Text(name).font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
+            Text(name).font(metaFont.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
         }
     }
 
@@ -644,13 +697,16 @@ private struct FileReaderContent: View {
 
     // MARK: Path (web .fl-path)
 
+    /// Web .fl-path: the whole path wraps (12.5 mono at 1.45) beside a 복사 button that lightens on hover.
     private func pathBox(_ path: String) -> some View {
         HStack(spacing: 4) {
             Text(path)
                 .font(CEFont.mono).foregroundStyle(CE.ink2)
-                .textSelection(.enabled).lineLimit(2).truncationMode(.middle)
+                .lineSpacing(CELeading.spacing(12.5, 1.45))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 8)
+                .padding(.vertical, 7)
                 .help(path)
             Button {
                 copyToPasteboard(path)
@@ -658,16 +714,15 @@ private struct FileReaderContent: View {
                 Task { try? await Task.sleep(for: .seconds(2)); copiedPath = false }
             } label: {
                 Text(copiedPath ? "복사됨" : "복사")
-                    .font(CEFont.meta.weight(.semibold))
+                    .font(isMac ? .system(size: 13, weight: .semibold) : CEFont.secondary.weight(.semibold))
                     .foregroundStyle(copiedPath ? CE.success : CE.ink)
-                    .padding(.horizontal, 10)
-                    .frame(minHeight: isMac ? 28 : 44)
-                    .contentShape(Rectangle())
+                    .padding(.horizontal, 8)
+                    .frame(minWidth: 52, minHeight: isMac ? 36 : 44)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(HoverFillStyle(radius: 10, hover: 0.08))
             .accessibilityLabel(copiedPath ? "원본 경로를 복사함" : "원본 경로 복사")
         }
-        .padding(.leading, 12).padding(.trailing, 2)
+        .padding(.leading, 12).padding(.trailing, 4)
         .recessed()
     }
 
@@ -677,39 +732,48 @@ private struct FileReaderContent: View {
         switch file.kind {
         case "document":
             // Documents keep their attachments above the text (web order).
-            attachmentList(file.attachments)
+            AttachmentGroup(items: file.attachments)
             prose
         case "artifact":
-            ArtifactViewer(file: file)
-            attachmentList(extraAttachments)
+            ArtifactViewer(file: file, loaded: $artifact, enlarged: $enlarged)
+                // web: the frame sits 4 below the block above (10 under a summary).
+                .padding(.top, artifact == nil ? 0 : file.summary.isEmpty ? 4 : 10)
+            AttachmentGroup(items: extraAttachments)
             prose
         case "code":
             if !file.body.isEmpty || !mainAttachments.isEmpty {
                 RawTextSource(file: file, attachment: mainAttachments.first, loadingText: "내용을 불러오는 중입니다") { text, truncated in
-                    CodeBlock(file: file, text: text, truncated: truncated)
+                    CodeBlock(file: file, attachment: mainAttachments.first, text: text, truncated: truncated)
                 }
             }
-            attachmentList(mainAttachments + extraAttachments)
+            // The original is the viewer above (받기 is in its bar); only the other attachments follow.
+            AttachmentGroup(items: extraAttachments)
         case "table":
             if !file.body.isEmpty || !mainAttachments.isEmpty {
                 RawTextSource(file: file, attachment: mainAttachments.first, loadingText: "표를 불러오는 중입니다") { text, truncated in
-                    TableBlock(text: text, truncated: truncated, tabSeparated: isTabSeparated)
+                    TableBlock(file: file, attachment: mainAttachments.first, text: text, truncated: truncated, tabSeparated: isTabSeparated)
                 }
             }
-            attachmentList(mainAttachments + extraAttachments)
+            AttachmentGroup(items: extraAttachments)
         case "image":
             if mainAttachments.count == 1, let only = mainAttachments.first {
-                AttachmentView(attachment: only, large: true)
+                SingleImage(attachment: only)
             } else if mainAttachments.count > 1 {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: wide ? 170 : 150), spacing: CESpace.s, alignment: .top)], alignment: .leading, spacing: CESpace.s) {
-                    ForEach(mainAttachments) { AttachmentView(attachment: $0, large: false) }
-                }
+                ImageGallery(attachments: mainAttachments)
             }
-            attachmentList(extraAttachments)
+            AttachmentGroup(items: extraAttachments)
+            prose
+        case "pdf":
+            ForEach(mainAttachments) { PDFBlock(attachment: $0) }
+            AttachmentGroup(items: extraAttachments)
+            prose
+        case "video", "audio":
+            ForEach(mainAttachments) { MediaBlock(attachment: $0, video: file.kind == "video") }
+            AttachmentGroup(items: extraAttachments)
             prose
         default:
-            // pdf, video, audio, file and kinds this build does not know yet.
-            attachmentList(mainAttachments + extraAttachments)
+            // file and kinds this build does not know yet: one card per original (web .vw-card).
+            ForEach(mainAttachments + extraAttachments) { FileCard(attachment: $0) }
             prose
         }
         if !hasContent {
@@ -731,34 +795,27 @@ private struct FileReaderContent: View {
     }
 
     /// Markdown body for document, artifact, image and attachment kinds (never code or table source), set off by a
-    /// hairline like the web .fl-doc__body.
+    /// hairline like the web .fl-doc__body (18 below the block above: gap 12 + margin 6, then 16 to the text).
     @ViewBuilder private var prose: some View {
         let text = markdownBody
         if !text.isEmpty {
             MarkdownText(text: text)
                 .padding(.top, CESpace.l)
                 .overlay(alignment: .top) { Rectangle().fill(CE.line).frame(height: 1) }
-                .padding(.top, 2)
-        }
-    }
-
-    @ViewBuilder private func attachmentList(_ items: [Attachment]) -> some View {
-        if !items.isEmpty {
-            VStack(alignment: .leading, spacing: CESpace.s) {
-                ForEach(items) { AttachmentView(attachment: $0, large: true) }
-            }
+                .padding(.top, 6)
         }
     }
 }
 
-/// Web .fl-kind: small rounded label; artifacts are violet.
+/// Web .fl-kind: 11.5/600 label on a 6pt rounded fill, about 19 tall; artifacts are violet.
 private struct KindTag: View {
     let kind: String
     var body: some View {
         Text(fileKindName(kind))
-            .font(CEFont.micro)
+            .font(isMac ? .system(size: 11.5, weight: .semibold) : .caption2.weight(.semibold))
             .foregroundStyle(kind == "artifact" ? Color.white : CE.ink)
-            .padding(.horizontal, 7).padding(.vertical, 2)
+            .padding(.horizontal, 7)
+            .frame(minHeight: 19)
             .background(kind == "artifact" ? CE.violet.opacity(0.45) : Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             .fixedSize()
     }
@@ -776,26 +833,22 @@ private struct LinkChip: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 if let dot {
-                    StatusDot(tone: dot, size: 6)
+                    StatusDot(tone: dot, size: 7)
                 } else if let icon {
-                    Image(systemName: icon).font(.system(size: 10, weight: .semibold)).foregroundStyle(CE.ink3)
+                    Image(systemName: icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(CE.ink3)
                 }
-                Text(label).foregroundStyle(highlighted ? CE.accent : CE.ink3)
+                Text(label).foregroundStyle(highlighted ? CE.accent : CE.ink2)
                 Text(shortTitle).foregroundStyle(CE.ink).lineLimit(1)
-                Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold)).foregroundStyle(CE.ink3)
+                Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold)).foregroundStyle(CE.ink3)
             }
-            .font(isMac ? .system(size: 12, weight: .medium) : CEFont.secondary.weight(.medium))
-            .padding(.horizontal, 10)
-            .frame(height: isMac ? 26 : 34)
-            .background(highlighted ? CE.violet.opacity(0.28) : Color.white.opacity(0.05), in: Capsule())
-            .overlay { Capsule().strokeBorder(highlighted ? CE.violet.opacity(0.55) : CE.line) }
-            .padding(.vertical, isMac ? 0 : 5)
-            .contentShape(Rectangle())
-            .fixedSize()
+            .font(isMac ? .system(size: 13, weight: .medium) : CEFont.secondary.weight(.medium))
+            .padding(.horizontal, 12)
         }
-        .buttonStyle(.plain)
+        // Same family as the filter chips and viewer buttons on this screen: 30 tall, lightens on hover.
+        .buttonStyle(LinkChipStyle(highlighted: highlighted))
+        .fixedSize()
         .help("\(help) · \(title)")
         .accessibilityLabel("\(label) \(title)")
         .accessibilityHint(help)
@@ -832,13 +885,10 @@ private struct RawTextSource<Content: View>: View {
         } else if let fetched {
             content(fetched.text, fetched.truncated)
         } else if let failure {
-            Label(failure, systemImage: "exclamationmark.circle").font(CEFont.secondary).foregroundStyle(CE.attention)
+            ViewerNote(text: failure, bad: true)
         } else {
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text(loadingText).font(CEFont.meta).foregroundStyle(CE.ink3)
-            }
-            .task { await fetch() }
+            ViewerNote(text: loadingText, loading: true)
+                .task { await fetch() }
         }
     }
 
@@ -884,7 +934,8 @@ private struct CodeLines {
         if all.count > 1, all.last == "" { all.removeLast() }
         total = all.count
         lines = Array(all.prefix(codeLineLimit))
-        digits = String(lines.count).count
+        // At least three digits wide, like the web's 5ch gutter.
+        digits = max(3, String(lines.count).count)
     }
     /// Padded so every chunk's number column has the same width.
     func number(_ index: Int) -> String {
@@ -893,28 +944,40 @@ private struct CodeLines {
     }
     /// Very tall single Text views render poorly; draw in chunks.
     var chunks: [Range<Int>] { stride(from: 0, to: lines.count, by: 200).map { $0..<min($0 + 200, lines.count) } }
+    /// One chunk's code. A chunk ending in an empty line keeps that line's height (a Text drops a trailing newline).
+    func text(_ range: Range<Int>) -> String {
+        let joined = lines[range].joined(separator: "\n")
+        return lines[range].last?.isEmpty == true ? joined + " " : joined
+    }
 }
 
+/// web .vw-code ol: 12.5 mono at line-height 1.6.
+private let codeLeading = CELeading.spacing(12.5, 1.6)
+/// web .vw-code li::before: the line-number column's own dark strip.
+private let codeGutterFill = Color(hex: 0x0A0817)
+
+/// Web CodeViewer: a bar (line count · 줄바꿈 · 복사 · 받기), then the source with a fixed line-number column.
 private struct CodeBlock: View {
     @Environment(\.ceWide) private var wide
     let file: FileDoc
+    let attachment: Attachment?
     let text: String
     let truncated: Bool
     @State private var wrapChoice: Bool?
     @State private var copied = false
     @State private var prepared: CodeLines?
+    /// Height of each drawn code chunk, so the fixed number column stays level with it.
+    @State private var chunkHeights: [Int: CGFloat] = [:]
+    /// Width of the number column in the wrapped layout (for its dark strip).
+    @State private var gutterWidth: CGFloat = 0
 
     /// Phone wraps by default; desk scrolls sideways.
     private var wrap: Bool { wrapChoice ?? !wide }
 
     var body: some View {
         let model = prepared ?? (text.utf8.count <= 200_000 ? CodeLines(text) : nil)
-        VStack(alignment: .leading, spacing: CESpace.s) {
-            HStack(spacing: 10) {
-                if let model {
-                    Text(countLine(model)).font(CEFont.meta).foregroundStyle(CE.ink3).monospacedDigit()
-                }
-                Spacer(minLength: 6)
+        VStack(alignment: .leading, spacing: 8) {
+            ViewerBar(text: model.map(countLine) ?? "") {
                 // Web .vw-btn: quiet rounded buttons; 줄바꿈 is a toggle drawn as a violet drop when on.
                 Button("줄바꿈") { wrapChoice = !wrap }
                     .buttonStyle(ViewerButtonStyle(on: wrap))
@@ -927,13 +990,13 @@ private struct CodeBlock: View {
                     Text(copied ? "복사됨" : truncated ? "보이는 만큼 복사" : "복사")
                 }
                 .buttonStyle(ViewerButtonStyle())
+                SaveButton(attachment: attachment, text: attachment == nil ? text : nil, name: saveName, label: saveLabel(model))
             }
             Group {
                 if let model {
                     if wrap { wrapped(model) } else { scrolling(model) }
                 } else {
-                    HStack(spacing: 8) { ProgressView().controlSize(.small); Text("내용을 정리하는 중입니다").font(CEFont.meta).foregroundStyle(CE.ink3) }
-                        .padding(CESpace.m)
+                    ViewerNote(text: "내용을 정리하는 중입니다", loading: true).padding(.horizontal, 12)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -948,47 +1011,84 @@ private struct CodeBlock: View {
         return line
     }
 
+    /// The original's name, or the title as a .txt when the source came only as text (web saveText).
+    private var saveName: String {
+        if let attachment, !attachment.name.isEmpty { return attachment.name }
+        let title = file.title.isEmpty ? "코드" : file.title
+        return title.replacing(#/[\\/:*?"<>|]/#, with: " ") + ".txt"
+    }
+
+    private func saveLabel(_ model: CodeLines?) -> String {
+        guard let attachment else { return "받기" }
+        let cut = truncated || (model.map { $0.total > $0.lines.count } ?? false)
+        return cut ? "전체 받기 (\(fileSizeText(attachment.size)))" : "받기"
+    }
+
+    /// Sideways scrolling; the number column stays put beside it (web: a sticky column).
     private func scrolling(_ model: CodeLines) -> some View {
-        ScrollView(.horizontal) {
-            VStack(alignment: .leading, spacing: 0) {
+        HStack(alignment: .top, spacing: 0) {
+            VStack(alignment: .trailing, spacing: codeLeading) {
                 ForEach(model.chunks, id: \.lowerBound) { range in
-                    HStack(alignment: .top, spacing: 14) {
-                        Text(range.map(model.number).joined(separator: "\n"))
-                            .foregroundStyle(CE.ink3.opacity(0.75))
-                            .accessibilityHidden(true)
-                        Text(model.lines[range].joined(separator: "\n"))
-                            .foregroundStyle(CE.ink)
-                            .textSelection(.enabled)
-                    }
+                    Text(range.map(model.number).joined(separator: "\n"))
+                        .lineSpacing(codeLeading)
+                        .frame(height: chunkHeights[range.lowerBound], alignment: .top)
                 }
             }
-            .font(CEFont.mono)
-            .padding(CESpace.m)
+            .foregroundStyle(CE.ink3)
+            .padding(.leading, 6).padding(.trailing, 9).padding(.vertical, 10)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .background(codeGutterFill)
+            .accessibilityHidden(true)
+            ScrollView(.horizontal) {
+                VStack(alignment: .leading, spacing: codeLeading) {
+                    ForEach(model.chunks, id: \.lowerBound) { range in
+                        Text(model.text(range))
+                            .lineSpacing(codeLeading)
+                            .foregroundStyle(CE.ink)
+                            .textSelection(.enabled)
+                            .fixedSize()
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                                if abs((chunkHeights[range.lowerBound] ?? 0) - height) > 0.5 { chunkHeights[range.lowerBound] = height }
+                            }
+                    }
+                }
+                .padding(.leading, 4).padding(.trailing, 14).padding(.vertical, 10)
+            }
         }
+        .font(CEFont.mono)
     }
 
     private func wrapped(_ model: CodeLines) -> some View {
-        LazyVStack(alignment: .leading, spacing: 1) {
+        LazyVStack(alignment: .leading, spacing: codeLeading) {
             ForEach(Array(model.lines.enumerated()), id: \.offset) { index, line in
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(model.number(index)).foregroundStyle(CE.ink3.opacity(0.75)).accessibilityHidden(true)
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    Text(model.number(index)).foregroundStyle(CE.ink3)
+                        .padding(.leading, 6).padding(.trailing, 9)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                            if abs(gutterWidth - width) > 0.5 { gutterWidth = width }
+                        }
+                        .accessibilityHidden(true)
                     Text(line.isEmpty ? " " : line)
                         .foregroundStyle(CE.ink)
+                        .lineSpacing(codeLeading)
                         .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 4).padding(.trailing, 14)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
         .font(CEFont.mono)
         .textSelection(.enabled)
-        .padding(CESpace.m)
+        .padding(.vertical, 10)
+        .background(alignment: .leading) { codeGutterFill.frame(width: gutterWidth) }
     }
 }
 
 // MARK: Table (csv / tsv)
 
 private let tableColumnLimit = 30
-private let tableRowLimit = 200
+/// Rows drawn at once (web TABLE_ROW_LIMIT). Sorting uses every row read, then draws the first of them.
+private let tableRowLimit = 500
 
 private struct ParsedTable {
     var header: [String]
@@ -997,89 +1097,162 @@ private struct ParsedTable {
     var numeric: [Bool]
 }
 
+/// web .vw-table: 13.5 cells at 1.45, 13/650 header. iPhone follows the text size setting.
+@MainActor private var tableCellSize: CGFloat {
+    #if os(macOS)
+    13.5
+    #else
+    UIFontMetrics(forTextStyle: .footnote).scaledValue(for: 13.5)
+    #endif
+}
+@MainActor private var tableHeadSize: CGFloat {
+    #if os(macOS)
+    13
+    #else
+    UIFontMetrics(forTextStyle: .footnote).scaledValue(for: 13)
+    #endif
+}
+
+/// Web TableViewer: a bar (rows · columns · 받기), then a bounded scroll box whose header row stays in view. Columns
+/// are as wide as their text up to 420 (longer text wraps); numbers line up on the right in tabular digits.
 private struct TableBlock: View {
+    @Environment(\.readerViewport) private var viewport
+    let file: FileDoc
+    let attachment: Attachment?
     let text: String
     let truncated: Bool
     let tabSeparated: Bool
     @State private var parsed: ParsedTable?
     @State private var sort: (column: Int, ascending: Bool)?
     @State private var sortedRows: [[String]]?
+    /// Column widths measured from the header and the first rows.
+    @State private var widths: [CGFloat]?
+    @State private var boxWidth: CGFloat = 0
+    /// Taller than its cap: the box scrolls vertically too and the header row stays pinned.
+    @State private var tall = false
 
     var body: some View {
-        let table = parsed ?? (text.utf8.count <= 100_000 ? parseTable(text, tab: tabSeparated, truncated: truncated) : nil)
-        VStack(alignment: .leading, spacing: CESpace.s) {
-            if let table {
-                if table.header.isEmpty {
-                    Text("비어 있는 표입니다").font(CEFont.secondary).foregroundStyle(CE.ink3)
-                } else {
-                    Text(summary(table)).font(CEFont.meta).foregroundStyle(CE.ink3).monospacedDigit()
-                    grid(table, rows: Array((sortedRows ?? table.rows).prefix(tableRowLimit)))
+        VStack(alignment: .leading, spacing: 8) {
+            if let table = parsed {
+                ViewerBar(text: summary(table)) {
+                    if let attachment {
+                        SaveButton(attachment: attachment, name: attachment.name,
+                                   label: cut(table) ? "전체 받기 (\(fileSizeText(attachment.size)))" : "받기")
+                    }
                 }
-            } else {
-                HStack(spacing: 8) { ProgressView().controlSize(.small); Text("표를 정리하는 중입니다").font(CEFont.meta).foregroundStyle(CE.ink3) }
+                if table.header.isEmpty {
+                    ViewerNote(text: "비어 있는 표입니다")
+                } else if let widths {
+                    grid(table, widths: fill(widths))
+                } else {
+                    ViewerNote(text: "표를 정리하는 중입니다", loading: true)
+                }
             }
         }
-        .task(id: text.utf8.count) { if parsed == nil { parsed = parseTable(text, tab: tabSeparated, truncated: truncated) } }
+        .task(id: text.utf8.count) { await prepare() }
+    }
+
+    private func prepare() async {
+        let table = parsed ?? parseTable(text, tab: tabSeparated, truncated: truncated)
+        parsed = table
+        tall = table.rows.count > 40
+        guard widths == nil, !table.header.isEmpty else { return }
+        let header = table.header, numeric = table.numeric
+        let sample = Array(table.rows.prefix(1500))
+        let cellSize = tableCellSize, headSize = tableHeadSize
+        if sample.count * header.count <= 4000 {
+            widths = measureTableColumns(header: header, rows: sample, numeric: numeric, cellSize: cellSize, headSize: headSize)
+        } else {
+            widths = await Task.detached(priority: .userInitiated) {
+                measureTableColumns(header: header, rows: sample, numeric: numeric, cellSize: cellSize, headSize: headSize)
+            }.value
+        }
     }
 
     private func summary(_ table: ParsedTable) -> String {
         var line = truncated ? "앞부분 \(table.rows.count.formatted())행" : "\(table.rows.count.formatted())행"
         line += " · \(table.header.count)열"
-        if table.rows.count > tableRowLimit { line += " · 앞 \(tableRowLimit)행만 표시" }
+        if table.rows.count > tableRowLimit { line += " · 앞 \(tableRowLimit.formatted())행만 표시" }
         if table.hiddenColumns > 0 { line += " · 전체 \(table.header.count + table.hiddenColumns)열 중 앞 \(table.header.count)열만 표시" }
         return line
     }
 
-    private func grid(_ table: ParsedTable, rows: [[String]]) -> some View {
-        ScrollView(.horizontal) {
-            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
-                GridRow {
-                    ForEach(Array(table.header.enumerated()), id: \.offset) { index, title in
-                        Button { toggleSort(index, table: table) } label: {
-                            HStack(spacing: 3) {
-                                Text(title.isEmpty ? "열 \(index + 1)" : clipped(title)).lineLimit(1)
-                                if let sort, sort.column == index {
-                                    Image(systemName: sort.ascending ? "arrow.up" : "arrow.down").font(.system(size: 8, weight: .bold))
-                                }
-                            }
-                            .font(CEFont.meta.weight(.semibold))
-                            .foregroundStyle(sort?.column == index ? CE.accent : CE.ink)
-                            .padding(.horizontal, 12).padding(.vertical, isMac ? 8 : 11)
-                            .frame(maxWidth: .infinity, alignment: table.numeric[index] ? .trailing : .leading)
-                            .background(Color(hex: 0x1A1533))
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("눌러서 정렬")
-                        .accessibilityLabel("\(title.isEmpty ? "열 \(index + 1)" : title) 열 정렬")
-                        .gridColumnAlignment(table.numeric[index] ? .trailing : .leading)
+    private func cut(_ table: ParsedTable) -> Bool { truncated || table.rows.count > tableRowLimit || table.hiddenColumns > 0 }
+
+    /// A narrow table still spans the box (web min-width 100%): the spare width is shared out by column width.
+    private func fill(_ widths: [CGFloat]) -> [CGFloat] {
+        let total = widths.reduce(0, +)
+        let room = boxWidth - 2
+        guard total > 0, room > total else { return widths }
+        return widths.map { ($0 * room / total).rounded(.down) }
+    }
+
+    private func grid(_ table: ParsedTable, widths: [CGFloat]) -> some View {
+        let rows = Array((sortedRows ?? table.rows).prefix(tableRowLimit))
+        // web max-height min(72vh, 780px).
+        let cap = viewportLimit(viewport, 0.9, cap: 780, floor: 260)
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let cellSize = tableCellSize
+        return ScrollView(tall ? [.horizontal, .vertical] : .horizontal) {
+            // Pinned only while the box scrolls itself (web th sticky inside .vw-table__scroll).
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: tall ? [.sectionHeaders] : []) {
+                Section {
+                    ForEach(rows.indices, id: \.self) { index in
+                        TableRowView(cells: rows[index], widths: widths, numeric: table.numeric,
+                                     last: index == rows.count - 1, cellSize: cellSize)
                     }
-                }
-                Divider().overlay(CE.lineStrong).gridCellUnsizedAxes(.horizontal)
-                ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
-                    if index > 0 { Divider().overlay(CE.line).gridCellUnsizedAxes(.horizontal) }
-                    GridRow {
-                        ForEach(0..<table.header.count, id: \.self) { column in
-                            let value = column < row.count ? row[column] : ""
-                            Text(clipped(value))
-                                .font(CEFont.secondary).foregroundStyle(CE.ink)
-                                .monospacedDigit()
-                                .lineLimit(1)
-                                .padding(.horizontal, 12).padding(.vertical, isMac ? 7 : 9)
-                                .help(value.count > 60 ? value : "")
-                        }
-                    }
+                } header: {
+                    headerRow(table, widths: widths)
                 }
             }
-            .textSelection(.enabled)
-            // The surface hugs the table; a wide table scrolls sideways inside the reader.
-            .background(CE.bgDeep.opacity(0.5))
-            .clipShape(RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
-            .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(CE.line) }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                if height > cap + 1, !tall { tall = true }
+            }
+        }
+        .frame(height: tall ? cap : nil)
+        .scrollBounceBehavior(.basedOnSize)
+        .background(CE.bgDeep.opacity(0.5))
+        .clipShape(shape)
+        .overlay { shape.strokeBorder(CE.line) }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+            if abs(boxWidth - width) > 0.5 { boxWidth = width }
         }
     }
 
-    private func clipped(_ value: String) -> String { value.count > 60 ? String(value.prefix(58)) + "…" : value }
+    /// web th button: 13/650 ink-1 on #1a1533, a hairline below, and an always-reserved slot for the sort arrow so
+    /// the column does not jump when it is sorted.
+    private func headerRow(_ table: ParsedTable, widths: [CGFloat]) -> some View {
+        HStack(spacing: 0) {
+            ForEach(table.header.indices, id: \.self) { index in
+                let title = table.header[index].isEmpty ? "열 \(index + 1)" : table.header[index]
+                let numeric = table.numeric[index]
+                let sorted = sort?.column == index ? sort?.ascending : nil
+                Button { toggleSort(index, table: table) } label: {
+                    HStack(spacing: 5) {
+                        if numeric { Spacer(minLength: 0) }
+                        Text(title).lineLimit(1)
+                        Image(systemName: sorted == false ? "arrow.down" : "arrow.up")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(CE.accent)
+                            .opacity(sorted == nil ? 0 : 1)
+                            .frame(width: 13)
+                        if !numeric { Spacer(minLength: 0) }
+                    }
+                    .font(.system(size: tableHeadSize, weight: .semibold))
+                    .foregroundStyle(CE.ink)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .frame(width: widths[index])
+                    .frame(minHeight: isMac ? 40 : 44)
+                }
+                .buttonStyle(HoverFillStyle(radius: 0, hover: 0.06))
+                .help("눌러서 정렬")
+                .accessibilityLabel("\(title) 열 정렬")
+                .accessibilityValue(sorted == nil ? "" : sorted == true ? "오름차순" : "내림차순")
+            }
+        }
+        .background(Color(hex: 0x1A1533))
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.white.opacity(0.14)).frame(height: 1) }
+    }
 
     /// Header tap cycles ascending → descending → original order. Empty cells always sink.
     private func toggleSort(_ column: Int, table: ParsedTable) {
@@ -1105,6 +1278,74 @@ private struct TableBlock: View {
             return sort.ascending ? order == .orderedAscending : order == .orderedDescending
         }
         .map(\.element)
+    }
+}
+
+/// One table row (web td: padding 8 12, top-aligned, wraps; numbers right-aligned in tabular digits; row hover .03).
+private struct TableRowView: View {
+    let cells: [String]
+    let widths: [CGFloat]
+    let numeric: [Bool]
+    let last: Bool
+    let cellSize: CGFloat
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(widths.indices, id: \.self) { column in
+                let number = column < numeric.count && numeric[column]
+                cell(column < cells.count ? cells[column] : "", number: number)
+                    .frame(width: widths[column], alignment: number ? .topTrailing : .topLeading)
+            }
+        }
+        .background(Color.white.opacity(hovering ? 0.03 : 0))
+        .overlay(alignment: .bottom) { if !last { Rectangle().fill(CE.line).frame(height: 1) } }
+        .onHover { hovering = $0 }
+    }
+
+    private func cell(_ value: String, number: Bool) -> some View {
+        (number ? Text(value).monospacedDigit() : Text(value))
+            .font(.system(size: cellSize))
+            .foregroundStyle(CE.ink)
+            .lineSpacing(CELeading.spacing(cellSize, 1.45))
+            .multilineTextAlignment(number ? .trailing : .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+            .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+}
+
+#if os(macOS)
+private typealias PlatformFont = NSFont
+#else
+private typealias PlatformFont = UIFont
+#endif
+
+/// Column widths like the web's auto table layout: the widest line of each column (text columns capped at 420,
+/// numbers never wrap) or its header with the sort slot, whichever is wider. Pure, so it can run off the main thread.
+private func measureTableColumns(header: [String], rows: [[String]], numeric: [Bool], cellSize: CGFloat, headSize: CGFloat) -> [CGFloat] {
+    let textFont = PlatformFont.systemFont(ofSize: cellSize)
+    let digitFont = PlatformFont.monospacedDigitSystemFont(ofSize: cellSize, weight: .regular)
+    let headFont = PlatformFont.systemFont(ofSize: headSize, weight: .semibold)
+    func width(_ value: String, _ font: PlatformFont) -> CGFloat {
+        var widest: CGFloat = 0
+        for line in value.split(whereSeparator: \.isNewline) {
+            widest = max(widest, (String(line) as NSString).size(withAttributes: [.font: font]).width)
+        }
+        return widest.rounded(.up) + 2
+    }
+    return header.indices.map { column in
+        let number = column < numeric.count && numeric[column]
+        let title = header[column].isEmpty ? "열 \(column + 1)" : header[column]
+        // label · 5 · 13 arrow slot · 12 + 12 padding
+        let head = width(title, headFont) + 5 + 13 + 24
+        var widest: CGFloat = 0
+        for row in rows where column < row.count {
+            widest = max(widest, width(row[column], number ? digitFont : textFont))
+            if !number && widest >= 396 { break }
+        }
+        let body = number ? widest + 24 : min(widest + 24, 420)
+        return max(head, body, 56)
     }
 }
 
@@ -1200,13 +1441,13 @@ private func isNumericColumn(_ rows: [[String]], _ column: Int) -> Bool {
 
 private struct ArtifactViewer: View {
     @Environment(AppStore.self) private var store
-    @Environment(\.ceWide) private var wide
     let file: FileDoc
-    /// Set only together with the compiled network block rule, so a preview never renders without it.
-    @State private var loaded: LoadedArtifact?
+    /// Set only together with the compiled network block rule, so a preview never renders without it. The reader owns
+    /// it so its header can offer 크게 보기.
+    @Binding var loaded: LoadedArtifact?
+    @Binding var enlarged: Bool
     @State private var loading = false
     @State private var error: String?
-    @State private var enlarged = false
     /// The page height reported by the fitted preview (0 until measured).
     @State private var pageHeight: CGFloat = 0
 
@@ -1232,10 +1473,11 @@ private struct ArtifactViewer: View {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "lock.shield").font(.system(size: 17, weight: .medium)).foregroundStyle(CE.accent)
                     .frame(width: 22)
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("직원이 만든 페이지입니다").font(CEFont.rowTitle).foregroundStyle(CE.ink)
                     Text("스크립트와 외부 연결을 끈 보호된 미리보기로 엽니다.")
-                        .font(CEFont.meta).foregroundStyle(CE.ink3)
+                        .font(gateNoteFont).foregroundStyle(CE.ink2)
+                        .lineSpacing(CELeading.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -1244,16 +1486,20 @@ private struct ArtifactViewer: View {
                     Text(loading ? "불러오는 중입니다" : error == nil ? "미리보기 열기" : "다시 시도")
                 }
                 .ceProminentButton()
+                .controlSize(.regular)
                 .disabled(loading || unavailableReason != nil)
                 if loading { ProgressView().controlSize(.small) }
                 if let reason = unavailableReason {
-                    Text(reason).font(CEFont.meta).foregroundStyle(CE.ink3).fixedSize(horizontal: false, vertical: true)
+                    Text(reason).font(gateNoteFont).foregroundStyle(CE.ink2)
+                        .lineSpacing(CELeading.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(.leading, 32)
             if let error {
                 Label(error, systemImage: "exclamationmark.circle")
-                    .font(CEFont.meta).foregroundStyle(CE.danger)
+                    .font(CEFont.note).foregroundStyle(CE.danger)
+                    .lineSpacing(CELeading.note)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 32)
             }
@@ -1264,26 +1510,18 @@ private struct ArtifactViewer: View {
         .recessed(radius: 14)
     }
 
+    private var gateNoteFont: Font { isMac ? .system(size: 13) : CEFont.secondary }
+
+    /// The page alone (web .afr-stage): 크게 보기 lives in the reader header, so the frame starts right under the summary.
     private func preview(_ artifact: LoadedArtifact) -> some View {
-        VStack(alignment: .leading, spacing: CESpace.s) {
-            HStack(spacing: CESpace.s) {
-                Label("보호된 미리보기", systemImage: "lock.shield")
-                    .font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
-                    .help("스크립트와 외부 연결을 끈 채로 그렸습니다.")
-                Spacer(minLength: 8)
-                Button { enlarged = true } label: {
-                    Label("크게 보기", systemImage: "arrow.up.left.and.arrow.down.right")
-                }
-                .buttonStyle(ViewerButtonStyle())
-            }
-            // As tall as the page once measured (the web's frame grows the same way); 520 until then.
-            SandboxedHTML(html: artifact.html, rule: artifact.rule, title: file.title, height: $pageHeight)
-                .frame(maxWidth: .infinity)
-                .frame(height: pageHeight > 0 ? max(pageHeight, 120) : 520)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CE.line) }
-                .accessibilityLabel("\(file.title) 미리보기")
-        }
+        // As tall as the page once measured (the web's frame grows the same way); 520 until then.
+        SandboxedHTML(html: artifact.html, rule: artifact.rule, title: file.title, height: $pageHeight)
+            .frame(maxWidth: .infinity)
+            .frame(height: pageHeight > 0 ? max(pageHeight, 120) : 520)
+            .background(CE.bg)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CE.line) }
+            .accessibilityLabel("\(file.title) 미리보기")
     }
 
     private func load() async {
@@ -1351,17 +1589,29 @@ private struct ArtifactFullView: View {
 // MARK: - Attachments
 
 /// One attachment in a message, decision or file. Loads only through the connected daemon with the access code in a header.
+/// `compact` is the web chat look (.atv): a 208×148 cover thumbnail for a picture, a name · size chip for anything else.
 struct AttachmentPreview: View {
     let attachment: Attachment
-    init(attachment: Attachment) { self.attachment = attachment }
-    var body: some View { AttachmentView(attachment: attachment, large: false) }
+    var compact = false
+    init(attachment: Attachment, compact: Bool = false) { self.attachment = attachment; self.compact = compact }
+    var body: some View {
+        if compact {
+            if attachment.isImage {
+                AttachmentThumb(attachment: attachment, height: 148).frame(maxWidth: 208)
+            } else {
+                AttachmentChip(attachment: attachment)
+            }
+        } else {
+            AttachmentView(attachment: attachment)
+        }
+    }
 }
 
+/// The captioned card a message or decision shows (the reader uses `AttachmentGroup`, `FileCard` and the viewers).
 private struct AttachmentView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.displayScale) private var displayScale
     let attachment: Attachment
-    var large = false
     @State private var data: Data?
     @State private var fileURL: URL?
     @State private var image: Image?
@@ -1373,7 +1623,6 @@ private struct AttachmentView: View {
 
     private var kind: String { attachmentKind(attachment) }
     private var isTextual: Bool { attachment.mime.hasPrefix("text/") || attachment.mime.contains("json") }
-    private var inlinePDF: Bool { large && kind == "pdf" }
     private var displayName: String { attachment.name.isEmpty ? "이름 없는 첨부" : attachment.name }
 
     var body: some View {
@@ -1381,7 +1630,7 @@ private struct AttachmentView: View {
             if attachment.isImage { imageTile } else { fileCard }
         }
         .quickLookPreview($quickLook)
-        .task(id: attachment.id) { if attachment.isImage || inlinePDF { await load() } }
+        .task(id: attachment.id) { if attachment.isImage { await load() } }
     }
 
     // MARK: Image
@@ -1411,7 +1660,7 @@ private struct AttachmentView: View {
         }
         .padding(6)
         .fileInset()
-        .frame(maxWidth: large ? .infinity : 420, alignment: .leading)
+        .frame(maxWidth: 420, alignment: .leading)
     }
 
     @ViewBuilder private var imageArea: some View {
@@ -1419,7 +1668,7 @@ private struct AttachmentView: View {
         if let image {
             let scale = max(displayScale, 1)
             image.resizable().scaledToFit()
-                .frame(maxWidth: pixelSize.width / scale, maxHeight: min(pixelSize.height / scale, large ? 560 : 260))
+                .frame(maxWidth: pixelSize.width / scale, maxHeight: min(pixelSize.height / scale, 260))
                 .clipShape(shape)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -1443,7 +1692,7 @@ private struct AttachmentView: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            .frame(height: large ? 200 : 120)
+            .frame(height: 120)
             .contentShape(Rectangle())
         }
     }
@@ -1460,12 +1709,6 @@ private struct AttachmentView: View {
                 }
                 Spacer(minLength: 6)
                 actions
-            }
-            if inlinePDF, let data {
-                PDFPreview(data: data)
-                    .frame(maxWidth: .infinity, minHeight: 480, idealHeight: 640)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .accessibilityLabel("\(displayName) 미리보기")
             }
             if showText, let data, let content = String(data: data, encoding: .utf8) {
                 Text(String(content.prefix(100_000)))
@@ -1484,7 +1727,7 @@ private struct AttachmentView: View {
         }
         .padding(10)
         .fileInset()
-        .frame(maxWidth: large ? .infinity : 420, alignment: .leading)
+        .frame(maxWidth: 420, alignment: .leading)
     }
 
     @ViewBuilder private var actions: some View {
@@ -1528,16 +1771,755 @@ private struct AttachmentView: View {
         loading = true; defer { loading = false }
         do {
             let result = try await api.attachmentData(attachment)
-            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("IAMCEO-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let name = attachment.name.isEmpty ? "attachment" : URL(fileURLWithPath: attachment.name).lastPathComponent
-            let destination = folder.appendingPathComponent(name)
-            try result.write(to: destination)
-            if attachment.isImage, let decoded = decodePreviewImage(result, maxPixel: large ? 2400 : 1400) {
+            let destination = try writeTemporaryFile(result, name: attachment.name)
+            if attachment.isImage, let decoded = decodePreviewImage(result, maxPixel: 1400) {
                 image = decoded.image; pixelSize = decoded.size
             }
             data = result; fileURL = destination; error = nil
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+// MARK: - Reader viewers (web components/viewers)
+
+private extension Attachment {
+    var displayName: String { name.isEmpty ? "이름 없는 첨부" : name }
+}
+
+/// The original into a private temporary folder, under its own file name (Quick Look and sharing need a real file).
+private func writeTemporaryFile(_ data: Data, name: String) throws -> URL {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("IAMCEO-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let file = name.isEmpty ? "attachment" : URL(fileURLWithPath: name).lastPathComponent
+    let destination = folder.appendingPathComponent(file)
+    try data.write(to: destination)
+    return destination
+}
+
+/// One attachment's original, fetched through the connected daemon (access code in a header, same origin only) into a
+/// temporary file; pictures are also decoded at preview size.
+@MainActor @Observable private final class AttachmentFile {
+    let attachment: Attachment
+    private(set) var url: URL?
+    private(set) var image: Image?
+    private(set) var pixelSize: CGSize = .zero
+    private(set) var loading = false
+    var error: String?
+
+    init(_ attachment: Attachment) { self.attachment = attachment }
+
+    func load(_ store: AppStore, maxPixel: Int = 1400) async {
+        guard url == nil, !loading else { return }
+        guard let api = store.api else {
+            error = store.isDemo ? "샘플에는 원본 파일이 없습니다." : "서버 연결 후 원본을 불러올 수 있습니다."
+            return
+        }
+        loading = true; defer { loading = false }
+        do {
+            let data = try await api.attachmentData(attachment)
+            let destination = try writeTemporaryFile(data, name: attachment.name)
+            if attachment.isImage, let decoded = decodePreviewImage(data, maxPixel: maxPixel) {
+                image = decoded.image; pixelSize = decoded.size
+            }
+            url = destination; error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+}
+
+/// Pictures shown together: Quick Look pages through all of them with the arrow keys (web ImageViewer 이전/다음).
+@MainActor @Observable private final class GalleryState {
+    var urls: [String: URL] = [:]
+    var selected: URL?
+}
+
+/// Web .atv[data-large] (a document's attachments, the extras under other viewers): pictures as 320×220 cover tiles
+/// (two to a row on iPhone, one alone at full width), every other file as a name · size chip.
+private struct AttachmentGroup: View {
+    @Environment(\.ceWide) private var wide
+    let items: [Attachment]
+    @State private var gallery = GalleryState()
+
+    var body: some View {
+        let images = items.filter(\.isImage)
+        let files = items.filter { !$0.isImage }
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                if !images.isEmpty {
+                    LazyVGrid(columns: columns(images.count), alignment: .leading, spacing: 8) {
+                        ForEach(images) { image in
+                            AttachmentThumb(attachment: image, height: tileHeight(images.count), gallery: gallery)
+                        }
+                    }
+                }
+                if !files.isEmpty {
+                    ChipFlow(spacing: 8) {
+                        ForEach(files) { AttachmentChip(attachment: $0) }
+                    }
+                }
+            }
+            .quickLookPreview($gallery.selected, in: images.compactMap { gallery.urls[$0.id] })
+        }
+    }
+
+    private func columns(_ count: Int) -> [GridItem] {
+        if wide { return [GridItem(.adaptive(minimum: 240, maximum: 320), spacing: 8, alignment: .top)] }
+        return count == 1 ? [GridItem(.flexible())] : [GridItem(.flexible(), spacing: 8), GridItem(.flexible())]
+    }
+
+    private func tileHeight(_ count: Int) -> CGFloat { wide ? 220 : count == 1 ? 200 : 124 }
+}
+
+/// Web .atv-thumb / .vw-gallery__item: a cover-cropped picture on a dark well, radius 12, a ring that brightens on
+/// hover. A click opens Quick Look.
+private struct AttachmentThumb: View {
+    @Environment(AppStore.self) private var store
+    let attachment: Attachment
+    /// Fixed tile height; nil = the web gallery's 4:3 tile.
+    var height: CGFloat?
+    /// Shared with the other pictures so Quick Look pages through them; nil = this picture alone.
+    var gallery: GalleryState?
+    @State private var source: AttachmentFile
+    @State private var preview: URL?
+    @State private var hovering = false
+
+    init(attachment: Attachment, height: CGFloat?, gallery: GalleryState? = nil) {
+        self.attachment = attachment
+        self.height = height
+        self.gallery = gallery
+        _source = State(initialValue: AttachmentFile(attachment))
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        Button { open() } label: {
+            well(shape)
+                .overlay {
+                    if let image = source.image {
+                        image.resizable().scaledToFill()
+                    } else if source.loading {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        VStack(spacing: 4) {
+                            Image(systemName: "photo").foregroundStyle(CE.ink3)
+                            Text(source.error ?? attachment.displayName)
+                                .font(CEFont.caption).foregroundStyle(CE.ink2)
+                                .lineSpacing(CELeading.spacing(12, 1.35))
+                                .lineLimit(2).multilineTextAlignment(.center)
+                        }
+                        .padding(10)
+                    }
+                }
+                .clipShape(shape)
+                .overlay { shape.strokeBorder(Color.white.opacity(hovering ? 0.28 : 0.1)) }
+                .contentShape(shape)
+                .animation(.linear(duration: 0.12), value: hovering)
+        }
+        .buttonStyle(.plain)
+        .disabled(source.loading)
+        .onHover { hovering = $0 }
+        .help(attachment.displayName)
+        .accessibilityLabel(source.url == nil ? "\(attachment.displayName) 불러오기" : "\(attachment.displayName) 크게 보기")
+        .quickLookPreview($preview)
+        .contextMenu {
+            if let url = source.url {
+                ShareLink(item: url) { Label("공유·저장", systemImage: "square.and.arrow.up") }
+            }
+        }
+        .task(id: attachment.id) { await fetch() }
+    }
+
+    @ViewBuilder private func well(_ shape: RoundedRectangle) -> some View {
+        if let height {
+            shape.fill(CE.bgDeep.opacity(0.5)).frame(maxWidth: .infinity).frame(height: height)
+        } else {
+            shape.fill(CE.bgDeep.opacity(0.5)).aspectRatio(4 / 3, contentMode: .fit).frame(maxWidth: .infinity)
+        }
+    }
+
+    private func fetch() async {
+        await source.load(store, maxPixel: 1000)
+        if let url = source.url { gallery?.urls[attachment.id] = url }
+    }
+
+    private func open() {
+        guard let url = source.url else { Task { await fetch() }; return }
+        if let gallery { gallery.selected = url } else { preview = url }
+    }
+}
+
+/// Web .atv-file: name and size on a quiet rounded chip that lightens on hover. A click opens the original in Quick
+/// Look; the context menu saves or shares it.
+private struct AttachmentChip: View {
+    @Environment(AppStore.self) private var store
+    let attachment: Attachment
+    @State private var source: AttachmentFile
+    @State private var preview: URL?
+    @State private var hovering = false
+
+    init(attachment: Attachment) {
+        self.attachment = attachment
+        _source = State(initialValue: AttachmentFile(attachment))
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        Button { Task { await open() } } label: {
+            HStack(spacing: 10) {
+                Image(systemName: fileKindIcon(attachmentKind(attachment)))
+                    .font(.system(size: 12, weight: .medium)).foregroundStyle(CE.ink3)
+                Text(attachment.displayName)
+                    .font(isMac ? .system(size: 13.5, weight: .medium) : CEFont.note.weight(.medium))
+                    .foregroundStyle(CE.ink).lineLimit(1).truncationMode(.middle)
+                if source.loading {
+                    ProgressView().controlSize(.mini)
+                } else if source.error != nil {
+                    Text("받지 못함").font(sizeFont).foregroundStyle(CE.danger)
+                } else {
+                    Text(fileSizeText(attachment.size)).font(sizeFont).foregroundStyle(CE.ink2).monospacedDigit()
+                }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 6)
+            .frame(minHeight: isMac ? 36 : 44)
+            .background(Color.white.opacity(hovering ? 0.13 : 0.07), in: shape)
+            .overlay { shape.strokeBorder(Color.white.opacity(0.1)) }
+            .contentShape(shape)
+            .animation(.linear(duration: 0.12), value: hovering)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(source.error ?? "\(attachment.displayName) 미리 보기")
+        .accessibilityLabel("\(attachment.displayName) \(fileSizeText(attachment.size)) 열기")
+        .quickLookPreview($preview)
+        .contextMenu {
+            if let url = source.url {
+                ShareLink(item: url) { Label("공유·저장", systemImage: "square.and.arrow.up") }
+            }
+        }
+    }
+
+    private var sizeFont: Font { isMac ? .system(size: 12.5) : CEFont.meta }
+
+    private func open() async {
+        await source.load(store)
+        if let url = source.url { preview = url }
+    }
+}
+
+/// Web .vw-gallery: several pictures in a grid of 4:3 cover tiles (170 minimum), paged through in Quick Look.
+private struct ImageGallery: View {
+    @Environment(\.ceWide) private var wide
+    let attachments: [Attachment]
+    @State private var gallery = GalleryState()
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: wide ? 170 : 140), spacing: 8, alignment: .top)], alignment: .leading, spacing: 8) {
+            ForEach(attachments) { AttachmentThumb(attachment: $0, height: nil, gallery: gallery) }
+        }
+        .quickLookPreview($gallery.selected, in: attachments.compactMap { gallery.urls[$0.id] })
+    }
+}
+
+/// Web .vw-gallery[data-single]: one picture centred on a dark full-width tile, up to about 68% of the view tall, then
+/// a bar with its name · size and 받기 / 공유.
+private struct SingleImage: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.readerViewport) private var viewport
+    @Environment(\.displayScale) private var displayScale
+    let attachment: Attachment
+    @State private var source: AttachmentFile
+    @State private var preview: URL?
+    @State private var hovering = false
+    @State private var width: CGFloat = 0
+
+    init(attachment: Attachment) {
+        self.attachment = attachment
+        _source = State(initialValue: AttachmentFile(attachment))
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                if let url = source.url { preview = url } else { Task { await source.load(store, maxPixel: 2400) } }
+            } label: {
+                ZStack {
+                    if let image = source.image {
+                        let size = fitted
+                        image.resizable().scaledToFit().frame(width: size.width, height: size.height)
+                    } else if source.loading {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        VStack(spacing: 6) {
+                            Image(systemName: "photo").font(.system(size: 18)).foregroundStyle(CE.ink3)
+                            if let error = source.error {
+                                Text(error).font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.note)
+                                    .multilineTextAlignment(.center)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                if store.api != nil { Text("눌러서 다시 불러오기").font(CEFont.note.weight(.semibold)).foregroundStyle(CE.accent) }
+                            }
+                        }
+                        .padding(CESpace.l)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 120)
+                .background(CE.bgDeep.opacity(0.5))
+                .clipShape(shape)
+                .overlay { shape.strokeBorder(Color.white.opacity(hovering ? 0.28 : 0.1)) }
+                .contentShape(shape)
+                .animation(.linear(duration: 0.12), value: hovering)
+            }
+            .buttonStyle(.plain)
+            .disabled(source.loading)
+            .onHover { hovering = $0 }
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { value in
+                if abs(width - value) > 0.5 { width = value }
+            }
+            .help(source.url == nil ? "" : "크게 보기")
+            .accessibilityLabel(source.url == nil ? "\(attachment.displayName) 불러오기" : "\(attachment.displayName) 크게 보기")
+            ViewerBar(text: "\(attachment.displayName) · \(fileSizeText(attachment.size))") {
+                SaveButton(attachment: attachment, name: attachment.name)
+                if let url = source.url {
+                    ShareLink(item: url) { Text("공유") }
+                        .buttonStyle(ViewerButtonStyle())
+                        .accessibilityLabel("\(attachment.displayName) 공유")
+                }
+            }
+        }
+        .quickLookPreview($preview)
+        .task(id: attachment.id) { await source.load(store, maxPixel: 2400) }
+    }
+
+    /// Natural size (never upscaled), narrowed to the tile and capped at min(68% of the view, 720).
+    private var fitted: CGSize {
+        let scale = max(displayScale, 1)
+        let natural = CGSize(width: source.pixelSize.width / scale, height: source.pixelSize.height / scale)
+        guard natural.width > 0, natural.height > 0 else { return .zero }
+        let cap = viewportLimit(viewport, 0.85, cap: 720)
+        var w = width > 0 ? min(natural.width, width) : natural.width
+        var h = w * natural.height / natural.width
+        if h > cap { h = cap; w = h * natural.width / natural.height }
+        return CGSize(width: w, height: h)
+    }
+}
+
+/// Web .vw-card: name (wraps to two lines) and size · type on a quiet card, the actions on the right as .vw-btn.
+private struct FileCard: View {
+    @Environment(AppStore.self) private var store
+    let attachment: Attachment
+    @State private var source: AttachmentFile
+    @State private var preview: URL?
+    @State private var text: String?
+    @State private var showText = false
+
+    init(attachment: Attachment) {
+        self.attachment = attachment
+        _source = State(initialValue: AttachmentFile(attachment))
+    }
+
+    private var isTextual: Bool { attachment.mime.hasPrefix("text/") || attachment.mime.contains("json") }
+    private var meta: String {
+        let mime = attachment.mime.isEmpty || attachment.mime == "application/octet-stream" ? nil : attachment.mime
+        return [fileSizeText(attachment.size), mime].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(attachment.displayName)
+                        .font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                        .lineSpacing(CELeading.spacing(14.5, 1.35))
+                        .lineLimit(2).truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(meta).font(CEFont.meta).foregroundStyle(CE.ink2).monospacedDigit().lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if source.loading { ProgressView().controlSize(.small) }
+                HStack(spacing: 6) {
+                    if isTextual {
+                        Button(showText ? "접기" : "텍스트 보기") { Task { await toggleText() } }
+                            .buttonStyle(ViewerButtonStyle(on: showText))
+                    }
+                    Button("열기") { Task { await open() } }
+                        .buttonStyle(ViewerButtonStyle())
+                        .help("원본을 받아 미리 봅니다")
+                        .accessibilityLabel("\(attachment.displayName) 열기")
+                    #if os(macOS)
+                    SaveButton(attachment: attachment, name: attachment.name)
+                    #endif
+                    if let url = source.url {
+                        ShareLink(item: url) { Text("공유") }
+                            .buttonStyle(ViewerButtonStyle())
+                            .help("공유·저장")
+                            .accessibilityLabel("\(attachment.displayName) 공유·저장")
+                    }
+                }
+                .fixedSize()
+                .disabled(source.loading)
+            }
+            if showText, let text {
+                Text(text)
+                    .font(CEFont.mono).foregroundStyle(CE.ink2)
+                    .lineSpacing(CELeading.spacing(12.5, 1.5))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .recessed(radius: 10, opacity: 0.55)
+            }
+            if let error = source.error {
+                Label(error, systemImage: "exclamationmark.circle")
+                    .font(CEFont.note).foregroundStyle(CE.danger)
+                    .lineSpacing(CELeading.note)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 12)
+        .background(Color.white.opacity(0.05), in: shape)
+        .overlay { shape.strokeBorder(CE.line) }
+        .quickLookPreview($preview)
+    }
+
+    private func open() async {
+        await source.load(store)
+        if let url = source.url { preview = url }
+    }
+
+    private func toggleText() async {
+        if showText { showText = false; return }
+        await source.load(store)
+        if text == nil, let url = source.url, let data = try? Data(contentsOf: url) {
+            text = String(String(decoding: data, as: UTF8.self).prefix(100_000))
+        }
+        showText = text != nil
+    }
+}
+
+/// Web PdfViewer: a bar (name · size, 열기, 받기), then the pages in a frame min(78% of the view, 900) tall on #2a2838.
+private struct PDFBlock: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.readerViewport) private var viewport
+    let attachment: Attachment
+    @State private var source: AttachmentFile
+    @State private var preview: URL?
+
+    init(attachment: Attachment) {
+        self.attachment = attachment
+        _source = State(initialValue: AttachmentFile(attachment))
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        VStack(alignment: .leading, spacing: 8) {
+            ViewerBar(text: "\(attachment.displayName) · \(fileSizeText(attachment.size))") {
+                if let url = source.url {
+                    Button("열기") { preview = url }
+                        .buttonStyle(ViewerButtonStyle())
+                        .help("Quick Look으로 엽니다")
+                }
+                SaveButton(attachment: attachment, name: attachment.name)
+            }
+            if let url = source.url {
+                PDFPreview(url: url)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: viewportLimit(viewport, 0.95, cap: 900, floor: 360))
+                    .background(Color(hex: 0x2A2838))
+                    .clipShape(shape)
+                    .overlay { shape.strokeBorder(CE.line) }
+                    .accessibilityLabel("\(attachment.displayName) 미리보기")
+            } else if let error = source.error {
+                HStack(spacing: 10) {
+                    ViewerNote(text: error, bad: true)
+                    if store.api != nil {
+                        Button("다시 시도") { Task { await source.load(store) } }.buttonStyle(ViewerButtonStyle())
+                    }
+                }
+            } else {
+                ViewerNote(text: "PDF를 불러오는 중입니다", loading: true)
+            }
+        }
+        .quickLookPreview($preview)
+        .task(id: attachment.id) { await source.load(store) }
+    }
+}
+
+/// Web MediaViewer: video full width up to min(68% of the view, 720) on black, or an audio strip, then a bar with the
+/// name · size and 받기.
+private struct MediaBlock: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.readerViewport) private var viewport
+    let attachment: Attachment
+    let video: Bool
+    @State private var source: AttachmentFile
+    @State private var player: AVPlayer?
+    @State private var audio: AudioModel?
+    @State private var aspect: CGFloat = 16 / 9
+    @State private var unplayable = false
+    @State private var width: CGFloat = 0
+
+    init(attachment: Attachment, video: Bool) {
+        self.attachment = attachment
+        self.video = video
+        _source = State(initialValue: AttachmentFile(attachment))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if unplayable {
+                ViewerNote(text: "여기서 재생할 수 없는 형식입니다. 받아서 열어 주세요.", bad: true)
+            } else if let player, video {
+                VideoPlayer(player: player)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: videoHeight)
+                    .background(Color.black)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .accessibilityLabel("\(attachment.displayName) 영상")
+            } else if let audio {
+                AudioStrip(model: audio, name: attachment.displayName)
+            } else if let error = source.error {
+                HStack(spacing: 10) {
+                    ViewerNote(text: error, bad: true)
+                    if store.api != nil {
+                        Button("다시 시도") { Task { await prepare() } }.buttonStyle(ViewerButtonStyle())
+                    }
+                }
+            } else {
+                ViewerNote(text: video ? "영상을 불러오는 중입니다" : "오디오를 불러오는 중입니다", loading: true)
+            }
+            ViewerBar(text: "\(attachment.displayName) · \(fileSizeText(attachment.size))") {
+                SaveButton(attachment: attachment, name: attachment.name)
+            }
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { value in
+            if abs(width - value) > 0.5 { width = value }
+        }
+        .task(id: attachment.id) { await prepare() }
+        .onDisappear { player?.pause(); audio?.stop() }
+    }
+
+    private var videoHeight: CGFloat {
+        let cap = viewportLimit(viewport, 0.85, cap: 720)
+        guard width > 0, aspect > 0 else { return min(cap, 360) }
+        return min(cap, width / aspect)
+    }
+
+    private func prepare() async {
+        await source.load(store)
+        guard let url = source.url else { return }
+        let asset = AVURLAsset(url: url)
+        if let playable = try? await asset.load(.isPlayable), !playable { unplayable = true; return }
+        if video {
+            if let track = try? await asset.loadTracks(withMediaType: .video).first,
+               let loaded = try? await track.load(.naturalSize, .preferredTransform) {
+                let rect = CGRect(origin: .zero, size: loaded.0).applying(loaded.1)
+                if rect.width != 0, rect.height != 0 { aspect = abs(rect.width / rect.height) }
+            }
+            if player == nil { player = AVPlayer(url: url) }
+        } else if audio == nil {
+            audio = AudioModel(url: url)
+        }
+    }
+}
+
+/// Inline audio player state (play/pause, position, length).
+@MainActor @Observable private final class AudioModel {
+    let player: AVPlayer
+    var playing = false
+    var position: Double = 0
+    var duration: Double = 0
+    @ObservationIgnored private var observer: Any?
+
+    init(url: URL) {
+        player = AVPlayer(url: url)
+        // Also fires when playback starts, stops or jumps, so `playing` follows the end of the track.
+        observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] time in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.position = time.seconds.isFinite ? time.seconds : 0
+                self.playing = self.player.rate != 0
+            }
+        }
+        Task { [weak self] in
+            let seconds = (try? await AVURLAsset(url: url).load(.duration))?.seconds ?? 0
+            self?.duration = seconds.isFinite ? seconds : 0
+        }
+    }
+
+    func toggle() {
+        if playing {
+            player.pause()
+            playing = false
+        } else {
+            if duration > 0, position >= duration - 0.05 { seek(to: 0) }
+            player.play()
+            playing = true
+        }
+    }
+
+    func seek(to seconds: Double) {
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
+        position = seconds
+    }
+
+    func stop() {
+        player.pause()
+        playing = false
+    }
+}
+
+/// Web <audio controls>: one 48pt strip with play/pause, the position and the time.
+private struct AudioStrip: View {
+    let model: AudioModel
+    let name: String
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        HStack(spacing: 10) {
+            Button { model.toggle() } label: {
+                Image(systemName: model.playing ? "pause.fill" : "play.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(CE.ink)
+                    .frame(width: 32, height: 32)
+                    .background(Color.white.opacity(0.1), in: Circle())
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(model.playing ? "\(name) 일시 정지" : "\(name) 재생")
+            Slider(value: Binding(get: { model.position }, set: { model.seek(to: $0) }), in: 0...max(model.duration, 0.1))
+                .tint(CE.accent)
+                .controlSize(.small)
+                .accessibilityLabel("재생 위치")
+            Text("\(clock(model.position)) / \(clock(model.duration))")
+                .font(isMac ? .system(size: 13) : CEFont.secondary).foregroundStyle(CE.ink2).monospacedDigit()
+                .fixedSize()
+        }
+        .padding(.leading, 2).padding(.trailing, 14)
+        .frame(minHeight: 48)
+        .background(Color.white.opacity(0.05), in: shape)
+        .overlay { shape.strokeBorder(CE.line) }
+    }
+
+    private func clock(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded(.down))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+/// 받기 (web DownloadLink): the original fetched with the access code in a header, then the Mac save panel (iPhone:
+/// Quick Look, whose share sheet saves to Files). Without an attachment it saves the given text instead.
+private struct SaveButton: View {
+    @Environment(AppStore.self) private var store
+    let attachment: Attachment?
+    var text: String? = nil
+    let name: String
+    var label = "받기"
+    @State private var busy = false
+    @State private var failure: String?
+    @State private var preview: URL?
+
+    var body: some View {
+        Button { Task { await save() } } label: { Text(busy ? "받는 중" : label) }
+            .buttonStyle(ViewerButtonStyle())
+            .disabled(busy || unavailable != nil)
+            .help(unavailable ?? (isMac ? "원본을 내려받아 저장합니다" : "원본을 열어 저장하거나 공유합니다"))
+            .accessibilityLabel("\(name) \(label)")
+            .quickLookPreview($preview)
+            .alert("받지 못했습니다", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+                Button("확인", role: .cancel) {}
+            } message: {
+                Text(failure ?? "")
+            }
+    }
+
+    private var unavailable: String? {
+        guard attachment != nil, store.api == nil else { return nil }
+        return store.isDemo ? "샘플에는 원본 파일이 없습니다." : "서버에 연결되면 받을 수 있습니다."
+    }
+
+    private func save() async {
+        busy = true
+        defer { busy = false }
+        do {
+            let data: Data
+            if let attachment {
+                guard let api = store.api else { return }
+                data = try await api.attachmentData(attachment)
+            } else {
+                data = Data((text ?? "").utf8)
+            }
+            #if os(macOS)
+            try await saveWithPanel(data, name: name)
+            #else
+            preview = try writeTemporaryFile(data, name: name)
+            #endif
+        } catch {
+            failure = error.localizedDescription
+        }
+    }
+}
+
+#if os(macOS)
+/// Mac 받기: the save panel, like a browser download.
+@MainActor private func saveWithPanel(_ data: Data, name: String) async throws {
+    let panel = NSSavePanel()
+    panel.nameFieldStringValue = name.isEmpty ? "attachment" : URL(fileURLWithPath: name).lastPathComponent
+    panel.canCreateDirectories = true
+    let response = await withCheckedContinuation { (continuation: CheckedContinuation<NSApplication.ModalResponse, Never>) in
+        panel.begin { continuation.resume(returning: $0) }
+    }
+    guard response == .OK, let url = panel.url else { return }
+    try data.write(to: url, options: .atomic)
+}
+#endif
+
+/// Web .vw-bar: the viewer's facts on the left (13 at 1.4, ink-2, tabular), its .vw-btn actions on the right; when
+/// both do not fit on one line the actions wrap under the text (gap 6 12).
+private struct ViewerBar<Actions: View>: View {
+    let text: String
+    @ViewBuilder var actions: Actions
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 12) {
+                label.fixedSize()
+                Spacer(minLength: 0)
+                HStack(spacing: 6) { actions }.fixedSize()
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                label.fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) { actions }.fixedSize()
+            }
+        }
+    }
+
+    private var label: some View {
+        Text(text)
+            .font(isMac ? .system(size: 13) : CEFont.secondary).foregroundStyle(CE.ink2).monospacedDigit()
+            .lineSpacing(CELeading.spacing(13, 1.4))
+    }
+}
+
+/// Web .vw-note: a loading or failure line in a viewer (14 at 1.5, ink-2; failures in the danger colour).
+private struct ViewerNote: View {
+    let text: String
+    var bad = false
+    var loading = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if loading { ProgressView().controlSize(.small) }
+            Text(text)
+                .font(isMac ? .system(size: 14) : CEFont.note)
+                .foregroundStyle(bad ? CE.danger : CE.ink2)
+                .lineSpacing(CELeading.spacing(14, 1.5))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.vertical, 14).padding(.horizontal, 2)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1572,6 +2554,21 @@ private func fileSizeText(_ size: Int) -> String {
     return String(format: "%.1f MB", Double(size) / (1024 * 1024))
 }
 
+/// When a file was posted (web Time / formatTime): 방금 · N분 전 · N시간 전 within six hours, then 14:20 · 어제 14:20 ·
+/// 11월 4일 14:20 · 2025년 3월 2일 14:20 — the clock never drops off an older date.
+private func fileTime(_ iso: String, now: Date = Date()) -> String {
+    guard let date = parseISODate(iso) else { return "" }
+    if now.timeIntervalSince(date) < 6 * 3600 { return relativeTime(iso, now: now) }
+    let calendar = Calendar.current
+    let clock = koTime(date)
+    if calendar.isDateInToday(date) { return clock }
+    if calendar.isDateInYesterday(date) { return "어제 \(clock)" }
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "ko_KR")
+    formatter.dateFormat = calendar.component(.year, from: date) == calendar.component(.year, from: now) ? "M월 d일" : "yyyy년 M월 d일"
+    return "\(formatter.string(from: date)) \(clock)"
+}
+
 /// Downsampled decode so a thread full of screenshots does not hold full-size bitmaps.
 private func decodePreviewImage(_ data: Data, maxPixel: Int) -> (image: Image, size: CGSize)? {
     guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
@@ -1593,29 +2590,50 @@ private func decodePreviewImage(_ data: Data, maxPixel: Int) -> (image: Image, s
     #endif
 }
 
-/// Wrapping row of chips for narrow panes.
+/// Wrapping row (web flex-wrap with align-items center): items keep their size, move to the next line when they do
+/// not fit, sit centred on their line, and an item wider than the line is narrowed to it (a one-line label truncates).
 private struct ChipFlow: Layout {
     var spacing: CGFloat = 6
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let limit = proposal.width ?? .infinity
-        var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0, widest: CGFloat = 0
-        for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
-            if x > 0, x + size.width > limit { y += rowHeight + spacing; x = 0; rowHeight = 0 }
-            widest = max(widest, x + size.width)
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
+    /// Between lines; `spacing` when nil.
+    var lineSpacing: CGFloat? = nil
+
+    private struct Line { var items: [(index: Int, size: CGSize)] = []; var width: CGFloat = 0; var height: CGFloat = 0 }
+
+    private func lines(_ limit: CGFloat, _ subviews: Subviews) -> [Line] {
+        var lines = [Line()]
+        for (index, view) in subviews.enumerated() {
+            var size = view.sizeThatFits(.unspecified)
+            if size.width > limit {
+                size = view.sizeThatFits(ProposedViewSize(width: limit, height: nil))
+                size.width = min(size.width, limit)
+            }
+            if !lines[lines.count - 1].items.isEmpty, lines[lines.count - 1].width + spacing + size.width > limit {
+                lines.append(Line())
+            }
+            var line = lines[lines.count - 1]
+            line.width += (line.items.isEmpty ? 0 : spacing) + size.width
+            line.height = max(line.height, size.height)
+            line.items.append((index, size))
+            lines[lines.count - 1] = line
         }
-        return CGSize(width: proposal.width ?? widest, height: y + rowHeight)
+        return lines
     }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let all = lines(proposal.width ?? .infinity, subviews)
+        let height = all.reduce(0) { $0 + $1.height } + (lineSpacing ?? spacing) * CGFloat(max(0, all.count - 1))
+        return CGSize(width: proposal.width ?? all.map(\.width).max() ?? 0, height: all.first?.items.isEmpty == true ? 0 : height)
+    }
+
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var x = bounds.minX, y = bounds.minY, rowHeight: CGFloat = 0
-        for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
-            if x > bounds.minX, x + size.width > bounds.maxX { y += rowHeight + spacing; x = bounds.minX; rowHeight = 0 }
-            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
+        var y = bounds.minY
+        for line in lines(bounds.width, subviews) {
+            var x = bounds.minX
+            for item in line.items {
+                subviews[item.index].place(at: CGPoint(x: x, y: y + (line.height - item.size.height) / 2), proposal: ProposedViewSize(item.size))
+                x += item.size.width + spacing
+            }
+            y += line.height + (lineSpacing ?? spacing)
         }
     }
 }
@@ -1634,7 +2652,8 @@ private extension View {
     }
 }
 
-/// Web .vw-btn: small rounded button in a viewer bar; `on` draws a toggle that is on as a violet drop.
+/// Web .vw-btn: rounded button in a viewer bar (Mac 34 tall, 13.5/600, radius 11, white .07 → .13 on hover);
+/// `on` draws a toggle that is on as a violet drop.
 private struct ViewerButtonStyle: ButtonStyle {
     var on = false
     func makeBody(configuration: Configuration) -> some View { ViewerBody(configuration: configuration, on: on) }
@@ -1644,18 +2663,94 @@ private struct ViewerButtonStyle: ButtonStyle {
         @Environment(\.isEnabled) private var isEnabled
         @State private var hovering = false
         var body: some View {
-            let shape = RoundedRectangle(cornerRadius: isMac ? 8 : 11, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
             configuration.label
-                .font(isMac ? .system(size: 12, weight: .semibold) : CEFont.secondary.weight(.semibold))
+                .font(isMac ? .system(size: 13.5, weight: .semibold) : CEFont.secondary.weight(.semibold))
                 .lineLimit(1)
                 .foregroundStyle(!isEnabled ? CE.ink3 : on ? Color.white : CE.ink)
-                .padding(.horizontal, isMac ? 10 : 13)
-                .frame(height: isMac ? 26 : 34)
-                .background(on ? CE.violet.opacity(0.42) : Color.white.opacity(configuration.isPressed ? 0.14 : hovering ? 0.11 : 0.07), in: shape)
+                .padding(.horizontal, 13)
+                .frame(height: 34)
+                .background(on ? CE.violet.opacity(0.42) : Color.white.opacity(fill), in: shape)
                 .overlay { shape.strokeBorder(Color.white.opacity(0.1)) }
                 // iPhone: 44pt touch target around the 34pt button.
                 .padding(.vertical, isMac ? 0 : 5)
                 .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+                .animation(.linear(duration: 0.12), value: hovering)
+        }
+        private var fill: Double {
+            guard isEnabled else { return 0.04 }
+            return configuration.isPressed ? 0.16 : hovering ? 0.13 : 0.07
+        }
+    }
+}
+
+/// Web .fl-chip: Mac 36 tall (web 44), 13.5/550, quiet capsule that lightens on hover (white .10, ink-1); the chosen
+/// one is a violet drop with white text and a white .16 ring.
+private struct FilterChipStyle: ButtonStyle {
+    let on: Bool
+    func makeBody(configuration: Configuration) -> some View { ChipBody(configuration: configuration, on: on) }
+    private struct ChipBody: View {
+        let configuration: ButtonStyleConfiguration
+        let on: Bool
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .font(isMac ? .system(size: 13.5, weight: .medium) : CEFont.note.weight(.medium))
+                .foregroundStyle(on ? Color.white : hovering ? CE.ink : CE.ink2)
+                .padding(.horizontal, 13)
+                .frame(height: isMac ? 36 : 34)
+                .background(on ? CE.violet.opacity(0.42) : Color.white.opacity(configuration.isPressed ? 0.13 : hovering ? 0.10 : 0.05), in: Capsule())
+                .overlay { Capsule().strokeBorder(on ? Color.white.opacity(0.16) : CE.line) }
+                // iPhone: 44pt touch target around the 34pt capsule.
+                .padding(.vertical, isMac ? 0 : 5)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+                .animation(.linear(duration: 0.12), value: hovering)
+        }
+    }
+}
+
+/// The reader's link chips (결재 · 대화): Mac 30 tall capsules that lighten on hover; an open decision is violet.
+private struct LinkChipStyle: ButtonStyle {
+    let highlighted: Bool
+    func makeBody(configuration: Configuration) -> some View { LinkBody(configuration: configuration, highlighted: highlighted) }
+    private struct LinkBody: View {
+        let configuration: ButtonStyleConfiguration
+        let highlighted: Bool
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .frame(height: isMac ? 30 : 34)
+                .background(fill, in: Capsule())
+                .overlay { Capsule().strokeBorder(highlighted ? CE.violet.opacity(0.55) : CE.line) }
+                .padding(.vertical, isMac ? 0 : 5)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+                .animation(.linear(duration: 0.12), value: hovering)
+        }
+        private var fill: Color {
+            if highlighted { return CE.violet.opacity(configuration.isPressed ? 0.42 : hovering ? 0.36 : 0.28) }
+            return Color.white.opacity(configuration.isPressed ? 0.13 : hovering ? 0.10 : 0.05)
+        }
+    }
+}
+
+/// Text-only control that gets a faint rounded fill on hover (web .fl-path__copy, table header buttons).
+private struct HoverFillStyle: ButtonStyle {
+    var radius: CGFloat = 10
+    var hover: Double = 0.08
+    func makeBody(configuration: Configuration) -> some View { HoverBody(configuration: configuration, radius: radius, hover: hover) }
+    private struct HoverBody: View {
+        let configuration: ButtonStyleConfiguration
+        let radius: CGFloat
+        let hover: Double
+        @State private var hovering = false
+        var body: some View {
+            let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+            configuration.label
+                .background(Color.white.opacity(configuration.isPressed ? hover + 0.05 : hovering ? hover : 0), in: shape)
+                .contentShape(shape)
                 .onHover { hovering = $0 }
         }
     }
@@ -1663,26 +2758,26 @@ private struct ViewerButtonStyle: ButtonStyle {
 
 #if os(macOS)
 private struct PDFPreview: NSViewRepresentable {
-    let data: Data
+    let url: URL
     func makeNSView(context: Context) -> PDFView {
         let view = PDFView()
         view.autoScales = true
         view.displayMode = .singlePageContinuous
         view.backgroundColor = .clear
-        view.document = PDFDocument(data: data)
+        view.document = PDFDocument(url: url)
         return view
     }
     func updateNSView(_ nsView: PDFView, context: Context) {}
 }
 #else
 private struct PDFPreview: UIViewRepresentable {
-    let data: Data
+    let url: URL
     func makeUIView(context: Context) -> PDFView {
         let view = PDFView()
         view.autoScales = true
         view.displayMode = .singlePageContinuous
         view.backgroundColor = .clear
-        view.document = PDFDocument(data: data)
+        view.document = PDFDocument(url: url)
         return view
     }
     func updateUIView(_ uiView: PDFView, context: Context) {}

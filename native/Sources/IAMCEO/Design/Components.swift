@@ -410,9 +410,9 @@ struct CountBadge: View {
     var tone: Tone = .accent
     var body: some View {
         if count > 0 {
-            Text("\(count)").font(CEFont.micro).monospacedDigit()
+            Text("\(count)").font(CEFont.caption.weight(.semibold)).monospacedDigit()
                 .foregroundStyle(tone == .neutral ? CE.ink : .white)
-                .padding(.horizontal, 5).frame(minWidth: 18, minHeight: 18)
+                .padding(.horizontal, 6).frame(minWidth: 20, minHeight: 20)
                 .background(tone == .neutral ? Color.white.opacity(0.12) : (tone == .danger || tone == .approval ? CE.error : CE.accentFill), in: Capsule())
                 .fixedSize()
         }
@@ -483,15 +483,17 @@ struct BrandMark: View {
 struct CECloseButton: View {
     var label = "닫기"
     var escapeCloses = true
+    /// The tooltip; nil = the label with its shortcut.
+    var help: String? = nil
     let action: () -> Void
     var body: some View {
         let button = Button(action: action) { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)) }
             .buttonStyle(CECloseButtonStyle())
             .focusEffectDisabled()
             #if os(macOS)
-            .help(escapeCloses ? "\(label) (esc)" : "\(label) (⌘W)")
+            .help(help ?? (escapeCloses ? "\(label) (esc)" : "\(label) (⌘W)"))
             #else
-            .help(escapeCloses ? "\(label) (esc)" : label)
+            .help(help ?? (escapeCloses ? "\(label) (esc)" : label))
             #endif
             .accessibilityLabel(label)
         if escapeCloses { button.keyboardShortcut(.cancelAction) } else { button }
@@ -677,9 +679,9 @@ struct CompactEmpty: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon).font(CEFont.rowTitle).foregroundStyle(CE.ink3).frame(width: 18)
             VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink2)
+                Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
                 if let detail {
-                    Text(detail).font(CEFont.note).foregroundStyle(CE.ink3).lineSpacing(CELeading.note)
+                    Text(detail).font(CEFont.secondary).foregroundStyle(CE.ink2).lineSpacing(CELeading.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -723,7 +725,14 @@ struct ContextMeter: View {
 /// headings, paragraphs, nested and numbered lists with task boxes, block quotes, rules, fenced code, and pipe tables
 /// drawn as a real grid. Inline: bold, italic, `code` (a faint chip), links and ~~strikethrough~~; a single `~` stays a
 /// tilde ("0.0~3.9" is a range, never a strike). Sizes follow Dynamic Type on iPhone.
+extension EnvironmentValues {
+    /// Markdown drawn on the violet "mine" bubble (web .th-mine .md): dark code chips and boxes, a white quote bar,
+    /// lilac quote text and list markers, since the default faint white details vanish on violet.
+    @Entry var markdownOnAccent = false
+}
+
 struct MarkdownText: View {
+    @Environment(\.markdownOnAccent) private var onAccent
     let text: String
     /// When the body opens with `# <this title>` (documents repeat their own title), that heading is not drawn again.
     var omitTitle: String?
@@ -747,7 +756,7 @@ struct MarkdownText: View {
             ForEach(Array(visibleBlocks.enumerated()), id: \.offset) { index, block in
                 switch block {
                 case .heading(let level, let value):
-                    Text(markdownInline(value))
+                    Text(inline(value))
                         .font(.system(size: headingSize(level), weight: .semibold))
                         .tracking(-0.15)
                         .lineSpacing((size * 0.2).rounded())
@@ -764,7 +773,8 @@ struct MarkdownText: View {
                             .padding(.horizontal, 14).padding(.vertical, 12)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(red: 5 / 255, green: 4 / 255, blue: 11 / 255).opacity(0.55), in: shape)
+                    .background(onAccent ? Color(red: 9 / 255, green: 7 / 255, blue: 19 / 255).opacity(0.5)
+                                         : Color(red: 5 / 255, green: 4 / 255, blue: 11 / 255).opacity(0.55), in: shape)
                     .overlay { shape.strokeBorder(CE.line) }
                 case .list(let items):
                     VStack(alignment: .leading, spacing: (size * 0.25).rounded()) {
@@ -772,8 +782,9 @@ struct MarkdownText: View {
                     }
                 case .quote(let value):
                     HStack(alignment: .top, spacing: 12) {
-                        RoundedRectangle(cornerRadius: 1).fill(CE.accent.opacity(0.7)).frame(width: 2)
-                        MarkdownText(text: value, size: size, lineHeight: lineHeight).foregroundStyle(CE.ink2)
+                        RoundedRectangle(cornerRadius: 1).fill(onAccent ? Color.white.opacity(0.5) : CE.accent.opacity(0.7)).frame(width: 2)
+                        MarkdownText(text: value, size: size, lineHeight: lineHeight)
+                            .foregroundStyle(onAccent ? Color(hex: 0xE6DFFF) : CE.ink2)
                     }
                     .fixedSize(horizontal: false, vertical: true)
                 case .rule:
@@ -781,7 +792,7 @@ struct MarkdownText: View {
                 case .table(let table):
                     MarkdownTableView(table: table, size: (size * 0.93).rounded())
                 case .paragraph(let value):
-                    Text(markdownInline(value)).font(.system(size: size)).lineSpacing(leading)
+                    Text(inline(value)).font(.system(size: size)).lineSpacing(leading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -798,17 +809,29 @@ struct MarkdownText: View {
                     Image(systemName: done ? "checkmark.square.fill" : "square")
                         .font(.system(size: size * 0.9)).foregroundStyle(done ? CE.accent : CE.ink3)
                 } else {
-                    Text(item.marker).font(.system(size: item.marker.count > 1 ? size * 0.93 : size)).foregroundStyle(CE.ink3)
+                    Text(item.marker).font(.system(size: item.marker.count > 1 ? size * 0.93 : size))
+                        .foregroundStyle(onAccent ? Color(hex: 0xDAD2FF) : CE.ink3)
                         .monospacedDigit()
                 }
             }
             .frame(minWidth: (size * 1.35).rounded(), alignment: .leading)
             .padding(.trailing, item.marker.count > 2 ? 4 : 0)
-            Text(markdownInline(item.text)).font(.system(size: size)).lineSpacing(leading)
+            Text(inline(item.text)).font(.system(size: size)).lineSpacing(leading)
                 .foregroundStyle(item.task == true ? CE.ink2 : CE.ink)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.leading, CGFloat(item.level) * (size * 1.35).rounded())
+    }
+
+    /// Inline markdown; on the violet bubble `code` sits on a dark chip (web .th-mine .md code rgb(9 7 19 / .35)).
+    private func inline(_ value: String) -> AttributedString {
+        var result = markdownInline(value)
+        guard onAccent else { return result }
+        for run in result.runs where run.inlinePresentationIntent?.contains(.code) == true {
+            result[run.range].backgroundColor = Color(red: 9 / 255, green: 7 / 255, blue: 19 / 255).opacity(0.35)
+            result[run.range].foregroundColor = Color.white
+        }
+        return result
     }
 
     private func headingSize(_ level: Int) -> CGFloat {

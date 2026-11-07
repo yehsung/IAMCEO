@@ -1,4 +1,5 @@
 import SwiftUI
+import ImageIO
 import UniformTypeIdentifiers
 
 /// One file being uploaded into a draft (shown as an "올리는 중" chip under its own draft key).
@@ -57,6 +58,8 @@ struct ComposerBar: View {
     @State private var sentToken = UUID()
     @State private var dropTargeted = false
     @State private var sendingLocally = false
+    /// Mac: the recipient list (web .cmp-menu) is open.
+    @State private var showTargets = false
     @FocusState private var focused: Bool
 
     private var key: String { DraftStore.key(project: store.selectedProjectID, target: target) }
@@ -134,7 +137,8 @@ struct ComposerBar: View {
 
     private var panel: some View {
         let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
-        return VStack(alignment: .leading, spacing: 2) {
+        // web .cmp__panel: meta row, error line and input row stack with no gap of their own.
+        return VStack(alignment: .leading, spacing: 0) {
             if hasMetaRow { metaRow }
             noticeLine
             inputRow
@@ -166,6 +170,7 @@ struct ComposerBar: View {
         .onAppear { if autoFocus { focusSoon() } }
         .onChange(of: router.focusComposer) { _, _ in focusSoon() }
         .onChange(of: key) { _, _ in uploadError = nil; sendError = nil; sentTo = nil }
+        .onChange(of: store.selectedProjectID) { _, _ in showTargets = false }
         .onChange(of: drafts.connectionGeneration) { _, _ in uploadError = nil; sendError = nil; sentTo = nil }
         .onChange(of: draftText) { old, new in
             sendError = nil
@@ -204,29 +209,68 @@ struct ComposerBar: View {
             }
             if files.isEmpty && pendingUploads.isEmpty { Spacer(minLength: 0) }
         }
-        .padding(.horizontal, 2)
-        .frame(minHeight: 30)
+        // web .cmp__meta: padding 2 4, so chips sit 10pt in from the panel edge in a 32pt row.
+        .padding(.horizontal, 4).padding(.vertical, 2)
+        .frame(minHeight: 32)
     }
 
-    private var hintFont: Font { isMac ? .system(size: 12.5) : CEFont.meta }
+    /// web .cmp__hint: 12.5px.
+    private var hintFont: Font { CEFont.meta }
 
-    /// Web target chip: "총괄"/"본사 AI" quiet; a worker is "@이름" in white on violet.
-    private var targetChip: some View {
+    /// The recipients of the target list (web .cmp-menu): the lead first ("기본"), then every worker with
+    /// "@handle · role" and its status.
+    private var targetEntries: [ComposerTargetEntry] {
+        let lead = store.members.first { $0.kind == "conductor" || $0.kind == "root" }
+        let workers = store.members.filter { $0.kind == "worker" }
+        return [ComposerTargetEntry(memberID: nil, name: leadName, sub: "기본", status: lead?.status)]
+            + workers.map { member in
+                let sub = [member.handle.isEmpty ? nil : "@\(member.handle)", member.role.isEmpty ? nil : member.role]
+                    .compactMap { $0 }.joined(separator: " · ")
+                return ComposerTargetEntry(memberID: member.id, name: member.name, sub: sub, status: member.status)
+            }
+    }
+
+    /// Web target chip: "총괄"/"본사 AI" quiet; a worker is "@이름" in white on violet. Mac opens the web's recipient
+    /// list (name, @handle · role, status); iPhone keeps the system menu with the same lines.
+    @ViewBuilder private var targetChip: some View {
         let direct = recipient != nil && !missingTarget
         let label = missingTarget ? "명부에 없는 대상" : recipient.map { "@\($0.name)" } ?? leadName
-        return Menu {
-            menuItem("\(leadName) · 기본", selected: target == nil) { target = nil }
-            let workers = store.members.filter { $0.kind == "worker" }
-            if !workers.isEmpty {
-                Divider()
-                ForEach(workers) { member in
-                    menuItem("\(member.name) · \(MemberStatusInfo(member.status).label)", selected: target == member.id) { target = member.id }
+        #if os(macOS)
+        Button { showTargets.toggle() } label: {
+            HStack(spacing: 5) {
+                if missingTarget { StatusDot(tone: .danger, size: 6) }
+                Text(label).font(CEFont.meta.weight(.semibold)).lineLimit(1)
+                Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .bold))
+            }
+        }
+        .buttonStyle(TargetChipStyle(direct: direct, missing: missingTarget))
+        .fixedSize()
+        .popover(isPresented: $showTargets, arrowEdge: .top) {
+            ComposerTargetMenu(entries: targetEntries, current: missingTarget ? nil : target) { picked in
+                target = picked
+                showTargets = false
+                focusSoon()
+            }
+        }
+        .help("보낼 대상 바꾸기")
+        .accessibilityLabel("보낼 대상: \(recipientName). 눌러서 바꾸기")
+        #else
+        Menu {
+            ForEach(Array(targetEntries.enumerated()), id: \.element.id) { position, entry in
+                if position == 1 { Divider() }
+                Button { target = entry.memberID } label: {
+                    Label {
+                        Text(entry.name)
+                        Text(([entry.sub.isEmpty ? nil : entry.sub] + [entry.status.map { MemberStatusInfo($0).label }]).compactMap { $0 }.joined(separator: " · "))
+                    } icon: {
+                        if !missingTarget && target == entry.memberID { Image(systemName: "checkmark") }
+                    }
                 }
             }
         } label: {
             HStack(spacing: 5) {
                 if missingTarget { StatusDot(tone: .danger, size: 6) }
-                Text(label).font(isMac ? .system(size: 12.5, weight: .semibold) : CEFont.meta.weight(.semibold)).lineLimit(1)
+                Text(label).font(CEFont.meta.weight(.semibold)).lineLimit(1)
                 Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .bold))
             }
             .foregroundStyle(direct ? Color.white : missingTarget ? CE.danger : CE.ink2)
@@ -234,7 +278,7 @@ struct ComposerBar: View {
             .background(direct ? CE.violet.opacity(0.42) : Color.white.opacity(0.08), in: Capsule())
             .overlay { Capsule().strokeBorder(direct ? CE.violet.opacity(0.95) : missingTarget ? CE.danger.opacity(0.6) : Color.white.opacity(0.1)) }
             .frame(maxWidth: 220)
-            .frame(height: isMac ? 28 : 44)
+            .frame(height: 44)
             .contentShape(Rectangle())
         }
         .menuStyle(.button)
@@ -243,30 +287,28 @@ struct ComposerBar: View {
         .fixedSize()
         .help("보낼 대상 바꾸기")
         .accessibilityLabel("보낼 대상: \(recipientName). 눌러서 바꾸기")
+        #endif
     }
 
-    @ViewBuilder private func menuItem(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        if selected {
-            Button(action: action) { Label(title, systemImage: "checkmark") }
-        } else {
-            Button(title, action: action)
-        }
-    }
-
+    /// web .cmp-chip--file: 28 tall, 12.5/500, an image shows a 20pt round thumbnail at −5, max 260 wide, and the
+    /// 28pt round × sits flush at the trailing end.
     private func fileChip(_ file: Attachment) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: file.isImage ? "photo" : "doc").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(CE.ink2)
-            Text(file.name).lineLimit(1).truncationMode(.middle).frame(maxWidth: 180, alignment: .leading)
-            Button { drafts.removeFile(file.id, for: key) } label: {
-                Image(systemName: "xmark").font(.system(size: 8.5, weight: .bold)).foregroundStyle(CE.ink2)
-                    .frame(width: 24, height: 24).contentShape(Circle())
+        HStack(spacing: 6) {
+            if file.isImage {
+                ComposerChipThumb(file: file).padding(.leading, -5)
+            } else {
+                Image(systemName: "doc").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(CE.ink2)
             }
-            .buttonStyle(.plain)
+            Text(file.name).lineLimit(1).truncationMode(.middle).frame(maxWidth: 200, alignment: .leading)
+            Button { drafts.removeFile(file.id, for: key) } label: {
+                Image(systemName: "xmark").font(.system(size: 8.5, weight: .bold))
+            }
+            .buttonStyle(ChipRemoveStyle())
             .accessibilityLabel("\(file.name) 빼기")
         }
-        .font(isMac ? .system(size: 12.5, weight: .medium) : CEFont.meta.weight(.medium))
+        .font(CEFont.meta.weight(.medium))
         .foregroundStyle(CE.ink)
-        .padding(.leading, 9).padding(.trailing, 2).frame(height: 28)
+        .padding(.leading, 9).frame(height: 28)
         .background(Color.white.opacity(0.08), in: Capsule())
         .overlay { Capsule().strokeBorder(Color.white.opacity(0.1)) }
         .help(file.name)
@@ -276,9 +318,10 @@ struct ComposerBar: View {
         HStack(spacing: 6) {
             ProgressView().controlSize(.mini)
             Text(upload.name).lineLimit(1).truncationMode(.middle).frame(maxWidth: 160, alignment: .leading)
-            Text("올리는 중").foregroundStyle(CE.ink2)
+            // web .cmp-chip__state: regular weight, ink-2.
+            Text("올리는 중").fontWeight(.regular).foregroundStyle(CE.ink2)
         }
-        .font(isMac ? .system(size: 12.5, weight: .medium) : CEFont.meta.weight(.medium))
+        .font(CEFont.meta.weight(.medium))
         .foregroundStyle(CE.ink)
         .padding(.horizontal, 9).frame(height: 28)
         .background(Color.white.opacity(0.08), in: Capsule())
@@ -341,10 +384,12 @@ struct ComposerBar: View {
     }
 
     /// One line on Mac (full text in the tooltip): this panel sits in a bar outside any scroll view.
+    /// web .cmp__error: padding 4 8, 13px at line-height 1.4.
     private func notice(_ text: String, icon: String, color: Color, actionTitle: String? = nil, action: (() -> Void)? = nil) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: icon).font(.system(size: 11, weight: .semibold))
+            Image(systemName: icon).font(.system(size: 11.5, weight: .semibold))
             Text(text).lineLimit(isMac ? 1 : 3).truncationMode(.tail)
+                .lineSpacing(CELeading.spacing(13, 1.4))
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let actionTitle, let action {
                 Button(action: action) {
@@ -357,7 +402,7 @@ struct ComposerBar: View {
         }
         .font(CEFont.secondary)
         .foregroundStyle(color)
-        .padding(.horizontal, 8).padding(.top, 2).padding(.bottom, 1)
+        .padding(.horizontal, 8).padding(.vertical, 4)
         .help(text)
         .accessibilityElement(children: .combine)
     }
@@ -378,6 +423,8 @@ struct ComposerBar: View {
             TextField("\(recipientName)에게 보낼 글", text: text, prompt: Text(placeholder).foregroundStyle(CE.ink2), axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(isMac ? .system(size: 15) : CEFont.body)
+                // web .cmp__input: 22pt lines (15px text + 4pt leading); 7 lines ≈ the web's 168pt cap.
+                .lineSpacing(4)
                 .lineLimit(1...7)
                 .focused($focused)
                 .padding(.horizontal, 6).padding(.vertical, 11)
@@ -513,7 +560,7 @@ struct ComposerBar: View {
     }
 }
 
-/// Web ghost icon button (paperclip): no fill until hovered or pressed.
+/// Web ghost icon button (paperclip, .gbtn--ghost): ink-2 and no fill; ink-1 on white .07 when hovered.
 private struct ComposerGhostStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { GhostBody(configuration: configuration) }
     private struct GhostBody: View {
@@ -521,33 +568,258 @@ private struct ComposerGhostStyle: ButtonStyle {
         @Environment(\.isEnabled) private var isEnabled
         @State private var hovering = false
         var body: some View {
+            let lit = isEnabled && (hovering || configuration.isPressed)
             configuration.label
-                .foregroundStyle(isEnabled ? CE.ink2 : CE.ink3.opacity(0.6))
+                .foregroundStyle(!isEnabled ? CE.ink3.opacity(0.6) : lit ? CE.ink : CE.ink2)
                 .background {
-                    Circle().fill(Color.white.opacity(configuration.isPressed ? 0.12 : hovering && isEnabled ? 0.08 : 0))
+                    Circle().fill(Color.white.opacity(!isEnabled ? 0 : configuration.isPressed ? 0.11 : hovering ? 0.07 : 0))
                 }
+                .animation(.linear(duration: 0.16), value: lit)
                 .contentShape(Circle())
                 .onHover { hovering = $0 }
         }
     }
 }
 
-/// Web primary 44pt round send button: violet gradient with rim and glow; a quiet ring when there is nothing to send.
+/// Web primary 44pt round send button (.gbtn--primary): violet gradient, a glossy top half, a lilac glow along the
+/// bottom, a deep violet shadow and a dark arrow shadow; hover brightens, press shrinks to .97. Nothing to send: the
+/// same violet circle at 40%, so it keeps its identity (web :disabled opacity .4).
 private struct ComposerSendStyle: ButtonStyle {
     let active: Bool
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundStyle(active ? Color.white : CE.ink3)
-            .frame(width: 44, height: 44)
-            .background {
-                if active {
-                    Circle().fill(CE.primaryGradient).opacity(configuration.isPressed ? 0.8 : 1)
+    func makeBody(configuration: Configuration) -> some View { SendBody(configuration: configuration, active: active) }
+    private struct SendBody: View {
+        let configuration: ButtonStyleConfiguration
+        let active: Bool
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .foregroundStyle(Color.white)
+                .shadow(color: Color(red: 28 / 255, green: 8 / 255, blue: 92 / 255).opacity(0.45), radius: 0.5, y: 1)
+                .frame(width: 44, height: 44)
+                .background {
+                    Circle().fill(CE.primaryGradient)
+                        .overlay {
+                            Circle().fill(LinearGradient(stops: [
+                                .init(color: .white.opacity(0.14), location: 0), .init(color: .white.opacity(0.025), location: 0.44),
+                                .init(color: .clear, location: 0.52),
+                            ], startPoint: .top, endPoint: .bottom))
+                        }
+                        .overlay {
+                            Circle().fill(LinearGradient(colors: [.clear, Color(red: 222 / 255, green: 208 / 255, blue: 1).opacity(0.35)],
+                                                         startPoint: .center, endPoint: .bottom))
+                        }
                         .overlay { GlassRim(shape: Circle()) }
-                        .shadow(color: CE.violet.opacity(0.45), radius: 10, y: 4)
-                } else {
-                    Circle().fill(Color.white.opacity(0.07)).overlay { Circle().strokeBorder(CE.line) }
+                        .shadow(color: CE.violet.opacity(active ? 0.6 : 0), radius: 12, y: 8)
+                        .shadow(color: Color(red: 16 / 255, green: 6 / 255, blue: 52 / 255).opacity(active ? 0.55 : 0), radius: 3, y: 2)
                 }
-            }
-            .contentShape(Circle())
+                .brightness(active && hovering && !configuration.isPressed ? 0.06 : 0)
+                .opacity(active ? 1 : 0.4)
+                .scaleEffect(configuration.isPressed ? 0.97 : 1)
+                .animation(.spring(response: 0.3, dampingFraction: 0.55), value: configuration.isPressed)
+                .animation(.linear(duration: 0.16), value: active)
+                .contentShape(Circle())
+                .onHover { hovering = $0 }
+        }
     }
 }
+
+/// Web .cmp-chip--target: 28pt capsule. Quiet: ink-2 on white .08, ink-1 on white .13 when hovered. A worker:
+/// white on violet .42 with a violet ring. A removed target: danger text and ring.
+private struct TargetChipStyle: ButtonStyle {
+    let direct: Bool
+    let missing: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        TargetChipBody(configuration: configuration, direct: direct, missing: missing)
+    }
+    private struct TargetChipBody: View {
+        let configuration: ButtonStyleConfiguration
+        let direct: Bool
+        let missing: Bool
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var hovering = false
+        var body: some View {
+            let lit = isEnabled && (hovering || configuration.isPressed)
+            configuration.label
+                .foregroundStyle(direct ? Color.white : missing ? CE.danger : lit ? CE.ink : CE.ink2)
+                .padding(.horizontal, 10).frame(height: 28)
+                .background(direct ? CE.violet.opacity(lit ? 0.52 : 0.42) : Color.white.opacity(lit ? 0.13 : 0.08), in: Capsule())
+                .overlay {
+                    Capsule().strokeBorder(direct ? CE.violet.opacity(0.95) : missing ? CE.danger.opacity(0.6) : Color.white.opacity(0.1))
+                }
+                .frame(maxWidth: 220)
+                .animation(.linear(duration: 0.12), value: lit)
+                .contentShape(Capsule())
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+/// Web .cmp-chip__x: a 28pt round × in ink-2; ink-1 on white .10 when hovered.
+private struct ChipRemoveStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { RemoveBody(configuration: configuration) }
+    private struct RemoveBody: View {
+        let configuration: ButtonStyleConfiguration
+        @State private var hovering = false
+        var body: some View {
+            let lit = hovering || configuration.isPressed
+            configuration.label
+                .foregroundStyle(lit ? CE.ink : CE.ink2)
+                .frame(width: 28, height: 28)
+                .background(Color.white.opacity(configuration.isPressed ? 0.14 : hovering ? 0.1 : 0), in: Circle())
+                .contentShape(Circle())
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+/// One recipient in the composer's target list.
+private struct ComposerTargetEntry: Identifiable {
+    /// nil = the project lead (총괄 / 본사 AI), the default recipient.
+    let memberID: String?
+    let name: String
+    let sub: String
+    let status: String?
+    var id: String { memberID ?? "lead" }
+}
+
+#if os(macOS)
+/// Web .cmp-menu: a dark list (rgb 18 14 38 / .98, padding 6) of 48pt rows, radius 12: name 14.5/600, "@handle ·
+/// role" 12.5 ink-2, status dot and label on the right; the hovered or keyboard row is violet .3. ↑↓ move,
+/// Return/Tab pick, Esc closes. Scrolls past 292pt.
+private struct ComposerTargetMenu: View {
+    let entries: [ComposerTargetEntry]
+    let current: String?
+    let onPick: (String?) -> Void
+    @State private var active = 0
+    @FocusState private var focused: Bool
+
+    private static let rowHeight: CGFloat = 48
+    private static let maxHeight: CGFloat = 292
+
+    var body: some View {
+        let height = CGFloat(entries.count) * Self.rowHeight + 12
+        Group {
+            if height > Self.maxHeight {
+                ScrollViewReader { reader in
+                    ScrollView { list }
+                        .frame(height: Self.maxHeight)
+                        .onChange(of: active) { _, row in reader.scrollTo(row) }
+                }
+            } else {
+                list
+            }
+        }
+        .frame(width: 340)
+        .background(Color(red: 18 / 255, green: 14 / 255, blue: 38 / 255).opacity(0.98))
+        .focusable()
+        .focused($focused)
+        .focusEffectDisabled()
+        .onKeyPress(.upArrow) { move(-1); return .handled }
+        .onKeyPress(.downArrow) { move(1); return .handled }
+        .onKeyPress(.return) { pick(active); return .handled }
+        .onKeyPress(.tab) { pick(active); return .handled }
+        .onAppear {
+            active = entries.firstIndex { $0.memberID == current } ?? 0
+            focused = true
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("보낼 대상")
+    }
+
+    private var list: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(entries.enumerated()), id: \.element.id) { position, entry in row(entry, position: position).id(position) }
+        }
+        .padding(6)
+    }
+
+    private func row(_ entry: ComposerTargetEntry, position: Int) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let selected = entry.memberID == current
+        let info = entry.status.map { MemberStatusInfo($0) }
+        return Button { onPick(entry.memberID) } label: {
+            HStack(spacing: 12) {
+                // web: name and sub at line-height 1.3, 1px apart.
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(entry.name).font(.system(size: 14.5, weight: .semibold)).foregroundStyle(CE.ink).lineLimit(1)
+                    if !entry.sub.isEmpty {
+                        Text(entry.sub).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 8)
+                if let info {
+                    HStack(spacing: 6) {
+                        StatusDot(tone: info.tone, pulsing: info.live, size: 8)
+                        Text(info.label).font(CEFont.meta).foregroundStyle(info.tone.color).lineLimit(1)
+                    }
+                    .fixedSize()
+                }
+                Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(CE.accent)
+                    .frame(width: 12)
+                    .opacity(selected ? 1 : 0)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .frame(maxWidth: .infinity, minHeight: Self.rowHeight, alignment: .leading)
+            .background(position == active ? CE.violet.opacity(0.3) : Color.clear, in: shape)
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .onHover { if $0 { active = position } }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel([entry.name, entry.sub.isEmpty ? nil : entry.sub, info?.label].compactMap { $0 }.joined(separator: ", "))
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    }
+
+    private func move(_ step: Int) {
+        guard !entries.isEmpty else { return }
+        active = (active + step + entries.count) % entries.count
+    }
+
+    private func pick(_ position: Int) {
+        guard entries.indices.contains(position) else { return }
+        onPick(entries[position].memberID)
+    }
+}
+#endif
+
+/// An image attachment's 20pt round thumbnail in its chip (web .cmp-chip__thumb). Read once per attachment and kept
+/// small; very large files and the sample keep the photo glyph.
+private struct ComposerChipThumb: View {
+    @Environment(AppStore.self) private var store
+    let file: Attachment
+    @State private var image: Image?
+
+    var body: some View {
+        ZStack {
+            if let image {
+                image.resizable().scaledToFill()
+            } else {
+                Circle().fill(Color.white.opacity(0.1))
+                Image(systemName: "photo").font(.system(size: 9, weight: .semibold)).foregroundStyle(CE.ink2)
+            }
+        }
+        .frame(width: 20, height: 20)
+        .clipShape(Circle())
+        .task(id: file.id) { await load() }
+        .accessibilityHidden(true)
+    }
+
+    private func load() async {
+        if let cached = composerThumbCache[file.id] { image = cached; return }
+        guard !store.isDemo, file.size <= 20 * 1024 * 1024, let api = store.api,
+              let data = try? await api.attachmentData(file),
+              let source = CGImageSourceCreateWithData(data as CFData, nil) else { return }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 60,
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return }
+        let thumb = Image(decorative: cgImage, scale: 1)
+        if composerThumbCache.count > 100 { composerThumbCache.removeAll() }
+        composerThumbCache[file.id] = thumb
+        image = thumb
+    }
+}
+
+@MainActor private var composerThumbCache: [String: Image] = [:]

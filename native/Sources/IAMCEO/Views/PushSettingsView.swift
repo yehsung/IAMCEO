@@ -224,14 +224,17 @@ struct PushSettingsView: View {
         #else
         let coverageHere = true
         #endif
-        return SettingsGroup(footnote: coverageHere ? Self.coverage : nil) {
+        // Mac: the iPhone part under its own caption, below the Mac one.
+        return SettingsGroup(isMac ? "iPhone" : nil, footnote: coverageHere ? Self.coverage : nil) {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(isMac ? "iPhone 알림" : "서버 컴퓨터").font(SetupFont.row).foregroundStyle(CE.ink)
-                    HStack(alignment: .center, spacing: 6) {
-                        StatusDot(tone: line.tone, size: 6)
+                    HStack(alignment: .firstTextBaseline, spacing: 7) {
+                        StatusDot(tone: line.tone, size: 7)
+                            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
                         Text(line.text).font(SetupFont.hint)
                             .foregroundStyle(line.tone == .attention ? CE.attention : CE.ink2)
+                            .lineSpacing(SetupFont.hintLeading)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .accessibilityElement(children: .combine)
@@ -247,17 +250,17 @@ struct PushSettingsView: View {
                     .disabled(!connected)
                 }
             }
-            .padding(.vertical, 10)
-            .frame(minHeight: isMac ? 46 : 50)
+            .padding(.vertical, 12)
+            .frame(minHeight: isMac ? 56 : 52)
             if let step = line.step {
-                keyStep(step).padding(.bottom, 12)
+                keyStep(step).padding(.bottom, 14)
             }
             if line.hasDetails && showDetails {
-                details.padding(.bottom, 12)
+                details.padding(.bottom, 14)
             }
             if !store.pendingPushRevocations.isEmpty {
                 InlineNotice(title: "해지 미완료", detail: "이전에 연결한 서버에서 해지를 마치지 못했습니다. 그 서버에 다시 연결해 확인해 주세요.")
-                    .padding(.bottom, 12)
+                    .padding(.bottom, 14)
             }
             ForEach(others) { device in
                 RowDivider(inset: 0)
@@ -266,8 +269,10 @@ struct PushSettingsView: View {
             if coverageHere, line.ready, devices.isEmpty {
                 RowDivider(inset: 0)
                 Text("iPhone 앱의 설정 › 알림에서 켜면 여기에 나옵니다.")
-                    .font(SetupFont.hint).foregroundStyle(CE.ink3)
-                    .padding(.vertical, 12)
+                    .font(SetupFont.hint).foregroundStyle(CE.ink2)
+                    .lineSpacing(SetupFont.hintLeading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical, 14)
             }
         }
     }
@@ -276,46 +281,48 @@ struct PushSettingsView: View {
     private func keyStep(_ step: KeyStep) -> some View {
         Text("\(step.lead)\(Text(Self.keyFile).font(CEFont.mono).foregroundStyle(CE.ink))\(step.tail)")
             .font(SetupFont.hint).foregroundStyle(CE.ink2)
+            .lineSpacing(SetupFont.hintLeading)
             .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// web .gbtn--ghost: text only until hovered.
     private var detailsToggle: some View {
         Button { withAnimation(.snappy(duration: 0.22)) { showDetails.toggle() } } label: {
             HStack(spacing: 4) {
                 Text("자세히")
-                Image(systemName: showDetails ? "chevron.up" : "chevron.down").font(.system(size: 8.5, weight: .bold))
+                Image(systemName: showDetails ? "chevron.up" : "chevron.down").font(.system(size: 9, weight: .bold))
             }
-            .font(CEFont.meta.weight(.medium)).foregroundStyle(CE.ink2)
-            .frame(minHeight: isMac ? 24 : 44)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .ceGhostButton()
+        .controlSize(.mini)
+        .fixedSize()
         .accessibilityLabel(showDetails ? "자세히 닫기" : "자세히 보기")
     }
 
     /// The provider per build kind, with the server's last error when it has one.
     private var details: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 8) {
             ForEach(Array((status?.providers ?? []).enumerated()), id: \.offset) { _, provider in
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 7) {
-                        StatusDot(tone: provider.state == .ready ? .success : .attention, size: 6)
-                        Text(environmentName(provider.environment)).foregroundStyle(CE.ink2)
+                        StatusDot(tone: provider.state == .ready ? .success : .attention, size: 7)
+                        Text(environmentName(provider.environment)).foregroundStyle(CE.ink)
                         Spacer(minLength: 8)
                         Text(providerLabel(provider.state)).foregroundStyle(provider.state == .ready ? CE.ink2 : CE.attention)
                     }
-                    .font(SetupFont.hint)
+                    .font(CEFont.secondary)
                     .accessibilityElement(children: .combine)
                     if let error = provider.lastError, !error.isEmpty {
-                        Text(error).font(CEFont.mono).foregroundStyle(CE.ink3).lineLimit(2).textSelection(.enabled)
-                            .padding(.leading, 13)
+                        Text(error).font(CEFont.mono).foregroundStyle(CE.ink2).lineLimit(2).textSelection(.enabled)
+                            .ceLineHeight(12.5, 1.45)
+                            .padding(.leading, 14)
                     }
                 }
             }
         }
-        .padding(12)
+        .padding(.horizontal, 14).padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(CE.line) }
@@ -353,8 +360,8 @@ struct PushSettingsView: View {
         let on = pendingChoice ?? PhonePushSwitch.isOn(state, device: mine)
         let line = phoneLine(phone, mine: mine, on: on)
         let blocked = !connected || pendingChoice != nil || [.requestingPermission, .registering].contains(state)
-        return SettingsGroup(footnote: Self.coverage) {
-            SettingsRow("이 iPhone에서 알림 받기", hint: line.text, hintTone: line.attention ? CE.attention : CE.ink3) {
+        return SettingsGroup("이 iPhone", footnote: Self.coverage) {
+            SettingsRow("이 iPhone에서 알림 받기", hint: line.text, hintTone: line.attention ? CE.attention : CE.ink2) {
                 Toggle("이 iPhone에서 알림 받기", isOn: Binding(get: { on }, set: { turn($0, phone) }))
                     .labelsHidden()
                     .settingsSwitch()
@@ -475,7 +482,7 @@ private struct PushDeviceRow: View {
     private var canTest: Bool { enabled && receiving }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: isMac ? 8 : 0) {
+        VStack(alignment: .leading, spacing: isMac ? 10 : 0) {
             if isThisDevice {
                 if showsPreferences { preferences }
                 ownActions
@@ -488,9 +495,14 @@ private struct PushDeviceRow: View {
                 #endif
             }
             if let error { InlineNotice(tone: .attention, title: error).padding(.vertical, isMac ? 0 : 6) }
-            if let notice { Text(notice).font(SetupFont.hint).foregroundStyle(CE.ink2).padding(.bottom, isMac ? 0 : 8) }
+            if let notice {
+                Text(notice).font(SetupFont.hint).foregroundStyle(CE.ink2)
+                    .lineSpacing(SetupFont.hintLeading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, isMac ? 0 : 8)
+            }
         }
-        .padding(.vertical, isThisDevice ? 4 : 10)
+        .padding(.vertical, isThisDevice ? 4 : 12)
         .confirmationDialog("이 기기의 알림 등록을 해지할까요?", isPresented: $confirmRevoke, titleVisibility: .visible) {
             Button("해지", role: .destructive) {
                 Task { await change {
@@ -504,9 +516,9 @@ private struct PushDeviceRow: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 10) {
-            Image(systemName: "iphone").font(.system(size: 15)).foregroundStyle(CE.ink3).frame(width: 20)
+            Image(systemName: "iphone").font(.system(size: 16)).foregroundStyle(CE.ink2).frame(width: 20)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(name).font(SetupFont.row).foregroundStyle(CE.ink).lineLimit(1)
                     if device.state != .active {
@@ -550,7 +562,8 @@ private struct PushDeviceRow: View {
         MetaText(parts)
         #else
         Text(parts.compactMap { $0?.replacingOccurrences(of: " ", with: "\u{00A0}") }.joined(separator: " · "))
-            .font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(2)
+            .font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(2)
+            .lineSpacing(CELeading.meta)
             .fixedSize(horizontal: false, vertical: true)
         #endif
     }
@@ -575,15 +588,19 @@ private struct PushDeviceRow: View {
         .frame(minHeight: isMac ? 30 : 44)
     }
 
-    /// Mac: four checkboxes on one line under the name. iPhone: a switch row each.
+    /// Mac: four checkboxes on one line under a quiet "받을 알림" label, lined up with the name. iPhone: a switch row each.
     @ViewBuilder private var preferences: some View {
         #if os(macOS)
-        HStack(spacing: 18) { preferenceToggles }
-            .toggleStyle(.checkbox)
-            .tint(CE.violet)
-            .font(SetupFont.hint)
-            .foregroundStyle(CE.ink2)
-            .padding(.leading, isThisDevice ? 0 : 30)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("받을 알림").font(CEFont.meta).foregroundStyle(CE.ink3)
+                .accessibilityHidden(true)
+            HStack(spacing: 18) { preferenceToggles }
+                .toggleStyle(.checkbox)
+                .tint(CE.violet)
+                .font(CEFont.secondary)
+                .foregroundStyle(CE.ink2)
+        }
+        .padding(.leading, isThisDevice ? 0 : 30)
         #else
         VStack(alignment: .leading, spacing: 0) { preferenceToggles }
             .settingsSwitch()

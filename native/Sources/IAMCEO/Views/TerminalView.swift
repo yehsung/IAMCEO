@@ -84,14 +84,16 @@ struct TerminalView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(CE.line) }
                 if let notice = session.notice {
-                    Text(TerminalPresentation.message(notice)).font(CEFont.meta).foregroundStyle(CE.attention).lineLimit(3)
+                    // web .tm-note: 13.5 at line-height 1.5.
+                    Text(TerminalPresentation.message(notice)).font(CEFont.note).foregroundStyle(CE.attention)
+                        .lineSpacing(CELeading.spacing(13.5, 1.5)).lineLimit(3)
                         .accessibilityLabel(TerminalPresentation.message(notice))
                 }
             }
         } footer: {
             #if os(macOS)
             HStack {
-                Text("닫으면 자동 전달이 다시 시작됩니다").font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
+                Text("닫으면 자동 전달이 다시 시작됩니다").font(CEFont.note).foregroundStyle(CE.ink2).lineLimit(1)
                 Spacer(minLength: 8)
                 Button("닫기") { dismiss() }.ceSecondaryButton().accessibilityLabel("터미널 닫기")
             }
@@ -100,12 +102,14 @@ struct TerminalView: View {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 HStack {
                     if missingTerminal {
-                        Text("깨우면 같은 창에서 다시 연결합니다").font(CEFont.meta).foregroundStyle(CE.ink3)
+                        Text("깨우면 같은 창에서 다시 연결합니다").font(CEFont.note).foregroundStyle(CE.ink2)
+                            .lineSpacing(CELeading.note)
                     } else if controlling || TerminalPresentation.holdsLease(store.terminalLeases[member.id], now: context.date) {
                         Button("입력 끝내기") { Task { await session.finishInput(store: store, member: member, resume: true) } }
                             .ceSecondaryButton().disabled(session.ending).accessibilityLabel("터미널 입력 끝내기")
                     } else {
-                        Text(TerminalPlatform.current.observeHint).font(CEFont.meta).foregroundStyle(CE.ink3)
+                        Text(TerminalPlatform.current.observeHint).font(CEFont.note).foregroundStyle(CE.ink2)
+                            .lineSpacing(CELeading.note)
                         Spacer(minLength: 8)
                         Button(session.starting ? "입력 준비 중" : "입력 시작") { session.beginInput(store: store, member: member) }
                             .ceProminentButton().disabled(store.isDemo || !store.canWrite || session.starting || session.ending)
@@ -128,8 +132,10 @@ struct TerminalView: View {
             Spacer(minLength: 8)
             #if os(macOS)
             if session.readOnly && !missingTerminal {
+                // A status-row action: web gbtn--s (32pt), not the footer size.
                 Button("다시 시도") { session.beginInput(store: store, member: member) }
-                    .ceSecondaryButton().disabled(store.isDemo || !store.canWrite || session.starting || session.ending)
+                    .ceSecondaryButton().controlSize(.small)
+                    .disabled(store.isDemo || !store.canWrite || session.starting || session.ending)
                     .accessibilityLabel("터미널 직접 입력 다시 시도")
             }
             #else
@@ -143,7 +149,7 @@ struct TerminalView: View {
     }
     #if os(iOS)
     private var reconnectButton: some View {
-        Button("다시 연결") { session.observe(store: store, member: member) }.ceSecondaryButton()
+        Button("다시 연결") { session.observe(store: store, member: member) }.ceSecondaryButton().controlSize(.small)
             .disabled(!TerminalPresentation.canReconnect(starting: session.starting, ending: session.ending, controlling: controlling))
             .accessibilityLabel("터미널 다시 연결")
     }
@@ -176,7 +182,9 @@ struct TerminalView: View {
     }
     private var sleepingTerminal: some View {
         VStack(spacing: 16) {
-            Text("이 직원은 잠들어 있어 터미널이 없습니다").font(CEFont.secondary).foregroundStyle(CE.ink2)
+            // web .tm-note: 13.5 ink-2 at line-height 1.5, centred.
+            Text("이 직원은 잠들어 있어 터미널이 없습니다").font(CEFont.note).foregroundStyle(CE.ink2)
+                .lineSpacing(CELeading.spacing(13.5, 1.5)).multilineTextAlignment(.center)
             Button(waking ? "깨우는 중…" : "깨우기") {
                 Task {
                     wakeNotice = nil
@@ -187,8 +195,12 @@ struct TerminalView: View {
             }
             .ceProminentButton()
             .disabled(!TerminalAvailability.needsWake(current) || !store.canWrite || waking || session.ending || store.pendingActions.contains("member:\(member.id)"))
-            if let wakeNotice { Text(wakeNotice).font(CEFont.meta).foregroundStyle(CE.danger) }
+            if let wakeNotice {
+                Text(wakeNotice).font(CEFont.note).foregroundStyle(CE.danger)
+                    .lineSpacing(CELeading.note).multilineTextAlignment(.center).frame(maxWidth: 440)
+            }
         }
+        .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     private var terminal: some View {

@@ -17,6 +17,7 @@ struct ProjectManageView: View {
     @State private var succeeded = false
     @State private var namespace = ""
     @FocusState private var nameFocused: Bool
+    @FocusState private var cwdFocused: Bool
 
     private var project: Project? {
         store.archivedProjects.first { $0.id == selection.projectID } ?? snapshot?.project
@@ -80,11 +81,11 @@ struct ProjectManageView: View {
     var body: some View {
         // While a change is being sent the sheet stays: the round close (and Esc) does nothing, as 취소 is disabled.
         CESheet(title, subtitle: subtitle, icon: icon, width: 500, onClose: { if !working { dismiss() } }) {
-            VStack(alignment: .leading, spacing: CESpace.m) {
+            VStack(alignment: .leading, spacing: 14) {
                 if loading {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("확인하는 중입니다").font(CEFont.secondary).foregroundStyle(CE.ink2)
+                        Text("확인하는 중입니다").font(CEFont.note).foregroundStyle(CE.ink2)
                     }
                 }
                 if store.isDemo { InlineNotice(tone: .accent, icon: "eye", title: "샘플은 읽기 전용입니다") }
@@ -135,41 +136,33 @@ struct ProjectManageView: View {
 
     // MARK: Pieces
 
-    /// 이름 (and 폴더 in settings), straight on the sheet: no card inside a popup.
+    /// 이름 (and 폴더 in settings), straight on the sheet: no card inside a popup. The same labelled fields as the
+    /// new-project sheet (web .field / .input, accent ring on the focused one).
     private var form: some View {
-        VStack(alignment: .leading, spacing: CESpace.m) {
-            field("이름") {
+        VStack(alignment: .leading, spacing: 14) {
+            SetupField("이름") {
                 TextField("프로젝트 이름", text: $name)
-                    .font(CEFont.body)
-                    .ceField()
-                    .overlay { if nameFocused { focusRing } }
+                    .labelsHidden()
+                    .font(SetupFont.input)
                     .focused($nameFocused)
                     .onSubmit { Task { await submit() } }
+                    .ceField(focused: nameFocused)
             }
             if selection.mode == .settings {
-                field("폴더", note: "새로 뜨는 직원부터 적용됩니다.") {
+                SetupField("폴더", hint: "새로 뜨는 직원부터 적용됩니다.") {
                     TextField("폴더", text: $cwd)
-                        .font(CEFont.mono)
-                        .ceField()
+                        .labelsHidden()
+                        .font(SetupFont.codeInput)
                         .autocorrectionDisabled()
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        #endif
+                        .focused($cwdFocused)
+                        .ceField(focused: cwdFocused)
                 }
             }
         }
         .disabled(!editable || succeeded)
-    }
-
-    private func field<Input: View>(_ label: String, note: String? = nil, @ViewBuilder input: () -> Input) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(label).font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink2)
-            input()
-            if let note { Text(note).font(CEFont.meta).foregroundStyle(CE.ink3) }
-        }
-    }
-
-    private var focusRing: some View {
-        RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
-            .strokeBorder(CE.accent.opacity(0.75), lineWidth: 1.5)
-            .allowsHitTesting(false)
     }
 
     /// What archiving does, then anything that stops it: one amber box, a row per reason, each with a quiet link to the
@@ -194,13 +187,13 @@ struct ProjectManageView: View {
                         .disabled(!canRecheck)
                         .help("정리한 뒤 다시 확인합니다")
                 }
-                .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 2)
+                .padding(.horizontal, 16).padding(.top, 13).padding(.bottom, 3)
                 ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
                     if index > 0 { Rectangle().fill(CE.attention.opacity(0.14)).frame(height: 1).padding(.leading, 16) }
                     blockerRow(row)
                 }
             }
-            .padding(.bottom, 4)
+            .padding(.bottom, 5)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(CE.attention.opacity(0.07), in: shape)
             .overlay { shape.strokeBorder(CE.attention.opacity(0.22)) }
@@ -209,10 +202,11 @@ struct ProjectManageView: View {
 
     private func blockerRow(_ row: (String, String, Destination)) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(row.0).font(CEFont.secondary.weight(.semibold)).foregroundStyle(CE.ink)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(row.0).font(CEFont.note.weight(.semibold)).foregroundStyle(CE.ink)
                 // Mac keeps two lines (the rest on hover); iPhone has no hover, so it shows every name.
-                Text(row.1).font(CEFont.meta).foregroundStyle(CE.ink3)
+                Text(row.1).font(CEFont.meta).foregroundStyle(CE.ink2)
+                    .lineSpacing(CELeading.meta)
                     .lineLimit(isMac ? 2 : nil).fixedSize(horizontal: false, vertical: true)
                     .help(row.1)
             }
@@ -221,7 +215,7 @@ struct ProjectManageView: View {
                 Task { await store.selectProject(id: selection.projectID); router.go(row.2); dismiss() }
             }
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
+        .padding(.horizontal, 16).padding(.vertical, 11)
     }
 
     /// Small accent text link (no button chrome) for actions inside the amber box. Icons are decoration only, so
@@ -239,9 +233,11 @@ struct ProjectManageView: View {
     private var canRecheck: Bool { !loading && !working && !store.isDemo }
     private func recheck() { Task { await load() } }
 
+    /// web .st-confirm: 14.5 at 1.6, ink-1, a little inset.
     private func explanation(_ text: String) -> some View {
-        Text(text).font(CEFont.secondary).foregroundStyle(CE.ink2).lineSpacing(3)
+        Text(text).font(CEFont.body).foregroundStyle(CE.ink).ceLineHeight(14.5, 1.6)
             .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, isMac ? 2 : 0).padding(.bottom, 4)
     }
 
     private func openRestored() {
@@ -309,6 +305,7 @@ struct ProjectManageView: View {
 /// Label of the quiet accent links in the archive popup; greyed while its button is disabled.
 private struct QuietLinkLabel: View {
     @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
     let title: String
     let icon: String?
     let trailingChevron: Bool
@@ -321,9 +318,10 @@ private struct QuietLinkLabel: View {
             }
         }
         .font(CEFont.meta.weight(.semibold))
-        .foregroundStyle(isEnabled ? CE.accent : CE.ink3)
-        .frame(minHeight: isMac ? 22 : 44)
+        .foregroundStyle(isEnabled ? (hovering ? CE.ink : CE.accent) : CE.ink3)
+        .frame(minHeight: isMac ? 26 : 44)
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
     }
 }
 

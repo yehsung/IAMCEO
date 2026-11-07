@@ -18,28 +18,37 @@ struct DeliveryNoticeView: View {
         let info = DeliveryInfo(summary)
         Plate {
             VStack(alignment: .leading, spacing: CESpace.m) {
-                Label(info.label, systemImage: info.icon)
-                    .font(CEFont.section).foregroundStyle(info.tone.color)
-                    .accessibilityLabel(info.explanation)
-                Text(info.explanation).font(CEFont.secondary).foregroundStyle(CE.ink2)
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(info.label, systemImage: info.icon)
+                        .font(CEFont.section).foregroundStyle(info.tone.color)
+                        .accessibilityLabel(info.explanation)
+                    Text(info.explanation).font(CEFont.secondary).foregroundStyle(CE.ink2)
+                        .ceLineHeight(13, 1.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let error {
-                    Text(error).font(CEFont.secondary).foregroundStyle(CE.danger)
+                    Text(error).font(CEFont.note).foregroundStyle(CE.danger)
+                        .lineSpacing(CELeading.note)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 ForEach(items) { item in
                     DeliveryNoticeRow(item: item, canWrite: canWrite,
                                       pending: pendingIDs.contains(item.deliveryId ?? item.id),
                                       onOpenMessage: onOpenMessage, onOpenReference: onOpenReference, onAction: onAction)
                 }
-                if isLoading { ProgressView().accessibilityLabel("전달 안내 불러오는 중") }
+                if isLoading { ProgressView().controlSize(.small).accessibilityLabel("전달 안내 불러오는 중") }
                 if hasOlder, let onLoadOlder {
+                    // A "load more" link (web .gbtn--ghost, size s).
                     Button("이전 전달 안내", action: onLoadOlder)
-                        .buttonStyle(CEQuietButtonStyle()).disabled(isLoading)
+                        .ceGhostButton().controlSize(.small).disabled(isLoading)
                 }
             }
         }
     }
 }
 
+/// One notice in three blocks, 12 apart: what (the state and the quoted message), why (explanation, evidence,
+/// recommendation and one check-time line), and one wrapping row of actions.
 private struct DeliveryNoticeRow: View {
     let item: DeliveryNoticeItem
     let canWrite: Bool
@@ -51,40 +60,56 @@ private struct DeliveryNoticeRow: View {
 
     var body: some View {
         let info = DeliveryInfo(item)
-        VStack(alignment: .leading, spacing: CESpace.s) {
-            Divider().overlay(CE.line)
-            Label(info.label, systemImage: info.icon).font(CEFont.rowTitle).foregroundStyle(info.tone.color)
-            if let preview = item.preview, !preview.isEmpty {
-                Text(preview).font(CEFont.body).foregroundStyle(CE.ink).textSelection(.enabled)
-            }
-            Text(info.explanation).font(CEFont.secondary).foregroundStyle(CE.ink2)
-            if let id = item.messageId, let onOpenMessage {
-                Button("원문 보기") { onOpenMessage(id) }.buttonStyle(CEQuietButtonStyle())
-            }
-            if let ref = item.ref, let onOpenReference {
-                Button("관련 항목 보기") { onOpenReference(ref) }.buttonStyle(CEQuietButtonStyle())
-            }
-            ForEach(Array((item.evidence ?? []).enumerated()), id: \.offset) { _, evidence in
-                let evidenceInfo = DeliveryEvidenceInfo(evidence)
-                VStack(alignment: .leading, spacing: CESpace.xs) {
-                    Text("\(evidenceInfo.sourceLabel) · \(evidenceInfo.label)").font(CEFont.meta.weight(.semibold))
-                    Text(evidenceInfo.detail).font(CEFont.secondary)
-                    timestamp("확인 시각", evidence.checkedAt)
+        VStack(alignment: .leading, spacing: CESpace.m) {
+            // A single 1pt hairline like every other divider (a Divider plus an overlay drew two).
+            Rectangle().fill(CE.line).frame(height: 1)
+            VStack(alignment: .leading, spacing: 6) {
+                Label(info.label, systemImage: info.icon).font(CEFont.rowTitle).foregroundStyle(info.tone.color)
+                if let preview = item.preview, !preview.isEmpty {
+                    quoted(preview)
                 }
-                .foregroundStyle(CE.ink2)
-                // location/code may contain host paths or raw diagnostics; never render them.
             }
-            timestamp("마지막 확인", item.lastCheckedAt)
-            timestamp("다음 확인", item.nextCheckAt)
-            if let recommendation = item.recommendation {
-                Text("추천 · \(recommendation.text)").font(CEFont.secondary).foregroundStyle(CE.ink2)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(info.explanation).font(CEFont.secondary).foregroundStyle(CE.ink2)
+                    .ceLineHeight(13, 1.5)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(Array((item.evidence ?? []).enumerated()), id: \.offset) { _, evidence in
+                    let evidenceInfo = DeliveryEvidenceInfo(evidence)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(evidenceInfo.sourceLabel) · \(evidenceInfo.label)").font(CEFont.meta.weight(.semibold))
+                        Text(evidenceInfo.detail).font(CEFont.secondary)
+                            .ceLineHeight(13, 1.5)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let checked = parseISODate(evidence.checkedAt) {
+                            Text("확인 \(deliveryShortTime(checked))").font(CEFont.meta).foregroundStyle(CE.ink3)
+                                .help("확인 시각 · \(koDateTime(checked))")
+                        }
+                    }
+                    .foregroundStyle(CE.ink2)
+                    .padding(.top, 4)
+                    // location/code may contain host paths or raw diagnostics; never render them.
+                }
+                if let recommendation = item.recommendation {
+                    Text("추천 · \(recommendation.text)").font(CEFont.secondary).foregroundStyle(CE.ink2)
+                        .ceLineHeight(13, 1.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                checkLine
+                if pending {
+                    Label("작업 결과 확인 중", systemImage: "clock").font(CEFont.meta).foregroundStyle(CE.ink2)
+                }
             }
-            if pending {
-                Label("작업 결과 확인 중", systemImage: "clock").font(CEFont.meta).foregroundStyle(CE.ink2)
-            }
-            ViewThatFits(in: .horizontal) {
-                HStack { actions }
-                VStack(alignment: .leading) { actions }
+            if hasActions {
+                TeamWrapLayout(spacing: 8, lineSpacing: 8) {
+                    if let id = item.messageId, let onOpenMessage {
+                        Button("원문 보기") { onOpenMessage(id) }.ceSecondaryButton()
+                    }
+                    if let ref = item.ref, let onOpenReference {
+                        Button("관련 항목 보기") { onOpenReference(ref) }.ceSecondaryButton()
+                    }
+                    actions
+                }
+                .controlSize(.small)
             }
         }
         .confirmationDialog("중복 전달 위험을 감수하고 다시 보낼까요?", isPresented: $confirmingRisk, titleVisibility: .visible) {
@@ -102,19 +127,44 @@ private struct DeliveryNoticeRow: View {
         .onChange(of: canWrite) { _, writable in if !writable { confirmingRisk = false } }
     }
 
+    private var hasActions: Bool {
+        (item.messageId != nil && onOpenMessage != nil) || (item.ref != nil && onOpenReference != nil)
+            || !deliveryPanelActions(item).isEmpty
+    }
+
+    /// The message as a quoted well (at most four lines; the full text is in 원문 보기).
+    private func quoted(_ text: String) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        return Text(text).font(CEFont.body).foregroundStyle(CE.ink)
+            .lineLimit(4)
+            .ceLineHeight(14.5, 1.55)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(CE.bgDeep.opacity(0.5), in: shape)
+            .overlay { shape.strokeBorder(CE.line) }
+    }
+
+    /// "마지막 확인 3분 전 · 다음 확인 14:20" on one line; the full dates are the tooltip.
+    @ViewBuilder private var checkLine: some View {
+        let last = parseISODate(item.lastCheckedAt)
+        let next = parseISODate(item.nextCheckAt)
+        if last != nil || next != nil {
+            MetaText([last.map { _ in "마지막 확인 \(relativeTime(item.lastCheckedAt))" },
+                      next.map { "다음 확인 \(deliveryShortTime($0))" }])
+                .help([last.map { "마지막 확인 · \(koDateTime($0))" }, next.map { "다음 확인 · \(koDateTime($0))" }]
+                    .compactMap { $0 }.joined(separator: "\n"))
+        }
+    }
+
     @ViewBuilder private var actions: some View {
         ForEach(deliveryPanelActions(item), id: \.rawValue) { action in
             Button(actionName(action)) {
                 if action == .retryWithRisk { confirmingRisk = true }
                 else { onAction(item, action, false) }
             }
-            .buttonStyle(CEQuietButtonStyle()).disabled(!canWrite || pending)
-        }
-    }
-
-    @ViewBuilder private func timestamp(_ label: String, _ value: String?) -> some View {
-        if let date = parseISODate(value) {
-            Text("\(label) · \(koDateTime(date))").font(CEFont.meta).foregroundStyle(CE.ink3)
+            .ceSecondaryButton().disabled(!canWrite || pending)
         }
     }
 
@@ -126,4 +176,17 @@ private struct DeliveryNoticeRow: View {
         case .unknown: "지원하지 않는 행동"
         }
     }
+}
+
+/// Short Korean time for check lines, past or future: "14:20", "어제 14:20", "내일 14:20", "11월 4일 14:20",
+/// and the full date in another year.
+private func deliveryShortTime(_ date: Date, now: Date = Date()) -> String {
+    let calendar = Calendar.current
+    let time = koTime(date)
+    if calendar.isDateInToday(date) { return time }
+    if calendar.isDateInYesterday(date) { return "어제 \(time)" }
+    if calendar.isDateInTomorrow(date) { return "내일 \(time)" }
+    guard calendar.component(.year, from: date) == calendar.component(.year, from: now) else { return koDateTime(date) }
+    let parts = calendar.dateComponents([.month, .day], from: date)
+    return "\(parts.month ?? 0)월 \(parts.day ?? 0)일 \(time)"
 }

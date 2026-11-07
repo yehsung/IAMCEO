@@ -1,4 +1,6 @@
 import SwiftUI
+import ImageIO
+import QuickLook
 #if os(macOS)
 import AppKit
 #else
@@ -79,17 +81,13 @@ struct InboxView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: CESpace.m) {
+                // Web .ibx: 22 between the pill and each section; cards inside a section are 10 apart.
+                VStack(alignment: .leading, spacing: 22) {
                     // The segment pill scrolls with the list: nested top bars would overlap the shell's status strips.
                     InboxSegmentBar(segment: $segment, openCount: openDecisions.count, doneCount: doneCount, stretch: !wide)
-                        .padding(.bottom, 2)
                     content
                 }
-                .padding(.horizontal, wide ? 24 : CESpace.l)
-                .padding(.top, CESpace.m)
-                .padding(.bottom, wide ? 24 : 28)
-                .frame(maxWidth: 880, alignment: .leading)
-                .frame(maxWidth: .infinity)
+                .ceContentColumn()
             }
             .scrollDismissesKeyboard(.interactively)
             .refreshable { await store.refresh() }
@@ -190,7 +188,7 @@ struct InboxView: View {
             if store.isLoading {
                 EmptyTile(loading: true, title: "결재를 불러오는 중입니다")
             } else {
-                EmptyTile(icon: "tray", title: "열린 프로젝트가 없습니다", detail: isMac ? "사이드바에서 프로젝트를 고르거나 새로 만드세요." : "위 제목을 눌러 프로젝트를 고르거나 새로 만드세요.")
+                emptyCard(icon: "tray", title: "열린 프로젝트가 없습니다", detail: isMac ? "사이드바에서 프로젝트를 고르거나 새로 만드세요." : "위 제목을 눌러 프로젝트를 고르거나 새로 만드세요.")
             }
         } else if segment == .open {
             openView
@@ -202,21 +200,43 @@ struct InboxView: View {
     // MARK: Open view
 
     private var openView: some View {
-        VStack(alignment: .leading, spacing: CESpace.m) {
-            connectionNotice
-            disconnectedNotice
-            if linkMissing { missingLinkNotice }
-            if !blocked.isEmpty { approvalCard }
-            if !uncertainMembers.isEmpty {
-                InlineNotice(tone: .neutral, icon: "questionmark.circle", title: "상태 확인 불가 \(uncertainMembers.count)명",
-                             detail: "승인 창이 확인되지 않았습니다. 팀 화면에서 상태 근거를 볼 수 있습니다.",
-                             actionTitle: "팀 화면으로", action: { router.go(.team) })
+        let blocks = self.blocks
+        return VStack(alignment: .leading, spacing: 22) {
+            if hasOpenNotices {
+                VStack(alignment: .leading, spacing: 10) {
+                    connectionNotice
+                    disconnectedNotice
+                    if linkMissing { missingLinkNotice }
+                    if !uncertainMembers.isEmpty {
+                        InlineNotice(tone: .neutral, icon: "questionmark.circle", title: "상태 확인 불가 \(uncertainMembers.count)명",
+                                     detail: "승인 창이 확인되지 않았습니다. 팀 화면에서 상태 근거를 볼 수 있습니다.",
+                                     actionTitle: "팀 화면으로", action: { router.go(.team) })
+                    }
+                }
             }
-            let blocks = self.blocks
+            if !blocked.isEmpty { approvalSection }
             if blocks.isEmpty && blocked.isEmpty {
-                EmptyTile(icon: "checkmark.seal", title: "결재할 항목이 없습니다", detail: emptyDetail)
+                emptyCard(title: "결재할 항목이 없습니다", detail: emptyDetail)
             }
-            ForEach(blocks) { block in blockView(block) }
+            if !blocks.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(blocks) { block in blockView(block) }
+                }
+            }
+        }
+    }
+
+    /// Notices above the open list, grouped so the section rhythm (22) does not open up between them.
+    private var hasOpenNotices: Bool {
+        let runnerDown = !store.isDemo && store.connectionStatus == .connected && store.state?.project.connection.ok == false
+        return runnerDown || (answerLock == .disconnected && !openDecisions.isEmpty) || linkMissing || !uncertainMembers.isEmpty
+    }
+
+    /// Web .ibx-empty: the empty message on the same glass card as the list (title 16, body 14, 44 above and below).
+    private func emptyCard(icon: String? = nil, title: String, detail: String) -> some View {
+        Plate(padding: 0) {
+            EmptyTile(icon: icon, title: title, detail: detail, framed: false)
+                .padding(.vertical, isMac ? 4 : 12)
         }
     }
 
@@ -249,39 +269,37 @@ struct InboxView: View {
 
     // MARK: Approval windows (CLI menus, not decisions)
 
-    /// One compact card for every confirmed CLI approval prompt.
-    private var approvalCard: some View {
-        Plate(padding: 0) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 6) {
-                    Text("승인 대기").font(CEFont.micro).foregroundStyle(CE.approval)
-                    Text("터미널에서 승인하거나 거절하세요").font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 14).padding(.top, 11).padding(.bottom, 2)
-                .accessibilityElement(children: .combine)
-                .accessibilityAddTraits(.isHeader)
-                ForEach(Array(blocked.enumerated()), id: \.element.id) { index, member in
-                    if index > 0 { RowDivider(inset: 31) }
-                    approvalRow(member)
-                }
+    /// Web BlockedList: a "승인 대기 n" heading above the cards, then one approval card per stopped session.
+    private var approvalSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("승인 대기").font(CEFont.section).tracking(-0.14).foregroundStyle(CE.ink)
+                InboxCount(count: blocked.count)
             }
-            .padding(.bottom, 4)
+            .padding(.horizontal, 4)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+            ForEach(blocked) { member in approvalCard(member) }
         }
-        .overlay { RoundedRectangle(cornerRadius: CERadius.plate, style: .continuous).strokeBorder(CE.approval.opacity(0.28)) }
     }
 
-    private func approvalRow(_ member: Member) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            approvalHeader(member)
-            CLIApprovalCard(member: member)
+    /// Web .ibx-card.ibx-approval: the member row, then the approval window (or how to answer it in the terminal).
+    private func approvalCard(_ member: Member) -> some View {
+        Plate(padding: 0) {
+            VStack(alignment: .leading, spacing: 12) {
+                approvalHeader(member)
+                CLIApprovalCard(member: member, fallback: "여기서 답할 수 없는 창입니다. 화면을 보고 터미널에서 승인하거나 거절하세요.")
+            }
+            .padding(.vertical, 16).padding(.horizontal, wide ? 18 : 14)
         }
+        .overlay { RoundedRectangle(cornerRadius: CERadius.plate, style: .continuous).strokeBorder(CE.approval.opacity(0.28)) }
     }
 
     private func approvalHeader(_ member: Member) -> some View {
         let command = TerminalCommand.attach(memberID: member.id, bootstrap: store.bootstrap)
         let copied = copiedMember == member.id
         let now = plainOneLine(member.now)
+        let readable = member.canReadCLIApproval
         return HStack(spacing: 6) {
             Button { router.openMember(member.id) } label: {
                 HStack(spacing: 10) {
@@ -289,34 +307,42 @@ struct InboxView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(alignment: .firstTextBaseline, spacing: 7) {
                             Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
-                            Text("승인 창 앞").font(CEFont.meta).foregroundStyle(CE.approval).lineLimit(1).fixedSize()
+                            Text("승인 창 앞").font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.approval).lineLimit(1).fixedSize()
                         }
-                        if !now.isEmpty { Text(now).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1) }
+                        if !now.isEmpty { Text(now).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1) }
                     }
                     Spacer(minLength: 0)
                 }
-                .padding(.leading, 10).padding(.vertical, 8)
-                .frame(minHeight: isMac ? 42 : 52)
+                .padding(.leading, 10).padding(.trailing, 6).padding(.vertical, 6)
+                .frame(minHeight: isMac ? 44 : 52)
             }
-            .buttonStyle(RowButtonStyle(radius: CERadius.row))
+            .buttonStyle(RowButtonStyle(radius: CERadius.control))
             .help(MemberStatusInfo(member).explanation)
             .accessibilityLabel("\(member.name), 승인 창 앞" + (now.isEmpty ? "" : ", \(now)"))
             .accessibilityHint("팀원 상세를 엽니다")
             Button { copyCommand(command, member: member.id) } label: {
                 Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(copied ? CE.success : CE.ink2)
-                    .frame(width: isMac ? 28 : 40, height: isMac ? 28 : 44)
+                    .frame(width: isMac ? 32 : 40, height: isMac ? 32 : 44)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("터미널 연결 명령 복사 · \(command)")
             .accessibilityLabel(copied ? "터미널 연결 명령 복사함" : "터미널 연결 명령 복사")
-            Button("터미널 열기") { router.openTerminal(member.id) }
-                .ceProminentButton().ceCompactControl()
-                .help("여기서 답할 수 없는 창입니다. 화면을 보고 승인하거나 거절하세요.")
+            // One filled button per card: when the window can be answered here, its confirm is the primary action.
+            Group {
+                if readable {
+                    Button("터미널 열기") { router.openTerminal(member.id) }.ceSecondaryButton()
+                } else {
+                    Button("터미널 열기") { router.openTerminal(member.id) }.ceProminentButton()
+                }
+            }
+            .ceCompactControl()
+            .help(readable ? "CLI 화면을 터미널에서 직접 봅니다" : "여기서 답할 수 없는 창입니다. 화면을 보고 승인하거나 거절하세요.")
         }
-        .padding(.leading, 4).padding(.trailing, 12).padding(.vertical, 1)
+        // Web .ibx-blocked__row: the row's hover fill bleeds 10 to the left and 6 above, so its text lines up with the card.
+        .padding(.leading, -10).padding(.top, -6)
     }
 
     // MARK: Cards and groups
@@ -338,15 +364,17 @@ struct InboxView: View {
         let armed = !single && (busy || batchArmed[group] == targets.map(\.id)) && !(batchArmed[group] ?? []).isEmpty
         return GroupFrame(single: single, wide: wide) {
             if !single {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 10) {
+                    // Web .ibx-group__head: padding 2 4 2 8; name 14.5/650 at 1.35, the sub-line 12.5 ink-2.
+                    HStack(alignment: .center, spacing: 12) {
                         VStack(alignment: .leading, spacing: 1) {
                             HStack(alignment: .firstTextBaseline, spacing: 5) {
                                 Text(group).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
-                                Text("· \(cards.count)건").font(CEFont.meta).foregroundStyle(CE.ink3).fixedSize()
+                                Text("· \(cards.count)건").font(CEFont.meta).foregroundStyle(CE.ink2).monospacedDigit().fixedSize()
                             }
                             if skipped > 0 && !targets.isEmpty {
-                                Text("권장이 없거나 직접 고른 \(skipped)건은 따로 결정해 주세요").font(CEFont.meta).foregroundStyle(CE.ink3)
+                                Text("권장이 없거나 직접 고른 \(skipped)건은 따로 결정해 주세요")
+                                    .font(CEFont.meta).foregroundStyle(CE.ink2).lineSpacing(CELeading.meta)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
@@ -355,11 +383,11 @@ struct InboxView: View {
                         Spacer(minLength: 6)
                         if !targets.isEmpty && !armed {
                             Button("이 묶음 추천대로") { batchArmed[group] = targets.map(\.id); batchErrors[group] = nil }
-                                .ceSecondaryButton().ceCompactControl()
+                                .ceSecondaryButton().controlSize(.regular).fixedSize()
                                 .disabled(!gateOpen || busy)
                         }
                     }
-                    .padding(.leading, 8).padding(.trailing, 2).padding(.top, 2)
+                    .padding(.leading, 8).padding(.trailing, 4).padding(.vertical, 2)
                     if armed {
                         // While sending, the armed cards are in flight and no longer targets; keep showing what was confirmed.
                         let armedIDs = batchArmed[group] ?? []
@@ -367,10 +395,12 @@ struct InboxView: View {
                                    disabled: !gateOpen, stretch: !wide, shiftedAt: shiftedAt,
                                    onConfirm: { Task { await runBatch(group, ids: armedIDs) } },
                                    onCancel: { batchArmed[group] = nil })
-                            .padding(.horizontal, 8).padding(.bottom, 2)
+                            .padding(.leading, 8).padding(.trailing, 4).padding(.bottom, 2)
+                            .transition(.opacity)
                     }
-                    if let error = batchErrors[group] { ErrorLine(text: error).padding(.horizontal, 8) }
+                    if let error = batchErrors[group] { ErrorLine(text: error).padding(.leading, 8).padding(.trailing, 4) }
                 }
+                .animation(.easeOut(duration: 0.18), value: armed)
             }
         } content: {
             ForEach(cards) { decision in cardView(decision) }
@@ -381,20 +411,19 @@ struct InboxView: View {
         let id = shown.id
         let current = latest(id)
         if let current, current.status != "open", !inFlight.contains(id) {
-            Plate(padding: wide ? 16 : 14) {
+            // Web .ibx-card--answered: 13 above and below, 18 at the sides (14 on iPhone).
+            Plate(padding: 0) {
                 VStack(alignment: .leading, spacing: 8) {
                     AnsweredBody(decision: current, asker: asker(current))
                     if let error = cardErrors[id] { ErrorLine(text: error) }
                     savedMemo(id)
                     if current.status == "closed", current.closeKind != nil {
-                        Button(reopening.contains(id) ? "여는 중" : "다시 열기") {
-                            Task { await reopen(current, inPlace: true) }
-                        }
-                        .ceSecondaryButton().ceCompactControl()
-                        .disabled(!store.canWrite || reopening.contains(id))
+                        reopenControl(busy: reopening.contains(id)) { Task { await reopen(current, inPlace: true) } }
+                            .padding(.top, 2)
                     }
                     if let error = reopenErrors[id] { ErrorLine(text: error) }
                 }
+                .padding(.vertical, 13).padding(.horizontal, wide ? 18 : 14)
             }
             .overlay { FlashRing(on: flashID == id) }
             .id(id)
@@ -432,7 +461,7 @@ struct InboxView: View {
     private var doneView: some View {
         let list = doneList
         let moreAvailable = (store.state?.doneDecisionCount ?? 0) > list.count && store.api != nil && !store.isDemo && !olderExhausted
-        return VStack(alignment: .leading, spacing: CESpace.m) {
+        return VStack(alignment: .leading, spacing: 10) {
             if linkMissing { missingLinkNotice }
             if let notice = reopenedNotice {
                 InlineNotice(tone: .accent, icon: "arrow.uturn.backward.circle", title: "다시 열었습니다",
@@ -440,28 +469,38 @@ struct InboxView: View {
                              actionTitle: "결재할 항목 보기", action: { reopenedNotice = nil; router.decisionID = notice.id })
             }
             if list.isEmpty {
-                EmptyTile(icon: "tray", title: "결재된 항목이 없습니다", detail: "결정한 결재가 여기에 쌓입니다.")
+                emptyCard(title: "결재된 항목이 없습니다", detail: "결정한 결재가 여기에 쌓입니다.")
             } else {
+                // Web .glass.ibx-done: padding 4 16; rows 12 above and below, a hairline between them.
                 Plate(padding: 0) {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(list.enumerated()), id: \.element.id) { index, decision in
-                            if index > 0 { Rectangle().fill(CE.line).frame(height: 1).padding(.horizontal, wide ? 16 : 14) }
+                            if index > 0 { Rectangle().fill(CE.line).frame(height: 1).padding(.horizontal, 16) }
                             doneRow(decision)
                         }
                     }
-                    .padding(.vertical, 3)
+                    .padding(.vertical, 4)
                 }
             }
             if moreAvailable {
-                HStack {
-                    Spacer(minLength: 0)
-                    Button(loadingOlder ? "불러오는 중" : "더 불러오기") { Task { await loadOlder() } }
-                        .ceSecondaryButton().ceCompactControl()
-                        .disabled(loadingOlder || store.connectionStatus != .connected)
-                    Spacer(minLength: 0)
-                }
+                Button(loadingOlder ? "불러오는 중" : "더 불러오기") { Task { await loadOlder() } }
+                    .ceGhostButton().controlSize(.regular)
+                    .disabled(loadingOlder || store.connectionStatus != .connected)
+                    .frame(maxWidth: .infinity)
             }
             if let olderError { ErrorLine(text: olderError) }
+        }
+    }
+
+    /// Web ReopenButton: a glass button with its consequence written beside it (visible on iPhone too, not only on hover).
+    private func reopenControl(busy: Bool, action: @escaping () -> Void) -> some View {
+        HStack(spacing: 10) {
+            Button(busy ? "여는 중" : "다시 열기", action: action)
+                .ceSecondaryButton().controlSize(.regular).fixedSize()
+                .disabled(!store.canWrite || busy)
+            Text("결재할 항목으로 돌아갑니다")
+                .font(CEFont.meta).foregroundStyle(CE.ink2).lineSpacing(CELeading.meta)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -470,54 +509,39 @@ struct InboxView: View {
         let expanded = expandedDone.contains(id)
         let hasMore = !decision.detail.isEmpty || !decision.images.isEmpty || decision.fileId != nil
         let reopenable = decision.status == "closed" && decision.closeKind != nil
-        return VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: 4) {
             AnsweredBody(decision: decision, asker: asker(decision))
             savedMemo(id)
-            if reopenable || hasMore {
-                HStack(spacing: 10) {
-                    if hasMore {
-                        Button {
-                            withAnimation(.easeOut(duration: 0.18)) {
-                                if expanded { expandedDone.remove(id) } else { expandedDone.insert(id) }
-                            }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text(expanded ? "배경 접기" : "배경 보기")
-                                Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .bold))
-                                    .rotationEffect(.degrees(expanded ? 180 : 0))
-                            }
-                            .frame(minHeight: isMac ? 24 : 40)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain).font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.accent)
-                        .accessibilityLabel(expanded ? "\(decision.title) 배경 접기" : "\(decision.title) 배경 보기")
-                    }
-                    Spacer(minLength: 0)
-                    if reopenable {
-                        Button(reopening.contains(id) ? "여는 중" : "다시 열기") { Task { await reopen(decision, inPlace: false) } }
-                            .ceSecondaryButton().ceCompactControl()
-                            .disabled(!store.canWrite || reopening.contains(id))
-                            .help("결재할 항목으로 돌아갑니다")
+            if reopenable {
+                reopenControl(busy: reopening.contains(id)) { Task { await reopen(decision, inPlace: false) } }
+                    .padding(.top, 6)
+            }
+            if let error = reopenErrors[id] { ErrorLine(text: error) }
+            if hasMore {
+                DisclosureLink(title: expanded ? "배경 접기" : "배경 보기", expanded: expanded,
+                               accessibilityLabel: expanded ? "\(decision.title) 배경 접기" : "\(decision.title) 배경 보기") {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        if expanded { expandedDone.remove(id) } else { expandedDone.insert(id) }
                     }
                 }
             }
-            if let error = reopenErrors[id] { ErrorLine(text: error) }
             if expanded && hasMore {
+                // Web .ibx-done__bg: padding 12 14, radius 14, white .05; the detail at the card's 14.5 / 1.6.
                 VStack(alignment: .leading, spacing: 10) {
-                    if !decision.detail.isEmpty { MarkdownText(text: decision.detail, size: 13.5).foregroundStyle(CE.ink) }
+                    if !decision.detail.isEmpty { MarkdownText(text: decision.detail, size: 14.5, lineHeight: 1.6).foregroundStyle(CE.ink) }
                     if !decision.images.isEmpty { ImageStrip(images: decision.images) }
                     if let fileID = decision.fileId {
                         FileChip(title: store.files.first { $0.id == fileID }?.title) { router.openFile(fileID) }
                     }
                 }
-                .padding(12)
+                .padding(.vertical, 12).padding(.horizontal, 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .padding(.top, 2)
             }
         }
-        .padding(.vertical, 11)
-        .padding(.horizontal, wide ? 16 : 14)
+        .padding(.vertical, 12)
+        .padding(.horizontal, 16)
         .background(CE.accent.opacity(flashID == id ? 0.1 : 0))
         .overlay { FlashRing(on: flashID == id, radius: 6) }
         .animation(.easeOut(duration: 0.35), value: flashID == id)
@@ -710,7 +734,7 @@ struct InboxView: View {
     @ViewBuilder private func savedMemo(_ id: String) -> some View {
         if let memo = drafts.memo(for: id), !memo.isEmpty {
             Text("내 메모 · 이 기기에 보관\n\(memo)")
-                .font(CEFont.secondary).foregroundStyle(CE.ink2)
+                .font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.spacing(13.5, 1.5))
                 .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
         }
     }
@@ -851,6 +875,8 @@ private struct DecisionCard: View {
     var onOpenFile: (String) -> Void
     /// Called when the confirm bar appears because of the person's pick, "답 보내기" or memo-only choice.
     var onArm: () -> Void = {}
+    @FocusState private var memoFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var decision: Decision { review.decision }
     private var stale: Bool { !busy && review.isStale(comparedTo: latest) }
@@ -863,15 +889,23 @@ private struct DecisionCard: View {
     }
 
     var body: some View {
-        Plate(padding: wide ? 16 : 14) {
-            VStack(alignment: .leading, spacing: 10) {
+        // Web .ibx-card: padding 16 18 (14 on iPhone), 12 between blocks.
+        Plate(padding: 0) {
+            VStack(alignment: .leading, spacing: 12) {
                 if decision.status == "open" {
                     header
                     if stale { staleNotice }
                     reopenLine
-                    Text(decision.title).font(CEFont.title).foregroundStyle(CE.ink).fixedSize(horizontal: false, vertical: true)
+                    // Web .ibx-title: 16.5 / 650, line height 1.4, -.015em.
+                    Text(decision.title)
+                        .font(CEFont.title).tracking(-0.25)
+                        .lineSpacing(CELeading.spacing(16.5, 1.4))
+                        .foregroundStyle(CE.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityAddTraits(.isHeader)
                     if !decision.detail.isEmpty {
-                        ClampedDetail(text: decision.detail, lines: wide ? 4 : 5, expanded: detailExpanded, onToggle: onToggleDetail)
+                        ClampedDetail(text: decision.detail, expanded: detailExpanded, onToggle: onToggleDetail)
                     }
                     if !decision.images.isEmpty { ImageStrip(images: decision.images) }
                     if let fileID = decision.fileId { FileChip(title: fileTitle) { onOpenFile(fileID) } }
@@ -883,6 +917,8 @@ private struct DecisionCard: View {
                     resolvedFooter
                 }
             }
+            .padding(.vertical, 16).padding(.horizontal, wide ? 18 : 14)
+            .animation(.easeOut(duration: 0.18), value: showsConfirm)
         }
         .overlay { FlashRing(on: flash) }
         // Only transitions caused on screen arm a reveal; a card that appears already armed does not scroll.
@@ -894,11 +930,12 @@ private struct DecisionCard: View {
     /// Quiet "who · time" line. The dot is the asker's CLI state (waiting, working, asleep…).
     private var header: some View {
         let state = asker.map { MemberStatusInfo($0) }
-        return HStack(alignment: .center, spacing: 7) {
+        // Web .ibx-top: who 13 / 600 ink-1, time 12.5 ink-2 at the far end.
+        return HStack(alignment: .center, spacing: 8) {
             StatusDot(tone: state?.tone ?? .attention)
             Text(whoName).font(CEFont.secondary.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
             Spacer(minLength: 6)
-            Text(relativeTime(decision.createdAt)).font(CEFont.meta).foregroundStyle(CE.ink3).fixedSize()
+            Text(relativeTime(decision.createdAt)).font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink2).fixedSize()
         }
         .help(state.map { "\(whoName) · \($0.label)" } ?? whoName)
         .accessibilityElement(children: .ignore)
@@ -908,12 +945,15 @@ private struct DecisionCard: View {
     @ViewBuilder private var reopenLine: some View {
         if let note = decision.reopenNote, !note.isEmpty {
             let last = decision.lastChoice.map { key in decision.options.first { $0.k == key }?.label ?? key }
+            // Web .ibx-reopened: 13.5 at 1.45, danger.
             Label {
-                Text(last.map { "\(note) · 직전 답: \($0)" } ?? note).fixedSize(horizontal: false, vertical: true)
+                Text(last.map { "\(note) · 직전 답: \($0)" } ?? note)
+                    .lineSpacing(CELeading.note)
+                    .fixedSize(horizontal: false, vertical: true)
             } icon: {
                 Image(systemName: "arrow.uturn.backward.circle")
             }
-            .font(CEFont.secondary).foregroundStyle(CE.danger)
+            .font(CEFont.note).foregroundStyle(CE.danger)
         }
     }
 
@@ -936,7 +976,7 @@ private struct DecisionCard: View {
 
     @ViewBuilder private var resolvedFooter: some View {
         HStack(spacing: 10) {
-            Text("결재된 항목으로 옮겨집니다").font(CEFont.meta).foregroundStyle(CE.ink3)
+            Text("결재된 항목으로 옮겨집니다").font(CEFont.meta).foregroundStyle(CE.ink2)
             Spacer(minLength: 0)
             if decision.status == "closed", decision.closeKind != nil {
                 Button(reopenBusy ? "여는 중" : "다시 열기", action: onReopen)
@@ -954,21 +994,23 @@ private struct DecisionCard: View {
         let typed = self.typed
         let picked = self.picked
         if !free { options(disabled: locked || busy || stale) }
+        // Web .ibx-memo: a 44pt .input (15px at 1.5, up to 160 tall) with a 44pt glass button beside it.
         HStack(alignment: .bottom, spacing: 8) {
             TextField((locked ? lockHint : nil) ?? (free ? "답을 적어 주세요" : "메모 (선택) — 다른 생각이나 조건"), text: $review.note, axis: .vertical)
                 .lineLimit(1...6)
-                .font(CEFont.body)
-                .ceField()
+                .lineSpacing(CELeading.spacing(15, 1.5))
+                .focused($memoFocused)
+                .ceField(focused: memoFocused)
                 .disabled(locked || busy)
                 .onSubmit { if free && typed && !locked && !busy && !stale { memoOnly = true } }
                 .accessibilityLabel(free ? "답" : "메모")
             if free && !memoOnly && !stale {
                 Button("답 보내기") { memoOnly = true }
-                    .ceSecondaryButton().fixedSize()
+                    .ceSecondaryButton().controlSize(.regular).fixedSize()
                     .disabled(!typed || locked || busy)
             } else if !free && typed && picked == nil && !memoOnly && !stale {
                 Button("메모만 보내기") { memoOnly = true }
-                    .ceSecondaryButton().fixedSize()
+                    .ceSecondaryButton().controlSize(.regular).fixedSize()
                     .disabled(locked || busy)
             }
         }
@@ -985,6 +1027,7 @@ private struct DecisionCard: View {
                 onConfirm: onSubmit,
                 onCancel: { review.choice = nil; memoOnly = false })
             .id(confirmBarID(decision.id))
+            .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: -4)))
         }
         if let error { ErrorLine(text: error) }
     }
@@ -1039,26 +1082,29 @@ struct OptionTile: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        // Web .ibx-opt: min 48, padding 11 14, gap 3; label 15 / 600 at 1.4, description 13 at 1.5 ink-2.
         Button(action: action) {
             VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .center, spacing: 7) {
+                HStack(alignment: .center, spacing: 8) {
                     Text(option.label).font(labelFont).foregroundStyle(isEnabled || picked ? CE.ink : CE.ink2)
+                        .lineSpacing(CELeading.spacing(15, 1.4))
                         .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
                     if recommended { RecommendedBadge() }
                     if wasLastChoice { Tag("직전 답") }
                     Spacer(minLength: 0)
                     if picked {
-                        Image(systemName: "checkmark").font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
+                        Image(systemName: "checkmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
                             .accessibilityHidden(true)
                     }
                 }
                 if let desc = option.desc, !desc.isEmpty {
                     Text(desc).font(CEFont.secondary).foregroundStyle(CE.ink2)
+                        .lineSpacing(CELeading.spacing(13, 1.5))
                         .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(.horizontal, 14).padding(.vertical, 11)
-            .frame(maxWidth: .infinity, minHeight: isMac ? 44 : 48, maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: 48, maxHeight: .infinity, alignment: .topLeading)
             .background(fill, in: shape)
             .overlay { shape.strokeBorder(stroke.color, lineWidth: stroke.width) }
             .contentShape(shape)
@@ -1091,24 +1137,27 @@ struct OptionTile: View {
     }
 }
 
-/// Web accent badge: white text on the violet fill.
+/// Web accent badge (.badge[data-tone=accent]: 20 tall, 12 / 650): white text on the violet fill.
 private struct RecommendedBadge: View {
     var body: some View {
         Text("권장")
-            .font(CEFont.micro).foregroundStyle(.white)
-            .padding(.horizontal, 7).frame(minHeight: 18)
+            .font(isMac ? .system(size: 12, weight: .semibold) : CEFont.caption.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 7).frame(minWidth: 20, minHeight: 20)
             .background(CE.accentFill, in: Capsule())
             .fixedSize()
     }
 }
 
-/// Quiet press feedback; disabled options stay readable (locked cards, sample mode).
-private struct OptionPressStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var isEnabled
+/// Quiet press feedback for option tiles: a touch brighter and a hair smaller. Disabled options keep their fill and
+/// ring; only the label steps down to ink-2 (web .ibx-opt:disabled), so locked cards stay readable.
+struct OptionPressStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .brightness(configuration.isPressed ? 0.06 : 0)
-            .opacity(isEnabled ? 1 : 0.78)
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.985 : 1)
+            .animation(.easeOut(duration: 0.09), value: configuration.isPressed)
     }
 }
 
@@ -1128,8 +1177,13 @@ struct ConfirmBar: View {
     @State private var shownAt = Date.distantFuture
 
     var body: some View {
+        // Web .ibx-confirm: hint 13 at 1.45 ink-2; a 44pt primary (gbtn--m) and a 44pt ghost 취소.
         VStack(alignment: .leading, spacing: 6) {
-            if let hint { Text(hint).font(CEFont.secondary).foregroundStyle(CE.ink2).padding(.horizontal, 2) }
+            if let hint {
+                Text(hint).font(CEFont.secondary).foregroundStyle(CE.ink2).lineSpacing(CELeading.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 2)
+            }
             HStack(spacing: 8) {
                 Button {
                     // A double tap's second half, or a tap right after cards moved, is not a confirmation.
@@ -1151,9 +1205,10 @@ struct ConfirmBar: View {
                 }
                 .ceProminentButton()
                 .disabled(busy || disabled)
-                Button("취소", action: onCancel).ceSecondaryButton().disabled(busy).fixedSize()
+                Button("취소", action: onCancel).ceGhostButton().disabled(busy).fixedSize()
                 if !stretch { Spacer(minLength: 0) }
             }
+            .controlSize(.regular)
         }
         .onAppear { shownAt = Date() }
     }
@@ -1169,35 +1224,54 @@ private struct AnsweredBody: View {
     private var who: String { decision.who.isEmpty ? "담당자" : decision.who }
 
     var body: some View {
+        // Web .ibx-answered (gap 4): title 14.5 / 600 at 1.4; answer, memo and close reason 13.5 at 1.5; meta 12.5 at 1.45.
+        // Nothing is clamped: the done list is the only place to read the full answer and memo again.
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .center, spacing: 8) {
                 Text(who).font(CEFont.secondary.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
-                if closed { Tag("닫힘", tone: .dim) } else { AnswerFlow(decision: decision) }
+                if closed { Tag("닫힘") } else { AnswerFlow(decision: decision) }
                 Spacer(minLength: 6)
-                Text(relativeTime(decision.answeredAt ?? decision.closedAt ?? decision.createdAt)).font(CEFont.meta).foregroundStyle(CE.ink3).fixedSize()
+                Text(relativeTime(decision.answeredAt ?? decision.closedAt ?? decision.createdAt))
+                    .font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink2).fixedSize()
             }
-            Text(decision.title).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(2)
+            Text(decision.title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                .lineSpacing(CELeading.spacing(14.5, 1.4))
+                .fixedSize(horizontal: false, vertical: true)
             if closed {
                 Text("닫힘" + (decision.closeReason.map { " · \($0)" } ?? ""))
-                    .font(CEFont.secondary).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
+                    .font(CEFont.note).foregroundStyle(CE.ink).lineSpacing(textLeading)
+                    .fixedSize(horizontal: false, vertical: true)
                 let meta = [closeKindName(decision.closeKind), decision.closedBy.map { "닫은 이: \($0)" }].compactMap { $0 }
-                if !meta.isEmpty { Text(meta.joined(separator: " · ")).font(CEFont.meta).foregroundStyle(CE.ink3) }
+                if !meta.isEmpty {
+                    Text(meta.joined(separator: " · ")).font(CEFont.meta).foregroundStyle(CE.ink2).lineSpacing(metaLeading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let quote = decision.closeQuote, !quote.isEmpty {
-                    Text("근거로 든 대표 말: '\(quote)'").font(CEFont.meta).foregroundStyle(CE.ink3).fixedSize(horizontal: false, vertical: true)
+                    Text("근거로 든 대표 말: '\(quote)'").font(CEFont.meta).foregroundStyle(CE.ink2).lineSpacing(metaLeading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             } else {
-                if let label = answerLabel { Text("답: \(label)").font(CEFont.secondary).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true) }
+                if let label = answerLabel {
+                    Text("답: \(label)").font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(textLeading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let note = decision.note, !note.isEmpty {
-                    Text("메모: \(note)").font(CEFont.secondary).foregroundStyle(CE.ink2).lineLimit(3)
+                    Text("메모: \(note)").font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(textLeading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if decision.status == "answered", let asker, ["blocked", "error", "asleep", "offline"].contains(asker.status) {
                     let info = MemberStatusInfo(asker.status)
                     Label("\(asker.name)\(particleIGa(asker.name)) '\(info.label)' 상태라 아직 받지 못했습니다", systemImage: info.icon)
-                        .font(CEFont.meta).foregroundStyle(CE.attention).fixedSize(horizontal: false, vertical: true)
+                        .font(CEFont.note).foregroundStyle(CE.attention).lineSpacing(CELeading.note)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
+        .textSelection(.enabled)
     }
+
+    private var textLeading: CGFloat { CELeading.spacing(13.5, 1.5) }
+    private var metaLeading: CGFloat { CELeading.spacing(12.5, 1.45) }
 
     private var answerLabel: String? {
         let chosen = decision.choice.map { key in decision.options.first { $0.k == key }?.label ?? key }
@@ -1212,9 +1286,10 @@ private struct AnswerFlow: View {
     var body: some View {
         let received = decision.status == "delivered"
         let who = decision.who.isEmpty ? "담당자" : decision.who
-        HStack(spacing: 4) {
+        // Web .ibx-flow: 12.5 / 600, gap 5, a 12×8 arrow.
+        HStack(spacing: 5) {
             Text("보냄").foregroundStyle(CE.success)
-            Image(systemName: "arrow.right").font(.system(size: 8, weight: .semibold)).foregroundStyle(CE.ink3)
+            Image(systemName: "arrow.right").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(CE.ink3)
             Text("받음").foregroundStyle(received ? CE.success : CE.ink3)
         }
         .font(CEFont.meta.weight(.semibold))
@@ -1238,8 +1313,10 @@ private struct InboxSegmentBar: View {
 
     var body: some View {
         HStack(spacing: 2) {
-            item(.open, title: "결재할 항목", count: openCount)
-            item(.done, title: "결재된 항목", count: doneCount)
+            InboxSegmentItem(title: "결재할 항목", count: openCount, highlightCount: true, selected: segment == .open,
+                             stretch: stretch, drop: drop) { segment = .open }
+            InboxSegmentItem(title: "결재된 항목", count: doneCount, highlightCount: false, selected: segment == .done,
+                             stretch: stretch, drop: drop) { segment = .done }
         }
         // Scoped to the pill: only the drop slides; the list below swaps without animating every card.
         .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.82), value: segment)
@@ -1248,19 +1325,35 @@ private struct InboxSegmentBar: View {
         .fixedSize(horizontal: !stretch, vertical: false)
         .frame(maxWidth: stretch ? .infinity : nil, alignment: .leading)
     }
+}
 
-    private func item(_ value: InboxSegment, title: String, count: Int) -> some View {
-        let selected = segment == value
-        return Button { segment = value } label: {
+/// One half of the segment pill (web .ibx-seg__item: 44 tall on the web, 13.5 / 600, ink-2 that brightens on hover).
+/// Pending decisions show their count as an accent bubble so they read at a glance; the done count stays plain.
+private struct InboxSegmentItem: View {
+    let title: String
+    let count: Int
+    let highlightCount: Bool
+    let selected: Bool
+    let stretch: Bool
+    let drop: Namespace.ID
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
             HStack(spacing: 6) {
                 Text(title)
-                Text("\(count)").fontWeight(.bold).monospacedDigit()
+                if highlightCount && count > 0 {
+                    InboxCount(count: count, accent: true)
+                } else {
+                    Text("\(count)").fontWeight(.bold).monospacedDigit()
+                }
             }
             .font(segmentFont)
-            .foregroundStyle(selected ? Color.white : CE.ink2)
+            .foregroundStyle(selected ? Color.white : hovering ? CE.ink : CE.ink2)
             .lineLimit(1)
-            .padding(.horizontal, 14)
-            .frame(maxWidth: stretch ? .infinity : nil, minHeight: isMac ? 30 : 40)
+            .padding(.horizontal, stretch ? 8 : 14)
+            .frame(maxWidth: stretch ? .infinity : nil, minHeight: isMac ? 40 : 44)
             .background {
                 if selected {
                     Capsule().fill(CE.violet.opacity(0.42))
@@ -1270,8 +1363,10 @@ private struct InboxSegmentBar: View {
                 }
             }
             .contentShape(Capsule())
+            .animation(.linear(duration: 0.12), value: hovering)
         }
         .buttonStyle(.plain)
+        .onHover { hovering = $0 }
         .accessibilityLabel("\(title) \(count)건")
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
@@ -1282,6 +1377,22 @@ private struct InboxSegmentBar: View {
         #else
         CEFont.rowTitle
         #endif
+    }
+}
+
+/// Web .ibx-count: a 20pt bubble, 12 / 650. Neutral is white .12 with ink digits; accent is the accent fill with white.
+private struct InboxCount: View {
+    let count: Int
+    var accent = false
+    var body: some View {
+        Text("\(count)")
+            .font(isMac ? .system(size: 12, weight: .semibold) : CEFont.caption.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(accent ? Color.white : CE.ink)
+            .padding(.horizontal, 6)
+            .frame(minWidth: 20, minHeight: 20)
+            .background(accent ? CE.accentFill : Color.white.opacity(0.12), in: Capsule())
+            .fixedSize()
     }
 }
 
@@ -1304,82 +1415,184 @@ private struct GroupFrame<Header: View, Content: View>: View {
     }
 }
 
-/// Background text clamped to a few lines; "더 보기" appears only when something is actually cut off.
-/// Collapsed it is one inline-markdown text (lists as bullets); expanded it is the full markdown.
+/// The decision's background as the web draws it (.md.ibx-detail: full markdown at 14.5 / 1.6, tables and headings
+/// included). Only a really long text is cut, at about twelve lines with a soft fade, and the line height is the same
+/// open or closed so nothing jumps when it opens.
 private struct ClampedDetail: View {
     let text: String
-    let lines: Int
     let expanded: Bool
     let onToggle: () -> Void
-    @State private var clampedHeight: CGFloat = 0
     @State private var fullHeight: CGFloat = 0
-    private var truncated: Bool { fullHeight > clampedHeight + 2 }
+
+    /// About twelve lines at 14.5 / 1.6.
+    private let limit: CGFloat = 280
+    /// A text only a few lines over the limit is shown whole: cutting it would save almost nothing.
+    private var clamps: Bool { fullHeight > limit + 70 }
+    private var cut: Bool { clamps && !expanded }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if expanded {
-                MarkdownText(text: text, size: 14.5).foregroundStyle(CE.ink)
-            } else {
-                let preview = previewText
-                Text(preview).font(CEFont.body).foregroundStyle(CE.ink).lineSpacing(4).lineLimit(lines)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { clampedHeight = $0 }
-                    .background(alignment: .topLeading) {
-                        Text(preview).font(CEFont.body).lineSpacing(4)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .hidden()
-                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { fullHeight = $0 }
+        VStack(alignment: .leading, spacing: 2) {
+            MarkdownText(text: text, size: 14.5, lineHeight: 1.6).foregroundStyle(CE.ink)
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { fullHeight = $0 }
+                .frame(maxHeight: cut ? limit : nil, alignment: .top)
+                .clipped()
+                .mask {
+                    if cut {
+                        LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 1 - 28 / limit),
+                                               .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom)
+                    } else {
+                        Rectangle()
                     }
-            }
-            if expanded || truncated {
-                Button(action: onToggle) {
-                    HStack(spacing: 4) {
-                        Text(expanded ? "접기" : "더 보기")
-                        Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .bold))
-                            .rotationEffect(.degrees(expanded ? 180 : 0))
-                    }
-                    .frame(minHeight: isMac ? 22 : 36)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain).font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.accent)
+            if clamps {
+                DisclosureLink(title: expanded ? "접기" : "더 보기", expanded: expanded, action: onToggle)
             }
         }
-    }
-
-    private var previewText: AttributedString {
-        var out: [String] = []
-        var inCode = false
-        for raw in text.components(separatedBy: "\n") {
-            var line = raw.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("```") { inCode.toggle(); continue }
-            if inCode { out.append(raw); continue }
-            while line.hasPrefix("#") { line.removeFirst() }
-            line = line.trimmingCharacters(in: .whitespaces)
-            for marker in ["- ", "* "] where line.hasPrefix(marker) { line = "• " + line.dropFirst(marker.count) }
-            out.append(line)
-        }
-        let joined = out.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        return inlineMarkdown(joined)
     }
 }
 
-/// Decision images as a row of thumbnails (scrolls sideways when there are several).
+/// Web .ibx-more: a focus-coloured text toggle with a turning chevron; it brightens to ink on hover.
+private struct DisclosureLink: View {
+    let title: String
+    let expanded: Bool
+    var accessibilityLabel: String? = nil
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Text(title)
+                Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold))
+                    .rotationEffect(.degrees(expanded ? 180 : 0))
+            }
+            .font(isMac ? .system(size: 13.5, weight: .semibold) : CEFont.note.weight(.semibold))
+            .foregroundStyle(hovering ? CE.ink : CE.accent)
+            .frame(minHeight: isMac ? 30 : 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityLabel(accessibilityLabel ?? title)
+    }
+}
+
+/// Decision images as the web's thumbnails (.ibx-thumb): one height (128, 112 on iPhone), each at its own shape,
+/// radius 12 with a faint ring, side by side and scrolling sideways when there are many. A click opens Quick Look.
 private struct ImageStrip: View {
     let images: [Attachment]
     var body: some View {
-        if images.count == 1, let image = images.first {
-            AttachmentPreview(attachment: image).frame(maxWidth: 260, alignment: .leading)
-        } else {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: 8) {
-                    ForEach(images) { image in AttachmentPreview(attachment: image).frame(width: 200) }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 8) {
+                ForEach(images) { image in
+                    if image.isImage {
+                        DecisionThumb(attachment: image)
+                    } else {
+                        AttachmentPreview(attachment: image).frame(width: 260)
+                    }
                 }
             }
+        }
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+    }
+}
+
+private struct DecisionThumb: View {
+    @Environment(AppStore.self) private var store
+    let attachment: Attachment
+    @State private var image: Image?
+    @State private var pixelSize: CGSize = .zero
+    @State private var fileURL: URL?
+    @State private var loading = false
+    @State private var failure: String?
+    @State private var quickLook: URL?
+    @State private var hovering = false
+
+    private var height: CGFloat { isMac ? 128 : 112 }
+    private var name: String { attachment.name.isEmpty ? "이름 없는 그림" : attachment.name }
+    /// The image's own shape at the thumbnail height, kept within sensible bounds.
+    private var width: CGFloat {
+        guard pixelSize.width > 0, pixelSize.height > 0 else { return height }
+        return min(max(height * pixelSize.width / pixelSize.height, 72), 360)
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        Button {
+            if let fileURL { quickLook = fileURL } else {
+                Task {
+                    await load()
+                    if let fileURL { quickLook = fileURL }
+                }
+            }
+        } label: {
+            Group {
+                if let image {
+                    image.resizable().scaledToFill().frame(width: width, height: height)
+                } else {
+                    ZStack {
+                        Color.white.opacity(0.04)
+                        if loading {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "photo").font(.system(size: 18)).foregroundStyle(CE.ink3)
+                        }
+                    }
+                    .frame(width: height, height: height)
+                }
+            }
+            .clipShape(shape)
+            .overlay { shape.strokeBorder(Color.white.opacity(hovering ? 0.22 : 0.12)) }
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .disabled(loading)
+        .onHover { hovering = $0 }
+        .help(failure ?? "\(name) 크게 보기")
+        .accessibilityLabel("\(name) 크게 보기")
+        .quickLookPreview($quickLook)
+        .task(id: attachment.id) { await load() }
+    }
+
+    /// Same authenticated download as the attachment tiles; the original is kept in a temporary file for Quick Look.
+    private func load() async {
+        guard fileURL == nil, !loading else { return }
+        guard let api = store.api else {
+            failure = store.isDemo ? "샘플에는 원본 파일이 없습니다." : "서버 연결 후 원본을 불러올 수 있습니다."
+            return
+        }
+        loading = true
+        defer { loading = false }
+        do {
+            let data = try await api.attachmentData(attachment)
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("IAMCEO-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let fileName = attachment.name.isEmpty ? "image" : URL(fileURLWithPath: attachment.name).lastPathComponent
+            let destination = folder.appendingPathComponent(fileName)
+            try data.write(to: destination)
+            if let decoded = decodeThumbnail(data, maxPixel: 900) { image = decoded.image; pixelSize = decoded.size }
+            fileURL = destination
+            failure = nil
+        } catch {
+            failure = error.localizedDescription
         }
     }
 }
 
-/// Web .ibx-file: "자료 보기: 제목" opens the file in 자료.
+/// Downsampled decode so a card of screenshots does not hold full-size bitmaps.
+private func decodeThumbnail(_ data: Data, maxPixel: Int) -> (image: Image, size: CGSize)? {
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+    let options: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+    ]
+    guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+    return (Image(decorative: cgImage, scale: 1), CGSize(width: cgImage.width, height: cgImage.height))
+}
+
+/// Web .ibx-file: "자료 보기: 제목" opens the file in 자료 (14 / 500 in the focus colour, white .05 well, ring .1).
 private struct FileChip: View {
     let title: String?
     let action: () -> Void
@@ -1388,12 +1601,12 @@ private struct FileChip: View {
         let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
         Button(action: action) {
             HStack(spacing: 7) {
-                Image(systemName: "doc.text").font(.system(size: 12, weight: .medium))
+                Image(systemName: "doc.text").font(.system(size: 14, weight: .medium))
                 Text(title.map { "자료 보기: \($0)" } ?? "자료 보기").lineLimit(1).truncationMode(.middle)
             }
-            .font(CEFont.secondary.weight(.medium)).foregroundStyle(CE.accent)
-            .padding(.leading, 11).padding(.trailing, 13)
-            .frame(minHeight: isMac ? 30 : 44)
+            .font(isMac ? .system(size: 14, weight: .medium) : CEFont.body.weight(.medium)).foregroundStyle(CE.accent)
+            .padding(.leading, 11).padding(.trailing, 14)
+            .frame(minHeight: isMac ? 36 : 44)
             .background(Color.white.opacity(hovering ? 0.09 : 0.05), in: shape)
             .overlay { shape.strokeBorder(Color.white.opacity(0.1)) }
             .contentShape(shape)
@@ -1420,8 +1633,10 @@ private struct FlashRing: View {
 private struct ErrorLine: View {
     let text: String
     var body: some View {
+        // Web .ibx-error: 13.5 at 1.45, danger.
         Label(text, systemImage: "exclamationmark.circle")
-            .font(CEFont.meta).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true)
+            .font(CEFont.note).foregroundStyle(CE.danger).lineSpacing(CELeading.note)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -1445,8 +1660,6 @@ private func particleIGa(_ word: String) -> String {
     guard let jong = finalConsonant(word) else { return "이(가)" }
     return jong == 0 ? "가" : "이"
 }
-
-private func inlineMarkdown(_ value: String) -> AttributedString { markdownInline(value) }
 
 /// An answer must refer to the exact content the person reviewed, even while polling updates the store.
 struct DecisionReview {

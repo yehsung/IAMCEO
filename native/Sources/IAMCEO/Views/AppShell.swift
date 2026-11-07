@@ -16,8 +16,12 @@ struct AppShell: View {
     #endif
     #if os(macOS)
     @Environment(\.openSettings) private var openSettings
-    /// Window width, for the member drawer's width (36% of the window, 400…480).
+    /// Window width, for the member drawer's width (40% of the window, 440…560).
     @State private var windowWidth: CGFloat = 1440
+    /// The whole window (under the toolbar too), so the detail column can redraw the window's aurora in place.
+    @State private var windowSize: CGSize = .zero
+    /// The detail column's width, for the headline's share of the toolbar.
+    @State private var detailWidth: CGFloat = 1176
     #endif
     private var needsConnection: Bool { store.bootstrap == nil && !store.isDemo }
 
@@ -25,6 +29,15 @@ struct AppShell: View {
         @Bindable var router = router
         ZStack {
             AmbientBackground()
+            #if os(macOS)
+            GeometryReader { geo in
+                Color.clear.onChange(of: geo.size, initial: true) { _, size in windowSize = size }
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            if !needsConnection { StageLights() }
+            #endif
             if needsConnection {
                 ConnectionView()
             } else {
@@ -176,18 +189,28 @@ struct AppShell: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ceStatusStrips()
                 .ceBar(.bottom) { dockedComposer }
-                .background { AmbientBackground() }
+                // The window's aurora and stage lights, redrawn at the window's size and position: a copy laid out in
+                // this column's own frame put its blobs elsewhere and left a seam at the rail's edge.
+                .background { WindowAnchoredBackdrop(windowSize: windowSize) }
                 // Sidebar max 320 + detail 560 stays inside the window minimum (1040).
                 .frame(minWidth: 560, maxWidth: .infinity, minHeight: 420, maxHeight: .infinity)
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { detailWidth = $0 }
                 // Member detail: a glass drawer over this column on every destination; the rail stays undimmed.
                 .overlay { if !store.isArchive { MemberDrawerHost(windowWidth: windowWidth) } }
+                // Kept for the Window menu and Mission Control; the toolbar shows `headline` instead (macOS 15+).
                 .navigationTitle(store.state?.project.name ?? "IAMCEO")
+                .modifier(DeskTitle(subtitle: headlineNow ?? ""))
                 .toolbar {
                     if #available(macOS 26.0, *) {
-                        ToolbarItem(placement: .principal) { DestinationSwitcher() }
+                        ToolbarItem(placement: .navigation) { headline }
                             .sharedBackgroundVisibility(.hidden)
+                        ToolbarItem(placement: .principal) { DestinationSwitcher(compact: compactTabs) }
+                            .sharedBackgroundVisibility(.hidden)
+                    } else if #available(macOS 15.0, *) {
+                        ToolbarItem(placement: .navigation) { headline }
+                        ToolbarItem(placement: .principal) { DestinationSwitcher(compact: compactTabs) }
                     } else {
-                        ToolbarItem(placement: .principal) { DestinationSwitcher() }
+                        ToolbarItem(placement: .principal) { DestinationSwitcher(compact: compactTabs) }
                     }
                 }
                 .background { shortcuts }
@@ -195,31 +218,78 @@ struct AppShell: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { windowWidth = $0 }
     }
 
+    /// Web: 108pt tab cells from a 1280pt window up, 92 below (the headline keeps its room).
+    private var compactTabs: Bool { windowWidth < 1280 }
+
+    /// Web .shell__now: the project's current situation under the title on 결재함 · 대화 · 자료 (홈 and 팀 show it
+    /// large on the page), one markdown-free line.
+    private var headlineNow: String? {
+        guard [.inbox, .chat, .files].contains(router.destination) else { return nil }
+        let now = plainOneLine(store.state?.project.now ?? "")
+        return now.isEmpty ? nil : now
+    }
+
+    /// Room left of the centred tab pill: half of what the pill leaves, less the toolbar's edge and a gap.
+    private var headlineWidth: CGFloat {
+        let pill = CGFloat(Destination.allCases.count) * DestinationSwitcher.tabWidth(compact: compactTabs) + 8
+        return min(440, max(96, (detailWidth - pill) / 2 - 56))
+    }
+
+    /// Web .shell__headline: project name 17/650 (line-height 1.3, −.015em), the now line 12.5 ink-2 under it.
+    private var headline: some View {
+        let name = store.state?.project.name ?? "IAMCEO"
+        let now = headlineNow
+        return VStack(alignment: .leading, spacing: 1) {
+            Text(name).font(.system(size: 17, weight: .semibold)).tracking(-0.25)
+                .foregroundStyle(CE.ink).lineLimit(1).truncationMode(.tail)
+            if let now {
+                Text(now).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1).truncationMode(.tail)
+            }
+        }
+        .frame(width: headlineWidth, alignment: .leading)
+        .help(now.map { "\(name)\n\($0)" } ?? name)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+
     /// Web composer: centred under the content column (832 = 880 column − 2×24 padding).
     /// While the member drawer is open the composer gives up keyboard focus (disabled; the draft stays in DraftStore),
     /// so keystrokes and Return never reach a field the drawer covers. 지시 closes the drawer first, then focuses it.
     @ViewBuilder private var dockedComposer: some View {
         @Bindable var router = router
+        // On 대화 the composer belongs to the thread it sends to, not under the recipients column
+        // (ChatView wide layout: 230pt column + 1pt divider).
+        let leading: CGFloat = router.destination == .chat && store.state != nil ? 231 : 0
         if !store.isArchive {
             ComposerBar(target: $router.chatTarget, onOpenChat: router.destination == .chat ? nil : { router.go(.chat) })
             .disabled(router.memberID != nil)
             .frame(maxWidth: 832)
             .padding(.horizontal, 24).padding(.top, 6).padding(.bottom, 14)
             .frame(maxWidth: .infinity)
-            // On 대화 the composer belongs to the thread it sends to, not under the recipients column
-            // (ChatView wide layout: 230pt column + 1pt divider).
-            .padding(.leading, router.destination == .chat && store.state != nil ? 231 : 0)
-            .background(alignment: .bottom) {
-                // Violet light behind the glass (web .shell__bottom::after), plus a dark fade before macOS 26,
-                // where there is no scroll-edge effect under the bar.
-                ZStack(alignment: .bottom) {
-                    if #available(macOS 26.0, *) {} else {
-                        LinearGradient(colors: [CE.bg.opacity(0), CE.bg.opacity(0.85)], startPoint: .top, endPoint: .bottom)
-                    }
-                    RadialGradient(colors: [CE.violet.opacity(0.22), CE.violet.opacity(0.08), .clear], center: .bottom, startRadius: 0, endRadius: 420)
-                        .frame(maxWidth: 900)
+            .padding(.leading, leading)
+            .background {
+                // Violet light behind the glass (web .shell__bottom::after): an ellipse min(760, 110%) wide from the
+                // bar's top to 30pt below the window, violet .3 → .12 at 55% → 0, brightest behind the panel's middle.
+                GeometryReader { geo in
+                    let width = geo.size.width - leading
+                    EllipticalGradient(stops: [
+                        .init(color: CE.violet.opacity(0.3), location: 0),
+                        .init(color: CE.violet.opacity(0.12), location: 0.55),
+                        .init(color: CE.violet.opacity(0), location: 1),
+                    ])
+                    .frame(width: min(760, width * 1.1), height: geo.size.height + 30)
+                    .position(x: leading + width / 2, y: (geo.size.height + 30) / 2)
                 }
                 .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+            // Under the light (web ::before under ::after): a dark fade before macOS 26, where there is no
+            // scroll-edge effect under the bar.
+            .background(alignment: .bottom) {
+                if #available(macOS 26.0, *) {} else {
+                    LinearGradient(colors: [CE.bg.opacity(0), CE.bg.opacity(0.85)], startPoint: .top, endPoint: .bottom)
+                        .allowsHitTesting(false)
+                }
             }
         }
     }
@@ -254,7 +324,7 @@ struct AppShell: View {
                                 Button { router.showSettings = true } label: { Image(systemName: "gearshape") }
                                     .accessibilityLabel("설정, \(connectionLabel)")
                             }
-                            projectSwitcher
+                            projectSwitcher(tab)
                             // iOS 26.1+: the bottom accessory pill (named recipient) replaces this button.
                             if !store.isArchive && tab != .chat && !usesComposeAccessory {
                                 ToolbarItem(placement: .topBarTrailing) {
@@ -289,12 +359,12 @@ struct AppShell: View {
 
     /// Title = project switcher (web phone header). The badge counts what waits in the *other* projects, which the
     /// tab badges (selected project only) cannot show: Σ inboxCount + blockedCount, danger when someone is blocked.
-    @ToolbarContentBuilder private var projectSwitcher: some ToolbarContent {
+    @ToolbarContentBuilder private func projectSwitcher(_ tab: Destination) -> some ToolbarContent {
         if #available(iOS 26.0, *) {
-            ToolbarItem(placement: .principal) { projectSwitcherLabel }
+            ToolbarItem(placement: .principal) { projectSwitcherLabel(tab) }
                 .sharedBackgroundVisibility(.hidden)
         } else {
-            ToolbarItem(placement: .principal) { projectSwitcherLabel }
+            ToolbarItem(placement: .principal) { projectSwitcherLabel(tab) }
         }
     }
 
@@ -303,14 +373,27 @@ struct AppShell: View {
         return (others.map { $0.inboxCount + $0.blockedCount }.reduce(0, +), others.contains { $0.blockedCount > 0 })
     }
 
-    private var projectSwitcherLabel: some View {
+    /// Web .ph-now: on 결재함 · 대화 · 자료 the project's current situation sits under the title, one line.
+    private func phoneNow(_ tab: Destination) -> String? {
+        guard [.inbox, .chat, .files].contains(tab) else { return nil }
+        let now = plainOneLine(store.state?.project.now ?? "")
+        return now.isEmpty ? nil : now
+    }
+
+    private func projectSwitcherLabel(_ tab: Destination) -> some View {
         let name = store.state?.project.name ?? "IAMCEO"
         let others = otherProjectsNeeds
+        let now = phoneNow(tab)
         return Menu { projectMenuItems } label: {
-            HStack(spacing: 7) {
-                Text(name).font(.headline).foregroundStyle(CE.ink).lineLimit(1)
-                CountBadge(count: others.count, tone: others.blocked ? .danger : .accent)
-                Image(systemName: "chevron.down").font(.caption.weight(.semibold)).foregroundStyle(CE.ink2)
+            VStack(spacing: 1) {
+                HStack(spacing: 7) {
+                    Text(name).font(.headline).foregroundStyle(CE.ink).lineLimit(1)
+                    CountBadge(count: others.count, tone: others.blocked ? .danger : .accent)
+                    Image(systemName: "chevron.down").font(.caption.weight(.semibold)).foregroundStyle(CE.ink2)
+                }
+                if let now {
+                    Text(now).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1).truncationMode(.tail)
+                }
             }
             .frame(minHeight: 44)
             .contentShape(Rectangle())
@@ -397,10 +480,13 @@ struct ProjectSidebar: View {
                 brand
                 ForEach(hq) { row($0) }
                 if store.isArchive, let project = store.state?.project {
-                    VStack(alignment: .leading, spacing: CESpace.xs) {
-                        Label(project.name, systemImage: "archivebox").font(CEFont.rowTitle).foregroundStyle(CE.ink)
-                        Text("보관함 · 읽기 전용").font(CEFont.meta).foregroundStyle(CE.ink3)
-                    }.padding(12)
+                    // Same type and insets as a project row (name 14.5/600, sub 12 ink-2, 3pt apart, 7/12).
+                    VStack(alignment: .leading, spacing: 3) {
+                        Label(project.name, systemImage: "archivebox").font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
+                        Text("보관함 · 읽기 전용").font(CEFont.caption).foregroundStyle(CE.ink2).lineLimit(1)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
                     .contextMenu {
                         Button("이름 바꾸기…") { router.manageProject(id: project.id, mode: .rename) }
                             .disabled(store.isDemo || store.connectionStatus != .connected)
@@ -415,17 +501,11 @@ struct ProjectSidebar: View {
                         .accessibilityAddTraits(.isHeader)
                 }
                 ForEach(others) { row($0) }
-                Button { router.showNewProject = true } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "plus").font(.system(size: 12, weight: .semibold))
-                        Text("새 프로젝트")
-                    }
-                    .font(.system(size: 14, weight: .medium)).foregroundStyle(CE.ink2)
-                    .padding(.horizontal, 12).frame(minHeight: 42)
-                }
-                .buttonStyle(RailRowStyle())
-                .padding(.top, 6)
-                .disabled(!store.canWrite)
+                // web .pj--add: 42 tall, 14/500 ink-2, ink-1 on hover.
+                Button { router.showNewProject = true } label: { quietRow("새 프로젝트", icon: "plus", minHeight: 42) }
+                    .buttonStyle(RailRowStyle(quiet: true))
+                    .padding(.top, 6)
+                    .disabled(!store.canWrite)
             }
             .padding(.horizontal, 8).padding(.bottom, 8)
         }
@@ -453,9 +533,11 @@ struct ProjectSidebar: View {
             Task { await store.selectProject(id: project.id) }
         } label: {
             HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(project.name).font(.system(size: 14.5, weight: .semibold)).foregroundStyle(CE.ink).lineLimit(1)
-                    Text(line).font(.system(size: 12)).foregroundStyle(CE.ink2).lineLimit(1)
+                // web .pj__main: name 14.5/600 and sub 12, both at line-height 1.3, 1px apart (≈ 3pt here).
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(project.name).font(.system(size: 14.5, weight: .semibold)).tracking(-0.15)
+                        .foregroundStyle(CE.ink).lineLimit(1)
+                    Text(line).font(CEFont.caption).foregroundStyle(CE.ink2).lineLimit(1)
                 }
                 Spacer(minLength: 4)
                 RailBadge(count: count, danger: project.blockedCount > 0)
@@ -478,31 +560,28 @@ struct ProjectSidebar: View {
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 
+    /// web .pj--foot / .pj--add: icon column 16, label 14/500; ink-2, ink-1 on hover (RailRowStyle quiet).
+    private func quietRow(_ title: String, icon: String, minHeight: CGFloat = 40) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).font(.system(size: 13, weight: .medium)).frame(width: 16)
+            Text(title).font(.system(size: 14, weight: .medium)).lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12).frame(minHeight: minHeight)
+        .contentShape(Rectangle())
+    }
+
     private var footer: some View {
         VStack(alignment: .leading, spacing: 2) {
             Rectangle().fill(CE.line).frame(height: 1).padding(.horizontal, 4).padding(.bottom, 4)
-            Button { showArchive = true } label: {
-                Label("보관함", systemImage: "archivebox").font(CEFont.secondary).foregroundStyle(CE.ink2)
-                    .padding(.horizontal, 12).frame(minHeight: 40)
-            }.buttonStyle(RailRowStyle())
-            SettingsLink {
-                Text("설정").font(.system(size: 14, weight: .medium)).foregroundStyle(CE.ink2)
-                    .padding(.horizontal, 12).frame(minHeight: 40)
-            }
-            .buttonStyle(RailRowStyle())
-            .help("설정 (⌘,)")
-            Button { router.showPairing = true } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: "iphone").font(.system(size: 13))
-                    Text("iPhone 연결").font(.system(size: 14, weight: .medium))
-                    Spacer(minLength: 0)
-                }
-                .foregroundStyle(CE.ink2)
-                .padding(.horizontal, 12).frame(minHeight: 40)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(RailRowStyle())
-            .help("QR로 iPhone을 이 Mac에 연결합니다")
+            Button { showArchive = true } label: { quietRow("보관함", icon: "archivebox") }
+                .buttonStyle(RailRowStyle(quiet: true))
+            SettingsLink { quietRow("설정", icon: "gearshape") }
+                .buttonStyle(RailRowStyle(quiet: true))
+                .help("설정 (⌘,)")
+            Button { router.showPairing = true } label: { quietRow("iPhone 연결", icon: "iphone") }
+                .buttonStyle(RailRowStyle(quiet: true))
+                .help("QR로 iPhone을 이 Mac에 연결합니다")
             connectionMark
         }
         .padding(.horizontal, 8).padding(.bottom, 8)
@@ -521,7 +600,8 @@ struct ProjectSidebar: View {
                 Spacer(minLength: 4)
                 if store.isLoading { ProgressView().controlSize(.mini) }
             }
-            .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 4)
+            // web .rail__foot .conn: padding 6 12 8.
+            .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 8)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -568,25 +648,36 @@ private struct RailBadge: View {
     }
 }
 
-/// Web `.pj` row: hover tint, violet gradient when current, dimmed when disabled.
+/// Web `.pj` row: hover tint, violet gradient when current, dimmed when disabled. `quiet` rows (web .pj--add,
+/// .pj--foot) draw their label in ink-2 and brighten it to ink-1 on hover or press.
 private struct RailRowStyle: ButtonStyle {
     var selected = false
-    func makeBody(configuration: Configuration) -> some View { RailRowBody(configuration: configuration, selected: selected) }
+    var quiet = false
+    func makeBody(configuration: Configuration) -> some View { RailRowBody(configuration: configuration, selected: selected, quiet: quiet) }
     private struct RailRowBody: View {
         let configuration: ButtonStyleConfiguration
         let selected: Bool
+        let quiet: Bool
         @Environment(\.isEnabled) private var isEnabled
         @State private var hovering = false
         var body: some View {
             let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
+            let lit = isEnabled && (hovering || configuration.isPressed)
             configuration.label
+                .foregroundStyle(quiet && !lit && !selected ? CE.ink2 : CE.ink)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(shape)
                 .background {
                     if selected {
+                        // web [aria-current]: violet .32 → .2, a 1px white .05 ring and a half-point white .45 line
+                        // along the top edge only (inset 0 1px .5px −.5px), not a bright ring down the sides.
                         shape.fill(LinearGradient(colors: [CE.violet.opacity(0.32), CE.violet.opacity(0.2)], startPoint: .top, endPoint: .bottom))
+                            .overlay { shape.strokeBorder(Color.white.opacity(0.05)) }
                             .overlay {
-                                shape.strokeBorder(LinearGradient(colors: [Color.white.opacity(0.32), Color.white.opacity(0.05)], startPoint: .top, endPoint: .bottom), lineWidth: 1)
+                                shape.strokeBorder(Color.white.opacity(0.45), lineWidth: 0.5)
+                                    .mask(alignment: .top) {
+                                        LinearGradient(colors: [.white, .white.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: 10)
+                                    }
                             }
                     } else if configuration.isPressed {
                         shape.fill(Color.white.opacity(0.09))
@@ -594,6 +685,7 @@ private struct RailRowStyle: ButtonStyle {
                         shape.fill(Color.white.opacity(0.06))
                     }
                 }
+                .animation(.linear(duration: 0.12), value: lit)
                 .opacity(isEnabled ? 1 : 0.5)
                 .onHover { hovering = $0 }
         }
@@ -605,45 +697,109 @@ private struct RailRowStyle: ButtonStyle {
 struct DestinationSwitcher: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
-    @Namespace private var dropSpace
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Narrow window: 92pt cells instead of 104 (web: 108 incl. pill padding from 1280 up, 92 below).
+    var compact = false
+    @State private var hovered: Destination?
+    @State private var slide = Slide()
+
+    /// web --tab-h is 40 (pill 48); 36 keeps the 44pt pill inside the 52pt unified toolbar.
+    static let tabHeight: CGFloat = 36
+    static func tabWidth(compact: Bool) -> CGFloat { compact ? 92 : 104 }
+
+    private struct Slide: Equatable { var count = 0; var distance = 1 }
+    private struct Squash { var x: CGFloat = 1; var y: CGFloat = 1 }
+
+    private var tabs: [Destination] { Destination.allCases }
+    private var tabWidth: CGFloat { Self.tabWidth(compact: compact) }
+    private var index: Int { tabs.firstIndex(of: router.destination) ?? 0 }
 
     var body: some View {
         segments
+            // The selected tab's glowing violet drop, behind the labels; it slides from tab to tab.
+            .background(alignment: .leading) { drop }
             .padding(4)
             // A little darker than a card: content scrolls under the toolbar.
             .cardPill(tint: 0.62)
-            .animation(.spring(response: 0.45, dampingFraction: 0.78), value: router.destination)
+            // web .gtabs-glow: a violet light behind the pill that follows the selected tab.
+            .background(alignment: .leading) { glow }
+            .animation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.78), value: router.destination)
             .fixedSize()
+            .onChange(of: router.destination) { old, new in
+                let from = tabs.firstIndex(of: old) ?? 0, to = tabs.firstIndex(of: new) ?? 0
+                slide = Slide(count: slide.count + 1, distance: max(1, min(abs(to - from), 3)))
+            }
     }
 
     private var segments: some View {
         HStack(spacing: 0) {
-            ForEach(Destination.allCases) { tab in segment(tab) }
+            ForEach(Array(tabs.enumerated()), id: \.element) { position, tab in segment(tab, position: position) }
         }
     }
 
-    private func segment(_ tab: Destination) -> some View {
+    private func segment(_ tab: Destination, position: Int) -> some View {
         let selected = router.destination == tab
         let count = store.navBadge(for: tab)
-        let label = HStack(spacing: 6) {
-            Text(tab.title).font(.system(size: 13.5, weight: selected ? .semibold : .medium))
-            CountBadge(count: count, tone: .accent)
-        }
-        .foregroundStyle(selected ? Color.white : CE.ink2)
-        .frame(width: 92, height: 32)
-        .contentShape(Capsule())
+        let detail = store.navBadgeHelp(for: tab)
+        // web .gtabs__link: 14.5/600 on every tab (selection changes only the colour, so labels never shift);
+        // ink-2, ink-1 on hover.
         return Button { router.go(tab) } label: {
-            if selected { drop(label) } else { label }
+            HStack(spacing: 6) {
+                Text(tab.title).font(.system(size: 14.5, weight: .semibold)).tracking(-0.15)
+                CountBadge(count: count, tone: .accent)
+            }
+            .foregroundStyle(selected ? Color.white : hovered == tab ? CE.ink : CE.ink2)
+            .animation(.linear(duration: 0.2), value: hovered)
+            .frame(width: tabWidth, height: Self.tabHeight)
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .help(store.navBadgeHelp(for: tab) ?? tab.title)
-        .accessibilityLabel(count > 0 ? "\(tab.title), \(store.navBadgeHelp(for: tab) ?? "\(count)건")" : tab.title)
+        .onHover { inside in
+            if inside { hovered = tab } else if hovered == tab { hovered = nil }
+        }
+        .help("\(tab.title)\(detail.map { " · \($0)" } ?? "") (⌘\(position + 1))")
+        .accessibilityLabel(count > 0 ? "\(tab.title), \(detail ?? "\(count)건")" : tab.title)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 
-    /// The selected tab's glowing violet drop, behind the label; it slides from tab to tab.
-    private func drop<Label: View>(_ label: Label) -> some View {
-        label.background { TabDrop().matchedGeometryEffect(id: "drop", in: dropSpace) }
+    /// One drop for the whole pill, moved by offset: it slides with the spring and, like the web drop, stretches
+    /// sideways and flattens while it travels (more for a longer jump). Reduce Motion: no stretch, no slide.
+    private var drop: some View {
+        let stretch: CGFloat = reduceMotion ? 1 : 1 + 0.16 * CGFloat(slide.distance)
+        let flatten: CGFloat = reduceMotion ? 1 : 0.84
+        return TabDrop()
+            .frame(width: tabWidth, height: Self.tabHeight)
+            .keyframeAnimator(initialValue: Squash(), trigger: slide) { content, value in
+                content.scaleEffect(x: value.x, y: value.y)
+            } keyframes: { _ in
+                KeyframeTrack(\.x) {
+                    CubicKeyframe(stretch, duration: 0.22)
+                    CubicKeyframe(reduceMotion ? 1 : 1.02, duration: 0.21)
+                    CubicKeyframe(1, duration: 0.19)
+                }
+                KeyframeTrack(\.y) {
+                    CubicKeyframe(flatten, duration: 0.22)
+                    CubicKeyframe(reduceMotion ? 1 : 0.98, duration: 0.21)
+                    CubicKeyframe(1, duration: 0.19)
+                }
+            }
+            .offset(x: CGFloat(index) * tabWidth)
+    }
+
+    /// web: radial violet .56 → .22 at 48% → 0, 2/n of the pill + 90 wide, 3.1 tab heights tall, centred on the tab.
+    /// The toolbar may cut it at its edge; it is faint there.
+    private var glow: some View {
+        let pill = CGFloat(tabs.count) * tabWidth + 8
+        let width = 2 * pill / CGFloat(tabs.count) + 90
+        return EllipticalGradient(stops: [
+            .init(color: CE.violet.opacity(0.56), location: 0),
+            .init(color: CE.violet.opacity(0.22), location: 0.48),
+            .init(color: CE.violet.opacity(0), location: 1),
+        ])
+        .frame(width: width, height: Self.tabHeight * 3.1)
+        .offset(x: 4 + (CGFloat(index) + 0.5) * tabWidth - width / 2)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -657,7 +813,7 @@ private struct MemberDrawerHost: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let windowWidth: CGFloat
 
-    private var width: CGFloat { min(max(windowWidth * 0.36, 400), 480) }
+    private var width: CGFloat { min(max(windowWidth * 0.4, 440), 560) }
 
     var body: some View {
         let open = router.memberID != nil
@@ -750,6 +906,82 @@ private struct DrawerSurface<S: InsettableShape>: ViewModifier {
         shape.strokeBorder(Color.white.opacity(0.08)).allowsHitTesting(false)
     }
 }
+
+// MARK: - Mac window title and backdrop
+
+/// macOS 15+: the system title leaves the toolbar (the window keeps it for the Window menu), and the custom headline
+/// takes its place. macOS 14 keeps the system title and shows the now line as its subtitle.
+private struct DeskTitle: ViewModifier {
+    let subtitle: String
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.toolbar(removing: .title)
+        } else {
+            content.navigationSubtitle(subtitle)
+        }
+    }
+}
+
+/// Web shell stage lights (LocalLight): violet at (60%, 0) min(980, 80%) wide, aspect .42, strength .34; orchid at
+/// (66%, 100%) min(860, 70%) wide, aspect .38, strength .28; each a, a × .42 at 45%, 0. Laid out in window
+/// coordinates like the web stage, which spans under the rail.
+private struct StageLights: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width, h = geo.size.height
+            if !reduceTransparency {
+                ZStack {
+                    light(CE.violet, strength: 0.34, width: min(980, w * 0.8), aspect: 0.42)
+                        .position(x: w * 0.6, y: 0)
+                    light(CE.orchid, strength: 0.28, width: min(860, w * 0.7), aspect: 0.38)
+                        .position(x: w * 0.66, y: h)
+                }
+            }
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func light(_ color: Color, strength a: Double, width: CGFloat, aspect: CGFloat) -> some View {
+        EllipticalGradient(stops: [
+            .init(color: color.opacity(a), location: 0),
+            .init(color: color.opacity(a * 0.42), location: 0.45),
+            .init(color: color.opacity(0), location: 1),
+        ])
+        .frame(width: width, height: width * aspect)
+    }
+}
+
+/// The window's backdrop (aurora + stage lights) drawn at the window's size, shifted so it lines up with the copy
+/// behind the rail: the detail column is the window's trailing, bottom-aligned part, so the shift is the size
+/// difference. Clipped to the column. Until the window has been measured it falls back to the column's own frame.
+private struct WindowAnchoredBackdrop: View {
+    let windowSize: CGSize
+    var body: some View {
+        GeometryReader { geo in
+            if windowSize.width > 0, windowSize.height > 0 {
+                backdrop
+                    .frame(width: windowSize.width, height: windowSize.height)
+                    .offset(x: geo.size.width - windowSize.width, y: geo.size.height - windowSize.height)
+            } else {
+                backdrop
+            }
+        }
+        .ignoresSafeArea()
+        .clipped()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private var backdrop: some View {
+        ZStack {
+            AmbientBackground()
+            StageLights()
+        }
+    }
+}
 #endif
 
 // MARK: - Status strips shared by both platforms
@@ -765,7 +997,13 @@ extension View {
 struct StatusStrips: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dismissedNotice: String?
+    /// Web OfflineBand waits 1.5 s before it shows: a short blip (window back in front, server restart) never
+    /// flashes the strip. The composer says at once that it cannot send.
+    @State private var offlineShown = false
+
+    private var offline: Bool { store.connectionStatus != .connected && !store.isDemo && store.bootstrap != nil }
 
     private struct Strip: Identifiable {
         let id: String
@@ -783,7 +1021,7 @@ struct StatusStrips: View {
         if store.isDemo && !isMac {
             items.append(Strip(id: "demo", tone: .accent, icon: "eye", text: "샘플 데이터 · 읽기 전용"))
         }
-        if store.connectionStatus != .connected && !store.isDemo && store.bootstrap != nil {
+        if offline && offlineShown {
             items.append(Strip(id: "offline", tone: .attention, icon: "wifi.slash", text: "서버와 연결이 끊겼습니다. 다시 잇는 중입니다.",
                                detail: store.connectionIssue, actionTitle: "지금 다시 연결", action: { Task { await store.connect() } }))
         }
@@ -810,44 +1048,96 @@ struct StatusStrips: View {
 
     var body: some View {
         let items = strips
-        if !items.isEmpty {
-            VStack(spacing: 6) {
-                ForEach(items) { strip($0) }
+        // Always present (zero height when empty), so strips slide in and out instead of making the content jump.
+        // Padding before the cap: the strips are as wide as the 832pt content column and the docked composer.
+        VStack(spacing: 6) {
+            ForEach(items) { item in
+                strip(item).transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
             }
-            .frame(maxWidth: 880)
-            .padding(.horizontal, isMac ? 24 : 14).padding(.top, 4).padding(.bottom, 6)
-            .frame(maxWidth: .infinity)
         }
+        .padding(.horizontal, isMac ? 24 : 14)
+        .padding(.top, items.isEmpty ? 0 : 4).padding(.bottom, items.isEmpty ? 0 : 6)
+        .frame(maxWidth: 880)
+        .frame(maxWidth: .infinity)
+        .animation(.easeOut(duration: 0.2), value: items.map(\.id))
+        .task(id: offline) {
+            guard offline else { offlineShown = false; return }
+            try? await Task.sleep(for: .milliseconds(1500))
+            if !Task.isCancelled { offlineShown = true }
+        }
+    }
+
+    /// web .offline-band: an opaque dark plate (not glass), readable over any light. The connection strips use the
+    /// web's warm plate; the others the app's dark plate tinted by their tone.
+    private struct Palette {
+        let warm: Bool
+        let tone: Tone
+        var text: Color { warm ? Color(hex: 0xFFE3BC) : CE.ink }
+        var action: Color { warm ? Color(hex: 0xFFF3E2) : CE.ink }
+        var ring: Color { warm ? CE.warn.opacity(0.34) : tone.color.opacity(0.34) }
     }
 
     private func strip(_ item: Strip) -> some View {
         let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
         let full = item.detail.map { "\(item.text) (\($0))" } ?? item.text
-        return HStack(spacing: 10) {
-            Image(systemName: item.icon).font(.system(size: 12, weight: .semibold)).foregroundStyle(item.tone.color)
-            Text(item.text).font(CEFont.secondary).foregroundStyle(CE.ink)
-                .lineLimit(isMac ? 1 : 2).truncationMode(.tail)
+        let palette = Palette(warm: item.tone == .attention, tone: item.tone)
+        let hasAction = item.actionTitle != nil && item.action != nil
+        return HStack(spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: item.icon).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(item.tone.color)
+                // web 13.5px at line-height 1.35.
+                Text(item.text).font(CEFont.note).foregroundStyle(palette.text)
+                    .lineSpacing(CELeading.spacing(13.5, 1.35))
+                    .lineLimit(isMac ? 1 : 2).truncationMode(.tail)
+            }
             Spacer(minLength: 6)
             if let title = item.actionTitle, let action = item.action {
-                Button(action: action) {
-                    Text(title).font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink)
-                        .padding(.horizontal, 12).frame(height: 28)
-                        .background(Color.white.opacity(0.1), in: Capsule())
-                        .frame(minHeight: isMac ? nil : 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .fixedSize()
+                Button(title, action: action)
+                    .buttonStyle(StripActionStyle(color: palette.action))
+                    .fixedSize()
             }
         }
-        .padding(.leading, 14).padding(.trailing, item.action == nil ? 14 : 5).padding(.vertical, item.action == nil || isMac ? 6 : 0)
+        // web: padding 8 8 8 14 around a 32pt button. iPhone: the button's 44pt hit area sets the height.
+        .padding(.leading, 14).padding(.trailing, hasAction ? 8 : 14)
+        .padding(.vertical, hasAction && !isMac ? 2 : 8)
         .background {
-            shape.fill(CE.bg.opacity(0.88))
-            shape.fill(item.tone.color.opacity(0.13))
+            ZStack {
+                if palette.warm {
+                    shape.fill(Color(red: 58 / 255, green: 28 / 255, blue: 16 / 255).opacity(0.94))
+                } else {
+                    shape.fill(CE.bg.opacity(0.9))
+                    shape.fill(item.tone.color.opacity(0.13))
+                }
+            }
+            // web 0 8px 24px −12px rgb(4 2 14 / .8): lifts the plate off the content passing under it.
+            .shadow(color: Color(red: 4 / 255, green: 2 / 255, blue: 14 / 255).opacity(0.55), radius: 10, y: 8)
         }
-        .overlay { shape.strokeBorder(item.tone.color.opacity(0.34)) }
+        .overlay { shape.strokeBorder(palette.ring) }
         .help(full)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// web .offline-band__retry: 32pt capsule, 13/600, white .10 → .17 on hover.
+private struct StripActionStyle: ButtonStyle {
+    let color: Color
+    func makeBody(configuration: Configuration) -> some View { StripActionBody(configuration: configuration, color: color) }
+    private struct StripActionBody: View {
+        let configuration: ButtonStyleConfiguration
+        let color: Color
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .font(isMac ? .system(size: 13, weight: .semibold) : CEFont.secondary.weight(.semibold))
+                .foregroundStyle(color)
+                .lineLimit(1)
+                .padding(.horizontal, 12).frame(height: 32)
+                .background(Color.white.opacity(configuration.isPressed ? 0.22 : hovering ? 0.17 : 0.1), in: Capsule())
+                .animation(.linear(duration: 0.12), value: hovering)
+                .frame(minHeight: isMac ? nil : 44)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+        }
     }
 }
 

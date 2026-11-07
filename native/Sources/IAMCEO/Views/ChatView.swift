@@ -1,4 +1,6 @@
 import SwiftUI
+import ImageIO
+import QuickLook
 #if os(macOS)
 import AppKit
 #else
@@ -127,7 +129,8 @@ struct ChatMineRow: View {
                 footer
                 if let resendError {
                     Text(resendError)
-                        .font(CEFont.meta).foregroundStyle(CE.danger)
+                        .font(CEFont.secondary).foregroundStyle(CE.danger)
+                        .ceLineHeight(13, 1.45)
                         .multilineTextAlignment(.trailing)
                         .lineLimit(3)
                         .padding(.trailing, 4)
@@ -137,17 +140,18 @@ struct ChatMineRow: View {
         }
     }
 
+    /// Web .th-mine: gap 8, padding 10 15 11.
     private var bubble: some View {
         let shape = ChatBubbleShape.shape
-        return VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: 8) {
             if let targetName {
                 Text("\(targetName)에게").font(ChatFont.bubbleTo).foregroundStyle(ChatPalette.bubbleTo).lineLimit(1)
             }
             if !message.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 ChatBodyText(text: message.body)
             }
-            ForEach(message.attachments) { attachment in
-                AttachmentPreview(attachment: attachment)
+            if !message.attachments.isEmpty {
+                ChatAttachments(items: message.attachments, onBubble: true)
             }
         }
         .foregroundStyle(Color.white)
@@ -155,11 +159,14 @@ struct ChatMineRow: View {
         .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, 11)
         .background(ChatPalette.bubble, in: shape)
         .overlay { shape.strokeBorder(ChatPalette.bubbleRim, lineWidth: 1) }
+        .chatMessageMenu(message)
     }
 
+    /// Web .th-foot: 12.5 / 1.4 in ink-2, column gap 8, 4 in from the bubble's edge; the time's tooltip is the full date.
     private var footer: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(clockTime(message.at)).monospacedDigit().foregroundStyle(CE.ink3).fixedSize()
+            Text(clockTime(message.at)).monospacedDigit().foregroundStyle(CE.ink2).fixedSize()
+                .help(parseISODate(message.at).map(koDateTime) ?? "")
             if let info { deliveryLabel(info) }
             if !store.isArchive, message.delivery == "failed" {
                 resendButton
@@ -178,6 +185,7 @@ struct ChatMineRow: View {
                 .foregroundStyle(chatDeliveryColor(message.delivery))
                 .multilineTextAlignment(.trailing)
                 .lineLimit(2)
+                .lineSpacing(CELeading.meta)
                 .padding(.vertical, isMac ? 0 : 6)
                 .contentShape(Rectangle())
         }
@@ -195,13 +203,15 @@ struct ChatMineRow: View {
         // Another send is in flight (the store de-duplicates per project): wait for it instead of failing.
         let busy = store.pendingActions.contains { $0.hasPrefix("send:") } && !resending
         return Button { Task { await resend() } } label: {
+            // Web .th-retry: 13 / 600 in ink-1, 0 4 padding, underlined.
             HStack(spacing: 4) {
                 if resending { ProgressView().controlSize(.mini) }
                 Text(resending ? "보내는 중" : "다시 보내기").underline(!resending)
             }
-            .font(CEFont.meta.weight(.semibold))
+            .font(ChatFont.footerAction)
             .foregroundStyle(locked || busy ? CE.ink3 : CE.ink)
-            .frame(minHeight: isMac ? nil : 44)
+            .padding(.horizontal, 4)
+            .frame(minHeight: isMac ? 24 : 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -236,11 +246,14 @@ struct ChatSystemRow: View {
         let title = message.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let detail = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
         let text = [title, detail == title ? "" : detail].filter { !$0.isEmpty }.joined(separator: " · ")
+        // Web .th-system: 13 / 1.5, padding 6 14, radius 12, at most 620 wide; the time is 12 in ink-3.
         Text(line(text))
             .font(CEFont.secondary)
+            .ceLineHeight(13, 1.5)
             .multilineTextAlignment(.center)
             .padding(.horizontal, 14).padding(.vertical, 6)
             .background(ChatPalette.systemFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .help(parseISODate(message.at).map(koDateTime) ?? "")
             .frame(maxWidth: 620)
             .frame(maxWidth: .infinity)
             .textSelection(.enabled)
@@ -251,7 +264,7 @@ struct ChatSystemRow: View {
         main.swiftUI.foregroundColor = CE.ink2
         var time = AttributedString("  " + clockTime(message.at))
         time.swiftUI.foregroundColor = CE.ink3
-        time.swiftUI.font = CEFont.meta.monospacedDigit()
+        time.swiftUI.font = CEFont.caption.monospacedDigit()
         return main + time
     }
 }
@@ -274,43 +287,45 @@ struct ChatReportRow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Plate(padding: 14) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        if !message.kind.isEmpty { Tag(message.kind, tone: messageKindTone(message.kind)) }
-                        Text(message.who).font(ChatFont.who).foregroundStyle(CE.ink).lineLimit(1)
-                        Spacer(minLength: 6)
-                        Text(clockTime(message.at)).font(CEFont.meta).foregroundStyle(CE.ink3).monospacedDigit()
-                            .help(parseISODate(message.at).map(koDateTime) ?? "")
-                    }
-                    .accessibilityElement(children: .combine)
-                    if !message.title.isEmpty {
-                        Text(message.title)
-                            .font(ChatFont.cardTitle).foregroundStyle(CE.ink)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
-                    }
-                    if showsBody {
-                        MarkdownText(text: message.body).foregroundStyle(CE.ink)
-                    }
-                    ForEach(message.attachments) { attachment in
-                        AttachmentPreview(attachment: attachment)
-                    }
-                    jumps
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    if !message.kind.isEmpty { Tag(message.kind, tone: messageKindTone(message.kind)) }
+                    Text(message.who).font(ChatFont.who).foregroundStyle(CE.ink).lineLimit(1)
+                    Spacer(minLength: 6)
+                    Text(clockTime(message.at)).font(CEFont.meta).foregroundStyle(CE.ink2).monospacedDigit()
+                        .help(parseISODate(message.at).map(koDateTime) ?? "")
                 }
+                .accessibilityElement(children: .combine)
+                if !message.title.isEmpty {
+                    // Web .th-card__title: 15.5 / 650, line height 1.4, −.012em.
+                    Text(message.title)
+                        .font(ChatFont.cardTitle).tracking(-0.19).foregroundStyle(CE.ink)
+                        .ceLineHeight(15.5, 1.4)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                if showsBody {
+                    MarkdownText(text: message.body).foregroundStyle(CE.ink)
+                }
+                if !message.attachments.isEmpty {
+                    ChatAttachments(items: message.attachments)
+                }
+                jumps
             }
+            .padding(.top, 13).padding(.horizontal, 16).padding(.bottom, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .environment(\.ceInsideGlass, true)
+            .modifier(ChatCardSurface())
+            .chatMessageMenu(message)
             .frame(maxWidth: 720, alignment: .leading)
             Spacer(minLength: 0)
         }
     }
 
+    /// Web .th-jumps: chips wrap onto new lines with an 8pt gap, directly in the card's 8pt rhythm.
     @ViewBuilder private var jumps: some View {
         if message.decisionId != nil || message.fileId != nil {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) { decisionJump; fileJump }
-                VStack(alignment: .leading, spacing: 8) { decisionJump; fileJump }
-            }
-            .padding(.top, 2)
+            TeamWrapLayout(spacing: 8, lineSpacing: 8) { decisionJump; fileJump }
         }
     }
 
@@ -333,15 +348,17 @@ struct ChatReportRow: View {
     }
 }
 
+/// A new day reads as a break: the thread puts 20 above it (10 for the first one) and it keeps 2 under itself, so
+/// the next row sits 12 below. 12 semibold: bold 11.5 Hangul looks blotchy.
 struct ChatDaySeparator: View {
     let label: String
     var body: some View {
         HStack(spacing: 10) {
             Rectangle().fill(CE.line).frame(height: 1)
-            Text(label).font(CEFont.micro).foregroundStyle(CE.ink3).fixedSize()
+            Text(label).font(CEFont.caption.weight(.semibold)).foregroundStyle(CE.ink3).fixedSize()
             Rectangle().fill(CE.line).frame(height: 1)
         }
-        .padding(.vertical, 4)
+        .padding(.bottom, 2)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
         .accessibilityAddTraits(.isHeader)
@@ -425,29 +442,35 @@ private struct ChatConversation: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                // Gaps are per row (see `chatThreadRows`): 10 like the web .th-list, 16 where the speaker side changes,
+                // 6 between my bubbles sent within two minutes. The padding sits outside each row's measured frame
+                // and scroll id, so anchoring and restoring still land on the row itself.
+                LazyVStack(alignment: .leading, spacing: 0) {
                     historyControls
                         .chatScrollRow(id: "history-top", coordinateSpace: scopeID)
                     if displayed.isEmpty && loaded {
                         ChatEmpty(title: "아직 대화가 없습니다", detail: emptyDetail)
+                            .padding(.top, 10)
                     }
                     ForEach(chatThreadRows(displayed)) { row in
                         switch row {
-                        case .day(_, let label): ChatDaySeparator(label: label)
-                        case .message(let message):
+                        case .day(_, let label, let gap): ChatDaySeparator(label: label).padding(.top, gap)
+                        case .message(let message, let gap):
                             ChatMessageRow(message: message, isLatestProblem: scope.unresolvedIDs.contains(message.id), showsTarget: scope.isProjectThread)
                                 .chatScrollRow(id: row.id, coordinateSpace: scopeID)
                                 .id(row.id)
+                                .padding(.top, gap)
                         }
                     }
-                    Color.clear.frame(height: 1).id(Self.bottomID)
-                        .chatScrollRow(id: "history-bottom", coordinateSpace: scopeID)
-                        .accessibilityHidden(true)
                 }
                 .background { ChatScrollHostProbe(anchor: anchor, scope: scopeID).frame(width: 0, height: 0) }
-                .padding(.horizontal, isMac ? CESpace.xl : CESpace.l)
-                .padding(.top, 14).padding(.bottom, CESpace.m)
-                .frame(maxWidth: 880).frame(maxWidth: .infinity)
+                // The one content column (880 with 24 gutters, so cards and bubbles line up with the docked composer)
+                // and the web's 44pt bottom, which keeps the last line clear of the composer's fade.
+                .ceContentColumn(top: 14)
+                // The bottom marker is the true end of the content, so scrolling to it shows that bottom space too.
+                Color.clear.frame(height: 1).id(Self.bottomID)
+                    .chatScrollRow(id: "history-bottom", coordinateSpace: scopeID)
+                    .accessibilityHidden(true)
             }
             .defaultScrollAnchor(.bottom)
             .chatScrollAnchoring(anchor, scope: scopeID)
@@ -515,8 +538,10 @@ private struct ChatConversation: View {
         }
     }
 
+    /// Web .th-older: centred, gap 4, padding 4 0 12 (the 2 here + the first row's 10). Status lines are 13 like
+    /// .th-older__error (errors in danger); paging is a ghost .gbtn--s, recovery actions a glass .gbtn--s.
     @ViewBuilder private var historyControls: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 4) {
             if store.isArchive { Tag("보관한 대화 · 읽기 전용", tone: .dim) }
             if let notice = router.navigationNotice { Text(notice).foregroundStyle(CE.attention) }
             if notificationAnchor != nil {
@@ -534,7 +559,8 @@ private struct ChatConversation: View {
                     Task { await store.restartHistoryFromLatest() }
                 }.ceSecondaryButton()
             } else if history?.isBridging == true {
-                Text(history?.error == nil ? "새 대화를 이어 받는 중입니다" : "새 대화를 이어 받지 못했습니다").foregroundStyle(CE.ink2)
+                Text(history?.error == nil ? "새 대화를 이어 받는 중입니다" : "새 대화를 이어 받지 못했습니다")
+                    .foregroundStyle(history?.error == nil ? CE.ink2 : CE.danger)
                 if history?.loading != nil { ProgressView().controlSize(.small) }
                 else {
                     Button(history?.error == nil ? "동기화 계속" : "다시 동기화") { Task { await store.continueHistoryBridge() } }
@@ -544,21 +570,21 @@ private struct ChatConversation: View {
                 Text("이 서버는 최근 대화만 보여줍니다").foregroundStyle(CE.ink3)
             } else if !loaded {
                 if history?.error != nil {
-                    Text("대화를 불러오지 못했습니다").foregroundStyle(CE.attention)
+                    Text("대화를 불러오지 못했습니다").foregroundStyle(CE.danger)
                     Button("다시 불러오기") { Task { await store.refreshHistory() } }.ceSecondaryButton()
                 } else { ProgressView("대화를 불러오는 중…").controlSize(.small) }
             } else if history?.loading?.kind == .older {
                 ProgressView("이전 글을 불러오는 중…").controlSize(.small)
             } else if history?.error != nil {
-                Text(lastLoad == .older ? "이전 글을 불러오지 못했습니다" : "새 대화를 불러오지 못했습니다").foregroundStyle(CE.attention)
+                Text(lastLoad == .older ? "이전 글을 불러오지 못했습니다" : "새 대화를 불러오지 못했습니다").foregroundStyle(CE.danger)
                 if lastLoad == .older {
-                    Button("다시 불러오기") { loadOlder() }.ceSecondaryButton().disabled(!canPage)
+                    Button("다시 불러오기") { loadOlder() }.ceGhostButton().disabled(!canPage)
                 } else {
                     Button("다시 동기화") { Task { await store.refreshHistory() } }.ceSecondaryButton()
                         .disabled(history?.loading != nil)
                 }
             } else if history?.hasOlder == true {
-                Button("이전 글 불러오기") { loadOlder() }.ceSecondaryButton().disabled(!canPage)
+                Button("이전 글 불러오기") { loadOlder() }.ceGhostButton().disabled(!canPage)
                     .accessibilityHint("이전 글 100개를 불러옵니다")
             } else if !displayed.isEmpty {
                 Text("대화의 처음입니다").foregroundStyle(CE.ink3)
@@ -567,7 +593,12 @@ private struct ChatConversation: View {
                 Text("읽던 위치를 확인하지 못했습니다. 이전 글은 잠시 뒤 다시 불러오세요.").foregroundStyle(CE.attention)
             }
         }
-        .font(CEFont.meta).frame(maxWidth: .infinity).padding(.bottom, 2)
+        .font(CEFont.secondary)
+        .lineSpacing(CELeading.secondary)
+        .multilineTextAlignment(.center)
+        .controlSize(.small)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 4).padding(.bottom, 2)
         .accessibilityElement(children: .contain)
     }
 
@@ -682,22 +713,27 @@ private struct ChatConversation: View {
         pinned = true; started = false
     }
 
-    private func jumpButton(_ proxy: ScrollViewProxy) -> some View {
+    /// Web .th-down: a .gbtn--s (32, 13.5 / 600, padding 0 14), glass at rest and the violet primary when new posts
+    /// arrived, sitting about 16 above the composer.
+    @ViewBuilder private func jumpButton(_ proxy: ScrollViewProxy) -> some View {
         let count = history?.isBridging == true ? 0 : history?.unreadCount ?? 0
-        return Button {
+        let action = {
             if notificationAnchor != nil { returnToLatest() }
             jump(proxy)
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "arrow.down").font(CEFont.micro)
-                Text(count > 0 ? "새 글 \(count)개" : "맨 아래로")
-            }
-            .font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink)
-            .padding(.horizontal, 12).frame(height: isMac ? 28 : 36)
-            .glassChrome(Capsule(), tint: count > 0 ? CE.accentFill.opacity(0.85) : nil, interactive: true)
-            .frame(minHeight: isMac ? nil : 44).contentShape(Rectangle())
         }
-        .buttonStyle(.plain).padding(.bottom, CESpace.s)
+        let label = HStack(spacing: 6) {
+            Image(systemName: "arrow.down").font(.system(size: 11, weight: .semibold))
+            Text(count > 0 ? "새 글 \(count)개" : "맨 아래로").monospacedDigit()
+        }
+        Group {
+            if count > 0 {
+                Button(action: action) { label }.ceProminentButton()
+            } else {
+                Button(action: action) { label }.ceSecondaryButton()
+            }
+        }
+        .controlSize(.small)
+        .padding(.bottom, 16)
         .accessibilityLabel(count > 0 ? "새 글 \(count)개, 맨 아래로 이동" : "맨 아래로 이동")
     }
 }
@@ -720,14 +756,16 @@ private struct ChatThreadContent: Equatable {
     }
 }
 
-/// Web empty state: centred title and one line, no icon.
+/// Web empty state (.empty): centred 16 / 600 title at −.01em and a 14 line at the body's 1.55, no icon.
 private struct ChatEmpty: View {
     let title: String
     let detail: String
     var body: some View {
         VStack(spacing: 8) {
-            Text(title).font(ChatFont.emptyTitle).foregroundStyle(CE.ink)
+            Text(title).font(ChatFont.emptyTitle).tracking(-0.16).foregroundStyle(CE.ink)
+                .multilineTextAlignment(.center)
             Text(detail).font(ChatFont.emptyBody).foregroundStyle(CE.ink2)
+                .ceLineHeight(14, 1.55)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -737,15 +775,22 @@ private struct ChatEmpty: View {
     }
 }
 
+/// A thread row and the space above it.
 private enum ChatThreadRow: Identifiable {
-    case day(id: String, label: String)
-    case message(Message)
+    case day(id: String, label: String, gap: CGFloat)
+    case message(Message, gap: CGFloat)
     var id: String {
         switch self {
-        case .day(let id, _): id
-        case .message(let message): chatMessageRowID(message.id)
+        case .day(let id, _, _): id
+        case .message(let message, _): chatMessageRowID(message.id)
         }
     }
+}
+
+/// Which side of the thread a message sits on (my bubbles, report cards, centred system pills).
+private enum ChatSide { case mine, report, system }
+private func chatSide(_ message: Message) -> ChatSide {
+    message.mine ? .mine : message.kind == "시스템" ? .system : .report
 }
 
 /// Swift String identity folds canonically equivalent IDs; the server's BINARY IDs must remain distinct.
@@ -761,24 +806,43 @@ private func chatMessageRowID(_ id: String) -> String { "m:" + Data(id.utf8).bas
 }
 
 /// Chronological rows with a day separator whenever the calendar day changes (rows only show a clock time).
+/// Spacing reads in turns: 10 between rows (web .th-list), 16 where the side changes (mine ↔ report ↔ system),
+/// 6 between two of my bubbles sent less than two minutes apart; 20 above a day separator (10 for the first).
 @MainActor private func chatThreadRows(_ messages: [Message]) -> [ChatThreadRow] {
     var rows: [ChatThreadRow] = []
     rows.reserveCapacity(messages.count + 4)
     var lastDay: String?
     var used = Set<String>()
+    var previous: (side: ChatSide, date: Date?)?
+    var afterDay = false
     let calendar = Calendar.current
     for message in messages {
-        if let date = ChatDates.parse(message.at) {
+        let date = ChatDates.parse(message.at)
+        if let date {
             let parts = calendar.dateComponents([.year, .month, .day], from: date)
             let day = "day:\(parts.year ?? 0)-\(parts.month ?? 0)-\(parts.day ?? 0)"
             if day != lastDay {
                 let id = used.contains(day) ? "\(day)#\(rows.count)" : day
                 used.insert(day)
-                rows.append(.day(id: id, label: ChatDates.dayLabel(date)))
+                rows.append(.day(id: id, label: ChatDates.dayLabel(date), gap: rows.isEmpty ? 10 : 20))
                 lastDay = day
+                afterDay = true
             }
         }
-        rows.append(.message(message))
+        let side = chatSide(message)
+        let gap: CGFloat
+        if afterDay || previous == nil {
+            gap = 10
+        } else if let previous, previous.side != side {
+            gap = 16
+        } else if side == .mine, let before = previous?.date, let date, abs(date.timeIntervalSince(before)) < 120 {
+            gap = 6
+        } else {
+            gap = 10
+        }
+        rows.append(.message(message, gap: gap))
+        previous = (side, date)
+        afterDay = false
     }
     return rows
 }
@@ -821,8 +885,9 @@ private struct ChatRecipientList: View {
             VStack(alignment: .leading, spacing: 2) {
                 row(nil, scope: scope, problems: problems)
                 if !scope.workers.isEmpty {
+                    // Web .pj-heading: padding 14 12 6, 12 / 600 in ink-3.
                     Text("팀장")
-                        .font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink3)
+                        .font(CEFont.caption.weight(.semibold)).foregroundStyle(CE.ink3)
                         .padding(.horizontal, 12).padding(.top, 14).padding(.bottom, 6)
                         .accessibilityAddTraits(.isHeader)
                     ForEach(scope.workers) { member in
@@ -845,11 +910,12 @@ private struct ChatRecipientList: View {
         let problem = problems[member?.id ?? "chief"]
         let draft = chatHasDraft(drafts, project: store.selectedProjectID, target: member?.id)
         let detail = member ?? scope.lead
+        // Web .pj: min height 48, padding 7 12, radius 13, gap 10; name 14.5 / 600 at −.01em over a 12 sub-line, 1 apart.
         return Button { router.chatTarget = member?.id } label: {
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 5) {
-                        Text(member?.name ?? scope.threadTitle).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
+                        Text(member?.name ?? scope.threadTitle).font(CEFont.rowTitle).tracking(-0.15).foregroundStyle(CE.ink).lineLimit(1)
                         if draft { ChatDraftMark() }
                     }
                     subtitle(member, scope: scope)
@@ -858,9 +924,9 @@ private struct ChatRecipientList: View {
                 if let problem { ChatProblemMark(kind: problem) }
             }
             .padding(.horizontal, 12).padding(.vertical, 7)
-            .frame(maxWidth: .infinity, minHeight: isMac ? 44 : 48, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
         }
-        .buttonStyle(ChatRowStyle(shape: RoundedRectangle(cornerRadius: 13, style: .continuous), selected: selected))
+        .buttonStyle(RowButtonStyle(selected: selected, radius: 13))
         .contextMenu {
             if !store.isArchive, let detail {
                 Button(detail.kind == "worker" ? "팀원 보기" : "\(rankName(detail.kind)) 보기") { router.openMember(detail.id) }
@@ -878,10 +944,10 @@ private struct ChatRecipientList: View {
             HStack(spacing: 5) {
                 StatusDot(tone: info.tone, pulsing: info.live, size: 6)
                 Text(member == nil ? "\(scope.leadTitle) · \(info.label)" : info.label)
-                    .font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1)
+                    .font(CEFont.caption).foregroundStyle(CE.ink2).lineLimit(1)
             }
         } else {
-            Text("총괄이 아직 없습니다").font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
+            Text("총괄이 아직 없습니다").font(CEFont.caption).foregroundStyle(CE.ink3).lineLimit(1)
         }
     }
 }
@@ -960,14 +1026,20 @@ private struct ChatThreadHeader: View {
             Spacer(minLength: CESpace.s)
             action(scope)
         }
-        .padding(.horizontal, isMac ? CESpace.xl : CESpace.l)
+        // 24 on Mac, the thread column's gutter, so the title lines up with the cards under it.
+        .padding(.horizontal, isMac ? 24 : CESpace.l)
         .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
         .overlay(alignment: .bottom) { Rectangle().fill(CE.line).frame(height: 1) }
     }
 
+    /// Web .shell__title: 17 / 650 at −.015em.
+    private func title(_ text: String) -> some View {
+        Text(text).font(CEFont.pageTitle).tracking(-0.25).foregroundStyle(CE.ink).lineLimit(1)
+    }
+
     @ViewBuilder private func identity(_ scope: ChatScope) -> some View {
         if let member = scope.recipient {
-            Text(member.name).font(CEFont.title).foregroundStyle(CE.ink).lineLimit(1)
+            title(member.name)
                 .help(member.role.isEmpty ? rankName(member.kind) : member.role)
             statusBadge(member)
             if member.queuedCount > 0 {
@@ -975,10 +1047,10 @@ private struct ChatThreadHeader: View {
                     .help("먼저 보낸 글 \(member.queuedCount)건이 차례를 기다립니다")
             }
         } else if scope.missingTarget {
-            Text("명부에 없는 대화 상대").font(CEFont.title).foregroundStyle(CE.ink).lineLimit(1)
+            title("명부에 없는 대화 상대")
                 .help("이 대상에게는 보낼 수 없습니다")
         } else {
-            Text(scope.threadTitle).font(CEFont.title).foregroundStyle(CE.ink).lineLimit(1)
+            title(scope.threadTitle)
                 .help("모든 보고와 지시")
             if let lead = scope.lead {
                 Text(scope.leadTitle).font(CEFont.meta).foregroundStyle(CE.ink3).fixedSize()
@@ -1225,6 +1297,7 @@ private struct ChatNoteStrip: View {
             Image(systemName: note.icon).foregroundStyle(note.tone.color)
             Text(note.text).foregroundStyle(CE.ink2)
                 .lineLimit(2)
+                .lineSpacing(CELeading.meta)
                 .help(note.text)
             Spacer(minLength: 6)
             if let title = note.actionTitle, let action = note.action {
@@ -1246,7 +1319,8 @@ private struct ChatNoteStrip: View {
     }
 }
 
-/// Web .th-link: rounded chip with a chevron; the open-decision chip is the violet one.
+/// Web .th-link: rounded chip with a chevron (13.5 / 600 at 1.35, padding 6 12 6 14, radius 12); the open-decision
+/// chip is the violet one. 36 tall on Mac (the web chip step), 44 on iPhone.
 private struct ChatJumpChip: View {
     let title: String
     var prominent = false
@@ -1254,13 +1328,13 @@ private struct ChatJumpChip: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                Text(title).lineLimit(1)
-                Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold)).foregroundStyle(CE.ink2)
+                Text(title).lineLimit(2).ceLineHeight(13.5, 1.35)
+                Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(CE.ink2)
             }
             .font(ChatFont.chip)
             .foregroundStyle(CE.ink)
-            .padding(.leading, 13).padding(.trailing, 11)
-            .frame(minHeight: isMac ? 30 : 44)
+            .padding(.leading, 14).padding(.trailing, 12).padding(.vertical, 6)
+            .frame(minHeight: isMac ? 36 : 44)
         }
         .buttonStyle(ChatJumpStyle(prominent: prominent))
     }
@@ -1278,54 +1352,34 @@ private struct ChatJumpBody<Label: View>: View {
     let pressed: Bool
     let prominent: Bool
     @State private var hovering = false
+    /// Web: white .07 → .13 on hover; the open one violet .34 → .48. 120ms linear.
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-        let lift = pressed ? 0.12 : hovering ? 0.08 : 0
+        let fill = prominent ? (pressed ? 0.54 : hovering ? 0.48 : 0.34) : (pressed ? 0.17 : hovering ? 0.13 : 0.07)
         label
             .contentShape(shape)
-            .background(prominent ? CE.violet.opacity(0.34 + lift * 1.4) : Color.white.opacity(0.07 + lift * 0.75), in: shape)
+            .background(prominent ? CE.violet.opacity(fill) : Color.white.opacity(fill), in: shape)
             .overlay { shape.strokeBorder(prominent ? CE.violet.opacity(0.8) : Color.white.opacity(0.1)) }
+            .animation(.linear(duration: 0.12), value: hovering)
             .onHover { hovering = $0 }
     }
 }
 
-/// Small text action in my bubble's footer ("터미널 열기", "팀원 보기"), same weight as "다시 보내기".
+/// Small text action in my bubble's footer ("터미널 열기", "팀원 보기"), same as "다시 보내기" (web .th-retry).
 private struct ChatFooterLink: View {
     let title: String
     let action: () -> Void
     var body: some View {
         Button(action: action) {
             Text(title).underline()
-                .font(CEFont.meta.weight(.semibold))
+                .font(ChatFont.footerAction)
                 .foregroundStyle(CE.ink)
-                .frame(minHeight: isMac ? nil : 44)
+                .padding(.horizontal, 4)
+                .frame(minHeight: isMac ? 24 : 44)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .fixedSize()
-    }
-}
-
-/// Recipient rows: clear at rest, light on hover, the web's violet gradient drop when selected.
-private struct ChatRowStyle<S: InsettableShape>: ButtonStyle {
-    let shape: S
-    var selected = false
-    func makeBody(configuration: Configuration) -> some View {
-        ChatRowBody(label: configuration.label, shape: shape, selected: selected, pressed: configuration.isPressed)
-    }
-}
-
-private struct ChatRowBody<S: InsettableShape, Label: View>: View {
-    let label: Label
-    let shape: S
-    let selected: Bool
-    let pressed: Bool
-    @State private var hovering = false
-    var body: some View {
-        label
-            .contentShape(shape)
-            .background { ChatSelectionFill(shape: shape, selected: selected, rest: pressed ? 0.09 : hovering ? 0.06 : 0) }
-            .onHover { hovering = $0 }
     }
 }
 
@@ -1347,7 +1401,8 @@ private struct ChatSelectionFill<S: InsettableShape>: View {
     }
 }
 
-/// What a delivery label means, on tap (popover on every device) — never a standing line in the thread.
+/// What a delivery label means, on tap (popover on every device) — never a standing line in the thread. A short
+/// paragraph that is read, so 13 at 1.5 rather than a meta line.
 private struct ChatDeliveryExplanation: View {
     let info: DeliveryInfo
     let note: String?
@@ -1355,12 +1410,14 @@ private struct ChatDeliveryExplanation: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(info.label).font(CEFont.rowTitle).foregroundStyle(color)
-            if let note { Text(note).font(CEFont.meta).foregroundStyle(CE.ink) }
-            if !info.explanation.isEmpty { Text(info.explanation).font(CEFont.meta).foregroundStyle(CE.ink2) }
+            if let note { Text(note).font(CEFont.secondary).foregroundStyle(CE.ink).ceLineHeight(13, 1.5) }
+            if !info.explanation.isEmpty {
+                Text(info.explanation).font(CEFont.secondary).foregroundStyle(CE.ink2).ceLineHeight(13, 1.5)
+            }
         }
         .fixedSize(horizontal: false, vertical: true)
-        .frame(width: 260, alignment: .leading)
-        .padding(14)
+        .frame(width: 280, alignment: .leading)
+        .padding(16)
         .presentationCompactAdaptation(.popover)
     }
 }
@@ -1388,15 +1445,17 @@ private struct ChatProblemMark: View {
 }
 
 /// Short single-paragraph messages hug their text (bubble width follows content); structured ones use MarkdownText.
+/// Both read as the web .md in my bubble: 15 at 1.65 (Dynamic Type on iPhone, like MarkdownText).
 private struct ChatBodyText: View {
     let text: String
+    @ScaledMetric(relativeTo: .subheadline) private var size: CGFloat = 15
     var body: some View {
         if Self.isStructured(text) {
-            MarkdownText(text: text)
+            MarkdownText(text: text).environment(\.markdownOnAccent, true)
         } else {
             Text(Self.inline(text))
-                .font(CEFont.body)
-                .lineSpacing(3)
+                .font(.system(size: size))
+                .lineSpacing(CELeading.spacing(size, 1.65))
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
         }
@@ -1411,7 +1470,16 @@ private struct ChatBodyText: View {
         }
         return false
     }
-    static func inline(_ value: String) -> AttributedString { markdownInline(value) }
+    /// Inline markdown on the violet bubble: `code` sits on a dark chip (web .th-mine .md code rgb(9 7 19 / .35)),
+    /// since the shared faint white chip disappears on violet.
+    static func inline(_ value: String) -> AttributedString {
+        var result = markdownInline(value)
+        for run in result.runs where run.inlinePresentationIntent?.contains(.code) == true {
+            result[run.range].backgroundColor = ChatPalette.bubbleCode
+            result[run.range].foregroundColor = Color.white
+        }
+        return result
+    }
 }
 
 /// Web thread colours that are not foundation tokens.
@@ -1420,6 +1488,10 @@ private enum ChatPalette {
     static let bubble = Color(red: 72 / 255, green: 50 / 255, blue: 176 / 255).opacity(0.9)
     static let bubbleTo = Color(hex: 0xDAD2FF)
     static let bubbleLink = Color(hex: 0xE6DFFF)
+    /// .th-mine .md code background rgb(9 7 19 / .35).
+    static let bubbleCode = Color(red: 9 / 255, green: 7 / 255, blue: 19 / 255).opacity(0.35)
+    /// .th-card background rgb(15 11 32 / .72): a dark plate, not glass (hundreds of rows scroll).
+    static let cardFill = Color(red: 15 / 255, green: 11 / 255, blue: 32 / 255).opacity(0.72)
     /// Bright top edge + faint ring (inset 0 1px .5px -.5px white .4, inset 0 0 0 1px white .07).
     static let bubbleRim = LinearGradient(stops: [
         .init(color: .white.opacity(0.4), location: 0),
@@ -1444,10 +1516,14 @@ private enum ChatFont {
     #if os(macOS)
     static let cardTitle: Font = .system(size: 15.5, weight: .semibold)
     static let who: Font = .system(size: 13.5, weight: .semibold)
-    static let chip: Font = .system(size: 13, weight: .semibold)
+    static let chip: Font = .system(size: 13.5, weight: .semibold)
     static let bubbleTo: Font = .system(size: 12.5, weight: .semibold)
     static let emptyTitle: Font = .system(size: 16, weight: .semibold)
     static let emptyBody: Font = .system(size: 14)
+    /// .th-retry 13 / 600.
+    static let footerAction: Font = .system(size: 13, weight: .semibold)
+    /// .atv-file 13.5, name 550.
+    static let fileName: Font = .system(size: 13.5, weight: .medium)
     #else
     static let cardTitle: Font = .callout.weight(.semibold)
     static let who: Font = .footnote.weight(.semibold)
@@ -1455,7 +1531,289 @@ private enum ChatFont {
     static let bubbleTo: Font = .caption.weight(.semibold)
     static let emptyTitle: Font = .callout.weight(.semibold)
     static let emptyBody: Font = .subheadline
+    static let footerAction: Font = .footnote.weight(.semibold)
+    static let fileName: Font = .footnote.weight(.medium)
     #endif
+}
+
+/// Web .th-card: radius 18, a dark plate rgb(15 11 32 / .72) with a 1pt white .08 ring and a half-point white .42
+/// highlight along the top edge. No glass, rim gradient or blurred shadow: hundreds of these scroll.
+/// Reduce Transparency: the solid plate.
+private struct ChatCardSurface: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: CERadius.card, style: .continuous)
+        if reduceTransparency {
+            content.background(CE.plateSolid, in: shape).overlay { shape.strokeBorder(CE.lineStrong) }
+        } else {
+            content
+                .background(ChatPalette.cardFill, in: shape)
+                .overlay {
+                    ZStack {
+                        shape.strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                        shape.strokeBorder(Color.white.opacity(0.42), lineWidth: 0.5)
+                            .mask(alignment: .top) {
+                                LinearGradient(colors: [.white, .white.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: 8)
+                            }
+                    }
+                    .allowsHitTesting(false)
+                }
+        }
+    }
+}
+
+private extension View {
+    /// Mac: right-click a bubble or card to copy its text without drag-selecting a long report; the full date is
+    /// the last (inert) line. iPhone keeps the text's own long-press selection.
+    @ViewBuilder func chatMessageMenu(_ message: Message) -> some View {
+        #if os(macOS)
+        self.contextMenu {
+            if !message.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Button("본문 복사") { chatCopy(message.body) }
+            }
+            if !message.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Button("제목 복사") { chatCopy(message.title) }
+            }
+            if let date = parseISODate(message.at) {
+                Divider()
+                Text(koDateTime(date))
+            }
+        }
+        #else
+        self
+        #endif
+    }
+}
+
+@MainActor private func chatCopy(_ text: String) {
+    #if os(macOS)
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+    #else
+    UIPasteboard.general.string = text
+    #endif
+}
+
+// MARK: - Attachments (web .atv)
+
+/// Web .atv: 208×148 image thumbnails and file chips in one wrapping row, 8 apart. A fixed thumbnail size, so nothing
+/// below moves while an image loads. `onBubble` keeps the chip text readable on my violet bubble.
+private struct ChatAttachments: View {
+    let items: [Attachment]
+    var onBubble = false
+    var body: some View {
+        TeamWrapLayout(spacing: 8, lineSpacing: 8) {
+            ForEach(items) { ChatAttachmentItem(attachment: $0, onBubble: onBubble) }
+        }
+    }
+}
+
+/// One attachment. Loads only through the connected daemon (the API client sends the access code); opens in Quick
+/// Look. The name is the tooltip and the accessibility label; share and 텍스트 보기 are in the context menu.
+private struct ChatAttachmentItem: View {
+    @Environment(AppStore.self) private var store
+    let attachment: Attachment
+    var onBubble = false
+    @State private var data: Data?
+    @State private var fileURL: URL?
+    @State private var image: Image?
+    @State private var loading = false
+    @State private var error: String?
+    @State private var showText = false
+    @State private var quickLook: URL?
+    @State private var hovering = false
+
+    private static let thumbSize = CGSize(width: 208, height: 148)
+    private var displayName: String { attachment.name.isEmpty ? "이름 없는 첨부" : attachment.name }
+    private var isTextual: Bool { attachment.mime.hasPrefix("text/") || attachment.mime.contains("json") }
+    private var sizeText: String { chatFileSize(attachment.size) }
+
+    var body: some View {
+        Group {
+            if attachment.isImage { thumbnail } else { fileChip }
+        }
+        .quickLookPreview($quickLook)
+        .task(id: attachment.id) { if attachment.isImage { await load() } }
+    }
+
+    // MARK: Image (web .atv-thumb)
+
+    private var thumbnail: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return Button {
+            if let fileURL { quickLook = fileURL } else { Task { await load() } }
+        } label: {
+            ZStack {
+                CE.bgDeep.opacity(0.5)
+                if let image {
+                    image.resizable().scaledToFill()
+                        .frame(width: Self.thumbSize.width, height: Self.thumbSize.height)
+                        .clipped()
+                } else if loading {
+                    ProgressView().controlSize(.small)
+                } else if let error {
+                    VStack(spacing: 4) {
+                        Image(systemName: "photo").foregroundStyle(CE.ink3)
+                        Text(error).font(CEFont.caption).foregroundStyle(CE.ink2)
+                            .multilineTextAlignment(.center).lineLimit(3).lineSpacing(2)
+                        if store.api != nil {
+                            Text("눌러서 다시 불러오기").font(CEFont.caption.weight(.semibold)).foregroundStyle(CE.ink)
+                        }
+                    }
+                    .padding(10)
+                } else if data != nil {
+                    VStack(spacing: 4) {
+                        Image(systemName: "photo").foregroundStyle(CE.ink3)
+                        Text("여기서 그릴 수 없는 형식 · 눌러서 열기").font(CEFont.caption).foregroundStyle(CE.ink2)
+                            .multilineTextAlignment(.center).lineSpacing(2)
+                    }
+                    .padding(10)
+                }
+            }
+            .frame(width: Self.thumbSize.width, height: Self.thumbSize.height)
+            .clipShape(shape)
+            .overlay { shape.strokeBorder(Color.white.opacity(hovering ? 0.28 : 0.1), lineWidth: 1) }
+            .contentShape(shape)
+            .animation(.linear(duration: 0.12), value: hovering)
+        }
+        .buttonStyle(.plain)
+        .disabled(loading)
+        .onHover { hovering = $0 }
+        .help(fileURL == nil ? displayName : "\(displayName) · 크게 보기")
+        .accessibilityLabel(fileURL == nil ? "\(displayName) 불러오기" : "\(displayName) 크게 보기")
+        .contextMenu {
+            if let fileURL {
+                Button("크게 보기") { quickLook = fileURL }
+                ShareLink("공유·저장", item: fileURL)
+            }
+        }
+    }
+
+    // MARK: Other files (web .atv-file)
+
+    /// 13.5 at 1.35, padding 6 14, radius 12, white .07 (hover .13) with a white .1 ring; name 550, size 12.5 ink-2.
+    private var fileChip: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return VStack(alignment: .leading, spacing: 6) {
+            Button { openFile() } label: {
+                HStack(spacing: 10) {
+                    Group {
+                        if loading { ProgressView().controlSize(.mini) }
+                        else { Image(systemName: fileKindIcon(chatAttachmentKind(attachment))).font(.system(size: 13)) }
+                    }
+                    .foregroundStyle(onBubble ? ChatPalette.bubbleTo : CE.ink2)
+                    .frame(width: 16)
+                    Text(displayName).font(ChatFont.fileName)
+                        .foregroundStyle(onBubble ? Color.white : CE.ink)
+                        .lineLimit(1).truncationMode(.middle)
+                    Text(sizeText).font(CEFont.meta).monospacedDigit()
+                        .foregroundStyle(onBubble ? ChatPalette.bubbleTo : CE.ink2)
+                        .fixedSize()
+                }
+                .padding(.horizontal, 14).padding(.vertical, 6)
+                .frame(minHeight: isMac ? 36 : 44)
+                .background(Color.white.opacity(hovering ? 0.13 : 0.07), in: shape)
+                .overlay { shape.strokeBorder(Color.white.opacity(0.1), lineWidth: 1) }
+                .contentShape(shape)
+                .animation(.linear(duration: 0.12), value: hovering)
+            }
+            .buttonStyle(.plain)
+            .disabled(loading)
+            .onHover { hovering = $0 }
+            .help("\(displayName) · 원본을 받아 미리 봅니다")
+            .accessibilityLabel("\(displayName) 열기")
+            .accessibilityValue(sizeText)
+            .contextMenu {
+                Button("열기") { openFile() }
+                if isTextual {
+                    Button(showText ? "텍스트 접기" : "텍스트 보기") {
+                        if data == nil { Task { await load(); showText = data != nil } } else { showText.toggle() }
+                    }
+                }
+                if let fileURL { ShareLink("공유·저장", item: fileURL) }
+            }
+            if showText, let data, let content = String(data: data, encoding: .utf8) {
+                Text(String(content.prefix(100_000)))
+                    .font(CEFont.mono).foregroundStyle(onBubble ? Color.white : CE.ink2)
+                    .lineSpacing(CELeading.spacing(12.5, 1.55))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12).padding(.vertical, 10)
+                    .background(onBubble ? ChatPalette.bubbleCode : CE.bgDeep.opacity(0.5),
+                                in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            if let error {
+                Label(error, systemImage: "exclamationmark.circle")
+                    .font(CEFont.caption).foregroundStyle(onBubble ? ChatPalette.bubbleTo : CE.attention)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 320, alignment: .leading)
+            }
+        }
+    }
+
+    private func openFile() {
+        if let fileURL { quickLook = fileURL; return }
+        Task {
+            await load()
+            if let fileURL { quickLook = fileURL }
+        }
+    }
+
+    // MARK: Loading (authenticated, same origin only)
+
+    private func load() async {
+        guard data == nil, !loading else { return }
+        guard let api = store.api else {
+            error = store.isDemo ? "샘플에는 원본 파일이 없습니다." : "서버 연결 후 원본을 불러올 수 있습니다."
+            return
+        }
+        loading = true; defer { loading = false }
+        do {
+            let result = try await api.attachmentData(attachment)
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("IAMCEO-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let name = attachment.name.isEmpty ? "attachment" : URL(fileURLWithPath: attachment.name).lastPathComponent
+            let destination = folder.appendingPathComponent(name)
+            try result.write(to: destination)
+            // A thumbnail only needs ~2× its 208×148 box: decode small so a thread of screenshots stays light.
+            if attachment.isImage { image = chatThumbnail(result, maxPixel: 720) }
+            data = result; fileURL = destination; error = nil
+        } catch { self.error = error.localizedDescription }
+    }
+}
+
+/// The server's file kind for an attachment's icon (images are drawn as thumbnails, so never asked here).
+private func chatAttachmentKind(_ attachment: Attachment) -> String {
+    let ext = (attachment.name as NSString).pathExtension.lowercased()
+    let mime = attachment.mime.lowercased()
+    if ["md", "markdown"].contains(ext) { return "document" }
+    if ["html", "htm"].contains(ext) || mime == "text/html" { return "artifact" }
+    if ext == "pdf" || mime == "application/pdf" { return "pdf" }
+    if ["csv", "tsv"].contains(ext) || mime == "text/csv" || mime == "text/tab-separated-values" { return "table" }
+    if ["mp4", "mov", "webm", "m4v", "mkv", "avi"].contains(ext) || mime.hasPrefix("video/") { return "video" }
+    if ["mp3", "wav", "m4a", "aac", "ogg", "flac", "opus"].contains(ext) || mime.hasPrefix("audio/") { return "audio" }
+    if mime.hasPrefix("text/") || mime.contains("json") { return "code" }
+    return "file"
+}
+
+/// Web formatBytes: "512 B", "48 KB", "2.3 MB".
+private func chatFileSize(_ size: Int) -> String {
+    if size < 1024 { return "\(size) B" }
+    if size < 1024 * 1024 { return "\(Int((Double(size) / 1024).rounded())) KB" }
+    return String(format: "%.1f MB", Double(size) / (1024 * 1024))
+}
+
+private func chatThumbnail(_ data: Data, maxPixel: Int) -> Image? {
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+    let options: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: maxPixel
+    ]
+    guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+    return Image(decorative: cgImage, scale: 1)
 }
 
 /// Web delivery tones: 받음 ok, 보류 warn, 실패 danger, 전달 대기 / 보냄 muted.

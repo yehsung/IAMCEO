@@ -15,18 +15,25 @@ struct FolderPickerView: View {
     @State private var newName = ""
     @State private var nameError: String?
     @FocusState private var nameFocused: Bool
+    @FocusState private var pathFocused: Bool
 
     private var selectable: Bool { !loading && !newFolder && (legacy ? !manualPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : listing.map { $0.path != $0.home } == true) }
     var body: some View {
         CESheet("폴더 고르기", icon: "folder", width: 560, scrolls: false, onClose: { if !creating { dismiss() } }) {
             VStack(alignment: .leading, spacing: 12) {
                 if legacy {
-                    Text("이 서버에서는 경로를 직접 입력해 주세요.").font(CEFont.secondary).foregroundStyle(CE.ink3)
-                    TextField("~/code/project", text: $manualPath).font(CEFont.mono).textFieldStyle(.plain)
-                        .autocorrectionDisabled()
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        #endif
+                    // An older server cannot list folders: the path is typed in the app's ordinary input well.
+                    SetupField("폴더 경로", hint: "이 서버에서는 경로를 직접 입력해 주세요. 서버 컴퓨터의 폴더입니다.") {
+                        TextField("폴더 경로", text: $manualPath, prompt: Text(verbatim: "~/code/project"))
+                            .labelsHidden()
+                            .font(SetupFont.codeInput)
+                            .autocorrectionDisabled()
+                            #if os(iOS)
+                            .textInputAutocapitalization(.never)
+                            #endif
+                            .focused($pathFocused)
+                            .ceField(focused: pathFocused)
+                    }
                     Spacer(minLength: 0)
                 } else {
                     HStack(spacing: 10) {
@@ -34,7 +41,7 @@ struct FolderPickerView: View {
                         Spacer(minLength: 8)
                         if loading { ProgressView().controlSize(.small) }
                         Button("새 폴더", systemImage: "folder.badge.plus") { newFolder = true; nameFocused = true }
-                            .ceSecondaryButton().controlSize(.small).disabled(loading || store.isDemo || !store.canWrite)
+                            .ceSecondaryButton().controlSize(.small).fixedSize().disabled(loading || store.isDemo || !store.canWrite)
                     }
                     let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
                     ScrollView {
@@ -43,38 +50,48 @@ struct FolderPickerView: View {
                             if let listing {
                                 if listing.entries.isEmpty && !loading && !newFolder {
                                     VStack(spacing: 6) {
-                                        Image(systemName: "folder").font(.system(size: 20)).foregroundStyle(CE.ink3)
-                                        Text("하위 폴더가 없습니다").font(CEFont.secondary).foregroundStyle(CE.ink3)
+                                        Image(systemName: "folder").font(.system(size: 22)).foregroundStyle(CE.ink3)
+                                            .frame(height: 26)
+                                            .accessibilityHidden(true)
+                                        Text("하위 폴더가 없습니다").font(CEFont.rowTitle).foregroundStyle(CE.ink2)
                                         Text("이 폴더를 그대로 쓰거나 새 폴더를 만드세요").font(CEFont.meta).foregroundStyle(CE.ink3)
-                                    }.frame(maxWidth: .infinity).padding(.vertical, 40)
+                                            .multilineTextAlignment(.center)
+                                    }.frame(maxWidth: .infinity).padding(.vertical, 48)
                                 }
                                 ForEach(listing.rows) { row in
                                     let folder = row.folder
                                     Button { Task { await navigate(folder.path) } } label: {
-                                        HStack(spacing: 10) {
-                                            Image(systemName: "folder.fill").foregroundStyle(CE.accent.opacity(0.85))
+                                        HStack(spacing: 11) {
+                                            Image(systemName: "folder.fill").font(.system(size: 14)).foregroundStyle(CE.accent.opacity(0.85))
+                                                .frame(width: 18)
                                             Text(folder.name).font(CEFont.body).foregroundStyle(CE.ink).lineLimit(1)
                                             Spacer(minLength: 0)
                                             Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(CE.ink3)
-                                        }.padding(.horizontal, 10).padding(.vertical, 9).contentShape(Rectangle())
-                                    }.buttonStyle(RowButtonStyle(radius: 8)).disabled(loading)
+                                        }.padding(.horizontal, 12).padding(.vertical, 10).contentShape(Rectangle())
+                                    }.buttonStyle(RowButtonStyle(radius: 9)).disabled(loading)
                                 }
                                 if listing.truncated == true {
-                                    Text("처음 500개만 보입니다").font(CEFont.meta).foregroundStyle(CE.ink3).padding(.horizontal, 10).padding(.vertical, 8)
+                                    Text("처음 500개만 보입니다").font(CEFont.meta).foregroundStyle(CE.ink2).padding(.horizontal, 12).padding(.vertical, 8)
                                 }
                             }
-                        }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(5)
                     }
                     .background(Color.white.opacity(0.025), in: shape)
                     .overlay { shape.strokeBorder(CE.line) }
                 }
                 if let error {
-                    Text(error).font(CEFont.secondary).foregroundStyle(CE.danger)
-                    Button("다시 시도") { Task { await start() } }.ceSecondaryButton().disabled(loading)
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Label(error, systemImage: "exclamationmark.circle")
+                            .font(CEFont.note).foregroundStyle(CE.danger)
+                            .lineSpacing(CELeading.note)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        Button("다시 시도") { Task { await start() } }.ceSecondaryButton().controlSize(.small).fixedSize().disabled(loading)
+                    }
                 }
             }
             #if os(macOS)
-            .frame(height: 350)
+            .frame(height: 420)
             #endif
         } footer: {
             footerNote.frame(maxWidth: .infinity, alignment: .leading)
@@ -93,14 +110,14 @@ struct FolderPickerView: View {
         return ViewThatFits(in: .horizontal) {
             HStack(spacing: 5) {
                 ForEach(Array(crumbs.enumerated()), id: \.element.id) { index, crumb in
-                    if index > 0 { Text("/").foregroundStyle(CE.ink3) }
+                    if index > 0 { separator }
                     crumbButton(crumb)
                 }
             }.fixedSize()
             HStack(spacing: 5) {
                 if let home = crumbs.first { crumbButton(home).fixedSize() }
                 if crumbs.count > 2 {
-                    Text("/").foregroundStyle(CE.ink3)
+                    separator
                     Menu("…") {
                         ForEach(Array(crumbs.dropFirst().dropLast())) { crumb in
                             Button(crumb.name) { Task { await navigate(crumb.path) } }
@@ -108,15 +125,22 @@ struct FolderPickerView: View {
                     }.font(CEFont.mono).fixedSize().disabled(loading)
                 }
                 if crumbs.count > 1, let current = crumbs.last {
-                    Text("/").foregroundStyle(CE.ink3)
+                    separator
                     crumbButton(current)
                 }
             }
         }
-        .padding(.horizontal, 10).padding(.vertical, 6)
-        .background(Color.black.opacity(0.22), in: Capsule())
-        .overlay { Capsule().strokeBorder(CE.line) }
+        // As tall as the 새 폴더 button beside it.
+        .padding(.horizontal, 12)
+        .frame(minHeight: 32)
+        .background(CE.bgDeep.opacity(0.45), in: Capsule())
+        .overlay { Capsule().strokeBorder(Color.white.opacity(0.1)) }
         .accessibilityLabel("현재 폴더: " + listing.path)
+    }
+
+    /// The "/" between crumbs, in the crumbs' own face.
+    private var separator: some View {
+        Text("/").font(CEFont.mono).foregroundStyle(CE.ink3).accessibilityHidden(true)
     }
 
     /// Left of the footer buttons: what "이 폴더로" will pick, or why it cannot.
@@ -133,19 +157,32 @@ struct FolderPickerView: View {
     private func crumbButton(_ crumb: FolderCrumb) -> some View {
         Button { Task { await navigate(crumb.path) } } label: {
             Text(crumb.name).lineLimit(1).truncationMode(.middle)
-        }.buttonStyle(.plain).font(CEFont.mono).foregroundStyle(CE.accent).disabled(loading)
+        }.buttonStyle(CrumbStyle()).font(CEFont.mono).disabled(loading)
     }
     private var creationRow: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Image(systemName: "folder.badge.plus").foregroundStyle(CE.accent)
-                TextField("새 폴더 이름", text: $newName, prompt: Text("새 폴더 이름")).labelsHidden().font(CEFont.body).focused($nameFocused)
+            HStack(spacing: 10) {
+                Image(systemName: "folder.badge.plus").font(.system(size: 15)).foregroundStyle(CE.accent).frame(width: 20)
+                    .accessibilityHidden(true)
+                TextField("새 폴더 이름", text: $newName, prompt: Text("새 폴더 이름")).labelsHidden().font(SetupFont.input).focused($nameFocused)
                     .onSubmit { Task { await createFolder() } }.autocorrectionDisabled()
-                    .ceField()
-                Button("만들기") { Task { await createFolder() } }.ceSecondaryButton().disabled(loading || newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Button { newFolder = false; nameError = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("새 폴더 취소").disabled(loading)
+                    .ceField(focused: nameFocused)
+                // As tall as the field (web .input + .gbtn--m, both 44).
+                Button("만들기") { Task { await createFolder() } }.ceSecondaryButton().controlSize(.regular).fixedSize()
+                    .disabled(loading || newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button { newFolder = false; nameError = nil } label: {
+                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
+                }
+                .buttonStyle(RoundQuietStyle())
+                .help("새 폴더 취소")
+                .accessibilityLabel("새 폴더 취소").disabled(loading)
             }
-            if let nameError { Text(nameError).font(CEFont.meta).foregroundStyle(CE.danger).padding(.leading, 26) }
+            if let nameError {
+                Text(nameError).font(CEFont.note).foregroundStyle(CE.danger)
+                    .lineSpacing(CELeading.note)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 30)
+            }
         }.padding(.horizontal, 8).padding(.vertical, 8)
     }
     private func start() async {
@@ -153,7 +190,11 @@ struct FolderPickerView: View {
         defer { loading = false }
         do {
             switch try await store.preferredFolder() {
-            case .legacy: legacy = true; manualPath = initialPath ?? store.recentProjectParent ?? ""
+            case .legacy:
+                legacy = true; manualPath = initialPath ?? store.recentProjectParent ?? ""
+                #if os(macOS)
+                pathFocused = true
+                #endif
             case .listing(let start):
                 listing = start
                 if let initialPath, let initial = try? await store.folderContents(path: initialPath) { listing = initial }
@@ -177,5 +218,43 @@ struct FolderPickerView: View {
             self.listing = try await store.folderContents(path: created.path)
             newFolder = false; newName = ""
         } catch { nameError = error.localizedDescription }
+    }
+}
+
+/// A crumb of the folder path: accent text that lights up under the pointer.
+private struct CrumbStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { CrumbBody(configuration: configuration) }
+    private struct CrumbBody: View {
+        let configuration: ButtonStyleConfiguration
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .foregroundStyle(!isEnabled ? CE.ink3 : hovering ? CE.ink : CE.accent)
+                .opacity(configuration.isPressed ? 0.7 : 1)
+                .frame(minHeight: isMac ? nil : 44)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+/// The round quiet × of an inline form (the sheet's close button look: 26pt white-tint circle), without its Esc key.
+private struct RoundQuietStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { RoundBody(configuration: configuration) }
+    private struct RoundBody: View {
+        let configuration: ButtonStyleConfiguration
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .foregroundStyle(!isEnabled ? CE.ink3 : hovering ? CE.ink : CE.ink2)
+                .frame(width: 26, height: 26)
+                .background(Color.white.opacity(configuration.isPressed ? 0.14 : hovering && isEnabled ? 0.1 : 0.06), in: Circle())
+                .overlay { Circle().strokeBorder(Color.white.opacity(0.07)) }
+                .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+        }
     }
 }

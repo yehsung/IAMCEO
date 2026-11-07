@@ -11,58 +11,82 @@ import UIKit
 
 // MARK: - Shared setup pieces
 
+/// Type of the setup and settings screens (web setup.css / shell.css form sizes).
 enum SetupFont {
     #if os(macOS)
+    /// web .su-brand 13/700.
     static let brand: Font = .system(size: 13, weight: .bold)
+    /// web .su-title 24/680.
     static let title: Font = .system(size: 24, weight: .bold)
-    static let lead: Font = .system(size: 14)
-    static let label: Font = .system(size: 12.5, weight: .semibold)
-    static let row: Font = .system(size: 13.5, weight: .medium)
-    static let input: Font = .system(size: 13.5)
-    static let hint: Font = .system(size: 12)
+    /// web .su-lead 14.5 at 1.55.
+    static let lead: Font = .system(size: 14.5)
+    /// web .field__label 13/600 ink-2.
+    static let label: Font = .system(size: 13, weight: .semibold)
+    /// Row titles (web .st-pj__name, .st-rank__who 14.5/620).
+    static let row: Font = .system(size: 14.5, weight: .semibold)
+    /// web .st-panel__title 16/650: the caption of a settings group.
+    static let caption: Font = .system(size: 16, weight: .semibold)
+    /// Choice tile titles (web .choice 14/600).
+    static let choice: Font = .system(size: 14, weight: .semibold)
+    /// Typed text in a full-size well (web .input 15).
+    static let input: Font = .system(size: 15)
+    /// Values in the compact wells and menus inside a settings row.
+    static let select: Font = .system(size: 14)
+    /// Plain values at the right of a row (web .st-facts dd 14).
+    static let value: Font = .system(size: 14)
+    /// Hints and helper text (web .su-hint 12.5 at 1.5, ink-2).
+    static let hint: Font = .system(size: 12.5)
+    /// Addresses and versions shown as values.
+    static let code: Font = .system(size: 13, design: .monospaced)
+    /// Paths and addresses typed in a full-size well.
+    static let codeInput: Font = .system(size: 13.5, design: .monospaced)
     #else
     static let brand: Font = .footnote.weight(.bold)
     static let title: Font = .title2.weight(.bold)
     static let lead: Font = .subheadline
     static let label: Font = .footnote.weight(.semibold)
-    static let row: Font = .subheadline.weight(.medium)
+    static let row: Font = .subheadline.weight(.semibold)
+    static let caption: Font = .callout.weight(.semibold)
+    static let choice: Font = .subheadline.weight(.semibold)
     static let input: Font = .subheadline
+    static let select: Font = .subheadline
+    static let value: Font = .subheadline
     static let hint: Font = .caption
+    static let code: Font = .system(.footnote, design: .monospaced)
+    static let codeInput: Font = .system(.subheadline, design: .monospaced)
     #endif
+    /// Line spacing of a wrapping hint (12.5 at 1.5).
+    static let hintLeading = CELeading.spacing(12.5, 1.5)
+    /// Line spacing of a choice tile's description (12.5 at 1.4).
+    static let choiceLeading = CELeading.spacing(12.5, 1.4)
 }
 
 private enum SetupMetrics {
     #if os(macOS)
-    static let inputHeight: CGFloat = 34
+    static let inputHeight: CGFloat = 44
     /// Menus and fields inside a settings row.
-    static let rowControlHeight: CGFloat = 28
+    static let rowControlHeight: CGFloat = 32
+    /// Card padding of a settings group; captions and footnotes line up with it.
+    static let groupInset: CGFloat = 20
     #else
     static let inputHeight: CGFloat = 44
-    static let rowControlHeight: CGFloat = 40
+    static let rowControlHeight: CGFloat = 44
+    static let groupInset: CGFloat = 16
     #endif
 }
 
 extension View {
-    /// Web `.input`: dark well, 12pt radius, faint inner ring (accent ring while focused).
-    func setupInput(active: Bool = false) -> some View {
-        let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
+    /// A small dark well for a value typed inside a settings row (a number): web .input at row height, accent ring
+    /// while focused.
+    func settingsWell(focused: Bool = false) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
         return self.textFieldStyle(.plain)
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            .frame(minHeight: SetupMetrics.inputHeight)
-            .background(CE.bgDeep.opacity(0.5), in: shape)
-            .overlay { shape.strokeBorder(active ? CE.accent.opacity(0.75) : Color.white.opacity(0.12), lineWidth: active ? 1.5 : 1) }
-    }
-}
-
-extension View {
-    /// A small dark well for a value typed inside a settings row (a number, a model name).
-    func settingsWell() -> some View {
-        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
-        return self.textFieldStyle(.plain)
-            .padding(.horizontal, 9)
+            .padding(.horizontal, 11)
             .frame(height: SetupMetrics.rowControlHeight)
             .background(CE.bgDeep.opacity(0.5), in: shape)
-            .overlay { shape.strokeBorder(Color.white.opacity(0.12)) }
+            .overlay {
+                shape.strokeBorder(focused ? CE.accent.opacity(0.85) : Color.white.opacity(0.12), lineWidth: focused ? 1.5 : 1)
+            }
     }
 
     /// The on/off switch of a settings row: violet, small on Mac like System Settings.
@@ -87,7 +111,7 @@ struct SettingsGroup<Accessory: View, Content: View>: View {
     let accessory: Accessory
     let content: Content
 
-    init(_ title: String? = nil, footnote: String? = nil, footnoteTone: Color = CE.ink3,
+    init(_ title: String? = nil, footnote: String? = nil, footnoteTone: Color = CE.ink2,
          @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content) {
         self.title = title
         self.footnote = footnote
@@ -97,28 +121,30 @@ struct SettingsGroup<Accessory: View, Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 10) {
             if title != nil || Accessory.self != EmptyView.self {
+                // web .st-panel__title: 16/650 ink-1, tracking -.012em.
                 HStack(alignment: .center, spacing: 8) {
                     if let title {
-                        Text(title).font(CEFont.section).foregroundStyle(CE.ink2).lineLimit(1)
+                        Text(title).font(SetupFont.caption).tracking(isMac ? -0.2 : 0).foregroundStyle(CE.ink).lineLimit(1)
                             .accessibilityAddTraits(.isHeader)
                     }
                     Spacer(minLength: 8)
                     accessory
                 }
-                .frame(minHeight: 20)
-                .padding(.horizontal, CESpace.l)
+                .frame(minHeight: 22)
+                .padding(.horizontal, SetupMetrics.groupInset)
             }
             Plate(padding: 0) {
                 VStack(alignment: .leading, spacing: 0) { content }
-                    .padding(.horizontal, CESpace.l)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, SetupMetrics.groupInset)
+                    .padding(.vertical, 4)
             }
             if let footnote, !footnote.isEmpty {
                 Text(footnote).font(SetupFont.hint).foregroundStyle(footnoteTone)
+                    .lineSpacing(SetupFont.hintLeading)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, CESpace.l)
+                    .padding(.horizontal, SetupMetrics.groupInset)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -126,29 +152,32 @@ struct SettingsGroup<Accessory: View, Content: View>: View {
 }
 
 extension SettingsGroup where Accessory == EmptyView {
-    init(_ title: String? = nil, footnote: String? = nil, footnoteTone: Color = CE.ink3, @ViewBuilder content: () -> Content) {
+    init(_ title: String? = nil, footnote: String? = nil, footnoteTone: Color = CE.ink2, @ViewBuilder content: () -> Content) {
         self.init(title, footnote: footnote, footnoteTone: footnoteTone, accessory: { EmptyView() }, content: content)
     }
 }
 
 /// One settings row: title and at most one short hint on the left, the control on the right. On iPhone a wide control
 /// either goes under the title (`stacksOnPhone`) or keeps the title's line while the hint runs under both
-/// (`hintBelowOnPhone`, for a number and its stepper). A `monoHint` is diagnostic text the owner may need to paste.
+/// (`hintBelowOnPhone`, for a number and its stepper). `stacked` puts the control under the title everywhere (a row of
+/// choice tiles). A `monoHint` is diagnostic text the owner may need to paste.
 struct SettingsRow<Control: View>: View {
     let title: String
     let hint: String?
     let hintTone: Color
     let monoHint: Bool
+    let stacked: Bool
     let stacksOnPhone: Bool
     let hintBelowOnPhone: Bool
     let control: Control
 
-    init(_ title: String, hint: String? = nil, hintTone: Color = CE.ink3, monoHint: Bool = false,
+    init(_ title: String, hint: String? = nil, hintTone: Color = CE.ink2, monoHint: Bool = false, stacked: Bool = false,
          stacksOnPhone: Bool = false, hintBelowOnPhone: Bool = false, @ViewBuilder control: () -> Control) {
         self.title = title
         self.hint = hint
         self.hintTone = hintTone
         self.monoHint = monoHint
+        self.stacked = stacked
         self.stacksOnPhone = stacksOnPhone
         self.hintBelowOnPhone = hintBelowOnPhone
         self.control = control()
@@ -156,8 +185,8 @@ struct SettingsRow<Control: View>: View {
 
     var body: some View {
         Group {
-            if !isMac && stacksOnPhone {
-                VStack(alignment: .leading, spacing: 10) {
+            if stacked || (!isMac && stacksOnPhone) {
+                VStack(alignment: .leading, spacing: isMac ? 12 : 10) {
                     label
                     control
                 }
@@ -177,12 +206,13 @@ struct SettingsRow<Control: View>: View {
                 }
             }
         }
-        .padding(.vertical, isMac ? 10 : 11)
-        .frame(minHeight: isMac ? 46 : 50)
+        // web .st-pj: min-height 60 around 44pt controls; rows here hold 32pt controls.
+        .padding(.vertical, 12)
+        .frame(minHeight: isMac ? 56 : 52)
     }
 
     private var label: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 3) {
             titleText
             hintText
         }
@@ -194,10 +224,12 @@ struct SettingsRow<Control: View>: View {
         if let hint, !hint.isEmpty {
             if monoHint {
                 Text(hint).font(CEFont.mono).foregroundStyle(hintTone)
+                    .ceLineHeight(12.5, 1.45)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             } else {
                 Text(hint).font(SetupFont.hint).foregroundStyle(hintTone)
+                    .lineSpacing(SetupFont.hintLeading)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -220,7 +252,7 @@ struct SettingsRefreshButton: View {
                 }
             }
             .foregroundStyle(isEnabled ? CE.ink2 : CE.ink3)
-            .frame(width: 24, height: 24)
+            .frame(width: 26, height: 26)
             .background(Color.white.opacity(isEnabled ? 0.07 : 0.03), in: Circle())
             .overlay { Circle().strokeBorder(Color.white.opacity(0.07)) }
             .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
@@ -232,7 +264,8 @@ struct SettingsRefreshButton: View {
     }
 }
 
-/// A short choice of a few words (권한, 총괄 CLI): the app's segment pill with the violet drop on the chosen item.
+/// A short choice of a few words (총괄 CLI): the app's segment pill with the violet drop on the chosen item. `fill`
+/// stretches it across a form field, as tall as an input (web select 44).
 private struct SettingsSegments: View {
     struct Option: Identifiable {
         let id: String
@@ -241,22 +274,24 @@ private struct SettingsSegments: View {
     let options: [Option]
     let selection: String
     let label: String
+    var fill = false
     let onSelect: (String) -> Void
     @Environment(\.isEnabled) private var isEnabled
     @Namespace private var dropSpace
 
     var body: some View {
+        let stretch = fill || !isMac
         HStack(spacing: 0) {
             ForEach(options) { option in
                 let selected = option.id == selection
                 Button { onSelect(option.id) } label: {
                     Text(option.title)
-                        .font(.system(size: isMac ? 12.5 : 14, weight: selected ? .semibold : .medium))
+                        .font(.system(size: isMac ? (fill ? 14 : 13.5) : 14, weight: selected ? .semibold : .medium))
                         .foregroundStyle(selected ? Color.white : CE.ink2)
                         .lineLimit(1)
-                        .padding(.horizontal, isMac ? 13 : 12)
-                        .frame(maxWidth: isMac ? nil : .infinity)
-                        .frame(height: isMac ? 26 : 36)
+                        .padding(.horizontal, isMac ? 14 : 12)
+                        .frame(maxWidth: stretch ? .infinity : nil)
+                        .frame(height: isMac ? (fill ? 38 : 32) : 38)
                         .background { if selected { TabDrop().matchedGeometryEffect(id: "drop", in: dropSpace) } }
                         .contentShape(Capsule())
                 }
@@ -269,28 +304,116 @@ private struct SettingsSegments: View {
         .cardPill()
         .opacity(isEnabled ? 1 : 0.55)
         .animation(.spring(response: 0.4, dampingFraction: 0.82), value: selection)
-        .fixedSize(horizontal: isMac, vertical: true)
+        .fixedSize(horizontal: !stretch, vertical: true)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(label)
     }
 }
 
-/// Web `.field`: label above, control, optional quiet hint below.
-private struct SetupField<Control: View>: View {
+/// A choice of a few options that each need a line of explanation (권한): equal tiles side by side on Mac, stacked on
+/// iPhone (web .st-perms / .choice: radius 13, padding 11/13, 14/600 title with an optional badge, 12.5 ink-2 line;
+/// the chosen tile is violet .24 with a 1.5pt violet ring).
+private struct SettingsChoiceTiles: View {
+    struct Option: Identifiable {
+        let id: String
+        let title: String
+        let detail: String
+        var badge: String? = nil
+    }
+    let options: [Option]
+    let selection: String
+    let label: String
+    let onSelect: (String) -> Void
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        let layout = isMac ? AnyLayout(HStackLayout(alignment: .top, spacing: 8)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+        layout {
+            ForEach(options) { option in tile(option) }
+        }
+        // Mac: every tile as tall as the tallest one.
+        .fixedSize(horizontal: false, vertical: true)
+        .animation(.easeOut(duration: 0.12), value: selection)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(label)
+    }
+
+    private func tile(_ option: Option) -> some View {
+        let selected = option.id == selection
+        return Button { onSelect(option.id) } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 7) {
+                    Text(option.title).font(SetupFont.choice).foregroundStyle(isEnabled ? CE.ink : CE.ink3).lineLimit(1)
+                    if let badge = option.badge { Tag(badge) }
+                }
+                .frame(minHeight: 20)
+                Text(option.detail).font(SetupFont.hint).foregroundStyle(isEnabled ? CE.ink2 : CE.ink3)
+                    .lineSpacing(SetupFont.choiceLeading)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 13).padding(.vertical, 11)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(minHeight: isMac ? nil : 44)
+        }
+        .buttonStyle(ChoiceTileStyle(selected: selected))
+        .accessibilityLabel(option.badge.map { "\(option.title), \($0)" } ?? option.title)
+        .accessibilityHint(option.detail)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    }
+}
+
+/// A picked option among several (web .choice): white .04 with a white .1 ring, white .06 on hover; picked: violet .24
+/// with a 1.5pt violet .9 ring.
+private struct ChoiceTileStyle: ButtonStyle {
+    var selected = false
+    var radius: CGFloat = 13
+    func makeBody(configuration: Configuration) -> some View {
+        TileBody(configuration: configuration, selected: selected, radius: radius)
+    }
+    private struct TileBody: View {
+        let configuration: ButtonStyleConfiguration
+        let selected: Bool
+        let radius: CGFloat
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var hovering = false
+        var body: some View {
+            let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+            let idle = configuration.isPressed ? 0.09 : hovering && isEnabled ? 0.065 : 0.04
+            configuration.label
+                .contentShape(shape)
+                .background(selected ? CE.violet.opacity(configuration.isPressed ? 0.3 : 0.24) : Color.white.opacity(idle), in: shape)
+                .overlay {
+                    shape.strokeBorder(selected ? CE.violet.opacity(0.9) : Color.white.opacity(hovering && isEnabled ? 0.16 : 0.1),
+                                       lineWidth: selected ? 1.5 : 1)
+                }
+                .opacity(isEnabled ? 1 : 0.6)
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+/// Web `.field`: label above (13/600 ink-2), control, optional helper line below (12.5 ink-2 at 1.5). Every form in
+/// the setup, new-project, project and GitHub sheets uses it.
+struct SetupField<Control: View>: View {
     let label: String
     let hint: String?
+    let hintTone: Color
     let control: Control
-    init(_ label: String, hint: String? = nil, @ViewBuilder control: () -> Control) {
+    init(_ label: String, hint: String? = nil, hintTone: Color = CE.ink2, @ViewBuilder control: () -> Control) {
         self.label = label
         self.hint = hint
+        self.hintTone = hintTone
         self.control = control()
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label).font(SetupFont.label).foregroundStyle(CE.ink2)
             control
-            if let hint {
-                Text(hint).font(SetupFont.hint).foregroundStyle(CE.ink3).fixedSize(horizontal: false, vertical: true)
+            if let hint, !hint.isEmpty {
+                Text(hint).font(SetupFont.hint).foregroundStyle(hintTone)
+                    .lineSpacing(SetupFont.hintLeading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -305,13 +428,15 @@ private struct SetupSelectLabel: View {
     var compact = false
     @Environment(\.isEnabled) private var isEnabled
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: compact ? 8 : CERadius.control, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: compact ? 10 : CERadius.control, style: .continuous)
         HStack(spacing: 6) {
-            Text(text).font(mono ? CEFont.mono : SetupFont.input).foregroundStyle(isEnabled ? CE.ink : CE.ink3).lineLimit(1)
+            Text(text).font(mono ? SetupFont.code : compact ? SetupFont.select : SetupFont.input)
+                .foregroundStyle(isEnabled ? CE.ink : CE.ink3).lineLimit(1)
             Spacer(minLength: 4)
-            Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(isEnabled ? CE.ink2 : CE.ink3)
+            // web .st-select: a down chevron 13pt in from the right.
+            Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)).foregroundStyle(isEnabled ? CE.ink2 : CE.ink3)
         }
-        .padding(.horizontal, compact ? 10 : 12)
+        .padding(.leading, compact ? 11 : 13).padding(.trailing, compact ? 11 : 13)
         .frame(maxWidth: .infinity, minHeight: compact ? SetupMetrics.rowControlHeight : SetupMetrics.inputHeight)
         .background(CE.bgDeep.opacity(0.5), in: shape)
         .overlay { shape.strokeBorder(Color.white.opacity(0.12)) }
@@ -354,22 +479,26 @@ private struct DotValue: View {
     let tone: Tone
     let text: String
     var body: some View {
-        HStack(spacing: 6) {
-            StatusDot(tone: tone, size: 6)
-            Text(text).font(CEFont.secondary).foregroundStyle(tone == .danger || tone == .attention ? tone.color : CE.ink2)
+        // web .st-facts dd: 14 at 1.45, ink-1.
+        HStack(spacing: 7) {
+            StatusDot(tone: tone, size: 7)
+            Text(text).font(SetupFont.value).foregroundStyle(tone == .danger || tone == .attention ? tone.color : CE.ink)
+                .ceLineHeight(14, 1.45)
+                .multilineTextAlignment(isMac ? .trailing : .leading)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .combine)
     }
 }
 
-/// Only used inside scroll views (it may wrap).
+/// Only used inside scroll views (it may wrap). web .form__error 13.5 danger.
 private struct SetupError: View {
     let text: String
     init(_ text: String) { self.text = text }
     var body: some View {
         Label(text, systemImage: "exclamationmark.circle")
-            .font(CEFont.secondary).foregroundStyle(CE.danger)
+            .font(CEFont.note).foregroundStyle(CE.danger)
+            .lineSpacing(CELeading.note)
             .fixedSize(horizontal: false, vertical: true)
     }
 }
@@ -378,10 +507,53 @@ private struct SetupBrand: View {
     var body: some View {
         HStack(spacing: 8) {
             BrandMark(size: 20)
-            Text("IAMCEO").font(SetupFont.brand).tracking(1.2).foregroundStyle(CE.ink2)
+            Text("IAMCEO").font(SetupFont.brand).tracking(0.8).foregroundStyle(CE.ink2)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("IAMCEO")
+    }
+}
+
+/// The command chip on the connection screen: brightens under the pointer, gives a little when pressed.
+private struct CopyChipStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { ChipBody(configuration: configuration) }
+    private struct ChipBody: View {
+        let configuration: ButtonStyleConfiguration
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .brightness(hovering ? 0.05 : 0)
+                .scaleEffect(configuration.isPressed ? 0.97 : 1)
+                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: configuration.isPressed)
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+/// web `.glass--thick` with the setup panel tint (rgb(14 10 32 / .66)): radius 30, a 1.5pt rim and the deep
+/// two-layer shadow (`0 44px 100px -34px` dark .9, `0 34px 90px -44px` violet .42), cut out of the card so the
+/// see-through inside stays clear. Reduce Transparency: the solid plate.
+private struct ThickCardSurface: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 30, style: .continuous)
+        if reduceTransparency {
+            content.background(CE.plateRaisedSolid, in: shape).overlay { shape.strokeBorder(CE.lineStrong) }
+        } else {
+            content
+                .background { CardGlassFill(shape: shape, tint: 0.66) }
+                .overlay { CardRim(shape: shape, width: 1.5) }
+                .background {
+                    ZStack {
+                        shape.inset(by: 34).fill(Color(red: 4 / 255, green: 2 / 255, blue: 14 / 255).opacity(0.9)).offset(y: 44).blur(radius: 50)
+                        shape.inset(by: 44).fill(CE.violet.opacity(0.42)).offset(y: 34).blur(radius: 45)
+                    }
+                    .overlay { shape.fill(Color.black).blendMode(.destinationOut) }
+                    .compositingGroup()
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                }
+        }
     }
 }
 
@@ -486,43 +658,46 @@ struct ConnectionView: View {
         .accessibilityHidden(true)
     }
 
+    /// web .su-code: a thick glass card (radius 30, tint .66), every child 12 apart.
     private var card: some View {
-        @Bindable var store = store
-        return Plate(padding: 0) {
-            VStack(alignment: .leading, spacing: 12) {
-                SetupBrand()
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(isMac ? "AI 팀에 연결" : "Mac과 연결").font(SetupFont.title).foregroundStyle(CE.ink)
-                        .accessibilityAddTraits(.isHeader)
-                    Text(isMac ? "접속 코드는 이 기기에 저장되어 다음부터는 묻지 않습니다." : "한 번 연결하면 다음부터는 자동으로 연결합니다.")
-                        .font(SetupFont.lead).foregroundStyle(CE.ink2)
-                        .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 12) {
+            SetupBrand()
+            Text(isMac ? "AI 팀에 연결" : "Mac과 연결").font(SetupFont.title).tracking(isMac ? -0.5 : 0).foregroundStyle(CE.ink)
+                .ceLineHeight(24, 1.3)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 2)
+                .accessibilityAddTraits(.isHeader)
+            Text(isMac ? "접속 코드는 이 기기에 저장되어 다음부터는 묻지 않습니다." : "한 번 연결하면 다음부터는 자동으로 연결합니다.")
+                .font(SetupFont.lead).foregroundStyle(CE.ink2)
+                .ceLineHeight(14.5, 1.55)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 6)
+            #if os(iOS)
+            PhonePairingSection()
+            Button { withAnimation(.snappy) { showManual.toggle() } } label: {
+                HStack(spacing: 5) {
+                    Text("주소와 접속 코드를 직접 입력")
+                    Image(systemName: showManual ? "chevron.up" : "chevron.down").font(.system(size: 10, weight: .semibold))
                 }
-                .padding(.bottom, 4)
-                #if os(iOS)
-                PhonePairingSection()
-                Button { withAnimation(.snappy) { showManual.toggle() } } label: {
-                    HStack(spacing: 5) {
-                        Text("주소와 접속 코드를 직접 입력")
-                        Image(systemName: showManual ? "chevron.up" : "chevron.down").font(.system(size: 10, weight: .semibold))
-                    }
-                    .font(CEFont.meta).foregroundStyle(CE.ink3)
-                    .frame(minHeight: 44)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                if showManual { manualFields }
-                #else
-                manualFields
-                #endif
-                #if os(macOS)
-                orDivider
-                localStart
-                #endif
-                foot
+                .font(CEFont.meta.weight(.medium)).foregroundStyle(CE.ink2)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 22).padding(.top, 26).padding(.bottom, 20)
+            .buttonStyle(.plain)
+            if showManual { manualFields }
+            #else
+            manualFields
+            #endif
+            #if os(macOS)
+            orDivider
+            localStart
+            #endif
+            foot
         }
+        .padding(.horizontal, 22).padding(.top, 26).padding(.bottom, 20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .environment(\.ceInsideGlass, true)
+        .modifier(ThickCardSurface())
     }
 
     @ViewBuilder private var manualFields: some View {
@@ -539,19 +714,20 @@ struct ConnectionView: View {
                         .textInputAutocapitalization(.never)
                         .textContentType(.URL)
                         #endif
-                        .setupInput(active: focus == .endpoint)
+                        .ceField(focused: focus == .endpoint)
                 }
                 SetupField("접속 코드") {
                     HStack(spacing: 6) {
+                        // web .t-code: the code itself in the code face; the placeholder stays in the text face.
                         Group {
                             if revealCode {
-                                TextField("접속 코드", text: $store.accessCode, prompt: Text("서버 컴퓨터의 접속 코드"))
+                                TextField("접속 코드", text: $store.accessCode, prompt: Text("서버 컴퓨터의 접속 코드").font(SetupFont.input))
                             } else {
-                                SecureField("접속 코드", text: $store.accessCode, prompt: Text("서버 컴퓨터의 접속 코드"))
+                                SecureField("접속 코드", text: $store.accessCode, prompt: Text("서버 컴퓨터의 접속 코드").font(SetupFont.input))
                             }
                         }
                         .labelsHidden()
-                        .font(SetupFont.input)
+                        .font(store.accessCode.isEmpty ? SetupFont.input : SetupFont.codeInput)
                         .focused($focus, equals: .code)
                         .onSubmit { connect() }
                         .autocorrectionDisabled()
@@ -560,33 +736,35 @@ struct ConnectionView: View {
                         #endif
                         Button { revealCode.toggle() } label: {
                             Image(systemName: revealCode ? "eye.slash" : "eye")
-                                .frame(width: 26, height: 26)
+                                .font(.system(size: 13, weight: .medium))
+                                .frame(width: 28, height: 24)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .foregroundStyle(CE.ink3)
+                        .foregroundStyle(CE.ink2)
                         .help(revealCode ? "접속 코드 숨기기" : "접속 코드 보기")
                         .accessibilityLabel(revealCode ? "접속 코드 숨기기" : "접속 코드 보기")
                     }
-                    .setupInput(active: focus == .code)
+                    .ceField(focused: focus == .code)
                 }
                 if codeHasNonASCII {
                     SetupError("접속 코드는 영문·숫자로 되어 있습니다. 한글 입력 상태인지 확인해 주세요.")
                 } else if let connectionError {
                     SetupError(connectionError)
                 }
+                // web .su-submit: .gbtn--primary .gbtn--l, 52 tall, full width.
                 Button { connect() } label: {
                     HStack(spacing: 7) {
                         if connecting { ProgressView().controlSize(.small).tint(.white) }
                         Text(connecting ? "연결하는 중" : "연결하기")
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, isMac ? 4 : 5)
+                    .padding(.vertical, isMac ? 0 : 5)
                 }
                 .ceProminentButton()
                 .controlSize(.large)
                 .disabled(!canConnect)
-                .padding(.top, 2)
+                .padding(.top, 4)
     }
 
     #if os(macOS)
@@ -601,24 +779,24 @@ struct ConnectionView: View {
     }
 
     private var localStart: some View {
-        VStack(spacing: 7) {
+        VStack(spacing: 8) {
             Button { startLocal() } label: {
                 HStack(spacing: 7) {
                     if localHost.isStarting {
                         ProgressView().controlSize(.small)
                     } else {
-                        Image(systemName: "desktopcomputer")
+                        Image(systemName: "desktopcomputer").font(.system(size: 14, weight: .semibold))
                     }
                     Text(localHost.isStarting ? "준비하는 중" : "이 Mac에서 시작")
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 4)
             }
             .ceSecondaryButton()
             .controlSize(.large)
             .disabled(localHost.isStarting || connecting)
             Text(localHost.isStarting && !localHost.statusText.isEmpty ? localHost.statusText : "이 Mac의 서버를 찾아 바로 연결합니다. 없으면 새로 준비합니다.")
-                .font(SetupFont.hint).foregroundStyle(CE.ink3)
+                .font(SetupFont.hint).foregroundStyle(CE.ink2)
+                .lineSpacing(SetupFont.hintLeading)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
                 .fixedSize(horizontal: false, vertical: true)
@@ -645,22 +823,24 @@ struct ConnectionView: View {
         VStack(spacing: 8) {
             Text("주소와 접속 코드는 서버 컴퓨터에서 확인합니다.")
                 .font(SetupFont.hint).foregroundStyle(CE.ink2)
+                .lineSpacing(SetupFont.hintLeading)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
             Button { copyAccessCommand() } label: {
                 HStack(spacing: 7) {
-                    Image(systemName: "terminal").font(.system(size: 10, weight: .semibold)).foregroundStyle(CE.ink3)
-                    Text(Self.accessCommand).font(CEFont.mono).foregroundStyle(CE.ink).lineLimit(1)
+                    Image(systemName: "terminal").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(CE.ink2)
+                    Text(Self.accessCommand).font(SetupFont.code).foregroundStyle(CE.ink).lineLimit(1)
                     Text(copiedCommand ? "복사함" : "복사").font(CEFont.meta.weight(.semibold))
                         .foregroundStyle(copiedCommand ? CE.success : CE.accent)
                 }
-                .padding(.horizontal, 11).padding(.vertical, 6)
-                .background(Color.white.opacity(0.07), in: Capsule())
+                .padding(.horizontal, 12)
+                .frame(minHeight: 30)
+                .background(Color.white.opacity(0.08), in: Capsule())
                 .overlay { Capsule().strokeBorder(CE.line) }
                 .frame(minHeight: isMac ? nil : 44)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(CopyChipStyle())
             .fixedSize()
             .help("서버 컴퓨터의 터미널에서 실행하면 주소와 접속 코드를 보여 줍니다")
             .accessibilityLabel(copiedCommand ? "iamceo open 명령 복사함" : "iamceo open 명령 복사")
@@ -736,6 +916,8 @@ struct SettingsView: View {
     @State private var confirmLeave = false
     @State private var confirmDiscard = false
     @State private var editedNamespace = ""
+    /// The number field being typed in (its well gets the focus ring).
+    @FocusState private var numberFocus: String?
     #if os(macOS)
     @State private var section: SettingsSection = SettingsView.launchSection ?? .general
     #else
@@ -748,9 +930,10 @@ struct SettingsView: View {
         let id: String
         let title: String
         let detail: String
+        var badge: String? = nil
     }
     private static let permissionChoices = [
-        PermissionChoice(id: "bypassPermissions", title: "바이패스", detail: "직원이 승인 없이 명령을 실행합니다"),
+        PermissionChoice(id: "bypassPermissions", title: "바이패스", detail: "직원이 승인 없이 명령을 실행합니다", badge: "기본"),
         PermissionChoice(id: "auto", title: "오토", detail: "위험해 보이는 작업만 멈춥니다"),
         PermissionChoice(id: "default", title: "모두 승인", detail: "도구를 쓸 때마다 승인을 기다립니다")
     ]
@@ -884,16 +1067,17 @@ struct SettingsView: View {
     private func sidebarItem(_ item: SettingsSection) -> some View {
         let selected = section == item
         let dirty = hasEdits(in: item)
+        // web .pj--foot: 40 tall, 14/500, radius 13, padding 7/12.
         return Button { section = item } label: {
             HStack(spacing: 10) {
                 sectionIcon(item, size: 24)
-                Text(item.title).font(.system(size: 13.5, weight: selected ? .semibold : .medium))
+                Text(item.title).font(.system(size: 14, weight: selected ? .semibold : .medium))
                     .foregroundStyle(selected ? CE.ink : CE.ink2).lineLimit(1)
                 Spacer(minLength: 4)
                 if dirty { unsavedDot(item) }
             }
-            .padding(.horizontal, 8)
-            .frame(height: 38)
+            .padding(.horizontal, 10)
+            .frame(height: 40)
         }
         .buttonStyle(SettingsNavStyle(selected: selected))
         .accessibilityLabel(dirty ? "\(item.title), \(unsavedLabel(item))" : item.title)
@@ -942,9 +1126,9 @@ struct SettingsView: View {
         let dirty = hasEdits(in: item)
         return HStack(spacing: 12) {
             sectionIcon(item, size: 28)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(item.title).font(SetupFont.row).foregroundStyle(CE.ink)
-                Text(summary(item)).font(SetupFont.hint).foregroundStyle(CE.ink3).lineLimit(1)
+                Text(summary(item)).font(SetupFont.hint).foregroundStyle(CE.ink2).lineLimit(1)
             }
             Spacer(minLength: 8)
             if dirty { unsavedDot(item) }
@@ -1013,13 +1197,13 @@ struct SettingsView: View {
     /// One part of settings, scrolling under the save bar.
     private func page(_ item: SettingsSection) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 24) {
                 notices
                 sectionContent(item)
             }
             .padding(.horizontal, isMac ? 24 : 16)
-            .padding(.top, isMac ? 18 : 12)
-            .padding(.bottom, 24)
+            .padding(.top, isMac ? 20 : 12)
+            .padding(.bottom, isMac ? 28 : 24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollBounceBehavior(.basedOnSize)
@@ -1037,9 +1221,9 @@ struct SettingsView: View {
             if store.settingsConflict != nil {
                 VStack(alignment: .leading, spacing: 8) {
                     InlineNotice(title: "다른 기기에서 설정이 바뀌었습니다", detail: "적은 내용은 남아 있습니다. 새 설정을 확인한 뒤 저장해 주세요.")
-                    HStack {
-                        Button("새 설정 불러오기") { revert() }.ceSecondaryButton()
-                        Button("내 변경 다시 검토") { reviewChanges() }.ceSecondaryButton()
+                    HStack(spacing: 8) {
+                        Button("새 설정 불러오기") { revert() }.ceSecondaryButton().controlSize(.small)
+                        Button("내 변경 다시 검토") { reviewChanges() }.ceSecondaryButton().controlSize(.small)
                     }.disabled(saving)
                 }
             }
@@ -1048,14 +1232,10 @@ struct SettingsView: View {
 
     @ViewBuilder private func sectionContent(_ item: SettingsSection) -> some View {
         if store.bootstrap == nil && item != .connection {
-            VStack(spacing: 8) {
-                Image(systemName: "wifi.slash").font(.system(size: 22)).foregroundStyle(CE.ink3)
-                Text("서버에 연결하면 볼 수 있습니다").font(CEFont.rowTitle).foregroundStyle(CE.ink2)
-                Text(isMac ? "메인 창에서 서버에 연결하세요." : "서버에 연결하면 설정을 볼 수 있습니다.")
-                    .font(CEFont.meta).foregroundStyle(CE.ink3).multilineTextAlignment(.center)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 48)
+            // web .empty: 16/600 title, 14 ink-2 line, generous room; no tile, the page itself is the surface.
+            EmptyTile(icon: "wifi.slash", title: "서버에 연결하면 볼 수 있습니다",
+                      detail: isMac ? "메인 창에서 서버에 연결하세요." : "서버에 연결하면 설정을 볼 수 있습니다.", framed: false)
+                .padding(.vertical, 16)
         } else {
             switch item {
             case .general: generalSection
@@ -1076,9 +1256,9 @@ struct SettingsView: View {
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 22) {
             SettingsGroup("운영", footnote: "세션은 샌드박스 없이 실행됩니다. 권한은 새 세션부터 적용됩니다.") {
-                SettingsRow("권한", hint: permissionChoice.detail, stacksOnPhone: true) {
-                    SettingsSegments(options: Self.permissionChoices.map { SettingsSegments.Option(id: $0.id, title: $0.title) },
-                                     selection: draft.permissionMode, label: "권한") { draft.permissionMode = $0 }
+                // web .st-perms: three explained choices, the server default marked 기본.
+                SettingsRow("권한", stacked: true) {
+                    SettingsChoiceTiles(options: permissionOptions, selection: draft.permissionMode, label: "권한") { draft.permissionMode = $0 }
                 }
                 RowDivider(inset: 0)
                 SettingsRow("동시 실행", hint: "넘치면 차례를 기다립니다", hintBelowOnPhone: true) {
@@ -1100,6 +1280,15 @@ struct SettingsView: View {
         }
     }
 
+    /// The three known modes, plus a mode the server holds that this app does not know (shown, not replaced).
+    private var permissionOptions: [SettingsChoiceTiles.Option] {
+        var options = Self.permissionChoices.map { SettingsChoiceTiles.Option(id: $0.id, title: $0.title, detail: $0.detail, badge: $0.badge) }
+        if !Self.permissionChoices.contains(where: { $0.id == draft.permissionMode }) {
+            options.append(SettingsChoiceTiles.Option(id: draft.permissionMode, title: draft.permissionMode, detail: "서버에 저장된 값입니다"))
+        }
+        return options
+    }
+
     private var tidyMenu: some View {
         let current = Int(draft.boardTidyHours.rounded())
         return SetupMenu(tidyLabel(current), compact: true, label: "판 정리 주기") {
@@ -1107,7 +1296,7 @@ struct SettingsView: View {
                 Toggle(tidyLabel(hours), isOn: menuCheck(current == hours) { draft.boardTidyHours = Double(hours) })
             }
         }
-        .frame(width: isMac ? 112 : 120)
+        .frame(width: isMac ? 120 : 128)
     }
 
     /// Fixed choices plus any custom value the server holds, so it is shown instead of silently replaced.
@@ -1120,7 +1309,8 @@ struct SettingsView: View {
     /// A typed number with its unit and a stepper, at the right of a row.
     private func numberControl(_ title: String, unit: String, value: Binding<Int>, range: ClosedRange<Int>, step: Int = 1) -> some View {
         let clamped = Binding<Int>(get: { value.wrappedValue }, set: { value.wrappedValue = min(max($0, range.lowerBound), range.upperBound) })
-        return HStack(spacing: 6) {
+        // web .st-number: 15 tabular digits in an input well, unit 14 ink-2. Wide enough for three digits (up to 256).
+        return HStack(spacing: 8) {
             TextField(title, value: clamped, format: .number)
                 .labelsHidden()
                 .font(SetupFont.input)
@@ -1129,11 +1319,12 @@ struct SettingsView: View {
                 #if os(iOS)
                 .keyboardType(.numberPad)
                 #endif
+                .focused($numberFocus, equals: title)
                 .onSubmit { Task { await save() } }
-                .frame(width: isMac ? 38 : 44)
-                .settingsWell()
-            Text(unit).font(SetupFont.input).foregroundStyle(CE.ink2)
-                .frame(minWidth: 14, alignment: .leading)
+                .frame(width: isMac ? 34 : 38)
+                .settingsWell(focused: numberFocus == title)
+            Text(unit).font(SetupFont.value).foregroundStyle(CE.ink2)
+                .frame(minWidth: 16, alignment: .leading)
             Stepper(title, value: clamped, in: range, step: step).labelsHidden()
         }
         .fixedSize()
@@ -1156,8 +1347,8 @@ struct SettingsView: View {
         let footnote: String = store.isDemo ? "샘플에는 연결된 실행 환경이 없습니다."
             : needsSetup ? "서버 컴퓨터의 IAMCEO 저장소에서 bun\u{00A0}run\u{00A0}setup:core 로 준비한 뒤 다시 확인하세요."
             : "로그인은 세션을 열 때 확인합니다."
-        return VStack(alignment: .leading, spacing: 7) {
-            SettingsGroup("실행 환경", footnote: footnote, footnoteTone: needsSetup && !store.isDemo ? CE.attention : CE.ink3, accessory: {
+        return VStack(alignment: .leading, spacing: 10) {
+            SettingsGroup("실행 환경", footnote: footnote, footnoteTone: needsSetup && !store.isDemo ? CE.attention : CE.ink2, accessory: {
                 if !store.isDemo {
                     SettingsRefreshButton(label: "실행 환경 다시 확인", busy: busy == .runtime) { Task { await refresh(.runtime) } }
                         .disabled(store.connectionStatus != .connected || store.isLoading || busy != nil)
@@ -1170,7 +1361,7 @@ struct SettingsView: View {
                 RowDivider(inset: 0)
                 SettingsRow("Codex CLI") { DotValue(tone: providerState(runtime, "codex").tone, text: providerState(runtime, "codex").text) }
             }
-            if let runtimeError { SetupError("진단을 읽지 못했습니다. \(runtimeError)").padding(.horizontal, CESpace.l) }
+            if let runtimeError { SetupError("진단을 읽지 못했습니다. \(runtimeError)").padding(.horizontal, SetupMetrics.groupInset) }
         }
     }
 
@@ -1193,15 +1384,16 @@ struct SettingsView: View {
         let rows = Self.rankRows.filter { $0.cli == cli }
         let last = cli == RankSettingsCLI.allCases.last
         return SettingsGroup(cli.title, footnote: last ? "직원별로 지정한 값이 먼저입니다. 바꾼 값은 세션을 다시 열 때 적용됩니다." : nil, accessory: {
+            // web .st-ranks thead th: 13/600 ink-2, over the value in each select.
             #if os(macOS)
             HStack(spacing: 8) {
-                Text("모델").padding(.leading, 10).frame(width: Self.modelWidth, alignment: .leading)
-                Text("effort").padding(.leading, 10).frame(width: Self.effortWidth, alignment: .leading)
+                Text("모델").padding(.leading, 11).frame(width: Self.modelWidth, alignment: .leading)
+                Text("effort").padding(.leading, 11).frame(width: Self.effortWidth, alignment: .leading)
             }
-            .font(SetupFont.hint).foregroundStyle(CE.ink3)
+            .font(SetupFont.label).foregroundStyle(CE.ink2)
             .accessibilityHidden(true)
             #else
-            Text("모델 · effort").font(SetupFont.hint).foregroundStyle(CE.ink3).accessibilityHidden(true)
+            Text("모델 · effort").font(SetupFont.label).foregroundStyle(CE.ink2).accessibilityHidden(true)
             #endif
         }) {
             ForEach(Array(rows.enumerated()), id: \.element.id) { index, rank in
@@ -1216,10 +1408,13 @@ struct SettingsView: View {
         let invalid = modelError(for: rank)
         let scope = overrides > 0 ? "\(rank.scope) · 직원별 지정 \(overrides)명" : rank.scope
         #if os(macOS)
+        // web .st-ranks: 8 above and below a 44pt line (min-height 60); the rank 14.5/620, its scope 12.5 ink-2.
         return HStack(alignment: invalid != nil ? .top : .center, spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(rank.title).font(SetupFont.row).foregroundStyle(CE.ink)
-                Text(scope).font(SetupFont.hint).foregroundStyle(CE.ink3)
+                Text(scope).font(SetupFont.hint).foregroundStyle(CE.ink2)
+                    .lineSpacing(SetupFont.hintLeading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             VStack(alignment: .leading, spacing: 6) {
@@ -1228,32 +1423,38 @@ struct SettingsView: View {
                     Group {
                         if rank.showsEffort { effortMenu(rank) }
                         else {
-                            Text("CLI 기본").font(SetupFont.input).foregroundStyle(CE.ink3)
-                                .padding(.leading, 10).frame(maxWidth: .infinity, alignment: .leading)
+                            Text("CLI 기본").font(SetupFont.select).foregroundStyle(CE.ink3)
+                                .padding(.leading, 11).frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
                     .frame(width: Self.effortWidth)
                 }
                 if let invalid {
-                    Text(invalid).font(SetupFont.hint).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true)
+                    Text(invalid).font(SetupFont.hint).foregroundStyle(CE.danger)
+                        .lineSpacing(SetupFont.hintLeading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(width: Self.modelWidth + 8 + Self.effortWidth)
         }
-        .padding(.vertical, 9)
-        .frame(minHeight: 46)
+        .padding(.vertical, 12)
+        .frame(minHeight: 60)
         #else
         return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(rank.title).font(SetupFont.row).foregroundStyle(CE.ink)
-                Text(scope).font(SetupFont.hint).foregroundStyle(CE.ink3)
+                Text(scope).font(SetupFont.hint).foregroundStyle(CE.ink2)
                 Spacer(minLength: 0)
             }
             HStack(spacing: 8) {
                 modelMenu(rank)
-                if rank.showsEffort { effortMenu(rank).frame(width: 118) }
+                if rank.showsEffort { effortMenu(rank).frame(width: 124) }
             }
-            if let invalid { Text(invalid).font(SetupFont.hint).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true) }
+            if let invalid {
+                Text(invalid).font(SetupFont.hint).foregroundStyle(CE.danger)
+                    .lineSpacing(SetupFont.hintLeading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.vertical, 12)
         #endif
@@ -1267,7 +1468,8 @@ struct SettingsView: View {
         let selected = list.option(for: value)
         let defaultLabel = "CLI 기본"
         let label = list.unknownCurrent(value) ?? selected?.label ?? defaultLabel
-        return SetupMenu(label, mono: !value.isEmpty, compact: true, label: "\(rank.title) 모델") {
+        // Sans like the web select, so 'CLI 기본' and a model name sit at the same size in the column.
+        return SetupMenu(label, compact: true, label: "\(rank.title) 모델") {
             Toggle(defaultLabel, isOn: menuCheck(value.isEmpty) { customRanks.remove(rank.id); setModel(nil, for: rank) })
             Divider()
             ForEach(list.models) { option in
@@ -1327,7 +1529,7 @@ struct SettingsView: View {
     }
 
     private var macNotifyGroup: some View {
-        SettingsGroup {
+        SettingsGroup("Mac") {
             SettingsRow("Mac 알림", hint: "결재나 할 일이 오면 서버 컴퓨터에 알림을 띄웁니다") {
                 Toggle("Mac 알림", isOn: $draft.notifyMac).labelsHidden().settingsSwitch()
             }
@@ -1342,8 +1544,9 @@ struct SettingsView: View {
         let online = store.bootstrap != nil && (!store.isDemo || Self.connectionSample)
         let notConnected: String? = store.bootstrap == nil && !store.isDemo
             ? (isMac ? "메인 창에서 서버에 연결하세요." : "서버에 연결하면 설정을 볼 수 있습니다.") : nil
-        return VStack(alignment: .leading, spacing: 22) {
-            VStack(alignment: .leading, spacing: 7) {
+        let urls = online ? (store.bootstrap?.urls ?? []) : []
+        return VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 10) {
                 SettingsGroup("접속", footnote: notConnected) {
                     SettingsRow("상태", hint: store.lastHeartbeatAt.map { "마지막 연결 신호 \(koTime($0, seconds: true))" }) {
                         DotValue(tone: summary.tone, text: summary.text)
@@ -1364,24 +1567,33 @@ struct SettingsView: View {
                         }
                         RowDivider(inset: 0)
                         SettingsRow("서버 주소", stacksOnPhone: true) { addressText(store.endpoint) }
-                        if let urls = store.bootstrap?.urls, !urls.isEmpty {
+                        if !urls.isEmpty {
                             RowDivider(inset: 0)
                             SettingsRow("들어올 주소", stacksOnPhone: true) {
-                                VStack(alignment: isMac ? .trailing : .leading, spacing: 3) {
+                                VStack(alignment: isMac ? .trailing : .leading, spacing: 4) {
                                     ForEach(urls, id: \.self) { addressText($0) }
                                 }
                             }
                         }
                         if let version = store.bootstrap?.version, !version.isEmpty {
                             RowDivider(inset: 0)
-                            SettingsRow("버전") { Text(version).font(CEFont.mono).foregroundStyle(CE.ink2) }
+                            SettingsRow("버전") { Text(version).font(SetupFont.code).foregroundStyle(CE.ink).textSelection(.enabled) }
                         }
                     } else if let date = store.lastSuccessfulSyncAt {
                         RowDivider(inset: 0)
-                        SettingsRow("마지막 데이터 확인") { Text(koDateTime(date)).font(CEFont.secondary).foregroundStyle(CE.ink2) }
+                        SettingsRow("마지막 데이터 확인") { Text(koDateTime(date)).font(SetupFont.value).foregroundStyle(CE.ink) }
                     }
                 }
-                if let syncError { SetupError(syncError).padding(.horizontal, CESpace.l) }
+                // web: how phones reach the server, under the facts (.su-hint with the command as a code chip).
+                if !urls.isEmpty {
+                    Text(reachHint)
+                        .font(SetupFont.hint).foregroundStyle(CE.ink2)
+                        .lineSpacing(SetupFont.hintLeading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, SetupMetrics.groupInset)
+                }
+                if let syncError { SetupError(syncError).padding(.horizontal, SetupMetrics.groupInset) }
             }
             #if os(macOS)
             if !store.isDemo || Self.connectionSample {
@@ -1416,11 +1628,23 @@ struct SettingsView: View {
         }
     }
 
+    /// web .st-facts dd: the address itself is the value, so it reads at full ink.
     private func addressText(_ value: String) -> some View {
-        Text(value).font(CEFont.mono).foregroundStyle(CE.ink2)
+        Text(value).font(SetupFont.code).foregroundStyle(CE.ink)
             .textSelection(.enabled)
             .lineLimit(1).truncationMode(.middle)
+            .help(value)
             .frame(maxWidth: isMac ? 320 : .infinity, alignment: isMac ? .trailing : .leading)
+    }
+
+    /// "폰에서는 Tailscale 주소(100.으로 시작)로 …": the command as a code chip (mono on a faint white fill).
+    private var reachHint: AttributedString {
+        var command = AttributedString("\u{00A0}iamceo setup --hosts lan\u{00A0}")
+        command.font = SetupFont.code
+        command.foregroundColor = CE.ink
+        command.backgroundColor = Color.white.opacity(0.08)
+        return AttributedString("폰에서는 Tailscale 주소(100.으로 시작)로 들어옵니다. 같은 망의 기기까지 열려면 서버 컴퓨터에서 ")
+            + command + AttributedString(" 뒤 서버를 다시 켭니다.")
     }
 
     /// Review hook (DEBUG, sample only): `--connection-sample` lays out the rows a connected Mac shows (all disabled).
@@ -1460,20 +1684,23 @@ struct SettingsView: View {
 
     @ViewBuilder private var saveBar: some View {
         if isDirty || savedNotice {
+            // web .st-bar: 60 tall, padding 8 8 8 18, gap 10, text 13.5 at 1.4 ink-2, buttons .gbtn--m (44).
             HStack(spacing: 10) {
                 if isDirty {
                     VStack(alignment: .leading, spacing: 2) {
                         // iPhone: the short form fits beside 되돌리기 and 저장.
-                        Text(isMac ? "저장하지 않은 변경이 있습니다" : "저장하지 않은 변경").font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
+                        Text(isMac ? "저장하지 않은 변경이 있습니다" : "저장하지 않은 변경").font(CEFont.note.weight(.medium)).foregroundStyle(CE.ink2).lineLimit(1)
                         if let problem = saveError ?? firstModelError {
-                            Text(problem).font(CEFont.meta).foregroundStyle(CE.danger).lineLimit(2)
+                            Text(problem).font(CEFont.caption).foregroundStyle(CE.danger).lineLimit(2)
+                                .ceLineHeight(12, 1.4)
                         } else if let lockNotice {
-                            Text(lockNotice.title).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
+                            Text(lockNotice.title).font(CEFont.caption).foregroundStyle(CE.ink3).lineLimit(1)
                         }
                     }
                     Spacer(minLength: CESpace.s)
                     Button("되돌리기") { revert() }
                         .ceSecondaryButton()
+                        .controlSize(.regular)
                         .disabled(saving)
                         .fixedSize()
                     Button { Task { await save() } } label: {
@@ -1483,18 +1710,20 @@ struct SettingsView: View {
                         }
                     }
                     .ceProminentButton()
+                    .controlSize(.regular)
                     .keyboardShortcut("s", modifiers: .command)
                     .disabled(!canSave)
                     .fixedSize()
                 } else {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(CE.success)
+                    Image(systemName: "checkmark.circle.fill").font(.system(size: 15)).foregroundStyle(CE.success)
                     Text("저장했습니다. 모델·effort는 다음 실행에 적용됩니다.")
-                        .font(CEFont.secondary).foregroundStyle(CE.success).lineLimit(2)
+                        .font(CEFont.note).foregroundStyle(CE.success).lineLimit(2)
+                        .ceLineHeight(13.5, 1.4)
                     Spacer(minLength: 0)
                 }
             }
-            .padding(.leading, 16).padding(.trailing, 8).padding(.vertical, 8)
-            .frame(minHeight: 52)
+            .padding(.leading, isMac ? 18 : 14).padding(.trailing, 8).padding(.vertical, 8)
+            .frame(minHeight: isMac ? 60 : 56)
             .glassChrome(RoundedRectangle(cornerRadius: CERadius.plate, style: .continuous), tint: Color(red: 16 / 255, green: 11 / 255, blue: 38 / 255).opacity(0.86))
             .frame(maxWidth: 880)
             .padding(.horizontal, isMac ? 24 : 16).padding(.top, CESpace.s).padding(.bottom, CESpace.m)
@@ -1612,7 +1841,7 @@ private struct SettingsNavStyle: ButtonStyle {
         let selected: Bool
         @State private var hovering = false
         var body: some View {
-            let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
             configuration.label
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(shape)
@@ -1646,15 +1875,12 @@ private struct SettingsProjectsGroup: View {
     var body: some View {
         SettingsGroup("프로젝트", accessory: {
             Button { showArchive = true } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "archivebox").font(.system(size: 10.5, weight: .semibold))
-                    Text("보관함")
-                }
-                .font(CEFont.meta.weight(.medium)).foregroundStyle(CE.accent)
-                .frame(minHeight: isMac ? nil : 44)
-                .contentShape(Rectangle())
+                Label("보관함", systemImage: "archivebox")
             }
-            .buttonStyle(.plain)
+            .ceSecondaryButton()
+            // The caption line's own size (26, like the ↻ of the other captions); iPhone keeps its 44pt target.
+            .controlSize(.mini)
+            .fixedSize()
             .help("보관한 프로젝트 보기")
         }) {
             ForEach(Array(store.projects.enumerated()), id: \.element.id) { index, project in
@@ -1665,13 +1891,34 @@ private struct SettingsProjectsGroup: View {
         .sheet(isPresented: $showArchive) { ArchiveLibraryView() }
     }
 
+    /// web .st-pj: name 14.5/620 and the folder in code 12.5 ink-2 (wrapping), 고치기 and 보관 in sight. iPhone keeps
+    /// them in the ⋯ menu so the row stays one line.
     private func row(_ project: ProjectSummary) -> some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name).font(SetupFont.row).foregroundStyle(CE.ink).lineLimit(1)
-                Text(project.cwd).font(CEFont.mono).foregroundStyle(CE.ink3).lineLimit(1).truncationMode(.middle)
+                Text(project.cwd).font(CEFont.mono).foregroundStyle(CE.ink2)
+                    .ceLineHeight(12.5, 1.45)
+                    .lineLimit(2).truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(project.cwd)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            #if os(macOS)
+            HStack(spacing: 6) {
+                Button("고치기") { router.manageProject(id: project.id, mode: .settings) }
+                    .accessibilityLabel("\(project.name) 고치기")
+                    .help("이름과 폴더 고치기")
+                if !project.isHq && project.id != "hq" {
+                    Button("보관") { router.manageProject(id: project.id, mode: .archive) }
+                        .accessibilityLabel("\(project.name) 보관하기")
+                }
+            }
+            .ceSecondaryButton()
+            .controlSize(.small)
+            .fixedSize()
+            .disabled(!editable)
+            #else
             Menu {
                 Button("이름 바꾸기…") { router.manageProject(id: project.id, mode: .rename) }
                 Button("폴더 고치기…") { router.manageProject(id: project.id, mode: .settings) }
@@ -1688,9 +1935,10 @@ private struct SettingsProjectsGroup: View {
             .disabled(!editable)
             .help("관리")
             .accessibilityLabel("\(project.name) 관리")
+            #endif
         }
-        .padding(.vertical, 8)
-        .frame(minHeight: 46)
+        .padding(.vertical, 12)
+        .frame(minHeight: isMac ? 60 : 52)
     }
 }
 
@@ -1789,16 +2037,16 @@ struct NewProjectView: View {
                         .font(SetupFont.input)
                         .focused($focus, equals: .name)
                         .onSubmit { if legacyFolderInput { focus = .cwd } }
-                        .setupInput(active: focus == .name)
+                        .ceField(focused: focus == .name)
                 }
                 SetupField("폴더") {
                     if legacyFolderInput {
                         TextField("폴더", text: $cwd, prompt: Text(verbatim: "~/code/landing"))
-                            .labelsHidden().font(CEFont.mono).focused($focus, equals: .cwd).autocorrectionDisabled()
+                            .labelsHidden().font(SetupFont.codeInput).focused($focus, equals: .cwd).autocorrectionDisabled()
                             #if os(iOS)
                             .textInputAutocapitalization(.never)
                             #endif
-                            .onSubmit { Task { await create() } }.setupInput(active: focus == .cwd)
+                            .onSubmit { Task { await create() } }.ceField(focused: focus == .cwd)
                     } else if cwd.isEmpty {
                         // Two ways in, side by side: an existing/new server folder, or a GitHub repository cloned for it.
                         HStack(spacing: 10) {
@@ -1811,7 +2059,7 @@ struct NewProjectView: View {
                 }
                 SetupField("총괄 AI CLI") {
                     SettingsSegments(options: ["claude", "codex"].map { SettingsSegments.Option(id: $0, title: providerLabel($0)) },
-                                     selection: provider, label: "총괄 AI CLI") { provider = $0 }
+                                     selection: provider, label: "총괄 AI CLI", fill: true) { provider = $0 }
                 }
             }
             .disabled(partial != nil || working)
@@ -1831,30 +2079,33 @@ struct NewProjectView: View {
 
     /// The chosen folder as one quiet tile: where the project will live, where it came from, and a way to change it.
     private var chosenFolder: some View {
-        let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
         return HStack(spacing: 12) {
             Image(systemName: clonedRepository == nil ? "folder.fill" : "arrow.down.circle.fill")
                 .font(.system(size: 15, weight: .semibold)).foregroundStyle(CE.accent)
-                .frame(width: 30, height: 30)
-                .background(CE.violet.opacity(0.16), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(cwd).font(CEFont.mono).foregroundStyle(CE.ink).lineLimit(1).truncationMode(.middle)
+                .frame(width: 32, height: 32)
+                .background(CE.violet.opacity(0.16), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(CE.violet.opacity(0.3)) }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(cwd).font(SetupFont.codeInput).foregroundStyle(CE.ink).lineLimit(1).truncationMode(.middle)
+                    .help(cwd)
                 Text(clonedRepository.map { "GitHub 저장소 \($0)에서 받은 폴더" } ?? "서버 컴퓨터의 폴더")
-                    .font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
+                    .font(SetupFont.hint).foregroundStyle(CE.ink2).lineLimit(1)
             }
             Spacer(minLength: 8)
             Menu {
                 Button { showFolderPicker = true } label: { Label("다른 폴더 고르기…", systemImage: "folder") }
                 Button { showGitHubClone = true } label: { Label("GitHub에서 가져오기…", systemImage: "arrow.down.circle") }
             } label: {
-                Text("바꾸기").font(CEFont.secondary.weight(.medium)).foregroundStyle(CE.accent)
+                QuietMenuLabel(title: "바꾸기")
             }
-            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+            .fixedSize()
             .accessibilityLabel("폴더 바꾸기")
         }
-        .padding(.horizontal, 12).padding(.vertical, 10)
+        .padding(.leading, 12).padding(.trailing, 10).padding(.vertical, 10)
         .background(Color.white.opacity(0.04), in: shape)
-        .overlay { shape.strokeBorder(CE.line) }
+        .overlay { shape.strokeBorder(Color.white.opacity(0.1)) }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("선택한 폴더: " + cwd)
     }
@@ -1913,6 +2164,28 @@ struct NewProjectView: View {
     }
 }
 
+/// The label of a menu that should look like a small quiet button (web .gbtn--glass .gbtn--s: 32 tall, 13.5/600).
+/// Menus draw their own label, so the capsule is drawn here instead of through a button style.
+private struct QuietMenuLabel: View {
+    let title: String
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
+    var body: some View {
+        Text(title)
+            .font(isMac ? .system(size: 13.5, weight: .semibold) : CEFont.rowTitle)
+            .tracking(-0.15)
+            .foregroundStyle(isEnabled ? CE.ink : CE.ink3)
+            .padding(.horizontal, 14)
+            .frame(minHeight: isMac ? 32 : 38)
+            .background(LinearGradient(colors: [Color.white.opacity(hovering && isEnabled ? 0.16 : 0.10), Color.white.opacity(hovering && isEnabled ? 0.06 : 0.03)],
+                                       startPoint: .top, endPoint: .bottom), in: Capsule())
+            .overlay { if isEnabled { GlassRim(shape: Capsule()) } else { Capsule().strokeBorder(CE.line) } }
+            .frame(minHeight: isMac ? nil : 44)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+    }
+}
+
 /// One of the two ways to give a new project its folder: icon tile, title, one short line. Equal width side by side.
 private struct FolderSourceTile: View {
     let icon: String
@@ -1920,19 +2193,25 @@ private struct FolderSourceTile: View {
     let detail: String
     let action: () -> Void
     var body: some View {
+        // web .choice: radius 13, padding 11/13 (a little more here: the tile carries an icon), 14/600 title,
+        // 12.5 ink-2 line at 1.4.
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 0) {
                 Image(systemName: icon)
                     .font(.system(size: 15, weight: .semibold)).foregroundStyle(CE.accent)
-                    .frame(width: 30, height: 30)
-                    .background(CE.violet.opacity(0.16), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
-                Text(detail).font(CEFont.meta).foregroundStyle(CE.ink3)
+                    .frame(width: 32, height: 32)
+                    .background(CE.violet.opacity(0.16), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(CE.violet.opacity(0.3)) }
+                    .padding(.bottom, 10)
+                Text(title).font(SetupFont.row).foregroundStyle(CE.ink)
+                    .padding(.bottom, 3)
+                Text(detail).font(SetupFont.hint).foregroundStyle(CE.ink2)
+                    .lineSpacing(SetupFont.choiceLeading)
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)
             }
-            .frame(maxWidth: .infinity, minHeight: 104, alignment: .topLeading)
-            .padding(12)
+            .frame(maxWidth: .infinity, minHeight: 112, alignment: .topLeading)
+            .padding(.horizontal, 14).padding(.vertical, 13)
             .contentShape(Rectangle())
         }
         .buttonStyle(FolderSourceTileStyle())
@@ -1948,10 +2227,12 @@ private struct FolderSourceTileStyle: ButtonStyle {
         @Environment(\.isEnabled) private var isEnabled
         @State private var hovering = false
         var body: some View {
-            let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
             configuration.label
-                .background(Color.white.opacity(configuration.isPressed ? 0.08 : hovering ? 0.06 : 0.035), in: shape)
-                .overlay { shape.strokeBorder(hovering ? CE.violet.opacity(0.45) : CE.line) }
+                .background(Color.white.opacity(configuration.isPressed ? 0.09 : hovering && isEnabled ? 0.065 : 0.04), in: shape)
+                .overlay { shape.strokeBorder(hovering && isEnabled ? CE.violet.opacity(0.55) : Color.white.opacity(0.1), lineWidth: hovering && isEnabled ? 1.25 : 1) }
+                .scaleEffect(configuration.isPressed ? 0.985 : 1)
+                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: configuration.isPressed)
                 .opacity(isEnabled ? 1 : 0.5)
                 .onHover { hovering = $0 }
         }

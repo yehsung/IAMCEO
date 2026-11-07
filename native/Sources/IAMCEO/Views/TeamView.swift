@@ -33,6 +33,7 @@ struct TeamView: View {
     var body: some View {
         @Bindable var router = router
         ScrollView {
+            // Web .tm: 12 between panels, in the one shared content column.
             VStack(alignment: .leading, spacing: CESpace.m) {
                 if let state = store.state {
                     sections(state)
@@ -42,11 +43,8 @@ struct TeamView: View {
                     EmptyTile(icon: "person.2", title: "팀을 불러오지 못했습니다", detail: "연결 상태를 확인한 뒤 다시 동기화하세요.")
                 }
             }
-            .frame(maxWidth: 880, alignment: .leading)
-            .padding(.horizontal, isMac ? 24 : 16)
-            .padding(.top, isMac ? 16 : 12)
-            .padding(.bottom, isMac ? 24 : 28)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .ceContentColumn(top: isMac ? 16 : 12)
         }
         .refreshable { await store.refresh() }
         .modifier(TeamDetailPresentation(memberID: $router.memberID))
@@ -72,11 +70,12 @@ struct TeamView: View {
             TeamWorkList(work: state.work)
         }
         if members.isEmpty && !project.isHq {
+            // Web .tm-adopt-entry: the glass button on its own row at the end, size m (44pt, 15 semibold).
             HStack {
                 Spacer(minLength: 0)
                 Button { router.showNewMember = true } label: { Label("팀장 추가", systemImage: "plus") }
                     .ceSecondaryButton()
-                    .controlSize(.small)
+                    .controlSize(.regular)
                     .disabled(!store.canWrite || !project.runnerEnabled)
                     .help(teamAddMemberHelp(store, project))
             }
@@ -128,12 +127,17 @@ private struct TeamStartPanel: View {
 
     var body: some View {
         let busy = store.pendingActions.contains("conductor-start")
-        Plate(padding: 18, raised: true) {
+        // Web .tm-start: padding 18, gap 8, radius 18; title 16/650, text 14/1.55 ink-2, a size-m primary button.
+        Plate(padding: 18, raised: true, radius: CERadius.card) {
             VStack(alignment: .leading, spacing: 8) {
                 Text(project.runnerEnabled && !hasMembers ? "아직 팀이 없습니다" : "총괄을 시작하세요")
                     .font(CEFont.title).foregroundStyle(CE.ink)
-                Text(message).font(CEFont.body).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 10) {
+                    .lineSpacing(CELeading.title)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(message).font(TeamFont.fact).foregroundStyle(CE.ink2)
+                    .lineSpacing(CELeading.spacing(14, 1.55))
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 12) {
                     Button {
                         Task {
                             failure = nil
@@ -146,14 +150,19 @@ private struct TeamStartPanel: View {
                         }
                     }
                     .ceProminentButton()
+                    .controlSize(.regular)
                     .disabled(lockReason != nil || busy || runtimeBlock != nil)
-                    if let lockReason { Text(lockReason).font(CEFont.meta).foregroundStyle(CE.ink3) }
-                    else if busy { Text("CLI 세션을 띄우는 데 시간이 걸릴 수 있습니다.").font(CEFont.meta).foregroundStyle(CE.ink3) }
+                    Group {
+                        if let lockReason { Text(lockReason) }
+                        else if busy { Text("CLI 세션을 띄우는 데 시간이 걸릴 수 있습니다.") }
+                    }
+                    .font(CEFont.meta).foregroundStyle(CE.ink3)
+                    .lineSpacing(CELeading.meta)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.top, 6)
                 if let failure {
-                    Label(failure, systemImage: "exclamationmark.circle").font(CEFont.meta).foregroundStyle(CE.danger)
-                        .fixedSize(horizontal: false, vertical: true)
+                    teamFailure(failure)
                 }
             }
         }
@@ -189,10 +198,11 @@ private struct TeamWorkList: View {
                     .padding(.vertical, 2)
                 }
             }
-            Plate(padding: 0) {
+            // Web .tm-work__list: radius 18, padding 4 14.
+            Plate(padding: 0, radius: CERadius.card) {
                 VStack(spacing: 0) {
                     if shown.isEmpty {
-                        Text("없음").font(CEFont.secondary).foregroundStyle(CE.ink3).frame(maxWidth: .infinity).padding(.vertical, 14)
+                        teamEmptyNote("없음")
                     }
                     ForEach(Array(shown.enumerated()), id: \.element.id) { index, item in
                         if index > 0 { RowDivider(inset: 0) }
@@ -201,14 +211,14 @@ private struct TeamWorkList: View {
                     if items.count > shown.count {
                         RowDivider(inset: 0)
                         Button { withAnimation(.easeOut(duration: 0.2)) { showAll = true } } label: {
-                            Text("\(items.count - shown.count)건 더 보기").font(CEFont.meta.weight(.medium)).foregroundStyle(CE.accent)
-                                .frame(maxWidth: .infinity, minHeight: isMac ? 34 : 44)
+                            Text("\(items.count - shown.count)건 더 보기").font(CEFont.note.weight(.medium)).foregroundStyle(CE.accent)
+                                .frame(maxWidth: .infinity, minHeight: 44)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, 14).padding(.vertical, 2)
+                .padding(.horizontal, 14).padding(.vertical, 4)
             }
         }
     }
@@ -242,45 +252,60 @@ private struct TeamWorkList: View {
         let section = WorkSection(rawValue: item.sec)
         let trailing = section == .done ? relativeTime(item.doneAt) : (filtered ? "" : (section?.title ?? item.sec))
         let sub = [item.who, item.detail].filter { !$0.isEmpty }.joined(separator: " · ")
-        return HStack(alignment: .top, spacing: 11) {
-            StatusDot(tone: section?.tone ?? .neutral, size: 8).padding(.top, isMac ? 5 : 6)
+        // Web .tm-wi: padding 11 2, gap 11; title 14.5/1.4 wraps, sub 13/1.45 ink-2, the section label on the title's
+        // baseline, the dot centred on the first line.
+        return HStack(alignment: .firstTextBaseline, spacing: 11) {
+            StatusDot(tone: section?.tone ?? .neutral, size: 8)
+                .alignmentGuide(.firstTextBaseline) { $0.height / 2 + 5 }
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.title).font(CEFont.body.weight(.medium)).foregroundStyle(CE.ink).lineLimit(2)
-                if !sub.isEmpty { Text(sub).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1) }
+                Text(item.title).font(CEFont.body.weight(.medium)).foregroundStyle(CE.ink)
+                    .lineSpacing(CELeading.spacing(14.5, 1.4))
+                    .fixedSize(horizontal: false, vertical: true)
+                if !sub.isEmpty {
+                    Text(sub).font(CEFont.secondary).foregroundStyle(CE.ink2)
+                        .lineSpacing(CELeading.secondary).lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             if !trailing.isEmpty {
-                Text(trailing).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1).fixedSize()
+                Text(trailing).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1).fixedSize()
             }
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, 11).padding(.horizontal, 2)
         .accessibilityElement(children: .combine)
     }
 }
 
-/// Web .tm-chip: dark capsule with a hairline; selected = violet fill and rim.
+/// Web .tm-chip: 13.5/600 ink-2, 36 tall (44 on a phone), padding 0 13, dark capsule rgb(11 8 26 / .55) with a white
+/// .1 hairline; selected = violet .42 fill and violet .9 rim; hover brightens the label.
 private struct TeamFilterChip: View {
     let title: String
     let count: Int?
     let selected: Bool
     let action: () -> Void
+    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 Text(title)
                 if let count { Text("\(count)").monospacedDigit().fontWeight(.medium) }
             }
-            .font(CEFont.meta.weight(.semibold))
-            .foregroundStyle(selected ? CE.ink : CE.ink2)
-            .padding(.horizontal, 12)
-            .frame(minHeight: isMac ? 28 : 36)
-            .background(selected ? CE.violet.opacity(0.42) : CE.glassTint.opacity(0.55), in: Capsule())
+            #if os(macOS)
+            .font(.system(size: 13.5, weight: .semibold))
+            #else
+            .font(.footnote.weight(.semibold))
+            #endif
+            .foregroundStyle(selected || hovering ? CE.ink : CE.ink2)
+            .padding(.horizontal, isMac ? 13 : 14)
+            .frame(minHeight: isMac ? 36 : 44)
+            .background(selected ? CE.violet.opacity(0.42) : Color(red: 11 / 255, green: 8 / 255, blue: 26 / 255).opacity(0.55), in: Capsule())
             .overlay { Capsule().strokeBorder(selected ? CE.violet.opacity(0.9) : Color.white.opacity(0.1)) }
-            .frame(minHeight: isMac ? nil : 44)
-            .contentShape(Rectangle())
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .onHover { hovering = $0 }
         .accessibilityLabel(count.map { "\(title) \($0)건" } ?? title)
         .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
@@ -389,7 +414,7 @@ struct MemberDetailView: View {
                         })
                     if store.deliveryErrors[m.id] != nil {
                         Button("전달 안내 다시 읽기") { Task { await store.loadDeliveryNotices(memberID: m.id) } }
-                            .ceSecondaryButton().controlSize(.small).disabled(store.connectionStatus != .connected || store.isDemo)
+                            .ceGhostButton().controlSize(.small).disabled(store.connectionStatus != .connected || store.isDemo)
                     }
                 }
             }
@@ -503,7 +528,8 @@ struct MemberDetailView: View {
             }
             if let status = compactionStatus(m) {
                 TeamFactRow(label: "") {
-                    Text(status).font(CEFont.meta).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
+                    Text(status).font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.note)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -595,7 +621,8 @@ struct MemberDetailView: View {
                     activityPlate(m)
                 }
                 .frame(maxWidth: 760, alignment: .leading)
-                .padding(.horizontal, drawer ? 14 : 16)
+                // The plates start where the name in the drawer header does (18), as the web dialog's body does.
+                .padding(.horizontal, drawer ? 18 : 16)
                 .padding(.top, drawer ? 4 : 10)
                 .padding(.bottom, drawer ? 14 : 24)
                 .frame(maxWidth: .infinity)
@@ -658,7 +685,7 @@ struct MemberDetailView: View {
                 HStack { Spacer(); CECloseButton(escapeCloses: false, action: onClose) }
             }
             if store.state == nil && store.isLoading {
-                HStack(spacing: 8) { ProgressView().controlSize(.small); Text("불러오는 중입니다").font(CEFont.secondary).foregroundStyle(CE.ink2) }
+                HStack(spacing: 8) { ProgressView().controlSize(.small); Text("불러오는 중입니다").font(CEFont.note).foregroundStyle(CE.ink2) }
             } else {
                 CompactEmpty(icon: "person.crop.circle.badge.questionmark", title: "찾을 수 없는 팀원입니다", detail: "명부에서 빠졌거나 다른 프로젝트의 팀원입니다.")
             }
@@ -669,9 +696,9 @@ struct MemberDetailView: View {
     }
 
     /// Drawer header, inline (no title bar, no hairline): name, state badge and rank on one line with the round close
-    /// button, then one quiet meta line and, only for a state I have to understand, what it means.
+    /// button, then the role, the provider/model line and, only for a state I have to understand, what it means.
     private func drawerHeader(_ m: Member, onClose: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 8) {
                 Text(m.name).font(CEFont.title).foregroundStyle(CE.ink).lineLimit(1)
                     .accessibilityAddTraits(.isHeader)
@@ -682,15 +709,15 @@ struct MemberDetailView: View {
                 CECloseButton(escapeCloses: false, action: onClose)
             }
             headerDetails(m)
-                .padding(.trailing, 8)
+                .padding(.trailing, 6)
         }
         .padding(.leading, 18).padding(.trailing, 12)
-        .padding(.top, 13).padding(.bottom, 10)
+        .padding(.top, 13).padding(.bottom, 12)
     }
 
-    /// iPhone page top (the name is the navigation title): state, rank, then the same meta line.
+    /// iPhone page top (the name is the navigation title): state, rank, then the same meta lines.
     private func phoneHeader(_ m: Member) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 TeamMemberStatusBadge(member: m).fixedSize()
                 if m.kind != "worker" { Tag(rankName(m.kind), tone: .accent) }
@@ -701,12 +728,23 @@ struct MemberDetailView: View {
         .padding(.horizontal, 2)
     }
 
-    /// "Claude · opus → sonnet · 역할 · 서브에이전트 2개 · 3분 전" and the state meaning when it matters.
+    /// Web .tm-detail__top under the name: the role (13.5 ink-2), then the provider badge · model, 서브에이전트 n개
+    /// in the working colour and the time at the trailing edge; the state meaning only when it matters.
     @ViewBuilder private func headerDetails(_ m: Member) -> some View {
         let info = MemberStatusInfo(m)
-        metaLine(m)
-        if showsExplanation(m, info: info) {
-            Text(info.explanation).font(CEFont.meta).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 4) {
+            if !m.role.isEmpty && m.role != m.name {
+                Text(m.role).font(CEFont.note).foregroundStyle(CE.ink2)
+                    .lineSpacing(CELeading.spacing(13.5, 1.4)).lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            metaLine(m)
+            if showsExplanation(m, info: info) {
+                Text(info.explanation).font(CEFont.note).foregroundStyle(CE.ink2)
+                    .lineSpacing(CELeading.note)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 2)
+            }
         }
     }
 
@@ -715,26 +753,37 @@ struct MemberDetailView: View {
         let applied = m.appliedModel ?? config?.model
         let requested = config?.model.flatMap { $0.isEmpty ? nil : $0 }
         let pending = requested.flatMap { value in m.appliedModel.flatMap { $0 != value ? value : nil } }
-        var model = Text(providerName(m.cli))
-        if let applied, !applied.isEmpty { model = model + Text(" · \(applied)") }
-        if let pending { model = model + Text(" → \(pending)").foregroundStyle(CE.attention) }
-        var tail: [String] = []
-        if !m.role.isEmpty && m.role != m.name { tail.append(m.role) }
+        var model: Text?
+        if let applied, !applied.isEmpty { model = Text(applied).foregroundStyle(CE.ink2) }
+        if let pending {
+            let arrow = Text((model == nil ? "→ " : " → ") + pending).foregroundStyle(CE.attention)
+            model = model.map { $0 + arrow } ?? arrow
+        }
         let subagents = SubagentInfo(m)
-        if let count = subagents.count, count > 0 {
-            tail.append(m.subagentState?.quality == "estimated" ? "서브에이전트 약 \(count)개" : "서브에이전트 \(count)개")
+        let subagentText: String? = subagents.count.flatMap { count in
+            count > 0 ? (m.subagentState?.quality == "estimated" ? "서브에이전트 약 \(count)개" : "서브에이전트 \(count)개") : nil
         }
         let activity = lastActivity(m)
-        if let activity { tail.append(relativeTime(activity.at)) }
         var help: [String] = []
         if let pending { help.append("요청한 모델 \(pending) · 세션을 다시 열 때 적용") }
         if let activity { help.append("\(activity.label)\n\(koDateTime(activity.date))") }
-        let line = tail.isEmpty ? model : model + Text(" · " + tail.joined(separator: " · "))
-        return line
-            .font(CEFont.meta).foregroundStyle(CE.ink3)
-            .lineLimit(2)
-            .fixedSize(horizontal: false, vertical: true)
-            .help(help.joined(separator: "\n"))
+        return HStack(alignment: .center, spacing: 8) {
+            Tag(providerName(m.cli))
+            if let model {
+                model.font(CEFont.meta).lineLimit(1).truncationMode(.middle)
+            }
+            if let subagentText {
+                Text(subagentText).font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.live).monospacedDigit()
+                    .lineLimit(1).fixedSize()
+            }
+            Spacer(minLength: 8)
+            if let activity {
+                Text(relativeTime(activity.at)).font(CEFont.caption).foregroundStyle(CE.ink3).monospacedDigit()
+                    .lineLimit(1).fixedSize()
+            }
+        }
+        .help(help.joined(separator: "\n"))
+        .accessibilityElement(children: .combine)
     }
 
     /// The state sentence only where the badge alone is not enough: down, failed, waiting on me, or not observed.
@@ -758,7 +807,8 @@ struct MemberDetailView: View {
             } else {
                 // On core, blocked also means the CLI state could not be read.
                 Text(info.explanation)
-                    .font(CEFont.secondary).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
+                    .font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.note)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if m.origin != "manual" && !teamIsLegacy(m) {
                 Group {
@@ -779,25 +829,29 @@ struct MemberDetailView: View {
     @ViewBuilder private func errorBox(_ m: Member) -> some View {
         if let error = m.lastError?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
             stateBox(tone: .danger, icon: "exclamationmark.triangle.fill", title: "마지막 오류") {
+                // Web .tm-error: the error itself in the danger colour, 13.5 / 1.45.
                 Text(error)
-                    .font(CEFont.secondary).foregroundStyle(CE.ink2)
+                    .font(CEFont.note).foregroundStyle(CE.danger.opacity(0.92)).lineSpacing(CELeading.note)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                 // The way back that is actually in reach: 깨우기 in the row, or for an older runner's session the menu.
                 if m.status == "error" && m.origin != "manual" {
                     Text(teamIsLegacy(m) ? "… 메뉴의 새 세션으로 이어가기로 복구하세요." : "깨우기로 다시 여세요.")
-                        .font(CEFont.meta).foregroundStyle(CE.ink3)
+                        .font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.note)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
     }
 
     private func stateBox<Content: View>(tone: Tone, icon: String, title: String, @ViewBuilder content: () -> Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: CERadius.plate - 4, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.card, style: .continuous)
         return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: icon).font(CEFont.secondary).foregroundStyle(tone.color)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: icon).font(.system(size: isMac ? 13.5 : 15, weight: .semibold)).foregroundStyle(tone.color)
                 Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                    .lineSpacing(CELeading.spacing(14.5, 1.35))
+                    .fixedSize(horizontal: false, vertical: true)
             }
             content()
         }
@@ -823,7 +877,9 @@ struct MemberDetailView: View {
             VStack(alignment: .leading, spacing: 4) {
                 DetailSectionTitle("최근 대화")
                 if talk.isEmpty {
-                    Text("아직 주고받은 말이 없습니다").font(CEFont.secondary).foregroundStyle(CE.ink3).padding(.vertical, 4)
+                    Text("아직 주고받은 말이 없습니다").font(CEFont.note).foregroundStyle(CE.ink2)
+                        .lineSpacing(CELeading.note).fixedSize(horizontal: false, vertical: true)
+                        .padding(.vertical, 6)
                 } else {
                     VStack(spacing: 0) {
                         ForEach(Array(talk.enumerated()), id: \.element.id) { index, message in
@@ -840,6 +896,8 @@ struct MemberDetailView: View {
                             .help("대화방에서 이 말 보기")
                         }
                     }
+                    // The row text stays under the title; the hover fill reaches a little past it.
+                    .padding(.horizontal, -4)
                 }
             }
             .padding(.horizontal, 2)
@@ -858,37 +916,41 @@ struct MemberDetailView: View {
                         DetailSectionTitle(report.label)
                         Spacer(minLength: 8)
                         if let reportedAt {
-                            Text(relativeTime(m.nowAt)).font(CEFont.meta).foregroundStyle(CE.ink3).monospacedDigit()
+                            Text(relativeTime(m.nowAt)).font(CEFont.caption).foregroundStyle(CE.ink3).monospacedDigit()
                                 .help("보고 시각 \(koDateTime(reportedAt))")
                         }
                     }
+                    // Web .tm-facts: 14 / 1.45.
                     if m.now.isEmpty {
                         Text(report.text).font(TeamFont.fact).foregroundStyle(CE.ink3)
+                            .lineSpacing(CELeading.spacing(14, 1.45))
+                            .fixedSize(horizontal: false, vertical: true)
                     } else {
                         Text(teamInlineMarkdown(m.now)).font(TeamFont.fact).foregroundStyle(CE.ink)
-                            .lineSpacing(2)
+                            .lineSpacing(CELeading.spacing(14, 1.45))
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 if !m.next.isEmpty || m.queuedCount > 0 || decisions > 0 {
-                    VStack(alignment: .leading, spacing: 7) {
+                    VStack(alignment: .leading, spacing: 8) {
                         if !m.next.isEmpty {
                             TeamFactRow(label: "다음") {
-                                Text(teamInlineMarkdown(m.next)).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
+                                Text(teamInlineMarkdown(m.next)).foregroundStyle(CE.ink).fixedSize(horizontal: false, vertical: true)
                             }
                         }
                         if m.queuedCount > 0 {
                             TeamFactRow(label: "대기열") {
-                                Text("\(m.queuedCount)건").foregroundStyle(CE.ink2).monospacedDigit()
+                                Text("\(m.queuedCount)건").foregroundStyle(CE.ink).monospacedDigit()
                                     .help("CLI에 아직 넣지 않은 입력입니다")
                             }
                         }
                         if decisions > 0 {
                             TeamFactRow(label: "결재") {
-                                // Home's quiet accent link ("결재함", "사무실 보기"): no underline, no state colour.
+                                // Web .tm-inlink: decisions waiting for me pull the eye (wait colour, semibold, underlined).
                                 Button { goInbox() } label: {
-                                    Text("\(decisions)건 대기 · 결재함으로").fontWeight(.medium).foregroundStyle(CE.accent)
+                                    Text("\(decisions)건 대기 · 결재함으로").fontWeight(.semibold).foregroundStyle(CE.attention)
+                                        .underline(true, color: CE.attention.opacity(0.7))
                                         .teamTallHitArea()
                                 }
                                 .buttonStyle(DetailPressStyle())
@@ -974,13 +1036,12 @@ struct MemberDetailView: View {
             if let busy = menuBusyTitle {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.mini)
-                    Text(busy).font(CEFont.meta).foregroundStyle(CE.ink2)
+                    Text(busy).font(CEFont.note).foregroundStyle(CE.ink2)
                 }
             }
             freshReceipt(m)
             if let reason = readOnlyReason {
-                Label(reason, systemImage: store.isDemo ? "eye" : "wifi.slash").font(CEFont.meta).foregroundStyle(CE.ink3)
-                    .fixedSize(horizontal: false, vertical: true)
+                teamStatus(reason, icon: store.isDemo ? "eye" : "wifi.slash")
             }
             if manual {
                 teamNote("직접 띄운 세션입니다. 압축하거나 재울 수 없고, 보낸 말은 그 세션이 wait를 부를 때 전달됩니다.")
@@ -990,13 +1051,13 @@ struct MemberDetailView: View {
                 teamNote("실행이 꺼져 있어 깨울 수 없습니다. 팀 화면에서 총괄을 시작하세요.")
             }
             if let note {
-                Label(note, systemImage: "paperplane").font(CEFont.meta).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
+                teamStatus(note, icon: "paperplane")
             }
             if let copyNote {
-                Label(copyNote, systemImage: "doc.on.doc").font(CEFont.meta).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
+                teamStatus(copyNote, icon: "doc.on.doc")
             }
             if let failure {
-                Label(failure, systemImage: "exclamationmark.circle").font(CEFont.meta).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true)
+                teamFailure(failure)
             }
         }
     }
@@ -1061,10 +1122,11 @@ struct MemberDetailView: View {
                     .help(command.attached ? "서버 컴퓨터의 터미널에서 실행하면 같은 CLI 터미널을 엽니다" : "서버 컴퓨터의 터미널에서 이 세션을 다시 엽니다")
             }
         } label: {
+            // As tall as the 32pt buttons beside it, so the row keeps one height.
             Image(systemName: "ellipsis")
-                .font(.system(size: 12, weight: .bold))
+                .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(CE.ink2)
-                .frame(width: 28, height: 26)
+                .frame(width: isMac ? 32 : 38, height: isMac ? 32 : 38)
                 .background(Color.white.opacity(0.06), in: Capsule())
                 .overlay { Capsule().strokeBorder(Color.white.opacity(0.1)) }
                 .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
@@ -1115,7 +1177,7 @@ struct MemberDetailView: View {
                 .padding(.bottom, 14)
             } label: {
                 HStack(spacing: 8) {
-                    DetailSectionTitle("실행 설정")
+                    DetailSectionTitle("실행 설정", fold: true)
                     Spacer(minLength: 8)
                     Text(configSummary(m)).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
                 }
@@ -1140,40 +1202,50 @@ struct MemberDetailView: View {
         let list = store.modelCatalog.list(for: cli)
         let selected = list.option(for: trimmed)
         let efforts = list.efforts(for: trimmed.isEmpty ? (rankConfig?.model ?? "") : trimmed, cli: cli)
+        let modelDefault = rankConfig?.model.map { "직급 기본값 (\($0))" } ?? "직급 기본값"
+        let effortDefault = rankConfig?.effort.map { "직급 기본값 (\($0))" } ?? "직급 기본값"
+        let modelShown = trimmed.isEmpty ? modelDefault : (selected?.label ?? list.unknownCurrent(trimmed) ?? trimmed)
+        let effortShown = effort.isEmpty ? effortDefault : (efforts.contains(effort) ? effort : "현재: \(effort)")
         return VStack(alignment: .leading, spacing: 10) {
-            TeamFactRow(label: "AI CLI", alignment: .center) {
+            // Web .field__label 13/600 ink-2 next to .input-sized controls (the fact rows above keep 13 ink-3).
+            TeamFactRow(label: "AI CLI", alignment: .center, strong: true) {
                 Picker("AI CLI", selection: Binding(get: { switchAllowed ? provider : m.cli }, set: { provider = $0 })) {
                     Text(providerOption("claude")).tag("claude")
                     Text(providerOption("codex")).tag("codex")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                #if os(macOS)
+                .controlSize(.large)
+                #endif
+                .fixedSize()
                 .disabled(!switchAllowed || !store.canWrite)
             }
             if let reason = switchBlockReason(m) { teamNote(reason) }
-            TeamFactRow(label: "모델", alignment: .center) {
-                Picker("모델", selection: $model) {
-                    Text(rankConfig?.model.map { "직급 기본값 (\($0))" } ?? "직급 기본값").tag("")
-                    ForEach(list.models) { option in
-                        Text(option.label).tag(selected?.value == option.value ? trimmed : option.value)
+            TeamFactRow(label: "모델", alignment: .center, strong: true) {
+                TeamSelect(value: modelShown, mono: !trimmed.isEmpty, accessibility: "모델") {
+                    Picker("모델", selection: $model) {
+                        Text(modelDefault).tag("")
+                        ForEach(list.models) { option in
+                            Text(option.label).tag(selected?.value == option.value ? trimmed : option.value)
+                        }
+                        if let unknown = list.unknownCurrent(trimmed) { Text(unknown).tag(trimmed).disabled(true) }
                     }
-                    if let unknown = list.unknownCurrent(trimmed) { Text(unknown).tag(trimmed).disabled(true) }
+                    .labelsHidden()
+                    .pickerStyle(.inline)
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .font(CEFont.mono)
                 .disabled(!store.canWrite)
-                .accessibilityLabel("모델")
             }
-            TeamFactRow(label: "effort", alignment: .center) {
-                Picker("effort", selection: $effort) {
-                    Text(rankConfig?.effort.map { "직급 기본값 (\($0))" } ?? "직급 기본값").tag("")
-                    ForEach(efforts, id: \.self) { Text($0).tag($0) }
-                    if !([""] + efforts).contains(effort) { Text("현재: \(effort)").tag(effort).disabled(true) }
+            TeamFactRow(label: "effort", alignment: .center, strong: true) {
+                TeamSelect(value: effortShown, accessibility: "effort") {
+                    Picker("effort", selection: $effort) {
+                        Text(effortDefault).tag("")
+                        ForEach(efforts, id: \.self) { Text($0).tag($0) }
+                        if !([""] + efforts).contains(effort) { Text("현재: \(effort)").tag(effort).disabled(true) }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.inline)
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .fixedSize()
                 .disabled(!store.canWrite)
             }
             if reopens {
@@ -1189,11 +1261,11 @@ struct MemberDetailView: View {
                 }.ceSecondaryButton().controlSize(.small).disabled(busy || !store.canWrite)
             }
             if let block {
-                Label(block, systemImage: "exclamationmark.circle").font(CEFont.meta).foregroundStyle(CE.attention).fixedSize(horizontal: false, vertical: true)
+                teamStatus(block, icon: "exclamationmark.circle", color: CE.attention)
             }
             HStack(spacing: 8) {
                 if dirty && !busy {
-                    Button("되돌리기") { loadConfig(m) }.buttonStyle(DetailGhostButtonStyle()).controlSize(.small)
+                    Button("되돌리기") { loadConfig(m) }.ceGhostButton().controlSize(.small)
                 }
                 Spacer(minLength: 0)
                 // A change that closes and reopens the session is confirmed first; a stored-only change applies directly.
@@ -1208,14 +1280,14 @@ struct MemberDetailView: View {
                 .disabled(list.unknownCurrent(trimmed) != nil || !dirty || configChanged(m) || block != nil || !store.canWrite || running != nil || store.pendingActions.contains("member:\(m.id)"))
             }
             if let configNote {
-                Label(configNote, systemImage: configHandoff ? "tray.full" : "checkmark.circle").font(CEFont.meta).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
+                teamStatus(configNote, icon: configHandoff ? "tray.full" : "checkmark.circle")
                 if configHandoff {
                     Button { instruct(m) } label: { Label("\(m.name)에게 지시", systemImage: "text.bubble") }
                         .ceSecondaryButton().controlSize(.small)
                 }
             }
             if let configFailure {
-                Label(configFailure, systemImage: "exclamationmark.circle").font(CEFont.meta).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true)
+                teamFailure(configFailure)
             }
         }
         .task(id: "\(store.writeNamespace)|\(configOpen)") {
@@ -1229,7 +1301,7 @@ struct MemberDetailView: View {
                 ActivityList(memberID: m.id).padding(.bottom, 10)
             } label: {
                 HStack {
-                    DetailSectionTitle("활동")
+                    DetailSectionTitle("활동", fold: true)
                     Spacer(minLength: 0)
                 }
             }
@@ -1247,7 +1319,7 @@ struct MemberDetailView: View {
             Label {
                 Text(busy ? (busyTitle ?? title) : title)
             } icon: {
-                if busy { ProgressView().controlSize(.mini) } else { Image(systemName: icon) }
+                if busy { ProgressView().controlSize(.small) } else { Image(systemName: icon) }
             }
         }
         .ceSecondaryButton()
@@ -1491,20 +1563,22 @@ private struct TeamTalkRow: View {
     let message: Message
     var notice: DeliveryNoticeItem?
     var hasDeliveryNotices = false
-    @ScaledMetric(relativeTo: .caption) private var markWidth: CGFloat = 38
+    @ScaledMetric(relativeTo: .caption) private var markWidth: CGFloat = 40
 
     var body: some View {
+        // Same rhythm as the activity rows (web .tm-act 13.5): about 36pt a row.
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             mark.frame(minWidth: markWidth, alignment: .leading)
-            Text(text).font(CEFont.secondary).foregroundStyle(CE.ink).lineLimit(1)
+            Text(text).font(CEFont.note).foregroundStyle(CE.ink).lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if message.mine, let delivery = notice.map(DeliveryInfo.init) ?? DeliveryInfo(hasDeliveryNotices && ["held", "failed"].contains(message.delivery ?? "") ? nil : message.delivery) {
-                Text(delivery.label).font(CEFont.meta.weight(.medium)).foregroundStyle(delivery.tone.color).lineLimit(1).fixedSize()
+                Text(delivery.label).font(CEFont.meta.weight(.semibold)).foregroundStyle(delivery.tone.color).lineLimit(1).fixedSize()
                     .help(delivery.explanation)
             }
-            Text(relativeTime(message.at)).font(CEFont.meta).foregroundStyle(CE.ink3).monospacedDigit().lineLimit(1).fixedSize()
+            Text(relativeTime(message.at)).font(CEFont.caption).foregroundStyle(CE.ink3).monospacedDigit().lineLimit(1).fixedSize()
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 9)
+        .padding(.horizontal, 4)
         .accessibilityElement(children: .combine)
     }
 
@@ -1628,16 +1702,17 @@ struct ActivityList: View {
     }
 
     @ViewBuilder private var list: some View {
+        // Empty and loading states are the web .tm-note: centred, 14 above and below.
         if store.isDemo {
-            teamNote("샘플에는 활동 기록이 없습니다.")
+            teamEmptyNote("샘플에는 활동 기록이 없습니다.")
         } else if let error, items.isEmpty {
-            Label(error, systemImage: "exclamationmark.circle").font(CEFont.meta).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true)
+            teamFailure(error)
         } else if !loaded {
-            teamNote(loading ? "불러오는 중입니다" : "서버에 연결되면 활동을 불러옵니다.")
+            teamEmptyNote(loading ? "불러오는 중입니다" : "서버에 연결되면 활동을 불러옵니다.")
         } else if items.isEmpty {
-            teamNote("아직 활동이 없습니다")
+            teamEmptyNote("아직 활동이 없습니다")
         } else {
-            if let error { Label(error, systemImage: "exclamationmark.circle").font(CEFont.meta).foregroundStyle(CE.danger) }
+            if let error { teamFailure(error) }
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                     if index > 0 { RowDivider(inset: 0) }
@@ -1652,15 +1727,17 @@ struct ActivityList: View {
         let long = item.text.count > 180 || item.text.contains("\n")
         let open = expanded.contains(item.id)
         let mono = item.kind == "tool" || item.kind == "tool_result"
+        // Web .tm-act: text 13.5 / 1.5 (tool output 12.5 monospaced), meta 12 in an 84pt column.
         return HStack(alignment: .firstTextBaseline, spacing: 10) {
             HStack(spacing: 8) {
-                Text(clockTime(item.at)).font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink3)
-                Text(activityKindName(item.kind)).font(CEFont.meta.weight(.semibold)).foregroundStyle(kindColor(item.kind))
+                Text(clockTime(item.at)).font(CEFont.caption).monospacedDigit().foregroundStyle(CE.ink3)
+                Text(activityKindName(item.kind)).font(CEFont.caption.weight(.semibold)).foregroundStyle(kindColor(item.kind))
             }
             .frame(width: metaWidth, alignment: .leading)
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.text.isEmpty ? "—" : item.text)
-                    .font(mono ? CEFont.mono : CEFont.secondary)
+                    .font(mono ? CEFont.mono : CEFont.note)
+                    .lineSpacing(mono ? CELeading.spacing(12.5, 1.5) : CELeading.spacing(13.5, 1.5))
                     .foregroundStyle(textColor(item.kind))
                     .lineLimit(open ? nil : 3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1727,6 +1804,7 @@ struct NewMemberView: View {
     @State private var provider = "claude"
     @State private var model = ""
     @State private var failure: String?
+    @FocusState private var focus: NewMemberField?
 
     init() {}
 
@@ -1749,8 +1827,9 @@ struct NewMemberView: View {
             form
         } footer: {
             // Esc is the header's close button; neither closes while the session is being added.
-            Button("취소") { dismiss() }.ceSecondaryButton().disabled(busy)
-            addButton.keyboardShortcut(.defaultAction)
+            // Web form actions: ghost 취소 and primary 추가, both size m (44pt, 15 semibold).
+            Button("취소") { dismiss() }.ceGhostButton().controlSize(.regular).disabled(busy)
+            addButton.controlSize(.regular).keyboardShortcut(.defaultAction)
         }
         .interactiveDismissDisabled(busy)
     }
@@ -1766,10 +1845,11 @@ struct NewMemberView: View {
         .disabled(trimmedName.isEmpty || busy || blockReason != nil)
     }
 
+    /// Web form: 14 between fields, 6 between a label (13/600 ink-2) and its 44pt input; errors 13.5 danger.
     private var form: some View {
         VStack(alignment: .leading, spacing: 14) {
-            field("이름", text: $name, prompt: "개발 담당", plain: false)
-            field("역할 · 선택", text: $role, prompt: "결제 화면 구현", plain: false)
+            field("이름", text: $name, prompt: "개발 담당", plain: false, id: .name)
+            field("역할 · 선택", text: $role, prompt: "결제 화면 구현", plain: false, id: .role)
             VStack(alignment: .leading, spacing: 6) {
                 fieldLabel("AI CLI")
                 Picker("AI CLI", selection: $provider) {
@@ -1778,40 +1858,58 @@ struct NewMemberView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                #if os(macOS)
+                .controlSize(.large)
+                #endif
                 .fixedSize()
             }
-            field("모델 · 선택", text: $model, prompt: "CLI 기본값", plain: true)
+            field("모델 · 선택", text: $model, prompt: "CLI 기본값", plain: true, id: .model)
             if store.runtime?.providers[provider]?.installed == false {
                 InlineNotice(tone: .attention, icon: "exclamationmark.triangle", title: "\(providerFullName(provider))가 설치돼 있지 않습니다",
                              detail: "설정의 실행 환경을 확인하세요.")
             }
             if let failure {
-                Label(failure, systemImage: "exclamationmark.circle").font(CEFont.secondary).foregroundStyle(CE.danger)
-                    .fixedSize(horizontal: false, vertical: true)
+                teamFailure(failure)
             } else if let blockReason {
-                Label(blockReason, systemImage: store.isDemo ? "eye" : "info.circle").font(CEFont.secondary).foregroundStyle(CE.ink2)
-                    .fixedSize(horizontal: false, vertical: true)
+                teamStatus(blockReason, icon: store.isDemo ? "eye" : "info.circle")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func fieldLabel(_ text: String) -> some View {
-        Text(text).font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink2)
+        #if os(macOS)
+        Text(text).font(.system(size: 13, weight: .semibold)).foregroundStyle(CE.ink2)
+        #else
+        Text(text).font(.footnote.weight(.semibold)).foregroundStyle(CE.ink2)
+        #endif
     }
 
-    private func field(_ label: String, text: Binding<String>, prompt: String, plain: Bool) -> some View {
+    private func field(_ label: String, text: Binding<String>, prompt: String, plain: Bool, id: NewMemberField) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             fieldLabel(label)
-            TextField(label, text: text, prompt: Text(prompt))
-                .font(plain ? CEFont.mono : CEFont.body)
-                .ceField()
+            // Names take the field's own 15pt; the model id is code (web .input.t-code), monospaced a step smaller.
+            Group {
+                if plain {
+                    TextField(label, text: text, prompt: Text(prompt)).font(Self.codeFont)
+                } else {
+                    TextField(label, text: text, prompt: Text(prompt))
+                }
+            }
+                .focused($focus, equals: id)
+                .ceField(focused: focus == id)
                 .autocorrectionDisabled(plain)
                 #if os(iOS)
                 .textInputAutocapitalization(plain ? .never : .sentences)
                 #endif
         }
     }
+
+    #if os(macOS)
+    private static let codeFont: Font = .system(size: 14, design: .monospaced)
+    #else
+    private static let codeFont: Font = .system(.subheadline, design: .monospaced)
+    #endif
 
     private func providerOption(_ cli: String) -> String {
         let name = providerFullName(cli)
@@ -1832,6 +1930,8 @@ struct NewMemberView: View {
     }
 }
 
+private enum NewMemberField: Hashable { case name, role, model }
+
 // MARK: - Member detail surfaces (file-private)
 
 /// Section plate of the member detail. In the Mac drawer (already a panel) a flat faint white fill and rim, no dark
@@ -1842,7 +1942,8 @@ private struct DetailPlate<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: CERadius.plate - 4, style: .continuous)
+        // Web team panels: radius 18.
+        let shape = RoundedRectangle(cornerRadius: CERadius.card, style: .continuous)
         let inner = content
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1857,55 +1958,63 @@ private struct DetailPlate<Content: View>: View {
     }
 }
 
-/// Section title inside a plate, as on Home cards.
+/// Section title inside a plate, as on Home cards (14 semibold); a fold's title is the web .tm-fold__sum, 14.5.
 private struct DetailSectionTitle: View {
     let title: String
-    init(_ title: String) { self.title = title }
+    var fold = false
+    init(_ title: String, fold: Bool = false) { self.title = title; self.fold = fold }
     var body: some View {
-        Text(title).font(CEFont.section).foregroundStyle(CE.ink).accessibilityAddTraits(.isHeader)
+        Text(title).font(fold ? CEFont.rowTitle : CEFont.section).foregroundStyle(CE.ink).accessibilityAddTraits(.isHeader)
     }
 }
 
-/// Quieter companion of the subtle-glass capsule (`ceSecondaryButton`): same size, no fill, a hairline outline and an
-/// ink2 label; a faint fill on hover.
-private struct DetailGhostButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View { GhostBody(configuration: configuration) }
+/// Web .input.tm-select: a dark well with a white .12 ring, the value and a chevron at the trailing edge; the choices
+/// open as a menu. `content` is an inline Picker, so the chosen value keeps its checkmark.
+private struct TeamSelect<Content: View>: View {
+    let value: String
+    var mono = false
+    let accessibility: String
+    @ViewBuilder var content: Content
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
 
-    private struct GhostBody: View {
-        let configuration: ButtonStyleConfiguration
-        @Environment(\.isEnabled) private var isEnabled
-        @Environment(\.controlSize) private var controlSize
-        @State private var hovering = false
-
-        var body: some View {
-            configuration.label
-                .font(font)
-                .lineLimit(1)
-                .padding(.horizontal, horizontal).padding(.vertical, vertical)
-                .foregroundStyle(isEnabled ? CE.ink2 : CE.ink3)
-                .background(Color.white.opacity(fill), in: Capsule())
-                .overlay { Capsule().strokeBorder(Color.white.opacity(isEnabled ? 0.11 : 0.06)) }
-                .opacity(isEnabled ? 1 : 0.8)
-                .ghostHitArea()
-                .onHover { hovering = $0 }
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
+        Menu {
+            content
+        } label: {
+            HStack(spacing: 10) {
+                Text(value)
+                    .font(mono ? Self.monoFont : Self.font)
+                    .foregroundStyle(isEnabled ? CE.ink : CE.ink3)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isEnabled ? CE.ink2 : CE.ink3)
+            }
+            .padding(.horizontal, 12)
+            .frame(minWidth: 170, minHeight: isMac ? 36 : 44, alignment: .leading)
+            .background(CE.bgDeep.opacity(0.5), in: shape)
+            .overlay { shape.strokeBorder(Color.white.opacity(isEnabled && hovering ? 0.2 : 0.12)) }
+            .contentShape(shape)
         }
-
-        private var fill: Double {
-            guard isEnabled else { return 0 }
-            return configuration.isPressed ? 0.09 : hovering ? 0.05 : 0
-        }
-
-        #if os(macOS)
-        private var small: Bool { controlSize == .small || controlSize == .mini }
-        private var font: Font { .system(size: small ? 12 : 13, weight: .medium) }
-        private var horizontal: CGFloat { small ? 10 : 13 }
-        private var vertical: CGFloat { small ? 4 : 6 }
-        #else
-        private var font: Font { CEFont.rowTitle }
-        private var horizontal: CGFloat { 14 }
-        private var vertical: CGFloat { 8 }
-        #endif
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .onHover { hovering = $0 }
+        .accessibilityLabel(accessibility)
+        .accessibilityValue(value)
     }
+
+    #if os(macOS)
+    private static var font: Font { .system(size: 13.5) }
+    private static var monoFont: Font { .system(size: 13, design: .monospaced) }
+    #else
+    private static var font: Font { .subheadline }
+    private static var monoFont: Font { .system(.subheadline, design: .monospaced) }
+    #endif
 }
 
 /// Inline links: dim on press, nothing else.
@@ -1916,15 +2025,6 @@ private struct DetailPressStyle: ButtonStyle {
 }
 
 private extension View {
-    /// iPhone: a 44pt hit target around the visible capsule. Mac: the capsule itself.
-    @ViewBuilder func ghostHitArea() -> some View {
-        #if os(macOS)
-        self.contentShape(Capsule())
-        #else
-        self.frame(minHeight: 44).contentShape(Rectangle())
-        #endif
-    }
-
     /// Text field on a flat plate: a light well instead of `ceField`'s dark one.
     func detailField() -> some View {
         self.textFieldStyle(.plain)
@@ -1936,7 +2036,8 @@ private extension View {
 
 // MARK: - Shared helpers (file-private)
 
-/// Collapsible section in the web .tm-fold look: chevron, label, content below. Content is built only when open.
+/// Collapsible section in the web .tm-fold look (summary 48 tall, 14.5/600, a small chevron): chevron, label, content
+/// below. Content is built only when open.
 private struct TeamFoldStyle: DisclosureGroupStyle {
     func makeBody(configuration: Configuration) -> some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1945,13 +2046,13 @@ private struct TeamFoldStyle: DisclosureGroupStyle {
             } label: {
                 HStack(spacing: 9) {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 10.5, weight: .bold))
                         .foregroundStyle(CE.ink2)
                         .rotationEffect(.degrees(configuration.isExpanded ? 90 : 0))
                     configuration.label
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(minHeight: isMac ? 40 : 48)
+                .frame(minHeight: isMac ? 46 : 48)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -1963,16 +2064,20 @@ private struct TeamFoldStyle: DisclosureGroupStyle {
     }
 }
 
+/// Web .tm-facts: a 56pt label column (13, ink-3) and the value at 14 / 1.45. `strong` labels a control instead of a
+/// fact (web .field__label: 13/600 ink-2).
 private struct TeamFactRow<Value: View>: View {
     let label: String
     var alignment: VerticalAlignment = .firstTextBaseline
+    var strong = false
     @ViewBuilder var value: Value
     @ScaledMetric(relativeTo: .footnote) private var labelWidth: CGFloat = 56
 
     var body: some View {
         HStack(alignment: alignment, spacing: 10) {
-            Text(label).font(TeamFont.label).foregroundStyle(CE.ink3).lineLimit(1).frame(width: labelWidth, alignment: .leading)
-            value.font(TeamFont.fact).frame(maxWidth: .infinity, alignment: .leading)
+            Text(label).font(strong ? TeamFont.label.weight(.semibold) : TeamFont.label).foregroundStyle(strong ? CE.ink2 : CE.ink3)
+                .lineLimit(1).frame(width: labelWidth, alignment: .leading)
+            value.font(TeamFont.fact).lineSpacing(CELeading.spacing(14, 1.45)).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
@@ -2044,8 +2149,31 @@ private extension View {
 
 private let teamLegacyNote = "이전 실행기의 세션입니다. 기존 터미널에서 확인하세요. herdr-core에서는 기존 세션 편입과 도구를 붙여 다시 열기를 지원하지 않습니다."
 
+/// Web .tm-note--left: 13.5 / 1.5, ink-2.
 private func teamNote(_ text: String) -> some View {
-    Text(text).font(CEFont.meta).foregroundStyle(CE.ink3).fixedSize(horizontal: false, vertical: true)
+    Text(text).font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.spacing(13.5, 1.5))
+        .fixedSize(horizontal: false, vertical: true)
+}
+
+/// Web .tm-note for an empty or loading state: centred, 14 above and below.
+private func teamEmptyNote(_ text: String) -> some View {
+    Text(text).font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.spacing(13.5, 1.5))
+        .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 14)
+}
+
+/// A status line with its mark (sent, copied, applied, why it is locked): 13.5 / 1.5.
+private func teamStatus(_ text: String, icon: String, color: Color = CE.ink2) -> some View {
+    Label(text, systemImage: icon).font(CEFont.note).foregroundStyle(color).lineSpacing(CELeading.spacing(13.5, 1.5))
+        .fixedSize(horizontal: false, vertical: true)
+}
+
+/// Web .tm-error / .form__error: 13.5 / 1.45, danger.
+private func teamFailure(_ text: String) -> some View {
+    Label(text, systemImage: "exclamationmark.circle").font(CEFont.note).foregroundStyle(CE.danger).lineSpacing(CELeading.note)
+        .fixedSize(horizontal: false, vertical: true)
 }
 
 private func teamIsLegacy(_ member: Member) -> Bool {
@@ -2069,20 +2197,34 @@ private func teamCopy(_ text: String) {
     #endif
 }
 
-/// Observation-aware status using the shared tokens, also used by the terminal sheet.
+/// Observation-aware status using the shared tokens, also used by the terminal sheet. Web .status.tm-status: 24 tall,
+/// padding 0 9 0 8, dot 8, 12.5/600, a fill per state (none for asleep/offline, which keep only the hollow ring).
 struct TeamMemberStatusBadge: View {
     let member: Member
     var body: some View {
         let info = MemberStatusInfo(member)
-        HStack(spacing: 5) {
-            StatusDot(tone: info.tone, pulsing: info.live, size: 6)
-            Text(info.label).font(CEFont.meta.weight(.medium))
+        HStack(spacing: 6) {
+            StatusDot(tone: info.tone, pulsing: info.live, size: 8)
+            Text(info.label).font(CEFont.meta.weight(.semibold))
                 .foregroundStyle(info.tone == .neutral || info.tone == .dim ? CE.ink2 : info.tone.color)
+                .lineLimit(1)
         }
-        .padding(.horizontal, 8).frame(height: 22)
-        .background((info.tone == .neutral || info.tone == .dim ? Color.white : info.tone.color).opacity(0.1), in: Capsule())
+        .padding(.leading, 8).padding(.trailing, 9).frame(minHeight: 24)
+        .background(Self.fill(info.tone), in: Capsule())
         .help(info.explanation)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("CLI 상태 \(info.label). \(info.explanation)")
+    }
+
+    private static func fill(_ tone: Tone) -> Color {
+        switch tone {
+        case .live, .accent: CE.violet.opacity(0.2)
+        case .attention: CE.attention.opacity(0.15)
+        case .approval: CE.approval.opacity(0.17)
+        case .danger: CE.error.opacity(0.15)
+        case .success: CE.success.opacity(0.14)
+        case .neutral: Color.white.opacity(0.06)
+        case .dim: Color.clear
+        }
     }
 }

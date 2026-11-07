@@ -16,8 +16,10 @@ struct HomeView: View {
     @State private var width: CGFloat = isMac ? 900 : 0
     @State private var nowExpanded = false
     @State private var nowFullHeight: CGFloat = 0
-    /// Three lines of the 지금 상황 body.
-    @ScaledMetric(relativeTo: .body) private var nowClampHeight: CGFloat = isMac ? 64 : 72
+    /// Five lines of the 지금 상황 body (web .hm-now__body: 14.5px × 1.6 × 5 = 116).
+    @ScaledMetric(relativeTo: .body) private var nowClampHeight: CGFloat = isMac ? 116 : 120
+    /// Mac: the pointing hand pushed while the pointer is over the collapsed 지금 상황 body.
+    @State private var nowCursorPushed = false
     @State private var tidyNote: HomeNote?
     /// iPhone/iPad: 판 정리 asks once (no tooltip there, and the circular-arrows mark reads as "refresh").
     @State private var confirmTidy = false
@@ -28,12 +30,17 @@ struct HomeView: View {
     @State private var todoError: String?
     @State private var lastTodoShift = Date.distantPast
 
-    private static let maxContentWidth: CGFloat = 880
+    /// The shared content column (`ceContentColumn`): 880 wide including the gutters, as the web .shell__column.
+    private static let columnWidth: CGFloat = 880
     private static let topDecisions = 3
     private static let topMembers = 5
-    private static let topNextWork = 2
-    private static let topWorkRows = 3
-    private static let topRecent = 3
+    /// Web TOP_WORK: up to five work rows.
+    private static let topNextWork = 5
+    private static let topWorkRows = 5
+    /// Web TOP_REPORTS.
+    private static let topRecent = 5
+    /// Web .hm-row__title 14.5 at 1.4, two lines at most.
+    private static let rowTitleLeading = CELeading.spacing(14.5, 1.4)
     /// 팀 summary: fixed order, zero counts dropped. 승인 창 앞 and 오류 are not counted here: they are in 내 차례.
     private static let summaryParts: [(status: String, label: String)] = [
         ("working", "일하는 중"), ("waiting", "내 답 기다림"), ("idle", "쉬는 중"), ("asleep", "잠듦"), ("offline", "안 보임"),
@@ -52,14 +59,16 @@ struct HomeView: View {
     // MARK: - Derived data
 
     private var hPad: CGFloat { isMac ? 24 : 16 }
-    private var contentWidth: CGFloat { min(width, Self.maxContentWidth + hPad * 2) - hPad * 2 }
+    private var contentWidth: CGFloat { min(width, Self.columnWidth) - hPad * 2 }
     /// Web: auto-fit columns of at least 320.
     private var twoColumn: Bool { wide && contentWidth >= 652 }
     private var isHq: Bool { store.state?.project.isHq == true }
     private var leadLabel: String { isHq ? "본사 AI" : "총괄" }
-    private var rowMinHeight: CGFloat { isMac ? 36 : 44 }
-    /// 내 차례: every row has the same 22pt leading column (glyph or checkbox), so titles start here.
-    private var titleInset: CGFloat { (rowMinHeight + 22) / 2 + 4 }
+    /// Web .hm-row / .hm-check: 44 on every platform.
+    private var rowMinHeight: CGFloat { 44 }
+    /// 내 차례: every row has the same 22pt leading column (glyph or checkbox), so titles start here
+    /// (web: 44 check − 11 margin + 2 padding = 35).
+    private var titleInset: CGFloat { (rowMinHeight + 22) / 2 + 2 }
     private var glyphGap: CGFloat { titleInset - 22 }
 
     private var openDecisions: [Decision] { newestFirst(store.decisions.filter { $0.status == "open" }) }
@@ -96,11 +105,7 @@ struct HomeView: View {
                 nowCard(state.project)
                 columns(turn)
             }
-            .padding(.horizontal, hPad)
-            .padding(.top, isMac ? 14 : 10)
-            .padding(.bottom, isMac ? 20 : 24)
-            .frame(maxWidth: Self.maxContentWidth + hPad * 2)
-            .frame(maxWidth: .infinity)
+            .ceContentColumn()
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .refreshable { await store.refresh() }
@@ -121,7 +126,7 @@ struct HomeView: View {
         if !hasLeft { clearBlock(turn.rows) }
         if twoColumn && hasLeft && hasRight {
             HStack(alignment: .top, spacing: CESpace.m) {
-                turnCard(turn.rows)
+                turnCard(turn)
                     .frame(maxWidth: .infinity)
                 VStack(spacing: CESpace.m) {
                     teamCard
@@ -131,7 +136,7 @@ struct HomeView: View {
                 .frame(maxWidth: .infinity)
             }
         } else {
-            if hasLeft { turnCard(turn.rows) }
+            if hasLeft { turnCard(turn) }
             teamCard
             progressCard
             recentCard
@@ -169,10 +174,8 @@ struct HomeView: View {
                 }
             }
         }
-        .padding(.horizontal, hPad)
-        .padding(.top, isMac ? 14 : 10)
-        .frame(maxWidth: Self.maxContentWidth + hPad * 2)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .ceContentColumn()
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: - 연결 게이트
@@ -181,21 +184,28 @@ struct HomeView: View {
     @ViewBuilder private func gateCard(_ project: Project) -> some View {
         if !store.isDemo && !project.connection.ok {
             let reason = project.connection.reason
-            Plate(padding: 0) {
+            // Web .gate: radius 20, padding 10 10 10 16, gap 8 × 14, text 14/1.5 (650 ink-1 for the reason),
+            // the action a glass size m button (44pt, 15/600).
+            let textFont: Font = isMac ? .system(size: 14, weight: .semibold) : CEFont.rowTitle
+            Plate(padding: 0, radius: 20) {
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack(alignment: .center, spacing: 10) {
-                        Image(systemName: gateIcon(reason))
-                            .font(CEFont.rowTitle)
-                            .foregroundStyle(reason == "backend_down" ? CE.danger : CE.attention)
-                            .accessibilityHidden(true)
-                        Text(project.connection.ownerDetail ?? gateFallback(reason))
-                            .font(CEFont.rowTitle).foregroundStyle(CE.ink)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(alignment: .center, spacing: 14) {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Image(systemName: gateIcon(reason))
+                                .font(textFont)
+                                .foregroundStyle(reason == "backend_down" ? CE.danger : CE.attention)
+                                .accessibilityHidden(true)
+                            Text(project.connection.ownerDetail ?? gateFallback(reason))
+                                .font(textFont).foregroundStyle(CE.ink)
+                                .lineSpacing(CELeading.spacing(14, 1.5))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                         gateAction(reason)
                     }
                     if let startError { HomeNoteLine(note: HomeNote(text: startError, tone: .danger)) }
                 }
-                .padding(.horizontal, isMac ? 16 : 14).padding(.vertical, 12)
+                .padding(.leading, isMac ? 16 : 14).padding(.trailing, 10).padding(.vertical, 10)
             }
             .accessibilityElement(children: .contain)
         }
@@ -231,8 +241,10 @@ struct HomeView: View {
                     }
                 }
             }
+            // The one action that unblocks everything: the web's size m (44pt), not the dense in-row size.
             .ceProminentButton()
-            .ceCompactControl()
+            .controlSize(.regular)
+            .fixedSize()
             .disabled(!store.canWrite || starting)
         case "backend_down":
             Button("실행 환경 보기") {
@@ -243,7 +255,8 @@ struct HomeView: View {
                 #endif
             }
             .ceSecondaryButton()
-            .ceCompactControl()
+            .controlSize(.regular)
+            .fixedSize()
         default:
             EmptyView()
         }
@@ -251,41 +264,45 @@ struct HomeView: View {
 
     // MARK: - 지금 상황 (+ 판 정리)
 
-    /// The lead's own summary. Always drawn so 판 정리 stays reachable; the tidy action is a quiet icon in the header.
+    /// The lead's own summary. Always drawn so 판 정리 stays reachable; the tidy action sits in the header with the
+    /// last tidy time beside it (web TidyBar: "마지막 판 정리 3분 전 · 지금 판 정리").
     private func nowCard(_ project: Project) -> some View {
         let hasNow = !project.now.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return HomeCard(title: "지금 상황", meta: hasNow ? relativeTime(project.nowAt) : nil) {
-            tidyButton(project)
+            tidyAccessory(project)
         } content: {
             VStack(alignment: .leading, spacing: 6) {
                 if hasNow {
                     nowBody(project.now)
                 } else {
                     Text("아직 요약이 없습니다 — 판 정리를 맡기면 \(isHq ? "본사 AI가" : "총괄이") 정리합니다")
-                        .font(CEFont.secondary).foregroundStyle(CE.ink3)
+                        .font(CEFont.note).foregroundStyle(CE.ink2)
+                        .lineSpacing(CELeading.note)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.bottom, 2)
                 }
                 if let tidyNote { HomeNoteLine(note: tidyNote).padding(.bottom, 2) }
             }
+            // CSS half-leading above the first line.
             .padding(.top, 2)
         }
     }
 
-    /// Mac: a quiet icon with the explanation in its tooltip. iPhone/iPad: no tooltip, and the circular arrows read as
-    /// "refresh" next to pull-to-refresh, so the mark carries the words "판 정리" and asks once before it hands the lead
-    /// a turn; the question also shows when the board was last tidied.
-    private func tidyButton(_ project: Project) -> some View {
-        let busy = store.pendingActions.contains("tidy")
+    /// The last tidy time (the hint when there was none), then the button. The time drops first when the header is
+    /// narrow (iPhone): the confirmation there repeats it.
+    private func tidyAccessory(_ project: Project) -> some View {
         let last = relativeTime(project.tidiedAt)
-        let detail = Self.tidyHint + (last.isEmpty ? "" : " · 마지막 판 정리 \(last)")
-        return HomeIconButton(icon: "arrow.triangle.2.circlepath", title: isMac ? nil : "판 정리", busy: busy) {
-            if isMac { Task { await tidy() } } else { confirmTidy = true }
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                Text(last.isEmpty ? Self.tidyHint : "마지막 판 정리 \(last)")
+                    .font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink2)
+                    .lineLimit(1).fixedSize()
+                    // The button's hint already says it.
+                    .accessibilityHidden(true)
+                tidyButton(project)
+            }
+            tidyButton(project)
         }
-        .disabled(!store.uiCanWrite || busy)
-        .help(store.isDemo ? Self.readOnlyHelp : busy ? "판 정리를 맡기는 중입니다" : "지금 판 정리 — \(detail)")
-        .accessibilityLabel(busy ? "판 정리를 맡기는 중" : "지금 판 정리")
-        .accessibilityHint(store.isDemo ? Self.readOnlyHelp : detail)
         .confirmationDialog("지금 판 정리", isPresented: $confirmTidy, titleVisibility: .visible) {
             Button("\(leadLabel)에게 맡기기") { Task { await tidy() } }
                 .disabled(!store.uiCanWrite)
@@ -293,6 +310,24 @@ struct HomeView: View {
         } message: {
             Text("\(isHq ? "본사 AI가" : "총괄이") \(Self.tidyHint)." + (last.isEmpty ? "" : "\n마지막 판 정리 \(last)"))
         }
+        // Offered the header's room before the spacer, so the time shows whenever it fits.
+        .layoutPriority(1)
+    }
+
+    /// A labelled capsule ("판 정리") on every platform: the circular arrows alone read as "refresh". Mac runs it at
+    /// once, with the explanation in the tooltip; iPhone/iPad (no tooltip, next to pull-to-refresh) asks once before
+    /// it hands the lead a turn.
+    private func tidyButton(_ project: Project) -> some View {
+        let busy = store.pendingActions.contains("tidy")
+        let last = relativeTime(project.tidiedAt)
+        let detail = Self.tidyHint + (last.isEmpty ? "" : " · 마지막 판 정리 \(last)")
+        return HomeIconButton(icon: "arrow.triangle.2.circlepath", title: busy ? "맡기는 중" : "판 정리", busy: busy) {
+            if isMac { Task { await tidy() } } else { confirmTidy = true }
+        }
+        .disabled(!store.uiCanWrite || busy)
+        .help(store.isDemo ? Self.readOnlyHelp : busy ? "판 정리를 맡기는 중입니다" : "지금 판 정리 — \(detail)")
+        .accessibilityLabel(busy ? "판 정리를 맡기는 중" : "지금 판 정리")
+        .accessibilityHint(store.isDemo ? Self.readOnlyHelp : detail)
     }
 
     private func tidy() async {
@@ -314,8 +349,9 @@ struct HomeView: View {
     private func nowBody(_ now: String) -> some View {
         let overflows = nowFullHeight > nowClampHeight + 4
         let collapsed = overflows && !nowExpanded
-        return VStack(alignment: .leading, spacing: 2) {
-            MarkdownText(text: now, size: 14.5)
+        return VStack(alignment: .leading, spacing: 4) {
+            // Web .hm-now__body .md: 14.5 at 1.6.
+            MarkdownText(text: now, size: 14.5, lineHeight: 1.6)
                 .fixedSize(horizontal: false, vertical: true)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { nowFullHeight = $0 }
                 .frame(maxHeight: collapsed ? nowClampHeight : nil, alignment: .top)
@@ -328,6 +364,16 @@ struct HomeView: View {
                         Rectangle()
                     }
                 }
+                // The faded body itself opens it (the 더 보기 button stays for keyboard and VoiceOver).
+                .contentShape(Rectangle())
+                .gesture(TapGesture().onEnded {
+                    guard collapsed else { return }
+                    setNowCursor(false)
+                    withAnimation(.easeOut(duration: 0.2)) { nowExpanded = true }
+                }, including: collapsed ? .all : .subviews)
+                .onHover { setNowCursor($0 && collapsed) }
+                .onChange(of: collapsed) { _, isCollapsed in if !isCollapsed { setNowCursor(false) } }
+                .onDisappear { setNowCursor(false) }
             if overflows {
                 HomeFoldButton(title: nowExpanded ? "접기" : "더 보기", open: nowExpanded) {
                     withAnimation(.easeOut(duration: 0.2)) { nowExpanded.toggle() }
@@ -338,6 +384,15 @@ struct HomeView: View {
         .padding(.bottom, overflows ? 0 : 2)
     }
 
+    /// Mac: a pointing hand over the collapsed body, popped exactly once however the hover ends.
+    private func setNowCursor(_ on: Bool) {
+        #if os(macOS)
+        guard on != nowCursorPushed else { return }
+        if on { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        nowCursorPushed = on
+        #endif
+    }
+
     /// Web .hm-clear: nothing waits on me — a quiet full-width line, not a card. Finished todos fold into its trailing
     /// end ("완료한 할 일 n"); opened, they list under it, where unchecking still works. Also carries a todo error and
     /// the resend note, which have no card to sit in here.
@@ -345,23 +400,26 @@ struct HomeView: View {
         let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
         let fold = rows.lazy.compactMap { row -> Int? in if case .doneFold(let count) = row { count } else { nil } }.first
         let rest = rows.filter { if case .doneFold = $0 { false } else { true } }
-        // The fold's hit area (36 / 44pt) overlaps the line's padding instead of making the line taller.
-        let foldPull: CGFloat = isMac ? -9 : -12
+        // The fold's 44pt hit area overlaps the line's padding instead of making the line taller.
+        let foldPull: CGFloat = -12
+        // Web .hm-clear: 14 at 1.5.
+        let font: Font = isMac ? .system(size: 14) : CEFont.body
+        let leading = CELeading.spacing(isMac ? 14 : 15, 1.5)
         return VStack(alignment: .leading, spacing: 0) {
             if let fold {
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 12) {
-                        clearText.font(CEFont.body).fixedSize()
+                        clearText.font(font).fixedSize()
                         Spacer(minLength: 12)
                         doneFoldButton(fold).fixedSize().padding(.vertical, foldPull)
                     }
                     VStack(alignment: .leading, spacing: 0) {
-                        clearText.font(CEFont.body).fixedSize(horizontal: false, vertical: true)
+                        clearText.font(font).lineSpacing(leading).fixedSize(horizontal: false, vertical: true)
                         doneFoldButton(fold).padding(.top, foldPull + 6).padding(.bottom, foldPull - 2)
                     }
                 }
             } else {
-                clearText.font(CEFont.body).fixedSize(horizontal: false, vertical: true)
+                clearText.font(font).lineSpacing(leading).fixedSize(horizontal: false, vertical: true)
             }
             if !rest.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
@@ -403,20 +461,25 @@ struct HomeView: View {
         let open = openDecisions
         rows += open.prefix(Self.topDecisions).map(HomeTurnRow.decision)
         if open.count > Self.topDecisions { rows.append(.moreDecisions(open.count - Self.topDecisions)) }
-        rows += liveTodos.map(HomeTurnRow.todo)
+        let live = liveTodos
+        rows += live.map(HomeTurnRow.todo)
         let waiting = !rows.isEmpty
+        // Web .hm-count: everything that waits on me — every open decision (also those behind "n건 더"), not the
+        // follow-up, error or fold lines.
+        let count = attention.members.count + attention.missingMembers.count + (attention.unassigned > 0 ? 1 : 0)
+            + attention.failedMessages.count + open.count + live.filter { !$0.done }.count
         if let todoError { rows.append(.todoError(todoError)) }
         let done = doneTodos
         if !done.isEmpty {
             rows.append(.doneFold(done.count))
             if showDoneTodos { rows += done.map(HomeTurnRow.todo) }
         }
-        return HomeTurn(rows: rows, waiting: waiting)
+        return HomeTurn(rows: rows, waiting: waiting, count: count)
     }
 
-    private func turnCard(_ rows: [HomeTurnRow]) -> some View {
-        HomeCard(title: "내 차례", more: openDecisions.isEmpty ? nil : "결재함", onMore: { router.go(.inbox) }) {
-            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+    private func turnCard(_ turn: HomeTurn) -> some View {
+        HomeCard(title: "내 차례", count: turn.count, more: openDecisions.isEmpty ? nil : "결재함", onMore: { router.go(.inbox) }) {
+            ForEach(Array(turn.rows.enumerated()), id: \.element.id) { index, row in
                 if index > 0 && row.dividerAbove { HomeDivider() }
                 turnRow(row)
             }
@@ -435,9 +498,11 @@ struct HomeView: View {
             HStack(spacing: 8) {
                 HomeRowButton(bleedTrailing: false, action: { router.openChat(chatTarget(for: message.targetMemberId)) }) {
                     turnLine("exclamationmark.bubble", tint: CE.danger) {
-                        Text(homePlainLine(message.body)).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(2)
+                        Text(homePlainLine(message.body)).font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                            .lineSpacing(Self.rowTitleLeading).lineLimit(2).multilineTextAlignment(.leading)
                         Text(["전달 실패", message.deliveryNote].compactMap { $0 }.joined(separator: " · "))
-                            .font(CEFont.secondary).foregroundStyle(CE.ink3).fixedSize(horizontal: false, vertical: true)
+                            .font(CEFont.secondary).foregroundStyle(CE.ink2).lineSpacing(CELeading.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 // The existing retry endpoint schedules evidence collection and preserves recovery fences.
@@ -463,7 +528,8 @@ struct HomeView: View {
     }
 
     private func doneFoldButton(_ count: Int) -> some View {
-        HomeFoldButton(title: "완료한 할 일 \(count)", open: showDoneTodos, quiet: true) {
+        // A 내 차례 row: the full 44pt (web .hm-more-btn).
+        HomeFoldButton(title: "완료한 할 일 \(count)", open: showDoneTodos, minHeight: 44) {
             withAnimation(.easeOut(duration: 0.2)) { showDoneTodos.toggle() }
         }
         .accessibilityLabel(showDoneTodos ? "완료한 할 일 \(count)개 접기" : "완료한 할 일 \(count)개 보기")
@@ -473,7 +539,8 @@ struct HomeView: View {
     private func turnLine<Lines: View>(_ icon: String, tint: Color, @ViewBuilder lines: () -> Lines) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: glyphGap) {
             HomeGlyph(icon: icon, tint: tint)
-            VStack(alignment: .leading, spacing: 2) { lines() }
+            // Web: title 14.5/1.4 and sub 13/1.45 with a 2px gap; SwiftUI has no half-leading, so the gap carries it.
+            VStack(alignment: .leading, spacing: 4) { lines() }
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -489,7 +556,8 @@ struct HomeView: View {
                     turnLine(info.icon, tint: info.tone.color) {
                         Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
                         Text([info.label, error.flatMap { $0.isEmpty ? nil : $0 }].compactMap { $0 }.joined(separator: " · "))
-                            .font(CEFont.secondary).foregroundStyle(info.tone.color).lineLimit(2)
+                            .font(CEFont.secondary).foregroundStyle(info.tone.color)
+                            .lineSpacing(CELeading.secondary).lineLimit(2)
                     }
                 }
                 .help(info.explanation)
@@ -506,7 +574,9 @@ struct HomeView: View {
             if let delivery, let detail = homeDeliverySummary(delivery) {
                 Text(detail)
                     .font(CEFont.meta).foregroundStyle(CE.attention)
-                    .padding(.leading, titleInset).padding(.bottom, 6)
+                    .lineSpacing(CELeading.meta)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, titleInset).padding(.bottom, 8)
             }
         }
     }
@@ -515,7 +585,7 @@ struct HomeView: View {
         HomeRowButton(action: { router.openChat(nil) }) {
             turnLine("exclamationmark.bubble", tint: CE.attention) {
                 Text("\(title) \(DeliveryInfo.badgeCount(count))")
-                    .font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                    .font(CEFont.rowTitle).monospacedDigit().foregroundStyle(CE.ink)
                 if let detail { HomeSub(text: detail) }
             }
         }
@@ -528,7 +598,7 @@ struct HomeView: View {
         HomeRowButton(action: { router.openDecision(decision.id) }) {
             turnLine("checkmark.seal", tint: CE.accent) {
                 Text(decision.title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
-                    .lineLimit(2).multilineTextAlignment(.leading)
+                    .lineSpacing(Self.rowTitleLeading).lineLimit(2).multilineTextAlignment(.leading)
                 HomeSub(text: [decision.who, relativeTime(decision.createdAt)].filter { !$0.isEmpty }.joined(separator: " · "))
             }
         }
@@ -561,16 +631,18 @@ struct HomeView: View {
                     }
                 } label: {
                     HStack(alignment: .center, spacing: 10) {
+                        // Web .hm-todo__title: 15/600 at 1.4, wraps when open.
                         Text(todo.title)
-                            .font(CEFont.rowTitle)
+                            .font(isMac ? .system(size: 15, weight: .semibold) : CEFont.rowTitle)
                             .foregroundStyle(checked ? CE.ink2 : CE.ink)
                             .strikethrough(checked, color: CE.ink3)
+                            .lineSpacing(CELeading.spacing(15, 1.4))
                             .lineLimit(expanded ? nil : 1)
                             .multilineTextAlignment(.leading)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         HomeChevron(open: expanded)
                     }
-                    .padding(.leading, 4).padding(.trailing, 8).padding(.vertical, 6)
+                    .padding(.leading, 2).padding(.trailing, 8).padding(.vertical, 6)
                     .frame(minHeight: hit)
                     .contentShape(Rectangle())
                 }
@@ -579,8 +651,9 @@ struct HomeView: View {
                 .accessibilityHint(expanded ? "접기" : "자세히 보기")
             }
             if let notice = todoWriteNotice(todo.id) {
-                Text(notice.text).font(CEFont.meta).foregroundStyle(notice.tone.color)
-                    .padding(.leading, titleInset).padding(.bottom, 6)
+                Text(notice.text).font(CEFont.note).foregroundStyle(notice.tone == .neutral ? CE.ink2 : notice.tone.color)
+                    .lineSpacing(CELeading.note)
+                    .padding(.leading, titleInset).padding(.bottom, 8)
                     .fixedSize(horizontal: false, vertical: true)
             }
             // Fold text starts where the title starts.
@@ -596,18 +669,21 @@ struct HomeView: View {
         let time = relativeTime(checked ? (todo.doneAt ?? todo.createdAt) : todo.createdAt)
         return VStack(alignment: .leading, spacing: 6) {
             if !todo.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownText(text: todo.detail, size: 14)
+                // Web .md.hm-todo__detail: 14 at 1.55.
+                MarkdownText(text: todo.detail, size: 14, lineHeight: 1.55)
             }
+            // Web .hm-todo__meta: 13 at 1.45, ink-2.
             if !closedBy.isEmpty {
                 Text(reason.isEmpty ? "\(closedBy) 정리" : "\(closedBy) 정리: \(reason)")
                     .font(CEFont.secondary).foregroundStyle(CE.ink2)
+                    .lineSpacing(CELeading.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 10) {
-                if !whoLine.isEmpty { Text(whoLine) }
-                if !time.isEmpty { Text(time) }
+                if !whoLine.isEmpty { Text(whoLine).lineLimit(1) }
+                if !time.isEmpty { Text(time).monospacedDigit().lineLimit(1).fixedSize() }
             }
-            .font(CEFont.secondary).foregroundStyle(CE.ink3)
+            .font(CEFont.secondary).foregroundStyle(CE.ink2)
         }
         .padding(.trailing, 8).padding(.top, 2).padding(.bottom, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -670,10 +746,11 @@ struct HomeView: View {
                 let summary = teamSummary
                 HomeCard(title: "팀", more: "사무실 보기", onMore: { router.go(.team) }) {
                     if summary.isEmpty {
-                        Text("지금 일하는 팀원이 없습니다").font(CEFont.secondary).foregroundStyle(CE.ink3)
+                        Text("지금 일하는 팀원이 없습니다").font(CEFont.secondary).foregroundStyle(CE.ink2)
                             .padding(.top, 2).padding(.bottom, 6)
                     } else {
-                        teamSummaryLine(summary).padding(.top, 2).padding(.bottom, shown.isEmpty ? 6 : 4)
+                        // Web .hm-chips: padding 4 0 6.
+                        teamSummaryLine(summary).padding(.top, 4).padding(.bottom, 6)
                     }
                     ForEach(Array(shown.enumerated()), id: \.element.id) { index, member in
                         HomeDivider().opacity(index == 0 ? 0.6 : 1)
@@ -689,58 +766,55 @@ struct HomeView: View {
         }
     }
 
-    /// "● 일하는 중 2  ● 내 답 기다림 1  ● 쉬는 중 2  ○ 잠듦 2": one quiet line, wraps on narrow widths.
+    /// Web .hm-chips: "● 일하는 중 2" capsules (28pt, white .07), wrapping on narrow widths.
     private func teamSummaryLine(_ parts: [(status: String, label: String, count: Int)]) -> some View {
-        HomeFlow(spacing: 14, lineSpacing: 4) {
+        HomeFlow(spacing: 6, lineSpacing: 6) {
             ForEach(parts, id: \.status) { part in
                 let info = MemberStatusInfo(part.status)
-                HStack(spacing: 5) {
-                    StatusDot(tone: info.tone, size: 6)
-                    Text(part.label).foregroundStyle(CE.ink3)
-                    Text("\(part.count)").monospacedDigit().fontWeight(.semibold).foregroundStyle(CE.ink2)
+                HStack(spacing: 6) {
+                    StatusDot(tone: info.tone, size: 8)
+                    Text(part.label)
+                    Text("\(part.count)").monospacedDigit().fontWeight(.semibold)
                 }
-                .font(CEFont.secondary)
+                .font(CEFont.secondary).foregroundStyle(CE.ink)
+                .lineLimit(1)
+                .padding(.leading, 9).padding(.trailing, 10)
+                .frame(minHeight: 28)
+                .background(Color.white.opacity(0.07), in: Capsule())
+                .fixedSize()
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("\(part.label) \(part.count)명")
             }
         }
     }
 
-    /// Mac: one line — dot · name · what it is doing · when. iPhone: the name line, then what it is doing.
+    /// Web .hm-row__main--stack: the name line (with when, on the right), then what it is doing on the full width.
     private func activeRow(_ member: Member) -> some View {
         let info = MemberStatusInfo(member)
         let now = plainOneLine(member.now)
-        let doing = now.isEmpty ? info.label : (info.icon == "questionmark.circle" ? "\(info.label) · " : "") + "마지막 보고 · \(now)"
+        // The dot already says working / waiting; a state the dot cannot say (확인 불가) keeps its words.
+        let doing = now.isEmpty ? info.label : (info.icon == "questionmark.circle" ? "\(info.label) · " : "") + now
         let time = relativeTime(member.nowAt)
         return HomeRowButton(action: { router.openMember(member.id) }) {
-            if isMac {
-                HStack(spacing: 10) {
-                    StatusDot(tone: info.tone, pulsing: info.live, size: 7).frame(width: 8)
-                    Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
-                        .frame(width: 120, alignment: .leading)
-                    Text(doing).font(CEFont.secondary).foregroundStyle(now.isEmpty ? CE.ink3 : CE.ink2).lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if !time.isEmpty { Text(time).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1).fixedSize() }
-                }
-            } else {
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    StatusDot(tone: info.tone, pulsing: info.live, size: 7)
-                        .frame(width: 8)
-                        .alignmentGuide(.firstTextBaseline) { $0.height / 2 + 5 }
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
-                            Spacer(minLength: 8)
-                            if !time.isEmpty { Text(time).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1).fixedSize() }
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                StatusDot(tone: info.tone, pulsing: info.live, size: 8)
+                    .frame(width: 8)
+                    .alignmentGuide(.firstTextBaseline) { $0.height / 2 + 5 }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
+                        Spacer(minLength: 8)
+                        if !time.isEmpty {
+                            Text(time).font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink2).lineLimit(1).fixedSize()
                         }
-                        Text(doing).font(CEFont.secondary).foregroundStyle(now.isEmpty ? CE.ink3 : CE.ink2).lineLimit(1)
                     }
+                    Text(doing).font(CEFont.secondary).foregroundStyle(CE.ink2).lineLimit(1)
                 }
             }
         }
-        .help(info.explanation)
+        .help([info.explanation, now.isEmpty ? "" : "마지막 보고 · \(now)"].filter { !$0.isEmpty }.joined(separator: "\n"))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([member.name, info.label, now, time].filter { !$0.isEmpty }.joined(separator: ", "))
+        .accessibilityLabel([member.name, info.label, now.isEmpty ? "" : "마지막 보고 \(now)", time].filter { !$0.isEmpty }.joined(separator: ", "))
         .accessibilityHint("팀원 보기")
     }
 
@@ -751,9 +825,9 @@ struct HomeView: View {
         let sub = member.status == "error" ? (error ?? info.label) : member.now.isEmpty ? "" : "마지막 보고 · \(member.now)"
         return HomeRowButton(action: { router.openMember(member.id) }) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                StatusDot(tone: info.tone, pulsing: info.live, size: 7)
+                StatusDot(tone: info.tone, pulsing: info.live, size: 8)
                     .alignmentGuide(.firstTextBaseline) { $0.height / 2 + 5 }
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
                         if showsState { Text(info.label).font(CEFont.meta.weight(.medium)).foregroundStyle(info.tone.color).fixedSize() }
@@ -776,8 +850,13 @@ struct HomeView: View {
             let total = store.work.count
             let today = done.filter { item in parseISODate(item.doneAt).map { Calendar.current.isDateInToday($0) } ?? false }.count
             let parts = [(WorkSection.doing, doing.count), (WorkSection.next, next.count), (WorkSection.hold, hold.count)].filter { $0.1 > 0 }
-            // Doing items are not listed: the 팀 rows already say who works on what.
+            // Doing items are not listed: the 팀 rows already say who works on what. 보류 first, then 예정, five in all,
+            // each group under its own label (web .hm-work__label) with "외 n건" for the rest.
             let rows = Array((hold + next.prefix(Self.topNextWork)).prefix(Self.topWorkRows))
+            let groups = [(WorkSection.hold, hold.count), (WorkSection.next, next.count)].compactMap { section, total in
+                let items = rows.filter { $0.sec == section.rawValue }
+                return items.isEmpty ? nil : (section: section, items: items, rest: total - items.count)
+            }
             HomeCard(title: "진척", more: isHq ? nil : "일 목록", onMore: isHq ? nil : { router.go(.team) }) {
                 VStack(alignment: .leading, spacing: 9) {
                     HomeProgressBar(segments: [
@@ -786,15 +865,30 @@ struct HomeView: View {
                     ])
                     progressLine(done: done.count, total: total, parts: parts, today: today)
                 }
-                .padding(.top, 4).padding(.bottom, rows.isEmpty ? 6 : 8)
+                .padding(.top, 2).padding(.bottom, rows.isEmpty ? 6 : 8)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(progressLabel(done: done.count, total: total, parts: parts, today: today))
-                if !rows.isEmpty {
+                if !groups.isEmpty {
                     HomeDivider()
                     VStack(alignment: .leading, spacing: 0) {
-                        ForEach(rows) { item in workRow(item) }
+                        ForEach(groups, id: \.section) { group in
+                            Text(group.section.title)
+                                .font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink2)
+                                .padding(.top, 6).padding(.bottom, 2)
+                                .accessibilityAddTraits(.isHeader)
+                            ForEach(group.items) { item in workRow(item) }
+                            if group.rest > 0 {
+                                if isHq {
+                                    Text("외 \(group.rest)건").font(CEFont.secondary).monospacedDigit().foregroundStyle(CE.ink2)
+                                        .padding(.top, 4).padding(.bottom, 2)
+                                } else {
+                                    HomeQuietLink(text: "외 \(group.rest)건") { router.go(.team) }
+                                        .accessibilityLabel("\(group.section.title) \(group.rest)건 더 보기")
+                                }
+                            }
+                        }
                     }
-                    .padding(.top, 4)
+                    .padding(.top, 2)
                 }
             }
         }
@@ -830,7 +924,7 @@ struct HomeView: View {
                 }
             }
         }
-        .font(CEFont.meta).foregroundStyle(CE.ink3)
+        .font(CEFont.meta).foregroundStyle(CE.ink2)
         let todayText = Text("오늘 끝냄 \(today)").font(CEFont.meta.weight(.semibold)).monospacedDigit().foregroundStyle(CE.success)
         return ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
@@ -865,26 +959,28 @@ struct HomeView: View {
         let dot = Circle().fill(Self.legendColor(section)).frame(width: 6, height: 6)
             .frame(width: 8)
             .accessibilityHidden(true)
-        let title = Text(item.title).font(CEFont.body).foregroundStyle(CE.ink)
-        let context = Text(trailing).font(CEFont.meta).foregroundStyle(CE.ink3)
+        // Web .hm-work__title 14 at 1.45; .hm-work__who 12.5 ink-2.
+        let title = Text(item.title).font(isMac ? .system(size: 14) : CEFont.body).foregroundStyle(CE.ink)
+        let context = Text(trailing).font(CEFont.meta).foregroundStyle(CE.ink2)
         return ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                dot
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                dot.alignmentGuide(.firstTextBaseline) { $0.height / 2 + 5 }
                 title.lineLimit(1).fixedSize()
                 Spacer(minLength: 12)
                 if !trailing.isEmpty { context.lineLimit(1).fixedSize() }
             }
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 dot.alignmentGuide(.firstTextBaseline) { $0.height / 2 + 5 }
-                VStack(alignment: .leading, spacing: 2) {
-                    title.lineLimit(1)
+                VStack(alignment: .leading, spacing: 3) {
+                    // The web title wraps rather than being cut.
+                    title.lineSpacing(CELeading.spacing(14, 1.45)).lineLimit(2)
                     if !trailing.isEmpty { context.lineLimit(1) }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(.vertical, isMac ? 5 : 7)
-        .frame(minHeight: isMac ? 28 : 34)
+        .frame(minHeight: isMac ? 30 : 34)
         .help([item.detail, item.who].filter { !$0.isEmpty }.joined(separator: " · "))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel([section.title, item.title, trailing].filter { !$0.isEmpty }.joined(separator: ", "))
@@ -904,7 +1000,10 @@ struct HomeView: View {
     @ViewBuilder private var recentCard: some View {
         let items = recentItems
         if !items.isEmpty {
-            HomeCard(title: "최근") {
+            HomeCard(title: "최근", links: [
+                HomeLink(title: "대화") { router.openChat(nil) },
+                HomeLink(title: "자료") { router.go(.files) },
+            ]) {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                     if index > 0 { HomeDivider() }
                     recentRow(item)
@@ -913,8 +1012,10 @@ struct HomeView: View {
         }
     }
 
+    /// Web .hm-row__main--stack: a title of up to two lines, then kind badge · who · when (.hm-row__sub--meta).
     private func recentRow(_ item: HomeRecent) -> some View {
         let icon: String, tint: Color, title: String, who: String, at: String, kind: String
+        let badge: (text: String, tone: Tone)?
         let action: () -> Void
         switch item {
         case .report(let message):
@@ -922,24 +1023,34 @@ struct HomeView: View {
             icon = mark.icon; tint = mark.tint
             title = message.title.isEmpty ? homePlainLine(message.body) : message.title
             who = message.who; at = message.at; kind = "\(message.kind) 보고"
+            badge = message.kind.isEmpty ? nil : (message.kind, Self.reportTone(message.kind))
             action = { router.openChat(chatTarget(for: message.memberId)) }
         case .file(let file):
             icon = fileKindIcon(file.kind); tint = CE.ink3
             title = file.title
             who = file.who; at = file.createdAt; kind = fileKindName(file.kind)
+            badge = nil
             action = { router.openFile(file.id) }
         }
         let time = relativeTime(at)
         return HomeRowButton(action: action) {
-            HStack(spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Image(systemName: icon)
                     .font(.system(size: isMac ? 13 : 15, weight: .medium))
                     .foregroundStyle(tint)
                     .frame(width: 18)
                     .accessibilityHidden(true)
-                Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text(time).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1).fixedSize()
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                        .lineSpacing(Self.rowTitleLeading).lineLimit(2).multilineTextAlignment(.leading)
+                    HStack(spacing: 8) {
+                        if let badge { Tag(badge.text, tone: badge.tone) }
+                        if !who.isEmpty { Text(who).lineLimit(1) }
+                        if !time.isEmpty { Text(time).monospacedDigit().lineLimit(1).fixedSize() }
+                    }
+                    .font(CEFont.secondary).foregroundStyle(CE.ink2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .help([kind, who].filter { !$0.isEmpty }.joined(separator: " · "))
@@ -956,6 +1067,16 @@ struct HomeView: View {
         case "막힘": ("exclamationmark.octagon", CE.danger)
         case "답변": ("arrowshape.turn.up.left", CE.ink3)
         default: ("bell", CE.ink3)
+        }
+    }
+
+    /// Web KIND_TONE: 완료 ok, 질문 accent, 막힘 danger, the rest neutral.
+    private static func reportTone(_ kind: String) -> Tone {
+        switch kind {
+        case "완료": .success
+        case "질문": .accent
+        case "막힘": .danger
+        default: .neutral
         }
     }
 }
@@ -994,6 +1115,8 @@ struct HomeAttention {
 private struct HomeTurn {
     var rows: [HomeTurnRow]
     var waiting: Bool
+    /// The header count: things that wait on me.
+    var count: Int
 }
 
 /// One row of 내 차례, in priority order.
@@ -1058,70 +1181,108 @@ private struct HomeNote: Identifiable {
 
 // MARK: - Private building blocks
 
-/// Web .hm-card: tinted glass card (Plate), title 14/650, quiet meta right after the title, then a trailing accessory
-/// or a "more" link.
+/// A header link ("결재함", "대화").
+private struct HomeLink {
+    let title: String
+    let action: () -> Void
+}
+
+/// Web .hm-card: tinted glass card (Plate), padding 10 16 12 (phone 8 14 10), a 32pt header (title 14/650, count
+/// pill, quiet meta, then a trailing accessory or links) and a 4pt gap before the content.
 private struct HomeCard<Accessory: View, Content: View>: View {
     let title: String
     var meta: String?
-    var more: String?
-    var onMore: (() -> Void)?
+    var count: Int?
+    var links: [HomeLink]
     let accessory: Accessory
     let content: Content
 
-    init(title: String, meta: String? = nil, more: String? = nil, onMore: (() -> Void)? = nil,
-         @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content) {
-        self.title = title; self.meta = meta; self.more = more; self.onMore = onMore
+    init(title: String, meta: String? = nil, count: Int? = nil, more: String? = nil, onMore: (() -> Void)? = nil,
+         links: [HomeLink] = [], @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content) {
+        self.title = title; self.meta = meta; self.count = count
+        var all: [HomeLink] = []
+        if let more, let onMore { all.append(HomeLink(title: more, action: onMore)) }
+        self.links = all + links
         self.accessory = accessory(); self.content = content()
     }
 
     var body: some View {
         Plate(padding: 0) {
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
                 header
-                content
+                // Rows and dividers sit flush: the 4pt gap is only under the header.
+                VStack(alignment: .leading, spacing: 0) { content }
             }
             .padding(.horizontal, isMac ? 16 : 14)
-            .padding(.top, isMac ? 6 : 4)
-            .padding(.bottom, isMac ? 10 : 8)
+            .padding(.top, isMac ? 10 : 8)
+            .padding(.bottom, isMac ? 12 : 10)
         }
         .accessibilityElement(children: .contain)
     }
 
     private var header: some View {
         HStack(spacing: 8) {
-            Text(title).font(CEFont.section).foregroundStyle(CE.ink)
+            Text(title).font(CEFont.section).tracking(-0.14).foregroundStyle(CE.ink)
+                .lineLimit(1).fixedSize()
                 .accessibilityAddTraits(.isHeader)
+            if let count, count > 0 {
+                Text("\(count)")
+                    .font(CEFont.caption.weight(.semibold)).monospacedDigit().foregroundStyle(CE.ink)
+                    .padding(.horizontal, 6)
+                    .frame(minWidth: 20, minHeight: 20)
+                    .background(Color.white.opacity(0.12), in: Capsule())
+                    .fixedSize()
+                    .accessibilityLabel("\(count)건")
+            }
             if let meta, !meta.isEmpty {
-                Text(meta).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
+                Text(meta).font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink2).lineLimit(1).fixedSize()
             }
             Spacer(minLength: 8)
             accessory
-            if let more, let onMore {
-                Button(action: onMore) {
-                    Text(more)
-                        .font(CEFont.secondary.weight(.medium))
-                        .foregroundStyle(CE.accent)
-                        .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? 28 : 44, alignment: .trailing)
-                        .contentShape(Rectangle())
+            if !links.isEmpty {
+                HStack(spacing: 12) {
+                    ForEach(links, id: \.title) { link in HomeHeaderLink(title: link.title, action: link.action) }
                 }
-                .buttonStyle(.plain)
-                // The hit area is 44pt on iPhone; the header line stays low.
-                .padding(.vertical, isMac ? 0 : -6)
-                .accessibilityLabel("\(more) 열기")
             }
         }
-        .frame(minHeight: isMac ? 34 : 38)
+        .frame(minHeight: 32)
     }
 }
 
 extension HomeCard where Accessory == EmptyView {
-    init(title: String, meta: String? = nil, more: String? = nil, onMore: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {
-        self.init(title: title, meta: meta, more: more, onMore: onMore, accessory: { EmptyView() }, content: content)
+    init(title: String, meta: String? = nil, count: Int? = nil, more: String? = nil, onMore: (() -> Void)? = nil,
+         links: [HomeLink] = [], @ViewBuilder content: () -> Content) {
+        self.init(title: title, meta: meta, count: count, more: more, onMore: onMore, links: links,
+                  accessory: { EmptyView() }, content: content)
     }
 }
 
-/// Small quiet button for a card header (판 정리): a 26pt circle on Mac; on iPhone a 30pt mark in a 44pt hit area,
-/// a capsule with a short title when one is given. While busy a spinner takes the icon's place.
+/// Web .hm-head__more: 13/500 in the focus colour, underlined on hover; a 44pt hit area on iPhone while the header
+/// line stays low.
+private struct HomeHeaderLink: View {
+    let title: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(CEFont.secondary.weight(.medium))
+                .foregroundStyle(CE.accent)
+                .underline(isMac && hovering, color: CE.accent.opacity(0.7))
+                .lineLimit(1).fixedSize()
+                .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? 32 : 44, alignment: .trailing)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, isMac ? 0 : -6)
+        .onHover { hovering = $0 }
+        .accessibilityLabel("\(title) 열기")
+    }
+}
+
+/// Small quiet button for a card header (판 정리). With a title: a capsule (Mac 28pt, 12.5/600; iPhone 30pt in a
+/// 44pt hit area). Without one: a circle. While busy a spinner takes the icon's place.
 private struct HomeIconButton: View {
     let icon: String
     var title: String?
@@ -1130,8 +1291,8 @@ private struct HomeIconButton: View {
     @Environment(\.isEnabled) private var isEnabled
     @State private var hovering = false
 
-    private var size: CGFloat { isMac ? 26 : 30 }
-    private var hit: CGFloat { isMac ? 26 : 44 }
+    private var size: CGFloat { isMac ? 28 : 30 }
+    private var hit: CGFloat { isMac ? 28 : 44 }
 
     var body: some View {
         Group {
@@ -1141,12 +1302,13 @@ private struct HomeIconButton: View {
                         if busy {
                             ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 14, height: 14)
                         } else {
-                            Image(systemName: icon).font(.system(size: isMac ? 10.5 : 12, weight: .semibold))
+                            Image(systemName: icon).font(.system(size: isMac ? 11 : 12, weight: .semibold))
                         }
-                        Text(title).font(CEFont.meta.weight(.semibold))
+                        Text(title).font(isMac ? .system(size: 12.5, weight: .semibold) : CEFont.meta.weight(.semibold))
+                            .lineLimit(1)
                     }
                     .foregroundStyle(ink)
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 11)
                     .frame(height: size)
                     .background(Capsule().fill(fill))
                     .overlay { Capsule().strokeBorder(isEnabled ? CE.lineStrong : CE.line) }
@@ -1238,11 +1400,12 @@ private struct HomeProgressBar: View {
     }
 }
 
-/// Web .hm-row: a tappable row whose hover/press fill bleeds 8pt past the card's text edge.
+/// Web .hm-row: a tappable row (44pt, padding 7 8) whose hover/press fill bleeds 8pt past the card's text edge.
+/// The vertical padding is 9: SwiftUI text has no CSS half-leading, so a two-line row lands on the web's 55.
 private struct HomeRowButton<Content: View>: View {
     var bleedTrailing = true
-    var minHeight: CGFloat = isMac ? 36 : 44
-    var vertical: CGFloat = isMac ? 6 : 7
+    var minHeight: CGFloat = 44
+    var vertical: CGFloat = 9
     let action: () -> Void
     @ViewBuilder var content: Content
 
@@ -1272,41 +1435,46 @@ private struct HomeGlyph: View {
     }
 }
 
-/// Quiet one-line context under a row title.
+/// Quiet one-line context under a row title (web .hm-row__sub: 13, ink-2).
 private struct HomeSub: View {
     let text: String
     var body: some View {
-        Text(text).font(CEFont.secondary).foregroundStyle(CE.ink3).lineLimit(1)
+        // Sub-lines carry times ("· 3분 전"): tabular digits, like the web's <Time>.
+        Text(text).font(CEFont.secondary).monospacedDigit().foregroundStyle(CE.ink2).lineLimit(1)
     }
 }
 
-/// "결재함에서 n건 더", "외 n명": a quiet line that is itself a link.
+/// "결재함에서 n건 더", "외 n명": a quiet line that is itself a link (web .hm-rest: 13, ink-2).
 private struct HomeQuietLink: View {
     let text: String
     let action: () -> Void
+    @State private var hovering = false
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
-                Text(text)
+                Text(text).monospacedDigit()
                 Image(systemName: "chevron.right").font(.system(size: isMac ? 9 : 10, weight: .bold))
             }
             .font(CEFont.secondary.weight(.medium))
-            .foregroundStyle(CE.ink3)
-            .frame(minHeight: isMac ? 28 : 44)
+            .foregroundStyle(hovering ? CE.ink : CE.ink2)
+            .frame(minHeight: isMac ? 30 : 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(HomePressStyle())
+        .onHover { hovering = $0 }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-/// Web .hm-check: a 22pt rounded box; checked fills with the ok colour and a dark tick.
+/// Web .hm-check: a 22pt rounded box; checked fills with the ok colour and a dark tick. The box dips while pressed
+/// and the tick springs in, so a tick feels like it landed.
 private struct HomeTodoCheck: View {
     let checked: Bool
     let busy: Bool
     let hit: CGFloat
     let action: () -> Void
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
     var body: some View {
@@ -1318,6 +1486,7 @@ private struct HomeTodoCheck: View {
                     Image(systemName: "checkmark")
                         .font(.system(size: 11, weight: .heavy))
                         .foregroundStyle(Color(hex: 0x0B1A14))
+                        .transition(reduceMotion ? .opacity : .scale(scale: 0.4).combined(with: .opacity))
                 } else {
                     // Read-only (sample, offline): a quieter box, never hidden.
                     shape.strokeBorder(hovering && isEnabled ? CE.ink : CE.ink2.opacity(isEnabled ? 1 : 0.6), lineWidth: 1.5)
@@ -1325,13 +1494,24 @@ private struct HomeTodoCheck: View {
             }
             .frame(width: 22, height: 22)
             .opacity(busy ? 0.55 : 1)
-            .animation(.linear(duration: 0.12), value: checked)
+            .animation(reduceMotion ? .linear(duration: 0.12) : .spring(response: 0.25, dampingFraction: 0.55), value: checked)
             .frame(width: hit, height: hit)
             .contentShape(Rectangle())
         }
-        .buttonStyle(HomePressStyle())
+        .buttonStyle(HomeCheckPressStyle(reduceMotion: reduceMotion))
         .onHover { hovering = $0 }
         .accessibilityAddTraits(.isToggle)
+    }
+}
+
+/// The check box shrinks to 0.88 while pressed and springs back on release.
+private struct HomeCheckPressStyle: ButtonStyle {
+    let reduceMotion: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.88 : 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.55), value: configuration.isPressed)
     }
 }
 
@@ -1346,35 +1526,39 @@ private struct HomeChevron: View {
     }
 }
 
-/// Web .hm-more-btn: "더 보기" / "접기" / "완료한 할 일 n" with a chevron. Quiet: smaller and dimmer.
+/// Web .hm-more-btn: "더 보기" / "접기" / "완료한 할 일 n" with a chevron — 13.5/600 ink-2 (ink-1 on hover), 7pt gap.
 private struct HomeFoldButton: View {
     let title: String
     let open: Bool
-    var quiet = false
+    /// Mac: 32 under 지금 상황 (the line stays low); the 완료 fold is a 내 차례 row and passes 44. iPhone: always 44.
+    var minHeight: CGFloat = 32
     let action: () -> Void
+    @State private var hovering = false
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
-                Text(title)
+            HStack(spacing: 7) {
+                Text(title).monospacedDigit().foregroundStyle(hovering ? CE.ink : CE.ink2)
                 HomeChevron(open: open)
             }
-            .font(quiet ? CEFont.secondary.weight(.medium) : isMac ? .system(size: 13, weight: .semibold) : CEFont.secondary.weight(.semibold))
-            .foregroundStyle(quiet ? CE.ink3 : CE.ink2)
-            // The 완료 fold is a 내 차례 row (36pt on Mac); 더 보기 under 지금 상황 stays low.
-            .frame(minHeight: isMac ? (quiet ? 36 : 30) : 44)
+            .font(isMac ? .system(size: 13.5, weight: .semibold) : CEFont.note.weight(.semibold))
+            .frame(minHeight: isMac ? minHeight : 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(HomePressStyle())
+        .onHover { hovering = $0 }
     }
 }
 
+/// Web .hm-tidy__note (13 at 1.45, ink-2) and .hm-error (13.5 at 1.45, danger).
 private struct HomeNoteLine: View {
     let note: HomeNote
     var trailing = false
     var body: some View {
+        let danger = note.tone == .danger
         Text(note.text)
-            .font(CEFont.secondary)
-            .foregroundStyle(note.tone == .danger ? CE.danger : CE.ink2)
+            .font(danger ? CEFont.note : CEFont.secondary)
+            .lineSpacing(danger ? CELeading.note : CELeading.secondary)
+            .foregroundStyle(danger ? CE.danger : CE.ink2)
             .multilineTextAlignment(trailing ? .trailing : .leading)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: trailing ? .trailing : .leading)

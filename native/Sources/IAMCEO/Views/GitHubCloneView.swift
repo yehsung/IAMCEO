@@ -16,6 +16,9 @@ struct GitHubCloneView: View {
     @State private var jobID: String?
     @State private var cloneServerKey: String?
     @State private var cloneTask: Task<Void, Never>?
+    @FocusState private var focus: Field?
+
+    private enum Field: Hashable { case search, address }
 
     private var serverKey: String { store.endpoint + "|" + (store.serverID ?? "") }
     private var repo: String? {
@@ -31,20 +34,22 @@ struct GitHubCloneView: View {
     var body: some View {
         CESheet("GitHub에서 가져오기", subtitle: "저장소를 서버 컴퓨터에 받아 그 폴더로 프로젝트를 만듭니다.", icon: "arrow.down.circle",
                 width: 580, maxBodyHeight: 600, onClose: { if !cloning { dismiss() } }) {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 18) {
                 repositorySection
                 addressSection
                 destinationSection
                 if cloning {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("저장소를 받는 중입니다").font(CEFont.secondary).foregroundStyle(CE.ink2)
+                        Text("저장소를 받는 중입니다").font(CEFont.note).foregroundStyle(CE.ink2)
                     }
                     .accessibilityIdentifier(jobID ?? "clone")
                 }
-                if store.isDemo { Text("샘플 저장소 · 읽기 전용").font(CEFont.meta).foregroundStyle(CE.ink3) }
+                if store.isDemo { Text("샘플 저장소 · 읽기 전용").font(CEFont.meta).foregroundStyle(CE.ink2) }
                 if let error {
-                    Label(error, systemImage: "exclamationmark.circle").font(CEFont.secondary).foregroundStyle(CE.danger)
+                    // web .form__error 13.5 danger.
+                    Label(error, systemImage: "exclamationmark.circle").font(CEFont.note).foregroundStyle(CE.danger)
+                        .lineSpacing(CELeading.note)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }.disabled(cloning || jobID != nil)
@@ -61,39 +66,42 @@ struct GitHubCloneView: View {
 
     /// My repositories: a search field and a bordered list; the chosen row is lit and ticked.
     @ViewBuilder private var repositorySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("내 저장소").font(CEFont.section).foregroundStyle(CE.ink)
+        SetupField("내 저장소") {
             if loading && repositories == nil {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("저장소 목록을 불러오는 중입니다").font(CEFont.secondary).foregroundStyle(CE.ink3)
+                    Text("저장소 목록을 불러오는 중입니다").font(CEFont.note).foregroundStyle(CE.ink2)
                 }.padding(.vertical, 10)
             } else if repositories?.available == true {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").font(CEFont.secondary).foregroundStyle(CE.ink3)
-                    TextField("검색", text: $search, prompt: Text("저장소 이름으로 찾기"))
-                        .labelsHidden().textFieldStyle(.plain).font(CEFont.body).autocorrectionDisabled()
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        #endif
+                VStack(alignment: .leading, spacing: 8) {
+                    // web .input: the search well with its glass, focus ring and all.
+                    HStack(spacing: 9) {
+                        Image(systemName: "magnifyingglass").font(.system(size: 13, weight: .medium)).foregroundStyle(CE.ink3)
+                            .accessibilityHidden(true)
+                        TextField("검색", text: $search, prompt: Text("저장소 이름으로 찾기"))
+                            .labelsHidden().font(SetupFont.input).autocorrectionDisabled()
+                            #if os(iOS)
+                            .textInputAutocapitalization(.never)
+                            #endif
+                            .focused($focus, equals: .search)
+                    }
+                    .ceField(focused: focus == .search)
+                    let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 3) {
+                            ForEach(filtered) { repository in repoRow(repository) }
+                            if filtered.isEmpty {
+                                Text(search.isEmpty ? "저장소가 없습니다" : "‘\(search)’에 맞는 저장소가 없습니다")
+                                    .font(CEFont.note).foregroundStyle(CE.ink2)
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: .infinity).padding(.vertical, 28)
+                            }
+                        }.padding(5)
+                    }
+                    .frame(height: isMac ? 300 : 280)
+                    .background(Color.white.opacity(0.025), in: shape)
+                    .overlay { shape.strokeBorder(CE.line) }
                 }
-                .padding(.horizontal, 11).padding(.vertical, 8)
-                .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
-                .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(CE.line) }
-                let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(filtered) { repository in repoRow(repository) }
-                        if filtered.isEmpty {
-                            Text(search.isEmpty ? "저장소가 없습니다" : "‘\(search)’에 맞는 저장소가 없습니다")
-                                .font(CEFont.secondary).foregroundStyle(CE.ink3)
-                                .frame(maxWidth: .infinity).padding(.vertical, 24)
-                        }
-                    }.padding(4)
-                }
-                .frame(height: 210)
-                .background(Color.white.opacity(0.025), in: shape)
-                .overlay { shape.strokeBorder(CE.line) }
             } else {
                 InlineNotice(tone: .accent, icon: "info.circle", title: "내 저장소 목록을 볼 수 없습니다",
                              detail: "서버 컴퓨터에서 GitHub CLI(gh)로 로그인하면 여기에 목록이 보입니다. 아래에 주소를 직접 넣어 가져올 수 있습니다.")
@@ -103,71 +111,79 @@ struct GitHubCloneView: View {
 
     /// A repository that is not in the list (any public one): owner/name or its github.com address.
     private var addressSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(repositories?.available == true ? "목록에 없는 저장소" : "저장소 주소").font(CEFont.section).foregroundStyle(CE.ink)
-            TextField("저장소 주소", text: $address, prompt: Text(verbatim: "owner/name 또는 https://github.com/owner/name"))
-                .labelsHidden().font(CEFont.mono).autocorrectionDisabled()
+        let invalid = !address.isEmpty && repo == nil
+        return SetupField(repositories?.available == true ? "목록에 없는 저장소" : "저장소 주소",
+                          hint: invalid ? "GitHub 저장소 주소 형식이 아닙니다" : nil, hintTone: CE.danger) {
+            TextField("저장소 주소", text: $address, prompt: Text(verbatim: "owner/name 또는 https://github.com/owner/name").font(SetupFont.input))
+                .labelsHidden().font(SetupFont.codeInput).autocorrectionDisabled()
                 #if os(iOS)
                 .textInputAutocapitalization(.never)
                 #endif
-                .ceField()
-            if !address.isEmpty && repo == nil {
-                Text("GitHub 저장소 주소 형식이 아닙니다").font(CEFont.meta).foregroundStyle(CE.danger)
-            }
+                .focused($focus, equals: .address)
+                .ceField(focused: focus == .address)
         }
     }
 
     /// Where it lands: the final folder path as a tile, with the place to change it.
     private var destinationSection: some View {
-        let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
-        return VStack(alignment: .leading, spacing: 6) {
-            Text("받을 위치").font(CEFont.section).foregroundStyle(CE.ink)
-            HStack(spacing: 10) {
-                Image(systemName: "folder").font(CEFont.secondary).foregroundStyle(CE.accent)
-                VStack(alignment: .leading, spacing: 2) {
+        let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
+        return SetupField("받을 위치") {
+            HStack(spacing: 12) {
+                Image(systemName: "folder.fill").font(.system(size: 14, weight: .semibold)).foregroundStyle(CE.accent)
+                    .frame(width: 30, height: 30)
+                    .background(CE.violet.opacity(0.16), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
                     Text(preview.isEmpty ? (parent.isEmpty ? "받을 위치를 골라 주세요" : parent) : preview)
-                        .font(CEFont.mono).foregroundStyle(parent.isEmpty ? CE.ink3 : CE.ink)
+                        .font(SetupFont.codeInput).foregroundStyle(parent.isEmpty ? CE.ink3 : CE.ink)
                         .lineLimit(1).truncationMode(.middle)
                     if preview.isEmpty && !parent.isEmpty {
-                        Text("저장소를 고르면 이 폴더 아래에 저장소 이름으로 만들어집니다").font(CEFont.meta).foregroundStyle(CE.ink3)
+                        Text("저장소를 고르면 이 폴더 아래에 저장소 이름으로 만들어집니다").font(SetupFont.hint).foregroundStyle(CE.ink2)
+                            .lineSpacing(SetupFont.hintLeading)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 Spacer(minLength: 8)
                 Button("바꾸기") { showLocationPicker = true }
-                    .buttonStyle(.plain).font(CEFont.secondary.weight(.medium)).foregroundStyle(CE.accent)
+                    .ceSecondaryButton()
+                    .controlSize(.small)
+                    .fixedSize()
                     .disabled(cloning || loading)
             }
-            .padding(.horizontal, 12).padding(.vertical, 10)
+            .padding(.leading, 12).padding(.trailing, 10).padding(.vertical, 10)
             .background(Color.white.opacity(0.04), in: shape)
-            .overlay { shape.strokeBorder(CE.line) }
+            .overlay { shape.strokeBorder(Color.white.opacity(0.1)) }
             .accessibilityElement(children: .combine)
             .accessibilityLabel(preview.isEmpty ? "받을 위치: \(parent)" : "최종 폴더: " + preview)
         }
     }
 
+    /// The picked repository looks like a picked choice (web .choice[data-on]: violet .24, 1.5pt violet ring).
     private func repoRow(_ repository: GitHubRepository) -> some View {
         let selected = selectedRepo == repository.nameWithOwner && address.isEmpty
         return Button { selectedRepo = repository.nameWithOwner; address = "" } label: {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: selected ? "checkmark.circle.fill" : "book.closed")
-                    .font(CEFont.secondary).foregroundStyle(selected ? CE.accent : CE.ink3)
-                    .frame(width: 18).padding(.top, 2)
+                    .font(.system(size: 14, weight: .medium)).foregroundStyle(selected ? CE.accent : CE.ink3)
+                    .frame(width: 18).padding(.top, 1)
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 7) {
                         Text(repository.nameWithOwner).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
                         if repository.visibility == "PRIVATE" { Tag("비공개", icon: "lock") }
                     }
                     if let description = repository.description, !description.isEmpty {
-                        Text(description).font(CEFont.secondary).foregroundStyle(CE.ink2).lineLimit(1)
+                        Text(description).font(CEFont.secondary).foregroundStyle(CE.ink2).lineLimit(2)
+                            .lineSpacing(CELeading.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 Spacer(minLength: 8)
                 Text(relativeTime(repository.updatedAt)).font(CEFont.meta).foregroundStyle(CE.ink3).fixedSize()
             }
-            .padding(.horizontal, 10).padding(.vertical, 9)
-            .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .buttonStyle(RowButtonStyle(selected: selected))
+        .buttonStyle(RepoRowStyle(selected: selected))
         .accessibilityLabel("\(repository.nameWithOwner)\(repository.visibility == "PRIVATE" ? ", 비공개" : "")")
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
@@ -214,5 +230,31 @@ struct GitHubCloneView: View {
             }
         } catch is CancellationError { }
         catch { self.error = error.localizedDescription }
+    }
+}
+
+/// A repository in the list: a plain row (white .06 on hover); the picked one is drawn as a picked choice
+/// (web .choice[data-on]: violet .24 with a 1.5pt violet .9 ring).
+private struct RepoRowStyle: ButtonStyle {
+    var selected = false
+    func makeBody(configuration: Configuration) -> some View { RowBody(configuration: configuration, selected: selected) }
+    private struct RowBody: View {
+        let configuration: ButtonStyleConfiguration
+        let selected: Bool
+        @State private var hovering = false
+        var body: some View {
+            let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+            configuration.label
+                .contentShape(shape)
+                .background {
+                    if selected {
+                        shape.fill(CE.violet.opacity(configuration.isPressed ? 0.3 : 0.24))
+                            .overlay { shape.strokeBorder(CE.violet.opacity(0.9), lineWidth: 1.5) }
+                    } else {
+                        shape.fill(Color.white.opacity(configuration.isPressed ? 0.09 : hovering ? 0.06 : 0))
+                    }
+                }
+                .onHover { hovering = $0 }
+        }
     }
 }

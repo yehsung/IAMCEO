@@ -96,34 +96,37 @@ struct TerminalMirrorView: View {
 
     @ViewBuilder private var chrome: some View {
         #if os(macOS)
-        // Sheet without a window toolbar: a one-line title bar (no wrapped text outside the scroll areas).
+        // Sheet without a window toolbar: a one-line title bar (no wrapped text outside the scroll areas), drawn like
+        // the CESheet header of the live terminal sheet (icon tile, 16.5 title, quiet round ×) on the same surface.
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "terminal").font(.system(size: 13, weight: .semibold)).foregroundStyle(CE.ink2)
-                Text("\(current.name) 터미널").font(CEFont.pageTitle).foregroundStyle(CE.ink).lineLimit(1)
+            HStack(spacing: 12) {
+                let tile = RoundedRectangle(cornerRadius: 9, style: .continuous)
+                Image(systemName: "terminal")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(CE.accent)
+                    .frame(width: 32, height: 32)
+                    .background(CE.violet.opacity(0.16), in: tile)
+                    .overlay { tile.strokeBorder(CE.violet.opacity(0.3)) }
+                    .accessibilityHidden(true)
+                Text("\(current.name) 터미널").font(CEFont.title).foregroundStyle(CE.ink).lineLimit(1)
+                    .accessibilityAddTraits(.isHeader)
                 TeamMemberStatusBadge(member: current)
-                Spacer(minLength: 8)
-                Button { dismiss() } label: {
-                    Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).frame(width: 28, height: 28)
-                        .background(Color.white.opacity(0.07), in: Circle())
-                        .overlay { Circle().strokeBorder(CE.line) }
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(CE.ink2)
-                .help(controlling ? "닫기 · 조작을 끝내고 자동 전달을 다시 켭니다" : "닫기")
-                .accessibilityLabel("터미널 닫기")
+                Spacer(minLength: 12)
+                Button { dismiss() } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)) }
+                    .buttonStyle(MirrorCloseStyle())
+                    .focusEffectDisabled()
+                    .help(controlling ? "닫기 · 조작을 끝내고 자동 전달을 다시 켭니다" : "닫기")
+                    .accessibilityLabel("터미널 닫기")
             }
-            .padding(.horizontal, 18).padding(.vertical, 12)
-            .overlay(alignment: .bottom) { Rectangle().fill(CE.line).frame(height: 1) }
+            .padding(.leading, 22).padding(.trailing, 16).padding(.top, 18).padding(.bottom, 14)
             main
         }
-        .background { AmbientBackground() }
+        .background { CESheetBackground() }
         .ceSheetSize(width: 860, height: 760)
         #else
         NavigationStack {
             main
-                .background { AmbientBackground() }
+                .background { CESheetBackground() }
                 .navigationTitle("\(current.name) 터미널")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
@@ -141,7 +144,8 @@ struct TerminalMirrorView: View {
             controls
             footer
         }
-        .padding(isMac ? 18 : 14)
+        // CESheet body insets on Mac (22 at the sides and bottom, the header above).
+        .padding(.horizontal, isMac ? 22 : 14).padding(.top, isMac ? 2 : 14).padding(.bottom, isMac ? 22 : 14)
     }
 
     // MARK: Sections
@@ -169,7 +173,7 @@ struct TerminalMirrorView: View {
 
     @ViewBuilder private var readMeta: some View {
         if let lastRead {
-            Text("갱신 \(koTime(lastRead, seconds: true))").font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink3).lineLimit(1)
+            Text("갱신 \(koTime(lastRead, seconds: true))").font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink2).lineLimit(1)
                 .help("화면은 2초마다 갱신합니다")
         }
     }
@@ -222,8 +226,9 @@ struct TerminalMirrorView: View {
         }
     }
 
+    /// web .tm-screen: radius 12, padding 12, rgb(5 4 11 / .78) with a hairline ring, code at line-height 1.45.
     private var terminal: some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
         return GeometryReader { proxy in
             ScrollViewReader { reader in
                 ScrollView([.horizontal, .vertical]) {
@@ -231,12 +236,12 @@ struct TerminalMirrorView: View {
                         Text(displayText)
                             .font(CEFont.mono)
                             .foregroundStyle(screen.isEmpty ? CE.ink3 : CE.ink)
-                            .lineSpacing(3)
+                            .lineSpacing(CELeading.spacing(12.5, 1.45))
                             .textSelection(.enabled)
                             .fixedSize()
                         Color.clear.frame(width: 1, height: 1).id(Self.bottomID)
                     }
-                    .padding(14)
+                    .padding(12)
                     .frame(minWidth: proxy.size.width, minHeight: proxy.size.height, alignment: .topLeading)
                 }
                 .onChange(of: screen) { _, _ in
@@ -248,7 +253,7 @@ struct TerminalMirrorView: View {
             }
         }
         .frame(minHeight: keyboardUp ? 120 : 220, maxHeight: .infinity)
-        .background(CE.bgDeep.opacity(0.82), in: shape)
+        .background(CE.bgDeep.opacity(0.78), in: shape)
         .clipShape(shape)
         .overlay { shape.strokeBorder(controlling ? CE.approval.opacity(0.55) : CE.line, lineWidth: controlling ? 1.2 : 1) }
         .shadow(color: controlling ? CE.approval.opacity(0.18) : .clear, radius: 14)
@@ -268,7 +273,7 @@ struct TerminalMirrorView: View {
                         #if os(iOS)
                         .textInputAutocapitalization(.never)
                         #endif
-                        .ceField()
+                        .ceField(focused: inputFocused)
                         .accessibilityLabel("터미널 입력")
                     Button { Task { await sendInput() } } label: {
                         Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)).frame(width: 18, height: 18)
@@ -293,7 +298,7 @@ struct TerminalMirrorView: View {
                 }
                 HStack(spacing: 10) {
                     if let expiresAt = store.terminalLeases[member.id]?.expiresAt {
-                        Text(leaseRemaining(expiresAt)).font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink3).lineLimit(1)
+                        Text(leaseRemaining(expiresAt)).font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink2).lineLimit(1)
                             .help("조작권은 5분 동안 유지되고 입력할 때마다 늘어납니다")
                     }
                     Spacer(minLength: 0)
@@ -317,33 +322,35 @@ struct TerminalMirrorView: View {
                 }
                 .ceProminentButton()
                 .disabled(!store.canWrite || pending || controlBlock != nil || (unresolved && !claimCanBeRecovered))
+                // web .tm-note: 13.5 ink-2 at line-height 1.5.
                 Text(controlBlock ?? "시작하면 \(current.name)에게 가는 자동 전달이 멈춥니다. 끝내면 다시 이어집니다.")
-                    .font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(3)
+                    .font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.spacing(13.5, 1.5)).lineLimit(3)
                     .layoutPriority(1)
                 Spacer(minLength: 0)
             }
         }
     }
 
+    /// Results and errors read at the web's note size (13.5, line-height 1.45).
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             if unresolved {
                 Label("직접 조작 결과 확인 중 · 입력을 다시 보내지 않습니다. 편집한 글은 보존됩니다.", systemImage: "clock")
-                    .font(CEFont.meta).foregroundStyle(CE.attention)
+                    .font(CEFont.note).foregroundStyle(CE.attention).lineSpacing(CELeading.note)
                 Button("작업 결과 다시 확인") { Task { await checkResult() } }
                     .ceSecondaryButton().controlSize(.small).disabled(!store.canWrite || pending)
             } else if let receipt = receipts.first {
                 Text(receipt.status == .applied ? "직접 조작 적용 확인 · 업무 완료를 뜻하지 않습니다." : TerminalPresentation.message(receipt.error ?? "직접 조작이 거부됐습니다."))
-                    .font(CEFont.meta).foregroundStyle(CE.ink3)
+                    .font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.note)
             }
             if let inputSaveError {
                 Text("입력을 저장하지 못했습니다. 글을 복사해 보관하세요. \(inputSaveError)")
-                    .font(CEFont.meta).foregroundStyle(CE.danger).textSelection(.enabled)
+                    .font(CEFont.note).foregroundStyle(CE.danger).lineSpacing(CELeading.note).textSelection(.enabled)
                 Button("입력 저장 다시 시도") { editInput(input) }.ceSecondaryButton().controlSize(.small)
             }
             if let issue = error ?? store.errorMessage {
-                Label(TerminalPresentation.message(issue), systemImage: "exclamationmark.circle").font(CEFont.meta).foregroundStyle(CE.danger)
-                    .lineLimit(3).layoutPriority(1)
+                Label(TerminalPresentation.message(issue), systemImage: "exclamationmark.circle").font(CEFont.note).foregroundStyle(CE.danger)
+                    .lineSpacing(CELeading.note).lineLimit(3).layoutPriority(1)
             }
             if current.origin != "manual" && !keyboardUp {
                 let command = "\(store.bootstrap?.cli ?? "iamceo") attach \(current.id)"
@@ -464,26 +471,27 @@ private struct TermNotice: View {
     let title: String
     let detail: String
 
+    /// Same values as InlineNotice (web notice text 13.5 at line-height 1.45, padding 12 / 14).
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
-        HStack(alignment: .top, spacing: 9) {
+        HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon).font(CEFont.rowTitle).foregroundStyle(tone.color).padding(.top, 1)
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
-                Text(detail).font(CEFont.secondary).foregroundStyle(CE.ink2).lineLimit(3)
+                Text(detail).font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.note).lineLimit(3)
             }
             Spacer(minLength: 0)
         }
-        .padding(CESpace.m)
+        .padding(.vertical, 12).padding(.horizontal, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(tone.color.opacity(0.1), in: shape)
-        .overlay { shape.strokeBorder(tone.color.opacity(0.25)) }
+        .background(tone.color.opacity(0.09), in: shape)
+        .overlay { shape.strokeBorder(tone.color.opacity(0.22)) }
         .layoutPriority(1)
         .accessibilityElement(children: .combine)
     }
 }
 
-/// Glass key cap: light fill, hairline rim, pressed state brighter.
+/// Glass key cap: light fill, hairline rim, pressed state brighter. 32pt on Mac (web gbtn--s), 40 on iPhone.
 private struct TermKeyStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { KeyBody(configuration: configuration) }
     private struct KeyBody: View {
@@ -494,12 +502,32 @@ private struct TermKeyStyle: ButtonStyle {
             let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
             configuration.label
                 .foregroundStyle(isEnabled ? CE.ink : CE.ink3)
-                .padding(.horizontal, 11)
-                .frame(minWidth: isMac ? 36 : 44, minHeight: isMac ? 28 : 40)
-                .background(Color.white.opacity(configuration.isPressed ? 0.16 : hovering ? 0.10 : 0.07), in: shape)
+                .padding(.horizontal, 12)
+                .frame(minWidth: isMac ? 40 : 44, minHeight: isMac ? 32 : 40)
+                .background(Color.white.opacity(configuration.isPressed ? 0.16 : hovering && isEnabled ? 0.11 : 0.07), in: shape)
                 .background(.ultraThinMaterial.opacity(isEnabled ? 1 : 0.5), in: shape)
                 .overlay { if isEnabled { GlassRim(shape: shape) } else { shape.strokeBorder(CE.line) } }
+                .scaleEffect(configuration.isPressed ? 0.97 : 1)
+                .animation(.spring(response: 0.3, dampingFraction: 0.55), value: configuration.isPressed)
                 .contentShape(shape)
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+/// The quiet round × of the title bar, as CECloseButton draws it: 26pt white-tint circle, ink-1 on hover.
+private struct MirrorCloseStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { CloseBody(configuration: configuration) }
+    private struct CloseBody: View {
+        let configuration: ButtonStyleConfiguration
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .foregroundStyle(hovering ? CE.ink : CE.ink2)
+                .frame(width: 26, height: 26)
+                .background(Color.white.opacity(configuration.isPressed ? 0.14 : hovering ? 0.1 : 0.06), in: Circle())
+                .overlay { Circle().strokeBorder(Color.white.opacity(0.07)) }
+                .contentShape(Circle())
                 .onHover { hovering = $0 }
         }
     }

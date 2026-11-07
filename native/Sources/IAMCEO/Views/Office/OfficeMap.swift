@@ -230,6 +230,8 @@ extension OfficeMap {
     /// Wide layouts go above 2.5pt a pixel (up to 3.5pt) only for one band of at least two columns whose scene stays
     /// within this height (points).
     static let boostHeight: CGFloat = 520
+    /// A nameplate's height in points (12pt name, 3pt padding above and below, with room for its count capsule).
+    static let plateHeightPoints: CGFloat = 21
     /// Floor between two bands (the bottom row's nameplates and the next top row's).
     static let bandAisle: CGFloat = 12
     /// How far a desk that recedes is faded.
@@ -249,7 +251,7 @@ extension OfficeMap {
 
     /// The scene's height in points with `bands` full bands at pixel size `p` (the same arithmetic as `build`).
     private static func sceneHeight(bands: Int, pixel p: CGFloat, lead: Bool) -> CGFloat {
-        let ph = CGFloat(Int((16 / p).rounded(.up)))
+        let ph = CGFloat(Int((plateHeightPoints / p).rounded(.up)))
         let top: CGFloat = lead ? 56 + ph : 6
         let band = ph + 22 + rowGap + 30 + ph
         return (top + CGFloat(bands) * band + CGFloat(max(0, bands - 1)) * bandAisle + 8) * p
@@ -344,7 +346,7 @@ extension OfficeMap {
         let c = (n + 1) / 2
         let grid = grid(input, columnsNeeded: c, lead: leadMember != nil)
         let p = grid.pixel
-        let ph = CGFloat(Int((16 / p).rounded(.up)))
+        let ph = CGFloat(Int((plateHeightPoints / p).rounded(.up)))
         map.pixel = p
         map.plateHeight = Int(ph)
         let mapW = CGFloat(grid.width)

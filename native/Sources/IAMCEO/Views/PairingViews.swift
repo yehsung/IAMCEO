@@ -110,7 +110,7 @@ struct MacPairingSheet: View {
                             Text(hosts).hidden().accessibilityHidden(true)
                         }
                     }
-                    .font(CEFont.mono).foregroundStyle(CE.ink3)
+                    .font(CEFont.mono).foregroundStyle(CE.ink2)
                     .lineLimit(1).truncationMode(.middle)
                 }
             }
@@ -143,14 +143,16 @@ struct MacPairingSheet: View {
         .accessibilityLabel(left > 0 ? "\(left / 60)분 \(left % 60)초 동안 한 번 쓸 수 있습니다" : "QR 시간이 지났습니다")
     }
 
-    /// How it works, as a calm numbered list: small muted numerals, no filled circles.
+    /// How it works, as a calm numbered list: small muted numerals, no filled circles (web .su-card__points 13.5 at
+    /// 1.5, ink-2).
     private var stepList: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(Self.steps.enumerated()), id: \.offset) { index, text in
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text("\(index + 1)").font(CEFont.meta.weight(.semibold)).monospacedDigit()
                         .foregroundStyle(CE.ink3).frame(width: 12, alignment: .trailing)
-                    Text(text).font(CEFont.secondary).foregroundStyle(CE.ink2)
+                    Text(text).font(CEFont.note).foregroundStyle(CE.ink2)
+                        .ceLineHeight(13.5, 1.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -199,7 +201,8 @@ struct PhonePairingSection: View {
                              actionTitle: "다시 확인") { tailnetUp = Tailnet.isConnected() }
             }
             Text("Mac의 IAMCEO에서 설정 → iPhone 연결을 누르고, 나온 QR을 이 iPhone 카메라로 비추세요.")
-                .font(CEFont.secondary).foregroundStyle(CE.ink2)
+                .font(CEFont.note).foregroundStyle(CE.ink2)
+                .lineSpacing(CELeading.note)
                 .fixedSize(horizontal: false, vertical: true)
             Button { scanning = true } label: {
                 HStack(spacing: 7) {
@@ -214,7 +217,8 @@ struct PhonePairingSection: View {
             .disabled(store.isPairing || !tailnetUp || !canScanInApp)
             if !canScanInApp {
                 Text("이 기기에서는 앱 안 스캔을 쓸 수 없습니다. 기본 카메라 앱으로 QR을 비추면 IAMCEO가 열립니다.")
-                    .font(CEFont.meta).foregroundStyle(CE.ink3)
+                    .font(CEFont.meta).foregroundStyle(CE.ink2)
+                    .lineSpacing(CELeading.spacing(12.5, 1.5))
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -242,7 +246,7 @@ struct QRScannerSheet: View {
                     .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .overlay { RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(CE.line) }
                 Text("Mac 화면의 QR을 비추세요.")
-                    .font(CEFont.secondary).foregroundStyle(CE.ink2)
+                    .font(CEFont.note).foregroundStyle(CE.ink2)
             }
             .padding(.bottom, CESpace.l)
         }

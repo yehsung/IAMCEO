@@ -173,13 +173,14 @@ struct OfficeView: View {
 
     var body: some View {
         let list = shown
-        Plate(padding: 0) {
+        // Web team panels (.tm-card, .tm-work__list): radius 18, text 16pt in from the edge.
+        Plate(padding: 0, radius: CERadius.card) {
             VStack(alignment: .leading, spacing: 12) {
                 OfficeHeader(counts: Self.counts(list), showsAdd: !project.isHq,
                              canAdd: store.canWrite && project.runnerEnabled, help: teamAddMemberHelp(store, project)) {
                     router.showNewMember = true
                 }
-                .padding(.horizontal, isMac ? 0 : 4)
+                .padding(.horizontal, isMac ? 2 : 4)
                 stage(list)
             }
             .padding(.horizontal, isMac ? 14 : 10)
@@ -275,9 +276,30 @@ struct OfficeView: View {
             }
             OfficeMessageBox(subject: boxSubject(everyone), queue: boxQueue(everyone), decisions: open, compactAt: compactAt,
                              still: reduceMotion) { id in router.memberID = id }
+            // Everyone awake at a glance (the web's member cards): what each one is doing, one row per member.
+            let awake = nowList(everyone)
+            if !awake.isEmpty {
+                OfficeNowList(members: awake, decisions: open, selected: router.memberID, hover: { id, inside in
+                    if inside { hovered = id } else if hovered == id { hovered = nil }
+                }) { id in router.memberID = id }
+                .padding(.top, 4)
+            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("사무실")
+    }
+
+    /// Who the 지금 list shows: everyone not asleep, the lead first, then who needs the CEO first (승인 창 앞, 내 답
+    /// 기다림, 오류), then who works, rests or is missing. Same order as the web's member cards.
+    private func nowList(_ list: [Member]) -> [Member] {
+        let rank = ["blocked": 0, "waiting": 1, "error": 2, "working": 3, "idle": 4, "offline": 5]
+        let awake = list.enumerated().filter { $0.element.status != "asleep" }
+        return awake.sorted { a, b in
+            let la = a.element.kind != "worker", lb = b.element.kind != "worker"
+            if la != lb { return la }
+            let ra = rank[a.element.status] ?? 6, rb = rank[b.element.status] ?? 6
+            return ra != rb ? ra < rb : a.offset < b.offset
+        }.map(\.element)
     }
 
     /// iPhone pauses whenever the scene is not active. A Mac window pauses once it is hidden or minimised; while it
@@ -763,19 +785,20 @@ private struct OfficeNameplate: View {
     var delivery: MemberDeliverySummary? = nil
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 5, style: .continuous)
+        // Never below the web's smallest word size (11.5-12px): name 12, marks 10, about 20pt tall.
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
         let away = member.map { officeDim($0.status) } ?? true
         let counted = member != nil && decisions > 0
-        HStack(spacing: 4) {
+        HStack(spacing: 5) {
             if let member {
-                HStack(spacing: 4) {
+                HStack(spacing: 5) {
                     dot(member.status)
-                    Text(member.name).font(.system(size: 10, weight: .semibold)).foregroundStyle(away ? CE.ink2 : CE.ink)
+                    Text(member.name).font(.system(size: 12, weight: .semibold)).foregroundStyle(away ? CE.ink2 : CE.ink)
                         .lineLimit(1).truncationMode(.tail)
                     if member.kind != "worker", !member.name.contains(rankName(member.kind)) {
-                        Text(rankName(member.kind)).font(.system(size: 8.5, weight: .bold)).foregroundStyle(CE.accent)
-                            .padding(.horizontal, 3).padding(.vertical, 0.5)
-                            .background(CE.accent.opacity(0.18), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
+                        Text(rankName(member.kind)).font(.system(size: 10, weight: .bold)).foregroundStyle(CE.accent)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(CE.accent.opacity(0.18), in: RoundedRectangle(cornerRadius: 3.5, style: .continuous))
                             .fixedSize()
                     }
                 }
@@ -783,18 +806,18 @@ private struct OfficeNameplate: View {
                 if let delivery, delivery.needsOwnerCount > 0 {
                     ViewThatFits(in: .horizontal) {
                         Text("전달 확인 \(DeliveryInfo.badgeCount(delivery.needsOwnerCount))")
-                            .font(.system(size: 8.5, weight: .bold)).foregroundStyle(CE.attention).fixedSize()
-                        Image(systemName: "exclamationmark.circle").font(.system(size: 8.5, weight: .bold)).foregroundStyle(CE.attention)
+                            .font(.system(size: 10, weight: .bold)).foregroundStyle(CE.attention).fixedSize()
+                        Image(systemName: "exclamationmark.circle").font(.system(size: 10, weight: .bold)).foregroundStyle(CE.attention)
                     }
                 }
                 if counted { count }
             } else {
-                Text("새 팀장 자리").font(.system(size: 10, weight: .semibold)).foregroundStyle(CE.ink3).lineLimit(1)
+                Text("새 팀장 자리").font(.system(size: 12, weight: .semibold)).foregroundStyle(CE.ink3).lineLimit(1)
                     .opacity(0.78)
             }
         }
         // The count capsule sits as far in from the trailing edge as from the top and bottom.
-        .padding(.leading, 5).padding(.trailing, counted ? 2.5 : 5).padding(.vertical, 2)
+        .padding(.leading, 6).padding(.trailing, counted ? 3 : 6).padding(.vertical, 3)
         .background(Color(hex: 0x0E0A1F).opacity(away ? 0.25 : 0.5), in: shape)
         .overlay {
             if member == nil {
@@ -808,16 +831,16 @@ private struct OfficeNameplate: View {
     /// Decisions waiting for the CEO (결재): an app-style count capsule in the attention colour.
     private var count: some View {
         Text(decisions > 9 ? "9+" : "\(decisions)")
-            .font(.system(size: 8.5, weight: .bold)).monospacedDigit()
+            .font(.system(size: 10, weight: .bold)).monospacedDigit()
             .foregroundStyle(Color(hex: 0x2B1708))
-            .padding(.horizontal, 3)
-            .frame(minWidth: 11, minHeight: 11)
+            .padding(.horizontal, 4)
+            .frame(minWidth: 14, minHeight: 14)
             .background(CE.attention, in: Capsule())
             .fixedSize()
     }
 
     private func dot(_ status: String) -> some View {
-        OfficeStateDot(status: status, size: 5)
+        OfficeStateDot(status: status, size: 6)
     }
 }
 
@@ -825,16 +848,21 @@ private struct OfficeContextPreview: View {
     let member: Member
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                OfficeStateDot(status: member.status, size: 7)
-                Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink)
-                Text(officeStateLabel(member.status)).font(CEFont.meta).foregroundStyle(MemberStatusInfo(member.status).tone.color)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                OfficeStateDot(status: member.status, size: 8)
+                    .alignmentGuide(.firstTextBaseline) { $0.height / 2 + 5 }
+                Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
+                Text(officeStateLabel(member.status)).font(CEFont.meta.weight(.semibold))
+                    .foregroundStyle(member.status == "idle" ? CE.ink3 : MemberStatusInfo(member.status).tone.color)
+                    .lineLimit(1).fixedSize()
             }
-            Text(officeDetail(member)).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(2)
+            Text(officeDetail(member)).font(CEFont.note).foregroundStyle(member.status == "error" ? CE.danger : CE.ink2)
+                .lineSpacing(CELeading.note).lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(14)
-        .frame(width: 280, alignment: .leading)
+        .padding(16)
+        .frame(width: 300, alignment: .leading)
         .background(CE.plateRaisedSolid)
     }
 }
@@ -851,16 +879,16 @@ private struct OfficeBench: View {
     private static let explanation = "오래 쉬어 책상을 비운 직원입니다. 일을 맡기면 다시 자리에 앉습니다."
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            HStack(spacing: 4) {
-                Text("자리 비움").font(.system(size: 11, weight: .semibold)).foregroundStyle(CE.ink3)
-                Text("\(members.count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(CE.ink3).monospacedDigit()
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            HStack(spacing: 5) {
+                Text("자리 비움").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(CE.ink2)
+                Text("\(members.count)").font(.system(size: 12.5)).foregroundStyle(CE.ink3).monospacedDigit()
             }
             .fixedSize()
             .help(Self.explanation)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("자리 비움 \(members.count)명. " + Self.explanation)
-            TeamWrapLayout(spacing: 6, lineSpacing: 6) {
+            TeamWrapLayout(spacing: 8, lineSpacing: 8) {
                 ForEach(members) { member in plate(member) }
             }
         }
@@ -868,30 +896,31 @@ private struct OfficeBench: View {
     }
 
     private func plate(_ member: Member) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
         let count = decisions[member.id] ?? 0
         let when = member.lastActiveAt.map { relativeTime($0) }
         return Button { open(member.id) } label: {
-            HStack(spacing: 5) {
-                OfficeStateDot(status: member.status, size: 5)
-                Text(member.name).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(CE.ink2).lineLimit(1)
+            HStack(spacing: 6) {
+                OfficeStateDot(status: member.status, size: 6)
+                Text(member.name).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(CE.ink2).lineLimit(1)
                 if let when, !when.isEmpty {
-                    Text(when).font(.system(size: 10)).foregroundStyle(CE.ink3).lineLimit(1)
+                    Text(when).font(.system(size: 11.5)).foregroundStyle(CE.ink3).monospacedDigit().lineLimit(1)
                 }
                 if count > 0 {
                     Text(count > 9 ? "9+" : "\(count)")
-                        .font(.system(size: 8.5, weight: .bold)).monospacedDigit()
+                        .font(.system(size: 10, weight: .bold)).monospacedDigit()
                         .foregroundStyle(Color(hex: 0x2B1708))
-                        .padding(.horizontal, 3)
-                        .frame(minWidth: 11, minHeight: 11)
+                        .padding(.horizontal, 4)
+                        .frame(minWidth: 14, minHeight: 14)
                         .background(CE.attention, in: Capsule())
                 }
             }
             .fixedSize()
-            .padding(.horizontal, 7).padding(.vertical, 3.5)
+            .padding(.horizontal, 10).padding(.vertical, 6)
             .background(Color(hex: 0x0E0A1F).opacity(0.3), in: shape)
             .overlay { shape.strokeBorder(Color.white.opacity(0.07), lineWidth: 1) }
-            .contentShape(shape)
+            .frame(minHeight: isMac ? nil : 44)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help("\(member.name) · \(officeStateLabel(member.status))" + (when.map { " · 마지막 작업 \($0)" } ?? "") + "\n" + Self.explanation)
@@ -925,7 +954,7 @@ private struct OfficeMessageBox: View {
         let member = member
         let line = member.map(officeDetail) ?? "모두 쉬는 중입니다."
         let key = (member?.id ?? "-") + "|" + (member?.status ?? "") + "|" + line
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
         Button {
             if let member { open(member.id) }
         } label: {
@@ -934,8 +963,9 @@ private struct OfficeMessageBox: View {
                     .id(key)
                     .transition(.opacity)
             }
-            .frame(maxWidth: .infinity, minHeight: isMac ? 34 : 50, alignment: .leading)
-            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .frame(minHeight: isMac ? 44 : 52)
             .background(Color.white.opacity(0.04), in: shape)
             .overlay { shape.strokeBorder(Color.white.opacity(0.07), lineWidth: 1) }
             .contentShape(shape)
@@ -958,10 +988,12 @@ private struct OfficeMessageBox: View {
     }
 
     @ViewBuilder private func content(_ member: Member?, line: String) -> some View {
+        // Web member card: name 15.5/650, state pill 12.5/600, what it does 14/1.45 ink-1 (here ink2 under the name).
         let detail = Text(line)
-            .font(.system(size: isMac ? 12 : 12.5))
+            .font(.system(size: isMac ? 13.5 : 14))
             .foregroundStyle(member == nil ? CE.ink3 : (member?.status == "error" ? CE.danger : CE.ink2))
-            .lineLimit(1)
+            .lineSpacing(isMac ? 0 : CELeading.spacing(14, 1.45))
+            .lineLimit(isMac ? 1 : 2)
             .truncationMode(.tail)
         if let member {
             let count = decisions[member.id] ?? 0
@@ -969,19 +1001,28 @@ private struct OfficeMessageBox: View {
                 let value = Int(min(max(pct, 0), 100).rounded())
                 return value >= compactAt ? value : nil
             }
+            let time = relativeTime(member.nowAt)
             #if os(macOS)
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 10) { title(member, extra: extras(count: count, due: due, long: true)); detail; Spacer(minLength: 0) }
-                HStack(spacing: 10) { title(member, extra: extras(count: count, due: due, long: false)); detail; Spacer(minLength: 0) }
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    title(member, extra: extras(count: count, due: due, long: true)); detail; Spacer(minLength: 0); stamp(time)
+                }
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    title(member, extra: extras(count: count, due: due, long: false)); detail; Spacer(minLength: 0); stamp(time)
+                }
             }
             #else
-            VStack(alignment: .leading, spacing: 3) {
-                ViewThatFits(in: .horizontal) {
-                    title(member, extra: extras(count: count, due: due, long: true))
-                    title(member, extra: extras(count: count, due: due, long: false))
-                    title(member, extra: nil)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    ViewThatFits(in: .horizontal) {
+                        title(member, extra: extras(count: count, due: due, long: true))
+                        title(member, extra: extras(count: count, due: due, long: false))
+                        title(member, extra: nil)
+                    }
+                    Spacer(minLength: 0)
+                    stamp(time)
                 }
-                detail
+                detail.fixedSize(horizontal: false, vertical: true)
             }
             #endif
         } else {
@@ -989,17 +1030,24 @@ private struct OfficeMessageBox: View {
         }
     }
 
+    /// When the member last reported (the web card's time), quiet at the trailing edge.
+    @ViewBuilder private func stamp(_ time: String) -> some View {
+        if !time.isEmpty {
+            Text(time).font(.system(size: 12)).foregroundStyle(CE.ink3).monospacedDigit().lineLimit(1).fixedSize()
+        }
+    }
+
     private func title(_ member: Member, extra: String?) -> some View {
         let info = MemberStatusInfo(member.status)
-        return HStack(spacing: 5) {
-            Text(member.name).font(.system(size: isMac ? 12.5 : 13, weight: .semibold)).foregroundStyle(CE.ink).lineLimit(1)
-            Text("·").font(.system(size: 12)).foregroundStyle(CE.ink3)
-            Text(officeStateLabel(member.status)).font(.system(size: isMac ? 12 : 12.5, weight: .medium))
+        return HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(member.name).font(.system(size: isMac ? 14 : 15, weight: .semibold)).foregroundStyle(CE.ink).lineLimit(1)
+            Text("·").font(.system(size: 13)).foregroundStyle(CE.ink3)
+            Text(officeStateLabel(member.status)).font(.system(size: isMac ? 12.5 : 13, weight: .semibold))
                 .foregroundStyle(member.status == "idle" ? CE.ink3 : info.tone.color)
                 .lineLimit(1).fixedSize()
             if let extra {
-                Text(extra).font(.system(size: isMac ? 11.5 : 12, weight: .medium)).foregroundStyle(CE.attention).lineLimit(1).fixedSize()
-                    .padding(.leading, 3)
+                Text(extra).font(.system(size: isMac ? 12.5 : 13, weight: .semibold)).foregroundStyle(CE.attention).lineLimit(1).fixedSize()
+                    .padding(.leading, 4)
             }
         }
         .fixedSize(horizontal: true, vertical: false)
@@ -1010,6 +1058,106 @@ private struct OfficeMessageBox: View {
         if count > 0 { parts.append("결재 \(count)건") }
         if let due { parts.append(long ? "문맥 \(due)% — 터미널에서 /compact" : "문맥 \(due)%") }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
+// MARK: - 지금 list
+
+/// Everyone awake, one row each, under the message box: what the web's member cards showed at once (who, what it is
+/// doing, open decisions, when it last reported). Mac: one line (dot · name · what · 결재 · time); iPhone: the name line,
+/// then up to two lines of what. Hovering a row lights that member's desk; a row opens the member's detail.
+private struct OfficeNowList: View {
+    let members: [Member]
+    let decisions: [String: Int]
+    let selected: String?
+    let hover: (String, Bool) -> Void
+    let open: (String) -> Void
+    @ScaledMetric(relativeTo: .subheadline) private var nameWidth: CGFloat = 120
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("지금 하는 일").font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink2)
+                Text("\(members.count)").font(CEFont.meta).foregroundStyle(CE.ink3).monospacedDigit()
+            }
+            .padding(.horizontal, isMac ? 2 : 4)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("지금 하는 일, \(members.count)명")
+            .accessibilityAddTraits(.isHeader)
+            VStack(spacing: 0) {
+                ForEach(Array(members.enumerated()), id: \.element.id) { index, member in
+                    if index > 0 { Rectangle().fill(CE.line).frame(height: 1).padding(.horizontal, 10) }
+                    row(member)
+                }
+            }
+            // Row text lines up with the header text; the hover fill reaches a little past it.
+            .padding(.horizontal, isMac ? -8 : -6)
+        }
+    }
+
+    private func row(_ member: Member) -> some View {
+        let info = MemberStatusInfo(member.status)
+        let count = decisions[member.id] ?? 0
+        let time = relativeTime(member.nowAt)
+        let detail = officeDetail(member)
+        let quiet = ["idle", "offline"].contains(member.status)
+        let urgent = ["waiting", "blocked", "error"].contains(member.status)
+        // Who needs the CEO says so before what it is doing; the error itself is the line for a failed session.
+        let lead = urgent && member.status != "error" ? Text("\(officeStateLabel(member.status)) · ").foregroundStyle(info.tone.color).fontWeight(.semibold) : Text("")
+        let what = lead + Text(detail).foregroundStyle(member.status == "error" ? CE.danger : (quiet ? CE.ink3 : CE.ink2))
+        return Button { open(member.id) } label: {
+            Group {
+                if isMac {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        OfficeStateDot(status: member.status, size: 8)
+                            .frame(width: 8)
+                            .alignmentGuide(.firstTextBaseline) { $0.height / 2 + 5 }
+                        Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
+                            .frame(width: nameWidth, alignment: .leading)
+                        what.font(CEFont.note).lineLimit(1).truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if count > 0 { decisionMark(count) }
+                        if !time.isEmpty { stamp(time) }
+                    }
+                } else {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        OfficeStateDot(status: member.status, size: 8)
+                            .frame(width: 8)
+                            .alignmentGuide(.firstTextBaseline) { $0.height / 2 + 5 }
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
+                                if count > 0 { decisionMark(count) }
+                                Spacer(minLength: 8)
+                                if !time.isEmpty { stamp(time) }
+                            }
+                            what.font(CEFont.note).lineSpacing(CELeading.note).lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, 10)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(RowButtonStyle(selected: selected == member.id, radius: CERadius.row))
+        .onHover { hover(member.id, $0) }
+        .help(info.explanation)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel([member.name, officeStateLabel(member.status), detail, count > 0 ? "결재 \(count)건" : "", time]
+            .filter { !$0.isEmpty }.joined(separator: ", "))
+        .accessibilityHint("대화방 정보 보기")
+        .accessibilityAddTraits(selected == member.id ? [.isSelected] : [])
+    }
+
+    private func decisionMark(_ count: Int) -> some View {
+        Text("결재 \(count)").font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.attention).monospacedDigit()
+            .lineLimit(1).fixedSize()
+    }
+
+    private func stamp(_ time: String) -> some View {
+        Text(time).font(CEFont.caption).foregroundStyle(CE.ink3).monospacedDigit().lineLimit(1).fixedSize()
     }
 }
 
@@ -1036,7 +1184,7 @@ private struct OfficeHeader: View {
                 Spacer(minLength: 8)
                 addButton
             }
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .center, spacing: 10) {
                     title
                     Spacer(minLength: 8)
@@ -1051,14 +1199,18 @@ private struct OfficeHeader: View {
         Text("사무실").font(CEFont.section).foregroundStyle(CE.ink2).accessibilityAddTraits(.isHeader)
     }
 
-    /// Quiet counts with the same state dots as the nameplates; wraps between items, never inside one.
+    /// Quiet counts with the same state dots as the nameplates (Home's team line: label ink3, number ink2); wraps
+    /// between items, never inside one.
     private var summary: some View {
-        TeamWrapLayout(spacing: 11, lineSpacing: 4) {
+        TeamWrapLayout(spacing: 14, lineSpacing: 6) {
             ForEach(counts, id: \.self) { item in
                 HStack(spacing: 5) {
-                    OfficeStateDot(status: item.status, size: 6)
-                    Text("\(item.label) \(item.count)").font(CEFont.meta).foregroundStyle(CE.ink3).monospacedDigit().lineLimit(1)
+                    OfficeStateDot(status: item.status, size: 7)
+                    Text(item.label).foregroundStyle(CE.ink3)
+                    Text("\(item.count)").monospacedDigit().fontWeight(.semibold).foregroundStyle(CE.ink2)
                 }
+                .font(CEFont.secondary)
+                .lineLimit(1)
                 .fixedSize()
             }
         }
@@ -1066,6 +1218,7 @@ private struct OfficeHeader: View {
         .accessibilityLabel(counts.map { "\($0.label) \($0.count)" }.joined(separator: ", "))
     }
 
+    /// Web 직원 추가 is a glass button; in this card header it takes the dense size (32pt, 13.5 semibold, web gbtn--s).
     @ViewBuilder private var addButton: some View {
         if showsAdd {
             Button(action: add) { Label("팀장 추가", systemImage: "plus") }

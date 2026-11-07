@@ -380,7 +380,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
         firstInstruction: a.first_instruction,
         userQuote: a.user_quote,
         parallel: a.parallel,
-      });
+      }, member);
       return reply(`${added.name}(${added.handle}) 직원을 띄웠습니다${assigned ? `. ${assignNote(assigned)}` : ""}`);
     },
   ),
@@ -397,7 +397,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     }),
     async (orch, member, a) => {
       const target = requireOther(orch, member, a.member);
-      return reply(`${target.name}: ${assignNote(await orch.assign(member.projectId, target.handle, { text: a.text, userQuote: a.user_quote, parallel: a.parallel, urgent: a.urgent, attachmentIds: a.attachments }))}`);
+      return reply(`${target.name}: ${assignNote(await orch.assign(member.projectId, target.handle, { text: a.text, userQuote: a.user_quote, parallel: a.parallel, urgent: a.urgent, attachmentIds: a.attachments }, member))}`);
     },
   ),
 
@@ -423,7 +423,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     "잠든 직원을 대화 기록 그대로 다시 연다.",
     z.strictObject({ member: memberRef, first_instruction: z.string().optional() }),
     async (orch, member, a) => {
-      const target = await orch.resumeMember(requireOther(orch, member, a.member).id, a.first_instruction);
+      const target = await orch.resumeMember(requireOther(orch, member, a.member).id, a.first_instruction, member);
       return reply(`${josa(target.name, "을")} 다시 열었습니다`);
     },
   ),

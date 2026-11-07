@@ -618,6 +618,16 @@ export const MIGRATIONS: string[] = [
        WHERE kind IN ('turn_start', 'turn_end', 'tool', 'tool_result')
        GROUP BY member_id) AS recent
      WHERE members.id = recent.member_id;`,
+  // 대표 지시 턴의 배정 확인. 활동 보관 한도와 무관하게 재시작·재전달을 합친다.
+  `CREATE TABLE delegation_ack_turns (
+     run_id TEXT PRIMARY KEY,
+     member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+     source_ids TEXT NOT NULL,
+     assignments TEXT NOT NULL DEFAULT '[]',
+     posted INTEGER NOT NULL DEFAULT 0,
+     ended INTEGER NOT NULL DEFAULT 0
+   );
+   CREATE INDEX delegation_ack_member ON delegation_ack_turns(member_id, ended);`,
 ];
 
 export function openDb(path: string): Database {

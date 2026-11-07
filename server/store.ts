@@ -52,7 +52,7 @@ import type { Bus } from "./bus.ts";
 import { newId, nowIso } from "./db.ts";
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOWS, exactSource } from "./runner/context.ts";
 import { MAX_PROJECT_NAME, MAX_ROLE, nameProblem, oneLineProblem, RESERVED_HANDLES, workerNameProblem } from "./text.ts";
-import { cleanName, conductorName } from "./text.ts";
+import { cleanName, cleanText, conductorName } from "./text.ts";
 
 /** status 가 그대로 HTTP 응답 코드가 되는 오류. */
 export class ApiError extends Error {
@@ -1960,6 +1960,56 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   markFailed(id: string, error: string): Delivery {
     return this.setDeliveryStatus(id, "failed", { lastError: error });
+  }
+
+  /** 전달 봉투를 턴 키로 사용한다. 대표가 깨운 턴만 배정 확인 대상이다. */
+  beginDelegationAck(runId: string, memberId: string, deliveries: Delivery[]): void {
+    if (this.requireMember(memberId).kind === "worker") return;
+    const sourceIds = deliveries.filter(d => d.wake && (d.kind === "user_message" || d.kind === "answer"))
+      .map(d => d.refId ?? d.id).sort();
+    const sources = JSON.stringify(sourceIds);
+    const posted = this.row("SELECT 1 FROM delegation_ack_turns WHERE member_id = ? AND source_ids = ? AND posted = 1 LIMIT 1", memberId, sources) ? 1 : 0;
+    this.run("INSERT OR IGNORE INTO delegation_ack_turns (run_id, member_id, source_ids, posted) VALUES (?, ?, ?, ?)", runId, memberId, sources, posted);
+  }
+
+  /** 지시 outbox와 같은 트랜잭션에서 호출한다. 도구 응답 유실에도 배정 사실이 남는다. */
+  noteDelegation(memberId: string, delivery: Delivery, queued: boolean): void {
+    const turn = this.row("SELECT * FROM delegation_ack_turns WHERE member_id = ? AND ended = 0 ORDER BY rowid DESC LIMIT 1", memberId);
+    if (!turn || JSON.parse(turn.source_ids).length === 0) return;
+    const assignments: { deliveryId: string; memberId: string; name: string; summary: string; queued: boolean }[] = JSON.parse(turn.assignments);
+    if (assignments.some(a => a.deliveryId === delivery.id)) return;
+    const target = this.requireMember(delivery.memberId);
+    const first = delivery.text.split("\n").find(line => line.startsWith("할 일: "))?.slice(5) ?? "";
+    const summary = Array.from(cleanText(first).replace(/\s+/g, " ").trim()).slice(0, 60).join("");
+    assignments.push({ deliveryId: delivery.id, memberId: target.id, name: target.name, summary, queued });
+    this.run("UPDATE delegation_ack_turns SET assignments = ? WHERE run_id = ?", JSON.stringify(assignments), turn.run_id);
+  }
+
+  /** ask·post 조회·자동 마지막 글은 post가 아니다. 실제 게시와 원자적으로 기록한다. */
+  noteDelegationPost(memberId: string): void {
+    this.run("UPDATE delegation_ack_turns SET posted = 1 WHERE member_id = ? AND ended = 0", memberId);
+  }
+
+  finishDelegationAck(memberId: string, runId?: string): void {
+    this.transaction(() => {
+      const turns = runId
+        ? this.rows("SELECT * FROM delegation_ack_turns WHERE member_id = ? AND run_id = ? AND ended = 0", memberId, runId)
+        : this.rows("SELECT * FROM delegation_ack_turns WHERE member_id = ? AND ended = 0", memberId);
+      for (const turn of turns) {
+        this.run("UPDATE delegation_ack_turns SET ended = 1 WHERE run_id = ?", turn.run_id);
+        const sources: string[] = JSON.parse(turn.source_ids);
+        if (turn.posted || !sources.length) continue;
+        const assignments: { deliveryId: string; memberId: string; name: string; summary: string; queued: boolean }[] = JSON.parse(turn.assignments);
+        // 확정 기동 실패로 취소된 신규 직원의 outbox는 배정으로 알리지 않는다.
+        const retained = assignments.filter(a => this.getDelivery(a.deliveryId));
+        // 같은 직원에게 여러 번 보냈으면 마지막 지시를 한 줄로 보여 준다.
+        for (const assignment of new Map(retained.map(a => [a.memberId, a])).values()) {
+          const key = createHash("sha256").update(JSON.stringify([memberId, sources, assignment.memberId])).digest("hex").slice(0, 32);
+          this.createMessage({ id: `msg_delegation_ack_${key}`, projectId: this.requireMember(memberId).projectId,
+            who: "시스템", kind: "시스템", body: `총괄이 ${assignment.name}에게 맡겼습니다: ${assignment.summary}${assignment.queued ? " (앞 일 끝나면 시작)" : ""}` });
+        }
+      }
+    });
   }
 
   // ---- 활동 ----

@@ -1010,6 +1010,7 @@ export class Orchestrator implements OrchestratorApi {
         const reported = this.completedReportSince(member, run.createdAt);
         const outcome = result === "interrupted" && reported ? "success" : result;
         this.store.saveExecutionJournal({ ...run, turn: turn ?? run.turn, phase: outcome === "interrupted" ? "interrupted" : "ended", result: outcome, reason, exitCode, endedAt: at, updatedAt: at });
+        this.store.finishDelegationAck(member.id, run.runId);
         if (outcome === "success") {
           this.completeExecutionReview(member, run);
           this.requestMissingReport(member, run);
@@ -2354,7 +2355,7 @@ export class Orchestrator implements OrchestratorApi {
     const result = await tools.handleAgentTool(this, member, name, args, signal);
     if (!result.isError) {
       if (boardRevision !== null) this.noteBoardReview(member, boardRevision);
-      if (["team_assign", "team_add"].includes(name) && this.runtime(member.id).turn) {
+      if (["team_assign", "team_add", "team_resume"].includes(name) && this.runtime(member.id).turn) {
         this.runtime(member.id).delegated = true;
         for (const run of this.store.listPendingExecutions().filter(run => run.memberId === member.id)) this.store.saveExecutionJournal({ ...run, reason: "awaiting_delegation", updatedAt: new Date().toISOString() });
       }
@@ -2473,7 +2474,7 @@ export class Orchestrator implements OrchestratorApi {
     return spawn;
   }
 
-  async addMember(projectId: string, input: NewMemberInput): Promise<{ member: Member; assigned: AssignResult | null }> {
+  async addMember(projectId: string, input: NewMemberInput, assignedBy?: Member): Promise<{ member: Member; assigned: AssignResult | null }> {
     this.models.requireModel(input.cli ?? "claude", input.modelOverride);
     const project = this.store.requireProject(projectId);
     if (!project.runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다");
@@ -2481,17 +2482,21 @@ export class Orchestrator implements OrchestratorApi {
     if (!name) throw new ApiError(400, "이름이 필요합니다");
     const source = input.userQuote?.trim() ? this.findQuoteSource(projectId, input.userQuote) : null;
     const quote = input.userQuote?.trim() ? { text: input.userQuote, verified: source !== null, source } : null;
-    const { value: { member, ready }, deliveries } = this.store.withDeliveryIntents(() => this.beginSpawn(project, {
-      kind: input.kind ?? "worker",
-      handle: input.handle ?? this.deriveHandle(projectId, name),
-      name,
-      role: input.role ?? "",
-      cli: input.cli ?? "claude",
-      modelOverride: input.modelOverride,
-      cwd: input.cwd ? this.resolveCwd(project, input.cwd) : undefined,
-    }), ({ member }) => {
-      if (!input.firstInstruction) return [];
-      return [{ projectId, memberId: member.id, kind: "instruction", text: formatInstruction(member.name, input.firstInstruction, quote) }];
+    const { value: { member, ready }, deliveries } = this.store.transaction(() => {
+      const spawned = this.store.withDeliveryIntents(() => this.beginSpawn(project, {
+        kind: input.kind ?? "worker",
+        handle: input.handle ?? this.deriveHandle(projectId, name),
+        name,
+        role: input.role ?? "",
+        cli: input.cli ?? "claude",
+        modelOverride: input.modelOverride,
+        cwd: input.cwd ? this.resolveCwd(project, input.cwd) : undefined,
+      }), ({ member }) => {
+        if (!input.firstInstruction) return [];
+        return [{ projectId, memberId: member.id, kind: "instruction", text: formatInstruction(member.name, input.firstInstruction, quote) }];
+      });
+      if (assignedBy) for (const delivery of spawned.deliveries) this.store.noteDelegation(assignedBy.id, delivery, false);
+      return spawned;
     });
     if (input.parallel) this.runtime(member.id).wantParallel = true;
     await ready;
@@ -2591,7 +2596,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   /** team_assign. member 는 핸들 또는 화면 이름. 다른 프로젝트 직원은 찾지 못한다. */
-  async assign(projectId: string, memberRef: string, input: AssignInput): Promise<AssignResult> {
+  async assign(projectId: string, memberRef: string, input: AssignInput, assignedBy?: Member): Promise<AssignResult> {
     const target = this.requireInProject(projectId, memberRef);
     const source = input.userQuote?.trim() ? this.findQuoteSource(projectId, input.userQuote) : null;
     const quote = input.userQuote?.trim() ? { text: input.userQuote, verified: source !== null, source } : null;
@@ -2605,12 +2610,16 @@ export class Orchestrator implements OrchestratorApi {
       if (!attachment || !this.store.isProjectAttachment(projectId, id)) throw new ApiError(404, `이 프로젝트에서 대표가 보낸 첨부가 아닙니다: ${id}`);
       return attachment;
     });
-    const delivery = this.store.enqueue({
-      projectId,
-      memberId: target.id,
-      kind: "instruction",
-      text: [formatInstruction(target.name, input.text, quote), ...attachmentLines(this.attachmentsFor(target, attachments))].join("\n"),
-      urgent: input.urgent,
+    const delivery = this.store.transaction(() => {
+      const delivery = this.store.enqueue({
+        projectId,
+        memberId: target.id,
+        kind: "instruction",
+        text: [formatInstruction(target.name, input.text, quote), ...attachmentLines(this.attachmentsFor(target, attachments))].join("\n"),
+        urgent: input.urgent,
+      });
+      if (assignedBy) this.store.noteDelegation(assignedBy.id, delivery, busy && !input.urgent);
+      return delivery;
     });
     const position = busy ? this.store.listPending(target.id).length : 0;
     await this.pump(target.id);
@@ -2824,7 +2833,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   /** --resume 으로 다시 연다. 실패하면 같은 핸들로 새 세션을 띄우고 마지막 일을 첫 지시에 넣는다. */
-  async resumeMember(memberId: string, firstInstruction?: string): Promise<Member> {
+  async resumeMember(memberId: string, firstInstruction?: string, assignedBy?: Member): Promise<Member> {
     const member = this.store.requireMember(memberId);
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 다시 열 수 없습니다");
     this.requireActive(this.store.requireProject(member.projectId));
@@ -2841,7 +2850,7 @@ export class Orchestrator implements OrchestratorApi {
       this.checkAwakeLimit(member.projectId);
     }
     if (firstInstruction?.trim()) {
-      await this.assign(member.projectId, member.handle, { text: firstInstruction });
+      await this.assign(member.projectId, member.handle, { text: firstInstruction }, assignedBy);
     } else {
       await this.pump(memberId);
     }
@@ -3018,6 +3027,7 @@ export class Orchestrator implements OrchestratorApi {
       title: rt.direct ? `(직접) ${input.title}` : input.title,
       body: [input.body ?? "", extra].filter(Boolean).join("\n\n"), decisionId: input.decisionId ?? null, fileId: files[0]?.id ?? null,
     }), message => {
+      this.store.noteDelegationPost(member.id);
       this.store.saveReportReferences(member.projectId, { sourceMessageId: message.id, fileIds: files.map(file => file.id), decisionIds: input.decisionId ? [input.decisionId] : [], authoredAt: message.at, sequence: this.store.boardRevision(member.projectId), correctsMessageId: input.correctsMessageId ?? null });
       return conductor && conductor.id !== member.id ? [{ projectId: member.projectId, memberId: conductor.id, kind: "report", text: this.reportText(message), wake: WAKE_POST_KINDS.has(input.kind), refType: "message", refId: message.id }] : [];
     });
@@ -3128,7 +3138,8 @@ export class Orchestrator implements OrchestratorApi {
         this.store.setDecisionFollowUp(decision.id, followUp);
         if (followUp.kind === "instruction") {
           const source = this.store.requireMessage(followUp.sourceMessageId);
-          this.store.enqueue({ projectId: member.projectId, memberId: followUp.memberId, kind: "instruction", text: formatInstruction(member.name, `${followUp.text}\n결재 #${decision.id} 닫기의 후속 지시`, { text: input.userQuote ?? source.body, verified: true, source: { id: source.id, text: source.body, at: source.at } }) });
+          const delivery = this.store.enqueue({ projectId: member.projectId, memberId: followUp.memberId, kind: "instruction", text: formatInstruction(member.name, `${followUp.text}\n결재 #${decision.id} 닫기의 후속 지시`, { text: input.userQuote ?? source.body, verified: true, source: { id: source.id, text: source.body, at: source.at } }) });
+          this.store.noteDelegation(member.id, delivery, this.isBusy(this.store.requireMember(followUp.memberId)));
           this.store.afterCommit(() => { void this.pump(followUp.memberId); });
         }
       }
@@ -3624,7 +3635,10 @@ export class Orchestrator implements OrchestratorApi {
     const review = dispatch.items.some(item => { const delivery = this.store.getDelivery(item.deliveryId); return delivery && isTidy(delivery); }) ? this.store.getBoardReview(member.projectId) : null;
     const run: ExecutionJournal = { runId: dispatch.dispatchId, memberId: member.id, projectId: member.projectId, identity: dispatch.identity, turn: null, deliveryIds: dispatch.items.map(item => item.deliveryId), phase: "starting", inputReceivedAt: null, startedAt: null, lastProgressAt: null, endedAt: null, result: null, reason: null, exitCode: null, interruptionNotifiedAt: null, reportRequestedAt: null, createdAt: at, updatedAt: at };
     if (review) run.reason = `board_review:${review.requestedRevision}:pending`;
-    this.store.saveExecutionJournal(run);
+    this.store.transaction(() => {
+      this.store.saveExecutionJournal(run);
+      this.store.beginDelegationAck(run.runId, member.id, run.deliveryIds.map(id => this.store.requireDelivery(id)));
+    });
     let result = await this.safeSend(send);
     if (result.ok && result.receipt && result.receipt.dispatchId !== dispatch.dispatchId) result = { ok: false, reason: "error", retryable: false, deliveryEffect: "unknown", detail: "다른 봉투의 수신 영수증입니다" };
     // The existing Runner.send success contract guarantees received input,
@@ -4168,6 +4182,7 @@ export class Orchestrator implements OrchestratorApi {
       const state = this.store.ensureContextState(member.id);
       this.store.saveContextState({ ...state, baseline: { ...state.baseline, completedTurn: e.turn ?? null } });
     }
+    this.store.finishDelegationAck(member.id);
     this.store.appendActivity(member.id, e.isError ? "error" : "turn_end", e.isError ? (e.errorText ?? "오류") : "턴 끝");
     if (member.subagents !== 0) this.store.patchMember(member.id, { subagents: 0 });
 

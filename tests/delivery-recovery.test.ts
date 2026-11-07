@@ -242,6 +242,27 @@ describe("자동 재전송과 제출 복구", () => {
     await f.service.tick(); expect(f.writes).toHaveLength(0);
   });
 
+  test("CLI 기록으로 모든 항목의 제출이 확인된 write_started 봉투는 수락으로 확정해 대기열 fence 를 푼다", async () => {
+    // Real 2026-11-07 run: kill -9 mid-send left write_started; the log proved receipt, yet the envelope fenced the member forever.
+    const f = setup(); const d = f.enqueue(); const dispatch = f.envelope([d]);
+    const logReceipt = [{ source: "claude_log" as const, verdict: "present" as const, location: "received_input" as const, code: "marker_in_user_input", complete: true, checkedAt: new Date(f.now).toISOString() }];
+    f.inspect = async (_m, q) => f.observation(q, { finding: "received", receivedDeliveryIds: [d.id], evidence: logReceipt });
+    await f.service.tick();
+    expect(f.r(d.id).phase).toBe("resolved");
+    expect(f.service.fenced(f.member.id)).toBe(false);
+    expect(f.store.getDispatch(dispatch.dispatchId)?.transportState).toBe("accepted");
+    expect(f.writes).toHaveLength(0);
+  });
+
+  test("기록 증거 없이 수신만 표시된 write_started 봉투는 그대로 fence 로 남는다", async () => {
+    const f = setup(); const a = f.enqueue(); const b = f.enqueue(); const dispatch = f.envelope([a, b]);
+    const logReceipt = [{ source: "claude_log" as const, verdict: "present" as const, location: "received_input" as const, code: "marker_in_user_input", complete: true, checkedAt: new Date(f.now).toISOString() }];
+    f.inspect = async (_m, q) => f.observation(q, { finding: "received", receivedDeliveryIds: [a.id], evidence: logReceipt });
+    await f.service.tick();
+    expect(f.service.fenced(f.member.id)).toBe(true);
+    expect(f.store.getDispatch(dispatch.dispatchId)?.transportState).not.toBe("accepted");
+  });
+
   test("부분 묶음 수신은 나머지만 새 봉투로 보내고 개별 표식은 보존한다", async () => {
     const f = setup(); const a = f.enqueue(); const b = f.enqueue(); const original = f.envelope([a, b]);
     let first = true;

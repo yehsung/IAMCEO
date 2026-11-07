@@ -126,6 +126,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
 
   /** Also used by ordinary and urgent admission. stopped releases only the logical fence. */
   fenced(memberId: string): boolean {
+    this.settleProvenDispatches(memberId);
     const state = this.store.inputState(memberId);
     return !!state.lease || this.mutations.has(memberId) || state.unresolvedDispatches.some(d => ["prepared", "write_started", "unknown"].includes(d.transportState)) ||
       this.store.listDeliveries(this.store.requireMember(memberId).projectId).some(d => d.memberId === memberId && this.logicalFence(d));
@@ -395,6 +396,22 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       });
       if (!dispatch || !runner?.repairDelivery || !unchanged.length) continue;
       await this.maybeRepair(dispatch, inspection, runner);
+    }
+  }
+  /**
+   * An envelope whose every item the CLI's own log shows as a submitted user message has finished writing, even
+   * when the writer died before the reply (real 2026-11-07 kill -9 mid-send). Generation 1 otherwise keeps
+   * write_started unresolved forever, and that alone fenced the member's whole queue. Only positive per-item
+   * provider-log receipt settles it; anything less stays unresolved.
+   */
+  private settleProvenDispatches(memberId: string): void {
+    for (const dispatch of this.store.listDispatches(memberId)) {
+      if (!["prepared", "write_started", "unknown"].includes(dispatch.transportState) || !dispatch.items.length) continue;
+      const proven = dispatch.items.every(item => {
+        const d = this.store.getDelivery(item.deliveryId), r = this.store.getDeliveryRecovery(item.deliveryId);
+        return d?.status === "delivered" && r?.phase === "resolved" && r.evidence.some(e => e.location === "received_input" && e.verdict === "present" && e.source !== "transport");
+      });
+      if (proven) this.store.updateDispatch(dispatch.dispatchId, dispatch.transportState, "accepted");
     }
   }
   private settlePhysical(dispatch: DeliveryDispatch, inspection: DeliveryInspection): void {

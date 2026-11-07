@@ -186,7 +186,7 @@ final class TerminalStreamTests: XCTestCase {
         XCTAssertEqual(view.getTerminal().cols, 90); XCTAssertEqual(view.getTerminal().rows, 25)
         #endif
     }
-    @MainActor func testInternalSwiftTermScrollStopsFollowingAndFeedKeepsHistoryPosition() async {
+    @MainActor func testKeyboardSwiftTermScrollStopsFollowingAndFeedKeepsHistoryPosition() async throws {
         #if os(macOS)
         let client = TerminalStreamClient()
         var following = true
@@ -199,7 +199,18 @@ final class TerminalStreamTests: XCTestCase {
         host.feed(Data((0..<100).map { "line \($0)\r\n" }.joined().utf8))
         host.followCursor()
         XCTAssertTrue(following, "Parser/layout/programmatic scroll must preserve following")
-        host.terminal.scroll(toPosition: 0.3) // SwiftTerm's own scroller and keyboard path.
+        host.terminal.scroll(toPosition: 0.3) // A position change alone is not evidence of user input.
+        XCTAssertTrue(following)
+        host.followCursor()
+        func pageKey(_ code: Int) throws -> NSEvent {
+            let characters = String(try XCTUnwrap(UnicodeScalar(code)))
+            return try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .function,
+                timestamp: 0, windowNumber: 0, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: 0))
+        }
+        host.handleObservedKey(try pageKey(NSPageDownFunctionKey))
+        XCTAssertTrue(following, "Scrolling down or remaining at the bottom must preserve following")
+        host.handleObservedKey(try pageKey(NSPageUpFunctionKey))
         XCTAssertFalse(following)
         let position = host.terminal.getTerminal().getTopVisibleRow()
         host.feed(Data("new output\r\n".utf8))
@@ -207,6 +218,67 @@ final class TerminalStreamTests: XCTestCase {
         XCTAssertFalse(following)
         XCTAssertEqual(host.terminal.getTerminal().getTopVisibleRow(), position)
         #endif
+    }
+    @MainActor func testScrollerActionStopsFollowingOnlyWhenMovingUp() throws {
+        #if os(macOS)
+        let client = TerminalStreamClient()
+        var following = true
+        let parent = TerminalRepresentable(client: client, mode: .observe, cols: 100, rows: 30,
+            following: Binding(get: { following }, set: { following = $0 }), onTypeWhileObserving: { _ in }, onSize: { _,_ in })
+        let coordinator = TerminalSurfaceCoordinator(parent)
+        let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 500), coordinator: coordinator)
+        coordinator.host = host
+        defer { host.teardown(); client.dispose() }
+        host.feed(Data((0..<100).map { "line \($0)\r\n" }.joined().utf8))
+        host.followCursor()
+        let internalScroller = try XCTUnwrap(host.terminal.subviews.compactMap { $0 as? NSScroller }.first)
+        XCTAssertTrue(internalScroller.target is TerminalScrollAction)
+        XCTAssertTrue(host.verticalScroller?.target is TerminalScrollAction)
+        let target = TerminalTestScrollTarget { host.terminal.scroll(toPosition: $0.doubleValue) }
+        let scroller = NSScroller()
+        scroller.target = target; scroller.action = #selector(TerminalTestScrollTarget.scroll(_:))
+        let action = TerminalScrollAction(scroller: scroller, coordinator: coordinator)
+        scroller.doubleValue = 1
+        action.scroll(scroller)
+        XCTAssertTrue(following)
+        scroller.doubleValue = 0.3
+        action.scroll(scroller)
+        XCTAssertFalse(following)
+        #endif
+    }
+    @MainActor func testSynchronizedOutputTimeoutWithoutUserScrollPreservesFollowing() async {
+        #if os(macOS)
+        for prefix in ["", (0..<100).map { "line \($0)\r\n" }.joined(), "\u{1b}[?1049h"] {
+            let client = TerminalStreamClient()
+            var following = true
+            let parent = TerminalRepresentable(client: client, mode: .observe, cols: 100, rows: 30,
+                following: Binding(get: { following }, set: { following = $0 }), onTypeWhileObserving: { _ in }, onSize: { _,_ in })
+            let coordinator = TerminalSurfaceCoordinator(parent)
+            let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 500), coordinator: coordinator)
+            coordinator.host = host
+            defer { host.teardown(); client.dispose() }
+            host.feed(Data((prefix + "\u{1b}[?2026hhello").utf8))
+            XCTAssertTrue(host.terminal.getTerminal().synchronizedOutputActive)
+            XCTAssertTrue(following)
+            try? await Task.sleep(for: .milliseconds(1250))
+            XCTAssertFalse(host.terminal.getTerminal().synchronizedOutputActive, "Exercise SwiftTerm's real timeout")
+            XCTAssertTrue(following, "Timeout notifications in normal, scrollback and alternate buffers are output")
+            host.feed(Data("more output\r\n".utf8))
+            XCTAssertTrue(following)
+        }
+        #endif
+    }
+    func testOnlyUpwardViewportOrHistoryMovementCountsAsScrollingUp() {
+        let before = TerminalScrollLocation(viewportY: 100, historyRow: 70)
+        XCTAssertTrue(TerminalScrollLocation(viewportY: 90, historyRow: 70).isAbove(before))
+        XCTAssertTrue(TerminalScrollLocation(viewportY: 100, historyRow: 69).isAbove(before))
+        XCTAssertFalse(before.isAbove(before))
+        XCTAssertFalse(TerminalScrollLocation(viewportY: 110, historyRow: 71).isAbove(before))
+        let bounced = TerminalScrollLocation.viewportY(120, minimum: 0, maximum: 100)
+        let settled = TerminalScrollLocation.viewportY(100, minimum: 0, maximum: 100)
+        XCTAssertEqual(bounced, settled, "Bottom-edge bounce must not look like an upward user scroll")
+        XCTAssertEqual(TerminalScrollLocation.viewportY(-10, minimum: 0, maximum: 100), 0)
+        XCTAssertEqual(TerminalScrollLocation.viewportY(0, minimum: 0, maximum: -50), 0)
     }
     @MainActor func testMacEscAndTabAreTerminalInputWhileObserving() {
         #if os(macOS)
@@ -274,3 +346,11 @@ final class TerminalStreamTests: XCTestCase {
     }
 
 }
+
+#if os(macOS)
+@MainActor private final class TerminalTestScrollTarget: NSObject {
+    let onScroll: (NSScroller) -> Void
+    init(_ onScroll: @escaping (NSScroller) -> Void) { self.onScroll = onScroll }
+    @objc func scroll(_ sender: NSScroller) { onScroll(sender) }
+}
+#endif

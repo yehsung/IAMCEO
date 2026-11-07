@@ -59,11 +59,25 @@ final class TerminalSurfaceCoordinator: NSObject, @preconcurrency TerminalViewDe
     }
     func setTerminalTitle(source: SwiftTerm.TerminalView, title: String) {}
     func hostCurrentDirectoryUpdate(source: SwiftTerm.TerminalView, directory: String?) {}
+    #if os(iOS)
+    // SwiftTerm 1.18 only provides a default link handler on macOS.
+    func requestOpenLink(source: SwiftTerm.TerminalView, link: String, params: [String: String]) {}
+    #endif
     func rangeChanged(source: SwiftTerm.TerminalView, startY: Int, endY: Int) {
         if parent.following { host?.followCursor() }
     }
     func scrolled(source: SwiftTerm.TerminalView, position: Double) {
-        guard let host, parent.mode == .observe, position < 1,
+        // SwiftTerm also sends this notification from parser/display timers.
+        // Only the input paths below can establish that a human scrolled.
+    }
+    func performUserScroll(_ action: () -> Void) {
+        guard let host else { action(); return }
+        let before = host.scrollLocation
+        action()
+        userScrolled(from: before)
+    }
+    func userScrolled(from before: TerminalScrollLocation) {
+        guard let host, parent.mode == .observe, host.scrollLocation.isAbove(before),
               TerminalPresentation.pausesFollowing(userScroll: true, programmatic: host.programmaticScroll || host.feeding,
                                                   layingOut: host.layingOut) else { return }
         stopFollowing()
@@ -78,7 +92,41 @@ final class TerminalSurfaceCoordinator: NSObject, @preconcurrency TerminalViewDe
     }
 }
 
+/// The outer viewport and SwiftTerm's scrollback are independent scroll axes.
+struct TerminalScrollLocation {
+    let viewportY: CGFloat
+    let historyRow: Int
+    func isAbove(_ previous: Self) -> Bool {
+        viewportY < previous.viewportY || historyRow < previous.historyRow
+    }
+    static func viewportY(_ offset: CGFloat, minimum: CGFloat, maximum: CGFloat) -> CGFloat {
+        // Rubber-band recovery from a downward scroll is not an upward scroll.
+        max(minimum, min(offset, maximum))
+    }
+}
+
 #if os(macOS)
+/// Wrap each scroller action, including SwiftTerm's private scroller, rather than
+/// treating arbitrary bounds changes as user input. Tracking may run a nested loop;
+/// the user scope covers only the action, not the entire mouse-down lifetime.
+@MainActor
+final class TerminalScrollAction: NSObject {
+    weak var coordinator: TerminalSurfaceCoordinator?
+    weak var target: AnyObject?
+    let action: Selector
+    init(scroller: NSScroller, coordinator: TerminalSurfaceCoordinator) {
+        target = scroller.target
+        action = scroller.action!
+        self.coordinator = coordinator
+        super.init()
+        scroller.target = self
+        scroller.action = #selector(scroll(_:))
+    }
+    @objc func scroll(_ sender: NSScroller) {
+        coordinator?.performUserScroll { NSApplication.shared.sendAction(action, to: target, from: sender) }
+    }
+}
+
 struct TerminalRepresentable: NSViewRepresentable {
     let client: TerminalStreamClient
     let mode: TerminalStreamMode
@@ -122,8 +170,10 @@ final class TerminalSurfaceHost: NSScrollView {
     var programmaticScroll = false
     private(set) var layingOut = false
     private var layoutKey: [CGFloat] = []
-    private var wheelMonitor: Any?
-    private var boundsObserver: NSObjectProtocol?
+    private var inputMonitor: Any?
+    private var scrollActions: [TerminalScrollAction] = []
+    private var liveScrollObservers: [NSObjectProtocol] = []
+    private var liveScrollY: CGFloat?
     private var pendingBytes: [Data] = []
     private let canvas = TerminalDocumentCanvas()
     private var fixedGrid: [Int] = []
@@ -139,12 +189,20 @@ final class TerminalSurfaceHost: NSScrollView {
         terminal.nativeForegroundColor = NSColor(CE.ink); terminal.caretColor = NSColor(CE.accent)
         terminal.terminalDelegate = coordinator; terminal.surface = self
         canvas.addSubview(terminal); documentView = canvas
-        contentView.postsBoundsChangedNotifications = true
-        boundsObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: contentView, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self, self.coordinator.parent.mode == .observe,
-                      TerminalPresentation.pausesFollowing(userScroll: true, programmatic: self.programmaticScroll || self.feeding, layingOut: self.layingOut) else { return }
-                self.coordinator.stopFollowing()
+        let scrollers = [verticalScroller].compactMap { $0 } + terminal.subviews.compactMap { $0 as? NSScroller }
+        scrollActions = scrollers.filter { $0.action != nil }.map { TerminalScrollAction(scroller: $0, coordinator: coordinator) }
+        // AppKit may apply wheel momentum after scrollWheel(with:) has returned.
+        liveScrollObservers = [NSScrollView.willStartLiveScrollNotification, NSScrollView.didLiveScrollNotification].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: self, queue: .main) { [weak self] notification in
+                let didScroll = notification.name == NSScrollView.didLiveScrollNotification
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    let current = self.scrollLocation
+                    if didScroll, let y = self.liveScrollY {
+                        self.coordinator.userScrolled(from: TerminalScrollLocation(viewportY: y, historyRow: current.historyRow))
+                    }
+                    self.liveScrollY = current.viewportY
+                }
             }
         }
     }
@@ -153,18 +211,27 @@ final class TerminalSurfaceHost: NSScrollView {
         .monospacedSystemFont(ofSize: size, weight: .regular)
     }
     func teardown() {
-        if let wheelMonitor { NSEvent.removeMonitor(wheelMonitor); self.wheelMonitor = nil }
-        if let boundsObserver { NotificationCenter.default.removeObserver(boundsObserver); self.boundsObserver = nil }
+        if let inputMonitor { NSEvent.removeMonitor(inputMonitor); self.inputMonitor = nil }
+        liveScrollObservers.forEach(NotificationCenter.default.removeObserver)
+        liveScrollObservers.removeAll()
     }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if let wheelMonitor { NSEvent.removeMonitor(wheelMonitor); self.wheelMonitor = nil }
+        if let inputMonitor { NSEvent.removeMonitor(inputMonitor); self.inputMonitor = nil }
         if window != nil {
             window?.makeFirstResponder(terminal)
-            wheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-                guard let self, self.coordinator.parent.mode == .observe, event.window === self.window,
-                      self.bounds.contains(self.convert(event.locationInWindow, from: nil)) else { return event }
-                self.scrollWheel(with: event); return nil
+            inputMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .keyDown]) { [weak self] event in
+                guard let self, self.coordinator.parent.mode == .observe, event.window === self.window else { return event }
+                if event.type == .keyDown {
+                    guard self.window?.firstResponder === self.terminal,
+                          let key = event.charactersIgnoringModifiers?.unicodeScalars.first,
+                          [NSPageUpFunctionKey, NSPageDownFunctionKey].contains(Int(key.value)) else { return event }
+                    self.handleObservedKey(event)
+                } else {
+                    guard self.bounds.contains(self.convert(event.locationInWindow, from: nil)) else { return event }
+                    self.scrollWheel(with: event)
+                }
+                return nil
             }
         }
     }
@@ -205,9 +272,18 @@ final class TerminalSurfaceHost: NSScrollView {
             canvas.setFrameSize(CGSize(width: fit.width, height: fit.height)); canvas.setBoundsSize(ideal)
         }
     }
+    func handleObservedKey(_ event: NSEvent) {
+        // SwiftTerm's keyDown/doCommand methods are public, but not open.
+        coordinator.performUserScroll { terminal.keyDown(with: event) }
+    }
     override func scrollWheel(with event: NSEvent) {
-        if event.scrollingDeltaY > 0 || event.scrollingDeltaX != 0 { coordinator.stopFollowing() }
-        super.scrollWheel(with: event)
+        coordinator.performUserScroll { super.scrollWheel(with: event) }
+    }
+    var scrollLocation: TerminalScrollLocation {
+        let clip = contentView
+        return TerminalScrollLocation(viewportY: TerminalScrollLocation.viewportY(clip.bounds.minY,
+            minimum: clip.documentRect.minY, maximum: clip.documentRect.maxY - clip.bounds.height),
+            historyRow: terminal.getTerminal().getTopVisibleRow())
     }
     func feed(_ data: Data) {
         layoutSubtreeIfNeeded()
@@ -260,6 +336,7 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
     private var layoutKey: [CGFloat] = []
     private var pendingBytes: [Data] = []
     private let canvas = UIView()
+    private var dragLocation: TerminalScrollLocation?
     private var fixedGrid: [Int] = []
     init(frame: CGRect, coordinator: TerminalSurfaceCoordinator) {
         self.coordinator = coordinator
@@ -330,8 +407,19 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
         terminal.setNeedsDisplay()
     }
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { coordinator.parent.mode == .observe ? canvas : nil }
-    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { coordinator.stopFollowing() }
-    func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) { coordinator.stopFollowing() }
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { dragLocation = scrollLocation }
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard scrollView.isDragging || scrollView.isDecelerating else { return }
+        defer { dragLocation = scrollLocation }
+        if let before = dragLocation {
+            coordinator.userScrolled(from: TerminalScrollLocation(viewportY: before.viewportY, historyRow: scrollLocation.historyRow))
+        }
+    }
+    var scrollLocation: TerminalScrollLocation {
+        TerminalScrollLocation(viewportY: TerminalScrollLocation.viewportY(contentOffset.y,
+            minimum: -adjustedContentInset.top, maximum: contentSize.height - bounds.height + adjustedContentInset.bottom),
+            historyRow: terminal.getTerminal().getTopVisibleRow())
+    }
     func feed(_ data: Data) {
         layoutIfNeeded()
         guard bounds.width > 0, !layoutKey.isEmpty else { pendingBytes.append(data); return }
@@ -352,6 +440,10 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
 
 final class TerminalCanvas: SwiftTerm.TerminalView {
     weak var surface: TerminalSurfaceHost?
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        guard let surface else { super.pressesBegan(presses, with: event); return }
+        surface.coordinator.performUserScroll { super.pressesBegan(presses, with: event) }
+    }
     nonisolated override func send(source: SwiftTerm.Terminal, data: ArraySlice<UInt8>) {
         let bytes = Array(data)
         Task { @MainActor [weak self] in

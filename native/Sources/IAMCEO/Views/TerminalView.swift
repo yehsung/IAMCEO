@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 struct TerminalView: View {
     @Environment(AppStore.self) private var store
@@ -21,6 +24,16 @@ struct TerminalView: View {
         return false
     }
     private var unsupported: Bool { client.state == .unsupported }
+
+    /// A Mac sheet opens at its minimum size, and CESheet draws at a fixed width: both must be the same number or the
+    /// content is centred in a narrower window and clipped on both sides. Wide enough for the core's 200 columns at a
+    /// readable size, never wider than the screen.
+    #if os(macOS)
+    private var sheetWidth: CGFloat { min(1040, max(720, (NSScreen.main?.visibleFrame.width ?? 1280) - 160)) }
+    private var sheetHeight: CGFloat { min(720, max(460, (NSScreen.main?.visibleFrame.height ?? 900) - 140)) }
+    #else
+    private let sheetWidth: CGFloat = 1040
+    #endif
 
     var body: some View {
         Group {
@@ -64,7 +77,7 @@ struct TerminalView: View {
     }
 
     private var liveSheet: some View {
-        CESheet("\(current.name) 터미널", icon: "terminal", width: 1040, scrolls: false, escapeCloses: false,
+        CESheet("\(current.name) 터미널", icon: "terminal", width: sheetWidth, scrolls: false, escapeCloses: false,
                 onClose: { dismiss() }) {
             VStack(alignment: .leading, spacing: 10) {
                 TimelineView(.periodic(from: .now, by: 1)) { context in statusRow(now: context.date) }
@@ -95,7 +108,7 @@ struct TerminalView: View {
         }
         #if os(macOS)
         .background { Button("닫기") { dismiss() }.keyboardShortcut("w", modifiers: .command).frame(width: 0, height: 0).opacity(0).accessibilityHidden(true) }
-        .frame(minWidth: 720, idealWidth: 1040, minHeight: 460, idealHeight: 680)
+        .frame(minWidth: sheetWidth, idealWidth: sheetWidth, maxWidth: sheetWidth, minHeight: sheetHeight, idealHeight: sheetHeight)
         #endif
     }
 

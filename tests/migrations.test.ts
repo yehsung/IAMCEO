@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { chmodSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { chmodSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { Bus } from "../server/bus.ts";
 import { MIGRATIONS, openDb } from "../server/db.ts";
+import { Store } from "../server/store.ts";
 import { DEFAULT_PUSH_PREFERENCES, PUSH_REPORT_GROUP_WINDOW_MS } from "../shared/push.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 import type { IsolatedRuntime } from "./fixtures/isolated-runtime.ts";
@@ -181,6 +183,48 @@ describe("append-only migrations", () => {
     expect(db.query("SELECT board_revision,board_requested_revision,board_completed_revision,board_reviewed_revision FROM projects WHERE id='p'").get()).toEqual({
       board_revision: 0, board_requested_revision: null, board_completed_revision: null, board_reviewed_revision: null,
     });
+  });
+
+  test("reports written under the earlier runner are not re-sent to the lead after upgrade; new reports are tracked", () => {
+    // Live schema on 2026-11-07 was v12. Its runner delivered worker reports without a message ref, so the
+    // startup repair used to queue every historical report (397 on the live copy) to the leads again.
+    const { path } = fixture();
+    historicalDb(path, 12).close();
+    const db = track(openDb(path));
+    const store = new Store(db, new Bus());
+    expect(store.listReportsMissingDeliveries().map((m) => m.id)).toEqual([]);
+    db.query(`INSERT INTO messages (id,project_id,at,member_id,kind,body,delivery) VALUES ('msg_after','p',?,'m','완료','새 보고','')`).run(at);
+    expect(store.listReportsMissingDeliveries().map((m) => m.id)).toEqual(["msg_after"]);
+  });
+
+  test("WAL-mode DB copied without its -wal/-shm side files still opens, backs up and migrates", () => {
+    // `sqlite3 .backup`, a file-only copy or a restore of just iamceo.db leaves a WAL-mode file with no side files.
+    // A read-only connection cannot create the shared-memory file there (SQLITE_CANTOPEN), which used to stop the server.
+    const { runtime, path } = fixture();
+    const old = historicalDb(path, afterWindow);
+    old.exec("PRAGMA journal_mode=WAL");
+    old.close();
+    for (const side of [`${path}-wal`, `${path}-shm`]) rmSync(side, { force: true });
+    const before = readFileSync(path);
+    const db = track(openDb(path));
+    expect(version(db)).toBe(MIGRATIONS.length);
+    expect(db.query("SELECT body FROM messages WHERE id='msg_한글'").get()).toEqual({ body: "원본 보고" });
+    expect(backups(runtime)).toHaveLength(1);
+    const snapshot = track(new Database(join(runtime.paths.iamceoHome, backups(runtime)[0]!), { readonly: true }));
+    expect(version(snapshot)).toBe(afterWindow);
+    expect(before.length).toBeGreaterThan(0);
+  });
+
+  test("future WAL-mode DB without side files is still refused and its bytes stay unchanged", () => {
+    const { runtime, path } = fixture();
+    const raw = new Database(path, { create: true });
+    raw.exec(`PRAGMA journal_mode=WAL; CREATE TABLE future_data (value TEXT); INSERT INTO future_data VALUES ('keep'); PRAGMA user_version=${MIGRATIONS.length + 1};`);
+    raw.close();
+    for (const side of [`${path}-wal`, `${path}-shm`]) rmSync(side, { force: true });
+    const before = readFileSync(path);
+    expect(() => openDb(path)).toThrow("미래 DB 스키마");
+    expect(readFileSync(path).equals(before)).toBe(true);
+    expect(backups(runtime)).toEqual([]);
   });
 
   test("future schema is refused before journal mode, permissions, bytes or directory contents change", () => {

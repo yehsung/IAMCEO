@@ -370,7 +370,7 @@ export default function Composer() {
     attachFiles(projectId, files);
   };
 
-  const placeholder = target ? `${target.name}에게 직접 지시` : isHq ? "본사 AI에게 — 새 프로젝트 만들기 등" : "지시나 질문 — CLI에 치듯이";
+  const placeholder = target ? `${target.name}에게 직접 지시` : isHq ? "본사 AI에게 — 새 프로젝트 만들기 등" : "지시나 질문";
   const showThreadLink = notice !== null && route.tab !== "thread";
 
   if (!gate.ok) {

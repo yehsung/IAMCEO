@@ -2057,6 +2057,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   listReportsMissingDeliveries(projectId?: string): Message[] {
     return this.rows(`SELECT m.* FROM messages m WHERE m.mine = 0 AND m.member_id IS NOT NULL AND m.kind IN ('완료','진행','막힘','알림')
+      AND m.rowid > COALESCE((SELECT legacy_max_rowid FROM report_delivery_tracking WHERE id = 1), 0)
       ${projectId === undefined ? "" : "AND m.project_id = ?"}
       AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.ref_type = 'message' AND d.ref_id = m.id AND d.kind = 'report')
       ORDER BY m.at COLLATE BINARY, m.id COLLATE BINARY`, ...(projectId === undefined ? [] : [projectId])).map(toMessage);

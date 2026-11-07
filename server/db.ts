@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, statSync } from "node:fs";
 
 export const MIGRATIONS: string[] = [
   `
@@ -602,15 +602,32 @@ export const MIGRATIONS: string[] = [
      cancelled_at TEXT,
      PRIMARY KEY (group_id, device_id)
    );`,
+  // 예전 실행기는 직원 보고를 총괄에게 넣을 때 원본 메시지 연결(ref)을 남기지 않았다. 그 보고들을 '전달 기록 없음'으로
+  // 보고 시작 복구가 총괄에게 다시 넣지 않도록, 이 시점까지의 메시지는 보고 전달 추적 대상에서 뺀다.
+  `CREATE TABLE report_delivery_tracking (
+     id INTEGER PRIMARY KEY CHECK (id = 1),
+     legacy_max_rowid INTEGER NOT NULL CHECK (legacy_max_rowid >= 0)
+   );
+   INSERT INTO report_delivery_tracking (id, legacy_max_rowid) SELECT 1, COALESCE(MAX(rowid), 0) FROM messages;`,
 ];
 
 export function openDb(path: string): Database {
   // 읽기/쓰기 연결은 close만으로도 남아 있던 WAL을 checkpoint할 수 있다.
   // 기존 DB의 버전 검사와 이주 전 백업은 읽기 전용 연결에서 끝내야 실패 시 원본이 그대로다.
   if (path !== ":memory:" && path !== "" && existsSync(path)) {
-    const probe = new Database(path, { readonly: true });
+    let probe = new Database(path, { readonly: true });
     try {
-      const current = supportedVersion(probe);
+      let current: number;
+      try {
+        current = supportedVersion(probe);
+      } catch (error) {
+        // WAL 모드 DB 파일만 복사·복원되어 -wal/-shm 이 없으면 읽기 전용 연결은 공유 메모리 파일을 만들지 못해
+        // SQLITE_CANTOPEN 이 난다. 커밋 안 된 WAL 내용이 없을 때만 내용을 쓰지 않는 읽기/쓰기 연결로 다시 연다.
+        if ((error as { code?: string }).code !== "SQLITE_CANTOPEN" || !walIsEmpty(path)) throw error;
+        probe.close();
+        probe = new Database(path, { readwrite: true, create: false });
+        current = supportedVersion(probe);
+      }
       probe.exec("PRAGMA busy_timeout = 5000");
       if (current < MIGRATIONS.length &&
           (current > 0 || probe.query("SELECT 1 FROM sqlite_schema LIMIT 1").get())) {
@@ -643,6 +660,15 @@ export function openDb(path: string): Database {
     return db;
   } catch (error) {
     db.close();
+    throw error;
+  }
+}
+
+function walIsEmpty(path: string): boolean {
+  try {
+    return statSync(`${path}-wal`).size === 0;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
     throw error;
   }
 }

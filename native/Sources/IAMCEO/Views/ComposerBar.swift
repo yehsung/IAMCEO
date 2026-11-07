@@ -101,7 +101,7 @@ struct ComposerBar: View {
         if missingTarget { return "명부에 없는 대상에게는 보낼 수 없습니다" }
         if let recipient { return "\(recipient.name)에게 직접 지시" }
         if store.state?.project.isHq == true { return "본사 AI에게 — 새 프로젝트 만들기 등" }
-        return "지시나 질문 — CLI에 치듯이"
+        return "지시나 질문"
     }
 
     private var blockedReason: (text: String, tone: Tone)? {

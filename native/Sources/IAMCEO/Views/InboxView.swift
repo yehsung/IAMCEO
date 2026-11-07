@@ -187,15 +187,10 @@ struct InboxView: View {
 
     @ViewBuilder private var content: some View {
         if store.state == nil {
-            Plate {
-                if store.isLoading {
-                    HStack(spacing: 10) {
-                        ProgressView().controlSize(.small)
-                        Text("결재를 불러오는 중입니다").font(CEFont.secondary).foregroundStyle(CE.ink2)
-                    }
-                } else {
-                    CompactEmpty(icon: "tray", title: "열린 프로젝트가 없습니다", detail: isMac ? "사이드바에서 프로젝트를 고르거나 새로 만드세요." : "위 제목을 눌러 프로젝트를 고르거나 새로 만드세요.")
-                }
+            if store.isLoading {
+                EmptyTile(loading: true, title: "결재를 불러오는 중입니다")
+            } else {
+                EmptyTile(icon: "tray", title: "열린 프로젝트가 없습니다", detail: isMac ? "사이드바에서 프로젝트를 고르거나 새로 만드세요." : "위 제목을 눌러 프로젝트를 고르거나 새로 만드세요.")
             }
         } else if segment == .open {
             openView
@@ -219,7 +214,7 @@ struct InboxView: View {
             }
             let blocks = self.blocks
             if blocks.isEmpty && blocked.isEmpty {
-                Plate { CompactEmpty(icon: "checkmark.seal", title: "결재할 항목이 없습니다", detail: emptyDetail) }
+                EmptyTile(icon: "checkmark.seal", title: "결재할 항목이 없습니다", detail: emptyDetail)
             }
             ForEach(blocks) { block in blockView(block) }
         }
@@ -284,7 +279,7 @@ struct InboxView: View {
     }
 
     private func approvalHeader(_ member: Member) -> some View {
-        let command = "\(store.bootstrap?.cli ?? "iamceo") attach \(member.id)"
+        let command = TerminalCommand.attach(memberID: member.id, bootstrap: store.bootstrap)
         let copied = copiedMember == member.id
         let now = plainOneLine(member.now)
         return HStack(spacing: 6) {
@@ -445,7 +440,7 @@ struct InboxView: View {
                              actionTitle: "결재할 항목 보기", action: { reopenedNotice = nil; router.decisionID = notice.id })
             }
             if list.isEmpty {
-                Plate { CompactEmpty(icon: "tray", title: "결재된 항목이 없습니다", detail: "결정한 결재가 여기에 쌓입니다.") }
+                EmptyTile(icon: "tray", title: "결재된 항목이 없습니다", detail: "결정한 결재가 여기에 쌓입니다.")
             } else {
                 Plate(padding: 0) {
                     VStack(alignment: .leading, spacing: 0) {

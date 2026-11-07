@@ -146,32 +146,33 @@ struct HomeView: View {
         expandedTodos = []; showDoneTodos = false
     }
 
+    /// No project state yet: one centred note at the top of the same column the home cards use.
     @ViewBuilder private var placeholder: some View {
-        VStack(alignment: .leading, spacing: CESpace.m) {
+        Group {
             if store.isLoading || store.connectionStatus == .connecting {
-                HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text("프로젝트를 불러오는 중입니다").font(CEFont.secondary).foregroundStyle(CE.ink2)
-                }
+                EmptyTile(loading: true, title: "프로젝트를 불러오는 중입니다")
             } else if store.projects.isEmpty {
-                CompactEmpty(icon: "folder.badge.plus", title: "아직 프로젝트가 없습니다",
-                             detail: "새 프로젝트를 만들면 총괄이 팀을 꾸리고 지금 상황을 여기에 정리합니다.")
-                Button("새 프로젝트") { router.showNewProject = true }
-                    .ceProminentButton()
-                    .disabled(!store.canWrite)
-            } else {
-                CompactEmpty(icon: "exclamationmark.circle", title: "프로젝트를 불러오지 못했습니다",
-                             detail: store.connectionStatus == .connected ? "다시 불러오거나 다른 프로젝트를 고르세요." : "서버에 다시 연결되면 불러올 수 있습니다.")
-                Button("다시 불러오기") {
-                    Task { if let id = store.selectedProjectID ?? store.projects.first?.id { await store.selectProject(id: id) } }
+                EmptyTile(icon: "folder.badge.plus", title: "아직 프로젝트가 없습니다",
+                          detail: "새 프로젝트를 만들면 총괄이 팀을 꾸리고 지금 상황을 여기에 정리합니다.") {
+                    Button("새 프로젝트") { router.showNewProject = true }
+                        .ceProminentButton()
+                        .disabled(!store.canWrite)
                 }
-                .ceSecondaryButton()
-                .disabled(store.connectionStatus != .connected)
+            } else {
+                EmptyTile(icon: "exclamationmark.circle", title: "프로젝트를 불러오지 못했습니다",
+                          detail: store.connectionStatus == .connected ? "다시 불러오거나 다른 프로젝트를 고르세요." : "서버에 다시 연결되면 불러올 수 있습니다.") {
+                    Button("다시 불러오기") {
+                        Task { if let id = store.selectedProjectID ?? store.projects.first?.id { await store.selectProject(id: id) } }
+                    }
+                    .ceSecondaryButton()
+                    .disabled(store.connectionStatus != .connected)
+                }
             }
         }
-        .frame(maxWidth: 420, alignment: .leading)
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, hPad)
+        .padding(.top, isMac ? 14 : 10)
+        .frame(maxWidth: Self.maxContentWidth + hPad * 2)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: - 연결 게이트

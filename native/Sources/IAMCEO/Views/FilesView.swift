@@ -122,30 +122,19 @@ struct FilesView: View {
         ScrollView {
             Group {
                 if store.isLoading {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("자료를 불러오는 중입니다").font(CEFont.meta).foregroundStyle(CE.ink3)
-                    }
-                    .padding(.vertical, CESpace.s)
+                    EmptyTile(loading: true, title: "자료를 불러오는 중입니다")
                 } else {
-                    CompactEmpty(icon: "folder", title: "열린 프로젝트가 없습니다", detail: "연결과 프로젝트를 확인한 뒤 다시 동기화하세요.")
+                    EmptyTile(icon: "folder", title: "열린 프로젝트가 없습니다", detail: "연결과 프로젝트를 확인한 뒤 다시 동기화하세요.")
                 }
             }
-            .frame(maxWidth: 1180, alignment: .leading)
-            .padding(outerPadding)
-            .frame(maxWidth: .infinity)
+            .modifier(EmptyColumn(wide: wide))
         }
     }
 
     private var emptyLibrary: some View {
         ScrollView {
-            Plate {
-                CompactEmpty(icon: "folder", title: "아직 올린 자료가 없습니다", detail: "직원이 자료를 올리면 여기에 모입니다.")
-            }
-            .frame(maxWidth: 560)
-            .frame(maxWidth: 1180, alignment: .leading)
-            .padding(outerPadding)
-            .frame(maxWidth: .infinity)
+            EmptyTile(icon: "folder", title: "아직 올린 자료가 없습니다", detail: "직원이 자료를 올리면 여기에 모입니다.")
+                .modifier(EmptyColumn(wide: wide))
         }
         #if os(iOS)
         .refreshable { await store.refresh() }
@@ -218,17 +207,16 @@ struct FilesView: View {
                 if let file = selectedFile {
                     FileReader(file: file)
                 } else {
-                    ScrollView {
-                        Group {
-                            if router.fileID != nil {
-                                missingFile
-                            } else {
-                                CompactEmpty(icon: "doc.text.magnifyingglass", title: "고른 자료가 없습니다", detail: "왼쪽 목록에서 자료를 고르세요.")
-                            }
+                    // Nothing to read: a quiet note in the middle of the pane, not a line stuck in its corner.
+                    Group {
+                        if router.fileID != nil {
+                            EmptyTile(icon: "questionmark.folder", title: "찾을 수 없는 자료입니다", detail: "목록에서 다시 골라 주세요.", framed: false)
+                        } else {
+                            EmptyTile(icon: "doc.text.magnifyingglass", title: "고른 자료가 없습니다", detail: "왼쪽 목록에서 자료를 고르세요.", framed: false)
                         }
-                        .padding(CESpace.xl)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .frame(maxWidth: 360)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -328,9 +316,19 @@ struct FilesView: View {
     private var noMatch: some View {
         CompactEmpty(icon: "magnifyingglass", title: "맞는 자료가 없습니다", detail: "검색어나 종류를 바꿔 보세요.")
     }
+}
 
-    private var missingFile: some View {
-        CompactEmpty(icon: "questionmark.folder", title: "찾을 수 없는 자료입니다", detail: "목록에서 다시 골라 주세요.")
+/// The column an empty or loading 자료 screen draws in: the same centred 880 column and paddings as 결재함, so the
+/// note sits in the middle of the screen instead of at the left of a wide area.
+private struct EmptyColumn: ViewModifier {
+    let wide: Bool
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, wide ? 24 : CESpace.l)
+            .padding(.top, CESpace.m)
+            .padding(.bottom, wide ? 24 : 28)
+            .frame(maxWidth: 880)
+            .frame(maxWidth: .infinity)
     }
 }
 
@@ -468,9 +466,8 @@ private struct FileDetailScreen: View {
                 FileReader(file: file)
             } else {
                 ScrollView {
-                    CompactEmpty(icon: "questionmark.folder", title: "찾을 수 없는 자료입니다", detail: "목록에서 다시 골라 주세요.")
-                        .padding(CESpace.l)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    EmptyTile(icon: "questionmark.folder", title: "찾을 수 없는 자료입니다", detail: "목록에서 다시 골라 주세요.")
+                        .modifier(EmptyColumn(wide: false))
                 }
             }
         }
@@ -1309,24 +1306,42 @@ private struct LoadedArtifact {
     let rule: WKContentRuleList
 }
 
+/// 크게 보기: the same protected preview in a large popup (CESheet frame, the page fills the body).
+/// Mac: opens at 1180 × 840, fitted inside a smaller display; the CESheet frame follows the sheet's size. (A Mac sheet
+/// opens at its minimum width, so the large width is the minimum; the height starts at its ideal and can change.)
 private struct ArtifactFullView: View {
-    @Environment(\.dismiss) private var dismiss
     let title: String
     let artifact: LoadedArtifact
     var body: some View {
-        NavigationStack {
-            SandboxedHTML(html: artifact.html, rule: artifact.rule)
-                .ignoresSafeArea(edges: .bottom)
-                .navigationTitle(title)
-                #if os(iOS)
-                .navigationBarTitleDisplayMode(.inline)
-                #endif
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("닫기") { dismiss() } }
-                }
-        }
-        .ceSheetSize(width: 1180, height: 840)
+        #if os(macOS)
+        GeometryReader { proxy in sheet(width: proxy.size.width) }
+            .frame(minWidth: Self.ideal.width, maxWidth: .infinity,
+                   minHeight: 420, idealHeight: Self.ideal.height, maxHeight: .infinity)
+        #else
+        sheet(width: 520)
+        #endif
     }
+
+    private func sheet(width: CGFloat) -> some View {
+        CESheet(title.isEmpty ? "제목 없는 자료" : title, icon: "macwindow", width: width, scrolls: false) {
+            SandboxedHTML(html: artifact.html, rule: artifact.rule)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CE.line) }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                #if os(iOS)
+                .padding(.bottom, CESpace.l)
+                #endif
+                .accessibilityLabel("\(title) 미리보기")
+        }
+    }
+
+    #if os(macOS)
+    /// The old large size, kept inside the screen the sheet opens on.
+    private static var ideal: CGSize {
+        let visible = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1440, height: 900)
+        return CGSize(width: min(1180, visible.width - 80), height: min(840, visible.height - 60))
+    }
+    #endif
 }
 
 // MARK: - Attachments

@@ -5,28 +5,27 @@ import AppKit
 import UIKit
 #endif
 
-// Connection, Settings and New project share the web's setup look (web/src/styles/setup.css): glass panels with a
-// 16pt title, labelled dark input wells, choice tiles with a violet ring, and a sticky glass save bar.
+// Connection and New project share the web's setup look (web/src/styles/setup.css): labelled dark input wells in a
+// glass card. Settings is a list of System Settings rows (title and one quiet hint left, the control right) grouped in
+// cards, in four parts, with a sticky glass save bar.
 
 // MARK: - Shared setup pieces
 
-private enum SetupFont {
+enum SetupFont {
     #if os(macOS)
     static let brand: Font = .system(size: 13, weight: .bold)
     static let title: Font = .system(size: 24, weight: .bold)
-    static let sheetTitle: Font = .system(size: 18, weight: .bold)
     static let lead: Font = .system(size: 14)
     static let label: Font = .system(size: 12.5, weight: .semibold)
-    static let choice: Font = .system(size: 14, weight: .semibold)
+    static let row: Font = .system(size: 13.5, weight: .medium)
     static let input: Font = .system(size: 13.5)
     static let hint: Font = .system(size: 12)
     #else
     static let brand: Font = .footnote.weight(.bold)
     static let title: Font = .title2.weight(.bold)
-    static let sheetTitle: Font = .headline
     static let lead: Font = .subheadline
     static let label: Font = .footnote.weight(.semibold)
-    static let choice: Font = .subheadline.weight(.semibold)
+    static let row: Font = .subheadline.weight(.medium)
     static let input: Font = .subheadline
     static let hint: Font = .caption
     #endif
@@ -35,8 +34,11 @@ private enum SetupFont {
 private enum SetupMetrics {
     #if os(macOS)
     static let inputHeight: CGFloat = 34
+    /// Menus and fields inside a settings row.
+    static let rowControlHeight: CGFloat = 28
     #else
     static let inputHeight: CGFloat = 44
+    static let rowControlHeight: CGFloat = 40
     #endif
 }
 
@@ -52,35 +54,224 @@ extension View {
     }
 }
 
-/// Web `.st-panel`: a glass card with its title and an optional trailing control.
-private struct SetupPanel<Accessory: View, Content: View>: View {
-    let title: String
+extension View {
+    /// A small dark well for a value typed inside a settings row (a number, a model name).
+    func settingsWell() -> some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        return self.textFieldStyle(.plain)
+            .padding(.horizontal, 9)
+            .frame(height: SetupMetrics.rowControlHeight)
+            .background(CE.bgDeep.opacity(0.5), in: shape)
+            .overlay { shape.strokeBorder(Color.white.opacity(0.12)) }
+    }
+
+    /// The on/off switch of a settings row: violet, small on Mac like System Settings.
+    @ViewBuilder func settingsSwitch() -> some View {
+        #if os(macOS)
+        self.toggleStyle(.switch).controlSize(.small).tint(CE.violet)
+        #else
+        self.toggleStyle(.switch).tint(CE.violet)
+        #endif
+    }
+}
+
+// MARK: - Settings rows (System Settings style)
+
+/// A group of settings rows in one card: an optional caption with an optional trailing accessory above it and an
+/// optional footnote below. Captions and footnotes line up with the row text inside the card. Separate rows with
+/// `RowDivider(inset: 0)`.
+struct SettingsGroup<Accessory: View, Content: View>: View {
+    let title: String?
+    let footnote: String?
+    let footnoteTone: Color
     let accessory: Accessory
     let content: Content
-    init(_ title: String, @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content) {
+
+    init(_ title: String? = nil, footnote: String? = nil, footnoteTone: Color = CE.ink3,
+         @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content) {
         self.title = title
+        self.footnote = footnote
+        self.footnoteTone = footnoteTone
         self.accessory = accessory()
         self.content = content()
     }
+
     var body: some View {
-        Plate(padding: isMac ? 18 : 16) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
-                    Text(title).font(CEFont.title).foregroundStyle(CE.ink).lineLimit(1)
-                        .accessibilityAddTraits(.isHeader)
+        VStack(alignment: .leading, spacing: 7) {
+            if title != nil || Accessory.self != EmptyView.self {
+                HStack(alignment: .center, spacing: 8) {
+                    if let title {
+                        Text(title).font(CEFont.section).foregroundStyle(CE.ink2).lineLimit(1)
+                            .accessibilityAddTraits(.isHeader)
+                    }
                     Spacer(minLength: 8)
                     accessory
                 }
-                .frame(minHeight: 24)
-                content
+                .frame(minHeight: 20)
+                .padding(.horizontal, CESpace.l)
+            }
+            Plate(padding: 0) {
+                VStack(alignment: .leading, spacing: 0) { content }
+                    .padding(.horizontal, CESpace.l)
+                    .padding(.vertical, 3)
+            }
+            if let footnote, !footnote.isEmpty {
+                Text(footnote).font(SetupFont.hint).foregroundStyle(footnoteTone)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, CESpace.l)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+extension SettingsGroup where Accessory == EmptyView {
+    init(_ title: String? = nil, footnote: String? = nil, footnoteTone: Color = CE.ink3, @ViewBuilder content: () -> Content) {
+        self.init(title, footnote: footnote, footnoteTone: footnoteTone, accessory: { EmptyView() }, content: content)
+    }
+}
+
+/// One settings row: title and at most one short hint on the left, the control on the right. On iPhone a wide control
+/// either goes under the title (`stacksOnPhone`) or keeps the title's line while the hint runs under both
+/// (`hintBelowOnPhone`, for a number and its stepper). A `monoHint` is diagnostic text the owner may need to paste.
+struct SettingsRow<Control: View>: View {
+    let title: String
+    let hint: String?
+    let hintTone: Color
+    let monoHint: Bool
+    let stacksOnPhone: Bool
+    let hintBelowOnPhone: Bool
+    let control: Control
+
+    init(_ title: String, hint: String? = nil, hintTone: Color = CE.ink3, monoHint: Bool = false,
+         stacksOnPhone: Bool = false, hintBelowOnPhone: Bool = false, @ViewBuilder control: () -> Control) {
+        self.title = title
+        self.hint = hint
+        self.hintTone = hintTone
+        self.monoHint = monoHint
+        self.stacksOnPhone = stacksOnPhone
+        self.hintBelowOnPhone = hintBelowOnPhone
+        self.control = control()
+    }
+
+    var body: some View {
+        Group {
+            if !isMac && stacksOnPhone {
+                VStack(alignment: .leading, spacing: 10) {
+                    label
+                    control
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else if !isMac && hintBelowOnPhone {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .center, spacing: 16) {
+                        titleText.frame(maxWidth: .infinity, alignment: .leading)
+                        control
+                    }
+                    hintText
+                }
+            } else {
+                HStack(alignment: .center, spacing: 16) {
+                    label.frame(maxWidth: .infinity, alignment: .leading)
+                    control
+                }
+            }
+        }
+        .padding(.vertical, isMac ? 10 : 11)
+        .frame(minHeight: isMac ? 46 : 50)
+    }
+
+    private var label: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            titleText
+            hintText
+        }
+    }
+
+    private var titleText: some View { Text(title).font(SetupFont.row).foregroundStyle(CE.ink) }
+
+    @ViewBuilder private var hintText: some View {
+        if let hint, !hint.isEmpty {
+            if monoHint {
+                Text(hint).font(CEFont.mono).foregroundStyle(hintTone)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            } else {
+                Text(hint).font(SetupFont.hint).foregroundStyle(hintTone)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 }
 
-extension SetupPanel where Accessory == EmptyView {
-    init(_ title: String, @ViewBuilder content: () -> Content) {
-        self.init(title, accessory: { EmptyView() }, content: content)
+/// The small round "다시 확인" of a settings card (↻; a spinner while it runs). iPhone keeps a 44pt target.
+struct SettingsRefreshButton: View {
+    let label: String
+    let busy: Bool
+    let action: () -> Void
+    @Environment(\.isEnabled) private var isEnabled
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                if busy {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 10.5, weight: .bold))
+                }
+            }
+            .foregroundStyle(isEnabled ? CE.ink2 : CE.ink3)
+            .frame(width: 24, height: 24)
+            .background(Color.white.opacity(isEnabled ? 0.07 : 0.03), in: Circle())
+            .overlay { Circle().strokeBorder(Color.white.opacity(0.07)) }
+            .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(busy ? "\(label), 확인하는 중" : label)
+    }
+}
+
+/// A short choice of a few words (권한, 총괄 CLI): the app's segment pill with the violet drop on the chosen item.
+private struct SettingsSegments: View {
+    struct Option: Identifiable {
+        let id: String
+        let title: String
+    }
+    let options: [Option]
+    let selection: String
+    let label: String
+    let onSelect: (String) -> Void
+    @Environment(\.isEnabled) private var isEnabled
+    @Namespace private var dropSpace
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(options) { option in
+                let selected = option.id == selection
+                Button { onSelect(option.id) } label: {
+                    Text(option.title)
+                        .font(.system(size: isMac ? 12.5 : 14, weight: selected ? .semibold : .medium))
+                        .foregroundStyle(selected ? Color.white : CE.ink2)
+                        .lineLimit(1)
+                        .padding(.horizontal, isMac ? 13 : 12)
+                        .frame(maxWidth: isMac ? nil : .infinity)
+                        .frame(height: isMac ? 26 : 36)
+                        .background { if selected { TabDrop().matchedGeometryEffect(id: "drop", in: dropSpace) } }
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(option.title)
+                .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+            }
+        }
+        .padding(3)
+        .cardPill()
+        .opacity(isEnabled ? 1 : 0.55)
+        .animation(.spring(response: 0.4, dampingFraction: 0.82), value: selection)
+        .fixedSize(horizontal: isMac, vertical: true)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(label)
     }
 }
 
@@ -110,16 +301,18 @@ private struct SetupField<Control: View>: View {
 private struct SetupSelectLabel: View {
     let text: String
     var mono = false
+    /// Inside a settings row: shorter well, smaller corner.
+    var compact = false
     @Environment(\.isEnabled) private var isEnabled
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: compact ? 8 : CERadius.control, style: .continuous)
         HStack(spacing: 6) {
             Text(text).font(mono ? CEFont.mono : SetupFont.input).foregroundStyle(isEnabled ? CE.ink : CE.ink3).lineLimit(1)
             Spacer(minLength: 4)
-            Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)).foregroundStyle(isEnabled ? CE.ink2 : CE.ink3)
+            Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(isEnabled ? CE.ink2 : CE.ink3)
         }
-        .padding(.horizontal, 12)
-        .frame(maxWidth: .infinity, minHeight: SetupMetrics.inputHeight)
+        .padding(.horizontal, compact ? 10 : 12)
+        .frame(maxWidth: .infinity, minHeight: compact ? SetupMetrics.rowControlHeight : SetupMetrics.inputHeight)
         .background(CE.bgDeep.opacity(0.5), in: shape)
         .overlay { shape.strokeBorder(Color.white.opacity(0.12)) }
         .contentShape(shape)
@@ -130,16 +323,18 @@ private struct SetupSelectLabel: View {
 private struct SetupMenu<Items: View>: View {
     let text: String
     let mono: Bool
+    let compact: Bool
     let label: String
     let items: Items
-    init(_ text: String, mono: Bool = false, label: String, @ViewBuilder items: () -> Items) {
+    init(_ text: String, mono: Bool = false, compact: Bool = false, label: String, @ViewBuilder items: () -> Items) {
         self.text = text
         self.mono = mono
+        self.compact = compact
         self.label = label
         self.items = items()
     }
     var body: some View {
-        Menu { items } label: { SetupSelectLabel(text: text, mono: mono) }
+        Menu { items } label: { SetupSelectLabel(text: text, mono: mono, compact: compact) }
             .menuStyle(.button)
             .buttonStyle(.plain)
             .menuIndicator(.hidden)
@@ -154,73 +349,17 @@ private struct SetupMenu<Items: View>: View {
     Binding(get: { selected }, set: { _ in action() })
 }
 
-/// Web `.choice`: quiet tile, violet fill and ring when chosen.
-private struct ChoiceTile: View {
-    let title: String
-    let detail: String
-    var badge: String? = nil
-    let selected: Bool
-    let action: () -> Void
-    @Environment(\.isEnabled) private var isEnabled
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 7) {
-                    Text(title).font(SetupFont.choice).foregroundStyle(isEnabled ? CE.ink : CE.ink3)
-                    if let badge { Tag(badge) }
-                }
-                Text(detail).font(SetupFont.hint).foregroundStyle(isEnabled ? CE.ink2 : CE.ink3)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.horizontal, 13).padding(.vertical, 11)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(selected ? CE.violet.opacity(0.24) : Color.white.opacity(0.04), in: shape)
-            .overlay { shape.strokeBorder(selected ? CE.violet.opacity(0.9) : Color.white.opacity(0.1), lineWidth: selected ? 1.5 : 1) }
-            .contentShape(shape)
-        }
-        .buttonStyle(.plain)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
-    }
-}
-
-/// Web `.st-facts` cell. Mac: label above value in a grid; iPhone: label left, value right.
-private struct FactCell<Value: View>: View {
-    let label: String
-    let value: Value
-    init(_ label: String, @ViewBuilder value: () -> Value) {
-        self.label = label
-        self.value = value()
-    }
-    var body: some View {
-        #if os(macOS)
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label).font(SetupFont.label).foregroundStyle(CE.ink3)
-            value.font(CEFont.secondary).foregroundStyle(CE.ink)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-        #else
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(label).font(SetupFont.label).foregroundStyle(CE.ink3)
-            Spacer(minLength: 8)
-            value.font(CEFont.secondary).foregroundStyle(CE.ink).multilineTextAlignment(.trailing)
-        }
-        .accessibilityElement(children: .combine)
-        #endif
-    }
-}
-
+/// A state at the right of a settings row: a dot and plain words (coloured only when something needs attention).
 private struct DotValue: View {
     let tone: Tone
     let text: String
     var body: some View {
         HStack(spacing: 6) {
             StatusDot(tone: tone, size: 6)
-            Text(text).foregroundStyle(tone == .danger || tone == .attention ? tone.color : CE.ink)
+            Text(text).font(CEFont.secondary).foregroundStyle(tone == .danger || tone == .attention ? tone.color : CE.ink2)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -555,7 +694,29 @@ struct ConnectionView: View {
     }
 }
 
-// MARK: - Settings (macOS Settings scene content / iOS sheet)
+// MARK: - Settings (macOS Settings window / iOS sheet)
+
+/// The four parts of settings. Mac: a sidebar inside the settings window; iPhone: a list that pushes each part.
+private enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
+    case general, ai, notifications, connection
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .general: "일반"
+        case .ai: "AI 모델"
+        case .notifications: "알림"
+        case .connection: "연결"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .general: "gearshape"
+        case .ai: "cpu"
+        case .notifications: "bell"
+        case .connection: "network"
+        }
+    }
+}
 
 struct SettingsView: View {
     @Environment(AppStore.self) private var store
@@ -577,6 +738,11 @@ struct SettingsView: View {
     @State private var confirmLeave = false
     @State private var confirmDiscard = false
     @State private var editedNamespace = ""
+    #if os(macOS)
+    @State private var section: SettingsSection = SettingsView.launchSection ?? .general
+    #else
+    @State private var path: [SettingsSection] = SettingsView.launchSection.map { [$0] } ?? []
+    #endif
 
     private enum Busy { case sync, runtime }
 
@@ -584,12 +750,11 @@ struct SettingsView: View {
         let id: String
         let title: String
         let detail: String
-        let badge: String?
     }
     private static let permissionChoices = [
-        PermissionChoice(id: "bypassPermissions", title: "바이패스", detail: "직원이 승인 없이 명령을 실행합니다", badge: "기본"),
-        PermissionChoice(id: "auto", title: "오토", detail: "위험해 보이는 작업만 멈춥니다", badge: nil),
-        PermissionChoice(id: "default", title: "모두 승인", detail: "도구를 쓸 때마다 승인을 기다립니다", badge: nil)
+        PermissionChoice(id: "bypassPermissions", title: "바이패스", detail: "직원이 승인 없이 명령을 실행합니다"),
+        PermissionChoice(id: "auto", title: "오토", detail: "위험해 보이는 작업만 멈춥니다"),
+        PermissionChoice(id: "default", title: "모두 승인", detail: "도구를 쓸 때마다 승인을 기다립니다")
     ]
 
     private struct RankRow: Identifiable {
@@ -606,6 +771,20 @@ struct SettingsView: View {
         RankRow(key: "staff", title: "직원", scope: "서브에이전트", cli: cli)
     ] }
     private static let tidyChoices = [0, 3, 6, 12, 24]
+    /// Mac rank rows: the model and effort columns (the group caption lines up with them).
+    private static let modelWidth: CGFloat = 176
+    private static let effortWidth: CGFloat = 116
+
+    /// Review hook for the read-only sample workspace (DEBUG): `--settings-section general|ai|notifications|connection`
+    /// opens that part of settings (screenshots of each part).
+    private static var launchSection: SettingsSection? {
+        #if DEBUG
+        guard LaunchOptions.demo, let raw = LaunchOptions.value(after: "--settings-section") else { return nil }
+        return SettingsSection(rawValue: raw)
+        #else
+        return nil
+        #endif
+    }
 
     // MARK: State
 
@@ -618,137 +797,385 @@ struct SettingsView: View {
     private var canSave: Bool { editable && isDirty && firstModelError == nil && !saving && store.settingsConflict == nil }
     private var serverSignature: String { store.bootstrap.map { Self.signature($0.settings) } ?? "" }
 
+    /// Which part holds unsaved edits (the dot on its sidebar item / list row). Together they cover `signature`.
+    private func hasEdits(in section: SettingsSection) -> Bool {
+        guard loaded else { return false }
+        switch section {
+        case .general:
+            return draft.permissionMode != base.permissionMode || draft.maxConcurrentTurns != base.maxConcurrentTurns
+                || draft.maxAwakeWorkers != base.maxAwakeWorkers || draft.compactAtPct != base.compactAtPct
+                || Int(draft.boardTidyHours.rounded()) != Int(base.boardTidyHours.rounded())
+        case .ai: return RankSettingsEditing.signature(draft) != RankSettingsEditing.signature(base) || pendingEmptyCustom
+        case .notifications: return draft.notifyMac != base.notifyMac
+        case .connection: return false
+        }
+    }
+
     private var lockNotice: (title: String, detail: String)? {
-        if store.isDemo { return ("샘플 설정입니다", "샘플은 읽기 전용이라 바꿀 수 없습니다. 실제 Mac에 연결하면 바꿀 수 있습니다.") }
+        if store.isDemo { return ("샘플 설정입니다", "읽기 전용이라 바꿀 수 없습니다. 실제 Mac에 연결하면 바꿀 수 있습니다.") }
         if store.connectionStatus != .connected { return ("서버에 연결되지 않았습니다", "보이는 값은 마지막 동기화 기준이며 지금은 바꿀 수 없습니다.") }
         return nil
     }
 
     var body: some View {
         #if os(macOS)
-        content
-            .navigationTitle("설정")
-            .frame(width: 700, height: 760)
-        #else
-        NavigationStack {
-            content
-                .navigationTitle("설정")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) { Button("완료") { close() } }
+        @Bindable var router = router
+        #endif
+        return container
+            .projectManagementSheets()
+            .onAppear {
+                editedNamespace = store.writeNamespace; syncFromStore()
+                #if os(macOS)
+                if store.bootstrap == nil, !store.isDemo, Self.launchSection == nil { section = .connection }
+                #endif
+                #if DEBUG
+                // Review hook (sample only, never saved): `--settings-dirty` makes two unsaved edits, one of them invalid,
+                // so the save bar and the section dots can be screenshotted.
+                if store.isDemo, loaded, LaunchOptions.arguments.contains("--settings-dirty"), let lead = Self.rankRows.first(where: { $0.cli == .claude && $0.key == "lead" }) {
+                    draft.maxConcurrentTurns += 1
+                    customRanks.insert(lead.id)
+                    setModel("opus 1m", for: lead)
                 }
+                #endif
+            }
+            .onChange(of: serverSignature) { _, _ in syncFromStore() }
+            .onChange(of: Self.signature(draft)) { _, _ in
+                saveError = nil
+                if loaded { store.setSettingsDraft(draft) }
+            }
+            .onChange(of: store.writeNamespace) { _, namespace in
+                editedNamespace = namespace; loaded = false; customRanks = []; saveError = nil; syncFromStore()
+            }
+            #if os(macOS)
+            .sheet(isPresented: $router.showPairing) { MacPairingSheet() }
+            #endif
+    }
+
+    // MARK: Frame
+
+    #if os(macOS)
+    /// System Settings: the four parts in a sidebar, the chosen part on the right, the save bar pinned under it.
+    private var container: some View {
+        HStack(spacing: 0) {
+            sidebar
+            page(section)
+                .id(section)
+                .ceBar(.bottom) { saveBarHost }
         }
+        .frame(width: 780, height: 700)
+        .background { AmbientBackground() }
+        .navigationTitle(section.title)
+    }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(SettingsSection.allCases) { item in sidebarItem(item) }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10).padding(.top, 12).padding(.bottom, 12)
+        .frame(width: 196)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background {
+            Color.black.opacity(0.24)
+                .overlay(alignment: .trailing) { Rectangle().fill(CE.line).frame(width: 1) }
+                .ignoresSafeArea()
+        }
+    }
+
+    private func sidebarItem(_ item: SettingsSection) -> some View {
+        let selected = section == item
+        let dirty = hasEdits(in: item)
+        return Button { section = item } label: {
+            HStack(spacing: 10) {
+                sectionIcon(item, size: 24)
+                Text(item.title).font(.system(size: 13.5, weight: selected ? .semibold : .medium))
+                    .foregroundStyle(selected ? CE.ink : CE.ink2).lineLimit(1)
+                Spacer(minLength: 4)
+                if dirty { unsavedDot(item) }
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 38)
+        }
+        .buttonStyle(SettingsNavStyle(selected: selected))
+        .accessibilityLabel(dirty ? "\(item.title), \(unsavedLabel(item))" : item.title)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    }
+    #else
+    /// iPhone: the four parts as a list; each pushes its page. The save bar stays pinned under every page.
+    private var container: some View {
+        NavigationStack(path: $path) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    notices
+                    SettingsGroup {
+                        ForEach(Array(SettingsSection.allCases.enumerated()), id: \.element) { index, item in
+                            if index > 0 { RowDivider(inset: 40) }
+                            NavigationLink(value: item) { sectionLink(item) }
+                                .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .padding(16)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .background { AmbientBackground() }
+            .navigationTitle("설정")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("완료") { close() } }
+            }
+            .navigationDestination(for: SettingsSection.self) { item in
+                page(item)
+                    .background { AmbientBackground() }
+                    .navigationTitle(item.title)
+                    .navigationBarTitleDisplayMode(.inline)
+            }
+        }
+        .ceBar(.bottom) { saveBarHost }
         .interactiveDismissDisabled(isDirty)
         .confirmationDialog("저장하지 않은 변경이 있습니다", isPresented: $confirmDiscard, titleVisibility: .visible) {
             Button("저장하지 않고 닫기", role: .destructive) { revert(); dismiss() }
             Button("계속 고치기", role: .cancel) {}
         }
-        #endif
     }
 
-    private var content: some View {
-        @Bindable var router = router
-        return ScrollView {
-            VStack(alignment: .leading, spacing: CESpace.m) {
-                if store.bootstrap != nil {
-                    if let lockNotice {
-                        InlineNotice(tone: store.isDemo ? .accent : .attention, icon: store.isDemo ? "eye" : "wifi.slash", title: lockNotice.title, detail: lockNotice.detail)
-                    }
-                    if store.settingsConflict != nil {
-                        InlineNotice(title: "다른 기기에서 설정이 바뀌었습니다", detail: "적은 내용은 남아 있습니다. 새 설정을 확인한 뒤 저장해 주세요.")
-                        HStack {
-                            Button("새 설정 불러오기") { revert() }.ceSecondaryButton()
-                            Button("내 변경 다시 검토") { reviewChanges() }.ceSecondaryButton()
-                        }.disabled(saving)
-                    }
-                    runtimePanel
-                    permissionPanel.disabled(!editable || saving)
-                    rankPanel.disabled(!editable || saving)
-                    SettingsProjectsPanel(editable: editable)
-                    operationPanel.disabled(!editable || saving)
-                    PushSettingsView()
-                }
-                connectionPanel
+    private func sectionLink(_ item: SettingsSection) -> some View {
+        let dirty = hasEdits(in: item)
+        return HStack(spacing: 12) {
+            sectionIcon(item, size: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title).font(SetupFont.row).foregroundStyle(CE.ink)
+                Text(summary(item)).font(SetupFont.hint).foregroundStyle(CE.ink3).lineLimit(1)
             }
-            .frame(maxWidth: 880)
-            .padding(.horizontal, isMac ? 20 : 16)
-            .padding(.top, isMac ? 16 : 12)
-            .padding(.bottom, 20)
-            .frame(maxWidth: .infinity)
+            Spacer(minLength: 8)
+            if dirty { unsavedDot(item) }
+            Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(CE.ink3)
+        }
+        .padding(.vertical, 10)
+        .frame(minHeight: 56)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityHint(dirty ? unsavedLabel(item) : "")
+    }
+
+    /// One line under each part on the iPhone list: its current value at a glance (nothing made up before the first load).
+    private func summary(_ item: SettingsSection) -> String {
+        if item != .connection && !loaded { return "연결 후 표시" }
+        switch item {
+        case .general:
+            return "\(permissionChoice.title) · 동시 실행 \(draft.maxConcurrentTurns)개"
+        case .ai:
+            func name(_ rank: String) -> String {
+                let value = settingsTrim(draft.rankConfig(rank, cli: .claude)?.model ?? "")
+                return value.isEmpty ? "CLI 기본" : value
+            }
+            return "Claude 부장 \(name("manager")) · 팀장 \(name("lead"))"
+        case .notifications:
+            var parts = ["Mac \(draft.notifyMac ? "켬" : "끔")"]
+            if let service = store.pushNotifications {
+                // The same rule as the switch on the 알림 page.
+                let on = PhonePushSwitch.isOn(service.state, device: store.pushSettings.device(id: service.installationID))
+                parts.append("iPhone \(on ? "켬" : "끔")")
+            }
+            return parts.joined(separator: " · ")
+        case .connection:
+            return connectionSummary().text
+        }
+    }
+    #endif
+
+    private func sectionIcon(_ item: SettingsSection, size: CGFloat) -> some View {
+        let tile = RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
+        return Image(systemName: item.icon)
+            .font(.system(size: size * 0.46, weight: .semibold))
+            .foregroundStyle(CE.accent)
+            .frame(width: size, height: size)
+            .background(CE.violet.opacity(0.16), in: tile)
+            .overlay { tile.strokeBorder(CE.violet.opacity(0.3)) }
+            .accessibilityHidden(true)
+    }
+
+    /// Unsaved edits in that part; red when one of them cannot be saved as is.
+    private func unsavedDot(_ item: SettingsSection) -> some View {
+        let invalid = hasInvalidEdit(item)
+        return Circle().fill(invalid ? CE.danger : CE.accent).frame(width: 7, height: 7)
+            .shadow(color: (invalid ? CE.danger : CE.violet).opacity(0.7), radius: 4)
+            .help(invalid ? "고쳐야 저장할 수 있는 변경이 있습니다" : "저장하지 않은 변경이 있습니다")
+            .accessibilityHidden(true)
+    }
+
+    private func hasInvalidEdit(_ item: SettingsSection) -> Bool { item == .ai && firstModelError != nil }
+
+    /// What the dot says to VoiceOver.
+    private func unsavedLabel(_ item: SettingsSection) -> String {
+        hasInvalidEdit(item) ? "고쳐야 저장할 수 있는 변경 있음" : "저장하지 않은 변경 있음"
+    }
+
+    /// One part of settings, scrolling under the save bar.
+    private func page(_ item: SettingsSection) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                notices
+                sectionContent(item)
+            }
+            .padding(.horizontal, isMac ? 24 : 16)
+            .padding(.top, isMac ? 18 : 12)
+            .padding(.bottom, 24)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollBounceBehavior(.basedOnSize)
         #if os(iOS)
         .scrollDismissesKeyboard(.interactively)
         #endif
-        .background { AmbientBackground() }
-        .ceBar(.bottom) {
-            VStack(spacing: 0) { saveBar }
-                .animation(.snappy(duration: 0.24), value: isDirty || savedNotice)
-        }
-        .projectManagementSheets()
-        .onAppear { editedNamespace = store.writeNamespace; syncFromStore() }
-        .onChange(of: serverSignature) { _, _ in syncFromStore() }
-        .onChange(of: Self.signature(draft)) { _, _ in
-            saveError = nil
-            if loaded { store.setSettingsDraft(draft) }
-        }
-        .onChange(of: store.writeNamespace) { _, namespace in
-            editedNamespace = namespace; loaded = false; customRanks = []; saveError = nil; syncFromStore()
-        }
-        #if os(macOS)
-        .sheet(isPresented: $router.showPairing) { MacPairingSheet() }
-        #endif
-        .confirmationDialog("이 기기에서 나갈까요?", isPresented: $confirmLeave, titleVisibility: .visible) {
-            Button("나가기", role: .destructive) { leave() }
-            Button("취소", role: .cancel) {}
-        } message: {
-            Text(leaveMessage)
+    }
+
+    /// Read-only and conflict notices, at the top of every part.
+    @ViewBuilder private var notices: some View {
+        if store.bootstrap != nil {
+            if let lockNotice {
+                InlineNotice(tone: store.isDemo ? .accent : .attention, icon: store.isDemo ? "eye" : "wifi.slash", title: lockNotice.title, detail: lockNotice.detail)
+            }
+            if store.settingsConflict != nil {
+                VStack(alignment: .leading, spacing: 8) {
+                    InlineNotice(title: "다른 기기에서 설정이 바뀌었습니다", detail: "적은 내용은 남아 있습니다. 새 설정을 확인한 뒤 저장해 주세요.")
+                    HStack {
+                        Button("새 설정 불러오기") { revert() }.ceSecondaryButton()
+                        Button("내 변경 다시 검토") { reviewChanges() }.ceSecondaryButton()
+                    }.disabled(saving)
+                }
+            }
         }
     }
 
-    // MARK: 실행 환경
+    @ViewBuilder private func sectionContent(_ item: SettingsSection) -> some View {
+        if store.bootstrap == nil && item != .connection {
+            VStack(spacing: 8) {
+                Image(systemName: "wifi.slash").font(.system(size: 22)).foregroundStyle(CE.ink3)
+                Text("서버에 연결하면 볼 수 있습니다").font(CEFont.rowTitle).foregroundStyle(CE.ink2)
+                Text(isMac ? "메인 창에서 서버에 연결하세요." : "서버에 연결하면 설정을 볼 수 있습니다.")
+                    .font(CEFont.meta).foregroundStyle(CE.ink3).multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 48)
+        } else {
+            switch item {
+            case .general: generalSection
+            case .ai: aiSection
+            case .notifications: notificationsSection
+            case .connection: connectionSection
+            }
+        }
+    }
 
-    private var runtimePanel: some View {
+    // MARK: 일반
+
+    private var permissionChoice: PermissionChoice {
+        Self.permissionChoices.first { $0.id == draft.permissionMode }
+            ?? PermissionChoice(id: draft.permissionMode, title: draft.permissionMode, detail: "")
+    }
+
+    private var generalSection: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsGroup("운영", footnote: "세션은 샌드박스 없이 실행됩니다. 권한은 새 세션부터 적용됩니다.") {
+                SettingsRow("권한", hint: permissionChoice.detail, stacksOnPhone: true) {
+                    SettingsSegments(options: Self.permissionChoices.map { SettingsSegments.Option(id: $0.id, title: $0.title) },
+                                     selection: draft.permissionMode, label: "권한") { draft.permissionMode = $0 }
+                }
+                RowDivider(inset: 0)
+                SettingsRow("동시 실행", hint: "넘치면 차례를 기다립니다", hintBelowOnPhone: true) {
+                    numberControl("동시 실행", unit: "개", value: $draft.maxConcurrentTurns, range: 1...64)
+                }
+                RowDivider(inset: 0)
+                SettingsRow("팀장 수 경보", hint: "넘으면 총괄에게 잠재울 후보를 알립니다", hintBelowOnPhone: true) {
+                    numberControl("팀장 수 경보", unit: "명", value: $draft.maxAwakeWorkers, range: 1...256)
+                }
+                RowDivider(inset: 0)
+                SettingsRow("문맥 기준", hint: "팀 화면 표시용입니다. 압축은 터미널에서 /compact로 합니다.", hintBelowOnPhone: true) {
+                    numberControl("문맥 기준", unit: "%", value: $draft.compactAtPct, range: 1...100, step: 5)
+                }
+                RowDivider(inset: 0)
+                SettingsRow("판 정리 주기", hint: "총괄이 쉬고 바뀐 게 있을 때만 판을 맞춥니다", hintBelowOnPhone: true) { tidyMenu }
+            }
+            .disabled(!editable || saving)
+            SettingsProjectsGroup(editable: editable)
+        }
+    }
+
+    private var tidyMenu: some View {
+        let current = Int(draft.boardTidyHours.rounded())
+        return SetupMenu(tidyLabel(current), compact: true, label: "판 정리 주기") {
+            ForEach(tidyOptions, id: \.self) { hours in
+                Toggle(tidyLabel(hours), isOn: menuCheck(current == hours) { draft.boardTidyHours = Double(hours) })
+            }
+        }
+        .frame(width: isMac ? 112 : 120)
+    }
+
+    /// Fixed choices plus any custom value the server holds, so it is shown instead of silently replaced.
+    private var tidyOptions: [Int] {
+        Array(Set(Self.tidyChoices + [Int(base.boardTidyHours.rounded()), Int(draft.boardTidyHours.rounded())])).sorted()
+    }
+
+    private func tidyLabel(_ hours: Int) -> String { hours == 0 ? "끔" : hours == 24 ? "매일" : "\(hours)시간" }
+
+    /// A typed number with its unit and a stepper, at the right of a row.
+    private func numberControl(_ title: String, unit: String, value: Binding<Int>, range: ClosedRange<Int>, step: Int = 1) -> some View {
+        let clamped = Binding<Int>(get: { value.wrappedValue }, set: { value.wrappedValue = min(max($0, range.lowerBound), range.upperBound) })
+        return HStack(spacing: 6) {
+            TextField(title, value: clamped, format: .number)
+                .labelsHidden()
+                .font(SetupFont.input)
+                .monospacedDigit()
+                .multilineTextAlignment(.trailing)
+                #if os(iOS)
+                .keyboardType(.numberPad)
+                #endif
+                .onSubmit { Task { await save() } }
+                .frame(width: isMac ? 38 : 44)
+                .settingsWell()
+            Text(unit).font(SetupFont.input).foregroundStyle(CE.ink2)
+                .frame(minWidth: 14, alignment: .leading)
+            Stepper(title, value: clamped, in: range, step: step).labelsHidden()
+        }
+        .fixedSize()
+    }
+
+    // MARK: AI 모델
+
+    private var aiSection: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            runtimeGroup
+            ForEach(RankSettingsCLI.allCases, id: \.self) { cli in
+                rankGroup(cli).disabled(!editable || saving)
+            }
+        }
+    }
+
+    private var runtimeGroup: some View {
         let runtime = store.runtime
         let needsSetup = runtime != nil && (runtime?.core.available != true || runtime?.providers.values.contains { !$0.installed } == true)
-        return SetupPanel("실행 환경") {
-            if !store.isDemo {
-                Button { Task { await refresh(.runtime) } } label: {
-                    HStack(spacing: 6) {
-                        if busy == .runtime { ProgressView().controlSize(.small) }
-                        Text(busy == .runtime ? "확인하는 중" : "다시 확인")
-                    }
+        let footnote: String = store.isDemo ? "샘플에는 연결된 실행 환경이 없습니다."
+            : needsSetup ? "서버 컴퓨터의 IAMCEO 저장소에서 bun\u{00A0}run\u{00A0}setup:core 로 준비한 뒤 다시 확인하세요."
+            : "로그인은 세션을 열 때 확인합니다."
+        return VStack(alignment: .leading, spacing: 7) {
+            SettingsGroup("실행 환경", footnote: footnote, footnoteTone: needsSetup && !store.isDemo ? CE.attention : CE.ink3, accessory: {
+                if !store.isDemo {
+                    SettingsRefreshButton(label: "실행 환경 다시 확인", busy: busy == .runtime) { Task { await refresh(.runtime) } }
+                        .disabled(store.connectionStatus != .connected || store.isLoading || busy != nil)
                 }
-                .ceSecondaryButton()
-                .ceCompactControl()
-                .fixedSize()
-                .disabled(store.connectionStatus != .connected || store.isLoading || busy != nil)
-            }
-        } content: {
-            factGrid(columns: 3) {
-                FactCell("herdr-core") { stateValue(coreState(runtime)) }
+            }) {
+                SettingsRow("herdr-core", hint: runtime?.core.detail, monoHint: true) { DotValue(tone: coreState(runtime).tone, text: coreState(runtime).text) }
                     .help("모든 AI 직원은 herdr-core에서 실행됩니다. 직원마다 Claude Code 또는 Codex를 고릅니다.")
-                FactCell("Claude Code") { stateValue(providerState(runtime, "claude")) }
-                FactCell("Codex CLI") { stateValue(providerState(runtime, "codex")) }
+                RowDivider(inset: 0)
+                SettingsRow("Claude Code") { DotValue(tone: providerState(runtime, "claude").tone, text: providerState(runtime, "claude").text) }
+                RowDivider(inset: 0)
+                SettingsRow("Codex CLI") { DotValue(tone: providerState(runtime, "codex").tone, text: providerState(runtime, "codex").text) }
             }
-            if let detail = runtime?.core.detail, !detail.isEmpty {
-                Text(detail).font(CEFont.mono).foregroundStyle(CE.ink3).textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if store.isDemo {
-                hint("샘플에는 연결된 실행 환경이 없습니다.")
-            } else if needsSetup {
-                Text("서버 컴퓨터의 IAMCEO 저장소에서 `bun\u{00A0}run\u{00A0}setup:core`로 실행 환경을 준비한 뒤 다시 확인하세요.")
-                    .font(SetupFont.hint).foregroundStyle(CE.attention)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let runtimeError { SetupError("진단을 읽지 못했습니다. \(runtimeError)") }
+            if let runtimeError { SetupError("진단을 읽지 못했습니다. \(runtimeError)").padding(.horizontal, CESpace.l) }
         }
     }
 
     private struct RuntimeState { let tone: Tone; let text: String }
-
-    private func stateValue(_ state: RuntimeState) -> some View { DotValue(tone: state.tone, text: state.text) }
 
     private func coreState(_ runtime: RuntimeDiagnostics?) -> RuntimeState {
         guard let core = runtime?.core else { return RuntimeState(tone: .neutral, text: "확인 전") }
@@ -757,59 +1184,31 @@ struct SettingsView: View {
         return RuntimeState(tone: .attention, text: "설치 필요")
     }
 
-    /// The daemon only reports whether the CLI is installed; login is checked when a session starts.
+    /// The daemon only reports whether the CLI is installed; login is checked when a session starts (the footnote says so).
     private func providerState(_ runtime: RuntimeDiagnostics?, _ cli: String) -> RuntimeState {
         guard let provider = runtime?.providers[cli] else { return RuntimeState(tone: .neutral, text: "확인 전") }
-        return provider.installed ? RuntimeState(tone: .success, text: "설치됨 · 로그인은 실행 때 확인") : RuntimeState(tone: .attention, text: "설치 필요")
+        return provider.installed ? RuntimeState(tone: .success, text: "설치됨") : RuntimeState(tone: .attention, text: "설치 필요")
     }
 
-    // MARK: 권한
-
-    private var permissionPanel: some View {
-        SetupPanel("권한") {
+    private func rankGroup(_ cli: RankSettingsCLI) -> some View {
+        let rows = Self.rankRows.filter { $0.cli == cli }
+        let last = cli == RankSettingsCLI.allCases.last
+        return SettingsGroup(cli.title, footnote: last ? "직원별로 지정한 값이 먼저입니다. 바꾼 값은 세션을 다시 열 때 적용됩니다." : nil, accessory: {
             #if os(macOS)
-            HStack(alignment: .top, spacing: 8) { permissionTiles }
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Text("모델").padding(.leading, 10).frame(width: Self.modelWidth, alignment: .leading)
+                Text("effort").padding(.leading, 10).frame(width: Self.effortWidth, alignment: .leading)
+            }
+            .font(SetupFont.hint).foregroundStyle(CE.ink3)
+            .accessibilityHidden(true)
             #else
-            VStack(spacing: 8) { permissionTiles }
+            Text("모델 · effort").font(SetupFont.hint).foregroundStyle(CE.ink3).accessibilityHidden(true)
             #endif
-            hint("세션은 이 Mac 사용자 권한으로 실행되며 샌드박스가 아닙니다. 새로 여는 세션부터 적용됩니다.")
-        }
-    }
-
-    private var permissionTiles: some View {
-        ForEach(Self.permissionChoices) { choice in
-            ChoiceTile(title: choice.title, detail: choice.detail, badge: choice.badge, selected: draft.permissionMode == choice.id) {
-                draft.permissionMode = choice.id
+        }) {
+            ForEach(Array(rows.enumerated()), id: \.element.id) { index, rank in
+                if index > 0 { RowDivider(inset: 0) }
+                rankRow(rank)
             }
-        }
-    }
-
-    // MARK: 직급별 모델·effort
-
-    private var rankPanel: some View {
-        SetupPanel("직급별 모델·effort") {
-            ForEach(RankSettingsCLI.allCases, id: \.self) { cli in
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(cli.title).font(SetupFont.choice).foregroundStyle(CE.ink)
-                        .padding(.bottom, 8)
-                    #if os(macOS)
-                    HStack(spacing: 10) {
-                        Text("직급").frame(width: 150, alignment: .leading)
-                        Text("모델").frame(maxWidth: .infinity, alignment: .leading)
-                        Text("effort").frame(width: 150, alignment: .leading)
-                    }
-                    .font(SetupFont.label).foregroundStyle(CE.ink3)
-                    .padding(.bottom, 4)
-                    .accessibilityHidden(true)
-                    #endif
-                    ForEach(Array(Self.rankRows.filter { $0.cli == cli }.enumerated()), id: \.element.id) { index, rank in
-                        if index > 0 { RowDivider(inset: 0) }
-                        rankRow(rank).padding(.vertical, isMac ? 8 : 10)
-                    }
-                }
-            }
-            hint("직원별로 지정한 값이 먼저입니다. 바꾼 값은 세션을 다시 열 때 적용됩니다.")
         }
     }
 
@@ -817,33 +1216,41 @@ struct SettingsView: View {
         let overrides = rank.cli == .claude && rank.key != "staff" ? (store.bootstrap?.rankOverrides[rank.key] ?? 0) : 0
         let custom = isCustom(rank)
         let invalid = modelError(for: rank)
+        let scope = overrides > 0 ? "\(rank.scope) · 직원별 지정 \(overrides)명" : rank.scope
         #if os(macOS)
-        return HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(rank.title).font(SetupFont.choice).foregroundStyle(CE.ink)
-                Text(rank.scope).font(SetupFont.hint).foregroundStyle(CE.ink2)
-                if overrides > 0 { Text("직원별 지정 \(overrides)명").font(SetupFont.hint).foregroundStyle(CE.ink3) }
+        return HStack(alignment: custom || invalid != nil ? .top : .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(rank.title).font(SetupFont.row).foregroundStyle(CE.ink)
+                Text(scope).font(SetupFont.hint).foregroundStyle(CE.ink3)
             }
-            .frame(width: 150, alignment: .leading)
-            .frame(minHeight: SetupMetrics.inputHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
             VStack(alignment: .leading, spacing: 6) {
-                modelMenu(rank)
+                HStack(spacing: 8) {
+                    modelMenu(rank).frame(width: Self.modelWidth)
+                    Group {
+                        if rank.showsEffort { effortMenu(rank) }
+                        else {
+                            Text("CLI 기본").font(SetupFont.input).foregroundStyle(CE.ink3)
+                                .padding(.leading, 10).frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .frame(width: Self.effortWidth)
+                }
                 if custom { customModelField(rank) }
-                if let invalid { Text(invalid).font(SetupFont.hint).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true) }
+                if let invalid {
+                    Text(invalid).font(SetupFont.hint).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true)
+                }
             }
-            .frame(maxWidth: .infinity)
-            Group {
-                if rank.showsEffort { effortMenu(rank) }
-                else { Text("CLI 기본").font(SetupFont.hint).foregroundStyle(CE.ink3).frame(maxWidth: .infinity, alignment: .leading) }
-            }.frame(width: 150)
+            .frame(width: Self.modelWidth + 8 + Self.effortWidth)
         }
+        .padding(.vertical, 9)
+        .frame(minHeight: 46)
         #else
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(rank.title).font(SetupFont.choice).foregroundStyle(CE.ink)
-                Text(rank.scope).font(SetupFont.hint).foregroundStyle(CE.ink2)
-                Spacer(minLength: 6)
-                if overrides > 0 { Text("직원별 지정 \(overrides)명").font(SetupFont.hint).foregroundStyle(CE.ink3) }
+                Text(rank.title).font(SetupFont.row).foregroundStyle(CE.ink)
+                Text(scope).font(SetupFont.hint).foregroundStyle(CE.ink3)
+                Spacer(minLength: 0)
             }
             HStack(spacing: 8) {
                 modelMenu(rank)
@@ -852,6 +1259,7 @@ struct SettingsView: View {
             if custom { customModelField(rank) }
             if let invalid { Text(invalid).font(SetupFont.hint).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true) }
         }
+        .padding(.vertical, 12)
         #endif
     }
 
@@ -865,8 +1273,8 @@ struct SettingsView: View {
     private func modelMenu(_ rank: RankRow) -> some View {
         let value = model(of: rank)
         let custom = isCustom(rank)
-        let defaultLabel = rank.cli == .codex ? "기본(CLI 설정)" : "CLI 기본"
-        return SetupMenu(custom ? "직접 입력" : (value.isEmpty ? defaultLabel : value), mono: !custom && !value.isEmpty, label: "\(rank.title) 모델") {
+        let defaultLabel = "CLI 기본"
+        return SetupMenu(custom ? "직접 입력" : (value.isEmpty ? defaultLabel : value), mono: !custom && !value.isEmpty, compact: true, label: "\(rank.title) 모델") {
             Toggle(defaultLabel, isOn: menuCheck(!custom && value.isEmpty) { customRanks.remove(rank.id); setModel(nil, for: rank) })
             Divider()
             ForEach(rank.cli.models, id: \.self) { name in
@@ -890,14 +1298,14 @@ struct SettingsView: View {
             .textInputAutocapitalization(.never)
             #endif
             .onSubmit { Task { await save() } }
-            .setupInput()
+            .settingsWell()
     }
 
     private func effortMenu(_ rank: RankRow) -> some View {
         let current = draft.rankConfig(rank.key, cli: rank.cli)?.effort
         let options = rank.cli.efforts + (current.map { rank.cli.efforts.contains($0) ? [] : [$0] } ?? [])
-        let defaultLabel = rank.cli == .codex ? "기본(CLI 설정)" : "기본"
-        return SetupMenu(current ?? defaultLabel, label: "\(rank.title) effort") {
+        let defaultLabel = "CLI 기본"
+        return SetupMenu(current ?? defaultLabel, compact: true, label: "\(rank.title) effort") {
             Toggle(defaultLabel, isOn: menuCheck(current == nil) { setEffort(nil, for: rank) })
             Divider()
             ForEach(options, id: \.self) { effort in
@@ -923,138 +1331,125 @@ struct SettingsView: View {
         RankSettingsEditing.modelError(model(of: rank), custom: customRanks.contains(rank.id), title: rank.title)
     }
 
-    // MARK: 운영
+    // MARK: 알림
 
-    private var operationPanel: some View {
-        SetupPanel("운영") {
-            factGrid(columns: 2, spacing: 14) {
-                numberField("동시 턴", unit: "개", hint: "넘치면 차례를 기다립니다", value: $draft.maxConcurrentTurns, range: 1...64)
-                numberField("팀장 상한", unit: "명", hint: "넘으면 총괄에게 잠재울 후보를 알립니다", value: $draft.maxAwakeWorkers, range: 1...256)
-                numberField("문맥 표시 기준", unit: "%", hint: "팀 화면의 문맥 표시 기준입니다. 자동 압축은 없으니 터미널에서 /compact를 쓰세요.", value: $draft.compactAtPct, range: 1...100, step: 5)
-                SetupField("판 정리 주기", hint: "총괄이 쉬는 중이고 바뀐 게 있을 때만 판을 지금 상태로 맞춥니다") {
-                    let current = Int(draft.boardTidyHours.rounded())
-                    SetupMenu(tidyLabel(current), label: "판 정리 주기") {
-                        ForEach(tidyOptions, id: \.self) { hours in
-                            Toggle(tidyLabel(hours), isOn: menuCheck(current == hours) { draft.boardTidyHours = Double(hours) })
-                        }
-                    }
-                }
-            }
-            notifyCheck
+    /// The iPhone hears about its own notifications first; the Mac about its own banner first.
+    private var notificationsSection: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            #if os(iOS)
+            PushSettingsView()
+            macNotifyGroup
+            #else
+            macNotifyGroup
+            PushSettingsView()
+            #endif
         }
     }
 
-    /// Web `.su-check`: the toggle and its sentence in one quiet tile.
-    private var notifyCheck: some View {
-        let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
-        return Toggle(isOn: $draft.notifyMac) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("맥 알림").font(SetupFont.choice).foregroundStyle(CE.ink)
-                Text("결재나 내 할 일이 올라오면 서버 컴퓨터(맥)에 알림을 띄웁니다")
-                    .font(SetupFont.hint).foregroundStyle(CE.ink2)
-                    .fixedSize(horizontal: false, vertical: true)
+    private var macNotifyGroup: some View {
+        SettingsGroup {
+            SettingsRow("Mac 알림", hint: "결재나 할 일이 오면 서버 컴퓨터에 알림을 띄웁니다") {
+                Toggle("Mac 알림", isOn: $draft.notifyMac).labelsHidden().settingsSwitch()
             }
         }
-        #if os(macOS)
-        .toggleStyle(.checkbox)
+        .disabled(!editable || saving)
+    }
+
+    // MARK: 연결
+
+    private var connectionSection: some View {
+        let summary = connectionSummary()
+        let online = store.bootstrap != nil && (!store.isDemo || Self.connectionSample)
+        let notConnected: String? = store.bootstrap == nil && !store.isDemo
+            ? (isMac ? "메인 창에서 서버에 연결하세요." : "서버에 연결하면 설정을 볼 수 있습니다.") : nil
+        return VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 7) {
+                SettingsGroup("접속", footnote: notConnected) {
+                    SettingsRow("상태", hint: store.lastHeartbeatAt.map { "마지막 연결 신호 \(koTime($0, seconds: true))" }) {
+                        DotValue(tone: summary.tone, text: summary.text)
+                    }
+                    if online {
+                        RowDivider(inset: 0)
+                        SettingsRow("동기화", hint: store.lastSuccessfulSyncAt.map { "마지막 데이터 확인 \(koDateTime($0))" }) {
+                            Button { Task { await refresh(.sync) } } label: {
+                                HStack(spacing: 6) {
+                                    if busy == .sync { ProgressView().controlSize(.small) }
+                                    Text("지금 동기화")
+                                }
+                            }
+                            .ceSecondaryButton()
+                            .ceCompactControl()
+                            .fixedSize()
+                            .disabled(store.connectionStatus != .connected || store.isLoading || busy != nil)
+                        }
+                        RowDivider(inset: 0)
+                        SettingsRow("서버 주소", stacksOnPhone: true) { addressText(store.endpoint) }
+                        if let urls = store.bootstrap?.urls, !urls.isEmpty {
+                            RowDivider(inset: 0)
+                            SettingsRow("들어올 주소", stacksOnPhone: true) {
+                                VStack(alignment: isMac ? .trailing : .leading, spacing: 3) {
+                                    ForEach(urls, id: \.self) { addressText($0) }
+                                }
+                            }
+                        }
+                        if let version = store.bootstrap?.version, !version.isEmpty {
+                            RowDivider(inset: 0)
+                            SettingsRow("버전") { Text(version).font(CEFont.mono).foregroundStyle(CE.ink2) }
+                        }
+                    } else if let date = store.lastSuccessfulSyncAt {
+                        RowDivider(inset: 0)
+                        SettingsRow("마지막 데이터 확인") { Text(koDateTime(date)).font(CEFont.secondary).foregroundStyle(CE.ink2) }
+                    }
+                }
+                if let syncError { SetupError(syncError).padding(.horizontal, CESpace.l) }
+            }
+            #if os(macOS)
+            if !store.isDemo || Self.connectionSample {
+                SettingsGroup {
+                    SettingsRow("iPhone 연결", hint: "iPhone으로 QR을 찍으면 Tailscale로 연결됩니다") {
+                        Button { router.showPairing = true } label: { Label("QR 보기", systemImage: "qrcode") }
+                            .ceSecondaryButton()
+                            .ceCompactControl()
+                            .fixedSize()
+                            .disabled(store.connectionStatus != .connected)
+                    }
+                }
+            }
+            #endif
+            if canLeave || Self.connectionSample {
+                SettingsGroup {
+                    SettingsRow("이 기기에서 나가기", hint: "키체인에 저장한 접속 코드를 지웁니다") {
+                        Button { confirmLeave = true } label: { Text("나가기").foregroundStyle(store.isDemo ? CE.ink3 : CE.danger) }
+                            .ceSecondaryButton()
+                            .ceCompactControl()
+                            .fixedSize()
+                            .disabled(store.isDemo)
+                    }
+                }
+            }
+        }
+        .confirmationDialog("이 기기에서 나갈까요?", isPresented: $confirmLeave, titleVisibility: .visible) {
+            Button("나가기", role: .destructive) { leave() }
+            Button("취소", role: .cancel) {}
+        } message: {
+            Text(leaveMessage)
+        }
+    }
+
+    private func addressText(_ value: String) -> some View {
+        Text(value).font(CEFont.mono).foregroundStyle(CE.ink2)
+            .textSelection(.enabled)
+            .lineLimit(1).truncationMode(.middle)
+            .frame(maxWidth: isMac ? 320 : .infinity, alignment: isMac ? .trailing : .leading)
+    }
+
+    /// Review hook (DEBUG, sample only): `--connection-sample` lays out the rows a connected Mac shows (all disabled).
+    private static var connectionSample: Bool {
+        #if DEBUG
+        return LaunchOptions.demo && LaunchOptions.arguments.contains("--connection-sample")
+        #else
+        return false
         #endif
-        .tint(CE.violet)
-        .padding(.horizontal, 13).padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.04), in: shape)
-        .overlay { shape.strokeBorder(Color.white.opacity(0.1)) }
-    }
-
-    /// Fixed choices plus any custom value the server holds, so it is shown instead of silently replaced.
-    private var tidyOptions: [Int] {
-        Array(Set(Self.tidyChoices + [Int(base.boardTidyHours.rounded()), Int(draft.boardTidyHours.rounded())])).sorted()
-    }
-
-    private func tidyLabel(_ hours: Int) -> String { hours == 0 ? "끔" : hours == 24 ? "매일" : "\(hours)시간" }
-
-    private func numberField(_ title: String, unit: String, hint: String, value: Binding<Int>, range: ClosedRange<Int>, step: Int = 1) -> some View {
-        let clamped = Binding<Int>(get: { value.wrappedValue }, set: { value.wrappedValue = min(max($0, range.lowerBound), range.upperBound) })
-        return SetupField(title, hint: hint) {
-            HStack(spacing: 8) {
-                TextField(title, value: clamped, format: .number)
-                    .labelsHidden()
-                    .font(SetupFont.input)
-                    .monospacedDigit()
-                    #if os(iOS)
-                    .keyboardType(.numberPad)
-                    #endif
-                    .onSubmit { Task { await save() } }
-                    .setupInput()
-                Text(unit).font(SetupFont.input).foregroundStyle(CE.ink2)
-                Stepper(title, value: clamped, in: range, step: step).labelsHidden()
-            }
-        }
-    }
-
-    // MARK: 접속
-
-    private var connectionPanel: some View {
-        SetupPanel("접속") {
-            factGrid(columns: 2) {
-                let summary = connectionSummary()
-                FactCell("상태") { DotValue(tone: summary.tone, text: summary.text) }
-                if let date = store.lastSuccessfulSyncAt {
-                    FactCell("마지막 데이터 확인") { Text(koDateTime(date)) }
-                }
-                if let date = store.lastHeartbeatAt {
-                    FactCell("마지막 연결 신호") { Text(koTime(date, seconds: true)) }
-                }
-                if store.bootstrap != nil, !store.isDemo {
-                    FactCell("서버 주소") {
-                        Text(store.endpoint).font(CEFont.mono).textSelection(.enabled).lineLimit(2)
-                    }
-                    if let urls = store.bootstrap?.urls, !urls.isEmpty {
-                        FactCell("들어올 주소") {
-                            VStack(alignment: isMac ? .leading : .trailing, spacing: 2) {
-                                ForEach(urls, id: \.self) { Text($0).font(CEFont.mono).textSelection(.enabled).lineLimit(1).truncationMode(.middle) }
-                            }
-                        }
-                    }
-                    if let version = store.bootstrap?.version, !version.isEmpty {
-                        FactCell("버전") { Text(version).font(CEFont.mono) }
-                    }
-                }
-            }
-            if store.bootstrap == nil, !store.isDemo {
-                hint(isMac ? "메인 창에서 서버에 연결하세요." : "서버에 연결하면 설정을 볼 수 있습니다.")
-            }
-            if !store.isDemo {
-                hint("접속 코드는 이 기기의 키체인에 저장됩니다. iPhone은 'iPhone 연결'의 QR을 찍으면 Tailscale로 연결됩니다.")
-                #if os(macOS)
-                Button { router.showPairing = true } label: { Label("iPhone 연결", systemImage: "qrcode") }
-                    .ceSecondaryButton()
-                    .ceCompactControl()
-                    .disabled(store.connectionStatus != .connected)
-                #endif
-                HStack(spacing: CESpace.s) {
-                    if store.bootstrap != nil {
-                        Button { Task { await refresh(.sync) } } label: {
-                            HStack(spacing: 6) {
-                                if busy == .sync { ProgressView().controlSize(.small) }
-                                Text("지금 동기화")
-                            }
-                        }
-                        .ceSecondaryButton()
-                        .ceCompactControl()
-                        .disabled(store.connectionStatus != .connected || store.isLoading || busy != nil)
-                    }
-                    Spacer(minLength: CESpace.s)
-                    if canLeave {
-                        Button { confirmLeave = true } label: {
-                            Text("이 기기에서 나가기").foregroundStyle(CE.danger)
-                        }
-                        .ceSecondaryButton()
-                        .ceCompactControl()
-                    }
-                }
-                if let syncError { SetupError(syncError) }
-            }
-        }
     }
 
     private var canLeave: Bool { !store.isDemo && (store.bootstrap != nil || !store.accessCode.isEmpty || drafts.pendingCount > 0) }
@@ -1076,28 +1471,20 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: Layout helpers
-
-    /// Mac: a grid of `columns`; iPhone: one column.
-    private func factGrid<Cells: View>(columns: Int, spacing: CGFloat = 12, @ViewBuilder _ cells: () -> Cells) -> some View {
-        let count = isMac ? columns : 1
-        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading), count: count), alignment: .leading, spacing: spacing) {
-            cells()
-        }
-    }
-
-    private func hint(_ text: String) -> some View {
-        Text(text).font(SetupFont.hint).foregroundStyle(CE.ink3).fixedSize(horizontal: false, vertical: true)
-    }
-
     // MARK: Save bar (sticky glass, only when there is something to say)
+
+    private var saveBarHost: some View {
+        VStack(spacing: 0) { saveBar }
+            .animation(.snappy(duration: 0.24), value: isDirty || savedNotice)
+    }
 
     @ViewBuilder private var saveBar: some View {
         if isDirty || savedNotice {
             HStack(spacing: 10) {
                 if isDirty {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("저장하지 않은 변경이 있습니다").font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
+                        // iPhone: the short form fits beside 되돌리기 and 저장.
+                        Text(isMac ? "저장하지 않은 변경이 있습니다" : "저장하지 않은 변경").font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
                         if let problem = saveError ?? firstModelError {
                             Text(problem).font(CEFont.meta).foregroundStyle(CE.danger).lineLimit(2)
                         } else if let lockNotice {
@@ -1130,7 +1517,7 @@ struct SettingsView: View {
             .frame(minHeight: 52)
             .glassChrome(RoundedRectangle(cornerRadius: CERadius.plate, style: .continuous), tint: Color(red: 16 / 255, green: 11 / 255, blue: 38 / 255).opacity(0.86))
             .frame(maxWidth: 880)
-            .padding(.horizontal, isMac ? 20 : 16).padding(.top, CESpace.s).padding(.bottom, CESpace.m)
+            .padding(.horizontal, isMac ? 24 : 16).padding(.top, CESpace.s).padding(.bottom, CESpace.m)
             .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
@@ -1235,35 +1622,95 @@ struct SettingsView: View {
     }
 }
 
+#if os(macOS)
+/// The settings sidebar item: the main window rail's row (hover tint, violet gradient when chosen).
+private struct SettingsNavStyle: ButtonStyle {
+    var selected = false
+    func makeBody(configuration: Configuration) -> some View { NavBody(configuration: configuration, selected: selected) }
+    private struct NavBody: View {
+        let configuration: ButtonStyleConfiguration
+        let selected: Bool
+        @State private var hovering = false
+        var body: some View {
+            let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
+            configuration.label
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(shape)
+                .background {
+                    if selected {
+                        shape.fill(LinearGradient(colors: [CE.violet.opacity(0.32), CE.violet.opacity(0.2)], startPoint: .top, endPoint: .bottom))
+                            .overlay {
+                                shape.strokeBorder(LinearGradient(colors: [Color.white.opacity(0.32), Color.white.opacity(0.05)], startPoint: .top, endPoint: .bottom), lineWidth: 1)
+                            }
+                    } else if configuration.isPressed {
+                        shape.fill(Color.white.opacity(0.09))
+                    } else if hovering {
+                        shape.fill(Color.white.opacity(0.06))
+                    }
+                }
+                .onHover { hovering = $0 }
+        }
+    }
+}
+#endif
+
 // MARK: - 프로젝트 (rename, archive, restore)
 
 /// Common management sheets keep settings, the rail and the phone switcher on one mutation path.
-private struct SettingsProjectsPanel: View {
+private struct SettingsProjectsGroup: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
     let editable: Bool
     @State private var showArchive = false
 
     var body: some View {
-        SetupPanel("프로젝트") {
-            ForEach(store.projects) { project in
-                HStack(spacing: CESpace.s) {
-                    VStack(alignment: .leading, spacing: CESpace.xs) {
-                        Text(project.name).font(CEFont.rowTitle).foregroundStyle(CE.ink)
-                        Text(project.cwd).font(CEFont.mono).foregroundStyle(CE.ink3).lineLimit(1).truncationMode(.middle)
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                    Menu("관리") {
-                        Button("이름 바꾸기…") { router.manageProject(id: project.id, mode: .rename) }
-                        Button("폴더 고치기…") { router.manageProject(id: project.id, mode: .settings) }
-                        if !project.isHq && project.id != "hq" {
-                            Button("보관…") { router.manageProject(id: project.id, mode: .archive) }
-                        }
-                    }.disabled(!editable)
-                }.padding(.vertical, CESpace.xs)
+        SettingsGroup("프로젝트", accessory: {
+            Button { showArchive = true } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "archivebox").font(.system(size: 10.5, weight: .semibold))
+                    Text("보관함")
+                }
+                .font(CEFont.meta.weight(.medium)).foregroundStyle(CE.accent)
+                .frame(minHeight: isMac ? nil : 44)
+                .contentShape(Rectangle())
             }
-            Button { showArchive = true } label: { Label("보관함", systemImage: "archivebox") }.ceSecondaryButton()
+            .buttonStyle(.plain)
+            .help("보관한 프로젝트 보기")
+        }) {
+            ForEach(Array(store.projects.enumerated()), id: \.element.id) { index, project in
+                if index > 0 { RowDivider(inset: 0) }
+                row(project)
+            }
         }
         .sheet(isPresented: $showArchive) { ArchiveLibraryView() }
+    }
+
+    private func row(_ project: ProjectSummary) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(project.name).font(SetupFont.row).foregroundStyle(CE.ink).lineLimit(1)
+                Text(project.cwd).font(CEFont.mono).foregroundStyle(CE.ink3).lineLimit(1).truncationMode(.middle)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Menu {
+                Button("이름 바꾸기…") { router.manageProject(id: project.id, mode: .rename) }
+                Button("폴더 고치기…") { router.manageProject(id: project.id, mode: .settings) }
+                if !project.isHq && project.id != "hq" {
+                    Button("보관…") { router.manageProject(id: project.id, mode: .archive) }
+                }
+            } label: {
+                Image(systemName: "ellipsis").font(.system(size: 13, weight: .semibold)).foregroundStyle(editable ? CE.ink2 : CE.ink3)
+                    .frame(width: 28, height: 28)
+                    .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+            .disabled(!editable)
+            .help("관리")
+            .accessibilityLabel("\(project.name) 관리")
+        }
+        .padding(.vertical, 8)
+        .frame(minHeight: 46)
     }
 }
 
@@ -1300,45 +1747,37 @@ struct NewProjectView: View {
     }
 
     var body: some View {
+        CESheet("새 프로젝트", subtitle: "서버 컴퓨터의 폴더에서 총괄 세션을 바로 엽니다.", icon: "folder.badge.plus", width: 520,
+                onClose: { if !working { dismiss() } }) {
+            form
+        } footer: {
+            Button(partial == nil ? "취소" : "닫기") { dismiss() }
+                .ceSecondaryButton()
+                .disabled(working)
+            if partial != nil {
+                Button { Task { await retryConductor() } } label: { busyLabel(working ? "띄우는 중" : "다시 시도") }
+                    .ceProminentButton()
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(working || !store.canWrite)
+            } else {
+                Button { Task { await create() } } label: { busyLabel(working ? "만드는 중" : "만들기") }
+                    .ceProminentButton()
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canCreate)
+            }
+        }
+        #if os(iOS)
+        // Flows through the environment to CESheet's ScrollView: a swipe puts the keyboard away from the 목표 field.
+        .scrollDismissesKeyboard(.interactively)
+        #endif
+        .interactiveDismissDisabled(working)
         #if os(macOS)
-        VStack(spacing: 0) {
-            Text("새 프로젝트").font(SetupFont.sheetTitle).foregroundStyle(CE.ink).lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 22).padding(.top, 20).padding(.bottom, 4)
-                .accessibilityAddTraits(.isHeader)
-            ScrollView {
-                form.padding(.horizontal, 22).padding(.vertical, 12)
-            }
-            .scrollBounceBehavior(.basedOnSize)
-            Rectangle().fill(CE.line).frame(height: 1)
-            footer.padding(.horizontal, 22).padding(.vertical, 14)
-        }
-        .background { AmbientBackground() }
-        .ceSheetSize(width: 520, height: 600)
-        .interactiveDismissDisabled(working)
         .onAppear { if store.canWrite { focus = .name } }
-        #else
-        NavigationStack {
-            ScrollView {
-                form.padding(16)
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .background { AmbientBackground() }
-            .navigationTitle("새 프로젝트")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(partial == nil ? "취소" : "닫기") { dismiss() }.disabled(working)
-                }
-                ToolbarItem(placement: .confirmationAction) { confirmButton }
-            }
-        }
-        .interactiveDismissDisabled(working)
         #endif
     }
 
     private var form: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 16) {
             if let lockNotice {
                 InlineNotice(tone: store.isDemo ? .accent : .attention, icon: store.isDemo ? "eye" : "wifi.slash", title: lockNotice.title, detail: lockNotice.detail)
             }
@@ -1363,7 +1802,7 @@ struct NewProjectView: View {
                         .onSubmit { Task { await create() } }
                         .setupInput(active: focus == .cwd)
                 }
-                SetupField("목표", hint: "적으면 지금 상황에 남기고 총괄에게 프로젝트 목표로 전합니다.") {
+                SetupField("목표", hint: "지금 상황에 남기고 총괄에게 프로젝트 목표로 전합니다.") {
                     TextField("목표", text: $goal, prompt: Text("선택 · 이루려는 결과와 끝났다고 볼 기준"), axis: .vertical)
                         .labelsHidden()
                         .font(SetupFont.input)
@@ -1371,19 +1810,16 @@ struct NewProjectView: View {
                         .focused($focus, equals: .goal)
                         .setupInput(active: focus == .goal)
                 }
-                SetupField("총괄 AI CLI", hint: "만들면 이 CLI로 총괄 세션을 바로 엽니다.") {
-                    SetupMenu(providerLabel(provider), label: "총괄 AI CLI") {
-                        ForEach(["claude", "codex"], id: \.self) { cli in
-                            Toggle(providerLabel(cli), isOn: menuCheck(provider == cli) { provider = cli })
-                        }
-                    }
+                SetupField("총괄 AI CLI") {
+                    SettingsSegments(options: ["claude", "codex"].map { SettingsSegments.Option(id: $0, title: providerLabel($0)) },
+                                     selection: provider, label: "총괄 AI CLI") { provider = $0 }
                 }
             }
             .disabled(partial != nil || working)
             if let core = coreUnavailable, partial == nil {
                 InlineNotice(tone: .attention, icon: "exclamationmark.triangle",
                              title: core.installed ? "herdr-core를 쓸 수 없습니다" : "herdr-core가 설치되지 않았습니다",
-                             detail: [core.detail, "지금 만들면 프로젝트만 생기고 총괄은 뜨지 않을 수 있습니다. 설정의 실행 환경을 확인하세요."].compactMap { $0 }.joined(separator: " "))
+                             detail: [core.detail, "지금 만들면 프로젝트만 생기고 총괄은 뜨지 않을 수 있습니다. 설정 › AI 모델의 실행 환경을 확인하세요."].compactMap { $0 }.joined(separator: " "))
             }
             if let partial {
                 InlineNotice(tone: .danger, icon: "exclamationmark.triangle", title: "프로젝트는 만들었지만 총괄을 띄우지 못했습니다",
@@ -1394,49 +1830,10 @@ struct NewProjectView: View {
         }
     }
 
-    #if os(macOS)
-    /// Web `.form__actions`: quiet cancel, primary create, bottom right.
-    private var footer: some View {
-        HStack(spacing: 8) {
-            Spacer(minLength: 0)
-            Button(partial == nil ? "취소" : "닫기") { dismiss() }
-                .ceSecondaryButton()
-                .keyboardShortcut(.cancelAction)
-                .disabled(working)
-            if partial != nil {
-                Button { Task { await retryConductor() } } label: { busyLabel(working ? "띄우는 중" : "다시 시도") }
-                    .ceProminentButton()
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(working || !store.canWrite)
-            } else {
-                Button { Task { await create() } } label: { busyLabel(working ? "만드는 중" : "만들기") }
-                    .ceProminentButton()
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!canCreate)
-            }
-        }
-    }
-    #endif
-
     private func busyLabel(_ text: String) -> some View {
         HStack(spacing: 6) {
             if working { ProgressView().controlSize(.small).tint(.white) }
             Text(text)
-        }
-    }
-
-    @ViewBuilder private var confirmButton: some View {
-        if working {
-            Button {} label: {
-                HStack(spacing: 6) { ProgressView().controlSize(.small); Text(partial == nil ? "만드는 중" : "띄우는 중") }
-            }
-            .disabled(true)
-        } else if partial != nil {
-            Button("다시 시도") { Task { await retryConductor() } }
-                .disabled(!store.canWrite)
-        } else {
-            Button("만들기") { Task { await create() } }
-                .disabled(!canCreate)
         }
     }
 

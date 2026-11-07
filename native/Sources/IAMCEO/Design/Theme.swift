@@ -259,7 +259,8 @@ extension View {
 
     @ViewBuilder func ceSheetSize(width: CGFloat, height: CGFloat) -> some View {
         #if os(macOS)
-        self.frame(minWidth: 460, idealWidth: width, minHeight: 420, idealHeight: height)
+        // A Mac sheet opens at its minimum width, so the intended width is the minimum.
+        self.frame(minWidth: width, idealWidth: width, minHeight: min(420, height), idealHeight: height)
         #else
         self
         #endif

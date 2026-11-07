@@ -10,11 +10,7 @@ struct ArchiveLibraryView: View {
         CESheet("보관함", subtitle: "보관한 프로젝트는 읽기 전용으로 열립니다. 꺼내면 다시 일할 수 있습니다.", icon: "archivebox", width: 560) {
             VStack(alignment: .leading, spacing: CESpace.s) {
                 if store.isLoadingArchive && store.archivedProjects.isEmpty {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("보관함을 불러오는 중입니다").font(CEFont.secondary).foregroundStyle(CE.ink2)
-                    }
-                    .padding(.vertical, CESpace.s)
+                    EmptyTile(loading: true, title: "보관함을 불러오는 중입니다")
                 }
                 if let error = store.archiveError {
                     InlineNotice(tone: .danger, title: "보관함을 불러오지 못했습니다", detail: error,
@@ -31,16 +27,8 @@ struct ArchiveLibraryView: View {
 
     /// Centred quiet empty state: the sheet stays small instead of a tall empty window.
     private var emptyState: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "archivebox").font(.system(size: 22, weight: .regular)).foregroundStyle(CE.ink3)
-            Text("보관한 프로젝트가 없습니다").font(CEFont.rowTitle).foregroundStyle(CE.ink2)
-            Text("프로젝트 메뉴의 ‘보관…’으로 끝난 프로젝트를 여기로 옮길 수 있습니다.")
-                .font(CEFont.meta).foregroundStyle(CE.ink3).multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 28)
-        .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(CE.line, style: StrokeStyle(lineWidth: 1, dash: [4, 4])) }
+        EmptyTile(icon: "archivebox", title: "보관한 프로젝트가 없습니다",
+                  detail: "프로젝트 메뉴의 ‘보관…’으로 끝난 프로젝트를 여기로 옮길 수 있습니다.")
     }
 
     /// One archived project: name and folder open its read-only record; rename/restore sit at the right.
@@ -81,6 +69,62 @@ struct ArchiveLibraryView: View {
         .padding(.horizontal, 12).padding(.vertical, 10)
         .background(Color.white.opacity(0.04), in: shape)
         .overlay { shape.strokeBorder(CE.line) }
+    }
+}
+
+/// Centred quiet empty (or loading) state where content would be: a glyph or spinner, a title, one line and optional
+/// actions on a faint tile with a dashed rim. Used by the archive popup and by the 자료·결재함·홈 screens, always centred
+/// in its column so nothing sits stuck to the left of a wide area. `framed: false` drops the tile, for a note that sits
+/// in the middle of a card that is already a surface (the empty 자료 reader). Loading never draws the tile: the dashed
+/// rim means "nothing here", which a list that is still on its way is not.
+struct EmptyTile<Actions: View>: View {
+    var icon: String?
+    var loading: Bool
+    let title: String
+    var detail: String?
+    var framed: Bool
+    private let actions: Actions
+
+    init(icon: String? = nil, loading: Bool = false, title: String, detail: String? = nil, framed: Bool = true,
+         @ViewBuilder actions: () -> Actions) {
+        self.icon = icon; self.loading = loading; self.title = title; self.detail = detail; self.framed = framed
+        self.actions = actions()
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
+        let tile = framed && !loading
+        VStack(spacing: 8) {
+            if loading {
+                ProgressView().controlSize(.small).frame(height: 26)
+            } else if let icon {
+                Image(systemName: icon).font(.system(size: 22, weight: .regular)).foregroundStyle(CE.ink3)
+                    .frame(height: 26)
+                    .accessibilityHidden(true)
+            }
+            Text(title).font(loading ? CEFont.secondary : CEFont.rowTitle).foregroundStyle(CE.ink2)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            if let detail, !detail.isEmpty {
+                Text(detail).font(CEFont.meta).foregroundStyle(CE.ink3)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if Actions.self != EmptyView.self {
+                HStack(spacing: 8) { actions }.padding(.top, 6)
+            }
+        }
+        .padding(.horizontal, 24).padding(.vertical, 28)
+        .frame(maxWidth: .infinity)
+        .background(tile ? Color.white.opacity(0.03) : .clear, in: shape)
+        .overlay { if tile { shape.strokeBorder(CE.line, style: StrokeStyle(lineWidth: 1, dash: [4, 4])) } }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+extension EmptyTile where Actions == EmptyView {
+    init(icon: String? = nil, loading: Bool = false, title: String, detail: String? = nil, framed: Bool = true) {
+        self.init(icon: icon, loading: loading, title: title, detail: detail, framed: framed, actions: { EmptyView() })
     }
 }
 
@@ -129,7 +173,7 @@ struct ArchiveView: View {
                                 }
                             }
                         } else {
-                            if store.isLoading { ProgressView("기록을 불러오는 중") }
+                            if store.isLoading { EmptyTile(loading: true, title: "기록을 불러오는 중입니다") }
                             else {
                                 InlineNotice(title: "기록을 불러오지 못했습니다", actionTitle: "다시 확인", action: { Task { await store.refresh() } })
                             }
@@ -145,7 +189,7 @@ struct ArchiveView: View {
     }
 
     private func empty(_ title: String) -> some View {
-        CompactEmpty(icon: "archivebox", title: title, detail: "보관한 프로젝트는 읽기 전용입니다.")
+        EmptyTile(icon: "archivebox", title: title, detail: "보관한 프로젝트는 읽기 전용입니다.")
     }
     private func record(_ title: String, detail: String, status: String, result: String?) -> some View {
         Plate {

@@ -37,13 +37,9 @@ struct TeamView: View {
                 if let state = store.state {
                     sections(state)
                 } else if store.isLoading {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("팀을 불러오는 중입니다").font(CEFont.secondary).foregroundStyle(CE.ink2)
-                    }
-                    .padding(.vertical, CESpace.xl)
+                    EmptyTile(loading: true, title: "팀을 불러오는 중입니다")
                 } else {
-                    CompactEmpty(icon: "person.2", title: "팀을 불러오지 못했습니다", detail: "연결 상태를 확인한 뒤 다시 동기화하세요.")
+                    EmptyTile(icon: "person.2", title: "팀을 불러오지 못했습니다", detail: "연결 상태를 확인한 뒤 다시 동기화하세요.")
                 }
             }
             .frame(maxWidth: 880, alignment: .leading)
@@ -292,8 +288,9 @@ private struct TeamFilterChip: View {
 
 // MARK: - Member detail (Mac: glass drawer hosted by the shell · iPhone: pushed)
 //
-// One tone on both platforms: flat plates (no glass on glass, no dark wells), quiet ink3 labels, accent links like
-// Home's, and two button weights — the subtle-glass capsule for 지시 / 대화 and a quieter outline for the rest.
+// Top to bottom: who (name, state, one quiet meta line), what needs me (delivery, approval window, last error), what it
+// is doing now (last report, next, queue, decisions, context), what I can do (지시 first, the rest in "…"), the last few
+// lines of the room, then folded settings and activity. Flat plates (no glass on glass), quiet ink3 labels.
 
 struct MemberDetailView: View {
     @Environment(AppStore.self) private var store
@@ -322,6 +319,8 @@ struct MemberDetailView: View {
     @State private var confirmClose = false
     @State private var configOpen = false
     @State private var activityOpen = false
+    /// Shown after "터미널 명령 복사" (what the command does, and a warning for a running session).
+    @State private var copyNote: String?
 
     init(memberID: String, onClose: (() -> Void)? = nil) {
         self.memberID = memberID
@@ -352,6 +351,7 @@ struct MemberDetailView: View {
         .onChange(of: memberID) { _, _ in
             freshMember = nil; freshGeneration = nil; confirmFresh = false; confirmConfig = false
             running = nil; note = nil; failure = nil; sleepRefusal = nil; configNote = nil; configFailure = nil; configHandoff = false
+            copyNote = nil
             if let latest = current { loadConfig(latest) }
         }
         .onChange(of: member.map(TeamConfigSnapshot.init)) { old, new in
@@ -425,28 +425,21 @@ struct MemberDetailView: View {
         }
     }
 
-    @ViewBuilder private func executionDetails(_ m: Member) -> some View {
-        if let execution = m.executionState {
-            TeamFactRow(label: "실행 근거") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(executionLabel(execution)).foregroundStyle(CE.ink2)
-                    if let date = parseISODate(execution.inputReceivedAt) {
-                        Text("입력 수신 · \(koDateTime(date))").foregroundStyle(CE.ink3)
-                    }
-                    if let date = parseISODate(execution.startedAt) {
-                        Text("턴 시작 · \(koDateTime(date))").foregroundStyle(CE.ink3)
-                    }
-                    if let date = parseISODate(execution.lastProgressAt) {
-                        Text("마지막 진전 · \(koDateTime(date))").foregroundStyle(CE.ink3)
-                    }
-                    if let date = parseISODate(execution.endedAt) {
-                        Text("턴 종료 · \(koDateTime(date))").foregroundStyle(CE.ink3)
-                    }
-                    if let code = execution.exitCode { Text("종료 코드 \(code)").foregroundStyle(CE.ink3) }
-                    if let reason = execution.reason, !reason.isEmpty { Text(reason).foregroundStyle(CE.ink3) }
-                }
-            }
+    /// Last thing the session did: the manual tool activity, or the newest turn timestamp (input, start, progress, end).
+    /// The observation clock is not activity (it ticks every poll), so it is not used here.
+    private func lastActivity(_ m: Member) -> (at: String, date: Date, label: String)? {
+        if m.origin == "manual" {
+            guard let at = m.manualActivityAt, let date = parseISODate(at) else { return nil }
+            return (at, date, "도구 활동")
         }
+        guard let execution = m.executionState else { return nil }
+        let stamps = [execution.endedAt, execution.lastProgressAt, execution.startedAt, execution.inputReceivedAt]
+            .compactMap { at in at.flatMap { value in parseISODate(value).map { (value, $0) } } }
+        guard let latest = stamps.max(by: { $0.1 < $1.1 }) else { return nil }
+        var label = executionLabel(execution)
+        if let code = execution.exitCode { label += " · 종료 코드 \(code)" }
+        if let reason = execution.reason, !reason.isEmpty { label += "\n\(reason)" }
+        return (latest.0, latest.1, label)
     }
 
     private func executionLabel(_ execution: MemberExecutionState) -> String {
@@ -493,33 +486,49 @@ struct MemberDetailView: View {
         }
     }
 
-    private func contextDetails(_ m: Member) -> some View {
-        let measurement = contextMeasurement(m)
+    /// One compact row: "문맥" + bar + percentage (how it was measured in the tooltip), and only while a compaction is
+    /// pending, running, unconfirmed or failed, its one-line status. Compacting itself lives in the "…" menu.
+    private func contextRow(_ m: Member) -> some View {
         let pct = contextPercent(m)
-        let block = compactBlock(m)
-        return VStack(alignment: .leading, spacing: 6) {
-            if let pct {
-                TeamContextBar(pct: pct, compactAt: compactAt)
-                Text(contextSource(m)).foregroundStyle(CE.ink3)
-            } else {
-                Text("문맥 확인 중").foregroundStyle(CE.ink3)
-            }
-            if let window = measurement?.window ?? m.contextWindow, window > 0 {
-                Text("문맥 창 \(window.formatted()) 토큰").foregroundStyle(CE.ink3)
-            }
-            if let model = measurement?.model { Text("측정 모델 · \(model)").foregroundStyle(CE.ink3) }
-            if let generation = measurement?.sessionGeneration { Text("세션 세대 · \(generation)").foregroundStyle(CE.ink3) }
-            if let date = parseISODate(measurement?.measuredAt) { Text("측정 · \(koDateTime(date))").foregroundStyle(CE.ink3) }
-            if let compact = m.contextState?.compaction { Text(compactionLabel(compact)).foregroundStyle(CE.ink2) }
-            if let block { Text(block).foregroundStyle(CE.ink3) }
-            if m.origin != "manual" {
-                Button("문맥 압축") {
-                    Task { await run("compact", success: "압축 요청을 접수했습니다. 완료는 실행 근거로 확인합니다.") { await store.compactMember(m) } }
+        return VStack(alignment: .leading, spacing: 4) {
+            TeamFactRow(label: "문맥", alignment: .center) {
+                Group {
+                    if let pct {
+                        TeamContextBar(pct: pct, compactAt: compactAt)
+                    } else {
+                        Text("확인 중").foregroundStyle(CE.ink3)
+                    }
                 }
-                .ceSecondaryButton().controlSize(.small)
-                .disabled(block != nil || running != nil || store.pendingActions.contains("member:\(m.id)"))
+                .help(contextHelp(m))
+            }
+            if let status = compactionStatus(m) {
+                TeamFactRow(label: "") {
+                    Text(status).font(CEFont.meta).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
+    }
+
+    /// Compaction status worth a line: in flight, unconfirmed, or failed (not a finished one, not a user release).
+    private func compactionStatus(_ m: Member) -> String? {
+        if store.contextChecking.contains(m.id) { return "압축 결과 확인 중 · 다시 전송하지 않습니다." }
+        guard let compact = m.contextState?.compaction else { return nil }
+        switch compact.phase {
+        case .succeeded?: return nil
+        case .failed?: return compact.reason == "user_resolved" ? nil : compactionLabel(compact)
+        default: return compactionLabel(compact)
+        }
+    }
+
+    /// Tooltip of the context meter: how the number was measured, the window and when.
+    private func contextHelp(_ m: Member) -> String {
+        guard contextPercent(m) != nil else { return "문맥 사용량을 아직 측정하지 못했습니다." }
+        let measurement = contextMeasurement(m)
+        var lines = [contextSource(m)]
+        if let window = measurement?.window ?? m.contextWindow, window > 0 { lines.append("문맥 창 \(window.formatted()) 토큰") }
+        if let date = parseISODate(measurement?.measuredAt) { lines.append("측정 \(koDateTime(date))") }
+        lines.append("압축 기준 \(compactAt)%")
+        return lines.joined(separator: "\n")
     }
 
     private func contextMeasurement(_ m: Member) -> ContextMeasurement? {
@@ -573,18 +582,21 @@ struct MemberDetailView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: CESpace.m) {
-                    summary(m).padding(.horizontal, drawer ? 4 : 0)
+                    // iPhone: the name is the navigation title; state, rank and the meta line open the page.
+                    if !drawer { phoneHeader(m) }
                     deliveryPlate(m)
                     if m.status == "blocked" { approvalBox(m) }
+                    errorBox(m)
+                    nowPlate(m)
+                    actions(m).padding(.horizontal, 2)
                     recentTalkPlate(m)
-                    overviewPlate(m)
-                    if m.origin != "manual" { configPlate(m) }
-                    terminalPlate(m)
+                    // A manual session has no settings here: only its folder, so no empty fold without one.
+                    if m.origin != "manual" || !m.cwd.isEmpty { configPlate(m) }
                     activityPlate(m)
                 }
                 .frame(maxWidth: 760, alignment: .leading)
                 .padding(.horizontal, drawer ? 14 : 16)
-                .padding(.top, drawer ? 2 : 14)
+                .padding(.top, drawer ? 4 : 10)
                 .padding(.bottom, drawer ? 14 : 24)
                 .frame(maxWidth: .infinity)
             }
@@ -643,7 +655,7 @@ struct MemberDetailView: View {
     private var missing: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let onClose {
-                HStack { Spacer(); closeButton(onClose) }
+                HStack { Spacer(); CECloseButton(escapeCloses: false, action: onClose) }
             }
             if store.state == nil && store.isLoading {
                 HStack(spacing: 8) { ProgressView().controlSize(.small); Text("불러오는 중입니다").font(CEFont.secondary).foregroundStyle(CE.ink2) }
@@ -656,90 +668,143 @@ struct MemberDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    /// Drawer header, inline (no title bar, no hairline): name like a Home card title, the state badge on the same
-    /// line, and a quiet round close button. One line only, so it never drives the drawer's size.
+    /// Drawer header, inline (no title bar, no hairline): name, state badge and rank on one line with the round close
+    /// button, then one quiet meta line and, only for a state I have to understand, what it means.
     private func drawerHeader(_ m: Member, onClose: @escaping () -> Void) -> some View {
-        HStack(alignment: .center, spacing: 8) {
-            Text(m.name).font(CEFont.title).foregroundStyle(CE.ink).lineLimit(1)
-                .accessibilityAddTraits(.isHeader)
-            TeamMemberStatusBadge(member: m)
-            if m.kind != "worker" { Tag(rankName(m.kind), tone: .accent) }
-            if m.origin == "manual" { Tag("직접 띄움") }
-            Spacer(minLength: 8)
-            closeButton(onClose)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .center, spacing: 8) {
+                Text(m.name).font(CEFont.title).foregroundStyle(CE.ink).lineLimit(1)
+                    .accessibilityAddTraits(.isHeader)
+                TeamMemberStatusBadge(member: m).fixedSize()
+                if m.kind != "worker" { Tag(rankName(m.kind), tone: .accent) }
+                if m.origin == "manual" { Tag("직접 띄움") }
+                Spacer(minLength: 8)
+                CECloseButton(escapeCloses: false, action: onClose)
+            }
+            headerDetails(m)
+                .padding(.trailing, 8)
         }
         .padding(.leading, 18).padding(.trailing, 12)
-        .padding(.top, 13).padding(.bottom, 9)
+        .padding(.top, 13).padding(.bottom, 10)
     }
 
-    private func closeButton(_ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
+    /// iPhone page top (the name is the navigation title): state, rank, then the same meta line.
+    private func phoneHeader(_ m: Member) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TeamMemberStatusBadge(member: m).fixedSize()
+                if m.kind != "worker" { Tag(rankName(m.kind), tone: .accent) }
+                if m.origin == "manual" { Tag("직접 띄움") }
+            }
+            headerDetails(m)
         }
-        .buttonStyle(DetailCloseButtonStyle())
-        .focusEffectDisabled()
-        .help("닫기 (esc)")
-        .accessibilityLabel("닫기")
+        .padding(.horizontal, 2)
     }
 
-    /// Web detail top row: status pill (in the drawer header on Mac), provider, role, subagents, time. Then the status
-    /// meaning in one quiet line.
-    private func summary(_ m: Member) -> some View {
+    /// "Claude · opus → sonnet · 역할 · 서브에이전트 2개 · 3분 전" and the state meaning when it matters.
+    @ViewBuilder private func headerDetails(_ m: Member) -> some View {
         let info = MemberStatusInfo(m)
-        let observation = MemberObservationInfo(m)
-        let time = relativeTime(m.origin == "manual" ? observation.manualActivityAt : observation.lastObservedAt)
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
-                TeamWrapLayout(spacing: 8, lineSpacing: 6) {
-                    if onClose == nil {
-                        if m.kind != "worker" { Tag(rankName(m.kind), tone: .accent) }
-                        if m.origin == "manual" { Tag("직접 띄움") }
-                        TeamMemberStatusBadge(member: m)
-                    }
-                    HStack(spacing: 5) {
-                        Tag(providerName(m.cli))
-                        if let applied = m.appliedModel ?? store.bootstrap?.settings.memberConfig(m).model, !applied.isEmpty { Text(applied).font(CEFont.meta).foregroundStyle(CE.ink3) }
-                        if let requested = store.bootstrap?.settings.memberConfig(m).model, !requested.isEmpty, let applied = m.appliedModel, requested != applied {
-                            Text("→ \(requested)").font(CEFont.meta).foregroundStyle(CE.attention).help("요청한 모델 · 세션을 다시 열 때 적용")
-                        }
-                    }
-                    .fixedSize()
-                    if !m.role.isEmpty && m.role != m.name { Text(m.role).font(TeamFont.role).foregroundStyle(CE.ink2).lineLimit(1) }
-                    Text(SubagentInfo(m).label).font(CEFont.meta).foregroundStyle(CE.ink3)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                if !time.isEmpty { Text(time).font(CEFont.meta).foregroundStyle(CE.ink3).fixedSize() }
-            }
-            // blocked: the approval box right below says what to do.
-            if m.status != "blocked" {
-                Text(info.explanation).font(CEFont.meta).foregroundStyle(CE.ink3).fixedSize(horizontal: false, vertical: true)
-            }
+        metaLine(m)
+        if showsExplanation(m, info: info) {
+            Text(info.explanation).font(CEFont.meta).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    /// The one state box: a flat plate with a faint approval wash; colour stays in the mark, the text stays ink.
+    private func metaLine(_ m: Member) -> some View {
+        let config = store.bootstrap?.settings.memberConfig(m)
+        let applied = m.appliedModel ?? config?.model
+        let requested = config?.model.flatMap { $0.isEmpty ? nil : $0 }
+        let pending = requested.flatMap { value in m.appliedModel.flatMap { $0 != value ? value : nil } }
+        var model = Text(providerName(m.cli))
+        if let applied, !applied.isEmpty { model = model + Text(" · \(applied)") }
+        if let pending { model = model + Text(" → \(pending)").foregroundStyle(CE.attention) }
+        var tail: [String] = []
+        if !m.role.isEmpty && m.role != m.name { tail.append(m.role) }
+        let subagents = SubagentInfo(m)
+        if let count = subagents.count, count > 0 {
+            tail.append(m.subagentState?.quality == "estimated" ? "서브에이전트 약 \(count)개" : "서브에이전트 \(count)개")
+        }
+        let activity = lastActivity(m)
+        if let activity { tail.append(relativeTime(activity.at)) }
+        var help: [String] = []
+        if let pending { help.append("요청한 모델 \(pending) · 세션을 다시 열 때 적용") }
+        if let activity { help.append("\(activity.label)\n\(koDateTime(activity.date))") }
+        let line = tail.isEmpty ? model : model + Text(" · " + tail.joined(separator: " · "))
+        return line
+            .font(CEFont.meta).foregroundStyle(CE.ink3)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+            .help(help.joined(separator: "\n"))
+    }
+
+    /// The state sentence only where the badge alone is not enough: down, failed, waiting on me, or not observed.
+    /// blocked has its own box; a failed session with an error text says it in the error box.
+    private func showsExplanation(_ m: Member, info: MemberStatusInfo) -> Bool {
+        if m.status == "blocked" { return false }
+        if m.status == "error", !(m.lastError ?? "").isEmpty { return false }
+        return info.tone == .attention || ["asleep", "offline", "gone", "error"].contains(m.status)
+    }
+
+    /// The approval window: a flat plate with a faint approval wash; colour stays in the mark, the text stays ink.
+    /// The badge above already names the state, so the box says what to do. A prompt IAMCEO can read (core folder
+    /// trust) is answered right here with Home's option card; 터미널 열기 stays as the way to look at the CLI itself
+    /// and is the one main action when there is no card.
     private func approvalBox(_ m: Member) -> some View {
-        let shape = RoundedRectangle(cornerRadius: CERadius.plate - 4, style: .continuous)
         let info = MemberStatusInfo(m)
+        let readable = m.canReadCLIApproval
+        return stateBox(tone: info.tone, icon: info.icon, title: "CLI 화면에서 처리가 필요합니다") {
+            if readable {
+                CLIApprovalCard(member: m)
+            } else {
+                // On core, blocked also means the CLI state could not be read.
+                Text(info.explanation)
+                    .font(CEFont.secondary).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
+            }
+            if m.origin != "manual" && !teamIsLegacy(m) {
+                Group {
+                    if readable {
+                        Button { openTerminal(m) } label: { Label("터미널 열기", systemImage: "terminal") }.ceSecondaryButton()
+                    } else {
+                        Button { openTerminal(m) } label: { Label("터미널 열기", systemImage: "terminal") }.ceProminentButton()
+                    }
+                }
+                .controlSize(.small)
+                .help(terminalHelp(m))
+                .padding(.top, 2)
+            }
+        }
+    }
+
+    /// The last error the session reported, in the same box as the approval window.
+    @ViewBuilder private func errorBox(_ m: Member) -> some View {
+        if let error = m.lastError?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
+            stateBox(tone: .danger, icon: "exclamationmark.triangle.fill", title: "마지막 오류") {
+                Text(error)
+                    .font(CEFont.secondary).foregroundStyle(CE.ink2)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                // The way back that is actually in reach: 깨우기 in the row, or for an older runner's session the menu.
+                if m.status == "error" && m.origin != "manual" {
+                    Text(teamIsLegacy(m) ? "… 메뉴의 새 세션으로 이어가기로 복구하세요." : "깨우기로 다시 여세요.")
+                        .font(CEFont.meta).foregroundStyle(CE.ink3)
+                }
+            }
+        }
+    }
+
+    private func stateBox<Content: View>(tone: Tone, icon: String, title: String, @ViewBuilder content: () -> Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: CERadius.plate - 4, style: .continuous)
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: info.icon).font(CEFont.secondary).foregroundStyle(info.tone.color)
-                Text(info.label).font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                Image(systemName: icon).font(CEFont.secondary).foregroundStyle(tone.color)
+                Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
             }
-            // On core, blocked also means the CLI state could not be read.
-            Text(info.explanation)
-                .font(CEFont.secondary).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
-            if m.origin != "manual" && !teamIsLegacy(m) {
-                Button { openTerminal(m) } label: { Label("터미널 열기", systemImage: "terminal") }
-                    .ceProminentButton()
-                    .controlSize(.small)
-                    .padding(.top, 2)
-            }
+            content()
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(info.tone.color.opacity(0.07), in: shape)
-        .overlay { shape.strokeBorder(info.tone.color.opacity(0.2)) }
+        .background(tone.color.opacity(0.07), in: shape)
+        .overlay { shape.strokeBorder(tone.color.opacity(0.2)) }
     }
 
     /// The last few lines of this member's conversation room, oldest first like the chat. A worker's room is its
@@ -751,16 +816,28 @@ struct MemberDetailView: View {
         return Array(room.suffix(4))
     }
 
+    /// The room's last lines and one quiet way into it.
     private func recentTalkPlate(_ m: Member) -> some View {
         let talk = recentTalk(m)
         return DetailPlate {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     DetailSectionTitle("최근 대화")
                     Spacer(minLength: 8)
-                    Button { openChat(m) } label: { Label("대화방 열기", systemImage: "bubble.left.and.bubble.right") }
-                        .ceSecondaryButton()
-                        .controlSize(.small)
+                    if !talk.isEmpty {
+                        Button { openChat(m) } label: {
+                            HStack(spacing: 3) {
+                                Text("모두 보기")
+                                Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold))
+                            }
+                            .font(CEFont.meta.weight(.medium)).foregroundStyle(CE.accent)
+                            .teamTallHitArea()
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(DetailPressStyle())
+                        .help("\(m.name)의 대화방 열기")
+                        .accessibilityLabel("대화 모두 보기")
+                    }
                 }
                 if talk.isEmpty {
                     Text("아직 주고받은 말이 없습니다").font(CEFont.secondary).foregroundStyle(CE.ink3).padding(.vertical, 4)
@@ -778,120 +855,151 @@ struct MemberDetailView: View {
         }
     }
 
-    /// Facts and actions together: one card for "what it does" and "what I can do".
-    private func overviewPlate(_ m: Member) -> some View {
+    /// What it is doing now: the last report (with when), next, queue, open decisions, then one context row.
+    private func nowPlate(_ m: Member) -> some View {
         let decisions = store.decisions.filter { $0.status == "open" && $0.memberId == m.id }.count
+        let report = LastReportInfo(m)
+        let reportedAt = parseISODate(m.nowAt)
         return DetailPlate {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 6) {
-                    TeamFactRow(label: LastReportInfo(m).label) {
-                        if m.now.isEmpty { Text("아직 보고가 없습니다").foregroundStyle(CE.ink3) }
-                        else { Text(teamInlineMarkdown(m.now)).foregroundStyle(CE.ink).fixedSize(horizontal: false, vertical: true) }
-                    }
-                    if let date = parseISODate(m.nowAt) {
-                        TeamFactRow(label: "보고 시각") { Text(koDateTime(date)).foregroundStyle(CE.ink3) }
-                    }
-                    if let date = parseISODate(m.statusObservation?.observedAt) {
-                        TeamFactRow(label: "마지막 관측") { Text(koDateTime(date)).foregroundStyle(CE.ink3) }
-                    }
-                    if let date = parseISODate(m.manualActivityAt), m.origin == "manual" {
-                        TeamFactRow(label: "도구 활동") { Text(koDateTime(date)).foregroundStyle(CE.ink3) }
-                    }
-                    if !m.next.isEmpty {
-                        TeamFactRow(label: "다음") { Text(teamInlineMarkdown(m.next)).foregroundStyle(CE.ink).fixedSize(horizontal: false, vertical: true) }
-                    }
-                    if m.queuedCount > 0 {
-                        TeamFactRow(label: "대기열") {
-                            Text("\(m.queuedCount)건 · CLI에 아직 넣지 않은 입력").foregroundStyle(CE.ink).monospacedDigit()
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        DetailSectionTitle(report.label)
+                        Spacer(minLength: 8)
+                        if let reportedAt {
+                            Text(relativeTime(m.nowAt)).font(CEFont.meta).foregroundStyle(CE.ink3).monospacedDigit()
+                                .help("보고 시각 \(koDateTime(reportedAt))")
                         }
                     }
-                    TeamFactRow(label: "문맥") { contextDetails(m) }
-                    executionDetails(m)
-                    if decisions > 0 {
-                        TeamFactRow(label: "결재") {
-                            // Home's quiet accent link ("결재함", "사무실 보기"): no underline, no state colour.
-                            Button { goInbox() } label: {
-                                Text("\(decisions)건 대기 · 결재함으로").fontWeight(.medium).foregroundStyle(CE.accent)
-                                    .teamTallHitArea()
+                    if m.now.isEmpty {
+                        Text(report.text).font(TeamFont.fact).foregroundStyle(CE.ink3)
+                    } else {
+                        Text(teamInlineMarkdown(m.now)).font(TeamFont.fact).foregroundStyle(CE.ink)
+                            .lineSpacing(2)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                if !m.next.isEmpty || m.queuedCount > 0 || decisions > 0 {
+                    VStack(alignment: .leading, spacing: 7) {
+                        if !m.next.isEmpty {
+                            TeamFactRow(label: "다음") {
+                                Text(teamInlineMarkdown(m.next)).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
                             }
-                            .buttonStyle(DetailPressStyle())
-                            .help("결재함 열기")
+                        }
+                        if m.queuedCount > 0 {
+                            TeamFactRow(label: "대기열") {
+                                Text("\(m.queuedCount)건").foregroundStyle(CE.ink2).monospacedDigit()
+                                    .help("CLI에 아직 넣지 않은 입력입니다")
+                            }
+                        }
+                        if decisions > 0 {
+                            TeamFactRow(label: "결재") {
+                                // Home's quiet accent link ("결재함", "사무실 보기"): no underline, no state colour.
+                                Button { goInbox() } label: {
+                                    Text("\(decisions)건 대기 · 결재함으로").fontWeight(.medium).foregroundStyle(CE.accent)
+                                        .teamTallHitArea()
+                                }
+                                .buttonStyle(DetailPressStyle())
+                                .help("결재함 열기")
+                            }
                         }
                     }
-                    if !m.cwd.isEmpty {
-                        TeamFactRow(label: "폴더") {
-                            Text(m.cwd).font(CEFont.mono).foregroundStyle(CE.ink2)
-                                .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
-                                .help(m.cwd)
-                        }
-                    }
                 }
-                if let error = m.lastError, !error.isEmpty {
-                    Text(error).font(CEFont.secondary).foregroundStyle(CE.danger).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                if showsContextRow(m) {
+                    RowDivider(inset: 0)
+                    contextRow(m)
                 }
-                if teamIsLegacy(m) {
-                    teamNote(teamLegacyNote)
-                }
-                RowDivider(inset: 0)
-                actions(m)
             }
             .padding(.horizontal, 2)
         }
     }
 
+    /// A session that is down is never measured: no "확인 중" that cannot resolve. A pending compaction still shows.
+    private func showsContextRow(_ m: Member) -> Bool {
+        contextPercent(m) != nil || compactionStatus(m) != nil || !["asleep", "offline", "gone", "error"].contains(m.status)
+    }
+
+    /// 지시 first (the one main action, unless the approval box above holds it), 대화방 and 터미널 beside it, the
+    /// state's urgent action (중단 / 깨우기) visible, everything else in "…". Notes and results stay right below.
     @ViewBuilder private func actions(_ m: Member) -> some View {
         let canAct = store.canWrite && !store.pendingActions.contains("member:\(m.id)") && running == nil
         let manual = m.origin == "manual"
+        let legacy = teamIsLegacy(m)
         let busyTurn = ["working", "blocked"].contains(m.status)
         let runnerOn = store.state?.project.runnerEnabled ?? false
         let wakeable = ["asleep", "offline", "error"].contains(m.status)
-        let down = ["asleep", "offline"].contains(m.status)
+        let approvalHoldsMain = m.status == "blocked" && !manual && !legacy
+        // Only when there is a CLI to look at: an open pane, or a state that has one.
+        let hasPane = !(m.paneId ?? "").isEmpty && !["asleep", "offline", "gone"].contains(m.status)
+        let showsTerminal = !manual && !legacy && !approvalHoldsMain && (hasPane || ["working", "waiting", "idle"].contains(m.status))
         VStack(alignment: .leading, spacing: 8) {
             TeamWrapLayout(spacing: 8, lineSpacing: 8) {
-                actionButton("지시", icon: "text.bubble", primary: true, enabled: true, help: "\(m.name)에게 지시를 보냅니다") { instruct(m) }
-                actionButton("대화하기", icon: "bubble.left.and.bubble.right", primary: true, enabled: true, help: "\(m.name)와 주고받은 대화") { openChat(m) }
-                if manual {
-                    if m.kind == "worker" {
-                        actionButton("명부에서 빼기", icon: "person.crop.circle.badge.minus", busyTitle: "빼는 중", name: "close", enabled: canAct) { confirmClose = true }
+                Group {
+                    if approvalHoldsMain {
+                        Button { instruct(m) } label: { Label("지시", systemImage: "text.bubble") }.ceSecondaryButton()
+                    } else {
+                        Button { instruct(m) } label: { Label("지시", systemImage: "text.bubble") }.ceProminentButton()
                     }
-                } else {
-                    if busyTurn {
-                        actionButton("중단", icon: "stop.circle", busyTitle: "멈추는 중", name: "interrupt", enabled: canAct) {
-                            Task { await run("interrupt", success: "멈추라고 보냈습니다. 지금 턴이 끊기면 대기로 바뀝니다.") { await store.memberAction(m, action: "interrupt") } }
-                        }
+                }
+                .controlSize(.small)
+                .help("\(m.name)에게 지시를 보냅니다")
+                Button { openChat(m) } label: { Label("대화방", systemImage: "bubble.left.and.bubble.right") }
+                    .ceSecondaryButton().controlSize(.small)
+                    .help("\(m.name)와 주고받은 대화")
+                if showsTerminal {
+                    Button { openTerminal(m) } label: { Label("터미널", systemImage: "terminal") }
+                        .ceSecondaryButton().controlSize(.small)
+                        .help(terminalHelp(m))
+                        .accessibilityLabel("\(m.name) 터미널 열기")
+                }
+                if !manual && busyTurn {
+                    actionButton("중단", icon: "stop.circle", busyTitle: "멈추는 중", name: "interrupt", enabled: canAct,
+                                 help: "지금 턴을 멈추라고 보냅니다") {
+                        Task { await run("interrupt", success: "멈추라고 보냈습니다. 지금 턴이 끊기면 대기로 바뀝니다.") { await store.memberAction(m, action: "interrupt") } }
                     }
-                    if wakeable {
-                        actionButton("깨우기", icon: "sunrise", busyTitle: "깨우는 중", name: "resume", enabled: canAct && runnerOn && !teamIsLegacy(m)) {
-                            Task { await run("resume", success: "다시 열라고 보냈습니다. 세션이 열리면 상태가 바뀝니다.") { await store.memberAction(m, action: "resume") } }
-                        }
+                }
+                if !manual && wakeable {
+                    actionButton("깨우기", icon: "sunrise", busyTitle: "깨우는 중", name: "resume", enabled: canAct && runnerOn && !legacy,
+                                 help: runnerOn ? "세션을 다시 엽니다" : "실행이 꺼져 있어 깨울 수 없습니다") {
+                        Task { await run("resume", success: "다시 열라고 보냈습니다. 세션이 열리면 상태가 바뀝니다.") { await store.memberAction(m, action: "resume") } }
                     }
-                    if !down {
-                        actionButton("잠재우기", icon: "moon.zzz", busyTitle: "재우는 중", name: "sleep", enabled: canAct) {
-                            Task { await sleep(m) }
-                        }
+                }
+                // Right after the server refused a plain 잠재우기 (failure line below): the follow-up stays in reach.
+                if !manual && sleepRefusal != nil && !["asleep", "offline"].contains(m.status) {
+                    actionButton("그래도 재우기…", icon: "moon.zzz.fill", enabled: canAct, help: "돌던 턴을 끊고 재웁니다. 먼저 확인을 받습니다.") {
+                        confirmForceSleep = true
                     }
-                    if sleepRefusal != nil && !down {
-                        actionButton("그래도 재우기", icon: "moon.zzz.fill", enabled: canAct) { confirmForceSleep = true }
-                    }
-                    actionButton("새 세션으로 이어가기", icon: "arrow.triangle.2.circlepath", busyTitle: "새 세션을 준비하는 중", name: "fresh", enabled: canAct && !busyTurn && !freshUnresolved(m),
-                                 help: busyTurn ? "일하거나 승인 창 앞이면 끝난 뒤 시작하세요" : "역할·현재 일·다음을 새 세션에 인계합니다") {
-                        freshMember = m
-                        freshGeneration = store.writeRevisions?.members?[m.id]?.sessionGeneration
-                        confirmFresh = true
-                    }
+                }
+                if hasMoreMenu(m) { moreMenu(m, canAct: canAct) }
+            }
+            #if os(iOS)
+            // iPhone: words only, so the row stays on one line at phone width.
+            .labelStyle(.titleOnly)
+            #endif
+            if let busy = menuBusyTitle {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text(busy).font(CEFont.meta).foregroundStyle(CE.ink2)
                 }
             }
             freshReceipt(m)
             if let reason = readOnlyReason {
                 Label(reason, systemImage: store.isDemo ? "eye" : "wifi.slash").font(CEFont.meta).foregroundStyle(CE.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if manual {
                 teamNote("직접 띄운 세션입니다. 압축하거나 재울 수 없고, 보낸 말은 그 세션이 wait를 부를 때 전달됩니다.")
+            } else if legacy {
+                teamNote(teamLegacyNote)
             } else if wakeable && !runnerOn {
                 teamNote("실행이 꺼져 있어 깨울 수 없습니다. 팀 화면에서 총괄을 시작하세요.")
             }
             if let note {
                 Label(note, systemImage: "paperplane").font(CEFont.meta).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
+            }
+            if let copyNote {
+                Label(copyNote, systemImage: "doc.on.doc").font(CEFont.meta).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
             }
             if let failure {
                 Label(failure, systemImage: "exclamationmark.circle").font(CEFont.meta).foregroundStyle(CE.danger).fixedSize(horizontal: false, vertical: true)
@@ -899,10 +1007,118 @@ struct MemberDetailView: View {
         }
     }
 
+    /// Progress of an action started from the "…" menu, which closes as soon as it is chosen.
+    private var menuBusyTitle: String? {
+        switch running {
+        case "sleep": "재우는 중"
+        case "fresh": "새 세션을 준비하는 중"
+        case "compact": "압축을 요청하는 중"
+        case "close": "명부에서 빼는 중"
+        default: nil
+        }
+    }
+
+    /// False only for a manual lead with nothing to copy: no empty "…" menu.
+    private func hasMoreMenu(_ m: Member) -> Bool {
+        m.origin != "manual" || m.kind == "worker" || terminalCommand(m) != nil
+    }
+
+    /// The less frequent actions. A disabled item says why right under it (the sample/offline reason is shown once,
+    /// below the buttons, instead).
+    private func moreMenu(_ m: Member, canAct: Bool) -> some View {
+        let manual = m.origin == "manual"
+        let busyTurn = ["working", "blocked"].contains(m.status)
+        let down = ["asleep", "offline"].contains(m.status)
+        let compact = compactBlock(m)
+        let freshReason: String? = busyTurn ? "일하거나 승인 창 앞이면 끝난 뒤 시작하세요" : (freshUnresolved(m) ? "새 세션 결과를 확인하는 중입니다" : nil)
+        let command = terminalCommand(m)
+        return Menu {
+            if manual {
+                if m.kind == "worker" {
+                    Button(role: .destructive) { confirmClose = true } label: {
+                        Label("명부에서 빼기…", systemImage: "person.crop.circle.badge.minus")
+                    }
+                    .disabled(!canAct)
+                }
+            } else {
+                // After a refusal, 그래도 재우기 sits visibly in the row instead.
+                if !down {
+                    Button { Task { await sleep(m) } } label: { Label("잠재우기", systemImage: "moon.zzz") }
+                        .disabled(!canAct)
+                }
+                Button {
+                    freshMember = m
+                    freshGeneration = store.writeRevisions?.members?[m.id]?.sessionGeneration
+                    confirmFresh = true
+                } label: { Label("새 세션으로 이어가기…", systemImage: "arrow.triangle.2.circlepath") }
+                    .disabled(!canAct || freshReason != nil)
+                    .help(freshReason ?? "역할·현재 일·다음을 새 세션에 인계합니다")
+                if let freshReason, canAct { Text(freshReason) }
+                Button {
+                    Task { await run("compact", success: "압축 요청을 접수했습니다. 끝나면 문맥 사용량에 반영됩니다.") { await store.compactMember(m) } }
+                } label: { Label("문맥 압축", systemImage: "arrow.down.right.and.arrow.up.left") }
+                    .disabled(compact != nil || running != nil || store.pendingActions.contains("member:\(m.id)"))
+                    .help(compact ?? "CLI에 문맥 압축을 요청합니다")
+                if let compact, compact != readOnlyReason { Text(compact) }
+            }
+            if let command {
+                Divider()
+                Button { copyTerminalCommand(m, command: command) } label: { Label("터미널 명령 복사", systemImage: "doc.on.doc") }
+                    .help(command.attached ? "서버 컴퓨터의 터미널에서 실행하면 같은 CLI 터미널을 엽니다" : "서버 컴퓨터의 터미널에서 이 세션을 다시 엽니다")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(CE.ink2)
+                .frame(width: 28, height: 26)
+                .background(Color.white.opacity(0.06), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.white.opacity(0.1)) }
+                .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("다른 조작")
+        .accessibilityLabel("\(m.name) 다른 조작")
+    }
+
+    private func copyTerminalCommand(_ m: Member, command: (text: String, attached: Bool)) {
+        teamCopy(command.text)
+        if !command.attached && !["asleep", "offline"].contains(m.status) {
+            // The warning stays until the next action: running the copy now would drive one session from two places.
+            copyNote = "터미널 명령을 복사했습니다. 지금 도는 세션입니다. 두 곳에서 함께 쓰면 꼬이니 먼저 잠재우고 여세요."
+            return
+        }
+        let shown = command.attached
+            ? "터미널 명령을 복사했습니다. 서버 컴퓨터에서 실행하면 같은 CLI 터미널을 엽니다."
+            : "터미널 명령을 복사했습니다."
+        copyNote = shown
+        // A plain confirmation clears itself, like the old 복사함.
+        Task {
+            try? await Task.sleep(for: .seconds(4))
+            if copyNote == shown { copyNote = nil }
+        }
+    }
+
+    private func terminalHelp(_ m: Member) -> String { "이 CLI의 터미널을 엽니다" }
+
+    /// Folded: the session's folder, then (sessions IAMCEO started) the CLI, model and effort.
     private func configPlate(_ m: Member) -> some View {
         DetailPlate(padding: 0) {
             DisclosureGroup(isExpanded: $configOpen) {
-                configBody(m).padding(.bottom, 14)
+                VStack(alignment: .leading, spacing: 10) {
+                    if !m.cwd.isEmpty {
+                        TeamFactRow(label: "폴더") {
+                            Text(m.cwd).font(CEFont.mono).foregroundStyle(CE.ink2)
+                                .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
+                                .help(m.cwd)
+                        }
+                    }
+                    if m.origin != "manual" { configBody(m) }
+                }
+                .padding(.bottom, 14)
             } label: {
                 HStack(spacing: 8) {
                     DetailSectionTitle("실행 설정")
@@ -1023,40 +1239,6 @@ struct MemberDetailView: View {
         }
     }
 
-    private func terminalPlate(_ m: Member) -> some View {
-        let manual = m.origin == "manual"
-        let legacy = teamIsLegacy(m)
-        let command = terminalCommand(m)
-        return DetailPlate {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    DetailSectionTitle("터미널")
-                    Spacer(minLength: 8)
-                    if !manual && !legacy {
-                        Button { openTerminal(m) } label: { Label("화면 · 직접 조작", systemImage: "terminal") }
-                            .buttonStyle(DetailGhostButtonStyle())
-                            .controlSize(.small)
-                    }
-                }
-                if manual {
-                    teamNote("직접 띄운 세션입니다. 그 세션을 띄운 터미널에서 확인하세요.")
-                } else if legacy {
-                    teamNote("이전 실행기의 세션은 여기서 조작할 수 없습니다. 기존 터미널에서 확인하세요.")
-                } else {
-                    teamNote("직접 조작하는 동안 자동 전달과 문맥 압축이 기다립니다. 끝나면 조작권을 놓아 주세요.")
-                }
-                if let command {
-                    TeamCommandRow(label: command.attached ? "연결된 터미널 열기" : "터미널로 열기",
-                                   command: command.text,
-                                   note: command.attached ? "서버 컴퓨터에서 실행하면 같은 CLI 터미널을 엽니다." : nil,
-                                   copiedNote: !command.attached && !["asleep", "offline"].contains(m.status)
-                                       ? "지금 도는 세션입니다. 두 곳에서 함께 쓰면 꼬이니 먼저 잠재우고 여세요." : nil)
-                }
-            }
-            .padding(.horizontal, 2)
-        }
-    }
-
     private func activityPlate(_ m: Member) -> some View {
         DetailPlate(padding: 0) {
             DisclosureGroup(isExpanded: $activityOpen) {
@@ -1073,19 +1255,18 @@ struct MemberDetailView: View {
         }
     }
 
-    /// `primary` (지시, 대화하기): the subtle-glass capsule used on Home and in 결재함. Everything else: a quieter
-    /// outline, so the row is not a band of equally loud pills.
-    @ViewBuilder private func actionButton(_ title: String, icon: String, busyTitle: String? = nil, name: String? = nil, primary: Bool = false, enabled: Bool, help: String? = nil, action: @escaping () -> Void) -> some View {
+    /// State actions in the row (중단, 깨우기): the same quiet glass capsule as 대화방, with a spinner and a busy title
+    /// while they run.
+    @ViewBuilder private func actionButton(_ title: String, icon: String, busyTitle: String? = nil, name: String? = nil, enabled: Bool, help: String? = nil, action: @escaping () -> Void) -> some View {
         let busy = name != nil && running == name
-        let button = Button(action: action) {
-            HStack(spacing: 5) {
-                if busy { ProgressView().controlSize(.mini) } else { Image(systemName: icon) }
+        Button(action: action) {
+            Label {
                 Text(busy ? (busyTitle ?? title) : title)
+            } icon: {
+                if busy { ProgressView().controlSize(.mini) } else { Image(systemName: icon) }
             }
         }
-        Group {
-            if primary { button.ceSecondaryButton() } else { button.buttonStyle(DetailGhostButtonStyle()) }
-        }
+        .ceSecondaryButton()
         .controlSize(.small)
         .disabled(!enabled || busy)
         .help(help ?? title)
@@ -1141,14 +1322,15 @@ struct MemberDetailView: View {
         return reason.isEmpty ? tail : "\(reason). \(tail)"
     }
 
-    /// Web CopyCommand: `{cli} attach {id}` for a core session with a pane, else the provider's resume command.
+    /// Web CopyCommand: the shared attach command (with the server's IAMCEO_HOME) for a core session with a pane, else
+    /// the provider's resume command.
     private func terminalCommand(_ m: Member) -> (text: String, attached: Bool)? {
         if m.backend == "core", let pane = m.paneId, !pane.isEmpty {
-            return ("\(store.bootstrap?.cli ?? "iamceo") attach \(teamShellQuote(m.id))", true)
+            return (TerminalCommand.attach(memberID: m.id, bootstrap: store.bootstrap), true)
         }
         if let session = m.sessionId, !session.isEmpty {
             let resume = m.cli == "codex" ? "codex resume" : "claude --resume"
-            return ("cd \(teamShellQuote(m.cwd)) && \(resume) \(teamShellQuote(session))", false)
+            return ("cd \(TerminalCommand.shellQuote(m.cwd)) && \(resume) \(TerminalCommand.shellQuote(session))", false)
         }
         return nil
     }
@@ -1252,7 +1434,7 @@ struct MemberDetailView: View {
 
     private func run(_ name: String, success: String, _ operation: () async -> Bool) async {
         let namespace = store.writeNamespace, id = memberID
-        running = name; failure = nil; note = nil; sleepRefusal = nil
+        running = name; failure = nil; note = nil; sleepRefusal = nil; copyNote = nil
         let ok = await operation()
         guard namespace == store.writeNamespace, id == memberID else { return }
         running = nil
@@ -1575,44 +1757,18 @@ struct NewMemberView: View {
         return nil
     }
 
+    /// The shared popup frame: what it does in the header, the form, 취소 / 추가 in the footer band.
     var body: some View {
-        #if os(macOS)
-        VStack(spacing: 0) {
-            HStack {
-                Text("팀장 추가").font(CEFont.pageTitle).foregroundStyle(CE.ink)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 20).padding(.vertical, 14)
-            .overlay(alignment: .bottom) { Rectangle().fill(CE.line).frame(height: 1) }
-            ScrollView { form.padding(20) }
-            HStack(spacing: 10) {
-                Spacer(minLength: 0)
-                Button("취소") { dismiss() }.ceSecondaryButton().keyboardShortcut(.cancelAction).disabled(busy)
-                addButton.keyboardShortcut(.defaultAction)
-            }
-            .padding(.horizontal, 20).padding(.vertical, 14)
-            .overlay(alignment: .top) { Rectangle().fill(CE.line).frame(height: 1) }
+        // One line; the wait hint only while the session is being prepared.
+        CESheet("팀장 추가", subtitle: busy ? "세션을 준비하는 중입니다. 잠시 걸릴 수 있습니다." : "새 CLI 세션을 띄워 팀장으로 등록합니다.",
+                icon: "person.badge.plus", width: 500, onClose: { if !busy { dismiss() } }) {
+            form
+        } footer: {
+            // Esc is the header's close button; neither closes while the session is being added.
+            Button("취소") { dismiss() }.ceSecondaryButton().disabled(busy)
+            addButton.keyboardShortcut(.defaultAction)
         }
-        .background { AmbientBackground() }
-        .ceSheetSize(width: 520, height: 500)
-        #else
-        NavigationStack {
-            ScrollView { form.padding(16) }
-                .background { AmbientBackground() }
-                .navigationTitle("팀장 추가")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("취소") { dismiss() }.disabled(busy) }
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button { Task { await add() } } label: {
-                            if busy { HStack(spacing: 6) { ProgressView().controlSize(.small); Text("추가하는 중") } } else { Text("추가") }
-                        }
-                        .disabled(trimmedName.isEmpty || busy || blockReason != nil)
-                    }
-                }
-                .interactiveDismissDisabled(busy)
-        }
-        #endif
+        .interactiveDismissDisabled(busy)
     }
 
     private var addButton: some View {
@@ -1638,9 +1794,9 @@ struct NewMemberView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .fixedSize()
             }
             field("모델 · 선택", text: $model, prompt: "CLI 기본값", plain: true)
-            teamNote("새 CLI 세션을 띄워 이 프로젝트의 팀장으로 등록합니다. 세션 준비에 시간이 걸릴 수 있습니다.")
             if store.runtime?.providers[provider]?.installed == false {
                 InlineNotice(tone: .attention, icon: "exclamationmark.triangle", title: "\(providerFullName(provider))가 설치돼 있지 않습니다",
                              detail: "설정의 실행 환경을 확인하세요.")
@@ -1768,27 +1924,6 @@ private struct DetailGhostButtonStyle: ButtonStyle {
     }
 }
 
-/// The drawer's round close button: 26pt, quiet white fill, ink2 mark, no focus ring.
-private struct DetailCloseButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View { CloseBody(configuration: configuration) }
-
-    private struct CloseBody: View {
-        let configuration: ButtonStyleConfiguration
-        @State private var hovering = false
-
-        var body: some View {
-            configuration.label
-                .foregroundStyle(hovering ? CE.ink : CE.ink2)
-                .frame(width: 26, height: 26)
-                .background(Color.white.opacity(configuration.isPressed ? 0.14 : hovering ? 0.1 : 0.06), in: Circle())
-                .overlay { Circle().strokeBorder(Color.white.opacity(0.07)) }
-                .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
-                .contentShape(Rectangle())
-                .onHover { hovering = $0 }
-        }
-    }
-}
-
 /// Inline links: dim on press, nothing else.
 private struct DetailPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
@@ -1840,42 +1975,6 @@ private struct TeamFoldStyle: DisclosureGroupStyle {
             if configuration.isExpanded {
                 configuration.content
             }
-        }
-    }
-}
-
-/// Copyable terminal command (web CopyBox): mono command in a dark well and a glass 복사 button.
-private struct TeamCommandRow: View {
-    let label: String
-    let command: String
-    var note: String? = nil
-    /// Shown after copying (e.g. the session is running right now).
-    var copiedNote: String? = nil
-    @State private var copied = false
-    @State private var everCopied = false
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
-        VStack(alignment: .leading, spacing: 6) {
-            Text(label).font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink2)
-            HStack(spacing: 8) {
-                Text(command).font(CEFont.mono).foregroundStyle(CE.ink).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                    .padding(.horizontal, 11).padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.white.opacity(0.04), in: shape)
-                    .overlay { shape.strokeBorder(CE.line) }
-                    .help(command)
-                Button(copied ? "복사함" : "복사") {
-                    teamCopy(command)
-                    copied = true; everCopied = true
-                    Task { try? await Task.sleep(for: .seconds(2)); copied = false }
-                }
-                .buttonStyle(DetailGhostButtonStyle())
-                .controlSize(.small)
-                .accessibilityLabel(copied ? "명령을 복사했습니다" : "\(label) 명령 복사")
-            }
-            if let note { teamNote(note) }
-            if everCopied, let copiedNote { teamNote(copiedNote) }
         }
     }
 }
@@ -1977,13 +2076,6 @@ private func teamNowLabel(_ member: Member) -> String {
 
 private func teamInlineMarkdown(_ value: String) -> AttributedString {
     (try? AttributedString(markdown: value, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(value)
-}
-
-/// Same quoting as the web `shellQuote`: bare when safe, else single-quoted.
-private func teamShellQuote(_ value: String) -> String {
-    let safe = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-./:=@")
-    if !value.isEmpty, value.unicodeScalars.allSatisfy({ safe.contains($0) }) { return value }
-    return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
 private func teamCopy(_ text: String) {

@@ -44,9 +44,23 @@ struct ProjectManageView: View {
         switch selection.mode {
         case .rename: "프로젝트 이름 바꾸기"
         case .settings: "프로젝트 설정"
-        case .archive: "‘\(project?.name ?? name)’ 프로젝트를 보관할까요?"
+        case .archive: "프로젝트를 보관할까요?"
         case .restore: "프로젝트 꺼내기"
         }
+    }
+    private var icon: String {
+        switch selection.mode {
+        case .rename: "pencil"
+        case .settings: "slider.horizontal.3"
+        case .archive: "archivebox"
+        case .restore: "tray.and.arrow.up"
+        }
+    }
+    /// Which project, under the title (the name field already shows it while renaming or editing settings).
+    private var subtitle: String? {
+        guard selection.mode == .archive || selection.mode == .restore else { return nil }
+        let current = project?.name ?? name
+        return current.isEmpty ? nil : current
     }
     private var actionTitle: String {
         switch selection.mode {
@@ -64,80 +78,178 @@ struct ProjectManageView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: CESpace.m) {
-                    if loading { ProgressView("확인하는 중") }
-                    if store.isDemo { InlineNotice(tone: .accent, icon: "eye", title: "샘플은 읽기 전용입니다") }
-                    if selection.mode == .rename || selection.mode == .settings {
-                        Plate {
-                            VStack(alignment: .leading, spacing: CESpace.s) {
-                                Text("프로젝트 이름").font(CEFont.meta).foregroundStyle(CE.ink2)
-                                TextField("프로젝트 이름", text: $name).setupInput(active: nameFocused)
-                                    .focused($nameFocused)
-                                    .onSubmit { Task { await submit() } }
-                                if selection.mode == .settings {
-                                    Text("폴더 · 새로 뜨는 직원부터 적용됩니다").font(CEFont.meta).foregroundStyle(CE.ink2)
-                                    TextField("폴더", text: $cwd).setupInput().autocorrectionDisabled()
-                                }
-                            }
-                        }.disabled(!editable || succeeded)
-                    } else if selection.mode == .archive {
-                        Text("목록에서 숨기고 IAMCEO가 관리하는 세션을 잠재웁니다. 기록은 남으며 보관함에서 꺼낼 수 있습니다. 직접 실행한 CLI는 종료하지 않습니다.")
-                            .font(CEFont.body).foregroundStyle(CE.ink2)
-                        ForEach(Array(blockers.enumerated()), id: \.offset) { _, row in
-                            InlineNotice(title: row.0, detail: row.1, actionTitle: "\(row.2.title)에서 확인", action: {
-                                Task { await store.selectProject(id: selection.projectID); router.go(row.2); dismiss() }
-                            })
-                        }
-                        Button("다시 확인") { Task { await load() } }.ceSecondaryButton().disabled(loading || working || store.isDemo)
+        // While a change is being sent the sheet stays: the round close (and Esc) does nothing, as 취소 is disabled.
+        CESheet(title, subtitle: subtitle, icon: icon, width: 500, onClose: { if !working { dismiss() } }) {
+            VStack(alignment: .leading, spacing: CESpace.m) {
+                if loading {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("확인하는 중입니다").font(CEFont.secondary).foregroundStyle(CE.ink2)
+                    }
+                }
+                if store.isDemo { InlineNotice(tone: .accent, icon: "eye", title: "샘플은 읽기 전용입니다") }
+                switch selection.mode {
+                case .rename, .settings: form
+                case .archive: archiveBody
+                case .restore:
+                    explanation("프로젝트 목록에 다시 표시합니다. 보관 때문에 멈춘 전달이 있으면 기존 지시가 이어질 수 있습니다.")
+                }
+                if let error {
+                    // Archive: a failed check (or a refused archive) is retried right here; the footer stays 취소 + 보관.
+                    if selection.mode == .archive && blockers.isEmpty {
+                        InlineNotice(tone: .danger, title: error, actionTitle: "다시 확인", action: recheck,
+                                     actionDisabled: !canRecheck)
                     } else {
-                        Text("프로젝트 목록에 다시 표시합니다. 보관 때문에 멈춘 전달이 있으면 기존 지시가 이어질 수 있습니다.")
-                            .font(CEFont.body).foregroundStyle(CE.ink2)
+                        InlineNotice(tone: .danger, title: error)
                     }
-                    if let error { InlineNotice(tone: .danger, title: error) }
-                    if checking {
-                        InlineNotice(title: "변경 결과를 확인 중입니다", detail: "같은 요청은 다시 보내지 않습니다.", actionTitle: "결과 확인", action: {
-                            Task { await store.recheckProject(id: selection.projectID) }
-                        })
-                    }
-                    if succeeded {
-                        InlineNotice(tone: .success, icon: "checkmark.circle", title: selection.mode == .restore ? "프로젝트를 보관함에서 꺼냈습니다" : "저장했습니다")
-                        if selection.mode == .restore {
-                            Button("프로젝트 열기") {
-                                Task {
-                                    await store.selectProject(id: selection.projectID)
-                                    guard store.selectedProjectID == selection.projectID, !store.isArchive else { return }
-                                    router.go(.home); dismiss(); onOpen?()
-                                }
-                            }.ceSecondaryButton()
-                        }
-                    }
-                }.padding(CESpace.l)
+                }
+                if checking {
+                    InlineNotice(title: "변경 결과를 확인 중입니다", detail: "같은 요청은 다시 보내지 않습니다.", actionTitle: "결과 확인", action: {
+                        Task { await store.recheckProject(id: selection.projectID) }
+                    })
+                }
+                if succeeded {
+                    InlineNotice(tone: .success, icon: "checkmark.circle", title: selection.mode == .restore ? "프로젝트를 보관함에서 꺼냈습니다" : "저장했습니다")
+                }
             }
-            .background { AmbientBackground() }
-            .navigationTitle(title)
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(succeeded ? "닫기" : "취소") { dismiss() }.keyboardShortcut(.cancelAction).disabled(working)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(actionTitle) { Task { await submit() } }.disabled(!canSubmit)
-                }
+        } footer: {
+            Button(succeeded ? "닫기" : "취소") { dismiss() }.ceSecondaryButton().disabled(working)
+            if succeeded && selection.mode == .restore {
+                Button("프로젝트 열기") { openRestored() }
+                    .ceProminentButton()
+                    .keyboardShortcut(.defaultAction)
+            } else {
+                Button(actionTitle) { Task { await submit() } }
+                    .ceProminentButton()
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canSubmit)
             }
         }
-        .font(CEFont.body)
-        .foregroundStyle(CE.ink)
-        .ceSheetSize(width: 560, height: 480)
         .interactiveDismissDisabled(working)
         .task { namespace = store.writeNamespace; await load() }
         .onChange(of: loaded) { _, ready in
             if ready && selection.mode == .rename { nameFocused = true }
         }
         .onChange(of: store.writeNamespace) { _, _ in dismiss() }
+    }
+
+    // MARK: Pieces
+
+    /// 이름 (and 폴더 in settings), straight on the sheet: no card inside a popup.
+    private var form: some View {
+        VStack(alignment: .leading, spacing: CESpace.m) {
+            field("이름") {
+                TextField("프로젝트 이름", text: $name)
+                    .font(CEFont.body)
+                    .ceField()
+                    .overlay { if nameFocused { focusRing } }
+                    .focused($nameFocused)
+                    .onSubmit { Task { await submit() } }
+            }
+            if selection.mode == .settings {
+                field("폴더", note: "새로 뜨는 직원부터 적용됩니다.") {
+                    TextField("폴더", text: $cwd)
+                        .font(CEFont.mono)
+                        .ceField()
+                        .autocorrectionDisabled()
+                }
+            }
+        }
+        .disabled(!editable || succeeded)
+    }
+
+    private func field<Input: View>(_ label: String, note: String? = nil, @ViewBuilder input: () -> Input) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label).font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink2)
+            input()
+            if let note { Text(note).font(CEFont.meta).foregroundStyle(CE.ink3) }
+        }
+    }
+
+    private var focusRing: some View {
+        RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
+            .strokeBorder(CE.accent.opacity(0.75), lineWidth: 1.5)
+            .allowsHitTesting(false)
+    }
+
+    /// What archiving does, then anything that stops it: one amber box, a row per reason, each with a quiet link to the
+    /// screen where it is settled (instead of a stack of separate warning boxes).
+    @ViewBuilder private var archiveBody: some View {
+        explanation("목록에서 숨기고 IAMCEO가 관리하는 세션을 잠재웁니다. 기록은 남으며 보관함에서 꺼낼 수 있습니다. 직접 실행한 CLI는 종료하지 않습니다.")
+        let rows = blockers
+        if !rows.isEmpty {
+            let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.circle").foregroundStyle(CE.attention)
+                        Text("먼저 정리해야 보관할 수 있습니다").foregroundStyle(CE.ink)
+                    }
+                    .font(CEFont.rowTitle)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: 8)
+                    // Settled it on another screen? Check again here (quiet, next to the list it refreshes).
+                    quietLink("다시 확인", icon: "arrow.clockwise", action: recheck)
+                        .disabled(!canRecheck)
+                        .help("정리한 뒤 다시 확인합니다")
+                }
+                .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 2)
+                ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                    if index > 0 { Rectangle().fill(CE.attention.opacity(0.14)).frame(height: 1).padding(.leading, 16) }
+                    blockerRow(row)
+                }
+            }
+            .padding(.bottom, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(CE.attention.opacity(0.07), in: shape)
+            .overlay { shape.strokeBorder(CE.attention.opacity(0.22)) }
+        }
+    }
+
+    private func blockerRow(_ row: (String, String, Destination)) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.0).font(CEFont.secondary.weight(.semibold)).foregroundStyle(CE.ink)
+                // Mac keeps two lines (the rest on hover); iPhone has no hover, so it shows every name.
+                Text(row.1).font(CEFont.meta).foregroundStyle(CE.ink3)
+                    .lineLimit(isMac ? 2 : nil).fixedSize(horizontal: false, vertical: true)
+                    .help(row.1)
+            }
+            Spacer(minLength: 8)
+            quietLink("\(row.2.title)에서 확인", trailingChevron: true) {
+                Task { await store.selectProject(id: selection.projectID); router.go(row.2); dismiss() }
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+
+    /// Small accent text link (no button chrome) for actions inside the amber box. Icons are decoration only, so
+    /// VoiceOver reads just the title.
+    private func quietLink(_ title: String, icon: String? = nil, trailingChevron: Bool = false,
+                           action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            QuietLinkLabel(title: title, icon: icon, trailingChevron: trailingChevron)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityLabel(title)
+    }
+
+    private var canRecheck: Bool { !loading && !working && !store.isDemo }
+    private func recheck() { Task { await load() } }
+
+    private func explanation(_ text: String) -> some View {
+        Text(text).font(CEFont.secondary).foregroundStyle(CE.ink2).lineSpacing(3)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func openRestored() {
+        Task {
+            await store.selectProject(id: selection.projectID)
+            guard store.selectedProjectID == selection.projectID, !store.isArchive else { return }
+            router.go(.home); dismiss(); onOpen?()
+        }
     }
 
     private func load() async {
@@ -194,13 +306,45 @@ struct ProjectManageView: View {
     }
 }
 
+/// Label of the quiet accent links in the archive popup; greyed while its button is disabled.
+private struct QuietLinkLabel: View {
+    @Environment(\.isEnabled) private var isEnabled
+    let title: String
+    let icon: String?
+    let trailingChevron: Bool
+    var body: some View {
+        HStack(spacing: 4) {
+            if let icon { Image(systemName: icon).font(.system(size: 9.5, weight: .bold)).accessibilityHidden(true) }
+            Text(title)
+            if trailingChevron {
+                Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold)).accessibilityHidden(true)
+            }
+        }
+        .font(CEFont.meta.weight(.semibold))
+        .foregroundStyle(isEnabled ? CE.accent : CE.ink3)
+        .frame(minHeight: isMac ? 22 : 44)
+        .contentShape(Rectangle())
+    }
+}
+
 private struct ProjectManagementSheets: ViewModifier {
     @Environment(Router.self) private var router
     let enabled: Bool
     func body(content: Content) -> some View {
         content.sheet(item: Binding(get: { enabled ? router.projectManagement : nil }, set: {
             if enabled { router.projectManagement = $0 }
-        })) { ProjectManageView(selection: $0).id($0.id) }
+        })) { ProjectManageView(selection: Self.reviewed($0)).id($0.id) }
+    }
+
+    /// Review hook for the read-only sample (DEBUG only): `--manage-mode archive|settings|restore` opens the popup that
+    /// `--sheet rename` asks for in that mode instead, so every mode can be screenshotted.
+    private static func reviewed(_ selection: ProjectManagementSelection) -> ProjectManagementSelection {
+        #if DEBUG
+        if LaunchOptions.demo, let mode = LaunchOptions.value(after: "--manage-mode").flatMap(ProjectManagementMode.init(rawValue:)) {
+            return ProjectManagementSelection(projectID: selection.projectID, mode: mode)
+        }
+        #endif
+        return selection
     }
 }
 extension View {

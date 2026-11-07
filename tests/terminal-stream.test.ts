@@ -503,6 +503,27 @@ describe("terminal stream", () => {
     expect((await f.orch.patchMemberConfig(f.member.id, { effortOverride: "ultra" })).effortOverride).toBe("ultra");
     expect((await f.orch.updateSettings({ codexRanks: { lead: { effort: "ultra" } } })).codexRanks.lead.effort).toBe("ultra");
     expect(f.store.requireMember(f.member.id).effortOverride).toBe("ultra");
+    for (const v2 of [false, true]) {
+      await f.orch.updateSettings({ codexRanks: { lead: { model: "future", effort: "ultra" } } });
+      const requestHeaders = { ...headers, ...(v2 ? { "X-IAMCEO-Contract": "2", "If-Match": `"${f.store.settingsRevision()}"` } : {}) };
+      const reset = await fetch(`${f.origin}/api/settings`, { method: "PUT", headers: requestHeaders, body: JSON.stringify({ codexRanks: { lead: { model: "other" } } }) });
+      expect(reset.status).toBe(200);
+      const body = await reset.json(), settings = v2 ? body.settings : body;
+      expect(settings.codexRanks.lead).toEqual({ model: "other", effort: null });
+      expect(settings.resetEfforts).toEqual(["codexRanks.lead.effort"]);
+      expect(f.store.getSettings().codexRanks.lead).toEqual({ model: "other", effort: null });
+      expect(f.store.getSettings().resetEfforts).toBeUndefined();
+      const explicit = await fetch(`${f.origin}/api/settings`, { method: "PUT", headers, body: JSON.stringify({ codexRanks: { lead: { model: "other", effort: "ultra" } } }) });
+      expect(explicit.status).toBe(400);
+      expect(f.store.getSettings().codexRanks.lead).toEqual({ model: "other", effort: null });
+    }
+    await f.orch.updateSettings({ codexRanks: { lead: { model: "future", effort: "ultra" } } });
+    const direct = await f.orch.updateSettings({ codexRanks: { lead: { model: "other" } } });
+    expect(direct.codexRanks.lead.effort).toBeNull();
+    expect(direct.resetEfforts).toEqual(["codexRanks.lead.effort"]);
+    const v2direct = await f.orch.updateSettingsV2({ codexRanks: { lead: { model: "future" } } }, { expectedRevision: f.store.settingsRevision() });
+    expect(v2direct.settings.codexRanks.lead).toEqual({ model: "future", effort: null });
+    expect(v2direct.settings.resetEfforts).toBeUndefined();
   });
 
   test("release without any control attach never waits for size restoration", async () => {

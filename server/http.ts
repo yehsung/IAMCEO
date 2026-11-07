@@ -466,7 +466,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
   const { config, store, orch, bus } = ctx;
   const models = new ModelCatalogReader(config);
   const folders = new Folders(ctx.folderHome);
-  const github = new GitHub(folders);
+  const github = new GitHub(folders, { ...process.env }, 600_000, { stateHome: config.home });
   const legacyProjectPatches = new Set<string>();
   // 재전송이 앞 요청의 orch 처리가 끝나기 전에 와도 두 번 전달되지 않게 한다.
   const inFlight = new Map<string, Promise<unknown>>();
@@ -864,13 +864,16 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       if (contractV2(req)) {
         const expected = precondition(req);
         const body = await parseBody(req, SettingsSchema);
-        models.requireSettings(body, store.getSettings());
+        const normalized = models.settingsPatch(body, store.getSettings());
         if (!orch.updateSettingsV2) throw new ApiError(501, "검토 버전이 있는 설정 변경을 지원하지 않습니다");
-        return Response.json(await orch.updateSettingsV2(body, expected));
+        const result = await orch.updateSettingsV2(normalized.patch, expected);
+        if (normalized.resetEfforts.length) result.settings = { ...result.settings, resetEfforts: normalized.resetEfforts };
+        return Response.json(result);
       }
       const body = await parseBody(req, SettingsSchema);
-      models.requireSettings(body, store.getSettings());
-      return Response.json(await orch.updateSettings(body));
+      const normalized = models.settingsPatch(body, store.getSettings());
+      const settings = await orch.updateSettings(normalized.patch);
+      return Response.json(normalized.resetEfforts.length ? { ...settings, resetEfforts: normalized.resetEfforts } : settings);
     }),
   ];
 }

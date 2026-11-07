@@ -292,10 +292,15 @@ extension APIClient {
 }
 
 // Server-side folder browsing. Paths here always belong to the connected server.
-struct ServerFolder: Codable, Sendable, Identifiable, Equatable {
+struct ServerFolder: Codable, Sendable, Equatable {
     let name: String
     let path: String
-    var id: String { path }
+}
+struct ServerFolderRow: Sendable, Identifiable {
+    struct ID: Hashable, Sendable { let name: String; let ordinal: Int }
+    let folder: ServerFolder
+    let ordinal: Int
+    var id: ID { ID(name: folder.name, ordinal: ordinal) }
 }
 struct FolderListing: Codable, Sendable, Equatable {
     let path: String
@@ -303,6 +308,9 @@ struct FolderListing: Codable, Sendable, Equatable {
     let home: String
     let entries: [ServerFolder]
     var truncated: Bool? = nil
+    var rows: [ServerFolderRow] {
+        entries.enumerated().map { ServerFolderRow(folder: $0.element, ordinal: $0.offset) }
+    }
 }
 enum FolderBrowserResult: Sendable { case listing(FolderListing), legacy }
 struct FolderCrumb: Identifiable, Equatable {

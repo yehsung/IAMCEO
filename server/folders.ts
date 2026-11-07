@@ -1,5 +1,5 @@
 import { constants, type Stats } from "node:fs";
-import { access, lstat, mkdir, readdir, realpath, stat } from "node:fs/promises";
+import { access, lstat, mkdir, opendir, realpath, rmdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ApiError } from "./store.ts";
@@ -13,7 +13,11 @@ export function folderName(input: string): string {
 }
 
 export class Folders {
-  constructor(private readonly homePath = homedir()) {}
+  constructor(private readonly homePath = homedir(), private readonly hooks: {
+    beforeMkdir?: () => Promise<void>;
+    afterMkdir?: () => Promise<void>;
+    onEntry?: () => void;
+  } = {}) {}
   async home(): Promise<string> { return realpath(this.homePath); }
   async directory(input?: string): Promise<string> {
     const home = await this.home();
@@ -36,12 +40,22 @@ export class Folders {
   async list(input?: string) {
     const path = await this.directory(input), home = await this.home();
     const entries: { name: string; path: string }[] = [];
-    // Sort before the cap so the same first 500 folders appear on each visit.
-    let children;
-    try { children = await readdir(path, { withFileTypes: true }); }
-    catch { throw new ApiError(403, "폴더를 열 수 없습니다"); }
-    children.sort((a, b) => a.name.localeCompare(b.name));
+    // Bound enumeration as well as the response, including hidden files and links.
+    const children = [];
     let truncated = false;
+    try {
+      const directory = await opendir(path, { bufferSize: 1 });
+      try {
+        for (let count = 0; count < 2000; count++) {
+          const child = await directory.read();
+          if (!child) break;
+          this.hooks.onEntry?.();
+          children.push(child);
+          if (count === 1999) truncated = true;
+        }
+      } finally { await directory.close(); }
+    } catch { throw new ApiError(403, "폴더를 열 수 없습니다"); }
+    children.sort((a, b) => a.name.localeCompare(b.name));
     for (const child of children) {
       if (child.name.startsWith(".") || (!child.isDirectory() && !child.isSymbolicLink())) continue;
       try {
@@ -53,20 +67,30 @@ export class Folders {
     return { path, parent: path === home ? null : dirname(path), home, entries, ...(truncated ? { truncated: true } : {}) };
   }
   async create(parent: string, input: string): Promise<{ name: string; path: string }> {
-    const name = folderName(input), path = join(await this.directory(parent), name);
-    try { await mkdir(path); }
+    const name = folderName(input), checkedParent = await this.directory(parent), path = join(checkedParent, name);
+    await this.hooks.beforeMkdir?.();
+    try { await mkdir(path, { mode: 0o755 }); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new ApiError(409, "같은 이름의 폴더가 있습니다");
       throw new ApiError(403, "폴더를 만들 수 없습니다");
     }
-    return { name, path };
-  }
-  /** Only the directory reserved by this job may be removed after a failed clone. */
-  async stillOwned(path: string, identity: Stats): Promise<boolean> {
+    let created: Stats | undefined;
     try {
-      if (await this.directory(dirname(path)) !== dirname(path)) return false;
-      const current = await lstat(path);
-      return current.isDirectory() && !current.isSymbolicLink() && current.dev === identity.dev && current.ino === identity.ino;
-    } catch { return false; }
+      created = await lstat(path);
+      await this.hooks.afterMkdir?.();
+      const item = await lstat(path);
+      if (item.isSymbolicLink() || !item.isDirectory() || item.dev !== created.dev || item.ino !== created.ino ||
+          await this.directory(checkedParent) !== checkedParent || await this.directory(path) !== path) {
+        throw new Error("folder changed");
+      }
+    } catch {
+      // Only the newly created, empty item. Never follow links or recurse.
+      try {
+        const current = await lstat(path);
+        if (created && current.dev === created.dev && current.ino === created.ino && !current.isSymbolicLink()) await rmdir(path);
+      } catch { /* A replacement or a nonempty item must be preserved. */ }
+      throw new ApiError(403, "폴더를 만들 수 없습니다");
+    }
+    return { name, path };
   }
 }

@@ -1652,7 +1652,9 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private async updateSettingsOnce(patch: SettingsPatch): Promise<Settings> {
-    this.models.requireSettings(patch, this.store.getSettings());
+    const normalized = this.models.settingsPatch(patch, this.store.getSettings());
+    patch = normalized.patch;
+    const response = (settings: Settings): Settings => normalized.resetEfforts.length ? { ...settings, resetEfforts: normalized.resetEfforts } : settings;
     if (this.archiving.size) throw new ApiError(409, "프로젝트 보관을 처리하는 중입니다");
     const before = this.store.getSettings();
     if (this.runners.has("core")) {
@@ -1660,7 +1662,7 @@ export class Orchestrator implements OrchestratorApi {
       const settings = this.store.patchSettings({ ...patch, backend: "core" });
       await this.refreshConnection();
       for (const member of this.store.listAllMembers()) if (this.configPending(member)) void this.pump(member.id);
-      return settings;
+      return response(settings);
     }
     let settings: Settings;
     if (patch.backend && patch.backend !== before.backend) {
@@ -1680,7 +1682,7 @@ export class Orchestrator implements OrchestratorApi {
     await this.refreshConnection();
     // 쉬고 있는 세션은 곧바로 새 설정으로 맞춘다. 응답을 칸 여는 시간만큼 붙잡지 않는다.
     for (const m of this.store.listAllMembers()) if (this.configPending(m)) void this.pump(m.id);
-    return settings;
+    return response(settings);
   }
 
   private requireNotSwitching(): void {

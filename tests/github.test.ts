@@ -56,7 +56,7 @@ test("clone is async, full clone arguments, no interactive credentials", async (
   expect(response.status).toBe(202); const { jobId } = await response.json();
   expect((await (await f.request("/api/github/clone/" + jobId)).json()).status).toBe("running");
   const job = await finish(jobId); expect(job.status).toBe("done"); expect(job.path).toBe(join(f.home, "new"));
-  expect(readFileSync(join(job.path, "arguments"), "utf8").trim().split("\n")).toEqual(["repo", "clone", "owner/new", job.path]);
+  expect(readFileSync(join(job.path, "arguments"), "utf8").trim().split("\n")).toEqual(["repo", "clone", "owner/new", ".", "--", "-c", "protocol.file.allow=never", "-c", "core.hooksPath=/dev/null"]);
   expect(readFileSync(join(job.path, "prompt"), "utf8")).toBe("0");
 });
 test("failure removes only reserved target and hides credentials", async () => {
@@ -77,12 +77,12 @@ test("duplicate, invalid repo/name and outside parent are refused", async () => 
 });
 test("git fallback uses argument array and timed out jobs clean up", async () => {
   const onlyGit = mkdtempSync("/private/tmp/iamceo-only-git-");
-  executable("git", 'printf "%s\\n" "$@" > "$3/args"', onlyGit);
+  executable("git", 'printf "%s\\n" "$@" > "./args"', onlyGit);
   const service = new GitHub(new Folders(f.home), { PATH: onlyGit, IAMCEO_TEST: "1" });
   const { jobId } = await service.clone({ repo: "owner/fallback", parent: f.home });
   for (let n = 0; n < 100 && service.job(jobId).status === "running"; n++) await Bun.sleep(10);
   expect(service.job(jobId).status).toBe("done");
-  expect(readFileSync(join(f.home, "fallback/args"), "utf8").trim().split("\n")).toEqual(["clone", "https://github.com/owner/fallback.git", join(f.home, "fallback")]);
+  expect(readFileSync(join(f.home, "fallback/args"), "utf8").trim().split("\n")).toEqual(["-c", "protocol.file.allow=never", "-c", "core.hooksPath=/dev/null", "clone", "https://github.com/owner/fallback.git", "."]);
   executable("git", 'exec /bin/sleep 10', onlyGit);
   const slow = new GitHub(new Folders(f.home), { PATH: onlyGit, IAMCEO_TEST: "1" }, 25);
   const job = await slow.clone({ repo: "owner/timeout", parent: f.home });
@@ -96,7 +96,7 @@ test("only three concurrent clones may run", async () => {
 });
 test("timeout kills git descendants before cleaning the target", async () => {
   const tools = mkdtempSync("/private/tmp/iamceo-forked-git-");
-  executable("git", '(/bin/sleep 0.2; /bin/mkdir -p "$3"; printf leaked > "$3/late") &\nwait', tools);
+  executable("git", '(/bin/sleep 0.2; printf leaked > "./late") &\nwait', tools);
   const service = new GitHub(new Folders(f.home), { PATH: tools, IAMCEO_TEST: "1" }, 25);
   const { jobId } = await service.clone({ repo: "owner/descendant", parent: f.home });
   for (let n = 0; n < 100 && service.job(jobId).status === "running"; n++) await Bun.sleep(10);

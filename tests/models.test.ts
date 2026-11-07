@@ -183,3 +183,28 @@ describe("CLI model catalog (isolated fake homes only)", () => {
     } finally { await server.stop(); store.db.close(); }
   });
 });
+
+// F4/F6: shared string efforts and normalization are exercised without CLI processes.
+test("rank model-only normalization clears incompatible efforts, preserves compatible/explicit values, and does not mutate input", () => {
+  const f = fixture();
+  writeFileSync(f.codexPath, JSON.stringify({ models: [
+    { ...model("future", 1), supported_reasoning_levels: [{ effort: "ultra" }] },
+    { ...model("other", 2), supported_reasoning_levels: [{ effort: "tiny" }] },
+    { ...model("compatible", 3), supported_reasoning_levels: [{ effort: "ultra" }] },
+  ] }));
+  const store = new Store(openDb(join(f.home, "test.db")), new Bus());
+  try {
+    const current = store.patchSettings({ codexRanks: { manager: { model: "future", effort: "ultra" }, lead: { model: "future", effort: "ultra" }, staff: { model: "future", effort: "ultra" } } });
+    const input = { codexRanks: { manager: { model: "other" }, lead: { model: "compatible" }, staff: { model: "other", effort: "tiny" } } };
+    const normalized = f.reader.settingsPatch(input, current);
+    expect(normalized.patch.codexRanks).toEqual({ manager: { model: "other", effort: null }, lead: { model: "compatible" }, staff: { model: "other", effort: "tiny" } });
+    expect(normalized.resetEfforts).toEqual(["codexRanks.manager.effort"]);
+    expect(input.codexRanks.manager).toEqual({ model: "other" });
+    expect(store.getSettings().codexRanks.manager.effort).toBe("ultra");
+    expect(() => f.reader.settingsPatch({ codexRanks: { manager: { model: "other", effort: "ultra" } } }, current)).toThrow("지원하지 않는 effort");
+    expect(() => f.reader.settingsPatch({ codexRanks: { manager: { effort: "tiny" } } }, current)).toThrow("지원하지 않는 effort");
+    const saved = store.patchSettings(normalized.patch);
+    expect(saved.codexRanks.manager.effort).toBeNull(); expect(saved.codexRanks.lead.effort).toBe("ultra");
+    expect(saved.codexRanks.staff.effort).toBe("tiny"); expect(saved.resetEfforts).toBeUndefined();
+  } finally { store.db.close(); }
+});

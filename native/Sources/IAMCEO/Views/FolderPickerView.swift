@@ -48,7 +48,8 @@ struct FolderPickerView: View {
                                         Text("이 폴더를 그대로 쓰거나 새 폴더를 만드세요").font(CEFont.meta).foregroundStyle(CE.ink3)
                                     }.frame(maxWidth: .infinity).padding(.vertical, 40)
                                 }
-                                ForEach(listing.entries) { folder in
+                                ForEach(listing.rows) { row in
+                                    let folder = row.folder
                                     Button { Task { await navigate(folder.path) } } label: {
                                         HStack(spacing: 10) {
                                             Image(systemName: "folder.fill").foregroundStyle(CE.accent.opacity(0.85))

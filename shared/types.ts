@@ -422,6 +422,8 @@ export interface AnswerApprovalReq { fingerprint: string; option: number; /** �
 
 /** 전체 설정 하나가 전부다. 프로젝트마다 따로 두지 않는다. */
 export interface Settings {
+  /** PUT response only: inherited efforts cleared by a rank model change. */
+  resetEfforts?: (`${"ranks" | "codexRanks"}.${Rank}.effort`)[];
   /** null 이면 아직 첫 실행 선택 전 */
   backend: Backend | null;
   permissionMode: PermissionMode;
@@ -522,7 +524,7 @@ export interface CreateProjectReq { name: string; cwd: string; goal?: string; st
 export interface CreateMemberReq { name: string; role?: string; cli?: CliProvider; modelOverride?: string | null }
 export interface PatchProjectReq { name?: string; cwd?: string; runnerEnabled?: boolean; now?: string; archived?: boolean }
 /** PUT /api/settings. ranks·codexRanks 는 고친 칸만 보내도 된다(나머지 유지). */
-export type SettingsPatch = Partial<Omit<Settings, "ranks" | "codexRanks">> & {
+export type SettingsPatch = Partial<Omit<Settings, "ranks" | "codexRanks" | "resetEfforts">> & {
   ranks?: Partial<Record<Rank, Partial<RankConfig>>>;
   codexRanks?: Partial<Record<Rank, Partial<RankConfig>>>;
 };

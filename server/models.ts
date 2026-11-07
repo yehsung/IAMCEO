@@ -113,15 +113,32 @@ export class ModelCatalogReader {
     return { patch, resetOverrides };
   }
 
-  requireSettings(patch: SettingsPatch, current?: Settings): void {
-    for (const [cli, ranks] of [["claude", patch.ranks], ["codex", patch.codexRanks]] as const) {
-      for (const [key, rank] of Object.entries(ranks ?? {})) {
-        this.requireModel(cli, rank?.model);
-        const model = rank?.model === undefined ? current?.[cli === "codex" ? "codexRanks" : "ranks"][key as keyof Settings["ranks"]].model : rank.model;
-        this.requireEffort(cli, model, rank?.effort);
+  settingsPatch(input: SettingsPatch, current?: Settings): { patch: SettingsPatch; resetEfforts: NonNullable<Settings["resetEfforts"]> } {
+    const patch = { ...input };
+    const resetEfforts: NonNullable<Settings["resetEfforts"]> = [];
+    for (const [cli, field] of [["claude", "ranks"], ["codex", "codexRanks"]] as const) {
+      if (!input[field]) continue;
+      patch[field] = { ...input[field] };
+      for (const [key, rank] of Object.entries(input[field]!)) {
+        if (!rank) continue;
+        const rankKey = key as keyof Settings["ranks"];
+        this.requireModel(cli, rank.model);
+        const previous = current?.[field][rankKey];
+        const model = rank.model === undefined ? previous?.model : rank.model;
+        const effort = rank.effort === undefined ? previous?.effort : rank.effort;
+        if (rank.model !== undefined && rank.model !== previous?.model && rank.effort === undefined &&
+            effort != null && !this.efforts(cli, model).includes(effort)) {
+          patch[field]![rankKey] = { ...rank, effort: null };
+          resetEfforts.push(`${field}.${rankKey}.effort`);
+        } else {
+          this.requireEffort(cli, model, effort);
+        }
       }
     }
+    return { patch, resetEfforts };
   }
+
+  requireSettings(patch: SettingsPatch, current?: Settings): void { this.settingsPatch(patch, current); }
 
   private readList(cli: "claude" | "codex"): ModelList {
     const path = this.paths[cli];

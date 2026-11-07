@@ -16,6 +16,13 @@ final class FolderPickerTests: XCTestCase {
         let done = try JSONDecoder().decode(GitHubCloneJob.self, from: Data(#"{"status":"done","path":"/fake/home/repo"}"#.utf8))
         XCTAssertEqual(done.status, .done); XCTAssertEqual(done.path, "/fake/home/repo")
     }
+    func testFolderRowIDsUseNameAndOrdinalForAliasesAndRepeatedNames() throws {
+        let listing = try JSONDecoder().decode(FolderListing.self, from: Data(#"{"path":"/fake/home","parent":null,"home":"/fake/home","entries":[{"name":"actual","path":"/fake/home/actual"},{"name":"alias","path":"/fake/home/actual"},{"name":"alias","path":"/fake/home/actual"}]}"#.utf8))
+        XCTAssertEqual(Set(listing.rows.map(\.id)).count, 3)
+        XCTAssertEqual(listing.rows.map(\.folder.path), Array(repeating: "/fake/home/actual", count: 3))
+        XCTAssertEqual(listing.rows[1].id, ServerFolderRow.ID(name: "alias", ordinal: 1))
+        XCTAssertEqual(listing.rows.map(\.id), listing.rows.map(\.id))
+    }
     func testBreadcrumbsUseServerHomeAndNeverSiblingPrefix() {
         XCTAssertEqual(ServerFolderPaths.breadcrumbs(path: "/server/home/코드/앱", home: "/server/home"), [
             FolderCrumb(name: "홈", path: "/server/home"), FolderCrumb(name: "코드", path: "/server/home/코드"), FolderCrumb(name: "앱", path: "/server/home/코드/앱")

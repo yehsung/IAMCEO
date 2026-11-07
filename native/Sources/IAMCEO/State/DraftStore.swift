@@ -59,6 +59,8 @@ struct DraftUploadFailure: Codable, Identifiable {
     let id: UUID
     let name: String
     let detail: String
+    // Optional so older notices remain readable; a display name alone cannot identify an original.
+    let sourceID: String?
 }
 
 @MainActor @Observable
@@ -203,13 +205,20 @@ final class DraftStore {
             && token.draftGeneration == hosts[namespace]?.records[token.key]?.generation
     }
     func uploadFailures(for key: String) -> [DraftUploadFailure] { hosts[namespace]?.records[key]?.uploadFailures ?? [] }
-    func failUpload(name: String, token: DraftUploadToken, id: UUID = UUID(), detail: String) {
+    func failUpload(name: String, token: DraftUploadToken, id: UUID = UUID(), sourceID: String? = nil, detail: String) {
         var record = hosts[token.namespace]?.records[token.key] ?? Record()
         var failures = record.uploadFailures ?? []
         failures.removeAll { $0.id == id }
-        failures.append(DraftUploadFailure(id: id, name: name, detail: detail))
+        failures.append(DraftUploadFailure(id: id, name: name, detail: detail, sourceID: sourceID))
         record.uploadFailures = failures
         hosts[token.namespace, default: Host()].records[token.key] = record
+        save()
+    }
+    func resolveUploadFailures(sourceID: String?, token: DraftUploadToken) {
+        guard let sourceID, isCurrentUpload(token),
+              let failures = hosts[token.namespace]?.records[token.key]?.uploadFailures,
+              failures.contains(where: { $0.sourceID == sourceID }) else { return }
+        hosts[token.namespace]?.records[token.key]?.uploadFailures = failures.filter { $0.sourceID != sourceID }
         save()
     }
     func dismissUploadFailures(for key: String) {

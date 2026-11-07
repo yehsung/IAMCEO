@@ -6,6 +6,7 @@ struct ComposerUpload: Identifiable {
     let id = UUID()
     let name: String
     let token: DraftUploadToken
+    let sourceID: String?
 }
 
 struct ComposerUploadContext {
@@ -45,9 +46,11 @@ final class ComposerAttachmentUploads {
 
     /// Register the complete batch synchronously, so send stays disabled before the Task starts.
     @discardableResult
-    func loadMedia(names: [String], context: ComposerUploadContext, store: AppStore,
+    func loadMedia(names: [String], sourceIDs: [String?] = [], context: ComposerUploadContext, store: AppStore,
                    load: @escaping @MainActor (Int) async throws -> [PhotoAttachmentFile]) -> Task<Void, Never> {
-        let batch = names.map { ComposerUpload(name: $0, token: context.token) }
+        let batch = names.enumerated().map { index, name in
+            ComposerUpload(name: name, token: context.token, sourceID: sourceIDs.indices.contains(index) ? sourceIDs[index] : nil)
+        }
         pending.append(contentsOf: batch)
         return Task {
             defer { pending.removeAll { item in batch.contains { $0.id == item.id } } }
@@ -58,32 +61,43 @@ final class ComposerAttachmentUploads {
                     try check(context, store: store)
                     let files = try await load(index)
                     defer { files.forEach { $0.cleanup() } }
-                    try check(context, store: store)
                     guard !files.isEmpty else { throw PhotoAttachmentError.unavailable }
                     for file in files {
-                        try check(context, store: store)
-                        try PhotoAttachment.validateSize(file.url)
-                        let data = try Data(contentsOf: file.url, options: .mappedIfSafe)
-                        let mime = UTType(filenameExtension: file.url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
-                        let attachment = await store.upload(data: data, filename: file.url.lastPathComponent, mime: mime,
-                                                            targetMemberID: context.targetMemberID)
-                        try check(context, store: store)
-                        guard attachment != nil else {
-                            throw APIError(status: 0, message: store.errorMessage ?? "첨부를 확인하지 못했습니다")
+                        // A promise can prepare several files. Each failure needs its own identity and name.
+                        let id = files.count == 1 ? item.id : UUID()
+                        let sourceID = files.count == 1 ? item.sourceID : nil
+                        do {
+                            try check(context, store: store)
+                            try PhotoAttachment.validateSize(file.url)
+                            let data = try Data(contentsOf: file.url, options: .mappedIfSafe)
+                            let mime = UTType(filenameExtension: file.url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+                            let attachment = await store.upload(data: data, filename: file.url.lastPathComponent, mime: mime,
+                                                                targetMemberID: context.targetMemberID)
+                            guard attachment != nil else {
+                                throw APIError(status: 0, message: store.errorMessage ?? "첨부를 확인하지 못했습니다")
+                            }
+                            // AppStore has committed this attachment. Readiness checks apply only to the next file.
+                            store.drafts.resolveUploadFailures(sourceID: sourceID, token: item.token)
+                        } catch {
+                            store.drafts.failUpload(name: file.url.lastPathComponent, token: item.token, id: id, sourceID: sourceID,
+                                                    detail: context.invalidationReason(in: store) ?? error.localizedDescription)
                         }
                     }
                 } catch {
                     // Write to the captured host/draft even after a switch, clear, disconnect, or view replacement.
-                    store.drafts.failUpload(name: item.name, token: item.token, id: item.id,
+                    store.drafts.failUpload(name: item.name, token: item.token, id: item.id, sourceID: item.sourceID,
                                             detail: context.invalidationReason(in: store) ?? error.localizedDescription)
                 }
             }
         }
     }
 
+    private func sourceID(for url: URL) -> String { "file:\(url.standardizedFileURL.absoluteString)" }
+
     @discardableResult
     func upload(_ urls: [URL], context: ComposerUploadContext, store: AppStore) -> Task<Void, Never> {
-        loadMedia(names: urls.map(\.lastPathComponent), context: context, store: store) { index in
+        loadMedia(names: urls.map(\.lastPathComponent), sourceIDs: urls.map { sourceID(for: $0) },
+                  context: context, store: store) { index in
             let url = urls[index]
             let access = url.startAccessingSecurityScopedResource()
             defer { if access { url.stopAccessingSecurityScopedResource() } }
@@ -101,14 +115,18 @@ final class ComposerAttachmentUploads {
             return false
         }
         if let reason = context.invalidationReason(in: store) {
-            store.drafts.failUpload(name: items[0].name, token: context.token, detail: reason)
+            store.drafts.failUpload(name: items[0].name, token: context.token, sourceID: sourceID(for: items[0]), detail: reason)
             return false
         }
         let date = Date()
-        loadMedia(names: items.map(\.name), context: context, store: store) { index in
+        loadMedia(names: items.map(\.name), sourceIDs: items.map { sourceID(for: $0) }, context: context, store: store) { index in
             try await items[index].prepare(date: date, index: index + 1)
         }
         return true
+    }
+    private func sourceID(for item: MacAttachmentItem) -> String? {
+        if case .file(let url) = item { return sourceID(for: url) }
+        return nil
     }
     #endif
 

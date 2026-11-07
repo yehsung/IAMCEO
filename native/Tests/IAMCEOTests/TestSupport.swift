@@ -6,6 +6,7 @@ struct IsolatedTestHTTPReply: Sendable {
     var status: Int = 200
     var data: Data = Data("{}".utf8)
     var headers: [String: String] = ["Content-Type": "application/json"]
+    var beforeDelivery: (@Sendable () async -> Void)? = nil
 }
 
 /// Each session owns its handler/capture. Unmatched requests fail in URLProtocol;
@@ -56,14 +57,23 @@ private final class IsolatedTestURLProtocol: URLProtocol, @unchecked Sendable {
             guard let id = request.value(forHTTPHeaderField: "X-IAMCEO-Test-Fixture"),
                   let state = IsolatedTestHTTPRegistry.shared.get(id) else { throw URLError(.unsupportedURL) }
             let reply = try state.reply(to: request)
-            guard let url = request.url,
-                  let response = HTTPURLResponse(url: url, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers) else {
-                throw URLError(.badServerResponse)
-            }
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: reply.data)
-            client?.urlProtocolDidFinishLoading(self)
+            if let beforeDelivery = reply.beforeDelivery {
+                Task { @Sendable [self, reply, beforeDelivery] in
+                    await beforeDelivery()
+                    self.deliver(reply)
+                }
+            } else { deliver(reply) }
         } catch { client?.urlProtocol(self, didFailWithError: error) }
+    }
+    private func deliver(_ reply: IsolatedTestHTTPReply) {
+        guard let url = request.url,
+              let response = HTTPURLResponse(url: url, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: reply.data)
+        client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
 }

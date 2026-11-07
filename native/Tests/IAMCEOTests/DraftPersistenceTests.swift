@@ -70,6 +70,37 @@ final class DraftPersistenceTests: XCTestCase {
         XCTAssertEqual(drafts.pendingCount, 0)
     }
 
+    @MainActor func testUploadFailureResolutionPreservesLegacyOtherHostAndOtherDraftFailures() throws {
+        let legacy = try JSONDecoder().decode(DraftUploadFailure.self, from: Data("""
+        {"id":"00000000-0000-0000-0000-000000000001","name":"same.txt","detail":"old failure"}
+        """.utf8))
+        XCTAssertNil(legacy.sourceID)
+        let drafts = DraftStore(persist: false, namespace: "a")
+        let token = drafts.uploadToken(for: "key")
+        drafts.failUpload(name: legacy.name, token: token, id: legacy.id, detail: legacy.detail)
+        drafts.failUpload(name: "same.txt", token: token, sourceID: "source-a", detail: "A")
+        drafts.failUpload(name: "same.txt", token: token, sourceID: "source-b", detail: "B")
+        let otherDraft = drafts.uploadToken(for: "other")
+        drafts.failUpload(name: "same.txt", token: otherDraft, sourceID: "source-a", detail: "other draft")
+        drafts.selectNamespace("b")
+        let otherHost = drafts.uploadToken(for: "key")
+        drafts.failUpload(name: "same.txt", token: otherHost, sourceID: "source-a", detail: "other host")
+        drafts.resolveUploadFailures(sourceID: "source-a", token: token)
+        XCTAssertEqual(drafts.uploadFailures(for: "key").count, 1)
+        drafts.selectNamespace("a")
+        drafts.resolveUploadFailures(sourceID: "source-a", token: token)
+        XCTAssertEqual(drafts.uploadFailures(for: "key").count, 3, "An old connection token must not clear failures")
+        let current = drafts.uploadToken(for: "key")
+        drafts.resolveUploadFailures(sourceID: nil, token: current)
+        XCTAssertEqual(drafts.uploadFailures(for: "key").count, 3)
+        drafts.resolveUploadFailures(sourceID: "source-a", token: current)
+        XCTAssertEqual(drafts.uploadFailures(for: "key").map(\.detail), ["old failure", "B"])
+        XCTAssertEqual(drafts.uploadFailures(for: "other").count, 1)
+        drafts.clear("key")
+        drafts.resolveUploadFailures(sourceID: "source-b", token: current)
+        XCTAssertEqual(drafts.uploadFailures(for: "key").count, 2, "A deleted draft token must not clear failures")
+    }
+
     @MainActor func testAcceptedSnapshotConsumesOnlyOriginalHostAndDeletionGeneration() {
         let drafts = DraftStore(persist: false, namespace: "a")
         drafts.setText("A", for: "key")

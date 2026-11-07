@@ -164,6 +164,8 @@ export interface Member {
   parallel: boolean; // ultracode 켬
   queuedCount: number; // 전달 대기 중 입력 수
   lastError: string | null;
+  /** CLI가 마지막으로 일한 시각(활동 turn_start/turn_end/tool/tool_result의 최신 ISO 시각). 기록이 없으면 null. */
+  lastActiveAt: string | null;
   updatedAt: string;
   createdAt: string;
   /** 추가 메타데이터의 누락은 구형/미지원이다. 기존 status/문맥 창 필드는 유지한다. */

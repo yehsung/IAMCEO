@@ -10,9 +10,8 @@ import SwiftUI
 // The pixel scale comes from the width, always a whole number of device pixels: as large as fits (iPhone up to about
 // 2.33pt per sprite pixel; Mac and iPad up to 2.5pt, and up to 3.5pt for a single band that fills the width), one
 // step smaller when that saves a band. A wide column never grows past `cellMax`: a team too small to fill the width
-// is centred instead of spread thin. The rest area (휴게) is a narrow column of armchairs at the right edge on Mac
-// and iPad, spanning the scene's height, one or two chairs wide by team size; on iPhone a full-width row of armchairs
-// below the bands, as many rows as rest now. Desks depend only on the member list and the width, never on who rests.
+// is centred instead of spread thin. There is no rest area: everyone stays at its own desk, resting or asleep there
+// too, so desks depend only on who has one (`OfficeSeating`) and the width, never on anyone's state.
 //
 // Nothing else is drawn: no wall, no decoration. The walk lattice (every 4px) is logical only.
 
@@ -48,7 +47,7 @@ struct OfficeDesk: Identifiable {
     let plate: OfficePlateSlot
     /// The screen of a bottom-row monitor (14x5).
     let screen: CGRect?
-    /// The owner is away (쉬는 중, 잠듦, offline) or there is no owner yet: the desk recedes, its chair is empty.
+    /// The owner is absent (offline, unknown) or there is no owner yet: the desk recedes, its chair is empty.
     let away: Bool
 }
 
@@ -61,18 +60,6 @@ struct OfficeFurniture {
     var desk: Int?
 }
 
-/// An armchair in the rest area.
-struct OfficeRestSpot {
-    /// Top-left of the armchair (22x18).
-    let chair: CGPoint
-    /// The open floor a walk passes through on the way in and out (beside the chair on Mac, in front of it on iPhone).
-    let approach: CGPoint
-    /// Anchor of the sitting frames.
-    var point: CGPoint { CGPoint(x: chair.x + 11, y: chair.y + 14) }
-    /// Where a walk ends (just in front of the seat).
-    var arrive: CGPoint { CGPoint(x: chair.x + 11, y: chair.y + 15) }
-}
-
 struct OfficeMap {
     /// In sprite pixels.
     var size: CGSize = .zero
@@ -83,11 +70,8 @@ struct OfficeMap {
     var desks: [OfficeDesk] = []
     var furniture: [OfficeFurniture] = []
     var shadows = PixelArt()
-    var rests: [OfficeRestSpot] = []
-    /// The rest area.
-    var zone: CGRect = .zero
     var walk = OfficeWalkGrid()
-    /// The desks only: walks and rest places carry over when the rest area grows or shrinks.
+    /// The desks only: walks carry over while it stays the same.
     var layout = ""
 }
 
@@ -207,7 +191,7 @@ struct OfficeWalkGrid {
 
 /// Per-desk facts that change the static art.
 struct OfficeDeskDecor: Equatable {
-    /// The owner is away (쉬는 중, 잠듦, offline) or there is no owner yet: the desk recedes.
+    /// The owner is absent (offline, unknown) or there is no owner yet: the desk recedes.
     var away = false
 }
 
@@ -225,12 +209,8 @@ struct OfficeLayoutInput {
     var width: CGFloat
     /// Device pixels per point.
     var displayScale: CGFloat
-    /// Mac and regular-width iPad: up to as many columns as fit comfortably, the rest area a column at the right edge.
-    /// iPhone: 3 columns (4 when that saves a band), the rest area a row below the bands.
+    /// Mac and regular-width iPad: up to as many columns as fit comfortably. iPhone: 3 columns (4 when that saves a band).
     var wide: Bool
-    /// Members resting right now. iPhone only: the rest row below the bands holds that many (whole rows). The wide
-    /// rest column is sized by the team instead, so the desks never move when someone starts or stops resting.
-    var resting: Int
     var decor: OfficeDecor
     /// A forced pixel size (DEBUG review hook).
     var forcedPixel: CGFloat?
@@ -252,16 +232,6 @@ extension OfficeMap {
     static let boostHeight: CGFloat = 520
     /// Floor between two bands (the bottom row's nameplates and the next top row's).
     static let bandAisle: CGFloat = 12
-    /// Mac rest column: an armchair (22px) with 4px each side, and a corridor before it.
-    static let restColumn = 30
-    static let restCorridor = 8
-    /// Mac: the least vertical distance between two armchairs (a lone column may stack them at `restStackTight`
-    /// before a second column is added), and the most. iPhone: the least horizontal one, and between rows.
-    static let restStack: CGFloat = 28
-    static let restStackTight: CGFloat = 24
-    static let restStackMax: CGFloat = 40
-    static let restPitch = 26
-    static let restRowPitch: CGFloat = 34
     /// How far a desk that recedes is faded.
     static let awayOpacity = 0.55
 
@@ -275,8 +245,6 @@ extension OfficeMap {
         /// Columns of the grid, and the width of one.
         var columns: Int
         var cell: Int
-        /// Mac rest columns.
-        var restColumns: Int
     }
 
     /// The scene's height in points with `bands` full bands at pixel size `p` (the same arithmetic as `build`).
@@ -294,13 +262,12 @@ extension OfficeMap {
     /// - iPhone: 3 columns at the largest pixel up to 2.33pt, or 4 (at `cellPhone4`) when that saves a band or leaves
     ///   fewer empty places in the last one.
     /// Either way one step down in pixel size is taken when it saves a band (or empty places), never more.
-    private static func grid(_ input: OfficeLayoutInput, columnsNeeded c: Int, restColumns: Int, lead: Bool) -> Grid {
+    private static func grid(_ input: OfficeLayoutInput, columnsNeeded c: Int, lead: Bool) -> Grid {
         let scale = max(1, input.displayScale.rounded())
         func px(_ points: CGFloat) -> Int { Int((points * scale + 0.01).rounded(.down)) }
         let base = px(input.wide ? 2.5 : 7.0 / 3.0)
         let top = input.wide ? px(3.5) : base
         let bottom = max(1, Int(((input.wide ? 1.5 : 4.0 / 3.0) * scale).rounded()))
-        let rest = input.wide ? restColumns * restColumn + restCorridor : 0
 
         struct Option {
             var grid: Grid
@@ -312,10 +279,10 @@ extension OfficeMap {
         func option(_ k: Int, columns n: Int?, forced: CGFloat? = nil) -> Option? {
             let p = forced ?? CGFloat(k) / scale
             let width = Int((input.width / p).rounded(.down))
-            let band = width - rest
+            let band = width
             guard band >= 52, forced != nil || k <= base || c >= 2 else { return nil }
             guard c > 0 else {
-                return Option(grid: Grid(pixel: p, width: width, columns: 0, cell: band, restColumns: restColumns),
+                return Option(grid: Grid(pixel: p, width: width, columns: 0, cell: band),
                               bands: 0, empty: 0, devicePixels: k)
             }
             let columns: Int
@@ -332,8 +299,7 @@ extension OfficeMap {
             if forced == nil, k > base {
                 guard bands == 1, sceneHeight(bands: 1, pixel: p, lead: lead) <= boostHeight else { return nil }
             }
-            return Option(grid: Grid(pixel: p, width: width, columns: columns, cell: min(band / columns, cellMax),
-                                     restColumns: restColumns),
+            return Option(grid: Grid(pixel: p, width: width, columns: columns, cell: min(band / columns, cellMax)),
                           bands: bands, empty: bands * columns - c, devicePixels: k)
         }
 
@@ -360,42 +326,29 @@ extension OfficeMap {
         // Very narrow: the smallest pixel, as many columns as fit.
         let p = input.forcedPixel ?? CGFloat(bottom) / scale
         let width = max(60, Int((input.width / p).rounded(.down)))
-        let band = max(34, width - rest)
+        let band = max(34, width)
         let n = c == 0 ? 0 : max(1, min(c, band / cellMin))
-        return Grid(pixel: p, width: width, columns: n, cell: n == 0 ? band : band / n, restColumns: restColumns)
+        return Grid(pixel: p, width: width, columns: n, cell: n == 0 ? band : band / n)
     }
 
     static func build(_ input: OfficeLayoutInput) -> OfficeMap {
         let leadMember = input.members.first { $0.kind != "worker" }
         var seats = input.members.filter { $0.id != leadMember?.id }.map { Entry(id: $0.id, memberID: $0.id) }
         if input.placeholder { seats.append(Entry(id: "office-placeholder", memberID: nil)) }
-        let map = build(input, lead: leadMember, seats: seats, restColumns: 1)
-        guard input.wide else { return map }
-        // The rest column is sized by the team, never by who rests now (its width narrows the desks, so a change
-        // would move them): a second column when the whole team would not fit in one, even stacked tighter.
-        // Beyond what two hold, the last chair is shared.
-        guard input.members.count > restCapacity(restRoom(map.zone.height), pitch: restStackTight) else { return map }
-        return build(input, lead: leadMember, seats: seats, restColumns: 2)
+        return build(input, lead: leadMember, seats: seats)
     }
 
-    /// The vertical room for armchair tops in a rest column of height `zone` (below its label, above its last chair).
-    private static func restRoom(_ zone: CGFloat) -> CGFloat { max(0, zone - 16 - 18 - 4) }
-
-    /// Armchairs that fit in one rest column with at least `pitch` between them.
-    private static func restCapacity(_ room: CGFloat, pitch: CGFloat) -> Int { Int(room / pitch) + 1 }
-
-    private static func build(_ input: OfficeLayoutInput, lead leadMember: Member?, seats: [Entry], restColumns: Int) -> OfficeMap {
+    private static func build(_ input: OfficeLayoutInput, lead leadMember: Member?, seats: [Entry]) -> OfficeMap {
         var map = OfficeMap()
         let n = seats.count
         let c = (n + 1) / 2
-        let grid = grid(input, columnsNeeded: c, restColumns: restColumns, lead: leadMember != nil)
+        let grid = grid(input, columnsNeeded: c, lead: leadMember != nil)
         let p = grid.pixel
         let ph = CGFloat(Int((16 / p).rounded(.up)))
         map.pixel = p
         map.plateHeight = Int(ph)
         let mapW = CGFloat(grid.width)
-        let restW = input.wide ? CGFloat(restColumns * restColumn + restCorridor) : 0
-        let bandArea = mapW - restW
+        let bandArea = mapW
         let bandsW = grid.columns > 0 ? CGFloat(grid.columns * grid.cell) : bandArea
         // Leftover pixels (a few, or the room a small team cannot fill at `cellMax`) go evenly to the sides.
         let bandX = ((bandArea - bandsW) / 2).rounded(.down)
@@ -509,62 +462,7 @@ extension OfficeMap {
             }
         }
 
-        // The rest area.
-        var height: CGFloat
-        if input.wide {
-            // A column at the right edge from the lead row down to the last band, armchairs stacked evenly.
-            height = (bottom + 8).rounded(.up)
-            let zone = CGRect(x: mapW - CGFloat(restColumns * restColumn), y: 4, width: CGFloat(restColumns * restColumn),
-                              height: height - 8)
-            map.zone = zone
-            // As many armchairs as the whole team needs (one column stacks them a little tighter before a second
-            // column is added), no more than fit, spread evenly and centred in the column's height.
-            let room = restRoom(zone.height)
-            let fit = restCapacity(room, pitch: restColumns == 1 ? restStackTight : restStack)
-            let perColumn = max(1, min(fit, (input.members.count + restColumns - 1) / restColumns))
-            let pitch = perColumn > 1 ? min((room / CGFloat(perColumn - 1)).rounded(.down), restStackMax) : 0
-            let top = zone.minY + 16 + ((room - CGFloat(perColumn - 1) * pitch) / 2).rounded(.down)
-            // Row by row, so a second column fills alongside the first instead of after it.
-            for i in 0..<perColumn {
-                for col in 0..<restColumns {
-                    let chair = CGPoint(x: zone.minX + CGFloat(col * restColumn) + 4, y: top + CGFloat(i) * pitch)
-                    map.rests.append(OfficeRestSpot(chair: chair, approach: CGPoint(x: chair.x - 4, y: chair.y + 15)))
-                }
-            }
-        } else {
-            // A full-width row below the bands (more rows for more resters), leaving floor at both ends for walkers;
-            // no more armchairs a row than the team has, spread evenly.
-            let zone0 = CGRect(x: 2, y: bottom + 6, width: mapW - 4, height: 0)
-            let inner = zone0.width - 20
-            let perRow = max(1, min(max(2, Int(inner) / restPitch), input.members.count))
-            let rows = max(1, (input.resting + perRow - 1) / perRow)
-            let step = (inner / CGFloat(perRow)).rounded(.down)
-            let rowW = step * CGFloat(perRow)
-            let x0 = (zone0.minX + (zone0.width - rowW) / 2).rounded(.down)
-            for r in 0..<rows {
-                let y = zone0.minY + 16 + CGFloat(r) * restRowPitch
-                for i in 0..<perRow {
-                    let chair = CGPoint(x: x0 + CGFloat(i) * step + ((step - 22) / 2).rounded(.down), y: y)
-                    map.rests.append(OfficeRestSpot(chair: chair, approach: CGPoint(x: chair.x + 11, y: chair.y + 25)))
-                }
-                // A row of armchairs, with whoever sits in them, is one block: walkers go round its ends.
-                blockers.append(CGRect(x: x0 + 2, y: y - 6, width: rowW - 4, height: 25))
-            }
-            let zoneH = 16 + CGFloat(rows) * 18 + CGFloat(rows - 1) * (restRowPitch - 18) + 12
-            map.zone = CGRect(x: zone0.minX, y: zone0.minY, width: zone0.width, height: zoneH)
-            height = (map.zone.maxY + 4).rounded(.up)
-        }
-        for spot in map.rests {
-            var canvas = PixelCanvas(x: Int(spot.chair.x), y: Int(spot.chair.y), width: 22, height: 18)
-            canvas.stamp(OfficeArt.chairRest, x: Int(spot.chair.x), y: Int(spot.chair.y))
-            items.append(OfficeFurniture(bounds: CGRect(x: spot.chair.x, y: spot.chair.y, width: 22, height: 18),
-                                         sortY: spot.chair.y + 13, art: canvas.art()))
-            shadows.append(CGRect(x: spot.chair.x + 2, y: spot.chair.y + 17, width: 18, height: 2))
-            if input.wide {
-                blockers.append(CGRect(x: spot.chair.x - 1, y: spot.chair.y - 6, width: 24, height: 25))
-            }
-        }
-
+        let height = (bottom + 8).rounded(.up)
         map.size = CGSize(width: mapW, height: height)
         map.furniture = items.sorted { $0.sortY < $1.sortY }
         var shade = PixelCanvas(x: 0, y: 0, width: Int(mapW), height: Int(height))
@@ -591,8 +489,44 @@ extension OfficeMap {
         }
         map.walk = lattice
 
-        map.layout = ["\(grid.width)", "\(p)", "\(grid.columns)x\(grid.cell)", input.wide ? "R\(restColumns)" : "B",
+        map.layout = ["\(grid.width)", "\(p)", "\(grid.columns)x\(grid.cell)", input.wide ? "W" : "N",
                       "\(Int(ph))", map.desks.map(\.id).joined(separator: ",")].joined(separator: "|")
         return map
+    }
+}
+
+// MARK: - Seating
+
+/// Who has a desk. The lead always does; of everyone else at most `workerDesks` do. Members who need the CEO or are
+/// working come first, then the most recently active (their CLI's last turn or tool call); the longest unused give up
+/// their desks. Desks keep the members' display order, so seating never shuffles who sits where among the seated.
+enum OfficeSeating {
+    static let workerDesks = 10
+
+    /// - Returns: the members with a desk, in `members` order, and the rest, most recently active first.
+    static func split(_ members: [Member], limit: Int = workerDesks) -> (seated: [Member], benched: [Member]) {
+        let workers = members.filter { $0.kind == "worker" }
+        guard workers.count > limit else { return (members, []) }
+        let ranked = workers.enumerated().sorted { a, b in
+            let (pa, pb) = (priority(a.element), priority(b.element))
+            if pa != pb { return pa < pb }
+            let (ta, tb) = (lastActive(a.element), lastActive(b.element))
+            if ta != tb { return ta > tb }
+            return a.offset < b.offset
+        }
+        let kept = Set(ranked.prefix(limit).map(\.element.id))
+        let seated = members.filter { $0.kind != "worker" || kept.contains($0.id) }
+        let benched = ranked.dropFirst(limit).map(\.element)
+        return (seated, benched)
+    }
+
+    /// 0: needs the CEO or is working, so it must be seen at a desk. 1: everyone else.
+    private static func priority(_ member: Member) -> Int {
+        ["working", "waiting", "blocked", "error"].contains(member.status) ? 0 : 1
+    }
+
+    /// An ISO-8601 time that sorts as text (older servers: when the member last said what it was doing). "" = never.
+    private static func lastActive(_ member: Member) -> String {
+        member.lastActiveAt ?? member.nowAt ?? ""
     }
 }

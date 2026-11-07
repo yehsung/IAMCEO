@@ -7,8 +7,8 @@ import UIKit
 
 // 팀: who is doing what, in which CLI state, and the next action for each member.
 // CLI state is never presented as task completion; only a `완료` report says that.
-// The team is drawn as an office (OfficeView): every session is a small figure that works at its own desk or rests in
-// the lounge. Provider model, context meter, folder and terminal commands live in the member detail.
+// The team is drawn as an office (OfficeView): every session is a small figure that works, rests or sleeps at its own
+// desk. Provider model, context meter, folder and terminal commands live in the member detail.
 
 private enum TeamFont {
     #if os(macOS)
@@ -923,7 +923,7 @@ struct MemberDetailView: View {
         let approvalHoldsMain = m.status == "blocked" && !manual && !legacy
         // Only when there is a CLI to look at: an open pane, or a state that has one.
         let hasPane = !(m.paneId ?? "").isEmpty && !["asleep", "offline", "gone"].contains(m.status)
-        let showsTerminal = !manual && !legacy && !approvalHoldsMain && (hasPane || ["working", "waiting", "idle"].contains(m.status))
+        let showsTerminal = !manual && !legacy && !approvalHoldsMain && (hasPane || ["working", "waiting", "idle"].contains(m.status) || TerminalAvailability.needsWake(m) || store.terminalWake.members.contains(m.id))
         VStack(alignment: .leading, spacing: 8) {
             TeamWrapLayout(spacing: 8, lineSpacing: 8) {
                 Group {
@@ -939,10 +939,13 @@ struct MemberDetailView: View {
                     .ceSecondaryButton().controlSize(.small)
                     .help("\(m.name)와 주고받은 대화")
                 if showsTerminal {
-                    Button { openTerminal(m) } label: { Label(isMac ? "터미널 직접 열기" : "터미널", systemImage: "terminal") }
+                    Button { openTerminal(m) } label: {
+                        Label(TerminalAvailability.title(m, waking: store.terminalWake.members.contains(m.id), normal: isMac ? "터미널 직접 열기" : "터미널"), systemImage: "terminal")
+                    }
                         .ceSecondaryButton().controlSize(.small)
+                        .disabled(!store.canOpenTerminal(m))
                         .help(isMac ? "이 CLI 터미널을 열고 바로 직접 입력합니다. 여는 동안 자동 전달이 멈춥니다." : terminalHelp(m))
-                        .accessibilityLabel("\(m.name) 터미널 열기")
+                        .accessibilityLabel("\(m.name) \(TerminalAvailability.title(m, waking: store.terminalWake.members.contains(m.id)))")
                 }
                 if !manual && busyTurn {
                     actionButton("중단", icon: "stop.circle", busyTitle: "멈추는 중", name: "interrupt", enabled: canAct,
@@ -951,7 +954,7 @@ struct MemberDetailView: View {
                     }
                 }
                 if !manual && wakeable {
-                    actionButton("깨우기", icon: "sunrise", busyTitle: "깨우는 중", name: "resume", enabled: canAct && runnerOn && !legacy,
+                    actionButton("깨우기", icon: "sunrise", busyTitle: "깨우는 중", name: "resume", enabled: canAct && runnerOn && !legacy && !store.terminalWake.members.contains(m.id),
                                  help: runnerOn ? "세션을 다시 엽니다" : "실행이 꺼져 있어 깨울 수 없습니다") {
                         Task { await run("resume", success: "다시 열라고 보냈습니다. 세션이 열리면 상태가 바뀝니다.") { await store.memberAction(m, action: "resume") } }
                     }
@@ -1285,7 +1288,7 @@ struct MemberDetailView: View {
     }
 
     /// The shell presents the terminal sheet from the window root (Mac and iOS).
-    private func openTerminal(_ m: Member) { router.openTerminal(m.id) }
+    private func openTerminal(_ m: Member) { router.openTerminal(m, store: store) }
 
     // MARK: Logic
 

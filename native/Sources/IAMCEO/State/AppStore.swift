@@ -38,7 +38,13 @@ final class AppStore: ProjectManagementStore {
     var endpoint: String
     var accessCode: String
     private(set) var connectionStatus: ConnectionStatus = .disconnected
-    var errorMessage: String?
+    // Keep the server reason available for internal decisions; only the UI getter translates it.
+    private(set) var rawErrorMessage: String?
+    var errorMessage: String? {
+        get { rawErrorMessage.map(TerminalPresentation.message) }
+        set { rawErrorMessage = newValue }
+    }
+    let terminalWake = TerminalWake()
     private(set) var isLoading = false
     /// A QR pairing claim is in flight (phone).
     private(set) var isPairing = false
@@ -891,7 +897,7 @@ final class AppStore: ProjectManagementStore {
     }
     /// Like `mutate`, but also returns the server/transport error so callers can tell "the server refused" from
     /// "we never heard back". `error == nil` with no value means the request was not sent.
-    private func perform<T: Sendable>(_ key: String, refreshAfter: Bool = true, allowArchived: Bool = false, operation: (APIClient) async throws -> T) async -> (value: T?, error: Error?) {
+    private func perform<T: Sendable>(_ key: String, refreshAfter: Bool = true, allowArchived: Bool = false, cancellationAware: Bool = false, operation: (APIClient) async throws -> T) async -> (value: T?, error: Error?) {
         guard !isDemo else { errorMessage = "샘플은 읽기 전용입니다. 실제 Mac에 연결하면 바꿀 수 있습니다."; return (nil, nil) }
         guard let api, canWrite || (allowArchived && connectionStatus == .connected && !isRevalidating && !isDemo) else { errorMessage = isArchive ? "보관한 프로젝트는 읽기 전용입니다." : "서버에 연결된 뒤에 바꿀 수 있습니다."; return (nil, nil) }
         guard !pendingActions.contains(key) else { return (nil, nil) }
@@ -900,12 +906,14 @@ final class AppStore: ProjectManagementStore {
         defer { if epoch == generation { pendingActions.remove(key) } }
         do {
             let result = try await operation(api)
+            if cancellationAware && Task.isCancelled { return (nil, nil) }
             guard epoch == generation else { return (nil, nil) }
             if refreshAfter { await refresh() }
             guard epoch == generation else { return (nil, nil) }
             return (result, nil)
         } catch {
             guard epoch == generation else { return (nil, error) }
+            if cancellationAware && Task.isCancelled { return (nil, error) }
             handle(error)
             // A conflict means our copy is stale (answered elsewhere, closed, reopened): show the truth right away.
             if (error as? APIError)?.status == 409 {
@@ -1174,6 +1182,34 @@ final class AppStore: ProjectManagementStore {
         if action == "compact" { return await compactMember(member) }
         let result: Member? = await mutate("member:\(member.id)") { api in try await api.request("/api/members/\(APIClient.segment(member.id))/\(action)", method: "POST", timeout: 150) }
         return result != nil
+    }
+
+    func canOpenTerminal(_ member: Member) -> Bool {
+        !terminalWake.members.contains(member.id)
+            && (!TerminalAvailability.needsWake(member)
+                || (canWrite && !pendingActions.contains("member:\(member.id)")))
+    }
+
+    /// Uses the same write guard, pending member key and error handling as other member actions.
+    @discardableResult func wakeTerminal(_ member: Member, timeout: Duration = .seconds(20)) async -> Bool {
+        guard canWrite, !pendingActions.contains("member:\(member.id)"),
+              TerminalAvailability.needsWake(member) else { return false }
+        let namespace = writeNamespace
+        let epoch = generation, projectEpoch = projectGeneration
+        let outcome = await terminalWake.wake(memberID: member.id, timeout: timeout, resume: {
+            let result: (value: Member?, error: Error?) = await self.perform("member:\(member.id)", refreshAfter: false, cancellationAware: true) { api in
+                try await api.request("/api/members/\(APIClient.segment(member.id))/resume", method: "POST", timeout: 20)
+            }
+            if result.value != nil { return nil }
+            return result.error?.localizedDescription ?? self.errorMessage ?? "요청을 보낼 수 없습니다"
+        }, current: {
+            self.members.first { $0.id == member.id }
+        }, allowed: {
+            self.writeNamespace == namespace && self.generation == epoch && self.projectGeneration == projectEpoch && self.canWrite
+        })
+        guard writeNamespace == namespace, generation == epoch, projectGeneration == projectEpoch else { return false }
+        if let message = outcome.message { errorMessage = message }
+        return outcome == .ready && canWrite && members.first(where: { $0.id == member.id }).map(TerminalAvailability.isReady) == true
     }
     @discardableResult func patchMember(_ member: Member, provider: String, model: String?, effort: String?) async -> Bool {
         let req = PatchMemberRequest(cli: provider, modelOverride: model, effortOverride: effort)

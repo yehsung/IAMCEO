@@ -4,7 +4,7 @@ import { loadConfig } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
 import { Store } from "../server/store.ts";
-import type { Backend, Member } from "../shared/types.ts";
+import type { Backend, Member, WsEvent } from "../shared/types.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult } from "../server/runner/types.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
@@ -46,7 +46,8 @@ function fixture(maxConcurrentTurns = 2) {
   const isolated = createIsolatedRuntime();
   const config = loadConfig({ IAMCEO_HOME: isolated.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: isolated.socketPath, IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin });
   const db = openDb(config.dbPath);
-  const store = new Store(db, new Bus());
+  const bus = new Bus();
+  const store = new Store(db, bus);
   store.patchSettings({ maxConcurrentTurns, boardTidyHours: 0 });
   const project = store.createProject({ name: "Workflow", cwd: isolated.paths.work });
   const runner = new FakeRunner();
@@ -63,8 +64,24 @@ function fixture(maxConcurrentTurns = 2) {
     return store.createMember({ projectId: project.id, handle: kind === "conductor" ? "lead" : `worker${i}`, name: `Member ${i}`, kind, origin, backend: "core", status: "idle", cwd: isolated.paths.work, paneId: `pane${i}`, sessionId: `session${i}` });
   }
   cleanups.push(async () => { for (const current of orchestrators) await current.shutdown(); db.close(); await isolated.stop(); });
-  return { isolated, config, store, project, runner, orch, orchestrator, member, db };
+  return { isolated, config, store, project, runner, orch, orchestrator, member, db, bus };
 }
+
+test("turn start/end member notifications already include the corresponding work timestamp", async () => {
+  const f = fixture();
+  const member = f.member();
+  const events: WsEvent[] = [];
+  f.bus.subscribe(event => events.push(event));
+  await f.orch.sendUserMessage(f.project.id, { text: "작업 시작", targetMemberId: member.id });
+  await until(() => f.store.listActivity(member.id).some(activity => activity.kind === "turn_start"));
+  const start = f.store.listActivity(member.id).find(activity => activity.kind === "turn_start")!;
+  expect(events.some(event => event.type === "member" && event.member.id === member.id && event.member.status === "working" && event.member.lastActiveAt === start.at)).toBe(true);
+  events.length = 0;
+  f.runner.end(f.store.requireMember(member.id));
+  await until(() => f.store.listActivity(member.id).some(activity => activity.kind === "turn_end"));
+  const end = f.store.listActivity(member.id).find(activity => activity.kind === "turn_end")!;
+  expect(events.some(event => event.type === "member" && event.member.id === member.id && event.member.status === "idle" && event.member.lastActiveAt === end.at)).toBe(true);
+});
 
 test("todo cancellation during an awaited send creates one correction after receipt", async () => {
   const f = fixture(); const member = f.member();

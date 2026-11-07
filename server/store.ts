@@ -328,6 +328,7 @@ function toMember(r: Row): Member {
     parallel: !!r.parallel,
     queuedCount: r.queued_count,
     lastError: r.last_error,
+    lastActiveAt: r.last_active_at ?? null,
     updatedAt: r.updated_at,
     createdAt: r.created_at,
     statusObservation: r.status_observation_json === null ? null : json<Member["statusObservation"]>(r.status_observation_json),
@@ -1975,6 +1976,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const member = this.requireMember(memberId);
       const clipped = text.length > MAX_ACTIVITY_TEXT ? `${text.slice(0, MAX_ACTIVITY_TEXT)}…` : text;
       const inserted = this.row("INSERT INTO activity (member_id, at, kind, text, delivery_event_key) VALUES (?, ?, ?, ?, ?) RETURNING *", memberId, nowIso(), kind, clipped, eventKey ?? null)!;
+      if (kind === "turn_start" || kind === "turn_end" || kind === "tool" || kind === "tool_result") {
+        // updated_at/직원 알림은 건드리지 않는다. 시계가 뒤로 가도 최신 작업 시각을 보존한다.
+        this.run("UPDATE members SET last_active_at = ? WHERE id = ? AND (last_active_at IS NULL OR last_active_at < ?)", inserted.at, memberId, inserted.at);
+      }
       // 마지막 턴 시작은 남긴다. 긴 턴이 500줄을 넘어도 재시작 뒤 '이번 턴'의 시작을 알아야 보고를 살린다.
       this.run(
         `DELETE FROM activity WHERE member_id = ? AND id <= COALESCE(

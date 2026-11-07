@@ -5,10 +5,11 @@ import SwiftUI
 // that spans the plate. Every session is the same small pixel mascot with its own desk (desk, laptop or monitor,
 // keyboard, chair; nothing else); its body colour is its state, and one small accessory tells members apart (the lead
 // wears the crown). Working ones type at a lit screen; one waiting for the CEO looks up (or turns its chair around)
-// with a "?", one at an approval prompt waves with a "!", an error squashes flat with dizzy eyes. Desks whose owner is
-// away recede; those residents sit in the armchairs of the rest area (휴게), asleep ones melting into them. A state
-// change makes the resident HOP (BFS over the floor) to its new place. Sessions keep their work names; residents never
-// carry letters or initials. Map, art, sprites, cast and drawing live in Views/Office/.
+// with a "?", one at an approval prompt waves with a "!", an error squashes flat with dizzy eyes. Nobody leaves the
+// desk: one on a break folds its paws on it, content; an asleep one slumps onto it under drifting z's. At most
+// `OfficeSeating.workerDesks` team desks: past that the longest unused give theirs up and wait in a quiet row under the
+// scene until they work again. Sessions keep their work names; residents never carry letters or initials. Map, art,
+// sprites, cast and drawing live in Views/Office/.
 
 /// Help text of the 팀장 추가 button (office header, and the bare button when there is no team yet).
 @MainActor func teamAddMemberHelp(_ store: AppStore, _ project: Project) -> String {
@@ -45,16 +46,19 @@ private struct OfficeStateDot: View {
     }
 }
 
-/// Away from the desk: on a break, asleep, offline or in an unknown state. Such desks recede.
+/// Absent: offline or in an unknown state (no body is drawn). Such desks recede, their chairs empty.
 private func officeAway(_ status: String) -> Bool {
-    !["working", "waiting", "blocked", "error"].contains(status)
+    !["working", "waiting", "blocked", "error", "idle", "asleep"].contains(status)
+}
+
+/// A quieter nameplate: asleep or absent.
+private func officeDim(_ status: String) -> Bool {
+    status == "asleep" || officeAway(status)
 }
 
 /// Same rule as the member detail: no terminal for a session started by hand or by a legacy runner.
 private func officeAllowsTerminal(_ member: Member) -> Bool {
-    if member.origin == "manual" || member.origin == "adopted" { return false }
-    if let backend = member.backend, backend != "core" { return false }
-    return true
+    TerminalAvailability.supportsTerminal(member)
 }
 
 /// What the message box (and accessibility) says a member is doing.
@@ -216,20 +220,20 @@ struct OfficeView: View {
         Dictionary(grouping: decisions.filter { $0.status == "open" }, by: { $0.memberId ?? "" }).mapValues(\.count)
     }
 
-    @ViewBuilder private func stage(_ list: [Member]) -> some View {
+    @ViewBuilder private func stage(_ everyone: [Member]) -> some View {
         let open = openDecisions
-        let placeholder = !project.isHq && !list.contains { $0.kind == "worker" }
+        let placeholder = !project.isHq && !everyone.contains { $0.kind == "worker" }
+        // At most `OfficeSeating.workerDesks` team desks; the rest wait in a row under the scene.
+        let (list, benched) = OfficeSeating.split(everyone)
         let decor = decor(list)
         let wideLayout = isMac || wide
-        // Only the iPhone rest row follows who rests now; the wide layout never changes with it.
-        let resting = wideLayout ? 0 : list.filter { $0.status == "idle" || $0.status == "asleep" }.count
         let input = OfficeLayoutInput(members: list, placeholder: placeholder, width: width, displayScale: layoutScale,
-                                      wide: wideLayout, resting: resting, decor: decor, forcedPixel: forcedPixel)
-        let key = ["\(width)", "\(layoutScale)", wideLayout ? "W" : "N", placeholder ? "P" : "", "\(resting)",
+                                      wide: wideLayout, decor: decor, forcedPixel: forcedPixel)
+        let key = ["\(width)", "\(layoutScale)", wideLayout ? "W" : "N", placeholder ? "P" : "",
                    list.map { "\($0.id):\($0.kind == "worker" ? "w" : "l")" }.joined(separator: ","),
                    list.map { (decor.desks[$0.id]?.away ?? true) ? "1" : "0" }.joined()].joined(separator: "|")
         let (map, revision) = cache.map(key: key) { OfficeMap.build(input) }
-        let fresh = OfficeCast.build(map: map, members: list, previous: cast)
+        let fresh = OfficeCast.build(map: map, members: list)
         let current = cast.flatMap { $0.signature == fresh.signature ? $0 : nil } ?? fresh
         let p = map.pixel
         let mapSize = CGSize(width: map.size.width * p, height: map.size.height * p)
@@ -266,7 +270,10 @@ struct OfficeView: View {
             .onDisappear { visible = false }
             .modifier(OfficeScrollVisibility(visible: $visible))
 
-            OfficeMessageBox(subject: boxSubject(list), queue: boxQueue(list), decisions: open, compactAt: compactAt,
+            if !benched.isEmpty {
+                OfficeBench(members: benched, decisions: open) { id in router.memberID = id }
+            }
+            OfficeMessageBox(subject: boxSubject(everyone), queue: boxQueue(everyone), decisions: open, compactAt: compactAt,
                              still: reduceMotion) { id in router.memberID = id }
         }
         .accessibilityElement(children: .contain)
@@ -340,8 +347,7 @@ struct OfficeView: View {
         let map = scene.map
         let byID = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return ZStack(alignment: .topLeading) {
-            OfficeRestZone(zone: CGRect(x: map.zone.minX * p, y: map.zone.minY * p, width: map.zone.width * p, height: map.zone.height * p))
-            ForEach(marks(map: map, cast: scene.cast)) { mark in
+            ForEach(marks(map: map)) { mark in
                 let shape = RoundedRectangle(cornerRadius: isMac ? 10 : 8, style: .continuous)
                 shape.fill(CE.accent.opacity(mark.strong ? 0.15 : 0.10))
                     .overlay { shape.strokeBorder(CE.accent.opacity(mark.strong ? 0.5 : 0.35), lineWidth: 1) }
@@ -404,15 +410,11 @@ struct OfficeView: View {
     // MARK: Hover and selection
 
     /// Soft accent areas under the scene: the selected member (stronger) and the hovered or focused one. Each covers
-    /// the member's desk with its resident, and the resident's armchair when it rests in the rest area.
-    private func marks(map: OfficeMap, cast: OfficeCast) -> [OfficeMark] {
+    /// the member's desk with its resident.
+    private func marks(map: OfficeMap) -> [OfficeMark] {
         var result: [OfficeMark] = []
         func add(_ id: String, strong: Bool) {
             guard let desk = map.desks.first(where: { ($0.memberID ?? $0.id) == id }) else { return }
-            if case .rest(let i, _)? = cast.placements[id], map.rests.indices.contains(i) {
-                let chair = map.rests[i].chair
-                result.append(OfficeMark(id: "\(id)-rest", rect: CGRect(x: chair.x - 3, y: chair.y - 10, width: 28, height: 31), strong: strong))
-            }
             result.append(OfficeMark(id: "\(id)-desk", rect: desk.cell, strong: strong))
         }
         let selected = router.memberID
@@ -448,7 +450,10 @@ struct OfficeView: View {
                 Button { openChat(member) } label: { Label("대화방 열기", systemImage: "bubble.left.and.bubble.right") }
                 Button { instruct(member) } label: { Label("지시", systemImage: "text.bubble") }
                 if officeAllowsTerminal(member) {
-                    Button { router.openTerminal(member.id) } label: { Label("터미널 열기", systemImage: "terminal") }
+                    Button { router.openTerminal(member, store: store) } label: {
+                        Label(TerminalAvailability.title(member, waking: store.terminalWake.members.contains(member.id)), systemImage: "terminal")
+                    }
+                    .disabled(!store.canOpenTerminal(member))
                 }
             } preview: {
                 OfficeContextPreview(member: member)
@@ -459,7 +464,12 @@ struct OfficeView: View {
             .accessibilityAction(named: "대화방 열기") { openChat(member) }
             .accessibilityAction(named: "지시") { instruct(member) }
             .accessibilityActions {
-                if officeAllowsTerminal(member) { Button("터미널 열기") { router.openTerminal(member.id) } }
+                if officeAllowsTerminal(member) {
+                    Button(TerminalAvailability.title(member, waking: store.terminalWake.members.contains(member.id))) {
+                        router.openTerminal(member, store: store)
+                    }
+                    .disabled(!store.canOpenTerminal(member))
+                }
             }
         } else {
             Color.clear
@@ -723,24 +733,6 @@ private struct OfficeFloorDots: View {
     }
 }
 
-/// The rest area: a very faint rounded zone of open floor with a tiny label.
-private struct OfficeRestZone: View {
-    let zone: CGRect
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-        ZStack(alignment: .topLeading) {
-            shape.fill(Color.white.opacity(0.035))
-                .frame(width: zone.width, height: zone.height)
-                .offset(x: zone.minX, y: zone.minY)
-            Text("휴게").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(CE.ink3)
-                .offset(x: zone.minX + 9, y: zone.minY + 6)
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-}
-
 /// The desks and chairs. Redrawn only when the map changes.
 private struct OfficeStaticLayer: View, Equatable {
     let map: OfficeMap
@@ -764,7 +756,7 @@ private struct OfficeStaticLayer: View, Equatable {
 // MARK: - Nameplate
 
 /// The session name on the outer side of its desk's row, with the state dot and, while decisions wait for the CEO,
-/// their count at the trailing end. An away member's plate recedes with its desk; the count never does.
+/// their count at the trailing end. An asleep or absent member's plate recedes; the count never does.
 private struct OfficeNameplate: View {
     let member: Member?
     var decisions = 0
@@ -772,7 +764,7 @@ private struct OfficeNameplate: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 5, style: .continuous)
-        let away = member.map { officeAway($0.status) } ?? true
+        let away = member.map { officeDim($0.status) } ?? true
         let counted = member != nil && decisions > 0
         HStack(spacing: 4) {
             if let member {
@@ -844,6 +836,68 @@ private struct OfficeContextPreview: View {
         .padding(14)
         .frame(width: 280, alignment: .leading)
         .background(CE.plateRaisedSolid)
+    }
+}
+
+// MARK: - Bench
+
+/// Members without a desk (past `OfficeSeating.workerDesks`, the longest unused): one quiet row of small plates under the
+/// scene, most recently active first, each opening the member's detail. Working again brings a member back to a desk.
+private struct OfficeBench: View {
+    let members: [Member]
+    let decisions: [String: Int]
+    let open: (String) -> Void
+
+    private static let explanation = "오래 쉬어 책상을 비운 직원입니다. 일을 맡기면 다시 자리에 앉습니다."
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            HStack(spacing: 4) {
+                Text("자리 비움").font(.system(size: 11, weight: .semibold)).foregroundStyle(CE.ink3)
+                Text("\(members.count)").font(.system(size: 11, weight: .semibold)).foregroundStyle(CE.ink3).monospacedDigit()
+            }
+            .fixedSize()
+            .help(Self.explanation)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("자리 비움 \(members.count)명. " + Self.explanation)
+            TeamWrapLayout(spacing: 6, lineSpacing: 6) {
+                ForEach(members) { member in plate(member) }
+            }
+        }
+        .padding(.horizontal, isMac ? 2 : 4)
+    }
+
+    private func plate(_ member: Member) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        let count = decisions[member.id] ?? 0
+        let when = member.lastActiveAt.map { relativeTime($0) }
+        return Button { open(member.id) } label: {
+            HStack(spacing: 5) {
+                OfficeStateDot(status: member.status, size: 5)
+                Text(member.name).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(CE.ink2).lineLimit(1)
+                if let when, !when.isEmpty {
+                    Text(when).font(.system(size: 10)).foregroundStyle(CE.ink3).lineLimit(1)
+                }
+                if count > 0 {
+                    Text(count > 9 ? "9+" : "\(count)")
+                        .font(.system(size: 8.5, weight: .bold)).monospacedDigit()
+                        .foregroundStyle(Color(hex: 0x2B1708))
+                        .padding(.horizontal, 3)
+                        .frame(minWidth: 11, minHeight: 11)
+                        .background(CE.attention, in: Capsule())
+                }
+            }
+            .fixedSize()
+            .padding(.horizontal, 7).padding(.vertical, 3.5)
+            .background(Color(hex: 0x0E0A1F).opacity(0.3), in: shape)
+            .overlay { shape.strokeBorder(Color.white.opacity(0.07), lineWidth: 1) }
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .help("\(member.name) · \(officeStateLabel(member.status))" + (when.map { " · 마지막 작업 \($0)" } ?? "") + "\n" + Self.explanation)
+        .accessibilityLabel([member.name, officeStateLabel(member.status), when.map { "마지막 작업 \($0)" }, count > 0 ? "결재 \(count)건" : nil]
+            .compactMap { $0 }.joined(separator: ", "))
+        .accessibilityHint("대화방 정보 보기")
     }
 }
 

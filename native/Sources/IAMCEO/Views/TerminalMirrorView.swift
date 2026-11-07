@@ -333,7 +333,7 @@ struct TerminalMirrorView: View {
                 Button("작업 결과 다시 확인") { Task { await checkResult() } }
                     .ceSecondaryButton().controlSize(.small).disabled(!store.canWrite || pending)
             } else if let receipt = receipts.first {
-                Text(receipt.status == .applied ? "직접 조작 적용 확인 · 업무 완료를 뜻하지 않습니다." : receipt.error ?? "직접 조작이 거부됐습니다.")
+                Text(receipt.status == .applied ? "직접 조작 적용 확인 · 업무 완료를 뜻하지 않습니다." : TerminalPresentation.message(receipt.error ?? "직접 조작이 거부됐습니다."))
                     .font(CEFont.meta).foregroundStyle(CE.ink3)
             }
             if let inputSaveError {
@@ -342,7 +342,7 @@ struct TerminalMirrorView: View {
                 Button("입력 저장 다시 시도") { editInput(input) }.ceSecondaryButton().controlSize(.small)
             }
             if let issue = error ?? store.errorMessage {
-                Label(issue, systemImage: "exclamationmark.circle").font(CEFont.meta).foregroundStyle(CE.danger)
+                Label(TerminalPresentation.message(issue), systemImage: "exclamationmark.circle").font(CEFont.meta).foregroundStyle(CE.danger)
                     .lineLimit(3).layoutPriority(1)
             }
             if current.origin != "manual" && !keyboardUp {

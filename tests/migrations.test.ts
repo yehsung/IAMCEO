@@ -11,6 +11,7 @@ import type { IsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
 const at = "2026-11-07T00:00:00.123Z";
 const afterWindow = MIGRATIONS.findIndex((sql) => sql.includes("ADD COLUMN context_window INTEGER")) + 1;
+const beforeLastActive = MIGRATIONS.findIndex(sql => sql.includes("ADD COLUMN last_active_at TEXT"));
 const runtimes: IsolatedRuntime[] = [];
 const connections: Database[] = [];
 
@@ -33,6 +34,65 @@ function track(db: Database): Database {
 function version(db: Database): number {
   return db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
 }
+
+describe("last active timestamp migration", () => {
+  test("backfills MAX of work kinds once for 50,000 rows, keeps nulls/updatedAt, and reopens idempotently", () => {
+    const { path, runtime } = fixture();
+    expect(beforeLastActive).toBeGreaterThan(0);
+    const old = historicalDb(path, beforeLastActive);
+    old.query(`INSERT INTO members (id,project_id,handle,name,kind,origin,status,cwd,token,created_at,updated_at)
+      VALUES ('empty','p','empty','기록 없음','worker','runner','idle','/fixture','empty-token',?,?),
+      ('noise','p','noise','시스템 기록만','worker','runner','idle','/fixture','noise-token',?,?)`).run(at, at, at, at);
+    const insert = old.query("INSERT INTO activity (member_id,at,kind,text) VALUES (?,?,?,'기존 기록')");
+    const expected = "2026-11-07T01:00:00.000Z";
+    old.transaction(() => {
+      const kinds = ["turn_start", "turn_end", "tool", "tool_result"];
+      for (let i = 0; i < 50_000; i++) insert.run("m", at, kinds[i % kinds.length]);
+      // 가장 늦게 삽입된 줄이 아니라 가장 늦은 at을 고른다.
+      insert.run("m", expected, "tool_result");
+      insert.run("m", at, "turn_end");
+      for (const kind of ["system", "error", "text", "compact"]) {
+        insert.run("m", "2099-01-01T00:00:00.000Z", kind);
+        insert.run("noise", "2099-01-01T00:00:00.000Z", kind);
+      }
+    })();
+    old.close();
+    const started = performance.now();
+    const db = openDb(path);
+    const elapsed = performance.now() - started;
+    console.info(`lastActiveAt migration: 50,010 activity rows including pre-migration backup in ${elapsed.toFixed(1)} ms`);
+    expect(elapsed).toBeLessThan(5000);
+    const rows = db.query("SELECT id,last_active_at,updated_at FROM members ORDER BY id").all();
+    expect(rows).toEqual([
+      { id: "empty", last_active_at: null, updated_at: at },
+      { id: "m", last_active_at: expected, updated_at: at },
+      { id: "noise", last_active_at: null, updated_at: at },
+    ]);
+    expect(version(db)).toBe(MIGRATIONS.length);
+    db.close();
+    const again = track(openDb(path));
+    expect(again.query("SELECT id,last_active_at,updated_at FROM members ORDER BY id").all()).toEqual(rows);
+    expect(backups(runtime)).toHaveLength(1);
+  });
+
+  test("failed backfill rolls back both column and version; opening again retries successfully", () => {
+    const { path } = fixture();
+    const old = historicalDb(path, beforeLastActive);
+    old.query("INSERT INTO activity (member_id,at,kind,text) VALUES ('m',?,'tool','작업')").run(at);
+    old.exec("CREATE TRIGGER reject_backfill BEFORE UPDATE ON members BEGIN SELECT RAISE(ABORT, 'reject backfill'); END");
+    old.close();
+    expect(() => openDb(path)).toThrow("reject backfill");
+    const unchanged = new Database(path);
+    expect(version(unchanged)).toBe(beforeLastActive);
+    expect(columns(unchanged, "members")).not.toContain("last_active_at");
+    expect(unchanged.query("SELECT updated_at FROM members WHERE id='m'").get()).toEqual({ updated_at: at });
+    unchanged.exec("DROP TRIGGER reject_backfill");
+    unchanged.close();
+    const retried = track(openDb(path));
+    expect(version(retried)).toBe(MIGRATIONS.length);
+    expect(retried.query("SELECT last_active_at FROM members WHERE id='m'").get()).toEqual({ last_active_at: at });
+  });
+});
 
 function columns(db: Database, table: string): string[] {
   return db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().map((row) => row.name);
@@ -100,7 +160,7 @@ function leaveCommittedWal(runtime: IsolatedRuntime, path: string, schemaVersion
 describe("append-only migrations", () => {
   test("creation goal migration leaves existing projects null instead of copying mutable now", () => {
     const { path } = fixture();
-    const old = historicalDb(path, MIGRATIONS.length - 1);
+    const old = historicalDb(path, MIGRATIONS.findIndex(sql => sql.includes("ADD COLUMN creation_goal TEXT")));
     old.query("UPDATE projects SET now='나중에 바뀐 상황' WHERE id='p'").run();
     expect(columns(old, "projects")).not.toContain("creation_goal");
     old.close();

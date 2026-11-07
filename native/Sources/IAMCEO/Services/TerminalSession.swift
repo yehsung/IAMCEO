@@ -11,6 +11,7 @@ final class TerminalSession {
     private(set) var ending = false
     private(set) var readOnly: Bool
     private(set) var notice: String?
+    private(set) var missingTerminal = false
     private(set) var naturalCols = 100
     private(set) var naturalRows = 30
     @ObservationIgnored private var startBuffer = TerminalStartBuffer()
@@ -20,6 +21,7 @@ final class TerminalSession {
     @ObservationIgnored private var hasNaturalSize = false
     @ObservationIgnored private var pendingControl: (api: APIClient, memberID: String, leaseID: String)?
     @ObservationIgnored private var claimOwner: UUID?
+    @ObservationIgnored private var missingPaneID: String?
     private(set) var ownedLeaseID: String?
     @ObservationIgnored private var revalidationTask: Task<Void, Never>?
     @ObservationIgnored private let connect: Connect
@@ -68,6 +70,9 @@ final class TerminalSession {
     }
 
     private func open(store: AppStore, member: Member) {
+        let member = store.members.first { $0.id == member.id } ?? member
+        if TerminalAvailability.needsWake(member) { memberChanged(store: store, member: member); return }
+        guard !missingTerminal else { return }
         guard visible, active, !starting, !ending, !controlling, client.state != .unsupported else { return }
         if platform.openingMode == .control { beginInput(store: store, member: member) }
         else { observe(store: store, member: member) }
@@ -90,6 +95,9 @@ final class TerminalSession {
     }
 
     func beginInput(store: AppStore, member: Member) {
+        let member = store.members.first { $0.id == member.id } ?? member
+        if TerminalAvailability.needsWake(member) { memberChanged(store: store, member: member); return }
+        guard !missingTerminal else { return }
         guard visible, active, !starting, !ending, !controlling else { return }
         if !store.isDemo, !store.canWrite, store.isRevalidating, store.api != nil,
            store.connectionStatus == .connected || store.connectionLost {
@@ -143,7 +151,7 @@ final class TerminalSession {
                     return attempt.namespace == namespace && attempt.action == .claim
                 }
                 let refusal = refusals.first { previousResults[$0.operationId] == nil } ?? refusals.first
-                fallback(store: store, member: member, message: refusal?.error ?? store.errorMessage ?? "조작권을 받지 못했습니다. 다른 기기나 세션 상태를 확인해 주세요.")
+                fallback(store: store, member: member, message: refusal?.error ?? store.rawErrorMessage ?? "조작권을 받지 못했습니다. 다른 기기나 세션 상태를 확인해 주세요.")
                 return
             }
             ownedLeaseID = lease
@@ -153,6 +161,9 @@ final class TerminalSession {
     }
 
     func observe(store: AppStore, member: Member) {
+        let member = store.members.first { $0.id == member.id } ?? member
+        if TerminalAvailability.needsWake(member) { memberChanged(store: store, member: member); return }
+        guard !missingTerminal else { return }
         guard visible, active, !starting, !ending else { return }
         readOnly = true
         if store.isDemo { client.showDemo(); return }
@@ -172,7 +183,11 @@ final class TerminalSession {
     }
 
     private func fallback(store: AppStore, member: Member, message: String, release: Bool = false) {
-        starting = false; readOnly = true; pendingControl = nil; startBuffer.clear(); notice = message
+        if message.contains("No core terminal for member"), TerminalAvailability.supportsTerminal(member) {
+            terminalDisappeared(store: store, member: member)
+            return
+        }
+        starting = false; readOnly = true; pendingControl = nil; startBuffer.clear(); notice = TerminalPresentation.message(message)
         if release {
             // Disable retry and invalidate the old attach before yielding to the release.
             ending = true; requestID = UUID(); client.close()
@@ -187,6 +202,36 @@ final class TerminalSession {
         } else if case .live(mode: .observe, cols: _, rows: _) = client.state {
             // iPhone keeps its current observer while an explicit claim is refused.
         } else { observe(store: store, member: member) }
+    }
+
+    func memberChanged(store: AppStore, member: Member) {
+        if TerminalAvailability.needsWake(member) { terminalDisappeared(store: store, member: member) }
+        else if missingTerminal, TerminalAvailability.isReady(member), member.paneId != missingPaneID, !ending {
+            missingTerminal = false; notice = nil
+            open(store: store, member: member)
+        }
+    }
+
+    func streamChanged(store: AppStore, member: Member) {
+        if case .closed(_, let message) = client.state,
+           message?.contains("No core terminal for member") == true, TerminalAvailability.supportsTerminal(member) {
+            terminalDisappeared(store: store, member: member)
+        }
+    }
+
+    private func terminalDisappeared(store: AppStore, member: Member) {
+        let member = store.members.first { $0.id == member.id } ?? member
+        missingPaneID = member.paneId
+        guard !missingTerminal else { return }
+        missingTerminal = true; notice = nil; starting = false; readOnly = true
+        requestID = UUID(); pendingControl = nil; startBuffer.clear(); revalidationTask?.cancel(); client.close()
+        let owner = takeOwner()
+        ending = true
+        Task {
+            _ = await release(store: store, member: member, owner: owner)
+            ending = false
+            memberChanged(store: store, member: store.members.first { $0.id == member.id } ?? member)
+        }
     }
 
     func finishInput(store: AppStore, member: Member, resume: Bool) async {

@@ -16,6 +16,7 @@ struct TerminalView: View {
     @Environment(\.scenePhase) private var scenePhase
     let member: Member
     @State private var session: TerminalSession
+    @State private var wakeNotice: String?
 
     init(member: Member, session: TerminalSession = TerminalSession()) {
         self.member = member
@@ -26,6 +27,8 @@ struct TerminalView: View {
     private var current: Member { store.members.first { $0.id == member.id } ?? member }
     private var controlling: Bool { session.controlling }
     private var unsupported: Bool { client.state == .unsupported }
+    private var missingTerminal: Bool { TerminalAvailability.needsWake(current) || session.missingTerminal }
+    private var waking: Bool { store.terminalWake.members.contains(member.id) }
 
     // Resolve the presenting window’s screen; width is an ideal, never a fixed frame.
     #if os(macOS)
@@ -39,10 +42,12 @@ struct TerminalView: View {
 
     var body: some View {
         Group {
-            if unsupported { TerminalMirrorView(member: member) }
+            if unsupported && !missingTerminal { TerminalMirrorView(member: member) }
             else { liveSheet }
         }
         .onAppear { session.appear(store: store, member: member, active: scenePhase == .active) }
+        .onChange(of: "\(current.status)|\(current.paneId ?? "")") { _, _ in session.memberChanged(store: store, member: current) }
+        .onChange(of: client.state) { _, _ in session.streamChanged(store: store, member: current) }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background || (TerminalPlatform.current == .mac && phase == .inactive) { session.setActive(false, store: store, member: member) }
             else if phase == .active { session.setActive(true, store: store, member: member) }
@@ -71,12 +76,16 @@ struct TerminalView: View {
             VStack(alignment: .leading, spacing: 10) {
                 TimelineView(.periodic(from: .now, by: 1)) { context in statusRow(now: context.date) }
                 terminal
+                    .opacity(missingTerminal ? 0 : 1)
+                    .allowsHitTesting(!missingTerminal)
+                    .accessibilityHidden(missingTerminal)
+                    .overlay { if missingTerminal { sleepingTerminal } }
                     .background(Color(red: 11/255, green: 9/255, blue: 24/255))
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(CE.line) }
                 if let notice = session.notice {
-                    Text(notice).font(CEFont.meta).foregroundStyle(CE.attention).lineLimit(3)
-                        .accessibilityLabel(notice)
+                    Text(TerminalPresentation.message(notice)).font(CEFont.meta).foregroundStyle(CE.attention).lineLimit(3)
+                        .accessibilityLabel(TerminalPresentation.message(notice))
                 }
             }
         } footer: {
@@ -90,7 +99,9 @@ struct TerminalView: View {
             #else
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 HStack {
-                    if controlling || TerminalPresentation.holdsLease(store.terminalLeases[member.id], now: context.date) {
+                    if missingTerminal {
+                        Text("깨우면 같은 창에서 다시 연결합니다").font(CEFont.meta).foregroundStyle(CE.ink3)
+                    } else if controlling || TerminalPresentation.holdsLease(store.terminalLeases[member.id], now: context.date) {
                         Button("입력 끝내기") { Task { await session.finishInput(store: store, member: member, resume: true) } }
                             .ceSecondaryButton().disabled(session.ending).accessibilityLabel("터미널 입력 끝내기")
                     } else {
@@ -116,15 +127,15 @@ struct TerminalView: View {
             Text(statusText(now: now)).font(CEFont.meta).foregroundStyle((controlling || TerminalPresentation.holdsLease(store.terminalLeases[member.id], now: now)) ? CE.attention : CE.ink2)
             Spacer(minLength: 8)
             #if os(macOS)
-            if session.readOnly {
+            if session.readOnly && !missingTerminal {
                 Button("다시 시도") { session.beginInput(store: store, member: member) }
                     .ceSecondaryButton().disabled(store.isDemo || !store.canWrite || session.starting || session.ending)
                     .accessibilityLabel("터미널 직접 입력 다시 시도")
             }
             #else
-            if case .closed = client.state {
+            if !missingTerminal, case .closed = client.state {
                 reconnectButton
-            } else if client.state == .connecting { reconnectButton }
+            } else if !missingTerminal && client.state == .connecting { reconnectButton }
             #endif
         }
         .accessibilityElement(children: .contain)
@@ -139,6 +150,7 @@ struct TerminalView: View {
     #endif
 
     private func statusText(now: Date) -> String {
+        if missingTerminal { return waking ? "깨우는 중…" : "터미널 없음" }
         #if os(macOS)
         if session.starting { return "연결 중" }
         if session.readOnly { return client.state == .connecting ? "읽기 전용 · 연결 중" : "읽기 전용" }
@@ -157,10 +169,27 @@ struct TerminalView: View {
                 if seconds < 60 { return "\(seconds)초 뒤 조작권이 끝납니다" }
             }
             return "직접 입력 중 · 이 직원의 자동 전달이 멈춰 있습니다"
-        case let .closed(_, message): return message ?? "연결이 끊겼습니다"
+        case let .closed(_, message): return TerminalPresentation.message(message ?? "연결이 끊겼습니다")
         case .unsupported: return "이 서버는 기존 터미널 화면을 사용합니다"
         }
         #endif
+    }
+    private var sleepingTerminal: some View {
+        VStack(spacing: 16) {
+            Text("이 직원은 잠들어 있어 터미널이 없습니다").font(CEFont.secondary).foregroundStyle(CE.ink2)
+            Button(waking ? "깨우는 중…" : "깨우기") {
+                Task {
+                    wakeNotice = nil
+                    if await store.wakeTerminal(current) {
+                        session.memberChanged(store: store, member: current)
+                    } else { wakeNotice = store.errorMessage }
+                }
+            }
+            .ceProminentButton()
+            .disabled(!TerminalAvailability.needsWake(current) || !store.canWrite || waking || session.ending || store.pendingActions.contains("member:\(member.id)"))
+            if let wakeNotice { Text(wakeNotice).font(CEFont.meta).foregroundStyle(CE.danger) }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     private var terminal: some View {
         LiveTerminalSurface(client: client, mode: session.surfaceMode, cols: client.grid.cols, rows: client.grid.rows,

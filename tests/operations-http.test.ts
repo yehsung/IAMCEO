@@ -153,6 +153,27 @@ test("receipt 조회와 쓰기는 pending/applied/refused/unknown 및 code를 �
   expect(safe).not.toContain("request-canary");
 });
 
+test("fresh/config receipt member serializers include lastActiveAt, including null for legacy snapshots", async () => {
+  const activity = store.appendActivity(memberId, "tool", "실제 작업");
+  const at = activity.at;
+  orch.operation = async id => receipts.get(id)!;
+  for (const legacy of [false, true]) {
+    const member = store.requireMember(memberId);
+    if (legacy) Reflect.deleteProperty(member, "lastActiveAt");
+    const common = { projectId, memberId, createdAt: at, updatedAt: at, status: "applied" as const };
+    const cases: OperationReceipt[] = [
+      { ...common, operationId: randomUUID(), kind: "fresh_session", result: { member, sessionGeneration: 1 } },
+      { ...common, operationId: randomUUID(), kind: "member_config", result: { member, configRevision: 1, sessionGeneration: 1 } },
+    ];
+    for (const receipt of cases) {
+      receipts.set(receipt.operationId, receipt);
+      const response = await request(`/api/operations/${receipt.operationId}`, undefined, v2, "GET");
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ result: { member: { id: memberId, lastActiveAt: legacy ? null : activity.at } } });
+    }
+  }
+});
+
 test("agent operationId와 manual batch ACK는 인증한 직원에 결합된다", async () => {
   const headers = { Authorization: `Bearer ${store.getMemberToken(manualId)}`, "X-IAMCEO-Contract": "2" };
   const id = randomUUID();

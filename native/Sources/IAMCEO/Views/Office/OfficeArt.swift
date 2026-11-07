@@ -595,7 +595,7 @@ enum OfficeArt {
         "KuuuuuuuuK",
         ".KKKKKKKK.",
     ], palette: ["K": 0x1A1433, "j": 0xB2A8E2, "J": 0x8C82C6, "U": 0x7067A8, "u": 0x2E2559, "@": 0x4A3F82])
-    /// The shut laptop of a top-row resident in error, at desk (9, 2).
+    /// The shut laptop of a top-row resident in error or asleep on the desk, at desk (9, 2).
     static let lidClosed = Piece(rows: [
         ".KKKKKKKK.",
         "KjjjjjjjjK",
@@ -697,27 +697,6 @@ enum OfficeArt {
         "KddddddddddddddddddddddK",
         ".KKKKKKKKKKKKKKKKKKKKKK.",
     ], palette: ["K": 0x1A1433, "c": 0x504893, "h": 0x3C3573, "d": 0x2B2554, "w": 0x5E56A2, "W": 0x241D46, "p": 0x6A5EB0])
-    /// The rest area's armchair (22x18), drawn before the resident (anchor = chair + (11, 14)).
-    static let chairRest = Piece(rows: [
-        "......KKKKKKKKKK......",
-        "....KKwccccccchhKK....",
-        "...KwcccccccccchhdK...",
-        "..KwcchhhhhhhhhhhddK..",
-        "..KcchhhhhhhhhhhhddK..",
-        ".KcchhhhhhhhhhhhhhddK.",
-        ".KchhhhhhhhhhhhhhhddK.",
-        ".KchhhhhhhhhhhhhhhddK.",
-        ".KKKhhhhhhhhhhhhddKKK.",
-        "KwccKhhhhhhhhhhddKhhdK",
-        "KcchKhhhhhhhhhhddKhddK",
-        "KchhKccccccccccccKhddK",
-        "KchhKhhhhhhhhhhhhKhddK",
-        "KhhdKddddddddddddKdddK",
-        "KhddKKKKKKKKKKKKKKdddK",
-        ".KKKKKKKKKKKKKKKKKKKK.",
-        "..KWK............KWK..",
-        "..KKK............KKK..",
-    ], palette: ["K": 0x1A1433, "c": 0x6B62B3, "h": 0x564E98, "d": 0x3B3474, "w": 0x8077C8, "W": 0x241D46])
     /// The context warning: an upright low battery on the desk's left end.
     static let battery = Piece(rows: [
         ".WW.",
@@ -728,27 +707,6 @@ enum OfficeArt {
         "WrrW",
         "WWWW",
     ], palette: ["W": 0xE6DEFF, "d": 0x2A2148, "r": 0xFF6A3D])
-    /// The armchair's armrests and seat lip, drawn after the resident so it sits IN the chair.
-    static let chairRestFront = Piece(rows: [
-        "......................",
-        "......................",
-        "......................",
-        "......................",
-        "......................",
-        "......................",
-        "......................",
-        "......................",
-        ".KKKh............dKKK.",
-        "KwccK............KhhdK",
-        "KcchK............KhddK",
-        "KchhKccccccccccccKhddK",
-        "KchhKhhhhhhhhhhhhKhddK",
-        "KhhdKddddddddddddKdddK",
-        "KhddKKKKKKKKKKKKKKdddK",
-        ".KKKKKKKKKKKKKKKKKKKK.",
-        "..KWK............KWK..",
-        "..KKK............KKK..",
-    ], palette: ["K": 0x1A1433, "c": 0x6B62B3, "h": 0x564E98, "d": 0x3B3474, "w": 0x8077C8, "W": 0x241D46])
     /// chairFront's seat front, drawn after a turned-around bottom-row resident.
     static let chairFrontLip = Piece(rows: [
         "................",
@@ -828,7 +786,8 @@ enum OfficeFrame: Int, CaseIterable, Sendable {
     case walkSide1, walkSide2, walkSide3, deskFrontType0, deskFrontType1, deskFrontType2
     case deskFrontWait0, deskFrontWait1, deskFrontBlocked0, deskFrontBlocked1, deskFrontError, deskBackType0
     case deskBackType1, deskBackType2, deskBackError, chairWait0, chairWait1, chairBlocked0
-    case chairBlocked1, restIdle0, restIdle1, restSleep0, restSleep1
+    case chairBlocked1, deskFrontRest0, deskFrontRest1, deskFrontSleep0, deskFrontSleep1, deskBackRest0
+    case deskBackRest1, deskBackSleep0, deskBackSleep1
 
     var art: OfficeArt.Frame {
         switch self {
@@ -1418,45 +1377,47 @@ enum OfficeFrame: Int, CaseIterable, Sendable {
                 ".....oossssssssoo....",
                 ".......oooooooo......",
             ])
-        case .restIdle0: .init(
-            anchorX: 10, anchorY: 15, view: .front, headX: 10, headY: 0,
-            faceX: 4, faceY: 5, face: "content", blink: nil, rows: [
-                ".......OOOOOo.......",
-                ".....OOlllllboo.....",
-                "....Olhhlllllbbo....",
-                "...Olhlllllllbbbo...",
-                "...Ollllllllbbbbo...",
-                "..Ollllllbbbbbbbso..",
-                "..Olllbbbbbbbbbbso..",
-                "..Ollbbbbbbbbbbbso..",
-                "..Olbbbbbbbbbbbsso..",
-                ".Oobbbbbbbbbbbbssoo.",
-                "Olbbbbbbbbbbbbbsssbo",
-                "obbobbbbbbbbbsssosso",
-                ".ooobbbbbbbsssssooo.",
-                "....oossssssssoo....",
-                "......oooooooo......",
+        // Resting at the desk (쉬는 중): paws folded on the desk, content, breathing a pixel.
+        case .deskFrontRest0: .init(
+            anchorX: 9, anchorY: 13, view: .front, headX: 9, headY: 0,
+            faceX: 3, faceY: 5, face: "content", blink: nil, rows: [
+                "......OOOOOo......",
+                "....OOlllllboo....",
+                "...Olhhlllllbbo...",
+                "..Olhlllllllbbbo..",
+                "..Ollllllllbbbbo..",
+                ".Ollllllbbbbbbbso.",
+                ".Olllbbbbbbbbbbso.",
+                ".Ollbbbbbbbbbbbso.",
+                ".Olbbbbbbbbbbbsso.",
+                ".obbbbbbbbbbbbsso.",
+                ".obbbbbbbbbbbbsso.",
+                "..obbbbbbbbbssso..",
+                ".Oobbbbbbbsssssoo.",
+                "Olbo..........osbo",
+                ".oo............oo.",
             ])
-        case .restIdle1: .init(
-            anchorX: 10, anchorY: 14, view: .front, headX: 10, headY: 0,
-            faceX: 4, faceY: 4, face: "content", blink: nil, rows: [
-                ".......OOOOOo.......",
-                ".....OOlllllboo.....",
-                "....Olhhlllllbbo....",
-                "...Olhlllllllbbbo...",
-                "...Ollllllllbbbbo...",
-                "..Ollllllbbbbbbbso..",
-                "..Ollbbbbbbbbbbbso..",
-                "..Olbbbbbbbbbbbsso..",
-                ".Oobbbbbbbbbbbbssoo.",
-                "Olbbbbbbbbbbbbbsssbo",
-                "obbobbbbbbbbbsssosso",
-                ".ooobbbbbbbsssssooo.",
-                "....oossssssssoo....",
-                "......oooooooo......",
+        case .deskFrontRest1: .init(
+            anchorX: 9, anchorY: 12, view: .front, headX: 9, headY: 0,
+            faceX: 3, faceY: 5, face: "content", blink: nil, rows: [
+                "......OOOOOo......",
+                "....OOlllllboo....",
+                "...Olhhlllllbbo...",
+                "..Olhlllllllbbbo..",
+                "..Ollllllllbbbbo..",
+                ".Ollllllbbbbbbbso.",
+                ".Olllbbbbbbbbbbso.",
+                ".Ollbbbbbbbbbbbso.",
+                ".Olbbbbbbbbbbbsso.",
+                ".obbbbbbbbbbbbsso.",
+                ".obbbbbbbbbbbbsso.",
+                ".Oobbbbbbbsssssoo.",
+                "Olbo..........osbo",
+                ".oo............oo.",
             ])
-        case .restSleep0: .init(
-            anchorX: 11, anchorY: 13, view: .front, headX: 11, headY: 0,
+        // Asleep at the desk (잠듦): slumped forward onto it, cheek on the paws, nodding a pixel.
+        case .deskFrontSleep0: .init(
+            anchorX: 11, anchorY: 10, view: .front, headX: 11, headY: 0,
             faceX: 5, faceY: 5, face: "sleep", blink: nil, rows: [
                 "........OOOOOo........",
                 "......OOlllllboo......",
@@ -1472,8 +1433,8 @@ enum OfficeFrame: Int, CaseIterable, Sendable {
                 ".oosbbbbbbbbbbsssssoo.",
                 "...oooooooooooooooo...",
             ])
-        case .restSleep1: .init(
-            anchorX: 11, anchorY: 12, view: .front, headX: 11, headY: 0,
+        case .deskFrontSleep1: .init(
+            anchorX: 11, anchorY: 9, view: .front, headX: 11, headY: 0,
             faceX: 5, faceY: 4, face: "sleep", blink: nil, rows: [
                 "........OOOOOo........",
                 "......OOlllllboo......",
@@ -1487,6 +1448,82 @@ enum OfficeFrame: Int, CaseIterable, Sendable {
                 "obbbbbbbbbbbbbbbssssso",
                 ".oosbbbbbbbbbbsssssoo.",
                 "...oooooooooooooooo...",
+            ])
+        // Resting at the desk seen from behind: still paws, breathing a pixel.
+        case .deskBackRest0: .init(
+            anchorX: 9, anchorY: 16, view: .back, headX: 9, headY: 0,
+            faceX: 3, faceY: 5, face: nil, blink: nil, rows: [
+                "......OOOOOo......",
+                "....OOlllllboo....",
+                "...Olhhllllbbbo...",
+                "...Olhlllllbbbo...",
+                "..Olllllllbbbbso..",
+                "..Ollllllbbbbbso..",
+                "..Ollllbbbbbbbso..",
+                "..Ollbbbbbbbbbso..",
+                ".OOlbbbbbbbbbssoo.",
+                "Olbbbbbbbbbbbsssbo",
+                "obbbbbbbbbbbbsssso",
+                ".oobbbbbbbbbsssoo.",
+                "...obbbbbbbssso...",
+                "...obbbbbbsssso...",
+                "....oossssssoo....",
+                "......oooooo......",
+            ])
+        case .deskBackRest1: .init(
+            anchorX: 9, anchorY: 15, view: .back, headX: 9, headY: 0,
+            faceX: 3, faceY: 5, face: nil, blink: nil, rows: [
+                "......OOOOOo......",
+                "....OOlllllboo....",
+                "...Olhhllllbbbo...",
+                "...Olhlllllbbbo...",
+                "..Olllllllbbbbso..",
+                "..Ollllllbbbbbso..",
+                "..Ollbbbbbbbbbso..",
+                ".OOlbbbbbbbbbssoo.",
+                "Olbbbbbbbbbbbsssbo",
+                "obbbbbbbbbbbbsssso",
+                ".oobbbbbbbbbsssoo.",
+                "...obbbbbbbssso...",
+                "...obbbbbbsssso...",
+                "....oossssssoo....",
+                "......oooooo......",
+            ])
+        // Asleep at the desk seen from behind: head bowed onto the desk (the body squashed down), nodding a pixel.
+        case .deskBackSleep0: .init(
+            anchorX: 9, anchorY: 14, view: .back, headX: 9, headY: 0,
+            faceX: 3, faceY: 5, face: nil, blink: nil, rows: [
+                "......OOOOOo......",
+                "....OOlllllboo....",
+                "...Olhhllllbbbo...",
+                "..Olllllllbbbbso..",
+                "..Ollllbbbbbbbso..",
+                "..Ollbbbbbbbbbso..",
+                ".OOlbbbbbbbbbssoo.",
+                "Olbbbbbbbbbbbsssbo",
+                "obbbbbbbbbbbbsssso",
+                ".oobbbbbbbbbsssoo.",
+                "...obbbbbbbssso...",
+                "...obbbbbbsssso...",
+                "....oossssssoo....",
+                "......oooooo......",
+            ])
+        case .deskBackSleep1: .init(
+            anchorX: 9, anchorY: 13, view: .back, headX: 9, headY: 0,
+            faceX: 3, faceY: 5, face: nil, blink: nil, rows: [
+                "......OOOOOo......",
+                "....OOlllllboo....",
+                "...Olhhllllbbbo...",
+                "..Olllllllbbbbso..",
+                "..Ollbbbbbbbbbso..",
+                ".OOlbbbbbbbbbssoo.",
+                "Olbbbbbbbbbbbsssbo",
+                "obbbbbbbbbbbbsssso",
+                ".oobbbbbbbbbsssoo.",
+                "...obbbbbbbssso...",
+                "...obbbbbbsssso...",
+                "....oossssssoo....",
+                "......oooooo......",
             ])
         }
     }

@@ -611,6 +611,13 @@ export const MIGRATIONS: string[] = [
    INSERT INTO report_delivery_tracking (id, legacy_max_rowid) SELECT 1, COALESCE(MAX(rowid), 0) FROM messages;`,
   // 생성 때 대표가 쓴 목표 원문. now 변경과 독립하며 과거 프로젝트는 소급하지 않는다.
   `ALTER TABLE projects ADD COLUMN creation_goal TEXT;`,
+  // CLI 작업 시각은 상태 패치와 분리한다. 기존 활동은 직원별로 한 번만 집계한다.
+  `ALTER TABLE members ADD COLUMN last_active_at TEXT;
+   UPDATE members SET last_active_at = recent.at
+     FROM (SELECT member_id, MAX(at) AS at FROM activity
+       WHERE kind IN ('turn_start', 'turn_end', 'tool', 'tool_result')
+       GROUP BY member_id) AS recent
+     WHERE members.id = recent.member_id;`,
 ];
 
 export function openDb(path: string): Database {

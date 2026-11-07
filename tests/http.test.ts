@@ -282,6 +282,25 @@ describe("REST", () => {
     expect(b.herdr.installed).toBe(false);
   });
 
+  test("member lastActiveAt is additive in state/sync and bootstrap keeps its existing shape", async () => {
+    const p = store.createProject({ name: "활동 응답", cwd });
+    const active = store.createMember({ projectId: p.id, handle: "active", name: "활동 직원", kind: "worker" });
+    const empty = store.createMember({ projectId: p.id, handle: "empty", name: "새 직원", kind: "worker" });
+    const activity = store.appendActivity(active.id, "tool", "실제 작업");
+    const state = await json<ProjectState>(api(`/api/projects/${p.id}/state`));
+    expect(state.members.find(m => m.id === active.id)?.lastActiveAt).toBe(activity.at);
+    expect(state.members.find(m => m.id === empty.id)).toHaveProperty("lastActiveAt", null);
+    const sync = await json<{ state: ProjectState; bootstrap: Bootstrap }>(api(`/api/sync?projectId=${p.id}`));
+    expect(sync.state.members).toEqual(state.members);
+    const bootstrap = await json<Bootstrap>(api("/api/bootstrap"));
+    // Bootstrap에는 원래 Member 객체가 없으므로 새 members 봉투를 만들지 않는다.
+    expect(bootstrap).not.toHaveProperty("members");
+    expect(sync.bootstrap).not.toHaveProperty("members");
+    expect(bootstrap.projects.map(project => project.id)).toContain(p.id);
+    const patched = await json<Member>(api(`/api/members/${active.id}`, { method: "PATCH", body: { modelOverride: null } }));
+    expect(patched.lastActiveAt).toBe(activity.at);
+  });
+
   test("프로젝트 만들기: 검증·~ 펼치기 안 된 경로 거부·orch 호출", async () => {
     await json(api("/api/projects", { method: "POST", body: { name: "", cwd } }), 400);
     await json(api("/api/projects", { method: "POST", body: { name: "a", cwd: "상대/경로" } }), 400);
@@ -702,6 +721,25 @@ describe("WebSocket", () => {
   }
 
   const wsUrl = () => `ws://127.0.0.1:${server.port}/ws`;
+
+  test("tool activity sends no extra member broadcasts and turn notifications carry lastActiveAt", async () => {
+    const connection = await connect(`${wsUrl()}?t=${CODE}`);
+    try {
+      await connection.next(event => event.type === "hello");
+      const member = store.createMember({ projectId, handle: "wsactivity", name: "활동방송직원", kind: "worker" });
+      const start = store.appendActivity(member.id, "turn_start", "시작");
+      store.patchMember(member.id, { status: "working" });
+      for (let i = 0; i < 100; i++) store.appendActivity(member.id, i % 2 ? "tool" : "tool_result", `도구 ${i}`);
+      const end = store.appendActivity(member.id, "turn_end", "종료");
+      store.patchMember(member.id, { status: "idle" });
+      await connection.next(event => event.type === "member" && event.member.id === member.id && event.member.status === "idle" && event.member.lastActiveAt === end.at);
+      const members = connection.events.filter((event): event is Extract<WsEvent, { type: "member" }> => event.type === "member" && event.member.id === member.id);
+      expect(members.map(event => [event.member.status, event.member.lastActiveAt])).toEqual([
+        ["idle", null], ["working", start.at], ["idle", end.at],
+      ]);
+      expect(connection.events.filter(event => event.type === "activity" && event.activity.memberId === member.id)).toHaveLength(102);
+    } finally { connection.ws.close(); }
+  });
 
   test("코드 틀리면 연결 안 됨", async () => {
     await expect(connect(`${wsUrl()}?t=wrong`)).rejects.toThrow("WS 연결 실패");

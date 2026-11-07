@@ -301,9 +301,9 @@ function publicFields<T extends object>(value: T, keys: readonly (keyof T)[]): o
 }
 
 function receiptMember(member: Member): object {
-  return publicFields(member, ["id", "projectId", "handle", "name", "role", "kind", "origin", "wasAdopted", "cli", "backend",
+  return publicFields({ ...member, lastActiveAt: member.lastActiveAt ?? null }, ["id", "projectId", "handle", "name", "role", "kind", "origin", "wasAdopted", "cli", "backend",
     "modelOverride", "effortOverride", "appliedModel", "appliedEffort", "status", "now", "next", "cwd", "sessionId", "paneId",
-    "contextPct", "contextWindow", "contextWindowSource", "subagents", "parallel", "queuedCount", "lastError", "updatedAt", "createdAt",
+    "contextPct", "contextWindow", "contextWindowSource", "subagents", "parallel", "queuedCount", "lastError", "lastActiveAt", "updatedAt", "createdAt",
     "statusObservation", "blockedReason", "subagentState", "nowAt", "manualActivityAt", "executionState", "lifecycleState", "contextState"]);
 }
 

@@ -1,7 +1,7 @@
 import SwiftUI
 
-// Drawing of the office. The static layer (desks, monitors, rest armchairs, and every piece of a desk whose owner is
-// away) redraws only when the map changes; the moving layer draws the rest every frame from pure positions: lights,
+// Drawing of the office. The static layer (desks, monitors, and every piece of a desk whose owner is away) redraws
+// only when the map changes; the moving layer draws the rest every frame from pure positions: lights,
 // screens, the chairs and laptops of occupied desks, residents (in their state's colour), emotes and fx. Both draw in
 // sprite pixels (the context is scaled by the pixel size), so every edge sits on the device pixel grid.
 
@@ -94,12 +94,10 @@ enum OfficeRenderer {
         var scene = sceneIn
         let map = scene.map
         let actors = scene.actors(at: t)
-        // A desk lights up only once its resident has sat down; an armchair holds whoever sits in it.
+        // A desk lights up only once its resident has sat down.
         var arrived: [Int: OfficeActor] = [:]
-        var seated: [Int: OfficeActor] = [:]
         for actor in actors where actor.alpha >= 1 {
             if let d = actor.desk { arrived[d] = actor }
-            if actor.pose == .resting, let i = map.rests.firstIndex(where: { $0.point == actor.point }) { seated[i] = actor }
         }
         for d in map.desks.indices where arrived[d] == nil { scene.screens[d] = .off }
         let lit = scene.screens.filter { map.desks.indices.contains($0.key) && $0.value != .off }.sorted { $0.key < $1.key }
@@ -113,7 +111,7 @@ enum OfficeRenderer {
             OfficePieces.battery.draw(&ctx, x: o.x + 1, y: o.y + 1)
         }
 
-        // The pieces of occupied desks and armchairs, and every resident, in depth order.
+        // The pieces of occupied desks, and every resident, in depth order.
         var pieces: [(y: CGFloat, order: Int, piece: Piece)] = []
         var seatShadows = Path()
         for (d, desk) in map.desks.enumerated() where !desk.away {
@@ -129,7 +127,9 @@ enum OfficeRenderer {
                 if here == nil {
                     pieces.append((o.y - 1, 0, .chair(OfficePieces.chairFront, CGPoint(x: o.x + 6, y: o.y - 13), clip: o.y)))
                 }
-                pieces.append((o.y + 2, 2, .lid(d, closed: here?.frame == .deskFrontError)))
+                // Shut while its owner lies on the desk (an error, or asleep with a cheek on the paws).
+                let shut = here.map { [.deskFrontError, .deskFrontSleep0, .deskFrontSleep1].contains($0.frame) } ?? false
+                pieces.append((o.y + 2, 2, .lid(d, closed: shut)))
             case .bottom:
                 seatShadows.addRect(CGRect(x: o.x + 9, y: o.y + 28, width: 10, height: 2))
                 seatShadows.addRect(CGRect(x: o.x + 8, y: o.y + 29, width: 12, height: 1))
@@ -142,10 +142,6 @@ enum OfficeRenderer {
                     pieces.append((o.y + 22, 2, .chair(OfficePieces.chairBack, CGPoint(x: o.x + 7, y: o.y + 18), clip: nil)))
                 }
             }
-        }
-        for (i, _) in seated where map.rests.indices.contains(i) {
-            let chair = map.rests[i].chair
-            pieces.append((chair.y + 14, 2, .chair(OfficePieces.chairRestFront, chair, clip: nil)))
         }
         if !seatShadows.isEmpty { ctx.fill(seatShadows, with: .color(OfficePalette.shadow.color)) }
         for (i, actor) in actors.enumerated() { pieces.append((actor.sortY, 1, .actor(i))) }

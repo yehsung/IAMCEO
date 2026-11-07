@@ -202,7 +202,6 @@ enum OfficePieces {
     static let chairLead = OfficePieceArt(OfficeArt.chairLead)
     static let chairBack = OfficePieceArt(OfficeArt.chairBack)
     static let chairFrontLip = OfficePieceArt(OfficeArt.chairFrontLip)
-    static let chairRestFront = OfficePieceArt(OfficeArt.chairRestFront)
     static let lid = OfficePieceArt(OfficeArt.lid)
     static let lidClosed = OfficePieceArt(OfficeArt.lidClosed)
     static let monitorBack = OfficePieceArt(OfficeArt.monitorBack)

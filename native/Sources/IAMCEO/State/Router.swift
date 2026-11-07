@@ -58,6 +58,18 @@ final class Router {
     func openFile(_ id: String) { cancelPendingNavigation(); fileID = id; destination = .files }
     func openChat(_ target: String?) { cancelPendingNavigation(); chatTarget = target; chatMessageID = nil; destination = .chat }
     func openTerminal(_ memberID: String) { cancelPendingNavigation(); terminalMemberID = memberID }
+    func openTerminal(_ member: Member, store: AppStore) {
+        Task {
+            let current = store.members.first { $0.id == member.id } ?? member
+            guard store.canOpenTerminal(current) else { return }
+            guard TerminalAvailability.needsWake(current) else { openTerminal(current.id); return }
+            cancelPendingNavigation()
+            let revision = navigationRevision, projectRevision = projectResetRevision
+            if await store.wakeTerminal(current), navigationRevision == revision, projectResetRevision == projectRevision {
+                openTerminal(current.id)
+            }
+        }
+    }
     func manageProject(id: String, mode: ProjectManagementMode) {
         projectManagement = ProjectManagementSelection(projectID: id, mode: mode)
     }

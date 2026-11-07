@@ -52,6 +52,8 @@ MCP stdio ── iamceo mcp /agent/* ──┘             │
 
 기존 DB의 버전을 올리기 전에 `VACUUM INTO`로 `<db>.pre-v<version>-<time>-<random>.bak`을 만들고 mode 600을 건다. committed WAL도 포함하는 독립 SQLite snapshot이며 백업 실패 시 마이그레이션을 중단한다. 원본의 대화·업무·토큰을 비우거나 새 DB로 바꾸지 않는다.
 
+직원 `Member.lastActiveAt`(`members.last_active_at`)은 CLI 활동 `turn_start`·`turn_end`·`tool`·`tool_result`의 최신 `at`(ISO UTC, 없으면 null)이며, 상태 패치의 `updatedAt`과 독립적으로 저장하고 활동마다 직원 변경 알림을 추가하지 않는다.
+
 ## 3. REST (`/api`, 헤더 `Authorization: Bearer <접속 코드>`, API 쿠키 없음)
 
 아래 기존 경로의 기본 응답은 v1이다. v2 쓰기의 별도 요청·응답은 §3.3을 따른다.

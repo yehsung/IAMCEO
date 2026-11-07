@@ -1,17 +1,17 @@
 import SwiftUI
 
-// Who is where. A member's placement follows its CLI state; positions are pure functions of
-// (map, placement, walk plan, time), so drawing, hit-testing and accessibility all agree. Only walk plans are state.
+// Who is where. Everyone with a desk stays at it: a member's mood there follows its CLI state. Positions are pure
+// functions of (map, placement, walk plan, time), so drawing, hit-testing and accessibility all agree. Only walk plans
+// are state (a resident walks only when its desk moves, for example when the team changes).
 
-enum OfficeSeatMood: Equatable, Sendable { case working, waiting, blocked, error }
+enum OfficeSeatMood: Equatable, Sendable { case working, waiting, blocked, error, resting, sleeping }
 
 enum OfficePlacement: Equatable, Sendable {
     /// At its desk: typing, waiting for an answer (top row: looks up; bottom row: turns its chair around), waving at
-    /// an approval prompt (turned around too in the bottom row), or collapsed on an error.
+    /// an approval prompt (turned around too in the bottom row), collapsed on an error, resting (쉬는 중: paws folded,
+    /// content) or asleep (잠듦: slumped onto the desk).
     case seat(Int, OfficeSeatMood)
-    /// On a chair in the rest area (index into `OfficeMap.rests`): on a break (쉬는 중) or dozing (잠듦).
-    case rest(Int, asleep: Bool)
-    /// Offline or unknown: not drawn.
+    /// Offline or unknown: not drawn (the desk recedes, its chair empty).
     case hidden
 }
 
@@ -23,14 +23,9 @@ struct OfficeCast: Equatable {
     /// Members in display order.
     var ids: [String] = []
 
-    /// - previous: the cast drawn so far. On the same desks, residents that stay in the rest area keep their chairs,
-    ///   so one member's change never makes the others get up and move.
-    static func build(map: OfficeMap, members: [Member], previous: OfficeCast? = nil) -> OfficeCast {
+    static func build(map: OfficeMap, members: [Member]) -> OfficeCast {
         var cast = OfficeCast(signature: map.layout)
         cast.ids = members.map(\.id)
-        let prior = previous.flatMap { $0.signature == map.layout ? $0.placements : nil } ?? [:]
-        let resting = members.filter { $0.status == "idle" || $0.status == "asleep" }.map { (id: $0.id, asleep: $0.status == "asleep") }
-        let spots = restSpots(resting, count: map.rests.count, prior: prior)
         for member in members {
             guard let desk = map.desks.firstIndex(where: { $0.memberID == member.id }) else { continue }
             let placement: OfficePlacement
@@ -39,36 +34,14 @@ struct OfficeCast: Equatable {
             case "waiting": placement = .seat(desk, .waiting)
             case "error": placement = .seat(desk, .error)
             case "blocked": placement = .seat(desk, .blocked)
-            case "idle": placement = spots[member.id].map { .rest($0, asleep: false) } ?? .hidden
-            case "asleep": placement = spots[member.id].map { .rest($0, asleep: true) } ?? .hidden
+            case "idle": placement = .seat(desk, .resting)
+            case "asleep": placement = .seat(desk, .sleeping)
             default: placement = .hidden
             }
             cast.placements[member.id] = placement
             if let tone = OfficeTone(status: member.status) { cast.tones[member.id] = tone }
         }
         return cast
-    }
-
-    /// Chairs in the rest area per resting member. Members already resting keep theirs (a break turning into sleep
-    /// stays put); newcomers take the first free chair. More residents than chairs share the last one.
-    static func restSpots(_ resting: [(id: String, asleep: Bool)], count: Int, prior: [String: OfficePlacement]) -> [String: Int] {
-        guard count > 0 else { return [:] }
-        var spots: [String: Int] = [:]
-        var taken = Set<Int>()
-        for (id, _) in resting {
-            if case .rest(let spot, _)? = prior[id], spot >= 0, spot < count, !taken.contains(spot) {
-                spots[id] = spot
-                taken.insert(spot)
-            }
-        }
-        var next = 0
-        for (id, _) in resting where spots[id] == nil {
-            while next < count && taken.contains(next) { next += 1 }
-            let spot = min(next, count - 1)
-            spots[id] = spot
-            taken.insert(spot)
-        }
-        return spots
     }
 }
 
@@ -120,8 +93,6 @@ struct OfficeActor {
         case walking
         /// Seated at desk `desk`.
         case atDesk(Int)
-        /// On a chair in the rest area.
-        case resting
     }
     let id: String
     /// Where the frame's anchor goes (sprite pixels).
@@ -245,21 +216,19 @@ enum OfficeStage {
             case .error:
                 frame = front ? .deskFrontError : .deskBackError
                 emote = .error
+            case .resting:
+                // Paws folded on the desk, content (^ ^), breathing slowly.
+                frame = beat(front ? [.deskFrontRest0, .deskFrontRest1] : [.deskBackRest0, .deskBackRest1],
+                             fps: 0.8, t: t, phase: phase, still: still)
+            case .sleeping:
+                // Slumped onto the desk, nodding a pixel, z's drifting up.
+                frame = beat(front ? [.deskFrontSleep0, .deskFrontSleep1] : [.deskBackSleep0, .deskBackSleep1],
+                             fps: 0.7, t: t, phase: phase, still: still)
+                emote = .sleep
             }
             return OfficeActor(id: id, point: desk.seat, frame: frame, tone: tone, blink: blink && frame.blinks,
                                pose: .atDesk(d), emote: emote, sweat: mood == .error, sparkle: sparkle, phase: phase,
                                sortY: desk.seat.y, walkPoint: desk.arrive)
-        case .rest(let i, let asleep):
-            guard map.rests.indices.contains(i) else { return nil }
-            let spot = map.rests[i]
-            if asleep {
-                // Melted into the armchair, nodding a pixel.
-                return OfficeActor(id: id, point: spot.point, frame: beat([.restSleep0, .restSleep1], fps: 0.7, t: t, phase: phase, still: still),
-                                   tone: tone, pose: .resting, emote: .sleep, phase: phase, sortY: spot.point.y, walkPoint: spot.arrive)
-            }
-            // Content (^ ^), breathing.
-            return OfficeActor(id: id, point: spot.point, frame: beat([.restIdle0, .restIdle1], fps: 0.8, t: t, phase: phase, still: still),
-                               tone: tone, pose: .resting, phase: phase, sortY: spot.point.y, walkPoint: spot.arrive)
         }
     }
 
@@ -279,10 +248,6 @@ enum OfficeStage {
             guard map.desks.indices.contains(d) else { return nil }
             goal = map.desks[d].arrive
             approach = map.desks[d].approach
-        case .rest(let i, _):
-            guard map.rests.indices.contains(i) else { return nil }
-            goal = map.rests[i].arrive
-            approach = map.rests[i].approach
         }
         // Staying at the same desk (typing -> waving -> waiting …) is not a walk.
         if case .seat(let a, _)? = old, case .seat(let b, _) = new, a == b, current.pose != .walking { return nil }
@@ -295,7 +260,6 @@ enum OfficeStage {
         if current.pose != .walking {
             switch old {
             case .seat(let d, _)? where map.desks.indices.contains(d): exit = map.desks[d].approach
-            case .rest(let i, _)? where map.rests.indices.contains(i): exit = map.rests[i].approach
             default: break
             }
         }

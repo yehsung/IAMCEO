@@ -131,6 +131,8 @@ struct Member: Codable, Sendable, Identifiable {
     var subagentState: SubagentState? = nil
     var executionState: MemberExecutionState? = nil
     var lifecycleState: MemberLifecycleState? = nil
+    /// When the member's CLI last did work (its latest turn or tool call); nil from older servers or if it never ran.
+    var lastActiveAt: String? = nil
 }
 extension Member {
     init(from decoder: Decoder) throws {
@@ -172,6 +174,7 @@ extension Member {
         subagentState = try c.decodeIfPresent(SubagentState.self, forKey: ModelKey("subagentState"))
         executionState = try c.decodeIfPresent(MemberExecutionState.self, forKey: ModelKey("executionState"))
         lifecycleState = try c.decodeIfPresent(MemberLifecycleState.self, forKey: ModelKey("lifecycleState"))
+        lastActiveAt = try c.decodeIfPresent(String.self, forKey: ModelKey("lastActiveAt"))
     }
 }
 

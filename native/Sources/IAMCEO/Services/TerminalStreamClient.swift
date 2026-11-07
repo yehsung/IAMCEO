@@ -267,6 +267,17 @@ struct TerminalReconnectPolicy {
 }
 
 struct TerminalPresentation {
+    /// Display only: APIError.message, stream state and receipts retain the server's original text.
+    static func message(_ raw: String) -> String {
+        let translations = [
+            ("No core terminal for member", "이 직원은 잠들어 있어 터미널이 없습니다"),
+            ("Terminal has finished", "터미널이 종료되었습니다"),
+            ("A matching active terminal control lease is required", "직접 조작 시간이 끝났습니다. 다시 시작하세요"),
+            ("Another terminal control lease is active", "다른 기기에서 터미널을 조작하고 있습니다")
+        ]
+        return translations.reduce(raw) { text, pair in text.replacingOccurrences(of: pair.0, with: pair.1) }
+    }
+
     static func controlStatus(expiresAt: Double?, now: Date) -> String {
         let status = "직접 입력 중 · 이 직원의 자동 전달이 멈춰 있습니다"
         guard let expiresAt else { return status }

@@ -19,21 +19,23 @@ final class LocalHostService {
         defer { isStarting = false }
         let environment = ProcessInfo.processInfo.environment
         let dataHome = Self.dataHome(environment: environment)
+        let resources = try Self.runtimeResources(environment: environment)
+        let expectedBuildID = try await Self.buildID(resources.daemon, environment: environment)
         statusText = "기존 로컬 연결을 확인하는 중"
         if let current = try Self.readConnection(dataHome: dataHome, environment: environment) {
             do {
-                try await Self.checkHealth(current)
-                statusText = "이 Mac에 연결했습니다"
+                let coreAvailable = try await Self.checkHealth(current, expectedBuildID: expectedBuildID)
+                statusText = coreAvailable ? "이 Mac에 연결했습니다" : "이 Mac에 연결했습니다 · core 연결을 확인하세요"
                 return current
             } catch let error as URLError where error.code == .cannotConnectToHost {
                 // Only a refused connection means it is safe to attempt a new local host.
-            } catch {
+            } catch let error as LocalHostError { throw error }
+            catch {
                 throw LocalHostError("기존 로컬 서버에 응답 또는 인증 문제가 있습니다. 실행 중인 서비스를 바꾸지 않았습니다. 연결 설정을 확인하세요.")
             }
         } else {
             try await Self.requireUnusedPort(Self.port(environment: environment, configured: nil))
         }
-        let resources = try Self.runtimeResources(environment: environment)
         let target = "gui/\(getuid())/com.iamceo.server"
         if try await Self.run(URL(fileURLWithPath: "/bin/launchctl"), arguments: ["print", target], environment: environment) == 0 {
             throw LocalHostError("이미 등록된 IAMCEO 서비스가 있습니다. 기존 서비스의 연결 문제를 먼저 확인하세요. 실행 중인 서비스는 교체하지 않았습니다.")
@@ -52,8 +54,8 @@ final class LocalHostService {
             try Task.checkCancellation()
             if let connection = try Self.readConnection(dataHome: dataHome, environment: environment) {
                 do {
-                    try await Self.checkHealth(connection)
-                    statusText = "이 Mac에 연결했습니다"
+                    let coreAvailable = try await Self.checkHealth(connection, expectedBuildID: expectedBuildID)
+                    statusText = coreAvailable ? "이 Mac에 연결했습니다" : "이 Mac에 연결했습니다 · core 연결을 확인하세요"
                     return connection
                 } catch let error as APIError where error.status == 401 {
                     throw LocalHostError("로컬 서버의 접속 코드가 설정과 다릅니다. 연결 설정을 확인하세요.")
@@ -69,16 +71,54 @@ final class LocalHostService {
         #endif
     }
 
-    private struct Health: Decodable, Sendable { let ok: Bool; let version: String }
-    private static func checkHealth(_ connection: LocalHostConnection) async throws {
+    private struct Readiness: Decodable, Sendable {
+        struct Daemon: Decodable, Sendable { let ready: Bool; let buildId: String; let version: String }
+        struct Schema: Decodable, Sendable { let version: Int; let supportedVersion: Int }
+        struct Core: Decodable, Sendable { let available: Bool }
+        let ok: Bool
+        let version: String
+        let daemon: Daemon?
+        let schema: Schema
+        let core: Core?
+    }
+    private static func checkHealth(_ connection: LocalHostConnection, expectedBuildID: String) async throws -> Bool {
         let client = APIClient(endpoint: try ServerEndpoint(connection.url.absoluteString), accessCode: connection.accessCode)
-        let health: Health = try await client.request("/api/health", timeout: 2)
-        guard health.ok, !health.version.isEmpty else { throw LocalHostError("로컬 서버 응답을 확인할 수 없습니다.") }
+        let readiness: Readiness = try await client.request("/api/readiness", timeout: 4)
+        guard readiness.ok, let daemon = readiness.daemon, daemon.ready,
+              daemon.buildId == expectedBuildID, daemon.version == readiness.version,
+              readiness.schema.version > 0, readiness.schema.version == readiness.schema.supportedVersion else {
+            throw LocalHostError("로컬 서버의 준비 상태·실행 build·DB 스키마가 앱과 맞지 않습니다. 설치와 실행 중인 서비스를 확인하세요.")
+        }
         let _: Bootstrap = try await client.request("/api/bootstrap", timeout: 3)
+        return readiness.core?.available == true
     }
 
     #if os(macOS)
     private struct RuntimeResources { let daemon: URL; let core: URL }
+    private nonisolated static func buildID(_ executable: URL, environment: [String: String]) async throws -> String {
+        try await Task.detached {
+            let process = Process()
+            let output = Pipe()
+            process.executableURL = executable
+            process.arguments = ["build-id"]
+            process.environment = environment
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: timeout)
+            defer { timeout.cancel() }
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let identity = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard process.terminationStatus == 0, identity.count == 64,
+                  identity.allSatisfy({ $0.isASCII && $0.isHexDigit }) else {
+                throw LocalHostError("앱에 포함된 서버의 build ID를 확인하지 못했습니다.")
+            }
+            return identity
+        }.value
+    }
     private static func runtimeResources(environment: [String: String]) throws -> RuntimeResources {
         let manager = FileManager.default
         if Bundle.main.bundleURL.pathExtension == "app", let resources = Bundle.main.resourceURL {

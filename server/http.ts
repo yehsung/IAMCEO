@@ -1,7 +1,8 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
-import { detectTailscaleIp } from "./config.ts";
+import { detectTailscaleIp, generateAccessCode, updateConfigFile } from "./config.ts";
+import { MIGRATIONS } from "./db.ts";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { z } from "zod";
@@ -28,12 +29,22 @@ export interface ServerContext {
   push?: PushRoutesContext;
   /** 시험용. 기본은 Tailscale 주소 감지. */
   detectHosts?: () => string[];
+  daemon?: () => { ready: boolean; buildId: string; version: string };
+}
+
+export interface HostBinding {
+  host: string;
+  state: "bound" | "failed";
+  attempts: number;
+  lastAttemptAt: string;
+  error: string | null;
 }
 
 export interface RunningServer {
   port: number;
   hosts: string[];
   urls: string[];
+  readonly hostBindings?: HostBinding[];
   /** 지금 잡히는 주소 중 아직 안 연 것을 연다(로그인 직후 Tailscale 이 늦게 올라오는 경우). */
   syncHosts(): void;
   stop(): Promise<void>;
@@ -99,6 +110,19 @@ export function safeEqual(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
   const hb = createHash("sha256").update(b).digest();
   return timingSafeEqual(ha, hb);
+}
+
+/** 저장 예외 뒤 rename 여부만 읽는다. loadConfig처럼 누락된 설정을 만들지는 않는다. */
+function rotationWasSaved(config: Config, accessCode: string): boolean {
+  let fd: number | undefined;
+  try {
+    fd = openSync(config.configPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid!()) return false;
+    const saved = z.object({ accessCode: z.string() }).safeParse(JSON.parse(readFileSync(fd, "utf8")));
+    return saved.success && safeEqual(saved.data.accessCode, accessCode);
+  } catch { return false; }
+  finally { if (fd !== undefined) closeSync(fd); }
 }
 
 function originMatchesHost(req: Request): boolean {
@@ -538,8 +562,11 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     }),
     // 폰 짝 맺기: Mac 화면이 QR 로 보여 줄 일회용 코드와 폰이 닿을 Tailscale 주소.
     route("POST", "/api/pair/start", async () => {
+      const credential = config.accessCode;
+      const availableUrls = await withMagicDnsNames(tailnetUrls(urls()));
+      if (!safeEqual(credential, config.accessCode)) throw new ApiError(401, "접속 코드가 바뀌었습니다. 다시 연결하세요");
       const { code, expiresAt } = pairing.start();
-      return Response.json({ code, expiresAt: new Date(expiresAt).toISOString(), ttlSeconds: PAIR_CODE_TTL_MS / 1000, urls: await withMagicDnsNames(tailnetUrls(urls())), version: VERSION });
+      return Response.json({ code, expiresAt: new Date(expiresAt).toISOString(), ttlSeconds: PAIR_CODE_TTL_MS / 1000, urls: availableUrls, version: VERSION });
     }),
     route("GET", "/api/runtime", async () => {
       if (!orch.runtimeInfo) throw new ApiError(501, "실행기 진단을 지원하지 않습니다");
@@ -994,12 +1021,14 @@ async function loadWebIndex(): Promise<Bun.HTMLBundle | null> {
 
 const WS_TOPIC = "events";
 const WS_V2_TOPIC = "events-v2";
-interface SocketData { protocol: 1 | 2 }
+interface SocketData { protocol: 1 | 2; authGeneration: number }
 
 export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   const { config, store, bus } = ctx;
   const ipRule = buildIpRule(config.hosts);
   const hosts: string[] = [];
+  const bindings = new Map<string, HostBinding>();
+  let authGeneration = 0;
   let boundPort = 0;
   const pairing = new Pairing();
   let herdrCache: HerdrInfo | undefined;
@@ -1042,7 +1071,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       if (version !== null && version !== "2") return fail(400, "실시간 연결 버전이 잘못되었습니다");
       if (version === "2" && url.searchParams.has("t")) return fail(400, "실시간 연결 주소에 접속 코드를 넣지 마세요");
       if (!hasAccessCode(req, url, version === null)) return fail(401, "인증이 필요합니다");
-      return server.upgrade(req, { data: { protocol: version === "2" ? 2 : 1 } }) ? undefined : fail(400, "WebSocket 요청이 아닙니다");
+      return server.upgrade(req, { data: { protocol: version === "2" ? 2 : 1, authGeneration } }) ? undefined : fail(400, "WebSocket 요청이 아닙니다");
     }
     // 코드가 틀려 나가는 기기도 지울 수 있어야 하므로 인증 앞에 둔다. 지우기뿐이고 바깥 사이트는 Origin 검사에 걸린다.
     if (path === "/api/files-session" && req.method === "DELETE") {
@@ -1050,6 +1079,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     }
     if (path.startsWith("/api/")) {
       if (!hasAccessCode(req, url, false)) return fail(401, "인증이 필요합니다");
+      if (path === "/api/auth/rotate") return rotate(req, url, server);
+      if (path === "/api/readiness") return readiness(req, url);
       if (path === "/api/push" || path.startsWith("/api/push/")) {
         return pushHandler ? pushHandler(req, url) : fail(501, "푸시를 지원하지 않습니다");
       }
@@ -1079,24 +1110,66 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     return fail(404, "없는 경로입니다");
   };
 
+  const readiness = async (req: Request, url: URL): Promise<Response> => {
+    if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다");
+    strictQuery(url, []);
+    const runtime = await ctx.orch.runtimeInfo?.();
+    const daemon = ctx.daemon?.() ?? null;
+    const schemaVersion = store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
+    const ok = daemon?.ready === true && schemaVersion === MIGRATIONS.length;
+    return Response.json({ ok, version: VERSION, daemon, schema: { version: schemaVersion, supportedVersion: MIGRATIONS.length },
+      core: runtime?.core ?? null, hosts: [...bindings.values()].map(binding => ({ ...binding })) }, { status: ok ? 200 : 503 });
+  };
+
+  const rotate = async (req: Request, url: URL, server: Server<SocketData>): Promise<Response> => {
+    if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다");
+    strictQuery(url, []);
+    // 요청의 실제 peer만 사용한다. 프록시 헤더나 Host는 로컬 접근의 증거가 아니다.
+    const peer = server.requestIP(req)?.address.toLowerCase().replace(/^::ffff:/, "");
+    const v4 = peer ? v4ToInt(peer) : null;
+    if (peer !== "::1" && (v4 === null || !inSubnet(v4, LOOPBACK_V4.base, LOOPBACK_V4.mask))) return fail(403, "접속 코드 회전은 이 Mac에서만 할 수 있습니다");
+    if (req.body !== null) await parseBody(req, z.strictObject({}));
+    // body를 읽는 동안 다른 회전이 완료됐을 수 있다.
+    if (!hasAccessCode(req, url, false)) return fail(401, "인증이 필요합니다");
+    const accessCode = generateAccessCode();
+    let durabilityUnknown = false;
+    try { updateConfigFile({ accessCode }, { IAMCEO_HOME: config.home }); }
+    catch {
+      // rename 뒤 디렉터리 fsync만 실패했을 수 있다. 디스크와 메모리의 인증을 다르게 두지 않는다.
+      durabilityUnknown = rotationWasSaved(config, accessCode);
+      if (!durabilityUnknown) return fail(500, "접속 코드를 저장하지 못했습니다. 로컬 설정을 확인하세요", "AUTH_ROTATION_SAVE_FAILED");
+    }
+    // 저장부터 인증 교체·QR 폐기·구독 해제까지 await 없이 한 번에 적용한다.
+    config.accessCode = accessCode;
+    authGeneration++;
+    pairing.invalidate();
+    closedEpochSockets ||= sockets.size > 0;
+    for (const ws of sockets) {
+      ws.unsubscribe(WS_TOPIC);
+      ws.unsubscribe(WS_V2_TOPIC);
+      ws.close(4001, "접속 코드가 바뀌었습니다. 다시 연결하세요");
+    }
+    return durabilityUnknown ? fail(500, "교체된 설정의 디스크 동기화를 확인하지 못했습니다. 이 Mac에서 iamceo open으로 현재 코드를 확인하세요", "AUTH_ROTATION_OUTCOME_UNKNOWN") : Response.json({ accessCode, version: VERSION });
+  };
+
   const handlePairClaim = async (req: Request, server: Server<SocketData>): Promise<Response> => {
     if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다");
+    const generation = authGeneration;
     const body = (await req.json().catch(() => null)) as { code?: unknown; device?: unknown } | null;
+    if (generation !== authGeneration) return fail(401, "접속 코드가 바뀌었습니다. Mac에서 새 QR을 만들어 주세요");
     if (!body || typeof body.code !== "string") return fail(400, "짝 맺기 코드가 필요합니다");
     const from = server.requestIP(req)?.address ?? "unknown";
     const result = pairing.claim(body.code, from);
     if (result === "limited") return fail(429, "너무 많이 시도했습니다. 잠시 뒤 Mac에서 새 QR을 만들어 다시 찍어 주세요");
     if (result === "invalid") return fail(401, "QR이 맞지 않거나 시간이 지났습니다. Mac에서 새 QR을 만들어 주세요");
-    const device = typeof body.device === "string" ? body.device.slice(0, 60).replace(/[\r\n]/g, " ") : "기기";
-    console.info(`짝 맺기: ${device} (${from})`);
-    return Response.json({ accessCode: config.accessCode, version: VERSION });
+    return Response.json({ accessCode: config.accessCode, version: VERSION }, { headers: { "Cache-Control": "no-store" } });
   };
 
   const handleRequest = async (req: Request, server: Server<SocketData>): Promise<Response | undefined> => {
     const url = new URL(req.url);
     // 인증 실패와 검증 오류도 사용자 데이터처럼 캐시에 남기지 않는다.
     const noStore = (response: Response | undefined): Response | undefined => {
-      if (response && (url.pathname.startsWith("/api/") || url.pathname.startsWith("/agent/") || url.pathname === "/ws")) response.headers.set("Cache-Control", "no-store");
+      if (response && (url.pathname.startsWith("/api/") || url.pathname.startsWith("/agent/") || url.pathname.startsWith("/pair/") || url.pathname === "/ws")) response.headers.set("Cache-Control", "no-store");
       return response;
     };
     if (!isIpAllowed(server.requestIP(req)?.address, ipRule)) return noStore(fail(403, "허용되지 않은 주소입니다"));
@@ -1142,6 +1215,11 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
         closeOnBackpressureLimit: true,
         open(ws) {
           sockets.add(ws);
+          if (ws.data.authGeneration !== authGeneration) {
+            closedEpochSockets = true;
+            ws.close(4001, "접속 코드가 바뀌었습니다. 다시 연결하세요");
+            return;
+          }
           ws.subscribe(ws.data.protocol === 2 ? WS_V2_TOPIC : WS_TOPIC);
           if (ws.data.protocol === 2) {
             v2Sockets.add(ws);
@@ -1166,16 +1244,20 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   const port = servers[0]!.port!;
   boundPort = port;
   hosts.push(firstHost);
+  bindings.set(firstHost, { host: firstHost, state: "bound", attempts: 1, lastAttemptAt: new Date().toISOString(), error: null });
   const open = (host: string) => {
+    const attempts = (bindings.get(host)?.attempts ?? 0) + 1;
+    const lastAttemptAt = new Date().toISOString();
     try {
       servers.push(serve(host, port));
       hosts.push(host);
-    } catch (e) {
+      bindings.set(host, { host, state: "bound", attempts, lastAttemptAt, error: null });
+    } catch {
       // Tailscale 이 꺼져 주소가 사라졌어도 로컬은 떠야 한다.
-      console.warn(`${host}:${port} 에서 열지 못했습니다:`, (e as Error).message);
+      bindings.set(host, { host, state: "failed", attempts, lastAttemptAt, error: "HOST_BIND_FAILED" });
     }
   };
-  for (const host of otherHosts) open(host);
+  for (const host of otherHosts) if (!hosts.includes(host)) open(host);
 
   // 로그인 직후 launchd 로 뜨면 Tailscale 이 아직 안 올라왔을 수 있다. 다시 켜지 않아도 폰에서 닿아야 한다.
   const detect = ctx.detectHosts ?? (() => {
@@ -1183,8 +1265,9 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     return ip ? [ip] : [];
   });
   const syncHosts = () => {
-    if (!config.hostsAuto) return;
-    for (const host of detect()) if (!hosts.includes(host)) open(host);
+    if (stopPromise) return;
+    const desired = [...new Set([...otherHosts, ...(config.hostsAuto ? detect() : [])])];
+    for (const host of desired) if (!hosts.includes(host)) open(host);
   };
   const hostTimer = setInterval(syncHosts, HOST_SYNC_MS);
   hostTimer.unref?.();
@@ -1225,7 +1308,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   return {
     port,
     hosts,
-    urls: hosts.map((h) => `http://${h.includes(":") ? `[${h}]` : h}:${port}`),
+    get urls() { return reachableUrls(hosts, port); },
+    get hostBindings() { return [...bindings.values()].map(binding => ({ ...binding })); },
     syncHosts,
     stop() {
       return stopPromise ??= (async () => {

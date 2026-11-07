@@ -26,6 +26,7 @@ const USAGE = `쓰는 법: iamceo <명령>
   restore <백업폴더> --destination 경로 [--clone]
                          별도 빈 홈에 복원하고 발신을 격리한다
   readiness              인증·복구 완료·실행 build ID를 확인한다
+  auth rotate            이 Mac의 접속 코드를 교체하고 모든 연결·QR을 만료시킨다
   build-id               실행 파일의 build ID를 보여 준다
   service install [--restart] [--dry-run] | uninstall [--dry-run]
                          launchd 서비스(com.iamceo.server)를 등록·해제한다
@@ -177,6 +178,7 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
     const runtimeInfo = orch.runtimeInfo.bind(orch);
     orch.runtimeInfo = async () => ({ ...await runtimeInfo(), daemon: { ready, buildId: identity, version: VERSION } });
     const context = { config, store, bus, orch, delivery: orch.deliveryRecovery,
+      daemon: () => ({ ready, buildId: identity, version: VERSION }),
       push: { store: push, providers: () => client!.status(), wake: () => worker?.wake() } };
     server = await (options.startServer ?? http.startServer)(context);
     orch.setServerUrl(server.urls[0]!);
@@ -356,10 +358,52 @@ async function status(): Promise<void> {
   console.log(`IAMCEO ${health.version} 실행 중: ${boot.urls.join(" · ")}`);
   console.log(`실행기: herdr-core · ${boot.runtime?.core.available ? "연결됨" : "연결 안 됨"}${boot.runtime?.core.detail ? ` (${boot.runtime.core.detail})` : ""}`);
   if (herdr.warning) console.log(`  ${herdr.warning}`);
+  try {
+    const response = await fetch(`${localUrl(config)}/api/readiness`, { headers: { Authorization: `Bearer ${config.accessCode}` },
+      redirect: "error", signal: AbortSignal.timeout(5_000) });
+    if (response.status === 401 || response.status === 403) throw new CliError("인증된 진단 확인 실패");
+    if (response.status === 200 || response.status === 503) {
+      const diagnostic = await response.json() as { ok: boolean; daemon: { buildId: string } | null;
+        schema: { version: number; supportedVersion: number }; hosts: { host: string; state: string }[] };
+      console.log(`준비 상태: ${diagnostic.ok ? "완료" : "미완료"} · build ${diagnostic.daemon?.buildId ?? "확인 불가"} · DB ${diagnostic.schema.version}/${diagnostic.schema.supportedVersion}`);
+      for (const binding of diagnostic.hosts) if (binding.state === "failed") console.log(`  접속 주소 열기 실패: ${binding.host} (자동 재시도 중)`);
+    } else { console.log(`준비 진단 확인 불가 (HTTP ${response.status})`); }
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    console.log("준비 진단 확인 불가");
+  }
   console.log("프로젝트:");
   for (const p of boot.projects) {
     console.log(`  ${p.name} (${p.id})${p.runnerEnabled ? "" : " [실행 꺼짐]"}: 결재 ${p.inboxCount} · 일하는 중 ${p.workingCount} · 직원 ${p.memberCount}${p.now ? ` · ${p.now.split("\n")[0]}` : ""}`);
   }
+}
+
+/** Only a local peer may rotate. A lost response is recovered by explicit local `open`, never replayed. */
+export async function rotateAccessCode(config: Config, request: typeof fetch = fetch): Promise<string> {
+  const host = config.hosts.find(host => host === "::1" || host === "localhost" || /^127(?:\.\d{1,3}){3}$/.test(host)) ??
+    (config.hosts.includes("0.0.0.0") ? "127.0.0.1" : config.hosts.includes("::") ? "::1" : null);
+  if (!host || config.port === 0) throw new CliError("로컬 접속 주소와 실행 포트가 필요합니다. loopback host 설정을 확인하세요.");
+  let response: Response;
+  try {
+    response = await request(`http://${host.includes(":") ? `[${host}]` : host}:${config.port}/api/auth/rotate`, {
+      method: "POST", headers: { Authorization: `Bearer ${config.accessCode}`, "Content-Type": "application/json" },
+      body: "{}", redirect: "error", signal: AbortSignal.timeout(5_000),
+    });
+  } catch { throw new CliError("접속 코드 교체 결과를 확인하지 못했습니다. 자동 재시도하지 않았습니다. 이 Mac에서 iamceo open으로 현재 코드를 확인하세요."); }
+  if (!response.ok) throw new CliError(`접속 코드 교체 실패 (HTTP ${response.status}). 이 Mac에서 iamceo open으로 현재 코드를 확인하세요.`);
+  let result: { accessCode: string };
+  try { result = parseRotationResult(await response.json()); }
+  catch { throw new CliError("교체 응답을 확인하지 못했습니다. 이 Mac에서 iamceo open으로 현재 코드를 확인하세요."); }
+  config.accessCode = result.accessCode;
+  return result.accessCode;
+}
+
+function parseRotationResult(value: unknown): { accessCode: string } {
+  // Network input is untrusted even though the public helper returns a typed value.
+  if (!value || typeof value !== "object" || !("accessCode" in value) || typeof value.accessCode !== "string" || !value.accessCode.trim()) {
+    throw new CliError("접속 코드 교체 응답이 잘못되었습니다");
+  }
+  return { accessCode: value.accessCode };
 }
 
 // ---- join ----
@@ -647,6 +691,9 @@ async function main(argv: string[]): Promise<void> {
     case "readiness":
       await waitForReadiness(loadConfig());
       return console.log("인증·복구·build ID 준비 확인 완료");
+    case "auth":
+      if (rest.length !== 1 || rest[0] !== "rotate") throw new CliError("쓰는 법: iamceo auth rotate");
+      return console.log(`접속 코드를 교체했습니다. 모든 기기에서 다시 연결하세요.\n접속 코드: ${await rotateAccessCode(loadConfig())}`);
     case "build-id":
       return console.log(await buildId());
     case "setup":

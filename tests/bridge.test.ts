@@ -1,7 +1,8 @@
 // 실제 서버 + 실제 브리지 프로세스 + SDK 클라이언트. 세션은 fake-claude 로만 돈다.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -14,9 +15,14 @@ import { startServer, type RunningServer } from "../server/http.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
 import { HeadlessRunner } from "../server/runner/headless.ts";
 import type { Runner } from "../server/runner/types.ts";
-import { Store } from "../server/store.ts";
+import { ApiError, Store } from "../server/store.ts";
+import type { AgentToolResult } from "../server/orchestrator-api.ts";
+import type { AgentOperationService } from "../server/service-contracts.ts";
+import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
+const runtime = createIsolatedRuntime();
 const FAKE = resolve(import.meta.dir, "fixtures", "fake-claude.ts");
+runtime.assertFakeExecutable(FAKE);
 const CLI = resolve(import.meta.dir, "..", "bin", "iamceo.ts");
 const CODE = "bridge-code";
 
@@ -31,9 +37,10 @@ let projectId: string;
 let lead: Member;
 let logPath: string;
 const clients: Client[] = [];
+const operationRequests: { operationId: string; memberId: string; name: string; args: Record<string, unknown> }[] = [];
 
 beforeAll(async () => {
-  home = mkdtempSync(join(tmpdir(), "iamceo-bridge-"));
+  home = runtime.paths.iamceoHome;
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
   updateConfigFile({ accessCode: CODE, hosts: ["127.0.0.1"], claudeBin: FAKE }, env);
   config = loadConfig(env);
@@ -42,10 +49,29 @@ beforeAll(async () => {
   logPath = join(home, "calls.jsonl");
   const runner = new HeadlessRunner(
     { claudeBin: FAKE },
-    { env: { ...process.env, FAKE_CLAUDE_LOG: logPath, FAKE_CLAUDE_SESSIONS: join(home, "sessions"), FAKE_CLAUDE_DIRECTIVES: "" } },
+    { env: { ...runtime.childEnv(), FAKE_CLAUDE_LOG: logPath, FAKE_CLAUDE_DIRECTIVES: "" } },
   );
   orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["headless", runner]]) });
+  // W1 AgentOperationService fake. The actual receipt engine is owned by the
+  // orchestration integration; this fixture checks bridge identity, never invents success.
+  const pending = new Map<string, { request: string; result: Promise<AgentToolResult> }>();
+  const operations: AgentOperationService = {
+    execute(member, name, args, context, signal) {
+      operationRequests.push({ ...context, memberId: member.id, name, args });
+      const request = JSON.stringify([member.id, name, args]);
+      const previous = pending.get(context.operationId);
+      if (previous) {
+        if (previous.request !== request) throw new ApiError(409, "다른 요청에 사용된 operationId입니다");
+        return previous.result;
+      }
+      const result = orch.handleAgentTool(member, name, args, signal);
+      pending.set(context.operationId, { request, result });
+      return result;
+    },
+  };
+  Object.assign(orch, { handleAgentOperation: operations.execute.bind(operations) });
   server = await startServer({ config, store, bus, orch });
+  while (server.port === 7878) { await server.stop(); server = await startServer({ config, store, bus, orch }); }
   url = server.urls[0]!;
   orch.setServerUrl(url);
   projectId = store.createProject({ name: "브리지 시험", cwd: home }).id;
@@ -56,11 +82,13 @@ afterAll(async () => {
   await Promise.all(clients.map((c) => c.close().catch(() => {})));
   await orch.shutdown();
   await server.stop();
+  store.db.close();
+  await runtime.stop();
 });
 
 async function connect(token: string, opts: { url?: string; env?: Record<string, string> } = {}): Promise<Client> {
   const client = new Client({ name: "시험", version: "1" });
-  const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", IAMCEO_URL: opts.url ?? url, IAMCEO_TOKEN: token, ...opts.env };
+  const env: Record<string, string> = { ...runtime.childEnv(), IAMCEO_URL: opts.url ?? url, IAMCEO_TOKEN: token, ...opts.env };
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [CLI, "mcp"], env, stderr: "pipe" }));
   clients.push(client);
   return client;
@@ -196,7 +224,7 @@ describe("잘못된 호출", () => {
   }, 15_000);
 
   test("환경변수가 없으면 stdout 을 더럽히지 않고 stderr 로 알린 뒤 끝난다", async () => {
-    const env = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
+    const env = runtime.childEnv();
     const p = Bun.spawn([process.execPath, CLI, "mcp"], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env });
     expect(await p.exited).toBe(1);
     expect(await new Response(p.stdout).text()).toBe("");
@@ -245,59 +273,94 @@ describe("직접 띄운 CLI 의 ask", () => {
     const { token } = await join_({ project: projectId, name: "손님3", handle: "guest3", cwd: home });
     const client = await connect(token);
     await orch.assign(projectId, "guest3", { text: "밀린 일" });
-    expect((await callText(client, "wait", { timeout_sec: 1 })).text).toContain("할 일: 밀린 일");
+    const received = await callText(client, "wait", { timeout_sec: 1 });
+    expect(received.text).toContain("할 일: 밀린 일");
+    const batch = JSON.parse(received.text) as { id: string; items: { deliveryId: string }[] };
+    expect(store.requireDelivery(batch.items[0]!.deliveryId).status).not.toBe("delivered");
+    expect((await callText(client, "wait", { timeout_sec: 1 })).text).toBe(received.text);
+    expect(await callText(client, "wait", { ack_batch_id: batch.id })).toMatchObject({ isError: false });
+    expect(store.requireDelivery(batch.items[0]!.deliveryId).status).toBe("delivered");
   }, 15_000);
 
-  test("답을 기다리는 도중 서버 프로세스가 죽었다 살아나도 이어서 받는다", async () => {
-    const serverHome = mkdtempSync(join(tmpdir(), "iamceo-bridge-restart-"));
-    updateConfigFile({ accessCode: CODE, hosts: ["127.0.0.1"] }, { IAMCEO_HOME: serverHome });
-    const probe = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
-    const port = probe.port!;
-    await probe.stop(true);
-    const base = `http://127.0.0.1:${port}`;
-    const headers = { Authorization: `Bearer ${CODE}`, "Content-Type": "application/json" };
-    const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(HERDR_|CLAUDE)/.test(k))) as Record<string, string>;
-    const start = async () => {
-      const p = Bun.spawn([process.execPath, CLI, "serve"], {
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-        env: { ...childEnv, IAMCEO_TEST: "1", IAMCEO_HOME: serverHome, IAMCEO_PORT: String(port), IAMCEO_HERDR_SOCKET: join(serverHome, "no.sock"), IAMCEO_CLAUDE_BIN: FAKE },
-      });
-      const end = Date.now() + 15_000;
-      while (!(await fetch(`${base}/api/health`).then((r) => r.ok, () => false))) {
-        if (Date.now() > end) throw new Error("서버가 뜨지 않았습니다");
-        await Bun.sleep(30);
+  test("ask 답 조회의 응답 유실 후 같은 decisionId로 이어 받는다", async () => {
+    let polls = 0;
+    let registered = 0;
+    const fake = runtime.serve(async req => {
+      const path = new URL(req.url).pathname;
+      if (path === "/agent/tool") {
+        registered++;
+        return Response.json({ text: "질문 등록", wait: { decisionId: "d_restart" } });
       }
-      return p;
-    };
+      if (path === "/agent/ask/wait") {
+        expect(await req.json()).toMatchObject({ decisionId: "d_restart" });
+        if (++polls === 1) return new Response("{", { status: 200 });
+        return Response.json({ done: true, text: "재시작 뒤 답", decision: {} });
+      }
+      return new Response("missing", { status: 404 });
+    });
+    const r = await callText(await connect("tk_fixture", { url: fake.url }), "ask", { title: "재시작 질문", detail: "배경" });
+    expect(r).toMatchObject({ isError: false, text: "재시작 뒤 답" });
+    expect(registered).toBe(1);
+    expect(polls).toBe(2);
+  }, 15_000);
+});
 
-    const first = await start();
-    let current = first;
-    try {
-      const project = (await (await fetch(`${base}/api/projects`, { method: "POST", headers, body: JSON.stringify({ name: "재시작", cwd: serverHome }) })).json()) as { id: string };
-      const joined = (await (await fetch(`${base}/agent/join`, { method: "POST", headers, body: JSON.stringify({ project: project.id, name: "손님", cwd: serverHome }) })).json()) as { token: string };
-      const client = await connect(joined.token, { url: base });
-      const pending = callText(client, "ask", { title: "재시작 질문", detail: "배경" });
-      const decisionId = await (async () => {
-        for (;;) {
-          const state = (await (await fetch(`${base}/api/projects/${project.id}/state`, { headers })).json()) as { decisions: { id: string }[] };
-          if (state.decisions[0]) return state.decisions[0].id;
-          await Bun.sleep(20);
-        }
-      })();
+describe("operation ID 계약", () => {
+  test("같은 본문 새 호출은 별개이고 명시한 같은 ID만 결과를 회수한다", async () => {
+    const client = await connect(store.getMemberToken(lead.id));
+    const before = store.listMessages(projectId).length;
+    const args = { kind: "알림", title: "같은 본문의 새 호출" };
+    const first = await callText(client, "post", args);
+    const second = await callText(client, "post", args);
+    expect(first.text).not.toBe(second.text);
+    expect(store.listMessages(projectId)).toHaveLength(before + 2);
+    const requests = operationRequests.filter(r => r.args.title === args.title);
+    expect(requests).toHaveLength(2);
+    expect(z.uuid().safeParse(requests[0]!.operationId).success).toBe(true);
+    expect(requests[0]!.operationId).not.toBe(requests[1]!.operationId);
+    expect(await callText(client, "post", { ...args, operation_id: requests[0]!.operationId })).toEqual(first);
+    expect(store.listMessages(projectId)).toHaveLength(before + 2);
+    expect((await callText(client, "post", { ...args, title: "다른 요청", operation_id: requests[0]!.operationId })).isError).toBe(true);
+    expect((await callText(client, "post", { ...args, operation_id: "잘못된 ID" })).isError).toBe(true);
+    const { tools } = await client.listTools();
+    expect((tools.find(t => t.name === "post")!.inputSchema.properties as Record<string, unknown>).operation_id).toMatchObject({ format: "uuid" });
+  });
 
-      first.kill("SIGKILL");
-      await first.exited;
-      await Bun.sleep(300);
-      current = await start();
-      const answered = await fetch(`${base}/api/decisions/${decisionId}/answer`, { method: "POST", headers, body: JSON.stringify({ note: "재시작 뒤 답" }) });
-      expect(answered.status).toBe(200);
-      const r = await pending;
-      expect(r.isError).toBe(false);
-      expect(r.text).toContain("재시작 뒤 답");
-    } finally {
-      current.kill("SIGTERM");
-    }
-  }, 40_000);
+  test("성공 응답 유실은 같은 ID로 한 번 재요청하며 재연결에도 ID를 재사용한다", async () => {
+    const received: { operationId: string; args: Record<string, unknown> }[] = [];
+    const receipts = new Map<string, AgentToolResult>();
+    let effects = 0;
+    const fake = runtime.serve(async req => {
+      expect(req.headers.get("X-IAMCEO-Contract")).toBe("2");
+      const body = await req.json() as { operationId: string; args: Record<string, unknown> };
+      received.push(body);
+      let result = receipts.get(body.operationId);
+      if (!result) { result = { text: `보고 #${++effects}` }; receipts.set(body.operationId, result); }
+      if (received.length === 1) return new Response("{", { status: 200 });
+      return Response.json(result);
+    });
+    const client = await connect("tk_fixture", { url: fake.url });
+    const result = await callText(client, "post", { kind: "완료", title: "응답 유실" });
+    expect(result).toMatchObject({ text: "보고 #1", isError: false });
+    expect(received).toHaveLength(2);
+    expect(received[0]!.operationId).toBe(received[1]!.operationId);
+    expect(effects).toBe(1);
+    const again = await connect("tk_fixture", { url: fake.url });
+    expect(await callText(again, "post", { kind: "완료", title: "응답 유실", operation_id: received[0]!.operationId })).toEqual(result);
+    expect(received.at(-1)!.args).not.toHaveProperty("operation_id");
+    expect(effects).toBe(1);
+  });
+
+  test("미지원 서비스는 ID를 보존한 오류이며 v1 재실행을 하지 않는다", async () => {
+    const requests: unknown[] = [];
+    const fake = runtime.serve(async req => {
+      requests.push(await req.json());
+      return Response.json({ error: "작업 ID 호출 미지원" }, { status: 501 });
+    });
+    const operationId = randomUUID();
+    const result = await callText(await connect("tk_fixture", { url: fake.url }), "post", { kind: "완료", title: "거부", operation_id: operationId });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(operationId);
+    expect(requests).toHaveLength(1);
+  });
 });

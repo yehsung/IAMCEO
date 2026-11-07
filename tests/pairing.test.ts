@@ -1,7 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { Bus } from "../server/bus.ts";
 import { type Config, loadConfig, updateConfigFile } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
@@ -9,6 +6,7 @@ import { type RunningServer, startServer } from "../server/http.ts";
 import type { OrchestratorApi } from "../server/orchestrator-api.ts";
 import { normalizePairCode, Pairing, PAIR_CODE_LENGTH, PAIR_CODE_TTL_MS, tailnetUrls, withMagicDnsNames } from "../server/pairing.ts";
 import { Store } from "../server/store.ts";
+import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
 const CODE = "test-access-code";
 
@@ -55,6 +53,16 @@ describe("짝 맺기 코드", () => {
     expect(pairing.claim(first, "100.64.0.2")).toBe("invalid");
   });
 
+  test("인증 회전은 미사용 QR을 모두 지우고 새 QR만 허용한다", () => {
+    const pairing = new Pairing();
+    const first = pairing.start().code;
+    const second = pairing.start().code;
+    pairing.invalidate();
+    expect(pairing.claim(first, "fixture")).toBe("invalid");
+    expect(pairing.claim(second, "fixture")).toBe("invalid");
+    expect(pairing.claim(pairing.start().code, "fixture")).toBe("ok");
+  });
+
   test("Tailscale IP 마다 MagicDNS 이름 주소를 앞에 붙이고, 못 찾으면 IP 만 남긴다", async () => {
     const reverse = async (ip: string) => (ip === "100.92.29.67" ? ["mac-mini.tail6b5aa2.ts.net."] : []);
     expect(await withMagicDnsNames(["http://100.92.29.67:7878"], reverse)).toEqual(["http://mac-mini.tail6b5aa2.ts.net:7878", "http://100.92.29.67:7878"]);
@@ -72,20 +80,25 @@ describe("짝 맺기 코드", () => {
 describe("짝 맺기 HTTP", () => {
   let server: RunningServer;
   let base: string;
+  let isolated: ReturnType<typeof createIsolatedRuntime>;
+  let store: Store;
 
   beforeAll(async () => {
-    const home = mkdtempSync(join(tmpdir(), "iamceo-pair-"));
-    const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
+    isolated = createIsolatedRuntime();
+    const env = isolated.childEnv();
     updateConfigFile({ accessCode: CODE, hosts: ["127.0.0.1"] }, env);
     const config: Config = loadConfig(env);
     const bus = new Bus();
-    const store = new Store(openDb(config.dbPath), bus);
+    store = new Store(openDb(config.dbPath), bus);
     const orch = {} as OrchestratorApi;
     server = await startServer({ config, store, bus, orch, detectHosts: () => [] });
+    while (server.port === 7878) { await server.stop(); server = await startServer({ config, store, bus, orch, detectHosts: () => [] }); }
     base = `http://127.0.0.1:${server.port}`;
   });
   afterAll(async () => {
     await server.stop();
+    store.db.close();
+    await isolated.stop();
   });
 
   const start = (auth = true) =>
@@ -109,10 +122,22 @@ describe("짝 맺기 HTTP", () => {
     const { code } = (await (await start()).json()) as { code: string };
     const ok = await claim(code);
     expect(ok.status).toBe(200);
+    expect(ok.headers.get("cache-control")).toBe("no-store");
     expect(((await ok.json()) as { accessCode: string }).accessCode).toBe(CODE);
     const again = await claim(code);
     expect(again.status).toBe(401);
     expect(((await again.json()) as { error: string }).error).toContain("새 QR");
+  });
+
+  test("성공 응답 유실은 코드 재사용 대신 새 QR로 복구한다", async () => {
+    const { code } = await (await start()).json() as { code: string };
+    const lost = await claim(code);
+    await lost.body?.cancel();
+    const retry = await claim(code);
+    expect(retry.status).toBe(401);
+    expect((await retry.json() as { error: string }).error).toContain("새 QR");
+    const replacement = await (await start()).json() as { code: string };
+    expect((await claim(replacement.code)).status).toBe(200);
   });
 
   test("코드가 없거나 형식이 틀리면 400, GET 은 405", async () => {

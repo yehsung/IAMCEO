@@ -7,13 +7,15 @@ import { CONDUCTOR_TOOLS, fileKindOf, MANUAL_TOOLS, ROOT_TOOLS, WORKER_TOOLS, ty
 import { FilePublication, importPath, prepareImport, MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES, type PreparedImport, type SavedFile } from "./files.ts";
 import { createStorageReferences } from "./storage-maintenance.ts";
 import { toStorageError } from "./storage-errors.ts";
-import type { AgentToolDef, AgentToolResult } from "./orchestrator-api.ts";
+import type { AgentToolDef, AgentToolResult, OrchestratorApi } from "./orchestrator-api.ts";
+import type { AgentWorkflowService } from "./service-contracts.ts";
 import type { AssignResult, Orchestrator } from "./orchestrator.ts";
 import { josa } from "./roles.ts";
 import { ApiError } from "./store.ts";
 import { oneLineProblem } from "./text.ts";
 
 type ToolName = (typeof WORKER_TOOLS | typeof CONDUCTOR_TOOLS | typeof ROOT_TOOLS | typeof MANUAL_TOOLS)[number];
+type ToolHost = Orchestrator & Partial<AgentWorkflowService> & Pick<OrchestratorApi, "manualInbox" | "acknowledgeManualInbox">;
 
 const WAIT_DEFAULT_SEC = 50;
 // 서버 idleTimeout(255초)보다 짧아야 연결이 안 끊긴다.
@@ -44,7 +46,7 @@ const userQuote = z.string().optional().describe("대표가 한 말 중 이 일�
 interface Tool<S extends z.ZodType = z.ZodType> {
   description: string;
   schema: S;
-  run(orch: Orchestrator, member: Member, args: z.output<S>, signal?: AbortSignal): AgentToolResult | Promise<AgentToolResult>;
+  run(orch: ToolHost, member: Member, args: z.output<S>, signal?: AbortSignal): AgentToolResult | Promise<AgentToolResult>;
 }
 
 function tool<S extends z.ZodType>(description: string, schema: S, run: Tool<S>["run"]): Tool<S> {
@@ -219,16 +221,35 @@ const TOOLS: Record<ToolName, Tool<any>> = {
   ),
 
   post: tool(
-    "대화에 보고를 남긴다. 완료·막힘은 턴을 마치기 전에 반드시, 진행·알림은 필요할 때. 질문은 ask 로 한다.",
+    "대화에 보고를 남긴다. 완료·막힘은 턴을 마치기 전에 반드시, 진행·알림은 필요할 때. 질문은 ask 로 한다. report_id만 주면 같은 프로젝트 보고의 원본·전체 자료·결재·작성 순서·정정 관계를 조회한다(게시하지 않는다).",
     z.strictObject({
-      kind: z.enum(["완료", "진행", "막힘", "알림"]),
-      title: oneLine(300).describe("결과 핵심 한 줄"),
+      report_id: text.optional().describe("조회할 보고 원본 메시지 id. 조회할 때는 이 필드만 준다"),
+      kind: z.enum(["완료", "진행", "막힘", "알림"]).optional(),
+      title: oneLine(300).optional().describe("결과 핵심 한 줄"),
       body: z.string().optional().describe("결과 핵심, 바뀐 파일·커밋, 대표가 확인하거나 정할 것(마크다운)"),
       file_ids: z.array(z.string()).optional().describe("이어 줄 자료 id"),
       decision_id: z.string().optional().describe("이어 줄 결재 id"),
+      corrects_message_id: text.optional().describe("정정할 자신의 이전 보고 원본 메시지 id"),
+    }).superRefine((a, ctx) => {
+      if (a.report_id !== undefined) {
+        if ([a.kind, a.title, a.body, a.file_ids, a.decision_id, a.corrects_message_id].some(v => v !== undefined)) ctx.addIssue({ code: "custom", message: "report_id 조회와 보고 게시 인자는 함께 줄 수 없습니다" });
+      } else if (a.kind === undefined || a.title === undefined) ctx.addIssue({ code: "custom", message: "보고 게시에는 kind와 title이 필요합니다" });
     }),
     async (orch, member, a) => {
-      const message = await orch.recordPost(member, { kind: a.kind, title: a.title, body: a.body, fileIds: a.file_ids, decisionId: a.decision_id });
+      if (a.report_id !== undefined) {
+        if (!orch.reportReferences) throw new ApiError(501, "보고 참조 조회를 지원하지 않습니다");
+        const refs = orch.reportReferences(member.projectId, a.report_id);
+        const source = orch.store.requireMessage(refs.sourceMessageId);
+        if (source.projectId !== member.projectId) throw new ApiError(404, "보고를 찾을 수 없습니다");
+        const files = refs.fileIds.map(id => {
+          const file = orch.store.getFile(id);
+          if (!file || file.projectId !== member.projectId) throw new ApiError(404, `자료를 찾을 수 없습니다: ${id}`);
+          return { id: file.id, title: file.title, summary: file.summary, body: file.body, kind: file.kind, attachments: file.attachments, ...(file.kind === "artifact" ? { html: orch.store.getFileHtml(file.id) } : {}) };
+        });
+        return reply(JSON.stringify({ ...refs, source, files }));
+      }
+      if (a.kind === undefined || a.title === undefined) throw new ApiError(400, "보고 게시에는 kind와 title이 필요합니다");
+      const message = await orch.recordPost(member, { kind: a.kind, title: a.title, body: a.body, fileIds: a.file_ids, decisionId: a.decision_id, correctsMessageId: a.corrects_message_id });
       return reply(`보고했습니다 #${message.id}`);
     },
   ),
@@ -313,15 +334,23 @@ const TOOLS: Record<ToolName, Tool<any>> = {
   ),
 
   ask_close: tool(
-    "결재함의 열린 카드를 이유와 함께 닫는다. 대신 답하지 않는다: 대표가 아직 정하지 않은 카드를 추측으로 닫지 않고, 애매하면 그대로 둔다. decided 는 대표가 대화 등으로 이미 정한 경우로, user_quote 에 대표 원문을 실어야 하며 서버가 대표 글과 맞춰 보고 확인되지 않으면(버튼 글·아주 짧은 글 포함) 닫지 않는다. obsolete 는 상황이 바뀌어 더 물을 필요가 없어진 경우다. 닫으면 물은 직원에게 깨우지 않고 알리고, 대표는 결재된 항목에서 이유를 보고 다시 열 수 있다. 직원은 자기가 올린 카드만 닫는다.",
+    "결재함의 열린 카드를 이유와 함께 닫는다. 대신 답하지 않는다: decided는 user_quote에 대표 원문이 필요하고, obsolete는 상황이 바뀌어 불필요해진 경우다. follow_up에 후속 불필요(none) 또는 대상·지시·대표 원본 메시지 ID(instruction)를 명시하면 닫기와 후속 전달을 함께 저장한다. 별도 team_assign으로 반복하지 않는다. 직원은 자기가 올린 카드만 닫는다.",
     z.strictObject({
       id: text.describe("결재 id(d_...). board 로 본다"),
       kind: z.enum(["decided", "obsolete"]).describe("decided 대표가 이미 정함 · obsolete 필요 없어짐"),
       reason: oneLine(300).describe("왜 닫는지 한 줄. 대표 결재함에 그대로 보인다"),
       user_quote: z.string().optional().describe("decided 일 때 필수. 대표가 이 일을 정한 말을 글자 그대로. 서버가 대표 글과 대조한다"),
+      follow_up: z.discriminatedUnion("kind", [
+        z.strictObject({ kind: z.literal("none") }),
+        z.strictObject({ kind: z.literal("instruction"), member_id: text, text, source_message_id: text }),
+      ]).optional().describe("새 호출에서는 반드시 명시한다. instruction의 member_id는 같은 프로젝트 직원 ID, source_message_id는 대표 원문 메시지 ID"),
     }),
     async (orch, member, a) => {
-      const closed = await orch.closeAsk(member, { id: a.id, kind: a.kind, reason: a.reason, userQuote: a.user_quote });
+      if (a.follow_up && !orch.closeDecision) throw new ApiError(501, "결재 후속 저장을 지원하지 않습니다");
+      const closed = a.follow_up
+        ? await orch.closeDecision!(member, { id: a.id, kind: a.kind, reason: a.reason, userQuote: a.user_quote,
+          followUp: a.follow_up.kind === "none" ? { kind: "none" } : { kind: "instruction", memberId: a.follow_up.member_id, text: a.follow_up.text, sourceMessageId: a.follow_up.source_message_id } })
+        : await orch.closeAsk(member, { id: a.id, kind: a.kind, reason: a.reason, userQuote: a.user_quote });
       return reply(`결재 #${closed.id} 를 닫았습니다${closed.closeQuote ? ". 인용은 대표 글과 맞습니다" : ""}`);
     },
   ),
@@ -484,9 +513,23 @@ const TOOLS: Record<ToolName, Tool<any>> = {
   }),
 
   wait: tool(
-    "밀린 지시와 결재 답을 받는다. 일이 끝났으면 턴을 마치기 전에 부른다. 없으면 그렇게 돌아오니 다시 부른다.",
-    z.strictObject({ timeout_sec: z.number().int().min(1).max(WAIT_MAX_SEC).optional().describe(`기본 ${WAIT_DEFAULT_SEC}초`) }),
-    async (orch, member, a, signal) => reply((await orch.waitInbox(member, (a.timeout_sec ?? WAIT_DEFAULT_SEC) * 1000, signal)) ?? "새 지시가 없습니다. 계속 기다리려면 다시 wait 를 부르세요"),
+    "밀린 지시와 결재 답을 batch로 받는다. 반환만으로 소비하지 않는다. 내용을 읽은 뒤 wait에 ack_batch_id를 넣어 수신을 확인한다. ACK 전 다시 조회하면 같은 batch다. 응답 유실 때 새 operation_id로 조회해도 회수된다. 일이 끝나면 다시 부른다.",
+    z.strictObject({
+      batch: z.literal(true).optional().describe("재조회 가능한 batch 수신 계약. MCP bridge는 자동으로 true를 보낸다"),
+      timeout_sec: z.number().int().min(1).max(WAIT_MAX_SEC).optional().describe(`기본 ${WAIT_DEFAULT_SEC}초`),
+      ack_batch_id: text.optional().describe("읽은 batch의 id. ACK만 수행한다. timeout_sec와 함께 주지 않는다"),
+    }).refine(a => a.ack_batch_id === undefined || a.timeout_sec === undefined, "ACK와 조회는 따로 호출합니다"),
+    async (orch, member, a, signal) => {
+      if (a.ack_batch_id !== undefined) {
+        if (!orch.acknowledgeManualInbox) throw new ApiError(501, "수신함 ACK를 지원하지 않습니다");
+        return reply(JSON.stringify(await orch.acknowledgeManualInbox(member.id, { batchId: a.ack_batch_id })));
+      }
+      // 기존 v1 HTTP 도구 호출은 문자열/즉시 소비 계약을 유지한다.
+      if (!a.batch) return reply((await orch.waitInbox(member, (a.timeout_sec ?? WAIT_DEFAULT_SEC) * 1000, signal)) ?? "새 지시가 없습니다. 계속 기다리려면 다시 wait 를 부르세요");
+      if (!orch.manualInbox) throw new ApiError(501, "수신함 batch 조회를 지원하지 않습니다");
+      const batch = await orch.manualInbox(member.id, (a.timeout_sec ?? WAIT_DEFAULT_SEC) * 1000, signal);
+      return reply(batch ? JSON.stringify(batch) : "새 지시가 없습니다. 계속 기다리려면 다시 wait 를 부르세요");
+    },
   ),
 };
 

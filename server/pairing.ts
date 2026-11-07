@@ -20,6 +20,11 @@ export class Pairing {
 
   constructor(private readonly now: () => number = Date.now) {}
 
+  /** 전역 인증 회전 시 미사용 QR도 모두 폐기한다. 실패 제한은 유지한다. */
+  invalidate(): void {
+    this.codes.clear();
+  }
+
   start(): { code: string; expiresAt: number } {
     this.prune();
     while (this.codes.size >= MAX_OPEN_CODES) {

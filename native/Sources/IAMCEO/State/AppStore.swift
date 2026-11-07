@@ -2,6 +2,17 @@ import Foundation
 import Observation
 
 enum ConnectionStatus: String, Sendable { case disconnected, connecting, connected, demo, failed }
+enum RealtimeStatus: String, Sendable { case paused, connecting, syncing, live, legacy, fallback, blocked }
+
+private struct RefreshScope: OptionSet {
+    let rawValue: Int
+    static let snapshot = Self(rawValue: 1)
+    static let history = Self(rawValue: 2)
+    static let delivery = Self(rawValue: 4)
+    static let activity = Self(rawValue: 8)
+    static let diagnostics = Self(rawValue: 16)
+    static let all: Self = [.snapshot, .history, .delivery, .activity]
+}
 
 @MainActor @Observable
 final class AppStore: ProjectManagementStore {
@@ -28,7 +39,7 @@ final class AppStore: ProjectManagementStore {
     var todos: [Todo] { state?.todos ?? [] }
     var files: [FileDoc] { state?.files ?? [] }
     var work: [WorkItem] { state?.work ?? [] }
-    var canWrite: Bool { connectionStatus == .connected && !isDemo && !isArchive && state?.project.archived != true }
+    var canWrite: Bool { connectionStatus == .connected && !isRevalidating && !isDemo && !isArchive && state?.project.archived != true }
     let histories = ChatHistoryCache()
     private(set) var pagingSupport: HistoryPagingSupport = .unknown
     private(set) var isArchive = false
@@ -64,22 +75,71 @@ final class AppStore: ProjectManagementStore {
     }
     @ObservationIgnored private var historyTarget: String?
     @ObservationIgnored private var historyVisible = false
-    @ObservationIgnored private var historyFlight: (key: ChatHistoryKey, id: UUID, task: Task<Void, Never>)?
+    @ObservationIgnored private var historyFlight: (key: ChatHistoryKey, id: UUID, revision: Int, task: Task<Void, Never>)?
+    @ObservationIgnored private var historyInvalidationRevision = 0
     @ObservationIgnored private var deliveryFlights: [String: UUID] = [:]
+    @ObservationIgnored private var deliveryRefreshPending: Set<String> = []
     @ObservationIgnored private var archiveLoad = UUID()
     /// The server stopped answering after a successful connect. The last snapshot stays on screen (read-only),
-    /// polling keeps retrying, and the next successful refresh returns to `.connected`.
+    /// fallback keeps retrying, and the next successful refresh returns to `.connected`.
     var connectionLost: Bool { connectionStatus == .disconnected && api != nil && bootstrap != nil && !isDemo }
     /// Why the last sync failed while `connectionLost` (system wording, e.g. no internet vs. server not answering).
     private(set) var connectionIssue: String?
-    var syncDescription: String { isDemo ? "Sample workspace · read-only" : foreground ? "Refreshes every 3 seconds while active" : "Updates paused in background" }
+    private(set) var realtimeStatus: RealtimeStatus = .paused
+    private(set) var isRevalidating = false
+    private(set) var lastHeartbeatAt: Date?
+    private(set) var lastSyncAttemptAt: Date?
+    private(set) var lastSuccessfulSyncAt: Date?
+    private(set) var receivedCursor: SyncCursor?
+    private(set) var appliedSnapshotCursor: SyncCursor?
+    private(set) var dirtyRevision = 0
+    private(set) var resyncRevision = 0
+    private(set) var activityRevisions: [String: Int] = [:]
+    private(set) var activities: [String: [Activity]] = [:]
+    private(set) var activityErrors: [String: String] = [:]
+    var syncDescription: String {
+        if isDemo { return "Sample workspace · read-only" }
+        switch realtimeStatus {
+        case .paused: return "Updates paused in background"
+        case .connecting: return "Connecting to live updates…"
+        case .syncing: return "Synchronizing latest state…"
+        case .live: return lowPowerMode ? "Live · power saving" : "Connected live"
+        case .legacy: return "Connected · legacy change notifications"
+        case .fallback: return "Live updates interrupted · checking periodically"
+        case .blocked: return "Check server address and access settings"
+        }
+    }
     @ObservationIgnored private let injectedSession: URLSession?
     @ObservationIgnored private let persistCredentials: Bool
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var projectGeneration = UUID()
     @ObservationIgnored private var refreshGeneration = UUID()
-    @ObservationIgnored private var pollTask: Task<Void, Never>?
-    @ObservationIgnored private var loadTask: Task<ProjectState, Error>?
+    @ObservationIgnored private let realtime: RealtimeClient?
+    @ObservationIgnored private let syncClock: any RealtimeClock
+    @ObservationIgnored private let retryJitter: @Sendable (Double) -> Double
+    @ObservationIgnored private let lowPowerMode: Bool
+    @ObservationIgnored private var socketGeneration = UUID()
+    @ObservationIgnored private var foregroundGeneration = UUID()
+    @ObservationIgnored private var coordinatorGeneration = UUID()
+    @ObservationIgnored private var socketTask: Task<Void, Never>?
+    @ObservationIgnored private var socketTransition: Task<Void, Never>?
+    @ObservationIgnored private var reconnectTask: Task<Void, Never>?
+    @ObservationIgnored private var fallbackTask: Task<Void, Never>?
+    @ObservationIgnored private var coordinatorTask: Task<Void, Never>?
+    @ObservationIgnored private var dirty: RefreshScope = []
+    @ObservationIgnored private var nextSnapshotAt: Duration = .zero
+    @ObservationIgnored private var syncSupported = false
+    @ObservationIgnored private var realtimeSupported = false
+    @ObservationIgnored private var capabilitiesLoaded = false
+    @ObservationIgnored private var socketHello = false
+    @ObservationIgnored private var highestRelevantSeq = 0
+    @ObservationIgnored private var socketFailures = 0
+    @ObservationIgnored private var restFailures = 0
+    @ObservationIgnored private var stableSince: Duration?
+    @ObservationIgnored private var openActivityMembers: Set<String> = []
+    @ObservationIgnored private var activityTokens: [String: UUID] = [:]
+    @ObservationIgnored private var initialTask: Task<Bootstrap, Error>?
+    @ObservationIgnored private var pendingConnect = false
     @ObservationIgnored private var refreshTask: Task<RefreshSnapshot, Error>?
     @ObservationIgnored private var foreground = true
     let drafts: DraftStore
@@ -108,8 +168,15 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored private var transportFailures = 0
 
     init(demo: Bool = false, session: URLSession? = nil, persistCredentials: Bool = true,
-         drafts: DraftStore? = nil, submissions: SubmissionStore? = nil, writeStorageURL: URL? = nil) {
+         drafts: DraftStore? = nil, submissions: SubmissionStore? = nil, writeStorageURL: URL? = nil,
+         realtime: RealtimeClient? = nil, clock: any RealtimeClock = SystemRealtimeClock(),
+         retryJitter: @escaping @Sendable (Double) -> Double = { $0 * Double.random(in: 0.8...1.2) },
+         lowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled) {
         injectedSession = session
+        // URLProtocol cannot intercept a WebSocket upgrade. Injected HTTP sessions must also
+        // inject a socket transport to opt in; tests can never escape to the real network.
+        self.realtime = realtime ?? (session == nil ? RealtimeClient() : nil)
+        syncClock = clock; self.retryJitter = retryJitter; self.lowPowerMode = lowPowerMode
         self.persistCredentials = persistCredentials
         isDemo = demo
         self.drafts = drafts ?? DraftStore(persist: persistCredentials && !demo)
@@ -143,10 +210,24 @@ final class AppStore: ProjectManagementStore {
 
     func connect() async {
         guard !isDemo else { return }
+        guard foreground else {
+            // A requested host change invalidates writes/uploads now, even though networking
+            // waits for the next active phase. A → B → A must reject A's late callbacks too.
+            pendingConnect = true; stopRequests()
+            generation = UUID(); projectGeneration = UUID()
+            api = nil; connectionStatus = .disconnected; isLoading = false; isRevalidating = true
+            drafts.selectNamespace("unassigned"); writeNamespace = "unassigned"
+            return
+        }
+        pendingConnect = false
         // "다시 연결" from the offline strip: same server and code, so retry now and keep the last snapshot,
         // leases and pending retries instead of dropping the CEO back onto the connection screen.
         if connectionLost, let creds = connectedCredentials,
            creds.endpoint == endpoint, creds.code == accessCode.trimmingCharacters(in: .whitespacesAndNewlines) {
+            if foreground {
+                restFailures = 0; socketFailures = 0
+                startSocket()
+            }
             await refresh()
             return
         }
@@ -157,7 +238,9 @@ final class AppStore: ProjectManagementStore {
         writeRevisions = nil; reviewedSettings = nil; reviewedMembers = [:]; reviewedTodos = [:]
         settingsEdit = nil; settingsConflict = nil; todoWrites = [:]; operationResults = [:]; batchResults = [:]
         leaseReceiptOrder = [:]; absentOperations = []; writeContextGeneration = UUID()
-        strictWriteContract = false
+        strictWriteContract = false; syncSupported = false; realtimeSupported = false; capabilitiesLoaded = false
+        receivedCursor = nil; appliedSnapshotCursor = nil; highestRelevantSeq = 0
+        socketFailures = 0; restFailures = 0; nextSnapshotAt = .zero
         resetReadCollections()
         let epoch = generation
         lastReadError = nil
@@ -173,8 +256,11 @@ final class AppStore: ProjectManagementStore {
             let validated = try ServerEndpoint(endpoint)
             guard !accessCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw APIError(status: 0, message: "접속 코드를 넣어 주세요.") }
             let client = APIClient(endpoint: validated, accessCode: accessCode.trimmingCharacters(in: .whitespacesAndNewlines), session: injectedSession)
-            let initial: Bootstrap = try await client.request("/api/bootstrap")
-            guard epoch == generation else { return }
+            let task = Task { try await client.request("/api/bootstrap") as Bootstrap }
+            initialTask = task
+            let initial = try await task.value
+            guard epoch == generation, foreground, !Task.isCancelled else { return }
+            initialTask = nil
             api = client
             writeNamespace = DraftStore.endpointNamespace(validated)
             drafts.selectNamespace(writeNamespace)
@@ -186,18 +272,17 @@ final class AppStore: ProjectManagementStore {
             catch { errorMessage = error.localizedDescription }
             connectedCredentials = (endpoint, accessCode.trimmingCharacters(in: .whitespacesAndNewlines))
             connectionStatus = .connected
+            await discoverCapabilities()
+            guard epoch == generation, foreground else { return }
             if let first = initial.projects.first { await selectProject(id: first.id) }
             else { await refreshWriteContext() }
-            guard epoch == generation else { return }
-            if runtime == nil {
-                do { runtime = try await client.request("/api/runtime") }
-                catch { if let apiError = error as? APIError, apiError.status == 401 { handle(error) } }
-            }
+            guard epoch == generation, foreground else { return }
+            if runtime == nil { await refreshDiagnostics() }
             await recoverWrites()
             guard epoch == generation, canWrite else { return }
-            startPolling()
+            if foreground { startSocket(); startFallback() }
         } catch {
-            guard epoch == generation else { return }
+            guard epoch == generation, foreground else { return }
             api = nil
             connectionStatus = .failed
             errorMessage = error.localizedDescription
@@ -210,8 +295,11 @@ final class AppStore: ProjectManagementStore {
         resetReadCollections()
         generation = UUID(); projectGeneration = UUID()
         if persistCredentials { KeychainStore.remove(for: endpoint) }
+        realtimeStatus = .paused; isRevalidating = false
+        receivedCursor = nil; appliedSnapshotCursor = nil
         api = nil; accessCode = ""; bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil
         connectedCredentials = nil; transportFailures = 0; connectionIssue = nil
+        pendingConnect = false
         connectionStatus = .disconnected
         drafts.selectNamespace("unassigned"); writeNamespace = "unassigned"
         writeRevisions = nil; settingsEdit = nil; settingsConflict = nil
@@ -224,15 +312,14 @@ final class AppStore: ProjectManagementStore {
 
     private func selectProject(id: String, archived: Bool) async {
         if isDemo { return }
-        guard let api, connectionStatus == .connected else { return }
-        loadTask?.cancel()
+        guard api != nil, connectionStatus == .connected else { return }
         refreshTask?.cancel()
         projectGeneration = UUID()
         let projectEpoch = projectGeneration
         let epoch = generation
         cancelHistoryLoad()
         historyVisible = false; historyTarget = nil
-        deliveryPages = [:]; deliveryErrors = [:]; deliveryResults = [:]; deliveryFlights = [:]; deliveryChecking = []
+        deliveryPages = [:]; deliveryErrors = [:]; deliveryResults = [:]; deliveryFlights = [:]; deliveryChecking = []; deliveryRefreshPending = []
         isArchive = archived
         selectedProjectID = id
         state = nil
@@ -240,100 +327,372 @@ final class AppStore: ProjectManagementStore {
         reviewedMembers = [:]; reviewedTodos = [:]
         errorMessage = nil
         isLoading = true
-        let task = Task {
-            if archived { return try await api.archiveState(projectID: id) }
-            return try await api.request("/api/projects/\(APIClient.segment(id))/state") as ProjectState
-        }
-        loadTask = task
         defer { if projectEpoch == projectGeneration { isLoading = false } }
-        do {
-            let next = try await task.value
-            guard epoch == generation, projectEpoch == projectGeneration, selectedProjectID == id else { return }
-            guard next.project.id == id, next.project.archived == archived else { throw SubmissionError.mismatchedResult }
-            state = next; lastUpdated = Date()
-            markReachable()
-            clearReadError()
-            await refreshWriteContext()
-        } catch {
-            guard epoch == generation, projectEpoch == projectGeneration, !Task.isCancelled else { return }
-            if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
-            if markUnreachable(error) { return }
-            handle(error)
-            lastReadError = errorMessage
+        // Selection invalidates only project reads. The host socket continues receiving cursors.
+        invalidateCoordinator()
+        openActivityMembers.removeAll(); activities = [:]; activityErrors = [:]
+        await enqueueRefresh(.all, immediate: true, allowPaused: true)
+        guard epoch == generation, projectEpoch == projectGeneration else { return }
+    }
+
+    /// Manual refreshes and all post-write invalidations share the event single flight.
+    func refresh() async {
+        guard !isDemo, api != nil, connectionStatus == .connected || connectionLost else { return }
+        if realtimeStatus == .blocked, foreground {
+            restFailures = 0; startSocket(); startFallback()
+        }
+        await enqueueRefresh(.all, immediate: true, allowPaused: true)
+    }
+
+    func refreshDiagnostics() async { await enqueueRefresh(.diagnostics, immediate: true) }
+
+    func setForeground(_ active: Bool) {
+        guard foreground != active else { return }
+        foreground = active; foregroundGeneration = UUID()
+        if active {
+            if pendingConnect {
+                Task { [weak self] in await self?.connect() }
+                return
+            }
+            guard api != nil, connectionStatus == .connected || connectionLost else { return }
+            isRevalidating = true; restFailures = 0
+            startSocket(); startFallback()
+            let scope: RefreshScope = runtime == nil ? [.all, .diagnostics] : .all
+            Task { [weak self] in await self?.enqueueRefresh(scope, immediate: true) }
+        } else {
+            if connectionStatus == .connecting, api == nil { pendingConnect = true }
+            stopRequests()
+            realtimeStatus = .paused
         }
     }
 
-    func refresh() async {
-        guard !isDemo, let api, connectionStatus == .connected || connectionLost, !isLoading else { return }
-        let epoch = generation, projectEpoch = projectGeneration
-        refreshGeneration = UUID()
-        let refreshEpoch = refreshGeneration
+    private func invalidateCoordinator() {
+        coordinatorGeneration = UUID(); refreshGeneration = UUID()
+        coordinatorTask?.cancel(); coordinatorTask = nil
+        refreshTask?.cancel(); refreshTask = nil
+        initialTask?.cancel(); initialTask = nil
+        dirty = []
+    }
+
+    private func enqueueRefresh(_ scope: RefreshScope, immediate: Bool = false, allowPaused: Bool = false) async {
+        guard !isDemo, api != nil, foreground || allowPaused else { return }
+        dirty.formUnion(scope); dirtyRevision &+= 1
+        if scope.contains(.history) { historyInvalidationRevision &+= 1 }
+        if let coordinatorTask { await coordinatorTask.value; return }
+        let token = coordinatorGeneration, epoch = generation, phase = foregroundGeneration
+        let task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let now = await syncClock.now()
+                let delay = max(scope.contains(.snapshot) ? nextSnapshotAt - now : .zero, immediate ? .zero : (lowPowerMode ? .milliseconds(500) : .milliseconds(250)))
+                if delay > .zero { try await syncClock.sleep(for: delay) }
+                while !Task.isCancelled, token == coordinatorGeneration, epoch == generation, phase == foregroundGeneration, !dirty.isEmpty {
+                    let scopes = dirty; dirty = []
+                    let now = await syncClock.now()
+                    if scopes.contains(.snapshot) {
+                        let delay = nextSnapshotAt - now
+                        if delay > .zero { try await syncClock.sleep(for: delay) }
+                        guard !Task.isCancelled, token == coordinatorGeneration else { return }
+                        nextSnapshotAt = await syncClock.now() + (lowPowerMode ? .seconds(1) : .milliseconds(500))
+                        await readSnapshot()
+                    }
+                    guard !Task.isCancelled, token == coordinatorGeneration, epoch == generation, phase == foregroundGeneration else { return }
+                    if scopes.contains(.history), historyVisible { await refreshHistory() }
+                    if scopes.contains(.delivery), foreground {
+                        for memberID in Set(deliveryPages.keys).union(deliveryFlights.keys) {
+                            await loadDeliveryNotices(memberID: memberID)
+                            guard !Task.isCancelled, token == coordinatorGeneration else { return }
+                        }
+                    }
+                    if scopes.contains(.activity) { await readActivities() }
+                    if scopes.contains(.diagnostics) { await readDiagnostics() }
+                }
+            } catch { /* Lifecycle cancellation owns invalidation. */ }
+            if token == coordinatorGeneration { coordinatorTask = nil }
+        }
+        coordinatorTask = task
+        await task.value
+    }
+
+    private func discoverCapabilities() async {
+        guard !capabilitiesLoaded, let api else { return }
+        let epoch = generation, phase = foregroundGeneration
+        do {
+            let capabilities = try await api.capabilities()
+            guard epoch == generation, phase == foregroundGeneration else { return }
+            capabilitiesLoaded = true
+            strictWriteContract = capabilities.contractVersion == 2 && capabilities.capabilities?.operations == true
+            realtimeSupported = capabilities.contractVersion == 2 && capabilities.capabilities?.realtime == true
+            syncSupported = capabilities.contractVersion == 2 && (capabilities.capabilities?.realtime == true || strictWriteContract)
+        } catch {
+            guard epoch == generation, phase == foregroundGeneration else { return }
+            if (error as? APIError)?.status == 401 { handle(error) }
+        }
+    }
+
+    private func readSnapshot() async {
+        guard let api else { return }
+        let epoch = generation, projectEpoch = projectGeneration, phase = foregroundGeneration
+        let socketEpoch = socketGeneration, requestID = UUID()
+        refreshGeneration = requestID
         let projectID = selectedProjectID, archived = isArchive
-        refreshTask?.cancel()
+        let supportsSync = syncSupported, optionalWriteContext = !realtimeSupported
+        let explicitSelection = isLoading
+        lastSyncAttemptAt = Date()
         let task = Task { () throws -> RefreshSnapshot in
-            let nextBootstrap: Bootstrap = try await api.request("/api/bootstrap")
-            let nextState: ProjectState?
-            if let projectID, archived {
-                nextState = try await api.archiveState(projectID: projectID)
-            } else if let projectID, nextBootstrap.projects.contains(where: { $0.id == projectID }) {
-                nextState = try await api.request("/api/projects/\(APIClient.segment(projectID))/state")
-            } else { nextState = nil }
-            return RefreshSnapshot(bootstrap: nextBootstrap, state: nextState)
+            if supportsSync, !optionalWriteContext {
+                do {
+                    let snapshot = try await api.sync(projectID: archived ? nil : projectID)
+                    let archiveState = if archived, let projectID { try await api.archiveState(projectID: projectID) } else { nil as ProjectState? }
+                    return RefreshSnapshot(bootstrap: snapshot.bootstrap, state: archiveState ?? snapshot.state, sync: snapshot)
+                } catch {
+                    if (error as? APIError)?.status == 401 { throw error }
+                    // Operations-only capability is the older optional write-context probe.
+                    // A realtime server may fall back only on an actual missing sync route.
+                    guard optionalWriteContext || (error as? APIError)?.status == 404 else { throw error }
+                }
+            }
+            let next: Bootstrap = try await api.request("/api/bootstrap")
+            let state: ProjectState?
+            if let projectID, archived { state = try await api.archiveState(projectID: projectID) }
+            else if let projectID, explicitSelection || next.projects.contains(where: { $0.id == projectID }) {
+                state = try await api.request("/api/projects/\(APIClient.segment(projectID))/state")
+            } else { state = nil }
+            var context: SyncSnapshot?
+            if supportsSync, optionalWriteContext {
+                do { context = try await api.sync(projectID: archived ? nil : projectID) }
+                catch { if (error as? APIError)?.status == 401 { throw error } }
+            }
+            return RefreshSnapshot(bootstrap: next, state: state, sync: context)
         }
         refreshTask = task
         do {
-            let snapshot = try await task.value
-            guard epoch == generation, projectEpoch == projectGeneration, refreshEpoch == refreshGeneration else { return }
-            markReachable()
-            bootstrap = snapshot.bootstrap
-            if let diagnostics = snapshot.bootstrap.runtime { runtime = diagnostics }
-            if let projectID, !archived, !snapshot.bootstrap.projects.contains(where: { $0.id == projectID }) {
-                state = nil; selectedProjectID = nil
-                if let first = snapshot.bootstrap.projects.first { await selectProject(id: first.id) }
-                return
-            }
-            if let next = snapshot.state {
+            let result = try await task.value
+            guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration,
+                  socketEpoch == socketGeneration, requestID == refreshGeneration else { return }
+            if let snapshot = result.sync {
+                guard snapshot.requestedProjectId == (archived ? nil : projectID), snapshot.projectStatus != .unknown else { throw SubmissionError.mismatchedResult }
+                if socketHello, let receivedCursor, snapshot.cursor.epoch != receivedCursor.epoch {
+                    throw RealtimeClientError.invalidFrame
+                }
+                if let applied = appliedSnapshotCursor, applied.epoch == snapshot.cursor.epoch, applied.seq > snapshot.cursor.seq {
+                    throw RealtimeClientError.invalidFrame
+                }
+                let changedEpoch = appliedSnapshotCursor != nil && appliedSnapshotCursor?.epoch != snapshot.cursor.epoch
+                appliedSnapshotCursor = snapshot.cursor
+                if receivedCursor?.epoch == snapshot.cursor.epoch {
+                    receivedCursor = try SyncCursor(epoch: snapshot.cursor.epoch, seq: max(receivedCursor?.seq ?? 0, snapshot.cursor.seq))
+                }
+                if socketHello, highestRelevantSeq > snapshot.cursor.seq { dirty.formUnion(.snapshot) }
+                try applyWriteContext(snapshot)
+                if changedEpoch { dirty.formUnion([.diagnostics, .history, .activity, .delivery]) }
+            } else if supportsSync, !optionalWriteContext { syncSupported = false }
+            if let next = result.state {
                 guard next.project.id == projectID, next.project.archived == archived else { throw SubmissionError.mismatchedResult }
             }
-            state = snapshot.state
-            lastUpdated = Date()
+            bootstrap = result.bootstrap
+            if let diagnostics = result.bootstrap.runtime { runtime = diagnostics }
+            state = result.state
+            markReachable(); restFailures = 0; isRevalidating = false
+            lastUpdated = Date(); lastSuccessfulSyncAt = lastUpdated
             clearReadError()
-            await refreshWriteContext()
-            await recoverWrites()
-            if foreground, historyVisible { await refreshHistory() }
-            guard epoch == generation, projectEpoch == projectGeneration else { return }
-            if foreground {
-                for memberID in Array(deliveryPages.keys) { await loadDeliveryNotices(memberID: memberID) }
+            resyncRevision &+= 1
+            if foreground, socketHello, !dirty.contains(.snapshot) {
+                realtimeStatus = receivedCursor == nil ? .legacy : .live
+                fallbackTask?.cancel(); fallbackTask = nil
+                if stableSince == nil { stableSince = await syncClock.now() }
             }
+            if projectID != nil, !archived, result.state == nil {
+                // /sync explicitly distinguishes a missing/archived selection from a missing route.
+                selectedProjectID = nil
+                if let first = result.bootstrap.projects.first(where: { $0.id == "hq" }) ?? result.bootstrap.projects.first {
+                    Task { [weak self] in await self?.selectProject(id: first.id) }
+                } else { projectGeneration = UUID() }
+            }
+            await recoverWrites()
         } catch {
-            guard epoch == generation, refreshEpoch == refreshGeneration else { return }
+            guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration,
+                  socketEpoch == socketGeneration, requestID == refreshGeneration else { return }
             if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
-            if markUnreachable(error) { return }
-            handle(error)
-            lastReadError = errorMessage
+            restFailures += 1
+            if !markUnreachable(error) { handle(error); lastReadError = errorMessage }
+            guard self.api != nil else { return }
+            if realtimeSupported {
+                connectionStatus = .disconnected; connectionIssue = error.localizedDescription
+            }
+            if Self.permanentReadFailure(error) {
+                stopSocket(); fallbackTask?.cancel(); fallbackTask = nil
+                reconnectTask?.cancel(); reconnectTask = nil
+                realtimeStatus = .blocked; isRevalidating = true
+                connectionIssue = (error as? APIError)?.status == 403 ? "서버 주소나 접근 허용 설정을 확인해 주세요." : error.localizedDescription
+            } else if foreground {
+                socketFailed()
+            }
         }
     }
 
-    func setForeground(_ active: Bool) {
-        foreground = active
-        if active {
-            startPolling()
-        } else {
-            pollTask?.cancel(); pollTask = nil
-            cancelHistoryLoad()
+    private func startSocket() {
+        guard foreground, let api, let realtime, socketTask == nil else { return }
+        reconnectTask?.cancel(); reconnectTask = nil
+        socketGeneration = UUID(); let socketID = socketGeneration
+        let epoch = generation, phase = foregroundGeneration
+        socketHello = false; stableSince = nil
+        realtimeStatus = .connecting
+        let transition = socketTransition
+        socketTask = Task { [weak self] in
+            await transition?.value
+            guard let self, !Task.isCancelled, socketID == socketGeneration, epoch == generation, phase == foregroundGeneration else { return }
+            do {
+                let stream = try await realtime.connect(api: api)
+                for try await event in stream {
+                    guard !Task.isCancelled, socketID == socketGeneration, epoch == generation, phase == foregroundGeneration else { return }
+                    await receive(event)
+                }
+            } catch { /* Socket status never authenticates a user; REST does that. */ }
+            guard !Task.isCancelled, socketID == socketGeneration, epoch == generation, phase == foregroundGeneration else { return }
+            socketFailed()
+            Task { [weak self] in await self?.enqueueRefresh(.all, immediate: true) }
         }
     }
-    private func startPolling() {
-        pollTask?.cancel()
-        guard foreground, connectionStatus == .connected || connectionLost else { return }
-        pollTask = Task { [weak self] in
+
+    private func stopSocket() {
+        socketGeneration = UUID(); socketHello = false; stableSince = nil
+        socketTask?.cancel(); socketTask = nil
+        guard let realtime else { return }
+        let previous = socketTransition
+        socketTransition = Task { await previous?.value; await realtime.disconnect() }
+    }
+
+    private func socketFailed() {
+        stopSocket()
+        guard foreground, api != nil else { return }
+        realtimeStatus = .fallback
+        startFallback()
+        guard realtime != nil, reconnectTask == nil else { return }
+        let delay = min(30, max(0, retryJitter(min(30, 0.5 * pow(2, Double(min(socketFailures, 6)))))))
+        socketFailures += 1
+        let epoch = generation, phase = foregroundGeneration
+        reconnectTask = Task { [weak self, syncClock] in
+            do { try await syncClock.sleep(for: .seconds(delay)) } catch { return }
+            guard let self, !Task.isCancelled, epoch == generation, phase == foregroundGeneration, foreground else { return }
+            reconnectTask = nil; startSocket()
+        }
+    }
+
+    private func startFallback() {
+        guard foreground, api != nil, fallbackTask == nil, realtimeStatus != .live, realtimeStatus != .legacy, realtimeStatus != .blocked else { return }
+        if socketTask == nil { realtimeStatus = .fallback }
+        let epoch = generation, phase = foregroundGeneration
+        fallbackTask = Task { [weak self, syncClock] in
             while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(3)) } catch { return }
-                // Keep polling while the connection is lost so the desk comes back by itself.
-                guard let self, !Task.isCancelled, self.foreground, self.connectionStatus == .connected || self.connectionLost else { return }
-                await self.refresh()
+                guard let self, epoch == generation, phase == foregroundGeneration, foreground else { return }
+                let base = lowPowerMode ? 10.0 : 3.0
+                let interval = restFailures == 0 ? base : min(30, max(0, retryJitter(min(30, base * pow(2, Double(min(restFailures - 1, 4)))))))
+                do { try await syncClock.sleep(for: .seconds(interval)) } catch { return }
+                guard !Task.isCancelled, epoch == generation, phase == foregroundGeneration, foreground else { return }
+                await enqueueRefresh(.all, immediate: true)
             }
         }
+    }
+
+    private func receive(_ event: RealtimeEvent) async {
+        lastHeartbeatAt = Date()
+        if event.type == "hello" {
+            // Optional discovery can fail independently. A valid v2 hello is sufficient to
+            // probe /sync; only that route's 404 permits bootstrap/state compatibility.
+            if event.cursor != nil { syncSupported = true; realtimeSupported = true }
+            receivedCursor = event.cursor; highestRelevantSeq = event.cursor?.seq ?? 0
+            socketHello = true; realtimeStatus = .syncing
+            invalidateCoordinator()
+            Task { [weak self] in await self?.enqueueRefresh(.all, immediate: true) }
+            return
+        }
+        if let cursor = event.cursor, let previous = receivedCursor {
+            guard cursor.epoch == previous.epoch, event.type != "ping" || cursor.seq >= previous.seq else {
+                socketFailed()
+                Task { [weak self] in await self?.enqueueRefresh(.all, immediate: true) }
+                return
+            }
+            if event.type == "ping" {
+                if cursor.seq > previous.seq {
+                    receivedCursor = cursor; highestRelevantSeq = max(highestRelevantSeq, cursor.seq)
+                    realtimeStatus = .syncing
+                    Task { [weak self] in await self?.enqueueRefresh(.all) }
+                } else if let stableSince, realtimeStatus == .live, await syncClock.now() - stableSince >= .seconds(30) { socketFailures = 0 }
+                return
+            }
+            guard cursor.seq > previous.seq else { return }
+            receivedCursor = cursor
+            if cursor.seq > previous.seq + 1 {
+                highestRelevantSeq = max(highestRelevantSeq, cursor.seq); realtimeStatus = .syncing
+                Task { [weak self] in await self?.enqueueRefresh(.all) }
+                return
+            }
+        } else if event.type == "ping" { return }
+        if event.type == "activity" {
+            if event.projectId == selectedProjectID, let memberID = event.activity?.memberId, openActivityMembers.contains(memberID) {
+                activityRevisions[memberID, default: 0] &+= 1
+                Task { [weak self] in await self?.enqueueRefresh(.activity) }
+            }
+            return
+        }
+        let project = event.project?.id ?? event.member?.projectId ?? event.projectId ?? event.decision?.projectId ?? event.todo?.projectId ?? event.message?.projectId ?? event.file?.projectId
+        let global = ["projects", "settings", "herdr"].contains(event.type)
+        let known = ["project", "member", "member_removed", "decision", "todo", "work", "message", "file"].contains(event.type)
+        guard global || !known || project == selectedProjectID else { return }
+        if let cursor = event.cursor { highestRelevantSeq = max(highestRelevantSeq, cursor.seq) }
+        var scope: RefreshScope = !known && !global ? .all : .snapshot
+        if event.type == "message" {
+            if let message = event.message { receiveHistoryMessage(message) }
+            scope.formUnion([.history, .delivery])
+        } else if event.type == "member" || event.type == "member_removed" {
+            scope.formUnion([.delivery, .history])
+        } else if !known { scope.insert(.delivery) }
+        Task { [weak self] in await self?.enqueueRefresh(scope) }
+    }
+
+    func activateActivity(memberID: String) async {
+        guard members.contains(where: { $0.id == memberID }) else { return }
+        openActivityMembers.insert(memberID); activityTokens[memberID] = UUID()
+        await enqueueRefresh(.activity, immediate: true)
+    }
+    func deactivateActivity(memberID: String) { openActivityMembers.remove(memberID); activityTokens[memberID] = nil }
+
+    private func readActivities() async {
+        guard foreground, let api, connectionStatus == .connected else { return }
+        let epoch = generation, projectEpoch = projectGeneration, phase = foregroundGeneration
+        for memberID in openActivityMembers {
+            let activityToken = activityTokens[memberID]
+            do {
+                let items = try await api.activity(memberID: memberID)
+                guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration else { return }
+                guard openActivityMembers.contains(memberID), activityTokens[memberID] == activityToken else { continue }
+                activities[memberID] = items.sorted { $0.id > $1.id }; activityErrors[memberID] = nil
+            } catch {
+                guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration else { return }
+                if (error as? APIError)?.status == 401 { handle(error); return }
+                if openActivityMembers.contains(memberID), activityTokens[memberID] == activityToken { activityErrors[memberID] = error.localizedDescription }
+            }
+        }
+    }
+
+    private func readDiagnostics() async {
+        guard foreground, let api else { return }
+        let epoch = generation, phase = foregroundGeneration, token = coordinatorGeneration
+        do {
+            let result: RuntimeDiagnostics = try await api.request("/api/runtime")
+            guard !Task.isCancelled, epoch == generation, phase == foregroundGeneration, token == coordinatorGeneration else { return }
+            runtime = result
+        } catch {
+            guard !Task.isCancelled, epoch == generation, phase == foregroundGeneration else { return }
+            if (error as? APIError)?.status == 401 { handle(error) }
+        }
+    }
+
+    private static func permanentReadFailure(_ error: Error) -> Bool {
+        if (error as? APIError)?.status == 403 { return true }
+        return [.serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot,
+                .serverCertificateNotYetValid, .secureConnectionFailed, .unsupportedURL, .badURL].contains((error as? URLError)?.code)
     }
     /// Transport failures (no network, host unreachable, timeout, or Tailscale Serve's 502–504 while the daemon is down)
     /// move to the offline state instead of pretending the connection is healthy. Returns whether it handled `error`.
@@ -346,8 +705,7 @@ final class AppStore: ProjectManagementStore {
         transportFailures += 1
         connectionIssue = error.localizedDescription
         if lastReadError != nil { clearReadError() }
-        // A stale socket after iOS returns from background fails once with "connection lost"; only a repeat counts.
-        guard connectionStatus == .connected, code != .networkConnectionLost || transportFailures >= 2 else { return true }
+        guard connectionStatus == .connected else { return true }
         connectionStatus = .disconnected
         return true
     }
@@ -356,7 +714,11 @@ final class AppStore: ProjectManagementStore {
         connectionIssue = nil
         if connectionLost { pagingSupport = .unknown; connectionStatus = .connected }
     }
-    private func stopRequests() { cancelHistoryLoad(); pollTask?.cancel(); pollTask = nil; loadTask?.cancel(); loadTask = nil; refreshTask?.cancel(); refreshTask = nil }
+    private func stopRequests() {
+        cancelHistoryLoad(); invalidateCoordinator(); stopSocket()
+        fallbackTask?.cancel(); fallbackTask = nil
+        reconnectTask?.cancel(); reconnectTask = nil
+    }
     private func clearReadError() {
         if let lastReadError, errorMessage == lastReadError { errorMessage = nil }
         lastReadError = nil
@@ -365,6 +727,7 @@ final class AppStore: ProjectManagementStore {
         errorMessage = error.localizedDescription
         if (error as? APIError)?.status == 401 {
             stopRequests(); resetReadCollections(); generation = UUID(); projectGeneration = UUID()
+            realtimeStatus = .blocked; isRevalidating = true
             api = nil; bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil
             terminalLeases.removeAll()
             drafts.selectNamespace("unassigned"); writeNamespace = "unassigned"
@@ -717,7 +1080,7 @@ final class AppStore: ProjectManagementStore {
             if epoch == generation { settingsConflict = reviewedSettings }
             return false
         }
-        // Invalidate reads that began before this CAS completed.
+        // A pending invalidation survives the cancelled pre-CAS read.
         refreshTask?.cancel(); refreshGeneration = UUID()
         writeContextGeneration = UUID()
         if saved.revision >= (writeRevisions?.settings ?? 0) {
@@ -729,6 +1092,7 @@ final class AppStore: ProjectManagementStore {
             settingsEdit = SettingsEdit(base: settings, draft: current.draft, revision: saved.revision)
         } else { settingsEdit = nil }
         settingsConflict = nil
+        dirty.insert(.diagnostics)
         await refresh()
         return true
     }
@@ -1011,48 +1375,27 @@ final class AppStore: ProjectManagementStore {
         do { try applyReceipt(receipt, tracked: tracked) } catch { handle(error) }
     }
 
-    /// Revisions and reviewed values always come from the same atomic /sync response.
+    /// All write revisions use the same atomic snapshot as the visible domain data.
     private func refreshWriteContext() async {
-        guard let api, canWrite else { return }
-        let epoch = generation, projectEpoch = projectGeneration, projectID = selectedProjectID
-        writeContextGeneration = UUID()
-        let contextEpoch = writeContextGeneration
-        do {
-            let capabilities = try await api.capabilities()
-            guard epoch == generation, projectEpoch == projectGeneration,
-                  contextEpoch == writeContextGeneration else { return }
-            // Once advertised, a failed probe/sync must never downgrade this connection's writes.
-            if capabilities.contractVersion == 2, capabilities.capabilities?.operations == true {
-                strictWriteContract = true
-            }
-        } catch {
-            guard epoch == generation, projectEpoch == projectGeneration,
-                  contextEpoch == writeContextGeneration else { return }
-            if (error as? APIError)?.status == 401 { handle(error); return }
-            // Optional capability discovery cannot disable an otherwise usable v1 connection.
-        }
+        await discoverCapabilities()
         guard strictWriteContract else { return }
-        do {
-            let snapshot = try await api.sync(projectID: projectID)
-            guard epoch == generation, projectEpoch == projectGeneration,
-                  contextEpoch == writeContextGeneration,
-                  snapshot.requestedProjectId == projectID else { return }
-            writeRevisions = snapshot.revisions
-            reviewedSettings = snapshot.bootstrap.settings
-            reviewedMembers = (snapshot.state?.members ?? []).reduce(into: [:]) { $0[$1.id] = $1 }
-            reviewedTodos = (snapshot.state?.todos ?? []).reduce(into: [:]) { $0[$1.id] = $1 }
-            if settingsEdit == nil { _ = beginSettingsEditing() }
-            for pending in Array(journal.todos.values) where pending.namespace == writeNamespace {
-                guard let revision = snapshot.revisions?.todos?[pending.id], let todo = reviewedTodos[pending.id] else { continue }
-                if revision > pending.revision {
-                    try saveJournal { $0.todos.removeValue(forKey: Self.scoped(pending.namespace, pending.id)) }
-                    todoWrites[pending.id] = todo.done == pending.done ? .confirmedCurrent : .conflict
-                } else { todoWrites[pending.id] = .checking }
-            }
-        } catch {
-            // Capability/sync absence does not fail an otherwise usable legacy connection.
-            guard epoch == generation, contextEpoch == writeContextGeneration else { return }
-            if (error as? APIError)?.status == 401 { handle(error) }
+        await enqueueRefresh(.snapshot, immediate: true, allowPaused: true)
+    }
+
+    private func applyWriteContext(_ snapshot: SyncSnapshot) throws {
+        writeRevisions = snapshot.revisions
+        reviewedSettings = snapshot.bootstrap.settings
+        reviewedMembers = (snapshot.state?.members ?? []).reduce(into: [:]) { $0[$1.id] = $1 }
+        reviewedTodos = (snapshot.state?.todos ?? []).reduce(into: [:]) { $0[$1.id] = $1 }
+        if settingsEdit == nil, let revision = snapshot.revisions?.settings {
+            settingsEdit = SettingsEdit(base: snapshot.bootstrap.settings, draft: snapshot.bootstrap.settings, revision: revision)
+        }
+        for pending in Array(journal.todos.values) where pending.namespace == writeNamespace {
+            guard let revision = snapshot.revisions?.todos?[pending.id], let todo = reviewedTodos[pending.id] else { continue }
+            if revision > pending.revision {
+                try saveJournal { $0.todos.removeValue(forKey: Self.scoped(pending.namespace, pending.id)) }
+                todoWrites[pending.id] = todo.done == pending.done ? .confirmedCurrent : .conflict
+            } else { todoWrites[pending.id] = .checking }
         }
     }
 
@@ -1102,7 +1445,7 @@ final class AppStore: ProjectManagementStore {
               key.connectionGeneration == generation, key.archived || pagingSupport != .unsupported else { return }
         if let flight = historyFlight, flight.key == key {
             await flight.task.value
-            if !flight.task.isCancelled { return }
+            if !flight.task.isCancelled, kind != .latest || flight.revision == historyInvalidationRevision { return }
             if historyFlight?.id == flight.id { historyFlight = nil }
             guard foreground, historyVisible, histories.activeKey == key, key.connectionGeneration == generation else { return }
         }
@@ -1130,7 +1473,7 @@ final class AppStore: ProjectManagementStore {
                 }
             } else if history?.initialized == true, !key.archived { pagingSupport = .supported }
         }
-        historyFlight = (key, id, task)
+        historyFlight = (key, id, historyInvalidationRevision, task)
         await task.value
         if historyFlight?.id == id { historyFlight = nil }
         if !task.isCancelled, foreground, historyVisible, generation == key.connectionGeneration, projectGeneration == projectEpoch,
@@ -1154,16 +1497,27 @@ final class AppStore: ProjectManagementStore {
 
     func loadDeliveryNotices(memberID: String, older: Bool = false) async {
         guard !isDemo, !isArchive, connectionStatus == .connected, let api, let projectID = selectedProjectID,
-              members.contains(where: { $0.id == memberID }), deliveryFlights[memberID] == nil else { return }
+              members.contains(where: { $0.id == memberID }) else { return }
+        if deliveryFlights[memberID] != nil {
+            if !older { deliveryRefreshPending.insert(memberID) }
+            return
+        }
         let previous = deliveryPages[memberID]
         if older && previous?.nextBefore == nil { return }
-        let epoch = generation, projectEpoch = projectGeneration, token = UUID()
+        let epoch = generation, projectEpoch = projectGeneration, phase = foregroundGeneration, token = UUID()
         deliveryFlights[memberID] = token
         deliveryErrors[memberID] = nil
-        defer { if deliveryFlights[memberID] == token { deliveryFlights[memberID] = nil } }
+        defer {
+            if deliveryFlights[memberID] == token {
+                deliveryFlights[memberID] = nil
+                if deliveryRefreshPending.remove(memberID) != nil {
+                    Task { [weak self] in await self?.enqueueRefresh(.delivery) }
+                }
+            }
+        }
         do {
             let page = try await api.deliveryNotices(memberID: memberID, before: older ? previous?.nextBefore : nil, limit: 50)
-            guard epoch == generation, projectEpoch == projectGeneration, deliveryFlights[memberID] == token else { return }
+            guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration, deliveryFlights[memberID] == token else { return }
             guard page.memberId.utf8.elementsEqual(memberID.utf8), page.summary.memberId.utf8.elementsEqual(memberID.utf8),
                   page.items.allSatisfy({ $0.memberId?.utf8.elementsEqual(memberID.utf8) == true && $0.projectId?.utf8.elementsEqual(projectID.utf8) == true }),
                   page.items.count <= 50, page.nextBefore == nil || (!page.items.isEmpty && page.nextBefore != (older ? previous?.nextBefore : nil)) else {
@@ -1176,7 +1530,7 @@ final class AppStore: ProjectManagementStore {
             }
             deliveryPages[memberID] = DeliveryNoticePage(memberId: memberID, summary: page.summary, items: items, nextBefore: page.nextBefore)
         } catch {
-            guard epoch == generation, projectEpoch == projectGeneration, deliveryFlights[memberID] == token else { return }
+            guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration, deliveryFlights[memberID] == token else { return }
             if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
             deliveryErrors[memberID] = error.localizedDescription
             if (error as? APIError)?.status == 401 { handle(error) }
@@ -1280,7 +1634,8 @@ final class AppStore: ProjectManagementStore {
         cancelHistoryLoad(); histories.removeAll(); historyVisible = false; historyTarget = nil
         historyFlight = nil
         pagingSupport = .unknown; isArchive = false; archivedProjects = []; archiveError = nil
-        deliveryPages = [:]; deliveryErrors = [:]; deliveryResults = [:]; deliveryChecking = []; deliveryFlights = [:]
+        deliveryPages = [:]; deliveryErrors = [:]; deliveryResults = [:]; deliveryChecking = []; deliveryFlights = [:]; deliveryRefreshPending = []
+        openActivityMembers = []; activityTokens = [:]; activityRevisions = [:]; activities = [:]; activityErrors = [:]
     }
 
     private func saveJournal(_ change: (inout AppWriteJournal) -> Void) throws {
@@ -1355,7 +1710,7 @@ private struct AppWriteJournal: Codable {
     var deliveryRecoveries: [String: PendingDeliveryRecovery]? = nil
 }
 
-private struct RefreshSnapshot: Sendable { let bootstrap: Bootstrap; let state: ProjectState? }
+private struct RefreshSnapshot: Sendable { let bootstrap: Bootstrap; let state: ProjectState?; let sync: SyncSnapshot? }
 
 enum HistoryPagingSupport: Sendable { case unknown, supported, unsupported }
 private struct PendingDeliveryRecovery: Codable {

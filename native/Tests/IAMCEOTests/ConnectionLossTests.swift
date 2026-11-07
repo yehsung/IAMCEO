@@ -33,7 +33,7 @@ final class ConnectionLossTests: XCTestCase {
         let mode = Mode(), network = try fixture(mode)
         let store = AppStore(session: network.session, persistCredentials: false)
         store.endpoint = network.endpoint.url.absoluteString; store.accessCode = "x"
-        await store.connect(); store.setForeground(false)
+        await store.connect()
         XCTAssertEqual(store.connectionStatus, .connected)
         mode.down = true
         await store.refresh()
@@ -53,6 +53,7 @@ final class ConnectionLossTests: XCTestCase {
         XCTAssertEqual(store.connectionStatus, .connected)
         XCTAssertNil(store.connectionIssue)
         XCTAssertTrue(store.canWrite)
+        XCTAssertEqual(store.realtimeStatus, .fallback)
         store.disconnect()
         XCTAssertFalse(store.connectionLost)
     }
@@ -86,5 +87,89 @@ final class ConnectionLossTests: XCTestCase {
         XCTAssertTrue(network.requests.filter { $0.url?.path.hasSuffix("/terminal/control") == true }
             .allSatisfy { $0.value(forHTTPHeaderField: "X-IAMCEO-Contract") == nil })
         store.disconnect()
+    }
+
+    @MainActor func testSocketFailureKeepsRESTWritableAndConfirmed401AloneEndsAuthentication() async throws {
+        let helper = RealtimeNetworkTests(), server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
+        let network = try IsolatedTestNetwork(handler: server.handle)
+        let store = try await helper.connected(server, network, clock, factory)
+        defer { store.disconnect() }
+        let socket = await factory.sockets[0]
+        try await socket.enqueue(.failure(URLError(.badServerResponse)))
+        await helper.eventually { store.realtimeStatus == .fallback }
+        XCTAssertTrue(store.canWrite)
+        XCTAssertEqual(store.accessCode, "fixture")
+        await helper.settle(); await clock.advance(.milliseconds(500))
+        await helper.eventually { await factory.sockets.count == 2 }
+        XCTAssertTrue(store.canWrite)
+        server.change { $0.syncStatus = 401 }
+        let refresh = Task { await store.refresh() }
+        await helper.settle(); await clock.advance(.milliseconds(500)); await refresh.value
+        XCTAssertNil(store.api)
+        XCTAssertEqual(store.connectionStatus, .failed)
+        XCTAssertEqual(store.accessCode, "")
+        let count = network.requests.count
+        await clock.advance(.seconds(600)); await helper.settle()
+        XCTAssertEqual(network.requests.count, count)
+    }
+
+    @MainActor func testRESTFailureBackoffAnd403PreserveSnapshotAndCredentials() async throws {
+        let helper = RealtimeNetworkTests(), server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
+        let network = try IsolatedTestNetwork(handler: server.handle)
+        let store = try await helper.connected(server, network, clock, factory)
+        defer { store.disconnect() }
+        server.change { $0.syncError = .cannotConnectToHost }
+        let failed = Task { await store.refresh() }
+        await helper.settle(); await clock.advance(.milliseconds(500)); await failed.value
+        XCTAssertTrue(store.connectionLost)
+        XCTAssertFalse(store.canWrite)
+        XCTAssertNotNil(store.state)
+        // A retrying socket never resets REST backoff, or a flapping WS would cause a fast poll loop.
+        let count = server.read { $0.syncs }
+        await helper.settle(); await clock.advance(.seconds(3))
+        await helper.eventually { server.read { $0.syncs } == count + 1 }
+        await helper.settle()
+        await clock.advance(.seconds(5)); await helper.settle()
+        XCTAssertEqual(server.read { $0.syncs }, count + 1)
+        await clock.advance(.seconds(1))
+        await helper.eventually { server.read { $0.syncs } == count + 2 }
+        server.change { $0.syncError = nil; $0.syncStatus = 403 }
+        let forbidden = Task { await store.refresh() }
+        await helper.settle(); await clock.advance(.milliseconds(500)); await forbidden.value
+        XCTAssertEqual(store.realtimeStatus, .blocked)
+        XCTAssertEqual(store.accessCode, "fixture")
+        XCTAssertNotNil(store.state)
+        XCTAssertFalse(store.canWrite)
+        let blockedCount = network.requests.count
+        await clock.advance(.seconds(600)); await helper.settle()
+        XCTAssertEqual(network.requests.count, blockedCount)
+        server.change { $0.syncStatus = 200 }
+        await store.refresh()
+        XCTAssertTrue(store.canWrite)
+    }
+
+    @MainActor func testEpochReplacementRejectsLateOldSnapshotAndFetchesNewDiagnostics() async throws {
+        let helper = RealtimeNetworkTests(), server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
+        let network = try IsolatedTestNetwork(handler: server.handle)
+        let store = try await helper.connected(server, network, clock, factory)
+        defer { store.disconnect() }
+        let old = await factory.sockets[0]
+        let gate = DispatchSemaphore(value: 0), entered = expectation(description: "old epoch read")
+        server.change { $0.seq = 1; $0.gate = gate; $0.entered = entered }
+        let refresh = Task { await store.refresh() }
+        await helper.settle(); await clock.advance(.milliseconds(500))
+        await fulfillment(of: [entered], timeout: 2)
+        server.change { $0.epoch = "F"; $0.seq = 0 }
+        try await helper.frame(old, #"{"type":"ping","epoch":"F","seq":0}"#)
+        await helper.eventually { store.realtimeStatus == .fallback }
+        await helper.settle(); await clock.advance(.milliseconds(500))
+        await helper.eventually { await factory.sockets.count == 2 }
+        let current = await factory.sockets[1]
+        try await helper.hello(current, epoch: "F")
+        gate.signal(); await refresh.value
+        await helper.settle(); await clock.advance(.milliseconds(500))
+        await helper.eventually { store.appliedSnapshotCursor?.epoch == "F" && store.realtimeStatus == .live }
+        XCTAssertEqual(store.state?.project.name, "seq-0")
+        XCTAssertEqual(server.read { $0.runtimeReads }, 2)
     }
 }

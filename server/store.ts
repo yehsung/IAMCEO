@@ -25,6 +25,7 @@ import type {
   FileDoc,
   FileKind,
   Member,
+  MemberLifecycleState,
   MemberKind,
   MemberOrigin,
   MemberStatus,
@@ -227,11 +228,26 @@ const HANDLE_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 export const MAX_ACTIVITY_PER_MEMBER = 500;
 // 도구 결과 하나가 수 MB 일 수 있다. 활동 판은 훑어보는 용도라 잘라도 된다.
 const MAX_ACTIVITY_TEXT = 4000;
+// 현재 세대의 마지막 생성 순서를 따른다. 이전 journal의 늦은 갱신은 새 작업을 덮지 않는다.
 const MEMBER_SELECT = `SELECT m.*, (SELECT COUNT(*) FROM deliveries d WHERE d.member_id = m.id AND d.status IN ('queued','held')) AS queued_count,
   (SELECT c.measurement_json FROM member_context_state c WHERE c.member_id = m.id AND c.generation = m.session_generation) AS measurement_json,
   (SELECT c.compaction_json FROM member_context_state c WHERE c.member_id = m.id AND c.generation = m.session_generation) AS compaction_json,
-  (SELECT c.member_id FROM member_context_state c WHERE c.member_id = m.id AND c.generation = m.session_generation) AS context_member_id
-  FROM members m`;
+  (SELECT c.member_id FROM member_context_state c WHERE c.member_id = m.id AND c.generation = m.session_generation) AS context_member_id,
+  l.operation_id AS lifecycle_operation_id, l.intent AS lifecycle_intent, l.phase AS lifecycle_phase,
+  l.reason AS lifecycle_reason, l.exit_code AS lifecycle_exit_code, l.updated_at AS lifecycle_updated_at,
+  e.run_id AS execution_run_id, e.turn AS execution_turn, e.delivery_ids_json AS execution_delivery_ids_json,
+  e.phase AS execution_phase, e.input_received_at AS execution_input_received_at, e.started_at AS execution_started_at,
+  e.last_progress_at AS execution_last_progress_at, e.ended_at AS execution_ended_at,
+  e.result AS execution_result, e.reason AS execution_reason, e.exit_code AS execution_exit_code
+  FROM members m
+  LEFT JOIN lifecycle_journal l ON l.rowid = (
+    SELECT j.rowid FROM lifecycle_journal j
+    WHERE j.member_id = m.id AND j.project_id = m.project_id AND j.generation = m.session_generation
+    ORDER BY j.created_at DESC, j.rowid DESC LIMIT 1)
+  LEFT JOIN execution_journal e ON e.rowid = (
+    SELECT j.rowid FROM execution_journal j
+    WHERE j.member_id = m.id AND j.project_id = m.project_id AND j.generation = m.session_generation
+    ORDER BY j.created_at DESC, j.rowid DESC LIMIT 1)`;
 
 // SQL 행은 컬럼 이름이 곧 스키마(db.ts)다. 아래 toX 함수가 타입 경계다.
 type Row = Record<string, any>;
@@ -268,6 +284,15 @@ function toProject(r: Row, connection: ProjectConnection): Project {
 
 function appliedOf(r: Row): AppliedConfig | null {
   return r.applied_config ? json<AppliedConfig>(r.applied_config) : null;
+}
+
+function lifecyclePhase(intent: LifecycleJournal["intent"], phase: LifecycleJournal["phase"]): MemberLifecycleState["phase"] {
+  switch (phase) {
+    case "confirmed": return intent === "start" ? "started_confirmed" : "stopped_confirmed";
+    case "refused": return "refused";
+    case "unknown": return intent === "start" ? "starting_unknown" : "stopping_unknown";
+    default: return intent === "start" ? "starting" : intent === "close" ? "closing" : "stopping";
+  }
 }
 
 // token 은 일부러 옮기지 않는다: Member 는 화면까지 나간다.
@@ -307,6 +332,29 @@ function toMember(r: Row): Member {
     subagentState: r.subagent_state_json === null ? null : json<Member["subagentState"]>(r.subagent_state_json),
     nowAt: r.now_at,
     manualActivityAt: r.manual_activity_at,
+    lifecycleState: r.lifecycle_operation_id === null ? null : {
+      operationId: r.lifecycle_operation_id,
+      sessionGeneration: r.session_generation,
+      intent: r.lifecycle_intent,
+      phase: lifecyclePhase(r.lifecycle_intent, r.lifecycle_phase),
+      reason: r.lifecycle_reason,
+      exitCode: r.lifecycle_exit_code,
+      updatedAt: r.lifecycle_updated_at,
+    },
+    executionState: r.execution_run_id === null ? null : {
+      runId: r.execution_run_id,
+      sessionGeneration: r.session_generation,
+      turn: r.execution_turn,
+      deliveryIds: json<string[]>(r.execution_delivery_ids_json),
+      phase: r.execution_phase,
+      inputReceivedAt: r.execution_input_received_at,
+      startedAt: r.execution_started_at,
+      lastProgressAt: r.execution_last_progress_at,
+      endedAt: r.execution_ended_at,
+      result: r.execution_result,
+      reason: r.execution_reason,
+      exitCode: r.execution_exit_code,
+    },
     ...(r.context_member_id ? { contextState: { measurement: r.measurement_json === null ? null : json<CoreContextState["measurement"]>(r.measurement_json), compaction: r.compaction_json === null ? null : json<CoreContextState["compaction"]>(r.compaction_json) } } : {}),
   };
 }

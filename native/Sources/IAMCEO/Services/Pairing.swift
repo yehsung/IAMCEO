@@ -85,8 +85,12 @@ enum PairingClient {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 8
         config.httpShouldSetCookies = false
-        let session = session ?? URLSession(configuration: config)
-        var lastError: Error = APIError(status: 0, message: "Mac에 닿지 않습니다. Mac과 이 기기 모두 Tailscale이 켜져 있는지 확인하세요.")
+        config.httpCookieStorage = nil
+        config.urlCredentialStorage = nil
+        let ownedSession = session == nil
+        let session = session ?? URLSession(configuration: config, delegate: PairingRedirectDelegate(), delegateQueue: nil)
+        defer { if ownedSession { session.invalidateAndCancel() } }
+        var lastError: Error = APIError(status: 0, message: "짝 맺기 응답을 확인하지 못했습니다. Mac과 이 기기의 Tailscale 연결을 확인한 뒤 Mac에서 새 QR을 만들어 주세요.")
         for base in link.urls {
             var request = URLRequest(url: base.appendingPathComponent("pair/claim"))
             request.httpMethod = "POST"
@@ -95,22 +99,35 @@ enum PairingClient {
             request.httpBody = try JSONEncoder().encode(PairClaimRequest(code: link.code, device: device))
             do {
                 let (data, response) = try await session.data(for: request)
-                guard let http = response as? HTTPURLResponse else { continue }
+                guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
                 guard (200..<300).contains(http.statusCode) else {
                     let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
                     // A refused code is final; trying another address would only burn an attempt.
-                    throw APIError(status: http.statusCode, message: object?["error"] as? String ?? "짝 맺기를 거절했습니다 (\(http.statusCode)).")
+                    throw APIError(status: http.statusCode, message: (object?["error"] as? String ?? "짝 맺기를 거절했습니다 (\(http.statusCode)).") + " 응답을 놓쳤다면 Mac에서 새 QR을 만들어 주세요.")
                 }
                 let result = try JSONDecoder().decode(PairClaimResponse.self, from: data)
+                guard !result.accessCode.isEmpty else { throw URLError(.badServerResponse) }
                 let origin = base.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                 return (origin, result.accessCode)
             } catch let error as APIError {
                 throw error
             } catch {
-                lastError = APIError(status: 0, message: "Mac에 닿지 않습니다. Mac과 이 기기 모두 Tailscale이 켜져 있는지 확인하세요.")
-                continue
+                if Task.isCancelled { throw CancellationError() }
+                // Only a definite pre-connection failure can safely try another origin.
+                // A timeout/invalid response may follow consumption of this one-time code.
+                if let network = error as? URLError, [.cannotFindHost, .dnsLookupFailed, .cannotConnectToHost, .notConnectedToInternet].contains(network.code) {
+                    lastError = APIError(status: 0, message: "Mac에 닿지 않습니다. Tailscale 연결을 확인한 뒤 Mac에서 새 QR을 만들어 주세요.")
+                    continue
+                }
+                throw APIError(status: 0, message: "짝 맺기 응답을 확인하지 못했습니다. 코드는 이미 사용됐을 수 있습니다. Mac에서 새 QR을 만들어 다시 찍어 주세요.")
             }
         }
         throw lastError
+    }
+}
+
+private final class PairingRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 }

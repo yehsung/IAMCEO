@@ -363,7 +363,9 @@ describe("주기 판 정리", () => {
     expect(deliveryBody(t.store, tidies(t)[0]!)).toBe(formatTidy("conductor", false));
     expect(tidies(t)[0]!.text).toContain("`ask_close`");
     expect(tidies(t)[0]!.text).toContain("직원은 깨우지 않는다");
-    expect(Date.now() - Date.parse(t.store.requireProject(t.project.id).tidiedAt!)).toBeLessThan(5000);
+    expect(Date.now() - Date.parse(t.store.getBoardReview(t.project.id)!.requestedAt)).toBeLessThan(5000);
+    expect(t.store.getBoardReview(t.project.id)!.completedAt).toBeNull();
+    expect(Date.now() - Date.parse(t.store.requireProject(t.project.id).tidiedAt!)).toBeGreaterThan(6 * HOUR);
     // 일하는 중(판 정리 턴)이면 또 넣지 않는다.
     t.store.setBoardTidiedAt(t.project.id, ago(7 * HOUR));
     t.say("또 새 말");
@@ -425,7 +427,8 @@ describe("주기 판 정리", () => {
     t.orch.checkBoardTidy();
     await Bun.sleep(20);
     const before = t.store.listMessages(t.project.id).length;
-    // 정리하면서 바꾼 것(결재 닫기 등)은 다음 정리의 '바뀐 것'이 아니다.
+    // 검토한 요청 revision 뒤의 변경은 다음 정리 대상으로 보존한다.
+    await t.call(t.lead, "board");
     t.store.upsertWork({ projectId: t.project.id, sec: "done", title: "정리하며 옮김" });
     await Bun.sleep(5);
     t.runner.end(t.lead.id, "정리할 것이 없습니다");
@@ -434,7 +437,7 @@ describe("주기 판 정리", () => {
     expect(t.store.listActivity(t.lead.id).some((a) => a.text.includes("판 정리: 정리할 것이 없습니다"))).toBe(true);
     const tidiedAt = t.store.requireProject(t.project.id).tidiedAt!;
     expect(tidiedAt >= t.store.lastBoardChangeAt(t.project.id)!).toBe(true);
-    expect(t.orch.checkBoardTidy(Date.now() + 7 * HOUR)).toEqual([]);
+    expect(t.store.boardRevision(t.project.id)).toBeGreaterThan(t.store.getBoardReview(t.project.id)!.reviewedRevision!);
     // 대표의 말과 함께 묶여 간 턴의 마지막 글은 평소처럼 올라간다.
     t.store.setBoardTidiedAt(t.project.id, ago(7 * HOUR));
     t.store.enqueue({ projectId: t.project.id, memberId: t.lead.id, kind: "system", text: formatTidy("conductor", false) });
@@ -524,3 +527,31 @@ describe("마이그레이션", () => {
   });
 });
 
+
+
+test("board completion covers the read revision and leaves changes during tidy for the next review", async () => {
+  const t = await setup();
+  t.store.setBoardTidiedAt(t.project.id, ago(7 * HOUR));
+  t.say("새 변경");
+  expect(t.orch.checkBoardTidy()).toEqual([t.project.id]);
+  await Bun.sleep(10);
+  await t.call(t.lead, "board");
+  const requested = t.store.getBoardReview(t.project.id)!;
+  t.store.createTodo({ projectId: t.project.id, title: "정리 중 추가한 할 일" });
+  t.runner.end(t.lead.id);
+  await Bun.sleep(20);
+  const completed = t.store.getBoardReview(t.project.id)!;
+  expect(completed.completedAt).toEqual(expect.any(String));
+  expect(completed.reviewedRevision).toBe(requested.requestedRevision);
+  expect(t.store.boardRevision(t.project.id)).toBeGreaterThan(completed.reviewedRevision!);
+  expect(t.orch.checkBoardTidy(Date.now() + 7 * HOUR)).toEqual([t.project.id]);
+});
+
+test("ending tidy without reading board does not claim a successful review", async () => {
+  const t = await setup();
+  await t.orch.tidyBoard(t.project.id);
+  t.runner.end(t.lead.id);
+  await Bun.sleep(20);
+  expect(t.store.getBoardReview(t.project.id)!.completedAt).toBeNull();
+  expect(t.store.requireProject(t.project.id).tidiedAt).toBeNull();
+});

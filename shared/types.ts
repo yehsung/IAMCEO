@@ -91,8 +91,11 @@ export interface MemberExecutionState {
 export interface MemberLifecycleState {
   operationId: string;
   sessionGeneration: number;
-  phase: "starting" | "starting_unknown" | "stopping" | "stopping_unknown" | "reconnecting" | "quarantined";
+  /** journal의 confirmed만 확정 상태다. 기존 status는 종료/시작의 증거가 아니다. */
+  phase: "starting" | "starting_unknown" | "stopping" | "stopping_unknown" | "closing" | "started_confirmed" | "stopped_confirmed" | "refused" | "reconnecting" | "quarantined";
+  intent?: "start" | "sleep" | "close" | "archive" | "fresh_session";
   reason: string | null;
+  exitCode?: number | null;
   updatedAt: string;
 }
 export interface ContextMeasurement {

@@ -278,7 +278,14 @@ export function readDeliveryEvidence(options: DeliveryEvidenceOptions): Delivery
     if (!entry || typeof entry.type !== "string") { state.unsupported = true; continue; }
     if (!supportedUserTextLayout(cli, entry)) state.unsupported = true;
     if (cli === "claude" && entry.sessionId === sessionId && entry.cwd === cwd && !entry.isSidechain) state.recognized = true;
-    if (!(cli === "claude" ? CLAUDE_RECORD_TYPES : ["session_meta", "response_item", "event_msg", "turn_context", "compacted"]).includes(entry.type)) state.unsupported = true;
+    if (cli === "claude" && !CLAUDE_RECORD_TYPES.includes(entry.type)) {
+      // Claude Code keeps adding bookkeeping record types (2.1.319 wrote "cost-state" on /exit). An unknown type is
+      // only harmless when it cannot be received input: no user-shaped message and none of our markers anywhere.
+      const raw = JSON.stringify(entry);
+      if (jsonObject(entry.message)?.role === "user" || markers.some(({ marker }) => raw.includes(marker)) || (options.bundleMarker && raw.includes(options.bundleMarker))) state.unsupported = true;
+      continue;
+    }
+    if (cli === "codex" && !["session_meta", "response_item", "event_msg", "turn_context", "compacted"].includes(entry.type)) state.unsupported = true;
     // An API request copy is not the session's received input, but a marker that appears only there means the
     // user-record layout changed under us: never let it read as absence.
     if (cli === "claude" && entry.type === "api-request-blob") {

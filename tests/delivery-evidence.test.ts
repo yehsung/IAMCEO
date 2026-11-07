@@ -110,9 +110,18 @@ describe("Claude Code 2.1.31x transcript layout (observed in a real 2.1.319 sess
     const both = readDeliveryEvidence(fixture("claude", [...metaRows(), claude(pasted(marker)), blob]));
     expect(both.evidence).toMatchObject({ verdict: "present", code: "marker_in_user_input" });
   });
-  test("a still-unknown record type keeps the range unsupported", () => {
-    const result = readDeliveryEvidence(fixture("claude", [...metaRows(), { type: "queued-input-v9", sessionId: "session", text: marker }, claude("다른 글")]));
-    expect(result.evidence).toMatchObject({ verdict: "unknown", code: "unrecognized_layout" });
+  test("an unknown record type carrying a marker or a user-shaped message keeps the range unsupported", () => {
+    const withMarker = readDeliveryEvidence(fixture("claude", [...metaRows(), { type: "queued-input-v9", sessionId: "session", text: marker }, claude("다른 글")]));
+    expect(withMarker.evidence).toMatchObject({ verdict: "unknown", code: "unrecognized_layout" });
+    const userShaped = readDeliveryEvidence(fixture("claude", [...metaRows(), { type: "user-v2", sessionId: "session", message: { role: "user", content: "무엇이든" } }, claude("다른 글")]));
+    expect(userShaped.evidence).toMatchObject({ verdict: "unknown", code: "unrecognized_layout" });
+  });
+  test("an unknown bookkeeping record without markers or user input does not block absence (cost-state on /exit)", () => {
+    const cost = { type: "cost-state", sessionId: "session", totalCostUSD: 0.0186, totalAPIDuration: 18905, totalLinesAdded: 0, startTime: 1794026651529 };
+    const result = readDeliveryEvidence(fixture("claude", [...metaRows(), claude(pasted("다른 글")), cost]));
+    expect(result.evidence).toMatchObject({ verdict: "absent", complete: true, code: "complete_range_without_marker" });
+    const present = readDeliveryEvidence(fixture("claude", [...metaRows(), cost, claude(pasted(marker))]));
+    expect(present.evidence).toMatchObject({ verdict: "present", code: "marker_in_user_input" });
   });
 });
 

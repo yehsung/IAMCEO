@@ -7,7 +7,8 @@ export type PermissionMode = "bypassPermissions" | "auto" | "default";
 export const PERMISSION_MODES = ["bypassPermissions", "auto", "default"] as const;
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export const CODEX_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
-export type Effort = (typeof EFFORTS)[number] | (typeof CODEX_EFFORTS)[number];
+/** CLI catalogs may introduce new per-model effort names; writes validate catalog membership. */
+export type Effort = string;
 /** manager 부장(총괄·본사 AI) · lead 팀장(직원 세션) · staff 직원(서브에이전트) */
 export type Rank = "manager" | "lead" | "staff";
 /** null 이면 CLI 기본값 */
@@ -144,6 +145,8 @@ export interface Member {
   /** null 이면 직급 기본(Settings.ranks) */
   modelOverride: string | null;
   effortOverride: Effort | null;
+  /** PATCH response only: saved overrides reset on a provider change. */
+  resetOverrides?: ("modelOverride" | "effortOverride")[];
   /** 지금 세션에 실제로 들어간 값. null 은 CLI 기본이거나 모름(넘겨받은 세션). */
   appliedModel: string | null;
   appliedEffort: Effort | null;

@@ -832,7 +832,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         });
         released.push(decisionId);
         this.emitMember(d.memberId);
-      } else if (d.refType === "message" && d.refId) {
+      } else if (d.kind !== "report" && d.refType === "message" && d.refId) {
+        // 직원 보고는 대표 글이 아니다. 실행기가 꺼진 동안 보류된 보고는 지우지 않고 다시 켜졌을 때 전달한다.
         this.run("DELETE FROM deliveries WHERE id = ?", d.id);
         released.push(d.refId);
         this.setMessageDelivery(d.refId, "failed", note);

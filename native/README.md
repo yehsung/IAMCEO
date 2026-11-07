@@ -1,44 +1,68 @@
 # IAMCEO native
 
-A SwiftUI client for the existing IAMCEO Bun daemon. The daemon owns the CLI processes, official `core` backend, project state, credentials and orchestration. The app talks directly to its REST API; it does not run a second coordinator or proxy model traffic.
+SwiftUI macOS/iOS client for the IAMCEO Bun daemon. The daemon owns domain state, CLI processes and orchestration; the app owns one network synchronization coordinator, not a second model orchestrator. This README describes the W1–9 source as of 2026-11-07. **Live operation stays on herdr** until isolated fake-project acceptance, separate real CLI/device acceptance and an owner-approved migration. Building this source does not migrate the live service. Historical dates/results in [the handoff](../docs/claude-handoff.md) remain historical.
 
-Requires Xcode 16+ / Swift 6 and macOS 14+ or iOS 17+. Native system controls follow Liquid Glass on macOS/iOS 26+. Custom workspace cards use translucent materials and dark violet gradients.
+IAMCEO is **source-available**, under Sustainable Use License 1.0 + IAMCEO Additional Permissions. See [LICENSE](../LICENSE) and [the Korean explanation](../docs/LICENSING.ko.md). The web client is legacy, scheduled for retirement; it receives API compatibility maintenance, with no new features.
+
+## Development and isolated validation
+
+Requires Xcode 16+ / Swift 6, macOS 14+ or iOS 17+. System controls use Liquid Glass on supported OS releases and material fallbacks on older systems. Custom workspace cards retain the existing translucent dark violet design.
+
+From the repository root, use the shared gates. They use temporary homes, fake executables/sockets and dynamic non-7878 ports. XcodeGen runs on a temporary copy with generated files and derived data outside the repository. Swift build/test run sequentially.
 
 ```sh
-# From the repository root
-# Bundled Mac application, including the daemon and official core runtime
-bun run build:native
-open dist/native/IAMCEO.app
-
-# Source development client (connect to an existing daemon)
-swift run --package-path native IAMCEO
-swift test --package-path native
-
-# Explicit sample workspace; read-only and never connects to a daemon
-swift run --package-path native IAMCEO --demo
-
-# Generate the macOS + iOS Xcode project
-xcodegen generate --spec native/project.yml
-open native/IAMCEO.xcodeproj
-
-# Build without developer signing for local validation
-xcodebuild -project native/IAMCEO.xcodeproj -scheme IAMCEO-macOS \
-  -configuration Debug -derivedDataPath native/DerivedData CODE_SIGNING_ALLOWED=NO build
-xcodebuild -project native/IAMCEO.xcodeproj -scheme IAMCEO-iOS \
-  -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
-  -derivedDataPath native/DerivedData CODE_SIGNING_ALLOWED=NO build
+bash /Users/yesung/iamceo/.pumasi/gates.sh ts
+bash /Users/yesung/iamceo/.pumasi/regress.sh
+bash /Users/yesung/iamceo/.pumasi/gates.sh swift
+# Separate unsigned macOS + iOS Simulator build gate:
+# bash /Users/yesung/iamceo/.pumasi/gates.sh xcode
 ```
 
-The macOS target is a local host application intended for Developer ID distribution, with App Sandbox disabled so its explicit local-host controls can install/start the bundled launchd daemon. The iOS target uses the normal platform sandbox and connects to a Mac remotely.
+Do not run the unfiltered Bun suite: it includes real-herdr tests. Do not use live port 7878, the real IAMCEO home/config, herdr sockets or `dist/native` for validation. Do not invoke `build:native`, `setup:core`, install or service kickstart as test gates. See [the operating runbook](../docs/operating-model.md) for isolation details and dated W10-D gate results, including environment failures. Build, mock tests, unsigned Simulator builds, signing and physical-device acceptance are separate evidence.
 
-In the bundled Mac app, choose “이 Mac에서 시작하기” to explicitly prepare the local daemon. Source development clients can connect to a daemon started as documented in the repository README by entering its origin and access code. On the same Mac the default origin is `http://127.0.0.1:7878`. iPhone/iPad loopback points to the device itself; connect through your Mac's HTTPS Tailscale Serve URL instead. Remote origins require HTTPS. Access codes are stored in this device's Keychain, scoped to the endpoint; only the endpoint is stored in UserDefaults. Disconnect removes the saved access code. Use a development team in Xcode for a physical device installation.
+For source previews, use an external scratch directory and the explicit read-only demo; it never connects to a daemon:
 
-The client refreshes bootstrap/project state every three seconds **while foregrounded**. It cancels project reads and clears the old project when switching, and pauses polling when backgrounded. This is polling, not a WebSocket subscription. Network errors remain visible and mutations never report offline success. A retried chat submission preserves its original message ID after a lost acknowledgement. Decision answers include the exact `updatedAt` as `expectedVersion`; a changed decision is rejected by the daemon rather than overwritten.
+```sh
+NATIVE_PREVIEW_ROOT=$(mktemp -d /private/tmp/iamceo-native-preview.XXXXXX)
+swift run --package-path native --scratch-path "$NATIVE_PREVIEW_ROOT/build" \
+  --cache-path "$NATIVE_PREVIEW_ROOT/cache" --config-path "$NATIVE_PREVIEW_ROOT/config" \
+  --security-path "$NATIVE_PREVIEW_ROOT/security" IAMCEO --demo
+```
 
-Home, Inbox, Team, Chat, Files and Settings use the real REST models. Creating projects and members, provider/model changes, decision and todo responses, member actions, authenticated attachment fetch/upload, artifact HTML, activity and terminal screens are supported by the service/store layer. Terminal input requires claiming a manual-control lease; a failed control request clears the local lease and requires claiming again. Only documented terminal keys are allowed. A lease is server-enforced and pauses automatic delivery until released or expired.
+Normal source clients require an explicitly chosen test daemon origin and access code. Bundled macOS local-host preparation is a separate operational action: “이 Mac에서 시작하기” may install/start a launchd daemon only when selected. This task does not authorize using it on the live host. macOS App Sandbox is disabled for those local-host controls; iOS uses the platform sandbox. Generated Xcode projects are reproducible from `project.yml`; regenerate in a temporary copy for QA. No signing identity or service credential is committed.
 
-Attachment requests use a Bearer header, never a token in the URL. The client refuses foreign-origin attachment URLs and HTTP redirects, so a daemon-supplied file URL cannot forward its access code to another host. Artifact rendering must stay isolated from app credentials and file access.
+## Connection and synchronization
 
-`--demo` is a deliberate, visibly labeled sample workspace for previews/screenshots. It is read-only; a normal launch has no sample data and requires a successful daemon connection. Unit tests exercise tolerant contract decoding, malformed responses, authorization headers, endpoint/file origin restrictions, explicit null model resets, decision versions and stable IDs across a real URLSession retry with a mocked network response.
+Use the test Mac’s HTTPS Tailscale Serve origin on iPhone/iPad; device loopback is not the Mac. Same-Mac loopback HTTP and existing tailnet HTTP compatibility remain, but endpoint validation does not prove iOS ATS or real network reachability. Prefer HTTPS/WSS. Access codes live in endpoint-scoped Keychain; UserDefaults holds the endpoint and non-secret state. REST/WS requests use Bearer headers. Foreign-origin attachment URLs and HTTP redirects never receive the access code.
 
-The generated Xcode project is reproducible from `project.yml`; regenerate after adding source files. No signing identity or service credential is committed.
+The single AppStore coordinator uses `/ws?v=2` epoch/seq invalidations and `/api/sync` snapshots/revisions. It detects gaps, heartbeat high-water and epoch changes, drops stale generations and resynchronizes on reconnect/foreground return. Normal live connections have **no periodic 3-second state or history polling**. Changes coalesce over 250ms, with at most two snapshots per second and one in flight. WS failure uses REST fallback; host failure backs off to 30 seconds. Low power uses 500ms coalescing, one snapshot/second and 10-second successful fallback. Confirmed 401 ends authentication; generic WS failures do not erase credentials.
+
+Aggregate active scenes share one connection. Inactive/background, iOS lock/protected-data loss and Mac sleep stop sockets, reads, fallback and retries. Foreground/wake starts a new generation. Host CLI work is independent of app activity; this does not promise work during host sleep/power loss. There is no background polling/silent-push keepalive. Open terminal screens retain a separate active-only 2-second screen read.
+
+## Writes, history and archive
+
+New supported writes declare `X-IAMCEO-Contract: 2`. Settings/member/todo writes send reviewed `If-Match: "<revision>"`; settings send dirty rank leaves only. Decision answers require the exact `updatedAt` string as `expectedVersion`. Fresh-session and terminal actions use stable operation IDs, reviewed session generations and receipt lookup. Terminal adds a reusable claim ID and input sequence. `pending/applied/refused/unknown` are distinct; an unknown Enter/input is never replayed. Old servers retain explicit legacy handling, but transient capability/sync failures must not downgrade previously established strict protection. v1 versionless writes and URL-authenticated WS remain weaker compatibility paths until legacy retirement.
+
+The first chat attempt persists its host namespace, immutable ID, target, text, completed attachment IDs and draft revision. After lost acknowledgement/restart, the app queries the existing message ID before consuming its matching draft. Late uploads/results cannot revive deleted drafts, cross hosts or erase subsequent edits. Batch answers consume only memos accepted for that request; conflicts keep notes. Todo unknown results remain checking and are resolved by state/revision reads.
+
+History is separate from the project snapshot: first 200, previous 100, opaque keyset cursors ordered by binary `(at,id)`. Per-scope single flight, ID deduplication and event/POST overlays preserve current delivery state. Reconnect gaps larger than 200 are bridged through staged pages before committing; failures preserve the old thread/cursor/draft and offer continue/retry. Prepend captures the current visible message and partial offset immediately before applying, and does not add unread counts. Real Mac/iOS keyboard/image/rotation/accessibility behavior still needs device QA beyond automated anchor tests.
+
+The sidebar/project switcher exposes archive and project management. Renaming preserves IDs, drafts, sessions and history. Archive reads use `/archive/state` and `/archive/messages/page`; ordinary state/page still return 404 for archived projects. Archive UI reads chat, decisions, work and files without send/answer/check/member controls; rename/unarchive are separate management actions. It is not an immutable database snapshot: late manual reports/files and legacy todo compatibility remain. Safe archive verifies resumable session identity and actual termination; unresolved Codex identity blocks it. HQ cannot be archived; there is no project deletion API. Unarchive rechecks archived-held delivery only, not a fleet-wide restart.
+
+Delivery panels show automatic checking separately from owner intervention. Only `needsOwner` contributes to Home/office attention. The server automatically corrects receipt evidence and repairs proven pre-write failures; post-write absence never proves safe resend. Owner actions use the server’s allowed actions, version and operation ID. There is no “mark received” action. Plain terminal controls require a 5-minute identity-bound lease that pauses automatic delivery and survives server restart. Manual claim/release alone does not resolve delivery or compaction uncertainty.
+
+## iPhone APNs and signing
+
+The iOS target is **`com.yehsung.iamceo`**, development team **`MQ2KQK37WD`**. The owner-provided APNs key ID is **`JA65PRWDJX`**; only its absolute private file path is configured on the separate test host. Never copy key contents into the repository, app bundle, chat or logs. Server credentials live in the host’s protected `apns.json`/external p8 file, not the app. See the configuration example and operational boundary in [the runbook](../docs/operating-model.md).
+
+`project.yml` declares Push Notifications and `Configuration/iOS.entitlements` uses `aps-environment=$(APNS_ENVIRONMENT)`. Debug `development` maps to API `sandbox`; Release `production` maps to `production`. Info `IAMCEOPushEnvironment` must match the **final signed entitlement**, including export/TestFlight changes. TestFlight uses production. No remote-notification background mode, badge permission or Mac APNs receiver is added; Mac can manage registered iPhones and retains its separate osascript notifications.
+
+Connection alone does not request OS permission. Explicit “이 iPhone에서 알림 받기” requests alert/sound, registers the current OS token and enables the server device. New registration is disabled until opt-in; the four kind preferences default **on**: `decision` (including free-answer asks), `approval_wait` (confirmed permission evidence), `error`, `report_complete`. Unknown/setup blocked state is not an approval notification.
+
+Completion reports group by project/member for a **fixed 120-second window from the first report**, without extension. The server persists the deadline, report IDs, last message and original recipient set. Different members/projects have separate groups; restarts preserve grouping. Opt-out cancels pending recipients, re-enable does not revive them and new devices get no historical group. APNs 200 means Apple acceptance, not a visible banner/read receipt. A post-write unknown is not retried automatically.
+
+Foreground notifications only refresh data, without banner/sound or forced navigation. A tap validates serverId, the saved event target and current membership, then applies one route after project reset. Unknown hosts require the existing connection flow, never an automatic endpoint switch. No tap automatically answers, approves, claims or inputs. Processed decisions show their current state; completion reports use around-message history and group references. Archived destinations follow the archive read flow where allowed, while a target lookup that now returns 404 is shown as unavailable. Offline taps retain a pending destination; offline disconnect reports incomplete revocation and reconciles it on reconnect.
+
+Physical-device signing/trust/Developer Mode, Apple acceptance, banner delivery and tap navigation must be tested separately for sandbox and production, including cold start, lock, multi-window, Tailscale and Wi-Fi/cellular changes. Mock HTTP/2 and Simulator success do not complete W11-A or authorize switching the live runner.
+
+Artifact previews remain nonpersistent WKWebView with JavaScript/external requests disabled. The legacy web renderer has different capabilities. Exact API bodies/results, recovery safeguards, backup/restore and global access-code rotation are documented in [spec.md](../docs/spec.md) and [operating-model.md](../docs/operating-model.md).

@@ -1,3 +1,4 @@
+import { configuredSecretRoots } from "./secret-paths.ts";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
@@ -12,7 +13,7 @@ import type { DeliveryRecoveryService } from "./service-contracts.ts";
 import { ARTIFACT_CSP } from "../shared/artifact-kit.ts";
 import type { Bus } from "./bus.ts";
 import { VERSION, type Config } from "./config.ts";
-import { MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES, resolveInside, saveUpload } from "./files.ts";
+import { FilePublication, prepareImport, MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES, resolveInside, saveUpload, type SavedFile } from "./files.ts";
 import type { OrchestratorApi } from "./orchestrator-api.ts";
 import { ApiError, type Store } from "./store.ts";
 import { SESSION_ID_RE } from "./text.ts";
@@ -21,6 +22,8 @@ import { createPushHandler, type PushRoutesContext } from "./push/routes.ts";
 import { TerminalStreams, type SocketData } from "./terminal-stream.ts";
 import { ModelCatalogReader } from "./models.ts";
 import { Folders } from "./folders.ts";
+import { checkLocalImportPath, readLocalFile } from "./local-files.ts";
+import { createStorageReferences } from "./storage-maintenance.ts";
 import { GitHub } from "./github.ts";
 
 export interface ServerContext {
@@ -35,6 +38,8 @@ export interface ServerContext {
   detectHosts?: () => string[];
   /** Isolated folder/API tests use a fake user home; production uses homedir(). */
   folderHome?: string;
+  /** Isolated fake-clone tests need not depend on host disk availability. */
+  githubFreeBytes?: (path: string) => Promise<number>;
   daemon?: () => { ready: boolean; buildId: string; version: string };
 }
 
@@ -466,7 +471,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
   const { config, store, orch, bus } = ctx;
   const models = new ModelCatalogReader(config);
   const folders = new Folders(ctx.folderHome);
-  const github = new GitHub(folders, { ...process.env }, 600_000, { stateHome: config.home });
+  const github = new GitHub(folders, { ...process.env }, 600_000, { stateHome: config.home, freeBytes: ctx.githubFreeBytes });
   const legacyProjectPatches = new Set<string>();
   // 재전송이 앞 요청의 orch 처리가 끝나기 전에 와도 두 번 전달되지 않게 한다.
   const inFlight = new Map<string, Promise<unknown>>();
@@ -514,6 +519,51 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
   };
 
   return [
+    route("GET", "/api/projects/:id/local-file", (_req, url, [id]) => {
+      const file = readLocalFile(store, id!, url.searchParams.get("path") ?? "", ctx.folderHome, configuredSecretRoots(config, process.env, ctx.folderHome));
+      const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
+      if (file.bytes) return new Response(new Uint8Array(file.bytes), { headers: { ...headers, "Content-Type": file.info.mime,
+        "X-Local-File-Metadata": Buffer.from(JSON.stringify(file.info)).toString("base64") } });
+      return Response.json(file.info, { headers });
+    }),
+    route("POST", "/api/projects/:id/files/from-path", async (req, _url, [id]) => {
+      activeProject(id!);
+      const body = await parseBody(req, z.strictObject({ path: z.string().min(1), title: z.string().trim().min(1).max(500).optional() }));
+      const local = readLocalFile(store, id!, body.path, ctx.folderHome, configuredSecretRoots(config, process.env, ctx.folderHome));
+      return Response.json(await once(`local-file:${id}:${local.info.path}`, async () => {
+        activeProject(id!);
+        const existing = store.listFiles(id!).find(file => file.path === local.info.path);
+        if (existing) return existing;
+        let publication: FilePublication | undefined;
+        try {
+          const attachments: SavedFile[] = [];
+          const detectedKind = fileKindOf(local.info.name, local.info.mime);
+          if (local.info.kind !== "text" || detectedKind === "image") {
+            if (local.info.size > MAX_UPLOAD_BYTES) throw new ApiError(413, "파일은 50MB 까지 올릴 수 있습니다");
+            const input = prepareImport(local.info.path);
+            checkLocalImportPath(input.source, ctx.folderHome, configuredSecretRoots(config, process.env, ctx.folderHome));
+            // stagePath must copy the inode/contents that passed our security and size checks.
+            Object.assign(input, local.identity, { size: local.info.size });
+            publication = new FilePublication(config.uploadsDir);
+            attachments.push(await publication.stagePath(input));
+            publication.publish();
+          }
+          const kind = local.info.kind === "text" && detectedKind === "file" ? "code" : detectedKind;
+          const file = store.transaction(() => {
+            activeProject(id!);
+            return store.createFile({ projectId: id!, title: body.title ?? local.info.name, who: "대표", path: local.info.path,
+              body: kind === "artifact" || attachments.length ? "" : local.info.content ?? "", kind,
+              html: kind === "artifact" ? local.info.content ?? null : null,
+              attachments: attachments.map(saved => store.createAttachment(saved)) });
+          });
+          publication?.complete();
+          return file;
+        } catch (error) {
+          try { publication?.fail(createStorageReferences(store, join(config.home, "inbox"))); } catch { /* Retain uncertain publication. */ }
+          throw error;
+        }
+      }));
+    }),
     route("GET", "/api/folders", async (_req, url) => Response.json(await folders.list(url.searchParams.get("path") ?? undefined))),
     route("POST", "/api/folders", async req => {
       const { parent, name } = await parseBody(req, z.strictObject({ parent: z.string(), name: z.string() }));

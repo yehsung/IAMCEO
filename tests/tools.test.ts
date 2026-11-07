@@ -66,8 +66,9 @@ afterAll(async () => {
 });
 
 async function setup() {
-  const home = mkdtempSync(join(tmpdir(), "iamceo-tools-"));
-  const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0", CLAUDE_CONFIG_DIR: join(home, "claude"), CODEX_HOME: join(home, "codex") };
+  const root = mkdtempSync(join(tmpdir(), "iamceo-tools-"));
+  const home = join(root, "work"); mkdirSync(home);
+  const env = { IAMCEO_HOME: join(root, "state"), IAMCEO_PORT: "0", CLAUDE_CONFIG_DIR: join(home, "claude"), CODEX_HOME: join(home, "codex") };
   mkdirSync(env.CLAUDE_CONFIG_DIR); mkdirSync(env.CODEX_HOME);
   updateConfigFile({ accessCode: "code", hosts: ["127.0.0.1"] }, env);
   const config = loadConfig(env);
@@ -254,7 +255,7 @@ describe("공통 도구", () => {
     expect(c.body).toBe("a,b\n");
     expect(c.attachments.map((x) => [x.name, x.isImage])).toEqual([["d.csv", false], ["p.png", true]]);
     expect(existsSync(c.attachments[0]!.path)).toBe(true);
-    expect(c.attachments[0]!.path).toStartWith(join(home, "uploads"));
+    expect(c.attachments[0]!.path).toStartWith(join(home, "..", "state", "uploads"));
 
     expect(await call(lead, "file", { title: "둘 다", path: "docs/r.md", content: "x" })).toMatchObject({ isError: true });
     expect(await call(lead, "file", { title: "없음" })).toMatchObject({ isError: true });
@@ -269,12 +270,12 @@ describe("공통 도구", () => {
     const csv = join(home, "data.csv");
     writeFileSync(image, "image");
     writeFileSync(csv, "a,b");
-    const before = existsSync(join(home, "uploads")) ? readdirSync(join(home, "uploads")) : [];
+    const before = existsSync(join(home, "..", "state", "uploads")) ? readdirSync(join(home, "..", "state", "uploads")) : [];
     for (const images of [[image, csv], [image, join(home, "missing.png")]]) {
       expect(await call(lead, "file", { title: "거부", path: csv, images })).toMatchObject({ isError: true });
     }
     expect(store.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
-    expect(readdirSync(join(home, "uploads"))).toEqual(before);
+    expect(readdirSync(join(home, "..", "state", "uploads"))).toEqual(before);
   });
 
   test("file: 두 번째 복사 실패는 게시하지 않고 실패 staging만 남긴다", async () => {
@@ -292,8 +293,8 @@ describe("공통 도구", () => {
     finally { stage.mockRestore(); }
     expect(store.listFiles(project.id)).toHaveLength(0);
     expect(store.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
-    expect(readdirSync(join(home, "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
-    const staging = join(home, "uploads", ".staging");
+    expect(readdirSync(join(home, "..", "state", "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
+    const staging = join(home, "..", "state", "uploads", ".staging");
     const manifest = JSON.parse(readFileSync(join(staging, readdirSync(staging)[0]!, "manifest.json"), "utf8"));
     expect(manifest.state).toBe("failed");
     expect(manifest.files).toHaveLength(2);
@@ -316,7 +317,7 @@ describe("공통 도구", () => {
     expect(store.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 1 });
     expect(store.getAttachment(prior.id)).toEqual(prior);
     expect(readFileSync(priorPath, "utf8")).toBe("draft");
-    expect(readdirSync(join(home, "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
+    expect(readdirSync(join(home, "..", "state", "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
   });
 
   test("file: 두 번째 첨부 INSERT 실패도 앞 첨부와 자료를 모두 rollback한다", async () => {
@@ -326,7 +327,7 @@ describe("공통 도구", () => {
     store.db.exec("CREATE TRIGGER fail_second_attachment BEFORE INSERT ON attachments WHEN (SELECT COUNT(*) FROM attachments) > 0 BEGIN SELECT RAISE(ABORT, 'second attachment failure'); END");
     await expect(handleAgentTool(orch, lead, "file", { title: "실패", images })).rejects.toThrow("second attachment failure");
     expect(store.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
-    expect(readdirSync(join(home, "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
+    expect(readdirSync(join(home, "..", "state", "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
   });
 
   test("file: SQLITE_FULL은 성공이 아닌 storage_full로 남고 새 파일은 staging으로 복귀한다", async () => {
@@ -338,7 +339,7 @@ describe("공통 도구", () => {
       await expect(handleAgentTool(orch, lead, "file", { title: "실패", path })).rejects.toBeInstanceOf(StorageError);
     } finally { insert.mockRestore(); }
     expect(store.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
-    expect(readdirSync(join(home, "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
+    expect(readdirSync(join(home, "..", "state", "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
   });
 
   test("todo: 내 할 일에 오르고 끝내면 요청자에게 전달", async () => {

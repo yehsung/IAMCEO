@@ -1,3 +1,4 @@
+import { rejectHardLink } from "./secret-paths.ts";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync, existsSync } from "node:fs";
 import { basename, extname, join, resolve, sep } from "node:path";
 import { z } from "zod";
@@ -168,6 +169,7 @@ export class FilePublication {
     const source = openSync(input.source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const before = fstatSync(source);
+      rejectHardLink(before);
       if (!before.isFile() || before.dev !== input.dev || before.ino !== input.ino || before.size !== input.size || before.mtimeMs !== input.mtimeMs || before.ctimeMs !== input.ctimeMs) throw new Error("파일이 검증 후 변경되었습니다");
       const dest = openSync(join(dir, input.name), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       try {
@@ -184,6 +186,7 @@ export class FilePublication {
           }
         }
         const after = fstatSync(source);
+        rejectHardLink(after);
         if (size !== input.size || after.size !== input.size || after.mtimeMs !== input.mtimeMs || after.ctimeMs !== input.ctimeMs) throw new Error("파일이 복사 중 변경되었습니다");
         fsyncSync(dest);
       } finally { closeSync(dest); }

@@ -14,6 +14,10 @@ struct AppShell: View {
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var sizeClass
     #endif
+    #if DEBUG
+    /// `--sheet localfile:md|code|image|other`: the chat file-path preview with sample content (review hook).
+    @State private var localFileSample: LocalFileSample?
+    #endif
     #if DEBUG && os(iOS)
     /// `--sheet keybar`: the terminal key bar over the keyboard (review hook, sample data only).
     @State private var keyBarPreview = false
@@ -58,6 +62,11 @@ struct AppShell: View {
         .sheet(isPresented: $showArchive) { ArchiveLibraryView() }
         #if DEBUG && os(iOS)
         .sheet(isPresented: $keyBarPreview) { TerminalKeyBarPreview() }
+        #endif
+        #if DEBUG
+        .sheet(item: $localFileSample) { sample in
+            LocalFileView(path: sample.path, projectID: store.selectedProjectID ?? "", sample: sample.preview)
+        }
         #endif
         .sheet(isPresented: $router.showNewProject) { NewProjectView() }
         .sheet(isPresented: $router.showNewMember) { NewMemberView() }
@@ -135,7 +144,9 @@ struct AppShell: View {
             #if os(iOS)
             case "keybar": keyBarPreview = true
             #endif
-            default: if sheet.hasPrefix("terminal:") { router.terminalMemberID = String(sheet.dropFirst("terminal:".count)) }
+            default:
+                if sheet.hasPrefix("localfile:") { localFileSample = LocalFileSample(kind: String(sheet.dropFirst("localfile:".count))); return }
+                if sheet.hasPrefix("terminal:") { router.terminalMemberID = String(sheet.dropFirst("terminal:".count)) }
             }
         }
         #endif

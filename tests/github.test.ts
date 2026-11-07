@@ -78,13 +78,13 @@ test("duplicate, invalid repo/name and outside parent are refused", async () => 
 test("git fallback uses argument array and timed out jobs clean up", async () => {
   const onlyGit = mkdtempSync("/private/tmp/iamceo-only-git-");
   executable("git", 'printf "%s\\n" "$@" > "./args"', onlyGit);
-  const service = new GitHub(new Folders(f.home), { PATH: onlyGit, IAMCEO_TEST: "1" });
+  const service = new GitHub(new Folders(f.home), { PATH: onlyGit, IAMCEO_TEST: "1" }, undefined, { freeBytes: async () => 10 * 1024 ** 3 });
   const { jobId } = await service.clone({ repo: "owner/fallback", parent: f.home });
   for (let n = 0; n < 100 && service.job(jobId).status === "running"; n++) await Bun.sleep(10);
   expect(service.job(jobId).status).toBe("done");
   expect(readFileSync(join(f.home, "fallback/args"), "utf8").trim().split("\n")).toEqual(["-c", "protocol.file.allow=never", "-c", "core.hooksPath=/dev/null", "clone", "https://github.com/owner/fallback.git", "."]);
   executable("git", 'exec /bin/sleep 10', onlyGit);
-  const slow = new GitHub(new Folders(f.home), { PATH: onlyGit, IAMCEO_TEST: "1" }, 25);
+  const slow = new GitHub(new Folders(f.home), { PATH: onlyGit, IAMCEO_TEST: "1" }, 25, { freeBytes: async () => 10 * 1024 ** 3 });
   const job = await slow.clone({ repo: "owner/timeout", parent: f.home });
   for (let n = 0; n < 100 && slow.job(job.jobId).status === "running"; n++) await Bun.sleep(10);
   expect(slow.job(job.jobId).status).toBe("failed"); expect(existsSync(join(f.home, "timeout"))).toBe(false);
@@ -97,7 +97,7 @@ test("only three concurrent clones may run", async () => {
 test("timeout kills git descendants before cleaning the target", async () => {
   const tools = mkdtempSync("/private/tmp/iamceo-forked-git-");
   executable("git", '(/bin/sleep 0.2; printf leaked > "./late") &\nwait', tools);
-  const service = new GitHub(new Folders(f.home), { PATH: tools, IAMCEO_TEST: "1" }, 25);
+  const service = new GitHub(new Folders(f.home), { PATH: tools, IAMCEO_TEST: "1" }, 25, { freeBytes: async () => 10 * 1024 ** 3 });
   const { jobId } = await service.clone({ repo: "owner/descendant", parent: f.home });
   for (let n = 0; n < 100 && service.job(jobId).status === "running"; n++) await Bun.sleep(10);
   expect(service.job(jobId).status).toBe("failed");

@@ -1,7 +1,7 @@
 // 에이전트 도구 정의와 처리기(spec §7). 스키마는 zod 하나로 검증과 JSON 스키마를 함께 낸다.
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, extname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { CONDUCTOR_TOOLS, fileKindOf, MANUAL_TOOLS, ROOT_TOOLS, WORKER_TOOLS, type Attachment, type FileKind, type Member } from "../shared/types.ts";
 import { FilePublication, importPath, prepareImport, MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES, type PreparedImport, type SavedFile } from "./files.ts";
@@ -13,6 +13,7 @@ import type { AssignResult, Orchestrator } from "./orchestrator.ts";
 import { josa } from "./roles.ts";
 import { ApiError } from "./store.ts";
 import { oneLineProblem } from "./text.ts";
+import { canonicalPath as realOrSelf, isInside, isSecretPath, rejectHardLink, SECRET_DIRS } from "./secret-paths.ts";
 
 type ToolName = (typeof WORKER_TOOLS | typeof CONDUCTOR_TOOLS | typeof ROOT_TOOLS | typeof MANUAL_TOOLS)[number];
 type ToolHost = Orchestrator & Partial<AgentWorkflowService> & Pick<OrchestratorApi, "manualInbox" | "acknowledgeManualInbox">;
@@ -70,44 +71,25 @@ function statOrNull(path: string) {
   }
 }
 
-// 작업 폴더가 홈일 수 있어(본사) 폴더 제한만으로는 모자란다. 비밀이 있는 곳은 어디서든 막는다.
-const SECRET_DIRS = [".ssh", ".aws", ".gnupg", ".claude", ".config", ".kube", ".docker", ".codex", ".gemini", "Library"];
-const DATA_SECRETS = ["config.json", "run", "uploads", "inbox", "logs", "roles"];
-const SECRET_FILE = /^(\.env(\..*)?|\.netrc|\.npmrc|\.pgpass|\.git-credentials|\.claude\.json|\.[a-z]*_history|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|.*\.(pem|key|p12|pfx))$/i;
-
-function isInside(path: string, dir: string): boolean {
-  return path === dir || path.startsWith(dir.endsWith(sep) ? dir : dir + sep);
-}
-
-function realOrSelf(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch {
-    return resolve(path);
-  }
-}
-
 /**
  * file 도구는 승인 없이 돌고 결과가 화면과 uploads 로 간다. 없으면 직원이 접속 코드·토큰·개인 키를 복사해 읽을 수 있다.
  * 심볼릭 링크를 따라간 진짜 경로가 작업 폴더 안일 때만 허용한다.
  */
 function requireReadable(orch: Orchestrator, member: Member, raw: string): string {
-  const path = realOrSelf(expandPath(raw, member.cwd));
+  const given = expandPath(raw, member.cwd);
+  const path = realOrSelf(given);
   const roots = [member.cwd, orch.store.requireProject(member.projectId).cwd].map(realOrSelf);
   const home = realOrSelf(homedir());
   const covering = roots.filter((root) => isInside(path, root));
   // 작업 폴더가 홈이면(본사) 폴더 제한이 소용없다. 목록으로는 인증 파일을 다 못 막으므로 홈 바로 아래의 점 파일·점 폴더는 기본으로 막는다.
   const homeDot = covering.length > 0 && covering.every((root) => isInside(home, root)) && isInside(path, home) && path !== home && path.slice(home.length + 1).startsWith(".");
-  const secret =
-    homeDot ||
-    DATA_SECRETS.some((name) => isInside(path, join(realOrSelf(orch.dataDir), name)) || basename(path).startsWith("iamceo.db")) ||
-    SECRET_DIRS.some((d) => isInside(path, join(home, d))) ||
-    SECRET_FILE.test(basename(path));
+  const protectedRoots = orch.protectedFileRoots;
+  const secret = isSecretPath(given, home, protectedRoots) || isSecretPath(path, home, protectedRoots, homeDot);
   if (secret) throw new ApiError(403, `이 경로는 자료로 올릴 수 없습니다(비밀이 있는 곳): ${path}`);
   if (covering.length === 0) throw new ApiError(403, `작업 폴더 밖의 파일은 올릴 수 없습니다: ${path}. 작업 폴더로 옮긴 뒤 올리세요`);
   // 하드 링크는 진짜 경로를 따라가도 원본을 알 수 없다. 작업 폴더 안의 이름으로 비밀을 읽는 길이 된다.
   const stat = statOrNull(path);
-  if (stat?.isFile() && stat.nlink > 1) throw new ApiError(403, `하드 링크는 자료로 올릴 수 없습니다: ${path}. 복사본을 만들어 올리세요`);
+  if (stat) rejectHardLink(stat);
   // 검사한 경로 그대로 읽는다. 받은 경로를 다시 열면 그 사이 링크가 바뀔 수 있다.
   return path;
 }
@@ -255,7 +237,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
   ),
 
   file: tool(
-    "자료를 올린다. 짧은 보고는 post, 긴 글은 content(마크다운). 글로 설명이 길어지거나 비교·흐름·구조·수치·시안처럼 글만으로 보기 힘든 내용은 html 로 한 페이지를 만들어 올린다. 대표가 읽고 판단할 비교표·요약 표도 csv·마크다운 표가 아니라 html 이다. 외부 사이트에 따로 게시하지 않는다. path 는 디스크의 파일로, 종류는 확장자로 정해진다(.html 아티팩트, csv·tsv 표는 내려받아 쓸 원본 데이터일 때, json·코드·로그·txt 코드, pdf, 이미지, 영상, 오디오). 결과의 id 를 post 의 file_ids 로 잇는다.",
+    "대표가 읽거나 복사하거나 확인해야 하는 문서·대본·표·이미지·영상은 반드시 이 도구로 자료에 올리고 post의 file_ids로 연결한다. 로컬 경로만 보고하지 않는다. 바뀌면 새 판을 올려 최신 id를 연결한다. 짧은 보고는 post, 긴 글은 content(마크다운). 글로 설명이 길어지거나 비교·흐름·구조·수치·시안처럼 글만으로 보기 힘든 내용은 html 로 한 페이지를 만들어 올린다. 대표가 읽고 판단할 비교표·요약 표도 csv·마크다운 표가 아니라 html 이다. 외부 사이트에 따로 게시하지 않는다. path 는 디스크의 파일로, 종류는 확장자로 정해진다(.html 아티팩트, csv·tsv 표는 내려받아 쓸 원본 데이터일 때, json·코드·로그·txt 코드, pdf, 이미지, 영상, 오디오). 결과의 id 를 post 의 file_ids 로 잇는다.",
     z.strictObject({
       title: text,
       summary: z.string().optional().describe("세 줄 요약"),

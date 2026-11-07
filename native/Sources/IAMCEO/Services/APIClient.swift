@@ -63,7 +63,7 @@ actor APIClient {
     func send<T: Decodable & Sendable, B: Encodable & Sendable>(_ path: String, method: String = "POST", body: B, timeout: TimeInterval? = nil, ifMatch: Int? = nil, contractVersion: Int? = nil) async throws -> T {
         try await request(path, method: method, body: JSONEncoder().encode(body), timeout: timeout, ifMatch: ifMatch, contractVersion: contractVersion)
     }
-    private func raw(_ path: String, method: String = "GET", body: Data? = nil, contentType: String? = nil, timeout: TimeInterval? = nil, ifMatch: Int? = nil, contractVersion: Int? = nil) async throws -> (Data, HTTPURLResponse) {
+    func raw(_ path: String, method: String = "GET", body: Data? = nil, contentType: String? = nil, timeout: TimeInterval? = nil, ifMatch: Int? = nil, contractVersion: Int? = nil) async throws -> (Data, HTTPURLResponse) {
         try Task.checkCancellation()
         if let ifMatch, !(0...9_007_199_254_740_991).contains(ifMatch) {
             throw APIError(status: 0, message: "올바른 revision이 필요합니다.")

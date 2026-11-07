@@ -1,3 +1,4 @@
+import { configuredSecretRoots } from "./secret-paths.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { ModelCatalogReader } from "./models.ts";
 import { DeliveryRecovery } from "./delivery-recovery.ts";
@@ -804,6 +805,10 @@ export class Orchestrator implements OrchestratorApi {
   /** 접속 코드·토큰이 있는 폴더. file 도구가 읽지 못하게 막는다. */
   get dataDir(): string {
     return this.config.home;
+  }
+
+  get protectedFileRoots(): string[] {
+    return configuredSecretRoots(this.config).concat(configuredSecretRoots(this.providerHomes ?? {}));
   }
 
   /** file 도구가 원본을 복사해 두는 곳. */

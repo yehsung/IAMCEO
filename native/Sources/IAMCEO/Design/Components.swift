@@ -799,6 +799,7 @@ struct MarkdownText: View {
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .modifier(LocalFilePresentation())
     }
 
     /// One item: the marker in a gutter (1.35em, like the web list padding), the text wrapping beside it.
@@ -829,7 +830,7 @@ struct MarkdownText: View {
         guard onAccent else { return result }
         for run in result.runs where run.inlinePresentationIntent?.contains(.code) == true {
             result[run.range].backgroundColor = Color(red: 9 / 255, green: 7 / 255, blue: 19 / 255).opacity(0.35)
-            result[run.range].foregroundColor = Color.white
+            if run.link == nil { result[run.range].foregroundColor = Color.white }
         }
         return result
     }
@@ -1032,7 +1033,7 @@ func markdownInline(_ value: String) -> AttributedString {
         result[run.range].backgroundColor = Color.white.opacity(0.08)
         result[run.range].foregroundColor = CE.ink
     }
-    return result
+    return LocalFileLinks.applying(to: result)
 }
 
 /// `\~` for every tilde that is not part of a `~~` pair, outside `code` spans (where a backslash would show).

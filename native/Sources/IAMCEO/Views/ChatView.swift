@@ -1458,6 +1458,7 @@ private struct ChatBodyText: View {
                 .lineSpacing(CELeading.spacing(size, 1.65))
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
+                .modifier(LocalFilePresentation())
         }
     }
     static func isStructured(_ text: String) -> Bool {
@@ -1476,7 +1477,7 @@ private struct ChatBodyText: View {
         var result = markdownInline(value)
         for run in result.runs where run.inlinePresentationIntent?.contains(.code) == true {
             result[run.range].backgroundColor = ChatPalette.bubbleCode
-            result[run.range].foregroundColor = Color.white
+            if run.link == nil { result[run.range].foregroundColor = Color.white }
         }
         return result
     }

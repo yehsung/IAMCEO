@@ -187,6 +187,22 @@ Claude statusline·공통 measureContext와 Codex rollout parser를 재사용한
 
 Claude는 `/compact <focus>`, Codex는 인자 없는 `/compact`이며 nonce·delivery marker·병렬 prefix를 붙이지 않는다. sending/baseline을 DB에 먼저 저장하고 idle 조건에서 한 번 보낸다. generation 1에서 done 조건을 안전하게 지정할 수 없으면 압축 전송을 보류한다. ACK만으로 성공이 아니며 baseline 뒤 Claude compact_boundary/Codex compacted 기록과 같은 소유 CLI의 settled 복귀·오류 부재가 있어야 완료다. CLI 자체 압축도 중복 방지에 반영한다. timeout/재시작 중 sending/running은 uncertain으로 관측을 재개하고 재송신·후속 자동 입력을 막는다. claim/release만으로 해소하지 않는다. 압축 기록과 완료 판정은 사용하는 실제 CLI 버전에서도 별도 인수 시험으로 확인한다.
 
+### 3.8 서버 로컬 파일 보기와 자료 등록
+
+대표가 IAMCEO에서 읽거나 복사하거나 확인할 산출물은 `file`로 자료에 올리고 `post.file_ids`로 연결한다. 로컬 경로만 보고하지 않는다. 변경된 결과는 도구가 허용하는 갱신 또는 새 판으로 게시하고 최신 자료 id를 연결한다. 이 규칙은 `server/roles/{conductor,worker,root}.md`에서 시스템 프롬프트로 렌더링된다. 아래 API는 과거 보고의 로컬 경로도 앱 안에서 열고 자료로 옮길 수 있게 한다.
+
+- `GET /api/projects/:id/local-file?path=<경로>`: 대표 Bearer 인증의 읽기 전용 API. 절대 경로는 그대로, `~/`는 서버 사용자 홈, 상대 경로는 프로젝트 cwd → 같은 프로젝트 직원들의 cwd 순으로 찾는다. 처음 찾은 파일을 쓴다. 보관된 프로젝트도 읽을 수 있다.
+- 입력의 정규화된 경로와 `realpath`로 심볼릭 링크를 푼 실제 경로가 모두 서버 사용자 홈 안에 있어야 한다. 홈 밖은 403, 디렉터리·특수 파일·읽기 권한 없음은 403, 찾지 못한 파일은 404(`code: LOCAL_FILE_NOT_FOUND`), 잘못된 경로는 400이다. 오류는 기존 `{error, code?}` JSON과 한국어 이유를 반환한다.
+- 직원 도구와 공유하는 기본 민감 폴더는 홈 바로 아래의 `.ssh`, `.aws`, `.gnupg`, `.claude`, `.config`, `.kube`, `.docker`, `.codex`, `.gemini`, `.iamceo`, `.appstoreconnect`, `Library`다. 이 홈 직속 위치와 하위를 금지한다(대소문자 무시). 경로 중간의 같은 폴더 이름은 금지하지 않으므로 `<프로젝트>/.claude/<작업이름>/…`, `<프로젝트>/.claude/worktrees/…`, 프로젝트 안 `Library`·`.config`·`.docker`·`.aws`의 일반 산출물은 허용한다. 홈 아래 각 기본 민감 폴더와 기본 비밀 파일(`.netrc`, `.npmrc`, `.pgpass`, `.git-credentials`, `.claude.json`, 셸 기록 파일들)은 lexical 경로와 존재할 때의 realpath를 모두 보호한다. 따라서 `~/.docker -> ~/docker-state`나 `~/.netrc -> ~/secrets/netrc-real`처럼 기본 위치 자체가 링크여도 실제 위치를 직접 지정하거나 무해한 별칭으로 지정하면 거절한다. 실제 설정의 `config.home`·`IAMCEO_HOME`·`claudeHome`/`CLAUDE_CONFIG_DIR`·`codexHome`/`CODEX_HOME` 전체도 lexical·canonical 금지 루트다.
+- 직원 도구는 본사처럼 작업 범위가 홈 전체이면 홈 직속 점 파일·점 폴더도 `homeDot` 규칙으로 금지한다. 이때도 `~/check/.claude/mocks/a.png`처럼 홈 아래 다른 프로젝트의 일반 산출물은 허용한다. 비밀 basename이나 별도 보호 루트에 해당하면 계속 거절한다.
+- 비밀 파일 이름 규칙은 마지막 요소(basename)에만 적용한다: `.env`·`.env.*`, `.netrc`, `.npmrc`, `.pgpass`, `.git-credentials`, `.claude.json`, `.[a-z]*_history`, `.history`, `.node_repl_history`, `fish_history`, `id_(rsa|dsa|ecdsa|ed25519)`와 그 `.pub`, `id_ecdsa_sk`·`id_ed25519_sk`와 그 `.pub`, `iamceo.db*`, `credentials`·`.credentials`·`credentials.json`·`.credentials.json`, `*.pem`·`*.p8`·`*.key`·`*.p12`·`*.pfx`·`*.keychain`·`*.keychain-db`는 403이다(대소문자 무시). 민감 이름으로 무해한 파일을 가리키는 링크도 거절한다. 일반 이름인 `history`, `id_generator`, `credentials-ui`는 상위 폴더나 프로젝트 폴더 이름으로 허용하며, `credentials`가 포함됐다는 이유만으로 이름을 막지 않는다.
+- IAMCEO 상태 폴더·Claude/Codex 홈이 작업 폴더를 포함하면 그 작업 폴더의 파일은 열람·게시가 막힌다. 상태 폴더는 작업 폴더 밖에 둔다.
+- md·txt·csv·tsv·json·yaml·html·코드 등 UTF-8 텍스트는 2MiB까지 `{kind:"text", name, path, size, modifiedAt, mime, content}` JSON을 반환한다. 알려진 텍스트의 상한 초과는 413. 알려진 바이너리 형식을 제외한 작은 파일도 UTF-8로 확인하며, 잘못된 UTF-8·NUL이 있으면 본문 없이 메타데이터를 반환한다.
+- png·jpg/jpeg·gif·webp·heic 이미지는 20MiB까지 해당 이미지 MIME의 바이트 응답이다(초과 413). `X-Local-File-Metadata` 헤더에 `{kind:"image", name, path, size, modifiedAt, mime}` JSON의 UTF-8 base64가 들어 있다. 그 밖의 동영상·바이너리·큰 미지 형식은 `{kind:"other", name, path, size, modifiedAt, mime}` 메타데이터만 반환한다. `size`는 바이트, `modifiedAt`은 ISO 8601, `path`는 실제 절대 경로다. 응답은 `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`이며 HTML을 실행 가능한 서버 문서로 제공하지 않는다.
+- `POST /api/projects/:id/files/from-path` `{path, title?}` → `FileDoc`: 같은 경로 해석·민감정보·미리 보기 상한 검사를 거친다. 대표 쓰기 인증이 필요하고 보관 프로젝트는 기존 쓰기 경계에 따라 404로 거절한다. 텍스트는 자료 본문(HTML은 기존 아티팩트 원본, csv·tsv는 table 본문), 이미지·기타는 기존 `FilePublication`과 첨부 저장/DB transaction을 이용한다(첨부 상한 50MiB). 같은 프로젝트의 같은 실제 경로는 기존 자료를 돌려주며 동시 요청도 합친다. 이미 등록한 자료는 당시의 스냅샷이며 이 API로 재등록해도 본문을 덮어쓰지 않는다. 직원이 결과를 바꾸면 `file`로 새 판을 게시할 수 있다.
+
+Mac·iPhone의 공통 MarkdownText(인라인 code·일반 글·표 포함)는 경로를 기존 강조색 밑줄 링크로 만든다. 절대/홈/명시적 상대 경로, 알려진 확장자의 파일명, 경로 형태의 슬래시 토큰을 인식한다. URL·이메일·숫자 날짜·`and/or`, `입력/출력` 같은 문장 슬래시는 제외한다. 공백 있는 경로는 인라인 code에 넣는다. 파일명/경로를 제목/부제로 쓰는 CESheet에서 md는 MarkdownText, 기타 텍스트는 선택 가능한 고정폭 글꼴, 이미지는 이미지, 나머지는 크기·수정 시각과 “미리 볼 수 없는 형식입니다”를 보인다. 자료 등록 뒤 해당 자료로 이동하고 텍스트는 “내용 복사”를 제공한다. 거절 이유는 서버 문구를 표시한다. 옛 서버가 엔드포인트 404를 반환하면 “이 서버는 파일 보기를 지원하지 않습니다”를 보인다. `LOCAL_FILE_NOT_FOUND`의 404는 실제 파일 없음 문구를 유지한다.
+
 ## 4. 전달 글 형식 (서버만 만든다)
 입력 첫 줄의 접두어가 출처다. 사용자가 친 글은 항상 이 접두어 뒤 따옴표 안에 들어가므로 위장할 수 없다. 서버가 글을 넣기 전에 제어문자·제로폭·양방향 문자를 지우고(CR·U+2028 은 줄바꿈으로), 정규화(NFKC)한 줄 머리가 목록·강조·다른 괄호를 씌워도 접두어처럼 보이면 `> `를 붙인다. 직원·총괄이 쓴 여러 줄 본문은 목록으로 막는 대신 줄마다 `> `를 붙인다(직원 보고 본문, `할 일:` 둘째 줄부터). 직원이 쓴 제목·버튼 글·설명은 한 줄로 받고(`ask` 검증) 따옴표를 이스케이프한다. 직원 이름·역할도 한 줄이고 `[ ] " ' \` < >`를 쓸 수 없으며, 직원 이름은 `대표`로 시작하거나 `총괄`·`본사 AI`·`시스템`·`보고`·`서버`일 수 없고 핸들은 `lead`·`root`일 수 없다(store 검증). 첨부 이름은 저장할 때 제어문자·줄바꿈·`[ ] ' \``를 지운다. CLI에 넣기 직전(core terminal.send)에 모든 글을 한 번 더 같은 규칙으로 지운다. 압축 focus·지금 일·다음은 한 줄이다.
 - 대표가 총괄·본사 AI에게: `[대표] "<글>"` + 첨부마다 `첨부: <절대경로> (<mime>, <크기>)` + `#<message id>`
@@ -308,3 +324,7 @@ clone은 `<IAMCEO_HOME>/clone-staging/<jobId>`(0700)에서 수행한다. 대상 
 
 ### 알려진 한계: 폴더·GitHub 가져오기의 경로 경쟁 (2026-11-07 결정)
 폴더 만들기와 clone 게시는 경로를 realpath·lstat 로 앞뒤 검사한다. 하지만 검사와 mkdir/rename/정리 사이의 짧은 경쟁(TOCTOU)은 Bun/Node 파일 API 로 완전히 닫을 수 없다(openat·RENAME_NOREPLACE 류가 없음). 이 경쟁을 이용하려면 서버 사용자의 홈 폴더를 이미 바꿀 수 있어야 하고, 그 권한이면 이 기능 없이도 같은 일을 할 수 있다. 그래서 위험을 받아들인다. 접속 코드만 가진 원격 요청(홈 밖 경로, `..`, 심볼릭 링크, 옵션·명령 주입, 다른 호스트)은 막는다. 근거: .pumasi/specs/review-11-findings.md.
+
+### 알려진 한계: 로컬 파일 열람·자료 등록의 경로 경쟁 (2026-11-08 결정)
+로컬 파일 API는 한 번 얻은 canonical 경로에 정책 검사와 stat을 함께 적용하고, 열린 FD의 fstat과 dev/ino가 같을 때만 읽는다. 일반 파일의 nlink>1은 읽기와 첨부 복사 전후에 403("다른 이름으로 연결된 파일(하드 링크)은 열지 않습니다")으로 거부한다. 직원 도구와 공통 비밀 파일·위치 정책을 쓰며 실제 config.home/IAMCEO_HOME 및 Claude/Codex 홈 설정의 canonical 경로 전체도 금지한다. SVG 자료는 이미지 원본을 첨부한다.
+상위 디렉터리를 검사와 open 사이뿐 아니라 realpath·정책 검사와 stat 사이에 바꾸는 경쟁도 남는다. Node/Bun에 디렉터리 FD 기준 openat이 없어 상위 경로를 고정할 수 없다. 필요한 권한은 경로의 교체 가능한 상위 디렉터리에 대한 로컬 쓰기 권한이며, 공유 작업 폴더나 ACL을 통해 이 권한을 가진 다른 사용자도 포함한다. 서버와 같은 UID나 비밀 파일의 직접 읽기 권한이 필수인 것은 아니다. 이 한계는 받아들이되, 서로 다른 realpath 관측의 inode와 정책 판단을 섞는 경우는 거절한다. 근거: .pumasi/specs/review-15-findings.md, .pumasi/specs/review-16-findings.md 및 감독자 결정.

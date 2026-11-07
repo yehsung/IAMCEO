@@ -21,7 +21,16 @@ import SwiftUI
 
 /// State label. In the office an idle CLI reads as a break, not as "대기".
 private func officeStateLabel(_ status: String) -> String {
-    status == "idle" ? "쉬는 중" : MemberStatusInfo(status).label
+    status == "unknown" ? "상태 확인 불가" : status == "idle" ? "쉬는 중" : MemberStatusInfo(status).label
+}
+
+private func officeStateKey(_ member: Member) -> String {
+    MemberStatusInfo.isUncertain(member) ? "unknown" : member.status
+}
+
+/// Keep observation failures and quiet-run guidance consistent with Home and member detail.
+func officeStateLabel(_ member: Member) -> String {
+    MemberStatusInfo.isUncertain(member) ? MemberStatusInfo(member).label : officeStateLabel(member.status)
 }
 
 /// The office's state colour: the body colour of a resident in that state (its base tone), so the header legend and
@@ -63,6 +72,7 @@ private func officeAllowsTerminal(_ member: Member) -> Bool {
 
 /// What the message box (and accessibility) says a member is doing.
 private func officeDetail(_ member: Member) -> String {
+    if MemberStatusInfo.isUncertain(member) { return MemberStatusInfo(member).explanation }
     let now = plainOneLine(member.now)
     switch member.status {
     case "error":
@@ -507,11 +517,12 @@ struct OfficeView: View {
         if let summary = store.deliverySummary(memberID: member.id), summary.needsOwnerCount > 0 {
             title += " · 전달 확인 \(summary.needsOwnerCount)건 · 상세에서 근거 확인"
         }
+        title += "\n\(officeStateLabel(member)) · \(MemberStatusInfo(member).explanation)"
         return due.map { "\(title)\n문맥 \($0)% — 터미널에서 /compact" } ?? title
     }
 
     private func accessibilityText(_ member: Member, decisions: Int) -> String {
-        var parts = [member.name, officeStateLabel(member.status), officeDetail(member)]
+        var parts = [member.name, officeStateLabel(member), officeDetail(member)]
         if decisions > 0 { parts.append("결재 \(decisions)건") }
         if let summary = store.deliverySummary(memberID: member.id), summary.needsOwnerCount > 0 {
             parts.append("전달 확인 \(summary.needsOwnerCount)건, 상세에서 근거 확인")
@@ -580,8 +591,9 @@ struct OfficeView: View {
 
     /// "일하는 중 2 · 내 답 기다림 1 · …" as items, so a line never breaks inside one; zero counts drop out.
     static func counts(_ members: [Member]) -> [OfficeCount] {
-        ["working", "waiting", "blocked", "error", "idle", "offline", "asleep"].compactMap { status in
-            let count = members.filter { $0.status == status }.count
+        let counts = MemberStatusInfo.summaryCounts(members)
+        return ["working", "waiting", "blocked", "error", "idle", "offline", "asleep", "unknown"].compactMap { status in
+            let count = counts[status, default: 0]
             return count > 0 ? OfficeCount(status: status, label: officeStateLabel(status), count: count) : nil
         }
     }
@@ -792,7 +804,7 @@ private struct OfficeNameplate: View {
         HStack(spacing: 5) {
             if let member {
                 HStack(spacing: 5) {
-                    dot(member.status)
+                    dot(officeStateKey(member))
                     Text(member.name).font(.system(size: 12, weight: .semibold)).foregroundStyle(away ? CE.ink2 : CE.ink)
                         .lineLimit(1).truncationMode(.tail)
                     if member.kind != "worker", !member.name.contains(rankName(member.kind)) {
@@ -850,11 +862,11 @@ private struct OfficeContextPreview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 7) {
-                OfficeStateDot(status: member.status, size: 8)
+                OfficeStateDot(status: officeStateKey(member), size: 8)
                     .alignmentGuide(.firstTextBaseline) { $0.height / 2 + 5 }
                 Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
-                Text(officeStateLabel(member.status)).font(CEFont.meta.weight(.semibold))
-                    .foregroundStyle(member.status == "idle" ? CE.ink3 : MemberStatusInfo(member.status).tone.color)
+                Text(officeStateLabel(member)).font(CEFont.meta.weight(.semibold))
+                    .foregroundStyle(member.status == "idle" ? CE.ink3 : MemberStatusInfo(member).tone.color)
                     .lineLimit(1).fixedSize()
             }
             Text(officeDetail(member)).font(CEFont.note).foregroundStyle(member.status == "error" ? CE.danger : CE.ink2)
@@ -901,7 +913,7 @@ private struct OfficeBench: View {
         let when = member.lastActiveAt.map { relativeTime($0) }
         return Button { open(member.id) } label: {
             HStack(spacing: 6) {
-                OfficeStateDot(status: member.status, size: 6)
+                OfficeStateDot(status: officeStateKey(member), size: 6)
                 Text(member.name).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(CE.ink2).lineLimit(1)
                 if let when, !when.isEmpty {
                     Text(when).font(.system(size: 11.5)).foregroundStyle(CE.ink3).monospacedDigit().lineLimit(1)
@@ -923,8 +935,8 @@ private struct OfficeBench: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("\(member.name) · \(officeStateLabel(member.status))" + (when.map { " · 마지막 작업 \($0)" } ?? "") + "\n" + Self.explanation)
-        .accessibilityLabel([member.name, officeStateLabel(member.status), when.map { "마지막 작업 \($0)" }, count > 0 ? "결재 \(count)건" : nil]
+        .help("\(member.name) · \(officeStateLabel(member))" + (when.map { " · 마지막 작업 \($0)" } ?? "") + "\n" + Self.explanation)
+        .accessibilityLabel([member.name, officeStateLabel(member), when.map { "마지막 작업 \($0)" }, count > 0 ? "결재 \(count)건" : nil]
             .compactMap { $0 }.joined(separator: ", "))
         .accessibilityHint("대화방 정보 보기")
     }
@@ -974,7 +986,7 @@ private struct OfficeMessageBox: View {
         .disabled(member == nil)
         .animation(still ? nil : .easeInOut(duration: 0.18), value: key)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(member.map { "\($0.name), \(officeStateLabel($0.status)), \(line)" } ?? line)
+        .accessibilityLabel(member.map { "\($0.name), \(officeStateLabel($0)), \(line)" } ?? line)
         .accessibilityHint(member == nil ? "" : "대화방 정보 보기")
         .task(id: still) {
             // Cycle through who needs the CEO, then who is working (slower with Reduce Motion). The task outlives the
@@ -1038,11 +1050,11 @@ private struct OfficeMessageBox: View {
     }
 
     private func title(_ member: Member, extra: String?) -> some View {
-        let info = MemberStatusInfo(member.status)
+        let info = MemberStatusInfo(member)
         return HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(member.name).font(.system(size: isMac ? 14 : 15, weight: .semibold)).foregroundStyle(CE.ink).lineLimit(1)
             Text("·").font(.system(size: 13)).foregroundStyle(CE.ink3)
-            Text(officeStateLabel(member.status)).font(.system(size: isMac ? 12.5 : 13, weight: .semibold))
+            Text(officeStateLabel(member)).font(.system(size: isMac ? 12.5 : 13, weight: .semibold))
                 .foregroundStyle(member.status == "idle" ? CE.ink3 : info.tone.color)
                 .lineLimit(1).fixedSize()
             if let extra {
@@ -1096,20 +1108,20 @@ private struct OfficeNowList: View {
     }
 
     private func row(_ member: Member) -> some View {
-        let info = MemberStatusInfo(member.status)
+        let info = MemberStatusInfo(member)
         let count = decisions[member.id] ?? 0
         let time = relativeTime(member.nowAt)
         let detail = officeDetail(member)
         let quiet = ["idle", "offline"].contains(member.status)
         let urgent = ["waiting", "blocked", "error"].contains(member.status)
         // Who needs the CEO says so before what it is doing; the error itself is the line for a failed session.
-        let lead = urgent && member.status != "error" ? Text("\(officeStateLabel(member.status)) · ").foregroundStyle(info.tone.color).fontWeight(.semibold) : Text("")
+        let lead = urgent && member.status != "error" ? Text("\(officeStateLabel(member)) · ").foregroundStyle(info.tone.color).fontWeight(.semibold) : Text("")
         let what = lead + Text(detail).foregroundStyle(member.status == "error" ? CE.danger : (quiet ? CE.ink3 : CE.ink2))
         return Button { open(member.id) } label: {
             Group {
                 if isMac {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        OfficeStateDot(status: member.status, size: 8)
+                        OfficeStateDot(status: officeStateKey(member), size: 8)
                             .frame(width: 8)
                             .alignmentGuide(.firstTextBaseline) { $0.height / 2 + 5 }
                         Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
@@ -1121,7 +1133,7 @@ private struct OfficeNowList: View {
                     }
                 } else {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        OfficeStateDot(status: member.status, size: 8)
+                        OfficeStateDot(status: officeStateKey(member), size: 8)
                             .frame(width: 8)
                             .alignmentGuide(.firstTextBaseline) { $0.height / 2 + 5 }
                         VStack(alignment: .leading, spacing: 3) {
@@ -1145,7 +1157,7 @@ private struct OfficeNowList: View {
         .onHover { hover(member.id, $0) }
         .help(info.explanation)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([member.name, officeStateLabel(member.status), detail, count > 0 ? "결재 \(count)건" : "", time]
+        .accessibilityLabel([member.name, officeStateLabel(member), detail, count > 0 ? "결재 \(count)건" : "", time]
             .filter { !$0.isEmpty }.joined(separator: ", "))
         .accessibilityHint("대화방 정보 보기")
         .accessibilityAddTraits(selected == member.id ? [.isSelected] : [])

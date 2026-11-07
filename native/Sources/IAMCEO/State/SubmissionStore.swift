@@ -227,6 +227,13 @@ final class SubmissionStore {
         }
     }
 
+    /// Prune only final attempts no longer referenced by the write journal. Unknown input is never discarded.
+    func pruneTerminalHistory(keeping ids: Set<String>) throws {
+        let obsolete = state.terminals.values.filter { !ids.contains($0.id) && ($0.status == .applied || $0.status == .refused) }.map(\.id)
+        guard !obsolete.isEmpty else { return }
+        try update { state in for id in obsolete { state.terminals.removeValue(forKey: id) } }
+    }
+
     func reconcileTerminal(id: String, using service: any OperationService) async throws {
         guard state.terminals[id] != nil else { throw SubmissionError.invalidTransition }
         guard queries.insert("terminal:\(id)").inserted else { return }

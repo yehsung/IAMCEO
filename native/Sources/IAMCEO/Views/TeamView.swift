@@ -789,6 +789,7 @@ struct MemberDetailView: View {
     /// The state sentence only where the badge alone is not enough: down, failed, waiting on me, or not observed.
     /// blocked has its own box; a failed session with an error text says it in the error box.
     private func showsExplanation(_ m: Member, info: MemberStatusInfo) -> Bool {
+        if MemberStatusInfo.progressNote(m) != nil { return true }
         if m.status == "blocked" { return false }
         if m.status == "error", !(m.lastError ?? "").isEmpty { return false }
         return info.tone == .attention || ["asleep", "offline", "gone", "error"].contains(m.status)

@@ -57,15 +57,51 @@ struct MemberStatusInfo: Sendable {
     static let order = ["blocked", "waiting", "error", "working", "idle", "offline", "asleep"]
     static func rank(_ status: String) -> Int { order.firstIndex(of: status) ?? order.count }
 
+    static func isProgressAdvisory(_ code: String?) -> Bool {
+        code == "progress_stalled" || code == "start_stalled"
+    }
+
+    static func observationUnavailable(_ member: Member) -> Bool {
+        guard let observation = member.statusObservation else { return false }
+        return observation.freshness != "fresh" || observation.ownership != "verified" ||
+            (observation.error != nil && !isProgressAdvisory(observation.error?.code) && !member.hasFolderTrustApproval)
+    }
+
+    /// Shared by badges and all member summaries; never classify by a display icon.
+    static func isUncertain(_ member: Member) -> Bool {
+        observationUnavailable(member) || !order.contains(member.status) ||
+            (member.status == "blocked" && !["permission", "selection"].contains(member.blockedReason ?? "") && !member.hasFolderTrustApproval)
+    }
+
+    static func summaryCounts(_ members: [Member]) -> [String: Int] {
+        Dictionary(grouping: members, by: { isUncertain($0) ? "unknown" : $0.status }).mapValues(\.count)
+    }
+
+    static func progressNote(_ member: Member, now: Date = Date()) -> String? {
+        guard isProgressAdvisory(member.statusObservation?.error?.code), !observationUnavailable(member) else { return nil }
+        let run = member.executionState
+        let since = run?.lastProgressAt ?? run?.startedAt ?? run?.inputReceivedAt
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let fractional = since.flatMap { formatter.date(from: $0) }
+        formatter.formatOptions = [.withInternetDateTime]
+        let date = fractional ?? since.flatMap { formatter.date(from: $0) }
+        if let date {
+            let minutes = max(0, Int(now.timeIntervalSince(date) / 60))
+            return "출력 없이 \(minutes)분째 진행 중"
+        }
+        return "출력 없이 진행 중입니다. 터미널 상태는 확인되고 있습니다."
+    }
+
     /// Prefer this overload when the server supplies observation metadata.
     init(_ member: Member) {
         let observation = member.statusObservation
         if observation?.ownership == "conflict" {
             self.init(label: "소유 관계 확인 필요", tone: .attention, icon: "lock.trianglebadge.exclamationmark",
                       explanation: "터미널 소유 관계가 달라 마지막 상태만 보존하고 있습니다. 자동 입력은 보류됩니다.", needsMe: true)
-        } else if let observation, observation.freshness != "fresh" || observation.ownership != "verified" || (observation.error != nil && !member.hasFolderTrustApproval) {
+        } else if Self.observationUnavailable(member) {
             self.init(label: "상태 확인 불가", tone: .attention, icon: "questionmark.circle",
-                      explanation: observation.error?.note ?? "현재 상태를 관측하지 못했습니다. 마지막 관측을 보존하며 다시 확인합니다.")
+                      explanation: observation?.error?.note ?? "현재 상태를 관측하지 못했습니다. 마지막 관측을 보존하며 다시 확인합니다.")
         } else if member.status == "blocked", !["permission", "selection"].contains(member.blockedReason ?? ""), !member.hasFolderTrustApproval {
             self.init(label: member.blockedReason == "setup" ? "상태 설정 확인 중" : "상태 확인 불가",
                       tone: .attention, icon: "questionmark.circle", explanation: "승인 창이 확인된 상태가 아닙니다. 상태 신호를 다시 확인하며 자동 입력을 보류합니다.")
@@ -76,13 +112,15 @@ struct MemberStatusInfo: Sendable {
         } else if !Self.order.contains(member.status) {
             self.init(label: "상태 확인 불가", tone: .neutral, icon: "questionmark.circle", explanation: "지원하지 않는 실행 상태입니다. 최신 상태를 다시 확인해 주세요.")
         } else {
-            self.init(member.status)
+            let base = Self(member.status)
+            self.init(label: base.label, tone: base.tone, icon: base.icon,
+                      explanation: Self.progressNote(member) ?? base.explanation, live: base.live, needsMe: base.needsMe)
         }
     }
 
-    private init(label: String, tone: Tone, icon: String, explanation: String, needsMe: Bool = false) {
+    private init(label: String, tone: Tone, icon: String, explanation: String, live: Bool = false, needsMe: Bool = false) {
         self.label = label; self.tone = tone; self.icon = icon; self.explanation = explanation
-        live = false; self.needsMe = needsMe
+        self.live = live; self.needsMe = needsMe
     }
 }
 
@@ -107,7 +145,7 @@ struct MemberObservationInfo: Sendable {
     init(_ member: Member) {
         lastObservedAt = member.statusObservation?.observedAt
         lastStatus = MemberStatusInfo(member.status).label
-        error = member.statusObservation?.error?.note ?? member.lastError
+        error = MemberStatusInfo.progressNote(member) ?? member.statusObservation?.error?.note ?? member.lastError
         manualActivityAt = member.origin == "manual" ? member.manualActivityAt : nil
     }
 }

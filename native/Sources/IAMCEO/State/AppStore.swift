@@ -387,7 +387,7 @@ final class AppStore: ProjectManagementStore {
         drafts.selectNamespace("unassigned"); writeNamespace = "unassigned"
         writeRevisions = nil; settingsEdit = nil; settingsConflict = nil
         todoWrites = [:]; operationResults = [:]; batchResults = [:]
-        pendingActions.removeAll(); terminalLeases.removeAll(); isLoading = false; errorMessage = nil; lastUpdated = nil
+        pendingActions.removeAll(); terminalLeases.removeAll(); terminalWindowNotices.removeAll(); isLoading = false; errorMessage = nil; lastUpdated = nil
     }
 
     func logout() async {
@@ -897,12 +897,13 @@ final class AppStore: ProjectManagementStore {
     }
     /// Like `mutate`, but also returns the server/transport error so callers can tell "the server refused" from
     /// "we never heard back". `error == nil` with no value means the request was not sent.
-    private func perform<T: Sendable>(_ key: String, refreshAfter: Bool = true, allowArchived: Bool = false, cancellationAware: Bool = false, operation: (APIClient) async throws -> T) async -> (value: T?, error: Error?) {
+    private func perform<T: Sendable>(_ key: String, refreshAfter: Bool = true, allowArchived: Bool = false, cancellationAware: Bool = false, deferRefusalToReceipt: Bool = false, operation: (APIClient) async throws -> T) async -> (value: T?, error: Error?) {
         guard !isDemo else { errorMessage = "샘플은 읽기 전용입니다. 실제 Mac에 연결하면 바꿀 수 있습니다."; return (nil, nil) }
         guard let api, canWrite || (allowArchived && connectionStatus == .connected && !isRevalidating && !isDemo) else { errorMessage = isArchive ? "보관한 프로젝트는 읽기 전용입니다." : "서버에 연결된 뒤에 바꿀 수 있습니다."; return (nil, nil) }
         guard !pendingActions.contains(key) else { return (nil, nil) }
         let epoch = generation
         pendingActions.insert(key); errorMessage = nil
+        if key.hasPrefix("terminal:") { terminalWindowNotices.removeValue(forKey: String(key.dropFirst("terminal:".count))) }
         defer { if epoch == generation { pendingActions.remove(key) } }
         do {
             let result = try await operation(api)
@@ -914,9 +915,16 @@ final class AppStore: ProjectManagementStore {
         } catch {
             guard epoch == generation else { return (nil, error) }
             if cancellationAware && Task.isCancelled { return (nil, error) }
-            handle(error)
-            // A conflict means our copy is stale (answered elsewhere, closed, reopened): show the truth right away.
-            if (error as? APIError)?.status == 409 {
+            if key.hasPrefix("terminal:"), terminalRefusalIsLocal(memberID: String(key.dropFirst("terminal:".count)), error: error.localizedDescription) {
+                terminalWindowNotices[String(key.dropFirst("terminal:".count))] = error.localizedDescription
+            }
+            let deferredRefusal = deferRefusalToReceipt && Self.definiteRefusal(error) && (error as? APIError)?.status != 401
+            if !deferredRefusal && (!key.hasPrefix("terminal:") || !terminalRefusalIsLocal(memberID: String(key.dropFirst("terminal:".count)), error: error.localizedDescription)) {
+                handle(error)
+            }
+            // A conflict means our copy is stale: show the truth right away. A missing terminal
+            // is definitive; do not reconcile its in-flight operation before recording the refusal.
+            if !deferredRefusal, (error as? APIError)?.status == 409, !(key.hasPrefix("terminal:") && error.localizedDescription.contains("No core terminal for member")) {
                 pendingActions.remove(key)
                 await refresh()
             }
@@ -1303,10 +1311,10 @@ final class AppStore: ProjectManagementStore {
             return epoch == generation && operationResults[existing.id]?.status == .applied
         }
         let tracked = TrackedOperation(id: UUID().uuidString, namespace: writeNamespace, memberID: member.id,
-                                       kind: .freshSession, sessionGeneration: version.sessionGeneration, order: journal.operations.count)
+                                       kind: .freshSession, sessionGeneration: version.sessionGeneration, order: (journal.operations.values.map(\.order).max() ?? -1) + 1)
         do { try saveJournal { $0.operations[tracked.id] = tracked } }
         catch { handle(error); return false }
-        let result = await perform("member:\(member.id)", refreshAfter: false) { api in
+        let result = await perform("member:\(member.id)", refreshAfter: false, deferRefusalToReceipt: true) { api in
             try await api.freshSession(memberID: member.id, request: FreshSessionRequest(operationId: tracked.id, expectedSessionGeneration: tracked.sessionGeneration))
         }
         guard epoch == generation else { return false }
@@ -1314,7 +1322,7 @@ final class AppStore: ProjectManagementStore {
             do { try applyReceipt(receipt, tracked: tracked) } catch { handle(error) }
         } else {
             await recordOperationFailure(tracked, error: result.error)
-            await reconcileOperation(tracked)
+            if journal.operations[tracked.id]?.status != .refused { await reconcileOperation(tracked) }
         }
         if operationResults[tracked.id]?.status == .applied { await refresh(); return true }
         return false
@@ -1345,11 +1353,23 @@ final class AppStore: ProjectManagementStore {
 
     // Sheet ownership is independent of the employee's shared status strip. Queue
     // handoffs so a late claim/close can never release the next sheet's lease.
+    @ObservationIgnored private var terminalWindows: [UUID: String] = [:]
+    private var terminalWindowNotices: [String: String] = [:]
+    func terminalWindowNotice(memberID: String) -> String? { terminalWindowNotices[memberID] }
+    func terminalWindowOpened(memberID: String, owner: UUID) { terminalWindows[owner] = memberID }
+    func terminalWindowClosed(owner: UUID) {
+        if let memberID = terminalWindows.removeValue(forKey: owner), !terminalWindows.values.contains(memberID) {
+            terminalWindowNotices.removeValue(forKey: memberID)
+        }
+    }
+    private func terminalRefusalIsLocal(memberID: String, error: String?) -> Bool {
+        error?.contains("No core terminal for member") == true && terminalWindows.values.contains(memberID)
+    }
+
     @ObservationIgnored private var terminalSessionTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var terminalSessionWanted: [String: UUID] = [:]
     @ObservationIgnored private var terminalSessionHeld: [String: (owner: UUID, leaseID: String, namespace: String)] = [:]
     @ObservationIgnored private var cancelledTerminalClaims: Set<String> = []
-    @ObservationIgnored private var cancelledTerminalLeases: [String: (claimID: String, leaseID: String)] = [:]
 
     func claimTerminalSession(_ member: Member, owner: UUID) async -> TerminalLease? {
         guard !cancelledTerminalClaims.contains(owner.uuidString) else { return nil }
@@ -1393,18 +1413,8 @@ final class AppStore: ProjectManagementStore {
         let task = Task<Bool, Never> {
             await previous?.value
             guard let held = self.terminalSessionHeld[member.id], held.owner == owner, held.namespace == self.writeNamespace else {
-                // A receipt may have recovered the claim while this sheet was in
-                // fallback, before it registered its close intent.
-                for receipt in self.operationResults.values {
-                    guard case .terminalControl(let result) = receipt.result,
-                          result.action == "claim", result.claimId == owner.uuidString,
-                          let lease = result.leaseId,
-                          let tracked = self.journal.operations[receipt.operationId],
-                          tracked.namespace == self.writeNamespace,
-                          tracked.order == self.leaseReceiptOrder[member.id] else { continue }
-                    return await self.releaseTerminal(member, expectedLeaseID: lease)
-                }
-                return true
+                // Closing can follow input/key receipts, not just the claim receipt.
+                return await self.recoverCancelledTerminalClaims(memberID: member.id)
             }
             let released = await self.releaseTerminal(member, expectedLeaseID: held.leaseID)
             if released, self.terminalSessionHeld[member.id]?.owner == owner { self.terminalSessionHeld.removeValue(forKey: member.id) }
@@ -1414,11 +1424,55 @@ final class AppStore: ProjectManagementStore {
         return await task.value
     }
 
-    private func releaseCancelledTerminalClaim(_ member: Member) async -> Bool {
-        guard let cancelled = cancelledTerminalLeases[member.id] else { return true }
-        let released = await releaseTerminal(member, expectedLeaseID: cancelled.leaseID)
-        if released, cancelledTerminalLeases[member.id]?.leaseID == cancelled.leaseID { cancelledTerminalLeases.removeValue(forKey: member.id) }
-        return released
+    /// Cancellation is durable work, independent of whether a lease receipt was already restored.
+    /// Run only after restoring the newest lease checkpoint, so an old claim cannot release a new holder.
+    private func recoverCancelledTerminalClaims(memberID: String? = nil) async -> Bool {
+        let epoch = generation, namespace = writeNamespace
+        let claims = journal.operations.values.filter {
+            $0.namespace == namespace && $0.action == .claim && $0.cancelledClaim == true &&
+                (memberID == nil || $0.memberID == memberID)
+        }.sorted { $0.order < $1.order }
+        var complete = true
+        for claim in claims {
+            guard epoch == generation, canWrite else { return false }
+            guard let version = writeRevisions?.members?[claim.memberID] else { complete = false; continue }
+            var finished = version.sessionGeneration != claim.sessionGeneration || claim.status == .refused
+            var endedCheckpointID: String?
+            if !finished, claim.status == .applied {
+                let latest = journal.operations.values.filter {
+                    $0.namespace == namespace && $0.memberID == claim.memberID && $0.kind == .terminalControl &&
+                        $0.status == .applied && $0.sessionGeneration == version.sessionGeneration
+                }.max { $0.order < $1.order }
+                if let latest, latest.order > claim.order, latest.action == .release {
+                    finished = true
+                } else if let latest, (leaseReceiptOrder[claim.memberID] ?? -1) >= latest.order {
+                    // Never recover an old legacy claim until the newest checkpoint is known.
+                    // If its lookup failed, keep the intent and retry on the next recovery.
+                    if journal.operations[claim.id]?.receipt == nil { await reconcileOperation(claim) }
+                    guard epoch == generation, canWrite else { return false }
+                    if case .terminalControl(let result) = journal.operations[claim.id]?.receipt?.result,
+                       let leaseID = result.leaseId {
+                        if terminalLeases[claim.memberID]?.leaseId != leaseID {
+                            finished = true // Stream ended, release applied, or a newer holder is already known.
+                        } else if terminalReleases[claim.memberID] == nil,
+                                  let member = members.first(where: { $0.id == claim.memberID }) {
+                            finished = await releaseTerminal(member, expectedLeaseID: leaseID)
+                            guard epoch == generation, canWrite else { return false }
+                        }
+                        if finished, terminalLeases[claim.memberID] == nil { endedCheckpointID = latest.id }
+                    }
+                }
+            }
+            if finished {
+                do { try saveJournal {
+                    $0.operations[claim.id]?.cancelledClaim = false
+                    // A confirmed disappearance must survive restart just like an applied release.
+                    if let endedCheckpointID { $0.operations[endedCheckpointID]?.leaseEnded = true }
+                } }
+                catch { handle(error); complete = false }
+            } else { complete = false }
+        }
+        return complete
     }
 
     func updateTerminalStreamLease(memberID: String, expiresAt: Double) {
@@ -1467,7 +1521,7 @@ final class AppStore: ProjectManagementStore {
             if !success, terminalLeases[member.id] != nil {
                 errorMessage = "\(member.name)의 조작권을 놓지 못했습니다. 결과 확인 중이며 서버의 lease가 유지될 수 있습니다."
             }
-            return success
+            return success || terminalLeases[member.id] == nil
         }
         guard let lease = terminalLeases[member.id]?.leaseId else { return false }
         let outcome: (value: TerminalLease?, error: Error?) = await perform("terminal:\(member.id)", refreshAfter: false) { api in
@@ -1525,7 +1579,7 @@ final class AppStore: ProjectManagementStore {
         if error.status == 404 { return true }
         guard error.status == 409 else { return false }
         return ["A matching active terminal control lease is required", "Another terminal control lease is active",
-                "Terminal has finished", "No core terminal for member"].contains { error.message.contains($0) }
+                "Terminal has finished", "No core terminal for member", "조작권이 만료되었거나 바뀌었습니다"].contains { error.message.contains($0) }
     }
 
     private func releaseAllTerminals() {
@@ -1561,12 +1615,14 @@ final class AppStore: ProjectManagementStore {
             if action == .claim, previous.action == .claim, absentOperations.contains(previous.id),
                claimID == nil || submissions.terminalAttempt(id: previous.id)?.claimID == claimID,
                let attempt = submissions.terminalAttempt(id: previous.id) {
-                let result = await perform("terminal:\(member.id)", refreshAfter: false) { api in
+                let result = await perform("terminal:\(member.id)", refreshAfter: false, deferRefusalToReceipt: true) { api in
                     try await api.terminalControl(memberID: member.id, request: attempt.request)
                 }
                 guard epoch == generation else { return false }
                 if let receipt = result.value {
                     do { try applyReceipt(receipt, tracked: previous) } catch { handle(error) }
+                } else {
+                    await recordOperationFailure(previous, error: result.error)
                 }
                 return operationResults[previous.id]?.status == .applied
             }
@@ -1579,8 +1635,8 @@ final class AppStore: ProjectManagementStore {
                 errorMessage = "직접 조작 결과 확인 중입니다. 미확인 입력을 다시 보내지 않습니다."; return false
             }
         }
-        if action == .claim, let cancelled = cancelledTerminalLeases[member.id], claimID != cancelled.claimID {
-            guard await releaseCancelledTerminalClaim(member) else { return false }
+        if action == .claim {
+            guard await recoverCancelledTerminalClaims(memberID: member.id) else { return false }
         }
         if action == .input || action == .key || action == .release {
             guard let lease = terminalLeases[member.id], lease.leaseId != nil else {
@@ -1595,16 +1651,16 @@ final class AppStore: ProjectManagementStore {
                                                          sessionGeneration: version.sessionGeneration, action: action, key: key, claimID: claimID)
             let tracked = TrackedOperation(id: attempt.id, namespace: writeNamespace, memberID: member.id,
                                            kind: .terminalControl, sessionGeneration: version.sessionGeneration,
-                                           order: journal.operations.count, action: action)
+                                           order: (journal.operations.values.map(\.order).max() ?? -1) + 1, action: action)
             try saveJournal { $0.operations[tracked.id] = tracked }
-            let result = await perform("terminal:\(member.id)", refreshAfter: false) { api in
+            let result = await perform("terminal:\(member.id)", refreshAfter: false, deferRefusalToReceipt: true) { api in
                 try await api.terminalControl(memberID: member.id, request: submissions.beginTerminal(id: attempt.id))
             }
             guard epoch == generation else { return false }
             if let receipt = result.value { try applyReceipt(receipt, tracked: tracked) }
             else {
                 await recordOperationFailure(tracked, error: result.error)
-                await reconcileOperation(tracked)
+                if journal.operations[tracked.id]?.status != .refused { await reconcileOperation(tracked) }
             }
             if operationResults[tracked.id]?.status == .applied { return true }
             if action == .release, let receipt = operationResults[tracked.id], receipt.status == .refused,
@@ -1634,12 +1690,36 @@ final class AppStore: ProjectManagementStore {
             _ = await reconcileMessage(attempt.id)
             guard epoch == generation, canWrite else { return }
         }
-        for operation in journal.operations.values.sorted(by: { $0.order < $1.order }) where operation.namespace == namespace {
-            if operation.kind == .terminalControl || operation.status == .unknown || operation.status == .pending {
+        do {
+            var pruned = journal
+            if pruned.pruneTerminalHistory() { try saveJournal { $0 = pruned } }
+            else { try submissions.pruneTerminalHistory(keeping: Set(journal.operations.keys)) }
+        } catch { handle(error); return }
+        let operations = journal.operations.values.sorted(by: { $0.order < $1.order })
+        // Only the latest applied terminal receipt can describe the current lease.
+        let latestApplied = Dictionary(grouping: operations.filter { $0.namespace == namespace && $0.kind == .terminalControl && $0.status == .applied }, by: \.memberID)
+            .compactMapValues { $0.last?.id }
+        // Restore known checkpoints before observing older unresolved claims.
+        for operation in operations where operation.namespace == namespace && latestApplied[operation.memberID] == operation.id {
+            guard writeRevisions?.members?[operation.memberID]?.sessionGeneration == operation.sessionGeneration,
+                  operation.order > (leaseReceiptOrder[operation.memberID] ?? -1) else { continue }
+            if operation.action == .release || operation.leaseEnded == true {
+                leaseReceiptOrder[operation.memberID] = operation.order
+                terminalLeases.removeValue(forKey: operation.memberID)
+            } else if let receipt = operation.receipt {
+                do { try applyReceipt(receipt, tracked: operation) } catch { handle(error) }
+            } else {
+                // Older journals have no cached receipt. Fetch once to restore the lease.
                 await reconcileOperation(operation)
-                guard epoch == generation, canWrite else { return }
             }
+            guard epoch == generation, canWrite else { return }
         }
+        for operation in operations where operation.namespace == namespace && (operation.status == .unknown || operation.status == .pending) {
+            await reconcileOperation(operation)
+            guard epoch == generation, canWrite else { return }
+        }
+        // Retry unfinished cleanup on every recovery, even when leaseReceiptOrder already consumed the claim.
+        _ = await recoverCancelledTerminalClaims()
     }
 
     private func reconcileOperation(_ tracked: TrackedOperation) async {
@@ -1664,35 +1744,56 @@ final class AppStore: ProjectManagementStore {
         guard receipt.operationId == tracked.id, receipt.kind == tracked.kind, receipt.memberId == tracked.memberID else {
             throw SubmissionError.mismatchedResult
         }
-        if journal.operations[tracked.id]?.status == .applied, receipt.status != .applied { return }
+        guard let previousStatus = journal.operations[tracked.id]?.status else { return }
+        if (previousStatus == .applied || previousStatus == .refused), receipt.status != previousStatus { return }
         if tracked.kind == .terminalControl {
             guard let submissions else { throw SubmissionError.invalidTransition }
             try submissions.applyTerminalReceipt(receipt)
+            let latestAppliedOrder = journal.operations.values.filter {
+                $0.namespace == tracked.namespace && $0.memberID == tracked.memberID && $0.kind == .terminalControl &&
+                    $0.sessionGeneration == tracked.sessionGeneration && $0.status == .applied
+            }.map(\.order).max() ?? -1
             if receipt.status == .applied, case .terminalControl(let result) = receipt.result,
                writeRevisions?.members?[tracked.memberID]?.sessionGeneration == result.sessionGeneration,
-               tracked.order >= (leaseReceiptOrder[tracked.memberID] ?? -1) {
+               tracked.order >= max(latestAppliedOrder, leaseReceiptOrder[tracked.memberID] ?? -1) {
                 leaseReceiptOrder[tracked.memberID] = tracked.order
-                if tracked.action == .release { terminalLeases.removeValue(forKey: tracked.memberID) }
+                if tracked.action == .release || journal.operations[tracked.id]?.leaseEnded == true {
+                    terminalLeases.removeValue(forKey: tracked.memberID)
+                }
                 else if let lease = result.leaseId {
                     terminalLeases[tracked.memberID] = TerminalLease(leaseId: lease, expiresAt: result.expiresAt)
-                    if tracked.action == .claim, (cancelledTerminalClaims.contains(result.claimId) || journal.operations[tracked.id]?.cancelledClaim == true),
-                       let member = members.first(where: { $0.id == tracked.memberID }) {
-                        // Recovery can learn about a claim after its sheet disappeared.
-                        // Expected incarnation prevents this cleanup from touching a newer holder.
-                        cancelledTerminalLeases[tracked.memberID] = (result.claimId, lease)
-                        Task { _ = await self.releaseCancelledTerminalClaim(member) }
-                    }
                 }
             }
         } else if receipt.status == .applied {
             guard case .freshSession(let result) = receipt.result, result.member.id == tracked.memberID,
                   result.sessionGeneration > tracked.sessionGeneration else { throw SubmissionError.mismatchedResult }
         }
-        try saveJournal { $0.operations[tracked.id]?.status = receipt.status }
+        var endedLeaseCheckpointID: String?
+        if tracked.action == .release, receipt.status == .refused,
+           let error = receipt.error, Self.leaseGone(APIError(status: 409, message: error)),
+           writeRevisions?.members?[tracked.memberID]?.sessionGeneration == tracked.sessionGeneration,
+           tracked.order >= (leaseReceiptOrder[tracked.memberID] ?? -1) {
+            // The server definitively says this incarnation is gone, rather than temporarily busy.
+            leaseReceiptOrder[tracked.memberID] = tracked.order
+            terminalLeases.removeValue(forKey: tracked.memberID)
+            endedLeaseCheckpointID = journal.operations.values.filter {
+                $0.namespace == tracked.namespace && $0.memberID == tracked.memberID && $0.kind == .terminalControl &&
+                    $0.sessionGeneration == tracked.sessionGeneration && $0.status == .applied && $0.order < tracked.order
+            }.max { $0.order < $1.order }?.id
+        }
+        try saveJournal {
+            $0.operations[tracked.id]?.status = receipt.status
+            if let endedLeaseCheckpointID { $0.operations[endedLeaseCheckpointID]?.leaseEnded = true }
+            if receipt.status == .applied { $0.operations[tracked.id]?.receipt = receipt }
+        }
         operationResults[tracked.id] = receipt
         if receipt.status == .unknown || receipt.status == .pending {
             errorMessage = "작업 결과 확인 중입니다. 미확인 작업은 재실행하지 않습니다."
-        } else if receipt.status == .refused { errorMessage = receipt.error ?? "서버가 작업을 거부했습니다." }
+        } else if receipt.status == .refused, previousStatus != .refused {
+            if tracked.kind == .terminalControl && terminalRefusalIsLocal(memberID: tracked.memberID, error: receipt.error) {
+                terminalWindowNotices[tracked.memberID] = receipt.error
+            } else { errorMessage = receipt.error ?? "서버가 작업을 거부했습니다." }
+        }
     }
 
     private func recordOperationFailure(_ tracked: TrackedOperation, error: Error?) async {
@@ -1700,7 +1801,12 @@ final class AppStore: ProjectManagementStore {
         let status: OperationStatus = Self.definiteRefusal(error) ? .refused : .unknown
         let receipt = OperationReceipt(operationId: tracked.id, kind: tracked.kind, memberId: tracked.memberID,
                                        status: status, code: (error as? APIError)?.code, error: error?.localizedDescription)
-        do { try applyReceipt(receipt, tracked: tracked) } catch { handle(error) }
+        do {
+            try applyReceipt(receipt, tracked: tracked)
+            // Refresh conflicts only after the durable refusal, so recovery cannot query this finished write.
+            if status == .refused, (error as? APIError)?.status == 409,
+               error?.localizedDescription.contains("No core terminal for member") != true { await refresh() }
+        } catch { handle(error) }
     }
 
     /// All write revisions use the same atomic snapshot as the visible domain data.
@@ -2305,8 +2411,13 @@ final class AppStore: ProjectManagementStore {
         if let persistenceFailure { throw APIError(status: 0, message: persistenceFailure) }
         var next = journal
         change(&next)
+        next.pruneTerminalHistory()
         try writeStorage.write(next)
         journal = next
+        let kept = Set(next.operations.keys)
+        operationResults = operationResults.filter { $0.value.kind != .terminalControl || kept.contains($0.key) }
+        absentOperations.formIntersection(kept)
+        try submissions?.pruneTerminalHistory(keeping: kept)
     }
     private static func scoped(_ namespace: String, _ id: String) -> String { "\(namespace.utf8.count):\(namespace)|\(id)" }
     private static func definiteRefusal(_ error: Error?) -> Bool {
@@ -2370,6 +2481,8 @@ private struct TrackedOperation: Codable {
     var action: TerminalAction? = nil
     var cancelledClaim: Bool? = nil
     var status: OperationStatus = .unknown
+    var receipt: OperationReceipt? = nil // Optional for journals written before fix 11.
+    var leaseEnded: Bool? = nil // A confirmed disappearance also fences historical lease restoration.
 }
 private struct PendingTodo: Codable {
     let id: String
@@ -2384,6 +2497,29 @@ private struct AppWriteJournal: Codable {
     var projectChanges: [String: PendingProjectChange]? = nil
     var contextRequests: [String: PendingContextRequest]? = nil
     var serverEndpoints: [String: String]? = nil
+
+    @discardableResult mutating func pruneTerminalHistory() -> Bool {
+        let completed = operations.values.filter { $0.kind == .terminalControl && ($0.status == .applied || $0.status == .refused) }
+            .sorted { ($0.order, $0.id) > ($1.order, $1.id) }
+        var keep = Set(completed.prefix(64).map(\.id))
+        // Keep one lease checkpoint per host/member, including a release tombstone.
+        var checkpointMembers = Set<String>()
+        for operation in completed where operation.status == .applied {
+            let key = "\(operation.namespace.utf8.count):\(operation.namespace)|\(operation.memberID)"
+            if checkpointMembers.insert(key).inserted { keep.insert(operation.id) }
+        }
+        // The current claim must survive >64 inputs so a later close can still persist its intent.
+        // A release or a newer claim ends the previous active-claim checkpoint.
+        var claimMembers = Set<String>()
+        for operation in completed where operation.status == .applied && (operation.action == .claim || operation.action == .release) {
+            let key = "\(operation.namespace.utf8.count):\(operation.namespace)|\(operation.memberID)"
+            if claimMembers.insert(key).inserted, operation.action == .claim { keep.insert(operation.id) }
+        }
+        for operation in completed where operation.cancelledClaim == true { keep.insert(operation.id) }
+        let oldCount = operations.count
+        for operation in completed where !keep.contains(operation.id) { operations.removeValue(forKey: operation.id) }
+        return operations.count != oldCount
+    }
 }
 
 enum ProjectChangeStatus: String { case sending, checking, applied, current, refused }

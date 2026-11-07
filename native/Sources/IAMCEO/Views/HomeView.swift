@@ -723,11 +723,11 @@ struct HomeView: View {
     /// Active members and observations that cannot be confirmed, in team order.
     /// 승인 창 앞 and 오류 are listed in 내 차례, not here.
     private var activeMembers: [Member] {
-        store.members.filter { ["working", "waiting"].contains($0.status) || MemberStatusInfo($0).icon == "questionmark.circle" }
+        store.members.filter { ["working", "waiting"].contains($0.status) || MemberStatusInfo.isUncertain($0) }
     }
 
     private var teamSummary: [(status: String, label: String, count: Int)] {
-        let counts = Dictionary(grouping: store.members, by: { MemberStatusInfo($0).icon == "questionmark.circle" ? "unknown" : $0.status }).mapValues(\.count)
+        let counts = MemberStatusInfo.summaryCounts(store.members)
         return (Self.summaryParts + [("unknown", "상태 확인 불가")]).compactMap { part in
             let count = counts[part.status] ?? 0
             return count > 0 ? (part.status, part.label, count) : nil

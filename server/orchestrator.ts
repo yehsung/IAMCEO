@@ -656,7 +656,7 @@ export class Orchestrator implements OrchestratorApi {
         const member = this.store.getMember(state.memberId);
         if (!member || this.closed || state.code === "mutation_in_progress") return;
         const setupError = state.outcome === "rejoined" && core instanceof CoreRunner ? core.observationState(member.id)?.setupError ?? null : null;
-        this.store.patchMember(member.id, { statusObservation: { source: "core", observedAt: state.lastObservedAt === null ? null : new Date(state.lastObservedAt).toISOString(), freshness: state.outcome === "rejoined" ? "fresh" : "stale", ownership: state.outcome === "rejoined" ? "verified" : state.outcome === "conflict" ? "conflict" : "unknown", consecutiveFailures: state.failures, error: state.code ? { code: state.code, note: "소유 터미널을 다시 관측합니다. 후보가 여러 개면 자동 선택하거나 종료하지 않습니다" } : setupError } });
+        this.store.patchMember(member.id, { statusObservation: this.executionObservation(member, { source: "core", observedAt: state.lastObservedAt === null ? null : new Date(state.lastObservedAt).toISOString(), freshness: state.outcome === "rejoined" ? "fresh" : "stale", ownership: state.outcome === "rejoined" ? "verified" : state.outcome === "conflict" ? "conflict" : "unknown", consecutiveFailures: state.failures, error: state.code ? { code: state.code, note: "소유 터미널을 다시 관측합니다. 후보가 여러 개면 자동 선택하거나 종료하지 않습니다" } : setupError }) });
         if (state.outcome === "rejoined" && !this.recovering) void this.pump(member.id);
       },
     }) : null;
@@ -943,12 +943,26 @@ export class Orchestrator implements OrchestratorApi {
       const observed = runner instanceof CoreRunner ? runner.observationState(member.id) : null;
       if (!runner || !observed || observed.failures || observed.identity.terminalId !== run.identity.terminalId) continue;
       if (this.settleRecoveredStart(member, run, observed)) continue;
-      const since = run.lastProgressAt ?? run.startedAt ?? run.inputReceivedAt ?? run.createdAt;
-      if (!["blocked", "waiting"].includes(member.status) && Date.now() - Date.parse(since) >= 20_000) {
-        const code = run.startedAt ? "progress_stalled" : "start_stalled";
-        this.store.patchMember(member.id, { statusObservation: { source: "core", observedAt: observed.observedAt, freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: { code, note: `업무 ${run.runId}의 ${run.startedAt ? "진전" : "시작"}을 재관측 중입니다. 마지막 근거 ${since}. 소유 터미널과 업무 기록을 확인하세요. 시간만으로 입력·Enter·중단하지 않습니다` } } });
+      const observation = this.executionObservation(member, { source: "core", observedAt: observed.observedAt, freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: observed.setupError });
+      if (observation.error?.code === "progress_stalled" || observation.error?.code === "start_stalled" ||
+          member.statusObservation?.error?.code === "progress_stalled" || member.statusObservation?.error?.code === "start_stalled") {
+        this.store.patchMember(member.id, { statusObservation: observation });
       }
     }
+  }
+
+  /** Compose observation and execution evidence atomically. A successful reattach is not new output:
+   * publishing its bare error:null used to erase the quiet-run advisory until the next reconciliation.
+   * The same 20s threshold and execution timestamps apply to every observation writer. */
+  private executionObservation(member: Member, observation: NonNullable<Member["statusObservation"]>, status: string = member.status): NonNullable<Member["statusObservation"]> {
+    if (observation.source !== "core" || observation.freshness !== "fresh" || observation.ownership !== "verified" || observation.error || ["blocked", "waiting"].includes(status)) return observation;
+    const generation = this.store.memberRevisions(member.id).sessionGeneration;
+    const run = this.store.listPendingExecutions().find(run => run.memberId === member.id && run.identity.sessionGeneration === generation && run.identity.terminalId === member.paneId);
+    if (!run) return observation;
+    const since = run.lastProgressAt ?? run.startedAt ?? run.inputReceivedAt ?? run.createdAt;
+    if (!(Date.now() - Date.parse(since) >= 20_000)) return observation;
+    const code = run.startedAt ? "progress_stalled" : "start_stalled";
+    return { ...observation, error: { code, note: `업무 ${run.runId}의 ${run.startedAt ? "진전" : "시작"}을 재관측 중입니다. 마지막 근거 ${since}. 소유 터미널과 업무 기록을 확인하세요. 시간만으로 입력·Enter·중단하지 않습니다` } };
   }
 
   /**
@@ -4012,7 +4026,7 @@ export class Orchestrator implements OrchestratorApi {
 
         if (e.blockedReason !== undefined || e.observation !== undefined) this.store.patchMember(member.id, {
           ...(e.blockedReason !== undefined ? { blockedReason: e.blockedReason } : {}),
-          ...(e.observation !== undefined ? { statusObservation: e.observation } : {}),
+          ...(e.observation !== undefined ? { statusObservation: this.executionObservation(this.store.requireMember(member.id), e.observation, e.status) } : {}),
         });
         return this.onStatus(this.store.requireMember(member.id), e.status);
       case "turn_end":

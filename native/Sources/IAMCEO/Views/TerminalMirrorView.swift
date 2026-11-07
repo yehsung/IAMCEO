@@ -8,6 +8,7 @@ struct TerminalMirrorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     let member: Member
+    @State private var windowOwner = UUID()
     @State private var screen = ""
     @State private var input = ""
     @State private var inputRevision = 0
@@ -80,7 +81,7 @@ struct TerminalMirrorView: View {
                     do { try await Task.sleep(for: .seconds(2)) } catch { break }
                 }
             }
-            .onAppear { restoreInput() }
+            .onAppear { store.terminalWindowOpened(memberID: member.id, owner: windowOwner); restoreInput() }
             .onChange(of: inputScope) { _, _ in restoreInput(); awaitingResult = false; screen = ""; lastRead = nil }
             .onChange(of: receipts.map { "\($0.operationId):\($0.status.rawValue)" }) { _, _ in
                 if !receipts.isEmpty, receipts.allSatisfy({ $0.status == .applied || $0.status == .refused }) { awaitingResult = false }
@@ -89,7 +90,7 @@ struct TerminalMirrorView: View {
                 // Receipt consumption only clears the submitted revision. Later edits were persisted on each keystroke.
                 if inputSaveError == nil { restoreInput() }
             }
-            .onDisappear { if controlling { Task { _ = await store.releaseTerminal(member) } } }
+            .onDisappear { store.terminalWindowClosed(owner: windowOwner); if controlling { Task { _ = await store.releaseTerminal(member) } } }
     }
 
     // MARK: Frame
@@ -348,7 +349,7 @@ struct TerminalMirrorView: View {
                     .font(CEFont.note).foregroundStyle(CE.danger).lineSpacing(CELeading.note).textSelection(.enabled)
                 Button("입력 저장 다시 시도") { editInput(input) }.ceSecondaryButton().controlSize(.small)
             }
-            if let issue = error ?? store.errorMessage {
+            if let issue = error ?? store.terminalWindowNotice(memberID: member.id) ?? store.errorMessage {
                 Label(TerminalPresentation.message(issue), systemImage: "exclamationmark.circle").font(CEFont.note).foregroundStyle(CE.danger)
                     .lineSpacing(CELeading.note).lineLimit(3).layoutPriority(1)
             }

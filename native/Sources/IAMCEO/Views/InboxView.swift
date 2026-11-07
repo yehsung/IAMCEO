@@ -118,7 +118,7 @@ struct InboxView: View {
 
     private var openDecisions: [Decision] { store.decisions.filter { $0.status == "open" } }
     private var blocked: [Member] { store.members.filter { $0.status == "blocked" && MemberStatusInfo($0).tone == .approval } }
-    private var uncertainMembers: [Member] { store.members.filter { MemberStatusInfo($0).icon == "questionmark.circle" } }
+    private var uncertainMembers: [Member] { store.members.filter { MemberStatusInfo.isUncertain($0) } }
     private var gateOpen: Bool { store.canWrite && store.state?.project.connection.ok == true }
     /// Why answers are impossible right now (nil = open). Every reason is global, so it is explained once:
     /// demo and disconnection by the pinned StatusStrips, plus one notice above the list (disconnected / runner).

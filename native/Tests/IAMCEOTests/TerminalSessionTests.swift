@@ -71,7 +71,7 @@ import SwiftUI
         XCTAssertEqual(session.notice, reason)
         let firstRefusal = try XCTUnwrap(store.operationResults.values.first { $0.kind == .terminalControl && $0.status == .refused })
         XCTAssertEqual(firstRefusal.error, reason)
-        XCTAssertTrue(network.requests.contains { $0.url?.path == "/api/operations/\(firstRefusal.operationId)" }, "Missing receipt lookup must not hide the claim refusal")
+        XCTAssertFalse(network.requests.contains { $0.url?.path == "/api/operations/\(firstRefusal.operationId)" }, "A definitive refusal is final and must not be queried again")
         session.pendingInput(Data("ignored".utf8)) // Fallback typing cannot reclaim control.
         XCTAssertEqual(modes, [.observe])
         server.change { $0.terminalUnknown = true }

@@ -40,7 +40,10 @@ final class TerminalSession {
     }
     var surfaceMode: TerminalStreamMode { controlling || (platform == .mac && !readOnly) ? .control : .observe }
 
+    private let windowOwner = UUID()
+
     func appear(store: AppStore, member: Member, active: Bool) {
+        store.terminalWindowOpened(memberID: member.id, owner: windowOwner)
         visible = true; self.active = active
         client.onReady = { [weak self] mode in
             guard let self, mode == .control else { return }
@@ -141,9 +144,8 @@ final class TerminalSession {
                     beginInput(store: store, member: member)
                     return
                 }
-                // A refused v2 claim is recorded before receipt reconciliation, whose
-                // missing/failed lookup can overwrite the shared errorMessage. Keep
-                // the claim's own server reason, excluding earlier refusals and input.
+                // Use this claim's own server reason even when its missing-terminal
+                // refusal is handled inside this window. Exclude older refusals and input.
                 let refusals = store.operationResults.values.filter { receipt in
                     guard receipt.kind == .terminalControl, receipt.memberId == member.id,
                           receipt.status == .refused, previousResults[receipt.operationId]?.status != .refused,
@@ -151,7 +153,7 @@ final class TerminalSession {
                     return attempt.namespace == namespace && attempt.action == .claim
                 }
                 let refusal = refusals.first { previousResults[$0.operationId] == nil } ?? refusals.first
-                fallback(store: store, member: member, message: refusal?.error ?? store.rawErrorMessage ?? "조작권을 받지 못했습니다. 다른 기기나 세션 상태를 확인해 주세요.")
+                fallback(store: store, member: member, message: refusal?.error ?? store.terminalWindowNotice(memberID: member.id) ?? store.rawErrorMessage ?? "조작권을 받지 못했습니다. 다른 기기나 세션 상태를 확인해 주세요.")
                 return
             }
             ownedLeaseID = lease
@@ -255,6 +257,7 @@ final class TerminalSession {
     }
 
     func disappear(store: AppStore, member: Member) {
+        store.terminalWindowClosed(owner: windowOwner)
         visible = false; active = false; requestID = UUID(); pendingControl = nil
         starting = false; startBuffer.clear(); revalidationTask?.cancel(); client.dispose()
         let owner = takeOwner()

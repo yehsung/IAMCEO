@@ -25,7 +25,8 @@ async function fixture(healthMs = 60_000) {
   const isolated = createIsolatedRuntime();
   const config = loadConfig({ IAMCEO_HOME: isolated.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: isolated.socketPath, IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin });
   const db = openDb(config.dbPath);
-  const store = new Store(db, new Bus());
+  const bus = new Bus();
+  const store = new Store(db, bus);
   const project = store.createProject({ name: "Lifecycle", cwd: isolated.paths.work });
   const calls: Rpc[] = [];
   const terminals = new Map<string, CoreTerminal>();
@@ -90,7 +91,7 @@ async function fixture(healthMs = 60_000) {
     db.close(); await isolated.stop();
   });
   const current = orchestrator();
-  return { ...current, store, db, project, config, calls, terminals, runners, orchestrator,
+  return { ...current, store, bus, db, project, config, calls, terminals, runners, orchestrator,
     count: (method: string) => calls.filter(c => c.method === method).length,
     loseRun: (value: boolean) => { runLost = value; }, loseKeys: () => { keysLost = true; },
     loseKill: (value: boolean) => { killLost = value; }, unavailable: (value: boolean) => { getUnavailable = value; },
@@ -440,4 +441,41 @@ test("force sleep preserves a draft with a Korean 409 and restart clears old exe
   f.store.patchMember(member.id, { lastError: "초기/실행 종료: exited (exit_code=0)" });
   await f.orch.resumeMember(member.id);
   expect(f.store.requireMember(member.id).lastError).toBeNull();
+});
+
+
+for (const started of [false, true]) test(`${started ? "progress" : "start"} advisory survives every emitted reattach observation until new progress`, async () => {
+  const f = await fixture(0);
+  f.started(started);
+  const member = await f.orch.createMember(f.project.id, { name: "Quiet worker" });
+  await f.orch.assign(f.project.id, member.handle, { text: "Think quietly" });
+  if (started) await until(() => !!f.store.listPendingExecutions()[0]?.startedAt);
+  const run = f.store.listPendingExecutions()[0]!;
+  const since = new Date(Date.now() - 30 * 60_000).toISOString();
+  f.store.saveExecutionJournal({ ...run, inputReceivedAt: since, startedAt: started ? since : null, lastProgressAt: started ? since : null });
+  await f.orch.refreshConnection();
+  const code = started ? "progress_stalled" : "start_stalled";
+  expect(f.store.requireMember(member.id).statusObservation?.error?.code).toBe(code);
+  const observations: string[] = [];
+  const unsubscribe = f.bus.subscribe(event => {
+    if (event.type === "member" && event.member.id === member.id) observations.push(event.member.statusObservation?.error?.code ?? "none");
+  });
+  const gets = f.count("terminal.get"), sends = f.count("terminal.send"), keys = f.count("terminal.keys"), interrupts = f.count("terminal.interrupt");
+  for (let n = 0; n < 3; n++) await f.orch.refreshConnection();
+  unsubscribe();
+  expect(f.count("terminal.get")).toBeGreaterThan(gets);
+  expect(observations.length).toBeGreaterThan(0);
+  expect(observations.every(value => value === code)).toBe(true); // Check intermediate websocket events, not just final DB state.
+  expect(f.store.getExecutionJournal(run.runId)).toMatchObject({ phase: run.phase, result: null, lastProgressAt: started ? since : null });
+  expect(f.count("terminal.send")).toBe(sends); expect(f.count("terminal.keys")).toBe(keys); expect(f.count("terminal.interrupt")).toBe(interrupts);
+
+  const emit = (event: RunnerEvent) => (f.orch as unknown as { onRunnerEvent(e: RunnerEvent): Promise<void> }).onRunnerEvent(event);
+  await emit({ type: "activity", memberId: member.id, terminalId: member.paneId, sessionGeneration: run.identity.sessionGeneration, kind: "tool", text: "New output" });
+  await f.orch.refreshConnection();
+  expect(f.store.requireMember(member.id).statusObservation?.error).toBeNull();
+  expect(Date.parse(f.store.getExecutionJournal(run.runId)!.lastProgressAt!)).toBeGreaterThan(Date.parse(since));
+  // Real observation failures still take precedence over the soft execution advisory.
+  await emit({ type: "status", memberId: member.id, terminalId: member.paneId, sessionGeneration: run.identity.sessionGeneration, status: "working",
+    observation: { source: "core", observedAt: since, freshness: "stale", ownership: "unknown", consecutiveFailures: 1, error: { code: "timeout", note: "Observation failed" } } });
+  expect(f.store.requireMember(member.id).statusObservation).toMatchObject({ freshness: "stale", error: { code: "timeout" } });
 });

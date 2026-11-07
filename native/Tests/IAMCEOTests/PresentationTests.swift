@@ -1,7 +1,72 @@
+import Foundation
 import XCTest
 @testable import IAMCEO
 
 final class PresentationTests: XCTestCase {
+    @MainActor func testOfficeCountsMatchHomeClassificationIncludingUnavailableObservations() {
+        var members = MemberStatusInfo.order.map { Member(id: $0, status: $0, blockedReason: $0 == "blocked" ? "permission" : nil) }
+        for code in ["progress_stalled", "start_stalled", "timeout"] {
+            for freshness in ["fresh", "stale", "unknown"] {
+                members.append(Member(id: "\(code)-\(freshness)", status: "working", statusObservation:
+                    StatusObservation(freshness: freshness, ownership: "verified", error: ObservationError(code: code, note: code))))
+            }
+        }
+        members.append(Member(id: "conflict", status: "working", statusObservation: StatusObservation(freshness: "fresh", ownership: "conflict")))
+        let home = MemberStatusInfo.summaryCounts(members)
+        let office = OfficeView.counts(members)
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: office.map { ($0.status, $0.count) }), home)
+        XCTAssertEqual(office.first { $0.status == "unknown" }?.label, "상태 확인 불가")
+        XCTAssertEqual(office.first { $0.status == "idle" }?.label, "쉬는 중")
+        XCTAssertEqual(office.reduce(0) { $0 + $1.count }, members.count)
+        for member in members where MemberStatusInfo.isUncertain(member) {
+            XCTAssertEqual(officeStateLabel(member), MemberStatusInfo(member).label)
+        }
+    }
+
+    func testQuietRunAdvisoriesPreserveWorkingBadgeAndShareSummaryClassification() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        for code in ["progress_stalled", "start_stalled"] {
+            var member = Member(id: code, status: "working", statusObservation: StatusObservation(source: "core", freshness: "fresh", ownership: "verified",
+                error: ObservationError(code: code, note: "technical diagnostic")))
+            member.executionState = MemberExecutionState(runId: "run", inputReceivedAt: "2027-01-15T07:34:00Z", lastProgressAt: "2027-01-15T07:34:00Z")
+            // Use a fixed baseline so the elapsed line can be asserted independently of wall time.
+            let baseline = try XCTUnwrap(ISO8601DateFormatter().date(from: "2027-01-15T07:34:00Z"))
+            XCTAssertEqual(MemberStatusInfo.progressNote(member, now: baseline.addingTimeInterval(30 * 60)), "출력 없이 30분째 진행 중")
+            XCTAssertEqual(MemberStatusInfo(member).label, "일하는 중")
+            XCTAssertTrue(MemberStatusInfo(member).live)
+            XCTAssertFalse(MemberStatusInfo.isUncertain(member))
+            XCTAssertEqual(MemberStatusInfo.summaryCounts([member]), ["working": 1])
+            XCTAssertFalse(MemberObservationInfo(member).error?.contains("technical") ?? true)
+            for freshness in ["stale", "unknown", nil] as [String?] {
+                var stale = member; stale.statusObservation?.freshness = freshness
+                XCTAssertTrue(MemberStatusInfo.isUncertain(stale))
+                XCTAssertEqual(MemberStatusInfo(stale).label, "상태 확인 불가")
+                XCTAssertNil(MemberStatusInfo.progressNote(stale, now: now))
+            }
+            for ownership in ["unknown", "conflict", nil] as [String?] {
+                var unowned = member; unowned.statusObservation?.ownership = ownership
+                XCTAssertTrue(MemberStatusInfo.isUncertain(unowned))
+                XCTAssertEqual(MemberStatusInfo.summaryCounts([member, unowned]), ["working": 1, "unknown": 1])
+            }
+        }
+    }
+
+    func testAllObservationFailureCodesRemainUncertainAndFolderTrustRemainsApproval() {
+        let codes = ["unsupported_generation", "session_owned", "no_owned_terminal", "multiple_terminals", "ownership_changed",
+                     "core_owner_conflict", "timeout", "protocol", "down", "closed", "rpc", "config", "unavailable", "unsupported",
+                     "conflict", "stale", "not_found", "error", "status_unknown", "snapshot_failed", "disconnected", "future_failure"]
+        for code in codes {
+            let member = Member(status: "working", statusObservation: StatusObservation(freshness: "fresh", ownership: "verified", error: ObservationError(code: code, note: code)))
+            XCTAssertTrue(MemberStatusInfo.isUncertain(member), code)
+            XCTAssertEqual(MemberStatusInfo(member).label, "상태 확인 불가", code)
+            XCTAssertEqual(MemberStatusInfo.summaryCounts([member]), ["unknown": 1], code)
+        }
+        let trust = Member(backend: "core", status: "blocked", blockedReason: "setup", statusObservation: StatusObservation(source: "core", freshness: "fresh", ownership: "verified", error: ObservationError(code: "folder_trust", note: "폴더 신뢰")))
+        XCTAssertFalse(MemberStatusInfo.isUncertain(trust))
+        XCTAssertEqual(MemberStatusInfo.summaryCounts([trust]), ["blocked": 1])
+        XCTAssertEqual(MemberStatusInfo(trust).label, "승인 창 앞")
+    }
+
     func testDemoHomeKeepsApprovalErrorAndOwnerDeliveryVisible() throws {
         let (_, state) = DemoFixtures.workspace(now: Date(timeIntervalSince1970: 1_800_000_000))
         for member in state.members {

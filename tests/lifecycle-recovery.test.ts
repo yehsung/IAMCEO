@@ -266,6 +266,37 @@ test("restart recognizes a later settled core turn without interruption or anoth
   expect(f.count("terminal.send")).toBe(1); expect(f.count("terminal.run")).toBe(1);
 });
 
+test("a write whose reply was lost settles from log receipt once a later turn is seen, then asks for the missing report", async () => {
+  // Real 2026-11-07 run: kill -9 ~60ms after an owner message left dispatch write_started and the run in "starting".
+  // Recovery proved receipt from the CLI log, but the run stayed "starting": member looked busy and the report the
+  // worker could not post while the daemon was down was never requested.
+  const f = await fixture(); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  await f.orch.assign(f.project.id, member.handle, { text: "Crash-window task" });
+  const run = f.store.listPendingExecutions()[0]!;
+  expect(f.store.getDispatch(run.runId)?.baseline.turn).toBe(0);
+  f.store.saveExecutionJournal({ ...run, phase: "starting", inputReceivedAt: null, startedAt: null, turn: null });
+  await f.orch.shutdown();
+  const terminal = f.terminals.get(member.paneId!)!; terminal.turn = 1; terminal.status = { state: "done" };
+  const next = f.orchestrator(); await next.orch.recover(); await next.orch.refreshConnection();
+  expect(f.store.getExecutionJournal(run.runId)).toMatchObject({ phase: "ended", result: "success" });
+  expect(f.store.listPendingExecutions()).toHaveLength(0);
+  expect(f.store.listPending(member.id).some(d => d.kind === "system" && d.text.includes("보고 보완"))).toBe(true);
+  expect(f.count("terminal.send")).toBe(1); expect(f.count("terminal.interrupt")).toBe(0);
+});
+
+test("a recovered start with no later turn stays received and fenced; time alone never ends it", async () => {
+  const f = await fixture(); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  await f.orch.assign(f.project.id, member.handle, { text: "Crash-window task, not yet counted" });
+  const run = f.store.listPendingExecutions()[0]!;
+  f.store.saveExecutionJournal({ ...run, phase: "starting", inputReceivedAt: null, startedAt: null, turn: null, createdAt: new Date(Date.now() - 60_000).toISOString() });
+  await f.orch.shutdown();
+  const terminal = f.terminals.get(member.paneId!)!; terminal.turn = 0; terminal.status = { state: "done" };
+  const next = f.orchestrator(); await next.orch.recover(); await next.orch.refreshConnection();
+  expect(f.store.getExecutionJournal(run.runId)).toMatchObject({ phase: "received", turn: 0 });
+  expect(f.store.listPendingExecutions()).toHaveLength(1);
+  expect(f.count("terminal.send")).toBe(1);
+});
+
 test("same-turn idle after restart leaves the received execution fenced", async () => {
   const f = await fixture(); const member = await f.orch.createMember(f.project.id, { name: "Worker" }); f.started(false);
   await f.orch.assign(f.project.id, member.handle, { text: "Received but not started" });

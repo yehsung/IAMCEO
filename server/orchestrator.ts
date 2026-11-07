@@ -866,12 +866,34 @@ export class Orchestrator implements OrchestratorApi {
       const runner = this.runners.get(this.backendOf(member));
       const observed = runner instanceof CoreRunner ? runner.observationState(member.id) : null;
       if (!runner || !observed || observed.failures || observed.identity.terminalId !== run.identity.terminalId) continue;
+      if (this.settleRecoveredStart(member, run, observed)) continue;
       const since = run.lastProgressAt ?? run.startedAt ?? run.inputReceivedAt ?? run.createdAt;
       if (!["blocked", "waiting"].includes(member.status) && Date.now() - Date.parse(since) >= 20_000) {
         const code = run.startedAt ? "progress_stalled" : "start_stalled";
         this.store.patchMember(member.id, { statusObservation: { source: "core", observedAt: observed.observedAt, freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: { code, note: `업무 ${run.runId}의 ${run.startedAt ? "진전" : "시작"}을 재관측 중입니다. 마지막 근거 ${since}. 소유 터미널과 업무 기록을 확인하세요. 시간만으로 입력·Enter·중단하지 않습니다` } } });
       }
     }
+  }
+
+  /**
+   * A write whose reply was lost (daemon killed mid-send, real 2026-11-07 run) leaves its run in "starting". Once
+   * delivery recovery proves receipt from the CLI's own log, the run is received; the turn counter observed just
+   * before the write is the comparison point. A quiet CLI past that counter means the input's turn already ended
+   * while we were away: close it as success (which also asks for a missing report). Without that counter the run
+   * stays received and fenced: elapsed time alone never ends it.
+   */
+  private settleRecoveredStart(member: Member, run: ExecutionJournal, observed: { turn: number | null; state: string | null }): boolean {
+    if (run.phase !== "starting" || run.inputReceivedAt || !run.deliveryIds.length) return false;
+    const dispatch = this.store.getDispatch(run.runId);
+    if (!dispatch || dispatch.transportState === "rejected" || !run.deliveryIds.every(id => this.store.getDelivery(id)?.status === "delivered")) return false;
+    const at = new Date().toISOString(), base = dispatch.baseline.turn ?? null;
+    this.store.saveExecutionJournal({ ...run, phase: "received", inputReceivedAt: at, turn: base, reason: run.reason ?? "receipt_from_log", updatedAt: at });
+    if (base !== null && observed.turn !== null && observed.turn > base && ["idle", "done"].includes(observed.state ?? "")) {
+      this.endExecution(member, "success", "입력 응답은 끊겼지만 CLI 기록으로 수신을 확인했고, 그 턴이 끝난 것을 확인했습니다", null, observed.turn);
+      this.runtime(member.id).turn = null;
+      this.releaseSlots();
+    }
+    return true;
   }
 
   private completedReportSince(member: Member, since: string): boolean {
@@ -3435,7 +3457,7 @@ export class Orchestrator implements OrchestratorApi {
     const observed = runner instanceof CoreRunner ? runner.observationState(member.id) : null;
     const dispatch = this.deliveryRecovery.prepareDispatch(deliveries.map(d => d.id), observed?.identity ?? {
       terminalId: member.paneId, sessionId: member.sessionId, sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration, process: null,
-    }, { serverEpoch: this.deliveryEpoch, turn: null, inputEpoch: observed?.inputEpoch ?? null, logs: [], capturedAt: new Date().toISOString() });
+    }, { serverEpoch: this.deliveryEpoch, turn: observed?.turn ?? null, inputEpoch: observed?.inputEpoch ?? null, logs: [], capturedAt: new Date().toISOString() });
     this.store.transaction(() => {
       this.store.updateDispatch(dispatch.dispatchId, "prepared", "write_started");
       for (const d of deliveries) this.store.setDeliveryStatus(d.id, "delivering", { attempt: true });

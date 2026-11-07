@@ -338,9 +338,10 @@ export class CoreRunner implements Runner {
     track.refresh = pending;
     return pending;
   }
-  observationState(memberId: string): { observedAt: string; failures: number; failure: string | null; lastError: string | null; identity: RunnerTerminalIdentity; inputEpoch: number; setupError: Track["setupError"] } | null {
+  observationState(memberId: string): { observedAt: string; failures: number; failure: string | null; lastError: string | null; identity: RunnerTerminalIdentity; inputEpoch: number; setupError: Track["setupError"]; turn: number | null; state: string | null } | null {
     const track = this.tracks.get(memberId);
-    return track ? { observedAt: track.observedAt, failures: track.failures, failure: track.failure, lastError: track.lastError, identity: this.identity(track), inputEpoch: track.epoch, setupError: track.setupError } : null;
+    return track ? { observedAt: track.observedAt, failures: track.failures, failure: track.failure, lastError: track.lastError, identity: this.identity(track), inputEpoch: track.epoch, setupError: track.setupError,
+      turn: track.terminal.state === "live" ? track.terminal.turn ?? null : null, state: track.terminal.state === "live" ? track.terminal.status?.state ?? null : null } : null;
   }
   private async poll(): Promise<void> {
     if (this.polling || this.closed) return;

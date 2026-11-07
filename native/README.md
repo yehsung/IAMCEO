@@ -1,8 +1,8 @@
 # IAMCEO native
 
-SwiftUI macOS/iOS client for the IAMCEO Bun daemon. The daemon owns domain state, CLI processes and orchestration; the app owns one network synchronization coordinator, not a second model orchestrator. **Live operation stays on herdr** until isolated fake-project acceptance, separate real CLI/device acceptance and an owner-approved migration. Building this source does not migrate the live service.
+SwiftUI macOS/iOS client for the IAMCEO Bun daemon. The daemon owns domain state, CLI processes and orchestration; the app owns one network synchronization coordinator, not a second model orchestrator. Live operation moved to the core runner on November 7, 2026, with the owner's approval. Server and database changes reach the live service only through an owner-approved deploy after a backup; building this source does not change it.
 
-IAMCEO is **source-available**, under Sustainable Use License 1.0 + IAMCEO Additional Permissions. See [LICENSE](../LICENSE) and [the Korean explanation](../docs/LICENSING.ko.md). The web client is legacy, scheduled for retirement; it receives API compatibility maintenance, with no new features.
+IAMCEO is **source-available**, under Sustainable Use License 1.0 + IAMCEO Additional Permissions. See [LICENSE](../LICENSE) and [the Korean explanation](../docs/LICENSING.ko.md). The web client is legacy, kept temporarily and scheduled for removal; until then it receives API compatibility maintenance, with no new features.
 
 ## Development and isolated validation
 

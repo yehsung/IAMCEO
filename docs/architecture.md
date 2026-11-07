@@ -1,8 +1,8 @@
 # 아키텍처
 
-Bun 서버가 데이터와 AI 세션으로의 전달을 맡고, SwiftUI macOS·iOS 앱과 레거시 React 웹이 같은 API를 쓴다. 현재 소스는 `herdr-core`와 공식 대화형 Claude Code·Codex CLI를 연결한다. **라이브는 herdr 실행기를 유지한다.** core로 바꾸려면 격리된 가짜 테스트 프로젝트의 인수 시험, 별도 실제 CLI·기기 시험, 운영자의 전환 승인을 거친다.
+Bun 서버가 데이터와 AI 세션으로의 전달을 맡고, SwiftUI macOS·iOS 앱과 레거시 React 웹이 같은 API를 쓴다. 현재 소스는 `herdr-core`와 공식 대화형 Claude Code·Codex CLI를 연결한다. 라이브는 2026년 11월 7일 운영자 승인으로 core 실행기로 전환했다. 서버·DB 변경은 백업 뒤 운영자 승인으로만 배포한다.
 
-IAMCEO는 소스 공개형(Sustainable Use License 1.0 + IAMCEO 추가 허락)이며 [LICENSE](../LICENSE)와 [라이선스 설명](LICENSING.ko.md)을 따른다. 웹은 곧 폐기할 레거시로, 기존 v1 API 호환만 유지한다.
+IAMCEO는 소스 공개형(Sustainable Use License 1.0 + IAMCEO 추가 허락)이며 [LICENSE](../LICENSE)와 [라이선스 설명](LICENSING.ko.md)을 따른다. 웹은 임시로 남겨 둔 레거시로 곧 없앤다. 그때까지 기존 v1 API 호환만 유지한다.
 
 ## 구성과 역할
 

@@ -195,6 +195,7 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored private var refreshTask: Task<RefreshSnapshot, Error>?
     @ObservationIgnored private var foreground = true
     let drafts: DraftStore
+    let composerUploads = ComposerAttachmentUploads()
     let submissions: SubmissionStore?
     private(set) var writeRevisions: SyncRevisions?
     private(set) var settingsEdit: SettingsEdit?

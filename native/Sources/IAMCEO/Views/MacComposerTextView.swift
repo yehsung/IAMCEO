@@ -11,6 +11,7 @@ struct MacComposerTextView: NSViewRepresentable {
     let canReceive: () -> Bool
     let receive: ([MacAttachmentItem]) -> Bool
     let submit: () -> Void
+    var rejectionReason: (() -> String?)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
@@ -50,6 +51,7 @@ struct MacComposerTextView: NSViewRepresentable {
         view.canReceive = canReceive
         view.focusChanged = { context.coordinator.parent.focused = $0 }
         view.receive = receive
+        view.rejectionReason = rejectionReason
         view.intake = intake
         view.submit = submit
         view.setAccessibilityLabel(placeholder)
@@ -109,6 +111,7 @@ struct MacComposerTextView: NSViewRepresentable {
         var canReceive: (() -> Bool)?
         var focusChanged: ((Bool) -> Void)?
         var receive: (([MacAttachmentItem]) -> Bool)?
+        var rejectionReason: (() -> String?)?
         var intake: MacAttachmentIntake?
         var submit: (() -> Void)?
 
@@ -123,10 +126,24 @@ struct MacComposerTextView: NSViewRepresentable {
             return accepted
         }
         override func paste(_ sender: Any?) {
-            let items = MacAttachmentItem.read(.general)
-            guard !items.isEmpty else { super.paste(sender); return }
+            if !pasteAttachments(from: .general) { super.paste(sender) }
+        }
+        @discardableResult func pasteAttachments(from pasteboard: NSPasteboard) -> Bool {
+            guard MacAttachmentItem.supports(pasteboard) else { return false }
             // Consume recognized files/images even if writes are blocked; never fall back to path insertion.
-            _ = receive?(items)
+            _ = acceptAttachments(MacAttachmentItem.read(pasteboard))
+            return true
+        }
+        private func acceptAttachments(_ items: [MacAttachmentItem]) -> Bool {
+            guard !items.isEmpty else {
+                intake?.reportRejection("파일이나 이미지를 읽지 못했습니다")
+                return false
+            }
+            guard let receive else {
+                intake?.reportRejection("입력칸을 준비 중이라 첨부하지 못했습니다. 다시 놓아 주세요")
+                return false
+            }
+            return receive(items)
         }
         override func keyDown(with event: NSEvent) {
             if event.keyCode == 36 || event.keyCode == 76 {
@@ -149,7 +166,11 @@ struct MacComposerTextView: NSViewRepresentable {
         }
         override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
             guard MacAttachmentItem.supports(sender.draggingPasteboard) else { return super.prepareForDragOperation(sender) }
-            return canReceive?() == true
+            guard canReceive?() == true else {
+                intake?.reportRejection(rejectionReason?() ?? "지금은 이 입력칸에 첨부할 수 없습니다")
+                return false
+            }
+            return true
         }
         override func draggingExited(_ sender: (any NSDraggingInfo)?) { intake?.targeted = false; super.draggingExited(sender) }
         override func draggingEnded(_ sender: any NSDraggingInfo) { intake?.targeted = false; super.draggingEnded(sender) }
@@ -157,7 +178,7 @@ struct MacComposerTextView: NSViewRepresentable {
             guard MacAttachmentItem.supports(sender.draggingPasteboard) else { return super.performDragOperation(sender) }
             defer { intake?.targeted = false }
             let items = MacAttachmentItem.read(sender.draggingPasteboard)
-            return receive?(items) ?? false
+            return acceptAttachments(items)
         }
     }
 }

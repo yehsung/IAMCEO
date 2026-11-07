@@ -31,11 +31,19 @@ struct MacAttachmentDropSurface: NSViewRepresentable {
         private func update(_ sender: any NSDraggingInfo) -> NSDragOperation {
             let supported = MacAttachmentItem.supports(sender.draggingPasteboard)
             intake?.targeted = supported
-            return supported && policy.canAccept && sender.draggingSourceOperationMask.contains(.copy) ? .copy : []
+            return supported && policy.canAccept && intake?.receive != nil
+                && sender.draggingSourceOperationMask.contains(.copy) ? .copy : []
         }
         override func draggingExited(_ sender: (any NSDraggingInfo)?) { intake?.targeted = false }
         override func draggingEnded(_ sender: any NSDraggingInfo) { intake?.targeted = false }
-        override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool { policy.canAccept }
+        override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+            if let reason = policy.reason { intake?.reportRejection(reason); return false }
+            guard intake?.receive != nil else {
+                intake?.reportRejection("입력칸을 준비 중이라 첨부하지 못했습니다. 다시 놓아 주세요")
+                return false
+            }
+            return true
+        }
         override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
             defer { intake?.targeted = false }
             return intake?.accept(MacAttachmentItem.read(sender.draggingPasteboard), policy: policy) ?? false

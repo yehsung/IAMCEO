@@ -247,7 +247,9 @@ struct AppShell: View {
                         VStack(spacing: 12) {
                             Image(systemName: attachmentPolicy.canAccept ? "paperclip.circle" : "lock.circle")
                                 .font(.system(size: 32))
-                            Text(attachmentPolicy.reason ?? "여기에 놓으면 \(attachmentRecipient)에게 보낼 첨부로 올립니다")
+                            Text(attachmentPolicy.reason ?? (attachmentIntake.receive == nil
+                                ? "입력칸을 준비 중입니다. 잠시 뒤 다시 놓아 주세요"
+                                : "여기에 놓으면 \(attachmentRecipient)에게 보낼 첨부로 올립니다"))
                                 .font(.system(size: 15, weight: .semibold))
                                 .multilineTextAlignment(.center)
                         }

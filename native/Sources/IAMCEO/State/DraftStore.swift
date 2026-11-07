@@ -55,6 +55,12 @@ struct DraftUploadToken: Sendable {
     let draftGeneration: UUID
 }
 
+struct DraftUploadFailure: Codable, Identifiable {
+    let id: UUID
+    let name: String
+    let detail: String
+}
+
 @MainActor @Observable
 final class DraftStore {
     private struct Record: Codable {
@@ -64,6 +70,8 @@ final class DraftStore {
         var textRevision = 0
         var attachmentRevisions: [String: Int] = [:]
         var generation = UUID()
+        // Optional for compatibility with drafts saved before upload notices were persisted.
+        var uploadFailures: [DraftUploadFailure]?
     }
     private struct Host: Codable {
         var records: [String: Record] = [:]
@@ -190,15 +198,34 @@ final class DraftStore {
         let sent = snapshot(for: key)
         return DraftUploadToken(namespace: namespace, connectionGeneration: connectionGeneration, key: key, draftGeneration: sent.generation)
     }
+    func isCurrentUpload(_ token: DraftUploadToken) -> Bool {
+        token.namespace == namespace && token.connectionGeneration == connectionGeneration
+            && token.draftGeneration == hosts[namespace]?.records[token.key]?.generation
+    }
+    func uploadFailures(for key: String) -> [DraftUploadFailure] { hosts[namespace]?.records[key]?.uploadFailures ?? [] }
+    func failUpload(name: String, token: DraftUploadToken, id: UUID = UUID(), detail: String) {
+        var record = hosts[token.namespace]?.records[token.key] ?? Record()
+        var failures = record.uploadFailures ?? []
+        failures.removeAll { $0.id == id }
+        failures.append(DraftUploadFailure(id: id, name: name, detail: detail))
+        record.uploadFailures = failures
+        hosts[token.namespace, default: Host()].records[token.key] = record
+        save()
+    }
+    func dismissUploadFailures(for key: String) {
+        hosts[namespace]?.records[key]?.uploadFailures = nil
+        save()
+    }
     @discardableResult func completeUpload(_ file: Attachment, token: DraftUploadToken) -> Bool {
-        guard token.namespace == namespace, token.connectionGeneration == connectionGeneration,
-              token.draftGeneration == hosts[namespace]?.records[token.key]?.generation else { return false }
+        guard isCurrentUpload(token) else { return false }
         addFile(file, for: token.key)
         return true
     }
 
     var pendingCount: Int {
-        (hosts[namespace]?.records.values.filter { !$0.text.isEmpty || !$0.attachments.isEmpty }.count ?? 0)
+        (hosts[namespace]?.records.values.filter {
+            !$0.text.isEmpty || !$0.attachments.isEmpty || !($0.uploadFailures ?? []).isEmpty
+        }.count ?? 0)
             + memos.values.filter { !$0.isEmpty }.count
     }
     func memo(for decisionID: String) -> String? { hosts[namespace]?.memos[decisionID] }

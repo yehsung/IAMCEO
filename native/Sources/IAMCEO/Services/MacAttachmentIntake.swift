@@ -152,9 +152,36 @@ struct MacAttachmentPolicy {
 final class MacAttachmentIntake {
     var targeted = false
     var receive: (([MacAttachmentItem]) -> Bool)?
+    private var receiverOwner: UUID?
+    private var reject: ((String) -> Void)?
+    private(set) var rejection: String?
+    func install(owner: UUID, receive: @escaping ([MacAttachmentItem]) -> Bool,
+                 reject: ((String) -> Void)? = nil) {
+        if self.reject == nil, let rejection { reject?(rejection) }
+        receiverOwner = owner
+        self.receive = receive
+        self.reject = reject
+    }
+    func remove(owner: UUID) {
+        guard receiverOwner == owner else { return }
+        receiverOwner = nil
+        receive = nil
+        // Keep the last draft's notice sink for a drop during a view replacement gap.
+    }
     func accept(_ items: [MacAttachmentItem], policy: MacAttachmentPolicy) -> Bool {
-        guard policy.canAccept, !items.isEmpty else { return false }
-        return receive?(items) ?? false
+        if let reason = policy.reason { reportRejection(reason); return false }
+        guard !items.isEmpty else { reportRejection("놓은 파일이나 이미지를 읽지 못했습니다"); return false }
+        guard let receive else { reportRejection("입력칸을 준비 중이라 첨부하지 못했습니다. 다시 놓아 주세요"); return false }
+        guard receive(items) else {
+            reportRejection("파일이나 이미지를 첨부하지 못했습니다. 입력칸의 상태를 확인해 주세요")
+            return false
+        }
+        rejection = nil
+        return true
+    }
+    func reportRejection(_ reason: String) {
+        rejection = reason
+        reject?(reason)
     }
 }
 #endif

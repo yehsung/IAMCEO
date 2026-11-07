@@ -1436,9 +1436,6 @@ private func isNumericColumn(_ rows: [[String]], _ column: Int) -> Bool {
 
 // MARK: - Artifact
 
-/// Artifacts the person chose to preview during this app session; reopening them skips the gate.
-@MainActor private var openedArtifactIDs = Set<String>()
-
 private struct ArtifactViewer: View {
     @Environment(AppStore.self) private var store
     let file: FileDoc
@@ -1459,15 +1456,31 @@ private struct ArtifactViewer: View {
 
     var body: some View {
         Group {
-            if let loaded { preview(loaded) } else { gate }
+            if let loaded { preview(loaded) }
+            else if error == nil && unavailableReason == nil { placeholder }
+            else { gate }
         }
-        .task(id: file.id) { if loaded == nil, openedArtifactIDs.contains(file.id) { await load() } }
+        // Opens by itself, as on the web: the page is always drawn protected (no script, no network, no navigation),
+        // so there is nothing to confirm first. The gate stays only for a failure (다시 시도) or no host.
+        .task(id: file.id) { if loaded == nil { await load() } }
         .sheet(isPresented: $enlarged) {
             if let loaded { ArtifactFullView(title: file.title, artifact: loaded) }
         }
     }
 
-    /// Web run gate, shortened: what it is, one line on how it opens, one action.
+    /// While the page loads: a quiet frame of the preview's size, so the reader does not jump when it appears.
+    private var placeholder: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("페이지를 불러오는 중입니다").font(CEFont.note).foregroundStyle(CE.ink2)
+        }
+        .frame(maxWidth: .infinity, minHeight: 200)
+        .background(CE.bg.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CE.line) }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Shown only when the page cannot be drawn: no host (sample data, offline) or a failed load, with 다시 시도.
     private var gate: some View {
         VStack(alignment: .leading, spacing: CESpace.m) {
             HStack(alignment: .top, spacing: 10) {
@@ -1536,7 +1549,6 @@ private struct ArtifactViewer: View {
         do {
             let html = try await api.artifact(fileID: file.id)
             loaded = LoadedArtifact(html: html, rule: rule)
-            openedArtifactIDs.insert(file.id)
         } catch {
             self.error = "아티팩트를 불러오지 못했습니다. \(error.localizedDescription)"
         }

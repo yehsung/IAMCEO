@@ -816,37 +816,28 @@ struct MemberDetailView: View {
         return Array(room.suffix(4))
     }
 
-    /// The room's last lines and one quiet way into it.
+    /// The room's last lines. The way into the room is the 대화방 action; a line opens the room at that message.
     private func recentTalkPlate(_ m: Member) -> some View {
         let talk = recentTalk(m)
         return DetailPlate {
             VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    DetailSectionTitle("최근 대화")
-                    Spacer(minLength: 8)
-                    if !talk.isEmpty {
-                        Button { openChat(m) } label: {
-                            HStack(spacing: 3) {
-                                Text("모두 보기")
-                                Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold))
-                            }
-                            .font(CEFont.meta.weight(.medium)).foregroundStyle(CE.accent)
-                            .teamTallHitArea()
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(DetailPressStyle())
-                        .help("\(m.name)의 대화방 열기")
-                        .accessibilityLabel("대화 모두 보기")
-                    }
-                }
+                DetailSectionTitle("최근 대화")
                 if talk.isEmpty {
                     Text("아직 주고받은 말이 없습니다").font(CEFont.secondary).foregroundStyle(CE.ink3).padding(.vertical, 4)
                 } else {
                     VStack(spacing: 0) {
                         ForEach(Array(talk.enumerated()), id: \.element.id) { index, message in
                             if index > 0 { RowDivider(inset: 0) }
-                            TeamTalkRow(message: message, notice: store.deliveryPages[m.id]?.items.first { $0.messageId == message.id },
-                                        hasDeliveryNotices: store.deliveryNotices != nil)
+                            Button {
+                                openChat(m)
+                                router.chatMessageID = message.id
+                            } label: {
+                                TeamTalkRow(message: message, notice: store.deliveryPages[m.id]?.items.first { $0.messageId == message.id },
+                                            hasDeliveryNotices: store.deliveryNotices != nil)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(RowButtonStyle(radius: 8))
+                            .help("대화방에서 이 말 보기")
                         }
                     }
                 }

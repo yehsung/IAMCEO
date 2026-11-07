@@ -39,7 +39,7 @@ struct ComposerAcceptedMessage {
 
 /// The one instruction surface (web Composer): a dark glass panel with a meta row (target chip, attachment chips,
 /// hints), an error line, and the input row (paperclip, text, round send button).
-/// Used docked under every Mac destination, inline in Chat, and in the iPhone quick-compose sheet.
+/// Used docked under every destination (Mac, iPhone) and inline in 대화.
 /// Drafts and attachments are keyed by project + target, so switching either never sends a draft to someone else.
 struct ComposerBar: View {
     @Environment(AppStore.self) private var store
@@ -50,11 +50,17 @@ struct ComposerBar: View {
     #endif
     @Binding var target: String?
     var showsTargetPicker = true
+    /// iPhone dock: the recipient chip appears only while typing, so the bar at rest is one row on every tab.
+    var targetPickerOnFocus = false
+    /// The placeholder names the lead ("총괄에게 지시나 질문") where no recipient chips are on screen.
+    var namesLead = false
+    /// iPhone keeps a composer on every tab: only the one on screen takes a "지시" focus request.
+    var respondsToFocusRequests = true
     var autoFocus = false
     /// Called after the daemon accepted the message (saved). Delivery is shown in Chat, never here.
     var onSent: (() -> Void)? = nil
     var onOpenChat: (() -> Void)? = nil
-    /// iPhone: a downward swipe on the composer. nil = lower the keyboard; the quick-compose sheet closes itself.
+    /// iPhone: a downward swipe on the composer. nil = lower the keyboard.
     var onSwipeDown: (() -> Void)? = nil
     @State private var importing = false
     @State private var importContext: ComposerUploadContext?
@@ -125,7 +131,7 @@ struct ComposerBar: View {
         if missingTarget { return "명부에 없는 대상에게는 보낼 수 없습니다" }
         if let recipient { return "\(recipient.name)에게 직접 지시" }
         if store.state?.project.isHq == true { return "본사 AI에게 — 새 프로젝트 만들기 등" }
-        return "지시나 질문"
+        return namesLead ? "\(leadName)에게 지시나 질문" : "지시나 질문"
     }
 
     private var blockedReason: (text: String, tone: Tone)? {
@@ -138,8 +144,10 @@ struct ComposerBar: View {
     }
 
     private var hasMetaRow: Bool {
-        showsTargetPicker || !files.isEmpty || !pendingUploads.isEmpty || dropTargeted || sentTo != nil || quietBlock != nil
+        targetPickerShown || !files.isEmpty || !pendingUploads.isEmpty || dropTargeted || sentTo != nil || quietBlock != nil
     }
+
+    private var targetPickerShown: Bool { showsTargetPicker || (targetPickerOnFocus && focused) }
 
     /// Why sending is off (sample, offline, runner connection), shown quietly beside the target chip. Errors and a
     /// removed target take their own line instead.
@@ -177,7 +185,7 @@ struct ComposerBar: View {
         .animation(.easeOut(duration: 0.12), value: focused)
         #if os(iOS)
         // A downward swipe anywhere on the panel (also over the text field) puts the composer away: the keyboard goes
-        // down, and the quick-compose sheet closes. Simultaneous, so typing, selecting and tapping keep working.
+        // down. Simultaneous, so typing, selecting and tapping keep working.
         .simultaneousGesture(DragGesture(minimumDistance: 12).onEnded { value in
             guard value.translation.height > 28, value.translation.height > abs(value.translation.width) * 1.2 else { return }
             focused = false
@@ -226,7 +234,7 @@ struct ComposerBar: View {
         #if os(macOS)
         .onDisappear { attachmentIntake.receive = nil }
         #endif
-        .onChange(of: router.focusComposer) { _, _ in focusSoon() }
+        .onChange(of: router.focusComposer) { _, _ in if respondsToFocusRequests { focusSoon() } }
         .onChange(of: key) { _, _ in uploadError = nil; sendError = nil; sentTo = nil }
         .onChange(of: store.selectedProjectID) { _, _ in showTargets = false }
         .onChange(of: drafts.connectionGeneration) { _, _ in uploadError = nil; sendError = nil; sentTo = nil }
@@ -240,7 +248,7 @@ struct ComposerBar: View {
 
     private var metaRow: some View {
         HStack(spacing: 6) {
-            if showsTargetPicker { targetChip }
+            if targetPickerShown { targetChip }
             if !files.isEmpty || !pendingUploads.isEmpty {
                 // Many attachments scroll inside the row instead of growing the panel.
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -496,7 +504,7 @@ struct ComposerBar: View {
                 .focused($focused)
                 .padding(.horizontal, 6).padding(.vertical, 11)
                 .frame(minHeight: 44)
-                .disabled(store.isDemo)
+                .disabled(store.isDemo && !LaunchOptions.reviewTyping)
             #endif
 
             Button { Task { await send() } } label: {

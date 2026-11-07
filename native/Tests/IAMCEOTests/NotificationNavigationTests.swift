@@ -58,7 +58,7 @@ import XCTest
         router.go(.files)
         router.resetForProjectChange()
         XCTAssertEqual(router.destination, .files); XCTAssertNil(router.decisionID)
-        router.showCompose = true; router.resetForProjectChange(); XCTAssertFalse(router.showCompose)
+        router.showNewMember = true; router.resetForProjectChange(); XCTAssertFalse(router.showNewMember)
         router.terminalMemberID = "old"; router.showSettings = true
         router.applyNotification(NotificationRoute(target: .inbox(projectId: "q", decisionId: "d")), afterProjectChange: false, resetRevision: router.projectResetRevision)
         XCTAssertNil(router.terminalMemberID); XCTAssertFalse(router.showSettings)

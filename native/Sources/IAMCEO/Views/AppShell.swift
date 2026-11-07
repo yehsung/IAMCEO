@@ -86,7 +86,6 @@ struct AppShell: View {
         .onChange(of: router.destination) { _, _ in router.memberID = nil }
         #else
         .sheet(isPresented: $router.showSettings) { SettingsView() }
-        .sheet(isPresented: $router.showCompose) { QuickComposeSheet() }
         #endif
         #if DEBUG && os(iOS)
         // Development hook (simulator has no camera and cannot tap the system "open in IAMCEO?" prompt):
@@ -140,6 +139,7 @@ struct AppShell: View {
             case "new-project", "folder-picker", "github-clone": router.showNewProject = true
             case "new-member": router.showNewMember = true
             case "settings": router.showSettings = true
+            case "compose": router.focusComposer &+= 1
             case "rename": if let id = store.selectedProjectID { router.manageProject(id: id, mode: .rename) }
             #if os(iOS)
             case "keybar": keyBarPreview = true
@@ -209,6 +209,10 @@ struct AppShell: View {
         } detail: {
             destinationView(router.destination)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // One look under the toolbar on every tab. macOS shows the window's aurora under the toolbar only
+                // where a scroll view reaches it (홈, 결재함, 팀); over a fixed layout (대화, 자료) it paints a dark band,
+                // which in full screen runs across the whole top of the screen.
+                .modifier(ScrollPocketUnderToolbar(enabled: router.destination == .chat || router.destination == .files))
                 .ceStatusStrips()
                 .ceBar(.bottom) { dockedComposer }
                 // The window's aurora and stage lights, redrawn at the window's size and position: a copy laid out in
@@ -222,9 +226,6 @@ struct AppShell: View {
                 // Kept for the Window menu and Mission Control; the toolbar shows `headline` instead (macOS 15+).
                 .navigationTitle(store.state?.project.name ?? "IAMCEO")
                 .modifier(DeskTitle(subtitle: ""))
-                // One look on every tab: the window's aurora shows through the toolbar. Without this, macOS paints its
-                // own grey toolbar wherever the content under it is not a scrolled page (대화, 자료).
-                .modifier(TransparentWindowToolbar())
                 .toolbar {
                     if #available(macOS 26.0, *) {
                         ToolbarItem(placement: .navigation) { headline }
@@ -369,36 +370,21 @@ struct AppShell: View {
                                     .accessibilityLabel("설정, \(connectionLabel)")
                             }
                             projectSwitcher(tab)
-                            // iOS 26.1+: the bottom accessory pill (named recipient) replaces this button.
-                            if !store.isArchive && tab != .chat && !usesComposeAccessory {
-                                ToolbarItem(placement: .topBarTrailing) {
-                                    Button { router.showCompose = true } label: { Image(systemName: "square.and.pencil") }
-                                        .accessibilityLabel("지시 쓰기: \(composeRecipientName)에게")
-                                }
-                            }
                         }
                 }
+                // The same composer sits above the tab bar on every tab and rises with the keyboard where it is
+                // (대화 has its own, under the recipient chips).
+                .modifier(PhoneComposerDock(tab: tab))
                 .tabItem { Label(tab.title, systemImage: tab.icon) }
                 .badge(store.navBadge(for: tab))
                 .tag(tab)
             }
         }
-        .modifier(QuickComposeAccessory())
     }
 
     private var connectionLabel: String {
         if store.isDemo { return "샘플 데이터 · 읽기 전용" }
         return store.connectionStatus == .connected ? "서버 연결됨" : "서버 끊김"
-    }
-
-    private var usesComposeAccessory: Bool {
-        if #available(iOS 26.1, *) { return true }
-        return false
-    }
-
-    private var composeRecipientName: String {
-        guard let id = router.chatTarget else { return store.leadRankName }
-        return store.members.first { $0.id == id }?.name ?? "명부에 없는 대상"
     }
 
     /// Title = project switcher (web phone header). The badge counts what waits in the *other* projects, which the
@@ -1172,111 +1158,61 @@ private struct StripActionStyle: ButtonStyle {
     }
 }
 
-// MARK: - iPhone quick compose
+// MARK: - iPhone composer dock
 
 #if os(iOS)
-/// iOS 26.1+: a pill above the tab bar that names the recipient ("결제 연동에게 지시…") on every tab except 대화, which
-/// has its own inline composer. On a member's page it addresses that member.
-private struct QuickComposeAccessory: ViewModifier {
+/// iPhone: one composer above the tab bar on 홈 · 결재함 · 팀 · 자료, the same panel 대화 shows under its chips. Tapping it
+/// types in place: the keyboard comes up and the panel rides on top of it (no separate sheet).
+private struct PhoneComposerDock: ViewModifier {
     @Environment(AppStore.self) private var store
-    @Environment(Router.self) private var router
+    let tab: Destination
     func body(content: Content) -> some View {
-        if #available(iOS 26.1, *) {
-            content.tabViewBottomAccessory(isEnabled: router.destination != .chat && !store.isArchive) { QuickComposePill() }
-        } else {
+        if tab == .chat || store.isArchive {
             content
+        } else {
+            content.ceBar(.bottom) { PhoneDockedComposer(tab: tab) }
         }
     }
 }
 
-struct QuickComposePill: View {
+private struct PhoneDockedComposer: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
-    @Environment(DraftStore.self) private var drafts
+    let tab: Destination
 
-    /// The member open on 팀 (pushed detail) when there is one, else the shared chat target.
-    private var contextTarget: String? {
-        if router.destination == .team, let id = router.memberID, let member = store.members.first(where: { $0.id == id }) {
-            return member.kind == "worker" ? member.id : nil
-        }
-        return router.chatTarget
+    /// A worker's page on 팀 addresses that worker (the lead's page, the lead); elsewhere the shared chat target.
+    private var pinned: String?? {
+        guard tab == .team, let id = router.memberID, let member = store.members.first(where: { $0.id == id }) else { return nil }
+        return .some(member.kind == "worker" ? member.id : nil)
     }
 
     var body: some View {
-        let target = contextTarget
-        let member = target.flatMap { id in store.members.first { $0.id == id } }
-        let name = member?.name ?? (target == nil ? store.leadRankName : "명부에 없는 대상")
-        let key = DraftStore.key(project: store.selectedProjectID, target: target)
-        let hasDraft = !drafts.text(for: key).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !drafts.files(for: key).isEmpty
-        Button {
-            router.chatTarget = target
-            router.showCompose = true
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "square.and.pencil").foregroundStyle(CE.accent)
-                Text("\(name)에게 지시…").font(CEFont.secondary).foregroundStyle(CE.ink2).lineLimit(1)
-                Spacer(minLength: 4)
-                if hasDraft { Text("작성 중").font(CEFont.micro).foregroundStyle(CE.attention) }
-            }
-            .padding(.horizontal, CESpace.l)
-            .frame(maxWidth: .infinity, minHeight: 44)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(name)에게 지시 쓰기\(hasDraft ? ", 작성 중인 글 있음" : "")")
+        let pinned = pinned
+        let target = Binding<String?>(get: { pinned ?? router.chatTarget }, set: { router.chatTarget = $0 })
+        ComposerBar(target: target, showsTargetPicker: false, targetPickerOnFocus: pinned == nil, namesLead: true,
+                    respondsToFocusRequests: router.destination == tab,
+                    onOpenChat: { router.go(.chat) })
+            .padding(.horizontal, CESpace.m).padding(.top, 6).padding(.bottom, CESpace.s)
+            .background { ComposerFloor() }
+    }
+}
+
+/// The dark floor under the phone composer: content fades out above the panel and the floor runs on under the tab bar
+/// to the bottom edge, so the composer and the tab bar sit on one surface (no band that stops at the panel's edge).
+struct ComposerFloor: View {
+    var body: some View {
+        LinearGradient(stops: [
+            .init(color: CE.bg.opacity(0), location: 0),
+            .init(color: CE.bg.opacity(0.82), location: 0.42),
+            .init(color: CE.bg.opacity(0.9), location: 1),
+        ], startPoint: .top, endPoint: .bottom)
+        .padding(.top, -18)
+        .ignoresSafeArea(edges: .bottom)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 #endif
-
-struct QuickComposeSheet: View {
-    @Environment(AppStore.self) private var store
-    @Environment(Router.self) private var router
-    @Environment(DraftStore.self) private var drafts
-    @Environment(\.dismiss) private var dismiss
-    @State private var closeTask: Task<Void, Never>?
-    var body: some View {
-        @Bindable var router = router
-        NavigationStack {
-            VStack(spacing: 0) {
-                // The sheet stays open long enough to show the result (sent, or why it failed with the text kept).
-                ComposerBar(target: $router.chatTarget, autoFocus: true,
-                            onSent: { scheduleClose() },
-                            onOpenChat: { closeTask?.cancel(); dismiss(); router.go(.chat) },
-                            onSwipeDown: { closeTask?.cancel(); dismiss() })
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 14).padding(.top, 8)
-            // The empty space under the composer closes the sheet with a downward swipe too (the system swipe only
-            // works on the title bar while the keyboard is up).
-            .contentShape(Rectangle())
-            .simultaneousGesture(DragGesture(minimumDistance: 12).onEnded { value in
-                guard value.translation.height > 40, value.translation.height > abs(value.translation.width) * 1.2 else { return }
-                closeTask?.cancel(); dismiss()
-            })
-            .background { AmbientBackground() }
-            .navigationTitle("지시 쓰기")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("닫기") { dismiss() } } }
-        }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
-        .onDisappear { closeTask?.cancel() }
-    }
-
-    /// Close after the sent notice was readable, unless the CEO already started the next instruction.
-    private func scheduleClose() {
-        closeTask?.cancel()
-        closeTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2.5))
-            guard !Task.isCancelled else { return }
-            let key = DraftStore.key(project: store.selectedProjectID, target: router.chatTarget)
-            guard drafts.text(for: key).isEmpty, drafts.files(for: key).isEmpty else { return }
-            dismiss()
-        }
-    }
-}
 
 extension AppStore {
     /// Writes need a live connection and a healthy project runner connection. In-flight requests are not a global
@@ -1326,12 +1262,20 @@ extension AppStore {
     }
 }
 
-/// The window toolbar draws no background of its own (macOS 15+), so every tab shows the same aurora under it.
-private struct TransparentWindowToolbar: ViewModifier {
+/// Puts a fixed layout (대화, 자료) inside a scroll view that exactly fits, so the toolbar treats it like a scrolled
+/// page (홈): no dark toolbar band. Nothing scrolls; the panes keep their own scroll views.
+private struct ScrollPocketUnderToolbar: ViewModifier {
+    let enabled: Bool
     func body(content: Content) -> some View {
         #if os(macOS)
-        if #available(macOS 15.0, *) {
-            content.toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+        if enabled {
+            GeometryReader { geo in
+                ScrollView(.vertical) {
+                    content.frame(width: geo.size.width, height: geo.size.height)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .scrollIndicators(.never)
+            }
         } else {
             content
         }

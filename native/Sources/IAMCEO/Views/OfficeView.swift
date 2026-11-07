@@ -533,14 +533,10 @@ struct OfficeView: View {
 
     private func openChat(_ member: Member) { router.openChat(member.kind == "worker" ? member.id : nil) }
 
-    /// Same as the detail's 지시: point the composer at this member (Mac docked bar, iOS quick-compose sheet).
+    /// Same as the detail's 지시: point the composer at this member (the docked composer on Mac and iPhone).
     private func instruct(_ member: Member) {
         router.chatTarget = member.kind == "worker" ? member.id : nil
-        #if os(iOS)
-        router.showCompose = true
-        #else
         router.focusComposer &+= 1
-        #endif
     }
 
     // MARK: Message box

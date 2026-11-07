@@ -151,12 +151,12 @@ final class ManagementNavigationServer: @unchecked Sendable {
         let server = ManagementNavigationServer(), network = try IsolatedTestNetwork { try server.handle($0) }
         let store = await connected(network); defer { store.disconnect() }
         let router = Router(); store.registerRouter(router)
-        router.showCompose = true; router.terminalMemberID = "m"
+        router.showNewMember = true; router.terminalMemberID = "m"
         let key = DraftStore.key(project: "p", target: "m"); store.drafts.setText("keep", for: key)
         let result = await store.patchProject(id: "p", request: PatchProjectRequest(archived: true))
         XCTAssertTrue(result)
         XCTAssertEqual(store.selectedProjectID, "hq")
-        XCTAssertFalse(router.showCompose); XCTAssertNil(router.terminalMemberID)
+        XCTAssertFalse(router.showNewMember); XCTAssertNil(router.terminalMemberID)
         XCTAssertEqual(store.drafts.text(for: key), "keep")
         XCTAssertTrue(store.archivedProjects.contains { $0.id == "p" })
         XCTAssertFalse(store.projects.contains { $0.id == "p" })

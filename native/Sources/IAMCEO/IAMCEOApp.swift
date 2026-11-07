@@ -7,6 +7,12 @@ import AppKit
 enum LaunchOptions {
     static let arguments = ProcessInfo.processInfo.arguments
     static let demo = arguments.contains("--demo")
+    /// Review hook (DEBUG): the sample workspace lets the iPhone composer take the keyboard, so screenshots can show it.
+    #if DEBUG
+    static let reviewTyping = arguments.contains("--typing")
+    #else
+    static let reviewTyping = false
+    #endif
 
     static func value(after flag: String) -> String? {
         guard let index = arguments.firstIndex(of: flag), arguments.indices.contains(index + 1) else { return nil }

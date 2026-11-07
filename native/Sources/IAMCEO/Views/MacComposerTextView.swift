@@ -67,11 +67,27 @@ struct MacComposerTextView: NSViewRepresentable {
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView scroll: NSScrollView, context: Context) -> CGSize? {
-        guard let view = scroll.documentView as? Editor,
-              let container = view.textContainer, let layout = view.layoutManager else { return nil }
-        let proposedWidth = proposal.width ?? 300
+        Self.measuredSize(text: text, proposedWidth: proposal.width)
+    }
+
+    /// SwiftUI probes multiple widths. Never lay out the live editor while measuring it;
+    /// its container width is owned by widthTracksTextView during actual view layout.
+    static func measuredSize(text: String, proposedWidth: CGFloat?) -> CGSize {
+        let proposedWidth = proposedWidth ?? 300
         let width = proposedWidth.isFinite ? max(1, proposedWidth) : 300
-        container.containerSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 4
+        // TextKit's usedRect omits the empty final paragraph. A zero-width glyph gives
+        // it the same font and line spacing as other lines, without adding any width.
+        let measuredText = text.hasSuffix("\n") ? text + "\u{200B}" : text
+        let storage = NSTextStorage(string: measuredText, attributes: [
+            .font: NSFont.systemFont(ofSize: 15), .paragraphStyle: style,
+        ])
+        let layout = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: width, height: CGFloat.greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
         layout.ensureLayout(for: container)
         return CGSize(width: width, height: min(154, max(22, ceil(layout.usedRect(for: container).height))))
     }

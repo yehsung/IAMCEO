@@ -43,7 +43,6 @@ final class Router {
     var showSettings = false
     var showNewProject = false
     var showNewMember = false
-    var showCompose = false
     /// Mac: the QR sheet for connecting an iPhone.
     var showPairing = false
     /// Bumped to move keyboard focus into the docked composer (Mac).
@@ -85,7 +84,7 @@ final class Router {
     private func apply(_ route: NotificationRoute) {
         pendingRoute = nil
         decisionID = nil; memberID = nil; fileID = nil; chatTarget = nil; terminalMemberID = nil; chatMessageID = nil
-        showCompose = false; showNewMember = false; showSettings = false; showPairing = false; projectManagement = nil
+        showNewMember = false; showSettings = false; showPairing = false; projectManagement = nil
         switch route.target {
         case .home: destination = .home
         case .inbox(_, let id): openDecision(id)
@@ -104,7 +103,7 @@ final class Router {
     /// Selections belong to one project; never carry them into another.
     func resetForProjectChange() {
         decisionID = nil; memberID = nil; fileID = nil; chatTarget = nil; terminalMemberID = nil
-        chatMessageID = nil; showCompose = false; showNewMember = false; navigationNotice = nil
+        chatMessageID = nil; showNewMember = false; navigationNotice = nil
         projectResetRevision &+= 1
         if let route = pendingRoute { apply(route) }
     }

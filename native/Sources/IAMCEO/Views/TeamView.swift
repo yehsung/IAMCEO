@@ -1338,16 +1338,12 @@ struct MemberDetailView: View {
         #endif
     }
 
-    /// Points the instruction composer at this member: the docked bar on Mac, the quick-compose sheet on iOS.
+    /// Points the instruction composer at this member: the docked composer on Mac and iPhone.
     /// Drafts are keyed per target, so nothing already typed moves to someone else.
     private func instruct(_ m: Member) {
         leaveDetail()
         router.chatTarget = m.kind == "worker" ? m.id : nil
-        #if os(iOS)
-        router.showCompose = true
-        #else
         router.focusComposer &+= 1
-        #endif
     }
 
     private func openChat(_ m: Member) {

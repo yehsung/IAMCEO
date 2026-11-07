@@ -1110,12 +1110,9 @@ private struct ChatInlineComposer: View {
 
     var body: some View {
         @Bindable var router = router
-        ComposerBar(target: $router.chatTarget, showsTargetPicker: false)
+        ComposerBar(target: $router.chatTarget, showsTargetPicker: false, respondsToFocusRequests: router.destination == .chat)
             .padding(.horizontal, CESpace.m).padding(.top, 6).padding(.bottom, CESpace.s)
-            .background {
-                LinearGradient(colors: [CE.bg.opacity(0), CE.bg.opacity(0.9)], startPoint: .top, endPoint: .center)
-                    .allowsHitTesting(false)
-            }
+            .background { ComposerFloor() }
     }
 }
 #endif

@@ -14,6 +14,8 @@ import SwiftUI
 // MetaText(_ parts: [String?])                    "a · b · c" in meta style, empty parts dropped
 // InlineNotice(tone:, icon:, title:, detail:, actionTitle:, action:)
 // CompactEmpty(icon:, title:, detail:)
+// CESheet(title, subtitle:, icon:, width:) { body } footer: { buttons }   every popup (no NavigationStack/toolbar)
+// CECloseButton { }                               round quiet ×, Esc
 // Avatar(name:, cli:, size:)                      neutral session glyph (no person initials)
 // ContextMeter(pct:)                              tiny bar + "문맥 n%"
 // MarkdownText(text:)                             paragraphs, headings, lists, code fences
@@ -415,6 +417,192 @@ struct InlineNotice: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(tone.color.opacity(0.09), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(tone.color.opacity(0.22)) }
+    }
+}
+
+// MARK: - Sheet (popup) frame
+
+/// The one quiet round close button (×) of drawers and sheets: 26pt white-tint circle, no focus ring, Esc closes.
+/// iPhone keeps a 44pt hit target around the visible circle.
+struct CECloseButton: View {
+    var label = "닫기"
+    var escapeCloses = true
+    let action: () -> Void
+    var body: some View {
+        let button = Button(action: action) { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)) }
+            .buttonStyle(CECloseButtonStyle())
+            .focusEffectDisabled()
+            .help("\(label) (esc)")
+            .accessibilityLabel(label)
+        if escapeCloses { button.keyboardShortcut(.cancelAction) } else { button }
+    }
+}
+
+private struct CECloseButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { CloseBody(configuration: configuration) }
+    private struct CloseBody: View {
+        let configuration: ButtonStyleConfiguration
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .foregroundStyle(hovering ? CE.ink : CE.ink2)
+                .frame(width: 26, height: 26)
+                .background(Color.white.opacity(configuration.isPressed ? 0.14 : hovering ? 0.1 : 0.06), in: Circle())
+                .overlay { Circle().strokeBorder(Color.white.opacity(0.07)) }
+                .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+/// Surface of every popup: the card's deep violet, darker toward the bottom, one faint violet light at the top
+/// left. No aurora blobs (they read as stains in a small window) and no material (it greys the colour).
+struct CESheetBackground: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [Color(hex: 0x19132F), Color(hex: 0x0F0B20)], startPoint: .top, endPoint: .bottom)
+            RadialGradient(colors: [CE.violet.opacity(0.16), .clear], center: UnitPoint(x: 0.12, y: 0), startRadius: 0, endRadius: 380)
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+/// Every popup (sheet) uses this frame instead of NavigationStack + a system toolbar.
+/// - Header: optional icon tile, title, optional one-line subtitle, `CECloseButton` (Esc).
+/// - Body: on Mac the sheet's height follows the content and scrolls only past `maxBodyHeight`; `scrolls: false`
+///   hands the body the space as is (a terminal, a reader) and the caller sizes it.
+/// - Footer (optional): right-aligned buttons on a slightly darker band. `ceSecondaryButton` for 닫기/취소/다시 확인,
+///   one `ceProminentButton` (with `.keyboardShortcut(.defaultAction)`) for the main action. Never system-tinted buttons.
+/// iPhone: the same body and footer in a NavigationStack with an inline title and a trailing close button.
+struct CESheet<Content: View, Footer: View>: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    var subtitle: String?
+    var icon: String?
+    var width: CGFloat
+    var maxBodyHeight: CGFloat
+    var scrolls: Bool
+    var onClose: (() -> Void)?
+    private let content: Content
+    private let footer: Footer
+    @State private var bodyHeight: CGFloat = 0
+
+    init(_ title: String, subtitle: String? = nil, icon: String? = nil, width: CGFloat = 520, maxBodyHeight: CGFloat = 620,
+         scrolls: Bool = true, onClose: (() -> Void)? = nil,
+         @ViewBuilder content: () -> Content, @ViewBuilder footer: () -> Footer) {
+        self.title = title; self.subtitle = subtitle; self.icon = icon; self.width = width
+        self.maxBodyHeight = maxBodyHeight; self.scrolls = scrolls; self.onClose = onClose
+        self.content = content(); self.footer = footer()
+    }
+
+    private var hasFooter: Bool { Footer.self != EmptyView.self }
+    private func close() { if let onClose { onClose() } else { dismiss() } }
+
+    var body: some View {
+        #if os(macOS)
+        VStack(spacing: 0) {
+            header
+                .padding(.leading, 22).padding(.trailing, 16)
+                .padding(.top, 18).padding(.bottom, 14)
+            if scrolls {
+                ScrollView {
+                    content
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 22)
+                        .padding(.top, 2)
+                        .padding(.bottom, hasFooter ? 16 : 22)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bodyHeight = $0 }
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .scrollIndicators(.automatic)
+                .frame(height: bodyHeight > 0 ? min(bodyHeight, maxBodyHeight) : nil)
+            } else {
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, hasFooter ? 16 : 22)
+            }
+            if hasFooter { footerBar }
+        }
+        .frame(width: width)
+        .foregroundStyle(CE.ink)
+        .background { CESheetBackground() }
+        #else
+        NavigationStack {
+            Group {
+                if scrolls {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: CESpace.m) {
+                            if let subtitle { Text(subtitle).font(CEFont.secondary).foregroundStyle(CE.ink2) }
+                            content
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
+                } else {
+                    content.padding(.horizontal, 16).padding(.top, 8)
+                }
+            }
+            .foregroundStyle(CE.ink)
+            .background { CESheetBackground() }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { close() } label: { Image(systemName: "xmark") }.accessibilityLabel("닫기")
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) { if hasFooter { footerBar } }
+        }
+        #endif
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 12) {
+            if let icon {
+                let tile = RoundedRectangle(cornerRadius: 9, style: .continuous)
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(CE.accent)
+                    .frame(width: 32, height: 32)
+                    .background(CE.violet.opacity(0.16), in: tile)
+                    .overlay { tile.strokeBorder(CE.violet.opacity(0.3)) }
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(CEFont.title).foregroundStyle(CE.ink).lineLimit(1)
+                    .accessibilityAddTraits(.isHeader)
+                if let subtitle {
+                    Text(subtitle).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 12)
+            CECloseButton { close() }
+        }
+    }
+
+    private var footerBar: some View {
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            footer
+        }
+        .padding(.horizontal, isMac ? 22 : 16)
+        .padding(.vertical, isMac ? 14 : 10)
+        .background(Color.black.opacity(0.22))
+        .overlay(alignment: .top) { Rectangle().fill(CE.line).frame(height: 1) }
+    }
+}
+
+extension CESheet where Footer == EmptyView {
+    init(_ title: String, subtitle: String? = nil, icon: String? = nil, width: CGFloat = 520, maxBodyHeight: CGFloat = 620,
+         scrolls: Bool = true, onClose: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {
+        self.init(title, subtitle: subtitle, icon: icon, width: width, maxBodyHeight: maxBodyHeight, scrolls: scrolls,
+                  onClose: onClose, content: content, footer: { EmptyView() })
     }
 }
 

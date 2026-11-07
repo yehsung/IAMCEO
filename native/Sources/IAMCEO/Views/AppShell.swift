@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 /// App frame, after the web shell the owner likes: Mac = glass rail (projects) + title + centred glass tabs + docked
 /// composer; iPhone = project title menu + tab bar with badges + compose access. On Mac the member detail is a glass
@@ -95,6 +98,56 @@ struct AppShell: View {
                   !store.endpoint.isEmpty, !store.accessCode.isEmpty else { return }
             await store.connect()
         }
+        #if DEBUG
+        // Review hook for the read-only sample workspace: `--sheet archive|pairing|new-project|new-member|settings|
+        // rename|terminal:<memberID>` opens that popup at launch (screenshots of sheets).
+        .task {
+            guard store.isDemo, let sheet = LaunchOptions.value(after: "--sheet") else { return }
+            try? await Task.sleep(for: .milliseconds(400))
+            switch sheet {
+            case "archive": showArchive = true
+            case "pairing": router.showPairing = true
+            case "new-project": router.showNewProject = true
+            case "new-member": router.showNewMember = true
+            case "settings": router.showSettings = true
+            case "rename": if let id = store.selectedProjectID { router.manageProject(id: id, mode: .rename) }
+            default: if sheet.hasPrefix("terminal:") { router.terminalMemberID = String(sheet.dropFirst("terminal:".count)) }
+            }
+        }
+        #endif
+        #if DEBUG && os(macOS)
+        // Review hook: `--peek` keeps every window of the sample app on the current Space (also over a full-screen app)
+        // with all but its last 2pt column left of the display, so `screencapture -l` can read it without showing it
+        // to the person at the Mac.
+        .task {
+            guard store.isDemo, LaunchOptions.arguments.contains("--peek") else { return }
+            for _ in 0..<160 {
+                for window in NSApp.windows where window.sheetParent == nil && window.isVisible {
+                    window.collectionBehavior.insert([.canJoinAllSpaces, .fullScreenAuxiliary])
+                    let target = NSPoint(x: -(window.frame.width - 2), y: 0)
+                    if window.frame.origin != target { window.setFrameOrigin(target); window.orderFrontRegardless() }
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+        // Review hook: `--snapshot <dir>` draws every window of the sample app into <dir>/window-<n>.png after the
+        // screen settles, then quits (AppKit cacheDisplay: layout is right, materials draw grey).
+        .task {
+            guard store.isDemo, let dir = LaunchOptions.value(after: "--snapshot") else { return }
+            let delay = Double(LaunchOptions.value(after: "--snapshot-delay") ?? "") ?? 3
+            try? await Task.sleep(for: .seconds(delay))
+            var index = 0
+            for window in NSApp.windows where window.isVisible && window.frame.width >= 200 {
+                guard let view = window.contentView?.superview ?? window.contentView,
+                      let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { continue }
+                view.cacheDisplay(in: view.bounds, to: rep)
+                index += 1
+                let kind = window.sheetParent != nil ? "sheet" : (window.identifier?.rawValue.contains("Settings") == true ? "settings" : "window")
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir).appendingPathComponent("\(kind)-\(index).png"))
+            }
+            exit(0)
+        }
+        #endif
     }
 
     /// Terminal sheet from the window root, on both platforms. The Mac member drawer lives inside the window, so the
@@ -129,7 +182,6 @@ struct AppShell: View {
                 // Member detail: a glass drawer over this column on every destination; the rail stays undimmed.
                 .overlay { if !store.isArchive { MemberDrawerHost(windowWidth: windowWidth) } }
                 .navigationTitle(store.state?.project.name ?? "IAMCEO")
-                .navigationSubtitle(deskSubtitle)
                 .toolbar {
                     if #available(macOS 26.0, *) {
                         ToolbarItem(placement: .principal) { DestinationSwitcher() }
@@ -170,13 +222,6 @@ struct AppShell: View {
                 .allowsHitTesting(false)
             }
         }
-    }
-
-    /// The selected destination is already shown by the tabs. Like the web header, 결재함·대화·자료 carry the
-    /// project's `now` line; 홈 and 팀 show it in their own content.
-    private var deskSubtitle: String {
-        guard [.inbox, .chat, .files].contains(router.destination), let now = store.state?.project.now else { return "" }
-        return plainOneLine(now)
     }
 
     /// ⌘1…⌘5 switch destinations, ⌘R syncs now.

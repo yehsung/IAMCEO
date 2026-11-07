@@ -14,9 +14,9 @@ enum TerminalPlatform: Sendable {
         #endif
     }
     var controlSizePolicy: TerminalSizePolicy { .fit }
-    var openingMode: TerminalStreamMode { self == .mac ? .control : .observe }
-    var buffersStartingInput: Bool { self == .mac }
-    var observeHint: String { self == .mac ? "읽기 전용 화면입니다" : "입력하려면 '입력 시작'을 누르세요" }
+    var openingMode: TerminalStreamMode { .control }
+    var buffersStartingInput: Bool { true }
+    var observeHint: String { "읽기 전용 화면입니다" }
     func usesCoreGrid(mode: TerminalStreamMode) -> Bool { mode == .observe || controlSizePolicy == .core }
     func acceptsKeyboard(mode: TerminalStreamMode) -> Bool { mode == .control }
 }

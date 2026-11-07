@@ -115,28 +115,175 @@ import SwiftUI
         session.disappear(store: store, member: member); store.disconnect()
     }
 
-    func testIPhoneStillObservesUntilExplicitInputStart() async throws {
+    func testIPhoneOpeningClaimsImmediatelyFitsViewportAndClosingReleases() async throws {
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         let attached = expectation(description: "phone control attach")
         var modes: [TerminalStreamMode] = []
-        let session = TerminalSession(platform: .iPhone) { _, _, mode, cols, rows, _, policy in
+        let session = TerminalSession(platform: .iPhone) { _, _, mode, cols, rows, lease, policy in
             modes.append(mode)
-            if mode == .control {
-                XCTAssertEqual(cols, 55); XCTAssertEqual(rows, 24); XCTAssertEqual(policy, .fit)
-                attached.fulfill()
-            }
+            XCTAssertEqual(mode, .control); XCTAssertEqual(lease, "lease")
+            XCTAssertEqual(cols, 55); XCTAssertEqual(rows, 24); XCTAssertEqual(policy, .fit)
+            attached.fulfill()
         }
+        XCTAssertEqual(session.surfaceMode, .control)
         session.appear(store: store, member: member, active: true)
-        XCTAssertEqual(modes, [.observe]); XCTAssertTrue(server.read { $0.terminalBodies.isEmpty })
-        session.pendingInput(Data("ignored".utf8)); XCTAssertFalse(session.starting)
+        XCTAssertTrue(session.starting); XCTAssertFalse(session.readOnly)
+        XCTAssertTrue(session.platform.acceptsKeyboard(mode: session.surfaceMode))
+        for _ in 0..<200 where store.terminalLeases[member.id] == nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNotNil(store.terminalLeases[member.id])
+        XCTAssertEqual(server.read { $0.terminalBodies.first?["action"] as? String }, "claim")
+        XCTAssertTrue(modes.isEmpty, "Claim immediately, but wait for the phone viewport before attaching")
         session.sizeChanged(cols: 55, rows: 24)
-        session.beginInput(store: store, member: member)
         await fulfillment(of: [attached], timeout: 3)
-        XCTAssertEqual(modes, [.observe, .control])
+        XCTAssertEqual(modes, [.control])
+        session.client.accept(.ready(mode: .control, cols: 55, rows: 24, expiresAt: nil))
+        XCTAssertFalse(session.starting); XCTAssertTrue(session.controlling)
+        session.disappear(store: store, member: member)
+        for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNil(store.terminalLeases[member.id]); XCTAssertNil(session.ownedLeaseID)
+        XCTAssertEqual(server.read { $0.terminalBodies.map { $0["action"] as? String } }, ["claim", "release"])
+        XCTAssertEqual(session.client.state, .closed(reason: "client_closed", message: nil))
+        store.disconnect()
+    }
+
+    func testIPhoneClaimRefusalFallsBackReadOnlyAndRetryClaimsControl() async throws {
+        let server = WriteTestServer()
+        server.change { $0.dropTerminal = true }
+        let network = try IsolatedTestNetwork { request in
+            if request.url?.path.hasSuffix("/terminal/control") == true, server.read({ $0.dropTerminal }) {
+                return IsolatedTestHTTPReply(status: 409, data: Data(#"{"error":"Another terminal control lease is active","code":"TERMINAL_REFUSED"}"#.utf8))
+            }
+            return try server.handle(request)
+        }
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        let fallback = expectation(description: "phone read-only"), retried = expectation(description: "phone retry")
+        var modes: [TerminalStreamMode] = [], sent: [Data] = []
+        let session = TerminalSession(platform: .iPhone, connect: { _, _, mode, _, _, _, _ in
+            modes.append(mode)
+            if mode == .observe { fallback.fulfill() } else { retried.fulfill() }
+        }, send: { sent.append($0) })
+        session.sizeChanged(cols: 55, rows: 24)
+        session.appear(store: store, member: member, active: true)
+        session.pendingInput(Data("discard on refusal".utf8))
+        await fulfillment(of: [fallback], timeout: 3)
+        XCTAssertTrue(session.readOnly); XCTAssertFalse(session.starting)
+        XCTAssertEqual(session.surfaceMode, .observe)
+        XCTAssertFalse(session.platform.acceptsKeyboard(mode: session.surfaceMode))
+        XCTAssertEqual(session.notice, "다른 기기에서 터미널을 조작하고 있습니다")
+        XCTAssertTrue(TerminalPresentation.canReconnect(starting: session.starting, ending: session.ending, controlling: session.controlling))
+        session.client.accept(.ready(mode: .observe, cols: 160, rows: 50, expiresAt: nil))
+        session.pendingInput(Data("ignored while read-only".utf8))
+        XCTAssertEqual(modes, [.observe])
+        server.change { $0.dropTerminal = false }
+        session.beginInput(store: store, member: member)
+        XCTAssertEqual(session.surfaceMode, .control)
+        XCTAssertEqual(session.client.state, .closed(reason: "client_closed", message: nil), "Retry stops the observer before claiming")
+        await fulfillment(of: [retried], timeout: 3)
+        session.client.accept(.ready(mode: .control, cols: 55, rows: 24, expiresAt: nil))
+        XCTAssertFalse(session.readOnly); XCTAssertNil(session.notice)
+        XCTAssertEqual(modes, [.observe, .control]); XCTAssertTrue(sent.isEmpty)
+        let claims = try network.requests.filter { $0.url?.path.hasSuffix("/terminal/control") == true }.map { try WriteTestServer.body($0) }
+        XCTAssertEqual(claims.map { $0["action"] as? String }, ["claim", "claim"])
+        XCTAssertEqual(Set(claims.compactMap { $0["operationId"] as? String }).count, 2)
         session.disappear(store: store, member: member)
         for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
         store.disconnect()
+    }
+
+    func testIPhoneControlDisconnectReleasesBeforeReadOnlyFallback() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        let attached = expectation(description: "phone attached"), fallback = expectation(description: "phone released before observe")
+        let session = TerminalSession(platform: .iPhone) { _, _, mode, _, _, _, _ in
+            if mode == .control { attached.fulfill() }
+            else {
+                XCTAssertNil(store.terminalLeases[member.id])
+                XCTAssertEqual(server.read { $0.terminalBodies.last?["action"] as? String }, "release")
+                fallback.fulfill()
+            }
+        }
+        session.sizeChanged(cols: 55, rows: 24)
+        session.appear(store: store, member: member, active: true)
+        await fulfillment(of: [attached], timeout: 3)
+        session.client.accept(.ready(mode: .control, cols: 55, rows: 24, expiresAt: nil))
+        session.client.accept(.closed(reason: "disconnected", message: "터미널 연결이 끊겼습니다"))
+        session.client.onControlEnded?()
+        await fulfillment(of: [fallback], timeout: 3)
+        XCTAssertTrue(session.readOnly); XCTAssertFalse(session.starting); XCTAssertFalse(session.ending)
+        XCTAssertEqual(session.surfaceMode, .observe); XCTAssertNil(session.ownedLeaseID)
+        XCTAssertEqual(session.notice, "터미널 연결이 끊겼습니다")
+        session.disappear(store: store, member: member); store.disconnect()
+    }
+
+    func testIPhoneOpeningInputBuffersDuringClaimAndAttachThenSendsOnce() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        let entered = expectation(description: "phone claim pending"), attached = expectation(description: "phone attach pending")
+        let gate = DispatchSemaphore(value: 0)
+        server.change { $0.gate = gate; $0.entered = entered }
+        defer { gate.signal() }
+        var sent: [Data] = []
+        let session = TerminalSession(platform: .iPhone, connect: { _, _, _, _, _, _, _ in attached.fulfill() }, send: { sent.append($0) })
+        session.sizeChanged(cols: 55, rows: 24)
+        session.appear(store: store, member: member, active: true)
+        await fulfillment(of: [entered], timeout: 3)
+        session.pendingInput(Data("한글".utf8))
+        session.pendingInput(Data([27, 91, 65]))
+        XCTAssertTrue(sent.isEmpty)
+        server.change { $0.gate = nil; $0.entered = nil }; gate.signal()
+        await fulfillment(of: [attached], timeout: 3)
+        session.pendingInput(Data([13]))
+        XCTAssertTrue(session.starting); XCTAssertTrue(sent.isEmpty)
+        session.client.accept(.ready(mode: .control, cols: 55, rows: 24, expiresAt: nil))
+        XCTAssertFalse(session.starting)
+        XCTAssertEqual(sent, [Data("한글".utf8) + Data([27, 91, 65, 13])])
+        session.pendingInput(Data("ignored after ready".utf8))
+        session.client.accept(.ready(mode: .control, cols: 55, rows: 24, expiresAt: nil))
+        XCTAssertEqual(sent.count, 1, "A ready event must never replay the same input twice")
+        session.disappear(store: store, member: member)
+        for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        store.disconnect()
+    }
+
+    func testIPhoneBackgroundReleasesAndForegroundClaimsAgain() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        var attaches = 0
+        let session = TerminalSession(platform: .iPhone) { _, _, mode, _, _, _, policy in
+            XCTAssertEqual(mode, .control); XCTAssertEqual(policy, .fit); attaches += 1
+        }
+        session.sizeChanged(cols: 55, rows: 24)
+        session.appear(store: store, member: member, active: true)
+        for _ in 0..<200 where attaches == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(attaches, 1)
+        session.client.accept(.ready(mode: .control, cols: 55, rows: 24, expiresAt: nil))
+        session.setActive(false, store: store, member: member)
+        for _ in 0..<200 where session.controlling || session.ending || store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(session.controlling); XCTAssertNil(store.terminalLeases[member.id])
+        XCTAssertEqual(session.surfaceMode, .observe, "Background cleanup disables the phone keyboard")
+        XCTAssertEqual(attaches, 1)
+        XCTAssertEqual(server.read { $0.terminalBodies.map { $0["action"] as? String } }, ["claim", "release"])
+        session.setActive(true, store: store, member: member)
+        for _ in 0..<200 where attaches < 2 { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(attaches, 2); XCTAssertFalse(session.readOnly)
+        session.disappear(store: store, member: member)
+        for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(server.read { $0.terminalBodies.map { $0["action"] as? String } }, ["claim", "release", "claim", "release"])
+        store.disconnect()
+    }
+
+    func testIPhoneDisconnectedOpeningIsReadOnlyWithoutClaiming() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        store.disconnect()
+        let session = TerminalSession(platform: .iPhone) { _, _, _, _, _, _, _ in XCTFail("Disconnected opening must not attach") }
+        session.appear(store: store, member: member, active: true)
+        XCTAssertTrue(session.readOnly); XCTAssertFalse(session.starting)
+        XCTAssertEqual(session.surfaceMode, .observe)
+        XCTAssertEqual(session.notice, "서버에 연결되지 않아 조작할 수 없습니다.")
+        XCTAssertTrue(server.read { $0.terminalBodies.isEmpty })
+        session.disappear(store: store, member: member)
     }
 
     func testClosingDuringClaimNeverAttachesAndReleasesLateClaim() async throws {

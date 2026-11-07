@@ -14,6 +14,10 @@ struct AppShell: View {
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var sizeClass
     #endif
+    #if DEBUG && os(iOS)
+    /// `--sheet keybar`: the terminal key bar over the keyboard (review hook, sample data only).
+    @State private var keyBarPreview = false
+    #endif
     #if os(macOS)
     @Environment(\.openSettings) private var openSettings
     /// Window width, for the member drawer's width (40% of the window, 440…560).
@@ -51,6 +55,9 @@ struct AppShell: View {
         .foregroundStyle(CE.ink)
         .projectManagementSheets(enabled: !router.showSettings && !showArchive)
         .sheet(isPresented: $showArchive) { ArchiveLibraryView() }
+        #if DEBUG && os(iOS)
+        .sheet(isPresented: $keyBarPreview) { TerminalKeyBarPreview() }
+        #endif
         .sheet(isPresented: $router.showNewProject) { NewProjectView() }
         .sheet(isPresented: $router.showNewMember) { NewMemberView() }
         .sheet(item: rootTerminal) { TerminalView(member: $0) }
@@ -124,6 +131,9 @@ struct AppShell: View {
             case "new-member": router.showNewMember = true
             case "settings": router.showSettings = true
             case "rename": if let id = store.selectedProjectID { router.manageProject(id: id, mode: .rename) }
+            #if os(iOS)
+            case "keybar": keyBarPreview = true
+            #endif
             default: if sheet.hasPrefix("terminal:") { router.terminalMemberID = String(sheet.dropFirst("terminal:".count)) }
             }
         }
@@ -1210,10 +1220,18 @@ struct QuickComposeSheet: View {
                 // The sheet stays open long enough to show the result (sent, or why it failed with the text kept).
                 ComposerBar(target: $router.chatTarget, autoFocus: true,
                             onSent: { scheduleClose() },
-                            onOpenChat: { closeTask?.cancel(); dismiss(); router.go(.chat) })
+                            onOpenChat: { closeTask?.cancel(); dismiss(); router.go(.chat) },
+                            onSwipeDown: { closeTask?.cancel(); dismiss() })
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 14).padding(.top, 8)
+            // The empty space under the composer closes the sheet with a downward swipe too (the system swipe only
+            // works on the title bar while the keyboard is up).
+            .contentShape(Rectangle())
+            .simultaneousGesture(DragGesture(minimumDistance: 12).onEnded { value in
+                guard value.translation.height > 40, value.translation.height > abs(value.translation.width) * 1.2 else { return }
+                closeTask?.cancel(); dismiss()
+            })
             .background { AmbientBackground() }
             .navigationTitle("지시 쓰기")
             #if os(iOS)
@@ -1222,6 +1240,7 @@ struct QuickComposeSheet: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("닫기") { dismiss() } } }
         }
         .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
         .onDisappear { closeTask?.cancel() }
     }
 

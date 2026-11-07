@@ -99,24 +99,27 @@ struct TerminalView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading).layoutPriority(1)
             #else
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                HStack {
-                    if missingTerminal {
-                        Text("깨우면 같은 창에서 다시 연결합니다").font(CEFont.note).foregroundStyle(CE.ink2)
-                            .lineSpacing(CELeading.note)
-                    } else if controlling || TerminalPresentation.holdsLease(store.terminalLeases[member.id], now: context.date) {
-                        Button("입력 끝내기") { Task { await session.finishInput(store: store, member: member, resume: true) } }
-                            .ceSecondaryButton().disabled(session.ending).accessibilityLabel("터미널 입력 끝내기")
-                    } else {
-                        Text(TerminalPlatform.current.observeHint).font(CEFont.note).foregroundStyle(CE.ink2)
-                            .lineSpacing(CELeading.note)
-                        Spacer(minLength: 8)
-                        Button(session.starting ? "입력 준비 중" : "입력 시작") { session.beginInput(store: store, member: member) }
-                            .ceProminentButton().disabled(store.isDemo || !store.canWrite || session.starting || session.ending)
-                            .accessibilityLabel("터미널 입력 시작")
-                    }
+            // iPhone opens straight into typing (like Mac): the footer is one quiet line, and an action only when the
+            // terminal could not be taken (다시 시도). Closing is the ✕ at the top.
+            HStack(spacing: 10) {
+                if missingTerminal {
+                    Text("깨우면 같은 창에서 다시 연결합니다").font(CEFont.note).foregroundStyle(CE.ink2)
+                        .lineSpacing(CELeading.note)
+                    Spacer(minLength: 0)
+                } else if session.readOnly && !session.starting {
+                    Text("읽기 전용으로 보는 중입니다").font(CEFont.note).foregroundStyle(CE.ink2)
+                    Spacer(minLength: 8)
+                    Button("다시 시도") { session.beginInput(store: store, member: member) }
+                        .ceProminentButton().controlSize(.small)
+                        .disabled(store.isDemo || !store.canWrite || session.starting || session.ending)
+                        .accessibilityLabel("터미널 직접 입력 다시 시도")
+                } else {
+                    Image(systemName: "arrow.uturn.backward.circle").font(.system(size: 13, weight: .medium)).foregroundStyle(CE.ink3)
+                    Text("닫으면 자동 전달이 다시 시작됩니다").font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1)
+                    Spacer(minLength: 0)
                 }
             }
+            .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
             #endif
         }
         #if os(macOS)
@@ -139,9 +142,7 @@ struct TerminalView: View {
                     .accessibilityLabel("터미널 직접 입력 다시 시도")
             }
             #else
-            if !missingTerminal, case .closed = client.state {
-                reconnectButton
-            } else if !missingTerminal && client.state == .connecting { reconnectButton }
+            if !missingTerminal, !session.starting, case .closed = client.state { reconnectButton }
             #endif
         }
         .accessibilityElement(children: .contain)
@@ -149,7 +150,7 @@ struct TerminalView: View {
     }
     #if os(iOS)
     private var reconnectButton: some View {
-        Button("다시 연결") { session.observe(store: store, member: member) }.ceSecondaryButton().controlSize(.small)
+        Button("다시 연결") { session.beginInput(store: store, member: member) }.ceSecondaryButton().controlSize(.small)
             .disabled(!TerminalPresentation.canReconnect(starting: session.starting, ending: session.ending, controlling: controlling))
             .accessibilityLabel("터미널 다시 연결")
     }
@@ -163,18 +164,15 @@ struct TerminalView: View {
         if controlling { return TerminalPresentation.controlStatus(expiresAt: store.terminalLeases[member.id]?.expiresAt, now: now) }
         return "연결 중"
         #else
-        if TerminalPresentation.holdsLease(store.terminalLeases[member.id], now: now) && !controlling {
-            return session.starting ? "직접 입력 연결 중 · 자동 전달이 멈춰 있습니다" : "조작권 유지 중 · 이 직원의 자동 전달이 멈춰 있습니다"
-        }
         switch client.state {
-        case .connecting: return session.starting ? "직접 입력 연결 중" : "연결 중"
-        case .live(mode: .observe, cols: _, rows: _): return "보는 중"
+        case .connecting: return session.starting ? "연결 중" : "다시 연결하는 중"
+        case .live(mode: .observe, cols: _, rows: _): return "읽기 전용"
         case .live(mode: .control, cols: _, rows: _):
             if let expiry = store.terminalLeases[member.id]?.expiresAt {
                 let seconds = max(0, Int(ceil(expiry / 1000 - now.timeIntervalSince1970)))
                 if seconds < 60 { return "\(seconds)초 뒤 조작권이 끝납니다" }
             }
-            return "직접 입력 중 · 이 직원의 자동 전달이 멈춰 있습니다"
+            return "직접 입력 중 · 자동 전달 멈춤"
         case let .closed(_, message): return TerminalPresentation.message(message ?? "연결이 끊겼습니다")
         case .unsupported: return "이 서버는 기존 터미널 화면을 사용합니다"
         }

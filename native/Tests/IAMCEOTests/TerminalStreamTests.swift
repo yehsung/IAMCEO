@@ -7,11 +7,11 @@ import SwiftTerm
 final class TerminalStreamTests: XCTestCase {
     func testPlatformPoliciesAndPureGridSelection() {
         XCTAssertEqual(TerminalPlatform.mac.openingMode, .control)
-        XCTAssertEqual(TerminalPlatform.iPhone.openingMode, .observe)
+        XCTAssertEqual(TerminalPlatform.iPhone.openingMode, .control)
         XCTAssertEqual(TerminalPlatform.mac.controlSizePolicy, .fit)
         XCTAssertEqual(TerminalPlatform.iPhone.controlSizePolicy, .fit)
         XCTAssertTrue(TerminalPlatform.mac.buffersStartingInput)
-        XCTAssertFalse(TerminalPlatform.iPhone.buffersStartingInput)
+        XCTAssertTrue(TerminalPlatform.iPhone.buffersStartingInput)
         for platform in [TerminalPlatform.mac, .iPhone] {
             XCTAssertFalse(platform.acceptsKeyboard(mode: .observe))
             XCTAssertTrue(platform.acceptsKeyboard(mode: .control))
@@ -24,7 +24,7 @@ final class TerminalStreamTests: XCTestCase {
                 XCTAssertEqual(control.cols, Int(viewport.width / 6)); XCTAssertEqual(control.rows, Int(viewport.height / 12))
             }
         }
-        XCTAssertEqual(TerminalPlatform.iPhone.observeHint, "입력하려면 '입력 시작'을 누르세요")
+        XCTAssertEqual(TerminalPlatform.iPhone.observeHint, "읽기 전용 화면입니다")
         XCTAssertEqual(TerminalPlatform.mac.observeHint, "읽기 전용 화면입니다")
     }
     func testPlatformSizePolicyIsSentInRequest() async throws {
@@ -110,7 +110,7 @@ final class TerminalStreamTests: XCTestCase {
         #if os(iOS)
         let client = TerminalStreamClient()
         let parent = TerminalRepresentable(client: client, mode: .observe, cols: 160, rows: 50,
-            following: .constant(true), onPendingInput: { _ in XCTFail("iPhone input requires the button") }, onSize: { _,_ in })
+            following: .constant(true), onPendingInput: { _ in XCTFail("Read-only input must not claim control") }, onSize: { _,_ in })
         let coordinator = TerminalSurfaceCoordinator(parent)
         let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 390, height: 500), coordinator: coordinator)
         coordinator.host = host

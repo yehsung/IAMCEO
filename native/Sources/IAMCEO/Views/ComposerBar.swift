@@ -46,6 +46,8 @@ struct ComposerBar: View {
     /// Called after the daemon accepted the message (saved). Delivery is shown in Chat, never here.
     var onSent: (() -> Void)? = nil
     var onOpenChat: (() -> Void)? = nil
+    /// iPhone: a downward swipe on the composer. nil = lower the keyboard; the quick-compose sheet closes itself.
+    var onSwipeDown: (() -> Void)? = nil
     @State private var importing = false
     @State private var importContext: ComposerUploadContext?
     @State private var uploads: [ComposerUpload] = []
@@ -154,6 +156,15 @@ struct ComposerBar: View {
             }
         }
         .animation(.easeOut(duration: 0.12), value: focused)
+        #if os(iOS)
+        // A downward swipe anywhere on the panel (also over the text field) puts the composer away: the keyboard goes
+        // down, and the quick-compose sheet closes. Simultaneous, so typing, selecting and tapping keep working.
+        .simultaneousGesture(DragGesture(minimumDistance: 12).onEnded { value in
+            guard value.translation.height > 28, value.translation.height > abs(value.translation.width) * 1.2 else { return }
+            focused = false
+            onSwipeDown?()
+        })
+        #endif
         .dropDestination(for: URL.self) { urls, _ in
             let local = urls.filter(\.isFileURL)
             guard !local.isEmpty, let context = uploadContext() else { return false }

@@ -477,7 +477,8 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
         terminal.nativeBackgroundColor = backgroundColor!
         terminal.nativeForegroundColor = UIColor(CE.ink); terminal.caretColor = UIColor(CE.accent)
         terminal.terminalDelegate = coordinator; terminal.surface = self
-        inputAccessory = terminal.inputAccessoryView
+        // The app's key bar (separate chips, dark) instead of SwiftTerm's plain grey default.
+        inputAccessory = TerminalKeyBar(terminal: terminal)
         updateInputMode()
         canvas.addSubview(terminal); addSubview(canvas); delegate = self
         keyboardDismissMode = .interactive

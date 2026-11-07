@@ -260,7 +260,9 @@ import XCTest
         let network = try IsolatedTestNetwork(handler: server.handle), store = await connect(network)
         var connections = 0
         let session = TerminalSession(platform: .iPhone) { _, _, _, _, _, _, _ in connections += 1 }
+        session.sizeChanged(cols: 55, rows: 24)
         session.appear(store: store, member: member, active: true)
+        try await eventually { connections == 1 }
         let raw = "No core terminal for member"
         session.client.accept(.closed(reason: "finished", message: raw))
         XCTAssertEqual(session.client.state, .closed(reason: "finished", message: raw))
@@ -273,8 +275,11 @@ import XCTest
         server.change { $0.state.members[0].status = "idle"; $0.state.members[0].paneId = "new-pane" }
         await store.refresh()
         session.memberChanged(store: store, member: store.members[0])
-        XCTAssertFalse(session.missingTerminal); XCTAssertEqual(connections, 2)
-        session.disappear(store: store, member: member); store.disconnect()
+        try await eventually { connections == 2 }
+        XCTAssertFalse(session.missingTerminal)
+        session.disappear(store: store, member: member)
+        try await eventually { store.terminalLeases[member.id] == nil }
+        store.disconnect()
     }
 
     func testRefusedReceiptKeepsEnglishReasonWhileSessionAndBannerDisplayKorean() async throws {

@@ -25,10 +25,12 @@ final class TerminalSession {
     private(set) var ownedLeaseID: String?
     @ObservationIgnored private var revalidationTask: Task<Void, Never>?
     @ObservationIgnored private let connect: Connect
+    @ObservationIgnored private let send: (Data) -> Void
 
-    init(platform: TerminalPlatform = .current, client: TerminalStreamClient = TerminalStreamClient(), connect: Connect? = nil) {
+    init(platform: TerminalPlatform = .current, client: TerminalStreamClient = TerminalStreamClient(), connect: Connect? = nil, send: ((Data) -> Void)? = nil) {
         self.platform = platform; self.client = client
         readOnly = platform.openingMode == .observe
+        self.send = send ?? { client.send($0) }
         self.connect = connect ?? { api, memberID, mode, cols, rows, leaseID, policy in
             client.connect(api: api, memberID: memberID, mode: mode, cols: cols, rows: rows, leaseID: leaseID, sizePolicy: policy)
         }
@@ -38,7 +40,7 @@ final class TerminalSession {
         if case .live(mode: .control, cols: _, rows: _) = client.state { return true }
         return false
     }
-    var surfaceMode: TerminalStreamMode { controlling || (platform == .mac && !readOnly) ? .control : .observe }
+    var surfaceMode: TerminalStreamMode { controlling || !readOnly ? .control : .observe }
 
     private let windowOwner = UUID()
 
@@ -50,7 +52,7 @@ final class TerminalSession {
             if let expiry = self.client.expiresAt, store.terminalLeases[member.id]?.leaseId == self.ownedLeaseID { store.updateTerminalStreamLease(memberID: member.id, expiresAt: expiry) }
             self.starting = false
             if self.platform.buffersStartingInput {
-                if let bytes = self.startBuffer.take(), !bytes.isEmpty { self.client.send(bytes) }
+                if let bytes = self.startBuffer.take(), !bytes.isEmpty { self.send(bytes) }
                 else if self.startBuffer.discarded { self.notice = "입력 준비가 길어져 친 키를 버렸습니다. 다시 입력해 주세요." }
                 // The viewport may have changed while the attach was in flight.
                 self.client.resize(cols: self.naturalCols, rows: self.naturalRows)
@@ -62,12 +64,12 @@ final class TerminalSession {
         }
         client.onControlEnded = { [weak self] in
             guard let self else { return }
-            var message = self.platform == .mac ? "직접 입력 연결이 끝났습니다." : "직접 입력 연결이 끝났습니다. 보는 중으로 돌아갑니다."
+            var message = "직접 입력 연결이 끝났습니다."
             if case let .closed(reason, serverMessage) = self.client.state {
                 if reason == "lease_ended", let id = self.ownedLeaseID, store.terminalLeases[member.id]?.leaseId == id { store.terminalStreamLeaseEnded(memberID: member.id) }
                 message = serverMessage ?? (reason == "lease_ended" ? "조작권이 끝났습니다." : message)
             }
-            self.fallback(store: store, member: member, message: message, release: self.platform == .mac)
+            self.fallback(store: store, member: member, message: message, release: true)
         }
         open(store: store, member: member)
     }
@@ -124,7 +126,7 @@ final class TerminalSession {
         starting = true; readOnly = false; notice = nil
         if platform.buffersStartingInput { startBuffer.begin() }
         // Retrying from the read-only fallback must stop that socket before claiming.
-        if platform == .mac { client.close() }
+        client.close()
         let previousOwner = takeOwner()
         let token = UUID(); requestID = token; claimOwner = token
         Task {
@@ -199,10 +201,6 @@ final class TerminalSession {
                 ending = false
                 observe(store: store, member: member)
             }
-        } else if platform == .mac {
-            observe(store: store, member: member)
-        } else if case .live(mode: .observe, cols: _, rows: _) = client.state {
-            // iPhone keeps its current observer while an explicit claim is refused.
         } else { observe(store: store, member: member) }
     }
 
@@ -241,6 +239,7 @@ final class TerminalSession {
         ending = true; requestID = UUID(); pendingControl = nil; revalidationTask?.cancel()
         let owner = takeOwner()
         client.close(); starting = false; startBuffer.clear()
+        if platform == .iPhone { readOnly = true }
         if !(await release(store: store, member: member, owner: owner)) { notice = store.errorMessage ?? "조작권을 놓지 못했습니다. 다시 닫아 주세요." }
         ending = false
         if resume { observe(store: store, member: member) }

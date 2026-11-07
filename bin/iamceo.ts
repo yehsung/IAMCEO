@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // IAMCEO CLI. mcp 는 세션마다 뜨므로 서버 코드를 끌어오지 않게 명령별로 늦게 불러온다.
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { connect } from "node:net";
 import { homedir, networkInterfaces, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -8,7 +9,7 @@ import { createInterface } from "node:readline";
 import { parseArgs } from "node:util";
 import pkg from "../package.json" with { type: "json" };
 import { EFFORTS, type Bootstrap, type Effort, type Member, type Project, type ProjectState } from "../shared/types.ts";
-import { DEFAULT_PORT, detectTailscaleIp, isTailscaleV4, loadConfig, updateConfigFile, type Config } from "../server/config.ts";
+import { DEFAULT_PORT, homeDir, detectTailscaleIp, isTailscaleV4, loadConfig, updateConfigFile, type Config } from "../server/config.ts";
 
 const USAGE = `쓰는 법: iamceo <명령>
   serve                  서버를 켠다
@@ -21,7 +22,12 @@ const USAGE = `쓰는 법: iamceo <명령>
                          내가 띄운 CLI 를 직원으로 등록하고 연결 명령을 알려 준다
   import <덤프.json> [--name 이름] [--cwd 폴더]
                          기존 운영판 덤프를 프로젝트로 가져온다
-  service install [--dry-run] | uninstall [--dry-run]
+  backup [--directory 경로] 검증된 DB·첨부·설정 백업
+  restore <백업폴더> --destination 경로 [--clone]
+                         별도 빈 홈에 복원하고 발신을 격리한다
+  readiness              인증·복구 완료·실행 build ID를 확인한다
+  build-id               실행 파일의 build ID를 보여 준다
+  service install [--restart] [--dry-run] | uninstall [--dry-run]
                          launchd 서비스(com.iamceo.server)를 등록·해제한다
   roles export           기본 역할 템플릿을 ~/.iamceo/roles/<kind>.example.md 로 꺼낸다. <kind>.md 로 고쳐 두면 그것을 쓴다
   version                버전을 보여 준다
@@ -90,51 +96,161 @@ function savedClaudeEffort(): Effort {
   return "high";
 }
 
-async function serve(): Promise<void> {
-  const config = loadConfig();
-  // 화면 번들의 주소가 작업 폴더 기준으로 나온다. 다른 폴더에서 켜면 스크립트가 HTML 로 응답되어 빈 화면이 된다.
-  if (!COMPILED) process.chdir(resolve(import.meta.dir, ".."));
-  // Bun.serve 는 routes 를 주면 이미 쓰는 포트에서도 예외 없이 돌아온다. 그러면 안 들리는 서버가 떠 있게 된다.
-  if (config.port !== 0 && (await portInUse(config.hosts[0]!, config.port))) {
-    throw new CliError(`포트 ${config.port} 을 이미 쓰고 있습니다. 서버가 떠 있으면 iamceo status 로 확인하고, 아니면 IAMCEO_PORT 나 iamceo setup 으로 바꾸세요.`);
-  }
-  const [{ Bus }, { openDb }, { startServer }, { createOrchestrator }, { Store }] = await Promise.all([
-    import("../server/bus.ts"),
-    import("../server/db.ts"),
-    import("../server/http.ts"),
-    import("../server/orchestrator.ts"),
-    import("../server/store.ts"),
-  ]);
-  const bus = new Bus();
-  const store = new Store(openDb(config.dbPath), bus);
-  store.fillRankEfforts(savedClaudeEffort());
-  const orch = createOrchestrator(config, store);
-  let server: Awaited<ReturnType<typeof startServer>>;
-  try {
-    server = await startServer({ config, store, bus, orch });
-  } catch (e) {
-    await orch.shutdown();
-    throw new CliError(`서버를 열지 못했습니다(포트 ${config.port}): ${(e as Error).message}`);
-  }
-  orch.setServerUrl(server.urls[0]!);
-  await orch.initializeRuntime();
-  await orch.recover();
-  console.log(`IAMCEO 서버: ${server.urls.join(" · ")}`);
-  console.log("접속 코드는 iamceo open 으로 봅니다.");
+/** Source runs hash the server inputs; compiled runs hash the installed executable once at startup. */
+let buildIdentity: Promise<string> | undefined;
+export function buildId(): Promise<string> {
+  return buildIdentity ??= (async () => {
+    const hash = createHash("sha256");
+    if (COMPILED) {
+      for await (const chunk of createReadStream(process.execPath)) hash.update(chunk);
+    } else {
+      const root = resolve(import.meta.dir, "..");
+      const files = [...new Bun.Glob("{bin,server,shared}/**/*.{ts,md}").scanSync({ cwd: root })].sort();
+      for (const file of ["package.json", "bun.lock", ...files]) {
+        hash.update(file).update("\0");
+        for await (const chunk of createReadStream(join(root, file))) hash.update(chunk);
+        hash.update("\0");
+      }
+    }
+    return hash.digest("hex");
+  })();
+}
 
+export interface OpsRuntimeOptions {
+  owner?: import("../server/home-owner.ts").HomeOwner;
+  createOrchestrator?: typeof import("../server/orchestrator.ts").createOrchestrator;
+  startServer?: typeof import("../server/http.ts").startServer;
+  client?: Pick<import("../server/push/apns.ts").APNsClient, "send" | "status" | "close">;
+  backupPolicy?: Partial<import("../server/backup.ts").BackupPolicy>;
+  sweepIntervalMs?: number;
+}
+
+/** Owns every resource from the pre-DB lock through the last background write. */
+export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions = {}) {
+  const { acquireHomeOwner } = await import("../server/home-owner.ts");
+  const owner = options.owner ?? acquireHomeOwner(config.home);
+  let db: import("bun:sqlite").Database | undefined;
+  let orch: ReturnType<NonNullable<OpsRuntimeOptions["createOrchestrator"]>> | undefined;
+  let server: import("../server/http.ts").RunningServer | undefined;
+  let worker: import("../server/push/worker.ts").PushWorker | undefined;
+  let backups: import("../server/backup.ts").BackupManager | undefined;
+  let client = options.client;
+  let sweepTimer: ReturnType<typeof setInterval> | undefined;
+  let unsubscribe: (() => void) | undefined;
+  let ready = false;
+  let stopped: Promise<void> | undefined;
+  const stop = (): Promise<void> => stopped ??= (async () => {
+    ready = false;
+    clearInterval(sweepTimer);
+    unsubscribe?.();
+    // Stop ingress and all producers/consumers together, within one outer deadline.
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => server?.stop()),
+      Promise.resolve().then(() => orch?.shutdown()),
+      Promise.resolve().then(() => worker ? worker.shutdown() : client?.close()),
+      Promise.resolve().then(() => backups?.stop()),
+    ]);
+    const failures = results.filter((result) => result.status === "rejected");
+    try { db?.close(); } finally { owner.release(); }
+    if (failures.length) throw new AggregateError(failures.map((result) => result.reason), "운영 자원 종료 실패");
+  })();
+  try {
+    const [{ Bus }, { openDb }, http, orchestration, { Store }, { PushStore }, { PushEventRecorder }, { PushWorker },
+      { APNsClient }, { loadAPNsConfig }, { BackupManager }, { StorageMaintenance, createStorageReferences }] = await Promise.all([
+      import("../server/bus.ts"), import("../server/db.ts"), import("../server/http.ts"), import("../server/orchestrator.ts"),
+      import("../server/store.ts"), import("../server/push/store.ts"), import("../server/push/events.ts"), import("../server/push/worker.ts"),
+      import("../server/push/apns.ts"), import("../server/push/config.ts"), import("../server/backup.ts"), import("../server/storage-maintenance.ts"),
+    ]);
+    const identity = await buildId();
+    db = openDb(config.dbPath);
+    client ??= new APNsClient(loadAPNsConfig(config.home));
+    const push = new PushStore(db, { providers: () => client!.status() });
+    const bus = new Bus();
+    const store = new Store(db, bus, new PushEventRecorder(push));
+    store.fillRankEfforts(process.env.IAMCEO_TEST === "1" ? "high" : savedClaudeEffort());
+    // Pending external effects are uncertain after a crash, never replayable inputs.
+    store.transaction(() => {
+      for (const receipt of store.listPendingOperations()) if (receipt.status === "pending") store.finishOperation({ ...receipt, status: "unknown",
+        code: "restart_reconciliation_required", error: "서버 재시작 후 외부 효과 확인 필요" });
+    });
+    orch = (options.createOrchestrator ?? orchestration.createOrchestrator)(config, store);
+    const runtimeInfo = orch.runtimeInfo.bind(orch);
+    orch.runtimeInfo = async () => ({ ...await runtimeInfo(), daemon: { ready, buildId: identity, version: VERSION } });
+    const context = { config, store, bus, orch, delivery: orch.deliveryRecovery,
+      push: { store: push, providers: () => client!.status(), wake: () => worker?.wake() } };
+    server = await (options.startServer ?? http.startServer)(context);
+    orch.setServerUrl(server.urls[0]!);
+    await orch.initializeRuntime();
+    // CoreRunner restores persisted identity-bound leases as it reattaches; only recover may resume the queue.
+    await orch.recover();
+    worker = new PushWorker(push, client, { onError: () => console.error("푸시 저장 오류") });
+    unsubscribe = bus.subscribe(() => { void worker!.wake().catch(() => console.error("푸시 저장 오류")); });
+    worker.start();
+    const backupDir = join(config.home, "backups");
+    backups = new BackupManager({ home: config.home, backupDir, policy: options.backupPolicy });
+    // Surface the first backup failure; periodic failures remain visible in diagnostics.
+    try { await backups.run(); } catch { console.error("정기 백업 실패"); }
+    backups.start();
+    const storage = new StorageMaintenance({ uploadsDir: config.uploadsDir, inboxDir: config.inboxDir, backupDir,
+      references: createStorageReferences(store, config.inboxDir) });
+    const sweep = () => {
+      try { if (storage.sweep().errors.length) console.error("저장소 정리 중 보존된 오류 항목이 있습니다"); }
+      catch { console.error("저장소 정리 실패"); }
+      if (backups?.lastError) console.error("정기 백업 실패");
+    };
+    sweep();
+    sweepTimer = setInterval(sweep, Math.max(1, options.sweepIntervalMs ?? 3_600_000));
+    sweepTimer.unref();
+    ready = true;
+    return { config, store, push, worker, server, backups, storage, stop };
+  } catch (error) {
+    try { await stop(); } catch (cleanup) { throw new AggregateError([error, cleanup], "시작 및 정리 실패"); }
+    throw error;
+  }
+}
+
+/** A timeout never releases ownership while a background task could still write. The CLI exits at the deadline. */
+export async function shutdownWithinBudget(stop: () => Promise<void>, timeoutMs = 15_000): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([Promise.resolve().then(stop), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new CliError("15초 종료 예산을 초과했습니다")), Math.min(Math.max(timeoutMs, 1), 15_000));
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+async function serve(): Promise<void> {
+  const { acquireHomeOwner } = await import("../server/home-owner.ts");
+  const owner = acquireHomeOwner(homeDir());
+  let runtime: Awaited<ReturnType<typeof startOpsRuntime>> | undefined;
+  let starting: Promise<Awaited<ReturnType<typeof startOpsRuntime>>> | undefined;
   let stopping = false;
   const stop = async () => {
     if (stopping) return;
     stopping = true;
-    // 자식이 시그널에 안 죽어도 launchd 재시작이 막히지 않게 한다.
-    setTimeout(() => process.exit(1), 15_000).unref();
-    await orch.shutdown();
-    await server.stop();
-    process.exit(0);
+    const hardStop = setTimeout(() => process.exit(1), 15_000);
+    try {
+      await shutdownWithinBudget(async () => { runtime ??= await starting; await runtime?.stop(); });
+      clearTimeout(hardStop);
+      process.exit(0);
+    } catch { process.exit(1); }
   };
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
-  process.on("SIGHUP", stop);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, stop);
+  try {
+    const config = loadConfig();
+    if (!COMPILED) process.chdir(resolve(import.meta.dir, ".."));
+    if (config.port !== 0 && await portInUse(config.hosts[0]!, config.port)) throw new CliError(`포트 ${config.port} 을 이미 쓰고 있습니다. iamceo status 로 확인하세요.`);
+    starting = startOpsRuntime(config, { owner });
+    runtime = await starting;
+    if (!stopping) {
+      console.log(`IAMCEO 서버: ${runtime.server.urls.join(" · ")}`);
+      console.log("접속 코드는 iamceo open 으로 봅니다.");
+    }
+  } catch (error) {
+    if (!starting) owner.release();
+    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.off(signal, stop);
+    throw error;
+  }
 }
 
 async function attach(args: string[]): Promise<void> {
@@ -195,6 +311,8 @@ async function setup(args: string[]): Promise<void> {
     import("../server/db.ts"),
     import("../server/store.ts"),
   ]);
+  const { acquireHomeOwner } = await import("../server/home-owner.ts");
+  using owner = acquireHomeOwner(homeDir());
   const config = loadConfig();
   console.log(`데이터 폴더: ${config.home}\n실행기: herdr-core (${config.coreBin ?? "herdr-core"})`);
   for (const cli of [config.claudeBin, config.codexBin ?? "codex"]) if (!Bun.which(cli)) console.log(`${cli} 명령을 찾지 못했습니다.`);
@@ -202,7 +320,6 @@ async function setup(args: string[]): Promise<void> {
 
   const db = openDb(config.dbPath);
   const store = new Store(db, new Bus());
-  const current = store.getSettings().backend;
   const reader = lineReader();
   try {
     const portText = values.port ?? (await reader.ask("포트", String(config.port || DEFAULT_PORT)));
@@ -276,6 +393,8 @@ async function join_(args: string[]): Promise<void> {
 
 // ---- import ----
 async function importDump(args: string[]): Promise<void> {
+  const { acquireHomeOwner } = await import("../server/home-owner.ts");
+  using owner = acquireHomeOwner(homeDir());
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { name: { type: "string" }, cwd: { type: "string" } } });
   const file = positionals[0];
   if (!file) throw new CliError("덤프 파일이 필요합니다: iamceo import <덤프.json> [--name 이름] [--cwd 폴더]");
@@ -284,6 +403,92 @@ async function importDump(args: string[]): Promise<void> {
     console.log(describeImport(await runImport({ file, name: values.name, cwd: values.cwd })));
   } catch (e) {
     throw new CliError((e as Error).message);
+  }
+}
+
+// ---- backup / separate-path restore ----
+async function backup(args: string[]): Promise<void> {
+  const { values } = parseArgs({ args, options: { directory: { type: "string" } } });
+  const { acquireHomeOwner } = await import("../server/home-owner.ts");
+  using owner = acquireHomeOwner(homeDir());
+  const config = loadConfig();
+  const { BackupManager } = await import("../server/backup.ts");
+  const manager = new BackupManager({ home: config.home, backupDir: resolve(values.directory ?? join(config.home, "backups")) });
+  const snapshot = await manager.run(true);
+  console.log(`백업 검증 완료: ${snapshot!.directory}`);
+}
+
+async function restore(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true,
+    options: { destination: { type: "string" }, clone: { type: "boolean" } } });
+  if (positionals.length !== 1 || !values.destination) throw new CliError("iamceo restore <백업폴더> --destination <별도 빈 홈> [--clone]");
+  const { restoreBackup } = await import("../server/restore.ts");
+  const result = restoreBackup({ snapshotDir: resolve(positionals[0]!), destinationHome: resolve(values.destination), mode: values.clone ? "clone" : "same-host" });
+  console.log(`복원 검증 완료: ${result.home}\n발신 꺼짐: 세션·lease·전달 증거 조정 후 명시적으로 재개하세요.`);
+}
+
+export async function waitForReadiness(config: Config, options: {
+  expectedBuildId?: string; timeoutMs?: number; pollMs?: number; fetch?: typeof fetch;
+} = {}): Promise<void> {
+  const expected = options.expectedBuildId ?? await buildId();
+  const deadline = Date.now() + Math.max(1, options.timeoutMs ?? 30_000);
+  let reason = "서버 응답 없음";
+  do {
+    try {
+      // Bootstrap is authenticated by HTTP. Liveness alone cannot confirm the running binary or recovery.
+      const response = await (options.fetch ?? fetch)(`${localUrl(config)}/api/bootstrap`, {
+        headers: { Authorization: `Bearer ${config.accessCode}` }, redirect: "error",
+        signal: AbortSignal.timeout(Math.max(1, Math.min(2_000, deadline - Date.now()))),
+      });
+      if (response.status === 401 || response.status === 403) throw new CliError("인증된 준비 확인 실패");
+      const body = await response.json() as { runtime?: { daemon?: { ready?: boolean; buildId?: string; version?: string } } };
+      const daemon = body.runtime?.daemon;
+      if (response.ok && daemon?.ready === true && daemon.buildId === expected && daemon.version === VERSION) return;
+      reason = !response.ok ? `HTTP ${response.status}` : !daemon ? "준비/build ID 계약 없음" : daemon.buildId !== expected || daemon.version !== VERSION ? "실행 build ID 불일치" : "복구 완료 대기";
+    } catch (error) {
+      if (error instanceof CliError) throw error;
+      reason = "서버 응답 없음";
+    }
+    if (Date.now() < deadline) await Bun.sleep(Math.min(Math.max(1, options.pollMs ?? 250), deadline - Date.now()));
+  } while (Date.now() < deadline);
+  throw new CliError(`서비스 준비 확인 실패: ${reason}. 로그를 확인하세요.`);
+}
+
+/** launchd owns only /dev/null FDs. This dedicated supervisor owns and rotates both real log FDs. */
+async function serviceRun(): Promise<void> {
+  const { BoundedLogWriter } = await import("../server/log-writer.ts");
+  const { acquireHomeOwner } = await import("../server/home-owner.ts");
+  const logs = join(homeDir(), "logs");
+  using logsOwner = acquireHomeOwner(logs);
+  const stdout = new BoundedLogWriter(join(logs, "server.log"));
+  let stderr: InstanceType<typeof BoundedLogWriter> | undefined;
+  let child: ReturnType<typeof Bun.spawn> | undefined;
+  let hardStop: ReturnType<typeof setTimeout> | undefined;
+  const signalChild = (signal: "SIGTERM" | "SIGINT" | "SIGHUP") => () => {
+    child?.kill(signal);
+    hardStop ??= setTimeout(() => child?.kill("SIGKILL"), 15_000);
+  };
+  const term = signalChild("SIGTERM"), interrupt = signalChild("SIGINT"), hup = signalChild("SIGHUP");
+  try {
+    stderr = new BoundedLogWriter(join(logs, "server.err.log"));
+    child = Bun.spawn(selfCommand("serve"), { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, IAMCEO_LOG_WRITER: "0" } });
+    process.on("SIGTERM", term); process.on("SIGINT", interrupt); process.on("SIGHUP", hup);
+    const pump = async (stream: ReadableStream<Uint8Array>, writer: InstanceType<typeof BoundedLogWriter>) => {
+      const reader = stream.getReader();
+      try { for (;;) { const { done, value } = await reader.read(); if (done) return; writer.write(value); } }
+      finally { reader.releaseLock(); }
+    };
+    const guard = (job: Promise<void>) => job.catch(error => { term(); throw error; });
+    const results = await Promise.allSettled([guard(pump(child.stdout as ReadableStream<Uint8Array>, stdout)), guard(pump(child.stderr as ReadableStream<Uint8Array>, stderr)), child.exited]);
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+    process.exitCode = await child.exited;
+    if (stdout.failed || stderr.failed) process.exitCode = 1;
+  } finally {
+    clearTimeout(hardStop);
+    process.off("SIGTERM", term); process.off("SIGINT", interrupt); process.off("SIGHUP", hup);
+    if (child && child.exitCode === null) { child.kill("SIGTERM"); await child.exited; }
+    try { stdout.close(); } finally { stderr?.close(); }
+    if (stdout.failed || stderr?.failed) process.exitCode = 1;
   }
 }
 
@@ -328,9 +533,9 @@ export function launchdPlist(opts: { program: string[]; home: string; logDir: st
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  ${string(join(opts.logDir, "server.log"))}
+  ${string("/dev/null")}
   <key>StandardErrorPath</key>
-  ${string(join(opts.logDir, "server.err.log"))}
+  ${string("/dev/null")}
 </dict>
 </plist>
 `;
@@ -341,6 +546,14 @@ function launchctl(...args: string[]): { ok: boolean; output: string } {
   return { ok: p.exitCode === 0, output: `${p.stdout.toString()}${p.stderr.toString()}`.trim() };
 }
 
+function serviceEnvironment(plistPath: string): Record<string, string> {
+  const converted = Bun.spawnSync(["plutil", "-convert", "json", "-o", "-", plistPath], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  try {
+    const value = JSON.parse(converted.stdout.toString()) as { EnvironmentVariables?: Record<string, string> };
+    return value.EnvironmentVariables ?? {};
+  } catch { throw new CliError("기존 서비스의 환경을 읽지 못했습니다"); }
+}
+
 function requireOwnedService(plistPath: string, dataHome: string): void {
   if (!existsSync(plistPath)) throw new CliError("같은 서비스 이름을 쓰는 다른 실행이 있어 변경하지 않았습니다");
   const converted = Bun.spawnSync(["plutil", "-convert", "json", "-o", "-", plistPath], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -348,53 +561,74 @@ function requireOwnedService(plistPath: string, dataHome: string): void {
   try { value = JSON.parse(converted.stdout.toString()); } catch { throw new CliError("기존 서비스의 소유를 확인하지 못해 변경하지 않았습니다"); }
   const args = value.ProgramArguments;
   const ownerHome = value.EnvironmentVariables?.IAMCEO_HOME ?? join(homedir(), ".iamceo");
-  if (value.Label !== SERVICE_LABEL || !Array.isArray(args) || args.at(-1) !== "serve" || !args.some((arg) => /(?:^|\/)iamceo(?:\.ts)?$/.test(arg)) || resolve(ownerHome) !== resolve(dataHome)) {
+  if (value.Label !== SERVICE_LABEL || !Array.isArray(args) || !["serve", "service-run"].includes(args.at(-1) ?? "") || !args.some((arg) => /(?:^|\/)iamceo(?:\.ts)?$/.test(arg)) || resolve(ownerHome) !== resolve(dataHome)) {
     throw new CliError("다른 IAMCEO 설치 또는 다른 프로그램의 서비스여서 변경하지 않았습니다");
   }
 }
 
-function service(args: string[]): void {
-  const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { "dry-run": { type: "boolean" } } });
+export interface ServiceDependencies {
+  home: string;
+  config: Config;
+  program: string[];
+  launchctl: (...args: string[]) => { ok: boolean; output: string };
+  readiness: (config: Config) => Promise<void>;
+}
+
+export async function service(args: string[], dependencies?: ServiceDependencies): Promise<void> {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { "dry-run": { type: "boolean" }, restart: { type: "boolean" } } });
   const action = positionals[0];
   if (action !== "install" && action !== "uninstall") throw new CliError("iamceo service install|uninstall [--dry-run]");
   const dry = values["dry-run"] === true;
-  if (!dry && process.env.IAMCEO_TEST === "1") throw new CliError("IAMCEO_TEST=1 에서는 launchd 에 등록하지 않습니다. --dry-run 을 쓰세요.");
+  if (!dry && process.env.IAMCEO_TEST === "1" && !dependencies) throw new CliError("IAMCEO_TEST=1 에서는 launchd 에 등록하지 않습니다. --dry-run 을 쓰세요.");
   if (!dry && process.platform !== "darwin") throw new CliError("launchd 서비스는 macOS 에서만 됩니다");
 
-  const home = homedir();
+  const home = dependencies?.home ?? homedir();
+  const control = dependencies?.launchctl ?? launchctl;
+  const readiness = dependencies?.readiness ?? waitForReadiness;
   const plistPath = join(home, "Library", "LaunchAgents", `${SERVICE_LABEL}.plist`);
   const target = `gui/${userInfo().uid}`;
   if (action === "uninstall") {
     if (dry) return console.log(`지울 파일: ${plistPath}\n실행할 명령: launchctl bootout ${target}/${SERVICE_LABEL}`);
-    requireOwnedService(plistPath, loadConfig().home);
-    launchctl("bootout", `${target}/${SERVICE_LABEL}`);
+    requireOwnedService(plistPath, (dependencies?.config ?? loadConfig()).home);
+    const result = control("bootout", `${target}/${SERVICE_LABEL}`);
+    if (!result.ok) throw new CliError(`launchd 해제 실패: ${result.output}`);
     rmSync(plistPath, { force: true });
     return console.log("서비스를 해제했습니다. 데이터는 그대로 남습니다.");
   }
 
-  const config = loadConfig();
+  const inherited = !dry && existsSync(plistPath) ? serviceEnvironment(plistPath) : {};
+  const config = dependencies?.config ?? loadConfig({ ...inherited, ...process.env });
   const logDir = join(config.home, "logs");
+  const serviceEnv = { ...inherited, ...process.env };
   const env = Object.fromEntries(
-    (["IAMCEO_HOME", "IAMCEO_PORT", "IAMCEO_CLAUDE_BIN", "IAMCEO_CODEX_BIN", "IAMCEO_CORE_BIN", "IAMCEO_CORE_SOCKET"] as const).flatMap((k) => (process.env[k] ? [[k, process.env[k]!]] : [])),
+    (["IAMCEO_HOME", "IAMCEO_PORT", "IAMCEO_CLAUDE_BIN", "IAMCEO_CODEX_BIN", "IAMCEO_CORE_BIN", "IAMCEO_CORE_SOCKET"] as const).flatMap((k) => (serviceEnv[k] ? [[k, serviceEnv[k]!]] : [])),
   );
   const claude = config.claudeBin.includes("/") ? config.claudeBin : Bun.which(config.claudeBin);
   const codex = config.codexBin?.includes("/") ? config.codexBin : Bun.which(config.codexBin ?? "codex");
   const core = config.coreBin?.includes("/") ? config.coreBin : Bun.which(config.coreBin ?? "herdr-core");
-  Object.assign(env, { IAMCEO_HOME: config.home, ...(claude ? { IAMCEO_CLAUDE_BIN: claude } : {}), ...(codex ? { IAMCEO_CODEX_BIN: codex } : {}), ...(core ? { IAMCEO_CORE_BIN: core } : {}), IAMCEO_CORE_SOCKET: config.coreSocket ?? join(config.home, "run", "core.sock") });
-  const plist = launchdPlist({ program: selfCommand("serve"), home, logDir, workingDir: home, env, path: servicePath(home, [claude, codex ?? null, core ?? null]) });
-  if (dry) return console.log(`쓸 파일: ${plistPath}\n실행할 명령: launchctl bootstrap ${target} ${plistPath}\n\n${plist}`);
+  Object.assign(env, { IAMCEO_LOG_WRITER: "1", IAMCEO_HOME: config.home, ...(claude ? { IAMCEO_CLAUDE_BIN: claude } : {}), ...(codex ? { IAMCEO_CODEX_BIN: codex } : {}), ...(core ? { IAMCEO_CORE_BIN: core } : {}), IAMCEO_CORE_SOCKET: config.coreSocket ?? join(config.home, "run", "core.sock") });
+  const plist = launchdPlist({ program: dependencies?.program ?? selfCommand("serve"), home, logDir, workingDir: home, env, path: servicePath(home, [claude, codex ?? null, core ?? null]) });
+  if (dry) return console.log(`쓸 파일: ${plistPath}\n로그: ${join(logDir, "server.log")}\n실행할 명령: launchctl bootstrap ${target} ${plistPath}\n\n${plist}`);
   if (!claude) console.log("claude 명령을 찾지 못했습니다. Claude Code 를 설치한 뒤 iamceo service install 을 다시 실행하세요. 그때 찾은 위치를 서비스에 적어 둡니다.");
 
-  const active = launchctl("print", `${target}/${SERVICE_LABEL}`);
+  const active = control("print", `${target}/${SERVICE_LABEL}`);
   if (existsSync(plistPath) || active.ok) {
     requireOwnedService(plistPath, config.home);
-    if (active.ok) return console.log(`이미 관리 중인 서비스가 실행 중입니다: ${plistPath}\n주소: ${publicUrls(config).join(" · ")}`);
+    if (active.ok && !values.restart) {
+      await readiness(config);
+      return console.log(`서비스 준비 확인 완료: ${plistPath}`);
+    }
+    if (active.ok) {
+      const unloaded = control("bootout", `${target}/${SERVICE_LABEL}`);
+      if (!unloaded.ok) throw new CliError(`서비스 재시작 실패: ${unloaded.output}`);
+    }
   }
   mkdirSync(logDir, { recursive: true, mode: 0o700 });
   mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
   writeFileSync(plistPath, plist);
-  const loaded = launchctl("bootstrap", target, plistPath);
+  const loaded = control("bootstrap", target, plistPath);
   if (!loaded.ok) throw new CliError(`launchd 등록 실패: ${loaded.output}`);
+  await readiness(config);
   console.log(`서비스를 등록했습니다: ${plistPath}\n로그: ${logDir}\n주소: ${publicUrls(config).join(" · ")}`);
 }
 
@@ -403,7 +637,18 @@ async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
   switch (command) {
     case "serve":
-      return serve();
+      return process.env.IAMCEO_LOG_WRITER === "1" ? serviceRun() : serve();
+    case "service-run":
+      return serviceRun();
+    case "backup":
+      return backup(rest);
+    case "restore":
+      return restore(rest);
+    case "readiness":
+      await waitForReadiness(loadConfig());
+      return console.log("인증·복구·build ID 준비 확인 완료");
+    case "build-id":
+      return console.log(await buildId());
     case "setup":
       return setup(rest);
     case "mcp":

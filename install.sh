@@ -58,7 +58,11 @@ say "설치했습니다: $DIR/iamceo ($VERSION)"
 # 이 실행 파일로 등록된 서비스가 있으면 새 판으로 다시 켠다.
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 if [ -f "$PLIST" ] && grep -qF "<string>$DIR/iamceo</string>" "$PLIST"; then
-  if launchctl kickstart -k "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then say "서비스를 새 판으로 다시 켰습니다."; fi
+  if "$DIR/iamceo" service install --restart; then
+    say "새 판의 인증·복구·build ID 준비를 확인했습니다."
+  else
+    die "파일은 설치됐지만 서비스 재시작/준비 확인에 실패했습니다. 로그를 확인하세요. 실행 중인 판을 새 판으로 확인하지 못했습니다."
+  fi
 fi
 
 case ":$PATH:" in
@@ -77,6 +81,6 @@ fi
 
 say ""
 say "다음:"
-say "  iamceo setup             실행 방식(herdr 또는 headless)·포트·접근 범위"
+say "  iamceo setup             실행기(herdr-core)·포트·접근 범위"
 say "  iamceo service install   로그인할 때 켜지고 죽으면 다시 켜지는 서비스로 등록"
 say "  iamceo open              접속 주소와 접속 코드"

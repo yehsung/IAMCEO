@@ -58,7 +58,10 @@ import type { Config } from "./config.ts";
 import type { AgentToolDef, AgentToolResult, AskWaitResult, OrchestratorApi } from "./orchestrator-api.ts";
 import { sanitizeName } from "./files.ts";
 import { josa, renderRole } from "./roles.ts";
-import { CoreError } from "./runner/core-client.ts";
+import { CoreError, coreRpc, type CoreHello, type CoreTerminal } from "./runner/core-client.ts";
+import { CoreSupervisor } from "./core-supervisor.ts";
+import type { LifecycleJournal } from "./service-contracts.ts";
+import type { FreshSessionRequest, MemberConfigWriteResult, OperationReceipt, RevisionPrecondition, SettingsWriteResult, TerminalControlRequestV2, TodoDoneRequest, TodoWriteResult } from "../shared/operations.ts";
 import { providerLaunch } from "./runner/providers.ts";
 import { CoreRunner, ensureCoreServer } from "./runner/core.ts";
 import { isMissingSessionError } from "./runner/headless.ts";
@@ -66,8 +69,8 @@ import { HerdrError } from "./runner/herdr-client.ts";
 import { detectHerdr, HerdrRunner, inspectPane, listAgents, type PaneInspection } from "./runner/herdr.ts";
 import { approvalSummary } from "./runner/approval.ts";
 import { exactSource, measureContext, validWindow } from "./runner/context.ts";
-import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult } from "./runner/types.ts";
-import { ApiError, type AppliedConfig, type NewDelivery, type Store } from "./store.ts";
+import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, RunnerStartResult, RunnerTerminalIdentity } from "./runner/types.ts";
+import { ApiError, type AppliedConfig, type ExecutionJournal, type NewDelivery, type Store } from "./store.ts";
 import { cleanText, RESERVED_HANDLES } from "./text.ts";
 import { conductorHandle, conductorName } from "./text.ts";
 
@@ -520,6 +523,13 @@ export class Orchestrator implements OrchestratorApi {
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private healthProbe: Promise<void> | null = null;
   private switching = false;
+  private recovering = false;
+  private stopRecovery: Promise<void> | null = null;
+  private readonly coreSupervisor: CoreSupervisor | null;
+  private readonly eventQueues = new Map<string, Promise<void>>();
+  private readonly observedTurns = new Map<string, { generation: number; terminal: string | null; turn: number; ended: number }>();
+  private readonly configWrites = new Set<string>();
+  private settingsWriting = false;
 
   constructor(deps: OrchestratorDeps) {
     this.store = deps.store;
@@ -535,12 +545,66 @@ export class Orchestrator implements OrchestratorApi {
     this.agentTools = deps.agentTools ?? null;
     this.notifier = deps.notifier ?? null;
     this.serverUrl = deps.serverUrl ?? `http://127.0.0.1:${deps.config.port}`;
+    const core = this.runners.get("core");
+    this.coreSupervisor = core?.reattachOwned ? new CoreSupervisor({
+      pollMs: this.timings.healthMs,
+      retryMs: this.timings.healthMs,
+      presence: async () => {
+        if (!(core instanceof CoreRunner)) return (await core.available()).ok ? "owned" : "unknown";
+        try {
+          const hello = await coreRpc<CoreHello>(this.coreSocket(), "hello", { generation: 1 }, 1000);
+          return hello.generation === 1 ? "owned" : "conflict";
+        } catch (error) {
+          return error instanceof CoreError && error.causeCode === "ENOENT" && error.deliveryEffect === "not_written" ? "absent" : "unknown";
+        }
+      },
+      startOwned: () => ensureCoreServer({ coreBin: this.config.coreBin, socketPath: this.coreSocket(), session: "iamceo", stateDir: join(this.config.home, "core-state"), configDir: join(this.config.home, "core-config") }),
+      reattachOwned: async watched => {
+        const member = this.store.getMember(watched.id);
+        if (!member || this.closed || this.runtime(watched.id).closing || this.runtime(watched.id).starting || this.runtime(watched.id).reopening || this.runtime(watched.id).pumping) return { outcome: "unknown", code: "mutation_in_progress" };
+        const rt = this.runtime(member.id);
+        rt.reattaching = true;
+        try {
+          const result = await core.reattachOwned!(this.runnerMember(member, this.store.requireProject(member.projectId)));
+          if (result.outcome === "rejoined" && !this.closed && this.store.getMember(member.id)) {
+            this.applyStarted(member.id, this.store.requireProject(member.projectId), result.started);
+            for (const journal of this.store.listPendingLifecycleJournals()) {
+              if (journal.memberId === member.id && journal.intent === "start" && journal.identity.sessionGeneration === watched.sessionGeneration) this.finishLifecycle(journal, "confirmed", null, result.started.identity ?? this.identity(this.store.requireMember(member.id)));
+            }
+            const current = this.store.requireMember(member.id);
+            if (current.lastError?.startsWith("starting_unknown") || current.lastError?.startsWith("core 재연결 보류")) this.store.patchMember(member.id, { lastError: null });
+            await this.reconcileExecutions(member.id);
+          }
+          if (result.outcome === "not_found" && member.paneId && !this.pendingLifecycle(member.id)) {
+            await this.reconcileAbsentTerminal(member);
+            this.store.patchMember(member.id, { status: "offline" });
+            rt.turn = null;
+          }
+          return result;
+        } finally { rt.reattaching = false; }
+      },
+      observed: state => {
+        const member = this.store.getMember(state.memberId);
+        if (!member || this.closed || state.code === "mutation_in_progress") return;
+        this.store.patchMember(member.id, { statusObservation: { source: "core", observedAt: state.lastObservedAt === null ? null : new Date(state.lastObservedAt).toISOString(), freshness: state.outcome === "rejoined" ? "fresh" : "stale", ownership: state.outcome === "rejoined" ? "verified" : state.outcome === "conflict" ? "conflict" : "unknown", consecutiveFailures: state.failures, error: state.code ? { code: state.code, note: "소유 터미널을 다시 관측합니다. 후보가 여러 개면 자동 선택하거나 종료하지 않습니다" } : null } });
+        if (state.outcome === "rejoined" && !this.recovering) void this.pump(member.id);
+      },
+    }) : null;
     for (const runner of this.runners.values()) {
       runner.on((event) => {
         const member = this.store.getMember(event.memberId);
         if (member && member.backend && member.backend !== runner.kind) return;
         if (this.runtimes.get(event.memberId)?.closing && (event.type !== "status" || event.status === "gone")) return;
-        void this.onRunnerEvent(event).catch((e) => console.error("실행기 이벤트 처리 오류:", event.type, e));
+        if (runner.kind !== "core") {
+          if (!this.closed) void this.onRunnerEvent(event).catch(e => console.error("실행기 이벤트 처리 오류:", event.type, e));
+          return;
+        }
+        const before = this.eventQueues.get(event.memberId);
+        const pending = (before ? before.then(async () => {
+          if (!this.closed) await this.onRunnerEvent(event);
+        }) : this.onRunnerEvent(event)).catch((e) => console.error("실행기 이벤트 처리 오류:", event.type, e));
+        this.eventQueues.set(event.memberId, pending);
+        void pending.finally(() => { if (this.eventQueues.get(event.memberId) === pending) this.eventQueues.delete(event.memberId); });
       });
     }
   }
@@ -548,26 +612,34 @@ export class Orchestrator implements OrchestratorApi {
   /** Serve startup owns a private daemon; diagnostics remain read-only and shutdown leaves it alive. */
   async initializeRuntime(): Promise<void> {
     if (!this.runners.has("core")) return;
-    try {
-      await ensureCoreServer({ coreBin: this.config.coreBin, socketPath: this.config.coreSocket ?? join(this.config.home, "run", "core.sock"), session: "iamceo", stateDir: join(this.config.home, "core-state"), configDir: join(this.config.home, "core-config") });
-    } catch (e) {
-      console.warn(`core 시작 보류: ${(e as Error).message}`);
+    if (this.coreSupervisor) {
+      await this.coreSupervisor.tick();
+      this.coreSupervisor.start();
     }
     await this.refreshConnection();
   }
 
+  private coreSocket(): string { return this.config.coreSocket ?? join(this.config.home, "run", "core.sock"); }
+
   async terminalControl(memberId: string, action: TerminalControlAction): Promise<TerminalControlResult> {
     const member = this.store.requireMember(memberId);
-    if (member.backend !== "core") throw new ApiError(409, "core 터미널만 조작할 수 있습니다");
+    if (member.backend !== "core") throw new ApiError(409, "core 터미널만 조작할 수 있습니다", "TERMINAL_REFUSED");
+    if (action.action !== "release") {
+      this.requireActive(this.store.requireProject(member.projectId));
+      if (this.pendingLifecycle(memberId)) throw new ApiError(409, "미확정 세션 작업을 확인하는 중입니다", "TERMINAL_REFUSED");
+    }
     const rt = this.runtime(memberId);
-    if (rt.closing || rt.starting || rt.reopening || rt.pumping) throw new ApiError(409, "세션을 처리하는 중입니다. 잠시 뒤 다시 여세요");
+    if (rt.closing || rt.starting || rt.reopening || rt.pumping) throw new ApiError(409, "세션을 처리하는 중입니다. 잠시 뒤 다시 여세요", "TERMINAL_REFUSED");
     const runner = this.runnerOf(member);
-    if (!runner.terminalControl) throw new ApiError(501, "터미널 조작을 지원하지 않습니다");
+    if (!runner.terminalControl) throw new ApiError(501, "터미널 조작을 지원하지 않습니다", "TERMINAL_REFUSED");
     try {
       const result = await runner.terminalControl(this.runnerMember(member, this.store.requireProject(member.projectId)), action);
       if (action.action === "release") void this.pump(memberId);
       return result;
-    } catch (e) { throw new ApiError(409, (e as Error).message); }
+    } catch (e) {
+      if (e instanceof CoreError && !e.uncertain) throw new ApiError(409, e.message, "TERMINAL_REFUSED");
+      throw e;
+    }
   }
 
   async runtimeInfo(): Promise<RuntimeInfo> {
@@ -606,56 +678,292 @@ export class Orchestrator implements OrchestratorApi {
     this.serverUrl = url;
   }
 
+  private identity(member: Member): RunnerTerminalIdentity {
+    const runner = this.runners.get(this.backendOf(member));
+    return (runner instanceof CoreRunner ? runner.observationState(member.id)?.identity : null) ?? { terminalId: member.paneId, sessionId: member.sessionId, sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration, process: null };
+  }
+
+  private pendingLifecycle(memberId: string): LifecycleJournal | undefined {
+    const generation = this.store.memberRevisions(memberId).sessionGeneration;
+    return this.store.listPendingLifecycleJournals().find(j => j.memberId === memberId && j.identity.sessionGeneration === generation);
+  }
+
+  private prepareLifecycle(member: Member, intent: LifecycleJournal["intent"]): LifecycleJournal {
+    const before = this.pendingLifecycle(member.id);
+    if (before) {
+      if (before.intent !== intent) throw new ApiError(409, "미확정 세션 작업을 먼저 확인해야 합니다");
+      return before;
+    }
+    const at = new Date().toISOString();
+    const run = this.store.listPendingExecutions().find(r => r.memberId === member.id);
+    const entry: LifecycleJournal = { operationId: randomUUID(), memberId: member.id, projectId: member.projectId, intent, phase: "prepared", identity: this.identity(member), runId: run?.runId ?? null, deliveryIds: run?.deliveryIds ?? [], baseline: null, reason: null, exitCode: null, createdAt: at, updatedAt: at };
+    this.store.saveLifecycleJournal(entry);
+    return entry;
+  }
+
+  private finishLifecycle(entry: LifecycleJournal, phase: LifecycleJournal["phase"], reason: string | null, identity = entry.identity): void {
+    this.store.saveLifecycleJournal({ ...entry, phase, reason, identity, updatedAt: new Date().toISOString() });
+  }
+
+  private async startManaged(member: Member, project: Project, resume: boolean, prepared?: LifecycleJournal): Promise<RunnerStartResult> {
+    const previous = this.pendingLifecycle(member.id);
+    if (previous && (previous.operationId !== prepared?.operationId || previous.phase !== "prepared")) throw new CoreError("starting_unknown", "미완료 생성 의도가 있어 소유 라벨로 확인하는 중입니다");
+    const entry = prepared ?? this.prepareLifecycle(member, "start");
+    const runner = this.runnerOf(member);
+    this.finishLifecycle(entry, "started", null);
+    try {
+      const started = await runner.start(this.runnerMember(member, project), { ...this.writeRunFiles(member, project, resume), operationId: entry.operationId });
+      if (!this.store.getMember(member.id)) return started;
+      const identity = started.identity ?? { ...entry.identity, sessionId: started.sessionId, terminalId: started.paneId };
+      this.finishLifecycle(entry, "confirmed", null, identity);
+      return started;
+    } catch (error) {
+      const unknown = runner.kind === "core" && (!(error instanceof CoreError) || error.uncertain || ["starting_unknown", "conflict", "unknown"].includes(error.kind));
+      this.finishLifecycle(entry, unknown ? "unknown" : "refused", (error as Error).message.slice(0, 500));
+      if (unknown) {
+        this.store.patchMember(member.id, { lastError: `starting_unknown: ${(error as Error).message.slice(0, 500)}` });
+        this.coreSupervisor?.watch(this.runnerMember(this.store.requireMember(member.id), project));
+      }
+      throw error;
+    }
+  }
+
+  private async stopManaged(member: Member, intent: "sleep" | "close" | "archive" | "fresh_session", whileWorking: boolean): Promise<void> {
+    const lease = this.store.inputState(member.id).lease;
+    if (lease && lease.identity.terminalId === member.paneId) throw new ApiError(409, "직접 조작권이 유효한 동안 세션을 종료할 수 없습니다");
+    const entry = this.prepareLifecycle(member, intent);
+    this.finishLifecycle(entry, "started", whileWorking ? "while_working:" : "idle_only:");
+    try {
+      await this.runnerOf(member).stop(this.runnerMember(member, this.store.requireProject(member.projectId)), { whileWorking });
+      // Final state and the confirmation share a transaction at the caller.
+    } catch (error) {
+      const refused = (error instanceof CoreError && !error.uncertain) || (error instanceof HerdrError && (error.code === "cannot_exit" || error.deliveryEffect !== "unknown")) || error instanceof ApiError;
+      this.finishLifecycle(entry, entry.phase !== "unknown" && refused ? "refused" : "unknown", `${whileWorking ? "while_working" : "idle_only"}: ${(error as Error).message.slice(0, 500)}`);
+      throw error;
+    }
+  }
+
+  private confirmStop(memberId: string): void {
+    const journal = this.pendingLifecycle(memberId);
+    if (journal && journal.intent !== "start") this.finishLifecycle(journal, "confirmed", null);
+    this.coreSupervisor?.unwatch(memberId);
+  }
+
+  private recoverStops(): Promise<void> {
+    this.stopRecovery ??= this.recoverStopsOnce().finally(() => { this.stopRecovery = null; });
+    return this.stopRecovery;
+  }
+
+  private async recoverStopsOnce(): Promise<void> {
+    for (const journal of this.store.listPendingLifecycleJournals()) {
+      if (!["sleep", "close", "archive"].includes(journal.intent)) continue;
+      const member = this.store.getMember(journal.memberId);
+      if (!member || this.store.memberRevisions(member.id).sessionGeneration !== journal.identity.sessionGeneration) continue;
+      const rt = this.runtime(member.id);
+      if (rt.closing || rt.starting || rt.reopening || rt.pumping) continue;
+      try {
+        if (journal.intent === "close") await this.closeMember(member.id);
+        else await this.sleepMember(member.id, { force: journal.reason?.startsWith("while_working:") ?? false, ...(journal.intent === "archive" ? { holdAs: "archived" as const } : {}) });
+      } catch (error) { this.store.patchMember(member.id, { lastError: `종료 확인 보류: ${(error as Error).message.slice(0, 500)}` }); }
+    }
+  }
+
+  private async reconcileAbsentTerminal(member: Member): Promise<void> {
+    if (!(this.runners.get("core") instanceof CoreRunner)) {
+      this.endExecution(member, "interrupted", "재결합 조회에서 소유 터미널의 부재를 확인했습니다");
+      return;
+    }
+    try {
+      const terminal = await coreRpc<CoreTerminal>(this.coreSocket(), "terminal.get", { terminal: member.paneId! }, 1000);
+      if (terminal.address !== member.paneId || terminal.labels?.["iamceo.member"] !== member.id || terminal.labels["iamceo.project"] !== member.projectId || terminal.labels["iamceo.cli"] !== member.cli || terminal.labels["iamceo.generation"] !== String(this.store.memberRevisions(member.id).sessionGeneration)) return;
+      if (terminal.state === "live") return;
+      const run = this.store.listPendingExecutions().find(r => r.memberId === member.id);
+      const settled = ["idle", "done"].includes(terminal.status?.state ?? "") && run?.turn !== null && run?.turn !== undefined && (terminal.turn ?? -1) > run.turn;
+      const result = terminal.status?.state === "error" ? "error" : settled ? "success" : "interrupted";
+      this.endExecution(member, result, terminal.reason ?? terminal.status?.msg ?? "소유 터미널이 종료되었습니다", terminal.exit_code ?? null, terminal.turn);
+      const detail = `초기/실행 종료: ${terminal.reason ?? "원인 미확인"} (exit_code=${terminal.exit_code ?? "unknown"})`;
+      if (member.lastError !== detail) this.store.appendActivity(member.id, result === "success" ? "system" : "error", detail.slice(0, 500));
+      this.store.patchMember(member.id, { lastError: result === "success" ? null : detail.slice(0, 500) });
+    } catch (error) {
+      if (error instanceof CoreError && error.kind === "not_found") this.endExecution(member, "interrupted", "소유 터미널의 부재를 확인했습니다");
+    }
+  }
+
+  private async reconcileExecutions(memberId?: string): Promise<void> {
+    for (const run of this.store.listPendingExecutions()) {
+      if (memberId && run.memberId !== memberId) continue;
+      const member = this.store.getMember(run.memberId);
+      if (!member || this.store.memberRevisions(member.id).sessionGeneration !== run.identity.sessionGeneration) continue;
+      const runner = this.runners.get(this.backendOf(member));
+      const observed = runner instanceof CoreRunner ? runner.observationState(member.id) : null;
+      if (!runner || !observed || observed.failures || observed.identity.terminalId !== run.identity.terminalId) continue;
+      const since = run.lastProgressAt ?? run.startedAt ?? run.inputReceivedAt ?? run.createdAt;
+      if (!["blocked", "waiting"].includes(member.status) && Date.now() - Date.parse(since) >= 20_000) {
+        const code = run.startedAt ? "progress_stalled" : "start_stalled";
+        this.store.patchMember(member.id, { statusObservation: { source: "core", observedAt: observed.observedAt, freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: { code, note: `업무 ${run.runId}의 ${run.startedAt ? "진전" : "시작"}을 재관측 중입니다. 마지막 근거 ${since}. 소유 터미널과 업무 기록을 확인하세요. 시간만으로 입력·Enter·중단하지 않습니다` } } });
+      }
+    }
+  }
+
+  private completedReportSince(member: Member, since: string): boolean {
+    let cursor: string | undefined;
+    do {
+      const opts = { scope: { kind: "member" as const, memberId: member.id }, cursor, limit: 200 };
+      const page = this.store.requireProject(member.projectId).archived ? this.store.listArchiveMessagePage(member.projectId, opts) : this.store.listMessagePage(member.projectId, opts);
+      if (page.items.some(message => message.memberId === member.id && !message.mine && message.at >= since && ["완료", "답변"].includes(message.kind))) return true;
+      if (!page.nextCursor || !page.items.some(message => message.at >= since)) return false;
+      cursor = page.nextCursor;
+    } while (cursor);
+    return false;
+  }
+
+  private endExecution(member: Member, result: "success" | "error" | "interrupted", reason: string | null, exitCode: number | null = null, turn?: number | null): void {
+    const at = new Date().toISOString();
+    this.store.transaction(() => {
+      for (const run of this.store.listPendingExecutions().filter(r => r.memberId === member.id && r.identity.sessionGeneration === this.store.memberRevisions(member.id).sessionGeneration)) {
+        const reported = this.completedReportSince(member, run.createdAt);
+        const outcome = result === "interrupted" && reported ? "success" : result;
+        this.store.saveExecutionJournal({ ...run, turn: turn ?? run.turn, phase: outcome === "interrupted" ? "interrupted" : "ended", result: outcome, reason, exitCode, endedAt: at, updatedAt: at });
+        if (outcome === "interrupted") this.store.claimExecutionNotice(run.runId, "interruption", () => {
+          this.systemMessage(member.projectId, `${member.name}: 실행 ${run.runId} 중단 — ${reason ?? "종료 근거 없이 세션이 사라졌습니다"}`);
+          const conductor = this.store.getConductor(member.projectId);
+          if (conductor && conductor.id !== member.id) this.store.enqueue({ projectId: member.projectId, memberId: conductor.id, kind: "system", text: formatSystem(`${member.name}의 실행 ${run.runId}이 중단되었습니다. 전달 ${run.deliveryIds.join(", ")}. 기존 변경과 보고를 확인한 뒤 후속 지시를 결정하세요.`), wake: true });
+        });
+      }
+    });
+  }
+
+  async operation(operationId: string): Promise<OperationReceipt> {
+    const receipt = this.store.getOperation(operationId);
+    if (!receipt) throw new ApiError(404, "작업을 찾을 수 없습니다");
+    if (receipt.projectId) this.store.requireProject(receipt.projectId);
+    if (receipt.memberId && this.store.requireMember(receipt.memberId).projectId !== receipt.projectId) throw new ApiError(404, "작업을 찾을 수 없습니다");
+    return receipt;
+  }
+
+  async freshMemberSessionV2(memberId: string, request: FreshSessionRequest): Promise<OperationReceipt<"fresh_session">> {
+    const member = this.store.requireMember(memberId);
+    const existing = this.store.getOperation(request.operationId);
+    const receipt = this.store.beginOperation({ operationId: request.operationId, kind: "fresh_session", projectId: member.projectId, memberId, request }) as OperationReceipt<"fresh_session">;
+    if (existing || receipt.status !== "pending") return receipt;
+    try {
+      if (this.store.memberRevisions(memberId).sessionGeneration !== request.expectedSessionGeneration) throw new ApiError(409, "세션 세대가 변경되었습니다", "SESSION_CONFLICT");
+      const updated = await this.freshMemberSession(memberId);
+      return this.store.finishOperation({ ...receipt, status: "applied", result: { member: updated, sessionGeneration: this.store.memberRevisions(memberId).sessionGeneration } }) as OperationReceipt<"fresh_session">;
+    } catch (error) {
+      const unknown = this.pendingLifecycle(memberId)?.phase === "unknown" || (error instanceof CoreError && error.uncertain);
+      return this.store.finishOperation({ ...receipt, status: unknown ? "unknown" : "refused", code: unknown ? "SESSION_UNKNOWN" : "SESSION_REFUSED", error: (error as Error).message.slice(0, 500) }) as OperationReceipt<"fresh_session">;
+    }
+  }
+
+  async terminalControlV2(memberId: string, request: TerminalControlRequestV2): Promise<OperationReceipt<"terminal_control">> {
+    const member = this.store.requireMember(memberId);
+    const existing = this.store.getOperation(request.operationId);
+    const receipt = this.store.beginOperation({ operationId: request.operationId, kind: "terminal_control", projectId: member.projectId, memberId, request }) as OperationReceipt<"terminal_control">;
+    if (existing || receipt.status !== "pending") return receipt;
+    let attempted = false;
+    try {
+      if (request.action !== "release") this.requireActive(this.store.requireProject(member.projectId));
+      const generation = this.store.memberRevisions(memberId).sessionGeneration;
+      if (generation !== request.expectedSessionGeneration) throw new ApiError(409, "세션 세대가 변경되었습니다");
+      const lease = this.store.inputState(memberId).lease;
+      if (request.action === "claim" && lease && lease.claimId !== request.claimId) throw new ApiError(409, "다른 조작권이 있습니다");
+      if (request.action !== "claim" && (!lease || lease.claimId !== request.claimId || lease.identity.terminalId !== member.paneId)) throw new ApiError(409, "조작권이 만료되었거나 바뀌었습니다");
+      if ((request.action === "input" || request.action === "key") && request.inputSequence !== lease!.lastInputSequence + 1) throw new ApiError(409, "입력 순번이 변경되었습니다");
+      attempted = true;
+      const result = await this.terminalControl(memberId, { action: request.action, leaseId: lease?.leaseId ?? request.claimId, ...(request.action === "input" ? { text: request.text } : request.action === "key" ? { key: request.key } : {}) });
+      return this.store.finishOperation({ ...receipt, status: "applied", result: { memberId, action: request.action, claimId: request.claimId, sessionGeneration: generation, ...result, ...((request.action === "input" || request.action === "key") ? { inputSequence: request.inputSequence } : {}) } }) as OperationReceipt<"terminal_control">;
+    } catch (error) {
+      const unknown = attempted && !(error instanceof ApiError && error.code === "TERMINAL_REFUSED");
+      return this.store.finishOperation({ ...receipt, status: unknown ? "unknown" : "refused", code: unknown ? "TERMINAL_UNKNOWN" : "TERMINAL_REFUSED", error: (error as Error).message.slice(0, 500) }) as OperationReceipt<"terminal_control">;
+    }
+  }
+
+  async patchMemberConfigV2(memberId: string, patch: PatchMemberReq, precondition: RevisionPrecondition): Promise<MemberConfigWriteResult> {
+    this.store.requireMember(memberId);
+    if (this.configWrites.has(memberId)) throw new ApiError(409, "직원 설정을 적용하는 중입니다");
+    if (this.store.memberRevisions(memberId).configRevision !== precondition.expectedRevision) throw new ApiError(409, "직원 설정이 변경되었습니다", "REVISION_CONFLICT");
+    this.configWrites.add(memberId);
+    try {
+      const member = await this.patchMemberConfigOnce(memberId, patch);
+      return { member, ...this.store.memberRevisions(memberId) };
+    } finally { this.releaseConfigWrite(memberId); }
+  }
+
+  async updateSettingsV2(patch: SettingsPatch, precondition: RevisionPrecondition): Promise<SettingsWriteResult> {
+    if (this.settingsWriting) throw new ApiError(409, "설정을 적용하는 중입니다");
+    if (this.store.settingsRevision() !== precondition.expectedRevision) throw new ApiError(409, "설정이 변경되었습니다", "REVISION_CONFLICT");
+    this.settingsWriting = true;
+    try {
+      const settings = await this.updateSettingsOnce(patch);
+      return { settings, revision: this.store.settingsRevision() };
+    } finally { this.settingsWriting = false; }
+  }
+
+  async setTodoDoneV2(todoId: string, request: TodoDoneRequest, precondition: RevisionPrecondition): Promise<TodoWriteResult> {
+    if (this.store.todoRevision(todoId) !== precondition.expectedRevision) throw new ApiError(409, "할 일이 변경되었습니다", "REVISION_CONFLICT");
+    const writing = this.setTodoDone(todoId, request.done);
+    const revision = this.store.todoRevision(todoId);
+    const todo = await writing;
+    return { todo, revision };
+  }
+
   // ---- 시작·종료 ----
   /** 서버 재시작 복구(§6). 끊긴 턴을 정리하고 대기열을 다시 민다. */
   async recover(): Promise<void> {
-    // 서버가 강제로 죽었으면 전 턴의 자식이 살아 있다. 먼저 끝내야 같은 세션을 둘이 쓰지 않는다.
-    await Promise.all([...this.runners.values()].map((r) => r.reapOrphans?.().catch((e) => console.warn("남은 자식 정리 실패:", (e as Error).message))));
-    for (const d of this.store.listDelivering()) this.deliveryRecovery.beginRecovery(d.id);
-    this.store.releaseHeldBeforeConnection();
-    await this.refreshConnection();
-    const herdrMembers: Member[] = [];
-    for (const member of this.store.listAllMembers()) {
-      if (member.subagents !== 0) this.store.patchMember(member.id, { subagents: 0 });
-      if (member.origin === "manual") continue;
-      const project = this.store.requireProject(member.projectId);
-      if (this.runners.has("core")) {
-        if (member.backend !== "core" && (member.sessionId || member.paneId)) {
-          for (const d of this.store.listPending(member.id)) this.hold(d, "legacy_session");
-          this.store.patchMember(member.id, { lastError: "이전 실행기의 세션입니다. 새 core 세션으로 명시적으로 전환해야 합니다" });
+    this.recovering = true;
+    try {
+      // An interrupted external mutation is never replayed on restart.
+      for (const receipt of this.store.listPendingOperations()) if (receipt.status === "pending") this.store.finishOperation({ ...receipt, status: "unknown", code: "RESTART_UNKNOWN", error: "서버 재시작으로 작업 결과를 확인할 수 없습니다. 같은 입력을 재생하지 않습니다" });
+      await this.recoverStops();
+      // 서버가 강제로 죽었으면 전 턴의 자식이 살아 있다. 먼저 끝내야 같은 세션을 둘이 쓰지 않는다.
+      await Promise.all([...this.runners.values()].map((r) => r.reapOrphans?.().catch((e) => console.warn("남은 자식 정리 실패:", (e as Error).message))));
+      for (const d of this.store.listDelivering()) this.deliveryRecovery.beginRecovery(d.id);
+      this.store.releaseHeldBeforeConnection();
+      await this.refreshConnection();
+      const herdrMembers: Member[] = [];
+      for (const member of this.store.listAllMembers()) {
+        if (member.subagents !== 0 || !member.subagentState) this.store.patchMember(member.id, { subagents: 0, subagentState: { quality: "unknown", count: null, observedAt: null, sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration } });
+        if (member.origin === "manual") continue;
+        const project = this.store.requireProject(member.projectId);
+        if (this.runners.has("core")) {
+          if (member.backend !== "core" && (member.sessionId || member.paneId)) {
+            for (const d of this.store.listPending(member.id)) this.hold(d, "legacy_session");
+            this.store.patchMember(member.id, { lastError: "이전 실행기의 세션입니다. 새 core 세션으로 명시적으로 전환해야 합니다" });
+            continue;
+          }
+          if (member.backend === "core" && member.status !== "asleep" && !project.archived) {
+            this.coreSupervisor?.watch(this.runnerMember(member, project));
+            if (!this.coreSupervisor && member.paneId) this.store.patchMember(member.id, { lastError: "core 재연결 보류: 읽기 재결합을 지원하지 않습니다" });
+          }
           continue;
         }
-        if (member.backend === "core" && member.paneId && member.status !== "asleep") {
-          try {
-            const started = await this.runnerOf(member).start(this.runnerMember(member, project), this.writeRunFiles(member, project));
-            this.applyStarted(member.id, project, started);
-          } catch (e) {
-            this.store.patchMember(member.id, { lastError: `core 재연결 보류: ${(e as Error).message}` });
+        if (this.backendOf(member) === "herdr") {
+          // 가져온 명부의 직원은 세션도 칸도 없어 재결합할 것이 없다.
+          if (member.status !== "asleep" && (member.sessionId || member.paneId)) herdrMembers.push(member);
+          continue;
+        }
+        if (member.status === "working" || member.status === "blocked") {
+          this.settle(member);
+          this.systemMessage(project.id, `서버 재시작으로 ${member.name}의 턴이 끊겼습니다`);
+          const conductor = this.store.getConductor(project.id);
+          if (conductor && conductor.id !== member.id) {
+            this.store.enqueue({
+              projectId: project.id,
+              memberId: conductor.id,
+              kind: "system",
+              text: formatSystem(`서버 재시작으로 ${member.name}의 턴이 끊겼습니다. 필요하면 다시 지시하세요.`),
+              wake: false,
+            });
           }
         }
-        continue;
       }
-      if (this.backendOf(member) === "herdr") {
-        // 가져온 명부의 직원은 세션도 칸도 없어 재결합할 것이 없다.
-        if (member.status !== "asleep" && (member.sessionId || member.paneId)) herdrMembers.push(member);
-        continue;
-      }
-      if (member.status === "working" || member.status === "blocked") {
-        this.settle(member);
-        this.systemMessage(project.id, `서버 재시작으로 ${member.name}의 턴이 끊겼습니다`);
-        const conductor = this.store.getConductor(project.id);
-        if (conductor && conductor.id !== member.id) {
-          this.store.enqueue({
-            projectId: project.id,
-            memberId: conductor.id,
-            kind: "system",
-            text: formatSystem(`서버 재시작으로 ${member.name}의 턴이 끊겼습니다. 필요하면 다시 지시하세요.`),
-            wake: false,
-          });
-        }
-      }
-    }
-    await Promise.all(herdrMembers.map((m) => this.reattachHerdr(m)));
+      await this.coreSupervisor?.tick();
+      await Promise.all([...this.eventQueues.values()]);
+      await this.reconcileExecutions();
+      await Promise.all(herdrMembers.map((m) => this.reattachHerdr(m)));
+    } finally { this.recovering = false; }
+    this.coreSupervisor?.start();
     this.startTick();
     const checking = this.settleInFlight();
     const ids = new Set(this.store.listUndelivered().map((d) => d.memberId));
@@ -745,7 +1053,17 @@ export class Orchestrator implements OrchestratorApi {
     const backend = this.store.effectiveBackend();
     const runner = this.runners.get(backend);
     const state = runner ? await runner.available().catch((e: Error) => ({ ok: false, detail: e.message })) : { ok: false, detail: "실행기가 없습니다" };
-    if (this.closed || !this.store.setRunnerHealth(backend, { ok: state.ok, detail: state.ok ? null : state.detail })) return;
+    if (this.closed) return;
+    const changed = this.store.setRunnerHealth(backend, { ok: state.ok, detail: state.ok ? null : state.detail });
+    await this.recoverStops();
+    for (const member of this.store.listAllMembers()) {
+      const project = this.store.requireProject(member.projectId);
+      if (member.backend === "core" && member.origin !== "manual" && member.status !== "asleep" && !project.archived) this.coreSupervisor?.watch(this.runnerMember(member, project));
+      else this.coreSupervisor?.unwatch(member.id);
+    }
+    await this.coreSupervisor?.tick();
+    await this.reconcileExecutions();
+    if (!changed) return;
     await this.broadcastHerdr();
     if (!state.ok) return;
     for (const id of new Set(this.store.listUndelivered().map((d) => d.memberId))) void this.pump(id);
@@ -862,6 +1180,8 @@ export class Orchestrator implements OrchestratorApi {
 
   async shutdown(): Promise<void> {
     this.closed = true;
+    await this.coreSupervisor?.shutdown();
+    await Promise.all([...this.eventQueues.values()]);
     if (this.tick) clearInterval(this.tick);
     if (this.healthTimer) clearInterval(this.healthTimer);
     for (const rt of this.runtimes.values()) {
@@ -991,14 +1311,18 @@ export class Orchestrator implements OrchestratorApi {
       }
       // Complete the old session before rotating credentials. Failure leaves the original identity intact.
       if ((member.sessionId || member.paneId) && !(freshSession && member.backend !== "core" && this.runners.has("core"))) {
-        try { await this.runnerOf(member).stop(this.runnerMember(member, project)); }
+        try { await this.stopManaged(member, "fresh_session", false); }
         catch (e) {
           if (!(freshSession && member.status === "offline" && e instanceof CoreError && e.kind === "not_found")) throw e;
         }
       }
       changedSession = true;
       const sameProvider = patch.cli === member.cli;
-      this.store.archiveAndRotateSession(member.id, patch.cli!, freshSession ? "fresh_session" : sameProvider ? "settings_change" : "provider_switch");
+      this.store.transaction(() => {
+        this.endExecution(member, "interrupted", freshSession ? "명시적 새 세션으로 전환했습니다" : "세션 설정을 변경했습니다");
+        this.confirmStop(member.id);
+        this.store.archiveAndRotateSession(member.id, patch.cli!, freshSession ? "fresh_session" : sameProvider ? "settings_change" : "provider_switch");
+      });
       if (!freshSession && sameProvider && member.cli === "claude") this.store.patchMember(member.id, { sessionId: member.sessionId });
       this.store.patchMember(member.id, { ...patch, ...(freshSession ? { origin: "runner" as const } : {}), backend: this.store.effectiveBackend(), status: "idle", lastError: null });
       if (member.kind !== "worker") this.store.setChiefCli(project.id, patch.cli!);
@@ -1009,8 +1333,8 @@ export class Orchestrator implements OrchestratorApi {
       ].join("\n");
       this.store.enqueue({ projectId: project.id, memberId: member.id, kind: "system", text: formatSystem(handoff), wake: false });
       const fresh = this.store.requireMember(member.id);
-      const runner = this.openRunner(fresh);
-      const started = await runner.start(this.runnerMember(fresh, project), this.writeRunFiles(fresh, project, !!fresh.sessionId));
+      this.openRunner(fresh);
+      const started = await this.startManaged(fresh, project, !!fresh.sessionId);
       this.applyStarted(member.id, project, started, this.desiredConfig(fresh));
       sessionReady = true;
       this.store.appendActivity(member.id, "system", handoff);
@@ -1031,6 +1355,13 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 전체 설정을 고친다. 실행 방식은 일하는 직원이 있으면 거부하고, 아니면 이전 실행기의 칸을 닫은 뒤 다음 전달부터 새 방식으로 잇는다. */
   async updateSettings(patch: SettingsPatch): Promise<Settings> {
+    if (this.settingsWriting) throw new ApiError(409, "설정을 적용하는 중입니다");
+    this.settingsWriting = true;
+    try { return await this.updateSettingsOnce(patch); }
+    finally { this.settingsWriting = false; }
+  }
+
+  private async updateSettingsOnce(patch: SettingsPatch): Promise<Settings> {
     const before = this.store.getSettings();
     if (this.runners.has("core")) {
       if (patch.backend && patch.backend !== "core") throw new ApiError(400, "실행기는 herdr-core 하나입니다");
@@ -1140,16 +1471,27 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 직원별 모델·effort. null 이면 직급 기본으로 돌아간다. */
   async patchMemberConfig(memberId: string, patch: PatchMemberReq): Promise<Member> {
+    if (this.configWrites.has(memberId)) throw new ApiError(409, "직원 설정을 적용하는 중입니다");
+    this.configWrites.add(memberId);
+    try { return await this.patchMemberConfigOnce(memberId, patch); }
+    finally { this.releaseConfigWrite(memberId); }
+  }
+
+  private releaseConfigWrite(memberId: string): void {
+    this.configWrites.delete(memberId);
+    if (!this.closed && this.store.getMember(memberId)) void this.pump(memberId);
+  }
+
+  private async patchMemberConfigOnce(memberId: string, patch: PatchMemberReq): Promise<Member> {
     const member = this.store.requireMember(memberId);
+    if (this.runtime(memberId).closing || this.runtime(memberId).starting || this.runtime(memberId).reopening || this.pendingLifecycle(memberId)) throw new ApiError(409, "세션을 처리하는 중입니다");
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 설정을 바꿀 수 없습니다");
     if (patch.cli && patch.cli !== member.cli) return this.switchProvider(member, patch);
     if (this.runners.has("core") && member.backend === "core" && (member.sessionId || member.paneId) &&
         ((patch.modelOverride !== undefined && patch.modelOverride !== member.modelOverride) || (patch.effortOverride !== undefined && patch.effortOverride !== member.effortOverride))) {
       return this.switchProvider(member, { ...patch, cli: member.cli });
     }
-    const updated = this.store.patchMember(memberId, patch);
-    if (this.configPending(updated)) void this.pump(memberId);
-    return updated;
+    return this.store.patchMember(memberId, patch);
   }
 
   /** 보관하면 화면에서 사라진다. 답을 기다리는 세션이나 일하는 세션을 두고 사라지면 아무도 풀어 줄 수 없다. */
@@ -1579,8 +1921,12 @@ export class Orchestrator implements OrchestratorApi {
     const paneKept = member.origin === "adopted";
     // 칸에 알리는 동안 전달과 화면 조회가 칸을 다시 묶거나 알림과 겹치지 않게 먼저 막는다.
     this.runtime(memberId).closing = true;
-    if (paneKept) notified = (await this.releasePane(member, project)).notified;
-    const dropped = await this.closeMember(memberId, { paneDone: paneKept });
+    let dropped: string[];
+    try {
+      if (paneKept) notified = (await this.releasePane(member, project)).notified;
+      this.runtime(memberId).closing = false;
+      dropped = await this.closeMember(memberId, { paneDone: paneKept });
+    } finally { this.runtime(memberId).closing = false; }
     // 편입이 켠 실행이고 남은 세션이 없으면 편입 전으로 돌린다. 칸도 세션도 없는 명부 행은 세션이 아니다.
     if (this.store.runnerByAdopt(project.id) && !this.store.listMembers(project.id).some((m) => m.origin !== "manual" && (m.kind === "conductor" || m.sessionId || m.paneId))) {
       this.store.patchProject(project.id, { runnerEnabled: false });
@@ -1716,16 +2062,17 @@ export class Orchestrator implements OrchestratorApi {
     const member = this.store.createMember({ projectId: project.id, ...input, origin: "runner", status: "idle" });
     if (!project.runnerEnabled) return { member, ready: Promise.resolve() };
     const rt = this.runtime(member.id);
+    const intent = this.prepareLifecycle(member, "start");
     // No external start can observe a source transaction that may still roll back.
     const ready = new Promise<void>((resolve, reject) => {
       this.store.afterCommit(() => {
         void (async () => {
-          const runner = this.openRunner(member);
+          this.openRunner(member);
           const sent = this.desiredConfig(member);
-          const started = await runner.start(this.runnerMember(member, project), this.writeRunFiles(member, project));
+          const started = await this.startManaged(member, project, false, intent);
           this.applyStarted(member.id, project, started, sent);
         })().then(resolve, e => {
-          this.abandonSpawn(member.id);
+          if (this.backendOf(member) !== "core" || (e instanceof CoreError && !e.uncertain && !["starting_unknown", "conflict", "unknown"].includes(e.kind))) this.abandonSpawn(member.id);
           reject(new ApiError(502, `세션을 띄우지 못했습니다: ${(e as Error).message}`));
         });
       });
@@ -1868,7 +2215,7 @@ export class Orchestrator implements OrchestratorApi {
   /** 일하는 중·열린 결재·대기열이 있으면 거부(force 로만). sessionId 는 유지한다. */
   async sleepMember(memberId: string, opts: { force?: boolean; holdAs?: "archived" } = {}): Promise<Member> {
     const member = this.store.requireMember(memberId);
-    if (member.status === "asleep") return member;
+    if (member.status === "asleep" && !this.pendingLifecycle(memberId)) return member;
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 잠재울 수 없습니다");
     const project = this.store.requireProject(member.projectId);
     const rt = this.runtime(memberId);
@@ -1878,38 +2225,44 @@ export class Orchestrator implements OrchestratorApi {
       if (this.store.listOpenDecisionsByMember(memberId).length > 0) throw new ApiError(409, `${member.name}에게 열린 결재가 있습니다`);
       if (pending.length > 0) throw new ApiError(409, `${member.name}의 대기열이 남아 있습니다`);
     }
-    // 넘겨받은 칸은 대표의 것이라 선택 창·승인 창이 떠 있으면 끝내지 않는다(입력칸에 남은 글은 지우고 끝낸다). 먼저 해 보고, 안 되면 아무것도 바꾸지 않고 이유를 돌려준다.
-    const adopted = member.origin === "adopted";
-    if (adopted) {
-      const runner = this.runnerOf(member);
-      const target = this.runnerMember(member, project);
-      try {
-        // 끊기 전에 본다. Esc 는 대표의 승인 창을 취소하고, 선택 창이 떠 있으면 끊고도 끝낼 수 없다. 승인 창은 force 여도 대표가 푼다.
-        if (opts.force && (this.isBusy(member) || member.status === "blocked")) {
-          await runner.checkStop?.(target, { whileWorking: true });
-          if (member.status !== "blocked") await runner.interrupt(target);
+    if (rt.closing || rt.starting || rt.reopening) throw new ApiError(409, "세션을 처리하는 중입니다");
+    rt.closing = true;
+    try {
+      // 넘겨받은 칸은 대표의 것이라 선택 창·승인 창이 떠 있으면 끝내지 않는다(입력칸에 남은 글은 지우고 끝낸다). 먼저 해 보고, 안 되면 아무것도 바꾸지 않고 이유를 돌려준다.
+      const adopted = member.origin === "adopted";
+      if (adopted) {
+        const runner = this.runnerOf(member);
+        const target = this.runnerMember(member, project);
+        try {
+          // 끊기 전에 본다. Esc 는 대표의 승인 창을 취소하고, 선택 창이 떠 있으면 끊고도 끝낼 수 없다. 승인 창은 force 여도 대표가 푼다.
+          if (opts.force && (this.isBusy(member) || member.status === "blocked")) {
+            await runner.checkStop?.(target, { whileWorking: true });
+            if (member.status !== "blocked") await runner.interrupt(target);
+          }
+          await this.stopManaged(member, opts.holdAs === "archived" ? "archive" : "sleep", !!opts.force && !opts.holdAs);
+        } catch (e) {
+          if (e instanceof HerdrError && e.code === "cannot_exit") throw new ApiError(409, e.message);
+          throw e;
         }
-        await runner.stop(target);
-      } catch (e) {
-        if (e instanceof HerdrError && e.code === "cannot_exit") throw new ApiError(409, e.message);
-        throw e;
       }
-    }
-    if (rt.turn) rt.turn.interrupted = true;
-    rt.compactRequest = null;
-    this.store.patchMember(memberId, { status: "asleep", subagents: 0 });
-    for (const d of pending) this.hold(d, opts.holdAs ?? "asleep");
-    if (!adopted) await this.runnerOf(member).stop(this.runnerMember(member, project));
-    // 닫힌 번호를 들고 있으면 나중에 같은 번호의 다른 칸을 자기 칸으로 착각한다.
-    if (member.paneId) this.store.patchMember(memberId, { paneId: null });
-    // herdr 는 칸을 닫을 뿐 turn_end 를 내지 않는다. 턴을 비우지 않으면 깨운 뒤 전달이 영영 막힌다.
-    if (rt.compactTimer) clearTimeout(rt.compactTimer);
-    rt.compactTimer = null;
-    if (rt.turn) {
-      rt.turn = null;
-      this.releaseSlots();
-    }
-    return this.store.requireMember(memberId);
+      if (!adopted) await this.stopManaged(member, opts.holdAs === "archived" ? "archive" : "sleep", !!opts.force && !opts.holdAs);
+      this.endExecution(member, "interrupted", "직원을 잠재워 실행을 종료했습니다");
+      if (rt.turn) rt.turn.interrupted = true;
+      rt.compactRequest = null;
+      this.store.transaction(() => {
+        this.store.patchMember(memberId, { status: "asleep", subagents: 0, paneId: null });
+        for (const d of pending) this.hold(d, opts.holdAs ?? "asleep");
+        this.confirmStop(memberId);
+      });
+      // herdr 는 칸을 닫을 뿐 turn_end 를 내지 않는다. 턴을 비우지 않으면 깨운 뒤 전달이 영영 막힌다.
+      if (rt.compactTimer) clearTimeout(rt.compactTimer);
+      rt.compactTimer = null;
+      if (rt.turn) {
+        rt.turn = null;
+        this.releaseSlots();
+      }
+      return this.store.requireMember(memberId);
+    } finally { rt.closing = false; }
   }
 
   /** --resume 으로 다시 연다. 실패하면 같은 핸들로 새 세션을 띄우고 마지막 일을 첫 지시에 넣는다. */
@@ -1951,7 +2304,7 @@ export class Orchestrator implements OrchestratorApi {
     const runner = this.openRunner(member);
     try {
       const sent = this.desiredConfig(member);
-      const started = await runner.start(this.runnerMember(member, project), this.writeRunFiles(member, project, !!member.sessionId));
+      const started = await this.startManaged(member, project, !!member.sessionId);
       if (await this.dropIfClosed(member, project, runner, started)) return null;
       this.applyStarted(member.id, project, started, sent);
       // 넘겨받은 세션도 서버가 다시 띄우면 도구와 규칙을 갖고 뜬다. 이제 서버가 띄운 세션과 같다.
@@ -1973,7 +2326,7 @@ export class Orchestrator implements OrchestratorApi {
       try {
         const fresh = { ...member, sessionId: null };
         const sent = this.desiredConfig(fresh);
-        const started = await runner.start(this.runnerMember(fresh, project), this.writeRunFiles(member, project, false));
+        const started = await this.startManaged(fresh, project, false);
         if (await this.dropIfClosed(member, project, runner, started)) return null;
         this.applyStarted(member.id, project, started, sent);
         this.store.patchMember(member.id, { contextPct: null, parallel: false, ...(member.origin === "adopted" ? { origin: "runner" as const } : {}) });
@@ -2006,41 +2359,49 @@ export class Orchestrator implements OrchestratorApi {
     const member = this.store.requireMember(memberId);
     if (member.kind !== "worker") throw new ApiError(400, "총괄은 닫을 수 없습니다");
     const rt = this.runtime(memberId);
+    if (rt.closing || (this.backendOf(member) === "core" && (rt.starting || rt.reopening || rt.pumping))) throw new ApiError(409, "세션을 처리하는 중입니다");
+    if (this.backendOf(member) !== "core") {
+      const starting = this.pendingLifecycle(memberId);
+      if (starting?.intent === "start") this.finishLifecycle(starting, "refused", "띄우는 동안 직원이 닫혔습니다");
+    }
     rt.closing = true;
-    if (rt.turn) rt.turn.interrupted = true;
-    if (member.origin !== "manual") {
-      // asleep 로 두어야 끊긴 턴의 뒤처리가 대기열을 다시 밀지 않는다.
-      this.store.patchMember(memberId, { status: "asleep" });
-      const project = this.store.requireProject(member.projectId);
-      // 넘겨받은 칸은 대표의 세션이다. 총괄이 닫아도 끝내지 않고 손만 뗀다.
-      if (member.origin === "adopted") {
-        if (!opts.paneDone) await this.releasePane(member, project);
-      } else await this.runnerOf(member).stop(this.runnerMember(member, project));
-    }
-    const dropped: string[] = [];
-    const doneTodos: Todo[] = [];
-    for (const d of this.store.listPending(memberId)) {
-      if (d.refType === "message" && d.refId) this.store.setMessageDelivery(d.refId, "failed", `${josa(member.name, "이")} 닫혔습니다`);
-      else if (d.kind === "todo_done" && d.refId) {
-        const todo = this.store.getTodo(d.refId);
-        if (todo?.done) doneTodos.push(todo);
-      } else if (d.kind === "instruction") dropped.push(normalizeSpace(d.text.replace(/^\[총괄\][^\n]*\n/, "")).slice(0, 120));
-    }
-    for (const d of this.store.listOpenDecisionsByMember(memberId)) {
-      this.store.closeDecision(d.id, { kind: null, reason: `${josa(member.name, "이")} 명부에서 빠져 함께 닫혔습니다`, by: "시스템" });
-      this.wakeAll(this.askWaiters, d.id);
-    }
-    this.clearRuntime(memberId, rt);
-    (this.runners.get("herdr") as HerdrCapable | undefined)?.dropMember?.(memberId);
-    this.store.removeMember(memberId);
-    this.releaseSlots();
-    // 대표가 체크한 '했음'은 받을 직원이 사라져도 잃으면 안 된다. 총괄에게 넘긴다.
-    const conductor = this.store.getConductor(member.projectId);
-    for (const todo of doneTodos) {
-      if (conductor) await this.deliver({ projectId: member.projectId, memberId: conductor.id, kind: "todo_done", text: formatTodoDone(todo), refType: "todo", refId: todo.id, wake: false });
-      else this.store.setTodoNoticePending(todo.id, true);
-    }
-    return dropped;
+    try {
+      if (member.origin !== "manual") {
+        const project = this.store.requireProject(member.projectId);
+        // 넘겨받은 칸은 대표의 세션이다. 총괄이 닫아도 끝내지 않고 손만 뗀다.
+        if (member.origin === "adopted") {
+          if (!opts.paneDone) await this.releasePane(member, project);
+        } else await this.stopManaged(member, "close", true);
+      }
+      this.endExecution(member, "interrupted", "직원을 닫아 실행을 종료했습니다");
+      if (rt.turn) rt.turn.interrupted = true;
+      if (member.origin !== "manual") this.store.patchMember(memberId, { status: "asleep" });
+      this.confirmStop(memberId);
+      const dropped: string[] = [];
+      const doneTodos: Todo[] = [];
+      for (const d of this.store.listPending(memberId)) {
+        if (d.refType === "message" && d.refId) this.store.setMessageDelivery(d.refId, "failed", `${josa(member.name, "이")} 닫혔습니다`);
+        else if (d.kind === "todo_done" && d.refId) {
+          const todo = this.store.getTodo(d.refId);
+          if (todo?.done) doneTodos.push(todo);
+        } else if (d.kind === "instruction") dropped.push(normalizeSpace(d.text.replace(/^\[총괄\][^\n]*\n/, "")).slice(0, 120));
+      }
+      for (const d of this.store.listOpenDecisionsByMember(memberId)) {
+        this.store.closeDecision(d.id, { kind: null, reason: `${josa(member.name, "이")} 명부에서 빠져 함께 닫혔습니다`, by: "시스템" });
+        this.wakeAll(this.askWaiters, d.id);
+      }
+      this.clearRuntime(memberId, rt);
+      (this.runners.get("herdr") as HerdrCapable | undefined)?.dropMember?.(memberId);
+      this.store.removeMember(memberId);
+      this.releaseSlots();
+      // 대표가 체크한 '했음'은 받을 직원이 사라져도 잃으면 안 된다. 총괄에게 넘긴다.
+      const conductor = this.store.getConductor(member.projectId);
+      for (const todo of doneTodos) {
+        if (conductor) await this.deliver({ projectId: member.projectId, memberId: conductor.id, kind: "todo_done", text: formatTodoDone(todo), refType: "todo", refId: todo.id, wake: false });
+        else this.store.setTodoNoticePending(todo.id, true);
+      }
+      return dropped;
+    } finally { rt.closing = false; }
   }
 
   roster(projectId: string): RosterEntry[] {
@@ -2339,6 +2700,10 @@ export class Orchestrator implements OrchestratorApi {
     }
     // Previously attempted entries must be inspected, including legacy held rows.
     for (const d of pending) if (d.attempts > 0 && this.store.getDeliveryRecovery(d.id)?.phase === "none") this.deliveryRecovery.beginRecovery(d.id);
+    if (this.recovering || this.configWrites.has(memberId) || this.pendingLifecycle(memberId)) return;
+    if (this.store.inputState(memberId).lease) return;
+    if (member.backend === "core" && member.statusObservation && member.statusObservation.ownership !== "verified" && !(member.status === "offline" && member.statusObservation.error?.code === "no_owned_terminal")) return;
+    if (member.backend === "core" && this.store.listPendingExecutions().some(run => run.memberId === memberId && run.identity.sessionGeneration === this.store.memberRevisions(memberId).sessionGeneration) && !this.runtime(memberId).turn) return;
     if (this.deliveryRecovery.fenced(memberId)) return;
     const rt = this.runtime(memberId);
     if (rt.closing) return; // 닫는 중에 다시 열면 명부 밖 칸이 남는다.
@@ -2406,11 +2771,10 @@ export class Orchestrator implements OrchestratorApi {
       let failure: Error | null = null;
       const current = member;
       runner = this.openRunner(current);
-      const opened = runner;
       const started = (async () => {
         try {
           const sent = this.desiredConfig(current);
-          const result = await opened.start(this.runnerMember(current, project), this.writeRunFiles(current, project, false));
+          const result = await this.startManaged(current, project, false);
           this.applyStarted(current.id, project, result, sent);
         } catch (e) {
           failure = e as Error;
@@ -2571,12 +2935,20 @@ export class Orchestrator implements OrchestratorApi {
       this.store.updateDispatch(dispatch.dispatchId, "prepared", "write_started");
       for (const d of deliveries) this.store.setDeliveryStatus(d.id, "delivering", { attempt: true });
     });
+    const at = new Date().toISOString();
+    const run: ExecutionJournal = { runId: dispatch.dispatchId, memberId: member.id, projectId: project.id, identity: dispatch.identity, turn: null, deliveryIds: deliveries.map(d => d.id), phase: "starting", inputReceivedAt: null, startedAt: null, lastProgressAt: null, endedAt: null, result: null, reason: null, exitCode: null, interruptionNotifiedAt: null, reportRequestedAt: null, createdAt: at, updatedAt: at };
+    this.store.saveExecutionJournal(run);
     let result = await this.safeSend(() => runner.send(this.runnerMember(member, project), dispatch.wireText, { ...this.writeRunFiles(member, project), marker: dispatch.bundleMarker }, urgent));
     if (result.ok && result.receipt && result.receipt.dispatchId !== dispatch.dispatchId) result = { ok: false, reason: "error", retryable: false, deliveryEffect: "unknown", detail: "다른 봉투의 수신 영수증입니다" };
     // The existing Runner.send success contract guarantees received input,
     // including core started:false. Bind legacy ACKs to the submitted envelope;
     // adapters with explicit receipts must identify this exact dispatch.
     this.deliveryRecovery.recordResult(dispatch.dispatchId, result.ok ? { ...result, receipt: result.receipt ?? { dispatchId: dispatch.dispatchId, receivedAt: new Date().toISOString(), source: "transport" } } : result);
+    const current = this.store.getExecutionJournal(run.runId)!;
+    if (!["ended", "interrupted"].includes(current.phase)) {
+      const updatedAt = new Date().toISOString();
+      this.store.saveExecutionJournal({ ...current, ...(result.ok ? { phase: current.startedAt || result.started ? "running" as const : "received" as const, inputReceivedAt: result.receipt?.receivedAt ?? updatedAt, startedAt: current.startedAt ?? (result.started ? updatedAt : null), turn: result.turn ?? current.turn } : result.deliveryEffect === "not_written" || result.deliveryEffect === "rejected" ? { phase: "ended" as const, result: "error" as const, reason: result.detail ?? result.reason, endedAt: updatedAt } : { phase: "unknown" as const, reason: result.detail ?? result.reason }), updatedAt });
+    }
     return result;
   }
 
@@ -2817,14 +3189,44 @@ export class Orchestrator implements OrchestratorApi {
       }
       return;
     }
+    const generation = this.store.memberRevisions(member.id).sessionGeneration;
+    if (e.sessionGeneration !== undefined && e.sessionGeneration !== generation) return;
+    if (e.terminalId && member.paneId && e.terminalId !== member.paneId) return;
+    if (this.runtime(member.id).closing) return;
+    if (e.turn !== undefined && e.turn !== null) {
+      const previous = this.observedTurns.get(member.id);
+      const same = previous?.generation === generation && previous.terminal === (e.terminalId ?? member.paneId);
+      if (same && (e.turn < previous.turn || (e.type === "turn_end" && e.turn <= previous.ended))) return;
+      this.observedTurns.set(member.id, { generation, terminal: e.terminalId ?? member.paneId, turn: e.turn, ended: e.type === "turn_end" ? e.turn : same ? previous.ended : -1 });
+    }
+    const pending = this.store.listPendingExecutions().filter(r => r.memberId === member.id && r.identity.sessionGeneration === generation && (!e.terminalId || !r.identity.terminalId || e.terminalId === r.identity.terminalId));
+    const at = e.observedAt ?? new Date().toISOString();
+    if (e.type === "activity" || (e.type === "status" && e.status === "working" && (!e.observation || e.observation.freshness === "fresh"))) for (const run of pending) {
+      this.store.saveExecutionJournal({ ...run, turn: e.turn ?? run.turn, phase: "running", startedAt: run.startedAt ?? at, lastProgressAt: at, updatedAt: at });
+    }
     switch (e.type) {
       case "status":
+        if (e.status === "idle" && e.turn !== undefined && e.turn !== null && pending.some(run => run.turn !== null && e.turn! > run.turn)) {
+          this.endExecution(member, "success", "서버 부재 중 더 뒤의 종결 turn을 확인했습니다");
+          this.runtime(member.id).turn = null;
+        }
+        if (e.status === "gone") {
+          this.endExecution(member, "interrupted", e.exit?.reason ?? "소유 터미널이 종료되거나 사라졌습니다", e.exit?.exitCode ?? null, e.turn);
+          if (e.exit) {
+            const detail = `초기/실행 종료: ${e.exit.reason ?? "원인 미확인"} (exit_code=${e.exit.exitCode ?? "unknown"})`;
+            if (member.lastError !== detail) this.store.appendActivity(member.id, "error", detail.slice(0, 500));
+            this.store.patchMember(member.id, { lastError: detail.slice(0, 500) });
+          }
+        }
+
         if (e.blockedReason !== undefined || e.observation !== undefined) this.store.patchMember(member.id, {
           ...(e.blockedReason !== undefined ? { blockedReason: e.blockedReason } : {}),
-          ...(e.observation !== undefined ? { observation: e.observation } : {}),
+          ...(e.observation !== undefined ? { statusObservation: e.observation } : {}),
         });
         return this.onStatus(this.store.requireMember(member.id), e.status);
       case "turn_end":
+        this.endExecution(member, e.isError ? "error" : "success", e.errorText ?? e.reason ?? null, e.exitCode ?? null, e.turn);
+        if (e.isError && !pending.length && member.status === "error" && member.lastError === (e.errorText ?? "오류")) return;
         return this.onTurnEnd(member, e);
       case "activity":
         this.store.appendActivity(member.id, e.kind, e.text);
@@ -2837,7 +3239,7 @@ export class Orchestrator implements OrchestratorApi {
         this.onContextUsage(member, e);
         return;
       case "subagents":
-        this.store.patchMember(member.id, { subagents: e.count });
+        this.store.patchMember(member.id, { subagents: e.count, subagentState: e.measurement ?? { quality: "estimated", count: e.count, observedAt: e.observedAt ?? new Date().toISOString(), sessionGeneration: generation } });
         return;
       case "background":
         return this.onBackground(member, e.label);
@@ -2892,13 +3294,13 @@ export class Orchestrator implements OrchestratorApi {
         break;
       case "idle":
         // turn_end 가 뒤따른다. 그때 정한다.
-        if (!rt.turn) this.settle(member);
+        if (!rt.turn && member.status !== "error") this.settle(member);
         break;
       case "blocked":
         this.markBlocked(member);
         break;
       case "gone":
-        this.store.patchMember(member.id, { status: "offline", paneId: null, subagents: 0 });
+        this.store.patchMember(member.id, { status: "offline", ...(this.backendOf(member) === "core" ? {} : { paneId: null }), subagents: 0 });
         rt.turn = null;
         rt.background = null;
         this.releaseSlots();
@@ -2995,11 +3397,10 @@ export class Orchestrator implements OrchestratorApi {
 
   private async resetSession(member: Member): Promise<Member> {
     const project = this.store.requireProject(member.projectId);
-    const runner = this.runnerOf(member);
     this.store.patchMember(member.id, { sessionId: null, contextPct: null });
     const fresh = this.store.requireMember(member.id);
     const sent = this.desiredConfig(fresh);
-    const started = await runner.start(this.runnerMember(fresh, project), this.writeRunFiles(fresh, project, false));
+    const started = await this.startManaged(fresh, project, false);
     this.applyStarted(member.id, project, started, sent);
     return this.store.requireMember(member.id);
   }
@@ -3010,6 +3411,7 @@ export class Orchestrator implements OrchestratorApi {
   private settle(member: Member, clearError = false): void {
     const open = member.origin !== "manual" && this.store.listOpenDecisionsByMember(member.id).length > 0;
     const status = this.runtime(member.id).background ? "working" : open ? "waiting" : "idle";
+    if (member.status === "error" && !clearError) return;
     if (member.status === status && !clearError) return;
     this.store.patchMember(member.id, { status, ...(clearError ? { lastError: null } : {}) });
   }

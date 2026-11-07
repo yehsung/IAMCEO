@@ -87,8 +87,11 @@ export interface OrchestratorApi {
   updateSettingsV2?(patch: SettingsWriteRequest, precondition: RevisionPrecondition): Promise<SettingsWriteResult>;
   patchMemberConfigV2?(memberId: string, patch: MemberConfigWriteRequest, precondition: RevisionPrecondition): Promise<MemberConfigWriteResult>;
   setTodoDoneV2?(todoId: string, request: TodoDoneRequest, precondition: RevisionPrecondition): Promise<TodoWriteResult>;
+  /** 동일 receipt는 세대 재검사 전에 반환한다. pending/unknown 외부 작업을 재생하지 않는다. */
   freshMemberSessionV2?(memberId: string, request: FreshSessionRequest): Promise<OperationReceipt<"fresh_session">>;
+  /** claim ID와 입력 순번은 영속 lease에 결합한다. unknown 입력은 조회만 한다. */
   terminalControlV2?(memberId: string, request: TerminalControlRequestV2): Promise<OperationReceipt<"terminal_control">>;
+  /** 내부 요청/토큰 없이 허용된 결과만 반환하며 소속은 매번 검사한다. */
   operation?(operationId: string): Promise<OperationReceipt>;
   recoverDelivery?(deliveryId: string, request: DeliveryRecoveryRequest): Promise<DeliveryRecoveryResult>;
   /** 실행기를 지금 다시 본다. 입력을 받기 전에 부른다. */

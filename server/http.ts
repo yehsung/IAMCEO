@@ -16,6 +16,7 @@ import type { OrchestratorApi } from "./orchestrator-api.ts";
 import { ApiError, type Store } from "./store.ts";
 import { SESSION_ID_RE } from "./text.ts";
 import { Pairing, PAIR_CODE_TTL_MS, tailnetUrls, withMagicDnsNames } from "./pairing.ts";
+import { createPushHandler, type PushRoutesContext } from "./push/routes.ts";
 
 export interface ServerContext {
   config: Config;
@@ -24,6 +25,7 @@ export interface ServerContext {
   orch: OrchestratorApi;
   /** 읽기 전용 notice와 복구 예약 포트. 호스트가 소유한 엔진만 주입한다. */
   delivery?: Pick<DeliveryRecoveryService, "notices" | "memberNotices" | "recover">;
+  push?: PushRoutesContext;
   /** 시험용. 기본은 Tailscale 주소 감지. */
   detectHosts?: () => string[];
 }
@@ -492,7 +494,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     route("GET", "/api/capabilities", (_req, url) => {
       strictQuery(url, []);
       const body: ServerCapabilities = { contractVersion: 2, capabilities: {
-        paging: true, archive: true, realtime: true, delivery: false, push: false, operations: false,
+        paging: true, archive: true, realtime: true, delivery: false, push: !!ctx.push, operations: false,
       } };
       return Response.json(body);
     }),
@@ -1008,6 +1010,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     return herdrPending ??= ctx.orch.herdrInfo().then((info) => herdrCache ??= info).finally(() => { herdrPending = undefined; });
   };
   const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, readHerdr, () => herdrCache!);
+  const pushHandler = ctx.push ? createPushHandler(ctx.push) : null;
   const sockets = new Set<ServerWebSocket<SocketData>>();
   const v2Sockets = new Set<ServerWebSocket<SocketData>>();
   const requests = new Set<Promise<Response | undefined>>();
@@ -1047,6 +1050,9 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     }
     if (path.startsWith("/api/")) {
       if (!hasAccessCode(req, url, false)) return fail(401, "인증이 필요합니다");
+      if (path === "/api/push" || path.startsWith("/api/push/")) {
+        return pushHandler ? pushHandler(req, url) : fail(501, "푸시를 지원하지 않습니다");
+      }
       if (path === "/api/files-session" && req.method === "POST") {
         return new Response(null, { status: 204, headers: { "Set-Cookie": filesCookie(url, filesCookieValue(config.accessCode), FILES_COOKIE_MAX_AGE) } });
       }

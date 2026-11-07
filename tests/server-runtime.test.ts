@@ -46,7 +46,7 @@ function fixture() {
   const store = new Store(db, bus);
   const runner = new FakeCore();
   const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]), timings: { tickMs: 60_000, healthMs: 60_000 } });
-  cleanup.push(() => db.close(), () => orch.shutdown());
+  cleanup.push(() => orch.shutdown(), () => db.close());
   const project = store.createProject({ name: "새 프로젝트", cwd: home });
   return { config, bus, db, store, runner, orch, project };
 }
@@ -235,4 +235,73 @@ test("explicit fresh-session recovers Codex and transfers idle legacy identity w
   expect(transferred).toMatchObject({ id: legacy.id, origin: "runner", backend: "core" });
   expect(f.runner.stops).not.toContain(legacy.id);
   expect(f.db.query("SELECT pane_id,reason FROM member_session_history WHERE member_id=?").get(legacy.id)).toEqual({ pane_id: "legacy:p9", reason: "fresh_session" });
+});
+
+
+test("v2 fresh-session HTTP retries return the same receipt before generation validation", async () => {
+  const f = fixture();
+  const member = await f.orch.createMember(f.project.id, { name: "개발자" });
+  const server = await startServer({ ...f, orch: f.orch });
+  cleanup.unshift(() => server.stop());
+  const operationId = crypto.randomUUID();
+  const headers = { Authorization: `Bearer ${f.config.accessCode}`, "Content-Type": "application/json", "X-IAMCEO-Contract": "2" };
+  const request = { operationId, expectedSessionGeneration: f.store.memberRevisions(member.id).sessionGeneration };
+  const call = () => fetch(`${server.urls[0]}/api/members/${member.id}/fresh-session`, { method: "POST", headers, body: JSON.stringify(request) });
+  const first = await call();
+  expect(first.status).toBe(200);
+  const receipt = await first.json();
+  expect(receipt).toMatchObject({ status: "applied", result: { sessionGeneration: request.expectedSessionGeneration + 1 } });
+  expect(await (await call()).json()).toEqual(receipt);
+  const result = await fetch(`${server.urls[0]}/api/operations/${operationId}`, { headers });
+  expect(await result.json()).toEqual(receipt);
+  expect(f.runner.starts).toHaveLength(2);
+  expect(f.runner.stops).toEqual([member.id]);
+});
+
+test("v2 member config uses reviewed revision and serializes v1 writes during provider stop", async () => {
+  const f = fixture();
+  const member = await f.orch.createMember(f.project.id, { name: "개발자" });
+  const revision = f.store.memberRevisions(member.id).configRevision;
+  let release!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  f.runner.stop = async () => { await barrier; };
+  const writing = f.orch.patchMemberConfigV2(member.id, { cli: "codex" }, { expectedRevision: revision });
+  try {
+    await expect(f.orch.patchMemberConfig(member.id, { effortOverride: "low" })).rejects.toMatchObject({ status: 409 });
+    await expect(f.orch.patchMemberConfigV2(member.id, { modelOverride: "sonnet" }, { expectedRevision: revision })).rejects.toMatchObject({ status: 409 });
+  } finally { release(); }
+  const updated = await writing;
+  expect(updated.member.cli).toBe("codex");
+  expect(updated.configRevision).toBeGreaterThan(revision);
+  await expect(f.orch.patchMemberConfigV2(member.id, { effortOverride: "max" }, { expectedRevision: revision })).rejects.toMatchObject({ status: 409, code: "REVISION_CONFLICT" });
+  expect(f.store.requireMember(member.id).effortOverride).toBe(member.effortOverride);
+});
+
+test("restart converts pending fresh and direct-input operations to durable unknown without replay", async () => {
+  const f = fixture();
+  const member = await f.orch.createMember(f.project.id, { name: "개발자" });
+  const request = { operationId: crypto.randomUUID(), expectedSessionGeneration: f.store.memberRevisions(member.id).sessionGeneration };
+  f.store.beginOperation({ operationId: request.operationId, kind: "fresh_session", projectId: f.project.id, memberId: member.id, request });
+  const terminalRequest = { ...request, operationId: crypto.randomUUID(), claimId: "persistent-claim", action: "key" as const, key: "enter" as const, inputSequence: 1 };
+  f.store.beginOperation({ operationId: terminalRequest.operationId, kind: "terminal_control", projectId: f.project.id, memberId: member.id, request: terminalRequest });
+  await f.orch.recover();
+  expect((await f.orch.freshMemberSessionV2(member.id, request)).status).toBe("unknown");
+  expect((await f.orch.terminalControlV2(member.id, terminalRequest)).status).toBe("unknown");
+  expect(f.runner.starts).toHaveLength(1);
+  expect(f.runner.stops).toHaveLength(0);
+});
+
+test("v2 stale settings and todo revisions cannot overwrite a newer value", async () => {
+  const f = fixture();
+  const settingsRevision = f.store.settingsRevision();
+  const settings = await f.orch.updateSettingsV2({ maxConcurrentTurns: 2 }, { expectedRevision: settingsRevision });
+  expect(settings.settings.maxConcurrentTurns).toBe(2);
+  expect(settings.revision).toBeGreaterThan(settingsRevision);
+  await expect(f.orch.updateSettingsV2({ maxConcurrentTurns: 9 }, { expectedRevision: settingsRevision })).rejects.toMatchObject({ status: 409 });
+  const todo = f.store.createTodo({ projectId: f.project.id, title: "검토" });
+  const revision = f.store.todoRevision(todo.id);
+  const changed = await f.orch.setTodoDoneV2(todo.id, { done: true }, { expectedRevision: revision });
+  expect(changed.todo.done).toBe(true);
+  await expect(f.orch.setTodoDoneV2(todo.id, { done: false }, { expectedRevision: revision })).rejects.toMatchObject({ status: 409 });
+  expect(f.store.requireTodo(todo.id).done).toBe(true);
 });

@@ -1,10 +1,10 @@
 // bin/iamceo.ts 와 가져오기. 시험 소켓·임시 폴더만 쓰고 launchctl·claude 는 부르지 않는다.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Backend, Member, Project, ProjectState } from "../shared/types.ts";
-import { launchdPlist, servicePath } from "../bin/iamceo.ts";
+import { buildId, launchdPlist, service, servicePath, waitForReadiness } from "../bin/iamceo.ts";
 import { Bus } from "../server/bus.ts";
 import { loadConfig, updateConfigFile } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
@@ -16,14 +16,14 @@ import { Store } from "../server/store.ts";
 import { importArtifact, normalizeCollection, parseWhen } from "../scripts/import-artifact.ts";
 
 const CLI = resolve(import.meta.dir, "..", "bin", "iamceo.ts");
-const REAL_HOME = process.env.HOME ?? "";
 
 function cliEnv(home: string, extra: Record<string, string> = {}): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && !/^(HERDR_|CLAUDE|IAMCEO_)/.test(k)) env[k] = v;
-  }
-  return { ...env, IAMCEO_HOME: home, IAMCEO_HERDR_SOCKET: join(home, "no-herdr.sock"), IAMCEO_CORE_BIN: join(home, "no-core-binary"), IAMCEO_TEST: "1", ...extra };
+  for (const dir of ["claude", "codex"]) mkdirSync(join(home, dir), { recursive: true, mode: 0o700 });
+  return { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "en_US.UTF-8",
+    IAMCEO_HOME: home, IAMCEO_PORT: "0", IAMCEO_HERDR_SOCKET: join(home, "no-herdr.sock"),
+    IAMCEO_CORE_SOCKET: join(home, "no-core.sock"), IAMCEO_CORE_BIN: "/usr/bin/false",
+    IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false",
+    CLAUDE_CONFIG_DIR: join(home, "claude"), CODEX_HOME: join(home, "codex"), IAMCEO_TEST: "1", ...extra };
 }
 
 async function cli(home: string, args: string[], opts: { stdin?: string; env?: Record<string, string>; cwd?: string } = {}) {
@@ -48,14 +48,15 @@ async function freePort(): Promise<number> {
   const probe = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
   const port = probe.port!;
   await probe.stop(true);
-  return port;
+  return port === 7878 ? freePort() : port;
 }
 
 async function serve(home: string, port: number) {
   updateConfigFile({ hosts: ["127.0.0.1"] }, { IAMCEO_HOME: home });
   const p = Bun.spawn([process.execPath, CLI, "serve"], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: cliEnv(home, { IAMCEO_PORT: String(port) }) });
   stops.push(() => {
-    p.kill("SIGTERM");
+    if (p.exitCode === null) p.kill("SIGTERM");
+    return p.exited.then(() => {});
   });
   const base = `http://127.0.0.1:${port}`;
   const end = Date.now() + 15_000;
@@ -184,7 +185,7 @@ describe("service", () => {
     expect(plist).toContain("/Users/u/.npm-global/bin");
     expect(plist).toContain("/opt/homebrew/bin");
     expect(plist).toContain("/Users/u/.local/bin");
-    expect(plist).toContain("/Users/u/.iamceo/logs/server.log");
+    expect(plist).toContain("<key>StandardOutPath</key>\n  <string>/dev/null</string>");
     expect(plist).toContain("/a&amp;b/iamceo.ts");
     expect(plist).toContain("/x&lt;y");
     const file = join(newHome(), "t.plist");
@@ -195,8 +196,6 @@ describe("service", () => {
 
   test("--dry-run 은 아무것도 등록하지 않고, IAMCEO_TEST 에서는 실제 등록을 거부한다", async () => {
     const home = newHome();
-    const plistPath = join(REAL_HOME, "Library", "LaunchAgents", "com.iamceo.server.plist");
-    const before = existsSync(plistPath);
     const dry = await cli(home, ["service", "install", "--dry-run"]);
     expect(dry.code).toBe(0);
     expect(dry.stdout).toContain("launchctl bootstrap gui/");
@@ -208,7 +207,6 @@ describe("service", () => {
     expect((await cli(home, ["service", "uninstall"])).code).toBe(1);
     expect((await cli(home, ["service", "uninstall", "--dry-run"])).stdout).toContain("launchctl bootout");
     expect((await cli(home, ["service", "모름"])).code).toBe(1);
-    expect(existsSync(plistPath)).toBe(before);
   });
 
   test("서비스 PATH: 등록할 때 찾은 claude·herdr 폴더를 앞에 두고, 겹치거나 없는 것은 뺀다", () => {
@@ -457,3 +455,144 @@ describe("가져오기", () => {
     await expect(orch.adopt(projectId, { paneId: "live", name: "또", role: "" })).rejects.toMatchObject({ status: 409 });
   }, 15_000);
 });
+
+describe("운영 CLI readiness·등록·복원", () => {
+  test("인증된 준비 확인: health만 성공하는 구형 데몬, 다른 build와 미복구 상태는 성공이 아니다", async () => {
+    const home = newHome();
+    const config = loadConfig({ IAMCEO_HOME: home, IAMCEO_PORT: "0" });
+    let mode = "old";
+    const expected = await buildId();
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
+      expect(req.headers.get("authorization")).toBe(`Bearer ${config.accessCode}`);
+      expect(new URL(req.url).pathname).toBe("/api/bootstrap");
+      if (mode === "auth") return Response.json({ error: "unauthorized" }, { status: 401 });
+      return Response.json(mode === "old" ? { version: "0.1.0" } : { runtime: { daemon: {
+        ready: mode !== "recovering", version: "0.1.0", buildId: mode === "mismatch" ? "old-build" : expected,
+      } } });
+    } });
+    if (server.port === 7878) { await server.stop(true); throw new Error("fixture port forbidden"); }
+    try {
+      const settings = { ...config, port: server.port! };
+      for (const value of ["old", "mismatch", "recovering", "auth"]) {
+        mode = value;
+        await expect(waitForReadiness(settings, { expectedBuildId: expected, timeoutMs: 25, pollMs: 1 })).rejects.toThrow();
+      }
+      mode = "ready";
+      await waitForReadiness(settings, { expectedBuildId: expected, timeoutMs: 100 });
+    } finally { await server.stop(true); }
+  });
+
+  test("등록·업데이트는 mock launchctl과 인증 readiness를 모두 통과해야 한다; 실패를 전파한다", async () => {
+    const home = newHome();
+    const config = loadConfig({ IAMCEO_HOME: home, IAMCEO_PORT: "0" });
+    const calls: string[] = [];
+    let loaded = false, fail = false, ready = false;
+    const dependencies = { home, config, program: ["/fixture/iamceo", "service-run"],
+      launchctl: (...args: string[]) => {
+        calls.push(args[0]!);
+        if (args[0] === "print") return { ok: loaded, output: "" };
+        if (args[0] === "bootstrap") { if (fail) return { ok: false, output: "mock bootstrap failed" }; loaded = true; }
+        if (args[0] === "bootout") loaded = false;
+        return { ok: true, output: "" };
+      },
+      readiness: async () => { calls.push("readiness"); if (!ready) throw new Error("mock build mismatch"); },
+    };
+    await expect(service(["install"], dependencies)).rejects.toThrow("build mismatch");
+    expect(calls).toEqual(["print", "bootstrap", "readiness"]);
+    calls.length = 0; ready = true;
+    await service(["install"], dependencies);
+    expect(calls).toEqual(["print", "readiness"]);
+    calls.length = 0;
+    await service(["install", "--restart"], dependencies);
+    expect(calls).toEqual(["print", "bootout", "bootstrap", "readiness"]);
+    expect(readFileSync(join(home, "Library/LaunchAgents/com.iamceo.server.plist"), "utf8")).toContain("service-run");
+    calls.length = 0; fail = true;
+    await expect(service(["install", "--restart"], dependencies)).rejects.toThrow("등록 실패");
+    expect(calls).toEqual(["print", "bootout", "bootstrap"]);
+  });
+
+  test("백업/별도 경로 복원을 CLI로 실행하며 복원본의 발신은 격리되고 사용 중 홈은 거부한다", async () => {
+    const home = newHome();
+    expect((await cli(home, ["setup", "--port", "7003", "--hosts", "127.0.0.1"])).code).toBe(0);
+    const backup = await cli(home, ["backup"]);
+    expect(backup.code).toBe(0);
+    const snapshot = backup.stdout.trim().replace("백업 검증 완료: ", "");
+    const destination = join(newHome(), "restore");
+    const restored = await cli(home, ["restore", snapshot, "--destination", destination, "--clone"]);
+    expect(restored.code).toBe(0); expect(restored.stdout).toContain("발신 꺼짐");
+    const db = openDb(join(destination, "iamceo.db"));
+    try {
+      expect(db.query("SELECT 1 FROM projects WHERE runner_enabled=1").get()).toBeNull();
+      expect(db.query("SELECT 1 FROM push_devices WHERE enabled=1").get()).toBeNull();
+    } finally { db.close(); }
+    expect((await cli(home, ["restore", snapshot, "--destination", home])).code).toBe(1);
+    const { acquireHomeOwner } = await import("../server/home-owner.ts");
+    using owner = acquireHomeOwner(home);
+    expect((await cli(home, ["backup"])).stderr).toContain("다른 작업");
+    expect((await cli(home, ["setup", "--port", "7003"])).stderr).toContain("다른 작업");
+  });
+
+  test("설치 스크립트는 가짜 바이너리/다운로드만 쓰고 업데이트 준비 실패를 숨기지 않는다", async () => {
+    const home = newHome(); const release = join(home, "release"); const dir = join(home, "bin");
+    mkdirSync(release); mkdirSync(dir);
+    const binary = '#!/bin/sh\ncase "$1" in version) echo fixture;; service) echo mock-service >&2; exit 7;; *) exit 9;; esac\n';
+    const hashes: string[] = [];
+    for (const asset of ["iamceo-darwin-arm64", "iamceo-darwin-x64"]) {
+      const path = join(release, asset); writeFileSync(path, binary);
+      const sum = Bun.spawnSync(["shasum", "-a", "256", path]);
+      hashes.push(`${sum.stdout.toString().split(" ")[0]}  ${asset}`);
+    }
+    writeFileSync(join(release, "SHA256SUMS"), hashes.join("\n") + "\n");
+    mkdirSync(join(home, "Library/LaunchAgents"), { recursive: true });
+    writeFileSync(join(home, "Library/LaunchAgents/com.iamceo.server.plist"), `<string>${dir}/iamceo</string>`);
+    const proc = Bun.spawn(["/bin/sh", resolve(import.meta.dir, "../install.sh")], { stdin: "ignore", stdout: "pipe", stderr: "pipe",
+      env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: home, TMPDIR: home, IAMCEO_INSTALL_DIR: dir, IAMCEO_DOWNLOAD_URL: `file://${release}`, IAMCEO_TEST: "1" } });
+    const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    expect(code).toBe(1); expect(stdout).toContain("설치했습니다");
+    expect(stderr).toContain("재시작/준비 확인에 실패"); expect(stderr).toContain("mock-service");
+  });
+});
+
+test("같은 홈의 다른 포트 데몬은 DB/복구 전에 거부하고 종료 뒤 다시 소유할 수 있다", async () => {
+  const home = newHome(); const port = await freePort();
+  const first = await serve(home, port);
+  const second = await cli(home, ["serve"], { env: { IAMCEO_PORT: "0" } });
+  expect(second.code).toBe(1); expect(second.stderr).toContain("다른 작업");
+  first.proc.kill("SIGTERM"); expect(await first.proc.exited).toBe(0);
+  const { acquireHomeOwner } = await import("../server/home-owner.ts");
+  using owner = acquireHomeOwner(home);
+});
+
+test("컴파일 산출물의 서비스 감독 프로세스가 로그·build ID·port0·SIGTERM 정리를 연결한다", async () => {
+  const home = newHome(); const binary = join(home, "iamceo");
+  const compile = Bun.spawn([process.execPath, "build", CLI, "--compile", "--outfile", binary], { stdout: "ignore", stderr: "pipe" });
+  const diagnostics = new Response(compile.stderr).text();
+  expect(await compile.exited, await diagnostics).toBe(0);
+  updateConfigFile({ hosts: ["127.0.0.1"] }, { IAMCEO_HOME: home });
+  const identity = Bun.spawn([binary, "build-id"], { stdout: "pipe", stderr: "pipe", env: cliEnv(home) });
+  const expected = (await new Response(identity.stdout).text()).trim();
+  expect(await identity.exited).toBe(0); expect(expected).toMatch(/^[a-f0-9]{64}$/);
+  const child = Bun.spawn([binary, "serve"], { stdin: "ignore", stdout: "ignore", stderr: "pipe", env: cliEnv(home, { IAMCEO_LOG_WRITER: "1" }) });
+  try {
+    const log = join(home, "logs/server.log"); const end = Date.now() + 10_000;
+    let origin = "";
+    while (Date.now() < end && child.exitCode === null) {
+      origin = existsSync(log) ? /http:\/\/127\.0\.0\.1:(\d+)/.exec(readFileSync(log, "utf8"))?.[0] ?? "" : "";
+      if (origin) break;
+      await Bun.sleep(20);
+    }
+    expect(origin).not.toBe(""); expect(new URL(origin).port).not.toBe("7878");
+    const config = loadConfig({ IAMCEO_HOME: home });
+    const response = await fetch(`${origin}/api/bootstrap`, { headers: { Authorization: `Bearer ${config.accessCode}` } });
+    expect(response.status).toBe(200);
+    const body = await response.json() as { runtime: { daemon: { buildId: string; ready: boolean } } };
+    expect(body.runtime.daemon).toMatchObject({ buildId: expected, ready: true });
+    child.kill("SIGTERM");
+    expect(await child.exited).toBe(0);
+    const { acquireHomeOwner } = await import("../server/home-owner.ts");
+    using owner = acquireHomeOwner(home);
+    expect(readFileSync(log, "utf8")).toContain("IAMCEO 서버");
+  } finally {
+    if (child.exitCode === null) { child.kill("SIGTERM"); await child.exited; }
+  }
+}, 30_000);

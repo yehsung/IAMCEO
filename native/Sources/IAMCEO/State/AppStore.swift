@@ -4,7 +4,7 @@ import Observation
 enum ConnectionStatus: String, Sendable { case disconnected, connecting, connected, demo, failed }
 
 @MainActor @Observable
-final class AppStore {
+final class AppStore: ProjectManagementStore {
     var endpoint: String
     var accessCode: String
     private(set) var connectionStatus: ConnectionStatus = .disconnected
@@ -28,7 +28,45 @@ final class AppStore {
     var todos: [Todo] { state?.todos ?? [] }
     var files: [FileDoc] { state?.files ?? [] }
     var work: [WorkItem] { state?.work ?? [] }
-    var canWrite: Bool { connectionStatus == .connected && !isDemo }
+    var canWrite: Bool { connectionStatus == .connected && !isDemo && !isArchive && state?.project.archived != true }
+    let histories = ChatHistoryCache()
+    private(set) var pagingSupport: HistoryPagingSupport = .unknown
+    private(set) var isArchive = false
+    private(set) var archivedProjects: [Project] = []
+    private(set) var archiveError: String?
+    private(set) var deliveryPages: [String: DeliveryNoticePage] = [:]
+    private(set) var deliveryErrors: [String: String] = [:]
+    private(set) var deliveryResults: [String: DeliveryRecoveryResult] = [:]
+    private(set) var deliveryChecking: Set<String> = []
+    var history: ChatHistory? {
+        guard let key = histories.activeKey, key.projectID == selectedProjectID, key.archived == isArchive else { return nil }
+        return histories.history(for: key)
+    }
+    var historyMessages: [Message] {
+        if isDemo || (!isArchive && pagingSupport == .unsupported) {
+            let scope = ChatHistoryKey.normalizedScope(targetMemberID: historyTarget, members: members)
+            return messages.filter { row in
+                if case .member(let id) = scope { return row.memberId == id || row.targetMemberId == id }
+                return true
+            }
+        }
+        return history?.items ?? []
+    }
+    var deliveryNotices: DeliveryNotices? {
+        guard state?.deliveryNotices?.version == 2 else { return nil }
+        return state?.deliveryNotices
+    }
+    /// Only server-confirmed owner requests are interventions. Checking/waiting counts overlap totals.
+    var deliveryAttentionMembers: [MemberDeliverySummary] { deliveryNotices?.members.filter { $0.needsOwnerCount > 0 } ?? [] }
+    var unassignedDeliveryAttentionCount: Int { deliveryNotices?.unassigned.needsOwnerCount ?? 0 }
+    func deliverySummary(memberID: String) -> MemberDeliverySummary? {
+        deliveryNotices?.members.first { $0.memberId == memberID }
+    }
+    @ObservationIgnored private var historyTarget: String?
+    @ObservationIgnored private var historyVisible = false
+    @ObservationIgnored private var historyFlight: (key: ChatHistoryKey, id: UUID, task: Task<Void, Never>)?
+    @ObservationIgnored private var deliveryFlights: [String: UUID] = [:]
+    @ObservationIgnored private var archiveLoad = UUID()
     /// The server stopped answering after a successful connect. The last snapshot stays on screen (read-only),
     /// polling keeps retrying, and the next successful refresh returns to `.connected`.
     var connectionLost: Bool { connectionStatus == .disconnected && api != nil && bootstrap != nil && !isDemo }
@@ -120,6 +158,7 @@ final class AppStore {
         settingsEdit = nil; settingsConflict = nil; todoWrites = [:]; operationResults = [:]; batchResults = [:]
         leaseReceiptOrder = [:]; absentOperations = []; writeContextGeneration = UUID()
         strictWriteContract = false
+        resetReadCollections()
         let epoch = generation
         lastReadError = nil
         connectionStatus = .connecting
@@ -168,6 +207,7 @@ final class AppStore {
     func disconnect() {
         releaseAllTerminals()
         stopRequests()
+        resetReadCollections()
         generation = UUID(); projectGeneration = UUID()
         if persistCredentials { KeychainStore.remove(for: endpoint) }
         api = nil; accessCode = ""; bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil
@@ -179,7 +219,10 @@ final class AppStore {
         pendingActions.removeAll(); terminalLeases.removeAll(); isLoading = false; errorMessage = nil; lastUpdated = nil
     }
 
-    func selectProject(id: String) async {
+    func selectProject(id: String) async { await selectProject(id: id, archived: false) }
+    func selectArchivedProject(id: String) async { await selectProject(id: id, archived: true) }
+
+    private func selectProject(id: String, archived: Bool) async {
         if isDemo { return }
         guard let api, connectionStatus == .connected else { return }
         loadTask?.cancel()
@@ -187,18 +230,26 @@ final class AppStore {
         projectGeneration = UUID()
         let projectEpoch = projectGeneration
         let epoch = generation
+        cancelHistoryLoad()
+        historyVisible = false; historyTarget = nil
+        deliveryPages = [:]; deliveryErrors = [:]; deliveryResults = [:]; deliveryFlights = [:]; deliveryChecking = []
+        isArchive = archived
         selectedProjectID = id
         state = nil
         writeRevisions?.members = nil; writeRevisions?.todos = nil
         reviewedMembers = [:]; reviewedTodos = [:]
         errorMessage = nil
         isLoading = true
-        let task = Task { try await api.request("/api/projects/\(APIClient.segment(id))/state") as ProjectState }
+        let task = Task {
+            if archived { return try await api.archiveState(projectID: id) }
+            return try await api.request("/api/projects/\(APIClient.segment(id))/state") as ProjectState
+        }
         loadTask = task
         defer { if projectEpoch == projectGeneration { isLoading = false } }
         do {
             let next = try await task.value
             guard epoch == generation, projectEpoch == projectGeneration, selectedProjectID == id else { return }
+            guard next.project.id == id, next.project.archived == archived else { throw SubmissionError.mismatchedResult }
             state = next; lastUpdated = Date()
             markReachable()
             clearReadError()
@@ -217,12 +268,14 @@ final class AppStore {
         let epoch = generation, projectEpoch = projectGeneration
         refreshGeneration = UUID()
         let refreshEpoch = refreshGeneration
-        let projectID = selectedProjectID
+        let projectID = selectedProjectID, archived = isArchive
         refreshTask?.cancel()
         let task = Task { () throws -> RefreshSnapshot in
             let nextBootstrap: Bootstrap = try await api.request("/api/bootstrap")
             let nextState: ProjectState?
-            if let projectID, nextBootstrap.projects.contains(where: { $0.id == projectID }) {
+            if let projectID, archived {
+                nextState = try await api.archiveState(projectID: projectID)
+            } else if let projectID, nextBootstrap.projects.contains(where: { $0.id == projectID }) {
                 nextState = try await api.request("/api/projects/\(APIClient.segment(projectID))/state")
             } else { nextState = nil }
             return RefreshSnapshot(bootstrap: nextBootstrap, state: nextState)
@@ -234,16 +287,24 @@ final class AppStore {
             markReachable()
             bootstrap = snapshot.bootstrap
             if let diagnostics = snapshot.bootstrap.runtime { runtime = diagnostics }
-            if let projectID, !snapshot.bootstrap.projects.contains(where: { $0.id == projectID }) {
+            if let projectID, !archived, !snapshot.bootstrap.projects.contains(where: { $0.id == projectID }) {
                 state = nil; selectedProjectID = nil
                 if let first = snapshot.bootstrap.projects.first { await selectProject(id: first.id) }
                 return
+            }
+            if let next = snapshot.state {
+                guard next.project.id == projectID, next.project.archived == archived else { throw SubmissionError.mismatchedResult }
             }
             state = snapshot.state
             lastUpdated = Date()
             clearReadError()
             await refreshWriteContext()
             await recoverWrites()
+            if foreground, historyVisible { await refreshHistory() }
+            guard epoch == generation, projectEpoch == projectGeneration else { return }
+            if foreground {
+                for memberID in Array(deliveryPages.keys) { await loadDeliveryNotices(memberID: memberID) }
+            }
         } catch {
             guard epoch == generation, refreshEpoch == refreshGeneration else { return }
             if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
@@ -255,7 +316,12 @@ final class AppStore {
 
     func setForeground(_ active: Bool) {
         foreground = active
-        if active { startPolling() } else { pollTask?.cancel(); pollTask = nil }
+        if active {
+            startPolling()
+        } else {
+            pollTask?.cancel(); pollTask = nil
+            cancelHistoryLoad()
+        }
     }
     private func startPolling() {
         pollTask?.cancel()
@@ -288,9 +354,9 @@ final class AppStore {
     private func markReachable() {
         transportFailures = 0
         connectionIssue = nil
-        if connectionLost { connectionStatus = .connected }
+        if connectionLost { pagingSupport = .unknown; connectionStatus = .connected }
     }
-    private func stopRequests() { pollTask?.cancel(); pollTask = nil; loadTask?.cancel(); loadTask = nil; refreshTask?.cancel(); refreshTask = nil }
+    private func stopRequests() { cancelHistoryLoad(); pollTask?.cancel(); pollTask = nil; loadTask?.cancel(); loadTask = nil; refreshTask?.cancel(); refreshTask = nil }
     private func clearReadError() {
         if let lastReadError, errorMessage == lastReadError { errorMessage = nil }
         lastReadError = nil
@@ -298,7 +364,7 @@ final class AppStore {
     private func handle(_ error: Error) {
         errorMessage = error.localizedDescription
         if (error as? APIError)?.status == 401 {
-            stopRequests(); generation = UUID(); projectGeneration = UUID()
+            stopRequests(); resetReadCollections(); generation = UUID(); projectGeneration = UUID()
             api = nil; bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil
             terminalLeases.removeAll()
             drafts.selectNamespace("unassigned"); writeNamespace = "unassigned"
@@ -314,9 +380,9 @@ final class AppStore {
     }
     /// Like `mutate`, but also returns the server/transport error so callers can tell "the server refused" from
     /// "we never heard back". `error == nil` with no value means the request was not sent.
-    private func perform<T: Sendable>(_ key: String, refreshAfter: Bool = true, operation: (APIClient) async throws -> T) async -> (value: T?, error: Error?) {
+    private func perform<T: Sendable>(_ key: String, refreshAfter: Bool = true, allowArchived: Bool = false, operation: (APIClient) async throws -> T) async -> (value: T?, error: Error?) {
         guard !isDemo else { errorMessage = "샘플은 읽기 전용입니다. 실제 Mac에 연결하면 바꿀 수 있습니다."; return (nil, nil) }
-        guard let api, canWrite else { errorMessage = "서버에 연결된 뒤에 바꿀 수 있습니다."; return (nil, nil) }
+        guard let api, canWrite || (allowArchived && connectionStatus == .connected && !isDemo) else { errorMessage = isArchive ? "보관한 프로젝트는 읽기 전용입니다." : "서버에 연결된 뒤에 바꿀 수 있습니다."; return (nil, nil) }
         guard !pendingActions.contains(key) else { return (nil, nil) }
         let epoch = generation
         pendingActions.insert(key); errorMessage = nil
@@ -374,6 +440,7 @@ final class AppStore {
             guard epoch == generation else { return false }
             if let message = outcome.value {
                 try submissions.acceptMessage(id: attempt.id, message: message)
+                receiveHistoryMessage(message)
                 try submissions.consumeAccepted(id: attempt.id, drafts: drafts)
                 await refresh()
                 return true
@@ -394,6 +461,7 @@ final class AppStore {
             _ = try await submissions.reconcileMessage(id: id, using: api)
             guard epoch == generation else { return false }
             if submissions.messageAttempt(id: id)?.status == .accepted {
+                if let message = submissions.messageAttempt(id: id)?.message { receiveHistoryMessage(message) }
                 try submissions.consumeAccepted(id: id, drafts: drafts)
             }
             return true
@@ -474,9 +542,10 @@ final class AppStore {
     @discardableResult func resend(_ message: Message) async -> Bool {
         guard let projectID = selectedProjectID, message.mine, message.delivery == "failed" else { return false }
         let request = SendMessageRequest(id: message.id, text: message.body, targetMemberId: message.targetMemberId, attachmentIds: message.attachments.map(\.id))
-        let result: Message? = await mutate("send:\(projectID)") { api in
+        let result: Message? = await mutate("send:\(projectID)", refreshAfter: false) { api in
             try await api.send("/api/projects/\(APIClient.segment(projectID))/messages", body: request)
         }
+        if let result { receiveHistoryMessage(result); await refresh() }
         return result != nil
     }
     @discardableResult func startConductor() async -> Bool {
@@ -865,10 +934,17 @@ final class AppStore {
 
     /// Query-only recovery, also called after reconnect. No message or terminal write is replayed here.
     func recoverWrites() async {
-        guard canWrite, strictWriteContract, !recoveryInFlight, let submissions else { return }
+        guard canWrite, !recoveryInFlight else { return }
         recoveryInFlight = true
         defer { recoveryInFlight = false }
         let epoch = generation, namespace = writeNamespace
+        for operation in journal.deliveryRecoveries?.values ?? Dictionary<String, PendingDeliveryRecovery>().values
+            where operation.namespace == namespace && operation.projectID == selectedProjectID && operation.result == nil && !operation.refused {
+            deliveryChecking.insert(operation.deliveryID)
+            await loadDeliveryNotices(memberID: operation.memberID)
+            guard epoch == generation, canWrite else { return }
+        }
+        guard strictWriteContract, let submissions else { return }
         for attempt in submissions.messages(namespace: namespace) where attempt.status == .checking || attempt.status == .accepted || attempt.status == .notAccepted {
             _ = await reconcileMessage(attempt.id)
             guard epoch == generation, canWrite else { return }
@@ -980,6 +1056,233 @@ final class AppStore {
         }
     }
 
+    // MARK: Conversation history (independent of /state's recent-message window)
+
+    func activateHistory(targetMemberID: String? = nil) async {
+        historyVisible = true; historyTarget = targetMemberID
+        guard !isDemo, let projectID = selectedProjectID, state != nil else { return }
+        let key = ChatHistoryKey(namespace: writeNamespace, connectionGeneration: generation, projectID: projectID,
+                                 scope: ChatHistoryKey.normalizedScope(targetMemberID: targetMemberID, members: members), archived: isArchive)
+        if histories.activeKey != key { cancelHistoryLoad() }
+        histories.activate(key)
+        await loadHistory(history?.initialized == true ? .latest : .initial)
+    }
+
+    func deactivateHistory() { historyVisible = false; cancelHistoryLoad() }
+    func loadOlderMessages() async { await loadHistory(.older) }
+    func refreshHistory() async {
+        guard let history else { return }
+        // A disconnected interval stays staged until explicit continuation, never replaced by /state.
+        guard !history.isBridging, !history.storeChanged else { return }
+        await loadHistory(history.initialized ? .latest : .initial)
+    }
+    func continueHistoryBridge() async { await loadHistory(.bridge) }
+    func restartHistoryFromLatest() async {
+        guard let key = histories.activeKey else { return }
+        cancelHistoryLoad()
+        histories.invalidate(projectID: key.projectID)
+        histories.activate(key)
+        await loadHistory(.initial)
+    }
+    func setHistoryReadingPosition(_ anchor: ChatHistoryAnchor?, pinned: Bool) {
+        guard let key = histories.activeKey else { return }
+        histories.setReadingPosition(anchor, pinned: pinned, for: key)
+    }
+    /// Use for POST responses and individual realtime message events, never a stale /state batch.
+    func receiveHistoryMessage(_ message: Message) {
+        histories.receive(message, namespace: writeNamespace, connectionGeneration: generation)
+    }
+    private func cancelHistoryLoad() {
+        historyFlight?.task.cancel()
+        // The cache checks cancellation before applying a page; activation also invalidates old range tokens.
+    }
+    private func loadHistory(_ kind: ChatHistoryLoad) async {
+        guard !isDemo, foreground, historyVisible, connectionStatus == .connected, let api,
+              let key = histories.activeKey, key.projectID == selectedProjectID, key.archived == isArchive,
+              key.connectionGeneration == generation, key.archived || pagingSupport != .unsupported else { return }
+        if let flight = historyFlight, flight.key == key {
+            await flight.task.value
+            if !flight.task.isCancelled { return }
+            if historyFlight?.id == flight.id { historyFlight = nil }
+            guard foreground, historyVisible, histories.activeKey == key, key.connectionGeneration == generation else { return }
+        }
+        let id = UUID(), projectEpoch = projectGeneration
+        let failure = HistoryRequestFailure()
+        let service = AppHistoryService(api: api, failure: failure)
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await histories.load(kind, for: key, using: service)
+            guard !Task.isCancelled, generation == key.connectionGeneration, projectGeneration == projectEpoch,
+                  histories.activeKey == key else { return }
+            if let error = await failure.error {
+                if (error as? APIError)?.status == 401 { handle(error); return }
+                // Only page 404 + a successful active /state proves an old server.
+                if (error as? APIError)?.status == 404, !key.archived {
+                    do {
+                        let snapshot: ProjectState = try await api.request("/api/projects/\(APIClient.segment(key.projectID))/state")
+                        guard !Task.isCancelled, generation == key.connectionGeneration, projectGeneration == projectEpoch,
+                              histories.activeKey == key, snapshot.project.id.utf8.elementsEqual(key.projectID.utf8), !snapshot.project.archived else { return }
+                        pagingSupport = .unsupported
+                    } catch {
+                        guard !Task.isCancelled, generation == key.connectionGeneration, projectGeneration == projectEpoch else { return }
+                        if (error as? APIError)?.status == 401 { handle(error) }
+                    }
+                }
+            } else if history?.initialized == true, !key.archived { pagingSupport = .supported }
+        }
+        historyFlight = (key, id, task)
+        await task.value
+        if historyFlight?.id == id { historyFlight = nil }
+        if !task.isCancelled, foreground, historyVisible, generation == key.connectionGeneration, projectGeneration == projectEpoch,
+           histories.activeKey == key, (await failure.error as? APIError)?.code == "MESSAGE_SCOPE_CHANGED" {
+            do {
+                let snapshot: ProjectState = try await api.request("/api/projects/\(APIClient.segment(key.projectID))/state")
+                guard foreground, historyVisible, generation == key.connectionGeneration, projectGeneration == projectEpoch, histories.activeKey == key,
+                      snapshot.project.id.utf8.elementsEqual(key.projectID.utf8), !snapshot.project.archived else { return }
+                let scope = ChatHistoryKey.normalizedScope(targetMemberID: historyTarget, members: snapshot.members)
+                state = snapshot
+                if ChatHistoryKey.scopeBytes(scope) != ChatHistoryKey.scopeBytes(key.scope) {
+                    await activateHistory(targetMemberID: historyTarget)
+                }
+            } catch {
+                if generation == key.connectionGeneration, (error as? APIError)?.status == 401 { handle(error) }
+            }
+        }
+    }
+
+    // MARK: Delivery notices
+
+    func loadDeliveryNotices(memberID: String, older: Bool = false) async {
+        guard !isDemo, !isArchive, connectionStatus == .connected, let api, let projectID = selectedProjectID,
+              members.contains(where: { $0.id == memberID }), deliveryFlights[memberID] == nil else { return }
+        let previous = deliveryPages[memberID]
+        if older && previous?.nextBefore == nil { return }
+        let epoch = generation, projectEpoch = projectGeneration, token = UUID()
+        deliveryFlights[memberID] = token
+        deliveryErrors[memberID] = nil
+        defer { if deliveryFlights[memberID] == token { deliveryFlights[memberID] = nil } }
+        do {
+            let page = try await api.deliveryNotices(memberID: memberID, before: older ? previous?.nextBefore : nil, limit: 50)
+            guard epoch == generation, projectEpoch == projectGeneration, deliveryFlights[memberID] == token else { return }
+            guard page.memberId.utf8.elementsEqual(memberID.utf8), page.summary.memberId.utf8.elementsEqual(memberID.utf8),
+                  page.items.allSatisfy({ $0.memberId?.utf8.elementsEqual(memberID.utf8) == true && $0.projectId?.utf8.elementsEqual(projectID.utf8) == true }),
+                  page.items.count <= 50, page.nextBefore == nil || (!page.items.isEmpty && page.nextBefore != (older ? previous?.nextBefore : nil)) else {
+                throw SubmissionError.mismatchedResult
+            }
+            var items = older ? previous?.items ?? [] : []
+            for item in page.items {
+                if let index = items.firstIndex(where: { $0.id.utf8.elementsEqual(item.id.utf8) }) { items[index] = item }
+                else { items.append(item) }
+            }
+            deliveryPages[memberID] = DeliveryNoticePage(memberId: memberID, summary: page.summary, items: items, nextBefore: page.nextBefore)
+        } catch {
+            guard epoch == generation, projectEpoch == projectGeneration, deliveryFlights[memberID] == token else { return }
+            if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
+            deliveryErrors[memberID] = error.localizedDescription
+            if (error as? APIError)?.status == 401 { handle(error) }
+        }
+    }
+
+    /// A retry after a lost response reuses the durable operation and its original reviewed version.
+    @discardableResult func recoverDelivery(_ item: DeliveryNoticeItem, action: DeliveryRecoveryAction,
+                                            acceptDuplicateRisk: Bool = false) async -> Bool {
+        guard canWrite, let api, let projectID = selectedProjectID, item.projectId == projectID,
+              let memberID = item.memberId, members.contains(where: { $0.id == memberID }),
+              let deliveryID = item.deliveryId, let version = item.version, version > 0,
+              item.safeAllowedActions.contains(action), action != .unknown,
+              action == .retryWithRisk ? acceptDuplicateRisk : !acceptDuplicateRisk else { return false }
+        let key = "delivery:\(deliveryID)"
+        guard !pendingActions.contains(key) else { return false }
+        let epoch = generation, projectEpoch = projectGeneration, namespace = writeNamespace
+        let previous = journal.deliveryRecoveries?[Self.scoped(namespace, deliveryID)]
+        // Do not turn an unresolved operation into a different action/version.
+        guard previous == nil || previous?.result != nil || previous?.refused == true || previous?.action == action else {
+            errorMessage = "이전 전달 작업의 결과를 먼저 확인해 주세요."; return false
+        }
+        var tracked = previous.flatMap { $0.result == nil && !$0.refused ? $0 : nil }
+            ?? PendingDeliveryRecovery(id: UUID().uuidString, namespace: namespace, projectID: projectID,
+                                       memberID: memberID, deliveryID: deliveryID, version: version,
+                                       action: action, acceptDuplicateRisk: acceptDuplicateRisk)
+        do {
+            try saveJournal {
+                if $0.deliveryRecoveries == nil { $0.deliveryRecoveries = [:] }
+                $0.deliveryRecoveries?[Self.scoped(namespace, deliveryID)] = tracked
+            }
+        } catch { handle(error); return false }
+        pendingActions.insert(key); deliveryChecking.insert(deliveryID)
+        defer { if epoch == generation { pendingActions.remove(key) } }
+        do {
+            let result = try await api.recoverDelivery(id: deliveryID, request: DeliveryRecoveryRequest(
+                operationId: tracked.id, expectedVersion: tracked.version, action: tracked.action,
+                acceptDuplicateRisk: tracked.action == .retryWithRisk ? true : nil))
+            guard epoch == generation else { return false }
+            guard result.operationId == tracked.id, result.deliveryId == deliveryID, result.committedVersion > tracked.version,
+                  (tracked.action == .recheck && result.outcome == .checkScheduled)
+                    || (tracked.action == .retryWithRisk && result.outcome == .retryScheduled)
+                    || (tracked.action == .stopRetry && result.outcome == .stopped) else { throw SubmissionError.mismatchedResult }
+            tracked.result = result
+            try saveJournal { $0.deliveryRecoveries?[Self.scoped(namespace, deliveryID)] = tracked }
+            guard projectEpoch == projectGeneration else { return false }
+            deliveryResults[tracked.id] = result
+            deliveryChecking.remove(deliveryID)
+            // 202 means scheduled, never "received". Re-read both aggregate and detail immediately.
+            await refresh()
+            guard epoch == generation, projectEpoch == projectGeneration else { return false }
+            await loadDeliveryNotices(memberID: memberID)
+            return true
+        } catch {
+            guard epoch == generation else { return false }
+            if Self.definiteRefusal(error) {
+                tracked.refused = true
+                do { try saveJournal { $0.deliveryRecoveries?[Self.scoped(namespace, deliveryID)] = tracked } }
+                catch { handle(error) }
+            }
+            guard projectEpoch == projectGeneration else { return false }
+            if tracked.refused { deliveryChecking.remove(deliveryID) }
+            handle(error)
+            await refresh()
+            guard epoch == generation, projectEpoch == projectGeneration else { return false }
+            await loadDeliveryNotices(memberID: memberID)
+            return false
+        }
+    }
+
+    func loadArchivedProjects() async {
+        guard !isDemo, let api, connectionStatus == .connected else { return }
+        let epoch = generation, token = UUID()
+        archiveLoad = token; archiveError = nil
+        do {
+            let projects = try await api.archivedProjects()
+            guard epoch == generation, archiveLoad == token else { return }
+            guard projects.allSatisfy(\.archived) else { throw SubmissionError.mismatchedResult }
+            archivedProjects = projects
+        } catch {
+            guard epoch == generation, archiveLoad == token else { return }
+            archiveError = error.localizedDescription
+            if (error as? APIError)?.status == 401 { handle(error) }
+        }
+    }
+    @discardableResult func patchProject(id: String, request: PatchProjectRequest) async -> Bool {
+        let epoch = generation
+        let outcome: (value: Project?, error: Error?) = await perform("project:\(id)", refreshAfter: false, allowArchived: true) { api in
+            try await api.patchProject(id: id, request: request)
+        }
+        guard epoch == generation, let project = outcome.value, project.id == id else { return false }
+        if selectedProjectID == id, project.archived != isArchive {
+            histories.invalidate(projectID: id)
+            await selectProject(id: id, archived: project.archived)
+        }
+        await refresh()
+        await loadArchivedProjects()
+        return epoch == generation
+    }
+    private func resetReadCollections() {
+        cancelHistoryLoad(); histories.removeAll(); historyVisible = false; historyTarget = nil
+        historyFlight = nil
+        pagingSupport = .unknown; isArchive = false; archivedProjects = []; archiveError = nil
+        deliveryPages = [:]; deliveryErrors = [:]; deliveryResults = [:]; deliveryChecking = []; deliveryFlights = [:]
+    }
+
     private func saveJournal(_ change: (inout AppWriteJournal) -> Void) throws {
         if let persistenceFailure { throw APIError(status: 0, message: persistenceFailure) }
         var next = journal
@@ -1049,6 +1352,41 @@ private struct PendingTodo: Codable {
 private struct AppWriteJournal: Codable {
     var operations: [String: TrackedOperation] = [:]
     var todos: [String: PendingTodo] = [:]
+    var deliveryRecoveries: [String: PendingDeliveryRecovery]? = nil
 }
 
 private struct RefreshSnapshot: Sendable { let bootstrap: Bootstrap; let state: ProjectState? }
+
+enum HistoryPagingSupport: Sendable { case unknown, supported, unsupported }
+private struct PendingDeliveryRecovery: Codable {
+    let id: String
+    let namespace: String
+    let projectID: String
+    let memberID: String
+    let deliveryID: String
+    let version: Int
+    let action: DeliveryRecoveryAction
+    let acceptDuplicateRisk: Bool
+    var result: DeliveryRecoveryResult? = nil
+    var refused = false
+}
+private actor HistoryRequestFailure {
+    private(set) var error: Error?
+    func record(_ error: Error) { self.error = error }
+}
+private struct AppHistoryService: MessageHistoryService {
+    let api: APIClient
+    let failure: HistoryRequestFailure
+    func messagePage(projectID: String, scope: MessageScope, cursor: String?, limit: Int) async throws -> MessagePage {
+        do { return try await api.messagePage(projectID: projectID, scope: scope, cursor: cursor, limit: limit) }
+        catch { await failure.record(error); throw error }
+    }
+    func archivedMessagePage(projectID: String, scope: MessageScope, cursor: String?, limit: Int) async throws -> MessagePage {
+        do { return try await api.archivedMessagePage(projectID: projectID, scope: scope, cursor: cursor, limit: limit) }
+        catch { await failure.record(error); throw error }
+    }
+    func message(id: String) async throws -> Message { try await api.message(id: id) }
+    func messagesAround(projectID: String, messageID: String, limit: Int) async throws -> [Message] {
+        try await api.messagesAround(projectID: projectID, messageID: messageID, limit: limit)
+    }
+}

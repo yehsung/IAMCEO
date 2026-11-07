@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { constants, closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Backend } from "../../shared/types.ts";
+import type { ApprovalPrompt, Backend } from "../../shared/types.ts";
+import { claudeFolderTrust } from "./core-approval.ts";
 import { cleanText } from "../text.ts";
 import { childEnv } from "./headless.ts";
 import { defaultClaudeHome, findSessionFile, inputText, screenContextPct } from "./herdr.ts";
@@ -35,6 +36,9 @@ export interface CoreRunnerDeps {
   compactStore?: { load(memberId: string): CoreCompactState | null; save(memberId: string, state: CoreCompactState): void };
 }
 interface Track {
+  statusKey: string | null;
+  setupAttempted: string | null;
+  setupError: { code: string; note: string } | null;
   member: RunnerMember; terminal: CoreTerminal; sessionId: string | null; pending: boolean; uncertain: boolean; status: string | null;
   epoch: number; endedTurn: number; completing: boolean; refresh: Promise<CoreTerminal> | null;
   nonce: string | null; binding: CodexBindingCursor | null; compact: CoreCompactState | null;
@@ -155,7 +159,7 @@ export class CoreRunner implements Runner {
   private name(member: RunnerMember): string { return `iamceo-${createHash("sha256").update(`${member.projectId}:${member.id}`).digest("hex").slice(0, 24)}`; }
   private async bind(member: RunnerMember, terminal: CoreTerminal, sessionId: string | null): Promise<Track> {
     if (this.closed) throw new CoreError("closed", "CoreRunner shut down while starting; terminal remains owned by core");
-    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, status: null,
+    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, status: null, statusKey: null, setupAttempted: null, setupError: null,
       epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, binding: null, compact: null,
       dispatches: [], evidence: new Map(), lastError: null, observedAt: new Date().toISOString(), failures: 0, failure: null };
     this.restore(track);
@@ -270,11 +274,15 @@ export class CoreRunner implements Runner {
       this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: state === "error", ...(state === "error" ? { errorText: track.lastError! } : {}) });
     }
     if (status === "gone") track.pending = false;
-    if (status !== track.status) {
+    const setup = status === "blocked" ? await this.readSetup(track) : null;
+    track.setupError = setup ? { code: "folder_trust", note: `폴더 신뢰 확인 창에서 멈췄습니다: ${track.member.cwd}` } : null;
+    const blockedReason = setup ? "setup" : state === "blocked" ? (["permission", "selection", "setup"].includes(terminal.status?.kind || "") ? terminal.status!.kind as "permission" | "selection" | "setup" : "status_unknown") : status === "blocked" ? "status_unknown" : null;
+    const statusKey = JSON.stringify([status, blockedReason, setup?.prompt.fingerprint ?? null]);
+    if (statusKey !== track.statusKey || track.failure) {
       track.status = status;
-      const blockedReason = state === "blocked" ? (["permission", "selection", "setup"].includes(terminal.status?.kind || "") ? terminal.status!.kind as "permission" | "selection" | "setup" : "status_unknown") : status === "blocked" ? "status_unknown" : null;
+      track.statusKey = statusKey;
       if (state === "error") return; // Keep the error result from being overwritten by idle in the same observation.
-      this.event(track, { type: "status", memberId: track.member.id, status, blockedReason, observation: { source: "core", observedAt: track.observedAt, freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: null }, ...(status === "gone" ? { exit: { reason: terminal.reason ?? null, exitCode: terminal.exit_code ?? null } } : {}) });
+      this.event(track, { type: "status", memberId: track.member.id, status, blockedReason, observation: { source: "core", observedAt: track.observedAt, freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: track.setupError }, ...(status === "gone" ? { exit: { reason: terminal.reason ?? null, exitCode: terminal.exit_code ?? null } } : {}) });
     }
   }
   /** 턴 끝 실측 창·사용량. core 는 문맥 표시만 하고 자동 압축은 하지 않는다. */
@@ -327,9 +335,9 @@ export class CoreRunner implements Runner {
     track.refresh = pending;
     return pending;
   }
-  observationState(memberId: string): { observedAt: string; failures: number; failure: string | null; lastError: string | null; identity: RunnerTerminalIdentity; inputEpoch: number } | null {
+  observationState(memberId: string): { observedAt: string; failures: number; failure: string | null; lastError: string | null; identity: RunnerTerminalIdentity; inputEpoch: number; setupError: Track["setupError"] } | null {
     const track = this.tracks.get(memberId);
-    return track ? { observedAt: track.observedAt, failures: track.failures, failure: track.failure, lastError: track.lastError, identity: this.identity(track), inputEpoch: track.epoch } : null;
+    return track ? { observedAt: track.observedAt, failures: track.failures, failure: track.failure, lastError: track.lastError, identity: this.identity(track), inputEpoch: track.epoch, setupError: track.setupError } : null;
   }
   private async poll(): Promise<void> {
     if (this.polling || this.closed) return;
@@ -705,6 +713,61 @@ export class CoreRunner implements Runner {
   async screen(member: RunnerMember): Promise<string> {
     const terminal = await this.owned(member);
     return (await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 })).text;
+  }
+  private async readSetup(track: Track): Promise<ReturnType<typeof claudeFolderTrust>> {
+    if (providerFor(track.member) !== "claude" || track.terminal.state !== "live" || ["working", "idle", "done", "error"].includes(track.terminal.status?.state || "")) return null;
+    const epoch = track.epoch;
+    const screen = await this.call<{ text: string }>("terminal.read", { terminal: track.terminal.address, lines: 0 });
+    this.validateTrack(track);
+    return epoch === track.epoch ? claudeFolderTrust(screen.text, track.member.cwd) : null;
+  }
+  async approval(member: RunnerMember): Promise<ApprovalPrompt | null> {
+    const track = this.tracks.get(member.id);
+    if (!track) return null;
+    this.assertMember(track, member);
+    await this.refresh(track);
+    const setup = await this.readSetup(track);
+    return setup && setup.prompt.fingerprint !== track.setupAttempted ? setup.prompt : null;
+  }
+  async answerApproval(member: RunnerMember, fingerprint: string, option: number): Promise<import("./types.ts").ApprovalAnswer> {
+    let release: () => void;
+    try { release = this.reserve(member.id); } catch { return { ok: false, reason: "input_busy" }; }
+    const track = this.tracks.get(member.id);
+    let attempted = false;
+    try {
+      if (!track) return { ok: false, reason: "gone" };
+      this.assertMember(track, member);
+      if (this.manualLease(member.id) || track.uncertain || track.compact && !["failed", "succeeded"].includes(track.compact.phase)) return { ok: false, reason: "input_busy" };
+      if (!this.methods.has("terminal.keys")) return { ok: false, reason: "unrecognized" };
+      const identity = this.identity(track);
+      const epoch = track.epoch;
+      await this.refresh(track);
+      if (track.terminal.state !== "live") return { ok: false, reason: "gone" };
+      const setup = await this.readSetup(track);
+      if (!setup) return { ok: false, reason: "unrecognized" };
+      const current = setup.prompt;
+      if (fingerprint !== current.fingerprint || track.setupAttempted === fingerprint) return { ok: false, reason: "changed", current };
+      const chosen = current.options.find((item) => item.n === option);
+      if (!chosen) return { ok: false, reason: "no_option", current };
+      // Revalidate identity/status after the screen read. No input crosses a lease or epoch change.
+      await this.refresh(track);
+      this.validateTrack(track);
+      if (this.manualLease(member.id) || track.epoch !== epoch || !this.sameIdentity(identity, this.identity(track))) return { ok: false, reason: "input_busy" };
+      const final = await this.readSetup(track);
+      if (!final || final.prompt.fingerprint !== fingerprint || track.epoch !== epoch) return { ok: false, reason: "changed", current: final?.prompt ?? null };
+      const distance = option - 1 - final.selected;
+      const keys = [...Array(Math.abs(distance)).fill(distance < 0 ? "up" : "down"), "enter"];
+      // Fence before the single write, including ambiguous replies. Never replay a setup answer.
+      track.setupAttempted = fingerprint; this.bump(track); attempted = true;
+      await this.call("terminal.keys", { terminal: track.terminal.address, keys }, this.sendTimeoutMs);
+      await this.refresh(track).catch(() => undefined); // Exit after 'No' is an observed exit, never a successful work turn.
+      return { ok: true, prompt: current, chosen };
+    } catch (error) {
+      if (track && attempted && (!(error instanceof CoreError) || error.uncertain)) track.uncertain = true;
+      if (!attempted && error instanceof CoreError && error.kind === "not_found") return { ok: false, reason: "gone" };
+      if (!attempted && error instanceof CoreError && error.kind === "conflict") return { ok: false, reason: "changed" };
+      throw error;
+    } finally { release(); }
   }
   private manualLease(memberId: string): TerminalLease | null {
     const lease = this.leases.get(memberId);

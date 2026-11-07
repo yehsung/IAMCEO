@@ -501,6 +501,7 @@ struct HomeView: View {
                         .accessibilityLabel("\(member.name) 터미널 열기")
                 }
             }
+            if approval { CLIApprovalCard(member: member) }
             if let delivery, let detail = homeDeliverySummary(delivery) {
                 Text(detail)
                     .font(CEFont.meta).foregroundStyle(CE.attention)

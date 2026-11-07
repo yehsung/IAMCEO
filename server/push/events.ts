@@ -9,10 +9,12 @@ export function pushErrorDigest(error: string | null): string | null {
   const normalized = error?.normalize("NFKC").trim().replace(/\s+/gu, " ");
   return normalized ? createHash("sha256").update(normalized).digest("hex") : null;
 }
-export function isPushApproval(member: Pick<Member, "status" | "blockedReason">): boolean {
-  return member.status === "blocked" && member.blockedReason === "permission";
+type ApprovalState = Pick<Member, "status" | "blockedReason"> & Partial<Pick<Member, "statusObservation">>;
+export function isPushApproval(member: ApprovalState): boolean {
+  return member.status === "blocked" && (member.blockedReason === "permission" ||
+    (member.blockedReason === "setup" && member.statusObservation?.source === "core" && member.statusObservation.error?.code === "folder_trust"));
 }
-function baseline(member: Pick<Member, "id" | "status" | "lastError" | "blockedReason">): PushEpisode {
+function baseline(member: ApprovalState & Pick<Member, "id" | "lastError">): PushEpisode {
   return { memberId: member.id, blockedGeneration: 0, blockedActive: isPushApproval(member), errorGeneration: 0,
     errorActive: member.status === "error" || pushErrorDigest(member.lastError) !== null, errorDigest: pushErrorDigest(member.lastError) };
 }
@@ -24,9 +26,11 @@ export class PushEventRecorder implements DomainRecorder {
   constructor(readonly push: PushStore) {
     // INSERT only missing baselines. Restart must never reset generations or emit old incidents.
     push.transaction(() => {
-      for (const row of push.db.query<{ id: string; status: Member["status"]; last_error: string | null; blocked_reason: Member["blockedReason"] }, []>(
-        "SELECT id,status,last_error,blocked_reason FROM members").all()) {
-        if (!push.getEpisode(row.id)) push.saveEpisode(baseline({ id: row.id, status: row.status, lastError: row.last_error, blockedReason: row.blocked_reason }));
+      for (const row of push.db.query<{ id: string; status: Member["status"]; last_error: string | null; blocked_reason: Member["blockedReason"]; status_observation_json: string | null }, []>(
+        "SELECT id,status,last_error,blocked_reason,status_observation_json FROM members").all()) {
+        let statusObservation: Member["statusObservation"] = null;
+        try { statusObservation = row.status_observation_json ? JSON.parse(row.status_observation_json) : null; } catch { /* No inferred approval from unreadable evidence. */ }
+        if (!push.getEpisode(row.id)) push.saveEpisode(baseline({ id: row.id, status: row.status, lastError: row.last_error, blockedReason: row.blocked_reason, statusObservation }));
       }
     });
   }
@@ -52,7 +56,8 @@ export class PushEventRecorder implements DomainRecorder {
     this.requireDomainTransaction();
     this.push.transaction(() => {
       const episode = this.push.getEpisode(after.id) ?? baseline(before);
-      const blocked = isPushApproval(after);
+      const blocked = isPushApproval(after) || (episode.blockedActive && after.status === "blocked" && after.blockedReason === "setup" &&
+        before.blockedReason === "setup" && after.statusObservation?.freshness === "stale");
       const digest = pushErrorDigest(after.lastError);
       const error = after.status === "error" || digest !== null;
       const newBlocked = blocked && !episode.blockedActive;

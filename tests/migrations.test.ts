@@ -98,6 +98,20 @@ function leaveCommittedWal(runtime: IsolatedRuntime, path: string, schemaVersion
 }
 
 describe("append-only migrations", () => {
+  test("creation goal migration leaves existing projects null instead of copying mutable now", () => {
+    const { path } = fixture();
+    const old = historicalDb(path, MIGRATIONS.length - 1);
+    old.query("UPDATE projects SET now='나중에 바뀐 상황' WHERE id='p'").run();
+    expect(columns(old, "projects")).not.toContain("creation_goal");
+    old.close();
+    const db = track(openDb(path));
+    const store = new Store(db, new Bus());
+    expect(store.requireProject("p")).toMatchObject({ now: "나중에 바뀐 상황", creationGoal: null, createdAt: at });
+    const project = store.createProject({ name: "새 목표", cwd: "/fixture", creationGoal: "대표의 원래 목표" });
+    store.patchProject(project.id, { now: "바뀐 진행 상황" });
+    expect(store.requireProject(project.id).creationGoal).toBe("대표의 원래 목표");
+    expect(version(db)).toBe(MIGRATIONS.length);
+  });
   test("fresh memory DB has all persistence boundaries, indexes and connection protections", () => {
     const db = track(openDb(":memory:"));
     expect(afterWindow).toBeGreaterThan(0);

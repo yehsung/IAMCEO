@@ -33,6 +33,8 @@ export interface Project {
   /** false 면 메시지를 저장만 하고 어떤 세션도 띄우거나 깨우지 않는다(가져온 프로젝트 기본값). */
   runnerEnabled: boolean;
   now: string; // '지금 상황' 한 줄~짧은 글
+  /** 생성 때 대표가 쓴 목표 원문. 이후 수정하지 않으며 이전 프로젝트는 null. */
+  readonly creationGoal: string | null;
   nowAt: string | null;
   herdrTabId: string | null;
   archived: boolean;
@@ -398,8 +400,9 @@ export type ActivityKind = "text" | "tool" | "tool_result" | "turn_start" | "tur
 export interface Activity { id: number; memberId: string; at: string; kind: ActivityKind; text: string }
 
 /**
- * herdr 칸에 뜬 Claude Code 권한 승인 창. 화면에서 읽은 글 그대로다(번역하지 않는다).
- * fingerprint 는 창 내용(제목·본문·질문·선택지)의 해시다. 누를 때 다시 읽어 같을 때만 누른다.
+ * 실행기가 확인한 CLI 승인·설정 창. 선택지는 화면 원문 순서 그대로다.
+ * fingerprint 는 창 근거의 해시다(herdr: 추출 내용, core 폴더 신뢰: 경로·선택 위치를 포함한 평문 화면).
+ * 누를 때 다시 읽어 같을 때만 누른다. 설정 창에는 앱의 사실 설명을 붙일 수 있다.
  */
 export interface ApprovalOption { n: number; label: string; /** 거절(No) 선택지 */ reject: boolean }
 export interface ApprovalPrompt {

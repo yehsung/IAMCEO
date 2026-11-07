@@ -254,7 +254,7 @@ struct InboxView: View {
 
     // MARK: Approval windows (CLI menus, not decisions)
 
-    /// One compact card for every session stopped at a CLI approval prompt. Answering happens in the terminal.
+    /// One compact card for every confirmed CLI approval prompt.
     private var approvalCard: some View {
         Plate(padding: 0) {
             VStack(alignment: .leading, spacing: 0) {
@@ -277,6 +277,13 @@ struct InboxView: View {
     }
 
     private func approvalRow(_ member: Member) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            approvalHeader(member)
+            CLIApprovalCard(member: member)
+        }
+    }
+
+    private func approvalHeader(_ member: Member) -> some View {
         let command = "\(store.bootstrap?.cli ?? "iamceo") attach \(member.id)"
         let copied = copiedMember == member.id
         let now = plainOneLine(member.now)
@@ -1025,7 +1032,7 @@ private struct DecisionCard: View {
 
 /// Web option tile: quiet glass fill; the recommended one violet with a ring; the picked one deep violet with a
 /// focus ring and a check. When another option is picked the recommended one steps back.
-private struct OptionTile: View {
+struct OptionTile: View {
     let option: DecisionOption
     let recommended: Bool
     let picked: Bool
@@ -1112,7 +1119,7 @@ private struct OptionPressStyle: ButtonStyle {
 
 // MARK: - Confirm bar (second step; nothing is sent on the first tap)
 
-private struct ConfirmBar: View {
+struct ConfirmBar: View {
     let quoted: String?
     let verb: String
     let hint: String?

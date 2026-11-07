@@ -644,7 +644,8 @@ export class Orchestrator implements OrchestratorApi {
       observed: state => {
         const member = this.store.getMember(state.memberId);
         if (!member || this.closed || state.code === "mutation_in_progress") return;
-        this.store.patchMember(member.id, { statusObservation: { source: "core", observedAt: state.lastObservedAt === null ? null : new Date(state.lastObservedAt).toISOString(), freshness: state.outcome === "rejoined" ? "fresh" : "stale", ownership: state.outcome === "rejoined" ? "verified" : state.outcome === "conflict" ? "conflict" : "unknown", consecutiveFailures: state.failures, error: state.code ? { code: state.code, note: "소유 터미널을 다시 관측합니다. 후보가 여러 개면 자동 선택하거나 종료하지 않습니다" } : null } });
+        const setupError = state.outcome === "rejoined" && core instanceof CoreRunner ? core.observationState(member.id)?.setupError ?? null : null;
+        this.store.patchMember(member.id, { statusObservation: { source: "core", observedAt: state.lastObservedAt === null ? null : new Date(state.lastObservedAt).toISOString(), freshness: state.outcome === "rejoined" ? "fresh" : "stale", ownership: state.outcome === "rejoined" ? "verified" : state.outcome === "conflict" ? "conflict" : "unknown", consecutiveFailures: state.failures, error: state.code ? { code: state.code, note: "소유 터미널을 다시 관측합니다. 후보가 여러 개면 자동 선택하거나 종료하지 않습니다" } : setupError } });
         if (state.outcome === "rejoined" && !this.recovering) void this.pump(member.id);
       },
     }) : null;
@@ -1329,7 +1330,7 @@ export class Orchestrator implements OrchestratorApi {
   // ---- REST 겉면 ----
   async createProject(req: CreateProjectReq): Promise<Project> {
     const goal = req.goal?.trim();
-    const project = this.store.createProject({ name: req.name, cwd: req.cwd, now: goal });
+    const project = this.store.createProject({ name: req.name, cwd: req.cwd, now: goal, creationGoal: req.goal ?? null });
     this.store.setChiefCli(project.id, req.chiefCli ?? "claude");
     if (req.startConductor) {
       const conductor = await this.ensureConductor(project.id);
@@ -2034,6 +2035,7 @@ export class Orchestrator implements OrchestratorApi {
         no_option: "그 번호의 선택지가 없습니다",
         no_effect: "키를 눌렀지만 창이 그대로입니다. 터미널에서 확인하세요",
         gone: "칸을 찾지 못했습니다",
+        input_busy: "수동 조작 중이거나 터미널 입력 상태가 바뀌었습니다. 조작을 끝내고 창을 다시 확인하세요",
       }[r.reason];
       throw new ApiError(r.reason === "no_option" ? 400 : 409, why);
     }
@@ -2468,6 +2470,8 @@ export class Orchestrator implements OrchestratorApi {
       if (option && normalizeSpace(option.label) === quote) return { id: d.id, text: option.label, at: d.answeredAt, card: d.title };
       if (d.note && matches(d.note)) return { id: d.id, text: d.note, at: d.answeredAt };
     }
+    const project = this.store.requireProject(projectId);
+    if (project.creationGoal && matches(project.creationGoal)) return { id: project.id, text: project.creationGoal, at: project.createdAt };
     let before: string | undefined;
     for (let page = 0; page < QUOTE_SCAN_PAGES; page++) {
       const messages = this.store.listMessages(projectId, { before, limit: 500 });
@@ -3886,7 +3890,8 @@ export class Orchestrator implements OrchestratorApi {
   /** 승인 창 앞에서는 대표가 풀어 줘야 움직인다. 결재함에 안 보이므로 다른 창을 보고 있어도 알린다. */
   private markBlocked(member: Member): void {
     if (member.status !== "blocked") void this.notifyBlocked(member);
-    this.store.patchMember(member.id, { status: "blocked" });
+    // The observation's verified reason may have arrived before this status transition.
+    this.store.patchMember(member.id, { status: "blocked", blockedReason: member.blockedReason ?? "status_unknown" });
   }
 
   /** 무엇을 승인할지 알림에 같이 싣는다. 창을 못 읽으면 예전 문구다. */

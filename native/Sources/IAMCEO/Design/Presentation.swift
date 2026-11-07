@@ -63,10 +63,10 @@ struct MemberStatusInfo: Sendable {
         if observation?.ownership == "conflict" {
             self.init(label: "소유 관계 확인 필요", tone: .attention, icon: "lock.trianglebadge.exclamationmark",
                       explanation: "터미널 소유 관계가 달라 마지막 상태만 보존하고 있습니다. 자동 입력은 보류됩니다.", needsMe: true)
-        } else if let observation, observation.freshness != "fresh" || observation.ownership != "verified" || observation.error != nil {
+        } else if let observation, observation.freshness != "fresh" || observation.ownership != "verified" || (observation.error != nil && !member.hasFolderTrustApproval) {
             self.init(label: "상태 확인 불가", tone: .attention, icon: "questionmark.circle",
                       explanation: observation.error?.note ?? "현재 상태를 관측하지 못했습니다. 마지막 관측을 보존하며 다시 확인합니다.")
-        } else if member.status == "blocked", !["permission", "selection"].contains(member.blockedReason ?? "") {
+        } else if member.status == "blocked", !["permission", "selection"].contains(member.blockedReason ?? ""), !member.hasFolderTrustApproval {
             self.init(label: member.blockedReason == "setup" ? "상태 설정 확인 중" : "상태 확인 불가",
                       tone: .attention, icon: "questionmark.circle", explanation: "승인 창이 확인된 상태가 아닙니다. 상태 신호를 다시 확인하며 자동 입력을 보류합니다.")
         } else if member.origin == "manual" {
@@ -83,6 +83,18 @@ struct MemberStatusInfo: Sendable {
     private init(label: String, tone: Tone, icon: String, explanation: String, needsMe: Bool = false) {
         self.label = label; self.tone = tone; self.icon = icon; self.explanation = explanation
         live = false; self.needsMe = needsMe
+    }
+}
+
+extension Member {
+    var hasFolderTrustApproval: Bool {
+        status == "blocked" && backend == "core" && blockedReason == "setup" &&
+        statusObservation?.source == "core" && statusObservation?.freshness == "fresh" &&
+        statusObservation?.ownership == "verified" && statusObservation?.error?.code == "folder_trust"
+    }
+    var canReadCLIApproval: Bool {
+        guard paneId != nil, MemberStatusInfo(self).tone == .approval else { return false }
+        return hasFolderTrustApproval || (backend == "herdr" && status == "blocked" && ["permission", "selection"].contains(blockedReason ?? ""))
     }
 }
 

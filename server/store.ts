@@ -74,6 +74,7 @@ export interface NewProject {
   chiefCli?: CliProvider;
   runnerEnabled?: boolean;
   now?: string;
+  creationGoal?: string | null;
 }
 export type ProjectPatch = Partial<
   Pick<
@@ -273,6 +274,7 @@ function toProject(r: Row, connection: ProjectConnection): Project {
     cwd: r.cwd,
     runnerEnabled: !!r.runner_enabled,
     now: r.now,
+    creationGoal: r.creation_goal ?? null,
     nowAt: r.now_at,
     herdrTabId: r.herdr_tab_id,
     archived: !!r.archived,
@@ -890,8 +892,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const id = input.id ?? newId("p_");
       const now = input.now ?? "";
       this.run(
-        `INSERT INTO projects (id, name, is_hq, cwd, runner_enabled, now, now_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO projects (id, name, is_hq, cwd, runner_enabled, now, now_at, created_at, updated_at, creation_goal)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id,
         input.name,
         id === "hq" ? 1 : 0,
@@ -901,6 +903,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         now ? at : null,
         at,
         at,
+        input.creationGoal ?? null,
       );
       if (input.chiefCli) this.setChiefCli(id, input.chiefCli);
       const project = this.requireProject(id);

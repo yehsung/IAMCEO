@@ -1239,6 +1239,29 @@ final class AppStore: ProjectManagementStore {
         return false
     }
 
+    func readCLIApproval(_ member: Member) async throws -> CLIApprovalPrompt? {
+        guard !isDemo, member.canReadCLIApproval, let api else { return nil }
+        let result: CLIApprovalResponse = try await api.request("/api/members/\(APIClient.segment(member.id))/approval")
+        return result.approval
+    }
+
+    @discardableResult func answerCLIApproval(_ member: Member, prompt: CLIApprovalPrompt, option: Int) async -> Bool {
+        let lease = terminalLeases[member.id]
+        let manualControl = lease?.leaseId != nil && (lease?.expiresAt.map { $0 > Date().timeIntervalSince1970 * 1000 } ?? true)
+        guard member.projectId == selectedProjectID,
+              members.first(where: { $0.id == member.id })?.canReadCLIApproval == true,
+              !manualControl else {
+            errorMessage = "현재 승인 창을 확인할 수 없습니다. 직접 조작을 끝내고 다시 읽어 주세요."
+            return false
+        }
+        struct Result: Decodable, Sendable { let ok: Bool }
+        let result: Result? = await mutate("approval:\(member.id)") { api in
+            try await api.send("/api/members/\(APIClient.segment(member.id))/approval",
+                               body: CLIApprovalAnswer(fingerprint: prompt.fingerprint, option: option))
+        }
+        return result?.ok == true
+    }
+
     @discardableResult func claimTerminal(_ member: Member) async -> Bool {
         if strictWriteContract { return await terminalOperation(member, action: .claim) }
         // Passing the lease we still hold renews it; a lost input reply may have extended it on the server past our copy.

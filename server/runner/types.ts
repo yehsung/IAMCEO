@@ -7,7 +7,7 @@ import type { ContextReading } from "./context.ts";
  */
 export type ApprovalAnswer =
   | { ok: true; prompt: ApprovalPrompt; chosen: ApprovalOption }
-  | { ok: false; reason: "not_blocked" | "unrecognized" | "changed" | "no_option" | "no_effect" | "gone"; current?: ApprovalPrompt | null };
+  | { ok: false; reason: "not_blocked" | "unrecognized" | "changed" | "no_option" | "no_effect" | "gone" | "input_busy"; current?: ApprovalPrompt | null };
 
 export interface RunnerMember {
   /** Official interactive provider; absent for legacy Claude members. */
@@ -204,9 +204,9 @@ export interface Runner {
   /** stop 이 넘겨받은 칸을 끝낼 수 있는지 아무것도 바꾸지 않고 본다. 못 끝내면 stop 과 같은 오류를 던진다. whileWorking: 곧 끊을 턴이라 일하는 중은 문제 삼지 않는다. 칸을 끝내지 않는 실행기는 구현하지 않는다. */
   checkStop?(m: RunnerMember, opts?: RunnerStopOptions): Promise<void>;
   screen(m: RunnerMember): Promise<string>;
-  /** 칸이 권한 승인 창 앞이면 그 창을 읽는다. 아니거나 알아볼 수 없는 창이면 null. 창이 없는 실행기는 구현하지 않는다. */
+  /** 실행기가 확인할 수 있는 승인·설정 창을 읽는다. 아니거나 알아볼 수 없는 창이면 null. */
   approval?(m: RunnerMember): Promise<ApprovalPrompt | null>;
-  /** 화면을 다시 읽어 fingerprint 가 같을 때만 option 번호 키를 누르고, 창이 닫혔는지 확인한다. */
+  /** 화면을 다시 읽어 fingerprint 가 같을 때만 고른 선택지에 맞는 키를 한 번 보내고 상태를 다시 관측한다. */
   answerApproval?(m: RunnerMember, fingerprint: string, option: number): Promise<ApprovalAnswer>;
   on(cb: (e: RunnerEvent) => void): void;
   shutdown(): Promise<void>;

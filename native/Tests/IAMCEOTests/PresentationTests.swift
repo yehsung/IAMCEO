@@ -96,6 +96,30 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(MemberStatusInfo(Member(status: "future-status")).label, "상태 확인 불가")
     }
 
+    func testCoreFolderTrustReusesApprovalInInboxAndHomeOnlyWithVerifiedEvidence() {
+        let observation = StatusObservation(source: "core", observedAt: "observed", freshness: "fresh", ownership: "verified",
+                                            error: ObservationError(code: "folder_trust", note: "폴더 신뢰 확인 창에서 멈췄습니다: /fixture"))
+        let member = Member(id: "trust", backend: "core", status: "blocked", paneId: "t1", blockedReason: "setup", statusObservation: observation)
+        XCTAssertTrue(member.canReadCLIApproval)
+        XCTAssertEqual(MemberStatusInfo(member).tone, .approval)
+        XCTAssertTrue(MemberStatusInfo(member).needsMe)
+        XCTAssertEqual(HomeAttention(members: [member], notices: nil, messages: []).members.map { $0.member.id }, ["trust"])
+        for change in ["stale", "unknown", "otherError", "otherSource", "otherBackend", "working", "noPane"] {
+            var other = member
+            switch change {
+            case "stale": other.statusObservation?.freshness = "stale"
+            case "unknown": other.statusObservation?.ownership = "unknown"
+            case "otherError": other.statusObservation?.error = ObservationError(code: "status_unknown", note: "알 수 없는 창")
+            case "otherSource": other.statusObservation?.source = "herdr"
+            case "otherBackend": other.backend = "herdr"
+            case "working": other.status = "working"
+            default: other.paneId = nil
+            }
+            XCTAssertFalse(other.canReadCLIApproval, change)
+            if change != "noPane" { XCTAssertNotEqual(MemberStatusInfo(other).tone, .approval, change) }
+        }
+    }
+
     func testManualStatusAndLastReportDoNotUseUpdatedAt() {
         let member = Member(origin: "manual", status: "working", now: "지난 작업", next: "보존할 예정",
                             updatedAt: "unrelated-edit", nowAt: "report-time", manualActivityAt: "tool-time")

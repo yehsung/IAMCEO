@@ -209,7 +209,8 @@ struct TerminalView: View {
     @ViewBuilder private var guidance: some View {
         if controlling {
             EmptyView()
-        } else if current.status == "blocked", ["permission", "selection"].contains(current.blockedReason ?? ""), MemberStatusInfo(current).tone == .approval {
+        } else if current.canReadCLIApproval {
+            CLIApprovalCard(member: current)
             TermNotice(tone: .approval, icon: "hand.raised.fill", title: "승인·선택 창 앞에서 멈췄습니다",
                        detail: "화면을 확인하고 직접 조작을 시작해 승인하거나 거절하세요. 끝나면 조작을 끝내 자동 전달을 다시 켜세요.")
         } else if current.status == "blocked" {

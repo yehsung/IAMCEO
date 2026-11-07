@@ -363,6 +363,39 @@ describe("대기열·동시 상한", () => {
 });
 
 describe("승인 근거", () => {
+  test("생성 목표 원문은 now 변경 뒤에도 검증되는 대표 요청이며 다른 글은 미확인", async () => {
+    const t = await setup();
+    const goal = "  동네 빵집 아침빵의 한 장짜리 소개 페이지를 완성한다.\n가격과 영업시간을 담는다.  ";
+    const p = await t.orch.createProject({ name: "빵집", cwd: t.home, goal });
+    expect(p.creationGoal).toBe(goal);
+    expect(t.orch.findQuoteSource(p.id, "동네 빵집 아침빵의 한 장짜리 소개 페이지를 완성한다")).toEqual({ id: p.id, text: goal, at: p.createdAt });
+    t.store.patchProject(p.id, { now: "전혀 다른 현재 상황" });
+    expect(t.store.requireProject(p.id).creationGoal).toBe(goal);
+    const added = await t.orch.addMember(p.id, { name: "개발", handle: "baker", role: "개발", firstInstruction: "@fake:silent", userQuote: "동네 빵집 아침빵의 한 장짜리 소개 페이지를 완성한다" });
+    const w = added.member;
+    expect(added.assigned?.verified).toBe(true); await t.idle(w.id);
+    expect(t.starts().at(-1)!.prompt).toContain('사용자 요청(원문, 서버 확인): "동네 빵집 아침빵의 한 장짜리 소개 페이지를 완성한다"');
+    const ok = await t.orch.assign(p.id, w.handle, { text: "@fake:silent", userQuote: "동네 빵집 아침빵의 한 장짜리 소개 페이지를 완성한다" });
+    expect(ok.verified).toBe(true); await t.idle(w.id);
+    expect(t.starts().at(-1)!.prompt).toContain('사용자 요청(원문, 서버 확인): "동네 빵집 아침빵의 한 장짜리 소개 페이지를 완성한다"');
+    expect(t.orch.findQuoteSource(p.id, "전혀 다른 현재 상황")).toBeNull();
+    const bad = await t.orch.assign(p.id, w.handle, { text: "@fake:silent", userQuote: "예약 결제 기능까지 만든다" });
+    expect(bad.verified).toBe(false); await t.idle(w.id);
+    expect(t.starts().at(-1)!.prompt).toContain('총괄 인용(미확인): "예약 결제 기능까지 만든다"');
+    expect(t.orch.findQuoteSource(t.project.id, goal)).toBeNull();
+  });
+
+  test("생성 목표도 짧은 인용은 전체 일치만 허용하고 now를 소급해 근거로 쓰지 않는다", async () => {
+    const t = await setup();
+    const long = await t.orch.createProject({ name: "긴 목표", cwd: t.home, goal: "네이버 말고 다른 곳" });
+    expect(t.orch.findQuoteSource(long.id, "네")).toBeNull();
+    const short = await t.orch.createProject({ name: "짧은 목표", cwd: t.home, goal: "네" });
+    expect(t.orch.findQuoteSource(short.id, '"네"')).toEqual({ id: short.id, text: "네", at: short.createdAt });
+    const legacy = t.store.createProject({ name: "목표 없는 프로젝트", cwd: t.home, now: "현재 목표라고 쓴 글" });
+    expect(legacy.creationGoal).toBeNull();
+    expect(t.orch.findQuoteSource(legacy.id, legacy.now)).toBeNull();
+  });
+
   test("대표 메시지에 공백 정규화로 있으면 서버 확인, 없으면 미확인", async () => {
     const t = await setup();
     const w = await worker(t);
@@ -518,11 +551,13 @@ describe("runnerEnabled=false 와 총괄 시작", () => {
     const t = await setup();
     const p = await t.orch.createProject({ name: "새것", cwd: t.home, goal: "랜딩 만들기 @fake:silent", startConductor: true });
     expect(p.now).toContain("랜딩 만들기");
+    expect(p.creationGoal).toBe("랜딩 만들기 @fake:silent");
     const lead = t.store.getConductor(p.id)!;
     expect(lead.handle).toBe("lead");
     await waitFor("목표 전달", () => t.starts().some((c) => c.prompt.includes("[시스템] 프로젝트 목표: 랜딩 만들기")));
     await t.idle(lead.id);
     const plain = await t.orch.createProject({ name: "그냥", cwd: t.home });
+    expect(plain.creationGoal).toBeNull();
     expect(t.store.getConductor(plain.id)).toBeNull();
   });
 });
@@ -710,7 +745,7 @@ describe("ask", () => {
 // 실패 사유는 headless 로 만들 수 없어 herdr 자리에 가짜 실행기를 끼운다.
 class ScriptedRunner implements Runner {
   store: Store | null = null;
-  readonly kind = "herdr" as const;
+  constructor(readonly kind: Backend = "herdr") {}
   results: SendResult[] = [];
   sent: { text: string; urgent: boolean }[] = [];
   compacts: string[] = [];
@@ -781,18 +816,18 @@ class ScriptedRunner implements Runner {
   }
 }
 
-function scripted(timings: Partial<OrchestratorTimings> = {}) {
+function scripted(timings: Partial<OrchestratorTimings> = {}, backend: Backend = "herdr") {
   const home = mkdtempSync(join(tmpdir(), "iamceo-script-"));
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
   updateConfigFile({ accessCode: "code", hosts: ["127.0.0.1"] }, env);
   const config = loadConfig(env);
   const store = new Store(openDb(config.dbPath), new Bus());
-  const runner = new ScriptedRunner();
+  const runner = new ScriptedRunner(backend);
   runner.store = store;
   const orch = new Orchestrator({
     config,
     store,
-    runners: new Map<Backend, Runner>([["herdr", runner]]),
+    runners: new Map<Backend, Runner>([[backend, runner]]),
     herdr: {
       info: async () => ({ installed: true, running: true, version: "1", protocol: 22, compatible: true, warning: null }),
       agents: async () => [
@@ -803,7 +838,7 @@ function scripted(timings: Partial<OrchestratorTimings> = {}) {
     timings,
   });
   cleanups.push(() => orch.shutdown());
-  store.patchSettings({ backend: "herdr" });
+  store.patchSettings({ backend });
   const project = store.createProject({ name: "칸", cwd: home });
   return { store, runner, orch, project, home };
 }
@@ -866,6 +901,29 @@ describe("승인 창 답", () => {
     options: [{ n: 1, label: "Yes", reject: false }, { n: 2, label: "No", reject: true }],
     fingerprint: "abcdef0123456789abcdef01",
   };
+
+  test("core setup 근거는 처음 blocked로 바뀔 때도 보존하고 같은 승인 API에서 stale·lease는 409, 종료는 offline", async () => {
+    const t = scripted({}, "core");
+    const w = (await t.orch.addMember(t.project.id, { name: "신뢰 확인", handle: "trust" })).member;
+    const trust: ApprovalPrompt = { ...prompt, title: "폴더 신뢰 확인", body: t.home,
+      options: [{ n: 1, label: "No, exit", reject: true }, { n: 2, label: "Yes, I trust this folder", reject: false }] };
+    t.runner.approvalPrompt = trust;
+    t.runner.emit({ type: "status", memberId: w.id, status: "blocked", blockedReason: "setup",
+      observation: { source: "core", observedAt: "now", freshness: "fresh", ownership: "verified", consecutiveFailures: 0,
+        error: { code: "folder_trust", note: `폴더 신뢰 확인 창에서 멈췄습니다: ${t.home}` } } });
+    expect(t.store.requireMember(w.id)).toMatchObject({ status: "blocked", blockedReason: "setup", statusObservation: { error: { code: "folder_trust" } } });
+    expect(await t.orch.memberApproval(w.id)).toEqual(trust);
+    for (const reason of ["changed", "input_busy"] as const) {
+      t.runner.answerResult = { ok: false, reason };
+      const error = await t.orch.answerApproval(w.id, { fingerprint: trust.fingerprint, option: 2 }).catch(e => e);
+      expect(error).toBeInstanceOf(ApiError); expect(error.status).toBe(409);
+    }
+    t.runner.answerResult = { ok: true, prompt: trust, chosen: trust.options[0]! };
+    await t.orch.answerApproval(w.id, { fingerprint: trust.fingerprint, option: 1 });
+    t.runner.emit({ type: "status", memberId: w.id, status: "gone", blockedReason: null, exit: { reason: "exited", exitCode: 0 } });
+    expect(t.store.requireMember(w.id)).toMatchObject({ status: "offline", blockedReason: null });
+    expect(t.store.listActivity(w.id).some(a => a.text.includes("No, exit"))).toBe(true);
+  });
 
   test("거절하며 남긴 말은 창이 닫힌 뒤 대표가 직접 보낸 글로 들어가고, 고른 것은 활동에 남는다", async () => {
     const t = scripted();

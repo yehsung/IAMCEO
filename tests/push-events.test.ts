@@ -39,11 +39,11 @@ function fixture(persistent = false) {
       environment: "sandbox", deviceToken: token, authorization: "authorized" });
     return push.patchDevice(value.id, { expectedRevision: value.revision, enabled: true });
   }
-  function transition(patch: Partial<Pick<Member, "status" | "lastError" | "blockedReason">>, id = member.id) {
+  function transition(patch: Partial<Pick<Member, "status" | "lastError" | "blockedReason" | "statusObservation">>, id = member.id) {
     return store.transaction(() => {
       const before = { ...store.requireMember(id), blockedReason: db.query<{ blocked_reason: Member["blockedReason"] }, [string]>("SELECT blocked_reason FROM members WHERE id=?").get(id)!.blocked_reason };
       const after = { ...before, ...patch };
-      db.query("UPDATE members SET status=?,last_error=?,blocked_reason=? WHERE id=?").run(after.status, after.lastError, after.blockedReason ?? null, id);
+      db.query("UPDATE members SET status=?,last_error=?,blocked_reason=?,status_observation_json=? WHERE id=?").run(after.status, after.lastError, after.blockedReason ?? null, after.statusObservation ? JSON.stringify(after.statusObservation) : null, id);
       recorder.member(before, after);
       return after;
     });
@@ -136,6 +136,23 @@ describe("domain recorder", () => {
     f.transition({ status: "blocked", blockedReason: "permission" });
     expect(f.push.getEpisode(f.member.id)?.blockedGeneration).toBe(2);
     expect(f.push.listEvents()).toHaveLength(2);
+  });
+  test("confirmed folder trust uses one approval episode across ticks, observation outages and restarts", () => {
+    const f = fixture(true); f.enabled();
+    f.transition({ status: "blocked", blockedReason: "setup" });
+    expect(f.push.listEvents()).toEqual([]);
+    const statusObservation: Member["statusObservation"] = { source: "core", freshness: "fresh", ownership: "verified", observedAt: "now", consecutiveFailures: 0,
+      error: { code: "folder_trust", note: "폴더 신뢰 확인 창에서 멈췄습니다: /fixture" } };
+    f.transition({ statusObservation });
+    f.transition({ statusObservation });
+    f.restart();
+    f.transition({ statusObservation: { ...statusObservation, freshness: "stale", error: { code: "timeout", note: "재관측 중" } } });
+    f.transition({ statusObservation });
+    expect(f.push.listEvents().map((e) => e.sourceKey)).toEqual([`blocked:${f.member.id}:1`]);
+    expect(f.push.listEvents()[0].kind).toBe("approval_wait");
+    expect(f.push.listDeliveries()).toHaveLength(1);
+    f.transition({ status: "offline", blockedReason: null });
+    expect(f.push.listDeliveries()[0].state).toBe("cancelled");
   });
   test("lastError-only failure, normalized digest, changed errors and error→idle latch", () => {
     const f = fixture(); f.enabled();

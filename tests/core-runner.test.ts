@@ -12,6 +12,11 @@ import type { DeliveryDispatch, RunnerRecoveryStore, TerminalLease } from "../se
 import type { DeliveryRepair } from "../server/runner/types.ts";
 import { transcriptPath } from "../server/runner/transcript.ts";
 import type { RunnerEvent, RunnerMember, StartOpts } from "../server/runner/types.ts";
+import { loadConfig } from "../server/config.ts";
+import { openDb } from "../server/db.ts";
+import { Bus } from "../server/bus.ts";
+import { Store } from "../server/store.ts";
+import { Orchestrator } from "../server/orchestrator.ts";
 
 const methods = ["terminal.run", "terminal.list", "terminal.get", "terminal.read", "terminal.send", "terminal.interrupt", "terminal.kill", "terminal.keys"];
 const composer = (draft = "") => `prior output\n${"─".repeat(30)}\n❯ ${draft}\n${"─".repeat(30)}\n`;
@@ -67,6 +72,116 @@ async function fixture() {
 }
 afterEach(async () => { for (const f of fixtures.splice(0)) { await Promise.all(f.runners.map((runner) => runner.shutdown())); for (const socket of f.sockets) socket.destroy(); await new Promise<void>((resolve) => f.server.close(() => resolve())); rmSync(f.dir, { recursive: true, force: true }); } });
 const until = async (predicate: () => boolean) => { for (let i = 0; i < 100 && !predicate(); i++) await Bun.sleep(10); expect(predicate()).toBe(true); };
+
+const trustScreen = (cwd = "/tmp", selected = 0) => ` Accessing workspace:\n ${cwd}\n Quick safety check: Is this a project you created or one you trust?\n ${selected === 0 ? "❯" : " "} No, exit\n ${selected === 1 ? "❯" : " "} Yes, I trust this folder\n Enter to confirm · Esc to cancel\n`;
+describe("core Claude folder trust approval", () => {
+  test("real orchestrator and supervisor keep folder trust evidence through reconnect and clear it on unknown screens", async () => {
+    const f = await fixture(); const runner = f.runner();
+    const config = loadConfig({ IAMCEO_HOME: join(f.dir, "iamceo"), IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: f.socketPath,
+      IAMCEO_CLAUDE_BIN: "/fake/claude", IAMCEO_CODEX_BIN: "/fake/codex", IAMCEO_CORE_BIN: "/usr/bin/false" });
+    const db = openDb(config.dbPath); const store = new Store(db, new Bus());
+    const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]),
+      providerHomes: { claudeHome: join(f.dir, "claude-home"), codexHome: join(f.dir, "codex-home") }, timings: { healthMs: 1, tickMs: 60000 } });
+    try {
+      const project = store.createProject({ name: "신뢰", cwd: f.dir });
+      const m = await orch.createMember(project.id, { name: "worker" });
+      f.terminals.get(m.paneId!)!.status = null; f.setScreen(trustScreen(f.dir));
+      await until(() => store.requireMember(m.id).statusObservation?.error?.code === "folder_trust");
+      expect(store.requireMember(m.id).blockedReason).toBe("setup");
+      await orch.refreshConnection();
+      expect(store.requireMember(m.id).statusObservation).toMatchObject({ freshness: "fresh", ownership: "verified", error: { code: "folder_trust" } });
+      store.patchMember(m.id, { statusObservation: { source: "core", observedAt: null, freshness: "stale", ownership: "unknown", consecutiveFailures: 1, error: { code: "timeout", note: "재연결 중" } } });
+      await Bun.sleep(5); await orch.refreshConnection();
+      expect(store.requireMember(m.id).statusObservation).toMatchObject({ freshness: "fresh", error: { code: "folder_trust" } });
+      expect((await orch.memberApproval(m.id))?.title).toBe("폴더 신뢰 확인");
+      f.setScreen("An unknown setup screen"); await Bun.sleep(5); await orch.refreshConnection();
+      expect(store.requireMember(m.id)).toMatchObject({ status: "blocked", blockedReason: "status_unknown", statusObservation: { error: null } });
+      expect(await orch.memberApproval(m.id)).toBeNull();
+      expect(f.calls.some(r => r.method === "terminal.keys")).toBe(false);
+    } finally { await orch.shutdown(); db.close(); }
+  });
+  async function trust(cli: "claude" | "codex" = "claude") {
+    const f = await fixture(); const runner = f.runner(10000); const m = member({ cli });
+    const started = await runner.start(m, f.opts); const terminal = f.terminals.get(started.paneId)!;
+    terminal.status = null; f.setScreen(trustScreen());
+    return { f, runner, m, terminal };
+  }
+  test("unknown → setup/folder_trust → unknown updates evidence even while status stays blocked", async () => {
+    const { f, runner, m } = await trust(); const events: RunnerEvent[] = []; runner.on((e) => events.push(e));
+    f.setScreen("An unknown setup dialog"); expect(await runner.approval(m)).toBeNull();
+    expect(events.at(-1)).toMatchObject({ status: "blocked", blockedReason: "status_unknown", observation: { error: null } });
+    f.setScreen(trustScreen()); const prompt = await runner.approval(m);
+    expect(prompt).toMatchObject({ title: "폴더 신뢰 확인", body: "/tmp\n이 폴더에서 AI가 파일을 읽고 고치고 실행할 수 있게 됩니다",
+      options: [{ n: 1, label: "No, exit", reject: true }, { n: 2, label: "Yes, I trust this folder", reject: false }] });
+    expect(events.at(-1)).toMatchObject({ status: "blocked", blockedReason: "setup", observation: { source: "core", freshness: "fresh", ownership: "verified", error: { code: "folder_trust", note: "폴더 신뢰 확인 창에서 멈췄습니다: /tmp" } } });
+    expect(prompt!.fingerprint).toMatch(/^[0-9a-f]{24}$/);
+    expect((await runner.approval(m))?.fingerprint).toBe(prompt!.fingerprint);
+    f.setScreen("Not a trust screen"); expect(await runner.approval(m)).toBeNull();
+    expect(events.at(-1)).toMatchObject({ status: "blocked", blockedReason: "status_unknown", observation: { error: null } });
+    expect(f.calls.filter((r) => ["terminal.send", "terminal.keys"].includes(r.method))).toHaveLength(0);
+  });
+  test("Yes sends down + enter in one write, then reports the actual idle state; replay is fenced", async () => {
+    const { f, runner, m, terminal } = await trust(); const prompt = (await runner.approval(m))!;
+    const events: RunnerEvent[] = []; runner.on((e) => events.push(e));
+    f.setHook((r) => { if (r.method === "terminal.keys") { terminal.status = { state: "idle" }; f.setScreen(composer()); } return false; });
+    expect(await runner.answerApproval(m, prompt.fingerprint, 2)).toMatchObject({ ok: true, chosen: { n: 2 } });
+    expect(f.calls.filter((r) => r.method === "terminal.keys").map((r) => r.params.keys)).toEqual([["down", "enter"]]);
+    expect(events.at(-1)).toMatchObject({ status: "idle", blockedReason: null });
+    terminal.status = null; f.setScreen(trustScreen());
+    expect(await runner.answerApproval(m, prompt.fingerprint, 2)).toMatchObject({ ok: false, reason: "changed" });
+    expect(f.calls.filter((r) => r.method === "terminal.keys")).toHaveLength(1);
+  });
+  test("No sends only enter and preserves the observed normal session exit", async () => {
+    const { f, runner, m, terminal } = await trust(); const prompt = (await runner.approval(m))!;
+    const events: RunnerEvent[] = []; runner.on((e) => events.push(e));
+    f.setHook((r) => { if (r.method === "terminal.keys") { terminal.state = "finished"; terminal.reason = "exited"; terminal.exit_code = 0; } return false; });
+    expect(await runner.answerApproval(m, prompt.fingerprint, 1)).toMatchObject({ ok: true, chosen: { reject: true } });
+    expect(f.calls.filter((r) => r.method === "terminal.keys").map((r) => r.params.keys)).toEqual([["enter"]]);
+    expect(events.at(-1)).toMatchObject({ status: "gone", exit: { reason: "exited", exitCode: 0 } });
+    expect(events.some((e) => e.type === "turn_end")).toBe(false);
+  });
+  test("selection marker determines movement, rather than assuming the default", async () => {
+    for (const option of [1, 2]) {
+      const { f, runner, m } = await trust(); f.setScreen(trustScreen("/tmp", 1));
+      const prompt = (await runner.approval(m))!;
+      expect(await runner.answerApproval(m, prompt.fingerprint, option)).toMatchObject({ ok: true });
+      expect(f.calls.filter((r) => r.method === "terminal.keys").map((r) => r.params.keys)).toEqual([option === 1 ? ["up", "enter"] : ["enter"]]);
+    }
+  });
+  test("changed screen fingerprint, path, unknown menu and manual lease each send zero keys", async () => {
+    const { f, runner, m } = await trust(); const prompt = (await runner.approval(m))!;
+    f.setScreen(trustScreen().replace("trust?", "trust? Changed explanation"));
+    expect(await runner.answerApproval(m, prompt.fingerprint, 2)).toMatchObject({ ok: false, reason: "changed" });
+    f.setScreen(trustScreen("/different")); expect(await runner.approval(m)).toBeNull();
+    expect(await runner.answerApproval(m, prompt.fingerprint, 2)).toMatchObject({ ok: false, reason: "unrecognized" });
+    f.setScreen(trustScreen()); await runner.terminalControl(m, { action: "claim" });
+    expect(await runner.answerApproval(m, prompt.fingerprint, 2)).toMatchObject({ ok: false, reason: "input_busy" });
+    expect(f.calls.filter((r) => ["terminal.send", "terminal.keys"].includes(r.method))).toHaveLength(0);
+  });
+  test("identity and epoch changes across screen reads refuse input", async () => {
+    for (const change of ["identity", "epoch"]) {
+      const { f, runner, m, terminal } = await trust(); const prompt = (await runner.approval(m))!;
+      if (change === "identity") { terminal.pid = 123; await runner.approval(m); }
+      let reads = 0;
+      f.setHook((r) => { if (r.method === "terminal.read" && ++reads === 2) {
+        if (change === "identity") terminal.pid = 999; else terminal.turn = 7;
+      } return false; });
+      expect(await runner.answerApproval(m, prompt.fingerprint, 2)).toMatchObject({ ok: false, reason: change === "identity" ? "changed" : "input_busy" });
+      expect(f.calls.filter((r) => r.method === "terminal.keys")).toHaveLength(0);
+    }
+  });
+  test("Codex trust text, ordinary blocked screens, malformed markers, and idle/working Claude are not parsed", async () => {
+    const codex = await trust("codex"); expect(await codex.runner.approval(codex.m)).toBeNull();
+    codex.f.setScreen("Do you trust the contents of this directory?\n1. Yes\n2. No"); expect(await codex.runner.approval(codex.m)).toBeNull();
+    const { f, runner, m, terminal } = await trust();
+    for (const screen of ["Approve execution?\n1. Yes\n2. No", trustScreen().replace("❯", " "), trustScreen().replace("Yes, I trust this folder", "❯ Yes, I trust this folder")]) {
+      f.setScreen(screen); expect(await runner.approval(m)).toBeNull();
+    }
+    f.setScreen(trustScreen());
+    for (const state of ["idle", "working", "done"] as const) { terminal.status = { state }; expect(await runner.approval(m)).toBeNull(); }
+    expect(f.calls.some((r) => r.method === "terminal.keys")).toBe(false);
+  });
+});
 
 describe("herdr-core client and lifecycle", () => {
   test("handshake validates generation and methods", async () => {

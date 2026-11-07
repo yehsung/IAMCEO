@@ -609,6 +609,8 @@ export const MIGRATIONS: string[] = [
      legacy_max_rowid INTEGER NOT NULL CHECK (legacy_max_rowid >= 0)
    );
    INSERT INTO report_delivery_tracking (id, legacy_max_rowid) SELECT 1, COALESCE(MAX(rowid), 0) FROM messages;`,
+  // 생성 때 대표가 쓴 목표 원문. now 변경과 독립하며 과거 프로젝트는 소급하지 않는다.
+  `ALTER TABLE projects ADD COLUMN creation_goal TEXT;`,
 ];
 
 export function openDb(path: string): Database {

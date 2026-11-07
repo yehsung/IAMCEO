@@ -1118,7 +1118,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       const terminal = /^\/api\/members\/([^/]+)\/terminal\/stream$/.exec(path);
       if (terminal) {
         if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다");
-        strictQuery(url, ["mode", "cols", "rows", "lease"]);
+        strictQuery(url, ["mode", "cols", "rows", "lease", "size"]);
         const generation = authGeneration;
         return terminalStreams.prepare(decodeURIComponent(terminal[1]!), url).then(async stream => {
           if (generation !== authGeneration || stopPromise) {

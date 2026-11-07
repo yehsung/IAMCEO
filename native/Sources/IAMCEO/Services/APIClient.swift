@@ -105,8 +105,8 @@ actor APIClient {
         }
         return try authorizedWebSocketRequest("/ws", query: version == 2 ? [URLQueryItem(name: "v", value: "2")] : [])
     }
-    func terminalStreamRequest(memberID: String, mode: TerminalStreamMode, cols: Int, rows: Int, leaseID: String?) throws -> URLRequest {
-        var query = [URLQueryItem(name: "mode", value: mode.rawValue), URLQueryItem(name: "cols", value: String(cols)), URLQueryItem(name: "rows", value: String(rows))]
+    func terminalStreamRequest(memberID: String, mode: TerminalStreamMode, cols: Int, rows: Int, leaseID: String?, sizePolicy: TerminalSizePolicy = .fit) throws -> URLRequest {
+        var query = [URLQueryItem(name: "mode", value: mode.rawValue), URLQueryItem(name: "cols", value: String(cols)), URLQueryItem(name: "rows", value: String(rows)), URLQueryItem(name: "size", value: sizePolicy.rawValue)]
         if let leaseID { query.append(URLQueryItem(name: "lease", value: leaseID)) }
         return try authorizedWebSocketRequest("/api/members/\(Self.segment(memberID))/terminal/stream", query: query)
     }

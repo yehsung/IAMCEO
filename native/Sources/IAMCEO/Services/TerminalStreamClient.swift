@@ -2,6 +2,23 @@ import Foundation
 import Observation
 
 enum TerminalStreamMode: String, Codable, Sendable { case observe, control }
+enum TerminalSizePolicy: String, Sendable { case core, fit }
+
+enum TerminalPlatform: Sendable {
+    case mac, iPhone
+    static var current: Self {
+        #if os(macOS)
+        .mac
+        #else
+        .iPhone
+        #endif
+    }
+    var controlSizePolicy: TerminalSizePolicy { self == .mac ? .core : .fit }
+    var startsOnTyping: Bool { self == .mac }
+    var observeHint: String { self == .mac ? "키를 누르면 바로 입력합니다" : "입력하려면 '입력 시작'을 누르세요" }
+    func usesCoreGrid(mode: TerminalStreamMode) -> Bool { mode == .observe || controlSizePolicy == .core }
+    func acceptsKeyboard(mode: TerminalStreamMode) -> Bool { mode == .control || startsOnTyping }
+}
 enum TerminalStreamState: Equatable, Sendable {
     case connecting
     case live(mode: TerminalStreamMode, cols: Int, rows: Int)
@@ -84,6 +101,7 @@ final class TerminalStreamClient {
     @ObservationIgnored private var pendingOutput: [Data] = []
     @ObservationIgnored private var connection = UUID()
     @ObservationIgnored private var outputOwner: UUID?
+    @ObservationIgnored private var sizePolicy: TerminalSizePolicy = .fit
 
     func attachOutput(owner: UUID, handler: @escaping (Data) -> Void) { outputOwner = owner; onOutput = handler }
     func detachOutput(owner: UUID) { if outputOwner == owner { onOutput = nil; outputOwner = nil } }
@@ -100,8 +118,10 @@ final class TerminalStreamClient {
     static func isUnsupported(status: Int) -> Bool { [404, 405, 501].contains(status) }
     static func reconnectDelay(attempt: Int) -> Double { [1, 2, 4, 8, 15][min(4, max(0, attempt))] }
 
-    func connect(api: APIClient, memberID: String, mode: TerminalStreamMode, cols: Int = 100, rows: Int = 30, leaseID: String? = nil) {
+    func connect(api: APIClient, memberID: String, mode: TerminalStreamMode, cols: Int = 100, rows: Int = 30, leaseID: String? = nil,
+                 sizePolicy: TerminalSizePolicy = TerminalPlatform.current.controlSizePolicy) {
         close()
+        self.sizePolicy = sizePolicy
         let token = UUID(); connection = token
         state = .connecting
         receiveTask = Task { [weak self] in
@@ -112,7 +132,7 @@ final class TerminalStreamClient {
                 self.state = .connecting
                 self.pendingOutput.removeAll()
                 do {
-                    let request = try await api.terminalStreamRequest(memberID: memberID, mode: mode, cols: cols, rows: rows, leaseID: leaseID)
+                    let request = try await api.terminalStreamRequest(memberID: memberID, mode: mode, cols: cols, rows: rows, leaseID: leaseID, sizePolicy: sizePolicy)
                     guard !Task.isCancelled, self.connection == token else { return }
                     let ws = self.session.webSocketTask(with: request)
                     self.socket = ws; ws.resume()
@@ -166,10 +186,12 @@ final class TerminalStreamClient {
             grid = (cols, rows); outputGeneration = UUID()
             expiresAt = expiry; state = .live(mode: mode, cols: cols, rows: rows); onReady?(mode)
         case let .resize(cols, rows):
-            guard case .live(mode: .observe, cols: _, rows: _) = state else { return }
+            guard case let .live(mode, _, _) = state else { return }
             grid = (cols, rows)
-            onOutput = nil; outputOwner = nil; pendingOutput.removeAll(); outputGeneration = UUID()
-            state = .live(mode: .observe, cols: cols, rows: rows)
+            if mode == .observe {
+                onOutput = nil; outputOwner = nil; pendingOutput.removeAll(); outputGeneration = UUID()
+            }
+            state = .live(mode: mode, cols: cols, rows: rows)
         case .lease(let expiry): expiresAt = expiry; onLease?(expiry)
         case let .closed(reason, message): state = .closed(reason: reason, message: message)
         }
@@ -195,7 +217,7 @@ final class TerminalStreamClient {
     }
     func resize(cols: Int, rows: Int) {
         resizeTask?.cancel()
-        guard case .live(mode: .control, cols: _, rows: _) = state, let socket else { return }
+        guard sizePolicy == .fit, case .live(mode: .control, cols: _, rows: _) = state, let socket else { return }
         let token = connection
         resizeTask = Task { [weak self] in
             do {

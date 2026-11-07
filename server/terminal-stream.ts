@@ -6,6 +6,7 @@ import { childEnv } from "./runner/headless.ts";
 import { ApiError, type Store } from "./store.ts";
 
 export type TerminalMode = "observe" | "control";
+export type TerminalSizePolicy = "core" | "fit";
 export interface TerminalSocketData { kind: "terminal"; authGeneration: number; stream: TerminalStream }
 export interface RealtimeSocketData { kind: "realtime"; authGeneration: number; protocol: 1 | 2 }
 export type SocketData = TerminalSocketData | RealtimeSocketData;
@@ -40,6 +41,8 @@ export class TerminalStreams {
   async prepare(memberId: string, url: URL): Promise<TerminalStream> {
     const mode = url.searchParams.get("mode") ?? "observe";
     if (mode !== "observe" && mode !== "control") throw new ApiError(400, "터미널 연결 방식이 잘못되었습니다");
+    const sizePolicy = url.searchParams.get("size") ?? "fit";
+    if (sizePolicy !== "core" && sizePolicy !== "fit") throw new ApiError(400, "터미널 크기 정책이 잘못되었습니다");
     const member = this.store.requireMember(memberId);
     const project = this.store.requireProject(member.projectId);
     if (this.stopped || member.backend !== "core" || !member.paneId || member.origin === "manual" || project.archived || !project.runnerEnabled) {
@@ -47,7 +50,7 @@ export class TerminalStreams {
     }
     if (!this.orch.terminalStreamInfo) throw new ApiError(501, "터미널 스트림을 지원하지 않습니다");
     const size = terminalSize(url.searchParams.get("cols"), url.searchParams.get("rows"));
-    const stream = new TerminalStream(this, memberId, member.paneId, mode, size, url.searchParams.get("lease"));
+    const stream = new TerminalStream(this, memberId, member.paneId, mode, size, url.searchParams.get("lease"), sizePolicy);
     this.streams.add(stream);
     try {
       stream.requireLease();
@@ -61,7 +64,7 @@ export class TerminalStreams {
       const currentSize = await this.orch.terminalStreamInfo(memberId);
       if (this.stopped || this.store.requireMember(memberId).paneId !== member.paneId) throw new ApiError(409, "세션이 바뀌었습니다", "TERMINAL_REFUSED");
       stream.requireLease();
-      if (mode === "observe") stream.size = currentSize;
+      if (mode === "observe" || sizePolicy === "core") stream.size = currentSize;
       return stream;
     } catch (error) { this.forget(stream); throw error; }
   }
@@ -96,7 +99,8 @@ export class TerminalStream {
   private lastPong = Date.now();
   private lastPing = Date.now();
   constructor(private readonly owner: TerminalStreams, readonly memberId: string, readonly paneId: string,
-    readonly mode: TerminalMode, public size: { cols: number; rows: number }, private readonly leaseId: string | null) {}
+    readonly mode: TerminalMode, public size: { cols: number; rows: number }, private readonly leaseId: string | null,
+    readonly sizePolicy: TerminalSizePolicy = "fit") {}
 
   requireLease(): void {
     if (this.ended) throw new LeaseEnded();
@@ -182,12 +186,13 @@ export class TerminalStream {
     void this.close(reason, reason === "refused" && failure instanceof Error ? failure.message : "터미널에 연결할 수 없습니다");
   }
   async refreshSize(): Promise<void> {
-    if (this.ended || this.mode !== "observe" || this.sizeCheck) return;
+    if (this.ended || (this.mode !== "observe" && this.sizePolicy !== "core") || this.sizeCheck) return;
     this.sizeCheck = true;
     try {
       const size = await this.owner.orch.terminalStreamInfo!(this.memberId);
       if (!this.ended && (size.cols !== this.size.cols || size.rows !== this.size.rows)) {
         this.size = size;
+        if (this.mode === "control") this.resizePTY();
         if (this.ready) this.sendText({ type: "resize", ...size });
       }
     } catch (error) { this.fail(error); }
@@ -214,13 +219,10 @@ export class TerminalStream {
         const event = JSON.parse(message);
         if (event.type === "ping") { this.pong(); this.sendText({ type: "pong" }); }
         if (event.type === "pong") this.pong();
-        if (event.type === "resize" && this.mode === "control") {
+        if (event.type === "resize" && this.mode === "control" && this.sizePolicy === "fit") {
           this.requireLease();
           this.size = terminalSize(event.cols, event.rows);
-          this.terminal?.resize(this.size.cols, this.size.rows);
-          // A pre-created Bun 1.3.14 Terminal has no child controlling process
-          // group on macOS, so TIOCSWINSZ alone does not deliver SIGWINCH.
-          if (this.proc?.exitCode === null) this.proc.kill("SIGWINCH");
+          this.resizePTY();
           this.owner.refreshObservers(this.memberId);
         }
       } catch (error) { this.fail(error); }
@@ -234,6 +236,11 @@ export class TerminalStream {
       if (this.pendingInput.length + bytes.length > 4096) { void this.close("error", "입력 준비 버퍼를 초과했습니다"); return; }
       this.pendingInput = Buffer.concat([this.pendingInput, bytes]);
     } else this.queueInput(bytes);
+  }
+  private resizePTY(): void {
+    this.terminal?.resize(this.size.cols, this.size.rows);
+    // Pre-created Bun Terminals on macOS need an explicit SIGWINCH.
+    if (this.proc?.exitCode === null) this.proc.kill("SIGWINCH");
   }
   private queueInput(bytes: Uint8Array): void {
     this.inputChain = this.inputChain.then(async () => {

@@ -5,6 +5,93 @@ import SwiftTerm
 @testable import IAMCEO
 
 final class TerminalStreamTests: XCTestCase {
+    func testPlatformPoliciesAndPureGridSelection() {
+        XCTAssertEqual(TerminalPlatform.mac.controlSizePolicy, .core)
+        XCTAssertEqual(TerminalPlatform.iPhone.controlSizePolicy, .fit)
+        XCTAssertTrue(TerminalPlatform.mac.startsOnTyping)
+        XCTAssertFalse(TerminalPlatform.iPhone.startsOnTyping)
+        XCTAssertTrue(TerminalPlatform.mac.acceptsKeyboard(mode: .observe))
+        XCTAssertFalse(TerminalPlatform.iPhone.acceptsKeyboard(mode: .observe))
+        XCTAssertTrue(TerminalPlatform.iPhone.acceptsKeyboard(mode: .control))
+        XCTAssertEqual(TerminalPlatform.iPhone.observeHint, "입력하려면 '입력 시작'을 누르세요")
+        XCTAssertEqual(TerminalPlatform.mac.observeHint, "키를 누르면 바로 입력합니다")
+        for viewport in [CGSize(width: 800, height: 500), CGSize(width: 390, height: 300)] {
+            for mode in [TerminalStreamMode.observe, .control] {
+                let grid = TerminalGridLayout.grid(platform: .mac, mode: mode, cols: 160, rows: 50,
+                    viewport: viewport, cellWidth: 7.2, cellHeight: 15)
+                XCTAssertEqual(grid.cols, 160); XCTAssertEqual(grid.rows, 50)
+            }
+            let observing = TerminalGridLayout.grid(platform: .iPhone, mode: .observe, cols: 160, rows: 50,
+                viewport: viewport, cellWidth: 6, cellHeight: 12)
+            XCTAssertEqual(observing.cols, 160); XCTAssertEqual(observing.rows, 50)
+            let control = TerminalGridLayout.grid(platform: .iPhone, mode: .control, cols: 160, rows: 50,
+                viewport: viewport, cellWidth: 6, cellHeight: 12)
+            XCTAssertEqual(control.cols, Int(viewport.width / 6)); XCTAssertEqual(control.rows, Int(viewport.height / 12))
+        }
+    }
+    func testPlatformSizePolicyIsSentInRequest() async throws {
+        let api = APIClient(endpoint: try ServerEndpoint("http://127.0.0.1:7881"), accessCode: "test")
+        for platform in [TerminalPlatform.mac, .iPhone] {
+            let request = try await api.terminalStreamRequest(memberID: "m", mode: .control, cols: 65, rows: 25,
+                leaseID: "lease", sizePolicy: platform.controlSizePolicy)
+            let url = try XCTUnwrap(request.url)
+            let items = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+            XCTAssertEqual(items.first { $0.name == "size" }?.value, platform == .mac ? "core" : "fit")
+        }
+    }
+    @MainActor func testMacControlKeepsObserveGridFontAndScaleAcrossWindowAndCoreResize() {
+        #if os(macOS)
+        let client = TerminalStreamClient()
+        let parent = TerminalRepresentable(client: client, mode: .observe, cols: 160, rows: 50,
+            following: .constant(true), onTypeWhileObserving: { _ in }, onSize: { _,_ in XCTFail("Mac must not propose a fit grid") })
+        let coordinator = TerminalSurfaceCoordinator(parent)
+        let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 500), coordinator: coordinator)
+        coordinator.host = host
+        defer { host.teardown(); client.dispose() }
+        host.layoutSubtreeIfNeeded(); host.layout()
+        let canvas = host.documentView!
+        let observeFrame = canvas.frame.size, observeBounds = canvas.bounds.size
+        let font = host.terminal.font
+        coordinator.parent = TerminalRepresentable(client: client, mode: .control, cols: 160, rows: 50,
+            following: .constant(true), onTypeWhileObserving: { _ in XCTFail("Already controlling") }, onSize: { _,_ in XCTFail("No fit resize") })
+        host.layout()
+        XCTAssertEqual(canvas.frame.size, observeFrame); XCTAssertEqual(canvas.bounds.size, observeBounds)
+        XCTAssertEqual(host.terminal.font, font)
+        XCTAssertEqual(host.terminal.getTerminal().cols, 160); XCTAssertEqual(host.terminal.getTerminal().rows, 50)
+        host.frame.size = CGSize(width: 640, height: 400); host.layout()
+        XCTAssertEqual(host.terminal.getTerminal().cols, 160); XCTAssertEqual(host.terminal.getTerminal().rows, 50)
+        coordinator.parent = TerminalRepresentable(client: client, mode: .control, cols: 180, rows: 60,
+            following: .constant(true), onTypeWhileObserving: { _ in }, onSize: { _,_ in XCTFail("No fit resize") })
+        host.layout()
+        XCTAssertEqual(host.terminal.getTerminal().cols, 180); XCTAssertEqual(host.terminal.getTerminal().rows, 60)
+        client.accept(.ready(mode: .control, cols: 180, rows: 60, expiresAt: nil))
+        client.accept(.resize(cols: 160, rows: 50))
+        host.feed(Data("paint after server resize".utf8)) // Before SwiftUI updates coordinator.parent.
+        XCTAssertEqual(host.terminal.getTerminal().cols, 160); XCTAssertEqual(host.terminal.getTerminal().rows, 50)
+        #endif
+    }
+    @MainActor func testIOSObserverCannotFocusOrShowAccessoryOrStartInput() {
+        #if os(iOS)
+        let client = TerminalStreamClient()
+        let parent = TerminalRepresentable(client: client, mode: .observe, cols: 160, rows: 50,
+            following: .constant(true), onTypeWhileObserving: { _ in XCTFail("iPhone input requires the button") }, onSize: { _,_ in })
+        let coordinator = TerminalSurfaceCoordinator(parent)
+        let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 390, height: 500), coordinator: coordinator)
+        coordinator.host = host
+        defer { client.dispose() }
+        XCTAssertFalse(host.terminal.canBecomeFirstResponder)
+        XCTAssertFalse(host.terminal.becomeFirstResponder())
+        XCTAssertNil(host.terminal.inputAccessoryView)
+        coordinator.send(source: host.terminal, data: Array("ignored".utf8)[...])
+        coordinator.parent = TerminalRepresentable(client: client, mode: .control, cols: 65, rows: 25,
+            following: .constant(true), onTypeWhileObserving: { _ in XCTFail() }, onSize: { _,_ in })
+        host.updateInputMode()
+        XCTAssertTrue(host.terminal.canBecomeFirstResponder); XCTAssertNotNil(host.terminal.inputAccessoryView)
+        coordinator.parent = parent; host.updateInputMode()
+        XCTAssertFalse(host.terminal.canBecomeFirstResponder); XCTAssertFalse(host.terminal.isFirstResponder)
+        XCTAssertNil(host.terminal.inputAccessoryView)
+        #endif
+    }
     func testEventParsingAndMalformedMessages() {
         XCTAssertEqual(TerminalStreamEvent.parse(#"{"type":"ready","mode":"observe","cols":200,"rows":120}"#),
                        .ready(mode: .observe, cols: 200, rows: 120, expiresAt: nil))
@@ -117,7 +204,7 @@ final class TerminalStreamTests: XCTestCase {
         XCTAssertNotNil(retry.failed(status: 500, code: nil))
         XCTAssertEqual(retry.refusals, 0)
     }
-    @MainActor func testResizeRebuildsOnlyObserveGridAndRequestsFreshRedraw() {
+    @MainActor func testResizeRebuildsObserveButPreservesControlRendererAndInput() {
         XCTAssertEqual(TerminalStreamEvent.parse(#"{"type":"resize","cols":80,"rows":24}"#), .resize(cols: 80, rows: 24))
         XCTAssertNil(TerminalStreamEvent.parse(#"{"type":"resize","cols":0,"rows":24}"#))
         let client = TerminalStreamClient()
@@ -129,8 +216,12 @@ final class TerminalStreamTests: XCTestCase {
         XCTAssertNotEqual(client.outputGeneration, before); XCTAssertNil(client.onOutput)
         client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
         let controlGeneration = client.outputGeneration
+        client.attachOutput(owner: UUID()) { _ in }
         client.accept(.resize(cols: 80, rows: 24))
-        XCTAssertEqual(client.outputGeneration, controlGeneration); XCTAssertEqual(client.grid.cols, 100)
+        XCTAssertEqual(client.outputGeneration, controlGeneration); XCTAssertEqual(client.grid.cols, 80)
+        XCTAssertNotNil(client.onOutput)
+        XCTAssertEqual(client.grid.rows, 24)
+        XCTAssertEqual(client.state, .live(mode: .control, cols: 80, rows: 24))
         client.dispose()
     }
     func testLeasePresentationUsesStoreExpiryAndReconnectCannotInterruptControlStart() {
@@ -244,6 +335,175 @@ final class TerminalStreamTests: XCTestCase {
         scroller.doubleValue = 0.3
         action.scroll(scroller)
         XCTAssertFalse(following)
+        #endif
+    }
+    @MainActor func testUserScrollInEitherModeKeepsBothHistoryAndViewportAcrossOutputAndCanResume() async throws {
+        #if os(macOS)
+        for mode in [TerminalStreamMode.observe, .control] {
+            for internalHistory in [true, false] {
+                let client = TerminalStreamClient()
+                var following = true
+                let parent = TerminalRepresentable(client: client, mode: mode, cols: 160, rows: 50,
+                    following: Binding(get: { following }, set: { following = $0 }), onTypeWhileObserving: { _ in }, onSize: { _,_ in })
+                let coordinator = TerminalSurfaceCoordinator(parent)
+                let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 300), coordinator: coordinator)
+                coordinator.host = host
+                defer { host.teardown(); client.dispose() }
+                host.feed(Data((0..<150).map { "line \($0)\r\n" }.joined().utf8))
+                host.followCursor()
+                XCTAssertTrue(following, "Output and programmatic scrolling preserve following in \(mode)")
+                let before = host.scrollLocation
+                XCTAssertGreaterThan(before.viewportY, 0, "Following must reach the cursor before the display timer runs")
+                XCTAssertGreaterThan(before.historyRow, 0, "Exercise a terminal with real scrollback")
+                let wiredScroller = internalHistory
+                    ? host.terminal.subviews.compactMap { $0 as? NSScroller }.first : host.verticalScroller
+                XCTAssertTrue(try XCTUnwrap(wiredScroller).target is TerminalScrollAction)
+                let target = TerminalTestScrollTarget { scroller in
+                    if internalHistory { host.terminal.scroll(toPosition: scroller.doubleValue) }
+                    else {
+                        host.contentView.scroll(to: CGPoint(x: 0, y: 0))
+                        host.reflectScrolledClipView(host.contentView)
+                    }
+                }
+                let scroller = NSScroller()
+                scroller.target = target; scroller.action = #selector(TerminalTestScrollTarget.scroll(_:))
+                let action = TerminalScrollAction(scroller: scroller, coordinator: coordinator)
+                scroller.doubleValue = 0.3
+                action.scroll(scroller)
+                XCTAssertTrue(host.scrollLocation.isAbove(before), "Exercise actual upward movement on each axis")
+                XCTAssertFalse(following, "User scrolling must pause following in \(mode)")
+                let paused = host.scrollLocation
+                host.feed(Data("new output\r\n".utf8))
+                try? await Task.sleep(for: .milliseconds(60))
+                XCTAssertFalse(following)
+                XCTAssertEqual(host.scrollLocation.historyRow, paused.historyRow)
+                XCTAssertEqual(host.scrollLocation.viewportY, paused.viewportY, accuracy: 0.5)
+                host.feed(Data("more output\r\n".utf8))
+                try? await Task.sleep(for: .milliseconds(60))
+                XCTAssertFalse(following)
+                XCTAssertEqual(host.scrollLocation.historyRow, paused.historyRow)
+                XCTAssertEqual(host.scrollLocation.viewportY, paused.viewportY, accuracy: 0.5)
+                following = true // The shared '맨 아래로' button resumes either mode.
+                host.followCursor()
+                XCTAssertGreaterThan(host.scrollLocation.historyRow, paused.historyRow)
+                XCTAssertGreaterThan(host.scrollLocation.viewportY, 0)
+            }
+        }
+        #endif
+    }
+    @MainActor func testOuterScrollPreservesVisibleTextWhenHistoryFillsAndRecycles() async throws {
+        #if os(macOS)
+        for mode in [TerminalStreamMode.observe, .control] {
+            for initialLines in [4980, 5200] {
+                let client = TerminalStreamClient()
+                var following = true
+                let parent = TerminalRepresentable(client: client, mode: mode, cols: 160, rows: 50,
+                    following: Binding(get: { following }, set: { following = $0 }), onTypeWhileObserving: { _ in }, onSize: { _,_ in })
+                let coordinator = TerminalSurfaceCoordinator(parent)
+                let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 300), coordinator: coordinator)
+                coordinator.host = host
+                defer { host.teardown(); client.dispose() }
+                func output(_ range: Range<Int>) {
+                    host.feed(Data(range.map { "numbered line \($0)\r\n" }.joined().utf8))
+                }
+                func visibleText() -> [String] {
+                    // The outer viewport is at its top; these are its first ten displayed lines.
+                    (0..<10).map { host.terminal.getTerminal().getLine(row: $0)?.translateToString(trimRight: true) ?? "missing" }
+                }
+                output(0..<initialLines)
+                host.followCursor()
+                XCTAssertEqual(host.terminal.getTerminal().options.scrollback, 5000)
+                let engine = host.terminal.getTerminal()
+                let before = host.scrollLocation
+                coordinator.performUserScroll {
+                    host.contentView.scroll(to: .zero)
+                    host.reflectScrolledClipView(host.contentView)
+                }
+                XCTAssertFalse(following)
+                XCTAssertGreaterThan(before.viewportY, host.scrollLocation.viewportY)
+                let text = visibleText(), paused = host.scrollLocation
+                XCTAssertTrue(text.allSatisfy { $0.hasPrefix("numbered line ") })
+                let trimmed = engine.buffer.totalLinesTrimmed
+                for range in [initialLines..<(initialLines + 100), (initialLines + 100)..<(initialLines + 127),
+                              (initialLines + 127)..<(initialLines + 187)] {
+                    output(range)
+                    try? await Task.sleep(for: .milliseconds(60))
+                    XCTAssertFalse(following)
+                    XCTAssertEqual(visibleText(), text, "Visible content must survive recycling in \(mode), initial=\(initialLines)")
+                    XCTAssertEqual(host.scrollLocation.historyRow, paused.historyRow - (engine.buffer.totalLinesTrimmed - trimmed))
+                    XCTAssertEqual(host.scrollLocation.viewportY, paused.viewportY, accuracy: 0.5)
+                }
+                XCTAssertGreaterThan(engine.buffer.totalLinesTrimmed, trimmed, "Exercise actual history recycling")
+                following = true
+                host.followCursor()
+                let resumed = engine.getTopVisibleRow()
+                output((initialLines + 187)..<(initialLines + 188))
+                XCTAssertEqual(engine.getTopVisibleRow(), resumed, "At capacity, resuming clears the engine's manual-scroll flag")
+                // If all anchored content has expired, remain paused at available history;
+                // the shared paused overlay offers '새 출력이 있습니다 · 맨 아래로'.
+                following = false
+                output(10000..<16000)
+                XCTAssertEqual(engine.getTopVisibleRow(), 0)
+                XCTAssertFalse(following)
+            }
+        }
+        #endif
+    }
+    @MainActor func testSynchronizedOutputKeepsViewportUntilEndOrTimeout() async {
+        #if os(macOS)
+        for mode in [TerminalStreamMode.observe, .control] {
+            for timeout in [false, true] {
+                let client = TerminalStreamClient()
+                let parent = TerminalRepresentable(client: client, mode: mode, cols: 160, rows: 50,
+                    following: .constant(true), onTypeWhileObserving: { _ in }, onSize: { _,_ in })
+                let coordinator = TerminalSurfaceCoordinator(parent)
+                let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 300), coordinator: coordinator)
+                coordinator.host = host
+                defer { host.teardown(); client.dispose() }
+                host.feed(Data("\u{1b}[50;1H".utf8))
+                host.followCursor()
+                try? await Task.sleep(for: .milliseconds(60))
+                let displayedCaret = host.terminal.caretFrame
+                let displayed = host.scrollLocation.viewportY
+                XCTAssertGreaterThan(displayed, 0)
+                host.feed(Data("\u{1b}[?2026h\u{1b}[1;1H".utf8))
+                host.followCursor() // All callers must honor the synchronized-output guard.
+                try? await Task.sleep(for: .milliseconds(80))
+                XCTAssertTrue(host.terminal.getTerminal().synchronizedOutputActive)
+                XCTAssertEqual(host.scrollLocation.viewportY, displayed, accuracy: 0.5)
+                XCTAssertEqual(host.terminal.caretFrame, displayedCaret, "The displayed cursor stays at the last completed frame")
+                if timeout { try? await Task.sleep(for: .milliseconds(1150)) }
+                else {
+                    host.feed(Data("\u{1b}[?2026l".utf8))
+                    try? await Task.sleep(for: .milliseconds(80))
+                }
+                XCTAssertFalse(host.terminal.getTerminal().synchronizedOutputActive)
+                XCTAssertEqual(host.scrollLocation.viewportY, 0, accuracy: 0.5)
+                XCTAssertNotEqual(host.terminal.caretFrame, displayedCaret, "Display and viewport catch up after synchronization")
+            }
+        }
+        #endif
+    }
+    @MainActor func testFollowCursorUsesParserRowBeforeDeferredCaretDisplay() {
+        #if os(macOS)
+        for mode in [TerminalStreamMode.observe, .control] {
+            let client = TerminalStreamClient()
+            let parent = TerminalRepresentable(client: client, mode: mode, cols: 160, rows: 50,
+                following: .constant(true), onTypeWhileObserving: { _ in }, onSize: { _,_ in })
+            let coordinator = TerminalSurfaceCoordinator(parent)
+            let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 300), coordinator: coordinator)
+            coordinator.host = host
+            defer { host.teardown(); client.dispose() }
+            host.feed(Data((0..<150).map { "line \($0)\r\n" }.joined().utf8))
+            host.followCursor()
+            XCTAssertGreaterThan(host.scrollLocation.viewportY, 0)
+            host.feed(Data("\u{1b}[1;1H".utf8))
+            host.followCursor()
+            XCTAssertEqual(host.scrollLocation.viewportY, 0, accuracy: 0.5, "Follow the new cursor row synchronously")
+            host.feed(Data("\u{1b}[50;1H".utf8))
+            host.followCursor()
+            XCTAssertGreaterThan(host.scrollLocation.viewportY, 0, "Resume at the bottom without waiting for paint")
+        }
         #endif
     }
     @MainActor func testSynchronizedOutputTimeoutWithoutUserScrollPreservesFollowing() async {

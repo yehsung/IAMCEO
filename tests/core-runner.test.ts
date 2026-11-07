@@ -17,6 +17,8 @@ import { openDb } from "../server/db.ts";
 import { Bus } from "../server/bus.ts";
 import { Store } from "../server/store.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
+import { claudeFolderTrust, codexFolderTrust } from "../server/runner/core-approval.ts";
+import { wrappedTrustScreens } from "./fixtures/folder-trust-160.ts";
 
 const methods = ["terminal.run", "terminal.list", "terminal.get", "terminal.read", "terminal.send", "terminal.interrupt", "terminal.kill", "terminal.keys"];
 const composer = (draft = "") => `prior output\n${"─".repeat(30)}\n❯ ${draft}\n${"─".repeat(30)}\n`;
@@ -47,7 +49,7 @@ async function fixture() {
         if (request.method === "hello") result = { generation: 1, version: "test", methods, features: [] };
         else if (request.method === "terminal.list") result = { terminals: [...terminals.values()].filter((terminal) => Object.entries(params.labels || {}).every(([key, value]) => terminal.labels[key] === value)) };
         else if (request.method === "terminal.run") {
-          const terminal: CoreTerminal = { address: `t${terminals.size + 1}`, argv: params.argv, cwd: params.cwd, labels: params.labels, state: "live", turn: 0, status: { state: "idle", app: "claude-code" }, reported: true };
+          const terminal: CoreTerminal = { address: `t${terminals.size + 1}`, argv: params.argv, cwd: params.cwd, labels: params.labels, state: "live", cols: params.size?.cols ?? 200, rows: params.size?.rows ?? 120, turn: 0, status: { state: "idle", app: "claude-code" }, reported: true };
           terminals.set(terminal.address, terminal); result = terminal;
         } else if (request.method === "terminal.get") result = terminals.get(params.terminal);
         else if (request.method === "terminal.read") result = { text: screen, complete: true, how: "screen" };
@@ -184,6 +186,14 @@ describe("core Claude folder trust approval", () => {
 });
 
 describe("herdr-core client and lifecycle", () => {
+  test("fake core follows the 0.1.18 size schema and ignores top-level dimensions", async () => {
+    const f = await fixture();
+    const params = { argv: ["/fake/claude"], cwd: "/tmp", labels: {}, cols: 80, rows: 24 };
+    const legacy = await coreRpc<CoreTerminal>(f.socketPath, "terminal.run", params);
+    expect(await coreRpc(f.socketPath, "terminal.get", { terminal: legacy.address })).toMatchObject({ cols: 200, rows: 120 });
+    const sized = await coreRpc<CoreTerminal>(f.socketPath, "terminal.run", { ...params, size: { cols: 160, rows: 50 } });
+    expect(await coreRpc(f.socketPath, "terminal.get", { terminal: sized.address })).toMatchObject({ cols: 160, rows: 50 });
+  });
   test("handshake validates generation and methods", async () => {
     const f = await fixture(); const runner = f.runner(); expect((await runner.available()).ok).toBe(true);
     f.setHook((request, socket) => { socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { generation: 1, version: "old", methods: [], features: [] } }) + "\n"); return true; });
@@ -192,11 +202,16 @@ describe("herdr-core client and lifecycle", () => {
   test("owned terminal launch uses argv, survives runner shutdown, rejoins without another launch", async () => {
     const f = await fixture(); const runner = f.runner(); const first = await runner.start(member(), f.opts);
     const launch = f.calls.find((request) => request.method === "terminal.run")!;
-    expect(launch.params).toMatchObject({ no_parent: true, outlive_parent: true, keep: false, wait: false });
+    expect(launch.params).toMatchObject({ size: { cols: 160, rows: 50 }, no_parent: true, outlive_parent: true, keep: false, wait: false });
+    expect(launch.params).not.toHaveProperty("cols"); expect(launch.params).not.toHaveProperty("rows");
+    expect(await runner.terminalInfo(member({ paneId: first.paneId }))).toEqual({ cols: 160, rows: 50 });
     expect(launch.params.env.XDG_CONFIG_HOME).toBeString(); expect(launch.params.env.XDG_STATE_HOME).toBeString(); expect(launch.params.env.HOME).toBe(process.env.HOME); expect(launch.params.argv[0]).toBe("/fake/claude"); expect(launch.params.argv).not.toContain("-p"); expect(launch.params.argv).toContain("--append-system-prompt-file");
     await runner.shutdown(); expect(f.calls.some((request) => ["terminal.kill", "server.stop"].includes(request.method))).toBe(false);
-    const recovered = await f.runner().start(member({ sessionId: first.sessionId, paneId: first.paneId }), { ...f.opts, resume: true });
+    Object.assign(f.terminals.get(first.paneId)!, { cols: 200, rows: 120 }); // A legacy session keeps its existing grid.
+    const rejoinedRunner = f.runner();
+    const recovered = await rejoinedRunner.start(member({ sessionId: first.sessionId, paneId: first.paneId }), { ...f.opts, resume: true });
     expect(recovered.rejoined).toBe(true); expect(recovered.paneId).toBe(first.paneId); expect(f.calls.filter((request) => request.method === "terminal.run")).toHaveLength(1);
+    expect(await rejoinedRunner.terminalInfo(member({ paneId: first.paneId }))).toEqual({ cols: 200, rows: 120 });
   });
   test("explicit stop kills only owned terminal; changed labels refuse control", async () => {
     const f = await fixture(); const runner = f.runner(); const start = await runner.start(member(), f.opts); const terminal = f.terminals.get(start.paneId)!;
@@ -965,4 +980,202 @@ test("Codex legacy terminal launch journal bounds binding even without a started
   const runner = f.runner(10000, { recoveryStore: { ...recovery.port, getLifecycleJournal: () => ({ operationId: "legacy-launch", memberId: codex.id, projectId: codex.projectId, intent: "start", phase: "confirmed", identity: { terminalId: started.paneId, sessionId: null, sessionGeneration: 1, process: null }, runId: null, deliveryIds: [], baseline: null, reason: null, exitCode: null, createdAt: timestamp, updatedAt: timestamp }) } });
   await runner.start({ ...codex, paneId: started.paneId }, f.opts); await runner.screen(codex);
   expect(runner.observationState(codex.id)?.identity.sessionId).toBe("native");
+});
+
+// Plain terminal.read snapshots: wrap at 160 columns and keep exactly 50 rows.
+function screen160x50(text: string): string {
+  const wrapped = text.trimEnd().split("\n").flatMap(line => {
+    const chars = Array.from(line);
+    return Array.from({ length: Math.max(1, Math.ceil(chars.length / 160)) }, (_, i) => chars.slice(i * 160, (i + 1) * 160).join("").padEnd(160));
+  });
+  return [...Array(Math.max(0, 50 - wrapped.length)).fill(" ".repeat(160)), ...wrapped].slice(-50).join("\n");
+}
+
+function trustPathScreen(cli: "claude" | "codex", pathRows: string[], pad = true): string {
+  const snapshot = wrappedTrustScreens[0];
+  const rows = snapshot[cli].trimEnd().split("\n");
+  rows.splice(1, snapshot.pathRows, ...pathRows);
+  // Preserve raw row boundaries and spaces, including all-space path fragments.
+  const padded = pad ? rows.map(row => row + " ".repeat(Math.max(0, 160 - Bun.stringWidth(row)))) : rows;
+  return [...Array(50 - padded.length).fill(" ".repeat(160)), ...padded].join("\n");
+}
+
+test.each(["claude", "codex"] as const)("%s R5-1 never trusts another cwd after deleting a real boundary space", async cli => {
+  const parse = cli === "claude" ? claudeFolderTrust : codexFolderTrust;
+  const indent = cli === "claude" ? 1 : 2;
+  // The review-5 reproduction, including the exact 160-column first path row.
+  const stem = "/tmp/" + "a".repeat(160 - indent - 1 - 5);
+  for (const actual of [stem + " /child", stem + "a /child", stem + " project/child", stem + "a project/child"]) {
+    const pathRows = [" ".repeat(indent) + actual.slice(0, 160 - indent), actual.slice(160 - indent)];
+    expect(pathRows[0]!.length).toBe(160);
+    const screen = trustPathScreen(cli, pathRows), otherCwd = actual.replace(" ", "");
+    expect(screen.split("\n")).toHaveLength(50);
+    expect(parse(screen, actual)).toBeNull(); // Ambiguous whitespace cannot establish either folder.
+    expect(parse(screen, otherCwd)).toBeNull();
+    const f = await fixture(), runner = f.runner(10000), m = member({ cli, cwd: otherCwd });
+    const started = await runner.start(m, f.opts);
+    f.terminals.get(started.paneId)!.status = null;
+    f.setScreen(screen);
+    expect(await runner.approval(m)).toBeNull();
+    const fingerprint = createHash("sha256").update(screen).digest("hex").slice(0, 24);
+    expect(await runner.answerApproval(m, fingerprint, cli === "claude" ? 2 : 1)).toMatchObject({ ok: false });
+    expect(f.calls.some(call => call.method === "terminal.keys")).toBe(false);
+  }
+});
+
+test.each(["claude", "codex"] as const)("%s R6-1 rejects final spaces, blank fragments, truncation and prefixes without sending keys", async cli => {
+  const parse = cli === "claude" ? claudeFolderTrust : codexFolderTrust;
+  const indent = " ".repeat(cli === "claude" ? 1 : 2);
+  const stem = "/tmp/" + "a".repeat(160 - indent.length - 5);
+  const cases = [
+    { rows: [indent + stem, "/child "], cwd: stem + "/child" },
+    { rows: [indent + stem, " ".repeat(160)], cwd: stem },
+    { rows: [indent + stem, "/child"], cwd: stem + "/child" },
+    { rows: [indent + stem, "/child"], cwd: stem },
+    { rows: [indent + stem], cwd: stem }, // exactly at the edge: may be cut off
+    { rows: [indent + "/tmp/project "], cwd: "/tmp/project" },
+    { rows: [indent + "/tmp/project-other"], cwd: "/tmp/project" },
+    { rows: [indent + "/tmp/project"], cwd: "/tmp/project/child" },
+  ];
+  const f = await fixture(), runner = f.runner(10000);
+  for (const [index, item] of cases.entries()) {
+    const m = member({ id: `r6-${index}`, cli, cwd: item.cwd });
+    const started = await runner.start(m, f.opts);
+    f.terminals.get(started.paneId)!.status = { state: "blocked", kind: "setup" };
+    for (const pad of [false, true]) {
+      const screen = trustPathScreen(cli, item.rows, pad);
+      expect(parse(screen, item.cwd)).toBeNull();
+      f.setScreen(screen);
+      expect(await runner.approval(m)).toBeNull();
+      expect(runner.observationState(m.id)?.state).toBe("blocked");
+      const fingerprint = createHash("sha256").update(screen).digest("hex").slice(0, 24);
+      expect(await runner.answerApproval(m, fingerprint, cli === "claude" ? 2 : 1)).toMatchObject({ ok: false });
+    }
+  }
+  expect(f.calls.filter(call => call.method === "terminal.keys")).toHaveLength(0);
+});
+
+test.each(["claude", "codex"] as const)("%s accepts exact unpadded short paths and rejects ambiguous padded paths", cli => {
+  const parse = cli === "claude" ? claudeFolderTrust : codexFolderTrust;
+  const indent = " ".repeat(cli === "claude" ? 1 : 2);
+  for (const cwd of ["/tmp", "/tmp/project", "/tmp/a project", "/tmp/한글/😀"]) {
+    expect(parse(trustPathScreen(cli, [indent + cwd], false), cwd)?.prompt.body).toStartWith(cwd + "\n");
+    expect(parse(trustPathScreen(cli, [indent + cwd]), cwd)).toBeNull();
+    expect(parse(trustPathScreen(cli, [indent + cwd], false), cwd + "/other")).toBeNull();
+  }
+});
+
+test.each(["claude", "codex"] as const)("%s refuses ambiguous whitespace and all-space continuation fragments", cli => {
+  const parse = cli === "claude" ? claudeFolderTrust : codexFolderTrust;
+  const indent = " ".repeat(cli === "claude" ? 1 : 2);
+  const stem = "/tmp/" + "a".repeat(160 - indent.length - 5);
+  for (const rows of [
+    [indent + stem.slice(0, -2) + "  ", "/child"],
+    [indent + stem, "  project/child"],
+    [indent + stem.slice(0, -1) + "\u00a0", "/child"],
+    [indent + stem, "\u3000project/child"],
+    [indent + stem, " ".repeat(160), "/child"],
+  ]) {
+    expect(Bun.stringWidth(rows[0]!)).toBe(160);
+    const displayed = rows.join("").slice(indent.length);
+    const collapsed = rows.map(row => row.trim()).join("");
+    const screen = trustPathScreen(cli, rows);
+    for (const cwd of [displayed, collapsed, collapsed + "/other"]) expect(parse(screen, cwd)).toBeNull();
+  }
+  // Trailing ASCII space could be terminal padding or part of the folder name.
+  expect(parse(trustPathScreen(cli, [indent + "/tmp/project "]), "/tmp/project ")).toBeNull();
+});
+
+test.each(["claude", "codex"] as const)("%s refuses multiple path rows regardless of their width", cli => {
+  const parse = cli === "claude" ? claudeFolderTrust : codexFolderTrust;
+  const indent = " ".repeat(cli === "claude" ? 1 : 2);
+  for (const rows of [[indent + "/tmp/project", "/child"], [indent + "/tmp/project", " ", "/child"]]) {
+    const raw = trustPathScreen(cli, rows);
+    expect(parse(raw, "/tmp/project/child")).toBeNull();
+    // Short terminal.read rows are not soft wraps either.
+    expect(parse(raw.split("\n").map(row => row.trimEnd()).join("\n"), "/tmp/project/child")).toBeNull();
+  }
+});
+
+test.each(["claude", "codex"] as const)("%s preserves spaces, special characters and Korean paths without prefix matching", cli => {
+  const parse = cli === "claude" ? claudeFolderTrust : codexFolderTrust;
+  const indent = " ".repeat(cli === "claude" ? 1 : 2);
+  for (const cwd of ["/tmp/한글 프로젝트/작업", "/tmp/a $'`[]#;&()/child", "/tmp/공백\u00a0중간\u3000폴더/child"]) {
+    const screen = trustPathScreen(cli, [indent + cwd], false);
+    expect(parse(screen, cwd)?.prompt.body).toStartWith(cwd + "\n");
+    for (const other of [cwd + "/other", cwd.slice(0, -1), cwd.replace(/\s/gu, "")]) {
+      expect(parse(screen, other)).toBeNull();
+    }
+    for (const forbidden of ["\t", "\n", "\r", "\u2028", "\u2029"]) {
+      const unsafe = cwd + forbidden + "child";
+      expect(parse(trustPathScreen(cli, [indent + unsafe]), unsafe)).toBeNull();
+    }
+  }
+  // CJK counts as two terminal cells, rather than one JS character.
+  const first = indent + "/tmp/" + "한".repeat(75) + "a".repeat(5 - indent.length);
+  expect(Bun.stringWidth(first)).toBe(160);
+  const cwd = first.slice(indent.length) + "/작업 공백/$[]";
+  const screen = trustPathScreen(cli, [first, "/작업 공백/$[]"]);
+  expect(parse(screen, cwd)).toBeNull();
+  expect(parse(screen, cwd + "/other")).toBeNull();
+  const short = first.slice(0, -1);
+  expect(parse(trustPathScreen(cli, [short, "/작업 공백/$[]"]), short.slice(indent.length) + "/작업 공백/$[]")).toBeNull();
+});
+
+for (const snapshot of wrappedTrustScreens) {
+  test.each(["claude", "codex"] as const)(`%s refuses ${snapshot.pathRows} wrapped path rows at 160 columns`, async cli => {
+    const parse = cli === "claude" ? claudeFolderTrust : codexFolderTrust;
+    const raw = snapshot[cli], pathRows = raw.split("\n").slice(1, 1 + snapshot.pathRows);
+    expect(pathRows).toHaveLength(snapshot.pathRows);
+    expect(pathRows.slice(0, -1).every(line => line.length === 160)).toBe(true);
+    const screen = screen160x50(raw);
+    expect(screen.split("\n")).toHaveLength(50);
+    expect(parse(screen, snapshot.cwd)).toBeNull();
+    for (const cwd of [snapshot.cwd + "/other", snapshot.cwd.slice(0, -1), snapshot.cwd.replace("long project", "longproject")]) {
+      expect(parse(screen, cwd)).toBeNull();
+    }
+    const badPaths = [
+      [...pathRows].reverse(), pathRows.slice(0, -1), [...pathRows, "/other"],
+      [pathRows[0]!, "unexpected text", ...pathRows.slice(1)],
+    ];
+    for (const path of badPaths) expect(parse(screen.replace(pathRows.join("\n"), path.join("\n")), snapshot.cwd)).toBeNull();
+    expect(parse(screen.replace(cli === "claude" ? "❯" : "›", " "), snapshot.cwd)).toBeNull();
+    expect(parse(screen.replace(cli === "claude" ? "Yes, I trust this folder" : "2. Quit", "Unknown option"), snapshot.cwd)).toBeNull();
+
+    const f = await fixture(), runner = f.runner(10000), m = member({ cli, cwd: snapshot.cwd });
+    const started = await runner.start(m, f.opts);
+    f.terminals.get(started.paneId)!.status = null;
+    f.setScreen(screen);
+    expect(await runner.approval(m)).toBeNull();
+    const fingerprint = createHash("sha256").update(screen).digest("hex").slice(0, 24);
+    expect(await runner.answerApproval(m, fingerprint, cli === "claude" ? 2 : 1)).toMatchObject({ ok: false });
+    expect(f.calls.some(c => c.method === "terminal.keys")).toBe(false);
+  });
+}
+test.each(["claude", "codex"] as const)("%s new 160x50 sessions preserve screen, status, draft guard and trust approval", async cli => {
+  const f = await fixture(), runner = f.runner(10000), m = member({ cli });
+  const start = await runner.start(m, f.opts), terminal = f.terminals.get(start.paneId)!;
+  expect(terminal).toMatchObject({ cols: 160, rows: 50 });
+  const composerText = cli === "claude" ? composer("keep this draft") : "output\n› keep this draft\n  ? for shortcuts\n";
+  const screen = screen160x50(composerText); f.setScreen(screen);
+  expect(screen.split("\n")).toHaveLength(50);
+  expect(screen.split("\n").every(line => Array.from(line).length === 160)).toBe(true);
+  for (const state of ["working", "idle"] as const) {
+    terminal.status = { state };
+    expect(await runner.screen(m)).toBe(screen);
+    expect(runner.observationState(m.id)?.state).toBe(state);
+  }
+  expect(await runner.send(m, "do not overwrite", f.opts)).toMatchObject({ ok: false, reason: "input_busy" });
+  expect(f.calls.some(c => c.method === "terminal.send")).toBe(false);
+  terminal.status = null;
+  f.setScreen(screen160x50(cli === "claude" ? trustScreen() : codexTrustScreen()));
+  // Padded text cannot prove whether trailing spaces belong to the folder.
+  expect(await runner.approval(m)).toBeNull();
+  f.setScreen(cli === "claude" ? trustScreen() : codexTrustScreen());
+  const prompt = await runner.approval(m);
+  expect(prompt?.title).toBe("폴더 신뢰 확인");
+  expect(runner.observationState(m.id)?.setupError?.code).toBe("folder_trust");
+  expect(await runner.answerApproval(m, prompt!.fingerprint!, cli === "claude" ? 2 : 1)).toMatchObject({ ok: true });
+  expect(f.calls.filter(c => c.method === "terminal.keys")).toHaveLength(1);
+  expect(f.calls.filter(c => c.method === "terminal.read").every(c => c.params.lines === 0)).toBe(true);
 });

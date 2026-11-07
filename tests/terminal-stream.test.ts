@@ -29,7 +29,8 @@ async function fixture() {
 const observe = process.argv.includes('--observe');
 if (!observe && !process.stdin.isTTY) { console.error(JSON.stringify({error:{kind:'usage',message:'attach needs a terminal'}})); process.exit(2); }
 const initialTermios = process.env.IAMCEO_TEST_INITIAL_TERMIOS ?? '';
-writeFileSync(${JSON.stringify(dir)} + '/attach-' + process.pid + '.json', JSON.stringify({pid:process.pid,observe,initialTermios,socket:process.env.HC_SOCKET,session:process.env.HC_SESSION,state:process.env.XDG_STATE_HOME,config:process.env.XDG_CONFIG_HOME}));
+const [rows,cols] = observe ? [] : Bun.spawnSync(['/bin/stty','size'],{stdin:0}).stdout.toString().trim().split(/\\s+/).map(Number);
+writeFileSync(${JSON.stringify(dir)} + '/attach-' + process.pid + '.json', JSON.stringify({pid:process.pid,observe,initialTermios,cols,rows,socket:process.env.HC_SOCKET,session:process.env.HC_SESSION,state:process.env.XDG_STATE_HOME,config:process.env.XDG_CONFIG_HOME}));
 if (observe) process.stdout.write(${JSON.stringify(VT)});
 else {
  process.stdin.resume();
@@ -119,6 +120,7 @@ describe("terminal stream", () => {
     expect((await f.status(`mode=observe&t=${f.config.accessCode}`, f.member.id, false)).status).toBe(401);
     expect((await f.status(`mode=observe&t=${f.config.accessCode}`)).status).toBe(400);
     expect((await f.status("mode=observe", "missing")).status).toBe(404);
+    expect((await f.status("mode=control&size=unknown")).status).toBe(400);
     for (const patch of [{ backend: "herdr" }, { origin: "manual" }, { paneId: null }] as const) {
       f.store.patchMember(f.member.id, patch);
       const response = await f.status(); expect(response.status).toBe(409); expect((await response.json()).code).toBe("TERMINAL_REFUSED");
@@ -187,6 +189,50 @@ describe("terminal stream", () => {
     await until(() => stream.events.some(e=>e.type==="closed"&&e.reason==="lease_ended"));
     await until(() => f.pids().every(p=>!alive(p.pid)));
     expect(f.store.listActivity(f.member.id).filter(a=>a.text.startsWith("대표가 터미널에서 직접 입력을"))).toHaveLength(2);
+  });
+  test.each([{ cols: 160, rows: 50 }, { cols: 200, rows: 120 }])("size=core opens at current core grid %j, ignores client resize, follows external changes", async size => {
+    const f = await fixture(), terminal = f.terminals.get(f.member.paneId!);
+    Object.assign(terminal, size);
+    const lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const manager = new TerminalStreams(f.config, f.store, f.orch); cleanups.push(() => manager.close());
+    const stream = await manager.prepare(f.member.id, new URL(`http://localhost/?mode=control&size=core&cols=80&rows=24&lease=${lease.leaseId}`));
+    const events: any[] = [], output: Buffer[] = [];
+    stream.open({ send: (text: string) => events.push(JSON.parse(text)), sendBinary: (bytes: Uint8Array) => output.push(Buffer.from(bytes)), close: () => {}, getBufferedAmount: () => 0 } as unknown as ServerWebSocket<SocketData>);
+    await until(() => events.some(e => e.type === "ready"));
+    expect(events[0]).toMatchObject({ type: "ready", mode: "control", ...size });
+    expect(f.pids()[0]).toMatchObject(size); // stty reads the actual slave PTY, not ready metadata.
+    stream.message(JSON.stringify({ type: "resize", cols: 100, rows: 40 }));
+    stream.message(JSON.stringify({ type: "resize", cols: "invalid", rows: 0 }));
+    stream.message(Buffer.from("still-accepts-input"));
+    await until(() => Buffer.concat(output).toString().includes("IN:"));
+    expect(Buffer.concat(output).toString()).not.toContain("SIZE:");
+    expect(stream.size).toEqual(size); expect(terminal).toMatchObject(size);
+    terminal.cols = 180; terminal.rows = 60;
+    await stream.refreshSize();
+    await until(() => Buffer.concat(output).toString().includes("SIZE:180x60"));
+    expect(events).toContainEqual({ type: "resize", cols: 180, rows: 60 });
+    expect(terminal).toMatchObject({ cols: 180, rows: 60 });
+    await stream.close();
+    expect(terminal).toMatchObject({ cols: 180, rows: 60, state: "live" });
+  });
+  test.each(["&size=fit", ""])("fit policy %s preserves client-sized PTY and resizing", async policy => {
+    const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const stream = f.connect(`mode=control${policy}&cols=80&rows=24&lease=${lease.leaseId}`);
+    await until(() => stream.text.includes("PTY_READY"));
+    expect(stream.events[0]).toMatchObject({ mode: "control", cols: 80, rows: 24 });
+    expect(f.pids()[0]).toMatchObject({ cols: 80, rows: 24 });
+    stream.ws.send(JSON.stringify({ type: "resize", cols: 100, rows: 40 }));
+    await until(() => stream.text.includes("SIZE:100x40"));
+  });
+  test("size=core query reaches the websocket route and uses core dimensions", async () => {
+    const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const stream = f.connect(`mode=control&size=core&cols=80&rows=24&lease=${lease.leaseId}`);
+    await until(() => stream.text.includes("PTY_READY"));
+    expect(stream.events[0]).toMatchObject({ cols: 200, rows: 120 });
+    stream.ws.send(JSON.stringify({ type: "resize", cols: 100, rows: 40 }));
+    stream.ws.send(JSON.stringify({ type: "ping" }));
+    await until(() => stream.events.some(e => e.type === "pong"));
+    expect(stream.text).not.toContain("SIZE:");
   });
   test("raw PTY is configured before spawn; delayed attach sends ready only after first paint; immediate Ctrl-C/CR survive", async () => {
     const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });

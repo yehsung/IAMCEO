@@ -1687,16 +1687,34 @@ private struct PDFPreview: UIViewRepresentable {
 
 // MARK: - Sandboxed artifact web view (security settings must not change)
 
+/// WebKit's URL-filter regex subset does not support disjunction. Keep each scheme family separate.
+/// CSP still limits resources to inline styles and data images/fonts; these rules also block FTP(S).
+func artifactBlockRuleJSON() -> String {
+    #"""
+    [
+        {"trigger":{"url-filter":"^https?:"},"action":{"type":"block"}},
+        {"trigger":{"url-filter":"^wss?:"},"action":{"type":"block"}},
+        {"trigger":{"url-filter":"^file:"},"action":{"type":"block"}},
+        {"trigger":{"url-filter":"^ftps?:"},"action":{"type":"block"}}
+    ]
+    """#
+}
+
 /// Compiled once per app run. Stays nil when WebKit refuses the rule, and then no artifact is shown.
 @MainActor private var compiledArtifactRule: WKContentRuleList?
 
-/// The http/https/ws/file block layer. nil means it could not be compiled: callers must not render.
+/// The HTTP(S)/WS(S)/file/FTP(S) block layer. nil means compilation failed: callers must not render.
 @MainActor
 private func artifactBlockRule() async -> WKContentRuleList? {
     if let compiledArtifactRule { return compiledArtifactRule }
-    let rules = "[{\"trigger\":{\"url-filter\":\"^(https?|wss?|file):\"},\"action\":{\"type\":\"block\"}}]"
+    let rules = artifactBlockRuleJSON()
     await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-        WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "IAMCEOIsolatedArtifact", encodedContentRuleList: rules) { rule, _ in
+        WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "IAMCEOIsolatedArtifact", encodedContentRuleList: rules) { rule, error in
+            if let error {
+                NSLog("[IAMCEO] Artifact content rule compilation failed: %@", error as NSError)
+            } else if rule == nil {
+                NSLog("[IAMCEO] Artifact content rule compilation returned neither a rule nor an error")
+            }
             if let rule { compiledArtifactRule = rule }
             continuation.resume()
         }
@@ -1704,14 +1722,35 @@ private func artifactBlockRule() async -> WKContentRuleList? {
     return compiledArtifactRule
 }
 
-/// Takes the compiled rule as a requirement, so an artifact web view cannot exist without its block layer.
+/// Only loadHTMLString's first main-frame document may navigate. No URL is opened by this policy.
+func artifactAllowsNavigation(firstAction: Bool, url: URL?, mainFrame: Bool, type: WKNavigationType) -> Bool {
+    firstAction && mainFrame && type == .other && url?.absoluteString == "about:blank"
+}
+
 @MainActor
-private func makeArtifactWebView(html: String, rule: WKContentRuleList) -> WKWebView {
+private final class ArtifactNavigationDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
+    private var firstAction = true
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        let allow = artifactAllowsNavigation(firstAction: firstAction, url: navigationAction.request.url,
+            mainFrame: navigationAction.targetFrame?.isMainFrame == true, type: navigationAction.navigationType)
+        firstAction = false
+        decisionHandler(allow ? .allow : .cancel)
+    }
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
+}
+
+/// Requires the compiled block layer before loading any artifact HTML.
+@MainActor
+private func makeArtifactWebView(html: String, rule: WKContentRuleList, delegate: ArtifactNavigationDelegate) -> WKWebView {
     let configuration = WKWebViewConfiguration()
     configuration.websiteDataStore = .nonPersistent()
     configuration.defaultWebpagePreferences.allowsContentJavaScript = false
     configuration.userContentController.add(rule)
     let view = WKWebView(frame: .zero, configuration: configuration)
+    view.navigationDelegate = delegate
+    view.uiDelegate = delegate
     let policy = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'\">"
     view.loadHTMLString(policy + html, baseURL: nil)
     return view
@@ -1720,14 +1759,16 @@ private func makeArtifactWebView(html: String, rule: WKContentRuleList) -> WKWeb
 private struct SandboxedHTML: NSViewRepresentable {
     let html: String
     let rule: WKContentRuleList
-    func makeNSView(context: Context) -> WKWebView { makeArtifactWebView(html: html, rule: rule) }
+    func makeCoordinator() -> ArtifactNavigationDelegate { ArtifactNavigationDelegate() }
+    func makeNSView(context: Context) -> WKWebView { makeArtifactWebView(html: html, rule: rule, delegate: context.coordinator) }
     func updateNSView(_ nsView: WKWebView, context: Context) {}
 }
 #else
 private struct SandboxedHTML: UIViewRepresentable {
     let html: String
     let rule: WKContentRuleList
-    func makeUIView(context: Context) -> WKWebView { makeArtifactWebView(html: html, rule: rule) }
+    func makeCoordinator() -> ArtifactNavigationDelegate { ArtifactNavigationDelegate() }
+    func makeUIView(context: Context) -> WKWebView { makeArtifactWebView(html: html, rule: rule, delegate: context.coordinator) }
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
 #endif

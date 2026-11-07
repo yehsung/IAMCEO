@@ -26,7 +26,7 @@ struct TerminalView: View {
     private var unsupported: Bool { client.state == .unsupported }
 
     /// A Mac sheet opens at its minimum size, and CESheet draws at a fixed width: both must be the same number or the
-    /// content is centred in a narrower window and clipped on both sides. Wide enough for the core's 200 columns at a
+    /// content is centred in a narrower window and clipped on both sides. Wide enough for the core grid at a
     /// readable size, never wider than the screen.
     #if os(macOS)
     private var sheetWidth: CGFloat { min(1040, max(720, (NSScreen.main?.visibleFrame.width ?? 1280) - 160)) }
@@ -46,8 +46,10 @@ struct TerminalView: View {
                 if mode == .control {
                     if let expiry = client.expiresAt { store.updateTerminalStreamLease(memberID: member.id, expiresAt: expiry) }
                     starting = false
-                    if let bytes = startBuffer.take(), !bytes.isEmpty { client.send(bytes) }
-                    else if startBuffer.discarded { notice = "입력 준비가 길어져 친 키를 버렸습니다. 다시 입력해 주세요." }
+                    if TerminalPlatform.current.startsOnTyping {
+                        if let bytes = startBuffer.take(), !bytes.isEmpty { client.send(bytes) }
+                        else if startBuffer.discarded { notice = "입력 준비가 길어져 친 키를 버렸습니다. 다시 입력해 주세요." }
+                    }
                 }
             }
             client.onLease = { expiry in store.updateTerminalStreamLease(memberID: member.id, expiresAt: expiry) }
@@ -97,7 +99,7 @@ struct TerminalView: View {
                         Button("입력 끝내기") { Task { await finishInput(resume: true) } }
                             .ceSecondaryButton().disabled(ending).accessibilityLabel("터미널 입력 끝내기")
                     } else {
-                        Text("키를 누르면 바로 입력합니다").font(CEFont.meta).foregroundStyle(CE.ink3)
+                        Text(TerminalPlatform.current.observeHint).font(CEFont.meta).foregroundStyle(CE.ink3)
                         Spacer(minLength: 8)
                         Button(starting ? "입력 준비 중" : "입력 시작") { beginInput() }
                             .ceProminentButton().disabled(store.isDemo || !store.canWrite || starting || ending)
@@ -145,7 +147,9 @@ struct TerminalView: View {
     }
     private var terminal: some View {
         LiveTerminalSurface(client: client, mode: controlling ? .control : .observe, cols: client.grid.cols, rows: client.grid.rows,
-                            onTypeWhileObserving: { bytes in beginInput(bytes) },
+                            onTypeWhileObserving: { bytes in
+                                if TerminalPlatform.current.startsOnTyping { beginInput(bytes) }
+                            },
                             onSize: { cols, rows in naturalCols = cols; naturalRows = rows })
             .id(client.outputGeneration)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -157,14 +161,17 @@ struct TerminalView: View {
         client.connect(api: api, memberID: member.id, mode: .observe)
     }
     private func beginInput(_ bytes: Data = Data()) {
+        guard bytes.isEmpty || TerminalPlatform.current.startsOnTyping else { return }
         guard !store.isDemo, !ending, visible, store.canWrite else { return }
         if controlling { client.send(bytes); return }
         if starting {
-            if !startBuffer.append(bytes) { notice = "입력 준비 중에는 4KB·3초까지만 보관합니다. 다시 입력해 주세요." }
+            if TerminalPlatform.current.startsOnTyping, !startBuffer.append(bytes) { notice = "입력 준비 중에는 4KB·3초까지만 보관합니다. 다시 입력해 주세요." }
             return
         }
-        starting = true; notice = nil; startBuffer.begin()
-        _ = startBuffer.append(bytes)
+        starting = true; notice = nil
+        if TerminalPlatform.current.startsOnTyping {
+            startBuffer.begin(); _ = startBuffer.append(bytes)
+        }
         let token = UUID(); requestID = token
         Task {
             let claimed = await store.claimTerminal(member)
@@ -177,7 +184,8 @@ struct TerminalView: View {
                 notice = store.errorMessage ?? "조작권을 받지 못했습니다. 다른 기기나 세션 상태를 확인해 주세요."
                 return
             }
-            client.connect(api: api, memberID: member.id, mode: .control, cols: naturalCols, rows: naturalRows, leaseID: lease)
+            client.connect(api: api, memberID: member.id, mode: .control, cols: naturalCols, rows: naturalRows, leaseID: lease,
+                           sizePolicy: TerminalPlatform.current.controlSizePolicy)
         }
     }
     private func finishInput(resume: Bool) async {

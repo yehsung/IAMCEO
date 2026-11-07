@@ -211,7 +211,7 @@ export class CoreRunner implements Runner {
     const nonce = providerFor(member) === "codex" ? crypto.randomUUID().replaceAll("-", "") : null;
     let terminal: CoreTerminal;
     try { terminal = await this.call<CoreTerminal>("terminal.run", {
-      argv: launch.argv, cwd: member.cwd, env, name: this.name(member),
+      argv: launch.argv, cwd: member.cwd, env, name: this.name(member), size: { cols: 160, rows: 50 },
       labels: { ...this.labels(member), "iamceo.startedAt": new Date().toISOString(), ...(member.sessionGeneration !== undefined ? { "iamceo.generation": String(member.sessionGeneration) } : {}), ...(opts.operationId ? { "iamceo.operation": opts.operationId } : {}), ...(nonce ? { "iamceo.binding": nonce } : {}), ...(launch.sessionId ? { "iamceo.session": launch.sessionId } : {}) },
       no_parent: true, outlive_parent: true, no_notify: true, keep: false, rm: false, wait: false,
     }, this.sendTimeoutMs);

@@ -290,3 +290,112 @@ extension APIClient {
         try await send("/api/members/\(Self.segment(memberID))/terminal/control", body: body)
     }
 }
+
+// Server-side folder browsing. Paths here always belong to the connected server.
+struct ServerFolder: Codable, Sendable, Identifiable, Equatable {
+    let name: String
+    let path: String
+    var id: String { path }
+}
+struct FolderListing: Codable, Sendable, Equatable {
+    let path: String
+    let parent: String?
+    let home: String
+    let entries: [ServerFolder]
+    var truncated: Bool? = nil
+}
+enum FolderBrowserResult: Sendable { case listing(FolderListing), legacy }
+struct FolderCrumb: Identifiable, Equatable {
+    let name: String
+    let path: String
+    var id: String { path }
+}
+enum ServerFolderPaths {
+    static func parent(_ path: String) -> String { (path as NSString).deletingLastPathComponent }
+    static func appending(_ name: String, to parent: String) -> String { parent.hasSuffix("/") ? parent + name : parent + "/" + name }
+    static func breadcrumbs(path: String, home: String) -> [FolderCrumb] {
+        guard path == home || path.hasPrefix(home + "/") else { return [] }
+        var result = [FolderCrumb(name: "홈", path: home)]
+        var current = home
+        for name in path.dropFirst(home.count).split(separator: "/").map(String.init) {
+            current = appending(name, to: current)
+            result.append(FolderCrumb(name: name, path: current))
+        }
+        return result
+    }
+    static func nameError(_ input: String) -> String? {
+        let name = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.unicodeScalars.count <= 100, !name.hasPrefix("."),
+              !name.contains("/"), !name.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else {
+            return "점으로 시작하지 않는 1~100자 이름을 입력하세요. /와 제어문자는 쓸 수 없습니다."
+        }
+        return nil
+    }
+    static func repository(_ input: String) -> String? {
+        let pattern = #"^(?:https://github\.com/)?([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9_.-]{1,100})$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: input, range: NSRange(input.startIndex..., in: input)),
+              match.range.length == input.utf16.count,
+              let owner = Range(match.range(at: 1), in: input), let repo = Range(match.range(at: 2), in: input) else { return nil }
+        var name = String(input[repo])
+        if name.hasSuffix(".git") { name.removeLast(4) }
+        guard !name.isEmpty, name != ".", name != ".." else { return nil }
+        return String(input[owner]) + "/" + name
+    }
+}
+struct GitHubRepository: Codable, Sendable, Identifiable {
+    let nameWithOwner: String
+    let description: String?
+    let visibility: String
+    let updatedAt: String
+    let url: String
+    var id: String { nameWithOwner }
+}
+struct GitHubRepositories: Codable, Sendable {
+    let available: Bool
+    var reason: String? = nil
+    var repos: [GitHubRepository] = []
+}
+extension GitHubRepositories {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        available = try values.decode(Bool.self, forKey: .available)
+        reason = try values.decodeIfPresent(String.self, forKey: .reason)
+        repos = try values.decodeIfPresent([GitHubRepository].self, forKey: .repos) ?? []
+    }
+}
+struct GitHubCloneJob: Codable, Sendable {
+    enum Status: String, Codable, Sendable { case running, done, failed }
+    let status: Status
+    var path: String? = nil
+    var error: String? = nil
+}
+extension APIClient {
+    func folderContents(path: String? = nil) async throws -> FolderListing {
+        var parts = URLComponents(); parts.path = "/api/folders"
+        if let path { parts.queryItems = [URLQueryItem(name: "path", value: path)] }
+        return try await request(parts.string!)
+    }
+    func folderBrowser() async throws -> FolderBrowserResult {
+        do { return .listing(try await folderContents()) }
+        catch let error as APIError where error.status == 404 { return .legacy }
+    }
+    func createFolder(parent: String, name: String) async throws -> ServerFolder {
+        struct Body: Encodable, Sendable { let parent: String; let name: String }
+        return try await send("/api/folders", body: Body(parent: parent, name: name))
+    }
+    func githubRepositories(query: String = "") async throws -> GitHubRepositories {
+        var parts = URLComponents(); parts.path = "/api/github/repos"
+        parts.queryItems = [URLQueryItem(name: "query", value: query)]
+        return try await request(parts.string!)
+    }
+    func cloneRepository(repo: String, parent: String) async throws -> String {
+        struct Body: Encodable, Sendable { let repo: String; let parent: String }
+        struct Result: Decodable, Sendable { let jobId: String }
+        let result: Result = try await send("/api/github/clone", body: Body(repo: repo, parent: parent))
+        return result.jobId
+    }
+    func cloneJob(_ id: String) async throws -> GitHubCloneJob {
+        try await request("/api/github/clone/\(Self.segment(id))")
+    }
+}

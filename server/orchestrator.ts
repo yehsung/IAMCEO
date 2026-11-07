@@ -55,7 +55,7 @@ import type {
   WorkItem,
   WorkSec,
 } from "../shared/types.ts";
-import { CODEX_EFFORTS, EFFORTS, adoptRefusal, memberConfig } from "../shared/types.ts";
+import { adoptRefusal, memberConfig } from "../shared/types.ts";
 import type { Config } from "./config.ts";
 import type { AgentToolDef, AgentToolResult, AskWaitResult, OrchestratorApi } from "./orchestrator-api.ts";
 import { sanitizeName } from "./files.ts";
@@ -723,7 +723,12 @@ export class Orchestrator implements OrchestratorApi {
         throw new ApiError(409, "세션이 바뀌었습니다", "TERMINAL_REFUSED");
       }
       return size;
-    } catch { throw new ApiError(409, "터미널 소유와 크기를 확인할 수 없습니다", "TERMINAL_REFUSED"); }
+    } catch (error) {
+      if (error instanceof CoreError && !error.uncertain && ["finished", "not_found"].includes(error.kind)) {
+        throw new ApiError(409, "터미널이 끝났거나 없습니다", "TERMINAL_GONE");
+      }
+      throw new ApiError(409, "터미널 소유와 크기를 확인할 수 없습니다", "TERMINAL_REFUSED");
+    }
   }
   terminalStreamLease(memberId: string) {
     const member = this.requireTerminalStream(memberId);
@@ -1647,7 +1652,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private async updateSettingsOnce(patch: SettingsPatch): Promise<Settings> {
-    this.models.requireSettings(patch);
+    this.models.requireSettings(patch, this.store.getSettings());
     if (this.archiving.size) throw new ApiError(409, "프로젝트 보관을 처리하는 중입니다");
     const before = this.store.getSettings();
     if (this.runners.has("core")) {
@@ -1775,13 +1780,16 @@ export class Orchestrator implements OrchestratorApi {
     this.requireActive(this.store.requireProject(member.projectId));
     if (this.runtime(memberId).closing || this.runtime(memberId).starting || this.runtime(memberId).reopening || this.pendingLifecycle(memberId)) throw new ApiError(409, "세션을 처리하는 중입니다");
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 설정을 바꿀 수 없습니다");
-    const targetCli = patch.cli ?? member.cli;
-    this.models.requireModel(targetCli, patch.modelOverride);
-    const requestedEffort = patch.effortOverride === undefined ? member.effortOverride : patch.effortOverride;
-    if (requestedEffort && !(targetCli === "codex" ? CODEX_EFFORTS : EFFORTS).some(value => value === requestedEffort)) {
-      throw new ApiError(400, `${targetCli}에서 지원하지 않는 effort입니다`);
+    const normalized = this.models.memberPatch(member, patch, this.store.getSettings());
+    patch = normalized.patch;
+    if (patch.cli && patch.cli !== member.cli) {
+      const updated = await this.switchProvider(member, patch);
+      if (normalized.resetOverrides.length) {
+        this.store.appendActivity(memberId, "system", `CLI 변경으로 지원하지 않는 ${normalized.resetOverrides.join(", ")} 지정을 비우고 직급 기본값으로 되돌렸습니다`);
+        return { ...updated, resetOverrides: normalized.resetOverrides };
+      }
+      return updated;
     }
-    if (patch.cli && patch.cli !== member.cli) return this.switchProvider(member, patch);
     if (this.runners.has("core") && member.backend === "core" && (member.sessionId || member.paneId) &&
         ((patch.modelOverride !== undefined && patch.modelOverride !== member.modelOverride) || (patch.effortOverride !== undefined && patch.effortOverride !== member.effortOverride))) {
       return this.switchProvider(member, { ...patch, cli: member.cli });

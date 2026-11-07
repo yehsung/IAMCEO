@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { createServer, type Socket } from "node:net";
-import { existsSync, chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { loadConfig } from "../server/config.ts";
@@ -21,7 +21,7 @@ const until = async (predicate: () => boolean) => {
   expect(predicate()).toBe(true);
 };
 
-async function fixture(simulateDetach = false, restoreDelay = 150) {
+async function fixture(simulateDetach = false, restoreDelay = 150, cli: "claude" | "codex" = "claude") {
   const dir = mkdtempSync("/private/tmp/iamceo-terminal-test-");
   const binary = join(dir, "fake-core");
   const script = join(dir, "fake-core.ts");
@@ -53,6 +53,7 @@ exec ${quote(process.execPath)} ${quote(script)} "$@"
   chmodSync(binary, 0o755);
   const socketPath = join(dir, "core.sock");
   const terminals = new Map<string, any>();
+  let terminalCount = 0;
   const peers = new Set<Socket>();
   const sent: { detached: boolean; restored: boolean }[] = [];
   const rpc = createServer(socket => {
@@ -67,7 +68,7 @@ exec ${quote(process.execPath)} ${quote(script)} "$@"
         switch (request.method) {
           case "hello": result = { generation: 1, version: "fake", features: [], methods: ["terminal.run", "terminal.list", "terminal.get", "terminal.read", "terminal.send", "terminal.interrupt", "terminal.kill", "terminal.keys"] }; break;
           case "terminal.run": {
-            result = { address: `t${terminals.size+1}`, argv: p.argv, cwd: p.cwd, labels: p.labels, state: "live", cols: 200, rows: 120, turn: 0, status: { state: "idle", app: "claude-code" }, reported: true };
+            result = { address: `t${++terminalCount}`, argv: p.argv, cwd: p.cwd, labels: p.labels, state: "live", cols: 200, rows: 120, turn: 0, status: { state: "idle", app: "claude-code" }, reported: true };
             terminals.set((result as any).address, result); break;
           }
           case "terminal.list": result = { terminals: [...terminals.values()].filter(t => Object.entries(p.labels || {}).every(([k,v]) => t.labels[k] === v)) }; break;
@@ -79,7 +80,12 @@ exec ${quote(process.execPath)} ${quote(script)} "$@"
             }
             result = t; break;
           }
-          case "terminal.read": result = { text: "─".repeat(30)+"\n❯ \n"+"─".repeat(30) }; break;
+          case "terminal.read": result = { text: terminals.get(p.terminal)?.labels["iamceo.cli"] === "codex" ? "› \n? for shortcuts" : "─".repeat(30)+"\n❯ \n"+"─".repeat(30) }; break;
+          case "terminal.kill": {
+            const t = terminals.get(p.terminal);
+            if (t) { t.state = "finished"; result = t; }
+            break;
+          }
           case "terminal.send": case "terminal.keys":
             sent.push({ detached: pids().filter(p => !p.observe).every(p => !alive(p.pid)), restored: terminals.get(p.terminal)?.cols === 200 });
             result = { turn: 0, started: true, status: "idle" }; break;
@@ -91,17 +97,20 @@ exec ${quote(process.execPath)} ${quote(script)} "$@"
   await new Promise<void>(resolve => rpc.listen(socketPath, resolve));
   const config = loadConfig({ IAMCEO_HOME: join(dir, "home"), IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: socketPath, IAMCEO_CORE_BIN: binary, IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false" });
   config.hosts = ["127.0.0.1"];
+  config.claudeHome = join(dir, "claude"); config.codexHome = join(dir, "codex");
   const bus = new Bus(); const db = openDb(config.dbPath); const store = new Store(db, bus);
   const runner = new CoreRunner({ socketPath, claudeBin: "/usr/bin/false", codexBin: "/usr/bin/false", contextHome: dir, claudeHome: join(dir, "claude"), codexHome: join(dir, "codex") }, { recoveryStore: store, pollMs: 60_000 });
   const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]), providerHomes: { claudeHome: join(dir,"claude"), codexHome: join(dir,"codex") }, timings: { healthMs: 60_000, tickMs: 60_000 } });
   const project = store.createProject({ name: "터미널", cwd: dir });
-  const member = await orch.createMember(project.id, { name: "직원" });
+  const member = await orch.createMember(project.id, { name: "직원", cli });
   const server = await startServer({ config, store, bus, orch, detectHosts: () => [] });
   const origin = `http://127.0.0.1:${server.port}`;
   const sockets: WebSocket[] = [];
   const pids = () => readdirSync(dir).filter(n => /^attach-\d+\.json$/.test(n)).map(n => JSON.parse(readFileSync(join(dir,n),"utf8")));
   cleanups.push(async () => {
+    const pumping = [...((orch as any).runtimes as Map<string, any>).values()].map(rt => rt.pumping);
     sockets.forEach(ws => ws.close()); await server.stop(); await orch.shutdown();
+    await Promise.all(pumping);
     peers.forEach(s => s.destroy()); await new Promise<void>(resolve => rpc.close(() => resolve()));
     db.close();
     for (const { pid } of pids()) expect(alive(pid)).toBe(false);
@@ -392,21 +401,120 @@ describe("terminal stream", () => {
     await until(() => f.sent.length > 0);
     expect(f.sent.every(s => s.detached && s.restored)).toBe(true);
   });
-  test("unverified restoration times out and keeps delivery fenced until a later core check succeeds", async () => {
+  test("unverified restoration warns at the two-second limit and allows queued delivery", async () => {
     const f = await fixture(true, 60_000);
     const lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
     const control = f.connect(`mode=control&size=fit&cols=91&rows=31&lease=${lease.leaseId}`);
     await until(() => control.text.includes("PTY_READY"));
     f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "instruction", text: "wait-for-restoration", wake: true });
     const started = performance.now();
-    await expect(f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId })).rejects.toMatchObject({ status: 409, message: "터미널 크기 복원을 확인하지 못했습니다" });
+    await f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId });
+    expect(performance.now() - started).toBeGreaterThanOrEqual(2000);
     expect(performance.now() - started).toBeLessThan(3000);
-    expect(f.sent).toHaveLength(0);
     expect(f.pids().every(p => !alive(p.pid))).toBe(true);
-    writeFileSync(join(f.dir, "restore-at"), "0");
+    await until(() => f.sent.length > 0);
+    expect(f.sent.every(s => s.detached && !s.restored)).toBe(true);
+    expect(f.store.listActivity(f.member.id).filter(a => a.text.includes("경고: 2초"))).toHaveLength(1);
+    const later = performance.now();
+    await f.orch.pump(f.member.id);
+    expect(performance.now() - later).toBeLessThan(500);
+  });
+
+  for (const expired of [false, true]) test.each(["terminal_gone", "finished", "not_found"])(`%s control termination releases without restore wait and reopens on wake (expiry=${expired})`, async ending => {
+    const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const manager = new TerminalStreams(f.config, f.store, f.orch); cleanups.push(() => manager.close());
+    const stream = await manager.prepare(f.member.id, new URL(`http://localhost/?mode=control&lease=${lease.leaseId}`));
+    const events: any[] = [];
+    stream.open({ send: (text: string) => events.push(JSON.parse(text)), sendBinary: () => {}, close: () => {}, getBufferedAmount: () => 0 } as unknown as ServerWebSocket<SocketData>);
+    await until(() => events.some(e => e.type === "ready"));
+    const terminal = f.terminals.get(f.member.paneId!);
+    terminal.state = "finished";
+    if (ending === "not_found") f.terminals.delete(f.member.paneId!);
+    if (ending !== "terminal_gone") await expect(f.orch.terminalStreamInfo(f.member.id)).rejects.toMatchObject({ code: "TERMINAL_GONE" });
+    await stream.close(ending === "terminal_gone" ? "terminal_gone" : undefined);
+    f.store.patchMember(f.member.id, { status: "offline" });
+    const start = performance.now();
+    if (expired) f.store.saveLease({ ...f.store.inputState(f.member.id).lease!, expiresAt: Date.now() - 1 });
+    else await f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId });
+    f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "instruction", text: "wake-after-terminal-exit", wake: true });
     await f.orch.pump(f.member.id);
     await until(() => f.sent.length > 0);
-    expect(f.sent.every(s => s.detached && s.restored)).toBe(true);
+    expect(performance.now() - start).toBeLessThan(1000);
+    const current = f.store.requireMember(f.member.id);
+    expect(current.paneId).not.toBe(f.member.paneId);
+    expect(f.terminals.get(current.paneId!)?.state).toBe("live");
+    expect(f.store.listPending(f.member.id)).toHaveLength(0);
+    expect(f.store.inputState(f.member.id).lease).toBeNull();
+    expect(f.store.listActivity(f.member.id).some(a => a.text.includes("경고: 2초"))).toBe(false);
+  });
+
+  for (const v2 of [false, true]) for (const cli of ["claude", "codex"] as const) {
+    test(`CLI-only PATCH resets incompatible saved overrides (${cli}, v2=${v2})`, async () => {
+      const f = await fixture(false, 150, cli), nextCli = cli === "claude" ? "codex" : "claude";
+      const oldModel = cli === "claude" ? "opus" : "gpt-6.1-sol";
+      f.store.patchMember(f.member.id, { modelOverride: oldModel, effortOverride: cli === "claude" ? "max" : "minimal" });
+      const headers = { ...f.headers, "Content-Type": "application/json", ...(v2 ? { "X-IAMCEO-Contract": "2", "If-Match": `"${f.store.memberRevisions(f.member.id).configRevision}"` } : {}) };
+      const url = `${f.origin}/api/members/${f.member.id}`;
+      const refused = await fetch(url, { method: "PATCH", headers, body: JSON.stringify({ cli: nextCli, modelOverride: oldModel }) });
+      expect(refused.status).toBe(400);
+      expect(f.store.requireMember(f.member.id).cli).toBe(cli);
+      expect(f.terminals.get(f.member.paneId!).state).toBe("live");
+      const res = await fetch(url, { method: "PATCH", headers, body: JSON.stringify({ cli: nextCli }) });
+      expect(res.status).toBe(200);
+      const body = await res.json(), updated = v2 ? body.member : body;
+      expect(updated).toMatchObject({ cli: nextCli, modelOverride: null, effortOverride: null, resetOverrides: ["modelOverride", "effortOverride"] });
+      expect(f.store.requireMember(f.member.id)).toMatchObject({ cli: nextCli, modelOverride: null, effortOverride: null });
+      expect(f.store.listActivity(f.member.id).some(a => a.text.includes("modelOverride, effortOverride") && a.text.includes("직급 기본값"))).toBe(true);
+    });
+
+    test(`PATCH validates explicit model/effort against the new provider (${cli}, v2=${v2})`, async () => {
+      const f = await fixture(false, 150, cli), nextCli = cli === "claude" ? "codex" : "claude";
+      const newModel = nextCli === "claude" ? "sonnet" : "gpt-6.1-terra";
+      const headers = { ...f.headers, "Content-Type": "application/json", ...(v2 ? { "X-IAMCEO-Contract": "2", "If-Match": `"${f.store.memberRevisions(f.member.id).configRevision}"` } : {}) };
+      const res = await fetch(`${f.origin}/api/members/${f.member.id}`, { method: "PATCH", headers, body: JSON.stringify({ cli: nextCli, modelOverride: newModel, effortOverride: "high" }) });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(v2 ? body.member : body).toMatchObject({ cli: nextCli, modelOverride: newModel, effortOverride: "high" });
+    });
+  }
+
+  test("HTTP and direct writes use per-model cached efforts for member and rank settings", async () => {
+    const f = await fixture(false, 150, "codex");
+    const home = join(f.dir, "codex"); mkdirSync(home, { recursive: true });
+    const cached = (slug: string, effort: string) => ({ slug, visibility: "list", supported_reasoning_levels: [{ effort }] });
+    writeFileSync(join(home, "models_cache.json"), JSON.stringify({ models: [cached("future", "ultra"), cached("other", "tiny")] }));
+    f.config.codexHome = home;
+    // The server and orchestrator already use this isolated provider home.
+    const headers = { ...f.headers, "Content-Type": "application/json" };
+    for (const v2 of [false, true]) {
+      const settingsHeaders = { ...headers, ...(v2 ? { "X-IAMCEO-Contract": "2", "If-Match": `"${f.store.settingsRevision()}"` } : {}) };
+      const settings = await fetch(`${f.origin}/api/settings`, { method: "PUT", headers: settingsHeaders, body: JSON.stringify({ codexRanks: { lead: { model: "future", effort: "ultra" } } }) });
+      expect(settings.status).toBe(200);
+      await f.orch.pump(f.member.id);
+      const bad = await fetch(`${f.origin}/api/settings`, { method: "PUT", headers, body: JSON.stringify({ codexRanks: { lead: { effort: "tiny" } } }) });
+      expect(bad.status).toBe(400);
+      const memberHeaders = { ...headers, ...(v2 ? { "X-IAMCEO-Contract": "2", "If-Match": `"${f.store.memberRevisions(f.member.id).configRevision}"` } : {}) };
+      const res = await fetch(`${f.origin}/api/members/${f.member.id}`, { method: "PATCH", headers: memberHeaders, body: JSON.stringify({ modelOverride: "future", effortOverride: "ultra" }) });
+      expect(res.status).toBe(200);
+      const body = await res.json(); expect((v2 ? body.member : body).effortOverride).toBe("ultra");
+    }
+    await expect(f.orch.patchMemberConfig(f.member.id, { effortOverride: "tiny" })).rejects.toMatchObject({ status: 400 });
+    await expect(f.orch.updateSettings({ codexRanks: { lead: { effort: "tiny" } } })).rejects.toMatchObject({ status: 400 });
+    expect((await f.orch.patchMemberConfig(f.member.id, { effortOverride: "ultra" })).effortOverride).toBe("ultra");
+    expect((await f.orch.updateSettings({ codexRanks: { lead: { effort: "ultra" } } })).codexRanks.lead.effort).toBe("ultra");
+    expect(f.store.requireMember(f.member.id).effortOverride).toBe("ultra");
+  });
+
+  test("release without any control attach never waits for size restoration", async () => {
+    const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const info = spyOn(f.orch, "terminalStreamInfo").mockImplementation(async () => { throw new Error("must not check size"); });
+    try {
+      const start = performance.now();
+      await f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId });
+      expect(performance.now() - start).toBeLessThan(500);
+      expect(info).not.toHaveBeenCalled();
+      expect(f.store.listActivity(f.member.id).some(a => a.text.includes("경고: 2초"))).toBe(false);
+    } finally { info.mockRestore(); }
   });
   test("release immediately revokes a socket and queued input across the same claim's reacquisition", async () => {
     const f = await fixture(), claimId = "persistent-claim";

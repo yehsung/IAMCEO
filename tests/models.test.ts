@@ -85,6 +85,19 @@ describe("CLI model catalog (isolated fake homes only)", () => {
     expect(f.reader.read().claude.source).toBe("default");
   });
 
+  test("Codex caches with no usable models fall back, including internally damaged entries", () => {
+    const f = fixture();
+    for (const models of [[], [null], [{ visibility: "list" }], [{ slug: "broken", visibility: "list", supported_reasoning_levels: null }], [model("hidden", 1, "hide")]]) {
+      writeFileSync(f.codexPath, JSON.stringify({ models }));
+      expect(f.reader.read().codex.source).toBe("default");
+      expect(f.reader.read().codex.models.length).toBeGreaterThan(0);
+      expect(() => f.reader.requireModel("codex", "gpt-6.1-sol")).not.toThrow();
+    }
+    writeFileSync(f.codexPath, JSON.stringify({ models: [{ visibility: "list" }, model("good", 2)] }));
+    expect(f.reader.read().codex.source).toBe("cli");
+    expect(f.reader.read().codex.models.map(m => m.value)).toEqual(["good"]);
+  });
+
   test("default user-home paths and configured/env homes resolve without real CLI files", () => {
     const f = fixture();
     mkdirSync(join(f.home, ".codex"));

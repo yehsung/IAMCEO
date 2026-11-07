@@ -107,7 +107,7 @@ struct AppShell: View {
             switch sheet {
             case "archive": showArchive = true
             case "pairing": router.showPairing = true
-            case "new-project": router.showNewProject = true
+            case "new-project", "folder-picker", "github-clone": router.showNewProject = true
             case "new-member": router.showNewMember = true
             case "settings": router.showSettings = true
             case "rename": if let id = store.selectedProjectID { router.manageProject(id: id, mode: .rename) }

@@ -845,10 +845,20 @@ export class CoreRunner implements Runner {
   async terminalControl(member: RunnerMember, action: TerminalControlAction): Promise<TerminalControlResult> {
     const release = this.reserve(member.id);
     try {
+      const lease = this.manualLease(member.id);
+      // Revoking our own lease is local: terminal.get may already be not_found.
+      if (action.action === "release") {
+        const track = this.tracks.get(member.id);
+        if (track) this.assertMember(track, member);
+        if (!lease || action.leaseId !== lease.leaseId || lease.identity.sessionGeneration !== (member.sessionGeneration ?? -1) ||
+            lease.identity.terminalId !== (member.paneId ?? track?.terminal.address)) throw new CoreError("conflict", "A matching active terminal control lease is required");
+        this.deps.recoveryStore?.removeLease(member.id, lease.claimId); this.leases.delete(member.id);
+        if (track) this.bump(track);
+        return {};
+      }
       const terminal = await this.owned(member);
       const track = this.tracks.get(member.id);
       if (!track) throw new CoreError("not_found", "Reattach the owned terminal before claiming control");
-      const lease = this.manualLease(member.id);
       if (action.action === "claim") {
         if (lease && action.leaseId !== lease.leaseId && action.leaseId !== lease.claimId) throw new CoreError("conflict", "Another terminal control lease is active");
         // Expired rows can also survive a restart, when there is no cached
@@ -864,10 +874,6 @@ export class CoreRunner implements Runner {
         return { leaseId: next.leaseId, expiresAt: next.expiresAt };
       }
       if (!lease || action.leaseId !== lease.leaseId) throw new CoreError("conflict", "A matching active terminal control lease is required");
-      if (action.action === "release") {
-        this.deps.recoveryStore?.removeLease(member.id, lease.claimId); this.leases.delete(member.id); this.bump(track);
-        return {};
-      }
       if (terminal.state !== "live") throw new CoreError("finished", "Terminal has finished");
       if (action.action === "input" && (!action.text?.length || Buffer.byteLength(action.text) > 128 * 1024)) throw new CoreError("invalid_params", "Terminal input must contain 1–131072 bytes");
       if (action.action === "key" && !this.methods.has("terminal.keys")) throw new CoreError("unsupported", "Core does not support terminal.keys");

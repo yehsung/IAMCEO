@@ -6,7 +6,7 @@ import { MIGRATIONS } from "./db.ts";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { z } from "zod";
-import { CODEX_EFFORTS, EFFORTS, fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type HerdrInfo, type Member, type MessagePageOptions, type SyncCursor, type SyncSnapshot } from "../shared/types.ts";
+import { fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type HerdrInfo, type Member, type MessagePageOptions, type SyncCursor, type SyncSnapshot } from "../shared/types.ts";
 import type { OperationReceipt, ServerCapabilities } from "../shared/operations.ts";
 import type { DeliveryRecoveryService } from "./service-contracts.ts";
 import { ARTIFACT_CSP } from "../shared/artifact-kit.ts";
@@ -20,6 +20,8 @@ import { Pairing, PAIR_CODE_TTL_MS, tailnetUrls, withMagicDnsNames } from "./pai
 import { createPushHandler, type PushRoutesContext } from "./push/routes.ts";
 import { TerminalStreams, type SocketData } from "./terminal-stream.ts";
 import { ModelCatalogReader } from "./models.ts";
+import { Folders } from "./folders.ts";
+import { GitHub } from "./github.ts";
 
 export interface ServerContext {
   config: Config;
@@ -31,6 +33,8 @@ export interface ServerContext {
   push?: PushRoutesContext;
   /** 시험용. 기본은 Tailscale 주소 감지. */
   detectHosts?: () => string[];
+  /** Isolated folder/API tests use a fake user home; production uses homedir(). */
+  folderHome?: string;
   daemon?: () => { ready: boolean; buildId: string; version: string };
 }
 
@@ -164,11 +168,11 @@ const nonEmpty = z.string().trim().min(1);
 const backend = z.enum(["core", "herdr", "headless"]);
 const cliProvider = z.enum(["claude", "codex"]);
 const permissionMode = z.enum(PERMISSION_MODES);
-const effort = z.enum(EFFORTS);
+const effort = z.string().min(1); // Membership comes from the selected model's catalog, including new CLI names.
 // 그대로 --model 뒤에 들어간다. '--플래그' 나 공백이 들어오면 안 된다. 별칭(haiku)·전체 이름·[1m] 을 받는다.
 const modelName = z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,127}$/, "모델 이름이 잘못되었습니다");
 const listedModel = z.string().trim(); // Membership validation supplies the same 400 reason for every unlisted string.
-const codexEffort = z.enum(CODEX_EFFORTS);
+const codexEffort = effort;
 const rankPatch = z.object({ model: listedModel.nullable(), effort: effort.nullable() }).partial().strict();
 const codexRankPatch = rankPatch.extend({ effort: codexEffort.nullable().optional() });
 const handle = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/);
@@ -461,6 +465,8 @@ async function artifactHtml({ config, store }: ServerContext, id: string): Promi
 function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, readHerdr: () => Promise<HerdrInfo>, currentHerdr: () => HerdrInfo): Route[] {
   const { config, store, orch, bus } = ctx;
   const models = new ModelCatalogReader(config);
+  const folders = new Folders(ctx.folderHome);
+  const github = new GitHub(folders);
   const legacyProjectPatches = new Set<string>();
   // 재전송이 앞 요청의 orch 처리가 끝나기 전에 와도 두 번 전달되지 않게 한다.
   const inFlight = new Map<string, Promise<unknown>>();
@@ -508,6 +514,14 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
   };
 
   return [
+    route("GET", "/api/folders", async (_req, url) => Response.json(await folders.list(url.searchParams.get("path") ?? undefined))),
+    route("POST", "/api/folders", async req => {
+      const { parent, name } = await parseBody(req, z.strictObject({ parent: z.string(), name: z.string() }));
+      return Response.json(await folders.create(parent, name));
+    }),
+    route("GET", "/api/github/repos", async (_req, url) => Response.json(await github.repos(url.searchParams.get("query") ?? ""))),
+    route("POST", "/api/github/clone", async req => Response.json(await github.clone(await parseBody(req, z.strictObject({ repo: z.string(), parent: z.string(), name: z.string().optional() }))), { status: 202 })),
+    route("GET", "/api/github/clone/:id", (_req, _url, [id]) => Response.json(github.job(id!))),
     route("GET", "/api/operations/:id", async (_req, url, [id]) => {
       strictQuery(url, []);
       if (!operationIdSchema.safeParse(id).success) throw new ApiError(400, "operationId가 잘못되었습니다");
@@ -772,12 +786,12 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       if (contractV2(req)) {
         const expected = precondition(req);
         const body = await parseBody(req, PatchMemberSchema);
-        models.requireModel(body.cli ?? store.requireMember(id!).cli, body.modelOverride);
+        models.memberPatch(store.requireMember(id!), body, store.getSettings());
         if (!orch.patchMemberConfigV2) throw new ApiError(501, "검토 버전이 있는 직원 설정을 지원하지 않습니다");
         return Response.json(await orch.patchMemberConfigV2(id!, body, expected));
       }
       const body = await parseBody(req, PatchMemberSchema);
-      models.requireModel(body.cli ?? store.requireMember(id!).cli, body.modelOverride);
+      models.memberPatch(store.requireMember(id!), body, store.getSettings());
       return Response.json(await orch.patchMemberConfig(id!, body));
     }),
     route("GET", "/api/members/:id/activity", (_req, url, [id]) => {
@@ -850,12 +864,12 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       if (contractV2(req)) {
         const expected = precondition(req);
         const body = await parseBody(req, SettingsSchema);
-        models.requireSettings(body);
+        models.requireSettings(body, store.getSettings());
         if (!orch.updateSettingsV2) throw new ApiError(501, "검토 버전이 있는 설정 변경을 지원하지 않습니다");
         return Response.json(await orch.updateSettingsV2(body, expected));
       }
       const body = await parseBody(req, SettingsSchema);
-      models.requireSettings(body);
+      models.requireSettings(body, store.getSettings());
       return Response.json(await orch.updateSettings(body));
     }),
   ];

@@ -2417,3 +2417,59 @@ private struct AppHistoryService: MessageHistoryService {
         try await api.messagesAround(projectID: projectID, messageID: messageID, limit: limit)
     }
 }
+
+// Folder picker / GitHub import only. Demo browsing never reaches a server.
+extension AppStore {
+    var recentProjectParent: String? {
+        guard let project = projects.last(where: { !$0.isHq && !$0.cwd.isEmpty }) else { return nil }
+        return ServerFolderPaths.parent(project.cwd)
+    }
+    func folderBrowser() async throws -> FolderBrowserResult {
+        if isDemo { return .listing(try demoFolderContents(path: nil)) }
+        guard let api else { throw APIError(status: 0, message: "서버에 연결해 주세요.") }
+        return try await api.folderBrowser()
+    }
+    func folderContents(path: String) async throws -> FolderListing {
+        if isDemo { return try demoFolderContents(path: path) }
+        guard let api else { throw APIError(status: 0, message: "서버에 연결해 주세요.") }
+        return try await api.folderContents(path: path)
+    }
+    func preferredFolder(forClone: Bool = false) async throws -> FolderBrowserResult {
+        let browser = try await folderBrowser()
+        guard case .listing(let home) = browser else { return browser }
+        if let recentProjectParent, let recent = try? await folderContents(path: recentProjectParent) { return .listing(recent) }
+        if forClone, let code = try? await folderContents(path: ServerFolderPaths.appending("code", to: home.home)) { return .listing(code) }
+        return .listing(home)
+    }
+    func createServerFolder(parent: String, name: String) async throws -> ServerFolder {
+        guard !isDemo, canWrite, let api else { throw APIError(status: 0, message: "폴더 만들기는 연결된 서버에서만 할 수 있습니다.") }
+        if let message = ServerFolderPaths.nameError(name) { throw APIError(status: 400, message: message) }
+        return try await api.createFolder(parent: parent, name: name.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    func githubRepositories() async throws -> GitHubRepositories {
+        if isDemo {
+            return GitHubRepositories(available: true, repos: [
+                GitHubRepository(nameWithOwner: "iamceo/landing", description: "새로운 브랜드와 제품을 소개하는 페이지", visibility: "PUBLIC", updatedAt: "2026-11-06T10:00:00Z", url: "https://github.com/iamceo/landing"),
+                GitHubRepository(nameWithOwner: "iamceo/workspace", description: "우리 팀의 작업 공간", visibility: "PRIVATE", updatedAt: "2026-11-05T09:00:00Z", url: "https://github.com/iamceo/workspace")
+            ])
+        }
+        guard let api else { throw APIError(status: 0, message: "서버에 연결해 주세요.") }
+        return try await api.githubRepositories()
+    }
+    func startRepositoryClone(repo: String, parent: String) async throws -> String {
+        guard !isDemo, canWrite, let api else { throw APIError(status: 0, message: "가져오기는 연결된 서버에서만 할 수 있습니다.") }
+        return try await api.cloneRepository(repo: repo, parent: parent)
+    }
+    func repositoryCloneJob(_ id: String) async throws -> GitHubCloneJob {
+        guard !isDemo, let api else { throw APIError(status: 0, message: "서버에 연결해 주세요.") }
+        return try await api.cloneJob(id)
+    }
+    private func demoFolderContents(path: String?) throws -> FolderListing {
+        let home = "/Users/demo"
+        let tree = [home: ["code", "Documents"], home + "/code": ["landing", "workspace"], home + "/Documents": [], home + "/code/landing": ["assets", "src"], home + "/code/workspace": [], home + "/code/landing/assets": [], home + "/code/landing/src": []]
+        let path = path ?? home
+        guard let children = tree[path] else { throw APIError(status: 404, message: "샘플 폴더가 없습니다.") }
+        return FolderListing(path: path, parent: path == home ? nil : ServerFolderPaths.parent(path), home: home,
+                             entries: children.sorted { $0.localizedCompare($1) == .orderedAscending }.map { ServerFolder(name: $0, path: ServerFolderPaths.appending($0, to: path)) })
+    }
+}

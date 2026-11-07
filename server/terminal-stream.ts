@@ -45,15 +45,21 @@ export class TerminalStreams {
           new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Core size check timed out")), remaining); }),
         ]).finally(() => clearTimeout(timer));
         if (size.cols === target.cols && size.rows === target.rows) { this.restores.delete(memberId); return; }
-      } catch { /* Keep delivery fenced until core can be verified. */ }
+      } catch (error) {
+        if (error instanceof ApiError && error.code === "TERMINAL_GONE") { this.restores.delete(memberId); return; }
+      }
       await Bun.sleep(25);
     } while (performance.now() < deadline);
-    throw new ApiError(409, "터미널 크기 복원을 확인하지 못했습니다", "TERMINAL_REFUSED");
+    this.restores.delete(memberId);
+    try { this.store.appendActivity(memberId, "system", "경고: 2초 안에 터미널 크기 복원을 확인하지 못해 계속 진행합니다"); }
+    catch { /* member may have been removed */ }
   }
-  detached(stream: TerminalStream): void {
-    if (stream.restoreSize) this.restores.set(stream.memberId, { paneId: stream.paneId, ...stream.restoreSize });
-    // Retain this fence even after the socket is forgotten. Release, expiry and
-    // the next attach await restore(); a timeout keeps delivery fenced.
+  detached(stream: TerminalStream, reason?: string): void {
+    if (reason === "terminal_gone") {
+      if (this.restores.get(stream.memberId)?.paneId === stream.paneId) this.restores.delete(stream.memberId);
+    } else if (stream.restoreSize) this.restores.set(stream.memberId, { paneId: stream.paneId, ...stream.restoreSize });
+    // Only a live control attach can create a restore target. Await detach first;
+    // terminal disappearance or the bounded check ends the delivery fence.
   }
   constructor(readonly config: Config, readonly store: Store, readonly orch: OrchestratorApi) {
     this.timer = setInterval(() => { for (const stream of this.streams) stream.check(); }, 1000);
@@ -216,6 +222,7 @@ export class TerminalStream {
     let failure = error;
     try { this.requireLease(); } catch (leaseError) { failure = leaseError; }
     const reason = failure instanceof LeaseEnded ? "lease_ended"
+      : failure instanceof ApiError && failure.code === "TERMINAL_GONE" ? "terminal_gone"
       : failure instanceof ApiError && failure.code === "TERMINAL_REFUSED" ? "refused" : "error";
     void this.close(reason, reason === "refused" && failure instanceof Error ? failure.message : "터미널에 연결할 수 없습니다");
   }
@@ -320,7 +327,7 @@ export class TerminalStream {
       try { this.terminal?.setRawMode(false); } catch { /* master already closed */ }
       this.terminal?.close();
       this.pendingInput = Buffer.alloc(0);
-      if (this.started && this.mode === "control") this.owner.detached(this);
+      if (this.started && this.mode === "control") this.owner.detached(this, reason);
       this.owner.forget(this);
       if (this.mode === "control") this.owner.refreshObservers(this.memberId);
     })();

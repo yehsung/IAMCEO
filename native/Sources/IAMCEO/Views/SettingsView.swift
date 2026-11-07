@@ -1702,6 +1702,11 @@ struct NewProjectView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var cwd = ""
+    @State private var showFolderPicker = false
+    @State private var showGitHubClone = false
+    /// Set when the folder came from "GitHub에서 가져오기", so the chosen-folder tile can say where it came from.
+    @State private var clonedRepository: String?
+    @State private var legacyFolderInput = false
     @State private var provider = "claude"
     @State private var working = false
     @State private var error: String?
@@ -1750,6 +1755,23 @@ struct NewProjectView: View {
         .scrollDismissesKeyboard(.interactively)
         #endif
         .interactiveDismissDisabled(working)
+        .sheet(isPresented: $showFolderPicker) { FolderPickerView(initialPath: cwd.isEmpty ? nil : cwd) { cwd = $0; clonedRepository = nil } }
+        .sheet(isPresented: $showGitHubClone) {
+            GitHubCloneView { path, repositoryName in
+                cwd = path
+                clonedRepository = repositoryName
+                if settingsTrim(name).isEmpty { name = repositoryName }
+            }
+        }
+        .task {
+            if let browser = try? await store.folderBrowser(), case .legacy = browser { legacyFolderInput = true }
+            #if DEBUG
+            if store.isDemo {
+                showFolderPicker = LaunchOptions.value(after: "--sheet") == "folder-picker"
+                showGitHubClone = LaunchOptions.value(after: "--sheet") == "github-clone"
+            }
+            #endif
+        }
         #if os(macOS)
         .onAppear { if store.canWrite { focus = .name } }
         #endif
@@ -1766,20 +1788,26 @@ struct NewProjectView: View {
                         .labelsHidden()
                         .font(SetupFont.input)
                         .focused($focus, equals: .name)
-                        .onSubmit { focus = .cwd }
+                        .onSubmit { if legacyFolderInput { focus = .cwd } }
                         .setupInput(active: focus == .name)
                 }
-                SetupField("폴더", hint: "서버 컴퓨터에 이미 있는 폴더입니다. ~/ 로 시작해도 됩니다.") {
-                    TextField("폴더", text: $cwd, prompt: Text("~/code/landing"))
-                        .labelsHidden()
-                        .font(CEFont.mono)
-                        .focused($focus, equals: .cwd)
-                        .autocorrectionDisabled()
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        #endif
-                        .onSubmit { Task { await create() } }
-                        .setupInput(active: focus == .cwd)
+                SetupField("폴더") {
+                    if legacyFolderInput {
+                        TextField("폴더", text: $cwd, prompt: Text(verbatim: "~/code/landing"))
+                            .labelsHidden().font(CEFont.mono).focused($focus, equals: .cwd).autocorrectionDisabled()
+                            #if os(iOS)
+                            .textInputAutocapitalization(.never)
+                            #endif
+                            .onSubmit { Task { await create() } }.setupInput(active: focus == .cwd)
+                    } else if cwd.isEmpty {
+                        // Two ways in, side by side: an existing/new server folder, or a GitHub repository cloned for it.
+                        HStack(spacing: 10) {
+                            FolderSourceTile(icon: "folder", title: "폴더 고르기", detail: "서버 컴퓨터의 폴더를 고르거나 새로 만듭니다") { showFolderPicker = true }
+                            FolderSourceTile(icon: "arrow.down.circle", title: "GitHub에서 가져오기", detail: "내 저장소를 받아 그 폴더로 엽니다") { showGitHubClone = true }
+                        }
+                    } else {
+                        chosenFolder
+                    }
                 }
                 SetupField("총괄 AI CLI") {
                     SettingsSegments(options: ["claude", "codex"].map { SettingsSegments.Option(id: $0, title: providerLabel($0)) },
@@ -1799,6 +1827,36 @@ struct NewProjectView: View {
             }
             if let error { SetupError(error) }
         }
+    }
+
+    /// The chosen folder as one quiet tile: where the project will live, where it came from, and a way to change it.
+    private var chosenFolder: some View {
+        let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
+        return HStack(spacing: 12) {
+            Image(systemName: clonedRepository == nil ? "folder.fill" : "arrow.down.circle.fill")
+                .font(.system(size: 15, weight: .semibold)).foregroundStyle(CE.accent)
+                .frame(width: 30, height: 30)
+                .background(CE.violet.opacity(0.16), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(cwd).font(CEFont.mono).foregroundStyle(CE.ink).lineLimit(1).truncationMode(.middle)
+                Text(clonedRepository.map { "GitHub 저장소 \($0)에서 받은 폴더" } ?? "서버 컴퓨터의 폴더")
+                    .font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Menu {
+                Button { showFolderPicker = true } label: { Label("다른 폴더 고르기…", systemImage: "folder") }
+                Button { showGitHubClone = true } label: { Label("GitHub에서 가져오기…", systemImage: "arrow.down.circle") }
+            } label: {
+                Text("바꾸기").font(CEFont.secondary.weight(.medium)).foregroundStyle(CE.accent)
+            }
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+            .accessibilityLabel("폴더 바꾸기")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(Color.white.opacity(0.04), in: shape)
+        .overlay { shape.strokeBorder(CE.line) }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("선택한 폴더: " + cwd)
     }
 
     private func busyLabel(_ text: String) -> some View {
@@ -1852,5 +1910,50 @@ struct NewProjectView: View {
         if store.selectedProjectID != target.id { await store.selectProject(id: target.id) }
         router.go(.team)
         dismiss()
+    }
+}
+
+/// One of the two ways to give a new project its folder: icon tile, title, one short line. Equal width side by side.
+private struct FolderSourceTile: View {
+    let icon: String
+    let title: String
+    let detail: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(CE.accent)
+                    .frame(width: 30, height: 30)
+                    .background(CE.violet.opacity(0.16), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                Text(detail).font(CEFont.meta).foregroundStyle(CE.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
+            }
+            .frame(maxWidth: .infinity, minHeight: 104, alignment: .topLeading)
+            .padding(12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(FolderSourceTileStyle())
+        .accessibilityLabel(title)
+        .accessibilityHint(detail)
+    }
+}
+
+private struct FolderSourceTileStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { TileBody(configuration: configuration) }
+    private struct TileBody: View {
+        let configuration: ButtonStyleConfiguration
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var hovering = false
+        var body: some View {
+            let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
+            configuration.label
+                .background(Color.white.opacity(configuration.isPressed ? 0.08 : hovering ? 0.06 : 0.035), in: shape)
+                .overlay { shape.strokeBorder(hovering ? CE.violet.opacity(0.45) : CE.line) }
+                .opacity(isEnabled ? 1 : 0.5)
+                .onHover { hovering = $0 }
+        }
     }
 }

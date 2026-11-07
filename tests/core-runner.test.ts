@@ -269,6 +269,18 @@ describe("delivery safety and OSC7501 turns", () => {
 
 
 describe("manual terminal control", () => {
+  test("release revokes only the matching lease even after terminal.get becomes not_found", async () => {
+    const f = await fixture(), runner = f.runner(10000), started = await runner.start(member(), f.opts);
+    const lease = await runner.terminalControl(member(), { action: "claim" });
+    f.terminals.delete(started.paneId);
+    const calls = f.calls.length;
+    await expect(runner.terminalControl(member(), { action: "release", leaseId: "foreign" })).rejects.toThrow("lease");
+    await expect(runner.terminalControl(member({ sessionGeneration: 2 }), { action: "release", leaseId: lease.leaseId })).rejects.toThrow();
+    expect(runner.terminalLease(member().id)?.leaseId).toBe(lease.leaseId);
+    await runner.terminalControl(member(), { action: "release", leaseId: lease.leaseId });
+    expect(runner.terminalLease(member().id)).toBeNull();
+    expect(f.calls.length).toBe(calls);
+  });
   test("token lease pauses automation; input/keys require owner token; release resumes", async () => {
     const f = await fixture(); const runner = f.runner(10000); const start = await runner.start(member(), f.opts);
     const lease = await runner.terminalControl(member(), { action: "claim" }); expect(lease.leaseId).toBeString();

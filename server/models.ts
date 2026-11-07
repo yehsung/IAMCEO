@@ -1,9 +1,9 @@
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { CliProvider, SettingsPatch } from "../shared/types.ts";
+import type { CliProvider, Member, PatchMemberReq, Settings, SettingsPatch } from "../shared/types.ts";
 import { ApiError } from "./store.ts";
-import { CODEX_EFFORTS, EFFORTS } from "../shared/types.ts";
+import { CODEX_EFFORTS, EFFORTS, memberRank } from "../shared/types.ts";
 
 export interface ModelOption {
   value: string;
@@ -56,6 +56,7 @@ function codexModels(data: unknown): ModelOption[] {
       ...(typeof model.default_reasoning_level === "string" && efforts.includes(model.default_reasoning_level) ? { defaultEffort: model.default_reasoning_level } : {}),
     });
   }
+  if (!models.length) throw new Error("No usable models");
   return models;
 }
 
@@ -83,9 +84,42 @@ export class ModelCatalogReader {
     throw new ApiError(400, "목록에 없는 모델입니다");
   }
 
-  requireSettings(patch: SettingsPatch): void {
+  efforts(cli: CliProvider, value?: string | null): readonly string[] {
+    const list = this.read()[cli].models;
+    const model = list.find(model => model.value === value) ??
+      (cli === "claude" && value === "fable" ? list.find(model => model.label.toLowerCase() === "fable") : undefined);
+    return model?.efforts.length ? model.efforts : cli === "codex" ? CODEX_EFFORTS : EFFORTS;
+  }
+
+  requireEffort(cli: CliProvider, model: string | null | undefined, effort: string | null | undefined): void {
+    if (effort != null && !this.efforts(cli, model).includes(effort)) throw new ApiError(400, `${cli}에서 지원하지 않는 effort입니다`);
+  }
+
+  memberPatch(member: Member, input: PatchMemberReq, settings: Settings): { patch: PatchMemberReq; resetOverrides: NonNullable<Member["resetOverrides"]> } {
+    const patch = { ...input }, cli = patch.cli ?? member.cli;
+    const resetOverrides: NonNullable<Member["resetOverrides"]> = [];
+    const switching = cli !== member.cli;
+    if (switching && patch.modelOverride === undefined && member.modelOverride != null) {
+      try { this.requireModel(cli, member.modelOverride); }
+      catch { patch.modelOverride = null; resetOverrides.push("modelOverride"); }
+    }
+    this.requireModel(cli, patch.modelOverride);
+    const rank = (cli === "codex" ? settings.codexRanks : settings.ranks)[memberRank(member.kind)];
+    const model = (patch.modelOverride === undefined ? member.modelOverride : patch.modelOverride) ?? rank.model;
+    if (switching && patch.effortOverride === undefined && member.effortOverride != null && !this.efforts(cli, model).includes(member.effortOverride)) {
+      patch.effortOverride = null; resetOverrides.push("effortOverride");
+    }
+    this.requireEffort(cli, model, patch.effortOverride === undefined ? member.effortOverride : patch.effortOverride);
+    return { patch, resetOverrides };
+  }
+
+  requireSettings(patch: SettingsPatch, current?: Settings): void {
     for (const [cli, ranks] of [["claude", patch.ranks], ["codex", patch.codexRanks]] as const) {
-      for (const rank of Object.values(ranks ?? {})) this.requireModel(cli, rank?.model);
+      for (const [key, rank] of Object.entries(ranks ?? {})) {
+        this.requireModel(cli, rank?.model);
+        const model = rank?.model === undefined ? current?.[cli === "codex" ? "codexRanks" : "ranks"][key as keyof Settings["ranks"]].model : rank.model;
+        this.requireEffort(cli, model, rank?.effort);
+      }
     }
   }
 

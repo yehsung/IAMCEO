@@ -732,6 +732,45 @@ export class CoreRunner implements Runner {
     const terminal = await this.owned(member);
     return (await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 })).text;
   }
+  async terminalInfo(member: RunnerMember): Promise<{ cols: number; rows: number }> {
+    const terminal = await this.owned(member);
+    if (terminal.address !== member.paneId) throw new CoreError("conflict", "터미널 연결이 바뀌었습니다");
+    if (terminal.state !== "live") throw new CoreError("finished", "터미널이 끝났습니다");
+    if (!Number.isInteger(terminal.cols) || !Number.isInteger(terminal.rows) || terminal.cols! < 1 || terminal.rows! < 1) {
+      throw new CoreError("unsupported", "터미널 크기를 확인할 수 없습니다");
+    }
+    return { cols: terminal.cols!, rows: terminal.rows! };
+  }
+  terminalLease(memberId: string): TerminalLease | null { return this.manualLease(memberId); }
+  renewLease(memberId: string, leaseId: string): number {
+    const lease = this.manualLease(memberId);
+    if (!lease || lease.leaseId !== leaseId) throw new CoreError("conflict", "조작권이 없습니다");
+    const next = { ...lease, expiresAt: Date.now() + 5 * 60_000 };
+    this.deps.recoveryStore?.saveLease(next);
+    this.leases.set(memberId, next);
+    return next.expiresAt;
+  }
+  async noteTerminalInput(memberId: string, write: () => void): Promise<void> {
+    const track = this.tracks.get(memberId);
+    if (!track) throw new CoreError("not_found", "Terminal is no longer tracked");
+    const terminal = track.terminal;
+    this.bump(track);
+    const compact = this.disarmManualResolution(track);
+    write(); // A successful local PTY write is the stream's acknowledgement.
+    await track.refresh?.catch(() => undefined);
+    this.validateTrack(track);
+    this.armManualResolution(track, compact, terminal);
+    await this.refresh(track).catch(() => undefined);
+  }
+  private disarmManualResolution(track: Track) {
+    const compact = track.compact && ["running", "uncertain"].includes(track.compact.phase) ? track.compact : null;
+    if (compact?.manualResolution) this.saveCompact(track, { ...compact, manualResolution: undefined });
+    return compact;
+  }
+  private armManualResolution(track: Track, compact: Track["compact"], terminal: CoreTerminal): void {
+    if (compact && track.compact?.id === compact.id && ["running", "uncertain"].includes(track.compact.phase)) this.saveCompact(track, { ...track.compact,
+      manualResolution: { turn: terminal.turn ?? null, unsettled: ["working", "blocked"].includes(terminal.status?.state || "") } });
+  }
   private async readSetup(track: Track): Promise<ReturnType<typeof claudeFolderTrust>> {
     if (track.terminal.state !== "live" || ["working", "idle", "done", "error"].includes(track.terminal.status?.state || "")) return null;
     const epoch = track.epoch;
@@ -789,6 +828,15 @@ export class CoreRunner implements Runner {
   }
   private manualLease(memberId: string): TerminalLease | null {
     const lease = this.leases.get(memberId);
+    if (lease && this.deps.recoveryStore) {
+      const saved = this.deps.recoveryStore.inputState(memberId).lease;
+      if (!saved || saved.leaseId !== lease.leaseId || !this.sameIdentity(saved.identity, lease.identity)) {
+        this.deps.recoveryStore.removeLease(memberId, lease.claimId);
+        this.leases.delete(memberId);
+        return null;
+      }
+      if (saved.expiresAt > Date.now()) { this.leases.set(memberId, saved); return saved; }
+    }
     if (lease && lease.expiresAt > Date.now()) return lease;
     if (lease) this.deps.recoveryStore?.removeLease(memberId, lease.claimId);
     this.leases.delete(memberId);
@@ -803,8 +851,15 @@ export class CoreRunner implements Runner {
       const lease = this.manualLease(member.id);
       if (action.action === "claim") {
         if (lease && action.leaseId !== lease.leaseId && action.leaseId !== lease.claimId) throw new CoreError("conflict", "Another terminal control lease is active");
-        const claimId = action.leaseId || lease?.claimId || crypto.randomUUID();
-        const next: TerminalLease = { memberId: member.id, claimId, leaseId: lease?.leaseId || claimId, identity: this.identity(track), expiresAt: Date.now() + 5 * 60_000, lastInputSequence: lease?.lastInputSequence ?? 0 };
+        // Expired rows can also survive a restart, when there is no cached
+        // lease left for manualLease to remove. Only clear this claim's row
+        // after the store confirms there is no live holder.
+        if (!lease && action.leaseId && this.deps.recoveryStore && !this.deps.recoveryStore.inputState(member.id).lease) {
+          this.deps.recoveryStore.removeLease(member.id, action.leaseId);
+        }
+        const claimId = lease?.claimId || action.leaseId || crypto.randomUUID();
+        // A claim is retry-stable; each new acquisition has a distinct incarnation.
+        const next: TerminalLease = { memberId: member.id, claimId, leaseId: lease?.leaseId || crypto.randomUUID(), identity: this.identity(track), expiresAt: Date.now() + 5 * 60_000, lastInputSequence: lease?.lastInputSequence ?? 0 };
         this.deps.recoveryStore?.saveLease(next); this.leases.set(member.id, next); this.bump(track);
         return { leaseId: next.leaseId, expiresAt: next.expiresAt };
       }
@@ -819,9 +874,7 @@ export class CoreRunner implements Runner {
       if (action.action === "key" && (!action.key || !["enter", "up", "down", "esc", "tab", "ctrl+c", "backspace"].includes(action.key))) throw new CoreError("invalid_params", "Unsupported terminal control key");
       const next = { ...lease, expiresAt: Date.now() + 5 * 60_000, lastInputSequence: lease.lastInputSequence + 1 };
       this.deps.recoveryStore?.saveLease(next); this.leases.set(member.id, next); this.bump(track);
-      const compact = track.compact && ["running", "uncertain"].includes(track.compact.phase) ? track.compact : null;
-      // A later refused/unknown input must not inherit proof from an earlier one.
-      if (compact?.manualResolution) this.saveCompact(track, { ...compact, manualResolution: undefined });
+      const compact = this.disarmManualResolution(track);
       try {
         if (action.action === "input") await this.call("terminal.send", { terminal: terminal.address, text: cleanText(action.text!), force: true, wait: false }, this.sendTimeoutMs);
         else await this.call("terminal.keys", { terminal: terminal.address, keys: [action.key] }, this.sendTimeoutMs);
@@ -833,8 +886,7 @@ export class CoreRunner implements Runner {
       // disarmed. Only a newly requested observation may prove settled input.
       await track.refresh?.catch(() => undefined);
       this.validateTrack(track);
-      if (compact && track.compact?.id === compact.id && ["running", "uncertain"].includes(track.compact.phase)) this.saveCompact(track, { ...track.compact,
-        manualResolution: { turn: terminal.turn ?? null, unsettled: ["working", "blocked"].includes(terminal.status?.state || "") } });
+      this.armManualResolution(track, compact, terminal);
       // Re-observe after the ACK. Claim/release, elapsed time and unchanged idle
       // cannot prove that a human intervention settled this compact operation.
       await this.refresh(track).catch(() => undefined);

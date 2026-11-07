@@ -1,5 +1,23 @@
 import Foundation
 import Observation
+#if os(iOS)
+import UIKit
+
+@MainActor private final class TerminalReleaseBackgroundTask {
+    private var id: UIBackgroundTaskIdentifier = .invalid
+    init() {
+        id = UIApplication.shared.beginBackgroundTask(withName: "Release terminal control") { [weak self] in
+            Task { @MainActor in self?.end() }
+        }
+    }
+    func end() {
+        guard id != .invalid else { return }
+        let current = id
+        id = .invalid
+        UIApplication.shared.endBackgroundTask(current)
+    }
+}
+#endif
 
 enum ConnectionStatus: String, Sendable { case disconnected, connecting, connected, demo, failed }
 enum RealtimeStatus: String, Sendable { case paused, connecting, syncing, live, legacy, fallback, blocked }
@@ -1262,6 +1280,12 @@ final class AppStore: ProjectManagementStore {
         return result?.ok == true
     }
 
+    func updateTerminalStreamLease(memberID: String, expiresAt: Double) {
+        guard let lease = terminalLeases[memberID], let leaseId = lease.leaseId else { return }
+        terminalLeases[memberID] = TerminalLease(leaseId: leaseId, expiresAt: expiresAt)
+    }
+    func terminalStreamLeaseEnded(memberID: String) { terminalLeases.removeValue(forKey: memberID) }
+
     @discardableResult func claimTerminal(_ member: Member) async -> Bool {
         if strictWriteContract { return await terminalOperation(member, action: .claim) }
         // Passing the lease we still hold renews it; a lost input reply may have extended it on the server past our copy.
@@ -1276,7 +1300,25 @@ final class AppStore: ProjectManagementStore {
         terminalLeases[member.id] = result
         return true
     }
+    @ObservationIgnored private var terminalReleases: [String: Task<Bool, Never>] = [:]
     @discardableResult func releaseTerminal(_ member: Member) async -> Bool {
+        if let pending = terminalReleases[member.id] { return await pending.value }
+        guard terminalLeases[member.id]?.leaseId != nil else { return true }
+        #if os(iOS)
+        let background = TerminalReleaseBackgroundTask()
+        #endif
+        let task = Task {
+            #if os(iOS)
+            defer { background.end() }
+            #endif
+            return await self.performTerminalRelease(member)
+        }
+        terminalReleases[member.id] = task
+        let result = await task.value
+        terminalReleases.removeValue(forKey: member.id)
+        return result
+    }
+    private func performTerminalRelease(_ member: Member) async -> Bool {
         if strictWriteContract {
             let success = await terminalOperation(member, action: .release)
             if !success, terminalLeases[member.id] != nil {
@@ -1418,6 +1460,11 @@ final class AppStore: ProjectManagementStore {
                 await reconcileOperation(tracked)
             }
             if operationResults[tracked.id]?.status == .applied { return true }
+            if action == .release, let receipt = operationResults[tracked.id], receipt.status == .refused,
+               receipt.error == "조작권이 만료되었거나 바뀌었습니다" {
+                terminalLeases.removeValue(forKey: member.id); errorMessage = nil
+                return true
+            }
             if Self.leaseGone(result.error) { terminalLeases.removeValue(forKey: member.id) }
         } catch { if epoch == generation { handle(error) } }
         return false

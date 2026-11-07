@@ -7,6 +7,7 @@ import { join } from "node:path";
 
 export interface CoreStatus { state: string; app?: string; msg?: string; title?: string; kind?: string | null; progress?: number | null }
 export interface CoreTerminal {
+  cols?: number; rows?: number;
   address: string; argv: string[]; cwd: string; labels: Record<string, string>; state: string;
   status?: CoreStatus | null; records?: Record<string, CoreStatus>; reported?: boolean;
   turn?: number; pid?: number | null; reason?: string | null; exit_code?: number | null;

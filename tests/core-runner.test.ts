@@ -485,11 +485,11 @@ describe("persistent input safety and transport effects", () => {
   });
   test("lease survives restart and same claim id is reclaimable before automated input", async () => {
     const f = await fixture(), recovery = recoveryStore(), first = f.runner(10000, { recoveryStore: recovery.port }); const started = await first.start(member(), f.opts);
-    const lease = await first.terminalControl(member(), { action: "claim", leaseId: "client-claim" }); expect(lease.leaseId).toBe("client-claim"); await first.shutdown();
+    const lease = await first.terminalControl(member(), { action: "claim", leaseId: "client-claim" }); expect(lease.leaseId).not.toBe("client-claim"); await first.shutdown();
     const second = f.runner(10000, { recoveryStore: recovery.port }); await second.start(member({ paneId: started.paneId, sessionId: started.sessionId }), f.opts);
     expect(await second.send(member(), "automatic", f.opts)).toMatchObject({ ok: false, reason: "input_busy", deliveryEffect: "not_written" });
-    expect(await second.terminalControl(member(), { action: "claim", leaseId: "client-claim" })).toMatchObject({ leaseId: "client-claim" });
-    await second.terminalControl(member(), { action: "release", leaseId: "client-claim" }); expect(recovery.lease()).toBeNull();
+    expect(await second.terminalControl(member(), { action: "claim", leaseId: "client-claim" })).toMatchObject({ leaseId: lease.leaseId });
+    await second.terminalControl(member(), { action: "release", leaseId: lease.leaseId }); expect(recovery.lease()).toBeNull();
     expect(await second.send(member(), "automatic", f.opts)).toMatchObject({ ok: true });
   });
   test("manual input, release and idle never clear an unknown original write", async () => {
@@ -711,6 +711,43 @@ describe("compact control and shared native binding", () => {
     expect(d.events.some(e => e.type === "compacted" || e.type === "turn_end")).toBe(false);
     await d.runner.terminalControl(member(), { action: "release", leaseId: lease.leaseId });
     d.terminal.status = { state: "idle" }; expect(await d.runner.send(member(), "next", d.f.opts)).toMatchObject({ ok: true });
+  });
+  test("stream writes arm the same compact recovery proof; later turn settles without compact success", async () => {
+    const d = await uncertainCompactFixture();
+    await d.runner.noteTerminalInput(member().id, () => {});
+    expect(d.store.states.get(member().id)?.phase).toBe("uncertain");
+    expect(d.store.states.get(member().id)?.manualResolution).toBeDefined();
+    d.terminal.turn = 1; d.terminal.status = { state: "idle" }; await d.runner.screen(member());
+    expect(d.store.states.get(member().id)).toMatchObject({phase:"failed",reason:"user_resolved"});
+    expect(d.events.some(e=>e.type==="compacted" || e.type==="turn_end")).toBe(false);
+  });
+  test("failed stream write clears old manual proof and unchanged idle does not resolve compact", async () => {
+    const d = await uncertainCompactFixture();
+    await d.runner.noteTerminalInput(member().id, () => {});
+    await d.runner.screen(member()); expect(d.store.states.get(member().id)?.phase).toBe("uncertain");
+    await expect(d.runner.noteTerminalInput(member().id, () => { throw new Error("write failed"); })).rejects.toThrow("write failed");
+    expect(d.store.states.get(member().id)?.manualResolution).toBeUndefined();
+    d.terminal.turn = 1; await d.runner.screen(member());
+    expect(d.store.states.get(member().id)?.phase).toBe("uncertain");
+    await d.runner.noteTerminalInput(member().id, () => {});
+    d.terminal.status = {state:"working"}; await d.runner.screen(member());
+    d.terminal.status = {state:"idle"}; await d.runner.screen(member());
+    expect(d.store.states.get(member().id)).toMatchObject({phase:"failed",reason:"user_resolved"});
+  });
+  test("a pre-write stream observation cannot settle compact before a fresh post-write observation", async () => {
+    const d = await uncertainCompactFixture();
+    let observation: {request: Request; socket: Socket} | null = null;
+    d.f.setHook((request,socket)=>{
+      if (request.method === "terminal.get" && !observation) { observation={request,socket}; return true; }
+      return false;
+    });
+    const reading = d.runner.screen(member()); await until(()=>observation!==null);
+    const input = d.runner.noteTerminalInput(member().id,()=>{ d.terminal.turn=1; d.terminal.status={state:"working"}; });
+    observation!.socket.write(JSON.stringify({jsonrpc:"2.0",id:observation!.request.id,result:{...d.terminal,status:{state:"idle"}}})+"\n");
+    await Promise.all([reading,input]); d.f.setHook(null);
+    expect(d.store.states.get(member().id)?.phase).toBe("uncertain");
+    d.terminal.status={state:"idle"}; await d.runner.screen(member());
+    expect(d.store.states.get(member().id)).toMatchObject({phase:"failed",reason:"user_resolved"});
   });
   test("same idle and claim/release cannot resolve even acknowledged human input", async () => {
     const d = await uncertainCompactFixture(); d.terminal.status = { state: "idle" };

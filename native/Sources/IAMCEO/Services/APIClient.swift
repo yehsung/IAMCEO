@@ -32,7 +32,7 @@ struct ServerEndpoint: Sendable {
 }
 
 /// Never forwards an access code through an HTTP redirect or to an attachment's foreign origin.
-private final class OriginRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+final class OriginRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         completionHandler(nil)
     }
@@ -103,9 +103,24 @@ actor APIClient {
         guard version == 1 || version == 2 else {
             throw APIError(status: 0, message: "지원하지 않는 실시간 프로토콜입니다.")
         }
-        var components = URLComponents(url: try authorizedURL("/ws"), resolvingAgainstBaseURL: false)!
+        return try authorizedWebSocketRequest("/ws", query: version == 2 ? [URLQueryItem(name: "v", value: "2")] : [])
+    }
+    func terminalStreamRequest(memberID: String, mode: TerminalStreamMode, cols: Int, rows: Int, leaseID: String?) throws -> URLRequest {
+        var query = [URLQueryItem(name: "mode", value: mode.rawValue), URLQueryItem(name: "cols", value: String(cols)), URLQueryItem(name: "rows", value: String(rows))]
+        if let leaseID { query.append(URLQueryItem(name: "lease", value: leaseID)) }
+        return try authorizedWebSocketRequest("/api/members/\(Self.segment(memberID))/terminal/stream", query: query)
+    }
+    func terminalStreamRefusal(memberID: String) async -> APIError? {
+        do {
+            _ = try await raw("/api/members/\(Self.segment(memberID))/terminal/stream?mode=observe")
+            return nil
+        } catch let error as APIError { return error.status == 400 ? nil : error }
+        catch { return nil }
+    }
+    private func authorizedWebSocketRequest(_ path: String, query: [URLQueryItem]) throws -> URLRequest {
+        var components = URLComponents(url: try authorizedURL(path), resolvingAgainstBaseURL: false)!
         components.scheme = endpoint.url.scheme == "https" ? "wss" : "ws"
-        components.queryItems = version == 2 ? [URLQueryItem(name: "v", value: "2")] : nil
+        components.queryItems = query.isEmpty ? nil : query
         guard let url = components.url else { throw APIError(status: 0, message: "실시간 연결 주소가 올바르지 않습니다.") }
         var request = URLRequest(url: url)
         request.timeoutInterval = 30

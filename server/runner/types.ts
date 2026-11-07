@@ -178,6 +178,10 @@ export type TerminalControlRequest = TerminalControlAction;
 export interface TerminalControlResult { leaseId?: string; expiresAt?: number }
 
 export interface Runner {
+  terminalInfo?(m: RunnerMember): Promise<{ cols: number; rows: number }>;
+  terminalLease?(memberId: string): import("../service-contracts.ts").TerminalLease | null;
+  renewLease?(memberId: string, leaseId: string): number;
+  noteTerminalInput?(memberId: string, write: () => void): Promise<void>;
   /** Explicit human terminal control; claim pauses automatic delivery. */
   terminalControl?(m: RunnerMember, action: TerminalControlAction): Promise<TerminalControlResult>;
   readonly kind: Backend;

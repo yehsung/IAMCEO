@@ -18,6 +18,7 @@ import { ApiError, type Store } from "./store.ts";
 import { SESSION_ID_RE } from "./text.ts";
 import { Pairing, PAIR_CODE_TTL_MS, tailnetUrls, withMagicDnsNames } from "./pairing.ts";
 import { createPushHandler, type PushRoutesContext } from "./push/routes.ts";
+import { TerminalStreams, type SocketData } from "./terminal-stream.ts";
 
 export interface ServerContext {
   config: Config;
@@ -1057,8 +1058,6 @@ async function loadWebIndex(): Promise<Bun.HTMLBundle | null> {
 
 const WS_TOPIC = "events";
 const WS_V2_TOPIC = "events-v2";
-interface SocketData { protocol: 1 | 2; authGeneration: number }
-
 export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   const { config, store, bus } = ctx;
   const ipRule = buildIpRule(config.hosts);
@@ -1067,6 +1066,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   let authGeneration = 0;
   let boundPort = 0;
   const pairing = new Pairing();
+  const terminalStreams = new TerminalStreams(config, store, ctx.orch);
   let herdrCache: HerdrInfo | undefined;
   let herdrPending: Promise<HerdrInfo> | undefined;
   let herdrCursor: Readonly<SyncCursor> | undefined;
@@ -1096,7 +1096,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     return given !== null && safeEqual(given, config.accessCode);
   };
 
-  const route = (req: Request, url: URL, server: Server<SocketData>): Response | Promise<Response> | undefined => {
+  const route = (req: Request, url: URL, server: Server<SocketData>): Response | Promise<Response | undefined> | undefined => {
     const path = url.pathname;
     if (path === "/api/health") return Response.json({ ok: true, version: VERSION });
     // 짝 맺기 코드를 낸 폰에만 접속 코드를 준다. 코드 자체가 인증이라 접속 코드 검사 앞에 둔다.
@@ -1107,7 +1107,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       if (version !== null && version !== "2") return fail(400, "실시간 연결 버전이 잘못되었습니다");
       if (version === "2" && url.searchParams.has("t")) return fail(400, "실시간 연결 주소에 접속 코드를 넣지 마세요");
       if (!hasAccessCode(req, url, version === null)) return fail(401, "인증이 필요합니다");
-      return server.upgrade(req, { data: { protocol: version === "2" ? 2 : 1, authGeneration } }) ? undefined : fail(400, "WebSocket 요청이 아닙니다");
+      return server.upgrade(req, { data: { kind: "realtime", protocol: version === "2" ? 2 : 1, authGeneration } }) ? undefined : fail(400, "WebSocket 요청이 아닙니다");
     }
     // 코드가 틀려 나가는 기기도 지울 수 있어야 하므로 인증 앞에 둔다. 지우기뿐이고 바깥 사이트는 Origin 검사에 걸린다.
     if (path === "/api/files-session" && req.method === "DELETE") {
@@ -1115,6 +1115,21 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     }
     if (path.startsWith("/api/")) {
       if (!hasAccessCode(req, url, false)) return fail(401, "인증이 필요합니다");
+      const terminal = /^\/api\/members\/([^/]+)\/terminal\/stream$/.exec(path);
+      if (terminal) {
+        if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다");
+        strictQuery(url, ["mode", "cols", "rows", "lease"]);
+        const generation = authGeneration;
+        return terminalStreams.prepare(decodeURIComponent(terminal[1]!), url).then(async stream => {
+          if (generation !== authGeneration || stopPromise) {
+            await stream.close();
+            return fail(401, "접속 코드가 바뀌었거나 서버가 종료됐습니다");
+          }
+          if (server.upgrade(req, { data: { kind: "terminal", authGeneration, stream } })) return undefined;
+          await stream.close();
+          return fail(400, "WebSocket 요청이 아닙니다");
+        });
+      }
       if (path === "/api/auth/rotate") return rotate(req, url, server);
       if (path === "/api/readiness") return readiness(req, url);
       if (path === "/api/push" || path.startsWith("/api/push/")) {
@@ -1181,6 +1196,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     pairing.invalidate();
     closedEpochSockets ||= sockets.size > 0;
     for (const ws of sockets) {
+      if (ws.data.kind === "terminal") { void ws.data.stream.close("error", "접속 코드가 바뀌었습니다. 다시 연결하세요"); continue; }
       ws.unsubscribe(WS_TOPIC);
       ws.unsubscribe(WS_V2_TOPIC);
       ws.close(4001, "접속 코드가 바뀌었습니다. 다시 연결하세요");
@@ -1256,6 +1272,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
             ws.close(4001, "접속 코드가 바뀌었습니다. 다시 연결하세요");
             return;
           }
+          if (ws.data.kind === "terminal") { closedEpochSockets = true; ws.data.stream.open(ws); return; }
           ws.subscribe(ws.data.protocol === 2 ? WS_V2_TOPIC : WS_TOPIC);
           if (ws.data.protocol === 2) {
             v2Sockets.add(ws);
@@ -1265,12 +1282,14 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
           }
         },
         close(ws) {
+          if (ws.data.kind === "terminal") void ws.data.stream.close();
           sockets.delete(ws);
           v2Sockets.delete(ws);
           if (sockets.size === 0) socketsDrained?.();
         },
-        // 서버→화면 단방향이다.
-        message() {},
+        pong(ws) { if (ws.data.kind === "terminal") ws.data.stream.pong(); },
+        // Realtime은 단방향이고 터미널 소켓만 입력을 받는다.
+        message(ws, message) { if (ws.data.kind === "terminal") ws.data.stream.message(message); },
       },
     });
 
@@ -1352,6 +1371,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
         clearInterval(hostTimer);
         clearInterval(pingTimer);
         unsubscribe();
+        await terminalStreams.close();
         const drained = sockets.size === 0 ? Promise.resolve() : new Promise<void>((resolve) => { socketsDrained = resolve; });
         const stopped = servers.map((s) => s.stop(true));
         // Bun 1.3.14는 서버가 먼저 닫은 WS를 pendingWebSockets에 남긴다.

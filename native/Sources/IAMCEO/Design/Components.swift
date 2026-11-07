@@ -451,7 +451,11 @@ struct CECloseButton: View {
         let button = Button(action: action) { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)) }
             .buttonStyle(CECloseButtonStyle())
             .focusEffectDisabled()
-            .help("\(label) (esc)")
+            #if os(macOS)
+            .help(escapeCloses ? "\(label) (esc)" : "\(label) (⌘W)")
+            #else
+            .help(escapeCloses ? "\(label) (esc)" : label)
+            #endif
             .accessibilityLabel(label)
         if escapeCloses { button.keyboardShortcut(.cancelAction) } else { button }
     }
@@ -504,16 +508,17 @@ struct CESheet<Content: View, Footer: View>: View {
     var width: CGFloat
     var maxBodyHeight: CGFloat
     var scrolls: Bool
+    var escapeCloses: Bool
     var onClose: (() -> Void)?
     private let content: Content
     private let footer: Footer
     @State private var bodyHeight: CGFloat = 0
 
     init(_ title: String, subtitle: String? = nil, icon: String? = nil, width: CGFloat = 520, maxBodyHeight: CGFloat = 620,
-         scrolls: Bool = true, onClose: (() -> Void)? = nil,
+         scrolls: Bool = true, escapeCloses: Bool = true, onClose: (() -> Void)? = nil,
          @ViewBuilder content: () -> Content, @ViewBuilder footer: () -> Footer) {
         self.title = title; self.subtitle = subtitle; self.icon = icon; self.width = width
-        self.maxBodyHeight = maxBodyHeight; self.scrolls = scrolls; self.onClose = onClose
+        self.maxBodyHeight = maxBodyHeight; self.scrolls = scrolls; self.escapeCloses = escapeCloses; self.onClose = onClose
         self.content = content(); self.footer = footer()
     }
 
@@ -601,7 +606,7 @@ struct CESheet<Content: View, Footer: View>: View {
                 }
             }
             Spacer(minLength: 12)
-            CECloseButton { close() }
+            CECloseButton(escapeCloses: escapeCloses) { close() }
         }
     }
 
@@ -619,8 +624,8 @@ struct CESheet<Content: View, Footer: View>: View {
 
 extension CESheet where Footer == EmptyView {
     init(_ title: String, subtitle: String? = nil, icon: String? = nil, width: CGFloat = 520, maxBodyHeight: CGFloat = 620,
-         scrolls: Bool = true, onClose: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {
-        self.init(title, subtitle: subtitle, icon: icon, width: width, maxBodyHeight: maxBodyHeight, scrolls: scrolls,
+         scrolls: Bool = true, escapeCloses: Bool = true, onClose: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {
+        self.init(title, subtitle: subtitle, icon: icon, width: width, maxBodyHeight: maxBodyHeight, scrolls: scrolls, escapeCloses: escapeCloses,
                   onClose: onClose, content: content, footer: { EmptyView() })
     }
 }

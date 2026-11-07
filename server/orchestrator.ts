@@ -687,6 +687,60 @@ export class Orchestrator implements OrchestratorApi {
 
   private coreSocket(): string { return this.config.coreSocket ?? join(this.config.home, "run", "core.sock"); }
 
+  private readonly terminalStreamClosers = new Set<() => Promise<void>>();
+  private readonly terminalLeaseListeners = new Set<(memberId: string, leaseId: string) => void>();
+  onTerminalLeaseEnded(ended: (memberId: string, leaseId: string) => void): () => void {
+    this.terminalLeaseListeners.add(ended);
+    return () => { this.terminalLeaseListeners.delete(ended); };
+  }
+  onTerminalStreamShutdown(close: () => Promise<void>): () => void {
+    this.terminalStreamClosers.add(close);
+    return () => { this.terminalStreamClosers.delete(close); };
+  }
+  private requireTerminalStream(memberId: string): Member {
+    const member = this.store.requireMember(memberId);
+    const project = this.store.requireProject(member.projectId);
+    const rt = this.runtime(memberId);
+    if (this.closed || member.backend !== "core" || !member.paneId || member.origin === "manual" || project.archived || !project.runnerEnabled ||
+        this.pendingLifecycle(memberId) || rt.closing || rt.starting || rt.reopening) {
+      throw new ApiError(409, "세션을 처리하는 중이거나 터미널을 열 수 없습니다", "TERMINAL_REFUSED");
+    }
+    return member;
+  }
+  async terminalStreamInfo(memberId: string): Promise<{ cols: number; rows: number }> {
+    const member = this.requireTerminalStream(memberId);
+    const generation = this.store.memberRevisions(memberId).sessionGeneration;
+    const runner = this.runnerOf(member);
+    if (!runner.terminalInfo) throw new ApiError(409, "core 터미널을 확인할 수 없습니다", "TERMINAL_REFUSED");
+    try {
+      const size = await runner.terminalInfo(this.runnerMember(member, this.store.requireProject(member.projectId)));
+      const latest = this.requireTerminalStream(memberId);
+      if (latest.paneId !== member.paneId || this.store.memberRevisions(memberId).sessionGeneration !== generation) {
+        throw new ApiError(409, "세션이 바뀌었습니다", "TERMINAL_REFUSED");
+      }
+      return size;
+    } catch { throw new ApiError(409, "터미널 소유와 크기를 확인할 수 없습니다", "TERMINAL_REFUSED"); }
+  }
+  terminalStreamLease(memberId: string) {
+    const member = this.requireTerminalStream(memberId);
+    const lease = this.runnerOf(member).terminalLease?.(memberId) ?? null;
+    return lease && lease.identity.terminalId === member.paneId && lease.identity.sessionGeneration === this.store.memberRevisions(memberId).sessionGeneration ? lease : null;
+  }
+  renewTerminalStreamLease(memberId: string, leaseId: string): number {
+    const member = this.requireTerminalStream(memberId);
+    if (this.terminalStreamLease(memberId)?.leaseId !== leaseId) throw new ApiError(409, "조작권이 없습니다", "TERMINAL_REFUSED");
+    const expiresAt = this.runnerOf(member).renewLease?.(memberId, leaseId);
+    if (!expiresAt) throw new ApiError(409, "조작권이 없습니다", "TERMINAL_REFUSED");
+    return expiresAt;
+  }
+  async terminalStreamInput(memberId: string, write: () => void): Promise<void> {
+    const member = this.requireTerminalStream(memberId);
+    this.invalidateCoreMeasurement(member);
+    const runner = this.runnerOf(member);
+    if (runner.noteTerminalInput) await runner.noteTerminalInput(memberId, write);
+    else write();
+  }
+
   async terminalControl(memberId: string, action: TerminalControlAction): Promise<TerminalControlResult> {
     const member = this.store.requireMember(memberId);
     if (member.backend !== "core") throw new ApiError(409, "core 터미널만 조작할 수 있습니다", "TERMINAL_REFUSED");
@@ -702,7 +756,11 @@ export class Orchestrator implements OrchestratorApi {
     this.terminalMutations.add(memberId);
     try {
       if (action.action === "input" || action.action === "key") this.invalidateCoreMeasurement(member);
+      const previousLease = runner.terminalLease?.(memberId);
       const result = await runner.terminalControl(this.runnerMember(member, this.store.requireProject(member.projectId)), action);
+      if (previousLease && (action.action === "release" || (action.action === "claim" && result.leaseId !== previousLease.leaseId))) {
+        for (const ended of this.terminalLeaseListeners) ended(memberId, previousLease.leaseId);
+      }
       if (action.action === "release") void this.pump(memberId);
       return result;
     } catch (e) {
@@ -1364,6 +1422,7 @@ export class Orchestrator implements OrchestratorApi {
 
   async shutdown(): Promise<void> {
     this.closed = true;
+    await Promise.all([...this.terminalStreamClosers].map(close => close()));
     await this.coreSupervisor?.shutdown();
     await Promise.all([...this.eventQueues.values()]);
     if (this.tick) clearInterval(this.tick);
@@ -1894,7 +1953,7 @@ export class Orchestrator implements OrchestratorApi {
         text: formatUserMessage(message.body, this.attachmentsFor(recipient, attachments), message.id, !!target), refType: "message", refId: message.id }];
       const conductor = this.store.getConductor(projectId);
       if (target && conductor && conductor.id !== target.id) intents.push({ projectId, memberId: conductor.id, kind: "system",
-        text: formatSystem(`대표가 ${target.name}에게 직접 지시했습니다 #${message.id}`), wake: false });
+        text: formatSystem(`대표가 ${target.name}에게 직접 지시했습니다 #${message.id}. 이미 ${target.name}에게 전달했습니다. 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.`), wake: false });
       return intents;
     });
     if (booting) await (booting as Promise<void>).catch(e => console.warn(`${project.name} 총괄을 띄우지 못했습니다:`, (e as Error).message));
@@ -1941,7 +2000,7 @@ export class Orchestrator implements OrchestratorApi {
       const intents: NewDelivery[] = [];
       if (recipient && asker?.origin !== "manual") intents.push({ projectId: project.id, memberId: recipient.id, kind: "answer", text: formatAnswer(decision), refType: "decision", refId: decision.id });
       if (conductor && recipient && conductor.id !== recipient.id) intents.push({ projectId: project.id, memberId: conductor.id, kind: "system",
-        text: formatSystem(`대표가 ${decision.who}의 결재에 답했습니다.\n${formatAnswer(decision)}`), wake: false });
+        text: formatSystem(`대표가 ${decision.who}의 결재에 답했습니다. 이미 ${decision.who}에게 전달했습니다. 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.\n${formatAnswer(decision)}`), wake: false });
       return intents;
     });
     if (!changed) return decision;
@@ -2480,13 +2539,27 @@ export class Orchestrator implements OrchestratorApi {
     }
   }
 
+  private refuseOwnerDirectRepeat(target: Member, quote: VerifiedQuote | null): void {
+    if (quote?.verified && quote.source) {
+      const message = this.store.getMessage(quote.source.id);
+      if (message?.mine && message.targetMemberId === target.id && this.store.listDeliveries(target.projectId).some(d =>
+        d.memberId === target.id && d.kind === "user_message" && d.refType === "message" && d.refId === message.id &&
+        ["queued", "delivering", "delivered"].includes(d.status))) {
+        const reason = `대표가 이미 ${target.name}에게 직접 보낸 지시입니다(#${message.id}). 다시 보내지 마세요. 더할 일이 있으면 인용 없이 그 부분만 쓰세요.`;
+        this.store.appendActivity(target.id, "system", reason);
+        throw new ApiError(409, reason);
+      }
+    }
+  }
+
   /** team_assign. member 는 핸들 또는 화면 이름. 다른 프로젝트 직원은 찾지 못한다. */
   async assign(projectId: string, memberRef: string, input: AssignInput): Promise<AssignResult> {
     const target = this.requireInProject(projectId, memberRef);
-    // 마지막 지시가 이긴다. 현재값과 같으면 앞서 대기 중인 반대 지시를 지워야 한다(같으면 applyParallel 이 아무것도 안 한다).
-    if (input.parallel !== undefined) this.runtime(target.id).wantParallel = input.parallel;
     const source = input.userQuote?.trim() ? this.findQuoteSource(projectId, input.userQuote) : null;
     const quote = input.userQuote?.trim() ? { text: input.userQuote, verified: source !== null, source } : null;
+    this.refuseOwnerDirectRepeat(target, quote);
+    // 마지막 지시가 이긴다. 거절된 지시는 병렬 설정도 바꾸지 않는다.
+    if (input.parallel !== undefined) this.runtime(target.id).wantParallel = input.parallel;
     const project = this.store.requireProject(projectId);
     const busy = this.isBusy(target);
     const attachments = (input.attachmentIds ?? []).map((id) => {
@@ -3008,6 +3081,8 @@ export class Orchestrator implements OrchestratorApi {
       const target = this.store.requireMember(followUp.memberId);
       if (source.projectId !== member.projectId || !source.mine || target.projectId !== member.projectId || !followUp.text.trim()) throw new ApiError(400, "후속 지시의 대상·대표 원문·내용을 확인하세요");
       if (input.kind === "decided" && source.id !== sourceId) throw new ApiError(409, "후속 지시의 대표 원문이 닫기 근거와 다릅니다");
+      this.refuseOwnerDirectRepeat(target, { text: input.userQuote ?? source.body, verified: true,
+        source: { id: source.id, text: source.body, at: source.at } });
     }
     const closed = this.store.transaction(() => {
       const closed = this.store.closeDecision(decision.id, { kind: input.kind, reason, by: member.name, quote });

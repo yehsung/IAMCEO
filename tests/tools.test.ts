@@ -360,6 +360,69 @@ describe("총괄 도구", () => {
     expect((await call(lead, "team_assign", { member: "cs", text: "x", user_quote: "총괄이 쓴 승인 문장" })).text).toContain("미확인");
   });
 
+  test.each(["queued", "delivering", "delivered"] as const)("대표 직접 지시 인용 재지시 차단: %s 전달, 추가 전달 0건", async status => {
+    const { store, project, orch, lead, call } = await setup();
+    const { member: w } = await orch.addMember(project.id, { name: "메뉴 가격표", handle: "menu" });
+    const message = await orch.sendUserMessage(project.id, { text: "메뉴 가격표를 최신 가격으로 수정해 주세요", targetMemberId: w.id });
+    const direct = store.listDeliveries(project.id).find(d => d.kind === "user_message" && d.refId === message.id)!;
+    store.setDeliveryStatus(direct.id, status);
+    const before = store.listDeliveries(project.id).length;
+    const result = await call(lead, "team_assign", { member: "menu", text: "같은 일을 진행하세요", user_quote: message.body });
+    expect(result).toMatchObject({ isError: true });
+    const reason = `대표가 이미 메뉴 가격표에게 직접 보낸 지시입니다(#${message.id}). 다시 보내지 마세요. 더할 일이 있으면 인용 없이 그 부분만 쓰세요.`;
+    expect(result.text).toContain(reason);
+    expect(store.listDeliveries(project.id)).toHaveLength(before);
+    expect(store.listActivity(w.id).filter(a => a.text === reason)).toHaveLength(1);
+  });
+
+  test("직원 AI의 ask_close 후속 지시도 대표 직접 지시를 다시 인용하면 차단하고 결재는 유지", async () => {
+    const { store, project, orch, call } = await setup();
+    const { member: w } = await orch.addMember(project.id, { name: "메뉴 가격표", handle: "menu" });
+    const { decision } = await orch.registerAsk(w, { title: "메뉴 가격을 바꿀까요?" });
+    const message = await orch.sendUserMessage(project.id, { text: "대표가 가격을 정했으니 메뉴 가격표를 최신 가격으로 수정해 주세요", targetMemberId: w.id });
+    const before = store.listDeliveries(project.id).length;
+    const result = await call(w, "ask_close", { id: decision.id, kind: "decided", reason: "대표가 직접 결정", user_quote: message.body,
+      follow_up: { kind: "instruction", member_id: w.id, text: "가격표를 수정하세요", source_message_id: message.id } });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(`대표가 이미 메뉴 가격표에게 직접 보낸 지시입니다(#${message.id})`);
+    expect(store.listDeliveries(project.id)).toHaveLength(before);
+    expect(store.getDecision(decision.id)!.status).toBe("open");
+    expect(store.listActivity(w.id).filter(a => a.text.includes(`직접 보낸 지시입니다(#${message.id})`))).toHaveLength(1);
+  });
+
+  test("대표 직접 지시 인용을 다른 직원에게 전달하는 것은 허용", async () => {
+    const { store, project, orch, lead, call } = await setup();
+    const { member: w } = await orch.addMember(project.id, { name: "메뉴 가격표", handle: "menu" });
+    const { member: other } = await orch.addMember(project.id, { name: "검토", handle: "review" });
+    const message = await orch.sendUserMessage(project.id, { text: "메뉴 가격표를 최신 가격으로 수정해 주세요", targetMemberId: w.id });
+    const result = await call(lead, "team_assign", { member: "review", text: "수정 결과를 검토하세요", user_quote: message.body });
+    expect(result.isError).not.toBe(true);
+    expect(store.listDeliveries(project.id).filter(d => d.memberId === other.id && d.kind === "instruction")).toHaveLength(1);
+  });
+
+  test("총괄에게 온 대표 글 인용과 인용 없는 별개 지시는 허용", async () => {
+    const { store, project, orch, lead, call } = await setup();
+    const { member: w } = await orch.addMember(project.id, { name: "메뉴 가격표", handle: "menu" });
+    await orch.sendUserMessage(project.id, { text: "메뉴 가격표를 수정해 주세요", targetMemberId: w.id });
+    const message = await orch.sendUserMessage(project.id, { text: "직원에게 다음 달 메뉴도 준비하도록 맡겨 주세요", targetMemberId: lead.id });
+    expect((await call(lead, "team_assign", { member: "menu", text: "다음 달 메뉴 준비", user_quote: message.body })).isError).not.toBe(true);
+    expect((await call(lead, "team_assign", { member: "menu", text: "추가로 가격 변경 이력만 기록하세요" })).isError).not.toBe(true);
+    expect(store.listDeliveries(project.id).filter(d => d.memberId === w.id && d.kind === "instruction")).toHaveLength(2);
+  });
+
+  test("대표 직접 지시와 결재 답 알림은 이미 전달했으며 결과를 기다리라고 안내", async () => {
+    const { store, project, orch, lead } = await setup();
+    const { member: w } = await orch.addMember(project.id, { name: "메뉴 가격표", handle: "menu" });
+    const message = await orch.sendUserMessage(project.id, { text: "가격을 수정해 주세요", targetMemberId: w.id });
+    const notices = () => store.listDeliveries(project.id).filter(d => d.memberId === lead.id && d.kind === "system");
+    expect(notices().find(d => d.text.includes(`#${message.id}`))).toMatchObject({ wake: false,
+      text: `[시스템] 대표가 메뉴 가격표에게 직접 지시했습니다 #${message.id}. 이미 메뉴 가격표에게 전달했습니다. 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.` });
+    const { decision } = await orch.registerAsk(w, { title: "가격을 적용할까요?", options: [{ k: "y", label: "적용하세요" }] });
+    await orch.answerDecision(decision.id, { choice: "y" });
+    expect(notices().find(d => d.text.includes("결재에 답했습니다"))).toMatchObject({ wake: false });
+    expect(notices().find(d => d.text.includes("결재에 답했습니다"))!.text).toContain("이미 메뉴 가격표에게 전달했습니다. 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.");
+  });
+
   test("user_quote: 결재 답의 버튼 글은 맞아도 '문맥 확인 필요'이고 카드 제목·id 가 함께 간다", async () => {
     const { store, project, orch, runner, lead, call } = await setup();
     const { member: w } = await orch.addMember(project.id, { name: "철수", handle: "cs", role: "개발" });

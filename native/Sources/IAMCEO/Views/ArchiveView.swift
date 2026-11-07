@@ -102,19 +102,24 @@ struct EmptyTile<Actions: View>: View {
                     .frame(height: 26)
                     .accessibilityHidden(true)
             }
-            Text(title).font(loading ? CEFont.secondary : CEFont.rowTitle).foregroundStyle(CE.ink2)
+            // web .empty: title 16/600 ink-1, body 14 ink-2 at 1.55, generous room.
+            Text(title)
+                .font(loading ? .system(size: 14) : .system(size: 16, weight: .semibold))
+                .tracking(loading ? 0 : -0.16)
+                .foregroundStyle(loading ? CE.ink2 : CE.ink)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
             if let detail, !detail.isEmpty {
-                Text(detail).font(CEFont.meta).foregroundStyle(CE.ink3)
+                Text(detail).font(.system(size: 14)).foregroundStyle(CE.ink2).lineSpacing(CELeading.spacing(14, 1.55))
                     .multilineTextAlignment(.center)
+                    .frame(maxWidth: 440)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if Actions.self != EmptyView.self {
-                HStack(spacing: 8) { actions }.padding(.top, 6)
+                HStack(spacing: 8) { actions }.padding(.top, 8)
             }
         }
-        .padding(.horizontal, 24).padding(.vertical, 28)
+        .padding(.horizontal, 24).padding(.vertical, isMac ? 40 : 32)
         .frame(maxWidth: .infinity)
         .background(tile ? Color.white.opacity(0.03) : .clear, in: shape)
         .overlay { if tile { shape.strokeBorder(CE.line, style: StrokeStyle(lineWidth: 1, dash: [4, 4])) } }

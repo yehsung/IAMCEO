@@ -71,10 +71,16 @@ enum CEFont {
     static let section: Font = .system(size: 14, weight: .semibold)
     static let rowTitle: Font = .system(size: 14.5, weight: .semibold)
     static let body: Font = .system(size: 14.5)
+    /// Notes, hints, errors and status lines (web 13.5px: .tm-note, .form__error, .offline-band).
+    static let note: Font = .system(size: 13.5)
+    /// Row sub-lines (web 13px: .hm-row__sub, .fl-row__summary).
     static let secondary: Font = .system(size: 13)
-    static let meta: Font = .system(size: 12)
+    /// Meta, times, hints (web 12.5px, the most common small size).
+    static let meta: Font = .system(size: 12.5)
+    /// Counts and rail sub-lines, the few places the web really uses 12px.
+    static let caption: Font = .system(size: 12)
     static let micro: Font = .system(size: 11.5, weight: .bold)
-    static let mono: Font = .system(size: 12, design: .monospaced)
+    static let mono: Font = .system(size: 12.5, design: .monospaced)
     static let number: Font = .system(size: 20, weight: .semibold, design: .rounded)
     #else
     static let pageTitle: Font = .headline
@@ -82,8 +88,10 @@ enum CEFont {
     static let section: Font = .subheadline.weight(.semibold)
     static let rowTitle: Font = .subheadline.weight(.semibold)
     static let body: Font = .subheadline
+    static let note: Font = .footnote
     static let secondary: Font = .footnote
     static let meta: Font = .caption
+    static let caption: Font = .caption
     static let micro: Font = .caption2.weight(.bold)
     static let mono: Font = .system(.caption, design: .monospaced)
     static let number: Font = .system(.title2, design: .rounded, weight: .semibold)
@@ -101,6 +109,32 @@ enum CEFont {
     #endif
 }
 
+/// Line height. SwiftUI's `lineSpacing` is extra space on top of the system font's own line (~1.2), so a web
+/// `line-height: L` on `size`-point text becomes `size * (L - 1.2)`. Every Text that can wrap gets one of these:
+/// without it multi-line text renders at ~1.2, 2.5-5pt per line tighter than the web.
+enum CELeading {
+    static func spacing(_ size: CGFloat, _ lineHeight: CGFloat) -> CGFloat {
+        max(0, ((size * (lineHeight - 1.2)) * 2).rounded() / 2)
+    }
+    /// 14.5 at 1.5 (body paragraphs, row text).
+    static let body = spacing(14.5, 1.5)
+    /// 13.5 at 1.45 (notes, errors, hints).
+    static let note = spacing(13.5, 1.45)
+    /// 13 at 1.45 (row sub-lines).
+    static let secondary = spacing(13, 1.45)
+    /// 12.5 at 1.4 (meta lines that wrap).
+    static let meta = spacing(12.5, 1.4)
+    /// 16 at 1.35 (titles that wrap).
+    static let title = spacing(16, 1.35)
+}
+
+extension View {
+    /// The web line height `lineHeight` for `size`-point text (see `CELeading`).
+    func ceLineHeight(_ size: CGFloat, _ lineHeight: CGFloat) -> some View {
+        lineSpacing(CELeading.spacing(size, lineHeight))
+    }
+}
+
 enum CESpace {
     static let xs: CGFloat = 4
     static let s: CGFloat = 8
@@ -112,6 +146,7 @@ enum CESpace {
 
 enum CERadius {
     static let plate: CGFloat = 22     // web .glass--regular
+    static let card: CGFloat = 18      // web inner cards (.tm-card, .ibx-card)
     static let control: CGFloat = 12   // inputs, option tiles
     static let row: CGFloat = 10       // list rows
 }
@@ -266,31 +301,49 @@ extension View {
         #endif
     }
 
-    /// Text input surface used inside forms and composers.
-    func ceField() -> some View {
-        self.textFieldStyle(.plain)
-            .padding(.horizontal, 11).padding(.vertical, 9)
-            .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
-            .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(CE.line) }
+    /// Text input surface used inside forms and composers (web .input: min-height 44, padding 10/13, 15px text,
+    /// rgb(5 4 11 / .5) well, white .12 ring; the focus ring is #B9A8FF). A font set on the field itself still wins.
+    func ceField(focused: Bool = false) -> some View {
+        let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
+        return self.textFieldStyle(.plain)
+            #if os(macOS)
+            .font(.system(size: 15))
+            #else
+            .font(CEFont.body)
+            #endif
+            .padding(.horizontal, 13).padding(.vertical, 10)
+            .frame(minHeight: 44)
+            .background(CE.bgDeep.opacity(0.5), in: shape)
+            .overlay {
+                shape.strokeBorder(focused ? CE.accent.opacity(0.85) : Color.white.opacity(0.12), lineWidth: focused ? 1.5 : 1)
+            }
+    }
+
+    /// Text-only action (취소, 더 불러오기, 다시 읽기): no fill until hovered (web .gbtn--ghost).
+    func ceGhostButton() -> some View {
+        self.buttonStyle(CEGhostButtonStyle())
     }
 }
 
-/// Size of the explicit button styles. Mac follows `controlSize` like system buttons; iOS keeps one readable size.
+/// Size of the explicit button styles, the web's .gbtn sizes (every variant 600 weight): small = .gbtn--s 32 / 13.5px,
+/// regular = .gbtn--m 44 / 15px, large = .gbtn--l 52 / 16px; mini is a 26pt step for the densest rows. Mac follows
+/// `controlSize`; iOS keeps one readable size with a 44pt hit area. A fixed height, not vertical padding, so Korean
+/// and Latin labels give the same capsule.
 private struct CEButtonMetrics {
     let font: Font
     let horizontal: CGFloat
-    let vertical: CGFloat
+    let height: CGFloat
     init(_ size: ControlSize, prominent: Bool) {
         #if os(macOS)
-        let weight: Font.Weight = prominent ? .semibold : .medium
         switch size {
-        case .mini, .small: font = .system(size: 12, weight: weight); horizontal = 10; vertical = 4
-        case .large, .extraLarge: font = .system(size: 13.5, weight: weight); horizontal = 16; vertical = 8
-        default: font = .system(size: 13, weight: weight); horizontal = 13; vertical = 6
+        case .mini: font = .system(size: 12.5, weight: .semibold); horizontal = 11; height = 26
+        case .small: font = .system(size: 13.5, weight: .semibold); horizontal = 14; height = 32
+        case .large, .extraLarge: font = .system(size: 16, weight: .semibold); horizontal = 26; height = 52
+        default: font = .system(size: 15, weight: .semibold); horizontal = 20; height = 44
         }
         #else
-        font = prominent ? CEFont.rowTitle.weight(.semibold) : CEFont.rowTitle
-        horizontal = 14; vertical = 8
+        font = CEFont.rowTitle.weight(.semibold)
+        horizontal = 16; height = 38
         #endif
     }
 }
@@ -317,21 +370,36 @@ struct CEFilledButtonStyle: ButtonStyle {
         @State private var hovering = false
         var body: some View {
             let metrics = CEButtonMetrics(controlSize, prominent: true)
+            // web .gbtn--primary: violet gradient, a glossy top half, a soft lilac glow along the bottom, a deep violet
+            // shadow and a dark text shadow; hover brightens 7%, press shrinks to .97; disabled keeps its colour at 40%.
             configuration.label
                 .font(metrics.font)
+                .tracking(-0.15)
                 .lineLimit(1)
-                .padding(.horizontal, metrics.horizontal).padding(.vertical, metrics.vertical)
-                .foregroundStyle(isEnabled ? Color.white : CE.ink3)
+                .padding(.horizontal, metrics.horizontal)
+                .frame(minHeight: metrics.height)
+                .foregroundStyle(Color.white)
+                .shadow(color: Color(red: 28 / 255, green: 8 / 255, blue: 92 / 255).opacity(0.45), radius: 0.5, y: 1)
                 .background {
-                    if isEnabled {
-                        Capsule().fill(CE.primaryGradient).opacity(configuration.isPressed ? 0.8 : 1)
-                            .overlay { if hovering && !configuration.isPressed { Capsule().fill(Color.white.opacity(0.08)) } }
-                            .overlay { GlassRim(shape: Capsule()) }
-                            .shadow(color: CE.violet.opacity(0.35), radius: 12, y: 6)
-                    } else {
-                        Capsule().fill(Color.white.opacity(0.06)).overlay { Capsule().strokeBorder(CE.line) }
-                    }
+                    Capsule().fill(CE.primaryGradient)
+                        .overlay {
+                            Capsule().fill(LinearGradient(stops: [
+                                .init(color: .white.opacity(0.14), location: 0), .init(color: .white.opacity(0.025), location: 0.44),
+                                .init(color: .clear, location: 0.52),
+                            ], startPoint: .top, endPoint: .bottom))
+                        }
+                        .overlay {
+                            Capsule().fill(LinearGradient(colors: [.clear, Color(red: 222 / 255, green: 208 / 255, blue: 1).opacity(0.3)],
+                                                          startPoint: .center, endPoint: .bottom))
+                        }
+                        .overlay { GlassRim(shape: Capsule()) }
+                        .shadow(color: CE.violet.opacity(isEnabled ? 0.55 : 0), radius: 12, y: 8)
+                        .shadow(color: Color(red: 16 / 255, green: 6 / 255, blue: 52 / 255).opacity(isEnabled ? 0.5 : 0), radius: 3, y: 2)
                 }
+                .brightness(isEnabled && hovering && !configuration.isPressed ? 0.06 : 0)
+                .opacity(isEnabled ? 1 : 0.4)
+                .scaleEffect(configuration.isPressed ? 0.97 : 1)
+                .animation(.spring(response: 0.3, dampingFraction: 0.55), value: configuration.isPressed)
                 .ceButtonHitArea()
                 .onHover { hovering = $0 }
         }
@@ -348,25 +416,57 @@ struct CEQuietButtonStyle: ButtonStyle {
         @State private var hovering = false
         var body: some View {
             let metrics = CEButtonMetrics(controlSize, prominent: false)
+            // web .gbtn--glass: a top-lit white gradient over the glass, a rim, and a soft dark shadow under it.
             configuration.label
                 .font(metrics.font)
+                .tracking(-0.15)
                 .lineLimit(1)
-                .padding(.horizontal, metrics.horizontal).padding(.vertical, metrics.vertical)
+                .padding(.horizontal, metrics.horizontal)
+                .frame(minHeight: metrics.height)
                 .foregroundStyle(isEnabled ? CE.ink : CE.ink3)
-                .background(Color.white.opacity(fill), in: Capsule())
+                .background(LinearGradient(colors: [Color.white.opacity(fill.top), Color.white.opacity(fill.bottom)],
+                                           startPoint: .top, endPoint: .bottom), in: Capsule())
                 .background(.ultraThinMaterial.opacity(isEnabled ? 1 : 0.5), in: Capsule())
                 .overlay { if isEnabled { GlassRim(shape: Capsule()) } else { Capsule().strokeBorder(CE.line) } }
+                .shadow(color: Color(red: 4 / 255, green: 2 / 255, blue: 14 / 255).opacity(isEnabled ? 0.45 : 0), radius: 8, y: 6)
+                .scaleEffect(configuration.isPressed ? 0.97 : 1)
+                .animation(.spring(response: 0.3, dampingFraction: 0.55), value: configuration.isPressed)
                 .ceButtonHitArea()
                 .onHover { hovering = $0 }
         }
-        private var fill: Double {
-            guard isEnabled else { return 0 }
-            return configuration.isPressed ? 0.13 : hovering ? 0.10 : 0.07
+        private var fill: (top: Double, bottom: Double) {
+            guard isEnabled else { return (0, 0) }
+            return configuration.isPressed ? (0.18, 0.08) : hovering ? (0.16, 0.06) : (0.10, 0.03)
         }
     }
 }
 
-/// Plain list row with hover, press and selection feedback.
+/// Text-only action: no fill or rim until hovered (web .gbtn--ghost). Same sizes as the other buttons.
+struct CEGhostButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { GhostBody(configuration: configuration) }
+    private struct GhostBody: View {
+        let configuration: ButtonStyleConfiguration
+        @Environment(\.isEnabled) private var isEnabled
+        @Environment(\.controlSize) private var controlSize
+        @State private var hovering = false
+        var body: some View {
+            let metrics = CEButtonMetrics(controlSize, prominent: false)
+            configuration.label
+                .font(metrics.font)
+                .tracking(-0.15)
+                .lineLimit(1)
+                .padding(.horizontal, metrics.horizontal)
+                .frame(minHeight: metrics.height)
+                .foregroundStyle(!isEnabled ? CE.ink3 : hovering ? CE.ink : CE.ink2)
+                .background(Color.white.opacity(!isEnabled ? 0 : configuration.isPressed ? 0.10 : hovering ? 0.07 : 0), in: Capsule())
+                .ceButtonHitArea()
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+/// Plain list row with hover, press and selection feedback (web .fl-row / .pj: hover white .06; the selected row is
+/// the rail's violet gradient with a lit top edge).
 struct RowButtonStyle: ButtonStyle {
     var selected = false
     var radius: CGFloat = CERadius.control
@@ -382,8 +482,19 @@ struct RowButtonStyle: ButtonStyle {
             let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
             configuration.label
                 .contentShape(shape)
-                .background(shape.fill(selected ? CE.accent.opacity(0.15) : configuration.isPressed ? CE.plateRaised : hovering ? Color.white.opacity(0.035) : .clear))
-                .overlay { if selected { shape.strokeBorder(CE.accent.opacity(0.35)) } }
+                .background {
+                    if selected {
+                        shape.fill(LinearGradient(colors: [CE.violet.opacity(0.34), CE.violet.opacity(0.22)], startPoint: .top, endPoint: .bottom))
+                            .overlay {
+                                shape.strokeBorder(Color.white.opacity(0.4), lineWidth: 0.5)
+                                    .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .clear, location: 0.35)],
+                                                         startPoint: .top, endPoint: .bottom))
+                            }
+                            .overlay { shape.strokeBorder(Color.white.opacity(0.05)) }
+                    } else {
+                        shape.fill(Color.white.opacity(configuration.isPressed ? 0.09 : hovering ? 0.06 : 0))
+                    }
+                }
                 .onHover { hovering = $0 }
         }
     }

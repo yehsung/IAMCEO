@@ -36,9 +36,11 @@ struct Plate<Content: View>: View {
     @Environment(\.ceInsideGlass) private var insideGlass
     var padding: CGFloat = CESpace.l
     var raised = false
+    /// Top-level corner radius (22, the web .glass--regular; 18 for the web's inner cards).
+    var radius: CGFloat = CERadius.plate
     @ViewBuilder var content: Content
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: insideGlass ? 14 : CERadius.plate, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: insideGlass ? 14 : radius, style: .continuous)
         let inner = content
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -52,6 +54,18 @@ struct Plate<Content: View>: View {
             // Reduce Transparency gets the solid plate there.
             inner.cardGlass(shape, raised: raised)
         }
+    }
+}
+
+extension View {
+    /// The one content column every screen uses (web .page: 880 wide including its 24pt gutters, so cards line up
+    /// with the docked composer and do not jump when switching tabs).
+    func ceContentColumn(top: CGFloat = 12) -> some View {
+        self.padding(.horizontal, isMac ? 24 : 16)
+            .padding(.top, top)
+            .padding(.bottom, isMac ? 44 : 28)
+            .frame(maxWidth: 880)
+            .frame(maxWidth: .infinity)
     }
 }
 
@@ -282,20 +296,26 @@ struct SectionHeader: View {
     }
 }
 
-/// Web badge: small tinted capsule (완료 = ok, 질문 = accent, 막힘 = danger, others neutral).
+/// Web badge (.badge: 20 tall, 12px/650, padding 0 7): a small tinted capsule (완료 = ok, 질문 = accent,
+/// 막힘 = danger, others neutral).
 struct Tag: View {
     let text: String
     var tone: Tone = .neutral
     var icon: String? = nil
     init(_ text: String, tone: Tone = .neutral, icon: String? = nil) { self.text = text; self.tone = tone; self.icon = icon }
     var body: some View {
-        HStack(spacing: 3) {
-            if let icon { Image(systemName: icon).font(.system(size: 8.5, weight: .bold)) }
+        HStack(spacing: 4) {
+            if let icon { Image(systemName: icon).font(.system(size: 9.5, weight: .bold)) }
             Text(text).lineLimit(1)
         }
-        .font(CEFont.micro)
-        .foregroundStyle(tone == .neutral ? CE.ink2 : tone.color)
-        .padding(.horizontal, 7).padding(.vertical, 2.5)
+        #if os(macOS)
+        .font(.system(size: 12, weight: .semibold))
+        #else
+        .font(CEFont.caption.weight(.semibold))
+        #endif
+        .foregroundStyle(tone == .neutral ? CE.ink : tone.color)
+        .padding(.horizontal, 7)
+        .frame(minWidth: 20, minHeight: 20)
         .background((tone == .neutral ? Color.white : tone.color).opacity(tone == .neutral ? 0.1 : 0.16), in: Capsule())
         .fixedSize()
     }
@@ -305,7 +325,7 @@ struct Tag: View {
 struct StatusDot: View {
     var tone: Tone
     var pulsing = false
-    var size: CGFloat = 7
+    var size: CGFloat = 8
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var expanded = false
     var body: some View {
@@ -339,17 +359,30 @@ struct StatusBadge: View {
             if compact {
                 StatusDot(tone: info.tone, pulsing: info.live)
             } else {
-                HStack(spacing: 5) {
-                    StatusDot(tone: info.tone, pulsing: info.live, size: 6)
-                    Text(info.label).font(CEFont.meta.weight(.medium)).foregroundStyle(info.tone == .neutral || info.tone == .dim ? CE.ink2 : info.tone.color)
+                // web .tm-status: 24 tall, padding 0 9 0 8, 12.5px/600, a background per state.
+                HStack(spacing: 6) {
+                    StatusDot(tone: info.tone, pulsing: info.live, size: 8)
+                    Text(info.label).font(CEFont.meta.weight(.semibold)).foregroundStyle(info.tone == .neutral || info.tone == .dim ? CE.ink2 : info.tone.color)
                 }
-                .padding(.horizontal, 8).frame(height: 22)
-                .background((info.tone == .neutral || info.tone == .dim ? Color.white : info.tone.color).opacity(0.1), in: Capsule())
+                .padding(.leading, 8).padding(.trailing, 9).frame(minHeight: 24)
+                .background(Self.fill(info.tone), in: Capsule())
             }
         }
         .fixedSize()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("CLI 상태 \(info.label)")
+    }
+
+    private static func fill(_ tone: Tone) -> Color {
+        switch tone {
+        case .live, .accent: CE.violet.opacity(0.2)
+        case .attention: CE.attention.opacity(0.15)
+        case .approval: CE.approval.opacity(0.17)
+        case .danger: CE.error.opacity(0.15)
+        case .success: CE.success.opacity(0.14)
+        case .neutral: Color.white.opacity(0.06)
+        case .dim: Color.clear
+        }
     }
 }
 
@@ -391,7 +424,7 @@ struct MetaText: View {
     init(_ parts: [String?]) { self.parts = parts }
     var body: some View {
         Text(parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
-            .font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
+            .font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1)
     }
 }
 
@@ -404,16 +437,20 @@ struct InlineNotice: View {
     var action: (() -> Void)? = nil
     var actionDisabled = false
     var body: some View {
-        HStack(alignment: .top, spacing: 9) {
+        HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon).font(CEFont.rowTitle).foregroundStyle(tone.color).padding(.top, 1)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
-                if let detail, !detail.isEmpty { Text(detail).font(CEFont.secondary).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true) }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineSpacing(CELeading.title)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let detail, !detail.isEmpty {
+                    Text(detail).font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.note)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer(minLength: 6)
             if let actionTitle, let action { Button(actionTitle, action: action).ceSecondaryButton().controlSize(.small).disabled(actionDisabled) }
         }
-        .padding(CESpace.m)
+        .padding(.vertical, 12).padding(.leading, 14).padding(.trailing, actionTitle != nil ? 10 : 14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(tone.color.opacity(0.09), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(tone.color.opacity(0.22)) }
@@ -603,7 +640,7 @@ struct CESheet<Content: View, Footer: View>: View {
                 Text(title).font(CEFont.title).foregroundStyle(CE.ink).lineLimit(1)
                     .accessibilityAddTraits(.isHeader)
                 if let subtitle {
-                    Text(subtitle).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(2)
+                    Text(subtitle).font(CEFont.meta).foregroundStyle(CE.ink2).lineSpacing(CELeading.meta).lineLimit(3)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -639,9 +676,12 @@ struct CompactEmpty: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon).font(CEFont.rowTitle).foregroundStyle(CE.ink3).frame(width: 18)
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink2)
-                if let detail { Text(detail).font(CEFont.meta).foregroundStyle(CE.ink3).fixedSize(horizontal: false, vertical: true) }
+                if let detail {
+                    Text(detail).font(CEFont.note).foregroundStyle(CE.ink3).lineSpacing(CELeading.note)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer(minLength: 0)
         }
@@ -689,14 +729,18 @@ struct MarkdownText: View {
     var omitTitle: String?
     @ScaledMetric private var size: CGFloat
 
-    init(text: String, size: CGFloat = 15, omitTitle: String? = nil) {
+    /// The web line height (1.65 for documents and chat; inbox and home details use 1.6 / 1.55).
+    private let lineHeight: CGFloat
+
+    init(text: String, size: CGFloat = 15, lineHeight: CGFloat = 1.65, omitTitle: String? = nil) {
         self.text = text
         self.omitTitle = omitTitle
+        self.lineHeight = lineHeight
         _size = ScaledMetric(wrappedValue: size, relativeTo: .subheadline)
     }
 
-    /// Extra space between two lines of one paragraph: a 1.65 line height over the system font's own ~1.2.
-    private var leading: CGFloat { (size * 0.45).rounded() }
+    /// Extra space between two lines of one paragraph: the web line height over the system font's own ~1.2.
+    private var leading: CGFloat { CELeading.spacing(size, lineHeight) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: (size * 0.7).rounded()) {
@@ -729,7 +773,7 @@ struct MarkdownText: View {
                 case .quote(let value):
                     HStack(alignment: .top, spacing: 12) {
                         RoundedRectangle(cornerRadius: 1).fill(CE.accent.opacity(0.7)).frame(width: 2)
-                        MarkdownText(text: value, size: size).foregroundStyle(CE.ink2)
+                        MarkdownText(text: value, size: size, lineHeight: lineHeight).foregroundStyle(CE.ink2)
                     }
                     .fixedSize(horizontal: false, vertical: true)
                 case .rule:

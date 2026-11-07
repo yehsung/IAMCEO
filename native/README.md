@@ -1,6 +1,6 @@
 # IAMCEO native
 
-SwiftUI macOS/iOS client for the IAMCEO Bun daemon. The daemon owns domain state, CLI processes and orchestration; the app owns one network synchronization coordinator, not a second model orchestrator. This README describes the W1–9 source as of 2026-11-07. **Live operation stays on herdr** until isolated fake-project acceptance, separate real CLI/device acceptance and an owner-approved migration. Building this source does not migrate the live service. Historical dates/results in [the handoff](../docs/claude-handoff.md) remain historical.
+SwiftUI macOS/iOS client for the IAMCEO Bun daemon. The daemon owns domain state, CLI processes and orchestration; the app owns one network synchronization coordinator, not a second model orchestrator. **Live operation stays on herdr** until isolated fake-project acceptance, separate real CLI/device acceptance and an owner-approved migration. Building this source does not migrate the live service.
 
 IAMCEO is **source-available**, under Sustainable Use License 1.0 + IAMCEO Additional Permissions. See [LICENSE](../LICENSE) and [the Korean explanation](../docs/LICENSING.ko.md). The web client is legacy, scheduled for retirement; it receives API compatibility maintenance, with no new features.
 
@@ -8,17 +8,17 @@ IAMCEO is **source-available**, under Sustainable Use License 1.0 + IAMCEO Addit
 
 Requires Xcode 16+ / Swift 6, macOS 14+ or iOS 17+. System controls use Liquid Glass on supported OS releases and material fallbacks on older systems. Custom workspace cards retain the existing translucent dark violet design.
 
-From the repository root, use the shared gates. They use temporary homes, fake executables/sockets and dynamic non-7878 ports. XcodeGen runs on a temporary copy with generated files and derived data outside the repository. Swift build/test run sequentially.
+From the repository root, use the shared gates. Server tests use a temporary IAMCEO home, fake executables, dedicated fixture sockets and dynamic non-7878 ports. Individual fixtures prepare provider homes when needed. XcodeGen runs on a temporary copy with generated files and derived data outside the repository. Swift build/test run sequentially.
 
 ```sh
-bash /Users/yesung/iamceo/.pumasi/gates.sh ts
-bash /Users/yesung/iamceo/.pumasi/regress.sh
-bash /Users/yesung/iamceo/.pumasi/gates.sh swift
+bash .pumasi/gates.sh ts
+bash .pumasi/regress.sh
+bash .pumasi/gates.sh swift
 # Separate unsigned macOS + iOS Simulator build gate:
-# bash /Users/yesung/iamceo/.pumasi/gates.sh xcode
+# bash .pumasi/gates.sh xcode
 ```
 
-Do not run the unfiltered Bun suite: it includes real-herdr tests. Do not use live port 7878, the real IAMCEO home/config, herdr sockets or `dist/native` for validation. Do not invoke `build:native`, `setup:core`, install or service kickstart as test gates. See [the operating runbook](../docs/operating-model.md) for isolation details and dated W10-D gate results, including environment failures. Build, mock tests, unsigned Simulator builds, signing and physical-device acceptance are separate evidence.
+Do not run the unfiltered Bun suite: it includes real-herdr tests. Do not use live port 7878, the real IAMCEO home/config, herdr sockets or `dist/native` for validation. Do not invoke `build:native`, `setup:core`, install or service kickstart as test gates. See [the operating runbook](../docs/operating-model.md#격리-시험-실행) for isolation requirements and commands. Build, mock tests, unsigned Simulator builds, signing and physical-device acceptance are separate evidence.
 
 For source previews, use an external scratch directory and the explicit read-only demo; it never connects to a daemon:
 
@@ -29,7 +29,7 @@ swift run --package-path native --scratch-path "$NATIVE_PREVIEW_ROOT/build" \
   --security-path "$NATIVE_PREVIEW_ROOT/security" IAMCEO --demo
 ```
 
-Normal source clients require an explicitly chosen test daemon origin and access code. Bundled macOS local-host preparation is a separate operational action: “이 Mac에서 시작하기” may install/start a launchd daemon only when selected. This task does not authorize using it on the live host. macOS App Sandbox is disabled for those local-host controls; iOS uses the platform sandbox. Generated Xcode projects are reproducible from `project.yml`; regenerate in a temporary copy for QA. No signing identity or service credential is committed.
+Normal source clients require an explicitly chosen test daemon origin and access code. Bundled macOS local-host preparation is a separate operational action: “이 Mac에서 시작하기” may install/start a launchd daemon only when selected. Keep development validation on the isolated test host. macOS App Sandbox is disabled for those local-host controls; iOS uses the platform sandbox. Generated Xcode projects are reproducible from `project.yml`; regenerate in a temporary copy for QA. No signing identity or service credential is committed.
 
 ## Connection and synchronization
 
@@ -47,7 +47,7 @@ The first chat attempt persists its host namespace, immutable ID, target, text, 
 
 History is separate from the project snapshot: first 200, previous 100, opaque keyset cursors ordered by binary `(at,id)`. Per-scope single flight, ID deduplication and event/POST overlays preserve current delivery state. Reconnect gaps larger than 200 are bridged through staged pages before committing; failures preserve the old thread/cursor/draft and offer continue/retry. Prepend captures the current visible message and partial offset immediately before applying, and does not add unread counts. Real Mac/iOS keyboard/image/rotation/accessibility behavior still needs device QA beyond automated anchor tests.
 
-The sidebar/project switcher exposes archive and project management. Renaming preserves IDs, drafts, sessions and history. Archive reads use `/archive/state` and `/archive/messages/page`; ordinary state/page still return 404 for archived projects. Archive UI reads chat, decisions, work and files without send/answer/check/member controls; rename/unarchive are separate management actions. It is not an immutable database snapshot: late manual reports/files and legacy todo compatibility remain. Safe archive verifies resumable session identity and actual termination; unresolved Codex identity blocks it. HQ cannot be archived; there is no project deletion API. Unarchive rechecks archived-held delivery only, not a fleet-wide restart.
+The sidebar/project switcher exposes archive and project management. Renaming preserves IDs, drafts, sessions and history. Archive reads use `/archive/state` and `/archive/messages/page`; ordinary state/page still return 404 for archived projects. Legacy `/api/projects/:id/messages` list/around and `/api/messages/:id` single-message reads remain available for archived history under user authentication, without waking sessions. The server also exposes archive list/around and single-message reads at `/api/projects/:id/archive/messages` and `/api/projects/:id/archive/messages/:message`. Archive UI reads chat, decisions, work and files without send/answer/check/member controls; rename/unarchive are separate management actions. It is not an immutable database snapshot: late manual reports/files and legacy todo compatibility remain. Safe archive verifies resumable session identity and actual termination; unresolved Codex identity blocks it. HQ cannot be archived; there is no project deletion API. Unarchive rechecks archived-held delivery only, not a fleet-wide restart.
 
 Delivery panels show automatic checking separately from owner intervention. Only `needsOwner` contributes to Home/office attention. The server automatically corrects receipt evidence and repairs proven pre-write failures; post-write absence never proves safe resend. Owner actions use the server’s allowed actions, version and operation ID. There is no “mark received” action. Plain terminal controls require a 5-minute identity-bound lease that pauses automatic delivery and survives server restart. Manual claim/release alone does not resolve delivery or compaction uncertainty.
 
@@ -63,6 +63,6 @@ Completion reports group by project/member for a **fixed 120-second window from 
 
 Foreground notifications only refresh data, without banner/sound or forced navigation. A tap validates serverId, the saved event target and current membership, then applies one route after project reset. Unknown hosts require the existing connection flow, never an automatic endpoint switch. No tap automatically answers, approves, claims or inputs. Processed decisions show their current state; completion reports use around-message history and group references. Archived destinations follow the archive read flow where allowed, while a target lookup that now returns 404 is shown as unavailable. Offline taps retain a pending destination; offline disconnect reports incomplete revocation and reconciles it on reconnect.
 
-Physical-device signing/trust/Developer Mode, Apple acceptance, banner delivery and tap navigation must be tested separately for sandbox and production, including cold start, lock, multi-window, Tailscale and Wi-Fi/cellular changes. Mock HTTP/2 and Simulator success do not complete W11-A or authorize switching the live runner.
+Physical-device signing/trust/Developer Mode, Apple acceptance, banner delivery and tap navigation must be tested separately for sandbox and production, including cold start, lock, multi-window, Tailscale and Wi-Fi/cellular changes. Mock HTTP/2 and Simulator success do not replace physical-device acceptance or authorize switching the live runner.
 
-Artifact previews remain nonpersistent WKWebView with JavaScript/external requests disabled. The legacy web renderer has different capabilities. Exact API bodies/results, recovery safeguards, backup/restore and global access-code rotation are documented in [spec.md](../docs/spec.md) and [operating-model.md](../docs/operating-model.md).
+Artifact previews remain nonpersistent WKWebView with JavaScript/external requests disabled. The legacy web renderer has different capabilities. Exact API bodies/results, recovery safeguards, backup/restore (including the stopped-home `restore reconcile` → `restore resume` sequence) and global access-code rotation are documented in [spec.md](../docs/spec.md) and [operating-model.md](../docs/operating-model.md).

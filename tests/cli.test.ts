@@ -128,7 +128,6 @@ describe("serve·status·open·join", () => {
 
     proc.kill("SIGTERM");
     expect(await proc.exited).toBe(0);
-
     const down = await cli(home, ["status"], { env: { IAMCEO_PORT: String(port) } });
     expect(down.code).toBe(1);
     expect(down.stderr).toContain("서버가 꺼져 있습니다");
@@ -457,6 +456,48 @@ describe("가져오기", () => {
 });
 
 describe("운영 CLI readiness·등록·복원", () => {
+  test("복원 운영은 조정 → 명시 재개 → serve 순서이며 잠금·조정 실패는 발신을 열지 않는다", async () => {
+    const home = newHome();
+    expect((await cli(home, ["setup", "--port", "7003", "--hosts", "127.0.0.1"])).code).toBe(0);
+    const backup = await cli(home, ["backup"]);
+    expect(backup.code).toBe(0);
+    const snapshot = backup.stdout.trim().replace("백업 검증 완료: ", "");
+    const destination = join(newHome(), "restored");
+    expect((await cli(home, ["restore", snapshot, "--destination", destination])).code).toBe(0);
+    const early = await cli(destination, ["restore", "resume"]);
+    expect(early.code).toBe(1);
+    expect(early.stderr).toContain("조정이 끝나지");
+    const blocked = await cli(destination, ["serve"]);
+    expect(blocked.code).toBe(1);
+    expect(blocked.stderr).toContain("발신 꺼짐");
+    expect(blocked.stdout).not.toContain("IAMCEO 서버:");
+    const { acquireHomeOwner } = await import("../server/home-owner.ts");
+    using owner = acquireHomeOwner(destination);
+    expect((await cli(destination, ["restore", "reconcile"])).stderr).toContain("다른 작업");
+    owner.release();
+    const reconciled = await cli(destination, ["restore", "reconcile"]);
+    expect(reconciled.code).toBe(0);
+    expect(reconciled.stdout).toContain("조정 완료");
+    expect(reconciled.stdout).toContain("발신 꺼짐");
+    expect((await cli(destination, ["serve"])).code).toBe(1);
+    const resumed = await cli(destination, ["restore", "resume"]);
+    expect(resumed.code).toBe(0);
+    expect(resumed.stdout).toContain("재개 허용");
+    expect((await cli(destination, ["restore", "resume"])).code).toBe(0);
+    const { proc } = await serve(destination, await freePort());
+    expect((await cli(destination, ["restore", "resume"])).stderr).toContain("다른 작업");
+    proc.kill("SIGTERM");
+    expect(await proc.exited).toBe(0);
+    expect((await cli(destination, ["restore", "resume"])).code).toBe(0);
+    for (const command of ["reconcile", "resume"]) {
+      expect((await cli(destination, ["restore", command, "--clone"])).code).toBe(1);
+      const unrelated = newHome();
+      expect((await cli(unrelated, ["restore", command])).code).toBe(1);
+      expect(existsSync(join(unrelated, "iamceo.db"))).toBe(false);
+      expect(existsSync(join(unrelated, "config.json"))).toBe(false);
+    }
+  }, 30_000);
+
   test("인증된 준비 확인: health만 성공하는 구형 데몬, 다른 build와 미복구 상태는 성공이 아니다", async () => {
     const home = newHome();
     const config = loadConfig({ IAMCEO_HOME: home, IAMCEO_PORT: "0" });

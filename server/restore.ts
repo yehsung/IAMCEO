@@ -20,6 +20,85 @@ const stateSchema = z.object({
   files: z.array(z.object({ path: z.string(), size: z.number().int().nonnegative().safe(), sha256: z.string().regex(/^[a-f0-9]{64}$/) })),
 }).strict();
 
+const reconciliationSchema = z.object({
+  snapshotId: z.string(), restoredAt: z.iso.datetime({ precision: 3 }), mode: z.enum(["same-host", "clone"]),
+  reconciliationRequired: z.boolean(), outboundEnabled: z.boolean(), enabledProjects: z.array(z.string()),
+  reconciledAt: z.iso.datetime({ precision: 3 }).optional(), resumedAt: z.iso.datetime({ precision: 3 }).optional(),
+}).passthrough().refine((state) => state.reconciliationRequired
+  ? !state.outboundEnabled && !state.reconciledAt && !state.resumedAt
+  : !!state.reconciledAt && (state.outboundEnabled ? !!state.resumedAt : !state.resumedAt), "Invalid restore transition");
+
+export interface RestoreOperationResult { home: string; snapshotId: string; reconciliationRequired: false; outboundEnabled: boolean }
+
+function reconciliationState(db: Database) {
+  const row = db.query<{ value: string }, []>("SELECT value FROM settings WHERE key='restoreReconciliation'").get();
+  return row ? reconciliationSchema.parse(JSON.parse(row.value)) : null;
+}
+
+/** The daemon must check this before constructing runners, HTTP ingress or APNs. */
+export function requireRestoreOutboundEnabled(db: Database, home: string): void {
+  const state = reconciliationState(db);
+  if (!state && existsSync(join(home, "restore-state.json"))) throw new Error("Missing restored reconciliation fence");
+  if (state && !state.outboundEnabled) throw new Error("복원 발신 꺼짐: 서버를 끈 상태에서 iamceo restore reconcile 후 iamceo restore resume 을 실행하세요");
+}
+
+function withRestoredHome<T>(home: string, action: (db: Database, state: z.infer<typeof reconciliationSchema>, home: string) => T): T {
+  home = normalizeHome(home);
+  // Refuse absent/unrelated homes rather than creating a new database or config.
+  backupPath(home, join(home, "iamceo.db"));
+  using owner = acquireHomeOwner(home);
+  const manifest = stateSchema.parse(readBackupJson(backupPath(home, join(home, "restore-state.json"))));
+  if (manifest.destinationHome !== home) throw new Error("Restored home identity mismatch");
+  const db = new Database(backupPath(home, join(home, "iamceo.db")), { readwrite: true });
+  try {
+    db.exec("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL");
+    checkBackupDatabase(db);
+    return db.transaction(() => {
+      const state = reconciliationState(db);
+      if (!state || state.snapshotId !== manifest.snapshotId || state.mode !== manifest.mode || state.restoredAt !== manifest.restoredAt) throw new Error("Missing restored reconciliation fence");
+      if (!state.outboundEnabled && (db.query<{ server_id: string }, []>("SELECT server_id FROM push_meta WHERE id=1").get()?.server_id ?? null) !== manifest.serverId) throw new Error("Restored server identity mismatch");
+      return action(db, state, home);
+    }).immediate();
+  } finally { db.close(); }
+}
+
+/** Offline reconciliation is conservative: retain receipt/lease/wire evidence and never replay uncertain work. */
+export function reconcileRestoredHome(home: string, now = new Date()): RestoreOperationResult {
+  return withRestoredHome(home, (db, state, home) => {
+    if (state.outboundEnabled) throw new Error("이미 재개된 복원본은 다시 조정할 수 없습니다");
+    const at = now.toISOString();
+    quarantineOutbound(db, at);
+    db.query("UPDATE settings SET value=? WHERE key='restoreReconciliation'").run(JSON.stringify({
+      ...state, reconciliationRequired: false, reconciledAt: at,
+    }));
+    return { home, snapshotId: state.snapshotId, reconciliationRequired: false, outboundEnabled: false };
+  });
+}
+
+/** Requires an exclusive, stopped home; pending restored work and push registrations stay quarantined. */
+export function resumeRestoredHome(home: string, now = new Date()): RestoreOperationResult {
+  return withRestoredHome(home, (db, state, home) => {
+    if (state.reconciliationRequired) throw new Error("복원 조정이 끝나지 않았습니다. iamceo restore reconcile 을 먼저 실행하세요");
+    if (!state.outboundEnabled) {
+      if (db.query(`SELECT 1 FROM projects WHERE runner_enabled != 0
+        UNION ALL SELECT 1 FROM deliveries WHERE status IN ('queued','delivering','failed')
+        UNION ALL SELECT 1 FROM push_devices WHERE enabled != 0
+        UNION ALL SELECT 1 FROM push_deliveries WHERE state IN ('queued','retry','sending')
+        UNION ALL SELECT 1 FROM push_report_groups WHERE state='open'
+        UNION ALL SELECT 1 FROM operation_receipts WHERE status='pending'
+        UNION ALL SELECT 1 FROM lifecycle_journal WHERE phase IN ('prepared','started')
+        UNION ALL SELECT 1 FROM execution_journal WHERE phase IN ('received','starting','running') LIMIT 1`).get()) {
+        throw new Error("복원 조정 이후 발신 상태가 바뀌었습니다. 재개를 거부합니다");
+      }
+      for (const id of state.enabledProjects) db.query("UPDATE projects SET runner_enabled=1 WHERE id=? AND archived=0").run(id);
+      db.query("UPDATE settings SET value=? WHERE key='restoreReconciliation'").run(JSON.stringify({
+        ...state, outboundEnabled: true, resumedAt: now.toISOString(),
+      }));
+    }
+    return { home, snapshotId: state.snapshotId, reconciliationRequired: false, outboundEnabled: true };
+  });
+}
+
 function relocatePath(path: string, source: string, destination: string): string {
   if (!isAbsolute(path)) return path;
   const tail = relative(source, path);
@@ -62,8 +141,7 @@ function relocateAttachments(db: Database, manifest: BackupManifest, destination
 }
 
 /** This changes only the restored copy. It does not infer delivery from elapsed time. */
-function quarantine(db: Database, manifest: BackupManifest, mode: "same-host" | "clone", at: string): string | null {
-  const enabledProjects = db.query<{ id: string }, []>("SELECT id FROM projects WHERE runner_enabled = 1").all().map((row) => row.id);
+function quarantineOutbound(db: Database, at: string): void {
   db.query("UPDATE projects SET runner_enabled = 0").run();
   db.query(`UPDATE deliveries SET status='held', hold_reason='delivery_unknown', next_attempt_at=NULL,
     last_error='restore_reconciliation_required' WHERE status IN ('queued','held','delivering','failed')`).run();
@@ -82,6 +160,11 @@ function quarantine(db: Database, manifest: BackupManifest, mode: "same-host" | 
     lease_until=NULL,finished_at=? WHERE state IN ('queued','retry','sending')`).run(at);
   db.query("UPDATE push_report_groups SET state='cancelled',closed_at=? WHERE state='open'").run(at);
   db.query("UPDATE push_report_group_recipients SET cancelled_at=? WHERE cancelled_at IS NULL").run(at);
+}
+
+function quarantine(db: Database, manifest: BackupManifest, mode: "same-host" | "clone", at: string): string | null {
+  const enabledProjects = db.query<{ id: string }, []>("SELECT id FROM projects WHERE runner_enabled = 1").all().map((row) => row.id);
+  quarantineOutbound(db, at);
   if (mode === "clone") {
     db.query(`INSERT INTO push_meta (id,server_id,created_at) VALUES (1,?,?)
       ON CONFLICT(id) DO UPDATE SET server_id=excluded.server_id`).run(randomUUID(), at);

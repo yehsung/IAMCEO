@@ -43,6 +43,7 @@ beforeAll(async () => {
   store.createTodo({ projectId, title: "업무 기록" });
   store.createFile({ projectId, title: "자료 기록", kind: "document", body: "자료 원문" });
   store.patchProject(projectId, { archived: true });
+  store.createMessage({ id: "active_message", projectId: "hq", kind: "알림", body: "활성 기록" });
   bus.subscribe((event) => events.push(event.type));
 });
 
@@ -76,22 +77,36 @@ describe("archive read HTTP", () => {
     expect(older.nextCursor).toBeNull();
     expect((await (await get(`${path}?scope=member&memberId=${workerId}`)).json() as MessagePage).items).toEqual([first]);
     expect((await (await get(`${path}?scope=member&memberId=${leadId}`)).json() as MessagePage).scope).toEqual({ kind: "project" });
+    expect(await (await get(`/api/projects/${projectId}/archive/messages/${first.id}`)).json()).toEqual(first);
+    expect(await (await get(`/api/projects/${projectId}/archive/messages?around=${first.id}&limit=1`)).json()).toEqual([first]);
+    expect(await (await get(`/api/projects/${projectId}/archive/messages?before=2021`)).json()).toEqual([first]);
     expect(await (await get(`/api/messages/${first.id}`)).json()).toEqual(first);
-    expect((await (await get(`/api/projects/${projectId}/messages?around=${first.id}&limit=1`)).json())).toEqual([first]);
+    expect(await (await get(`/api/projects/${projectId}/messages`)).json()).toEqual(store.listMessages(projectId));
+    expect(await (await get(`/api/projects/${projectId}/messages?around=${first.id}&limit=1`)).json()).toEqual([first]);
+    expect(await (await get(`/api/projects/${projectId}/messages?before=2021`)).json()).toEqual([first]);
     expect(calls).toEqual([]);
     expect(events).toEqual([]);
     expect(bus.seq).toBe(seq);
     expect(store.db.query("SELECT total_changes() AS n").get()).toEqual(total);
   });
 
-  test("없는/활성 archive는 404·일반 state/page는 보관 404·구형 messages는 유지", async () => {
-    for (const id of ["missing", "hq"]) for (const suffix of ["archive/state", "archive/messages/page"]) {
+  test("없는/활성 archive와 보관의 일반 state/page는 404이고 구형 메시지 읽기는 유지한다", async () => {
+    for (const id of ["missing", "hq"]) for (const suffix of ["archive/state", "archive/messages/page", "archive/messages", `archive/messages/${first.id}`]) {
       const response = await get(`/api/projects/${id}/${suffix}`);
       expect(response.status).toBe(404);
       expect(response.headers.get("cache-control")).toBe("no-store");
     }
     for (const suffix of ["state", "messages/page"]) expect((await get(`/api/projects/${projectId}/${suffix}`)).status).toBe(404);
-    expect((await get(`/api/projects/${projectId}/messages`)).status).toBe(200);
+    for (const path of ["/api/messages/missing", "/api/projects/missing/messages", `/api/projects/${projectId}/messages?around=active_message`]) {
+      const response = await get(path);
+      expect(response.status).toBe(404);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    }
+    for (const id of ["missing", "active_message"]) expect((await get(`/api/projects/${projectId}/archive/messages/${id}`)).status).toBe(404);
+    expect((await get(`/api/projects/${projectId}/archive/messages?around=active_message`)).status).toBe(404);
+    expect(await (await get("/api/messages/active_message")).json()).toEqual(store.requireMessage("active_message"));
+    expect((await get("/api/projects/hq/messages?around=active_message")).status).toBe(200);
+    expect((await get("/api/projects/hq/messages/page")).status).toBe(200);
     expect(calls).toEqual([]);
   });
 
@@ -106,12 +121,21 @@ describe("archive read HTTP", () => {
     expect(badCursor.status).toBe(400);
     expect(await badCursor.json()).toMatchObject({ code: "INVALID_MESSAGE_CURSOR" });
     expect((await get(`/api/projects/${projectId}/archive/state?extra=1`)).status).toBe(400);
-    for (const suffix of ["archive/state", "archive/messages/page"]) {
+    expect((await get(`/api/projects/${projectId}/archive/messages/${first.id}?extra=1`)).status).toBe(400);
+    expect((await get(`/api/projects/${projectId}/archive/messages?around=${first.id}&extra=1`)).status).toBe(400);
+    expect((await get(`/api/messages/${first.id}?extra=1`)).status).toBe(400);
+    expect((await get(`/api/projects/${projectId}/messages?around=${first.id}&before=2021`)).status).toBe(400);
+    for (const suffix of ["archive/state", "archive/messages/page", "archive/messages", `archive/messages/${first.id}`, "messages", `messages?around=${first.id}`]) {
       for (const init of [{}, { headers: { Authorization: `Bearer ${store.getMemberToken(workerId)}` } }]) {
         const response = await fetch(`${base}/api/projects/${projectId}/${suffix}?t=${CODE}`, init);
         expect(response.status).toBe(401);
         expect(response.headers.get("cache-control")).toBe("no-store");
       }
+    }
+    for (const init of [{}, { headers: { Authorization: `Bearer ${store.getMemberToken(workerId)}` } }]) {
+      const response = await fetch(`${base}/api/messages/${first.id}?t=${CODE}`, init);
+      expect(response.status).toBe(401);
+      expect(response.headers.get("cache-control")).toBe("no-store");
     }
     expect(calls).toEqual([]);
   });
@@ -124,6 +148,8 @@ describe("archive read HTTP", () => {
     expect((await response.json() as ArchiveProjectState).messages.at(-1)).toEqual(late);
     const page = await (await get(`/api/projects/${projectId}/archive/messages/page`)).json() as MessagePage;
     expect(page.items.at(-1)).toEqual(late);
+    expect(await (await get(`/api/messages/${late.id}`)).json()).toEqual(late);
+    expect(await (await get(`/api/projects/${projectId}/archive/messages/${late.id}`)).json()).toEqual(late);
     expect(calls).toEqual([]);
     expect(events).toEqual([]);
     expect(bus.seq).toBe(seq);

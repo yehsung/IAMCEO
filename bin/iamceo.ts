@@ -25,6 +25,8 @@ const USAGE = `쓰는 법: iamceo <명령>
   backup [--directory 경로] 검증된 DB·첨부·설정 백업
   restore <백업폴더> --destination 경로 [--clone]
                          별도 빈 홈에 복원하고 발신을 격리한다
+  restore reconcile      서버가 꺼진 IAMCEO_HOME의 큐·푸시를 보수적으로 조정한다
+  restore resume         조정 완료 후 발신을 허용한다. 이후 serve로 시작한다
   readiness              인증·복구 완료·실행 build ID를 확인한다
   auth rotate            이 Mac의 접속 코드를 교체하고 모든 연결·QR을 만료시킨다
   build-id               실행 파일의 build ID를 보여 준다
@@ -157,13 +159,15 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
   })();
   try {
     const [{ Bus }, { openDb }, http, orchestration, { Store }, { PushStore }, { PushEventRecorder }, { PushWorker },
-      { APNsClient }, { loadAPNsConfig }, { BackupManager }, { StorageMaintenance, createStorageReferences }] = await Promise.all([
+      { APNsClient }, { loadAPNsConfig }, { BackupManager }, { StorageMaintenance, createStorageReferences }, { requireRestoreOutboundEnabled }] = await Promise.all([
       import("../server/bus.ts"), import("../server/db.ts"), import("../server/http.ts"), import("../server/orchestrator.ts"),
       import("../server/store.ts"), import("../server/push/store.ts"), import("../server/push/events.ts"), import("../server/push/worker.ts"),
       import("../server/push/apns.ts"), import("../server/push/config.ts"), import("../server/backup.ts"), import("../server/storage-maintenance.ts"),
+      import("../server/restore.ts"),
     ]);
     const identity = await buildId();
     db = openDb(config.dbPath);
+    requireRestoreOutboundEnabled(db, config.home);
     client ??= new APNsClient(loadAPNsConfig(config.home));
     const push = new PushStore(db, { providers: () => client!.status() });
     const bus = new Bus();
@@ -463,12 +467,21 @@ async function backup(args: string[]): Promise<void> {
 }
 
 async function restore(args: string[]): Promise<void> {
+  if (args[0] === "reconcile" || args[0] === "resume") {
+    if (args.length !== 1) throw new CliError("iamceo restore reconcile | iamceo restore resume (IAMCEO_HOME으로 복원 홈 지정, 서버 종료 필요)");
+    const { reconcileRestoredHome, resumeRestoredHome } = await import("../server/restore.ts");
+    const result = args[0] === "reconcile" ? reconcileRestoredHome(homeDir()) : resumeRestoredHome(homeDir());
+    console.log(result.outboundEnabled
+      ? `복원 발신 재개 허용: ${result.home}\n이 홈에서 iamceo serve 로 시작하세요. 기존 보류 전달·푸시 기기는 자동 재전송·활성화하지 않습니다.`
+      : `복원 큐·푸시 조정 완료: ${result.home}\n발신 꺼짐: iamceo restore resume 으로 명시적으로 재개하세요.`);
+    return;
+  }
   const { values, positionals } = parseArgs({ args, allowPositionals: true,
     options: { destination: { type: "string" }, clone: { type: "boolean" } } });
   if (positionals.length !== 1 || !values.destination) throw new CliError("iamceo restore <백업폴더> --destination <별도 빈 홈> [--clone]");
   const { restoreBackup } = await import("../server/restore.ts");
   const result = restoreBackup({ snapshotDir: resolve(positionals[0]!), destinationHome: resolve(values.destination), mode: values.clone ? "clone" : "same-host" });
-  console.log(`복원 검증 완료: ${result.home}\n발신 꺼짐: 세션·lease·전달 증거 조정 후 명시적으로 재개하세요.`);
+  console.log(`복원 검증 완료: ${result.home}\n발신 꺼짐: IAMCEO_HOME을 복원 홈으로 지정하고 restore reconcile → restore resume → serve 순서로 실행하세요. 기존 전달·lease 증거는 보존하며 푸시는 다시 등록·활성화해야 합니다.`);
 }
 
 export async function waitForReadiness(config: Config, options: {

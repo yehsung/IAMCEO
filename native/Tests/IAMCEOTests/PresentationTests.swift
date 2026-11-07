@@ -145,6 +145,30 @@ final class PresentationTests: XCTestCase {
         XCTAssertTrue(DeliveryInfo(DeliveryNoticeItem(id: "d", phase: .stopped)).explanation.contains("알 수 없습니다"))
     }
 
+    func testHomeDeliverySummaryOmitsZeroCountsAndOwnerConfirmation() {
+        func value(unknown: Int = 0, undelivered: Int = 0, waitingBehind: Int = 0) -> MemberDeliverySummary {
+            MemberDeliverySummary(memberId: "m", undeliveredCount: undelivered, unknownCount: unknown,
+                                  deliveringCount: 3, checkingCount: 4, needsOwnerCount: 1,
+                                  waitingBehindCount: waitingBehind, oldestAt: nil, reasons: [])
+        }
+        XCTAssertEqual(homeDeliverySummary(value(undelivered: 1)), "미전달 1")
+        XCTAssertEqual(homeDeliverySummary(value(unknown: 2)), "미확인 2")
+        XCTAssertEqual(homeDeliverySummary(value(waitingBehind: 3)), "뒤에서 대기 3")
+        XCTAssertEqual(homeDeliverySummary(value(unknown: 2, undelivered: 1)), "미확인 2 · 미전달 1")
+        XCTAssertEqual(homeDeliverySummary(value(unknown: 2, waitingBehind: 3)), "미확인 2 · 뒤에서 대기 3")
+        XCTAssertEqual(homeDeliverySummary(value(undelivered: 1, waitingBehind: 3)), "미전달 1 · 뒤에서 대기 3")
+        XCTAssertEqual(homeDeliverySummary(value(unknown: 2, undelivered: 1, waitingBehind: 3)),
+                       "미확인 2 · 미전달 1 · 뒤에서 대기 3")
+        XCTAssertNil(homeDeliverySummary(value()))
+        XCTAssertNil(homeDeliverySummary(value(unknown: -1, undelivered: -2, waitingBehind: -3)))
+        XCTAssertEqual(homeDeliverySummary(value(unknown: -1, undelivered: 123, waitingBehind: -3)), "미전달 123")
+
+        // Compact Home copy must not remove the full detail's owner-confirmation information.
+        XCTAssertEqual(DeliveryInfo(value(undelivered: 1)).label, "전달 확인 1")
+        XCTAssertEqual(DeliveryInfo(value(undelivered: 1)).explanation, "전달 확인이 필요한 항목 1건입니다.")
+        XCTAssertTrue(DeliveryInfo(value()).needsOwner)
+    }
+
     func testEvidenceAbsenceNeedsCompleteScanAndDoesNotMeanNotReceived() {
         func evidence(_ verdict: EvidenceVerdict, complete: Bool) -> DeliveryEvidence {
             DeliveryEvidence(source: "codex_jsonl", verdict: verdict, location: "private-path", code: "test", complete: complete, checkedAt: "time")

@@ -487,6 +487,18 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
   const activeProject = (id: string): void => {
     if (store.requireProject(id).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
   };
+  const archivedProject = (id: string): void => {
+    if (!store.requireProject(id).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+  };
+  const messages: Handler = (_req, url, [id]) => {
+    if (url.searchParams.has("around")) {
+      strictQuery(url, ["around", "limit"], "INVALID_MESSAGE_PAGE_QUERY");
+      const around = url.searchParams.get("around")!;
+      if (!around || Buffer.byteLength(around) > 256) throw new ApiError(400, "대화 조회 조건이 잘못되었습니다", "INVALID_MESSAGE_PAGE_QUERY");
+      return Response.json(store.listMessagesAround(id!, around, strictLimit(url.searchParams.get("limit"), 41, 100)));
+    }
+    return Response.json(store.listMessages(id!, { before: url.searchParams.get("before") ?? undefined, limit: parseLimit(url) }));
+  };
 
   return [
     route("GET", "/api/operations/:id", async (_req, url, [id]) => {
@@ -587,16 +599,10 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       const state = store.projectState(id!);
       return Response.json(ctx.delivery ? { ...state, deliveryNotices: ctx.delivery.notices(id!) } : state);
     }),
-    route("GET", "/api/projects/:id/messages", (_req, url, [id]) => {
-      store.requireProject(id!);
-      if (url.searchParams.has("around")) {
-        strictQuery(url, ["around", "limit"], "INVALID_MESSAGE_PAGE_QUERY");
-        const around = url.searchParams.get("around")!;
-        if (!around || Buffer.byteLength(around) > 256) throw new ApiError(400, "대화 조회 조건이 잘못되었습니다", "INVALID_MESSAGE_PAGE_QUERY");
-        return Response.json(store.listMessagesAround(id!, around, strictLimit(url.searchParams.get("limit"), 41, 100)));
-      }
-      const before = url.searchParams.get("before") ?? undefined;
-      return Response.json(store.listMessages(id!, { before, limit: parseLimit(url) }));
+    route("GET", "/api/projects/:id/messages", (req, url, params) => {
+      // Legacy read-only lookups also serve archived history; state/page use the archive boundary.
+      store.requireProject(params[0]!);
+      return messages(req, url, params);
     }),
     route("GET", "/api/projects/:id/messages/page", (_req, url, [id]) => Response.json(store.listMessagePage(id!, messagePageQuery(url)))),
     route("GET", "/api/projects/:id/archive/state", (_req, url, [id]) => {
@@ -604,6 +610,17 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       return Response.json(store.archiveState(id!));
     }),
     route("GET", "/api/projects/:id/archive/messages/page", (_req, url, [id]) => Response.json(store.listArchiveMessagePage(id!, messagePageQuery(url)))),
+    route("GET", "/api/projects/:id/archive/messages", (req, url, params) => {
+      archivedProject(params[0]!);
+      return messages(req, url, params);
+    }),
+    route("GET", "/api/projects/:id/archive/messages/:message", (_req, url, [id, messageId]) => {
+      strictQuery(url, []);
+      archivedProject(id!);
+      const message = store.requireMessage(messageId!);
+      if (message.projectId !== id) throw new ApiError(404, "메시지를 찾을 수 없습니다");
+      return Response.json(message);
+    }),
     route("GET", "/api/messages/:id", (_req, url, [id]) => {
       strictQuery(url, []);
       return Response.json(store.requireMessage(id!));

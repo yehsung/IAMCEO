@@ -201,6 +201,16 @@ struct DeliveryInfo: Sendable {
     }
 }
 
+/// Home shows only nonzero delivery details; full recovery counts stay in member details.
+func homeDeliverySummary(_ summary: MemberDeliverySummary) -> String? {
+    let parts = [("미확인", summary.unknownCount),
+                 ("미전달", summary.undeliveredCount),
+                 ("뒤에서 대기", summary.waitingBehindCount)]
+        .filter { $0.1 > 0 }
+        .map { "\($0.0) \($0.1)" }
+    return parts.isEmpty ? nil : parts.joined(separator: " · ")
+}
+
 struct DeliveryEvidenceInfo: Sendable {
     let sourceLabel: String
     let label: String

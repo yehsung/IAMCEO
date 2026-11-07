@@ -6,7 +6,7 @@ import { BackupManager, backupFile, createBackup, DEFAULT_BACKUP_POLICY, listBac
 import type { BackupSnapshot } from "../server/backup.ts";
 import { openDb, MIGRATIONS } from "../server/db.ts";
 import { acquireHomeOwner } from "../server/home-owner.ts";
-import { restoreBackup, verifyRestoredHome } from "../server/restore.ts";
+import { reconcileRestoredHome, requireRestoreOutboundEnabled, restoreBackup, resumeRestoredHome, verifyRestoredHome } from "../server/restore.ts";
 import { classifyStorageError } from "../server/storage-errors.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 import type { IsolatedRuntime } from "./fixtures/isolated-runtime.ts";
@@ -242,6 +242,92 @@ describe("consistent backup packages", () => {
 });
 
 describe("separate-home restore and outbound reconciliation", () => {
+  test.each(["same-host", "clone"] as const)("%s: reconciliation commits before explicit resume; uncertain work is never replayed", (mode) => {
+    const f = fixture();
+    seedOutbound(f.db);
+    f.db.query("INSERT INTO projects (id,name,cwd,archived,runner_enabled,created_at,updated_at) VALUES ('archived','보관',?,1,1,?,?)").run(f.home, at, at);
+    const snapshot = f.backup();
+    restoreBackup({ snapshotDir: snapshot.directory, destinationHome: f.destination, mode });
+    const db = readDb(f.destination);
+    const state = () => JSON.parse(db.query<{ value: string }, []>("SELECT value FROM settings WHERE key='restoreReconciliation'").get()!.value);
+    expect(() => requireRestoreOutboundEnabled(db, f.destination)).toThrow("발신 꺼짐");
+    const before = state();
+    expect(() => resumeRestoredHome(f.destination)).toThrow("조정이 끝나지");
+    expect(state()).toEqual(before);
+    expect(reconcileRestoredHome(f.destination, new Date(at))).toMatchObject({ reconciliationRequired: false, outboundEnabled: false });
+    expect(state()).toMatchObject({ reconciliationRequired: false, outboundEnabled: false, reconciledAt: at });
+    expect(() => requireRestoreOutboundEnabled(db, f.destination)).toThrow("발신 꺼짐");
+    expect(resumeRestoredHome(f.destination, new Date(at))).toMatchObject({ reconciliationRequired: false, outboundEnabled: true });
+    expect(() => requireRestoreOutboundEnabled(db, f.destination)).not.toThrow();
+    expect(state()).toMatchObject({ resumedAt: at, outboundEnabled: true });
+    expect(db.query("SELECT id,runner_enabled FROM projects ORDER BY id").all()).toEqual([
+      { id: "archived", runner_enabled: 0 }, { id: "p", runner_enabled: 1 },
+    ]);
+    expect(db.query("SELECT id,status FROM deliveries ORDER BY id").all()).toEqual([
+      { id: "delivered", status: "delivered" }, { id: "delivering", status: "held" }, { id: "failed", status: "held" },
+      { id: "held", status: "held" }, { id: "queued", status: "held" },
+    ]);
+    expect(db.query("SELECT wire_text,transport_state FROM delivery_dispatches").get()).toEqual({ wire_text: "immutable wire", transport_state: "write_started" });
+    expect(db.query("SELECT claim_id,lease_id FROM terminal_leases").get()).toEqual({ claim_id: "claim", lease_id: "lease" });
+    expect(db.query("SELECT status FROM operation_receipts").get()).toEqual({ status: "unknown" });
+    expect(db.query("SELECT 1 FROM push_devices WHERE enabled!=0").get()).toBeNull();
+    expect(db.query("SELECT 1 FROM push_deliveries WHERE state IN ('queued','retry','sending')").get()).toBeNull();
+    expect(db.query("SELECT state FROM push_deliveries WHERE id='sending'").get()).toEqual({ state: "unknown" });
+    const resumed = state();
+    expect(resumeRestoredHome(f.destination).outboundEnabled).toBe(true);
+    expect(state()).toEqual(resumed);
+    expect(() => reconcileRestoredHome(f.destination)).toThrow("이미 재개");
+    expect(f.db.query("SELECT status FROM deliveries WHERE id='queued'").get()).toEqual({ status: "queued" });
+  });
+
+  test("failed reconciliation/resume commits neither completion nor partial runner enablement", () => {
+    const f = fixture();
+    seedOutbound(f.db);
+    restoreBackup({ snapshotDir: f.backup().directory, destinationHome: f.destination });
+    const db = track(new Database(join(f.destination, "iamceo.db")));
+    db.exec(`UPDATE deliveries SET status='queued' WHERE id='queued';
+      CREATE TRIGGER fail_reconcile BEFORE UPDATE ON push_devices BEGIN SELECT RAISE(ABORT,'fixture reconcile failure'); END`);
+    expect(() => reconcileRestoredHome(f.destination)).toThrow("fixture reconcile failure");
+    expect(db.query("SELECT status FROM deliveries WHERE id='queued'").get()).toEqual({ status: "queued" });
+    expect(() => resumeRestoredHome(f.destination)).toThrow("조정이 끝나지");
+    db.exec("DROP TRIGGER fail_reconcile");
+    reconcileRestoredHome(f.destination);
+    db.exec("CREATE TRIGGER fail_resume BEFORE UPDATE ON settings BEGIN SELECT RAISE(ABORT,'fixture resume failure'); END");
+    expect(() => resumeRestoredHome(f.destination)).toThrow("fixture resume failure");
+    expect(db.query("SELECT 1 FROM projects WHERE runner_enabled!=0").get()).toBeNull();
+    expect(() => requireRestoreOutboundEnabled(db, f.destination)).toThrow("발신 꺼짐");
+    db.exec("DROP TRIGGER fail_resume");
+    expect(resumeRestoredHome(f.destination).outboundEnabled).toBe(true);
+  });
+
+  test("refuses changed quarantine, malformed/missing fences and concurrent local operations", () => {
+    const f = fixture();
+    seedOutbound(f.db);
+    restoreBackup({ snapshotDir: f.backup().directory, destinationHome: f.destination });
+    using owner = acquireHomeOwner(f.destination);
+    expect(() => reconcileRestoredHome(f.destination)).toThrow("사용 중");
+    expect(() => resumeRestoredHome(f.destination)).toThrow("사용 중");
+    owner.release();
+    reconcileRestoredHome(f.destination);
+    const db = track(new Database(join(f.destination, "iamceo.db")));
+    db.query("UPDATE push_deliveries SET state='retry' WHERE id='queued'").run();
+    expect(() => resumeRestoredHome(f.destination)).toThrow("상태가 바뀌었");
+    expect(() => requireRestoreOutboundEnabled(db, f.destination)).toThrow("발신 꺼짐");
+    reconcileRestoredHome(f.destination);
+    expect(db.query("SELECT state FROM push_deliveries WHERE id='queued'").get()).toEqual({ state: "cancelled" });
+    const valid = db.query<{ value: string }, []>("SELECT value FROM settings WHERE key='restoreReconciliation'").get()!.value;
+    for (const value of ["{", JSON.stringify({ ...JSON.parse(valid), outboundEnabled: true })]) {
+      db.query("UPDATE settings SET value=? WHERE key='restoreReconciliation'").run(value);
+      expect(() => resumeRestoredHome(f.destination)).toThrow();
+      expect(() => requireRestoreOutboundEnabled(db, f.destination)).toThrow();
+    }
+    db.query("DELETE FROM settings WHERE key='restoreReconciliation'").run();
+    expect(() => resumeRestoredHome(f.destination)).toThrow("fence");
+    expect(() => requireRestoreOutboundEnabled(db, f.destination)).toThrow("fence");
+    expect(() => resumeRestoredHome(f.home)).toThrow();
+    expect(() => requireRestoreOutboundEnabled(f.db, f.home)).not.toThrow();
+  });
+
   test("migrates an older backup only in the restore staging copy", () => {
     const f = fixture();
     const oldHome = join(f.runtime.dir, "old-home");

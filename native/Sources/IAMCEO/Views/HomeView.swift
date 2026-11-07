@@ -427,7 +427,7 @@ struct HomeView: View {
         case .member(let member, let delivery): attentionRow(member, delivery: delivery)
         case .delivery(let summary):
             deliveryAttentionRow(title: "담당자 확인 필요", count: summary.needsOwnerCount,
-                                 detail: deliveryDetail(summary))
+                                 detail: homeDeliverySummary(summary))
         case .unassigned(let count):
             deliveryAttentionRow(title: "담당 미배정", count: count, detail: "받을 팀원이 정해지지 않았습니다")
         case .failedMessage(let message):
@@ -501,30 +501,24 @@ struct HomeView: View {
                         .accessibilityLabel("\(member.name) 터미널 열기")
                 }
             }
-            if let delivery {
-                let deliveryInfo = DeliveryInfo(delivery)
-                Text("\(deliveryInfo.label) · \(deliveryDetail(delivery))")
+            if let delivery, let detail = homeDeliverySummary(delivery) {
+                Text(detail)
                     .font(CEFont.meta).foregroundStyle(CE.attention)
                     .padding(.leading, titleInset).padding(.bottom, 6)
-                    .accessibilityLabel("전달 확인 필요 \(delivery.needsOwnerCount)건, \(deliveryDetail(delivery))")
             }
         }
     }
 
-    private func deliveryDetail(_ summary: MemberDeliverySummary) -> String {
-        "미확인 \(max(0, summary.unknownCount)) · 미전달 \(max(0, summary.undeliveredCount)) · 뒤에서 대기 \(max(0, summary.waitingBehindCount))"
-    }
-
-    private func deliveryAttentionRow(title: String, count: Int, detail: String) -> some View {
+    private func deliveryAttentionRow(title: String, count: Int, detail: String?) -> some View {
         HomeRowButton(action: { router.openChat(nil) }) {
             turnLine("exclamationmark.bubble", tint: CE.attention) {
-                Text("\(title) · 전달 확인 \(DeliveryInfo.badgeCount(count))")
+                Text("\(title) \(DeliveryInfo.badgeCount(count))")
                     .font(CEFont.rowTitle).foregroundStyle(CE.ink)
-                HomeSub(text: detail)
+                if let detail { HomeSub(text: detail) }
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(title), 전달 확인 필요 \(count)건, \(detail)")
+        .accessibilityLabel((["\(title) \(count)건"] + [detail].compactMap { $0 }).joined(separator: ", "))
         .accessibilityHint("프로젝트 대화에서 원문 보기")
     }
 

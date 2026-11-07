@@ -1,19 +1,20 @@
 # IAMCEO 구현 계약
 
-2026-11-07 W1~9 작업 트리의 구현 계약이다. 라이브는 **herdr 실행기를 유지**하며, 이 소스의 core 조립을 배포·전환 완료로 해석하지 않는다. core 전환은 가짜 테스트 프로젝트 인수와 별도 실제 CLI·실기기 인수 뒤 소유자가 운영 전환을 승인한 다음에 한다. 날짜가 고정된 [과거 인계](claude-handoff.md)의 검증 기록을 이 문서의 새 완료 사실로 바꾸지 않는다.
+현재 소스의 API와 실행 규칙을 설명한다. **라이브는 herdr 실행기를 유지한다.** core 전환은 격리된 가짜 테스트 프로젝트의 인수 시험, 별도 실제 CLI·기기 시험, 운영자의 전환 승인 뒤에 한다. 소스 빌드는 라이브 배포나 전환을 뜻하지 않는다.
 
 IAMCEO는 **소스 공개형**이며 Sustainable Use License 1.0 + IAMCEO 추가 허락을 따른다. [LICENSE](../LICENSE)와 [라이선스 설명](LICENSING.ko.md)을 본다.
 
 공통 타입은 `shared/types.ts`, 실행기 계약은 `server/runner/types.ts`, core protocol은 upstream generation 1이다. 아키텍처 개요는 [architecture.md](architecture.md), 고정 core 출처는 [vendor 문서](../vendor/herdr-core/README.md)를 본다. `docs/herdr-schema.json`과 herdr/headless 어댑터는 과거 연동의 호환·회귀 자료이며 새 제품 실행의 기준이 아니다.
 
-## 0. 작업·시험 경계
+용어는 다음 뜻으로 쓴다. `lease`는 시간 제한이 있는 직접 조작권, `operation receipt`는 작업 ID별 처리 결과다. `CAS`는 읽었던 변경 버전과 현재 버전이 같을 때만 저장하는 방식이다. `unknown`은 결과를 확인할 수 없다는 뜻이며 실패나 재전송 허가가 아니다. `fresh exact`는 현재 세션에서 최근에 정확히 측정한 값, `wake`는 세션을 깨워 전달할 업무다.
+
+## 0. 실행과 시험의 경계
 
 - 사용자 실제 `~/.iamceo`, 기존 herdr/core 소켓·세션·서비스에 개발 쓰기 요청을 보내지 않는다. 시험은 임시 `IAMCEO_HOME`, 명시적 시험 소켓, 격리된 `HC_SESSION`·XDG 경로를 사용한다.
 - 단위·통합 시험은 실제 유료 모델을 부르지 않는다. core는 fake JSON-RPC 서버, 기존 headless 회귀 시험은 fake Claude를 쓴다. 실제 모델 호출·전역 도구 설치·업데이트·배포·launchd 등록은 해당 작업이 명시적으로 요청된 경우만 한다.
 - core shutdown은 detach다. 앱·서버 종료를 이유로 holder나 제공자 CLI를 끝내지 않는다. 명시적 멤버 종료·잠재우기·안전한 세션 교체와 구분한다.
 - 공식 CLI의 사용자 설정·로그인·도구를 유지한다. 호출별 인자·MCP 설정을 쓰고 전역 Claude/Codex 설정 파일을 수정하지 않는다. 부모의 외부 `HC_*`·`HERDR_*`·Claude 중첩 세션 변수는 전달하지 않고, 사용자 HOME·XDG 설정 경로를 복원한다.
 - 초안을 지우거나 불확실한 PTY 입력을 자동 재전송하지 않는다. 화면은 입력 안전 확인·사람의 조작을 위해 읽을 수 있지만 실행 상태나 최종 답변을 추측하는 근거로 쓰지 않는다.
-- 자기 담당 파일만 고치고 다른 작업자의 변경을 되돌리지 않는다. git push·외부 게시·라이선스 변경을 일반 구현 작업에 포함하지 않는다.
 
 ## 1. 구조
 
@@ -112,15 +113,15 @@ terminal 공통 body는 `{operationId:"UUID",expectedSessionGeneration:<정수>,
 
 `GET /api/operations/:operationId` → `{operationId,kind,projectId,memberId,createdAt,updatedAt,status,...}`. status는 `pending|applied|refused|unknown`; applied만 허용된 `result`, refused/unknown은 `code,error`를 가진다. fresh result는 `{member,sessionGeneration}`, terminal result는 `{memberId,action,claimId,sessionGeneration,inputSequence?,leaseId?,expiresAt?}`(expiresAt은 Unix ms)다. 없는 작업 404, 잘못된 UUID 400, 미지원 501. 인증·소속을 항상 검사하며 임의 요청 body나 MCP 토큰을 반환하지 않는다. 같은 operation ID/요청의 receipt를 세대 재검사보다 먼저 돌려주되 다른 body/대상 재사용은 409다. `unknown`은 실패로 추정해 재입력하지 않는다. fresh/terminal의 실행·세대/lease 거부는 HTTP 200 receipt의 `status:"refused"`로도 반환하므로 HTTP 성공만으로 적용됐다고 보지 않는다. CAS 경로의 오래된 revision은 HTTP 409다.
 
-v1은 기존 Settings/Member/Todo 객체 자체, 무본문 fresh, terminal `{leaseId?,expiresAt?}`, 선택적 결재 버전과 `Message.delivery`의 `queued|held|delivering|delivered|failed`를 유지한다. 따라서 버전 없는 v1 설정·결재·fresh·terminal은 v2와 같은 충돌/재생 보호를 보장하지 않는다. 웹 폐기 후 v1 제거와 기기별 인증 철회는 별도 작업이다. APNs 기기 해지는 API 접속 권한 회수가 아니다.
+v1은 기존 Settings/Member/Todo 객체 자체, 무본문 fresh, terminal `{leaseId?,expiresAt?}`, 선택적 결재 버전과 `Message.delivery`의 `queued|held|delivering|delivered|failed`를 유지한다. 따라서 버전 없는 v1 설정·결재·fresh·terminal은 v2와 같은 충돌/재생 보호를 보장하지 않는다. 레거시 웹이 사용하는 v1 경로는 남아 있으며 기기별 API 인증 철회는 제공하지 않는다. APNs 기기 해지는 API 접속 권한 회수가 아니다.
 
 ### 3.4 대화 페이지와 보관 읽기
 
 - `GET /api/projects/:id/messages/page` → `{projectId,scope,items,nextCursor,hasOlder}`. 허용 query는 `scope,memberId,limit,cursor` 네 개뿐이고 중복도 400이다. limit 기본 200, 명시 십진 정수 1…500; 앱 최초 200/이전 100. cursor는 불투명 base64url이며 클라이언트가 만들거나 해석하지 않는다.
 - scope 생략/project는 전체, member는 memberId 필수다. 현재 root/conductor ID는 project로 정규화하고 다른 직원은 `memberId == id OR targetMemberId == id`를 해당 프로젝트 안에서 조회한다. project+memberId는 400. 삭제된 담당자도 과거 ID 범위로 조회할 수 있다.
 - `(at COLLATE BINARY,id COLLATE BINARY)` keyset의 오름차순 items, exclusive 이전 커서다. 잘못된 query는 `INVALID_MESSAGE_PAGE_QUERY`, cursor는 `INVALID_MESSAGE_CURSOR`(400), 별칭 정규화 변경은 `MESSAGE_SCOPE_CHANGED`(409). 빈 페이지/마지막은 `hasOlder:false,nextCursor:null`이다. 없는/보관 프로젝트는 일반 page/state에서 404다.
-- 기존 `/messages?before=<at>&limit=`의 Message[]·시각/rowid 정렬과 `/state.messages` 최근 200개는 유지한다. `/messages?around=<messageId>&limit=41`은 기존 Message[] 모양의 주변 조회(최대 100)다. around와 before 병용은 400, 다른 프로젝트/없는 anchor는 404다. `GET /api/messages/:id`는 저장된 Message 전체를 반환하고 없는 원본은 404다. **현재 구현 차이:** 이 단건 경로는 프로젝트 보관 검사가 없어 보관 원본도 읽힌다. PLAN의 단건 보관 404 계약과 달라 HTTP 소유자의 후속 수정·회귀가 필요하다. 기존 `/messages` 목록/around의 보관 읽기 호환과 혼동하지 않는다.
-- `GET /api/projects/archived` → Project[]. `GET /api/projects/:id/archive/state` → archived Project를 포함한 ProjectState, `GET /api/projects/:id/archive/messages/page` → 같은 MessagePage다. archive 경로는 없는/활성 프로젝트에서 404이며 page query·정렬도 위와 같다. GET은 CLI를 깨우지 않는다.
+- 기존 `/messages?before=<at>&limit=`의 Message[]·시각/rowid 정렬과 `/state.messages` 최근 200개는 유지한다. `/messages?around=<messageId>&limit=41`은 기존 Message[] 모양의 주변 조회(최대 100)다. around와 before 병용은 400, 다른 프로젝트/없는 anchor는 404다. `GET /api/messages/:id`는 저장된 Message 전체를 반환하며 없는 원본이나 보관 프로젝트의 메시지는 404다. 일반 `/messages` 목록·around도 보관 프로젝트에는 404를 반환한다.
+- `GET /api/projects/archived` → Project[]. `GET /api/projects/:id/archive/state` → archived Project를 포함한 ProjectState, `GET /api/projects/:id/archive/messages/page` → 같은 MessagePage다. `GET /api/projects/:id/archive/messages`는 기존 Message[] 모양의 목록·before·around 조회이고, `GET /api/projects/:id/archive/messages/:message`는 해당 보관 프로젝트의 Message 단건 조회다. archive 경로는 없는/활성 프로젝트에서 404이며 다른 프로젝트의 단건·around 대상도 404다. page query·정렬은 위와 같고 GET은 CLI를 깨우지 않는다.
 - 보관함에서는 대화·결재·업무·자료를 **읽기 전용 UI**로 연다. 보내기·답·체크·직원 조작은 없고 이름 변경/꺼내기는 별도 관리 액션이다. 늦은 manual 보고·자료 및 v1 todo 호환 때문에 DB 불변 snapshot은 아니다.
 - 이름만 변경하면 ID·초안·세션·이력은 유지한다. 보관은 Orchestrator의 단일 PATCH 진입점에서 전원 사전 검사→안전 stop→실제 종료 확인→저장 순서다. resume 가능한 native ID/기록을 확인하며 Codex ID 미확인은 기존 표식으로 탐색한 뒤에도 불명이면 409로 보류한다. HQ 보관은 400, 삭제 API는 없다. 일부 종료 실패면 프로젝트 PATCH는 미반영하고 이미 종료한 직원은 asleep으로 남기며 나머지는 참조·journal을 보존한다. manual 프로세스는 종료하지 않는다.
 
@@ -174,7 +175,7 @@ history는 snapshot과 별도 캐시다. ID 중복 제거·진행 중 이벤트/
 
 푸시 라우트는 strict JSON 8KiB, query 불허, 토큰 hex 2…1024자(짝수)이며 32바이트로 고정하지 않는다. 등록 lease는 30일, 해지 tombstone은 90일이다. revision·token generation으로 늦은 410이 새 토큰을 무효화하지 않게 한다. 끄기/해지는 미발신을 취소하며 이미 Apple로 나간 알림은 회수할 수 없다.
 
-HTTP/2 TLS·ES256 JWT(20분 최소 갱신 간격/50분 갱신/60분 만료)를 사용하며 HTTP/1 fallback이나 환경 자동 전환은 없다. APNs 200은 Apple 접수다. 배너·읽음·exactly-once를 보장하지 않고, write 뒤 timeout/수락 불명은 unknown으로 두어 자동 재발신하지 않는다. payload는 고정 문구·불투명 ID만 포함하며 본문·프로젝트명·경로·접속 코드·키·토큰을 싣지 않는다. foreground 수신은 갱신만 하고 배너/소리/강제 탐색은 없다. 탭은 최신 target·호스트 serverId·소속을 확인한 뒤 이동하며 자동 답·승인·claim/input을 하지 않는다. 호스트 자체 사망의 외부 감시는 별도 과제다.
+HTTP/2 TLS·ES256 JWT(20분 최소 갱신 간격/50분 갱신/60분 만료)를 사용하며 HTTP/1 fallback이나 환경 자동 전환은 없다. APNs 200은 Apple 접수다. 배너·읽음·exactly-once를 보장하지 않고, write 뒤 timeout/수락 불명은 unknown으로 두어 자동 재발신하지 않는다. payload는 고정 문구·불투명 ID만 포함하며 본문·프로젝트명·경로·접속 코드·키·토큰을 싣지 않는다. foreground 수신은 갱신만 하고 배너/소리/강제 탐색은 없다. 탭은 최신 target·호스트 serverId·소속을 확인한 뒤 이동하며 자동 답·승인·claim/input을 하지 않는다. 호스트가 꺼지면 스스로 푸시를 보낼 수 없으며 외부에서 호스트 장애를 감시하는 기능은 제공하지 않는다.
 
 ### 3.7 core 문맥과 압축
 
@@ -182,7 +183,7 @@ Claude statusline·공통 measureContext와 Codex rollout parser를 재사용한
 
 자동 압축은 **fresh exact + 기준 이상 + 실제 wake 큐 + 다음 업무 전**에만 한 번 판단한다. lease·초안·승인·working·미확인 입력을 우회하지 않고 압축을 위해 CLI를 새로 띄우지 않는다. manual POST compact는 기존 200 Member를 유지하며 식별 가능한 세션에서 예약할 수 있다. `contextState.compaction.phase`의 queued/sending/running/succeeded/failed/uncertain으로 접수와 완료를 구별한다.
 
-Claude는 `/compact <focus>`, Codex는 인자 없는 `/compact`이며 nonce·delivery marker·병렬 prefix를 붙이지 않는다. sending/baseline을 DB에 먼저 저장하고 idle 조건에서 한 번 보낸다. generation 1에서 done 조건을 안전하게 지정할 수 없으면 압축 전송을 보류한다. ACK만으로 성공이 아니며 baseline 뒤 Claude compact_boundary/Codex compacted 기록과 같은 소유 CLI의 settled 복귀·오류 부재가 있어야 완료다. CLI 자체 압축도 중복 방지에 반영한다. timeout/재시작 중 sending/running은 uncertain으로 관측을 재개하고 재송신·후속 자동 입력을 막는다. claim/release만으로 해소하지 않는다. 실제 제공자 버전의 기록·완료 의미는 W11-A 인수 대상이다.
+Claude는 `/compact <focus>`, Codex는 인자 없는 `/compact`이며 nonce·delivery marker·병렬 prefix를 붙이지 않는다. sending/baseline을 DB에 먼저 저장하고 idle 조건에서 한 번 보낸다. generation 1에서 done 조건을 안전하게 지정할 수 없으면 압축 전송을 보류한다. ACK만으로 성공이 아니며 baseline 뒤 Claude compact_boundary/Codex compacted 기록과 같은 소유 CLI의 settled 복귀·오류 부재가 있어야 완료다. CLI 자체 압축도 중복 방지에 반영한다. timeout/재시작 중 sending/running은 uncertain으로 관측을 재개하고 재송신·후속 자동 입력을 막는다. claim/release만으로 해소하지 않는다. 압축 기록과 완료 판정은 사용하는 실제 CLI 버전에서도 별도 인수 시험으로 확인한다.
 
 ## 4. 전달 글 형식 (서버만 만든다)
 입력 첫 줄의 접두어가 출처다. 사용자가 친 글은 항상 이 접두어 뒤 따옴표 안에 들어가므로 위장할 수 없다. 서버가 글을 넣기 전에 제어문자·제로폭·양방향 문자를 지우고(CR·U+2028 은 줄바꿈으로), 정규화(NFKC)한 줄 머리가 목록·강조·다른 괄호를 씌워도 접두어처럼 보이면 `> `를 붙인다. 직원·총괄이 쓴 여러 줄 본문은 목록으로 막는 대신 줄마다 `> `를 붙인다(직원 보고 본문, `할 일:` 둘째 줄부터). 직원이 쓴 제목·버튼 글·설명은 한 줄로 받고(`ask` 검증) 따옴표를 이스케이프한다. 직원 이름·역할도 한 줄이고 `[ ] " ' \` < >`를 쓸 수 없으며, 직원 이름은 `대표`로 시작하거나 `총괄`·`본사 AI`·`시스템`·`보고`·`서버`일 수 없고 핸들은 `lead`·`root`일 수 없다(store 검증). 첨부 이름은 저장할 때 제어문자·줄바꿈·`[ ] ' \``를 지운다. CLI에 넣기 직전(core terminal.send)에 모든 글을 한 번 더 같은 규칙으로 지운다. 압축 focus·지금 일·다음은 한 줄이다.
@@ -253,23 +254,23 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 판 정리(공통, 직원은 자기가 올린 결재·할 일만): `ask_close{id,kind:'decided'|'obsolete',reason,user_quote?,follow_up?}` (`follow_up:{kind:"none"}|{kind:"instruction",member_id,text,source_message_id}`로 닫기와 명시 후속을 함께 저장)(decided 는 user_quote 필수, 대표 글로 확인되어야 닫힌다) · `todo_close{id,outcome:'done'|'dropped',reason}`. `board` 는 열린 결재(id·제목·물은 직원·올린 날짜·묶음)·안 끝난 할 일(id·제목·부탁한 사람·날짜)·진행판(id·칸·제목·갱신 날짜, 완료는 최근 10)·지금 상황·지난 판 정리 시각. 도구 설명에 '대신 답하지 않는다(추측으로 닫지 않는다, 애매하면 둔다)'를 쓴다.
 직접 띄운 CLI 추가: `wait{timeout_sec?,batch?:true,ack_batch_id?}` — 밀린 지시 받기. 엄격 경로는 `POST /agent/inbox/wait` `{timeoutMs?}`로 `{id,memberId,items,createdAt}`를 재조회하고 `POST /agent/inbox/ack` `{batchId}` → `{batchId,acknowledged:true}`로 소비한다. 응답만 반환했다고 delivered로 확정하지 않는다. 브리지가 호출 전에 만든 `operationId`를 `/agent/tool`의 `{name,args,operationId}`에 보내며 같은 ID의 재요청만 합친다. 같은 본문의 새 ID는 독립 호출이다. manual 답 수신은 화면의 최근 50건 제한을 사용하지 않고 askWait와 소비 상태를 공유한다. 브리지는 wait에 batch=true를 붙이고 `ack_batch_id`로 명시 ACK한다. 보고 `post{report_id}`는 새 게시 없이 원본·전체 자료·결재·작성 순서·정정 관계를 조회한다.
 `member` 인자는 핸들 또는 화면 이름.
-**파일 경로(`file`의 path·images, `ask`의 images)**: 심볼릭 링크를 따라간 경로가 작업 폴더(직원·프로젝트) 안이어야 하고, `~/.ssh` 등 비밀 폴더·`.env`·개인 키·셸 기록·`~/.claude.json`·`~/.iamceo`의 설정·토큰·DB·첨부는 어디서든 거부한다. 작업 폴더가 홈이면(본사) 홈 바로 아래의 점 파일·점 폴더를 모두 거부한다. 하드 링크(nlink>1)도 거부한다. 검사한 진짜 경로로 읽는다. 같은 OS 사용자로 도는 세션의 Bash 까지 막는 것은 아니다(미해결, 설계 결정 필요).
+**파일 경로(`file`의 path·images, `ask`의 images)**: 심볼릭 링크를 따라간 경로가 작업 폴더(직원·프로젝트) 안이어야 하고, `~/.ssh` 등 비밀 폴더·`.env`·개인 키·셸 기록·`~/.claude.json`·`~/.iamceo`의 설정·토큰·DB·첨부는 어디서든 거부한다. 작업 폴더가 홈이면(본사) 홈 바로 아래의 점 파일·점 폴더를 모두 거부한다. 하드 링크(nlink>1)도 거부한다. 검사한 진짜 경로로 읽는다. 같은 OS 사용자로 도는 세션의 Bash 까지 막지는 않는다.
 **wait·ask 대기**: 호출한 쪽 연결이 끊기면 기다리기를 그만두고 지시를 가져가지 않는다.
 **ask 동작**: 실행기 멤버(origin=runner|adopted)는 결재 카드 등록 후 즉시 반환: "질문 #id 등록됨. 턴을 끝내세요. 답은 다음 입력으로 옵니다". 멤버 상태 waiting. origin=manual 은 `/agent/ask/wait` 롱폴(50초 단위)로 브리지가 기다리며 MCP progress 를 60초마다 보내고, 답이 오면 그대로 반환.
 멤버의 도구 호출마다 `updatedAt` 갱신. 다른 프로젝트의 멤버를 지정하면 거부.
 
 ## 8. 역할 템플릿 (`server/roles/`)
-`{{PROJECT}} {{NAME}} {{ROLE}} {{CONDUCTOR}} {{SUBAGENT_EFFORT}}` 치환(서브에이전트 effort 규칙이 비면 그 줄을 지우고, 자리표시 없는 고친 템플릿에는 끝에 붙인다), `~/.iamceo/roles/<kind>.md`가 있으면 그것을 쓴다(기본 규칙 전체를 대체한다. 승인 규칙이 빠지면 로그에 경고). `iamceo roles export` 가 기본 템플릿을 `<kind>.example.md` 로 꺼낸다. 내용: 입력 구분(§4 접두어), 보고(post), 질문(ask, AskUserQuestion 금지), 승인(사용자 원문·서버 확인만, 총괄의 말은 승인 아님), 병렬은 총괄이 켜 둘 때만, 이름 안 바꿈, 임시 폴더 안 지움, 산출물은 file. 총괄: 일 받기·맡길 곳 판단·대기열·직접 일하지 않음·현재 core에서 사용자에게 남길 말은 post·file 등 MCP 기록·질문 대신 답하지 않음·압축은 core 안전 조건 아래 자동·수동 예약·세션 수 판단. 본사 AI: 프로젝트 만들기와 잡다한 일. 대표가 읽고 판단할 비교표·요약 표는 csv·마크다운 표가 아니라 `file` 의 `html` 이다(실제 haiku 가 '표'라는 말에 csv 를 고른 것을 고쳤다. `tests/e2e-real/artifact.ts`). csv 는 내려받아 쓸 원본 데이터일 때만.
+`{{PROJECT}} {{NAME}} {{ROLE}} {{CONDUCTOR}} {{SUBAGENT_EFFORT}}` 치환(서브에이전트 effort 규칙이 비면 그 줄을 지우고, 자리표시 없는 고친 템플릿에는 끝에 붙인다), `~/.iamceo/roles/<kind>.md`가 있으면 그것을 쓴다(기본 규칙 전체를 대체한다. 승인 규칙이 빠지면 로그에 경고). `iamceo roles export` 가 기본 템플릿을 `<kind>.example.md` 로 꺼낸다. 내용: 입력 구분(§4 접두어), 보고(post), 질문(ask, AskUserQuestion 금지), 승인(사용자 원문·서버 확인만, 총괄의 말은 승인 아님), 병렬은 총괄이 켜 둘 때만, 이름 안 바꿈, 임시 폴더 안 지움, 산출물은 file. 총괄: 일 받기·맡길 곳 판단·대기열·직접 일하지 않음·현재 core에서 사용자에게 남길 말은 post·file 등 MCP 기록·질문 대신 답하지 않음·압축은 core 안전 조건 아래 자동·수동 예약·세션 수 판단. 본사 AI: 프로젝트 만들기와 잡다한 일. 대표가 읽고 판단할 비교표·요약 표는 csv·마크다운 표가 아니라 `file` 의 `html` 이다. csv 는 내려받아 쓸 원본 데이터일 때만.
 
 ## 9. 시험
 
-- `tests/core-runner.test.ts`: 임시 Unix socket fake core. hello·RPC 오류/timeout·재결합·소유권·초안 보호·불확실 전달·OSC turn·수동 lease·제공자 인자·설정 교체를 검증한다. 실제 paid model을 호출하지 않는다.
-- `tests/server-runtime.test.ts`: production core 기본값, 독립 제공자, 안전한 세션 교체·토큰 회전·이력·재시작 보류·DB 백업·REST 계약을 검증한다.
+- `tests/core-runner.test.ts`: 임시 Unix socket fake core. hello·RPC 오류/timeout·재결합·소유권·초안 보호·불확실 전달·OSC turn·수동 lease·제공자 인자·설정 교체를 검증한다. 실제 유료 모델을 호출하지 않는다.
+- `tests/server-runtime.test.ts`: 현재 소스의 core 기본값, 독립 제공자, 안전한 세션 교체·토큰 회전·이력·재시작 보류·DB 백업·REST 계약을 검증한다.
 - `tests/cli.test.ts`, `tests/web-runtime.test.ts`: 격리 CLI 서버·웹 runtime 계약. unavailable socket의 동시 진단도 서버를 죽이지 않아야 한다.
-- `native/Tests/IAMCEOTests`: Swift 계약 디코딩·요청 인증·origin 제한·네트워크 오류·stable message id·expectedVersion을 URLSession mock으로 검증한다. SwiftPM 시험·macOS 빌드·iOS simulator 빌드는 별도 검증이며 physical device 설치·서명·공증은 별도 작업이다.
+- `native/Tests/IAMCEOTests`: Swift 계약 디코딩·요청 인증·origin 제한·네트워크 오류·stable message id·expectedVersion을 URLSession mock으로 검증한다. SwiftPM 시험·macOS 빌드·iOS simulator 빌드는 별도 검증이며 실기기 설치·서명·공증은 별도로 확인한다.
 - 실제 PTY 시작·daemon 재시작 검증은 임시 IAMCEO_HOME·HC_SESSION·HC_SOCKET·XDG 경로에서만 한다. 사용자 원래 daemon·터미널을 끄거나 전역 CLI를 업데이트하지 않는다. CLI 시작만 검증하는 시험에 자동 유료 prompt를 넣지 않는다.
 - 기존 `tests/fixtures/fake-claude.ts`, herdr fixture, headless·adopt 브라우저 시험은 과거 어댑터의 회귀 시험이다. 현재 core UX·수명·상태 계약의 근거로 사용하지 않는다.
-- 기존 `tests/e2e-real/*`는 명시적으로 승인된 paid-model 작업에서만 실행한다. 일반 unit/integration/typecheck에 포함해 유료 작업을 유발하지 않는다.
+- 기존 `tests/e2e-real/*`는 명시적으로 승인된 유료 모델 시험에서만 실행한다. 일반 unit/integration/typecheck에 포함해 유료 작업을 유발하지 않는다.
 
 ## 10. 클라이언트와 검증 경계
 
@@ -283,4 +284,14 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 - macOS 로컬 시작은 명시적 선택에만 실행하며 다른 서비스·포트·인증 오류를 덮어쓰지 않는다. 빌드는 서비스 등록·실행·라이브 전환이 아니다. macOS는 로컬 서비스용 App Sandbox 비활성, iOS는 플랫폼 sandbox다.
 - 웹 아티팩트는 §3.2의 수동 실행 sandbox다. 네이티브는 비영속 WKWebView에서 JavaScript·외부 요청을 막은 미리보기로 기능이 다르다. Liquid Glass는 지원 OS에서 쓰고 이전 OS는 material fallback이다.
 
-격리 자동 시험의 통과, 실제 CLI 의미 검증, Mac/iPhone 화면·스크롤 2pt·접근성, APNs 실기기 sandbox/production, Tailscale·잠금·24시간 병렬 인수는 각각 다른 증거다. 명령과 W10-D 검증 기록은 [운영 모델](operating-model.md), 서명·앱 빌드는 [native README](../native/README.md)를 본다. 과거 handoff의 날짜·통과 수를 새 검증으로 재사용하지 않는다.
+격리 자동 시험의 통과, 실제 CLI 의미 검증, Mac/iPhone 화면·스크롤 위치·접근성, APNs 실기기 sandbox/production, Tailscale·잠금·24시간 병렬 인수는 각각 다른 증거다. 격리 시험 명령과 운영 절차는 [운영 모델](operating-model.md), 서명·앱 빌드는 [native README](../native/README.md)를 본다.
+
+## 11. 백업·복원과 접속 코드
+
+- `iamceo backup --directory <경로>`는 지정한 `IAMCEO_HOME`의 DB·참조 첨부·설정을 검증해 백업한다. 홈 잠금이 필요하므로 수동 백업과 해당 홈의 데몬 실행은 동시에 할 수 없다. 실행 중 데몬은 자체 정기 백업을 쓴다.
+- `iamceo restore <snapshot> --destination <별도 빈 홈> [--clone]`은 원본을 덮지 않고 새 홈에 복원한다. 결과는 `reconciliationRequired:true,outboundEnabled:false`이며 서버 기동을 실행기·HTTP·APNs 준비 전에 차단한다. 미종결 작업과 직접 조작권·전달 증거는 보존하고 프로젝트 실행·기기 알림은 끈다.
+- 서버가 꺼진 복원 홈을 `IAMCEO_HOME`으로 지정해 `iamceo restore reconcile`을 실행하면 기존 전달·푸시를 격리한 채 조정 완료를 기록한다. 실제 외부 효과를 확인한 뒤 `iamceo restore resume`으로 발신을 허용한다. 이 명령은 서버를 시작하거나 기존 보류 전달·푸시를 일괄 재전송하지 않는다. 복원 전 실행이 켜져 있던 활성 프로젝트를 다시 허용하므로 실제 기동은 별도 운영 전환 절차를 따른다.
+- `POST /api/auth/rotate`는 사용자 Bearer와 실제 loopback 연결을 요구하며 빈 본문 또는 `{}`만 받는다. 저장 성공 뒤 `{accessCode,version}`을 반환하고 이전 인증·첨부 인증·열린 WS·사용하지 않은 연결 QR을 무효화한다. 저장 전 실패는 `AUTH_ROTATION_SAVE_FAILED`, 파일 교체 뒤 디스크 동기화 확인 실패는 `AUTH_ROTATION_OUTCOME_UNKNOWN`이다. 응답 유실 때 반복 교체하지 않고 같은 Mac·같은 홈에서 `iamceo open`으로 확인한다.
+- `GET /api/health`는 생존 확인이다. 인증된 `GET /api/readiness`는 `{ok,version,daemon,schema,core,hosts}`를 반환하며 데몬 준비와 지원 DB 버전이 맞으면 200, 아니면 503이다. core 연결·제공자 로그인·실제 업무 가능 여부까지 `ok`로 보장하지는 않는다.
+
+명령 예시와 복원 후 확인 절차는 [운영 모델](operating-model.md#백업복원)을 따른다.

@@ -303,3 +303,6 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 폴더 생성은 mode 0755로 만들고 lstat·부모/자식 realpath를 재검사한다. 실패 시 새 항목만 rmdir하며 재귀 정리하지 않는다. 폴더 열거는 숨긴 항목·파일까지 최대 2000개를 읽어 정렬하고 응답은 500개까지만 반환한다. 열거/응답 한도에 도달하면 truncated=true다. 앱 행 ID는 이름과 목록 순번으로 만든다.
 
 clone은 `<IAMCEO_HOME>/clone-staging/<jobId>`(0700)에서 수행한다. 대상 부모를 다시 검사하고 이름이 없을 때만 rename한다. EXDEV면 대상 부모 아래 `.iamceo-clone-<jobId>`(0700)에서 다시 받은 후 rename하며 다시 EXDEV면 안내하고 실패한다. 사용자 대상 경로는 실패 정리하지 않는다. 정리는 소유 identity·lstat·realpath를 확인한 임시 폴더에만 적용하며 quarantine 이동 뒤 identity를 재확인한다. 시작 여유 공간은 5 GiB 이상이어야 하며, 실행 중 2초마다 및 게시 전에 크기를 확인해 2 GiB 초과 시 프로세스 그룹을 중단한다. 오류는 `저장소가 너무 큽니다(2GB 초과)`다. 전체 이력을 받으며 서브모듈 재귀는 하지 않는다. 상속 환경의 Git 제어·추적 변수를 제거하고 `-c protocol.file.allow=never -c core.hooksPath=/dev/null`을 사용한다. 완료/실패 기록만 최대 50개·1시간 보관하며 만료 ID는 404다.
+
+### 알려진 한계: 폴더·GitHub 가져오기의 경로 경쟁 (2026-11-07 결정)
+폴더 만들기와 clone 게시는 경로를 realpath·lstat 로 앞뒤 검사한다. 하지만 검사와 mkdir/rename/정리 사이의 짧은 경쟁(TOCTOU)은 Bun/Node 파일 API 로 완전히 닫을 수 없다(openat·RENAME_NOREPLACE 류가 없음). 이 경쟁을 이용하려면 서버 사용자의 홈 폴더를 이미 바꿀 수 있어야 하고, 그 권한이면 이 기능 없이도 같은 일을 할 수 있다. 그래서 위험을 받아들인다. 접속 코드만 가진 원격 요청(홈 밖 경로, `..`, 심볼릭 링크, 옵션·명령 주입, 다른 호스트)은 막는다. 근거: .pumasi/specs/review-11-findings.md.

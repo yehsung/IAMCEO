@@ -69,7 +69,7 @@ export type AskWaitResult = { done: false } | { done: true; text: string; decisi
 export interface OrchestratorApi {
   /** Store 로 프로젝트를 만들고 goal·startConductor 를 처리한다. */
   createProject(req: CreateProjectReq): Promise<Project>;
-  /** W9의 실제 HTTP 전환 때 required로 바꾼다. 현재 hook 경로는 유지한다. */
+  /** 프로젝트 변경 단일 진입점. W9 HTTP 전환 전 fake/v1 hook은 호환한다. */
   patchProject?(projectId: string, patch: PatchProjectReq): Promise<Project>;
   createMember?(projectId: string, req: CreateMemberReq): Promise<Member>;
   runtimeInfo?(): Promise<RuntimeInfo>;

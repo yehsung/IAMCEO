@@ -54,7 +54,9 @@ class Fake {
     if (e) throw e;
     this.stopped.push(m.id);
   }
-  async checkStop(m: RunnerMember) {
+  checks: { id: string; whileWorking?: boolean }[] = [];
+  async checkStop(m: RunnerMember, opts?: { whileWorking?: boolean }) {
+    this.checks.push({ id: m.id, whileWorking: opts?.whileWorking });
     const e = this.checkErrors.get(m.id);
     if (e) throw e;
   }
@@ -104,7 +106,7 @@ async function setup(opts: { timings?: Partial<OrchestratorTimings>; runnerEnabl
     fetch(`${base}${path}`, { method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
   const manual = async (name = "직접") => (await (await api("POST", "/agent/join", { project: project.id, name })).json()) as { member: Member; token: string };
   const tool = async (token: string, name: string, args: unknown) => (await (await api("POST", "/agent/tool", { name, args }, token)).json()) as { text: string; isError?: boolean };
-  return { store, orch, runner, project, api, manual, tool };
+  return { store, orch, runner, project, api, manual, tool, config, runners, herdr };
 }
 
 const until = async (cond: () => boolean, label: string, ms = 3000) => {
@@ -187,7 +189,7 @@ describe("보관", () => {
     expect(delivery.attempts).toBe(1);
     expect(t.orch.deliveryRecovery.fenced(lead.id)).toBe(true);
     expect((await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: true })).status).toBe(200);
-    expect(t.store.listPending(lead.id).find((d) => d.refId === message.id)).toMatchObject({ status: "held", holdReason: "archived" });
+    expect(t.store.listPending(lead.id).find((d) => d.refId === message.id)).toMatchObject({ status: "held", holdReason: "delivery_unknown" });
     t.runner.sendResult = { ok: true };
     await Bun.sleep(50);
     expect(t.runner.sent.some((s) => s.text.includes("옛 지시"))).toBe(false);
@@ -304,6 +306,112 @@ describe("보관", () => {
       expect(t.store.requireProject(t.project.id).archived).toBe(true);
       expect(t.store.requireMember(a.id).status).toBe("asleep");
     });
+  });
+});
+
+describe("단일 프로젝트 변경 장벽", () => {
+  const managed = (t: Awaited<ReturnType<typeof setup>>, handle: string) => t.store.createMember({
+    projectId: t.project.id, handle, name: handle, role: "개발", kind: "worker", origin: "runner", status: "idle", sessionId: `session-${handle}`, paneId: `pane-${handle}`,
+  });
+
+  test("전체 patch/HQ 검증이 종료보다 먼저이며 같은 값은 부작용이 없다", async () => {
+    const t = await setup(); managed(t, "worker");
+    for (const patch of [{ name: "  ", archived: true }, { archived: true, runnerEnabled: true }]) {
+      await expect(t.orch.patchProject(t.project.id, patch)).rejects.toMatchObject({ status: 400 });
+    }
+    await t.orch.patchProject(t.project.id, { name: t.project.name });
+    await expect(t.orch.patchProject("hq", { archived: true })).rejects.toMatchObject({ status: 400 });
+    expect(t.runner.stopped).toHaveLength(0); expect(t.runner.checks).toHaveLength(0);
+  });
+
+  test("runner 직원도 전원 사전 검사하고, 마지막 검사에서 거부하면 한 명도 종료하지 않는다", async () => {
+    const t = await setup(); const a = managed(t, "first"), b = managed(t, "second");
+    t.runner.checkErrors.set(b.id, new HerdrError("cannot_exit", "초안 보존"));
+    await expect(t.orch.patchProject(t.project.id, { archived: true, name: "새 이름" })).rejects.toMatchObject({ status: 409 });
+    await until(() => t.runner.checks.length === 2, "전원 검사");
+    expect(t.runner.stopped).toHaveLength(0);
+    expect(t.store.requireProject(t.project.id)).toMatchObject({ archived: false, name: "시험" });
+    t.runner.checkErrors.clear(); t.runner.checks = [];
+    const check = t.runner.checkStop.bind(t.runner);
+    t.runner.checkStop = async (member, opts) => {
+      await check(member, opts);
+      if (member.id === a.id && t.runner.checks.filter(c => c.id === a.id).length === 2) throw new HerdrError("cannot_exit", "검사 뒤 초안 변경");
+    };
+    await expect(t.orch.patchProject(t.project.id, { archived: true })).rejects.toMatchObject({ status: 409 });
+    await until(() => t.runner.checks.length === 3, "종료 직전 검사");
+    expect(t.runner.checks.every(c => c.whileWorking === false)).toBe(true);
+    expect(t.runner.stopped).toHaveLength(0);
+  });
+
+  test("장벽 중 중복 patch/새 업무/생성/재개/설정/수신은 효과 없이 거부하고 manual은 종료하지 않는다", async () => {
+    const t = await setup(); const a = managed(t, "worker");
+    const manual = await t.manual();
+    t.store.patchMember(manual.member.id, { status: "idle" });
+    const delivery = t.store.enqueue({ projectId: t.project.id, memberId: manual.member.id, kind: "instruction", text: "manual 대기" });
+    t.runner.stopDelayMs = 80;
+    const changing = t.orch.patchProject(t.project.id, { archived: true });
+    await until(() => t.runner.checks.length >= 2, "장벽");
+    await expect(t.orch.patchProject(t.project.id, { name: "경합" })).rejects.toMatchObject({ status: 409 });
+    await expect(t.orch.sendUserMessage(t.project.id, { text: "경합", targetMemberId: a.id })).rejects.toMatchObject({ status: 409 });
+    await expect(t.orch.resumeMember(a.id)).rejects.toMatchObject({ status: 409 });
+    await expect(t.orch.addMember(t.project.id, { name: "추가" })).rejects.toMatchObject({ status: 409 });
+    await expect(t.orch.patchMemberConfig(a.id, { modelOverride: "other" })).rejects.toMatchObject({ status: 409 });
+    expect(await t.orch.manualInbox(manual.member.id, 0)).toBeNull();
+    await t.orch.pump(a.id);
+    const archived = await changing;
+    expect(archived.archived).toBe(true); expect(t.runner.starts).toHaveLength(0);
+    expect(t.runner.stopped).toEqual([a.id]);
+    expect(t.store.requireDelivery(delivery.id).status).toBe("held");
+  });
+
+  test("진행 중 start는 pane 저장 전에도 보관을 거절한다", async () => {
+    const t = await setup(); const original = t.runner.start.bind(t.runner);
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    t.runner.start = async member => { await gate; return original(member); };
+    const spawning = t.orch.ensureConductor(t.project.id);
+    await until(() => t.store.getConductor(t.project.id) !== null, "생성 의도");
+    await expect(t.orch.patchProject(t.project.id, { archived: true })).rejects.toMatchObject({ status: 409 });
+    expect(t.store.requireProject(t.project.id).archived).toBe(false);
+    finish(); await spawning;
+  });
+
+  test("종료 뒤 DB commit이 실패해도 장벽을 풀고 종료한 큐를 asleep으로 남긴다", async () => {
+    const t = await setup(); const member = managed(t, "worker");
+    const delivery = t.store.enqueue({ projectId: t.project.id, memberId: member.id, kind: "instruction", text: "보존" });
+    const patch = t.store.patchProject.bind(t.store);
+    t.store.patchProject = () => { throw new Error("injected DB write failure"); };
+    await expect(t.orch.patchProject(t.project.id, { archived: true })).rejects.toThrow("DB write failure");
+    t.store.patchProject = patch;
+    expect(t.store.requireProject(t.project.id).archived).toBe(false);
+    expect(t.store.requireDelivery(delivery.id)).toMatchObject({ status: "held", holdReason: "asleep" });
+    await t.orch.patchProject(t.project.id, { name: "복구" });
+    expect(t.store.requireProject(t.project.id).name).toBe("복구");
+    expect(t.runner.starts).toHaveLength(0);
+  });
+
+  test("부분 종료 불명은 journal로 복구하고 PATCH 필드/세션과 기존 asleep 보류를 보존한다", async () => {
+    const t = await setup({ timings: { tickMs: 60_000, healthMs: 60_000 } });
+    const a = managed(t, "first"), b = managed(t, "second");
+    const first = t.store.enqueue({ projectId: t.project.id, memberId: a.id, kind: "instruction", text: "대기" });
+    t.runner.stopErrors.set(b.id, new Error("종료 ACK 유실"));
+    await expect(t.orch.patchProject(t.project.id, { archived: true, name: "반영 금지" })).rejects.toMatchObject({ status: 503 });
+    expect(t.store.requireProject(t.project.id)).toMatchObject({ archived: false, name: "시험" });
+    expect(t.store.requireMember(a.id)).toMatchObject({ status: "asleep", paneId: null, sessionId: a.sessionId });
+    expect(t.store.requireDelivery(first.id)).toMatchObject({ status: "held", holdReason: "asleep" });
+    expect(t.store.requireMember(b.id)).toMatchObject({ paneId: b.paneId, sessionId: b.sessionId });
+    expect(t.store.listPendingLifecycleJournals()).toEqual([expect.objectContaining({ memberId: b.id, intent: "archive", phase: "unknown" })]);
+    await t.orch.shutdown(); t.runner.stopErrors.clear();
+    const restarted = new Orchestrator({ config: t.config, store: t.store, runners: t.runners, herdr: t.herdr as never, timings: { tickMs: 60_000, healthMs: 60_000 } });
+    closers.push(() => restarted.shutdown()); await restarted.recover();
+    expect(t.store.requireMember(b.id)).toMatchObject({ status: "asleep", paneId: null, sessionId: b.sessionId });
+    expect(t.store.listPendingLifecycleJournals()).toHaveLength(0);
+    expect(t.store.requireProject(t.project.id).archived).toBe(false);
+    expect(t.runner.starts).toHaveLength(0);
+    await restarted.patchProject(t.project.id, { archived: true });
+    await restarted.patchProject(t.project.id, { archived: false });
+    expect(t.runner.starts).toHaveLength(0);
+    expect(t.store.requireDelivery(first.id)).toMatchObject({ status: "held", holdReason: "asleep" });
   });
 });
 

@@ -56,6 +56,78 @@ struct MemberStatusInfo: Sendable {
     /// Display order for summaries (most urgent first).
     static let order = ["blocked", "waiting", "error", "working", "idle", "offline", "asleep"]
     static func rank(_ status: String) -> Int { order.firstIndex(of: status) ?? order.count }
+
+    /// Prefer this overload when the server supplies observation metadata.
+    init(_ member: Member) {
+        let observation = member.statusObservation
+        if observation?.ownership == "conflict" {
+            self.init(label: "소유 관계 확인 필요", tone: .attention, icon: "lock.trianglebadge.exclamationmark",
+                      explanation: "터미널 소유 관계가 달라 마지막 상태만 보존하고 있습니다. 자동 입력은 보류됩니다.", needsMe: true)
+        } else if let observation, observation.freshness != "fresh" || observation.ownership != "verified" || observation.error != nil {
+            self.init(label: "상태 확인 불가", tone: .attention, icon: "questionmark.circle",
+                      explanation: observation.error?.note ?? "현재 상태를 관측하지 못했습니다. 마지막 관측을 보존하며 다시 확인합니다.")
+        } else if member.status == "blocked", !["permission", "selection"].contains(member.blockedReason ?? "") {
+            self.init(label: member.blockedReason == "setup" ? "상태 설정 확인 중" : "상태 확인 불가",
+                      tone: .attention, icon: "questionmark.circle", explanation: "승인 창이 확인된 상태가 아닙니다. 상태 신호를 다시 확인하며 자동 입력을 보류합니다.")
+        } else if member.origin == "manual" {
+            let base = Self(member.status)
+            self.init(label: "\(base.label) · 추정", tone: base.tone, icon: base.icon,
+                      explanation: "마지막 도구 활동에 따른 추정입니다. 실제 CLI 실행 상태나 종료를 확인한 것은 아닙니다.", needsMe: base.needsMe)
+        } else if !Self.order.contains(member.status) {
+            self.init(label: "상태 확인 불가", tone: .neutral, icon: "questionmark.circle", explanation: "지원하지 않는 실행 상태입니다. 최신 상태를 다시 확인해 주세요.")
+        } else {
+            self.init(member.status)
+        }
+    }
+
+    private init(label: String, tone: Tone, icon: String, explanation: String, needsMe: Bool = false) {
+        self.label = label; self.tone = tone; self.icon = icon; self.explanation = explanation
+        live = false; self.needsMe = needsMe
+    }
+}
+
+/// Dedicated timestamps never fall back to a general DB modification timestamp.
+struct MemberObservationInfo: Sendable {
+    let lastObservedAt: String?
+    let lastStatus: String
+    let error: String?
+    let manualActivityAt: String?
+    init(_ member: Member) {
+        lastObservedAt = member.statusObservation?.observedAt
+        lastStatus = MemberStatusInfo(member.status).label
+        error = member.statusObservation?.error?.note ?? member.lastError
+        manualActivityAt = member.origin == "manual" ? member.manualActivityAt : nil
+    }
+}
+
+struct SubagentInfo: Sendable {
+    let label: String
+    let count: Int?
+    let observedAt: String?
+    init(_ member: Member) {
+        observedAt = member.subagentState?.observedAt
+        switch member.subagentState?.quality {
+        case "exact", "estimated":
+            if let value = member.subagentState?.count, value >= 0 {
+                count = value
+                label = "서브에이전트 \(value)개" + (member.subagentState?.quality == "estimated" ? " · 추정" : "")
+            } else { count = nil; label = "서브에이전트 수 확인 불가" }
+        case "unsupported": count = nil; label = "서브에이전트 수 미지원"
+        default: count = nil; label = "서브에이전트 수 미수집"
+        }
+    }
+}
+
+struct LastReportInfo: Sendable {
+    let label = "마지막 보고"
+    let text: String
+    let reportedAt: String?
+    let next: String
+    init(_ member: Member) {
+        text = member.now.isEmpty ? "아직 보고가 없습니다" : member.now
+        reportedAt = member.nowAt
+        next = member.next
+    }
 }
 
 /// Delivery of one of my messages. Delivered means the CLI received it as input, not that work finished.
@@ -86,6 +158,83 @@ struct DeliveryInfo: Sendable {
         default:
             label = delivery; tone = .neutral; icon = "questionmark.circle"; explanation = ""
         }
+    }
+
+    init(_ item: DeliveryNoticeItem) {
+        switch item.phase {
+        case .checking:
+            self.init(label: "전달 확인 중", tone: .neutral, icon: "magnifyingglass", explanation: "CLI 수신 여부를 시스템이 확인하고 있습니다.")
+        case .retryWait:
+            self.init(label: "자동 재전송 대기", tone: .neutral, icon: "arrow.clockwise", explanation: "안전한 조건을 다시 검사한 뒤 자동 전달합니다. 아직 수신 성공이 아닙니다.")
+        case .needsOwner:
+            self.init(label: "전달 확인 필요", tone: .attention, icon: "exclamationmark.circle", explanation: item.reasonDescription)
+        case .waiting:
+            self.init(label: "전달 대기", tone: .neutral, icon: "clock", explanation: item.reasonDescription)
+        case .stopped:
+            self.init(label: "추가 전달 중지", tone: .dim, icon: "pause.circle", explanation: "추가 전달을 중지했습니다. 과거 수신 여부는 알 수 없습니다.")
+        case .resolved where item.status == "delivered":
+            self.init(label: "받음", tone: .success, icon: "checkmark.circle", explanation: "CLI가 입력을 받았습니다. 업무 완료를 뜻하지 않습니다.")
+        case .some(.none):
+            self = Self(item.status) ?? Self(label: "전달 상태 확인 불가", tone: .neutral, icon: "questionmark.circle", explanation: "최신 전달 근거를 다시 확인해 주세요.")
+        default:
+            self.init(label: "전달 상태 확인 불가", tone: .neutral, icon: "questionmark.circle", explanation: "최신 전달 근거를 다시 확인해 주세요.")
+        }
+    }
+
+    init(_ summary: MemberDeliverySummary) {
+        if summary.needsOwnerCount > 0 {
+            self.init(label: "전달 확인 \(Self.badgeCount(summary.needsOwnerCount))", tone: .attention,
+                      icon: "exclamationmark.circle", explanation: "전달 확인이 필요한 항목 \(summary.needsOwnerCount)건입니다.")
+        } else if summary.checkingCount > 0 || summary.unknownCount > 0 {
+            self.init(label: "전달 확인 중", tone: .neutral, icon: "magnifyingglass", explanation: "시스템이 수신 근거를 확인하고 있습니다. 대표의 수신 판정은 필요하지 않습니다.")
+        } else if summary.deliveringCount > 0 {
+            self.init(label: "전달 중", tone: .neutral, icon: "arrow.up.circle", explanation: "CLI에 넣는 중입니다. 아직 수신 성공이 아닙니다.")
+        } else {
+            self.init(label: summary.undeliveredCount > 0 ? "전달 대기" : "전달 문제 없음", tone: .neutral, icon: "clock", explanation: "미전달 \(max(0, summary.undeliveredCount))건 · 뒤에서 대기 \(max(0, summary.waitingBehindCount))건")
+        }
+    }
+
+    var needsOwner: Bool { tone == .attention }
+    static func badgeCount(_ count: Int) -> String { count > 99 ? "99+" : String(max(0, count)) }
+    private init(label: String, tone: Tone, icon: String, explanation: String) {
+        self.label = label; self.tone = tone; self.icon = icon; self.explanation = explanation
+    }
+}
+
+struct DeliveryEvidenceInfo: Sendable {
+    let sourceLabel: String
+    let label: String
+    let detail: String
+    init(_ evidence: DeliveryEvidence) {
+        switch evidence.source {
+        case "claude_log": sourceLabel = "Claude 주 세션 입력 기록"
+        case "codex_log": sourceLabel = "Codex 주 세션 입력 기록"
+        case "transport": sourceLabel = "터미널 응답"
+        case "core_screen", "herdr_screen": sourceLabel = evidence.location == "composer" ? "입력칸" : "터미널 화면"
+        default: sourceLabel = "전달 근거"
+        }
+        switch evidence.verdict {
+        case .present:
+            label = "확인됨"
+            if evidence.location == "composer" {
+                detail = "입력칸의 내용을 확인했습니다. CLI가 입력을 받았다는 뜻은 아닙니다."
+            } else {
+                detail = "해당 위치에서 근거를 확인했습니다. 업무 완료를 뜻하지 않습니다."
+            }
+        case .absent where evidence.complete: label = "해당 없음"; detail = "완전하게 확인한 범위에 근거가 없습니다. 이것만으로 미수신을 확정하지 않습니다."
+        default: label = "취득 불가"; detail = "근거를 완전하게 확인하지 못했습니다. 미수신을 뜻하지 않습니다."
+        }
+    }
+}
+
+/// A single policy shared by the panel and its tests. Future phases/reasons permit read-only rechecks only.
+func deliveryPanelActions(_ item: DeliveryNoticeItem) -> [DeliveryRecoveryAction] {
+    guard let deliveryID = item.deliveryId, !deliveryID.isEmpty, let version = item.version, version > 0,
+          item.phase != .resolved, item.phase != .stopped, item.phase != .some(.none) else { return [] }
+    return [.recheck, .retryWithRisk, .stopRetry].filter { action in
+        item.safeAllowedActions.contains(action) && (action == .recheck || item.phase == .needsOwner)
+            && (action == .recheck || item.reason != "duplicate_draft")
+            && (action != .retryWithRisk || ["retry_exhausted", "log_missing", "log_incomplete", "unsupported_schema"].contains(item.reason ?? ""))
     }
 }
 

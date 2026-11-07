@@ -15,6 +15,7 @@ import { writeStatuslineWrapper } from "./runner/statusline.ts";
 //
 // 조립 순서: createOrchestrator(config, store) → startServer(ctx) → setServerUrl(url) → recover() · 끝낼 때 shutdown().
 import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type {
   AdoptPreview,
@@ -61,9 +62,12 @@ import { josa, renderRole } from "./roles.ts";
 import { CoreError, coreRpc, type CoreHello, type CoreTerminal } from "./runner/core-client.ts";
 import { CoreSupervisor } from "./core-supervisor.ts";
 import type { DecisionFollowUp, DeliveryDispatch, ReportReferences, LifecycleJournal } from "./service-contracts.ts";
-import type { ManualInboxBatch, ManualInboxAckRequest, ManualInboxAckResult, FreshSessionRequest, MemberConfigWriteResult, OperationReceipt, RevisionPrecondition, SettingsWriteResult, TerminalControlRequestV2, TodoDoneRequest, TodoWriteResult } from "../shared/operations.ts";
+import type { AgentOperationContext, ManualInboxBatch, ManualInboxAckRequest, ManualInboxAckResult, FreshSessionRequest, MemberConfigWriteResult, OperationReceipt, RevisionPrecondition, SettingsWriteResult, TerminalControlRequestV2, TodoDoneRequest, TodoWriteResult } from "../shared/operations.ts";
+import { coreContextMeasurement, observeCompactBoundary, type CompactBoundaryBaseline } from "./runner/core-context.ts";
+import { readJsonlRange, parseCodexSessionMeta, jsonObject } from "./runner/delivery-evidence.ts";
+import { defaultClaudeHome, findSessionFile } from "./runner/herdr.ts";
 import { providerLaunch } from "./runner/providers.ts";
-import { CoreRunner, ensureCoreServer } from "./runner/core.ts";
+import { CoreRunner, ensureCoreServer, type CoreCompactState, type CoreRunnerDeps } from "./runner/core.ts";
 import { isMissingSessionError } from "./runner/headless.ts";
 import { HerdrError } from "./runner/herdr-client.ts";
 import { detectHerdr, HerdrRunner, inspectPane, listAgents, type PaneInspection } from "./runner/herdr.ts";
@@ -309,6 +313,8 @@ export interface OrchestratorDeps {
   /** 맥 알림. 시험에서는 넣지 않으면 아무것도 안 한다. */
   notifier?: (title: string, body: string) => void;
   deliveryRecovery?: DeliveryRecovery;
+  /** 주입한 CoreRunner와 같은 기록 루트. 시험은 임시 경로만 사용한다. */
+  providerHomes?: { claudeHome: string; codexHome: string };
 }
 
 export interface NewMemberInput {
@@ -469,6 +475,46 @@ class OrchestratorDeliveryRecovery extends DeliveryRecovery {
   }
 }
 
+/** Runner의 외부 입력 baseline/cursor도 기존 세대별 문맥 행에 함께 저장한다. */
+export function coreCompactStore(store: Store): NonNullable<CoreRunnerDeps["compactStore"]> {
+  return {
+    load(memberId) {
+      const state = store.ensureContextState(memberId);
+      const saved = state?.baseline?.coreCompact as CoreCompactState | undefined;
+      if (!saved) {
+        if (state.compaction && ["sending", "running", "uncertain"].includes(state.compaction.phase)) throw new ApiError(409, "미확정 압축의 baseline이 없어 자동 입력을 보류합니다");
+        return null;
+      }
+      if (!saved.baseline || !["sending", "running", "uncertain", "succeeded", "failed"].includes(saved.phase)) throw new ApiError(409, "압축 기록이 손상되어 자동 입력을 보류합니다");
+      if (saved.baseline.generation !== state.generation) return null;
+      if (["sending", "running"].includes(saved.phase)) {
+        const uncertain: CoreCompactState = { ...saved, phase: "uncertain" };
+        store.saveContextState({ ...state, baseline: { ...state.baseline, coreCompact: uncertain },
+          compaction: state.compaction ? { ...state.compaction, phase: "uncertain", reason: "send_uncertain" } : null });
+        return uncertain;
+      }
+      return saved;
+    },
+    save(memberId, compact) {
+      const state = store.ensureContextState(memberId);
+      const member = store.requireMember(memberId);
+      if (state.generation !== compact.baseline.generation || member.sessionId !== compact.baseline.sessionId || member.paneId !== compact.baseline.terminalId) throw new ApiError(409, "문맥 세대나 세션이 변경되었습니다");
+      const before = state.compaction;
+      if (before && before.id !== compact.id && (compact.phase !== "sending" || !["queued", "succeeded", "failed"].includes(before.phase))) throw new ApiError(409, "다른 압축 작업의 결과입니다");
+      if (before?.id === compact.id && ["succeeded", "failed"].includes(before.phase) && compact.phase !== before.phase) return;
+      const at = new Date().toISOString();
+      store.saveContextState({ ...state,
+        measurement: compact.phase === "sending" || compact.phase === "succeeded" ? null : state.measurement,
+        baseline: { ...state.baseline, coreCompact: compact },
+        compaction: { id: compact.id, trigger: before?.trigger ?? "manual", phase: compact.phase,
+          reason: compact.phase === "uncertain" ? "send_uncertain" : compact.phase === "failed" ? "provider_error" : null,
+          requestedAt: before?.requestedAt ?? at, startedAt: new Date(compact.startedAt).toISOString(),
+          finishedAt: ["succeeded", "failed"].includes(compact.phase) ? at : null },
+      }, compact.phase === "sending" || compact.phase === "succeeded" ? { contextPct: null } : {});
+    },
+  };
+}
+
 /** 실제 실행기로 조립한다. herdr 는 설정의 소켓만 쓴다. */
 export function createOrchestrator(config: Config, store: Store): Orchestrator {
   const runners = new Map<Backend, Runner>();
@@ -476,13 +522,14 @@ export function createOrchestrator(config: Config, store: Store): Orchestrator {
   const deliveryRecovery = new OrchestratorDeliveryRecovery(store, member => orchestrator?.recoveryRunner(member) ?? null);
   runners.set("core", new CoreRunner({ contextHome: config.home, coreBin: config.coreBin, socketPath: config.coreSocket, session: "iamceo", stateDir: join(config.home, "core-state"), configDir: join(config.home, "core-config"), claudeBin: config.claudeBin, codexBin: config.codexBin }, {
     recoveryStore: store,
+    compactStore: coreCompactStore(store),
     repair: deliveryRecovery.repair,
     // Generation 1 has no post-write drain or external-attach barrier. Unknown
     // writes stay unresolved; do not manufacture externalInput:false here.
     quiescence: (_memberId, dispatch) => ({ originalWrite: dispatch.transportState === "rejected" ? "rejected" : dispatch.transportState === "accepted" ? "settled" : "unresolved", externalInput: null }),
   }));
   const herdr: HerdrQueries = { info: () => detectHerdr(config.herdrSocket), agents: () => listAgents(config.herdrSocket), inspect: (a) => inspectPane(config.herdrSocket, a) };
-  orchestrator = new Orchestrator({ config, store, runners, herdr, deliveryRecovery, notifier: macNotifier() });
+  orchestrator = new Orchestrator({ config, store, runners, herdr, deliveryRecovery, providerHomes: { claudeHome: defaultClaudeHome(), codexHome: process.env.CODEX_HOME || join(homedir(), ".codex") }, notifier: macNotifier() });
   return orchestrator;
 }
 
@@ -535,9 +582,14 @@ export class Orchestrator implements OrchestratorApi {
   private readonly observedTurns = new Map<string, { generation: number; terminal: string | null; turn: number; ended: number }>();
   private readonly configWrites = new Set<string>();
   private settingsWriting = false;
+  private readonly projectPatches = new Set<string>();
+  private readonly terminalMutations = new Set<string>();
+  private readonly agentOperations = new Map<string, Promise<AgentToolResult>>();
+  private readonly providerHomes: OrchestratorDeps["providerHomes"];
 
   constructor(deps: OrchestratorDeps) {
     this.store = deps.store;
+    this.providerHomes = deps.providerHomes;
     this.config = deps.config;
     this.runners = deps.runners;
     this.deliveryRecovery = deps.deliveryRecovery ?? new OrchestratorDeliveryRecovery(this.store, member => this.recoveryRunner(member));
@@ -638,14 +690,17 @@ export class Orchestrator implements OrchestratorApi {
     if (rt.closing || rt.starting || rt.reopening || rt.pumping) throw new ApiError(409, "세션을 처리하는 중입니다. 잠시 뒤 다시 여세요", "TERMINAL_REFUSED");
     const runner = this.runnerOf(member);
     if (!runner.terminalControl) throw new ApiError(501, "터미널 조작을 지원하지 않습니다", "TERMINAL_REFUSED");
+    if (this.terminalMutations.has(memberId)) throw new ApiError(409, "터미널 입력을 처리하는 중입니다");
+    this.terminalMutations.add(memberId);
     try {
+      if (action.action === "input" || action.action === "key") this.invalidateCoreMeasurement(member);
       const result = await runner.terminalControl(this.runnerMember(member, this.store.requireProject(member.projectId)), action);
       if (action.action === "release") void this.pump(memberId);
       return result;
     } catch (e) {
       if (e instanceof CoreError && !e.uncertain) throw new ApiError(409, e.message, "TERMINAL_REFUSED");
       throw e;
-    }
+    } finally { this.terminalMutations.delete(memberId); }
   }
 
   async runtimeInfo(): Promise<RuntimeInfo> {
@@ -712,12 +767,14 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private async startManaged(member: Member, project: Project, resume: boolean, prepared?: LifecycleJournal): Promise<RunnerStartResult> {
+    this.requireActive(this.store.requireProject(project.id));
     const previous = this.pendingLifecycle(member.id);
     if (previous && (previous.operationId !== prepared?.operationId || previous.phase !== "prepared")) throw new CoreError("starting_unknown", "미완료 생성 의도가 있어 소유 라벨로 확인하는 중입니다");
     const entry = prepared ?? this.prepareLifecycle(member, "start");
     const runner = this.runnerOf(member);
     this.finishLifecycle(entry, "started", null);
     try {
+      this.requireActive(this.store.requireProject(project.id));
       const started = await runner.start(this.runnerMember(member, project), { ...this.writeRunFiles(member, project, resume), operationId: entry.operationId });
       if (!this.store.getMember(member.id)) return started;
       const identity = started.identity ?? { ...entry.identity, sessionId: started.sessionId, terminalId: started.paneId };
@@ -766,10 +823,13 @@ export class Orchestrator implements OrchestratorApi {
       const member = this.store.getMember(journal.memberId);
       if (!member || this.store.memberRevisions(member.id).sessionGeneration !== journal.identity.sessionGeneration) continue;
       const rt = this.runtime(member.id);
-      if (rt.closing || rt.starting || rt.reopening || rt.pumping) continue;
+      if (this.archiving.has(member.projectId) || rt.closing || rt.starting || rt.reopening || rt.pumping) continue;
       try {
         if (journal.intent === "close") await this.closeMember(member.id);
-        else await this.sleepMember(member.id, { force: journal.reason?.startsWith("while_working:") ?? false, ...(journal.intent === "archive" ? { holdAs: "archived" as const } : {}) });
+        else {
+          await this.sleepMember(member.id, { force: journal.intent === "archive" || (journal.reason?.startsWith("while_working:") ?? false), ...(journal.intent === "archive" ? { holdAs: "archived" as const } : {}) });
+          if (journal.intent === "archive" && !this.store.requireProject(member.projectId).archived) for (const d of this.store.listPending(member.id)) if (d.status === "held" && d.holdReason === "archived") this.hold(d, "asleep");
+        }
       } catch (error) { this.store.patchMember(member.id, { lastError: `종료 확인 보류: ${(error as Error).message.slice(0, 500)}` }); }
     }
   }
@@ -952,6 +1012,12 @@ export class Orchestrator implements OrchestratorApi {
   async recover(): Promise<void> {
     this.recovering = true;
     try {
+      for (const member of this.store.listAllMembers()) {
+        if (this.backendOf(member) !== "core") continue;
+        const state = this.store.ensureContextState(member.id);
+        this.store.saveContextState({ ...state, measurement: state.measurement ? { ...state.measurement, fresh: false } : null,
+          compaction: state.compaction && ["sending", "running"].includes(state.compaction.phase) ? { ...state.compaction, phase: "uncertain", reason: "send_uncertain" } : state.compaction });
+      }
       // An interrupted external mutation is never replayed on restart.
       for (const receipt of this.store.listPendingOperations()) if (receipt.status === "pending") this.store.finishOperation({ ...receipt, status: "unknown", code: "RESTART_UNKNOWN", error: "서버 재시작으로 작업 결과를 확인할 수 없습니다. 같은 입력을 재생하지 않습니다" });
       await this.recoverStops();
@@ -1122,6 +1188,11 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private onTick(): void {
+    for (const member of this.store.listAllMembers()) {
+      if (this.backendOf(member) !== "core") continue;
+      this.reconcileCoreCompact(member);
+      if (this.store.getContextState(member.id)?.compaction?.phase === "queued") void this.pump(member.id);
+    }
     void this.settleInFlight().catch(e => console.warn("전달 확인 실패:", e));
     for (const id of [...this.unattached]) {
       const member = this.store.getMember(id);
@@ -1267,56 +1338,92 @@ export class Orchestrator implements OrchestratorApi {
     return this.store.requireProject(project.id);
   }
 
-  /** 저장 전에 부른다. 보관할 수 없으면 거부한다. */
-  async beforeProjectPatch(project: Project, patch: PatchProjectReq): Promise<void> {
-    if (patch.archived === true && !project.archived) {
-      this.checkArchivable(project);
-      await this.sleepAdoptedForArchive(project);
+  async patchProject(projectId: string, patch: PatchProjectReq): Promise<Project> {
+    if (this.projectPatches.has(projectId) || this.archiving.has(projectId)) throw new ApiError(409, "프로젝트 변경을 처리하는 중입니다. 잠시 뒤 다시 하세요");
+    this.projectPatches.add(projectId);
+    const awake = new Set(this.store.listMembers(projectId).filter(m => m.status !== "asleep").map(m => m.id));
+    try {
+      const project = this.store.requireProject(projectId);
+      const validated = this.store.validateProjectPatch(projectId, patch);
+      if (project.archived && patch.archived !== false && this.store.listMembers(projectId).some(m => m.origin !== "manual" && m.status !== "asleep" && (m.sessionId || m.paneId))) throw new ApiError(409, "보관된 프로젝트의 세션 종료 상태를 확인해야 합니다");
+      if (Object.entries(validated).every(([key, value]) => project[key as keyof Project] === value)) return project;
+      await this.beforeProjectPatch(project, patch);
+      const saved = this.store.patchProject(projectId, validated);
+      await this.onProjectPatched(saved, patch);
+      return this.store.requireProject(projectId);
+    } catch (error) {
+      if (!this.store.requireProject(projectId).archived) for (const memberId of awake) {
+        if (this.store.getMember(memberId)?.status !== "asleep") continue;
+        for (const delivery of this.store.listPending(memberId)) if (delivery.status === "held" && delivery.holdReason === "archived") this.hold(delivery, "asleep");
+      }
+      throw error;
+    } finally {
+      this.archiving.delete(projectId);
+      this.projectPatches.delete(projectId);
     }
-    // 켜면 세션이 뜬다. 꺼내면서 켜는 것만 된다.
-    if (patch.runnerEnabled === true && (patch.archived ?? project.archived)) this.requireActive(project);
   }
 
-  /**
-   * 넘겨받은 칸은 대표의 것이라 하나라도 못 끝내면 보관을 거부한다. 끝낸 칸은 되돌릴 수 없으므로 전부 먼저 보고, 다 된다고 할 때만 끝낸다.
-   * 소켓 문제도 거부한다. 칸이 깬 채로 보관되면 안 된다. 이미 안 보이는 직원(offline)만 예외다.
-   * 끝내는 동안 전달이 칸을 다시 열지 못하게 archiving 으로 막는다. 끝나면 호출한 쪽이 곧바로 저장하므로 틱이 끼어들 틈이 없다.
-   */
-  private async sleepAdoptedForArchive(project: Project): Promise<void> {
-    if (this.archiving.has(project.id)) throw new ApiError(409, "보관을 처리하는 중입니다. 잠시 뒤 다시 하세요");
+  /** v1 HTTP hook 호환. W9에서 HTTP도 patchProject 한 곳으로 옮긴다. */
+  async beforeProjectPatch(project: Project, patch: PatchProjectReq): Promise<void> {
+    this.store.validateProjectPatch(project.id, patch);
+    if (this.archiving.has(project.id)) throw new ApiError(409, "프로젝트 변경을 처리하는 중입니다. 잠시 뒤 다시 하세요");
+    if (patch.runnerEnabled === true && (patch.archived ?? project.archived)) this.requireActive(project);
+    if (patch.archived !== true || project.archived) return;
     this.archiving.add(project.id);
+    const slept: Member[] = [];
     try {
-      const adopted = this.store.listMembers(project.id).filter((m) => m.origin === "adopted" && m.status !== "asleep" && (m.sessionId || m.paneId));
-      for (const m of adopted) {
+      this.checkArchivable(project);
+      const managed = this.store.listMembers(project.id).filter(m => m.origin !== "manual" && m.status !== "asleep" && (m.sessionId || m.paneId));
+      for (const m of managed) {
+        const rt = this.runtime(m.id);
+        if (rt.starting || rt.reopening || rt.pumping || rt.closing || this.configWrites.has(m.id) || this.terminalMutations.has(m.id) || this.pendingLifecycle(m.id) || this.store.inputState(m.id).lease) throw new ApiError(409, `${m.name}의 세션을 처리하는 중입니다`);
         try {
-          await this.runnerOf(m).checkStop?.(this.runnerMember(m, project));
+          await this.verifyArchiveSession(m);
+          await this.runnerOf(m).checkStop?.(this.runnerMember(m, project), { whileWorking: false });
         } catch (e) {
-          if (this.skipsArchiveRefusal(m, e)) continue;
+          if (this.backendOf(m) !== "core" && this.skipsArchiveRefusal(m, e)) continue;
           throw this.archiveRefusal(m, e);
         }
       }
-      this.checkArchivable(project); // 보는 동안 일이 시작됐을 수 있다.
-      const slept: { member: Member; deliveries: Set<string> }[] = [];
-      for (const m of adopted) {
-        const deliveries = new Set(this.store.listPending(m.id).map((d) => d.id));
+      this.checkArchivable(project);
+      for (const m of managed) {
         try {
           await this.sleepMember(m.id, { force: true, holdAs: "archived" });
-          slept.push({ member: m, deliveries });
+          slept.push(m);
         } catch (e) {
-          if (this.skipsArchiveRefusal(m, e)) continue;
-          // 보고 난 뒤에 칸이 달라진 경우다. 이미 끝낸 칸은 되돌릴 수 없으니 잠든 채로 두고, 활성 프로젝트에서 저절로 깨어나지 않게 한다.
-          for (const s of slept) {
-            for (const d of this.store.listPending(s.member.id)) {
-              if (s.deliveries.has(d.id) && d.status === "held" && d.holdReason === "archived") this.hold(d, "asleep");
-            }
-          }
+          if (this.backendOf(m) !== "core" && this.skipsArchiveRefusal(m, e)) continue;
           const refusal = this.archiveRefusal(m, e);
-          if (slept.length === 0) throw refusal;
-          throw new ApiError(refusal.status, `${refusal.message} (${slept.map((s) => s.member.name).join(", ")}의 칸은 이미 끝나 잠든 채로 둡니다)`);
+          throw new ApiError(refusal.status, `${refusal.message}${slept.length ? ` (${slept.map(s => s.name).join(", ")}의 칸은 이미 끝나 잠든 채로 둡니다)` : ""}`);
         }
       }
-    } finally {
+      this.checkArchivable(project);
+      // 장벽은 DB commit과 큐 보류까지 onProjectPatched가 유지한다.
+    } catch (e) {
+      for (const m of slept) for (const d of this.store.listPending(m.id)) if (d.status === "held" && d.holdReason === "archived") this.hold(d, "asleep");
       this.archiving.delete(project.id);
+      throw e;
+    }
+  }
+
+  private async verifyArchiveSession(member: Member): Promise<void> {
+    const runner = this.runnerOf(member);
+    if (this.store.inputState(member.id).lease) throw new ApiError(409, "직접 조작권을 해제한 뒤 보관하세요");
+    if (runner instanceof CoreRunner && !member.sessionId) {
+      // 읽기 poll은 기존 terminal의 nonce만 탐색한다. 식별용 업무를 보내지 않는다.
+      await runner.screen(this.runnerMember(member, this.store.requireProject(member.projectId)));
+      await Promise.all([...this.eventQueues.values()]);
+      member = this.store.requireMember(member.id);
+    }
+    if (!member.sessionId) throw new ApiError(409, "이어갈 native 세션 기록을 확인하는 중입니다");
+    if ((runner as Runner).sessionExists?.(this.runnerMember(member, this.store.requireProject(member.projectId))) === false) throw new ApiError(409, "이어갈 native 세션 기록을 확인할 수 없습니다");
+    if (runner instanceof CoreRunner) {
+      const log = this.contextLog(member);
+      if (!log) throw new ApiError(409, "이어갈 native 세션 기록을 확인할 수 없습니다");
+      const records = readJsonlRange(join(log.home, member.cli === "codex" ? "sessions" : "projects"), log.path).records;
+      if (member.cli !== "codex" && !records.some(record => {
+        const entry = jsonObject(record.value);
+        return entry?.sessionId === member.sessionId && entry.cwd === member.cwd && !entry.isSidechain;
+      })) throw new ApiError(409, "현재 native 세션과 일치하는 주 세션 기록을 확인할 수 없습니다");
     }
   }
 
@@ -1328,7 +1435,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private isCannotExit(e: unknown): boolean {
-    return (e instanceof HerdrError && e.code === "cannot_exit") || (e instanceof ApiError && e.status === 409);
+    return (e instanceof CoreError && !e.uncertain && ["busy", "input_busy", "conflict", "unsupported"].includes(e.kind)) || (e instanceof HerdrError && e.code === "cannot_exit") || (e instanceof ApiError && e.status === 409);
   }
 
   private archiveRefusal(m: Member, e: unknown): ApiError {
@@ -1410,7 +1517,7 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 보관한 프로젝트는 화면에 없어 멈출 수 없다. 세션을 새로 띄우거나 깨우는 길은 모두 여기서 막는다. */
   private requireActive(project: Project): void {
-    if (project.archived) throw new ApiError(409, "보관된 프로젝트입니다. 보관함에서 꺼낸 뒤 다시 하세요");
+    if (project.archived || this.archiving.has(project.id)) throw new ApiError(409, "보관된 프로젝트이거나 보관을 처리하는 중입니다. 꺼낸 뒤 다시 하세요");
   }
 
   /** 전체 설정을 고친다. 실행 방식은 일하는 직원이 있으면 거부하고, 아니면 이전 실행기의 칸을 닫은 뒤 다음 전달부터 새 방식으로 잇는다. */
@@ -1422,6 +1529,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private async updateSettingsOnce(patch: SettingsPatch): Promise<Settings> {
+    if (this.archiving.size) throw new ApiError(409, "프로젝트 보관을 처리하는 중입니다");
     const before = this.store.getSettings();
     if (this.runners.has("core")) {
       if (patch.backend && patch.backend !== "core") throw new ApiError(400, "실행기는 herdr-core 하나입니다");
@@ -1531,6 +1639,7 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 직원별 모델·effort. null 이면 직급 기본으로 돌아간다. */
   async patchMemberConfig(memberId: string, patch: PatchMemberReq): Promise<Member> {
+    this.requireActive(this.store.requireProject(this.store.requireMember(memberId).projectId));
     if (this.configWrites.has(memberId)) throw new ApiError(409, "직원 설정을 적용하는 중입니다");
     this.configWrites.add(memberId);
     try { return await this.patchMemberConfigOnce(memberId, patch); }
@@ -1544,6 +1653,7 @@ export class Orchestrator implements OrchestratorApi {
 
   private async patchMemberConfigOnce(memberId: string, patch: PatchMemberReq): Promise<Member> {
     const member = this.store.requireMember(memberId);
+    this.requireActive(this.store.requireProject(member.projectId));
     if (this.runtime(memberId).closing || this.runtime(memberId).starting || this.runtime(memberId).reopening || this.pendingLifecycle(memberId)) throw new ApiError(409, "세션을 처리하는 중입니다");
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 설정을 바꿀 수 없습니다");
     if (patch.cli && patch.cli !== member.cli) return this.switchProvider(member, patch);
@@ -1557,6 +1667,11 @@ export class Orchestrator implements OrchestratorApi {
   /** 보관하면 화면에서 사라진다. 답을 기다리는 세션이나 일하는 세션을 두고 사라지면 아무도 풀어 줄 수 없다. */
   private checkArchivable(project: Project): void {
     const members = this.store.listMembers(project.id);
+    if (this.settingsWriting || this.switching) throw new ApiError(409, "실행 설정을 처리하는 중입니다");
+    for (const member of members) {
+      const rt = this.runtime(member.id);
+      if (rt.starting || rt.reopening || rt.pumping || rt.closing || this.configWrites.has(member.id) || this.terminalMutations.has(member.id)) throw new ApiError(409, `${member.name}의 세션을 처리하는 중입니다`);
+    }
     const busy = members.find((m) => m.status === "working" || m.status === "blocked" || (m.origin !== "manual" && this.isBusy(m)));
     if (busy) throw new ApiError(409, `${josa(busy.name, "이")} 일하는 중이라 보관할 수 없습니다`);
     const open = this.store.listDecisions(project.id).filter((d) => d.status === "open").length;
@@ -1566,23 +1681,19 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   async onProjectPatched(project: Project, patch: PatchProjectReq): Promise<void> {
-    if (patch.runnerEnabled === true) {
-      // 대표가 직접 켰다. 이제 편입만으로 켠 실행이 아니다.
-      this.store.setRunnerByAdopt(project.id, false);
-      await this.enableProject(project.id);
-    }
-    if (patch.archived === true) {
-      // 칸을 띄워 둘 이유가 없다. 세션은 남아 꺼내면 다시 깨울 수 있다.
-      for (const m of this.store.listMembers(project.id)) {
-        if (m.origin !== "manual" && m.status !== "asleep" && (m.sessionId || m.paneId)) {
-          await this.sleepMember(m.id, { force: true, holdAs: "archived" }).catch((e) => console.warn(`${m.name} 잠재우기 실패:`, (e as Error).message));
-        }
+    try {
+      if (patch.archived === true) {
+        // 사전 hook에서 전원 종료했다. commit 뒤 새 입력은 없다.
+        for (const d of this.store.listUndelivered(project.id)) if (d.status === "queued" && d.attempts === 0) this.hold(d, "archived");
       }
-    }
+      if (patch.runnerEnabled === true) {
+        this.store.setRunnerByAdopt(project.id, false);
+        if (patch.archived !== false) await this.enableProject(project.id);
+      }
+    } finally { this.archiving.delete(project.id); }
     if (patch.archived === false) {
-      // 보관 때문에 멈춘 전달을 다시 민다. 응답을 칸 여는 시간만큼 붙잡지 않는다.
-      const stopped = this.store.listUndelivered(project.id).filter((d) => d.status === "held" && d.holdReason === "archived");
-      for (const id of new Set(stopped.map((d) => d.memberId))) void this.pump(id);
+      const stopped = this.store.listUndelivered(project.id).filter(d => d.status === "held" && d.holdReason === "archived");
+      for (const id of new Set(stopped.map(d => d.memberId))) void this.pump(id);
     }
   }
 
@@ -1595,6 +1706,7 @@ export class Orchestrator implements OrchestratorApi {
     if (!runner) throw new ApiError(503, `실행기가 없습니다: ${backend}`);
     const available = await runner.available();
     if (!available.ok) throw new ApiError(503, available.detail ?? "실행기를 쓸 수 없습니다");
+    this.requireActive(this.store.requireProject(projectId));
     if (!project.runnerEnabled) this.store.patchProject(projectId, { runnerEnabled: true });
     const conductor = await this.ensureConductor(projectId);
     if (conductor.status === "asleep") await this.resumeMember(conductor.id);
@@ -1702,7 +1814,7 @@ export class Orchestrator implements OrchestratorApi {
 
   async sendUserMessage(projectId: string, req: SendMessageReq): Promise<Message> {
     const project = this.store.requireProject(projectId);
-    if (project.archived) throw new ApiError(409, "보관된 프로젝트에는 보낼 수 없습니다");
+    this.requireActive(project);
     const attachments = (req.attachmentIds ?? []).map(id => this.store.getAttachment(id)).filter((a): a is Attachment => a !== null);
     const target = req.targetMemberId ? this.store.requireMember(req.targetMemberId) : null;
     if (target && target.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 직원이 아닙니다");
@@ -1855,10 +1967,18 @@ export class Orchestrator implements OrchestratorApi {
     const member = this.store.requireMember(memberId);
     const rt = this.runtime(memberId);
     const project = this.store.requireProject(member.projectId);
+    this.requireActive(project);
     const runner = this.runners.get(this.backendOf(member));
     if (member.origin === "manual" || !runner) throw new ApiError(400, "실행기가 관리하지 않는 세션입니다");
     if (rt.turn) rt.turn.interrupted = true;
     await runner.interrupt(this.runnerMember(member, project));
+    if (runner.kind === "core") {
+      this.interruptCoreCompaction(member);
+      const state = this.store.getContextState(memberId);
+      if (state?.compaction?.phase === "failed" && rt.turn?.kind === "compact") this.store.saveContextState({ ...state, compaction: { ...state.compaction, reason: "interrupted" } });
+      rt.compactRequest = null;
+      if (rt.turn?.kind === "compact") this.endCompact(memberId, rt, "대표가 압축을 중단했습니다");
+    }
     return this.store.requireMember(memberId);
   }
 
@@ -1899,6 +2019,7 @@ export class Orchestrator implements OrchestratorApi {
     const runner = this.runners.get(this.backendOf(member));
     if (!runner?.answerApproval) throw new ApiError(501, "이 실행 방식에는 승인 창이 없습니다");
     const project = this.store.requireProject(member.projectId);
+    this.requireActive(project);
     const r = await runner.answerApproval(this.runnerMember(member, project), req.fingerprint, req.option);
     if (!r.ok) {
       const why = {
@@ -1969,6 +2090,7 @@ export class Orchestrator implements OrchestratorApi {
     const kind = req.kind ?? "worker";
     if (kind === "conductor" && this.store.getConductor(projectId)) throw new ApiError(409, "이미 총괄이 있습니다");
     // 실행 방식은 전체 설정 하나다. 편입은 칸이 있어야 하므로 herdr 일 때만 된다.
+    this.requireActive(this.store.requireProject(projectId));
     this.requireNotSwitching();
     if (this.store.getSettings().backend !== "herdr") throw new ApiError(409, "실행 방식이 herdr 일 때만 편입할 수 있습니다. 설정에서 실행 방식을 먼저 바꾸세요");
     const runner = this.runners.get("herdr") as HerdrCapable | undefined;
@@ -1986,6 +2108,7 @@ export class Orchestrator implements OrchestratorApi {
       member = placeholder
         ? this.store.patchMember(placeholder.id, { name: req.name, role: req.role, ...placed })
         : this.store.createMember({ projectId, handle: req.handle ?? this.deriveHandle(projectId, req.name), name: req.name, role: req.role, kind, origin: "adopted", ...placed });
+      this.terminalMutations.add(member.id);
       const moved = await runner.adopt(this.runnerMember(member, herdrProject), req.paneId, this.writeRunFiles(member, herdrProject));
       // 넘겨받은 세션은 대표가 쓰던 그대로 둔다. 무슨 모델로 도는지 모르고, 설정은 잠재웠다 깨울 때 전체 인자로 들어간다.
       this.applyStarted(member.id, herdrProject, { ...moved, rejoined: true });
@@ -2002,7 +2125,7 @@ export class Orchestrator implements OrchestratorApi {
       if (e instanceof ApiError) throw e;
       if (e instanceof HerdrError && e.code === "cannot_adopt") throw new ApiError(409, e.message);
       throw new ApiError(502, `칸을 넘겨받지 못했습니다: ${(e as Error).message}`);
-    }
+    } finally { if (member) this.terminalMutations.delete(member.id); }
     this.store.setAdoptedInfo(member.id, { turnedOnRunner });
     const conductorName = this.store.getConductor(projectId)?.name ?? "총괄";
     await this.deliver({
@@ -2022,6 +2145,7 @@ export class Orchestrator implements OrchestratorApi {
     const member = this.store.requireMember(memberId);
     if (!member.wasAdopted || member.kind !== "worker") throw new ApiError(400, "편입한 직원만 해제할 수 있습니다");
     const project = this.store.requireProject(member.projectId);
+    this.requireActive(project);
     let notified = false;
     const paneKept = member.origin === "adopted";
     // 칸에 알리는 동안 전달과 화면 조회가 칸을 다시 묶거나 알림과 겹치지 않게 먼저 막는다.
@@ -2083,6 +2207,34 @@ export class Orchestrator implements OrchestratorApi {
     return result;
   }
 
+  /** 영속 예약을 먼저 커밋한다. 프로세스가 죽으면 미확인 결과를 반환하며 효과를 재생하지 않는다. */
+  async handleAgentOperation(member: Member, name: string, args: Record<string, unknown>, context: AgentOperationContext, signal?: AbortSignal): Promise<AgentToolResult> {
+    const current = this.store.requireMember(member.id);
+    if (current.projectId !== member.projectId) throw new ApiError(404, "직원을 찾을 수 없습니다");
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(context.operationId)) throw new ApiError(400, "operationId가 잘못되었습니다");
+    let reserved = false;
+    const previous = this.store.agentOperation(current.id, name, context.operationId, args, () => {
+      reserved = true;
+      return { text: "이 작업의 결과를 확인할 수 없습니다. 같은 작업은 자동 재실행하지 않습니다", isError: true };
+    });
+    const running = this.agentOperations.get(context.operationId);
+    if (running) return running;
+    // 동기 Store 포트의 두 불변 receipt로 예약과 비동기 결과를 나눈다.
+    // ':'는 외부 operation ID에 허용하지 않아 결과 namespace와 충돌하지 않는다.
+    const resultId = `agent-result:${context.operationId}`;
+    if (!reserved) {
+      const missing = Symbol("result_pending");
+      try { return this.store.agentOperation(current.id, name, resultId, args, () => { throw missing; }); }
+      catch (error) { if (error !== missing) throw error; }
+      return previous;
+    }
+    const execution = this.handleAgentTool(current, name, args, signal).then(result =>
+      this.store.agentOperation(current.id, name, resultId, args, () => result),
+    ).finally(() => { this.agentOperations.delete(context.operationId); });
+    this.agentOperations.set(context.operationId, execution);
+    return execution;
+  }
+
   /** Called at the board read boundary; completion only covers the requested revision. */
   noteBoardReview(member: Member, revision = this.store.boardRevision(member.projectId)): void {
     const turn = this.runtime(member.id).turn;
@@ -2106,7 +2258,7 @@ export class Orchestrator implements OrchestratorApi {
       const current = this.store.requireMember(member.id);
       const decision = this.store.requireDecision(decisionId);
       if (decision.projectId !== current.projectId || decision.memberId !== member.id) throw new ApiError(403, "자신이 올린 결재만 기다릴 수 있습니다");
-      if (signal?.aborted || this.store.requireProject(member.projectId).archived || decision.status === "open") return null;
+      if (signal?.aborted || this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId) || decision.status === "open") return null;
       const answered = decision.status === "answered" || decision.status === "delivered";
       if (decision.status === "answered") {
         this.materializeManualAnswers(current);
@@ -2196,6 +2348,7 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 명부에 올리고 세션을 띄우기 시작한다. 끝나기 전에는 pump 가 건너뛰고, 끝나면 다시 민다. */
   private beginSpawn(project: Project, input: { kind: MemberKind; handle: string; name: string; role: string; cwd?: string; cli?: CliProvider; modelOverride?: string | null }): { member: Member; ready: Promise<void> } {
+    this.requireActive(this.store.requireProject(project.id));
     this.requireNotSwitching(); // 옮기는 명단에 없는 칸이 옛 실행기에 남는다.
     const member = this.store.createMember({ projectId: project.id, ...input, origin: "runner", status: "idle" });
     if (!project.runnerEnabled) return { member, ready: Promise.resolve() };
@@ -2321,17 +2474,98 @@ export class Orchestrator implements OrchestratorApi {
     return null;
   }
 
-  /** team_compact·화면 압축. 일하는 중이면 끊지 않고 끝난 뒤로 미룬다. */
+  /** team_compact·화면 압축. 실행 중이어도 안전 조건을 우회하지 않고 예약한다. */
   async compactMember(memberId: string, focus?: string): Promise<Member> {
     const member = this.store.requireMember(memberId);
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 압축할 수 없습니다");
-    if (this.backendOf(member) === "core") throw new ApiError(409, "터미널을 열어 CLI의 /compact 명령을 사용하세요");
-    if (!member.sessionId) throw new ApiError(400, "아직 세션이 없습니다");
-    if (member.status === "asleep") throw new ApiError(409, "잠든 직원은 압축할 수 없습니다");
-    // 입력칸에 그대로 들어간다. 제어문자·줄바꿈이 있으면 붙여넣기를 끝내고 입력을 고칠 수 있다.
-    this.runtime(memberId).compactRequest = (focus ? normalizeSpace(focus) : "") || this.compactFocus(member);
+    const project = this.store.requireProject(member.projectId);
+    this.requireActive(project);
+    if (!project.runnerEnabled || ["asleep", "offline"].includes(member.status)) throw new ApiError(409, "깨어 있고 실행이 켜진 직원만 압축할 수 있습니다");
+    if (!member.sessionId) throw new ApiError(this.backendOf(member) === "core" ? 409 : 400, "아직 native 세션을 확인하지 못했습니다");
+    const normalized = (focus ? normalizeSpace(focus) : "") || this.compactFocus(member);
+    if (this.backendOf(member) === "core") {
+      if (!member.paneId) throw new ApiError(409, "세션 터미널이 없습니다");
+      if (this.runnerOf(member) instanceof CoreRunner && !this.contextLog(member)) throw new ApiError(409, "압축 완료를 관찰할 native 세션 기록이 없습니다");
+      this.coreCompactFenced(member); // 손상된 영속 상태도 새 예약으로 덮지 않는다.
+      const state = this.store.ensureContextState(memberId);
+      if (state.compaction && ["queued", "sending", "running", "uncertain"].includes(state.compaction.phase)) return this.store.requireMember(memberId);
+      const generation = this.store.memberRevisions(memberId).sessionGeneration;
+      const available = await this.runnerOf(member).available();
+      this.requireActive(this.store.requireProject(project.id));
+      if (!available.ok) throw new ApiError(409, "실행기에 연결할 수 없습니다");
+      const current = this.store.requireMember(memberId);
+      if (this.store.memberRevisions(memberId).sessionGeneration !== generation || current.sessionId !== member.sessionId || current.paneId !== member.paneId || ["asleep", "offline"].includes(current.status)) throw new ApiError(409, "압축을 예약하는 동안 세션이 변경되었습니다");
+      this.queueCoreCompact(this.store.requireMember(memberId), "manual", normalized);
+    } else this.runtime(memberId).compactRequest = normalized;
     await this.pump(memberId);
     return this.store.requireMember(memberId);
+  }
+
+  private queueCoreCompact(member: Member, trigger: "manual" | "auto", focus: string): void {
+    const state = this.store.ensureContextState(member.id);
+    if (state.compaction && ["queued", "sending", "running", "uncertain"].includes(state.compaction.phase)) return;
+    this.store.saveContextState({ ...state, baseline: { ...state.baseline, focus,
+      ...(trigger === "auto" ? { autoTurn: state.measurement?.turn } : {}) },
+      compaction: { id: randomUUID(), trigger, phase: "queued", reason: member.status === "working" ? "working" : member.status === "blocked" ? "blocked" : null,
+        requestedAt: new Date().toISOString(), startedAt: null, finishedAt: null } });
+    this.runtime(member.id).compactRequest = focus;
+  }
+
+  private contextLog(member: Member): { path: string; home: string } | null {
+    if (!this.providerHomes || !member.sessionId) return null;
+    const home = member.cli === "codex" ? this.providerHomes.codexHome : this.providerHomes.claudeHome;
+    if (member.cli !== "codex") {
+      const path = findSessionFile(home, member.cwd, member.sessionId);
+      return path ? { path, home } : null;
+    }
+    const root = join(home, "sessions");
+    try {
+      const paths = [...new Bun.Glob("**/rollout-*.jsonl").scanSync({ cwd: root, absolute: true, onlyFiles: true, followSymlinks: false })].filter(path => {
+        const meta = parseCodexSessionMeta(readJsonlRange(root, path, null, { maxBytes: 1024 * 1024 }).records[0]?.value);
+        return meta?.sessionId === member.sessionId && meta.cwd === member.cwd;
+      });
+      return paths.length === 1 ? { path: paths[0]!, home } : null;
+    } catch { return null; }
+  }
+
+  private invalidateCoreMeasurement(member: Member): void {
+    if (this.backendOf(member) !== "core") return;
+    const state = this.store.getContextState(member.id);
+    if (state?.measurement?.fresh) this.store.saveContextState({ ...state, measurement: { ...state.measurement, fresh: false } });
+  }
+
+  private deferCoreCompact(member: Member, reason: "manual_control" | "working" | "blocked" | "backend_down"): void {
+    if (this.backendOf(member) !== "core") return;
+    const state = this.store.getContextState(member.id);
+    if (state?.compaction?.phase === "queued" && state.compaction.reason !== reason) this.store.saveContextState({ ...state, compaction: { ...state.compaction, reason } });
+  }
+
+  private interruptCoreCompaction(member: Member): void {
+    if (this.backendOf(member) !== "core") return;
+    const state = this.store.getContextState(member.id);
+    if (!state?.compaction || ["succeeded", "failed"].includes(state.compaction.phase)) return;
+    const saved = state.baseline?.coreCompact as CoreCompactState | undefined;
+    this.store.saveContextState({ ...state, measurement: state.measurement ? { ...state.measurement, fresh: false } : null,
+      baseline: { ...state.baseline, ...(saved?.id === state.compaction.id ? { coreCompact: { ...saved, phase: "failed" } } : {}) },
+      compaction: { ...state.compaction, phase: "failed", reason: "interrupted", finishedAt: new Date().toISOString() } });
+    this.runtime(member.id).compactRequest = null;
+    this.runtime(member.id).skipCompact = true;
+  }
+
+  private coreCompactFenced(member: Member): boolean {
+    if (this.backendOf(member) !== "core") return false;
+    const compact = this.store.getContextState(member.id)?.compaction;
+    if (compact && !["queued", "sending", "running", "uncertain", "succeeded", "failed"].includes(compact.phase)) throw new ApiError(409, "압축 상태를 읽을 수 없어 자동 입력을 보류합니다");
+    return !!compact && ["sending", "running", "uncertain"].includes(compact.phase);
+  }
+
+  /** 실패/불확실도 Runner가 저장한 결과만 반영한다. idle이나 ACK는 완료 근거가 아니다. */
+  private reconcileCoreCompact(member: Member): void {
+    if (this.backendOf(member) !== "core") return;
+    const state = this.store.getContextState(member.id);
+    const rt = this.runtime(member.id);
+    if (state?.compaction?.phase === "queued") rt.compactRequest ??= (state.baseline?.focus as string | undefined) ?? this.compactFocus(member);
+    if (state?.compaction?.phase === "failed" && rt.turn?.kind === "compact") this.endCompact(member.id, rt, "제공자가 압축 종료/실패를 확인했습니다");
   }
 
   private compactFocus(member: Member): string {
@@ -2356,6 +2590,7 @@ export class Orchestrator implements OrchestratorApi {
     if (member.status === "asleep" && !this.pendingLifecycle(memberId)) return member;
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 잠재울 수 없습니다");
     const project = this.store.requireProject(member.projectId);
+    if (!opts.holdAs) this.requireActive(project);
     const rt = this.runtime(memberId);
     const pending = this.store.listPending(memberId);
     if (!opts.force) {
@@ -2366,6 +2601,10 @@ export class Orchestrator implements OrchestratorApi {
     if (rt.closing || rt.starting || rt.reopening) throw new ApiError(409, "세션을 처리하는 중입니다");
     rt.closing = true;
     try {
+      if (opts.holdAs === "archived") {
+        await this.verifyArchiveSession(member);
+        await this.runnerOf(member).checkStop?.(this.runnerMember(member, project), { whileWorking: false });
+      }
       // 넘겨받은 칸은 대표의 것이라 선택 창·승인 창이 떠 있으면 끝내지 않는다(입력칸에 남은 글은 지우고 끝낸다). 먼저 해 보고, 안 되면 아무것도 바꾸지 않고 이유를 돌려준다.
       const adopted = member.origin === "adopted";
       if (adopted) {
@@ -2373,7 +2612,7 @@ export class Orchestrator implements OrchestratorApi {
         const target = this.runnerMember(member, project);
         try {
           // 끊기 전에 본다. Esc 는 대표의 승인 창을 취소하고, 선택 창이 떠 있으면 끊고도 끝낼 수 없다. 승인 창은 force 여도 대표가 푼다.
-          if (opts.force && (this.isBusy(member) || member.status === "blocked")) {
+          if (opts.force && !opts.holdAs && (this.isBusy(member) || member.status === "blocked")) {
             await runner.checkStop?.(target, { whileWorking: true });
             if (member.status !== "blocked") await runner.interrupt(target);
           }
@@ -2388,8 +2627,12 @@ export class Orchestrator implements OrchestratorApi {
       if (rt.turn) rt.turn.interrupted = true;
       rt.compactRequest = null;
       this.store.transaction(() => {
+        this.interruptCoreCompaction(member);
         this.store.patchMember(memberId, { status: "asleep", subagents: 0, paneId: null });
-        for (const d of pending) this.hold(d, opts.holdAs ?? "asleep");
+        for (const d of this.store.listPending(memberId)) {
+          if (opts.holdAs && (d.attempts > 0 || d.status === "held" && d.holdReason !== "archived")) continue;
+          this.hold(d, opts.holdAs ?? "asleep");
+        }
         this.confirmStop(memberId);
       });
       // herdr 는 칸을 닫을 뿐 turn_end 를 내지 않는다. 턴을 비우지 않으면 깨운 뒤 전달이 영영 막힌다.
@@ -2495,6 +2738,7 @@ export class Orchestrator implements OrchestratorApi {
   /** 세션을 끝내고 명부에서 뺀다. 대화·결재 기록은 남는다. 나가지 않고 사라진 입력의 요약을 돌려준다. */
   async closeMember(memberId: string, opts: { paneDone?: boolean } = {}): Promise<string[]> {
     const member = this.store.requireMember(memberId);
+    if (this.archiving.has(member.projectId)) throw new ApiError(409, "프로젝트 보관을 처리하는 중입니다");
     if (member.kind !== "worker") throw new ApiError(400, "총괄은 닫을 수 없습니다");
     const rt = this.runtime(memberId);
     if (rt.closing || (this.backendOf(member) === "core" && (rt.starting || rt.reopening || rt.pumping))) throw new ApiError(409, "세션을 처리하는 중입니다");
@@ -2626,7 +2870,7 @@ export class Orchestrator implements OrchestratorApi {
   /** ask. blocking 이면(manual) 호출자가 askWait 로 기다리고, 아니면 text 를 도구 결과로 돌려준다. */
   async registerAsk(member: Member, input: AskInput): Promise<{ decision: Decision; blocking: boolean; text: string }> {
     // 보관한 프로젝트의 카드는 화면에 없고 답도 409 다. 올리면 세션이 답 없는 대기에 묶인다.
-    if (this.store.requireProject(member.projectId).archived) throw new ApiError(409, "프로젝트가 보관되어 대표가 답할 수 없습니다. 묻지 말고 턴을 끝내세요");
+    if (this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId)) throw new ApiError(409, "프로젝트가 보관되어 대표가 답할 수 없습니다. 묻지 말고 턴을 끝내세요");
     const { value: decision, deliveries } = this.store.withDeliveryIntents(() => {
       const decision = this.store.createDecision({
         projectId: member.projectId,
@@ -2794,7 +3038,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private materializeManualAnswers(member: Member): void {
-    if (this.store.requireProject(member.projectId).archived) return;
+    if (this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId)) return;
     this.store.transaction(() => {
       for (const decision of this.store.listUnreceivedAnswers(member.id)) {
         if (!this.store.listDeliveries(member.projectId).some(d => d.refType === "decision" && d.refId === decision.id && d.memberId === member.id)) this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "answer", text: formatAnswer(decision), refType: "decision", refId: decision.id });
@@ -2806,7 +3050,7 @@ export class Orchestrator implements OrchestratorApi {
     const take = () => {
       const member = this.store.requireMember(memberId);
       if (member.origin !== "manual") throw new ApiError(409, "직접 띄운 직원만 수신함을 사용할 수 있습니다");
-      if (signal?.aborted || this.store.requireProject(member.projectId).archived) return null;
+      if (signal?.aborted || this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId)) return null;
       this.materializeManualAnswers(member);
       return this.store.manualInbox(memberId);
     };
@@ -2819,6 +3063,7 @@ export class Orchestrator implements OrchestratorApi {
 
   async acknowledgeManualInbox(memberId: string, request: ManualInboxAckRequest): Promise<ManualInboxAckResult> {
     const member = this.store.requireMember(memberId);
+    this.requireActive(this.store.requireProject(member.projectId));
     if (member.origin !== "manual") throw new ApiError(409, "직접 띄운 직원만 수신함을 사용할 수 있습니다");
     const result = this.store.acknowledgeManualInbox(memberId, request.batchId);
     this.reconcileTodoCorrections();
@@ -2828,7 +3073,7 @@ export class Orchestrator implements OrchestratorApi {
 
   /** v1 compatibility: delivery and ACK are inseparable in the old string response. */
   private takeInbox(member: Member): string | null {
-    if (this.store.requireProject(member.projectId).archived) return null;
+    if (this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId)) return null;
     this.materializeManualAnswers(member);
     const batch = this.store.manualInbox(member.id);
     if (!batch) return null;
@@ -2917,11 +3162,13 @@ export class Orchestrator implements OrchestratorApi {
     // Previously attempted entries must be inspected, including legacy held rows.
     for (const d of pending) if (d.attempts > 0 && this.store.getDeliveryRecovery(d.id)?.phase === "none") this.deliveryRecovery.beginRecovery(d.id);
     if (this.recovering || this.configWrites.has(memberId) || this.pendingLifecycle(memberId)) return;
-    if (this.store.inputState(memberId).lease) return;
+    if (this.store.inputState(memberId).lease) { this.deferCoreCompact(member, "manual_control"); return; }
     if (member.backend === "core" && member.statusObservation && member.statusObservation.ownership !== "verified" && !(member.status === "offline" && member.statusObservation.error?.code === "no_owned_terminal")) return;
     if (member.backend === "core" && this.store.listPendingExecutions().some(run => run.memberId === memberId && run.identity.sessionGeneration === this.store.memberRevisions(memberId).sessionGeneration) && !this.runtime(memberId).turn) return;
     if (this.deliveryRecovery.fenced(memberId)) return;
     const rt = this.runtime(memberId);
+    this.reconcileCoreCompact(member);
+    if (this.coreCompactFenced(member)) return;
     if (rt.closing) return; // 닫는 중에 다시 열면 명부 밖 칸이 남는다.
     if (this.switching || this.settingsWriting) return; // 설정 적용이 끝나면 다시 민다.
     if (rt.starting) return; // 다 뜨면 다시 민다.
@@ -2964,10 +3211,12 @@ export class Orchestrator implements OrchestratorApi {
 
     // 턴 도중 승인 창에 걸려도 보류로 보여 준다. isBusy 보다 먼저 본다(§6).
     if (member.status === "blocked") {
+      this.deferCoreCompact(member, "blocked");
       for (const d of pending) this.hold(d, "blocked");
       return;
     }
     if (this.isBusy(member)) {
+      this.deferCoreCompact(member, "working");
       const urgent = pending.filter((d) => d.urgent);
       // headless 는 돌고 있는 턴에 끼워 넣을 수 없다. 끝나면 묶어서 나간다.
       if (urgent.length > 0 && runner.kind !== "headless") await this.sendUrgent(member, project, runner, urgent);
@@ -3019,7 +3268,14 @@ export class Orchestrator implements OrchestratorApi {
     }
 
     const compactAt = this.store.getSettings().compactAtPct;
-    const autoCompact = runner.kind !== "core" && hasWake && !rt.skipCompact && member.contextPct !== null && member.contextPct >= compactAt;
+    const state = runner.kind === "core" ? this.store.getContextState(memberId) : null;
+    const measurement = state?.measurement;
+    const exact = measurement?.fresh && measurement.quality === "exact" && measurement.sessionId === member.sessionId &&
+      measurement.sessionGeneration === this.store.memberRevisions(memberId).sessionGeneration && measurement.turn !== null &&
+      state?.baseline?.completedTurn === measurement.turn && state.baseline.autoTurn !== measurement.turn &&
+      state.baseline.configRevision === this.store.memberRevisions(memberId).configRevision;
+    const autoCompact = hasWake && !rt.skipCompact && member.contextPct !== null && member.contextPct >= compactAt && (runner.kind !== "core" || exact);
+    if (autoCompact && runner.kind === "core") this.queueCoreCompact(member, "auto", this.compactFocus(member));
     if (rt.compactRequest !== null || autoCompact) {
       await this.beginCompact(member, project, runner, rt, rt.compactRequest ?? this.compactFocus(member));
       return;
@@ -3156,7 +3412,7 @@ export class Orchestrator implements OrchestratorApi {
 
   /** Commit the exact envelope before I/O; all ambiguous results belong to recovery. */
   private async sendEnvelope(member: Member, project: Project, runner: Runner, deliveries: Delivery[], urgent: boolean): Promise<SendResult> {
-    if (!deliveries.length || this.deliveryRecovery.fenced(member.id)) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written" };
+    if (project.archived || this.archiving.has(project.id) || this.coreCompactFenced(member) || !deliveries.length || this.deliveryRecovery.fenced(member.id)) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written" };
     const observed = runner instanceof CoreRunner ? runner.observationState(member.id) : null;
     const dispatch = this.deliveryRecovery.prepareDispatch(deliveries.map(d => d.id), observed?.identity ?? {
       terminalId: member.paneId, sessionId: member.sessionId, sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration, process: null,
@@ -3165,6 +3421,7 @@ export class Orchestrator implements OrchestratorApi {
       this.store.updateDispatch(dispatch.dispatchId, "prepared", "write_started");
       for (const d of deliveries) this.store.setDeliveryStatus(d.id, "delivering", { attempt: true });
     });
+    this.invalidateCoreMeasurement(member);
     return this.executeDispatch(member, dispatch, () => runner.send(this.runnerMember(member, project), dispatch.wireText, { ...this.writeRunFiles(member, project), marker: dispatch.bundleMarker }, urgent));
   }
 
@@ -3391,7 +3648,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private isBusy(member: Member): boolean {
-    return this.runtime(member.id).turn !== null || !!this.runners.get(this.backendOf(member))?.isBusy(member.id);
+    return this.coreCompactFenced(member) || this.runtime(member.id).turn !== null || !!this.runners.get(this.backendOf(member))?.isBusy(member.id);
   }
 
   /** Count persisted executions before admitting new work, including unknown/received turns. */
@@ -3402,7 +3659,7 @@ export class Orchestrator implements OrchestratorApi {
       if (member && ["core", "headless"].includes(this.backendOf(member)) && this.store.memberRevisions(member.id).sessionGeneration === run.identity.sessionGeneration) ids.add(member.id);
     }
     for (const [id, rt] of this.runtimes) if (rt.turn?.admitted) ids.add(id);
-    for (const member of this.store.listAllMembers()) if (member.origin !== "manual" && this.backendOf(member) === "core" && this.runners.get("core")?.isBusy(member.id)) ids.add(member.id);
+    for (const member of this.store.listAllMembers()) if (member.origin !== "manual" && member.status !== "offline" && member.status !== "asleep" && this.backendOf(member) === "core" && this.runners.get("core")?.isBusy(member.id)) ids.add(member.id);
     return ids.size;
   }
 
@@ -3420,8 +3677,9 @@ export class Orchestrator implements OrchestratorApi {
 
   // ---- 압축 ----
   private async beginCompact(member: Member, project: Project, runner: Runner, rt: Runtime, focus: string): Promise<void> {
+    if (runner.kind === "core") return this.beginCoreCompact(member, project, runner, rt, focus);
     rt.compactRequest = null;
-    const turn: Turn = { kind: "compact", admitted: runner.kind === "headless" || runner.kind === "core", text: "", interrupted: false };
+    const turn: Turn = { kind: "compact", admitted: runner.kind === "headless", text: "", interrupted: false };
     rt.turn = turn;
     this.store.patchMember(member.id, { status: "working" });
     this.store.appendActivity(member.id, "compact", `압축 시작 (문맥 ${member.contextPct ?? "?"}%)`);
@@ -3448,6 +3706,47 @@ export class Orchestrator implements OrchestratorApi {
     this.releaseSlots();
   }
 
+  private async beginCoreCompact(member: Member, project: Project, runner: Runner, rt: Runtime, focus: string): Promise<void> {
+    const state = this.store.ensureContextState(member.id);
+    if (state.compaction?.phase !== "queued") return;
+    this.requireActive(this.store.requireProject(project.id));
+    const turn: Turn = { kind: "compact", admitted: true, text: "", interrupted: false };
+    rt.turn = turn; // admission은 첫 await 이전에 예약한다.
+    rt.compactRequest = null;
+    const result = await this.safeSend(() => runner.compact(this.runnerMember(member, project), focus, this.writeRunFiles(member, project)));
+    if (rt.turn !== turn) return;
+    const latest = this.store.ensureContextState(member.id);
+    if (latest.compaction?.phase === "succeeded") { this.endCompact(member.id, rt, null); return; }
+    if (result.ok) {
+      this.store.appendActivity(member.id, "compact", `압축 시작 (문맥 ${member.contextPct ?? "?"}%)`);
+      this.store.patchMember(member.id, { status: "working" });
+      const id = latest.compaction?.id;
+      rt.compactTimer = setTimeout(() => {
+        rt.compactTimer = null;
+        const current = this.store.getContextState(member.id);
+        if (!current?.compaction || current.compaction.id !== id || !["sending", "running"].includes(current.compaction.phase)) return;
+        this.store.saveContextState({ ...current, compaction: { ...current.compaction, phase: "uncertain", reason: "completion_timeout" } });
+        this.store.appendActivity(member.id, "error", "압축 완료를 확인할 수 없어 후속 자동 입력을 보류합니다");
+      }, this.timings.compactTimeoutMs);
+      return;
+    }
+    const uncertain = !["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown");
+    const retry = !uncertain && (result.deliveryEffect === "rejected" || ["busy", "blocked", "input_busy", "down"].includes(result.reason));
+    if (latest.compaction && (latest.compaction.phase !== "failed" || retry)) this.store.saveContextState({ ...latest,
+      compaction: { ...latest.compaction, phase: uncertain ? "uncertain" : retry ? "queued" : "failed",
+        reason: uncertain ? "send_uncertain" : result.reason === "input_busy" ? "draft" : result.reason === "blocked" ? "blocked" : result.reason === "down" ? "backend_down" : retry ? "working" : "provider_error",
+        finishedAt: !uncertain && !retry ? new Date().toISOString() : null } });
+    if (uncertain) {
+      this.store.appendActivity(member.id, "error", "압축 응답을 확인할 수 없어 자동 재전송을 중지했습니다");
+      return;
+    }
+    rt.turn = null;
+    if (retry) { rt.compactRequest = focus; this.retryLater(member.id, rt, this.timings.retryMs); }
+    else { rt.skipCompact = true; rt.again = true; this.store.appendActivity(member.id, "error", `압축 실패: ${result.detail ?? result.reason}`); }
+    this.settle(this.store.requireMember(member.id));
+    this.releaseSlots();
+  }
+
   /** 압축 턴 정리. 실패해도 대기열은 멈추지 않는다. */
   private endCompact(memberId: string, rt: Runtime, error: string | null): void {
     rt.turn = null;
@@ -3468,7 +3767,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private afterCompacted(member: Member): void {
-    this.store.patchMember(member.id, { contextPct: null });
+    if (this.backendOf(member) !== "core") this.store.patchMember(member.id, { contextPct: null });
     this.store.appendActivity(member.id, "compact", "압축 완료");
     if (member.origin !== "adopted") return;
     // 넘겨받은 세션은 규칙이 시스템 프롬프트에 없어 요약에서 흐려진다(스킬 §4).
@@ -3494,6 +3793,7 @@ export class Orchestrator implements OrchestratorApi {
     if (e.sessionGeneration !== undefined && e.sessionGeneration !== generation) return;
     if (e.terminalId && member.paneId && e.terminalId !== member.paneId) return;
     if (this.runtime(member.id).closing) return;
+    this.reconcileCoreCompact(member);
     if (e.turn !== undefined && e.turn !== null) {
       const previous = this.observedTurns.get(member.id);
       const same = previous?.generation === generation && previous.terminal === (e.terminalId ?? member.paneId);
@@ -3507,6 +3807,7 @@ export class Orchestrator implements OrchestratorApi {
     }
     switch (e.type) {
       case "status":
+        if (e.status === "working" || e.observation?.freshness === "stale") this.invalidateCoreMeasurement(member);
         if (e.status === "idle" && e.turn !== undefined && e.turn !== null && pending.some(run => run.turn !== null && e.turn! > run.turn)) {
           this.endExecution(member, "success", "서버 부재 중 더 뒤의 종결 turn을 확인했습니다");
           this.runtime(member.id).turn = null;
@@ -3555,11 +3856,18 @@ export class Orchestrator implements OrchestratorApi {
         return;
       case "compacted": {
         const rt = this.runtime(member.id);
+        if (this.backendOf(member) === "core") {
+          const state = this.store.getContextState(member.id);
+          if (state?.compaction?.phase !== "succeeded" || e.runId !== state.compaction.id || state.baseline?.reportedCompact === e.runId) return;
+          this.store.saveContextState({ ...state, baseline: { ...state.baseline, reportedCompact: e.runId } });
+        }
         if (rt.turn?.kind === "compact") {
           this.endCompact(member.id, rt, null);
         } else {
           rt.skipCompact = true;
           this.afterCompacted(member);
+          this.releaseSlots();
+          void this.pump(member.id);
         }
         return;
       }
@@ -3607,6 +3915,9 @@ export class Orchestrator implements OrchestratorApi {
         this.markBlocked(member);
         break;
       case "gone":
+        this.interruptCoreCompaction(member);
+        if (rt.compactTimer) clearTimeout(rt.compactTimer);
+        rt.compactTimer = null;
         this.store.patchMember(member.id, { status: "offline", ...(this.backendOf(member) === "core" ? {} : { paneId: null }), subagents: 0 });
         rt.turn = null;
         rt.background = null;
@@ -3621,6 +3932,7 @@ export class Orchestrator implements OrchestratorApi {
     const turn = rt.turn;
     if (turn?.kind === "control") return;
     if (turn?.kind === "compact") {
+      if (this.backendOf(member) === "core") return;
       if (turn.interrupted) {
         rt.turn = null;
         if (rt.compactTimer) clearTimeout(rt.compactTimer);
@@ -3644,6 +3956,10 @@ export class Orchestrator implements OrchestratorApi {
     rt.posted = false;
     rt.direct = false;
     rt.skipCompact = false;
+    if (this.backendOf(member) === "core") {
+      const state = this.store.ensureContextState(member.id);
+      this.store.saveContextState({ ...state, baseline: { ...state.baseline, completedTurn: e.turn ?? null } });
+    }
     this.store.appendActivity(member.id, e.isError ? "error" : "turn_end", e.isError ? (e.errorText ?? "오류") : "턴 끝");
     if (member.subagents !== 0) this.store.patchMember(member.id, { subagents: 0 });
 
@@ -3737,6 +4053,27 @@ export class Orchestrator implements OrchestratorApi {
    * 화면 % 는 바로 표시하고, 창 추정은 두 읽기가 맞아야 저장한다.
    */
   private onContextUsage(member: Member, e: Extract<RunnerEvent, { type: "context_usage" }>): void {
+    if (this.backendOf(member) === "core") {
+      if (!member.sessionId || !member.paneId || e.sessionId && e.sessionId !== member.sessionId) return;
+      const state = this.store.ensureContextState(member.id);
+      const settings = this.store.getSettings();
+      const identity = { sessionId: member.sessionId, generation: state.generation, terminalId: member.paneId, turn: e.turn ?? null, model: e.model };
+      const measurement = coreContextMeasurement(e, identity, identity,
+        { learned: member.contextWindow, source: member.contextWindowSource, fallback: settings.contextWindowDefault, windows: settings.contextWindows },
+        { complete: true, fresh: e.sessionGeneration === state.generation && e.terminalId === member.paneId, measuredAt: e.observedAt ?? new Date().toISOString() });
+      if (!measurement) return;
+      const measured = measureContext(e, { learned: member.contextWindow, source: member.contextWindowSource, fallback: settings.contextWindowDefault, windows: settings.contextWindows });
+      const log = this.contextLog(member);
+      const old = state.baseline?.measurementLog as CompactBoundaryBaseline | undefined;
+      let builtin = false;
+      if (log && old) builtin = observeCompactBoundary({ cli: member.cli, home: log.home, cwd: member.cwd, baseline: old, current: identity, settled: true, providerError: false }).outcome === "succeeded";
+      const range = log ? readJsonlRange(join(log.home, member.cli === "codex" ? "sessions" : "projects"), log.path) : null;
+      const baseline = range?.complete && range.cursor && log ? { ...identity, path: log.path, fileIdentity: range.cursor.fileIdentity, offset: range.cursor.offset } : null;
+      this.store.saveContextState({ ...state, measurement, baseline: { ...state.baseline, configRevision: this.store.memberRevisions(member.id).configRevision,
+        measurementLog: baseline, ...(builtin ? { autoTurn: measurement.turn } : {}) } },
+        { contextPct: measured?.pct ?? null, ...(measured?.learned !== null && measured?.learned !== undefined ? { contextWindow: measured.learned, contextWindowSource: measured.source } : {}) });
+      return;
+    }
     const rt = this.runtime(member.id);
     if (rt.contextCandidate?.sessionId !== member.sessionId) rt.contextCandidate = null;
     if (e.sessionId && e.sessionId !== member.sessionId) return;
@@ -3841,6 +4178,7 @@ export class Orchestrator implements OrchestratorApi {
     const backend = this.store.effectiveBackend();
     const runner = this.runners.get(backend);
     if (!runner) throw new ApiError(503, `실행기가 없습니다: ${backend}`);
+    if (backend === "core" && this.store.getMember(member.id)) this.store.ensureContextState(member.id);
     if (this.store.getMember(member.id) && member.backend !== backend) {
       this.store.patchMember(member.id, { backend });
       member.backend = backend;

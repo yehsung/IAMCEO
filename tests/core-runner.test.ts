@@ -220,7 +220,7 @@ describe("delivery safety and OSC7501 turns", () => {
   test("blocked, silent, unknown composer and user drafts never receive input", async () => {
     const f = await fixture(); const runner = f.runner(10000); const start = await runner.start(member(), f.opts); const terminal = f.terminals.get(start.paneId)!;
     terminal.status = { state: "blocked", kind: "permission" }; expect(await runner.send(member(), "message", f.opts)).toMatchObject({ ok: false, reason: "blocked" });
-    terminal.status = null; expect(await runner.send(member(), "message", f.opts)).toMatchObject({ ok: false, reason: "input_busy", retryable: false });
+    terminal.status = null; expect(await runner.send(member(), "message", f.opts)).toMatchObject({ ok: false, reason: "busy", retryable: true });
     terminal.status = { state: "idle" }; f.setScreen(composer("User's existing draft")); expect(await runner.send(member(), "message", f.opts)).toMatchObject({ ok: false, reason: "input_busy" });
     f.setScreen("Approve execution?\n1. Yes\n2. No"); expect(await runner.send(member(), "message", f.opts)).toMatchObject({ ok: false, reason: "input_busy" });
     expect(f.calls.some((request) => ["terminal.send", "terminal.keys"].includes(request.method))).toBe(false);
@@ -832,4 +832,75 @@ test("malformed creation receipt leaves a start fence instead of authorizing a s
   const defaults = providerLaunch(m, f.opts, { codexBin: "/fake/codex" });
   expect(defaults.argv).not.toContain("--model");
   expect(defaults.argv.some(arg => /model_reasoning_effort|default_subagent_model/.test(arg))).toBe(false);
+});
+
+
+const codexTrustScreen = (selected = 0, cwd = "/tmp") => `Folder access
+${cwd}
+Trust this folder? Codex can read, edit, and run files here, subject to your permission settings. Folder settings can run code automatically, even without a model request. Continue only if you
+trust these files. Your trust decision will be saved.
+${selected === 0 ? "›" : " "} 1. Trust and continue
+${selected === 1 ? "›" : " "} 2. Quit
+enter continue · esc quit
+`;
+describe("Codex 0.166 folder trust approval", () => {
+  async function trust(selected = 0) {
+    const f = await fixture(), runner = f.runner(10000), m = member({ cli: "codex" });
+    const start = await runner.start(m, f.opts), terminal = f.terminals.get(start.paneId)!;
+    terminal.status = null; f.setScreen(codexTrustScreen(selected));
+    return { f, runner, m, terminal };
+  }
+  test.each([[0, 1, ["enter"]], [0, 2, ["down", "enter"]], [1, 1, ["up", "enter"]]] as const)("selection %s answer %s calculates keys from the observed cursor", async (selected, option, keys) => {
+    const { f, runner, m } = await trust(selected);
+    const prompt = (await runner.approval(m))!;
+    expect(prompt).toMatchObject({ title: "폴더 신뢰 확인", question: "Trust this folder?", options: [{ n: 1, reject: false }, { n: 2, reject: true }] });
+    expect(f.calls.filter(c => c.method === "terminal.keys")).toHaveLength(0);
+    expect(runner.observationState(m.id)?.setupError?.code).toBe("folder_trust");
+    expect(await runner.answerApproval(m, prompt.fingerprint!, option)).toMatchObject({ ok: true });
+    expect(f.calls.filter(c => c.method === "terminal.keys").at(-1)?.params.keys).toEqual([...keys]);
+    expect(await runner.answerApproval(m, prompt.fingerprint!, option)).toMatchObject({ ok: false });
+    expect(f.calls.filter(c => c.method === "terminal.keys")).toHaveLength(1);
+  });
+  test("changed fingerprint, wrong cwd, missing selection and manual lease never send keys", async () => {
+    const { f, runner, m } = await trust(); const prompt = (await runner.approval(m))!;
+    f.setScreen(codexTrustScreen(1));
+    expect(await runner.answerApproval(m, prompt.fingerprint!, 1)).toMatchObject({ ok: false, reason: "changed" });
+    for (const screen of [codexTrustScreen(0, "/other"), codexTrustScreen().replace("›", " ")]) {
+      f.setScreen(screen); expect(await runner.approval(m)).toBeNull();
+    }
+    f.setScreen(codexTrustScreen()); await runner.terminalControl(m, { action: "claim" });
+    expect(await runner.answerApproval(m, prompt.fingerprint!, 1)).toMatchObject({ ok: false, reason: "input_busy" });
+    expect(f.calls.filter(c => c.method === "terminal.keys")).toHaveLength(0);
+  });
+});
+
+test("resumed native session reads old delivery markers across terminal identity change without authorizing repair", async () => {
+  const d = await deliveryFixture();
+  writeFileSync(d.path, d.user(d.dispatch.wireText));
+  const old = { ...d.dispatch, identity: { ...d.dispatch.identity, terminalId: "previous-terminal", sessionGeneration: 0 } };
+  const result = await d.runner.inspectDelivery(member(), old);
+  expect(result.finding).toBe("received"); expect(result.receivedDeliveryIds).toEqual(["delivery"]);
+  expect(result.snapshot?.identity.terminalId).toBe(d.started.paneId);
+  expect(result.quiescence).toBe("unresolved");
+  expect(d.f.calls.filter(c => c.method === "terminal.send")).toHaveLength(0);
+  const different = await d.runner.inspectDelivery(member(), { ...old, identity: { ...old.identity, sessionId: "another-native" } });
+  expect(different).toMatchObject({ finding: "unknown", receivedDeliveryIds: [], evidence: [{ code: "identity_changed" }] });
+});
+
+test("Codex legacy terminal launch journal bounds binding even without a startedAt label", async () => {
+  const f = await fixture(), first = f.runner(10000), codex = member({ cli: "codex" });
+  const started = await first.start(codex, f.opts), terminal = f.terminals.get(started.paneId)!;
+  const timestamp = "2026-11-06T01:00:00Z", nonce = terminal.labels["iamceo.binding"];
+  delete terminal.labels["iamceo.startedAt"]; terminal.labels["iamceo.operation"] = "legacy-launch";
+  const dir = join(f.dir, "codex-home/sessions/day"); mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < 25; i++) writeFileSync(join(dir, `rollout-2025-01-01T00-00-00-${i}.jsonl`), "{broken old format}\n");
+  writeFileSync(join(dir, "rollout-2026-11-06T01-00-00-native.jsonl"), [
+    { type: "session_meta", payload: { id: "native", session_id: "native", cwd: codex.cwd, timestamp } },
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: `[IAMCEO session binding: ${nonce}]` }] } },
+  ].map(row => JSON.stringify(row)).join("\n") + "\n");
+  await first.shutdown();
+  const recovery = recoveryStore();
+  const runner = f.runner(10000, { recoveryStore: { ...recovery.port, getLifecycleJournal: () => ({ operationId: "legacy-launch", memberId: codex.id, projectId: codex.projectId, intent: "start", phase: "confirmed", identity: { terminalId: started.paneId, sessionId: null, sessionGeneration: 1, process: null }, runId: null, deliveryIds: [], baseline: null, reason: null, exitCode: null, createdAt: timestamp, updatedAt: timestamp }) } });
+  await runner.start({ ...codex, paneId: started.paneId }, f.opts); await runner.screen(codex);
+  expect(runner.observationState(codex.id)?.identity.sessionId).toBe("native");
 });

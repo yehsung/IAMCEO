@@ -17,7 +17,7 @@ function token(usage: unknown = { total_tokens: 49_096 }, window: unknown = 258_
   return { type: "event_msg", timestamp: "2026-11-07T01:02:03Z", payload: { type: "token_count", info: { model_context_window: window, last_token_usage: usage, total_token_usage: { total_tokens: 9_999_999 } } } };
 }
 function rollout(id = "session", rows: unknown[] = [], date = "2026/11/07") {
-  const path = join(runtime.paths.codexHome, "sessions", date, `rollout-time-${id}.jsonl`);
+  const path = join(runtime.paths.codexHome, "sessions", date, `${/^\d{4}-/.test(id) ? "rollout-" : "rollout-time-"}${id}.jsonl`);
   mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, rows.map(line).join("")); return path;
 }
 function binding(cursor?: ReturnType<typeof discoverCodexSession>["cursor"]) { return discoverCodexSession({ home: runtime.paths.codexHome, cwd: runtime.paths.work, generation: 4, nonce, cursor }); }
@@ -203,5 +203,35 @@ describe("compact boundary observation", () => {
     expect(observeCompactBoundary({ ...opts, settled: true }).outcome).toBe("unknown");
     const codex = setup("codex"); appendFileSync(codex.baseline.path, line({ type: "event_msg", payload: { type: "context_compacted" } }));
     expect(observeCompactBoundary({ ...codex, settled: true }).outcome).toBe("pending");
+  });
+});
+
+
+describe("Codex 0.166 scoped binding", () => {
+  const since = "2026-11-07T01:00:00Z";
+  function scoped() { return discoverCodexSession({ home: runtime.paths.codexHome, cwd: runtime.paths.work, generation: 4, nonce, since }); }
+  function recent(id: string, rows: unknown[]) { return rollout(`2026-11-07T01-00-01-${id}`, rows); }
+  test("과거 형식 수십 개는 후보에서 제외하고 현재 nonce 하나에 연결한다", () => {
+    for (let i = 0; i < 25; i++) rollout(`2025-01-01T00-00-00-old${i}`, [{ old_format: true }]);
+    // Nonstandard filename can still be excluded by metadata timestamp.
+    rollout("old-meta", [meta("old", { timestamp: "2025-01-01T00:00:00Z" }), user()]);
+    recent("new", [meta("new", { session_id: "new", timestamp: since, context_window: 258400, cli_version: "0.166.0" }), { type: "world_state", payload: {} }, user()]);
+    expect(scoped()).toMatchObject({ outcome: "bound", sessionId: "new" });
+  });
+  test("현재 두 nonce는 conflict, 현재 손상 metadata는 unknown", () => {
+    recent("one", [meta("one"), user()]); recent("two", [meta("two"), user()]);
+    expect(scoped().outcome).toBe("conflict");
+    recent("two", [{ type: "session_meta", payload: { broken: true } }]);
+    expect(scoped()).toMatchObject({ outcome: "unknown", code: "incomplete_candidates" });
+  });
+  test("0.166 metadata window는 요청 window가 없을 때 실측 근거이며 요청 window가 우선한다", () => {
+    const path = rollout("session", [meta("session", { session_id: "session", context_window: 258400, cli_version: "0.166.0" }),
+      { type: "world_state" }, { type: "token_usage_record" }, { type: "turn_context", payload: { model: "gpt-fixture" } },
+      { type: "event_msg", payload: { type: "thread_settings_applied" } }, token({ total_tokens: 1234 }, undefined)]);
+    // helper default supplies a window; explicitly omit it in the actual event.
+    appendFileSync(path, line({ type: "event_msg", timestamp: since, payload: { type: "token_count", info: { last_token_usage: { total_tokens: 2222 } } } }));
+    expect(readCodexContextFile(runtime.paths.codexHome, path, "session").reading).toMatchObject({ tokens: 2222, exact: { window: 258400, source: "codex" } });
+    appendFileSync(path, line(token({ total_tokens: 3333 }, 475000)));
+    expect(readCodexContextFile(runtime.paths.codexHome, path, "session").reading).toMatchObject({ tokens: 3333, exact: { window: 475000 } });
   });
 });

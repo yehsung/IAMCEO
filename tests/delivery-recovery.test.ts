@@ -30,14 +30,14 @@ function setup() {
   let service: DeliveryRecovery;
   let finalHook = (_request: DeliveryRepair) => {};
   let inspect = async (_member: RunnerMember, query: DeliveryProbe): Promise<DeliveryInspection> => observation(query);
-  let result: SendResult = { ok: false, reason: "down", retryable: true, deliveryEffect: "not_written" };
+  let result: SendResult = { ok: false, reason: "error", retryable: false, deliveryEffect: "unknown" };
   function observation(query: DeliveryProbe, patch: Partial<DeliveryInspection> = {}): DeliveryInspection {
     return { finding: "unknown", evidence: [{ source: "claude_log", verdict: "unknown", location: "none", code: "partial_log", complete: false, checkedAt: new Date(time).toISOString() }], receivedDeliveryIds: [], quiescence: "unresolved",
       snapshot: { identity: query.identity, observedAt: new Date(time).toISOString(), turn: 1, inputEpoch: 1, ownership: "verified", status: "idle", blockedReason: null, leaseActive: false, mutation: "none", composer: "empty", originalWrite: "unresolved", externalInput: false }, ...patch };
   }
   function absent(query: DeliveryProbe): DeliveryInspection {
     const value = observation(query, { finding: "not_received", quiescence: "settled", evidence: [{ source: "transport", verdict: "absent", location: "none", code: "not_written", complete: true, checkedAt: new Date(time).toISOString() }] });
-    value.snapshot!.originalWrite = "not_written";
+    value.snapshot!.originalWrite = "settled";
     return value;
   }
   const runner = {
@@ -178,7 +178,7 @@ describe("영속 확인과 안전 fence", () => {
 
 describe("자동 재전송과 제출 복구", () => {
   test("같은 delivery/표식으로 2/10/30초 backoff, 최초 외 최대 3회, 재시작 상한", async () => {
-    const f = setup(); const d = f.enqueue(); const dispatch = f.envelope([d], "not_written");
+    const f = setup(); const d = f.enqueue(); const dispatch = f.envelope([d]);
     f.inspect = async (_m, q) => f.absent(q);
     for (const delay of [2_000, 10_000, 30_000]) {
       await f.service.tick(); expect(Date.parse(f.r(d.id).nextCheckAt!) - f.now).toBe(delay);
@@ -196,7 +196,7 @@ describe("자동 재전송과 제출 복구", () => {
   });
 
   test("jitter는 0~20%이고 GET이 재시도 예약을 바꾸지 않는다", async () => {
-    const f = setup(); f.random = 1; const d = f.enqueue(); f.envelope([d], "not_written"); f.inspect = async (_m, q) => f.absent(q);
+    const f = setup(); f.random = 1; const d = f.enqueue(); f.envelope([d]); f.inspect = async (_m, q) => f.absent(q);
     await f.service.tick(); expect(Date.parse(f.r(d.id).nextCheckAt!) - f.now).toBe(2_400);
     const before = f.r(d.id); const count = f.events.length;
     f.service.notices(f.project.id); f.service.memberNotices(f.member.id);
@@ -204,7 +204,7 @@ describe("자동 재전송과 제출 복구", () => {
   });
 
   test("옛 시도의 늦은 실패는 새 봉투의 unknown 물리 입력 fence를 해제하지 않는다", async () => {
-    const f = setup(); const d = f.enqueue(); const original = f.envelope([d], "not_written");
+    const f = setup(); const d = f.enqueue(); const original = f.envelope([d]);
     f.inspect = async (_m, q) => f.absent(q); f.result = { ok: false, reason: "error", retryable: false, deliveryEffect: "unknown" };
     await f.service.tick(); await f.due(d.id);
     const attempt = f.store.getDispatch(f.writes[0].dispatchId)!;
@@ -217,7 +217,7 @@ describe("자동 재전송과 제출 복구", () => {
   });
 
   test("재전송 직전 수신을 발견하면 입력하지 않고 다음 확인에서 정정한다", async () => {
-    const f = setup(); const d = f.enqueue(); f.envelope([d], "not_written");
+    const f = setup(); const d = f.enqueue(); f.envelope([d]);
     let scans = 0;
     f.inspect = async (_m, q) => ++scans >= 3 ? f.observation(q, { finding: "received", receivedDeliveryIds: [d.id] }) : f.absent(q);
     await f.service.tick(); await f.due(d.id); expect(f.writes).toHaveLength(0);
@@ -243,7 +243,7 @@ describe("자동 재전송과 제출 복구", () => {
   });
 
   test("부분 묶음 수신은 나머지만 새 봉투로 보내고 개별 표식은 보존한다", async () => {
-    const f = setup(); const a = f.enqueue(); const b = f.enqueue(); const original = f.envelope([a, b], "not_written");
+    const f = setup(); const a = f.enqueue(); const b = f.enqueue(); const original = f.envelope([a, b]);
     let first = true;
     f.inspect = async (_m, q) => { if (first) { first = false; return f.observation(q, { finding: "received", receivedDeliveryIds: [a.id] }); } return f.absent(q); };
     await f.service.tick(); expect(f.r(a.id).phase).toBe("resolved"); expect(f.service.fenced(f.member.id)).toBe(true);
@@ -259,7 +259,7 @@ describe("자동 재전송과 제출 복구", () => {
 
   test("원본 취소가 최종 prepare 직전에 발생해도 쓰기는 0회다", async () => {
     const f = setup(); const todo = f.store.createTodo({ projectId: f.project.id, title: "할 일" }); f.store.setTodoDone(todo.id, true);
-    const d = f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "todo_done", text: "완료", refType: "todo", refId: todo.id }); f.envelope([d], "not_written");
+    const d = f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "todo_done", text: "완료", refType: "todo", refId: todo.id }); f.envelope([d]);
     f.inspect = async (_m, q) => f.absent(q); await f.service.tick();
     f.finalHook = () => { f.store.setTodoDone(todo.id, false); };
     await f.due(d.id); expect(f.writes).toHaveLength(0);
@@ -268,7 +268,7 @@ describe("자동 재전송과 제출 복구", () => {
   });
 
   test("lease claim/보관이 최종 prepare 직전에 생기면 입력을 차단한다", async () => {
-    const f = setup(); const d = f.enqueue(); const dispatch = f.envelope([d], "not_written"); f.inspect = async (_m, q) => f.absent(q); await f.service.tick();
+    const f = setup(); const d = f.enqueue(); const dispatch = f.envelope([d]); f.inspect = async (_m, q) => f.absent(q); await f.service.tick();
     f.finalHook = () => f.store.saveLease({ memberId: f.member.id, claimId: "late", leaseId: "lease", identity: dispatch.identity, expiresAt: Date.now() + 60_000, lastInputSequence: 0 });
     await f.due(d.id); expect(f.writes).toHaveLength(0); expect(f.r(d.id).autoAttempts).toBe(0);
   });
@@ -317,11 +317,12 @@ describe("원본 판, operation과 읽기 집계", () => {
     const later: DeliveryDispatch = { ...old, dispatchId: randomUUID(), bundleMarker: "#iamceo_b_later", transportState: "rejected" };
     f.store.saveDispatch(later);
     f.inspect = async (_m, q) => q.dispatchId === old.dispatchId ? f.observation(q) : f.absent(q);
-    await f.service.tick(); await f.due(d.id);
+    await f.service.tick();
+    expect(f.r(d.id)).toMatchObject({ phase: "resolved", reason: "not_received" });
     expect(f.writes).toHaveLength(0); expect(f.service.fenced(f.member.id)).toBe(true);
     f.inspect = async (_m, q) => f.absent(q);
     f.now += 60_000; await f.service.tick();
-    expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("rejected");
+    expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("accepted");
   });
 
   test("위험 동의도 원래 쓰기 미종료는 우회하지 않고 안전한 unknown만 1회 요청한다", async () => {
@@ -378,7 +379,7 @@ describe("원본 판, operation과 읽기 집계", () => {
   });
 
   test("위험 동의는 상한을 초기화하지 않고 새 쓰기 한 번만 허용한다", async () => {
-    const f = setup(); const d = f.enqueue(); f.envelope([d], "not_written");
+    const f = setup(); const d = f.enqueue(); f.envelope([d]);
     f.store.updateDeliveryRecovery(d.id, f.r(d.id).version, { phase: "needs_owner", reason: "retry_exhausted", autoAttempts: 3 });
     const request = { operationId: randomUUID(), expectedVersion: f.r(d.id).version, action: "retry_with_risk" as const, acceptDuplicateRisk: true as const };
     const result = await f.service.recover(d.id, request); expect(await f.service.recover(d.id, request)).toEqual(result);
@@ -476,4 +477,77 @@ test.each(["claude", "codex"] as const)("%s delivery recovery resolves provider 
   f.inspect = async (m, q) => { observed = m; return f.observation(q); };
   await f.service.tick();
   expect(observed).toMatchObject(cli === "codex" ? { model: "gpt-6-luna", effort: "low", subagentModel: "gpt-6.1-terra" } : { model: "sonnet", effort: "high", subagentModel: "haiku" });
+});
+
+
+describe("확정 미기록은 불확실 복구와 분리", () => {
+  test.each(["not_written", "rejected"] as const)("%s는 같은 delivery/marker의 일반 봉투로 다시 시도한다", effect => {
+    const f = setup(), d = f.enqueue(), old = f.envelope([d]);
+    f.service.recordResult(old.dispatchId, { ok: false, reason: "busy", retryable: true, deliveryEffect: effect });
+    expect(f.r(d.id)).toMatchObject({ phase: "resolved", reason: "not_received" });
+    expect(f.store.requireDelivery(d.id).status).toBe("queued");
+    expect(f.service.fenced(f.member.id)).toBe(false);
+    const next = f.service.prepareDispatch([d.id], old.identity, old.baseline);
+    expect(next.dispatchId).not.toBe(old.dispatchId); expect(next.markers).toEqual(old.markers);
+    expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("rejected");
+    expect(f.calls).toHaveLength(0);
+  });
+  test("identity_changed needs_owner와 재시작도 rejected면 기록 조회 없이 닫는다", async () => {
+    const f = setup(), d = f.enqueue(), old = f.envelope([d]);
+    f.store.updateDispatch(old.dispatchId, "unknown", "rejected");
+    f.store.updateDeliveryRecovery(d.id, f.r(d.id).version, { phase: "needs_owner", reason: "identity_changed", nextCheckAt: new Date(f.now + 60000).toISOString() });
+    f.store.patchMember(f.member.id, { paneId: "new-terminal", sessionId: "new-native" });
+    f.restart(); await f.service.tick();
+    expect(f.r(d.id)).toMatchObject({ phase: "resolved", reason: "not_received" });
+    expect(f.store.requireDelivery(d.id).status).toBe("queued"); expect(f.calls).toHaveLength(0);
+    expect(f.service.fenced(f.member.id)).toBe(false);
+  });
+  test("연속 거절 5회는 재시작 뒤에도 보류하고 후속 전달 fence를 만들지 않는다", () => {
+    const f = setup(), d = f.enqueue(); let old = f.envelope([d]);
+    for (let i = 0; i < 5; i++) {
+      f.service.recordResult(old.dispatchId, { ok: false, reason: "busy", retryable: true, deliveryEffect: "rejected" });
+      f.restart();
+      if (i < 4) old = f.service.prepareDispatch([d.id], old.identity, old.baseline);
+    }
+    expect(f.store.requireDelivery(d.id)).toMatchObject({ status: "held", holdReason: "input_busy" });
+    expect(f.service.memberNotices(f.member.id).items[0].note).toContain("5회");
+    expect(() => f.service.prepareDispatch([d.id], old.identity, old.baseline)).toThrow();
+    expect(f.service.fenced(f.member.id)).toBe(false);
+    const later = f.enqueue(); expect(f.service.prepareDispatch([later.id], old.identity, old.baseline)).toBeDefined();
+  });
+  test("부재 확정+다른 초안에는 사실을 안내하고 위험 동의 행동을 제공한다", async () => {
+    const f = setup(), d = f.enqueue(); f.envelope([d]);
+    f.inspect = async (_m, q) => { const x = f.observation(q); x.snapshot!.composer = "different";
+      x.evidence = [{ source: "claude_log", verdict: "absent", complete: true, code: "complete_range_without_marker", location: "none", checkedAt: new Date(f.now).toISOString() },
+        { source: "core_screen", verdict: "present", complete: true, code: "different", location: "composer", checkedAt: new Date(f.now).toISOString() }]; return x; };
+    await f.service.tick(); f.now += 120000; await f.service.tick();
+    const item = f.service.memberNotices(f.member.id).items[0];
+    expect(item.allowedActions).toContain("retry_with_risk"); expect(item.note).toContain("입력칸에 다른 글");
+    await f.service.recover(d.id, { operationId: randomUUID(), expectedVersion: item.version, action: "retry_with_risk", acceptDuplicateRisk: true });
+    await f.service.tick(); expect(f.writes).toHaveLength(0); // A consent never bypasses an unresolved write/draft.
+  });
+});
+
+test("same native resume can reconcile log receipt after generation change while preserving the old physical fence", async () => {
+  const f = setup(), d = f.enqueue(), old = f.envelope([d]);
+  // Reopen to the same native session but a different owned terminal/generation.
+  f.store.patchMember(f.member.id, { paneId: "resumed-terminal", sessionId: old.identity.sessionId });
+  f.inspect = async (_m, q) => {
+    const x = f.observation(q, { finding: "received", receivedDeliveryIds: [d.id] });
+    x.snapshot!.identity = { ...q.identity, terminalId: "resumed-terminal" }; return x;
+  };
+  await f.service.tick();
+  expect(f.store.requireDelivery(d.id).status).toBe("delivered");
+  expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("unknown");
+  expect(f.service.fenced(f.member.id)).toBe(true); expect(f.writes).toHaveLength(0);
+});
+
+test("different native session records identity_changed for owner review instead of silently skipping checks", async () => {
+  const f = setup(), d = f.enqueue(); f.envelope([d]);
+  f.store.patchMember(f.member.id, { paneId: "other", sessionId: "other" });
+  f.inspect = async (_m, q) => f.observation(q, { snapshot: null, evidence: [{ source: "transport", verdict: "unknown", location: "none", complete: false, code: "identity_changed", checkedAt: new Date(f.now).toISOString() }] });
+  await f.service.tick(); f.now += 120000; await f.service.tick();
+  expect(f.r(d.id)).toMatchObject({ phase: "needs_owner", reason: "identity_changed" });
+  expect(f.service.memberNotices(f.member.id).items[0].note).toContain("세션이 다시 열려");
+  expect(f.writes).toHaveLength(0);
 });

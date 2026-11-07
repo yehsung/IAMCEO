@@ -186,6 +186,8 @@ struct DeliveryInfo: Sendable {
             self.init(label: "추가 전달 중지", tone: .dim, icon: "pause.circle", explanation: "추가 전달을 중지했습니다. 과거 수신 여부는 알 수 없습니다.")
         case .resolved where item.status == "delivered":
             self.init(label: "받음", tone: .success, icon: "checkmark.circle", explanation: "CLI가 입력을 받았습니다. 업무 완료를 뜻하지 않습니다.")
+        case .some(.none) where item.reason == "not_received":
+            self.init(label: item.status == "held" ? "입력 확인 대기" : "전달 대기", tone: .neutral, icon: "clock", explanation: item.reasonDescription)
         case .some(.none):
             self = Self(item.status) ?? Self(label: "전달 상태 확인 불가", tone: .neutral, icon: "questionmark.circle", explanation: "최신 전달 근거를 다시 확인해 주세요.")
         default:
@@ -256,7 +258,8 @@ func deliveryPanelActions(_ item: DeliveryNoticeItem) -> [DeliveryRecoveryAction
     return [.recheck, .retryWithRisk, .stopRetry].filter { action in
         item.safeAllowedActions.contains(action) && (action == .recheck || item.phase == .needsOwner)
             && (action == .recheck || item.reason != "duplicate_draft")
-            && (action != .retryWithRisk || ["retry_exhausted", "log_missing", "log_incomplete", "unsupported_schema"].contains(item.reason ?? ""))
+            && (action != .retryWithRisk || ["retry_exhausted", "log_missing", "log_incomplete", "unsupported_schema"].contains(item.reason ?? "")
+                || (item.evidence ?? []).contains { $0.code == "complete_range_without_marker" && $0.verdict == .absent && $0.complete })
     }
 }
 

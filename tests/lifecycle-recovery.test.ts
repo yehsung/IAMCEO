@@ -3,7 +3,7 @@ import { createServer, type Socket } from "node:net";
 import { loadConfig } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
 import { Bus } from "../server/bus.ts";
-import { Store } from "../server/store.ts";
+import { ApiError, Store } from "../server/store.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
 import { CoreRunner } from "../server/runner/core.ts";
 import type { CoreTerminal } from "../server/runner/core-client.ts";
@@ -36,6 +36,8 @@ async function fixture(healthMs = 60_000) {
   let sendStarted = true;
   let getUnavailable = false;
   let killLost = false;
+  let rejectSend = false;
+  let unknownSend = false;
   const server = createServer(socket => {
     sockets.add(socket); socket.on("close", () => sockets.delete(socket)); socket.setEncoding("utf8");
     let buffer = "";
@@ -57,6 +59,8 @@ async function fixture(healthMs = 60_000) {
         if (request.method === "terminal.get" && !getUnavailable) result = terminal;
         if (request.method === "terminal.read") result = { text: `output\n${"─".repeat(30)}\n❯ ${draft}\n${"─".repeat(30)}\n`, complete: true };
         if (request.method === "terminal.send" && terminal) {
+          if (rejectSend) { socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32000, message: "busy after restart", data: { kind: "status_mismatch" } } }) + "\n"); continue; }
+          if (unknownSend) { socket.destroy(); continue; }
           result = { turn: terminal.turn, started: sendStarted, status: "idle" };
           if (sendStarted) terminal.status = { state: "working" };
         }
@@ -75,7 +79,7 @@ async function fixture(healthMs = 60_000) {
   const runners: CoreRunner[] = [];
   function orchestrator() {
     const runner = new CoreRunner({ ...isolated.runnerOptions(isolated.providerHomes) }, { recoveryStore: store, pollMs: 20, rpcTimeoutMs: 100, sendTimeoutMs: 100 });
-    const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]), timings: { tickMs: 60_000, healthMs } });
+    const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]), timings: { tickMs: 60_000, healthMs, retryMs: 10, inputBusyRetryMs: 10 } });
     runners.push(runner); orchestrators.push(orch);
     return { orch, runner };
   }
@@ -90,6 +94,7 @@ async function fixture(healthMs = 60_000) {
     count: (method: string) => calls.filter(c => c.method === method).length,
     loseRun: (value: boolean) => { runLost = value; }, loseKeys: () => { keysLost = true; },
     loseKill: (value: boolean) => { killLost = value; }, unavailable: (value: boolean) => { getUnavailable = value; },
+    rejectSend: (value: boolean) => { rejectSend = value; }, unknownSend: () => { unknownSend = true; },
     draft: (text: string) => { draft = text; }, started: (value: boolean) => { sendStarted = value; } };
 }
 
@@ -337,4 +342,58 @@ test("recovery of an idle-only sleep cannot force-stop newly observed work", asy
   expect(f.count("terminal.kill")).toBe(kills);
   expect(f.store.listPendingLifecycleJournals()).toHaveLength(1);
   expect(f.store.requireMember(member.id).status).not.toBe("asleep");
+});
+
+
+test("draft pre-write refusal clears to one automatic send with the same marker and no duplicate", async () => {
+  const f = await fixture(), member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  f.draft("owner draft");
+  const d = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "report", text: "직원 보고", wake: true });
+  await f.orch.pump(member.id);
+  expect(f.count("terminal.send")).toBe(0);
+  expect(f.store.requireDelivery(d.id)).toMatchObject({ status: "queued", attempts: 1 });
+  const old = f.store.listDispatches(member.id).at(-1)!;
+  expect(old.transportState).toBe("rejected"); expect(f.store.getDeliveryRecovery(d.id)?.phase).toBe("resolved");
+  f.draft(""); await until(() => f.count("terminal.send") === 1);
+  await f.orch.pump(member.id);
+  expect(f.store.requireDelivery(d.id)).toMatchObject({ status: "delivered", attempts: 2 });
+  expect(f.store.listDispatches(member.id).at(-1)!.markers).toEqual(old.markers);
+  expect(f.count("terminal.send")).toBe(1);
+});
+
+test("busy rejected survives server restart and sends exactly once after ordinary safety checks", async () => {
+  const f = await fixture(), member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  f.rejectSend(true);
+  const d = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "report", text: "보고", wake: true });
+  await f.orch.pump(member.id);
+  expect(f.count("terminal.send")).toBe(1); expect(f.store.listDispatches(member.id).at(-1)!.transportState).toBe("rejected");
+  // Persist the old bug's owner-review state before booting the fixed server.
+  const recovery = f.store.getDeliveryRecovery(d.id)!;
+  f.store.updateDeliveryRecovery(d.id, recovery.version, { phase: "needs_owner", reason: "identity_changed", nextCheckAt: new Date(Date.now() + 60000).toISOString() });
+  await f.orch.shutdown(); f.rejectSend(false);
+  const next = f.orchestrator(); await next.orch.recover();
+  await until(() => f.store.requireDelivery(d.id).status === "delivered");
+  await next.orch.pump(member.id);
+  expect(f.count("terminal.send")).toBe(2); expect(f.store.requireDelivery(d.id).attempts).toBe(2);
+});
+
+test("unknown send keeps its fence and tells sleep refusal's real cause", async () => {
+  const f = await fixture(), member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  f.unknownSend();
+  const d = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "report", text: "보고", wake: true });
+  await f.orch.pump(member.id); await f.orch.pump(member.id);
+  expect(f.count("terminal.send")).toBe(1); expect(f.store.getDeliveryRecovery(d.id)?.phase).toBe("checking");
+  await expect(f.orch.sleepMember(member.id)).rejects.toThrow("전달 결과가 확인되지");
+});
+
+test("force sleep preserves a draft with a Korean 409 and restart clears old execution error", async () => {
+  const f = await fixture(), member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  f.draft("preserve me");
+  try { await f.orch.sleepMember(member.id, { force: true }); throw new Error("expected refusal"); }
+  catch (error) { expect(error).toBeInstanceOf(ApiError); expect((error as ApiError).status).toBe(409); expect((error as Error).message).toContain("입력칸에 글"); }
+  expect(f.count("terminal.kill")).toBe(0);
+  f.draft(""); await f.orch.sleepMember(member.id, { force: true });
+  f.store.patchMember(member.id, { lastError: "초기/실행 종료: exited (exit_code=0)" });
+  await f.orch.resumeMember(member.id);
+  expect(f.store.requireMember(member.id).lastError).toBeNull();
 });

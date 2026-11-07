@@ -282,7 +282,7 @@ W1-Q와 각 시험 소유자는 위의 **기존 시험도** import/자식 환경
 | 프로젝트 생성→Claude/Codex 총괄→팀장 병렬 배정→status/ask→대표 답→post/file→업무판→명시 완료 | 원본·자료·수신자 연결을 유지한다. 접수/전달/턴 종료/업무 완료를 구분하며 총괄과 질문자에게 중복 지시가 없다. |
 | 원본 저장 직후/intent commit 직후/외부 쓰기 전후/수신 뒤 DB 갱신 전 테스트 데몬 강제 종료 | 원본과 intent가 함께 있거나 둘 다 없다. 전체 DB 수선으로 500건 밖 원본도 검출한다. 표식 발견은 send 0회로 정정하고 불명은 fence를 유지한다. |
 | 로그에는 수신했으나 DB failed/held, 묶음 일부 수신, assistant/tool_result·다른 session의 표식 | 올바른 주 세션 user 증거만 해당 delivery를 정정한다. 미해결 항목의 fence는 유지한다. 거짓 긍정·중복 활동은 0건이다. |
-| 쓰기 전 연결 실패, 완전 일치 미제출 composer, 일부/사용자 수정/축약 입력, 늦은 원래 쓰기 | 확정 쓰기 전 실패만 같은 ID·표식으로 최대 3회 복구한다. settled+전체 일치에서만 Enter 1회, 본문 재입력 0회다. 원래 RPC가 미종료이면 입력하지 않는다. 재전송 직전 수신 발견은 send 0회다. |
+| 쓰기 전 연결 실패, 완전 일치 미제출 composer, 일부/사용자 수정/축약 입력, 늦은 원래 쓰기 | 확정 쓰기 전 거절은 같은 ID·표식으로 일반 안전검사를 다시 받고, 연속 5회면 입력 상태 확인을 위한 보류로 남긴다. 불확실 쓰기는 기존 증거·settled 장벽과 최대 3회 복구 상한을 유지한다. settled+전체 일치에서만 Enter 1회, 본문 재입력 0회다. 원래 RPC가 미종료이면 입력하지 않는다. 재전송 직전 수신 발견은 send 0회다. |
 | lease/승인/working/외부 attach 경합과 같은 직원 urgent | 자동 입력 0회, lease 중 기록 scan 0회다. 대기 시간은 활성 확인 2분 예산에서 제외한다. 다른 직원은 진행하며 duplicate_draft는 delivered 정정과 별도 fence를 유지한다. |
 | start 응답 유실·pane 저장 전 crash·동일 label 복수 후보 | 같은 member/operation을 보존하고 추가 terminal.run 없이 재결합한다. 유효 후보가 여럿이면 증거·추천과 함께 격리하고 임의 kill/선택을 하지 않는다. |
 | 최초 core bind 실패→큐 0→지연 복귀, 소유 core 부재·hello timeout·소유권 변경 | 큐 없이 관측이 복원된다. 확실한 소유 core 부재만 단일 기동 재시도를 한다. timeout/충돌만으로 kill/new CLI를 호출하지 않는다. |

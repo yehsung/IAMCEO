@@ -811,7 +811,8 @@ struct DeliveryNoticeItem: Codable, Sendable, Identifiable {
         "blocked", "input_busy", "asleep", "offline", "backend_down", "runner_disabled",
         "archived", "legacy_session", "send_error", "turn_error", "manual_control", "busy",
         "draft_pending", "duplicate_draft", "log_missing", "log_incomplete", "session_unbound",
-        "session_lost", "inflight_unsettled", "unsupported_schema", "source_changed", "retry_exhausted"
+        "session_lost", "inflight_unsettled", "unsupported_schema", "source_changed", "retry_exhausted",
+        "identity_changed", "complete_range_without_marker", "not_received"
     ]
 }
 struct DeliveryRecommendation: Codable, Sendable { let code: String; let text: String }

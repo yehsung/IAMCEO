@@ -207,6 +207,24 @@ final class PresentationTests: XCTestCase {
         XCTAssertTrue(composer.detail.contains("받았다는 뜻은 아닙니다"))
     }
 
+    func testConfirmedAbsenceAndIdentityNotesUseServerEvidenceAndActions() {
+        let note = "기록상 아직 안 들어갔습니다. 입력칸에 다른 글이 있어 자동으로 넣지 않았습니다."
+        var item = DeliveryNoticeItem(id: "d", deliveryId: "d", status: "held", phase: .needsOwner,
+                                     reason: "complete_range_without_marker", note: note, version: 2,
+                                     evidence: [DeliveryEvidence(source: "codex_jsonl", verdict: .absent, location: "none",
+                                                                 code: "complete_range_without_marker", complete: true, checkedAt: "time")],
+                                     allowedActions: [.recheck, .retryWithRisk, .stopRetry])
+        XCTAssertEqual(DeliveryInfo(item).explanation, note)
+        XCTAssertTrue(deliveryPanelActions(item).contains(.retryWithRisk))
+        item.reason = "identity_changed"; item.note = "세션이 다시 열려 이전 입력의 결과를 이어서 확인하지 못했습니다."
+        XCTAssertEqual(DeliveryInfo(item).explanation, item.note)
+        XCTAssertTrue(deliveryPanelActions(item).contains(.retryWithRisk))
+        item.evidence = []
+        XCTAssertFalse(deliveryPanelActions(item).contains(.retryWithRisk))
+        item.reason = "not_received"; item.phase = .some(.none); item.note = "입력 전에 5회 거절되어 보류했습니다."
+        XCTAssertEqual(DeliveryInfo(item).explanation, item.note)
+    }
+
     func testFutureAndDuplicateDraftCannotAuthorizePhysicalInput() {
         var item = DeliveryNoticeItem(id: "d", deliveryId: "d", phase: .needsOwner, reason: "retry_exhausted",
                                       version: 2, allowedActions: [.recheck, .retryWithRisk, .stopRetry, .unknown, .recheck])

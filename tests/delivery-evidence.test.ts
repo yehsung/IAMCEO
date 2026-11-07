@@ -235,3 +235,22 @@ describe("range and identity safety", () => {
     expect(readJsonlRange(opts.home, dirname(opts.path)).complete).toBe(false);
   });
 });
+
+
+describe("Codex 0.166 metadata and future kinds", () => {
+  const rows = () => [meta("session", { session_id: "session", context_window: 258400, cli_version: "0.166.0" }),
+    { type: "world_state", payload: {} }, { type: "token_usage_record", payload: {} },
+    ...["thread_settings_applied", "item_completed"].map(type => ({ type: "event_msg", payload: { type } })),
+    ...["additional_tools", "custom_tool_call", "custom_tool_call_output"].map(type => ({ type: "response_item", payload: { type } })),
+    { type: "future_bookkeeping", payload: { count: 1 } }];
+  test("known and harmless future records preserve receipt and complete absence", () => {
+    expect(readDeliveryEvidence(fixture("codex", [...rows(), codex()])).receivedDeliveryIds).toEqual(["d1"]);
+    expect(readDeliveryEvidence(fixture("codex", [...rows(), codex("other work")])).evidence).toMatchObject({ verdict: "absent", complete: true });
+  });
+  test("future record containing a marker or user shape cannot prove absence or receipt", () => {
+    for (const entry of [{ type: "future", payload: { message: marker } }, { type: "future", payload: { role: "user" } }, { type: "future", payload: { type: "user_message", message: "new" } }, { type: "response_item", payload: { type: "future_user_text", role: "user", text: "new" } }, { type: "event_msg", payload: { type: "future_text", message: marker } }]) {
+      const result = readDeliveryEvidence(fixture("codex", [...rows(), entry]));
+      expect(result.evidence.verdict).toBe("unknown"); expect(result.receivedDeliveryIds).toEqual([]);
+    }
+  });
+});

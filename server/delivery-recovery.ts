@@ -20,6 +20,7 @@ export interface DeliveryRecoveryOptions {
   random?: () => number;
 }
 
+const MAX_REJECTED = 5;
 const CHECK_MS = [1_000, 3_000, 10_000, 30_000, 60_000];
 const RETRY_MS = [2_000, 10_000, 30_000];
 const STOP_NOTE = "추가 전달을 중지했습니다. 과거 수신 여부는 알 수 없습니다";
@@ -32,7 +33,7 @@ const requestSchema = z.discriminatedUnion("action", [
 
 function hash(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 function compare(a: string, b: string): number { return Buffer.compare(Buffer.from(a), Buffer.from(b)); }
-function note(reason: string | null): string {
+function note(reason: string | null, evidence: DeliveryEvidence[] = []): string {
   switch (reason) {
     case "manual_control": return "직접 조작이 끝나면 다시 확인합니다";
     case "busy": return "받을 수 있을 때 다시 확인합니다";
@@ -42,12 +43,18 @@ function note(reason: string | null): string {
     case "retry_exhausted": return "자동 재전송 상한에 도달했습니다";
     case "not_received": return "미전달을 확인했습니다. 안전 상태를 다시 확인한 뒤 재전송합니다";
     case "draft_pending": return "입력 제출을 확인 중입니다";
-    case "session_lost": return "기존 세션을 확인할 수 없습니다. 연결 상태를 확인해 주세요";
+    case "session_lost": return "세션이나 터미널이 바뀌어 이전 입력의 결과를 이어서 확인하지 못했습니다. 같은 대화인지 터미널과 연결 상태를 확인해 주세요";
+    case "session_unbound": return "CLI의 대화 연결을 아직 확인하지 못했습니다. 터미널에서 세션이 열렸는지 확인한 뒤 다시 확인해 주세요";
     case "unsupported_schema": return "이 실행기에서는 안전한 전달 확인을 지원하지 않습니다";
-    case "log_missing": return "세션 기록을 확인할 수 없습니다";
+    case "log_missing": return "세션 기록을 찾지 못했습니다. 연결과 기록 경로를 확인한 뒤 다시 확인해 주세요";
+    case "log_incomplete": return "기록을 끝까지 읽지 못해 수신 여부를 확정하지 못했습니다. 다시 확인하거나 터미널에서 확인해 주세요";
+    case "identity_changed": return "세션이 다시 열려 이전 입력의 결과를 이어서 확인하지 못했습니다. 같은 대화인지 터미널에서 확인한 뒤 다시 확인해 주세요";
+    case "complete_range_without_marker": return evidence.some(e => e.location === "composer" && e.code === "different")
+      ? "기록상 아직 안 들어갔습니다. 입력칸에 다른 글이 있어 자동으로 넣지 않았습니다. 입력칸을 비운 뒤 다시 확인하거나 중복 위험에 동의해 다시 보내세요"
+      : "기록상 아직 안 들어갔습니다. 자동 재전송의 안전 조건을 확인하지 못했습니다. 터미널을 확인한 뒤 중복 위험에 동의해 다시 보낼 수 있습니다";
     case "legacy_unknown": return "옛 전달의 수신 여부를 확인할 수 없습니다";
     case "inflight_unsettled": return "원래 입력의 종료 여부를 확인하고 있습니다";
-    default: return "상세 내용을 확인해 주세요";
+    default: return "입력 결과를 아직 확정하지 못했습니다. 터미널과 연결을 확인한 뒤 다시 확인해 주세요";
   }
 }
 
@@ -137,9 +144,18 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       const member = this.store.requireMember(first.memberId);
       if (this.closed || !this.store.requireProject(member.projectId).runnerEnabled || this.fenced(member.id) || member.origin === "manual" || identity.terminalId !== member.paneId || identity.sessionId !== member.sessionId || identity.sessionGeneration !== this.store.memberRevisions(member.id).sessionGeneration) throw new ApiError(409, "입력 안전 상태가 바뀌었습니다");
       for (const d of deliveries) {
-        if (d.memberId !== first.memberId || d.projectId !== first.projectId || d.kind === "compact" || !["queued", "held"].includes(d.status) || d.attempts || this.latest(d) || this.record(d.id).phase !== "none" || this.sourceRevision(d) === null) throw new ApiError(409, "새 전달 봉투를 만들 수 없습니다");
+        const previous = this.latest(d), phase = this.record(d.id).phase;
+        const admissible = previous
+          ? previous.transportState === "rejected" && this.rejectedCount(d) < MAX_REJECTED && ["none", "resolved"].includes(phase)
+          : d.attempts === 0 && phase === "none";
+        if (d.memberId !== first.memberId || d.projectId !== first.projectId || d.kind === "compact" || !["queued", "held"].includes(d.status) || !admissible || this.sourceRevision(d) === null) throw new ApiError(409, "새 전달 봉투를 만들 수 없습니다");
       }
-      return this.saveEnvelope(deliveries, identity, baseline, "prepared");
+      const dispatch = this.saveEnvelope(deliveries, identity, baseline, "prepared");
+      for (const d of deliveries) {
+        const r = this.record(d.id);
+        this.store.updateDeliveryRecovery(d.id, r.version, { phase: "none", reason: null, nextCheckAt: null });
+      }
+      return dispatch;
     });
   }
   private saveEnvelope(deliveries: Delivery[], identity: RunnerTerminalIdentity, baseline: DeliveryBaseline, transportState: DeliveryDispatch["transportState"]): DeliveryDispatch {
@@ -159,10 +175,35 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     return dispatch;
   }
 
+  private rejectedCount(d: Delivery): number {
+    let count = 0;
+    for (const dispatch of this.store.listDispatches(d.memberId).filter(x => x.items.some(i => i.deliveryId === d.id)).reverse()) {
+      if (dispatch.transportState !== "rejected") break;
+      count++;
+    }
+    return count;
+  }
+
+  /** A durable pre-write refusal needs no log, identity or quiescence evidence. */
+  requeueRejected(deliveryId: string): boolean {
+    return this.store.transaction(() => {
+      const d = this.store.requireDelivery(deliveryId), r = this.record(deliveryId);
+      if (this.latest(d)?.transportState !== "rejected" || d.status === "delivered" || r.phase === "stopped") return false;
+      if (r.phase === "resolved" && r.reason === "not_received") return true;
+      const exhausted = this.rejectedCount(d) >= MAX_REJECTED;
+      this.store.updateDeliveryRecovery(d.id, r.version, { phase: "resolved", reason: "not_received", nextCheckAt: null });
+      this.store.setDeliveryStatus(d.id, exhausted ? "held" : "queued", { holdReason: exhausted ? "input_busy" : null });
+      this.store.patchDeliveryRetry(d.id, { nextAttemptAt: null, retryReason: exhausted ? "rejected_limit" : null });
+      if (d.refType === "message" && d.refId) this.store.setMessageDelivery(d.refId, exhausted ? "held" : "queued", exhausted ? "입력 전에 5회 거절되어 자동 전달을 보류했습니다. 터미널의 입력칸과 승인 창을 확인한 뒤 다시 보내세요" : null);
+      return true;
+    });
+  }
+
   beginRecovery(deliveryId: string, reason = "inflight_unsettled"): void {
     this.store.transaction(() => {
       const d = this.store.requireDelivery(deliveryId);
       const r = this.record(deliveryId);
+      if (this.requeueRejected(deliveryId)) return;
       if (["resolved", "stopped"].includes(r.phase) || d.status === "delivered") return;
       this.store.updateDeliveryRecovery(d.id, r.version, { phase: r.phase === "needs_owner" ? "needs_owner" : "checking", reason: r.phase === "needs_owner" ? r.reason : reason, nextCheckAt: this.iso() });
       this.projectStatus(d, "held", CHECK_NOTE);
@@ -287,6 +328,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     const members = new Map<string, Delivery[]>();
     for (const d of this.store.listDeliveries()) {
       const r = this.record(d.id);
+      if (!["none", "resolved", "stopped"].includes(r.phase) && this.requeueRejected(d.id)) continue;
       const physical = this.store.listDispatches(d.memberId).some(item => item.items.some(item => item.deliveryId === d.id) && ["prepared", "write_started", "unknown"].includes(item.transportState));
       if (!physical && (["resolved", "stopped"].includes(r.phase) || d.status === "delivered" && r.reason !== "duplicate_draft" || r.phase === "none" && !["failed", "delivering"].includes(d.status) && !(d.status === "held" && d.holdReason === "delivery_unknown"))) continue;
       if (this.store.requireProject(d.projectId).archived || this.store.requireMember(d.memberId).origin === "manual") continue;
@@ -324,7 +366,9 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
         for (const id of ids) this.wait(id, "manual_control");
         continue;
       }
-      const runner = this.options.runner(this.store.requireMember(d.memberId));
+      const memberBefore = this.store.requireMember(d.memberId);
+      const generationBefore = this.store.memberRevisions(d.memberId).sessionGeneration;
+      const runner = this.options.runner(memberBefore);
       const versions = new Map(ids.map(id => [id, this.record(id).version]));
       let inspection: DeliveryInspection;
       try {
@@ -332,7 +376,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       } catch { inspection = this.unknown("backend_down"); }
       if (this.closed) return;
       // Re-read CAS, lease, membership and archive after every awaited observation.
-      if (this.store.requireProject(d.projectId).archived || this.store.inputState(d.memberId).lease || dispatch && this.validDispatch(dispatch) && (this.store.memberRevisions(d.memberId).sessionGeneration !== dispatch.identity.sessionGeneration || this.store.requireMember(d.memberId).sessionId !== dispatch.identity.sessionId)) continue;
+      if (this.store.requireProject(d.projectId).archived || this.store.inputState(d.memberId).lease || (this.store.memberRevisions(d.memberId).sessionGeneration !== generationBefore || this.store.requireMember(d.memberId).sessionId !== memberBefore.sessionId || this.store.requireMember(d.memberId).paneId !== memberBefore.paneId)) continue;
       const unchanged = ids.filter(id => this.record(id).version === versions.get(id) && !["resolved", "stopped"].includes(this.record(id).phase));
       const received = new Set(inspection.receivedDeliveryIds);
       this.store.transaction(() => {
@@ -409,7 +453,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     } else if (activeCheckMs >= 120_000 || ["unsupported_schema", "legacy_unknown"].includes(reason)) phase = "needs_owner";
     if (phase === "needs_owner") nextCheckAt = this.iso(this.now() + 60_000);
     r = this.store.updateDeliveryRecovery(d.id, r.version, { phase, reason, activeCheckMs, checkCount: r.checkCount + 1, lastCheckedAt: this.iso(), nextCheckAt, evidence: inspection.evidence });
-    this.projectStatus(d, phase === "needs_owner" && reason === "retry_exhausted" ? "failed" : "held", CHECK_NOTE);
+    this.projectStatus(d, phase === "needs_owner" && reason === "retry_exhausted" ? "failed" : "held", phase === "needs_owner" ? note(reason, inspection.evidence) : CHECK_NOTE);
   }
   private async maybeRepair(original: DeliveryDispatch, inspection: DeliveryInspection, runner: Pick<Runner, "repairDelivery">): Promise<void> {
     if (this.closed || !this.safe(original, inspection) || inspection.receivedDeliveryIds.length && inspection.finding !== "not_received") return;
@@ -428,7 +472,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
         // Every attempt has its own envelope so a late result can only settle its own RPC.
         // Delivery IDs/markers remain stable, and this new subset has never been written.
         this.settlePhysical(original, inspection);
-        return this.saveEnvelope(unresolved, original.identity, original.baseline, "rejected");
+        return this.saveEnvelope(unresolved, original.identity, original.baseline, "prepared");
       });
     }
     // A bundle uses one reviewed CAS version. Store increments can differ after partial corrections;
@@ -469,7 +513,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     if (["resolved", "stopped", "none"].includes(r.phase)) return [];
     if (r.phase !== "needs_owner" || r.reason === "duplicate_draft") return ["recheck"];
     const dispatch = this.latest(d);
-    const retry = dispatch && this.validDispatch(dispatch) && this.sourceValid(dispatch, d) && ["retry_exhausted", "log_missing", "log_incomplete", "unsupported_schema"].includes(r.reason ?? "") && this.store.memberRevisions(d.memberId).sessionGeneration === dispatch.identity.sessionGeneration && this.store.requireMember(d.memberId).sessionId === dispatch.identity.sessionId;
+    const retry = dispatch && this.validDispatch(dispatch) && this.sourceValid(dispatch, d) && (["retry_exhausted", "log_missing", "log_incomplete", "unsupported_schema"].includes(r.reason ?? "") || r.evidence.some(e => e.code === "complete_range_without_marker" && e.verdict === "absent" && e.complete)) && this.store.memberRevisions(d.memberId).sessionGeneration === dispatch.identity.sessionGeneration && this.store.requireMember(d.memberId).sessionId === dispatch.identity.sessionId;
     return retry ? ["recheck", "retry_with_risk", "stop_retry"] : ["recheck", "stop_retry"];
   }
 
@@ -494,13 +538,13 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   }
   private item(d: Delivery): DeliveryNoticeItem | null {
     const r = this.record(d.id);
-    if (r.phase === "resolved" || r.phase === "stopped" || d.status === "delivered" && r.reason !== "duplicate_draft") return null;
+    if (r.phase === "resolved" && !(r.reason === "not_received" && ["queued", "held"].includes(d.status)) || r.phase === "stopped" || d.status === "delivered" && r.reason !== "duplicate_draft") return null;
     const m = d.refType === "message" && d.refId ? this.store.getMessage(d.refId) : null;
     const preview = m?.body ?? (d.refType === "decision" && d.refId ? this.store.getDecision(d.refId)?.title : d.refType === "todo" && d.refId ? this.store.getTodo(d.refId)?.title : null) ?? ({ user_message: "대표 메시지", answer: "결재 답변", todo_done: "업무 완료 알림", instruction: "업무 지시", report: "보고 전달", system: "시스템 지시", compact: "문맥 정리" }[d.kind]);
     return { id: d.id, deliveryId: d.id, messageId: m?.id ?? null, memberId: d.memberId, projectId: d.projectId, kind: d.kind, status: d.status,
-      phase: r.phase, holdReason: d.holdReason, reason: r.reason, note: r.phase === "none" ? d.status === "failed" ? note("legacy_unknown") : "전달 대기" : note(r.reason),
+      phase: r.phase === "resolved" ? "none" : r.phase, holdReason: d.holdReason, reason: r.reason, note: this.store.getDeliveryRetry(d.id).retryReason === "rejected_limit" ? "입력 전에 5회 거절되어 자동 전달을 보류했습니다. 터미널의 입력칸과 승인 창을 확인한 뒤 다시 보내세요" : r.phase === "none" ? d.status === "failed" ? note("legacy_unknown") : "전달 대기" : note(r.reason, r.evidence),
       version: r.version, createdAt: d.createdAt, lastCheckedAt: r.lastCheckedAt, nextCheckAt: r.nextCheckAt, autoAttempts: r.autoAttempts, evidence: r.evidence,
-      recommendation: r.phase === "needs_owner" ? { code: r.reason ?? "unknown", text: note(r.reason) } : null, allowedActions: this.actions(d, r),
+      recommendation: r.phase === "needs_owner" ? { code: r.reason ?? "unknown", text: note(r.reason, r.evidence) } : null, allowedActions: this.actions(d, r),
       ref: d.refType && d.refId ? { type: d.refType, id: d.refId } : null, preview: preview.length > 160 ? preview.slice(0, 157) + "..." : preview };
   }
   private items(projectId: string): DeliveryNoticeItem[] {

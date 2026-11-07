@@ -285,7 +285,23 @@ export function readDeliveryEvidence(options: DeliveryEvidenceOptions): Delivery
       if (jsonObject(entry.message)?.role === "user" || markers.some(({ marker }) => raw.includes(marker)) || (options.bundleMarker && raw.includes(options.bundleMarker))) state.unsupported = true;
       continue;
     }
-    if (cli === "codex" && !["session_meta", "response_item", "event_msg", "turn_context", "compacted"].includes(entry.type)) state.unsupported = true;
+    if (cli === "codex" && !["session_meta", "response_item", "event_msg", "turn_context", "compacted", "world_state", "token_usage_record"].includes(entry.type)) {
+      const raw = JSON.stringify(entry), payload = jsonObject(entry.payload);
+      if (entry.role === "user" || jsonObject(entry.message)?.role === "user" || payload?.role === "user" || payload?.type === "user_message" ||
+          markers.some(({ marker }) => raw.includes(marker)) || (options.bundleMarker && raw.includes(options.bundleMarker))) state.unsupported = true;
+      continue;
+    }
+    if (cli === "codex" && ["response_item", "event_msg"].includes(entry.type)) {
+      const payload = jsonObject(entry.payload);
+      const known = entry.type === "response_item"
+        ? ["message", "reasoning", "function_call", "function_call_output", "local_shell_call", "web_search_call", "image_generation_call", "custom_tool_call", "custom_tool_call_output", "additional_tools", "ghost_snapshot", "compaction"]
+        : ["user_message", "agent_message", "agent_reasoning", "agent_reasoning_raw_content", "token_count", "task_started", "task_complete", "turn_aborted", "context_compacted", "thread_settings_applied", "item_completed"];
+      if (!known.includes(payload?.type as string)) {
+        const raw = JSON.stringify(entry);
+        if (payload?.role === "user" || markers.some(({ marker }) => raw.includes(marker)) || (options.bundleMarker && raw.includes(options.bundleMarker))) state.unsupported = true;
+        continue;
+      }
+    }
     // An API request copy is not the session's received input, but a marker that appears only there means the
     // user-record layout changed under us: never let it read as absence.
     if (cli === "claude" && entry.type === "api-request-blob") {

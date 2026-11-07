@@ -1,5 +1,5 @@
 /** Provider parsing and observations only. No CLI input, timers, DB writes, or success ACKs. */
-import { isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import type { CliProvider, ContextMeasurement } from "../../shared/types.ts";
 import { contextWindowFor, measureContext, validWindow, type ContextReading, type WindowHints } from "./context.ts";
 import { jsonObject, parseCodexSessionMeta, parseProviderUserText, providerLogPath, readJsonlRange, supportedUserTextLayout, type CodexSessionMeta, type JsonlCursor } from "./delivery-evidence.ts";
@@ -38,6 +38,13 @@ export function discoverCodexSession(options: { home: string; cwd: string; gener
   try {
     paths = [...new Bun.Glob("**/rollout-*.jsonl").scanSync({ cwd: root, absolute: true, onlyFiles: true, followSymlinks: false })].sort();
   } catch { return result("unknown", "path_unavailable"); }
+  // Filename time excludes historical schemas before reading their potentially huge bodies.
+  const cutoff = options.since ? Date.parse(options.since) - 120_000 : null;
+  paths = paths.filter(path => {
+    const stamp = /^rollout-(\d{4}-\d{2}-\d{2}T\d{2}[-:]\d{2}[-:]\d{2})/.exec(basename(path))?.[1];
+    const time = stamp ? Date.parse(stamp.slice(0, 13) + ":" + stamp.slice(14, 16) + ":" + stamp.slice(17, 19) + "Z") : NaN;
+    return cutoff === null || !Number.isFinite(time) || time >= cutoff;
+  });
   if (!paths.length) return result("pending", "session_unbound");
   // A disappeared/rotated candidate cannot retain a positive nonce match.
   if (state.files.some((file) => !paths.includes(file.path))) return result("unknown", "file_changed");
@@ -45,6 +52,7 @@ export function discoverCodexSession(options: { home: string; cwd: string; gener
   let visited = 0;
   while (visited < 8 && state.next < state.files.length) {
     const file = state.files[state.next]!;
+    if (file.excluded) { visited++; state.next++; continue; }
     const range = readJsonlRange(root, file.path, file.log, { maxBytes: 1024 * 1024 });
     if (range.code === "file_changed") { file.log = null; file.meta = null; file.matched = false; file.invalid = false; file.excluded = false; return result("pending", "file_changed"); }
     file.log = range.cursor;
@@ -54,29 +62,32 @@ export function discoverCodexSession(options: { home: string; cwd: string; gener
       if (record.start === 0) {
         file.meta = parseCodexSessionMeta(entry);
         const payload = jsonObject(entry?.payload), source = jsonObject(payload?.source);
-        file.excluded = !!(file.meta && file.meta.cwd !== options.cwd) || (entry?.type === "session_meta" && source !== null && Object.hasOwn(source, "subagent"));
-        if (!file.meta && !file.excluded) file.invalid = true;
+        const timestamp = payload?.timestamp ?? entry?.timestamp;
+        file.excluded = !!(file.meta && file.meta.cwd !== options.cwd) || !!(cutoff !== null && entry?.type === "session_meta" && typeof timestamp === "string" && Number.isFinite(Date.parse(timestamp)) && Date.parse(timestamp) < cutoff) || (entry?.type === "session_meta" && source !== null && Object.hasOwn(source, "subagent"));
+        if (file.excluded) break;
+        if (!file.meta) file.invalid = true;
       } else if (entry?.type === "session_meta") file.invalid = true;
       if (!supportedUserTextLayout("codex", entry)) file.invalid = true;
       const user = parseProviderUserText("codex", entry);
       if (!user || !file.meta || file.meta.cwd !== options.cwd ||
         (user.sessionId !== null && user.sessionId !== file.meta.sessionId) || (user.cwd !== null && user.cwd !== options.cwd) ||
-        (options.since && user.timestamp && Date.parse(user.timestamp) < Date.parse(options.since))) continue;
+        (options.since && user.timestamp && Date.parse(user.timestamp) < cutoff!)) continue;
       if (user.texts.some((text) => text.split("\n").some((line) => line === marker))) file.matched = true;
     }
     visited++;
-    if (range.code === "scan_pending") return result("pending", "scan_pending");
+    if (!file.excluded && range.code === "scan_pending") return result("pending", "scan_pending");
     state.next++;
   }
   if (state.next < state.files.length) return result("pending", "scan_pending");
   state.next = 0; // next tick checks append-only changes, not the full historical bytes
-  const matches = state.files.filter((file) => file.matched && !file.invalid && file.meta?.cwd === options.cwd);
+  const matches = state.files.filter((file) => file.matched && !file.excluded && !file.invalid && file.meta?.cwd === options.cwd);
   if (matches.length > 1) return result("conflict", "binding_conflict");
   // Invalid other-parent candidates can conceal another copy of this nonce.
   const unresolved = state.files.some((file) => !file.excluded && (file.invalid || !file.meta || !file.log || file.log.offset !== file.log.readOffset || file.log.invalid));
   if (unresolved) return result("unknown", "incomplete_candidates");
   for (let i = 0; i < state.files.length; i++) {
     const file = state.files[i]!;
+    if (file.excluded) continue;
     const check = readJsonlRange(root, file.path, file.log, { maxBytes: 0 });
     if (!check.complete && !file.excluded) { state.next = i; return result("pending", check.code); }
   }

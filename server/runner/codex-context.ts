@@ -41,6 +41,7 @@ export function readCodexContextFile(home: string, path: string, sessionId: stri
   // Revalidate metadata even for a cached path: filenames and prior cache entries are not identity.
   const head = readJsonlRange(join(home, "sessions"), target, null, { maxBytes: 1024 * 1024 });
   const meta = parseCodexSessionMeta(head.records[0]?.value);
+  const sessionWindow = jsonObject(jsonObject(head.records[0]?.value)?.payload)?.context_window;
   if (!meta || meta.sessionId !== sessionId || head.records[0]?.start !== 0 || !head.cursor) return unknown("session_conflict");
   if (previous && (previous.sessionId !== sessionId || previous.log.fileIdentity !== head.cursor.fileIdentity)) previous = null;
   let start = 0;
@@ -76,6 +77,11 @@ export function readCodexContextFile(home: string, path: string, sessionId: stri
     }
     if (entry?.type === "compacted") { reading = null; measuredAt = null; }
     const parsed = parseCodexTokenCount(entry, sessionId, model);
+    // Request-level window wins; session metadata supplies the same measured-window tier
+    // when token_count omits it. Never infer a window from total usage.
+    if (parsed && !parsed.exact && validWindow(sessionWindow)) {
+      parsed.exact = { window: sessionWindow, source: "codex" };
+    }
     if (parsed) {
       reading = parsed;
       measuredAt = typeof entry?.timestamp === "string" && Number.isFinite(Date.parse(entry.timestamp)) ? entry.timestamp : null;

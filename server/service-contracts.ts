@@ -128,6 +128,8 @@ export interface RunnerRecoveryState {
   unresolvedDispatches: DeliveryDispatch[];
 }
 export interface RunnerRecoveryStore {
+  /** Start journal supplies launch time for terminals created before the startedAt label. */
+  getLifecycleJournal?(operationId: string): LifecycleJournal | null;
   inputState(memberId: string): RunnerRecoveryState;
   saveLease(lease: TerminalLease): void;
   removeLease(memberId: string, claimId: string): void;

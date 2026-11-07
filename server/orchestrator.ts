@@ -803,6 +803,8 @@ export class Orchestrator implements OrchestratorApi {
     } catch (error) {
       const refused = (error instanceof CoreError && !error.uncertain) || (error instanceof HerdrError && (error.code === "cannot_exit" || error.deliveryEffect !== "unknown")) || error instanceof ApiError;
       this.finishLifecycle(entry, entry.phase !== "unknown" && refused ? "refused" : "unknown", `${whileWorking ? "while_working" : "idle_only"}: ${(error as Error).message.slice(0, 500)}`);
+      if (error instanceof CoreError && !error.uncertain && error.kind === "input_busy") throw new ApiError(409, "입력칸에 글이 남아 있거나 입력 상태를 확인하지 못해 닫지 않았습니다. 터미널에서 지운 뒤 다시 시도하세요");
+      if (error instanceof CoreError && !error.uncertain && error.kind === "busy") throw new ApiError(409, "실행 중인 일이나 미해결 입력이 있어 닫지 않았습니다. 터미널과 전달 결과를 확인해 주세요");
       throw error;
     }
   }
@@ -1024,6 +1026,7 @@ export class Orchestrator implements OrchestratorApi {
       await this.recoverStops();
       // 서버가 강제로 죽었으면 전 턴의 자식이 살아 있다. 먼저 끝내야 같은 세션을 둘이 쓰지 않는다.
       await Promise.all([...this.runners.values()].map((r) => r.reapOrphans?.().catch((e) => console.warn("남은 자식 정리 실패:", (e as Error).message))));
+      for (const d of this.store.listDeliveries()) this.deliveryRecovery.requeueRejected(d.id);
       for (const d of this.store.listDelivering()) this.deliveryRecovery.beginRecovery(d.id);
       this.store.releaseHeldBeforeConnection();
       await this.refreshConnection();
@@ -2399,7 +2402,9 @@ export class Orchestrator implements OrchestratorApi {
 
   /** sent 는 start 에 실제로 넘긴 설정이다. 띄우는 동안 바뀐 값을 적으면 옛 값으로 돌면서 맞춘 것으로 기록된다. */
   private applyStarted(memberId: string, project: Project, started: { sessionId: string | null; paneId: string | null; tabId?: string | null; rejoined?: boolean }, sent?: AppliedConfig): void {
-    this.store.patchMember(memberId, { sessionId: started.sessionId, paneId: started.paneId });
+    const runner = this.runnerOf(this.store.requireMember(memberId));
+    const currentError = runner instanceof CoreRunner ? runner.observationState(memberId)?.lastError : null;
+    this.store.patchMember(memberId, { sessionId: started.sessionId, paneId: started.paneId, ...(!currentError ? { lastError: null } : {}) });
     // 이미 떠 있던 칸에 붙었으면 이번 인자가 들어간 것이 아니다.
     if (!started.rejoined && sent) this.store.setAppliedConfig(memberId, sent);
     if (started.tabId && started.tabId !== project.herdrTabId) this.store.patchProject(project.id, { herdrTabId: started.tabId });
@@ -2603,6 +2608,9 @@ export class Orchestrator implements OrchestratorApi {
     const rt = this.runtime(memberId);
     const pending = this.store.listPending(memberId);
     if (!opts.force) {
+      if (this.store.inputState(memberId).lease) throw new ApiError(409, "직접 조작권이 남아 있어 잠재울 수 없습니다. 조작을 끝내고 조작권을 놓아 주세요");
+      if (this.deliveryRecovery.fenced(memberId)) throw new ApiError(409, "전달 결과가 확인되지 않은 입력이 있어 잠재울 수 없습니다. 전달 확인을 먼저 끝내세요");
+      if (this.coreCompactFenced(member)) throw new ApiError(409, "문맥 압축을 처리하고 있어 잠재울 수 없습니다. 압축 결과를 확인해 주세요");
       if (this.isBusy(member)) throw new ApiError(409, `${josa(member.name, "은")} 일하는 중입니다`);
       if (this.store.listOpenDecisionsByMember(memberId).length > 0) throw new ApiError(409, `${member.name}에게 열린 결재가 있습니다`);
       if (pending.length > 0) throw new ApiError(409, `${member.name}의 대기열이 남아 있습니다`);
@@ -3163,13 +3171,14 @@ export class Orchestrator implements OrchestratorApi {
       return;
     }
     const project = this.store.requireProject(member.projectId);
-    const pending = this.store.listPending(memberId);
+    let pending = this.store.listPending(memberId);
     if (this.runners.has("core") && member.backend && member.backend !== "core" && (member.sessionId || member.paneId)) {
       for (const d of pending) this.hold(d, "legacy_session");
       return;
     }
     // Previously attempted entries must be inspected, including legacy held rows.
-    for (const d of pending) if (d.attempts > 0 && this.store.getDeliveryRecovery(d.id)?.phase === "none") this.deliveryRecovery.beginRecovery(d.id);
+    for (const d of pending) if (d.attempts > 0 && !this.deliveryRecovery.requeueRejected(d.id) && this.store.getDeliveryRecovery(d.id)?.phase === "none") this.deliveryRecovery.beginRecovery(d.id);
+    pending = this.store.listPending(memberId).filter(d => this.store.getDeliveryRetry(d.id).retryReason !== "rejected_limit");
     if (this.recovering || this.configWrites.has(memberId) || this.pendingLifecycle(memberId)) return;
     if (this.store.inputState(memberId).lease) { this.deferCoreCompact(member, "manual_control"); return; }
     if (member.backend === "core" && member.statusObservation && member.statusObservation.ownership !== "verified" && !(member.status === "offline" && member.statusObservation.error?.code === "no_owned_terminal")) return;
@@ -3302,7 +3311,7 @@ export class Orchestrator implements OrchestratorApi {
       }
     }
 
-    const fresh = this.store.listPending(memberId);
+    const fresh = this.store.listPending(memberId).filter(d => this.store.getDeliveryRetry(d.id).retryReason !== "rejected_limit");
     if (!fresh.some(d => d.wake) || this.retryDue(member) > Date.now()) {
       rt.turn = null;
       this.releaseSlots();
@@ -3330,6 +3339,7 @@ export class Orchestrator implements OrchestratorApi {
     }
     if (!result.ok) {
       if (rt.turn === turn) rt.turn = null;
+      if (["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown")) this.onSendFailed(member, rt, ordered.filter(d => this.store.getDeliveryRetry(d.id).retryReason !== "rejected_limit"), result);
       this.releaseSlots();
       return;
     }
@@ -3537,7 +3547,14 @@ export class Orchestrator implements OrchestratorApi {
 
   private onSendFailed(member: Member, rt: Runtime, deliveries: Delivery[], result: Extract<SendResult, { ok: false }>): void {
     const memberId = member.id;
-    if (this.backendOf(member) === "core" && (result.reason === "error" || (result as { reason: string }).reason === "unknown")) {
+    if (result.reason === "error" && ["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown")) {
+      // A provider's non-retryable refusal is still not an ambiguous write.
+      // Durable rejected-count admission bounds these ordinary retries.
+      for (const d of deliveries) this.requeue(d);
+      this.retryLater(memberId, rt, this.timings.retryMs);
+      return;
+    }
+    if (this.backendOf(member) === "core" && !["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown") && (result.reason === "error" || (result as { reason: string }).reason === "unknown")) {
       for (const d of deliveries) this.hold(d, "delivery_unknown");
       this.store.patchMember(memberId, { lastError: result.detail ?? "전달 여부를 확인할 수 없습니다" });
       return;
@@ -3629,7 +3646,7 @@ export class Orchestrator implements OrchestratorApi {
     const due = Date.now() + Math.max(ms, 0);
     this.store.transaction(() => {
       for (const delivery of this.store.listPending(memberId)) {
-        if (this.store.getDeliveryRecovery(delivery.id)?.phase !== "none") continue;
+        if (!["none", "resolved"].includes(this.store.getDeliveryRecovery(delivery.id)?.phase ?? "none") || this.store.getDeliveryRetry(delivery.id).retryReason === "rejected_limit") continue;
         const retry = this.store.getDeliveryRetry(delivery.id);
         this.store.patchDeliveryRetry(delivery.id, { nextAttemptAt: new Date(Math.max(due, Date.parse(retry.nextAttemptAt ?? "") || 0)).toISOString(), retryScope: `member:${memberId}`, retryReason: retry.retryReason ?? "control_retry" });
       }
@@ -3816,6 +3833,7 @@ export class Orchestrator implements OrchestratorApi {
     }
     switch (e.type) {
       case "status":
+        if (["idle", "working"].includes(e.status) && (!e.observation || e.observation.freshness === "fresh") && member.lastError) this.store.patchMember(member.id, { lastError: null });
         if (e.status === "working" || e.observation?.freshness === "stale") this.invalidateCoreMeasurement(member);
         if (e.status === "idle" && e.turn !== undefined && e.turn !== null && pending.some(run => run.turn !== null && e.turn! > run.turn)) {
           this.endExecution(member, "success", "서버 부재 중 더 뒤의 종결 turn을 확인했습니다");

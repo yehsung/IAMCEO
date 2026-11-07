@@ -1506,17 +1506,17 @@ describe("W5 전달 통합", () => {
     expect(t.store.listDispatches(a.id)[1]!.wireText).not.toContain("둘째 입력");
   });
 
-  test("검증된 쓰기 전 실패 복구는 같은 delivery와 표식으로 repair 포트를 거친다", async () => {
+  test("불확실 입력의 검증된 미수신 복구는 같은 delivery와 표식으로 repair 포트를 거친다", async () => {
     const t = await setup();
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
     let sends = 0;
-    t.runner.send = async () => { sends++; return { ok: false, reason: "down", retryable: true, deliveryEffect: "not_written" }; };
+    t.runner.send = async () => { sends++; return { ok: false, reason: "error", retryable: true, deliveryEffect: "unknown" }; };
     const { delivery } = await t.orch.assign(t.project.id, w.handle, { text: "안전 재시도" });
     const original = t.store.listDispatches(w.id)[0]!;
     t.runner.inspectImpl = async (_m, query) => {
       const result = deliveryObservation(query);
       result.finding = "not_received";
-      result.snapshot!.originalWrite = "rejected";
+      result.snapshot!.originalWrite = "settled";
       return result;
     };
     let repairs = 0;

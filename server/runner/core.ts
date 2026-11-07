@@ -5,7 +5,7 @@ import { constants, closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ApprovalPrompt, Backend } from "../../shared/types.ts";
-import { claudeFolderTrust } from "./core-approval.ts";
+import { claudeFolderTrust, codexFolderTrust } from "./core-approval.ts";
 import { cleanText } from "../text.ts";
 import { childEnv } from "./headless.ts";
 import { defaultClaudeHome, findSessionFile, inputText, screenContextPct } from "./herdr.ts";
@@ -41,7 +41,7 @@ interface Track {
   setupError: { code: string; note: string } | null;
   member: RunnerMember; terminal: CoreTerminal; sessionId: string | null; pending: boolean; uncertain: boolean; status: string | null;
   epoch: number; endedTurn: number; completing: boolean; refresh: Promise<CoreTerminal> | null;
-  nonce: string | null; binding: CodexBindingCursor | null; compact: CoreCompactState | null;
+  nonce: string | null; bindingSince: string; binding: CodexBindingCursor | null; compact: CoreCompactState | null;
   dispatches: DeliveryDispatch[]; evidence: Map<string, DeliveryEvidenceCursor>; lastError: string | null;
   observedAt: string; failures: number; failure: string | null;
 }
@@ -138,7 +138,8 @@ export class CoreRunner implements Runner {
   private bump(track: Track): void { track.epoch++; }
   private restore(track: Track): void {
     const state = this.deps.recoveryStore?.inputState(track.member.id);
-    track.dispatches = state?.unresolvedDispatches ?? [];
+    // Recovery phase can lag a durable pre-write refusal across a restart.
+    track.dispatches = (state?.unresolvedDispatches ?? []).filter(d => d.transportState !== "rejected");
     track.uncertain ||= track.dispatches.length > 0;
     if (state?.lease && state.lease.expiresAt > Date.now() && this.sameIdentity({ ...state.lease.identity, sessionId: track.sessionId ?? state.lease.identity.sessionId }, { ...this.identity(track), sessionId: track.sessionId ?? state.lease.identity.sessionId })) this.leases.set(track.member.id, state.lease);
     const compact = this.deps.compactStore?.load(track.member.id);
@@ -159,8 +160,10 @@ export class CoreRunner implements Runner {
   private name(member: RunnerMember): string { return `iamceo-${createHash("sha256").update(`${member.projectId}:${member.id}`).digest("hex").slice(0, 24)}`; }
   private async bind(member: RunnerMember, terminal: CoreTerminal, sessionId: string | null): Promise<Track> {
     if (this.closed) throw new CoreError("closed", "CoreRunner shut down while starting; terminal remains owned by core");
+    const launch = terminal.labels["iamceo.operation"] ? this.deps.recoveryStore?.getLifecycleJournal?.(terminal.labels["iamceo.operation"]) : null;
+    const launchedAt = launch?.memberId === member.id && launch.intent === "start" ? launch.createdAt : null;
     const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, status: null, statusKey: null, setupAttempted: null, setupError: null,
-      epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, binding: null, compact: null,
+      epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, bindingSince: terminal.labels["iamceo.startedAt"] || launchedAt || new Date().toISOString(), binding: null, compact: null,
       dispatches: [], evidence: new Map(), lastError: null, observedAt: new Date().toISOString(), failures: 0, failure: null };
     this.restore(track);
     this.tracks.set(member.id, track);
@@ -209,7 +212,7 @@ export class CoreRunner implements Runner {
     let terminal: CoreTerminal;
     try { terminal = await this.call<CoreTerminal>("terminal.run", {
       argv: launch.argv, cwd: member.cwd, env, name: this.name(member),
-      labels: { ...this.labels(member), ...(member.sessionGeneration !== undefined ? { "iamceo.generation": String(member.sessionGeneration) } : {}), ...(opts.operationId ? { "iamceo.operation": opts.operationId } : {}), ...(nonce ? { "iamceo.binding": nonce } : {}), ...(launch.sessionId ? { "iamceo.session": launch.sessionId } : {}) },
+      labels: { ...this.labels(member), "iamceo.startedAt": new Date().toISOString(), ...(member.sessionGeneration !== undefined ? { "iamceo.generation": String(member.sessionGeneration) } : {}), ...(opts.operationId ? { "iamceo.operation": opts.operationId } : {}), ...(nonce ? { "iamceo.binding": nonce } : {}), ...(launch.sessionId ? { "iamceo.session": launch.sessionId } : {}) },
       no_parent: true, outlive_parent: true, no_notify: true, keep: false, rm: false, wait: false,
     }, this.sendTimeoutMs);
       if (!terminal?.address || !terminal.labels || !Array.isArray(terminal.argv) || terminal.cwd !== member.cwd || !this.owns(terminal, member) || (terminal.turn !== undefined && (!Number.isSafeInteger(terminal.turn) || terminal.turn < 0))) throw new CoreError("protocol", "Invalid terminal.run identity; creation may have occurred", true);
@@ -375,7 +378,7 @@ export class CoreRunner implements Runner {
       const state = terminal.status?.state;
       if (state === "working") return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
       if (state === "blocked") return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: `Complete the CLI dialog with iamceo attach ${member.id}` };
-      if (!["idle", "done"].includes(state || "")) return { ok: false, reason: "input_busy", retryable: false, deliveryEffect: "not_written", detail: `No trustworthy idle OSC 7501 status; inspect CLI setup with iamceo attach ${member.id}` };
+      if (!["idle", "done"].includes(state || "")) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written", detail: `No trustworthy idle OSC 7501 status; inspect CLI setup with iamceo attach ${member.id}` };
       const inputEpoch = track.epoch;
       const screen = await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 });
       // Never erase a person's draft or deliver through an unidentified dialog.
@@ -407,7 +410,7 @@ export class CoreRunner implements Runner {
     } catch (error) {
       if (track && deliveryAttempted && (!(error instanceof CoreError) || error.uncertain)) { track.pending = false; track.uncertain = true; return { ...unsupported(`Delivery may have occurred; do not resend automatically. ${error instanceof Error ? error.message : String(error)}`), deliveryEffect: "unknown" }; }
       if (track && deliveryAttempted) track.pending = false;
-      if (error instanceof CoreError && ["blocked", "status_mismatch"].includes(error.kind)) return { ok: false, reason: error.kind === "blocked" ? "blocked" : "busy", retryable: true, detail: error.message, deliveryEffect: deliveryAttempted ? "rejected" : "not_written" };
+      if (error instanceof CoreError && ["blocked", "status_mismatch", "busy"].includes(error.kind)) return { ok: false, reason: error.kind === "blocked" ? "blocked" : "busy", retryable: true, detail: error.message, deliveryEffect: deliveryAttempted ? "rejected" : "not_written" };
       return { ok: false, reason: error instanceof CoreError && error.deliveryEffect === "not_written" ? "down" : "error", retryable: error instanceof CoreError && error.deliveryEffect === "not_written", deliveryEffect: !deliveryAttempted ? "not_written" : error instanceof CoreError ? error.deliveryEffect : "unknown", detail: error instanceof Error ? error.message : String(error) };
     } finally { this.sending.delete(member.id); }
   }
@@ -417,7 +420,7 @@ export class CoreRunner implements Runner {
   }
   private discoverBinding(track: Track): void {
     if (providerFor(track.member) !== "codex" || track.sessionId || !track.nonce || track.member.sessionGeneration === undefined) return;
-    const result = discoverCodexSession({ home: this.providerHome(track.member), cwd: track.member.cwd, generation: track.member.sessionGeneration, nonce: track.nonce, cursor: track.binding });
+    const result = discoverCodexSession({ home: this.providerHome(track.member), cwd: track.member.cwd, generation: track.member.sessionGeneration, nonce: track.nonce, since: track.bindingSince, cursor: track.binding });
     track.binding = result.cursor;
     if (result.outcome === "bound" && result.sessionId) {
       track.sessionId = result.sessionId;
@@ -451,7 +454,7 @@ export class CoreRunner implements Runner {
     this.assertMember(track, member);
     if (this.manualLease(member.id)) return unknown("manual_control", "wait"); // No provider record scan under lease.
     const terminal = await this.refresh(track);
-    if (query.cli !== providerFor(member) || query.backend !== "core" || !this.sameIdentity(query.identity, this.identity(track))) return unknown("identity_changed");
+    if (query.cli !== providerFor(member) || query.backend !== "core" || (!this.sameIdentity(query.identity, this.identity(track)) && (!query.identity.sessionId || query.identity.sessionId !== track.sessionId))) return unknown("identity_changed");
     const stored = this.deps.recoveryStore?.inputState(member.id).unresolvedDispatches ?? track.dispatches;
     const dispatch = stored.find((item) => item.dispatchId === query.dispatchId && item.wireSha256 === query.wireSha256);
     const barrier = dispatch && this.deps.quiescence?.(member.id, dispatch);
@@ -715,11 +718,11 @@ export class CoreRunner implements Runner {
     return (await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 })).text;
   }
   private async readSetup(track: Track): Promise<ReturnType<typeof claudeFolderTrust>> {
-    if (providerFor(track.member) !== "claude" || track.terminal.state !== "live" || ["working", "idle", "done", "error"].includes(track.terminal.status?.state || "")) return null;
+    if (track.terminal.state !== "live" || ["working", "idle", "done", "error"].includes(track.terminal.status?.state || "")) return null;
     const epoch = track.epoch;
     const screen = await this.call<{ text: string }>("terminal.read", { terminal: track.terminal.address, lines: 0 });
     this.validateTrack(track);
-    return epoch === track.epoch ? claudeFolderTrust(screen.text, track.member.cwd) : null;
+    return epoch === track.epoch ? (providerFor(track.member) === "claude" ? claudeFolderTrust : codexFolderTrust)(screen.text, track.member.cwd) : null;
   }
   async approval(member: RunnerMember): Promise<ApprovalPrompt | null> {
     const track = this.tracks.get(member.id);

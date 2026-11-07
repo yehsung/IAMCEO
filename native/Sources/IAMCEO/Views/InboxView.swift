@@ -47,6 +47,9 @@ struct InboxView: View {
     @State private var inFlight: Set<String> = []
     @State private var answeredHere: Set<String> = []
     @State private var cardErrors: [String: String] = [:]
+    @State private var contextID = UUID()
+    @State private var visitID = UUID()
+    @State private var memoRevisions: [String: Int] = [:]
     @State private var expandedDetail: Set<String> = []
     @State private var batchArmed: [String: [String]] = [:]
     @State private var batchBusy: Set<String> = []
@@ -100,6 +103,7 @@ struct InboxView: View {
             .onChange(of: olderDone.count) { _, _ in if router.decisionID != nil { handleLink(proxy) } }
             .onChange(of: segment) { _, _ in resetVisit(full: false); sync() }
             .onChange(of: store.selectedProjectID) { _, _ in resetProject() }
+            .onChange(of: drafts.namespace) { _, _ in resetProject() }
             .onChange(of: displayedIDs) { _, _ in shiftedAt = Date() }
             .onChange(of: revealRequest) { _, request in
                 guard let request else { return }
@@ -115,7 +119,8 @@ struct InboxView: View {
     // MARK: - Derived state
 
     private var openDecisions: [Decision] { store.decisions.filter { $0.status == "open" } }
-    private var blocked: [Member] { store.members.filter { $0.status == "blocked" } }
+    private var blocked: [Member] { store.members.filter { $0.status == "blocked" && MemberStatusInfo($0).tone == .approval } }
+    private var uncertainMembers: [Member] { store.members.filter { MemberStatusInfo($0).icon == "questionmark.circle" } }
     private var gateOpen: Bool { store.canWrite && store.state?.project.connection.ok == true }
     /// Why answers are impossible right now (nil = open). Every reason is global, so it is explained once:
     /// demo and disconnection by the pinned StatusStrips, plus one notice above the list (disconnected / runner).
@@ -207,6 +212,11 @@ struct InboxView: View {
             disconnectedNotice
             if linkMissing { missingLinkNotice }
             if !blocked.isEmpty { approvalCard }
+            if !uncertainMembers.isEmpty {
+                InlineNotice(tone: .neutral, icon: "questionmark.circle", title: "상태 확인 불가 \(uncertainMembers.count)명",
+                             detail: "승인 창이 확인되지 않았습니다. 팀 화면에서 상태 근거를 볼 수 있습니다.",
+                             actionTitle: "팀 화면으로", action: { router.go(.team) })
+            }
             let blocks = self.blocks
             if blocks.isEmpty && blocked.isEmpty {
                 Plate { CompactEmpty(icon: "checkmark.seal", title: "결재할 항목이 없습니다", detail: emptyDetail) }
@@ -287,7 +297,7 @@ struct InboxView: View {
                 .frame(minHeight: isMac ? 42 : 52)
             }
             .buttonStyle(RowButtonStyle(radius: CERadius.row))
-            .help(MemberStatusInfo("blocked").explanation)
+            .help(MemberStatusInfo(member).explanation)
             .accessibilityLabel("\(member.name), 승인 창 앞" + (now.isEmpty ? "" : ", \(now)"))
             .accessibilityHint("팀원 상세를 엽니다")
             Button { copyCommand(command, member: member.id) } label: {
@@ -368,9 +378,21 @@ struct InboxView: View {
     @ViewBuilder private func cardView(_ shown: Decision) -> some View {
         let id = shown.id
         let current = latest(id)
-        if let current, current.status != "open", answeredHere.contains(id), !inFlight.contains(id) {
+        if let current, current.status != "open", !inFlight.contains(id) {
             Plate(padding: wide ? 16 : 14) {
-                AnsweredBody(decision: current, asker: asker(current))
+                VStack(alignment: .leading, spacing: 8) {
+                    AnsweredBody(decision: current, asker: asker(current))
+                    if let error = cardErrors[id] { ErrorLine(text: error) }
+                    savedMemo(id)
+                    if current.status == "closed", current.closeKind != nil {
+                        Button(reopening.contains(id) ? "여는 중" : "다시 열기") {
+                            Task { await reopen(current, inPlace: true) }
+                        }
+                        .ceSecondaryButton().ceCompactControl()
+                        .disabled(!store.canWrite || reopening.contains(id))
+                    }
+                    if let error = reopenErrors[id] { ErrorLine(text: error) }
+                }
             }
             .overlay { FlashRing(on: flashID == id) }
             .id(id)
@@ -448,6 +470,7 @@ struct InboxView: View {
         let reopenable = decision.status == "closed" && decision.closeKind != nil
         return VStack(alignment: .leading, spacing: 6) {
             AnsweredBody(decision: decision, asker: asker(decision))
+            savedMemo(id)
             if reopenable || hasMore {
                 HStack(spacing: 10) {
                     if hasMore {
@@ -514,7 +537,10 @@ struct InboxView: View {
             set: { next in
                 let previous = reviews[id] ?? makeReview(decision)
                 reviews[id] = next
-                if next.note != previous.note { drafts.setMemo(next.note, for: id) }
+                if next.note != previous.note {
+                    memoRevisions[id, default: 0] += 1
+                    drafts.setMemo(next.note, for: id)
+                }
                 if next.note != previous.note || next.choice != previous.choice { engaged.insert(id) }
                 // A different pick changes the group's batch targets: ask again.
                 if next.choice != previous.choice, let group = decision.group { batchArmed[group] = nil }
@@ -568,6 +594,7 @@ struct InboxView: View {
     }
 
     private func resetVisit(full: Bool) {
+        visitID = UUID()
         answeredHere = []; engaged = []; cardErrors = [:]
         batchArmed = [:]; batchErrors = [:]; reopenErrors = [:]; reopenedNotice = nil
         if full {
@@ -577,9 +604,10 @@ struct InboxView: View {
     }
 
     private func resetProject() {
+        contextID = UUID()
         resetVisit(full: true)
         olderDone = []; olderCursor = nil; olderExhausted = false; olderError = nil; loadingOlder = false
-        reopening = []; segment = .open
+        reopening = []; inFlight = []; batchBusy = []; memoRevisions = [:]; segment = .open
     }
 
     // MARK: - Actions
@@ -594,16 +622,30 @@ struct InboxView: View {
         } else {
             guard review.canSubmit(comparedTo: current) else { return }
         }
+        let namespace = drafts.namespace
+        let projectID = store.selectedProjectID
+        let visit = visitID
+        let context = contextID
+        let memo = drafts.memo(for: id)
+        let revision = memoRevisions[id, default: 0]
         inFlight.insert(id)
+        engaged.insert(id)
         cardErrors[id] = nil
         let ok = await store.answerDecision(review.decision, choice: noteOnly ? nil : review.choice, note: note.isEmpty ? nil : note)
+        guard contextID == context, drafts.namespace == namespace, store.selectedProjectID == projectID else { return }
+        if ok, visitID == visit, memoRevisions[id, default: 0] == revision, drafts.memo(for: id) == memo {
+            drafts.clearMemo(id)
+        }
         inFlight.remove(id)
+        guard visitID == visit else { return }
         if ok {
             answeredHere.insert(id)
             memoOnly.remove(id)
-            drafts.clearMemo(id)
+            if memoRevisions[id, default: 0] == revision { reviews[id]?.note = "" }
         } else {
-            cardErrors[id] = store.errorMessage ?? "보내지 못했습니다. 연결을 확인하고 다시 시도해 주세요."
+            cardErrors[id] = latest(id).map({ $0.status != "open" }) == true
+                ? "이미 처리된 결재입니다. 내 요청의 수락은 확인하지 못해 메모를 남겼습니다."
+                : store.errorMessage ?? "답변 결과를 확인하지 못했습니다. 내 메모는 남겼습니다."
             sync()
         }
     }
@@ -612,26 +654,63 @@ struct InboxView: View {
         let cards = liveDecisions.filter { $0.group == group }
         let targets = batchTargets(cards)
         guard gateOpen, !batchBusy.contains(group), targets.map(\.id) == ids, !targets.isEmpty else { batchArmed[group] = nil; return }
+        let namespace = drafts.namespace
+        let projectID = store.selectedProjectID
+        let visit = visitID
+        let context = contextID
+        let memos = ids.reduce(into: [String: String]()) { result, id in
+            if let memo = drafts.memo(for: id) { result[id] = memo }
+        }
+        let revisions = memoRevisions
         var notes: [String: String] = [:]
         for decision in targets {
             let memo = (reviews[decision.id]?.note ?? drafts.memo(for: decision.id) ?? decision.lastNote ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if !memo.isEmpty { notes[decision.id] = memo }
+            if reviews[decision.id] == nil { reviews[decision.id] = makeReview(decision) }
         }
         batchBusy.insert(group)
         batchErrors[group] = nil
-        for id in ids { inFlight.insert(id) }
-        let result = await store.answerBatch(targets, notes: notes)
+        for id in ids { inFlight.insert(id); engaged.insert(id); cardErrors[id] = nil }
+        let results = await store.answerBatchResults(targets, notes: notes)
+        guard contextID == context, drafts.namespace == namespace, store.selectedProjectID == projectID else { return }
         for id in ids {
-            inFlight.remove(id)
-            if let current = latest(id), current.status != "open" {
-                answeredHere.insert(id)
+            // A closed card is not proof that this device's request was accepted.
+            if results[id] == .accepted, visitID == visit, memoRevisions[id, default: 0] == revisions[id, default: 0],
+               drafts.memo(for: id) == memos[id] {
                 drafts.clearMemo(id)
             }
+            inFlight.remove(id)
         }
         batchBusy.remove(group)
+        guard visitID == visit else { return }
+        for id in ids {
+            switch results[id] ?? .notSent {
+            case .accepted:
+                answeredHere.insert(id)
+                memoOnly.remove(id)
+                if memoRevisions[id, default: 0] == revisions[id, default: 0] { reviews[id]?.note = "" }
+            case .conflict:
+                cardErrors[id] = "다른 곳에서 바뀌었습니다. 내 메모는 남겼습니다. 최신 내용을 확인하세요."
+            case .unknown:
+                cardErrors[id] = "답변 결과 확인 중입니다. 내 메모는 남겼습니다."
+            case .refused:
+                cardErrors[id] = "답변을 반영하지 않았습니다. 내 메모는 남겼습니다."
+            case .notSent:
+                cardErrors[id] = "보내지 않았습니다. 내 메모는 남겼습니다."
+            }
+        }
         batchArmed[group] = nil
-        if let first = result.failures.first { batchErrors[group] = "\(result.failures.count)건을 보내지 못했습니다: \(first)" }
+        let remaining = ids.filter { results[$0] != .accepted }.count
+        if remaining > 0 { batchErrors[group] = "\(remaining)건은 카드별 결과를 확인하세요. 메모는 남겼습니다." }
         sync()
+    }
+
+    @ViewBuilder private func savedMemo(_ id: String) -> some View {
+        if let memo = drafts.memo(for: id), !memo.isEmpty {
+            Text("내 메모 · 이 기기에 보관\n\(memo)")
+                .font(CEFont.secondary).foregroundStyle(CE.ink2)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+        }
     }
 
     private func reviewLatest(_ id: String) {
@@ -812,7 +891,7 @@ private struct DecisionCard: View {
 
     /// Quiet "who · time" line. The dot is the asker's CLI state (waiting, working, asleep…).
     private var header: some View {
-        let state = asker.map { MemberStatusInfo($0.status) }
+        let state = asker.map { MemberStatusInfo($0) }
         return HStack(alignment: .center, spacing: 7) {
             StatusDot(tone: state?.tone ?? .attention)
             Text(whoName).font(CEFont.secondary.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)

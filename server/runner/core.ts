@@ -1,6 +1,7 @@
 import { capturedContext } from "./statusline.ts";
 import { readCodexContextFile } from "./codex-context.ts";
 import { createHash } from "node:crypto";
+import { constants, closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Backend } from "../../shared/types.ts";
@@ -10,7 +11,7 @@ import { defaultClaudeHome, findSessionFile, inputText, screenContextPct } from 
 import { CoreError, coreRpc, coreSocketPath, type CoreHello, type CoreTerminal } from "./core-client.ts";
 import { providerFor, providerLaunch, isProviderArgv, type ProviderBins } from "./providers.ts";
 import { codexBindingMarker, discoverCodexSession, observeCompactBoundary, type CodexBindingCursor, type CompactBoundaryBaseline, type CompactBoundaryCursor } from "./core-context.ts";
-import { readDeliveryEvidence, readJsonlRange, parseCodexSessionMeta, type DeliveryEvidenceCursor } from "./delivery-evidence.ts";
+import { readDeliveryEvidence, readJsonlRange, parseCodexSessionMeta, providerLogPath, type DeliveryEvidenceCursor, type JsonlCursor } from "./delivery-evidence.ts";
 import type { DeliveryDispatch, RunnerRecoveryStore, TerminalLease } from "../service-contracts.ts";
 import { readTranscriptTail } from "./transcript.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, DeliveryProbe, DeliveryInspection, DeliveryRepair, RunnerTerminalIdentity, RunnerReattachResult, RunnerObservation } from "./types.ts";
@@ -20,6 +21,9 @@ export interface CoreRunnerOptions extends ProviderBins { coreBin?: string; sock
 export interface CoreCompactState {
   id: string; baseline: CompactBoundaryBaseline; phase: "sending" | "running" | "uncertain" | "succeeded" | "failed";
   startedAt: number; cursor: CompactBoundaryCursor | null;
+  reason?: "user_resolved";
+  /** Only acknowledged human input can arm resolution; idle alone is insufficient. */
+  manualResolution?: { turn: number | null; unsettled: boolean };
 }
 export interface CoreRunnerDeps {
   pollMs?: number; rpcTimeoutMs?: number; sendTimeoutMs?: number; compactTimeoutMs?: number;
@@ -39,6 +43,36 @@ interface Track {
 }
 const REQUIRED_METHODS = ["terminal.run", "terminal.list", "terminal.get", "terminal.read", "terminal.send", "terminal.interrupt", "terminal.kill"];
 const unsupported = (detail: string): Extract<SendResult, { ok: false }> => ({ ok: false, reason: "error", retryable: false, deliveryEffect: "not_written", detail });
+
+/** Capture an EOF baseline, not an exhaustive delivery/absence scan of history. */
+function compactLogBaseline(root: string, path: string): JsonlCursor | null {
+  const target = providerLogPath(root, path);
+  if (!target) return null;
+  let fd: number;
+  try { fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch { return null; }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || providerLogPath(root, path) !== target) return null;
+    const tail = Buffer.alloc(Math.min(stat.size, 4 * 1024 * 1024));
+    const start = stat.size - tail.length;
+    if (readSync(fd, tail, 0, tail.length, start) !== tail.length || (tail.length && tail.at(-1) !== 10)) return null;
+    // Skip the first potentially partial line. Never adopt a partial EOF or an
+    // oversized last line as a completed baseline, even if it contains a marker.
+    let offset = start;
+    if (start > 0) {
+      const previous = Buffer.alloc(1);
+      if (readSync(fd, previous, 0, 1, start - 1) !== 1) return null;
+      if (previous[0] !== 10) {
+        offset += tail.indexOf(10) + 1;
+        if (offset <= start || offset === stat.size) return null;
+      }
+    }
+    const range = readJsonlRange(root, path, null, { startOffset: offset, fileIdentity: `${stat.dev}:${stat.ino}:${stat.birthtimeMs}` });
+    return range.complete && range.cursor?.offset === stat.size ? range.cursor : null;
+  } catch { return null; }
+  finally { closeSync(fd); }
+}
 
 /** Terminals belong to core's holders. IAMCEO shutdown only detaches. */
 export class CoreRunner implements Runner {
@@ -492,15 +526,17 @@ export class CoreRunner implements Runner {
       if (this.manualLease(member.id) || this.isBusy(member.id)) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
       const terminal = await this.refresh(track);
       if (terminal.state !== "live" || terminal.status?.state !== "idle") return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: "Compact requires exact idle; generation 1 cannot condition on done" };
+      const epoch = track.epoch;
       const screen = await this.screen(member);
       if ((providerFor(member) === "claude" ? inputText(screen) : codexDraft(screen)) !== "") return { ok: false, reason: "input_busy", retryable: true, deliveryEffect: "not_written" };
       const path = this.logPath(track), home = this.providerHome(member);
       if (!path) return { ...unsupported("Native session log is unavailable"), deliveryEffect: "not_written" };
-      const range = readJsonlRange(join(home, providerFor(member) === "claude" ? "projects" : "sessions"), path);
-      if (!range.complete || !range.cursor) return { ...unsupported("Compact log baseline is incomplete"), deliveryEffect: "not_written" };
+      const root = join(home, providerFor(member) === "claude" ? "projects" : "sessions");
+      const baseline = compactLogBaseline(root, path);
+      if (!baseline) return { ...unsupported("Compact log baseline is incomplete"), deliveryEffect: "not_written" };
       const current = await this.refresh(track);
-      if (current.state !== "live" || current.status?.state !== "idle" || this.manualLease(member.id)) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
-      this.saveCompact(track, { id: crypto.randomUUID(), phase: "sending", startedAt: Date.now(), cursor: null, baseline: { path, fileIdentity: range.cursor.fileIdentity, offset: range.cursor.offset,
+      if (current.state !== "live" || current.status?.state !== "idle" || track.epoch !== epoch || this.manualLease(member.id) || !readJsonlRange(root, path, baseline, { maxBytes: 0 }).complete) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
+      this.saveCompact(track, { id: crypto.randomUUID(), phase: "sending", startedAt: Date.now(), cursor: null, baseline: { path, fileIdentity: baseline.fileIdentity, offset: baseline.offset,
         sessionId: track.sessionId, terminalId: current.address, generation: member.sessionGeneration, turn: current.turn ?? null, model: member.model } });
       this.bump(track); track.pending = true; attempted = true;
       const command = providerFor(member) === "codex" ? "/compact" : `/compact ${cleanText(focus).replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim()}`.trim();
@@ -521,9 +557,22 @@ export class CoreRunner implements Runner {
     } finally { release(); }
   }
   private async checkCompact(track: Track): Promise<void> {
-    const operation = track.compact!;
-    if (this.manualLease(track.member.id) || operation.phase === "sending") return;
+    let operation = track.compact!;
     const state = track.terminal.status?.state;
+    const resolution = operation.manualResolution;
+    if (operation.phase === "uncertain" && resolution && track.terminal.state === "live") {
+      if (["working", "blocked"].includes(state || "") && !resolution.unsettled) {
+        this.saveCompact(track, { ...operation, manualResolution: { ...resolution, unsettled: true } });
+        operation = track.compact!;
+      }
+      if (["idle", "done"].includes(state || "") && (resolution.unsettled || resolution.turn !== null && (track.terminal.turn ?? -1) > resolution.turn)) {
+        this.saveCompact(track, { ...operation, phase: "failed", reason: "user_resolved" });
+        track.pending = false; track.uncertain = track.dispatches.length > 0;
+        this.event(track, { type: "activity", memberId: track.member.id, kind: "system", text: "사용자 확인으로 압축 대기를 해제했습니다", runId: operation.id });
+        return;
+      }
+    }
+    if (this.manualLease(track.member.id) || operation.phase === "sending") return;
     const result = observeCompactBoundary({ cli: providerFor(track.member), home: this.providerHome(track.member), cwd: track.member.cwd, baseline: operation.baseline,
       current: { sessionId: track.sessionId!, generation: track.member.sessionGeneration ?? -1, terminalId: track.terminal.address, turn: track.terminal.turn ?? null, model: track.member.model },
       settled: track.terminal.state === "live" && ["idle", "done"].includes(state || ""), providerError: state === "error", cursor: operation.cursor });
@@ -689,6 +738,9 @@ export class CoreRunner implements Runner {
       if (action.action === "key" && (!action.key || !["enter", "up", "down", "esc", "tab", "ctrl+c", "backspace"].includes(action.key))) throw new CoreError("invalid_params", "Unsupported terminal control key");
       const next = { ...lease, expiresAt: Date.now() + 5 * 60_000, lastInputSequence: lease.lastInputSequence + 1 };
       this.deps.recoveryStore?.saveLease(next); this.leases.set(member.id, next); this.bump(track);
+      const compact = track.compact && ["running", "uncertain"].includes(track.compact.phase) ? track.compact : null;
+      // A later refused/unknown input must not inherit proof from an earlier one.
+      if (compact?.manualResolution) this.saveCompact(track, { ...compact, manualResolution: undefined });
       try {
         if (action.action === "input") await this.call("terminal.send", { terminal: terminal.address, text: cleanText(action.text!), force: true, wait: false }, this.sendTimeoutMs);
         else await this.call("terminal.keys", { terminal: terminal.address, keys: [action.key] }, this.sendTimeoutMs);
@@ -696,7 +748,14 @@ export class CoreRunner implements Runner {
         if (!(error instanceof CoreError) || error.uncertain) track.uncertain = true;
         throw error;
       }
-      // A human key or release is not evidence that an unknown original write drained.
+      // Drain any observation started before the ACK while resolution remains
+      // disarmed. Only a newly requested observation may prove settled input.
+      await track.refresh?.catch(() => undefined);
+      this.validateTrack(track);
+      if (compact && track.compact?.id === compact.id && ["running", "uncertain"].includes(track.compact.phase)) this.saveCompact(track, { ...track.compact,
+        manualResolution: { turn: terminal.turn ?? null, unsettled: ["working", "blocked"].includes(terminal.status?.state || "") } });
+      // Re-observe after the ACK. Claim/release, elapsed time and unchanged idle
+      // cannot prove that a human intervention settled this compact operation.
       await this.refresh(track).catch(() => undefined);
       return { leaseId: next.leaseId, expiresAt: next.expiresAt };
     } finally { release(); }

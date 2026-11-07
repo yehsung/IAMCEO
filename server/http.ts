@@ -454,6 +454,7 @@ async function artifactHtml({ config, store }: ServerContext, id: string): Promi
 
 function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, readHerdr: () => Promise<HerdrInfo>, currentHerdr: () => HerdrInfo): Route[] {
   const { config, store, orch, bus } = ctx;
+  const legacyProjectPatches = new Set<string>();
   // 재전송이 앞 요청의 orch 처리가 끝나기 전에 와도 두 번 전달되지 않게 한다.
   const inFlight = new Map<string, Promise<unknown>>();
   const once = <T>(key: string, run: () => Promise<T>): Promise<T> => {
@@ -518,7 +519,10 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     route("GET", "/api/capabilities", (_req, url) => {
       strictQuery(url, []);
       const body: ServerCapabilities = { contractVersion: 2, capabilities: {
-        paging: true, archive: true, realtime: true, delivery: false, push: !!ctx.push, operations: false,
+        paging: true, archive: true, realtime: true, delivery: !!ctx.delivery, push: !!ctx.push,
+        // 네이티브는 이 값으로 엄격 쓰기를 켠다. 결과 조회와 모든 쓰기 포트가 있어야 한다.
+        operations: (["operation", "updateSettingsV2", "patchMemberConfigV2", "setTodoDoneV2", "freshMemberSessionV2", "terminalControlV2"] as const)
+          .every(port => port in orch && !!orch[port]),
       } };
       return Response.json(body);
     }),
@@ -618,14 +622,26 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     }),
     route("GET", "/api/decisions/:id", (_req, _url, [id]) => Response.json(store.requireDecision(id!))),
     route("PATCH", "/api/projects/:id", async (req, _url, [id]) => {
-      const current = store.requireProject(id!);
+      store.requireProject(id!);
+      const v2 = contractV2(req);
       const body = await parseBody(req, PatchProjectSchema);
-      if (current.isHq && body.archived) throw new ApiError(400, "본사는 보관할 수 없습니다");
       const patch = body.cwd === undefined ? body : { ...body, cwd: expandDir(body.cwd) };
-      await orch.beforeProjectPatch?.(current, patch);
-      const project = store.patchProject(id!, patch);
-      await orch.onProjectPatched(project, patch);
-      return Response.json(store.requireProject(id!));
+      // 연결된 구현은 종료·commit·후속 hook까지 단일 진입점이 소유한다.
+      if (orch.patchProject) return Response.json(await orch.patchProject(id!, patch));
+      // 구형 v1 포트의 활성 프로젝트 메타데이터만 호환한다.
+      // 보관 전환/보관된 세션과 v2는 새 진입점의 장벽 없이 처리하지 않는다.
+      const project = store.requireProject(id!);
+      const validated = store.validateProjectPatch(id!, patch);
+      if (v2 || patch.archived !== undefined || project.archived) throw new ApiError(501, "프로젝트 변경을 지원하지 않습니다");
+      if (legacyProjectPatches.has(id!)) throw new ApiError(409, "프로젝트 변경을 처리하는 중입니다. 잠시 뒤 다시 하세요");
+      legacyProjectPatches.add(id!);
+      try {
+        if (Object.entries(validated).every(([key, value]) => project[key as keyof typeof project] === value)) return Response.json(project);
+        await orch.beforeProjectPatch?.(project, validated);
+        const saved = store.patchProject(id!, validated);
+        await orch.onProjectPatched(saved, validated);
+        return Response.json(store.requireProject(id!));
+      } finally { legacyProjectPatches.delete(id!); }
     }),
     route("POST", "/api/projects/:id/conductor/start", async (_req, _url, [id]) => {
       store.requireProject(id!);

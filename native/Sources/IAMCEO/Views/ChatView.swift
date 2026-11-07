@@ -1,4 +1,9 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 // MARK: - 대화
 //
@@ -42,7 +47,7 @@ struct ChatView: View {
             .ceBar(.bottom) { ChatInlineComposer() }
             // The recipient's detail link lives in the nav bar (AppShell leaves the trailing slot empty on Chat).
             .toolbar {
-                if let member = ChatScope(store: store, router: router).currentMember {
+                if !store.isArchive, let member = ChatScope(store: store, router: router).currentMember {
                     ToolbarItem(placement: .topBarTrailing) {
                         let title = member.kind == "worker" ? "\(member.name) 팀원 보기" : "\(chatLeadLabel(member)) 보기"
                         Button { router.openMember(member.id) } label: { Image(systemName: "person.crop.circle") }
@@ -156,9 +161,9 @@ struct ChatMineRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(clockTime(message.at)).monospacedDigit().foregroundStyle(CE.ink3).fixedSize()
             if let info { deliveryLabel(info) }
-            if message.delivery == "failed" {
+            if !store.isArchive, message.delivery == "failed" {
                 resendButton
-            } else if message.delivery == "held", isLatestProblem, let target {
+            } else if !store.isArchive, message.delivery == "held", isLatestProblem, let target {
                 heldAction(target)
             }
         }
@@ -315,7 +320,7 @@ struct ChatReportRow: View {
         if let id = message.decisionId {
             let decision = store.decisions.first { $0.id == id }
             let link = chatDecisionLink(decision)
-            ChatJumpChip(title: link.title, prominent: link.open) { router.openDecision(id) }
+            ChatJumpChip(title: store.isArchive ? "결재 기록 보기" : link.title, prominent: !store.isArchive && link.open) { router.openDecision(id) }
                 .help(decision.map { DecisionStateInfo($0).label } ?? "결재함에서 찾아 엽니다")
         }
     }
@@ -348,107 +353,370 @@ struct ChatDaySeparator: View {
 private struct ChatThread: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Thread key whose bottom sentinel scrolled out of view. nil (or another key) = pinned to the bottom.
-    @State private var bottomHiddenKey: String?
-    @State private var newCount = 0
-    private static let bottomID = "chat-thread-bottom"
+    @Environment(DraftStore.self) private var drafts
 
     var body: some View {
         let scope = ChatScope(store: store, router: router)
-        let key = scope.threadKey
-        let items = scope.messages
-        let rows = chatThreadRows(items)
-        let unresolved = scope.unresolvedIDs
-        let showsTarget = scope.isProjectThread
+        let key = Data("\(drafts.namespace)|\(drafts.connectionGeneration)|\(scope.threadKey)|\(store.isArchive)".utf8).base64EncodedString()
+        ChatConversation(scopeID: key, targetMemberID: router.chatTarget, projectID: store.selectedProjectID,
+                         namespace: drafts.namespace).id(key)
+    }
+}
+
+/// The displayed interval is staged separately so the public scroll adapter captures the position at application time.
+private struct ChatConversation: View {
+    @Environment(AppStore.self) private var store
+    @Environment(Router.self) private var router
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let scopeID: String
+    let targetMemberID: String?
+    let projectID: String?
+    let namespace: String
+    @State private var anchor: ChatScrollAnchor
+    @State private var displayed: [Message] = []
+    @State private var queued: [Message]?
+    @State private var pinned = true
+    @State private var started = false
+    @State private var restoring: ChatHistoryAnchor?
+    @State private var reading: ChatVisibleAnchor?
+    @State private var viewportHeight: CGFloat = 0
+    @State private var top: CGFloat?
+    @State private var intentUsed = false
+    @State private var wasInteracting = false
+    @State private var dragging = false
+    @State private var isVisible = false
+    @State private var autoPaused = false
+    @State private var lastLoad: ChatHistoryLoad = .initial
+    @State private var followID: String?
+    @State private var positionError = false
+    private static let bottomID = "chat-thread-bottom"
+
+    init(scopeID: String, targetMemberID: String?, projectID: String?, namespace: String) {
+        self.scopeID = scopeID
+        self.targetMemberID = targetMemberID; self.projectID = projectID; self.namespace = namespace
+        _anchor = State(initialValue: ChatScrollAnchor(scope: scopeID))
+    }
+
+    private var scope: ChatScope { ChatScope(store: store, router: router) }
+    private var history: ChatHistory? {
+        guard let history = store.history,
+              history.key.projectID == projectID, history.key.namespace == namespace,
+              ChatHistoryKey.scopeBytes(history.key.scope) == ChatHistoryKey.scopeBytes(
+                ChatHistoryKey.normalizedScope(targetMemberID: targetMemberID, members: store.members)) else { return nil }
+        return history
+    }
+    private var notificationAnchor: String? {
+        guard router.chatMessageID == store.notificationMessageID else { return nil }
+        return router.chatMessageID
+    }
+    private var items: [Message] {
+        if notificationAnchor != nil { return store.historyMessages }
+        if store.isDemo || (!store.isArchive && store.pagingSupport == .unsupported) { return scope.messages }
+        return history?.items ?? []
+    }
+    private var loaded: Bool { store.isDemo || (!store.isArchive && store.pagingSupport == .unsupported)
+        || history?.initialized == true || notificationAnchor != nil }
+    private var canPage: Bool {
+        !store.isDemo && store.connectionStatus == .connected && notificationAnchor == nil
+            && history?.hasOlder == true && history?.loading == nil && history?.isBridging == false
+            && history?.storeChanged == false && !anchor.isPreservingPosition
+    }
+
+    var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    if store.messages.count >= 200 {
-                        Label("최근 200개까지 보입니다", systemImage: "clock.arrow.circlepath")
-                            .font(CEFont.meta).foregroundStyle(CE.ink3)
-                            .frame(maxWidth: .infinity)
-                            .padding(.bottom, 2)
+                    historyControls
+                        .chatScrollRow(id: "history-top", coordinateSpace: scopeID)
+                    if displayed.isEmpty && loaded {
+                        ChatEmpty(title: "아직 대화가 없습니다", detail: emptyDetail)
                     }
-                    if items.isEmpty {
-                        ChatEmpty(title: "아직 대화가 없습니다", detail: emptyDetail(scope))
-                    }
-                    ForEach(rows) { row in
+                    ForEach(chatThreadRows(displayed)) { row in
                         switch row {
-                        case .day(_, let label):
-                            ChatDaySeparator(label: label)
+                        case .day(_, let label): ChatDaySeparator(label: label)
                         case .message(let message):
-                            ChatMessageRow(message: message, isLatestProblem: unresolved.contains(message.id), showsTarget: showsTarget)
+                            ChatMessageRow(message: message, isLatestProblem: scope.unresolvedIDs.contains(message.id), showsTarget: scope.isProjectThread)
+                                .chatScrollRow(id: row.id, coordinateSpace: scopeID)
+                                .id(row.id)
                         }
                     }
                     Color.clear.frame(height: 1).id(Self.bottomID)
-                        .onAppear {
-                            if bottomHiddenKey == key { bottomHiddenKey = nil }
-                            newCount = 0
-                        }
-                        .onDisappear { bottomHiddenKey = key }
+                        .chatScrollRow(id: "history-bottom", coordinateSpace: scopeID)
                         .accessibilityHidden(true)
                 }
+                .background { ChatScrollHostProbe(anchor: anchor, scope: scopeID).frame(width: 0, height: 0) }
                 .padding(.horizontal, isMac ? CESpace.xl : CESpace.l)
                 .padding(.top, 14).padding(.bottom, CESpace.m)
-                .frame(maxWidth: 880)
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: 880).frame(maxWidth: .infinity)
             }
             .defaultScrollAnchor(.bottom)
+            .chatScrollAnchoring(anchor, scope: scopeID)
+            .background(GeometryReader { geometry in
+                Color.clear.onAppear { viewportHeight = geometry.size.height }
+                    .onChange(of: geometry.size.height) { _, height in viewportHeight = height }
+            })
+            .onPreferenceChange(ChatMessageFramesKey.self) { frames in
+                MainActor.assumeIsolated { observe(frames, proxy: proxy) }
+            }
             #if os(iOS)
             .scrollDismissesKeyboard(.interactively)
             #endif
-            .id(key)
             .overlay(alignment: .bottom) {
-                if !items.isEmpty && bottomHiddenKey == key {
-                    jumpButton(proxy)
+                if !displayed.isEmpty && (!pinned || notificationAnchor != nil) { jumpButton(proxy) }
+            }
+            .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in
+                if !dragging { dragging = true; wasInteracting = false }
+            }.onEnded { _ in dragging = false; wasInteracting = false })
+            .onAppear { isVisible = true }
+            .task {
+                await store.activateHistory(targetMemberID: targetMemberID)
+            }
+            .onDisappear {
+                isVisible = false
+                savePosition()
+                anchor.cancelPreservation()
+                if history != nil { store.deactivateHistory() }
+            }
+            .onChange(of: ChatThreadContent(items: items), initial: true) { _, content in
+                present(content.items, proxy: proxy)
+            }
+            .onChange(of: loaded) { _, value in
+                if value { present(items, proxy: proxy) }
+            }
+            .onChange(of: anchor.isPreservingPosition) { _, preserving in
+                if !preserving, let queued { self.queued = nil; present(queued, proxy: proxy) }
+            }
+            .onChange(of: anchor.visibleAnchor) { _, visible in
+                if positionError, visible != nil, anchor.hostFound, let queued {
+                    positionError = false; self.queued = nil; present(queued, proxy: proxy)
                 }
             }
-            .onChange(of: ChatThreadTail(key: key, lastID: items.last?.id)) { old, new in
-                follow(old: old, new: new, items: items, proxy: proxy)
+            .onChange(of: anchor.isInteracting) { _, interacting in
+                if !interacting { wasInteracting = false }
+            }
+            .onChange(of: history?.error) { _, error in
+                if error != nil { autoPaused = true; chatAnnounce("대화를 불러오지 못했습니다. 다시 불러오기를 눌러 주세요.") }
+            }
+            .onChange(of: history?.loading, initial: true) { _, request in
+                if let request { lastLoad = request.kind }
+            }
+            .onChange(of: router.chatMessageID) { _, _ in
+                anchor.cancelPreservation(); queued = nil; restoring = nil; reading = nil
+                started = false; present(items, proxy: proxy)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: ComposerAcceptedMessage.notification)) { note in
+                guard let sent = note.object as? ComposerAcceptedMessage,
+                      sent.namespace == store.writeNamespace, sent.projectID == store.selectedProjectID,
+                      scope.isProjectThread || sent.targetMemberID == router.chatTarget else { return }
+                followID = sent.messageID
+                store.leaveNotificationAnchor(); router.chatMessageID = nil
+                jump(proxy)
             }
         }
     }
 
-    private func emptyDetail(_ scope: ChatScope) -> String {
+    @ViewBuilder private var historyControls: some View {
+        VStack(spacing: 6) {
+            if store.isArchive { Tag("보관한 대화 · 읽기 전용", tone: .dim) }
+            if let notice = router.navigationNotice { Text(notice).foregroundStyle(CE.attention) }
+            if notificationAnchor != nil {
+                Text("알림의 보고 앞뒤를 보고 있습니다").foregroundStyle(CE.ink2)
+                Button("최신 대화로") { returnToLatest() }
+                    .ceSecondaryButton()
+            } else if store.isDemo {
+                Text("샘플 대화 · 읽기 전용").foregroundStyle(CE.ink3)
+            } else if store.connectionStatus != .connected {
+                Text("연결이 끊겼습니다. 다시 연결하면 이전 글을 불러올 수 있습니다").foregroundStyle(CE.attention)
+            } else if history?.storeChanged == true {
+                Text("서버의 대화 기록이 변경되었습니다").foregroundStyle(CE.attention)
+                Button("최신 대화부터 다시 보기") {
+                    anchor.cancelPreservation(); started = false; displayed = []; queued = nil
+                    Task { await store.restartHistoryFromLatest() }
+                }.ceSecondaryButton()
+            } else if history?.isBridging == true {
+                Text(history?.error == nil ? "새 대화를 이어 받는 중입니다" : "새 대화를 이어 받지 못했습니다").foregroundStyle(CE.ink2)
+                if history?.loading != nil { ProgressView().controlSize(.small) }
+                else {
+                    Button(history?.error == nil ? "동기화 계속" : "다시 동기화") { Task { await store.continueHistoryBridge() } }
+                        .ceSecondaryButton()
+                }
+            } else if store.pagingSupport == .unsupported && !store.isArchive {
+                Text("이 서버는 최근 대화만 보여줍니다").foregroundStyle(CE.ink3)
+            } else if !loaded {
+                if history?.error != nil {
+                    Text("대화를 불러오지 못했습니다").foregroundStyle(CE.attention)
+                    Button("다시 불러오기") { Task { await store.refreshHistory() } }.ceSecondaryButton()
+                } else { ProgressView("대화를 불러오는 중…").controlSize(.small) }
+            } else if history?.loading?.kind == .older {
+                ProgressView("이전 글을 불러오는 중…").controlSize(.small)
+            } else if history?.error != nil {
+                Text(lastLoad == .older ? "이전 글을 불러오지 못했습니다" : "새 대화를 불러오지 못했습니다").foregroundStyle(CE.attention)
+                if lastLoad == .older {
+                    Button("다시 불러오기") { loadOlder() }.ceSecondaryButton().disabled(!canPage)
+                } else {
+                    Button("다시 동기화") { Task { await store.refreshHistory() } }.ceSecondaryButton()
+                        .disabled(history?.loading != nil)
+                }
+            } else if history?.hasOlder == true {
+                Button("이전 글 불러오기") { loadOlder() }.ceSecondaryButton().disabled(!canPage)
+                    .accessibilityHint("이전 글 100개를 불러옵니다")
+            } else if !displayed.isEmpty {
+                Text("대화의 처음입니다").foregroundStyle(CE.ink3)
+            }
+            if positionError {
+                Text("읽던 위치를 확인하지 못했습니다. 이전 글은 잠시 뒤 다시 불러오세요.").foregroundStyle(CE.attention)
+            }
+        }
+        .font(CEFont.meta).frame(maxWidth: .infinity).padding(.bottom, 2)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var emptyDetail: String {
+        if store.isArchive { return "보관된 기록은 여기서 읽을 수 있습니다." }
         if let member = scope.recipient { return "\(member.name)에게 보낸 지시와 보고가 여기에 이어집니다." }
         return "아래 입력칸에 지시를 적으면 여기에 이어집니다."
     }
 
-    /// Stay pinned when already at the bottom or when I just sent; otherwise count what arrived below.
-    private func follow(old: ChatThreadTail, new: ChatThreadTail, items: [Message], proxy: ScrollViewProxy) {
-        guard old.key == new.key else { newCount = 0; return }
-        guard let last = new.lastID, last != old.lastID else { return }
-        if bottomHiddenKey != new.key || items.last?.mine == true {
-            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
-            newCount = 0
-        } else {
-            let added = old.lastID.flatMap { id in items.firstIndex { $0.id == id } }.map { items.count - 1 - $0 } ?? 1
-            newCount += max(added, 1)
+    private func loadOlder() {
+        guard canPage else { return }
+        guard anchor.hostFound, anchor.visibleAnchor != nil else { positionError = true; return }
+        positionError = false; autoPaused = false; intentUsed = true
+        chatAnnounce("이전 글을 불러오는 중입니다")
+        Task { await store.loadOlderMessages() }
+    }
+
+    private func present(_ incoming: [Message], proxy: ScrollViewProxy) {
+        guard loaded else { return }
+        if !started {
+            started = true; displayed = incoming
+            if let id = notificationAnchor {
+                pinned = false; restoring = ChatHistoryAnchor(messageID: chatMessageRowID(id), offset: 0)
+            } else if let saved = history?.anchor, history?.pinnedToBottom == false {
+                pinned = false; restoring = saved
+            } else { pinned = true }
+            Task { @MainActor in
+                await Task.yield()
+                guard isVisible else { return }
+                if let restoring { proxy.scrollTo(restoring.messageID, anchor: .top) }
+                else { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+            }
+            return
+        }
+        guard ChatThreadContent(items: displayed) != ChatThreadContent(items: incoming) else { return }
+        queued = incoming
+        guard !anchor.isPreservingPosition else { return }
+        let hasPrepend = displayed.first.flatMap { first in incoming.first.map { ChatHistory.ordered($0, first) } } ?? false
+        if hasPrepend || (!pinned && !displayed.isEmpty) {
+            if anchor.prepend(scope: scopeID, mutation: {
+                if let queued {
+                    let count = max(0, queued.count - displayed.count)
+                    displayed = queued; self.queued = nil
+                    if hasPrepend && count > 0 { chatAnnounce("이전 글 \(count)개를 불러왔습니다") }
+                }
+            }) { return }
+            // Keep the old viewport rather than applying a page without a proven host/anchor.
+            positionError = true
+            return
+        }
+        displayed = incoming; queued = nil
+        if pinned || followID.map({ id in incoming.contains { $0.id == id } }) == true {
+            followID = nil
+            Task { @MainActor in
+                await Task.yield()
+                if isVisible { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+            }
         }
     }
 
-    /// Web: primary "새 글 n개" when something arrived below, glass "맨 아래로" otherwise.
+    private func observe(_ frames: [String: CGRect], proxy: ScrollViewProxy) {
+        guard started, viewportHeight > 0 else { return }
+        if anchor.isInteracting && !wasInteracting { intentUsed = false }
+        wasInteracting = anchor.isInteracting
+        if let restoring, let frame = frames[restoring.messageID] {
+            if !anchor.isInteracting {
+                anchor.adjustOffset(by: frame.minY - CGFloat(restoring.offset))
+                self.restoring = nil
+            }
+            return
+        }
+        if let nextTop = frames["history-top"]?.minY {
+            if let top, nextTop > top + 1, anchor.isInteracting, !intentUsed, !autoPaused,
+               nextTop >= -480, canPage { loadOlder() }
+            top = nextTop
+        }
+        if !anchor.isInteracting, !anchor.isPreservingPosition, !pinned,
+           let reading, let frame = frames[reading.messageID], abs(frame.minY - reading.top) > 0.5 {
+            if abs(anchor.adjustOffset(by: frame.minY - reading.top)) > 0.01 { return }
+        }
+        if !anchor.isPreservingPosition {
+            if let bottom = frames["history-bottom"] {
+                let nearBottom = bottom.maxY <= viewportHeight + 80
+                // During content growth retain the prior pin; real user scrolling may unpin it.
+                if anchor.isInteracting || nearBottom { pinned = nearBottom }
+                if pinned && !nearBottom && !anchor.isInteracting { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+            } else if anchor.isInteracting { pinned = false }
+            reading = ChatScrollAnchor.firstVisible(frames: frames, viewportHeight: viewportHeight)
+            savePosition()
+        }
+    }
+
+    private func savePosition() {
+        guard notificationAnchor == nil, history != nil, restoring == nil else { return }
+        let value = reading.map { ChatHistoryAnchor(messageID: $0.messageID, offset: Double($0.top)) }
+        if history?.anchor != value || history?.pinnedToBottom != pinned {
+            store.setHistoryReadingPosition(value, pinned: pinned)
+        }
+    }
+
+    private func jump(_ proxy: ScrollViewProxy) {
+        anchor.cancelPreservation(); restoring = nil; reading = nil; pinned = true
+        if let queued { displayed = queued; self.queued = nil }
+        store.setHistoryReadingPosition(nil, pinned: true)
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+    }
+
+    private func returnToLatest() {
+        anchor.cancelPreservation(); queued = nil; restoring = nil; reading = nil
+        store.leaveNotificationAnchor(); router.chatMessageID = nil
+        store.setHistoryReadingPosition(nil, pinned: true)
+        pinned = true; started = false
+    }
+
     private func jumpButton(_ proxy: ScrollViewProxy) -> some View {
-        Button {
-            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
-            newCount = 0
+        let count = history?.isBridging == true ? 0 : history?.unreadCount ?? 0
+        return Button {
+            if notificationAnchor != nil { returnToLatest() }
+            jump(proxy)
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: "arrow.down").font(.system(size: 10, weight: .bold))
-                Text(newCount > 0 ? "새 글 \(newCount)개" : "맨 아래로")
+                Image(systemName: "arrow.down").font(CEFont.micro)
+                Text(count > 0 ? "새 글 \(count)개" : "맨 아래로")
             }
-            .font(CEFont.meta.weight(.semibold))
-            .foregroundStyle(CE.ink)
-            .padding(.horizontal, 12)
-            .frame(height: isMac ? 28 : 36)
-            .glassChrome(Capsule(), tint: newCount > 0 ? CE.accentFill.opacity(0.85) : nil, interactive: true)
-            .frame(minHeight: isMac ? nil : 44)
-            .contentShape(Rectangle())
+            .font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink)
+            .padding(.horizontal, 12).frame(height: isMac ? 28 : 36)
+            .glassChrome(Capsule(), tint: count > 0 ? CE.accentFill.opacity(0.85) : nil, interactive: true)
+            .frame(minHeight: isMac ? nil : 44).contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .padding(.bottom, CESpace.s)
-        .accessibilityLabel(newCount > 0 ? "새 글 \(newCount)개, 맨 아래로 이동" : "맨 아래로 이동")
+        .buttonStyle(.plain).padding(.bottom, CESpace.s)
+        .accessibilityLabel(count > 0 ? "새 글 \(count)개, 맨 아래로 이동" : "맨 아래로 이동")
+    }
+}
+
+/// Compare all rendered fields, including delivery and attachment changes, without adding model-wide equality.
+private struct ChatThreadContent: Equatable {
+    let items: [Message]
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        guard lhs.items.count == rhs.items.count else { return false }
+        return zip(lhs.items, rhs.items).allSatisfy { a, b in
+            a.id.utf8.elementsEqual(b.id.utf8) && a.projectId == b.projectId && a.at == b.at && a.mine == b.mine
+                && a.memberId == b.memberId && a.who == b.who && a.kind == b.kind && a.title == b.title
+                && a.body == b.body && a.targetMemberId == b.targetMemberId && a.targetName == b.targetName
+                && a.decisionId == b.decisionId && a.fileId == b.fileId && a.delivery == b.delivery && a.deliveryNote == b.deliveryNote
+                && a.attachments.count == b.attachments.count && zip(a.attachments, b.attachments).allSatisfy { x, y in
+                    x.id == y.id && x.name == y.name && x.mime == y.mime && x.size == y.size
+                        && x.url == y.url && x.path == y.path && x.isImage == y.isImage
+                }
+        }
     }
 }
 
@@ -469,20 +737,27 @@ private struct ChatEmpty: View {
     }
 }
 
-private struct ChatThreadTail: Equatable {
-    let key: String
-    let lastID: String?
-}
-
 private enum ChatThreadRow: Identifiable {
     case day(id: String, label: String)
     case message(Message)
     var id: String {
         switch self {
         case .day(let id, _): id
-        case .message(let message): "m:\(message.id)"
+        case .message(let message): chatMessageRowID(message.id)
         }
     }
+}
+
+/// Swift String identity folds canonically equivalent IDs; the server's BINARY IDs must remain distinct.
+private func chatMessageRowID(_ id: String) -> String { "m:" + Data(id.utf8).base64EncodedString() }
+
+@MainActor private func chatAnnounce(_ text: String) {
+    #if os(macOS)
+    NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
+                         userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+    #else
+    UIAccessibility.post(notification: .announcement, argument: text)
+    #endif
 }
 
 /// Chronological rows with a day separator whenever the calendar day changes (rows only show a clock time).
@@ -587,7 +862,7 @@ private struct ChatRecipientList: View {
         }
         .buttonStyle(ChatRowStyle(shape: RoundedRectangle(cornerRadius: 13, style: .continuous), selected: selected))
         .contextMenu {
-            if let detail {
+            if !store.isArchive, let detail {
                 Button(detail.kind == "worker" ? "팀원 보기" : "\(rankName(detail.kind)) 보기") { router.openMember(detail.id) }
                 if detail.status == "blocked" { Button("터미널 열기") { router.openTerminal(detail.id) } }
             }
@@ -678,7 +953,7 @@ private struct ChatThreadHeader: View {
 
     var body: some View {
         let scope = ChatScope(store: store, router: router)
-        let note = scope.runnerOffNote ?? scope.currentMember.flatMap { scope.note(for: $0, wide: true) }
+        let note = store.isArchive ? nil : scope.runnerOffNote ?? scope.currentMember.flatMap { scope.note(for: $0, wide: true) }
         HStack(spacing: 10) {
             identity(scope)
             if let note { ChatNoteCapsule(note: note).layoutPriority(-1) }
@@ -717,7 +992,9 @@ private struct ChatThreadHeader: View {
     }
 
     @ViewBuilder private func action(_ scope: ChatScope) -> some View {
-        if scope.missingTarget {
+        if store.isArchive {
+            Tag("읽기 전용", tone: .dim)
+        } else if scope.missingTarget {
             Button("프로젝트 대화로") { router.chatTarget = nil }.ceSecondaryButton().controlSize(.small)
         } else if let member = scope.currentMember {
             Button(member.kind == "worker" ? "팀원 보기" : "\(rankName(member.kind)) 보기") { router.openMember(member.id) }
@@ -736,7 +1013,7 @@ private struct ChatCompactNotes: View {
         let scope = ChatScope(store: store, router: router)
         let note = scope.currentMember.flatMap { scope.note(for: $0, wide: false) }
         let runner = scope.runnerOffNote
-        if note != nil || scope.missingTarget || runner != nil {
+        if !store.isArchive && (note != nil || scope.missingTarget || runner != nil) {
             VStack(alignment: .leading, spacing: 6) {
                 if scope.missingTarget {
                     ChatNoteStrip(note: ChatNote(tone: .attention, icon: "person.crop.circle.badge.questionmark",
@@ -821,7 +1098,7 @@ private struct ChatPlaceholder: View {
     var leadTitle: String { lead.map { rankName($0.kind) } ?? "총괄" }
     /// The all-messages thread: "본사 대화" on HQ, "프로젝트 대화" elsewhere.
     var threadTitle: String { store.state?.project.isHq == true ? "본사 대화" : "프로젝트 대화" }
-    var threadKey: String { "\(store.selectedProjectID ?? "none"):\(isProjectThread ? "project" : router.chatTarget ?? "")" }
+    var threadKey: String { DraftStore.key(project: store.selectedProjectID, target: isProjectThread ? nil : router.chatTarget) }
 
     /// Project thread = everything; a member thread = their reports and what I sent them.
     var messages: [Message] {

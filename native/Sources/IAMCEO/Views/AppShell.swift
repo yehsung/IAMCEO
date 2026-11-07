@@ -6,6 +6,8 @@ import SwiftUI
 struct AppShell: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var showArchive = false
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var sizeClass
     #endif
@@ -31,6 +33,8 @@ struct AppShell: View {
             }
         }
         .foregroundStyle(CE.ink)
+        .projectManagementSheets(enabled: !router.showSettings && !showArchive)
+        .sheet(isPresented: $showArchive) { ArchiveLibraryView() }
         .sheet(isPresented: $router.showNewProject) { NewProjectView() }
         .sheet(isPresented: $router.showNewMember) { NewMemberView() }
         .sheet(item: rootTerminal) { TerminalView(member: $0) }
@@ -63,6 +67,11 @@ struct AppShell: View {
         #endif
         // A pairing QR read by the system camera opens iamceo://pair?… — trade it for a connection right away.
         .onOpenURL { url in
+            guard !store.isDemo else { return }
+            if let notification = NotificationLink(url: url) {
+                NotificationInbox.shared.receive(notification, tapped: true)
+                return
+            }
             guard let link = PairingLink(url: url) else { return }
             #if os(iOS)
             Task { await store.pair(with: link, device: UIDevice.current.name) }
@@ -71,8 +80,14 @@ struct AppShell: View {
             _ = link
             #endif
         }
+        .onChange(of: "\(scenePhase == .active):\(store.connectionStatus.rawValue):\(store.isRevalidating):\(store.serverID ?? ""):\(NotificationInbox.shared.refreshRevision):\(NotificationInbox.shared.pending.count)", initial: true) { _, _ in
+            store.registerRouter(router)
+            guard scenePhase == .active else { router.cancelPendingNavigation(); return }
+            // Consuming a tap changes the mailbox. It must not cancel its own validation request.
+            Task { await store.processNotifications(router: router) }
+        }
         // Foreground/background polling is driven by the App's aggregate scene phase (IAMCEOApp).
-        .onChange(of: store.selectedProjectID) { _, _ in router.resetForProjectChange() }
+        .onChange(of: "\(store.selectedProjectID ?? ""):\(store.isArchive)") { _, _ in router.resetForProjectChange() }
         // The store is shared by every window: a window that appears later (second iPad window, Mac window reopened
         // after ⌘W) must not tear down a live or in-progress connection.
         .task {
@@ -89,7 +104,8 @@ struct AppShell: View {
     }
 
     private var terminalMember: Member? {
-        router.terminalMemberID.flatMap { id in store.members.first { $0.id == id } }
+        guard !store.isArchive else { return nil }
+        return router.terminalMemberID.flatMap { id in store.members.first { $0.id == id } }
     }
 
     // MARK: Mac desk
@@ -111,7 +127,7 @@ struct AppShell: View {
                 // Sidebar max 320 + detail 560 stays inside the window minimum (1040).
                 .frame(minWidth: 560, maxWidth: .infinity, minHeight: 420, maxHeight: .infinity)
                 // Member detail: a glass drawer over this column on every destination; the rail stays undimmed.
-                .overlay { MemberDrawerHost(windowWidth: windowWidth) }
+                .overlay { if !store.isArchive { MemberDrawerHost(windowWidth: windowWidth) } }
                 .navigationTitle(store.state?.project.name ?? "IAMCEO")
                 .navigationSubtitle(deskSubtitle)
                 .toolbar {
@@ -130,9 +146,10 @@ struct AppShell: View {
     /// Web composer: centred under the content column (832 = 880 column − 2×24 padding).
     /// While the member drawer is open the composer gives up keyboard focus (disabled; the draft stays in DraftStore),
     /// so keystrokes and Return never reach a field the drawer covers. 지시 closes the drawer first, then focuses it.
-    private var dockedComposer: some View {
+    @ViewBuilder private var dockedComposer: some View {
         @Bindable var router = router
-        return ComposerBar(target: $router.chatTarget, onOpenChat: router.destination == .chat ? nil : { router.go(.chat) })
+        if !store.isArchive {
+            ComposerBar(target: $router.chatTarget, onOpenChat: router.destination == .chat ? nil : { router.go(.chat) })
             .disabled(router.memberID != nil)
             .frame(maxWidth: 832)
             .padding(.horizontal, 24).padding(.top, 6).padding(.bottom, 14)
@@ -152,6 +169,7 @@ struct AppShell: View {
                 }
                 .allowsHitTesting(false)
             }
+        }
     }
 
     /// The selected destination is already shown by the tabs. Like the web header, 결재함·대화·자료 carry the
@@ -193,7 +211,7 @@ struct AppShell: View {
                             }
                             projectSwitcher
                             // iOS 26.1+: the bottom accessory pill (named recipient) replaces this button.
-                            if tab != .chat && !usesComposeAccessory {
+                            if !store.isArchive && tab != .chat && !usesComposeAccessory {
                                 ToolbarItem(placement: .topBarTrailing) {
                                     Button { router.showCompose = true } label: { Image(systemName: "square.and.pencil") }
                                         .accessibilityLabel("지시 쓰기: \(composeRecipientName)에게")
@@ -268,6 +286,17 @@ struct AppShell: View {
             .disabled(store.isDemo && project.id != store.selectedProjectID)
         }
         Divider()
+        if let id = store.selectedProjectID {
+            Button("이름 바꾸기…") { router.manageProject(id: id, mode: .rename) }
+                .disabled(store.isDemo || store.connectionStatus != .connected)
+            if store.isArchive {
+                Button("꺼내기…") { router.manageProject(id: id, mode: .restore) }
+                    .disabled(store.isDemo || store.connectionStatus != .connected)
+            } else if id != "hq", store.state?.project.isHq != true {
+                Button("보관…") { router.manageProject(id: id, mode: .archive) }.disabled(!store.canWrite)
+            }
+        }
+        Button { showArchive = true } label: { Label("보관함", systemImage: "archivebox") }
         Button { router.showNewProject = true } label: { Label("새 프로젝트", systemImage: "plus") }
             .disabled(!store.canWrite)
         Button { router.showSettings = true } label: { Label("설정", systemImage: "gearshape") }
@@ -283,12 +312,14 @@ struct AppShell: View {
     #endif
 
     @ViewBuilder private func destinationView(_ tab: Destination) -> some View {
-        switch tab {
-        case .home: HomeView()
-        case .inbox: InboxView()
-        case .team: TeamView()
-        case .chat: ChatView()
-        case .files: FilesView()
+        if store.isArchive { ArchiveView(destination: tab) } else {
+            switch tab {
+            case .home: HomeView()
+            case .inbox: InboxView()
+            case .team: TeamView()
+            case .chat: ChatView()
+            case .files: FilesView()
+            }
         }
     }
 }
@@ -311,6 +342,7 @@ func projectRailLine(_ project: ProjectSummary) -> String {
 struct ProjectSidebar: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
+    @State private var showArchive = false
     private var hq: [ProjectSummary] { store.projects.filter(\.isHq) }
     private var others: [ProjectSummary] { store.projects.filter { !$0.isHq } }
 
@@ -319,6 +351,18 @@ struct ProjectSidebar: View {
             VStack(alignment: .leading, spacing: 2) {
                 brand
                 ForEach(hq) { row($0) }
+                if store.isArchive, let project = store.state?.project {
+                    VStack(alignment: .leading, spacing: CESpace.xs) {
+                        Label(project.name, systemImage: "archivebox").font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                        Text("보관함 · 읽기 전용").font(CEFont.meta).foregroundStyle(CE.ink3)
+                    }.padding(12)
+                    .contextMenu {
+                        Button("이름 바꾸기…") { router.manageProject(id: project.id, mode: .rename) }
+                            .disabled(store.isDemo || store.connectionStatus != .connected)
+                        Button("꺼내기…") { router.manageProject(id: project.id, mode: .restore) }
+                            .disabled(store.isDemo || store.connectionStatus != .connected)
+                    }
+                }
                 if !others.isEmpty {
                     Text("프로젝트")
                         .font(.system(size: 12, weight: .semibold)).foregroundStyle(CE.ink3)
@@ -342,6 +386,7 @@ struct ProjectSidebar: View {
         }
         .scrollIndicators(.never)
         .ceBar(.bottom) { footer }
+        .sheet(isPresented: $showArchive) { ArchiveLibraryView() }
     }
 
     private var brand: some View {
@@ -378,6 +423,13 @@ struct ProjectSidebar: View {
         }
         .buttonStyle(RailRowStyle(selected: selected))
         .disabled(store.isDemo && !selected)
+        .contextMenu {
+            Button("이름 바꾸기…") { router.manageProject(id: project.id, mode: .rename) }
+                .disabled(store.isDemo || store.connectionStatus != .connected)
+            if !project.isHq && project.id != "hq" {
+                Button("보관…") { router.manageProject(id: project.id, mode: .archive) }.disabled(!store.canWrite)
+            }
+        }
         .help(projectStatusLine(project))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(project.name), \(line)\(count > 0 ? ", 확인할 일 \(count)건" : "")")
@@ -387,6 +439,10 @@ struct ProjectSidebar: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 2) {
             Rectangle().fill(CE.line).frame(height: 1).padding(.horizontal, 4).padding(.bottom, 4)
+            Button { showArchive = true } label: {
+                Label("보관함", systemImage: "archivebox").font(CEFont.secondary).foregroundStyle(CE.ink2)
+                    .padding(.horizontal, 12).frame(minHeight: 40)
+            }.buttonStyle(RailRowStyle())
             SettingsLink {
                 Text("설정").font(.system(size: 14, weight: .medium)).foregroundStyle(CE.ink2)
                     .padding(.horizontal, 12).frame(minHeight: 40)
@@ -436,7 +492,7 @@ struct ProjectSidebar: View {
     private var connectionState: (text: String, color: Color, glow: Bool, danger: Bool) {
         if store.isDemo { return ("샘플 데이터 · 읽기 전용", CE.accent, true, false) }
         switch store.connectionStatus {
-        case .connected: return ("서버 연결됨", CE.success, true, false)
+        case .connected: return (store.localizedSyncDescription, store.realtimeStatus == .fallback ? CE.attention : CE.success, store.realtimeStatus == .live, false)
         case .connecting: return ("서버 연결 중", CE.warn, false, false)
         default: return ("서버 끊김", CE.danger, false, true)
         }
@@ -666,6 +722,8 @@ extension View {
 /// (full text in the tooltip): wrapped text in a bar outside a scroll view must not size the split view.
 struct StatusStrips: View {
     @Environment(AppStore.self) private var store
+    @Environment(Router.self) private var router
+    @State private var dismissedNotice: String?
 
     private struct Strip: Identifiable {
         let id: String
@@ -686,6 +744,20 @@ struct StatusStrips: View {
         if store.connectionStatus != .connected && !store.isDemo && store.bootstrap != nil {
             items.append(Strip(id: "offline", tone: .attention, icon: "wifi.slash", text: "서버와 연결이 끊겼습니다. 다시 잇는 중입니다.",
                                detail: store.connectionIssue, actionTitle: "지금 다시 연결", action: { Task { await store.connect() } }))
+        }
+        if store.isArchive {
+            items.append(Strip(id: "archive", tone: .neutral, icon: "archivebox", text: "보관한 프로젝트 · 읽기 전용",
+                               actionTitle: "관리", action: {
+                if let id = store.selectedProjectID { router.manageProject(id: id, mode: .restore) }
+            }))
+        }
+        if store.connectionStatus == .connected && !store.isDemo && store.realtimeStatus == .fallback {
+            items.append(Strip(id: "fallback", tone: .attention, icon: "arrow.triangle.2.circlepath", text: store.localizedSyncDescription,
+                               actionTitle: "지금 다시 연결", action: { Task { await store.connect() } }))
+        }
+        if let notice = router.navigationNotice ?? store.notificationNotice ?? store.projectNotice, notice != dismissedNotice {
+            items.append(Strip(id: "notice", tone: .neutral, icon: "info.circle", text: notice,
+                               actionTitle: "닫기", action: { dismissedNotice = notice; router.navigationNotice = nil }))
         }
         if let error = store.errorMessage {
             items.append(Strip(id: "error", tone: .danger, icon: "exclamationmark.circle", text: error,
@@ -743,10 +815,11 @@ struct StatusStrips: View {
 /// iOS 26.1+: a pill above the tab bar that names the recipient ("결제 연동에게 지시…") on every tab except 대화, which
 /// has its own inline composer. On a member's page it addresses that member.
 private struct QuickComposeAccessory: ViewModifier {
+    @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
     func body(content: Content) -> some View {
         if #available(iOS 26.1, *) {
-            content.tabViewBottomAccessory(isEnabled: router.destination != .chat) { QuickComposePill() }
+            content.tabViewBottomAccessory(isEnabled: router.destination != .chat && !store.isArchive) { QuickComposePill() }
         } else {
             content
         }
@@ -837,7 +910,20 @@ extension AppStore {
     /// Writes need a live connection and a healthy project runner connection. In-flight requests are not a global
     /// lock: each control checks its own `pendingActions` key (mutate() already de-duplicates per key), so a
     /// 150 s member respawn never blocks instructions to everyone else.
-    var uiCanWrite: Bool { connectionStatus == .connected && !isDemo && state?.project.connection.ok == true }
+    var uiCanWrite: Bool { canWrite && state?.project.connection.ok == true }
+
+    var localizedSyncDescription: String {
+        if isDemo { return "샘플 데이터 · 읽기 전용" }
+        switch realtimeStatus {
+        case .paused: return "앱이 비활성 상태여서 동기화를 쉬고 있습니다"
+        case .connecting: return "실시간 연결 중…"
+        case .syncing: return "최신 상태를 불러오는 중…"
+        case .live: return "실시간으로 연결됨"
+        case .legacy: return "연결됨 · 이전 방식으로 변경 확인"
+        case .fallback: return "실시간 연결이 끊겨 주기적으로 확인하고 있습니다"
+        case .blocked: return "서버 주소나 접근 허용 설정을 확인해 주세요"
+        }
+    }
 
     /// Rank name of the member who receives messages with no explicit target (총괄, or 본사 AI on HQ).
     var leadRankName: String { members.first { $0.kind == "conductor" || $0.kind == "root" }.map { rankName($0.kind) } ?? "총괄" }
@@ -845,7 +931,8 @@ extension AppStore {
     /// Destination badges always equal a number visible on that destination (same rule as the web tabs):
     /// 결재함 = open decisions + members at an approval prompt (both listed there); 홈 = open todos (its 할 일 counter).
     func navBadge(for tab: Destination) -> Int {
-        switch tab {
+        if isArchive { return 0 }
+        return switch tab {
         case .inbox: decisions.filter { $0.status == "open" }.count + members.filter { $0.status == "blocked" }.count
         case .home: todos.filter { !$0.done }.count
         default: 0

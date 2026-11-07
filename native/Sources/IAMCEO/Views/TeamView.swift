@@ -305,6 +305,9 @@ struct MemberDetailView: View {
     @State private var model = ""
     @State private var effort = ""
     @State private var baseline = TeamConfigSnapshot()
+    @State private var configRevision: Int?
+    @State private var freshMember: Member?
+    @State private var freshGeneration: Int?
     @State private var running: String?
     @State private var note: String?
     @State private var failure: String?
@@ -337,18 +340,228 @@ struct MemberDetailView: View {
         .background { if onClose == nil { AmbientBackground() } }
         .modifier(TeamPushTitle(title: member?.name ?? "팀원", enabled: onClose == nil))
         .onAppear { if let member { loadConfig(member) } }
+        .task(id: "\(store.writeNamespace)|\(memberID)") { await store.recoverWrites() }
+        .onChange(of: store.writeNamespace) { _, _ in
+            freshMember = nil; freshGeneration = nil; confirmFresh = false; confirmConfig = false
+            if let latest = current { loadConfig(latest) }
+        }
+        .onChange(of: store.writeRevisions?.members?[memberID]?.configRevision) { _, _ in
+            if running != "config", TeamConfigSnapshot(provider: provider, model: model, effort: effort) == baseline,
+               let latest = current { loadConfig(latest) }
+        }
         .onChange(of: memberID) { _, _ in
+            freshMember = nil; freshGeneration = nil; confirmFresh = false; confirmConfig = false
             running = nil; note = nil; failure = nil; sleepRefusal = nil; configNote = nil; configFailure = nil; configHandoff = false
             if let latest = current { loadConfig(latest) }
         }
         .onChange(of: member.map(TeamConfigSnapshot.init)) { old, new in
             // Follow server-side changes unless the user is in the middle of editing.
-            guard let new else { return }
-            if old == nil || TeamConfigSnapshot(provider: provider, model: model, effort: effort) == baseline { apply(new) }
+            guard new != nil else { return }
+            if running != "config", old == nil || TeamConfigSnapshot(provider: provider, model: model, effort: effort) == baseline {
+                if let latest = current { loadConfig(latest) }
+            }
         }
     }
 
     // MARK: Layout
+
+    @ViewBuilder private func deliveryPlate(_ m: Member) -> some View {
+        if let summary = store.deliverySummary(memberID: m.id), !store.isArchive {
+            let page = store.deliveryPages[m.id]
+            Group {
+                if summary.undeliveredCount > 0 || summary.unknownCount > 0 || summary.needsOwnerCount > 0 || summary.checkingCount > 0 || summary.deliveringCount > 0 {
+                    DeliveryNoticeView(summary: summary, items: page?.items ?? [], canWrite: store.canWrite,
+                        pendingIDs: store.deliveryChecking, error: store.deliveryErrors[m.id],
+                        hasOlder: page?.nextBefore != nil,
+                        onLoadOlder: { Task { await store.loadDeliveryNotices(memberID: m.id, older: true) } },
+                        onOpenMessage: { id in
+                            openChat(m); router.chatMessageID = id
+                        }, onOpenReference: { ref in
+                            leaveDetail()
+                            switch ref.type {
+                            case "decision": router.openDecision(ref.id)
+                            case "message": router.openChat(m.kind == "worker" ? m.id : nil); router.chatMessageID = ref.id
+                            case "file", "attachment": router.openFile(ref.id)
+                            default: router.go(.home)
+                            }
+                        }, onAction: { item, action, risk in
+                            Task { _ = await store.recoverDelivery(item, action: action, acceptDuplicateRisk: risk) }
+                        })
+                    if store.deliveryErrors[m.id] != nil {
+                        Button("전달 안내 다시 읽기") { Task { await store.loadDeliveryNotices(memberID: m.id) } }
+                            .ceSecondaryButton().controlSize(.small).disabled(store.connectionStatus != .connected || store.isDemo)
+                    }
+                }
+            }
+            .task(id: "\(store.writeNamespace)|\(m.projectId)|\(m.id)") {
+                await store.loadDeliveryNotices(memberID: m.id)
+            }
+        }
+    }
+
+    private func freshReceipts(_ m: Member) -> [OperationReceipt] {
+        store.operationResults.values.filter { $0.memberId == m.id && $0.kind == .freshSession }
+            .sorted { ($0.updatedAt ?? $0.createdAt ?? "", $0.operationId) > ($1.updatedAt ?? $1.createdAt ?? "", $1.operationId) }
+    }
+
+    private func freshUnresolved(_ m: Member) -> Bool {
+        freshReceipts(m).contains { $0.status == .unknown || $0.status == .pending }
+    }
+
+    @ViewBuilder private func freshReceipt(_ m: Member) -> some View {
+        if let receipt = freshReceipts(m).first(where: { $0.status == .unknown || $0.status == .pending }) ?? freshReceipts(m).first {
+            VStack(alignment: .leading, spacing: 6) {
+                switch receipt.status {
+                case .pending, .unknown:
+                    teamNote("새 세션 결과 확인 중 · 같은 작업을 다시 실행하지 않습니다.")
+                    Button("결과 다시 확인") { Task { await store.recoverWrites() } }
+                        .ceSecondaryButton().controlSize(.small).disabled(!store.canWrite || running != nil)
+                case .refused:
+                    teamNote(receipt.error ?? "새 세션 요청이 거부됐습니다. 최신 상태를 검토하세요.")
+                case .applied:
+                    teamNote("새 세션 요청이 적용됐습니다. 업무 완료를 뜻하지 않습니다.")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func executionDetails(_ m: Member) -> some View {
+        if let execution = m.executionState {
+            TeamFactRow(label: "실행 근거") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(executionLabel(execution)).foregroundStyle(CE.ink2)
+                    if let date = parseISODate(execution.inputReceivedAt) {
+                        Text("입력 수신 · \(koDateTime(date))").foregroundStyle(CE.ink3)
+                    }
+                    if let date = parseISODate(execution.startedAt) {
+                        Text("턴 시작 · \(koDateTime(date))").foregroundStyle(CE.ink3)
+                    }
+                    if let date = parseISODate(execution.lastProgressAt) {
+                        Text("마지막 진전 · \(koDateTime(date))").foregroundStyle(CE.ink3)
+                    }
+                    if let date = parseISODate(execution.endedAt) {
+                        Text("턴 종료 · \(koDateTime(date))").foregroundStyle(CE.ink3)
+                    }
+                    if let code = execution.exitCode { Text("종료 코드 \(code)").foregroundStyle(CE.ink3) }
+                    if let reason = execution.reason, !reason.isEmpty { Text(reason).foregroundStyle(CE.ink3) }
+                }
+            }
+        }
+    }
+
+    private func executionLabel(_ execution: MemberExecutionState) -> String {
+        switch execution.phase {
+        case "received": "입력 수신 · 턴 시작 확인 중"
+        case "starting": "입력 전달 중 · 턴 시작 확인 중"
+        case "running", "working": "턴 진행 중 · 업무 완료는 보고로 확인합니다"
+        case "ended", "finished": execution.result == "error" ? "턴 오류 · 입력 수신과 구분합니다" : "턴 종료 · 업무 완료는 보고로 확인합니다"
+        case "interrupted": "턴 중단 · 자동으로 다시 입력하지 않습니다"
+        default: "실행 상태 확인 중 · 자동으로 다시 입력하지 않습니다"
+        }
+    }
+
+    private func compactBlock(_ m: Member) -> String? {
+        if let reason = readOnlyReason { return reason }
+        if m.origin == "manual" { return "직접 띄운 세션은 원래 터미널에서 압축하세요." }
+        if store.state?.project.runnerEnabled != true { return "실행이 꺼져 있어 압축할 수 없습니다." }
+        if m.paneId == nil || ["asleep", "offline", "gone"].contains(m.status) { return "열린 세션이 있어야 압축할 수 있습니다." }
+        if (m.backend ?? store.bootstrap?.settings.backend) == "core", m.contextState == nil || m.sessionId == nil {
+            return "세션 기록 확인 중 · 문맥 압축 대기"
+        }
+        if store.contextChecking.contains(m.id) { return "압축 결과 확인 중 · 다시 전송하지 않습니다." }
+        if let phase = m.contextState?.compaction?.phase, [.queued, .sending, .running, .uncertain, .unknown].contains(phase) {
+            return compactionLabel(m.contextState?.compaction)
+        }
+        return nil
+    }
+
+    private func compactionLabel(_ compact: ContextCompaction?) -> String {
+        guard let compact else { return "압축 결과 확인 중 · 다시 전송하지 않습니다." }
+        switch compact.phase {
+        case .queued:
+            switch compact.reason {
+            case "working": return "압축 예약됨 · 지금 턴이 끝난 뒤 진행합니다."
+            case "manual_control": return "직접 조작 중 · 압축 대기"
+            case "draft": return "작성 중인 입력이 있어 압축을 기다립니다."
+            case "blocked": return "CLI 화면을 먼저 확인하세요 · 압축 대기"
+            default: return "압축 예약됨 · 안전한 실행 조건을 기다립니다."
+            }
+        case .sending, .running: return "문맥 압축 중"
+        case .succeeded: return "문맥 압축 완료 · 사용량 갱신 중"
+        case .failed: return compact.reason == "user_resolved" ? "사용자 확인으로 압축 대기를 해제했습니다." : "문맥 압축이 끝나지 않았습니다. 터미널을 확인하세요."
+        default: return "압축 결과를 확인할 수 없습니다. 다시 보내지 말고 터미널을 확인하세요."
+        }
+    }
+
+    private func contextDetails(_ m: Member) -> some View {
+        let measurement = contextMeasurement(m)
+        let pct = contextPercent(m)
+        let block = compactBlock(m)
+        return VStack(alignment: .leading, spacing: 6) {
+            if let pct {
+                TeamContextBar(pct: pct, compactAt: compactAt)
+                Text(contextSource(m)).foregroundStyle(CE.ink3)
+            } else {
+                Text("문맥 확인 중").foregroundStyle(CE.ink3)
+            }
+            if let window = measurement?.window ?? m.contextWindow, window > 0 {
+                Text("문맥 창 \(window.formatted()) 토큰").foregroundStyle(CE.ink3)
+            }
+            if let model = measurement?.model { Text("측정 모델 · \(model)").foregroundStyle(CE.ink3) }
+            if let generation = measurement?.sessionGeneration { Text("세션 세대 · \(generation)").foregroundStyle(CE.ink3) }
+            if let date = parseISODate(measurement?.measuredAt) { Text("측정 · \(koDateTime(date))").foregroundStyle(CE.ink3) }
+            if let compact = m.contextState?.compaction { Text(compactionLabel(compact)).foregroundStyle(CE.ink2) }
+            if let block { Text(block).foregroundStyle(CE.ink3) }
+            if m.origin != "manual" {
+                Button("문맥 압축") {
+                    Task { await run("compact", success: "압축 요청을 접수했습니다. 완료는 실행 근거로 확인합니다.") { await store.compactMember(m) } }
+                }
+                .ceSecondaryButton().controlSize(.small)
+                .disabled(block != nil || running != nil || store.pendingActions.contains("member:\(m.id)"))
+            }
+        }
+    }
+
+    private func contextMeasurement(_ m: Member) -> ContextMeasurement? {
+        guard let measurement = m.contextState?.measurement else { return nil }
+        if let generation = measurement.sessionGeneration, let current = store.writeRevisions?.members?[m.id]?.sessionGeneration,
+           generation != current { return nil }
+        if let session = measurement.sessionId, let current = m.sessionId, session != current { return nil }
+        return measurement
+    }
+
+    private func contextPercent(_ m: Member) -> Double? {
+        if m.contextState?.measurement != nil, contextMeasurement(m) == nil { return nil }
+        // The shared collector already prefers the CLI's official percentage over a token ratio.
+        if let pct = m.contextPct, pct.isFinite { return min(max(pct, 0), 100) }
+        if let measurement = contextMeasurement(m), let tokens = measurement.tokens, tokens >= 0,
+           let window = measurement.window, window > 0 {
+            return min(max(Double(tokens) / Double(window) * 100, 0), 100)
+        }
+        return nil
+    }
+
+    private func contextSource(_ m: Member) -> String {
+        let measurement = contextMeasurement(m)
+        guard measurement?.fresh == true else { return "마지막 측정 · 갱신 대기" }
+        if measurement?.quality == "estimated" {
+            let source: String
+            switch measurement?.source {
+            case "screen": source = "화면 기준"
+            case "model": source = "모델 기준"
+            case "default": source = "기본 창 기준"
+            case "stored": source = "이전 측정 기준"
+            default: source = "사용량 기준"
+            }
+            return "약 \(Int((contextPercent(m) ?? 0).rounded()))% · \(source) 추정"
+        }
+        guard measurement?.quality == "exact" else { return "측정 정확도 확인 중" }
+        switch measurement?.source {
+        case "statusline", "codex": return "CLI 측정"
+        case "stored": return "이전 CLI 측정"
+        default: return "측정 출처 확인 중"
+        }
+    }
 
     private func content(_ m: Member) -> some View {
         let drawer = onClose != nil
@@ -361,6 +574,7 @@ struct MemberDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: CESpace.m) {
                     summary(m).padding(.horizontal, drawer ? 4 : 0)
+                    deliveryPlate(m)
                     if m.status == "blocked" { approvalBox(m) }
                     recentTalkPlate(m)
                     overviewPlate(m)
@@ -379,7 +593,14 @@ struct MemberDetailView: View {
         .confirmationDialog("새 세션으로 이어갈까요?", isPresented: $confirmFresh, titleVisibility: .visible) {
             Button("새 세션으로 이어가기") {
                 // The server queues the handoff with wake:false; it reaches the CLI only with the next instruction.
-                Task { await run("fresh", success: Self.handoffQueuedNote("새 세션을 열었습니다.")) { await store.memberAction(m, action: "fresh-session") } }
+                Task {
+                    guard let reviewed = freshMember, let latest = current, latest.id == reviewed.id,
+                          latest.projectId == reviewed.projectId, TeamConfigSnapshot(latest) == TeamConfigSnapshot(reviewed),
+                          freshGeneration == store.writeRevisions?.members?[m.id]?.sessionGeneration else {
+                        failure = "세션이 바뀌었습니다. 최신 상태를 확인하고 다시 선택하세요."; return
+                    }
+                    await run("fresh", success: Self.handoffQueuedNote("새 세션을 열었습니다.")) { await store.freshSession(latest) }
+                }
             }
             Button("취소", role: .cancel) {}
         } message: {
@@ -387,7 +608,7 @@ struct MemberDetailView: View {
         }
         .confirmationDialog("세션을 다시 열까요?", isPresented: $confirmConfig, titleVisibility: .visible) {
             Button("적용하고 다시 열기") {
-                Task { if let latest = current { await applyConfig(latest) } }
+                Task { await applyConfig(m) }
             }
             Button("취소", role: .cancel) {}
         } message: {
@@ -441,7 +662,7 @@ struct MemberDetailView: View {
         HStack(alignment: .center, spacing: 8) {
             Text(m.name).font(CEFont.title).foregroundStyle(CE.ink).lineLimit(1)
                 .accessibilityAddTraits(.isHeader)
-            StatusBadge(status: m.status)
+            TeamMemberStatusBadge(member: m)
             if m.kind != "worker" { Tag(rankName(m.kind), tone: .accent) }
             if m.origin == "manual" { Tag("직접 띄움") }
             Spacer(minLength: 8)
@@ -464,15 +685,16 @@ struct MemberDetailView: View {
     /// Web detail top row: status pill (in the drawer header on Mac), provider, role, subagents, time. Then the status
     /// meaning in one quiet line.
     private func summary(_ m: Member) -> some View {
-        let info = MemberStatusInfo(m.status)
-        let time = relativeTime(m.updatedAt)
+        let info = MemberStatusInfo(m)
+        let observation = MemberObservationInfo(m)
+        let time = relativeTime(m.origin == "manual" ? observation.manualActivityAt : observation.lastObservedAt)
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 8) {
                 TeamWrapLayout(spacing: 8, lineSpacing: 6) {
                     if onClose == nil {
                         if m.kind != "worker" { Tag(rankName(m.kind), tone: .accent) }
                         if m.origin == "manual" { Tag("직접 띄움") }
-                        StatusBadge(status: m.status)
+                        TeamMemberStatusBadge(member: m)
                     }
                     HStack(spacing: 5) {
                         Tag(providerName(m.cli))
@@ -483,7 +705,7 @@ struct MemberDetailView: View {
                     }
                     .fixedSize()
                     if !m.role.isEmpty && m.role != m.name { Text(m.role).font(TeamFont.role).foregroundStyle(CE.ink2).lineLimit(1) }
-                    if m.subagents > 0 { Text("서브에이전트 \(m.subagents)개").font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.live).fixedSize() }
+                    Text(SubagentInfo(m).label).font(CEFont.meta).foregroundStyle(CE.ink3)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 if !time.isEmpty { Text(time).font(CEFont.meta).foregroundStyle(CE.ink3).fixedSize() }
@@ -498,13 +720,14 @@ struct MemberDetailView: View {
     /// The one state box: a flat plate with a faint approval wash; colour stays in the mark, the text stays ink.
     private func approvalBox(_ m: Member) -> some View {
         let shape = RoundedRectangle(cornerRadius: CERadius.plate - 4, style: .continuous)
+        let info = MemberStatusInfo(m)
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: "hand.raised.fill").font(CEFont.secondary).foregroundStyle(CE.approval)
-                Text("승인 창 앞에서 멈췄습니다").font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                Image(systemName: info.icon).font(CEFont.secondary).foregroundStyle(info.tone.color)
+                Text(info.label).font(CEFont.rowTitle).foregroundStyle(CE.ink)
             }
             // On core, blocked also means the CLI state could not be read.
-            Text("승인·선택 창 앞이거나 CLI 상태를 읽지 못했습니다. 화면을 보고 터미널에서 승인하거나 거절하세요. 그동안 이 팀원에게 가는 전달은 보류됩니다.")
+            Text(info.explanation)
                 .font(CEFont.secondary).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
             if m.origin != "manual" && !teamIsLegacy(m) {
                 Button { openTerminal(m) } label: { Label("터미널 열기", systemImage: "terminal") }
@@ -515,8 +738,8 @@ struct MemberDetailView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(CE.approval.opacity(0.07), in: shape)
-        .overlay { shape.strokeBorder(CE.approval.opacity(0.2)) }
+        .background(info.tone.color.opacity(0.07), in: shape)
+        .overlay { shape.strokeBorder(info.tone.color.opacity(0.2)) }
     }
 
     /// The last few lines of this member's conversation room, oldest first like the chat. A worker's room is its
@@ -545,7 +768,8 @@ struct MemberDetailView: View {
                     VStack(spacing: 0) {
                         ForEach(Array(talk.enumerated()), id: \.element.id) { index, message in
                             if index > 0 { RowDivider(inset: 0) }
-                            TeamTalkRow(message: message)
+                            TeamTalkRow(message: message, notice: store.deliveryPages[m.id]?.items.first { $0.messageId == message.id },
+                                        hasDeliveryNotices: store.deliveryNotices != nil)
                         }
                     }
                 }
@@ -560,9 +784,18 @@ struct MemberDetailView: View {
         return DetailPlate {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 6) {
-                    TeamFactRow(label: teamNowLabel(m)) {
-                        if m.now.isEmpty { Text("맡은 일 없음").foregroundStyle(CE.ink3) }
+                    TeamFactRow(label: LastReportInfo(m).label) {
+                        if m.now.isEmpty { Text("아직 보고가 없습니다").foregroundStyle(CE.ink3) }
                         else { Text(teamInlineMarkdown(m.now)).foregroundStyle(CE.ink).fixedSize(horizontal: false, vertical: true) }
+                    }
+                    if let date = parseISODate(m.nowAt) {
+                        TeamFactRow(label: "보고 시각") { Text(koDateTime(date)).foregroundStyle(CE.ink3) }
+                    }
+                    if let date = parseISODate(m.statusObservation?.observedAt) {
+                        TeamFactRow(label: "마지막 관측") { Text(koDateTime(date)).foregroundStyle(CE.ink3) }
+                    }
+                    if let date = parseISODate(m.manualActivityAt), m.origin == "manual" {
+                        TeamFactRow(label: "도구 활동") { Text(koDateTime(date)).foregroundStyle(CE.ink3) }
                     }
                     if !m.next.isEmpty {
                         TeamFactRow(label: "다음") { Text(teamInlineMarkdown(m.next)).foregroundStyle(CE.ink).fixedSize(horizontal: false, vertical: true) }
@@ -572,9 +805,8 @@ struct MemberDetailView: View {
                             Text("\(m.queuedCount)건 · CLI에 아직 넣지 않은 입력").foregroundStyle(CE.ink).monospacedDigit()
                         }
                     }
-                    if let pct = m.contextPct {
-                        TeamFactRow(label: "문맥", alignment: .center) { TeamContextBar(pct: pct, compactAt: compactAt) }
-                    }
+                    TeamFactRow(label: "문맥") { contextDetails(m) }
+                    executionDetails(m)
                     if decisions > 0 {
                         TeamFactRow(label: "결재") {
                             // Home's quiet accent link ("결재함", "사무실 보기"): no underline, no state colour.
@@ -641,12 +873,15 @@ struct MemberDetailView: View {
                     if sleepRefusal != nil && !down {
                         actionButton("그래도 재우기", icon: "moon.zzz.fill", enabled: canAct) { confirmForceSleep = true }
                     }
-                    actionButton("새 세션으로 이어가기", icon: "arrow.triangle.2.circlepath", busyTitle: "새 세션을 준비하는 중", name: "fresh", enabled: canAct && !busyTurn,
+                    actionButton("새 세션으로 이어가기", icon: "arrow.triangle.2.circlepath", busyTitle: "새 세션을 준비하는 중", name: "fresh", enabled: canAct && !busyTurn && !freshUnresolved(m),
                                  help: busyTurn ? "일하거나 승인 창 앞이면 끝난 뒤 시작하세요" : "역할·현재 일·다음을 새 세션에 인계합니다") {
+                        freshMember = m
+                        freshGeneration = store.writeRevisions?.members?[m.id]?.sessionGeneration
                         confirmFresh = true
                     }
                 }
             }
+            freshReceipt(m)
             if let reason = readOnlyReason {
                 Label(reason, systemImage: store.isDemo ? "eye" : "wifi.slash").font(CEFont.meta).foregroundStyle(CE.ink3)
             }
@@ -685,7 +920,7 @@ struct MemberDetailView: View {
         let switchAllowed = canSwitchProvider(m)
         let target = configTarget(m)
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        let dirty = TeamConfigSnapshot(provider: target, model: trimmed, effort: effort) != TeamConfigSnapshot(m)
+        let dirty = TeamConfigSnapshot(provider: target, model: trimmed, effort: effort) != baseline
         let reopens = dirty && configReopens(m, target: target, model: trimmed)
         let block = configBlock(m, target: target, reopens: reopens)
         let busy = running == "config"
@@ -750,12 +985,19 @@ struct MemberDetailView: View {
                              detail: reopenDetail(m, target: target))
             }
             teamNote(configHelp(m))
+            if configChanged(m) {
+                teamNote("서버 설정이 바뀌었습니다. 내 편집은 보존했습니다. 현재 값 · \(configSummary(m))")
+                Button("내 편집 유지하고 다시 검토") {
+                    configRevision = store.writeRevisions?.members?[m.id]?.configRevision
+                    baseline = TeamConfigSnapshot(m); configFailure = nil
+                }.ceSecondaryButton().controlSize(.small).disabled(busy || !store.canWrite)
+            }
             if let block {
                 Label(block, systemImage: "exclamationmark.circle").font(CEFont.meta).foregroundStyle(CE.attention).fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {
                 if dirty && !busy {
-                    Button("되돌리기") { apply(TeamConfigSnapshot(m)) }.buttonStyle(DetailGhostButtonStyle()).controlSize(.small)
+                    Button("되돌리기") { loadConfig(m) }.buttonStyle(DetailGhostButtonStyle()).controlSize(.small)
                 }
                 Spacer(minLength: 0)
                 // A change that closes and reopens the session is confirmed first; a stored-only change applies directly.
@@ -767,7 +1009,7 @@ struct MemberDetailView: View {
                 }
                 .ceProminentButton()
                 .controlSize(.small)
-                .disabled(!dirty || block != nil || !store.canWrite || running != nil || store.pendingActions.contains("member:\(m.id)"))
+                .disabled(!dirty || configChanged(m) || block != nil || !store.canWrite || running != nil || store.pendingActions.contains("member:\(m.id)"))
             }
             if let configNote {
                 Label(configNote, systemImage: configHandoff ? "tray.full" : "checkmark.circle").font(CEFont.meta).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
@@ -802,7 +1044,7 @@ struct MemberDetailView: View {
                 } else if legacy {
                     teamNote("이전 실행기의 세션은 여기서 조작할 수 없습니다. 기존 터미널에서 확인하세요.")
                 } else {
-                    teamNote("직접 조작하는 동안 자동 전달이 멈춥니다. 자동 압축은 지원하지 않으니 문맥 정리는 터미널에서 CLI의 /compact로 합니다.")
+                    teamNote("직접 조작하는 동안 자동 전달과 문맥 압축이 기다립니다. 끝나면 조작권을 놓아 주세요.")
                 }
                 if let command {
                     TeamCommandRow(label: command.attached ? "연결된 터미널 열기" : "터미널로 열기",
@@ -888,6 +1130,7 @@ struct MemberDetailView: View {
 
     private var readOnlyReason: String? {
         if store.isDemo { return "샘플은 읽기 전용입니다. 실제 Mac에 연결하면 조작할 수 있습니다." }
+        if store.isArchive { return "보관함은 읽기 전용입니다." }
         if store.connectionStatus != .connected { return "서버에 연결되지 않아 조작할 수 없습니다." }
         return nil
     }
@@ -991,7 +1234,14 @@ struct MemberDetailView: View {
         "\(opened) 인계 메모는 대기열에 있고, 다음 지시를 보내면 함께 들어갑니다."
     }
 
-    private func loadConfig(_ m: Member) { apply(TeamConfigSnapshot(m)) }
+    private func loadConfig(_ m: Member) {
+        apply(TeamConfigSnapshot(m))
+        configRevision = store.writeRevisions?.members?[m.id]?.configRevision
+    }
+
+    private func configChanged(_ m: Member) -> Bool {
+        TeamConfigSnapshot(m) != baseline || configRevision != store.writeRevisions?.members?[m.id]?.configRevision
+    }
 
     private func apply(_ snapshot: TeamConfigSnapshot) {
         provider = snapshot.provider
@@ -1001,8 +1251,10 @@ struct MemberDetailView: View {
     }
 
     private func run(_ name: String, success: String, _ operation: () async -> Bool) async {
+        let namespace = store.writeNamespace, id = memberID
         running = name; failure = nil; note = nil; sleepRefusal = nil
         let ok = await operation()
+        guard namespace == store.writeNamespace, id == memberID else { return }
         running = nil
         guard ok else {
             failure = store.errorMessage ?? "요청을 처리하지 못했습니다."
@@ -1027,19 +1279,29 @@ struct MemberDetailView: View {
     }
 
     private func applyConfig(_ m: Member) async {
+        guard !configChanged(m) else {
+            configFailure = "서버 설정이 바뀌었습니다. 내 편집을 유지하고 다시 검토하세요."; return
+        }
         let target = configTarget(m)
         let switching = target != m.cli
+        let sent = TeamConfigSnapshot(provider: provider, model: model, effort: effort)
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         let reopens = configReopens(m, target: target, model: trimmed)
+        let namespace = store.writeNamespace, id = memberID
         running = "config"; configNote = nil; configFailure = nil; configHandoff = false
-        let ok = await store.patchMember(m, provider: target, model: trimmed.isEmpty ? nil : trimmed, effort: effort.isEmpty ? nil : effort)
+        let ok = await store.patchMember(m, provider: target, model: trimmed.isEmpty ? nil : trimmed, effort: sent.effort.isEmpty ? nil : sent.effort)
+        guard namespace == store.writeNamespace, id == memberID else { return }
         running = nil
         guard ok else {
             configFailure = store.errorMessage ?? "설정을 바꾸지 못했습니다."
             return
         }
         if let latest = current {
-            loadConfig(latest)
+            if TeamConfigSnapshot(provider: provider, model: model, effort: effort) == sent { loadConfig(latest) }
+            else {
+                baseline = TeamConfigSnapshot(latest)
+                configRevision = store.writeRevisions?.members?[latest.id]?.configRevision
+            }
             // Any apply that rotated the session can leave the member in error ("새 세션 시작 실패: …").
             if reopens && latest.status == "error" {
                 configFailure = latest.lastError ?? "새 세션을 시작하지 못했습니다."
@@ -1061,6 +1323,8 @@ struct MemberDetailView: View {
 /// One line of the room: mine = "나" · text · delivery · time; a report = kind tag · title (or first line) · time.
 private struct TeamTalkRow: View {
     let message: Message
+    var notice: DeliveryNoticeItem?
+    var hasDeliveryNotices = false
     @ScaledMetric(relativeTo: .caption) private var markWidth: CGFloat = 38
 
     var body: some View {
@@ -1068,7 +1332,7 @@ private struct TeamTalkRow: View {
             mark.frame(minWidth: markWidth, alignment: .leading)
             Text(text).font(CEFont.secondary).foregroundStyle(CE.ink).lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if message.mine, let delivery = DeliveryInfo(message.delivery) {
+            if message.mine, let delivery = notice.map(DeliveryInfo.init) ?? DeliveryInfo(hasDeliveryNotices && ["held", "failed"].contains(message.delivery ?? "") ? nil : message.delivery) {
                 Text(delivery.label).font(CEFont.meta.weight(.medium)).foregroundStyle(delivery.tone.color).lineLimit(1).fixedSize()
                     .help(delivery.explanation)
             }
@@ -1729,4 +1993,22 @@ private func teamCopy(_ text: String) {
     #else
     UIPasteboard.general.string = text
     #endif
+}
+
+/// Observation-aware status using the shared tokens, also used by the terminal sheet.
+struct TeamMemberStatusBadge: View {
+    let member: Member
+    var body: some View {
+        let info = MemberStatusInfo(member)
+        HStack(spacing: 5) {
+            StatusDot(tone: info.tone, pulsing: info.live, size: 6)
+            Text(info.label).font(CEFont.meta.weight(.medium))
+                .foregroundStyle(info.tone == .neutral || info.tone == .dim ? CE.ink2 : info.tone.color)
+        }
+        .padding(.horizontal, 8).frame(height: 22)
+        .background((info.tone == .neutral || info.tone == .dim ? Color.white : info.tone.color).opacity(0.1), in: Capsule())
+        .help(info.explanation)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("CLI 상태 \(info.label). \(info.explanation)")
+    }
 }

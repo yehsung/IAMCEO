@@ -5,7 +5,30 @@ import UniformTypeIdentifiers
 private struct ComposerUpload: Identifiable {
     let id = UUID()
     let name: String
-    let key: String
+    let token: DraftUploadToken
+}
+
+private struct ComposerUploadFailure: Identifiable {
+    let id = UUID()
+    let token: DraftUploadToken
+    let name: String
+    let url: URL
+    let detail: String
+}
+
+private struct ComposerUploadContext {
+    let projectID: String
+    let targetMemberID: String?
+    let token: DraftUploadToken
+}
+
+/// A local acceptance, as distinct from an old/other-device `mine` row appearing in history.
+struct ComposerAcceptedMessage {
+    static let notification = Notification.Name("IAMCEO.composerAcceptedMessage")
+    let namespace: String
+    let projectID: String
+    let targetMemberID: String?
+    let messageID: String
 }
 
 /// The one instruction surface (web Composer): a dark glass panel with a meta row (target chip, attachment chips,
@@ -23,7 +46,9 @@ struct ComposerBar: View {
     var onSent: (() -> Void)? = nil
     var onOpenChat: (() -> Void)? = nil
     @State private var importing = false
+    @State private var importContext: ComposerUploadContext?
     @State private var uploads: [ComposerUpload] = []
+    @State private var failedUploads: [ComposerUploadFailure] = []
     @State private var uploadError: String?
     /// Why the last send failed; the text stays in the draft.
     @State private var sendError: String?
@@ -31,6 +56,7 @@ struct ComposerBar: View {
     @State private var sentTo: String?
     @State private var sentToken = UUID()
     @State private var dropTargeted = false
+    @State private var sendingLocally = false
     @FocusState private var focused: Bool
 
     private var key: String { DraftStore.key(project: store.selectedProjectID, target: target) }
@@ -41,14 +67,32 @@ struct ComposerBar: View {
     /// The project lead (총괄, or 본사 AI on HQ) receives messages with no explicit target.
     private var leadName: String { store.leadRankName }
     private var recipientName: String { missingTarget ? "명부에 없는 대상" : recipient?.name ?? leadName }
-    private var sending: Bool { store.pendingActions.contains { $0.hasPrefix("send:") } }
+    private var sending: Bool { sendingLocally || store.pendingActions.contains { $0.hasPrefix("send:") } }
     private var draftText: String { drafts.text(for: key) }
     private var files: [Attachment] { drafts.files(for: key) }
-    private var pendingUploads: [ComposerUpload] { uploads.filter { $0.key == key } }
+    private var pendingUploads: [ComposerUpload] {
+        uploads.filter { $0.token.key == key && $0.token.namespace == drafts.namespace
+            && $0.token.connectionGeneration == drafts.connectionGeneration
+            && $0.token.draftGeneration == drafts.snapshot(for: key).generation }
+    }
+    private var missingUploads: [ComposerUploadFailure] {
+        failedUploads.filter { $0.token.key == key && $0.token.namespace == drafts.namespace
+            && $0.token.connectionGeneration == drafts.connectionGeneration
+            && $0.token.draftGeneration == drafts.snapshot(for: key).generation }
+    }
+    private var attempt: MessageSubmission? {
+        store.submissions?.messages(namespace: drafts.namespace).first {
+            $0.draft.key == key && $0.status != .refused && ($0.status != .accepted || !$0.draftConsumed)
+        }
+    }
+    private var checkingAttempt: Bool { attempt?.status == .checking || attempt?.status == .accepted }
+    private var editedAttempt: Bool { attempt.map { $0.draft.revision != drafts.revision(for: key) } ?? false }
     private var text: Binding<String> { Binding(get: { drafts.text(for: key) }, set: { drafts.setText($0, for: key) }) }
     private var canAttach: Bool { store.uiCanWrite && !missingTarget }
     private var canSend: Bool {
-        store.uiCanWrite && !sending && pendingUploads.isEmpty && !missingTarget
+        store.uiCanWrite && !sending && !checkingAttempt && !editedAttempt && pendingUploads.isEmpty
+            && missingUploads.isEmpty && uploadError == nil
+            && drafts.persistenceError == nil && !missingTarget
             && (!draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty)
     }
 
@@ -81,8 +125,16 @@ struct ComposerBar: View {
     }
 
     var body: some View {
+        if store.isArchive || store.state?.project.archived == true {
+            Text("보관한 대화 · 읽기 전용").font(CEFont.meta).foregroundStyle(CE.ink3)
+        } else {
+            panel
+        }
+    }
+
+    private var panel: some View {
         let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
-        VStack(alignment: .leading, spacing: 2) {
+        return VStack(alignment: .leading, spacing: 2) {
             if hasMetaRow { metaRow }
             noticeLine
             inputRow
@@ -100,19 +152,21 @@ struct ComposerBar: View {
         .animation(.easeOut(duration: 0.12), value: focused)
         .dropDestination(for: URL.self) { urls, _ in
             let local = urls.filter(\.isFileURL)
-            guard canAttach, !local.isEmpty else { return false }
-            Task { await upload(local) }
+            guard !local.isEmpty, let context = uploadContext() else { return false }
+            Task { await upload(local, context: context) }
             return true
         } isTargeted: { dropTargeted = $0 && canAttach }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             switch result {
-            case .success(let urls): Task { await upload(urls) }
+            case .success(let urls):
+                if let context = importContext { Task { await upload(urls, context: context) } }
             case .failure(let error): uploadError = error.localizedDescription
             }
         }
         .onAppear { if autoFocus { focusSoon() } }
         .onChange(of: router.focusComposer) { _, _ in focusSoon() }
         .onChange(of: key) { _, _ in uploadError = nil; sendError = nil; sentTo = nil }
+        .onChange(of: drafts.connectionGeneration) { _, _ in uploadError = nil; sendError = nil; sentTo = nil }
         .onChange(of: draftText) { old, new in
             sendError = nil
             if new.count > old.count { sentTo = nil }
@@ -255,8 +309,29 @@ struct ComposerBar: View {
     // MARK: Notice line
 
     @ViewBuilder private var noticeLine: some View {
-        if let uploadError {
-            notice(uploadError, icon: "exclamationmark.circle", color: CE.danger)
+        if checkingAttempt {
+            notice("접수 확인 중 · 글과 첨부는 보관했습니다", icon: "clock", color: CE.attention,
+                   actionTitle: "접수 확인", action: { Task { await store.recoverWrites() } })
+        } else if let error = drafts.persistenceError {
+            notice("초안을 저장하지 못했습니다: \(error)", icon: "exclamationmark.circle", color: CE.danger)
+        } else if pendingUploads.isEmpty, let missing = missingUploads.first {
+            notice("첨부 \(missingUploads.count)개를 확인하지 못했습니다: \(missing.detail)", icon: "exclamationmark.circle", color: CE.danger,
+                   actionTitle: "빠진 첨부 빼기", action: {
+                       let ids = Set(missingUploads.map(\.id))
+                       failedUploads.removeAll { ids.contains($0.id) }
+                   })
+        } else if let uploadError {
+            notice(uploadError + " · 첨부를 다시 골라 주세요", icon: "exclamationmark.circle", color: CE.danger,
+                   actionTitle: "첨부 없이 보내기", action: { self.uploadError = nil })
+        } else if let attempt, editedAttempt {
+            notice("이전 글은 접수되지 않았습니다. 편집한 글과 첨부는 남아 있습니다.", icon: "clock", color: CE.attention,
+                   actionTitle: "편집한 글 사용", action: {
+                       guard attempt.status == .notAccepted || attempt.status == .prepared else { return }
+                       do { try store.submissions?.refuseMessage(id: attempt.id) }
+                       catch { sendError = "이전 전송을 정리하지 못했습니다: \(error.localizedDescription)" }
+                   })
+        } else if attempt?.status == .notAccepted {
+            notice("접수되지 않았습니다. 같은 전송으로 다시 보낼 수 있습니다.", icon: "arrow.clockwise", color: CE.attention)
         } else if let sendError {
             notice(sendError, icon: "exclamationmark.circle", color: CE.danger)
         } else if missingTarget {
@@ -291,7 +366,7 @@ struct ComposerBar: View {
 
     private var inputRow: some View {
         HStack(alignment: .bottom, spacing: 2) {
-            Button { importing = true } label: {
+            Button { importContext = uploadContext(); importing = importContext != nil } label: {
                 Image(systemName: "paperclip").font(.system(size: 17))
                     .frame(width: 44, height: 44)
             }
@@ -341,56 +416,100 @@ struct ComposerBar: View {
 
     private func send() async {
         guard canSend else { return }
-        let sendingKey = key
-        let message = drafts.text(for: sendingKey)
-        let sentFiles = drafts.files(for: sendingKey)
+        let snapshot = drafts.snapshot(for: key)
+        let connection = drafts.connectionGeneration
+        let project = store.selectedProjectID
         let sendingTarget = target
         let name = recipientName
+        sendingLocally = true
+        defer { sendingLocally = false }
         sendError = nil
         sentTo = nil
-        let ok = await store.sendMessage(text: message, targetMemberID: sendingTarget, attachmentIDs: sentFiles.map(\.id))
+        let ok = await store.sendMessage(text: snapshot.text, targetMemberID: sendingTarget, attachmentIDs: snapshot.attachments.map(\.id))
+        guard connection == drafts.connectionGeneration, drafts.namespace == snapshot.namespace,
+              project == store.selectedProjectID, key == snapshot.key else { return }
         guard ok else {
+            if checkingAttempt { return }
             let detail = store.errorMessage?.trimmingCharacters(in: CharacterSet(charactersIn: ". ")) ?? ""
             sendError = (detail.isEmpty ? "보내지 못했습니다" : "보내지 못했습니다: \(detail)") + ". 글은 그대로 두었습니다"
             // Said once, here, next to the kept text (not again in the status strip). A 401 leaves the app, so keep it.
             if store.bootstrap != nil, !detail.isEmpty { store.errorMessage = nil }
             return
         }
-        // Text typed or files attached while the request was in flight stay in the draft.
-        drafts.consumeSent(text: message, attachmentIDs: sentFiles.map(\.id), for: sendingKey)
+        // AppStore consumes the accepted attempt's captured revision. Never consume the current draft again here.
+        if let accepted = store.submissions?.messages(namespace: snapshot.namespace).first(where: {
+            $0.draft.key == snapshot.key && $0.draft.generation == snapshot.generation
+                && $0.draft.revision == snapshot.revision && $0.status == .accepted
+        }), let project {
+            NotificationCenter.default.post(name: ComposerAcceptedMessage.notification,
+                object: ComposerAcceptedMessage(namespace: snapshot.namespace, projectID: project,
+                                                targetMemberID: sendingTarget, messageID: accepted.id))
+        }
         let token = UUID()
         sentToken = token
         sentTo = name
         onSent?()
+        sendingLocally = false
         try? await Task.sleep(for: .seconds(5))
         if sentToken == token { sentTo = nil }
     }
 
-    private func upload(_ urls: [URL]) async {
-        guard let api = store.api, let project = store.selectedProjectID, canAttach else { return }
-        let uploadKey = key
-        let uploadTarget = target
-        uploadError = nil
+    private func uploadContext() -> ComposerUploadContext? {
+        guard canAttach, let project = store.selectedProjectID else { return nil }
+        return ComposerUploadContext(projectID: project, targetMemberID: target, token: drafts.uploadToken(for: key))
+    }
+
+    private func upload(_ urls: [URL], context: ComposerUploadContext) async {
+        let token = context.token
+        let project = context.projectID
+        let uploadTarget = context.targetMemberID
+        guard store.api != nil, store.canWrite, project == store.selectedProjectID,
+              token.namespace == drafts.namespace, token.connectionGeneration == drafts.connectionGeneration,
+              token.draftGeneration == drafts.snapshot(for: token.key).generation else { return }
+        if key == token.key { uploadError = nil }
+        // Register the whole batch before the first await, so the draft cannot be sent between files.
+        let batch = urls.map { ComposerUpload(name: $0.lastPathComponent, token: token) }
+        uploads.append(contentsOf: batch)
+        for url in urls { failUpload(url, token: token, detail: "아직 첨부하지 못했습니다") }
+        defer { uploads.removeAll { item in batch.contains { $0.id == item.id } } }
         for url in urls {
-            let item = ComposerUpload(name: url.lastPathComponent, key: uploadKey)
-            uploads.append(item)
-            defer { uploads.removeAll { $0.id == item.id } }
+            guard token.namespace == drafts.namespace, token.connectionGeneration == drafts.connectionGeneration,
+                  token.draftGeneration == drafts.snapshot(for: token.key).generation,
+                  project == store.selectedProjectID, store.canWrite else { return }
             let access = url.startAccessingSecurityScopedResource()
             defer { if access { url.stopAccessingSecurityScopedResource() } }
             do {
                 let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
                 guard size <= 50 * 1024 * 1024 else {
-                    uploadError = "\(url.lastPathComponent): 파일은 50MB까지 올릴 수 있습니다"
+                    failUpload(url, token: token, detail: "파일은 50MB까지 올릴 수 있습니다")
                     continue
                 }
                 let data = try Data(contentsOf: url, options: .mappedIfSafe)
                 let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
-                let attachment = try await api.upload(data: data, filename: url.lastPathComponent, mime: mime, projectID: project, targetMemberID: uploadTarget)
-                drafts.addFile(attachment, for: uploadKey)
+                // AppStore checks connection/project and deletion generations and persists the completed attachment.
+                let attachment = await store.upload(data: data, filename: url.lastPathComponent, mime: mime, targetMemberID: uploadTarget)
+                guard token.namespace == drafts.namespace, token.connectionGeneration == drafts.connectionGeneration,
+                      token.draftGeneration == drafts.snapshot(for: token.key).generation,
+                      project == store.selectedProjectID else { return }
+                if attachment == nil { failUpload(url, token: token, detail: "첨부를 확인하지 못했습니다") }
+                else {
+                    failedUploads.removeAll { $0.token.namespace == token.namespace && $0.token.key == token.key
+                        && $0.token.draftGeneration == token.draftGeneration && $0.url == url }
+                }
             } catch {
-                uploadError = "\(url.lastPathComponent): \(error.localizedDescription)"
+                guard token.namespace == drafts.namespace, token.connectionGeneration == drafts.connectionGeneration,
+                      token.draftGeneration == drafts.snapshot(for: token.key).generation else { return }
+                failUpload(url, token: token, detail: error.localizedDescription)
             }
         }
+    }
+
+    private func failUpload(_ url: URL, token: DraftUploadToken, detail: String) {
+        failedUploads.removeAll { $0.token.namespace == token.namespace && $0.token.key == token.key
+            && $0.token.draftGeneration == token.draftGeneration && $0.url == url }
+        failedUploads.append(ComposerUploadFailure(token: token, name: url.lastPathComponent,
+                                                  url: url,
+                                                  detail: "\(url.lastPathComponent): \(detail)"))
     }
 }
 

@@ -40,7 +40,7 @@ private enum SetupMetrics {
     #endif
 }
 
-private extension View {
+extension View {
     /// Web `.input`: dark well, 12pt radius, faint inner ring (accent ring while focused).
     func setupInput(active: Bool = false) -> some View {
         let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
@@ -576,6 +576,7 @@ struct SettingsView: View {
     @State private var runtimeError: String?
     @State private var confirmLeave = false
     @State private var confirmDiscard = false
+    @State private var editedNamespace = ""
 
     private enum Busy { case sync, runtime }
 
@@ -615,7 +616,7 @@ struct SettingsView: View {
     private var pendingEmptyCustom: Bool { Self.rankRows.contains { customRanks.contains($0.id) && model(of: $0.id).isEmpty } }
     private var isDirty: Bool { loaded && (Self.signature(draft) != Self.signature(base) || pendingEmptyCustom) }
     private var firstModelError: String? { Self.rankRows.lazy.compactMap { modelError(for: $0) }.first }
-    private var canSave: Bool { editable && isDirty && firstModelError == nil && !saving }
+    private var canSave: Bool { editable && isDirty && firstModelError == nil && !saving && store.settingsConflict == nil }
     private var serverSignature: String { store.bootstrap.map { Self.signature($0.settings) } ?? "" }
 
     private var lockNotice: (title: String, detail: String)? {
@@ -647,17 +648,26 @@ struct SettingsView: View {
     }
 
     private var content: some View {
-        ScrollView {
+        @Bindable var router = router
+        return ScrollView {
             VStack(alignment: .leading, spacing: CESpace.m) {
                 if store.bootstrap != nil {
                     if let lockNotice {
                         InlineNotice(tone: store.isDemo ? .accent : .attention, icon: store.isDemo ? "eye" : "wifi.slash", title: lockNotice.title, detail: lockNotice.detail)
+                    }
+                    if store.settingsConflict != nil {
+                        InlineNotice(title: "다른 기기에서 설정이 바뀌었습니다", detail: "적은 내용은 남아 있습니다. 새 설정을 확인한 뒤 저장해 주세요.")
+                        HStack {
+                            Button("새 설정 불러오기") { revert() }.ceSecondaryButton()
+                            Button("내 변경 다시 검토") { reviewChanges() }.ceSecondaryButton()
+                        }.disabled(saving)
                     }
                     runtimePanel
                     permissionPanel.disabled(!editable || saving)
                     rankPanel.disabled(!editable || saving)
                     SettingsProjectsPanel(editable: editable)
                     operationPanel.disabled(!editable || saving)
+                    PushSettingsView()
                 }
                 connectionPanel
             }
@@ -676,9 +686,19 @@ struct SettingsView: View {
             VStack(spacing: 0) { saveBar }
                 .animation(.snappy(duration: 0.24), value: isDirty || savedNotice)
         }
-        .onAppear { syncFromStore() }
+        .projectManagementSheets()
+        .onAppear { editedNamespace = store.writeNamespace; syncFromStore() }
         .onChange(of: serverSignature) { _, _ in syncFromStore() }
-        .onChange(of: Self.signature(draft)) { _, _ in saveError = nil }
+        .onChange(of: Self.signature(draft)) { _, _ in
+            saveError = nil
+            if loaded { store.setSettingsDraft(draft) }
+        }
+        .onChange(of: store.writeNamespace) { _, namespace in
+            editedNamespace = namespace; loaded = false; customRanks = []; saveError = nil; syncFromStore()
+        }
+        #if os(macOS)
+        .sheet(isPresented: $router.showPairing) { MacPairingSheet() }
+        #endif
         .confirmationDialog("이 기기에서 나갈까요?", isPresented: $confirmLeave, titleVisibility: .visible) {
             Button("나가기", role: .destructive) { leave() }
             Button("취소", role: .cancel) {}
@@ -973,9 +993,13 @@ struct SettingsView: View {
     private var connectionPanel: some View {
         SetupPanel("접속") {
             factGrid(columns: 2) {
-                TimelineView(.periodic(from: .now, by: 5)) { context in
-                    let summary = connectionSummary(now: context.date)
-                    FactCell("상태") { DotValue(tone: summary.tone, text: summary.text) }
+                let summary = connectionSummary()
+                FactCell("상태") { DotValue(tone: summary.tone, text: summary.text) }
+                if let date = store.lastSuccessfulSyncAt {
+                    FactCell("마지막 데이터 확인") { Text(koDateTime(date)) }
+                }
+                if let date = store.lastHeartbeatAt {
+                    FactCell("마지막 연결 신호") { Text(koTime(date, seconds: true)) }
                 }
                 if store.bootstrap != nil, !store.isDemo {
                     FactCell("서버 주소") {
@@ -1038,13 +1062,12 @@ struct SettingsView: View {
         return "이 기기의 \(what) 지웁니다. 다시 들어오려면 서버 컴퓨터에서 iamceo\u{00A0}open 으로 코드를 확인해야 합니다."
     }
 
-    private func connectionSummary(now: Date) -> (tone: Tone, text: String) {
+    private func connectionSummary() -> (tone: Tone, text: String) {
         if store.isDemo { return (.accent, "샘플 · 읽기 전용") }
         switch store.connectionStatus {
         case .connecting: return (.live, "연결하는 중")
         case .connected:
-            if let updated = store.lastUpdated, now.timeIntervalSince(updated) > 20 { return (.attention, "연결됨 · 동기화가 늦어지고 있습니다") }
-            return (.success, "연결됨 · 3초마다 동기화")
+            return (store.realtimeStatus == .fallback || store.realtimeStatus == .blocked ? .attention : .success, store.localizedSyncDescription)
         case .failed: return (.danger, "연결 실패")
         case .disconnected, .demo: return (.danger, "연결 끊김")
         }
@@ -1111,18 +1134,43 @@ struct SettingsView: View {
 
     // MARK: Actions
 
-    /// Adopt the server's values unless the person is mid-edit; then only move the baseline.
+    /// Keep the reviewed baseline pinned while the person edits.
     private func syncFromStore() {
         guard let server = store.bootstrap?.settings else { return }
-        if !loaded || !isDirty { draft = server }
-        base = server
+        guard !loaded || !isDirty else { return }
+        let edit = store.beginSettingsEditing()
+        draft = edit?.draft ?? server
+        base = edit?.base ?? server
         loaded = true
     }
 
     private func revert() {
+        let edit = store.beginSettingsEditing()
+        base = edit?.base ?? store.bootstrap?.settings ?? base
         draft = base
         customRanks = []
         saveError = nil
+    }
+
+    /// Rebase only fields this screen changed, after the owner explicitly chooses to review them.
+    private func reviewChanges() {
+        let previous = base, mine = draft
+        guard let edit = store.beginSettingsEditing() else { return }
+        var next = edit.base
+        if mine.permissionMode != previous.permissionMode { next.permissionMode = mine.permissionMode }
+        if mine.maxConcurrentTurns != previous.maxConcurrentTurns { next.maxConcurrentTurns = mine.maxConcurrentTurns }
+        if mine.compactAtPct != previous.compactAtPct { next.compactAtPct = mine.compactAtPct }
+        if mine.maxAwakeWorkers != previous.maxAwakeWorkers { next.maxAwakeWorkers = mine.maxAwakeWorkers }
+        if mine.notifyMac != previous.notifyMac { next.notifyMac = mine.notifyMac }
+        if mine.boardTidyHours != previous.boardTidyHours { next.boardTidyHours = mine.boardTidyHours }
+        for rank in Self.rankRows {
+            var config = next.ranks[rank.id] ?? RankConfig()
+            if mine.ranks[rank.id]?.model != previous.ranks[rank.id]?.model { config.model = mine.ranks[rank.id]?.model }
+            if mine.ranks[rank.id]?.effort != previous.ranks[rank.id]?.effort { config.effort = mine.ranks[rank.id]?.effort }
+            next.ranks[rank.id] = config
+        }
+        base = edit.base; draft = next; store.setSettingsDraft(next)
+        saveError = "새 설정과 내 변경을 확인한 뒤 저장해 주세요."
     }
 
     private func save() async {
@@ -1137,7 +1185,10 @@ struct SettingsView: View {
             cleaned.model = model.isEmpty ? nil : model
             next.ranks[key] = cleaned
         }
-        if await store.updateSettings(next) {
+        let namespace = editedNamespace
+        let accepted = await store.updateSettings(next)
+        guard namespace == store.writeNamespace else { return }
+        if accepted {
             let saved = store.bootstrap?.settings ?? next
             base = saved
             draft = saved
@@ -1159,7 +1210,7 @@ struct SettingsView: View {
         if kind == .sync { syncError = nil } else { runtimeError = nil }
         defer { busy = nil }
         let before = store.lastUpdated
-        await store.refresh()
+        if kind == .runtime { await store.refreshDiagnostics() } else { await store.refresh() }
         guard store.lastUpdated == before, let error = store.errorMessage else { return }
         if kind == .sync { syncError = error } else { runtimeError = error }
     }
@@ -1189,173 +1240,33 @@ struct SettingsView: View {
 
 // MARK: - 프로젝트 (rename, archive, restore)
 
-/// `PATCH /api/projects/:id` accepts only these keys; nil keys are left out of the body.
-private struct ProjectPatch: Encodable, Sendable {
-    var name: String? = nil
-    var cwd: String? = nil
-    var archived: Bool? = nil
-}
-
-/// Web Settings "프로젝트": each row renames in place or archives (HQ cannot be archived); the 보관함 restores.
-/// The store has no project-admin calls yet, so this talks to the connected client directly and lets the store
-/// refresh afterwards (a 401 is handed to the store by that refresh).
+/// Common management sheets keep settings, the rail and the phone switcher on one mutation path.
 private struct SettingsProjectsPanel: View {
     @Environment(AppStore.self) private var store
+    @Environment(Router.self) private var router
     let editable: Bool
-    @State private var editingID: String?
-    @State private var editName = ""
-    @State private var editCwd = ""
-    @State private var busyID: String?
-    @State private var error: String?
-    @State private var archiveTarget: ProjectSummary?
-    @State private var archived: [Project] = []
-
-    private var reloadKey: String { store.projects.map(\.id).joined(separator: ",") + "|\(store.canWrite)" }
+    @State private var showArchive = false
 
     var body: some View {
         SetupPanel("프로젝트") {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(store.projects.enumerated()), id: \.element.id) { index, project in
-                    if index > 0 { RowDivider(inset: 0) }
-                    if editingID == project.id { editForm(project) } else { row(project) }
-                }
+            ForEach(store.projects) { project in
+                HStack(spacing: CESpace.s) {
+                    VStack(alignment: .leading, spacing: CESpace.xs) {
+                        Text(project.name).font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                        Text(project.cwd).font(CEFont.mono).foregroundStyle(CE.ink3).lineLimit(1).truncationMode(.middle)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                    Menu("관리") {
+                        Button("이름 바꾸기…") { router.manageProject(id: project.id, mode: .rename) }
+                        Button("폴더 고치기…") { router.manageProject(id: project.id, mode: .settings) }
+                        if !project.isHq && project.id != "hq" {
+                            Button("보관…") { router.manageProject(id: project.id, mode: .archive) }
+                        }
+                    }.disabled(!editable)
+                }.padding(.vertical, CESpace.xs)
             }
-            if !archived.isEmpty {
-                Text("보관함").font(SetupFont.label).foregroundStyle(CE.ink2).padding(.top, 2)
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(archived.enumerated()), id: \.element.id) { index, project in
-                        if index > 0 { RowDivider(inset: 0) }
-                        archivedRow(project)
-                    }
-                }
-            }
-            if let error { SetupError(error) }
+            Button { showArchive = true } label: { Label("보관함", systemImage: "archivebox") }.ceSecondaryButton()
         }
-        .task(id: reloadKey) { await loadArchived() }
-        .confirmationDialog(archiveTarget.map { "\($0.name) 보관" } ?? "보관",
-                            isPresented: Binding(get: { archiveTarget != nil }, set: { if !$0 { archiveTarget = nil } }),
-                            titleVisibility: .visible, presenting: archiveTarget) { project in
-            Button("보관", role: .destructive) { Task { await archive(project) } }
-            Button("취소", role: .cancel) {}
-        } message: { _ in
-            Text("목록에서 사라지고 깨어 있는 세션은 잠듭니다. 데이터는 남고, 설정의 보관함에서 다시 꺼낼 수 있습니다.")
-        }
-    }
-
-    private func names(_ name: String, _ cwd: String, dim: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(name).font(SetupFont.choice).foregroundStyle(dim ? CE.ink2 : CE.ink).lineLimit(1)
-            Text(cwd).font(CEFont.mono).foregroundStyle(CE.ink3).lineLimit(1).truncationMode(.middle).help(cwd)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func row(_ project: ProjectSummary) -> some View {
-        HStack(spacing: 10) {
-            names(project.name, project.cwd)
-            Button("고치기") {
-                editName = project.name
-                editCwd = project.cwd
-                error = nil
-                editingID = project.id
-            }
-            .ceSecondaryButton().ceCompactControl().fixedSize()
-            .accessibilityLabel("\(project.name) 고치기")
-            if !project.isHq {
-                Button(busyID == project.id ? "보관하는 중" : "보관") { error = nil; archiveTarget = project }
-                    .ceSecondaryButton().ceCompactControl().fixedSize()
-                    .accessibilityLabel("\(project.name) 보관하기")
-            }
-        }
-        .disabled(!editable || busyID != nil)
-        .padding(.vertical, 9)
-    }
-
-    private func editForm(_ project: ProjectSummary) -> some View {
-        let saving = busyID == project.id
-        return VStack(alignment: .leading, spacing: 10) {
-            SetupField("이름") {
-                TextField("이름", text: $editName).labelsHidden().font(SetupFont.input).setupInput()
-                    .onSubmit { Task { await saveEdit(project) } }
-            }
-            SetupField("폴더", hint: "새로 뜨는 직원부터 적용됩니다") {
-                TextField("폴더", text: $editCwd).labelsHidden().font(CEFont.mono)
-                    .autocorrectionDisabled()
-                    #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                    #endif
-                    .setupInput()
-                    .onSubmit { Task { await saveEdit(project) } }
-            }
-            HStack(spacing: 8) {
-                Spacer(minLength: 0)
-                Button("취소") { editingID = nil; error = nil }
-                    .ceSecondaryButton().ceCompactControl().disabled(saving)
-                Button(saving ? "저장하는 중" : "저장") { Task { await saveEdit(project) } }
-                    .ceProminentButton().ceCompactControl()
-                    .disabled(saving || !editable || settingsTrim(editName).isEmpty || settingsTrim(editCwd).isEmpty)
-            }
-        }
-        .disabled(!editable)
-        .padding(.vertical, 10)
-    }
-
-    private func archivedRow(_ project: Project) -> some View {
-        HStack(spacing: 10) {
-            names(project.name, project.cwd, dim: true)
-            Button(busyID == project.id ? "꺼내는 중" : "꺼내기") { Task { await restore(project) } }
-                .ceSecondaryButton().ceCompactControl().fixedSize()
-                .disabled(!editable || busyID != nil)
-                .accessibilityLabel("\(project.name) 다시 꺼내기")
-        }
-        .padding(.vertical, 9)
-    }
-
-    private func saveEdit(_ project: ProjectSummary) async {
-        let name = settingsTrim(editName), cwd = settingsTrim(editCwd)
-        guard !name.isEmpty, !cwd.isEmpty else { error = "이름과 폴더를 넣어 주세요"; return }
-        let patch = ProjectPatch(name: name != project.name ? name : nil, cwd: cwd != project.cwd ? cwd : nil)
-        guard patch.name != nil || patch.cwd != nil else { editingID = nil; return }
-        if await send(project.id, patch) { editingID = nil }
-    }
-
-    private func archive(_ project: ProjectSummary) async {
-        if await send(project.id, ProjectPatch(archived: true)) { await loadArchived() }
-    }
-
-    private func restore(_ project: Project) async {
-        if await send(project.id, ProjectPatch(archived: false)) { await loadArchived() }
-    }
-
-    private func send(_ id: String, _ patch: ProjectPatch) async -> Bool {
-        guard store.canWrite, let api = store.api else {
-            error = store.isDemo ? "샘플은 읽기 전용입니다. 실제 Mac에 연결하면 바꿀 수 있습니다." : "서버에 연결된 뒤에 바꿀 수 있습니다."
-            return false
-        }
-        guard busyID == nil else { return false }
-        busyID = id
-        error = nil
-        defer { busyID = nil }
-        do {
-            // Archiving puts the project's sessions to sleep, so allow the daemon's slow-call time.
-            let _: Project = try await api.send("/api/projects/\(APIClient.segment(id))", method: "PATCH", body: patch, timeout: 150)
-            await store.refresh()
-            return true
-        } catch let failure {
-            error = failure.localizedDescription
-            if (failure as? APIError)?.status == 401 { await store.refresh() }
-            return false
-        }
-    }
-
-    private func loadArchived() async {
-        guard !store.isDemo, store.canWrite, let api = store.api else { return }
-        do {
-            let rows: [Project] = try await api.request("/api/projects/archived")
-            archived = rows
-        } catch {
-            // Keep the last list; the next change reloads it.
-        }
+        .sheet(isPresented: $showArchive) { ArchiveLibraryView() }
     }
 }
 

@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 /// Launch arguments: `--demo` (read-only sample workspace), `--screen <destination>` and, in demo only, `--open <id>`.
 enum LaunchOptions {
@@ -29,20 +32,29 @@ enum LaunchOptions {
 
 @main
 struct IAMCEOApp: App {
-    /// Read at the App level this is the aggregate of every window: polling stops only when no window is active.
+    /// App-level scene phase includes the settings window and every main window.
     @Environment(\.scenePhase) private var scenePhase
+    #if os(iOS)
+    @UIApplicationDelegateAdaptor(NotificationAppDelegate.self) private var notificationDelegate
+    #endif
     @State private var store: AppStore
     @State private var drafts: DraftStore
+    @State private var lifecycle = ApplicationLifecycle()
     init() {
-        _store = State(initialValue: AppStore(demo: LaunchOptions.demo))
-        _drafts = State(initialValue: DraftStore(persist: !LaunchOptions.demo))
+        let store = AppStore(demo: LaunchOptions.demo, persistCredentials: !LaunchOptions.demo)
+        _store = State(initialValue: store)
+        _drafts = State(initialValue: store.drafts)
     }
     var body: some Scene {
         // A fixed id keeps the scene identity stable across builds (the default id is derived from the root view type).
         WindowGroup(id: "main") {
             MainWindow(store: store, drafts: drafts)
+                .modifier(ApplicationLifecycleHooks(lifecycle: lifecycle, store: store))
         }
-        .onChange(of: scenePhase) { _, phase in store.setForeground(phase == .active) }
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            lifecycle.active = phase == .active
+            lifecycle.apply(to: store)
+        }
         #if os(macOS)
         .defaultSize(width: 1440, height: 920)
         .windowToolbarStyle(.unified)
@@ -51,8 +63,44 @@ struct IAMCEOApp: App {
         #if os(macOS)
         SwiftUI.Settings {
             SettingsWindow(store: store, drafts: drafts)
+                .modifier(ApplicationLifecycleHooks(lifecycle: lifecycle, store: store))
         }
         #endif
+    }
+}
+
+@MainActor @Observable
+private final class ApplicationLifecycle {
+    var active = false
+    var sleeping = false
+    var protectedDataAvailable = true
+    func apply(to store: AppStore) { store.setForeground(active && !sleeping && protectedDataAvailable) }
+}
+
+private struct ApplicationLifecycleHooks: ViewModifier {
+    let lifecycle: ApplicationLifecycle
+    let store: AppStore
+    func body(content: Content) -> some View {
+        content
+            #if os(macOS)
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)) { _ in
+                lifecycle.sleeping = true; lifecycle.apply(to: store)
+            }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)) { _ in
+                lifecycle.sleeping = false; lifecycle.apply(to: store)
+            }
+            #else
+            .onAppear {
+                lifecycle.protectedDataAvailable = UIApplication.shared.isProtectedDataAvailable
+                lifecycle.apply(to: store)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.protectedDataWillBecomeUnavailableNotification)) { _ in
+                lifecycle.protectedDataAvailable = false; lifecycle.apply(to: store)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.protectedDataDidBecomeAvailableNotification)) { _ in
+                lifecycle.protectedDataAvailable = true; lifecycle.apply(to: store)
+            }
+            #endif
     }
 }
 

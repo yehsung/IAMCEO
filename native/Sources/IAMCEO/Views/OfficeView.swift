@@ -366,7 +366,8 @@ struct OfficeView: View {
             // name is never hidden.
             OfficePlateLayout(pixel: p) {
                 ForEach(map.desks) { desk in
-                    OfficeNameplate(member: desk.memberID.flatMap { byID[$0] }, decisions: open[desk.memberID ?? ""] ?? 0)
+                    OfficeNameplate(member: desk.memberID.flatMap { byID[$0] }, decisions: open[desk.memberID ?? ""] ?? 0,
+                                    delivery: desk.memberID.flatMap { store.deliverySummary(memberID: $0) })
                         .layoutValue(key: OfficePlateKey.self, value: desk.plate)
                 }
             }
@@ -470,13 +471,19 @@ struct OfficeView: View {
     }
 
     private func deskHelp(_ member: Member, decisions: Int, due: Int?) -> String {
-        let title = decisions > 0 ? "\(member.name) · 결재 \(decisions)건 · 대화방 정보 보기" : "\(member.name) · 대화방 정보 보기"
+        var title = decisions > 0 ? "\(member.name) · 결재 \(decisions)건 · 대화방 정보 보기" : "\(member.name) · 대화방 정보 보기"
+        if let summary = store.deliverySummary(memberID: member.id), summary.needsOwnerCount > 0 {
+            title += " · 전달 확인 \(summary.needsOwnerCount)건 · 상세에서 근거 확인"
+        }
         return due.map { "\(title)\n문맥 \($0)% — 터미널에서 /compact" } ?? title
     }
 
     private func accessibilityText(_ member: Member, decisions: Int) -> String {
         var parts = [member.name, officeStateLabel(member.status), officeDetail(member)]
         if decisions > 0 { parts.append("결재 \(decisions)건") }
+        if let summary = store.deliverySummary(memberID: member.id), summary.needsOwnerCount > 0 {
+            parts.append("전달 확인 \(summary.needsOwnerCount)건, 상세에서 근거 확인")
+        }
         if let due = contextDue(member) { parts.append("문맥 \(due)퍼센트, 터미널에서 compact") }
         return parts.joined(separator: ", ")
     }
@@ -761,6 +768,7 @@ private struct OfficeStaticLayer: View, Equatable {
 private struct OfficeNameplate: View {
     let member: Member?
     var decisions = 0
+    var delivery: MemberDeliverySummary? = nil
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 5, style: .continuous)
@@ -780,6 +788,13 @@ private struct OfficeNameplate: View {
                     }
                 }
                 .opacity(away ? 0.78 : 1)
+                if let delivery, delivery.needsOwnerCount > 0 {
+                    ViewThatFits(in: .horizontal) {
+                        Text("전달 확인 \(DeliveryInfo.badgeCount(delivery.needsOwnerCount))")
+                            .font(.system(size: 8.5, weight: .bold)).foregroundStyle(CE.attention).fixedSize()
+                        Image(systemName: "exclamationmark.circle").font(.system(size: 8.5, weight: .bold)).foregroundStyle(CE.attention)
+                    }
+                }
                 if counted { count }
             } else {
                 Text("새 팀장 자리").font(.system(size: 10, weight: .semibold)).foregroundStyle(CE.ink3).lineLimit(1)

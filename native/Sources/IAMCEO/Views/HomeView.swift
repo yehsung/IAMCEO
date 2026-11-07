@@ -22,16 +22,9 @@ struct HomeView: View {
     /// iPhone/iPad: 판 정리 asks once (no tooltip there, and the circular-arrows mark reads as "refresh").
     @State private var confirmTidy = false
     @State private var startError: String?
-    @State private var sendNote: HomeNote?
     @State private var expandedTodos: Set<String> = []
     @State private var showDoneTodos = false
-    /// Optimistic done state per todo until the server's copy agrees.
-    @State private var todoOverrides: [String: Bool] = [:]
-    /// The server accepted the change; the next snapshot is the truth whatever it says.
-    @State private var confirmedTodos: Set<String> = []
-    /// Checked rows stay in place for a moment before moving to the 완료 fold (web SETTLE_MS).
-    @State private var settlingTodos: Set<String> = []
-    @State private var settleTasks: [String: Task<Void, Never>] = [:]
+    @State private var contextID = UUID()
     @State private var todoError: String?
     @State private var lastTodoShift = Date.distantPast
 
@@ -70,23 +63,23 @@ struct HomeView: View {
     private var glyphGap: CGFloat { titleInset - 22 }
 
     private var openDecisions: [Decision] { newestFirst(store.decisions.filter { $0.status == "open" }) }
-    private var attention: HomeAttention { HomeAttention(members: store.members, messages: store.messages) }
-    private var errorMembers: [Member] { store.members.filter { $0.status == "error" } }
+    private var attention: HomeAttention { HomeAttention(members: store.members, notices: store.deliveryNotices) }
 
-    private func isDone(_ todo: Todo) -> Bool { todoOverrides[todo.id] ?? todo.done }
+    private func todoBusy(_ id: String) -> Bool {
+        store.pendingActions.contains("todo:\(id)") || [.sending, .checking].contains(store.todoWrites[id])
+    }
+    private func todoNeedsNotice(_ id: String) -> Bool { todoBusy(id) || store.todoWrites[id] == .conflict }
     /// AI가 '필요 없어짐'으로 정리한 할 일은 할 일도, 한 일도 아니다.
-    private var visibleTodos: [Todo] { store.todos.filter { $0.outcome != "dropped" }.sorted { $0.createdAt < $1.createdAt } }
-    private var liveTodos: [Todo] { visibleTodos.filter { !isDone($0) || settlingTodos.contains($0.id) } }
+    private var visibleTodos: [Todo] { store.todos.filter { $0.outcome != "dropped" || todoNeedsNotice($0.id) }.sorted { $0.createdAt < $1.createdAt } }
+    private var liveTodos: [Todo] { visibleTodos.filter { !$0.done || todoNeedsNotice($0.id) } }
     /// Same order reversed: newest-created first.
-    private var doneTodos: [Todo] { visibleTodos.filter { isDone($0) && !settlingTodos.contains($0.id) }.reversed() }
-    private var todoSignature: [String] { store.todos.map { "\($0.id):\($0.done)" } }
+    private var doneTodos: [Todo] { visibleTodos.filter { $0.done && !todoNeedsNotice($0.id) }.reversed() }
 
     private func work(_ section: WorkSection) -> [WorkItem] {
         store.work.filter { $0.sec == section.rawValue }.sorted { $0.order < $1.order }
     }
 
     private func memberName(_ id: String?) -> String? { id.flatMap { id in store.members.first { $0.id == id }?.name } }
-    private func targetName(_ message: Message) -> String { message.targetName ?? memberName(message.targetMemberId) ?? leadLabel }
     /// Chat target for a member's report: workers get their own thread, the lead lives in the project conversation.
     private func chatTarget(for memberID: String?) -> String? {
         guard let memberID, store.members.first(where: { $0.id == memberID })?.kind == "worker" else { return nil }
@@ -112,7 +105,7 @@ struct HomeView: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .refreshable { await store.refresh() }
         .onChange(of: store.selectedProjectID) { _, _ in resetLocalState() }
-        .onChange(of: todoSignature) { _, _ in pruneTodoOverrides() }
+        .onChange(of: store.drafts.namespace) { _, _ in resetLocalState() }
         // Any row that moves inside 내 차례 can put another todo under the pointer.
         .onChange(of: turn.rows.map(\.id)) { _, _ in lastTodoShift = Date() }
         .onChange(of: turn.waiting) { _, _ in lastTodoShift = Date() }
@@ -145,14 +138,12 @@ struct HomeView: View {
         }
     }
 
-    /// Notes, folds and optimistic marks belong to one project; never show them on another.
+    /// Notes and folds belong to one project; never show them on another.
     private func resetLocalState() {
+        contextID = UUID()
         nowExpanded = false; confirmTidy = false
-        tidyNote = nil; startError = nil; sendNote = nil; todoError = nil
+        tidyNote = nil; startError = nil; todoError = nil
         expandedTodos = []; showDoneTodos = false
-        for task in settleTasks.values { task.cancel() }
-        settleTasks = [:]
-        todoOverrides = [:]; confirmedTodos = []; settlingTodos = []
     }
 
     @ViewBuilder private var placeholder: some View {
@@ -384,7 +375,6 @@ struct HomeView: View {
                 }
                 .padding(.top, 10).padding(.bottom, -6)
             }
-            if let sendNote { HomeNoteLine(note: sendNote).padding(.top, 8) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16).padding(.vertical, 12)
@@ -405,9 +395,9 @@ struct HomeView: View {
     /// need me, the newest open decisions, open todos. A todo error and the 완료 fold (with its rows) come last.
     /// `waiting` is false when only finished todos (or a todo error) remain: then 내 차례 is the full-width clear line.
     private func turnRows(_ attention: HomeAttention) -> HomeTurn {
-        var rows: [HomeTurnRow] = attention.blocked.map { HomeTurnRow.blocked($0.member, $0.delivery) }
-        rows += errorMembers.map(HomeTurnRow.memberError)
-        rows += attention.deliveries.map(HomeTurnRow.delivery)
+        var rows: [HomeTurnRow] = attention.members.map { .member($0.member, $0.delivery) }
+        rows += attention.missingMembers.map(HomeTurnRow.delivery)
+        if attention.unassigned > 0 { rows.append(.unassigned(attention.unassigned)) }
         let open = openDecisions
         rows += open.prefix(Self.topDecisions).map(HomeTurnRow.decision)
         if open.count > Self.topDecisions { rows.append(.moreDecisions(open.count - Self.topDecisions)) }
@@ -428,15 +418,17 @@ struct HomeView: View {
                 if index > 0 && row.dividerAbove { HomeDivider() }
                 turnRow(row)
             }
-            if let sendNote { HomeNoteLine(note: sendNote).padding(.top, 4).padding(.bottom, 4) }
         }
     }
 
     @ViewBuilder private func turnRow(_ row: HomeTurnRow) -> some View {
         switch row {
-        case .blocked(let member, let delivery): blockedRow(member, delivery: delivery)
-        case .memberError(let member): errorRow(member)
-        case .delivery(let message): deliveryRow(message)
+        case .member(let member, let delivery): attentionRow(member, delivery: delivery)
+        case .delivery(let summary):
+            deliveryAttentionRow(title: "담당자 확인 필요", count: summary.needsOwnerCount,
+                                 detail: deliveryDetail(summary))
+        case .unassigned(let count):
+            deliveryAttentionRow(title: "담당 미배정", count: count, detail: "받을 팀원이 정해지지 않았습니다")
         case .decision(let decision): decisionRow(decision)
         case .moreDecisions(let count):
             HomeQuietLink(text: "결재함에서 \(count)건 더") { router.go(.inbox) }
@@ -469,97 +461,55 @@ struct HomeView: View {
         }
     }
 
-    private func blockedRow(_ member: Member, delivery: Message?) -> some View {
-        let info = MemberStatusInfo(member.status)
+    /// One intervention per member, with delivery evidence attached to the same row.
+    private func attentionRow(_ member: Member, delivery: MemberDeliverySummary?) -> some View {
+        let info = MemberStatusInfo(member)
+        let approval = info.tone == .approval
+        let error = member.status == "error" ? member.lastError : nil
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                HomeRowButton(bleedTrailing: false, action: { router.openMember(member.id) }) {
-                    turnLine("hand.raised.fill", tint: CE.approval) {
+                HomeRowButton(bleedTrailing: !approval, action: { router.openMember(member.id) }) {
+                    turnLine(info.icon, tint: info.tone.color) {
                         Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
-                        Text(info.label).font(CEFont.meta.weight(.medium)).foregroundStyle(CE.approval).lineLimit(1)
+                        Text([info.label, error.flatMap { $0.isEmpty ? nil : $0 }].compactMap { $0 }.joined(separator: " · "))
+                            .font(CEFont.secondary).foregroundStyle(info.tone.color).lineLimit(2)
                     }
                 }
                 .help(info.explanation)
                 .accessibilityElement(children: .combine)
-                .accessibilityHint("팀원 보기")
-                Button { router.openTerminal(member.id) } label: {
-                    Label("터미널", systemImage: "terminal")
+                .accessibilityHint("팀원 상세에서 상태와 전달 근거 보기")
+                if approval {
+                    Button { router.openTerminal(member.id) } label: { Label("터미널", systemImage: "terminal") }
+                        .ceSecondaryButton().ceCompactControl()
+                        .help("확인된 승인 창을 보고 직접 승인하거나 거절합니다")
+                        .accessibilityLabel("\(member.name) 터미널 열기")
                 }
-                .ceSecondaryButton()
-                .ceCompactControl()
-                .help("터미널 화면을 보고 직접 승인하거나 거절합니다")
-                .accessibilityLabel("\(member.name) 터미널 열기")
             }
-            if let delivery { deliverySubLine(delivery).padding(.leading, titleInset) }
+            if let delivery {
+                let deliveryInfo = DeliveryInfo(delivery)
+                Text("\(deliveryInfo.label) · \(deliveryDetail(delivery))")
+                    .font(CEFont.meta).foregroundStyle(CE.attention)
+                    .padding(.leading, titleInset).padding(.bottom, 6)
+                    .accessibilityLabel("전달 확인 필요 \(delivery.needsOwnerCount)건, \(deliveryDetail(delivery))")
+            }
         }
     }
 
-    /// A member whose turn or session failed. The row opens the member, where 깨우기 / 새 세션 live.
-    private func errorRow(_ member: Member) -> some View {
-        let info = MemberStatusInfo(member.status)
-        let error = member.lastError.flatMap { $0.isEmpty ? nil : $0 }
-        return HomeRowButton(action: { router.openMember(member.id) }) {
-            turnLine("exclamationmark.triangle.fill", tint: CE.error) {
-                Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
-                Text(error ?? info.label).font(CEFont.secondary).foregroundStyle(CE.danger).lineLimit(1)
+    private func deliveryDetail(_ summary: MemberDeliverySummary) -> String {
+        "미확인 \(max(0, summary.unknownCount)) · 미전달 \(max(0, summary.undeliveredCount)) · 뒤에서 대기 \(max(0, summary.waitingBehindCount))"
+    }
+
+    private func deliveryAttentionRow(title: String, count: Int, detail: String) -> some View {
+        HomeRowButton(action: { router.openChat(nil) }) {
+            turnLine("exclamationmark.bubble", tint: CE.attention) {
+                Text("\(title) · 전달 확인 \(DeliveryInfo.badgeCount(count))")
+                    .font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                HomeSub(text: detail)
             }
         }
-        .help([error ?? "", info.explanation].filter { !$0.isEmpty }.joined(separator: "\n"))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(member.name), \(info.label)\(error.map { ", \($0)" } ?? "")")
-        .accessibilityHint("팀원 보기")
-    }
-
-    /// My held or failed message to the member whose approval prompt is the row above: same incident, one sub-line.
-    private func deliverySubLine(_ message: Message) -> some View {
-        let failed = message.delivery == "failed"
-        let info = DeliveryInfo(message.delivery)
-        return HStack(spacing: 8) {
-            HomeRowButton(bleedTrailing: !failed, minHeight: isMac ? 26 : 44, vertical: isMac ? 3 : 6, action: { router.openChat(message.targetMemberId) }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.turn.down.right")
-                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(CE.ink3)
-                        .accessibilityHidden(true)
-                    if let info {
-                        Text(info.label).font(CEFont.meta.weight(.semibold)).foregroundStyle(deliveryColor(message))
-                    }
-                    Text(messageLine(message)).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
-                }
-            }
-            .help(deliveryHelp(message))
-            .accessibilityElement(children: .combine)
-            .accessibilityHint("대화에서 보기")
-            if failed { resendButton(message) }
-        }
-        // Pulled up under its row: the hit area overlaps the row's bottom padding, the text sits right under the title.
-        .padding(.top, isMac ? -4 : -11)
-        .padding(.bottom, isMac ? 2 : -2)
-    }
-
-    /// A send that needs me on its own: failed (resend) or held with unknown delivery (check the terminal).
-    private func deliveryRow(_ message: Message) -> some View {
-        let failed = message.delivery == "failed"
-        let info = DeliveryInfo(message.delivery)
-        return HStack(spacing: 8) {
-            HomeRowButton(bleedTrailing: !failed, action: { router.openChat(message.targetMemberId) }) {
-                turnLine("exclamationmark.bubble.fill", tint: failed ? CE.danger : CE.warn) {
-                    // Up to two lines, like a decision title: the CEO has to read what is being resent.
-                    Text(messageLine(message)).font(CEFont.rowTitle).foregroundStyle(CE.ink)
-                        .lineLimit(2).multilineTextAlignment(.leading)
-                    HStack(spacing: 6) {
-                        Text(failed ? "전달 실패" : (info?.label ?? "보류"))
-                            .font(CEFont.meta.weight(.semibold)).foregroundStyle(deliveryColor(message))
-                            .fixedSize()
-                        Text([("→ " + targetName(message)), relativeTime(message.at)].filter { !$0.isEmpty }.joined(separator: " · "))
-                            .font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
-                    }
-                }
-            }
-            .help(deliveryHelp(message))
-            .accessibilityElement(children: .combine)
-            .accessibilityHint("대화에서 보기")
-            if failed { resendButton(message) }
-        }
+        .accessibilityLabel("\(title), 전달 확인 필요 \(count)건, \(detail)")
+        .accessibilityHint("프로젝트 대화에서 원문 보기")
     }
 
     private func decisionRow(_ decision: Decision) -> some View {
@@ -574,74 +524,24 @@ struct HomeView: View {
         .accessibilityHint("결재함에서 답하기")
     }
 
-    private func deliveryColor(_ message: Message) -> Color {
-        switch message.delivery {
-        case "failed": CE.danger
-        case "held": CE.warn
-        default: DeliveryInfo(message.delivery)?.tone.color ?? CE.ink3
-        }
-    }
-
-    private func deliveryHelp(_ message: Message) -> String {
-        [message.deliveryNote ?? "", DeliveryInfo(message.delivery)?.explanation ?? ""].filter { !$0.isEmpty }.joined(separator: "\n")
-    }
-
-    private func messageLine(_ message: Message) -> String {
-        let line = homePlainLine(message.body)
-        if !line.isEmpty { return line }
-        return message.attachments.isEmpty ? "내 지시" : "첨부 \(message.attachments.count)개"
-    }
-
-    /// Mac: a text capsule. iPhone/iPad: an icon-only circle, so the message title keeps the row's width.
-    @ViewBuilder private func resendButton(_ message: Message) -> some View {
-        let sending = store.pendingActions.contains { $0.hasPrefix("send:") }
-        Group {
-            if isMac {
-                Button {
-                    Task { await resend(message) }
-                } label: {
-                    Label(sending ? "보내는 중" : "다시 보내기", systemImage: "arrow.clockwise")
-                }
-                .ceSecondaryButton()
-                .ceCompactControl()
-            } else {
-                HomeCircleButton(icon: "arrow.clockwise", busy: sending) { Task { await resend(message) } }
-            }
-        }
-        .disabled(!store.uiCanWrite || sending)
-        .help(store.isDemo ? Self.readOnlyHelp : "같은 글을 같은 받는 사람에게 다시 보냅니다")
-        .accessibilityLabel(sending ? "보내는 중" : "\(targetName(message))에게 다시 보내기")
-    }
-
-    private func resend(_ message: Message) async {
-        sendNote = nil
-        let ok = await store.resend(message)
-        let note = ok
-            ? HomeNote(text: "다시 보냈습니다. 전달 여부는 대화에서 확인하세요.", tone: .neutral)
-            : HomeNote(text: "다시 보내지 못했습니다." + (store.errorMessage.map { " \($0)" } ?? ""), tone: .danger)
-        sendNote = note
-        try? await Task.sleep(for: .seconds(6))
-        if sendNote?.id == note.id { sendNote = nil }
-    }
-
     // MARK: 할 일 rows
 
     /// Web .hm-todo: 22pt rounded checkbox · one-line title · chevron. The fold holds detail, who and when.
     private func todoRow(_ todo: Todo) -> some View {
-        let checked = isDone(todo)
+        let checked = todo.done
         let expanded = expandedTodos.contains(todo.id)
         let hit = rowMinHeight
         return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 0) {
-                HomeTodoCheck(checked: checked, busy: store.pendingActions.contains("todo:\(todo.id)"), hit: hit) {
+                HomeTodoCheck(checked: checked, busy: todoBusy(todo.id), hit: hit) {
                     toggleTodo(todo, to: !checked)
                 }
                 // The 22pt box lines up with the card's text edge; the hit area extends past it.
                 .padding(.leading, -(hit - 22) / 2)
-                .disabled(!store.canWrite)
+                .disabled(!store.canWrite || todoBusy(todo.id))
                 .help(store.isDemo ? Self.readOnlyHelp : checked ? "했음 표시 지우기" : "했음으로 표시 (결재 답이 아닙니다)")
                 .accessibilityLabel("\(todo.title) 했음")
-                .accessibilityValue(checked ? "표시함" : "표시 안 함")
+                .accessibilityValue([checked ? "표시함" : "표시 안 함", todoWriteNotice(todo.id)?.text].compactMap { $0 }.joined(separator: ", "))
 
                 Button {
                     withAnimation(.easeOut(duration: 0.2)) {
@@ -666,7 +566,12 @@ struct HomeView: View {
                 .padding(.trailing, -8)
                 .accessibilityHint(expanded ? "접기" : "자세히 보기")
             }
-            // Fold text starts where the title starts: box edge + 22pt box + half the extra hit width + title inset.
+            if let notice = todoWriteNotice(todo.id) {
+                Text(notice.text).font(CEFont.meta).foregroundStyle(notice.tone.color)
+                    .padding(.leading, titleInset).padding(.bottom, 6)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // Fold text starts where the title starts.
             if expanded { todoFold(todo, checked: checked).padding(.leading, titleInset) }
         }
     }
@@ -697,63 +602,45 @@ struct HomeView: View {
         .transition(.opacity)
     }
 
-    private func toggleTodo(_ todo: Todo, to done: Bool) {
-        // A row that just moved must not take a tap meant for the row that was there.
-        guard Date().timeIntervalSince(lastTodoShift) > 0.4, !store.pendingActions.contains("todo:\(todo.id)") else { return }
-        let id = todo.id
-        todoError = nil
-        confirmedTodos.remove(id)
-        todoOverrides[id] = done
-        settleTasks[id]?.cancel()
-        settleTasks[id] = nil
-        if done {
-            settlingTodos.insert(id)
-            settleTasks[id] = Task { @MainActor in
-                try? await Task.sleep(for: .seconds(1.5))
-                guard !Task.isCancelled else { return }
-                withAnimation(.easeOut(duration: 0.25)) { _ = settlingTodos.remove(id) }
-                settleTasks[id] = nil
-            }
-        } else {
-            // Unchecking moves the row back right away.
-            withAnimation(.easeOut(duration: 0.2)) { _ = settlingTodos.remove(id) }
-        }
-        Task { @MainActor in
-            let ok = await store.setTodoDone(todo, done: done)
-            guard todoOverrides[id] == done else { return }
-            if ok {
-                if store.todos.first(where: { $0.id == id })?.done == done { todoOverrides[id] = nil } else { confirmedTodos.insert(id) }
-            } else {
-                todoOverrides[id] = nil
-                settleTasks[id]?.cancel(); settleTasks[id] = nil
-                withAnimation(.easeOut(duration: 0.2)) { _ = settlingTodos.remove(id) }
-                todoError = "'\(todo.title)' 표시를 바꾸지 못했습니다." + (store.errorMessage.map { " \($0)" } ?? "")
-            }
+    private func todoWriteNotice(_ id: String) -> (text: String, tone: Tone)? {
+        switch store.todoWrites[id] {
+        case .sending: ("보내는 중", .neutral)
+        case nil where store.pendingActions.contains("todo:\(id)"): ("보내는 중", .neutral)
+        case .checking: ("결과 확인 중 · 확인이 끝나면 다시 바꿀 수 있습니다", .attention)
+        case .conflict: ("이전 상태의 변경은 반영하지 않았습니다. 최신 내용과 정리 이유를 확인하세요.", .attention)
+        case .confirmedCurrent: ("최신 상태를 확인했습니다", .neutral)
+        default: nil
         }
     }
 
-    /// Drop optimistic marks once the server's copy agrees (or after a confirmed write, whatever it says now).
-    private func pruneTodoOverrides() {
-        for (id, value) in todoOverrides {
-            let server = store.todos.first { $0.id == id }
-            if server == nil || server?.done == value || confirmedTodos.contains(id) {
-                todoOverrides[id] = nil
-                confirmedTodos.remove(id)
+    private func toggleTodo(_ todo: Todo, to done: Bool) {
+        guard store.canWrite, Date().timeIntervalSince(lastTodoShift) > 0.4, !todoBusy(todo.id) else { return }
+        let projectID = store.selectedProjectID
+        let namespace = store.drafts.namespace
+        let context = contextID
+        todoError = nil
+        Task { @MainActor in
+            let ok = await store.setTodoDone(todo, done: done)
+            guard contextID == context, store.selectedProjectID == projectID, store.drafts.namespace == namespace else { return }
+            let status = store.todoWrites[todo.id]
+            let confirmedCurrent = status == .confirmedCurrent && store.todos.first(where: { $0.id == todo.id })?.done == done
+            if !ok && ![.sending, .checking, .conflict].contains(status) && !confirmedCurrent {
+                todoError = "'\(todo.title)' 변경을 반영하지 않았습니다. " + (store.errorMessage ?? "최신 상태를 확인하세요.")
             }
         }
     }
 
     // MARK: - 팀
 
-    /// Who is doing something right now: working first, then who waits on my answer (each in team order).
+    /// Active members and observations that cannot be confirmed, in team order.
     /// 승인 창 앞 and 오류 are listed in 내 차례, not here.
     private var activeMembers: [Member] {
-        store.members.filter { $0.status == "working" } + store.members.filter { $0.status == "waiting" }
+        store.members.filter { ["working", "waiting"].contains($0.status) || MemberStatusInfo($0).icon == "questionmark.circle" }
     }
 
     private var teamSummary: [(status: String, label: String, count: Int)] {
-        let counts = Dictionary(grouping: store.members, by: \.status).mapValues(\.count)
-        return Self.summaryParts.compactMap { part in
+        let counts = Dictionary(grouping: store.members, by: { MemberStatusInfo($0).icon == "questionmark.circle" ? "unknown" : $0.status }).mapValues(\.count)
+        return (Self.summaryParts + [("unknown", "상태 확인 불가")]).compactMap { part in
             let count = counts[part.status] ?? 0
             return count > 0 ? (part.status, part.label, count) : nil
         }
@@ -809,10 +696,10 @@ struct HomeView: View {
 
     /// Mac: one line — dot · name · what it is doing · when. iPhone: the name line, then what it is doing.
     private func activeRow(_ member: Member) -> some View {
-        let info = MemberStatusInfo(member.status)
+        let info = MemberStatusInfo(member)
         let now = plainOneLine(member.now)
-        let doing = now.isEmpty ? info.label : now
-        let time = relativeTime(member.updatedAt)
+        let doing = now.isEmpty ? info.label : (info.icon == "questionmark.circle" ? "\(info.label) · " : "") + "마지막 보고 · \(now)"
+        let time = relativeTime(member.nowAt)
         return HomeRowButton(action: { router.openMember(member.id) }) {
             if isMac {
                 HStack(spacing: 10) {
@@ -847,9 +734,9 @@ struct HomeView: View {
 
     /// HQ's single AI with its state label.
     private func memberRow(_ member: Member, showsState: Bool = false) -> some View {
-        let info = MemberStatusInfo(member.status)
+        let info = MemberStatusInfo(member)
         let error = member.lastError.flatMap { $0.isEmpty ? nil : $0 }
-        let sub = member.status == "error" ? (error ?? info.label) : member.now
+        let sub = member.status == "error" ? (error ?? info.label) : member.now.isEmpty ? "" : "마지막 보고 · \(member.now)"
         return HomeRowButton(action: { router.openMember(member.id) }) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 StatusDot(tone: info.tone, pulsing: info.live, size: 7)
@@ -1063,27 +950,24 @@ struct HomeView: View {
 
 // MARK: - Private model helpers
 
-/// What stops work until the CEO acts, beyond decisions: members at an approval prompt (my unresolved message to
-/// them rides on their row as a sub-line) and my sends that need me on their own — failed (resend) or held with
-/// unknown delivery (never retried by itself). Ordinary holds clear by themselves and stay in 대화.
+/// Recovery totals are authoritative. Automatic checking never creates an intervention.
 private struct HomeAttention {
-    var blocked: [(member: Member, delivery: Message?)] = []
-    var deliveries: [Message] = []
+    var members: [(member: Member, delivery: MemberDeliverySummary?)] = []
+    var missingMembers: [MemberDeliverySummary] = []
+    var unassigned = 0
 
-    init(members: [Member], messages: [Message]) {
-        let blockedMembers = members.filter { $0.status == "blocked" }
-        let blockedIDs = Set(blockedMembers.map(\.id))
-        // A message without a target went to the project conversation, which is the lead's.
-        let lead = members.first { $0.kind == "conductor" || $0.kind == "root" }
-        var attached: [String: Message] = [:]
-        for message in unresolvedDeliveries(messages, status: "failed") + unresolvedDeliveries(messages, status: "held") {
-            if let owner = message.targetMemberId ?? lead?.id, blockedIDs.contains(owner), attached[owner] == nil {
-                attached[owner] = message
-            } else if message.delivery == "failed" || isDeliveryUnknownHold(message) {
-                deliveries.append(message)
+    init(members: [Member], notices: DeliveryNotices?) {
+        let summaries = notices?.members ?? []
+        for member in members {
+            let info = MemberStatusInfo(member)
+            let delivery = summaries.first { $0.memberId == member.id && $0.needsOwnerCount > 0 }
+            if member.status == "error" || (info.needsMe && member.status != "waiting") || delivery != nil {
+                self.members.append((member, delivery))
             }
         }
-        blocked = blockedMembers.map { ($0, attached[$0.id]) }
+        let known = Set(members.map(\.id))
+        missingMembers = summaries.filter { $0.needsOwnerCount > 0 && !known.contains($0.memberId) }
+        unassigned = max(0, notices?.unassigned.needsOwnerCount ?? 0)
     }
 }
 
@@ -1095,9 +979,9 @@ private struct HomeTurn {
 
 /// One row of 내 차례, in priority order.
 private enum HomeTurnRow: Identifiable {
-    case blocked(Member, Message?)
-    case memberError(Member)
-    case delivery(Message)
+    case member(Member, MemberDeliverySummary?)
+    case delivery(MemberDeliverySummary)
+    case unassigned(Int)
     case decision(Decision)
     case moreDecisions(Int)
     case todo(Todo)
@@ -1106,9 +990,9 @@ private enum HomeTurnRow: Identifiable {
 
     var id: String {
         switch self {
-        case .blocked(let member, _): "blocked:\(member.id)"
-        case .memberError(let member): "error:\(member.id)"
-        case .delivery(let message): "delivery:\(message.id)"
+        case .member(let member, _): "member:\(member.id)"
+        case .delivery(let summary): "delivery:\(summary.memberId)"
+        case .unassigned: "delivery-unassigned"
         case .decision(let decision): "decision:\(decision.id)"
         case .moreDecisions: "more-decisions"
         // Open and done rows of the same todo share an id, so a checked row moves into the fold.

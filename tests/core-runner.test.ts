@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, type Server, type Socket } from "node:net";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CoreRunner, codexDraft, ensureCoreServer, type CoreRunnerDeps, type CoreCompactState } from "../server/runner/core.ts";
@@ -429,6 +429,15 @@ function compactStore() {
   return { states, port: { load: (id: string) => states.get(id) ?? null, save: (id: string, state: CoreCompactState) => { states.set(id, structuredClone(state)); } } };
 }
 
+async function uncertainCompactFixture() {
+  const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
+  const runner = d.f.runner(10000, { compactStore: store.port, compactTimeoutMs: 0 }), events: RunnerEvent[] = [];
+  runner.on(e => events.push(e)); await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+  expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: true }); await runner.screen(member());
+  expect(store.states.get(member().id)?.phase).toBe("uncertain");
+  return { ...d, store, runner, events, terminal: d.f.terminals.get(d.started.paneId)! };
+}
+
 describe("compact control and shared native binding", () => {
   test("Claude wrapper is invocation scoped and preserves explicitly supplied settings", async () => {
     const f = await fixture(), settingsFile = join(f.dir, "settings.json"); writeFileSync(settingsFile, JSON.stringify({ permissions: { allow: ["Read"] }, statusLine: { command: "old" } }));
@@ -447,6 +456,59 @@ describe("compact control and shared native binding", () => {
     await until(() => events.some(e => e.type === "compacted")); expect(events.filter(e => e.type === "compacted")).toHaveLength(1);
     await Bun.sleep(40); expect(events.filter(e => e.type === "turn_end")).toHaveLength(0); expect(runner.isBusy(member().id)).toBe(false);
     expect(store.states.get(member().id)?.phase).toBe("succeeded");
+  });
+  test("large Claude history captures EOF, ignores historical boundaries and resumes after restart", async () => {
+    const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
+    const boundary = JSON.stringify({ type: "system", subtype: "compact_boundary", sessionId: d.started.sessionId, cwd: member().cwd }) + "\n";
+    writeFileSync(d.path, (JSON.stringify({ type: "assistant", message: { content: "한글😀".repeat(8192) } }) + "\n").repeat(65) + boundary, { flag: "a" });
+    const size = statSync(d.path).size; expect(size).toBeGreaterThan(4 * 1024 * 1024);
+    const first = d.f.runner(10000, { compactStore: store.port }); await first.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    expect(await first.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: true });
+    expect(store.states.get(member().id)?.baseline.offset).toBe(size); await first.shutdown();
+    const terminal = d.f.terminals.get(d.started.paneId)!; terminal.turn = 1; terminal.status = { state: "idle" };
+    const second = d.f.runner(10000, { compactStore: store.port }), events: RunnerEvent[] = []; second.on(e => events.push(e));
+    await second.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    expect(second.isBusy(member().id)).toBe(true); expect(events.some(e => e.type === "compacted")).toBe(false);
+    // Completion can itself span more than the observer's 1MiB per-poll budget.
+    writeFileSync(d.path, (JSON.stringify({ type: "assistant", message: { content: "x".repeat(32768) } }) + "\n").repeat(40) + boundary, { flag: "a" });
+    await second.screen(member()); expect(second.isBusy(member().id)).toBe(true);
+    await second.screen(member()); expect(second.isBusy(member().id)).toBe(false);
+    expect(events.filter(e => e.type === "compacted")).toHaveLength(1); expect(events.some(e => e.type === "turn_end")).toBe(false);
+    expect(d.f.calls.filter(c => c.method === "terminal.send")).toHaveLength(1);
+  });
+  test("tail starting exactly on a complete 4MiB record boundary is a usable baseline", async () => {
+    const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
+    const budget = 4 * 1024 * 1024;
+    const line = JSON.stringify({ text: "x".repeat(budget - JSON.stringify({ text: "" }).length - 1) }) + "\n";
+    expect(Buffer.byteLength(line)).toBe(budget); writeFileSync(d.path, line, { flag: "a" });
+    const runner = d.f.runner(10000, { compactStore: store.port }); await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: true });
+    expect(store.states.get(member().id)?.baseline.offset).toBe(statSync(d.path).size);
+  });
+  test.each(["partial", "corrupt", "oversized"])("large Claude history refuses a %s tail without sending, then accepts a repaired tail", async kind => {
+    const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
+    writeFileSync(d.path, (JSON.stringify({ type: "assistant", message: { content: "x".repeat(65536) } }) + "\n").repeat(65), { flag: "a" });
+    const size = statSync(d.path).size;
+    writeFileSync(d.path, kind === "partial" ? '{"text":"unfinished😀' : kind === "corrupt" ? "broken JSON\n" : JSON.stringify({ text: "x".repeat(4 * 1024 * 1024) }) + "\n", { flag: "a" });
+    const runner = d.f.runner(10000, { compactStore: store.port }); await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: false, deliveryEffect: "not_written" });
+    expect(store.states.size).toBe(0); expect(d.f.calls.some(c => c.method === "terminal.send")).toBe(false);
+    truncateSync(d.path, size); expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: true });
+  });
+  test.each(["replace", "truncate", "append"])("baseline %s during final terminal recheck prevents compact input", async kind => {
+    const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
+    const runner = d.f.runner(10000, { compactStore: store.port }); await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    let checks = 0;
+    d.f.setHook(request => {
+      if (request.method === "terminal.get" && ++checks === 3) {
+        if (kind === "replace") { renameSync(d.path, d.path + ".old"); writeFileSync(d.path, "{}\n"); }
+        else if (kind === "truncate") truncateSync(d.path, 0);
+        else writeFileSync(d.path, "{}\n", { flag: "a" });
+      }
+      return false;
+    });
+    expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: false, deliveryEffect: "not_written" });
+    expect(store.states.size).toBe(0); expect(d.f.calls.some(c => c.method === "terminal.send")).toBe(false);
   });
   test("done, drafts, working and unavailable persistence send no compact input", async () => {
     const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
@@ -474,10 +536,15 @@ describe("compact control and shared native binding", () => {
     const id = "native-codex", dir = join(f.dir, "codex-home/sessions/day"); mkdirSync(dir, { recursive: true }); const path = join(dir, `rollout-time-${id}.jsonl`);
     writeFileSync(path, [ { type: "session_meta", payload: { id, cwd: codex.cwd } }, { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: wire }] } } ].map(v => JSON.stringify(v)).join("\n") + "\n");
     terminal.turn = 1; terminal.status = { state: "idle" }; await first.screen(codex); expect(first.observationState(codex.id)?.identity.sessionId).toBe(id); await first.shutdown();
-    const second = f.runner(20, { compactStore: store.port }), events: RunnerEvent[] = []; second.on(e => events.push(e)); await second.start({ ...codex, paneId: started.paneId }, f.opts); await second.screen(codex);
+    writeFileSync(path, (JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "x".repeat(65536) }] } }) + "\n").repeat(65) + JSON.stringify({ type: "compacted" }) + "\n", { flag: "a" });
+    const second = f.runner(20, { compactStore: store.port }), events: RunnerEvent[] = []; second.on(e => events.push(e)); await second.start({ ...codex, paneId: started.paneId }, f.opts);
+    for (let i = 0; i < 8 && !second.observationState(codex.id)?.identity.sessionId; i++) await second.screen(codex);
     expect(second.observationState(codex.id)?.identity.sessionId).toBe(id); expect(terminal.labels["iamceo.binding"]).toBe(nonce);
     expect(await second.compact(codex, "never pass Claude focus", f.opts)).toMatchObject({ ok: true });
+    expect(store.states.get(codex.id)?.baseline.offset).toBe(statSync(path).size);
     expect(f.calls.filter(c => c.method === "terminal.send").at(-1)?.params.text).toBe("/compact");
+    terminal.turn = 2; terminal.status = { state: "idle" }; await second.screen(codex);
+    expect(second.isBusy(codex.id)).toBe(true); expect(events.some(e => e.type === "compacted")).toBe(false);
     writeFileSync(path, JSON.stringify({ type: "compacted" }) + "\n", { flag: "a" }); terminal.turn = 2; terminal.status = { state: "idle" };
     await until(() => events.some(e => e.type === "compacted")); expect(events.some(e => e.type === "turn_end" && e.turn === 2)).toBe(false);
   });
@@ -487,6 +554,100 @@ describe("compact control and shared native binding", () => {
     expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: true }); await until(() => store.states.get(member().id)?.phase === "uncertain");
     const lease = await runner.terminalControl(member(), { action: "claim" }); await runner.terminalControl(member(), { action: "release", leaseId: lease.leaseId });
     expect(await runner.send(member(), "next", d.f.opts)).toMatchObject({ ok: false, reason: "busy" }); expect(events.some(e => e.type === "compacted" || e.type === "turn_end")).toBe(false);
+  });
+  test.each(["input", "key"])("acknowledged human %s plus settled transition resolves compact once without claiming success", async action => {
+    const d = await uncertainCompactFixture(); d.terminal.status = { state: "blocked", kind: "selection" };
+    const lease = await d.runner.terminalControl(member(), { action: "claim" });
+    await d.runner.terminalControl(member(), { action, text: "resolve the prompt", key: "esc", leaseId: lease.leaseId });
+    expect(d.store.states.get(member().id)?.phase).toBe("uncertain");
+    d.terminal.status = { state: "done" }; await d.runner.screen(member());
+    expect(d.store.states.get(member().id)).toMatchObject({ phase: "failed", reason: "user_resolved" });
+    expect(d.runner.isBusy(member().id)).toBe(false); await d.runner.screen(member());
+    expect(d.events.filter(e => e.type === "activity" && e.runId === d.store.states.get(member().id)?.id)).toHaveLength(1);
+    expect(d.events.some(e => e.type === "compacted" || e.type === "turn_end")).toBe(false);
+    await d.runner.terminalControl(member(), { action: "release", leaseId: lease.leaseId });
+    d.terminal.status = { state: "idle" }; expect(await d.runner.send(member(), "next", d.f.opts)).toMatchObject({ ok: true });
+  });
+  test("same idle and claim/release cannot resolve even acknowledged human input", async () => {
+    const d = await uncertainCompactFixture(); d.terminal.status = { state: "idle" };
+    const lease = await d.runner.terminalControl(member(), { action: "claim" });
+    await d.runner.terminalControl(member(), { action: "key", key: "esc", leaseId: lease.leaseId });
+    await d.runner.screen(member()); await d.runner.terminalControl(member(), { action: "release", leaseId: lease.leaseId });
+    await d.runner.screen(member()); expect(d.runner.isBusy(member().id)).toBe(true);
+    expect(d.store.states.get(member().id)?.phase).toBe("uncertain");
+    d.terminal.status = { state: "working" }; await d.runner.screen(member());
+    d.terminal.status = { state: "idle" }; await d.runner.screen(member());
+    expect(d.store.states.get(member().id)).toMatchObject({ phase: "failed", reason: "user_resolved" });
+  });
+  test("a settled observation requested before the human ACK cannot resolve compact", async () => {
+    const d = await uncertainCompactFixture(), lease = await d.runner.terminalControl(member(), { action: "claim" });
+    let key: { request: Request; socket: Socket } | null = null, observation: { request: Request; socket: Socket } | null = null;
+    let capture = true;
+    d.f.setHook((request, socket) => {
+      if (request.method === "terminal.keys") { key = { request, socket }; return true; }
+      if (request.method === "terminal.get" && key && capture) { capture = false; observation = { request, socket }; return true; }
+      return false;
+    });
+    const input = d.runner.terminalControl(member(), { action: "key", key: "esc", leaseId: lease.leaseId }); await until(() => key !== null);
+    const reading = d.runner.screen(member()); await until(() => observation !== null);
+    key!.socket.write(JSON.stringify({ jsonrpc: "2.0", id: key!.request.id, result: { turn: 0 } }) + "\n");
+    d.terminal.turn = 1; d.terminal.status = { state: "working" };
+    observation!.socket.write(JSON.stringify({ jsonrpc: "2.0", id: observation!.request.id, result: { ...d.terminal, status: { state: "idle" } } }) + "\n");
+    await Promise.all([input, reading]); d.f.setHook(null);
+    expect(d.store.states.get(member().id)?.phase).toBe("uncertain"); expect(d.runner.isBusy(member().id)).toBe(true);
+    d.terminal.status = { state: "idle" }; await d.runner.screen(member());
+    expect(d.store.states.get(member().id)).toMatchObject({ phase: "failed", reason: "user_resolved" });
+  });
+  test("expired control lease plus a later idle turn without acknowledged input retains the fence", async () => {
+    const d = await uncertainCompactFixture(); await d.runner.shutdown();
+    d.recovery.port.saveLease({ memberId: member().id, claimId: "expired", leaseId: "expired", identity: d.dispatch.identity, expiresAt: Date.now() - 1, lastInputSequence: 1 });
+    d.terminal.turn = 1; d.terminal.status = { state: "idle" };
+    const runner = d.f.runner(10000, { compactStore: d.store.port, recoveryStore: d.recovery.port });
+    await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts); await runner.screen(member());
+    expect(d.store.states.get(member().id)?.phase).toBe("uncertain"); expect(runner.isBusy(member().id)).toBe(true);
+  });
+  test.each(["refused", "unknown"])("%s human input cannot arm resolution after a later settled turn", async effect => {
+    const d = await uncertainCompactFixture(), lease = await d.runner.terminalControl(member(), { action: "claim" });
+    d.f.setHook((request, socket) => {
+      if (request.method !== "terminal.keys") return false;
+      if (effect === "unknown") socket.destroy();
+      else socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32000, message: "refused", data: { kind: "blocked" } } }) + "\n");
+      return true;
+    });
+    await expect(d.runner.terminalControl(member(), { action: "key", key: "esc", leaseId: lease.leaseId })).rejects.toThrow(); d.f.setHook(null);
+    d.terminal.turn = 2; d.terminal.status = { state: "idle" }; await d.runner.screen(member());
+    await d.runner.terminalControl(member(), { action: "release", leaseId: lease.leaseId }); await d.runner.screen(member());
+    expect(d.store.states.get(member().id)?.phase).toBe("uncertain"); expect(d.runner.isBusy(member().id)).toBe(true);
+  });
+  test("a later unknown human input discards earlier ACK proof and keeps unresolved delivery fenced", async () => {
+    const d = await uncertainCompactFixture(), lease = await d.runner.terminalControl(member(), { action: "claim" });
+    await d.runner.terminalControl(member(), { action: "key", key: "esc", leaseId: lease.leaseId });
+    expect(d.store.states.get(member().id)?.manualResolution).toBeDefined();
+    d.f.setHook((request, socket) => { if (request.method !== "terminal.keys") return false; socket.destroy(); return true; });
+    await expect(d.runner.terminalControl(member(), { action: "key", key: "enter", leaseId: lease.leaseId })).rejects.toThrow(); d.f.setHook(null);
+    d.terminal.turn = 1; d.terminal.status = { state: "idle" }; await d.runner.screen(member());
+    expect(d.store.states.get(member().id)?.manualResolution).toBeUndefined(); expect(d.runner.isBusy(member().id)).toBe(true);
+    // A fresh, acknowledged intervention may resolve compact, while the
+    // independent delivery recovery fence must survive that resolution.
+    await d.runner.terminalControl(member(), { action: "key", key: "esc", leaseId: lease.leaseId }); await d.runner.shutdown();
+    d.recovery.dispatches([d.dispatch]); d.terminal.turn = 2;
+    const runner = d.f.runner(10000, { compactStore: d.store.port, recoveryStore: d.recovery.port });
+    await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    expect(d.store.states.get(member().id)).toMatchObject({ phase: "failed", reason: "user_resolved" });
+    expect(runner.isBusy(member().id)).toBe(true); expect(await runner.send(member(), "next", d.f.opts)).toMatchObject({ ok: false, reason: "busy" });
+  });
+  test("acknowledged human resolution survives restart; failed persistence and ownership changes retain the fence", async () => {
+    const d = await uncertainCompactFixture(), lease = await d.runner.terminalControl(member(), { action: "claim" });
+    await d.runner.terminalControl(member(), { action: "key", key: "esc", leaseId: lease.leaseId }); await d.runner.shutdown();
+    d.terminal.turn = 1; d.terminal.status = { state: "idle" };
+    let fail = true;
+    const runner = d.f.runner(10000, { compactStore: { load: d.store.port.load, save: (id, state) => { if (fail && state.reason === "user_resolved") throw new Error("disk full"); d.store.port.save(id, state); } } });
+    await expect(runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts)).rejects.toThrow("disk full");
+    expect(runner.isBusy(member().id)).toBe(true); expect(d.store.states.get(member().id)?.phase).toBe("uncertain");
+    fail = false; d.terminal.labels["iamceo.generation"] = "2"; await expect(runner.screen(member())).rejects.toThrow("ownership");
+    expect(runner.isBusy(member().id)).toBe(true);
+    d.terminal.labels["iamceo.generation"] = "1"; await runner.screen(member());
+    expect(d.store.states.get(member().id)).toMatchObject({ phase: "failed", reason: "user_resolved" }); expect(runner.isBusy(member().id)).toBe(false);
   });
 });
 

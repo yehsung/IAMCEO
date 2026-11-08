@@ -1114,6 +1114,53 @@ private struct MarkdownTableView: View {
     }
 }
 
+/// Column widths for a markdown table, like a browser's auto table layout. The result never adds up to more than the
+/// space offered: a table wider than the phone would push the whole page sideways and clip both edges.
+enum MarkdownTableColumns {
+    static func widths(ideal natural: [CGFloat], floor: CGFloat, available: CGFloat?) -> [CGFloat] {
+        let ideal = natural.map { max($0, floor) }
+        guard let available, available.isFinite, available > 0, !ideal.isEmpty else { return ideal }
+        let total = ideal.reduce(0, +)
+        if total <= available {
+            // Stretch to fill the width, in proportion to each column's natural size.
+            return ideal.map { $0 * available / max(total, 1) }
+        }
+        // Not even the floors fit: equal columns that add up to the space.
+        guard available > CGFloat(ideal.count) * floor else { return ideal.map { _ in available / CGFloat(ideal.count) } }
+        var result = Array(repeating: CGFloat(0), count: ideal.count)
+        var open = Set(ideal.indices)
+        var remaining = available
+        // A column that fits within an even share keeps its natural width (a short "15.6~18.0" never wraps).
+        var settled = true
+        while settled && !open.isEmpty {
+            settled = false
+            let share = remaining / CGFloat(open.count)
+            for i in open.sorted() where ideal[i] <= share {
+                result[i] = ideal[i]
+                remaining -= ideal[i]
+                open.remove(i)
+                settled = true
+            }
+        }
+        // The wide ones split what is left in proportion to their natural widths. A column whose share falls under the
+        // floor is held at the floor, and the others share what remains after it, so the total stays exact.
+        while !open.isEmpty {
+            let openIdeal = max(open.reduce(CGFloat(0)) { $0 + ideal[$1] }, 1)
+            let pinned = open.filter { remaining * ideal[$0] / openIdeal < floor }
+            if pinned.isEmpty {
+                for i in open { result[i] = remaining * ideal[i] / openIdeal }
+                break
+            }
+            for i in pinned {
+                result[i] = floor
+                remaining -= floor
+                open.remove(i)
+            }
+        }
+        return result
+    }
+}
+
 /// Lays out table cells (row-major, `columns` per row). Column widths follow the widest cell of each column (capped),
 /// stretched to fill the width or shrunk in proportion down to a floor; each row is as tall as its tallest cell.
 private struct MarkdownTableLayout: Layout {
@@ -1134,34 +1181,7 @@ private struct MarkdownTableLayout: Layout {
     }
 
     private func widths(_ available: CGFloat?, cache: Cache) -> [CGFloat] {
-        let ideal = cache.ideal.map { max($0, floor) }
-        guard let available, available.isFinite, available > 0 else { return ideal }
-        let total = ideal.reduce(0, +)
-        if total <= available {
-            // Stretch to fill the width, in proportion to each column's natural size.
-            return ideal.map { $0 * available / max(total, 1) }
-        }
-        let base = CGFloat(ideal.count) * floor
-        guard available > base else { return ideal.map { _ in available / CGFloat(max(ideal.count, 1)) } }
-        // Like a browser's auto table layout: a column that fits within an even share keeps its natural width (a short
-        // "15.6~18.0" never wraps); the wide ones split what is left in proportion to their natural widths.
-        var result = Array(repeating: CGFloat(0), count: ideal.count)
-        var open = Set(ideal.indices)
-        var remaining = available
-        var settled = true
-        while settled && !open.isEmpty {
-            settled = false
-            let share = remaining / CGFloat(open.count)
-            for i in open.sorted() where ideal[i] <= share {
-                result[i] = ideal[i]
-                remaining -= ideal[i]
-                open.remove(i)
-                settled = true
-            }
-        }
-        let openIdeal = max(open.reduce(CGFloat(0)) { $0 + ideal[$1] }, 1)
-        for i in open { result[i] = max(floor, remaining * ideal[i] / openIdeal) }
-        return result
+        MarkdownTableColumns.widths(ideal: cache.ideal, floor: floor, available: available)
     }
 
     private func rowHeights(_ widths: [CGFloat], subviews: Subviews) -> [CGFloat] {

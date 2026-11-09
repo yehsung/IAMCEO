@@ -1049,22 +1049,14 @@ export class Orchestrator implements OrchestratorApi {
     const supplementOnly = deliveries.some(d => d.text.startsWith(formatSystem("보고 보완")));
     // 총괄의 직원 보고 확인 턴에는 대표에게 다시 최종 보고를 요구하지 않는다.
     if (!supplementOnly && member.kind !== "worker" && !deliveries.some(d => d.wake && ["user_message", "answer"].includes(d.kind))) return;
-    if (this.completedReportSince(member, run.createdAt) || this.store.listOpenDecisionsByMember(member.id).some(d => d.createdAt >= run.createdAt)) return;
-    // A blocked post is a result, while a progress update alone is not a final report.
-    let cursor: string | undefined;
-    do {
-      const page = this.store.listMessagePage(member.projectId, { scope: { kind: "member", memberId: member.id }, cursor, limit: 200 });
-      if (page.items.some(m => m.memberId === member.id && !m.mine && m.at >= run.createdAt && ["막힘", "질문"].includes(m.kind))) return;
-      if (!page.nextCursor || !page.items.some(m => m.at >= run.createdAt)) break;
-      cursor = page.nextCursor;
-    } while (cursor);
+    if (this.store.hasExecutionReport(run)) return;
     this.store.claimExecutionNotice(run.runId, "report", () => {
       if (supplementOnly) {
-        this.store.createMessage({ id: `msg_missing_report_${run.runId}`, projectId: member.projectId, who: "시스템", kind: "시스템", title: "결과 보고 누락", body: `${member.name}의 결과 보고가 보완 요청 뒤에도 남지 않았습니다. 기존 업무를 다시 실행하지 않고 결과를 확인해 주세요. 실행 #${run.runId}` });
+        this.store.createMessage({ id: `msg_missing_report_${run.runId}`, projectId: member.projectId, who: "시스템", kind: "시스템", title: "결과 보고 누락", body: `${member.name}의 결과 보고가 보완 요청 뒤에도 남지 않았습니다. 기존 업무를 다시 실행하지 않고 결과를 확인해 주세요.` });
         this.store.appendActivity(member.id, "error", "결과 보고 누락: 보완 요청 뒤에도 결과가 남지 않았습니다", `${run.runId}:missing_report_final`);
         return;
       }
-      this.store.appendActivity(member.id, "system", `실행 ${run.runId}의 필수 보고가 없어 보고 보완을 요청했습니다`, `${run.runId}:missing_report`);
+      this.store.appendActivity(member.id, "system", "필수 보고가 없어 보고 보완을 요청했습니다", `${run.runId}:missing_report`);
       this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "system", ...(this.recovering ? { nextAttemptAt: new Date(Date.now() + this.timings.retryMs).toISOString() } : {}), text: formatSystem(`보고 보완: 실행 ${run.runId}의 결과만 post로 알려 주세요. 기존 업무를 다시 실행하지 마세요. 완료·막힘 또는 질문/위임 대기 상태를 명시하세요.`) });
     });
   }

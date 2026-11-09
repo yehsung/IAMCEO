@@ -2,13 +2,13 @@ import { afterEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { Bus } from "../server/bus.ts";
 import { loadConfig } from "../server/config.ts";
-import { openDb } from "../server/db.ts";
+import { MIGRATIONS, openDb } from "../server/db.ts";
 import { DeliveryRecovery } from "../server/delivery-recovery.ts";
 import { startServer } from "../server/http.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
 import { CoreError } from "../server/runner/core-client.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "../server/runner/types.ts";
-import { Store } from "../server/store.ts";
+import { Store, type ExecutionJournal } from "../server/store.ts";
 import type { Delivery, Member } from "../shared/types.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
@@ -72,6 +72,17 @@ function fixture(maxConcurrentTurns = 4) {
   const notices = () => store.listMessages(project.id, { limit: 500 }).filter(m => m.id.startsWith("msg_delegation_ack_"));
   cleanups.push(async () => { await orch.shutdown(); db.close(); await isolated.stop(); });
   return { config, db, bus, store, runner, project, orch, member, enqueue, notices };
+}
+
+function journal(f: ReturnType<typeof fixture>, member: Member, patch: Partial<ExecutionJournal> = {}) {
+  const at = new Date().toISOString();
+  const run: ExecutionJournal = { runId: randomUUID(), memberId: member.id, projectId: member.projectId,
+    identity: { sessionId: member.sessionId, terminalId: member.paneId, sessionGeneration: 0, process: null },
+    turn: 1, deliveryIds: [], phase: "running", inputReceivedAt: at, startedAt: at, lastProgressAt: null,
+    endedAt: null, result: null, reason: null, exitCode: null, interruptionNotifiedAt: null, reportRequestedAt: null,
+    createdAt: at, updatedAt: at, ...patch };
+  f.store.saveExecutionJournal(run);
+  return run;
 }
 
 test("message and answer HTTP receipts do not wait for cold start or health probes; duplicate IDs retain one intent", async () => {
@@ -156,7 +167,7 @@ test("wait reason distinguishes working, approval, manual control, disabled and 
   expect(f.store.deliveryWait(delivery).waitReason).toBe("archived");
 });
 
-test("reasonless stall creates one durable visible notice; recheck is idempotent and never creates a new delivery", async () => {
+test("wake=1 reasonless stall creates one durable visible notice; recheck is idempotent and never creates a new delivery", async () => {
   const f = fixture(); const member = f.member(), delivery = f.enqueue(member);
   const future = Date.parse(delivery.createdAt) + 120_001;
   f.store.detectDeliveryStalls(future);
@@ -188,6 +199,78 @@ test("known waiting reasons do not generate a reasonless-stall alert", () => {
   expect(f.store.listMessages(f.project.id).filter(m => m.title === "전달 확인 필요")).toHaveLength(0);
 });
 
+for (const kind of ["system", "report"] as const) test(`passive ${kind} waits for an idle recipient's next turn beyond 120 seconds`, () => {
+  const f = fixture(); const member = f.member("conductor");
+  const message = f.store.createMessage({ projectId: f.project.id, kind: "알림", body: "다음 턴에 확인" });
+  const delivery = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind, text: message.body, wake: false, refType: "message", refId: message.id });
+  f.store.detectDeliveryStalls(Date.parse(delivery.createdAt) + 120_001);
+  expect(f.store.deliveryWait(delivery).waitReason).toBe("next_turn");
+  expect(f.store.requireMessage(message.id).deliveryInfo?.[0].waitReason).toBe("next_turn");
+  expect(f.orch.deliveryRecovery.memberNotices(member.id).summary).toMatchObject({ waitReason: "next_turn", needsOwnerCount: 0 });
+  expect(f.store.deliveryStalled(delivery.id)).toBe(false);
+  expect(f.store.listMessages(f.project.id).filter(m => m.title === "전달 확인 필요")).toHaveLength(0);
+  expect(f.runner.sent).toHaveLength(0);
+});
+
+test("passive input waits through the existing turn and restart, but a later started turn cannot leave it queued", () => {
+  const f = fixture(1); const member = f.member();
+  const current = journal(f, member);
+  f.store.patchMember(member.id, { status: "working" });
+  const delivery = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "system", text: "다음 입력", wake: false });
+  const future = Date.parse(delivery.createdAt) + 120_001;
+  const restart = new Store(f.db, new Bus());
+  restart.detectDeliveryStalls(future);
+  expect(restart.deliveryWait(delivery).waitReason).toBe("next_turn");
+  expect(restart.deliveryStalled(delivery.id)).toBe(false);
+  f.store.saveExecutionJournal({ ...current, phase: "ended", endedAt: delivery.createdAt, result: "success" });
+  // Deliberately use the same timestamp: insertion order must identify the next turn.
+  const next = journal(f, member, { createdAt: delivery.createdAt, phase: "received", startedAt: null });
+  expect(restart.deliveryWait(delivery).waitReason).toBe("next_turn");
+  f.store.saveExecutionJournal({ ...next, phase: "running", startedAt: delivery.createdAt });
+  restart.detectDeliveryStalls(future);
+  expect(restart.deliveryWait(delivery).waitReason).toBe("unknown");
+  expect(restart.deliveryStalled(delivery.id)).toBe(true);
+  f.store.saveExecutionJournal({ ...next, phase: "ended", startedAt: delivery.createdAt, endedAt: delivery.createdAt, result: "success" });
+  f.store.patchMember(member.id, { status: "idle" });
+  expect(restart.deliveryWait(delivery).waitReason).toBe("unknown");
+  expect(f.store.listMessages(f.project.id).filter(m => m.title === "전달 확인 필요")).toHaveLength(1);
+  expect(f.runner.sent).toHaveLength(0);
+});
+
+test("old passive stall records resolve on reevaluation and retain the original system messages", () => {
+  const f = fixture(); const member = f.member("conductor");
+  for (const kind of ["system", "report"] as const) {
+    const delivery = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind, text: "정상 대기", wake: false });
+    f.db.query("INSERT INTO delivery_stalls (delivery_id, detected_at) VALUES (?, ?)").run(delivery.id, delivery.createdAt);
+    const history = f.store.createMessage({ id: `msg_delivery_stalled_${delivery.id}`, projectId: f.project.id, kind: "시스템", title: "전달 확인 필요", body: "과거 오탐 원문" });
+    const restart = new Store(f.db, new Bus());
+    restart.detectDeliveryStalls(Date.parse(delivery.createdAt) + 120_001);
+    expect(restart.deliveryStalled(delivery.id)).toBe(false);
+    expect(f.db.query("SELECT resolved_at FROM delivery_stalls WHERE delivery_id = ?").get(delivery.id)).toMatchObject({ resolved_at: expect.any(String) });
+    expect(restart.requireMessage(history.id).body).toBe(history.body);
+  }
+  expect(f.orch.deliveryRecovery.memberNotices(member.id).summary.needsOwnerCount).toBe(0);
+  expect(f.runner.sent).toHaveLength(0);
+});
+
+test("legacy migration restores the passive turn boundary and resolves only normal waits", () => {
+  const f = fixture(); const waiting = f.member(), missed = f.member();
+  const at = Date.now(), before = new Date(at - 60_000).toISOString();
+  for (const member of [waiting, missed]) journal(f, member, { createdAt: before, startedAt: before, phase: "ended" });
+  const passive = [waiting, missed].map(member => f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "system", text: "기존 전달", wake: false }));
+  journal(f, missed, { createdAt: new Date(at + 60_000).toISOString() });
+  for (const delivery of passive) f.db.query("INSERT INTO delivery_stalls (delivery_id, detected_at) VALUES (?, ?)").run(delivery.id, before);
+  f.db.exec("ALTER TABLE deliveries DROP COLUMN next_turn_after_run");
+  f.db.exec("ALTER TABLE delivery_stalls DROP COLUMN resolved_at");
+  f.db.exec(MIGRATIONS.at(-1)!);
+  const restart = new Store(f.db, new Bus());
+  restart.detectDeliveryStalls(at + 180_000);
+  expect(restart.deliveryWait(passive[0]).waitReason).toBe("next_turn");
+  expect(restart.deliveryStalled(passive[0].id)).toBe(false);
+  expect(restart.deliveryWait(passive[1]).waitReason).toBe("unknown");
+  expect(restart.deliveryStalled(passive[1].id)).toBe(true);
+});
+
 test("delegation acknowledgement checks each assignee's name, including post body, across restart", async () => {
   const f = fixture(); const lead = f.member("conductor"), first = f.member(), second = f.member();
   const source = f.enqueue(lead, "user_message", "owner-A");
@@ -214,21 +297,90 @@ for (const posted of [true, false]) test(`bundle [A,B] -> [A] replay retains per
   expect(f.notices()).toHaveLength(posted ? 0 : 1);
 });
 
-test("a supplement without a final report creates one owner-visible missing-result notice and no third execution", async () => {
+test("a supplement notification without a final report creates one owner-visible missing-result notice and no third execution", async () => {
   const f = fixture(); const member = f.member();
   await f.orch.assign(f.project.id, member.handle, { text: "원래 업무" });
   f.runner.end(f.store, member.id);
   await until(() => f.runner.sent.length === 2);
   await until(() => f.store.listActivity(member.id).filter(a => a.kind === "turn_start").length === 2);
+  await f.orch.recordPost(member, { kind: "알림", title: "확인 중이며 아직 결과가 없습니다" });
   f.runner.end(f.store, member.id, 2);
   await until(() => f.store.listMessages(f.project.id).some(m => m.title === "결과 보고 누락"));
   f.runner.end(f.store, member.id, 2); await Bun.sleep(10);
   expect(f.store.listMessages(f.project.id).filter(m => m.title === "결과 보고 누락")).toHaveLength(1);
+  const missing = f.store.listMissingReportNotices(f.project.id)[0];
+  expect(f.store.requireMessage(missing.messageId).body).not.toContain(missing.runId);
   expect(f.runner.sent).toHaveLength(2);
   expect(f.runner.sent[1].text).toContain("기존 업무를 다시 실행하지 마세요");
   expect(f.orch.deliveryRecovery.notices(f.project.id).reportNotices).toMatchObject([{ kind: "missing_report", memberId: member.id, title: "결과 보고 누락" }]);
   await f.orch.recordPost(member, { kind: "완료", title: "늦게 남긴 결과" });
   expect(f.orch.deliveryRecovery.notices(f.project.id).reportNotices).toEqual([]);
+});
+
+test("an approval opened before a supplement plus a notification post is a valid result", async () => {
+  const f = fixture(); const member = f.member();
+  await f.orch.assign(f.project.id, member.handle, { text: "원 업무" });
+  const original = f.store.listPendingExecutions().find(r => r.memberId === member.id)!;
+  f.runner.end(f.store, member.id);
+  await until(() => f.runner.sent.length === 2);
+  await until(() => f.store.listActivity(member.id).filter(a => a.kind === "turn_start").length === 2);
+  const decision = f.store.createDecision({ projectId: f.project.id, memberId: member.id, who: member.name, title: "대표 답 대기" });
+  // Reproduce a decision that was already open before this run began.
+  f.db.query("UPDATE decisions SET created_at = ? WHERE id = ?").run(new Date(Date.parse(original.createdAt) - 60_000).toISOString(), decision.id);
+  await f.orch.recordPost(member, { kind: "알림", title: "결재 카드는 이미 올라가 있고 답을 기다립니다", decisionId: decision.id });
+  f.runner.end(f.store, member.id, 2);
+  await until(() => f.store.listActivity(member.id).filter(a => a.kind === "turn_end").length === 2);
+  expect(f.store.listMessages(f.project.id).filter(m => m.title === "결과 보고 누락")).toHaveLength(0);
+  expect(f.store.listMissingReportNotices(f.project.id)).toEqual([]);
+  expect(f.runner.sent).toHaveLength(2);
+});
+
+for (const kind of ["완료", "막힘", "질문"] as const) test(`a supplement notification needs no missing-report alert after an original ${kind}`, async () => {
+  const f = fixture(); const member = f.member();
+  const original = journal(f, member, { createdAt: "2026-11-09T05:00:00.000Z", phase: "ended" });
+  f.store.createMessage({ projectId: f.project.id, memberId: member.id, kind, at: "2026-11-09T05:01:00.000Z", title: "원 업무의 유효 보고" });
+  f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "system", text: `[시스템] 보고 보완: 실행 ${original.runId}의 결과만 post로 알려 주세요. 기존 업무를 다시 실행하지 마세요.` });
+  await f.orch.pump(member.id);
+  await until(() => f.store.listActivity(member.id).some(a => a.kind === "turn_start"));
+  await f.orch.recordPost(member, { kind: "알림", title: "기존 보고를 확인해 주세요" });
+  f.runner.end(f.store, member.id);
+  await until(() => f.store.listActivity(member.id).some(a => a.kind === "turn_end"));
+  expect(f.store.listMessages(f.project.id).filter(m => m.title === "결과 보고 누락")).toHaveLength(0);
+  expect(f.runner.sent).toHaveLength(1);
+});
+
+for (const kind of ["완료", "답변", "막힘", "질문"] as const) test(`a ${kind} from the original work resolves an old supplement notice across restart`, () => {
+  const f = fixture(); const member = f.member(), other = f.member();
+  const start = "2026-11-09T05:00:00.000Z", supplementAt = "2026-11-09T05:02:00.000Z";
+  const work = f.enqueue(member);
+  const original = journal(f, member, { deliveryIds: [work.id], createdAt: start, phase: "ended" });
+  const supplement = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "system", text: `[시스템] 보고 보완: 실행 ${original.runId}의 결과만 post로 알려 주세요. 기존 업무를 다시 실행하지 마세요.` });
+  const run = journal(f, member, { deliveryIds: [supplement.id], createdAt: supplementAt, phase: "ended" });
+  const history = f.store.createMessage({ id: `msg_missing_report_${run.runId}`, projectId: f.project.id, kind: "시스템", title: "결과 보고 누락", body: "과거 누락 오탐 원문" });
+  f.store.createMessage({ projectId: f.project.id, memberId: member.id, kind, at: "2026-11-09T04:59:00.000Z" });
+  f.store.createMessage({ projectId: f.project.id, memberId: other.id, kind, at: supplementAt });
+  expect(f.store.listMissingReportNotices(f.project.id)).toHaveLength(1);
+  f.store.createMessage({ projectId: f.project.id, memberId: member.id, kind, at: "2026-11-09T05:01:00.000Z" });
+  const restart = new Store(f.db, new Bus());
+  expect(restart.hasExecutionReport(run)).toBe(true);
+  expect(restart.listMissingReportNotices(f.project.id)).toEqual([]);
+  expect(restart.requireMessage(history.id).body).toBe(history.body);
+  const unrelated = journal(f, member, { createdAt: "2026-11-09T05:03:00.000Z", deliveryIds: [f.enqueue(member).id] });
+  expect(restart.hasExecutionReport(unrelated)).toBe(false);
+  const replay = journal(f, member, { createdAt: unrelated.createdAt, deliveryIds: [work.id] });
+  expect(restart.hasExecutionReport(replay)).toBe(true);
+});
+
+test("an older open approval clears an existing missing-report notice without deleting history", () => {
+  const f = fixture(); const member = f.member(), other = f.member();
+  const run = journal(f, member);
+  const message = f.store.createMessage({ id: `msg_missing_report_${run.runId}`, projectId: f.project.id, kind: "시스템", title: "결과 보고 누락", body: "이력 유지" });
+  f.store.createDecision({ projectId: f.project.id, memberId: other.id, who: other.name, title: "다른 직원 결재" });
+  expect(f.store.listMissingReportNotices(f.project.id)).toHaveLength(1);
+  const decision = f.store.createDecision({ projectId: f.project.id, memberId: member.id, who: member.name, title: "답 대기" });
+  f.db.query("UPDATE decisions SET created_at = ? WHERE id = ?").run("2026-11-09T00:00:00.000Z", decision.id);
+  expect(new Store(f.db, new Bus()).listMissingReportNotices(f.project.id)).toEqual([]);
+  expect(f.store.requireMessage(message.id).body).toBe("이력 유지");
 });
 
 for (const kind of ["conductor", "root"] as const) test(`${kind} worker-report wake is exempt; owner-command wake still requires a result`, async () => {

@@ -153,6 +153,7 @@ history는 snapshot과 별도 캐시다. ID 중복 제거·진행 중 이벤트/
 
 | waitReason | 뜻 |
 |---|---|
+| next_turn | `wake=0` 입력이 다음 업무 턴에 합류하기를 기다림. 생성 당시 진행 중이던 턴은 대상이 아님 |
 | run_limit | 전역 동시 실행 한도. `runLimit:{used,limit}`는 실제 점유 중인 직원 수와 한도 |
 | member_busy | 대상 직원이 앞 일을 처리 중 |
 | waking | 시작·재결합 또는 깨우기 진행 중 |
@@ -166,6 +167,8 @@ history는 snapshot과 별도 캐시다. ID 중복 제거·진행 중 이벤트/
 `waitingSince`는 전달 생성 시각(ISO UTC)이다. 사유가 바뀌어도 이 전달이 연속 대기한 전체 시간을 보존하며 받음/종료된 항목은 메시지의 대기 목록에서 빠진다. GET은 저장된 정보와 메모리 상태만 읽고 실행기·pump를 호출하지 않는다.
 
 명확한 사유 없이 마지막 전달 진행(최근 봉투 updatedAt, 봉투가 없으면 생성)부터 120초 이상 멈추면 delivery ID당 한 번 영속 정체 기록·error activity·대표가 읽는 시스템 메시지('전달 확인 필요')를 남긴다. 이 항목은 notice에서 `phase:needs_owner,reason:stalled,recommendation:{code:"recheck",text:"다시 확인"},allowedActions:["recheck"]`로 보인다. 원래 recovery phase/fence를 거짓 unknown으로 바꾸지 않는다. 기존 복구 API의 version/operationId로 recheck하면 안전 검사를 거친 같은 전달의 pump를 예약한다. 새 전달·원본 복제·위험 재전송 동의를 만들지 않는다. 이미 불확실한 입력은 기존 증거 확인·비재전송 규칙을 그대로 따른다.
+
+`next_turn`은 아직 시도하지 않은 `wake=0` 전달에 적용하며 idle·수면·기존 업무 진행 중에도 정체로 판정하지 않는다. 전달 생성 시 execution journal의 순서를 `deliveries.next_turn_after_run`에 저장해 재시작·동일 밀리초에도 기존 턴과 이후 턴을 구별한다. 기존 데이터는 전달 생성 시각 이전의 실행으로 경계를 복원한다. 이후 실행이 실제 시작(`started_at`)했는데도 queued로 남으면 `next_turn` 예외를 끝내고, 업무 진행·실행 한도로 가리지 않고 기존 120초 정체 검사를 적용한다. 수신 불확실·결재·직접 조작 등 기존 안전 사유가 우선한다. `wake=1` 정체 판정은 유지한다. 정체 재평가에서 정상 사유가 확인되거나 전달이 종결되면 `delivery_stalls.resolved_at`을 기록해 활성 알림을 해제한다. 과거 시스템 메시지와 activity는 보존하고 같은 전달의 알림을 중복 생성하지 않는다. 앱 표시 문구는 `waitReasonLabel` 담당에서 정한다.
 
 ### 3.6 실시간 sync와 iPhone APNs
 
@@ -366,6 +369,8 @@ clone은 `<IAMCEO_HOME>/clone-staging/<jobId>`(0700)에서 수행한다. 대상 
 ### UX-T1 보고 보완 범위
 
 core 업무 턴의 최종 결과가 없으면 기존 업무를 다시 실행하지 않는 보고 보완을 한 번 요청한다. 보완을 포함한 턴도 완료·답변·막힘·질문·열린 결재 등 유효 결과 없이 끝나면 execution journal의 report notice claim으로 '결과 보고 누락' 시스템 메시지와 error activity를 한 번 남긴다. 추가 보완/업무 재실행은 자동으로 만들지 않는다. 보완의 오류·중단 종료도 같은 누락 확인을 한다. 기존 notice 응답의 하위 호환 추가 필드 `deliveryNotices.reportNotices`는 `{kind:"missing_report",runId,memberId,messageId,createdAt,title:"결과 보고 누락"}` 목록이다. 이후 해당 직원이 유효한 결과·막힘·질문을 남기거나 열린 결재로 기다리면 활성 목록에서 빠지고 시스템 메시지는 이력으로 남는다. 총괄·본사 AI의 직원 보고 확인 턴은 보완 대상에서 제외하고, wake=true 대표 메시지·결재 답으로 시작한 턴은 계속 검사한다. 직원의 실제 배정 업무는 기존 최종 보고 의무를 유지한다.
+
+누락 생성과 활성 목록은 `Store.hasExecutionReport`의 같은 판정을 사용한다. 해당 직원에게 열린 결재가 있으면 생성 시각과 관계없이 대표 답 대기로 인정한다(보완 턴의 `알림` 보고가 기존 열린 결재를 가리킬 때도 포함). 완료·답변·막힘·질문은 해당 실행뿐 아니라 보완 입력이 가리키는 같은 직원·프로젝트의 원 실행 및 같은 전달을 재사용한 실행의 시작부터 확인한다. 원 업무 이전 보고나 다른 직원의 보고·결재는 근거가 아니다. `진행`·`알림`만 있고 유효 보고·열린 결재가 없으면 기존 누락 검사를 유지한다. 기존 `missing_report`도 조회할 때 재평가해 활성 목록에서 해제하며 과거 원문은 수정·삭제하지 않는다. 새 대표용 누락 메시지·보완 activity에는 실행 UUID를 표시하지 않고 journal·notice 식별자·activity event ID 및 직원에게 전달하는 원 실행 참조에만 유지한다.
 
 ### UX-T2 추가 계약 (서버 API 2차·앱 모델)
 

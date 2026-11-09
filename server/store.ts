@@ -669,40 +669,78 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     if (input.unresolvedDispatches.length || recovery && !["none", "resolved", "stopped"].includes(recovery.phase) || this.listDeliveries(project.id).some(d => d.memberId === member.id && (d.status === "delivering" || d.holdReason === "delivery_unknown"))) return { waitReason: "receipt_check", waitingSince };
     if (context?.waking || member.lifecycleState && ["starting", "starting_unknown", "reconnecting"].includes(member.lifecycleState.phase)) return { waitReason: "waking", waitingSince };
     if (project.connection.reason === "backend_down" || ["backend_down", "runner_disabled"].includes(delivery.holdReason ?? "")) return { waitReason: "runner_off", waitingSince };
-    if (context?.busy || member.status === "working") return { waitReason: "member_busy", waitingSince };
+    // A passive input belongs to the next turn, not the turn already in flight.
+    // Persisted insertion order avoids same-millisecond and restart ambiguity.
+    if (!delivery.wake && delivery.attempts === 0 && ["queued", "held"].includes(delivery.status) && !this.row(`
+      SELECT 1 FROM execution_journal e JOIN deliveries d ON d.id = ?
+      WHERE e.member_id = d.member_id AND e.project_id = d.project_id AND e.rowid > d.next_turn_after_run
+        AND e.started_at IS NOT NULL LIMIT 1`, delivery.id)) {
+      return { waitReason: "next_turn", waitingSince };
+    }
+    // Once a later turn started, leaving this passive delivery behind is
+    // unexplained even while that turn is busy or the global slots are full.
+    const missedNextTurn = !delivery.wake && delivery.attempts === 0;
+    if (!missedNextTurn && (context?.busy || member.status === "working")) return { waitReason: "member_busy", waitingSince };
     const used = context?.used ?? new Set(this.listPendingExecutions().map(run => run.memberId)).size;
     const limit = this.getSettings().maxConcurrentTurns;
-    if (member.origin !== "manual" && ["core", "headless"].includes(member.backend ?? this.effectiveBackend()) && used >= limit) return { waitReason: "run_limit", waitingSince, runLimit: { used, limit } };
+    if (!missedNextTurn && member.origin !== "manual" && ["core", "headless"].includes(member.backend ?? this.effectiveBackend()) && used >= limit) return { waitReason: "run_limit", waitingSince, runLimit: { used, limit } };
     return { waitReason: "unknown", waitingSince };
   }
 
   deliveryStalled(id: string): boolean {
-    return !!this.row("SELECT 1 FROM delivery_stalls WHERE delivery_id = ?", id);
+    return !!this.row("SELECT 1 FROM delivery_stalls WHERE delivery_id = ? AND resolved_at IS NULL", id);
   }
 
   detectDeliveryStalls(now = Date.now(), thresholdMs = 120_000): void {
+    this.run("UPDATE delivery_stalls SET resolved_at = ? WHERE resolved_at IS NULL AND delivery_id IN (SELECT id FROM deliveries WHERE status IN ('delivered','failed'))", new Date(now).toISOString());
     for (const delivery of this.listUndelivered()) {
-      if (this.requireProject(delivery.projectId).archived || this.deliveryWait(delivery).waitReason !== "unknown") continue;
+      if (this.deliveryWait(delivery).waitReason !== "unknown") {
+        this.run("UPDATE delivery_stalls SET resolved_at = ? WHERE delivery_id = ? AND resolved_at IS NULL", new Date(now).toISOString(), delivery.id);
+        continue;
+      }
       const progress = this.listDispatches(delivery.memberId).filter(d => d.items.some(i => i.deliveryId === delivery.id)).at(-1)?.updatedAt ?? delivery.createdAt;
       if (now - Date.parse(progress) < thresholdMs || this.deliveryStalled(delivery.id)) continue;
       this.transaction(() => {
-        this.run("INSERT OR IGNORE INTO delivery_stalls (delivery_id, detected_at) VALUES (?, ?)", delivery.id, new Date(now).toISOString());
+        this.run(`INSERT INTO delivery_stalls (delivery_id, detected_at) VALUES (?, ?)
+          ON CONFLICT(delivery_id) DO UPDATE SET detected_at = excluded.detected_at, resolved_at = NULL`, delivery.id, new Date(now).toISOString());
         this.appendActivity(delivery.memberId, "error", "전달이 진행되지 않고 있습니다. 다시 확인해 주세요", `delivery-stalled:${delivery.id}`);
         this.createMessage({ id: `msg_delivery_stalled_${delivery.id}`, projectId: delivery.projectId, who: "시스템", kind: "시스템", title: "전달 확인 필요", body: `${this.requireMember(delivery.memberId).name}에게 전달이 진행되지 않고 있습니다. 전달 정보에서 '다시 확인'을 눌러 주세요. 원래 입력을 중복해서 보내지 않습니다.` });
       });
     }
   }
 
+  hasExecutionReport(run: ExecutionJournal): boolean {
+    if (this.row("SELECT 1 FROM decisions WHERE project_id = ? AND member_id = ? AND status = 'open' LIMIT 1", run.projectId, run.memberId)) return true;
+    let since = run.createdAt;
+    const pending = [run], seen = new Set<string>();
+    while (pending.length) {
+      const current = pending.pop()!;
+      if (seen.has(current.runId)) continue;
+      seen.add(current.runId);
+      // A replay of the same source deliveries is still the original work.
+      const original = this.row(`SELECT MIN(e.created_at) AS at FROM execution_journal e, json_each(e.delivery_ids_json) item
+        WHERE e.project_id = ? AND e.member_id = ? AND item.value IN (SELECT value FROM json_each(?))`,
+        run.projectId, run.memberId, JSON.stringify(current.deliveryIds))?.at;
+      if (original && original < since) since = original;
+      if (current.createdAt < since) since = current.createdAt;
+      for (const id of current.deliveryIds) {
+        const delivery = this.getDelivery(id);
+        if (delivery?.kind !== "system" || delivery.projectId !== run.projectId || delivery.memberId !== run.memberId) continue;
+        const sourceId = /^\[시스템\] 보고 보완: 실행 (\S+)의 결과만 post로/.exec(delivery.text)?.[1];
+        const source = sourceId ? this.getExecutionJournal(sourceId) : null;
+        if (source && source.projectId === run.projectId && source.memberId === run.memberId && source.createdAt <= current.createdAt) pending.push(source);
+      }
+    }
+    return !!this.row(`SELECT 1 FROM messages WHERE project_id = ? AND member_id = ? AND mine = 0
+      AND at >= ? AND kind IN ('완료', '답변', '막힘', '질문') LIMIT 1`, run.projectId, run.memberId, since);
+  }
+
   listMissingReportNotices(projectId: string): MissingReportNotice[] {
     return this.rows(`SELECT e.run_id, e.member_id, m.id AS message_id, m.at
       FROM execution_journal e JOIN messages m ON m.id = 'msg_missing_report_' || e.run_id
-      WHERE e.project_id = ? AND NOT EXISTS (
-        SELECT 1 FROM messages result WHERE result.project_id = e.project_id AND result.member_id = e.member_id
-          AND result.mine = 0 AND result.at >= e.created_at AND result.kind IN ('완료', '답변', '막힘', '질문')
-      ) AND NOT EXISTS (
-        SELECT 1 FROM decisions d WHERE d.project_id = e.project_id AND d.member_id = e.member_id
-          AND d.status = 'open' AND d.created_at >= e.created_at
-      ) ORDER BY m.at, m.id`, projectId).map(row => ({ kind: "missing_report", runId: row.run_id, memberId: row.member_id, messageId: row.message_id, createdAt: row.at, title: "결과 보고 누락" }));
+      WHERE e.project_id = ? ORDER BY m.at, m.id`, projectId)
+      .filter(row => !this.hasExecutionReport(this.getExecutionJournal(row.run_id)!))
+      .map(row => ({ kind: "missing_report", runId: row.run_id, memberId: row.member_id, messageId: row.message_id, createdAt: row.at, title: "결과 보고 누락" }));
   }
 
   private messageFrom(row: Row, includeDelivery = true): Message {
@@ -1990,6 +2028,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         nowIso(),
       );
       this.run("UPDATE deliveries SET source_revision = ?, next_attempt_at = ? WHERE id = ?", input.sourceRevision ?? null, input.nextAttemptAt ?? null, id);
+      this.run(`UPDATE deliveries SET next_turn_after_run = COALESCE((SELECT MAX(rowid) FROM execution_journal
+        WHERE member_id = ? AND project_id = ?), 0) WHERE id = ?`, input.memberId, input.projectId, id);
       this.run("INSERT INTO delivery_recovery (delivery_id, updated_at) VALUES (?, ?)", id, nowIso());
       this.emitMember(input.memberId);
       return this.requireDelivery(id);

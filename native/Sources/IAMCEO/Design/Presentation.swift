@@ -549,6 +549,8 @@ func waitReasonLabel(_ reason: String?, since: String? = nil, used: Int? = nil, 
         if let used, let limit, limit > 0 { base = "동시에 일하는 직원이 다 차서 차례를 기다리는 중(\(used)/\(limit))" }
         else { base = "동시에 일하는 직원이 다 차서 차례를 기다리는 중" }
     case "member_busy": base = "지금 하던 일이 끝나면 전달"
+    // A report or note that does not wake its reader: it goes in with that member's next turn, by design.
+    case "next_turn": base = "다음에 일할 때 함께 전달"
     case "waking": base = "깨우는 중"
     case "receipt_check": base = "앞 지시를 받았는지 확인하는 중"
     case "approval": base = "승인 창 앞이라 대기 중"

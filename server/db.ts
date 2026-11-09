@@ -657,6 +657,14 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE messages ADD COLUMN context_file_id TEXT;
    ALTER TABLE todos ADD COLUMN completion_note TEXT;
    ALTER TABLE todos ADD COLUMN completion_file_ids TEXT NOT NULL DEFAULT '[]';`,
+  // Passive deliveries wait for a later execution, including across restarts.
+  `ALTER TABLE deliveries ADD COLUMN next_turn_after_run INTEGER NOT NULL DEFAULT 0;
+   UPDATE deliveries SET next_turn_after_run = COALESCE((
+     SELECT MAX(e.rowid) FROM execution_journal e
+     WHERE e.member_id = deliveries.member_id AND e.project_id = deliveries.project_id
+       AND e.created_at <= deliveries.created_at
+   ), 0);
+   ALTER TABLE delivery_stalls ADD COLUMN resolved_at TEXT;`,
 ];
 
 export function openDb(path: string): Database {

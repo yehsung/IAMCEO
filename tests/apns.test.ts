@@ -27,7 +27,7 @@ function fixture() {
   const keys = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
   const path = join(runtime.paths.configDir, "test.p8");
   writeFileSync(path, keys.privateKey.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
-  const entry = { keyId: "TESTKEY123", teamId: "MQ2KQK37WD", bundleId: DEFAULT_PUSH_BUNDLE_ID, privateKeyPath: path };
+  const entry = { keyId: "TESTKEY123", teamId: "TEAMID1234", bundleId: DEFAULT_PUSH_BUNDLE_ID, privateKeyPath: path };
   const configPath = join(runtime.paths.iamceoHome, "apns.json");
   function save(value: unknown = { sandbox: entry, production: entry }) {
     writeFileSync(configPath, JSON.stringify(value), { mode: 0o600 });

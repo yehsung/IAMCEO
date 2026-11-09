@@ -1,4 +1,4 @@
-/* 토큰·기본값. 랜딩(aing-check v3)의 색·움직임을 그대로 옮겼다. 글꼴만 시스템 글꼴로 바꿨다. */
+/* 토큰·기본값. 디자인 시안의 색·움직임을 그대로 옮겼다. 글꼴만 시스템 글꼴로 바꿨다. */
 
 @property --spec { syntax:"<number>"; inherits:true; initial-value:0; }
 @property --g-blur { syntax:"<length>"; inherits:false; initial-value:28px; }

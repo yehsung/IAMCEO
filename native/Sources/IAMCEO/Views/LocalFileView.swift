@@ -263,10 +263,10 @@ struct LocalFileSample: Identifiable {
     var id: String { kind }
     var path: String {
         switch kind {
-        case "code": "~/Aingo/scripts/sync_rows.py"
-        case "image": "~/Aingo/output/screens/home@2x.png"
-        case "other": "~/Aingo/output/결과보고서.docx"
-        default: "~/Aingo/docs/리포트/주간-진행-보고.md"
+        case "code": "~/project/scripts/sync_rows.py"
+        case "image": "~/project/output/screens/home@2x.png"
+        case "other": "~/project/output/결과보고서.docx"
+        default: "~/project/docs/리포트/주간-진행-보고.md"
         }
     }
     var preview: LocalFilePreview {

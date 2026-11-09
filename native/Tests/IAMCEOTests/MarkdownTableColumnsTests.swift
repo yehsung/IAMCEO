@@ -9,7 +9,7 @@ final class MarkdownTableColumnsTests: XCTestCase {
         return widths
     }
 
-    /// The Aingo decision card: five columns, one very wide, on an iPhone card (~329pt). Before the fix the floors were
+    /// A wide decision card: five columns, one very wide, on an iPhone card (~329pt). Before the fix the floors were
     /// added on top of the proportional split and the table came out ~40pt wider than the screen.
     func testWideFiveColumnTableNeverExceedsPhoneWidth() {
         let widths = assertFits([140, 460, 300, 200, 110], available: 329)

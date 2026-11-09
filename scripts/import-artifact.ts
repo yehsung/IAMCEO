@@ -1,4 +1,4 @@
-// 기존 운영판(아티팩트) 덤프 JSON → 프로젝트. 필드 뜻은 orchestra 스킬 §8-2.
+// 기존 운영판(아티팩트) 덤프 JSON → 프로젝트. 아래 입력 타입이 가져오기 필드 형식을 정의한다.
 // 어떤 세션도 띄우거나 깨우지 않는다: runnerEnabled=false, 직원은 칸 없는 offline.
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";

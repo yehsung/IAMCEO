@@ -64,16 +64,16 @@ describe("짝 맺기 코드", () => {
   });
 
   test("Tailscale IP 마다 MagicDNS 이름 주소를 앞에 붙이고, 못 찾으면 IP 만 남긴다", async () => {
-    const reverse = async (ip: string) => (ip === "100.92.29.67" ? ["mac-mini.tail6b5aa2.ts.net."] : []);
-    expect(await withMagicDnsNames(["http://100.92.29.67:7878"], reverse)).toEqual(["http://mac-mini.tail6b5aa2.ts.net:7878", "http://100.92.29.67:7878"]);
+    const reverse = async (ip: string) => (ip === "100.64.0.7" ? ["sample-mac.tail0000.ts.net."] : []);
+    expect(await withMagicDnsNames(["http://100.64.0.7:7878"], reverse)).toEqual(["http://sample-mac.tail0000.ts.net:7878", "http://100.64.0.7:7878"]);
     expect(await withMagicDnsNames(["http://100.64.0.9:7878"], reverse)).toEqual(["http://100.64.0.9:7878"]);
     const failing = async () => { throw new Error("no resolver"); };
     expect(await withMagicDnsNames(["http://100.64.0.10:7878"], failing)).toEqual(["http://100.64.0.10:7878"]);
   });
 
   test("Tailscale 주소만 고른다", () => {
-    expect(tailnetUrls(["http://127.0.0.1:7878", "http://100.92.29.67:7878", "http://192.168.0.4:7878", "http://[fd7a:115c:a1e0::1]:7878", "http://100.200.0.1:7878"]))
-      .toEqual(["http://100.92.29.67:7878", "http://[fd7a:115c:a1e0::1]:7878"]);
+    expect(tailnetUrls(["http://127.0.0.1:7878", "http://100.64.0.7:7878", "http://192.168.0.4:7878", "http://[fd7a:115c:a1e0::1]:7878", "http://100.200.0.1:7878"]))
+      .toEqual(["http://100.64.0.7:7878", "http://[fd7a:115c:a1e0::1]:7878"]);
   });
 });
 

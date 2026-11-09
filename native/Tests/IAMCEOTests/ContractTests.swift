@@ -36,12 +36,12 @@ final class ContractTests: XCTestCase {
         XCTAssertNoThrow(try ServerEndpoint("http://127.0.0.1:8787"))
         XCTAssertNoThrow(try ServerEndpoint("http://localhost:8787/"))
         // Tailscale addresses are WireGuard-encrypted and tailnet-only, so plain HTTP is allowed there.
-        XCTAssertNoThrow(try ServerEndpoint("http://100.92.29.67:7878"))
+        XCTAssertNoThrow(try ServerEndpoint("http://100.64.0.7:7878"))
         XCTAssertThrowsError(try ServerEndpoint("http://192.168.0.4:7878"))
         XCTAssertThrowsError(try ServerEndpoint("http://100.200.0.1:7878"))
         XCTAssertNoThrow(try ServerEndpoint("https://mac.tailnet.ts.net"))
         // MagicDNS names are tailnet-only and WireGuard-encrypted, like 100.x (QR pairing uses them).
-        XCTAssertNoThrow(try ServerEndpoint("http://mac-mini.tail6b5aa2.ts.net:7878"))
+        XCTAssertNoThrow(try ServerEndpoint("http://sample-mac.tail0000.ts.net:7878"))
         for invalid in ["http://ts.net", "http://example.com", "https://token@host", "https://host?token=secret", "file:///tmp", "https://host/path"] {
             XCTAssertThrowsError(try ServerEndpoint(invalid), invalid)
         }
@@ -117,25 +117,25 @@ final class ContractTests: XCTestCase {
 
 
     func testPairingLinkRoundTripAndRejectsForeignAddresses() throws {
-        let link = PairingLink(code: "AB23CD45", urls: [URL(string: "http://100.92.29.67:7878")!])
+        let link = PairingLink(code: "AB23CD45", urls: [URL(string: "http://100.64.0.7:7878")!])
         XCTAssertEqual(link.url.scheme, "iamceo")
         XCTAssertEqual(PairingLink(url: link.url), link)
         XCTAssertFalse(link.url.absoluteString.contains("accessCode"))
         // A QR that points somewhere outside the tailnet is ignored, so a forged code cannot send the phone elsewhere.
         XCTAssertNil(PairingLink(url: URL(string: "iamceo://pair?c=AB23CD45&u=http%3A%2F%2Fevil.example.com")!))
-        XCTAssertNil(PairingLink(url: URL(string: "iamceo://pair?u=http%3A%2F%2F100.92.29.67%3A7878")!))
-        XCTAssertNil(PairingLink(url: URL(string: "https://pair?c=AB23CD45&u=http%3A%2F%2F100.92.29.67%3A7878")!))
+        XCTAssertNil(PairingLink(url: URL(string: "iamceo://pair?u=http%3A%2F%2F100.64.0.7%3A7878")!))
+        XCTAssertNil(PairingLink(url: URL(string: "https://pair?c=AB23CD45&u=http%3A%2F%2F100.64.0.7%3A7878")!))
         XCTAssertTrue(Tailnet.isTailnetHost("100.64.0.1"))
         XCTAssertTrue(Tailnet.isTailnetHost("[fd7a:115c:a1e0::1]"))
         XCTAssertFalse(Tailnet.isTailnetHost("100.128.0.1"))
         XCTAssertFalse(Tailnet.isTailnetHost("10.0.0.1"))
-        XCTAssertTrue(Tailnet.isTailnetHost("mac-mini.tail6b5aa2.ts.net"))
+        XCTAssertTrue(Tailnet.isTailnetHost("sample-mac.tail0000.ts.net"))
         XCTAssertFalse(Tailnet.isTailnetHost("ts.net"))
         XCTAssertFalse(Tailnet.isTailnetHost("evil-ts.net"))
     }
 
     @MainActor func testPairingQRRenders() throws {
-        let link = PairingLink(code: "AB23CD45", urls: [URL(string: "http://mac-mini.tail6b5aa2.ts.net:7878")!])
+        let link = PairingLink(code: "AB23CD45", urls: [URL(string: "http://sample-mac.tail0000.ts.net:7878")!])
         let image = try XCTUnwrap(QRCodeImage.render(link.url.absoluteString))
         XCTAssertGreaterThan(image.width, 200)
     }

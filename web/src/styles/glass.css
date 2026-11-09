@@ -1,4 +1,4 @@
-/* 유리 재질. 원본: aing-check 랜딩 app/globals.css · docs/v3/glass-api.md. 값은 고치지 않고 그대로 옮겼다(달라진 곳은 주석).
+/* 유리 재질. 원본: 디자인 시안의 유리 재질 값. 값은 고치지 않고 그대로 옮겼다(달라진 곳은 주석).
    규칙
    · 유리 판 뒤에는 늘 빛이 있어야 한다(AuroraField + LocalLight 1–2개).
    · 글 많은 판은 tint(.glass-tint), 굴절은 화면당 판 3개까지(상단 탭 물방울 · 입력칸).

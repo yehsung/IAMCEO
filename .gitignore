@@ -2,16 +2,44 @@ node_modules/
 dist/
 .DS_Store
 *.log
+/.tmp/
 tests/.tmp/
 .handoff/
 
 .runtime/
 native/.build/
 native/build/
+native/.swiftpm/
 native/*.xcodeproj/
 native/DerivedData*/
+xcuserdata/
+*.xcarchive
+*.ipa
+
+# secrets and local data — never commit
+.env
+.env.*
+*.p8
+*.p12
+*.pem
+apns.json
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# test and tool output
+test-results/
+playwright-report/
+coverage/
+
+# editors and local agent settings
+.vscode/
+.idea/
+.claude/settings.local.json
+.codex/
 
 # local working files (Claude/Codex orchestration, generated images)
-.pumasi/
-.imagen/
-images/
+/.pumasi/
+/.imagen/
+/images/

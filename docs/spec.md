@@ -1,10 +1,10 @@
 # IAMCEO 구현 계약
 
-현재 소스의 API와 실행 규칙을 설명한다. 라이브는 2026년 11월 7일 운영자 승인으로 core 실행기로 전환했다. 소스 빌드는 라이브 배포를 뜻하지 않으며, 서버·DB 변경은 백업 뒤 운영자 승인으로만 배포한다.
+현재 소스의 API와 실행 규칙을 설명한다. 서버·DB 변경을 배포할 때는 데이터를 먼저 백업한다.
 
 IAMCEO는 **소스 공개형**이며 Sustainable Use License 1.0 + IAMCEO 추가 허락을 따른다. [LICENSE](../LICENSE)와 [라이선스 설명](LICENSING.ko.md)을 본다.
 
-공통 타입은 `shared/types.ts`, 실행기 계약은 `server/runner/types.ts`, core protocol은 upstream generation 1이다. 아키텍처 개요는 [architecture.md](architecture.md), 고정 core 출처는 [vendor 문서](../vendor/herdr-core/README.md)를 본다. `docs/herdr-schema.json`과 herdr/headless 어댑터는 과거 연동의 호환·회귀 자료이며 새 제품 실행의 기준이 아니다.
+공통 타입은 `shared/types.ts`, 실행기 계약은 `server/runner/types.ts`, core protocol은 upstream generation 1이다. 아키텍처 개요는 [architecture.md](architecture.md), 고정 core 출처는 [vendor 문서](../vendor/herdr-core/README.md)를 본다. herdr/headless 어댑터는 과거 연동의 호환·회귀 자료이며 새 제품 실행의 기준이 아니다.
 
 용어는 다음 뜻으로 쓴다. `lease`는 시간 제한이 있는 직접 조작권, `operation receipt`는 작업 ID별 처리 결과다. `CAS`는 읽었던 변경 버전과 현재 버전이 같을 때만 저장하는 방식이다. `unknown`은 결과를 확인할 수 없다는 뜻이며 실패나 재전송 허가가 아니다. `fresh exact`는 현재 세션에서 최근에 정확히 측정한 값, `wake`는 세션을 깨워 전달할 업무다.
 
@@ -43,12 +43,12 @@ MCP stdio ── iamceo mcp /agent/* ──┘             │
 | `web/`, `shared/types.ts`, `shared/artifact-kit.ts` | React, 공통 도메인 타입·아티팩트 문서 조립 |
 | `vendor/herdr-core/`, `scripts/setup-core.ts` | 고정 release·라이선스·checksum·macOS 서명 검증 |
 
-`herdr.ts`, `herdr-client.ts`, `headless.ts`, `transcript.ts`는 기존 데이터·시험을 위한 호환 어댑터다. 현재 소스의 `createOrchestrator()`는 core를 조립하지만 라이브 herdr는 별도 운영 결정에 따라 유지한다. 웹은 곧 폐기할 레거시로 기능을 추가하지 않고 v1 API 호환만 유지한다. 기존 세션을 core 주소로 해석하거나 자동으로 새 CLI에 옮기지 않는다.
+`herdr.ts`, `herdr-client.ts`, `headless.ts`, `transcript.ts`는 기존 데이터·시험을 위한 호환 어댑터다. 현재 소스의 `createOrchestrator()`는 core를 조립하지만 이전 herdr 실행 방식은 호환을 위해 유지한다. 웹은 곧 폐기할 레거시로 기능을 추가하지 않고 v1 API 호환만 유지한다. 기존 세션을 core 주소로 해석하거나 자동으로 새 CLI에 옮기지 않는다.
 
 ## 2. DB
 `shared/types.ts`의 타입과 1:1. 테이블 projects, members, decisions, todos, work, messages, files, attachments, deliveries, activity(직원당 최근 500만 유지), settings(kv). JSON 필드(options, images, attachments)는 TEXT. `project_settings_v4` 는 프로젝트별 설정을 전체 설정으로 합칠 때 옛 값을 남겨 둔 표다(마이그레이션만 읽는다. 저장한 전역 권한과 프로젝트 값 중 가장 엄격한 것을 적고 바뀌면 대표에게 알린다. 프로젝트 모델이 하나로 모이면 직급 기본값의 빈 칸으로 올리고, 저장된 값과 다르면 직원별 지정으로 남긴 뒤 알린다). `files.html` 은 아티팩트 원본(FileDoc 에 싣지 않는다), `members.applied_config` 는 세션에 실제로 들어간 설정이다. `members.adopted_info` 는 편입 표시(JSON, `turnedOnRunner`)다. 판 정리: `decisions.close_kind`(decided·obsolete, AI 가 닫았을 때만)·`close_reason`·`close_quote`·`closed_by`·`closed_at`, `todos.outcome`(done·dropped)·`close_reason`·`closed_by`·`updated_at`, `projects.board_tidied_at`(마지막 판 정리). 멤버 `token`(MCP 인증, 화면에 안 나감) 컬럼 포함. id는 접두어+짧은 난수(`p_`, `m_`, `d_`, `t_`, `w_`, `msg_`, `f_`, `a_`, `dl_`). 시각은 ISO UTC. 첫 실행 때 본사 프로젝트(`id='hq'`, name '본사', cwd=홈, runnerEnabled=true)를 만든다.
 
-`projects.chief_cli`는 총괄 제공자 기본값, `members.cli`는 멤버 제공자다. `members.session_generation`과 `member_session_history`는 CLI/backend/native session/pane/적용 설정·교체 이유·시각을 보관한다. native sessionId와 core paneId는 별개이며 Codex sessionId는 모르면 null이다. 이 소스의 새 실행 backend는 core이고 기존 backend 값은 이력·명시적 전환 판단에 남긴다. 라이브 backend를 자동 변경하지 않는다. lifecycle/execution journal, terminal lease, operation receipt, domain revision, delivery recovery/dispatch, member context, push outbox·120초 보고 그룹도 DB에 영속화한다.
+`projects.chief_cli`는 총괄 제공자 기본값, `members.cli`는 멤버 제공자다. `members.session_generation`과 `member_session_history`는 CLI/backend/native session/pane/적용 설정·교체 이유·시각을 보관한다. native sessionId와 core paneId는 별개이며 Codex sessionId는 모르면 null이다. 이 소스의 새 실행 backend는 core이고 기존 backend 값은 이력·명시적 전환 판단에 남긴다. 실행 중인 backend를 자동 변경하지 않는다. lifecycle/execution journal, terminal lease, operation receipt, domain revision, delivery recovery/dispatch, member context, push outbox·120초 보고 그룹도 DB에 영속화한다.
 
 기존 DB의 버전을 올리기 전에 `VACUUM INTO`로 `<db>.pre-v<version>-<time>-<random>.bak`을 만들고 mode 600을 건다. committed WAL도 포함하는 독립 SQLite snapshot이며 백업 실패 시 마이그레이션을 중단한다. 원본의 대화·업무·토큰을 비우거나 새 DB로 바꾸지 않는다.
 
@@ -86,7 +86,7 @@ MCP stdio ── iamceo mcp /agent/* ──┘             │
 - `/api/members/:id/approval`의 fingerprint 승인, `/api/herdr/*`, adopt/release/reopen-with-tools는 과거 herdr 연동의 호환 경로다. core는 구조화된 승인 창 파싱·자동 선택·기존 외부 칸 편입을 구현하지 않는다
 - `POST /api/members/:id/fresh-session`은 같은 제공자의 새 세션으로 명시적으로 인계한다. 작업 중·승인 대기·불확실한 전달·직접 관리하는 세션은 거부한다. 잃어버린 Codex 세션과 기존 실행기 멤버를 복구하는 경로이며, 기존 실행기 터미널은 건드리지 않는다. 멤버 기록을 유지하고 세션 이력·토큰을 회전한다.
 - `POST /api/members/:id/sleep`(`{force?}` 는 대표가 '그래도 재우기'를 눌렀을 때만) · `POST /api/members/:id/resume|compact`(resume 은 실행이 꺼진 프로젝트면 409) · `POST /api/members/:id/interrupt` · `POST /api/members/:id/close`(직접 띄운 세션만)
-- `PUT /api/settings`(SettingsPatch) → Settings. `ranks`·`codexRanks`는 고친 칸만 보내도 된다. `ranks`는 Claude, `codexRanks`는 Codex의 manager/lead/staff별 `{model,effort}` 기본값이다. 직원별 지정이 먼저이며 null이면 해당 CLI 자체 기본값을 쓴다. Codex 기본값은 모두 null이고 effort는 선택한 모델의 `/api/models` efforts 목록으로 검증한다. 모델이 기본값이거나 efforts가 비어 있으면 제공자 기본 목록(Claude low/medium/high/xhigh/max, Codex minimal/low/medium/high/xhigh)을 쓴다. 캐시에 새 effort가 추가되면 같은 문자열을 저장할 수 있다. effort만 고치는 PATCH/PUT도 저장된 모델로 검증한다. 직급 model만 바꾸어 기존 effort가 새 목록에서 빠지면 null로 비우며 응답의 `resetEfforts`에 `codexRanks.lead.effort` 같은 필드 경로를 남긴다(v2는 `settings.resetEfforts`). 이 배열은 응답 전용이며 저장하지 않는다. Codex staff 노력은 저장만 하며 실행에 전달하지 않고, staff 모델은 `agents.default_subagent_model`로 전달한다. 필드 없는 레거시 저장은 기존 codexRanks를 유지한다. 실행 중인 턴을 중단하지 않고 기존 ranks와 같은 다음 설정 적용 경로를 따른다. 저장된 과거 backend 값과 무관하게 이 소스의 새 실행은 core이며 라이브 전환을 뜻하지 않는다. 제공자 선택은 멤버의 cli로 한다
+- `PUT /api/settings`(SettingsPatch) → Settings. `ranks`·`codexRanks`는 고친 칸만 보내도 된다. `ranks`는 Claude, `codexRanks`는 Codex의 manager/lead/staff별 `{model,effort}` 기본값이다. 직원별 지정이 먼저이며 null이면 해당 CLI 자체 기본값을 쓴다. Codex 기본값은 모두 null이고 effort는 선택한 모델의 `/api/models` efforts 목록으로 검증한다. 모델이 기본값이거나 efforts가 비어 있으면 제공자 기본 목록(Claude low/medium/high/xhigh/max, Codex minimal/low/medium/high/xhigh)을 쓴다. 캐시에 새 effort가 추가되면 같은 문자열을 저장할 수 있다. effort만 고치는 PATCH/PUT도 저장된 모델로 검증한다. 직급 model만 바꾸어 기존 effort가 새 목록에서 빠지면 null로 비우며 응답의 `resetEfforts`에 `codexRanks.lead.effort` 같은 필드 경로를 남긴다(v2는 `settings.resetEfforts`). 이 배열은 응답 전용이며 저장하지 않는다. Codex staff 노력은 저장만 하며 실행에 전달하지 않고, staff 모델은 `agents.default_subagent_model`로 전달한다. 필드 없는 레거시 저장은 기존 codexRanks를 유지한다. 실행 중인 턴을 중단하지 않고 기존 ranks와 같은 다음 설정 적용 경로를 따른다. 저장된 과거 backend 값과 무관하게 이 소스의 새 실행은 core다. 제공자 선택은 멤버의 cli로 한다
 - `GET /files/<attachment id>/<name>` 첨부(인증: 헤더 또는 첨부 쿠키. `<img>`·`<video>`·`<audio>` 는 헤더를 못 붙이므로 `POST /api/files-session` 이 주는 쿠키(`iamceo_files_<포트>`, `Path=/files`, HttpOnly, SameSite=Strict, 접속 코드에서 파생해 `/api` 에 통하지 않음)로 받는다. `?t=` 는 받지 않는다. `DELETE /api/files-session` 이 쿠키를 지운다. 래스터 이미지·영상·오디오만 inline, html·svg·xml 을 포함한 나머지는 attachment. `no-store`, `no-referrer`. 화면의 내려받기는 헤더로 받아 저장한다), `WS /ws?t=<접속 코드>`
 접근: 설정된 host 에만 listen(기본 127.0.0.1 + Tailscale IP가 있으면 그 주소. `hosts`를 안 적었으면 Tailscale 이 늦게 올라와도 30초 안에 그 주소를 연다). 요청 IP가 127.0.0.1·::1·100.64.0.0/10·fd7a:115c:a1e0::/48 이외면 403(`hosts`에 LAN을 넣으면 그 대역 허용, `iamceo setup --hosts lan`). 화면 파일(HTML·JS)도 같은 검사를 거친다. 비교는 상수 시간. `Origin`이 있으면 Host 와 같아야 한다. Host 는 IP·localhost·설정한 hosts·점 없는 이름·`.local`·`.ts.net` 만 받는다(DNS 리바인딩 차단). 페이지에는 CSP(`script-src 'self'`, `img-src 'self' data: blob:`, `frame-src 'self' blob:`)를 건다. WS 는 15초마다 `ping` 을 보내고, 화면은 45초 조용하면 소켓을 새로 잇는다.
 
@@ -150,7 +150,7 @@ history는 snapshot과 별도 캐시다. ID 중복 제거·진행 중 이벤트/
 
 `POST /api/deliveries/:id/recovery` body는 `{operationId:"UUID",expectedVersion:<양의 정수>,action:"recheck"|"retry_with_risk"|"stop_retry"}`다. retry_with_risk만 `acceptDuplicateRisk:true`가 필수이고 다른 action에는 금지다. recheck/retry는 202와 `{operationId,deliveryId,outcome:"check_scheduled"|"retry_scheduled",committedVersion}`, stop은 200과 `outcome:"stopped"`다. 같은 요청은 저장 결과를 재현하고 다른 요청 ID 재사용/상태 변경은 409, 없는/보관 대상 404, 미지원 501이다. 202는 예약 접수이며 수신 성공이 아니다. 허용 행동은 서버 allowedActions를 따르고 위험 동의도 lease/초안/원래 RPC/세션 안전 조건을 우회하지 않는다. stop은 추가 전달 포기이며 과거 수신·업무 완료 판정이 아니다. `confirm_received` API/받음 확정 버튼은 없다.
 
-#### 대기 사유와 정체 알림 (UX-T1)
+#### 대기 사유와 정체 알림
 
 수신자 없는 옛 실패 정리 (unassigned-fail):
 
@@ -300,7 +300,7 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 - team_add는 유일한 핸들·이름과 역할·규칙·선택한 CLI로 독립 core 세션을 만든다. team_assign은 대기열과 병렬 선호를 다룬다. Claude는 Ultracode 명령 응답을 확인하고 Codex는 native subagent 기능과 다음 과제의 선호 지시를 쓴다. 실제 병렬 실행 수를 보장하지 않는다.
 - 잠재우기·종료는 명시적 액션이다. 일하는 턴·열린 결재·큐를 무시하는 force는 대표가 선택했을 때만 쓴다. core는 소유권이 확인된 terminal만 종료하고 idle 초안·알 수 없는 composer를 지우지 않는다.
 - 서버 재시작은 기존 core holder를 보존하고 멤버·프로젝트·CLI 라벨로 재결합한다. 단절이나 start timeout만으로 동일 CLI를 다시 띄우지 않는다. 기존 herdr/headless 세션은 원본을 보존하고 `legacy_session`으로 보류한다. 자동 backend 전환이나 이전 프로세스 일괄 종료를 하지 않는다.
-- 이 소스의 backend 조립은 core다. 라이브 herdr 유지·전환 승인은 [운영 모델](operating-model.md)을 따른다. 제공자 기본은 Claude, 프로젝트의 chiefCli와 각 Member.cli는 독립적으로 저장된다. 같은 멤버의 제공자를 바꾸어도 멤버 id·역할·업무·대화·결재·파일은 유지한다.
+- 이 소스의 backend 조립은 core다. 운영 절차는 [운영 모델](operating-model.md)을 따른다. 제공자 기본은 Claude, 프로젝트의 chiefCli와 각 Member.cli는 독립적으로 저장된다. 같은 멤버의 제공자를 바꾸어도 멤버 id·역할·업무·대화·결재·파일은 유지한다.
 - 제공자·살아 있는 세션의 모델/effort 변경은 working·blocked·처리 중·불확실한 전달이 있으면 409다. 새 CLI 인자를 먼저 검증하고, 이전 종료 확인 뒤 `member_session_history`를 남기고 MCP 토큰·session_generation을 회전한다. 이전 종료 실패면 제공자와 토큰을 유지하고, 이후 새 시작 실패면 오류로 남긴다.
 - 같은 제공자의 설정 변경은 Claude와 Codex 모두 native session ID를 보존해 resume한다. native ID를 모르거나 resume이 실패하면 즉시 새 세션을 만들지 않고 설정 적용을 다음 자연 기동으로 보류한다. 보류 설정과 실패 여부는 DB에 남아 서버 재시작으로 재기동을 반복하지 않는다. 실패 시 미확정 입력·종료 검증을 우회해 옛 설정으로 무조건 전달하지 않는다. 명시적 새 세션/제공자 변경은 별도의 새 세션 경로다. 역할·현재 일·다음 일·프로젝트 상황과 board 확인 안내를 넣는다. 같은 대화 문맥·숨은 추론을 다른 제공자에게 옮기는 기능은 없다.
 - 모델은 멤버별 덮어쓰기, 적용 가능한 직급 값, CLI 기본 순이다. Claude용 직급 모델·staff 설정을 Codex에 자동 상속하지 않는다. 설정은 실행 인자로 적용하고 사용자 전역 CLI 기본값을 수정하지 않는다. null 모델·effort는 기본으로 돌아간다.
@@ -341,8 +341,8 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 - 최초 메시지 attempt는 호스트 namespace·불변 ID·대상·본문·첨부·초안 revision과 함께 영속화한다. 응답 유실·재시작 뒤 `GET /api/messages/:id`로 접수를 확인한다. 늦은 업로드/POST가 다른 호스트·새 초안을 덮거나 되살리지 않는다. 업로드 완료 attachment ID도 복원한다.
 - 설정은 편집 base와 dirty 필드를 보존하고 CAS 충돌에서 재검토한다. 묶음 결재는 자기 요청이 수락된 카드의 메모만 소비한다. todo는 불명 결과를 조회하며 최신 revision을 보호한다. terminal `unknown`은 재생하지 않고 제출 뒤 추가 편집도 보존한다.
 - terminal은 plain screen·lease 아래 직접 input/key다. 전체 VT 스트림 렌더러는 아니다. 확인된 승인, setup/status_unknown, 마지막 관측·오류, 마지막 보고 시각, 미수집 subagent를 구분한다. 미수집을 0명으로 단정하지 않는다.
-- macOS 로컬 시작은 명시적 선택에만 실행하며 다른 서비스·포트·인증 오류를 덮어쓰지 않는다. 빌드는 서비스 등록·실행·라이브 전환이 아니다. macOS는 로컬 서비스용 App Sandbox 비활성, iOS는 플랫폼 sandbox다.
-- 웹 아티팩트는 §3.2의 수동 실행 sandbox다. 네이티브 아티팩트의 서버 계약은 인라인 JavaScript를 허용하는 비영속 WKWebView다. 서버 render 응답의 sandbox CSP를 유지하고 외부 요청·쿠키·서버 API·직접 탐색을 차단한다. 링크는 앱이 목적지를 확인한 뒤 연다. 앱 표시 전환은 UX-T8에서 연결한다. Liquid Glass는 지원 OS에서 쓰고 이전 OS는 material fallback이다.
+- macOS 로컬 시작은 명시적 선택에만 실행하며 다른 서비스·포트·인증 오류를 덮어쓰지 않는다. 빌드는 서비스 등록·실행이 아니다. macOS는 로컬 서비스용 App Sandbox 비활성, iOS는 플랫폼 sandbox다.
+- 웹 아티팩트는 §3.2의 수동 실행 sandbox다. 네이티브 아티팩트의 서버 계약은 인라인 JavaScript를 허용하는 비영속 WKWebView다. 서버 render 응답의 sandbox CSP를 유지하고 외부 요청·쿠키·서버 API·직접 탐색을 차단한다. 링크는 앱이 목적지를 확인한 뒤 연다. Liquid Glass는 지원 OS에서 쓰고 이전 OS는 material fallback이다.
 
 격리 자동 시험의 통과, 실제 CLI 의미 검증, Mac/iPhone 화면·스크롤 위치·접근성, APNs 실기기 sandbox/production, Tailscale·잠금·24시간 병렬 인수는 각각 다른 증거다. 격리 시험 명령과 운영 절차는 [운영 모델](operating-model.md), 서명·앱 빌드는 [native README](../native/README.md)를 본다.
 
@@ -373,19 +373,19 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 clone은 `<IAMCEO_HOME>/clone-staging/<jobId>`(0700)에서 수행한다. 대상 부모를 다시 검사하고 이름이 없을 때만 rename한다. EXDEV면 대상 부모 아래 `.iamceo-clone-<jobId>`(0700)에서 다시 받은 후 rename하며 다시 EXDEV면 안내하고 실패한다. 사용자 대상 경로는 실패 정리하지 않는다. 정리는 소유 identity·lstat·realpath를 확인한 임시 폴더에만 적용하며 quarantine 이동 뒤 identity를 재확인한다. 시작 여유 공간은 5 GiB 이상이어야 하며, 실행 중 2초마다 및 게시 전에 크기를 확인해 2 GiB 초과 시 프로세스 그룹을 중단한다. 오류는 `저장소가 너무 큽니다(2GB 초과)`다. 전체 이력을 받으며 서브모듈 재귀는 하지 않는다. 상속 환경의 Git 제어·추적 변수를 제거하고 `-c protocol.file.allow=never -c core.hooksPath=/dev/null`을 사용한다. 완료/실패 기록만 최대 50개·1시간 보관하며 만료 ID는 404다.
 
 ### 알려진 한계: 폴더·GitHub 가져오기의 경로 경쟁 (2026-11-07 결정)
-폴더 만들기와 clone 게시는 경로를 realpath·lstat 로 앞뒤 검사한다. 하지만 검사와 mkdir/rename/정리 사이의 짧은 경쟁(TOCTOU)은 Bun/Node 파일 API 로 완전히 닫을 수 없다(openat·RENAME_NOREPLACE 류가 없음). 이 경쟁을 이용하려면 서버 사용자의 홈 폴더를 이미 바꿀 수 있어야 하고, 그 권한이면 이 기능 없이도 같은 일을 할 수 있다. 그래서 위험을 받아들인다. 접속 코드만 가진 원격 요청(홈 밖 경로, `..`, 심볼릭 링크, 옵션·명령 주입, 다른 호스트)은 막는다. 근거: .pumasi/specs/review-11-findings.md.
+폴더 만들기와 clone 게시는 경로를 realpath·lstat 로 앞뒤 검사한다. 하지만 검사와 mkdir/rename/정리 사이의 짧은 경쟁(TOCTOU)은 Bun/Node 파일 API 로 완전히 닫을 수 없다(openat·RENAME_NOREPLACE 류가 없음). 이 경쟁을 이용하려면 서버 사용자의 홈 폴더를 이미 바꿀 수 있어야 하고, 그 권한이면 이 기능 없이도 같은 일을 할 수 있다. 그래서 위험을 받아들인다. 접속 코드만 가진 원격 요청(홈 밖 경로, `..`, 심볼릭 링크, 옵션·명령 주입, 다른 호스트)은 막는다.
 
 ### 알려진 한계: 로컬 파일 열람·자료 등록의 경로 경쟁 (2026-11-08 결정)
 로컬 파일 API는 한 번 얻은 canonical 경로에 정책 검사와 stat을 함께 적용하고, 열린 FD의 fstat과 dev/ino가 같을 때만 읽는다. 일반 파일의 nlink>1은 읽기와 첨부 복사 전후에 403("다른 이름으로 연결된 파일(하드 링크)은 열지 않습니다")으로 거부한다. 직원 도구와 공통 비밀 파일·위치 정책을 쓰며 실제 config.home/IAMCEO_HOME 및 Claude/Codex 홈 설정의 canonical 경로 전체도 금지한다. SVG 자료는 이미지 원본을 첨부한다.
-상위 디렉터리를 검사와 open 사이뿐 아니라 realpath·정책 검사와 stat 사이에 바꾸는 경쟁도 남는다. Node/Bun에 디렉터리 FD 기준 openat이 없어 상위 경로를 고정할 수 없다. 필요한 권한은 경로의 교체 가능한 상위 디렉터리에 대한 로컬 쓰기 권한이며, 공유 작업 폴더나 ACL을 통해 이 권한을 가진 다른 사용자도 포함한다. 서버와 같은 UID나 비밀 파일의 직접 읽기 권한이 필수인 것은 아니다. 이 한계는 받아들이되, 서로 다른 realpath 관측의 inode와 정책 판단을 섞는 경우는 거절한다. 근거: .pumasi/specs/review-15-findings.md, .pumasi/specs/review-16-findings.md 및 감독자 결정.
+상위 디렉터리를 검사와 open 사이뿐 아니라 realpath·정책 검사와 stat 사이에 바꾸는 경쟁도 남는다. Node/Bun에 디렉터리 FD 기준 openat이 없어 상위 경로를 고정할 수 없다. 필요한 권한은 경로의 교체 가능한 상위 디렉터리에 대한 로컬 쓰기 권한이며, 공유 작업 폴더나 ACL을 통해 이 권한을 가진 다른 사용자도 포함한다. 서버와 같은 UID나 비밀 파일의 직접 읽기 권한이 필수인 것은 아니다. 이 한계는 받아들이되, 서로 다른 realpath 관측의 inode와 정책 판단을 섞는 경우는 거절한다.
 
-### UX-T1 보고 보완 범위
+### 보고 보완 범위
 
 core 업무 턴의 최종 결과가 없으면 기존 업무를 다시 실행하지 않는 보고 보완을 한 번 요청한다. 보완을 포함한 턴도 완료·답변·막힘·질문·열린 결재 등 유효 결과 없이 끝나면 execution journal의 report notice claim으로 '결과 보고 누락' 시스템 메시지와 error activity를 한 번 남긴다. 추가 보완/업무 재실행은 자동으로 만들지 않는다. 보완의 오류·중단 종료도 같은 누락 확인을 한다. 기존 notice 응답의 하위 호환 추가 필드 `deliveryNotices.reportNotices`는 `{kind:"missing_report",runId,memberId,messageId,createdAt,title:"결과 보고 누락"}` 목록이다. 이후 해당 직원이 유효한 결과·막힘·질문을 남기거나 열린 결재로 기다리면 활성 목록에서 빠지고 시스템 메시지는 이력으로 남는다. 총괄·본사 AI의 직원 보고 확인 턴은 보완 대상에서 제외하고, wake=true 대표 메시지·결재 답으로 시작한 턴은 계속 검사한다. 직원의 실제 배정 업무는 기존 최종 보고 의무를 유지한다.
 
 누락 생성과 활성 목록은 `Store.hasExecutionReport`의 같은 판정을 사용한다. 해당 직원에게 열린 결재가 있으면 생성 시각과 관계없이 대표 답 대기로 인정한다(보완 턴의 `알림` 보고가 기존 열린 결재를 가리킬 때도 포함). 완료·답변·막힘·질문은 해당 실행뿐 아니라 보완 입력이 가리키는 같은 직원·프로젝트의 원 실행 및 같은 전달을 재사용한 실행의 시작부터 확인한다. 원 업무 이전 보고나 다른 직원의 보고·결재는 근거가 아니다. `진행`·`알림`만 있고 유효 보고·열린 결재가 없으면 기존 누락 검사를 유지한다. 기존 `missing_report`도 조회할 때 재평가해 활성 목록에서 해제하며 과거 원문은 수정·삭제하지 않는다. 새 대표용 누락 메시지·보완 activity에는 실행 UUID를 표시하지 않고 journal·notice 식별자·activity event ID 및 직원에게 전달하는 원 실행 참조에만 유지한다.
 
-### UX-T2 추가 계약 (서버 API 2차·앱 모델)
+### 추가 계약 (서버 API 2차·앱 모델)
 
 - `ProjectSummary.needsCount`: 열린 결재 + 안 끝난 대표 할 일 + status=blocked이고 blockedReason=permission/selection인 직원 수 + status=error 직원 수 + 전달 notice의 phase=needs_owner 건수. 항목별 합이며 한 직원에게 결재와 전달 확인이 함께 있으면 각각 센다. `needsDanger`는 오류 직원 수가 1 이상인지를 뜻한다. 기존 inboxCount(결재+할 일), blockedCount(permission만), errorCount는 유지한다. needs_owner는 복구 엔진의 동일 projection을 사용하므로 가상 옛 실패·정체 notice도 포함한다.
 - `GET /api/projects/:id/state?lite=1`, `GET /api/sync?projectId=:id&lite=1`: files에서 body를 생략하며 HTML 원본은 원래 목록에 없다. 나머지 메타데이터·첨부 목록은 보존한다. lite 생략/0은 기존 전체 응답이다. `/ws?v=2&lite=1`(또는 v1 `/ws?lite=1`)은 같은 원칙으로 file 사건에서 body를 생략하며 epoch/seq·heartbeat·인증 경계는 같다. WebSocket 주소에는 접속 코드를 넣지 않고 헤더를 사용한다.

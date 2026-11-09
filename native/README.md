@@ -1,24 +1,24 @@
 # IAMCEO native
 
-SwiftUI macOS/iOS client for the IAMCEO Bun daemon. The daemon owns domain state, CLI processes and orchestration; the app owns one network synchronization coordinator, not a second model orchestrator. Live operation moved to the core runner on November 7, 2026, with the owner's approval. Server and database changes reach the live service only through an owner-approved deploy after a backup; building this source does not change it.
+SwiftUI macOS/iOS client for the IAMCEO Bun daemon. The daemon owns domain state, CLI processes and orchestration; the app owns one network synchronization coordinator, not a second model orchestrator.
 
 IAMCEO is **source-available**, under Sustainable Use License 1.0 + IAMCEO Additional Permissions. See [LICENSE](../LICENSE) and [the Korean explanation](../docs/LICENSING.ko.md). The web client is legacy, kept temporarily and scheduled for removal; until then it receives API compatibility maintenance, with no new features.
 
 ## Development and isolated validation
 
-Requires Xcode 16+ / Swift 6, macOS 14+ or iOS 17+. System controls use Liquid Glass on supported OS releases and material fallbacks on older systems. Custom workspace cards retain the existing translucent dark violet design.
+Requires Xcode 26 (the code uses the macOS/iOS 26 SDK), XcodeGen and Bun 1.3+. Apps run on macOS 14+ and iOS 17+. System controls use Liquid Glass on supported OS releases and material fallbacks on older systems. Custom workspace cards retain the existing translucent dark violet design.
 
-From the repository root, use the shared gates. Server tests use a temporary IAMCEO home, fake executables, dedicated fixture sockets and dynamic non-7878 ports. Individual fixtures prepare provider homes when needed. XcodeGen runs on a temporary copy with generated files and derived data outside the repository. Swift build/test run sequentially.
+From the repository root, use the package scripts. Server tests use a temporary IAMCEO home, fake executables, dedicated fixture sockets and dynamic non-7878 ports. Individual fixtures prepare provider homes when needed. XcodeGen runs on a temporary copy with generated files and derived data outside the repository. Swift build/test run sequentially.
 
 ```sh
-bash .pumasi/gates.sh ts
-bash .pumasi/regress.sh
-bash .pumasi/gates.sh swift
-# Separate unsigned macOS + iOS Simulator build gate:
-# bash .pumasi/gates.sh xcode
+bun run check:ts      # typecheck
+bun run test:server   # isolated server tests (temporary home, fake executables)
+bun run test:native   # Swift tests
+bun run build:check   # unsigned macOS + iOS Simulator builds
+bun run check         # all of the above
 ```
 
-Do not run the unfiltered Bun suite: it includes real-herdr tests. Do not use live port 7878, the real IAMCEO home/config, herdr sockets or `dist/native` for validation. Do not invoke `build:native`, `setup:core`, install or service kickstart as test gates. See [the operating runbook](../docs/operating-model.md#격리-시험-실행) for isolation requirements and commands. Build, mock tests, unsigned Simulator builds, signing and physical-device acceptance are separate evidence.
+Do not use port 7878, your real IAMCEO home/config, herdr sockets or `dist/native` for validation. Do not invoke `build:native`, `setup:core`, install or service kickstart as test gates. See [the operating runbook](../docs/operating-model.md#격리-시험-실행) for isolation requirements and commands. Build, mock tests, unsigned Simulator builds, signing and physical-device acceptance are separate evidence.
 
 For source previews, use an external scratch directory and the explicit read-only demo; it never connects to a daemon:
 
@@ -53,7 +53,7 @@ Delivery panels show automatic checking separately from owner intervention. Only
 
 ## iPhone APNs and signing
 
-The iOS target is **`com.yehsung.iamceo`**, development team **`MQ2KQK37WD`**. The owner-provided APNs key ID is **`JA65PRWDJX`**; only its absolute private file path is configured on the separate test host. Never copy key contents into the repository, app bundle, chat or logs. Server credentials live in the host’s protected `apns.json`/external p8 file, not the app. See the configuration example and operational boundary in [the runbook](../docs/operating-model.md).
+To install on your own iPhone, set the iOS bundle ID and `DEVELOPMENT_TEAM` in `native/project.yml` to your own (Push Notifications needs a paid Apple Developer account; otherwise remove the capability). Configure your own APNs key ID, team ID and the absolute path of the `.p8` file in the host’s `apns.json`. Never copy key contents into the repository, app bundle, chat or logs. Server credentials live in the host’s protected `apns.json`/external p8 file, not the app. See the configuration example and operational boundary in [the runbook](../docs/operating-model.md).
 
 `project.yml` declares Push Notifications and `Configuration/iOS.entitlements` uses `aps-environment=$(APNS_ENVIRONMENT)`. Debug `development` maps to API `sandbox`; Release `production` maps to `production`. Info `IAMCEOPushEnvironment` must match the **final signed entitlement**, including export/TestFlight changes. TestFlight uses production. No remote-notification background mode, badge permission or Mac APNs receiver is added; Mac can manage registered iPhones and retains its separate osascript notifications.
 
@@ -63,6 +63,6 @@ Completion reports group by project/member for a **fixed 120-second window from 
 
 Foreground notifications only refresh data, without banner/sound or forced navigation. A tap validates serverId, the saved event target and current membership, then applies one route after project reset. Unknown hosts require the existing connection flow, never an automatic endpoint switch. No tap automatically answers, approves, claims or inputs. Processed decisions show their current state; completion reports use around-message history and group references. Archived destinations follow the archive read flow where allowed, while a target lookup that now returns 404 is shown as unavailable. Offline taps retain a pending destination; offline disconnect reports incomplete revocation and reconciles it on reconnect.
 
-Physical-device signing/trust/Developer Mode, Apple acceptance, banner delivery and tap navigation must be tested separately for sandbox and production, including cold start, lock, multi-window, Tailscale and Wi-Fi/cellular changes. Mock HTTP/2 and Simulator success do not replace physical-device acceptance or authorize switching the live runner.
+Physical-device signing/trust/Developer Mode, Apple acceptance, banner delivery and tap navigation must be tested separately for sandbox and production, including cold start, lock, multi-window, Tailscale and Wi-Fi/cellular changes. Mock HTTP/2 and Simulator success do not replace physical-device acceptance.
 
 Artifact previews remain nonpersistent WKWebView with JavaScript/external requests disabled. The legacy web renderer has different capabilities. Exact API bodies/results, recovery safeguards, backup/restore (including the stopped-home `restore reconcile` → `restore resume` sequence) and global access-code rotation are documented in [spec.md](../docs/spec.md) and [operating-model.md](../docs/operating-model.md).

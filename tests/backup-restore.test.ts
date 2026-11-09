@@ -104,7 +104,7 @@ describe("consistent backup packages", () => {
     const key = join(f.runtime.dir, "must-not-be-read.p8");
     // A directory cannot be read as a key. Backup succeeds without inspecting it.
     fs.mkdirSync(key);
-    fs.writeFileSync(join(f.home, "apns.json"), JSON.stringify({ sandbox: { privateKeyPath: key, keyId: "JA65PRWDJX", teamId: "MQ2KQK37WD", bundleId: "com.yehsung.iamceo" } }), { mode: 0o600 });
+    fs.writeFileSync(join(f.home, "apns.json"), JSON.stringify({ sandbox: { privateKeyPath: key, keyId: "TESTKEY123", teamId: "TEAMID1234", bundleId: "com.yehsung.iamceo" } }), { mode: 0o600 });
     const snapshot = f.backup();
     expect(snapshot.manifest.configs.map((entry) => entry.path)).toEqual(["config.json", "apns.json"]);
     expect(snapshot.manifest.externalSecrets.apnsP8).toBe("separate_backup_required_not_included");

@@ -4,7 +4,7 @@ import XCTest
 
 final class LocalFileTests: XCTestCase {
     func testPathDetectionAcceptsConcreteFilesAndRejectsProseURLsAndEmails() {
-        for value in ["/Users/test/video/ad.md", "~/Downloads/영상.mp4", "docs/spec.md", "src/views", "./script", "../notes.txt", "B2_장면표_요청피피티_1107.md", "~/folder with spaces/a.md", "/Users/test/assets/logo@2x.png", "~/Downloads/report@2026.md", "./assets/logo@2x.png"] {
+        for value in ["/Users/test/video/ad.md", "~/Downloads/영상.mp4", "docs/spec.md", "src/views", "./script", "../notes.txt", "장면표_초안_1107.md", "~/folder with spaces/a.md", "/Users/test/assets/logo@2x.png", "~/Downloads/report@2026.md", "./assets/logo@2x.png"] {
             XCTAssertTrue(LocalFileLinks.isPath(value), value)
         }
         for value in ["https://example.com/a.md", "http://localhost/a/b", "www.example.com/a.md", "user@example.com", "me@host/a.md", "mailto:person@example.com", "and/or", "입력/출력", "및/또는", "CI/CD", "2026/11/08", "/", "~/", "일반 문장", "//example.com/a.md"] {
@@ -12,16 +12,16 @@ final class LocalFileTests: XCTestCase {
         }
     }
     func testMarkdownLinksInlineCodePlainTextAndPreservesExistingWebLinks() throws {
-        let result = markdownInline("복사: `B2_장면표_요청피피티_1107.md`, ~/Downloads/a.mp4. docs/spec.md https://example.com/a.md person@example.com [웹](https://example.com/path.md)")
+        let result = markdownInline("복사: `장면표_초안_1107.md`, ~/Downloads/a.mp4. docs/spec.md https://example.com/a.md person@example.com [웹](https://example.com/path.md)")
         let paths = result.runs.compactMap { $0.link.flatMap(LocalFileLinks.path) }
-        XCTAssertEqual(paths, ["B2_장면표_요청피피티_1107.md", "~/Downloads/a.mp4", "docs/spec.md"])
+        XCTAssertEqual(paths, ["장면표_초안_1107.md", "~/Downloads/a.mp4", "docs/spec.md"])
         XCTAssertTrue(result.runs.contains { $0.link?.scheme == "https" })
         let namedWeb = markdownInline("[~/Downloads/report@2026.md](https://example.com)")
         XCTAssertEqual(namedWeb.runs.compactMap { $0.link?.absoluteString }, ["https://example.com"])
         let spaces = markdownInline("`~/folder with spaces/a.md`")
         XCTAssertEqual(spaces.runs.compactMap { $0.link.flatMap(LocalFileLinks.path) }, ["~/folder with spaces/a.md"])
-        let particle = markdownInline("`B2_장면표_요청피피티_1107.md`의 블록")
-        XCTAssertEqual(particle.runs.compactMap { $0.link.flatMap(LocalFileLinks.path) }, ["B2_장면표_요청피피티_1107.md"])
+        let particle = markdownInline("`장면표_초안_1107.md`의 블록")
+        XCTAssertEqual(particle.runs.compactMap { $0.link.flatMap(LocalFileLinks.path) }, ["장면표_초안_1107.md"])
         for text in ["https://host/a.md?next=/tmp/a.md", "name@host/docs/a.md", "https://host/a.md;other=/tmp/b.md"] {
             XCTAssertTrue(markdownInline(text).runs.compactMap { $0.link.flatMap(LocalFileLinks.path) }.isEmpty, text)
         }

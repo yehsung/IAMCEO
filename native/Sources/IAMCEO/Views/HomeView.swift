@@ -27,6 +27,8 @@ struct HomeView: View {
     @State private var confirmTidy = false
     @State private var startError: String?
     @State private var completion: TodoCompletionReview?
+    /// The open request awaiting the '필요 없음' confirmation.
+    @State private var droppingTodo: Todo?
     @State private var expandedTodos: Set<String> = []
     @State private var showDoneTodos = false
     @State private var contextID = UUID()
@@ -138,6 +140,14 @@ struct HomeView: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .refreshable { await store.refresh() }
         .sheet(item: $completion) { review in TodoCompletionEditor(review: review) }
+        .confirmationDialog(droppingTodo.map { "'\($0.title)'\(objectParticle($0.title)) 필요 없음으로 정리할까요?" } ?? "",
+                            isPresented: Binding(get: { droppingTodo != nil }, set: { if !$0 { droppingTodo = nil } }),
+                            titleVisibility: .visible, presenting: droppingTodo) { todo in
+            Button("필요 없음으로 정리", role: .destructive) { dropTodo(todo) }
+            Button("취소", role: .cancel) {}
+        } message: { todo in
+            Text(todo.who.isEmpty ? "홈의 내 차례에서 빠집니다." : "\(todo.who)에게 알리고 홈의 내 차례에서 빠집니다. 다시 필요하면 다시 부탁할 것입니다.")
+        }
         .onChange(of: store.selectedProjectID) { _, _ in resetLocalState() }
         .onChange(of: store.drafts.namespace) { _, _ in resetLocalState() }
         // Any row that moves inside 내 차례 can put another todo under the pointer.
@@ -175,7 +185,7 @@ struct HomeView: View {
     /// Notes and folds belong to one project; never show them on another.
     private func resetLocalState() {
         contextID = UUID()
-        completion = nil
+        completion = nil; droppingTodo = nil
         nowExpanded = false; confirmTidy = false
         tidyNote = nil; startError = nil; todoError = nil
         expandedTodos = []; showDoneTodos = false
@@ -696,6 +706,11 @@ struct HomeView: View {
                             .lineLimit(expanded ? nil : 1)
                             .multilineTextAlignment(.leading)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                        // An open request three days or older says so, so the pile is easy to prune.
+                        if !checked, let days = Self.openDays(todo), days >= 3 {
+                            Text("\(days)일째").font(CEFont.meta).foregroundStyle(CE.ink3)
+                                .monospacedDigit().lineLimit(1).fixedSize()
+                        }
                         HomeChevron(open: expanded)
                     }
                     .padding(.leading, 2).padding(.trailing, 8).padding(.vertical, 6)
@@ -738,6 +753,19 @@ struct HomeView: View {
             HStack(spacing: 10) {
                 if !whoLine.isEmpty { Text(whoLine).lineLimit(1) }
                 if !time.isEmpty { Text(time).monospacedDigit().lineLimit(1).fixedSize() }
+                if !checked {
+                    Spacer(minLength: 8)
+                    // Not done but no longer wanted: the requester is told, and the row leaves 홈.
+                    Button { droppingTodo = todo } label: {
+                        Text("필요 없음").fontWeight(.semibold).foregroundStyle(CE.accent)
+                            .frame(minHeight: isMac ? nil : 44).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .disabled(!store.canWrite || todoBusy(todo.id))
+                    .opacity(!store.canWrite || todoBusy(todo.id) ? 0.45 : 1)
+                    .help(store.isDemo ? Self.readOnlyHelp : "하지 않았지만 이제 필요 없는 일로 정리")
+                }
             }
             .font(CEFont.secondary).foregroundStyle(CE.ink2)
         }
@@ -754,6 +782,28 @@ struct HomeView: View {
         case .conflict: ("이전 상태의 변경은 반영하지 않았습니다. 최신 내용과 정리 이유를 확인하세요.", .attention)
         case .confirmedCurrent: ("최신 상태를 확인했습니다", .neutral)
         default: nil
+        }
+    }
+
+    /// Whole days since the request, for open rows only.
+    static func openDays(_ todo: Todo, now: Date = Date()) -> Int? {
+        guard let created = parseISODate(todo.createdAt) else { return nil }
+        return Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: created), to: Calendar.current.startOfDay(for: now)).day
+    }
+
+    private func dropTodo(_ todo: Todo) {
+        guard store.canWrite, !todoBusy(todo.id) else { return }
+        let projectID = store.selectedProjectID
+        let namespace = store.drafts.namespace
+        let context = contextID
+        todoError = nil
+        Task { @MainActor in
+            let ok = await store.dropTodo(todo)
+            guard contextID == context, store.selectedProjectID == projectID, store.drafts.namespace == namespace else { return }
+            let status = store.todoWrites[todo.id]
+            if !ok && ![.sending, .checking, .conflict].contains(status) {
+                todoError = "'\(todo.title)' 정리를 반영하지 않았습니다. " + (store.errorMessage ?? "최신 상태를 확인하세요.")
+            }
         }
     }
 

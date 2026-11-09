@@ -244,7 +244,7 @@ export interface Todo {
   createdAt: string;
   /** 안 끝났으면 null. 대표가 체크하면 done. */
   outcome: TodoOutcome | null;
-  /** AI 가 todo_close 로 정리했을 때의 이유와 정리한 이. 대표가 체크했으면 null. */
+  /** todo_close 또는 대표의 필요 없음으로 정리한 이유와 정리한 이. 대표가 체크했으면 null. */
   closeReason: string | null;
   closedBy: string | null;
 }

@@ -667,6 +667,9 @@ export const MIGRATIONS: string[] = [
    ALTER TABLE delivery_stalls ADD COLUMN resolved_at TEXT;`,
   // Delivery snapshots can cross between WS, POST and GET. Persist ordering across retries/restarts.
   `ALTER TABLE messages ADD COLUMN delivery_revision INTEGER NOT NULL DEFAULT 0;`,
+  // Todo hygiene: durable passive reminder and stale-board review throttles.
+  `ALTER TABLE todos ADD COLUMN stale_notified_at TEXT;
+   ALTER TABLE projects ADD COLUMN stale_review_at TEXT;`,
 ];
 
 export function openDb(path: string): Database {

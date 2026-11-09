@@ -981,3 +981,5 @@ struct TodoCompletionRequest: Encodable, Sendable {
     var note: String? = nil
     var fileIds: [String]? = nil
 }
+
+struct TodoDropRequest: Encodable, Sendable { let reason: String? }

@@ -584,7 +584,7 @@ describe("runnerEnabled=false 와 총괄 시작", () => {
 });
 
 describe("잠재우기·다시 열기", () => {
-  test("일하는 중·열린 결재·대기열이면 거부, force 는 된다. 세션은 유지", async () => {
+  test("일하는 중·열린 결재·깨우는 대기열이면 거부, force 는 된다. 세션은 유지", async () => {
     const t = await setup();
     const w = await worker(t);
     await t.orch.assign(t.project.id, w.handle, { text: "@fake:hang @fake:silent" });
@@ -604,8 +604,8 @@ describe("잠재우기·다시 열기", () => {
     t.store.createDecision({ projectId: t.project.id, memberId: other.id, who: "영희", title: "물음" });
     await expect(t.orch.sleepMember(other.id)).rejects.toThrow("열린 결재");
     const third = await worker(t, "민수", "ms");
-    t.store.enqueue({ projectId: t.project.id, memberId: third.id, kind: "system", text: "[시스템] 사실", wake: false });
-    await expect(t.orch.sleepMember(third.id)).rejects.toBeInstanceOf(ApiError);
+    t.store.enqueue({ projectId: t.project.id, memberId: third.id, kind: "system", text: "[시스템] 새 업무", wake: true });
+    await expect(t.orch.sleepMember(third.id)).rejects.toThrow("대기열이 남아 있습니다");
   });
 
   test("잠든 직원에게 깨우는 입력이 오면 자동으로 이어서 연다. wake=false 는 깨우지 않는다", async () => {

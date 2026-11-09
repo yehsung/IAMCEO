@@ -1577,6 +1577,31 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.rows("SELECT * FROM todos WHERE project_id = ? ORDER BY created_at, rowid", projectId).map(toTodo);
   }
 
+  listStaleTodos(projectId: string, now = Date.now()): Todo[] {
+    return this.rows("SELECT * FROM todos WHERE project_id = ? AND done = 0 AND created_at < ? ORDER BY created_at, rowid",
+      projectId, new Date(now - 3 * 86_400_000).toISOString()).map(toTodo);
+  }
+
+  /** Queue and stamp atomically; no recipient means no stamp so a future lead can receive it. */
+  remindStaleTodo(todo: Todo, memberId: string, text: string, now: number): boolean {
+    return this.transaction(() => {
+      const row = this.row("SELECT done, stale_notified_at FROM todos WHERE id = ?", todo.id);
+      if (!row || row.done || row.stale_notified_at && now - Date.parse(row.stale_notified_at) < 3 * 86_400_000) return false;
+      this.enqueue({ projectId: todo.projectId, memberId, kind: "system", text, wake: false });
+      this.run("UPDATE todos SET stale_notified_at = ? WHERE id = ?", new Date(now).toISOString(), todo.id);
+      return true;
+    });
+  }
+
+  staleReviewDue(projectId: string, now: number): boolean {
+    const row = this.row("SELECT stale_review_at FROM projects WHERE id = ?", projectId);
+    return !row?.stale_review_at || now - Date.parse(row.stale_review_at) >= 86_400_000;
+  }
+
+  markStaleReview(projectId: string, at: string): void {
+    this.run("UPDATE projects SET stale_review_at = ? WHERE id = ?", at, projectId);
+  }
+
   createTodo(input: NewTodo): Todo {
     return this.transaction(() => {
       this.requireProject(input.projectId);

@@ -72,6 +72,7 @@ MCP stdio ── iamceo mcp /agent/* ──┘             │
 - `GET /api/projects/archived` → Project[] · `PATCH archived:true`는 working·blocked·열린 결재·미완료 할 일·안전하게 종료할 수 없는 세션이 있으면 거부한다. 종료 전 상태·소유권·초안을 확인하고 확인할 수 없는 연결 오류도 성공으로 처리하지 않는다. 보관되면 세션을 잠재우고 전달은 `held(archived)`로 둔다. 보관 중에는 자동 깨움·새 세션·`runnerEnabled:true` 단독을 거부한다. 꺼내기는 archived 때문에 보류된 전달만 재검사하며 모든 직원을 기동하지 않는다(§3.4).
 - `GET /api/projects/:id/decisions?status=done|open&before=<at>&limit=` → Decision[]. 기본 done(최근 답한 순, `before` 는 그 answeredAt 앞). open 은 전부(오래된 순, before·limit 무시) · `GET /api/decisions/:id` → Decision
 - `POST /api/decisions/:id/answer`(AnswerReq) 멱등 → Decision. 새 답인데 연결되어 있지 않으면 409(같은 답 재전송은 그대로 돌려준다). v1의 `expectedVersion?`는 읽은 `Decision.updatedAt` 문자열이고 다르면 409; v2에서는 필수(§3.3)다
+- `POST /api/todos/:id/drop` `{reason?:string}` → Todo. 대표 인증, 연결과 상관없이 된다. 열린 할 일을 `done=true`, `outcome=dropped`, `closedBy="대표"`, `closeReason=사유 또는 "대표가 필요 없음으로 정리"`로 닫는다. 빈 사유는 기본값을 쓴다(최대 100,000자). 이미 dropped면 원래 결과를 반환하고 중복 알림은 넣지 않는다. 이미 done인 항목은 409. 부탁한 직원과 총괄에 `"[대표] '<제목>' 필요 없음"`을 기존 완료와 같은 wake 정책으로 알리며, 총괄이 없으면 기존 완료처럼 영속 보류한다. 기존 done 경로와 체크 되돌리기는 유지한다.
 - `POST /api/todos/:id/done` `{done:boolean}` → Todo. 연결과 상관없이 된다. 체크를 풀면 AI 의 정리 이유도 지운다
 - `POST /api/decisions/:id/reopen` → Decision. AI 가 `ask_close` 로 닫은 카드만(아니면 409). 결재할 항목으로 돌아가고(`reopenNote` 에 닫은 이유), 물은 직원·총괄에게 wake=false 로 알린다
 - `POST /api/projects/:id/tidy` → TidyResult(`{already}`). 총괄(본사는 본사 AI)에게 판 정리 지시를 넣는다. 연결되어 있지 않으면 409, 총괄이 없거나 잠들었으면 띄운다. 이미 기다리거나 도는 정리가 있으면 `already:true`
@@ -106,6 +107,7 @@ core가 응답해도 각 CLI의 trust/auth/권한 창이나 상태 미보고로 
 |---|---|---|
 | `PUT /api/settings` | 기존 부분 SettingsPatch + `If-Match: "<revision>"`; ranks도 고친 하위 필드만 | `{settings,revision}` |
 | `PATCH /api/members/:id` | 기존 PatchMemberReq + 같은 If-Match | `{member,configRevision,sessionGeneration}` |
+| `POST /api/todos/:id/drop` | `{reason?:string}` + 같은 If-Match | `{todo,revision}` |
 | `POST /api/todos/:id/done` | `{done:boolean}` + 같은 If-Match | `{todo,revision}` |
 | `POST /api/decisions/:id/answer` | 기존 AnswerReq + **문자열** `expectedVersion=Decision.updatedAt` | Decision 자체 |
 | `POST /api/members/:id/fresh-session` | `{operationId:"UUID",expectedSessionGeneration:0}` | OperationReceipt |
@@ -385,3 +387,12 @@ core 업무 턴의 최종 결과가 없으면 기존 업무를 다시 실행하�
 - 아티팩트 및 HTML render 응답 CSP: `sandbox allow-scripts`와 ARTIFACT_CSP(`default-src 'none'`, `connect-src 'none'`, 인라인 script/style 및 data/blob 자원만). allow-same-origin을 넣지 않는다. 외부 CDN 금지, 스크립트는 파일 안에, 링크는 앱이 확인 후 연다는 역할 규칙과 같다. CSP가 못 막는 WebRTC/preconnect 한계는 §3.2와 같으며 앱의 네트워크·탐색 차단도 유지해야 한다.
 - `Settings.macScriptNotifications` 기본 true. 기존 notifyMac(기본 false)의 알림 동의가 켜져 있고 이 경로 스위치도 true일 때만 osascript를 호출한다. `PATCH /api/settings {macScriptNotifications:false}`로 서버 스크립트 알림만 끈다. v1은 Settings, `X-IAMCEO-Contract:2` + `If-Match:"<settings revision>"`는 `{settings,revision}`를 반환하고 이전 revision이면 409다. 기존 PUT 설정 API도 이 필드를 받는다. T9는 Mac 앱 자체 알림을 사용자가 켠 뒤 PATCH로 이 경로를 끈다. 이 PATCH가 앱 알림 권한을 자동으로 켜지는 않는다.
 - 앱은 T1 Message.deliveryInfo[], DeliveryNoticeItem.waitReason/waitingSince/runLimit, MemberDeliverySummary.waitReason/waitingSince/runLimit/waitReasons, deliveryNotices.reportNotices를 읽는다. 누락은 구형 서버로 처리하고 알 수 없는 waitReason 문자열도 디코딩한다. 표시할 때 waitReasonLabel/waitReasonTone을 사용한다.
+
+
+### 묵은 대표 할 일 정리
+- 서버 틱은 보관하지 않은 프로젝트에서 생성 후 **3일 초과** 열린 할 일을 찾는다. 부탁한 직원(memberId)이 명부에 있는 worker면 그 직원에게, 없거나 대표·총괄이 만든 일이면 프로젝트 총괄(본사는 본사 AI)에게 시스템 소식을 넣는다. 잠든 직원은 여전히 명부에 있으므로 안내를 보관한다. 받을 사람이 없으면 다음 틱에 다시 찾는다.
+- 소식과 `todos.stale_notified_at`을 원자 저장해 같은 할 일은 **72시간에 한 번 이하** 안내한다. `wake=false`, 기존 next_turn 계약을 그대로 사용하며 안내만으로 pump·세션 시작을 하지 않는다. 다음에 일을 할 때 로그인·파일·설정 등을 직접 확인하고 결과를 이유로 todo_close(done), 필요 없어졌으면 dropped. 추측으로 닫지 않는다.
+- 주기 판 정리는 기존 활성·연결·총괄 idle·중복 방지 조건과 boardTidyHours=0 비활성화를 유지한다. 일반 변경 검토 조건에 더해 3일 초과 열린 할 일이 있고 `projects.stale_review_at` 이후 24시간 이상 지났으면 변경이 없어도 지시를 넣는다(간격 설정과 독립). 열린 묵은 할 일이 있는 판 정리 요청 시 이 시각을 원자 기록하므로 자동 묵은 할 일 검토는 하루 한 번 이하이다. 일반 변경에 따른 정리는 원래 주기를 따른다.
+- 총괄은 직접 확인할 수 있는 일만 근거를 적어 닫으며 대표 브라우저(Aside 등)는 열지 않는다. 확인할 수 없으면 남기고 부탁한 직원의 자동 안내를 기다린다.
+- 대기열이 wake=false 소식뿐이면 잠재우기를 허용한다. 소식은 보류로 보존하고 resume 뒤에도 그 소식만으로 턴을 시작하지 않는다. wake=true 입력이나 미수신 결재 답, 열린 결재가 있으면 기존처럼 거절한다.
+- 스키마 v30→v31은 MIGRATIONS 끝에 `todos.stale_notified_at`, `projects.stale_review_at` nullable TEXT를 추가한다. PRAGMA user_version은 기존 마이그레이션 개수 기반으로 1 증가한다. 다운그레이드는 새 DB를 옛 바이너리로 열 수 없으므로 이주 전 백업으로 복원해야 한다.

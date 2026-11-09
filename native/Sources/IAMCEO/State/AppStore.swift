@@ -1449,6 +1449,22 @@ final class AppStore: ProjectManagementStore {
                                                       done: done, note: note, fileIds: fileIDs))
     }
 
+    @discardableResult func dropTodo(_ todo: Todo, reason: String? = nil) async -> Bool {
+        if !strictWriteContract {
+            let result: Todo? = await mutate("todo:\(todo.id)") { api in
+                try await api.dropTodo(id: todo.id, reason: reason).todo
+            }
+            return result != nil
+        }
+        guard canWrite, let revision = writeRevisions?.todos?[todo.id],
+              reviewedTodos[todo.id].map({ Self.same($0, todo) }) == true,
+              todoWrites[todo.id] != .checking, todoWrites[todo.id] != .sending else {
+            errorMessage = "최신 업무 상태를 확인한 뒤 변경하세요."; return false
+        }
+        return await submitTodoCompletion(PendingTodo(id: todo.id, namespace: writeNamespace, revision: revision,
+                                                      done: true, note: nil, fileIds: nil, dropReason: reason, dropped: true))
+    }
+
     /// Explicit retry only. A restored uncertain write is queried, never automatically submitted.
     @discardableResult func retryTodoCompletion(_ todo: Todo) async -> Bool {
         guard strictWriteContract, canWrite,
@@ -1467,10 +1483,11 @@ final class AppStore: ProjectManagementStore {
         } catch { handle(error); return false }
         todoWrites[id] = .sending
         let outcome = await perform("todo:\(id)", refreshAfter: false) { api in
-            try await api.completeTodo(id: id, done: done, note: pending.note, fileIDs: pending.fileIds ?? [], revision: revision)
+            if pending.dropped == true { return try await api.dropTodo(id: id, reason: pending.dropReason, revision: revision) }
+            return try await api.completeTodo(id: id, done: done, note: pending.note, fileIDs: pending.fileIds ?? [], revision: revision)
         }
         guard epoch == generation else { return false }
-        if let result = outcome.value, result.todo.id == id, result.todo.done == done, result.revision >= revision {
+        if let result = outcome.value, result.todo.id == id, result.todo.done == done, (pending.dropped != true || result.todo.outcome == "dropped"), result.revision >= revision {
             todoWrites[id] = .confirmed
             writeRevisions?.todos?[id] = result.revision
             if let index = state?.todos.firstIndex(where: { $0.id == id }) { state?.todos[index] = result.todo }
@@ -2144,7 +2161,7 @@ final class AppStore: ProjectManagementStore {
             guard let revision = snapshot.revisions?.todos?[pending.id], let todo = reviewedTodos[pending.id] else { continue }
             if revision > pending.revision {
                 try saveJournal { $0.todos.removeValue(forKey: Self.scoped(pending.namespace, pending.id)) }
-                todoWrites[pending.id] = todo.done == pending.done ? .confirmedCurrent : .conflict
+                todoWrites[pending.id] = (todo.done == pending.done && (pending.dropped != true || todo.outcome == "dropped")) ? .confirmedCurrent : .conflict
             } else { todoWrites[pending.id] = .checking }
         }
     }
@@ -2920,6 +2937,8 @@ private struct PendingTodo: Codable {
     let done: Bool
     let note: String?
     let fileIds: [String]?
+    var dropReason: String? = nil
+    var dropped: Bool? = nil
 }
 private struct AppWriteJournal: Codable {
     var operations: [String: TrackedOperation] = [:]

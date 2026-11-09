@@ -92,6 +92,8 @@ export interface OrchestratorApi {
   /** 별도 v2 포트. 미지원이면 501/capability=false이며 v1로 쓰기를 내려 보내지 않는다. */
   updateSettingsV2?(patch: SettingsWriteRequest, precondition: RevisionPrecondition): Promise<SettingsWriteResult>;
   patchMemberConfigV2?(memberId: string, patch: MemberConfigWriteRequest, precondition: RevisionPrecondition): Promise<MemberConfigWriteResult>;
+  dropTodoV2?(todoId: string, request: { reason?: string }, precondition: RevisionPrecondition): Promise<TodoWriteResult>;
+  dropTodo?(todoId: string, reason?: string): Promise<Todo>;
   setTodoDoneV2?(todoId: string, request: TodoDoneRequest, precondition: RevisionPrecondition): Promise<TodoWriteResult>;
   /** 동일 receipt는 세대 재검사 전에 반환한다. pending/unknown 외부 작업을 재생하지 않는다. */
   freshMemberSessionV2?(memberId: string, request: FreshSessionRequest): Promise<OperationReceipt<"fresh_session">>;

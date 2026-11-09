@@ -88,6 +88,12 @@ actor APIClient {
         let todo: Todo = try await send("/api/todos/\(Self.segment(id))/done", body: body)
         return TodoWriteResult(todo: todo, revision: 0)
     }
+    func dropTodo(id: String, reason: String? = nil, revision: Int? = nil) async throws -> TodoWriteResult {
+        let body = TodoDropRequest(reason: reason)
+        if let revision { return try await send("/api/todos/\(Self.segment(id))/drop", body: body, ifMatch: revision, contractVersion: 2) }
+        let todo: Todo = try await send("/api/todos/\(Self.segment(id))/drop", body: body)
+        return TodoWriteResult(todo: todo, revision: 0)
+    }
     /// T9 calls after the app's own Mac notification permission has been enabled.
     func setMacScriptNotifications(_ enabled: Bool, revision: Int? = nil) async throws {
         struct Patch: Encodable, Sendable { let macScriptNotifications: Bool }

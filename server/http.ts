@@ -228,6 +228,7 @@ const AnswerSchema = z.object({
   note: z.string().nullable().optional(),
   batch: z.boolean().optional(),
 });
+const TodoDropSchema = z.object({ reason: z.string().max(100_000).optional() });
 const TodoDoneSchema = z.object({ done: z.boolean(), note: z.string().max(100_000).optional(), fileIds: z.array(z.string().min(1)).max(50).optional() });
 const SleepSchema = z.object({ force: z.boolean().optional() });
 const AdoptSchema = z.object({
@@ -850,6 +851,18 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       // 대표의 말처럼 총괄에게 가는 입력이다. 연결이 없으면 409.
       await requireReachable(id!, null);
       return Response.json(await once(`tidy:${id}`, () => orch.tidyBoard!(id!)));
+    }),
+    route("POST", "/api/todos/:id/drop", async (req, _url, [id]) => {
+      store.requireTodo(id!);
+      if (contractV2(req)) {
+        const expected = precondition(req);
+        const body = await parseBody(req, TodoDropSchema.strict());
+        if (!orch.dropTodoV2) throw new ApiError(501, "검토 버전이 있는 업무 변경을 지원하지 않습니다");
+        return Response.json(await orch.dropTodoV2(id!, body, expected));
+      }
+      const body = await parseBody(req, TodoDropSchema);
+      if (!orch.dropTodo) throw new ApiError(501, "지원하지 않습니다");
+      return Response.json(await orch.dropTodo(id!, body.reason));
     }),
     route("POST", "/api/todos/:id/done", async (req, _url, [id]) => {
       const todo = store.requireTodo(id!);

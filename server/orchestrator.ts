@@ -160,6 +160,7 @@ export function formatAnswer(d: Decision): string {
 }
 
 export function formatTodoDone(t: Todo): string {
+  if (t.outcome === "dropped") return `[대표] '${quotedInline(t.title)}' 필요 없음 #${t.id}\n${t.closeReason ?? "대표가 필요 없음으로 정리"}`;
   return `[대표] '${quotedInline(t.title)}' 했음 #${t.id}${t.completionNote != null ? `\n[대표 완료 답 원문]\n${t.completionNote}\n[대표 완료 답 끝]` : ""}${t.completionFileIds?.length ? `\n대표가 올린 첨부: ${t.completionFileIds.join(", ")}` : ""}`;
 }
 
@@ -234,6 +235,7 @@ export function formatTidy(kind: MemberKind, manual: boolean): string {
     `${TIDY_HEAD}${manual ? "(대표가 눌렀습니다)" : ""}: 열린 결재·내 할 일·진행판·지금 상황을 지금 상태에 맞춰라.`,
     "- `board` 로 판을 보고, 대화·보고·세션 기록으로 판단한다.",
     `- ${tools}`,
+    "- 3일 넘은 열린 할 일은 직접 확인할 수 있으면 확인 결과를 이유로 todo_close(done), 필요 없어졌으면 dropped로 닫는다. 대표 브라우저를 여는 확인(Aside 등)은 하지 않는다. 확인할 수 없으면 그대로 둔다. 부탁한 직원(없으면 총괄)에게 깨우지 않는 자동 안내가 가며 다음에 그 일을 할 때 확인한다.",
     "- 대표가 아직 정하지 않은 결재는 대신 닫지 않는다. 확실하지 않으면 그대로 둔다. 직원은 깨우지 않는다.",
     "- 바뀐 게 있으면 `post`(알림) 한 줄로 무엇을 정리했는지 알린다. 없으면 아무것도 올리지 말고 턴을 끝낸다.",
   ].join("\n");
@@ -1162,6 +1164,13 @@ export class Orchestrator implements OrchestratorApi {
     return { todo, revision };
   }
 
+  async dropTodoV2(todoId: string, request: { reason?: string }, precondition: RevisionPrecondition): Promise<TodoWriteResult> {
+    if (this.store.todoRevision(todoId) !== precondition.expectedRevision) throw new ApiError(409, "할 일이 변경되었습니다", "REVISION_CONFLICT");
+    const writing = this.dropTodo(todoId, request.reason);
+    const revision = this.store.todoRevision(todoId);
+    return { todo: await writing, revision };
+  }
+
   // ---- 시작·종료 ----
   /** 서버 재시작 복구(§6). 끊긴 턴을 정리하고 대기열을 다시 민다. */
   async recover(): Promise<void> {
@@ -1392,16 +1401,33 @@ export class Orchestrator implements OrchestratorApi {
     );
     for (const id of ids) void this.pump(id);
     try {
+      this.checkStaleTodos();
       this.checkBoardTidy();
     } catch (e) {
       console.warn("판 정리 확인 실패:", (e as Error).message);
     }
   }
 
+  /** Passive reminders never pump, start a session, or wake a sleeping member. */
+  checkStaleTodos(now = Date.now()): string[] {
+    const queued: string[] = [];
+    if (this.closed) return queued;
+    for (const project of this.store.listProjects()) {
+      if (this.archiving.has(project.id)) continue;
+      for (const todo of this.store.listStaleTodos(project.id, now)) {
+        const requester = todo.memberId ? this.store.getMember(todo.memberId) : null;
+        const target = requester?.kind === "worker" ? requester : this.store.getConductor(project.id);
+        if (!target) continue;
+        const days = Math.floor((now - Date.parse(todo.createdAt)) / 86_400_000);
+        if (this.store.remindStaleTodo(todo, target.id, formatSystem(`네가 부탁한 대표의 할 일 #${todo.id} '${quotedInline(todo.title)}' 이 ${days}일째 열려 있다. 다음에 그 일을 할 때 됐는지 직접 확인하고 그 결과를 근거로 todo_close 로 정리해라. 필요 없어졌으면 dropped.`), now)) queued.push(todo.id);
+      }
+    }
+    return queued;
+  }
+
   /**
-   * 판 정리(주기). 틱마다 부른다. 조건이 모두 맞는 프로젝트의 총괄(본사는 본사 AI)에게만 판 정리 지시를 깨움으로 넣는다:
-   * 보관 아님 · 실행 켜짐 · 연결됨 · 총괄이 이미 떠 있고 쉬는 중(일하는 중·잠듦·꺼짐·넘겨받은 칸이면 건너뛴다. 정리하려고 띄우지 않는다)
-   * · 간격이 지남 · 지난 정리 뒤 결재·할 일·진행판·대화에 바뀐 게 있음 · 기다리는 판 정리 지시가 없음. 넣은 프로젝트 id 를 돌려준다.
+   * 주기 판 정리: 활성·연결·총괄 idle·중복 방지 조건을 유지한다.
+   * 변경+설정 간격 또는 묵은 할 일+24시간 경과 시 요청한다. 정리만 하려고 세션을 띄우지 않는다.
    */
   checkBoardTidy(now = Date.now()): string[] {
     const hours = this.store.getSettings().boardTidyHours;
@@ -1418,9 +1444,10 @@ export class Orchestrator implements OrchestratorApi {
       // 한 번도 정리하지 않았으면 총괄이 뜬 때부터 센다.
       const review = this.store.getBoardReview(project.id);
       const since = review?.requestedAt ?? project.tidiedAt ?? lead.createdAt;
-      if (now - Date.parse(since) < hours * 3_600_000) continue;
+      const staleDue = this.store.listStaleTodos(project.id, now).length > 0 && this.store.staleReviewDue(project.id, now);
+      if (!staleDue && now - Date.parse(since) < hours * 3_600_000) continue;
       const changed = this.store.lastBoardChangeAt(project.id);
-      if (review?.completedAt ? this.store.boardRevision(project.id) <= (review.reviewedRevision ?? -1) : !review && (!changed || changed <= since)) continue;
+      if (!staleDue && (review?.completedAt ? this.store.boardRevision(project.id) <= (review.reviewedRevision ?? -1) : !review && (!changed || changed <= since))) continue;
       this.queueBoardReview(project.id, lead, false, new Date(now).toISOString());
       void this.pump(lead.id);
       queued.push(project.id);
@@ -1431,6 +1458,7 @@ export class Orchestrator implements OrchestratorApi {
   private queueBoardReview(projectId: string, lead: Member, manual: boolean, at = new Date().toISOString()): void {
     this.store.transaction(() => {
       this.store.requestBoardReview(projectId, at);
+      if (this.store.listStaleTodos(projectId, Date.parse(at)).length) this.store.markStaleReview(projectId, at);
       this.store.enqueue({ projectId, memberId: lead.id, kind: "system", text: formatTidy(lead.kind, manual) });
     });
   }
@@ -2113,14 +2141,25 @@ export class Orchestrator implements OrchestratorApi {
     return [formatTodoDone(todo), ...attachmentLines(this.attachmentsFor(member, attachments))].join("\n");
   }
 
+  async dropTodo(todoId: string, reason?: string): Promise<Todo> {
+    return this.writeTodo(todoId, true, {}, reason?.trim() || "대표가 필요 없음으로 정리");
+  }
+
   async setTodoDone(todoId: string, done: boolean, completion: { note?: string; fileIds?: string[] } = {}): Promise<Todo> {
+    return this.writeTodo(todoId, done, completion);
+  }
+
+  private async writeTodo(todoId: string, done: boolean, completion: { note?: string; fileIds?: string[] }, dropReason?: string): Promise<Todo> {
     for (const id of completion.fileIds ?? []) if (!this.store.getAttachment(id)) throw new ApiError(400, "업로드된 첨부를 찾을 수 없습니다");
     if (!done && (completion.note !== undefined || completion.fileIds?.length)) throw new ApiError(400, "완료할 때만 답과 첨부를 붙일 수 있습니다");
     let targetId: string | null = null;
     const { todo, changed } = this.store.transaction(() => {
       const before = this.store.requireTodo(todoId);
       if (before.done !== done) this.store.setTodoCompletion(todoId, done ? completion.note ?? null : null, done ? completion.fileIds ?? [] : []);
-      const result = this.store.setTodoDone(todoId, done);
+      if (dropReason !== undefined && before.done && before.outcome !== "dropped") throw new ApiError(409, "이미 끝났거나 정리된 할 일입니다");
+      const result = dropReason !== undefined && !before.done
+        ? { todo: this.store.closeTodo(todoId, { outcome: "dropped", reason: dropReason, by: "대표" }), changed: true }
+        : this.store.setTodoDone(todoId, done);
       if (!result.changed) return result;
       const todo = result.todo;
       const target = (todo.memberId ? this.store.getMember(todo.memberId) : null) ?? this.store.getConductor(todo.projectId);
@@ -2851,7 +2890,7 @@ export class Orchestrator implements OrchestratorApi {
     return `이어갈 일: ${parts.join(" · ") || "대표의 말과 결정, 지금까지 한 일을 빠짐없이 남긴다"}`;
   }
 
-  /** 일하는 중·열린 결재·대기열이 있으면 거부(force 로만). sessionId 는 유지한다. */
+  /** 일하는 중·열린 결재·깨우는 입력이나 미수신 답이 있으면 거부(force 로만). 깨우지 않는 소식은 보존한다. sessionId 는 유지한다. */
   async sleepMember(memberId: string, opts: { force?: boolean; holdAs?: "archived" } = {}): Promise<Member> {
     const member = this.store.requireMember(memberId);
     if (member.status === "asleep" && !this.pendingLifecycle(memberId)) return member;
@@ -2866,7 +2905,7 @@ export class Orchestrator implements OrchestratorApi {
       if (this.coreCompactFenced(member)) throw new ApiError(409, "문맥 압축을 처리하고 있어 잠재울 수 없습니다. 압축 결과를 확인해 주세요");
       if (this.isBusy(member)) throw new ApiError(409, `${josa(member.name, "은")} 일하는 중입니다`);
       if (this.store.listOpenDecisionsByMember(memberId).length > 0) throw new ApiError(409, `${member.name}에게 열린 결재가 있습니다`);
-      if (pending.length > 0) throw new ApiError(409, `${member.name}의 대기열이 남아 있습니다`);
+      if (pending.some(d => d.wake) || this.store.listUnreceivedAnswers(memberId).length > 0) throw new ApiError(409, `${member.name}의 대기열이 남아 있습니다`);
     }
     if (rt.closing || rt.starting || rt.reopening) throw new ApiError(409, "세션을 처리하는 중입니다");
     rt.closing = true;

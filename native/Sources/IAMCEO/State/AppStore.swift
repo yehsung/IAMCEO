@@ -160,6 +160,7 @@ final class AppStore: ProjectManagementStore {
     }
     @ObservationIgnored private var historyTarget: String?
     @ObservationIgnored private var historyVisible = false
+    @ObservationIgnored private var historyOwnerID: UUID?
     @ObservationIgnored private var historyFlight: (key: ChatHistoryKey, id: UUID, revision: Int, task: Task<Void, Never>)?
     @ObservationIgnored private var historyInvalidationRevision = 0
     @ObservationIgnored private var deliveryFlights: [String: UUID] = [:]
@@ -511,7 +512,7 @@ final class AppStore: ProjectManagementStore {
         let projectEpoch = projectGeneration
         let epoch = generation
         cancelHistoryLoad()
-        historyVisible = false; historyTarget = nil
+        historyVisible = false; historyOwnerID = nil; historyTarget = nil
         deliveryPages = [:]; deliveryErrors = [:]; deliveryResults = [:]; deliveryFlights = [:]; deliveryChecking = []; deliveryRefreshPending = []
         isArchive = archived
         selectedProjectID = id
@@ -1999,17 +2000,33 @@ final class AppStore: ProjectManagementStore {
 
     // MARK: Conversation history (independent of /state's recent-message window)
 
-    func activateHistory(targetMemberID: String? = nil) async {
-        historyVisible = true; historyTarget = targetMemberID
-        guard !isDemo, let projectID = selectedProjectID, state != nil else { return }
+    @discardableResult
+    func activateHistory(ownerID: UUID = UUID(), targetMemberID: String? = nil) async -> UUID {
+        historyVisible = true; historyOwnerID = ownerID; historyTarget = targetMemberID
+        guard !isDemo, let projectID = selectedProjectID, state != nil else { return ownerID }
         let key = ChatHistoryKey(namespace: writeNamespace, connectionGeneration: generation, projectID: projectID,
                                  scope: ChatHistoryKey.normalizedScope(targetMemberID: targetMemberID, members: members), archived: isArchive)
         if histories.activeKey != key { cancelHistoryLoad() }
         histories.activate(key)
         await loadHistory(history?.initialized == true ? .latest : .initial)
+        // One recovery attempt per activation, only for an idle, silent initial load.
+        // A newer screen may have taken ownership while this activation was suspended.
+        if !Task.isCancelled, historyVisible, historyOwnerID == ownerID, histories.activeKey == key,
+           let history, !history.initialized, history.loading == nil, history.error == nil {
+            await loadHistory(.initial)
+            if historyVisible, historyOwnerID == ownerID, histories.activeKey == key,
+               foreground, connectionStatus == .connected, key.archived || pagingSupport != .unsupported {
+                histories.finishInitialLoadIfIdle(for: key)
+            }
+        }
+        return ownerID
     }
 
-    func deactivateHistory() { historyVisible = false; cancelHistoryLoad() }
+    func deactivateHistory(ownerID: UUID) {
+        guard historyOwnerID == ownerID else { return }
+        historyVisible = false; historyOwnerID = nil
+        cancelHistoryLoad()
+    }
     func loadOlderMessages() async { await loadHistory(.older) }
     func refreshHistory() async {
         guard let history else { return }
@@ -2034,18 +2051,24 @@ final class AppStore: ProjectManagementStore {
         histories.receive(message, namespace: writeNamespace, connectionGeneration: generation)
     }
     private func cancelHistoryLoad() {
-        historyFlight?.task.cancel()
+        guard let flight = historyFlight else { return }
+        flight.task.cancel()
+        histories.cancelLoad(for: flight.key)
         // The cache checks cancellation before applying a page; activation also invalidates old range tokens.
     }
     private func loadHistory(_ kind: ChatHistoryLoad) async {
         guard !isDemo, foreground, historyVisible, connectionStatus == .connected, let api,
               let key = histories.activeKey, key.projectID == selectedProjectID, key.archived == isArchive,
               key.connectionGeneration == generation, key.archived || pagingSupport != .unsupported else { return }
-        if let flight = historyFlight, flight.key == key {
+        let ownerID = historyOwnerID
+        while let flight = historyFlight, flight.key == key {
             await flight.task.value
+            guard foreground, historyVisible, historyOwnerID == ownerID, histories.activeKey == key,
+                  key.connectionGeneration == generation else { return }
+            // Another waiter may already have replaced the cancelled flight. Join it.
+            if let current = historyFlight, current.id != flight.id { continue }
             if !flight.task.isCancelled, kind != .latest || flight.revision == historyInvalidationRevision { return }
             if historyFlight?.id == flight.id { historyFlight = nil }
-            guard foreground, historyVisible, histories.activeKey == key, key.connectionGeneration == generation else { return }
         }
         let id = UUID(), projectEpoch = projectGeneration
         let failure = HistoryRequestFailure()
@@ -2083,7 +2106,9 @@ final class AppStore: ProjectManagementStore {
                 let scope = ChatHistoryKey.normalizedScope(targetMemberID: historyTarget, members: snapshot.members)
                 state = snapshot
                 if ChatHistoryKey.scopeBytes(scope) != ChatHistoryKey.scopeBytes(key.scope) {
-                    await activateHistory(targetMemberID: historyTarget)
+                    if let ownerID = historyOwnerID {
+                        await activateHistory(ownerID: ownerID, targetMemberID: historyTarget)
+                    }
                 }
             } catch {
                 if generation == key.connectionGeneration, (error as? APIError)?.status == 401 { handle(error) }
@@ -2574,7 +2599,7 @@ final class AppStore: ProjectManagementStore {
         }
     }
     private func resetReadCollections() {
-        cancelHistoryLoad(); histories.removeAll(); historyVisible = false; historyTarget = nil
+        cancelHistoryLoad(); histories.removeAll(); historyVisible = false; historyOwnerID = nil; historyTarget = nil
         historyFlight = nil
         pagingSupport = .unknown; isArchive = false; archivedProjects = []; archiveError = nil
         archiveLoad = UUID(); isLoadingArchive = false; archiveObserved = false

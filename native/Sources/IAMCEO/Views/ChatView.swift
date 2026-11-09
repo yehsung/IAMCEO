@@ -475,6 +475,7 @@ private struct ChatConversation: View {
     let projectID: String?
     let namespace: String
     @State private var anchor: ChatScrollAnchor
+    @State private var historyOwnerID = UUID()
     @State private var focus = ChatMessageFocus()
     @State private var displayed: [Message] = []
     @State private var queued: [Message]?
@@ -591,8 +592,8 @@ private struct ChatConversation: View {
                 if !dragging { dragging = true; wasInteracting = false }
             }.onEnded { _ in dragging = false; wasInteracting = false })
             .onAppear { isVisible = true }
-            .task {
-                await store.activateHistory(targetMemberID: targetMemberID)
+            .task(id: store.connectionStatus) {
+                await store.activateHistory(ownerID: historyOwnerID, targetMemberID: targetMemberID)
             }
             .task(id: router.chatMessageID.map { Data($0.utf8) }) { await openMessage() }
             .onChange(of: focus.revision) { _, _ in showFocusedMessage(proxy) }
@@ -602,7 +603,7 @@ private struct ChatConversation: View {
                 savePosition()
                 anchor.cancelPreservation()
                 anchor.clearHighlight(); focus.clear()
-                if history != nil { store.deactivateHistory() }
+                store.deactivateHistory(ownerID: historyOwnerID)
             }
             .onChange(of: ChatThreadContent(items: items), initial: true) { _, content in
                 present(content.items, proxy: proxy)

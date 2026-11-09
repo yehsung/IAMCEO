@@ -226,9 +226,16 @@ struct ChatHistory: Sendable {
         if !(failure is CancellationError), (failure as? URLError)?.code != .cancelled {
             error = friendlyLoadError(failure, what: "대화", verb: "읽지")
         }
+        finishInitialLoadIfIdle()
     }
     mutating func cancel() {
         generation = UUID(); loading = nil; journal = []
+        finishInitialLoadIfIdle()
+    }
+    /// An interrupted initial read must expose the existing retry control, never an idle spinner.
+    mutating func finishInitialLoadIfIdle() {
+        guard !initialized, loading == nil, error == nil else { return }
+        error = "대화 불러오기가 중단되었습니다. 다시 불러오기를 눌러 주세요."
     }
     mutating func jumpToLatest() { anchor = nil; pinnedToBottom = true; unreadCount = 0 }
 
@@ -341,6 +348,8 @@ final class ChatHistoryCache {
         }
     }
     func history(for key: ChatHistoryKey) -> ChatHistory? { histories[key] }
+    func cancelLoad(for key: ChatHistoryKey) { histories[key]?.cancel() }
+    func finishInitialLoadIfIdle(for key: ChatHistoryKey) { histories[key]?.finishInitialLoadIfIdle() }
     func receive(_ message: Message, namespace: String, connectionGeneration: UUID) {
         for key in Array(histories.keys) where key.namespace == namespace && key.connectionGeneration == connectionGeneration {
             histories[key]?.receive(message)

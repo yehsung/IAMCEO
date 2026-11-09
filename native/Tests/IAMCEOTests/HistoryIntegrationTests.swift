@@ -194,12 +194,13 @@ final class HistoryIntegrationServer: @unchecked Sendable {
         let server = HistoryIntegrationServer(), network = try IsolatedTestNetwork(handler: { try server.handle($0) })
         let store = await connect(network)
         defer { store.disconnect() }
-        await store.activateHistory()
+        let ownerID = await store.activateHistory()
         let count = server.read { $0.pageRequests }
         store.setForeground(false)
         await store.refreshHistory(); await store.loadOlderMessages()
         XCTAssertEqual(server.read { $0.pageRequests }, count)
-        store.setForeground(true); store.deactivateHistory()
+        store.setForeground(true)
+        store.deactivateHistory(ownerID: ownerID)
         await store.refresh()
         XCTAssertEqual(server.read { $0.pageRequests }, count)
         let demo = AppStore(demo: true, session: network.session, persistCredentials: false)

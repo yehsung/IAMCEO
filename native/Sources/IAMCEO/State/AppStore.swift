@@ -33,6 +33,13 @@ private struct RefreshScope: OptionSet {
     static let all: Self = [.snapshot, .history, .delivery, .activity]
 }
 
+private struct AppliedSyncIdentity: Equatable {
+    let selection: UUID
+    let cursor: SyncCursor
+    let revisions: SyncRevisions?
+    let projectStatus: SyncProjectStatus
+}
+
 @MainActor @Observable
 final class AppStore: ProjectManagementStore {
     var endpoint: String
@@ -60,7 +67,9 @@ final class AppStore: ProjectManagementStore {
     private(set) var bootstrap: Bootstrap?
     private(set) var runtime: RuntimeDiagnostics?
     private(set) var selectedProjectID: String?
-    private(set) var state: ProjectState?
+    private(set) var state: ProjectState? {
+        didSet { updateStateCollections() }
+    }
     private(set) var lastUpdated: Date?
     private(set) var api: APIClient?
     private(set) var modelCatalog: ModelCatalog = .fallback
@@ -68,12 +77,12 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored private var modelsRequestID = UUID()
     let isDemo: Bool
     var projects: [ProjectSummary] { bootstrap?.projects ?? [] }
-    var messages: [Message] { state?.messages ?? [] }
-    var members: [Member] { state?.members ?? [] }
-    var decisions: [Decision] { state?.decisions ?? [] }
-    var todos: [Todo] { state?.todos ?? [] }
-    var files: [FileDoc] { state?.files ?? [] }
-    var work: [WorkItem] { state?.work ?? [] }
+    private(set) var messages: [Message] = []
+    private(set) var members: [Member] = []
+    private(set) var decisions: [Decision] = []
+    private(set) var todos: [Todo] = []
+    private(set) var files: [FileDoc] = []
+    private(set) var work: [WorkItem] = []
     var canWrite: Bool { capabilitiesLoaded && hasFreshProject && connectionStatus == .connected && !isRevalidating && !isDemo && !isArchive && state?.project.archived != true
         && selectedProjectID.map { projectResults[$0] != .checking } != false }
     /// A cached snapshot is for reading only. Realtime hosts need an atomic sync for this selection.
@@ -269,6 +278,8 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored private var validatedProjectGeneration: UUID?
     @ObservationIgnored private var validatedWriteGeneration: UUID?
     @ObservationIgnored private var projectCache = ProjectStateCache()
+    @ObservationIgnored private var selectionRequestID = UUID()
+    @ObservationIgnored private var appliedSyncIdentity: AppliedSyncIdentity?
     @ObservationIgnored private let navigationDefaults: UserDefaults?
     @ObservationIgnored private var catalogDiscoveryTask: Task<Void, Never>?
 
@@ -325,6 +336,17 @@ final class AppStore: ProjectManagementStore {
             selectedProjectID = fixture.1.project.id
             connectionStatus = .demo
         }
+        updateStateCollections()
+    }
+
+    /// Collection consumers observe only their own slice, even when another slice changes.
+    private func updateStateCollections() {
+        if messages != (state?.messages ?? []) { messages = state?.messages ?? [] }
+        if members != (state?.members ?? []) { members = state?.members ?? [] }
+        if decisions != (state?.decisions ?? []) { decisions = state?.decisions ?? [] }
+        if todos != (state?.todos ?? []) { todos = state?.todos ?? [] }
+        if files != (state?.files ?? []) { files = state?.files ?? [] }
+        if work != (state?.work ?? []) { work = state?.work ?? [] }
     }
 
     func connect() async {
@@ -516,11 +538,19 @@ final class AppStore: ProjectManagementStore {
     private func selectProject(id: String, archived: Bool, navigationToken: UUID? = nil) async {
         if isDemo { return }
         guard api != nil, connectionStatus == .connected else { return }
+        let selectionRequestID = UUID()
+        self.selectionRequestID = selectionRequestID
         if selectedProjectID == id, isArchive == archived, navigationToken == nil {
             await refresh()
             return
         }
-        if let state { projectCache.insert(state) }
+        // Cache only when leaving a project. JSON encoding never inherits MainActor.
+        if let state {
+            let epoch = generation
+            let encoded = await ProjectStateCache.encode(state)
+            guard epoch == generation, selectionRequestID == self.selectionRequestID else { return }
+            projectCache.insert(state, encoded: encoded)
+        }
         refreshTask?.cancel()
         projectGeneration = navigationToken ?? UUID()
         if navigationToken == nil { for item in routers { item.value?.cancelPendingNavigation() } }
@@ -772,6 +802,10 @@ final class AppStore: ProjectManagementStore {
             let result = try await task.value
             guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration,
                   socketEpoch == socketGeneration, requestID == refreshGeneration else { return }
+            if let next = result.state {
+                guard next.project.id == projectID, next.project.archived == archived else { throw SubmissionError.mismatchedResult }
+            }
+            var applyDomain = true
             if let snapshot = result.sync {
                 guard snapshot.requestedProjectId == (archived ? nil : projectID), snapshot.projectStatus != .unknown else { throw SubmissionError.mismatchedResult }
                 if socketHello, let receivedCursor, snapshot.cursor.epoch != receivedCursor.epoch {
@@ -780,25 +814,33 @@ final class AppStore: ProjectManagementStore {
                 if let applied = appliedSnapshotCursor, applied.epoch == snapshot.cursor.epoch, applied.seq > snapshot.cursor.seq {
                     throw RealtimeClientError.invalidFrame
                 }
+                // Cursors are host-wide: a different selection at the same cursor still needs its state.
+                // Archive/legacy reads are independent of /sync and must always compare their payloads.
+                applyDomain = archived || optionalWriteContext || appliedSyncIdentity != AppliedSyncIdentity(
+                    selection: projectEpoch, cursor: snapshot.cursor, revisions: snapshot.revisions, projectStatus: snapshot.projectStatus)
                 let changedEpoch = appliedSnapshotCursor != nil && appliedSnapshotCursor?.epoch != snapshot.cursor.epoch
-                appliedSnapshotCursor = snapshot.cursor
+                if appliedSnapshotCursor != snapshot.cursor { appliedSnapshotCursor = snapshot.cursor }
                 if receivedCursor?.epoch == snapshot.cursor.epoch {
-                    receivedCursor = try SyncCursor(epoch: snapshot.cursor.epoch, seq: max(receivedCursor?.seq ?? 0, snapshot.cursor.seq))
+                    let cursor = try SyncCursor(epoch: snapshot.cursor.epoch, seq: max(receivedCursor?.seq ?? 0, snapshot.cursor.seq))
+                    if receivedCursor != cursor { receivedCursor = cursor }
                 }
                 if socketHello, highestRelevantSeq > snapshot.cursor.seq { dirty.formUnion(.snapshot) }
                 try applyWriteContext(snapshot)
                 if changedEpoch { dirty.formUnion([.diagnostics, .history, .activity, .delivery]) }
             } else if supportsSync, !optionalWriteContext { syncSupported = false }
-            if let next = result.state {
-                guard next.project.id == projectID, next.project.archived == archived else { throw SubmissionError.mismatchedResult }
+            if applyDomain {
+                if bootstrap != result.bootstrap { bootstrap = result.bootstrap }
+                if let diagnostics = result.bootstrap.runtime, runtime != diagnostics { runtime = diagnostics }
+                let next = mergingRecentMessageDelivery(result.state)
+                if state != next { state = next }
             }
-            bootstrap = result.bootstrap
-            if let diagnostics = result.bootstrap.runtime { runtime = diagnostics }
-            state = mergingRecentMessageDelivery(result.state)
+            if let snapshot = result.sync {
+                appliedSyncIdentity = AppliedSyncIdentity(selection: projectEpoch, cursor: snapshot.cursor,
+                    revisions: snapshot.revisions, projectStatus: snapshot.projectStatus)
+            }
             validatedProjectGeneration = projectEpoch
             if result.sync != nil { validatedWriteGeneration = projectEpoch }
-            if let state { projectCache.insert(state) }
-            else if let projectID { projectCache.remove(projectID: projectID) }
+            if state == nil, let projectID { projectCache.remove(projectID: projectID) }
             reconcileContextChanges()
             markReachable(); restFailures = 0; isRevalidating = false
             lastUpdated = Date(); lastSuccessfulSyncAt = lastUpdated
@@ -2158,10 +2200,12 @@ final class AppStore: ProjectManagementStore {
     }
 
     private func applyWriteContext(_ snapshot: SyncSnapshot) throws {
-        writeRevisions = snapshot.revisions
-        reviewedSettings = snapshot.bootstrap.settings
-        reviewedMembers = (snapshot.state?.members ?? []).reduce(into: [:]) { $0[$1.id] = $1 }
-        reviewedTodos = (snapshot.state?.todos ?? []).reduce(into: [:]) { $0[$1.id] = $1 }
+        if writeRevisions != snapshot.revisions { writeRevisions = snapshot.revisions }
+        if reviewedSettings != snapshot.bootstrap.settings { reviewedSettings = snapshot.bootstrap.settings }
+        let members = (snapshot.state?.members ?? []).reduce(into: [:]) { $0[$1.id] = $1 }
+        if reviewedMembers != members { reviewedMembers = members }
+        let todos = (snapshot.state?.todos ?? []).reduce(into: [:]) { $0[$1.id] = $1 }
+        if reviewedTodos != todos { reviewedTodos = todos }
         if settingsEdit == nil, let revision = snapshot.revisions?.settings {
             settingsEdit = SettingsEdit(base: snapshot.bootstrap.settings, draft: snapshot.bootstrap.settings, revision: revision)
         }
@@ -3221,10 +3265,18 @@ struct ProjectStateCache {
         self.countLimit = max(0, countLimit); self.byteLimit = max(0, byteLimit)
     }
     private func key(_ id: String, _ archived: Bool) -> String { "\(archived):\(id)" }
-    mutating func insert(_ state: ProjectState) {
+    /// Shared by the app and tests; generic so an Encodable probe can verify the actual executor.
+    static func encode<Value: Encodable & Sendable>(_ value: Value) async -> Data? {
+        await Task.detached(priority: .utility) { try? JSONEncoder().encode(value) }.value
+    }
+    mutating func insert(_ state: ProjectState) async {
+        let encoded = await Self.encode(state)
+        insert(state, encoded: encoded)
+    }
+    mutating func insert(_ state: ProjectState, encoded data: Data?) {
         let key = key(state.project.id, state.project.archived)
         removeKey(key)
-        guard countLimit > 0, let data = try? JSONEncoder().encode(state), data.count <= byteLimit else { return }
+        guard countLimit > 0, let data, data.count <= byteLimit else { return }
         while entries.count >= countLimit || byteCount + data.count > byteLimit {
             guard let victim = recency.first else { break }
             removeKey(victim)

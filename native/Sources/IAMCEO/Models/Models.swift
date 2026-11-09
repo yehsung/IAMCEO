@@ -2,7 +2,7 @@ import Foundation
 
 // String-valued server enums deliberately preserve newly introduced daemon values.
 
-struct ProjectConnection: Codable, Sendable {
+struct ProjectConnection: Codable, Sendable, Equatable {
     var ok: Bool = false
     var reason: String? = nil
     var detail: String? = nil
@@ -25,7 +25,7 @@ extension ProjectConnection {
     }
 }
 
-struct Project: Codable, Sendable, Identifiable {
+struct Project: Codable, Sendable, Identifiable, Equatable {
     var id: String = ""
     var name: String = ""
     var isHq: Bool = false
@@ -57,7 +57,7 @@ extension Project {
     }
 }
 
-struct ProjectSummary: Codable, Sendable, Identifiable {
+struct ProjectSummary: Codable, Sendable, Identifiable, Equatable {
     var id: String = ""
     var name: String = ""
     var isHq: Bool = false
@@ -97,7 +97,7 @@ extension ProjectSummary {
     }
 }
 
-struct Member: Codable, Sendable, Identifiable {
+struct Member: Codable, Sendable, Identifiable, Equatable {
     var id: String = ""
     var projectId: String = ""
     var handle: String = ""
@@ -182,7 +182,7 @@ extension Member {
     }
 }
 
-struct DecisionOption: Codable, Sendable {
+struct DecisionOption: Codable, Sendable, Equatable {
     var k: String = ""
     var label: String = ""
     var desc: String? = nil
@@ -196,7 +196,7 @@ extension DecisionOption {
     }
 }
 
-struct Decision: Codable, Sendable, Identifiable {
+struct Decision: Codable, Sendable, Identifiable, Equatable {
     var id: String = ""
     var projectId: String = ""
     var memberId: String? = nil
@@ -258,7 +258,7 @@ extension Decision {
     }
 }
 
-struct Todo: Codable, Sendable, Identifiable {
+struct Todo: Codable, Sendable, Identifiable, Equatable {
     var id: String = ""
     var projectId: String = ""
     var memberId: String? = nil
@@ -294,7 +294,7 @@ extension Todo {
     }
 }
 
-struct WorkItem: Codable, Sendable, Identifiable {
+struct WorkItem: Codable, Sendable, Identifiable, Equatable {
     var id: String = ""
     var projectId: String = ""
     var sec: String = ""
@@ -322,7 +322,7 @@ extension WorkItem {
     }
 }
 
-struct Attachment: Codable, Sendable, Identifiable {
+struct Attachment: Codable, Sendable, Identifiable, Equatable {
     var id: String = ""
     var name: String = ""
     var mime: String = ""
@@ -344,7 +344,7 @@ extension Attachment {
     }
 }
 
-struct Message: Codable, Sendable, Identifiable {
+struct Message: Codable, Sendable, Identifiable, Equatable {
     var id: String = ""
     var projectId: String = ""
     var at: String = ""
@@ -397,7 +397,7 @@ extension Message {
     }
 }
 
-struct FileDoc: Codable, Sendable, Identifiable {
+struct FileDoc: Codable, Sendable, Identifiable, Equatable {
     var id: String = ""
     var kind: String = ""
     var projectId: String = ""
@@ -449,7 +449,7 @@ extension Activity {
     }
 }
 
-struct RankConfig: Codable, Sendable {
+struct RankConfig: Codable, Sendable, Equatable {
     var model: String? = nil
     var effort: String? = nil
 }
@@ -461,7 +461,7 @@ extension RankConfig {
     }
 }
 
-struct Settings: Codable, Sendable {
+struct Settings: Codable, Sendable, Equatable {
     var backend: String? = nil
     var permissionMode: String = "default"
     var ranks: [String: RankConfig] = [:]
@@ -493,7 +493,7 @@ extension Settings {
     }
 }
 
-struct HerdrInfo: Codable, Sendable {
+struct HerdrInfo: Codable, Sendable, Equatable {
     var installed: Bool = false
     var running: Bool = false
     var compatible: Bool = false
@@ -511,7 +511,7 @@ extension HerdrInfo {
     }
 }
 
-struct Bootstrap: Codable, Sendable {
+struct Bootstrap: Codable, Sendable, Equatable {
     var runtime: RuntimeDiagnostics? = nil
     var version: String = ""
     var settings: Settings = Settings()
@@ -537,7 +537,7 @@ extension Bootstrap {
     }
 }
 
-struct ProjectState: Codable, Sendable {
+struct ProjectState: Codable, Sendable, Equatable {
     var project: Project = Project()
     var members: [Member] = []
     var decisions: [Decision] = []
@@ -563,7 +563,7 @@ extension ProjectState {
     }
 }
 
-struct CoreRuntime: Codable, Sendable {
+struct CoreRuntime: Codable, Sendable, Equatable {
     var installed: Bool = false
     var available: Bool = false
     var version: String? = nil
@@ -579,7 +579,7 @@ extension CoreRuntime {
     }
 }
 
-struct ProviderRuntime: Codable, Sendable {
+struct ProviderRuntime: Codable, Sendable, Equatable {
     var installed: Bool = false
 }
 extension ProviderRuntime {
@@ -589,7 +589,7 @@ extension ProviderRuntime {
     }
 }
 
-struct RuntimeDiagnostics: Codable, Sendable {
+struct RuntimeDiagnostics: Codable, Sendable, Equatable {
     var backend: String = "core"
     var core: CoreRuntime = CoreRuntime()
     var providers: [String: ProviderRuntime] = [:]
@@ -778,7 +778,7 @@ struct DeliveryEvidence: Codable, Sendable {
     let checkedAt: String
 }
 
-struct DeliveryNotices: Codable, Sendable {
+struct DeliveryNotices: Codable, Sendable, Equatable {
     let version: Int
     let members: [MemberDeliverySummary]
     let unassigned: UnassignedDeliverySummary
@@ -788,7 +788,7 @@ struct DeliveryNotices: Codable, Sendable {
 enum UnassignedRecoveryAction: String, SafeStringEnum {
     case sendToConductor = "send_to_conductor", dismiss, unknown
 }
-struct UnassignedDeliveryItem: Codable, Sendable, Identifiable {
+struct UnassignedDeliveryItem: Codable, Sendable, Identifiable, Equatable {
     let id: String
     let messageId: String
     let projectId: String
@@ -810,12 +810,12 @@ struct UnassignedRecoveryResult: Codable, Sendable {
     let outcome: String
     let committedVersion: Int
 }
-struct UnassignedDeliverySummary: Codable, Sendable {
+struct UnassignedDeliverySummary: Codable, Sendable, Equatable {
     let undeliveredCount: Int
     let unknownCount: Int
     let needsOwnerCount: Int
 }
-struct MemberDeliverySummary: Codable, Sendable {
+struct MemberDeliverySummary: Codable, Sendable, Equatable {
     let memberId: String
     let undeliveredCount: Int
     let unknownCount: Int
@@ -830,7 +830,7 @@ struct MemberDeliverySummary: Codable, Sendable {
     var runLimit: DeliveryRunLimit? = nil
     var waitReasons: [DeliveryWaitReasonCount]? = nil
 }
-struct DeliveryReasonCount: Codable, Sendable {
+struct DeliveryReasonCount: Codable, Sendable, Equatable {
     let code: String
     let count: Int
     let note: String
@@ -914,11 +914,11 @@ struct DeliveryRecoveryResult: Codable, Sendable {
     let committedVersion: Int
 }
 
-struct CoreContextState: Codable, Sendable {
+struct CoreContextState: Codable, Sendable, Equatable {
     var measurement: ContextMeasurement? = nil
     var compaction: ContextCompaction? = nil
 }
-struct ContextMeasurement: Codable, Sendable {
+struct ContextMeasurement: Codable, Sendable, Equatable {
     var sessionId: String? = nil
     var sessionGeneration: Int? = nil
     var turn: Int? = nil
@@ -933,7 +933,7 @@ struct ContextMeasurement: Codable, Sendable {
 enum ContextCompactionPhase: String, SafeStringEnum {
     case queued, sending, running, succeeded, failed, uncertain, unknown
 }
-struct ContextCompaction: Codable, Sendable {
+struct ContextCompaction: Codable, Sendable, Equatable {
     let id: String
     var trigger: String? = nil
     var phase: ContextCompactionPhase? = nil
@@ -943,7 +943,7 @@ struct ContextCompaction: Codable, Sendable {
     var finishedAt: String? = nil
 }
 
-struct StatusObservation: Codable, Sendable {
+struct StatusObservation: Codable, Sendable, Equatable {
     var source: String? = nil
     var observedAt: String? = nil
     var freshness: String? = nil
@@ -951,14 +951,14 @@ struct StatusObservation: Codable, Sendable {
     var consecutiveFailures: Int? = nil
     var error: ObservationError? = nil
 }
-struct ObservationError: Codable, Sendable { let code: String; let note: String }
-struct SubagentState: Codable, Sendable {
+struct ObservationError: Codable, Sendable, Equatable { let code: String; let note: String }
+struct SubagentState: Codable, Sendable, Equatable {
     var quality: String? = nil
     var count: Int? = nil
     var observedAt: String? = nil
     var sessionGeneration: Int? = nil
 }
-struct MemberExecutionState: Codable, Sendable {
+struct MemberExecutionState: Codable, Sendable, Equatable {
     let runId: String
     var sessionGeneration: Int? = nil
     var turn: Int? = nil
@@ -972,7 +972,7 @@ struct MemberExecutionState: Codable, Sendable {
     var reason: String? = nil
     var exitCode: Int? = nil
 }
-struct MemberLifecycleState: Codable, Sendable {
+struct MemberLifecycleState: Codable, Sendable, Equatable {
     let operationId: String
     var sessionGeneration: Int? = nil
     var phase: String? = nil
@@ -980,21 +980,21 @@ struct MemberLifecycleState: Codable, Sendable {
     var updatedAt: String? = nil
 }
 
-struct DeliveryRunLimit: Codable, Sendable { let used: Int; let limit: Int }
-struct MessageDeliveryInfo: Codable, Sendable {
+struct DeliveryRunLimit: Codable, Sendable, Equatable { let used: Int; let limit: Int }
+struct MessageDeliveryInfo: Codable, Sendable, Equatable {
     let deliveryId: String
     let memberId: String
     var waitReason: String? = nil
     var waitingSince: String? = nil
     var runLimit: DeliveryRunLimit? = nil
 }
-struct DeliveryWaitReasonCount: Codable, Sendable {
+struct DeliveryWaitReasonCount: Codable, Sendable, Equatable {
     let waitReason: String
     let waitingSince: String
     var runLimit: DeliveryRunLimit? = nil
     let count: Int
 }
-struct MissingReportNotice: Codable, Sendable, Identifiable {
+struct MissingReportNotice: Codable, Sendable, Identifiable, Equatable {
     var id: String { runId }
     let kind: String
     let runId: String

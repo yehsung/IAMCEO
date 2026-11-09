@@ -137,6 +137,7 @@ struct OfficeView: View {
     #if os(macOS)
     /// Keyboard focus is only shown while the window is active (a background window keeps AppKit's first key view).
     @Environment(\.appearsActive) private var appearsActive
+    @State private var windowAllowsAnimation = false
     #endif
     let project: Project
     let members: [Member]
@@ -287,6 +288,12 @@ struct OfficeView: View {
                 return CGSize(width: rest(origin.x), height: rest(origin.y))
             } action: { nudge = $0 }
             .onChange(of: fresh, initial: true) { _, new in apply(new, map: map) }
+            #if os(macOS)
+            .background {
+                OfficeAnimationWindowReader { windowAllowsAnimation = $0 }
+                    .allowsHitTesting(false)
+            }
+            #endif
             .onAppear { visible = true }
             .onDisappear { visible = false }
             .modifier(OfficeScrollVisibility(visible: $visible))
@@ -322,29 +329,21 @@ struct OfficeView: View {
         }.map(\.element)
     }
 
-    /// iPhone pauses whenever the scene is not active. A Mac window pauses once it is hidden or minimised; while it
-    /// sits behind another app (or another window is key) it keeps living at a few frames per second.
+    /// Only the office's own key, unoccluded Mac window animates. A terminal window becoming key pauses it.
     private var sceneActive: Bool {
         #if os(macOS)
-        scenePhase != .background
+        scenePhase == .active && windowAllowsAnimation
         #else
         scenePhase == .active
         #endif
     }
 
-    /// The moving layer's clock: 30 fps only while someone walks, 12 fps for typing, screens, z's and bubbles; in an
-    /// inactive Mac window 15 and 6 fps; a single frame when paused (out of view, Reduce Motion at rest).
+    /// 30 fps for walking, 12 fps at rest; one frame when hidden, inactive, or Reduce Motion is at rest.
     private func cadence(map: OfficeMap) -> OfficeCadence {
         let now = Date().timeIntervalSinceReferenceDate
         var cadence = OfficeCadence()
         cadence.paused = !visible || !sceneActive || (reduceMotion && now > fadeUntil)
         cadence.walks = plans.values.filter { $0.signature == map.layout && $0.end > now }.map { $0.start...$0.end }
-        #if os(macOS)
-        if scenePhase != .active || !appearsActive {
-            cadence.fast = 1.0 / 15
-            cadence.slow = 1.0 / 6
-        }
-        #endif
         return cadence
     }
 
@@ -1342,3 +1341,53 @@ private struct TeamSessionMenu: View {
         }
     }
 }
+
+#if os(macOS)
+/// Observe the containing window, never NSApp.keyWindow (which may be the terminal).
+enum OfficeAnimationVisibility {
+    static func allowsAnimation(isKeyWindow: Bool, occlusionState: NSWindow.OcclusionState) -> Bool {
+        isKeyWindow && occlusionState.contains(.visible)
+    }
+}
+
+private struct OfficeAnimationWindowReader: NSViewRepresentable {
+    let changed: (Bool) -> Void
+
+    func makeNSView(context: Context) -> OfficeAnimationWindowView {
+        let view = OfficeAnimationWindowView()
+        view.changed = changed
+        return view
+    }
+    func updateNSView(_ view: OfficeAnimationWindowView, context: Context) { view.changed = changed }
+}
+
+private final class OfficeAnimationWindowView: NSView {
+    var changed: ((Bool) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        NotificationCenter.default.removeObserver(self)
+        if let window {
+            for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
+                         NSWindow.didChangeOcclusionStateNotification] {
+                // Selector observers are automatically removed when this view is deallocated.
+                NotificationCenter.default.addObserver(self, selector: #selector(windowChanged), name: name, object: window)
+            }
+        }
+        publishVisibility()
+    }
+
+    @objc private func windowChanged(_ notification: Notification) { publishVisibility() }
+
+    private func publishVisibility() {
+        // Moving into a window can happen during a SwiftUI update; publish on the next actor turn.
+        // Read the current window then so a late notification cannot restart a detached office.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            changed?(window.map {
+                OfficeAnimationVisibility.allowsAnimation(isKeyWindow: $0.isKeyWindow, occlusionState: $0.occlusionState)
+            } ?? false)
+        }
+    }
+}
+#endif

@@ -152,25 +152,25 @@ private final class UXStateServer: @unchecked Sendable {
         XCTAssertFalse(network.requests.contains { $0.url?.path == "/api/projects/q/messages" })
     }
 
-    func testCacheBoundsEvictionArchiveSeparationAndOversizedEntry() throws {
+    func testCacheBoundsEvictionArchiveSeparationAndOversizedEntry() async throws {
         var cache = ProjectStateCache(countLimit: 2, byteLimit: 4096)
-        for id in ["p", "q"] { cache.insert(ProjectState(project: Project(id: id))) }
+        for id in ["p", "q"] { await cache.insert(ProjectState(project: Project(id: id))) }
         XCTAssertNotNil(cache.value(projectID: "p", archived: false))
-        cache.insert(ProjectState(project: Project(id: "r")))
+        await cache.insert(ProjectState(project: Project(id: "r")))
         XCTAssertNil(cache.value(projectID: "q", archived: false), "Least recently read entry is evicted")
         XCTAssertNotNil(cache.value(projectID: "p", archived: false))
-        cache.insert(ProjectState(project: Project(id: "p", archived: true)))
+        await cache.insert(ProjectState(project: Project(id: "p", archived: true)))
         XCTAssertNotNil(cache.value(projectID: "p", archived: true))
         XCTAssertNotNil(cache.value(projectID: "p", archived: false))
-        cache.insert(ProjectState(project: Project(id: "large", now: String(repeating: "x", count: 5000))))
+        await cache.insert(ProjectState(project: Project(id: "large", now: String(repeating: "x", count: 5000))))
         XCTAssertNil(cache.value(projectID: "large", archived: false))
         XCTAssertLessThanOrEqual(cache.count, 2); XCTAssertLessThanOrEqual(cache.byteCount, 4096)
         cache.remove(projectID: "p"); XCTAssertEqual(cache.byteCount, 0)
         var disabled = ProjectStateCache(countLimit: -1, byteLimit: -1)
-        disabled.insert(ProjectState(project: Project(id: "p")))
+        await disabled.insert(ProjectState(project: Project(id: "p")))
         XCTAssertEqual(disabled.count, 0)
         var bytes = ProjectStateCache(countLimit: 20, byteLimit: 1300)
-        for n in 0..<10 { bytes.insert(ProjectState(project: Project(id: "\(n)", now: String(repeating: "x", count: 500)))) }
+        for n in 0..<10 { await bytes.insert(ProjectState(project: Project(id: "\(n)", now: String(repeating: "x", count: 500)))) }
         XCTAssertLessThanOrEqual(bytes.byteCount, 1300); XCTAssertLessThan(bytes.count, 10)
     }
 

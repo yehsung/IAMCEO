@@ -22,12 +22,12 @@ enum SyncProjectStatus: String, SafeStringEnum {
     case none, ok, notFound = "not_found", archived, unknown
 }
 
-struct SyncRevisions: Codable, Sendable {
+struct SyncRevisions: Codable, Sendable, Equatable {
     var settings: Int? = nil
     var members: [String: MemberRevisions]? = nil
     var todos: [String: Int]? = nil
 }
-struct MemberRevisions: Codable, Sendable {
+struct MemberRevisions: Codable, Sendable, Equatable {
     let configRevision: Int
     let sessionGeneration: Int
 }

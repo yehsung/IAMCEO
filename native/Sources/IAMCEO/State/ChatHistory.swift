@@ -315,9 +315,11 @@ final class ChatMessageFocus {
         revision = UUID()
     }
 
-    func open(_ id: String, key: ChatHistoryKey, available: [Message],
-              fetch: @Sendable () async throws -> [Message]) async {
-        guard !Task.isCancelled else { return }
+    /// Returns a destination only for a valid project message outside the current conversation.
+    @discardableResult
+    func open(_ id: String, key: ChatHistoryKey, available: [Message], members: [Member] = [],
+              fetch: @Sendable () async throws -> [Message]) async -> MessageScope? {
+        guard !Task.isCancelled else { return nil }
         let token = UUID()
         flight = token; messageID = nil; loading = true; error = nil
         let range = ChatHistory(key: key)
@@ -326,27 +328,39 @@ final class ChatMessageFocus {
         if known.contains(where: { $0.id.utf8.elementsEqual(id.utf8) && range.contains($0) }) {
             if context?.contains(where: { $0.id.utf8.elementsEqual(id.utf8) && range.contains($0) }) != true { context = nil }
             loading = false; messageID = id; revision = UUID()
-            return
+            return nil
         }
         do {
             let rows = try await fetch()
             try Task.checkCancellation()
-            guard flight == token else { return }
-            guard rows.count <= 100, rows.allSatisfy({ $0.projectId.utf8.elementsEqual(key.projectID.utf8) }),
-                  rows.contains(where: { $0.id.utf8.elementsEqual(id.utf8) && range.contains($0) }) else {
+            guard flight == token else { return nil }
+            guard rows.count <= 100, rows.allSatisfy({ $0.projectId.utf8.elementsEqual(key.projectID.utf8) }) else {
                 throw ChatHistoryFailure.invalidPage
+            }
+            guard let message = rows.first(where: { $0.id.utf8.elementsEqual(id.utf8) }) else {
+                context = nil; loading = false
+                error = "이 글은 다른 대화에 있습니다"
+                return nil
+            }
+            if !range.contains(message) {
+                let member = [message.memberId, message.targetMemberId].compactMap { $0 }.first { id in
+                    members.contains { $0.kind == "worker" && $0.id.utf8.elementsEqual(id.utf8) }
+                }
+                clear()
+                return member.map { .member(memberId: $0) } ?? .project
             }
             var unique: [Data: Message] = [:]
             for row in rows where range.contains(row) { unique[Data(row.id.utf8)] = row }
             context = unique.values.sorted(by: ChatHistory.ordered)
             loading = false; messageID = id; revision = UUID()
         } catch {
-            guard flight == token else { return }
+            guard flight == token else { return nil }
             loading = false
             if !(error is CancellationError), (error as? URLError)?.code != .cancelled {
                 self.error = friendlyLoadError(error, what: "대화", verb: "읽지")
             }
         }
+        return nil
     }
 }
 

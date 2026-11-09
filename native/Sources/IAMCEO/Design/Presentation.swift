@@ -508,6 +508,12 @@ func friendlyError(_ raw: String) -> String {
 func friendlyLoadError(_ error: Error, what: String = "원본", verb: String = "받지") -> String {
     let object = "\(what)\(objectParticle(what))"
     let subject = "\(what)\(subjectParticle(what))"
+    if let failure = error as? ChatHistoryFailure {
+        switch failure {
+        case .invalidPage: return "대화 기록을 확인하지 못했습니다. 다시 불러오기를 눌러 주세요."
+        case .storeChanged: return "서버의 대화 기록이 변경되었습니다"
+        }
+    }
     if let api = error as? APIError {
         switch api.status {
         case 401, 403: return "접근이 거절됐습니다. 설정에서 연결을 다시 확인해 주세요."
@@ -516,7 +522,7 @@ func friendlyLoadError(_ error: Error, what: String = "원본", verb: String = "
         case 500...599: return "서버 문제로 \(object) \(verb) 못했습니다. 잠시 뒤 다시 시도해 주세요."
         default:
             let message = api.message.trimmingCharacters(in: .whitespacesAndNewlines)
-            if message.range(of: #"\p{Hangul}"#, options: .regularExpression) != nil { return message }
+            if !message.contains("IAMCEO."), message.range(of: #"\p{Hangul}"#, options: .regularExpression) != nil { return message }
             return "\(object) \(verb) 못했습니다."
         }
     }
@@ -530,8 +536,9 @@ func friendlyLoadError(_ error: Error, what: String = "원본", verb: String = "
         }
     }
     if error is DecodingError { return "\(what) 내용을 읽지 못했습니다. 형식이 맞지 않습니다." }
-    let text = error.localizedDescription
-    if text.range(of: #"\p{Hangul}"#, options: .regularExpression) != nil { return friendlyError(text) }
+    // Foundation's synthesized description can contain a Korean wrapper around an internal type name.
+    if let text = (error as? LocalizedError)?.errorDescription, !text.contains("IAMCEO."),
+       text.range(of: #"\p{Hangul}"#, options: .regularExpression) != nil { return friendlyError(text) }
     return "\(object) \(verb) 못했습니다."
 }
 

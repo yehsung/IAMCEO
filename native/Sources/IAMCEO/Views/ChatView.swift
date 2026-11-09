@@ -746,10 +746,22 @@ private struct ChatConversation: View {
                                  scope: ChatHistoryKey.normalizedScope(targetMemberID: targetMemberID, members: store.members),
                                  archived: store.isArchive)
         let api = store.isDemo ? nil : store.api
-        await focus.open(id, key: key, available: baseItems) {
+        let navigationRevision = router.navigationRevision, projectRevision = router.projectResetRevision
+        let destination = await focus.open(id, key: key, available: baseItems, members: store.members) {
             guard let api else { throw APIError(status: 404, message: "대화를 찾을 수 없습니다.") }
             return try await api.chatMessagesAround(projectID: projectID, messageID: id, archived: key.archived)
         }
+        guard let destination, !Task.isCancelled, isVisible, store.api === api,
+              store.selectedProjectID?.utf8.elementsEqual(projectID.utf8) == true, store.isArchive == key.archived,
+              router.navigationRevision == navigationRevision, router.projectResetRevision == projectRevision,
+              router.chatMessageID?.utf8.elementsEqual(id.utf8) == true,
+              router.chatTarget.map({ Data($0.utf8) }) == targetMemberID.map({ Data($0.utf8) }) else { return }
+        switch destination {
+        case .member(let memberID): router.openChat(memberID)
+        case .project: router.openChat(nil)
+        case .unknown: return
+        }
+        router.chatMessageID = id
     }
 
     private func presentReset() {

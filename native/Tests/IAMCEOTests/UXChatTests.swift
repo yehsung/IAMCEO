@@ -175,6 +175,113 @@ private actor UXChatAroundGate {
         XCTAssertFalse(focus.loading)
     }
 
+    func testChangingRecipientClearsOpenedMessageFocusAndSameRecipientKeepsIt() async {
+        let router = Router(destination: .chat), focus = ChatMessageFocus(), message = row("report")
+        router.openChat("m"); router.chatMessageID = message.id
+        await focus.open(message.id, key: key(scope: .member(memberId: "m")), available: [message]) {
+            XCTFail("A loaded report must not fetch")
+            return []
+        }
+        XCTAssertEqual(focus.messageID, message.id)
+        router.chatTarget = "m"
+        XCTAssertEqual(router.chatMessageID, message.id)
+        for target in ["other", nil, "m"] as [String?] {
+            router.chatMessageID = message.id
+            router.chatTarget = target
+            XCTAssertNil(router.chatMessageID)
+            XCTAssertNil(focus.error)
+        }
+    }
+
+    func testRecipientIdentityUsesBytesAndOpenChatThenMessageIDStillWorks() {
+        let router = Router()
+        router.openChat("é"); router.chatMessageID = "old"
+        router.chatTarget = "e\u{301}"
+        XCTAssertNil(router.chatMessageID)
+        for target in ["e\u{301}", "other", nil] as [String?] {
+            router.openChat(target)
+            XCTAssertNil(router.chatMessageID)
+            router.chatMessageID = "new"
+            XCTAssertEqual(router.chatMessageID, "new")
+            XCTAssertEqual(router.chatTarget, target)
+            XCTAssertEqual(router.destination, .chat)
+        }
+    }
+
+    func testProjectAndConnectionChangesClearFocusEvenWithProjectRecipient() {
+        let router = Router(destination: .chat)
+        for target in [nil, "m"] as [String?] {
+            router.openChat(target); router.chatMessageID = "old-project"
+            router.resetForProjectChange()
+            XCTAssertNil(router.chatMessageID)
+            XCTAssertNil(router.chatTarget)
+            router.openChat(target); router.chatMessageID = "old-connection"
+            router.resetForConnectionChange()
+            XCTAssertNil(router.chatMessageID)
+            XCTAssertNil(router.chatTarget)
+        }
+    }
+
+    func testProjectResetClearsOldFocusAndAppliesNewNotificationFocus() {
+        let router = Router(destination: .chat)
+        router.openChat("old"); router.chatMessageID = "old-report"
+        let route = NotificationRoute(target: .chat(projectId: "new-project", memberId: "worker", messageId: "new-report"),
+                                      chatTarget: "worker", chatMessageID: "new-report")
+        router.applyNotification(route, afterProjectChange: true, resetRevision: router.projectResetRevision)
+        router.resetForProjectChange()
+        XCTAssertEqual(router.chatTarget, "worker")
+        XCTAssertEqual(router.chatMessageID, "new-report")
+        router.resetForProjectChange()
+        XCTAssertNil(router.chatMessageID)
+    }
+
+    func testOutOfScopeReportAndInstructionOpenInTheirConversation() async throws {
+        let members = [Member(id: "lead", kind: "conductor"), Member(id: "worker"), Member(id: "other")]
+        let messages = [row("report", member: "worker"),
+                        Message(id: "instruction", projectId: "p", mine: true, memberId: "lead", targetMemberId: "worker")]
+        for message in messages {
+            for archived in [false, true] {
+                let router = Router(destination: .chat), focus = ChatMessageFocus()
+                router.openChat("other"); router.chatMessageID = message.id
+                var historyKey = key(scope: .member(memberId: "other"))
+                historyKey.archived = archived
+                let rows = [message, row("unrelated", member: "other"), message]
+                let destination = await focus.open(message.id, key: historyKey, available: [], members: members) { rows }
+                XCTAssertEqual(destination, .member(memberId: "worker"))
+                XCTAssertNil(focus.error)
+                XCTAssertNil(focus.context)
+                XCTAssertFalse(focus.loading)
+                guard case .member(let memberID) = try XCTUnwrap(destination) else { return XCTFail("Expected a worker conversation") }
+                router.openChat(memberID); router.chatMessageID = message.id
+                let reopened = ChatMessageFocus()
+                var destinationKey = key(scope: .member(memberId: memberID))
+                destinationKey.archived = archived
+                let nextDestination = await reopened.open(message.id, key: destinationKey, available: [], members: members) { rows }
+                XCTAssertNil(nextDestination)
+                XCTAssertEqual(router.chatMessageID, message.id)
+                XCTAssertEqual(reopened.messageID, message.id)
+                XCTAssertEqual(reopened.context?.map(\.id), [message.id])
+                XCTAssertNil(reopened.error)
+            }
+        }
+    }
+
+    func testOutOfScopeLeadAndUnassignedMessagesOpenProjectConversation() async {
+        let members = [Member(id: "root", kind: "root"), Member(id: "lead", kind: "conductor")]
+        for message in [row("root-report", member: "root"), row("lead-report", member: "lead"),
+                        Message(id: "project", projectId: "p"), row("removed-member", member: "removed")] {
+            let focus = ChatMessageFocus()
+            let destination = await focus.open(message.id, key: key(scope: .member(memberId: "other")),
+                                               available: [], members: members) { [message] }
+            XCTAssertEqual(destination, .project)
+            XCTAssertNil(focus.error)
+            let nextDestination = await focus.open(message.id, key: key(), available: [], members: members) { [message] }
+            XCTAssertNil(nextDestination)
+            XCTAssertEqual(focus.messageID, message.id)
+            XCTAssertNil(focus.error)
+        }
+    }
+
     func testRelatedFileRoutePassesTheExactReportToFocus() async throws {
         let router = Router(destination: .files, usesPhoneNavigation: false)
         let report = row("report", member: "worker")
@@ -228,16 +335,36 @@ private actor UXChatAroundGate {
         XCTAssertNil(focus.error)
     }
 
-    func testAroundRejectsMissingAnchorWrongProjectAndWrongRecipient() async {
+    func testAroundRejectsMissingAnchorWrongProjectAndOversizedResponse() async {
         let foreign = Message(id: "a", projectId: "other", memberId: "m")
-        let wrongMember = row("a", member: "other")
         let missing = row("b")
-        for rows in [[foreign], [wrongMember], [missing], [row("a"), foreign]] {
+        for rows in [[foreign], [missing], [row("a"), foreign], Array(repeating: row("a"), count: 101)] {
             let focus = ChatMessageFocus()
-            await focus.open("a", key: key(scope: .member(memberId: "m")), available: []) { rows }
+            let destination = await focus.open("a", key: key(scope: .member(memberId: "m")), available: []) { rows }
+            XCTAssertNil(destination)
             XCTAssertNil(focus.messageID)
             XCTAssertNil(focus.context)
             XCTAssertNotNil(focus.error)
+            XCTAssertFalse(focus.loading)
+            XCTAssertEqual(focus.error, rows.first?.id == "b" ? "이 글은 다른 대화에 있습니다"
+                           : "대화 기록을 확인하지 못했습니다. 다시 불러오기를 눌러 주세요.")
+        }
+    }
+
+    func testClearedAndCancelledFocusCannotRedirectLateOutOfScopeResponse() async {
+        for cancel in [false, true] {
+            let focus = ChatMessageFocus(), gate = UXChatAroundGate()
+            let historyKey = key(scope: .member(memberId: "m")), outside = row("old", member: "other")
+            let members = [Member(id: "other")]
+            let task = Task { await focus.open("old", key: historyKey, available: [], members: members) { try await gate.fetch() } }
+            await gate.waitForRequest()
+            if cancel { task.cancel() } else { focus.clear() }
+            await gate.respond([outside])
+            let destination = await task.value
+            XCTAssertNil(destination)
+            XCTAssertNil(focus.messageID)
+            XCTAssertNil(focus.context)
+            XCTAssertNil(focus.error)
             XCTAssertFalse(focus.loading)
         }
     }
@@ -258,7 +385,9 @@ private actor UXChatAroundGate {
             XCTAssertTrue(focus.loading)
             if clear { focus.clear() }
             else { await focus.open("current", key: historyKey, available: [current]) { throw URLError(.unsupportedURL) } }
-            await gate.respond([old]); await task.value
+            await gate.respond([old])
+            let destination = await task.value
+            XCTAssertNil(destination)
             XCTAssertEqual(focus.messageID, clear ? nil : "current")
             XCTAssertNil(focus.context)
             XCTAssertNil(focus.error)
@@ -271,7 +400,9 @@ private actor UXChatAroundGate {
         let task = Task { await focus.open("a", key: historyKey, available: []) { try await gate.fetch() } }
         await gate.waitForRequest()
         task.cancel()
-        await gate.respond([anchor]); await task.value
+        await gate.respond([anchor])
+        let destination = await task.value
+        XCTAssertNil(destination)
         XCTAssertNil(focus.messageID)
         XCTAssertNil(focus.context)
         XCTAssertNil(focus.error)

@@ -51,7 +51,11 @@ final class Router {
     var memberID: String?
     var fileID: String?
     /// Composer / chat recipient. nil = 총괄 (project conversation).
-    var chatTarget: String?
+    var chatTarget: String? {
+        didSet {
+            if chatTarget.map({ Data($0.utf8) }) != oldValue.map({ Data($0.utf8) }) { chatMessageID = nil }
+        }
+    }
     var chatMessageID: String?
     var navigationNotice: String?
     var projectManagement: ProjectManagementSelection?

@@ -340,6 +340,20 @@ final class FriendlyErrorTests: XCTestCase {
 }
 
 final class FriendlyLoadErrorTests: XCTestCase {
+    func testChatHistoryFailuresUseKoreanAndUnknownErrorsHideInternalNames() {
+        XCTAssertEqual(friendlyLoadError(ChatHistoryFailure.invalidPage),
+                       "대화 기록을 확인하지 못했습니다. 다시 불러오기를 눌러 주세요.")
+        XCTAssertEqual(friendlyLoadError(ChatHistoryFailure.storeChanged), "서버의 대화 기록이 변경되었습니다")
+        enum UnknownFailure: Error { case unexpected }
+        let raw = "작업을 완료할 수 없습니다.(IAMCEO.UnknownFailure 오류 0.)"
+        let failures: [Error] = [UnknownFailure.unexpected, NSError(domain: "IAMCEO.UnknownFailure", code: 0),
+                                 NSError(domain: "IAMCEO.UnknownFailure", code: 0, userInfo: [NSLocalizedDescriptionKey: raw]),
+                                 APIError(status: 400, message: raw)]
+        for error in failures {
+            XCTAssertEqual(friendlyLoadError(error, what: "대화", verb: "읽지"), "대화를 읽지 못했습니다.")
+        }
+    }
+
     func testStatusCodesAndNetworkErrorsBecomeActionableKorean() {
         XCTAssertEqual(friendlyLoadError(APIError(status: 502, message: "Request failed (502).")),
                        "서버 문제로 원본을 받지 못했습니다. 잠시 뒤 다시 시도해 주세요.")

@@ -58,18 +58,17 @@ export function codexFolderTrust(screen: string, cwd: string): { prompt: Approva
   } };
 }
 
-/** Never reconstruct wrapped paths or remove potentially real path whitespace. */
+/** Only a complete, unpadded single row can establish the workspace path. */
 function matchesWorkspacePath(lines: string[], heading: number, question: number, cwd: string, indent: number): boolean {
-  if (!cwd.startsWith("/") || unsafePathCharacters.test(cwd) || cwd.endsWith(" ")) return false;
+  if (!cwd.startsWith("/") || /[\x00-\x1f\x7f-\x9f\u2028\u2029]/u.test(cwd) || /\s$/u.test(cwd)) return false;
   const rows = lines.slice(heading + 1, question);
   while (rows.length && /^ *$/.test(rows[0]!)) rows.shift();
   while (rows.length && /^ *$/.test(rows.at(-1)!)) rows.pop();
   if (rows.length !== 1) return false;
-  const row = rows[0]!;
-  // A full-width row may continue on a blank/space-only row. Trailing spaces
-  // may be padding or a different folder name; neither establishes this cwd.
-  if (unsafePathCharacters.test(row) || Bun.stringWidth(row) >= 160 || / $/.test(row)) return false;
-  return row === cwd || row === " ".repeat(indent) + cwd;
+  const path = rows[0]!;
+  // terminal.read does not distinguish padding from a real filename space, or
+  // soft wraps from separate rows. Trimming/joining could approve another cwd.
+  // Even an exact row at the 160-cell edge could have a clipped continuation.
+  if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/u.test(path) || /\s$/u.test(path) || Bun.stringWidth(path) >= 160) return false;
+  return path === cwd || path === " ".repeat(indent) + cwd;
 }
-
-const unsafePathCharacters = /[\x00-\x1f\x7f-\x9f\u2028\u2029]/u;

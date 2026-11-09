@@ -21,7 +21,7 @@ async function until(check: () => boolean) {
   for (let i = 0; i < 100 && !check(); i++) await Bun.sleep(10);
   expect(check()).toBe(true);
 }
-async function fixture(healthMs = 60_000) {
+async function fixture(healthMs = 60_000, rpcTimeoutMs = 100) {
   const isolated = createIsolatedRuntime();
   const config = loadConfig({ IAMCEO_HOME: isolated.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: isolated.socketPath, IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin });
   const db = openDb(config.dbPath);
@@ -79,7 +79,7 @@ async function fixture(healthMs = 60_000) {
   const orchestrators: Orchestrator[] = [];
   const runners: CoreRunner[] = [];
   function orchestrator() {
-    const runner = new CoreRunner({ ...isolated.runnerOptions(isolated.providerHomes) }, { recoveryStore: store, pollMs: 20, rpcTimeoutMs: 100, sendTimeoutMs: 100 });
+    const runner = new CoreRunner({ ...isolated.runnerOptions(isolated.providerHomes) }, { recoveryStore: store, pollMs: 20, rpcTimeoutMs, sendTimeoutMs: rpcTimeoutMs });
     const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]), timings: { tickMs: 60_000, healthMs, retryMs: 10, inputBusyRetryMs: 10 } });
     runners.push(runner); orchestrators.push(orch);
     return { orch, runner };
@@ -256,16 +256,21 @@ test("Codex gone then wake with an unknown native ID cannot create a fresh conve
 });
 
 test("restart recognizes a later settled core turn without interruption or another send", async () => {
-  const f = await fixture(); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  const f = await fixture(60_000, 5_000); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
   await f.orch.assign(f.project.id, member.handle, { text: "Finish while away" });
   const run = f.store.listPendingExecutions()[0]!;
   await f.orch.shutdown();
+  // A missing report intentionally schedules a new send after retryMs. Supply
+  // the report so this test measures recovery rather than racing that timer.
+  f.store.createMessage({ projectId: f.project.id, memberId: member.id, who: member.name, kind: "완료", title: "완료 보고", body: "작업 완료" });
   const terminal = f.terminals.get(member.paneId!)!;
   terminal.turn = 1; terminal.status = { state: "done" };
   const next = f.orchestrator(); await next.orch.recover();
+  await until(() => f.store.getExecutionJournal(run.runId)?.phase === "ended");
   expect(f.store.getExecutionJournal(run.runId)).toMatchObject({ phase: "ended", result: "success", interruptionNotifiedAt: null });
+  await next.orch.refreshConnection(); await next.orch.pump(member.id);
   expect(f.count("terminal.send")).toBe(1); expect(f.count("terminal.run")).toBe(1);
-});
+}, 15_000);
 
 test("a write whose reply was lost settles from log receipt once a later turn is seen, then asks for the missing report", async () => {
   // Real 2026-11-07 run: kill -9 ~60ms after an owner message left dispatch write_started and the run in "starting".
@@ -286,17 +291,28 @@ test("a write whose reply was lost settles from log receipt once a later turn is
 });
 
 test("a recovered start with no later turn stays received and fenced; time alone never ends it", async () => {
-  const f = await fixture(); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  const f = await fixture(60_000, 5_000); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
   await f.orch.assign(f.project.id, member.handle, { text: "Crash-window task, not yet counted" });
-  const run = f.store.listPendingExecutions()[0]!;
-  f.store.saveExecutionJournal({ ...run, phase: "starting", inputReceivedAt: null, startedAt: null, turn: null, createdAt: new Date(Date.now() - 60_000).toISOString() });
   await f.orch.shutdown();
+  const run = f.store.listPendingExecutions()[0]!;
+  const old = new Date(Date.now() - 60_000).toISOString();
+  // Freeze the crash-window snapshot after old runner events have drained.
+  f.store.saveExecutionJournal({ ...run, phase: "starting", inputReceivedAt: null, startedAt: null, turn: null, createdAt: old });
   const terminal = f.terminals.get(member.paneId!)!; terminal.turn = 0; terminal.status = { state: "done" };
   const next = f.orchestrator(); await next.orch.recover(); await next.orch.refreshConnection();
+  await until(() => f.store.getExecutionJournal(run.runId)?.phase === "received");
   expect(f.store.getExecutionJournal(run.runId)).toMatchObject({ phase: "received", turn: 0 });
+  f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "instruction", text: "Must remain fenced" });
+  // Age the receipt timestamps without sleeping; elapsed time is not evidence
+  // of completion. Exercise health reconciliation and the queued-send guard.
+  const received = f.store.getExecutionJournal(run.runId)!;
+  f.store.saveExecutionJournal({ ...received, inputReceivedAt: old, updatedAt: old });
+  await next.orch.refreshConnection(); await next.orch.pump(member.id);
+  expect(f.store.getExecutionJournal(run.runId)).toMatchObject({ phase: "received", turn: 0, endedAt: null, result: null });
   expect(f.store.listPendingExecutions()).toHaveLength(1);
+  expect(f.store.listPending(member.id)).toHaveLength(1);
   expect(f.count("terminal.send")).toBe(1);
-});
+}, 15_000);
 
 test("a pump that never settles is reported once with its waiting stage and nothing is sent", async () => {
   // Real 2026-11-07 run: one member's queue stayed stuck for minutes with no clue where its pump waited.

@@ -36,6 +36,10 @@ export interface CoreRunnerDeps {
   compactStore?: { load(memberId: string): CoreCompactState | null; save(memberId: string, state: CoreCompactState): void };
 }
 interface Track {
+  statusPublishedAt: number;
+  publishedStatus: string | null;
+  pendingStatus: Extract<RunnerEvent, { type: "status" }> | null;
+  statusTimer: ReturnType<typeof setTimeout> | null;
   statusKey: string | null;
   setupAttempted: string | null;
   setupError: { code: string; note: string } | null;
@@ -124,6 +128,23 @@ export class CoreRunner implements Runner {
     return { terminalId: track.terminal.address, ...(track.member.sessionGeneration !== undefined ? { sessionGeneration: track.member.sessionGeneration } : {}), turn: track.terminal.turn ?? null, inputEpoch: track.epoch, observedAt: track.observedAt };
   }
   private event(track: Track, event: RunnerEvent): void { this.emit({ ...this.observation(track), ...event }); }
+  private publishStatus(track: Track, event: Extract<RunnerEvent, { type: "status" }>): void {
+    const delay = 250 - (Date.now() - track.statusPublishedAt);
+    if (["working", "idle"].includes(event.status) && ["working", "idle"].includes(track.publishedStatus ?? "") && event.observation?.freshness === "fresh" && delay > 0) {
+      track.pendingStatus = event;
+      track.statusTimer ??= setTimeout(() => {
+        track.statusTimer = null;
+        const latest = track.pendingStatus; track.pendingStatus = null;
+        if (!this.closed && this.tracks.get(track.member.id) === track && latest) this.publishStatus(track, latest);
+      }, delay);
+      return;
+    }
+    if (track.statusTimer) clearTimeout(track.statusTimer);
+    track.statusTimer = null; track.pendingStatus = null;
+    track.statusPublishedAt = Date.now();
+    track.publishedStatus = event.status;
+    this.event(track, event);
+  }
   private identity(track: Track): RunnerTerminalIdentity {
     return { terminalId: track.terminal.address, sessionId: track.sessionId, sessionGeneration: track.member.sessionGeneration ?? -1,
       process: track.terminal.pid ? { pid: track.terminal.pid, startedAt: null } : null };
@@ -163,7 +184,7 @@ export class CoreRunner implements Runner {
     if (this.closed) throw new CoreError("closed", "CoreRunner shut down while starting; terminal remains owned by core");
     const launch = terminal.labels["iamceo.operation"] ? this.deps.recoveryStore?.getLifecycleJournal?.(terminal.labels["iamceo.operation"]) : null;
     const launchedAt = launch?.memberId === member.id && launch.intent === "start" ? launch.createdAt : null;
-    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, status: null, statusKey: null, setupAttempted: null, setupError: null,
+    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, status: null, statusKey: null, statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
       epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, bindingSince: terminal.labels["iamceo.startedAt"] || launchedAt || new Date().toISOString(), binding: null, compact: null,
       dispatches: [], evidence: new Map(), lastError: null, nextPollAt: 0, pollDelay: this.pollMs, observedAt: new Date().toISOString(), failures: 0, failure: null };
     this.restore(track);
@@ -281,12 +302,16 @@ export class CoreRunner implements Runner {
     const setup = status === "blocked" ? await this.readSetup(track) : null;
     track.setupError = setup ? { code: "folder_trust", note: `폴더 신뢰 확인 창에서 멈췄습니다: ${track.member.cwd}` } : null;
     const blockedReason = setup ? "setup" : state === "blocked" ? (["permission", "selection", "setup"].includes(terminal.status?.kind || "") ? terminal.status!.kind as "permission" | "selection" | "setup" : "status_unknown") : status === "blocked" ? "status_unknown" : null;
+    if (state === "error") {
+      if (track.statusTimer) clearTimeout(track.statusTimer);
+      track.statusTimer = null; track.pendingStatus = null;
+    }
     const statusKey = JSON.stringify([status, blockedReason, setup?.prompt.fingerprint ?? null]);
     if (statusKey !== track.statusKey || track.failure) {
       track.status = status;
       track.statusKey = statusKey;
-      if (state === "error") return; // Keep the error result from being overwritten by idle in the same observation.
-      this.event(track, { type: "status", memberId: track.member.id, status, blockedReason, observation: { source: "core", observedAt: track.observedAt, freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: track.setupError }, ...(status === "gone" ? { exit: { reason: terminal.reason ?? null, exitCode: terminal.exit_code ?? null } } : {}) });
+      if (state === "error") return; // Keep the error result from being overwritten by an earlier queued status.
+      this.publishStatus(track, { type: "status", memberId: track.member.id, status, blockedReason, observation: { source: "core", observedAt: track.observedAt, freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: track.setupError }, ...(status === "gone" ? { exit: { reason: terminal.reason ?? null, exitCode: terminal.exit_code ?? null } } : {}) });
     }
   }
   /** 턴 끝 실측 창·사용량. core 는 문맥 표시만 하고 자동 압축은 하지 않는다. */
@@ -332,7 +357,7 @@ export class CoreRunner implements Runner {
       } catch (error) {
         const previousFailure = track.failure;
         track.failures++; track.failure = error instanceof CoreError ? error.kind : "error";
-        if (!this.closed && this.tracks.get(track.member.id) === track && previousFailure !== track.failure && track.failure !== "not_found") this.event(track, { type: "status", memberId: track.member.id, status: track.status as "working" | "idle" | "blocked" | "gone" || "blocked",
+        if (!this.closed && this.tracks.get(track.member.id) === track && previousFailure !== track.failure && track.failure !== "not_found") this.publishStatus(track, { type: "status", memberId: track.member.id, status: track.status as "working" | "idle" | "blocked" | "gone" || "blocked",
           observation: { source: "core", observedAt: track.observedAt, freshness: "stale", ownership: track.failure === "conflict" ? "conflict" : "unknown", consecutiveFailures: track.failures, error: { code: track.failure, note: "Core terminal observation failed; retry read-only inspection" } } });
         throw error;
       }
@@ -923,6 +948,7 @@ export class CoreRunner implements Runner {
     this.configuring.clear();
     this.parallelPreferences.clear();
     this.leases.clear();
+    for (const track of this.tracks.values()) if (track.statusTimer) clearTimeout(track.statusTimer);
     this.tracks.clear();
   }
 }

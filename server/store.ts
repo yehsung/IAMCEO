@@ -634,6 +634,56 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   private readonly sqlTransaction: Database["transaction"];
   private commitFrames: (() => void)[][] = [];
   private lastMessageMs = 0;
+  private deliveryRead: {
+    projectId: string; deliveries: Delivery[]; rows: Map<string, Row>; recoveries: Map<string, Row>;
+    stalls: Set<string>; receiptMembers: Set<string>; startedRuns: Map<string, number>;
+    reportRefs: Map<string, Row>; superseded: Map<string, string>; messageDeliveries: Map<string, Delivery[]>; memo: Map<string, unknown>;
+  } | null = null;
+
+  /** Request-local read snapshot. Never survives a synchronous read or caches runtime wait state across requests. */
+  withDeliveryRead<T>(projectId: string, read: () => T): T {
+    if (this.deliveryRead?.projectId === projectId) return read();
+    const previous = this.deliveryRead;
+    const rows = this.rows("SELECT * FROM deliveries WHERE project_id = ? ORDER BY rowid", projectId);
+    const reportRefs = this.rows("SELECT * FROM report_references WHERE project_id = ? ORDER BY sequence, rowid", projectId);
+    const messageDeliveries = new Map<string, Delivery[]>();
+    for (const row of rows) if (row.ref_type === "message" && !["delivered", "failed"].includes(row.status)) {
+      const own = messageDeliveries.get(row.ref_id) ?? [];
+      own.push(toDelivery(row)); messageDeliveries.set(row.ref_id, own);
+    }
+    this.deliveryRead = { projectId, rows: new Map(rows.map(row => [row.id, row])), deliveries: rows.map(toDelivery),
+      recoveries: new Map(this.rows("SELECT r.* FROM delivery_recovery r JOIN deliveries d ON d.id = r.delivery_id WHERE d.project_id = ?", projectId).map(row => [row.delivery_id, row])),
+      stalls: new Set(this.rows("SELECT s.delivery_id FROM delivery_stalls s JOIN deliveries d ON d.id = s.delivery_id WHERE d.project_id = ? AND s.resolved_at IS NULL", projectId).map(row => row.delivery_id)),
+      receiptMembers: new Set(rows.filter(row => row.status === "delivering" || row.hold_reason === "delivery_unknown").map(row => row.member_id)),
+      startedRuns: new Map(this.rows("SELECT member_id, MAX(rowid) AS last_run FROM execution_journal WHERE project_id = ? AND started_at IS NOT NULL GROUP BY member_id", projectId).map(row => [row.member_id, row.last_run])),
+      reportRefs: new Map(reportRefs.map(row => [row.source_message_id, row])), superseded: new Map(reportRefs.filter(row => row.corrects_message_id).map(row => [row.corrects_message_id, row.source_message_id])),
+      messageDeliveries, memo: new Map() };
+    try {
+      const result = read();
+      if (result instanceof Promise) throw new Error("withDeliveryRead requires a synchronous callback");
+      return result;
+    } finally { this.deliveryRead = previous; }
+  }
+
+  private deliveryReadMemo<T>(key: string, read: () => T): T {
+    if (!this.deliveryRead) return read();
+    if (!this.deliveryRead.memo.has(key)) this.deliveryRead.memo.set(key, read());
+    return this.deliveryRead.memo.get(key) as T;
+  }
+
+  deliveryNoticePreviews(projectId: string): Map<string, string> {
+    const previews = new Map<string, string>();
+    for (const [type, table, column] of [["message", "messages", "body"], ["decision", "decisions", "title"], ["todo", "todos", "title"]]) {
+      for (const row of this.rows(`SELECT id, ${column} AS preview FROM ${table} WHERE id IN (SELECT ref_id FROM deliveries WHERE project_id = ? AND ref_type = ?)`, projectId, type)) previews.set(`${type}:${row.id}`, row.preview);
+    }
+    return previews;
+  }
+
+  listUnlinkedFailedMessages(projectId: string): Message[] {
+    return this.rows(`SELECT m.* FROM messages m WHERE m.project_id = ? AND m.mine = 1 AND m.delivery = 'failed'
+      AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.project_id = m.project_id AND d.ref_type = 'message' AND d.ref_id = m.id)
+      ORDER BY m.at DESC, m.id DESC`, projectId).map(toMessage);
+  }
   private waitContext: ((memberId: string) => { busy: boolean; waking: boolean; used: number }) | null = null;
   private recheckPending: ((memberId: string) => void) | null = null;
 
@@ -660,23 +710,29 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   deliveryWait(delivery: Delivery): DeliveryWaitInfo {
+    return this.deliveryReadMemo(`wait:${delivery.id}`, () => this.readDeliveryWait(delivery));
+  }
+
+  private readDeliveryWait(delivery: Delivery): DeliveryWaitInfo {
     const member = this.requireMember(delivery.memberId), project = this.requireProject(delivery.projectId);
     const input = this.inputState(member.id), recovery = this.getDeliveryRecovery(delivery.id);
-    const context = this.waitContext?.(member.id);
+    const context = this.deliveryReadMemo(`context:${member.id}`, () => this.waitContext?.(member.id));
     const waitingSince = delivery.createdAt;
     if (project.archived) return { waitReason: "archived", waitingSince };
     if (!project.runnerEnabled) return { waitReason: "runner_off", waitingSince };
     if (input.lease) return { waitReason: "manual_control", waitingSince };
     if (member.status === "blocked" || delivery.holdReason === "blocked") return { waitReason: "approval", waitingSince };
-    if (input.unresolvedDispatches.length || recovery && !["none", "resolved", "stopped"].includes(recovery.phase) || this.listDeliveries(project.id).some(d => d.memberId === member.id && (d.status === "delivering" || d.holdReason === "delivery_unknown"))) return { waitReason: "receipt_check", waitingSince };
+    if (input.unresolvedDispatches.length || recovery && !["none", "resolved", "stopped"].includes(recovery.phase) || (this.deliveryRead?.projectId === project.id ? this.deliveryRead.receiptMembers.has(member.id) : this.listDeliveries(project.id).some(d => d.memberId === member.id && (d.status === "delivering" || d.holdReason === "delivery_unknown")))) return { waitReason: "receipt_check", waitingSince };
     if (context?.waking || member.lifecycleState && ["starting", "starting_unknown", "reconnecting"].includes(member.lifecycleState.phase)) return { waitReason: "waking", waitingSince };
     if (project.connection.reason === "backend_down" || ["backend_down", "runner_disabled"].includes(delivery.holdReason ?? "")) return { waitReason: "runner_off", waitingSince };
     // A passive input belongs to the next turn, not the turn already in flight.
     // Persisted insertion order avoids same-millisecond and restart ambiguity.
-    if (!delivery.wake && delivery.attempts === 0 && ["queued", "held"].includes(delivery.status) && !this.row(`
+    if (!delivery.wake && delivery.attempts === 0 && ["queued", "held"].includes(delivery.status) && !(this.deliveryRead?.rows.has(delivery.id)
+      ? (this.deliveryRead.startedRuns.get(member.id) ?? 0) > this.deliveryRead.rows.get(delivery.id)!.next_turn_after_run
+      : this.row(`
       SELECT 1 FROM execution_journal e JOIN deliveries d ON d.id = ?
       WHERE e.member_id = d.member_id AND e.project_id = d.project_id AND e.rowid > d.next_turn_after_run
-        AND e.started_at IS NOT NULL LIMIT 1`, delivery.id)) {
+        AND e.started_at IS NOT NULL LIMIT 1`, delivery.id))) {
       return { waitReason: "next_turn", waitingSince };
     }
     // Once a later turn started, leaving this passive delivery behind is
@@ -690,24 +746,36 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   deliveryStalled(id: string): boolean {
+    if (this.deliveryRead?.rows.has(id)) return this.deliveryRead.stalls.has(id);
     return !!this.row("SELECT 1 FROM delivery_stalls WHERE delivery_id = ? AND resolved_at IS NULL", id);
   }
 
   detectDeliveryStalls(now = Date.now(), thresholdMs = 120_000): void {
     this.run("UPDATE delivery_stalls SET resolved_at = ? WHERE resolved_at IS NULL AND delivery_id IN (SELECT id FROM deliveries WHERE status IN ('delivered','failed'))", new Date(now).toISOString());
+    const byProject = new Map<string, Delivery[]>();
     for (const delivery of this.listUndelivered()) {
-      if (this.deliveryWait(delivery).waitReason !== "unknown") {
-        this.run("UPDATE delivery_stalls SET resolved_at = ? WHERE delivery_id = ? AND resolved_at IS NULL", new Date(now).toISOString(), delivery.id);
-        continue;
+      const own = byProject.get(delivery.projectId) ?? [];
+      own.push(delivery); byProject.set(delivery.projectId, own);
+    }
+    for (const [projectId, deliveries] of byProject) {
+      const observations = this.withDeliveryRead(projectId, () => deliveries.map(delivery => {
+        const waiting = this.deliveryWait(delivery).waitReason !== "unknown";
+        const progress = waiting ? delivery.createdAt : this.listDispatches(delivery.memberId).filter(d => d.items.some(i => i.deliveryId === delivery.id)).at(-1)?.updatedAt ?? delivery.createdAt;
+        return { delivery, waiting, stalled: this.deliveryStalled(delivery.id), progress };
+      }));
+      for (const { delivery, waiting, stalled, progress } of observations) {
+        if (waiting) {
+          if (stalled) this.run("UPDATE delivery_stalls SET resolved_at = ? WHERE delivery_id = ? AND resolved_at IS NULL", new Date(now).toISOString(), delivery.id);
+          continue;
+        }
+        if (now - Date.parse(progress) < thresholdMs || stalled) continue;
+        this.transaction(() => {
+          this.run(`INSERT INTO delivery_stalls (delivery_id, detected_at) VALUES (?, ?)
+            ON CONFLICT(delivery_id) DO UPDATE SET detected_at = excluded.detected_at, resolved_at = NULL`, delivery.id, new Date(now).toISOString());
+          this.appendActivity(delivery.memberId, "error", "전달이 진행되지 않고 있습니다. 다시 확인해 주세요", `delivery-stalled:${delivery.id}`);
+          this.createMessage({ id: `msg_delivery_stalled_${delivery.id}`, projectId: delivery.projectId, who: "시스템", kind: "시스템", title: "전달 확인 필요", body: `${this.requireMember(delivery.memberId).name}에게 전달이 진행되지 않고 있습니다. 전달 정보에서 '다시 확인'을 눌러 주세요. 원래 입력을 중복해서 보내지 않습니다.` });
+        });
       }
-      const progress = this.listDispatches(delivery.memberId).filter(d => d.items.some(i => i.deliveryId === delivery.id)).at(-1)?.updatedAt ?? delivery.createdAt;
-      if (now - Date.parse(progress) < thresholdMs || this.deliveryStalled(delivery.id)) continue;
-      this.transaction(() => {
-        this.run(`INSERT INTO delivery_stalls (delivery_id, detected_at) VALUES (?, ?)
-          ON CONFLICT(delivery_id) DO UPDATE SET detected_at = excluded.detected_at, resolved_at = NULL`, delivery.id, new Date(now).toISOString());
-        this.appendActivity(delivery.memberId, "error", "전달이 진행되지 않고 있습니다. 다시 확인해 주세요", `delivery-stalled:${delivery.id}`);
-        this.createMessage({ id: `msg_delivery_stalled_${delivery.id}`, projectId: delivery.projectId, who: "시스템", kind: "시스템", title: "전달 확인 필요", body: `${this.requireMember(delivery.memberId).name}에게 전달이 진행되지 않고 있습니다. 전달 정보에서 '다시 확인'을 눌러 주세요. 원래 입력을 중복해서 보내지 않습니다.` });
-      });
     }
   }
 
@@ -756,9 +824,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       } catch { /* Malformed legacy links are plain text, never cross-project references. */ }
     }
     message.supersedes = refs?.correctsMessageId ?? null;
-    message.supersededBy = this.row("SELECT source_message_id FROM report_references WHERE project_id = ? AND corrects_message_id = ? ORDER BY sequence DESC, rowid DESC LIMIT 1", message.projectId, message.id)?.source_message_id ?? null;
+    message.supersededBy = this.deliveryRead?.projectId === message.projectId ? this.deliveryRead.superseded.get(message.id) ?? null : this.row("SELECT source_message_id FROM report_references WHERE project_id = ? AND corrects_message_id = ? ORDER BY sequence DESC, rowid DESC LIMIT 1", message.projectId, message.id)?.source_message_id ?? null;
     if (!includeDelivery) return message;
-    const deliveries = this.rows("SELECT * FROM deliveries WHERE ref_type = 'message' AND ref_id = ? AND status NOT IN ('delivered', 'failed') ORDER BY rowid", message.id).map(toDelivery);
+    const deliveries = this.deliveryRead?.projectId === message.projectId ? this.deliveryRead.messageDeliveries.get(message.id) ?? [] : this.rows("SELECT * FROM deliveries WHERE ref_type = 'message' AND ref_id = ? AND status NOT IN ('delivered', 'failed') ORDER BY rowid", message.id).map(toDelivery);
     return deliveries.length ? { ...message, deliveryInfo: deliveries.map(d => ({ deliveryId: d.id, memberId: d.memberId, ...this.deliveryWait(d) })) } : message;
   }
   private runnerHealth = new Map<Backend, RunnerHealth>();
@@ -863,6 +931,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   private run(sql: string, ...params: SQLQueryBindings[]): void {
+    if (this.deliveryRead) throw new Error("Cannot write inside a delivery read snapshot");
     this.db.query<Row, SQLQueryBindings[]>(sql).run(...params);
   }
 
@@ -1008,8 +1077,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   // ---- 프로젝트 ----
   getProject(id: string): Project | null {
-    const r = this.row("SELECT * FROM projects WHERE id = ?", id);
-    return r ? this.projectFrom(r) : null;
+    return this.deliveryReadMemo(`project:${id}`, () => {
+      const r = this.row("SELECT * FROM projects WHERE id = ?", id);
+      return r ? this.projectFrom(r) : null;
+    });
   }
 
   requireProject(id: string): Project {
@@ -1145,6 +1216,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   projectState(id: string): ProjectState {
+    return this.withDeliveryRead(id, () => this.readProjectState(id));
+  }
+
+  private readProjectState(id: string): ProjectState {
     const project = this.requireProject(id);
     return {
       project,
@@ -1160,8 +1235,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   // ---- 직원 ----
   getMember(id: string): Member | null {
-    const r = this.row(`${MEMBER_SELECT} WHERE m.id = ?`, id);
-    return r ? toMember(r) : null;
+    return this.deliveryReadMemo(`member:${id}`, () => {
+      const r = this.row(`${MEMBER_SELECT} WHERE m.id = ?`, id);
+      return r ? toMember(r) : null;
+    });
   }
 
   requireMember(id: string): Member {
@@ -1278,6 +1355,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       else if (patch.status === "blocked" && before.status !== "blocked" && patch.blockedReason === undefined) patch = { ...patch, blockedReason: "status_unknown" };
       const at = nowIso();
       if (patch.now !== undefined && patch.nowAt === undefined) patch = { ...patch, nowAt: at };
+      const changed = Object.entries(patch).filter(([key, value]) => value !== undefined && JSON.stringify(value) !== JSON.stringify(before[key as keyof MemberPatch]));
+      if (!changed.length) return before;
+      const observationOnly = changed.every(([key]) => key === "statusObservation") && patch.statusObservation && before.statusObservation &&
+        JSON.stringify({ ...patch.statusObservation, observedAt: null }) === JSON.stringify({ ...before.statusObservation, observedAt: null });
       const { set, values } = buildSet({
         ...patch,
         statusObservation: patch.statusObservation == null ? patch.statusObservation : JSON.stringify(patch.statusObservation),
@@ -1292,6 +1373,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         this.run("UPDATE member_context_state SET measurement_json = NULL, updated_at = ? WHERE member_id = ?", nowIso(), id);
       }
       const member = this.requireMember(id);
+      if (observationOnly) return member;
       this.recorder?.member(before, member);
       this.emit({ type: "member", member });
       if (member.status !== before.status || member.blockedReason !== before.blockedReason) this.emitProjects();
@@ -2019,6 +2101,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   // ---- 전달 큐 ----
   getDelivery(id: string): Delivery | null {
+    if (this.deliveryRead?.rows.has(id)) return this.deliveryReadMemo(`delivery:${id}`, () => toDelivery(this.deliveryRead!.rows.get(id)!));
     const r = this.row("SELECT * FROM deliveries WHERE id = ?", id);
     return r ? toDelivery(r) : null;
   }
@@ -2067,6 +2150,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   /** 아직 전달되지 않은 것(queued·held), 넣은 순서대로. */
   listPending(memberId: string): Delivery[] {
     return this.rows("SELECT * FROM deliveries WHERE member_id = ? AND status IN ('queued','held') ORDER BY rowid", memberId).map(toDelivery);
+  }
+
+  listSendablePending(memberId: string): Delivery[] {
+    return this.rows("SELECT * FROM deliveries WHERE member_id = ? AND status IN ('queued','held') AND (retry_reason IS NULL OR retry_reason != 'rejected_limit') ORDER BY rowid", memberId).map(toDelivery);
   }
 
   /** 서버 재시작 복구용: 프로젝트 전체의 미전달 + 전달 중이던 것. */
@@ -2266,6 +2353,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   // ---- 설정 ----
   getSettings(): Settings {
+    return this.deliveryReadMemo("settings", () => this.readSettings());
+  }
+
+  private readSettings(): Settings {
     const settings: Settings = { ...DEFAULT_SETTINGS };
     for (const r of this.rows("SELECT key, value FROM settings")) {
       if (r.key in settings) (settings as unknown as Record<string, unknown>)[r.key] = JSON.parse(r.value);
@@ -2331,7 +2422,24 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   listDeliveries(projectId?: string): Delivery[] {
+    if (projectId !== undefined && this.deliveryRead?.projectId === projectId) return this.deliveryRead.deliveries;
     return this.rows(`SELECT * FROM deliveries ${projectId === undefined ? "" : "WHERE project_id = ?"} ORDER BY rowid`, ...(projectId === undefined ? [] : [projectId])).map(toDelivery);
+  }
+
+  /** Ordinary queued rows need no evidence scan. An unresolved physical write remains eligible even after logical resolution. */
+  listDeliveryRecoveryCandidates(): Delivery[] {
+    return this.rows(`SELECT d.* FROM deliveries d JOIN delivery_recovery r ON r.delivery_id = d.id
+      WHERE r.phase NOT IN ('none','resolved','stopped') OR d.status IN ('failed','delivering')
+        OR (d.status = 'held' AND d.hold_reason = 'delivery_unknown')
+        OR EXISTS (SELECT 1 FROM delivery_dispatch_items i JOIN delivery_dispatches p ON p.id = i.dispatch_id
+          WHERE i.delivery_id = d.id AND p.transport_state IN ('prepared','write_started','unknown'))
+      ORDER BY d.rowid`).map(toDelivery);
+  }
+
+  deliveryRetryDue(memberId: string, backend: Backend): number {
+    return this.rows(`SELECT next_attempt_at FROM deliveries WHERE next_attempt_at IS NOT NULL
+      AND ((member_id = ? AND status IN ('queued','held')) OR retry_scope = ? OR retry_scope = ?)`,
+      memberId, `member:${memberId}`, `backend:${backend}`).reduce((due, row) => Math.max(due, Date.parse(row.next_attempt_at)), 0);
   }
 
   // ---- revision / CAS ----
@@ -2454,6 +2562,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   inputState(memberId: string): RunnerRecoveryState {
+    return this.deliveryReadMemo(`input:${memberId}`, () => this.readInputState(memberId));
+  }
+
+  private readInputState(memberId: string): RunnerRecoveryState {
     const generation = this.memberRevisions(memberId).sessionGeneration;
     const r = this.row("SELECT * FROM terminal_leases WHERE member_id = ? AND generation = ? AND expires_at > ?", memberId, generation, Date.now());
     return { lease: r ? { memberId, claimId: r.claim_id, leaseId: r.lease_id, identity: json(r.terminal_identity_json), expiresAt: r.expires_at, lastInputSequence: r.last_input_sequence } : null, unresolvedDispatches: this.listDispatches(memberId).filter((d) => ["prepared", "write_started", "unknown"].includes(d.transportState) || d.items.some((item) => { const phase = this.getDeliveryRecovery(item.deliveryId)?.phase; return phase !== undefined && !["none", "resolved", "stopped"].includes(phase); })) };
@@ -2461,7 +2573,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   // ---- 전달 복구 CAS / 봉투 ----
   getDeliveryRecovery(deliveryId: string): DeliveryRecoveryRecord | null {
-    const r = this.row("SELECT * FROM delivery_recovery WHERE delivery_id = ?", deliveryId);
+    const r = this.deliveryRead?.rows.has(deliveryId) ? this.deliveryRead.recoveries.get(deliveryId) : this.row("SELECT * FROM delivery_recovery WHERE delivery_id = ?", deliveryId);
     return r ? { deliveryId, marker: r.marker, phase: r.phase, reason: r.reason, version: r.version, autoAttempts: r.auto_attempts, checkCount: r.check_count, activeCheckMs: r.active_check_ms, nextCheckAt: r.next_check_at, lastCheckedAt: r.last_checked_at, evidence: json(r.evidence_json), updatedAt: r.updated_at } : null;
   }
 
@@ -2506,11 +2618,24 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     const r = this.row("SELECT * FROM delivery_dispatches WHERE id = ?", id);
     if (!r) return null;
     const items = this.rows("SELECT i.*, r.marker FROM delivery_dispatch_items i JOIN delivery_recovery r ON r.delivery_id = i.delivery_id WHERE dispatch_id = ? ORDER BY ordinal", id);
-    return { dispatchId: id, projectId: r.project_id, memberId: r.member_id, cli: r.cli, backend: r.backend, bundleMarker: r.bundle_marker, identity: json(r.terminal_identity_json), baseline: json(r.baseline_json), wireText: r.wire_text, wireSha256: r.wire_sha256, transportState: r.transport_state, submitAttempts: r.submit_attempts, createdAt: r.created_at, updatedAt: r.updated_at, items: items.map((i) => ({ deliveryId: i.delivery_id, ordinal: i.ordinal, sourceRevision: i.source_revision })), markers: items.map((i) => ({ deliveryId: i.delivery_id, marker: i.marker })) };
+    return this.dispatchFrom(r, items);
+  }
+
+  private dispatchFrom(r: Row, items: Row[]): DeliveryDispatch {
+    return { dispatchId: r.id, projectId: r.project_id, memberId: r.member_id, cli: r.cli, backend: r.backend, bundleMarker: r.bundle_marker, identity: json(r.terminal_identity_json), baseline: json(r.baseline_json), wireText: r.wire_text, wireSha256: r.wire_sha256, transportState: r.transport_state, submitAttempts: r.submit_attempts, createdAt: r.created_at, updatedAt: r.updated_at, items: items.map((i) => ({ deliveryId: i.delivery_id, ordinal: i.ordinal, sourceRevision: i.source_revision })), markers: items.map((i) => ({ deliveryId: i.delivery_id, marker: i.marker })) };
   }
 
   listDispatches(memberId: string): DeliveryDispatch[] {
-    return this.rows("SELECT id FROM delivery_dispatches WHERE member_id = ? ORDER BY created_at, rowid", memberId).map((r) => this.getDispatch(r.id)!);
+    return this.deliveryReadMemo(`dispatches:${memberId}`, () => {
+      const items = new Map<string, Row[]>();
+      for (const row of this.rows(`SELECT i.*, r.marker FROM delivery_dispatch_items i
+        JOIN delivery_recovery r ON r.delivery_id = i.delivery_id JOIN delivery_dispatches d ON d.id = i.dispatch_id
+        WHERE d.member_id = ? ORDER BY i.dispatch_id, i.ordinal`, memberId)) {
+        const own = items.get(row.dispatch_id) ?? [];
+        own.push(row); items.set(row.dispatch_id, own);
+      }
+      return this.rows("SELECT * FROM delivery_dispatches WHERE member_id = ? ORDER BY created_at, rowid", memberId).map(row => this.dispatchFrom(row, items.get(row.id) ?? []));
+    });
   }
 
   updateDispatch(id: string, expected: DeliveryDispatch["transportState"], state: DeliveryDispatch["transportState"], submit = false): DeliveryDispatch {
@@ -2563,7 +2688,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   getDeliveryRetry(id: string): DeliveryRetryState {
     this.requireDelivery(id);
-    const r = this.row("SELECT * FROM deliveries WHERE id = ?", id)!;
+    const r = this.deliveryRead?.rows.get(id) ?? this.row("SELECT * FROM deliveries WHERE id = ?", id)!;
     return { nextAttemptAt: r.next_attempt_at, sourceRevision: r.source_revision, retryScope: r.retry_scope, retryReason: r.retry_reason, correctionRevision: r.correction_revision };
   }
 
@@ -2722,7 +2847,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   getReportReferences(projectId: string, messageId: string): ReportReferences | null {
-    const r = this.row("SELECT * FROM report_references WHERE project_id = ? AND source_message_id = ?", projectId, messageId);
+    const r = this.deliveryRead?.projectId === projectId ? this.deliveryRead.reportRefs.get(messageId) : this.row("SELECT * FROM report_references WHERE project_id = ? AND source_message_id = ?", projectId, messageId);
     return r ? { sourceMessageId: r.source_message_id, fileIds: json(r.file_ids_json), decisionIds: json(r.decision_ids_json), authoredAt: r.authored_at, sequence: r.sequence, correctsMessageId: r.corrects_message_id } : null;
   }
 

@@ -9,6 +9,7 @@ import type { DeliveryBaseline, DeliveryInspection, DeliveryRepair, Runner, Runn
 export type DeliveryRecoveryStore = Pick<Store,
   "legacyAssignedMember" | "getConductor" | "unassignedMessageOperation" | "setNeedsOwnerCounter" | "transaction" | "afterCommit" | "requireProject" | "listProjects" | "requireMember" | "getMember" | "listMembers" | "memberRevisions" | "getSettings" |
   "listDeliveries" | "requireDelivery" | "getDelivery" | "enqueue" | "getDeliveryRecovery" | "updateDeliveryRecovery" | "listDeliveryRecoveries" |
+  "withDeliveryRead" | "deliveryNoticePreviews" | "listUnlinkedFailedMessages" | "listDeliveryRecoveryCandidates" |
   "getDeliveryRetry" | "patchDeliveryRetry" | "saveDispatch" | "getDispatch" | "listDispatches" | "updateDispatch" | "inputState" |
   "deliveryRecoveryOperation" | "markDelivered" | "markHeld" | "markFailed" | "setDeliveryStatus" | "setMessageDelivery" |
   "listMissingReportNotices" | "deliveryWait" | "detectDeliveryStalls" | "deliveryStalled" | "recheckPendingDelivery" | "getMessage" | "requireMessage" | "listMessagePage" | "getDecision" | "setDecisionStatus" | "getTodo" | "todoRevision" | "appendActivity">;
@@ -129,9 +130,11 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   /** Also used by ordinary and urgent admission. stopped releases only the logical fence. */
   fenced(memberId: string): boolean {
     this.settleProvenDispatches(memberId);
-    const state = this.store.inputState(memberId);
-    return !!state.lease || this.mutations.has(memberId) || state.unresolvedDispatches.some(d => ["prepared", "write_started", "unknown"].includes(d.transportState)) ||
-      this.store.listDeliveries(this.store.requireMember(memberId).projectId).some(d => d.memberId === memberId && this.logicalFence(d));
+    return this.store.withDeliveryRead(this.store.requireMember(memberId).projectId, () => {
+      const state = this.store.inputState(memberId);
+      return !!state.lease || this.mutations.has(memberId) || state.unresolvedDispatches.some(d => ["prepared", "write_started", "unknown"].includes(d.transportState)) ||
+        this.store.listDeliveries(this.store.requireMember(memberId).projectId).some(d => d.memberId === memberId && this.logicalFence(d));
+    });
   }
   private logicalFence(d: Delivery): boolean {
     const r = this.record(d.id);
@@ -339,10 +342,12 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   private async run(): Promise<void> {
     this.store.detectDeliveryStalls(this.now());
     const members = new Map<string, Delivery[]>();
-    for (const d of this.store.listDeliveries()) {
+    const dispatches = new Map<string, DeliveryDispatch[]>();
+    for (const d of this.store.listDeliveryRecoveryCandidates()) {
       const r = this.record(d.id);
       if (!["none", "resolved", "stopped"].includes(r.phase) && this.requeueRejected(d.id)) continue;
-      const physical = this.store.listDispatches(d.memberId).some(item => item.items.some(item => item.deliveryId === d.id) && ["prepared", "write_started", "unknown"].includes(item.transportState));
+      if (!dispatches.has(d.memberId)) dispatches.set(d.memberId, this.store.listDispatches(d.memberId));
+      const physical = dispatches.get(d.memberId)!.some(item => item.items.some(item => item.deliveryId === d.id) && ["prepared", "write_started", "unknown"].includes(item.transportState));
       if (!physical && (["resolved", "stopped"].includes(r.phase) || d.status === "delivered" && r.reason !== "duplicate_draft" || r.phase === "none" && !["failed", "delivering"].includes(d.status) && !(d.status === "held" && d.holdReason === "delivery_unknown"))) continue;
       if (this.store.requireProject(d.projectId).archived || this.store.requireMember(d.memberId).origin === "manual") continue;
       if (physical && ["resolved", "stopped"].includes(r.phase) && r.lastCheckedAt && Date.parse(r.lastCheckedAt) + 60_000 > this.now()) continue;
@@ -593,21 +598,25 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     const r = this.record(d.id);
     return ["not_received", "retry_exhausted"].includes(r.reason ?? "") || r.phase === "none" && ["queued", "held"].includes(d.status) && d.holdReason !== "delivery_unknown";
   }
-  private item(d: Delivery): DeliveryNoticeItem | null {
+  private item(d: Delivery, previews: Map<string, string>): DeliveryNoticeItem | null {
     const r = this.record(d.id);
     if (r.phase === "resolved" && !(r.reason === "not_received" && ["queued", "held"].includes(d.status)) || r.phase === "stopped" || d.status === "delivered" && r.reason !== "duplicate_draft") return null;
     const wait = this.store.deliveryWait(d);
     const stalled = wait.waitReason === "unknown" && this.store.deliveryStalled(d.id) && ["none", "resolved"].includes(r.phase);
-    const m = d.refType === "message" && d.refId ? this.store.getMessage(d.refId) : null;
-    const preview = m?.body ?? (d.refType === "decision" && d.refId ? this.store.getDecision(d.refId)?.title : d.refType === "todo" && d.refId ? this.store.getTodo(d.refId)?.title : null) ?? ({ user_message: "대표 메시지", answer: "결재 답변", todo_done: "업무 완료 알림", instruction: "업무 지시", report: "보고 전달", system: "시스템 지시", compact: "문맥 정리" }[d.kind]);
-    return { ...wait, id: d.id, deliveryId: d.id, messageId: m?.id ?? null, memberId: d.memberId, projectId: d.projectId, kind: d.kind, status: d.status,
+    const sourceKey = `${d.refType}:${d.refId}`;
+    const preview = previews.get(sourceKey) ?? ({ user_message: "대표 메시지", answer: "결재 답변", todo_done: "업무 완료 알림", instruction: "업무 지시", report: "보고 전달", system: "시스템 지시", compact: "문맥 정리" }[d.kind]);
+    return { ...wait, id: d.id, deliveryId: d.id, messageId: d.refType === "message" && previews.has(sourceKey) ? d.refId : null, memberId: d.memberId, projectId: d.projectId, kind: d.kind, status: d.status,
       phase: stalled ? "needs_owner" : r.phase === "resolved" ? "none" : r.phase, holdReason: d.holdReason, reason: stalled ? "stalled" : r.reason, note: stalled ? "전달이 진행되지 않고 있습니다. 다시 확인해 주세요" : this.store.getDeliveryRetry(d.id).retryReason === "rejected_limit" ? "입력 전에 5회 거절되어 자동 전달을 보류했습니다. 터미널의 입력칸과 승인 창을 확인한 뒤 다시 보내세요" : r.phase === "none" ? d.status === "failed" ? note("legacy_unknown") : "전달 대기" : note(r.reason, r.evidence),
       version: r.version, createdAt: d.createdAt, lastCheckedAt: r.lastCheckedAt, nextCheckAt: r.nextCheckAt, autoAttempts: r.autoAttempts, evidence: r.evidence,
       recommendation: stalled ? { code: "recheck", text: "다시 확인" } : r.phase === "needs_owner" ? { code: r.reason ?? "unknown", text: note(r.reason, r.evidence) } : null, allowedActions: stalled ? ["recheck", "stop_retry"] : this.actions(d, r),
       ref: d.refType && d.refId ? { type: d.refType, id: d.refId } : null, preview: preview.length > 160 ? preview.slice(0, 157) + "..." : preview };
   }
   private items(projectId: string): DeliveryNoticeItem[] {
+    return this.store.withDeliveryRead(projectId, () => this.readItems(projectId));
+  }
+  private readItems(projectId: string): DeliveryNoticeItem[] {
     const deliveries = this.store.listDeliveries(projectId);
+    const previews = this.store.deliveryNoticePreviews(projectId);
     const last = new Map<string, string>();
     const key = (d: Delivery) => { const revision = this.store.getDeliveryRetry(d.id).sourceRevision; return d.refType && d.refId && revision ? JSON.stringify([d.memberId, d.refType, d.refId, revision]) : null; };
     for (const d of deliveries) { const k = key(d); if (k) last.set(k, d.id); }
@@ -615,16 +624,10 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     for (const d of deliveries) {
       const k = key(d);
       if (d.status === "failed" && this.definitelyAbsent(d) && k && last.get(k) !== d.id) continue;
-      const item = this.item(d);
+      const item = this.item(d, previews);
       if (item) items.push(item);
     }
-    const linked = new Set(deliveries.filter(d => d.refType === "message").map(d => d.refId));
-    let cursor: string | undefined;
-    do {
-      const page = this.store.listMessagePage(projectId, { limit: 500, cursor });
-      for (const m of page.items) if (m.mine && m.delivery === "failed" && !linked.has(m.id)) items.push(this.virtual(m));
-      cursor = page.nextCursor ?? undefined;
-    } while (cursor);
+    for (const m of this.store.listUnlinkedFailedMessages(projectId)) items.push(this.virtual(m));
     return items;
   }
   private virtual(m: Message): DeliveryNoticeItem {
@@ -666,15 +669,15 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     return summary;
   }
   notices(projectId: string): DeliveryNotices {
-    return this.store.transaction(() => {
+    return this.store.transaction(() => this.store.withDeliveryRead(projectId, () => {
       this.activeProject(projectId);
       const items = this.items(projectId);
       const unassigned = this.summarize("", items);
       return { version: 2, unassignedItems: items.filter(item => item.memberId === ""), reportNotices: this.store.listMissingReportNotices(projectId), members: this.store.listMembers(projectId).map(m => this.summarize(m.id, items)), unassigned: { undeliveredCount: unassigned.undeliveredCount, unknownCount: unassigned.unknownCount, needsOwnerCount: unassigned.needsOwnerCount } };
-    });
+    }));
   }
   memberNotices(memberId: string, opts: DeliveryNoticePageOptions = {}): DeliveryNoticePage {
-    return this.store.transaction(() => {
+    return this.store.transaction(() => this.store.withDeliveryRead(this.store.requireMember(memberId).projectId, () => {
       const member = this.store.requireMember(memberId);
       this.activeProject(member.projectId);
       const limit = opts.limit ?? 50;
@@ -695,7 +698,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       const items = page.slice(0, limit);
       const tail = items.at(-1);
       return { memberId, summary: this.summarize(memberId, all), items, nextBefore: page.length > limit && tail ? Buffer.from(JSON.stringify({ v: 1, memberId, createdAt: tail.createdAt, id: tail.id })).toString("base64url") : null };
-    });
+    }));
   }
   async shutdown(): Promise<void> { this.closed = true; await this.running; }
 }

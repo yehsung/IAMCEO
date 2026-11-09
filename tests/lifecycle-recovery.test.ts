@@ -461,10 +461,13 @@ for (const started of [false, true]) test(`${started ? "progress" : "start"} adv
     if (event.type === "member" && event.member.id === member.id) observations.push(event.member.statusObservation?.error?.code ?? "none");
   });
   const gets = f.count("terminal.get"), sends = f.count("terminal.send"), keys = f.count("terminal.keys"), interrupts = f.count("terminal.interrupt");
-  for (let n = 0; n < 3; n++) await f.orch.refreshConnection();
+  for (let n = 0; n < 3; n++) {
+    await f.orch.refreshConnection();
+    expect(f.store.requireMember(member.id).statusObservation?.error?.code).toBe(code);
+  }
   unsubscribe();
   expect(f.count("terminal.get")).toBeGreaterThan(gets);
-  expect(observations.length).toBeGreaterThan(0);
+  expect(observations).toHaveLength(0); // Repeated timestamps persist freshness without invalidating every client's snapshot.
   expect(observations.every(value => value === code)).toBe(true); // Check intermediate websocket events, not just final DB state.
   expect(f.store.getExecutionJournal(run.runId)).toMatchObject({ phase: run.phase, result: null, lastProgressAt: started ? since : null });
   expect(f.count("terminal.send")).toBe(sends); expect(f.count("terminal.keys")).toBe(keys); expect(f.count("terminal.interrupt")).toBe(interrupts);

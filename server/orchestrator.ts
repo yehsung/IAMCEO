@@ -3525,7 +3525,7 @@ export class Orchestrator implements OrchestratorApi {
     }
     // Previously attempted entries must be inspected, including legacy held rows.
     for (const d of pending) if (d.attempts > 0 && !this.deliveryRecovery.requeueRejected(d.id) && this.store.getDeliveryRecovery(d.id)?.phase === "none") this.deliveryRecovery.beginRecovery(d.id);
-    pending = this.store.listPending(memberId).filter(d => this.store.getDeliveryRetry(d.id).retryReason !== "rejected_limit");
+    pending = this.store.listSendablePending(memberId);
     if (this.recovering || this.configWrites.has(memberId) || this.terminalMutations.has(memberId) || this.pendingLifecycle(memberId)) return;
     if (this.store.inputState(memberId).lease) { this.deferCoreCompact(member, "manual_control"); return; }
     // Expiry/replacement can be discovered by the runner/store before the socket timer.
@@ -3671,7 +3671,7 @@ export class Orchestrator implements OrchestratorApi {
       }
     }
 
-    const fresh = this.store.listPending(memberId).filter(d => this.store.getDeliveryRetry(d.id).retryReason !== "rejected_limit");
+    const fresh = this.store.listSendablePending(memberId);
     if (!fresh.some(d => d.wake) || this.retryDue(member) > Date.now()) {
       rt.turn = null;
       this.releaseSlots();
@@ -3996,12 +3996,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private retryDue(member: Member): number {
-    let due = 0;
-    for (const delivery of this.store.listDeliveries()) {
-      const retry = this.store.getDeliveryRetry(delivery.id);
-      if (retry.nextAttemptAt && (delivery.memberId === member.id && ["queued", "held"].includes(delivery.status) || retry.retryScope === `member:${member.id}` || retry.retryScope === `backend:${this.backendOf(member)}`)) due = Math.max(due, Date.parse(retry.nextAttemptAt));
-    }
-    return due;
+    return this.store.deliveryRetryDue(member.id, this.backendOf(member));
   }
 
   private scheduleRetry(memberId: string, rt: Runtime, due: number): void {

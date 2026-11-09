@@ -132,46 +132,66 @@ export function serializeAPNsPayload(payload: PushPayload): string {
 }
 
 type Connector = (origin: string, options: { servername: string; rejectUnauthorized: true; ALPNProtocols: string[] }) => ClientHttp2Session;
-interface Connection { session: ClientHttp2Session; draining: boolean }
+interface Connection { session: ClientHttp2Session; draining: boolean; ready: Promise<boolean>; failed: boolean }
 
 export class HTTP2APNsTransport implements APNsTransport {
   #connections = new Map<string, Connection>();
   #sessions = new Set<ClientHttp2Session>();
+  #failures = new Map<string, { count: number; until: number }>();
   #closed = false;
-  constructor(private readonly connector: Connector = (origin, options) => connect(origin, options)) {}
+  constructor(private readonly connector: Connector = (origin, options) => connect(origin, options), private readonly now: () => number = Date.now) {}
+  private backoff(key: string): void {
+    const count = Math.min(7, (this.#failures.get(key)?.count ?? 0) + 1);
+    this.#failures.set(key, { count, until: this.now() + Math.min(60_000, 1000 * 2 ** (count - 1)) });
+  }
   async send(request: APNsTransportRequest): Promise<APNsTransportResult> {
     if (this.#closed) return { type: "not_sent", reason: "shutdown" };
     const deadline = Date.now() + request.timeoutMs;
     let connection = this.#connections.get(request.credential.cacheKey);
     if (!connection || connection.draining || connection.session.closed || connection.session.destroyed) {
+      if ((this.#failures.get(request.credential.cacheKey)?.until ?? 0) > this.now()) return { type: "not_sent", reason: "network_error" };
       try {
         const origin = APNS_ORIGINS[request.credential.environment];
         const session = this.connector(origin, { servername: new URL(origin).hostname, rejectUnauthorized: true, ALPNProtocols: ["h2"] });
-        connection = { session, draining: false };
+        connection = { session, draining: false, ready: Promise.resolve(false), failed: false };
         this.#sessions.add(session);
         const entry = connection;
         const retire = () => {
           entry.draining = true;
           if (this.#connections.get(request.credential.cacheKey) === entry) this.#connections.delete(request.credential.cacheKey);
         };
-        session.on("error", retire); // Always consume TLS/session errors, never log secrets.
+        const failed = () => {
+          if (!entry.failed && !this.#closed) { entry.failed = true; this.backoff(request.credential.cacheKey); }
+          retire(); session.destroy();
+        };
+        session.on("error", failed); // Retire AND close failed TLS attempts before reconnecting.
         session.on("close", () => { retire(); this.#sessions.delete(session); });
         // Finish in-flight GOAWAY listeners before closing the retired session.
         session.on("goaway", () => { retire(); queueMicrotask(() => { if (!session.closed && !session.destroyed) session.close(); }); });
         this.#connections.set(request.credential.cacheKey, connection);
-      } catch { return { type: "not_sent", reason: "network_error" }; }
+        // One handshake promise/listener set per session, shared by concurrent sends.
+        entry.ready = new Promise<boolean>((resolve) => {
+          if (!session.connecting) { resolve(!session.destroyed && session.alpnProtocol === "h2"); return; }
+          let settled = false;
+          const done = (ok: boolean) => {
+            if (settled) return;
+            settled = true; clearTimeout(timer);
+            session.off("connect", connected); session.off("error", closed); session.off("close", closed);
+            resolve(ok);
+            if (!ok) failed();
+          };
+          const connected = () => done(session.alpnProtocol === "h2");
+          const closed = () => done(false);
+          const timer = setTimeout(() => done(false), Math.max(1, request.timeoutMs));
+          session.once("connect", connected); session.once("error", closed); session.once("close", closed);
+        }).then(ready => { if (ready) this.#failures.delete(request.credential.cacheKey); return ready; });
+      } catch { this.backoff(request.credential.cacheKey); return { type: "not_sent", reason: "network_error" }; }
     }
     const { session } = connection;
     let failure: "network_error" | "timeout" = "network_error";
     const ready = await new Promise<boolean>((resolve) => {
-      if (!session.connecting) { resolve(!session.destroyed && session.alpnProtocol === "h2"); return; }
-      const done = (ok: boolean) => {
-        clearTimeout(timer); session.off("connect", connected); session.off("error", failed); session.off("close", failed); resolve(ok);
-      };
-      const connected = () => done(session.alpnProtocol === "h2");
-      const failed = () => done(false);
-      const timer = setTimeout(() => { failure = "timeout"; failed(); }, Math.max(1, deadline - Date.now()));
-      session.once("connect", connected); session.once("error", failed); session.once("close", failed);
+      const timer = setTimeout(() => { failure = "timeout"; resolve(false); }, Math.max(1, deadline - Date.now()));
+      void connection.ready.then(ok => { clearTimeout(timer); resolve(ok); });
     });
     if (!ready || connection.draining || this.#closed || Date.now() >= deadline) {
       session.destroy();
@@ -224,6 +244,7 @@ export class HTTP2APNsTransport implements APNsTransport {
     for (const session of this.#sessions) session.destroy();
     this.#sessions.clear();
     this.#connections.clear();
+    this.#failures.clear();
   }
 }
 

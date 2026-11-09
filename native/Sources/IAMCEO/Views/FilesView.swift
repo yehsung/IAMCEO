@@ -58,6 +58,15 @@ struct FilesView: View {
     @Environment(\.ceWide) private var wide
     @State private var search = ""
     @State private var kind: String?
+    @State private var arrivals = FileListArrivalState()
+    @State private var bodyMatches = Set<String>()
+    @State private var searchingBodies = false
+    @State private var searchError: String?
+    @State private var listPreview: URL?
+    @State private var listPreviewResource: FileResource?
+    @State private var listSharing: FileResource?
+    @State private var listActionError: String?
+    @State private var host: FileHostConnection?
     @FocusState private var searchFocused: Bool
     #if os(macOS)
     /// The list takes ↑/↓ once a row was clicked (Mail-style paging through the reader).
@@ -77,7 +86,7 @@ struct FilesView: View {
     private var shown: [FileDoc] {
         allFiles.filter { file in
             (activeKind == nil || file.kind == activeKind)
-                && (query.isEmpty || [file.title, file.summary, file.who].contains { $0.localizedStandardContains(query) })
+                && (FileLinks.matches(file, body: nil, query: query) || bodyMatches.contains(file.id))
         }
     }
     private var kindCounts: [String: Int] { store.files.reduce(into: [:]) { $0[$1.kind, default: 0] += 1 } }
@@ -89,7 +98,7 @@ struct FilesView: View {
     /// Filtering by kind only helps when there are two kinds to tell apart (web rule).
     private var showsChips: Bool { presentKinds.count >= 2 }
     /// The web has no search. It appears once the list is long enough to need one, and stays while it holds text.
-    private var showsSearch: Bool { store.files.count >= 8 || !search.isEmpty }
+    private var showsSearch: Bool { true }
     /// A linked file opens regardless of the filter; with nothing linked the first visible file is shown.
     private var selectedFile: FileDoc? {
         if let id = router.fileID { return allFiles.first { $0.id == id } }
@@ -117,7 +126,30 @@ struct FilesView: View {
             }
         }
         // A search or kind typed in one project must not hide the next project's files.
-        .onChange(of: store.selectedProjectID) { _, _ in search = ""; kind = nil }
+        .onChange(of: store.selectedProjectID) { _, _ in
+            search = ""; kind = nil; bodyMatches = []; arrivals = FileListArrivalState()
+            listPreview = nil; listPreviewResource = nil
+        }
+        .onChange(of: allFiles.map(\.id), initial: true) { _, ids in
+            arrivals.update(ids)
+            if wide { router.fileID = FileLinks.pinnedSelection(current: router.fileID, visibleIDs: shown.map(\.id)) }
+        }
+        .task(id: "\(store.selectedProjectID ?? ""):\(store.api.map { String(describing: ObjectIdentifier($0)) } ?? ""):\(query):\(allFiles.map(\.id).joined(separator: ","))") { await searchBodies() }
+        .task(id: store.api.map(ObjectIdentifier.init)) {
+            listPreview = nil; listPreviewResource = nil
+            host = await FileHostConnection.current(store.api)
+        }
+        .quickLookPreview($listPreview)
+        .modifier(ResourceSharing(resource: $listSharing))
+        .alert("자료를 열 수 없습니다", isPresented: Binding(get: { listActionError != nil }, set: { if !$0 { listActionError = nil } })) {
+            Button("확인", role: .cancel) {}
+        } message: { Text(listActionError ?? "") }
+        #if os(macOS)
+        .background {
+            Button("자료 검색") { searchFocused = true }
+                .keyboardShortcut("f", modifiers: .command).disabled(router.destination != .files).hidden()
+        }
+        #endif
         #if os(iOS)
         .navigationDestination(item: wide ? .constant(nil) : $router.fileID) { id in FileDetailScreen(fileID: id).ceStatusStrips() }
         #endif
@@ -181,14 +213,16 @@ struct FilesView: View {
                     VStack(alignment: .leading, spacing: CESpace.s) {
                         if showsSearch { searchField }
                         if showsChips {
-                            // The list is narrow: chips wrap so every kind stays in view (web .fl-chips).
-                            ChipFlow(spacing: 6) { chipButtons }
-                                .accessibilityElement(children: .contain)
-                                .accessibilityLabel("종류로 거르기")
+                            kindChips
                         }
                     }
                     .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 4)
                 }
+                if !arrivals.unseen.isEmpty {
+                    Button("새 자료 \(arrivals.unseen.count)") { arrivals.acknowledge() }
+                        .buttonStyle(.plain).font(CEFont.meta).padding(8)
+                }
+                searchStatus
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 0) {
@@ -204,6 +238,7 @@ struct FilesView: View {
                                 }
                                 // web .fl-row: radius 15, hover white .06, the selected row is the rail's violet drop.
                                 .buttonStyle(RowButtonStyle(selected: selected, radius: 15))
+                                .contextMenu { fileMenu(file) }
                                 .id(file.id)
                             }
                         }
@@ -220,6 +255,10 @@ struct FilesView: View {
                     .focused($listFocused)
                     .onKeyPress(.upArrow) { step(-1) }
                     .onKeyPress(.downArrow) { step(1) }
+                    .onKeyPress(.space) {
+                        guard let file = selectedFile else { return .ignored }
+                        Task { await quickLook(file) }; return .handled
+                    }
                     #endif
                 }
             }
@@ -271,6 +310,7 @@ struct FilesView: View {
             VStack(alignment: .leading, spacing: CESpace.m) {
                 if showsSearch { searchField }
                 if showsChips { kindChips }
+                searchStatus
                 if shown.isEmpty {
                     noMatch
                 } else {
@@ -301,7 +341,7 @@ struct FilesView: View {
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").font(.system(size: 13, weight: .medium)).foregroundStyle(CE.ink3)
-            TextField("제목·요약·작성자 검색", text: $search)
+            TextField("제목·요약·작성자·본문 검색", text: $search)
                 .focused($searchFocused)
                 .autocorrectionDisabled()
             if !search.isEmpty {
@@ -342,6 +382,82 @@ struct FilesView: View {
         .buttonStyle(FilterChipStyle(on: on))
         .accessibilityLabel("\(title) \(count)개")
         .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    @ViewBuilder private var searchStatus: some View {
+        if searchingBodies { ViewerNote(text: "본문에서도 찾는 중입니다", loading: true) }
+        if let searchError { ViewerNote(text: searchError, bad: true) }
+    }
+
+    private func searchBodies() async {
+        bodyMatches = []; searchError = nil
+        guard !query.isEmpty, let api = store.api, !store.isDemo else { searchingBodies = false; return }
+        let project = store.selectedProjectID, term = query
+        searchingBodies = true
+        defer { if query == term, store.api === api { searchingBodies = false } }
+        // There is no server search endpoint. Resolve immutable bodies sequentially, reusing T2's bounded cache.
+        for file in allFiles {
+            guard !Task.isCancelled, query == term, store.api === api, store.selectedProjectID == project else { return }
+            do {
+                let full = store.isArchive ? file : try await store.fileBody(id: file.id)
+                guard !Task.isCancelled, query == term, store.api === api, store.selectedProjectID == project else { return }
+                if full.body.localizedStandardContains(term) { bodyMatches.insert(file.id) }
+            } catch {
+                guard !Task.isCancelled, query == term, store.api === api else { return }
+                searchError = friendlyLoadError(error, what: "일부 자료 본문", verb: "읽지")
+            }
+        }
+    }
+
+    @ViewBuilder private func fileMenu(_ file: FileDoc) -> some View {
+        Button("열기") { router.fileID = file.id }
+        #if os(macOS)
+        if let path = file.path, host?.localURL(path, current: store.api) != nil {
+            Button("Finder에서 보기") { Task { await reveal(path: path, projectID: file.projectId) } }
+        }
+        #endif
+        if let path = file.path { Button("경로 복사") { copyToPasteboard(path) } }
+        Button("공유") { Task { await share(file) } }
+    }
+
+    #if os(macOS)
+    private func reveal(path: String, projectID: String) async {
+        guard let host, store.api === host.api else { return }
+        do {
+            guard let url = try await host.validatedURL(path: path, projectID: projectID),
+                  store.api === host.api, store.selectedProjectID == projectID else { return }
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch { listActionError = friendlyLoadError(error, what: "원본", verb: "읽지") }
+    }
+    #endif
+
+    private func share(_ file: FileDoc) async {
+        guard let api = store.api else { return }
+        do {
+            let full = store.isArchive ? file : try await store.fileBody(id: file.id)
+            let result: FileResource
+            if full.kind == "artifact" {
+                result = try FileResource(api: api, data: Data(try await FileResources.artifact(full.id, api: api).utf8), name: full.title + ".html")
+            } else if let first = full.attachments.first { result = try await FileResources.attachment(first, api: api) }
+            else { result = try FileResource(api: api, data: Data(full.body.utf8), name: full.title + ".txt") }
+            guard store.api === api, store.selectedProjectID == full.projectId else { return }
+            listSharing = result
+        } catch { if store.api === api, store.selectedProjectID == file.projectId { listActionError = friendlyLoadError(error, what: "자료", verb: "읽지") } }
+    }
+
+    private func quickLook(_ file: FileDoc) async {
+        guard let api = store.api else { return }
+        do {
+            let full = store.isDemo || store.isArchive ? file : try await store.fileBody(id: file.id)
+            let resource: FileResource
+            if full.kind == "artifact" {
+                // Quick Look receives source text. Executable HTML stays inside SandboxedHTML.
+                resource = try FileResource(api: api, data: Data(try await FileResources.artifact(full.id, api: api).utf8), name: full.title + ".html.txt")
+            } else if let attachment = full.attachments.first { resource = try await FileResources.attachment(attachment, api: api) }
+            else { resource = try FileResource(api: api, data: Data(full.body.utf8), name: full.title + ".txt") }
+            guard store.api === api, store.selectedProjectID == file.projectId else { return }
+            listPreviewResource = resource; listPreview = resource.url
+        } catch { if store.api === api, store.selectedProjectID == file.projectId { listActionError = friendlyLoadError(error, what: "자료", verb: "읽지") } }
     }
 
     private var noMatch: some View {
@@ -414,36 +530,33 @@ private struct RowThumb: View {
     @Environment(AppStore.self) private var store
     let attachment: Attachment
     @State private var thumb: Image?
+    @State private var thumbAPI: APIClient?
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
         shape.fill(CE.bgDeep.opacity(0.5))
             .frame(width: 52, height: 52)
             .overlay {
-                if let thumb {
+                if let thumb, thumbAPI === store.api {
                     thumb.resizable().scaledToFill()
                 } else {
                     Image(systemName: "photo").font(.system(size: 15)).foregroundStyle(CE.ink3)
                 }
             }
             .clipShape(shape)
-            .task(id: attachment.id) { await loadThumb() }
+            .task(id: attachment.id + String(describing: store.api.map(ObjectIdentifier.init))) { await loadThumb() }
             .accessibilityHidden(true)
     }
 
     private func loadThumb() async {
-        if let cached = rowThumbCache[attachment.id] { thumb = cached; return }
         guard let api = store.api, !store.isDemo,
-              let data = try? await api.attachmentData(attachment),
+              let data = try? await FileResources.data(attachment, api: api),
               let decoded = decodePreviewImage(data, maxPixel: 160) else { return }
-        if rowThumbCache.count > 300 { rowThumbCache.removeAll() }
-        rowThumbCache[attachment.id] = decoded.image
-        thumb = decoded.image
+        guard store.api === api, !Task.isCancelled else { return }
+        thumbAPI = api; thumb = decoded.image
     }
 }
 
-/// Small decoded thumbnails by attachment id, so scrolling the list does not fetch them again.
-@MainActor private var rowThumbCache: [String: Image] = [:]
 
 #if os(iOS)
 /// iPhone push target. Looks the file up live so polling updates (and removals) show.
@@ -476,13 +589,41 @@ private struct FileDetailScreen: View {
 /// One file, read top to bottom. Embeddable (Files reader pane, Inbox evidence panel, iPhone push):
 /// it scrolls by itself and has no NavigationStack, so do not wrap it in another vertical ScrollView.
 struct FileReader: View {
+    @Environment(AppStore.self) private var store
     let file: FileDoc
     /// iPhone: the reader draws its own glass panel (web .fl-panel--phone); the desk puts it in the reader plate.
     var framed = false
     init(file: FileDoc, framed: Bool = false) { self.file = file; self.framed = framed }
     var body: some View {
         // A different file starts from the top with fresh viewer state (gate, loaded originals, sort).
-        FileReaderContent(file: file, framed: framed).id(file.id)
+        FileBodyReader(file: file, framed: framed).id(file.id + String(describing: store.api.map(ObjectIdentifier.init)))
+    }
+}
+
+private struct FileBodyReader: View {
+    @Environment(AppStore.self) private var store
+    let file: FileDoc
+    let framed: Bool
+    @State private var full: FileDoc?
+    @State private var failure: String?
+    @State private var retry = 0
+    var body: some View {
+        let direct = store.isDemo || store.isArchive
+        let cached = store.api.flatMap { FileBodyMemory.shared.get(file.id, api: $0) }
+        let resolved = direct ? file : full ?? cached ?? file
+        FileReaderContent(file: resolved, framed: framed,
+                          bodyLoading: !direct && full == nil && cached == nil && failure == nil,
+                          bodyFailure: failure, retryBody: { failure = nil; retry += 1 })
+        .task(id: "\(store.api.map { String(describing: ObjectIdentifier($0)) } ?? ""):\(file.id):\(retry)") {
+            full = nil; failure = nil
+            guard !direct else { return }
+            guard let api = store.api else { failure = "연결한 뒤 자료를 열어 주세요."; return }
+            do {
+                let result = try await store.fileBody(id: file.id)
+                guard !Task.isCancelled, store.api === api, result.projectId == store.selectedProjectID else { return }
+                FileBodyMemory.shared.insert(result, api: api); full = result
+            } catch { if !Task.isCancelled, store.api === api { failure = friendlyLoadError(error, what: "자료", verb: "읽지") } }
+        }
     }
 }
 
@@ -508,6 +649,11 @@ private struct FileReaderContent: View {
     @Environment(\.ceWide) private var wide
     let file: FileDoc
     var framed = false
+    var bodyLoading = false
+    var bodyFailure: String? = nil
+    var retryBody: (() -> Void)? = nil
+    @State private var host: FileHostConnection?
+    @State private var pathFailure: String?
     @State private var copiedPath = false
     @State private var copiedDocument = false
     /// The protected artifact preview once opened. The reader holds it so 크게 보기 can sit beside the title (web
@@ -528,7 +674,7 @@ private struct FileReaderContent: View {
         }
     }
     private var relatedDecisions: [Decision] { newestFirst(store.decisions.filter { $0.fileId == file.id }) }
-    private var relatedMessages: [Message] { Array(store.messages.filter { $0.fileId == file.id }.suffix(3).reversed()) }
+    private var relatedMessages: [Message] { Array(store.messages.filter { $0.fileIds.contains(file.id) }.suffix(3).reversed()) }
     private var author: Member? { file.memberId.flatMap { id in store.members.first { $0.id == id } } }
     private var isArtifact: Bool { file.kind == "artifact" }
     private var path: String? { file.path.flatMap { $0.isEmpty ? nil : $0 } }
@@ -559,6 +705,10 @@ private struct FileReaderContent: View {
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewport = $0 }
         .environment(\.readerViewport, viewport)
+        .task(id: store.api.map(ObjectIdentifier.init)) { host = await FileHostConnection.current(store.api) }
+        .alert("원본을 읽지 못했습니다", isPresented: Binding(get: { pathFailure != nil }, set: { if !$0 { pathFailure = nil } })) {
+            Button("확인", role: .cancel) {}
+        } message: { Text(pathFailure ?? "") }
     }
 
     private var column: some View {
@@ -566,7 +716,9 @@ private struct FileReaderContent: View {
             header
             if !relatedDecisions.isEmpty || !relatedMessages.isEmpty { related.padding(.horizontal, isArtifact ? 6 : 0) }
             if let path, !isArtifact { pathBox(path) }
-            content
+            if bodyLoading && !isArtifact { ViewerNote(text: "본문을 읽는 중입니다", loading: true) }
+            else if let bodyFailure, !isArtifact { ViewerNote(text: bodyFailure, bad: true, retry: retryBody) }
+            else { content }
             // An artifact leads with its page (web hides the path); where it lives on the host comes last.
             if let path, isArtifact { pathBox(path) }
         }
@@ -717,19 +869,12 @@ private struct FileReaderContent: View {
             }
             ForEach(relatedMessages) { message in
                 LinkChip(icon: "bubble.left", label: message.kind.isEmpty ? "대화" : message.kind, title: messageHeadline(message), help: "대화 보기") {
-                    router.openChat(chatTarget(for: message))
+                    FileLinks.openRelated(message, router: router)
                 }
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("관련")
-    }
-
-    /// Workers have their own thread; the conductor/root and the CEO's own posts live in the project conversation.
-    private func chatTarget(for message: Message) -> String? {
-        guard let id = message.mine ? message.targetMemberId : message.memberId,
-              store.members.first(where: { $0.id == id })?.kind == "worker" else { return nil }
-        return id
     }
 
     private func messageHeadline(_ message: Message) -> String {
@@ -750,6 +895,20 @@ private struct FileReaderContent: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 7)
                 .help(path)
+            #if os(macOS)
+            if host?.localURL(path, current: store.api) != nil {
+                Button("Finder에서 보기") {
+                    Task {
+                        guard let host, store.api === host.api else { return }
+                        do {
+                            guard let url = try await host.validatedURL(path: path, projectID: file.projectId),
+                                  store.api === host.api, store.selectedProjectID == file.projectId else { return }
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                        } catch { pathFailure = friendlyLoadError(error, what: "원본", verb: "읽지") }
+                    }
+                }.buttonStyle(ViewerButtonStyle())
+            }
+            #endif
             Button {
                 copyToPasteboard(path)
                 copiedPath = true
@@ -863,46 +1022,6 @@ private struct KindTag: View {
     }
 }
 
-/// One link out of the reader: "● 결재 제목 ›" / "대화 제목 ›". An open decision is the highlighted (violet) one.
-private struct LinkChip: View {
-    var dot: Tone? = nil
-    var icon: String? = nil
-    let label: String
-    let title: String
-    var highlighted = false
-    let help: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                if let dot {
-                    StatusDot(tone: dot, size: 7)
-                } else if let icon {
-                    Image(systemName: icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(CE.ink3)
-                }
-                Text(label).foregroundStyle(highlighted ? CE.accent : CE.ink2)
-                Text(shortTitle).foregroundStyle(CE.ink).lineLimit(1)
-                Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold)).foregroundStyle(CE.ink3)
-            }
-            .font(isMac ? .system(size: 13, weight: .medium) : CEFont.secondary.weight(.medium))
-            .padding(.horizontal, 12)
-        }
-        // Same family as the filter chips and viewer buttons on this screen: 30 tall, lightens on hover.
-        .buttonStyle(LinkChipStyle(highlighted: highlighted))
-        .fixedSize()
-        .help("\(help) · \(title)")
-        .accessibilityLabel("\(label) \(title)")
-        .accessibilityHint(help)
-    }
-
-    /// Chips sit in a wrapping row, so long titles are cut by length (the full title is in the tooltip).
-    private var shortTitle: String {
-        let value = title.isEmpty ? "제목 없음" : title
-        return value.count > 26 ? String(value.prefix(25)) + "…" : value
-    }
-}
-
 // MARK: - Raw text (code, table)
 
 private struct FetchedText { let text: String; let truncated: Bool }
@@ -943,7 +1062,7 @@ private struct RawTextSource<Content: View>: View {
             return
         }
         do {
-            let data = try await api.attachmentData(attachment)
+            let data = try await FileResources.data(attachment, api: api)
             let limit = 512 * 1024
             let truncated = data.count > limit
             fetched = FetchedText(text: decodeText(truncated ? data.prefix(limit) : data, truncated: truncated), truncated: truncated)
@@ -1509,7 +1628,7 @@ private struct ArtifactViewer: View {
             else if error == nil && unavailableReason == nil { placeholder }
             else { gate }
         }
-        // Opens by itself, as on the web: the page is always drawn protected (no script, no network, no navigation),
+        // Opens by itself, as on the web: the page is always drawn protected (isolated scripts, no network, confirmed external links),
         // so there is nothing to confirm first. The gate stays only for a failure (다시 시도) or no host.
         .task(id: file.id) { if loaded == nil { await load() } }
         .sheet(isPresented: $enlarged) {
@@ -1613,7 +1732,8 @@ private struct ArtifactViewer: View {
             return
         }
         do {
-            let html = try await api.artifact(fileID: file.id)
+            let html = try await FileResources.artifact(file.id, api: api)
+            guard store.api === api, store.selectedProjectID == file.projectId, !Task.isCancelled else { return }
             loaded = LoadedArtifact(html: html, rule: rule)
         } catch {
             self.error = friendlyLoadError(error, what: "페이지")
@@ -1672,10 +1792,14 @@ private struct ArtifactFullView: View {
 /// One attachment in a message, decision or file. Loads only through the connected daemon with the access code in a header.
 /// `compact` is the web chat look (.atv): a 208×148 cover thumbnail for a picture, a name · size chip for anything else.
 struct AttachmentPreview: View {
+    @Environment(AppStore.self) private var store
     let attachment: Attachment
     var compact = false
     init(attachment: Attachment, compact: Bool = false) { self.attachment = attachment; self.compact = compact }
     var body: some View {
+        content.id(attachment.id + String(describing: store.api.map(ObjectIdentifier.init)))
+    }
+    @ViewBuilder private var content: some View {
         if compact {
             if attachment.isImage {
                 AttachmentThumb(attachment: attachment, height: 148).frame(maxWidth: 208)
@@ -1695,6 +1819,7 @@ private struct AttachmentView: View {
     let attachment: Attachment
     @State private var data: Data?
     @State private var fileURL: URL?
+    @State private var resource: FileResource?
     @State private var image: Image?
     @State private var pixelSize: CGSize = .zero
     @State private var loading = false
@@ -1711,6 +1836,7 @@ private struct AttachmentView: View {
             if attachment.isImage { imageTile } else { fileCard }
         }
         .quickLookPreview($quickLook)
+        .modifier(AttachmentActions(attachment: attachment))
         .task(id: attachment.id) { if attachment.isImage { await load() } }
     }
 
@@ -1829,11 +1955,7 @@ private struct AttachmentView: View {
                 } label: { Text("열기") }
                 .help("원본을 받아 미리 봅니다")
                 .accessibilityLabel("\(displayName) 열기")
-                if let fileURL {
-                    ShareLink(item: fileURL) { Image(systemName: "square.and.arrow.up") }
-                        .help("공유·저장")
-                        .accessibilityLabel("\(displayName) 공유·저장")
-                }
+                AttachmentShareButton(attachment: attachment)
             }
             .buttonStyle(.plain)
             .font(CEFont.meta.weight(.semibold))
@@ -1851,8 +1973,11 @@ private struct AttachmentView: View {
         }
         loading = true; defer { loading = false }
         do {
-            let result = try await api.attachmentData(attachment)
-            let destination = try writeTemporaryFile(result, name: attachment.name)
+            let loaded = try await FileResources.attachment(attachment, api: api)
+            guard store.api === api, !Task.isCancelled else { return }
+            let result = try loaded.read()
+            resource = loaded
+            let destination = loaded.url
             if attachment.isImage, let decoded = decodePreviewImage(result, maxPixel: 1400) {
                 image = decoded.image; pixelSize = decoded.size
             }
@@ -1867,16 +1992,6 @@ private extension Attachment {
     var displayName: String { name.isEmpty ? "이름 없는 첨부" : name }
 }
 
-/// The original into a private temporary folder, under its own file name (Quick Look and sharing need a real file).
-private func writeTemporaryFile(_ data: Data, name: String) throws -> URL {
-    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("IAMCEO-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-    let file = name.isEmpty ? "attachment" : URL(fileURLWithPath: name).lastPathComponent
-    let destination = folder.appendingPathComponent(file)
-    try data.write(to: destination)
-    return destination
-}
-
 /// One attachment's original, fetched through the connected daemon (access code in a header, same origin only) into a
 /// temporary file; pictures are also decoded at preview size.
 @MainActor @Observable private final class AttachmentFile {
@@ -1885,26 +2000,33 @@ private func writeTemporaryFile(_ data: Data, name: String) throws -> URL {
     private(set) var image: Image?
     private(set) var pixelSize: CGSize = .zero
     private(set) var loading = false
+    private(set) var progress: Double?
+    private var resource: FileResource?
     var error: String?
 
     init(_ attachment: Attachment) { self.attachment = attachment }
 
     func load(_ store: AppStore, maxPixel: Int = 1400) async {
-        guard url == nil, !loading else { return }
+        guard !loading else { return }
         guard let api = store.api else {
             error = store.isDemo ? "샘플에는 원본 파일이 없습니다." : "서버 연결 후 원본을 불러올 수 있습니다."
             return
         }
-        loading = true; defer { loading = false }
+        if resource?.api === api { return }
+        let project = store.selectedProjectID
+        loading = true; progress = nil; defer { loading = false }
         do {
-            let data = try await api.attachmentData(attachment)
-            let destination = try writeTemporaryFile(data, name: attachment.name)
-            if attachment.isImage, let decoded = decodePreviewImage(data, maxPixel: maxPixel) {
+            let trackProgress = attachment.mime == "application/pdf" || attachment.mime.hasPrefix("video/") || attachment.mime.hasPrefix("audio/")
+                || ["pdf", "mp4", "mov", "m4v", "webm"].contains((attachment.name as NSString).pathExtension.lowercased())
+            let report: @Sendable (Double?) -> Void = { [weak self] value in Task { @MainActor in self?.progress = value } }
+            let result = try await FileResources.attachment(attachment, api: api, progress: trackProgress ? report : nil)
+            guard store.api === api, store.selectedProjectID == project, !Task.isCancelled else { return }
+            if attachment.isImage, let decoded = decodePreviewImage(try result.read(), maxPixel: maxPixel) {
                 image = decoded.image; pixelSize = decoded.size
             }
-            url = destination; error = nil
+            resource = result; url = result.url; error = nil
         } catch {
-            self.error = friendlyLoadError(error)
+            if store.api === api, store.selectedProjectID == project, !Task.isCancelled { self.error = friendlyLoadError(error, what: "파일", verb: "받지") }
         }
     }
 }
@@ -2003,11 +2125,7 @@ private struct AttachmentThumb: View {
         .help(attachment.displayName)
         .accessibilityLabel(source.url == nil ? "\(attachment.displayName) 불러오기" : "\(attachment.displayName) 크게 보기")
         .quickLookPreview($preview)
-        .contextMenu {
-            if let url = source.url {
-                ShareLink(item: url) { Label("공유·저장", systemImage: "square.and.arrow.up") }
-            }
-        }
+        .modifier(AttachmentActions(attachment: attachment))
         .task(id: attachment.id) { await fetch() }
     }
 
@@ -2073,11 +2191,7 @@ private struct AttachmentChip: View {
         .help(source.error ?? "\(attachment.displayName) 미리 보기")
         .accessibilityLabel("\(attachment.displayName) \(fileSizeText(attachment.size)) 열기")
         .quickLookPreview($preview)
-        .contextMenu {
-            if let url = source.url {
-                ShareLink(item: url) { Label("공유·저장", systemImage: "square.and.arrow.up") }
-            }
-        }
+        .modifier(AttachmentActions(attachment: attachment))
     }
 
     private var sizeFont: Font { isMac ? .system(size: 12.5) : CEFont.meta }
@@ -2169,6 +2283,7 @@ private struct SingleImage: View {
             }
         }
         .quickLookPreview($preview)
+        .modifier(AttachmentActions(attachment: attachment))
         .task(id: attachment.id) { await source.load(store, maxPixel: 2400) }
     }
 
@@ -2228,15 +2343,8 @@ private struct FileCard: View {
                         .buttonStyle(ViewerButtonStyle())
                         .help("원본을 받아 미리 봅니다")
                         .accessibilityLabel("\(attachment.displayName) 열기")
-                    #if os(macOS)
                     SaveButton(attachment: attachment, name: attachment.name)
-                    #endif
-                    if let url = source.url {
-                        ShareLink(item: url) { Text("공유") }
-                            .buttonStyle(ViewerButtonStyle())
-                            .help("공유·저장")
-                            .accessibilityLabel("\(attachment.displayName) 공유·저장")
-                    }
+                    AttachmentShareButton(attachment: attachment)
                 }
                 .fixedSize()
                 .disabled(source.loading)
@@ -2262,6 +2370,7 @@ private struct FileCard: View {
         .background(Color.white.opacity(0.05), in: shape)
         .overlay { shape.strokeBorder(CE.line) }
         .quickLookPreview($preview)
+        .modifier(AttachmentActions(attachment: attachment))
     }
 
     private func open() async {
@@ -2319,10 +2428,11 @@ private struct PDFBlock: View {
                     }
                 }
             } else {
-                ViewerNote(text: "PDF를 불러오는 중입니다", loading: true)
+                FileDownloadStatus(title: "PDF를 받는 중입니다", progress: source.progress)
             }
         }
         .quickLookPreview($preview)
+        .modifier(AttachmentActions(attachment: attachment))
         .task(id: attachment.id) { await source.load(store) }
     }
 }
@@ -2368,7 +2478,7 @@ private struct MediaBlock: View {
                     }
                 }
             } else {
-                ViewerNote(text: video ? "영상을 불러오는 중입니다" : "오디오를 불러오는 중입니다", loading: true)
+                FileDownloadStatus(title: video ? "영상을 받는 중입니다" : "오디오를 받는 중입니다", progress: source.progress)
             }
             ViewerBar(text: "\(attachment.displayName) · \(fileSizeText(attachment.size))") {
                 SaveButton(attachment: attachment, name: attachment.name)
@@ -2379,6 +2489,7 @@ private struct MediaBlock: View {
         }
         .task(id: attachment.id) { await prepare() }
         .onDisappear { player?.pause(); audio?.stop() }
+        .modifier(AttachmentActions(attachment: attachment))
     }
 
     private var videoHeight: CGFloat {
@@ -2491,7 +2602,7 @@ private struct AudioStrip: View {
 }
 
 /// 받기 (web DownloadLink): the original fetched with the access code in a header, then the Mac save panel (iPhone:
-/// Quick Look, whose share sheet saves to Files). Without an attachment it saves the given text instead.
+/// the system share sheet, including Save to Files). Without an attachment it saves the given text instead.
 private struct SaveButton: View {
     @Environment(AppStore.self) private var store
     let attachment: Attachment?
@@ -2500,15 +2611,16 @@ private struct SaveButton: View {
     var label = "받기"
     @State private var busy = false
     @State private var failure: String?
-    @State private var preview: URL?
+    @State private var shareResource: FileResource?
+    @State private var progress: Double?
 
     var body: some View {
-        Button { Task { await save() } } label: { Text(busy ? "받는 중" : label) }
+        Button { Task { await save() } } label: { Text(busy ? progress.map { "받는 중 \(Int($0 * 100))%" } ?? "받는 중" : label) }
             .buttonStyle(ViewerButtonStyle())
             .disabled(busy || unavailable != nil)
             .help(unavailable ?? (isMac ? "원본을 내려받아 저장합니다" : "원본을 열어 저장하거나 공유합니다"))
             .accessibilityLabel("\(name) \(label)")
-            .quickLookPreview($preview)
+            .modifier(ResourceSharing(resource: $shareResource))
             .alert("받지 못했습니다", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
                 Button("확인", role: .cancel) {}
             } message: {
@@ -2522,25 +2634,26 @@ private struct SaveButton: View {
     }
 
     private func save() async {
-        busy = true
+        busy = true; progress = nil
         defer { busy = false }
+        let api = store.api, project = store.selectedProjectID
         do {
-            let data: Data
+            let resource: FileResource
             if let attachment {
-                guard let api = store.api else { return }
-                data = try await api.attachmentData(attachment)
-            } else {
-                data = Data((text ?? "").utf8)
-            }
+                guard let api else { return }
+                resource = try await FileResources.attachment(attachment, api: api, progress: { value in
+                    Task { @MainActor in progress = value }
+                })
+            } else { resource = try FileResource(api: api, data: Data((text ?? "").utf8), name: name) }
+            guard store.api === api, store.selectedProjectID == project else { return }
             #if os(macOS)
-            try await saveWithPanel(data, name: name)
+            try await saveWithPanel(resource.read(), name: name)
             #else
-            preview = try writeTemporaryFile(data, name: name)
+            shareResource = resource
             #endif
         } catch {
-            // Closing the save panel is a choice, not a failure.
             if (error as? CocoaError)?.code == .userCancelled || error is CancellationError { return }
-            failure = friendlyLoadError(error, what: "파일")
+            failure = friendlyLoadError(error, what: "파일", verb: "받지")
         }
     }
 }
@@ -2681,7 +2794,7 @@ private func decodePreviewImage(_ data: Data, maxPixel: Int) -> (image: Image, s
 
 /// Wrapping row (web flex-wrap with align-items center): items keep their size, move to the next line when they do
 /// not fit, sit centred on their line, and an item wider than the line is narrowed to it (a one-line label truncates).
-private struct ChipFlow: Layout {
+struct ChipFlow: Layout {
     var spacing: CGFloat = 6
     /// Between lines; `spacing` when nil.
     var lineSpacing: CGFloat? = nil
@@ -2800,31 +2913,6 @@ private struct FilterChipStyle: ButtonStyle {
     }
 }
 
-/// The reader's link chips (결재 · 대화): Mac 30 tall capsules that lighten on hover; an open decision is violet.
-private struct LinkChipStyle: ButtonStyle {
-    let highlighted: Bool
-    func makeBody(configuration: Configuration) -> some View { LinkBody(configuration: configuration, highlighted: highlighted) }
-    private struct LinkBody: View {
-        let configuration: ButtonStyleConfiguration
-        let highlighted: Bool
-        @State private var hovering = false
-        var body: some View {
-            configuration.label
-                .frame(height: isMac ? 30 : 34)
-                .background(fill, in: Capsule())
-                .overlay { Capsule().strokeBorder(highlighted ? CE.violet.opacity(0.55) : CE.line) }
-                .padding(.vertical, isMac ? 0 : 5)
-                .contentShape(Rectangle())
-                .onHover { hovering = $0 }
-                .animation(.linear(duration: 0.12), value: hovering)
-        }
-        private var fill: Color {
-            if highlighted { return CE.violet.opacity(configuration.isPressed ? 0.42 : hovering ? 0.36 : 0.28) }
-            return Color.white.opacity(configuration.isPressed ? 0.13 : hovering ? 0.10 : 0.05)
-        }
-    }
-}
-
 /// Text-only control that gets a faint rounded fill on hover (web .fl-path__copy, table header buttons).
 private struct HoverFillStyle: ButtonStyle {
     var radius: CGFloat = 10
@@ -2893,7 +2981,7 @@ func artifactBlockRuleJSON() -> String {
 
 /// The HTTP(S)/WS(S)/file/FTP(S) block layer. nil means compilation failed: callers must not render.
 @MainActor
-private func artifactBlockRule() async -> WKContentRuleList? {
+func artifactBlockRule() async -> WKContentRuleList? {
     if let compiledArtifactRule { return compiledArtifactRule }
     let rules = artifactBlockRuleJSON()
     await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -2915,16 +3003,47 @@ func artifactAllowsNavigation(firstAction: Bool, url: URL?, mainFrame: Bool, typ
     firstAction && mainFrame && type == .other && url?.absoluteString == "about:blank"
 }
 
+func artifactAllowsChildNavigation(loaded: Bool, url: URL?, type: WKNavigationType) -> Bool {
+    guard let value = url?.absoluteString else { return false }
+    return (!loaded && value == "about:srcdoc" && type == .other)
+        || (loaded && value.hasPrefix("about:srcdoc#") && type == .linkActivated)
+}
+
 @MainActor
-private final class ArtifactNavigationDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
+final class ArtifactNavigationDelegate: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+    private var childLoaded = false
+    private(set) var childFrame: WKFrameInfo?
+    var onLink: ((String) -> Void)?
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard !message.frameInfo.isMainFrame, message.frameInfo.request.url?.absoluteString.hasPrefix("about:srcdoc") == true else { return }
+        if message.name == "artifactHeight", let number = message.body as? NSNumber {
+            let height = number.doubleValue
+            guard height.isFinite, height > 0 else { return }
+            childFrame = message.frameInfo
+            onHeight?(CGFloat(height))
+            if let view = message.webView as? ArtifactWebView, view.fitted {
+                view.evaluateJavaScript("document.getElementById('artifact').style.height='" + String(height) + "px'", in: nil, in: .defaultClient, completionHandler: { _ in })
+            }
+        } else if message.name == "artifactLink", let value = message.body as? String { onLink?(value) }
+        else if message.name == "artifactAnchor", let value = message.body as? NSNumber,
+                value.doubleValue.isFinite, value.doubleValue >= 0,
+                let view = message.webView as? ArtifactWebView, view.fitted {
+            view.scrollToAnchor(CGFloat(value.doubleValue))
+        }
+    }
     private var firstAction = true
     /// Reports the page's content height (fitted previews only).
     var onHeight: ((CGFloat) -> Void)?
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        let allow = artifactAllowsNavigation(firstAction: firstAction, url: navigationAction.request.url,
-            mainFrame: navigationAction.targetFrame?.isMainFrame == true, type: navigationAction.navigationType)
-        firstAction = false
+                 decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
+        let url = navigationAction.request.url
+        let main = navigationAction.targetFrame?.isMainFrame == true
+        var allow = artifactAllowsNavigation(firstAction: firstAction, url: url, mainFrame: main, type: navigationAction.navigationType)
+        if !main, navigationAction.targetFrame != nil,
+           artifactAllowsChildNavigation(loaded: childLoaded, url: url, type: navigationAction.navigationType) {
+            childLoaded = true; allow = true
+        }
+        if main { firstAction = false }
         decisionHandler(allow ? .allow : .cancel)
     }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
@@ -2932,11 +3051,12 @@ private final class ArtifactNavigationDelegate: NSObject, WKNavigationDelegate, 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { measure(webView) }
 
     /// The page height as the web measures it (the body's scroll height plus its margins), read from the app's own
-    /// isolated script world: page scripts stay off, and nothing the page defines can answer for it.
+    /// isolated script world: page scripts run inside the opaque sandbox, and nothing the page defines can answer for it.
     func measure(_ webView: WKWebView) {
         guard let onHeight else { return }
         let script = "(function(){var b=document.body;if(!b)return 0;var c=getComputedStyle(b);return Math.ceil(b.scrollHeight+(parseFloat(c.marginTop)||0)+(parseFloat(c.marginBottom)||0))})()"
-        webView.evaluateJavaScript(script, in: nil, in: .defaultClient) { result in
+        guard let childFrame else { return }
+        webView.evaluateJavaScript(script, in: childFrame, in: .defaultClient) { result in
             if case .success(let value) = result, let height = (value as? NSNumber)?.doubleValue, height > 0 {
                 onHeight(CGFloat(height))
             }
@@ -2967,6 +3087,24 @@ private final class ArtifactWebView: WKWebView {
     }
     #endif
 
+    func scrollToAnchor(_ top: CGFloat) {
+        var ancestor = superview
+        while let current = ancestor {
+            #if os(macOS)
+            if let scroll = current as? NSScrollView, let document = scroll.documentView {
+                document.scrollToVisible(convert(CGRect(x: 0, y: top, width: 1, height: 44), to: document))
+                return
+            }
+            #else
+            if let scroll = current as? UIScrollView {
+                scroll.scrollRectToVisible(convert(CGRect(x: 0, y: top, width: 1, height: 44), to: scroll), animated: false)
+                return
+            }
+            #endif
+            ancestor = current.superview
+        }
+    }
+
     private func widthChanged(_ width: CGFloat) {
         guard fitted, abs(width - measuredWidth) > 0.5 else { return }
         measuredWidth = width
@@ -2979,13 +3117,20 @@ private final class ArtifactWebView: WKWebView {
 }
 
 /// Requires the compiled block layer before loading any artifact HTML. The page gets the web's artifact kit (dark page,
-/// type scale, cards, grids, callouts) under the same protected policy; page scripts stay off.
+/// type scale, cards, grids, callouts) under the same protected policy; page scripts run inside the opaque sandbox.
 @MainActor
-private func makeArtifactWebView(html: String, title: String?, rule: WKContentRuleList, delegate: ArtifactNavigationDelegate,
+func makeArtifactWebView(html: String, title: String?, rule: WKContentRuleList, delegate: ArtifactNavigationDelegate,
                                  fitted: Bool) -> WKWebView {
     let configuration = WKWebViewConfiguration()
     configuration.websiteDataStore = .nonPersistent()
-    configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+    configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+    configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+    let controller = configuration.userContentController
+    controller.add(delegate, contentWorld: .defaultClient, name: "artifactHeight")
+    controller.add(delegate, contentWorld: .defaultClient, name: "artifactLink")
+    controller.add(delegate, contentWorld: .defaultClient, name: "artifactAnchor")
+    controller.addUserScript(WKUserScript(source: artifactObservationScript, injectionTime: .atDocumentStart,
+                                        forMainFrameOnly: false, in: .defaultClient))
     configuration.userContentController.add(rule)
     let view = ArtifactWebView(frame: .zero, configuration: configuration)
     view.fitted = fitted
@@ -3001,34 +3146,198 @@ private func makeArtifactWebView(html: String, title: String?, rule: WKContentRu
     view.scrollView.backgroundColor = .clear
     if fitted { view.scrollView.isScrollEnabled = false }
     #endif
-    view.loadHTMLString(ArtifactKit.document(html, title: title), baseURL: nil)
+    view.loadHTMLString(ArtifactKit.sandboxDocument(html, title: title, fitted: fitted), baseURL: nil)
     return view
 }
 #if os(macOS)
-private struct SandboxedHTML: NSViewRepresentable {
+private struct SandboxedHTMLSurface: NSViewRepresentable {
     let html: String
     let rule: WKContentRuleList
     var title: String? = nil
     /// Fitted: as tall as the page (reported here); otherwise the page scrolls inside the view.
     var height: Binding<CGFloat>? = nil
-    func makeCoordinator() -> ArtifactNavigationDelegate { ArtifactNavigationDelegate() }
+    var onLink: (String) -> Void
+    func makeCoordinator() -> ArtifactNavigationDelegate {
+        let delegate = ArtifactNavigationDelegate(); delegate.onLink = onLink; return delegate
+    }
     func makeNSView(context: Context) -> WKWebView {
         if let height { context.coordinator.onHeight = { value in if abs(height.wrappedValue - value) > 0.5 { height.wrappedValue = value } } }
         return makeArtifactWebView(html: html, title: title, rule: rule, delegate: context.coordinator, fitted: height != nil)
     }
     func updateNSView(_ nsView: WKWebView, context: Context) {}
+    static func dismantleNSView(_ view: WKWebView, coordinator: ArtifactNavigationDelegate) {
+        view.stopLoading(); view.configuration.userContentController.removeAllScriptMessageHandlers(from: .defaultClient)
+        coordinator.onHeight = nil; coordinator.onLink = nil
+    }
 }
 #else
-private struct SandboxedHTML: UIViewRepresentable {
+private struct SandboxedHTMLSurface: UIViewRepresentable {
     let html: String
     let rule: WKContentRuleList
     var title: String? = nil
     var height: Binding<CGFloat>? = nil
-    func makeCoordinator() -> ArtifactNavigationDelegate { ArtifactNavigationDelegate() }
+    var onLink: (String) -> Void
+    func makeCoordinator() -> ArtifactNavigationDelegate {
+        let delegate = ArtifactNavigationDelegate(); delegate.onLink = onLink; return delegate
+    }
     func makeUIView(context: Context) -> WKWebView {
         if let height { context.coordinator.onHeight = { value in if abs(height.wrappedValue - value) > 0.5 { height.wrappedValue = value } } }
         return makeArtifactWebView(html: html, title: title, rule: rule, delegate: context.coordinator, fitted: height != nil)
     }
     func updateUIView(_ uiView: WKWebView, context: Context) {}
+    static func dismantleUIView(_ view: WKWebView, coordinator: ArtifactNavigationDelegate) {
+        view.stopLoading(); view.configuration.userContentController.removeAllScriptMessageHandlers(from: .defaultClient)
+        coordinator.onHeight = nil; coordinator.onLink = nil
+    }
+}
+#endif
+
+
+/// App-only, isolated-world observation. Page scripts cannot call these message handlers.
+private let artifactObservationScript = #"""
+(function(){if(window.top===window)return;function measure(){var b=document.body;if(!b)return;var c=getComputedStyle(b);window.webkit.messageHandlers.artifactHeight.postMessage(Math.ceil(b.scrollHeight+(parseFloat(c.marginTop)||0)+(parseFloat(c.marginBottom)||0)))}var observer=new ResizeObserver(measure);addEventListener('DOMContentLoaded',function(){if(document.body)observer.observe(document.body);measure()});addEventListener('load',measure);addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;var h=a.getAttribute('href')||'';if(h.charAt(0)==='#'){try{var id=decodeURIComponent(h.slice(1)),target=id?document.getElementById(id)||document.getElementsByName(id)[0]:document.body;if(target){window.webkit.messageHandlers.artifactAnchor.postMessage(target.getBoundingClientRect().top+window.scrollY)}}catch(x){}return}e.preventDefault();if(!e.isTrusted)return;window.webkit.messageHandlers.artifactLink.postMessage(a.href)},true)})()
+"""#
+
+struct SandboxedHTML: View {
+    let html: String
+    let rule: WKContentRuleList
+    var title: String? = nil
+    var height: Binding<CGFloat>? = nil
+    @State private var pendingLink: String?
+    var body: some View {
+        SandboxedHTMLSurface(html: html, rule: rule, title: title, height: height, onLink: { pendingLink = $0 })
+            .alert("바깥 링크를 엽니다: " + (pendingLink ?? ""),
+                   isPresented: Binding(get: { pendingLink != nil }, set: { if !$0 { pendingLink = nil } })) {
+                if let pendingLink, let url = ArtifactKit.externalURL(pendingLink) {
+                    Button("브라우저에서 열기") {
+                        #if os(macOS)
+                        NSWorkspace.shared.open(url)
+                        #else
+                        UIApplication.shared.open(url)
+                        #endif
+                        self.pendingLink = nil
+                    }
+                }
+                Button("취소", role: .cancel) { pendingLink = nil }
+            } message: {
+                if ArtifactKit.externalURL(pendingLink ?? "") == nil { Text("이 주소는 브라우저에서 열 수 없습니다.") }
+            }
+    }
+}
+
+
+private struct FileDownloadStatus: View {
+    let title: String
+    let progress: Double?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let progress {
+                ProgressView(value: progress).accessibilityLabel(title)
+                Text("\(title) · \(Int(progress * 100))%").font(CEFont.meta)
+            } else { ViewerNote(text: title, loading: true) }
+        }
+    }
+}
+
+/// Menu visibility never depends on whether the bytes have already arrived.
+private struct AttachmentActions: ViewModifier {
+    @Environment(AppStore.self) private var store
+    let attachment: Attachment
+    @State private var resource: FileResource?
+    @State private var sharing: FileResource?
+    @State private var preview: URL?
+    @State private var failure: String?
+    @State private var busy = false
+    @State private var progress: Double?
+    func body(content: Content) -> some View {
+        content.contextMenu {
+            Button("열기") { Task { await perform(share: false, save: false) } }
+            Button("공유") { Task { await perform(share: true, save: false) } }
+            Button("저장") { Task { await perform(share: true, save: true) } }
+            Button("이름 복사") { copyToPasteboard(attachment.displayName) }
+        }
+        .overlay(alignment: .bottomLeading) {
+            if busy { FileDownloadStatus(title: "파일을 받는 중입니다", progress: progress).padding(8).background(CE.bg) }
+        }
+        .quickLookPreview($preview)
+        .modifier(ResourceSharing(resource: $sharing))
+        .alert("파일을 받지 못했습니다", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("확인", role: .cancel) {}
+        } message: { Text(failure ?? "") }
+    }
+    private func perform(share: Bool, save: Bool) async {
+        guard !busy, let api = store.api else { return }
+        busy = true; progress = nil; defer { busy = false }
+        let project = store.selectedProjectID
+        do {
+            let loaded = try await FileResources.attachment(attachment, api: api, progress: { value in
+                Task { @MainActor in progress = value }
+            })
+            guard store.api === api, store.selectedProjectID == project else { return }
+            resource = loaded
+            #if os(macOS)
+            if save { try await saveWithPanel(loaded.read(), name: attachment.name); return }
+            #endif
+            if share { sharing = loaded } else { preview = loaded.url }
+        } catch { failure = friendlyLoadError(error, what: "파일", verb: "받지") }
+    }
+}
+
+private struct AttachmentShareButton: View {
+    @Environment(AppStore.self) private var store
+    let attachment: Attachment
+    @State private var sharing: FileResource?
+    @State private var failure: String?
+    @State private var busy = false
+    @State private var progress: Double?
+    var body: some View {
+        Button(busy ? progress.map { "받는 중 \(Int($0 * 100))%" } ?? "받는 중" : "공유") {
+            Task {
+                guard let api = store.api else { return }
+                let project = store.selectedProjectID
+                busy = true; progress = nil; defer { busy = false }
+                do {
+                    let loaded = try await FileResources.attachment(attachment, api: api, progress: { value in
+                        Task { @MainActor in progress = value }
+                    })
+                    guard store.api === api, store.selectedProjectID == project else { return }
+                    sharing = loaded
+                } catch { failure = friendlyLoadError(error, what: "파일", verb: "받지") }
+            }
+        }
+        .buttonStyle(ViewerButtonStyle()).disabled(busy || store.api == nil)
+        .modifier(ResourceSharing(resource: $sharing))
+        .alert("파일을 받지 못했습니다", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("확인", role: .cancel) {}
+        } message: { Text(failure ?? "") }
+    }
+}
+
+private struct ResourceSharing: ViewModifier {
+    @Environment(AppStore.self) private var store
+    @Binding var resource: FileResource?
+    func body(content: Content) -> some View {
+        content.sheet(isPresented: Binding(get: { resource != nil }, set: { if !$0 { resource = nil } })) {
+            if let resource { FileActivitySheet(url: resource.url) }
+        }
+        .onChange(of: store.api.map(ObjectIdentifier.init)) { _, _ in resource = nil }
+        .onChange(of: store.selectedProjectID) { _, _ in resource = nil }
+    }
+}
+#if os(iOS)
+private struct FileActivitySheet: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        controller.popoverPresentationController?.sourceView = controller.view
+        controller.popoverPresentationController?.sourceRect = CGRect(x: controller.view.bounds.midX, y: controller.view.bounds.midY, width: 1, height: 1)
+        return controller
+    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+#else
+private struct FileActivitySheet: View {
+    let url: URL
+    var body: some View { ShareLink(item: url) { Label("공유", systemImage: "square.and.arrow.up") }.padding(24) }
 }
 #endif

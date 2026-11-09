@@ -67,6 +67,17 @@ struct CLIApprovalCard: View {
                 statusLine(fallback, color: CE.ink2)
             }
         }
+        .modifier(ApprovalKeyboardShortcuts(
+            enabled: store.uiCanWrite && !busy && !reading && !sent,
+            onNumber: { number in
+                guard let option = prompt?.options.first(where: { $0.n == number }) else { return false }
+                picked = option.n; error = nil
+                return true
+            },
+            onReturn: {
+                if let prompt, let picked { Task { await answer(prompt, option: picked) } }
+            },
+            onCancel: { picked = nil }))
     }
 
     // MARK: Pieces
@@ -184,7 +195,7 @@ struct CLIApprovalCard: View {
             sentLine = prompt.options.first(where: { $0.n == option }).map { "눌렀습니다: \($0.n). \($0.label)" }
             sent = true; self.prompt = nil; picked = nil
         } else {
-            error = store.errorMessage ?? "선택 결과를 확인하지 못했습니다. 창을 다시 확인하세요."
+            error = store.errorMessage.map(friendlyError) ?? "선택 결과를 확인하지 못했습니다. 창을 다시 확인하세요."
             picked = nil
             await read()
         }

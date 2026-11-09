@@ -46,6 +46,7 @@ final class Router {
     private(set) var mainWindowRequest = 0
     private(set) var isOpeningNotification = false
     @ObservationIgnored private var notificationOpeningID: UUID?
+    var inboxReview = InboxReviewState()
     var decisionID: String?
     var memberID: String?
     var fileID: String?
@@ -168,6 +169,8 @@ final class Router {
     }
     /// Selections belong to one project; never carry them into another.
     func resetForProjectChange() {
+        inboxReview = InboxReviewState()
+        inlineFieldFocused = false
         decisionID = nil; memberID = nil; fileID = nil; chatTarget = nil; terminalMemberID = nil
         phonePaths = [:]
         chatMessageID = nil; showNewMember = false; navigationNotice = nil
@@ -182,5 +185,35 @@ extension EnvironmentValues {
     var ceWide: Bool {
         get { self[WideLayoutKey.self] }
         set { self[WideLayoutKey.self] = newValue }
+    }
+}
+
+/// Review snapshots and pending answers survive file navigation, but never cross project/connection resets.
+@MainActor @Observable
+final class InboxReviewState {
+    var segment: InboxSegment = .open
+    // Review state for this visit. Memos live in DraftStore and survive the visit.
+    var reviews: [String: DecisionReview] = [:]
+    /// Explicit memo-only review on option cards. Free answers use one final confirmation directly.
+    var memoOnly: Set<String> = []
+    var engaged: Set<String> = []
+    var inFlight: Set<String> = []
+    var answeredHere: Set<String> = []
+    var cardErrors: [String: String] = [:]
+    var contextID = UUID()
+    var visitID = UUID()
+    var memoRevisions: [String: Int] = [:]
+    var expandedDetail: Set<String> = []
+    var batchArmed: [String: [String]] = [:]
+    var batchBusy: Set<String> = []
+    var batchErrors: [String: String] = [:]
+    var expandedDone: Set<String> = []
+    var scrollID: String?
+    var scrollLocations: [String: InboxScrollLocation] = [:]
+
+    @discardableResult func beginSubmission(_ id: String) -> Bool {
+        guard !inFlight.contains(id) else { return false }
+        inFlight.insert(id)
+        return true
     }
 }

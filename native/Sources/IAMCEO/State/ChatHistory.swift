@@ -223,7 +223,9 @@ struct ChatHistory: Sendable {
     mutating func fail(_ failure: Error, request: ChatHistoryRequest) {
         guard loading == request, generation == request.generation else { return }
         loading = nil; journal = []
-        if !(failure is CancellationError), (failure as? URLError)?.code != .cancelled { error = failure.localizedDescription }
+        if !(failure is CancellationError), (failure as? URLError)?.code != .cancelled {
+            error = friendlyLoadError(failure, what: "대화", verb: "읽지")
+        }
     }
     mutating func cancel() {
         generation = UUID(); loading = nil; journal = []
@@ -260,6 +262,64 @@ struct ChatHistory: Sendable {
         guard var staged = bridge else { return }
         staged.items = mergeBufferedTail(staged.items)
         bridge = staged
+    }
+}
+
+/// An around response is a separate interval: it must never manufacture a page cursor or bridge a history gap.
+@MainActor @Observable
+final class ChatMessageFocus {
+    private(set) var messageID: String?
+    private(set) var context: [Message]?
+    private(set) var loading = false
+    private(set) var error: String?
+    private(set) var revision = UUID()
+    private var flight = UUID()
+
+    func clear() {
+        flight = UUID(); messageID = nil; context = nil; loading = false; error = nil
+        revision = UUID()
+    }
+
+    func open(_ id: String, key: ChatHistoryKey, available: [Message],
+              fetch: @Sendable () async throws -> [Message]) async {
+        guard !Task.isCancelled else { return }
+        let token = UUID()
+        flight = token; messageID = nil; loading = true; error = nil
+        let range = ChatHistory(key: key)
+        // Keep an already opened around interval when following another correction within it.
+        let known = (context ?? []) + available
+        if known.contains(where: { $0.id.utf8.elementsEqual(id.utf8) && range.contains($0) }) {
+            if context?.contains(where: { $0.id.utf8.elementsEqual(id.utf8) && range.contains($0) }) != true { context = nil }
+            loading = false; messageID = id; revision = UUID()
+            return
+        }
+        do {
+            let rows = try await fetch()
+            try Task.checkCancellation()
+            guard flight == token else { return }
+            guard rows.count <= 100, rows.allSatisfy({ $0.projectId.utf8.elementsEqual(key.projectID.utf8) }),
+                  rows.contains(where: { $0.id.utf8.elementsEqual(id.utf8) && range.contains($0) }) else {
+                throw ChatHistoryFailure.invalidPage
+            }
+            var unique: [Data: Message] = [:]
+            for row in rows where range.contains(row) { unique[Data(row.id.utf8)] = row }
+            context = unique.values.sorted(by: ChatHistory.ordered)
+            loading = false; messageID = id; revision = UUID()
+        } catch {
+            guard flight == token else { return }
+            loading = false
+            if !(error is CancellationError), (error as? URLError)?.code != .cancelled {
+                self.error = friendlyLoadError(error, what: "대화", verb: "읽지")
+            }
+        }
+    }
+}
+
+extension APIClient {
+    /// Archive and active reads use the same existing around contract, with no write or wake operation.
+    func chatMessagesAround(projectID: String, messageID: String, archived: Bool) async throws -> [Message] {
+        if !archived { return try await messagesAround(projectID: projectID, messageID: messageID, limit: 41) }
+        return try await request("/api/projects/\(Self.segment(projectID))/archive/messages?around=\(Self.segment(messageID))&limit=41")
     }
 }
 

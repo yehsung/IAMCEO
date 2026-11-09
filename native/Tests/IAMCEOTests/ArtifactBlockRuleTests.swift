@@ -22,6 +22,16 @@ final class ArtifactBlockRuleTests: XCTestCase {
         XCTAssertFalse(artifactAllowsNavigation(firstAction: true, url: nil, mainFrame: true, type: .other))
     }
 
+    func testSandboxFrameOnlyLoadsOnceAndAnchorsRemainInsideTheDocument() {
+        XCTAssertTrue(artifactAllowsChildNavigation(loaded: false, url: URL(string: "about:srcdoc"), type: .other))
+        XCTAssertFalse(artifactAllowsChildNavigation(loaded: true, url: URL(string: "about:srcdoc"), type: .other))
+        XCTAssertTrue(artifactAllowsChildNavigation(loaded: true, url: URL(string: "about:srcdoc#section"), type: .linkActivated))
+        for value in ["https://fixture.invalid/", "about:blank", "file:///fixture/private", "javascript:alert(1)", "data:text/html,hello"] {
+            for loaded in [true, false] { XCTAssertFalse(artifactAllowsChildNavigation(loaded: loaded, url: URL(string: value), type: .linkActivated)) }
+        }
+        XCTAssertFalse(artifactAllowsChildNavigation(loaded: false, url: nil, type: .other))
+    }
+
     private func rules() throws -> [[String: [String: String]]] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: Data(artifactBlockRuleJSON().utf8)) as? [[String: [String: String]]])
     }

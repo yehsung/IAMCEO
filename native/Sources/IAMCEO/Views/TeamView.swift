@@ -397,7 +397,9 @@ struct MemberDetailView: View {
         if let summary = store.deliverySummary(memberID: m.id), !store.isArchive {
             let page = store.deliveryPages[m.id]
             Group {
-                if summary.undeliveredCount > 0 || summary.unknownCount > 0 || summary.needsOwnerCount > 0 || summary.checkingCount > 0 || summary.deliveringCount > 0 {
+                // A-60: the full plate only when the CEO has to act (or the notices failed to load). Ordinary waiting —
+                // the member is busy, waking, or a turn ahead is being confirmed — is one line in 대기열 below.
+                if summary.needsOwnerCount > 0 || store.deliveryErrors[m.id] != nil {
                     DeliveryNoticeView(summary: summary, items: page?.items ?? [], canWrite: store.canWrite,
                         pendingIDs: store.deliveryChecking, error: store.deliveryErrors[m.id],
                         hasOlder: page?.nextBefore != nil,
@@ -606,9 +608,6 @@ struct MemberDetailView: View {
         return VStack(spacing: 0) {
             if let onClose {
                 drawerHeader(m, onClose: onClose)
-                Picker("직원", selection: Binding(get: { memberID }, set: { router.memberID = $0 })) {
-                    ForEach(store.members) { member in Text(member.name).tag(member.id) }
-                }.padding(.horizontal, 18).accessibilityLabel("드로어 직원 전환")
                 // Lost connection / failed write stay visible while the drawer covers the content column.
                 StatusStrips().padding(.horizontal, -10)
             }
@@ -616,9 +615,10 @@ struct MemberDetailView: View {
                 VStack(alignment: .leading, spacing: CESpace.m) {
                     // iPhone: the name is the navigation title; state, rank and the meta line open the page.
                     if !drawer { phoneHeader(m) }
-                    deliveryPlate(m)
+                    // What needs the CEO first (an approval window, an error); a delivery plate only below them.
                     if m.status == "blocked" { approvalBox(m) }
                     errorBox(m)
+                    deliveryPlate(m)
                     nowPlate(m)
                     actions(m).padding(.horizontal, 2)
                     recentTalkPlate(m)
@@ -939,17 +939,25 @@ struct MemberDetailView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                if !m.next.isEmpty || m.queuedCount > 0 || decisions > 0 {
+                // Waiting deliveries the plate above no longer shows sit here (the larger of the two counts).
+                let queued = max(m.queuedCount, store.deliverySummary(memberID: m.id)?.undeliveredCount ?? 0)
+                if !m.next.isEmpty || queued > 0 || decisions > 0 {
                     VStack(alignment: .leading, spacing: 8) {
                         if !m.next.isEmpty {
                             TeamFactRow(label: "다음") {
                                 Text(teamInlineMarkdown(m.next)).foregroundStyle(CE.ink).fixedSize(horizontal: false, vertical: true)
                             }
                         }
-                        if m.queuedCount > 0 {
+                        if queued > 0 {
                             TeamFactRow(label: "대기열") {
-                                Text("\(m.queuedCount)건").foregroundStyle(CE.ink).monospacedDigit()
-                                    .help("CLI에 아직 넣지 않은 입력입니다")
+                                let summary = store.deliverySummary(memberID: m.id)
+                                let reason = waitReasonLabel(summary?.waitReason, since: summary?.waitingSince,
+                                                             used: summary?.runLimit?.used, limit: summary?.runLimit?.limit)
+                                Text(["\(queued)건", reason].compactMap { $0 }.joined(separator: " · "))
+                                    .foregroundStyle(summary?.waitReason.map { waitReasonTone($0) == .attention } == true ? CE.attention : CE.ink)
+                                    .monospacedDigit()
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .help("아직 이 직원에게 넣지 않은 지시입니다")
                             }
                         }
                         if decisions > 0 {
@@ -1811,18 +1819,123 @@ struct ActivityList: View {
 
 // MARK: - New member
 
+import Observation
+
+/// App lifetime state; dismissing the form never cancels or replays the creation request.
+@MainActor @Observable
+final class MemberCreationNotice {
+    enum Outcome: Sendable, Equatable {
+        case created(String), partial(String?, String), failed(String), hostChanged
+    }
+    static let shared = MemberCreationNotice()
+    private(set) var namespace = ""
+    private(set) var projectID: String?
+    private(set) var memberID: String?
+    private(set) var message: String?
+    private(set) var running = false
+    private(set) var failed = false
+
+    func clear() { message = nil }
+
+    func create(store: AppStore, name: String, role: String, provider: String, model: String?) async -> Outcome {
+        guard !running, store.canWrite, !store.pendingActions.contains("create-member"),
+              let client = store.api, let project = store.state?.project,
+              !project.isHq, project.runnerEnabled else { return .failed("지금은 직원을 추가할 수 없습니다.") }
+        namespace = ProjectCreationNotice.scope(store)
+        projectID = project.id; memberID = nil; failed = false; running = true
+        message = "직원을 만드는 중입니다. 창을 닫아도 계속됩니다."
+        defer { running = false }
+        let before = Set(store.members.map(\.id))
+        let sameHost = { self.namespace == ProjectCreationNotice.scope(store) && store.api === client }
+        func hostChanged() -> Outcome {
+            failed = true
+            message = "연결이 바뀌었습니다. 원래 Mac에 연결해 직원 만들기 결과를 확인해 주세요."
+            return .hostChanged
+        }
+        do {
+            let member: Member = try await client.send("/api/projects/\(APIClient.segment(project.id))/members",
+                body: CreateMemberRequest(name: name, role: role, cli: provider, modelOverride: model), timeout: 150)
+            guard sameHost() else { return hostChanged() }
+            guard member.projectId == project.id, !member.id.isEmpty else { throw URLError(.badServerResponse) }
+            memberID = member.id
+            message = "직원을 만들었습니다. 이 직원에게 첫 일을 맡겨 보세요."
+            await store.refresh()
+            guard sameHost() else { memberID = nil; return hostChanged() }
+            return .created(member.id)
+        } catch {
+            guard sameHost() else { return hostChanged() }
+            failed = true
+            let detail = friendlyLoadError(error, what: "직원 만들기 결과", verb: "확인하지")
+            // Read the original project even if the user switched projects while waiting.
+            let snapshot: ProjectState? = try? await client.request("/api/projects/\(APIClient.segment(project.id))/state")
+            guard sameHost() else { return hostChanged() }
+            let matches = snapshot?.project.id == project.id
+                ? snapshot?.members.filter { !before.contains($0.id) && $0.name == name && $0.cli == provider } ?? [] : []
+            if matches.count == 1, let member = matches.first {
+                memberID = member.id
+                message = "직원은 등록됐습니다. 준비 상태를 확인해 주세요. \(detail)"
+                await store.refresh()
+                guard sameHost() else { memberID = nil; return hostChanged() }
+                return .partial(member.id, message!)
+            }
+            message = "\(detail) 팀에서 등록 여부를 확인해 주세요. 자동으로 다시 요청하지 않습니다."
+            return .failed(message!)
+        }
+    }
+
+    @discardableResult func openMember(store: AppStore, router: Router) async -> Bool {
+        guard namespace == ProjectCreationNotice.scope(store), let projectID, let memberID,
+              let client = store.api else { return false }
+        let navigation = router.navigationRevision
+        if store.selectedProjectID != projectID { await store.selectProject(id: projectID) }
+        guard namespace == ProjectCreationNotice.scope(store), store.api === client,
+              router.navigationRevision == navigation else { return false }
+        guard store.state?.project.id == projectID, store.members.contains(where: { $0.id == memberID }) else {
+            router.navigationNotice = "직원을 열지 못했습니다. 팀에서 준비 상태를 확인해 주세요."
+            return false
+        }
+        router.openChat(memberID)
+        router.focusComposer &+= 1
+        clear()
+        return true
+    }
+}
+
+/// Shared banner for the form and the app's notice host.
+struct MemberCreationBanner: View {
+    @Environment(AppStore.self) private var store
+    @Environment(Router.self) private var router
+    var onOpen: (() -> Void)? = nil
+    var body: some View {
+        let notice = MemberCreationNotice.shared
+        if notice.namespace == ProjectCreationNotice.scope(store), let message = notice.message {
+            InlineNotice(tone: notice.failed ? .attention : notice.running ? .neutral : .success,
+                         title: notice.running ? "직원 준비 중" : "직원 만들기 결과", detail: message,
+                         actionTitle: notice.memberID == nil || notice.running ? "닫기" : "이 직원에게 첫 일 맡기기") {
+                if notice.memberID != nil, !notice.running {
+                    Task { if await notice.openMember(store: store, router: router) { onOpen?() } }
+                } else { notice.clear() }
+            }
+        }
+    }
+}
+
 struct NewMemberView: View {
     @Environment(AppStore.self) private var store
+    @Environment(Router.self) private var router
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var role = ""
     @State private var selection = NewMemberModelSelection()
     @State private var failure: String?
+    @State private var submitted = false
+    @State private var presented = false
+    @State private var backgroundMessage: String?
     @FocusState private var focus: NewMemberField?
 
     init() {}
 
-    private var busy: Bool { store.pendingActions.contains("create-member") }
+    private var busy: Bool { MemberCreationNotice.shared.running || store.pendingActions.contains("create-member") }
     private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var blockReason: String? {
         if store.isDemo { return "샘플은 읽기 전용입니다. 실제 Mac에 연결하면 팀장을 추가할 수 있습니다." }
@@ -1837,17 +1950,24 @@ struct NewMemberView: View {
     var body: some View {
         // One line; the wait hint only while the session is being prepared.
         CESheet("팀장 추가", subtitle: busy ? "세션을 준비하는 중입니다. 잠시 걸릴 수 있습니다." : "새 CLI 세션을 띄워 팀장으로 등록합니다.",
-                icon: "person.badge.plus", width: 520, onClose: { if !busy { dismiss() } }) {
+                icon: "person.badge.plus", width: 520, onClose: { dismiss() }) {
             form
         } footer: {
-            // Esc is the header's close button; neither closes while the session is being added.
-            // Match the new-project sheet: secondary 취소 and primary 추가.
-            Button("취소") { dismiss() }.ceSecondaryButton().controlSize(.regular).disabled(busy)
+            Button("취소") { dismiss() }.ceSecondaryButton().controlSize(.regular)
             addButton.controlSize(.regular).keyboardShortcut(.defaultAction)
         }
-        .interactiveDismissDisabled(busy)
         .scrollDismissesKeyboard(.interactively)
         .task { await store.refreshModels() }
+        .overlay(alignment: .top) { MemberCreationBanner(onOpen: { dismiss() }).padding() }
+        .onAppear { presented = true }
+        .onDisappear {
+            presented = false
+            if submitted, busy, router.navigationNotice == nil,
+               let message = MemberCreationNotice.shared.message {
+                backgroundMessage = message
+                router.navigationNotice = message
+            }
+        }
         #if os(macOS)
         .onAppear { if store.canWrite { focus = .name } }
         #endif
@@ -1861,7 +1981,7 @@ struct NewMemberView: View {
             }
         }
         .ceProminentButton()
-        .disabled(trimmedName.isEmpty || busy || blockReason != nil)
+        .disabled(trimmedName.isEmpty || busy || submitted || blockReason != nil)
     }
 
     /// Web form: 14 between fields, 6 between a label (13/600 ink-2) and its 44pt input; errors 13.5 danger.
@@ -1942,12 +2062,15 @@ struct NewMemberView: View {
             return
         }
         let trimmedModel = selection.model
-        let ok = await store.createMember(name: trimmedName, role: role.trimmingCharacters(in: .whitespacesAndNewlines), provider: selection.provider, model: trimmedModel.isEmpty ? nil : trimmedModel)
-        guard ok else {
-            failure = store.errorMessage ?? "팀장을 추가하지 못했습니다."
-            return
+        submitted = true
+        let result = await MemberCreationNotice.shared.create(store: store, name: trimmedName,
+            role: role.trimmingCharacters(in: .whitespacesAndNewlines), provider: selection.provider,
+            model: trimmedModel.isEmpty ? nil : trimmedModel)
+        let notice = MemberCreationNotice.shared
+        if !presented, router.navigationNotice == nil || router.navigationNotice == backgroundMessage,
+           notice.namespace == ProjectCreationNotice.scope(store) || result == .hostChanged {
+            router.navigationNotice = notice.message
         }
-        dismiss()
     }
 }
 

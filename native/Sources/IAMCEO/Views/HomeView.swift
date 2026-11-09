@@ -1,4 +1,6 @@
 import SwiftUI
+import Observation
+import UniformTypeIdentifiers
 
 /// 홈 — "지금". It answers four questions, in this order, and nothing else:
 /// 지금 상황 (what is going on) · 내 차례 (what waits on me) · 팀 (who is working on what) · 진척 (how far along),
@@ -24,6 +26,7 @@ struct HomeView: View {
     /// iPhone/iPad: 판 정리 asks once (no tooltip there, and the circular-arrows mark reads as "refresh").
     @State private var confirmTidy = false
     @State private var startError: String?
+    @State private var completion: TodoCompletionReview?
     @State private var expandedTodos: Set<String> = []
     @State private var showDoneTodos = false
     @State private var contextID = UUID()
@@ -35,14 +38,14 @@ struct HomeView: View {
     private static let topDecisions = 3
 
     /// A decision open for 6 hours or more: it is probably holding someone's work.
-    static func waitedLong(_ decision: Decision, now: Date = Date()) -> Bool {
-        guard let created = parseISODate(decision.createdAt) else { return false }
+    static func waitedLong(_ decision: Decision, now: Date = Date(), waitingSince: Date? = nil) -> Bool {
+        guard let created = waitingSince ?? parseISODate(decision.createdAt) else { return false }
         return now.timeIntervalSince(created) >= 6 * 3600
     }
 
     /// "9시간째" / "2일째" for a card that has waited long, nil otherwise.
-    static func waitedLabel(_ decision: Decision, now: Date = Date()) -> String? {
-        guard waitedLong(decision, now: now), let created = parseISODate(decision.createdAt) else { return nil }
+    static func waitedLabel(_ decision: Decision, now: Date = Date(), waitingSince: Date? = nil) -> String? {
+        guard waitedLong(decision, now: now, waitingSince: waitingSince), let created = waitingSince ?? parseISODate(decision.createdAt) else { return nil }
         let hours = Int(now.timeIntervalSince(created) / 3600)
         return hours >= 48 ? "\(hours / 24)일째 기다림" : "\(hours)시간째 기다림"
     }
@@ -69,6 +72,17 @@ struct HomeView: View {
         }
     }
 
+    static func openReport(_ notice: MissingReportNotice, members: [Member], router: Router) {
+        let member = members.first { $0.id == notice.memberId }
+        router.openChat(member?.kind == "worker" ? notice.memberId : nil)
+        router.chatMessageID = notice.messageId
+    }
+
+    static func openRuntime(router: Router, openSettings: () -> Void) {
+        SettingsView.showRuntime()
+        if isMac { openSettings() } else { router.showSettings = true }
+    }
+
     // MARK: - Derived data
 
     private var hPad: CGFloat { isMac ? 24 : 16 }
@@ -84,7 +98,7 @@ struct HomeView: View {
     private var titleInset: CGFloat { (rowMinHeight + 22) / 2 + 2 }
     private var glyphGap: CGFloat { titleInset - 22 }
 
-    private var openDecisions: [Decision] { newestFirst(store.decisions.filter { $0.status == "open" }) }
+    private var openDecisions: [Decision] { InboxHomePolicy.prioritized(store.decisions.filter { $0.status == "open" }, members: store.members, notices: store.deliveryNotices) }
     private var attention: HomeAttention { HomeAttention(members: store.members, notices: store.deliveryNotices, messages: store.messages) }
 
     private func todoBusy(_ id: String) -> Bool {
@@ -116,12 +130,14 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: CESpace.m) {
                 gateCard(state.project)
                 nowCard(state.project)
+                missingReports
                 columns(turn)
             }
             .ceContentColumn()
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .refreshable { await store.refresh() }
+        .sheet(item: $completion) { review in TodoCompletionEditor(review: review) }
         .onChange(of: store.selectedProjectID) { _, _ in resetLocalState() }
         .onChange(of: store.drafts.namespace) { _, _ in resetLocalState() }
         // Any row that moves inside 내 차례 can put another todo under the pointer.
@@ -159,6 +175,7 @@ struct HomeView: View {
     /// Notes and folds belong to one project; never show them on another.
     private func resetLocalState() {
         contextID = UUID()
+        completion = nil
         nowExpanded = false; confirmTidy = false
         tidyNote = nil; startError = nil; todoError = nil
         expandedTodos = []; showDoneTodos = false
@@ -262,9 +279,9 @@ struct HomeView: View {
         case "backend_down":
             Button("실행 환경 보기") {
                 #if os(macOS)
-                openSettings()
+                Self.openRuntime(router: router) { openSettings() }
                 #else
-                router.showSettings = true
+                Self.openRuntime(router: router) {}
                 #endif
             }
             .ceSecondaryButton()
@@ -461,6 +478,24 @@ struct HomeView: View {
         return Text("\(lead) \(rest)")
     }
 
+    @ViewBuilder private var missingReports: some View {
+        if let notices = store.deliveryNotices?.reportNotices, !notices.isEmpty {
+            HomeCard(title: "결과 보고 누락", count: notices.count) {
+                ForEach(notices) { notice in
+                    HStack {
+                        HomeRowButton(action: {
+                            Self.openReport(notice, members: store.members, router: router)
+                        }) {
+                            Text(notice.title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                        }
+                        Button(memberName(notice.memberId) ?? "직원 보기") { router.openMember(notice.memberId) }
+                            .ceSecondaryButton().ceCompactControl()
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - 내 차례
 
     /// Everything that is stopped until the CEO acts, in priority order: approval prompts, member errors, my sends that
@@ -472,8 +507,8 @@ struct HomeView: View {
         if attention.unassigned > 0 { rows.append(.unassigned(attention.unassigned)) }
         rows += attention.failedMessages.map(HomeTurnRow.failedMessage)
         let open = openDecisions
-        // Newest first (the owner's choice), but a card that has waited long never hides behind "n건 더".
-        let shown = open.prefix(Self.topDecisions) + open.dropFirst(Self.topDecisions).filter { Self.waitedLong($0) }
+        // Old or blocking decisions stay ahead of fresh, unrelated decisions.
+        let shown = open.prefix(Self.topDecisions) + open.dropFirst(Self.topDecisions).filter { Self.waitedLong($0, waitingSince: InboxHomePolicy.waitingStart($0, members: store.members, notices: store.deliveryNotices)) }
         rows += shown.map(HomeTurnRow.decision)
         if open.count > shown.count { rows.append(.moreDecisions(open.count - shown.count)) }
         let live = liveTodos
@@ -481,8 +516,8 @@ struct HomeView: View {
         let waiting = !rows.isEmpty
         // Web .hm-count: everything that waits on me — every open decision (also those behind "n건 더"), not the
         // follow-up, error or fold lines.
-        let count = attention.members.count + attention.missingMembers.count + (attention.unassigned > 0 ? 1 : 0)
-            + attention.failedMessages.count + open.count + live.filter { !$0.done }.count
+        let count = InboxHomePolicy.needsCount(decisions: store.decisions, todos: store.todos,
+                                               members: store.members, notices: store.deliveryNotices)
         if let todoError { rows.append(.todoError(todoError)) }
         let done = doneTodos
         if !done.isEmpty {
@@ -586,6 +621,8 @@ struct HomeView: View {
                 }
             }
             if approval { CLIApprovalCard(member: member) }
+            DeliveryWaitReasonView(summary: store.deliverySummary(memberID: member.id))
+                .padding(.leading, titleInset)
             if let delivery, let detail = homeDeliverySummary(delivery) {
                 Text(detail)
                     .font(CEFont.meta).foregroundStyle(CE.attention)
@@ -616,7 +653,7 @@ struct HomeView: View {
                     .lineSpacing(Self.rowTitleLeading).lineLimit(2).multilineTextAlignment(.leading)
                 HStack(spacing: 6) {
                     HomeSub(text: [decision.who, relativeTime(decision.createdAt)].filter { !$0.isEmpty }.joined(separator: " · "))
-                    if let waited = Self.waitedLabel(decision) { Tag(waited, tone: .attention) }
+                    if let waited = Self.waitedLabel(decision, waitingSince: InboxHomePolicy.waitingStart(decision, members: store.members, notices: store.deliveryNotices)) { Tag(waited, tone: .attention) }
                 }
             }
         }
@@ -634,7 +671,8 @@ struct HomeView: View {
         return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 0) {
                 HomeTodoCheck(checked: checked, busy: todoBusy(todo.id), hit: hit) {
-                    toggleTodo(todo, to: !checked)
+                    if checked { toggleTodo(todo, to: false) }
+                    else { completion = TodoCompletionReview(todo: todo, store: store) }
                 }
                 // The 22pt box lines up with the card's text edge; the hit area extends past it.
                 .padding(.leading, -(hit - 22) / 2)
@@ -827,6 +865,7 @@ struct HomeView: View {
                         }
                     }
                     Text(doing).font(CEFont.secondary).foregroundStyle(CE.ink2).lineLimit(1)
+                    DeliveryWaitReasonView(summary: store.deliverySummary(memberID: member.id))
                 }
             }
         }
@@ -851,6 +890,7 @@ struct HomeView: View {
                         if showsState { Text(info.label).font(CEFont.meta.weight(.medium)).foregroundStyle(info.tone.color).fixedSize() }
                     }
                     if !sub.isEmpty { HomeSub(text: sub) }
+                    DeliveryWaitReasonView(summary: store.deliverySummary(memberID: member.id))
                 }
             }
         }
@@ -1643,4 +1683,165 @@ private func homePlainLine(_ text: String) -> String {
         if !line.isEmpty { return line }
     }
     return ""
+}
+
+/// One definition for destination counts, project counts and the actual inbox approval section.
+enum InboxHomePolicy {
+    static func approvals(_ members: [Member]) -> [Member] {
+        members.filter { $0.status == "blocked" && MemberStatusInfo($0).tone == .approval }
+    }
+
+    static func inboxCount(decisions: [Decision], members: [Member]) -> Int {
+        decisions.filter { $0.status == "open" }.count + approvals(members).count
+    }
+
+    /// Matches the server's additive needsCount, including separate delivery interventions for one employee.
+    static func needsCount(decisions: [Decision], todos: [Todo], members: [Member], notices: DeliveryNotices?) -> Int {
+        decisions.filter { $0.status == "open" }.count + todos.filter { !$0.done }.count
+            + members.filter { $0.status == "blocked" && ["permission", "selection"].contains($0.blockedReason ?? "") }.count
+            + members.filter { $0.status == "error" }.count
+            + (notices?.members.reduce(0) { $0 + max(0, $1.needsOwnerCount) } ?? 0)
+            + max(0, notices?.unassigned.needsOwnerCount ?? 0)
+    }
+
+    static func projectCount(_ project: ProjectSummary) -> Int {
+        max(0, project.needsCount ?? (project.inboxCount + project.blockedCount + project.errorCount))
+    }
+
+    static func waitingStart(_ decision: Decision, members: [Member], notices: DeliveryNotices?) -> Date {
+        let created = parseISODate(decision.createdAt)
+        // A generic delivery wait is not evidence that this decision stops work. Require its asker to be waiting.
+        let waiting = members.contains { $0.id == decision.memberId && $0.status == "waiting" }
+            ? parseISODate(notices?.members.first { $0.memberId == decision.memberId }?.waitingSince) : nil
+        return [created, waiting].compactMap { $0 }.min() ?? .distantFuture
+    }
+
+    static func prioritized(_ decisions: [Decision], members: [Member], notices: DeliveryNotices?, now: Date = Date()) -> [Decision] {
+        decisions.sorted { left, right in
+            let lhs = waitingStart(left, members: members, notices: notices)
+            let rhs = waitingStart(right, members: members, notices: notices)
+            let leftOld = now.timeIntervalSince(lhs) >= 6 * 3600
+            let rightOld = now.timeIntervalSince(rhs) >= 6 * 3600
+            if leftOld != rightOld { return leftOld }
+            let leftBlocks = members.contains { $0.id == left.memberId && $0.status == "waiting" }
+            let rightBlocks = members.contains { $0.id == right.memberId && $0.status == "waiting" }
+            if leftBlocks != rightBlocks { return leftBlocks }
+            if lhs != rhs { return lhs < rhs }
+            return left.id < right.id
+        }
+    }
+}
+
+/// Separate from the chat composer: completing a todo never consumes or changes its draft attachments.
+@MainActor @Observable
+final class TodoCompletionReview: Identifiable {
+    let id = UUID()
+    let todo: Todo
+    let namespace: String
+    let projectID: String?
+    let connectionGeneration: UUID
+    var note = ""
+    var files: [Attachment] = []
+    var sending = false
+    var uploading = false
+    var error: String?
+
+    init(todo: Todo, store: AppStore) {
+        self.todo = todo
+        namespace = store.drafts.namespace
+        projectID = store.selectedProjectID
+        connectionGeneration = store.drafts.connectionGeneration
+    }
+
+    func isCurrent(in store: AppStore) -> Bool {
+        namespace == store.drafts.namespace && projectID == store.selectedProjectID
+            && connectionGeneration == store.drafts.connectionGeneration
+    }
+
+    func submit(store: AppStore) async -> Bool {
+        guard !sending, !uploading, isCurrent(in: store), store.uiCanWrite else { return false }
+        guard let current = store.todos.first(where: { $0.id == todo.id }), !current.done, current.outcome != "dropped" else {
+            error = "이미 완료되었거나 정리된 할 일입니다. 답과 첨부는 남겨 두었습니다."
+            return false
+        }
+        sending = true; error = nil
+        defer { sending = false }
+        let accepted = await store.setTodoDone(todo, done: true, note: note.isEmpty ? nil : note, fileIDs: files.map(\.id))
+        guard isCurrent(in: store) else { return false }
+        if !accepted { error = store.errorMessage.map(friendlyError) ?? "완료 답을 보내지 못했습니다. 답과 첨부는 남겨 두었습니다." }
+        return accepted
+    }
+
+    func upload(_ urls: [URL], store: AppStore) async {
+        guard !uploading, !sending, isCurrent(in: store), store.uiCanWrite,
+              let api = store.api, let projectID else { return }
+        uploading = true; error = nil
+        defer { uploading = false }
+        for url in urls {
+            guard isCurrent(in: store), store.uiCanWrite, !Task.isCancelled else { return }
+            do {
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                guard url.isFileURL else { throw PhotoAttachmentError.unavailable }
+                try PhotoAttachment.validateSize(url)
+                let data = try Data(contentsOf: url, options: .mappedIfSafe)
+                let file = try await api.upload(data: data, filename: url.lastPathComponent,
+                                               mime: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
+                                               projectID: projectID, targetMemberID: todo.memberId)
+                guard isCurrent(in: store), !Task.isCancelled else { return }
+                if !files.contains(where: { $0.id == file.id }) { files.append(file) }
+            } catch {
+                guard isCurrent(in: store) else { return }
+                self.error = friendlyLoadError(error, what: "첨부", verb: "올리지")
+                return
+            }
+        }
+    }
+}
+
+private struct TodoCompletionEditor: View {
+    @Bindable var review: TodoCompletionReview
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var importing = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: CESpace.m) {
+            Text(review.todo.title).font(CEFont.section)
+            TextField("짧은 답 (선택)", text: $review.note, axis: .vertical)
+                .lineLimit(2...5).ceField().disabled(review.sending)
+            Text("비밀번호·인증 코드 같은 비밀은 쓰거나 첨부하지 마세요.").font(CEFont.meta).foregroundStyle(CE.ink2)
+            ForEach(review.files) { file in
+                HStack {
+                    Text(file.name.isEmpty ? "첨부" : file.name).font(CEFont.note)
+                    Button("빼기") { review.files.removeAll { $0.id == file.id } }
+                        .ceGhostButton().disabled(review.sending)
+                }
+            }
+            if review.uploading { ProgressView("첨부 올리는 중") }
+            if let error = review.error { InlineNotice(tone: .danger, title: error) }
+            if !review.isCurrent(in: store) {
+                Text("연결이 바뀌었습니다. 이 창을 닫고 할 일을 다시 열어 주세요.").font(CEFont.meta).foregroundStyle(CE.ink2)
+            } else if let reason = store.writeBlockedReason {
+                Text(reason).font(CEFont.meta).foregroundStyle(CE.ink2)
+            }
+            HStack {
+                Button("파일 붙이기") { importing = true }.ceSecondaryButton()
+                    .disabled(review.sending || review.uploading || !store.uiCanWrite || !review.isCurrent(in: store))
+                Button(review.sending ? "보내는 중" : review.error == nil ? "완료 답 보내기" : "다시 시도") {
+                    Task { if await review.submit(store: store) { dismiss() } }
+                }.ceProminentButton().disabled(review.sending || review.uploading || !store.uiCanWrite || !review.isCurrent(in: store))
+                Button("취소") { dismiss() }.ceGhostButton().disabled(review.sending || review.uploading)
+            }
+        }
+        .padding(CESpace.l)
+        .frame(minWidth: isMac ? 380 : nil, idealWidth: 440)
+        .interactiveDismissDisabled(review.sending || review.uploading)
+        .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            switch result {
+            case .success(let urls): Task { await review.upload(urls, store: store) }
+            case .failure(let error): review.error = friendlyLoadError(error, what: "첨부", verb: "읽지")
+            }
+        }
+    }
 }

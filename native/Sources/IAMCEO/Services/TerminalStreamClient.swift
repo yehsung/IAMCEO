@@ -279,7 +279,7 @@ struct TerminalPresentation {
     }
 
     static func controlStatus(expiresAt: Double?, now: Date) -> String {
-        let status = "직접 입력 중 · 이 직원의 자동 전달이 멈춰 있습니다"
+        let status = "직접 입력 중 · 보낸 지시는 잠시 기다립니다"
         guard let expiresAt else { return status }
         let seconds = max(0, Int(ceil(expiresAt / 1000 - now.timeIntervalSince1970)))
         return seconds < 60 ? "\(status) · \(seconds)초 남음" : status

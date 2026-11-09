@@ -535,7 +535,7 @@ import SwiftUI
     #endif
 
     func testMacStatusKeepsDeliveryMessageAndAddsLastMinuteCountdown() {
-        let now = Date(timeIntervalSince1970: 1000), status = "직접 입력 중 · 이 직원의 자동 전달이 멈춰 있습니다"
+        let now = Date(timeIntervalSince1970: 1000), status = "직접 입력 중 · 보낸 지시는 잠시 기다립니다"
         XCTAssertEqual(TerminalPresentation.controlStatus(expiresAt: nil, now: now), status)
         XCTAssertEqual(TerminalPresentation.controlStatus(expiresAt: 1_060_000, now: now), status)
         XCTAssertEqual(TerminalPresentation.controlStatus(expiresAt: 1_059_000, now: now), status + " · 59초 남음")

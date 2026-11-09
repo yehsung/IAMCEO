@@ -26,6 +26,7 @@ struct DeliveryNoticeView: View {
                         .ceLineHeight(13, 1.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                DeliveryWaitReasonView(summary: summary)
                 if let error {
                     Text(error).font(CEFont.note).foregroundStyle(CE.danger)
                         .lineSpacing(CELeading.note)
@@ -93,6 +94,9 @@ private struct DeliveryNoticeRow: View {
                     Text("추천 · \(recommendation.text)").font(CEFont.secondary).foregroundStyle(CE.ink2)
                         .ceLineHeight(13, 1.5)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                if let label = waitReasonLabel(item.waitReason, since: item.waitingSince, used: item.runLimit?.used, limit: item.runLimit?.limit) {
+                    Text(label).font(CEFont.meta).foregroundStyle(waitReasonTone(item.waitReason).color)
                 }
                 checkLine
                 if pending {
@@ -189,4 +193,26 @@ private func deliveryShortTime(_ date: Date, now: Date = Date()) -> String {
     guard calendar.component(.year, from: date) == calendar.component(.year, from: now) else { return koDateTime(date) }
     let parts = calendar.dateComponents([.month, .day], from: date)
     return "\(parts.month ?? 0)월 \(parts.day ?? 0)일 \(time)"
+}
+
+/// Uses the same copy and tones as chat and employee detail; supports old servers without waitReasons.
+struct DeliveryWaitReasonView: View {
+    let summary: MemberDeliverySummary?
+
+    var body: some View {
+        if let reasons = summary?.waitReasons, !reasons.isEmpty {
+            ForEach(Array(reasons.enumerated()), id: \.offset) { _, reason in
+                if let label = waitReasonLabel(reason.waitReason, since: reason.waitingSince,
+                                              used: reason.runLimit?.used, limit: reason.runLimit?.limit) {
+                    Text(label + (reason.count > 1 ? " · \(reason.count)건" : ""))
+                        .font(CEFont.meta).foregroundStyle(waitReasonTone(reason.waitReason).color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        } else if let summary, let label = waitReasonLabel(summary.waitReason, since: summary.waitingSince,
+                                                          used: summary.runLimit?.used, limit: summary.runLimit?.limit) {
+            Text(label).font(CEFont.meta).foregroundStyle(waitReasonTone(summary.waitReason).color)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
 }

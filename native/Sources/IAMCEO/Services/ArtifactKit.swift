@@ -70,22 +70,39 @@ enum ArtifactKit {
 @media (max-width:520px){:where(body){padding:16px;font-size:14.5px}:where(h1){font-size:1.35rem}:where(.grid,.compare){grid-template-columns:1fr}:where(.flow){flex-direction:column;gap:22px}:where(.flow>*){flex:none}:where(.flow>*:not(:last-child))::after{content:"↓";right:auto;left:50%;top:auto;bottom:-22px;transform:translateX(-50%)}}
 """
 
-    /// The protected preview's policy: inline styles and data: images/fonts only; no script, request, form or base.
-    static let policy = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'\">"
+    /// Inline scripts run only inside sandbox="allow-scripts"; no origin, network, form or base access.
+    static let policy = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:; media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'\">"
 
-    /// The whole document, as the web's buildArtifactSrcdoc lays it out minus its script (the native preview runs no
-    /// page script): the policy first, then the kit, then the author's page. Whatever the author writes (doctype, html,
-    /// head, comments) comes after the policy, so it can only tighten it. Nested frames and `<link>` are renamed before
-    /// parsing (no preconnect), and NUL characters are dropped, as on the web.
+    /// Put the native policy and kit before any author markup. Never load this outside sandboxDocument.
     static func document(_ html: String, title: String? = nil) -> String {
         var head = "<!doctype html><html lang=\"ko\"><head>" + policy
         head += "<meta http-equiv=\"x-dns-prefetch-control\" content=\"off\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         if let title, !title.isEmpty { head += "<title>" + escape(title) + "</title>" }
-        head += "<style>" + css + "</style></head><body>"
+        head += "<style>" + css + "</style>"
+        // CSP cannot stop STUN. Disable WebRTC in the page realm before author scripts, as the server kit does.
+        head += "<script>" + isolationScript + "</script></head><body>"
         var body = html.replacingOccurrences(of: "\u{0}", with: "")
         body = blocked.stringByReplacingMatches(in: body, range: NSRange(body.startIndex..., in: body), withTemplate: "<$1x-blocked-$2")
         return head + body + "</body></html>"
     }
+
+    /// srcdoc has an opaque origin: no allow-same-origin, top navigation, forms, downloads or popups.
+    /// The fetched render=1 response's CSP is enforced again here because URLSession headers do not follow HTML strings.
+    static func sandboxDocument(_ html: String, title: String? = nil, fitted: Bool = false) -> String {
+        let page = escape(document(html, title: title))
+        return "<!doctype html><html><head><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; frame-src about:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>html,body{margin:0;width:100%;height:100%;background:#090713}iframe{display:block;border:0;width:100%;height:100%}</style></head><body><iframe id=\"artifact\" sandbox=\"allow-scripts\" referrerpolicy=\"no-referrer\" srcdoc=\"" + page + "\"></iframe></body></html>"
+    }
+
+    static func externalURL(_ value: String) -> URL? {
+        guard let parts = URLComponents(string: value), let scheme = parts.scheme?.lowercased(),
+              ["https", "http"].contains(scheme), let host = parts.host, !host.isEmpty,
+              parts.user == nil, parts.password == nil else { return nil }
+        return parts.url
+    }
+
+    private static let isolationScript = #"""
+    (function(){["RTCPeerConnection","webkitRTCPeerConnection"].forEach(function(k){try{Object.defineProperty(window,k,{value:undefined,writable:false,configurable:false})}catch(e){}});var E=Element.prototype;[[E,"attachShadow"],[E,"setHTMLUnsafe"],[Document,"parseHTMLUnsafe"],[Document.prototype,"write"],[Document.prototype,"writeln"]].forEach(function(x){try{delete x[0][x[1]]}catch(e){}});var q=E.querySelectorAll,m=E.matches,r=E.remove;new MutationObserver(function(list){list.forEach(function(c){c.addedNodes.forEach(function(n){if(n.nodeType!==1)return;if(m.call(n,"iframe,frame,link"))r.call(n);else q.call(n,"iframe,frame,link").forEach(function(e){r.call(e)})})})}).observe(document,{childList:true,subtree:true})})()
+    """#
 
     private static let blocked = try! NSRegularExpression(pattern: "<(/?)(iframe|frameset|frame|link)(?=[\\s/>])", options: [.caseInsensitive])
 

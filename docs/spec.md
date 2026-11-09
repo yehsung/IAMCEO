@@ -342,6 +342,14 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 
 모델 캐시에서 유효한 Codex 표시 모델이 0개면 `source:"default"` 기본 모델 목록으로 대체한다. 터미널 control attach 종료를 기다린 뒤 크기 복원을 확인하되 `terminal_gone` 또는 확정된 finished/not_found면 복원 대상을 정리하고 pump·재열기를 진행한다. 복원 확인은 최대 2초이며 초과하면 경고 활동을 남기고 전달을 계속한다. control attach가 없으면 크기 복원을 기다리지 않는다.
 
+### iPhone 페어링
+
+- 인증된 `POST /api/pair/start`는 `{code,expiresAt,ttlSeconds,urls,version}`을 반환한다. QR은 접속 코드 대신 5분 유효한 일회용 코드와 Tailscale 주소만 담는다. 미사용 코드는 최대 5개, 전체 상태 기록은 최대 128개이며 오래된 기록부터 폐기한다.
+- `POST /pair/claim`의 `{code,device?}`는 인증 없이 한 번만 교환한다. 성공 응답은 기존 `{accessCode,version}`에 `confirmationToken`을 추가한다. 교환만으로 연결 완료로 간주하지 않는다. 응답 유실 시 교환을 반복하지 않고 새 QR을 만든다.
+- 인증된 `GET /api/pair/status?code=<일회용 코드>`는 `{code,status}`를 반환한다. 정규화된 code와 `pending`(미교환), `claimed`(교환됨), `connected`(아래 ACK 성공), `expired`(만료·폐기·알 수 없는 코드)를 구분한다. 코드 소진·만료 자체는 연결 완료의 증거가 아니다.
+- iPhone의 모든 QR 진입은 `AppStore.pair`를 사용한다. 교환 응답의 접속 코드로 실제 인증 연결에 성공한 뒤 해당 API client로 `POST /api/pair/ack`에 `{code,confirmationToken}`을 보낸다. 인증과 해당 교환 응답의 토큰이 모두 맞는 claimed 코드만 connected로 바꾼다. 같은 ACK는 멱등이며 미교환·만료·잘못된 토큰은 409다. 공유 접속 코드만으로 특정 QR의 연결을 추정하지 않는다.
+- 상태와 ACK도 Bearer 인증·`Cache-Control: no-store`를 따른다. 인증 회전·서버 재시작·원래 5분 만료는 교환 및 완료 기록을 모두 무효화한다. 이전 서버가 토큰을 생략하면 iPhone 연결은 유지하며 ACK를 생략한다. ACK 유실은 이미 성공한 연결을 실패로 바꾸거나 QR을 자동 재교환하지 않는다.
+
 ### 폴더·GitHub 가져오기 보안 한도
 
 폴더 생성은 mode 0755로 만들고 lstat·부모/자식 realpath를 재검사한다. 실패 시 새 항목만 rmdir하며 재귀 정리하지 않는다. 폴더 열거는 숨긴 항목·파일까지 최대 2000개를 읽어 정렬하고 응답은 500개까지만 반환한다. 열거/응답 한도에 도달하면 truncated=true다. 앱 행 ID는 이름과 목록 순번으로 만든다.

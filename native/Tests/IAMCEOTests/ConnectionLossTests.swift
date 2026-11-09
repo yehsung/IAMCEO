@@ -92,9 +92,9 @@ final class ConnectionLossTests: XCTestCase {
     @MainActor func testSocketFailureKeepsRESTWritableAndConfirmed401AloneEndsAuthentication() async throws {
         let helper = RealtimeNetworkTests(), server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
-        let store = try await helper.connected(server, network, clock, factory)
+        guard let store = try await helper.connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
-        let socket = await factory.sockets[0]
+        guard let socket = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
         try await socket.enqueue(.failure(URLError(.badServerResponse)))
         await helper.eventually { store.realtimeStatus == .fallback }
         XCTAssertTrue(store.canWrite)
@@ -116,7 +116,7 @@ final class ConnectionLossTests: XCTestCase {
     @MainActor func testRESTFailureBackoffAnd403PreserveSnapshotAndCredentials() async throws {
         let helper = RealtimeNetworkTests(), server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
-        let store = try await helper.connected(server, network, clock, factory)
+        guard let store = try await helper.connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
         server.change { $0.syncError = .cannotConnectToHost }
         let failed = Task { await store.refresh() }
@@ -151,9 +151,9 @@ final class ConnectionLossTests: XCTestCase {
     @MainActor func testEpochReplacementRejectsLateOldSnapshotAndFetchesNewDiagnostics() async throws {
         let helper = RealtimeNetworkTests(), server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
-        let store = try await helper.connected(server, network, clock, factory)
+        guard let store = try await helper.connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
-        let old = await factory.sockets[0]
+        guard let old = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
         let gate = DispatchSemaphore(value: 0), entered = expectation(description: "old epoch read")
         server.change { $0.seq = 1; $0.gate = gate; $0.entered = entered }
         let refresh = Task { await store.refresh() }
@@ -164,7 +164,11 @@ final class ConnectionLossTests: XCTestCase {
         await helper.eventually { store.realtimeStatus == .fallback }
         await helper.settle(); await clock.advance(.milliseconds(500))
         await helper.eventually { await factory.sockets.count == 2 }
-        let current = await factory.sockets[1]
+        guard let current = await factory.sockets.dropFirst().first else {
+            XCTFail("Expected the replacement coordinator socket")
+            gate.signal()
+            return
+        }
         try await helper.hello(current, epoch: "F")
         gate.signal(); await refresh.value
         await helper.settle(); await clock.advance(.milliseconds(500))

@@ -60,6 +60,11 @@ actor APIClient {
         }
     }
 
+    func acknowledgePairing(code: String, confirmationToken: String) async throws -> PairingCompletion {
+        struct Acknowledgement: Encodable, Sendable { let code: String; let confirmationToken: String }
+        return try await send("/api/pair/ack", body: Acknowledgement(code: code, confirmationToken: confirmationToken))
+    }
+
     /// Cache belongs to this endpoint/credential actor; never shared across servers or sign-ins.
     /// File IDs identify immutable snapshots. forceRefresh is for legacy documents edited in place.
     func fileBody(id: String, forceRefresh: Bool = false) async throws -> FileDoc {

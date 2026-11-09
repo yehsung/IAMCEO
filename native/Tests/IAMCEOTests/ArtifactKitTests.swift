@@ -33,4 +33,24 @@ final class ArtifactKitTests: XCTestCase {
         XCTAssertTrue(doc.contains("<linked>ok</linked>"))
         XCTAssertFalse(doc.contains("\u{0}"))
     }
+
+    func testSandboxAllowsInlineInteractionWithoutGivingAnOriginOrPopupPermission() {
+        let html = ArtifactKit.sandboxDocument("</iframe><script>window.popup=window.open('https://fixture.invalid')</script><a href='#section'>목차</a><div id='section'>본문</div>", title: "자료")
+        XCTAssertTrue(html.contains("sandbox=\"allow-scripts\""))
+        XCTAssertFalse(html.contains("allow-same-origin"))
+        XCTAssertFalse(html.contains("allow-popups"))
+        XCTAssertFalse(html.contains("allow-top-navigation"))
+        XCTAssertTrue(html.contains("&lt;/x-blocked-iframe&gt;"))
+        XCTAssertTrue(ArtifactKit.policy.contains("script-src 'unsafe-inline'"))
+        XCTAssertTrue(ArtifactKit.policy.contains("connect-src 'none'"))
+        XCTAssertTrue(html.contains("RTCPeerConnection"))
+    }
+
+    func testExternalLinkConfirmationOnlyOffersBrowserURLsWithoutEmbeddedCredentials() {
+        for value in ["https://example.invalid/source?q=1#section", "http://example.invalid/"] { XCTAssertNotNil(ArtifactKit.externalURL(value)) }
+        for value in ["#section", "javascript:alert(1)", "file:///fixture/private", "data:text/html,a", "https://user:token@example.invalid/", "iamceo-local-file://preview?path=a", "https:///", "mailto:a@example.invalid"] {
+            XCTAssertNil(ArtifactKit.externalURL(value), value)
+        }
+    }
+
 }

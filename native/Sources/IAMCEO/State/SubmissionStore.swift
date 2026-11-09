@@ -17,12 +17,13 @@ struct MessageSubmission: Codable, Sendable, Identifiable {
     let projectID: String
     let targetMemberID: String?
     let draft: DraftSnapshot
+    let contextFileId: String?
     var status: MessageSubmissionStatus = .prepared
     var message: Message?
     var draftConsumed = false
 
     var request: SendMessageRequest {
-        SendMessageRequest(id: id, text: draft.text, targetMemberId: targetMemberID, attachmentIds: draft.attachments.map(\.id))
+        SendMessageRequest(id: id, text: draft.text, targetMemberId: targetMemberID, attachmentIds: draft.attachments.map(\.id), contextFileId: contextFileId)
     }
 }
 
@@ -82,7 +83,7 @@ final class SubmissionStore {
     func terminalAttempt(id: String) -> TerminalSubmission? { state.terminals[id] }
 
     /// An edited draft cannot silently replace an unresolved first attempt.
-    func prepareMessage(projectID: String, targetMemberID: String?, draft: DraftSnapshot) throws -> MessageSubmission {
+    func prepareMessage(projectID: String, targetMemberID: String?, draft: DraftSnapshot, contextFileID: String? = nil) throws -> MessageSubmission {
         if let existing = state.messages.values.first(where: {
             $0.namespace == draft.namespace && $0.draft.key == draft.key && $0.status != .refused
                 && ($0.status != .accepted || !$0.draftConsumed)
@@ -94,7 +95,7 @@ final class SubmissionStore {
             return existing
         }
         let attempt = MessageSubmission(id: UUID().uuidString, namespace: draft.namespace, projectID: projectID,
-                                        targetMemberID: targetMemberID, draft: draft)
+                                        targetMemberID: targetMemberID, draft: draft, contextFileId: contextFileID)
         try update { $0.messages[attempt.id] = attempt }
         return attempt
     }

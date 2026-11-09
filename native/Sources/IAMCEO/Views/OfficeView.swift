@@ -193,10 +193,8 @@ struct OfficeView: View {
                 }
                 .padding(.horizontal, isMac ? 2 : 4)
                 #if os(iOS)
-                Picker("팀 보기", selection: $showsList) {
-                    Text("사무실").tag(false)
-                    Text("목록").tag(true)
-                }.pickerStyle(.segmented)
+                CESegmentPill(selection: $showsList, items: [(false, "사무실"), (true, "목록")])
+                    .accessibilityLabel("팀 보기")
                 if showsList {
                     OfficeNowList(members: list, decisions: openDecisions, selected: router.memberID,
                                   hover: { _, _ in }) { router.openMember($0) }

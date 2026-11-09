@@ -61,6 +61,8 @@ extension View {
     private(set) var isPreservingPosition = false
     private(set) var lastRestorationError: CGFloat?
     private(set) var visibleAnchor: ChatVisibleAnchor?
+    private(set) var highlightedMessageID: String?
+    private var highlightTask: Task<Void, Never>?
     private var viewportHeight: CGFloat = 0
     private var frames: [String: CGRect] = [:]
     private var target: ChatVisibleAnchor?
@@ -78,6 +80,7 @@ extension View {
 
     func reset(scope: String) {
         cancelPreservation()
+        clearHighlight()
         #if os(macOS)
         removeObservers(); macLiveScrolling = false
         #endif
@@ -137,6 +140,21 @@ extension View {
     func cancelPreservation() {
         settling?.cancel(); settling = nil; deferredMutation = nil; target = nil
         transaction = nil; isPreservingPosition = false; lastRestorationError = nil
+    }
+
+    /// Start only once the destination row is laid out, so a slow around load cannot consume the emphasis.
+    func highlight(messageID: String, duration: Duration = .seconds(3)) {
+        clearHighlight()
+        highlightedMessageID = messageID
+        highlightTask = Task { [weak self] in
+            do { try await Task.sleep(for: duration) } catch { return }
+            self?.highlightedMessageID = nil
+            self?.highlightTask = nil
+        }
+    }
+
+    func clearHighlight() {
+        highlightTask?.cancel(); highlightTask = nil; highlightedMessageID = nil
     }
 
     private func applyDeferredMutation() {

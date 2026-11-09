@@ -167,9 +167,9 @@ struct TerminalMirrorView: View {
 
     @ViewBuilder private var controlTag: some View {
         if controlling {
-            Tag("직접 조작 중 · 자동 전달 멈춤", tone: .approval, icon: "hand.raised.fill")
+            Tag("직접 입력 중 · 보낸 지시는 잠시 대기", tone: .approval, icon: "hand.raised.fill")
         } else {
-            Tag("읽기 전용", tone: .neutral, icon: "eye")
+            Tag("보는 중", tone: .neutral, icon: "eye")
                 .help("CLI 화면을 그대로 보여 줍니다. 승인 창이나 선택 창은 직접 조작으로 처리합니다.")
         }
     }
@@ -311,7 +311,7 @@ struct TerminalMirrorView: View {
                     Button { Task { _ = await store.releaseTerminal(member) } } label: {
                         HStack(spacing: 6) {
                             if pending { ProgressView().controlSize(.mini) } else { Image(systemName: "hand.raised.slash") }
-                            Text("조작 끝내기 · 자동 전달 재개")
+                            Text("입력 끝내기")
                         }
                     }
                     .ceSecondaryButton()

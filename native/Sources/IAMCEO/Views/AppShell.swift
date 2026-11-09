@@ -423,9 +423,11 @@ struct AppShell: View {
         }
     }
 
+    /// '나를 기다리는 것' in the other projects (the same count as each project's rail badge), danger when one has
+    /// an error.
     private var otherProjectsNeeds: (count: Int, blocked: Bool) {
         let others = store.projects.filter { $0.id != store.selectedProjectID }
-        return (others.map { $0.inboxCount + $0.blockedCount }.reduce(0, +), others.contains { $0.blockedCount > 0 })
+        return (others.map { store.projectNeedsCount($0) }.reduce(0, +), others.contains { store.projectNeedsDanger($0) })
     }
 
     private func projectSwitcherLabel(_ tab: Destination) -> some View {
@@ -483,11 +485,8 @@ struct AppShell: View {
     /// What waits on the CEO first (the rail's badge, spelled out because a menu has no badge), then the web
     /// projectLine.
     private func projectMenuLine(_ project: ProjectSummary) -> String {
-        var parts: [String] = []
-        if project.decisionCount > 0 { parts.append("결재 \(project.decisionCount)") }
-        if project.todoCount > 0 { parts.append("할 일 \(project.todoCount)") }
-        parts.append(projectRailLine(project))
-        return parts.joined(separator: " · ")
+        let needs = store.projectNeedsCount(project)
+        return (needs > 0 ? ["내 차례 \(needs)건"] : []).appending(projectRailLine(project)).joined(separator: " · ")
     }
     #endif
 
@@ -579,7 +578,7 @@ struct ProjectSidebar: View {
 
     private func row(_ project: ProjectSummary) -> some View {
         let selected = project.id == store.selectedProjectID
-        let count = project.inboxCount + project.blockedCount
+        let count = store.projectNeedsCount(project)
         let line = projectRailLine(project)
         return Button {
             guard !selected else { return }
@@ -593,7 +592,7 @@ struct ProjectSidebar: View {
                     Text(line).font(CEFont.caption).foregroundStyle(CE.ink2).lineLimit(1)
                 }
                 Spacer(minLength: 4)
-                RailBadge(count: count, danger: project.blockedCount > 0)
+                RailBadge(count: count, danger: store.projectNeedsDanger(project))
             }
             .padding(.horizontal, 12).padding(.vertical, 7)
             .frame(minHeight: 48)
@@ -799,7 +798,7 @@ struct DestinationSwitcher: View {
         return Button { router.go(tab) } label: {
             HStack(spacing: 6) {
                 Text(tab.title).font(.system(size: 14.5, weight: .semibold)).tracking(-0.15)
-                CountBadge(count: count, tone: .accent)
+                CountBadge(count: count, tone: store.navBadgeDanger(for: tab) ? .danger : .accent)
             }
             .foregroundStyle(selected ? Color.white : hovered == tab ? CE.ink : CE.ink2)
             .animation(.linear(duration: 0.2), value: hovered)
@@ -1356,27 +1355,36 @@ extension AppStore {
     /// Rank name of the member who receives messages with no explicit target (총괄, or 본사 AI on HQ).
     var leadRankName: String { members.first { $0.kind == "conductor" || $0.kind == "root" }.map { rankName($0.kind) } ?? "총괄" }
 
-    /// Destination badges always equal a number visible on that destination (same rule as the web tabs):
-    /// 결재함 = open decisions + members at an approval prompt (both listed there); 홈 = open todos (its 할 일 counter).
+    /// Counts are shared with the destination's list/header, including CLI approval filtering.
     func navBadge(for tab: Destination) -> Int {
         if isArchive { return 0 }
         return switch tab {
-        case .inbox: decisions.filter { $0.status == "open" }.count + members.filter { $0.status == "blocked" }.count
-        case .home: todos.filter { !$0.done }.count
+        case .inbox: InboxHomePolicy.inboxCount(decisions: decisions, members: members)
+        case .home: InboxHomePolicy.needsCount(decisions: decisions, todos: todos, members: members, notices: deliveryNotices)
         default: 0
         }
     }
 
+    func projectNeedsCount(_ project: ProjectSummary) -> Int {
+        if project.id == selectedProjectID, state?.project.id == project.id { return navBadge(for: .home) }
+        return InboxHomePolicy.projectCount(project)
+    }
+
+    func navBadgeDanger(for tab: Destination) -> Bool {
+        tab == .home && members.contains { $0.status == "error" }
+    }
+
+    func projectNeedsDanger(_ project: ProjectSummary) -> Bool {
+        if project.id == selectedProjectID, state?.project.id == project.id { return navBadgeDanger(for: .home) }
+        return project.needsDanger ?? (project.errorCount > 0)
+    }
+
     func navBadgeHelp(for tab: Destination) -> String? {
+        let count = navBadge(for: tab)
+        guard count > 0 else { return nil }
         switch tab {
-        case .inbox:
-            let open = decisions.filter { $0.status == "open" }.count
-            let blocked = members.filter { $0.status == "blocked" }.count
-            guard open + blocked > 0 else { return nil }
-            return [open > 0 ? "결재 \(open)건" : nil, blocked > 0 ? "승인 창 앞 \(blocked)명" : nil].compactMap { $0 }.joined(separator: " · ")
-        case .home:
-            let todos = todos.filter { !$0.done }.count
-            return todos > 0 ? "내 할 일 \(todos)건" : nil
+        case .inbox: return "결재할 항목 \(count)건"
+        case .home: return "내 차례 \(count)건"
         default: return nil
         }
     }
@@ -1403,4 +1411,8 @@ private struct ScrollPocketUnderToolbar: ViewModifier {
         content
         #endif
     }
+}
+
+private extension Array {
+    func appending(_ element: Element) -> [Element] { self + [element] }
 }

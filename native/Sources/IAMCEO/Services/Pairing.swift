@@ -72,7 +72,7 @@ struct PairStart: Decodable, Sendable {
 }
 
 private struct PairClaimRequest: Encodable, Sendable { let code: String; let device: String }
-private struct PairClaimResponse: Decodable, Sendable { let accessCode: String }
+private struct PairClaimResponse: Decodable, Sendable { let accessCode: String; let confirmationToken: String? }
 
 enum Tailnet {
     /// Tailscale addresses: IPv4 100.64.0.0/10, IPv6 fd7a:115c:a1e0::/48 and MagicDNS names (<device>.<tailnet>.ts.net).
@@ -109,7 +109,7 @@ enum Tailnet {
 
 enum PairingClient {
     /// Trades the one-time code for the access code, trying each address in the QR. Returns the origin that answered.
-    static func claim(_ link: PairingLink, device: String, session: URLSession? = nil) async throws -> (endpoint: String, accessCode: String) {
+    static func claim(_ link: PairingLink, device: String, session: URLSession? = nil) async throws -> (endpoint: String, accessCode: String, confirmationToken: String?) {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 8
         config.httpShouldSetCookies = false
@@ -136,7 +136,7 @@ enum PairingClient {
                 let result = try JSONDecoder().decode(PairClaimResponse.self, from: data)
                 guard !result.accessCode.isEmpty else { throw URLError(.badServerResponse) }
                 let origin = base.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                return (origin, result.accessCode)
+                return (origin, result.accessCode, result.confirmationToken)
             } catch let error as APIError {
                 throw error
             } catch {

@@ -66,6 +66,14 @@ struct ComposerCameraPicker: UIViewControllerRepresentable {
 enum ComposerPasteIntake {
     static let contentTypes: [UTType] = [.fileURL, .image, .pdf, .archive, .audio, .movie, .spreadsheet, .presentation]
 
+    #if os(iOS)
+    /// Whether the clipboard holds something the composer can attach. A type check only: it reads no content and
+    /// shows no paste prompt, so the composer can offer 붙여넣기 just when it would do something.
+    static var clipboardHasAttachment: Bool {
+        UIPasteboard.general.contains(pasteboardTypes: contentTypes.map(\.identifier), inItemSet: nil)
+    }
+    #endif
+
     static func receive(_ providers: [NSItemProvider], context: ComposerUploadContext, store: AppStore) {
         let date = Date()
         store.composerUploads.loadMedia(names: providers.enumerated().map {

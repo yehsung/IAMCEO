@@ -693,6 +693,18 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       const { code, expiresAt } = pairing.start();
       return Response.json({ code, expiresAt: new Date(expiresAt).toISOString(), ttlSeconds: PAIR_CODE_TTL_MS / 1000, urls: availableUrls, version: VERSION });
     }),
+    route("GET", "/api/pair/status", (_req, url) => {
+      strictQuery(url, ["code"]);
+      const code = url.searchParams.get("code");
+      if (!code || code.length > 64) throw new ApiError(400, "짝 맺기 코드가 필요합니다");
+      return Response.json(pairing.status(code));
+    }),
+    route("POST", "/api/pair/ack", async (req, url) => {
+      strictQuery(url, []);
+      const body = await parseBody(req, z.object({ code: z.string().min(1).max(64), confirmationToken: z.string().length(64) }).strict());
+      if (!pairing.acknowledge(body.code, body.confirmationToken)) throw new ApiError(409, "연결 확인 시간이 지났습니다. Mac에서 새 QR을 만들어 주세요");
+      return Response.json(pairing.status(body.code));
+    }),
     route("GET", "/api/runtime", async () => {
       if (!orch.runtimeInfo) throw new ApiError(501, "실행기 진단을 지원하지 않습니다");
       return Response.json(await orch.runtimeInfo());
@@ -1352,7 +1364,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     const result = pairing.claim(body.code, from);
     if (result === "limited") return fail(429, "너무 많이 시도했습니다. 잠시 뒤 Mac에서 새 QR을 만들어 다시 찍어 주세요");
     if (result === "invalid") return fail(401, "QR이 맞지 않거나 시간이 지났습니다. Mac에서 새 QR을 만들어 주세요");
-    return Response.json({ accessCode: config.accessCode, version: VERSION }, { headers: { "Cache-Control": "no-store" } });
+    return Response.json({ accessCode: config.accessCode, confirmationToken: pairing.confirmationToken(body.code), version: VERSION }, { headers: { "Cache-Control": "no-store" } });
   };
 
   const handleRequest = async (req: Request, server: Server<SocketData>): Promise<Response | undefined> => {

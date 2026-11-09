@@ -416,18 +416,27 @@ private struct ProjectManagementSheets: ViewModifier {
         content.sheet(item: Binding(get: { enabled ? router.projectManagement : nil }, set: {
             if enabled { router.projectManagement = $0 }
         })) { ProjectManageView(selection: Self.reviewed($0)).id($0.id) }
+        // Results of a project or member made after its window was closed (C-09): one stack at the top of the window,
+        // as wide as a reading column, so the next step ("첫 일 맡기기") is one tap away wherever the CEO is.
         .overlay(alignment: .top) {
-            let notice = ProjectCreationNotice.shared
-            if enabled, notice.namespace == ProjectCreationNotice.scope(store), let message = notice.message {
-                InlineNotice(tone: notice.failed ? .attention : notice.running ? .neutral : .success,
-                             title: notice.running ? "프로젝트 준비 중" : notice.failed ? "프로젝트 만들기 결과" : "프로젝트를 만들었습니다",
-                             detail: message,
-                             actionTitle: notice.projectID == nil ? "닫기" : notice.failed ? "프로젝트 확인" : "총괄에게 첫 일 맡기기") {
-                    if let id = notice.projectID {
-                        Task { await ProjectCreationNotice.openProject(id, store: store, router: router) }
-                    } else { notice.clear() }
+            if enabled {
+                VStack(spacing: 8) {
+                    let notice = ProjectCreationNotice.shared
+                    if notice.namespace == ProjectCreationNotice.scope(store), let message = notice.message {
+                        InlineNotice(tone: notice.failed ? .attention : notice.running ? .neutral : .success,
+                                     title: notice.running ? "프로젝트 준비 중" : notice.failed ? "프로젝트 만들기 결과" : "프로젝트를 만들었습니다",
+                                     detail: message,
+                                     actionTitle: notice.projectID == nil ? "닫기" : notice.failed ? "프로젝트 확인" : "총괄에게 첫 일 맡기기") {
+                            if let id = notice.projectID {
+                                Task { await ProjectCreationNotice.openProject(id, store: store, router: router) }
+                            } else { notice.clear() }
+                        }
+                    }
+                    MemberCreationBanner()
                 }
-                .padding()
+                .frame(maxWidth: 560)
+                .padding(.horizontal, 16).padding(.top, 8)
+                .animation(.easeOut(duration: 0.2), value: ProjectCreationNotice.shared.message)
             }
         }
     }

@@ -310,7 +310,8 @@ private final class UXStateServer: @unchecked Sendable {
         defer { store.disconnect() }
         await store.connect()
         await eventually { await factory.sockets.count == 1 }
-        let old = await factory.sockets[0], reset = router.projectResetRevision
+        guard let old = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
+        let reset = router.projectResetRevision
         router.go(.files); router.terminalMemberID = "m"
         await store.restartRealtime()
         await eventually { await factory.sockets.count == 2 }

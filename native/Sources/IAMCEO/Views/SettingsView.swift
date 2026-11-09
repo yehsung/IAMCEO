@@ -1276,9 +1276,9 @@ struct SettingsView: View {
         case .notifications:
             var parts = ["Mac \(draft.notifyMac ? "켬" : "끔")"]
             if let service = store.pushNotifications {
-                // The same rule as the switch on the 알림 page.
+                // The same rule as the switch on the 알림 page. This phone's own state comes first.
                 let on = PhonePushSwitch.isOn(service.state, device: store.pushSettings.device(id: service.installationID))
-                parts.append("iPhone \(on ? "켬" : "끔")")
+                parts.insert("iPhone \(on ? "켬" : "끔")", at: 0)
             }
             return parts.joined(separator: " · ")
         case .connection:

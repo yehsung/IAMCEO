@@ -31,7 +31,9 @@ actor CoordinatorSockets: RealtimeTransportFactory {
     private(set) var sockets: [IsolatedTestWebSocket] = []
     private(set) var requests: [URLRequest] = []
     func connect(request: URLRequest) throws -> any RealtimeTransport {
-        guard request.url?.port != 7878, request.url?.path == "/ws", request.url?.query == "v=2",
+        let query = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
+        guard request.url?.port != 7878, request.url?.path == "/ws",
+              query.filter({ $0.name == "v" }) == [URLQueryItem(name: "v", value: "2")],
               request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture" else { throw URLError(.unsupportedURL) }
         requests.append(request)
         let socket = IsolatedTestWebSocket(); sockets.append(socket)
@@ -118,13 +120,20 @@ final class CoordinatorServer: @unchecked Sendable {
         try await frame(socket, "{\"type\":\"hello\",\"protocol\":2,\"epoch\":\"\(epoch)\",\"seq\":\(seq),\"heartbeatMs\":15000,\"staleAfterMs\":45000}")
     }
     func connected(_ server: CoordinatorServer, _ network: IsolatedTestNetwork,
-                   _ clock: CoordinatorClock, _ factory: CoordinatorSockets, lowPower: Bool = false) async throws -> AppStore {
+                   _ clock: CoordinatorClock, _ factory: CoordinatorSockets, lowPower: Bool = false) async throws -> AppStore? {
         let store = AppStore(session: network.session, persistCredentials: false,
             realtime: RealtimeClient(factory: factory, clock: clock), clock: clock, retryJitter: { $0 }, lowPowerMode: lowPower)
         store.endpoint = network.endpoint.url.absoluteString; store.accessCode = "fixture"
         await store.connect()
         await eventually { await factory.sockets.count == 1 }
-        let socket = await factory.sockets[0]
+        guard let socket = await factory.sockets.first else {
+            XCTFail("Expected the initial coordinator socket")
+            store.disconnect()
+            return nil
+        }
+        let url = await factory.requests.first?.url
+        let query = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems }
+        XCTAssertEqual(query?.filter { $0.name == "lite" }, [URLQueryItem(name: "lite", value: "1")])
         try await hello(socket)
         await eventually { store.realtimeStatus == .syncing }
         await settle(); await clock.advance(lowPower ? .seconds(1) : .milliseconds(500))
@@ -136,9 +145,9 @@ final class CoordinatorServer: @unchecked Sendable {
     func testBurstUsesFixed250msWindowAndPreservesChangesDuringSingleFlight() async throws {
         let server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
-        let store = try await connected(server, network, clock, factory)
+        guard let store = try await connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
-        let socket = await factory.sockets[0]
+        guard let socket = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
         await clock.advance(.seconds(1))
         let before = server.read { $0.syncs }
         for n in 1...30 {
@@ -172,11 +181,11 @@ final class CoordinatorServer: @unchecked Sendable {
     func testHeartbeatFiveMinutesHasNoPeriodicSnapshotHistoryOrRuntimeReads() async throws {
         let server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
-        let store = try await connected(server, network, clock, factory)
+        guard let store = try await connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
         await store.activateHistory()
         let baseline = network.requests.count, updated = store.lastUpdated
-        let socket = await factory.sockets[0]
+        guard let socket = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
         for _ in 0..<20 {
             await clock.advance(.seconds(15))
             try await frame(socket, #"{"type":"ping","epoch":"E","seq":0}"#)
@@ -192,9 +201,10 @@ final class CoordinatorServer: @unchecked Sendable {
     func testSequenceFilteringGapAndHeartbeatHighWaterConverge() async throws {
         let server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
-        let store = try await connected(server, network, clock, factory)
+        guard let store = try await connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
-        let socket = await factory.sockets[0], before = server.read { $0.syncs }
+        guard let socket = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
+        let before = server.read { $0.syncs }
         try await frame(socket, #"{"type":"work","epoch":"E","seq":1,"projectId":"q","work":[]}"#)
         await eventually { store.receivedCursor?.seq == 1 }
         await clock.advance(.seconds(1)); await settle()
@@ -218,9 +228,9 @@ final class CoordinatorServer: @unchecked Sendable {
     func testActivityOnlyRefreshesOpenMemberAndMessagesRefreshVisibleHistory() async throws {
         let server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
-        let store = try await connected(server, network, clock, factory)
+        guard let store = try await connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
-        let socket = await factory.sockets[0]
+        guard let socket = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
         await store.activateHistory(); await store.activateActivity(memberID: "m")
         let before = server.read { ($0.syncs, $0.activityReads, $0.pageReads) }
         try await frame(socket, #"{"type":"activity","epoch":"E","seq":1,"projectId":"p","activity":{"id":1,"memberId":"m"}}"#)
@@ -243,7 +253,7 @@ final class CoordinatorServer: @unchecked Sendable {
     func testForegroundResumeRevalidatesWithoutNewHostSocketOnProjectSwitch() async throws {
         let server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
-        let store = try await connected(server, network, clock, factory)
+        guard let store = try await connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
         let switchProject = Task { await store.selectProject(id: "q") }
         await settle(); await clock.advance(.milliseconds(500)); await switchProject.value
@@ -288,9 +298,9 @@ final class CoordinatorServer: @unchecked Sendable {
     func testPostWriteRefreshAndEventJoinPendingSnapshotWithoutCancellingIt() async throws {
         let server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
-        let store = try await connected(server, network, clock, factory)
+        guard let store = try await connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
-        let socket = await factory.sockets[0]
+        guard let socket = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
         let before = server.read { $0.syncs }
         let gate = DispatchSemaphore(value: 0), entered = expectation(description: "pre-write read")
         server.change { $0.gate = gate; $0.entered = entered }
@@ -317,7 +327,7 @@ final class CoordinatorServer: @unchecked Sendable {
     func testProjectSwitchDiscardsOldSnapshotAndKeepsSocketGeneration() async throws {
         let server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
-        let store = try await connected(server, network, clock, factory)
+        guard let store = try await connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
         let gate = DispatchSemaphore(value: 0), entered = expectation(description: "old project read")
         server.change { $0.gate = gate; $0.entered = entered }
@@ -340,9 +350,10 @@ final class CoordinatorServer: @unchecked Sendable {
     func testLowPowerUses500msBatchAndOneSnapshotPerSecond() async throws {
         let server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
-        let store = try await connected(server, network, clock, factory, lowPower: true)
+        guard let store = try await connected(server, network, clock, factory, lowPower: true) else { return }
         defer { store.disconnect() }
-        let socket = await factory.sockets[0], before = server.read { $0.syncs }
+        guard let socket = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
+        let before = server.read { $0.syncs }
         await clock.advance(.seconds(1))
         server.change { $0.seq = 1 }
         try await frame(socket, #"{"type":"future","epoch":"E","seq":1}"#)
@@ -363,14 +374,15 @@ final class CoordinatorServer: @unchecked Sendable {
     func testSocketFlappingBackoffOnlyResetsAfterThirtyStableSeconds() async throws {
         let server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
-        let store = try await connected(server, network, clock, factory)
+        guard let store = try await connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
-        var socket = await factory.sockets[0]
+        guard var socket = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
         try await socket.enqueue(.failure(URLError(.networkConnectionLost)))
         await eventually { store.realtimeStatus == .fallback }
         await settle(); await clock.advance(.milliseconds(500))
         await eventually { await factory.sockets.count == 2 }
-        socket = await factory.sockets[1]
+        guard let nextSocket1 = await factory.sockets.dropFirst(1).first else { XCTFail("Expected coordinator socket 2"); return }
+        socket = nextSocket1
         try await hello(socket)
         await settle(); await clock.advance(.milliseconds(500))
         await eventually { store.realtimeStatus == .live }
@@ -380,7 +392,8 @@ final class CoordinatorServer: @unchecked Sendable {
         let before = await factory.sockets.count; XCTAssertEqual(before, 2)
         await clock.advance(.milliseconds(1))
         await eventually { await factory.sockets.count == 3 }
-        socket = await factory.sockets[2]
+        guard let nextSocket2 = await factory.sockets.dropFirst(2).first else { XCTFail("Expected coordinator socket 3"); return }
+        socket = nextSocket2
         try await hello(socket)
         await settle(); await clock.advance(.milliseconds(500))
         await eventually { store.realtimeStatus == .live }

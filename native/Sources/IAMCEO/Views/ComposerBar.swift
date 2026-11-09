@@ -70,6 +70,8 @@ struct ComposerBar: View {
     @State private var attachmentReceiverID = UUID()
     #else
     @FocusState private var focused: Bool
+    /// The clipboard holds an image or a file (type check only; see ComposerPasteIntake).
+    @State private var clipboardHasAttachment = false
     #endif
 
     private var key: String { DraftStore.key(project: store.selectedProjectID, target: target) }
@@ -114,8 +116,14 @@ struct ComposerBar: View {
         return (friendlyError(reason), store.isDemo ? .dim : .attention)
     }
 
+    @State private var omittedContextFileID: String?
+    private var contextFile: FileDoc? {
+        guard let id = FileLinks.viewedFileID(router: router), id != omittedContextFileID else { return nil }
+        return store.files.first { $0.id == id && $0.projectId == store.selectedProjectID }
+    }
+
     private var hasMetaRow: Bool {
-        targetPickerShown || fixedRecipientShown || !files.isEmpty || !pendingUploads.isEmpty || dropTargeted || sentTo != nil
+        contextFile != nil || targetPickerShown || fixedRecipientShown || !files.isEmpty || !pendingUploads.isEmpty || dropTargeted || sentTo != nil
             || quietBlock != nil || (isMac && focused) || !missingUploads.isEmpty
     }
 
@@ -208,6 +216,15 @@ struct ComposerBar: View {
             .ignoresSafeArea()
         }
         #endif
+        #if os(iOS)
+        .onAppear { clipboardHasAttachment = ComposerPasteIntake.clipboardHasAttachment }
+        .onReceive(NotificationCenter.default.publisher(for: UIPasteboard.changedNotification)) { _ in
+            withAnimation(.easeOut(duration: 0.15)) { clipboardHasAttachment = ComposerPasteIntake.clipboardHasAttachment }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            clipboardHasAttachment = ComposerPasteIntake.clipboardHasAttachment
+        }
+        #endif
         .onAppear {
             if autoFocus { focusSoon() }
             #if os(macOS)
@@ -221,7 +238,8 @@ struct ComposerBar: View {
         #endif
         .onChange(of: router.focusComposer) { _, _ in if respondsToFocusRequests { focusSoon() } }
         .onChange(of: key) { _, _ in sendError = nil; sentTo = nil }
-        .onChange(of: store.selectedProjectID) { _, _ in showTargets = false }
+        .onChange(of: store.selectedProjectID) { _, _ in showTargets = false; omittedContextFileID = nil }
+        .onChange(of: FileLinks.viewedFileID(router: router)) { _, _ in omittedContextFileID = nil }
         .onChange(of: drafts.connectionGeneration) { _, _ in sendError = nil; sentTo = nil }
         .onChange(of: draftText) { old, new in
             sendError = nil
@@ -234,6 +252,7 @@ struct ComposerBar: View {
     private var metaRow: some View {
         HStack(spacing: 6) {
             if targetPickerShown { targetChip }
+            if let contextFile { ViewedFileContextChip(file: contextFile) { omittedContextFileID = contextFile.id } }
             if fixedRecipientShown {
                 Text("\(recipientName)에게").font(hintFont.weight(.semibold)).foregroundStyle(CE.ink2)
                     .lineLimit(1).padding(.leading, 6)
@@ -497,13 +516,22 @@ struct ComposerBar: View {
         HStack(alignment: .bottom, spacing: 2) {
             attachmentButton
             #if os(iOS)
-            PasteButton(supportedContentTypes: ComposerPasteIntake.contentTypes) { providers in
-                guard let context = uploadContext() else { return }
-                ComposerPasteIntake.receive(providers, context: context, store: store)
+            // Only while the clipboard holds an image or a file: a standing grey paste button beside the paperclip
+            // was clutter on every tab. A small round one appears when pasting would attach something.
+            if clipboardHasAttachment {
+                PasteButton(supportedContentTypes: ComposerPasteIntake.contentTypes) { providers in
+                    guard let context = uploadContext() else { return }
+                    ComposerPasteIntake.receive(providers, context: context, store: store)
+                }
+                .labelStyle(.iconOnly)
+                .buttonBorderShape(.circle)
+                .tint(CE.violet)
+                .controlSize(.small)
+                .frame(width: 44, height: 44)
+                .disabled(!canAttach)
+                .transition(.scale.combined(with: .opacity))
+                .accessibilityLabel("복사한 이미지나 파일 붙여넣기")
             }
-            .labelStyle(.iconOnly)
-            .disabled(!canAttach)
-            .accessibilityLabel("복사한 이미지나 파일 붙여넣기")
             #endif
 
             #if os(macOS)
@@ -685,7 +713,7 @@ struct ComposerBar: View {
         sendError = nil
         sentTo = nil
         acceptedMessage = nil
-        let ok = await store.sendMessage(text: snapshot.text, targetMemberID: sendingTarget, attachmentIDs: snapshot.attachments.map(\.id))
+        let ok = await store.sendMessage(text: snapshot.text, targetMemberID: sendingTarget, attachmentIDs: snapshot.attachments.map(\.id), contextFileID: contextFile?.id)
         guard connection == drafts.connectionGeneration, drafts.namespace == snapshot.namespace,
               project == store.selectedProjectID, key == snapshot.key else { return }
         guard ok else {

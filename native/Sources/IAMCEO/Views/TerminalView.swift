@@ -110,11 +110,15 @@ struct TerminalView: View {
             }
         } footer: {
             HStack {
-                Text(controlling ? "조작을 끝내면 자동 전달이 다시 시작됩니다" : "보기만 해서는 자동 전달을 멈추지 않습니다")
+                // What the CEO's choice does to the member, in plain words: looking never pauses the work.
+                Text(controlling ? "직접 입력하는 동안 보낸 지시는 잠시 기다립니다. 끝내면 이어서 들어갑니다."
+                                 : "보는 중에도 직원은 계속 일하고, 보낸 지시도 그대로 들어갑니다.")
                     .font(CEFont.note).foregroundStyle(CE.ink2)
+                    .lineSpacing(CELeading.spacing(13.5, 1.45))
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
                 if controlling || session.starting {
-                    Button("조작 끝내기") { Task { await session.finishInput(store: store, member: member, resume: true) } }
+                    Button("입력 끝내기") { Task { await session.finishInput(store: store, member: member, resume: true) } }
                         .ceSecondaryButton().disabled(session.ending)
                 } else if !missingTerminal {
                     Button("입력 시작") { session.beginInput(store: store, member: member) }
@@ -144,13 +148,13 @@ struct TerminalView: View {
     }
     private func statusText(now: Date) -> String {
         if missingTerminal { return waking ? "깨우는 중…" : "터미널 준비 필요" }
-        if session.ending { return "조작 끝내는 중…" }
+        if session.ending { return "입력 끝내는 중…" }
         if session.starting { return "입력 준비 중…" }
         if controlling { return TerminalPresentation.controlStatus(expiresAt: store.terminalLeases[member.id]?.expiresAt, now: now) }
         switch client.state {
         case .connecting: return "보기 연결 중…"
         case let .closed(_, message): return friendlyError(TerminalPresentation.message(message ?? "연결이 끊겼습니다"))
-        default: return "읽기 전용"
+        default: return "보는 중"
         }
     }
 

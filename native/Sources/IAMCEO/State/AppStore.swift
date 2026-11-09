@@ -380,7 +380,7 @@ final class AppStore: ProjectManagementStore {
         do {
             let validated = try ServerEndpoint(endpoint)
             guard !accessCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw APIError(status: 0, message: "접속 코드를 넣어 주세요.") }
-            let client = APIClient(endpoint: validated, accessCode: accessCode.trimmingCharacters(in: .whitespacesAndNewlines), session: injectedSession)
+            let client = APIClient(endpoint: validated, accessCode: accessCode.trimmingCharacters(in: .whitespacesAndNewlines), session: injectedSession, liteStateEnabled: true)
             let task = Task { try await client.request("/api/bootstrap") as Bootstrap }
             initialTask = task
             let initial = try await task.value
@@ -1089,10 +1089,10 @@ final class AppStore: ProjectManagementStore {
                 throw APIError(status: 0, message: "첨부 초안을 확인해 주세요. 누락된 첨부를 빼고 보내지 않습니다.")
             }
             if let error = drafts.persistenceError { throw APIError(status: 0, message: error) }
-            let attempt = try submissions.prepareMessage(projectID: projectID, targetMemberID: targetMemberID, draft: drafts.snapshot(for: key))
+            let attempt = try submissions.prepareMessage(projectID: projectID, targetMemberID: targetMemberID, draft: drafts.snapshot(for: key), contextFileID: contextFileID)
             let outcome: (value: Message?, error: Error?) = await perform(actionKey, refreshAfter: false, ownsPendingAction: true) { api in
                 let request = try submissions.beginMessage(id: attempt.id, allowUnconfirmedRetry: !strictWriteContract)
-                return try await api.sendMessage(projectID: projectID, request: request, contextFileID: contextFileID, contractVersion: strictWriteContract ? 2 : nil)
+                return try await api.sendMessage(projectID: projectID, request: request, contractVersion: strictWriteContract ? 2 : nil)
             }
             guard epoch == generation else { return false }
             if let message = outcome.value {
@@ -1249,17 +1249,27 @@ final class AppStore: ProjectManagementStore {
     /// Phone: trades the QR's one-time code for the access code over Tailscale, then connects like a manual login.
     @discardableResult func pair(with link: PairingLink, device: String) async -> Bool {
         guard !isDemo else { errorMessage = "샘플 모드에서는 연결하지 않습니다."; return false }
+        guard !isPairing else { return false }
         errorMessage = nil
         isPairing = true
         defer { isPairing = false }
+        let pairingEpoch = generation
         do {
             let result = try await PairingClient.claim(link, device: device, session: injectedSession)
+            guard pairingEpoch == generation, !Task.isCancelled else { return false }
             endpoint = result.endpoint
             accessCode = result.accessCode
             await connect()
-            return connectionStatus == .connected
+            guard connectionStatus == .connected, endpoint == result.endpoint,
+                  accessCode == result.accessCode, let client = api else { return false }
+            // The shared access code cannot identify a QR. ACK only on the authenticated client
+            // established above; older servers omit the token and remain compatible.
+            if let token = result.confirmationToken {
+                _ = try? await client.acknowledgePairing(code: link.code, confirmationToken: token)
+            }
+            return api === client && connectionStatus == .connected
         } catch {
-            errorMessage = error.localizedDescription
+            if pairingEpoch == generation { errorMessage = friendlyLoadError(error, what: "Mac 연결", verb: "확인하지") }
             return false
         }
     }
@@ -1284,27 +1294,43 @@ final class AppStore: ProjectManagementStore {
               todoWrites[todo.id] != .checking, todoWrites[todo.id] != .sending else {
             errorMessage = "최신 업무 상태를 확인한 뒤 변경하세요."; return false
         }
-        let epoch = generation, namespace = writeNamespace
+        return await submitTodoCompletion(PendingTodo(id: todo.id, namespace: writeNamespace, revision: revision,
+                                                      done: done, note: note, fileIds: fileIDs))
+    }
+
+    /// Explicit retry only. A restored uncertain write is queried, never automatically submitted.
+    @discardableResult func retryTodoCompletion(_ todo: Todo) async -> Bool {
+        guard strictWriteContract, canWrite,
+              let pending = journal.todos[Self.scoped(writeNamespace, todo.id)],
+              todoWrites[todo.id] != .sending,
+              writeRevisions?.todos?[todo.id] == pending.revision,
+              reviewedTodos[todo.id].map({ Self.same($0, todo) }) == true else { return false }
+        return await submitTodoCompletion(pending)
+    }
+
+    private func submitTodoCompletion(_ pending: PendingTodo) async -> Bool {
+        let epoch = generation, namespace = pending.namespace
+        let id = pending.id, revision = pending.revision, done = pending.done
         do {
-            try saveJournal { $0.todos[Self.scoped(namespace, todo.id)] = PendingTodo(id: todo.id, namespace: namespace, revision: revision, done: done) }
+            try saveJournal { $0.todos[Self.scoped(namespace, id)] = pending }
         } catch { handle(error); return false }
-        todoWrites[todo.id] = .sending
-        let outcome = await perform("todo:\(todo.id)", refreshAfter: false) { api in
-            try await api.completeTodo(id: todo.id, done: done, note: note, fileIDs: fileIDs, revision: revision)
+        todoWrites[id] = .sending
+        let outcome = await perform("todo:\(id)", refreshAfter: false) { api in
+            try await api.completeTodo(id: id, done: done, note: pending.note, fileIDs: pending.fileIds ?? [], revision: revision)
         }
         guard epoch == generation else { return false }
-        if let result = outcome.value, result.todo.id == todo.id, result.todo.done == done, result.revision >= revision {
-            todoWrites[todo.id] = .confirmed
-            writeRevisions?.todos?[todo.id] = result.revision
-            if let index = state?.todos.firstIndex(where: { $0.id == todo.id }) { state?.todos[index] = result.todo }
-            do { try saveJournal { $0.todos.removeValue(forKey: Self.scoped(namespace, todo.id)) } }
+        if let result = outcome.value, result.todo.id == id, result.todo.done == done, result.revision >= revision {
+            todoWrites[id] = .confirmed
+            writeRevisions?.todos?[id] = result.revision
+            if let index = state?.todos.firstIndex(where: { $0.id == id }) { state?.todos[index] = result.todo }
+            do { try saveJournal { $0.todos.removeValue(forKey: Self.scoped(namespace, id)) } }
             catch { handle(error) }
             await refresh()
             return true
         }
-        todoWrites[todo.id] = Self.definiteRefusal(outcome.error) ? .conflict : .checking
-        if todoWrites[todo.id] == .conflict {
-            do { try saveJournal { $0.todos.removeValue(forKey: Self.scoped(namespace, todo.id)) } }
+        todoWrites[id] = Self.definiteRefusal(outcome.error) ? .conflict : .checking
+        if todoWrites[id] == .conflict {
+            do { try saveJournal { $0.todos.removeValue(forKey: Self.scoped(namespace, id)) } }
             catch { handle(error) }
         } else { errorMessage = "업무 변경 결과 확인 중입니다." }
         await refreshWriteContext()
@@ -2639,6 +2665,8 @@ private struct PendingTodo: Codable {
     let namespace: String
     let revision: Int
     let done: Bool
+    let note: String?
+    let fileIds: [String]?
 }
 private struct AppWriteJournal: Codable {
     var operations: [String: TrackedOperation] = [:]

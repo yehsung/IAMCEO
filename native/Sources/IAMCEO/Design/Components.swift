@@ -1308,3 +1308,63 @@ extension View {
         padding(.vertical, isMac ? 0 : slack).contentShape(Rectangle()).padding(.vertical, isMac ? 0 : -slack)
     }
 }
+
+/// A two-or-more way switch in the inbox's look (web .ibx-seg): a card-tinted capsule with a violet drop that slides to
+/// the chosen item. Use it wherever a screen switches between views of the same content (결재함, 사무실/목록), so every
+/// switch in the app looks and moves the same.
+struct CESegmentPill<Value: Hashable>: View {
+    @Binding var selection: Value
+    let items: [(value: Value, title: String)]
+    var stretch = true
+    @Namespace private var drop
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                CESegmentPillItem(title: item.title, selected: selection == item.value, stretch: stretch, drop: drop) {
+                    selection = item.value
+                }
+            }
+        }
+        .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.82), value: selection)
+        .padding(3)
+        .cardPill()
+        .fixedSize(horizontal: !stretch, vertical: false)
+        .frame(maxWidth: stretch ? .infinity : nil, alignment: .leading)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+private struct CESegmentPillItem: View {
+    let title: String
+    let selected: Bool
+    let stretch: Bool
+    let drop: Namespace.ID
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(isMac ? .system(size: 13.5, weight: .semibold) : CEFont.secondary.weight(.semibold))
+                .foregroundStyle(selected ? Color.white : hovering ? CE.ink : CE.ink2)
+                .lineLimit(1)
+                .padding(.horizontal, stretch ? 8 : 14)
+                .frame(maxWidth: stretch ? .infinity : nil, minHeight: isMac ? 34 : 40)
+                .background {
+                    if selected {
+                        Capsule().fill(CE.violet.opacity(0.42))
+                            .overlay { Capsule().strokeBorder(CE.violet.opacity(0.9)) }
+                            .shadow(color: CE.violet.opacity(0.45), radius: 10, y: 2)
+                            .matchedGeometryEffect(id: "drop", in: drop)
+                    }
+                }
+                .contentShape(Capsule())
+                .animation(.linear(duration: 0.12), value: hovering)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    }
+}

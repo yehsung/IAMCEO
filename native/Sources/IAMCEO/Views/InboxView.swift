@@ -10,11 +10,11 @@ import UIKit
 // 결재함: "결재할 항목" and "결재된 항목".
 // Picking an option never sends; the card's confirm bar does, carrying the reviewed version (`expectedVersion`).
 // Cards answered during this visit stay in place as compact answered cards ("보냄 → 받음") until the person
-// switches segment or leaves the screen. CLI approval windows (blocked members) are listed separately: they are
+// switches segment. Review drafts survive navigation. CLI approval windows (blocked members) are listed separately: they are
 // terminal actions, not decisions, and answering a decision never means a todo was done.
 // Look: the web inbox (glass segment pill, tinted glass cards, violet group frame, violet option tiles), kept compact.
 
-private enum InboxSegment: Hashable { case open, done }
+enum InboxSegment: Hashable { case open, done }
 
 /// Why answers are locked. All are global states, explained once rather than on every card.
 private enum AnswerLock { case demo, disconnected, runner }
@@ -40,26 +40,13 @@ struct InboxView: View {
     @Environment(DraftStore.self) private var drafts
     @Environment(\.ceWide) private var wide
 
-    @State private var segment: InboxSegment = .open
-    // Review state for this visit. Memos live in DraftStore and survive the visit.
-    @State private var reviews: [String: DecisionReview] = [:]
-    /// Option cards: "메모만 보내기" chosen. Free-answer cards: "답 보내기" pressed. Either way the confirm bar is armed.
-    @State private var memoOnly: Set<String> = []
-    @State private var engaged: Set<String> = []
-    @State private var inFlight: Set<String> = []
-    @State private var answeredHere: Set<String> = []
-    @State private var cardErrors: [String: String] = [:]
-    @State private var contextID = UUID()
-    @State private var visitID = UUID()
-    @State private var memoRevisions: [String: Int] = [:]
-    @State private var expandedDetail: Set<String> = []
-    @State private var batchArmed: [String: [String]] = [:]
-    @State private var batchBusy: Set<String> = []
-    @State private var batchErrors: [String: String] = [:]
+    private var session: InboxReviewState { router.inboxReview }
+    @State private var scrollViewport: CGFloat = 0
+    @State private var restoringScroll = false
+    @State private var scrollRestoreID = UUID()
     @State private var shiftedAt = Date.distantPast
     @State private var flashID: String?
     // Done view.
-    @State private var expandedDone: Set<String> = []
     @State private var olderDone: [Decision] = []
     /// Paging cursor for "더 불러오기": set only from loaded pages, never from deep-linked single fetches,
     /// so a deep link to an old decision cannot make the next page skip the decisions in between.
@@ -84,27 +71,35 @@ struct InboxView: View {
                 // Web .ibx: 22 between the pill and each section; cards inside a section are 10 apart.
                 VStack(alignment: .leading, spacing: 22) {
                     // The segment pill scrolls with the list: nested top bars would overlap the shell's status strips.
-                    InboxSegmentBar(segment: $segment, openCount: openDecisions.count, doneCount: doneCount, stretch: !wide)
+                    InboxSegmentBar(segment: Binding(get: { session.segment }, set: { session.segment = $0 }), openCount: openDecisions.count, doneCount: doneCount, stretch: !wide)
                     content
                 }
                 .ceContentColumn()
             }
+            .coordinateSpace(name: "inbox-scroll")
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { scrollViewport = $0 }
+            .onPreferenceChange(InboxCardFrames.self) { frames in rememberScroll(frames) }
             .scrollDismissesKeyboard(.interactively)
             .refreshable { await store.refresh() }
-            .onAppear { sync(); handleLink(proxy) }
-            .onDisappear { resetVisit(full: true); segment = .open }
+            .onAppear { sync(); restoreScroll(proxy); handleLink(proxy) }
+            .onDisappear { router.inlineFieldFocused = false; scrollRestoreID = UUID() }
             .onChange(of: router.decisionID) { _, _ in handleLink(proxy) }
             .onChange(of: versionSignature) { _, _ in
                 sync()
                 if router.decisionID != nil { handleLink(proxy) }
             }
             .onChange(of: olderDone.count) { _, _ in if router.decisionID != nil { handleLink(proxy) } }
-            .onChange(of: segment) { _, _ in resetVisit(full: false); sync() }
+            .onChange(of: session.segment) { _, _ in
+                session.engaged.subtract(session.answeredHere)
+                session.answeredHere = []; session.batchArmed = [:]
+                sync()
+            }
             .onChange(of: store.selectedProjectID) { _, _ in resetProject() }
             .onChange(of: drafts.namespace) { _, _ in resetProject() }
             .onChange(of: displayedIDs) { _, _ in shiftedAt = Date() }
             .onChange(of: revealRequest) { _, request in
                 guard let request else { return }
+                scrollRestoreID = UUID(); restoringScroll = false
                 Task { @MainActor in
                     // Wait for the bar's layout, then scroll only as far as needed (nil anchor): no jump when it is already visible.
                     try? await Task.sleep(for: .milliseconds(80))
@@ -114,10 +109,36 @@ struct InboxView: View {
         }
     }
 
+    private func rememberScroll(_ frames: [String: CGRect]) {
+        guard !restoringScroll, router.destination == .inbox,
+              (router.phonePaths[.inbox] ?? []).isEmpty, scrollViewport > 0 else { return }
+        guard let first = frames.filter({ $0.value.maxY > 0 && $0.value.minY < scrollViewport })
+            .min(by: { $0.value.minY < $1.value.minY }) else { return }
+        session.scrollID = first.key
+        session.scrollLocations[first.key] = InboxScrollLocation(top: first.value.minY, height: first.value.height)
+    }
+
+    private func restoreScroll(_ proxy: ScrollViewProxy) {
+        let token = UUID(); scrollRestoreID = token
+        guard router.decisionID == nil, let id = session.scrollID, let location = session.scrollLocations[id] else {
+            restoringScroll = false; return
+        }
+        restoringScroll = true
+        let context = session.contextID
+        Task { @MainActor in
+            // Allow the restored cards and expanded details to lay out before aligning the saved point.
+            try? await Task.sleep(for: .milliseconds(100))
+            guard scrollRestoreID == token, session.contextID == context else { return }
+            proxy.scrollTo(InboxCardGeometry.locationID(id), anchor: location.anchor(viewport: scrollViewport))
+            try? await Task.sleep(for: .milliseconds(80))
+            if scrollRestoreID == token { restoringScroll = false }
+        }
+    }
+
     // MARK: - Derived state
 
     private var openDecisions: [Decision] { store.decisions.filter { $0.status == "open" } }
-    private var blocked: [Member] { store.members.filter { $0.status == "blocked" && MemberStatusInfo($0).tone == .approval } }
+    private var blocked: [Member] { InboxHomePolicy.approvals(store.members) }
     private var uncertainMembers: [Member] { store.members.filter { MemberStatusInfo.isUncertain($0) } }
     private var gateOpen: Bool { store.canWrite && store.state?.project.connection.ok == true }
     /// Why answers are impossible right now (nil = open). Every reason is global, so it is explained once:
@@ -128,8 +149,7 @@ struct InboxView: View {
         if store.state?.project.connection.ok != true { return .runner }
         return nil
     }
-    /// Zero-height per-card cue: shown as the disabled field's placeholder, so a card reached by a deep link
-    /// still says why it is locked. Demo keeps the normal placeholder (the sample strip is always visible).
+    /// Fallback for the per-card lock explanation. Draft fields remain available while disconnected.
     private var lockHint: String? {
         guard let answerLock, answerLock != .demo else { return nil }
         return "연결 문제로 지금은 답할 수 없습니다"
@@ -144,14 +164,14 @@ struct InboxView: View {
     private var liveDecisions: [Decision] {
         var result: [Decision] = []
         var seen = Set<String>()
-        for decision in store.decisions where decision.status == "open" || inFlight.contains(decision.id) || answeredHere.contains(decision.id) || engaged.contains(decision.id) {
+        for decision in store.decisions where decision.status == "open" || session.inFlight.contains(decision.id) || session.answeredHere.contains(decision.id) || session.engaged.contains(decision.id) {
             result.append(decision); seen.insert(decision.id)
         }
         // A card someone was working on that vanished from the payload keeps its reviewed snapshot.
-        for id in engaged.sorted() where !seen.contains(id) {
-            if let snapshot = reviews[id]?.decision { result.append(snapshot) }
+        for id in session.engaged.sorted() where !seen.contains(id) {
+            if let snapshot = session.reviews[id]?.decision { result.append(snapshot) }
         }
-        return newestFirst(result)
+        return InboxHomePolicy.prioritized(result, members: store.members, notices: store.deliveryNotices)
     }
 
     private var blocks: [InboxBlock] {
@@ -162,8 +182,8 @@ struct InboxView: View {
             if let group = decision.group, !group.isEmpty {
                 guard !placed.contains(group) else { continue }
                 placed.insert(group)
-                // Inside a group: asked order, oldest first.
-                out.append(InboxBlock(id: "group:\(group)", group: group, decisions: Array(live.filter { $0.group == group }.reversed())))
+                // Keep the same waiting/blocking priority inside a group as between groups.
+                out.append(InboxBlock(id: "group:\(group)", group: group, decisions: live.filter { $0.group == group }))
             } else {
                 out.append(InboxBlock(id: decision.id, group: nil, decisions: [decision]))
             }
@@ -190,7 +210,7 @@ struct InboxView: View {
             } else {
                 emptyCard(icon: "tray", title: "열린 프로젝트가 없습니다", detail: isMac ? "사이드바에서 프로젝트를 고르거나 새로 만드세요." : "위 제목을 눌러 프로젝트를 고르거나 새로 만드세요.")
             }
-        } else if segment == .open {
+        } else if session.segment == .open {
             openView
         } else {
             doneView
@@ -220,7 +240,7 @@ struct InboxView: View {
             }
             if !blocks.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
-                    ForEach(blocks) { block in blockView(block) }
+                    ForEach(blocks) { block in blockView(block).id(block.id) }
                 }
             }
         }
@@ -360,8 +380,8 @@ struct InboxView: View {
         let targets = batchTargets(cards)
         let openInGroup = cards.filter { latest($0.id)?.status == "open" }.count
         let skipped = openInGroup - targets.count
-        let busy = batchBusy.contains(group)
-        let armed = !single && (busy || batchArmed[group] == targets.map(\.id)) && !(batchArmed[group] ?? []).isEmpty
+        let busy = session.batchBusy.contains(group)
+        let armed = !single && (busy || session.batchArmed[group] == targets.map(\.id)) && !(session.batchArmed[group] ?? []).isEmpty
         return GroupFrame(single: single, wide: wide) {
             if !single {
                 VStack(alignment: .leading, spacing: 10) {
@@ -382,7 +402,7 @@ struct InboxView: View {
                         .accessibilityAddTraits(.isHeader)
                         Spacer(minLength: 6)
                         if !targets.isEmpty && !armed {
-                            Button("이 묶음 추천대로") { batchArmed[group] = targets.map(\.id); batchErrors[group] = nil }
+                            Button("이 묶음 추천대로") { session.batchArmed[group] = targets.map(\.id); session.batchErrors[group] = nil }
                                 .ceSecondaryButton().controlSize(.regular).fixedSize()
                                 .disabled(!gateOpen || busy)
                         }
@@ -390,15 +410,15 @@ struct InboxView: View {
                     .padding(.leading, 8).padding(.trailing, 4).padding(.vertical, 2)
                     if armed {
                         // While sending, the armed cards are in flight and no longer targets; keep showing what was confirmed.
-                        let armedIDs = batchArmed[group] ?? []
+                        let armedIDs = session.batchArmed[group] ?? []
                         ConfirmBar(quoted: nil, verb: "묶음 \(armedIDs.count)건 결정", hint: "각 카드의 권장안으로 결정합니다", busy: busy,
                                    disabled: !gateOpen, stretch: !wide, shiftedAt: shiftedAt,
                                    onConfirm: { Task { await runBatch(group, ids: armedIDs) } },
-                                   onCancel: { batchArmed[group] = nil })
+                                   onCancel: { session.batchArmed[group] = nil })
                             .padding(.leading, 8).padding(.trailing, 4).padding(.bottom, 2)
                             .transition(.opacity)
                     }
-                    if let error = batchErrors[group] { ErrorLine(text: error).padding(.leading, 8).padding(.trailing, 4) }
+                    if let error = session.batchErrors[group] { ErrorLine(text: error).padding(.leading, 8).padding(.trailing, 4) }
                 }
                 .animation(.easeOut(duration: 0.18), value: armed)
             }
@@ -410,12 +430,12 @@ struct InboxView: View {
     @ViewBuilder private func cardView(_ shown: Decision) -> some View {
         let id = shown.id
         let current = latest(id)
-        if let current, current.status != "open", !inFlight.contains(id) {
+        if let current, current.status != "open", !session.inFlight.contains(id) {
             // Web .ibx-card--answered: 13 above and below, 18 at the sides (14 on iPhone).
             Plate(padding: 0) {
                 VStack(alignment: .leading, spacing: 8) {
                     AnsweredBody(decision: current, asker: asker(current))
-                    if let error = cardErrors[id] { ErrorLine(text: error) }
+                    if let error = session.cardErrors[id] { ErrorLine(text: error) }
                     savedMemo(id)
                     if current.status == "closed", current.closeKind != nil {
                         reopenControl(busy: reopening.contains(id)) { Task { await reopen(current, inPlace: true) } }
@@ -427,6 +447,7 @@ struct InboxView: View {
             }
             .overlay { FlashRing(on: flashID == id) }
             .id(id)
+            .background(InboxCardGeometry(id: id))
         } else {
             DecisionCard(
                 review: reviewBinding(shown),
@@ -435,17 +456,17 @@ struct InboxView: View {
                 asker: asker(shown),
                 fileTitle: shown.fileId.flatMap { fileID in store.files.first { $0.id == fileID }?.title },
                 wide: wide,
-                locked: answerLock != nil,
+                locked: !gateOpen,
                 lockHint: lockHint,
-                busy: inFlight.contains(id),
-                error: cardErrors[id],
+                busy: session.inFlight.contains(id),
+                error: session.cardErrors[id],
                 flash: flashID == id,
-                detailExpanded: expandedDetail.contains(id),
+                detailExpanded: session.expandedDetail.contains(id),
                 canReopen: store.canWrite,
                 reopenBusy: reopening.contains(id),
                 reopenError: reopenErrors[id],
                 shiftedAt: shiftedAt,
-                onToggleDetail: { if expandedDetail.contains(id) { expandedDetail.remove(id) } else { expandedDetail.insert(id) } },
+                onToggleDetail: { if session.expandedDetail.contains(id) { session.expandedDetail.remove(id) } else { session.expandedDetail.insert(id) } },
                 onSubmit: { Task { await submit(id) } },
                 onReviewLatest: { reviewLatest(id) },
                 onReopen: { if let current { Task { await reopen(current, inPlace: true) } } },
@@ -453,6 +474,7 @@ struct InboxView: View {
                 onArm: { revealRequest = RevealRequest(target: confirmBarID(id)) }
             )
             .id(id)
+            .background(InboxCardGeometry(id: id))
         }
     }
 
@@ -506,7 +528,7 @@ struct InboxView: View {
 
     private func doneRow(_ decision: Decision) -> some View {
         let id = decision.id
-        let expanded = expandedDone.contains(id)
+        let expanded = session.expandedDone.contains(id)
         let hasMore = !decision.detail.isEmpty || !decision.images.isEmpty || decision.fileId != nil
         let reopenable = decision.status == "closed" && decision.closeKind != nil
         return VStack(alignment: .leading, spacing: 4) {
@@ -521,7 +543,7 @@ struct InboxView: View {
                 DisclosureLink(title: expanded ? "배경 접기" : "배경 보기", expanded: expanded,
                                accessibilityLabel: expanded ? "\(decision.title) 배경 접기" : "\(decision.title) 배경 보기") {
                     withAnimation(.easeOut(duration: 0.18)) {
-                        if expanded { expandedDone.remove(id) } else { expandedDone.insert(id) }
+                        if expanded { session.expandedDone.remove(id) } else { session.expandedDone.insert(id) }
                     }
                 }
             }
@@ -546,6 +568,7 @@ struct InboxView: View {
         .overlay { FlashRing(on: flashID == id, radius: 6) }
         .animation(.easeOut(duration: 0.35), value: flashID == id)
         .id(id)
+        .background(InboxCardGeometry(id: id))
     }
 
     // MARK: - Review bindings
@@ -559,27 +582,27 @@ struct InboxView: View {
     private func reviewBinding(_ decision: Decision) -> Binding<DecisionReview> {
         let id = decision.id
         return Binding(
-            get: { reviews[id] ?? makeReview(decision) },
+            get: { session.reviews[id] ?? makeReview(decision) },
             set: { next in
-                let previous = reviews[id] ?? makeReview(decision)
-                reviews[id] = next
+                let previous = session.reviews[id] ?? makeReview(decision)
+                session.reviews[id] = next
                 if next.note != previous.note {
-                    memoRevisions[id, default: 0] += 1
+                    session.memoRevisions[id, default: 0] += 1
                     drafts.setMemo(next.note, for: id)
                 }
-                if next.note != previous.note || next.choice != previous.choice { engaged.insert(id) }
+                if next.note != previous.note || next.choice != previous.choice { session.engaged.insert(id) }
                 // A different pick changes the group's batch targets: ask again.
-                if next.choice != previous.choice, let group = decision.group { batchArmed[group] = nil }
+                if next.choice != previous.choice, let group = decision.group { session.batchArmed[group] = nil }
             })
     }
 
     private func memoOnlyBinding(_ decision: Decision) -> Binding<Bool> {
         let id = decision.id
         return Binding(
-            get: { memoOnly.contains(id) },
+            get: { session.memoOnly.contains(id) },
             set: { value in
-                if value { memoOnly.insert(id); engaged.insert(id) } else { memoOnly.remove(id) }
-                if let group = decision.group { batchArmed[group] = nil }
+                if value { session.memoOnly.insert(id); session.engaged.insert(id) } else { session.memoOnly.remove(id) }
+                if let group = decision.group { session.batchArmed[group] = nil }
             })
     }
 
@@ -587,8 +610,8 @@ struct InboxView: View {
     /// and the local pick is unset or equals the recommendation.
     private func batchTargets(_ cards: [Decision]) -> [Decision] {
         cards.compactMap { card -> Decision? in
-            guard let current = latest(card.id), current.status == "open", !inFlight.contains(card.id), !memoOnly.contains(card.id) else { return nil }
-            let review = reviews[card.id] ?? makeReview(current)
+            guard let current = latest(card.id), current.status == "open", !session.inFlight.contains(card.id), !session.memoOnly.contains(card.id) else { return nil }
+            let review = session.reviews[card.id] ?? makeReview(current)
             guard !review.isStale(comparedTo: current) else { return nil }
             guard let rec = current.rec, current.options.contains(where: { $0.k == rec }) else { return nil }
             return review.choice == nil || review.choice == rec ? review.decision : nil
@@ -599,50 +622,43 @@ struct InboxView: View {
 
     private func sync() {
         let byID = Dictionary(store.decisions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        for decision in store.decisions where decision.status == "open" && reviews[decision.id] == nil {
-            reviews[decision.id] = makeReview(decision)
+        for decision in store.decisions where decision.status == "open" && session.reviews[decision.id] == nil {
+            session.reviews[decision.id] = makeReview(decision)
         }
-        for (id, review) in reviews where !inFlight.contains(id) && review.isStale(comparedTo: byID[id]) {
-            if engaged.contains(id) && !answeredHere.contains(id) {
+        for (id, review) in session.reviews where !session.inFlight.contains(id) && review.isStale(comparedTo: byID[id]) {
+            if session.engaged.contains(id) && !session.answeredHere.contains(id) {
                 // The person was working on this card: keep it, clear the pick, keep the memo, ask for review.
-                if review.choice != nil { reviews[id]?.choice = nil }
-                memoOnly.remove(id)
+                if review.choice != nil { session.reviews[id]?.choice = nil }
+                session.memoOnly.remove(id)
             } else if let current = byID[id], current.status == "open" {
-                reviews[id] = makeReview(current)
+                session.reviews[id] = makeReview(current)
             } else {
-                reviews[id] = nil
+                session.reviews[id] = nil
             }
         }
-        for (group, ids) in batchArmed where !batchBusy.contains(group) {
+        for (group, ids) in session.batchArmed where !session.batchBusy.contains(group) {
             let cards = liveDecisions.filter { $0.group == group }
-            if batchTargets(cards).map(\.id) != ids { batchArmed[group] = nil }
-        }
-    }
-
-    private func resetVisit(full: Bool) {
-        visitID = UUID()
-        answeredHere = []; engaged = []; cardErrors = [:]
-        batchArmed = [:]; batchErrors = [:]; reopenErrors = [:]; reopenedNotice = nil
-        if full {
-            reviews = [:]; memoOnly = []; expandedDetail = []; expandedDone = []
-            linkMissing = false
+            if batchTargets(cards).map(\.id) != ids { session.batchArmed[group] = nil }
         }
     }
 
     private func resetProject() {
-        contextID = UUID()
-        resetVisit(full: true)
+        session.contextID = UUID()
+        router.inboxReview = InboxReviewState()
         olderDone = []; olderCursor = nil; olderExhausted = false; olderError = nil; loadingOlder = false
-        reopening = []; inFlight = []; batchBusy = []; memoRevisions = [:]; segment = .open
+        reopening = []; reopenErrors = [:]; reopenedNotice = nil
+        linkMissing = false; resolvingLink = nil; copiedMember = nil; revealRequest = nil; flashID = nil
+        scrollRestoreID = UUID(); restoringScroll = false
+        session.inFlight = []; session.batchBusy = []; session.memoRevisions = [:]; session.segment = .open
     }
 
     // MARK: - Actions
 
     private func submit(_ id: String) async {
-        guard gateOpen, !inFlight.contains(id), let review = reviews[id] else { return }
+        guard gateOpen, !session.inFlight.contains(id), let review = session.reviews[id] else { return }
         let current = latest(id)
         let note = review.note.trimmingCharacters(in: .whitespacesAndNewlines)
-        let noteOnly = memoOnly.contains(id) && !review.decision.options.isEmpty
+        let noteOnly = session.memoOnly.contains(id) && !review.decision.options.isEmpty
         if noteOnly {
             guard review.decision.status == "open", !review.isStale(comparedTo: current), !note.isEmpty else { return }
         } else {
@@ -650,28 +666,28 @@ struct InboxView: View {
         }
         let namespace = drafts.namespace
         let projectID = store.selectedProjectID
-        let visit = visitID
-        let context = contextID
+        let visit = session.visitID
+        let context = session.contextID
         let memo = drafts.memo(for: id)
-        let revision = memoRevisions[id, default: 0]
-        inFlight.insert(id)
-        engaged.insert(id)
-        cardErrors[id] = nil
+        let revision = session.memoRevisions[id, default: 0]
+        guard session.beginSubmission(id) else { return }
+        session.engaged.insert(id)
+        session.cardErrors[id] = nil
         let ok = await store.answerDecision(review.decision, choice: noteOnly ? nil : review.choice, note: note.isEmpty ? nil : note)
-        guard contextID == context, drafts.namespace == namespace, store.selectedProjectID == projectID else { return }
-        if ok, visitID == visit, memoRevisions[id, default: 0] == revision, drafts.memo(for: id) == memo {
+        guard session.contextID == context, drafts.namespace == namespace, store.selectedProjectID == projectID else { return }
+        if ok, session.visitID == visit, session.memoRevisions[id, default: 0] == revision, drafts.memo(for: id) == memo {
             drafts.clearMemo(id)
         }
-        inFlight.remove(id)
-        guard visitID == visit else { return }
+        session.inFlight.remove(id)
+        guard session.visitID == visit else { return }
         if ok {
-            answeredHere.insert(id)
-            memoOnly.remove(id)
-            if memoRevisions[id, default: 0] == revision { reviews[id]?.note = "" }
+            session.answeredHere.insert(id)
+            session.memoOnly.remove(id)
+            if session.memoRevisions[id, default: 0] == revision { session.reviews[id]?.note = "" }
         } else {
-            cardErrors[id] = latest(id).map({ $0.status != "open" }) == true
+            session.cardErrors[id] = latest(id).map({ $0.status != "open" }) == true
                 ? "이미 처리된 결재입니다. 내 요청의 수락은 확인하지 못해 메모를 남겼습니다."
-                : store.errorMessage ?? "답변 결과를 확인하지 못했습니다. 내 메모는 남겼습니다."
+                : store.errorMessage.map(friendlyError) ?? "답변 결과를 확인하지 못했습니다. 내 메모는 남겼습니다."
             sync()
         }
     }
@@ -679,55 +695,55 @@ struct InboxView: View {
     private func runBatch(_ group: String, ids: [String]) async {
         let cards = liveDecisions.filter { $0.group == group }
         let targets = batchTargets(cards)
-        guard gateOpen, !batchBusy.contains(group), targets.map(\.id) == ids, !targets.isEmpty else { batchArmed[group] = nil; return }
+        guard gateOpen, !session.batchBusy.contains(group), targets.map(\.id) == ids, !targets.isEmpty else { session.batchArmed[group] = nil; return }
         let namespace = drafts.namespace
         let projectID = store.selectedProjectID
-        let visit = visitID
-        let context = contextID
+        let visit = session.visitID
+        let context = session.contextID
         let memos = ids.reduce(into: [String: String]()) { result, id in
             if let memo = drafts.memo(for: id) { result[id] = memo }
         }
-        let revisions = memoRevisions
+        let revisions = session.memoRevisions
         var notes: [String: String] = [:]
         for decision in targets {
-            let memo = (reviews[decision.id]?.note ?? drafts.memo(for: decision.id) ?? decision.lastNote ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let memo = (session.reviews[decision.id]?.note ?? drafts.memo(for: decision.id) ?? decision.lastNote ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if !memo.isEmpty { notes[decision.id] = memo }
-            if reviews[decision.id] == nil { reviews[decision.id] = makeReview(decision) }
+            if session.reviews[decision.id] == nil { session.reviews[decision.id] = makeReview(decision) }
         }
-        batchBusy.insert(group)
-        batchErrors[group] = nil
-        for id in ids { inFlight.insert(id); engaged.insert(id); cardErrors[id] = nil }
+        session.batchBusy.insert(group)
+        session.batchErrors[group] = nil
+        for id in ids { session.inFlight.insert(id); session.engaged.insert(id); session.cardErrors[id] = nil }
         let results = await store.answerBatchResults(targets, notes: notes)
-        guard contextID == context, drafts.namespace == namespace, store.selectedProjectID == projectID else { return }
+        guard session.contextID == context, drafts.namespace == namespace, store.selectedProjectID == projectID else { return }
         for id in ids {
             // A closed card is not proof that this device's request was accepted.
-            if results[id] == .accepted, visitID == visit, memoRevisions[id, default: 0] == revisions[id, default: 0],
+            if results[id] == .accepted, session.visitID == visit, session.memoRevisions[id, default: 0] == revisions[id, default: 0],
                drafts.memo(for: id) == memos[id] {
                 drafts.clearMemo(id)
             }
-            inFlight.remove(id)
+            session.inFlight.remove(id)
         }
-        batchBusy.remove(group)
-        guard visitID == visit else { return }
+        session.batchBusy.remove(group)
+        guard session.visitID == visit else { return }
         for id in ids {
             switch results[id] ?? .notSent {
             case .accepted:
-                answeredHere.insert(id)
-                memoOnly.remove(id)
-                if memoRevisions[id, default: 0] == revisions[id, default: 0] { reviews[id]?.note = "" }
+                session.answeredHere.insert(id)
+                session.memoOnly.remove(id)
+                if session.memoRevisions[id, default: 0] == revisions[id, default: 0] { session.reviews[id]?.note = "" }
             case .conflict:
-                cardErrors[id] = "다른 곳에서 바뀌었습니다. 내 메모는 남겼습니다. 최신 내용을 확인하세요."
+                session.cardErrors[id] = "다른 곳에서 바뀌었습니다. 내 메모는 남겼습니다. 최신 내용을 확인하세요."
             case .unknown:
-                cardErrors[id] = "답변 결과 확인 중입니다. 내 메모는 남겼습니다."
+                session.cardErrors[id] = "답변 결과 확인 중입니다. 내 메모는 남겼습니다."
             case .refused:
-                cardErrors[id] = "답변을 반영하지 않았습니다. 내 메모는 남겼습니다."
+                session.cardErrors[id] = "답변을 반영하지 않았습니다. 내 메모는 남겼습니다."
             case .notSent:
-                cardErrors[id] = "보내지 않았습니다. 내 메모는 남겼습니다."
+                session.cardErrors[id] = "보내지 않았습니다. 내 메모는 남겼습니다."
             }
         }
-        batchArmed[group] = nil
+        session.batchArmed[group] = nil
         let remaining = ids.filter { results[$0] != .accepted }.count
-        if remaining > 0 { batchErrors[group] = "\(remaining)건은 카드별 결과를 확인하세요. 메모는 남겼습니다." }
+        if remaining > 0 { session.batchErrors[group] = "\(remaining)건은 카드별 결과를 확인하세요. 메모는 남겼습니다." }
         sync()
     }
 
@@ -741,18 +757,20 @@ struct InboxView: View {
 
     private func reviewLatest(_ id: String) {
         guard let current = latest(id) else { return }
-        if reviews[id] == nil { reviews[id] = makeReview(current) } else { reviews[id]?.reviewLatest(current) }
+        if session.reviews[id] == nil { session.reviews[id] = makeReview(current) } else { session.reviews[id]?.reviewLatest(current) }
         // A server reopen brings back the previous note unless the person wrote their own.
-        if drafts.memo(for: id) == nil, reviews[id]?.note.isEmpty == true { reviews[id]?.note = current.lastNote ?? "" }
-        memoOnly.remove(id)
-        cardErrors[id] = nil
+        if drafts.memo(for: id) == nil, session.reviews[id]?.note.isEmpty == true { session.reviews[id]?.note = current.lastNote ?? "" }
+        session.memoOnly.remove(id)
+        session.cardErrors[id] = nil
     }
 
     private func reopen(_ decision: Decision, inPlace: Bool) async {
         guard store.canWrite, !reopening.contains(decision.id) else { return }
         reopening.insert(decision.id)
         reopenErrors[decision.id] = nil
+        let context = session.contextID
         let ok = await store.reopenDecision(decision)
+        guard session.contextID == context else { return }
         reopening.remove(decision.id)
         guard ok else {
             reopenErrors[decision.id] = store.errorMessage ?? "다시 열지 못했습니다."
@@ -775,17 +793,20 @@ struct InboxView: View {
         if let before { path += "&before=\(APIClient.segment(before))" }
         loadingOlder = true
         olderError = nil
+        let context = session.contextID
         do {
             let page: [Decision] = try await api.request(path)
-            guard store.selectedProjectID == projectID else { return }
+            guard session.contextID == context, store.selectedProjectID == projectID else { return }
             let known = Set(olderDone.map(\.id)).union(store.decisions.map(\.id))
             olderDone += page.filter { !known.contains($0.id) }
             if let oldest = page.map(pagingKey).min() { olderCursor = oldest }
             if page.count < 50 { olderExhausted = true }
         } catch {
-            if store.selectedProjectID == projectID { olderError = friendlyLoadError(error, what: "지난 결재", verb: "불러오지") }
+            if session.contextID == context, store.selectedProjectID == projectID {
+                olderError = friendlyLoadError(error, what: "지난 결재", verb: "불러오지")
+            }
         }
-        loadingOlder = false
+        if session.contextID == context { loadingOlder = false }
     }
 
     private func pagingKey(_ decision: Decision) -> String { decision.answeredAt ?? decision.createdAt }
@@ -811,9 +832,9 @@ struct InboxView: View {
         guard let decision = latest(id) ?? olderDone.first(where: { $0.id == id }) else { resolveMissingLink(id); return }
         router.decisionID = nil
         linkMissing = false
-        let target: InboxSegment = decision.status == "open" || answeredHere.contains(id) || engaged.contains(id) ? .open : .done
-        if target == .done { expandedDone.insert(id) }
-        if segment != target { segment = target }
+        let target: InboxSegment = decision.status == "open" || session.answeredHere.contains(id) || session.engaged.contains(id) ? .open : .done
+        if target == .done { session.expandedDone.insert(id) }
+        if session.segment != target { session.segment = target }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(160))
             withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(id, anchor: .center) }
@@ -830,15 +851,18 @@ struct InboxView: View {
             linkMissing = true; router.decisionID = nil; return
         }
         resolvingLink = id
+        let context = session.contextID
         Task { @MainActor in
             do {
                 let found: Decision = try await api.request("/api/decisions/\(APIClient.segment(id))")
+                guard session.contextID == context else { return }
                 if resolvingLink == id { resolvingLink = nil }
                 guard store.selectedProjectID == projectID, router.decisionID == id else { return }
                 guard found.projectId.isEmpty || found.projectId == projectID else { linkMissing = true; router.decisionID = nil; return }
                 // Open cards arrive with the next poll and are handled then.
                 if found.status != "open", !olderDone.contains(where: { $0.id == id }) { olderDone.append(found) }
             } catch {
+                guard session.contextID == context else { return }
                 if resolvingLink == id { resolvingLink = nil }
                 guard router.decisionID == id else { return }
                 linkMissing = true; router.decisionID = nil
@@ -851,14 +875,14 @@ struct InboxView: View {
 
 private struct DecisionCard: View {
     @Binding var review: DecisionReview
-    /// Option card: "메모만 보내기" chosen. Free-answer card: "답 보내기" pressed. Either way the confirm bar shows.
+    /// Option card: "메모만 보내기" chosen. Free answers show the final bar as soon as text is entered.
     @Binding var memoOnly: Bool
     let latest: Decision?
     let asker: Member?
     let fileTitle: String?
     let wide: Bool
     let locked: Bool
-    /// Placeholder for the disabled field while locked (nil keeps the normal placeholder).
+    /// Fallback reason while final submission is locked; editing remains local.
     let lockHint: String?
     let busy: Bool
     let error: String?
@@ -878,6 +902,7 @@ private struct DecisionCard: View {
     @FocusState private var memoFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(Router.self) private var router
+    @Environment(AppStore.self) private var store
 
     private var decision: Decision { review.decision }
     private var stale: Bool { !busy && review.isStale(comparedTo: latest) }
@@ -886,7 +911,7 @@ private struct DecisionCard: View {
     private var typed: Bool { !review.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     private var picked: DecisionOption? { decision.options.first { $0.k == review.choice } }
     private var showsConfirm: Bool {
-        decision.status == "open" && !stale && (picked != nil || (memoOnly && typed))
+        review.showsConfirmation(comparedTo: latest, memoOnly: memoOnly, busy: busy)
     }
 
     var body: some View {
@@ -922,10 +947,20 @@ private struct DecisionCard: View {
             .animation(.easeOut(duration: 0.18), value: showsConfirm)
         }
         .overlay { FlashRing(on: flash) }
+        .modifier(ApprovalKeyboardShortcuts(
+            enabled: !busy && !stale && !store.isDemo && !store.isArchive && decision.status == "open",
+            onNumber: { number in
+                guard decision.options.indices.contains(number - 1) else { return false }
+                review.choice = decision.options[number - 1].k; memoOnly = false
+                return true
+            },
+            onReturn: { if showsConfirm && !locked { onSubmit() } },
+            onCancel: { review.choice = nil; memoOnly = false; review.freeConfirmationCancelled = true }))
         // Only transitions caused on screen arm a reveal; a card that appears already armed does not scroll.
         .onChange(of: showsConfirm) { _, shown in if shown { onArm() } }
-        // A free answer cleared after "답 보내기" has nothing left to send: disarm.
+        // Clearing the answer also disarms a memo-only confirmation.
         .onChange(of: typed) { _, now in if !now && memoOnly { memoOnly = false } }
+        .onChange(of: review.note) { _, _ in review.freeConfirmationCancelled = false }
     }
 
     /// Quiet "who · time" line. The dot is the asker's CLI state (waiting, working, asleep…).
@@ -936,7 +971,7 @@ private struct DecisionCard: View {
             StatusDot(tone: state?.tone ?? .attention)
             Text(whoName).font(CEFont.secondary.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
             Spacer(minLength: 6)
-            if decision.status == "open", let waited = HomeView.waitedLabel(decision) { Tag(waited, tone: .attention) }
+            if decision.status == "open", let waited = HomeView.waitedLabel(decision, waitingSince: InboxHomePolicy.waitingStart(decision, members: store.members, notices: store.deliveryNotices)) { Tag(waited, tone: .attention) }
             Text(relativeTime(decision.createdAt)).font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink2).fixedSize()
         }
         .help(state.map { "\(whoName) · \($0.label)" } ?? whoName)
@@ -995,46 +1030,50 @@ private struct DecisionCard: View {
     @ViewBuilder private var answerArea: some View {
         let typed = self.typed
         let picked = self.picked
-        if !free { options(disabled: locked || busy || stale) }
+        if !free { options(disabled: busy || stale || store.isDemo || store.isArchive) }
         // Web .ibx-memo: a 44pt .input (15px at 1.5, up to 160 tall) with a 44pt glass button beside it.
         HStack(alignment: .bottom, spacing: 8) {
-            TextField((locked ? lockHint : nil) ?? (free ? "답을 적어 주세요" : "메모 (선택) — 다른 생각이나 조건"), text: $review.note, axis: .vertical)
+            TextField(free ? "답을 적어 주세요" : "메모 (선택) — 다른 생각이나 조건", text: $review.note, axis: .vertical)
                 .lineLimit(1...6)
                 .lineSpacing(CELeading.spacing(15, 1.5))
                 .focused($memoFocused)
                 .onChange(of: memoFocused) { _, focused in router.inlineFieldFocused = focused }
                 .onDisappear { if memoFocused { router.inlineFieldFocused = false } }
                 .ceField(focused: memoFocused)
-                .disabled(locked || busy)
-                .onSubmit { if free && typed && !locked && !busy && !stale { memoOnly = true } }
+                .disabled(busy || store.isDemo || store.isArchive)
+                .onSubmit { if free && typed && !locked && !busy && !stale { memoOnly = true; review.freeConfirmationCancelled = false } }
                 .accessibilityLabel(free ? "답" : "메모")
-            if free && !memoOnly && !stale {
-                Button("답 보내기") { memoOnly = true }
-                    .ceSecondaryButton().controlSize(.regular).fixedSize()
-                    .disabled(!typed || locked || busy)
+            if free && typed && review.freeConfirmationCancelled && !stale {
+                Button("답 확인") { review.freeConfirmationCancelled = false }.ceSecondaryButton().disabled(busy)
             } else if !free && typed && picked == nil && !memoOnly && !stale {
                 Button("메모만 보내기") { memoOnly = true }
                     .ceSecondaryButton().controlSize(.regular).fixedSize()
-                    .disabled(locked || busy)
+                    .disabled(busy || store.isDemo || store.isArchive)
             }
         }
         if showsConfirm {
             let quoted = picked?.label ?? (free ? plainOneLine(review.note) : nil)
             ConfirmBar(
                 quoted: quoted,
-                verb: quoted.map { "\(particleRo($0)) 결정" } ?? "메모만 보내기로 결정",
+                verb: free ? "답 보내기" : quoted.map { "\(particleRo($0)) 결정" } ?? "메모만 보내기",
                 hint: picked != nil && typed ? "메모도 함께 보냅니다" : nil,
                 busy: busy,
                 disabled: locked,
                 stretch: !wide,
                 shiftedAt: shiftedAt,
                 onConfirm: onSubmit,
-                onCancel: { review.choice = nil; memoOnly = false })
+                onCancel: { review.choice = nil; memoOnly = false; review.freeConfirmationCancelled = true })
             .id(confirmBarID(decision.id))
             .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: -4)))
         }
-        if let error { ErrorLine(text: error) }
+        if locked, let reason = routerWriteBlockedReason { Text(reason).font(CEFont.meta).foregroundStyle(CE.ink2) }
+        if let error {
+            ErrorLine(text: friendlyError(error))
+            if showsConfirm { Button("다시 시도", action: onSubmit).ceSecondaryButton().disabled(locked || busy) }
+        }
     }
+
+    private var routerWriteBlockedReason: String? { store.writeBlockedReason ?? lockHint }
 
     /// One column; three or fewer options sit side by side when each still gets about 200pt (web auto-fit grid).
     @ViewBuilder private func options(disabled: Bool) -> some View {
@@ -1178,7 +1217,6 @@ struct ConfirmBar: View {
     let shiftedAt: Date
     var onConfirm: () -> Void
     var onCancel: () -> Void
-    @State private var shownAt = Date.distantFuture
 
     var body: some View {
         // Web .ibx-confirm: hint 13 at 1.45 ink-2; a 44pt primary (gbtn--m) and a 44pt ghost 취소.
@@ -1190,9 +1228,7 @@ struct ConfirmBar: View {
             }
             HStack(spacing: 8) {
                 Button {
-                    // A double tap's second half, or a tap right after cards moved, is not a confirmation.
-                    let now = Date()
-                    guard now.timeIntervalSince(shownAt) >= 0.6, now.timeIntervalSince(shiftedAt) >= 0.5 else { return }
+                    guard !busy, !disabled else { return }
                     onConfirm()
                 } label: {
                     HStack(spacing: 0) {
@@ -1214,7 +1250,6 @@ struct ConfirmBar: View {
             }
             .controlSize(.regular)
         }
-        .onAppear { shownAt = Date() }
     }
 }
 
@@ -1634,11 +1669,12 @@ private struct FlashRing: View {
     }
 }
 
-private struct ErrorLine: View {
+/// Shared with 홈 (the todo completion editor).
+struct ErrorLine: View {
     let text: String
     var body: some View {
-        // Web .ibx-error: 13.5 at 1.45, danger.
-        Label(text, systemImage: "exclamationmark.circle")
+        // Web .ibx-error: 13.5 at 1.45, danger. Raw server/CLI text reads as plain Korean (friendlyError).
+        Label(friendlyError(text), systemImage: "exclamationmark.circle")
             .font(CEFont.note).foregroundStyle(CE.danger).lineSpacing(CELeading.note)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -1670,6 +1706,7 @@ struct DecisionReview {
     private(set) var decision: Decision
     var choice: String?
     var note: String
+    var freeConfirmationCancelled = false
 
     init(decision: Decision) {
         self.decision = decision
@@ -1680,6 +1717,12 @@ struct DecisionReview {
         guard let latest else { return true }
         return latest.id != decision.id || latest.updatedAt != decision.updatedAt || latest.status != decision.status
     }
+    func showsConfirmation(comparedTo latest: Decision?, memoOnly: Bool, busy: Bool = false) -> Bool {
+        guard decision.status == "open", busy || !isStale(comparedTo: latest) else { return false }
+        let typed = !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return decision.options.contains { $0.k == choice }
+            || (typed && (memoOnly || (decision.options.isEmpty && !freeConfirmationCancelled)))
+    }
     func canSubmit(comparedTo latest: Decision?) -> Bool {
         guard decision.status == "open", !isStale(comparedTo: latest) else { return false }
         if decision.options.isEmpty { return !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -1689,6 +1732,90 @@ struct DecisionReview {
         guard latest.id == decision.id else { return }
         decision = latest
         choice = nil
+        freeConfirmationCancelled = false
         // The person's draft is deliberately retained; refreshed server notes cannot replace it.
+    }
+}
+
+/// Local card focus only. A text editor keeps every character and Return/Escape it handles.
+struct ApprovalKeyboardShortcuts: ViewModifier {
+    let enabled: Bool
+    let onNumber: (Int) -> Bool
+    let onReturn: () -> Void
+    let onCancel: () -> Void
+    #if os(macOS)
+    @FocusState private var focused: Bool
+    private var editing: Bool {
+        (NSApp.keyWindow?.firstResponder as? NSTextView)?.isEditable == true
+    }
+    #endif
+
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        content
+            .focusable().focused($focused)
+            .simultaneousGesture(TapGesture().onEnded {
+                // Let a clicked text field become first responder before deciding to focus its enclosing card.
+                Task { @MainActor in
+                    await Task.yield()
+                    if !editing { focused = true }
+                }
+            })
+            .onKeyPress(characters: CharacterSet(charactersIn: "123456789")) { press in
+                guard enabled, !editing, press.modifiers.isEmpty,
+                      let number = Self.optionNumber(press.characters, editing: editing) else { return .ignored }
+                return onNumber(number) ? .handled : .ignored
+            }
+            .onKeyPress(.return) {
+                guard enabled, !editing else { return .ignored }
+                onReturn(); return .handled
+            }
+            .onKeyPress(.escape) {
+                guard enabled, !editing else { return .ignored }
+                onCancel(); return .handled
+            }
+        #else
+        content
+        #endif
+    }
+
+    static func optionNumber(_ characters: String, editing: Bool) -> Int? {
+        guard !editing, characters.count == 1, let number = Int(characters), (1...9).contains(number) else { return nil }
+        return number
+    }
+}
+
+/// Save the intra-card offset as well as the ID; a tall review returns to the paragraph being read.
+struct InboxScrollLocation {
+    let top: CGFloat
+    let height: CGFloat
+    func anchor(viewport: CGFloat) -> UnitPoint {
+        // Restore through a one-point marker at the card's top. Unlike the whole card, its alignment
+        // remains defined even when the card height equals the viewport or spans several screens.
+        guard viewport > 1 else { return .top }
+        return UnitPoint(x: 0, y: top / (viewport - 1))
+    }
+}
+
+private struct InboxCardFrames: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+
+private struct InboxCardGeometry: View {
+    let id: String
+    static func locationID(_ id: String) -> String { "scroll-location-\(id)" }
+    var body: some View {
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                Color.clear.frame(width: 1, height: 1).id(Self.locationID(id))
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .preference(key: InboxCardFrames.self, value: [id: geometry.frame(in: .named("inbox-scroll"))])
+        }
+        .allowsHitTesting(false)
     }
 }

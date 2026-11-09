@@ -1,4 +1,4 @@
-import { randomInt } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 
 /** 헷갈리는 글자(0·O·1·I·L)를 뺀 32자. 8자리 = 40비트. */
 const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
@@ -9,26 +9,28 @@ const FAIL_WINDOW_MS = 5 * 60_000;
 const MAX_FAILS = 10;
 
 export type ClaimResult = "ok" | "invalid" | "limited";
+export type PairStatus = "pending" | "claimed" | "connected" | "expired";
 
 /**
  * 폰 짝 맺기. Mac 화면의 QR 에는 5분 동안 한 번만 쓰는 코드만 담고, 접속 코드는 그 코드를 낸 기기에만 돌려준다.
  * 서버가 다시 켜지면 코드는 사라진다(화면에서 새 QR 을 만들면 된다).
  */
 export class Pairing {
-  private readonly codes = new Map<string, number>();
+  private readonly codes = new Map<string, { expiresAt: number; status: PairStatus; confirmationToken?: string }>();
   private readonly failures = new Map<string, number[]>();
 
   constructor(private readonly now: () => number = Date.now) {}
 
-  /** 전역 인증 회전 시 미사용 QR도 모두 폐기한다. 실패 제한은 유지한다. */
+  /** 전역 인증 회전 시 QR과 교환·완료 기록을 모두 폐기한다. 실패 제한은 유지한다. */
   invalidate(): void {
     this.codes.clear();
   }
 
   start(): { code: string; expiresAt: number } {
     this.prune();
-    while (this.codes.size >= MAX_OPEN_CODES) {
-      const oldest = this.codes.keys().next().value;
+    while ([...this.codes.values()].filter((entry) => entry.status === "pending").length >= MAX_OPEN_CODES || this.codes.size >= 128) {
+      const oldest = this.codes.size >= 128 ? this.codes.keys().next().value
+        : [...this.codes].find(([, entry]) => entry.status === "pending")?.[0];
       if (oldest === undefined) break;
       this.codes.delete(oldest);
     }
@@ -37,11 +39,11 @@ export class Pairing {
       code = Array.from({ length: PAIR_CODE_LENGTH }, () => ALPHABET[randomInt(ALPHABET.length)]).join("");
     } while (this.codes.has(code));
     const expiresAt = this.now() + PAIR_CODE_TTL_MS;
-    this.codes.set(code, expiresAt);
+    this.codes.set(code, { expiresAt, status: "pending" });
     return { code, expiresAt };
   }
 
-  /** 맞으면 코드를 지운다(한 번만). 같은 주소에서 5분에 10번 틀리면 잠시 막는다. */
+  /** 교환은 한 번만 허용하되, 교환과 실제 인증 완료를 구분해 보존한다. */
   claim(raw: string, from: string): ClaimResult {
     const t = this.now();
     const recent = (this.failures.get(from) ?? []).filter((at) => t - at < FAIL_WINDOW_MS);
@@ -51,8 +53,10 @@ export class Pairing {
     }
     this.prune();
     const code = normalizePairCode(raw);
-    if (code.length === PAIR_CODE_LENGTH && this.codes.has(code)) {
-      this.codes.delete(code);
+    const entry = this.codes.get(code);
+    if (code.length === PAIR_CODE_LENGTH && entry?.status === "pending") {
+      entry.status = "claimed";
+      entry.confirmationToken = randomBytes(32).toString("hex");
       this.failures.delete(from);
       return "ok";
     }
@@ -61,9 +65,29 @@ export class Pairing {
     return "invalid";
   }
 
+  status(raw: string): { code: string; status: PairStatus } {
+    this.prune();
+    const code = normalizePairCode(raw);
+    return { code, status: this.codes.get(code)?.status ?? "expired" };
+  }
+
+  confirmationToken(raw: string): string | undefined {
+    this.prune();
+    return this.codes.get(normalizePairCode(raw))?.confirmationToken;
+  }
+
+  /** 인증된 ACK와 교환 응답에만 실린 증거가 함께 있어야 완료한다. 중복 ACK는 무해하다. */
+  acknowledge(raw: string, confirmationToken: string): boolean {
+    this.prune();
+    const entry = this.codes.get(normalizePairCode(raw));
+    if (!entry || entry.status === "pending" || !entry.confirmationToken || entry.confirmationToken !== confirmationToken) return false;
+    entry.status = "connected";
+    return true;
+  }
+
   private prune(): void {
     const t = this.now();
-    for (const [code, expiresAt] of this.codes) if (expiresAt <= t) this.codes.delete(code);
+    for (const [code, entry] of this.codes) if (entry.expiresAt <= t) this.codes.delete(code);
   }
 }
 

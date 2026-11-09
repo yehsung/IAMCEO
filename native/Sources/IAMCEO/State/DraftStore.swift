@@ -65,6 +65,53 @@ struct DraftUploadFailure: Codable, Identifiable {
 
 @MainActor @Observable
 final class DraftStore {
+    private struct EditorSession {
+        let namespace: String
+        let key: String
+        let canRestore: () -> Bool
+        let commit: () -> Void
+        let synchronize: (DraftSnapshot) -> Void
+        let moveCaretToEnd: () -> Void
+    }
+    @ObservationIgnored private var editors: [UUID: EditorSession] = [:]
+
+    func registerEditor(id: UUID, key: String, canRestore: @escaping () -> Bool,
+                        commit: @escaping () -> Void, synchronize: @escaping (DraftSnapshot) -> Void,
+                        moveCaretToEnd: @escaping () -> Void = {}) {
+        editors[id] = EditorSession(namespace: namespace, key: key, canRestore: canRestore,
+                                    commit: commit, synchronize: synchronize, moveCaretToEnd: moveCaretToEnd)
+    }
+    func unregisterEditor(id: UUID) { editors.removeValue(forKey: id) }
+    func commitEditors(for key: String) {
+        for editor in Array(editors.values) where editor.namespace == namespace && editor.key == key { editor.commit() }
+    }
+    func moveEditorsCaretToEnd(for key: String) {
+        for editor in Array(editors.values) where editor.namespace == namespace && editor.key == key { editor.moveCaretToEnd() }
+    }
+    private func synchronizeEditors(_ snapshot: DraftSnapshot) {
+        for editor in Array(editors.values) where editor.namespace == snapshot.namespace && editor.key == snapshot.key {
+            editor.synchronize(snapshot)
+        }
+    }
+    func hasEditor(for sent: DraftSnapshot) -> Bool {
+        editors.values.contains { $0.namespace == sent.namespace && $0.key == sent.key }
+    }
+    func canRestoreSubmission(_ sent: DraftSnapshot) -> Bool {
+        let record = hosts[sent.namespace]?.records[sent.key]
+        return (record?.text.isEmpty ?? true) && (record?.attachments.isEmpty ?? true)
+            && editors.values.filter { $0.namespace == sent.namespace && $0.key == sent.key }.allSatisfy { $0.canRestore() }
+    }
+    func restoredSubmission(_ sent: DraftSnapshot, id: String) -> DraftSnapshot? {
+        hosts[sent.namespace]?.handoffs?[id]?.restoredDraft
+    }
+    func matches(_ snapshot: DraftSnapshot) -> Bool {
+        guard let record = hosts[snapshot.namespace]?.records[snapshot.key] else { return false }
+        return record.generation == snapshot.generation && record.revision == snapshot.revision
+    }
+    func isCurrentGeneration(_ snapshot: DraftSnapshot) -> Bool {
+        snapshot.namespace == namespace && hosts[snapshot.namespace]?.records[snapshot.key]?.generation == snapshot.generation
+    }
+
     private struct Record: Codable {
         var text = ""
         var attachments: [Attachment] = []
@@ -75,9 +122,13 @@ final class DraftStore {
         // Optional for compatibility with drafts saved before upload notices were persisted.
         var uploadFailures: [DraftUploadFailure]?
     }
+    private struct Handoff: Codable {
+        var restoredDraft: DraftSnapshot?
+    }
     private struct Host: Codable {
         var records: [String: Record] = [:]
         var memos: [String: String] = [:]
+        var handoffs: [String: Handoff]?
     }
     private(set) var namespace: String
     private(set) var connectionGeneration = UUID()
@@ -168,6 +219,71 @@ final class DraftStore {
                              attachmentRevisions: record.attachmentRevisions)
     }
 
+    /// The draft change and its receipt share one atomic file write. Replaying after a crash is harmless.
+    @discardableResult func detachSubmission(_ sent: DraftSnapshot, id: String) throws -> Bool {
+        guard hosts[sent.namespace]?.handoffs?[id] == nil else { return false }
+        let detached = try updateSubmission {
+            var detached = false
+            var record = hosts[sent.namespace]?.records[sent.key] ?? Record()
+            if record.generation == sent.generation, record.revision == sent.revision {
+                record.revision += 1
+                record.text = ""; record.attachments = []; record.attachmentRevisions = [:]
+                record.textRevision = record.revision
+                record.generation = UUID()
+                hosts[sent.namespace, default: Host()].records[sent.key] = record
+                detached = true
+            }
+            if hosts[sent.namespace]?.handoffs == nil { hosts[sent.namespace, default: Host()].handoffs = [:] }
+            hosts[sent.namespace]?.handoffs?[id] = Handoff()
+            return detached
+        }
+        if detached {
+            let record = hosts[sent.namespace]!.records[sent.key]!
+            synchronizeEditors(DraftSnapshot(namespace: sent.namespace, key: sent.key, generation: record.generation,
+                revision: record.revision, textRevision: record.textRevision, text: record.text,
+                attachments: record.attachments, attachmentRevisions: record.attachmentRevisions))
+        }
+        return detached
+    }
+
+    /// Merges only when explicitly requested by the caller; SubmissionStore gates automatic restoration.
+    @discardableResult func restoreSubmission(_ sent: DraftSnapshot, id: String) throws -> DraftSnapshot {
+        if let restored = hosts[sent.namespace]?.handoffs?[id]?.restoredDraft { return restored }
+        // A prepared intent may have crashed before the detach. Do not prepend an uncleared original.
+        try detachSubmission(sent, id: id)
+        let restored = try updateSubmission {
+            var record = hosts[sent.namespace]?.records[sent.key] ?? Record()
+            record.revision += 1
+            if !sent.text.isEmpty {
+                record.text = sent.text + (record.text.isEmpty ? "" : "\n\n" + record.text)
+                record.textRevision = record.revision
+            }
+            let sentIDs = Set(sent.attachments.map(\.id))
+            record.attachments = sent.attachments + record.attachments.filter { !sentIDs.contains($0.id) }
+            for file in sent.attachments { record.attachmentRevisions[file.id] = record.revision }
+            hosts[sent.namespace, default: Host()].records[sent.key] = record
+            let restored = DraftSnapshot(namespace: sent.namespace, key: sent.key, generation: record.generation,
+                                     revision: record.revision, textRevision: record.textRevision, text: record.text,
+                                     attachments: record.attachments, attachmentRevisions: record.attachmentRevisions)
+            hosts[sent.namespace]?.handoffs?[id] = Handoff(restoredDraft: restored)
+            return restored
+        }
+        synchronizeEditors(restored)
+        return restored
+    }
+
+    private func updateSubmission<Value>(_ change: () -> Value) throws -> Value {
+        guard canPersist else { throw APIError(status: 0, message: persistenceError ?? "초안을 저장하지 못했습니다") }
+        let previous = hosts
+        let result = change()
+        do { try storage.write(hosts); persistenceError = nil; return result }
+        catch {
+            hosts = previous
+            persistenceError = error.localizedDescription
+            throw error
+        }
+    }
+
     /// Revision comparisons preserve even edit → undo, and remove/re-attach of the same ID.
     func consumeSent(_ sent: DraftSnapshot) {
         guard let record = hosts[sent.namespace]?.records[sent.key], record.generation == sent.generation else { return }
@@ -249,7 +365,7 @@ final class DraftStore {
     }
     func clearMemo(_ decisionID: String) { hosts[namespace]?.memos.removeValue(forKey: decisionID); save() }
     func removeAll() {
-        hosts[namespace] = Host()
+        hosts[namespace] = Host(handoffs: hosts[namespace]?.handoffs)
         connectionGeneration = UUID()
         save()
     }

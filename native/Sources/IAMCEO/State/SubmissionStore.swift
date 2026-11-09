@@ -11,6 +11,8 @@ enum MessageSubmissionStatus: String, Codable, Sendable {
     case prepared, checking, notAccepted, accepted, refused
 }
 
+enum MessageFailureDisposition: String, Codable, Sendable { case retained, restored, dismissed }
+
 struct MessageSubmission: Codable, Sendable, Identifiable {
     let id: String
     let namespace: String
@@ -21,6 +23,21 @@ struct MessageSubmission: Codable, Sendable, Identifiable {
     var status: MessageSubmissionStatus = .prepared
     var message: Message?
     var draftConsumed = false
+    // Optional fields preserve attempts written before immediate composer clearing.
+    var handoffID: String?
+    var handoffDraft: DraftSnapshot?
+    var restoredDraft: DraftSnapshot?
+    var failureReason: String?
+    var failureDisposition: MessageFailureDisposition?
+
+    var retainsFailedMessage: Bool {
+        failureDisposition == .retained || (failureDisposition == nil && (status == .refused || status == .notAccepted))
+    }
+    var failureText: String {
+        "보내지 못했습니다: \(failureReason ?? "서버가 접수하지 않았습니다")"
+            + (failureDisposition == .restored ? ". 글은 입력칸에 되돌려 두었습니다" : "")
+    }
+    var failurePreview: String { String(draft.text.prefix(while: { !$0.isNewline })) }
 
     var request: SendMessageRequest {
         SendMessageRequest(id: id, text: draft.text, targetMemberId: targetMemberID, attachmentIds: draft.attachments.map(\.id), contextFileId: contextFileId)
@@ -83,20 +100,47 @@ final class SubmissionStore {
     func terminalAttempt(id: String) -> TerminalSubmission? { state.terminals[id] }
 
     /// An edited draft cannot silently replace an unresolved first attempt.
-    func prepareMessage(projectID: String, targetMemberID: String?, draft: DraftSnapshot, contextFileID: String? = nil) throws -> MessageSubmission {
+    func prepareMessage(projectID: String, targetMemberID: String?, draft: DraftSnapshot, contextFileID: String? = nil, clearsDraft: Bool = false) throws -> MessageSubmission {
         if let existing = state.messages.values.first(where: {
-            $0.namespace == draft.namespace && $0.draft.key == draft.key && $0.status != .refused
-                && ($0.status != .accepted || !$0.draftConsumed)
+            guard $0.namespace == draft.namespace, $0.draft.key == draft.key else { return false }
+            // A definitive refusal ends the intent. Even an unchanged restoration is a new send.
+            // Only receipt-confirmed absence below needs to preserve the original request ID.
+            if $0.status == .refused { return false }
+            if $0.failureDisposition == .retained || $0.failureDisposition == .dismissed { return false }
+            if $0.failureDisposition == .restored {
+                return $0.restoredDraft?.generation == draft.generation && $0.restoredDraft?.revision == draft.revision
+            }
+            return $0.status != .refused && ($0.status != .accepted || !$0.draftConsumed)
         }) {
+            let expected = existing.restoredDraft ?? existing.draft
             guard existing.projectID == projectID, existing.targetMemberID == targetMemberID,
-                  existing.draft.generation == draft.generation, existing.draft.revision == draft.revision else {
+                  expected.generation == draft.generation, expected.revision == draft.revision else {
                 throw SubmissionError.unresolvedAttempt(existing.id)
+            }
+            if existing.handoffID != nil, existing.status == .notAccepted {
+                var retry = existing
+                retry.status = .notAccepted
+                retry.handoffID = UUID().uuidString; retry.handoffDraft = draft; retry.restoredDraft = nil
+                retry.failureDisposition = nil
+                retry.failureReason = nil
+                try update { $0.messages[retry.id] = retry }
+                return retry
             }
             return existing
         }
-        let attempt = MessageSubmission(id: UUID().uuidString, namespace: draft.namespace, projectID: projectID,
+        var attempt = MessageSubmission(id: UUID().uuidString, namespace: draft.namespace, projectID: projectID,
                                         targetMemberID: targetMemberID, draft: draft, contextFileId: contextFileID)
-        try update { $0.messages[attempt.id] = attempt }
+        if clearsDraft { attempt.handoffID = UUID().uuidString; attempt.handoffDraft = draft }
+        try update { state in
+            // Retire restored notices atomically with the replacement intent. Retained originals
+            // belong to a separate next draft and must keep their explicit recovery actions.
+            for previous in state.messages.values where previous.namespace == draft.namespace
+                && previous.draft.key == draft.key && previous.failureDisposition == .restored
+                && (previous.status == .refused || previous.status == .notAccepted) {
+                state.messages[previous.id]?.failureDisposition = .dismissed
+            }
+            state.messages[attempt.id] = attempt
+        }
         return attempt
     }
 
@@ -104,6 +148,7 @@ final class SubmissionStore {
     /// Only an explicit v1 retry may bypass the query; it still returns the original ID and body.
     func beginMessage(id: String, allowUnconfirmedRetry: Bool = false) throws -> SendMessageRequest {
         guard var attempt = state.messages[id], [.prepared, .notAccepted].contains(attempt.status)
+                || (attempt.status == .refused && attempt.retainsFailedMessage)
                 || (allowUnconfirmedRetry && attempt.status == .checking) else {
             throw SubmissionError.invalidTransition
         }
@@ -119,21 +164,23 @@ final class SubmissionStore {
         try update { $0.messages[id] = attempt }
     }
 
-    func refuseMessage(id: String) throws {
+    func refuseMessage(id: String, reason: String? = nil) throws {
         guard var attempt = state.messages[id], attempt.status != .accepted else { throw SubmissionError.invalidTransition }
         attempt.status = .refused
+        if let reason { attempt.failureReason = reason }
         try update { $0.messages[id] = attempt }
     }
 
     @discardableResult func reconcileMessage(id: String, using service: any MessageHistoryService) async throws -> MessageSubmissionStatus {
         guard let attempt = state.messages[id] else { throw SubmissionError.invalidTransition }
-        if attempt.status == .accepted || attempt.status == .refused { return attempt.status }
+        if attempt.status == .accepted || attempt.status == .refused || attempt.status == .notAccepted { return attempt.status }
         guard queries.insert("message:\(id)").inserted else { return attempt.status }
         defer { queries.remove("message:\(id)") }
         do { try acceptMessage(id: id, message: await service.message(id: id)) }
         catch let error as APIError where error.status == 404 {
             if var current = state.messages[id], current.status != .accepted, current.status != .refused {
                 current.status = .notAccepted
+                current.failureReason = "서버가 접수하지 않았습니다"
                 try update { $0.messages[id] = current }
             }
         }
@@ -141,10 +188,91 @@ final class SubmissionStore {
         return state.messages[id]!.status
     }
 
+    @discardableResult func detachMessage(id: String, drafts: DraftStore) throws -> Bool {
+        guard let attempt = state.messages[id] else { throw SubmissionError.invalidTransition }
+        if let handoffID = attempt.handoffID, let sent = attempt.handoffDraft {
+            return try drafts.detachSubmission(sent, id: handoffID)
+        }
+        return false
+    }
+
+    func restoreMessage(id: String, drafts: DraftStore) throws {
+        guard var attempt = state.messages[id], attempt.status == .refused || attempt.status == .notAccepted else {
+            throw SubmissionError.invalidTransition
+        }
+        guard attempt.failureDisposition == nil else { return }
+        // An atomic draft receipt may have reached disk before the submission receipt.
+        if let handoffID = attempt.handoffID, let sent = attempt.handoffDraft {
+            if let restored = drafts.restoredSubmission(sent, id: handoffID) {
+                attempt.restoredDraft = restored
+                attempt.failureDisposition = drafts.matches(restored) ? .restored : .retained
+            } else if drafts.canRestoreSubmission(sent) || (drafts.matches(sent) && !drafts.hasEditor(for: sent)) {
+                // The prepared-before-detach crash window is repaired before any editor is installed.
+                if drafts.matches(sent) { try detachMessage(id: id, drafts: drafts) }
+                if drafts.canRestoreSubmission(sent) {
+                    attempt.restoredDraft = try drafts.restoreSubmission(sent, id: handoffID)
+                    attempt.failureDisposition = .restored
+                } else { attempt.failureDisposition = .retained }
+            } else { attempt.failureDisposition = .retained }
+        } else { attempt.failureDisposition = .retained }
+        try update { $0.messages[id] = attempt }
+    }
+
+    func failureNotices(namespace: String, key: String, drafts: DraftStore) -> [MessageSubmission] {
+        messages(namespace: namespace).compactMap { attempt in
+            guard attempt.draft.key == key, attempt.status != .accepted else { return nil }
+            if attempt.retainsFailedMessage {
+                var visible = attempt
+                visible.failureDisposition = .retained
+                return visible
+            }
+            if attempt.failureDisposition == .restored, attempt.restoredDraft.map(drafts.matches) == true { return attempt }
+            return nil
+        }
+    }
+
+    func dismissMessageFailure(id: String) throws {
+        guard var attempt = state.messages[id], attempt.status == .refused || attempt.status == .notAccepted else {
+            throw SubmissionError.invalidTransition
+        }
+        attempt.failureDisposition = .dismissed
+        attempt.status = .refused
+        try update { $0.messages[id] = attempt }
+    }
+
+    func insertFailedMessage(id: String, drafts: DraftStore) throws {
+        guard let attempt = state.messages[id], attempt.retainsFailedMessage,
+              attempt.status == .refused || attempt.status == .notAccepted,
+              attempt.namespace == drafts.namespace else { throw SubmissionError.invalidTransition }
+        drafts.commitEditors(for: attempt.draft.key)
+        let sent = attempt.handoffDraft ?? attempt.draft
+        // The draft receipt makes a crash between insertion and dismissal idempotent.
+        _ = try drafts.restoreSubmission(sent, id: "insert:\(attempt.id)")
+        drafts.moveEditorsCaretToEnd(for: attempt.draft.key)
+        try dismissMessageFailure(id: id)
+    }
+
+    /// Repair both crash windows (intent → clear and restore → intent receipt) before displaying drafts.
+    func recoverMessageDrafts(drafts: DraftStore) throws {
+        for attempt in state.messages.values where attempt.handoffID != nil || attempt.status == .refused {
+            switch attempt.status {
+            case .prepared:
+                var unsent = attempt
+                unsent.status = .notAccepted
+                try update { $0.messages[attempt.id] = unsent }
+                try restoreMessage(id: attempt.id, drafts: drafts)
+            case .checking: try detachMessage(id: attempt.id, drafts: drafts)
+            case .accepted: try consumeAccepted(id: attempt.id, drafts: drafts)
+            case .notAccepted, .refused: try restoreMessage(id: attempt.id, drafts: drafts)
+            }
+        }
+    }
+
     func consumeAccepted(id: String, drafts: DraftStore) throws {
         guard var attempt = state.messages[id], attempt.status == .accepted else { throw SubmissionError.invalidTransition }
         guard !attempt.draftConsumed else { return }
-        drafts.consumeSent(attempt.draft)
+        if attempt.handoffID != nil { try detachMessage(id: id, drafts: drafts) }
+        else { drafts.consumeSent(attempt.draft) }
         if let error = drafts.persistenceError { throw APIError(status: 0, message: error) }
         attempt.draftConsumed = true
         try update { $0.messages[id] = attempt }

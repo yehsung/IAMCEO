@@ -16,6 +16,9 @@ struct MacComposerTextView: NSViewRepresentable {
     /// The production binding supplies this to distinguish old empty drafts from intentional clears.
     var textRevision: (() -> Int)? = nil
 
+    var drafts: DraftStore? = nil
+    var draftKey: String? = nil
+
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -46,6 +49,7 @@ struct MacComposerTextView: NSViewRepresentable {
             coordinator?.publish(view)
         }
         view.registerForDraggedTypes(MacAttachmentItem.pasteboardTypes)
+        context.coordinator.connect(view)
         scroll.documentView = view
         return scroll
     }
@@ -53,6 +57,7 @@ struct MacComposerTextView: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let view = scroll.documentView as? Editor else { return }
+        context.coordinator.connect(view)
         view.isEditable = context.environment.isEnabled
         view.isSelectable = context.environment.isEnabled
         view.canReceive = canReceive
@@ -70,6 +75,10 @@ struct MacComposerTextView: NSViewRepresentable {
                 view.window?.makeFirstResponder(view)
             }
         }
+    }
+
+    static func dismantleNSView(_ view: NSScrollView, coordinator: Coordinator) {
+        coordinator.parent.drafts?.unregisterEditor(id: coordinator.editorID)
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView scroll: NSScrollView, context: Context) -> CGSize? {
@@ -98,12 +107,28 @@ struct MacComposerTextView: NSViewRepresentable {
         return CGSize(width: width, height: min(154, max(22, ceil(layout.usedRect(for: container).height))))
     }
 
-    final class Coordinator: NSObject, NSTextViewDelegate {
+    @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
+        let editorID = UUID()
         var parent: MacComposerTextView
         private var lastRevision: Int?
         private var lastPublishedText: String?
+        private var lastObservedText: String?
         private var applyingExternalText = false
         init(_ parent: MacComposerTextView) { self.parent = parent }
+
+        func connect(_ view: Editor) {
+            guard let drafts = parent.drafts, let key = parent.draftKey else { return }
+            drafts.registerEditor(id: editorID, key: key, canRestore: { [weak view] in
+                guard let view else { return true }
+                return view.string.isEmpty && !view.hasMarkedText() && !view.isHandlingInput
+            }, commit: { [weak view] in view?.commitComposition() }, synchronize: { [weak self, weak view] snapshot in
+                guard let view else { return }
+                self?.synchronize(view, text: snapshot.text, revision: snapshot.revision)
+            }, moveCaretToEnd: { [weak view] in
+                guard let view else { return }
+                view.setSelectedRange(NSRange(location: view.string.utf16.count, length: 0))
+            })
+        }
 
         func synchronize(_ view: Editor, text: String, revision: Int?) {
             // Even a genuine external update must not destroy AppKit's marked range.
@@ -111,23 +136,28 @@ struct MacComposerTextView: NSViewRepresentable {
             if let revision, let lastRevision, revision <= lastRevision { return }
             if revision == nil, text == lastPublishedText { return }
             lastRevision = revision
+            lastObservedText = text
             guard !view.string.utf8.elementsEqual(text.utf8) else { return }
-            let selections = view.selectedRanges.map { $0.rangeValue }
             applyingExternalText = true
             defer { applyingExternalText = false }
             view.string = text
             let length = (text as NSString).length
-            view.selectedRanges = selections.map { range in
-                let location = min(range.location, length)
-                return NSValue(range: NSRange(location: location, length: min(range.length, length - location)))
-            }
+            view.setSelectedRange(NSRange(location: length, length: 0))
             view.undoManager?.removeAllActions()
         }
 
         func publish(_ view: Editor) {
             guard !view.isHandlingInput, !applyingExternalText else { return }
             let value = view.string
+            if let revision = parent.textRevision?(), let lastRevision, revision > lastRevision,
+               !parent.text.utf8.elementsEqual(value.utf8),
+               lastObservedText.map({ parent.text.utf8.elementsEqual($0.utf8) }) != true {
+                // A skipped external revision owns the binding. Never publish over an unseen value.
+                synchronize(view, text: parent.text, revision: revision)
+                return
+            }
             lastPublishedText = value
+            lastObservedText = value
             if !parent.text.utf8.elementsEqual(value.utf8) { parent.text = value }
             // The binding setter is synchronous. Remember its revision before SwiftUI echoes it.
             if let revision = parent.textRevision?() {
@@ -185,6 +215,14 @@ struct MacComposerTextView: NSViewRepresentable {
                 unmarkText()
                 inputContext?.discardMarkedText()
             }
+            textChanged?()
+        }
+
+        /// Clear in the submission's actor turn, before SwiftUI gets its next render or another keystroke.
+        func clearAfterSubmission() {
+            string = ""
+            setSelectedRange(NSRange(location: 0, length: 0))
+            undoManager?.removeAllActions()
             textChanged?()
         }
 

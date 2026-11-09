@@ -468,7 +468,11 @@ func recentReports(_ messages: [Message], limit: Int = 4) -> [Message] {
 /// Raw CLI / runner errors in words the CEO can act on. Known provider messages become one Korean sentence with the
 /// next step; anything unknown passes through unchanged (never hide the original when we do not understand it).
 func friendlyError(_ raw: String) -> String {
-    let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    // The server appends the raw socket detail, e.g. "(hello: connect ENOENT /private/…/core.sock)". The Korean lead says it all.
+    if let range = text.range(of: #"\s*\([^()]*(ENOENT|ECONNREFUSED|ETIMEDOUT|hello:|connect )[^()]*\)\s*$"#, options: [.regularExpression, .caseInsensitive]) {
+        text.removeSubrange(range)
+    }
     let lower = text.lowercased()
     func has(_ needle: String) -> Bool { lower.contains(needle.lowercased()) }
     if has("can't use your claude subscription") || has("payment is past due") {

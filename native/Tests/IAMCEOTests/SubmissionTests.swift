@@ -219,7 +219,7 @@ final class WriteTestServer: @unchecked Sendable {
         XCTAssertEqual(server.read { $0.sentIDs }, [id])
         XCTAssertEqual(store.submissions?.messageAttempt(id: id)?.status, .checking)
         XCTAssertTrue(store.errorMessage?.contains("접수 확인 중") == true)
-        XCTAssertEqual(store.drafts.text(for: DraftStore.key(project: "p", target: nil)), "Hello")
+        XCTAssertEqual(store.drafts.text(for: DraftStore.key(project: "p", target: nil)), "", "The unresolved body lives in SubmissionStore, separately from the next draft")
 
         server.change { $0.dropMessage = false }
         await store.recoverWrites()

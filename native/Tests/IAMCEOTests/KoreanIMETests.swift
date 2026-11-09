@@ -160,12 +160,12 @@ final class KoreanIMETests: XCTestCase {
         XCTAssertEqual(fixture.editor.string, "앞 글 한")
     }
 
-    func testExternalReplacementPreservesAndClampsUTF16Selection() {
+    func testExternalReplacementMovesSelectionToUTF16End() {
         let fixture = EditorFixture("🙂 앞 글 한글")
         fixture.editor.setSelectedRange(NSRange(location: 3, length: 2))
         fixture.draft.write("🙂 앞 글 다른 초안")
         fixture.synchronize()
-        XCTAssertEqual(fixture.editor.selectedRange(), NSRange(location: 3, length: 2))
+        XCTAssertEqual(fixture.editor.selectedRange(), NSRange(location: "🙂 앞 글 다른 초안".utf16.count, length: 0))
         fixture.draft.write("짧음")
         fixture.synchronize()
         XCTAssertEqual(fixture.editor.string, "짧음")

@@ -44,6 +44,13 @@ final class AppStore: ProjectManagementStore {
         get { rawErrorMessage.map(TerminalPresentation.message) }
         set { rawErrorMessage = newValue }
     }
+    private var messageSendNotices: [String: String] = [:]
+    func messageSendNotice(targetMemberID: String?) -> String? {
+        messageSendNotices[Self.scoped(writeNamespace, DraftStore.key(project: selectedProjectID, target: targetMemberID))]
+    }
+    func explainMessageSendBlock(_ reason: String, targetMemberID: String?) {
+        messageSendNotices[Self.scoped(writeNamespace, DraftStore.key(project: selectedProjectID, target: targetMemberID))] = reason
+    }
     let terminalWake = TerminalWake()
     private(set) var isLoading = false
     /// A QR pairing claim is in flight (phone).
@@ -216,6 +223,7 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored private var fallbackTask: Task<Void, Never>?
     @ObservationIgnored private var coordinatorTask: Task<Void, Never>?
+    @ObservationIgnored private var refreshWaiters: [UUID: (revision: Int, continuation: CheckedContinuation<Void, Never>)] = [:]
     @ObservationIgnored private var dirty: RefreshScope = []
     @ObservationIgnored private var nextSnapshotAt: Duration = .zero
     @ObservationIgnored private var syncSupported = false
@@ -285,12 +293,15 @@ final class AppStore: ProjectManagementStore {
         self.pushNotifications = pushNotifications
         #endif
         pushSettings = self.pushNotifications?.settingsStore ?? PushSettingsStore()
-        self.drafts = drafts ?? DraftStore(persist: persistCredentials && !demo)
+        let composerDrafts = drafts ?? DraftStore(persist: persistCredentials && !demo)
+        self.drafts = composerDrafts
         writeStorage = LocalStateStorage(enabled: !demo && (persistCredentials || writeStorageURL != nil),
                                          url: writeStorageURL, defaults: .standard, key: "iamceo.appWrites.v1")
         do {
             let restored = try writeStorage.read(AppWriteJournal.self) ?? AppWriteJournal()
-            self.submissions = try submissions ?? SubmissionStore(persist: persistCredentials && !demo)
+            let restoredSubmissions = try submissions ?? SubmissionStore(persist: persistCredentials && !demo)
+            try restoredSubmissions.recoverMessageDrafts(drafts: composerDrafts)
+            self.submissions = restoredSubmissions
             journal = restored
         } catch {
             self.submissions = nil
@@ -606,47 +617,76 @@ final class AppStore: ProjectManagementStore {
         refreshTask?.cancel(); refreshTask = nil
         initialTask?.cancel(); initialTask = nil
         dirty = []
+        finishRefreshWaiters()
+    }
+
+    private func finishRefreshWaiters(through revision: Int? = nil) {
+        for (id, waiter) in refreshWaiters where revision.map({ waiter.revision <= $0 }) ?? true {
+            refreshWaiters.removeValue(forKey: id)?.continuation.resume()
+        }
     }
 
     private func enqueueRefresh(_ scope: RefreshScope, immediate: Bool = false, allowPaused: Bool = false) async {
         guard !isDemo, api != nil, foreground || allowPaused else { return }
         dirty.formUnion(scope); dirtyRevision &+= 1
         if scope.contains(.history) { historyInvalidationRevision &+= 1 }
-        if let coordinatorTask { await coordinatorTask.value; return }
-        let token = coordinatorGeneration, epoch = generation, phase = foregroundGeneration
-        let task = Task { [weak self] in
-            guard let self else { return }
-            do {
-                let now = await syncClock.now()
-                let delay = max(scope.contains(.snapshot) ? nextSnapshotAt - now : .zero, immediate ? .zero : (lowPowerMode ? .milliseconds(500) : .milliseconds(250)))
-                if delay > .zero { try await syncClock.sleep(for: delay) }
-                while !Task.isCancelled, token == coordinatorGeneration, epoch == generation, phase == foregroundGeneration, !dirty.isEmpty {
-                    let scopes = dirty; dirty = []
-                    let now = await syncClock.now()
-                    if scopes.contains(.snapshot) {
-                        let delay = nextSnapshotAt - now
-                        if delay > .zero { try await syncClock.sleep(for: delay) }
-                        guard !Task.isCancelled, token == coordinatorGeneration else { return }
-                        nextSnapshotAt = await syncClock.now() + (lowPowerMode ? .seconds(1) : .milliseconds(500))
-                        await readSnapshot()
-                    }
-                    guard !Task.isCancelled, token == coordinatorGeneration, epoch == generation, phase == foregroundGeneration else { return }
-                    if scopes.contains(.history), historyVisible { await refreshHistory() }
-                    if scopes.contains(.delivery), foreground {
-                        for memberID in Set(deliveryPages.keys).union(deliveryFlights.keys) {
-                            await loadDeliveryNotices(memberID: memberID)
-                            guard !Task.isCancelled, token == coordinatorGeneration else { return }
+        let requestedRevision = dirtyRevision
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else { continuation.resume(); return }
+                // Register before starting the task, including when every read completes immediately.
+                refreshWaiters[waiterID] = (requestedRevision, continuation)
+                if coordinatorTask == nil {
+                    let token = coordinatorGeneration, epoch = generation, phase = foregroundGeneration
+                    let task = Task { [weak self] in
+                        guard let self else { return }
+                        defer {
+                            if token == coordinatorGeneration {
+                                coordinatorTask = nil
+                                finishRefreshWaiters()
+                            }
                         }
+                        do {
+                            let now = await syncClock.now()
+                            let delay = max(scope.contains(.snapshot) ? nextSnapshotAt - now : .zero, immediate ? .zero : (lowPowerMode ? .milliseconds(500) : .milliseconds(250)))
+                            if delay > .zero { try await syncClock.sleep(for: delay) }
+                            while !Task.isCancelled, token == coordinatorGeneration, epoch == generation, phase == foregroundGeneration, !dirty.isEmpty {
+                                let scopes = dirty, passRevision = dirtyRevision
+                                dirty = []
+                                let now = await syncClock.now()
+                                if scopes.contains(.snapshot) {
+                                    let delay = nextSnapshotAt - now
+                                    if delay > .zero { try await syncClock.sleep(for: delay) }
+                                    guard !Task.isCancelled, token == coordinatorGeneration else { return }
+                                    nextSnapshotAt = await syncClock.now() + (lowPowerMode ? .seconds(1) : .milliseconds(500))
+                                    await readSnapshot()
+                                }
+                                guard !Task.isCancelled, token == coordinatorGeneration, epoch == generation, phase == foregroundGeneration else { return }
+                                if scopes.contains(.history), historyVisible { await refreshHistory() }
+                                if scopes.contains(.delivery), foreground {
+                                    for memberID in Set(deliveryPages.keys).union(deliveryFlights.keys) {
+                                        await loadDeliveryNotices(memberID: memberID)
+                                        guard !Task.isCancelled, token == coordinatorGeneration else { return }
+                                    }
+                                }
+                                if scopes.contains(.activity) { await readActivities() }
+                                if scopes.contains(.diagnostics) { await readDiagnostics() }
+                                if scopes.contains(.archive) { await loadArchivedProjects() }
+                                guard !Task.isCancelled, token == coordinatorGeneration, epoch == generation, phase == foregroundGeneration else { return }
+                                // Release only requests included in this pass; later events keep draining independently.
+                                finishRefreshWaiters(through: passRevision)
+                            }
+                        } catch { /* Lifecycle cancellation owns invalidation. */ }
                     }
-                    if scopes.contains(.activity) { await readActivities() }
-                    if scopes.contains(.diagnostics) { await readDiagnostics() }
-                    if scopes.contains(.archive) { await loadArchivedProjects() }
+                    coordinatorTask = task
                 }
-            } catch { /* Lifecycle cancellation owns invalidation. */ }
-            if token == coordinatorGeneration { coordinatorTask = nil }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.refreshWaiters.removeValue(forKey: waiterID)?.continuation.resume()
+            }
         }
-        coordinatorTask = task
-        await task.value
     }
 
     private func discoverCapabilities() async {
@@ -1065,11 +1105,30 @@ final class AppStore: ProjectManagementStore {
     }
 
     /// The caller may pass the shared composer DraftStore. The immutable snapshot is durable before POST.
-    @discardableResult func sendMessage(text: String, targetMemberID: String? = nil, attachmentIDs: [String] = [], contextFileID: String? = nil) async -> Bool {
-        guard !isDemo else { errorMessage = "샘플은 읽기 전용입니다."; return false }
-        guard canWrite, let projectID = selectedProjectID, let submissions,
-              !isSending(projectID: projectID, targetMemberID: targetMemberID),
-              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachmentIDs.isEmpty else { return false }
+    @discardableResult func sendMessage(text: String, targetMemberID: String? = nil, attachmentIDs: [String] = [], contextFileID: String? = nil, draftDidDetach: (@MainActor () -> Void)? = nil) async -> Bool {
+        let noticeNamespace = writeNamespace
+        let noticeDraftKey = DraftStore.key(project: selectedProjectID, target: targetMemberID)
+        let noticeKey = Self.scoped(noticeNamespace, noticeDraftKey)
+        messageSendNotices.removeValue(forKey: noticeKey)
+        var completed = false
+        var explainedFailure = false
+        var failureReason = "연결이나 초안이 바뀌어 보내지 않았습니다. 글을 확인하고 다시 보내 주세요."
+        defer {
+            // A persisted refusal already explains the failure. Every other false result also
+            // gets a composer-scoped explanation, including early guards and local errors.
+            if completed || explainedFailure { messageSendNotices.removeValue(forKey: noticeKey) }
+            else { messageSendNotices[noticeKey] = failureReason }
+        }
+        guard !isDemo else { failureReason = "샘플은 읽기 전용입니다."; errorMessage = failureReason; return false }
+        guard canWrite else { failureReason = writeBlockedReason ?? "최신 상태를 확인한 뒤 보내 주세요."; return false }
+        guard let projectID = selectedProjectID else { failureReason = "프로젝트를 고른 뒤 보내 주세요."; return false }
+        guard let submissions else { failureReason = "전송 기록을 준비하지 못했습니다. 다시 연결해 주세요."; return false }
+        guard !isSending(projectID: projectID, targetMemberID: targetMemberID) else {
+            failureReason = "앞선 글을 보내는 중입니다. 끝난 뒤 다시 보내 주세요."; return false
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachmentIDs.isEmpty else {
+            failureReason = "보낼 글이나 첨부를 넣어 주세요."; return false
+        }
         let epoch = generation
         let actionKey = sendActionKey(projectID: projectID, targetMemberID: targetMemberID)
         pendingActions.insert(actionKey)
@@ -1080,24 +1139,51 @@ final class AppStore: ProjectManagementStore {
             for attempt in submissions.messages(namespace: writeNamespace) where attempt.draft.key == key
                 && (attempt.status == .checking || (attempt.status == .accepted && !attempt.draftConsumed)) {
                 if attempt.status == .checking, strictWriteContract {
+                    failureReason = "접수 확인 중입니다. 결과를 확인한 뒤 다시 보내 주세요."
                     guard await reconcileMessage(attempt.id), epoch == generation else { return false }
+                    if let current = submissions.messageAttempt(id: attempt.id), current.restoredDraft != nil {
+                        failureReason = "접수 확인 뒤 입력칸의 글이 바뀌었습니다. 확인하고 다시 보내 주세요."
+                        guard drafts.text(for: key) == text, drafts.files(for: key).map(\.id) == attachmentIDs else { return false }
+                    }
                 }
                 if let current = submissions.messageAttempt(id: attempt.id), current.status == .accepted,
                    current.draft.text == text, current.request.attachmentIds == attachmentIDs {
                     try submissions.consumeAccepted(id: attempt.id, drafts: drafts)
+                    completed = true
                     return true
                 }
             }
-            drafts.setText(text, for: key)
-            let files = drafts.files(for: key)
+            // A legacy explicit retry uses the immutable attempt, never copies its sent text into the next draft.
+            let retry = submissions.messages(namespace: writeNamespace).first {
+                $0.draft.key == key && $0.status == .checking && !strictWriteContract
+                    && $0.draft.text == text && $0.request.attachmentIds == attachmentIDs
+            }
+            if retry == nil { drafts.setText(text, for: key) }
+            let files = retry?.draft.attachments ?? drafts.files(for: key)
             guard Set(files.map(\.id)) == Set(attachmentIDs), files.count == attachmentIDs.count else {
                 throw APIError(status: 0, message: "첨부 초안을 확인해 주세요. 누락된 첨부를 빼고 보내지 않습니다.")
             }
             if let error = drafts.persistenceError { throw APIError(status: 0, message: error) }
-            let attempt = try submissions.prepareMessage(projectID: projectID, targetMemberID: targetMemberID, draft: drafts.snapshot(for: key), contextFileID: contextFileID)
-            let outcome: (value: Message?, error: Error?) = await perform(actionKey, refreshAfter: false, ownsPendingAction: true) { api in
+            let attempt = try retry ?? submissions.prepareMessage(projectID: projectID, targetMemberID: targetMemberID, draft: drafts.snapshot(for: key), contextFileID: contextFileID, clearsDraft: true)
+            // No suspension between the durable intent, snapshot and durable clear. Both platforms share this path.
+            let detached = try submissions.detachMessage(id: attempt.id, drafts: drafts)
+            if retry == nil, attempt.handoffID != nil, !detached {
+                throw APIError(status: 0, message: "초안이 바뀌어 보내지 않았습니다. 입력칸을 확인하고 다시 보내 주세요.")
+            }
+            if detached { draftDidDetach?() }
+            let outcome: (value: Message?, error: Error?) = await perform(actionKey, refreshAfter: false, deferRefusalToReceipt: true, ownsPendingAction: true) { api in
                 let request = try submissions.beginMessage(id: attempt.id, allowUnconfirmedRetry: !strictWriteContract)
                 return try await api.sendMessage(projectID: projectID, request: request, contractVersion: strictWriteContract ? 2 : nil)
+            }
+            // A 401 can invalidate the connection inside perform. Restore its proven refusal
+            // in the captured namespace even then; never change the newly selected host.
+            if Self.definiteRefusal(outcome.error)
+                || submissions.messageAttempt(id: attempt.id)?.status == .prepared
+                || submissions.messageAttempt(id: attempt.id)?.status == .notAccepted {
+                try submissions.refuseMessage(id: attempt.id, reason: outcome.error?.localizedDescription ?? "서버가 접수하지 않았습니다")
+                try submissions.restoreMessage(id: attempt.id, drafts: drafts)
+                explainedFailure = true
+                return false
             }
             guard epoch == generation else { return false }
             if let message = outcome.value {
@@ -1105,13 +1191,71 @@ final class AppStore: ProjectManagementStore {
                 receiveHistoryMessage(message)
                 try submissions.consumeAccepted(id: attempt.id, drafts: drafts)
                 await refresh()
+                completed = true
                 return true
             }
-            if Self.definiteRefusal(outcome.error) { try submissions.refuseMessage(id: attempt.id) }
-            else if outcome.error != nil { errorMessage = "접수 확인 중입니다. 같은 전송 ID로 조회합니다." }
+            if outcome.error != nil {
+                failureReason = "접수 확인 중입니다. 같은 전송 ID로 조회합니다."
+                errorMessage = failureReason
+            } else { failureReason = errorMessage ?? failureReason }
         } catch {
             guard epoch == generation else { return false }
-            handle(error)
+            if case SubmissionError.unresolvedAttempt = error {
+                failureReason = "이전 글의 접수 결과를 먼저 확인해 주세요. 글은 입력칸에 남아 있습니다."
+                errorMessage = failureReason
+            } else { failureReason = error.localizedDescription; handle(error) }
+        }
+        return false
+    }
+
+    /// Explicit retry sends the retained immutable attempt and never detaches the user's next draft.
+    @discardableResult func retryFailedMessage(id: String) async -> Bool {
+        guard let attempt = submissions?.messageAttempt(id: id) else {
+            explainMessageSendBlock("보내지 못한 글의 기록을 찾지 못했습니다.", targetMemberID: nil)
+            return false
+        }
+        let noticeKey = Self.scoped(attempt.namespace, attempt.draft.key)
+        messageSendNotices.removeValue(forKey: noticeKey)
+        var completed = false
+        var failureReason = "지금은 다시 보낼 수 없습니다. 연결과 이전 전송 결과를 확인해 주세요."
+        defer {
+            if completed { messageSendNotices.removeValue(forKey: noticeKey) }
+            else { messageSendNotices[noticeKey] = failureReason }
+        }
+        guard canWrite, let submissions, let attempt = submissions.messageAttempt(id: id),
+              attempt.namespace == writeNamespace, attempt.projectID == selectedProjectID,
+              attempt.retainsFailedMessage,
+              attempt.status == .refused || attempt.status == .notAccepted,
+              !isSending(projectID: attempt.projectID, targetMemberID: attempt.targetMemberID) else { return false }
+        let epoch = generation
+        let actionKey = sendActionKey(projectID: attempt.projectID, targetMemberID: attempt.targetMemberID)
+        pendingActions.insert(actionKey)
+        defer { if epoch == generation { pendingActions.remove(actionKey) } }
+        do {
+            let outcome: (value: Message?, error: Error?) = await perform(actionKey, refreshAfter: false,
+                deferRefusalToReceipt: true, ownsPendingAction: true) { api in
+                let request = try submissions.beginMessage(id: id)
+                return try await api.sendMessage(projectID: attempt.projectID, request: request,
+                                                 contractVersion: strictWriteContract ? 2 : nil)
+            }
+            if Self.definiteRefusal(outcome.error) {
+                try submissions.refuseMessage(id: id, reason: outcome.error?.localizedDescription)
+                completed = true // The retained failure notice explains this definitive rejection.
+                return false
+            }
+            guard epoch == generation else { return false }
+            if let message = outcome.value {
+                try submissions.acceptMessage(id: id, message: message)
+                receiveHistoryMessage(message)
+                try submissions.consumeAccepted(id: id, drafts: drafts)
+                await refresh()
+                completed = true
+                return true
+            }
+            failureReason = outcome.error == nil ? (errorMessage ?? failureReason) : "접수 확인 중입니다. 같은 전송 ID로 조회합니다."
+        } catch {
+            failureReason = error.localizedDescription
+            if epoch == generation { handle(error) }
         }
         return false
     }
@@ -1125,6 +1269,8 @@ final class AppStore: ProjectManagementStore {
             if submissions.messageAttempt(id: id)?.status == .accepted {
                 if let message = submissions.messageAttempt(id: id)?.message { receiveHistoryMessage(message) }
                 try submissions.consumeAccepted(id: id, drafts: drafts)
+            } else if submissions.messageAttempt(id: id)?.status == .notAccepted {
+                try submissions.restoreMessage(id: id, drafts: drafts)
             }
             return true
         } catch {
@@ -1856,6 +2002,7 @@ final class AppStore: ProjectManagementStore {
         }
         guard strictWriteContract, let submissions else { return }
         for attempt in submissions.messages(namespace: namespace) where attempt.status == .checking || attempt.status == .accepted || attempt.status == .notAccepted {
+            guard !isSending(projectID: attempt.projectID, targetMemberID: attempt.targetMemberID) else { continue }
             _ = await reconcileMessage(attempt.id)
             guard epoch == generation, canWrite else { return }
         }

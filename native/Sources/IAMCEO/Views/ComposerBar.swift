@@ -59,8 +59,6 @@ struct ComposerBar: View {
     @State private var takingPhoto = false
     @State private var cameraContext: ComposerUploadContext?
     #endif
-    /// Why the last send failed; the text stays in the draft.
-    @State private var sendError: String?
     /// Recipient of the last accepted send, shown for a few seconds.
     @State private var acceptedMessage: ComposerAcceptedMessage?
     @State private var sentTo: String?
@@ -72,7 +70,7 @@ struct ComposerBar: View {
     @State private var focused = false
     @State private var attachmentReceiverID = UUID()
     #else
-    @FocusState private var focused: Bool
+    @State private var focused = false
     /// The clipboard holds an image or a file (type check only; see ComposerPasteIntake).
     @State private var clipboardHasAttachment = false
     #endif
@@ -91,12 +89,27 @@ struct ComposerBar: View {
     private var pendingUploads: [ComposerUpload] { store.composerUploads.pending(for: key, drafts: drafts) }
     private var missingUploads: [DraftUploadFailure] { drafts.uploadFailures(for: key) }
     private var attempt: MessageSubmission? {
-        store.submissions?.messages(namespace: drafts.namespace).first {
-            $0.draft.key == key && $0.status != .refused && ($0.status != .accepted || !$0.draftConsumed)
+        Self.pendingAttempt(in: store, key: key)
+    }
+    @MainActor private static func pendingAttempt(in store: AppStore, key: String) -> MessageSubmission? {
+        store.submissions?.messages(namespace: store.drafts.namespace).first {
+            $0.draft.key == key && $0.status != .refused && $0.failureDisposition != .retained
+                && $0.failureDisposition != .dismissed && $0.failureDisposition != .restored
+                && ($0.status != .accepted || !$0.draftConsumed)
         }
     }
-    private var checkingAttempt: Bool { attempt?.status == .checking || attempt?.status == .accepted }
-    private var editedAttempt: Bool { attempt.map { $0.draft.revision != drafts.revision(for: key) } ?? false }
+    private var failures: [MessageSubmission] {
+        store.submissions?.failureNotices(namespace: drafts.namespace, key: key, drafts: drafts) ?? []
+    }
+    private var checkingAttempt: Bool {
+        attempt?.status == .checking || attempt?.status == .accepted || failures.contains { $0.status == .checking }
+    }
+    private var editedAttempt: Bool {
+        attempt.map {
+            let expected = $0.restoredDraft ?? $0.draft
+            return expected.revision != drafts.revision(for: key)
+        } ?? false
+    }
     private var text: Binding<String> {
         let draftKey = key
         let connection = drafts.connectionGeneration
@@ -106,11 +119,52 @@ struct ComposerBar: View {
         })
     }
     private var canAttach: Bool { ComposerAttachmentUploads.blockedReason(in: store, target: target) == nil && !missingTarget }
-    private var canSend: Bool {
-        store.uiCanWrite && !sending && !checkingAttempt && !editedAttempt && pendingUploads.isEmpty
-            && missingUploads.isEmpty
-            && drafts.persistenceError == nil && !missingTarget
-            && (!draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty)
+    private var canSend: Bool { Self.sendBlockReason(in: store, targetMemberID: target) == nil }
+
+    /// Shared by the button, Return and native-editor regression tests. Read current store state
+    /// at submission time rather than relying on an earlier SwiftUI render's enabled state.
+    @MainActor static func sendBlockReason(in store: AppStore, targetMemberID: String?) -> String? {
+        let drafts = store.drafts
+        let key = DraftStore.key(project: store.selectedProjectID, target: targetMemberID)
+        guard store.canWrite else { return store.writeBlockedReason ?? "최신 상태를 확인한 뒤 보내 주세요." }
+        guard let project = store.selectedProjectID else { return "프로젝트를 고른 뒤 보내 주세요." }
+        if store.isSending(projectID: project, targetMemberID: targetMemberID) { return "앞선 글을 보내는 중입니다. 끝난 뒤 다시 보내 주세요." }
+        let attempt = pendingAttempt(in: store, key: key)
+        let failures = store.submissions?.failureNotices(namespace: drafts.namespace, key: key, drafts: drafts) ?? []
+        if attempt?.status == .checking || attempt?.status == .accepted || failures.contains(where: { $0.status == .checking }) {
+            return "접수 확인 중입니다. 결과를 확인한 뒤 다시 보내 주세요."
+        }
+        if let attempt, (attempt.restoredDraft ?? attempt.draft).revision != drafts.revision(for: key) {
+            return "이전 글의 접수 결과를 확인하고 편집한 글 사용을 눌러 주세요."
+        }
+        if !store.composerUploads.pending(for: key, drafts: drafts).isEmpty { return "첨부를 올리는 중입니다. 끝난 뒤 보내 주세요." }
+        if !drafts.uploadFailures(for: key).isEmpty { return "올리지 못한 첨부를 확인하거나 빼고 보내 주세요." }
+        if let error = drafts.persistenceError { return "초안을 저장하지 못했습니다: \(error)" }
+        if let targetMemberID, !store.members.contains(where: { $0.id == targetMemberID }) { return "명부에서 빠진 대상입니다. 보낼 대상을 바꿔 주세요." }
+        // A refused restoration is proven absent. A refreshed runner-down hint must not turn
+        // Return into a no-op: the reachable server can give the new send its definitive result.
+        let restoredRefusal = store.submissions?.messages(namespace: drafts.namespace).contains {
+            $0.draft.key == key && $0.failureDisposition == .restored
+                && ($0.status == .refused || $0.status == .notAccepted)
+                && $0.restoredDraft.map(drafts.isCurrentGeneration) == true
+        } == true
+        if !store.uiCanWrite && !restoredRefusal { return store.writeBlockedReason ?? "프로젝트의 실행 연결을 확인해 주세요." }
+        if drafts.text(for: key).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && drafts.files(for: key).isEmpty {
+            return "보낼 글이나 첨부를 넣어 주세요."
+        }
+        return nil
+    }
+
+    @MainActor @discardableResult static func submit(in store: AppStore, targetMemberID: String?, contextFileID: String? = nil) async -> Bool {
+        let key = DraftStore.key(project: store.selectedProjectID, target: targetMemberID)
+        store.drafts.commitEditors(for: key)
+        if let reason = sendBlockReason(in: store, targetMemberID: targetMemberID) {
+            store.explainMessageSendBlock(reason, targetMemberID: targetMemberID)
+            return false
+        }
+        let snapshot = store.drafts.snapshot(for: key)
+        return await store.sendMessage(text: snapshot.text, targetMemberID: targetMemberID,
+                                       attachmentIDs: snapshot.attachments.map(\.id), contextFileID: contextFileID)
     }
 
     /// Web placeholders.
@@ -247,12 +301,11 @@ struct ComposerBar: View {
         .onChange(of: drafts.connectionGeneration) { _, _ in installAttachmentReceiver() }
         #endif
         .onChange(of: router.focusComposer) { _, _ in if respondsToFocusRequests { focusSoon() } }
-        .onChange(of: key) { _, _ in sendError = nil; sentTo = nil }
+        .onChange(of: key) { _, _ in sentTo = nil }
         .onChange(of: store.selectedProjectID) { _, _ in showTargets = false; omittedContextFileID = nil }
         .onChange(of: FileLinks.viewedFileID(router: router)) { _, _ in omittedContextFileID = nil }
-        .onChange(of: drafts.connectionGeneration) { _, _ in sendError = nil; sentTo = nil }
+        .onChange(of: drafts.connectionGeneration) { _, _ in sentTo = nil }
         .onChange(of: draftText) { old, new in
-            sendError = nil
             if new.count > old.count { sentTo = nil }
         }
     }
@@ -466,6 +519,10 @@ struct ComposerBar: View {
     // MARK: Notice line
 
     @ViewBuilder private var noticeLine: some View {
+        ForEach(failures) { failure in failureNotice(failure) }
+        if let reason = store.messageSendNotice(targetMemberID: target) {
+            notice(reason, icon: "exclamationmark.circle", color: CE.attention)
+        }
         if checkingAttempt {
             notice("접수 확인 중 · 글과 첨부는 보관했습니다", icon: "clock", color: CE.attention,
                    actionTitle: "접수 확인", action: { Task { await store.recoverWrites() } })
@@ -482,18 +539,70 @@ struct ComposerBar: View {
                    actionTitle: "편집한 글 사용", action: {
                        guard attempt.status == .notAccepted || attempt.status == .prepared else { return }
                        do { try store.submissions?.refuseMessage(id: attempt.id) }
-                       catch { sendError = friendlyLoadError(error, what: "이전 전송", verb: "정리하지") }
+                       catch { store.errorMessage = friendlyLoadError(error, what: "이전 전송", verb: "정리하지") }
                    })
-        } else if attempt?.status == .notAccepted {
-            notice("접수되지 않았습니다. 같은 전송으로 다시 보낼 수 있습니다.", icon: "arrow.clockwise", color: CE.attention)
-        } else if let sendError {
-            notice(sendError, icon: "exclamationmark.circle", color: CE.danger)
         } else if let intakeNotice = store.composerUploads.notice {
             notice(intakeNotice, icon: "paperclip", color: CE.attention)
         } else if missingTarget {
             notice("명부에서 빠진 대상입니다. 쓰던 글은 그대로 있습니다.", icon: "person.crop.circle.badge.xmark", color: CE.attention,
                    actionTitle: "\(leadName)에게 보내기로 바꾸기", action: { target = nil })
         }
+    }
+
+    /// A refused send. Restored into an empty composer: one red line, like the other send errors.
+    /// Kept beside newer text: what was not sent, why, and three actions on their own row.
+    private func failureNotice(_ failure: MessageSubmission) -> some View {
+        let retained = failure.failureDisposition == .retained
+        let reason = friendlyError(failure.failureReason ?? "서버가 접수하지 않았습니다")
+        return HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "exclamationmark.circle")
+                .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(CE.danger)
+            VStack(alignment: .leading, spacing: 3) {
+                if retained {
+                    Text("보내지 못한 글 · \(failure.failurePreview)")
+                        .fontWeight(.semibold).foregroundStyle(CE.ink)
+                        .lineLimit(1).truncationMode(.tail)
+                    Text(reason).foregroundStyle(CE.ink2)
+                        .lineLimit(isMac ? 1 : 2).truncationMode(.tail)
+                    HStack(spacing: 16) {
+                        failureAction("다시 보내기", disabled: !store.canWrite || sending || checkingAttempt || missingTarget) {
+                            Task { await store.retryFailedMessage(id: failure.id) }
+                        }
+                        failureAction("입력칸에 넣기", disabled: sending || checkingAttempt) {
+                            do { try store.submissions?.insertFailedMessage(id: failure.id, drafts: drafts) }
+                            catch { store.errorMessage = friendlyLoadError(error, what: "글", verb: "되돌리지") }
+                        }
+                        failureAction("버리기", color: CE.ink2, disabled: sending || checkingAttempt) {
+                            do { try store.submissions?.dismissMessageFailure(id: failure.id) }
+                            catch { store.errorMessage = friendlyLoadError(error, what: "글", verb: "정리하지") }
+                        }
+                    }
+                    .padding(.top, 1)
+                } else {
+                    Text("보내지 못했습니다: \(reason)"
+                         + (failure.failureDisposition == .restored ? (reason.hasSuffix(".") ? " " : ". ") + "글은 입력칸에 되돌려 두었습니다" : ""))
+                        .foregroundStyle(CE.danger)
+                        .lineLimit(isMac ? 1 : 3).truncationMode(.tail)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(CEFont.secondary)
+        .lineSpacing(CELeading.spacing(13, 1.4))
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .help(retained ? "\(failure.draft.text)\n\n\(reason)" : failure.failureText)
+    }
+
+    /// Same weight and tint as the single action of `notice`; 44pt tall on iPhone.
+    private func failureAction(_ title: String, color: Color = CE.accent, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).fontWeight(.semibold).foregroundStyle(color)
+                .frame(minHeight: isMac ? nil : 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .disabled(disabled)
+        .opacity(disabled ? 0.45 : 1)
     }
 
     /// One line on Mac (full text in the tooltip): this panel sits in a bar outside any scroll view.
@@ -552,7 +661,7 @@ struct ComposerBar: View {
                                 receive: { attachmentIntake.accept($0, policy: macAttachmentPolicy) },
                                 submit: { Task { await send() } },
                                 rejectionReason: { macAttachmentPolicy.reason ?? "입력칸을 준비 중이라 첨부하지 못했습니다" },
-                                textRevision: { drafts.revision(for: draftKey) })
+                                textRevision: { drafts.revision(for: draftKey) }, drafts: drafts, draftKey: draftKey)
                 .id([drafts.namespace, draftKey])
                 .overlay(alignment: .topLeading) {
                     if draftText.isEmpty {
@@ -564,14 +673,15 @@ struct ComposerBar: View {
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .disabled(store.isDemo)
             #else
-            TextField("\(recipientName)에게 보낼 글", text: text, prompt: Text(placeholder).foregroundStyle(CE.ink2), axis: .vertical)
+            IOSComposerTextView(text: text, focused: Binding(get: { focused }, set: { focused = $0 }),
+                                placeholder: "\(recipientName)에게 보낼 글",
+                                textRevision: { drafts.revision(for: draftKey) }, drafts: drafts, draftKey: draftKey)
                 .id([drafts.namespace, draftKey])
-                .textFieldStyle(.plain)
-                .font(isMac ? .system(size: 15) : CEFont.body)
-                // web .cmp__input: 22pt lines (15px text + 4pt leading); 7 lines ≈ the web's 168pt cap.
-                .lineSpacing(4)
-                .lineLimit(1...7)
-                .focused($focused)
+                .overlay(alignment: .topLeading) {
+                    if draftText.isEmpty {
+                        Text(placeholder).font(CEFont.body).foregroundStyle(CE.ink2).allowsHitTesting(false)
+                    }
+                }
                 .padding(.horizontal, 6).padding(.vertical, 11)
                 .frame(minHeight: 44)
                 .disabled(store.isDemo && !LaunchOptions.reviewTyping)
@@ -717,45 +827,23 @@ struct ComposerBar: View {
     }
 
     private func send() async {
-        #if os(macOS)
-        if focused, let editor = NSApp.keyWindow?.firstResponder as? MacComposerTextView.Editor {
-            editor.commitComposition()
-        }
-        #elseif os(iOS)
-        if focused,
-           let input = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
-            .flatMap(\.windows).first(where: \.isKeyWindow)?.composerFirstResponder as? any UITextInput {
-            input.unmarkText()
-            if let range = input.textRange(from: input.beginningOfDocument, to: input.endOfDocument),
-               let committed = input.text(in: range) {
-                text.wrappedValue = committed
-            }
-        }
-        #endif
-        guard canSend else { return }
+        drafts.commitEditors(for: key)
         let snapshot = drafts.snapshot(for: key)
         let connection = drafts.connectionGeneration
         let project = store.selectedProjectID
         let sendingTarget = target
         let name = recipientName
-        sendError = nil
         sentTo = nil
         acceptedMessage = nil
-        let ok = await store.sendMessage(text: snapshot.text, targetMemberID: sendingTarget, attachmentIDs: snapshot.attachments.map(\.id), contextFileID: contextFile?.id)
+        let ok = await Self.submit(in: store, targetMemberID: sendingTarget, contextFileID: contextFile?.id)
         guard connection == drafts.connectionGeneration, drafts.namespace == snapshot.namespace,
               project == store.selectedProjectID, key == snapshot.key else { return }
-        guard ok else {
-            if checkingAttempt { return }
-            let detail = store.errorMessage.map { friendlyLoadError(APIError(status: 0, message: $0), what: "글", verb: "보내지") } ?? ""
-            sendError = (detail.isEmpty ? "보내지 못했습니다" : "보내지 못했습니다: \(detail)") + ". 글은 그대로 두었습니다"
-            // Said once, here, next to the kept text (not again in the status strip). A 401 leaves the app, so keep it.
-            if store.bootstrap != nil, !detail.isEmpty { store.errorMessage = nil }
-            return
-        }
-        // AppStore consumes the accepted attempt's captured revision. Never consume the current draft again here.
+        guard ok else { return }
+        // The submitted draft was detached before POST. Success leaves the next draft untouched.
         if let accepted = store.submissions?.messages(namespace: snapshot.namespace).first(where: {
-            $0.draft.key == snapshot.key && $0.draft.generation == snapshot.generation
-                && $0.draft.revision == snapshot.revision && $0.status == .accepted
+            let sentDraft = $0.handoffDraft ?? $0.draft
+            return sentDraft.key == snapshot.key && sentDraft.generation == snapshot.generation
+                && sentDraft.revision == snapshot.revision && $0.status == .accepted
         }), let project {
             let message = ComposerAcceptedMessage(namespace: snapshot.namespace, projectID: project,
                                                   targetMemberID: sendingTarget, messageID: accepted.id)
@@ -793,10 +881,140 @@ struct ComposerBar: View {
 }
 
 #if os(iOS)
-private extension UIView {
-    var composerFirstResponder: UIView? {
-        if isFirstResponder { return self }
-        return subviews.lazy.compactMap { $0.composerFirstResponder }.first
+/// UIKit owns IME and selection. Only a genuinely different external value moves the caret.
+struct IOSComposerTextView: UIViewRepresentable {
+    @Binding var text: String
+    @Binding var focused: Bool
+    let placeholder: String
+    let textRevision: () -> Int
+    var drafts: DraftStore? = nil
+    var draftKey: String? = nil
+
+    /// Web .cmp__input: 15px text with 22pt lines (4pt extra leading).
+    static func attributes(_ font: UIFont?) -> [NSAttributedString.Key: Any] {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 4
+        return [.font: font ?? UIFont.preferredFont(forTextStyle: .subheadline), .foregroundColor: UIColor(CE.ink), .paragraphStyle: style]
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeUIView(context: Context) -> UITextView {
+        let view = Editor()
+        view.textChanged = { [weak coordinator = context.coordinator, weak view] in
+            guard let view else { return }
+            coordinator?.textViewDidChange(view)
+        }
+        view.backgroundColor = .clear
+        // Same size as the placeholder and the former TextField (CEFont.body = .subheadline on iOS).
+        view.font = .preferredFont(forTextStyle: .subheadline)
+        view.adjustsFontForContentSizeCategory = true
+        view.textColor = UIColor(CE.ink)
+        view.tintColor = UIColor(CE.accent)
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.typingAttributes = Self.attributes(view.font)
+        view.delegate = context.coordinator
+        context.coordinator.connect(view)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return view
+    }
+    func updateUIView(_ view: UITextView, context: Context) {
+        context.coordinator.parent = self
+        context.coordinator.connect(view)
+        view.isEditable = context.environment.isEnabled
+        view.isSelectable = context.environment.isEnabled
+        view.accessibilityLabel = placeholder
+        context.coordinator.synchronize(view, text: text, revision: textRevision())
+        if focused, !view.isFirstResponder {
+            DispatchQueue.main.async { [weak view, weak coordinator = context.coordinator] in
+                guard coordinator?.parent.focused == true else { return }
+                view?.becomeFirstResponder()
+            }
+        } else if !focused, view.isFirstResponder { view.resignFirstResponder() }
+    }
+    static func dismantleUIView(_ view: UITextView, coordinator: Coordinator) {
+        coordinator.parent.drafts?.unregisterEditor(id: coordinator.editorID)
+    }
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+        let proposedWidth = proposal.width ?? 300
+        let width = proposedWidth.isFinite ? max(1, proposedWidth) : 300
+        let height = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
+        return CGSize(width: width, height: min((uiView.font?.lineHeight ?? 22) * 7 + 24, max(22, height)))
+    }
+    @MainActor final class Coordinator: NSObject, UITextViewDelegate {
+        let editorID = UUID()
+        var parent: IOSComposerTextView
+        private var lastRevision: Int?
+        private var lastObservedText: String?
+        init(_ parent: IOSComposerTextView) { self.parent = parent }
+        func connect(_ view: UITextView) {
+            guard let drafts = parent.drafts, let key = parent.draftKey else { return }
+            drafts.registerEditor(id: editorID, key: key, canRestore: { [weak view] in
+                guard let view else { return true }
+                return view.text.isEmpty && view.markedTextRange == nil && (view as? Editor)?.isHandlingInput != true
+            }, commit: { [weak self, weak view] in
+                guard let view else { return }
+                view.unmarkText()
+                self?.textViewDidChange(view)
+            }, synchronize: { [weak self, weak view] snapshot in
+                guard let view else { return }
+                self?.synchronize(view, text: snapshot.text, revision: snapshot.revision)
+            }, moveCaretToEnd: { [weak view] in
+                guard let view else { return }
+                view.selectedRange = NSRange(location: view.text.utf16.count, length: 0)
+            })
+        }
+        func synchronize(_ view: UITextView, text: String, revision: Int) {
+            guard view.markedTextRange == nil, (view as? Editor)?.isHandlingInput != true else { return }
+            if let lastRevision, revision <= lastRevision { return }
+            lastRevision = revision
+            lastObservedText = text
+            guard !view.text.utf8.elementsEqual(text.utf8) else { return }
+            // Plain `text =` drops the paragraph style, so restored drafts would lose the 4pt line spacing.
+            let attributes = IOSComposerTextView.attributes(view.font)
+            view.attributedText = NSAttributedString(string: text, attributes: attributes)
+            view.typingAttributes = attributes
+            view.selectedRange = NSRange(location: text.utf16.count, length: 0)
+            view.undoManager?.removeAllActions()
+        }
+        func textViewDidChange(_ view: UITextView) {
+            guard (view as? Editor)?.isHandlingInput != true else { return }
+            let revision = parent.textRevision()
+            if let lastRevision, revision > lastRevision, !parent.text.utf8.elementsEqual(view.text.utf8),
+               lastObservedText.map({ parent.text.utf8.elementsEqual($0.utf8) }) != true {
+                synchronize(view, text: parent.text, revision: revision)
+                return
+            }
+            if !parent.text.utf8.elementsEqual(view.text.utf8) { parent.text = view.text }
+            lastObservedText = view.text
+            lastRevision = max(lastRevision ?? 0, parent.textRevision())
+        }
+        func textViewDidBeginEditing(_ view: UITextView) { parent.focused = true }
+        func textViewDidEndEditing(_ view: UITextView) { parent.focused = false }
+    }
+    final class Editor: UITextView {
+        var textChanged: (() -> Void)?
+        private var inputDepth = 0
+        var isHandlingInput: Bool { inputDepth > 0 }
+        private func finishInput() {
+            inputDepth -= 1
+            if inputDepth == 0 { textChanged?() }
+        }
+        override func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
+            inputDepth += 1
+            defer { finishInput() }
+            super.setMarkedText(markedText, selectedRange: selectedRange)
+        }
+        override func insertText(_ text: String) {
+            inputDepth += 1
+            defer { finishInput() }
+            super.insertText(text)
+        }
+        override func unmarkText() {
+            inputDepth += 1
+            defer { finishInput() }
+            super.unmarkText()
+        }
     }
 }
 #endif

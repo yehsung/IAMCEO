@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, renameSync, rmdirSync, statSync } from "node:f
 import * as fs from "node:fs";
 import { join } from "node:path";
 import type { Server } from "bun";
+import pkg from "../package.json";
 import { rotateAccessCode } from "../bin/iamceo.ts";
 import { Bus } from "../server/bus.ts";
 import { loadConfig, updateConfigFile } from "../server/config.ts";
@@ -27,7 +28,7 @@ async function fixture() {
   let coreAvailable = false;
   const orch = { runtimeInfo: async () => ({ backend: "core", core: { installed: true, available: coreAvailable, version: "fixture", detail: null },
     providers: { claude: { installed: false }, codex: { installed: false } } }) } as OrchestratorApi;
-  const context = { config, bus, store, orch, daemon: () => ({ ready, buildId: "a".repeat(64), version: "0.1.0" }) };
+  const context = { config, bus, store, orch, daemon: () => ({ ready, buildId: "a".repeat(64), version: pkg.version }) };
   let server = await startServer(context);
   while (server.port === 7878) { await server.stop(); server = await startServer(context); }
   const base = server.urls[0]!;
@@ -158,7 +159,7 @@ describe("global access code rotation", () => {
 
   test("liveness remains public while authenticated readiness distinguishes daemon, build, schema and core", async () => {
     const f = await fixture();
-    expect(await (await fetch(`${f.base}/api/health`)).json()).toEqual({ ok: true, version: "0.1.0" });
+    expect(await (await fetch(`${f.base}/api/health`)).json()).toEqual({ ok: true, version: pkg.version });
     expect((await fetch(`${f.base}/api/readiness`)).status).toBe(401);
     let response = await f.request("/api/readiness");
     expect(response.status).toBe(200);

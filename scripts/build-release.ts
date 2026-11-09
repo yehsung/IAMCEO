@@ -1,5 +1,5 @@
 // 배포판: 맥 두 종류(Apple Silicon·Intel)용 단일 실행 파일과 SHA256SUMS 를 dist/release/ 에 만든다.
-// install.sh 가 GitHub 릴리스에서 이 이름 그대로 받는다. 릴리스 워크플로(.github/workflows/release.yml)와 로컬이 같은 스크립트를 쓴다.
+// CLI 호환 자산이다. Mac 앱 설치 DMG는 release-mac.ts가 만들고 SHA256SUMS에 이 항목들을 합친다.
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";

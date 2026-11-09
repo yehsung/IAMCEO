@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import lock from "../vendor/herdr-core/release-lock.json";
+import pkg from "../package.json";
 
 if (process.platform !== "darwin") throw new Error("The native macOS bundle must be built on macOS with Xcode and XcodeGen.");
 if (process.arch !== "arm64" && process.arch !== "x64") throw new Error(`Unsupported Mac architecture: ${process.arch}`);
@@ -36,9 +37,11 @@ try {
   const derived = join(staging, "DerivedData");
   // A Mac local host needs Process + LaunchAgents access. The iOS target remains sandboxed.
   run(["xcodebuild", "-project", join(source, "IAMCEO.xcodeproj"), "-scheme", "IAMCEO-macOS", "-configuration", "Release", "-derivedDataPath", derived,
+    `ARCHS=${process.arch === "x64" ? "x86_64" : "arm64"}`, "ONLY_ACTIVE_ARCH=YES",
     "CODE_SIGNING_ALLOWED=NO", "CODE_SIGN_ENTITLEMENTS=", "ENABLE_APP_SANDBOX=NO", "build"]);
   const app = join(staging, "IAMCEO.app");
   run(["/usr/bin/ditto", join(derived, "Build", "Products", "Release", "IAMCEO.app"), app]);
+  run(["/usr/libexec/PlistBuddy", "-c", `Set :CFBundleShortVersionString ${pkg.version}`, join(app, "Contents", "Info.plist")]);
   const runtime = join(app, "Contents", "Resources", "runtime");
   mkdirSync(runtime, { recursive: true });
   cpSync(daemon, join(runtime, "iamceo"));

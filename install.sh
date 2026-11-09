@@ -1,86 +1,131 @@
 #!/bin/sh
 # IAMCEO 설치: curl -fsSL https://raw.githubusercontent.com/yehsung/IAMCEO/main/install.sh | sh
-# GitHub 릴리스에서 이 맥에 맞는 실행 파일을 받아 SHA-256 을 맞춰 보고 ~/.local/bin/iamceo 에 둔다. 다시 실행하면 새 판으로 바꾼다.
-#   IAMCEO_INSTALL_DIR  둘 폴더 (기본 ~/.local/bin)
-#   IAMCEO_VERSION      받을 판, 예: v0.1.0 (기본 최신)
-#   IAMCEO_DOWNLOAD_URL 받을 곳을 통째로 바꾼다 (시험용. 이 주소 아래에 iamceo-darwin-* 와 SHA256SUMS 가 있어야 한다)
+# Apple Silicon, macOS 14+. IAMCEO_VERSION=v0.2.0 pins a release.
+# IAMCEO_DOWNLOAD_URL overrides the release asset directory (also accepts file:// for tests).
+# IAMCEO_INSTALL_DIR overrides /Applications; tests must also supply an isolated HOME and PATH.
 set -eu
 
-REPO="yehsung/IAMCEO"
-DIR="${IAMCEO_INSTALL_DIR:-$HOME/.local/bin}"
-LABEL="com.iamceo.server"
-
 say() { printf '%s\n' "$*"; }
-die() { printf 'iamceo 설치 실패: %s\n' "$*" >&2; exit 1; }
-
-[ "$(uname -s)" = "Darwin" ] || die "지금은 macOS 에서만 됩니다."
+die() { printf 'IAMCEO 설치 실패: %s\n' "$*" >&2; exit 1; }
+[ "$(uname -s)" = Darwin ] || die 'macOS에서만 설치할 수 있습니다.'
 case "$(uname -m)" in
-  arm64) ARCH=arm64 ;;
-  x86_64)
-    # Rosetta 로 돌아가는 터미널이면 실제 칩은 Apple Silicon 이다.
-    if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = "1" ]; then ARCH=arm64; else ARCH=x64; fi ;;
-  *) die "모르는 CPU 입니다: $(uname -m)" ;;
+  arm64) ;;
+  x86_64) [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ] || die 'Apple Silicon(arm64) Mac이 필요합니다.' ;;
+  *) die 'Apple Silicon(arm64) Mac이 필요합니다.' ;;
 esac
-ASSET="iamceo-darwin-$ARCH"
-
-if [ -n "${IAMCEO_DOWNLOAD_URL:-}" ]; then
-  BASE="$IAMCEO_DOWNLOAD_URL"
-elif [ -n "${IAMCEO_VERSION:-}" ]; then
-  BASE="https://github.com/$REPO/releases/download/$IAMCEO_VERSION"
-else
-  BASE="https://github.com/$REPO/releases/latest/download"
-fi
-
-command -v curl >/dev/null 2>&1 || die "curl 이 필요합니다."
-command -v shasum >/dev/null 2>&1 || die "shasum 이 필요합니다."
-
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/iamceo-install.XXXXXX")"
-trap 'rm -f "$TMP/$ASSET" "$TMP/SHA256SUMS"; rmdir "$TMP" 2>/dev/null || true' EXIT
-
-say "받는 중: $BASE/$ASSET"
-curl -fL --progress-bar -o "$TMP/$ASSET" "$BASE/$ASSET" || die "실행 파일을 받지 못했습니다: $BASE/$ASSET"
-curl -fsSL -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS" || die "SHA256SUMS 를 받지 못했습니다."
-
-WANT="$(awk -v f="$ASSET" '$2 == f { print $1 }' "$TMP/SHA256SUMS")"
-[ -n "$WANT" ] || die "SHA256SUMS 에 $ASSET 이 없습니다."
-GOT="$(shasum -a 256 "$TMP/$ASSET" | awk '{ print $1 }')"
-[ "$WANT" = "$GOT" ] || die "SHA-256 이 맞지 않습니다. 받은 파일이 깨졌거나 바뀌었습니다."
-
-chmod +x "$TMP/$ASSET"
-VERSION="$("$TMP/$ASSET" version 2>/dev/null)" || die "받은 실행 파일이 이 맥에서 돌지 않습니다."
-
-mkdir -p "$DIR"
-# 돌고 있는 실행 파일을 덮어쓰지 않고 새 파일로 바꿔 넣는다(서비스가 쓰는 중이어도 안전).
-mv -f "$TMP/$ASSET" "$DIR/iamceo.new"
-mv -f "$DIR/iamceo.new" "$DIR/iamceo"
-say "설치했습니다: $DIR/iamceo ($VERSION)"
-
-# 이 실행 파일로 등록된 서비스가 있으면 새 판으로 다시 켠다.
+OS_MAJOR=$(sw_vers -productVersion | cut -d. -f1)
+case "$OS_MAJOR" in ''|*[!0-9]*) die 'macOS 버전을 확인하지 못했습니다.' ;; esac
+[ "$OS_MAJOR" -ge 14 ] || die 'macOS Sonoma(14) 이상이 필요합니다.'
+DIR=${IAMCEO_INSTALL_DIR:-/Applications}
+case "$DIR" in /*) ;; *) die 'IAMCEO_INSTALL_DIR은 절대 경로여야 합니다.' ;; esac
+APP="$DIR/IAMCEO.app"
+LABEL=com.iamceo.server
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-if [ -f "$PLIST" ] && grep -qF "<string>$DIR/iamceo</string>" "$PLIST"; then
-  if "$DIR/iamceo" service install --restart; then
-    say "새 판의 인증·복구·build ID 준비를 확인했습니다."
-  else
-    die "파일은 설치됐지만 서비스 재시작/준비 확인에 실패했습니다. 로그를 확인하세요. 실행 중인 판을 새 판으로 확인하지 못했습니다."
+for tool in curl shasum hdiutil ditto plutil pgrep; do
+  command -v "$tool" >/dev/null 2>&1 || die "$tool 명령이 필요합니다."
+done
+
+# Inspect only; never unload an app-owned (or unrecognized) launchd job.
+if [ -f "$PLIST" ]; then
+  PROGRAM=$(plutil -extract Program raw -o - "$PLIST" 2>/dev/null || plutil -extract ProgramArguments.0 raw -o - "$PLIST" 2>/dev/null || true)
+  SERVICE_LABEL=$(plutil -extract Label raw -o - "$PLIST" 2>/dev/null || true)
+  if [ "$SERVICE_LABEL" = "$LABEL" ]; then
+    case "$PROGRAM" in
+      "$HOME/.local/bin/"*)
+        say '이전 CLI 서비스가 등록돼 있습니다. 먼저 아래 명령으로 해제한 뒤 설치를 다시 실행하세요:'
+        say "  \"$HOME/.local/bin/iamceo\" service uninstall"
+        die '기존 서비스와 데이터는 변경하지 않았습니다.' ;;
+    esac
   fi
+elif [ -x "$HOME/.local/bin/iamceo" ]; then
+  say '이전 CLI 실행 파일이 있습니다. 이번 설치는 Mac 앱을 설치합니다.'
 fi
+check_running() {
+  if [ -e "$APP" ] && pgrep -x IAMCEO >/dev/null 2>&1; then
+    die 'IAMCEO 앱을 종료한 뒤 다시 실행하세요. 실행 중인 앱은 덮어쓰지 않습니다.'
+  fi
+}
+check_running
 
-case ":$PATH:" in
-  *":$DIR:"*) ;;
-  *)
-    say ""
-    say "$DIR 이 PATH 에 없습니다. 셸 설정(~/.zshrc 등)에 아래 줄을 넣고 새 터미널을 여세요:"
-    say "  export PATH=\"$DIR:\$PATH\""
-    ;;
-esac
-
-if ! command -v claude >/dev/null 2>&1; then
-  say ""
-  say "claude 명령이 없습니다. 직원을 띄우려면 Claude Code 를 설치하고 로그인하세요: https://code.claude.com/docs/en/setup"
+VERSION=${IAMCEO_VERSION:-}
+if [ -n "$VERSION" ]; then
+  VERSION=${VERSION#v}
+  printf '%s\n' "$VERSION" | /usr/bin/grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die 'IAMCEO_VERSION은 v0.2.0 같은 정식 버전이어야 합니다.'
 fi
-
-say ""
-say "다음:"
-say "  iamceo setup             실행기(herdr-core)·포트·접근 범위"
-say "  iamceo service install   로그인할 때 켜지고 죽으면 다시 켜지는 서비스로 등록"
-say "  iamceo open              접속 주소와 접속 코드"
+if [ -n "${IAMCEO_DOWNLOAD_URL:-}" ]; then
+  BASE=${IAMCEO_DOWNLOAD_URL%/}
+elif [ -n "$VERSION" ]; then
+  BASE="https://github.com/yehsung/IAMCEO/releases/download/v$VERSION"
+else
+  BASE='https://github.com/yehsung/IAMCEO/releases/latest/download'
+fi
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/iamceo-install.XXXXXX")
+MOUNTED=0
+STAGE=
+INSTALLED=0
+cleanup() {
+  STATUS=$?
+  trap - 0
+  if [ "$MOUNTED" = 1 ]; then
+    if ! hdiutil detach "$TMP/mount" >/dev/null; then
+      say "디스크 마운트를 해제하지 못했습니다: $TMP/mount" >&2
+      [ "$STATUS" -ne 0 ] || STATUS=1
+    else
+      MOUNTED=0
+    fi
+  fi
+  if [ -n "$STAGE" ]; then
+    # Roll back if moving the replacement into place failed.
+    if [ "$INSTALLED" = 0 ] && [ -d "$STAGE/previous.app" ] && [ ! -e "$APP" ]; then
+      mv "$STAGE/previous.app" "$APP" || say "이전 앱 복원 필요: $STAGE/previous.app" >&2
+    fi
+    if [ "$INSTALLED" = 1 ] || [ ! -e "$STAGE/previous.app" ]; then
+      find "$STAGE" -depth -delete || true
+    fi
+  fi
+  # Never recurse through a mounted volume, even when detach fails.
+  if [ "$MOUNTED" = 0 ]; then
+    find "$TMP" -depth -delete || true
+  fi
+  [ "$STATUS" -eq 0 ] || say '설치를 완료하지 못했습니다. 위 오류를 확인한 뒤 다시 실행하세요.' >&2
+  exit "$STATUS"
+}
+trap cleanup 0
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir "$TMP/mount"
+curl -fsSL -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS" || die 'SHA256SUMS를 받지 못했습니다.'
+if [ -n "$VERSION" ]; then
+  ASSET="IAMCEO-$VERSION-arm64.dmg"
+else
+  ASSET=$(awk '$2 ~ /^IAMCEO-[0-9]+\.[0-9]+\.[0-9]+-arm64\.dmg$/ {print $2}' "$TMP/SHA256SUMS")
+  [ "$(printf '%s\n' "$ASSET" | wc -l | tr -d ' ')" = 1 ] && [ -n "$ASSET" ] || die '최신 릴리스에 설치 가능한 Mac DMG가 하나 있어야 합니다. v0.1.0 CLI 릴리스는 지원하지 않습니다.'
+  VERSION=${ASSET#IAMCEO-}
+  VERSION=${VERSION%-arm64.dmg}
+fi
+WANT=$(awk -v f="$ASSET" '$2 == f {print $1}' "$TMP/SHA256SUMS")
+printf '%s\n' "$WANT" | /usr/bin/grep -Eq '^[a-fA-F0-9]{64}$' || die "SHA256SUMS에 유효한 $ASSET 체크섬이 없습니다."
+[ "$(printf '%s\n' "$WANT" | wc -l | tr -d ' ')" = 1 ] || die '체크섬 항목이 중복돼 있습니다.'
+say "받는 중: $BASE/$ASSET"
+curl -fL --progress-bar -o "$TMP/$ASSET" "$BASE/$ASSET" || die 'DMG를 받지 못했습니다.'
+GOT=$(shasum -a 256 "$TMP/$ASSET" | awk '{print $1}')
+[ "$(printf '%s' "$WANT" | tr 'A-F' 'a-f')" = "$GOT" ] || die 'SHA-256이 맞지 않습니다.'
+hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$TMP/mount" "$TMP/$ASSET" >/dev/null || die 'DMG를 마운트하지 못했습니다.'
+MOUNTED=1
+[ -d "$TMP/mount/IAMCEO.app" ] && [ ! -L "$TMP/mount/IAMCEO.app" ] || die 'DMG에 IAMCEO.app이 없습니다.'
+APP_VERSION=$(plutil -extract CFBundleShortVersionString raw -o - "$TMP/mount/IAMCEO.app/Contents/Info.plist") || die '앱 버전을 읽지 못했습니다.'
+[ "$APP_VERSION" = "$VERSION" ] || die 'DMG 이름과 앱 버전이 다릅니다.'
+mkdir -p "$DIR" || die "$DIR 폴더를 만들 수 없습니다."
+STAGE=$(mktemp -d "$DIR/.iamceo-install.XXXXXX") || die "$DIR 쓰기 권한이 필요합니다."
+ditto "$TMP/mount/IAMCEO.app" "$STAGE/IAMCEO.app" || die '앱을 복사하지 못했습니다.'
+check_running
+[ ! -L "$APP" ] || die '설치 대상이 심볼릭 링크입니다. 직접 확인하세요.'
+[ ! -e "$APP" ] || [ -d "$APP" ] || die '설치 대상이 앱 폴더가 아닙니다. 직접 확인하세요.'
+if [ -e "$APP" ]; then mv "$APP" "$STAGE/previous.app" || die '이전 앱을 보관하지 못했습니다.'; fi
+mv "$STAGE/IAMCEO.app" "$APP" || die '앱을 설치하지 못했습니다.'
+INSTALLED=1
+hdiutil detach "$TMP/mount" >/dev/null || die 'DMG를 해제하지 못했습니다.'
+MOUNTED=0
+open "$APP" || die "앱은 설치됐습니다. $APP 을 직접 여세요."
+say "설치했습니다: $APP ($VERSION)"
+say '다음: 앱에서 ‘이 Mac에서 시작’을 선택하세요. 기존 CLI 로그인과 프로젝트 데이터는 그대로 사용합니다.'

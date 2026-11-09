@@ -32,7 +32,7 @@ class HygieneRunner implements Runner {
   end(memberId: string) { this.listener({ type: "turn_end", memberId, finalText: "", isError: false }); }
 }
 async function setup() {
-  if (!process.env.IAMCEO_TEST || !process.env.IAMCEO_HOME) throw new Error("Use .pumasi/gates.sh bt");
+  if (!process.env.IAMCEO_TEST || !process.env.IAMCEO_HOME) throw new Error("Use bun run test:server");
   const home = mkdtempSync(join(process.env.IAMCEO_HOME, "hygiene-"));
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
   updateConfigFile({ accessCode: "code", hosts: ["127.0.0.1"] }, env);

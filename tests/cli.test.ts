@@ -3,6 +3,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import pkg from "../package.json";
 import type { Backend, Member, Project, ProjectState } from "../shared/types.ts";
 import { buildId, launchdPlist, service, servicePath, waitForReadiness } from "../bin/iamceo.ts";
 import { Bus } from "../server/bus.ts";
@@ -90,7 +91,7 @@ describe("serve·status·open·join", () => {
     const home = newHome();
     const port = await freePort();
     const { base, proc } = await serve(home, port);
-    expect(await (await fetch(`${base}/api/health`)).json()).toMatchObject({ ok: true, version: "0.1.0" });
+    expect(await (await fetch(`${base}/api/health`)).json()).toMatchObject({ ok: true, version: pkg.version });
 
     const opened = await cli(home, ["open"], { env: { IAMCEO_PORT: String(port) } });
     const code = /접속 코드: (\S+)/.exec(opened.stdout)![1]!;
@@ -507,14 +508,15 @@ describe("운영 CLI readiness·등록·복원", () => {
       expect(req.headers.get("authorization")).toBe(`Bearer ${config.accessCode}`);
       expect(new URL(req.url).pathname).toBe("/api/bootstrap");
       if (mode === "auth") return Response.json({ error: "unauthorized" }, { status: 401 });
-      return Response.json(mode === "old" ? { version: "0.1.0" } : { runtime: { daemon: {
-        ready: mode !== "recovering", version: "0.1.0", buildId: mode === "mismatch" ? "old-build" : expected,
+      return Response.json(mode === "old" ? { version: `${pkg.version}-old` } : { runtime: { daemon: {
+        ready: mode !== "recovering", version: mode === "old-version" ? `${pkg.version}-old` : pkg.version,
+        buildId: mode === "mismatch" ? "old-build" : expected,
       } } });
     } });
     if (server.port === 7878) { await server.stop(true); throw new Error("fixture port forbidden"); }
     try {
       const settings = { ...config, port: server.port! };
-      for (const value of ["old", "mismatch", "recovering", "auth"]) {
+      for (const value of ["old", "old-version", "mismatch", "recovering", "auth"]) {
         mode = value;
         await expect(waitForReadiness(settings, { expectedBuildId: expected, timeoutMs: 25, pollMs: 1 })).rejects.toThrow();
       }
@@ -573,25 +575,6 @@ describe("운영 CLI readiness·등록·복원", () => {
     expect((await cli(home, ["setup", "--port", "7003"])).stderr).toContain("다른 작업");
   });
 
-  test("설치 스크립트는 가짜 바이너리/다운로드만 쓰고 업데이트 준비 실패를 숨기지 않는다", async () => {
-    const home = newHome(); const release = join(home, "release"); const dir = join(home, "bin");
-    mkdirSync(release); mkdirSync(dir);
-    const binary = '#!/bin/sh\ncase "$1" in version) echo fixture;; service) echo mock-service >&2; exit 7;; *) exit 9;; esac\n';
-    const hashes: string[] = [];
-    for (const asset of ["iamceo-darwin-arm64", "iamceo-darwin-x64"]) {
-      const path = join(release, asset); writeFileSync(path, binary);
-      const sum = Bun.spawnSync(["shasum", "-a", "256", path]);
-      hashes.push(`${sum.stdout.toString().split(" ")[0]}  ${asset}`);
-    }
-    writeFileSync(join(release, "SHA256SUMS"), hashes.join("\n") + "\n");
-    mkdirSync(join(home, "Library/LaunchAgents"), { recursive: true });
-    writeFileSync(join(home, "Library/LaunchAgents/com.iamceo.server.plist"), `<string>${dir}/iamceo</string>`);
-    const proc = Bun.spawn(["/bin/sh", resolve(import.meta.dir, "../install.sh")], { stdin: "ignore", stdout: "pipe", stderr: "pipe",
-      env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: home, TMPDIR: home, IAMCEO_INSTALL_DIR: dir, IAMCEO_DOWNLOAD_URL: `file://${release}`, IAMCEO_TEST: "1" } });
-    const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-    expect(code).toBe(1); expect(stdout).toContain("설치했습니다");
-    expect(stderr).toContain("재시작/준비 확인에 실패"); expect(stderr).toContain("mock-service");
-  });
 });
 
 test("같은 홈의 다른 포트 데몬은 DB/복구 전에 거부하고 종료 뒤 다시 소유할 수 있다", async () => {

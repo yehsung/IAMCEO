@@ -1,5 +1,7 @@
-# v* 태그를 올리면 맥 두 종류용 실행 파일과 SHA256SUMS 를 만들어 GitHub 릴리스로 낸다. install.sh 는 최신 릴리스를 받는다.
-# 릴리스는 타입 검사와 단위 시험이 막는다. herdr 시험(herdr 실행 파일 필요)과 화면 시험(브라우저)은 태그 전에 로컬에서 돌린다.
+# v* 태그는 CLI 자산이 있는 draft만 만든다. draft는 latest를 바꾸지 않는다.
+# 감독자: 같은 태그를 release-mac.ts --ref vX.Y.Z --upload 로 빌드/서명/공증/첨부,
+# DMG와 설치를 확인한 다음 gh release edit vX.Y.Z --draft=false --latest 로 공개한다.
+# release-mac.ts --upload --publish 는 확인을 마친 감독자용 선택 경로다.
 # 화면 시험은 여기서도 따로 돌려 결과를 남기지만 릴리스를 막지 않는다(러너에서 잠깐의 상태를 놓치거나 WebKit 이 느린 일이 있다).
 name: release
 on:
@@ -18,15 +20,17 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: 태그와 package.json 버전이 같은지
         run: test "v$(bun -e 'console.log(require("./package.json").version)')" = "$GITHUB_REF_NAME"
-      - run: bun run typecheck
+      - run: bun run check:ts
       - name: 단위 시험
-        run: bun test $(ls tests/*.test.ts | grep -v -e herdr.test.ts -e browser.test.ts)
+        # check.sh supplies IAMCEO_TEST=1, temporary HOME/IAMCEO_HOME, port 0,
+        # non-live socket paths and fake provider/core executables.
+        run: bun run test:server
       - run: bun run build:release
       - run: test "$(dist/release/iamceo-darwin-arm64 version)" = "${GITHUB_REF_NAME#v}"
       - name: 릴리스
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/release/iamceo-darwin-arm64 dist/release/iamceo-darwin-x64 dist/release/SHA256SUMS LICENSE THIRD-PARTY-NOTICES.md --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" dist/release/iamceo-darwin-arm64 dist/release/iamceo-darwin-x64 dist/release/SHA256SUMS LICENSE THIRD-PARTY-NOTICES.md --draft --title "$GITHUB_REF_NAME" --generate-notes
 
   screens:
     runs-on: macos-latest
@@ -39,4 +43,4 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bunx playwright install chromium webkit
       - name: 화면 시험
-        run: bun test tests/browser.test.ts
+        run: bash scripts/check.sh server tests/browser.test.ts

@@ -1,6 +1,6 @@
 {
   "name": "iamceo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "AI 팀을 운영하는 사람의 창구 — CLI AI 세션을 홈·결재함·팀·대화·자료로 지휘한다",
   "license": "SEE LICENSE IN LICENSE",
@@ -18,7 +18,13 @@
   "scripts": {
     "start": "bun bin/iamceo.ts serve",
     "dev": "bun --watch bin/iamceo.ts serve",
-    "test": "bun test tests",
+    "test": "bash scripts/check.sh server",
+    "check": "bash scripts/check.sh all",
+    "check:ts": "bash scripts/check.sh ts",
+    "test:server": "bash scripts/check.sh server",
+    "test:native": "bash scripts/check.sh swift",
+    "build:check": "bash scripts/check.sh build",
+    "release:mac": "bun scripts/release-mac.ts",
     "typecheck": "tsc --noEmit",
     "build": "bun build bin/iamceo.ts --compile --outfile dist/iamceo",
     "build:release": "bun scripts/build-release.ts",

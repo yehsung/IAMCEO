@@ -452,6 +452,7 @@ function toMessage(r: Row): Message {
     attachments: json(r.attachments),
     delivery: r.delivery,
     deliveryNote: r.delivery_note,
+    deliveryRevision: r.delivery_revision,
     contextFileId: r.context_file_id ?? null,
   };
 }
@@ -1911,8 +1912,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   setMessageDelivery(id: string, delivery: DeliveryStatus | null, note: string | null = null): Message {
     return this.transaction(() => {
-      this.requireMessage(id);
-      this.run("UPDATE messages SET delivery = ?, delivery_note = ? WHERE id = ?", delivery, note, id);
+      const current = this.requireMessage(id);
+      if (current.delivery === delivery && current.deliveryNote === note) return current;
+      this.run("UPDATE messages SET delivery = ?, delivery_note = ?, delivery_revision = delivery_revision + 1 WHERE id = ?", delivery, note, id);
       const message = this.requireMessage(id);
       this.bumpBoard(message.projectId);
       this.emit({ type: "message", message });

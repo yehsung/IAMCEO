@@ -211,11 +211,12 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       body: z.string().optional().describe("결과 핵심, 바뀐 파일·커밋, 대표가 확인하거나 정할 것(마크다운)"),
       file_ids: z.array(z.string()).optional().describe("이어 줄 자료 id"),
       decision_id: z.string().optional().describe("이어 줄 결재 id"),
+      group: oneLineOpt(80).optional().describe("같은 업무의 결재 묶음 이름(ask의 group과 같은 값)"),
       supersedes: text.optional().describe("정정할 자신의 이전 보고 ID; corrects_message_id와 같은 의미"),
       corrects_message_id: text.optional().describe("정정할 자신의 이전 보고 원본 메시지 id"),
     }).superRefine((a, ctx) => {
       if (a.report_id !== undefined) {
-        if ([a.kind, a.title, a.body, a.file_ids, a.decision_id, a.corrects_message_id, a.supersedes].some(v => v !== undefined)) ctx.addIssue({ code: "custom", message: "report_id 조회와 보고 게시 인자는 함께 줄 수 없습니다" });
+        if ([a.kind, a.title, a.body, a.file_ids, a.decision_id, a.group, a.corrects_message_id, a.supersedes].some(v => v !== undefined)) ctx.addIssue({ code: "custom", message: "report_id 조회와 보고 게시 인자는 함께 줄 수 없습니다" });
       } else if (a.kind === undefined || a.title === undefined) ctx.addIssue({ code: "custom", message: "보고 게시에는 kind와 title이 필요합니다" });
     }),
     async (orch, member, a) => {
@@ -232,8 +233,8 @@ const TOOLS: Record<ToolName, Tool<any>> = {
         return reply(JSON.stringify({ ...refs, source, files }));
       }
       if (a.kind === undefined || a.title === undefined) throw new ApiError(400, "보고 게시에는 kind와 title이 필요합니다");
-      const message = await orch.recordPost(member, { kind: a.kind, title: a.title, body: a.body, fileIds: a.file_ids, decisionId: a.decision_id, correctsMessageId: a.corrects_message_id, supersedes: a.supersedes });
-      return reply(`보고했습니다 #${message.id}`);
+      const message = await orch.recordPost(member, { kind: a.kind, title: a.title, body: a.body, fileIds: a.file_ids, decisionId: a.decision_id, group: a.group, correctsMessageId: a.corrects_message_id, supersedes: a.supersedes });
+      return reply(`보고했습니다 #${message.id}${message.systemInstruction ? `\n${message.systemInstruction}` : ""}`);
     },
   ),
 

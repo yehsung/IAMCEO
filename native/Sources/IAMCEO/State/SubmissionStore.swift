@@ -115,7 +115,7 @@ final class SubmissionStore {
     func acceptMessage(id: String, message: Message) throws {
         guard var attempt = state.messages[id], message.id == id, message.projectId == attempt.projectID,
               message.mine, message.targetMemberId == attempt.targetMemberID else { throw SubmissionError.mismatchedResult }
-        attempt.status = .accepted; attempt.message = message
+        attempt.status = .accepted; attempt.message = message.mergingDelivery(from: attempt.message)
         try update { $0.messages[id] = attempt }
     }
 

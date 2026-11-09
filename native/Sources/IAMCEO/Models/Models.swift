@@ -366,6 +366,7 @@ struct Message: Codable, Sendable, Identifiable {
     var attachments: [Attachment] = []
     var delivery: String? = nil
     var deliveryNote: String? = nil
+    var deliveryRevision: Int? = nil
 }
 extension Message {
     init(from decoder: Decoder) throws {
@@ -391,6 +392,7 @@ extension Message {
         attachments = try c.decodeIfPresent([Attachment].self, forKey: ModelKey("attachments")) ?? []
         delivery = try c.decodeIfPresent(String.self, forKey: ModelKey("delivery"))
         deliveryNote = try c.decodeIfPresent(String.self, forKey: ModelKey("deliveryNote"))
+        deliveryRevision = try c.decodeIfPresent(Int.self, forKey: ModelKey("deliveryRevision"))
     }
 }
 

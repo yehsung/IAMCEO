@@ -1,6 +1,24 @@
 import Foundation
 import Observation
 
+extension Message {
+    /// Revisions order delivery snapshots, including explicit failed → queued retries.
+    /// Legacy peers without revisions retain their arrival-order contract. Once a revision
+    /// is known, an unversioned snapshot cannot erase it. Other message metadata still updates.
+    func mergingDelivery(from current: Message?) -> Message {
+        guard let current, id.utf8.elementsEqual(current.id.utf8),
+              projectId.utf8.elementsEqual(current.projectId.utf8),
+              let revision = current.deliveryRevision,
+              deliveryRevision == nil || deliveryRevision! <= revision else { return self }
+        var merged = self
+        merged.delivery = current.delivery
+        merged.deliveryNote = current.deliveryNote
+        merged.deliveryRevision = revision
+        if deliveryRevision == nil || deliveryRevision! < revision { merged.deliveryInfo = current.deliveryInfo }
+        return merged
+    }
+}
+
 struct ChatHistoryKey: Hashable, Sendable {
     let namespace: String
     let connectionGeneration: UUID
@@ -103,14 +121,19 @@ struct ChatHistory: Sendable {
 
     mutating func addOptimistic(_ message: Message) {
         guard contains(message), confirmed[Data(message.id.utf8)] == nil else { return }
-        optimistic[Data(message.id.utf8)] = message
+        let id = Data(message.id.utf8)
+        optimistic[id] = message.mergingDelivery(from: optimistic[id]).mergingDelivery(from: overlay[id])
+            .mergingDelivery(from: bridge?.items[id])
     }
 
     /// WS and POST arrivals share this path; explicit retry transitions (failed → queued) remain valid.
     mutating func receive(_ message: Message) {
         guard contains(message) else { return }
         let id = Data(message.id.utf8)
+        let message = message.mergingDelivery(from: optimistic[id]).mergingDelivery(from: confirmed[id])
+            .mergingDelivery(from: overlay[id]).mergingDelivery(from: bridge?.items[id])
         let wasOptimistic = optimistic[id] != nil
+        if wasOptimistic { optimistic[id] = message }
         if loading != nil { journal.append(message) }
         if confirmed[id] != nil {
             optimistic.removeValue(forKey: id)
@@ -162,10 +185,15 @@ struct ChatHistory: Sendable {
         var rows: [Data: Message] = [:]
         for message in page.items {
             let id = Data(message.id.utf8)
-            rows[id] = overlay.removeValue(forKey: id) ?? message
+            let buffered = overlay.removeValue(forKey: id)
+            rows[id] = (buffered?.mergingDelivery(from: message) ?? message)
+                .mergingDelivery(from: old[id]).mergingDelivery(from: bridge?.items[id])
         }
-        // Arrival order, never a made-up ranking of delivery strings.
-        for message in journal where rows[Data(message.id.utf8)] != nil { rows[Data(message.id.utf8)] = message }
+        // Revision order for delivery; legacy messages still use arrival order, never status ranking.
+        for message in journal where rows[Data(message.id.utf8)] != nil {
+            let id = Data(message.id.utf8)
+            rows[id] = message.mergingDelivery(from: rows[id])
+        }
         let arrivals = journal
         loading = nil; journal = []; error = nil
         switch request.kind {
@@ -175,7 +203,7 @@ struct ChatHistory: Sendable {
             confirmed = mergeBufferedTail(confirmed)
             change = .initial
         case .older:
-            confirmed.merge(rows) { _, page in page }
+            confirmed.merge(rows) { current, page in page.mergingDelivery(from: current) }
             nextCursor = page.nextCursor; hasOlder = page.hasOlder
             change = .prepend
         case .latest:
@@ -188,7 +216,7 @@ struct ChatHistory: Sendable {
                 bridge = Bridge(items: rows, cursor: nil, anchors: Set(old.keys), oldTail: tail, oldIDs: knownIDs)
                 markStoreChanged()
             } else if !Set(rows.keys).isDisjoint(with: old.keys) {
-                confirmed.merge(rows) { _, page in page }
+                confirmed.merge(rows) { current, page in page.mergingDelivery(from: current) }
                 confirmed = mergeBufferedTail(confirmed)
                 countNew(oldIDs: knownIDs, oldTail: tail)
             } else {
@@ -197,13 +225,13 @@ struct ChatHistory: Sendable {
             }
         case .bridge:
             guard var staged = bridge else { return false }
-            staged.items.merge(rows) { _, page in page }
+            staged.items.merge(rows) { current, page in page.mergingDelivery(from: current) }
             staged.cursor = page.nextCursor
             bridge = staged
             if !page.hasOlder && !staged.anchors.isSubset(of: Set(staged.items.keys)) {
                 markStoreChanged()
             } else if !Set(rows.keys).isDisjoint(with: staged.anchors) {
-                confirmed.merge(staged.items) { _, page in page }
+                confirmed.merge(staged.items) { current, page in page.mergingDelivery(from: current) }
                 confirmed = mergeBufferedTail(confirmed)
                 bridge = nil
                 countNew(oldIDs: staged.oldIDs, oldTail: staged.oldTail)
@@ -213,8 +241,8 @@ struct ChatHistory: Sendable {
         // Updates to old visible IDs were already applied; no unread increments for replay.
         for message in arrivals {
             let id = Data(message.id.utf8)
-            if confirmed[id] != nil { confirmed[id] = message }
-            if bridge?.items[id] != nil { bridge?.items[id] = message }
+            if confirmed[id] != nil { confirmed[id] = message.mergingDelivery(from: confirmed[id]) }
+            if let staged = bridge?.items[id] { bridge?.items[id] = message.mergingDelivery(from: staged) }
         }
         for id in confirmed.keys { optimistic.removeValue(forKey: id) }
         return true
@@ -261,7 +289,7 @@ struct ChatHistory: Sendable {
         var rows = source
         let oldest = rows.values.min(by: Self.ordered)
         for (id, row) in overlay where rows[id] != nil || oldest.map({ !Self.ordered(row, $0) }) == true || rows.isEmpty {
-            rows[id] = row; overlay.removeValue(forKey: id); optimistic.removeValue(forKey: id)
+            rows[id] = row.mergingDelivery(from: rows[id]); overlay.removeValue(forKey: id); optimistic.removeValue(forKey: id)
         }
         return rows
     }
@@ -368,19 +396,21 @@ final class ChatHistoryCache {
     }
 
     /// Single flight includes the bridge queue. Each user continuation fetches at most three pages.
-    func load(_ kind: ChatHistoryLoad, for key: ChatHistoryKey, using service: any MessageHistoryService) async {
+    func load(_ kind: ChatHistoryLoad, for key: ChatHistoryKey, using service: any MessageHistoryService,
+              mergeDelivery: @MainActor (Message) -> Message = { $0 }) async {
         guard !Task.isCancelled, activeKey == key, let request = histories[key]?.begin(kind) else { return }
-        await fetch(request, for: key, using: service)
+        await fetch(request, for: key, using: service, mergeDelivery: mergeDelivery)
         guard !Task.isCancelled, histories[key]?.generation == request.generation, histories[key]?.error == nil,
               kind == .latest || kind == .bridge else { return }
         for _ in 1..<3 {
             guard !Task.isCancelled, activeKey == key, histories[key]?.generation == request.generation,
                   let request = histories[key]?.begin(.bridge) else { break }
-            await fetch(request, for: key, using: service)
+            await fetch(request, for: key, using: service, mergeDelivery: mergeDelivery)
             if histories[key]?.error != nil { break }
         }
     }
-    private func fetch(_ request: ChatHistoryRequest, for key: ChatHistoryKey, using service: any MessageHistoryService) async {
+    private func fetch(_ request: ChatHistoryRequest, for key: ChatHistoryKey, using service: any MessageHistoryService,
+                       mergeDelivery: @MainActor (Message) -> Message) async {
         do {
             try Task.checkCancellation()
             let page: MessagePage
@@ -390,7 +420,10 @@ final class ChatHistoryCache {
                 page = try await service.messagePage(projectID: key.projectID, scope: key.scope, cursor: request.cursor, limit: request.limit)
             }
             try Task.checkCancellation()
-            histories[key]?.apply(page, request: request)
+            guard histories[key]?.loading == request else { return }
+            let merged = MessagePage(projectId: page.projectId, scope: page.scope, items: page.items.map { mergeDelivery($0) },
+                                     nextCursor: page.nextCursor, hasOlder: page.hasOlder)
+            histories[key]?.apply(merged, request: request)
         } catch {
             histories[key]?.fail(error, request: request)
         }

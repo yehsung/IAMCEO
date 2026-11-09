@@ -360,6 +360,7 @@ export interface PostInput {
   body?: string;
   fileIds?: string[];
   decisionId?: string | null;
+  group?: string | null;
   correctsMessageId?: string | null;
   supersedes?: string | null;
 }
@@ -372,6 +373,29 @@ export interface AskInput {
   group?: string | null;
   fileId?: string | null;
   images?: Attachment[];
+}
+
+const APPROVAL_CARD_INSTRUCTION = "보고에 대표 승인이 필요하다고 썼는데 열린 결재 카드가 없다. 지금 ask 로 카드를 올리거나, 필요 없으면 보고를 정정하라.";
+
+/** 단어만으로 막지 않는다. 앞으로 받을 판단과 이미 받은 판단·불필요·CLI 승인을 구분한다. */
+function needsApprovalCard(text: string): boolean {
+  const prose = text.replace(/```[^]*?```|~~~[^]*?~~~/g, "").replace(/^\s*>.*$/gm, "");
+  return prose.split(/[\n.!?;,。]|(?:하지만|그러나|지만)/).some(part => {
+    const clause = part
+      .replace(/(?:터미널|CLI|cli|명령(?:어)?|도구|실행|권한|샌드박스)\s*(?:승인|허락)(?:\s*창)?/g, "")
+      .replace(/승인\s*창/g, "")
+      .replace(/(?:승인|결재|허락)\s*(?:요청\s*)?(?:기능|로직|문구|테스트|시험|규칙|카드\s*UI)/g, "")
+      .replace(/(?:승인|허락|결재)\s*요청(?:은|을)?\s*(?:하지\s*않|안\s*했)/g, "")
+      .replace(/(?:대표(?:님)?(?:의)?\s*)?(?:승인|허락|결재|확인|결정)(?:은|는|이|가|을|를)?\s*(?:불필요|필요\s*(?:없|하지\s*않)|요청하지\s*않|받지\s*않아도|(?:이미\s*)?(?:받았|받음|완료|끝났|끝남))/g, "")
+      .replace(/(?:대표(?:님)?(?:이|께서)?\s*)?(?:승인|허락|결재|확인|결정)(?:을|를)?\s*(?:해\s*주셨|하셨|했습|했음)/g, "")
+      .replace(/(?:여쭙|여쭈|여쭤)(?:지\s*않|지\s*말|지\s*않아도|었|봤)/g, "");
+    if (/(?:승인|허락|결재|대표(?:님)?(?:의)?\s*(?:확인|결정))\s*(?:후|뒤).*(?:했습니다|했음|끝냈습니다|마쳤습니다)\s*$/.test(clause)
+      && !/(?:필요|대기|여쭙|여쭈|여쭤)/.test(clause)) return false;
+    return /(?:승인|허락|결재)(?:을|를|이|가|은|는)?\s*(?:뒤|후|전|대기|필요|요청|받아야|받으면|받고|받은\s*(?:뒤|후)|받기\s*전|부탁|올려야|올릴)/.test(clause)
+      || /대표(?:님)?(?:의)?\s*(?:확인|결정)(?:을|를|이|가|은|는)?\s*(?:필요|대기|기다|요청|뒤|후|전|받아야|받으면|받고|부탁|바랍니다|해\s*주)/.test(clause)
+      || /(?:대표(?:님)?(?:의)?\s*(?:확인|결정)|승인|허락|결재)\s*$/.test(clause)
+      || /(?:여쭙|여쭘|여쭈|여쭤|정해\s*주시면)/.test(clause);
+  });
 }
 
 export interface RosterEntry {
@@ -404,6 +428,8 @@ interface Turn {
   interrupted: boolean;
   /** 이 턴으로 나간 전달. 수신 여부는 별도 복구 증거로만 판단한다. */
   deliveries?: Delivery[];
+  /** 같은 턴에 ask를 이미 올렸으면 보고에서 다시 카드를 요구하지 않는다. */
+  askedDecisionIds?: Set<string>;
 }
 
 interface Runtime {
@@ -3059,7 +3085,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   // ---- 보고 ----
-  async recordPost(member: Member, input: PostInput): Promise<Message> {
+  async recordPost(member: Member, input: PostInput): Promise<Message & { systemInstruction?: string }> {
     const rt = this.runtime(member.id);
     if (input.supersedes && input.correctsMessageId && input.supersedes !== input.correctsMessageId) throw new ApiError(400, "정정 대상이 서로 다릅니다");
     input = { ...input, correctsMessageId: input.supersedes ?? input.correctsMessageId };
@@ -3082,6 +3108,7 @@ export class Orchestrator implements OrchestratorApi {
       if (previous.projectId !== member.projectId || previous.memberId !== member.id || previous.mine) throw new ApiError(400, "자신이 작성한 보고만 정정할 수 있습니다");
     }
     const conductor = member.kind === "worker" ? this.store.getConductor(member.projectId) : null;
+    let systemInstruction: string | undefined;
     const { value: message, deliveries } = this.store.withDeliveryIntents(() => this.store.createMessage({
       projectId: member.projectId, memberId: member.id, who: member.name, kind: input.kind,
       title: rt.direct ? `(직접) ${input.title}` : input.title,
@@ -3089,11 +3116,29 @@ export class Orchestrator implements OrchestratorApi {
     }), message => {
       this.store.noteDelegationPost(member.id, `${message.title}\n${message.body}`);
       this.store.saveReportReferences(member.projectId, { sourceMessageId: message.id, fileIds: files.map(file => file.id), decisionIds: input.decisionId ? [input.decisionId] : [], authoredAt: message.at, sequence: this.store.boardRevision(member.projectId), correctsMessageId: input.correctsMessageId ?? null });
+      if (this.missingApprovalCard(member, input)) {
+        systemInstruction = formatSystem(APPROVAL_CARD_INSTRUCTION);
+        // post 응답으로 한 번만 돌려준다. 업무 입력을 enqueue하거나 직원을 깨우지 않는다.
+        this.store.appendActivity(member.id, "system", systemInstruction, `approval-card:${message.id}`);
+      }
       return conductor && conductor.id !== member.id ? [{ projectId: member.projectId, memberId: conductor.id, kind: "report", text: this.reportText(message), wake: WAKE_POST_KINDS.has(input.kind), refType: "message", refId: message.id }] : [];
     });
     rt.posted = true;
     await Promise.all(deliveries.map(d => this.pump(d.memberId)));
-    return this.store.requireMessage(message.id);
+    return { ...this.store.requireMessage(message.id), ...(systemInstruction ? { systemInstruction } : {}) };
+  }
+
+  private missingApprovalCard(member: Member, input: PostInput): boolean {
+    const report = `${input.title}\n${input.body ?? ""}`;
+    if (!needsApprovalCard(report) || this.runtime(member.id).turn?.askedDecisionIds?.size) return false;
+    const group = input.group?.trim() || (input.decisionId ? this.store.getDecision(input.decisionId)?.group?.trim() : null);
+    const normalizedReport = normalizeSpace(report);
+    return !this.store.listOpenDecisions(member.projectId).some(decision =>
+      decision.memberId === member.id
+      || decision.id === input.decisionId
+      || new RegExp(`(?<![\\w-])${decision.id}(?![\\w-])`).test(report)
+      || (normalizeSpace(decision.title).length >= 2 && normalizedReport.includes(normalizeSpace(decision.title)))
+      || (!!group && decision.group?.trim() === group));
   }
 
   reportReferences(projectId: string, messageId: string): ReportReferences {
@@ -3149,7 +3194,9 @@ export class Orchestrator implements OrchestratorApi {
       return conductor ? [{ projectId: member.projectId, memberId: conductor.id, kind: "system",
         text: formatSystem(`${josa(member.name, "이")} 대표에게 질문했습니다: ${normalizeSpace(input.title)} #${decision.id}`), wake: false }] : [];
     });
-    this.runtime(member.id).posted = true;
+    const rt = this.runtime(member.id);
+    rt.posted = true;
+    if (rt.turn) (rt.turn.askedDecisionIds ??= new Set()).add(decision.id);
     this.notifyInbox(`${member.name}의 결재`, input.title);
     await Promise.all(deliveries.map(d => this.pump(d.memberId)));
     if (member.origin === "manual") return { decision, blocking: true, text: `질문 #${decision.id} 등록됨. 답을 기다립니다` };

@@ -262,7 +262,7 @@ test("legacy migration restores the passive turn boundary and resolves only norm
   for (const delivery of passive) f.db.query("INSERT INTO delivery_stalls (delivery_id, detected_at) VALUES (?, ?)").run(delivery.id, before);
   f.db.exec("ALTER TABLE deliveries DROP COLUMN next_turn_after_run");
   f.db.exec("ALTER TABLE delivery_stalls DROP COLUMN resolved_at");
-  f.db.exec(MIGRATIONS.at(-1)!);
+  f.db.exec(MIGRATIONS.find(sql => sql.includes("ADD COLUMN next_turn_after_run"))!);
   const restart = new Store(f.db, new Bus());
   restart.detectDeliveryStalls(at + 180_000);
   expect(restart.deliveryWait(passive[0]).waitReason).toBe("next_turn");

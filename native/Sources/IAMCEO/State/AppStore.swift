@@ -131,6 +131,8 @@ final class AppStore: ProjectManagementStore {
     private(set) var deliveryErrors: [String: String] = [:]
     private(set) var deliveryResults: [String: DeliveryRecoveryResult] = [:]
     private(set) var deliveryChecking: Set<String> = []
+    /// Connection-scoped delivery knowledge also covers IDs not yet in /state's recent window.
+    private var messageDeliveryUpdates: [Data: Message] = [:]
     var history: ChatHistory? {
         guard let key = histories.activeKey, key.projectID == selectedProjectID, key.archived == isArchive else { return nil }
         return histories.history(for: key)
@@ -160,8 +162,10 @@ final class AppStore: ProjectManagementStore {
     }
     @ObservationIgnored private var historyTarget: String?
     @ObservationIgnored private var historyVisible = false
-    @ObservationIgnored private var historyOwnerID: UUID?
+    // Unique live registrations, ordered so a disappearing screen falls back to the latest survivor.
+    @ObservationIgnored private var historyOwners: [(id: UUID, key: ChatHistoryKey?, targetMemberID: String?)] = []
     @ObservationIgnored private var historyFlight: (key: ChatHistoryKey, id: UUID, revision: Int, task: Task<Void, Never>)?
+    @ObservationIgnored private var historyRestoration: (key: ChatHistoryKey, id: UUID, task: Task<Void, Never>)?
     @ObservationIgnored private var historyInvalidationRevision = 0
     @ObservationIgnored private var deliveryFlights: [String: UUID] = [:]
     @ObservationIgnored private var deliveryRefreshPending: Set<String> = []
@@ -512,11 +516,11 @@ final class AppStore: ProjectManagementStore {
         let projectEpoch = projectGeneration
         let epoch = generation
         cancelHistoryLoad()
-        historyVisible = false; historyOwnerID = nil; historyTarget = nil
+        historyVisible = false; historyOwners = []; historyTarget = nil
         deliveryPages = [:]; deliveryErrors = [:]; deliveryResults = [:]; deliveryFlights = [:]; deliveryChecking = []; deliveryRefreshPending = []
         isArchive = archived
         selectedProjectID = id
-        state = projectCache.value(projectID: id, archived: archived)
+        state = mergingRecentMessageDelivery(projectCache.value(projectID: id, archived: archived))
         saveNavigation()
         writeRevisions?.members = nil; writeRevisions?.todos = nil
         reviewedMembers = [:]; reviewedTodos = [:]
@@ -748,7 +752,7 @@ final class AppStore: ProjectManagementStore {
             }
             bootstrap = result.bootstrap
             if let diagnostics = result.bootstrap.runtime { runtime = diagnostics }
-            state = result.state
+            state = mergingRecentMessageDelivery(result.state)
             validatedProjectGeneration = projectEpoch
             if result.sync != nil { validatedWriteGeneration = projectEpoch }
             if let state { projectCache.insert(state) }
@@ -2002,33 +2006,74 @@ final class AppStore: ProjectManagementStore {
 
     @discardableResult
     func activateHistory(ownerID: UUID = UUID(), targetMemberID: String? = nil) async -> UUID {
-        historyVisible = true; historyOwnerID = ownerID; historyTarget = targetMemberID
-        guard !isDemo, let projectID = selectedProjectID, state != nil else { return ownerID }
-        let key = ChatHistoryKey(namespace: writeNamespace, connectionGeneration: generation, projectID: projectID,
-                                 scope: ChatHistoryKey.normalizedScope(targetMemberID: targetMemberID, members: members), archived: isArchive)
+        let key = historyKey(targetMemberID: targetMemberID)
+        historyOwners.removeAll { $0.id == ownerID }
+        historyOwners.append((ownerID, key, targetMemberID))
+        historyVisible = true; historyTarget = targetMemberID
+        guard let key else { return ownerID }
         if histories.activeKey != key { cancelHistoryLoad() }
         histories.activate(key)
-        await loadHistory(history?.initialized == true ? .latest : .initial)
-        // One recovery attempt per activation, only for an idle, silent initial load.
-        // A newer screen may have taken ownership while this activation was suspended.
-        if !Task.isCancelled, historyVisible, historyOwnerID == ownerID, histories.activeKey == key,
-           let history, !history.initialized, history.loading == nil, history.error == nil {
-            await loadHistory(.initial)
-            if historyVisible, historyOwnerID == ownerID, histories.activeKey == key,
-               foreground, connectionStatus == .connected, key.archived || pagingSupport != .unsupported {
-                histories.finishInitialLoadIfIdle(for: key)
-            }
+        if let restoration = historyRestoration, restoration.key == key {
+            await restoration.task.value
+        } else {
+            await loadActivatedHistory(key)
         }
         return ownerID
     }
 
+    private func historyKey(targetMemberID: String?) -> ChatHistoryKey? {
+        guard !isDemo, let projectID = selectedProjectID, state != nil else { return nil }
+        return ChatHistoryKey(namespace: writeNamespace, connectionGeneration: generation, projectID: projectID,
+                              scope: ChatHistoryKey.normalizedScope(targetMemberID: targetMemberID, members: members), archived: isArchive)
+    }
+
+    private func loadActivatedHistory(_ key: ChatHistoryKey) async {
+        // A fallback task may start after its owner has disappeared or switched scope.
+        guard !Task.isCancelled, historyVisible, histories.activeKey == key,
+              historyOwners.contains(where: { $0.key == key }) else { return }
+        await loadHistory(history?.initialized == true ? .latest : .initial)
+        // One recovery attempt per activation, only for an idle, silent initial load.
+        // Any surviving screen for this key can finish the shared load.
+        if !Task.isCancelled, historyVisible, historyOwners.contains(where: { $0.key == key }), histories.activeKey == key,
+           let history, !history.initialized, history.loading == nil, history.error == nil {
+            await loadHistory(.initial)
+            if historyVisible, historyOwners.contains(where: { $0.key == key }), histories.activeKey == key,
+               foreground, connectionStatus == .connected, key.archived || pagingSupport != .unsupported {
+                histories.finishInitialLoadIfIdle(for: key)
+            }
+        }
+    }
+
     func deactivateHistory(ownerID: UUID) {
-        guard historyOwnerID == ownerID else { return }
-        historyVisible = false; historyOwnerID = nil
+        guard let index = historyOwners.firstIndex(where: { $0.id == ownerID }) else { return }
+        historyOwners.remove(at: index)
+        guard let owner = historyOwners.last else {
+            historyVisible = false; historyTarget = nil
+            cancelHistoryLoad()
+            return
+        }
+        historyTarget = owner.targetMemberID
+        // Membership may have changed since this surviving screen last activated.
+        let key = historyKey(targetMemberID: owner.targetMemberID)
+        historyOwners[historyOwners.count - 1].key = key
+        guard let key, histories.activeKey != key else { return }
         cancelHistoryLoad()
+        histories.activate(key)
+        let id = UUID()
+        let task = Task { [weak self] in
+            guard let self, historyRestoration?.id == id else { return }
+            await loadActivatedHistory(key)
+            if historyRestoration?.id == id { historyRestoration = nil }
+        }
+        // Reserve the catch-up before yielding, so refresh/activation joins even before HTTP starts.
+        historyRestoration = (key, id, task)
     }
     func loadOlderMessages() async { await loadHistory(.older) }
     func refreshHistory() async {
+        if let restoration = historyRestoration, restoration.key == histories.activeKey {
+            await restoration.task.value
+            return
+        }
         guard let history else { return }
         // A disconnected interval stays staged until explicit continuation, never replaced by /state.
         guard !history.isBridging, !history.storeChanged else { return }
@@ -2048,22 +2093,54 @@ final class AppStore: ProjectManagementStore {
     }
     /// Use for POST responses and individual realtime message events, never a stale /state batch.
     func receiveHistoryMessage(_ message: Message) {
+        let message = mergingMessageDelivery(message)
+        if let attempt = submissions?.messageAttempt(id: message.id), attempt.namespace == writeNamespace,
+           attempt.projectID == message.projectId, message.mine, attempt.targetMemberID == message.targetMemberId {
+            do { try submissions?.acceptMessage(id: message.id, message: message) }
+            catch { handle(error) }
+        }
         histories.receive(message, namespace: writeNamespace, connectionGeneration: generation)
+        if state?.project.id == message.projectId,
+           let index = state?.messages.firstIndex(where: { $0.id.utf8.elementsEqual(message.id.utf8) }) {
+            state?.messages[index] = message
+        }
+        for index in notificationMessages.indices where notificationMessages[index].id.utf8.elementsEqual(message.id.utf8)
+            && notificationMessages[index].projectId.utf8.elementsEqual(message.projectId.utf8) {
+            notificationMessages[index] = message
+        }
+    }
+    private func mergingMessageDelivery(_ message: Message) -> Message {
+        let id = Data(message.id.utf8)
+        let attempt = submissions?.messageAttempt(id: message.id)
+        let accepted = attempt?.namespace == writeNamespace ? attempt?.message : nil
+        let current = state?.messages.first { $0.id.utf8.elementsEqual(message.id.utf8) }
+        let merged = message.mergingDelivery(from: accepted).mergingDelivery(from: current)
+            .mergingDelivery(from: messageDeliveryUpdates[id])
+        messageDeliveryUpdates[id] = merged
+        return merged
+    }
+    private func mergingRecentMessageDelivery(_ snapshot: ProjectState?) -> ProjectState? {
+        guard var snapshot else { return nil }
+        snapshot.messages = snapshot.messages.map { mergingMessageDelivery($0) }
+        return snapshot
     }
     private func cancelHistoryLoad() {
+        // Invalidate queued restoration without waiting for its cancelled HTTP request.
+        historyRestoration = nil
         guard let flight = historyFlight else { return }
+        historyFlight = nil
         flight.task.cancel()
         histories.cancelLoad(for: flight.key)
-        // The cache checks cancellation before applying a page; activation also invalidates old range tokens.
+        // A cancelled transport may still be blocked. Never make the next scope await it.
+        // Cache cancellation/range tokens reject its late completion.
     }
     private func loadHistory(_ kind: ChatHistoryLoad) async {
         guard !isDemo, foreground, historyVisible, connectionStatus == .connected, let api,
               let key = histories.activeKey, key.projectID == selectedProjectID, key.archived == isArchive,
               key.connectionGeneration == generation, key.archived || pagingSupport != .unsupported else { return }
-        let ownerID = historyOwnerID
         while let flight = historyFlight, flight.key == key {
             await flight.task.value
-            guard foreground, historyVisible, historyOwnerID == ownerID, histories.activeKey == key,
+            guard foreground, historyVisible, historyOwners.contains(where: { $0.key == key }), histories.activeKey == key,
                   key.connectionGeneration == generation else { return }
             // Another waiter may already have replaced the cancelled flight. Join it.
             if let current = historyFlight, current.id != flight.id { continue }
@@ -2075,7 +2152,10 @@ final class AppStore: ProjectManagementStore {
         let service = AppHistoryService(api: api, failure: failure)
         let task = Task { [weak self] in
             guard let self else { return }
-            await histories.load(kind, for: key, using: service)
+            await histories.load(kind, for: key, using: service) { [weak self] message in
+                guard let self, generation == key.connectionGeneration else { return message }
+                return mergingMessageDelivery(message)
+            }
             guard !Task.isCancelled, generation == key.connectionGeneration, projectGeneration == projectEpoch,
                   histories.activeKey == key else { return }
             if let error = await failure.error {
@@ -2104,10 +2184,10 @@ final class AppStore: ProjectManagementStore {
                 guard foreground, historyVisible, generation == key.connectionGeneration, projectGeneration == projectEpoch, histories.activeKey == key,
                       snapshot.project.id.utf8.elementsEqual(key.projectID.utf8), !snapshot.project.archived else { return }
                 let scope = ChatHistoryKey.normalizedScope(targetMemberID: historyTarget, members: snapshot.members)
-                state = snapshot
+                state = mergingRecentMessageDelivery(snapshot)
                 if ChatHistoryKey.scopeBytes(scope) != ChatHistoryKey.scopeBytes(key.scope) {
-                    if let ownerID = historyOwnerID {
-                        await activateHistory(ownerID: ownerID, targetMemberID: historyTarget)
+                    if let owner = historyOwners.last {
+                        await activateHistory(ownerID: owner.id, targetMemberID: owner.targetMemberID)
                     }
                 }
             } catch {
@@ -2599,7 +2679,8 @@ final class AppStore: ProjectManagementStore {
         }
     }
     private func resetReadCollections() {
-        cancelHistoryLoad(); histories.removeAll(); historyVisible = false; historyOwnerID = nil; historyTarget = nil
+        messageDeliveryUpdates = [:]
+        cancelHistoryLoad(); histories.removeAll(); historyVisible = false; historyOwners = []; historyTarget = nil
         historyFlight = nil
         pagingSupport = .unknown; isArchive = false; archivedProjects = []; archiveError = nil
         archiveLoad = UUID(); isLoadingArchive = false; archiveObserved = false

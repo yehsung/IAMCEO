@@ -284,6 +284,8 @@ export interface Message {
   /** 대표 말의 전달 상태: sent 보냄 · queued 대기 · held 보류(사유) · delivered 받음 · failed 실패 */
   delivery: DeliveryStatus | null;
   deliveryNote: string | null;
+  /** Persisted per-message delivery snapshot revision; increases on every setMessageDelivery, including retries. */
+  deliveryRevision?: number;
   /** 보고에 연결된 자료 전체. fileId는 첫 자료의 호환 필드다. */
   fileIds?: string[];
   supersedes?: string | null;

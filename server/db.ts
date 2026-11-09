@@ -665,6 +665,8 @@ export const MIGRATIONS: string[] = [
        AND e.created_at <= deliveries.created_at
    ), 0);
    ALTER TABLE delivery_stalls ADD COLUMN resolved_at TEXT;`,
+  // Delivery snapshots can cross between WS, POST and GET. Persist ordering across retries/restarts.
+  `ALTER TABLE messages ADD COLUMN delivery_revision INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export function openDb(path: string): Database {

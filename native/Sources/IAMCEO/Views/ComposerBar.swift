@@ -1,6 +1,9 @@
 import SwiftUI
 import ImageIO
 import UniformTypeIdentifiers
+#if os(macOS)
+import AppKit
+#endif
 #if os(iOS)
 import PhotosUI
 import UIKit
@@ -94,7 +97,14 @@ struct ComposerBar: View {
     }
     private var checkingAttempt: Bool { attempt?.status == .checking || attempt?.status == .accepted }
     private var editedAttempt: Bool { attempt.map { $0.draft.revision != drafts.revision(for: key) } ?? false }
-    private var text: Binding<String> { Binding(get: { drafts.text(for: key) }, set: { drafts.setText($0, for: key) }) }
+    private var text: Binding<String> {
+        let draftKey = key
+        let connection = drafts.connectionGeneration
+        return Binding(get: { drafts.text(for: draftKey) }, set: {
+            guard drafts.connectionGeneration == connection else { return }
+            drafts.setText($0, for: draftKey)
+        })
+    }
     private var canAttach: Bool { ComposerAttachmentUploads.blockedReason(in: store, target: target) == nil && !missingTarget }
     private var canSend: Bool {
         store.uiCanWrite && !sending && !checkingAttempt && !editedAttempt && pendingUploads.isEmpty
@@ -513,7 +523,8 @@ struct ComposerBar: View {
     // MARK: Input row
 
     private var inputRow: some View {
-        HStack(alignment: .bottom, spacing: 2) {
+        let draftKey = key
+        return HStack(alignment: .bottom, spacing: 2) {
             attachmentButton
             #if os(iOS)
             // Only while the clipboard holds an image or a file: a standing grey paste button beside the paperclip
@@ -540,8 +551,9 @@ struct ComposerBar: View {
                                 canReceive: { macAttachmentPolicy.canAccept && attachmentIntake.receive != nil },
                                 receive: { attachmentIntake.accept($0, policy: macAttachmentPolicy) },
                                 submit: { Task { await send() } },
-                                rejectionReason: { macAttachmentPolicy.reason ?? "입력칸을 준비 중이라 첨부하지 못했습니다" })
-                .id(key)
+                                rejectionReason: { macAttachmentPolicy.reason ?? "입력칸을 준비 중이라 첨부하지 못했습니다" },
+                                textRevision: { drafts.revision(for: draftKey) })
+                .id([drafts.namespace, draftKey])
                 .overlay(alignment: .topLeading) {
                     if draftText.isEmpty {
                         Text(placeholder).font(.system(size: 15)).foregroundStyle(CE.ink2)
@@ -553,6 +565,7 @@ struct ComposerBar: View {
                 .disabled(store.isDemo)
             #else
             TextField("\(recipientName)에게 보낼 글", text: text, prompt: Text(placeholder).foregroundStyle(CE.ink2), axis: .vertical)
+                .id([drafts.namespace, draftKey])
                 .textFieldStyle(.plain)
                 .font(isMac ? .system(size: 15) : CEFont.body)
                 // web .cmp__input: 22pt lines (15px text + 4pt leading); 7 lines ≈ the web's 168pt cap.
@@ -704,6 +717,21 @@ struct ComposerBar: View {
     }
 
     private func send() async {
+        #if os(macOS)
+        if focused, let editor = NSApp.keyWindow?.firstResponder as? MacComposerTextView.Editor {
+            editor.commitComposition()
+        }
+        #elseif os(iOS)
+        if focused,
+           let input = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows).first(where: \.isKeyWindow)?.composerFirstResponder as? any UITextInput {
+            input.unmarkText()
+            if let range = input.textRange(from: input.beginningOfDocument, to: input.endOfDocument),
+               let committed = input.text(in: range) {
+                text.wrappedValue = committed
+            }
+        }
+        #endif
         guard canSend else { return }
         let snapshot = drafts.snapshot(for: key)
         let connection = drafts.connectionGeneration
@@ -763,6 +791,15 @@ struct ComposerBar: View {
     }
 
 }
+
+#if os(iOS)
+private extension UIView {
+    var composerFirstResponder: UIView? {
+        if isFirstResponder { return self }
+        return subviews.lazy.compactMap { $0.composerFirstResponder }.first
+    }
+}
+#endif
 
 /// Web ghost icon button (paperclip, .gbtn--ghost): ink-2 and no fill; ink-1 on white .07 when hovered.
 private struct ComposerGhostStyle: ButtonStyle {

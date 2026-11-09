@@ -49,8 +49,11 @@ private final class UXHistoryRaceServer: @unchecked Sendable {
             }
             if cancelled { throw URLError(.cancelled) }
             let project = path.contains("/p/") ? "p" : "q"
-            var response = try reply(MessagePage(projectId: project, scope: .project,
-                items: [Message(id: "\(project)-history", projectId: project, at: "1")], nextCursor: nil, hasOlder: false))
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let memberID = query.first { $0.name == "memberId" }?.value
+            let scope: MessageScope = memberID.map { .member(memberId: $0) } ?? .project
+            var response = try reply(MessagePage(projectId: project, scope: scope,
+                items: [Message(id: "\(project)-history", projectId: project, at: "1", memberId: memberID)], nextCursor: nil, hasOlder: false))
             if let gate { response.beforeDelivery = { await gate.wait() } }
             return response
         default: return IsolatedTestHTTPReply(status: 404)
@@ -75,10 +78,11 @@ private final class UXHistoryRaceServer: @unchecked Sendable {
         await finish(Task { await store.selectProject(id: "p") })
         return store
     }
-    private func activate(_ store: AppStore, owner: UUID, started: XCTestExpectation? = nil) -> Task<UUID, Never> {
+    private func activate(_ store: AppStore, owner: UUID, targetMemberID: String? = nil,
+                          started: XCTestExpectation? = nil) -> Task<UUID, Never> {
         Task {
             started?.fulfill()
-            return await store.activateHistory(ownerID: owner)
+            return await store.activateHistory(ownerID: owner, targetMemberID: targetMemberID)
         }
     }
 
@@ -110,6 +114,14 @@ private final class UXHistoryRaceServer: @unchecked Sendable {
     }
 
     func testNewOwnerOfSameScopeKeepsSharedFlightAlive() async throws {
+        try await exerciseSameScopeOverlap(disappearNewest: false)
+    }
+
+    func testNewerOwnerDisappearsWhileOlderOwnerFinishesSharedHistory() async throws {
+        try await exerciseSameScopeOverlap(disappearNewest: true)
+    }
+
+    private func exerciseSameScopeOverlap(disappearNewest: Bool) async throws {
         let server = UXHistoryRaceServer()
         let network = try IsolatedTestNetwork(handler: { try server.handle($0) })
         let store = await connect(network)
@@ -123,13 +135,135 @@ private final class UXHistoryRaceServer: @unchecked Sendable {
         let joined = expectation(description: "new owner joins")
         let fresh = activate(store, owner: newOwner, started: joined)
         await fulfillment(of: [joined], timeout: 3)
-        store.deactivateHistory(ownerID: oldOwner)
+        let request = try XCTUnwrap(store.history?.loading)
+        let generation = store.history?.generation
+        store.deactivateHistory(ownerID: disappearNewest ? newOwner : oldOwner)
+        // A → B → B disappears is the actual Mac AppShell replacement order.
+        // Both disappearance orders must preserve the very same request and range token.
+        XCTAssertEqual(store.history?.loading, request)
+        XCTAssertEqual(store.history?.generation, generation)
+        XCTAssertNil(store.history?.error)
         XCTAssertNotNil(store.history?.loading)
         await gate.release()
         await finish(old); await finish(fresh)
         XCTAssertEqual(store.history?.initialized, true)
         XCTAssertEqual(store.historyMessages.map(\.id), ["p-history"])
+        XCTAssertEqual(store.pagingSupport, .supported)
+        XCTAssertNil(store.history?.loading); XCTAssertNil(store.history?.error)
         XCTAssertEqual(server.pageCount, 1)
+    }
+
+    func testAllOverlappingOwnersDisappearingCancelsSharedRequest() async throws {
+        for newestFirst in [false, true] {
+            let server = UXHistoryRaceServer()
+            let network = try IsolatedTestNetwork(handler: { try server.handle($0) })
+            let store = await connect(network)
+            defer { store.disconnect() }
+            let entered = expectation(description: "shared initial page")
+            let gate = UXHistoryRaceGate(entered)
+            server.holdPage(0, at: gate)
+            let a = UUID(), b = UUID()
+            let first = activate(store, owner: a)
+            await fulfillment(of: [entered], timeout: 3)
+            let joined = expectation(description: "second live owner")
+            let second = activate(store, owner: b, started: joined)
+            await fulfillment(of: [joined], timeout: 3)
+            let generation = store.history?.generation
+            store.deactivateHistory(ownerID: newestFirst ? b : a)
+            XCTAssertNotNil(store.history?.loading)
+            store.deactivateHistory(ownerID: newestFirst ? a : b)
+            XCTAssertNil(store.history?.loading)
+            XCTAssertNotEqual(store.history?.generation, generation)
+            XCTAssertNotNil(store.history?.error)
+            // Finish before releasing HTTP: cancelling the last owner must cancel the request itself.
+            await finish(first); await finish(second)
+            await finish(Task { await store.refreshHistory() })
+            XCTAssertEqual(server.pageCount, 1)
+            await gate.release()
+            XCTAssertEqual(store.history?.initialized, false)
+        }
+    }
+
+    func testDuplicateRegistrationDoesNotKeepAnInvisibleOwnerAlive() async throws {
+        let server = UXHistoryRaceServer()
+        let network = try IsolatedTestNetwork(handler: { try server.handle($0) })
+        let store = await connect(network)
+        defer { store.disconnect() }
+        let entered = expectation(description: "initial page")
+        let gate = UXHistoryRaceGate(entered)
+        server.holdPage(0, at: gate)
+        let owner = UUID()
+        let first = activate(store, owner: owner)
+        await fulfillment(of: [entered], timeout: 3)
+        let joined = expectation(description: "duplicate registration")
+        let duplicate = activate(store, owner: owner, started: joined)
+        await fulfillment(of: [joined], timeout: 3)
+        store.deactivateHistory(ownerID: UUID())
+        XCTAssertNotNil(store.history?.loading)
+        store.deactivateHistory(ownerID: owner)
+        XCTAssertNil(store.history?.loading)
+        XCTAssertNotNil(store.history?.error)
+        await finish(first); await finish(duplicate)
+        await gate.release()
+        await finish(Task { await store.refreshHistory() })
+        XCTAssertEqual(server.pageCount, 1)
+    }
+
+    func testDifferentScopeSurvivorRestartsItsCancelledInitialLoad() async throws {
+        let server = UXHistoryRaceServer()
+        let network = try IsolatedTestNetwork(handler: { try server.handle($0) })
+        let store = await connect(network)
+        defer { store.disconnect() }
+        let aEntered = expectation(description: "A project initial page")
+        let aGate = UXHistoryRaceGate(aEntered)
+        let bEntered = expectation(description: "B member initial page")
+        let bGate = UXHistoryRaceGate(bEntered)
+        let resumed = expectation(description: "surviving A restarts project page")
+        let resumeGate = UXHistoryRaceGate(resumed)
+        server.holdPage(0, at: aGate); server.holdPage(1, at: bGate); server.holdPage(2, at: resumeGate)
+        let a = UUID(), b = UUID()
+        let first = activate(store, owner: a)
+        await fulfillment(of: [aEntered], timeout: 3)
+        let projectKey = try XCTUnwrap(store.histories.activeKey)
+        let second = activate(store, owner: b, targetMemberID: "m")
+        await fulfillment(of: [bEntered], timeout: 3)
+        XCTAssertEqual(store.histories.activeKey?.scope, .member(memberId: "m"))
+        await finish(first)
+        store.deactivateHistory(ownerID: b)
+        XCTAssertEqual(store.histories.activeKey, projectKey)
+        await fulfillment(of: [resumed], timeout: 3)
+        let joined = expectation(description: "join resumed project request")
+        let completion = Task { joined.fulfill(); await store.refreshHistory() }
+        await fulfillment(of: [joined], timeout: 3)
+        await aGate.release(); await bGate.release(); await resumeGate.release()
+        await finish(second); await finish(completion)
+        XCTAssertEqual(store.histories.activeKey, projectKey)
+        XCTAssertEqual(store.history?.initialized, true)
+        XCTAssertEqual(store.historyMessages.map(\.id), ["p-history"])
+        XCTAssertNil(store.history?.loading); XCTAssertNil(store.history?.error)
+        XCTAssertEqual(server.pageCount, 3)
+    }
+
+    func testQueuedScopeRestorationCannotRestartAfterAllOwnersDisappear() async throws {
+        let server = UXHistoryRaceServer()
+        let network = try IsolatedTestNetwork(handler: { try server.handle($0) })
+        let store = await connect(network)
+        defer { store.disconnect() }
+        let a = UUID(), b = UUID()
+        await finish(activate(store, owner: a))
+        let entered = expectation(description: "member initial page")
+        let gate = UXHistoryRaceGate(entered)
+        server.holdPage(1, at: gate)
+        let member = activate(store, owner: b, targetMemberID: "m")
+        await fulfillment(of: [entered], timeout: 3)
+        // No suspension between removals: the queued project restoration starts with no live owner.
+        store.deactivateHistory(ownerID: b)
+        store.deactivateHistory(ownerID: a)
+        await finish(member)
+        await gate.release()
+        await finish(Task { await store.refreshHistory() })
+        XCTAssertNil(store.history?.loading)
+        XCTAssertEqual(server.pageCount, 2)
     }
 
     func testOnlyOwnerDisappearanceCancelsAndReentryRetries() async throws {

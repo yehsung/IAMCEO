@@ -27,6 +27,22 @@ final class SystemPushAuthorizationProvider: PushAuthorizationProvider {
     func requestAuthorization() async throws {
         _ = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
     }
+    func offerNotificationSetup() async -> Bool? {
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive }),
+              let root = scene.windows.first(where: \.isKeyWindow)?.rootViewController else { return nil }
+        var presenter = root
+        while let next = presenter.presentedViewController { presenter = next }
+        guard presenter.viewIfLoaded?.window != nil, !presenter.isBeingDismissed,
+              !(presenter is UIAlertController) else { return nil }
+        return await withCheckedContinuation { continuation in
+            let alert = UIAlertController(title: "iPhone 알림을 켤까요?", message: nil, preferredStyle: .alert)
+            alert.message = "새 결재와 승인 대기, 완료·막힘 보고, 대표 할 일을 알려 드립니다. 설정에서 언제든 바꿀 수 있습니다."
+            alert.addAction(UIAlertAction(title: "지금 켜기", style: .default) { _ in continuation.resume(returning: true) })
+            alert.addAction(UIAlertAction(title: "나중에", style: .cancel) { _ in continuation.resume(returning: false) })
+            presenter.present(alert, animated: true)
+        }
+    }
     func register(generation: UUID) -> Bool {
         if let pending {
             if pending != generation { queued = generation }

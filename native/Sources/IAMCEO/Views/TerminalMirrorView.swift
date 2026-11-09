@@ -8,6 +8,8 @@ struct TerminalMirrorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     let member: Member
+    @AppStorage(TerminalReadingScale.preferenceKey) private var readingZoom = 1.0
+    @GestureState private var pinch = 1.0
     @State private var windowOwner = UUID()
     @State private var screen = ""
     @State private var input = ""
@@ -235,7 +237,7 @@ struct TerminalMirrorView: View {
                 ScrollView([.horizontal, .vertical]) {
                     VStack(alignment: .leading, spacing: 0) {
                         Text(displayText)
-                            .font(CEFont.mono)
+                            .font(.system(size: 12 * TerminalReadingScale.zoom(readingZoom * pinch), design: .monospaced))
                             .foregroundStyle(screen.isEmpty ? CE.ink3 : CE.ink)
                             .lineSpacing(CELeading.spacing(12.5, 1.45))
                             .textSelection(.enabled)
@@ -253,6 +255,9 @@ struct TerminalMirrorView: View {
                 }
             }
         }
+        .simultaneousGesture(MagnifyGesture().updating($pinch) { value, state, _ in
+            state = value.magnification
+        }.onEnded { value in readingZoom = TerminalReadingScale.zoom(readingZoom * value.magnification) })
         .frame(minHeight: keyboardUp ? 120 : 220, maxHeight: .infinity)
         .background(CE.bgDeep.opacity(0.78), in: shape)
         .clipShape(shape)
@@ -318,7 +323,7 @@ struct TerminalMirrorView: View {
                 Button { Task { if await store.claimTerminal(member) { await readScreen() } } } label: {
                     HStack(spacing: 6) {
                         if pending { ProgressView().controlSize(.small).tint(.white) } else { Image(systemName: "hand.tap") }
-                        Text(pending ? "조작권을 받는 중" : claimCanBeRecovered ? "조작권 다시 확인" : "직접 조작 시작")
+                        Text(pending ? "조작권을 받는 중" : claimCanBeRecovered ? "조작권 다시 확인" : "입력 시작")
                     }
                 }
                 .ceProminentButton()
@@ -341,7 +346,7 @@ struct TerminalMirrorView: View {
                 Button("작업 결과 다시 확인") { Task { await checkResult() } }
                     .ceSecondaryButton().controlSize(.small).disabled(!store.canWrite || pending)
             } else if let receipt = receipts.first {
-                Text(receipt.status == .applied ? "직접 조작 적용 확인 · 업무 완료를 뜻하지 않습니다." : TerminalPresentation.message(receipt.error ?? "직접 조작이 거부됐습니다."))
+                Text(receipt.status == .applied ? "직접 조작 적용 확인 · 업무 완료를 뜻하지 않습니다." : friendlyError(TerminalPresentation.message(receipt.error ?? "직접 조작이 거부됐습니다.")))
                     .font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.note)
             }
             if let inputSaveError {
@@ -387,7 +392,7 @@ struct TerminalMirrorView: View {
         do {
             try submissions.setTerminalInput(text, namespace: store.writeNamespace, memberID: member.id)
             inputSaveError = nil
-        } catch { inputSaveError = error.localizedDescription }
+        } catch { inputSaveError = friendlyLoadError(error, what: "입력", verb: "저장하지") }
     }
 
     private func sendInput() async {
@@ -451,7 +456,7 @@ struct TerminalMirrorView: View {
         } catch {
             guard scope == inputScope else { return }
             if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
-            self.error = "화면을 읽지 못했습니다: \(error.localizedDescription)"
+            self.error = friendlyLoadError(error, what: "화면", verb: "읽지")
         }
     }
 

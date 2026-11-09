@@ -150,6 +150,7 @@ export interface WorkInput {
 }
 
 export interface NewMessage {
+  contextFileId?: string | null;
   id?: string;
   projectId: string;
   at?: string;
@@ -218,6 +219,7 @@ export const DEFAULT_SETTINGS: Settings = {
   contextWindows: { ...DEFAULT_CONTEXT_WINDOWS },
   maxAwakeWorkers: 8,
   notifyMac: false,
+  macScriptNotifications: true,
   boardTidyHours: 6,
 };
 
@@ -409,6 +411,8 @@ function toTodo(r: Row): Todo {
     done: !!r.done,
     doneAt: r.done_at,
     createdAt: r.created_at,
+    completionNote: r.completion_note ?? null,
+    completionFileIds: json(r.completion_file_ids ?? "[]"),
     outcome: r.outcome ?? (r.done ? "done" : null),
     closeReason: r.close_reason ?? null,
     closedBy: r.closed_by ?? null,
@@ -448,6 +452,7 @@ function toMessage(r: Row): Message {
     attachments: json(r.attachments),
     delivery: r.delivery,
     deliveryNote: r.delivery_note,
+    contextFileId: r.context_file_id ?? null,
   };
 }
 
@@ -700,8 +705,19 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       ) ORDER BY m.at, m.id`, projectId).map(row => ({ kind: "missing_report", runId: row.run_id, memberId: row.member_id, messageId: row.message_id, createdAt: row.at, title: "결과 보고 누락" }));
   }
 
-  private messageFrom(row: Row): Message {
+  private messageFrom(row: Row, includeDelivery = true): Message {
     const message = toMessage(row);
+    const refs = this.getReportReferences(message.projectId, message.id);
+    message.fileIds = refs?.fileIds ?? (message.fileId ? [message.fileId] : []);
+    if (!refs) for (const link of message.body.matchAll(/\]\(#\/p\/([^/()]+)\/files\/([^/()]+)\)/g)) {
+      try {
+        const projectId = decodeURIComponent(link[1]!), fileId = decodeURIComponent(link[2]!);
+        if (projectId === message.projectId && this.getFile(fileId)?.projectId === projectId && !message.fileIds.includes(fileId)) message.fileIds.push(fileId);
+      } catch { /* Malformed legacy links are plain text, never cross-project references. */ }
+    }
+    message.supersedes = refs?.correctsMessageId ?? null;
+    message.supersededBy = this.row("SELECT source_message_id FROM report_references WHERE project_id = ? AND corrects_message_id = ? ORDER BY sequence DESC, rowid DESC LIMIT 1", message.projectId, message.id)?.source_message_id ?? null;
+    if (!includeDelivery) return message;
     const deliveries = this.rows("SELECT * FROM deliveries WHERE ref_type = 'message' AND ref_id = ? AND status NOT IN ('delivered', 'failed') ORDER BY rowid", message.id).map(toDelivery);
     return deliveries.length ? { ...message, deliveryInfo: deliveries.map(d => ({ deliveryId: d.id, memberId: d.memberId, ...this.deliveryWait(d) })) } : message;
   }
@@ -1054,6 +1070,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     this.run("UPDATE projects SET runner_by_adopt = ? WHERE id = ?", on ? 1 : 0, id);
   }
 
+  private needsOwnerCounter: ((projectId: string) => number) | null = null;
+  setNeedsOwnerCounter(counter: (projectId: string) => number): void { this.needsOwnerCounter = counter; }
+
   projectSummaries(): ProjectSummary[] {
     return this.rows(
       `SELECT p.id, p.name, p.is_hq, p.cwd, p.now, p.runner_enabled, p.archived,
@@ -1061,6 +1080,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
          (SELECT COUNT(*) FROM todos t WHERE t.project_id = p.id AND t.done = 0) AS todo_count,
          (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id AND m.status = 'working') AS working_count,
          (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id AND m.status = 'blocked' AND m.blocked_reason = 'permission') AS blocked_count,
+         (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id AND m.status = 'blocked' AND m.blocked_reason IN ('permission', 'selection')) AS attention_blocked_count,
          (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id AND m.status = 'error') AS error_count,
          (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id) AS member_count
        FROM projects p WHERE p.archived = 0 ORDER BY p.is_hq DESC, p.created_at, p.rowid`,
@@ -1074,6 +1094,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       connection: this.connectionOf(r.id, !!r.runner_enabled, !!r.archived),
       decisionCount: r.decision_count,
       todoCount: r.todo_count,
+      needsCount: r.decision_count + r.todo_count + r.attention_blocked_count + r.error_count + (this.needsOwnerCounter?.(r.id) ?? this.row("SELECT COUNT(*) AS n FROM delivery_recovery r JOIN deliveries d ON d.id = r.delivery_id WHERE d.project_id = ? AND r.phase = 'needs_owner'", r.id)!.n),
+      needsDanger: r.error_count > 0,
       inboxCount: r.decision_count + r.todo_count,
       workingCount: r.working_count,
       blockedCount: r.blocked_count,
@@ -1541,6 +1563,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   /** 받을 사람이 없어 '했음'을 못 알린 할 일. 총괄이 뜨면 전한다. */
+  setTodoCompletion(id: string, note: string | null, fileIds: string[]): Todo {
+    this.run("UPDATE todos SET completion_note = ?, completion_file_ids = ? WHERE id = ?", note, JSON.stringify(fileIds), id);
+    return this.requireTodo(id);
+  }
+
   setTodoNoticePending(id: string, pending: boolean): void {
     this.run("UPDATE todos SET notice_pending = ? WHERE id = ?", pending ? 1 : 0, id);
   }
@@ -1802,7 +1829,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.transaction(() => {
       if (input.id) {
         const row = this.row("SELECT * FROM messages WHERE id = ?", input.id);
-        const existing = row ? toMessage(row) : null;
+        const existing = row ? this.messageFrom(row, false) : null;
         if (existing) {
           if (existing.projectId !== input.projectId) throw new ApiError(409, "다른 프로젝트에서 사용된 메시지 ID입니다");
           return existing;
@@ -1830,7 +1857,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         input.delivery ?? null,
         input.deliveryNote ?? null,
       );
-      const message = toMessage(this.row("SELECT * FROM messages WHERE id = ?", id)!);
+      if (input.contextFileId) this.run("UPDATE messages SET context_file_id = ? WHERE id = ?", input.contextFileId, id);
+      const message = this.messageFrom(this.row("SELECT * FROM messages WHERE id = ?", id)!, false);
       // 보관 중 늦은 manual 보고도 저장한다. 푸시는 활성 프로젝트의 실제 작성자만 대상이다.
       if (this.recorder && !this.requireProject(message.projectId).archived && (!message.memberId || this.getMember(message.memberId)?.projectId === message.projectId)) this.recorder.message(message);
       this.bumpBoard(message.projectId);
@@ -2378,6 +2406,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       if (before.marker !== null && patch.marker !== undefined && patch.marker !== before.marker) throw new ApiError(409, "저장된 전달 표식은 바꿀 수 없습니다");
       const { set, values } = buildSet({ ...patch, evidence: patch.evidence === undefined ? undefined : JSON.stringify(patch.evidence) }, { marker: "marker", phase: "phase", reason: "reason", autoAttempts: "auto_attempts", checkCount: "check_count", activeCheckMs: "active_check_ms", nextCheckAt: "next_check_at", lastCheckedAt: "last_checked_at", evidence: "evidence_json" });
       this.run(`UPDATE delivery_recovery SET ${[...set, "version = version + 1", "updated_at = ?"].join(", ")} WHERE delivery_id = ? AND version = ?`, ...values, nowIso(), deliveryId, expectedVersion);
+      if (patch.phase !== undefined && patch.phase !== before.phase && (patch.phase === "needs_owner" || before.phase === "needs_owner")) this.emitProjects();
       return this.getDeliveryRecovery(deliveryId)!;
     });
   }
@@ -2589,7 +2618,13 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         if (stableJson(before) !== stableJson(refs)) throw new ApiError(409, "이미 기록된 보고 출처가 다릅니다");
         return;
       }
+      if (refs.correctsMessageId) {
+        const original = this.requireMessage(refs.correctsMessageId), replacement = this.requireMessage(refs.sourceMessageId);
+        if (!replacement.memberId || original.memberId !== replacement.memberId || original.mine || replacement.mine || original.id === replacement.id) throw new ApiError(400, "자신이 작성한 보고만 정정할 수 있습니다");
+        if (original.supersededBy) throw new ApiError(409, "이미 정정된 보고입니다. 최신 보고를 정정하세요");
+      }
       this.run("INSERT INTO report_references (source_message_id, project_id, file_ids_json, decision_ids_json, authored_at, sequence, corrects_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)", refs.sourceMessageId, projectId, JSON.stringify(refs.fileIds), JSON.stringify(refs.decisionIds), refs.authoredAt, refs.sequence, refs.correctsMessageId);
+      if (refs.correctsMessageId) this.afterCommit(() => this.bus.emit({ type: "message", message: this.requireMessage(refs.correctsMessageId!) }));
     });
   }
 

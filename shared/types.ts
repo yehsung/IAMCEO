@@ -47,6 +47,8 @@ export interface Project {
 }
 
 export interface ProjectSummary extends Pick<Project, "id" | "name" | "isHq" | "cwd" | "now" | "runnerEnabled" | "connection"> {
+  needsCount?: number; // 열린 결재 + 대표 할 일 + 승인·선택 대기 직원 + 오류 직원 + needs_owner 전달
+  needsDanger?: boolean; // 오류 직원 포함
   decisionCount: number; // 열린 결재
   todoCount: number; // 안 한 내 할 일
   /** decisionCount + todoCount. 호환용으로 남겨 두었다. 새 화면은 위 둘을 쓴다. */
@@ -229,6 +231,8 @@ export type DecisionCloseKind = "decided" | "obsolete";
 /** done 끝남 · dropped 필요 없어짐(홈에서 빠진다). 둘 다 done=true 다. */
 export type TodoOutcome = "done" | "dropped";
 export interface Todo {
+  completionNote?: string | null;
+  completionFileIds?: string[];
   id: string;
   projectId: string;
   memberId: string | null;
@@ -280,6 +284,11 @@ export interface Message {
   /** 대표 말의 전달 상태: sent 보냄 · queued 대기 · held 보류(사유) · delivered 받음 · failed 실패 */
   delivery: DeliveryStatus | null;
   deliveryNote: string | null;
+  /** 보고에 연결된 자료 전체. fileId는 첫 자료의 호환 필드다. */
+  fileIds?: string[];
+  supersedes?: string | null;
+  supersededBy?: string | null;
+  contextFileId?: string | null;
   /** 이 메시지의 아직 끝나지 않은 전달별 상태. 기존 delivery·deliveryNote는 유지한다. */
   deliveryInfo?: (DeliveryWaitInfo & { deliveryId: string; memberId: string })[];
 }
@@ -310,6 +319,8 @@ export interface FileDoc {
   attachments: Attachment[];
   createdAt: string;
   order: number;
+  /** from-path 게시 응답에서만 있다. 같은 내용의 기존 판을 돌려주었는가. */
+  reused?: boolean;
 }
 
 /** 대기 중인 동안의 연속 대기 시작 시각. runLimit은 run_limit일 때만 있다. */
@@ -472,6 +483,7 @@ export interface Settings {
   maxAwakeWorkers: number; // 기본 8
   /** 결재·할 일이 올라오면 서버 컴퓨터(맥)에 알림을 띄운다. */
   notifyMac: boolean;
+  macScriptNotifications?: boolean; // 기본 true; notifyMac 동의와 별개인 서버 알림 경로 스위치
   /** 총괄에게 판 정리(결재·내 할 일·진행판·지금 상황)를 맡기는 간격(시간). 0 이면 끈다. 기본 6. */
   boardTidyHours: number;
 }
@@ -561,7 +573,7 @@ export type SettingsPatch = Partial<Omit<Settings, "ranks" | "codexRanks" | "res
 };
 /** PATCH /api/members/:id. null 이면 직급 기본으로 돌아간다. */
 export interface PatchMemberReq { cli?: CliProvider; modelOverride?: string | null; effortOverride?: Effort | null }
-export interface SendMessageReq { id?: string; text: string; targetMemberId?: string | null; attachmentIds?: string[] }
+export interface SendMessageReq { id?: string; text: string; targetMemberId?: string | null; attachmentIds?: string[]; contextFileId?: string | null }
 export interface AnswerReq { expectedVersion?: string; choice?: string | null; note?: string | null; batch?: boolean }
 export interface AdoptReq { paneId: string; name: string; role: string; handle?: string; kind?: "conductor" | "worker" }
 /** conductor 다른 지휘자의 흔적 · folder 프로젝트 밖 폴더 · input 입력칸에 쓰던 글(넘겨받을 때 지운다). 편입을 막지는 않는다. */

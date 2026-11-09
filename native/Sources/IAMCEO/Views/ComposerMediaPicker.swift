@@ -1,3 +1,5 @@
+import Foundation
+import UniformTypeIdentifiers
 #if os(iOS)
 import SwiftUI
 import PhotosUI
@@ -57,3 +59,76 @@ struct ComposerCameraPicker: UIViewControllerRepresentable {
     }
 }
 #endif
+
+/// Shared provider loader, so iPhone paste intake is regression-tested without a system clipboard.
+/// PasteButton grants access only after a deliberate paste. Providers are copied inside their URL callback.
+@MainActor
+enum ComposerPasteIntake {
+    static let contentTypes: [UTType] = [.fileURL, .image, .pdf, .archive, .audio, .movie, .spreadsheet, .presentation]
+
+    static func receive(_ providers: [NSItemProvider], context: ComposerUploadContext, store: AppStore) {
+        let date = Date()
+        store.composerUploads.loadMedia(names: providers.enumerated().map {
+            $0.element.suggestedName ?? "붙여넣은 첨부 \($0.offset + 1)"
+        }, context: context, store: store) { index in
+            let provider = providers[index]
+            let original = try await copy(provider)
+            defer { original.cleanup() }
+            if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                return try await Task.detached(priority: .userInitiated) {
+                    [try PhotoAttachment.prepare(source: original.url, video: false, date: date, index: index + 1)]
+                }.value
+            }
+            return [try PhotoAttachmentFile.copy(from: original.url, filename: original.url.lastPathComponent)]
+        }
+    }
+
+    static func copy(_ provider: NSItemProvider) async throws -> PhotoAttachmentFile {
+        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            return try await withCheckedThrowingContinuation { continuation in
+                provider.loadObject(ofClass: NSURL.self) { item, error in
+                    do {
+                        if let error { throw error }
+                        guard let url = item as? URL, url.isFileURL else { throw PhotoAttachmentError.unavailable }
+                        let access = url.startAccessingSecurityScopedResource()
+                        defer { if access { url.stopAccessingSecurityScopedResource() } }
+                        try PhotoAttachment.validateSize(url)
+                        continuation.resume(returning: try PhotoAttachmentFile.copy(from: url, filename: url.lastPathComponent))
+                    } catch { continuation.resume(throwing: error) }
+                }
+            }
+        }
+        guard let identifier = provider.registeredTypeIdentifiers.first(where: {
+            UTType($0)?.conforms(to: .image) == true
+        }) ?? provider.registeredTypeIdentifiers.first(where: {
+            UTType($0)?.conforms(to: .data) == true && UTType($0)?.conforms(to: .text) != true
+        }) else { throw PhotoAttachmentError.unavailable }
+        do {
+            return try await withCheckedThrowingContinuation { continuation in
+                provider.loadFileRepresentation(forTypeIdentifier: identifier) { url, error in
+                    do {
+                        if let error { throw error }
+                        guard let url, url.isFileURL else { throw PhotoAttachmentError.unavailable }
+                        try PhotoAttachment.validateSize(url)
+                        continuation.resume(returning: try PhotoAttachmentFile.copy(from: url, filename: url.lastPathComponent))
+                    } catch { continuation.resume(throwing: error) }
+                }
+            }
+        } catch {
+            // Pixel-only paste providers can offer data without a file representation.
+            let name = provider.suggestedName.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "붙여넣은 파일"
+            let filename = URL(fileURLWithPath: name).pathExtension.isEmpty
+                ? name + "." + (UTType(identifier)?.preferredFilenameExtension ?? "bin") : name
+            return try await withCheckedThrowingContinuation { continuation in
+                provider.loadDataRepresentation(forTypeIdentifier: identifier) { data, error in
+                    do {
+                        if let error { throw error }
+                        guard let data else { throw PhotoAttachmentError.unavailable }
+                        guard data.count <= PhotoAttachment.maximumBytes else { throw PhotoAttachmentError.tooLarge }
+                        continuation.resume(returning: try PhotoAttachmentFile.write(data, filename: filename))
+                    } catch { continuation.resume(throwing: error) }
+                }
+            }
+        }
+    }
+}

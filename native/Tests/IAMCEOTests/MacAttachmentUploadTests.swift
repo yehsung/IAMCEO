@@ -14,6 +14,7 @@ private final class P2UploadResponses: @unchecked Sendable {
     init(failingRequests: Set<Int> = []) { self.failingRequests = failingRequests }
     var writable: Bool { lock.withLock { runnerOK } }
     func stopRunner() { lock.withLock { runnerOK = false } }
+    func startRunner() { lock.withLock { runnerOK = true } }
     func upload() -> IsolatedTestHTTPReply {
         lock.withLock {
             count += 1
@@ -92,6 +93,7 @@ final class MacAttachmentUploadTests: XCTestCase {
 
     private func connected(_ net: IsolatedTestNetwork, drafts: DraftStore? = nil) async throws -> AppStore {
         let store = AppStore(session: net.session, persistCredentials: false, drafts: drafts)
+        store.composerUploads.sessionConfiguration = net.session.configuration
         store.endpoint = net.endpoint.url.absoluteString; store.accessCode = "fixture-only"
         await store.connect(); store.setForeground(false)
         XCTAssertTrue(store.uiCanWrite)
@@ -176,15 +178,17 @@ final class MacAttachmentUploadTests: XCTestCase {
         XCTAssertTrue(store.canWrite)
         XCTAssertFalse(store.uiCanWrite)
         await gate.release()
-        await task.value
+        let firstDeadline = Date().addingTimeInterval(3)
+        while store.drafts.files(for: captured.token.key).isEmpty && Date() < firstDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         XCTAssertEqual(store.drafts.files(for: captured.token.key).count, 1)
-        let failures = store.drafts.uploadFailures(for: captured.token.key)
-        XCTAssertEqual(failures.map(\.name), ["next.txt", "last.txt"])
-        XCTAssertTrue(failures.allSatisfy { $0.detail.contains("지금은") })
+        XCTAssertTrue(store.drafts.uploadFailures(for: captured.token.key).isEmpty)
         XCTAssertEqual(net.requests.filter { $0.url?.path == "/api/uploads" }.count, 1)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: files[0].url.path))
-        XCTAssertTrue(files.dropFirst().allSatisfy { FileManager.default.fileExists(atPath: $0.url.path) },
-                      "Files rejected before loading remain owned by the loader")
+        responses.startRunner()
+        await store.refresh()
+        await task.value
+        XCTAssertEqual(store.drafts.files(for: captured.token.key).count, 3)
         XCTAssertTrue(store.composerUploads.pending.isEmpty)
         await net.close()
     }
@@ -205,13 +209,13 @@ final class MacAttachmentUploadTests: XCTestCase {
         let failures = store.drafts.uploadFailures(for: captured.token.key)
         XCTAssertEqual(failures.map(\.name), ["a.txt", "c.txt"])
         XCTAssertEqual(Set(failures.map(\.id)).count, 2)
-        XCTAssertTrue(failures.allSatisfy { $0.detail.contains("fixture upload refused") })
+        XCTAssertTrue(failures.allSatisfy { $0.detail.contains("서버 문제") })
         XCTAssertTrue(files.allSatisfy { !FileManager.default.fileExists(atPath: $0.url.path) })
         XCTAssertTrue(store.composerUploads.pending.isEmpty)
         await net.close()
     }
 
-    func testP2InvalidatedPromiseBatchRecordsEveryPreparedFilenameInOriginalDraft() async throws {
+    func testP2InvalidatedPromiseBatchShowsNoticeWithoutPersistentFailures() async throws {
         for switchProject in [true, false] {
             let net = try network(), store = try await connected(net)
             let captured = context(store)
@@ -228,8 +232,8 @@ final class MacAttachmentUploadTests: XCTestCase {
                 return files
             }.value
             let failures = store.drafts.uploadFailures(for: captured.token.key)
-            XCTAssertEqual(failures.map(\.name), ["a.txt", "b.txt", "c.txt"])
-            XCTAssertTrue(failures.allSatisfy { $0.detail.contains(switchProject ? "프로젝트" : "서버 연결") })
+            XCTAssertTrue(failures.isEmpty)
+            XCTAssertTrue(store.composerUploads.notice?.contains(switchProject ? "프로젝트" : "서버 연결") == true)
             XCTAssertTrue(store.drafts.uploadFailures(for: DraftStore.key(project: "q", target: nil)).isEmpty)
             XCTAssertTrue(store.drafts.files(for: captured.token.key).isEmpty)
             XCTAssertFalse(net.requests.contains { $0.url?.path == "/api/uploads" })
@@ -273,6 +277,7 @@ final class MacAttachmentUploadTests: XCTestCase {
     func testFinderDropThroughSurfaceAndEditorReachesUploadsAndKeepsChips() async throws {
         let net = try network()
         let store = AppStore(session: net.session, persistCredentials: false)
+        store.composerUploads.sessionConfiguration = net.session.configuration
         store.endpoint = net.endpoint.url.absoluteString; store.accessCode = "fixture-only"
         await store.connect(); store.setForeground(false)
         defer { store.disconnect() }
@@ -311,6 +316,7 @@ final class MacAttachmentUploadTests: XCTestCase {
     func testDepartingComposerDoesNotEraseNewComposerReceiver() async throws {
         let net = try network()
         let store = AppStore(session: net.session, persistCredentials: false)
+        store.composerUploads.sessionConfiguration = net.session.configuration
         store.endpoint = net.endpoint.url.absoluteString; store.accessCode = "fixture-only"
         await store.connect(); store.setForeground(false)
         defer { store.disconnect() }
@@ -387,7 +393,7 @@ final class MacAttachmentUploadTests: XCTestCase {
         await net.close()
     }
 
-    func testClearBeforeLoadRecordsReasonInsteadOfSilentlyDroppingWholeBatch() async throws {
+    func testClearBeforeLoadShowsNoticeWithoutPersistentFailures() async throws {
         let net = try network(), store = try await connected(net)
         defer { store.disconnect() }
         let captured = context(store)
@@ -399,13 +405,13 @@ final class MacAttachmentUploadTests: XCTestCase {
         await upload.value
         XCTAssertFalse(net.requests.contains { $0.url?.path == "/api/uploads" })
         let failures = store.drafts.uploadFailures(for: captured.token.key)
-        XCTAssertEqual(failures.count, 2)
-        XCTAssertTrue(failures.allSatisfy { $0.detail.contains("초안") })
+        XCTAssertTrue(failures.isEmpty)
+        XCTAssertTrue(store.composerUploads.notice?.contains("초안") == true)
         XCTAssertTrue(store.composerUploads.pending.isEmpty)
         await net.close()
     }
 
-    func testProjectSwitchDuringPreparationRecordsFailureOnlyInOriginalDraftAndCleansCopy() async throws {
+    func testProjectSwitchDuringPreparationShowsNoticeAndCleansCopy() async throws {
         let net = try network(), store = try await connected(net)
         defer { store.disconnect() }
         let captured = context(store)
@@ -426,12 +432,12 @@ final class MacAttachmentUploadTests: XCTestCase {
         XCTAssertFalse(net.requests.contains { $0.url?.path == "/api/uploads" })
         XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.url.path))
         XCTAssertTrue(store.drafts.uploadFailures(for: DraftStore.key(project: "q", target: nil)).isEmpty)
-        XCTAssertEqual(store.drafts.uploadFailures(for: captured.token.key).count, 1)
-        XCTAssertTrue(store.drafts.uploadFailures(for: captured.token.key)[0].detail.contains("프로젝트"))
+        XCTAssertTrue(store.drafts.uploadFailures(for: captured.token.key).isEmpty)
+        XCTAssertTrue(store.composerUploads.notice?.contains("프로젝트") == true)
         await net.close()
     }
 
-    func testCancelledPreparationAndConnectionABAErrorsSurviveDraftPersistenceAndComposerReplacement() async throws {
+    func testCancelledPreparationAndConnectionABARejectionsDoNotSurviveDraftPersistence() async throws {
         let saved = try PhotoAttachmentFile.write(Data(), filename: "drafts.json")
         defer { saved.cleanup() }
         try FileManager.default.removeItem(at: saved.url)
@@ -456,7 +462,8 @@ final class MacAttachmentUploadTests: XCTestCase {
         XCTAssertTrue(drafts.uploadFailures(for: captured.token.key).isEmpty)
         drafts.selectNamespace(captured.token.namespace)
         XCTAssertFalse(drafts.isCurrentUpload(captured.token))
-        XCTAssertTrue(drafts.uploadFailures(for: captured.token.key)[0].detail.contains("서버 연결"))
+        XCTAssertTrue(drafts.uploadFailures(for: captured.token.key).isEmpty)
+        XCTAssertTrue(store.composerUploads.notice?.contains("서버 연결") == true)
         let newContext = context(store)
         let cancelled = store.composerUploads.loadMedia(names: ["cancel.txt"], context: newContext, store: store) { _ in
             XCTFail("Cancelled before loading"); return []
@@ -464,8 +471,7 @@ final class MacAttachmentUploadTests: XCTestCase {
         cancelled.cancel()
         await cancelled.value
         let restored = DraftStore(namespace: captured.token.namespace, storageURL: saved.url)
-        XCTAssertEqual(restored.uploadFailures(for: captured.token.key).count, 2)
-        XCTAssertTrue(restored.uploadFailures(for: captured.token.key)[1].detail.contains("취소"))
+        XCTAssertTrue(restored.uploadFailures(for: captured.token.key).isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.url.path))
         XCTAssertFalse(net.requests.contains { $0.url?.path == "/api/uploads" })
         restored.dismissUploadFailures(for: captured.token.key)
@@ -473,7 +479,7 @@ final class MacAttachmentUploadTests: XCTestCase {
         await net.close()
     }
 
-    func testMissingFileInvalidImageAndEmptyPreparationAllLeaveReasonsAndAllowOtherFiles() async throws {
+    func testMissingFileInvalidImageAndEmptyPreparationShowNoticeAndAllowOtherFiles() async throws {
         let net = try network(), store = try await connected(net)
         defer { store.disconnect() }
         let captured = context(store)
@@ -484,32 +490,26 @@ final class MacAttachmentUploadTests: XCTestCase {
                                                     context: captured, store: store))
         try await drain(store)
         await store.composerUploads.loadMedia(names: ["empty"], context: captured, store: store) { _ in [] }.value
-        XCTAssertEqual(store.drafts.uploadFailures(for: captured.token.key).count, 3)
-        XCTAssertTrue(store.drafts.uploadFailures(for: captured.token.key).allSatisfy { !$0.detail.isEmpty })
+        XCTAssertTrue(store.drafts.uploadFailures(for: captured.token.key).isEmpty)
+        XCTAssertNotNil(store.composerUploads.notice)
         XCTAssertEqual(store.drafts.files(for: captured.token.key).count, 1)
         XCTAssertEqual(net.requests.filter { $0.url?.path == "/api/uploads" }.count, 1)
         await net.close()
     }
 
-    func testBridgeMissingReceiverEmptyDropAndReadOnlyRejectionsAreVisibleInOriginalDraft() {
+    func testBridgeMissingReceiverAndEmptyDropShowTransientNotices() {
         let drafts = DraftStore(persist: false, namespace: "a")
-        let token = drafts.uploadToken(for: "draft")
+        let uploads = ComposerAttachmentUploads()
         let intake = MacAttachmentIntake(), owner = UUID()
-        intake.install(owner: owner, receive: { _ in true }) { reason in
-            drafts.failUpload(name: "첨부", token: token, detail: reason)
-        }
+        intake.install(owner: owner, receive: { _ in true }) { reason in uploads.reportRejection(reason) }
         intake.remove(owner: owner)
         XCTAssertFalse(intake.accept([.image(Data())], policy: writable))
         XCTAssertFalse(intake.accept([], policy: writable))
-        let blocked = MacAttachmentPolicy(archived: false, demo: false, connected: false, writable: false, missingTarget: false)
-        XCTAssertFalse(intake.accept([.image(Data())], policy: blocked))
-        XCTAssertEqual(drafts.uploadFailures(for: "draft").count, 3)
-        XCTAssertTrue(drafts.uploadFailures(for: "draft")[0].detail.contains("준비"))
-        XCTAssertTrue(drafts.uploadFailures(for: "draft")[1].detail.contains("읽지"))
-        XCTAssertTrue(drafts.uploadFailures(for: "draft")[2].detail.contains("서버 연결"))
+        XCTAssertTrue(drafts.uploadFailures(for: "draft").isEmpty)
+        XCTAssertNotNil(uploads.notice)
     }
 
-    func testHTTPFailureLeavesReasonAndRunnerReadOnlyRejectsBeforePOST() async throws {
+    func testHTTPFailureLeavesReasonAndRunnerReadOnlyQueuesWithoutPOST() async throws {
         let net = try network(failUploads: true), store = try await connected(net)
         defer { store.disconnect() }
         let captured = context(store)
@@ -519,7 +519,7 @@ final class MacAttachmentUploadTests: XCTestCase {
         XCTAssertEqual(net.requests.filter { $0.url?.path == "/api/uploads" }.count, 1)
         XCTAssertTrue(store.drafts.files(for: captured.token.key).isEmpty)
         XCTAssertEqual(store.drafts.uploadFailures(for: captured.token.key).count, 1)
-        XCTAssertTrue(store.drafts.uploadFailures(for: captured.token.key)[0].detail.contains("fixture upload refused"))
+        XCTAssertTrue(store.drafts.uploadFailures(for: captured.token.key)[0].detail.contains("서버 문제"))
         await net.close()
 
         let readOnly = try network(writable: false)
@@ -529,10 +529,14 @@ final class MacAttachmentUploadTests: XCTestCase {
         defer { blocked.disconnect() }
         XCTAssertFalse(blocked.uiCanWrite)
         let blockedContext = context(blocked)
-        await blocked.composerUploads.upload([file.url], context: blockedContext, store: blocked).value
+        blocked.composerUploads.sessionConfiguration = readOnly.session.configuration
+        let queued = blocked.composerUploads.upload([file.url], context: blockedContext, store: blocked)
+        try await Task.sleep(for: .milliseconds(100))
         XCTAssertFalse(readOnly.requests.contains { $0.url?.path == "/api/uploads" })
-        XCTAssertEqual(blocked.drafts.uploadFailures(for: blockedContext.token.key).count, 1)
-        XCTAssertTrue(blocked.drafts.uploadFailures(for: blockedContext.token.key)[0].detail.contains("지금은"))
+        XCTAssertTrue(blocked.drafts.uploadFailures(for: blockedContext.token.key).isEmpty)
+        XCTAssertEqual(blocked.composerUploads.pending.count, 1)
+        queued.cancel()
+        await queued.value
         await readOnly.close()
     }
 }

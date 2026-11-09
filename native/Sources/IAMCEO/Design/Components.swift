@@ -1300,3 +1300,11 @@ struct PanelCaption: View {
         .accessibilityAddTraits(.isHeader)
     }
 }
+
+extension View {
+    /// A 44pt touch target (iPhone) that does not make the line taller: the hit area grows by `slack` above and below
+    /// while the layout keeps the label's own height, so a footer link sits as close to its bubble as plain text.
+    func quietHitArea(_ slack: CGFloat = 12) -> some View {
+        padding(.vertical, isMac ? 0 : slack).contentShape(Rectangle()).padding(.vertical, isMac ? 0 : -slack)
+    }
+}

@@ -1060,7 +1060,7 @@ final class AppStore: ProjectManagementStore {
     }
 
     /// The caller may pass the shared composer DraftStore. The immutable snapshot is durable before POST.
-    @discardableResult func sendMessage(text: String, targetMemberID: String? = nil, attachmentIDs: [String] = []) async -> Bool {
+    @discardableResult func sendMessage(text: String, targetMemberID: String? = nil, attachmentIDs: [String] = [], contextFileID: String? = nil) async -> Bool {
         guard !isDemo else { errorMessage = "샘플은 읽기 전용입니다."; return false }
         guard canWrite, let projectID = selectedProjectID, let submissions,
               !isSending(projectID: projectID, targetMemberID: targetMemberID),
@@ -1092,7 +1092,7 @@ final class AppStore: ProjectManagementStore {
             let attempt = try submissions.prepareMessage(projectID: projectID, targetMemberID: targetMemberID, draft: drafts.snapshot(for: key))
             let outcome: (value: Message?, error: Error?) = await perform(actionKey, refreshAfter: false, ownsPendingAction: true) { api in
                 let request = try submissions.beginMessage(id: attempt.id, allowUnconfirmedRetry: !strictWriteContract)
-                return try await api.send("/api/projects/\(APIClient.segment(projectID))/messages", body: request, contractVersion: strictWriteContract ? 2 : nil)
+                return try await api.sendMessage(projectID: projectID, request: request, contextFileID: contextFileID, contractVersion: strictWriteContract ? 2 : nil)
             }
             guard epoch == generation else { return false }
             if let message = outcome.value {
@@ -1264,10 +1264,18 @@ final class AppStore: ProjectManagementStore {
         }
     }
 
-    @discardableResult func setTodoDone(_ todo: Todo, done: Bool) async -> Bool {
+    /// T8 loads this before reading body; returned data remains bound to the current API actor.
+    func fileBody(id: String, forceRefresh: Bool = false) async throws -> FileDoc {
+        guard let api else { throw APIError(status: 0, message: "연결한 뒤 자료를 열어 주세요.") }
+        let file = try await api.fileBody(id: id, forceRefresh: forceRefresh)
+        guard self.api === api, file.projectId == selectedProjectID else { throw APIError(status: 0, message: "현재 프로젝트의 자료를 선택해 주세요.") }
+        return file
+    }
+
+    @discardableResult func setTodoDone(_ todo: Todo, done: Bool, note: String? = nil, fileIDs: [String] = []) async -> Bool {
         if !strictWriteContract {
             let result: Todo? = await mutate("todo:\(todo.id)") { api in
-                try await api.send("/api/todos/\(APIClient.segment(todo.id))/done", body: TodoPatchRequest(done: done))
+                try await api.completeTodo(id: todo.id, done: done, note: note, fileIDs: fileIDs).todo
             }
             return result != nil
         }
@@ -1282,7 +1290,7 @@ final class AppStore: ProjectManagementStore {
         } catch { handle(error); return false }
         todoWrites[todo.id] = .sending
         let outcome = await perform("todo:\(todo.id)", refreshAfter: false) { api in
-            try await api.patchTodo(id: todo.id, request: TodoPatchRequest(done: done), revision: revision)
+            try await api.completeTodo(id: todo.id, done: done, note: note, fileIDs: fileIDs, revision: revision)
         }
         guard epoch == generation else { return false }
         if let result = outcome.value, result.todo.id == todo.id, result.todo.done == done, result.revision >= revision {

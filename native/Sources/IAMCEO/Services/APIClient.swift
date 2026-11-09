@@ -42,9 +42,14 @@ actor APIClient {
     let endpoint: ServerEndpoint
     private let accessCode: String
     private let session: URLSession
-    init(endpoint: ServerEndpoint, accessCode: String, session: URLSession? = nil) {
+    // Enable only after T8 switches every file reader to fileBody(id:).
+    let liteStateEnabled: Bool
+    private var fileBodyCache: [String: FileDoc] = [:]
+    private var fileBodyOrder: [String] = []
+    init(endpoint: ServerEndpoint, accessCode: String, session: URLSession? = nil, liteStateEnabled: Bool = false) {
         self.endpoint = endpoint
         self.accessCode = accessCode
+        self.liteStateEnabled = liteStateEnabled
         if let session { self.session = session }
         else {
             let config = URLSessionConfiguration.ephemeral
@@ -52,6 +57,39 @@ actor APIClient {
             config.timeoutIntervalForResource = 160
             config.httpShouldSetCookies = false
             self.session = URLSession(configuration: config, delegate: OriginRedirectDelegate(), delegateQueue: nil)
+        }
+    }
+
+    /// Cache belongs to this endpoint/credential actor; never shared across servers or sign-ins.
+    /// File IDs identify immutable snapshots. forceRefresh is for legacy documents edited in place.
+    func fileBody(id: String, forceRefresh: Bool = false) async throws -> FileDoc {
+        if !forceRefresh, let cached = fileBodyCache[id] { return cached }
+        let file: FileDoc = try await request("/api/files/\(Self.segment(id))")
+        guard file.id == id else { throw APIError(status: 0, message: "자료를 다시 확인해 주세요.") }
+        fileBodyCache[id] = file
+        fileBodyOrder.removeAll { $0 == id }; fileBodyOrder.append(id)
+        while fileBodyOrder.count > 32 { fileBodyCache.removeValue(forKey: fileBodyOrder.removeFirst()) }
+        return file
+    }
+    func clearFileBodyCache() { fileBodyCache.removeAll(); fileBodyOrder.removeAll() }
+    func sendMessage(projectID: String, request: SendMessageRequest, contextFileID: String? = nil, contractVersion: Int? = nil) async throws -> Message {
+        var body = request
+        if let contextFileID { body.contextFileId = contextFileID }
+        return try await send("/api/projects/\(Self.segment(projectID))/messages", body: body, contractVersion: contractVersion)
+    }
+    func completeTodo(id: String, done: Bool, note: String? = nil, fileIDs: [String] = [], revision: Int? = nil) async throws -> TodoWriteResult {
+        let body = TodoCompletionRequest(done: done, note: note, fileIds: fileIDs.isEmpty ? nil : fileIDs)
+        if let revision { return try await send("/api/todos/\(Self.segment(id))/done", body: body, ifMatch: revision, contractVersion: 2) }
+        let todo: Todo = try await send("/api/todos/\(Self.segment(id))/done", body: body)
+        return TodoWriteResult(todo: todo, revision: 0)
+    }
+    /// T9 calls after the app's own Mac notification permission has been enabled.
+    func setMacScriptNotifications(_ enabled: Bool, revision: Int? = nil) async throws {
+        struct Patch: Encodable, Sendable { let macScriptNotifications: Bool }
+        if let revision {
+            let _: SettingsWriteResult = try await send("/api/settings", method: "PATCH", body: Patch(macScriptNotifications: enabled), ifMatch: revision, contractVersion: 2)
+        } else {
+            let _: Settings = try await send("/api/settings", method: "PATCH", body: Patch(macScriptNotifications: enabled))
         }
     }
 
@@ -80,7 +118,7 @@ actor APIClient {
     func request<T: Decodable & Sendable>(_ path: String, method: String = "GET", body: Data? = nil, timeout: TimeInterval? = nil, ifMatch: Int? = nil, contractVersion: Int? = nil) async throws -> T {
         let (data, _) = try await raw(path, method: method, body: body, contentType: body == nil ? nil : "application/json", timeout: timeout, ifMatch: ifMatch, contractVersion: contractVersion)
         do { return try JSONDecoder().decode(T.self, from: data) }
-        catch { throw APIError(status: 0, message: "서버 응답이 이 앱과 호환되지 않습니다: \(error.localizedDescription)") }
+        catch { throw APIError(status: 0, message: "서버 응답이 이 앱과 호환되지 않습니다. 앱과 서버 버전을 확인해 주세요.") }
     }
     func send<T: Decodable & Sendable, B: Encodable & Sendable>(_ path: String, method: String = "POST", body: B, timeout: TimeInterval? = nil, ifMatch: Int? = nil, contractVersion: Int? = nil) async throws -> T {
         try await request(path, method: method, body: JSONEncoder().encode(body), timeout: timeout, ifMatch: ifMatch, contractVersion: contractVersion)
@@ -90,7 +128,14 @@ actor APIClient {
         if let ifMatch, !(0...9_007_199_254_740_991).contains(ifMatch) {
             throw APIError(status: 0, message: "올바른 revision이 필요합니다.")
         }
-        let url = try authorizedURL(path)
+        var readPath = path
+        if liteStateEnabled, method == "GET", var parts = URLComponents(string: path),
+           parts.path == "/api/sync" || (parts.path.hasPrefix("/api/projects/") && parts.path.hasSuffix("/state") && !parts.path.contains("/archive/")) {
+            var query = (parts.queryItems ?? []).filter { $0.name != "lite" }
+            query.append(URLQueryItem(name: "lite", value: "1")); parts.queryItems = query
+            readPath = parts.string ?? path
+        }
+        let url = try authorizedURL(readPath)
         var req = URLRequest(url: url)
         req.httpMethod = method
         req.timeoutInterval = timeout ?? (method == "GET" ? 30 : 20)
@@ -125,7 +170,9 @@ actor APIClient {
         guard version == 1 || version == 2 else {
             throw APIError(status: 0, message: "지원하지 않는 실시간 프로토콜입니다.")
         }
-        return try authorizedWebSocketRequest("/ws", query: version == 2 ? [URLQueryItem(name: "v", value: "2")] : [])
+        var query = version == 2 ? [URLQueryItem(name: "v", value: "2")] : []
+        if liteStateEnabled { query.append(URLQueryItem(name: "lite", value: "1")) }
+        return try authorizedWebSocketRequest("/ws", query: query)
     }
     func terminalStreamRequest(memberID: String, mode: TerminalStreamMode, cols: Int, rows: Int, leaseID: String?, sizePolicy: TerminalSizePolicy = .fit) throws -> URLRequest {
         var query = [URLQueryItem(name: "mode", value: mode.rawValue), URLQueryItem(name: "cols", value: String(cols)), URLQueryItem(name: "rows", value: String(rows)), URLQueryItem(name: "size", value: sizePolicy.rawValue)]
@@ -277,6 +324,7 @@ struct SendMessageRequest: Encodable, Sendable {
     let text: String
     let targetMemberId: String?
     let attachmentIds: [String]
+    var contextFileId: String? = nil
 }
 struct AnswerRequest: Encodable, Sendable {
     let choice: String?

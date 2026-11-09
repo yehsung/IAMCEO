@@ -97,7 +97,7 @@ struct ChatMineRow: View {
     private var info: DeliveryInfo? { DeliveryInfo(message.delivery) }
     private var note: String? {
         let value = message.deliveryNote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return value.isEmpty ? nil : value
+        return value.isEmpty ? nil : plainDeliveryNote(value)
     }
     private var lead: Member? { store.members.first { $0.kind == "conductor" || $0.kind == "root" } }
     /// Who the message waits on: the targeted member, or the lead for a project message.
@@ -138,6 +138,8 @@ struct ChatMineRow: View {
             }
             .frame(maxWidth: 620, alignment: .trailing)
         }
+        // A footer with a reason line belongs to this bubble: keep clear air below it before the next message.
+        .padding(.bottom, info != nil && note != nil ? 6 : 0)
     }
 
     /// Web .th-mine: gap 8, padding 10 15 11.
@@ -198,8 +200,7 @@ struct ChatMineRow: View {
                 .foregroundStyle(chatDeliveryColor(message.delivery))
                 .lineLimit(1)
                 .fixedSize()
-                .padding(.vertical, isMac ? 0 : 6)
-                .contentShape(Rectangle())
+                .quietHitArea()
         }
         .buttonStyle(.plain)
         .help(info.explanation)
@@ -223,8 +224,8 @@ struct ChatMineRow: View {
             .font(ChatFont.footerAction)
             .foregroundStyle(locked || busy ? CE.ink3 : CE.ink)
             .padding(.horizontal, 4)
-            .frame(minHeight: isMac ? 24 : 44)
-            .contentShape(Rectangle())
+            .frame(minHeight: isMac ? 24 : nil)
+            .quietHitArea()
         }
         .buttonStyle(.plain)
         .disabled(locked || busy || resending)
@@ -1440,8 +1441,8 @@ private struct ChatFooterLink: View {
                 .font(ChatFont.footerAction)
                 .foregroundStyle(CE.ink)
                 .padding(.horizontal, 4)
-                .frame(minHeight: isMac ? 24 : 44)
-                .contentShape(Rectangle())
+                .frame(minHeight: isMac ? 24 : nil)
+                .quietHitArea()
         }
         .buttonStyle(.plain)
         .fixedSize()

@@ -14,7 +14,7 @@ enum TerminalPlatform: Sendable {
         #endif
     }
     var controlSizePolicy: TerminalSizePolicy { .fit }
-    var openingMode: TerminalStreamMode { .control }
+    var openingMode: TerminalStreamMode { .observe }
     var buffersStartingInput: Bool { true }
     var observeHint: String { "읽기 전용 화면입니다" }
     func usesCoreGrid(mode: TerminalStreamMode) -> Bool { mode == .observe || controlSizePolicy == .core }
@@ -294,4 +294,12 @@ struct TerminalPresentation {
         userScroll && !programmatic && !layingOut
     }
     static func renderScale(zoom: CGFloat, screen: CGFloat) -> CGFloat { max(1, zoom) * screen }
+}
+
+/// One reading preference shared by the live and legacy iPhone renderers (12–36pt).
+enum TerminalReadingScale {
+    static let preferenceKey = "terminalReadingZoom"
+    static func zoom(_ value: Double) -> Double {
+        value.isFinite ? min(max(value, 1), 3) : 1
+    }
 }

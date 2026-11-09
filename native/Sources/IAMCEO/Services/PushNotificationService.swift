@@ -16,6 +16,12 @@ struct PushSystemSettings: Sendable, Equatable {
     func register(generation: UUID) -> Bool
     func cancelPendingRegistration()
     func clearDelivered(serverID: String) async
+    /// nil means there is no foreground surface to present the one-time invitation.
+    func offerNotificationSetup() async -> Bool?
+}
+
+extension PushAuthorizationProvider {
+    func offerNotificationSetup() async -> Bool? { nil }
 }
 
 enum PushRegistrationState: Equatable {
@@ -33,6 +39,7 @@ private struct PushLocalState: Codable {
     }
     var installationID = UUID().uuidString.lowercased()
     var hosts: [String: Host] = [:]
+    var notificationSetupOffered: Bool? = nil
 }
 
 @MainActor @Observable
@@ -53,6 +60,7 @@ final class PushNotificationService {
     @ObservationIgnored private var enableRevision: Int?
     @ObservationIgnored private var operation: UUID?
     @ObservationIgnored private var deferredToken = false
+    @ObservationIgnored private var offeringSetup = false
     @ObservationIgnored private var uploaded: (token: Data, at: Date)?
     private static let persistenceKey = "iamceo.push.registration.v1"
 
@@ -82,13 +90,24 @@ final class PushNotificationService {
         state = local.hosts[key]?.revocationPending == true ? .revocationPending : .disabled
     }
 
-    /// Launch/reconnect/foreground hook. It never requests permission or implicitly enables delivery.
+    /// Launch/reconnect/foreground hook. The invitation requests OS permission only after an explicit "지금 켜기".
     func foreground() async {
         guard let key = hostKey else { state = .needsHost; return }
         let id = generation
         if local.hosts[key]?.revocationPending == true { await revoke(); return }
         if local.hosts[key]?.disablePending == true { await disable(); return }
-        guard local.hosts[key]?.optedIn == true else { state = .disabled; return }
+        guard local.hosts[key]?.optedIn == true else {
+            state = .disabled
+            guard local.notificationSetupOffered != true, !offeringSetup, environment != .unknown else { return }
+            offeringSetup = true
+            let choice = await provider.offerNotificationSetup()
+            offeringSetup = false
+            guard let choice else { return }
+            local.notificationSetupOffered = true; persist()
+            guard valid(id) else { return }
+            if choice { await enable() }
+            return
+        }
         guard environment != .unknown else { state = .unsupported; return }
         guard operation == nil else { return }
         operation = id

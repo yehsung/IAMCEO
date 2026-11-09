@@ -6,8 +6,8 @@ import SwiftTerm
 
 final class TerminalStreamTests: XCTestCase {
     func testPlatformPoliciesAndPureGridSelection() {
-        XCTAssertEqual(TerminalPlatform.mac.openingMode, .control)
-        XCTAssertEqual(TerminalPlatform.iPhone.openingMode, .control)
+        XCTAssertEqual(TerminalPlatform.mac.openingMode, .observe)
+        XCTAssertEqual(TerminalPlatform.iPhone.openingMode, .observe)
         XCTAssertEqual(TerminalPlatform.mac.controlSizePolicy, .fit)
         XCTAssertEqual(TerminalPlatform.iPhone.controlSizePolicy, .fit)
         XCTAssertTrue(TerminalPlatform.mac.buffersStartingInput)
@@ -115,6 +115,9 @@ final class TerminalStreamTests: XCTestCase {
         let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 390, height: 500), coordinator: coordinator)
         coordinator.host = host
         defer { client.dispose() }
+        XCTAssertEqual(host.terminal.font.pointSize, 12)
+        XCTAssertEqual(host.minimumZoomScale, 1); XCTAssertEqual(host.maximumZoomScale, 3)
+        XCTAssertNotNil(host.viewForZooming(in: host))
         XCTAssertFalse(host.terminal.canBecomeFirstResponder)
         XCTAssertFalse(host.terminal.becomeFirstResponder())
         XCTAssertNil(host.terminal.inputAccessoryView)
@@ -123,6 +126,7 @@ final class TerminalStreamTests: XCTestCase {
             following: .constant(true), onPendingInput: { _ in XCTFail() }, onSize: { _,_ in })
         host.updateInputMode()
         XCTAssertTrue(host.terminal.canBecomeFirstResponder); XCTAssertNotNil(host.terminal.inputAccessoryView)
+        XCTAssertNotNil(host.viewForZooming(in: host), "Input mode also allows pinch zoom")
         coordinator.parent = parent; host.updateInputMode()
         XCTAssertFalse(host.terminal.canBecomeFirstResponder); XCTAssertFalse(host.terminal.isFirstResponder)
         XCTAssertNil(host.terminal.inputAccessoryView)

@@ -146,8 +146,10 @@ struct MacComposerTextView: NSViewRepresentable {
             return receive(items)
         }
         override func keyDown(with event: NSEvent) {
-            if event.keyCode == 36 || event.keyCode == 76 {
-                if event.modifierFlags.intersection([.shift, .option]).isEmpty && !hasMarkedText() { submit?(); return }
+            if (event.keyCode == 36 || event.keyCode == 76) && !hasMarkedText() {
+                if event.modifierFlags.intersection([.shift, .option]).isEmpty { submit?() }
+                else { insertNewline(nil) }
+                return
             }
             super.keyDown(with: event)
         }

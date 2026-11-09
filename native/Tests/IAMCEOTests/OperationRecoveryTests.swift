@@ -297,6 +297,7 @@ import XCTest
             let store = try await connect(network, root: root), member = store.members[0]
             let session = TerminalSession(platform: .mac) { _, _, _, _, _, _, _ in }
             session.appear(store: store, member: member, active: true)
+            session.beginInput(store: store, member: member)
             for _ in 0..<200 where session.starting { try await Task.sleep(for: .milliseconds(10)) }
             XCTAssertTrue(session.missingTerminal, "The window offers its existing wake guidance")
             XCTAssertNil(store.errorMessage)

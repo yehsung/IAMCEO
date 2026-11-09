@@ -110,7 +110,7 @@ export interface OrchestratorApi {
   /** 끝내 실패한 대표 글을 같은 id 로 다시 넣는다. */
   resendMessage?(existing: Message): Promise<Message>;
   /** 값이 실제로 바뀔 때만 불린다. */
-  setTodoDone(todoId: string, done: boolean): Promise<Todo>;
+  setTodoDone(todoId: string, done: boolean, completion?: { note?: string; fileIds?: string[] }): Promise<Todo>;
   /** AI 가 닫은 결재(closeKind 있음)를 대표가 다시 연다. 아니면 409. */
   reopenDecision?(decisionId: string): Promise<Decision>;
   /** '지금 판 정리'. 총괄에게 판 정리 지시를 넣는다(없거나 잠들었으면 띄운다). http 가 연결을 먼저 본다. */

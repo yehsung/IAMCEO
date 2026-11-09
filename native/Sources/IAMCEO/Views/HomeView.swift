@@ -515,7 +515,7 @@ struct HomeView: View {
                     turnLine("exclamationmark.bubble", tint: CE.danger) {
                         Text(homePlainLine(message.body)).font(CEFont.rowTitle).foregroundStyle(CE.ink)
                             .lineSpacing(Self.rowTitleLeading).lineLimit(2).multilineTextAlignment(.leading)
-                        Text(["전달 실패", message.deliveryNote].compactMap { $0 }.joined(separator: " · "))
+                        Text(["전달 실패", message.deliveryNote.map(plainDeliveryNote)].compactMap { $0 }.joined(separator: " · "))
                             .font(CEFont.secondary).foregroundStyle(CE.ink2).lineSpacing(CELeading.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

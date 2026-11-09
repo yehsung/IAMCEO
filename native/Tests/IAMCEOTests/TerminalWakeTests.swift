@@ -297,6 +297,8 @@ import XCTest
         var observed = false
         let session = TerminalSession(platform: .mac) { _, _, mode, _, _, _, _ in observed = mode == .observe }
         session.appear(store: store, member: member, active: true)
+        observed = false
+        session.beginInput(store: store, member: member)
         try await eventually { observed }
         XCTAssertEqual(session.notice, "다른 기기에서 터미널을 조작하고 있습니다")
         XCTAssertEqual(store.errorMessage, "다른 기기에서 터미널을 조작하고 있습니다")

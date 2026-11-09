@@ -192,13 +192,13 @@ struct GitHubCloneView: View {
         defer { loading = false }
         do { repositories = try await store.githubRepositories() }
         catch let issue as APIError where issue.status == 404 { repositories = GitHubRepositories(available: false) }
-        catch { repositories = GitHubRepositories(available: false); self.error = error.localizedDescription }
+        catch { repositories = GitHubRepositories(available: false); self.error = friendlyLoadError(error, what: "저장소", verb: "읽지") }
         do {
             switch try await store.preferredFolder(forClone: true) {
             case .listing(let location): parent = location.path
             case .legacy: parent = store.recentProjectParent ?? "~/code"
             }
-        } catch { self.error = error.localizedDescription }
+        } catch { self.error = friendlyLoadError(error, what: "저장소", verb: "읽지") }
     }
     private func clone() async {
         guard canClone, let repo, let client = store.api else { return }
@@ -229,7 +229,7 @@ struct GitHubCloneView: View {
                 }
             }
         } catch is CancellationError { }
-        catch { self.error = error.localizedDescription }
+        catch { self.error = friendlyLoadError(error, what: "저장소", verb: "읽지") }
     }
 }
 

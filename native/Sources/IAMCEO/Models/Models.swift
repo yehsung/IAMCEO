@@ -67,6 +67,8 @@ struct ProjectSummary: Codable, Sendable, Identifiable {
     var connection: ProjectConnection = ProjectConnection()
     var decisionCount: Int = 0
     var todoCount: Int = 0
+    var needsCount: Int? = nil
+    var needsDanger: Bool? = nil
     var inboxCount: Int = 0
     var workingCount: Int = 0
     var blockedCount: Int = 0
@@ -85,6 +87,8 @@ extension ProjectSummary {
         connection = try c.decodeIfPresent(ProjectConnection.self, forKey: ModelKey("connection")) ?? ProjectConnection()
         decisionCount = try c.decodeIfPresent(Int.self, forKey: ModelKey("decisionCount")) ?? 0
         todoCount = try c.decodeIfPresent(Int.self, forKey: ModelKey("todoCount")) ?? 0
+        needsCount = try c.decodeIfPresent(Int.self, forKey: ModelKey("needsCount"))
+        needsDanger = try c.decodeIfPresent(Bool.self, forKey: ModelKey("needsDanger"))
         inboxCount = try c.decodeIfPresent(Int.self, forKey: ModelKey("inboxCount")) ?? 0
         workingCount = try c.decodeIfPresent(Int.self, forKey: ModelKey("workingCount")) ?? 0
         blockedCount = try c.decodeIfPresent(Int.self, forKey: ModelKey("blockedCount")) ?? 0
@@ -261,6 +265,8 @@ struct Todo: Codable, Sendable, Identifiable {
     var who: String = ""
     var title: String = ""
     var detail: String = ""
+    var completionNote: String? = nil
+    var completionFileIds: [String] = []
     var done: Bool = false
     var doneAt: String? = nil
     var createdAt: String = ""
@@ -277,6 +283,8 @@ extension Todo {
         who = try c.decodeIfPresent(String.self, forKey: ModelKey("who")) ?? ""
         title = try c.decodeIfPresent(String.self, forKey: ModelKey("title")) ?? ""
         detail = try c.decodeIfPresent(String.self, forKey: ModelKey("detail")) ?? ""
+        completionNote = try c.decodeIfPresent(String.self, forKey: ModelKey("completionNote"))
+        completionFileIds = try c.decodeIfPresent([String].self, forKey: ModelKey("completionFileIds")) ?? []
         done = try c.decodeIfPresent(Bool.self, forKey: ModelKey("done")) ?? false
         doneAt = try c.decodeIfPresent(String.self, forKey: ModelKey("doneAt"))
         createdAt = try c.decodeIfPresent(String.self, forKey: ModelKey("createdAt")) ?? ""
@@ -350,6 +358,11 @@ struct Message: Codable, Sendable, Identifiable {
     var targetName: String? = nil
     var decisionId: String? = nil
     var fileId: String? = nil
+    var fileIds: [String] = []
+    var supersedes: String? = nil
+    var supersededBy: String? = nil
+    var contextFileId: String? = nil
+    var deliveryInfo: [MessageDeliveryInfo]? = nil
     var attachments: [Attachment] = []
     var delivery: String? = nil
     var deliveryNote: String? = nil
@@ -370,6 +383,11 @@ extension Message {
         targetName = try c.decodeIfPresent(String.self, forKey: ModelKey("targetName"))
         decisionId = try c.decodeIfPresent(String.self, forKey: ModelKey("decisionId"))
         fileId = try c.decodeIfPresent(String.self, forKey: ModelKey("fileId"))
+        fileIds = try c.decodeIfPresent([String].self, forKey: ModelKey("fileIds")) ?? fileId.map { [$0] } ?? []
+        supersedes = try c.decodeIfPresent(String.self, forKey: ModelKey("supersedes"))
+        supersededBy = try c.decodeIfPresent(String.self, forKey: ModelKey("supersededBy"))
+        contextFileId = try c.decodeIfPresent(String.self, forKey: ModelKey("contextFileId"))
+        deliveryInfo = try c.decodeIfPresent([MessageDeliveryInfo].self, forKey: ModelKey("deliveryInfo"))
         attachments = try c.decodeIfPresent([Attachment].self, forKey: ModelKey("attachments")) ?? []
         delivery = try c.decodeIfPresent(String.self, forKey: ModelKey("delivery"))
         deliveryNote = try c.decodeIfPresent(String.self, forKey: ModelKey("deliveryNote"))
@@ -389,6 +407,7 @@ struct FileDoc: Codable, Sendable, Identifiable {
     var attachments: [Attachment] = []
     var createdAt: String = ""
     var order: Int = 0
+    var reused: Bool? = nil
 }
 extension FileDoc {
     init(from decoder: Decoder) throws {
@@ -404,6 +423,7 @@ extension FileDoc {
         path = try c.decodeIfPresent(String.self, forKey: ModelKey("path"))
         attachments = try c.decodeIfPresent([Attachment].self, forKey: ModelKey("attachments")) ?? []
         createdAt = try c.decodeIfPresent(String.self, forKey: ModelKey("createdAt")) ?? ""
+        reused = try c.decodeIfPresent(Bool.self, forKey: ModelKey("reused"))
         order = try c.decodeIfPresent(Int.self, forKey: ModelKey("order")) ?? 0
     }
 }
@@ -447,6 +467,7 @@ struct Settings: Codable, Sendable {
     var compactAtPct: Int = 70
     var maxAwakeWorkers: Int = 8
     var notifyMac: Bool = false
+    var macScriptNotifications: Bool = true
     var boardTidyHours: Double = 6
     var contextWindowDefault: Int? = nil
     var contextWindows: [String: Int]? = nil
@@ -461,6 +482,7 @@ extension Settings {
         maxConcurrentTurns = try c.decodeIfPresent(Int.self, forKey: ModelKey("maxConcurrentTurns")) ?? 4
         compactAtPct = try c.decodeIfPresent(Int.self, forKey: ModelKey("compactAtPct")) ?? 70
         maxAwakeWorkers = try c.decodeIfPresent(Int.self, forKey: ModelKey("maxAwakeWorkers")) ?? 8
+        macScriptNotifications = try c.decodeIfPresent(Bool.self, forKey: ModelKey("macScriptNotifications")) ?? true
         notifyMac = try c.decodeIfPresent(Bool.self, forKey: ModelKey("notifyMac")) ?? false
         boardTidyHours = try c.decodeIfPresent(Double.self, forKey: ModelKey("boardTidyHours")) ?? 6
         contextWindowDefault = try c.decodeIfPresent(Int.self, forKey: ModelKey("contextWindowDefault"))
@@ -757,6 +779,7 @@ struct DeliveryNotices: Codable, Sendable {
     let version: Int
     let members: [MemberDeliverySummary]
     let unassigned: UnassignedDeliverySummary
+    var reportNotices: [MissingReportNotice]? = nil
 }
 struct UnassignedDeliverySummary: Codable, Sendable {
     let undeliveredCount: Int
@@ -773,6 +796,10 @@ struct MemberDeliverySummary: Codable, Sendable {
     let waitingBehindCount: Int
     let oldestAt: String?
     let reasons: [DeliveryReasonCount]
+    var waitReason: String? = nil
+    var waitingSince: String? = nil
+    var runLimit: DeliveryRunLimit? = nil
+    var waitReasons: [DeliveryWaitReasonCount]? = nil
 }
 struct DeliveryReasonCount: Codable, Sendable {
     let code: String
@@ -807,6 +834,9 @@ struct DeliveryNoticeItem: Codable, Sendable, Identifiable {
     var allowedActions: [DeliveryRecoveryAction]? = nil
     var ref: DeliveryReference? = nil
     var preview: String? = nil
+    var waitReason: String? = nil
+    var waitingSince: String? = nil
+    var runLimit: DeliveryRunLimit? = nil
 
     /// Future reasons cannot authorize another physical input even if an action is advertised.
     var safeAllowedActions: [DeliveryRecoveryAction] {
@@ -919,4 +949,33 @@ struct MemberLifecycleState: Codable, Sendable {
     var phase: String? = nil
     var reason: String? = nil
     var updatedAt: String? = nil
+}
+
+struct DeliveryRunLimit: Codable, Sendable { let used: Int; let limit: Int }
+struct MessageDeliveryInfo: Codable, Sendable {
+    let deliveryId: String
+    let memberId: String
+    var waitReason: String? = nil
+    var waitingSince: String? = nil
+    var runLimit: DeliveryRunLimit? = nil
+}
+struct DeliveryWaitReasonCount: Codable, Sendable {
+    let waitReason: String
+    let waitingSince: String
+    var runLimit: DeliveryRunLimit? = nil
+    let count: Int
+}
+struct MissingReportNotice: Codable, Sendable, Identifiable {
+    var id: String { runId }
+    let kind: String
+    let runId: String
+    let memberId: String
+    let messageId: String
+    let createdAt: String
+    let title: String
+}
+struct TodoCompletionRequest: Encodable, Sendable {
+    let done: Bool
+    var note: String? = nil
+    var fileIds: [String]? = nil
 }

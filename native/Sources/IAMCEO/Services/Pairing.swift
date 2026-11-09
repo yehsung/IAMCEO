@@ -3,6 +3,34 @@ import Foundation
 import Darwin
 #endif
 
+/// Connection failures describe recovery without guessing whether the Mac is asleep.
+enum ConnectionRecovery {
+    static let checklist = "같은 Wi-Fi에 연결되어 있거나 두 기기의 Tailscale이 켜져 있는지, Mac의 IAMCEO가 켜져 있는지, 서버 주소가 맞는지 확인해 주세요."
+
+    static func reason(_ raw: String) -> String {
+        let text = raw.lowercased()
+        if text.contains("401") || text.contains("인증이 필요") || text.contains("unauthorized") {
+            return "접속 코드가 맞지 않거나 바뀌었습니다. Mac에서 새 QR을 만들어 다시 연결해 주세요."
+        }
+        if text.contains("timed out") || text.contains("시간이 초과") || text.contains("timeout") {
+            return "Mac의 응답을 기다리다 시간이 지났습니다."
+        }
+        return friendlyLoadError(APIError(status: 0, message: raw), what: "Mac 연결", verb: "확인하지")
+    }
+
+    static func showsSavedConnection(endpoint: String, accessCode: String, useQR: Bool) -> Bool {
+        !useQR && !endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !accessCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+/// A consumed/expired QR alone is not evidence of a connected phone.
+struct PairingCompletion: Decodable, Sendable {
+    let code: String
+    let status: String
+    func confirms(_ expectedCode: String) -> Bool { code == expectedCode && status == "connected" }
+}
+
 /// The link inside the Mac's QR code: `iamceo://pair?c=<one-time code>&u=<tailnet url>&u=…`.
 /// It never carries the access code; the phone trades the one-time code for it over Tailscale.
 struct PairingLink: Sendable, Equatable {

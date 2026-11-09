@@ -6,6 +6,20 @@ import UIKit
 import VisionKit
 #endif
 
+/// Shared recovery content for first connection and the shell's disconnected strip.
+struct ConnectionRecoveryNotice: View {
+    var rawError: String?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            InlineNotice(tone: .attention, title: "Mac에 연결하지 못했습니다",
+                         detail: (rawError.map(ConnectionRecovery.reason) ?? "연결을 확인해 주세요.") + " " + ConnectionRecovery.checklist)
+            if let rawError, !rawError.isEmpty {
+                DisclosureGroup("자세히") { Text(rawError).font(CEFont.mono).textSelection(.enabled) }
+            }
+        }
+    }
+}
+
 /// Crisp QR code for any text (CoreImage, no network).
 struct QRCodeImage: View {
     let text: String
@@ -34,9 +48,11 @@ struct QRCodeImage: View {
 /// Mac → 'iPhone 연결': a one-time QR (5 minutes) for the phone's camera.
 struct MacPairingSheet: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
     @State private var start: PairStart?
     @State private var loading = false
     @State private var failure: String?
+    @State private var connected = false
 
     private var link: PairingLink? {
         guard let start else { return nil }
@@ -61,10 +77,30 @@ struct MacPairingSheet: View {
             }
         }
         .task { await make() }
+        .task(id: start?.code) {
+            guard let start, !store.isDemo, let api = store.api else { return }
+            // Optional authenticated status contract. Older servers return 404; expiry never means success.
+            while !Task.isCancelled, parseISODate(start.expiresAt).map({ $0 > Date() }) == true {
+                do {
+                    let result: PairingCompletion = try await api.request("/api/pair/status?code=\(APIClient.segment(start.code))")
+                    guard !Task.isCancelled, self.start?.code == start.code else { return }
+                    if result.confirms(start.code) {
+                        connected = true
+                        try await Task.sleep(for: .seconds(1.5))
+                        if !Task.isCancelled { dismiss() }
+                        return
+                    }
+                } catch let error as APIError where [404, 405, 501].contains(error.status) { return }
+                catch { if Task.isCancelled { return } }
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            }
+        }
     }
 
     @ViewBuilder private var content: some View {
-        if loading && start == nil {
+        if connected {
+            InlineNotice(tone: .success, icon: "checkmark.circle", title: "연결됨", detail: "iPhone이 연결되었습니다.")
+        } else if loading && start == nil {
             qrTile { ProgressView().controlSize(.small) }
                 .accessibilityLabel("QR을 만드는 중입니다")
         } else if let failure {
@@ -164,7 +200,7 @@ struct MacPairingSheet: View {
     }
 
     private func make() async {
-        loading = true; failure = nil
+        loading = true; failure = nil; connected = false
         defer { loading = false }
         #if DEBUG
         // Review hook for the read-only sample: `--pairing-sample <seconds left>` draws a made-up QR (no server call),
@@ -177,7 +213,7 @@ struct MacPairingSheet: View {
         #endif
         if store.isDemo { failure = "샘플 모드에서는 QR을 만들지 않습니다."; return }
         if let result = await store.startPairing() { start = result }
-        else { failure = store.errorMessage ?? "서버에 연결된 뒤 다시 시도하세요." }
+        else { failure = store.errorMessage.map(friendlyError) ?? "서버에 연결된 뒤 다시 시도하세요." }
     }
 }
 #endif

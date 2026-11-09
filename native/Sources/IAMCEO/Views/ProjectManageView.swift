@@ -1,4 +1,75 @@
 import SwiftUI
+import Observation
+
+/// App-scoped result survives dismissal of the sheet and never replays a creation request.
+@MainActor @Observable
+final class ProjectCreationNotice {
+    enum Outcome: Sendable, Equatable {
+        case created(String), partial(String, String), failed(String), hostChanged
+    }
+    static let shared = ProjectCreationNotice()
+    private(set) var id: UUID?
+    private(set) var namespace = ""
+    private(set) var projectID: String?
+    private(set) var message: String?
+    private(set) var running = false
+    private(set) var failed = false
+
+    func begin(id: UUID, namespace: String) {
+        self.id = id; self.namespace = namespace; projectID = nil
+        message = "프로젝트를 만드는 중입니다. 창을 닫아도 계속됩니다."; running = true; failed = false
+    }
+    func finish(id: UUID? = nil, projectID: String?, message: String, failed: Bool = false) {
+        guard id == nil || id == self.id else { return }
+        self.projectID = projectID; self.message = message; self.failed = failed; running = false
+    }
+    func clear() { message = nil }
+
+    static func scope(_ store: AppStore) -> String { store.writeNamespace + ":" + (store.serverID ?? "") }
+
+    func create(store: AppStore, name: String, cwd: String, provider: String) async -> Outcome {
+        guard !running, !store.pendingActions.contains("create-project") else { return .failed("이미 프로젝트를 만드는 중입니다.") }
+        let namespace = Self.scope(store), id = UUID(), before = Set(store.projects.map(\.id))
+        begin(id: id, namespace: namespace)
+        let accepted = await store.createProject(name: name, cwd: cwd, goal: "", provider: provider)
+        guard namespace == Self.scope(store) else {
+            finish(id: id, projectID: nil, message: "연결이 바뀌었습니다. 원래 Mac에 연결해 만들기 결과를 확인해 주세요.", failed: true)
+            return .hostChanged
+        }
+        if accepted, let project = store.selectedProjectID {
+            finish(id: id, projectID: project, message: "프로젝트를 만들었습니다. 총괄에게 첫 일을 맡겨 보세요.")
+            return .created(project)
+        }
+        let message = store.errorMessage.map(friendlyError) ?? "프로젝트를 만들지 못했습니다."
+        await store.refresh()
+        guard namespace == Self.scope(store) else {
+            finish(id: id, projectID: nil, message: "연결이 바뀌었습니다. 원래 Mac에 연결해 만들기 결과를 확인해 주세요.", failed: true)
+            return .hostChanged
+        }
+        // The server canonicalizes ~ and symlinks; the returned cwd need not equal the typed path.
+        let matches = store.projects.filter { !before.contains($0.id) && $0.name == name }
+        if matches.count == 1, let project = matches.first {
+            finish(id: id, projectID: project.id, message: message, failed: true)
+            return .partial(project.id, message)
+        }
+        finish(id: id, projectID: nil, message: message, failed: true)
+        return .failed(message)
+    }
+
+    @discardableResult static func openProject(_ id: String, store: AppStore, router: Router) async -> Bool {
+        let namespace = scope(store), navigation = router.navigationRevision
+        if store.selectedProjectID != id { await store.selectProject(id: id) }
+        guard namespace == scope(store), router.navigationRevision == navigation else { return false }
+        guard store.selectedProjectID == id, store.state?.project.id == id else {
+            router.navigationNotice = "프로젝트를 열지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요."
+            return false
+        }
+        router.openChat(nil)
+        router.focusComposer &+= 1
+        if shared.projectID == id && shared.namespace == namespace { shared.clear() }
+        return true
+    }
+}
 
 /// Every entry point uses the same store mutation, including its persisted uncertain-result guard.
 struct ProjectManageView: View {
@@ -16,6 +87,8 @@ struct ProjectManageView: View {
     @State private var error: String?
     @State private var succeeded = false
     @State private var namespace = ""
+    @State private var showFolderPicker = false
+    @State private var showManualPath = false
     @FocusState private var nameFocused: Bool
     @FocusState private var cwdFocused: Bool
 
@@ -127,6 +200,9 @@ struct ProjectManageView: View {
             }
         }
         .interactiveDismissDisabled(working)
+        .sheet(isPresented: $showFolderPicker) {
+            FolderPickerView(initialPath: cwd.isEmpty ? nil : cwd) { cwd = $0 }
+        }
         .task { namespace = store.writeNamespace; await load() }
         .onChange(of: loaded) { _, ready in
             if ready && selection.mode == .rename { nameFocused = true }
@@ -150,6 +226,12 @@ struct ProjectManageView: View {
             }
             if selection.mode == .settings {
                 SetupField("폴더", hint: "새로 뜨는 직원부터 적용됩니다.") {
+                    HStack {
+                        Text(cwd).font(CEFont.mono).lineLimit(2).textSelection(.enabled)
+                        Spacer()
+                        Button("폴더 고르기…") { showFolderPicker = true }.ceSecondaryButton()
+                    }
+                    DisclosureGroup("경로 직접 입력", isExpanded: $showManualPath) {
                     TextField("폴더", text: $cwd)
                         .labelsHidden()
                         .font(SetupFont.codeInput)
@@ -159,6 +241,7 @@ struct ProjectManageView: View {
                         #endif
                         .focused($cwdFocused)
                         .ceField(focused: cwdFocused)
+                    }
                 }
             }
         }
@@ -270,7 +353,7 @@ struct ProjectManageView: View {
             snapshot = result; name = result.project.name; cwd = result.project.cwd; loaded = true
         } catch {
             guard !Task.isCancelled, namespace == store.writeNamespace else { return }
-            snapshot = nil; self.error = "프로젝트 상태를 확인하지 못했습니다. \(error.localizedDescription)"
+            snapshot = nil; self.error = friendlyLoadError(error, what: "프로젝트 상태", verb: "확인하지")
             if (error as? APIError)?.status == 401 { await store.refresh() }
         }
     }
@@ -296,7 +379,7 @@ struct ProjectManageView: View {
             else { dismiss() }
         } else {
             guard namespace == store.writeNamespace else { return }
-            error = store.errorMessage ?? "변경하지 못했습니다. 다시 확인해 주세요."
+            error = store.errorMessage.map(friendlyError) ?? "변경하지 못했습니다. 다시 확인해 주세요."
             if selection.mode == .archive { loaded = false }
         }
     }
@@ -326,12 +409,27 @@ private struct QuietLinkLabel: View {
 }
 
 private struct ProjectManagementSheets: ViewModifier {
+    @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
     let enabled: Bool
     func body(content: Content) -> some View {
         content.sheet(item: Binding(get: { enabled ? router.projectManagement : nil }, set: {
             if enabled { router.projectManagement = $0 }
         })) { ProjectManageView(selection: Self.reviewed($0)).id($0.id) }
+        .overlay(alignment: .top) {
+            let notice = ProjectCreationNotice.shared
+            if enabled, notice.namespace == ProjectCreationNotice.scope(store), let message = notice.message {
+                InlineNotice(tone: notice.failed ? .attention : notice.running ? .neutral : .success,
+                             title: notice.running ? "프로젝트 준비 중" : notice.failed ? "프로젝트 만들기 결과" : "프로젝트를 만들었습니다",
+                             detail: message,
+                             actionTitle: notice.projectID == nil ? "닫기" : notice.failed ? "프로젝트 확인" : "총괄에게 첫 일 맡기기") {
+                    if let id = notice.projectID {
+                        Task { await ProjectCreationNotice.openProject(id, store: store, router: router) }
+                    } else { notice.clear() }
+                }
+                .padding()
+            }
+        }
     }
 
     /// Review hook for the read-only sample (DEBUG only): `--manage-mode archive|settings|restore` opens the popup that

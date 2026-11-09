@@ -137,12 +137,13 @@ struct MacAttachmentPolicy {
 
     init(archived: Bool, demo: Bool, connected: Bool, writable: Bool, missingTarget: Bool,
          composerCovered: Bool = false) {
+        // Keep the shell's connected/writable arguments source-compatible. Local intake is independent of freshness;
+        // the installed composer validates the selected project and upload waits for write readiness.
         reason = archived ? "보관한 프로젝트는 첨부할 수 없습니다"
             : demo ? "샘플 프로젝트는 읽기 전용입니다"
-            : !connected ? "서버 연결이 끊겨 첨부할 수 없습니다"
             : missingTarget ? "명부에 없는 대상에게는 첨부할 수 없습니다"
             : composerCovered ? "구성원 상세를 닫은 뒤 첨부해 주세요"
-            : !writable ? "지금은 이 프로젝트에 첨부할 수 없습니다" : nil
+            : nil
     }
 }
 
@@ -182,6 +183,10 @@ final class MacAttachmentIntake {
     func reportRejection(_ reason: String) {
         rejection = reason
         reject?(reason)
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            if self?.rejection == reason { self?.rejection = nil }
+        }
     }
 }
 #endif

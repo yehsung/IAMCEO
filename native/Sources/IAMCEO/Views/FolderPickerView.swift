@@ -199,14 +199,14 @@ struct FolderPickerView: View {
                 listing = start
                 if let initialPath, let initial = try? await store.folderContents(path: initialPath) { listing = initial }
             }
-        } catch { self.error = error.localizedDescription }
+        } catch { self.error = friendlyLoadError(error, what: "폴더", verb: "읽지") }
     }
     private func navigate(_ path: String) async {
         guard !loading else { return }
         loading = true; error = nil
         defer { loading = false }
         do { listing = try await store.folderContents(path: path); newFolder = false; newName = ""; nameError = nil }
-        catch { self.error = error.localizedDescription }
+        catch { self.error = friendlyLoadError(error, what: "폴더", verb: "읽지") }
     }
     private func createFolder() async {
         guard !loading, let listing, !store.isDemo else { return }
@@ -217,7 +217,7 @@ struct FolderPickerView: View {
             let created = try await store.createServerFolder(parent: listing.path, name: newName)
             self.listing = try await store.folderContents(path: created.path)
             newFolder = false; newName = ""
-        } catch { nameError = error.localizedDescription }
+        } catch { nameError = friendlyLoadError(error, what: "폴더", verb: "읽지") }
     }
 }
 

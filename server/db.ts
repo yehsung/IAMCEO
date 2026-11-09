@@ -653,6 +653,10 @@ export const MIGRATIONS: string[] = [
      answer_quote TEXT NOT NULL,
      created_at TEXT NOT NULL
    );`,
+  // UX-T2: 원문과 자료 맥락은 재시작·지연 전달에서도 보존한다.
+  `ALTER TABLE messages ADD COLUMN context_file_id TEXT;
+   ALTER TABLE todos ADD COLUMN completion_note TEXT;
+   ALTER TABLE todos ADD COLUMN completion_file_ids TEXT NOT NULL DEFAULT '[]';`,
 ];
 
 export function openDb(path: string): Database {

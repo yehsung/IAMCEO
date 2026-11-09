@@ -471,7 +471,7 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
         var options = TerminalOptions.default
         options.cols = coordinator.parent.cols; options.rows = coordinator.parent.rows
         options.scrollback = 5000
-        terminal = TerminalCanvas(frame: CGRect(x: 0, y: 0, width: 600, height: 400), font: Self.font(10), options: options)
+        terminal = TerminalCanvas(frame: CGRect(x: 0, y: 0, width: 600, height: 400), font: Self.font(12), options: options)
         super.init(frame: frame)
         backgroundColor = UIColor(red: 11/255, green: 9/255, blue: 24/255, alpha: 1)
         terminal.nativeBackgroundColor = backgroundColor!
@@ -482,6 +482,8 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
         updateInputMode()
         canvas.addSubview(terminal); addSubview(canvas); delegate = self
         keyboardDismissMode = .interactive
+        minimumZoomScale = 1; maximumZoomScale = 3
+        zoomScale = TerminalReadingScale.zoom(UserDefaults.standard.double(forKey: TerminalReadingScale.preferenceKey))
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     static func font(_ size: CGFloat) -> UIFont {
@@ -498,6 +500,7 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         updateInputMode()
+        updateReadingDensity()
     }
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -514,13 +517,15 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
         guard key != layoutKey else { return }; layoutKey = key
         terminal.isScrollEnabled = parent.mode == .control
         if parent.mode == .control {
-            minimumZoomScale = 1; maximumZoomScale = 1
+            minimumZoomScale = 1; maximumZoomScale = 3
             let grid = coordinator.displayGrid(viewport: bounds.size)
             TerminalRenderer.resize(terminal, cols: grid.cols, rows: grid.rows)
             let ideal = terminal.getOptimalFrameSize().size
             let size = CGSize(width: max(ideal.width, bounds.width), height: max(ideal.height, bounds.height))
-            canvas.frame = CGRect(origin: .zero, size: size)
-            terminal.frame = CGRect(origin: .zero, size: ideal); contentSize = size
+            canvas.bounds = CGRect(origin: .zero, size: size)
+            terminal.frame = CGRect(origin: .zero, size: ideal)
+            canvas.center = CGPoint(x: size.width * zoomScale / 2, y: size.height * zoomScale / 2)
+            contentSize = CGSize(width: size.width * zoomScale, height: size.height * zoomScale)
         } else {
             if fixedGrid != [parent.cols, parent.rows] {
                 TerminalRenderer.resize(terminal, cols: parent.cols, rows: parent.rows)
@@ -530,22 +535,22 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
             }
             let ideal = terminal.getOptimalFrameSize().size
             _ = coordinator.naturalGrid(viewport: bounds.size, ideal: ideal, cols: parent.cols, rows: parent.rows)
-            let fit = TerminalGridLayout.observe(cols: parent.cols, rows: parent.rows, viewportWidth: bounds.width,
-                                                  baseFont: 10, minimumFont: 6, cellWidth: ideal.width / CGFloat(parent.cols), cellHeight: ideal.height / CGFloat(parent.rows))
-            let wasFitted = abs(zoomScale - minimumZoomScale) < 0.01
             canvas.bounds.size = ideal
-            minimumZoomScale = fit.fontSize / 10; maximumZoomScale = 3
-            if wasFitted || zoomScale < minimumZoomScale { zoomScale = minimumZoomScale }
+            minimumZoomScale = 1; maximumZoomScale = 3
             canvas.center = CGPoint(x: ideal.width * zoomScale / 2, y: ideal.height * zoomScale / 2)
             contentSize = CGSize(width: ideal.width * zoomScale, height: ideal.height * zoomScale)
         }
     }
     func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
-        let density = TerminalPresentation.renderScale(zoom: scale, screen: window?.screen.scale ?? UIScreen.main.scale)
+        UserDefaults.standard.set(TerminalReadingScale.zoom(Double(scale)), forKey: TerminalReadingScale.preferenceKey)
+        updateReadingDensity()
+    }
+    private func updateReadingDensity() {
+        let density = TerminalPresentation.renderScale(zoom: zoomScale, screen: window?.screen.scale ?? UIScreen.main.scale)
         terminal.contentScaleFactor = density; terminal.layer.contentsScale = density
         terminal.setNeedsDisplay()
     }
-    func viewForZooming(in scrollView: UIScrollView) -> UIView? { coordinator.parent.mode == .observe ? canvas : nil }
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? { canvas }
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { dragLocation = scrollLocation }
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         guard scrollView.isDragging || scrollView.isDecelerating else { return }

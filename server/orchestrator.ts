@@ -160,7 +160,7 @@ export function formatAnswer(d: Decision): string {
 }
 
 export function formatTodoDone(t: Todo): string {
-  return `[대표] '${quotedInline(t.title)}' 했음 #${t.id}`;
+  return `[대표] '${quotedInline(t.title)}' 했음 #${t.id}${t.completionNote != null ? `\n[대표 완료 답 원문]\n${t.completionNote}\n[대표 완료 답 끝]` : ""}${t.completionFileIds?.length ? `\n대표가 올린 첨부: ${t.completionFileIds.join(", ")}` : ""}`;
 }
 
 export function formatTodoUndone(t: Todo): string {
@@ -361,6 +361,7 @@ export interface PostInput {
   fileIds?: string[];
   decisionId?: string | null;
   correctsMessageId?: string | null;
+  supersedes?: string | null;
 }
 
 export interface AskInput {
@@ -1137,7 +1138,7 @@ export class Orchestrator implements OrchestratorApi {
 
   async setTodoDoneV2(todoId: string, request: TodoDoneRequest, precondition: RevisionPrecondition): Promise<TodoWriteResult> {
     if (this.store.todoRevision(todoId) !== precondition.expectedRevision) throw new ApiError(409, "할 일이 변경되었습니다", "REVISION_CONFLICT");
-    const writing = this.setTodoDone(todoId, request.done);
+    const writing = this.setTodoDone(todoId, request.done, request);
     const revision = this.store.todoRevision(todoId);
     const todo = await writing;
     return { todo, revision };
@@ -1919,14 +1920,14 @@ export class Orchestrator implements OrchestratorApi {
         projectId,
         memberId: conductor.id,
         kind: "user_message",
-        text: formatUserMessage(message.body, this.attachmentsFor(conductor, message.attachments), message.id, false),
+        text: formatUserMessage(message.body, this.attachmentsFor(conductor, message.attachments), message.id, false) + this.messageContext(message),
         refType: "message",
         refId: message.id,
       });
     }
     for (const d of answers) this.store.enqueue({ projectId, memberId: conductor.id, kind: "answer", text: formatAnswer(d), refType: "decision", refId: d.id });
     for (const t of todos) {
-      this.store.enqueue({ projectId, memberId: conductor.id, kind: "todo_done", text: formatTodoDone(t), refType: "todo", refId: t.id });
+      this.store.enqueue({ projectId, memberId: conductor.id, kind: "todo_done", text: this.todoDoneText(t, conductor), refType: "todo", refId: t.id });
       this.store.setTodoNoticePending(t.id, false);
     }
   }
@@ -1936,7 +1937,7 @@ export class Orchestrator implements OrchestratorApi {
     this.store.transaction(() => {
       for (const message of this.store.listMessagesMissingDeliveries(projectId)) {
         const member = message.targetMemberId ? this.store.getMember(message.targetMemberId) : null;
-        if (member) this.store.enqueue({ projectId, memberId: member.id, kind: "user_message", text: formatUserMessage(message.body, this.attachmentsFor(member, message.attachments), message.id, true), refType: "message", refId: message.id });
+        if (member) this.store.enqueue({ projectId, memberId: member.id, kind: "user_message", text: formatUserMessage(message.body, this.attachmentsFor(member, message.attachments), message.id, true) + this.messageContext(message), refType: "message", refId: message.id });
       }
       for (const decision of this.store.listAnswersMissingDeliveries(projectId)) {
         const member = decision.memberId ? this.store.getMember(decision.memberId) : null;
@@ -1998,9 +1999,16 @@ export class Orchestrator implements OrchestratorApi {
     return this.store.requireMessage(current.id);
   }
 
+  private messageContext(message: Message): string {
+    if (!message.contextFileId) return "";
+    const file = this.store.getFile(message.contextFileId);
+    return file && file.projectId === message.projectId ? `\n[시스템 자료 맥락 · 대표 원문 아님]\n대표가 보던 자료: ${file.title.replace(/[\r\n]+/g, " ")} (${file.id})` : "";
+  }
+
   async sendUserMessage(projectId: string, req: SendMessageReq): Promise<Message> {
     const project = this.store.requireProject(projectId);
     this.requireActive(project);
+    if (req.contextFileId && this.store.getFile(req.contextFileId)?.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 자료가 아닙니다");
     const attachments = (req.attachmentIds ?? []).map(id => this.store.getAttachment(id)).filter((a): a is Attachment => a !== null);
     const target = req.targetMemberId ? this.store.requireMember(req.targetMemberId) : null;
     if (target && target.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 직원이 아닙니다");
@@ -2008,7 +2016,7 @@ export class Orchestrator implements OrchestratorApi {
     let booting: Promise<void> | null = null;
     const { value: message, deliveries } = this.store.withDeliveryIntents(() => {
       const message = this.store.createMessage({ id: req.id, projectId, mine: true, who: "나", kind: "나", body: req.text,
-        targetMemberId: target?.id ?? null, targetName: target?.name ?? null, attachments, delivery: "queued" });
+        targetMemberId: target?.id ?? null, targetName: target?.name ?? null, attachments, contextFileId: req.contextFileId, delivery: "queued" });
       if (!recipient && project.runnerEnabled) {
         const spawn = this.beginConductor(project, true);
         recipient = spawn.member;
@@ -2019,10 +2027,10 @@ export class Orchestrator implements OrchestratorApi {
     }, message => {
       if (!recipient) return [];
       const intents: NewDelivery[] = [{ projectId, memberId: recipient.id, kind: "user_message",
-        text: formatUserMessage(message.body, this.attachmentsFor(recipient, attachments), message.id, !!target), refType: "message", refId: message.id }];
+        text: formatUserMessage(message.body, this.attachmentsFor(recipient, attachments), message.id, !!target) + this.messageContext(message), refType: "message", refId: message.id }];
       const conductor = this.store.getConductor(projectId);
       if (target && conductor && conductor.id !== target.id) intents.push({ projectId, memberId: conductor.id, kind: "system",
-        text: formatSystem(`대표가 ${target.name}에게 직접 지시했습니다 #${message.id}. 이미 ${target.name}에게 전달했습니다. 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.`), wake: false });
+        text: formatSystem(`대표가 ${target.name}에게 직접 지시했습니다 #${message.id}. 이미 ${target.name}에게 전달했습니다. 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.`) + this.messageContext(message), wake: false });
       return intents;
     });
     if (booting) void (booting as Promise<void>).catch(e => console.warn(`${project.name} 총괄을 띄우지 못했습니다:`, (e as Error).message));
@@ -2082,9 +2090,18 @@ export class Orchestrator implements OrchestratorApi {
     return this.store.requireDecision(decisionId);
   }
 
-  async setTodoDone(todoId: string, done: boolean): Promise<Todo> {
+  private todoDoneText(todo: Todo, member: Member): string {
+    const attachments = (todo.completionFileIds ?? []).map(id => this.store.getAttachment(id)).filter((a): a is Attachment => a !== null);
+    return [formatTodoDone(todo), ...attachmentLines(this.attachmentsFor(member, attachments))].join("\n");
+  }
+
+  async setTodoDone(todoId: string, done: boolean, completion: { note?: string; fileIds?: string[] } = {}): Promise<Todo> {
+    for (const id of completion.fileIds ?? []) if (!this.store.getAttachment(id)) throw new ApiError(400, "업로드된 첨부를 찾을 수 없습니다");
+    if (!done && (completion.note !== undefined || completion.fileIds?.length)) throw new ApiError(400, "완료할 때만 답과 첨부를 붙일 수 있습니다");
     let targetId: string | null = null;
     const { todo, changed } = this.store.transaction(() => {
+      const before = this.store.requireTodo(todoId);
+      if (before.done !== done) this.store.setTodoCompletion(todoId, done ? completion.note ?? null : null, done ? completion.fileIds ?? [] : []);
       const result = this.store.setTodoDone(todoId, done);
       if (!result.changed) return result;
       const todo = result.todo;
@@ -2095,15 +2112,25 @@ export class Orchestrator implements OrchestratorApi {
         this.store.cancelPendingFor("todo", todo.id);
         this.reconcileTodoCorrections(todo.id);
       } else if (target) {
-        const delivery = this.store.enqueue({ projectId: todo.projectId, memberId: target.id, kind: "todo_done", text: formatTodoDone(todo), refType: "todo", refId: todo.id });
+        const delivery = this.store.enqueue({ projectId: todo.projectId, memberId: target.id, kind: "todo_done", text: this.todoDoneText(todo, target), refType: "todo", refId: todo.id });
         this.store.patchDeliveryRetry(delivery.id, { correctionRevision: this.store.todoRevision(todo.id) });
+        const conductor = this.store.getConductor(todo.projectId);
+        if (conductor && conductor.id !== target.id) {
+          const notice = this.store.enqueue({ projectId: todo.projectId, memberId: conductor.id, kind: "todo_done", text: this.todoDoneText(todo, conductor), refType: "todo", refId: todo.id });
+          this.store.patchDeliveryRetry(notice.id, { correctionRevision: this.store.todoRevision(todo.id) });
+          this.store.afterCommit(() => { void this.pump(conductor.id); });
+        } else if (!conductor && target.kind === "worker") {
+          this.store.setTodoNoticePending(todo.id, true);
+        }
       } else this.store.setTodoNoticePending(todo.id, true);
       return result;
     });
     if (changed && done && !targetId && this.store.requireProject(todo.projectId).runnerEnabled && !this.store.runnerByAdopt(todo.projectId)) {
       await this.ensureConductor(todo.projectId).catch(e => console.warn("할 일 완료를 받을 총괄을 띄우지 못했습니다:", (e as Error).message));
       await this.adoptOrphans(todo.projectId);
-      targetId = this.store.getConductor(todo.projectId)?.id ?? null;
+      const conductor = this.store.getConductor(todo.projectId);
+      if (conductor && targetId && conductor.id !== targetId) void this.pump(conductor.id);
+      targetId ??= conductor?.id ?? null;
     }
     if (changed && targetId) {
       if (done) await this.pump(targetId);
@@ -2682,6 +2709,7 @@ export class Orchestrator implements OrchestratorApi {
       if (option && normalizeSpace(option.label) === quote) return { id: d.id, text: option.label, at: d.answeredAt, card: d.title };
       if (d.note && matches(d.note)) return { id: d.id, text: d.note, at: d.answeredAt };
     }
+    for (const todo of this.store.listTodos(projectId)) if (todo.done && todo.completionNote && matches(todo.completionNote)) return { id: todo.id, text: todo.completionNote, at: todo.doneAt, card: todo.title };
     const project = this.store.requireProject(projectId);
     if (project.creationGoal && matches(project.creationGoal)) return { id: project.id, text: project.creationGoal, at: project.createdAt };
     let before: string | undefined;
@@ -3003,7 +3031,7 @@ export class Orchestrator implements OrchestratorApi {
       // 대표가 체크한 '했음'은 받을 직원이 사라져도 잃으면 안 된다. 총괄에게 넘긴다.
       const conductor = this.store.getConductor(member.projectId);
       for (const todo of doneTodos) {
-        if (conductor) await this.deliver({ projectId: member.projectId, memberId: conductor.id, kind: "todo_done", text: formatTodoDone(todo), refType: "todo", refId: todo.id, wake: false });
+        if (conductor) await this.deliver({ projectId: member.projectId, memberId: conductor.id, kind: "todo_done", text: this.todoDoneText(todo, conductor), refType: "todo", refId: todo.id, wake: false });
         else this.store.setTodoNoticePending(todo.id, true);
       }
       return dropped;
@@ -3041,6 +3069,8 @@ export class Orchestrator implements OrchestratorApi {
   // ---- 보고 ----
   async recordPost(member: Member, input: PostInput): Promise<Message> {
     const rt = this.runtime(member.id);
+    if (input.supersedes && input.correctsMessageId && input.supersedes !== input.correctsMessageId) throw new ApiError(400, "정정 대상이 서로 다릅니다");
+    input = { ...input, correctsMessageId: input.supersedes ?? input.correctsMessageId };
     const files = (input.fileIds ?? []).map((id) => {
       const file = this.store.getFile(id);
       if (!file || file.projectId !== member.projectId) throw new ApiError(404, `자료를 찾을 수 없습니다: ${id}`);
@@ -3050,7 +3080,7 @@ export class Orchestrator implements OrchestratorApi {
       throw new ApiError(404, `결재를 찾을 수 없습니다: ${input.decisionId}`);
     }
     // 거부된 호출은 보고가 아니다. 턴 마지막 글의 자동 보고를 막으면 안 된다.
-    // Message 는 자료 하나만 잇는다. 나머지는 본문의 앱 안 링크로 잇는다.
+    // v1 웹은 첫 자료와 본문 링크를 계속 사용한다. 전체 목록은 Message.fileIds에도 projection한다.
     const extra = files
       .slice(1)
       .map((f) => `[자료: ${f.title.replace(/[\[\]\\]/g, "\\$&")}](#/p/${encodeURIComponent(member.projectId)}/files/${encodeURIComponent(f.id)})`)
@@ -3071,7 +3101,7 @@ export class Orchestrator implements OrchestratorApi {
     });
     rt.posted = true;
     await Promise.all(deliveries.map(d => this.pump(d.memberId)));
-    return message;
+    return this.store.requireMessage(message.id);
   }
 
   reportReferences(projectId: string, messageId: string): ReportReferences {
@@ -3257,7 +3287,7 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 대표가 다른 창에 있어도 결정할 일을 알게 한다. 설정에서 켠 때만. */
   notifyInbox(title: string, body: string): void {
-    if (!this.notifier || !this.store.getSettings().notifyMac) return;
+    if (!this.notifier || (!this.store.getSettings().notifyMac || this.store.getSettings().macScriptNotifications === false)) return;
     this.notifier(`IAMCEO · ${normalizeSpace(title).slice(0, 60)}`, normalizeSpace(body).slice(0, 200));
   }
 

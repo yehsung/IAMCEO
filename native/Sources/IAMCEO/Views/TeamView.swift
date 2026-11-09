@@ -320,6 +320,9 @@ private struct TeamFilterChip: View {
 struct MemberDetailView: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
+    #if os(macOS)
+    @Environment(\.openWindow) private var openWindow
+    #endif
     let memberID: String
     private let onClose: (() -> Void)?
 
@@ -603,6 +606,9 @@ struct MemberDetailView: View {
         return VStack(spacing: 0) {
             if let onClose {
                 drawerHeader(m, onClose: onClose)
+                Picker("직원", selection: Binding(get: { memberID }, set: { router.memberID = $0 })) {
+                    ForEach(store.members) { member in Text(member.name).tag(member.id) }
+                }.padding(.horizontal, 18).accessibilityLabel("드로어 직원 전환")
                 // Lost connection / failed write stay visible while the drawer covers the content column.
                 StatusStrips().padding(.horizontal, -10)
             }
@@ -949,7 +955,7 @@ struct MemberDetailView: View {
                         if decisions > 0 {
                             TeamFactRow(label: "결재") {
                                 // Web .tm-inlink: decisions waiting for me pull the eye (wait colour, semibold, underlined).
-                                Button { goInbox() } label: {
+                                Button { goInbox(m) } label: {
                                     Text("\(decisions)건 대기 · 결재함으로").fontWeight(.semibold).foregroundStyle(CE.attention)
                                         .underline(true, color: CE.attention.opacity(0.7))
                                         .teamTallHitArea()
@@ -1007,7 +1013,7 @@ struct MemberDetailView: View {
                     }
                         .ceSecondaryButton().controlSize(.small)
                         .disabled(!store.canOpenTerminal(m))
-                        .help(isMac ? "이 CLI 터미널을 열고 바로 직접 입력합니다. 여는 동안 자동 전달이 멈춥니다." : terminalHelp(m))
+                        .help(isMac ? "이 CLI 터미널을 봅니다. 입력 시작을 누를 때만 자동 전달이 멈춥니다." : terminalHelp(m))
                         .accessibilityLabel("\(m.name) \(TerminalAvailability.title(m, waking: store.terminalWake.members.contains(m.id)))")
                 }
                 if !manual && busyTurn {
@@ -1351,13 +1357,21 @@ struct MemberDetailView: View {
         router.openChat(m.kind == "worker" ? m.id : nil)
     }
 
-    private func goInbox() {
+    private func goInbox(_ member: Member) {
+        guard let decision = UXTeamTerminal.openDecision(for: member.id, in: store.decisions) else { return }
         leaveDetail()
-        router.go(.inbox)
+        router.openDecision(decision.id)
     }
 
-    /// The shell presents the terminal sheet from the window root (Mac and iOS).
-    private func openTerminal(_ m: Member) { router.openTerminal(m, store: store) }
+    /// Mac opens a member-keyed window; iPhone presents the terminal before waking.
+    private func openTerminal(_ m: Member) {
+        guard store.canOpenTerminal(m) else { return }
+        #if os(macOS)
+        openWindow(id: "terminal", value: m.id)
+        #else
+        router.openTerminal(m.id)
+        #endif
+    }
 
     // MARK: Logic
 
@@ -1688,10 +1702,14 @@ struct ActivityList: View {
             }
             list
         }
-        .task(id: memberID) {
+        .task(id: "\(store.writeNamespace)|\(memberID)") {
             shownFor = memberID
             items = []; loaded = false; expanded = []; error = nil
             await load(memberID)
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                if store.connectionStatus == .connected, !loading { await load(memberID) }
+            }
         }
         .onChange(of: store.connectionStatus) { _, status in
             if status == .connected { Task { await load(memberID) } }
@@ -1786,7 +1804,7 @@ struct ActivityList: View {
         } catch {
             if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
             guard request == mine, shownFor == id else { return }
-            self.error = "활동을 불러오지 못했습니다: \(error.localizedDescription)"
+            self.error = friendlyLoadError(error, what: "활동", verb: "읽지")
         }
     }
 }
@@ -1798,8 +1816,7 @@ struct NewMemberView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var role = ""
-    @State private var provider = "claude"
-    @State private var model = ""
+    @State private var selection = NewMemberModelSelection()
     @State private var failure: String?
     @FocusState private var focus: NewMemberField?
 
@@ -1820,15 +1837,20 @@ struct NewMemberView: View {
     var body: some View {
         // One line; the wait hint only while the session is being prepared.
         CESheet("팀장 추가", subtitle: busy ? "세션을 준비하는 중입니다. 잠시 걸릴 수 있습니다." : "새 CLI 세션을 띄워 팀장으로 등록합니다.",
-                icon: "person.badge.plus", width: 500, onClose: { if !busy { dismiss() } }) {
+                icon: "person.badge.plus", width: 520, onClose: { if !busy { dismiss() } }) {
             form
         } footer: {
             // Esc is the header's close button; neither closes while the session is being added.
-            // Web form actions: ghost 취소 and primary 추가, both size m (44pt, 15 semibold).
-            Button("취소") { dismiss() }.ceGhostButton().controlSize(.regular).disabled(busy)
+            // Match the new-project sheet: secondary 취소 and primary 추가.
+            Button("취소") { dismiss() }.ceSecondaryButton().controlSize(.regular).disabled(busy)
             addButton.controlSize(.regular).keyboardShortcut(.defaultAction)
         }
         .interactiveDismissDisabled(busy)
+        .scrollDismissesKeyboard(.interactively)
+        .task { await store.refreshModels() }
+        #if os(macOS)
+        .onAppear { if store.canWrite { focus = .name } }
+        #endif
     }
 
     private var addButton: some View {
@@ -1844,12 +1866,16 @@ struct NewMemberView: View {
 
     /// Web form: 14 between fields, 6 between a label (13/600 ink-2) and its 44pt input; errors 13.5 danger.
     private var form: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 16) {
+            if let failure {
+                InlineNotice(tone: .danger, icon: "exclamationmark.triangle", title: friendlyError(failure))
+            } else if let blockReason {
+                InlineNotice(tone: .attention, icon: "info.circle", title: blockReason)
+            }
             field("이름", text: $name, prompt: "개발 담당", plain: false, id: .name)
             field("역할 · 선택", text: $role, prompt: "결제 화면 구현", plain: false, id: .role)
-            VStack(alignment: .leading, spacing: 6) {
-                fieldLabel("AI CLI")
-                Picker("AI CLI", selection: $provider) {
+            SetupField("팀장이 쓸 AI") {
+                Picker("AI CLI", selection: $selection.provider) {
                     Text(providerOption("claude")).tag("claude")
                     Text(providerOption("codex")).tag("codex")
                 }
@@ -1858,34 +1884,28 @@ struct NewMemberView: View {
                 #if os(macOS)
                 .controlSize(.large)
                 #endif
-                .fixedSize()
+                .frame(maxWidth: .infinity)
             }
-            field("모델 · 선택", text: $model, prompt: "CLI 기본값", plain: true, id: .model)
-            if store.runtime?.providers[provider]?.installed == false {
-                InlineNotice(tone: .attention, icon: "exclamationmark.triangle", title: "\(providerFullName(provider))가 설치돼 있지 않습니다",
+            SetupField("모델") {
+                let cli: RankSettingsCLI = selection.provider == "codex" ? .codex : .claude
+                let list = store.modelCatalog.list(for: cli)
+                let defaultModel = store.bootstrap?.settings.rankConfig("lead", cli: cli)?.model
+                Picker("모델", selection: $selection.model) {
+                    Text(defaultModel.map { "직급 기본값 (\($0))" } ?? "직급 기본값").tag("")
+                    ForEach(list.models) { option in Text(option.label).tag(option.id) }
+                }.labelsHidden()
+            }
+            if store.runtime?.providers[selection.provider]?.installed == false {
+                InlineNotice(tone: .attention, icon: "exclamationmark.triangle", title: "\(providerFullName(selection.provider))가 설치돼 있지 않습니다",
                              detail: "설정의 실행 환경을 확인하세요.")
-            }
-            if let failure {
-                teamFailure(failure)
-            } else if let blockReason {
-                teamStatus(blockReason, icon: store.isDemo ? "eye" : "info.circle")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func fieldLabel(_ text: String) -> some View {
-        #if os(macOS)
-        Text(text).font(.system(size: 13, weight: .semibold)).foregroundStyle(CE.ink2)
-        #else
-        Text(text).font(.footnote.weight(.semibold)).foregroundStyle(CE.ink2)
-        #endif
-    }
-
     private func field(_ label: String, text: Binding<String>, prompt: String, plain: Bool, id: NewMemberField) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            fieldLabel(label)
-            // Names take the field's own 15pt; the model id is code (web .input.t-code), monospaced a step smaller.
+        SetupField(label) {
+            // Name and optional role use the shared setup field.
             Group {
                 if plain {
                     TextField(label, text: text, prompt: Text(prompt)).font(Self.codeFont)
@@ -1917,8 +1937,12 @@ struct NewMemberView: View {
         guard !trimmedName.isEmpty else { failure = "팀장 이름을 넣어 주세요"; return }
         guard blockReason == nil, !busy else { return }
         failure = nil
-        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        let ok = await store.createMember(name: trimmedName, role: role.trimmingCharacters(in: .whitespacesAndNewlines), provider: provider, model: trimmedModel.isEmpty ? nil : trimmedModel)
+        guard selection.isValid(in: store.modelCatalog) else {
+            failure = "모델 목록이 바뀌었습니다. 사용할 모델을 다시 골라 주세요."
+            return
+        }
+        let trimmedModel = selection.model
+        let ok = await store.createMember(name: trimmedName, role: role.trimmingCharacters(in: .whitespacesAndNewlines), provider: selection.provider, model: trimmedModel.isEmpty ? nil : trimmedModel)
         guard ok else {
             failure = store.errorMessage ?? "팀장을 추가하지 못했습니다."
             return
@@ -2223,5 +2247,23 @@ struct TeamMemberStatusBadge: View {
         case .neutral: Color.white.opacity(0.06)
         case .dim: Color.clear
         }
+    }
+}
+
+/// Selection uses only this employee's currently open decisions.
+enum UXTeamTerminal {
+    static func openDecision(for memberID: String, in decisions: [Decision]) -> Decision? {
+        decisions.first { $0.memberId == memberID && $0.status == "open" }
+    }
+}
+
+struct NewMemberModelSelection {
+    var provider = "claude" {
+        didSet { if provider != oldValue { model = "" } }
+    }
+    var model = ""
+    var cli: RankSettingsCLI { provider == "codex" ? .codex : .claude }
+    func isValid(in catalog: ModelCatalog) -> Bool {
+        model.isEmpty || catalog.list(for: cli).models.contains { $0.value == model }
     }
 }

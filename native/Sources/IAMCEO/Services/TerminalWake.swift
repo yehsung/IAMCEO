@@ -54,14 +54,14 @@ final class TerminalWake {
         }
     }
 
-    func wake(memberID: String, timeout: Duration = .seconds(20),
+    func wake(memberID: String, timeout: Duration? = nil,
               resume: @escaping @MainActor @Sendable () async -> String?,
               current: @escaping @MainActor @Sendable () -> Member?,
               allowed: @escaping @MainActor @Sendable () -> Bool) async -> Outcome {
         guard members.insert(memberID).inserted else { return .duplicate }
         defer { members.remove(memberID) }
         let attempt = Attempt()
-        // A slow POST or refresh must not hold the UI beyond the deadline, even if it ignores cancellation.
+        // Interactive terminal opening waits for readiness; legacy callers may still supply a deadline.
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 attempt.continuation = continuation
@@ -80,9 +80,11 @@ final class TerminalWake {
                         do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
                     }
                 }
-                attempt.deadline = Task {
-                    do { try await Task.sleep(for: timeout) } catch { return }
-                    attempt.finish(.timedOut)
+                if let timeout {
+                    attempt.deadline = Task {
+                        do { try await Task.sleep(for: timeout) } catch { return }
+                        attempt.finish(.timedOut)
+                    }
                 }
             }
         } onCancel: {

@@ -177,6 +177,37 @@ describe("terminal stream", () => {
     const proc = f.pids()[0]; expect(proc).toMatchObject({ observe:true, socket:f.config.coreSocket, session:"iamceo", state:join(f.config.home,"core-state"), config:join(f.config.home,"core-config") });
     stream.ws.close(); await until(() => !alive(proc.pid));
   });
+  test("UX-T7 observing never claims control or pauses queued automatic delivery", async () => {
+    const f = await fixture(), observer = f.connect();
+    await until(() => observer.text.includes("hello"));
+    expect(f.store.inputState(f.member.id).lease).toBeNull();
+    f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "instruction", text: "deliver-while-observing", wake: true });
+    await f.orch.pump(f.member.id);
+    await until(() => f.sent.length === 1);
+    expect(observer.closed).toBe(false);
+    expect(f.store.inputState(f.member.id).lease).toBeNull();
+    expect(f.pids().every(p => p.observe)).toBe(true);
+  });
+  test("UX-T7 responsive observer survives beyond five minutes and another window's lease expiry", async () => {
+    const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const manager = new TerminalStreams(f.config, f.store, f.orch); cleanups.push(() => manager.close());
+    const observe = await manager.prepare(f.member.id, new URL("http://localhost/?mode=observe"));
+    const control = await manager.prepare(f.member.id, new URL(`http://localhost/?mode=control&lease=${lease.leaseId}`));
+    const observed: any[] = [], controlled: any[] = [];
+    const socket = (events: any[]) => ({ send: (text: string) => events.push(JSON.parse(text)), sendBinary: () => {}, ping: () => {}, close: () => {}, getBufferedAmount: () => 0 }) as unknown as ServerWebSocket<SocketData>;
+    observe.open(socket(observed)); control.open(socket(controlled));
+    await until(() => observed.some(e => e.type === "ready") && controlled.some(e => e.type === "ready"));
+    const base = Date.now(), now = spyOn(Date, "now");
+    try {
+      for (let elapsed = 15_000; elapsed <= 315_000; elapsed += 15_000) {
+        now.mockReturnValue(base + elapsed);
+        observe.pong(); control.pong(); observe.check(); control.check();
+      }
+      expect(controlled.some(e => e.reason === "lease_ended")).toBe(true);
+      expect(observed.some(e => e.type === "closed")).toBe(false);
+    } finally { now.mockRestore(); }
+    await control.close(); await observe.close();
+  });
   test("control requires current lease; PTY input filters detach, clamps resize and renews with throttle", async () => {
     const f = await fixture();
     expect((await f.status("mode=control")).status).toBe(409);

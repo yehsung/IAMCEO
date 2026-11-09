@@ -4,6 +4,17 @@ import SwiftUI
 @testable import IAMCEO
 
 @MainActor final class TerminalSessionTests: XCTestCase {
+    /// Existing claim/fence scenarios start with an explicit human input request.
+    /// Their connect spy ignores the initial observe attachment; opening is covered separately in UXTeamTerminalTests.
+    private func controlSession(platform: TerminalPlatform, client: TerminalStreamClient = TerminalStreamClient(),
+                                connect: @escaping TerminalSession.Connect, send: ((Data) -> Void)? = nil) -> TerminalSession {
+        var opened = false
+        return TerminalSession(platform: platform, client: client, connect: { api, id, mode, cols, rows, lease, policy in
+            if !opened, mode == .observe { opened = true; return }
+            connect(api, id, mode, cols, rows, lease, policy)
+        }, send: send)
+    }
+
     private func connectedStore(_ network: IsolatedTestNetwork, submissions: SubmissionStore? = nil, journal: URL? = nil) async -> AppStore {
         let store = AppStore(session: network.session, persistCredentials: false, submissions: submissions, writeStorageURL: journal)
         store.endpoint = network.endpoint.url.absoluteString; store.accessCode = "test"
@@ -11,27 +22,27 @@ import SwiftUI
         return store
     }
 
-    func testMacOpeningClaimsImmediatelyAndAttachesOnlyControlAtNaturalSize() async throws {
+    func testMacExplicitInputClaimsAndAttachesControlAtNaturalSize() async throws {
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         let attached = expectation(description: "control attach")
         var modes: [TerminalStreamMode] = []
-        let session = TerminalSession(platform: .mac) { _, id, mode, cols, rows, lease, policy in
+        let session = controlSession(platform: .mac) { _, id, mode, cols, rows, lease, policy in
             modes.append(mode)
             XCTAssertEqual(id, member.id); XCTAssertEqual(mode, .control); XCTAssertEqual(policy, .fit)
             XCTAssertEqual(cols, 113); XCTAssertEqual(rows, 37); XCTAssertEqual(lease, "lease")
             attached.fulfill()
         }
-        session.appear(store: store, member: member, active: true)
+        session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         XCTAssertTrue(session.starting); XCTAssertEqual(session.surfaceMode, .control); XCTAssertFalse(session.readOnly)
-        // Claim starts even before SwiftUI has reported the first viewport.
+        // Explicit input claims even before SwiftUI has reported the first viewport.
         for _ in 0..<200 where store.terminalLeases[member.id] == nil { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertNotNil(store.terminalLeases[member.id])
         XCTAssertEqual(server.read { $0.terminalBodies.first?["action"] as? String }, "claim")
         XCTAssertTrue(modes.isEmpty, "Never attach using the placeholder 100x30 grid")
         session.sizeChanged(cols: 113, rows: 37)
         await fulfillment(of: [attached], timeout: 3)
-        XCTAssertEqual(modes, [.control], "Mac opening must never use observe")
+        XCTAssertEqual(modes, [.control], "Explicit input attaches control after the initial observe stream")
         session.client.accept(.ready(mode: .control, cols: 113, rows: 37, expiresAt: 9_999_999_999_999))
         XCTAssertFalse(session.starting); XCTAssertTrue(session.controlling)
         session.disappear(store: store, member: member)
@@ -57,14 +68,14 @@ import SwiftUI
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         let fallback = expectation(description: "read-only fallback"), refusedAgain = expectation(description: "retry refused"), retried = expectation(description: "retried control")
         var modes: [TerminalStreamMode] = []
-        let session = TerminalSession(platform: .mac) { _, _, mode, _, _, _, _ in
+        let session = controlSession(platform: .mac) { _, _, mode, _, _, _, _ in
             modes.append(mode)
             if mode == .observe {
                 if modes.count == 1 { fallback.fulfill() } else { refusedAgain.fulfill() }
             } else { retried.fulfill() }
         }
         session.sizeChanged(cols: 120, rows: 40)
-        session.appear(store: store, member: member, active: true)
+        session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         await fulfillment(of: [fallback], timeout: 3)
         XCTAssertTrue(session.readOnly); XCTAssertFalse(session.starting)
         XCTAssertEqual(session.surfaceMode, .observe)
@@ -98,7 +109,7 @@ import SwiftUI
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         let attached = expectation(description: "control attach"), fallback = expectation(description: "observe after release")
         let client = TerminalStreamClient()
-        let session = TerminalSession(platform: .mac, client: client) { _, _, mode, _, _, _, _ in
+        let session = controlSession(platform: .mac, client: client) { _, _, mode, _, _, _, _ in
             if mode == .control { attached.fulfill() }
             else {
                 XCTAssertNil(store.terminalLeases[member.id])
@@ -107,7 +118,7 @@ import SwiftUI
             }
         }
         session.sizeChanged(cols: 120, rows: 40)
-        session.appear(store: store, member: member, active: true)
+        session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         await fulfillment(of: [attached], timeout: 3)
         client.accept(.closed(reason: "refused", message: "세션을 처리 중입니다")); client.onControlEnded?()
         await fulfillment(of: [fallback], timeout: 3)
@@ -115,19 +126,19 @@ import SwiftUI
         session.disappear(store: store, member: member); store.disconnect()
     }
 
-    func testIPhoneOpeningClaimsImmediatelyFitsViewportAndClosingReleases() async throws {
+    func testIPhoneExplicitInputFitsViewportAndClosingReleases() async throws {
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         let attached = expectation(description: "phone control attach")
         var modes: [TerminalStreamMode] = []
-        let session = TerminalSession(platform: .iPhone) { _, _, mode, cols, rows, lease, policy in
+        let session = controlSession(platform: .iPhone) { _, _, mode, cols, rows, lease, policy in
             modes.append(mode)
             XCTAssertEqual(mode, .control); XCTAssertEqual(lease, "lease")
             XCTAssertEqual(cols, 55); XCTAssertEqual(rows, 24); XCTAssertEqual(policy, .fit)
             attached.fulfill()
         }
-        XCTAssertEqual(session.surfaceMode, .control)
-        session.appear(store: store, member: member, active: true)
+        XCTAssertEqual(session.surfaceMode, .observe)
+        session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         XCTAssertTrue(session.starting); XCTAssertFalse(session.readOnly)
         XCTAssertTrue(session.platform.acceptsKeyboard(mode: session.surfaceMode))
         for _ in 0..<200 where store.terminalLeases[member.id] == nil { try await Task.sleep(for: .milliseconds(10)) }
@@ -159,12 +170,12 @@ import SwiftUI
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         let fallback = expectation(description: "phone read-only"), retried = expectation(description: "phone retry")
         var modes: [TerminalStreamMode] = [], sent: [Data] = []
-        let session = TerminalSession(platform: .iPhone, connect: { _, _, mode, _, _, _, _ in
+        let session = controlSession(platform: .iPhone, connect: { _, _, mode, _, _, _, _ in
             modes.append(mode)
             if mode == .observe { fallback.fulfill() } else { retried.fulfill() }
         }, send: { sent.append($0) })
         session.sizeChanged(cols: 55, rows: 24)
-        session.appear(store: store, member: member, active: true)
+        session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         session.pendingInput(Data("discard on refusal".utf8))
         await fulfillment(of: [fallback], timeout: 3)
         XCTAssertTrue(session.readOnly); XCTAssertFalse(session.starting)
@@ -195,7 +206,7 @@ import SwiftUI
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         let attached = expectation(description: "phone attached"), fallback = expectation(description: "phone released before observe")
-        let session = TerminalSession(platform: .iPhone) { _, _, mode, _, _, _, _ in
+        let session = controlSession(platform: .iPhone) { _, _, mode, _, _, _, _ in
             if mode == .control { attached.fulfill() }
             else {
                 XCTAssertNil(store.terminalLeases[member.id])
@@ -204,7 +215,7 @@ import SwiftUI
             }
         }
         session.sizeChanged(cols: 55, rows: 24)
-        session.appear(store: store, member: member, active: true)
+        session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         await fulfillment(of: [attached], timeout: 3)
         session.client.accept(.ready(mode: .control, cols: 55, rows: 24, expiresAt: nil))
         session.client.accept(.closed(reason: "disconnected", message: "터미널 연결이 끊겼습니다"))
@@ -216,7 +227,7 @@ import SwiftUI
         session.disappear(store: store, member: member); store.disconnect()
     }
 
-    func testIPhoneOpeningInputBuffersDuringClaimAndAttachThenSendsOnce() async throws {
+    func testIPhoneExplicitInputBuffersDuringClaimAndAttachThenSendsOnce() async throws {
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         let entered = expectation(description: "phone claim pending"), attached = expectation(description: "phone attach pending")
@@ -224,9 +235,9 @@ import SwiftUI
         server.change { $0.gate = gate; $0.entered = entered }
         defer { gate.signal() }
         var sent: [Data] = []
-        let session = TerminalSession(platform: .iPhone, connect: { _, _, _, _, _, _, _ in attached.fulfill() }, send: { sent.append($0) })
+        let session = controlSession(platform: .iPhone, connect: { _, _, _, _, _, _, _ in attached.fulfill() }, send: { sent.append($0) })
         session.sizeChanged(cols: 55, rows: 24)
-        session.appear(store: store, member: member, active: true)
+        session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         await fulfillment(of: [entered], timeout: 3)
         session.pendingInput(Data("한글".utf8))
         session.pendingInput(Data([27, 91, 65]))
@@ -246,15 +257,15 @@ import SwiftUI
         store.disconnect()
     }
 
-    func testIPhoneBackgroundReleasesAndForegroundClaimsAgain() async throws {
+    func testIPhoneBackgroundReleasesAndExplicitInputAfterForegroundClaimsAgain() async throws {
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         var attaches = 0
-        let session = TerminalSession(platform: .iPhone) { _, _, mode, _, _, _, policy in
-            XCTAssertEqual(mode, .control); XCTAssertEqual(policy, .fit); attaches += 1
+        let session = controlSession(platform: .iPhone) { _, _, mode, _, _, _, policy in
+            guard mode == .control else { return }; XCTAssertEqual(policy, .fit); attaches += 1
         }
         session.sizeChanged(cols: 55, rows: 24)
-        session.appear(store: store, member: member, active: true)
+        session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         for _ in 0..<200 where attaches == 0 { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(attaches, 1)
         session.client.accept(.ready(mode: .control, cols: 55, rows: 24, expiresAt: nil))
@@ -264,7 +275,7 @@ import SwiftUI
         XCTAssertEqual(session.surfaceMode, .observe, "Background cleanup disables the phone keyboard")
         XCTAssertEqual(attaches, 1)
         XCTAssertEqual(server.read { $0.terminalBodies.map { $0["action"] as? String } }, ["claim", "release"])
-        session.setActive(true, store: store, member: member)
+        session.setActive(true, store: store, member: member); session.beginInput(store: store, member: member)
         for _ in 0..<200 where attaches < 2 { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(attaches, 2); XCTAssertFalse(session.readOnly)
         session.disappear(store: store, member: member)
@@ -273,12 +284,12 @@ import SwiftUI
         store.disconnect()
     }
 
-    func testIPhoneDisconnectedOpeningIsReadOnlyWithoutClaiming() async throws {
+    func testIPhoneDisconnectedInputFallsBackToReadOnlyWithoutClaiming() async throws {
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         store.disconnect()
-        let session = TerminalSession(platform: .iPhone) { _, _, _, _, _, _, _ in XCTFail("Disconnected opening must not attach") }
-        session.appear(store: store, member: member, active: true)
+        let session = controlSession(platform: .iPhone) { _, _, _, _, _, _, _ in XCTFail("Disconnected opening must not attach") }
+        session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         XCTAssertTrue(session.readOnly); XCTAssertFalse(session.starting)
         XCTAssertEqual(session.surfaceMode, .observe)
         XCTAssertEqual(session.notice, "서버에 연결되지 않아 조작할 수 없습니다.")
@@ -291,9 +302,9 @@ import SwiftUI
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         let entered = expectation(description: "claim in flight"), gate = DispatchSemaphore(value: 0)
         server.change { $0.gate = gate; $0.entered = entered }
-        let session = TerminalSession(platform: .mac) { _, _, _, _, _, _, _ in XCTFail("Closed sheet must never attach") }
+        let session = controlSession(platform: .mac) { _, _, _, _, _, _, _ in XCTFail("Closed sheet must never attach") }
         session.sizeChanged(cols: 120, rows: 40)
-        session.appear(store: store, member: member, active: true)
+        session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         await fulfillment(of: [entered], timeout: 3)
         session.disappear(store: store, member: member)
         server.change { $0.gate = nil; $0.entered = nil }; gate.signal()
@@ -310,9 +321,9 @@ import SwiftUI
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         let attached = expectation(description: "control attach")
-        let session = TerminalSession(platform: .mac) { _, _, _, _, _, _, _ in attached.fulfill() }
+        let session = controlSession(platform: .mac) { _, _, _, _, _, _, _ in attached.fulfill() }
         session.sizeChanged(cols: 120, rows: 40)
-        session.appear(store: store, member: member, active: true)
+        session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         session.pendingInput(Data(repeating: 65, count: 4096))
         XCTAssertNil(session.notice)
         session.pendingInput(Data([66]))
@@ -330,13 +341,13 @@ import SwiftUI
         let network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         let firstReady = expectation(description: "first ready"), secondReady = expectation(description: "second ready")
-        let first = TerminalSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { firstReady.fulfill() } }
-        first.sizeChanged(cols: 100, rows: 30); first.appear(store: store, member: member, active: true)
+        let first = controlSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { firstReady.fulfill() } }
+        first.sizeChanged(cols: 100, rows: 30); first.appear(store: store, member: member, active: true); first.beginInput(store: store, member: member)
         await fulfillment(of: [firstReady], timeout: 3)
         first.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
         let oldLease = first.ownedLeaseID
-        let second = TerminalSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { secondReady.fulfill() } }
-        second.sizeChanged(cols: 120, rows: 40); second.appear(store: store, member: member, active: true)
+        let second = controlSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { secondReady.fulfill() } }
+        second.sizeChanged(cols: 120, rows: 40); second.appear(store: store, member: member, active: true); second.beginInput(store: store, member: member)
         await fulfillment(of: [secondReady], timeout: 3)
         second.client.accept(.ready(mode: .control, cols: 120, rows: 40, expiresAt: nil))
         XCTAssertNotEqual(second.ownedLeaseID, oldLease)
@@ -359,13 +370,13 @@ import SwiftUI
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         let entered = expectation(description: "first claim pending"), gate = DispatchSemaphore(value: 0)
         server.change { $0.gate = gate; $0.entered = entered }
-        let first = TerminalSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { XCTFail("Closed sheet attached") } }
-        first.sizeChanged(cols: 100, rows: 30); first.appear(store: store, member: member, active: true)
+        let first = controlSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { XCTFail("Closed sheet attached") } }
+        first.sizeChanged(cols: 100, rows: 30); first.appear(store: store, member: member, active: true); first.beginInput(store: store, member: member)
         await fulfillment(of: [entered], timeout: 3)
         first.disappear(store: store, member: member)
         let secondReady = expectation(description: "new sheet ready")
-        let second = TerminalSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { secondReady.fulfill() } }
-        second.sizeChanged(cols: 120, rows: 40); second.appear(store: store, member: member, active: true)
+        let second = controlSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { secondReady.fulfill() } }
+        second.sizeChanged(cols: 120, rows: 40); second.appear(store: store, member: member, active: true); second.beginInput(store: store, member: member)
         server.change { $0.gate = nil; $0.entered = nil }; gate.signal()
         await fulfillment(of: [secondReady], timeout: 3)
         try await Task.sleep(for: .milliseconds(100))
@@ -389,15 +400,15 @@ import SwiftUI
             }
             let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
             var controlAttaches = 0
-            let session = TerminalSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { controlAttaches += 1 } }
-            session.sizeChanged(cols: 100, rows: 30); session.appear(store: store, member: member, active: true)
+            let session = controlSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { controlAttaches += 1 } }
+            session.sizeChanged(cols: 100, rows: 30); session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
             for _ in 0..<200 where controlAttaches == 0 { try await Task.sleep(for: .milliseconds(10)) }
             session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
             session.setActive(false, store: store, member: member)
             for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
             let gate = DispatchSemaphore(value: 0), entered = expectation(description: "sync held")
             server.change { $0.gate = gate; $0.entered = entered }
-            store.setForeground(true); session.setActive(true, store: store, member: member)
+            store.setForeground(true); session.setActive(true, store: store, member: member); session.beginInput(store: store, member: member)
             await fulfillment(of: [entered], timeout: 3)
             XCTAssertTrue(store.isRevalidating); XCTAssertTrue(session.starting)
             XCTAssertEqual(controlAttaches, 1)
@@ -421,8 +432,8 @@ import SwiftUI
         }
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
         server.change { $0.dropTerminal = true }
-        let session = TerminalSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { XCTFail("Unconfirmed claim attached") } }
-        session.sizeChanged(cols: 100, rows: 30); session.appear(store: store, member: member, active: true)
+        let session = controlSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { XCTFail("Unconfirmed claim attached") } }
+        session.sizeChanged(cols: 100, rows: 30); session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         for _ in 0..<200 where session.starting { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertNil(store.terminalLeases[member.id])
         session.disappear(store: store, member: member)
@@ -450,8 +461,8 @@ import SwiftUI
         let store = await connectedStore(network, submissions: try SubmissionStore(storageURL: submissionURL), journal: journal)
         let member = try XCTUnwrap(store.members.first)
         server.change { $0.dropTerminal = true }
-        let session = TerminalSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { XCTFail("Unconfirmed claim attached") } }
-        session.sizeChanged(cols: 100, rows: 30); session.appear(store: store, member: member, active: true)
+        let session = controlSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { XCTFail("Unconfirmed claim attached") } }
+        session.sizeChanged(cols: 100, rows: 30); session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         for _ in 0..<200 where session.starting { try await Task.sleep(for: .milliseconds(10)) }
         session.disappear(store: store, member: member)
         try await Task.sleep(for: .milliseconds(100)); store.disconnect()
@@ -491,8 +502,8 @@ import SwiftUI
             let packet = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
             resizePackets.append(["cols": try XCTUnwrap(packet["cols"] as? Int), "rows": try XCTUnwrap(packet["rows"] as? Int)])
         })
-        let session = TerminalSession(platform: .mac, client: client) { _, _, _, _, _, _, _ in }
-        let hosting = NSHostingView(rootView: TerminalView(member: member, session: session).environment(store))
+        let session = controlSession(platform: .mac, client: client) { _, _, _, _, _, _, _ in }
+        let hosting = NSHostingView(rootView: TerminalView(member: member, session: session).environment(store).environment(\.terminalWindow, true))
         let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1000, height: 650),
                               styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = hosting
@@ -503,7 +514,7 @@ import SwiftUI
         }
         hosting.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(100))
-        session.appear(store: store, member: member, active: true)
+        session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         for _ in 0..<200 where session.ownedLeaseID == nil { try await Task.sleep(for: .milliseconds(10)) }
         session.client.accept(.ready(mode: .control, cols: session.naturalCols, rows: session.naturalRows, expiresAt: nil))
         var previousWidth: CGFloat = 0, previousCols = 0

@@ -152,6 +152,7 @@ struct OfficeView: View {
     @State private var hovered: String?
     @State private var visible = true
     @State private var fadeUntil: Double = 0
+    @AppStorage("teamOfficeList") private var showsList = false
     @State private var fadeTick = 0
     @FocusState private var focused: String?
     #if DEBUG
@@ -191,7 +192,18 @@ struct OfficeView: View {
                     router.showNewMember = true
                 }
                 .padding(.horizontal, isMac ? 2 : 4)
+                #if os(iOS)
+                Picker("팀 보기", selection: $showsList) {
+                    Text("사무실").tag(false)
+                    Text("목록").tag(true)
+                }.pickerStyle(.segmented)
+                if showsList {
+                    OfficeNowList(members: list, decisions: openDecisions, selected: router.memberID,
+                                  hover: { _, _ in }) { router.openMember($0) }
+                } else { stage(list) }
+                #else
                 stage(list)
+                #endif
             }
             .padding(.horizontal, isMac ? 14 : 10)
             .padding(.vertical, 14)
@@ -482,10 +494,7 @@ struct OfficeView: View {
                 Button { openChat(member) } label: { Label("대화방 열기", systemImage: "bubble.left.and.bubble.right") }
                 Button { instruct(member) } label: { Label("지시", systemImage: "text.bubble") }
                 if officeAllowsTerminal(member) {
-                    Button { router.openTerminal(member, store: store) } label: {
-                        Label(TerminalAvailability.title(member, waking: store.terminalWake.members.contains(member.id)), systemImage: "terminal")
-                    }
-                    .disabled(!store.canOpenTerminal(member))
+                    TeamSessionMenu(member: member)
                 }
             } preview: {
                 OfficeContextPreview(member: member)
@@ -498,7 +507,7 @@ struct OfficeView: View {
             .accessibilityActions {
                 if officeAllowsTerminal(member) {
                     Button(TerminalAvailability.title(member, waking: store.terminalWake.members.contains(member.id))) {
-                        router.openTerminal(member, store: store)
+                        router.openTerminal(member.id)
                     }
                     .disabled(!store.canOpenTerminal(member))
                 }
@@ -1148,6 +1157,7 @@ private struct OfficeNowList: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(RowButtonStyle(selected: selected == member.id, radius: CERadius.row))
+        .contextMenu { TeamSessionMenu(member: member) }
         .onHover { hover(member.id, $0) }
         .help(info.explanation)
         .accessibilityElement(children: .ignore)
@@ -1302,3 +1312,35 @@ private enum OfficeDebug {
     }
 }
 #endif
+
+/// Shared session shortcuts; refusals retain the server's ownership and delivery checks.
+private struct TeamSessionMenu: View {
+    @Environment(AppStore.self) private var store
+    @Environment(Router.self) private var router
+    #if os(macOS)
+    @Environment(\.openWindow) private var openWindow
+    #endif
+    let member: Member
+    private var busy: Bool { store.pendingActions.contains("member:\(member.id)") }
+    var body: some View {
+        if TerminalAvailability.supportsTerminal(member) {
+            Button("터미널 열기", systemImage: "terminal") {
+                #if os(macOS)
+                openWindow(id: "terminal", value: member.id)
+                #else
+                router.openTerminal(member.id)
+                #endif
+            }.disabled(!store.canOpenTerminal(member))
+            if ["asleep", "offline"].contains(member.status) {
+                Button("깨우기", systemImage: "sunrise") { Task { _ = await store.memberAction(member, action: "resume") } }
+                    .disabled(!store.canWrite || busy || store.terminalWake.members.contains(member.id))
+            } else {
+                Button("재우기", systemImage: "moon") { Task { _ = await store.sleepMember(member) } }
+                    .disabled(!store.canWrite || busy)
+                Button("문맥 압축", systemImage: "arrow.down.right.and.arrow.up.left") {
+                    Task { _ = await store.memberAction(member, action: "compact") }
+                }.disabled(!store.canWrite || busy)
+            }
+        }
+    }
+}

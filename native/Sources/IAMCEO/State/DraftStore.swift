@@ -221,6 +221,12 @@ final class DraftStore {
         hosts[token.namespace]?.records[token.key]?.uploadFailures = failures.filter { $0.sourceID != sourceID }
         save()
     }
+    func dismissUploadFailure(_ id: UUID) {
+        for key in hosts[namespace]?.records.keys.map({ $0 }) ?? [] {
+            hosts[namespace]?.records[key]?.uploadFailures?.removeAll { $0.id == id }
+        }
+        save()
+    }
     func dismissUploadFailures(for key: String) {
         hosts[namespace]?.records[key]?.uploadFailures = nil
         save()

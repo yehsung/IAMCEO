@@ -1,8 +1,86 @@
 import SwiftUI
+import Observation
 #if os(macOS)
 import AppKit
 #else
 import UIKit
+#endif
+
+@MainActor @Observable
+final class SettingsNavigation {
+    static let shared = SettingsNavigation()
+    var pendingRuntime = false
+    private(set) var revision = 0
+    func requestRuntime() { pendingRuntime = true; revision &+= 1 }
+}
+
+enum SettingsCloseAction: Equatable {
+    case close, confirm, wait
+    static func resolve(dirty: Bool, saving: Bool) -> Self {
+        saving ? .wait : dirty ? .confirm : .close
+    }
+}
+
+#if os(macOS)
+/// Intercepts the title-bar close and Command-W without changing the app's other windows.
+private struct SettingsCloseGuard: NSViewRepresentable {
+    let dirty: Bool
+    let saving: Bool
+    let onWindow: (NSWindow) -> Void
+    let onClose: () -> Void
+
+    final class HostView: NSView {
+        var installed: ((NSWindow) -> Void)?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { installed?(window) }
+        }
+    }
+    @MainActor final class Coordinator: NSObject, NSWindowDelegate {
+        var owner: SettingsCloseGuard
+        weak var window: NSWindow?
+        // NSObject's forwarding hooks are nonisolated; they only read this weak reference.
+        nonisolated(unsafe) weak var previous: (any NSWindowDelegate)?
+        init(_ owner: SettingsCloseGuard) { self.owner = owner }
+        func attach(_ window: NSWindow) {
+            guard self.window !== window || window.delegate !== self else { return }
+            if self.window !== window { restore() }
+            self.window = window; previous = window.delegate; window.delegate = self
+            Task { @MainActor in owner.onWindow(window) }
+        }
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            switch SettingsCloseAction.resolve(dirty: owner.dirty, saving: owner.saving) {
+            case .wait: return false
+            case .confirm: owner.onClose(); return false
+            case .close: return previous?.windowShouldClose?(sender) ?? true
+            }
+        }
+        nonisolated override func responds(to selector: Selector!) -> Bool {
+            super.responds(to: selector) || previous?.responds(to: selector) == true
+        }
+        nonisolated override func forwardingTarget(for selector: Selector!) -> Any? {
+            previous?.responds(to: selector) == true ? previous : super.forwardingTarget(for: selector)
+        }
+        func restore() {
+            if let window, window.delegate === self { window.delegate = previous }
+            window = nil; previous = nil
+        }
+    }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> HostView {
+        let view = HostView()
+        view.installed = { [weak coordinator = context.coordinator] in coordinator?.attach($0) }
+        return view
+    }
+    func updateNSView(_ view: HostView, context: Context) {
+        context.coordinator.owner = self
+        if let window = view.window {
+            context.coordinator.attach(window)
+            window.isDocumentEdited = dirty
+        }
+    }
+    static func dismantleNSView(_ view: HostView, coordinator: Coordinator) { coordinator.restore() }
+}
 #endif
 
 // Connection and New project share the web's setup look (web/src/styles/setup.css): labelled dark input wells in a
@@ -585,6 +663,11 @@ struct ConnectionView: View {
     #endif
 
     private enum Field: Hashable { case endpoint, code }
+    @State private var useQR = false
+
+    private var restoringConnection: Bool {
+        ConnectionRecovery.showsSavedConnection(endpoint: store.endpoint, accessCode: store.accessCode, useQR: useQR)
+    }
 
     /// Prints the server's addresses and access code on the server computer.
     private static let accessCommand = "iamceo open"
@@ -673,7 +756,18 @@ struct ConnectionView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.bottom, 6)
             #if os(iOS)
-            PhonePairingSection()
+            if restoringConnection {
+                if connecting || store.connectionStatus == .disconnected && store.errorMessage == nil {
+                    ProgressView("연결 중")
+                } else {
+                    connectionFailure
+                    Button("다시 시도") { connect() }.ceProminentButton().disabled(!canConnect)
+                    Button("QR로 다시 연결") { useQR = true }.ceSecondaryButton()
+                }
+            } else {
+                PhonePairingSection()
+                if store.errorMessage != nil { connectionFailure }
+            }
             Button { withAnimation(.snappy) { showManual.toggle() } } label: {
                 HStack(spacing: 5) {
                     Text("주소와 접속 코드를 직접 입력")
@@ -686,11 +780,9 @@ struct ConnectionView: View {
             .buttonStyle(.plain)
             if showManual { manualFields }
             #else
-            manualFields
-            #endif
-            #if os(macOS)
-            orDivider
             localStart
+            orDivider
+            DisclosureGroup("다른 컴퓨터의 서버에 연결", isExpanded: $showManual) { manualFields }
             #endif
             foot
         }
@@ -698,6 +790,10 @@ struct ConnectionView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .environment(\.ceInsideGlass, true)
         .modifier(ThickCardSurface())
+    }
+
+    private var connectionFailure: some View {
+        ConnectionRecoveryNotice(rawError: store.rawErrorMessage ?? store.connectionIssue)
     }
 
     @ViewBuilder private var manualFields: some View {
@@ -791,7 +887,8 @@ struct ConnectionView: View {
                 }
                 .frame(maxWidth: .infinity)
             }
-            .ceSecondaryButton()
+            .ceProminentButton()
+            .keyboardShortcut(.defaultAction)
             .controlSize(.large)
             .disabled(localHost.isStarting || connecting)
             Text(localHost.isStarting && !localHost.statusText.isEmpty ? localHost.statusText : "이 Mac의 서버를 찾아 바로 연결합니다. 없으면 새로 준비합니다.")
@@ -813,7 +910,7 @@ struct ConnectionView: View {
                 store.endpoint = connection.url.absoluteString
                 store.accessCode = connection.accessCode
                 await store.connect()
-            } catch { localStartError = error.localizedDescription }
+            } catch { localStartError = friendlyLoadError(error, what: "이 Mac의 연결", verb: "준비하지") }
         }
     }
     #endif
@@ -868,7 +965,7 @@ struct ConnectionView: View {
     /// The server's 401 text says nothing about what to do next.
     private func friendlyConnectionError(_ raw: String) -> String {
         if raw == "인증이 필요합니다" { return "접속 코드가 맞지 않거나 바뀌었습니다. 서버 컴퓨터에서 iamceo\u{00A0}open 으로 확인해 다시 넣어 주세요." }
-        return raw
+        return ConnectionRecovery.reason(raw)
     }
 }
 
@@ -916,6 +1013,16 @@ struct SettingsView: View {
     @State private var confirmLeave = false
     @State private var confirmDiscard = false
     @State private var editedNamespace = ""
+    @State private var macAlerts = false
+    @State private var baseMacAlerts = false
+    @State private var savingLocal = false
+    @State private var highlightRuntime = false
+    #if os(macOS)
+    @State private var settingsWindow: NSWindow?
+    #endif
+
+    /// Call before opening Settings; also works when its Mac window is already open.
+    static func showRuntime() { SettingsNavigation.shared.requestRuntime() }
     /// The number field being typed in (its well gets the focus ring).
     @FocusState private var numberFocus: String?
     #if os(macOS)
@@ -970,10 +1077,10 @@ struct SettingsView: View {
     // MARK: State
 
     private var editable: Bool { store.canWrite && store.bootstrap != nil }
-    private var saving: Bool { store.pendingActions.contains("settings") }
+    private var saving: Bool { savingLocal || store.pendingActions.contains("settings") }
     /// A rank switched to "직접 입력" with nothing typed yet counts as an unsaved (and invalid) change, as on the web.
     private var pendingEmptyCustom: Bool { Self.rankRows.contains { customRanks.contains($0.id) && model(of: $0).isEmpty } }
-    private var isDirty: Bool { loaded && (Self.signature(draft) != Self.signature(base) || pendingEmptyCustom) }
+    private var isDirty: Bool { loaded && (Self.signature(draft) != Self.signature(base) || pendingEmptyCustom || macAlerts != baseMacAlerts) }
     private var firstModelError: String? { Self.rankRows.lazy.compactMap { modelError(for: $0) }.first }
     private var canSave: Bool { editable && isDirty && firstModelError == nil && !saving && store.settingsConflict == nil }
     private var serverSignature: String { store.bootstrap.map { Self.signature($0.settings) } ?? "" }
@@ -987,7 +1094,7 @@ struct SettingsView: View {
                 || draft.maxAwakeWorkers != base.maxAwakeWorkers || draft.compactAtPct != base.compactAtPct
                 || Int(draft.boardTidyHours.rounded()) != Int(base.boardTidyHours.rounded())
         case .ai: return RankSettingsEditing.signature(draft) != RankSettingsEditing.signature(base) || pendingEmptyCustom
-        case .notifications: return draft.notifyMac != base.notifyMac
+        case .notifications: return draft.notifyMac != base.notifyMac || macAlerts != baseMacAlerts
         case .connection: return false
         }
     }
@@ -1008,6 +1115,10 @@ struct SettingsView: View {
             .onAppear {
                 editedNamespace = store.writeNamespace; syncFromStore()
                 #if os(macOS)
+                macAlerts = MacNotificationService.shared.enabled; baseMacAlerts = macAlerts
+                #endif
+                if SettingsNavigation.shared.pendingRuntime { revealRuntime() }
+                #if os(macOS)
                 if store.bootstrap == nil, !store.isDemo, Self.launchSection == nil { section = .connection }
                 #endif
                 #if DEBUG
@@ -1020,6 +1131,7 @@ struct SettingsView: View {
                 }
                 #endif
             }
+            .onChange(of: SettingsNavigation.shared.revision) { _, _ in revealRuntime() }
             .onChange(of: serverSignature) { _, _ in syncFromStore() }
             .onChange(of: Self.signature(draft)) { _, _ in
                 saveError = nil
@@ -1030,7 +1142,13 @@ struct SettingsView: View {
             }
             #if os(macOS)
             .sheet(isPresented: $router.showPairing) { MacPairingSheet() }
+            .background(SettingsCloseGuard(dirty: isDirty, saving: saving, onWindow: { settingsWindow = $0 }, onClose: { confirmDiscard = true }))
             #endif
+            .confirmationDialog("저장하지 않은 변경이 있습니다", isPresented: $confirmDiscard, titleVisibility: .visible) {
+                Button("저장하고 닫기") { Task { await saveAndClose() } }.disabled(!canSave)
+                Button("버리고 닫기", role: .destructive) { revert(); finishClosing() }.disabled(saving)
+                Button("취소", role: .cancel) {}
+            }
     }
 
     // MARK: Frame
@@ -1104,21 +1222,23 @@ struct SettingsView: View {
             .background { AmbientBackground() }
             .navigationTitle("설정")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("완료") { close() } }
-            }
+            .toolbar { phoneSettingsActions }
             .navigationDestination(for: SettingsSection.self) { item in
                 page(item)
                     .background { AmbientBackground() }
                     .navigationTitle(item.title)
                     .navigationBarTitleDisplayMode(.inline)
+                    .toolbar { phoneSettingsActions }
             }
         }
         .ceBar(.bottom) { saveBarHost }
         .interactiveDismissDisabled(isDirty)
-        .confirmationDialog("저장하지 않은 변경이 있습니다", isPresented: $confirmDiscard, titleVisibility: .visible) {
-            Button("저장하지 않고 닫기", role: .destructive) { revert(); dismiss() }
-            Button("계속 고치기", role: .cancel) {}
+    }
+
+    @ToolbarContentBuilder private var phoneSettingsActions: some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) { Button("취소") { close() }.disabled(saving) }
+        ToolbarItem(placement: .confirmationAction) {
+            Button("저장") { Task { await saveAndClose() } }.disabled(isDirty && !canSave || saving)
         }
     }
 
@@ -1196,7 +1316,8 @@ struct SettingsView: View {
 
     /// One part of settings, scrolling under the save bar.
     private func page(_ item: SettingsSection) -> some View {
-        ScrollView {
+        ScrollViewReader { scroll in
+          ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 notices
                 sectionContent(item)
@@ -1207,9 +1328,15 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollBounceBehavior(.basedOnSize)
+        .task(id: "\(SettingsNavigation.shared.revision):\(highlightRuntime)") {
+            guard highlightRuntime, item == .ai else { return }
+            await Task.yield()
+            if !Task.isCancelled { scroll.scrollTo("runtime", anchor: .top) }
+        }
         #if os(iOS)
         .scrollDismissesKeyboard(.interactively)
         #endif
+        }
     }
 
     /// Read-only and conflict notices, at the top of every part.
@@ -1335,6 +1462,8 @@ struct SettingsView: View {
     private var aiSection: some View {
         VStack(alignment: .leading, spacing: 22) {
             runtimeGroup
+                .id("runtime")
+                .overlay { if highlightRuntime { RoundedRectangle(cornerRadius: CERadius.control).stroke(CE.accent, lineWidth: 2) } }
             ForEach(RankSettingsCLI.allCases, id: \.self) { cli in
                 rankGroup(cli).disabled(!editable || saving)
             }
@@ -1530,9 +1659,14 @@ struct SettingsView: View {
 
     private var macNotifyGroup: some View {
         SettingsGroup("Mac") {
-            SettingsRow("Mac 알림", hint: "결재나 할 일이 오면 서버 컴퓨터에 알림을 띄웁니다") {
-                Toggle("Mac 알림", isOn: $draft.notifyMac).labelsHidden().settingsSwitch()
+            #if os(macOS)
+            SettingsRow("Mac 알림", hint: "새 결재, 승인·선택 대기, 완료·막힘 보고, 대표 할 일을 알립니다") {
+                Toggle("Mac 알림", isOn: $macAlerts).labelsHidden().settingsSwitch()
             }
+            if let message = MacNotificationService.shared.permissionNotice { MetaText([message]) }
+            #else
+            Text("Mac 알림은 Mac의 IAMCEO 설정에서 켜거나 끌 수 있습니다.").font(CEFont.note).foregroundStyle(CE.ink2)
+            #endif
         }
         .disabled(!editable || saving)
     }
@@ -1747,8 +1881,10 @@ struct SettingsView: View {
         let edit = store.beginSettingsEditing()
         base = edit?.base ?? store.bootstrap?.settings ?? base
         draft = base
+        store.setSettingsDraft(base)
         customRanks = []
         saveError = nil
+        macAlerts = baseMacAlerts
     }
 
     /// Rebase only fields this screen changed, after the owner explicitly chooses to review them.
@@ -1769,6 +1905,8 @@ struct SettingsView: View {
 
     private func save() async {
         guard canSave else { return }
+        savingLocal = true
+        defer { savingLocal = false }
         saveError = nil
         var next = draft
         // This screen never chooses the runner. Omitting the key leaves the daemon's value untouched.
@@ -1785,6 +1923,20 @@ struct SettingsView: View {
         let accepted = await store.updateSettings(next)
         guard namespace == store.writeNamespace else { return }
         if accepted {
+            #if os(macOS)
+            if macAlerts != baseMacAlerts || macAlerts && store.bootstrap?.settings.macScriptNotifications != false {
+                let configured = await MacNotificationService.shared.setEnabled(macAlerts, api: store.api)
+                guard namespace == store.writeNamespace else { return }
+                if !configured {
+                    saveError = MacNotificationService.shared.permissionNotice ?? "Mac 알림 설정을 저장하지 못했습니다."
+                    base = store.bootstrap?.settings ?? next; draft = base
+                    return
+                }
+                await store.refresh()
+                guard namespace == store.writeNamespace else { return }
+            }
+            baseMacAlerts = macAlerts
+            #endif
             let saved = store.bootstrap?.settings ?? next
             base = saved
             draft = saved
@@ -1796,7 +1948,7 @@ struct SettingsView: View {
                 if !Task.isCancelled { savedNotice = false }
             }
         } else {
-            saveError = store.errorMessage ?? "저장하지 못했습니다."
+            saveError = store.errorMessage.map(friendlyError) ?? "저장하지 못했습니다."
         }
     }
 
@@ -1808,7 +1960,7 @@ struct SettingsView: View {
         let before = store.lastUpdated
         if kind == .runtime { await store.refreshDiagnostics() } else { await store.refresh() }
         guard store.lastUpdated == before, let error = store.errorMessage else { return }
-        if kind == .sync { syncError = error } else { runtimeError = error }
+        if kind == .sync { syncError = friendlyError(error) } else { runtimeError = friendlyError(error) }
     }
 
     private func leave() {
@@ -1819,9 +1971,43 @@ struct SettingsView: View {
 
     #if os(iOS)
     private func close() {
-        if isDirty { confirmDiscard = true } else { dismiss() }
+        switch SettingsCloseAction.resolve(dirty: isDirty, saving: saving) {
+        case .close: dismiss()
+        case .confirm: confirmDiscard = true
+        case .wait: break
+        }
     }
     #endif
+
+    private func saveAndClose() async {
+        if !isDirty { finishClosing(); return }
+        await save()
+        if !isDirty && !saving { finishClosing() }
+    }
+
+    private func finishClosing() {
+        #if os(macOS)
+        settingsWindow?.close()
+        #else
+        dismiss()
+        #endif
+    }
+
+    private func revealRuntime() {
+        guard SettingsNavigation.shared.pendingRuntime else { return }
+        SettingsNavigation.shared.pendingRuntime = false
+        #if os(macOS)
+        section = .ai
+        #else
+        path = [.ai]
+        #endif
+        highlightRuntime = true
+        let revision = SettingsNavigation.shared.revision
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            if revision == SettingsNavigation.shared.revision { highlightRuntime = false }
+        }
+    }
 
     /// Compares only what this screen edits, with model names normalized the way they are saved.
     private static func signature(_ settings: Settings) -> String {
@@ -1960,13 +2146,14 @@ struct NewProjectView: View {
     @State private var error: String?
     /// The daemon keeps a project whose conductor failed to start; retrying "만들기" would make a second one.
     @State private var partial: Partial?
+    @State private var createdID: String?
     @FocusState private var focus: Field?
 
     private enum Field: Hashable { case name, cwd }
     private struct Partial { let id: String; var detail: String }
 
     private var canCreate: Bool {
-        store.canWrite && !working && partial == nil && !settingsTrim(name).isEmpty && !settingsTrim(cwd).isEmpty
+        store.canWrite && !working && !ProjectCreationNotice.shared.running && partial == nil && createdID == nil && !store.pendingActions.contains("create-project") && !settingsTrim(name).isEmpty && !settingsTrim(cwd).isEmpty
     }
     private var lockNotice: (title: String, detail: String)? {
         if store.isDemo { return ("샘플은 읽기 전용입니다", "실제 Mac에 연결하면 프로젝트를 만들 수 있습니다.") }
@@ -1980,13 +2167,14 @@ struct NewProjectView: View {
 
     var body: some View {
         CESheet("새 프로젝트", subtitle: "작업 폴더를 고르면 총괄이 바로 일을 시작합니다.", icon: "folder.badge.plus", width: 520,
-                onClose: { if !working { dismiss() } }) {
+                onClose: { dismiss() }) {
             form
         } footer: {
-            Button(partial == nil ? "취소" : "닫기") { dismiss() }
+            Button(working ? "뒤에서 계속 만들기" : partial == nil && createdID == nil ? "취소" : "닫기") { dismiss() }
                 .ceSecondaryButton()
-                .disabled(working)
-            if partial != nil {
+            if let createdID {
+                Button("총괄에게 첫 일 맡기기") { Task { await openCreated(createdID) } }.ceProminentButton()
+            } else if partial != nil {
                 Button { Task { await retryConductor() } } label: { busyLabel(working ? "띄우는 중" : "다시 시도") }
                     .ceProminentButton()
                     .keyboardShortcut(.defaultAction)
@@ -2002,7 +2190,6 @@ struct NewProjectView: View {
         // Flows through the environment to CESheet's ScrollView: a swipe puts the keyboard away.
         .scrollDismissesKeyboard(.interactively)
         #endif
-        .interactiveDismissDisabled(working)
         .sheet(isPresented: $showFolderPicker) { FolderPickerView(initialPath: cwd.isEmpty ? nil : cwd) { cwd = $0; clonedRepository = nil } }
         .sheet(isPresented: $showGitHubClone) {
             GitHubCloneView { path, repositoryName in
@@ -2062,11 +2249,20 @@ struct NewProjectView: View {
                                      selection: provider, label: "총괄이 쓸 AI", fill: true) { provider = $0 }
                 }
             }
-            .disabled(partial != nil || working)
+            .disabled(partial != nil || createdID != nil || working)
+            if working {
+                InlineNotice(title: "프로젝트를 만드는 중입니다", detail: "이 창을 닫아도 만들기는 계속됩니다. 결과는 안내 띠로 알려 드립니다.")
+            }
+            if createdID != nil {
+                InlineNotice(tone: .success, title: "프로젝트를 만들었습니다", detail: "총괄에게 첫 일을 맡겨 보세요.")
+            }
             if let core = coreUnavailable, partial == nil {
                 InlineNotice(tone: .attention, icon: "exclamationmark.triangle",
                              title: core.installed ? "실행 엔진을 쓸 수 없습니다" : "실행 엔진(herdr-core)이 설치되지 않았습니다",
-                             detail: [core.detail, "지금 만들면 프로젝트만 생기고 총괄은 뜨지 않을 수 있습니다. 설정 › AI 모델의 실행 환경을 확인하세요."].compactMap { $0 }.joined(separator: " "))
+                             detail: [core.detail, "지금 만들면 프로젝트만 생기고 총괄은 뜨지 않을 수 있습니다. 설정 › AI 모델의 실행 환경을 확인하세요."].compactMap { $0 }.joined(separator: " "),
+                             actionTitle: "실행 환경 보기", action: {
+                    SettingsView.showRuntime(); dismiss(); router.showSettings = true
+                })
             }
             if let partial {
                 InlineNotice(tone: .danger, icon: "exclamationmark.triangle", title: "프로젝트는 만들었지만 총괄을 띄우지 못했습니다",
@@ -2123,37 +2319,36 @@ struct NewProjectView: View {
 
     private func create() async {
         guard canCreate else { return }
-        let projectName = settingsTrim(name)
         error = nil
         working = true
         defer { working = false }
-        let before = Set(store.projects.map(\.id))
-        // No goal at creation: the lead sets the aim of each piece of work when the owner hands it over.
-        if await store.createProject(name: projectName, cwd: settingsTrim(cwd), goal: "", provider: provider) {
-            router.go(.team)
-            dismiss()
-            return
-        }
-        let message = store.errorMessage ?? "프로젝트를 만들지 못했습니다."
-        await store.refresh()
-        if let created = store.projects.first(where: { !before.contains($0.id) && $0.name == projectName }) {
-            partial = Partial(id: created.id, detail: message)
-        } else {
-            error = message
+        let result = await ProjectCreationNotice.shared.create(store: store, name: settingsTrim(name), cwd: settingsTrim(cwd), provider: provider)
+        switch result {
+        case .created(let id): createdID = id
+        case .partial(let id, let detail): partial = Partial(id: id, detail: detail)
+        case .failed(let detail): error = detail
+        case .hostChanged: error = "연결이 바뀌었습니다. 원래 Mac에서 만들기 결과를 확인해 주세요."
         }
     }
 
     private func retryConductor() async {
         guard let target = partial else { return }
+        let namespace = store.writeNamespace
         working = true
         defer { working = false }
         if store.selectedProjectID != target.id { await store.selectProject(id: target.id) }
+        guard namespace == store.writeNamespace, store.selectedProjectID == target.id else { return }
         if await store.startConductor() {
-            router.go(.team)
-            dismiss()
+            guard namespace == store.writeNamespace else { return }
+            createdID = target.id; partial = nil
+            ProjectCreationNotice.shared.finish(projectID: target.id, message: "총괄이 준비되었습니다. 첫 일을 맡겨 보세요.")
         } else {
-            partial?.detail = store.errorMessage ?? "총괄을 띄우지 못했습니다."
+            partial?.detail = store.errorMessage.map(friendlyError) ?? "총괄을 띄우지 못했습니다."
         }
+    }
+
+    private func openCreated(_ id: String) async {
+        if await ProjectCreationNotice.openProject(id, store: store, router: router) { dismiss() }
     }
 
     private func openPartial() async {

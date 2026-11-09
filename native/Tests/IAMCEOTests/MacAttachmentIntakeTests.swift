@@ -60,8 +60,6 @@ final class MacAttachmentIntakeTests: XCTestCase {
         let policies = [
             MacAttachmentPolicy(archived: true, demo: false, connected: true, writable: true, missingTarget: false),
             MacAttachmentPolicy(archived: false, demo: true, connected: true, writable: true, missingTarget: false),
-            MacAttachmentPolicy(archived: false, demo: false, connected: false, writable: true, missingTarget: false),
-            MacAttachmentPolicy(archived: false, demo: false, connected: true, writable: false, missingTarget: false),
             MacAttachmentPolicy(archived: false, demo: false, connected: true, writable: true, missingTarget: true),
             MacAttachmentPolicy(archived: false, demo: false, connected: true, writable: true, missingTarget: false, composerCovered: true),
         ]

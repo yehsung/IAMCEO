@@ -12,6 +12,10 @@ struct TerminalSheetLayout {
 
 struct TerminalView: View {
     @Environment(AppStore.self) private var store
+    #if os(macOS)
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.terminalWindow) private var terminalWindow
+    #endif
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     let member: Member
@@ -41,10 +45,24 @@ struct TerminalView: View {
     #endif
 
     var body: some View {
+        #if os(macOS)
+        if !terminalWindow {
+            Color.clear.frame(width: 1, height: 1).onAppear {
+                openWindow(id: "terminal", value: member.id)
+                dismiss()
+            }
+        } else { content }
+        #else
+        content
+        #endif
+    }
+
+    private var content: some View {
         Group {
             if unsupported && !missingTerminal { TerminalMirrorView(member: member) }
             else { liveSheet }
         }
+        .task(id: member.id) { if TerminalAvailability.needsWake(current) { await wake() } }
         .onAppear { session.appear(store: store, member: member, active: scenePhase == .active) }
         .onChange(of: "\(current.status)|\(current.paneId ?? "")") { _, _ in session.memberChanged(store: store, member: current) }
         .onChange(of: client.state) { _, _ in session.streamChanged(store: store, member: current) }
@@ -85,42 +103,25 @@ struct TerminalView: View {
                     .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(CE.line) }
                 if let notice = session.notice {
                     // web .tm-note: 13.5 at line-height 1.5.
-                    Text(TerminalPresentation.message(notice)).font(CEFont.note).foregroundStyle(CE.attention)
+                    Text(friendlyError(TerminalPresentation.message(notice))).font(CEFont.note).foregroundStyle(CE.attention)
                         .lineSpacing(CELeading.spacing(13.5, 1.5)).lineLimit(3)
-                        .accessibilityLabel(TerminalPresentation.message(notice))
+                        .accessibilityLabel(friendlyError(TerminalPresentation.message(notice)))
                 }
             }
         } footer: {
-            #if os(macOS)
             HStack {
-                Text("닫으면 자동 전달이 다시 시작됩니다").font(CEFont.note).foregroundStyle(CE.ink2).lineLimit(1)
+                Text(controlling ? "조작을 끝내면 자동 전달이 다시 시작됩니다" : "보기만 해서는 자동 전달을 멈추지 않습니다")
+                    .font(CEFont.note).foregroundStyle(CE.ink2)
                 Spacer(minLength: 8)
-                Button("닫기") { dismiss() }.ceSecondaryButton().accessibilityLabel("터미널 닫기")
-            }
-            .frame(maxWidth: .infinity, alignment: .leading).layoutPriority(1)
-            #else
-            // iPhone opens straight into typing (like Mac): the footer is one quiet line, and an action only when the
-            // terminal could not be taken (다시 시도). Closing is the ✕ at the top.
-            HStack(spacing: 10) {
-                if missingTerminal {
-                    Text("깨우면 같은 창에서 다시 연결합니다").font(CEFont.note).foregroundStyle(CE.ink2)
-                        .lineSpacing(CELeading.note)
-                    Spacer(minLength: 0)
-                } else if session.readOnly && !session.starting {
-                    Text("읽기 전용으로 보는 중입니다").font(CEFont.note).foregroundStyle(CE.ink2)
-                    Spacer(minLength: 8)
-                    Button("다시 시도") { session.beginInput(store: store, member: member) }
-                        .ceProminentButton().controlSize(.small)
-                        .disabled(store.isDemo || !store.canWrite || session.starting || session.ending)
-                        .accessibilityLabel("터미널 직접 입력 다시 시도")
-                } else {
-                    Image(systemName: "arrow.uturn.backward.circle").font(.system(size: 13, weight: .medium)).foregroundStyle(CE.ink3)
-                    Text("닫으면 자동 전달이 다시 시작됩니다").font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1)
-                    Spacer(minLength: 0)
+                if controlling || session.starting {
+                    Button("조작 끝내기") { Task { await session.finishInput(store: store, member: member, resume: true) } }
+                        .ceSecondaryButton().disabled(session.ending)
+                } else if !missingTerminal {
+                    Button("입력 시작") { session.beginInput(store: store, member: member) }
+                        .ceProminentButton()
+                        .disabled(store.isDemo || !store.canWrite || session.ending)
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
-            #endif
         }
         #if os(macOS)
         .frame(minWidth: min(640, sheetWidth - 80), idealWidth: sheetWidth, maxWidth: .infinity,
@@ -133,74 +134,57 @@ struct TerminalView: View {
             StatusDot(tone: (controlling || TerminalPresentation.holdsLease(store.terminalLeases[member.id], now: now)) ? .attention : .neutral)
             Text(statusText(now: now)).font(CEFont.meta).foregroundStyle((controlling || TerminalPresentation.holdsLease(store.terminalLeases[member.id], now: now)) ? CE.attention : CE.ink2)
             Spacer(minLength: 8)
-            #if os(macOS)
-            if session.readOnly && !missingTerminal {
-                // A status-row action: web gbtn--s (32pt), not the footer size.
-                Button("다시 시도") { session.beginInput(store: store, member: member) }
-                    .ceSecondaryButton().controlSize(.small)
-                    .disabled(store.isDemo || !store.canWrite || session.starting || session.ending)
-                    .accessibilityLabel("터미널 직접 입력 다시 시도")
+            if !missingTerminal, !session.starting, case .closed = client.state {
+                Button("다시 연결") { session.observe(store: store, member: member) }
+                    .ceSecondaryButton().controlSize(.small).disabled(session.ending)
             }
-            #else
-            if !missingTerminal, !session.starting, case .closed = client.state { reconnectButton }
-            #endif
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(statusText(now: now))
     }
-    #if os(iOS)
-    private var reconnectButton: some View {
-        Button("다시 연결") { session.beginInput(store: store, member: member) }.ceSecondaryButton().controlSize(.small)
-            .disabled(!TerminalPresentation.canReconnect(starting: session.starting, ending: session.ending, controlling: controlling))
-            .accessibilityLabel("터미널 다시 연결")
-    }
-    #endif
-
     private func statusText(now: Date) -> String {
-        if missingTerminal { return waking ? "깨우는 중…" : "터미널 없음" }
-        #if os(macOS)
-        if session.starting { return "연결 중" }
-        if session.readOnly { return client.state == .connecting ? "읽기 전용 · 연결 중" : "읽기 전용" }
+        if missingTerminal { return waking ? "깨우는 중…" : "터미널 준비 필요" }
+        if session.ending { return "조작 끝내는 중…" }
+        if session.starting { return "입력 준비 중…" }
         if controlling { return TerminalPresentation.controlStatus(expiresAt: store.terminalLeases[member.id]?.expiresAt, now: now) }
-        return "연결 중"
-        #else
         switch client.state {
-        case .connecting: return session.starting ? "연결 중" : "다시 연결하는 중"
-        case .live(mode: .observe, cols: _, rows: _): return "읽기 전용"
-        case .live(mode: .control, cols: _, rows: _):
-            if let expiry = store.terminalLeases[member.id]?.expiresAt {
-                let seconds = max(0, Int(ceil(expiry / 1000 - now.timeIntervalSince1970)))
-                if seconds < 60 { return "\(seconds)초 뒤 조작권이 끝납니다" }
-            }
-            return "직접 입력 중 · 자동 전달 멈춤"
-        case let .closed(_, message): return TerminalPresentation.message(message ?? "연결이 끊겼습니다")
-        case .unsupported: return "이 서버는 기존 터미널 화면을 사용합니다"
+        case .connecting: return "보기 연결 중…"
+        case let .closed(_, message): return friendlyError(TerminalPresentation.message(message ?? "연결이 끊겼습니다"))
+        default: return "읽기 전용"
         }
-        #endif
     }
+
     private var sleepingTerminal: some View {
         VStack(spacing: 16) {
-            // web .tm-note: 13.5 ink-2 at line-height 1.5, centred.
-            Text("이 직원은 잠들어 있어 터미널이 없습니다").font(CEFont.note).foregroundStyle(CE.ink2)
-                .lineSpacing(CELeading.spacing(13.5, 1.5)).multilineTextAlignment(.center)
-            Button(waking ? "깨우는 중…" : "깨우기") {
-                Task {
-                    wakeNotice = nil
-                    if await store.wakeTerminal(current) {
-                        session.memberChanged(store: store, member: current)
-                    } else { wakeNotice = store.errorMessage }
-                }
-            }
-            .ceProminentButton()
-            .disabled(!TerminalAvailability.needsWake(current) || !store.canWrite || waking || session.ending || store.pendingActions.contains("member:\(member.id)"))
-            if let wakeNotice {
-                Text(wakeNotice).font(CEFont.note).foregroundStyle(CE.danger)
-                    .lineSpacing(CELeading.note).multilineTextAlignment(.center).frame(maxWidth: 440)
+            if waking {
+                ProgressView("깨우는 중…")
+                Text("터미널이 준비되면 이어서 연결합니다").font(CEFont.note).foregroundStyle(CE.ink2)
+            } else {
+                Text(wakeNotice ?? "터미널을 준비하고 있습니다").font(CEFont.note).foregroundStyle(CE.ink2)
+                    .multilineTextAlignment(.center)
+                Button("다시 시도") { Task { await wake() } }
+                    .ceProminentButton().disabled(!store.canWrite || session.ending)
             }
         }
-        .padding(.horizontal, 24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 24).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    private func wake() async {
+        guard TerminalAvailability.needsWake(current), store.canOpenTerminal(current) else { return }
+        wakeNotice = nil
+        let namespace = store.writeNamespace
+        let outcome = await store.terminalWake.wake(memberID: member.id, resume: {
+            await store.memberAction(current, action: "resume") ? nil : (store.errorMessage ?? "직원을 깨우지 못했습니다")
+        }, current: {
+            store.members.first { $0.id == member.id }
+        }, allowed: {
+            store.writeNamespace == namespace && store.canWrite && !store.isArchive
+        })
+        guard !Task.isCancelled else { return }
+        if outcome == .ready { session.memberChanged(store: store, member: current) }
+        else if let message = outcome.message { wakeNotice = friendlyError(message) }
+    }
+
     private var terminal: some View {
         LiveTerminalSurface(client: client, mode: session.surfaceMode, cols: client.grid.cols, rows: client.grid.rows,
                             onPendingInput: { session.pendingInput($0) },
@@ -209,3 +193,31 @@ struct TerminalView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
+
+#if os(macOS)
+private struct TerminalWindowKey: EnvironmentKey { static let defaultValue = false }
+extension EnvironmentValues {
+    var terminalWindow: Bool {
+        get { self[TerminalWindowKey.self] }
+        set { self[TerminalWindowKey.self] = newValue }
+    }
+}
+
+struct TerminalWindowContent: View {
+    @Environment(AppStore.self) private var store
+    let memberID: String?
+    @State private var retained: Member?
+    var body: some View {
+        Group {
+            if let member = store.members.first(where: { $0.id == memberID }) ?? retained {
+                TerminalView(member: member).environment(\.terminalWindow, true)
+            } else {
+                EmptyTile(icon: "terminal", title: "직원을 찾을 수 없습니다", detail: "팀에서 직원을 다시 선택해 주세요.")
+            }
+        }
+        .onAppear { retained = store.members.first { $0.id == memberID } }
+        .frame(minWidth: 640, minHeight: 400)
+        .preferredColorScheme(.dark).tint(CE.accent)
+    }
+}
+#endif

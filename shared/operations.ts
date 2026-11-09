@@ -30,7 +30,7 @@ export interface ServerCapabilities {
 export interface RevisionPrecondition { expectedRevision: Revision }
 export type SettingsWriteRequest = SettingsPatch;
 export type MemberConfigWriteRequest = PatchMemberReq;
-export interface TodoDoneRequest { done: boolean }
+export interface TodoDoneRequest { done: boolean; note?: string; fileIds?: string[] }
 /** Decision.updatedAt 문자열이다. delivery recovery의 숫자 version과 혼용하지 않는다. */
 export type AnswerRequestV2 = Omit<AnswerReq, "expectedVersion"> & { expectedVersion: string };
 export interface SettingsWriteResult { settings: Settings; revision: Revision }

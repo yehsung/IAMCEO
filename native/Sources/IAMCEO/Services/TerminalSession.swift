@@ -239,7 +239,7 @@ final class TerminalSession {
         ending = true; requestID = UUID(); pendingControl = nil; revalidationTask?.cancel()
         let owner = takeOwner()
         client.close(); starting = false; startBuffer.clear()
-        if platform == .iPhone { readOnly = true }
+        readOnly = true
         if !(await release(store: store, member: member, owner: owner)) { notice = store.errorMessage ?? "조작권을 놓지 못했습니다. 다시 닫아 주세요." }
         ending = false
         if resume { observe(store: store, member: member) }

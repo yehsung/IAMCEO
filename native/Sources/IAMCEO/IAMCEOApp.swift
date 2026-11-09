@@ -60,6 +60,9 @@ struct IAMCEOApp: App {
             #if os(macOS)
             MainWindow(store: store, drafts: drafts, sharedRouter: sharedRouter)
                 .modifier(ApplicationLifecycleHooks(lifecycle: lifecycle, store: store))
+                // The app's own notifications and Dock badge (A-82, A-101): started once with the first window, kept
+                // for the app's life (it only posts when the owner turned Mac notifications on in 설정).
+                .task { MacNotificationService.shared.start(store: store, router: sharedRouter) }
             #else
             MainWindow(store: store, drafts: drafts)
                 .modifier(ApplicationLifecycleHooks(lifecycle: lifecycle, store: store))
@@ -75,6 +78,10 @@ struct IAMCEOApp: App {
         .commands { MacCommands(store: store, router: sharedRouter) }
         #endif
         #if os(macOS)
+        WindowGroup(id: "terminal", for: String.self) { $memberID in
+            TerminalWindowContent(memberID: memberID).environment(store).environment(sharedRouter).environment(drafts)
+        }
+        .defaultSize(width: 1040, height: 700)
         SwiftUI.Settings {
             SettingsWindow(store: store, drafts: drafts, router: sharedRouter)
                 .modifier(ApplicationLifecycleHooks(lifecycle: lifecycle, store: store))

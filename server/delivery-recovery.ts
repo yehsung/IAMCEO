@@ -7,7 +7,7 @@ import type { DeliveryBaseline, DeliveryInspection, DeliveryRepair, Runner, Runn
 
 /** SQL, cursors and transactions belong exclusively to Store. */
 export type DeliveryRecoveryStore = Pick<Store,
-  "transaction" | "afterCommit" | "requireProject" | "listProjects" | "requireMember" | "getMember" | "listMembers" | "memberRevisions" | "getSettings" |
+  "setNeedsOwnerCounter" | "transaction" | "afterCommit" | "requireProject" | "listProjects" | "requireMember" | "getMember" | "listMembers" | "memberRevisions" | "getSettings" |
   "listDeliveries" | "requireDelivery" | "getDelivery" | "enqueue" | "getDeliveryRecovery" | "updateDeliveryRecovery" | "listDeliveryRecoveries" |
   "getDeliveryRetry" | "patchDeliveryRetry" | "saveDispatch" | "getDispatch" | "listDispatches" | "updateDispatch" | "inputState" |
   "deliveryRecoveryOperation" | "markDelivered" | "markHeld" | "markFailed" | "setDeliveryStatus" | "setMessageDelivery" |
@@ -69,6 +69,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
 
   constructor(private readonly options: DeliveryRecoveryOptions) {
     this.store = options.store;
+    this.store.setNeedsOwnerCounter(projectId => this.items(projectId).filter(item => item.phase === "needs_owner").length);
     this.now = options.now ?? Date.now;
     this.random = options.random ?? Math.random;
   }
@@ -108,7 +109,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     if (delivery.refType === "message") {
       const m = this.store.getMessage(delivery.refId);
       return m && m.projectId === delivery.projectId && (delivery.kind !== "user_message" || m.targetMemberId === null || m.targetMemberId === delivery.memberId)
-        ? hash({ id: m.id, body: m.body, title: m.title, attachments: m.attachments, targetMemberId: m.targetMemberId, memberId: delivery.memberId }) : null;
+        ? hash({ id: m.id, body: m.body, title: m.title, attachments: m.attachments, ...(m.contextFileId ? { contextFileId: m.contextFileId } : {}), targetMemberId: m.targetMemberId, memberId: delivery.memberId }) : null;
     }
     if (delivery.refType === "decision") {
       const d = this.store.getDecision(delivery.refId);

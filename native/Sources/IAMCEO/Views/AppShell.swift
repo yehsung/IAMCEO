@@ -25,6 +25,7 @@ struct AppShell: View {
     #if os(macOS)
     @State private var attachmentIntake = MacAttachmentIntake()
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     /// Window width, for the member drawer's width (40% of the window, 440…560).
     @State private var windowWidth: CGFloat = 1440
     /// The whole window (under the toolbar too), so the detail column can redraw the window's aurora in place.
@@ -71,8 +72,18 @@ struct AppShell: View {
         #endif
         .sheet(isPresented: $router.showNewProject) { NewProjectView() }
         .sheet(isPresented: $router.showNewMember) { NewMemberView() }
+        #if os(iOS)
         .sheet(item: rootTerminal) { TerminalView(member: $0) }
+        #endif
         #if os(macOS)
+        // Mac: a terminal is its own window (A-54), so two members can sit side by side and the screen behind stays
+        // usable. Every entry point (홈, 대화, 결재함, the drawer) only sets terminalMemberID; it opens here.
+        .onChange(of: router.terminalMemberID) { _, id in
+            guard let id else { return }
+            router.terminalMemberID = nil
+            guard !store.isArchive, store.members.contains(where: { $0.id == id }) else { return }
+            openWindow(id: "terminal", value: id)
+        }
         // Settings is its own window on Mac.
         .onChange(of: router.showSettings) { _, show in
             guard show else { return }
@@ -861,10 +872,11 @@ private struct MemberDrawerHost: View {
         let open = router.memberID != nil
         ZStack(alignment: .trailing) {
             if open {
+                // A light veil only: clicks go through to the screen, so another member's row (팀, 사무실, 홈) switches
+                // the drawer to that member in one click (A-64) instead of closing it. Esc, 닫기 or a tab closes it.
                 // Stops at the toolbar: the tabs stay live (switching screens closes the drawer), so they stay undimmed.
-                Color.black.opacity(0.14)
-                    .contentShape(Rectangle())
-                    .onTapGesture { close() }
+                Color.black.opacity(0.08)
+                    .allowsHitTesting(false)
                     .transition(.opacity)
                     .accessibilityHidden(true)
             }
@@ -1060,6 +1072,8 @@ struct StatusStrips: View {
         var action: (() -> Void)? = nil
         /// A small spinner in place of the icon (work in progress, nothing to press).
         var busy = false
+        /// iPhone line limit (Mac strips stay one line, full text in the tooltip).
+        var lines = 2
     }
 
     private var strips: [Strip] {
@@ -1069,8 +1083,13 @@ struct StatusStrips: View {
             items.append(Strip(id: "demo", tone: .accent, icon: "eye", text: "샘플 데이터 · 읽기 전용"))
         }
         if offline && offlineShown {
-            items.append(Strip(id: "offline", tone: .attention, icon: "wifi.slash", text: "서버와 연결이 끊겼습니다. 다시 잇는 중입니다.",
-                               detail: store.connectionIssue, actionTitle: "지금 다시 연결", action: { Task { await store.restartRealtime() } }))
+            // A-90: what to check, not the system's raw error (that stays in the Mac tooltip). The iPhone usually
+            // reaches the Mac over Wi-Fi or Tailscale, so say which two things to look at.
+            items.append(Strip(id: "offline", tone: .attention, icon: "wifi.slash",
+                               text: isMac ? "서버와 연결이 끊겼습니다. 다시 잇는 중입니다."
+                                           : "Mac과 연결이 끊겼습니다. Wi-Fi·Tailscale과 Mac의 IAMCEO가 켜져 있는지 확인해 주세요.",
+                               detail: store.connectionIssue.map(ConnectionRecovery.reason), actionTitle: "다시 연결",
+                               action: { Task { await store.restartRealtime() } }, lines: 3))
         }
         if store.isArchive {
             items.append(Strip(id: "archive", tone: .neutral, icon: "archivebox", text: "보관한 프로젝트 · 읽기 전용",
@@ -1149,7 +1168,7 @@ struct StatusStrips: View {
                 // web 13.5px at line-height 1.35.
                 Text(item.text).font(CEFont.note).foregroundStyle(palette.text)
                     .lineSpacing(CELeading.spacing(13.5, 1.35))
-                    .lineLimit(isMac ? 1 : 2).truncationMode(.tail)
+                    .lineLimit(isMac ? 1 : item.lines).truncationMode(.tail)
             }
             Spacer(minLength: 6)
             if let title = item.actionTitle, let action = item.action {

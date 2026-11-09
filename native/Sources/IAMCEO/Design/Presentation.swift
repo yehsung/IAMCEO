@@ -573,3 +573,18 @@ func waitReasonTone(_ reason: String?) -> Tone {
     default: .neutral
     }
 }
+
+/// The server's delivery note in plain words (the chat footer and its explanation). The server writes these for the
+/// web too, so the app rewrites only the phrases that read like a system log; anything else is shown as is.
+func plainDeliveryNote(_ note: String) -> String {
+    let text = note.trimmingCharacters(in: .whitespacesAndNewlines)
+    let exhausted = "몇 번 다시 넣어 봤지만 들어가지 않았습니다. '다시 보내기'를 눌러 주세요."
+    if text.hasPrefix("자동 재전송 상한에 도달") || text.hasPrefix("자동 재시도로 해결 안 됨") { return exhausted }
+    if text.hasPrefix("미전달을 확인했습니다") { return "아직 들어가지 않은 것을 확인했습니다. 안전한지 확인한 뒤 다시 넣습니다." }
+    if text.hasPrefix("입력 제출을 확인 중") { return "입력칸에 넣은 글이 제출됐는지 확인하는 중입니다." }
+    return text
+        .replacingOccurrences(of: "CLI의 대화 연결", with: "AI 프로그램의 대화 연결")
+        .replacingOccurrences(of: "이 실행기에서는", with: "이 실행 방식에서는")
+        .replacingOccurrences(of: "세션 기록", with: "대화 기록")
+}
+

@@ -39,7 +39,7 @@ struct PushSettingsView: View {
     #endif
 
     /// What is sent, in one line.
-    static let coverage = "새 결재, 승인 창 앞 멈춤, 오류 멈춤, 완료 보고(2분씩 묶음)를 알립니다."
+    static let coverage = "새 결재, 승인·선택 대기, 오류 멈춤, 완료·막힘 보고, 대표 할 일을 알립니다."
     /// Where the push key goes on the server computer (docs/operating-model.md › APNs 호스트 설정).
     private static let keyFile = "~/.iamceo/apns.json"
 

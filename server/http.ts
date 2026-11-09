@@ -7,10 +7,10 @@ import { MIGRATIONS } from "./db.ts";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { z } from "zod";
-import { fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type HerdrInfo, type Member, type MessagePageOptions, type SyncCursor, type SyncSnapshot } from "../shared/types.ts";
+import { fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type HerdrInfo, type Member, type MessagePageOptions, type SyncCursor, type SyncSnapshot, type FileDoc, type WsEvent } from "../shared/types.ts";
 import type { OperationReceipt, ServerCapabilities } from "../shared/operations.ts";
 import type { DeliveryRecoveryService } from "./service-contracts.ts";
-import { ARTIFACT_CSP } from "../shared/artifact-kit.ts";
+import { ARTIFACT_CSP, buildArtifactSrcdoc } from "../shared/artifact-kit.ts";
 import type { Bus } from "./bus.ts";
 import { VERSION, type Config } from "./config.ts";
 import { FilePublication, prepareImport, MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES, resolveInside, saveUpload, type SavedFile } from "./files.ts";
@@ -19,7 +19,8 @@ import { ApiError, type Store } from "./store.ts";
 import { SESSION_ID_RE } from "./text.ts";
 import { Pairing, PAIR_CODE_TTL_MS, tailnetUrls, withMagicDnsNames } from "./pairing.ts";
 import { createPushHandler, type PushRoutesContext } from "./push/routes.ts";
-import { TerminalStreams, type SocketData } from "./terminal-stream.ts";
+import { TerminalStreams, type SocketData as TerminalSocketData } from "./terminal-stream.ts";
+type SocketData = TerminalSocketData & { lite?: boolean };
 import { ModelCatalogReader } from "./models.ts";
 import { Folders } from "./folders.ts";
 import { checkLocalImportPath, readLocalFile } from "./local-files.ts";
@@ -219,6 +220,7 @@ const SendMessageSchema = z.object({
   text: z.string(),
   targetMemberId: z.string().nullable().optional(),
   attachmentIds: z.array(z.string()).max(50).optional(),
+  contextFileId: z.string().nullable().optional(),
 });
 const AnswerSchema = z.object({
   expectedVersion: nonEmpty.optional(),
@@ -226,7 +228,7 @@ const AnswerSchema = z.object({
   note: z.string().nullable().optional(),
   batch: z.boolean().optional(),
 });
-const TodoDoneSchema = z.object({ done: z.boolean() });
+const TodoDoneSchema = z.object({ done: z.boolean(), note: z.string().max(100_000).optional(), fileIds: z.array(z.string().min(1)).max(50).optional() });
 const SleepSchema = z.object({ force: z.boolean().optional() });
 const AdoptSchema = z.object({
   paneId: nonEmpty,
@@ -248,6 +250,7 @@ const SettingsSchema = z
     contextWindows: z.record(z.string().min(1).max(200), z.number().int().min(1_000).max(10_000_000)),
     maxAwakeWorkers: z.number().int().min(1).max(256),
     notifyMac: z.boolean(),
+    macScriptNotifications: z.boolean(),
     // 0 이면 끈다. 화면은 끔·3·6·12·24 를 고르게 한다.
     boardTidyHours: z.number().int().min(0).max(168),
   })
@@ -325,7 +328,7 @@ function operationResponse(receipt: OperationReceipt): Response {
       const { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt } = receipt.result;
       result = { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt }; break;
     }
-    case "settings": result = { settings: publicFields(receipt.result.settings, ["backend", "permissionMode", "ranks", "codexRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault", "contextWindows", "maxAwakeWorkers", "notifyMac", "boardTidyHours"]), revision: receipt.result.revision }; break;
+    case "settings": result = { settings: publicFields(receipt.result.settings, ["backend", "permissionMode", "ranks", "codexRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault", "contextWindows", "maxAwakeWorkers", "notifyMac", "macScriptNotifications", "boardTidyHours"]), revision: receipt.result.revision }; break;
     case "member_config": result = { member: receiptMember(receipt.result.member), configRevision: receipt.result.configRevision, sessionGeneration: receipt.result.sessionGeneration }; break;
     case "todo_done": result = { todo: publicFields(receipt.result.todo, ["id", "projectId", "memberId", "who", "title", "detail", "done", "doneAt", "createdAt", "outcome", "closeReason", "closedBy"]), revision: receipt.result.revision }; break;
   }
@@ -467,6 +470,20 @@ async function artifactHtml({ config, store }: ServerContext, id: string): Promi
   return source.text();
 }
 
+/** Wire-only projection: never mutate the cached/persisted full document. */
+export function liteFile(file: FileDoc): Omit<FileDoc, "body"> {
+  const { body: _body, ...metadata } = file;
+  return metadata;
+}
+export function liteEvent(event: WsEvent): unknown {
+  return event.type === "file" ? { ...event, file: liteFile(event.file) } : event;
+}
+function wantsLite(url: URL): boolean {
+  const value = url.searchParams.get("lite");
+  if (value !== null && value !== "1" && value !== "0") throw new ApiError(400, "lite 값이 잘못되었습니다");
+  return value === "1";
+}
+
 function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, readHerdr: () => Promise<HerdrInfo>, currentHerdr: () => HerdrInfo): Route[] {
   const { config, store, orch, bus } = ctx;
   const models = new ModelCatalogReader(config);
@@ -521,7 +538,8 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
   return [
     route("GET", "/api/projects/:id/local-file", (_req, url, [id]) => {
       const file = readLocalFile(store, id!, url.searchParams.get("path") ?? "", ctx.folderHome, configuredSecretRoots(config, process.env, ctx.folderHome));
-      const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
+      const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": `sandbox allow-scripts; ${ARTIFACT_CSP}`, "Referrer-Policy": "no-referrer" };
+      if (file.info.kind === "html" && url.searchParams.get("render") === "1") return new Response(buildArtifactSrcdoc(file.info.content ?? "", { title: file.info.name }), { headers: { ...headers, "Content-Type": "text/html; charset=utf-8" } });
       if (file.bytes) return new Response(new Uint8Array(file.bytes), { headers: { ...headers, "Content-Type": file.info.mime,
         "X-Local-File-Metadata": Buffer.from(JSON.stringify(file.info)).toString("base64") } });
       return Response.json(file.info, { headers });
@@ -533,12 +551,11 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       return Response.json(await once(`local-file:${id}:${local.info.path}`, async () => {
         activeProject(id!);
         const existing = store.listFiles(id!).find(file => file.path === local.info.path);
-        if (existing) return existing;
         let publication: FilePublication | undefined;
         try {
           const attachments: SavedFile[] = [];
           const detectedKind = fileKindOf(local.info.name, local.info.mime);
-          if (local.info.kind !== "text" || detectedKind === "image") {
+          if (!["text", "html", "csv"].includes(local.info.kind) || detectedKind === "image") {
             if (local.info.size > MAX_UPLOAD_BYTES) throw new ApiError(413, "파일은 50MB 까지 올릴 수 있습니다");
             const input = prepareImport(local.info.path);
             checkLocalImportPath(input.source, ctx.folderHome, configuredSecretRoots(config, process.env, ctx.folderHome));
@@ -549,15 +566,31 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
             publication.publish();
           }
           const kind = local.info.kind === "text" && detectedKind === "file" ? "code" : detectedKind;
+          const bodyText = kind === "artifact" || attachments.length ? "" : local.info.content ?? "";
+          const html = kind === "artifact" ? local.info.content ?? null : null;
+          const sameBytes = async () => {
+            if (!existing || existing.kind !== kind || existing.body !== bodyText || store.getFileHtml(existing.id) !== html || existing.attachments.length !== attachments.length) return false;
+            for (let i = 0; i < attachments.length; i++) {
+              const oldPath = resolveInside(config.uploadsDir, existing.attachments[i]!.path);
+              const newPath = resolveInside(config.uploadsDir, attachments[i]!.path);
+              if (!oldPath || !newPath || !await Bun.file(oldPath).exists()) return false;
+              const oldHash = createHash("sha256").update(new Uint8Array(await Bun.file(oldPath).arrayBuffer())).digest("hex");
+              if (oldHash !== createHash("sha256").update(new Uint8Array(await Bun.file(newPath).arrayBuffer())).digest("hex")) return false;
+            }
+            return true;
+          };
+          if (await sameBytes()) {
+            publication?.fail(createStorageReferences(store, join(config.home, "inbox")));
+            return { ...existing!, reused: true };
+          }
           const file = store.transaction(() => {
             activeProject(id!);
             return store.createFile({ projectId: id!, title: body.title ?? local.info.name, who: "대표", path: local.info.path,
-              body: kind === "artifact" || attachments.length ? "" : local.info.content ?? "", kind,
-              html: kind === "artifact" ? local.info.content ?? null : null,
+              body: bodyText, kind, html,
               attachments: attachments.map(saved => store.createAttachment(saved)) });
           });
           publication?.complete();
-          return file;
+          return { ...file, reused: false };
         } catch (error) {
           try { publication?.fail(createStorageReferences(store, join(config.home, "inbox"))); } catch { /* Retain uncertain publication. */ }
           throw error;
@@ -614,7 +647,8 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       return Response.json(models.read());
     }),
     route("GET", "/api/sync", async (_req, url) => {
-      strictQuery(url, ["projectId"]);
+      strictQuery(url, ["projectId", "lite"]);
+      const lite = wantsLite(url);
       const requestedProjectId = url.searchParams.get("projectId");
       if (requestedProjectId !== null && (!requestedProjectId.trim() || Buffer.byteLength(requestedProjectId) > 256)) throw new ApiError(400, "프로젝트 ID가 잘못되었습니다");
       await readHerdr();
@@ -632,7 +666,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
         revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },
         cursor: bus.cursor,
       };
-      return Response.json(body);
+      return Response.json(lite && body.state ? { ...body, state: { ...body.state, files: body.state.files.map(liteFile) } } : body);
     }),
     route("GET", "/api/bootstrap", async () => {
       await orch.refreshConnection?.();
@@ -668,11 +702,12 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       if (!orch.createMember) throw new ApiError(501, "직원 만들기를 지원하지 않습니다");
       return Response.json(await orch.createMember(id!, await parseBody(req, CreateMemberSchema)));
     }),
-    route("GET", "/api/projects/:id/state", (_req, _url, [id]) => {
+    route("GET", "/api/projects/:id/state", (_req, url, [id]) => {
       // 보관한 프로젝트는 없는 것으로 친다. 화면이 본사로 돌아간다.
       if (store.requireProject(id!).archived) throw new ApiError(404, "보관된 프로젝트입니다");
       const state = store.projectState(id!);
-      return Response.json(ctx.delivery ? { ...state, deliveryNotices: ctx.delivery.notices(id!) } : state);
+      const snapshot = ctx.delivery ? { ...state, deliveryNotices: ctx.delivery.notices(id!) } : state;
+      return Response.json(wantsLite(url) ? { ...snapshot, files: state.files.map(liteFile) } : snapshot);
     }),
     route("GET", "/api/projects/:id/messages", (req, url, params) => {
       // Legacy read-only lookups also serve archived history; state/page use the archive boundary.
@@ -812,13 +847,23 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
         if (!orch.setTodoDoneV2) throw new ApiError(501, "검토 버전이 있는 업무 변경을 지원하지 않습니다");
         return Response.json(await orch.setTodoDoneV2(id!, body, expected));
       }
-      const { done } = await parseBody(req, TodoDoneSchema);
-      if (todo.done === done) return Response.json(todo);
-      return Response.json(await orch.setTodoDone(id!, done));
+      const body = await parseBody(req, TodoDoneSchema);
+      if (!body.done && (body.note !== undefined || body.fileIds?.length)) throw new ApiError(400, "완료할 때만 답과 첨부를 붙일 수 있습니다");
+      for (const fileId of body.fileIds ?? []) if (!store.getAttachment(fileId)) throw new ApiError(400, "업로드된 첨부를 찾을 수 없습니다");
+      if (todo.done === body.done) return Response.json(todo);
+      return Response.json(await orch.setTodoDone(id!, body.done, body));
     }),
-    route("GET", "/api/files/:id/artifact", async (_req, _url, [id]) => {
+    route("GET", "/api/files/:id", (_req, url, [id]) => {
+      strictQuery(url, []);
+      const file = store.getFile(id!);
+      if (!file) throw new ApiError(404, "자료를 찾을 수 없습니다");
+      return Response.json(file, { headers: { "Cache-Control": "no-store" } });
+    }),
+    route("GET", "/api/files/:id/artifact", async (_req, url, [id]) => {
       // JSON 으로만 준다. 이 출처의 문서로 열리면 스크립트가 접속 코드에 닿는다. 화면은 /artifact-frame 격리 칸에 넣는다.
-      return Response.json({ html: await artifactHtml(ctx, id!) }, { headers: { "Cache-Control": "no-store" } });
+      const html = await artifactHtml(ctx, id!);
+      if (url.searchParams.get("render") === "1") return new Response(buildArtifactSrcdoc(html, { title: store.getFile(id!)!.title }), { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": `sandbox allow-scripts; ${ARTIFACT_CSP}`, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" } });
+      return Response.json({ html }, { headers: { "Cache-Control": "no-store", "Content-Security-Policy": `sandbox allow-scripts; ${ARTIFACT_CSP}`, "X-Content-Type-Options": "nosniff" } });
     }),
     route("POST", "/api/members/:id/terminal/control", async (req, _url, [id]) => {
       store.requireMember(id!);
@@ -909,6 +954,15 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     route("POST", "/api/projects/:id/adopt", async (req, _url, [id]) => {
       store.requireProject(id!);
       return Response.json(await orch.adopt(id!, await parseBody(req, AdoptSchema)));
+    }),
+    route("PATCH", "/api/settings", async req => {
+      const expected = contractV2(req) ? precondition(req) : null;
+      const body = await parseBody(req, z.strictObject({ macScriptNotifications: z.boolean() }));
+      if (expected) {
+        if (!orch.updateSettingsV2) throw new ApiError(501, "검토 버전이 있는 설정 변경을 지원하지 않습니다");
+        return Response.json(await orch.updateSettingsV2(body, expected));
+      }
+      return Response.json(await orch.updateSettings(body));
     }),
     route("PUT", "/api/settings", async (req) => {
       if (contractV2(req)) {
@@ -1138,6 +1192,8 @@ async function loadWebIndex(): Promise<Bun.HTMLBundle | null> {
 
 const WS_TOPIC = "events";
 const WS_V2_TOPIC = "events-v2";
+const WS_LITE_TOPIC = "events-lite";
+const WS_V2_LITE_TOPIC = "events-v2-lite";
 export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   const { config, store, bus } = ctx;
   const ipRule = buildIpRule(config.hosts);
@@ -1182,12 +1238,12 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     // 짝 맺기 코드를 낸 폰에만 접속 코드를 준다. 코드 자체가 인증이라 접속 코드 검사 앞에 둔다.
     if (path === "/pair/claim") return handlePairClaim(req, server);
     if (path === "/ws") {
-      strictQuery(url, ["v", "t"]);
+      strictQuery(url, ["v", "t", "lite"]);
       const version = url.searchParams.get("v");
       if (version !== null && version !== "2") return fail(400, "실시간 연결 버전이 잘못되었습니다");
       if (version === "2" && url.searchParams.has("t")) return fail(400, "실시간 연결 주소에 접속 코드를 넣지 마세요");
       if (!hasAccessCode(req, url, version === null)) return fail(401, "인증이 필요합니다");
-      return server.upgrade(req, { data: { kind: "realtime", protocol: version === "2" ? 2 : 1, authGeneration } }) ? undefined : fail(400, "WebSocket 요청이 아닙니다");
+      return server.upgrade(req, { data: { kind: "realtime", protocol: version === "2" ? 2 : 1, authGeneration, lite: wantsLite(url) } }) ? undefined : fail(400, "WebSocket 요청이 아닙니다");
     }
     // 코드가 틀려 나가는 기기도 지울 수 있어야 하므로 인증 앞에 둔다. 지우기뿐이고 바깥 사이트는 Origin 검사에 걸린다.
     if (path === "/api/files-session" && req.method === "DELETE") {
@@ -1278,7 +1334,9 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     for (const ws of sockets) {
       if (ws.data.kind === "terminal") { void ws.data.stream.close("error", "접속 코드가 바뀌었습니다. 다시 연결하세요"); continue; }
       ws.unsubscribe(WS_TOPIC);
+      ws.unsubscribe(WS_LITE_TOPIC);
       ws.unsubscribe(WS_V2_TOPIC);
+      ws.unsubscribe(WS_V2_LITE_TOPIC);
       ws.close(4001, "접속 코드가 바뀌었습니다. 다시 연결하세요");
     }
     return durabilityUnknown ? fail(500, "교체된 설정의 디스크 동기화를 확인하지 못했습니다. 이 Mac에서 iamceo open으로 현재 코드를 확인하세요", "AUTH_ROTATION_OUTCOME_UNKNOWN") : Response.json({ accessCode, version: VERSION });
@@ -1353,7 +1411,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
             return;
           }
           if (ws.data.kind === "terminal") { closedEpochSockets = true; ws.data.stream.open(ws); return; }
-          ws.subscribe(ws.data.protocol === 2 ? WS_V2_TOPIC : WS_TOPIC);
+          ws.subscribe(ws.data.lite ? (ws.data.protocol === 2 ? WS_V2_LITE_TOPIC : WS_LITE_TOPIC) : (ws.data.protocol === 2 ? WS_V2_TOPIC : WS_TOPIC));
           if (ws.data.protocol === 2) {
             v2Sockets.add(ws);
             ws.send(JSON.stringify({ type: "hello", protocol: 2, ...bus.cursor, heartbeatMs: WS_PING_MS, staleAfterMs: 45_000 }));
@@ -1413,6 +1471,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     for (const server of servers) {
       server.publish(WS_TOPIC, payload);
       server.publish(WS_V2_TOPIC, v2Payload);
+      server.publish(WS_LITE_TOPIC, payload);
+      server.publish(WS_V2_LITE_TOPIC, v2Payload);
     }
   }, WS_PING_MS);
   pingTimer.unref?.();
@@ -1429,6 +1489,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       closedEpochSockets ||= v2Sockets.size > 0;
       for (const ws of v2Sockets) {
         ws.unsubscribe(WS_V2_TOPIC);
+        ws.unsubscribe(WS_V2_LITE_TOPIC);
         ws.close(1012, "실시간 동기화를 다시 시작하세요");
       }
     }
@@ -1437,6 +1498,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     for (const server of servers) {
       server.publish(WS_TOPIC, payload);
       if (v2Payload) server.publish(WS_V2_TOPIC, v2Payload);
+      server.publish(WS_LITE_TOPIC, JSON.stringify(liteEvent(event)));
+      if (v2Payload) server.publish(WS_V2_LITE_TOPIC, JSON.stringify({ ...(liteEvent(event) as object), ...cursor }));
     }
   });
 

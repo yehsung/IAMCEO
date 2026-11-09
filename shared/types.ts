@@ -283,6 +283,8 @@ export interface Message {
   attachments: Attachment[];
   /** 대표 말의 전달 상태: sent 보냄 · queued 대기 · held 보류(사유) · delivered 받음 · failed 실패 */
   delivery: DeliveryStatus | null;
+  /** Additive terminal disposition. v1 delivery remains held; native reads this as dismissed. */
+  deliveryDisposition?: "dismissed";
   deliveryNote: string | null;
   /** Persisted per-message delivery snapshot revision; increases on every setMessageDelivery, including retries. */
   deliveryRevision?: number;
@@ -367,7 +369,8 @@ export interface DeliveryEvidence {
 }
 export type DeliveryFinding = "received" | "not_received" | "draft_only" | "wait" | "unknown";
 export type DeliveryRecoveryPhase = "none" | "checking" | "waiting" | "retry_wait" | "needs_owner" | "resolved" | "stopped";
-export type DeliveryRecoveryAction = "recheck" | "retry_with_risk" | "stop_retry";
+export type UnassignedRecoveryAction = "send_to_conductor" | "dismiss";
+export type DeliveryRecoveryAction = "recheck" | "retry_with_risk" | "stop_retry" | UnassignedRecoveryAction;
 export interface MemberDeliverySummary {
   memberId: string;
   /** undelivered/unknown/delivering은 배타적. 나머지는 보조 집합이므로 더하지 않는다. */
@@ -398,6 +401,7 @@ export interface DeliveryNotices {
   reportNotices?: MissingReportNotice[];
   /** state.members와 같은 순서, 0건도 포함. 최근 메시지가 아닌 전체 DB 집계. */
   members: MemberDeliverySummary[];
+  unassignedItems?: DeliveryNoticeItem[];
   unassigned: { undeliveredCount: number; unknownCount: number; needsOwnerCount: number };
 }
 export interface DeliveryNoticeItem extends Partial<DeliveryWaitInfo> {
@@ -436,6 +440,19 @@ export type DeliveryRecoveryRequest = { operationId: string; expectedVersion: nu
   | { action: "retry_with_risk"; acceptDuplicateRisk: true }
   | { action: "recheck" | "stop_retry"; acceptDuplicateRisk?: never }
 );
+export interface UnassignedRecoveryRequest {
+  operationId: string;
+  /** Virtual legacy items use version 0. */
+  expectedVersion: number;
+  action: UnassignedRecoveryAction;
+}
+export interface UnassignedRecoveryResult {
+  operationId: string;
+  messageId: string;
+  deliveryId: string | null;
+  outcome: "send_scheduled" | "dismissed";
+  committedVersion: number;
+}
 export interface DeliveryRecoveryResult {
   operationId: string;
   deliveryId: string;

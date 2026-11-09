@@ -33,7 +33,7 @@ export interface ServerContext {
   bus: Bus;
   orch: OrchestratorApi;
   /** 읽기 전용 notice와 복구 예약 포트. 호스트가 소유한 엔진만 주입한다. */
-  delivery?: Pick<DeliveryRecoveryService, "notices" | "memberNotices" | "recover">;
+  delivery?: Pick<DeliveryRecoveryService, "notices" | "memberNotices" | "recover" | "recoverUnassignedMessage">;
   push?: PushRoutesContext;
   /** 시험용. 기본은 Tailscale 주소 감지. */
   detectHosts?: () => string[];
@@ -624,6 +624,20 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       if (before !== null && (!before || before.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(before))) throw new ApiError(400, "전달 조회 위치가 올바르지 않습니다");
       if (!ctx.delivery) throw new ApiError(501, "전달 조회를 지원하지 않습니다");
       return Response.json(ctx.delivery.memberNotices(id!, { limit: rawLimit === null ? 50 : Number(rawLimit), before: before ?? undefined }));
+    }),
+    route("GET", "/api/projects/:id/delivery-notices", (_req, url, [id]) => {
+      strictQuery(url, []);
+      if (!ctx.delivery) throw new ApiError(501, "전달 조회를 지원하지 않습니다");
+      return Response.json(ctx.delivery.notices(id!));
+    }),
+    route("POST", "/api/messages/:id/recovery", async (req, url, [id]) => {
+      contractV2(req);
+      strictQuery(url, []);
+      const body = await parseBody(req, z.strictObject({ operationId: operationIdSchema, expectedVersion: revision,
+        action: z.enum(["send_to_conductor", "dismiss"]) }));
+      if (!ctx.delivery) throw new ApiError(501, "메시지 정리를 지원하지 않습니다");
+      const result = ctx.delivery.recoverUnassignedMessage(id!, body);
+      return Response.json(result, { status: result.outcome === "dismissed" ? 200 : 202 });
     }),
     route("POST", "/api/deliveries/:id/recovery", async (req, url, [id]) => {
       activeProject(store.requireDelivery(id!).projectId);

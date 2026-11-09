@@ -205,6 +205,9 @@ struct DeliveryInfo: Sendable {
         case "failed":
             label = "실패"; tone = .danger; icon = "exclamationmark.circle"
             explanation = "받는 사람에게 넣지 못했습니다. 같은 글을 다시 보낼 수 있습니다."
+        case "dismissed":
+            label = "정리함"; tone = .dim; icon = "minus.circle"
+            explanation = "보내지 않고 정리했습니다. 필요하면 새로 써서 보내 주세요."
         default:
             label = delivery; tone = .neutral; icon = "questionmark.circle"; explanation = ""
         }

@@ -163,6 +163,7 @@ final class AppStore: ProjectManagementStore {
     }
     /// Only server-confirmed owner requests are interventions. Checking/waiting counts overlap totals.
     var deliveryAttentionMembers: [MemberDeliverySummary] { deliveryNotices?.members.filter { $0.needsOwnerCount > 0 } ?? [] }
+    var unassignedDeliveries: [UnassignedDeliveryItem] { deliveryNotices?.unassignedItems ?? [] }
     var unassignedDeliveryAttentionCount: Int { deliveryNotices?.unassigned.needsOwnerCount ?? 0 }
     func deliverySummary(memberID: String) -> MemberDeliverySummary? {
         deliveryNotices?.members.first { $0.memberId == memberID }
@@ -666,7 +667,8 @@ final class AppStore: ProjectManagementStore {
                                 if scopes.contains(.history), historyVisible { await refreshHistory() }
                                 if scopes.contains(.delivery), foreground {
                                     for memberID in Set(deliveryPages.keys).union(deliveryFlights.keys) {
-                                        await loadDeliveryNotices(memberID: memberID)
+                                        if memberID.isEmpty { await loadUnassignedDeliveries() }
+                                        else { await loadDeliveryNotices(memberID: memberID) }
                                         guard !Task.isCancelled, token == coordinatorGeneration else { return }
                                     }
                                 }
@@ -2017,6 +2019,12 @@ final class AppStore: ProjectManagementStore {
             await loadDeliveryNotices(memberID: operation.memberID)
             guard epoch == generation, canWrite else { return }
         }
+        for operation in journal.unassignedRecoveries?.values ?? Dictionary<String, PendingUnassignedRecovery>().values
+            where operation.namespace == namespace && operation.projectID == selectedProjectID && operation.result == nil && !operation.refused {
+            deliveryChecking.insert("message:\(operation.messageID)")
+            await loadUnassignedDeliveries()
+            guard epoch == generation, canWrite else { return }
+        }
         guard strictWriteContract, let submissions else { return }
         for attempt in submissions.messages(namespace: namespace) where attempt.status == .checking || attempt.status == .accepted || attempt.status == .notAccepted {
             guard !isSending(projectID: attempt.projectID, targetMemberID: attempt.targetMemberID) else { continue }
@@ -2361,6 +2369,99 @@ final class AppStore: ProjectManagementStore {
     }
 
     // MARK: Delivery notices
+
+    func loadUnassignedDeliveries() async {
+        guard !isDemo, !isArchive, connectionStatus == .connected, let api, let projectID = selectedProjectID,
+              deliveryFlights[""] == nil else { return }
+        let epoch = generation, projectEpoch = projectGeneration, phase = foregroundGeneration, token = UUID()
+        deliveryFlights[""] = token; deliveryErrors[""] = nil
+        defer { if deliveryFlights[""] == token { deliveryFlights[""] = nil } }
+        do {
+            let notices = try await api.unassignedDeliveryNotices(projectID: projectID)
+            guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration,
+                  phase == foregroundGeneration, deliveryFlights[""] == token else { return }
+            guard notices.version == 2, (notices.unassignedItems ?? []).allSatisfy({
+                $0.projectId == projectID && $0.memberId.isEmpty && $0.version == 0 && $0.id == "message:\($0.messageId)"
+            }) else { throw SubmissionError.mismatchedResult }
+            state?.deliveryNotices = notices
+        } catch {
+            guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration,
+                  phase == foregroundGeneration, deliveryFlights[""] == token else { return }
+            if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
+            deliveryErrors[""] = error.localizedDescription
+            if (error as? APIError)?.status == 401 { handle(error) }
+        }
+    }
+
+    @discardableResult func sendUnassignedToConductor(messageID: String) async -> Bool {
+        await recoverUnassignedMessage(messageID: messageID, action: .sendToConductor)
+    }
+    @discardableResult func dismissUndelivered(messageID: String) async -> Bool {
+        await recoverUnassignedMessage(messageID: messageID, action: .dismiss)
+    }
+    private func recoverUnassignedMessage(messageID: String, action: UnassignedRecoveryAction) async -> Bool {
+        guard canWrite, let api, let projectID = selectedProjectID else { return false }
+        let epoch = generation, projectEpoch = projectGeneration, namespace = writeNamespace
+        let scope = Self.scoped(namespace, messageID), key = "unassigned:\(messageID)"
+        guard !pendingActions.contains(key) else { return false }
+        let previous = journal.unassignedRecoveries?[scope]
+        let unresolved = previous.flatMap { $0.result == nil && !$0.refused ? $0 : nil }
+        guard unresolved == nil || unresolved?.action == action else {
+            errorMessage = "이전 전달 작업의 결과를 먼저 확인해 주세요."; return false
+        }
+        if unresolved == nil && !unassignedDeliveries.contains(where: { $0.messageId == messageID }) {
+            await loadUnassignedDeliveries()
+        }
+        guard epoch == generation, projectEpoch == projectGeneration, canWrite, !pendingActions.contains(key) else { return false }
+        let item = unassignedDeliveries.first { $0.messageId == messageID }
+        guard unresolved != nil || (item?.version == 0 && item?.allowedActions.contains(action) == true) else { return false }
+        var tracked = unresolved ?? PendingUnassignedRecovery(id: UUID().uuidString, namespace: namespace,
+            projectID: projectID, messageID: messageID, version: item!.version, action: action)
+        do {
+            try saveJournal {
+                if $0.unassignedRecoveries == nil { $0.unassignedRecoveries = [:] }
+                $0.unassignedRecoveries?[scope] = tracked
+            }
+        } catch { handle(error); return false }
+        pendingActions.insert(key); deliveryChecking.insert("message:\(messageID)")
+        defer { if epoch == generation { pendingActions.remove(key) } }
+        do {
+            let result = try await api.recoverUnassignedMessage(messageID: messageID, request: UnassignedRecoveryRequest(
+                operationId: tracked.id, expectedVersion: tracked.version, action: tracked.action))
+            guard epoch == generation else { return false }
+            guard result.operationId == tracked.id, result.messageId == messageID, result.committedVersion > tracked.version,
+                  result.outcome == (action == .dismiss ? "dismissed" : "send_scheduled"),
+                  action == .dismiss ? result.deliveryId == nil : result.deliveryId?.isEmpty == false else { throw SubmissionError.mismatchedResult }
+            tracked.result = result
+            try saveJournal { $0.unassignedRecoveries?[scope] = tracked }
+            guard projectEpoch == projectGeneration else { return false }
+            deliveryChecking.remove("message:\(messageID)")
+            deliveryFlights[""] = nil
+            await refresh()
+            guard epoch == generation, projectEpoch == projectGeneration else { return false }
+            await loadUnassignedDeliveries()
+            let message = try await api.message(id: messageID)
+            guard epoch == generation, projectEpoch == projectGeneration else { return false }
+            guard message.id == messageID, message.projectId == projectID else { throw SubmissionError.mismatchedResult }
+            receiveHistoryMessage(message)
+            return true
+        } catch {
+            guard epoch == generation else { return false }
+            if tracked.result == nil && Self.definiteRefusal(error) {
+                tracked.refused = true
+                do { try saveJournal { $0.unassignedRecoveries?[scope] = tracked } }
+                catch { handle(error) }
+            }
+            guard projectEpoch == projectGeneration else { return false }
+            if tracked.refused || tracked.result != nil { deliveryChecking.remove("message:\(messageID)") }
+            handle(error)
+            deliveryFlights[""] = nil
+            await refresh()
+            guard epoch == generation, projectEpoch == projectGeneration else { return false }
+            await loadUnassignedDeliveries()
+            return tracked.result != nil
+        }
+    }
 
     func loadDeliveryNotices(memberID: String, older: Bool = false) async {
         guard !isDemo, !isArchive, connectionStatus == .connected, let api, let projectID = selectedProjectID,
@@ -2943,6 +3044,7 @@ private struct PendingTodo: Codable {
 private struct AppWriteJournal: Codable {
     var operations: [String: TrackedOperation] = [:]
     var todos: [String: PendingTodo] = [:]
+    var unassignedRecoveries: [String: PendingUnassignedRecovery]? = nil
     var deliveryRecoveries: [String: PendingDeliveryRecovery]? = nil
     var projectChanges: [String: PendingProjectChange]? = nil
     var contextRequests: [String: PendingContextRequest]? = nil
@@ -3007,6 +3109,16 @@ private struct PendingContextRequest: Codable {
 private struct RefreshSnapshot: Sendable { let bootstrap: Bootstrap; let state: ProjectState?; let sync: SyncSnapshot? }
 
 enum HistoryPagingSupport: Sendable { case unknown, supported, unsupported }
+private struct PendingUnassignedRecovery: Codable {
+    let id: String
+    let namespace: String
+    let projectID: String
+    let messageID: String
+    let version: Int
+    let action: UnassignedRecoveryAction
+    var result: UnassignedRecoveryResult? = nil
+    var refused = false
+}
 private struct PendingDeliveryRecovery: Codable {
     let id: String
     let namespace: String

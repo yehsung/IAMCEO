@@ -670,6 +670,18 @@ export const MIGRATIONS: string[] = [
   // Todo hygiene: durable passive reminder and stale-board review throttles.
   `ALTER TABLE todos ADD COLUMN stale_notified_at TEXT;
    ALTER TABLE projects ADD COLUMN stale_review_at TEXT;`,
+  // Owner decisions for legacy messages without a recipient; also the durable idempotency receipt/audit.
+  `CREATE TABLE unassigned_message_recoveries (
+     message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+     operation_id TEXT PRIMARY KEY,
+     request_json TEXT NOT NULL,
+     result_json TEXT NOT NULL,
+     action TEXT NOT NULL CHECK (action IN ('send_to_conductor','dismiss')),
+     actor TEXT NOT NULL CHECK (actor = 'owner'),
+     member_id TEXT,
+     created_at TEXT NOT NULL
+   );
+   CREATE INDEX unassigned_recoveries_message ON unassigned_message_recoveries(message_id);`,
 ];
 
 export function openDb(path: string): Database {

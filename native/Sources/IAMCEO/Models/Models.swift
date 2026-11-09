@@ -391,6 +391,7 @@ extension Message {
         deliveryInfo = try c.decodeIfPresent([MessageDeliveryInfo].self, forKey: ModelKey("deliveryInfo"))
         attachments = try c.decodeIfPresent([Attachment].self, forKey: ModelKey("attachments")) ?? []
         delivery = try c.decodeIfPresent(String.self, forKey: ModelKey("delivery"))
+        if try c.decodeIfPresent(String.self, forKey: ModelKey("deliveryDisposition")) == "dismissed" { delivery = "dismissed" }
         deliveryNote = try c.decodeIfPresent(String.self, forKey: ModelKey("deliveryNote"))
         deliveryRevision = try c.decodeIfPresent(Int.self, forKey: ModelKey("deliveryRevision"))
     }
@@ -782,6 +783,32 @@ struct DeliveryNotices: Codable, Sendable {
     let members: [MemberDeliverySummary]
     let unassigned: UnassignedDeliverySummary
     var reportNotices: [MissingReportNotice]? = nil
+    var unassignedItems: [UnassignedDeliveryItem]? = nil
+}
+enum UnassignedRecoveryAction: String, SafeStringEnum {
+    case sendToConductor = "send_to_conductor", dismiss, unknown
+}
+struct UnassignedDeliveryItem: Codable, Sendable, Identifiable {
+    let id: String
+    let messageId: String
+    let projectId: String
+    let memberId: String
+    let version: Int
+    let preview: String
+    let createdAt: String
+    let allowedActions: [UnassignedRecoveryAction]
+}
+struct UnassignedRecoveryRequest: Encodable, Sendable {
+    let operationId: String
+    let expectedVersion: Int
+    let action: UnassignedRecoveryAction
+}
+struct UnassignedRecoveryResult: Codable, Sendable {
+    let operationId: String
+    let messageId: String
+    let deliveryId: String?
+    let outcome: String
+    let committedVersion: Int
 }
 struct UnassignedDeliverySummary: Codable, Sendable {
     let undeliveredCount: Int
@@ -843,7 +870,7 @@ struct DeliveryNoticeItem: Codable, Sendable, Identifiable {
     /// Future reasons cannot authorize another physical input even if an action is advertised.
     var safeAllowedActions: [DeliveryRecoveryAction] {
         guard let reason, Self.knownReasons.contains(reason), let phase, phase != .unknown else {
-            return (allowedActions ?? []).filter { $0 == .recheck }
+            return (allowedActions ?? []).filter { $0 == .recheck || $0 == .stopRetry }
         }
         return (allowedActions ?? []).filter { $0 != .unknown }
     }

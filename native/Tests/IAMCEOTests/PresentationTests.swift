@@ -295,7 +295,7 @@ final class PresentationTests: XCTestCase {
                                       version: 2, allowedActions: [.recheck, .retryWithRisk, .stopRetry, .unknown, .recheck])
         XCTAssertEqual(deliveryPanelActions(item), [.recheck, .retryWithRisk, .stopRetry])
         item.reason = "future"
-        XCTAssertEqual(deliveryPanelActions(item), [.recheck])
+        XCTAssertEqual(deliveryPanelActions(item), [.recheck, .stopRetry])
         item.reason = "duplicate_draft"
         XCTAssertEqual(deliveryPanelActions(item), [.recheck])
         item.reason = "session_lost"

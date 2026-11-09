@@ -1,13 +1,13 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { memberConfig, type Delivery, type DeliveryEvidence, type DeliveryNoticeItem, type DeliveryNoticePage, type DeliveryNoticePageOptions, type DeliveryNotices, type DeliveryRecoveryRequest, type DeliveryRecoveryResult, type Member, type MemberDeliverySummary, type Message } from "../shared/types.ts";
+import { memberConfig, type Delivery, type DeliveryEvidence, type DeliveryNoticeItem, type DeliveryNoticePage, type DeliveryNoticePageOptions, type DeliveryNotices, type DeliveryRecoveryRequest, type DeliveryRecoveryResult, type Member, type MemberDeliverySummary, type Message, type UnassignedRecoveryRequest, type UnassignedRecoveryResult } from "../shared/types.ts";
 import { ApiError, type Store } from "./store.ts";
 import type { DeliveryDispatch, DeliveryRecoveryRecord, DeliveryRecoveryService } from "./service-contracts.ts";
 import type { DeliveryBaseline, DeliveryInspection, DeliveryRepair, Runner, RunnerMember, RunnerTerminalIdentity, SendResult } from "./runner/types.ts";
 
 /** SQL, cursors and transactions belong exclusively to Store. */
 export type DeliveryRecoveryStore = Pick<Store,
-  "setNeedsOwnerCounter" | "transaction" | "afterCommit" | "requireProject" | "listProjects" | "requireMember" | "getMember" | "listMembers" | "memberRevisions" | "getSettings" |
+  "legacyAssignedMember" | "getConductor" | "unassignedMessageOperation" | "setNeedsOwnerCounter" | "transaction" | "afterCommit" | "requireProject" | "listProjects" | "requireMember" | "getMember" | "listMembers" | "memberRevisions" | "getSettings" |
   "listDeliveries" | "requireDelivery" | "getDelivery" | "enqueue" | "getDeliveryRecovery" | "updateDeliveryRecovery" | "listDeliveryRecoveries" |
   "getDeliveryRetry" | "patchDeliveryRetry" | "saveDispatch" | "getDispatch" | "listDispatches" | "updateDispatch" | "inputState" |
   "deliveryRecoveryOperation" | "markDelivered" | "markHeld" | "markFailed" | "setDeliveryStatus" | "setMessageDelivery" |
@@ -16,6 +16,7 @@ export type DeliveryRecoveryStore = Pick<Store,
 export interface DeliveryRecoveryOptions {
   store: DeliveryRecoveryStore;
   runner: (member: Member) => Pick<Runner, "inspectDelivery" | "repairDelivery"> | null;
+  legacyMessageText?: (message: Message) => string;
   now?: () => number;
   random?: () => number;
 }
@@ -108,7 +109,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     if (!delivery.refType || !delivery.refId) return hash({ text: delivery.text, memberId: delivery.memberId });
     if (delivery.refType === "message") {
       const m = this.store.getMessage(delivery.refId);
-      return m && m.projectId === delivery.projectId && (delivery.kind !== "user_message" || m.targetMemberId === null || m.targetMemberId === delivery.memberId)
+      return m && m.projectId === delivery.projectId && (delivery.kind !== "user_message" || m.targetMemberId === null || m.targetMemberId === delivery.memberId || this.store.legacyAssignedMember(m.id) === delivery.memberId)
         ? hash({ id: m.id, body: m.body, title: m.title, attachments: m.attachments, ...(m.contextFileId ? { contextFileId: m.contextFileId } : {}), targetMemberId: m.targetMemberId, memberId: delivery.memberId }) : null;
     }
     if (delivery.refType === "decision") {
@@ -305,11 +306,14 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     this.activeProject(d.projectId);
     return this.store.deliveryRecoveryOperation(deliveryId, request.operationId, request, () => {
       const r = this.record(deliveryId);
-      if (request.action === "recheck" && ["none", "resolved"].includes(r.phase) && this.store.deliveryStalled(d.id) && ["queued", "held"].includes(d.status)) {
+      if (["recheck", "stop_retry"].includes(request.action) && ["none", "resolved"].includes(r.phase) && this.store.deliveryStalled(d.id) && ["queued", "held"].includes(d.status)) {
         if (this.closed || r.version !== request.expectedVersion || this.mutations.has(d.memberId)) throw new ApiError(409, "전달 상태가 바뀌었습니다. 다시 확인해 주세요");
-        const next = this.store.updateDeliveryRecovery(d.id, r.version, { phase: r.phase, lastCheckedAt: this.iso() });
-        this.store.recheckPendingDelivery(d.memberId);
-        return { operationId: request.operationId, deliveryId, outcome: "check_scheduled", committedVersion: next.version };
+        const next = this.store.updateDeliveryRecovery(d.id, r.version, { phase: request.action === "stop_retry" ? "stopped" : r.phase, lastCheckedAt: this.iso(), nextCheckAt: null });
+        if (request.action === "stop_retry") {
+          this.projectStatus(d, "failed", STOP_NOTE);
+          this.store.patchDeliveryRetry(d.id, { nextAttemptAt: null, retryReason: null });
+        } else this.store.recheckPendingDelivery(d.memberId);
+        return { operationId: request.operationId, deliveryId, outcome: request.action === "stop_retry" ? "stopped" : "check_scheduled", committedVersion: next.version };
       }
       if (this.closed || r.version !== request.expectedVersion || ["resolved", "stopped"].includes(r.phase) || r.phase === "none" || this.mutations.has(d.memberId)) throw new ApiError(409, "전달 상태가 바뀌었습니다. 다시 확인해 주세요");
       if (request.action !== "recheck" && !this.actions(d, r).includes(request.action)) throw new ApiError(409, "전달 상태가 바뀌었습니다. 다시 확인해 주세요");
@@ -317,7 +321,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
         ? { phase: "stopped", nextCheckAt: null }
         : { phase: request.action === "recheck" && r.phase === "needs_owner" ? "needs_owner" : "checking", reason: request.action === "retry_with_risk" ? "risk_approved" : r.reason, nextCheckAt: this.iso() });
       if (request.action === "stop_retry") {
-        this.projectStatus(d, "failed", STOP_NOTE);
+        if (d.status !== "delivered") this.projectStatus(d, "failed", STOP_NOTE);
         this.store.patchDeliveryRetry(d.id, { nextAttemptAt: null, retryReason: null });
       } else if (request.action === "retry_with_risk") {
         this.store.patchDeliveryRetry(d.id, { nextAttemptAt: this.iso(), retryReason: `delivery_risk:${request.operationId}` });
@@ -536,7 +540,8 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
 
   private actions(d: Delivery, r: DeliveryRecoveryRecord): DeliveryNoticeItem["allowedActions"] {
     if (["resolved", "stopped", "none"].includes(r.phase)) return [];
-    if (r.phase !== "needs_owner" || r.reason === "duplicate_draft") return ["recheck"];
+    if (r.phase !== "needs_owner") return ["recheck"];
+    if (r.reason === "duplicate_draft") return ["recheck", "stop_retry"];
     const dispatch = this.latest(d);
     const retry = dispatch && this.validDispatch(dispatch) && this.sourceValid(dispatch, d) && (["retry_exhausted", "log_missing", "log_incomplete", "unsupported_schema"].includes(r.reason ?? "") || r.evidence.some(e => e.code === "complete_range_without_marker" && e.verdict === "absent" && e.complete)) && this.store.memberRevisions(d.memberId).sessionGeneration === dispatch.identity.sessionGeneration && this.store.requireMember(d.memberId).sessionId === dispatch.identity.sessionId;
     return retry ? ["recheck", "retry_with_risk", "stop_retry"] : ["recheck", "stop_retry"];
@@ -557,6 +562,33 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     });
   }
 
+  /** Explicit owner choice: never infer a recipient while reading legacy failures. */
+  recoverUnassignedMessage(messageId: string, request: UnassignedRecoveryRequest): UnassignedRecoveryResult {
+    if (!z.strictObject({ operationId: z.uuid(), expectedVersion: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      action: z.enum(["send_to_conductor", "dismiss"]) }).safeParse(request).success) throw new ApiError(400, "메시지 정리 요청이 올바르지 않습니다");
+    return this.store.transaction(() => {
+      const m = this.store.requireMessage(messageId);
+      if (this.store.requireProject(m.projectId).archived) throw new ApiError(409, "보관 중인 프로젝트의 메시지는 정리할 수 없습니다");
+      return this.store.unassignedMessageOperation<UnassignedRecoveryResult>(messageId, request.operationId, request, request.action, () => {
+        if (this.closed || request.expectedVersion !== 0 || !m.mine || m.delivery !== "failed" ||
+          this.store.listDeliveries(m.projectId).some(d => d.refType === "message" && d.refId === m.id)) throw new ApiError(409, "메시지 상태가 바뀌었습니다. 다시 확인해 주세요");
+        const target = m.targetMemberId && this.store.getMember(m.targetMemberId);
+        if (request.action === "dismiss") {
+          this.store.setMessageDelivery(m.id, "dismissed");
+          return { memberId: null, result: { operationId: request.operationId, messageId, deliveryId: null, outcome: "dismissed" as const, committedVersion: 1 } };
+        }
+        if (target && target.projectId === m.projectId) throw new ApiError(409, "이미 수신자가 지정된 메시지입니다");
+        const member = this.store.getConductor(m.projectId);
+        if (!member) throw new ApiError(409, "프로젝트에 현재 총괄이 없습니다");
+        const d = this.store.enqueue({ projectId: m.projectId, memberId: member.id, kind: "user_message", text: this.options.legacyMessageText?.(m) ?? m.body,
+          refType: "message", refId: m.id });
+        this.store.setMessageDelivery(m.id, "queued");
+        this.store.recheckPendingDelivery(member.id);
+        return { memberId: member.id, result: { operationId: request.operationId, messageId, deliveryId: d.id, outcome: "send_scheduled" as const, committedVersion: 1 } };
+      });
+    });
+  }
+
   private definitelyAbsent(d: Delivery): boolean {
     const r = this.record(d.id);
     return ["not_received", "retry_exhausted"].includes(r.reason ?? "") || r.phase === "none" && ["queued", "held"].includes(d.status) && d.holdReason !== "delivery_unknown";
@@ -571,7 +603,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     return { ...wait, id: d.id, deliveryId: d.id, messageId: m?.id ?? null, memberId: d.memberId, projectId: d.projectId, kind: d.kind, status: d.status,
       phase: stalled ? "needs_owner" : r.phase === "resolved" ? "none" : r.phase, holdReason: d.holdReason, reason: stalled ? "stalled" : r.reason, note: stalled ? "전달이 진행되지 않고 있습니다. 다시 확인해 주세요" : this.store.getDeliveryRetry(d.id).retryReason === "rejected_limit" ? "입력 전에 5회 거절되어 자동 전달을 보류했습니다. 터미널의 입력칸과 승인 창을 확인한 뒤 다시 보내세요" : r.phase === "none" ? d.status === "failed" ? note("legacy_unknown") : "전달 대기" : note(r.reason, r.evidence),
       version: r.version, createdAt: d.createdAt, lastCheckedAt: r.lastCheckedAt, nextCheckAt: r.nextCheckAt, autoAttempts: r.autoAttempts, evidence: r.evidence,
-      recommendation: stalled ? { code: "recheck", text: "다시 확인" } : r.phase === "needs_owner" ? { code: r.reason ?? "unknown", text: note(r.reason, r.evidence) } : null, allowedActions: stalled ? ["recheck"] : this.actions(d, r),
+      recommendation: stalled ? { code: "recheck", text: "다시 확인" } : r.phase === "needs_owner" ? { code: r.reason ?? "unknown", text: note(r.reason, r.evidence) } : null, allowedActions: stalled ? ["recheck", "stop_retry"] : this.actions(d, r),
       ref: d.refType && d.refId ? { type: d.refType, id: d.refId } : null, preview: preview.length > 160 ? preview.slice(0, 157) + "..." : preview };
   }
   private items(projectId: string): DeliveryNoticeItem[] {
@@ -599,7 +631,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     const member = m.targetMemberId && this.store.getMember(m.targetMemberId);
     return { id: `message:${m.id}`, deliveryId: null, messageId: m.id, memberId: member && member.projectId === m.projectId ? member.id : "", projectId: m.projectId,
       kind: "user_message", status: "failed", phase: "needs_owner", holdReason: null, reason: "legacy_unknown", note: note("legacy_unknown"), version: 0,
-      createdAt: m.at, lastCheckedAt: null, nextCheckAt: null, autoAttempts: 0, evidence: [], recommendation: { code: "legacy_unknown", text: "기존 메시지에서 다시 확인해 주세요" }, allowedActions: [], ref: { type: "message", id: m.id }, preview: m.body.length > 160 ? m.body.slice(0, 157) + "..." : m.body };
+      createdAt: m.at, lastCheckedAt: null, nextCheckAt: null, autoAttempts: 0, evidence: [], recommendation: { code: "legacy_unknown", text: "대표가 전달하거나 정리할 수 있습니다" }, allowedActions: member && member.projectId === m.projectId ? ["dismiss"] : ["send_to_conductor", "dismiss"], ref: { type: "message", id: m.id }, preview: m.body.length > 160 ? m.body.slice(0, 157) + "..." : m.body };
   }
   private summarize(memberId: string, items: DeliveryNoticeItem[]): MemberDeliverySummary {
     const summary: MemberDeliverySummary = { memberId, undeliveredCount: 0, unknownCount: 0, deliveringCount: 0, checkingCount: 0, needsOwnerCount: 0, waitingBehindCount: 0, oldestAt: null, reasons: [], waitReason: null, waitingSince: null, waitReasons: [] };
@@ -638,7 +670,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       this.activeProject(projectId);
       const items = this.items(projectId);
       const unassigned = this.summarize("", items);
-      return { version: 2, reportNotices: this.store.listMissingReportNotices(projectId), members: this.store.listMembers(projectId).map(m => this.summarize(m.id, items)), unassigned: { undeliveredCount: unassigned.undeliveredCount, unknownCount: unassigned.unknownCount, needsOwnerCount: unassigned.needsOwnerCount } };
+      return { version: 2, unassignedItems: items.filter(item => item.memberId === ""), reportNotices: this.store.listMissingReportNotices(projectId), members: this.store.listMembers(projectId).map(m => this.summarize(m.id, items)), unassigned: { undeliveredCount: unassigned.undeliveredCount, unknownCount: unassigned.unknownCount, needsOwnerCount: unassigned.needsOwnerCount } };
     });
   }
   memberNotices(memberId: string, opts: DeliveryNoticePageOptions = {}): DeliveryNoticePage {

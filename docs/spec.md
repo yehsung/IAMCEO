@@ -152,6 +152,16 @@ history는 snapshot과 별도 캐시다. ID 중복 제거·진행 중 이벤트/
 
 #### 대기 사유와 정체 알림 (UX-T1)
 
+수신자 없는 옛 실패 정리 (unassigned-fail):
+
+- `ProjectState.deliveryNotices.unassignedItems` 및 `GET /api/projects/:id/delivery-notices`의 `unassignedItems`는 전체 DB의 수신자 없는 가상 실패 목록이다. 기존 version 2·members·unassigned 집계는 그대로이며 새 목록은 하위 호환 추가 필드다. 각 항목은 `id:"message:<messageId>",messageId,projectId,memberId:"",preview,createdAt,version:0,allowedActions:["send_to_conductor","dismiss"]`와 기존 notice 메타데이터를 갖는다. GET은 입력이나 자동 수신자 배정을 하지 않는다. 새 앱의 `unassignedDeliveries`/`loadUnassignedDeliveries()`가 이 목록을 읽으며 목록이 없는 구형 서버는 빈 목록으로 처리한다.
+- 대표 Bearer 인증의 `POST /api/messages/:id/recovery` body는 `{operationId:"UUID",expectedVersion:0,action:"send_to_conductor"|"dismiss"}`다. 추가 키·음수/소수/비안전 정수는 400, 다른 검토 버전·이미 실제 전달이 있는 메시지·대표가 쓰지 않은 글·보관 프로젝트는 409다. 총괄 전송은 현재 수신자가 없는 옛 failed 메시지만 받으며 현재 총괄이 없으면 이유와 함께 409다. 존재하지 않는 글 404, 미지원 서비스 501, 잘못된 계약 헤더 400이다. 새 앱은 `X-IAMCEO-Contract: 2`를 붙이며 검토 버전/operationId는 기존 전달 복구와 같은 body 계약이다. 헤더 없는 구형 클라이언트에도 기존 경로는 유지한다.
+- `send_to_conductor`는 원본 메시지의 ID·본문·생성 시각·기존 target을 보존하고 현재 총괄에 연결된 새 queued/wake 전달 한 건을 저장한 뒤 기존 pump를 예약한다. 실행기가 받았다는 판정은 하지 않는다. 202와 `{operationId,messageId,deliveryId,outcome:"send_scheduled",committedVersion:1}`을 반환하며 unassigned/needsOwner에서 빠지고 총괄의 undelivered로 이동한다. 생산용 전달에는 기존 대표 접두어·메시지 참조·첨부 경로·자료 맥락을 포함한다. 없는 총괄을 자동 생성하지 않는다.
+- `dismiss`는 전달 없이 메시지의 DB delivery를 `dismissed`로 저장하고 200과 `{operationId,messageId,deliveryId:null,outcome:"dismissed",committedVersion:1}`을 반환한다. 메시지는 삭제하지 않으며 needsOwner·unassigned·undelivered 집계에서 제외된다. 수신자가 있는 가상 실패에도 dismiss를 허용한다. 구형 웹·앱의 다섯 delivery 값 계약을 보존하기 위해 모든 읽기/WS 응답은 `delivery:"held",deliveryDisposition:"dismissed"`를 내보낸다. 새 네이티브 모델은 disposition을 `Message.delivery == "dismissed"`로 해석한다. 새 deliveryRevision이 늦은 failed 응답의 덮어쓰기를 막는다. held는 수신 성공 표시가 아니며 실제 전달 행도 생기지 않는다. 표시 문구는 View 담당이 정한다.
+- DB v31의 `unassigned_message_recoveries`가 메시지 ID·operationId·정규화 요청·결과·action·주체 `owner`(대표)·지정 총괄 ID·UTC 시각을 같은 트랜잭션에 저장한다. 같은 operationId/요청은 검토 버전 검사보다 먼저 저장 결과를 재현한다. 다른 메시지/본문으로 ID를 재사용하면 409다. 새 operationId라도 같은 메시지/동작/검토 버전이면 동일 결과를 재현하고 새 전달·상태 변경은 하지 않는다. 다른 동작으로 뒤집기는 409다. 보관 프로젝트는 재요청도 409다.
+- 모든 needs_owner 항목은 가상이면 dismiss, 실제면 stop_retry를 최소 하나 갖는다. duplicate_draft의 stop_retry는 이미 delivered인 원래 수신 표시를 보존하며 추가 전달만 중지한다. 물리 입력의 미종료 fence는 기존 안전 규칙대로 유지한다.
+- 앱의 `@discardableResult func sendUnassignedToConductor(messageID: String) async -> Bool` 및 `@discardableResult func dismissUndelivered(messageID: String) async -> Bool`는 기존 canWrite·프로젝트/연결 세대 검사·항목별 잠금·디스크 journal을 따른다. 응답 유실 시 원래 operationId/검토 버전을 재사용하고 다른 동작은 막는다. 완료 후 notices/state와 원본 메시지 단건을 다시 읽어 최근 200건 밖 대화 기록에도 반영한다. 자동 재전송은 하지 않는다.
+
 `Message.deliveryInfo`는 해당 메시지의 미종결 전달마다 `{deliveryId,memberId,waitReason,waitingSince,runLimit?}`를 추가한다. message 단건·페이지·state·WS에서 같은 계산을 쓴다. 기존 `delivery`·`deliveryNote`는 유지한다. `DeliveryNoticeItem`에도 같은 wait 필드가 있다. 멤버 요약(`deliveryNotices.members[]`, 상세의 `summary`)은 가장 오래 기다린 항목의 `waitReason,waitingSince,runLimit?`와 사유별 `waitReasons:[{waitReason,waitingSince,runLimit?,count}]`를 추가한다. 대기 항목이 없으면 요약 사유·시각은 null, 목록은 빈 배열이다.
 
 | waitReason | 뜻 |
@@ -169,7 +179,7 @@ history는 snapshot과 별도 캐시다. ID 중복 제거·진행 중 이벤트/
 
 `waitingSince`는 전달 생성 시각(ISO UTC)이다. 사유가 바뀌어도 이 전달이 연속 대기한 전체 시간을 보존하며 받음/종료된 항목은 메시지의 대기 목록에서 빠진다. GET은 저장된 정보와 메모리 상태만 읽고 실행기·pump를 호출하지 않는다.
 
-명확한 사유 없이 마지막 전달 진행(최근 봉투 updatedAt, 봉투가 없으면 생성)부터 120초 이상 멈추면 delivery ID당 한 번 영속 정체 기록·error activity·대표가 읽는 시스템 메시지('전달 확인 필요')를 남긴다. 이 항목은 notice에서 `phase:needs_owner,reason:stalled,recommendation:{code:"recheck",text:"다시 확인"},allowedActions:["recheck"]`로 보인다. 원래 recovery phase/fence를 거짓 unknown으로 바꾸지 않는다. 기존 복구 API의 version/operationId로 recheck하면 안전 검사를 거친 같은 전달의 pump를 예약한다. 새 전달·원본 복제·위험 재전송 동의를 만들지 않는다. 이미 불확실한 입력은 기존 증거 확인·비재전송 규칙을 그대로 따른다.
+명확한 사유 없이 마지막 전달 진행(최근 봉투 updatedAt, 봉투가 없으면 생성)부터 120초 이상 멈추면 delivery ID당 한 번 영속 정체 기록·error activity·대표가 읽는 시스템 메시지('전달 확인 필요')를 남긴다. 이 항목은 notice에서 `phase:needs_owner,reason:stalled,recommendation:{code:"recheck",text:"다시 확인"},allowedActions:["recheck","stop_retry"]`로 보인다. 정체 항목도 대표가 stop_retry로 정리할 수 있으며 과거 수신 여부를 판정하지 않는다. 원래 recovery phase/fence를 거짓 unknown으로 바꾸지 않는다. 기존 복구 API의 version/operationId로 recheck하면 안전 검사를 거친 같은 전달의 pump를 예약한다. 새 전달·원본 복제·위험 재전송 동의를 만들지 않는다. 이미 불확실한 입력은 기존 증거 확인·비재전송 규칙을 그대로 따른다.
 
 `next_turn`은 아직 시도하지 않은 `wake=0` 전달에 적용하며 idle·수면·기존 업무 진행 중에도 정체로 판정하지 않는다. 전달 생성 시 execution journal의 순서를 `deliveries.next_turn_after_run`에 저장해 재시작·동일 밀리초에도 기존 턴과 이후 턴을 구별한다. 기존 데이터는 전달 생성 시각 이전의 실행으로 경계를 복원한다. 이후 실행이 실제 시작(`started_at`)했는데도 queued로 남으면 `next_turn` 예외를 끝내고, 업무 진행·실행 한도로 가리지 않고 기존 120초 정체 검사를 적용한다. 수신 불확실·결재·직접 조작 등 기존 안전 사유가 우선한다. `wake=1` 정체 판정은 유지한다. 정체 재평가에서 정상 사유가 확인되거나 전달이 종결되면 `delivery_stalls.resolved_at`을 기록해 활성 알림을 해제한다. 과거 시스템 메시지와 activity는 보존하고 같은 전달의 알림을 중복 생성하지 않는다. 앱 표시 문구는 `waitReasonLabel` 담당에서 정한다.
 

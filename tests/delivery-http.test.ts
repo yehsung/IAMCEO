@@ -160,3 +160,31 @@ test("미지원 포트는 501, 보관·없는 대상은 404이며 GET/POST가 �
   expect((await post(deliveryId, { operationId: randomUUID(), expectedVersion: store.getDeliveryRecovery(deliveryId)!.version, action: "recheck" })).status).toBe(404);
   expect(runnerCalls).toEqual([]);
 });
+
+test("unassigned recovery and additive notices preserve v1 message shape and enforce reviewed operations", async () => {
+  const project = store.createProject({ name: "미배정 HTTP", cwd: home });
+  const message = store.createMessage({ projectId: project.id, mine: true, kind: "나", body: "옛 실패", delivery: "failed" });
+  const path = `/api/messages/${message.id}/recovery`;
+  const request = (body: unknown, headers = auth) => fetch(base + path, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const body = { operationId: randomUUID(), expectedVersion: 0, action: "send_to_conductor" };
+  const notices = await (await get(`/api/projects/${project.id}/delivery-notices`)).json();
+  expect(notices).toMatchObject({ version: 2, unassigned: { needsOwnerCount: 1 }, unassignedItems: [{ messageId: message.id, allowedActions: ["send_to_conductor", "dismiss"] }] });
+  expect((await request(body)).status).toBe(409);
+  expect((await request({ ...body, expectedVersion: "0" })).status).toBe(400);
+  expect((await request({ ...body, expectedVersion: -1 })).status).toBe(400);
+  expect((await request({ ...body, extra: true })).status).toBe(400);
+  expect((await request(body, { Authorization: "Bearer wrong" })).status).toBe(401);
+  expect((await request(body, { ...auth, "X-IAMCEO-Contract": "3" } as typeof auth)).status).toBe(400);
+  const dismiss = { ...body, action: "dismiss" };
+  const response = await request(dismiss, { ...auth, "X-IAMCEO-Contract": "2" } as typeof auth);
+  expect(response.status).toBe(200);
+  const result = await response.json();
+  expect(await (await request(dismiss)).json()).toEqual(result);
+  const legacy = await (await get(`/api/messages/${message.id}`)).json();
+  expect(legacy).toMatchObject({ id: message.id, body: "옛 실패", delivery: "held", deliveryDisposition: "dismissed" });
+  expect(["queued", "held", "delivering", "delivered", "failed"]).toContain(legacy.delivery);
+  expect(await (await get(`/api/projects/${project.id}/delivery-notices`)).json()).toMatchObject({ unassigned: { needsOwnerCount: 0 }, unassignedItems: [] });
+  store.patchProject(project.id, { archived: true });
+  expect((await request(dismiss)).status).toBe(409);
+  expect(runnerCalls).toEqual([]);
+});

@@ -492,7 +492,12 @@ const WAKE_POST_KINDS = new Set<string>(["완료", "막힘", "질문"]);
 /** Domain references also include orphan answers and todo correction notices. */
 class OrchestratorDeliveryRecovery extends DeliveryRecovery {
   constructor(private readonly sourceStore: Store, runner: (member: Member) => Pick<Runner, "inspectDelivery" | "repairDelivery"> | null) {
-    super({ store: sourceStore, runner });
+    super({ store: sourceStore, runner, legacyMessageText: message => {
+      const file = message.contextFileId ? sourceStore.getFile(message.contextFileId) : null;
+      const context = file && file.projectId === message.projectId
+        ? `\n[시스템 자료 맥락 · 대표 원문 아님]\n대표가 보던 자료: ${file.title.replace(/[\r\n]+/g, " ")} (${file.id})` : "";
+      return formatUserMessage(message.body, message.attachments, message.id, false) + context;
+    } });
   }
   override sourceRevision(delivery: Delivery): string | null {
     const revision = super.sourceRevision(delivery);

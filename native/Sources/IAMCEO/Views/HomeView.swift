@@ -29,6 +29,8 @@ struct HomeView: View {
     @State private var completion: TodoCompletionReview?
     /// The open request awaiting the '필요 없음' confirmation.
     @State private var droppingTodo: Todo?
+    /// Unassigned messages whose 보내기/정리 is in flight.
+    @State private var unassignedBusy: Set<String> = []
     @State private var expandedTodos: Set<String> = []
     @State private var showDoneTodos = false
     @State private var contextID = UUID()
@@ -185,7 +187,7 @@ struct HomeView: View {
     /// Notes and folds belong to one project; never show them on another.
     private func resetLocalState() {
         contextID = UUID()
-        completion = nil; droppingTodo = nil
+        completion = nil; droppingTodo = nil; unassignedBusy = []
         nowExpanded = false; confirmTidy = false
         tidyNote = nil; startError = nil; todoError = nil
         expandedTodos = []; showDoneTodos = false
@@ -552,8 +554,7 @@ struct HomeView: View {
         case .delivery(let summary):
             deliveryAttentionRow(title: "담당자 확인 필요", count: summary.needsOwnerCount,
                                  detail: homeDeliverySummary(summary))
-        case .unassigned(let count):
-            deliveryAttentionRow(title: "담당 미배정", count: count, detail: "받을 팀원이 정해지지 않았습니다")
+        case .unassigned(let count): unassignedRows(count)
         case .failedMessage(let message):
             HStack(spacing: 8) {
                 HomeRowButton(bleedTrailing: false, action: { router.openChat(chatTarget(for: message.targetMemberId)) }) {
@@ -640,6 +641,65 @@ struct HomeView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, titleInset).padding(.bottom, 8)
             }
+        }
+    }
+
+    /// My messages that never had a recipient. Each shows what was sent and the two exits the server allows,
+    /// so the count can always be cleared. Until the list arrives, the count line stands in.
+    @ViewBuilder private func unassignedRows(_ count: Int) -> some View {
+        let items = store.unassignedDeliveries
+        if items.isEmpty {
+            deliveryAttentionRow(title: "담당 미배정", count: count, detail: "받을 팀원이 정해지지 않았습니다")
+                .task(id: count) { await store.loadUnassignedDeliveries() }
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                    if index > 0 { HomeDivider() }
+                    unassignedRow(item)
+                }
+            }
+        }
+    }
+
+    private func unassignedRow(_ item: UnassignedDeliveryItem) -> some View {
+        let busy = unassignedBusy.contains(item.messageId)
+        return VStack(alignment: .leading, spacing: 4) {
+            HomeRowButton(action: { router.openChat(nil) }) {
+                turnLine("exclamationmark.bubble", tint: CE.attention) {
+                    Text(homePlainLine(item.preview)).font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                        .lineSpacing(Self.rowTitleLeading).lineLimit(2).multilineTextAlignment(.leading)
+                    HomeSub(text: ["받을 팀원이 없어 전달하지 못함", relativeTime(item.createdAt)].filter { !$0.isEmpty }.joined(separator: " · "))
+                }
+            }
+            .accessibilityHint("프로젝트 대화에서 원문 보기")
+            HStack(spacing: 8) {
+                if item.allowedActions.contains(.sendToConductor) {
+                    Button("\(leadLabel)에게 보내기") { resolveUnassigned(item, send: true) }
+                        .ceSecondaryButton().ceCompactControl()
+                        .help(store.isDemo ? Self.readOnlyHelp : "지금 \(leadLabel)을 받을 사람으로 정해 이 글을 보냅니다")
+                }
+                if item.allowedActions.contains(.dismiss) {
+                    Button("정리") { resolveUnassigned(item, send: false) }
+                        .ceSecondaryButton().ceCompactControl()
+                        .help(store.isDemo ? Self.readOnlyHelp : "보내지 않고 정리합니다. 대화에는 '정리함'으로 남습니다")
+                }
+            }
+            .disabled(!store.canWrite || busy)
+            .padding(.leading, titleInset).padding(.bottom, 8)
+        }
+    }
+
+    private func resolveUnassigned(_ item: UnassignedDeliveryItem, send: Bool) {
+        guard store.canWrite, !unassignedBusy.contains(item.messageId) else { return }
+        unassignedBusy.insert(item.messageId)
+        todoError = nil
+        let context = contextID
+        Task { @MainActor in
+            let ok = send ? await store.sendUnassignedToConductor(messageID: item.messageId)
+                          : await store.dismissUndelivered(messageID: item.messageId)
+            unassignedBusy.remove(item.messageId)
+            guard contextID == context, !ok else { return }
+            todoError = "'\(homePlainLine(item.preview))' \(send ? "보내기" : "정리")를 반영하지 않았습니다. " + (store.errorMessage ?? "최신 상태를 확인하세요.")
         }
     }
 

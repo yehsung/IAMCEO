@@ -287,6 +287,12 @@ extension APIClient: MessageHistoryService, ProjectManagementService, SyncServic
     func deliveryNotices(memberID: String, before: String?, limit: Int) async throws -> DeliveryNoticePage {
         try await request("/api/members/\(Self.segment(memberID))/delivery-notices?limit=\(limit)" + (before.map { "&before=\(Self.segment($0))" } ?? ""))
     }
+    func unassignedDeliveryNotices(projectID: String) async throws -> DeliveryNotices {
+        try await request("/api/projects/\(Self.segment(projectID))/delivery-notices")
+    }
+    func recoverUnassignedMessage(messageID: String, request: UnassignedRecoveryRequest) async throws -> UnassignedRecoveryResult {
+        try await send("/api/messages/\(Self.segment(messageID))/recovery", body: request, contractVersion: 2)
+    }
     func recoverDelivery(id: String, request: DeliveryRecoveryRequest) async throws -> DeliveryRecoveryResult {
         try await send("/api/deliveries/\(Self.segment(id))/recovery", body: request, contractVersion: 2)
     }

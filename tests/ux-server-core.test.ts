@@ -179,7 +179,7 @@ test("wake=1 reasonless stall creates one durable visible notice; recheck is ide
   restart.setDeliveryWaitContext(() => ({ busy: false, waking: false, used: 0 }), () => { rechecks++; });
   const recovery = new DeliveryRecovery({ store: restart, runner: () => null, now: () => future });
   const item = recovery.memberNotices(member.id).items[0];
-  expect(item).toMatchObject({ phase: "needs_owner", waitReason: "unknown", allowedActions: ["recheck"], recommendation: { text: "다시 확인" } });
+  expect(item).toMatchObject({ phase: "needs_owner", waitReason: "unknown", allowedActions: ["recheck", "stop_retry"], recommendation: { text: "다시 확인" } });
   const request = { action: "recheck" as const, operationId: randomUUID(), expectedVersion: item.version };
   const first = await recovery.recover(delivery.id, request);
   expect(await recovery.recover(delivery.id, request)).toEqual(first);

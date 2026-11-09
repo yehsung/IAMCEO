@@ -450,7 +450,8 @@ function toMessage(r: Row): Message {
     decisionId: r.decision_id,
     fileId: r.file_id,
     attachments: json(r.attachments),
-    delivery: r.delivery,
+    delivery: r.delivery === "dismissed" ? "held" : r.delivery,
+    ...(r.delivery === "dismissed" ? { deliveryDisposition: "dismissed" as const } : {}),
     deliveryNote: r.delivery_note,
     deliveryRevision: r.delivery_revision,
     contextFileId: r.context_file_id ?? null,
@@ -1935,10 +1936,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     });
   }
 
-  setMessageDelivery(id: string, delivery: DeliveryStatus | null, note: string | null = null): Message {
+  setMessageDelivery(id: string, delivery: Message["delivery"] | "dismissed", note: string | null = null): Message {
     return this.transaction(() => {
       const current = this.requireMessage(id);
-      if (current.delivery === delivery && current.deliveryNote === note) return current;
+      if ((current.deliveryDisposition ?? current.delivery) === delivery && current.deliveryNote === note) return current;
       this.run("UPDATE messages SET delivery = ?, delivery_note = ?, delivery_revision = delivery_revision + 1 WHERE id = ?", delivery, note, id);
       const message = this.requireMessage(id);
       this.bumpBoard(message.projectId);
@@ -2533,6 +2534,31 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       this.run("INSERT INTO delivery_recovery_operations (operation_id, delivery_id, request_json, result_json, created_at) VALUES (?, ?, ?, ?, ?)", operationId, deliveryId, stableJson(request), JSON.stringify(result), nowIso());
       return result;
     });
+  }
+
+  /** One terminal owner decision per virtual message. Receipt lookup precedes the reviewed-version check. */
+  unassignedMessageOperation<T>(messageId: string, operationId: string, request: { operationId: string; expectedVersion: number; action: "send_to_conductor" | "dismiss" },
+      action: "send_to_conductor" | "dismiss", execute: () => { result: T; memberId: string | null }): T {
+    return this.transaction(() => {
+      this.requireMessage(messageId);
+      const reused = this.row("SELECT * FROM unassigned_message_recoveries WHERE operation_id = ?", operationId);
+      if (reused) {
+        if (reused.message_id !== messageId || reused.request_json !== stableJson(request)) throw new ApiError(409, "다른 요청에 사용된 operationId입니다");
+        return json<T>(reused.result_json);
+      }
+      const existing = this.row("SELECT * FROM unassigned_message_recoveries WHERE message_id = ? ORDER BY rowid LIMIT 1", messageId);
+      if (existing && existing.request_json !== stableJson({ ...request, operationId: existing.operation_id })) throw new ApiError(409, "이미 다른 동작으로 정리했거나 검토 버전이 바뀐 메시지입니다");
+      const { result, memberId } = existing
+        ? { result: { ...json<T>(existing.result_json), operationId }, memberId: existing.member_id }
+        : execute();
+      this.run("INSERT INTO unassigned_message_recoveries (message_id, operation_id, request_json, result_json, action, actor, member_id, created_at) VALUES (?, ?, ?, ?, ?, 'owner', ?, ?)",
+        messageId, operationId, stableJson(request), JSON.stringify(result), action, memberId, nowIso());
+      return result;
+    });
+  }
+
+  legacyAssignedMember(messageId: string): string | null {
+    return this.row("SELECT member_id FROM unassigned_message_recoveries WHERE message_id = ? AND action = 'send_to_conductor' ORDER BY rowid LIMIT 1", messageId)?.member_id ?? null;
   }
 
   getDeliveryRetry(id: string): DeliveryRetryState {

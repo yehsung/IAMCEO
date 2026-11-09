@@ -163,9 +163,11 @@ describe("영속 확인과 안전 fence", () => {
     const summary = f.service.notices(f.project.id).members[0];
     expect(summary).toMatchObject({ unknownCount: 0, undeliveredCount: 0, needsOwnerCount: 1 });
     expect(f.r(d.id).reason).toBe("duplicate_draft"); expect(f.service.fenced(f.member.id)).toBe(true);
-    await errorStatus(f.service.recover(d.id, { operationId: randomUUID(), expectedVersion: f.r(d.id).version, action: "stop_retry" }), 409);
-    f.inspect = async (_m, q) => f.observation(q);
-    await f.due(d.id); expect(f.r(d.id).phase).toBe("resolved"); expect(f.writes).toHaveLength(0);
+    expect(f.service.memberNotices(f.member.id).items[0].allowedActions).toContain("stop_retry");
+    await f.service.recover(d.id, { operationId: randomUUID(), expectedVersion: f.r(d.id).version, action: "stop_retry" });
+    expect(f.store.requireDelivery(d.id).status).toBe("delivered");
+    expect(f.r(d.id).phase).toBe("stopped");
+    expect(f.writes).toHaveLength(0);
   });
 
   test("unknown은 빈 화면과 시간 경과만으로 재전송하지 않는다", async () => {
@@ -448,7 +450,7 @@ describe("원본 판, operation과 읽기 집계", () => {
     const result = f.service.notices(f.project.id); expect(result.members[0]).toMatchObject({ unknownCount: 1, needsOwnerCount: 1 });
     expect(result.unassigned).toEqual({ undeliveredCount: 0, unknownCount: 1, needsOwnerCount: 1 });
     const item = f.service.memberNotices(f.member.id).items[0];
-    expect(item).toMatchObject({ id: `message:${old.id}`, version: 0, deliveryId: null, allowedActions: [] }); expect(item.preview).toHaveLength(160);
+    expect(item).toMatchObject({ id: `message:${old.id}`, version: 0, deliveryId: null, allowedActions: ["dismiss"] }); expect(item.preview).toHaveLength(160);
     expect(f.calls).toHaveLength(0); expect(f.events).toHaveLength(snapshots);
     const actual = f.service.materializeLegacyMessage(old.id); expect(f.service.materializeLegacyMessage(old.id).id).toBe(actual.id);
     expect(f.r(actual.id).marker).toBeNull(); expect(f.r(actual.id).phase).toBe("checking");

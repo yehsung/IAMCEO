@@ -3,7 +3,7 @@
 import type {
   ArchiveMessagePage, ArchiveProjectState, CoreContextState, Decision, DecisionCloseFollowUp, Delivery,
   DeliveryNoticePage, DeliveryNoticePageOptions, DeliveryNotices, DeliveryRecoveryPhase,
-  DeliveryRecoveryRequest, DeliveryRecoveryResult, Member, Message, MessagePage,
+  DeliveryRecoveryRequest, DeliveryRecoveryResult, UnassignedRecoveryRequest, UnassignedRecoveryResult, Member, Message, MessagePage,
   MessagePageOptions, PatchProjectReq, Project,
 } from "../shared/types.ts";
 import type {
@@ -34,6 +34,7 @@ export interface ProjectManagementService {
 export interface DeliveryRecoveryService {
   notices(projectId: string): DeliveryNotices;
   memberNotices(memberId: string, opts?: DeliveryNoticePageOptions): DeliveryNoticePage;
+  recoverUnassignedMessage(messageId: string, request: UnassignedRecoveryRequest): UnassignedRecoveryResult;
   recover(deliveryId: string, request: DeliveryRecoveryRequest): Promise<DeliveryRecoveryResult>;
   /** 중복 tick을 합친다. lease/승인/작업 대기는 활성 확인 예산에서 제외한다. */
   tick(): Promise<void>;

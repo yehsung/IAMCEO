@@ -77,6 +77,31 @@ actor APIClient {
         return file
     }
     func clearFileBodyCache() { fileBodyCache.removeAll(); fileBodyOrder.removeAll() }
+
+    func searchFiles(projectID: String, query: String, limit: Int = 200, archived: Bool = false) async throws -> [FileSearchResult] {
+        var parts = URLComponents()
+        parts.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "limit", value: String(limit))]
+        // Encode the project as one segment, including IDs containing slashes.
+        let path = "/api/projects/\(Self.segment(projectID))/\(archived ? "archive/" : "")files/search"
+        return try await request(path + "?" + (parts.percentEncodedQuery ?? ""), contractVersion: 2)
+    }
+
+    /// Only a missing/unsupported route permits the legacy per-body search.
+    func searchFilesWithFallback(projectID: String, query: String, files: [FileDoc], archived: Bool = false) async throws -> [FileSearchResult] {
+        guard !query.isEmpty else { return [] }
+        do { return try await searchFiles(projectID: projectID, query: query, archived: archived) }
+        catch let error as APIError where error.status == 404 || error.status == 501 {
+            var results: [FileSearchResult] = []
+            for file in files where file.projectId == projectID {
+                try Task.checkCancellation()
+                let full = archived ? file : try await fileBody(id: file.id)
+                let metadata = FileLinks.matches(file, body: "", query: query)
+                guard metadata || full.body.localizedStandardContains(query) else { continue }
+                results.append(FileSearchResult(id: file.id, match: metadata ? "title" : "body", excerpt: "", rank: results.count + 1))
+            }
+            return results
+        }
+    }
     func sendMessage(projectID: String, request: SendMessageRequest, contextFileID: String? = nil, contractVersion: Int? = nil) async throws -> Message {
         var body = request
         if let contextFileID { body.contextFileId = contextFileID }

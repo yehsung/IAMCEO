@@ -526,6 +526,15 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
   const archivedProject = (id: string): void => {
     if (!store.requireProject(id).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
   };
+  const fileSearch = (archived: boolean): Handler => (req, url, [id]) => {
+    contractV2(req);
+    strictQuery(url, ["q", "limit"], "INVALID_FILE_SEARCH_QUERY");
+    const query = url.searchParams.get("q"), limit = url.searchParams.get("limit");
+    if (query === null || (limit !== null && (!/^[0-9]+$/.test(limit) || Number(limit) < 1 || Number(limit) > 200))) {
+      throw new ApiError(400, "자료 검색 조건이 잘못되었습니다", "INVALID_FILE_SEARCH_QUERY");
+    }
+    return Response.json(store.searchFiles(id!, query, limit === null ? 50 : Number(limit), archived), { headers: { "Cache-Control": "no-store" } });
+  };
   const messages: Handler = (_req, url, [id]) => {
     if (url.searchParams.has("around")) {
       strictQuery(url, ["around", "limit"], "INVALID_MESSAGE_PAGE_QUERY");
@@ -537,6 +546,8 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
   };
 
   return [
+    route("GET", "/api/projects/:id/files/search", fileSearch(false)),
+    route("GET", "/api/projects/:id/archive/files/search", fileSearch(true)),
     route("GET", "/api/projects/:id/local-file", (_req, url, [id]) => {
       const file = readLocalFile(store, id!, url.searchParams.get("path") ?? "", ctx.folderHome, configuredSecretRoots(config, process.env, ctx.folderHome));
       const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": `sandbox allow-scripts; ${ARTIFACT_CSP}`, "Referrer-Policy": "no-referrer" };

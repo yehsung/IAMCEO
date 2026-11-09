@@ -310,6 +310,13 @@ export interface MessagePage {
 
 /** 자료의 모양. artifact 는 GET /api/files/:id/artifact 의 html 을 격리 칸에 그린다. table·code 는 body 에 원문이 있다(1MB 이하). */
 export type FileKind = "document" | "artifact" | "image" | "pdf" | "table" | "code" | "video" | "audio" | "file";
+/** metadata (title/path/summary) is reported as title; rank is 1-based, best first. */
+export interface FileSearchResult {
+  id: string;
+  match: "title" | "body";
+  excerpt: string;
+  rank: number;
+}
 export interface FileDoc {
   id: string;
   kind: FileKind;

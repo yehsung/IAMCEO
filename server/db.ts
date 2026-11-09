@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, statSync } from "node:fs";
+import { fileSearchMigration, scheduleFileSearchBackfill } from "./store.ts";
 
 export const MIGRATIONS: string[] = [
   `
@@ -682,6 +683,8 @@ export const MIGRATIONS: string[] = [
      created_at TEXT NOT NULL
    );
    CREATE INDEX unassigned_recoveries_message ON unassigned_message_recoveries(message_id);`,
+  // File search schema and durable invalidations only; body backfill yields after startup.
+  fileSearchMigration(),
 ];
 
 export function openDb(path: string): Database {
@@ -730,6 +733,9 @@ export function openDb(path: string): Database {
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA synchronous = NORMAL");
     migrate(db);
+    // Source parsing/index failures cannot roll back the schema or delay server startup.
+    // Durable pending rows survive shutdown and resume in bounded, best-effort batches.
+    scheduleFileSearchBackfill(db);
     return db;
   } catch (error) {
     db.close();

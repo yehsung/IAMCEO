@@ -59,7 +59,7 @@ struct FilesView: View {
     @State private var search = ""
     @State private var kind: String?
     @State private var arrivals = FileListArrivalState()
-    @State private var bodyMatches = Set<String>()
+    @State private var searchResults: [FileSearchResult]?
     @State private var searchingBodies = false
     @State private var searchError: String?
     @State private var listPreview: URL?
@@ -84,9 +84,12 @@ struct FilesView: View {
     }
     private var query: String { search.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var shown: [FileDoc] {
-        allFiles.filter { file in
+        if !query.isEmpty, let searchResults {
+            return FileSearchPresentation(results: searchResults).files(allFiles, kind: activeKind)
+        }
+        return allFiles.filter { file in
             (activeKind == nil || file.kind == activeKind)
-                && (FileLinks.matches(file, body: nil, query: query) || bodyMatches.contains(file.id))
+                && FileLinks.matches(file, body: nil, query: query)
         }
     }
     private var kindCounts: [String: Int] { store.files.reduce(into: [:]) { $0[$1.kind, default: 0] += 1 } }
@@ -127,14 +130,14 @@ struct FilesView: View {
         }
         // A search or kind typed in one project must not hide the next project's files.
         .onChange(of: store.selectedProjectID) { _, _ in
-            search = ""; kind = nil; bodyMatches = []; arrivals = FileListArrivalState()
+            search = ""; kind = nil; searchResults = nil; arrivals = FileListArrivalState()
             listPreview = nil; listPreviewResource = nil
         }
         .onChange(of: allFiles.map(\.id), initial: true) { _, ids in
             arrivals.update(ids)
             if wide { router.fileID = FileLinks.pinnedSelection(current: router.fileID, visibleIDs: shown.map(\.id)) }
         }
-        .task(id: "\(store.selectedProjectID ?? ""):\(store.api.map { String(describing: ObjectIdentifier($0)) } ?? ""):\(query):\(allFiles.map(\.id).joined(separator: ","))") { await searchBodies() }
+        .task(id: "\(store.selectedProjectID ?? ""):\(store.isArchive):\(store.api.map { String(describing: ObjectIdentifier($0)) } ?? ""):\(query):\(allFiles.map(\.id).joined(separator: ","))") { await searchBodies() }
         .task(id: store.api.map(ObjectIdentifier.init)) {
             listPreview = nil; listPreviewResource = nil
             host = await FileHostConnection.current(store.api)
@@ -234,7 +237,7 @@ struct FilesView: View {
                                     listFocused = true
                                     #endif
                                 } label: {
-                                    FileRow(file: file, openDecisions: counts[file.id] ?? 0, selected: selected)
+                                    FileRow(file: file, openDecisions: counts[file.id] ?? 0, selected: selected, searchResult: searchResults?.first { $0.id == file.id })
                                 }
                                 // web .fl-row: radius 15, hover white .06, the selected row is the rail's violet drop.
                                 .buttonStyle(RowButtonStyle(selected: selected, radius: 15))
@@ -319,7 +322,7 @@ struct FilesView: View {
                             ForEach(Array(shown.enumerated()), id: \.element.id) { index, file in
                                 if index > 0 { RowDivider(inset: 14) }
                                 Button { router.fileID = file.id } label: {
-                                    FileRow(file: file, openDecisions: counts[file.id] ?? 0, chevron: true)
+                                    FileRow(file: file, openDecisions: counts[file.id] ?? 0, chevron: true, searchResult: searchResults?.first { $0.id == file.id })
                                 }
                                 .buttonStyle(RowButtonStyle(radius: 0))
                             }
@@ -390,22 +393,19 @@ struct FilesView: View {
     }
 
     private func searchBodies() async {
-        bodyMatches = []; searchError = nil
-        guard !query.isEmpty, let api = store.api, !store.isDemo else { searchingBodies = false; return }
-        let project = store.selectedProjectID, term = query
+        searchResults = nil; searchError = nil
+        guard !query.isEmpty, let api = store.api, let project = store.selectedProjectID, !store.isDemo else { searchingBodies = false; return }
+        let term = query, archived = store.isArchive
         searchingBodies = true
-        defer { if query == term, store.api === api { searchingBodies = false } }
-        // There is no server search endpoint. Resolve immutable bodies sequentially, reusing T2's bounded cache.
-        for file in allFiles {
-            guard !Task.isCancelled, query == term, store.api === api, store.selectedProjectID == project else { return }
-            do {
-                let full = store.isArchive ? file : try await store.fileBody(id: file.id)
-                guard !Task.isCancelled, query == term, store.api === api, store.selectedProjectID == project else { return }
-                if full.body.localizedStandardContains(term) { bodyMatches.insert(file.id) }
-            } catch {
-                guard !Task.isCancelled, query == term, store.api === api else { return }
-                searchError = friendlyLoadError(error, what: "일부 자료 본문", verb: "읽지")
-            }
+        defer { if !Task.isCancelled, query == term, store.api === api, store.selectedProjectID == project, store.isArchive == archived { searchingBodies = false } }
+        do {
+            try await Task.sleep(for: .milliseconds(200))
+            let results = try await api.searchFilesWithFallback(projectID: project, query: term, files: allFiles, archived: archived)
+            guard !Task.isCancelled, query == term, store.api === api, store.selectedProjectID == project, store.isArchive == archived else { return }
+            searchResults = results
+        } catch {
+            guard !Task.isCancelled, query == term, store.api === api, store.selectedProjectID == project, store.isArchive == archived else { return }
+            searchError = friendlyLoadError(error, what: "자료", verb: "검색하지")
         }
     }
 
@@ -475,6 +475,7 @@ private struct FileRow: View {
     var openDecisions = 0
     var selected = false
     var chevron = false
+    var searchResult: FileSearchResult?
 
     private var title: String { file.title.isEmpty ? "제목 없는 자료" : file.title }
     private var imageAttachment: Attachment? { file.attachments.first(where: \.isImage) }
@@ -494,10 +495,14 @@ private struct FileRow: View {
                             .lineSpacing(CELeading.secondary)
                             .lineLimit(2).multilineTextAlignment(.leading)
                     }
+                    if let excerpt = searchResult?.excerpt, !excerpt.isEmpty {
+                        Text(excerpt).font(CEFont.secondary).foregroundStyle(CE.ink2).lineLimit(1)
+                    }
                     // web .fl-row__meta: wraps under the tag when the name and time do not fit beside it.
                     ChipFlow(spacing: 7, lineSpacing: 3) {
                         KindTag(kind: file.kind)
                         Text(byline).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1)
+                        if let label = searchResult?.bodyLabel { Text(label).font(CEFont.meta).foregroundStyle(CE.ink2) }
                         if openDecisions > 0 { Tag("결재 \(openDecisions)", tone: .attention) }
                     }
                     .padding(.top, 2)
@@ -520,6 +525,7 @@ private struct FileRow: View {
 
     private var accessibilityText: String {
         var parts = [fileKindName(file.kind), title, file.summary, file.who, relativeTime(file.createdAt)]
+        if let searchResult { parts += [searchResult.bodyLabel ?? "", searchResult.excerpt] }
         if openDecisions > 0 { parts.append("결재 \(openDecisions)건 대기") }
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }

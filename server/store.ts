@@ -27,6 +27,7 @@ import type {
   Effort,
   FileDoc,
   FileKind,
+  FileSearchResult,
   Member,
   MemberLifecycleState,
   MemberKind,
@@ -181,6 +182,152 @@ export interface NewFile {
   kind?: FileKind;
   /** kind=artifact 의 원본. 화면 상태에 싣지 않는다. */
   html?: string | null;
+}
+
+/** File projection schema, appended by db.ts's versioned migrations. */
+export function fileSearchMigration(): string {
+  return `
+    CREATE TABLE file_search_documents (
+      rowid INTEGER PRIMARY KEY,
+      file_id TEXT NOT NULL UNIQUE REFERENCES files(id) ON DELETE CASCADE,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      archived INTEGER NOT NULL,
+      title TEXT NOT NULL, path TEXT NOT NULL, summary TEXT NOT NULL, body TEXT NOT NULL,
+      title_fold TEXT NOT NULL, path_fold TEXT NOT NULL, summary_fold TEXT NOT NULL, body_fold TEXT NOT NULL
+    );
+    CREATE INDEX file_search_project ON file_search_documents(project_id, archived);
+    CREATE VIRTUAL TABLE file_search_fts USING fts5(title_fold, path_fold, summary_fold, body_fold,
+      content='file_search_documents', content_rowid='rowid', tokenize='trigram');
+    CREATE TABLE file_search_pending (file_id TEXT PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE);
+    CREATE TABLE file_search_migration_audit (
+      id INTEGER PRIMARY KEY CHECK(id = 1), indexed_files INTEGER NOT NULL,
+      body_limit INTEGER NOT NULL, completed_at TEXT
+    );
+    INSERT INTO file_search_migration_audit VALUES (1, 0, 65536, NULL);
+    CREATE TRIGGER file_search_document_insert AFTER INSERT ON file_search_documents BEGIN
+      INSERT INTO file_search_fts(rowid,title_fold,path_fold,summary_fold,body_fold) VALUES(new.rowid,new.title_fold,new.path_fold,new.summary_fold,new.body_fold);
+    END;
+    CREATE TRIGGER file_search_document_delete AFTER DELETE ON file_search_documents BEGIN
+      INSERT INTO file_search_fts(file_search_fts,rowid,title_fold,path_fold,summary_fold,body_fold) VALUES('delete',old.rowid,old.title_fold,old.path_fold,old.summary_fold,old.body_fold);
+    END;
+    CREATE TRIGGER file_search_document_update AFTER UPDATE OF title_fold,path_fold,summary_fold,body_fold ON file_search_documents BEGIN
+      INSERT INTO file_search_fts(file_search_fts,rowid,title_fold,path_fold,summary_fold,body_fold) VALUES('delete',old.rowid,old.title_fold,old.path_fold,old.summary_fold,old.body_fold);
+      INSERT INTO file_search_fts(rowid,title_fold,path_fold,summary_fold,body_fold) VALUES(new.rowid,new.title_fold,new.path_fold,new.summary_fold,new.body_fold);
+    END;
+    CREATE TRIGGER file_search_file_insert AFTER INSERT ON files BEGIN
+      INSERT OR IGNORE INTO file_search_pending VALUES(new.id);
+    END;
+    CREATE TRIGGER file_search_file_update AFTER UPDATE OF id,project_id,title,path,summary,body,kind,html,attachments ON files BEGIN
+      DELETE FROM file_search_documents WHERE file_id=old.id;
+      INSERT OR IGNORE INTO file_search_pending VALUES(new.id);
+    END;
+    CREATE TRIGGER file_search_project_archive AFTER UPDATE OF archived ON projects BEGIN
+      UPDATE file_search_documents SET archived=new.archived WHERE project_id=new.id;
+    END;
+    INSERT INTO file_search_pending SELECT id FROM files;
+  `;
+}
+
+/** Best-effort, bounded projection work. Failed rows remain durable for the next refresh/open. */
+export function refreshFileSearchIndex(db: Database, options: { fileId?: string; projectId?: string; limit?: number } = {}): number {
+  try {
+    // Hosts without the migration continue to serve legacy file routes.
+    if (!db.query("SELECT 1 FROM sqlite_schema WHERE name='file_search_pending'").get()) return 0;
+    if (!db.query("SELECT 1 FROM file_search_pending LIMIT 1").get()) return 0;
+    return db.transaction(() => {
+      const pending = db.query<{ id: string; project_id: string; archived: number; title: string; path: string | null;
+        summary: string; body: string | null; html: string | null; kind: FileKind | null; attachments: string; binary: number },
+        [number, string | null, string | null]>(`
+        SELECT f.id,f.project_id,p.archived,CAST(f.title AS TEXT) AS title,CAST(f.path AS TEXT) AS path,
+          CAST(f.summary AS TEXT) AS summary,
+          CASE WHEN typeof(f.body)='text' THEN substr(f.body,1,65536) END AS body,
+          CASE WHEN typeof(f.html)='text' THEN substr(f.html,1,65536) END AS html,
+          f.kind,f.attachments,(typeof(f.body)='blob' OR typeof(f.html)='blob') AS binary
+        FROM file_search_pending q JOIN files f ON f.id=q.file_id JOIN projects p ON p.id=f.project_id
+        WHERE (?2 IS NULL OR f.id=?2) AND (?3 IS NULL OR f.project_id=?3) LIMIT ?1`)
+        .all(Math.min(Math.max(options.limit ?? 32, 1), 32), options.fileId ?? null, options.projectId ?? null);
+      const insert = db.query(`INSERT INTO file_search_documents(file_id,project_id,archived,title,path,summary,body,title_fold,path_fold,summary_fold,body_fold)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(file_id) DO UPDATE SET project_id=excluded.project_id,archived=excluded.archived,
+        title=excluded.title,path=excluded.path,summary=excluded.summary,body=excluded.body,
+        title_fold=excluded.title_fold,path_fold=excluded.path_fold,summary_fold=excluded.summary_fold,body_fold=excluded.body_fold`);
+      const save = (file: typeof pending[number], fields: string[]) => db.transaction(() => {
+        insert.run(file.id, file.project_id, file.archived, ...fields, ...fields.map(value => value.toLowerCase()));
+        db.query("DELETE FROM file_search_pending WHERE file_id=?").run(file.id);
+      })();
+      const started = performance.now();
+      let processed = 0;
+      for (const file of pending) {
+        const metadata = [file.title.normalize("NFC"), (file.path ?? "").normalize("NFC"), "", ""];
+        try {
+          const attachments = JSON.parse(file.attachments) as Attachment[];
+          const kind = file.kind ?? fileKindOf(file.path ?? file.title, attachments[0]?.mime ?? "");
+          const text = ["document", "artifact", "table", "code"].includes(kind) ||
+            (kind === "file" && !attachments.length && (!file.path || ["document", "artifact", "table", "code"].includes(fileKindOf(file.path))));
+          let body = text ? file.body ?? "" : "";
+          if (text) {
+            if (file.binary || /[\u0000-\u0008\u000b\u000e-\u001f]/u.test((file.html ?? "") + body)) throw new Error("Non-text body");
+            if (kind === "artifact" || /\.html?$/i.test(file.path ?? "")) body = fileSearchHTMLText(file.html ?? body);
+          }
+          save(file, [metadata[0], metadata[1], text ? file.summary.normalize("NFC") : "",
+            Array.from(body.normalize("NFC")).slice(0, 65536).join("")]);
+          processed++;
+        } catch (error) {
+          // No source contents in logs. Even SQL/FTS failures must not prevent schema upgrades or source writes.
+          console.warn(`[file-search] file=${JSON.stringify(file.id)} metadata-only fallback (${error instanceof Error ? error.name : "index error"})`);
+          try { save(file, metadata); processed++; }
+          catch { /* Keep pending when even the metadata projection cannot be written. */ }
+        }
+        // One bounded input may exceed the budget; always yield before attempting the next one.
+        if (performance.now() - started >= 10) break;
+      }
+      if (processed) db.exec(`UPDATE file_search_migration_audit SET indexed_files=(SELECT COUNT(*) FROM file_search_documents),
+        completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=1 AND completed_at IS NULL
+        AND NOT EXISTS(SELECT 1 FROM file_search_pending)`);
+      return processed;
+    })();
+  } catch (error) {
+    console.warn(`[file-search] backfill deferred (${error instanceof Error ? error.name : "index error"}); pending rows will retry`);
+    return 0;
+  }
+}
+
+/** Start only after openDb returns. Each timer commits a small batch and yields to HTTP/I/O. */
+export function scheduleFileSearchBackfill(db: Database): void {
+  try {
+    if (!db.query("SELECT 1 FROM file_search_pending LIMIT 1").get()) return;
+  } catch { return; }
+  const tick = () => {
+    // The owner may close the connection before this timer fires (tests, restore, shutdown).
+    try { db.query("SELECT 1").get(); } catch { return; }
+    const processed = refreshFileSearchIndex(db, { limit: 16 });
+    try {
+      if (processed && db.query("SELECT 1 FROM file_search_pending LIMIT 1").get()) setTimeout(tick, 10).unref();
+    } catch { /* Retry on the next open/refresh; never surface a background rejection. */ }
+  };
+  setTimeout(tick, 10).unref();
+}
+
+function fileSearchHTMLText(html: string): string {
+  let text = "", hidden = 0;
+  new HTMLRewriter().on("*", {
+    element(element) {
+      if (["script", "style", "template", "noscript"].includes(element.tagName)) {
+        if (element.canHaveContent) {
+          hidden++;
+          element.onEndTag(() => { hidden--; });
+        }
+      } else if (!hidden && ["p", "div", "br", "li", "tr", "td", "th", "h1", "h2", "h3", "section", "article"].includes(element.tagName)) {
+        text += " ";
+        if (element.canHaveContent) element.onEndTag(() => { text += " "; });
+      }
+    },
+    text(chunk) { if (!hidden) text += chunk.text; },
+  }).transform(html);
+  return text.replace(/&(#x[0-9a-f]+|#[0-9]+|amp|lt|gt|quot|apos|nbsp);/gi, (entity, value: string) => {
+    if (value[0] !== "#") return ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " } as Record<string, string>)[value.toLowerCase()] ?? entity;
+    const point = value[1].toLowerCase() === "x" ? parseInt(value.slice(2), 16) : parseInt(value.slice(1), 10);
+    return point > 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff) ? String.fromCodePoint(point) : "�";
+  }).replace(/\s+/g, " ").trim();
 }
 
 export interface NewDelivery {
@@ -2045,6 +2192,42 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.rows("SELECT * FROM files WHERE project_id = ? ORDER BY sort_order DESC, rowid DESC", projectId).map(toFile);
   }
 
+  searchFiles(projectId: string, query: string, limit = 50, archived = false): FileSearchResult[] {
+    if (this.requireProject(projectId).archived !== archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+    const term = query.trim().normalize("NFC").toLowerCase();
+    if (term.length > 512 || term.includes("\0")) throw new ApiError(400, "검색어는 512자 이하여야 합니다", "INVALID_FILE_SEARCH_QUERY");
+    if (!Number.isInteger(limit)) throw new ApiError(400, "limit 값이 잘못되었습니다", "INVALID_FILE_SEARCH_QUERY");
+    const count = Math.min(Math.max(limit, 0), 200);
+    if (!term || !count) return [];
+    if (!this.row("SELECT 1 FROM sqlite_schema WHERE name='file_search_documents'")) throw new ApiError(501, "자료 검색 색인 마이그레이션이 필요합니다");
+    return this.transaction(() => {
+      refreshFileSearchIndex(this.db, { projectId });
+      const trigram = Array.from(term).length >= 3;
+      const rows = this.db.query<{ file_id: string; title: string; path: string; summary: string; body: string }, [Record<string, string | number>]>(`
+        SELECT d.file_id,d.title,d.path,d.summary,d.body FROM file_search_documents d
+        ${trigram ? "JOIN file_search_fts ON file_search_fts.rowid=d.rowid" : ""}
+        WHERE d.project_id=$project AND d.archived=$archived AND ${trigram ? "file_search_fts MATCH $fts" : `(
+          instr(d.title_fold,$q)>0 OR instr(d.path_fold,$q)>0 OR
+          instr(d.summary_fold,$q)>0 OR instr(d.body_fold,$q)>0)`}
+        ORDER BY CASE WHEN instr(d.title_fold,$q)>0 THEN 0
+          WHEN instr(d.path_fold,$q)>0 THEN 1
+          WHEN instr(d.summary_fold,$q)>0 THEN 2 ELSE 3 END,
+          ${trigram ? "bm25(file_search_fts,8,4,2,1)," : ""} d.rowid DESC LIMIT $limit`).all({
+          $project: projectId, $archived: archived ? 1 : 0, $q: term, $limit: count,
+          ...(trigram ? { $fts: `"${term.replaceAll('"', '""')}"` } : {}),
+        });
+      return rows.map((row, index) => {
+        const metadata = [row.title, row.path, row.summary].find(text => text.toLowerCase().includes(term));
+        const text = metadata ?? row.body;
+        const characters = Array.from(text);
+        const offset = Array.from(text.slice(0, Math.max(0, text.toLowerCase().indexOf(term)))).length;
+        const start = Math.max(0, offset - 48), end = Math.min(characters.length, offset + Array.from(term).length + 80);
+        return { id: row.file_id, match: metadata === undefined ? "body" : "title", rank: index + 1,
+          excerpt: Array.from(((start > 0 ? "…" : "") + characters.slice(start, end).join("") + (end < characters.length ? "…" : "")).replace(/\s+/g, " ")).slice(0, 200).join("") };
+      });
+    });
+  }
+
   createFile(input: NewFile): FileDoc {
     return this.transaction(() => {
       this.requireProject(input.projectId);
@@ -2066,6 +2249,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         input.kind ?? null,
         input.html ?? null,
       );
+      refreshFileSearchIndex(this.db, { fileId: id, limit: 1 });
       const file = this.getFile(id)!;
       this.emit({ type: "file", file });
       return file;

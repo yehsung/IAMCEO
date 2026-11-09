@@ -117,7 +117,7 @@ struct ChatMineRow: View {
         if let connection = store.state?.project.connection, !connection.ok {
             return connection.ownerDetail ?? "이 프로젝트의 실행 연결에 문제가 있어 지금은 다시 보낼 수 없습니다"
         }
-        if store.pendingActions.contains(where: { $0.hasPrefix("send:") }) { return "보내는 중입니다" }
+        if store.isSending(projectID: message.projectId, targetMemberID: message.targetMemberId) { return "보내는 중입니다" }
         return nil
     }
 
@@ -163,29 +163,41 @@ struct ChatMineRow: View {
     }
 
     /// Web .th-foot: 12.5 / 1.4 in ink-2, column gap 8, 4 in from the bubble's edge; the time's tooltip is the full date.
+    /// One clean line (time · state · action); the reason, when there is one, sits on its own quiet line under it
+    /// instead of wrapping the state and the action across two lines.
     private var footer: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(clockTime(message.at)).monospacedDigit().foregroundStyle(CE.ink2).fixedSize()
-                .help(parseISODate(message.at).map(koDateTime) ?? "")
-            if let info { deliveryLabel(info) }
-            if !store.isArchive, message.delivery == "failed" {
-                resendButton
-            } else if !store.isArchive, message.delivery == "held", isLatestProblem, let target {
-                heldAction(target)
+        VStack(alignment: .trailing, spacing: 1) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(clockTime(message.at)).monospacedDigit().foregroundStyle(CE.ink2).fixedSize()
+                    .help(parseISODate(message.at).map(koDateTime) ?? "")
+                if let info { deliveryLabel(info) }
+                if !store.isArchive, message.delivery == "failed" {
+                    resendButton
+                } else if !store.isArchive, message.delivery == "held", isLatestProblem, let target {
+                    heldAction(target)
+                }
+            }
+            if info != nil, let note {
+                Text(note)
+                    .foregroundStyle(chatDeliveryColor(message.delivery).opacity(0.8))
+                    .multilineTextAlignment(.trailing)
+                    .lineLimit(2)
+                    .lineSpacing(CELeading.meta)
+                    .frame(maxWidth: 360, alignment: .trailing)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .font(CEFont.meta)
         .padding(.trailing, 4)
     }
 
-    /// "보류 · {note}" like the web; tap (or hover on Mac) tells what the label means.
+    /// The state word; tap (or hover on Mac) tells what it means.
     private func deliveryLabel(_ info: DeliveryInfo) -> some View {
         Button { explaining = true } label: {
-            Text(note.map { "\(info.label) · \($0)" } ?? info.label)
+            Text(info.label)
                 .foregroundStyle(chatDeliveryColor(message.delivery))
-                .multilineTextAlignment(.trailing)
-                .lineLimit(2)
-                .lineSpacing(CELeading.meta)
+                .lineLimit(1)
+                .fixedSize()
                 .padding(.vertical, isMac ? 0 : 6)
                 .contentShape(Rectangle())
         }
@@ -201,7 +213,7 @@ struct ChatMineRow: View {
     private var resendButton: some View {
         let locked = !store.uiCanWrite
         // Another send is in flight (the store de-duplicates per project): wait for it instead of failing.
-        let busy = store.pendingActions.contains { $0.hasPrefix("send:") } && !resending
+        let busy = store.isSending(projectID: message.projectId, targetMemberID: message.targetMemberId) && !resending
         return Button { Task { await resend() } } label: {
             // Web .th-retry: 13 / 600 in ink-1, 0 4 padding, underlined.
             HStack(spacing: 4) {
@@ -245,7 +257,8 @@ struct ChatSystemRow: View {
     var body: some View {
         let title = message.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let detail = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
-        let text = [title, detail == title ? "" : detail].filter { !$0.isEmpty }.joined(separator: " · ")
+        // Server notices often end in a raw provider message ("… 오류: Claude Code can't use …"): say it plainly.
+        let text = [title, detail == title ? "" : detail].filter { !$0.isEmpty }.map(Self.plain).joined(separator: " · ")
         // Web .th-system: 13 / 1.5, padding 6 14, radius 12, at most 620 wide; the time is 12 in ink-3.
         Text(line(text))
             .font(CEFont.secondary)
@@ -257,6 +270,12 @@ struct ChatSystemRow: View {
             .frame(maxWidth: 620)
             .frame(maxWidth: .infinity)
             .textSelection(.enabled)
+    }
+
+    /// "{이름} 오류: <raw>" keeps the name and maps the raw part; other notices pass through.
+    static func plain(_ text: String) -> String {
+        guard let range = text.range(of: "오류: ") ?? text.range(of: "): ") else { return friendlyError(text) }
+        return String(text[..<range.upperBound]) + friendlyError(String(text[range.upperBound...]))
     }
 
     private func line(_ text: String) -> AttributedString {
@@ -294,8 +313,8 @@ struct ChatReportRow: View {
                     Spacer(minLength: 6)
                     Text(clockTime(message.at)).font(CEFont.meta).foregroundStyle(CE.ink2).monospacedDigit()
                         .help(parseISODate(message.at).map(koDateTime) ?? "")
+                    cardActions
                 }
-                .accessibilityElement(children: .combine)
                 if !message.title.isEmpty {
                     // Web .th-card__title: 15.5 / 650, line height 1.4, −.012em.
                     Text(message.title)
@@ -319,6 +338,55 @@ struct ChatReportRow: View {
             .chatMessageMenu(message)
             .frame(maxWidth: 720, alignment: .leading)
             Spacer(minLength: 0)
+        }
+    }
+
+    /// The member who wrote this report, when the composer can address them (not on the roster any more: none).
+    private var author: Member? {
+        message.memberId.flatMap { id in store.members.first { $0.id == id } }
+    }
+
+    /// "답하기" points the composer at the author and focuses it, so a report can be answered without hunting for the
+    /// recipient. iPhone also gets copy here (a long press is text selection, not a menu).
+    @ViewBuilder private var cardActions: some View {
+        let replyTarget: String?? = {
+            guard let author else { return Optional<String?>.none }
+            return author.kind == "worker" ? Optional<String?>.some(author.id) : Optional<String?>.some(nil)
+        }()
+        let canReply = !store.isArchive && replyTarget != nil && router.chatTarget != replyTarget!
+        if canReply, let author, let replyTarget {
+            // Tap answers the author; a long press (or right click) offers copy.
+            Menu { cardMenu(reply: (author, replyTarget)) } label: { cardActionIcon("arrowshape.turn.up.left") } primaryAction: {
+                router.chatTarget = replyTarget
+                router.focusComposer &+= 1
+            }
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+            .help("\(author.name)에게 답하기 · 길게 누르면 복사")
+            .accessibilityLabel("\(author.name)에게 답하기")
+        } else if !isMac {
+            Menu { cardMenu(reply: nil) } label: { cardActionIcon("ellipsis") }
+                .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+                .accessibilityLabel("복사")
+        }
+    }
+
+    private func cardActionIcon(_ symbol: String) -> some View {
+        Image(systemName: symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(CE.ink2)
+            .frame(width: isMac ? 22 : 32, height: isMac ? 22 : 32)
+            .contentShape(Rectangle())
+    }
+
+    @ViewBuilder private func cardMenu(reply: (Member, String?)?) -> some View {
+        if let reply {
+            Button { router.chatTarget = reply.1; router.focusComposer &+= 1 } label: {
+                Label("\(reply.0.name)에게 답하기", systemImage: "arrowshape.turn.up.left")
+            }
+        }
+        if !message.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Button { chatCopy(message.body) } label: { Label("본문 복사", systemImage: "doc.on.doc") }
+        }
+        if !message.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Button { chatCopy(message.title) } label: { Label("제목 복사", systemImage: "textformat") }
         }
     }
 
@@ -939,8 +1007,8 @@ private struct ChatRecipientList: View {
 
     /// One quiet line, like the web project rows: status (dot carries the colour) or "총괄 · status".
     @ViewBuilder private func subtitle(_ member: Member?, scope: ChatScope) -> some View {
-        if let status = (member ?? scope.lead)?.status {
-            let info = MemberStatusInfo(status)
+        if let shown = member ?? scope.lead {
+            let info = MemberStatusInfo(shown)
             HStack(spacing: 5) {
                 StatusDot(tone: info.tone, pulsing: info.live, size: 6)
                 Text(member == nil ? "\(scope.leadTitle) · \(info.label)" : info.label)
@@ -988,7 +1056,7 @@ private struct ChatRecipientChips: View {
         return Button { router.chatTarget = member?.id } label: {
             HStack(spacing: 6) {
                 if let member {
-                    let info = MemberStatusInfo(member.status)
+                    let info = MemberStatusInfo(member)
                     StatusDot(tone: info.tone, pulsing: info.live, size: 6)
                 }
                 Text(member?.name ?? scope.threadTitle).font(CEFont.meta.weight(.semibold)).lineLimit(1)
@@ -1060,7 +1128,7 @@ private struct ChatThreadHeader: View {
     }
 
     private func statusBadge(_ member: Member) -> some View {
-        StatusBadge(status: member.status).help(MemberStatusInfo(member.status).explanation)
+        StatusBadge(member: member).help(MemberStatusInfo(member).explanation)
     }
 
     @ViewBuilder private func action(_ scope: ChatScope) -> some View {
@@ -1206,7 +1274,7 @@ private struct ChatPlaceholder: View {
         if member.status == "error" {
             let error = member.lastError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return ChatNote(tone: .danger, icon: "exclamationmark.triangle.fill",
-                            text: error.isEmpty ? "오류 · 턴이나 세션 시작이 실패했습니다" : "오류: \(error)",
+                            text: error.isEmpty ? "오류 · 일을 시작하거나 이어 가다 실패했습니다" : "오류: \(friendlyError(error))",
                             actionTitle: wide ? nil : detailTitle, action: wide ? nil : { router.openMember(id) })
         }
         if let backend = member.backend, backend != "core" {
@@ -1240,9 +1308,9 @@ private struct ChatPlaceholder: View {
     func accessibilityText(_ member: Member?, problem: String?, draft: Bool) -> String {
         var parts = [member?.name ?? threadTitle]
         if let member {
-            parts.append(MemberStatusInfo(member.status).label)
+            parts.append(MemberStatusInfo(member).label)
         } else if let lead {
-            parts.append("\(rankName(lead.kind)) \(MemberStatusInfo(lead.status).label)")
+            parts.append("\(rankName(lead.kind)) \(MemberStatusInfo(lead).label)")
         }
         if problem == "failed" { parts.append("전달 실패한 글 있음") } else if problem == "held" { parts.append("보류된 전달 있음") }
         if draft { parts.append("쓰던 글 있음") }

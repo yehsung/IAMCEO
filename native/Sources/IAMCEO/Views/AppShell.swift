@@ -54,6 +54,7 @@ struct AppShell: View {
                 desk
                 #else
                 phone.environment(\.ceWide, sizeClass == .regular)
+                    .onChange(of: sizeClass, initial: true) { _, size in router.usesPhoneNavigation = size != .regular }
                 #endif
             }
         }
@@ -83,7 +84,10 @@ struct AppShell: View {
         .onChange(of: router.focusComposer) { _, _ in router.memberID = nil }
         // The tabs and ⌘1…⌘5 stay usable while the drawer is open: going to another screen closes it. (`--open` sets
         // both values at launch, so this never fires for it; on Mac `openMember` never changes the destination.)
-        .onChange(of: router.destination) { _, _ in router.memberID = nil }
+        .onChange(of: router.destination) { _, _ in
+            NSApp.keyWindow?.makeFirstResponder(nil)
+            router.memberID = nil
+        }
         #else
         .sheet(isPresented: $router.showSettings) { SettingsView() }
         #endif
@@ -207,7 +211,18 @@ struct AppShell: View {
                 .frame(minWidth: 220, maxWidth: .infinity, minHeight: 300, maxHeight: .infinity)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 264, max: 320)
         } detail: {
-            destinationView(router.destination)
+            ZStack {
+                // Instantiate a tab on first visit, then preserve its local state and scroll views.
+                // Disabled inactive controls cannot receive focus or invoke keyboard shortcuts.
+                ForEach(Destination.allCases.filter { router.visitedDestinations.contains($0) }) { tab in
+                    destinationView(tab)
+                        .opacity(router.destination == tab ? 1 : 0)
+                        .allowsHitTesting(router.destination == tab)
+                        .disabled(router.destination != tab)
+                        .accessibilityHidden(router.destination != tab)
+                        .zIndex(router.destination == tab ? 1 : 0)
+                }
+            }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 // One look under the toolbar on every tab. macOS shows the window's aurora under the toolbar only
                 // where a scroll view reaches it (홈, 결재함, 팀); over a fixed layout (대화, 자료) it paints a dark band,
@@ -224,7 +239,7 @@ struct AppShell: View {
                 // Member detail: a glass drawer over this column on every destination; the rail stays undimmed.
                 .overlay { if !store.isArchive { MemberDrawerHost(windowWidth: windowWidth) } }
                 // Kept for the Window menu and Mission Control; the toolbar shows `headline` instead (macOS 15+).
-                .navigationTitle(store.state?.project.name ?? "IAMCEO")
+                .navigationTitle(store.currentProjectName)
                 .modifier(DeskTitle(subtitle: ""))
                 .toolbar {
                     if #available(macOS 26.0, *) {
@@ -239,7 +254,6 @@ struct AppShell: View {
                         ToolbarItem(placement: .principal) { DestinationSwitcher(compact: compactTabs) }
                     }
                 }
-                .background { shortcuts }
                 .overlay { MacAttachmentDropSurface(intake: attachmentIntake, policy: attachmentPolicy) }
                 .overlay {
                     if attachmentIntake.targeted {
@@ -289,7 +303,7 @@ struct AppShell: View {
     /// The project name alone (17/650). The owner asked for no summary line under it on any tab: the current
     /// situation lives on 홈.
     private var headline: some View {
-        let name = store.state?.project.name ?? "IAMCEO"
+        let name = store.currentProjectName
         return Text(name).font(.system(size: 17, weight: .semibold)).tracking(-0.25)
             .foregroundStyle(CE.ink).lineLimit(1).truncationMode(.tail)
         .frame(width: headlineWidth, alignment: .leading)
@@ -341,16 +355,7 @@ struct AppShell: View {
         }
     }
 
-    /// ⌘1…⌘5 switch destinations, ⌘R syncs now.
-    private var shortcuts: some View {
-        ZStack {
-            ForEach(Array(Destination.allCases.enumerated()), id: \.element) { index, tab in
-                Button(tab.title) { router.go(tab) }.keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
-            }
-            Button("지금 동기화") { Task { await store.refresh() } }.keyboardShortcut("r", modifiers: .command)
-        }
-        .opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
-    }
+    // ⌘1…⌘5, ⌘R and the other shortcuts are menu bar commands (IAMCEOApp MacCommands).
     #endif
 
     // MARK: iPhone / iPad
@@ -360,11 +365,17 @@ struct AppShell: View {
         @Bindable var router = router
         return TabView(selection: $router.destination) {
             ForEach(Destination.allCases) { tab in
-                NavigationStack {
+                NavigationStack(path: router.path(for: tab)) {
                     destinationView(tab)
+                        .navigationDestination(for: PhoneRoute.self) { route in
+                            switch route {
+                            case .member(let id): MemberDetailView(memberID: id).id(id).ceStatusStrips()
+                            case .file(let id): FilesView.phoneDetail(fileID: id)
+                            }
+                        }
                         .ceStatusStrips()
                         .background { AmbientBackground() }
-                        .navigationTitle(store.state?.project.name ?? "IAMCEO")
+                        .navigationTitle(store.currentProjectName)
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
                             ToolbarItem(placement: .topBarLeading) {
@@ -389,8 +400,9 @@ struct AppShell: View {
         return store.connectionStatus == .connected ? "서버 연결됨" : "서버 끊김"
     }
 
-    /// Title = project switcher (web phone header). The badge counts what waits in the *other* projects, which the
-    /// tab badges (selected project only) cannot show: Σ inboxCount + blockedCount, danger when someone is blocked.
+    /// Title = project switcher (web phone header). What waits in the *other* projects (which the tab badges, selected
+    /// project only, cannot show) is a small dot on the chevron, not a number next to this project's name: a number
+    /// there read as this project's count. The counts themselves are on each row of the menu.
     @ToolbarContentBuilder private func projectSwitcher(_ tab: Destination) -> some ToolbarContent {
         if #available(iOS 26.0, *) {
             ToolbarItem(placement: .principal) { projectSwitcherLabel(tab) }
@@ -406,18 +418,26 @@ struct AppShell: View {
     }
 
     private func projectSwitcherLabel(_ tab: Destination) -> some View {
-        let name = store.state?.project.name ?? "IAMCEO"
+        let name = store.currentProjectName
         let others = otherProjectsNeeds
         return Menu { projectMenuItems } label: {
-            HStack(spacing: 7) {
+            HStack(spacing: 6) {
                 Text(name).font(.headline).foregroundStyle(CE.ink).lineLimit(1)
-                CountBadge(count: others.count, tone: others.blocked ? .danger : .accent)
                 Image(systemName: "chevron.down").font(.caption.weight(.semibold)).foregroundStyle(CE.ink2)
+                    .overlay(alignment: .topTrailing) {
+                        if others.count > 0 {
+                            Circle().fill(others.blocked ? CE.danger : CE.accent)
+                                .frame(width: 7, height: 7)
+                                .overlay { Circle().strokeBorder(CE.bg, lineWidth: 1.5) }
+                                .offset(x: 5, y: -4)
+                        }
+                    }
             }
             .frame(minHeight: 44)
             .contentShape(Rectangle())
         }
-        .accessibilityLabel("프로젝트 \(name)\(others.count > 0 ? ", 다른 프로젝트에서 \(others.count)건이 기다립니다" : ""). 바꾸기")
+        .accessibilityLabel("프로젝트 \(name). 바꾸기")
+        .accessibilityValue(others.count > 0 ? "다른 프로젝트에 확인할 일 \(others.count)건" : "")
     }
 
     @ViewBuilder private var projectMenuItems: some View {
@@ -449,11 +469,13 @@ struct AppShell: View {
         Button { router.showSettings = true } label: { Label("설정", systemImage: "gearshape") }
     }
 
-    /// Web projectLine plus what waits on the CEO (the rail's badge, spelled out because a menu has no badge).
+    /// What waits on the CEO first (the rail's badge, spelled out because a menu has no badge), then the web
+    /// projectLine.
     private func projectMenuLine(_ project: ProjectSummary) -> String {
-        var parts = [projectRailLine(project)]
+        var parts: [String] = []
         if project.decisionCount > 0 { parts.append("결재 \(project.decisionCount)") }
         if project.todoCount > 0 { parts.append("할 일 \(project.todoCount)") }
+        parts.append(projectRailLine(project))
         return parts.joined(separator: " · ")
     }
     #endif
@@ -477,8 +499,9 @@ func projectRailLine(_ project: ProjectSummary) -> String {
     if project.errorCount > 0 { return "오류 \(project.errorCount)명" }
     if project.workingCount > 0 { return "\(project.workingCount)명 일하는 중" }
     if !project.isHq && !project.runnerEnabled { return "총괄 시작 전" }
-    if project.memberCount > 0 { return "\(project.memberCount)명 대기" }
-    return "대기"
+    // "N명 대기" read as N people waiting on the CEO; idle members are simply resting (the status label's wording).
+    if project.memberCount > 0 { return "모두 쉬는 중" }
+    return "아직 직원 없음"
 }
 
 // MARK: - Mac rail
@@ -1017,12 +1040,15 @@ struct StatusStrips: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var dismissedNotice: String?
     /// Web OfflineBand waits 1.5 s before it shows: a short blip (window back in front, server restart) never
     /// flashes the strip. The composer says at once that it cannot send.
     @State private var offlineShown = false
+    /// The realtime socket drops and comes back within a second on every return to the app or Wi-Fi change, and
+    /// REST keeps the screen current meanwhile (nothing for the CEO to do): only a fallback that lasts 10 s shows.
+    @State private var fallbackShown = false
 
     private var offline: Bool { store.connectionStatus != .connected && !store.isDemo && store.bootstrap != nil }
+    private var fallback: Bool { store.connectionStatus == .connected && !store.isDemo && store.realtimeStatus == .fallback }
 
     private struct Strip: Identifiable {
         let id: String
@@ -1032,6 +1058,8 @@ struct StatusStrips: View {
         var detail: String? = nil
         var actionTitle: String? = nil
         var action: (() -> Void)? = nil
+        /// A small spinner in place of the icon (work in progress, nothing to press).
+        var busy = false
     }
 
     private var strips: [Strip] {
@@ -1042,7 +1070,7 @@ struct StatusStrips: View {
         }
         if offline && offlineShown {
             items.append(Strip(id: "offline", tone: .attention, icon: "wifi.slash", text: "서버와 연결이 끊겼습니다. 다시 잇는 중입니다.",
-                               detail: store.connectionIssue, actionTitle: "지금 다시 연결", action: { Task { await store.connect() } }))
+                               detail: store.connectionIssue, actionTitle: "지금 다시 연결", action: { Task { await store.restartRealtime() } }))
         }
         if store.isArchive {
             items.append(Strip(id: "archive", tone: .neutral, icon: "archivebox", text: "보관한 프로젝트 · 읽기 전용",
@@ -1050,13 +1078,18 @@ struct StatusStrips: View {
                 if let id = store.selectedProjectID { router.manageProject(id: id, mode: .restore) }
             }))
         }
-        if store.connectionStatus == .connected && !store.isDemo && store.realtimeStatus == .fallback {
-            items.append(Strip(id: "fallback", tone: .attention, icon: "arrow.triangle.2.circlepath", text: store.localizedSyncDescription,
-                               actionTitle: "지금 다시 연결", action: { Task { await store.connect() } }))
+        if fallback && fallbackShown {
+            items.append(Strip(id: "fallback", tone: .neutral, icon: "arrow.triangle.2.circlepath",
+                               text: "실시간 연결을 다시 잇는 중입니다. 그동안 몇 초마다 새 소식을 확인합니다.",
+                               actionTitle: "다시 연결", action: { Task { await store.restartRealtime() } }))
         }
-        if let notice = router.navigationNotice ?? store.notificationNotice ?? store.projectNotice, notice != dismissedNotice {
+        if router.isOpeningNotification {
+            items.append(Strip(id: "notification-opening", tone: .neutral, icon: "bell", text: "알림을 여는 중입니다…", busy: true))
+        }
+        if let notice = router.navigationNotice ?? store.notificationNotice ?? store.projectNotice {
+            // Closing clears the notice itself, so it is gone on every tab and pushed screen (each has its own strips).
             items.append(Strip(id: "notice", tone: .neutral, icon: "info.circle", text: notice,
-                               actionTitle: "닫기", action: { dismissedNotice = notice; router.navigationNotice = nil }))
+                               actionTitle: "닫기", action: { router.navigationNotice = nil; store.dismissNotices() }))
         }
         if let error = store.errorMessage {
             items.append(Strip(id: "error", tone: .danger, icon: "exclamationmark.circle", text: error,
@@ -1084,6 +1117,11 @@ struct StatusStrips: View {
             try? await Task.sleep(for: .milliseconds(1500))
             if !Task.isCancelled { offlineShown = true }
         }
+        .task(id: fallback) {
+            guard fallback else { fallbackShown = false; return }
+            try? await Task.sleep(for: .seconds(10))
+            if !Task.isCancelled { fallbackShown = true }
+        }
     }
 
     /// web .offline-band: an opaque dark plate (not glass), readable over any light. The connection strips use the
@@ -1103,7 +1141,11 @@ struct StatusStrips: View {
         let hasAction = item.actionTitle != nil && item.action != nil
         return HStack(spacing: 12) {
             HStack(spacing: 8) {
-                Image(systemName: item.icon).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(item.tone.color)
+                if item.busy {
+                    ProgressView().controlSize(.small).tint(item.tone.color).frame(width: 14, height: 14)
+                } else {
+                    Image(systemName: item.icon).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(item.tone.color)
+                }
                 // web 13.5px at line-height 1.35.
                 Text(item.text).font(CEFont.note).foregroundStyle(palette.text)
                     .lineSpacing(CELeading.spacing(13.5, 1.35))
@@ -1179,8 +1221,11 @@ private struct PhoneComposerDock: ViewModifier {
 
 private struct PhoneDockedComposer: View {
     @Environment(AppStore.self) private var store
+    @Environment(DraftStore.self) private var drafts
     @Environment(Router.self) private var router
     let tab: Destination
+    /// The folded dock was opened (tap on its pill); folds again when the screen changes or the panel is swiped down.
+    @State private var expanded = false
 
     /// A worker's page on 팀 addresses that worker (the lead's page, the lead); elsewhere the shared chat target.
     private var pinned: String?? {
@@ -1188,14 +1233,68 @@ private struct PhoneDockedComposer: View {
         return .some(member.kind == "worker" ? member.id : nil)
     }
 
+    /// Screens for reading and deciding start with the composer folded to one small pill: 결재함 (every card has its
+    /// own answer field, so a second open box invites an answer in the wrong place) and a file opened on 자료.
+    private var folds: Bool {
+        if tab == .inbox { return true }
+        // A file read on 자료 (its own detail) or pushed over another tab.
+        if tab == .files && router.fileID != nil { return true }
+        if case .file = router.phonePaths[tab]?.last { return true }
+        return false
+    }
+
     var body: some View {
         let pinned = pinned
         let target = Binding<String?>(get: { pinned ?? router.chatTarget }, set: { router.chatTarget = $0 })
-        ComposerBar(target: target, showsTargetPicker: false, targetPickerOnFocus: pinned == nil, namesLead: true,
-                    respondsToFocusRequests: router.destination == tab,
-                    onOpenChat: { router.go(.chat) })
-            .padding(.horizontal, CESpace.m).padding(.top, 6).padding(.bottom, CESpace.s)
-            .background { ComposerFloor() }
+        Group {
+            if router.inlineFieldFocused && router.destination == tab {
+                // A card's own field has the keyboard: one field rides it, not two.
+                Color.clear.frame(height: 0)
+            } else if folds && !expanded {
+                pill(target: target.wrappedValue)
+            } else {
+                ComposerBar(target: target, showsTargetPicker: false, targetPickerOnFocus: pinned == nil, namesLead: true,
+                            respondsToFocusRequests: router.destination == tab, autoFocus: folds,
+                            onSent: folds ? { expanded = false } : nil,
+                            onOpenChat: { router.go(.chat) },
+                            onSwipeDown: folds ? { expanded = false } : nil)
+                    .padding(.horizontal, CESpace.m).padding(.top, 6).padding(.bottom, CESpace.s)
+                    .background { ComposerFloor() }
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: expanded)
+        .animation(.easeOut(duration: 0.18), value: router.inlineFieldFocused)
+        .onChange(of: folds) { _, _ in expanded = false }
+        // "지시" from elsewhere (member page, report card) opens the folded dock and types in it.
+        .onChange(of: router.focusComposer) { _, _ in if folds && router.destination == tab { expanded = true } }
+    }
+
+    /// Folded dock: a 40pt glass pill at the trailing edge, "총괄에게 쓰기" (or the recipient's name), with a dot when a
+    /// draft is waiting in it. Tapping opens the full composer in place with the keyboard up.
+    private func pill(target: String?) -> some View {
+        let name = target.flatMap { id in store.members.first { $0.id == id }?.name } ?? store.leadRankName
+        let hasDraft = !drafts.text(for: DraftStore.key(project: store.selectedProjectID, target: target))
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !drafts.files(for: DraftStore.key(project: store.selectedProjectID, target: target)).isEmpty
+        return HStack {
+            Spacer(minLength: 0)
+            Button { expanded = true } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "square.and.pencil").font(.system(size: 14, weight: .semibold))
+                    Text(hasDraft ? "\(name)에게 쓰던 글" : "\(name)에게 쓰기").font(CEFont.secondary.weight(.semibold)).lineLimit(1)
+                    if hasDraft { Circle().fill(CE.accent).frame(width: 6, height: 6) }
+                }
+                .foregroundStyle(CE.ink)
+                .padding(.horizontal, 16).frame(height: 40)
+                .glassPanel(Capsule())
+                .frame(minHeight: 44)
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .disabled(store.isDemo && !LaunchOptions.reviewTyping)
+            .accessibilityLabel(hasDraft ? "\(name)에게 쓰던 글 이어 쓰기" : "\(name)에게 지시나 질문 쓰기")
+        }
+        .padding(.horizontal, CESpace.m).padding(.top, 2).padding(.bottom, CESpace.s)
     }
 }
 

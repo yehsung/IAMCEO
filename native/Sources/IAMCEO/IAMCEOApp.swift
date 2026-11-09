@@ -46,6 +46,9 @@ struct IAMCEOApp: App {
     @State private var store: AppStore
     @State private var drafts: DraftStore
     @State private var lifecycle = ApplicationLifecycle()
+    #if os(macOS)
+    @State private var sharedRouter = LaunchOptions.makeRouter()
+    #endif
     init() {
         let store = AppStore(demo: LaunchOptions.demo, persistCredentials: !LaunchOptions.demo)
         _store = State(initialValue: store)
@@ -54,8 +57,13 @@ struct IAMCEOApp: App {
     var body: some Scene {
         // A fixed id keeps the scene identity stable across builds (the default id is derived from the root view type).
         WindowGroup(id: "main") {
+            #if os(macOS)
+            MainWindow(store: store, drafts: drafts, sharedRouter: sharedRouter)
+                .modifier(ApplicationLifecycleHooks(lifecycle: lifecycle, store: store))
+            #else
             MainWindow(store: store, drafts: drafts)
                 .modifier(ApplicationLifecycleHooks(lifecycle: lifecycle, store: store))
+            #endif
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             lifecycle.active = phase == .active
@@ -64,11 +72,11 @@ struct IAMCEOApp: App {
         #if os(macOS)
         .defaultSize(width: 1440, height: 920)
         .windowToolbarStyle(.unified)
-        .commands { CommandGroup(replacing: .newItem) {} }
+        .commands { MacCommands(store: store, router: sharedRouter) }
         #endif
         #if os(macOS)
         SwiftUI.Settings {
-            SettingsWindow(store: store, drafts: drafts)
+            SettingsWindow(store: store, drafts: drafts, router: sharedRouter)
                 .modifier(ApplicationLifecycleHooks(lifecycle: lifecycle, store: store))
         }
         #endif
@@ -115,7 +123,9 @@ private struct ApplicationLifecycleHooks: ViewModifier {
 private struct MainWindow: View {
     let store: AppStore
     let drafts: DraftStore
-    @State private var router = LaunchOptions.makeRouter()
+    var sharedRouter: Router? = nil
+    @State private var windowRouter = LaunchOptions.makeRouter()
+    private var router: Router { sharedRouter ?? windowRouter }
     var body: some View {
         AppShell()
             .environment(store)
@@ -126,15 +136,76 @@ private struct MainWindow: View {
             #if os(macOS)
             // Sidebar ≤320 + detail ≥560 fit inside this minimum (see AppShell.desk).
             .frame(minWidth: 1040, minHeight: 680)
+            .background { AppWindowReader { $0?.identifier = NSUserInterfaceItemIdentifier("IAMCEO.MainWindow") } }
             #endif
     }
 }
 
 #if os(macOS)
+/// The menu bar (Mac): 파일 holds 새 프로젝트 and 팀장 추가, 이동 holds the five screens, the project before and after
+/// this one in the rail's order, the composer and 지금 동기화. These are the app's only keyboard shortcuts for them,
+/// so a key and its menu item can never drift apart. Each acts on the main window, bringing it to the front when
+/// the settings window has the focus.
+private struct MacCommands: Commands {
+    let store: AppStore
+    let router: Router
+
+    /// The rail's order: 본사 first, then the projects.
+    private var projects: [ProjectSummary] { store.projects.filter(\.isHq) + store.projects.filter { !$0.isHq } }
+
+    private func neighbour(_ step: Int) -> ProjectSummary? {
+        let list = projects
+        guard !store.isDemo, list.count > 1,
+              let index = list.firstIndex(where: { $0.id == store.selectedProjectID }) else { return nil }
+        let next = index + step
+        return list.indices.contains(next) ? list[next] : nil
+    }
+
+    private func switchTo(_ project: ProjectSummary?) {
+        guard let project else { return }
+        router.showInMainWindow(router.destination)
+        Task { await store.selectProject(id: project.id) }
+    }
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("새 프로젝트…") { router.showInMainWindow(router.destination); router.showNewProject = true }
+                .keyboardShortcut("n", modifiers: .command)
+                .disabled(!store.canWrite)
+            Button("팀장 추가…") { router.showInMainWindow(router.destination); router.showNewMember = true }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+                .disabled(!store.uiCanWrite || store.isArchive || store.selectedProjectID == nil)
+        }
+        CommandMenu("이동") {
+            ForEach(Array(Destination.allCases.enumerated()), id: \.element) { index, tab in
+                Button(tab.title) { router.showInMainWindow(tab) }
+                    .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
+                    .disabled(store.bootstrap == nil && !store.isDemo)
+            }
+            Divider()
+            Button("이전 프로젝트") { switchTo(neighbour(-1)) }
+                .keyboardShortcut(.upArrow, modifiers: [.command, .control])
+                .disabled(neighbour(-1) == nil)
+            Button("다음 프로젝트") { switchTo(neighbour(1)) }
+                .keyboardShortcut(.downArrow, modifiers: [.command, .control])
+                .disabled(neighbour(1) == nil)
+            Divider()
+            Button("입력칸으로") { router.showInMainWindow(router.destination); router.focusComposer &+= 1 }
+                .keyboardShortcut("l", modifiers: .command)
+                .disabled(store.isArchive || (store.bootstrap == nil && !store.isDemo))
+            Button("지금 동기화") { Task { await store.refresh() } }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(store.isDemo || store.bootstrap == nil)
+        }
+    }
+}
+
 private struct SettingsWindow: View {
     let store: AppStore
     let drafts: DraftStore
-    @State private var router = Router()
+    let router: Router
+    @Environment(\.openWindow) private var openWindow
+    @State private var settingsWindow: NSWindow?
     var body: some View {
         SettingsView()
             .environment(store)
@@ -142,6 +213,31 @@ private struct SettingsWindow: View {
             .environment(drafts)
             .preferredColorScheme(.dark)
             .tint(CE.accent)
+            .background { AppWindowReader { settingsWindow = $0 } }
+            .onChange(of: router.mainWindowRequest) { _, _ in
+                if let main = NSApp.windows.first(where: { $0.identifier?.rawValue == "IAMCEO.MainWindow" }) {
+                    if main.isMiniaturized { main.deminiaturize(nil) }
+                    main.makeKeyAndOrderFront(nil)
+                } else { openWindow(id: "main") }
+                settingsWindow?.close()
+                NSApp.activate(ignoringOtherApps: true)
+            }
+    }
+}
+
+private struct AppWindowReader: NSViewRepresentable {
+    let capture: (NSWindow?) -> Void
+    func makeNSView(context: Context) -> WindowView { WindowView(capture: capture) }
+    func updateNSView(_ nsView: WindowView, context: Context) {}
+    final class WindowView: NSView {
+        let capture: (NSWindow?) -> Void
+        init(capture: @escaping (NSWindow?) -> Void) { self.capture = capture; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { return nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            let window = window
+            DispatchQueue.main.async { self.capture(window) }
+        }
     }
 }
 #endif

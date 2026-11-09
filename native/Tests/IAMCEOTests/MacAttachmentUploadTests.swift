@@ -26,12 +26,12 @@ private final class P2UploadResponses: @unchecked Sendable {
 }
 
 private actor P2UploadGate {
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var continuation: TestDeadlineContinuation<Void, Never>?
     private var released = false
     var held: Bool { continuation != nil }
     func hold() async {
         guard !released else { return }
-        await withCheckedContinuation { continuation = $0 }
+        await withTestDeadline(fallback: ()) { continuation = $0 }
     }
     func release() { released = true; continuation?.resume(); continuation = nil }
 }
@@ -410,14 +410,18 @@ final class MacAttachmentUploadTests: XCTestCase {
         defer { store.disconnect() }
         let captured = context(store)
         let prepared = try PhotoAttachmentFile.write(Data("content".utf8), filename: "prepared.txt")
-        var resume: CheckedContinuation<Void, Never>?
+        defer { prepared.cleanup() }
+        var resume: TestDeadlineContinuation<Void, Never>?
         let upload = store.composerUploads.loadMedia(names: ["original.txt"], context: captured, store: store) { _ in
-            await withCheckedContinuation { resume = $0 }
+            await withTestDeadline(fallback: ()) { resume = $0 }
             return [prepared]
         }
-        while resume == nil { await Task.yield() }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while resume == nil && ContinuousClock.now < deadline { await Task.yield() }
+        guard let resume else { upload.cancel(); throw TestDeadlineError.expired }
+        defer { resume.resume() }
         await store.selectProject(id: "q")
-        resume?.resume()
+        resume.resume()
         await upload.value
         XCTAssertFalse(net.requests.contains { $0.url?.path == "/api/uploads" })
         XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.url.path))
@@ -435,15 +439,19 @@ final class MacAttachmentUploadTests: XCTestCase {
         let net = try network(), store = try await connected(net, drafts: drafts)
         defer { store.disconnect() }
         let captured = context(store)
-        var resume: CheckedContinuation<Void, Never>?
+        var resume: TestDeadlineContinuation<Void, Never>?
         let prepared = try PhotoAttachmentFile.write(Data("content".utf8), filename: "prepared.txt")
+        defer { prepared.cleanup() }
         let upload = store.composerUploads.loadMedia(names: ["original.txt"], context: captured, store: store) { _ in
-            await withCheckedContinuation { resume = $0 }
+            await withTestDeadline(fallback: ()) { resume = $0 }
             return [prepared]
         }
-        while resume == nil { await Task.yield() }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while resume == nil && ContinuousClock.now < deadline { await Task.yield() }
+        guard let resume else { upload.cancel(); throw TestDeadlineError.expired }
+        defer { resume.resume() }
         drafts.selectNamespace("other-host")
-        resume?.resume()
+        resume.resume()
         await upload.value
         XCTAssertTrue(drafts.uploadFailures(for: captured.token.key).isEmpty)
         drafts.selectNamespace(captured.token.namespace)

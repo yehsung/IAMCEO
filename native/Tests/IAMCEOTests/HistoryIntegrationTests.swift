@@ -60,7 +60,7 @@ final class HistoryIntegrationServer: @unchecked Sendable {
             if let gate {
                 self.gate = nil
                 let entered = self.entered
-                lock.unlock(); entered?.fulfill(); _ = gate.wait(timeout: .now() + 5); lock.lock()
+                lock.unlock(); entered?.fulfill(); XCTAssertEqual(gate.wait(timeout: .now() + 5), .success, "Fixture gate timed out"); lock.lock()
             }
             return response
         default: return IsolatedTestHTTPReply(status: 404)

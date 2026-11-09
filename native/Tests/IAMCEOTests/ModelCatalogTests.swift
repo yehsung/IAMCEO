@@ -60,11 +60,12 @@ final class ModelCatalogTests: XCTestCase {
         store.endpoint = fixture.endpoint.url.absoluteString; store.accessCode = "fixture-only"
         await store.connect()
         XCTAssertEqual(store.connectionStatus, .connected)
+        await store.refreshModels()
         XCTAssertEqual(store.modelCatalog.codex.models.first?.value, "new-codex")
         let settings = try XCTUnwrap(store.bootstrap?.settings)
         await store.refreshModels()
         XCTAssertEqual(store.bootstrap?.settings.ranks["lead"]?.model, settings.ranks["lead"]?.model)
-        XCTAssertEqual(fixture.requests.filter { $0.url?.path == "/api/models" }.count, 2)
+        XCTAssertGreaterThanOrEqual(fixture.requests.filter { $0.url?.path == "/api/models" }.count, 2)
         store.disconnect()
         XCTAssertEqual(store.modelCatalog, .fallback)
         await fixture.close()

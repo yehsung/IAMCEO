@@ -121,7 +121,7 @@ final class IsolatedTestNetwork: @unchecked Sendable {
 /// URLSessionWebSocketTask upgrades, so no real WS task/session is created here.
 actor IsolatedTestWebSocket: RealtimeTransport {
     private var frames: [Result<Data, URLError>] = []
-    private var waiter: (UUID, CheckedContinuation<Data, any Error>)?
+    private var waiter: (UUID, TestDeadlineContinuation<Data, any Error>)?
     private var closed = false
     private(set) var receiveCount = 0
     private(set) var closeCount = 0
@@ -133,7 +133,7 @@ actor IsolatedTestWebSocket: RealtimeTransport {
         if !frames.isEmpty { return try frames.removeFirst().get() }
         let id = UUID()
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in waiter = (id, continuation) }
+            try await withThrowingTestDeadline { continuation in waiter = (id, continuation) }
         } onCancel: {
             Task { await self.cancelReceive(id) }
         }
@@ -230,11 +230,17 @@ final class IsolatedTestSupportTests: XCTestCase {
         do { _ = try await transport.receive(); XCTFail("Lost frame succeeded") }
         catch let error as URLError { XCTAssertEqual(error.code, .networkConnectionLost) }
         let waiting = Task { try await transport.receive() }
-        while await socket.receiveCount < 3 { await Task.yield() }
+        let receiveDeadline = ContinuousClock.now + .seconds(3)
+        while await socket.receiveCount < 3 && ContinuousClock.now < receiveDeadline { await Task.yield() }
+        let received = await socket.receiveCount
+        XCTAssertGreaterThanOrEqual(received, 3)
         waiting.cancel()
         do { _ = try await waiting.value; XCTFail("Cancelled receive succeeded") } catch {}
         let waitingForClose = Task { try await transport.receive() }
-        while await socket.receiveCount < 4 { await Task.yield() }
+        let closeDeadline = ContinuousClock.now + .seconds(3)
+        while await socket.receiveCount < 4 && ContinuousClock.now < closeDeadline { await Task.yield() }
+        let receivedBeforeClose = await socket.receiveCount
+        XCTAssertGreaterThanOrEqual(receivedBeforeClose, 4)
         await fixture.close()
         do { _ = try await waitingForClose.value; XCTFail("Closed receive succeeded") } catch {}
         let count = await socket.closeCount
@@ -250,5 +256,52 @@ final class IsolatedTestSupportTests: XCTestCase {
         let sockets = await fixture.webSockets.createdSockets
         XCTAssertTrue(sockets.isEmpty)
         await fixture.close()
+    }
+}
+
+
+// A task-group timeout cannot escape a child suspended on a continuation. Resolve
+// the continuation itself, once, so failed test preconditions cannot strand a gate.
+enum TestDeadlineError: Error { case expired }
+final class TestDeadlineContinuation<Value: Sendable, Failure: Error>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Failure>?
+    private var watchdog: Task<Void, Never>?
+    init(_ continuation: CheckedContinuation<Value, Failure>, timeout: Result<Value, Failure>,
+         file: StaticString, line: UInt) {
+        self.continuation = continuation
+        watchdog = Task { [self] in
+            do { try await Task.sleep(for: .seconds(10)) } catch { return }
+            if let continuation = take() {
+                XCTFail("Fixture continuation timed out after 10 seconds", file: file, line: line)
+                continuation.resume(with: timeout)
+            }
+        }
+    }
+    private func take() -> CheckedContinuation<Value, Failure>? {
+        lock.withLock {
+            defer { continuation = nil; watchdog?.cancel(); watchdog = nil }
+            return continuation
+        }
+    }
+    func resume(with result: Result<Value, Failure>) { take()?.resume(with: result) }
+    func resume(returning value: Value) { resume(with: .success(value)) }
+    func resume(throwing error: Failure) { resume(with: .failure(error)) }
+}
+extension TestDeadlineContinuation where Value == Void {
+    func resume() { resume(returning: ()) }
+}
+func withTestDeadline<Value: Sendable>(fallback: Value, isolation: isolated (any Actor)? = #isolation,
+    file: StaticString = #filePath, line: UInt = #line,
+    _ body: (TestDeadlineContinuation<Value, Never>) -> Void) async -> Value {
+    await withCheckedContinuation(isolation: isolation) { continuation in
+        body(TestDeadlineContinuation(continuation, timeout: .success(fallback), file: file, line: line))
+    }
+}
+func withThrowingTestDeadline<Value: Sendable>(isolation: isolated (any Actor)? = #isolation,
+    file: StaticString = #filePath, line: UInt = #line,
+    _ body: (TestDeadlineContinuation<Value, Error>) -> Void) async throws -> Value {
+    try await withCheckedThrowingContinuation(isolation: isolation) { continuation in
+        body(TestDeadlineContinuation(continuation, timeout: .failure(TestDeadlineError.expired), file: file, line: line))
     }
 }

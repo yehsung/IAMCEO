@@ -48,6 +48,24 @@ final class NotificationLinkTests: XCTestCase {
         XCTAssertNotNil(NotificationLink.parse(metadata: metadata(kind: "report_complete", target: #"{"screen":"chat","projectId":"hq","memberId":null,"messageId":"old_report","groupId":"277551bf-cf60-4ecd-a450-1fd3e695a8d8"}"#)))
     }
 
+
+    func testTodoAndBlockedKindTargetAllowlistAndHomeRoundTrip() throws {
+        let target = PushTarget.projectHome(projectId: "p_1")
+        XCTAssertEqual(NotificationLink.parse(metadata: metadata(kind: "todo_created", target: #"{"screen":"home","projectId":"p_1"}"#))?.target, target)
+        XCTAssertEqual(try JSONDecoder().decode(PushTarget.self, from: JSONEncoder().encode(target)), target)
+        XCTAssertEqual(NotificationLink.parse(metadata: metadata(kind: "report_blocked", target: #"{"screen":"chat","projectId":"p_1","memberId":"m","messageId":"blocked"}"#))?.target,
+            .chat(projectId: "p_1", memberId: "m", messageId: "blocked"))
+        for (kind, target) in [
+            ("todo_created", #"{"screen":"home"}"#),
+            ("todo_created", #"{"screen":"home","projectId":null}"#),
+            ("todo_created", #"{"screen":"home","projectId":"../p"}"#),
+            ("todo_created", #"{"screen":"home","projectId":"p","action":"done"}"#),
+            ("todo_created", #"{"screen":"chat","projectId":"p","messageId":"m"}"#),
+            ("report_blocked", #"{"screen":"home","projectId":"p"}"#),
+            ("test", #"{"screen":"home","projectId":"p"}"#)
+        ] { XCTAssertNil(NotificationLink.parse(metadata: metadata(kind: kind, target: target))) }
+    }
+
     @MainActor func testColdTapMailboxDeduplicatesAcrossWindowsAndForegroundOnlyRefreshes() throws {
         let inbox = NotificationInbox()
         let link = try XCTUnwrap(NotificationLink.parse(metadata: metadata()))

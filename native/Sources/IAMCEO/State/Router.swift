@@ -8,6 +8,10 @@ enum Destination: String, CaseIterable, Identifiable {
     var icon: String { switch self { case .home: "square.grid.2x2"; case .inbox: "tray"; case .team: "person.2"; case .chat: "bubble.left.and.bubble.right"; case .files: "folder" } }
 }
 
+enum PhoneRoute: Hashable {
+    case member(String), file(String)
+}
+
 enum ProjectManagementMode: String { case rename, archive, restore, settings }
 struct ProjectManagementSelection: Identifiable {
     let projectID: String
@@ -23,10 +27,25 @@ struct NotificationRoute {
 }
 
 /// Cross-screen navigation shared by every view: which screen is shown and which item is open in it.
-/// Mac shows the member detail as a sheet over any screen; iPhone/iPad push it on 팀.
+/// Mac shows the member detail as a sheet over any screen; iPhone pushes it on the current tab.
 @MainActor @Observable
 final class Router {
-    var destination: Destination { didSet { if destination != oldValue { cancelPendingNavigation() } } }
+    var destination: Destination {
+        didSet {
+            visitedDestinations.insert(destination)
+            if destination != oldValue { cancelPendingNavigation() }
+            if !restoringDestination { destinationChanged?(destination) }
+        }
+    }
+    private(set) var visitedDestinations: Set<Destination>
+    var phonePaths: [Destination: [PhoneRoute]] = [:]
+    var usesPhoneNavigation = !isMac
+    @ObservationIgnored var destinationChanged: ((Destination) -> Void)?
+    @ObservationIgnored private var restoringDestination = false
+    /// A settings-window link requests activation even when its destination was already selected.
+    private(set) var mainWindowRequest = 0
+    private(set) var isOpeningNotification = false
+    @ObservationIgnored private var notificationOpeningID: UUID?
     var decisionID: String?
     var memberID: String?
     var fileID: String?
@@ -47,15 +66,38 @@ final class Router {
     var showPairing = false
     /// Bumped to move keyboard focus into the docked composer (Mac).
     var focusComposer = 0
+    /// iPhone: a field inside the content (a decision card's answer or memo) has the keyboard. The docked composer
+    /// steps aside meanwhile, so one field rides the keyboard and an answer cannot land in the wrong box.
+    var inlineFieldFocused = false
 
-    init(destination: Destination = .home) { self.destination = destination }
+    init(destination: Destination = .home, usesPhoneNavigation: Bool = !isMac) {
+        self.destination = destination; visitedDestinations = [destination]
+        self.usesPhoneNavigation = usesPhoneNavigation
+    }
+    func restoreDestination(_ destination: Destination) {
+        restoringDestination = true; self.destination = destination; restoringDestination = false
+    }
+    func showInMainWindow(_ destination: Destination) {
+        go(destination); showSettings = false; mainWindowRequest &+= 1
+    }
+    func path(for tab: Destination) -> Binding<[PhoneRoute]> {
+        Binding(get: { self.phonePaths[tab] ?? [] }, set: { self.phonePaths[tab] = $0 })
+    }
 
     func go(_ destination: Destination) { cancelPendingNavigation(); self.destination = destination }
-    func openDecision(_ id: String) { cancelPendingNavigation(); decisionID = id; destination = .inbox }
+    func openDecision(_ id: String) { cancelPendingNavigation(); phonePaths[.inbox] = []; decisionID = id; destination = .inbox }
     /// Mac: the shell's member sheet opens over the current screen. iPhone/iPad: 팀 pushes the detail.
-    func openMember(_ id: String) { cancelPendingNavigation(); memberID = id; if !isMac { destination = .team } }
-    func openFile(_ id: String) { cancelPendingNavigation(); fileID = id; destination = .files }
-    func openChat(_ target: String?) { cancelPendingNavigation(); chatTarget = target; chatMessageID = nil; destination = .chat }
+    func openMember(_ id: String) {
+        cancelPendingNavigation()
+        if usesPhoneNavigation { phonePaths[destination, default: []].append(.member(id)) }
+        else { memberID = id; if !isMac { destination = .team } }
+    }
+    func openFile(_ id: String) {
+        cancelPendingNavigation()
+        if usesPhoneNavigation { phonePaths[destination, default: []].append(.file(id)) }
+        else { fileID = id; destination = .files }
+    }
+    func openChat(_ target: String?) { cancelPendingNavigation(); phonePaths[.chat] = []; chatTarget = target; chatMessageID = nil; destination = .chat }
     func openTerminal(_ memberID: String) { cancelPendingNavigation(); terminalMemberID = memberID }
     func openTerminal(_ member: Member, store: AppStore) {
         Task {
@@ -73,7 +115,28 @@ final class Router {
         projectManagement = ProjectManagementSelection(projectID: id, mode: mode)
     }
 
-    func cancelPendingNavigation() { navigationRevision &+= 1; pendingRoute = nil }
+    func cancelPendingNavigation() {
+        navigationRevision &+= 1; pendingRoute = nil
+        notificationOpeningID = nil; isOpeningNotification = false
+    }
+    @discardableResult func beginOpeningNotification(_ target: PushTarget) -> UUID {
+        cancelPendingNavigation()
+        switch target {
+        case .home, .projectHome: destination = .home
+        case .inbox: destination = .inbox
+        case .team: destination = .team
+        case .chat: destination = .chat
+        case .unknown: break
+        }
+        phonePaths[destination] = []
+        if case .team = target { memberID = nil }
+        let id = UUID(); notificationOpeningID = id; isOpeningNotification = true
+        return id
+    }
+    func finishOpeningNotification(_ id: UUID) {
+        guard notificationOpeningID == id else { return }
+        notificationOpeningID = nil; isOpeningNotification = false
+    }
 
     /// Selection may finish before SwiftUI delivers onChange. That reset owns the final application.
     func applyNotification(_ route: NotificationRoute, afterProjectChange: Bool, resetRevision: Int) {
@@ -86,9 +149,12 @@ final class Router {
         decisionID = nil; memberID = nil; fileID = nil; chatTarget = nil; terminalMemberID = nil; chatMessageID = nil
         showNewMember = false; showSettings = false; showPairing = false; projectManagement = nil
         switch route.target {
-        case .home: destination = .home
+        case .home, .projectHome: destination = .home
         case .inbox(_, let id): openDecision(id)
-        case .team(_, let id): openMember(id)
+        case .team(_, let id):
+            destination = .team
+            if usesPhoneNavigation { phonePaths[.team] = [.member(id)] }
+            else { openMember(id) }
         case .chat:
             openChat(route.chatTarget); chatMessageID = route.chatMessageID
         case .unknown: return
@@ -103,6 +169,7 @@ final class Router {
     /// Selections belong to one project; never carry them into another.
     func resetForProjectChange() {
         decisionID = nil; memberID = nil; fileID = nil; chatTarget = nil; terminalMemberID = nil
+        phonePaths = [:]
         chatMessageID = nil; showNewMember = false; navigationNotice = nil
         projectResetRevision &+= 1
         if let route = pendingRoute { apply(route) }

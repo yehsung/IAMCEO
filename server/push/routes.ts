@@ -17,7 +17,7 @@ const revision = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
 const authorization = z.enum(["authorized", "provisional", "ephemeral", "denied", "notDetermined"]);
 const label = z.string().refine((value) => Array.from(value).length >= 1 && Array.from(value).length <= 40 && !/[\p{Cc}\p{Cf}]/u.test(value));
 const preferences = z.strictObject({ decision: z.boolean().optional(), approval_wait: z.boolean().optional(),
-  error: z.boolean().optional(), report_complete: z.boolean().optional() }).refine((value) => Object.keys(value).length > 0);
+  error: z.boolean().optional(), report_complete: z.boolean().optional(), todo_created: z.boolean().optional(), report_blocked: z.boolean().optional() }).refine((value) => Object.keys(value).length > 0);
 const register = z.strictObject({ expectedRevision: revision.nullable(), platform: z.literal("ios"),
   bundleId: z.string().min(1).max(255), environment: z.enum(["sandbox", "production"]),
   deviceToken: z.string().max(1024).refine((value) => /^(?:[0-9a-f]{2})+$/i.test(value)).transform((value) => value.toLowerCase()),

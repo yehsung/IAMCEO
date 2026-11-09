@@ -316,24 +316,28 @@ const TOOLS: Record<ToolName, Tool<any>> = {
   ),
 
   ask_close: tool(
-    "결재함의 열린 카드를 이유와 함께 닫는다. 대신 답하지 않는다: decided는 user_quote에 대표 원문이 필요하고, obsolete는 상황이 바뀌어 불필요해진 경우다. follow_up에 후속 불필요(none) 또는 대상·지시·대표 원본 메시지 ID(instruction)를 명시하면 닫기와 후속 전달을 함께 저장한다. 별도 team_assign으로 반복하지 않는다. 직원은 자기가 올린 카드만 닫는다.",
+    "결재함의 열린 카드를 이유와 함께 닫는다. 대표 대신 답하지 않는다. decided는 user_quote의 대표 원문 또는 answered_decision_id의 실제 대표 답으로 검증한다. 답한 결재와 같은 그룹이거나 총괄이 same_issue에 같은 안건인 이유를 명시해야 한다. obsolete는 상황이 바뀌어 불필요해진 경우다. follow_up에 후속 불필요(none) 또는 대상·지시·대표 원본 메시지 ID(instruction)를 명시하면 닫기와 후속 전달을 함께 저장한다. 별도 team_assign으로 반복하지 않는다. 직원은 자기가 올린 카드만 닫는다.",
     z.strictObject({
       id: text.describe("결재 id(d_...). board 로 본다"),
       kind: z.enum(["decided", "obsolete"]).describe("decided 대표가 이미 정함 · obsolete 필요 없어짐"),
       reason: oneLine(300).describe("왜 닫는지 한 줄. 대표 결재함에 그대로 보인다"),
-      user_quote: z.string().optional().describe("decided 일 때 필수. 대표가 이 일을 정한 말을 글자 그대로. 서버가 대표 글과 대조한다"),
+      user_quote: z.string().optional().describe("decided에서 answered_decision_id가 없을 때 필수. 대표가 이 일을 정한 원문. 서버가 대조한다"),
+      answered_decision_id: text.optional().describe("같은 프로젝트에서 대표가 실제 답한 결재 ID. 같은 그룹 또는 총괄의 same_issue 설명이 필요하다"),
+      same_issue: oneLine(300).optional().describe("그룹이 다를 때 총괄이 두 결재가 같은 안건인 이유를 명시한다"),
       follow_up: z.discriminatedUnion("kind", [
         z.strictObject({ kind: z.literal("none") }),
-        z.strictObject({ kind: z.literal("instruction"), member_id: text, text, source_message_id: text }),
-      ]).optional().describe("새 호출에서는 반드시 명시한다. instruction의 member_id는 같은 프로젝트 직원 ID, source_message_id는 대표 원문 메시지 ID"),
+        z.strictObject({ kind: z.literal("instruction"), member_id: text, text, source_message_id: text.optional() }),
+      ]).optional().describe("새 호출에서는 반드시 명시한다. instruction은 같은 프로젝트 직원. 대표 글 근거면 source_message_id 필수, answered_decision_id 근거면 생략하고 같은 답을 후속 출처로 쓴다"),
+    }).superRefine((a, ctx) => {
+      if (a.follow_up?.kind === "instruction" && !a.follow_up.source_message_id && !a.answered_decision_id) ctx.addIssue({ code: "custom", message: "후속 지시의 대표 원문 또는 답한 결재가 필요합니다" });
     }),
     async (orch, member, a) => {
       if (a.follow_up && !orch.closeDecision) throw new ApiError(501, "결재 후속 저장을 지원하지 않습니다");
       const closed = a.follow_up
-        ? await orch.closeDecision!(member, { id: a.id, kind: a.kind, reason: a.reason, userQuote: a.user_quote,
-          followUp: a.follow_up.kind === "none" ? { kind: "none" } : { kind: "instruction", memberId: a.follow_up.member_id, text: a.follow_up.text, sourceMessageId: a.follow_up.source_message_id } })
-        : await orch.closeAsk(member, { id: a.id, kind: a.kind, reason: a.reason, userQuote: a.user_quote });
-      return reply(`결재 #${closed.id} 를 닫았습니다${closed.closeQuote ? ". 인용은 대표 글과 맞습니다" : ""}`);
+        ? await orch.closeDecision!(member, { id: a.id, kind: a.kind, reason: a.reason, userQuote: a.user_quote, ...(a.answered_decision_id ? { answeredDecisionId: a.answered_decision_id } : {}), ...(a.same_issue ? { sameIssue: a.same_issue } : {}),
+          followUp: a.follow_up.kind === "none" ? { kind: "none" } : { kind: "instruction", memberId: a.follow_up.member_id, text: a.follow_up.text, ...(a.follow_up.source_message_id ? { sourceMessageId: a.follow_up.source_message_id } : { sourceDecisionId: a.answered_decision_id! }) } })
+        : await orch.closeAsk(member, { id: a.id, kind: a.kind, reason: a.reason, userQuote: a.user_quote, ...(a.answered_decision_id ? { answeredDecisionId: a.answered_decision_id } : {}), ...(a.same_issue ? { sameIssue: a.same_issue } : {}) });
+      return reply(`결재 #${closed.id} 를 닫았습니다${closed.closeQuote ? ". 대표 원문 근거를 확인했습니다" : ""}`);
     },
   ),
 

@@ -77,7 +77,7 @@ struct LocalFileView: View {
             if let sample { preview = sample; return }
             guard let api = store.api else { failure = "서버에 연결된 뒤에 열 수 있습니다"; return }
             do { preview = try await api.localFile(projectID: projectID, path: path) }
-            catch { failure = error.localizedDescription }
+            catch { failure = friendlyLoadError(error, what: "파일") }
         }
     }
     @ViewBuilder private func content(_ preview: LocalFilePreview) -> some View {
@@ -155,7 +155,7 @@ struct LocalFileView: View {
             await store.refresh()
             guard store.selectedProjectID == projectID, store.api === api else { return }
             dismiss(); router.openFile(file.id)
-        } catch { failure = error.localizedDescription }
+        } catch { failure = friendlyLoadError(error, what: "자료", verb: "올리지") }
     }
 }
 

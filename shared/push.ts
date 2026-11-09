@@ -1,5 +1,5 @@
 // APNs 전용 계약. Settings/Bootstrap/WsEvent 및 v1 응답을 확장하지 않는다.
-export const PUSH_KINDS = ["decision", "approval_wait", "error", "report_complete"] as const;
+export const PUSH_KINDS = ["decision", "approval_wait", "error", "report_complete", "todo_created", "report_blocked"] as const;
 /** 자유 답변 ask도 decision 사건 하나이며 질문 메시지는 별도 사건을 만들지 않는다. */
 export type PushKind = (typeof PUSH_KINDS)[number];
 export type PushPreferences = Record<PushKind, boolean>;
@@ -9,6 +9,8 @@ export const DEFAULT_PUSH_PREFERENCES: Readonly<PushPreferences> = Object.freeze
   approval_wait: true,
   error: true,
   report_complete: true,
+  todo_created: true,
+  report_blocked: true,
 });
 export const DEFAULT_PUSH_BUNDLE_ID = "com.yehsung.iamceo";
 export const PUSH_REPORT_GROUP_WINDOW_MS = 120_000;
@@ -60,6 +62,7 @@ export interface PushProviderStatus {
 }
 export interface PushStatus { serverId: string; supported: boolean; providers: PushProviderStatus[] }
 export type PushTarget =
+  | { screen: "home"; projectId: string }
   | { screen: "inbox"; projectId: string; decisionId: string }
   | { screen: "team"; projectId: string; memberId: string }
   | { screen: "chat"; projectId: string; memberId: string | null; messageId: string; groupId?: string };

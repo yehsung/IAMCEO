@@ -783,7 +783,7 @@ struct InboxView: View {
             if let oldest = page.map(pagingKey).min() { olderCursor = oldest }
             if page.count < 50 { olderExhausted = true }
         } catch {
-            if store.selectedProjectID == projectID { olderError = error.localizedDescription }
+            if store.selectedProjectID == projectID { olderError = friendlyLoadError(error, what: "지난 결재", verb: "불러오지") }
         }
         loadingOlder = false
     }
@@ -877,6 +877,7 @@ private struct DecisionCard: View {
     var onArm: () -> Void = {}
     @FocusState private var memoFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(Router.self) private var router
 
     private var decision: Decision { review.decision }
     private var stale: Bool { !busy && review.isStale(comparedTo: latest) }
@@ -935,6 +936,7 @@ private struct DecisionCard: View {
             StatusDot(tone: state?.tone ?? .attention)
             Text(whoName).font(CEFont.secondary.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
             Spacer(minLength: 6)
+            if decision.status == "open", let waited = HomeView.waitedLabel(decision) { Tag(waited, tone: .attention) }
             Text(relativeTime(decision.createdAt)).font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink2).fixedSize()
         }
         .help(state.map { "\(whoName) · \($0.label)" } ?? whoName)
@@ -1000,6 +1002,8 @@ private struct DecisionCard: View {
                 .lineLimit(1...6)
                 .lineSpacing(CELeading.spacing(15, 1.5))
                 .focused($memoFocused)
+                .onChange(of: memoFocused) { _, focused in router.inlineFieldFocused = focused }
+                .onDisappear { if memoFocused { router.inlineFieldFocused = false } }
                 .ceField(focused: memoFocused)
                 .disabled(locked || busy)
                 .onSubmit { if free && typed && !locked && !busy && !stale { memoOnly = true } }
@@ -1575,7 +1579,7 @@ private struct DecisionThumb: View {
             fileURL = destination
             failure = nil
         } catch {
-            failure = error.localizedDescription
+            failure = friendlyLoadError(error, what: "첨부")
         }
     }
 }

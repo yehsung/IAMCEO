@@ -67,8 +67,38 @@ final class AppStore: ProjectManagementStore {
     var todos: [Todo] { state?.todos ?? [] }
     var files: [FileDoc] { state?.files ?? [] }
     var work: [WorkItem] { state?.work ?? [] }
-    var canWrite: Bool { connectionStatus == .connected && !isRevalidating && !isDemo && !isArchive && state?.project.archived != true
+    var canWrite: Bool { capabilitiesLoaded && hasFreshProject && connectionStatus == .connected && !isRevalidating && !isDemo && !isArchive && state?.project.archived != true
         && selectedProjectID.map { projectResults[$0] != .checking } != false }
+    /// A cached snapshot is for reading only. Realtime hosts need an atomic sync for this selection.
+    /// Operations-only hosts validate revisions per write; an optional sync failure cannot lock all writes.
+    private var hasFreshProject: Bool {
+        selectedProjectID == nil || (validatedProjectGeneration == projectGeneration && state?.project.id == selectedProjectID
+            && (!realtimeSupported || !syncSupported || validatedWriteGeneration == projectGeneration))
+    }
+    var currentProjectName: String {
+        state?.project.name ?? projects.first { $0.id == selectedProjectID }?.name
+            ?? archivedProjects.first { $0.id == selectedProjectID }?.name ?? "IAMCEO"
+    }
+    var writeBlockedReason: String? {
+        if isDemo { return "샘플은 읽기 전용입니다" }
+        if isArchive || state?.project.archived == true { return "보관한 프로젝트는 읽기 전용입니다" }
+        if connectionStatus != .connected { return "서버와 연결이 끊겼습니다" }
+        if !hasFreshProject || (selectedProjectID != nil && state == nil) { return "프로젝트를 불러오는 중입니다" }
+        if isRevalidating || !capabilitiesLoaded || selectedProjectID.map({ projectResults[$0] == .checking }) == true {
+            return "최신 상태를 다시 확인하는 중입니다"
+        }
+        if state?.project.connection.ok == false { return "프로젝트의 실행 연결을 확인해 주세요" }
+        return nil
+    }
+    /// Consumers can check one recipient instead of treating all send actions as a global lock.
+    func sendActionKey(projectID: String, targetMemberID: String?) -> String {
+        let scope = ChatHistoryKey.normalizedScope(targetMemberID: targetMemberID, members: members)
+        let target: String? = if case .member(let id) = scope { id } else { nil }
+        return "send:" + DraftStore.key(project: projectID, target: target)
+    }
+    func isSending(projectID: String, targetMemberID: String?) -> Bool {
+        pendingActions.contains(sendActionKey(projectID: projectID, targetMemberID: targetMemberID))
+    }
     let histories = ChatHistoryCache()
     private(set) var pagingSupport: HistoryPagingSupport = .unknown
     private(set) var isArchive = false
@@ -81,6 +111,8 @@ final class AppStore: ProjectManagementStore {
     private(set) var serverID: String?
     private(set) var pushConnectionError: PushSettingsError?
     private(set) var notificationNotice: String?
+    /// The notice strip's 닫기: clears the notice itself (not one screen's copy), so it is gone on every tab.
+    func dismissNotices() { notificationNotice = nil; projectNotice = nil }
     private(set) var notificationMessages: [Message] = []
     private(set) var notificationMessageID: String?
     @ObservationIgnored private var notificationScope: MessageScope?
@@ -91,6 +123,7 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored private var archiveObserved = false
     @ObservationIgnored private var notificationFlight = false
     @ObservationIgnored private var pendingNotification: NotificationLink?
+    @ObservationIgnored private var pendingNotificationOwner: (router: WeakRouter, revision: Int)?
     @ObservationIgnored private var notificationRefreshRevision = 0
     @ObservationIgnored private var pushLogoutTask: Task<Void, Never>?
     @ObservationIgnored private var routers: [WeakRouter] = []
@@ -182,7 +215,7 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored private var nextSnapshotAt: Duration = .zero
     @ObservationIgnored private var syncSupported = false
     @ObservationIgnored private var realtimeSupported = false
-    @ObservationIgnored private var capabilitiesLoaded = false
+    private var capabilitiesLoaded = false
     @ObservationIgnored private var socketHello = false
     @ObservationIgnored private var highestRelevantSeq = 0
     @ObservationIgnored private var socketFailures = 0
@@ -219,13 +252,19 @@ final class AppStore: ProjectManagementStore {
     /// Endpoint and code of the live client, so a reconnect from the offline strip can keep the last snapshot.
     @ObservationIgnored private var connectedCredentials: (endpoint: String, code: String)?
     @ObservationIgnored private var transportFailures = 0
+    @ObservationIgnored private var validatedProjectGeneration: UUID?
+    @ObservationIgnored private var validatedWriteGeneration: UUID?
+    @ObservationIgnored private var projectCache = ProjectStateCache()
+    @ObservationIgnored private let navigationDefaults: UserDefaults?
+    @ObservationIgnored private var catalogDiscoveryTask: Task<Void, Never>?
 
     init(demo: Bool = false, session: URLSession? = nil, persistCredentials: Bool = true,
          drafts: DraftStore? = nil, submissions: SubmissionStore? = nil, writeStorageURL: URL? = nil,
          realtime: RealtimeClient? = nil, clock: any RealtimeClock = SystemRealtimeClock(),
          retryJitter: @escaping @Sendable (Double) -> Double = { $0 * Double.random(in: 0.8...1.2) },
          lowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled,
-         pushNotifications: PushNotificationService? = nil) {
+         pushNotifications: PushNotificationService? = nil, navigationDefaults: UserDefaults? = nil) {
+        self.navigationDefaults = navigationDefaults ?? (persistCredentials && !demo ? .standard : nil)
         injectedSession = session
         // URLProtocol cannot intercept a WebSocket upgrade. Injected HTTP sessions must also
         // inject a socket transport to opt in; tests can never escape to the real network.
@@ -273,36 +312,44 @@ final class AppStore: ProjectManagementStore {
 
     func connect() async {
         guard !isDemo else { return }
+        // Canonical origins make a trailing slash or default port the same server.
+        if let creds = connectedCredentials,
+           let requested = try? ServerEndpoint(endpoint), let connected = try? ServerEndpoint(creds.endpoint),
+           DraftStore.endpointNamespace(requested) == DraftStore.endpointNamespace(connected),
+           creds.code == accessCode.trimmingCharacters(in: .whitespacesAndNewlines) {
+            await restartRealtime()
+            return
+        }
+        await establishConnection()
+    }
+
+    private func establishConnection() async {
+        let sameServer = connectedCredentials.flatMap { try? ServerEndpoint($0.endpoint) }.map { previous in
+            (try? ServerEndpoint(endpoint)).map { DraftStore.endpointNamespace($0) == DraftStore.endpointNamespace(previous) } ?? false
+        } ?? false
         guard foreground else {
             // A requested host change invalidates writes/uploads now, even though networking
             // waits for the next active phase. A → B → A must reject A's late callbacks too.
             pendingConnect = true; stopRequests()
             generation = UUID(); projectGeneration = UUID()
-            clearHostNavigation()
+            if !sameServer { clearHostNavigation(); projectCache.removeAll() }
             pushNotifications?.setHost(nil); pushSettings.setHost(nil)
             api = nil; connectionStatus = .disconnected; isLoading = false; isRevalidating = true
             drafts.selectNamespace("unassigned"); writeNamespace = "unassigned"
             return
         }
         pendingConnect = false
-        // "다시 연결" from the offline strip: same server and code, so retry now and keep the last snapshot,
-        // leases and pending retries instead of dropping the CEO back onto the connection screen.
-        if connectionLost, let creds = connectedCredentials,
-           creds.endpoint == endpoint, creds.code == accessCode.trimmingCharacters(in: .whitespacesAndNewlines) {
-            if foreground {
-                restFailures = 0; socketFailures = 0
-                startSocket()
-            }
-            await refresh()
-            await refreshModels()
-            await refreshPushConnection()
-            return
-        }
+        let previousProject = selectedProjectID
+        let previousArchive = isArchive
+        let previousState = state
+        let previousBootstrap = bootstrap
         releaseAllTerminals()
         stopRequests()
+        projectCache.removeAll()
+        validatedProjectGeneration = nil; validatedWriteGeneration = nil
         generation = UUID()
         let connectionEpoch = generation
-        clearHostNavigation()
+        if !sameServer { clearHostNavigation() }
         modelCatalog = .fallback
         api = nil; connectionStatus = .connecting
         if pushLogoutTask == nil { pushNotifications?.setHost(nil); pushSettings.setHost(nil) }
@@ -325,7 +372,9 @@ final class AppStore: ProjectManagementStore {
         connectedCredentials = nil; transportFailures = 0; connectionIssue = nil
         pendingActions.removeAll()
         errorMessage = nil
-        bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil
+        if sameServer {
+            bootstrap = previousBootstrap; state = previousState; selectedProjectID = previousProject; isArchive = previousArchive
+        } else { bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil }
         isLoading = true
         defer { if epoch == generation { isLoading = false } }
         do {
@@ -348,12 +397,25 @@ final class AppStore: ProjectManagementStore {
             catch { errorMessage = error.localizedDescription }
             connectedCredentials = (endpoint, accessCode.trimmingCharacters(in: .whitespacesAndNewlines))
             connectionStatus = .connected
-            await refreshModels()
+            // Reading the workspace never waits for the model catalog or capability probe.
+            catalogDiscoveryTask = Task { [weak self] in await self?.refreshModels() }
+            async let discovery: Void = discoverCapabilities()
+            if !sameServer { restoreNavigation() }
+            let saved = sameServer ? (previousProject ?? savedProjectID()) : savedProjectID()
+            if sameServer, previousArchive, let saved {
+                await selectArchivedProject(id: saved)
+            } else if let project = initial.projects.first(where: { $0.id == saved })
+                ?? initial.projects.first(where: { $0.isHq || $0.id == "hq" }) ?? initial.projects.first {
+                await selectProject(id: project.id)
+            }
+            await discovery
             guard epoch == generation, foreground else { return }
-            await discoverCapabilities()
-            guard epoch == generation, foreground else { return }
-            if let first = initial.projects.first { await selectProject(id: first.id) }
-            else { await refreshWriteContext() }
+            // A state read that preceded discovery cannot supply the strict write revisions.
+            if syncSupported, validatedWriteGeneration != projectGeneration {
+                nextSnapshotAt = .zero
+                await refresh()
+            }
+            else if selectedProjectID == nil { await refreshWriteContext() }
             guard epoch == generation, foreground else { return }
             if runtime == nil { await refreshDiagnostics() }
             await recoverWrites()
@@ -369,6 +431,40 @@ final class AppStore: ProjectManagementStore {
         }
     }
 
+    /// Restart transport and revalidate without changing project, drafts, windows, or route.
+    func restartRealtime() async {
+        guard !isDemo else { return }
+        guard api != nil, bootstrap != nil else { await establishConnection(); return }
+        socketFailures = 0; restFailures = 0; transportFailures = 0; nextSnapshotAt = .zero
+        isRevalidating = true
+        guard foreground else { return }
+        invalidateCoordinator()
+        reconnectTask?.cancel(); reconnectTask = nil
+        fallbackTask?.cancel(); fallbackTask = nil
+        stopSocket()
+        startSocket(); startFallback()
+        async let discovery: Void = discoverCapabilities()
+        await discovery
+        await refresh()
+    }
+
+    private var navigationKey: String { "iamceo.navigation.v1." + writeNamespace }
+    private func savedProjectID() -> String? {
+        navigationDefaults?.dictionary(forKey: navigationKey)?["projectID"] as? String
+    }
+    private func saveNavigation(destination: Destination? = nil) {
+        guard !isDemo, writeNamespace != "unassigned" else { return }
+        var saved = navigationDefaults?.dictionary(forKey: navigationKey) ?? [:]
+        if let selectedProjectID { saved["projectID"] = selectedProjectID }
+        if let destination { saved["destination"] = destination.rawValue }
+        navigationDefaults?.set(saved, forKey: navigationKey)
+    }
+    private func restoreNavigation() {
+        let saved = navigationDefaults?.dictionary(forKey: navigationKey)?["destination"] as? String
+        let destination = saved.flatMap(Destination.init(rawValue:)) ?? .home
+        for item in routers { item.value?.restoreDestination(destination) }
+    }
+
     func disconnect() {
         beginPushLogout()
         clearHostNavigation()
@@ -376,6 +472,7 @@ final class AppStore: ProjectManagementStore {
         releaseAllTerminals()
         stopRequests()
         resetReadCollections()
+        projectCache.removeAll(); validatedProjectGeneration = nil; validatedWriteGeneration = nil
         generation = UUID(); projectGeneration = UUID()
         if persistCredentials { KeychainStore.remove(for: endpoint) }
         realtimeStatus = .paused; isRevalidating = false
@@ -402,6 +499,11 @@ final class AppStore: ProjectManagementStore {
     private func selectProject(id: String, archived: Bool, navigationToken: UUID? = nil) async {
         if isDemo { return }
         guard api != nil, connectionStatus == .connected else { return }
+        if selectedProjectID == id, isArchive == archived, navigationToken == nil {
+            await refresh()
+            return
+        }
+        if let state { projectCache.insert(state) }
         refreshTask?.cancel()
         projectGeneration = navigationToken ?? UUID()
         if navigationToken == nil { for item in routers { item.value?.cancelPendingNavigation() } }
@@ -413,7 +515,8 @@ final class AppStore: ProjectManagementStore {
         deliveryPages = [:]; deliveryErrors = [:]; deliveryResults = [:]; deliveryFlights = [:]; deliveryChecking = []; deliveryRefreshPending = []
         isArchive = archived
         selectedProjectID = id
-        state = nil
+        state = projectCache.value(projectID: id, archived: archived)
+        saveNavigation()
         writeRevisions?.members = nil; writeRevisions?.todos = nil
         reviewedMembers = [:]; reviewedTodos = [:]
         errorMessage = nil
@@ -421,6 +524,7 @@ final class AppStore: ProjectManagementStore {
         defer { if projectEpoch == projectGeneration { isLoading = false } }
         // Selection invalidates only project reads. The host socket continues receiving cursors.
         invalidateCoordinator()
+        nextSnapshotAt = .zero
         openActivityMembers.removeAll(); activities = [:]; activityErrors = [:]
         await enqueueRefresh(.all, immediate: true, allowPaused: true)
         guard epoch == generation, projectEpoch == projectGeneration else { return }
@@ -440,7 +544,12 @@ final class AppStore: ProjectManagementStore {
     func refreshModels() async {
         guard !isDemo, let api else { return }
         let epoch = generation
-        if let modelsTask { _ = try? await modelsTask.value; return }
+        if let modelsTask {
+            let requestID = modelsRequestID
+            if let catalog = try? await modelsTask.value,
+               epoch == generation, requestID == modelsRequestID, !modelsTask.isCancelled { modelCatalog = catalog }
+            return
+        }
         let requestID = UUID()
         modelsRequestID = requestID
         let task = Task { try await api.models() }
@@ -467,8 +576,15 @@ final class AppStore: ProjectManagementStore {
             var scope: RefreshScope = runtime == nil ? [.all, .diagnostics] : .all
             if archiveObserved { scope.insert(.archive) }
             Task { [weak self] in
-                await self?.enqueueRefresh(scope, immediate: true)
-                await self?.refreshPushConnection()
+                guard let self else { return }
+                let epoch = generation, phase = foregroundGeneration
+                // An initial probe invalidated by backgrounding must get another chance.
+                async let discovery: Void = discoverCapabilities()
+                await enqueueRefresh(scope, immediate: true)
+                await discovery
+                guard epoch == generation, phase == foregroundGeneration, foreground else { return }
+                if syncSupported, validatedWriteGeneration != projectGeneration { await refresh() }
+                await refreshPushConnection()
             }
         } else {
             if connectionStatus == .connecting, api == nil { pendingConnect = true }
@@ -540,7 +656,11 @@ final class AppStore: ProjectManagementStore {
             syncSupported = capabilities.contractVersion == 2 && (capabilities.capabilities?.realtime == true || strictWriteContract)
         } catch {
             guard epoch == generation, phase == foregroundGeneration else { return }
-            if (error as? APIError)?.status == 401 { handle(error) }
+            if (error as? APIError)?.status == 401 { handle(error); return }
+            guard !Task.isCancelled else { return }
+            // Discovery is optional (spec 3.3). A completed failed probe opens the
+            // unadvertised v1 path; it never clears a previously confirmed v2 contract.
+            capabilitiesLoaded = true
         }
     }
 
@@ -628,6 +748,10 @@ final class AppStore: ProjectManagementStore {
             bootstrap = result.bootstrap
             if let diagnostics = result.bootstrap.runtime { runtime = diagnostics }
             state = result.state
+            validatedProjectGeneration = projectEpoch
+            if result.sync != nil { validatedWriteGeneration = projectEpoch }
+            if let state { projectCache.insert(state) }
+            else if let projectID { projectCache.remove(projectID: projectID) }
             reconcileContextChanges()
             markReachable(); restFailures = 0; isRevalidating = false
             lastUpdated = Date(); lastSuccessfulSyncAt = lastUpdated
@@ -866,6 +990,7 @@ final class AppStore: ProjectManagementStore {
         }
     }
     private func stopRequests() {
+        catalogDiscoveryTask?.cancel(); catalogDiscoveryTask = nil
         modelsTask?.cancel(); modelsTask = nil
         modelsRequestID = UUID()
         cancelHistoryLoad(); invalidateCoordinator(); stopSocket()
@@ -881,7 +1006,8 @@ final class AppStore: ProjectManagementStore {
         if (error as? APIError)?.status == 401 {
             beginPushLogout(); clearHostNavigation()
             NotificationInbox.shared.discardPending()
-            stopRequests(); resetReadCollections(); generation = UUID(); projectGeneration = UUID()
+            stopRequests(); resetReadCollections(); projectCache.removeAll(); validatedProjectGeneration = nil; validatedWriteGeneration = nil
+            generation = UUID(); projectGeneration = UUID()
             realtimeStatus = .blocked; isRevalidating = true
             api = nil; bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil
             terminalLeases.removeAll()
@@ -898,14 +1024,14 @@ final class AppStore: ProjectManagementStore {
     }
     /// Like `mutate`, but also returns the server/transport error so callers can tell "the server refused" from
     /// "we never heard back". `error == nil` with no value means the request was not sent.
-    private func perform<T: Sendable>(_ key: String, refreshAfter: Bool = true, allowArchived: Bool = false, cancellationAware: Bool = false, deferRefusalToReceipt: Bool = false, operation: (APIClient) async throws -> T) async -> (value: T?, error: Error?) {
+    private func perform<T: Sendable>(_ key: String, refreshAfter: Bool = true, allowArchived: Bool = false, cancellationAware: Bool = false, deferRefusalToReceipt: Bool = false, ownsPendingAction: Bool = false, operation: (APIClient) async throws -> T) async -> (value: T?, error: Error?) {
         guard !isDemo else { errorMessage = "샘플은 읽기 전용입니다. 실제 Mac에 연결하면 바꿀 수 있습니다."; return (nil, nil) }
         guard let api, canWrite || (allowArchived && connectionStatus == .connected && !isRevalidating && !isDemo) else { errorMessage = isArchive ? "보관한 프로젝트는 읽기 전용입니다." : "서버에 연결된 뒤에 바꿀 수 있습니다."; return (nil, nil) }
-        guard !pendingActions.contains(key) else { return (nil, nil) }
+        guard ownsPendingAction || !pendingActions.contains(key) else { return (nil, nil) }
         let epoch = generation
         pendingActions.insert(key); errorMessage = nil
         if key.hasPrefix("terminal:") { terminalWindowNotices.removeValue(forKey: String(key.dropFirst("terminal:".count))) }
-        defer { if epoch == generation { pendingActions.remove(key) } }
+        defer { if epoch == generation, !ownsPendingAction { pendingActions.remove(key) } }
         do {
             let result = try await operation(api)
             if cancellationAware && Task.isCancelled { return (nil, nil) }
@@ -926,7 +1052,7 @@ final class AppStore: ProjectManagementStore {
             // A conflict means our copy is stale: show the truth right away. A missing terminal
             // is definitive; do not reconcile its in-flight operation before recording the refusal.
             if !deferredRefusal, (error as? APIError)?.status == 409, !(key.hasPrefix("terminal:") && error.localizedDescription.contains("No core terminal for member")) {
-                pendingActions.remove(key)
+                if !ownsPendingAction { pendingActions.remove(key) }
                 await refresh()
             }
             return (nil, error)
@@ -937,9 +1063,12 @@ final class AppStore: ProjectManagementStore {
     @discardableResult func sendMessage(text: String, targetMemberID: String? = nil, attachmentIDs: [String] = []) async -> Bool {
         guard !isDemo else { errorMessage = "샘플은 읽기 전용입니다."; return false }
         guard canWrite, let projectID = selectedProjectID, let submissions,
-              !pendingActions.contains("send:\(projectID)"),
+              !isSending(projectID: projectID, targetMemberID: targetMemberID),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachmentIDs.isEmpty else { return false }
         let epoch = generation
+        let actionKey = sendActionKey(projectID: projectID, targetMemberID: targetMemberID)
+        pendingActions.insert(actionKey)
+        defer { if epoch == generation { pendingActions.remove(actionKey) } }
         let key = DraftStore.key(project: projectID, target: targetMemberID)
         do {
             // Query unresolved attempts before considering any edited replacement.
@@ -961,7 +1090,7 @@ final class AppStore: ProjectManagementStore {
             }
             if let error = drafts.persistenceError { throw APIError(status: 0, message: error) }
             let attempt = try submissions.prepareMessage(projectID: projectID, targetMemberID: targetMemberID, draft: drafts.snapshot(for: key))
-            let outcome: (value: Message?, error: Error?) = await perform("send:\(projectID)", refreshAfter: false) { api in
+            let outcome: (value: Message?, error: Error?) = await perform(actionKey, refreshAfter: false, ownsPendingAction: true) { api in
                 let request = try submissions.beginMessage(id: attempt.id, allowUnconfirmedRetry: !strictWriteContract)
                 return try await api.send("/api/projects/\(APIClient.segment(projectID))/messages", body: request, contractVersion: strictWriteContract ? 2 : nil)
             }
@@ -1068,9 +1197,9 @@ final class AppStore: ProjectManagementStore {
     }
     /// Re-sends a failed message with the same id, target and attachments (the daemon treats it as a retry).
     @discardableResult func resend(_ message: Message) async -> Bool {
-        guard let projectID = selectedProjectID, message.mine, message.delivery == "failed" else { return false }
+        guard let projectID = selectedProjectID, message.projectId == projectID, message.mine, message.delivery == "failed" else { return false }
         let request = SendMessageRequest(id: message.id, text: message.body, targetMemberId: message.targetMemberId, attachmentIds: message.attachments.map(\.id))
-        let result: Message? = await mutate("send:\(projectID)", refreshAfter: false) { api in
+        let result: Message? = await mutate(sendActionKey(projectID: projectID, targetMemberID: message.targetMemberId), refreshAfter: false) { api in
             try await api.send("/api/projects/\(APIClient.segment(projectID))/messages", body: request)
         }
         if let result { receiveHistoryMessage(result); await refresh() }
@@ -2223,7 +2352,14 @@ final class AppStore: ProjectManagementStore {
     /// Scene owners register their local Router; the AppStore and mailbox remain app-scoped.
     func registerRouter(_ router: Router) {
         routers.removeAll { $0.value == nil }
-        if !routers.contains(where: { $0.value === router }) { routers.append(WeakRouter(router)) }
+        if !routers.contains(where: { $0.value === router }) {
+            routers.append(WeakRouter(router))
+            router.destinationChanged = { [weak self] destination in self?.saveNavigation(destination: destination) }
+            if bootstrap != nil, !isDemo {
+                let saved = navigationDefaults?.dictionary(forKey: navigationKey)?["destination"] as? String
+                if let saved = saved.flatMap(Destination.init(rawValue:)) { router.restoreDestination(saved) }
+            }
+        }
     }
 
     private func clearHostNavigation() {
@@ -2291,29 +2427,34 @@ final class AppStore: ProjectManagementStore {
     func processNotifications(router: Router, inbox: NotificationInbox? = nil) async {
         let inbox = inbox ?? .shared
         registerRouter(router)
-        guard !isDemo, foreground, connectionStatus == .connected, !isRevalidating, let api, let serverID,
+        guard !isDemo, foreground, connectionStatus == .connected || connectionLost, let api, let serverID,
               !notificationFlight else { return }
         notificationFlight = true
         defer { notificationFlight = false }
-        let initialEpoch = generation
-        if notificationRefreshRevision != inbox.refreshRevision {
-            notificationRefreshRevision = inbox.refreshRevision
-            await enqueueRefresh(.all, immediate: true)
+        if let owner = pendingNotificationOwner, owner.router.value == nil || owner.router.value?.navigationRevision != owner.revision {
+            pendingNotification = nil; pendingNotificationOwner = nil
         }
-        guard initialEpoch == generation, foreground, connectionStatus == .connected, self.api != nil else { return }
         if pendingNotification == nil { pendingNotification = inbox.consume(serverID: serverID) }
         guard let link = pendingNotification else {
+            if notificationRefreshRevision != inbox.refreshRevision {
+                notificationRefreshRevision = inbox.refreshRevision
+                await enqueueRefresh(.all, immediate: true)
+            }
             if let first = inbox.pending.first, first.serverID != serverID { notificationNotice = "이 알림의 호스트에 연결해 주세요." }
             return
         }
         guard link.serverID == serverID else { pendingNotification = nil; return }
+        let opening = router.beginOpeningNotification(link.target)
+        defer { router.finishOpeningNotification(opening) }
         let epoch = generation, projectEpoch = projectGeneration, phase = foregroundGeneration
         let navigation = router.navigationRevision, reset = router.projectResetRevision
+        pendingNotificationOwner = (WeakRouter(router), navigation)
         func valid() -> Bool {
             !Task.isCancelled && epoch == generation && phase == foregroundGeneration && foreground
                 && self.serverID == serverID && router.navigationRevision == navigation
         }
         do {
+            async let hintedContext = api.notificationContext(target: link.target)
             let target: PushTarget
             if let eventID = link.eventID {
                 let result = try await api.pushTarget(eventID: eventID)
@@ -2325,44 +2466,44 @@ final class AppStore: ProjectManagementStore {
             let projectID: String?
             switch target {
             case .home: projectID = nil
+            case .projectHome(let project): projectID = project
             case .inbox(let project, _), .team(let project, _), .chat(let project, _, _, _): projectID = project
             case .unknown: throw SubmissionError.mismatchedResult
             }
-            var snapshot: ProjectState?
+            let context: NotificationContext
+            if target == link.target { context = try await hintedContext }
+            else {
+                _ = try? await hintedContext
+                context = try await api.notificationContext(target: target)
+            }
+            guard valid(), projectEpoch == projectGeneration else { pendingNotification = nil; return }
+            let snapshot = context.state
             if let projectID {
-                snapshot = try await api.request("/api/projects/\(APIClient.segment(projectID))/state")
-                guard valid(), projectEpoch == projectGeneration else { pendingNotification = nil; return }
                 guard snapshot?.project.id == projectID, snapshot?.project.archived == false else {
                     throw APIError(status: 404, message: "보관되었거나 없는 프로젝트입니다.")
                 }
             }
             switch target {
             case .inbox(let project, let id):
-                let decision: Decision = try await api.request("/api/decisions/\(APIClient.segment(id))")
-                guard valid(), projectEpoch == projectGeneration else { pendingNotification = nil; return }
-                guard decision.id == id, decision.projectId == project else { throw SubmissionError.mismatchedResult }
+                guard let decision = context.decision, decision.id == id, decision.projectId == project else { throw SubmissionError.mismatchedResult }
                 if decision.status != "open" { route.notice = "이미 처리된 결재입니다." }
             case .team(let project, let id):
                 guard snapshot?.members.contains(where: { $0.id == id && $0.projectId == project }) == true else {
                     throw APIError(status: 404, message: "직원을 찾을 수 없습니다.")
                 }
             case .chat(let project, _, let id, _):
-                do {
-                    let around = try await api.messagesAround(projectID: project, messageID: id, limit: 41)
-                    guard valid(), projectEpoch == projectGeneration else { pendingNotification = nil; return }
-                    guard around.allSatisfy({ $0.projectId == project }), let anchor = around.first(where: { $0.id == id }) else {
+                if context.missingReport { route.notice = "보고를 찾을 수 없습니다." }
+                else {
+                    guard context.messages.allSatisfy({ $0.projectId == project }), let anchor = context.messages.first(where: { $0.id == id }) else {
                         throw SubmissionError.mismatchedResult
                     }
-                    let roster = snapshot?.members ?? []
                     let targetID = anchor.targetMemberId ?? anchor.memberId
-                    if case .member(let memberID) = ChatHistoryKey.normalizedScope(targetMemberID: targetID, members: roster) {
+                    if case .member(let memberID) = ChatHistoryKey.normalizedScope(targetMemberID: targetID, members: snapshot?.members ?? []) {
                         route.chatTarget = memberID
                     }
                     route.chatMessageID = id
-                    // Kept as a separate interval: never claim an around page closes a history gap.
-                    snapshot?.messages = around
-                } catch let error as APIError where error.status == 404 { route.notice = "보고를 찾을 수 없습니다." }
-            case .home, .unknown: break
+                }
+            case .home, .projectHome, .unknown: break
             }
             guard valid(), projectEpoch == projectGeneration else { pendingNotification = nil; return }
             let changed = projectID != nil && (selectedProjectID != projectID || isArchive || state?.project.id != projectID)
@@ -2375,7 +2516,7 @@ final class AppStore: ProjectManagementStore {
             }
             if case .chat = target, let id = route.chatMessageID {
                 notificationScope = ChatHistoryKey.normalizedScope(targetMemberID: route.chatTarget, members: snapshot?.members ?? [])
-                notificationMessages = (snapshot?.messages ?? []).filter { message in
+                notificationMessages = context.messages.filter { message in
                     if case .member(let member) = notificationScope { return message.memberId == member || message.targetMemberId == member }
                     return true
                 }.sorted(by: ChatHistory.ordered)
@@ -2645,4 +2786,41 @@ extension AppStore {
         return FolderListing(path: path, parent: path == home ? nil : ServerFolderPaths.parent(path), home: home,
                              entries: children.sorted { $0.localizedCompare($1) == .orderedAscending }.map { ServerFolder(name: $0, path: ServerFolderPaths.appending($0, to: path)) })
     }
+}
+
+/// The payload is stored as bounded Data, so the inactive cache has a real byte ceiling,
+/// independent of the number or size of file bodies in a ProjectState. Never persisted to disk.
+struct ProjectStateCache {
+    let countLimit: Int
+    let byteLimit: Int
+    private var entries: [String: Data] = [:]
+    private var recency: [String] = []
+    private(set) var byteCount = 0
+    var count: Int { entries.count }
+    init(countLimit: Int = 4, byteLimit: Int = 8 * 1024 * 1024) {
+        self.countLimit = max(0, countLimit); self.byteLimit = max(0, byteLimit)
+    }
+    private func key(_ id: String, _ archived: Bool) -> String { "\(archived):\(id)" }
+    mutating func insert(_ state: ProjectState) {
+        let key = key(state.project.id, state.project.archived)
+        removeKey(key)
+        guard countLimit > 0, let data = try? JSONEncoder().encode(state), data.count <= byteLimit else { return }
+        while entries.count >= countLimit || byteCount + data.count > byteLimit {
+            guard let victim = recency.first else { break }
+            removeKey(victim)
+        }
+        entries[key] = data; byteCount += data.count; recency.append(key)
+    }
+    mutating func value(projectID: String, archived: Bool) -> ProjectState? {
+        let key = key(projectID, archived)
+        guard let data = entries[key], let state = try? JSONDecoder().decode(ProjectState.self, from: data) else { return nil }
+        recency.removeAll { $0 == key }; recency.append(key)
+        return state
+    }
+    mutating func remove(projectID: String) { removeKey(key(projectID, false)); removeKey(key(projectID, true)) }
+    private mutating func removeKey(_ key: String) {
+        if let data = entries.removeValue(forKey: key) { byteCount -= data.count }
+        recency.removeAll { $0 == key }
+    }
+    mutating func removeAll() { entries = [:]; recency = []; byteCount = 0 }
 }

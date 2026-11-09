@@ -24,14 +24,61 @@ import XCTest
         let store = AppStore(session: network.session, persistCredentials: false, pushNotifications: push)
         store.endpoint = network.endpoint.url.absoluteString; store.accessCode = "fixture"
         await store.connect()
+        // This fixture's scenarios operate on p; first launch now correctly defaults to HQ.
+        await store.selectProject(id: "p")
         return store
     }
     private func link(_ target: PushTarget, event: String = UUID().uuidString, server: String = ManagementNavigationServer.serverID) throws -> NotificationLink {
         let kind: String
-        switch target { case .home: kind = "test"; case .inbox: kind = "decision"; case .team: kind = "error"; default: kind = "report_complete" }
+        switch target { case .home: kind = "test"; case .projectHome: kind = "todo_created"; case .inbox: kind = "decision"; case .team: kind = "error"; default: kind = "report_complete" }
         return try XCTUnwrap(NotificationLink.parse(metadata: JSONEncoder().encode(PushNotificationMetadata(
             v: 1, serverId: server, eventId: event, kind: kind, target: target))))
     }
+
+    func testTodoTapValidatesProjectAndOpensItsHomeWithoutWriting() async throws {
+        for id in ["q", "a", "missing", "wrong-state"] {
+            let server = ManagementNavigationServer()
+            server.change { $0.target = .projectHome(projectId: id) }
+            let network = try IsolatedTestNetwork { request in
+                if request.url?.path == "/api/projects/wrong-state/state" {
+                    return try server.reply(ProjectState(project: Project(id: "q")))
+                }
+                return try server.handle(request)
+            }
+            let store = await connect(network), router = Router(destination: .chat), inbox = NotificationInbox()
+            defer { store.disconnect() }
+            inbox.receive(try link(.projectHome(projectId: id)), tapped: true)
+            await store.processNotifications(router: router, inbox: inbox)
+            router.resetForProjectChange()
+            XCTAssertEqual(router.destination, .home)
+            XCTAssertEqual(store.selectedProjectID, id == "q" ? "q" : "p")
+            XCTAssertEqual(store.state?.project.id, id == "q" ? "q" : "p")
+            XCTAssertNil(router.decisionID); XCTAssertNil(router.terminalMemberID)
+            if id != "q" { XCTAssertNotNil(store.notificationNotice) }
+            XCTAssertTrue(network.requests.allSatisfy { $0.httpMethod == "GET" })
+            await network.close()
+        }
+    }
+
+    func testBlockedReportTapOpensOriginalChatWithoutAnswerOrInput() async throws {
+        let server = ManagementNavigationServer()
+        let target = PushTarget.chat(projectId: "q", memberId: "m", messageId: "old")
+        server.change { $0.target = target }
+        let network = try IsolatedTestNetwork(handler: server.handle), store = await connect(network)
+        defer { store.disconnect() }
+        let inbox = NotificationInbox(), router = Router()
+        let notification = try XCTUnwrap(NotificationLink.parse(metadata: JSONEncoder().encode(PushNotificationMetadata(
+            v: 1, serverId: ManagementNavigationServer.serverID, eventId: UUID().uuidString,
+            kind: "report_blocked", target: target))))
+        inbox.receive(notification, tapped: true)
+        await store.processNotifications(router: router, inbox: inbox)
+        router.resetForProjectChange()
+        XCTAssertEqual(store.selectedProjectID, "q"); XCTAssertEqual(router.destination, .chat)
+        XCTAssertEqual(router.chatTarget, "m"); XCTAssertEqual(router.chatMessageID, "old")
+        XCTAssertTrue(network.requests.allSatisfy { $0.httpMethod == "GET" })
+        await network.close()
+    }
+
     func testColdStartTapAppliesOnlyAfterProjectResetAndOnlyOneWindowConsumes() async throws {
         let server = ManagementNavigationServer(), network = try IsolatedTestNetwork { try server.handle($0) }
         let inbox = NotificationInbox(), first = Router(), second = Router()

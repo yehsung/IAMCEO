@@ -11,20 +11,20 @@ private actor TestRealtimeClock: RealtimeClock {
 
 private actor TestRealtimeSocket: RealtimeTransport {
     var queue: [Data] = []
-    var waiter: CheckedContinuation<Data, Error>?
+    var waiter: TestDeadlineContinuation<Data, Error>?
     var closed = false
     var closes = 0
     var receives = 0
     var concurrent = 0
     var maximumConcurrent = 0
     var holdClose = false
-    var closeWaiter: CheckedContinuation<Void, Never>?
+    var closeWaiter: TestDeadlineContinuation<Void, Never>?
     func receive() async throws -> Data {
         receives += 1; concurrent += 1; maximumConcurrent = max(maximumConcurrent, concurrent)
         defer { concurrent -= 1 }
         if closed { throw CancellationError() }
         if !queue.isEmpty { return queue.removeFirst() }
-        return try await withCheckedThrowingContinuation { waiter = $0 }
+        return try await withThrowingTestDeadline { waiter = $0 }
     }
     func send(_ text: String) { send(Data(text.utf8)) }
     func send(_ data: Data) {
@@ -36,7 +36,7 @@ private actor TestRealtimeSocket: RealtimeTransport {
     func close() async {
         closes += 1; closed = true
         waiter?.resume(throwing: CancellationError()); waiter = nil
-        if holdClose { await withCheckedContinuation { closeWaiter = $0 } }
+        if holdClose { await withTestDeadline(fallback: ()) { closeWaiter = $0 } }
     }
 }
 
@@ -50,9 +50,9 @@ private actor TestRealtimeFactory: RealtimeTransportFactory {
 
 private actor DelayedRealtimeFactory: RealtimeTransportFactory {
     let socket = TestRealtimeSocket()
-    var waiter: CheckedContinuation<Void, Never>?
+    var waiter: TestDeadlineContinuation<Void, Never>?
     func connect(request: URLRequest) async -> any RealtimeTransport {
-        await withCheckedContinuation { waiter = $0 }
+        await withTestDeadline(fallback: ()) { waiter = $0 }
         return socket
     }
     func release() { waiter?.resume(); waiter = nil }

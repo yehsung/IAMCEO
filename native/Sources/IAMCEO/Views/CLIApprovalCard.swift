@@ -171,7 +171,7 @@ struct CLIApprovalCard: View {
         } catch {
             guard !Task.isCancelled, namespace == store.writeNamespace else { return }
             prompt = nil; picked = nil
-            readError = "승인 창을 읽지 못했습니다: \(error.localizedDescription)"
+            readError = friendlyLoadError(error, what: "승인 창", verb: "읽지")
             loaded = true
         }
     }

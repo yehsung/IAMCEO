@@ -225,15 +225,17 @@ describe("report group deadlines", () => {
     const first = report(); f.advance(119_999); const last = report();
     const group = f.db.query<{ id: string }, []>("SELECT id FROM push_report_groups").get()!;
     f.enabled("cd");
-    await f.worker.tick(); expect(f.transport.requests).toHaveLength(0);
+    await f.worker.tick(); expect(f.transport.requests).toHaveLength(1);
+    expect(JSON.parse(f.transport.requests[0].body).iamceo.target.messageId).toBe(first.id);
     await f.restart(); f.advance(1); await f.worker.tick();
     expect(f.push.getReportGroup(group.id)).toMatchObject({ state: "closed", reportIds: [first.id, last.id], lastMessageId: last.id });
-    expect(f.push.listEvents()).toHaveLength(1);
+    expect(f.push.listEvents()).toHaveLength(2);
     expect(f.delivery()).toMatchObject({ state: "accepted", deviceId: original.id });
-    const payload = JSON.parse(f.transport.requests[0].body);
+    const payload = JSON.parse(f.transport.requests[1].body);
+    expect(payload.aps.alert.body).toBe("추가 완료 보고가 도착했습니다.");
     expect(payload.iamceo.target).toMatchObject({ messageId: last.id, groupId: group.id });
     await f.restart(); await f.worker.tick();
-    expect(f.transport.requests).toHaveLength(1); expect(f.push.listEvents()).toHaveLength(1);
+    expect(f.transport.requests).toHaveLength(2); expect(f.push.listEvents()).toHaveLength(2);
   });
   test("opt-out/re-enable never resurrects cancelled group recipients; late deadline beyond TTL sends nothing", async () => {
     const f = fixture(); const device = f.enabled();
@@ -247,7 +249,7 @@ describe("report group deadlines", () => {
     const g = fixture(); g.enabled();
     g.push.appendReport(g.store.createMessage({ projectId: g.project.id, memberId: g.member.id, kind: "완료" }));
     g.advance(120_000 + 3_600_000); await g.worker.tick();
-    expect(g.push.listEvents()).toHaveLength(1); expect(g.push.listDeliveries()).toHaveLength(0);
+    expect(g.push.listEvents()).toHaveLength(1); expect(g.push.listDeliveries().map(d => d.state)).toEqual(["expired"]);
   });
 });
 

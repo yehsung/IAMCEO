@@ -6,7 +6,7 @@ import { handleAgentTool, listAgentTools } from "../server/agent-tools.ts";
 import { Bus } from "../server/bus.ts";
 import { openDb } from "../server/db.ts";
 import type { Orchestrator } from "../server/orchestrator.ts";
-import type { AgentWorkflowService, ManualInboxService, ReportReferences } from "../server/service-contracts.ts";
+import type { AgentWorkflowService, DecisionFollowUp, ManualInboxService, ReportReferences } from "../server/service-contracts.ts";
 import { ApiError, Store } from "../server/store.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
@@ -67,6 +67,20 @@ describe("결재 후속 명시", () => {
     expect(seen[0]).toEqual([f.member, { id: decision.id, kind: "decided", reason: "대표가 정함", userQuote: "대표 원문", followUp: { kind: "instruction", memberId: f.member.id, text: "후속 실행", sourceMessageId: "msg_owner" } }]);
     await f.call("ask_close", { id: decision.id, kind: "obsolete", reason: "불필요", follow_up: { kind: "none" } });
     expect(seen[1]![1].followUp).toEqual({ kind: "none" });
+    expect(f.legacy().closes).toBe(0);
+  });
+
+  test("답한 결재 근거와 동일 안건 설명을 서비스 계약의 후속 출처로 넘긴다", async () => {
+    const f = fixture();
+    const decision = f.store.createDecision({ projectId: f.project.id, memberId: f.member.id, who: f.member.name, title: "결재" });
+    const seen: Parameters<AgentWorkflowService["closeDecision"]>[] = [];
+    f.host.closeDecision = async (...args) => { seen.push(args); return decision; };
+    const followUp: DecisionFollowUp = { kind: "instruction", memberId: f.member.id, text: "검증된 답의 후속", sourceDecisionId: "d_answered" };
+    const result = await f.call("ask_close", { id: decision.id, kind: "decided", reason: "같은 안건", answered_decision_id: "d_answered", same_issue: "같은 결제 범위",
+      follow_up: { kind: "instruction", member_id: f.member.id, text: followUp.text } });
+    expect(result.isError).toBeUndefined();
+    expect(seen).toEqual([[f.member, { id: decision.id, kind: "decided", reason: "같은 안건", userQuote: undefined,
+      answeredDecisionId: "d_answered", sameIssue: "같은 결제 범위", followUp }]]);
     expect(f.legacy().closes).toBe(0);
   });
 

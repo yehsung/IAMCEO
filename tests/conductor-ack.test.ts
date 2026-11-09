@@ -113,9 +113,9 @@ for (const postFirst of [true, false]) {
   test(`실제 post가 ${postFirst ? "배정 전" : "배정 후"} 있으면 재시작 후에도 시스템 줄을 남기지 않는다`, async () => {
     const f = fixture(); const w = f.member();
     await f.start();
-    if (postFirst) await f.tool("post", { kind: "진행", title: "알겠습니다. 검토 담당에게 맡기겠습니다" });
+    if (postFirst) await f.tool("post", { kind: "진행", title: `알겠습니다. ${w.name}에게 맡기겠습니다` });
     await f.tool("team_assign", { member: w.handle, text: "결제 확인" });
-    if (!postFirst) await f.tool("post", { kind: "진행", title: "알겠습니다. 검토 담당에게 맡겼습니다" });
+    if (!postFirst) await f.tool("post", { kind: "진행", title: `알겠습니다. ${w.name}에게 맡겼습니다` });
     await f.restart(); await f.end();
     expect(f.notices()).toHaveLength(0);
   });
@@ -161,7 +161,7 @@ for (const posted of [false, true]) {
   test(`대표 원문 재전달도 ${posted ? "기존 post" : "기존 시스템 안내"}와 중복되지 않는다`, async () => {
     const f = fixture(); const w = f.member();
     await f.start(); await f.tool("team_assign", { member: w.handle, text: "결제 검토" });
-    if (posted) await f.tool("post", { kind: "진행", title: "알겠습니다. 검토를 맡겼습니다" });
+    if (posted) await f.tool("post", { kind: "진행", title: `알겠습니다. ${w.name}에게 검토를 맡겼습니다` });
     await f.end();
     const expected = posted ? 0 : 1;
     expect(f.notices()).toHaveLength(expected);

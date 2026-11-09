@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Bus } from "../server/bus.ts";
 import { MIGRATIONS, openDb } from "../server/db.ts";
 import { Store } from "../server/store.ts";
+import { storedPushPreferences } from "../server/push/contracts.ts";
 import { DEFAULT_PUSH_PREFERENCES, PUSH_REPORT_GROUP_WINDOW_MS } from "../shared/push.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 import type { IsolatedRuntime } from "./fixtures/isolated-runtime.ts";
@@ -517,7 +518,9 @@ describe("persistence contracts", () => {
     insertDevice(db, "revoked-b");
     const device = db.query<{ enabled: number; preferences: string; revision: number; registration_generation: number }, []>("SELECT enabled,preferences,revision,registration_generation FROM push_devices WHERE id='device-a'").get()!;
     expect(device.enabled).toBe(0);
-    expect(JSON.parse(device.preferences)).toEqual(DEFAULT_PUSH_PREFERENCES);
+    // Raw migration defaults predate the new kinds; missing keys are not renewed consent.
+    expect(JSON.parse(device.preferences)).toEqual({ decision: true, approval_wait: true, error: true, report_complete: true });
+    expect(storedPushPreferences(device.preferences)).toEqual({ ...DEFAULT_PUSH_PREFERENCES, todo_created: false, report_blocked: false });
     expect(device.revision).toBe(1);
     expect(device.registration_generation).toBe(1);
     expect(() => insertDevice(db, "duplicate", "token")).toThrow();

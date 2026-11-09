@@ -76,7 +76,7 @@ private func officeDetail(_ member: Member) -> String {
     let now = plainOneLine(member.now)
     switch member.status {
     case "error":
-        if let error = member.lastError, !error.isEmpty { return plainOneLine(error) }
+        if let error = member.lastError, !error.isEmpty { return plainOneLine(friendlyError(error)) }
     case "idle", "asleep":
         return now.isEmpty ? (member.status == "idle" ? "맡은 일 없음" : "세션을 내려 두었습니다") : "마지막: \(now)"
     case "offline":
@@ -518,7 +518,7 @@ struct OfficeView: View {
             title += " · 전달 확인 \(summary.needsOwnerCount)건 · 상세에서 근거 확인"
         }
         title += "\n\(officeStateLabel(member)) · \(MemberStatusInfo(member).explanation)"
-        return due.map { "\(title)\n문맥 \($0)% — 터미널에서 /compact" } ?? title
+        return due.map { "\(title)\n문맥 \($0)% 사용 — 상세에서 '문맥 압축'" } ?? title
     }
 
     private func accessibilityText(_ member: Member, decisions: Int) -> String {
@@ -527,7 +527,7 @@ struct OfficeView: View {
         if let summary = store.deliverySummary(memberID: member.id), summary.needsOwnerCount > 0 {
             parts.append("전달 확인 \(summary.needsOwnerCount)건, 상세에서 근거 확인")
         }
-        if let due = contextDue(member) { parts.append("문맥 \(due)퍼센트, 터미널에서 compact") }
+        if let due = contextDue(member) { parts.append("문맥 \(due)퍼센트 사용, 상세에서 문맥 압축") }
         return parts.joined(separator: ", ")
     }
 
@@ -541,7 +541,7 @@ struct OfficeView: View {
 
     // MARK: Message box
 
-    /// Hovered (Mac), else selected; nil lets the box cycle through `boxQueue`.
+    /// Hovered (Mac), else selected; nil shows the first of `boxQueue`.
     private func boxSubject(_ list: [Member]) -> Member? {
         if let hovered, let member = list.first(where: { $0.id == hovered }) { return member }
         if let selected = router.memberID, let member = list.first(where: { $0.id == selected }) { return member }
@@ -801,8 +801,11 @@ private struct OfficeNameplate: View {
             if let member {
                 HStack(spacing: 5) {
                     dot(officeStateKey(member))
-                    Text(member.name).font(.system(size: 12, weight: .semibold)).foregroundStyle(away ? CE.ink2 : CE.ink)
-                        .lineLimit(1).truncationMode(.tail)
+                    // iPhone: four desks share a row, so a name may take two short lines rather than end in "…".
+                    Text(member.name).font(.system(size: isMac ? 12 : 11.5, weight: .semibold)).foregroundStyle(away ? CE.ink2 : CE.ink)
+                        .lineLimit(isMac ? 1 : 2).truncationMode(.tail)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
                     if member.kind != "worker", !member.name.contains(rankName(member.kind)) {
                         Text(rankName(member.kind)).font(.system(size: 10, weight: .bold)).foregroundStyle(CE.accent)
                             .padding(.horizontal, 4).padding(.vertical, 1)
@@ -812,20 +815,24 @@ private struct OfficeNameplate: View {
                 }
                 .opacity(away ? 0.78 : 1)
                 if let delivery, delivery.needsOwnerCount > 0 {
-                    ViewThatFits(in: .horizontal) {
-                        Text("전달 확인 \(DeliveryInfo.badgeCount(delivery.needsOwnerCount))")
-                            .font(.system(size: 10, weight: .bold)).foregroundStyle(CE.attention).fixedSize()
+                    if isMac {
+                        ViewThatFits(in: .horizontal) {
+                            Text("전달 확인 \(DeliveryInfo.badgeCount(delivery.needsOwnerCount))")
+                                .font(.system(size: 10, weight: .bold)).foregroundStyle(CE.attention).fixedSize()
+                            Image(systemName: "exclamationmark.circle").font(.system(size: 10, weight: .bold)).foregroundStyle(CE.attention)
+                        }
+                    } else {
                         Image(systemName: "exclamationmark.circle").font(.system(size: 10, weight: .bold)).foregroundStyle(CE.attention)
                     }
                 }
-                if counted { count }
+                if counted && isMac { count }
             } else {
                 Text("새 팀장 자리").font(.system(size: 12, weight: .semibold)).foregroundStyle(CE.ink3).lineLimit(1)
                     .opacity(0.78)
             }
         }
         // The count capsule sits as far in from the trailing edge as from the top and bottom.
-        .padding(.leading, 6).padding(.trailing, counted ? 3 : 6).padding(.vertical, 3)
+        .padding(.leading, 6).padding(.trailing, counted && isMac ? 3 : 6).padding(.vertical, 3)
         .background(Color(hex: 0x0E0A1F).opacity(away ? 0.25 : 0.5), in: shape)
         .overlay {
             if member == nil {
@@ -833,6 +840,9 @@ private struct OfficeNameplate: View {
             } else {
                 shape.strokeBorder(Color.white.opacity(away ? 0.04 : 0.09), lineWidth: 1)
             }
+        }
+        .overlay(alignment: .topTrailing) {
+            if counted && !isMac { count.offset(x: 5, y: -6) }
         }
     }
 
@@ -950,13 +960,10 @@ private struct OfficeMessageBox: View {
     let compactAt: Int
     let still: Bool
     let open: (String) -> Void
-    @State private var cycle = 0
 
-    private var member: Member? {
-        if let subject { return subject }
-        guard !queue.isEmpty else { return nil }
-        return queue[cycle % queue.count]
-    }
+    /// Hovered or selected, else whoever needs the CEO most. It does not rotate: a line that changes while it is
+    /// being read (every 6 s before) is worse than one that waits for a hover or a click.
+    private var member: Member? { subject ?? queue.first }
 
     var body: some View {
         let member = member
@@ -984,15 +991,6 @@ private struct OfficeMessageBox: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(member.map { "\($0.name), \(officeStateLabel($0)), \(line)" } ?? line)
         .accessibilityHint(member == nil ? "" : "대화방 정보 보기")
-        .task(id: still) {
-            // Cycle through who needs the CEO, then who is working (slower with Reduce Motion). The task outlives the
-            // struct it captured, so it never looks at `subject` or `queue` itself: `member` reads the current ones.
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(still ? 10 : 6))
-                if Task.isCancelled { return }
-                cycle &+= 1
-            }
-        }
     }
 
     @ViewBuilder private func content(_ member: Member?, line: String) -> some View {
@@ -1064,7 +1062,7 @@ private struct OfficeMessageBox: View {
     private func extras(count: Int, due: Int?, long: Bool) -> String? {
         var parts: [String] = []
         if count > 0 { parts.append("결재 \(count)건") }
-        if let due { parts.append(long ? "문맥 \(due)% — 터미널에서 /compact" : "문맥 \(due)%") }
+        if let due { parts.append(long ? "문맥 \(due)% 사용 · 압축 권장" : "문맥 \(due)%") }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }

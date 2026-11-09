@@ -1,7 +1,7 @@
 // 후속 웨이브가 주입할 서비스 포트. 현재 Store/Orchestrator/Runner에 implements를 강제하지 않는다.
 // 구현이 없는 포트는 capability=false/HTTP 501이며 성공 stub으로 대체하지 않는다.
 import type {
-  ArchiveMessagePage, ArchiveProjectState, CoreContextState, Decision, Delivery,
+  ArchiveMessagePage, ArchiveProjectState, CoreContextState, Decision, DecisionCloseFollowUp, Delivery,
   DeliveryNoticePage, DeliveryNoticePageOptions, DeliveryNotices, DeliveryRecoveryPhase,
   DeliveryRecoveryRequest, DeliveryRecoveryResult, Member, Message, MessagePage,
   MessagePageOptions, PatchProjectReq, Project,
@@ -87,9 +87,7 @@ export interface AgentOperationService {
   execute(member: Member, name: string, args: Record<string, unknown>, context: AgentOperationContext, signal?: AbortSignal): Promise<AgentToolResult>;
 }
 /** 후속 불필요도 명시한다. 필요한 후속은 닫기 원본과 함께 outbox transaction에 넣는다. */
-export type DecisionFollowUp =
-  | { kind: "none" }
-  | { kind: "instruction"; memberId: string; text: string; sourceMessageId: string };
+export type DecisionFollowUp = DecisionCloseFollowUp;
 export interface ReportReferences {
   sourceMessageId: string;
   fileIds: string[];
@@ -105,7 +103,7 @@ export interface BoardReview {
   completedAt: string | null;
 }
 export interface AgentWorkflowService {
-  closeDecision(member: Member, request: { id: string; kind: "decided" | "obsolete"; reason: string; userQuote?: string; followUp: DecisionFollowUp }): Promise<Decision>;
+  closeDecision(member: Member, request: { id: string; kind: "decided" | "obsolete"; reason: string; userQuote?: string; answeredDecisionId?: string; sameIssue?: string; followUp: DecisionFollowUp }): Promise<Decision>;
   reportReferences(projectId: string, messageId: string): ReportReferences;
 }
 export interface ContextCompactionService {

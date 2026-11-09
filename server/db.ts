@@ -628,6 +628,31 @@ export const MIGRATIONS: string[] = [
      ended INTEGER NOT NULL DEFAULT 0
    );
    CREATE INDEX delegation_ack_member ON delegation_ack_turns(member_id, ended);`,
+  // UX-T1: 직원·원문별 배정 확인과 정체 알림은 재시작해도 중복되지 않는다.
+  `ALTER TABLE members ADD COLUMN config_deferred_json TEXT;
+   ALTER TABLE delegation_ack_turns ADD COLUMN post_texts TEXT NOT NULL DEFAULT '[]';
+   CREATE TABLE delegation_ack_receipts (
+     member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+     source_id TEXT NOT NULL,
+     target_id TEXT NOT NULL,
+     PRIMARY KEY(member_id, source_id, target_id)
+   );
+   INSERT OR IGNORE INTO delegation_ack_receipts
+     SELECT t.member_id, s.value, json_extract(a.value, '$.memberId')
+     FROM delegation_ack_turns t, json_each(t.source_ids) s, json_each(t.assignments) a WHERE t.ended = 1;
+   CREATE TABLE delivery_stalls (
+     delivery_id TEXT PRIMARY KEY REFERENCES deliveries(id) ON DELETE CASCADE,
+     detected_at TEXT NOT NULL
+   );
+   CREATE TABLE decision_close_audit (
+     id INTEGER PRIMARY KEY,
+     decision_id TEXT NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+     answered_decision_id TEXT NOT NULL REFERENCES decisions(id),
+     actor_id TEXT NOT NULL,
+     same_issue TEXT,
+     answer_quote TEXT NOT NULL,
+     created_at TEXT NOT NULL
+   );`,
 ];
 
 export function openDb(path: string): Database {

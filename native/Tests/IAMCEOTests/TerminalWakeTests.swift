@@ -81,10 +81,10 @@ import XCTest
 
     func testDeadlineIncludesAnUnresponsiveResumeAndIgnoresItsLateSuccess() async throws {
         let wake = TerminalWake(), member = sleeping()
-        var reply: CheckedContinuation<String?, Never>?
+        var reply: TestDeadlineContinuation<String?, Never>?
         let task = Task {
             await wake.wake(memberID: member.id, timeout: .milliseconds(50), resume: {
-                await withCheckedContinuation { reply = $0 }
+                await withTestDeadline(fallback: nil) { reply = $0 }
             }, current: { member }, allowed: { true })
         }
         try await eventually { reply != nil }
@@ -98,10 +98,10 @@ import XCTest
     func testLiveTerminalOpensEvenWhenResumeReplyIsDelayed() async throws {
         let wake = TerminalWake()
         var member = sleeping()
-        var reply: CheckedContinuation<String?, Never>?
+        var reply: TestDeadlineContinuation<String?, Never>?
         let task = Task {
             await wake.wake(memberID: member.id, timeout: .seconds(2), resume: {
-                await withCheckedContinuation { reply = $0 }
+                await withTestDeadline(fallback: nil) { reply = $0 }
             }, current: { member }, allowed: { true })
         }
         try await eventually { reply != nil }

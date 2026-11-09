@@ -113,7 +113,7 @@ describe("domain recorder", () => {
   });
   test("only explicit member completion posts group; role is irrelevant", () => {
     const f = fixture(); f.enabled();
-    for (const kind of ["질문", "답변", "알림", "막힘"] as const) f.report(randomUUID(), f.member.id, f.project.id, kind);
+    for (const kind of ["질문", "답변", "알림"] as const) f.report(randomUUID(), f.member.id, f.project.id, kind);
     f.report("mine", f.member.id, f.project.id, "완료", true);
     const system = f.store.createMessage({ projectId: f.project.id, kind: "완료" }); f.recorder.message(system);
     f.transition({ status: "working" }); f.transition({ status: "idle" });
@@ -125,7 +125,7 @@ describe("domain recorder", () => {
   });
   test("only verified approval is an episode; ticks, context updates and restart do not repeat", () => {
     const f = fixture(true); f.enabled();
-    for (const blockedReason of [undefined, "setup", "status_unknown", "selection"] as const) f.transition({ status: "blocked", blockedReason });
+    for (const blockedReason of [undefined, "setup", "status_unknown"] as const) f.transition({ status: "blocked", blockedReason });
     expect(f.push.listEvents()).toEqual([]);
     const blocked = f.transition({ status: "blocked", blockedReason: "permission" });
     f.store.transaction(() => f.recorder.member(blocked, { ...blocked, contextPct: 20 }));
@@ -231,6 +231,21 @@ describe("domain recorder", () => {
 });
 
 describe("fixed report window", () => {
+  test("first report is immediate; multiple later reports produce one summary without replaying after restart", () => {
+    const f = fixture(true); f.enabled();
+    f.report("immediate");
+    expect(f.push.listEvents()).toHaveLength(1);
+    expect(f.push.listEvents()[0].target).toMatchObject({ messageId: "immediate" });
+    f.advance(30_000); f.report("additional-one");
+    f.advance(30_000); f.report("additional-two"); f.restart();
+    expect(f.push.listEvents()).toHaveLength(1);
+    f.advance(60_000); f.push.closeDueGroups(f.push.timestamp());
+    expect(f.push.listEvents()).toHaveLength(2);
+    expect(f.push.eventTarget(f.push.listEvents()[1].id)).toMatchObject({ target: { messageId: "additional-two" },
+      reportGroup: { reportIds: ["immediate", "additional-one", "additional-two"] } });
+    f.restart(); f.push.closeDueGroups(f.push.timestamp());
+    expect(f.push.listEvents()).toHaveLength(2);
+  });
   test("120-second deadline, ordered reports and last anchor survive DB reopen; exact boundary starts a new group", () => {
     const f = fixture(true); f.enabled();
     f.report("first");
@@ -239,14 +254,14 @@ describe("fixed report window", () => {
     expect(Date.parse(initial.closesAt) - Date.parse(initial.openedAt)).toBe(120_000);
     f.advance(119_999); f.report("second"); f.report("second"); f.restart();
     expect(f.push.getReportGroup(groupId)).toMatchObject({ closesAt: initial.closesAt, reportIds: ["first", "second"], lastMessageId: "second" });
-    f.push.closeDueGroups(f.push.timestamp()); expect(f.push.listEvents()).toEqual([]);
+    f.push.closeDueGroups(f.push.timestamp()); expect(f.push.listEvents()).toHaveLength(1);
     f.advance(1); f.report("third");
     f.push.closeDueGroups(f.push.timestamp()); f.restart(); f.push.closeDueGroups(f.push.timestamp());
-    expect(f.push.listEvents()).toHaveLength(1); expect(f.push.listDeliveries()).toHaveLength(1);
-    const saved = f.push.listEvents()[0];
+    expect(f.push.listEvents()).toHaveLength(3); expect(f.push.listDeliveries()).toHaveLength(3);
+    const saved = f.push.listEvents()[1];
     expect(f.push.eventTarget(saved.id)).toMatchObject({ target: { screen: "chat", groupId, messageId: "second" }, reportGroup: { reportIds: ["first", "second"] } });
     expect(f.db.query("SELECT COUNT(*) n FROM push_report_groups").get()).toEqual({ n: 2 });
-    f.advance(120_000); f.push.closeDueGroups(f.push.timestamp()); expect(f.push.listEvents()).toHaveLength(2);
+    f.advance(120_000); f.push.closeDueGroups(f.push.timestamp()); expect(f.push.listEvents()).toHaveLength(3);
   });
   test("first eligible recipients are fixed; opt-out/re-enable and later installs never backfill", () => {
     const f = fixture(); const a = f.enabled("aa"); const b = f.enabled("bb");
@@ -258,7 +273,7 @@ describe("fixed report window", () => {
     f.enabled("cc"); f.report("two"); f.advance(110_000); f.push.closeDueGroups(f.push.timestamp());
     expect(f.push.getReportGroup(id)?.recipients).toHaveLength(2);
     expect(f.push.getReportGroup(id)?.recipients[0].cancelledAt).not.toBeNull();
-    expect(f.push.listDeliveries().map((d) => d.deviceId)).toEqual([b.id]);
+    expect(f.push.listDeliveries(f.push.getReportGroup(id)!.eventId!).map((d) => d.deviceId)).toEqual([b.id]);
   });
   test("renewal retains group recipient, revocation cancels it permanently", () => {
     const f = fixture(); const current = f.enabled(); f.report("one");
@@ -271,7 +286,7 @@ describe("fixed report window", () => {
       bundleId: DEFAULT_PUSH_BUNDLE_ID, deviceToken: "ef", authorization: "authorized" });
     f.push.patchDevice(active.id, { expectedRevision: active.revision, enabled: true });
     f.advance(120_000); f.push.closeDueGroups(f.push.timestamp());
-    expect(f.push.listEvents()).toHaveLength(1);
+    expect(f.push.listEvents()).toHaveLength(2);
     expect(f.db.query("SELECT state FROM push_report_groups WHERE last_message_id='two'").get()).toEqual({ state: "cancelled" });
   });
   test("different project/member pairs are separate, and empty recipient snapshots stay empty", () => {
@@ -285,12 +300,14 @@ describe("fixed report window", () => {
     expect(f.push.listEvents()).toHaveLength(3); expect(f.push.listDeliveries()).toHaveLength(2);
   });
   test("domain and group writes roll back together; overdue restart respects notification TTL", () => {
-    const f = fixture(true); f.enabled(); f.report("one");
+    const f = fixture(true); f.enabled(); f.report("one"); f.report("two");
+    const leading = f.push.listEvents()[0];
     f.db.exec("CREATE TEMP TRIGGER fail_group BEFORE INSERT ON push_events BEGIN SELECT RAISE(ABORT,'group failure'); END");
     f.advance(120_000); expect(() => f.push.closeDueGroups(f.push.timestamp())).toThrow("group failure");
-    expect(f.db.query("SELECT state,event_id FROM push_report_groups").get()).toEqual({ state: "open", event_id: null });
+    expect(f.db.query("SELECT state,event_id FROM push_report_groups").get()).toEqual({ state: "open", event_id: leading.id });
     f.db.exec("DROP TRIGGER fail_group");
     f.advance(3_600_000); f.restart(); f.push.closeDueGroups(f.push.timestamp());
-    expect(f.push.listEvents()).toHaveLength(1); expect(f.push.listDeliveries()).toEqual([]);
+    expect(f.push.listEvents()).toHaveLength(2);
+    expect(f.push.listDeliveries(f.push.listEvents()[1].id)).toEqual([]);
   });
 });

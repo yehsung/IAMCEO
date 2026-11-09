@@ -107,14 +107,14 @@ final class WriteTestServer: @unchecked Sendable {
             if storeTerminalReceipt { receipts[id] = receipt }
             if let gate {
                 let entered = self.entered
-                lock.unlock(); entered?.fulfill(); gate.wait(); lock.lock()
+                lock.unlock(); entered?.fulfill(); XCTAssertEqual(gate.wait(timeout: .now() + 5), .success, "Fixture gate timed out"); lock.lock()
             }
             if dropTerminal { throw URLError(.timedOut) }
             return try reply(receipt)
         case "/api/uploads":
             if let gate {
                 let entered = self.entered
-                lock.unlock(); entered?.fulfill(); gate.wait(); lock.lock()
+                lock.unlock(); entered?.fulfill(); XCTAssertEqual(gate.wait(timeout: .now() + 5), .success, "Fixture gate timed out"); lock.lock()
             }
             return try reply(Attachment(id: "file", url: "/uploads/file"))
         default:

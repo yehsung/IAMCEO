@@ -40,7 +40,7 @@ final class ManagementNavigationServer: @unchecked Sendable {
         if path == blockedPath, let gate {
             self.gate = nil; blockedPath = nil
             let entered = entered
-            lock.unlock(); entered?.fulfill(); _ = gate.wait(timeout: .now() + 5); lock.lock()
+            lock.unlock(); entered?.fulfill(); XCTAssertEqual(gate.wait(timeout: .now() + 5), .success, "Fixture gate timed out"); lock.lock()
         }
         return response
     }
@@ -125,6 +125,8 @@ final class ManagementNavigationServer: @unchecked Sendable {
         let store = AppStore(session: network.session, persistCredentials: false, writeStorageURL: storage)
         store.endpoint = network.endpoint.url.absoluteString; store.accessCode = "fixture"
         await store.connect()
+        // This fixture's scenarios operate on p; first launch now correctly defaults to HQ.
+        await store.selectProject(id: "p")
         return store
     }
     func testRenamePreservesIdentityDraftHistoryAndManagementSheet() async throws {

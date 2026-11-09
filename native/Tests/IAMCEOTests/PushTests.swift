@@ -10,7 +10,7 @@ private actor MockPushAPI: PushService {
     var revocations = 0
     var failure: Int?
     var holdRegistration = false
-    var held: CheckedContinuation<Void, Never>?
+    var held: TestDeadlineContinuation<Void, Never>?
     init(_ serverID: String) { self.serverID = serverID }
     func setFailure(_ value: Int?) { failure = value }
     func setHoldRegistration() { holdRegistration = true }
@@ -26,7 +26,7 @@ private actor MockPushAPI: PushService {
     }
     func registerPushDevice(id: String, request: PushRegistrationRequest) async throws -> PushDevice {
         try check(); registrations.append(request)
-        if holdRegistration { await withCheckedContinuation { held = $0 } }
+        if holdRegistration { await withTestDeadline(fallback: ()) { held = $0 } }
         let old = devices[id]
         guard request.expectedRevision == old?.revision else { throw APIError(status: 409, message: "changed") }
         let device = PushDevice(id: id, platform: "ios", bundleId: PushContract.bundleID, environment: request.environment,
@@ -47,6 +47,8 @@ private actor MockPushAPI: PushService {
             if let value = preferences.approvalWait { current.approvalWait = value }
             if let value = preferences.error { current.error = value }
             if let value = preferences.reportComplete { current.reportComplete = value }
+            if let value = preferences.todoCreated { current.todoCreated = value }
+            if let value = preferences.reportBlocked { current.reportBlocked = value }
             device.preferences = current
         }
         device.revision = (device.revision ?? 0) + 1; devices[id] = device
@@ -76,11 +78,11 @@ private actor MockPushAPI: PushService {
     var cleared: [String] = []
     var synchronousToken: Data?
     var holdPermission = false
-    var permissionWaiter: CheckedContinuation<Void, Never>?
+    var permissionWaiter: TestDeadlineContinuation<Void, Never>?
     func settings() -> PushSystemSettings { reads += 1; return current }
     func requestAuthorization() async {
         prompts += 1
-        if holdPermission { await withCheckedContinuation { permissionWaiter = $0 } }
+        if holdPermission { await withTestDeadline(fallback: ()) { permissionWaiter = $0 } }
         current = PushSystemSettings(authorization: grant ? .authorized : .denied, alertsEnabled: grant, soundsEnabled: grant)
     }
     func releasePermission() { holdPermission = false; permissionWaiter?.resume(); permissionWaiter = nil }
@@ -123,7 +125,7 @@ final class PushTests: XCTestCase {
         XCTFail("Condition did not settle", file: file, line: line)
     }
 
-    func testExplicitOptInVariableLengthHexAndFourDefaults() async throws {
+    func testExplicitOptInVariableLengthHexAndSixDefaults() async throws {
         let api = MockPushAPI(server); let os = MockPushOS()
         let service = PushNotificationService(provider: os, environment: .sandbox, defaults: nil)
         service.setHost(try host(api))
@@ -138,6 +140,7 @@ final class PushTests: XCTestCase {
         let device = try await api.pushDevice(id: service.installationID)
         XCTAssertEqual(device.preferences, PushPreferences())
         XCTAssertTrue(device.preferences?.reportComplete == true)
+        XCTAssertTrue(device.preferences?.todoCreated == true); XCTAssertTrue(device.preferences?.reportBlocked == true)
         XCTAssertEqual(device.bundleId, "com.yehsung.iamceo")
         XCTAssertEqual(service.systemSettings?.soundsEnabled, true)
     }
@@ -249,6 +252,28 @@ final class PushTests: XCTestCase {
         await api.setFailure(404); service.setHost(try host(api)); await service.enable()
         XCTAssertEqual(service.state, .unsupported)
         XCTAssertEqual(service.settingsStore.error, .unsupported)
+    }
+
+
+    func testNewPreferencesPatchOnlyOneKindAndTokenReregistrationPreservesChoices() async throws {
+        let api = MockPushAPI(server), store = PushSettingsStore()
+        store.setHost(try host(api))
+        let id = UUID().uuidString
+        await api.seed(PushDevice(id: id, enabled: false, authorization: .authorized,
+            preferences: PushPreferences(), state: .active, revision: 1))
+        try await store.refresh()
+        _ = try await store.patch(id: id, preferences: PushPreferencesPatch(todoCreated: false))
+        _ = try await store.patch(id: id, preferences: PushPreferencesPatch(reportBlocked: false))
+        let patches = await api.patches
+        for (index, key) in ["todo_created", "report_blocked"].enumerated() {
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(patches[index])) as? [String: Any])
+            XCTAssertEqual(json["preferences"] as? [String: Bool], [key: false])
+            XCTAssertNil(json["enabled"])
+        }
+        let updated = try await api.registerPushDevice(id: id, request: PushRegistrationRequest(
+            expectedRevision: 3, environment: .sandbox, deviceToken: "00", authorization: .authorized))
+        XCTAssertEqual(updated.enabled, false)
+        XCTAssertEqual(updated.preferences, PushPreferences(todoCreated: false, reportBlocked: false))
     }
 
     func testSettingsPartialPatchConflictAndTestReceipt() async throws {

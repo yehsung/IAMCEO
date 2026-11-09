@@ -52,7 +52,8 @@ struct NotificationLink: Sendable, Equatable {
               value.v == 1, uuid(value.serverId), uuid(value.eventId),
               let targetObject = object["target"] as? [String: Any], valid(value.target, keys: Set(targetObject.keys)) else { return nil }
         switch (value.kind, value.target) {
-        case ("test", .home), ("decision", .inbox), ("approval_wait", .team), ("error", .team), ("report_complete", .chat): break
+        case ("test", .home), ("decision", .inbox), ("approval_wait", .team), ("error", .team), ("report_complete", .chat),
+             ("todo_created", .projectHome), ("report_blocked", .chat): break
         default: return nil
         }
         return NotificationLink(serverID: value.serverId, eventID: value.eventId, kind: value.kind, target: value.target)
@@ -61,6 +62,7 @@ struct NotificationLink: Sendable, Equatable {
     private static func valid(_ target: PushTarget, keys: Set<String>) -> Bool {
         switch target {
         case .home: return keys == ["screen"]
+        case .projectHome(let project): return keys == ["screen", "projectId"] && identifier(project)
         case .inbox(let project, let decision):
             return keys == ["screen", "projectId", "decisionId"] && identifier(project) && identifier(decision)
         case .team(let project, let member):

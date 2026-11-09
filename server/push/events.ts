@@ -11,7 +11,7 @@ export function pushErrorDigest(error: string | null): string | null {
 }
 type ApprovalState = Pick<Member, "status" | "blockedReason"> & Partial<Pick<Member, "statusObservation">>;
 export function isPushApproval(member: ApprovalState): boolean {
-  return member.status === "blocked" && (member.blockedReason === "permission" ||
+  return member.status === "blocked" && (member.blockedReason === "permission" || member.blockedReason === "selection" ||
     (member.blockedReason === "setup" && member.statusObservation?.source === "core" && member.statusObservation.error?.code === "folder_trust"));
 }
 function baseline(member: ApprovalState & Pick<Member, "id" | "lastError">): PushEpisode {
@@ -48,9 +48,11 @@ export class PushEventRecorder implements DomainRecorder {
     });
   }
   message(message: Message): void {
-    if (message.mine || !message.memberId || message.kind !== "완료") return;
+    if (message.mine || !message.memberId || (message.kind !== "완료" && message.kind !== "막힘")) return;
     this.requireDomainTransaction();
-    this.push.appendReport(message);
+    if (message.kind === "완료") this.push.appendReport(message);
+    else this.push.recordEvent({ sourceKey: `report-blocked:${message.id}`, kind: "report_blocked", projectId: message.projectId,
+      memberId: message.memberId, target: { screen: "chat", projectId: message.projectId, memberId: message.memberId, messageId: message.id }, occurredAt: this.push.timestamp() });
   }
   member(before: Member, after: Member): void {
     this.requireDomainTransaction();

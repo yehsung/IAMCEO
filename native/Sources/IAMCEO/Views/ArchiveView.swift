@@ -41,7 +41,7 @@ struct ArchiveLibraryView: View {
                 Task {
                     await store.selectArchivedProject(id: project.id)
                     guard store.isArchive, store.selectedProjectID == project.id else { return }
-                    router.go(.home); router.showSettings = false; dismiss()
+                    router.showInMainWindow(.home); dismiss()
                 }
             } label: {
                 HStack(spacing: 11) {

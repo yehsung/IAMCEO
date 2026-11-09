@@ -55,6 +55,28 @@ actor APIClient {
         }
     }
 
+    /// These independent read-only checks run together; navigation is still owned by the Router token.
+    func notificationContext(target: PushTarget) async throws -> NotificationContext {
+        let projectID: String
+        switch target {
+        case .inbox(let project, _), .team(let project, _), .chat(let project, _, _, _): projectID = project
+        case .projectHome(let project): projectID = project
+        case .home: return NotificationContext()
+        case .unknown: throw SubmissionError.mismatchedResult
+        }
+        async let snapshot: ProjectState = request("/api/projects/\(Self.segment(projectID))/state")
+        var context = NotificationContext()
+        switch target {
+        case .inbox(_, let id): context.decision = try await request("/api/decisions/\(Self.segment(id))")
+        case .chat(_, _, let id, _):
+            do { context.messages = try await messagesAround(projectID: projectID, messageID: id, limit: 41) }
+            catch let error as APIError where error.status == 404 { context.missingReport = true }
+        default: break
+        }
+        context.state = try await snapshot
+        return context
+    }
+
     func request<T: Decodable & Sendable>(_ path: String, method: String = "GET", body: Data? = nil, timeout: TimeInterval? = nil, ifMatch: Int? = nil, contractVersion: Int? = nil) async throws -> T {
         let (data, _) = try await raw(path, method: method, body: body, contentType: body == nil ? nil : "application/json", timeout: timeout, ifMatch: ifMatch, contractVersion: contractVersion)
         do { return try JSONDecoder().decode(T.self, from: data) }
@@ -406,4 +428,11 @@ extension APIClient {
     func cloneJob(_ id: String) async throws -> GitHubCloneJob {
         try await request("/api/github/clone/\(Self.segment(id))")
     }
+}
+
+struct NotificationContext: Sendable {
+    var state: ProjectState?
+    var decision: Decision?
+    var messages: [Message] = []
+    var missingReport = false
 }

@@ -33,6 +33,19 @@ struct HomeView: View {
     /// The shared content column (`ceContentColumn`): 880 wide including the gutters, as the web .shell__column.
     private static let columnWidth: CGFloat = 880
     private static let topDecisions = 3
+
+    /// A decision open for 6 hours or more: it is probably holding someone's work.
+    static func waitedLong(_ decision: Decision, now: Date = Date()) -> Bool {
+        guard let created = parseISODate(decision.createdAt) else { return false }
+        return now.timeIntervalSince(created) >= 6 * 3600
+    }
+
+    /// "9시간째" / "2일째" for a card that has waited long, nil otherwise.
+    static func waitedLabel(_ decision: Decision, now: Date = Date()) -> String? {
+        guard waitedLong(decision, now: now), let created = parseISODate(decision.createdAt) else { return nil }
+        let hours = Int(now.timeIntervalSince(created) / 3600)
+        return hours >= 48 ? "\(hours / 24)일째 기다림" : "\(hours)시간째 기다림"
+    }
     private static let topMembers = 5
     /// Web TOP_WORK: up to five work rows.
     private static let topNextWork = 5
@@ -459,8 +472,10 @@ struct HomeView: View {
         if attention.unassigned > 0 { rows.append(.unassigned(attention.unassigned)) }
         rows += attention.failedMessages.map(HomeTurnRow.failedMessage)
         let open = openDecisions
-        rows += open.prefix(Self.topDecisions).map(HomeTurnRow.decision)
-        if open.count > Self.topDecisions { rows.append(.moreDecisions(open.count - Self.topDecisions)) }
+        // Newest first (the owner's choice), but a card that has waited long never hides behind "n건 더".
+        let shown = open.prefix(Self.topDecisions) + open.dropFirst(Self.topDecisions).filter { Self.waitedLong($0) }
+        rows += shown.map(HomeTurnRow.decision)
+        if open.count > shown.count { rows.append(.moreDecisions(open.count - shown.count)) }
         let live = liveTodos
         rows += live.map(HomeTurnRow.todo)
         let waiting = !rows.isEmpty
@@ -508,7 +523,7 @@ struct HomeView: View {
                 // The existing retry endpoint schedules evidence collection and preserves recovery fences.
                 Button("다시 보내기") { Task { await store.resend(message) } }
                 .ceSecondaryButton().ceCompactControl()
-                .disabled(!store.uiCanWrite || store.pendingActions.contains { $0.hasPrefix("send:") })
+                .disabled(!store.uiCanWrite || store.isSending(projectID: message.projectId, targetMemberID: message.targetMemberId))
                 .help(store.isDemo ? Self.readOnlyHelp : "같은 글·대상·첨부의 전달 근거를 다시 확인합니다")
             }
         case .decision(let decision): decisionRow(decision)
@@ -549,7 +564,7 @@ struct HomeView: View {
     private func attentionRow(_ member: Member, delivery: MemberDeliverySummary?) -> some View {
         let info = MemberStatusInfo(member)
         let approval = info.tone == .approval
-        let error = member.status == "error" ? member.lastError : nil
+        let error = member.status == "error" ? member.lastError.map(friendlyError) : nil
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 HomeRowButton(bleedTrailing: !approval, action: { router.openMember(member.id) }) {
@@ -599,7 +614,10 @@ struct HomeView: View {
             turnLine("checkmark.seal", tint: CE.accent) {
                 Text(decision.title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
                     .lineSpacing(Self.rowTitleLeading).lineLimit(2).multilineTextAlignment(.leading)
-                HomeSub(text: [decision.who, relativeTime(decision.createdAt)].filter { !$0.isEmpty }.joined(separator: " · "))
+                HStack(spacing: 6) {
+                    HomeSub(text: [decision.who, relativeTime(decision.createdAt)].filter { !$0.isEmpty }.joined(separator: " · "))
+                    if let waited = Self.waitedLabel(decision) { Tag(waited, tone: .attention) }
+                }
             }
         }
         .accessibilityElement(children: .combine)
@@ -821,7 +839,7 @@ struct HomeView: View {
     /// HQ's single AI with its state label.
     private func memberRow(_ member: Member, showsState: Bool = false) -> some View {
         let info = MemberStatusInfo(member)
-        let error = member.lastError.flatMap { $0.isEmpty ? nil : $0 }
+        let error = member.lastError.flatMap { $0.isEmpty ? nil : friendlyError($0) }
         let sub = member.status == "error" ? (error ?? info.label) : member.now.isEmpty ? "" : "마지막 보고 · \(member.now)"
         return HomeRowButton(action: { router.openMember(member.id) }) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {

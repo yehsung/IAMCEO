@@ -180,6 +180,11 @@ export interface Member {
   contextState?: CoreContextState | null;
 }
 
+/** 결재 답을 근거로 닫는 경우 후속 지시도 같은 검증된 답을 참조한다. */
+export type DecisionCloseFollowUp = { kind: "none" }
+  | { kind: "instruction"; memberId: string; text: string; sourceMessageId: string }
+  | { kind: "instruction"; memberId: string; text: string; sourceDecisionId: string };
+
 export interface DecisionOption { k: string; label: string; desc?: string }
 export type DecisionStatus = "open" | "answered" | "delivered" | "closed";
 export interface Decision {
@@ -275,6 +280,8 @@ export interface Message {
   /** 대표 말의 전달 상태: sent 보냄 · queued 대기 · held 보류(사유) · delivered 받음 · failed 실패 */
   delivery: DeliveryStatus | null;
   deliveryNote: string | null;
+  /** 이 메시지의 아직 끝나지 않은 전달별 상태. 기존 delivery·deliveryNote는 유지한다. */
+  deliveryInfo?: (DeliveryWaitInfo & { deliveryId: string; memberId: string })[];
 }
 
 export type MessageScope = { kind: "project" } | { kind: "member"; memberId: string };
@@ -303,6 +310,14 @@ export interface FileDoc {
   attachments: Attachment[];
   createdAt: string;
   order: number;
+}
+
+/** 대기 중인 동안의 연속 대기 시작 시각. runLimit은 run_limit일 때만 있다. */
+export type DeliveryWaitReason = "run_limit" | "member_busy" | "waking" | "receipt_check" | "approval" | "manual_control" | "runner_off" | "archived" | "unknown";
+export interface DeliveryWaitInfo {
+  waitReason: DeliveryWaitReason;
+  waitingSince: string;
+  runLimit?: { used: number; limit: number };
 }
 
 export type DeliveryKind = "user_message" | "answer" | "todo_done" | "instruction" | "report" | "system" | "compact";
@@ -351,14 +366,28 @@ export interface MemberDeliverySummary {
   waitingBehindCount: number;
   oldestAt: string | null;
   reasons: { code: string; count: number; note: string }[];
+  waitReason?: DeliveryWaitReason | null;
+  waitingSince?: string | null;
+  runLimit?: { used: number; limit: number };
+  waitReasons?: (DeliveryWaitInfo & { count: number })[];
+}
+export interface MissingReportNotice {
+  kind: "missing_report";
+  runId: string;
+  memberId: string;
+  messageId: string;
+  createdAt: string;
+  title: "결과 보고 누락";
 }
 export interface DeliveryNotices {
   version: 2;
+  /** 보고 보완 뒤에도 결과가 없는 실행. 원래 업무의 재실행을 뜻하지 않는다. */
+  reportNotices?: MissingReportNotice[];
   /** state.members와 같은 순서, 0건도 포함. 최근 메시지가 아닌 전체 DB 집계. */
   members: MemberDeliverySummary[];
   unassigned: { undeliveredCount: number; unknownCount: number; needsOwnerCount: number };
 }
-export interface DeliveryNoticeItem {
+export interface DeliveryNoticeItem extends Partial<DeliveryWaitInfo> {
   id: string;
   deliveryId: string | null;
   messageId: string | null;

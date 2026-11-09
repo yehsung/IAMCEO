@@ -364,9 +364,9 @@ describe("기동", () => {
     const t = await setup();
     t.runner.failStarts = 1;
     const m = await t.orch.sendUserMessage(t.project.id, { id: "m_first", text: "첫 말" });
-    expect(m.delivery).toBe("held");
-    expect(m.deliveryNote).toContain("실행기");
-    expect(t.store.listMembers(t.project.id)).toHaveLength(0);
+    await until(() => t.store.requireMessage(m.id).delivery === "held", "기동 실패 보류");
+    expect(t.store.requireMessage(m.id).deliveryNote).toContain("실행기");
+    expect(t.store.listMembers(t.project.id)).toHaveLength(1); // 접수한 전달 의도와 수신자를 유지한다.
     await t.orch.startConductor(t.project.id);
     await until(() => t.runner.sent.length === 1, "전달");
     expect(t.runner.sent[0]!.text).toContain("첫 말");
@@ -392,7 +392,8 @@ describe("기동", () => {
     const t = await setup();
     const d = t.store.createDecision({ projectId: t.project.id, who: "옛 총괄", title: "질문A", options: [{ k: "a", label: "가" }] });
     const answered = await t.orch.answerDecision(d.id, { choice: "a" });
-    expect(answered.status).toBe("delivered");
+    expect(["answered", "delivered"]).toContain(answered.status);
+    await until(() => t.store.requireDecision(d.id).status === "delivered", "결재 답 전달");
     expect(t.runner.sent.at(-1)!.text).toContain("질문A");
   });
 
@@ -957,7 +958,7 @@ describe("2차 검수 회귀: 입력 위조", () => {
     t.store.db.run("UPDATE members SET name = '총괄', handle = 'lead' WHERE id = ?", [w.id]);
     t.runner.autoBusy = false;
     const m = await t.orch.sendUserMessage(t.project.id, { text: "시작" });
-    expect(m.delivery).toBe("delivered");
+    await until(() => t.store.requireMessage(m.id).delivery === "delivered", "대표 말 전달");
     const lead = t.store.getConductor(t.project.id)!;
     expect(lead).toMatchObject({ kind: "conductor", name: "시험 총괄", handle: "lead-2" });
   });

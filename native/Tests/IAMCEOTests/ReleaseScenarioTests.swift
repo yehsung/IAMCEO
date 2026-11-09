@@ -83,7 +83,9 @@ private final class ReleaseHost {
             let terminateDeadline = Date().addingTimeInterval(1)
             while process.isRunning && Date() < terminateDeadline { Thread.sleep(forTimeInterval: 0.01) }
             if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-            process.waitUntilExit()
+            let killDeadline = Date().addingTimeInterval(2)
+            while process.isRunning && Date() < killDeadline { Thread.sleep(forTimeInterval: 0.01) }
+            XCTAssertFalse(process.isRunning, "Owned fixture did not exit after SIGKILL")
         }
         try? output.fileHandleForReading.close()
         try? FileManager.default.removeItem(at: root)

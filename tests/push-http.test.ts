@@ -9,7 +9,8 @@ import { PushEventRecorder } from "../server/push/events.ts";
 import { createPushHandler } from "../server/push/routes.ts";
 import { PushStore } from "../server/push/store.ts";
 import { Store } from "../server/store.ts";
-import { DEFAULT_PUSH_BUNDLE_ID, DEFAULT_PUSH_PREFERENCES } from "../shared/push.ts";
+import { DEFAULT_PUSH_BUNDLE_ID } from "../shared/push.ts";
+import { DEFAULT_PUSH_PREFERENCES } from "../server/push/contracts.ts";
 import type { PushDevice, PushProviderStatus, PushTestResult } from "../shared/push.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
@@ -348,7 +349,7 @@ describe("Push test outbox and targets", () => {
     const second = f.store.createMessage({ projectId: project.id, memberId: member.id, kind: "완료", body: "비밀 보고 2", mine: false });
     f.advance(120_000);
     f.push.closeDueGroups(f.push.timestamp());
-    const reportEvent = f.push.listEvents().find((e) => e.kind === "report_complete")!;
+    const reportEvent = f.push.listEvents().find((e) => e.sourceKey.startsWith("report-group:"))!;
     const target = await read(f.request(`/api/push/events/${reportEvent.id}/target`));
     expect(target).toMatchObject({ target: { screen: "chat", messageId: second.id }, reportGroup: { reportIds: [report.id, second.id] } });
     for (let n = 0; n < 205; n++) f.store.createMessage({ projectId: project.id, kind: "나", body: `새 메시지 ${n}`, mine: true });

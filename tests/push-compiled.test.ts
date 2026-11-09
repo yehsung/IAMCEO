@@ -28,14 +28,14 @@ async function probe(root: string, port: number) {
   };
   const notification = (token: string, kind: APNsNotification["kind"] = "test"): APNsNotification => ({ environment: "sandbox", deviceToken: token,
     deliveryId: randomUUID(), eventId: randomUUID(), serverId: randomUUID(), kind, occurredAt: new Date(now).toISOString(), expiresAt: new Date(now + 300_000).toISOString(),
-    target: kind === "decision" ? { screen: "inbox", projectId: "p", decisionId: "d" } : kind === "report_complete" ? { screen: "chat", projectId: "p", memberId: "m", messageId: "msg" }
-      : kind === "test" ? { screen: "home" } : { screen: "team", projectId: "p", memberId: "m" } });
+    target: kind === "decision" ? { screen: "inbox", projectId: "p", decisionId: "d" } : (kind === "report_complete" || kind === "report_blocked") ? { screen: "chat", projectId: "p", memberId: "m", messageId: "msg" }
+      : kind === "todo_created" ? { screen: "home", projectId: "p" } : kind === "test" ? { screen: "home" } : { screen: "team", projectId: "p", memberId: "m" } });
   try {
     const outcomes: Record<string, unknown> = {};
     for (const token of ["aa", "bb", "cc", "dd", "ee", "ff", "ab", "ac"]) outcomes[token] = await makeClient().send(notification(token));
     outcomes.untrusted = await makeClient(false).send(notification("aa"));
     const sender = makeClient();
-    outcomes.kinds = await Promise.all((["decision", "approval_wait", "error", "report_complete"] as const).map(kind => sender.send(notification("aa", kind))));
+    outcomes.kinds = await Promise.all((["decision", "approval_wait", "error", "report_complete", "todo_created", "report_blocked"] as const).map(kind => sender.send(notification("aa", kind))));
     const expired = notification("aa"); expired.occurredAt = new Date(now - 300_001).toISOString(); expired.expiresAt = new Date(now - 1).toISOString();
     outcomes.expired = await sender.send(expired);
     // Persisted unknown must never turn into another POST after restart.
@@ -138,13 +138,13 @@ if (process.argv[2] === "--apns-probe") {
           expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
           const result = JSON.parse(stdout.split("\n").find(line => line.startsWith("W10:"))!.slice(4));
           for (const [token, state] of Object.entries({ aa: "accepted", bb: "invalid", cc: "unavailable", dd: "invalid", ee: "retry", ff: "retry", ab: "unknown", ac: "unknown", untrusted: "retry", expired: "expired" })) expect(result[token].state).toBe(state);
-          expect(result.kinds.map((r: { state: string }) => r.state)).toEqual(Array(4).fill("accepted"));
+          expect(result.kinds.map((r: { state: string }) => r.state)).toEqual(Array(6).fill("accepted"));
           expect(result.beforeRestart[0]).toMatchObject({ state: "unknown", attempts: 1 }); expect(result.afterRestart).toEqual(result.beforeRestart);
           expect(result.retry[0]).toMatchObject({ state: "retry", attempts: 1 }); expect(result.retryAfterRestart).toEqual(result.retry);
           expect(result.device.state).toBe("active");
           expect(result.staleDevice).toEqual({ state: "active", tokenPreserved: true });
           expect(result.staleDelivery[0].state).toBe("invalid");
-          const requests = received.slice(before); expect(requests).toHaveLength(15);
+          const requests = received.slice(before); expect(requests).toHaveLength(17);
           expect(requests.filter(r => r.headers[":path"] === "/3/device/ab")).toHaveLength(2);
           for (const request of requests) {
             expect(request.alpn).toBe("h2"); expect(request.headers["apns-topic"]).toBe("com.yehsung.iamceo");

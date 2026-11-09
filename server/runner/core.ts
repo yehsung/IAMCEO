@@ -27,7 +27,7 @@ export interface CoreCompactState {
   manualResolution?: { turn: number | null; unsettled: boolean };
 }
 export interface CoreRunnerDeps {
-  pollMs?: number; rpcTimeoutMs?: number; sendTimeoutMs?: number; compactTimeoutMs?: number;
+  pollMs?: number; pollConcurrency?: number; rpcTimeoutMs?: number; sendTimeoutMs?: number; compactTimeoutMs?: number;
   recoveryStore?: RunnerRecoveryStore;
   /** Synchronous transaction ports. A throw prevents external input. */
   repair?: { load(memberId: string, request: DeliveryRepair): DeliveryDispatch | null; prepare(memberId: string, request: DeliveryRepair, dispatch: DeliveryDispatch): boolean };
@@ -43,6 +43,7 @@ interface Track {
   epoch: number; endedTurn: number; completing: boolean; refresh: Promise<CoreTerminal> | null;
   nonce: string | null; bindingSince: string; binding: CodexBindingCursor | null; compact: CoreCompactState | null;
   dispatches: DeliveryDispatch[]; evidence: Map<string, DeliveryEvidenceCursor>; lastError: string | null;
+  nextPollAt: number; pollDelay: number;
   observedAt: string; failures: number; failure: string | null;
 }
 const REQUIRED_METHODS = ["terminal.run", "terminal.list", "terminal.get", "terminal.read", "terminal.send", "terminal.interrupt", "terminal.kill"];
@@ -94,7 +95,7 @@ export class CoreRunner implements Runner {
   private readonly sending = new Set<string>();
   private readonly starts = new Map<string, Promise<{ sessionId: string | null; paneId: string; rejoined?: boolean }>>();
   private timer: ReturnType<typeof setInterval> | null = null;
-  private polling = false;
+  private readonly polling = new Set<Track>();
   private closed = false;
   private methods = new Set<string>();
 
@@ -164,14 +165,14 @@ export class CoreRunner implements Runner {
     const launchedAt = launch?.memberId === member.id && launch.intent === "start" ? launch.createdAt : null;
     const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, status: null, statusKey: null, setupAttempted: null, setupError: null,
       epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, bindingSince: terminal.labels["iamceo.startedAt"] || launchedAt || new Date().toISOString(), binding: null, compact: null,
-      dispatches: [], evidence: new Map(), lastError: null, observedAt: new Date().toISOString(), failures: 0, failure: null };
+      dispatches: [], evidence: new Map(), lastError: null, nextPollAt: 0, pollDelay: this.pollMs, observedAt: new Date().toISOString(), failures: 0, failure: null };
     this.restore(track);
     this.tracks.set(member.id, track);
     await this.observe(track, terminal, true);
     this.event(track, { type: "pane", memberId: member.id, paneId: terminal.address });
     if (sessionId) this.event(track, { type: "session", memberId: member.id, sessionId });
     if (!this.timer) {
-      this.timer = setInterval(() => { void this.poll(); }, this.deps.pollMs ?? 1000);
+      this.timer = setInterval(() => { this.poll(); }, Math.min(this.pollMs, 250));
       this.timer.unref?.();
     }
     return track;
@@ -318,6 +319,7 @@ export class CoreRunner implements Runner {
   }
   private refresh(track: Track): Promise<CoreTerminal> {
     if (track.refresh) return track.refresh;
+    const startedAt = Date.now();
     const pending = (async () => {
       try {
         const terminal = await this.call<CoreTerminal>("terminal.get", { terminal: track.terminal.address });
@@ -334,7 +336,15 @@ export class CoreRunner implements Runner {
           observation: { source: "core", observedAt: track.observedAt, freshness: "stale", ownership: track.failure === "conflict" ? "conflict" : "unknown", consecutiveFailures: track.failures, error: { code: track.failure, note: "Core terminal observation failed; retry read-only inspection" } } });
         throw error;
       }
-    })().finally(() => { if (track.refresh === pending) track.refresh = null; });
+    })().finally(() => {
+      if (track.refresh === pending) track.refresh = null;
+      // A slow read is local to this employee, even when it eventually succeeds.
+      const completedAt = Date.now();
+      const delayed = track.failures > 0 || completedAt - startedAt >= this.pollMs;
+      track.pollDelay = delayed
+        ? Math.min(Math.max(this.pollMs, 30_000), track.pollDelay * 2) : this.pollMs;
+      track.nextPollAt = delayed ? completedAt + track.pollDelay : startedAt + this.pollMs;
+    });
     track.refresh = pending;
     return pending;
   }
@@ -343,20 +353,27 @@ export class CoreRunner implements Runner {
     return track ? { observedAt: track.observedAt, failures: track.failures, failure: track.failure, lastError: track.lastError, identity: this.identity(track), inputEpoch: track.epoch, setupError: track.setupError,
       turn: track.terminal.state === "live" ? track.terminal.turn ?? null : null, state: track.terminal.state === "live" ? track.terminal.status?.state ?? null : null } : null;
   }
-  private async poll(): Promise<void> {
-    if (this.polling || this.closed) return;
-    this.polling = true;
-    try {
-      await Promise.all([...this.tracks.values()].map(async (track) => {
-        try { await this.refresh(track); }
-        catch (error) {
-          // A socket outage is not proof a holder died. Reconnect next poll.
-          if (this.tracks.get(track.member.id) === track && error instanceof CoreError && error.kind === "not_found") {
-            await this.observe(track, { ...track.terminal, state: "finished", reason: "not_found" });
-          }
+  private get pollMs(): number { return Math.max(1, this.deps.pollMs ?? 1000); }
+  private poll(): void {
+    if (this.closed) return;
+    const limit = Math.max(1, Math.floor(this.deps.pollConcurrency ?? 4));
+    const active = new Set([...this.polling, ...[...this.tracks.values()].filter(track => track.refresh)]);
+    const now = Date.now();
+    const due = [...this.tracks.values()].filter(track => !track.refresh && !this.polling.has(track) && track.nextPollAt <= now)
+      .sort((a, b) => a.nextPollAt - b.nextPollAt);
+    for (const track of due) {
+      if (active.size >= limit) break;
+      active.add(track); this.polling.add(track);
+      void this.refresh(track).catch(async error => {
+        // A socket outage is not proof a holder died. Only not_found ends it.
+        if (!this.closed && this.tracks.get(track.member.id) === track && error instanceof CoreError && error.kind === "not_found") {
+          await this.observe(track, { ...track.terminal, state: "finished", reason: "not_found" });
         }
-      }));
-    } finally { this.polling = false; }
+      }).catch(() => undefined).finally(() => {
+        this.polling.delete(track);
+        this.poll();
+      });
+    }
   }
   isBusy(memberId: string): boolean {
     const track = this.tracks.get(memberId);

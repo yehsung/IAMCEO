@@ -758,7 +758,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       if (body.targetMemberId && store.getMember(body.targetMemberId)?.projectId !== id) {
         throw new ApiError(400, "이 프로젝트의 직원이 아닙니다");
       }
-      await requireReachable(id!, body.targetMemberId ?? null);
+      store.requireReachable(id!, body.targetMemberId ? store.getMember(body.targetMemberId) : null);
       for (const attachmentId of body.attachmentIds ?? []) {
         if (!store.getAttachment(attachmentId)) throw new ApiError(400, `없는 첨부입니다: ${attachmentId}`);
       }
@@ -786,7 +786,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       const duplicate = store.checkAnswer(id!, body);
       if (duplicate) return Response.json(duplicate);
       const decision = store.requireDecision(id!);
-      await requireReachable(decision.projectId, decision.memberId);
+      store.requireReachable(decision.projectId, decision.memberId ? store.getMember(decision.memberId) : null);
       const answered = await once(`decision:${id}`, () => orch.answerDecision(id!, body));
       // 동시에 온 다른 답이 앞 요청의 결과를 받아 가면 안 된다.
       store.checkAnswer(id!, body);

@@ -1,8 +1,9 @@
 import Foundation
 
 enum PushKind: String, SafeStringEnum {
-    case decision, approvalWait = "approval_wait", error, reportComplete = "report_complete", unknown
-    static var supported: [PushKind] { [.decision, .approvalWait, .error, .reportComplete] }
+    case decision, approvalWait = "approval_wait", error, reportComplete = "report_complete"
+    case todoCreated = "todo_created", reportBlocked = "report_blocked", unknown
+    static var supported: [PushKind] { [.decision, .approvalWait, .error, .reportComplete, .todoCreated, .reportBlocked] }
 }
 enum PushEnvironment: String, SafeStringEnum { case sandbox, production, unknown }
 enum PushAuthorization: String, SafeStringEnum {
@@ -28,9 +29,12 @@ struct PushPreferences: Codable, Sendable, Equatable {
     var approvalWait: Bool = true
     var error: Bool = true
     var reportComplete: Bool = true
+    var todoCreated: Bool = true
+    var reportBlocked: Bool = true
 
     private enum CodingKeys: String, CodingKey {
         case decision, approvalWait = "approval_wait", error, reportComplete = "report_complete"
+        case todoCreated = "todo_created", reportBlocked = "report_blocked"
     }
 }
 extension PushPreferences {
@@ -41,6 +45,8 @@ extension PushPreferences {
         approvalWait = try c.decodeIfPresent(Bool.self, forKey: .approvalWait) ?? false
         error = try c.decodeIfPresent(Bool.self, forKey: .error) ?? false
         reportComplete = try c.decodeIfPresent(Bool.self, forKey: .reportComplete) ?? false
+        todoCreated = try c.decodeIfPresent(Bool.self, forKey: .todoCreated) ?? false
+        reportBlocked = try c.decodeIfPresent(Bool.self, forKey: .reportBlocked) ?? false
     }
 }
 struct PushPreferencesPatch: Encodable, Sendable {
@@ -48,8 +54,11 @@ struct PushPreferencesPatch: Encodable, Sendable {
     var approvalWait: Bool? = nil
     var error: Bool? = nil
     var reportComplete: Bool? = nil
+    var todoCreated: Bool? = nil
+    var reportBlocked: Bool? = nil
     private enum CodingKeys: String, CodingKey {
         case decision, approvalWait = "approval_wait", error, reportComplete = "report_complete"
+        case todoCreated = "todo_created", reportBlocked = "report_blocked"
     }
 }
 
@@ -130,6 +139,7 @@ struct PushReportGroupReference: Codable, Sendable {
 
 enum PushTarget: Codable, Sendable, Equatable {
     case home
+    case projectHome(projectId: String)
     case inbox(projectId: String, decisionId: String)
     case team(projectId: String, memberId: String)
     case chat(projectId: String, memberId: String?, messageId: String, groupId: String? = nil)
@@ -139,7 +149,9 @@ enum PushTarget: Codable, Sendable, Equatable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decodeIfPresent(String.self, forKey: .screen) {
-        case "home": self = .home
+        case "home":
+            if c.contains(.projectId) { self = .projectHome(projectId: try c.decode(String.self, forKey: .projectId)) }
+            else { self = .home }
         case "inbox": self = .inbox(projectId: try c.decode(String.self, forKey: .projectId), decisionId: try c.decode(String.self, forKey: .decisionId))
         case "team": self = .team(projectId: try c.decode(String.self, forKey: .projectId), memberId: try c.decode(String.self, forKey: .memberId))
         case "chat": self = .chat(projectId: try c.decode(String.self, forKey: .projectId), memberId: try c.decodeIfPresent(String.self, forKey: .memberId), messageId: try c.decode(String.self, forKey: .messageId), groupId: try c.decodeIfPresent(String.self, forKey: .groupId))
@@ -150,6 +162,9 @@ enum PushTarget: Codable, Sendable, Equatable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .home: try c.encode("home", forKey: .screen)
+        case .projectHome(let projectId):
+            try c.encode("home", forKey: .screen)
+            try c.encode(projectId, forKey: .projectId)
         case .inbox(let projectId, let decisionId):
             try c.encode("inbox", forKey: .screen)
             try c.encode(projectId, forKey: .projectId)

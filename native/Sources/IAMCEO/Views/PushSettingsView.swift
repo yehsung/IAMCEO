@@ -614,6 +614,8 @@ private struct PushDeviceRow: View {
         preference("승인 창 앞 멈춤", value: device.preferences?.approvalWait, patch: { PushPreferencesPatch(approvalWait: $0) })
         preference("오류 멈춤", value: device.preferences?.error, patch: { PushPreferencesPatch(error: $0) })
         preference("완료 보고", value: device.preferences?.reportComplete, patch: { PushPreferencesPatch(reportComplete: $0) })
+        preference("대표 할 일 생김", value: device.preferences?.todoCreated, patch: { PushPreferencesPatch(todoCreated: $0) })
+        preference("막힘 보고", value: device.preferences?.reportBlocked, patch: { PushPreferencesPatch(reportBlocked: $0) })
     }
 
     private func preference(_ title: String, value: Bool?, patch: @escaping (Bool) -> PushPreferencesPatch) -> some View {

@@ -31,7 +31,7 @@ final class PresentationTests: XCTestCase {
             member.executionState = MemberExecutionState(runId: "run", inputReceivedAt: "2027-01-15T07:34:00Z", lastProgressAt: "2027-01-15T07:34:00Z")
             // Use a fixed baseline so the elapsed line can be asserted independently of wall time.
             let baseline = try XCTUnwrap(ISO8601DateFormatter().date(from: "2027-01-15T07:34:00Z"))
-            XCTAssertEqual(MemberStatusInfo.progressNote(member, now: baseline.addingTimeInterval(30 * 60)), "출력 없이 30분째 진행 중")
+            XCTAssertEqual(MemberStatusInfo.progressNote(member, now: baseline.addingTimeInterval(30 * 60)), "화면 출력 없이 30분째 진행 중")
             XCTAssertEqual(MemberStatusInfo(member).label, "일하는 중")
             XCTAssertTrue(MemberStatusInfo(member).live)
             XCTAssertFalse(MemberStatusInfo.isUncertain(member))
@@ -324,3 +324,54 @@ final class PresentationTests: XCTestCase {
     }
 }
 
+
+final class FriendlyErrorTests: XCTestCase {
+    func testKnownProviderErrorsBecomePlainKorean() {
+        XCTAssertTrue(friendlyError("Claude Code can't use your Claude subscription, usually because a payment is past due · Pay or renew").contains("결제"))
+        XCTAssertTrue(friendlyError("API Error: No response from API (waited 3m)").contains("응답하지 않습니다"))
+        XCTAssertTrue(friendlyError("codex가 사용 한도 오류로 종료했습니다 (exit 1)").contains("사용 한도"))
+        XCTAssertEqual(friendlyError("글을 넣었지만 턴이 시작되지 않았습니다"), "글을 넣었지만 일을 시작하지 않았습니다")
+        XCTAssertEqual(friendlyError("세션이 끝났습니다 (exit_code=2)"), "세션이 끝났습니다 (종료 코드 2)")
+    }
+
+    func testUnknownErrorsPassThrough() {
+        XCTAssertEqual(friendlyError("  알 수 없는 문제  "), "알 수 없는 문제")
+    }
+}
+
+final class FriendlyLoadErrorTests: XCTestCase {
+    func testStatusCodesAndNetworkErrorsBecomeActionableKorean() {
+        XCTAssertEqual(friendlyLoadError(APIError(status: 502, message: "Request failed (502).")),
+                       "서버 문제로 원본을 받지 못했습니다. 잠시 뒤 다시 시도해 주세요.")
+        XCTAssertEqual(friendlyLoadError(APIError(status: 404, message: "Request failed (404)."), what: "페이지"),
+                       "페이지가 서버에 없습니다. 지워졌거나 옮겨졌을 수 있습니다.")
+        XCTAssertEqual(friendlyLoadError(URLError(.networkConnectionLost), what: "자료", verb: "올리지"),
+                       "서버와 연결이 끊겨 자료를 올리지 못했습니다.")
+        XCTAssertEqual(friendlyLoadError(URLError(.timedOut), what: "승인 창", verb: "읽지"),
+                       "시간이 너무 오래 걸려 승인 창을 읽지 못했습니다. 다시 시도해 주세요.")
+        // A Korean message from the server is already for the CEO.
+        XCTAssertEqual(friendlyLoadError(APIError(status: 400, message: "보관한 프로젝트입니다")), "보관한 프로젝트입니다")
+        XCTAssertFalse(friendlyLoadError(APIError(status: 418, message: "I'm a teapot")).contains("teapot"))
+    }
+
+    func testParticlesFollowTheLastSyllable() {
+        XCTAssertEqual(objectParticle("원본"), "을"); XCTAssertEqual(objectParticle("페이지"), "를")
+        XCTAssertEqual(subjectParticle("첨부"), "가"); XCTAssertEqual(subjectParticle("파일"), "이")
+    }
+}
+
+final class WaitReasonLabelTests: XCTestCase {
+    func testReasonsReadPlainlyWithElapsedTime() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let tenMinutesAgo = ISO8601DateFormatter().string(from: now.addingTimeInterval(-600))
+        XCTAssertEqual(waitReasonLabel("run_limit", since: tenMinutesAgo, used: 4, limit: 4, now: now),
+                       "동시에 일하는 직원이 다 차서 차례를 기다리는 중(4/4) · 10분째")
+        XCTAssertEqual(waitReasonLabel("waking", now: now), "깨우는 중")
+        XCTAssertEqual(waitReasonLabel("member_busy", since: ISO8601DateFormatter().string(from: now.addingTimeInterval(-7300)), now: now),
+                       "지금 하던 일이 끝나면 전달 · 2시간째")
+        XCTAssertNil(waitReasonLabel(nil))
+        XCTAssertEqual(waitReasonLabel("something_new", now: now), "전달을 기다리는 중")
+        XCTAssertEqual(waitReasonTone("approval"), .attention)
+        XCTAssertEqual(waitReasonTone("member_busy"), .neutral)
+    }
+}

@@ -139,7 +139,7 @@ test("Codex never inherits Claude-specific rank models or staff settings", () =>
   expect(memberConfig({ kind: "conductor", cli: "codex", modelOverride: null, effortOverride: null }, { ...DEFAULT_RANKS, manager: { model: "opus", effort: "max" } })).toEqual({ model: null, effort: null });
 });
 
-test("idle model change resumes Claude explicitly while Codex change gets a fresh handoff", async () => {
+test("idle model change resumes the same Claude native session", async () => {
   const f = fixture();
   const member = await f.orch.createMember(f.project.id, { name: "개발자" });
   const updated = await f.orch.patchMemberConfig(member.id, { modelOverride: "sonnet" });
@@ -218,7 +218,9 @@ test("a failed new session after a successful stop is explicit for provider and 
     const member = await f.orch.createMember(f.project.id, { name: "개발자" });
     f.runner.startError = new Error("new launch failed");
     await expect(f.orch.patchMemberConfig(member.id, patch)).rejects.toThrow("new launch failed");
-    expect(f.store.requireMember(member.id)).toMatchObject({ status: "error", lastError: "새 세션 시작 실패: new launch failed" });
+    expect(f.store.requireMember(member.id)).toMatchObject("cli" in patch
+      ? { status: "error", lastError: "새 세션 시작 실패: new launch failed" }
+      : { status: "offline", lastError: "설정 적용 보류: new launch failed", sessionId: member.sessionId });
     expect(f.runner.stops).toEqual([member.id]);
   }
 });

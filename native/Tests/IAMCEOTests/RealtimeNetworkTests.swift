@@ -5,14 +5,14 @@ import XCTest
 /// A monotonic clock shared by the transport watchdog and the AppStore coordinator.
 actor CoordinatorClock: RealtimeClock {
     private var time: Duration = .zero
-    private var sleepers: [UUID: (Duration, CheckedContinuation<Void, Error>)] = [:]
+    private var sleepers: [UUID: (Duration, TestDeadlineContinuation<Void, Error>)] = [:]
     func now() -> Duration { time }
     func sleep(for duration: Duration) async throws {
         try Task.checkCancellation()
         guard duration > .zero else { return }
         let id = UUID(), deadline = time + duration
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+            try await withThrowingTestDeadline { continuation in
                 sleepers[id] = (deadline, continuation)
             }
         } onCancel: { Task { await self.cancel(id) } }
@@ -89,7 +89,7 @@ final class CoordinatorServer: @unchecked Sendable {
                 bootstrap: bootstrap, state: projectID.flatMap { missing ? nil : state($0) }, revisions: nil))
             if let gate {
                 self.gate = nil; let entered = self.entered
-                lock.unlock(); entered?.fulfill(); _ = gate.wait(timeout: .now() + 5); lock.lock()
+                lock.unlock(); entered?.fulfill(); XCTAssertEqual(gate.wait(timeout: .now() + 5), .success, "Fixture gate timed out"); lock.lock()
             }
             simultaneous -= 1
             return snapshot

@@ -213,6 +213,7 @@ describe("연결 상태", () => {
     const decision = t.store.createDecision({ projectId: t.project.id, who: "x", title: "고르세요", options: [{ k: "a", label: "에이" }] });
     expect((await t.api("POST", `/api/decisions/${decision.id}/answer`, { choice: "a" })).status).toBe(200);
     t.herdr.health = { ok: false, detail: "꺼짐" };
+    await t.orch.refreshConnection(); // 접수 API는 마지막 health 관측을 읽고 probe를 기다리지 않는다.
     expect((await t.api("POST", `/api/decisions/${decision.id}/answer`, { choice: "a" })).status).toBe(200);
     expect((await t.api("POST", `/api/projects/${t.project.id}/messages`, { text: "안녕" })).status).toBe(409);
   });

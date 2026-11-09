@@ -212,7 +212,7 @@ struct ProjectManageView: View {
             }
             Spacer(minLength: 8)
             quietLink("\(row.2.title)에서 확인", trailingChevron: true) {
-                Task { await store.selectProject(id: selection.projectID); router.go(row.2); dismiss() }
+                Task { await store.selectProject(id: selection.projectID); router.showInMainWindow(row.2); dismiss() }
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 11)
@@ -244,7 +244,7 @@ struct ProjectManageView: View {
         Task {
             await store.selectProject(id: selection.projectID)
             guard store.selectedProjectID == selection.projectID, !store.isArchive else { return }
-            router.go(.home); dismiss(); onOpen?()
+            router.showInMainWindow(.home); dismiss(); onOpen?()
         }
     }
 

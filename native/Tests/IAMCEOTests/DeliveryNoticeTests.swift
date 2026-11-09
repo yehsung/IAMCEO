@@ -47,7 +47,7 @@ private final class DeliveryNoticeServer: @unchecked Sendable {
             if let gate, !gateRecovery {
                 self.gate = nil
                 let entered = self.entered
-                lock.unlock(); entered?.fulfill(); _ = gate.wait(timeout: .now() + 5); lock.lock()
+                lock.unlock(); entered?.fulfill(); XCTAssertEqual(gate.wait(timeout: .now() + 5), .success, "Fixture gate timed out"); lock.lock()
             }
             return reply
         case "/api/deliveries/d/recovery":
@@ -67,7 +67,7 @@ private final class DeliveryNoticeServer: @unchecked Sendable {
             if let gate, gateRecovery {
                 self.gate = nil
                 let entered = self.entered
-                lock.unlock(); entered?.fulfill(); _ = gate.wait(timeout: .now() + 5); lock.lock()
+                lock.unlock(); entered?.fulfill(); XCTAssertEqual(gate.wait(timeout: .now() + 5), .success, "Fixture gate timed out"); lock.lock()
             }
             return IsolatedTestHTTPReply(status: action == "stop_retry" ? 200 : 202, data: reply.data)
         default: return try base.handle(request)

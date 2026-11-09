@@ -66,6 +66,7 @@ export class PushWorker {
       // A lease is a claim lock, never permission to repeat an uncertain POST.
       this.push.db.query(`UPDATE push_deliveries SET state='unknown',last_reason='lease_expired',finished_at=?,lease_until=NULL
         WHERE state='sending' AND (lease_until IS NULL OR lease_until<=?)`).run(this.timestamp(), this.timestamp());
+      this.push.recordTodoChanges();
       this.push.closeDueGroups(this.timestamp());
       this.push.sweep();
     });
@@ -114,7 +115,7 @@ export class PushWorker {
         if (!updated.changes) continue;
         return { ...row, attempts: row.attempts + 1, leaseUntil, notification: { environment,
           deviceToken: registration!.deviceToken!, deliveryId: row.id, eventId: row.eventId, serverId: this.push.serverId,
-          kind: event!.kind, target: event!.target, occurredAt: event!.occurredAt,
+          kind: event!.kind, target: event!.target, occurredAt: event!.occurredAt, reportSummary: event!.sourceKey.startsWith("report-group:"),
           expiresAt: new Date(Math.min(Date.parse(row.expiresAt), Date.parse(event!.expiresAt))).toISOString() } };
       }
       return null;

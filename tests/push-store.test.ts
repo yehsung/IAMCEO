@@ -7,7 +7,8 @@ import { MIGRATIONS, openDb } from "../server/db.ts";
 import { PushStore } from "../server/push/store.ts";
 import type { PushStoreOptions } from "../server/push/store.ts";
 import { ApiError } from "../server/store.ts";
-import { DEFAULT_PUSH_BUNDLE_ID, DEFAULT_PUSH_PREFERENCES } from "../shared/push.ts";
+import { DEFAULT_PUSH_BUNDLE_ID } from "../shared/push.ts";
+import { DEFAULT_PUSH_PREFERENCES } from "../server/push/contracts.ts";
 import type { PushEnvironment, RegisterPushDeviceRequest } from "../shared/push.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 import type { IsolatedRuntime } from "./fixtures/isolated-runtime.ts";
@@ -44,7 +45,7 @@ function testEvent(push: PushStore, key: string = randomUUID()) {
 }
 
 describe("PushStore registration", () => {
-  test("new device is disabled with all four defaults; DTOs never expose the token/generation", () => {
+  test("new device is disabled with all six defaults; DTOs never expose the token/generation", () => {
     const { push } = fixture();
     const device = push.registerDevice(randomUUID(), request("ABCD"));
     expect(device).toMatchObject({ enabled: false, revision: 1, state: "active", preferences: DEFAULT_PUSH_PREFERENCES });

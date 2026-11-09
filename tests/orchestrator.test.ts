@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ApprovalPrompt, Backend, Decision, DecisionOption, Delivery, Member, Project, Todo } from "../shared/types.ts";
@@ -90,10 +90,14 @@ async function setup(opts: { home?: string; directives?: string; timings?: Parti
   cleanups.push(async () => {
     if (!stopped) await stop();
   });
-  const calls = (): Call[] =>
-    existsSync(logPath)
-      ? readFileSync(logPath, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Call)
-      : [];
+  const calls = (): Call[] => {
+    if (!existsSync(logPath)) return [];
+    const log = readFileSync(logPath, "utf8");
+    // The fake process may have created the file or be appending its next JSONL record.
+    // Only newline-terminated records are complete; malformed complete records still fail.
+    const complete = log.slice(0, log.lastIndexOf("\n") + 1);
+    return complete ? complete.slice(0, -1).split("\n").map((line) => JSON.parse(line) as Call) : [];
+  };
   const starts = () => calls().filter((c) => c.event === "start");
   const project = store.createProject({ name: "시험 프로젝트", cwd: home });
   const member = (id: string) => store.requireMember(id);
@@ -164,7 +168,8 @@ describe("턴 왕복", () => {
     const sent = await t.orch.sendUserMessage(t.project.id, { id: "msgclient1", text: "안녕 @fake:text=첫답변" });
     const lead = t.store.getConductor(t.project.id)!;
     expect(lead.kind).toBe("conductor");
-    expect(sent.delivery).toBe("delivered");
+    expect(sent.delivery).toBe("queued");
+    await waitFor("원문 전달", () => t.store.requireMessage(sent.id).delivery === "delivered");
     await t.idle(lead.id);
 
     const first = t.starts()[0]!;
@@ -296,6 +301,22 @@ describe("턴 종료 처리", () => {
 });
 
 describe("대기열·동시 상한", () => {
+  test("가짜 CLI 로그는 쓰는 중인 끝줄만 기다리고 완성된 JSON 오류는 숨기지 않는다", async () => {
+    const t = await setup();
+    const logPath = join(t.home, "calls.jsonl");
+    expect(t.calls()).toEqual([]);
+    writeFileSync(logPath, "");
+    expect(t.calls()).toEqual([]);
+    const call: Call = { event: "start", pid: 1, at: 1, prompt: "시험", args: [], sessionFlag: null, resumeFlag: null };
+    writeFileSync(logPath, JSON.stringify(call));
+    expect(t.calls()).toEqual([]);
+    writeFileSync(logPath, `${JSON.stringify(call)}\n{`);
+    expect(t.calls()).toEqual([call]);
+    writeFileSync(logPath, `${JSON.stringify(call)}\n{\n`);
+    expect(() => t.calls()).toThrow(SyntaxError);
+    await t.close();
+  });
+
   test("일하는 중이면 대기열 위치를 알려 주고 쌓인 것을 한 글로 묶는다(wake=false 가 앞)", async () => {
     const t = await setup();
     const w = await worker(t);
@@ -646,6 +667,7 @@ describe("잠재우기·다시 열기", () => {
     await t.orch.assign(t.project.id, w.handle, { text: "@fake:hang" });
     await waitFor("일하는 중", () => t.member(w.id).status === "working" && t.starts().length === 1);
     const q = await t.orch.sendUserMessage(t.project.id, { text: "대기", targetMemberId: w.id });
+    await t.orch.pump(w.id);
     const d = t.store.createDecision({ projectId: t.project.id, memberId: w.id, who: "철수", title: "물음" });
     await t.orch.closeMember(w.id);
     expect(t.store.getMember(w.id)).toBeNull();
@@ -686,7 +708,8 @@ describe("ask", () => {
     expect(t.store.listPending(lead.id).some((d) => d.text.includes("대표에게 질문했습니다") && !d.wake)).toBe(true);
 
     const answered = await t.orch.answerDecision(decision.id, { choice: "a", note: "조심해서" });
-    expect(answered.status).toBe("delivered");
+    expect(["answered", "delivered"]).toContain(answered.status);
+    await waitFor("결재 수신", () => t.store.requireDecision(decision.id).status === "delivered");
     const turn = await waitFor("답 전달", () => t.starts().find((c) => c.prompt.includes("[대표 답(원문)")));
     expect(turn.prompt).toStartWith(`[대표 답(원문) '배포할까요'] "그렇게 하세요"(추천) 메모 "조심해서" #${decision.id}\n#iamceo_`);
     // 총괄에게는 wake=false 알림.
@@ -971,7 +994,8 @@ describe("전달 실패 사유(herdr 자리)", () => {
     const w = await ready(t);
     t.runner.results = [{ ok: false, reason, retryable: true }];
     const message = await t.orch.sendUserMessage(t.project.id, { text: "미확인", targetMemberId: w.id });
-    expect(message.delivery).toBe("held");
+    await t.orch.pump(w.id);
+    expect(t.store.requireMessage(message.id).delivery).toBe("held");
     expect(t.store.listPending(w.id)[0]!.holdReason).toBe("delivery_unknown");
     t.runner.emit({ type: "status", memberId: w.id, status: "idle" });
     await t.orch.pump(w.id);

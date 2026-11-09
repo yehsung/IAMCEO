@@ -123,6 +123,13 @@ struct FilesView: View {
         #endif
     }
 
+    #if os(iOS)
+    /// Shared phone-stack destination; the reader implementation remains private to this file.
+    static func phoneDetail(fileID: String) -> some View {
+        FileDetailScreen(fileID: fileID).ceStatusStrips()
+    }
+    #endif
+
     // MARK: States
 
     private var placeholder: some View {
@@ -502,6 +509,7 @@ private struct FileReaderContent: View {
     let file: FileDoc
     var framed = false
     @State private var copiedPath = false
+    @State private var copiedDocument = false
     /// The protected artifact preview once opened. The reader holds it so 크게 보기 can sit beside the title (web
     /// .afr-bar); it is only ever set together with the compiled block rule (see `ArtifactViewer.load`).
     @State private var artifact: LoadedArtifact?
@@ -607,15 +615,49 @@ private struct FileReaderContent: View {
                     Label("크게 보기", systemImage: "arrow.up.left.and.arrow.down.right")
                 }
                 .buttonStyle(ViewerButtonStyle())
-                .help("보호된 미리보기 · 스크립트와 외부 연결을 끈 채로 그렸습니다")
-                .accessibilityHint("보호된 미리보기를 크게 엽니다")
+                .help("이 페이지를 크게 엽니다")
+                .accessibilityHint("이 페이지를 크게 엽니다")
+                .offset(y: isMac ? -4 : -8)
+            } else if documentActions {
+                // A-76: a report goes on whole (to a message, a file, another app), in the same place 크게 보기 sits.
+                HStack(spacing: 6) {
+                    Button {
+                        copyToPasteboard(documentText)
+                        copiedDocument = true
+                        Task { try? await Task.sleep(for: .seconds(2)); copiedDocument = false }
+                    } label: { Text(copiedDocument ? "복사됨" : "복사") }
+                    .buttonStyle(ViewerButtonStyle())
+                    .help("문서 전체를 복사합니다")
+                    .accessibilityLabel(copiedDocument ? "문서를 복사했습니다" : "문서 전체 복사")
+                    #if os(iOS)
+                    ShareLink(item: documentText, subject: Text(documentTitle)) { Text("공유") }
+                        .buttonStyle(ViewerButtonStyle())
+                        .accessibilityLabel("문서 공유")
+                    #else
+                    SaveButton(attachment: nil, text: documentText, name: "\(documentFileName).md")
+                    #endif
+                }
                 .offset(y: isMac ? -4 : -8)
             }
         }
     }
 
-    /// Room beside the meta line and title for the 크게 보기 button (web padding-right 112).
-    private var enlargeReserve: CGFloat { isArtifact && artifact != nil ? 106 : 0 }
+    /// A document with text gets 복사 and 받기/공유 in the header.
+    private var documentActions: Bool { file.kind == "document" && !file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var documentTitle: String { file.title.isEmpty ? "제목 없는 자료" : file.title }
+    /// The whole document as written: its title as the heading, then the text (the body already repeats the title
+    /// when it starts with it).
+    private var documentText: String { markdownBody == file.body && !file.body.hasPrefix("# ") ? "# \(documentTitle)\n\n\(file.body)" : file.body }
+    private var documentFileName: String {
+        let cleaned = documentTitle.components(separatedBy: CharacterSet(charactersIn: "/\\:?%*|\"<>")).joined(separator: " ")
+        return String(cleaned.prefix(80)).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Room beside the meta line and title for the 크게 보기 button (web padding-right 112), or 복사 · 받기.
+    private var enlargeReserve: CGFloat {
+        if isArtifact && artifact != nil { return 106 }
+        return documentActions ? (isMac ? 118 : 112) : 0
+    }
 
     private var metaFont: Font { isMac ? .system(size: 13) : CEFont.secondary }
 
@@ -785,7 +827,7 @@ private struct FileReaderContent: View {
 
     private var emptyDetail: String {
         if store.isDemo { return "샘플 자료에는 원본 파일이 없습니다." }
-        if let path { return "실행 호스트의 원본 위치: \(path)" }
+        if let path { return "작업하는 컴퓨터의 원본 위치: \(path)" }
         return "올린 직원에게 원본을 다시 올려 달라고 요청할 수 있습니다."
     }
 
@@ -885,7 +927,9 @@ private struct RawTextSource<Content: View>: View {
         } else if let fetched {
             content(fetched.text, fetched.truncated)
         } else if let failure {
-            ViewerNote(text: failure, bad: true)
+            ViewerNote(text: failure, bad: true, retry: attachment != nil && store.api != nil ? {
+                self.failure = nil
+            } : nil)
         } else {
             ViewerNote(text: loadingText, loading: true)
                 .task { await fetch() }
@@ -904,7 +948,7 @@ private struct RawTextSource<Content: View>: View {
             let truncated = data.count > limit
             fetched = FetchedText(text: decodeText(truncated ? data.prefix(limit) : data, truncated: truncated), truncated: truncated)
         } catch {
-            failure = "원본을 받지 못했습니다. \(error.localizedDescription)"
+            failure = friendlyLoadError(error)
         }
     }
 }
@@ -1447,9 +1491,14 @@ private struct ArtifactViewer: View {
     @State private var error: String?
     /// The page height reported by the fitted preview (0 until measured).
     @State private var pageHeight: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// One height from the first frame to the drawn page (A-70): the page's last measured height when it was opened
+    /// before, 360 the first time. The loading frame, the unmeasured page and the page share it, so nothing jumps.
+    private var reservedHeight: CGFloat { ArtifactHeights.byFile[file.id] ?? 360 }
 
     private var unavailableReason: String? {
-        if store.isDemo { return "샘플 자료에는 연결된 실행 호스트가 없습니다." }
+        if store.isDemo { return "샘플 자료라 페이지를 열 수 없습니다." }
         if store.api == nil { return "서버에 연결되면 미리보기를 열 수 있습니다." }
         return nil
     }
@@ -1474,7 +1523,8 @@ private struct ArtifactViewer: View {
             ProgressView().controlSize(.small)
             Text("페이지를 불러오는 중입니다").font(CEFont.note).foregroundStyle(CE.ink2)
         }
-        .frame(maxWidth: .infinity, minHeight: 200)
+        .frame(maxWidth: .infinity)
+        .frame(height: reservedHeight)
         .background(CE.bg.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CE.line) }
         .accessibilityElement(children: .combine)
@@ -1488,7 +1538,7 @@ private struct ArtifactViewer: View {
                     .frame(width: 22)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("직원이 만든 페이지입니다").font(CEFont.rowTitle).foregroundStyle(CE.ink)
-                    Text("스크립트와 외부 연결을 끈 보호된 미리보기로 엽니다.")
+                    Text("인터넷에 연결하지 않고 안전하게 엽니다.")
                         .font(gateNoteFont).foregroundStyle(CE.ink2)
                         .lineSpacing(CELeading.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1527,10 +1577,26 @@ private struct ArtifactViewer: View {
 
     /// The page alone (web .afr-stage): 크게 보기 lives in the reader header, so the frame starts right under the summary.
     private func preview(_ artifact: LoadedArtifact) -> some View {
-        // As tall as the page once measured (the web's frame grows the same way); 520 until then.
+        // As tall as the page once measured (the web's frame grows the same way); the reserved height until then,
+        // under a loading cover (web ArtifactFrame) so an empty frame never shows. The cover fades and the height
+        // eases to the page's own.
         SandboxedHTML(html: artifact.html, rule: artifact.rule, title: file.title, height: $pageHeight)
             .frame(maxWidth: .infinity)
-            .frame(height: pageHeight > 0 ? max(pageHeight, 120) : 520)
+            .frame(height: pageHeight > 0 ? max(pageHeight, 120) : reservedHeight)
+            .overlay {
+                if pageHeight == 0 {
+                    ZStack {
+                        CE.bg
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("페이지를 불러오는 중입니다").font(CEFont.note).foregroundStyle(CE.ink2)
+                        }
+                    }
+                    .transition(.opacity)
+                }
+            }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: pageHeight)
+            .onChange(of: pageHeight) { _, height in if height > 0 { ArtifactHeights.byFile[file.id] = max(height, 120) } }
             .background(CE.bg)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CE.line) }
@@ -1543,17 +1609,20 @@ private struct ArtifactViewer: View {
         defer { loading = false }
         // Fail closed: without the block rule the page is not fetched or shown at all.
         guard let rule = await artifactBlockRule() else {
-            error = "보호 규칙을 준비하지 못해 미리보기를 열지 않았습니다."
+            error = "페이지를 안전하게 열 준비가 되지 않았습니다. 다시 시도해 주세요."
             return
         }
         do {
             let html = try await api.artifact(fileID: file.id)
             loaded = LoadedArtifact(html: html, rule: rule)
         } catch {
-            self.error = "아티팩트를 불러오지 못했습니다. \(error.localizedDescription)"
+            self.error = friendlyLoadError(error, what: "페이지")
         }
     }
 }
+
+/// Last measured page height per file for this app run, so reopening a page reserves its real height at once.
+@MainActor private enum ArtifactHeights { static var byFile: [String: CGFloat] = [:] }
 
 private struct LoadedArtifact {
     let html: String
@@ -1788,7 +1857,7 @@ private struct AttachmentView: View {
                 image = decoded.image; pixelSize = decoded.size
             }
             data = result; fileURL = destination; error = nil
-        } catch { self.error = error.localizedDescription }
+        } catch { self.error = friendlyLoadError(error) }
     }
 }
 
@@ -1835,7 +1904,7 @@ private func writeTemporaryFile(_ data: Data, name: String) throws -> URL {
             }
             url = destination; error = nil
         } catch {
-            self.error = error.localizedDescription
+            self.error = friendlyLoadError(error)
         }
     }
 }
@@ -2469,7 +2538,9 @@ private struct SaveButton: View {
             preview = try writeTemporaryFile(data, name: name)
             #endif
         } catch {
-            failure = error.localizedDescription
+            // Closing the save panel is a choice, not a failure.
+            if (error as? CocoaError)?.code == .userCancelled || error is CancellationError { return }
+            failure = friendlyLoadError(error, what: "파일")
         }
     }
 }
@@ -2520,6 +2591,8 @@ private struct ViewerNote: View {
     let text: String
     var bad = false
     var loading = false
+    /// A failure the viewer can try again from the same place (A-78).
+    var retry: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 8) {
@@ -2529,6 +2602,10 @@ private struct ViewerNote: View {
                 .foregroundStyle(bad ? CE.danger : CE.ink2)
                 .lineSpacing(CELeading.spacing(14, 1.5))
                 .fixedSize(horizontal: false, vertical: true)
+            if let retry {
+                Spacer(minLength: 8)
+                Button("다시 시도", action: retry).buttonStyle(ViewerButtonStyle()).fixedSize()
+            }
         }
         .padding(.vertical, 14).padding(.horizontal, 2)
         .accessibilityElement(children: .combine)

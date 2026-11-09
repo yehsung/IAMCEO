@@ -299,14 +299,21 @@ extension ContractTests {
     }
 
     func testPushDefaultsRegistrationAndPartialPreferences() throws {
-        XCTAssertEqual(PushKind.supported.map(\.rawValue), ["decision", "approval_wait", "error", "report_complete"])
+        XCTAssertEqual(PushKind.supported.map(\.rawValue), ["decision", "approval_wait", "error", "report_complete", "todo_created", "report_blocked"])
         let defaults = try object(PushPreferences())
-        XCTAssertEqual(defaults.count, 4)
+        XCTAssertEqual(defaults.count, 6)
         XCTAssertTrue(defaults.values.allSatisfy { ($0 as? Bool) == true })
         XCTAssertEqual(PushContract.reportGroupWindowMilliseconds, 120_000)
         let decoded = try decode(PushPreferences.self, #"{"decision":true}"#)
         XCTAssertFalse(decoded.reportComplete)
         XCTAssertFalse(decoded.approvalWait)
+        XCTAssertFalse(decoded.todoCreated); XCTAssertFalse(decoded.reportBlocked)
+        let existing = try decode(PushPreferences.self, #"{"decision":true,"approval_wait":false,"error":true,"report_complete":false,"todo_created":true,"report_blocked":false}"#)
+        XCTAssertTrue(existing.todoCreated); XCTAssertFalse(existing.reportBlocked)
+        XCTAssertEqual(try decode(PushPreferences.self, String(data: JSONEncoder().encode(existing), encoding: .utf8)!), existing)
+        XCTAssertEqual(try object(PushPreferencesPatch(todoCreated: false))["todo_created"] as? Bool, false)
+        XCTAssertEqual(Set(try object(PushPreferencesPatch(todoCreated: false)).keys), ["todo_created"])
+        XCTAssertEqual(Set(try object(PushPreferencesPatch(reportBlocked: true)).keys), ["report_blocked"])
         let registration = PushRegistrationRequest(expectedRevision: nil, environment: .sandbox, deviceToken: "ab", authorization: .authorized)
         let json = try object(registration)
         XCTAssertTrue(json["expectedRevision"] is NSNull)

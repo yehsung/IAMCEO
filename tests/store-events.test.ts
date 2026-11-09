@@ -108,13 +108,18 @@ describe("Store domain recorder integration", () => {
     }
   });
 
-  test("only confirmed permission contributes to approval events and blocked totals", () => {
+  test("permission and selection share approval episodes; blocked totals count only confirmed permission", () => {
     const f = fixture(); f.enabled();
-    for (const reason of ["status_unknown", "setup", "selection", null] as const) {
+    for (const reason of ["status_unknown", "setup", null] as const) {
       f.store.patchMember(f.member.id, { status: "blocked", blockedReason: reason });
       expect(f.store.projectSummaries().find((p) => p.id === f.project.id)!.blockedCount).toBe(0);
     }
     expect(f.push.listEvents()).toEqual([]);
+    f.store.patchMember(f.member.id, { blockedReason: "selection" });
+    expect(f.store.projectSummaries().find((p) => p.id === f.project.id)!.blockedCount).toBe(0);
+    expect(f.push.listEvents().map((event) => event.kind)).toEqual(["approval_wait"]);
+    expect(f.push.getEpisode(f.member.id)?.blockedGeneration).toBe(1);
+    expect(f.push.listDeliveries()[0].state).toBe("queued");
     f.store.patchMember(f.member.id, { blockedReason: "permission" });
     expect(f.store.projectSummaries().find((p) => p.id === f.project.id)!.blockedCount).toBe(1);
     f.store.patchMember(f.member.id, { status: "blocked", contextPct: 10, now: "승인 대기" });
@@ -173,16 +178,31 @@ describe("Store domain recorder integration", () => {
     f.store.createMessage({ projectId: f.project.id, memberId: f.member.id, kind: "완료", mine: true });
     f.store.createMessage({ projectId: f.project.id, kind: "완료" });
     expect(f.groups()).toEqual([]);
+    expect(f.push.listEvents().map((event) => event.kind)).toEqual(["report_blocked"]);
     f.report("first");
     const group = f.groups()[0];
-    f.advance(119_999); f.enabled("bb"); f.report("second"); f.report("second"); f.restart();
-    expect(f.groups()[0]).toMatchObject({ id: group.id, closesAt: group.closesAt, reportIds: ["first", "second"], lastMessageId: "second" });
+    const leading = f.push.eventBySource(`report-leading:${group.id}`)!;
+    expect(leading).toMatchObject({ kind: "report_complete", occurredAt: group.openedAt, target: { messageId: "first", groupId: group.id } });
+    expect(Date.parse(group.closesAt) - Date.parse(group.openedAt)).toBe(120_000);
+    expect(f.push.listDeliveries(leading.id).map((delivery) => delivery.deviceId)).toEqual([first.id]);
+    f.advance(119_999); const late = f.enabled("bb"); f.report("second"); f.report("second"); f.restart();
+    expect(f.groups()[0]).toMatchObject({ id: group.id, closesAt: group.closesAt, reportIds: ["first", "second"], lastMessageId: "second", recipients: group.recipients });
+    expect(f.push.listEvents().filter((event) => event.kind === "report_complete")).toEqual([leading]);
     f.advance(1); f.report("third");
     f.push.closeDueGroups(f.push.timestamp()); f.restart(); f.push.closeDueGroups(f.push.timestamp());
-    expect(f.push.listEvents()).toHaveLength(1);
-    expect(f.push.listDeliveries().map((delivery) => delivery.deviceId)).toEqual([first.id]);
-    expect(f.push.eventTarget(f.push.listEvents()[0].id)).toMatchObject({ target: { messageId: "second", groupId: group.id } });
+    const nextGroup = f.groups()[1];
+    const summary = f.push.eventBySource(`report-group:${group.id}`)!;
+    const nextLeading = f.push.eventBySource(`report-leading:${nextGroup.id}`)!;
+    expect(f.push.listEvents().filter((event) => event.kind === "report_complete")).toEqual([leading, summary, nextLeading]);
+    expect(f.push.listDeliveries(summary.id).map((delivery) => delivery.deviceId)).toEqual([first.id]);
+    expect(f.push.listDeliveries(nextLeading.id).map((delivery) => delivery.deviceId).sort()).toEqual([first.id, late.id].sort());
+    expect(f.push.eventTarget(leading.id)).toMatchObject({ target: { messageId: "first", groupId: group.id }, reportGroup: { reportIds: ["first", "second"] } });
+    expect(f.push.eventTarget(summary.id)).toMatchObject({ target: { messageId: "second", groupId: group.id } });
     expect(f.groups()).toHaveLength(2);
+    const events = f.push.listEvents(), deliveries = f.push.listDeliveries();
+    f.advance(120_000); f.push.closeDueGroups(f.push.timestamp()); f.restart(); f.push.closeDueGroups(f.push.timestamp());
+    expect(f.groups()[1].state).toBe("closed");
+    expect(f.push.listEvents()).toEqual(events); expect(f.push.listDeliveries()).toEqual(deliveries);
   });
 
   test("different projects and staff have separate report groups; late archived reports still persist", () => {
@@ -209,7 +229,9 @@ describe("Store domain recorder integration", () => {
       f.store.patchMember(f.member.id, { status: "error", lastError: "rollback" });
       f.report("rollback");
       expect(f.broadcasts).toEqual([]); expect(wakes).toBe(0);
-      expect(f.push.listEvents()).toHaveLength(2);
+      expect(f.push.listEvents().map((event) => event.kind)).toEqual(["decision", "error", "report_complete"]);
+      expect(f.push.listDeliveries()).toHaveLength(3);
+      expect(f.groups()[0].reportIds).toEqual(["rollback"]);
       throw new Error("outer rollback");
     })).toThrow("outer rollback");
     expect(f.store.listDecisions(f.project.id)).toEqual([]);
@@ -235,9 +257,15 @@ describe("Store domain recorder integration", () => {
         kind: "answer", text: "답", refType: "decision", refId: decision.id }], () => { expect(f.db.inTransaction).toBe(false); wakes++; });
       expect(f.broadcasts).toEqual([]); expect(wakes).toBe(0);
     })();
+    expect(f.groups()).toHaveLength(1);
     expect(f.groups()[0].reportIds).toEqual(["kept"]);
     expect(f.store.getMessage("discarded")).toBeNull();
-    expect(f.push.listEvents().map((event) => event.kind)).toEqual(["decision"]);
+    expect(f.push.listEvents().map((event) => event.kind)).toEqual(["report_complete", "decision"]);
+    expect(f.push.listDeliveries().map((delivery) => delivery.state)).toEqual(["queued", "queued"]);
+    expect(f.push.getEpisode(f.member.id)).toBeNull();
+    expect(f.store.requireMember(f.member.id).status).toBe("idle");
+    expect(f.store.listDecisions(f.project.id)).toHaveLength(1);
+    expect(f.store.listPending(f.member.id)).toHaveLength(1);
     expect(wakes).toBe(1); expect(f.broadcasts.length).toBeGreaterThan(0);
     expect(f.transactionStates.every((active) => !active)).toBe(true);
   });
@@ -255,13 +283,22 @@ describe("Store domain recorder integration", () => {
   });
 
   test("report group storage failure rolls back its source; deadline closure also rolls back with the new report", () => {
-    const f = fixture(); f.enabled(); f.report("first"); f.advance(120_000); f.broadcasts.length = 0;
+    const f = fixture(); f.enabled(); f.report("first"); f.advance(1); f.report("second");
+    const groups = f.groups(), events = f.push.listEvents(), deliveries = f.push.listDeliveries();
+    f.advance(119_999); f.broadcasts.length = 0;
     f.db.exec("CREATE TEMP TRIGGER fail_report BEFORE INSERT ON push_report_group_reports BEGIN SELECT RAISE(ABORT,'report full'); END");
     expect(() => f.report("failed")).toThrow("report full");
     expect(f.store.getMessage("failed")).toBeNull();
-    expect(f.groups()).toHaveLength(1);
-    expect(f.groups()[0]).toMatchObject({ state: "open", reportIds: ["first"], lastMessageId: "first" });
-    expect(f.push.listEvents()).toEqual([]); expect(f.push.listDeliveries()).toEqual([]); expect(f.broadcasts).toEqual([]);
+    expect(f.groups()).toEqual(groups);
+    expect(f.groups()[0]).toMatchObject({ state: "open", reportIds: ["first", "second"], lastMessageId: "second" });
+    expect(f.push.listEvents()).toEqual(events); expect(f.push.listDeliveries()).toEqual(deliveries); expect(f.broadcasts).toEqual([]);
+    f.db.exec("DROP TRIGGER fail_report");
+    f.report("failed");
+    expect(f.groups()[0]).toMatchObject({ state: "closed", reportIds: ["first", "second"] });
+    expect(f.groups()[1].reportIds).toEqual(["failed"]);
+    expect(f.push.listEvents().map((event) => event.sourceKey)).toEqual([
+      `report-leading:${groups[0].id}`, `report-group:${groups[0].id}`, `report-leading:${f.groups()[1].id}`,
+    ]);
   });
 
   test("decision cancellation storage failure preserves both open source and pending outbox", () => {

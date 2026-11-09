@@ -56,7 +56,6 @@ struct ComposerBar: View {
     @State private var sentTo: String?
     @State private var sentToken = UUID()
     @State private var dropTargeted = false
-    @State private var sendingLocally = false
     /// Mac: the recipient list (web .cmp-menu) is open.
     @State private var showTargets = false
     #if os(macOS)
@@ -74,7 +73,7 @@ struct ComposerBar: View {
     /// The project lead (총괄, or 본사 AI on HQ) receives messages with no explicit target.
     private var leadName: String { store.leadRankName }
     private var recipientName: String { missingTarget ? "명부에 없는 대상" : recipient?.name ?? leadName }
-    private var sending: Bool { sendingLocally || store.pendingActions.contains { $0.hasPrefix("send:") } }
+    private var sending: Bool { store.selectedProjectID.map { store.isSending(projectID: $0, targetMemberID: target) } ?? false }
     private var draftText: String { drafts.text(for: key) }
     private var files: [Attachment] { drafts.files(for: key) }
     private var pendingUploads: [ComposerUpload] { store.composerUploads.pending(for: key, drafts: drafts) }
@@ -113,10 +112,21 @@ struct ComposerBar: View {
     }
 
     private var hasMetaRow: Bool {
-        targetPickerShown || !files.isEmpty || !pendingUploads.isEmpty || dropTargeted || sentTo != nil || quietBlock != nil
+        targetPickerShown || fixedRecipientShown || !files.isEmpty || !pendingUploads.isEmpty || dropTargeted || sentTo != nil
+            || quietBlock != nil
     }
 
-    private var targetPickerShown: Bool { showsTargetPicker || (targetPickerOnFocus && focused) }
+    private var hasDraftContent: Bool {
+        !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty || !pendingUploads.isEmpty
+    }
+
+    /// The placeholder names the recipient only while the field is empty: once there is a draft the chip stays,
+    /// focused or not, so a draft left on 홈 never hides who it goes to.
+    private var targetPickerShown: Bool { showsTargetPicker || (targetPickerOnFocus && (focused || hasDraftContent)) }
+
+    /// A dock whose recipient the screen fixes (a worker's page on 팀) has no chip to show; it names the recipient
+    /// in words once a draft hides the placeholder.
+    private var fixedRecipientShown: Bool { namesLead && !targetPickerShown && hasDraftContent }
 
     /// Why sending is off (sample, offline, runner connection), shown quietly beside the target chip. Errors and a
     /// removed target take their own line instead.
@@ -222,6 +232,11 @@ struct ComposerBar: View {
     private var metaRow: some View {
         HStack(spacing: 6) {
             if targetPickerShown { targetChip }
+            if fixedRecipientShown {
+                Text("\(recipientName)에게").font(hintFont.weight(.semibold)).foregroundStyle(CE.ink2)
+                    .lineLimit(1).padding(.leading, 6)
+                    .accessibilityLabel("보낼 대상: \(recipientName)")
+            }
             if !files.isEmpty || !pendingUploads.isEmpty {
                 // Many attachments scroll inside the row instead of growing the panel.
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -628,8 +643,6 @@ struct ComposerBar: View {
         let project = store.selectedProjectID
         let sendingTarget = target
         let name = recipientName
-        sendingLocally = true
-        defer { sendingLocally = false }
         sendError = nil
         sentTo = nil
         let ok = await store.sendMessage(text: snapshot.text, targetMemberID: sendingTarget, attachmentIDs: snapshot.attachments.map(\.id))
@@ -656,7 +669,6 @@ struct ComposerBar: View {
         sentToken = token
         sentTo = name
         onSent?()
-        sendingLocally = false
         try? await Task.sleep(for: .seconds(5))
         if sentToken == token { sentTo = nil }
     }

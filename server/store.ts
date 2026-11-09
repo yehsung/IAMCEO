@@ -16,10 +16,13 @@ import type {
   CliProvider,
   Decision,
   DecisionCloseKind,
+  DecisionCloseFollowUp,
   DecisionOption,
   DecisionStatus,
   Delivery,
   DeliveryKind,
+  DeliveryWaitInfo,
+  MissingReportNotice,
   DeliveryStatus,
   Effort,
   FileDoc,
@@ -46,7 +49,7 @@ import type {
 } from "../shared/types.ts";
 import { DEFAULT_CODEX_RANKS, DEFAULT_RANKS, fileKindOf } from "../shared/types.ts";
 import type { MemberRevisions, OperationKind, OperationReceipt, OperationStatus, SyncRevisions, ManualInboxBatch } from "../shared/operations.ts";
-import type { DeliveryDispatch, DeliveryIntentResult, DeliveryRecoveryRecord, DomainRecorder, LifecycleJournal, DecisionFollowUp, MessageReadStore, ProjectPatchStore, RunnerRecoveryStore, TerminalLease, RunnerRecoveryState, ReportReferences, BoardReview } from "./service-contracts.ts";
+import type { DeliveryDispatch, DeliveryIntentResult, DeliveryRecoveryRecord, DomainRecorder, LifecycleJournal, MessageReadStore, ProjectPatchStore, RunnerRecoveryStore, TerminalLease, RunnerRecoveryState, ReportReferences, BoardReview } from "./service-contracts.ts";
 import type { RunnerTerminalIdentity } from "./runner/types.ts";
 import type { Bus } from "./bus.ts";
 import { newId, nowIso } from "./db.ts";
@@ -624,6 +627,84 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   private readonly sqlTransaction: Database["transaction"];
   private commitFrames: (() => void)[][] = [];
   private lastMessageMs = 0;
+  private waitContext: ((memberId: string) => { busy: boolean; waking: boolean; used: number }) | null = null;
+  private recheckPending: ((memberId: string) => void) | null = null;
+
+  deferMemberConfig(memberId: string, signature: string, failed = false): void {
+    this.run("UPDATE members SET config_deferred_json = ? WHERE id = ?", JSON.stringify({ signature, failed }), memberId);
+  }
+
+  deferredMemberConfig(memberId: string): { signature: string; failed: boolean } | null {
+    const row = this.row("SELECT config_deferred_json FROM members WHERE id = ?", memberId);
+    return row?.config_deferred_json ? json(row.config_deferred_json) : null;
+  }
+
+  clearDeferredMemberConfig(memberId: string): void {
+    this.run("UPDATE members SET config_deferred_json = NULL WHERE id = ?", memberId);
+  }
+
+  setDeliveryWaitContext(read: (memberId: string) => { busy: boolean; waking: boolean; used: number }, recheck: (memberId: string) => void): void {
+    this.waitContext = read;
+    this.recheckPending = recheck;
+  }
+
+  recheckPendingDelivery(memberId: string): void {
+    this.afterCommit(() => this.recheckPending?.(memberId));
+  }
+
+  deliveryWait(delivery: Delivery): DeliveryWaitInfo {
+    const member = this.requireMember(delivery.memberId), project = this.requireProject(delivery.projectId);
+    const input = this.inputState(member.id), recovery = this.getDeliveryRecovery(delivery.id);
+    const context = this.waitContext?.(member.id);
+    const waitingSince = delivery.createdAt;
+    if (project.archived) return { waitReason: "archived", waitingSince };
+    if (!project.runnerEnabled) return { waitReason: "runner_off", waitingSince };
+    if (input.lease) return { waitReason: "manual_control", waitingSince };
+    if (member.status === "blocked" || delivery.holdReason === "blocked") return { waitReason: "approval", waitingSince };
+    if (input.unresolvedDispatches.length || recovery && !["none", "resolved", "stopped"].includes(recovery.phase) || this.listDeliveries(project.id).some(d => d.memberId === member.id && (d.status === "delivering" || d.holdReason === "delivery_unknown"))) return { waitReason: "receipt_check", waitingSince };
+    if (context?.waking || member.lifecycleState && ["starting", "starting_unknown", "reconnecting"].includes(member.lifecycleState.phase)) return { waitReason: "waking", waitingSince };
+    if (project.connection.reason === "backend_down" || ["backend_down", "runner_disabled"].includes(delivery.holdReason ?? "")) return { waitReason: "runner_off", waitingSince };
+    if (context?.busy || member.status === "working") return { waitReason: "member_busy", waitingSince };
+    const used = context?.used ?? new Set(this.listPendingExecutions().map(run => run.memberId)).size;
+    const limit = this.getSettings().maxConcurrentTurns;
+    if (member.origin !== "manual" && ["core", "headless"].includes(member.backend ?? this.effectiveBackend()) && used >= limit) return { waitReason: "run_limit", waitingSince, runLimit: { used, limit } };
+    return { waitReason: "unknown", waitingSince };
+  }
+
+  deliveryStalled(id: string): boolean {
+    return !!this.row("SELECT 1 FROM delivery_stalls WHERE delivery_id = ?", id);
+  }
+
+  detectDeliveryStalls(now = Date.now(), thresholdMs = 120_000): void {
+    for (const delivery of this.listUndelivered()) {
+      if (this.requireProject(delivery.projectId).archived || this.deliveryWait(delivery).waitReason !== "unknown") continue;
+      const progress = this.listDispatches(delivery.memberId).filter(d => d.items.some(i => i.deliveryId === delivery.id)).at(-1)?.updatedAt ?? delivery.createdAt;
+      if (now - Date.parse(progress) < thresholdMs || this.deliveryStalled(delivery.id)) continue;
+      this.transaction(() => {
+        this.run("INSERT OR IGNORE INTO delivery_stalls (delivery_id, detected_at) VALUES (?, ?)", delivery.id, new Date(now).toISOString());
+        this.appendActivity(delivery.memberId, "error", "전달이 진행되지 않고 있습니다. 다시 확인해 주세요", `delivery-stalled:${delivery.id}`);
+        this.createMessage({ id: `msg_delivery_stalled_${delivery.id}`, projectId: delivery.projectId, who: "시스템", kind: "시스템", title: "전달 확인 필요", body: `${this.requireMember(delivery.memberId).name}에게 전달이 진행되지 않고 있습니다. 전달 정보에서 '다시 확인'을 눌러 주세요. 원래 입력을 중복해서 보내지 않습니다.` });
+      });
+    }
+  }
+
+  listMissingReportNotices(projectId: string): MissingReportNotice[] {
+    return this.rows(`SELECT e.run_id, e.member_id, m.id AS message_id, m.at
+      FROM execution_journal e JOIN messages m ON m.id = 'msg_missing_report_' || e.run_id
+      WHERE e.project_id = ? AND NOT EXISTS (
+        SELECT 1 FROM messages result WHERE result.project_id = e.project_id AND result.member_id = e.member_id
+          AND result.mine = 0 AND result.at >= e.created_at AND result.kind IN ('완료', '답변', '막힘', '질문')
+      ) AND NOT EXISTS (
+        SELECT 1 FROM decisions d WHERE d.project_id = e.project_id AND d.member_id = e.member_id
+          AND d.status = 'open' AND d.created_at >= e.created_at
+      ) ORDER BY m.at, m.id`, projectId).map(row => ({ kind: "missing_report", runId: row.run_id, memberId: row.member_id, messageId: row.message_id, createdAt: row.at, title: "결과 보고 누락" }));
+  }
+
+  private messageFrom(row: Row): Message {
+    const message = toMessage(row);
+    const deliveries = this.rows("SELECT * FROM deliveries WHERE ref_type = 'message' AND ref_id = ? AND status NOT IN ('delivered', 'failed') ORDER BY rowid", message.id).map(toDelivery);
+    return deliveries.length ? { ...message, deliveryInfo: deliveries.map(d => ({ deliveryId: d.id, memberId: d.memberId, ...this.deliveryWait(d) })) } : message;
+  }
   private runnerHealth = new Map<Backend, RunnerHealth>();
   private lastConnections = new Map<string, string>();
 
@@ -1391,6 +1472,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     });
   }
 
+  auditDecisionClose(decisionId: string, answeredDecisionId: string, actorId: string, sameIssue: string | null, quote: string): void {
+    this.run("INSERT INTO decision_close_audit (decision_id, answered_decision_id, actor_id, same_issue, answer_quote, created_at) VALUES (?, ?, ?, ?, ?, ?)", decisionId, answeredDecisionId, actorId, sameIssue, quote, nowIso());
+  }
+
   /** 끝내 전달하지 못한 답은 대표가 다시 답할 수 있게 카드를 연다. 메모의 사본은 전달 글뿐이었으니 직전 답을 카드에 남긴다. 닫힌 카드를 다시 열 때도 쓴다(닫은 이유는 지운다). */
   reopenDecision(id: string, why = "전달하지 못했습니다. 다시 결정해 주세요"): Decision {
     return this.transaction(() => {
@@ -1599,7 +1684,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   // ---- 대화 ----
   getMessage(id: string): Message | null {
     const r = this.row("SELECT * FROM messages WHERE id = ?", id);
-    return r ? toMessage(r) : null;
+    return r ? this.messageFrom(r) : null;
   }
 
   requireMessage(id: string): Message {
@@ -1614,7 +1699,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     const rows = opts.before
       ? this.rows("SELECT * FROM messages WHERE project_id = ? AND at < ? ORDER BY at DESC, rowid DESC LIMIT ?", projectId, opts.before, limit)
       : this.rows("SELECT * FROM messages WHERE project_id = ? ORDER BY at DESC, rowid DESC LIMIT ?", projectId, limit);
-    return rows.reverse().map(toMessage);
+    return rows.reverse().map(r => this.messageFrom(r));
   }
 
   private messageScope(projectId: string, scope: MessageScope = { kind: "project" }): MessageScope {
@@ -1669,7 +1754,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
           SELECT id, at FROM candidates ORDER BY at COLLATE BINARY DESC, id COLLATE BINARY DESC LIMIT $limit
         ) SELECT m.* FROM page_keys k JOIN messages m ON m.id = k.id ORDER BY k.at COLLATE BINARY DESC, k.id COLLATE BINARY DESC`).all({ ...params, $member: scope.memberId });
     const hasOlder = rows.length > limit;
-    const items = rows.slice(0, limit).reverse().map(toMessage);
+    const items = rows.slice(0, limit).reverse().map(r => this.messageFrom(r));
     const first = items[0];
     if (hasOlder && first && (Buffer.byteLength(first.at) > 128 || Buffer.byteLength(first.id) > 256 || !first.at || !first.id)) throw new ApiError(500, "저장된 메시지의 위치 정보가 올바르지 않습니다");
     return { projectId, scope, items, hasOlder, nextCursor: hasOlder && first ? Buffer.from(JSON.stringify({ v: 1, projectId, scope, before: { at: first.at, id: first.id } })).toString("base64url") : null };
@@ -1702,7 +1787,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     if (anchor.projectId !== projectId) throw new ApiError(404, "메시지를 찾을 수 없습니다");
     const older = this.rows("SELECT * FROM messages WHERE project_id = ? AND (at, id) < (?, ?) ORDER BY at COLLATE BINARY DESC, id COLLATE BINARY DESC LIMIT ?", projectId, anchor.at, anchor.id, Math.floor((limit - 1) / 2));
     const newer = this.rows("SELECT * FROM messages WHERE project_id = ? AND (at, id) > (?, ?) ORDER BY at COLLATE BINARY, id COLLATE BINARY LIMIT ?", projectId, anchor.at, anchor.id, limit - 1 - older.length);
-    return [...older.reverse().map(toMessage), anchor, ...newer.map(toMessage)];
+    return [...older.reverse().map(r => this.messageFrom(r)), anchor, ...newer.map(r => this.messageFrom(r))];
   }
 
   // before 페이징이 같은 at 의 글을 건너뛰지 않도록 at 을 프로세스 안에서 단조 증가시킨다.
@@ -1716,7 +1801,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   createMessage(input: NewMessage): Message {
     return this.transaction(() => {
       if (input.id) {
-        const existing = this.getMessage(input.id);
+        const row = this.row("SELECT * FROM messages WHERE id = ?", input.id);
+        const existing = row ? toMessage(row) : null;
         if (existing) {
           if (existing.projectId !== input.projectId) throw new ApiError(409, "다른 프로젝트에서 사용된 메시지 ID입니다");
           return existing;
@@ -1744,11 +1830,15 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         input.delivery ?? null,
         input.deliveryNote ?? null,
       );
-      const message = this.requireMessage(id);
+      const message = toMessage(this.row("SELECT * FROM messages WHERE id = ?", id)!);
       // 보관 중 늦은 manual 보고도 저장한다. 푸시는 활성 프로젝트의 실제 작성자만 대상이다.
       if (this.recorder && !this.requireProject(message.projectId).archived && (!message.memberId || this.getMember(message.memberId)?.projectId === message.projectId)) this.recorder.message(message);
       this.bumpBoard(message.projectId);
-      this.emit({ type: "message", message });
+      // 원본 생성 반환값은 저장된 Message다. 방송은 outbox까지 commit된 현재 전달 정보를 싣는다.
+      this.afterCommit(() => {
+        const current = this.getMessage(id);
+        if (current) this.bus.emit({ type: "message", message: current });
+      });
       return message;
     });
   }
@@ -1967,9 +2057,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     if (this.requireMember(memberId).kind === "worker") return;
     const sourceIds = deliveries.filter(d => d.wake && (d.kind === "user_message" || d.kind === "answer"))
       .map(d => d.refId ?? d.id).sort();
-    const sources = JSON.stringify(sourceIds);
-    const posted = this.row("SELECT 1 FROM delegation_ack_turns WHERE member_id = ? AND source_ids = ? AND posted = 1 LIMIT 1", memberId, sources) ? 1 : 0;
-    this.run("INSERT OR IGNORE INTO delegation_ack_turns (run_id, member_id, source_ids, posted) VALUES (?, ?, ?, ?)", runId, memberId, sources, posted);
+    this.run("INSERT OR IGNORE INTO delegation_ack_turns (run_id, member_id, source_ids) VALUES (?, ?, ?)", runId, memberId, JSON.stringify(sourceIds));
   }
 
   /** 지시 outbox와 같은 트랜잭션에서 호출한다. 도구 응답 유실에도 배정 사실이 남는다. */
@@ -1986,8 +2074,12 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   /** ask·post 조회·자동 마지막 글은 post가 아니다. 실제 게시와 원자적으로 기록한다. */
-  noteDelegationPost(memberId: string): void {
-    this.run("UPDATE delegation_ack_turns SET posted = 1 WHERE member_id = ? AND ended = 0", memberId);
+  noteDelegationPost(memberId: string, text = ""): void {
+    for (const turn of this.rows("SELECT * FROM delegation_ack_turns WHERE member_id = ? AND ended = 0", memberId)) {
+      const texts: string[] = JSON.parse(turn.post_texts);
+      texts.push(text);
+      this.run("UPDATE delegation_ack_turns SET posted = 1, post_texts = ? WHERE run_id = ?", JSON.stringify(texts), turn.run_id);
+    }
   }
 
   finishDelegationAck(memberId: string, runId?: string): void {
@@ -1998,13 +2090,17 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       for (const turn of turns) {
         this.run("UPDATE delegation_ack_turns SET ended = 1 WHERE run_id = ?", turn.run_id);
         const sources: string[] = JSON.parse(turn.source_ids);
-        if (turn.posted || !sources.length) continue;
+        if (!sources.length) continue;
         const assignments: { deliveryId: string; memberId: string; name: string; summary: string; queued: boolean }[] = JSON.parse(turn.assignments);
         // 확정 기동 실패로 취소된 신규 직원의 outbox는 배정으로 알리지 않는다.
         const retained = assignments.filter(a => this.getDelivery(a.deliveryId));
         // 같은 직원에게 여러 번 보냈으면 마지막 지시를 한 줄로 보여 준다.
         for (const assignment of new Map(retained.map(a => [a.memberId, a])).values()) {
-          const key = createHash("sha256").update(JSON.stringify([memberId, sources, assignment.memberId])).digest("hex").slice(0, 32);
+          const pendingSources = sources.filter(source => !this.row("SELECT 1 FROM delegation_ack_receipts WHERE member_id = ? AND source_id = ? AND target_id = ?", memberId, source, assignment.memberId));
+          for (const source of pendingSources) this.run("INSERT OR IGNORE INTO delegation_ack_receipts VALUES (?, ?, ?)", memberId, source, assignment.memberId);
+          const texts: string[] = JSON.parse(turn.post_texts);
+          if (!pendingSources.length || texts.some(text => new RegExp(`(?<![\\p{L}\\p{N}_])${assignment.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[\\s\\p{P}]|(?:에게|이|가|은|는|와|과|님|씨)(?=$|[\\s\\p{P}]))`, "u").test(text))) continue;
+          const key = createHash("sha256").update(JSON.stringify([memberId, pendingSources, assignment.memberId])).digest("hex").slice(0, 32);
           this.createMessage({ id: `msg_delegation_ack_${key}`, projectId: this.requireMember(memberId).projectId,
             who: "시스템", kind: "시스템", body: `총괄이 ${assignment.name}에게 맡겼습니다: ${assignment.summary}${assignment.queued ? " (앞 일 끝나면 시작)" : ""}` });
         }
@@ -2115,7 +2211,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.rows(`SELECT m.* FROM messages m WHERE m.mine = 1 AND m.delivery IN ('queued','held')
       ${projectId === undefined ? "" : "AND m.project_id = ?"}
       AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.ref_type = 'message' AND d.ref_id = m.id)
-      ORDER BY m.at COLLATE BINARY, m.id COLLATE BINARY`, ...(projectId === undefined ? [] : [projectId])).map(toMessage);
+      ORDER BY m.at COLLATE BINARY, m.id COLLATE BINARY`, ...(projectId === undefined ? [] : [projectId])).map(r => this.messageFrom(r));
   }
 
   listReportsMissingDeliveries(projectId?: string): Message[] {
@@ -2123,7 +2219,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       AND m.rowid > COALESCE((SELECT legacy_max_rowid FROM report_delivery_tracking WHERE id = 1), 0)
       ${projectId === undefined ? "" : "AND m.project_id = ?"}
       AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.ref_type = 'message' AND d.ref_id = m.id AND d.kind = 'report')
-      ORDER BY m.at COLLATE BINARY, m.id COLLATE BINARY`, ...(projectId === undefined ? [] : [projectId])).map(toMessage);
+      ORDER BY m.at COLLATE BINARY, m.id COLLATE BINARY`, ...(projectId === undefined ? [] : [projectId])).map(r => this.messageFrom(r));
   }
 
   listAnswersMissingDeliveries(projectId?: string): Decision[] {
@@ -2434,16 +2530,19 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     });
   }
 
-  getDecisionFollowUp(id: string): DecisionFollowUp | null {
+  getDecisionFollowUp(id: string): DecisionCloseFollowUp | null {
     this.requireDecision(id);
     const r = this.row("SELECT follow_up_json FROM decisions WHERE id = ?", id)!;
     return r.follow_up_json === null ? null : json(r.follow_up_json);
   }
 
-  setDecisionFollowUp(id: string, followUp: DecisionFollowUp): void {
+  setDecisionFollowUp(id: string, followUp: DecisionCloseFollowUp): void {
     this.transaction(() => {
       const decision = this.requireDecision(id);
-      if (followUp.kind === "instruction" && (this.requireMember(followUp.memberId).projectId !== decision.projectId || this.requireMessage(followUp.sourceMessageId).projectId !== decision.projectId)) throw new ApiError(400, "후속 지시의 프로젝트가 다릅니다");
+      if (followUp.kind === "instruction") {
+        const source = "sourceMessageId" in followUp ? this.requireMessage(followUp.sourceMessageId) : this.requireDecision(followUp.sourceDecisionId);
+        if (this.requireMember(followUp.memberId).projectId !== decision.projectId || source.projectId !== decision.projectId) throw new ApiError(400, "후속 지시의 프로젝트가 다릅니다");
+      }
       const before = this.getDecisionFollowUp(id);
       if (before !== null && stableJson(before) !== stableJson(followUp)) throw new ApiError(409, "이미 기록된 후속 지시가 다릅니다");
       this.run("UPDATE decisions SET follow_up_json = ? WHERE id = ?", JSON.stringify(followUp), id);

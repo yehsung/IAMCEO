@@ -65,7 +65,7 @@ MCP stdio ── iamceo mcp /agent/* ──┘             │
 - `GET /api/projects/:id/messages?before=<at>&limit=` → Message[]
 - `POST /api/projects`(CreateProjectReq: `name,cwd,goal?,startConductor?,chiefCli?:"claude"|"codex"`) → Project · `PATCH /api/projects/:id`(PatchProjectReq). 실행 방식·권한·모델 필드는 없다. 보내면 400
 - `POST /api/projects/:id/conductor/start` → Member (총괄 띄우기, runnerEnabled 를 true 로)
-- `POST /api/projects/:id/messages`(SendMessageReq; id 는 클라이언트 UUID로 멱등) → Message. 연결되어 있지 않으면 409(§3.1)
+- `POST /api/projects/:id/messages`(SendMessageReq; id 는 클라이언트 UUID로 멱등) → Message. 원문·전달 의도 commit 직후 응답하며 기동·pump 완료를 기다리지 않는다. 접수 시 캐시된 연결 상태로 검사하며 알려진 연결 불가는 409(§3.1)
 - `POST /api/uploads?project=<id>&target=<직원 id>`(multipart, file, 50MB) → Attachment. `project` 를 주면 연결을 먼저 본다(409). 끝까지 올린 뒤에 보내기에서 거부당하지 않게 화면은 붙인다
 - `POST /api/projects/:id/messages` 는 같은 id 면 그 글을 돌려주고, 그 글이 끝내 실패(failed)한 대표 글이면 같은 글을 다시 넣는다(대화 줄이 늘지 않는다).
 - `GET /api/projects/archived` → Project[] · `PATCH archived:true`는 working·blocked·열린 결재·미완료 할 일·안전하게 종료할 수 없는 세션이 있으면 거부한다. 종료 전 상태·소유권·초안을 확인하고 확인할 수 없는 연결 오류도 성공으로 처리하지 않는다. 보관되면 세션을 잠재우고 전달은 `held(archived)`로 둔다. 보관 중에는 자동 깨움·새 세션·`runnerEnabled:true` 단독을 거부한다. 꺼내기는 archived 때문에 보류된 전달만 재검사하며 모든 직원을 기동하지 않는다(§3.4).
@@ -131,7 +131,7 @@ history는 snapshot과 별도 캐시다. ID 중복 제거·진행 중 이벤트/
 
 ### 3.5 전달 증거와 복구
 
-접수·CLI 수신·턴 시작/종료·MCP 보고·업무 완료는 별개다. 원본과 전달 의도를 같은 DB transaction에 저장하고 commit 후 pump한다. 전체 DB에서 누락 원본을 수선하며 최근 200/500건을 집계 한계로 쓰지 않는다. 봉투 구성·표식·wire hash·세션 세대·기록 기준선을 외부 쓰기 전에 저장한다.
+접수·CLI 수신·턴 시작/종료·MCP 보고·업무 완료는 별개다. 원본과 전달 의도를 같은 DB transaction에 저장하고 commit 후 pump한다. 대표 메시지·결재 답 POST는 이 commit으로 접수를 완료해 기존 Message/Decision 모양을 반환한다. start·기동 중인 pump·연결 health probe를 기다리지 않으며 응답 당시 전달은 queued일 수 있다. 이후 기동·전달 실패는 해당 전달의 held/needs_owner 등 기존 상태로 드러난다. 접수 뒤 확정 기동 거절에도 수신자 명부와 outbox를 남긴다. 불확실 기동은 기존 lifecycle journal을 확인하며 새 시작을 추측하지 않는다. 전체 DB에서 누락 원본을 수선하며 최근 200/500건을 집계 한계로 쓰지 않는다. 봉투 구성·표식·wire hash·세션 세대·기록 기준선을 외부 쓰기 전에 저장한다.
 
 정확한 주 세션 user-text 표식 또는 검증된 수신 ACK만 받음이다. assistant 인용·tool_result·sidechain·다른 세션·현재 composer·working·조회 실패는 받음이 아니다. 기록 없음/불완전/미지원/원래 쓰기 미종료는 unknown이다. `terminal.send`의 검증된 성공 ACK와 `started:false`는 수신 계약을 유지하되 턴 시작·완료를 뜻하지 않는다.
 
@@ -146,6 +146,26 @@ history는 snapshot과 별도 캐시다. ID 중복 제거·진행 중 이벤트/
 
 `POST /api/deliveries/:id/recovery` body는 `{operationId:"UUID",expectedVersion:<양의 정수>,action:"recheck"|"retry_with_risk"|"stop_retry"}`다. retry_with_risk만 `acceptDuplicateRisk:true`가 필수이고 다른 action에는 금지다. recheck/retry는 202와 `{operationId,deliveryId,outcome:"check_scheduled"|"retry_scheduled",committedVersion}`, stop은 200과 `outcome:"stopped"`다. 같은 요청은 저장 결과를 재현하고 다른 요청 ID 재사용/상태 변경은 409, 없는/보관 대상 404, 미지원 501이다. 202는 예약 접수이며 수신 성공이 아니다. 허용 행동은 서버 allowedActions를 따르고 위험 동의도 lease/초안/원래 RPC/세션 안전 조건을 우회하지 않는다. stop은 추가 전달 포기이며 과거 수신·업무 완료 판정이 아니다. `confirm_received` API/받음 확정 버튼은 없다.
 
+#### 대기 사유와 정체 알림 (UX-T1)
+
+`Message.deliveryInfo`는 해당 메시지의 미종결 전달마다 `{deliveryId,memberId,waitReason,waitingSince,runLimit?}`를 추가한다. message 단건·페이지·state·WS에서 같은 계산을 쓴다. 기존 `delivery`·`deliveryNote`는 유지한다. `DeliveryNoticeItem`에도 같은 wait 필드가 있다. 멤버 요약(`deliveryNotices.members[]`, 상세의 `summary`)은 가장 오래 기다린 항목의 `waitReason,waitingSince,runLimit?`와 사유별 `waitReasons:[{waitReason,waitingSince,runLimit?,count}]`를 추가한다. 대기 항목이 없으면 요약 사유·시각은 null, 목록은 빈 배열이다.
+
+| waitReason | 뜻 |
+|---|---|
+| run_limit | 전역 동시 실행 한도. `runLimit:{used,limit}`는 실제 점유 중인 직원 수와 한도 |
+| member_busy | 대상 직원이 앞 일을 처리 중 |
+| waking | 시작·재결합 또는 깨우기 진행 중 |
+| receipt_check | 앞 입력의 미확정 수신·물리 입력 fence 확인 중 |
+| approval | 직원의 승인·선택 창 앞 |
+| manual_control | 유효한 직접 조작권 때문에 자동 입력 보류 |
+| runner_off | 실행 꺼짐 또는 실행기 연결 불가 |
+| archived | 보관된 프로젝트 |
+| unknown | 위 사유로 설명되지 않는 대기 |
+
+`waitingSince`는 전달 생성 시각(ISO UTC)이다. 사유가 바뀌어도 이 전달이 연속 대기한 전체 시간을 보존하며 받음/종료된 항목은 메시지의 대기 목록에서 빠진다. GET은 저장된 정보와 메모리 상태만 읽고 실행기·pump를 호출하지 않는다.
+
+명확한 사유 없이 마지막 전달 진행(최근 봉투 updatedAt, 봉투가 없으면 생성)부터 120초 이상 멈추면 delivery ID당 한 번 영속 정체 기록·error activity·대표가 읽는 시스템 메시지('전달 확인 필요')를 남긴다. 이 항목은 notice에서 `phase:needs_owner,reason:stalled,recommendation:{code:"recheck",text:"다시 확인"},allowedActions:["recheck"]`로 보인다. 원래 recovery phase/fence를 거짓 unknown으로 바꾸지 않는다. 기존 복구 API의 version/operationId로 recheck하면 안전 검사를 거친 같은 전달의 pump를 예약한다. 새 전달·원본 복제·위험 재전송 동의를 만들지 않는다. 이미 불확실한 입력은 기존 증거 확인·비재전송 규칙을 그대로 따른다.
+
 ### 3.6 실시간 sync와 iPhone APNs
 
 `GET /api/sync?projectId=<id>`는 사용자 Bearer 아래 `{protocol:2,cursor:{epoch,seq},requestedProjectId,projectStatus,bootstrap,state,revisions}`를 반환한다. projectStatus는 `none|ok|not_found|archived`; 부재/보관도 HTTP 200과 state=null이다. bootstrap은 runtime을 제외하고 revisions는 `{settings,members:{[id]:{configRevision,sessionGeneration}},todos:{[id]:revision}}`다. state와 cursor/revisions는 같은 동기 읽기 경계다. projectId 외 query·빈 값·중복은 400이다.
@@ -154,16 +174,20 @@ history는 snapshot과 별도 캐시다. ID 중복 제거·진행 중 이벤트/
 
 정상 연결에서는 이벤트를 250ms로 묶어 snapshot을 최대 초당 2회/동시 1개 읽고 진행 중 dirty를 보존한다. WS만 실패하면 REST 3초 fallback, REST도 실패하면 3→6→12→24→30초+jitter, WS는 0.5→30초 backoff다. 저전력은 500ms/초당 1회·fallback 10초다. 확인된 401만 인증을 종료하며 403/TLS 오류는 설정 확인을 안내한다. v1 WS의 URL 인증은 호환 부채로 남기고 로그에서 query를 제거한다.
 
-푸시는 실행기 입력용 outbox와 별도인 영속 APNs outbox다. 명시적 opt-in과 OS alert/sound 허용·등록·enabled 저장 뒤 켜진다. 새 기기는 enabled=false이고 종류 기본값 **4종 모두 true**다.
+푸시는 실행기 입력용 outbox와 별도인 영속 APNs outbox다. 명시적 opt-in과 OS alert/sound 허용·등록·enabled 저장 뒤 켜진다. 새 기기는 enabled=false이고 종류 기본값 **6종 모두 true**다. 기존 기기에 `todo_created`·`report_blocked` 키가 없으면 false로 해석하고, 저장된 설정과 전체 enabled를 유지한다. 옛 클라이언트의 4종 부분 PATCH·토큰 재등록도 새 종류의 설정을 지우지 않는다. 공용 종류·설정·payload·target 계약은 `shared/push.ts` 한 곳에서 정의한다.
 
 | PushKind | 사건 | 고정 알림 본문 |
 |---|---|---|
 | `decision` | 새/재열린 ask; 선택지 없는 자유 답변 질문도 한 사건 | 새 결재가 도착했습니다. |
-| `approval_wait` | `blockedReason=permission`으로 확인된 승인 대기 진입 | 진행을 위해 직접 확인이 필요합니다. |
+| `approval_wait` | `blocked`이면서 `permission`·`selection` 또는 core 관측의 `setup + folder_trust` 대기 진입; 같은 episode의 반복·selection→permission은 중복 억제 | 진행을 위해 직접 확인이 필요합니다. |
 | `error` | 새 오류 episode; 같은 오류 반복은 억제 | 실행 문제를 확인해 주세요. |
-| `report_complete` | 명시적 완료 post | 완료 보고가 도착했습니다. |
+| `report_complete` | 명시적 완료 post의 첫 보고 즉시·추가분 마감 요약 | 완료 보고가 도착했습니다. / 추가 완료 보고가 도착했습니다. |
+| `todo_created` | 새 대표 할 일을 committed scan에서 최초 관측 | 대표 할 일이 생겼습니다. |
+| `report_blocked` | 직원의 명시적 막힘 post; 원본 message ID별 한 사건 | 막힘 보고를 확인해 주세요. |
 
-완료 보고는 `(projectId,memberId)`별 첫 보고부터 **고정 120초**로 묶고 마감을 연장하지 않는다. group ID·마감·마지막 message ID·보고 ID 목록·처음의 수신 가능 기기 집합을 DB에 저장하고 닫을 때 사건/기기 delivery를 한 번 만든다. 타 직원/프로젝트는 분리하며 재시작도 같은 마감이다. opt-out으로 취소한 과거 그룹은 다시 켜도 복원하지 않고 새 기기에 소급하지 않는다. target은 마지막 보고와 reportGroup 참조를 반환한다.
+완료 보고는 `(projectId,memberId)`별 첫 보고를 저장할 때 `report-leading:<groupId>` 사건/기기 delivery를 원본과 함께 즉시 저장하고 commit 뒤 worker가 발신한다. 이후 보고만 첫 시각부터 **고정 120초** 창에 추가하며 마감을 연장하지 않는다. 추가분이 있으면 마감에 `report-group:<groupId>` 요약 사건/기기 delivery를 한 번 만들고, 없으면 추가 알림 없이 닫는다. 즉시 알림 target은 첫 보고, 요약 target은 마지막 보고이며 둘 다 전체 원본 ID 순서의 reportGroup 참조를 제공한다. group ID·마감·마지막 message ID·보고 ID 목록·처음의 수신 가능 기기와 registration generation·취소 표식을 DB에 보존한다. 타 직원/프로젝트는 분리하며 재시작도 같은 마감과 수신자다. opt-out으로 취소한 과거 그룹은 다시 켜도 복원하지 않고 새 기기에 소급하지 않는다. 이전 버전에서 열린 leading 사건 없는 그룹은 기존 마감 발신만 유지하며 첫 보고를 소급 발신하지 않는다.
+
+`todo_created`는 `{screen:"home",projectId}`로, `report_blocked`는 `{screen:"chat",projectId,memberId,messageId}`로 이동한다. 프로젝트 없는 `{screen:"home"}`은 기존 테스트 알림 target으로 유지한다. 할 일은 기존 store/Bus wake와 worker 주기 tick에서 관측 ID·사건·outbox를 원자 저장한다. 최초 이주 전의 기존 할 일은 알리지 않고, scan 전에 완료·삭제·보관된 할 일도 알리지 않는다. 발신 전 완료·삭제·보관은 미발신 알림을 취소한다. 단순 진행·대표 메시지·직원 없는 보고는 보고 알림에서 제외한다. 서로 다른 원본 사건을 같은 업무로 추정해 합치지 않는다.
 
 | 사용자 Bearer 경로 | 요청/응답 |
 |---|---|
@@ -252,7 +276,7 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 - 메시지·결재 답·총괄 지시·직원 보고·시스템 알림은 `deliveries`를 거쳐 `enqueue → pump(member) → Runner.send`로 간다. wake=false는 다음 깨움에 함께 보내고 작업 중이면 줄을 선다. 보관·실행 꺼짐·연결 끊김·blocked·수동 lease는 보류 사유다.
 - `send` 성공은 PTY paste+Enter 수락을 뜻한다. 모델이 작업을 끝냈거나 결과가 저장됐다는 뜻이 아니다. started:false도 이미 전달된 입력일 수 있어 자동으로 다시 보내지 않는다. 불확실한 전달은 `delivery_unknown`으로 계속 보류한다.
 - core turn_end는 대기열 진행 신호다. 열린 업무 결재가 남으면 waiting, 아니면 idle로 정리한다. working/idle만으로 업무 완료를 보고하지 않는다. core의 압축은 §3.7의 증거 계약을 따른다. transcript 기반 최종 답변 복원은 하지 않는다.
-- 대표 지시·결재 답으로 일을 맡기면 총괄은 `post`(진행)로 확인·대상·맡긴 일을 한두 줄로 알린다(예고 없음). 직접 지시받은 직원도 바로 확인한다. 총괄·본사 AI가 해당 턴에 `post` 없이 배정(team_assign/team_add/team_resume·결재 follow_up)하면 서버가 시스템 배정 안내를 직원별 한 줄로 남기며, 대기열 여부를 표시하고 턴·대표 원문 기준으로 재시작·재전달 중복을 막는다.
+- 대표 지시·결재 답으로 일을 맡기면 총괄은 `post`(진행)로 확인·대상·맡긴 일을 한두 줄로 알린다(예고 없음). 직접 지시받은 직원도 바로 확인한다. 총괄·본사 AI가 대표 지시 턴에 배정(team_assign/team_add/team_resume·결재 follow_up)하면 그 턴의 실제 post 제목·본문에 이름이 없는 배정 대상만 시스템 안내 한 줄로 보완한다. 직원별 대기열 여부를 표시하고 `(배정자,대표 원문 ID,대상 직원)`별 영속 확인 기록으로 재시작과 묶음 `[A,B]→[A]` 재전달 중복을 막는다.
 - 대표 메시지는 지정 직원 또는 총괄·본사 AI에 전달한다. 총괄 시작은 중복 요청을 합치고 시작 실패도 메시지를 잃지 않게 보류한다. `@직원` 직접 지시는 총괄에게 사실만 알린다. 보관 프로젝트에는 세션 시작·깨움·입력을 거부한다.
 - 결재 답은 물은 직원에게 wake=true, 총괄에게 wake=false다. `expectedVersion`이 다르면 409다. 같은 답 재전송은 멱등이고 다른 답으로 덮어쓰기는 거부한다. 연결 실패를 답변 성공으로 꾸미지 않는다.
 - post의 완료·막힘·질문은 총괄을 깨우고 진행·알림은 다음 깨움에 간다. `ask_close`·`todo_close`의 소유권·사용자 원문 대조는 §7과 같다. 할 일 체크를 되돌리면 나가지 않은 알림은 거두고 이미 전달된 완료는 정정한다.
@@ -261,7 +285,7 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 - 서버 재시작은 기존 core holder를 보존하고 멤버·프로젝트·CLI 라벨로 재결합한다. 단절이나 start timeout만으로 동일 CLI를 다시 띄우지 않는다. 기존 herdr/headless 세션은 원본을 보존하고 `legacy_session`으로 보류한다. 자동 backend 전환이나 이전 프로세스 일괄 종료를 하지 않는다.
 - 이 소스의 backend 조립은 core다. 라이브 herdr 유지·전환 승인은 [운영 모델](operating-model.md)을 따른다. 제공자 기본은 Claude, 프로젝트의 chiefCli와 각 Member.cli는 독립적으로 저장된다. 같은 멤버의 제공자를 바꾸어도 멤버 id·역할·업무·대화·결재·파일은 유지한다.
 - 제공자·살아 있는 세션의 모델/effort 변경은 working·blocked·처리 중·불확실한 전달이 있으면 409다. 새 CLI 인자를 먼저 검증하고, 이전 종료 확인 뒤 `member_session_history`를 남기고 MCP 토큰·session_generation을 회전한다. 이전 종료 실패면 제공자와 토큰을 유지하고, 이후 새 시작 실패면 오류로 남긴다.
-- 같은 Claude 설정 변경은 native UUID를 `--resume`한다. 제공자 변경이나 native ID를 모르는 Codex 설정 변경은 새 세션이다. 역할·현재 일·다음 일·프로젝트 상황과 board 확인 안내를 넣는다. 같은 대화 문맥·숨은 추론을 다른 제공자에게 옮기는 기능은 없다.
+- 같은 제공자의 설정 변경은 Claude와 Codex 모두 native session ID를 보존해 resume한다. native ID를 모르거나 resume이 실패하면 즉시 새 세션을 만들지 않고 설정 적용을 다음 자연 기동으로 보류한다. 보류 설정과 실패 여부는 DB에 남아 서버 재시작으로 재기동을 반복하지 않는다. 실패 시 미확정 입력·종료 검증을 우회해 옛 설정으로 무조건 전달하지 않는다. 명시적 새 세션/제공자 변경은 별도의 새 세션 경로다. 역할·현재 일·다음 일·프로젝트 상황과 board 확인 안내를 넣는다. 같은 대화 문맥·숨은 추론을 다른 제공자에게 옮기는 기능은 없다.
 - 모델은 멤버별 덮어쓰기, 적용 가능한 직급 값, CLI 기본 순이다. Claude용 직급 모델·staff 설정을 Codex에 자동 상속하지 않는다. 설정은 실행 인자로 적용하고 사용자 전역 CLI 기본값을 수정하지 않는다. null 모델·effort는 기본으로 돌아간다.
 - 판 정리는 기존 주기·변경 여부·연결·총괄 idle·중복 지시 조건을 따르며 정리만 하려고 새 총괄을 띄우지 않는다. 명시적 tidy는 총괄에게 지시를 넣는다. 업무 완료 보고는 MCP에 남긴다.
 - 직접 `iamceo join`한 CLI는 실행기 밖이다. 서버가 그 프로세스를 띄우거나 입력하지 않고 wait/ask 롱폴로 지시·답을 받는다. 과거 herdr adopt·release는 새 core 편입 수단이 아니다.
@@ -270,7 +294,7 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 공통: `status{now,next?}` · `ask{title,detail,options?[{k,label,desc}],rec?,group?,file_id?,images?[]}` · `post{kind:'완료'|'진행'|'막힘'|'알림',title,body?,file_ids?,decision_id?}` · `file{title,summary?,path?|content?|html?,images?[]}`(html: 자체 완결 HTML 2MB 이하 → kind=artifact, path 는 확장자로 종류를 정한다: .html 아티팩트, csv·tsv 표, json·코드·로그·txt 코드, pdf, 이미지, 영상, 오디오) · `todo{title,detail?}`(대표가 할 일)
 총괄 추가: `team_add{name,role,handle?,cwd?,first_instruction?,user_quote?,parallel?}`(cwd 는 프로젝트 폴더 안, 데이터 폴더·비밀 폴더는 거부. 밖은 대표 글에 그 경로가 있고 user_quote 로 대조될 때만) · `team_assign{member,text,user_quote?,parallel?,urgent?,attachments?}`(attachments: 그 프로젝트 대표 메시지의 첨부 id, 받는 직원 폴더로 잇는다) · `team_compact{member,focus?}` · `team_sleep{member,force?}` · `team_resume{member,first_instruction?}` · `team_close{member}` · `roster{}` · `project_now{text}` · `work_set{id?,sec,title,detail?,who?}` · `work_list{}` · `work_remove{id}` · `board{}`
 본사 AI 추가: `project_create{name,cwd,goal?,start_conductor?}` · `project_list{}` · `board{}`
-판 정리(공통, 직원은 자기가 올린 결재·할 일만): `ask_close{id,kind:'decided'|'obsolete',reason,user_quote?,follow_up?}` (`follow_up:{kind:"none"}|{kind:"instruction",member_id,text,source_message_id}`로 닫기와 명시 후속을 함께 저장)(decided 는 user_quote 필수, 대표 글로 확인되어야 닫힌다) · `todo_close{id,outcome:'done'|'dropped',reason}`. `board` 는 열린 결재(id·제목·물은 직원·올린 날짜·묶음)·안 끝난 할 일(id·제목·부탁한 사람·날짜)·진행판(id·칸·제목·갱신 날짜, 완료는 최근 10)·지금 상황·지난 판 정리 시각. 도구 설명에 '대신 답하지 않는다(추측으로 닫지 않는다, 애매하면 둔다)'를 쓴다.
+판 정리(공통, 직원은 자기가 올린 결재·할 일만): `ask_close{id,kind:'decided'|'obsolete',reason,user_quote?,answered_decision_id?,same_issue?,follow_up?}` (`follow_up:{kind:"none"}|{kind:"instruction",member_id,text,source_message_id?}`로 닫기와 명시 후속을 함께 저장). decided는 대표 글의 `user_quote` 또는 같은 프로젝트의 실제 answered/delivered 결재 `answered_decision_id`를 근거로 쓴다. 후자는 nonempty group 일치 또는 총괄·본사 AI의 `same_issue` 설명이 필수이며 직원은 다른 그룹을 연결할 수 없다. 서버가 고른 버튼 글·메모 전체를 직접 인용하고 `decision_close_audit`에 닫은 결재·답한 결재·작성자·동일 안건 설명·인용·시각을 기록한다. answered_decision_id 근거의 후속 instruction은 source_message_id를 생략하며 검증된 답을 `sourceDecisionId`로 저장한다. 닫기·감사·원문 알림·후속 outbox는 원자 저장한다. 대표 글 근거는 기존 source_message_id 검증을 유지하며 버튼 글만의 인용은 계속 거부한다 · `todo_close{id,outcome:'done'|'dropped',reason}`. `board` 는 열린 결재(id·제목·물은 직원·올린 날짜·묶음)·안 끝난 할 일(id·제목·부탁한 사람·날짜)·진행판(id·칸·제목·갱신 날짜, 완료는 최근 10)·지금 상황·지난 판 정리 시각. 도구 설명에 '대신 답하지 않는다(추측으로 닫지 않는다, 애매하면 둔다)'를 쓴다.
 직접 띄운 CLI 추가: `wait{timeout_sec?,batch?:true,ack_batch_id?}` — 밀린 지시 받기. 엄격 경로는 `POST /agent/inbox/wait` `{timeoutMs?}`로 `{id,memberId,items,createdAt}`를 재조회하고 `POST /agent/inbox/ack` `{batchId}` → `{batchId,acknowledged:true}`로 소비한다. 응답만 반환했다고 delivered로 확정하지 않는다. 브리지가 호출 전에 만든 `operationId`를 `/agent/tool`의 `{name,args,operationId}`에 보내며 같은 ID의 재요청만 합친다. 같은 본문의 새 ID는 독립 호출이다. manual 답 수신은 화면의 최근 50건 제한을 사용하지 않고 askWait와 소비 상태를 공유한다. 브리지는 wait에 batch=true를 붙이고 `ack_batch_id`로 명시 ACK한다. 보고 `post{report_id}`는 새 게시 없이 원본·전체 자료·결재·작성 순서·정정 관계를 조회한다.
 `member` 인자는 핸들 또는 화면 이름.
 **파일 경로(`file`의 path·images, `ask`의 images)**: 심볼릭 링크를 따라간 경로가 작업 폴더(직원·프로젝트) 안이어야 하고, `~/.ssh` 등 비밀 폴더·`.env`·개인 키·셸 기록·`~/.claude.json`·`~/.iamceo`의 설정·토큰·DB·첨부는 어디서든 거부한다. 작업 폴더가 홈이면(본사) 홈 바로 아래의 점 파일·점 폴더를 모두 거부한다. 하드 링크(nlink>1)도 거부한다. 검사한 진짜 경로로 읽는다. 같은 OS 사용자로 도는 세션의 Bash 까지 막지는 않는다.
@@ -329,3 +353,7 @@ clone은 `<IAMCEO_HOME>/clone-staging/<jobId>`(0700)에서 수행한다. 대상 
 ### 알려진 한계: 로컬 파일 열람·자료 등록의 경로 경쟁 (2026-11-08 결정)
 로컬 파일 API는 한 번 얻은 canonical 경로에 정책 검사와 stat을 함께 적용하고, 열린 FD의 fstat과 dev/ino가 같을 때만 읽는다. 일반 파일의 nlink>1은 읽기와 첨부 복사 전후에 403("다른 이름으로 연결된 파일(하드 링크)은 열지 않습니다")으로 거부한다. 직원 도구와 공통 비밀 파일·위치 정책을 쓰며 실제 config.home/IAMCEO_HOME 및 Claude/Codex 홈 설정의 canonical 경로 전체도 금지한다. SVG 자료는 이미지 원본을 첨부한다.
 상위 디렉터리를 검사와 open 사이뿐 아니라 realpath·정책 검사와 stat 사이에 바꾸는 경쟁도 남는다. Node/Bun에 디렉터리 FD 기준 openat이 없어 상위 경로를 고정할 수 없다. 필요한 권한은 경로의 교체 가능한 상위 디렉터리에 대한 로컬 쓰기 권한이며, 공유 작업 폴더나 ACL을 통해 이 권한을 가진 다른 사용자도 포함한다. 서버와 같은 UID나 비밀 파일의 직접 읽기 권한이 필수인 것은 아니다. 이 한계는 받아들이되, 서로 다른 realpath 관측의 inode와 정책 판단을 섞는 경우는 거절한다. 근거: .pumasi/specs/review-15-findings.md, .pumasi/specs/review-16-findings.md 및 감독자 결정.
+
+### UX-T1 보고 보완 범위
+
+core 업무 턴의 최종 결과가 없으면 기존 업무를 다시 실행하지 않는 보고 보완을 한 번 요청한다. 보완을 포함한 턴도 완료·답변·막힘·질문·열린 결재 등 유효 결과 없이 끝나면 execution journal의 report notice claim으로 '결과 보고 누락' 시스템 메시지와 error activity를 한 번 남긴다. 추가 보완/업무 재실행은 자동으로 만들지 않는다. 보완의 오류·중단 종료도 같은 누락 확인을 한다. 기존 notice 응답의 하위 호환 추가 필드 `deliveryNotices.reportNotices`는 `{kind:"missing_report",runId,memberId,messageId,createdAt,title:"결과 보고 누락"}` 목록이다. 이후 해당 직원이 유효한 결과·막힘·질문을 남기거나 열린 결재로 기다리면 활성 목록에서 빠지고 시스템 메시지는 이력으로 남는다. 총괄·본사 AI의 직원 보고 확인 턴은 보완 대상에서 제외하고, wake=true 대표 메시지·결재 답으로 시작한 턴은 계속 검사한다. 직원의 실제 배정 업무는 기존 최종 보고 의무를 유지한다.

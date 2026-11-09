@@ -383,7 +383,7 @@ import SwiftUI
             let server = WriteTestServer()
             let network = try IsolatedTestNetwork { request in
                 if request.url?.path == "/api/sync", let gate = server.read({ $0.gate }) {
-                    server.read { $0.entered }?.fulfill(); gate.wait()
+                    server.read { $0.entered }?.fulfill(); XCTAssertEqual(gate.wait(timeout: .now() + 5), .success, "Fixture gate timed out")
                 }
                 return try server.handle(request)
             }

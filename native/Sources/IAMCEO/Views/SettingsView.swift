@@ -933,9 +933,9 @@ struct SettingsView: View {
         var badge: String? = nil
     }
     private static let permissionChoices = [
-        PermissionChoice(id: "bypassPermissions", title: "바이패스", detail: "직원이 승인 없이 명령을 실행합니다", badge: "기본"),
-        PermissionChoice(id: "auto", title: "오토", detail: "위험해 보이는 작업만 멈춥니다"),
-        PermissionChoice(id: "default", title: "모두 승인", detail: "도구를 쓸 때마다 승인을 기다립니다")
+        PermissionChoice(id: "bypassPermissions", title: "묻지 않기", detail: "직원이 승인 창 없이 명령을 실행합니다", badge: "기본"),
+        PermissionChoice(id: "auto", title: "위험할 때만 묻기", detail: "위험해 보이는 작업만 멈추고 묻습니다"),
+        PermissionChoice(id: "default", title: "매번 묻기", detail: "도구를 쓸 때마다 승인을 기다립니다")
     ]
 
     private struct RankRow: Identifiable {
@@ -947,9 +947,9 @@ struct SettingsView: View {
         var showsEffort: Bool { cli != .codex || key != "staff" }
     }
     private static let rankRows = RankSettingsCLI.allCases.flatMap { cli in [
-        RankRow(key: "manager", title: "부장", scope: "총괄·본사 AI", cli: cli),
-        RankRow(key: "lead", title: "팀장", scope: "직원 세션", cli: cli),
-        RankRow(key: "staff", title: "직원", scope: "서브에이전트", cli: cli)
+        RankRow(key: "manager", title: "총괄", scope: "본사 AI도 같음", cli: cli),
+        RankRow(key: "lead", title: "팀장", scope: "일을 맡는 직원", cli: cli),
+        RankRow(key: "staff", title: "서브에이전트", scope: "팀장이 나눠 맡기는 일", cli: cli)
     ] }
     private static let tidyChoices = [0, 3, 6, 12, 24]
     /// Mac rank rows: the model and effort columns (the group caption lines up with them).
@@ -1150,9 +1150,9 @@ struct SettingsView: View {
         case .ai:
             func name(_ rank: String) -> String {
                 let value = settingsTrim(draft.rankConfig(rank, cli: .claude)?.model ?? "")
-                return value.isEmpty ? "CLI 기본" : value
+                return value.isEmpty ? "기본값" : value
             }
-            return "Claude 부장 \(name("manager")) · 팀장 \(name("lead"))"
+            return "총괄 \(name("manager")) · 팀장 \(name("lead"))"
         case .notifications:
             var parts = ["Mac \(draft.notifyMac ? "켬" : "끔")"]
             if let service = store.pushNotifications {
@@ -1269,7 +1269,7 @@ struct SettingsView: View {
                     numberControl("팀장 수 경보", unit: "명", value: $draft.maxAwakeWorkers, range: 1...256)
                 }
                 RowDivider(inset: 0)
-                SettingsRow("문맥 기준", hint: "팀 화면 표시용입니다. 압축은 터미널에서 /compact로 합니다.", hintBelowOnPhone: true) {
+                SettingsRow("문맥 기준", hint: "이 비율을 넘으면 팀 화면에 표시합니다. 직원 상세의 '문맥 압축'으로 줄일 수 있습니다.", hintBelowOnPhone: true) {
                     numberControl("문맥 기준", unit: "%", value: $draft.compactAtPct, range: 1...100, step: 5)
                 }
                 RowDivider(inset: 0)
@@ -1354,8 +1354,8 @@ struct SettingsView: View {
                         .disabled(store.connectionStatus != .connected || store.isLoading || busy != nil)
                 }
             }) {
-                SettingsRow("herdr-core", hint: runtime?.core.detail, monoHint: true) { DotValue(tone: coreState(runtime).tone, text: coreState(runtime).text) }
-                    .help("모든 AI 직원은 herdr-core에서 실행됩니다. 직원마다 Claude Code 또는 Codex를 고릅니다.")
+                SettingsRow("실행 엔진", hint: runtime?.core.detail, monoHint: true) { DotValue(tone: coreState(runtime).tone, text: coreState(runtime).text) }
+                    .help("모든 AI 직원은 이 실행 엔진(herdr-core) 위에서 일합니다. 직원마다 Claude Code 또는 Codex를 고릅니다.")
                 RowDivider(inset: 0)
                 SettingsRow("Claude Code") { DotValue(tone: providerState(runtime, "claude").tone, text: providerState(runtime, "claude").text) }
                 RowDivider(inset: 0)
@@ -1388,12 +1388,12 @@ struct SettingsView: View {
             #if os(macOS)
             HStack(spacing: 8) {
                 Text("모델").padding(.leading, 11).frame(width: Self.modelWidth, alignment: .leading)
-                Text("effort").padding(.leading, 11).frame(width: Self.effortWidth, alignment: .leading)
+                Text("생각 깊이").padding(.leading, 11).frame(width: Self.effortWidth, alignment: .leading)
             }
             .font(SetupFont.label).foregroundStyle(CE.ink2)
             .accessibilityHidden(true)
             #else
-            Text("모델 · effort").font(SetupFont.label).foregroundStyle(CE.ink2).accessibilityHidden(true)
+            Text("모델 · 생각 깊이").font(SetupFont.label).foregroundStyle(CE.ink2).accessibilityHidden(true)
             #endif
         }) {
             ForEach(Array(rows.enumerated()), id: \.element.id) { index, rank in
@@ -1423,7 +1423,7 @@ struct SettingsView: View {
                     Group {
                         if rank.showsEffort { effortMenu(rank) }
                         else {
-                            Text("CLI 기본").font(SetupFont.select).foregroundStyle(CE.ink3)
+                            Text("기본값").font(SetupFont.select).foregroundStyle(CE.ink3)
                                 .padding(.leading, 11).frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
@@ -1466,7 +1466,7 @@ struct SettingsView: View {
         let value = model(of: rank)
         let list = store.modelCatalog.list(for: rank.cli)
         let selected = list.option(for: value)
-        let defaultLabel = "CLI 기본"
+        let defaultLabel = "기본값"
         let label = list.unknownCurrent(value) ?? selected?.label ?? defaultLabel
         // Sans like the web select, so 'CLI 기본' and a model name sit at the same size in the column.
         return SetupMenu(label, compact: true, label: "\(rank.title) 모델") {
@@ -1482,8 +1482,8 @@ struct SettingsView: View {
     private func effortMenu(_ rank: RankRow) -> some View {
         let current = draft.rankConfig(rank.key, cli: rank.cli)?.effort
         let options = store.modelCatalog.list(for: rank.cli).efforts(for: model(of: rank), cli: rank.cli)
-        let defaultLabel = "CLI 기본"
-        return SetupMenu(current ?? defaultLabel, compact: true, label: "\(rank.title) effort") {
+        let defaultLabel = "기본값"
+        return SetupMenu(current ?? defaultLabel, compact: true, label: "\(rank.title) 생각 깊이") {
             Toggle(defaultLabel, isOn: menuCheck(current == nil) { setEffort(nil, for: rank) })
             Divider()
             ForEach(options, id: \.self) { effort in
@@ -1569,7 +1569,7 @@ struct SettingsView: View {
                         SettingsRow("서버 주소", stacksOnPhone: true) { addressText(store.endpoint) }
                         if !urls.isEmpty {
                             RowDivider(inset: 0)
-                            SettingsRow("들어올 주소", stacksOnPhone: true) {
+                            SettingsRow("밖에서 접속할 주소", stacksOnPhone: true) {
                                 VStack(alignment: isMac ? .trailing : .leading, spacing: 4) {
                                     ForEach(urls, id: \.self) { addressText($0) }
                                 }
@@ -1716,7 +1716,7 @@ struct SettingsView: View {
                     .fixedSize()
                 } else {
                     Image(systemName: "checkmark.circle.fill").font(.system(size: 15)).foregroundStyle(CE.success)
-                    Text("저장했습니다. 모델·effort는 다음 실행에 적용됩니다.")
+                    Text("저장했습니다. 모델과 생각 깊이는 다음 실행부터 적용됩니다.")
                         .font(CEFont.note).foregroundStyle(CE.success).lineLimit(2)
                         .ceLineHeight(13.5, 1.4)
                     Spacer(minLength: 0)
@@ -1979,7 +1979,7 @@ struct NewProjectView: View {
     }
 
     var body: some View {
-        CESheet("새 프로젝트", subtitle: "서버 컴퓨터의 폴더에서 총괄 세션을 바로 엽니다.", icon: "folder.badge.plus", width: 520,
+        CESheet("새 프로젝트", subtitle: "작업 폴더를 고르면 총괄이 바로 일을 시작합니다.", icon: "folder.badge.plus", width: 520,
                 onClose: { if !working { dismiss() } }) {
             form
         } footer: {
@@ -2057,15 +2057,15 @@ struct NewProjectView: View {
                         chosenFolder
                     }
                 }
-                SetupField("총괄 AI CLI") {
+                SetupField("총괄이 쓸 AI") {
                     SettingsSegments(options: ["claude", "codex"].map { SettingsSegments.Option(id: $0, title: providerLabel($0)) },
-                                     selection: provider, label: "총괄 AI CLI", fill: true) { provider = $0 }
+                                     selection: provider, label: "총괄이 쓸 AI", fill: true) { provider = $0 }
                 }
             }
             .disabled(partial != nil || working)
             if let core = coreUnavailable, partial == nil {
                 InlineNotice(tone: .attention, icon: "exclamationmark.triangle",
-                             title: core.installed ? "herdr-core를 쓸 수 없습니다" : "herdr-core가 설치되지 않았습니다",
+                             title: core.installed ? "실행 엔진을 쓸 수 없습니다" : "실행 엔진(herdr-core)이 설치되지 않았습니다",
                              detail: [core.detail, "지금 만들면 프로젝트만 생기고 총괄은 뜨지 않을 수 있습니다. 설정 › AI 모델의 실행 환경을 확인하세요."].compactMap { $0 }.joined(separator: " "))
             }
             if let partial {

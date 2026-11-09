@@ -1,11 +1,14 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import { DEFAULT_PUSH_BUNDLE_ID, DEFAULT_PUSH_PREFERENCES, PUSH_KINDS, PUSH_REPORT_GROUP_WINDOW_MS } from "../../shared/push.ts";
-import type { PatchPushDeviceRequest, PushAuthorization, PushDeliveryState, PushDevice, PushEnvironment, PushEventTarget, PushEventTargetResult, PushKind, PushPreferences, PushProviderStatus, PushReportGroup, RegisterPushDeviceRequest } from "../../shared/push.ts";
+import { DEFAULT_PUSH_BUNDLE_ID, PUSH_REPORT_GROUP_WINDOW_MS } from "../../shared/push.ts";
+import type { PushAuthorization, PushDeliveryState, PushEnvironment, PushProviderStatus, PushReportGroup, RegisterPushDeviceRequest } from "../../shared/push.ts";
 import type { Message } from "../../shared/types.ts";
 import type { PushReportGroupStore } from "../service-contracts.ts";
 import { ApiError } from "../store.ts";
 import { APNS_TTL_MS, buildAPNsPayload } from "./apns.ts";
+import { DEFAULT_PUSH_PREFERENCES, PUSH_KINDS, storedPushPreferences } from "./contracts.ts";
+import type { PatchPushDeviceRequest, PushDevice, PushEventTarget, PushEventTargetResult, PushKind } from "./contracts.ts";
+import { extendPushSchema } from "./schema.ts";
 
 const DAY = 86_400_000;
 export interface PushStoreOptions {
@@ -43,7 +46,7 @@ interface DeliveryRow {
 }
 function device(row: DeviceRow): PushDevice {
   return { id: row.id, label: row.label, platform: row.platform, bundleId: row.bundle_id, environment: row.environment,
-    enabled: !!row.enabled, authorization: row.authorization, preferences: JSON.parse(row.preferences), state: row.state,
+    enabled: !!row.enabled, authorization: row.authorization, preferences: storedPushPreferences(row.preferences), state: row.state,
     revision: row.revision, registeredAt: row.registered_at, lastSeenAt: row.last_seen_at, expiresAt: row.expires_at,
     lastAcceptedAt: row.last_accepted_at, lastFailure: row.last_failure };
 }
@@ -70,6 +73,7 @@ export class PushStore implements PushReportGroupStore {
     this.now = options.now ?? Date.now;
     this.providers = options.providers ?? (() => []);
     this.transaction(() => {
+      extendPushSchema(this.db);
       this.run("INSERT OR IGNORE INTO push_meta(id,server_id,created_at) VALUES(1,?,?)", randomUUID(), this.timestamp());
     });
   }
@@ -108,7 +112,7 @@ export class PushStore implements PushReportGroupStore {
   private ready(row: DeviceRow): boolean { return this.provider(row.bundle_id, row.environment)?.state === "ready"; }
   private eligible(row: DeviceRow, kind: PushEvent["kind"], at: string): boolean {
     return row.state === "active" && !!row.token && !!row.enabled && authorized(row.authorization) && row.expires_at > at &&
-      this.ready(row) && (kind === "test" || (JSON.parse(row.preferences) as PushPreferences)[kind]);
+      this.ready(row) && (kind === "test" || storedPushPreferences(row.preferences)[kind]);
   }
   registerDevice(id: string, request: RegisterPushDeviceRequest): PushDevice {
     uuid(id);
@@ -159,7 +163,7 @@ export class PushStore implements PushReportGroupStore {
       const permission = patch.authorization ?? row.authorization;
       const enabled = authorized(permission) && (patch.enabled ?? !!row.enabled);
       if (patch.enabled && (!authorized(permission) || row.state !== "active" || !row.token || !this.ready(row))) throw new ApiError(409, "이 기기에서 알림을 켤 수 없습니다");
-      const preferences = { ...JSON.parse(row.preferences) as PushPreferences, ...patch.preferences };
+      const preferences = { ...storedPushPreferences(row.preferences), ...patch.preferences };
       this.run("UPDATE push_devices SET enabled=?,preferences=?,label=?,authorization=?,revision=revision+1 WHERE id=?",
         enabled ? 1 : 0, JSON.stringify(preferences), patch.label ?? row.label, permission, id);
       if (!enabled) this.cancelDevice(id, this.timestamp());
@@ -249,6 +253,13 @@ export class PushStore implements PushReportGroupStore {
       const row = this.one<{ status: string; updated_at: string }>("SELECT status,updated_at FROM decisions WHERE id=? AND project_id=?", value.target.decisionId, value.projectId);
       return !!row && row.status === "open" && value.sourceKey === `ask:${value.target.decisionId}:${row.updated_at}`;
     }
+    if (value.kind === "todo_created") {
+      const todoId = value.sourceKey.slice("todo:".length);
+      return value.sourceKey.startsWith("todo:") && !!this.one("SELECT 1 FROM todos WHERE id=? AND project_id=? AND done=0", todoId, value.projectId);
+    }
+    if (value.kind === "report_blocked") {
+      return value.target.screen === "chat" && !!this.one("SELECT 1 FROM messages WHERE id=? AND project_id=? AND member_id=? AND mine=0 AND kind='막힘'", value.target.messageId, value.projectId, value.memberId);
+    }
     if (value.kind === "report_complete") {
       if (value.target.screen !== "chat") return false;
       return !!this.one("SELECT 1 FROM messages WHERE id=? AND project_id=? AND member_id=? AND mine=0 AND kind='완료'", value.target.messageId, value.projectId, value.memberId);
@@ -293,8 +304,10 @@ export class PushStore implements PushReportGroupStore {
       this.closeDueGroups(at);
       if (!this.projectActive(message.projectId) || !this.one("SELECT 1 FROM members WHERE id=? AND project_id=?", message.memberId, message.projectId) ||
           !this.one("SELECT 1 FROM messages WHERE id=? AND project_id=? AND member_id=? AND mine=0 AND kind='완료'", message.id, message.projectId, message.memberId)) throw new ApiError(404, "보고를 찾을 수 없습니다");
+      let leading = false;
       let row = this.one<GroupRow>("SELECT * FROM push_report_groups WHERE project_id=? AND member_id=? AND state='open'", message.projectId, message.memberId);
       if (!row) {
+        leading = true;
         const id = randomUUID();
         this.run(`INSERT INTO push_report_groups(id,project_id,member_id,opened_at,closes_at,last_message_id) VALUES(?,?,?,?,?,?)`,
           id, message.projectId, message.memberId, at, new Date(Date.parse(at) + PUSH_REPORT_GROUP_WINDOW_MS).toISOString(), message.id);
@@ -305,7 +318,24 @@ export class PushStore implements PushReportGroupStore {
       }
       this.run(`INSERT INTO push_report_group_reports(group_id,message_id,ordinal) VALUES(?,?,(SELECT COUNT(*) FROM push_report_group_reports WHERE group_id=?))`, row.id, message.id, row.id);
       this.run("UPDATE push_report_groups SET last_message_id=? WHERE id=?", message.id, row.id);
+      if (leading) {
+        const group = this.getReportGroup(row.id)!;
+        const saved = this.recordEvent({ sourceKey: `report-leading:${row.id}`, kind: "report_complete", projectId: message.projectId, memberId: message.memberId,
+          occurredAt: at, target: { screen: "chat", projectId: message.projectId, memberId: message.memberId, messageId: message.id, groupId: row.id } }, group.recipients);
+        this.run("UPDATE push_report_groups SET event_id=? WHERE id=?", saved.id, row.id);
+      }
       return this.getReportGroup(row.id)!;
+    });
+  }
+  /** Worker already wakes on committed store/Bus changes; scan also covers restart gaps. */
+  recordTodoChanges(): void {
+    this.transaction(() => {
+      for (const row of this.all<{ id: string; project_id: string; member_id: string | null; done: number; created_at: string }>(
+        "SELECT t.id,t.project_id,t.member_id,t.done,t.created_at FROM todos t LEFT JOIN push_todo_observations o ON o.todo_id=t.id WHERE o.todo_id IS NULL ORDER BY t.rowid")) {
+        this.run("INSERT INTO push_todo_observations(todo_id) VALUES(?)", row.id);
+        if (!row.done && this.projectActive(row.project_id)) this.recordEvent({ sourceKey: `todo:${row.id}`, kind: "todo_created",
+          projectId: row.project_id, memberId: row.member_id, occurredAt: row.created_at, target: { screen: "home", projectId: row.project_id } });
+      }
     });
   }
   closeDueGroups(now: string): void {
@@ -319,6 +349,11 @@ export class PushStore implements PushReportGroupStore {
           this.run("UPDATE push_report_groups SET state='cancelled',closed_at=? WHERE id=? AND state='open'", at, row.id);
           continue;
         }
+        // Old open groups have no leading event and retain their original close behavior.
+        if (this.eventBySource(`report-leading:${row.id}`) && group.reportIds.length === 1) {
+          this.run("UPDATE push_report_groups SET state='closed',closed_at=? WHERE id=? AND state='open'", at, row.id);
+          continue;
+        }
         const saved = this.recordEvent({ sourceKey: `report-group:${row.id}`, kind: "report_complete", projectId: row.project_id, memberId: row.member_id,
           occurredAt: row.closes_at, target: { screen: "chat", projectId: row.project_id, memberId: row.member_id, messageId: row.last_message_id, groupId: row.id } }, recipients);
         this.run("UPDATE push_report_groups SET state='closed',event_id=?,closed_at=? WHERE id=? AND state='open'", saved.id, at, row.id);
@@ -328,6 +363,7 @@ export class PushStore implements PushReportGroupStore {
   eventTarget(id: string): PushEventTargetResult {
     const saved = this.getEvent(id);
     if (!saved || Date.parse(saved.occurredAt) <= this.now() - 90 * DAY || (saved.kind !== "test" && !this.projectActive(saved.projectId))) throw new ApiError(404, "알림을 찾을 수 없습니다");
+    if (saved.kind === "todo_created" && !this.one("SELECT 1 FROM todos WHERE id=? AND project_id=?", saved.sourceKey.slice("todo:".length), saved.projectId)) throw new ApiError(404, "알림 대상을 찾을 수 없습니다");
     const target = saved.target;
     if (target.screen === "inbox" && !this.one("SELECT 1 FROM decisions WHERE id=? AND project_id=?", target.decisionId, target.projectId) ||
         target.screen === "team" && !this.one("SELECT 1 FROM members WHERE id=? AND project_id=?", target.memberId, target.projectId) ||

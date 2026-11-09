@@ -5,8 +5,8 @@ import XCTest
 private actor HistoryMock: MessageHistoryService {
     struct Call: Sendable { let cursor: String?; let limit: Int; let archived: Bool }
     private(set) var calls: [Call] = []
-    private var pending: [Int: CheckedContinuation<MessagePage, Error>] = [:]
-    private var observers: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var pending: [Int: TestDeadlineContinuation<MessagePage, Error>] = [:]
+    private var observers: [(Int, TestDeadlineContinuation<Void, Never>)] = []
     func messagePage(projectID: String, scope: MessageScope, cursor: String?, limit: Int) async throws -> MessagePage {
         try await page(cursor: cursor, limit: limit, archived: false)
     }
@@ -16,7 +16,7 @@ private actor HistoryMock: MessageHistoryService {
     private func page(cursor: String?, limit: Int, archived: Bool) async throws -> MessagePage {
         let index = calls.count
         calls.append(Call(cursor: cursor, limit: limit, archived: archived))
-        return try await withCheckedThrowingContinuation { continuation in
+        return try await withThrowingTestDeadline { continuation in
             pending[index] = continuation
             let ready = observers.filter { $0.0 <= calls.count }
             observers.removeAll { $0.0 <= calls.count }
@@ -25,7 +25,7 @@ private actor HistoryMock: MessageHistoryService {
     }
     func waitForCalls(_ count: Int) async {
         if calls.count >= count { return }
-        await withCheckedContinuation { observers.append((count, $0)) }
+        await withTestDeadline(fallback: ()) { observers.append((count, $0)) }
     }
     func respond(_ index: Int, _ result: Result<MessagePage, Error>) { pending.removeValue(forKey: index)!.resume(with: result) }
     func message(id: String) async throws -> Message { throw URLError(.unsupportedURL) }

@@ -254,6 +254,70 @@ describe("delivery safety and OSC7501 turns", () => {
     expect(events.some((event) => event.type === "status" && event.status === "gone")).toBe(false);
     f.setHook(null); const terminal = f.terminals.get(start.paneId)!; terminal.status = { state: "working" }; await until(() => events.some((event) => event.type === "status" && event.status === "working")); expect(f.calls.filter((request) => request.method === "terminal.run")).toHaveLength(1);
   });
+  test("a held slow employee does not block healthy polls; only that employee backs off and recovers", async () => {
+    const f = await fixture(); const runner = f.runner(20, { rpcTimeoutMs: 500, pollConcurrency: 2 });
+    const slow = await runner.start(member({ id: "slow" }), f.opts);
+    const fast = await runner.start(member({ id: "fast" }), f.opts);
+    const gets: { terminal: string; at: number }[] = [];
+    let held: { request: Request; socket: Socket } | null = null;
+    f.setHook((request, socket) => {
+      if (request.method !== "terminal.get") return false;
+      gets.push({ terminal: request.params.terminal, at: Date.now() });
+      if (request.params.terminal !== slow.paneId || held) return false;
+      held = { request, socket }; return true;
+    });
+    await until(() => gets.filter(r => r.terminal === fast.paneId).length >= 4);
+    expect(gets.filter(r => r.terminal === slow.paneId)).toHaveLength(1);
+    const resolvedAt = Date.now();
+    const reply = held as unknown as { request: Request; socket: Socket };
+    reply.socket.write(JSON.stringify({ jsonrpc: "2.0", id: reply.request.id, result: f.terminals.get(slow.paneId) }) + "\n");
+    await until(() => gets.filter(r => r.terminal === slow.paneId).length >= 3);
+    const slowGets = gets.filter(r => r.terminal === slow.paneId);
+    expect(slowGets[1].at - resolvedAt).toBeGreaterThanOrEqual(35);
+    expect(slowGets[2].at - slowGets[1].at).toBeLessThan(75);
+    expect(f.calls.some(r => ["terminal.send", "terminal.keys", "terminal.kill"].includes(r.method))).toBe(false);
+  });
+  test("poll concurrency is bounded, each employee has one in-flight read and waiting employees get the next slot", async () => {
+    const f = await fixture(); const runner = f.runner(20, { rpcTimeoutMs: 1000, pollConcurrency: 2 });
+    for (let i = 0; i < 5; i++) await runner.start(member({ id: `employee-${i}` }), f.opts);
+    const held: { request: Request; socket: Socket }[] = [];
+    f.setHook((request, socket) => {
+      if (request.method !== "terminal.get") return false;
+      held.push({ request, socket }); return true;
+    });
+    await until(() => held.length === 2); await Bun.sleep(60);
+    expect(held).toHaveLength(2);
+    expect(new Set(held.map(r => r.request.params.terminal)).size).toBe(2);
+    const first = held[0];
+    first.socket.write(JSON.stringify({ jsonrpc: "2.0", id: first.request.id, result: f.terminals.get(first.request.params.terminal) }) + "\n");
+    await until(() => held.length === 3);
+    expect(new Set(held.map(r => r.request.params.terminal)).size).toBe(3);
+    await runner.shutdown();
+    for (const reply of held.slice(1)) reply.socket.write(JSON.stringify({ jsonrpc: "2.0", id: reply.request.id, result: f.terminals.get(reply.request.params.terminal) }) + "\n");
+    const calls = f.calls.length; await Bun.sleep(50); expect(f.calls).toHaveLength(calls);
+  });
+  test("failed observations back off per employee without reporting death, and a healthy reply resets the cadence", async () => {
+    const f = await fixture(); const runner = f.runner(20);
+    const slow = await runner.start(member({ id: "failing" }), f.opts);
+    const fast = await runner.start(member({ id: "healthy" }), f.opts);
+    const events: RunnerEvent[] = []; runner.on(e => events.push(e));
+    const times: number[] = []; let failing = true;
+    f.setHook((request, socket) => {
+      if (request.method !== "terminal.get" || request.params.terminal !== slow.paneId) return false;
+      times.push(Date.now());
+      if (!failing) return false;
+      socket.destroy(); return true;
+    });
+    await until(() => times.length >= 3);
+    expect(times[1] - times[0]).toBeGreaterThanOrEqual(35);
+    expect(times[2] - times[1]).toBeGreaterThanOrEqual(75);
+    expect(f.calls.filter(r => r.method === "terminal.get" && r.params.terminal === fast.paneId).length).toBeGreaterThan(times.length);
+    expect(events.some(e => e.type === "status" && e.status === "gone")).toBe(false);
+    failing = false;
+    await until(() => times.length >= 6);
+    expect(times[5] - times[4]).toBeLessThan(75);
+    expect(runner.observationState("failing")?.failures).toBe(0);
+  });
   test("Codex uses official interactive command and scoped TOML MCP; unknown native id is not invented", async () => {
     const f = await fixture(); const codex = member({ cli: "codex", model: "gpt-test", effort: "xhigh" }); const launch = providerLaunch(codex, f.opts, { codexBin: "/fake/codex" });
     expect(launch.argv[0]).toBe("/fake/codex"); expect(launch.argv).not.toContain("exec"); expect(launch.argv).toContain('model_reasoning_effort="xhigh"'); expect(launch.argv).toContain('mcp_servers.iamceo.command="/bin/echo"'); expect(launch.argv).toContain('mcp_servers.iamceo.env_vars=["IAMCEO_TOKEN","IAMCEO_URL"]'); expect(launch.env.IAMCEO_TOKEN).toBe("secret"); expect(launch.argv.join(" ")).not.toContain("secret"); expect(launch.sessionId).toBeNull();

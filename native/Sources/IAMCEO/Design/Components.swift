@@ -351,10 +351,12 @@ struct StatusDot: View {
 
 /// Web status pill: tinted capsule with dot and label in the status colour.
 struct StatusBadge: View {
-    let status: String
+    let info: MemberStatusInfo
     var compact = false
+    init(status: String, compact: Bool = false) { info = MemberStatusInfo(status); self.compact = compact }
+    /// Prefer this: it keeps "상태 확인 불가" and estimates the same on every screen.
+    init(member: Member, compact: Bool = false) { info = MemberStatusInfo(member); self.compact = compact }
     var body: some View {
-        let info = MemberStatusInfo(status)
         Group {
             if compact {
                 StatusDot(tone: info.tone, pulsing: info.live)
@@ -370,7 +372,7 @@ struct StatusBadge: View {
         }
         .fixedSize()
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("CLI 상태 \(info.label)")
+        .accessibilityLabel("상태 \(info.label)")
     }
 
     private static func fill(_ tone: Tone) -> Color {

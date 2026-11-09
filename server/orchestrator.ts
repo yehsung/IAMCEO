@@ -277,6 +277,8 @@ export interface HerdrQueries {
 
 export interface OrchestratorTimings {
   inputBusyRetryMs: number;
+  /** Maximum wait for one external pump operation, including its read guards. */
+  pumpStageTimeoutMs: number;
   /** A pump still running after this long is reported once (diagnostics only). */
   stuckPumpMs: number;
   inputBusyLimitMs: number;
@@ -294,6 +296,7 @@ export interface OrchestratorTimings {
 
 const DEFAULT_TIMINGS: OrchestratorTimings = {
   inputBusyRetryMs: 5000,
+  pumpStageTimeoutMs: 45_000,
   stuckPumpMs: 60_000,
   inputBusyLimitMs: 60_000,
   retryMs: 5000,
@@ -622,6 +625,7 @@ export class Orchestrator implements OrchestratorApi {
   private recovering = false;
   private stopRecovery: Promise<void> | null = null;
   private readonly coreSupervisor: CoreSupervisor | null;
+  private readonly absentCoreMembers = new Map<string, number>();
   private readonly eventQueues = new Map<string, Promise<void>>();
   private readonly observedTurns = new Map<string, { generation: number; terminal: string | null; turn: number; ended: number }>();
   private readonly configWrites = new Set<string>();
@@ -683,9 +687,9 @@ export class Orchestrator implements OrchestratorApi {
             if (current.lastError?.startsWith("starting_unknown") || current.lastError?.startsWith("core 재연결 보류")) this.store.patchMember(member.id, { lastError: null });
             await this.reconcileExecutions(member.id);
           }
-          if (result.outcome === "not_found" && member.paneId && !this.pendingLifecycle(member.id)) {
-            await this.reconcileAbsentTerminal(member);
-            this.store.patchMember(member.id, { status: "offline" });
+          if (result.outcome === "not_found" && !this.pendingLifecycle(member.id) && (member.paneId || member.status === "offline")) {
+            if (member.paneId && !(await this.reconcileAbsentTerminal(member))) return { outcome: "unknown", code: "terminal_absence_unverified" };
+            this.store.patchMember(member.id, { status: "offline", paneId: null });
             rt.turn = null;
             this.releaseSlots();
           }
@@ -695,6 +699,12 @@ export class Orchestrator implements OrchestratorApi {
       observed: state => {
         const member = this.store.getMember(state.memberId);
         if (!member || this.closed || state.code === "mutation_in_progress") return;
+        if (state.outcome === "not_found" && member.status === "offline" && !member.paneId && !this.pendingLifecycle(member.id)) {
+          this.absentCoreMembers.set(member.id, this.store.memberRevisions(member.id).sessionGeneration);
+          this.store.patchMember(member.id, { statusObservation: null });
+          this.coreSupervisor?.unwatch(member.id);
+          return;
+        }
         const setupError = state.outcome === "rejoined" && core instanceof CoreRunner ? core.observationState(member.id)?.setupError ?? null : null;
         this.store.patchMember(member.id, { statusObservation: this.executionObservation(member, { source: "core", observedAt: state.lastObservedAt === null ? null : new Date(state.lastObservedAt).toISOString(), freshness: state.outcome === "rejoined" ? "fresh" : "stale", ownership: state.outcome === "rejoined" ? "verified" : state.outcome === "conflict" ? "conflict" : "unknown", consecutiveFailures: state.failures, error: state.code ? { code: state.code, note: "소유 터미널을 다시 관측합니다. 후보가 여러 개면 자동 선택하거나 종료하지 않습니다" } : setupError }) });
         if (state.outcome === "rejoined" && !this.recovering) void this.pump(member.id);
@@ -896,7 +906,8 @@ export class Orchestrator implements OrchestratorApi {
     this.finishLifecycle(entry, "started", null);
     try {
       this.requireActive(this.store.requireProject(project.id));
-      const started = await runner.start(this.runnerMember(member, project), { ...this.writeRunFiles(member, project, resume), operationId: entry.operationId });
+      this.absentCoreMembers.delete(member.id);
+      const started = await this.pumpWait(member.id, this.runtime(member.id).closing ? "sync_config.start" : ["offline", "asleep"].includes(member.status) ? "reopen" : "start_session", () => runner.start(this.runnerMember(member, project), { ...this.writeRunFiles(member, project, resume), operationId: entry.operationId }), runner);
       if (!this.store.getMember(member.id)) return started;
       const identity = started.identity ?? { ...entry.identity, sessionId: started.sessionId, terminalId: started.paneId };
       this.finishLifecycle(entry, "confirmed", null, identity);
@@ -918,7 +929,7 @@ export class Orchestrator implements OrchestratorApi {
     const entry = this.prepareLifecycle(member, intent);
     this.finishLifecycle(entry, "started", whileWorking ? "while_working:" : "idle_only:");
     try {
-      await this.runnerOf(member).stop(this.runnerMember(member, this.store.requireProject(member.projectId)), { whileWorking });
+      await this.pumpWait(member.id, this.runtime(member.id).pumpStage === "sync_config" ? "sync_config.stop" : "stop_session", () => this.runnerOf(member).stop(this.runnerMember(member, this.store.requireProject(member.projectId)), { whileWorking }), this.runnerOf(member));
       // Final state and the confirmation share a transaction at the caller.
     } catch (error) {
       const refused = (error instanceof CoreError && !error.uncertain) || (error instanceof HerdrError && (error.code === "cannot_exit" || error.deliveryEffect !== "unknown")) || error instanceof ApiError;
@@ -957,15 +968,15 @@ export class Orchestrator implements OrchestratorApi {
     }
   }
 
-  private async reconcileAbsentTerminal(member: Member): Promise<void> {
+  private async reconcileAbsentTerminal(member: Member): Promise<boolean> {
     if (!(this.runners.get("core") instanceof CoreRunner)) {
       this.endExecution(member, "interrupted", "재결합 조회에서 소유 터미널의 부재를 확인했습니다");
-      return;
+      return true;
     }
     try {
       const terminal = await coreRpc<CoreTerminal>(this.coreSocket(), "terminal.get", { terminal: member.paneId! }, 1000);
-      if (terminal.address !== member.paneId || terminal.labels?.["iamceo.member"] !== member.id || terminal.labels["iamceo.project"] !== member.projectId || terminal.labels["iamceo.cli"] !== member.cli || terminal.labels["iamceo.generation"] !== String(this.store.memberRevisions(member.id).sessionGeneration)) return;
-      if (terminal.state === "live") return;
+      if (terminal.address !== member.paneId || terminal.labels?.["iamceo.member"] !== member.id || terminal.labels["iamceo.project"] !== member.projectId || terminal.labels["iamceo.cli"] !== member.cli || terminal.labels["iamceo.generation"] !== String(this.store.memberRevisions(member.id).sessionGeneration)) return false;
+      if (terminal.state === "live") return false;
       const run = this.store.listPendingExecutions().find(r => r.memberId === member.id);
       const settled = ["idle", "done"].includes(terminal.status?.state ?? "") && run?.turn !== null && run?.turn !== undefined && (terminal.turn ?? -1) > run.turn;
       const result = terminal.status?.state === "error" ? "error" : settled ? "success" : "interrupted";
@@ -973,8 +984,13 @@ export class Orchestrator implements OrchestratorApi {
       const detail = `초기/실행 종료: ${terminal.reason ?? "원인 미확인"} (exit_code=${terminal.exit_code ?? "unknown"})`;
       if (member.lastError !== detail) this.store.appendActivity(member.id, result === "success" ? "system" : "error", detail.slice(0, 500));
       this.store.patchMember(member.id, { lastError: result === "success" ? null : detail.slice(0, 500) });
+      return true;
     } catch (error) {
-      if (error instanceof CoreError && error.kind === "not_found") this.endExecution(member, "interrupted", "소유 터미널의 부재를 확인했습니다");
+      if (error instanceof CoreError && error.kind === "not_found" && !error.uncertain) {
+        this.endExecution(member, "interrupted", "소유 터미널의 부재를 확인했습니다");
+        return true;
+      }
+      return false;
     }
   }
 
@@ -1207,7 +1223,7 @@ export class Orchestrator implements OrchestratorApi {
             this.store.patchMember(member.id, { lastError: "이전 실행기의 세션입니다. 새 core 세션으로 명시적으로 전환해야 합니다" });
             continue;
           }
-          if (member.backend === "core" && member.status !== "asleep" && !project.archived) {
+          if (member.backend === "core" && member.status !== "asleep" && !project.archived && !this.coreAbsenceConfirmed(member)) {
             this.coreSupervisor?.watch(this.runnerMember(member, project));
             if (!this.coreSupervisor && member.paneId) this.store.patchMember(member.id, { lastError: "core 재연결 보류: 읽기 재결합을 지원하지 않습니다" });
           }
@@ -1341,10 +1357,10 @@ export class Orchestrator implements OrchestratorApi {
    * daemon restart) and nothing said where it waited. Report the stage once per pump. Diagnostics only: this never
    * sends, presses Enter, interrupts or resets the pump.
    */
-  private reportStuckPumps(): void {
+  private reportStuckPumps(timedOutMemberId?: string): void {
     const now = Date.now();
     for (const [memberId, rt] of this.runtimes) {
-      if (!rt.pumping || rt.pumpReported || rt.pumpSince === null || now - rt.pumpSince < this.timings.stuckPumpMs) continue;
+      if (!rt.pumping || rt.pumpReported || rt.pumpSince === null || now - rt.pumpSince < this.timings.stuckPumpMs && memberId !== timedOutMemberId) continue;
       const member = this.store.getMember(memberId);
       if (!member) continue;
       rt.pumpReported = true;
@@ -1353,6 +1369,16 @@ export class Orchestrator implements OrchestratorApi {
       this.store.appendActivity(memberId, "error", text, `pump-stuck:${rt.pumpSince}`);
       console.warn("전달 펌프 정체:", memberId, rt.pumpStage, `${seconds}s`);
     }
+  }
+
+  private controlFenced(member: Member): boolean {
+    return !!member.lastError?.startsWith("control_unknown:") ||
+      this.store.deferredMemberConfig(member.id)?.signature === `parallel_unknown:${this.store.memberRevisions(member.id).sessionGeneration}`;
+  }
+
+  private coreAbsenceConfirmed(member: Member): boolean {
+    return member.status === "offline" && !member.paneId && !this.pendingLifecycle(member.id) &&
+      this.absentCoreMembers.get(member.id) === this.store.memberRevisions(member.id).sessionGeneration;
   }
 
   private async probeHealth(): Promise<void> {
@@ -1364,7 +1390,7 @@ export class Orchestrator implements OrchestratorApi {
     await this.recoverStops();
     for (const member of this.store.listAllMembers()) {
       const project = this.store.requireProject(member.projectId);
-      if (member.backend === "core" && member.origin !== "manual" && member.status !== "asleep" && !project.archived) this.coreSupervisor?.watch(this.runnerMember(member, project));
+      if (member.backend === "core" && member.origin !== "manual" && member.status !== "asleep" && !project.archived && !this.coreAbsenceConfirmed(member)) this.coreSupervisor?.watch(this.runnerMember(member, project));
       else this.coreSupervisor?.unwatch(member.id);
     }
     await this.coreSupervisor?.tick();
@@ -2678,7 +2704,7 @@ export class Orchestrator implements OrchestratorApi {
   private applyStarted(memberId: string, project: Project, started: { sessionId: string | null; paneId: string | null; tabId?: string | null; rejoined?: boolean }, sent?: AppliedConfig): void {
     const runner = this.runnerOf(this.store.requireMember(memberId));
     const currentError = runner instanceof CoreRunner ? runner.observationState(memberId)?.lastError : null;
-    this.store.patchMember(memberId, { sessionId: started.sessionId, paneId: started.paneId, ...(!currentError ? { lastError: null } : {}) });
+    this.store.patchMember(memberId, { sessionId: started.sessionId, paneId: started.paneId, ...(!currentError && !(started.rejoined && this.store.requireMember(memberId).lastError?.startsWith("control_unknown:")) ? { lastError: null } : {}) });
     // 이미 떠 있던 칸에 붙었으면 이번 인자가 들어간 것이 아니다.
     if (!started.rejoined && sent) {
       this.store.setAppliedConfig(memberId, sent);
@@ -3040,7 +3066,7 @@ export class Orchestrator implements OrchestratorApi {
     if (this.store.getMember(member.id)) return false;
     // 방금 띄운 칸은 서버 칸이다. 대표의 칸에 다시 붙은 경우(rejoined)만 넘겨받은 칸으로 다룬다.
     const origin = member.origin === "adopted" && !started.rejoined ? "runner" : member.origin;
-    await runner.stop(this.runnerMember({ ...member, origin, sessionId: started.sessionId, paneId: started.paneId }, project)).catch((e) => console.warn("닫힌 직원의 칸을 닫지 못했습니다:", (e as Error).message));
+    await this.pumpWait(member.id, "drop_closed_session", () => runner.stop(this.runnerMember({ ...member, origin, sessionId: started.sessionId, paneId: started.paneId }, project)), runner).catch((e) => console.warn("닫힌 직원의 칸을 닫지 못했습니다:", (e as Error).message));
     return true;
   }
 
@@ -3531,11 +3557,12 @@ export class Orchestrator implements OrchestratorApi {
     // Expiry/replacement can be discovered by the runner/store before the socket timer.
     // Fence every delivery until old control attaches have detached and restored core.
     if (member.backend === "core" && this.terminalLeaseListeners.size) {
-      await Promise.all([...this.terminalLeaseListeners].map(ended => ended(memberId, null)));
+      await this.pumpWait(memberId, "lease_cleanup", () => Promise.all([...this.terminalLeaseListeners].map(ended => ended(memberId, null))));
     }
     if (this.terminalMutations.has(memberId) || this.store.inputState(memberId).lease) return;
     if (member.backend === "core" && member.statusObservation && member.statusObservation.ownership !== "verified" && !(member.status === "offline" && member.statusObservation.error?.code === "no_owned_terminal")) return;
     if (member.backend === "core" && this.store.listPendingExecutions().some(run => run.memberId === memberId && run.identity.sessionGeneration === this.store.memberRevisions(memberId).sessionGeneration) && !this.runtime(memberId).turn) return;
+    if (this.controlFenced(member)) return;
     if (this.deliveryRecovery.fenced(memberId)) return;
     const rt = this.runtime(memberId);
     const deferred = this.store.deferredMemberConfig(memberId);
@@ -3743,6 +3770,10 @@ export class Orchestrator implements OrchestratorApi {
         await this.switchProvider(member, { cli: member.cli }, true);
         return true;
       } catch (e) {
+        if (e instanceof CoreError && !e.uncertain && ["timeout", "down", "closed", "unavailable"].includes(e.kind)) {
+          this.retryLater(member.id, rt, this.timings.retryMs);
+          return false;
+        }
         rt.configGaveUp = JSON.stringify(want);
         this.store.deferMemberConfig(member.id, JSON.stringify(want), true);
         this.store.patchMember(member.id, { lastError: `설정 적용 보류: ${(e as Error).message}` });
@@ -3752,7 +3783,7 @@ export class Orchestrator implements OrchestratorApi {
     const held = rt.turn;
     const control: Turn = { kind: "control", admitted: false, text: "", interrupted: false };
     rt.turn = control;
-    const result = await this.safeSend(() => runner.applyConfig!(this.runnerMember(member, project), this.writeRunFiles(member, project, true)));
+    const result = await this.safeSend(() => this.pumpWait(member.id, "sync_config", () => runner.applyConfig!(this.runnerMember(member, project), this.writeRunFiles(member, project, true)), runner));
     if (rt.turn === control) rt.turn = held;
     if (!this.store.getMember(member.id)) return false;
     if (result.ok) {
@@ -3822,7 +3853,7 @@ export class Orchestrator implements OrchestratorApi {
       this.store.saveExecutionJournal(run);
       this.store.beginDelegationAck(run.runId, member.id, run.deliveryIds.map(id => this.store.requireDelivery(id)));
     });
-    let result = await this.safeSend(send);
+    let result = await this.safeSend(() => this.pumpWait(member.id, this.runtime(member.id).pumpStage?.startsWith("send_urgent") ? "send_urgent" : "send", send, this.runnerOf(member)));
     if (result.ok && result.receipt && result.receipt.dispatchId !== dispatch.dispatchId) result = { ok: false, reason: "error", retryable: false, deliveryEffect: "unknown", detail: "다른 봉투의 수신 영수증입니다" };
     // The existing Runner.send success contract guarantees received input,
     // including core started:false. Bind legacy ACKs to the submitted envelope;
@@ -3865,6 +3896,35 @@ export class Orchestrator implements OrchestratorApi {
     };
   }
 
+  /** Only race external leaves: late results cannot resume lifecycle/send continuations. */
+  private async pumpWait<T>(memberId: string, stage: string, action: () => Promise<T>, runner?: Runner): Promise<T> {
+    const rt = this.runtime(memberId);
+    rt.pumpStage = stage;
+    const controller = new AbortController();
+    const deadline = Date.now() + this.timings.pumpStageTimeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            this.reportStuckPumps(memberId);
+            const error = new CoreError("timeout", `Pump stage ${rt.pumpStage ?? stage} exceeded ${this.timings.pumpStageTimeoutMs}ms`, true);
+            controller.abort(error);
+            reject(error);
+          }, this.timings.pumpStageTimeoutMs);
+        }),
+        runner instanceof CoreRunner ? runner.withSignal(controller.signal, waiting => { rt.pumpStage = `${stage}:${waiting}`; }, action, deadline) : action(),
+      ]);
+    } catch (error) {
+      if (error instanceof CoreError && error.kind === "timeout") {
+        const waiting = /^(hello|terminal\.[a-z_]+|context_file):/.exec(error.message)?.[1];
+        if (waiting) rt.pumpStage = `${stage}:${waiting}`;
+        this.reportStuckPumps(memberId);
+      }
+      throw error;
+    } finally { if (timer) clearTimeout(timer); }
+  }
+
   private async safeSend(send: () => Promise<SendResult>): Promise<SendResult> {
     try {
       return await send();
@@ -3880,13 +3940,21 @@ export class Orchestrator implements OrchestratorApi {
     if (want === member.parallel) return true;
     const held = rt.turn;
     rt.turn = { kind: "control", admitted: runner.kind === "headless" || runner.kind === "core", text: "", interrupted: false };
-    const result = await this.safeSend(() => runner.setParallel(this.runnerMember(member, project), want, this.writeRunFiles(member, project)));
+    const result = await this.safeSend(() => this.pumpWait(member.id, "parallel", () => runner.setParallel(this.runnerMember(member, project), want, this.writeRunFiles(member, project)), runner));
     rt.turn = held;
     if (result.ok) {
       rt.parallelFails = 0;
       this.store.patchMember(member.id, { parallel: want });
       this.store.appendActivity(member.id, "system", `병렬 ${want ? "켬" : "끔"}`);
       return true;
+    }
+    if (runner.kind === "core" && !["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown")) {
+      this.store.transaction(() => {
+        this.store.deferMemberConfig(member.id, `parallel_unknown:${this.store.memberRevisions(member.id).sessionGeneration}`, true);
+        this.store.patchMember(member.id, { lastError: "control_unknown: 병렬 설정 결과를 확인하지 못했습니다. 자동 입력을 보류합니다" });
+      });
+      rt.wantParallel = null;
+      return false;
     }
     const detail = result.detail ?? result.reason;
     this.store.appendActivity(member.id, "error", `병렬 설정 실패: ${detail}`);
@@ -4081,7 +4149,7 @@ export class Orchestrator implements OrchestratorApi {
     rt.turn = turn;
     this.store.patchMember(member.id, { status: "working" });
     this.store.appendActivity(member.id, "compact", `압축 시작 (문맥 ${member.contextPct ?? "?"}%)`);
-    const result = await this.safeSend(() => runner.compact(this.runnerMember(member, project), focus, this.writeRunFiles(member, project)));
+    const result = await this.safeSend(() => this.pumpWait(member.id, "compact", () => runner.compact(this.runnerMember(member, project), focus, this.writeRunFiles(member, project)), runner));
     if (result.ok) {
       if (rt.turn === turn) {
         rt.compactTimer = setTimeout(() => {
@@ -4111,7 +4179,7 @@ export class Orchestrator implements OrchestratorApi {
     const turn: Turn = { kind: "compact", admitted: true, text: "", interrupted: false };
     rt.turn = turn; // admission은 첫 await 이전에 예약한다.
     rt.compactRequest = null;
-    const result = await this.safeSend(() => runner.compact(this.runnerMember(member, project), focus, this.writeRunFiles(member, project)));
+    const result = await this.safeSend(() => this.pumpWait(member.id, "compact", () => runner.compact(this.runnerMember(member, project), focus, this.writeRunFiles(member, project)), runner));
     if (rt.turn !== turn) return;
     const latest = this.store.ensureContextState(member.id);
     if (latest.compaction?.phase === "succeeded") { this.endCompact(member.id, rt, null); return; }
@@ -4205,7 +4273,7 @@ export class Orchestrator implements OrchestratorApi {
     }
     switch (e.type) {
       case "status":
-        if (["idle", "working"].includes(e.status) && (!e.observation || e.observation.freshness === "fresh") && member.lastError) this.store.patchMember(member.id, { lastError: null });
+        if (["idle", "working"].includes(e.status) && (!e.observation || e.observation.freshness === "fresh") && member.lastError && !member.lastError.startsWith("control_unknown:")) this.store.patchMember(member.id, { lastError: null });
         if (e.status === "working" || e.observation?.freshness === "stale") this.invalidateCoreMeasurement(member);
         if (e.status === "idle" && e.turn !== undefined && e.turn !== null && pending.some(run => run.turn !== null && e.turn! > run.turn)) {
           this.endExecution(member, "success", "서버 부재 중 더 뒤의 종결 turn을 확인했습니다");
@@ -4556,6 +4624,7 @@ export class Orchestrator implements OrchestratorApi {
     if (rt.compactTimer) clearTimeout(rt.compactTimer);
     if (rt.retryTimer) clearTimeout(rt.retryTimer);
     this.waiting.delete(memberId);
+    this.absentCoreMembers.delete(memberId);
     this.runtimes.delete(memberId);
   }
 

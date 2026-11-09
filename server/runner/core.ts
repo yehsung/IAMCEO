@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { capturedContext } from "./statusline.ts";
 import { readCodexContextFile } from "./codex-context.ts";
 import { createHash } from "node:crypto";
@@ -28,6 +29,8 @@ export interface CoreCompactState {
 }
 export interface CoreRunnerDeps {
   pollMs?: number; pollConcurrency?: number; rpcTimeoutMs?: number; sendTimeoutMs?: number; compactTimeoutMs?: number;
+  contextTimeoutMs?: number;
+  readContext?: typeof capturedContext;
   recoveryStore?: RunnerRecoveryStore;
   /** Synchronous transaction ports. A throw prevents external input. */
   repair?: { load(memberId: string, request: DeliveryRepair): DeliveryDispatch | null; prepare(memberId: string, request: DeliveryRepair, dispatch: DeliveryDispatch): boolean };
@@ -89,6 +92,7 @@ export class CoreRunner implements Runner {
   readonly socketPath: string;
   private readonly rpcTimeoutMs: number;
   private readonly sendTimeoutMs: number;
+  private readonly operation = new AsyncLocalStorage<{ signal: AbortSignal; waiting: (stage: string) => void; deadline: number }>();
   private readonly tracks = new Map<string, Track>();
   private readonly listeners = new Set<(event: RunnerEvent) => void>();
   private readonly configuring = new Set<string>();
@@ -109,8 +113,40 @@ export class CoreRunner implements Runner {
     this.rpcTimeoutMs = deps.rpcTimeoutMs ?? 8000;
     this.sendTimeoutMs = deps.sendTimeoutMs ?? 20_000;
   }
+  /** Scope cancellation to this attempt; a late read must never initiate another input. */
+  withSignal<T>(signal: AbortSignal, waiting: (stage: string) => void, action: () => Promise<T>, deadline: number): Promise<T> {
+    return this.operation.run({ signal, waiting, deadline }, action);
+  }
+  private waitFor<T>(stage: string, action: () => Promise<T>, timeoutMs: number): Promise<T> {
+    const scope = this.operation?.getStore();
+    if (scope?.signal.aborted) return Promise.reject(scope.signal.reason);
+    scope?.waiting(stage);
+    return new Promise<T>((resolve, reject) => {
+      const finish = (error: unknown, value?: T) => {
+        clearTimeout(timer);
+        scope?.signal.removeEventListener("abort", aborted);
+        if (error) reject(error); else resolve(value as T);
+      };
+      const aborted = () => finish(scope!.signal.reason);
+      const timer = setTimeout(() => finish(new CoreError("timeout", `${stage}: no completion within ${timeoutMs}ms`, true)), timeoutMs);
+      scope?.signal.addEventListener("abort", aborted, { once: true });
+      try { action().then(value => finish(null, value), error => finish(error)); }
+      catch (error) { finish(error); }
+    });
+  }
   private call<T>(method: string, params: Record<string, unknown> = {}, timeoutMs = this.rpcTimeoutMs): Promise<T> {
     if (this.closed) return Promise.reject(new CoreError("closed", "CoreRunner is shut down"));
+    const scope = this.operation.getStore();
+    if (scope) {
+      if (scope.signal.aborted) return Promise.reject(scope.signal.reason);
+      const remaining = scope.deadline - Date.now();
+      if (remaining <= 0) return Promise.reject(new CoreError("timeout", `${method}: pump deadline expired before RPC`, false, "not_written"));
+      scope.waiting(method);
+      timeoutMs = Math.min(timeoutMs, remaining);
+    }
+    // Let coreRpc destroy its socket before releasing the runner's input lock.
+    // Racing a live socket against abort could otherwise allow a late connect
+    // to write after a manual lease had been admitted. Non-pump input is unchanged.
     return coreRpc<T>(this.socketPath, method, params, timeoutMs);
   }
   async available(): Promise<{ ok: boolean; detail?: string }> {
@@ -171,6 +207,7 @@ export class CoreRunner implements Runner {
     }
   }
   private validateTrack(track: Track): void {
+    this.operation.getStore()?.signal.throwIfAborted();
     if (this.closed || this.tracks.get(track.member.id) !== track) throw new CoreError("conflict", "Terminal generation changed during operation");
   }
   private assertMember(track: Track, member: RunnerMember): void {
@@ -194,7 +231,7 @@ export class CoreRunner implements Runner {
     this.event(track, { type: "pane", memberId: member.id, paneId: terminal.address });
     if (sessionId) this.event(track, { type: "session", memberId: member.id, sessionId });
     if (!this.timer) {
-      this.timer = setInterval(() => { this.poll(); }, Math.min(this.pollMs, 250));
+      this.timer = this.operation.exit(() => setInterval(() => { this.poll(); }, Math.min(this.pollMs, 250)));
       this.timer.unref?.();
     }
     return track;
@@ -209,11 +246,16 @@ export class CoreRunner implements Runner {
     return promise;
   }
   private async startLocked(member: RunnerMember, opts: StartOpts) {
-    const availability = await this.available();
-    if (!availability.ok) throw new CoreError("unavailable", availability.detail || "Core unavailable");
-    const snapshot = await this.call<{ terminals: CoreTerminal[] }>("terminal.list", {});
-    const live = snapshot.terminals.filter((terminal) => terminal.state === "live");
-    const joined = await this.reattachFrom(member, live);
+    const joined = await (async () => {
+      const availability = await this.available();
+      if (!availability.ok) throw new CoreError("unavailable", availability.detail || "Core unavailable");
+      const snapshot = await this.call<{ terminals: CoreTerminal[] }>("terminal.list", {});
+      return this.reattachFrom(member, snapshot.terminals.filter(terminal => terminal.state === "live"));
+    })().catch(error => {
+      // These RPCs only observe; a lost read reply cannot have created a CLI.
+      if (error instanceof CoreError) throw new CoreError(error.kind, error.message, false, "not_written", error.causeCode);
+      throw error;
+    });
     if (joined.outcome === "rejoined") return { sessionId: joined.started.sessionId, paneId: joined.started.paneId!, rejoined: true };
     if (joined.outcome !== "not_found") throw new CoreError(joined.outcome, joined.detail || joined.code);
     if (this.unknownStarts.has(member.id)) throw new CoreError("starting_unknown", "Previous terminal.run may still create a holder; read-only reattach is required");
@@ -258,6 +300,7 @@ export class CoreRunner implements Runner {
   }
   private async reattachFrom(member: RunnerMember, live: CoreTerminal[]): Promise<RunnerReattachResult> {
     const matches = live.filter((terminal) => terminal.labels?.["iamceo.member"] === member.id && terminal.labels?.["iamceo.project"] === member.projectId);
+    if (live.some(terminal => (terminal.address === member.paneId || terminal.labels?.["iamceo.member"] === member.id) && !this.owns(terminal, member))) return { outcome: "conflict", code: "ownership_changed", detail: "A recorded terminal or member label has conflicting ownership" };
     if (member.sessionId && live.some((terminal) => terminal.labels?.["iamceo.session"] === member.sessionId && !this.owns(terminal, member))) return { outcome: "conflict", code: "session_owned", detail: "CLI session is already owned by another live terminal" };
     if (!matches.length) return { outcome: "not_found", code: "no_owned_terminal" };
     if (matches.length !== 1) return { outcome: "conflict", code: "multiple_terminals", detail: "Multiple live terminals claim this member" };
@@ -338,7 +381,12 @@ export class CoreRunner implements Runner {
     const screen = await this.call<{ text: string }>("terminal.read", { terminal: track.terminal.address, lines: 0 }, Math.min(this.rpcTimeoutMs, 1900)).then((r) => r.text, () => "");
     if (this.closed || this.tracks.get(track.member.id) !== track) return;
     const shownPct = screenContextPct(screen);
-    const reading = await capturedContext(this.options.contextHome, sessionId, { tokens, shownPct, model: track.member.model ?? model }, endedAt);
+    const reading = await this.waitFor("context_file", () => (this.deps?.readContext ?? capturedContext)(this.options.contextHome, sessionId, { tokens, shownPct, model: track.member.model ?? model }, endedAt), this.deps?.contextTimeoutMs ?? 2000).catch((error): Awaited<ReturnType<typeof capturedContext>> => {
+      this.operation?.getStore()?.signal.throwIfAborted();
+      if (!(error instanceof CoreError) || error.kind !== "timeout") throw error;
+      // Optional usage capture must not prevent an observed turn from ending.
+      return { tokens, shownPct, model: track.member.model ?? model };
+    });
     if (this.closed || this.tracks.get(track.member.id) !== track || (track.sessionId || track.member.sessionId) !== sessionId || track.terminal.turn !== turn) return;
     if (reading.tokens === null && reading.shownPct === null && !reading.exact) return;
     this.event(track, { type: "context_usage", memberId: track.member.id, sessionId, ...reading });
@@ -672,6 +720,7 @@ export class CoreRunner implements Runner {
     const deadline = Date.now() + 5000;
     const word = on ? "on" : "off";
     while (Date.now() < deadline && !this.closed) {
+      this.operation.getStore()?.signal.throwIfAborted();
       const screen = await this.screen(member).catch(() => "");
       const index = screen.lastIndexOf(command);
       if (index >= 0 && screen.slice(index + command.length).split("\n").some((line) => new RegExp(`^\\W*ultracode ${word}\\b`, "i").test(line))) {
@@ -681,7 +730,7 @@ export class CoreRunner implements Runner {
       }
       await Bun.sleep(150);
     }
-    return unsupported(`The command was delivered, but Ultracode ${word} was not confirmed; inspect the terminal before retrying`);
+    return { ...unsupported(`The command was delivered, but Ultracode ${word} was not confirmed; inspect the terminal before retrying`), deliveryEffect: "unknown" };
   }
   async applyConfig(member: RunnerMember, opts: StartOpts): Promise<SendResult> {
     const track = this.tracks.get(member.id);
@@ -748,7 +797,12 @@ export class CoreRunner implements Runner {
   private async stopLocked(member: RunnerMember, opts: { whileWorking?: boolean }): Promise<void> {
     let terminal: CoreTerminal;
     try { await this.checkStop(member, opts); terminal = await this.owned(member); }
-    catch (error) { if (error instanceof CoreError && error.kind === "not_found") { this.detachStopped(member); return; } throw error; }
+    catch (error) {
+      if (error instanceof CoreError && error.kind === "not_found") { this.detachStopped(member); return; }
+      // No terminal.kill has been attempted during these ownership/draft reads.
+      if (error instanceof CoreError) throw new CoreError(error.kind, error.message, false, "not_written", error.causeCode);
+      throw error;
+    }
     if (terminal.state === "live") {
       if (!opts.whileWorking && !["idle", "done"].includes(terminal.status?.state || "")) throw new CoreError("busy", "CLI state changed before stop");
       try {
@@ -757,7 +811,11 @@ export class CoreRunner implements Runner {
       } catch (error) {
         if (!(error instanceof CoreError) || !error.uncertain) throw error;
         try { if ((await this.owned(member)).state !== "finished") throw error; }
-        catch (inspection) { if (!(inspection instanceof CoreError) || inspection.kind !== "not_found") throw inspection; }
+        catch (inspection) {
+          // A failed/cancelled verification read cannot turn an unknown kill
+          // into a definite pre-write refusal. Retain the original write fence.
+          if (!(inspection instanceof CoreError) || inspection.kind !== "not_found" || inspection.uncertain) throw error;
+        }
       }
     }
     this.detachStopped(member);

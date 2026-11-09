@@ -19,13 +19,9 @@ struct TerminalView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     let member: Member
-    @State private var session: TerminalSession
+    let session: TerminalSession
+    @State private var following = true
     @State private var wakeNotice: String?
-
-    init(member: Member, session: TerminalSession = TerminalSession()) {
-        self.member = member
-        _session = State(initialValue: session)
-    }
 
     private var client: TerminalStreamClient { session.client }
     private var current: Member { store.members.first { $0.id == member.id } ?? member }
@@ -67,19 +63,20 @@ struct TerminalView: View {
         .onChange(of: "\(current.status)|\(current.paneId ?? "")") { _, _ in session.memberChanged(store: store, member: current) }
         .onChange(of: client.state) { _, _ in session.streamChanged(store: store, member: current) }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background || (TerminalPlatform.current == .mac && phase == .inactive) { session.setActive(false, store: store, member: member) }
+            if phase == .background { session.setActive(false, store: store, member: member, immediately: true) }
+            else if TerminalPlatform.current == .mac && phase == .inactive { session.setActive(false, store: store, member: member) }
             else if phase == .active { session.setActive(true, store: store, member: member) }
         }
         .onDisappear { session.disappear(store: store, member: member) }
         #if os(macOS)
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)) { _ in
-            session.setActive(false, store: store, member: member)
+            session.setActive(false, store: store, member: member, immediately: true)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             session.setActive(false, store: store, member: member)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            session.setActive(true, store: store, member: member)
+            if scenePhase == .active { session.setActive(true, store: store, member: member) }
         }
         .background {
             Button("닫기") { dismiss() }.keyboardShortcut("w", modifiers: .command)
@@ -138,6 +135,10 @@ struct TerminalView: View {
             StatusDot(tone: (controlling || TerminalPresentation.holdsLease(store.terminalLeases[member.id], now: now)) ? .attention : .neutral)
             Text(statusText(now: now)).font(CEFont.meta).foregroundStyle((controlling || TerminalPresentation.holdsLease(store.terminalLeases[member.id], now: now)) ? CE.attention : CE.ink2)
             Spacer(minLength: 8)
+            if !following && !missingTerminal {
+                Button("새 출력이 있습니다 · 맨 아래로", systemImage: "arrow.down.to.line") { following = true }
+                    .ceSecondaryButton().controlSize(.small).accessibilityLabel("터미널 맨 아래로")
+            }
             if !missingTerminal, !session.starting, case .closed = client.state {
                 Button("다시 연결") { session.observe(store: store, member: member) }
                     .ceSecondaryButton().controlSize(.small).disabled(session.ending)
@@ -151,10 +152,11 @@ struct TerminalView: View {
         if session.ending { return "입력 끝내는 중…" }
         if session.starting { return "입력 준비 중…" }
         if controlling { return TerminalPresentation.controlStatus(expiresAt: store.terminalLeases[member.id]?.expiresAt, now: now) }
+        if let status = session.inputEndedStatus { return status }
         switch client.state {
         case .connecting: return "보기 연결 중…"
         case let .closed(_, message): return friendlyError(TerminalPresentation.message(message ?? "연결이 끊겼습니다"))
-        default: return "보는 중"
+        default: return TerminalPlatform.current.observeHint
         }
     }
 
@@ -192,9 +194,24 @@ struct TerminalView: View {
     private var terminal: some View {
         LiveTerminalSurface(client: client, mode: session.surfaceMode, cols: client.grid.cols, rows: client.grid.rows,
                             onPendingInput: { session.pendingInput($0) },
-                            onSize: { session.sizeChanged(cols: $0, rows: $1) })
-            .id(client.outputGeneration)
+                            onSize: { session.sizeChanged(cols: $0, rows: $1) }, following: $following,
+                            onRequestInput: { session.requestInput($0, store: store, member: member) })
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// The state starts empty so parent body evaluation never constructs a throwaway client.
+struct TerminalSessionContent: View {
+    let member: Member
+    var makeSession: () -> TerminalSession = { TerminalSession() }
+    @State private var session: TerminalSession?
+    var body: some View {
+        Group {
+            if let session { TerminalView(member: member, session: session) }
+            // An empty Group may never appear, so it cannot bootstrap its own session.
+            else { Color.clear }
+        }
+        .onAppear { if session == nil { session = makeSession() } }
     }
 }
 
@@ -214,7 +231,7 @@ struct TerminalWindowContent: View {
     var body: some View {
         Group {
             if let member = store.members.first(where: { $0.id == memberID }) ?? retained {
-                TerminalView(member: member).environment(\.terminalWindow, true)
+                TerminalSessionContent(member: member).environment(\.terminalWindow, true)
             } else {
                 EmptyTile(icon: "terminal", title: "직원을 찾을 수 없습니다", detail: "팀에서 직원을 다시 선택해 주세요.")
             }

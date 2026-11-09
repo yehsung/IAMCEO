@@ -5,6 +5,209 @@ import SwiftTerm
 @testable import IAMCEO
 
 final class TerminalStreamTests: XCTestCase {
+    @MainActor func testActivityIsKeyWindowOnlyAndAtMostOncePerThirtySeconds() async throws {
+        var texts: [String] = []
+        let client = TerminalStreamClient(messageSender: { if case let .string(text) = $0 { texts.append(text) } })
+        defer { client.dispose() }
+        client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
+        let now = Date()
+        client.activity(windowIsKey: false, now: now)
+        client.activity(windowIsKey: true, now: now)
+        client.activity(windowIsKey: true, now: now.addingTimeInterval(29.999))
+        client.activity(windowIsKey: false, now: now.addingTimeInterval(30))
+        client.activity(windowIsKey: true, now: now.addingTimeInterval(30))
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(texts, [#"{"type":"activity"}"#, #"{"type":"activity"}"#])
+        client.accept(.ready(mode: .observe, cols: 100, rows: 30, expiresAt: nil))
+        client.activity(windowIsKey: true, now: now.addingTimeInterval(60))
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(texts.count, 2)
+    }
+
+    @MainActor func testInputCoalescesInOrderAndSerializesLaterFrames() async throws {
+        var frames: [Data] = []
+        let client = TerminalStreamClient(messageSender: { message in
+            if case let .data(bytes) = message {
+                if frames.isEmpty { try await Task.sleep(for: .milliseconds(35)) }
+                frames.append(bytes)
+            }
+        })
+        defer { client.dispose() }
+        client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
+        client.send(Data("a".utf8)); client.send(Data("b".utf8)); client.send(Data([27, 91, 65]))
+        try await Task.sleep(for: .milliseconds(15))
+        client.send(Data("c".utf8)); client.send(Data("d".utf8))
+        try await Task.sleep(for: .milliseconds(90))
+        XCTAssertEqual(frames, [Data([97, 98, 27, 91, 65]), Data("cd".utf8)])
+        client.send(Data("must not leak".utf8)); client.close()
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(frames.count, 2)
+    }
+
+    @MainActor func testControlTransportRetriesOriginalLeaseOnlyOnceThenEnds() async throws {
+        let network = try IsolatedTestNetwork { _ in IsolatedTestHTTPReply(status: 503) }
+        var receives = 0, leases: [String] = [], endings = 0
+        let client = TerminalStreamClient(session: network.session, receiveMessage: { request in
+            receives += 1
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+            leases.append(items?.first { $0.name == "lease" }?.value ?? "")
+            if receives == 1 || receives == 3 {
+                return .string(#"{"type":"ready","mode":"control","cols":100,"rows":30}"#)
+            }
+            throw URLError(.networkConnectionLost)
+        })
+        let done = expectation(description: "control ended after retry")
+        client.onControlEnded = { endings += 1; done.fulfill() }
+        client.connect(api: network.makeAPIClient(), memberID: "m", mode: .control, leaseID: "same-lease")
+        await fulfillment(of: [done], timeout: 3)
+        XCTAssertEqual(receives, 4); XCTAssertEqual(leases, Array(repeating: "same-lease", count: 4)); XCTAssertEqual(endings, 1)
+        XCTAssertEqual(client.state, .closed(reason: "disconnected", message: TerminalPresentation.disconnectedStatus))
+        client.dispose()
+    }
+
+    @MainActor func testControlRefusalDoesNotRetryOrHideServerGuidance() async throws {
+        let reason = "다른 기기에서 입력 중입니다"
+        let network = try IsolatedTestNetwork { _ in
+            IsolatedTestHTTPReply(status: 409, data: Data(#"{"error":"다른 기기에서 입력 중입니다","code":"TERMINAL_REFUSED"}"#.utf8))
+        }
+        var receives = 0
+        let client = TerminalStreamClient(session: network.session, receiveMessage: { _ in
+            receives += 1; throw APIError(status: 409, message: reason)
+        })
+        let ended = expectation(description: "refusal ends control")
+        client.onControlEnded = { ended.fulfill() }
+        client.connect(api: network.makeAPIClient(), memberID: "m", mode: .control, leaseID: "lease")
+        await fulfillment(of: [ended], timeout: 3)
+        XCTAssertEqual(receives, 1)
+        XCTAssertEqual(client.state, .closed(reason: "disconnected", message: reason))
+        client.dispose()
+    }
+
+    @MainActor func testUnsupportedRetryStillEndsControlInsteadOfHoldingLease() async throws {
+        let network = try IsolatedTestNetwork()
+        var receives = 0
+        let client = TerminalStreamClient(session: network.session, receiveMessage: { _ in
+            receives += 1; throw APIError(status: receives == 1 ? 503 : 404, message: "unavailable")
+        })
+        let ended = expectation(description: "unsupported retry ends control")
+        client.onControlEnded = { ended.fulfill() }
+        client.connect(api: network.makeAPIClient(), memberID: "m", mode: .control, leaseID: "lease")
+        await fulfillment(of: [ended], timeout: 3)
+        XCTAssertEqual(receives, 2)
+        XCTAssertEqual(client.state, .closed(reason: "disconnected", message: TerminalPresentation.disconnectedStatus))
+        client.dispose()
+    }
+
+    @MainActor func testGenerationResetsEngineInPlaceAndObserveResizeKeepsIt() {
+        #if os(macOS)
+        let client = TerminalStreamClient()
+        var following = true
+        let parent = TerminalRepresentable(client: client, mode: .observe, cols: 100, rows: 30,
+            following: Binding(get: { following }, set: { following = $0 }), onPendingInput: { _ in }, onSize: { _,_ in })
+        let coordinator = TerminalSurfaceCoordinator(parent)
+        let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 300), coordinator: coordinator)
+        coordinator.host = host
+        client.attachOutput(owner: coordinator.outputID) { [weak host] in host?.feed($0) }
+        defer { host.teardown(); client.dispose() }
+        host.feed(Data("old content".utf8))
+        let viewID = ObjectIdentifier(host.terminal), engine = host.terminal.getTerminal(), oldBuffer = engine.buffer
+        following = false
+        client.accept(.ready(mode: .observe, cols: 80, rows: 24, expiresAt: nil))
+        client.onOutput?(Data("first paint".utf8))
+        XCTAssertEqual(ObjectIdentifier(host.terminal), viewID); XCTAssertTrue(engine === host.terminal.getTerminal())
+        XCTAssertFalse(oldBuffer === engine.buffer); XCTAssertTrue(following)
+        XCTAssertEqual(engine.cols, 80); XCTAssertEqual(engine.rows, 24)
+        XCTAssertTrue(engine.getLine(row: 0)?.translateToString().hasPrefix("first paint") == true)
+        let generation = client.outputGeneration, resizedBuffer = engine.buffer
+        client.accept(.resize(cols: 90, rows: 28)); client.onOutput?(Data("more".utf8))
+        XCTAssertEqual(client.outputGeneration, generation); XCTAssertNotNil(client.onOutput)
+        XCTAssertTrue(resizedBuffer === engine.buffer)
+        XCTAssertEqual(engine.cols, 90); XCTAssertEqual(engine.rows, 28)
+        #endif
+    }
+
+    @MainActor func testMacSingleClickRequestsInputButDoubleClickAndDragSelect() async throws {
+        #if os(macOS)
+        let client = TerminalStreamClient()
+        var requests = 0
+        let parent = TerminalRepresentable(client: client, mode: .observe, cols: 100, rows: 30,
+            following: .constant(true), onPendingInput: { _ in }, onSize: { _,_ in }, onRequestInput: { _ in requests += 1 })
+        let coordinator = TerminalSurfaceCoordinator(parent)
+        let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 500), coordinator: coordinator)
+        coordinator.host = host
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        host.feed(Data("select these words".utf8))
+        func event(_ type: NSEvent.EventType, count: Int = 1, x: CGFloat = 20) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: host.terminal.convert(CGPoint(x: x, y: host.terminal.bounds.height - 8), to: nil),
+                modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: count, pressure: 1)!
+        }
+        defer { host.teardown(); window.contentView = nil; client.dispose() }
+        XCTAssertTrue(host.acceptsFirstMouse(for: nil)); XCTAssertTrue(host.terminal.acceptsFirstMouse(for: nil))
+        host.terminal.mouseDown(with: event(.leftMouseDown)); host.terminal.mouseUp(with: event(.leftMouseUp))
+        try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.05))
+        XCTAssertEqual(requests, 1)
+        host.terminal.mouseDown(with: event(.leftMouseDown)); host.terminal.mouseUp(with: event(.leftMouseUp))
+        host.terminal.mouseDown(with: event(.leftMouseDown, count: 2)); host.terminal.mouseUp(with: event(.leftMouseUp, count: 2))
+        try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.05))
+        XCTAssertEqual(requests, 1); XCTAssertTrue(host.terminal.selectionActive)
+        host.terminal.mouseDown(with: event(.leftMouseDown))
+        host.terminal.mouseDragged(with: event(.leftMouseDragged, x: 110)); host.terminal.mouseUp(with: event(.leftMouseUp, x: 110))
+        try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.05))
+        XCTAssertEqual(requests, 1); XCTAssertTrue(host.terminal.selectionActive)
+        host.feed(Data("new output".utf8))
+        XCTAssertTrue(host.terminal.selectionActive, "Output preserves selection when mouse mode is off")
+        #endif
+    }
+
+    @MainActor func testObserveWheelReachesHistoryAndMouseReportingTracksTUIModeAfterFeed() throws {
+        #if os(macOS)
+        let client = TerminalStreamClient()
+        var following = true
+        let parent = TerminalRepresentable(client: client, mode: .observe, cols: 100, rows: 30,
+            following: Binding(get: { following }, set: { following = $0 }), onPendingInput: { _ in }, onSize: { _,_ in })
+        let coordinator = TerminalSurfaceCoordinator(parent)
+        let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 500), coordinator: coordinator)
+        coordinator.host = host
+        defer { host.teardown(); client.dispose() }
+        host.feed(Data((0..<350).map { "history \($0)\r\n" }.joined().utf8)); host.followCursor()
+        let before = host.scrollLocation.historyRow
+        let cg = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 10, wheel2: 0, wheel3: 0))
+        cg.location = CGPoint(x: 30, y: 30)
+        host.handleUserWheel(try XCTUnwrap(NSEvent(cgEvent: cg)))
+        XCTAssertLessThan(host.scrollLocation.historyRow, before); XCTAssertFalse(following)
+        host.feed(Data("\u{1b}[?1000h".utf8)); XCTAssertFalse(host.terminal.allowMouseReporting)
+        coordinator.parent = TerminalRepresentable(client: client, mode: .control, cols: 100, rows: 30,
+            following: .constant(false), onPendingInput: { _ in }, onSize: { _,_ in })
+        host.layout(); XCTAssertTrue(host.terminal.allowMouseReporting)
+        host.feed(Data("\u{1b}[?1000l".utf8)); XCTAssertFalse(host.terminal.allowMouseReporting)
+        #endif
+    }
+
+    @MainActor func testUserScrollUpdatesSynchronizedAnchorAndBottomResumesFollowing() async throws {
+        #if os(macOS)
+        let client = TerminalStreamClient()
+        var following = true
+        let parent = TerminalRepresentable(client: client, mode: .observe, cols: 100, rows: 30,
+            following: Binding(get: { following }, set: { following = $0 }), onPendingInput: { _ in }, onSize: { _,_ in })
+        let coordinator = TerminalSurfaceCoordinator(parent)
+        let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 500), coordinator: coordinator)
+        coordinator.host = host
+        defer { host.teardown(); client.dispose() }
+        host.feed(Data((0..<350).map { "history \($0)\r\n" }.joined().utf8)); host.followCursor()
+        coordinator.performUserScroll { host.terminal.scroll(toPosition: 0.2) }
+        XCTAssertFalse(following)
+        host.feed(Data("\u{1b}[?2026hnew output\r\n".utf8))
+        coordinator.performUserScroll { host.terminal.scroll(toPosition: 0.5) }
+        let newAnchor = host.scrollLocation.historyRow
+        host.feed(Data("\u{1b}[?2026l".utf8))
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertEqual(host.scrollLocation.historyRow, newAnchor)
+        coordinator.performUserScroll { host.followCursor() }
+        XCTAssertTrue(host.isAtBottom); XCTAssertTrue(following)
+        #endif
+    }
+
     func testPlatformPoliciesAndPureGridSelection() {
         XCTAssertEqual(TerminalPlatform.mac.openingMode, .observe)
         XCTAssertEqual(TerminalPlatform.iPhone.openingMode, .observe)
@@ -24,8 +227,8 @@ final class TerminalStreamTests: XCTestCase {
                 XCTAssertEqual(control.cols, Int(viewport.width / 6)); XCTAssertEqual(control.rows, Int(viewport.height / 12))
             }
         }
-        XCTAssertEqual(TerminalPlatform.iPhone.observeHint, "읽기 전용 화면입니다")
-        XCTAssertEqual(TerminalPlatform.mac.observeHint, "읽기 전용 화면입니다")
+        XCTAssertEqual(TerminalPlatform.iPhone.observeHint, "읽기 전용 · 클릭하거나 입력하면 입력을 시작합니다")
+        XCTAssertEqual(TerminalPlatform.mac.observeHint, "읽기 전용 · 클릭하거나 입력하면 입력을 시작합니다")
     }
     func testPlatformSizePolicyIsSentInRequest() async throws {
         let api = APIClient(endpoint: try ServerEndpoint("http://127.0.0.1:7881"), accessCode: "test")
@@ -80,11 +283,11 @@ final class TerminalStreamTests: XCTestCase {
         XCTAssertEqual(host.terminal.getTerminal().rows, before.rows)
         #endif
     }
-    @MainActor func testMacReadOnlyFallbackScalesCoreGridAndCannotType() {
+    @MainActor func testMacReadOnlyScalesCoreGridAndRequestsTypedInput() {
         #if os(macOS)
         let client = TerminalStreamClient()
         let parent = TerminalRepresentable(client: client, mode: .observe, cols: 160, rows: 50,
-            following: .constant(true), onPendingInput: { _ in XCTFail("Read-only input must not claim control") }, onSize: { _,_ in })
+            following: .constant(true), onPendingInput: { _ in XCTFail("Observe input uses the request callback") }, onSize: { _,_ in })
         let coordinator = TerminalSurfaceCoordinator(parent)
         let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 500), coordinator: coordinator)
         coordinator.host = host
@@ -92,7 +295,10 @@ final class TerminalStreamTests: XCTestCase {
         host.layoutSubtreeIfNeeded(); host.layout()
         XCTAssertEqual(host.terminal.getTerminal().cols, 160); XCTAssertEqual(host.terminal.getTerminal().rows, 50)
         XCTAssertLessThan(host.documentView!.frame.width, host.documentView!.bounds.width)
-        coordinator.send(source: host.terminal, data: Array("ignored".utf8)[...])
+        var requested = Data()
+        coordinator.parent.onRequestInput = { requested.append($0) }
+        coordinator.send(source: host.terminal, data: Array("ab".utf8)[...])
+        XCTAssertEqual(requested, Data("ab".utf8))
         #endif
     }
     @MainActor func testMacBackingScaleTracksOneAndTwoTimesWithoutExtraMagnification() {
@@ -106,11 +312,11 @@ final class TerminalStreamTests: XCTestCase {
         }
         #endif
     }
-    @MainActor func testIOSObserverCannotFocusOrShowAccessoryOrStartInput() {
+    @MainActor func testIOSObserverCanFocusByUserIntentWithoutClaimOrAccessory() {
         #if os(iOS)
         let client = TerminalStreamClient()
         let parent = TerminalRepresentable(client: client, mode: .observe, cols: 160, rows: 50,
-            following: .constant(true), onPendingInput: { _ in XCTFail("Read-only input must not claim control") }, onSize: { _,_ in })
+            following: .constant(true), onPendingInput: { _ in XCTFail("Observe input uses the request callback") }, onSize: { _,_ in })
         let coordinator = TerminalSurfaceCoordinator(parent)
         let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 390, height: 500), coordinator: coordinator)
         coordinator.host = host
@@ -118,17 +324,20 @@ final class TerminalStreamTests: XCTestCase {
         XCTAssertEqual(host.terminal.font.pointSize, 12)
         XCTAssertEqual(host.minimumZoomScale, 1); XCTAssertEqual(host.maximumZoomScale, 3)
         XCTAssertNotNil(host.viewForZooming(in: host))
-        XCTAssertFalse(host.terminal.canBecomeFirstResponder)
-        XCTAssertFalse(host.terminal.becomeFirstResponder())
+        XCTAssertTrue(host.terminal.canBecomeFirstResponder)
+        XCTAssertFalse(host.terminal.isFirstResponder, "Opening an observe surface never focuses the keyboard")
         XCTAssertNil(host.terminal.inputAccessoryView)
-        coordinator.send(source: host.terminal, data: Array("ignored".utf8)[...])
+        var requested = Data()
+        coordinator.parent.onRequestInput = { requested.append($0) }
+        coordinator.send(source: host.terminal, data: Array("ab".utf8)[...])
+        XCTAssertEqual(requested, Data("ab".utf8))
         coordinator.parent = TerminalRepresentable(client: client, mode: .control, cols: 65, rows: 25,
             following: .constant(true), onPendingInput: { _ in XCTFail() }, onSize: { _,_ in })
         host.updateInputMode()
         XCTAssertTrue(host.terminal.canBecomeFirstResponder); XCTAssertNotNil(host.terminal.inputAccessoryView)
         XCTAssertNotNil(host.viewForZooming(in: host), "Input mode also allows pinch zoom")
         coordinator.parent = parent; host.updateInputMode()
-        XCTAssertFalse(host.terminal.canBecomeFirstResponder); XCTAssertFalse(host.terminal.isFirstResponder)
+        XCTAssertTrue(host.terminal.canBecomeFirstResponder)
         XCTAssertNil(host.terminal.inputAccessoryView)
         #endif
     }
@@ -244,7 +453,7 @@ final class TerminalStreamTests: XCTestCase {
         XCTAssertNotNil(retry.failed(status: 500, code: nil))
         XCTAssertEqual(retry.refusals, 0)
     }
-    @MainActor func testResizeRebuildsObserveButPreservesControlRendererAndInput() {
+    @MainActor func testResizePreservesObserveAndControlGenerationAndOutputHandler() {
         XCTAssertEqual(TerminalStreamEvent.parse(#"{"type":"resize","cols":80,"rows":24}"#), .resize(cols: 80, rows: 24))
         XCTAssertNil(TerminalStreamEvent.parse(#"{"type":"resize","cols":0,"rows":24}"#))
         let client = TerminalStreamClient()
@@ -253,7 +462,7 @@ final class TerminalStreamTests: XCTestCase {
         client.attachOutput(owner: UUID()) { _ in }
         client.accept(.resize(cols: 80, rows: 24))
         XCTAssertEqual(client.grid.cols, 80); XCTAssertEqual(client.grid.rows, 24)
-        XCTAssertNotEqual(client.outputGeneration, before); XCTAssertNil(client.onOutput)
+        XCTAssertEqual(client.outputGeneration, before); XCTAssertNotNil(client.onOutput)
         client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
         let controlGeneration = client.outputGeneration
         client.attachOutput(owner: UUID()) { _ in }
@@ -583,6 +792,7 @@ final class TerminalStreamTests: XCTestCase {
         XCTAssertEqual(bounced, settled, "Bottom-edge bounce must not look like an upward user scroll")
         XCTAssertEqual(TerminalScrollLocation.viewportY(-10, minimum: 0, maximum: 100), 0)
         XCTAssertEqual(TerminalScrollLocation.viewportY(0, minimum: 0, maximum: -50), 0)
+        XCTAssertEqual(TerminalScrollLocation.viewportY(25, minimum: 100, maximum: 0), 25)
     }
     @MainActor func testMacEscAndTabAreBufferedTerminalInputWhileConnecting() {
         #if os(macOS)

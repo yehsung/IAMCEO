@@ -22,6 +22,125 @@ import SwiftUI
         return store
     }
 
+    func testObserveTypingClaimsThroughSurfaceAndReplaysABOnceReady() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        var modes: [TerminalStreamMode] = [], sent: [Data] = []
+        let session = TerminalSession(platform: .mac, connect: { _, _, mode, _, _, _, _ in modes.append(mode) }, send: { sent.append($0) })
+        session.appear(store: store, member: member, active: true)
+        session.client.accept(.ready(mode: .observe, cols: 100, rows: 30, expiresAt: nil))
+        session.sizeChanged(cols: 100, rows: 30)
+        let parent = TerminalRepresentable(client: session.client, mode: .observe, cols: 100, rows: 30,
+            following: .constant(true), onPendingInput: { session.pendingInput($0) }, onSize: { _, _ in },
+            onRequestInput: { session.requestInput($0, store: store, member: member) })
+        let coordinator = TerminalSurfaceCoordinator(parent)
+        let host = TerminalSurfaceHost(frame: CGRect(x: 0, y: 0, width: 800, height: 500), coordinator: coordinator)
+        coordinator.host = host
+        coordinator.send(source: host.terminal, data: Array("a".utf8)[...])
+        coordinator.send(source: host.terminal, data: Array("b".utf8)[...])
+        XCTAssertTrue(session.starting); XCTAssertTrue(sent.isEmpty)
+        for _ in 0..<200 where modes.last != .control { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(modes, [.observe, .control])
+        XCTAssertEqual(server.read { $0.terminalBodies.compactMap { $0["action"] as? String } }, ["claim"])
+        session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
+        XCTAssertEqual(sent, [Data("ab".utf8)])
+        session.client.onReady?(.control)
+        XCTAssertEqual(sent, [Data("ab".utf8)])
+        host.teardown(); session.disappear(store: store, member: member); store.disconnect()
+    }
+
+    func testMacInactiveGraceKeepsLeaseUntilThreeMinutesAndShowsStatus() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        var modes: [TerminalStreamMode] = []
+        let session = TerminalSession(platform: .mac, connect: { _, _, mode, _, _, _, _ in modes.append(mode) })
+        session.appear(store: store, member: member, active: true); session.sizeChanged(cols: 100, rows: 30)
+        session.beginInput(store: store, member: member)
+        for _ in 0..<200 where modes.last != .control { try await Task.sleep(for: .milliseconds(10)) }
+        session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
+        let now = Date()
+        session.setActive(false, store: store, member: member, now: now)
+        session.endInputIfInactive(store: store, member: member, now: now.addingTimeInterval(179.999))
+        XCTAssertTrue(session.controlling); XCTAssertNotNil(session.ownedLeaseID)
+        XCTAssertEqual(modes, [.observe, .control])
+        session.setActive(true, store: store, member: member)
+        session.endInputIfInactive(store: store, member: member, now: now.addingTimeInterval(200))
+        XCTAssertTrue(session.controlling, "Returning cancels the inactivity timer")
+        session.setActive(false, store: store, member: member, now: now)
+        session.setActive(false, store: store, member: member, now: now.addingTimeInterval(100))
+        session.endInputIfInactive(store: store, member: member, now: now.addingTimeInterval(180))
+        for _ in 0..<200 where session.controlling || session.ending || session.ownedLeaseID != nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(session.readOnly)
+        XCTAssertEqual(session.inputEndedStatus, "자리를 비운 사이 입력을 끝냈습니다 · 클릭하면 다시 시작합니다")
+        XCTAssertEqual(server.read { $0.terminalBodies.compactMap { $0["action"] as? String } }, ["claim", "release"])
+        session.setActive(true, store: store, member: member)
+        XCTAssertEqual(modes.last, .observe)
+        session.disappear(store: store, member: member); store.disconnect()
+    }
+
+    func testFailedControlRetryReleasesLeaseAndShowsReadOnlyReconnectStatus() async throws {
+        let server = WriteTestServer()
+        let network = try IsolatedTestNetwork { request in
+            if request.url?.path.hasSuffix("/terminal/stream") == true { return IsolatedTestHTTPReply(status: 503) }
+            return try server.handle(request)
+        }
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        var receives = 0, leases: [String] = []
+        let client = TerminalStreamClient(session: network.session, receiveMessage: { request in
+            receives += 1
+            leases.append(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "lease" }?.value ?? "")
+            if receives == 1 || receives == 3 { return .string(#"{"type":"ready","mode":"control","cols":100,"rows":30}"#) }
+            throw URLError(.networkConnectionLost)
+        })
+        let fallback = expectation(description: "released then observing")
+        let session = controlSession(platform: .mac, client: client) { api, id, mode, cols, rows, lease, policy in
+            if mode == .control {
+                client.connect(api: api, memberID: id, mode: mode, cols: cols, rows: rows, leaseID: lease, sizePolicy: policy)
+            } else {
+                XCTAssertNil(store.terminalLeases[member.id]); fallback.fulfill()
+            }
+        }
+        session.appear(store: store, member: member, active: true); session.sizeChanged(cols: 100, rows: 30)
+        session.beginInput(store: store, member: member)
+        await fulfillment(of: [fallback], timeout: 3)
+        XCTAssertEqual(receives, 4); XCTAssertEqual(leases, Array(repeating: "lease", count: 4))
+        XCTAssertTrue(session.readOnly); XCTAssertFalse(session.controlling); XCTAssertNil(session.ownedLeaseID)
+        XCTAssertEqual(session.inputEndedStatus, "연결이 끊겨 입력을 끝냈습니다 · 클릭하면 다시 시작합니다")
+        XCTAssertEqual(server.read { $0.terminalBodies.compactMap { $0["action"] as? String } }, ["claim", "release"])
+        session.disappear(store: store, member: member); store.disconnect()
+    }
+
+    func testReadOnlyInactivityDoesNotPreventImmediateBackgroundClose() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        let session = TerminalSession(platform: .mac, connect: { _, _, _, _, _, _, _ in })
+        session.appear(store: store, member: member, active: true)
+        session.client.accept(.ready(mode: .observe, cols: 100, rows: 30, expiresAt: nil))
+        let now = Date()
+        session.setActive(false, store: store, member: member, now: now)
+        session.endInputIfInactive(store: store, member: member, now: now.addingTimeInterval(180))
+        XCTAssertNil(session.inputEndedStatus)
+        session.setActive(false, store: store, member: member, immediately: true)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(session.client.state, .closed(reason: "client_closed", message: nil))
+        session.disappear(store: store, member: member); store.disconnect()
+    }
+
+    func testMacBackgroundEndsImmediatelyWithoutGrace() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        var attached = false
+        let session = controlSession(platform: .mac) { _, _, mode, _, _, _, _ in attached = mode == .control }
+        session.appear(store: store, member: member, active: true); session.sizeChanged(cols: 100, rows: 30)
+        session.beginInput(store: store, member: member)
+        for _ in 0..<200 where !attached { try await Task.sleep(for: .milliseconds(10)) }
+        session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
+        session.setActive(false, store: store, member: member, immediately: true)
+        for _ in 0..<200 where session.controlling || session.ending || session.ownedLeaseID != nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(session.readOnly); XCTAssertNil(session.ownedLeaseID)
+        session.disappear(store: store, member: member); store.disconnect()
+    }
+
     func testMacExplicitInputClaimsAndAttachesControlAtNaturalSize() async throws {
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
@@ -399,25 +518,30 @@ import SwiftUI
                 return try server.handle(request)
             }
             let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
-            var controlAttaches = 0
-            let session = controlSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { controlAttaches += 1 } }
+            var controlAttaches = 0, sent: [Data] = []
+            let session = controlSession(platform: .mac, connect: { _, _, mode, _, _, _, _ in if mode == .control { controlAttaches += 1 } }, send: { sent.append($0) })
             session.sizeChanged(cols: 100, rows: 30); session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
             for _ in 0..<200 where controlAttaches == 0 { try await Task.sleep(for: .milliseconds(10)) }
             session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
-            session.setActive(false, store: store, member: member)
+            session.setActive(false, store: store, member: member, immediately: true)
             for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
             let gate = DispatchSemaphore(value: 0), entered = expectation(description: "sync held")
             server.change { $0.gate = gate; $0.entered = entered }
             store.setForeground(true); session.setActive(true, store: store, member: member); session.beginInput(store: store, member: member)
             await fulfillment(of: [entered], timeout: 3)
             XCTAssertTrue(store.isRevalidating); XCTAssertTrue(session.starting)
+            session.requestInput(Data("ab".utf8), store: store, member: member)
             XCTAssertEqual(controlAttaches, 1)
             if closeDuringWait { session.disappear(store: store, member: member) }
             server.change { $0.gate = nil; $0.entered = nil }; gate.signal()
             for _ in 0..<200 where store.isRevalidating || (!closeDuringWait && controlAttaches < 2) { try await Task.sleep(for: .milliseconds(10)) }
             try await Task.sleep(for: .milliseconds(100))
             XCTAssertEqual(controlAttaches, closeDuringWait ? 1 : 2)
-            if !closeDuringWait { XCTAssertFalse(session.readOnly); XCTAssertNil(session.notice) }
+            if !closeDuringWait {
+                XCTAssertFalse(session.readOnly); XCTAssertNil(session.notice)
+                session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
+                XCTAssertEqual(sent, [Data("ab".utf8)])
+            } else { XCTAssertTrue(sent.isEmpty) }
             session.disappear(store: store, member: member)
             for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
             store.disconnect()
@@ -494,6 +618,56 @@ import SwiftUI
     }
 
     #if os(macOS)
+    func testWindowOwnsOneSessionAndKeepsRenderedHostAcrossReadyAndParentRefresh() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        var constructions = 0
+        var createdSession: TerminalSession?
+        func root(_ member: Member) -> some View {
+            TerminalSessionContent(member: member, makeSession: {
+                constructions += 1
+                let session = TerminalSession(platform: .mac, connect: { _, _, _, _, _, _, _ in })
+                createdSession = session
+                return session
+            })
+            .environment(store).environment(\.terminalWindow, true).environment(\.scenePhase, .active)
+        }
+        let hosting = NSHostingView(rootView: root(member))
+        XCTAssertEqual(constructions, 0, "Creating the parent value must not construct a session")
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1000, height: 650),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = hosting
+        defer { createdSession?.disappear(store: store, member: member); window.close(); store.disconnect() }
+        func surface(in view: NSView) -> TerminalSurfaceHost? {
+            if let host = view as? TerminalSurfaceHost { return host }
+            return view.subviews.lazy.compactMap { surface(in: $0) }.first
+        }
+        hosting.layoutSubtreeIfNeeded()
+        for _ in 0..<100 where surface(in: hosting) == nil { try await Task.sleep(for: .milliseconds(10)); hosting.layoutSubtreeIfNeeded() }
+        XCTAssertEqual(constructions, 1, "The first mount must create exactly one session")
+        let session = try XCTUnwrap(createdSession)
+        let first = try XCTUnwrap(surface(in: hosting)), canvas = first.terminal, engine = canvas.getTerminal()
+        XCTAssertTrue(canvas.isDescendant(of: hosting), "The terminal canvas must be mounted in the window")
+        XCTAssertGreaterThan(canvas.bounds.width, 0); XCTAssertGreaterThan(canvas.bounds.height, 0)
+        first.feed(Data("old screen".utf8))
+        let oldBuffer = engine.buffer
+        session.client.accept(.ready(mode: .observe, cols: 80, rows: 24, expiresAt: nil))
+        session.client.onOutput?(Data("new screen".utf8))
+        try await Task.sleep(for: .milliseconds(60)); hosting.layoutSubtreeIfNeeded()
+        XCTAssertTrue(first === surface(in: hosting)); XCTAssertTrue(canvas === first.terminal)
+        XCTAssertTrue(engine === canvas.getTerminal()); XCTAssertFalse(oldBuffer === engine.buffer)
+        for width: CGFloat in [900, 1000, 800, 1100, 900] {
+            var updatedMember = member
+            updatedMember.now = "Parent refresh at width \(width)"
+            hosting.rootView = root(updatedMember)
+            window.setContentSize(CGSize(width: width, height: 600)); hosting.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(60))
+            XCTAssertEqual(constructions, 1, "Parent recomputation must retain the mounted session")
+            XCTAssertTrue(createdSession === session); XCTAssertTrue(first === surface(in: hosting))
+            XCTAssertTrue(canvas === first.terminal); XCTAssertTrue(engine === canvas.getTerminal())
+        }
+    }
+
     func testTerminalViewAndCESheetPropagateWindowWidthToViewportAndColumns() async throws {
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)

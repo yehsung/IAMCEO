@@ -30,16 +30,11 @@ struct LiveTerminalSurface: View {
     let rows: Int
     var onPendingInput: (Data) -> Void
     var onSize: (Int, Int) -> Void
-    @State private var following = true
+    @Binding var following: Bool
+    var onRequestInput: (Data) -> Void
     var body: some View {
         TerminalRepresentable(client: client, mode: mode, cols: cols, rows: rows, following: $following,
-                              onPendingInput: onPendingInput, onSize: onSize)
-            .overlay(alignment: .bottomTrailing) {
-                if !following && (mode == .observe || TerminalPlatform.current == .mac) {
-                    Button("새 출력이 있습니다 · 맨 아래로", systemImage: "arrow.down.to.line") { following = true }
-                        .ceSecondaryButton().padding(10).accessibilityLabel("터미널 맨 아래로")
-                }
-            }
+                              onPendingInput: onPendingInput, onSize: onSize, onRequestInput: onRequestInput)
     }
 }
 
@@ -49,15 +44,36 @@ final class TerminalSurfaceCoordinator: NSObject, @preconcurrency TerminalViewDe
     let outputID = UUID()
     weak var host: TerminalSurfaceHost?
     private var reportedSize: [Int] = []
-    init(_ parent: TerminalRepresentable) { self.parent = parent }
+    private var generation: UUID
+    var mode: TerminalStreamMode {
+        if case let .live(mode, _, _) = parent.client.state { return mode }
+        return parent.mode
+    }
+    init(_ parent: TerminalRepresentable) { self.parent = parent; generation = parent.client.outputGeneration }
+    func synchronizeOutput() {
+        guard generation != parent.client.outputGeneration else { return }
+        generation = parent.client.outputGeneration
+        host?.resetForGeneration()
+    }
+    func scheduleOutputReset() {
+        guard generation != parent.client.outputGeneration else { return }
+        // SwiftUI update callbacks must not mutate the following binding.
+        Task { [weak self] in self?.synchronizeOutput() }
+    }
+    func activity() {
+        #if os(macOS)
+        parent.client.activity(windowIsKey: host?.window?.isKeyWindow == true)
+        #endif
+    }
     func sizeChanged(source: SwiftTerm.TerminalView, newCols: Int, newRows: Int) {
-        guard parent.mode == .control, TerminalPlatform.current.controlSizePolicy == .fit else { return }
+        guard mode == .control, TerminalPlatform.current.controlSizePolicy == .fit else { return }
         reportSize(cols: newCols, rows: newRows)
         parent.client.resize(cols: newCols, rows: newRows)
     }
     func send(source: SwiftTerm.TerminalView, data: ArraySlice<UInt8>) {
         guard host?.feeding != true else { return } // VT device reports never claim human control.
-        guard parent.mode == .control else { return }
+        activity()
+        guard mode == .control else { parent.onRequestInput(Data(data)); return }
         if case .live(mode: .control, cols: _, rows: _) = parent.client.state { parent.client.send(Data(data)) }
         else if TerminalPlatform.current.buffersStartingInput { parent.onPendingInput(Data(data)) }
     }
@@ -81,14 +97,14 @@ final class TerminalSurfaceCoordinator: NSObject, @preconcurrency TerminalViewDe
         userScrolled(from: before)
     }
     func userScrolled(from before: TerminalScrollLocation) {
-        guard let host, parent.mode == .observe || TerminalPlatform.current == .mac, host.scrollLocation.isAbove(before),
+        guard let host, mode == .observe || TerminalPlatform.current == .mac,
               TerminalPresentation.pausesFollowing(userScroll: true, programmatic: host.programmaticScroll || host.feeding,
                                                   layingOut: host.layingOut) else { return }
-        stopFollowing()
+        if host.isAtBottom { parent.following = true }
+        else if host.scrollLocation.isAbove(before) { stopFollowing() }
+        host.userDidScroll()
     }
-    func stopFollowing() {
-        parent.following = false
-    }
+    func stopFollowing() { parent.following = false; host?.userDidScroll() }
     func displayGrid(viewport: CGSize) -> (cols: Int, rows: Int) {
         guard let host else { return (parent.cols, parent.rows) }
         #if os(iOS)
@@ -99,16 +115,16 @@ final class TerminalSurfaceCoordinator: NSObject, @preconcurrency TerminalViewDe
         // A resize event can precede SwiftUI's representable update and its next
         // binary paint. Read the live grid here so that paint uses the new grid.
         let core: (cols: Int, rows: Int)
-        if parent.mode == .control, case .live(mode: .control, cols: _, rows: _) = parent.client.state {
+        if case .live = parent.client.state {
             core = parent.client.grid
         } else { core = (parent.cols, parent.rows) }
         #if os(macOS)
         let cell = host.cellSize
-        return TerminalGridLayout.grid(platform: .mac, mode: parent.mode, cols: core.cols, rows: core.rows,
+        return TerminalGridLayout.grid(platform: .mac, mode: mode, cols: core.cols, rows: core.rows,
             viewport: CGSize(width: max(0, viewport.width - host.terminalGutter), height: viewport.height),
             cellWidth: cell.width, cellHeight: cell.height)
         #else
-        return TerminalGridLayout.grid(platform: .iPhone, mode: parent.mode, cols: core.cols, rows: core.rows,
+        return TerminalGridLayout.grid(platform: .iPhone, mode: mode, cols: core.cols, rows: core.rows,
             viewport: viewport, cellWidth: ideal.width / CGFloat(max(1, dimensions.cols)),
             cellHeight: ideal.height / CGFloat(max(1, dimensions.rows)))
         #endif
@@ -134,7 +150,7 @@ struct TerminalScrollLocation {
     }
     static func viewportY(_ offset: CGFloat, minimum: CGFloat, maximum: CGFloat) -> CGFloat {
         // Rubber-band recovery from a downward scroll is not an upward scroll.
-        max(minimum, min(offset, maximum))
+        min(max(offset, min(minimum, maximum)), max(minimum, maximum))
     }
 }
 
@@ -184,6 +200,7 @@ struct TerminalRepresentable: NSViewRepresentable {
     @Binding var following: Bool
     let onPendingInput: (Data) -> Void
     let onSize: (Int, Int) -> Void
+    var onRequestInput: (Data) -> Void = { _ in }
     func makeCoordinator() -> TerminalSurfaceCoordinator { TerminalSurfaceCoordinator(self) }
     func makeNSView(context: Context) -> TerminalSurfaceHost {
         let host = TerminalSurfaceHost(frame: .zero, coordinator: context.coordinator)
@@ -192,8 +209,11 @@ struct TerminalRepresentable: NSViewRepresentable {
         return host
     }
     func updateNSView(_ host: TerminalSurfaceHost, context: Context) {
-        context.coordinator.parent = self; host.needsLayout = true
-        if following { host.followCursor() }
+        let previous = context.coordinator.parent
+        context.coordinator.parent = self
+        context.coordinator.scheduleOutputReset()
+        if previous.mode != mode || previous.cols != cols || previous.rows != rows { host.needsLayout = true }
+        host.updateFollowing(following)
     }
     static func dismantleNSView(_ host: TerminalSurfaceHost, coordinator: TerminalSurfaceCoordinator) {
         host.teardown()
@@ -203,10 +223,37 @@ struct TerminalRepresentable: NSViewRepresentable {
 
 final class TerminalCanvas: SwiftTerm.TerminalView {
     weak var surface: TerminalSurfaceHost?
+    private var inputClick: Task<Void, Never>?
+    private var observingPress = false
+    private var dragged = false
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        inputClick?.cancel(); inputClick = nil
+        observingPress = surface?.coordinator.mode == .observe && event.clickCount == 1
+        dragged = false
+        surface?.coordinator.activity()
+        super.mouseDown(with: event)
+    }
+    override func mouseDragged(with event: NSEvent) {
+        dragged = true; inputClick?.cancel(); inputClick = nil
+        super.mouseDragged(with: event)
+    }
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        guard observingPress, !dragged, event.clickCount == 1 else { return }
+        observingPress = false
+        // Wait out the second press so word selection never takes a lease.
+        inputClick = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval)) } catch { return }
+            guard let self, let surface = self.surface, surface.window != nil else { return }
+            surface.coordinator.parent.onRequestInput(Data())
+        }
+    }
+    func cancelInputClick() { inputClick?.cancel(); inputClick = nil }
     nonisolated override func send(source: SwiftTerm.Terminal, data: ArraySlice<UInt8>) {
         let bytes = Array(data)
         Task { @MainActor [weak self] in
-            guard let self, self.surface?.coordinator.parent.mode == .control else { return }
+            guard let self, self.surface?.coordinator.mode == .control else { return }
             self.terminalDelegate?.send(source: self, data: bytes[...])
         }
     }
@@ -228,6 +275,7 @@ final class TerminalSurfaceHost: NSScrollView {
     private var followTask: Task<Void, Never>?
     private let canvas = TerminalDocumentCanvas()
     private var fixedGrid: [Int] = []
+    private var wasFollowing = true
     init(frame: CGRect, coordinator: TerminalSurfaceCoordinator) {
         self.coordinator = coordinator
         var options = TerminalOptions.default
@@ -287,7 +335,7 @@ final class TerminalSurfaceHost: NSScrollView {
         view.subviews.forEach { applyBackingScale(to: $0, scale: scale) }
     }
     func teardown() {
-        followTask?.cancel(); followTask = nil
+        followTask?.cancel(); followTask = nil; terminal.cancelInputClick()
         if let inputMonitor { NSEvent.removeMonitor(inputMonitor); self.inputMonitor = nil }
         liveScrollObservers.forEach(NotificationCenter.default.removeObserver)
         liveScrollObservers.removeAll()
@@ -298,15 +346,21 @@ final class TerminalSurfaceHost: NSScrollView {
         if window != nil {
             updateBackingScale()
             window?.makeFirstResponder(terminal)
-            inputMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .keyDown]) { [weak self] event in
+            inputMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
                 guard let self, event.window === self.window else { return event }
+                if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) {
+                    self.coordinator.activity()
+                    return event
+                }
                 if event.type == .keyDown {
-                    guard self.coordinator.parent.mode == .observe, self.window?.firstResponder === self.terminal,
+                    self.coordinator.activity()
+                    guard self.coordinator.mode == .observe, self.window?.firstResponder === self.terminal,
                           let key = event.charactersIgnoringModifiers?.unicodeScalars.first,
                           [NSPageUpFunctionKey, NSPageDownFunctionKey].contains(Int(key.value)) else { return event }
                     self.handleObservedKey(event)
                 } else {
                     guard self.bounds.contains(self.convert(event.locationInWindow, from: nil)) else { return event }
+                    self.coordinator.activity()
                     self.handleUserWheel(event)
                 }
                 return nil
@@ -322,13 +376,12 @@ final class TerminalSurfaceHost: NSScrollView {
             let bytes = pendingBytes; pendingBytes.removeAll()
             bytes.forEach(feed)
         }
-        let parent = coordinator.parent
-        terminal.allowMouseReporting = parent.mode == .control
+        updateMouseReporting()
         let cell = cellSize
         _ = coordinator.naturalGrid(viewport: CGSize(width: max(0, contentSize.width - terminalGutter), height: contentSize.height),
             ideal: cell, cols: 1, rows: 1)
         let grid = coordinator.displayGrid(viewport: contentSize)
-        let key = [contentSize.width, contentSize.height, CGFloat(grid.cols), CGFloat(grid.rows), parent.mode == .control ? 1 : 0]
+        let key = [contentSize.width, contentSize.height, CGFloat(grid.cols), CGFloat(grid.rows), coordinator.mode == .control ? 1 : 0]
         guard key != layoutKey else { return }; layoutKey = key
         if fixedGrid != [grid.cols, grid.rows] {
             TerminalRenderer.resize(terminal, cols: grid.cols, rows: grid.rows)
@@ -337,7 +390,7 @@ final class TerminalSurfaceHost: NSScrollView {
             fixedGrid = [grid.cols, grid.rows]
         }
         let ideal = terminal.getOptimalFrameSize().size
-        if parent.mode == .control {
+        if coordinator.mode == .control {
             // Actual 13pt cells, with identical frame/bounds: no scale transform.
             canvas.setFrameSize(ideal); canvas.setBoundsSize(ideal)
         } else {
@@ -353,31 +406,69 @@ final class TerminalSurfaceHost: NSScrollView {
         coordinator.performUserScroll { terminal.keyDown(with: event) }
     }
     func handleUserWheel(_ event: NSEvent) {
-        if coordinator.parent.mode == .control, terminal.bounds.contains(terminal.convert(event.locationInWindow, from: nil)) {
-            // Preserve SwiftTerm mouse reporting and scrollback handling in control.
+        updateMouseReporting()
+        let clip = contentView
+        let canMoveOuter = event.scrollingDeltaY > 0
+            ? scrollLocation.viewportY > clip.documentRect.minY
+            : scrollLocation.viewportY < max(clip.documentRect.minY, clip.documentRect.maxY - clip.bounds.height)
+        if !terminal.allowMouseReporting, !terminal.getTerminal().isCurrentBufferAlternate, canMoveOuter {
+            scrollWheel(with: event)
+        } else {
             coordinator.performUserScroll { terminal.scrollWheel(with: event) }
-        } else { scrollWheel(with: event) }
+        }
     }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func scrollWheel(with event: NSEvent) {
         coordinator.performUserScroll { super.scrollWheel(with: event) }
     }
     var scrollLocation: TerminalScrollLocation {
         let clip = contentView
         return TerminalScrollLocation(viewportY: TerminalScrollLocation.viewportY(clip.bounds.minY,
-            minimum: clip.documentRect.minY, maximum: clip.documentRect.maxY - clip.bounds.height),
+            minimum: clip.documentRect.minY, maximum: max(clip.documentRect.minY, clip.documentRect.maxY - clip.bounds.height)),
             historyRow: terminal.getTerminal().getTopVisibleRow())
     }
+    func updateMouseReporting() {
+        terminal.allowMouseReporting = coordinator.mode == .control && terminal.getTerminal().mouseMode != .off
+    }
+    func updateFollowing(_ following: Bool) {
+        defer { wasFollowing = following }
+        if following && !wasFollowing { followCursor() }
+    }
+    func userDidScroll() {
+        pausedAnchor = coordinator.parent.following ? nil : TerminalHistoryAnchor(engine: terminal.getTerminal())
+        wasFollowing = coordinator.parent.following
+    }
+    func resetForGeneration() {
+        followTask?.cancel(); followTask = nil; pendingBytes.removeAll()
+        feeding = true
+        terminal.selectNone()
+        terminal.getTerminal().resetToInitialState()
+        let grid = coordinator.parent.client.grid
+        TerminalRenderer.resize(terminal, cols: grid.cols, rows: grid.rows)
+        fixedGrid.removeAll(); layoutKey.removeAll()
+        pausedAnchor = nil; coordinator.parent.following = true; wasFollowing = true
+        feeding = false
+        contentView.scroll(to: .zero); reflectScrolledClipView(contentView)
+        needsLayout = true
+        updateMouseReporting()
+    }
+    var isAtBottom: Bool {
+        let bottom = max(contentView.documentRect.minY, contentView.documentRect.maxY - contentView.bounds.height)
+        return (!terminal.canScroll || terminal.scrollPosition >= 1) && scrollLocation.viewportY >= bottom - 1
+    }
     func feed(_ data: Data) {
+        coordinator.synchronizeOutput()
         let client = coordinator.parent.client
-        if coordinator.parent.mode == .control, case .live(mode: .control, cols: _, rows: _) = client.state,
-           fixedGrid != [client.grid.cols, client.grid.rows] { needsLayout = true }
+        if case .live = client.state, fixedGrid != [client.grid.cols, client.grid.rows] { needsLayout = true }
         layoutSubtreeIfNeeded()
         guard contentSize.width > 0, !layoutKey.isEmpty else { pendingBytes.append(data); return }
         if !coordinator.parent.following, pausedAnchor == nil {
             pausedAnchor = TerminalHistoryAnchor(engine: terminal.getTerminal())
         }
         feeding = true
+        updateMouseReporting()
         terminal.feed(byteArray: Array(data)[...])
+        updateMouseReporting()
         restorePausedHistory()
         feeding = false
         scheduleFollow()
@@ -388,8 +479,7 @@ final class TerminalSurfaceHost: NSScrollView {
            let row = anchor.row(in: terminal.getTerminal()) {
             terminal.scrollTo(row: row)
         }
-        // If the anchor was discarded or the buffer reset, the paused overlay
-        // explains the new output and offers an explicit return to the bottom.
+        // A discarded anchor leaves the status-row action available to resume.
         pausedAnchor = nil
     }
     private func scheduleFollow() {
@@ -435,6 +525,7 @@ struct TerminalRepresentable: UIViewRepresentable {
     @Binding var following: Bool
     let onPendingInput: (Data) -> Void
     let onSize: (Int, Int) -> Void
+    var onRequestInput: (Data) -> Void = { _ in }
     func makeCoordinator() -> TerminalSurfaceCoordinator { TerminalSurfaceCoordinator(self) }
     func makeUIView(context: Context) -> TerminalSurfaceHost {
         let host = TerminalSurfaceHost(frame: .zero, coordinator: context.coordinator)
@@ -443,8 +534,13 @@ struct TerminalRepresentable: UIViewRepresentable {
         return host
     }
     func updateUIView(_ host: TerminalSurfaceHost, context: Context) {
-        context.coordinator.parent = self; host.updateInputMode(); host.setNeedsLayout()
-        if following { host.followCursor() }
+        let previous = context.coordinator.parent
+        context.coordinator.parent = self
+        context.coordinator.scheduleOutputReset()
+        if previous.mode != mode || previous.cols != cols || previous.rows != rows {
+            host.updateInputMode(); host.setNeedsLayout()
+        }
+        host.updateFollowing(following)
     }
     static func dismantleUIView(_ host: TerminalSurfaceHost, coordinator: TerminalSurfaceCoordinator) {
         host.teardown()
@@ -465,6 +561,7 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
     private let canvas = UIView()
     private var dragLocation: TerminalScrollLocation?
     private var fixedGrid: [Int] = []
+    private var wasFollowing = true
     private var inputAccessory: UIView?
     init(frame: CGRect, coordinator: TerminalSurfaceCoordinator) {
         self.coordinator = coordinator
@@ -491,11 +588,10 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
     }
     func teardown() { followTask?.cancel(); followTask = nil }
     func updateInputMode() {
-        terminal.keyboardEnabled = TerminalPlatform.iPhone.acceptsKeyboard(mode: coordinator.parent.mode)
-        terminal.inputAccessoryView = terminal.keyboardEnabled ? inputAccessory : nil
-        if terminal.keyboardEnabled {
-            if window != nil, !terminal.isFirstResponder { _ = terminal.becomeFirstResponder() }
-        } else { _ = terminal.resignFirstResponder() }
+        terminal.keyboardEnabled = true
+        let controlling = coordinator.mode == .control
+        terminal.inputAccessoryView = controlling ? inputAccessory : nil
+        if controlling, window != nil, !terminal.isFirstResponder { _ = terminal.becomeFirstResponder() }
     }
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -511,14 +607,14 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
             let bytes = pendingBytes; pendingBytes.removeAll()
             bytes.forEach(feed)
         }
-        let parent = coordinator.parent
-        terminal.allowMouseReporting = parent.mode == .control
-        let key = [bounds.width, bounds.height, CGFloat(parent.cols), CGFloat(parent.rows), parent.mode == .control ? 1 : 0]
+        let grid = coordinator.displayGrid(viewport: bounds.size)
+        updateMouseReporting()
+        let key = [bounds.width, bounds.height, CGFloat(grid.cols), CGFloat(grid.rows), coordinator.mode == .control ? 1 : 0]
         guard key != layoutKey else { return }; layoutKey = key
-        terminal.isScrollEnabled = parent.mode == .control
-        if parent.mode == .control {
+        terminal.isScrollEnabled = coordinator.mode == .control
+        if coordinator.mode == .control {
             minimumZoomScale = 1; maximumZoomScale = 3
-            let grid = coordinator.displayGrid(viewport: bounds.size)
+            fixedGrid = [grid.cols, grid.rows]
             TerminalRenderer.resize(terminal, cols: grid.cols, rows: grid.rows)
             let ideal = terminal.getOptimalFrameSize().size
             let size = CGSize(width: max(ideal.width, bounds.width), height: max(ideal.height, bounds.height))
@@ -527,14 +623,14 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
             canvas.center = CGPoint(x: size.width * zoomScale / 2, y: size.height * zoomScale / 2)
             contentSize = CGSize(width: size.width * zoomScale, height: size.height * zoomScale)
         } else {
-            if fixedGrid != [parent.cols, parent.rows] {
-                TerminalRenderer.resize(terminal, cols: parent.cols, rows: parent.rows)
+            if fixedGrid != [grid.cols, grid.rows] {
+                TerminalRenderer.resize(terminal, cols: grid.cols, rows: grid.rows)
                 terminal.frame = terminal.getOptimalFrameSize()
-                TerminalRenderer.resize(terminal, cols: parent.cols, rows: parent.rows)
-                fixedGrid = [parent.cols, parent.rows]
+                TerminalRenderer.resize(terminal, cols: grid.cols, rows: grid.rows)
+                fixedGrid = [grid.cols, grid.rows]
             }
             let ideal = terminal.getOptimalFrameSize().size
-            _ = coordinator.naturalGrid(viewport: bounds.size, ideal: ideal, cols: parent.cols, rows: parent.rows)
+            _ = coordinator.naturalGrid(viewport: bounds.size, ideal: ideal, cols: grid.cols, rows: grid.rows)
             canvas.bounds.size = ideal
             minimumZoomScale = 1; maximumZoomScale = 3
             canvas.center = CGPoint(x: ideal.width * zoomScale / 2, y: ideal.height * zoomScale / 2)
@@ -561,17 +657,52 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
     }
     var scrollLocation: TerminalScrollLocation {
         TerminalScrollLocation(viewportY: TerminalScrollLocation.viewportY(contentOffset.y,
-            minimum: -adjustedContentInset.top, maximum: contentSize.height - bounds.height + adjustedContentInset.bottom),
+            minimum: -adjustedContentInset.top, maximum: max(-adjustedContentInset.top, contentSize.height - bounds.height + adjustedContentInset.bottom)),
             historyRow: terminal.getTerminal().getTopVisibleRow())
     }
+    func updateMouseReporting() {
+        terminal.allowMouseReporting = coordinator.mode == .control && terminal.getTerminal().mouseMode != .off
+    }
+    func updateFollowing(_ following: Bool) {
+        defer { wasFollowing = following }
+        if following && !wasFollowing { followCursor() }
+    }
+    func userDidScroll() {
+        pausedAnchor = coordinator.parent.following ? nil : TerminalHistoryAnchor(engine: terminal.getTerminal())
+        wasFollowing = coordinator.parent.following
+    }
+    func resetForGeneration() {
+        followTask?.cancel(); followTask = nil; pendingBytes.removeAll()
+        feeding = true
+        terminal.selectNone()
+        terminal.getTerminal().resetToInitialState()
+        let grid = coordinator.parent.client.grid
+        TerminalRenderer.resize(terminal, cols: grid.cols, rows: grid.rows)
+        fixedGrid.removeAll(); layoutKey.removeAll()
+        pausedAnchor = nil; coordinator.parent.following = true; wasFollowing = true
+        feeding = false
+        setContentOffset(.zero, animated: false); setNeedsLayout()
+        updateMouseReporting()
+    }
+    var isAtBottom: Bool {
+        let bottom = max(-adjustedContentInset.top, contentSize.height - bounds.height + adjustedContentInset.bottom)
+        return (!terminal.canScroll || terminal.scrollPosition >= 1) && scrollLocation.viewportY >= bottom - 1
+    }
     func feed(_ data: Data) {
+        coordinator.synchronizeOutput()
+        if case .live = coordinator.parent.client.state {
+            let grid = coordinator.parent.client.grid
+            if fixedGrid != [grid.cols, grid.rows] { setNeedsLayout() }
+        }
         layoutIfNeeded()
         guard bounds.width > 0, !layoutKey.isEmpty else { pendingBytes.append(data); return }
         if !coordinator.parent.following, pausedAnchor == nil {
             pausedAnchor = TerminalHistoryAnchor(engine: terminal.getTerminal())
         }
         feeding = true
+        updateMouseReporting()
         terminal.feed(byteArray: Array(data)[...])
+        updateMouseReporting()
         restorePausedHistory()
         feeding = false
         scheduleFollow()
@@ -582,8 +713,7 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
            let row = anchor.row(in: terminal.getTerminal()) {
             terminal.scrollTo(row: row)
         }
-        // If the anchor was discarded or the buffer reset, the paused overlay
-        // explains the new output and offers an explicit return to the bottom.
+        // A discarded anchor leaves the status-row action available to resume.
         pausedAnchor = nil
     }
     private func scheduleFollow() {
@@ -626,7 +756,7 @@ final class TerminalCanvas: SwiftTerm.TerminalView {
     nonisolated override func send(source: SwiftTerm.Terminal, data: ArraySlice<UInt8>) {
         let bytes = Array(data)
         Task { @MainActor [weak self] in
-            guard let self, self.surface?.coordinator.parent.mode == .control else { return }
+            guard let self, self.surface?.coordinator.mode == .control else { return }
             self.terminalDelegate?.send(source: self, data: bytes[...])
         }
     }

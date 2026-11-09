@@ -133,6 +133,81 @@ exec ${quote(process.execPath)} ${quote(script)} "$@"
 function alive(pid: number) { try { process.kill(pid,0); return true; } catch { return false; } }
 
 describe("terminal stream", () => {
+  test("activity renews only after 60 seconds across reconnects, and observers ignore it", async () => {
+    const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const manager = new TerminalStreams(f.config, f.store, f.orch); cleanups.push(() => manager.close());
+    const control = await manager.prepare(f.member.id, new URL(`http://localhost/?mode=control&lease=${lease.leaseId}`));
+    const observe = await manager.prepare(f.member.id, new URL("http://localhost/?mode=observe"));
+    const renew = spyOn(f.orch, "renewTerminalStreamLease"), base = Date.now(), now = spyOn(Date, "now");
+    try {
+      const activity = JSON.stringify({ type: "activity" });
+      now.mockReturnValue(base + 59_000); control.message(activity); expect(renew).toHaveBeenCalledTimes(0);
+      now.mockReturnValue(base + 60_000); control.message(activity); expect(renew).toHaveBeenCalledTimes(1);
+      expect(f.store.inputState(f.member.id).lease!.expiresAt).toBe(base + 360_000);
+      now.mockReturnValue(base + 119_999); control.message(activity); expect(renew).toHaveBeenCalledTimes(1);
+      now.mockReturnValue(base + 120_000); control.message(activity); expect(renew).toHaveBeenCalledTimes(2);
+      now.mockReturnValue(base + 180_000); observe.message(activity); expect(renew).toHaveBeenCalledTimes(2);
+      await control.close();
+      const reconnect = await manager.prepare(f.member.id, new URL(`http://localhost/?mode=control&lease=${lease.leaseId}`));
+      reconnect.message(activity); expect(renew).toHaveBeenCalledTimes(3);
+      const active = f.store.inputState(f.member.id).lease!;
+      f.store.saveLease({ ...active, expiresAt: base + 179_999 });
+      now.mockReturnValue(base + 181_000);
+      reconnect.message(activity); expect(renew).toHaveBeenCalledTimes(3);
+    } finally { now.mockRestore(); renew.mockRestore(); }
+  });
+  test("queued chunks use one ordered PTY write and reuse the lease validated by check", async () => {
+    const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const manager = new TerminalStreams(f.config, f.store, f.orch); cleanups.push(() => manager.close());
+    const stream = await manager.prepare(f.member.id, new URL(`http://localhost/?mode=control&lease=${lease.leaseId}`));
+    const output: Buffer[] = [];
+    stream.open({ send: () => {}, sendBinary: (bytes: Uint8Array) => output.push(Buffer.from(bytes)), close: () => {}, getBufferedAmount: () => 0 } as unknown as ServerWebSocket<SocketData>);
+    await until(() => Buffer.concat(output).toString().includes("PTY_READY"));
+    stream.message(Buffer.from("prime"));
+    await until(() => Buffer.concat(output).toString().includes("IN:7072696d65"));
+    const lookup = spyOn(f.orch, "terminalStreamLease"), input = spyOn(f.orch, "terminalStreamInput");
+    try {
+      stream.check(); expect(lookup).toHaveBeenCalledTimes(1);
+      stream.message(Buffer.from("A")); stream.message(Buffer.from([28, 66]));
+      await until(() => Buffer.concat(output).toString().includes("IN:4142"));
+      expect(input).toHaveBeenCalledTimes(1);
+      expect(lookup).toHaveBeenCalledTimes(1);
+    } finally { lookup.mockRestore(); input.mockRestore(); }
+  });
+  test("observe prepare waits for restoration before reading the current size", async () => {
+    const f = await fixture(), manager = new TerminalStreams(f.config, f.store, f.orch);
+    cleanups.push(() => manager.close());
+    let restored!: () => void;
+    const restoring = new Promise<void>(resolve => { restored = resolve; });
+    const restore = spyOn(manager, "restore").mockImplementation(() => restoring);
+    const info = spyOn(f.orch, "terminalStreamInfo");
+    try {
+      const preparing = manager.prepare(f.member.id, new URL("http://localhost/?mode=observe"));
+      await Promise.resolve();
+      expect(restore).toHaveBeenCalledWith(f.member.id); expect(info).toHaveBeenCalledTimes(0);
+      Object.assign(f.terminals.get(f.member.paneId!), { cols: 160, rows: 50 });
+      restored();
+      expect((await preparing).size).toEqual({ cols: 160, rows: 50 });
+      expect(info).toHaveBeenCalledTimes(1);
+    } finally { restored(); restore.mockRestore(); info.mockRestore(); }
+  });
+  test("identical fit sizes do not resize the PTY or send SIGWINCH", async () => {
+    const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const manager = new TerminalStreams(f.config, f.store, f.orch); cleanups.push(() => manager.close());
+    const stream = await manager.prepare(f.member.id, new URL(`http://localhost/?mode=control&cols=100&rows=30&lease=${lease.leaseId}`));
+    let ready = false;
+    stream.open({ send: (text: string) => { ready ||= JSON.parse(text).type === "ready"; }, sendBinary: () => {}, close: () => {}, getBufferedAmount: () => 0 } as unknown as ServerWebSocket<SocketData>);
+    await until(() => ready);
+    const resize = spyOn((stream as any).terminal, "resize"), kill = spyOn((stream as any).proc, "kill");
+    try {
+      stream.message(JSON.stringify({ type: "resize", cols: 100, rows: 30 }));
+      expect(resize).toHaveBeenCalledTimes(0); expect(kill).toHaveBeenCalledTimes(0);
+      stream.message(JSON.stringify({ type: "resize", cols: 101, rows: 31 }));
+      stream.message(JSON.stringify({ type: "resize", cols: 101, rows: 31 }));
+      expect(resize).toHaveBeenCalledTimes(1); expect(kill).toHaveBeenCalledTimes(1);
+      expect(kill).toHaveBeenCalledWith("SIGWINCH");
+    } finally { resize.mockRestore(); kill.mockRestore(); }
+  });
   test("bearer only, strict query, missing member and legacy/manual/project refusals before upgrade", async () => {
     const f = await fixture();
     expect((await f.status("mode=observe", f.member.id, false)).status).toBe(401);

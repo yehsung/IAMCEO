@@ -73,7 +73,7 @@ struct AppShell: View {
         .sheet(isPresented: $router.showNewProject) { NewProjectView() }
         .sheet(isPresented: $router.showNewMember) { NewMemberView() }
         #if os(iOS)
-        .sheet(item: rootTerminal) { TerminalView(member: $0) }
+        .sheet(item: rootTerminal) { TerminalSessionContent(member: $0) }
         #endif
         #if os(macOS)
         // Mac: a terminal is its own window (A-54), so two members can sit side by side and the screen behind stays

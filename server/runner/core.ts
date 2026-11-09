@@ -100,6 +100,7 @@ export class CoreRunner implements Runner {
   private readonly starts = new Map<string, Promise<{ sessionId: string | null; paneId: string; rejoined?: boolean }>>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly polling = new Set<Track>();
+  private readonly inputRefreshes = new Map<Track, ReturnType<typeof setTimeout>>();
   private closed = false;
   private methods = new Set<string>();
 
@@ -796,13 +797,28 @@ export class CoreRunner implements Runner {
     const track = this.tracks.get(memberId);
     if (!track) throw new CoreError("not_found", "Terminal is no longer tracked");
     const terminal = track.terminal;
+    clearTimeout(this.inputRefreshes.get(track));
+    this.inputRefreshes.delete(track);
     this.bump(track);
     const compact = this.disarmManualResolution(track);
     write(); // A successful local PTY write is the stream's acknowledgement.
-    await track.refresh?.catch(() => undefined);
-    this.validateTrack(track);
-    this.armManualResolution(track, compact, terminal);
-    await this.refresh(track).catch(() => undefined);
+    // Keep pre-write observations disarmed without putting them on the input chain.
+    const previous = track.refresh;
+    if (!previous) this.armManualResolution(track, compact, terminal);
+    const armed = previous?.catch(() => undefined).then(() => {
+      if (!this.closed && this.tracks.get(memberId) === track && this.inputRefreshes.get(track) === timer) this.armManualResolution(track, compact, terminal);
+    }).catch(() => undefined);
+    const timer = setTimeout(() => {
+      void (async () => {
+        await armed;
+        if (this.closed || this.tracks.get(memberId) !== track || this.inputRefreshes.get(track) !== timer) return;
+        await this.refresh(track);
+      })().catch(() => undefined).finally(() => {
+        if (this.inputRefreshes.get(track) === timer) this.inputRefreshes.delete(track);
+      });
+    }, 200);
+    timer.unref();
+    this.inputRefreshes.set(track, timer);
   }
   private disarmManualResolution(track: Track) {
     const compact = track.compact && ["running", "uncertain"].includes(track.compact.phase) ? track.compact : null;
@@ -948,6 +964,8 @@ export class CoreRunner implements Runner {
     this.configuring.clear();
     this.parallelPreferences.clear();
     this.leases.clear();
+    for (const timer of this.inputRefreshes.values()) clearTimeout(timer);
+    this.inputRefreshes.clear();
     for (const track of this.tracks.values()) if (track.statusTimer) clearTimeout(track.statusTimer);
     this.tracks.clear();
   }

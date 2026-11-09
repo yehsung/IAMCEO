@@ -85,18 +85,18 @@ export class TerminalStreams {
     const stream = new TerminalStream(this, memberId, member.paneId, mode, size, url.searchParams.get("lease"), sizePolicy);
     this.streams.add(stream);
     try {
-      stream.requireLease();
+      stream.requireLease(true);
       if (mode === "control") {
         // Only an authenticated current lease holder may replace an orphan.
         await Promise.all([...this.streams].filter(s => s !== stream && s.memberId === memberId && s.mode === "control").map(s => s.replace()));
-        await this.restore(memberId);
-        stream.requireLease();
+        stream.requireLease(true);
       }
+      await this.restore(memberId);
       const peers = [...this.streams].filter(s => s.memberId === memberId && s.mode === mode);
       if (this.streams.size > 12 || peers.length > (mode === "observe" ? 3 : 1)) throw new ApiError(429, "열린 터미널이 너무 많습니다");
       const currentSize = await this.orch.terminalStreamInfo(memberId);
       if (this.stopped || this.store.requireMember(memberId).paneId !== member.paneId) throw new ApiError(409, "세션이 바뀌었습니다", "TERMINAL_REFUSED");
-      stream.requireLease();
+      stream.requireLease(true);
       if (mode === "observe" || sizePolicy === "core") stream.size = currentSize;
       if (mode === "control") stream.restoreSize = currentSize;
       return stream;
@@ -122,12 +122,14 @@ export class TerminalStream {
   private ended = false;
   private started = false;
   private lastRenew = -Infinity;
+  private leaseCheckedAt = -Infinity;
   private expiresAt?: number;
   private terminal?: Terminal;
   private ready = false;
   private earlyOutput: Uint8Array[] = [];
   private pendingInput = Buffer.alloc(0);
-  private inputChain = Promise.resolve();
+  private queuedInput: Uint8Array[] = [];
+  private inputScheduled = false;
   private sizeCheck = false;
   restoreSize?: { cols: number; rows: number };
   private lastSizeCheck = 0;
@@ -137,18 +139,21 @@ export class TerminalStream {
     readonly mode: TerminalMode, public size: { cols: number; rows: number }, private readonly leaseId: string | null,
     readonly sizePolicy: TerminalSizePolicy = "fit") {}
 
-  requireLease(): void {
+  requireLease(force = false): void {
     if (this.ended) throw new LeaseEnded();
     if (this.mode !== "control") return;
+    const now = Date.now();
+    if (!force && now >= this.leaseCheckedAt && now - this.leaseCheckedAt < 1000 && this.expiresAt! > now) return;
     const lease = this.owner.orch.terminalStreamLease?.(this.memberId);
-    if (!lease || lease.expiresAt <= Date.now() || lease.leaseId !== this.leaseId) throw new LeaseEnded();
+    if (!lease || lease.expiresAt <= now || lease.leaseId !== this.leaseId) throw new LeaseEnded();
     this.expiresAt = lease.expiresAt;
+    this.leaseCheckedAt = now;
   }
   async endLease(memberId: string, leaseId: string | null): Promise<void> {
     if (this.mode !== "control" || this.memberId !== memberId) return;
     if (leaseId !== null && this.leaseId !== leaseId) return;
     if (leaseId === null && !this.ended) {
-      try { this.requireLease(); return; } catch { /* expired or replaced */ }
+      try { this.requireLease(true); return; } catch { /* expired or replaced */ }
     }
     await this.close("lease_ended");
   }
@@ -157,7 +162,7 @@ export class TerminalStream {
     this.lastPong = this.lastPing = Date.now();
     if (this.ended) { ws.close(); return; }
     try {
-      this.requireLease();
+      this.requireLease(true);
       const config = this.owner.config;
       const env = { ...childEnv(), HC_SOCKET: config.coreSocket ?? join(config.home, "run", "core.sock"), HC_SESSION: "iamceo",
         XDG_STATE_HOME: join(config.home, "core-state"), XDG_CONFIG_HOME: join(config.home, "core-config") };
@@ -220,7 +225,7 @@ export class TerminalStream {
   private fail(error: unknown): void {
     // A renewal can cross the expiry boundary after the preceding lease check.
     let failure = error;
-    try { this.requireLease(); } catch (leaseError) { failure = leaseError; }
+    try { this.requireLease(true); } catch (leaseError) { failure = leaseError; }
     const reason = failure instanceof LeaseEnded ? "lease_ended"
       : failure instanceof ApiError && failure.code === "TERMINAL_GONE" ? "terminal_gone"
       : failure instanceof ApiError && failure.code === "TERMINAL_REFUSED" ? "refused" : "error";
@@ -241,7 +246,7 @@ export class TerminalStream {
   }
   check(): void {
     if (this.ended) return;
-    try { this.requireLease(); } catch (error) { this.fail(error); return; }
+    try { this.requireLease(true); } catch (error) { this.fail(error); return; }
     if (this.ws) {
       const now = Date.now();
       if (now - this.lastPong >= 30_000) { void this.close("timeout"); return; }
@@ -260,9 +265,16 @@ export class TerminalStream {
         const event = JSON.parse(message);
         if (event.type === "ping") { this.pong(); this.sendText({ type: "pong" }); }
         if (event.type === "pong") this.pong();
+        if (event.type === "activity" && this.mode === "control") {
+          this.requireLease();
+          // Core leases last five minutes; keep the renewal clock on reconnect.
+          this.renew(60_000, this.expiresAt! - 5 * 60_000);
+        }
         if (event.type === "resize" && this.mode === "control" && this.sizePolicy === "fit") {
           this.requireLease();
-          this.size = terminalSize(event.cols, event.rows);
+          const size = terminalSize(event.cols, event.rows);
+          if (size.cols === this.size.cols && size.rows === this.size.rows) return;
+          this.size = size;
           this.resizePTY();
           this.owner.refreshObservers(this.memberId);
         }
@@ -270,10 +282,10 @@ export class TerminalStream {
       return;
     }
     if (this.mode !== "control") return;
-    try { this.requireLease(); } catch (error) { this.fail(error); return; }
     const bytes = message.filter(byte => byte !== 0x1c);
     if (!bytes.length) return;
     if (!this.ready) {
+      try { this.requireLease(); } catch (error) { this.fail(error); return; }
       if (this.pendingInput.length + bytes.length > 4096) { void this.close("error", "입력 준비 버퍼를 초과했습니다"); return; }
       this.pendingInput = Buffer.concat([this.pendingInput, bytes]);
     } else this.queueInput(bytes);
@@ -284,23 +296,36 @@ export class TerminalStream {
     if (this.proc?.exitCode === null) this.proc.kill("SIGWINCH");
   }
   private queueInput(bytes: Uint8Array): void {
-    this.inputChain = this.inputChain.then(async () => {
-      if (this.ended) return;
-      this.requireLease();
-      if (Date.now() - this.lastRenew >= 10_000) {
-        this.expiresAt = this.owner.orch.renewTerminalStreamLease!(this.memberId, this.leaseId!);
-        this.lastRenew = Date.now();
-        this.sendText({ type: "lease", expiresAt: this.expiresAt });
+    this.queuedInput.push(bytes);
+    if (this.inputScheduled) return;
+    this.inputScheduled = true;
+    queueMicrotask(() => { void this.flushInput(); });
+  }
+  private renew(interval: number, since = -Infinity): void {
+    const now = Date.now();
+    if (now - Math.max(this.lastRenew, since) < interval) return;
+    this.expiresAt = this.owner.orch.renewTerminalStreamLease!(this.memberId, this.leaseId!);
+    this.lastRenew = now;
+    this.leaseCheckedAt = now;
+    this.sendText({ type: "lease", expiresAt: this.expiresAt });
+  }
+  private async flushInput(): Promise<void> {
+    try {
+      while (!this.ended && this.queuedInput.length) {
+        this.renew(10_000);
+        await this.owner.orch.terminalStreamInput!(this.memberId, () => {
+          if (this.ended) throw new Error("Stream closed");
+          this.requireLease();
+          const bytes = Buffer.concat(this.queuedInput);
+          this.queuedInput = [];
+          this.terminal!.write(bytes);
+        });
       }
-      await this.owner.orch.terminalStreamInput!(this.memberId, () => {
-        if (this.ended) throw new Error("Stream closed");
-        this.requireLease();
-        this.terminal!.write(bytes);
-      });
-    }).catch(error => this.fail(error));
+    } catch (error) { this.fail(error); }
+    finally { this.inputScheduled = false; }
   }
   replace(): Promise<void> {
-    try { this.requireLease(); }
+    try { this.requireLease(true); }
     catch (error) { this.fail(error); return this.close(); }
     return this.close("replaced");
   }
@@ -327,6 +352,7 @@ export class TerminalStream {
       try { this.terminal?.setRawMode(false); } catch { /* master already closed */ }
       this.terminal?.close();
       this.pendingInput = Buffer.alloc(0);
+      this.queuedInput = [];
       if (this.started && this.mode === "control") this.owner.detached(this, reason);
       this.owner.forget(this);
       if (this.mode === "control") this.owner.refreshObservers(this.memberId);

@@ -186,6 +186,52 @@ describe("core Claude folder trust approval", () => {
 });
 
 describe("herdr-core client and lifecycle", () => {
+  test("stream inputs return before an outstanding refresh and debounce to one post-input refresh", async () => {
+    const f = await fixture(), runner = f.runner(60_000);
+    const started = await runner.start(member(), f.opts);
+    let held: { request: Request; socket: Socket } | undefined;
+    f.setHook((request, socket) => {
+      if (request.method === "terminal.get" && !held) { held = { request, socket }; return true; }
+      return false;
+    });
+    const reading = runner.screen(member());
+    await until(() => !!held);
+    const writes: string[] = [];
+    const before = f.calls.filter(c => c.method === "terminal.get").length;
+    expect(await Promise.race([
+      (async () => {
+        await runner.noteTerminalInput(member().id, () => writes.push("A"));
+        await runner.noteTerminalInput(member().id, () => writes.push("B"));
+        return "written";
+      })(), Bun.sleep(50).then(() => "blocked"),
+    ])).toBe("written");
+    expect(writes).toEqual(["A", "B"]);
+    held!.socket.write(JSON.stringify({ jsonrpc: "2.0", id: held!.request.id, result: f.terminals.get(started.paneId) }) + "\n");
+    await reading; f.setHook(null);
+    await until(() => f.calls.filter(c => c.method === "terminal.get").length === before + 1);
+    await Bun.sleep(250);
+    expect(f.calls.filter(c => c.method === "terminal.get")).toHaveLength(before + 1);
+  });
+  test("blocked full-screen inspection cannot hold up PTY input", async () => {
+    const f = await fixture(), runner = f.runner(60_000);
+    const started = await runner.start(member(), f.opts);
+    f.terminals.get(started.paneId)!.status = { state: "blocked", kind: "selection" };
+    let held: { request: Request; socket: Socket } | undefined;
+    f.setHook((request, socket) => {
+      if (request.method === "terminal.read" && !held) { held = { request, socket }; return true; }
+      return false;
+    });
+    const reading = runner.screen(member());
+    await until(() => !!held);
+    let writes = "";
+    expect(await Promise.race([
+      runner.noteTerminalInput(member().id, () => { writes += "AB"; }).then(() => "written"),
+      Bun.sleep(50).then(() => "blocked"),
+    ])).toBe("written");
+    expect(writes).toBe("AB");
+    held!.socket.write(JSON.stringify({ jsonrpc: "2.0", id: held!.request.id, result: { text: "unknown blocked screen" } }) + "\n");
+    await reading; f.setHook(null);
+  });
   test("fake core follows the 0.1.18 size schema and ignores top-level dimensions", async () => {
     const f = await fixture();
     const params = { argv: ["/fake/claude"], cwd: "/tmp", labels: {}, cols: 80, rows: 24 };

@@ -1017,7 +1017,7 @@ struct MemberDetailView: View {
                     .help("\(m.name)와 주고받은 대화")
                 if showsTerminal {
                     Button { openTerminal(m) } label: {
-                        Label(TerminalAvailability.title(m, waking: store.terminalWake.members.contains(m.id), normal: isMac ? "터미널 직접 열기" : "터미널"), systemImage: "terminal")
+                        Label(TerminalAvailability.title(m, waking: store.terminalWake.members.contains(m.id), normal: isMac ? "터미널 보기" : "터미널"), systemImage: "terminal")
                     }
                         .ceSecondaryButton().controlSize(.small)
                         .disabled(!store.canOpenTerminal(m))

@@ -73,7 +73,7 @@ import XCTest
         session.disappear(store: store, member: member); store.disconnect()
     }
 
-    func testForegroundReturnsToViewingWithoutTakingAnotherLease() async throws {
+    func testBriefMacDeactivationKeepsInputWithoutTakingAnotherLease() async throws {
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connect(network), member = try XCTUnwrap(store.members.first)
         var modes: [TerminalStreamMode] = []
@@ -83,11 +83,12 @@ import XCTest
         try await eventually { modes.last == .control }
         session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
         session.setActive(false, store: store, member: member)
-        try await eventually { !session.ending && store.terminalLeases[member.id] == nil }
+        await Task.yield()
+        XCTAssertTrue(session.controlling); XCTAssertNotNil(store.terminalLeases[member.id])
         session.setActive(true, store: store, member: member)
-        XCTAssertEqual(modes.last, .observe)
-        XCTAssertTrue(session.readOnly)
-        XCTAssertEqual(server.read { $0.terminalBodies.compactMap { $0["action"] as? String } }, ["claim", "release"])
+        XCTAssertEqual(modes, [.observe, .control])
+        XCTAssertFalse(session.readOnly)
+        XCTAssertEqual(server.read { $0.terminalBodies.compactMap { $0["action"] as? String } }, ["claim"])
         session.disappear(store: store, member: member); store.disconnect()
     }
 

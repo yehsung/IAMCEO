@@ -16,7 +16,7 @@ enum TerminalPlatform: Sendable {
     var controlSizePolicy: TerminalSizePolicy { .fit }
     var openingMode: TerminalStreamMode { .observe }
     var buffersStartingInput: Bool { true }
-    var observeHint: String { "읽기 전용 화면입니다" }
+    var observeHint: String { "읽기 전용 · 클릭하거나 입력하면 입력을 시작합니다" }
     func usesCoreGrid(mode: TerminalStreamMode) -> Bool { mode == .observe || controlSizePolicy == .core }
     func acceptsKeyboard(mode: TerminalStreamMode) -> Bool { mode == .control }
 }
@@ -97,6 +97,11 @@ final class TerminalStreamClient {
     @ObservationIgnored private var socket: URLSessionWebSocketTask?
     @ObservationIgnored private var receiveTask: Task<Void, Never>?
     @ObservationIgnored private var sendTask: Task<Void, Never>?
+    @ObservationIgnored private var inputFlushTask: Task<Void, Never>?
+    @ObservationIgnored private var inputBytes = Data()
+    @ObservationIgnored private var lastActivity: Date?
+    @ObservationIgnored private let messageSender: ((URLSessionWebSocketTask.Message) async throws -> Void)?
+    @ObservationIgnored private let receiveMessage: ((URLRequest) async throws -> URLSessionWebSocketTask.Message)?
     @ObservationIgnored private var resizeTask: Task<Void, Never>?
     @ObservationIgnored private var session: URLSession
     @ObservationIgnored private var pendingOutput: [Data] = []
@@ -108,7 +113,10 @@ final class TerminalStreamClient {
     func attachOutput(owner: UUID, handler: @escaping (Data) -> Void) { outputOwner = owner; onOutput = handler }
     func detachOutput(owner: UUID) { if outputOwner == owner { onOutput = nil; outputOwner = nil } }
 
-    init(session: URLSession? = nil, resizeSender: ((String) async throws -> Void)? = nil) {
+    init(session: URLSession? = nil, resizeSender: ((String) async throws -> Void)? = nil,
+         messageSender: ((URLSessionWebSocketTask.Message) async throws -> Void)? = nil,
+         receiveMessage: ((URLRequest) async throws -> URLSessionWebSocketTask.Message)? = nil) {
+        self.messageSender = messageSender; self.receiveMessage = receiveMessage
         self.resizeSender = resizeSender
         let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false
@@ -130,6 +138,7 @@ final class TerminalStreamClient {
         receiveTask = Task { [weak self] in
             var retry = TerminalReconnectPolicy()
             var liveSince: Date?
+            var retriedControl = false
             while !Task.isCancelled {
                 guard let self, self.connection == token else { return }
                 self.state = .connecting
@@ -138,9 +147,12 @@ final class TerminalStreamClient {
                     let request = try await api.terminalStreamRequest(memberID: memberID, mode: mode, cols: cols, rows: rows, leaseID: leaseID, sizePolicy: sizePolicy)
                     guard !Task.isCancelled, self.connection == token else { return }
                     let ws = self.session.webSocketTask(with: request)
-                    self.socket = ws; ws.resume()
+                    self.socket = ws
+                    if self.receiveMessage == nil { ws.resume() }
                     while !Task.isCancelled {
-                        let message = try await ws.receive()
+                        let message: URLSessionWebSocketTask.Message
+                        if let receive = self.receiveMessage { message = try await receive(request) }
+                        else { message = try await ws.receive() }
                         guard self.connection == token else { return }
                         switch message {
                         case .data(let bytes): self.output(bytes)
@@ -148,7 +160,6 @@ final class TerminalStreamClient {
                             if let event = TerminalStreamEvent.parse(text) {
                                 self.accept(event)
                                 if case .ready = event { liveSince = Date() }
-                                if case .resize = event, mode == .observe { throw StreamResized() }
                                 if case .closed = event { throw StreamEnded() }
                             }
                         @unknown default: break
@@ -159,18 +170,35 @@ final class TerminalStreamClient {
                     var status = (self.socket?.response as? HTTPURLResponse)?.statusCode ?? (error as? APIError)?.status ?? 0
                     var refusal: APIError?
                     // Foundation does not expose the body of a rejected upgrade.
-                    if !(error is StreamEnded) && !(error is StreamResized) && (status == 0 || status == 409) {
+                    if !(error is StreamEnded) && (status == 0 || status == 409) {
                         refusal = await api.terminalStreamRefusal(memberID: memberID)
                         guard !Task.isCancelled, self.connection == token else { return }
                         if let refusal { status = refusal.status }
                     }
                     self.socket?.cancel(with: .goingAway, reason: nil); self.socket = nil
-                    if error is StreamResized { continue }
-                    if Self.isUnsupported(status: status) { self.state = .unsupported; return }
+                    if Self.isUnsupported(status: status) {
+                        if mode == .control {
+                            self.state = .closed(reason: "disconnected", message: TerminalPresentation.disconnectedStatus)
+                            self.onControlEnded?()
+                        } else { self.state = .unsupported }
+                        return
+                    }
                     if case .closed = self.state {} else {
                         self.state = .closed(reason: "disconnected", message: refusal?.message ?? (status == 401 ? "접속 코드를 확인해 주세요" : status == 409 ? "세션을 처리 중이거나 조작권이 없습니다" : "터미널 연결이 끊겼습니다"))
                     }
-                    if mode == .control { self.onControlEnded?(); return }
+                    if mode == .control {
+                        // A transport failure gets one attach with the original lease.
+                        // Explicit lease endings/refusals must never be retried.
+                        if !retriedControl, !(error is StreamEnded), ![401, 403, 409].contains(status) {
+                            retriedControl = true
+                            self.cancelPendingInput()
+                            continue
+                        }
+                        if !(error is StreamEnded), ![401, 403, 409].contains(status) {
+                            self.state = .closed(reason: "disconnected", message: TerminalPresentation.disconnectedStatus)
+                        }
+                        self.onControlEnded?(); return
+                    }
                     let stable = liveSince.map { Date().timeIntervalSince($0) >= 15 } ?? false
                     liveSince = nil
                     guard let delay = retry.failed(status: status, code: refusal?.code, stable: stable) else {
@@ -185,15 +213,12 @@ final class TerminalStreamClient {
     func accept(_ event: TerminalStreamEvent) {
         switch event {
         case let .ready(mode, cols, rows, expiry):
-            onOutput = nil; outputOwner = nil
+            pendingOutput.removeAll()
             grid = (cols, rows); outputGeneration = UUID()
             expiresAt = expiry; state = .live(mode: mode, cols: cols, rows: rows); onReady?(mode)
         case let .resize(cols, rows):
             guard case let .live(mode, _, _) = state else { return }
             grid = (cols, rows)
-            if mode == .observe {
-                onOutput = nil; outputOwner = nil; pendingOutput.removeAll(); outputGeneration = UUID()
-            }
             state = .live(mode: mode, cols: cols, rows: rows)
         case .lease(let expiry): expiresAt = expiry; onLease?(expiry)
         case let .closed(reason, message): state = .closed(reason: reason, message: message)
@@ -203,20 +228,45 @@ final class TerminalStreamClient {
         if let onOutput { onOutput(bytes) } else { pendingOutput.append(bytes) }
     }
     func showDemo() {
-        close(); onOutput = nil; outputOwner = nil; grid = (100, 30); outputGeneration = UUID()
+        close(); grid = (100, 30); outputGeneration = UUID()
         state = .live(mode: .observe, cols: 100, rows: 30)
         output(Data("\u{1b}c\u{1b}[38;5;141m╭─ Claude Code ──────────────────────────────╮\r\n│ IAMCEO · 샘플 프로젝트                     │\r\n╰────────────────────────────────────────────╯\u{1b}[0m\r\n\r\n\u{1b}[32m●\u{1b}[0m 요청한 변경을 확인했습니다.\r\n  앱 안에서 CLI 화면과 색을 확인할 수 있습니다.\r\n\r\n\u{1b}[38;5;141m❯\u{1b}[0m 다음 작업을 입력하세요\r\n".utf8))
     }
     func send(_ bytes: Data) {
-        guard case .live(mode: .control, cols: _, rows: _) = state, let socket else { return }
-        // Serialize sends so fast typing cannot overtake earlier bytes.
-        let previous = sendTask
+        guard !bytes.isEmpty, case .live(mode: .control, cols: _, rows: _) = state,
+              socket != nil || messageSender != nil else { return }
+        inputBytes.append(bytes)
+        guard inputFlushTask == nil else { return }
         let token = connection
+        inputFlushTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(8)) } catch { return }
+            guard let self, self.connection == token else { return }
+            let bytes = self.inputBytes
+            self.inputBytes.removeAll(); self.inputFlushTask = nil
+            self.enqueue(.data(bytes))
+        }
+    }
+    func activity(windowIsKey: Bool, now: Date = Date()) {
+        guard windowIsKey, case .live(mode: .control, cols: _, rows: _) = state,
+              socket != nil || messageSender != nil,
+              lastActivity.map({ now.timeIntervalSince($0) >= 30 }) ?? true else { return }
+        lastActivity = now
+        enqueue(.string(#"{"type":"activity"}"#))
+    }
+    private func enqueue(_ message: URLSessionWebSocketTask.Message) {
+        let previous = sendTask, socket = socket, token = connection
         sendTask = Task { [weak self] in
             await previous?.value
             guard let self, !Task.isCancelled, self.connection == token else { return }
-            do { try await socket.send(.data(bytes)) } catch { socket.cancel(with: .goingAway, reason: nil) }
+            do {
+                if let sender = self.messageSender { try await sender(message) }
+                else if let socket { try await socket.send(message) }
+            } catch { socket?.cancel(with: .goingAway, reason: nil) }
         }
+    }
+    private func cancelPendingInput() {
+        inputFlushTask?.cancel(); inputFlushTask = nil; inputBytes.removeAll()
+        sendTask?.cancel(); sendTask = nil
     }
     func resize(cols: Int, rows: Int) {
         resizeTask?.cancel()
@@ -237,7 +287,7 @@ final class TerminalStreamClient {
     func close() {
         connection = UUID()
         receiveTask?.cancel(); receiveTask = nil
-        sendTask?.cancel(); sendTask = nil
+        cancelPendingInput(); lastActivity = nil
         resizeTask?.cancel(); resizeTask = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
         pendingOutput.removeAll()
@@ -249,7 +299,6 @@ final class TerminalStreamClient {
         close(); session.invalidateAndCancel()
     }
     private struct StreamEnded: Error {}
-    private struct StreamResized: Error {}
 }
 
 /// Retry state survives short-lived ready/output bursts from a failing attach.
@@ -267,6 +316,8 @@ struct TerminalReconnectPolicy {
 }
 
 struct TerminalPresentation {
+    static let inactiveStatus = "자리를 비운 사이 입력을 끝냈습니다 · 클릭하면 다시 시작합니다"
+    static let disconnectedStatus = "연결이 끊겨 입력을 끝냈습니다 · 클릭하면 다시 시작합니다"
     /// Display only: APIError.message, stream state and receipts retain the server's original text.
     static func message(_ raw: String) -> String {
         let translations = [

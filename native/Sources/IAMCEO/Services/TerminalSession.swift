@@ -11,6 +11,9 @@ final class TerminalSession {
     private(set) var ending = false
     private(set) var readOnly: Bool
     private(set) var notice: String?
+    private(set) var inputEndedStatus: String?
+    @ObservationIgnored private var inactiveSince: Date?
+    @ObservationIgnored private var inactivityTask: Task<Void, Never>?
     private(set) var missingTerminal = false
     private(set) var naturalCols = 100
     private(set) var naturalRows = 30
@@ -69,6 +72,9 @@ final class TerminalSession {
                 if reason == "lease_ended", let id = self.ownedLeaseID, store.terminalLeases[member.id]?.leaseId == id { store.terminalStreamLeaseEnded(memberID: member.id) }
                 message = serverMessage ?? (reason == "lease_ended" ? "조작권이 끝났습니다." : message)
             }
+            if case .closed(reason: "disconnected", message: _) = self.client.state {
+                self.inputEndedStatus = TerminalPresentation.disconnectedStatus
+            }
             self.fallback(store: store, member: member, message: message, release: true)
         }
         open(store: store, member: member)
@@ -99,6 +105,13 @@ final class TerminalSession {
         if !startBuffer.append(bytes) { notice = "입력 준비 중에는 4KB·3초까지만 보관합니다. 다시 입력해 주세요." }
     }
 
+    /// All human input uses the same claim/refusal path as the input button.
+    func requestInput(_ bytes: Data, store: AppStore, member: Member) {
+        if controlling { if !bytes.isEmpty { send(bytes) }; return }
+        if !starting { beginInput(store: store, member: member) }
+        pendingInput(bytes)
+    }
+
     func beginInput(store: AppStore, member: Member) {
         let member = store.members.first { $0.id == member.id } ?? member
         if TerminalAvailability.needsWake(member) { memberChanged(store: store, member: member); return }
@@ -107,6 +120,7 @@ final class TerminalSession {
         if !store.isDemo, !store.canWrite, store.isRevalidating, store.api != nil,
            store.connectionStatus == .connected || store.connectionLost {
             starting = true; readOnly = false; notice = "서버 연결을 확인하고 있습니다."
+            if platform.buffersStartingInput, startBuffer.startedAt == nil { startBuffer.begin() }
             let token = UUID(); requestID = token
             revalidationTask?.cancel()
             revalidationTask = Task {
@@ -123,8 +137,8 @@ final class TerminalSession {
             fallback(store: store, member: member, message: store.isDemo ? "샘플은 읽기 전용입니다." : "서버에 연결되지 않아 조작할 수 없습니다.")
             return
         }
-        starting = true; readOnly = false; notice = nil
-        if platform.buffersStartingInput { startBuffer.begin() }
+        starting = true; readOnly = false; notice = nil; inputEndedStatus = nil
+        if platform.buffersStartingInput, startBuffer.startedAt == nil { startBuffer.begin() }
         // Retrying from the read-only fallback must stop that socket before claiming.
         client.close()
         let previousOwner = takeOwner()
@@ -246,17 +260,41 @@ final class TerminalSession {
         else if visible && active { open(store: store, member: member) }
     }
 
-    func setActive(_ active: Bool, store: AppStore, member: Member) {
+    func setActive(_ active: Bool, store: AppStore, member: Member, immediately: Bool = false, now: Date = Date()) {
+        if !active, platform == .mac, !immediately {
+            guard self.active, inactiveSince == nil else { return }
+            inactiveSince = now
+            inactivityTask = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(180)) } catch { return }
+                self?.endInputIfInactive(store: store, member: member)
+            }
+            return
+        }
+        inactiveSince = nil; inactivityTask?.cancel(); inactivityTask = nil
         guard self.active != active else { return }
         self.active = active
         if !active {
             revalidationTask?.cancel()
             Task { await finishInput(store: store, member: member, resume: false) }
-        } else { open(store: store, member: member) }
+        } else if !controlling, !starting {
+            // A brief Mac focus change leaves both sockets and leases intact.
+            if case .live = client.state { return }
+            open(store: store, member: member)
+        }
+    }
+
+    func endInputIfInactive(store: AppStore, member: Member, now: Date = Date()) {
+        guard let inactiveSince, now.timeIntervalSince(inactiveSince) >= 180, visible, active else { return }
+        self.inactiveSince = nil; inactivityTask?.cancel(); inactivityTask = nil
+        guard controlling || starting || ownedLeaseID != nil else { return }
+        active = false
+        inputEndedStatus = TerminalPresentation.inactiveStatus
+        Task { await finishInput(store: store, member: member, resume: false) }
     }
 
     func disappear(store: AppStore, member: Member) {
         store.terminalWindowClosed(owner: windowOwner)
+        inactiveSince = nil; inactivityTask?.cancel(); inactivityTask = nil
         visible = false; active = false; requestID = UUID(); pendingControl = nil
         starting = false; startBuffer.clear(); revalidationTask?.cancel(); client.dispose()
         let owner = takeOwner()

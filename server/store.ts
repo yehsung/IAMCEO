@@ -616,6 +616,9 @@ function deriveFileKind(body: string, attachments: { name: string; mime: string 
   return kinds[0]!;
 }
 
+// html(아티팩트 원본)은 getFileHtml로만 읽는다. 목록·단건 조회가 매번 통째로 읽지 않게 열을 명시한다.
+const FILE_COLUMNS = "id, kind, project_id, title, who, member_id, summary, body, path, attachments, created_at, sort_order";
+
 function toFile(r: Row): FileDoc {
   const attachments = json<Attachment[]>(r.attachments);
   return {
@@ -969,7 +972,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     if (!refs) for (const link of message.body.matchAll(/\]\(#\/p\/([^/()]+)\/files\/([^/()]+)\)/g)) {
       try {
         const projectId = decodeURIComponent(link[1]!), fileId = decodeURIComponent(link[2]!);
-        if (projectId === message.projectId && this.getFile(fileId)?.projectId === projectId && !message.fileIds.includes(fileId)) message.fileIds.push(fileId);
+        if (projectId === message.projectId && this.fileProjectId(fileId) === projectId && !message.fileIds.includes(fileId)) message.fileIds.push(fileId);
       } catch { /* Malformed legacy links are plain text, never cross-project references. */ }
     }
     message.supersedes = refs?.correctsMessageId ?? null;
@@ -2098,7 +2101,12 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     const rows = opts.before
       ? this.rows("SELECT * FROM messages WHERE project_id = ? AND at < ? ORDER BY at DESC, rowid DESC LIMIT ?", projectId, opts.before, limit)
       : this.rows("SELECT * FROM messages WHERE project_id = ? ORDER BY at DESC, rowid DESC LIMIT ?", projectId, limit);
-    return rows.reverse().map(r => this.messageFrom(r));
+    return this.messagesFrom(projectId, rows.reverse());
+  }
+
+  /** 글마다 출처·전달을 따로 묻지 않도록 프로젝트 읽기 스냅샷 안에서 조립한다. */
+  private messagesFrom(projectId: string, rows: Row[]): Message[] {
+    return rows.length ? this.withDeliveryRead(projectId, () => rows.map(r => this.messageFrom(r))) : [];
   }
 
   private messageScope(projectId: string, scope: MessageScope = { kind: "project" }): MessageScope {
@@ -2153,7 +2161,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
           SELECT id, at FROM candidates ORDER BY at COLLATE BINARY DESC, id COLLATE BINARY DESC LIMIT $limit
         ) SELECT m.* FROM page_keys k JOIN messages m ON m.id = k.id ORDER BY k.at COLLATE BINARY DESC, k.id COLLATE BINARY DESC`).all({ ...params, $member: scope.memberId });
     const hasOlder = rows.length > limit;
-    const items = rows.slice(0, limit).reverse().map(r => this.messageFrom(r));
+    const items = this.messagesFrom(projectId, rows.slice(0, limit).reverse());
     const first = items[0];
     if (hasOlder && first && (Buffer.byteLength(first.at) > 128 || Buffer.byteLength(first.id) > 256 || !first.at || !first.id)) throw new ApiError(500, "저장된 메시지의 위치 정보가 올바르지 않습니다");
     return { projectId, scope, items, hasOlder, nextCursor: hasOlder && first ? Buffer.from(JSON.stringify({ v: 1, projectId, scope, before: { at: first.at, id: first.id } })).toString("base64url") : null };
@@ -2186,7 +2194,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     if (anchor.projectId !== projectId) throw new ApiError(404, "메시지를 찾을 수 없습니다");
     const older = this.rows("SELECT * FROM messages WHERE project_id = ? AND (at, id) < (?, ?) ORDER BY at COLLATE BINARY DESC, id COLLATE BINARY DESC LIMIT ?", projectId, anchor.at, anchor.id, Math.floor((limit - 1) / 2));
     const newer = this.rows("SELECT * FROM messages WHERE project_id = ? AND (at, id) > (?, ?) ORDER BY at COLLATE BINARY, id COLLATE BINARY LIMIT ?", projectId, anchor.at, anchor.id, limit - 1 - older.length);
-    return [...older.reverse().map(r => this.messageFrom(r)), anchor, ...newer.map(r => this.messageFrom(r))];
+    const around = this.messagesFrom(projectId, [...older.reverse(), ...newer]);
+    return [...around.slice(0, older.length), anchor, ...around.slice(older.length)];
   }
 
   // before 페이징이 같은 at 의 글을 건너뛰지 않도록 at 을 프로세스 안에서 단조 증가시킨다.
@@ -2257,8 +2266,13 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   // ---- 자료 ----
   getFile(id: string): FileDoc | null {
-    const r = this.row("SELECT * FROM files WHERE id = ?", id);
+    const r = this.row(`SELECT ${FILE_COLUMNS} FROM files WHERE id = ?`, id);
     return r ? toFile(r) : null;
+  }
+
+  /** 소속만 확인할 때 쓴다. 본문·첨부를 읽지 않는다. */
+  private fileProjectId(id: string): string | null {
+    return (this.row("SELECT project_id FROM files WHERE id = ?", id)?.project_id as string | undefined) ?? null;
   }
 
   /** 아티팩트 원본. 예전 자료는 첨부에 들어 있어 호출하는 쪽이 첨부에서 읽는다. */
@@ -2267,7 +2281,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   listFiles(projectId: string): FileDoc[] {
-    return this.rows("SELECT * FROM files WHERE project_id = ? ORDER BY sort_order DESC, rowid DESC", projectId).map(toFile);
+    return this.rows(`SELECT ${FILE_COLUMNS} FROM files WHERE project_id = ? ORDER BY sort_order DESC, rowid DESC`, projectId).map(toFile);
   }
 
   searchFiles(projectId: string, query: string, limit = 50, archived = false): FileSearchResult[] {
@@ -2837,7 +2851,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   // ---- 전달 복구 CAS / 봉투 ----
   getDeliveryRecovery(deliveryId: string): DeliveryRecoveryRecord | null {
     const r = this.deliveryRead?.rows.has(deliveryId) ? this.deliveryRead.recoveries.get(deliveryId) : this.row("SELECT * FROM delivery_recovery WHERE delivery_id = ?", deliveryId);
-    return r ? { deliveryId, marker: r.marker, phase: r.phase, reason: r.reason, version: r.version, autoAttempts: r.auto_attempts, checkCount: r.check_count, activeCheckMs: r.active_check_ms, nextCheckAt: r.next_check_at, lastCheckedAt: r.last_checked_at, evidence: json(r.evidence_json), updatedAt: r.updated_at } : null;
+    return r ? this.deliveryRecoveryFrom(r) : null;
+  }
+
+  private deliveryRecoveryFrom(r: Row): DeliveryRecoveryRecord {
+    return { deliveryId: r.delivery_id, marker: r.marker, phase: r.phase, reason: r.reason, version: r.version, autoAttempts: r.auto_attempts, checkCount: r.check_count, activeCheckMs: r.active_check_ms, nextCheckAt: r.next_check_at, lastCheckedAt: r.last_checked_at, evidence: json(r.evidence_json), updatedAt: r.updated_at };
   }
 
   updateDeliveryRecovery(deliveryId: string, expectedVersion: number, patch: Partial<Omit<DeliveryRecoveryRecord, "deliveryId" | "version" | "updatedAt">>): DeliveryRecoveryRecord {
@@ -2855,7 +2873,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   listDeliveryRecoveries(projectId?: string): DeliveryRecoveryRecord[] {
-    return this.rows(`SELECT r.delivery_id FROM delivery_recovery r JOIN deliveries d ON d.id = r.delivery_id ${projectId === undefined ? "" : "WHERE d.project_id = ?"} ORDER BY d.rowid`, ...(projectId === undefined ? [] : [projectId])).map((r) => this.getDeliveryRecovery(r.delivery_id)!);
+    // 전달마다 다시 묻지 않고 한 번에 읽는다.
+    return this.rows(`SELECT r.* FROM delivery_recovery r JOIN deliveries d ON d.id = r.delivery_id ${projectId === undefined ? "" : "WHERE d.project_id = ?"} ORDER BY d.rowid`, ...(projectId === undefined ? [] : [projectId])).map((r) => this.deliveryRecoveryFrom(r));
   }
 
   saveDispatch(dispatch: DeliveryDispatch): void {
@@ -3092,7 +3111,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   saveReportReferences(projectId: string, refs: ReportReferences): void {
     this.transaction(() => {
       if (this.requireMessage(refs.sourceMessageId).projectId !== projectId || (refs.correctsMessageId && this.requireMessage(refs.correctsMessageId).projectId !== projectId)) throw new ApiError(400, "다른 프로젝트의 메시지입니다");
-      for (const id of refs.fileIds) if (this.getFile(id)?.projectId !== projectId) throw new ApiError(400, "자료의 프로젝트가 다릅니다");
+      for (const id of refs.fileIds) if (this.fileProjectId(id) !== projectId) throw new ApiError(400, "자료의 프로젝트가 다릅니다");
       for (const id of refs.decisionIds) if (this.requireDecision(id).projectId !== projectId) throw new ApiError(400, "결재의 프로젝트가 다릅니다");
       const before = this.getReportReferences(projectId, refs.sourceMessageId);
       if (before) {

@@ -134,6 +134,8 @@ struct OfficeView: View {
     @Environment(\.scenePhase) private var scenePhase
     /// Mac and regular-width iPad: the wide office (more columns, the rest area a column at the right edge).
     @Environment(\.ceWide) private var wide
+    /// Mac은 숨은 탭도 계속 올려 둔다. 보이지 않는 동안에는 장면을 한 프레임만 그리고 멈춘다.
+    @Environment(\.ceTabVisible) private var tabVisible
     #if os(macOS)
     /// Keyboard focus is only shown while the window is active (a background window keeps AppKit's first key view).
     @Environment(\.appearsActive) private var appearsActive
@@ -349,7 +351,7 @@ struct OfficeView: View {
     private func cadence(map: OfficeMap) -> OfficeCadence {
         let now = Date().timeIntervalSinceReferenceDate
         var cadence = OfficeCadence()
-        cadence.paused = !visible || !sceneActive || (reduceMotion && now > fadeUntil)
+        cadence.paused = !visible || !tabVisible || !sceneActive || (reduceMotion && now > fadeUntil)
         cadence.walks = plans.values.filter { $0.signature == map.layout && $0.end > now }.map { $0.start...$0.end }
         return cadence
     }

@@ -56,7 +56,7 @@ extension SyncSnapshot {
         bootstrap = try c.decode(Bootstrap.self, forKey: .bootstrap)
         state = try c.decodeIfPresent(ProjectState.self, forKey: .state)
         revisions = try c.decodeIfPresent(SyncRevisions.self, forKey: .revisions)
-        apiOutage = try c.decodeIfPresent(APIOutage.self, forKey: .apiOutage)
+        apiOutage = c.lenient(APIOutage.self, forKey: .apiOutage)
         guard protocolVersion == 2 else {
             throw DecodingError.dataCorruptedError(forKey: .protocolVersion, in: c, debugDescription: "Unsupported sync protocol")
         }
@@ -141,7 +141,7 @@ struct RealtimeEvent: Decodable, Sendable {
                 throw DecodingError.dataCorruptedError(forKey: .heartbeatMs, in: c, debugDescription: "Invalid heartbeat contract")
             }
         case "ping": break
-        case "projects": projects = try c.decode([ProjectSummary].self, forKey: .projects)
+        case "projects": projects = try c.requiredLossyArray(ProjectSummary.self, forKey: .projects)
         case "project": project = try c.decode(Project.self, forKey: .project)
         case "member": member = try c.decode(Member.self, forKey: .member)
         case "member_removed":
@@ -151,7 +151,7 @@ struct RealtimeEvent: Decodable, Sendable {
         case "todo": todo = try c.decode(Todo.self, forKey: .todo)
         case "work":
             projectId = try c.decode(String.self, forKey: .projectId)
-            work = try c.decode([WorkItem].self, forKey: .work)
+            work = try c.requiredLossyArray(WorkItem.self, forKey: .work)
         case "message": message = try c.decode(Message.self, forKey: .message)
         case "file": file = try c.decode(FileDoc.self, forKey: .file)
         case "activity":

@@ -23,6 +23,8 @@
     "check:ts": "bash scripts/check.sh ts",
     "test:server": "bash scripts/check.sh server",
     "test:native": "bash scripts/check.sh swift",
+    "test:perf": "IAMCEO_PERF_STRICT=1 bash scripts/check.sh server tests/file-search.test.ts tests/stall-fix.test.ts",
+    "smoke:db": "bun scripts/smoke-db.ts",
     "build:check": "bash scripts/check.sh build",
     "release:mac": "bun scripts/release-mac.ts",
     "typecheck": "tsc --noEmit",

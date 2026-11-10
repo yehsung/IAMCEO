@@ -25,6 +25,7 @@ then give instructions and approve decisions from one Mac and iPhone app.
 - **Deliverables, not paths** — documents, tables, images, videos and HTML pages open right in the app, under Files.
 - **Keep going away from the desk** — instruct, approve and get notified from your iPhone while your Mac keeps the work running.
 - **Your records, on your Mac** — conversations, decisions and files live in SQLite on your Mac and survive AI account changes.
+- **No reinvented wheels** — the official CLIs, herdr-core, MCP, SQLite and Tailscale are used as they are; IAMCEO builds only the layer that makes them work like a company. → [Design](#how-it-works)
 
 Mac and iPhone native apps are the supported clients. The web client was removed on 2026-11-10; existing native app API contracts remain supported.
 
@@ -64,18 +65,51 @@ Or `curl -fsSL https://raw.githubusercontent.com/yehsung/IAMCEO/main/install.sh 
 
 ## How it works
 
+**Use what is already good, build only what was missing.** IAMCEO does not ship its own AI model, terminal multiplexer or agent protocol. What it builds is the layer on top that makes several sessions work like a company. That keeps the program small, and when any of those parts improves, IAMCEO improves with it.
+
 ```mermaid
 flowchart LR
-    APP["Mac · iPhone apps"] -- "REST · WebSocket" --> D["IAMCEO daemon<br/>(Bun · SQLite)"]
+    APP["Mac · iPhone apps<br/>(SwiftUI)"] -- "REST · WebSocket<br/>Tailscale" --> D["IAMCEO server<br/>delivery queue · decisions · files"]
+    D --- DB[("SQLite")]
     D -- "holds terminals" --> CORE["herdr-core"]
     CORE --> L["Lead<br/>Claude Code"] & W["Staff<br/>Claude Code · Codex"]
     L & W -- "MCP tools<br/>post · ask · file · team_assign" --> D
+    classDef own fill:#8b5cf6,stroke:#6d28d9,color:#ffffff
+    classDef reuse fill:#f4f1fa,stroke:#b8a9d9,color:#1f1633
+    class APP,D own
+    class DB,CORE,L,W reuse
 ```
 
-- **The official CLIs, unchanged.** Claude Code and Codex run in interactive terminals under your own log-ins. IAMCEO only adds role instructions and an MCP connection.
-- **Sessions outlive the apps and the server.** [herdr-core](https://github.com/herdrdev/herdr-core) holds the terminals, so closing the app or restarting the server never stops the work.
+<sub>Purple is what IAMCEO builds; the light boxes are reused as they are.</sub>
+
+### Reused
+
+| Job | What does it | What you get |
+|---|---|---|
+| The AI and its coding tools | The official [Claude Code](https://claude.com/claude-code) and [Codex CLI](https://github.com/openai/codex) | Your own subscription and log-in. No API key, no fee added by IAMCEO, and new CLI features arrive as soon as the CLI ships them. |
+| Holding terminals | [herdr-core](https://github.com/herdrdev/herdr-core) | Sessions stay alive when you close the app or restart the server. |
+| Talking to the agents | The [MCP](https://modelcontextprotocol.io) standard | No screen scraping. Reports and requests arrive as tool calls, so everything is recorded. |
+| Server and data | [Bun](https://bun.sh) and SQLite | No database server to install. Your data is one file, so a backup is one copy. Only two runtime packages. |
+| Terminal view | [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) | See a staff member's real terminal inside the app, and type into it. |
+| Remote access | [Tailscale](https://tailscale.com) | No open ports and no relay. There is no server run by IAMCEO. |
+| Notifications, secrets, always-on | APNs, Keychain, launchd | The way macOS and iOS already do it. |
+
+### Built here
+
+- **The company structure** — each project has a lead that splits the work and hands it to staff. Every staff member has its own session, so contexts never mix.
+- **The Inbox** — staff questions and approvals become cards with background, the outcome of each option and a recommendation.
+- **The delivery queue** — checks the session record to confirm your words really reached the CLI. When that is uncertain, it never types the same message twice. If the network drops or a usage limit hits, it continues once that clears.
+- **Owner-quote checking** — when the lead quotes you, the server compares the quote with your original words and marks the result.
+- **Files** — documents, tables, images, videos and HTML pages made by staff open right in the app.
+- **The Mac and iPhone apps** — one SwiftUI codebase, the same screens on both.
+
+### Design rules
+
+- **The official CLIs, unchanged.** Claude Code and Codex run in interactive terminals under your own log-ins. IAMCEO only adds role instructions and an MCP connection, and never edits the CLIs' global settings.
+- **Sessions outlive the apps and the server.** herdr-core holds the terminals, so closing the app or restarting the server never stops the work.
+- **No guessing at state.** Whether a member is working or done comes from the record the CLI writes. When that is unknown, IAMCEO stops typing and asks you to check.
 - **Reports are tool calls, not screen scraping.** Reports (`post`), decisions (`ask`), files (`file`) and assignments (`team_assign`) are all recorded.
-- **Only you decide.** Sending anything outside, committing or pushing, deleting and spending money need a sentence from you; when the lead quotes you, the server checks the quote against your original words.
+- **Only you decide.** Sending anything outside, committing or pushing, deleting and spending money need a sentence from you.
 
 Components are in [architecture](docs/architecture.md) and every rule in the [operating model](docs/operating-model.md) (both in Korean).
 
@@ -103,7 +137,7 @@ To install on your own iPhone, set the bundle ID and team in `native/project.yml
 
 ## Thanks
 
-[herdr-core](https://github.com/herdrdev/herdr-core) (Apache-2.0) keeps the terminals alive. Notices for every bundled open-source component are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+IAMCEO stands on good tools. [herdr-core](https://github.com/herdrdev/herdr-core) (Apache-2.0) keeps the terminals alive, [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) (MIT) renders them, and the [MCP SDK](https://github.com/modelcontextprotocol/typescript-sdk) (MIT) connects the agents. Notices for every bundled open-source component are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## License
 

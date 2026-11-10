@@ -179,6 +179,13 @@ function scanDim(screen: string): { text: string; dim: boolean[] }[] {
   return lines;
 }
 
+/** 빈 입력칸의 안내 문구(Claude Code 2.1.322 기준). 고르는 중("Press Enter to edit the selected message…")은 넣지 않는다. */
+const INPUT_HINTS = [
+  /^Try "[^"]*"$/,
+  /^Press up to edit queued( messages?)?(, Enter to send them immediately)?$/,
+  /^Press up to select a queued message(?: to edit, or Enter to send them now|, then Enter to edit it)$/,
+];
+
 /**
  * Claude 입력칸에 친 글. 두 가로줄 사이의 `❯`(또는 `>`) 줄부터 읽는다. 빈 문자열이면 비었다.
  * null 은 입력칸을 못 찾음(승인 창·선택 창·다른 프로그램).
@@ -196,10 +203,12 @@ export function inputText(screen: string): string | null {
     return s;
   };
   const first = typed(box.top + 1, box.prefix).replace(/\s*[│┃]?\s*$/, "").trim();
-  const hint = /^Try "[^"]*"$/.test(first) || /^Press up to edit queued( messages?)?$/.test(first);
   const rest: string[] = [];
   for (let i = box.top + 2; i < box.bottom; i++) rest.push(typed(i).replace(/[│┃]/g, "").trim());
-  return [hint ? "" : first, ...rest].join("\n").trim();
+  // 좁은 칸에서는 안내 문구가 여러 줄로 접힌다. 이어 붙인 글 전체가 안내 문구일 때만 빈 칸이다.
+  const whole = [first, ...rest].filter(Boolean).join(" ");
+  if (INPUT_HINTS.some((hint) => hint.test(whole))) return "";
+  return [INPUT_HINTS.some((hint) => hint.test(first)) ? "" : first, ...rest].join("\n").trim();
 }
 
 /** Conservative full composer comparison. Do not trim, unwrap, or expand pasted-text placeholders. */

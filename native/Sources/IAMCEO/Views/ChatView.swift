@@ -1011,9 +1011,14 @@ private func chatMessageRowID(_ id: String) -> String { "m:" + Data(id.utf8).bas
     var previous: (side: ChatSide, date: Date?)?
     var afterDay = false
     let calendar = Calendar.current
+    // 이어지는 글은 대개 같은 날이다. 날짜 구성요소 계산은 날이 바뀔 때만 한다.
+    var lastDaySpan: DateInterval?
     for message in messages {
         let date = ChatDates.parse(message.at)
-        if let date {
+        if let date, let span = lastDaySpan, date >= span.start, date < span.end {
+            // 직전 글과 같은 날: 구분선 없음.
+        } else if let date {
+            lastDaySpan = calendar.dateInterval(of: .day, for: date)
             let parts = calendar.dateComponents([.year, .month, .day], from: date)
             let day = "day:\(parts.year ?? 0)-\(parts.month ?? 0)-\(parts.day ?? 0)"
             if day != lastDay {
@@ -1043,16 +1048,8 @@ private func chatMessageRowID(_ id: String) -> String { "m:" + Data(id.utf8).bas
 }
 
 @MainActor private enum ChatDates {
-    static let fractional: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
-    static let plain = ISO8601DateFormatter()
-    static func parse(_ value: String) -> Date? {
-        guard !value.isEmpty else { return nil }
-        return fractional.date(from: value) ?? plain.date(from: value)
-    }
+    // 대화 본문은 스크롤 프레임마다 다시 계산된다. 글마다 한 번만 파싱하도록 공용 캐시를 쓴다.
+    static func parse(_ value: String) -> Date? { parseISODate(value) }
     static func dayLabel(_ date: Date, now: Date = Date()) -> String {
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return "오늘" }
@@ -1860,6 +1857,8 @@ private struct ChatAttachmentItem: View {
     var onBubble = false
     @State private var data: Data?
     @State private var fileURL: URL?
+    /// 받아 둔 원본. 공용 캐시가 같은 첨부를 다시 내려받지 않게 하고, 놓으면 임시 파일도 지워진다.
+    @State private var resource: FileResource?
     @State private var image: Image?
     @State private var loading = false
     @State private var error: String?
@@ -2015,15 +2014,12 @@ private struct ChatAttachmentItem: View {
         }
         loading = true; defer { loading = false }
         do {
-            let result = try await api.attachmentData(attachment)
-            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("IAMCEO-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let name = attachment.name.isEmpty ? "attachment" : URL(fileURLWithPath: attachment.name).lastPathComponent
-            let destination = folder.appendingPathComponent(name)
-            try result.write(to: destination)
+            // 행이 다시 만들어질 때마다 원본을 새로 받아 새 임시 폴더에 쌓지 않도록, 한도가 있는 공용 캐시를 쓴다.
+            let loaded = try await FileResources.attachment(attachment, api: api)
+            let result = try loaded.read()
             // A thumbnail only needs ~2× its 208×148 box: decode small so a thread of screenshots stays light.
             if attachment.isImage { image = chatThumbnail(result, maxPixel: 720) }
-            data = result; fileURL = destination; error = nil
+            data = result; resource = loaded; fileURL = loaded.url; error = nil
         } catch { self.error = friendlyLoadError(error, what: "첨부", verb: "받지") }
     }
 }

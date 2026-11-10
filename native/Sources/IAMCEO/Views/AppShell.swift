@@ -238,6 +238,7 @@ struct AppShell: View {
                         .disabled(router.destination != tab)
                         .accessibilityHidden(router.destination != tab)
                         .zIndex(router.destination == tab ? 1 : 0)
+                        .environment(\.ceTabVisible, router.destination == tab)
                 }
             }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

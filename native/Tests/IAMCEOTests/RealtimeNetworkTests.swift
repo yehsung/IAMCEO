@@ -303,6 +303,9 @@ final class CoordinatorServer: @unchecked Sendable {
         guard let store = try await connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
         guard let socket = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
+        // A hello at the cursor that was just read no longer triggers another read. Read once here so the
+        // passes below start inside the minimum snapshot interval, which is what this test exercises.
+        await store.refresh()
         let before = server.read { $0.syncs }
         let gate = DispatchSemaphore(value: 0), entered = expectation(description: "pre-write read")
         server.change { $0.gate = gate; $0.entered = entered }

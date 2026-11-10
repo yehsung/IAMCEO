@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-struct LocalHostConnection: Sendable {
+struct LocalHostConnection: Sendable, Equatable {
     let url: URL
     let accessCode: String
 }
@@ -22,22 +22,51 @@ final class LocalHostService {
         let resources = try Self.runtimeResources(environment: environment)
         let expectedBuildID = try await Self.buildID(resources.daemon, environment: environment)
         statusText = "기존 로컬 연결을 확인하는 중"
+        var hadConnection = false
         if let current = try Self.readConnection(dataHome: dataHome, environment: environment) {
-            do {
-                let coreAvailable = try await Self.checkHealth(current, expectedBuildID: expectedBuildID)
-                statusText = coreAvailable ? "이 Mac에 연결했습니다" : "이 Mac에 연결했습니다 · core 연결을 확인하세요"
-                return current
-            } catch let error as URLError where error.code == .cannotConnectToHost {
-                // Only a refused connection means it is safe to attempt a new local host.
-            } catch let error as LocalHostError { throw error }
-            catch {
-                throw LocalHostError("기존 로컬 서버에 응답 또는 인증 문제가 있습니다. 실행 중인 서비스를 바꾸지 않았습니다. 연결 설정을 확인하세요.")
+            hadConnection = true
+            let client = try Self.client(current)
+            var slowAnswers = 0
+            existing: while true {
+                do {
+                    let coreAvailable = try await Self.checkHealth(client, expectedBuildID: expectedBuildID, readinessTimeout: 15, bootstrapTimeout: 30)
+                    statusText = coreAvailable ? "이 Mac에 연결했습니다" : "이 Mac에 연결했습니다 · core 연결을 확인하세요"
+                    return current
+                } catch let error as URLError where error.code == .cannotConnectToHost {
+                    // Only a refused connection means it is safe to attempt a new local host.
+                    break existing
+                } catch let error as URLError where error.code == .timedOut {
+                    // 응답이 늦을 뿐 서버는 떠 있다. 서비스를 건드리지 않고 한 번 더 기다린다.
+                    slowAnswers += 1
+                    guard slowAnswers < 2 else {
+                        throw LocalHostError("이 Mac의 서버가 바빠 응답이 늦습니다. 실행 중인 서비스는 바꾸지 않았습니다. 잠시 뒤 다시 시도하세요.")
+                    }
+                    try Task.checkCancellation()
+                    statusText = "서버 응답을 기다리는 중"
+                } catch let error as APIError where error.status == 503 {
+                    // 서버가 뜨는 중이다(STARTING). 서비스는 건드리지 않고 준비될 때까지 기다린다.
+                    statusText = "서버가 준비되기를 기다리는 중"
+                    if let connection = try await awaitReady(dataHome: dataHome, environment: environment, expectedBuildID: expectedBuildID, attempts: 60, within: .seconds(30)) {
+                        return connection
+                    }
+                    throw LocalHostError("이 Mac의 서버가 아직 준비 중입니다. 실행 중인 서비스는 바꾸지 않았습니다. 잠시 뒤 다시 시도하세요.")
+                } catch let error as LocalHostError { throw error }
+                catch {
+                    throw LocalHostError("기존 로컬 서버에 응답 또는 인증 문제가 있습니다. 실행 중인 서비스를 바꾸지 않았습니다. 연결 설정을 확인하세요.")
+                }
             }
         } else {
             try await Self.requireUnusedPort(Self.port(environment: environment, configured: nil))
         }
         let target = "gui/\(getuid())/com.iamceo.server"
-        if try await Self.run(URL(fileURLWithPath: "/bin/launchctl"), arguments: ["print", target], environment: environment) == 0 {
+        if try await Self.run(URL(fileURLWithPath: "/bin/launchctl"), arguments: ["print", target], environment: environment, timeout: 15) == 0 {
+            // 등록된 서비스가 다시 뜨는 중(재시작·배포 직후)일 수 있다. 서비스는 건드리지 않고 잠시 기다려 본다.
+            if hadConnection {
+                statusText = "서버가 다시 뜨기를 기다리는 중"
+                if let connection = try await awaitReady(dataHome: dataHome, environment: environment, expectedBuildID: expectedBuildID, attempts: 60, within: .seconds(30)) {
+                    return connection
+                }
+            }
             throw LocalHostError("이미 등록된 IAMCEO 서비스가 있습니다. 기존 서비스의 연결 문제를 먼저 확인하세요. 실행 중인 서비스는 교체하지 않았습니다.")
         }
         try Self.requireOwnedPlist(daemon: resources.daemon, dataHome: dataHome)
@@ -45,16 +74,35 @@ final class LocalHostService {
         launchEnvironment["IAMCEO_HOME"] = dataHome.path
         launchEnvironment["IAMCEO_CORE_BIN"] = resources.core.path
         statusText = "이 Mac의 실행 서비스를 준비하는 중"
-        let status = try await Self.run(resources.daemon, arguments: ["service", "install"], environment: launchEnvironment)
+        // service install 은 서버 준비를 30초까지 기다린 뒤 끝난다.
+        let status = try await Self.run(resources.daemon, arguments: ["service", "install"], environment: launchEnvironment, timeout: 90)
         guard status == 0 else {
             throw LocalHostError("로컬 서비스 등록을 완료하지 못했습니다 (종료 코드 \(status)). 기존 설치의 서비스 설정을 확인하세요.")
         }
         statusText = "서버가 준비되기를 기다리는 중"
-        for _ in 0..<60 {
+        if let connection = try await awaitReady(dataHome: dataHome, environment: environment, expectedBuildID: expectedBuildID, attempts: 60, within: .seconds(120)) {
+            return connection
+        }
+        throw LocalHostError("로컬 서버가 아직 준비되지 않았습니다. 잠시 뒤 다시 시도하거나 ~/.iamceo/logs의 서버 로그를 확인하세요.")
+        #else
+        throw LocalHostError("로컬 실행은 Mac 앱에서 시작할 수 있습니다. iPhone에서는 실행 중인 Mac에 연결하세요.")
+        #endif
+    }
+
+    #if os(macOS)
+    /// 준비될 때까지 0.5초 간격으로 확인한다. 점검 한 번이 길어질 수 있어 횟수와 함께 전체 시간도 묶는다. nil 은 시간 안에 준비되지 않았다는 뜻이다.
+    private func awaitReady(dataHome: URL, environment: [String: String], expectedBuildID: String, attempts: Int, within limit: Duration) async throws -> LocalHostConnection? {
+        let deadline = ContinuousClock.now + limit
+        var reused: (connection: LocalHostConnection, client: APIClient)?
+        for _ in 0..<attempts {
+            guard ContinuousClock.now < deadline else { break }
             try Task.checkCancellation()
             if let connection = try Self.readConnection(dataHome: dataHome, environment: environment) {
                 do {
-                    let coreAvailable = try await Self.checkHealth(connection, expectedBuildID: expectedBuildID)
+                    let client: APIClient
+                    if let reused, reused.connection == connection { client = reused.client }
+                    else { client = try Self.client(connection); reused = (connection, client) }
+                    let coreAvailable = try await Self.checkHealth(client, expectedBuildID: expectedBuildID, readinessTimeout: 4, bootstrapTimeout: 30)
                     statusText = coreAvailable ? "이 Mac에 연결했습니다" : "이 Mac에 연결했습니다 · core 연결을 확인하세요"
                     return connection
                 } catch let error as APIError where error.status == 401 {
@@ -65,11 +113,9 @@ final class LocalHostService {
             }
             try await Task.sleep(for: .milliseconds(500))
         }
-        throw LocalHostError("로컬 서버가 아직 준비되지 않았습니다. 잠시 뒤 다시 시도하거나 ~/.iamceo/logs의 서버 로그를 확인하세요.")
-        #else
-        throw LocalHostError("로컬 실행은 Mac 앱에서 시작할 수 있습니다. iPhone에서는 실행 중인 Mac에 연결하세요.")
-        #endif
+        return nil
     }
+    #endif
 
     private struct Readiness: Decodable, Sendable {
         struct Daemon: Decodable, Sendable { let ready: Bool; let buildId: String; let version: String }
@@ -81,15 +127,18 @@ final class LocalHostService {
         let schema: Schema
         let core: Core?
     }
-    private static func checkHealth(_ connection: LocalHostConnection, expectedBuildID: String) async throws -> Bool {
-        let client = APIClient(endpoint: try ServerEndpoint(connection.url.absoluteString), accessCode: connection.accessCode)
-        let readiness: Readiness = try await client.request("/api/readiness", timeout: 4)
+    private static func client(_ connection: LocalHostConnection) throws -> APIClient {
+        APIClient(endpoint: try ServerEndpoint(connection.url.absoluteString), accessCode: connection.accessCode)
+    }
+    /// 라이브 서버의 bootstrap 은 바쁠 때 십수 초가 걸린다. 그보다 짧게 끊으면 멀쩡한 서버를 '문제'로 읽는다.
+    private static func checkHealth(_ client: APIClient, expectedBuildID: String, readinessTimeout: TimeInterval, bootstrapTimeout: TimeInterval) async throws -> Bool {
+        let readiness: Readiness = try await client.request("/api/readiness", timeout: readinessTimeout)
         guard readiness.ok, let daemon = readiness.daemon, daemon.ready,
               daemon.buildId == expectedBuildID, daemon.version == readiness.version,
               readiness.schema.version > 0, readiness.schema.version == readiness.schema.supportedVersion else {
             throw LocalHostError("로컬 서버의 준비 상태·실행 build·DB 스키마가 앱과 맞지 않습니다. 설치와 실행 중인 서비스를 확인하세요.")
         }
-        let _: Bootstrap = try await client.request("/api/bootstrap", timeout: 3)
+        let _: Bootstrap = try await client.request("/api/bootstrap", timeout: bootstrapTimeout)
         return readiness.core?.available == true
     }
 
@@ -109,7 +158,8 @@ final class LocalHostService {
             let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
             DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: timeout)
             defer { timeout.cancel() }
-            let data = output.fileHandleForReading.readDataToEndOfFile()
+            // readDataToEndOfFile 은 읽기 오류를 잡을 수 없는 NSException 으로 던진다.
+            let data = try output.fileHandleForReading.readToEnd() ?? Data()
             process.waitUntilExit()
             let identity = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard process.terminationStatus == 0, identity.count == 64,
@@ -187,22 +237,63 @@ final class LocalHostService {
         }
     }
     /// No shell, no command output, and no access code in logs or arguments.
-    private nonisolated static func run(_ executable: URL, arguments: [String], environment: [String: String]) async throws -> Int32 {
-        try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            process.executableURL = executable
-            process.arguments = arguments
-            process.environment = environment
-            process.standardInput = FileHandle.nullDevice
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            process.terminationHandler = { completed in continuation.resume(returning: completed.terminationStatus) }
-            do { try process.run() }
-            catch { continuation.resume(throwing: LocalHostError("로컬 실행 서비스를 시작할 수 없습니다. 앱의 실행 파일과 macOS 권한을 확인하세요.")) }
-        }
+    nonisolated static func run(_ executable: URL, arguments: [String], environment: [String: String], timeout: TimeInterval) async throws -> Int32 {
+        let child = ChildRun()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                child.start(executable, arguments: arguments, environment: environment, timeout: timeout, continuation: continuation)
+            }
+        } onCancel: { child.stop(CancellationError()) }
     }
     #endif
 }
+
+#if os(macOS)
+/// 자식 프로세스 대기를 한 번만 끝낸다: 정상 종료, 제한 시간, 취소 가운데 먼저 온 쪽이 이긴다.
+private final class ChildRun: @unchecked Sendable {
+    private let lock = NSLock()
+    private let process = Process()
+    private var continuation: CheckedContinuation<Int32, any Error>?
+    private var result: Result<Int32, any Error>?
+    private var launched = false
+
+    func start(_ executable: URL, arguments: [String], environment: [String: String], timeout: TimeInterval,
+               continuation: CheckedContinuation<Int32, any Error>) {
+        lock.lock()
+        if let result { lock.unlock(); continuation.resume(with: result); return } // 시작 전에 취소됨
+        self.continuation = continuation
+        process.executableURL = executable
+        process.arguments = arguments
+        process.environment = environment
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] completed in self?.finish(.success(completed.terminationStatus), terminate: false) }
+        // 실행까지 잠금 안에서 끝내 취소가 '띄우기 직전'에 끼어들지 못하게 한다.
+        do { try process.run(); launched = true; lock.unlock() }
+        catch {
+            lock.unlock()
+            finish(.failure(LocalHostError("로컬 실행 서비스를 시작할 수 없습니다. 앱의 실행 파일과 macOS 권한을 확인하세요.")), terminate: false)
+            return
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
+            self?.stop(LocalHostError("이 Mac의 실행 서비스 준비가 제한 시간 안에 끝나지 않았습니다. 잠시 뒤 다시 시도하세요."))
+        }
+    }
+    func stop(_ error: any Error) { finish(.failure(error), terminate: true) }
+    private func finish(_ value: Result<Int32, any Error>, terminate: Bool) {
+        lock.lock()
+        guard result == nil else { lock.unlock(); return }
+        result = value
+        let waiting = continuation
+        continuation = nil
+        let running = launched
+        lock.unlock()
+        if terminate, running, process.isRunning { process.terminate() }
+        waiting?.resume(with: value)
+    }
+}
+#endif
 
 private struct LocalHostError: LocalizedError, Sendable {
     let message: String

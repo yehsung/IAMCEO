@@ -20,6 +20,7 @@ struct CLIApprovalCard: View {
     @State private var loaded = false
     @State private var reading = false
     @State private var readSeq = 0
+    @State private var refreshes = CLIApprovalRefresh()
     @State private var bodyHeight: CGFloat = 0
 
     var body: some View {
@@ -62,7 +63,10 @@ struct CLIApprovalCard: View {
                     if let readError { statusLine(readError, color: CE.danger) }
                 }
                 .animation(.easeOut(duration: 0.18), value: picked)
-                .task(id: "\(store.writeNamespace)|\(member.id)|\(member.statusObservation?.observedAt ?? "")") { await read() }
+                // 관측 시각(observedAt)은 서버가 1초마다 고쳐 써서 스냅샷마다 다르다. 이것을 task id에 넣으면 읽기가
+                // 스냅샷마다 취소·재시작되어, 서버 응답이 느릴 때 '읽는 중'에서 영영 못 벗어난다.
+                .task(id: CLIApprovalCard.readIdentity(namespace: store.writeNamespace, member: member)) { await read() }
+                .onChange(of: member.statusObservation?.observedAt) { _, _ in refresh() }
             } else if let fallback {
                 statusLine(fallback, color: CE.ink2)
             }
@@ -163,12 +167,26 @@ struct CLIApprovalCard: View {
 
     // MARK: Reading and answering
 
-    @MainActor private func read() async {
+    /// 처음 읽기와 다시 읽기의 단위: 연결·직원이 같으면 진행 중인 읽기를 취소하지 않는다.
+    static func readIdentity(namespace: String, member: Member) -> String { "\(namespace)|\(member.id)" }
+
+    /// 새 관측이 올 때마다 창을 조용히 다시 읽는다(창이 바뀌었을 수 있다). 진행 중인 읽기는 끝까지 두고,
+    /// 그 사이 온 요청은 끝난 뒤 한 번으로 합친다. 버튼의 '읽는 중' 표시와 숫자 단축키는 건드리지 않는다.
+    @MainActor private func refresh() {
+        guard loaded, refreshes.request() else { return }
+        let identity = CLIApprovalCard.readIdentity(namespace: store.writeNamespace, member: member)
+        Task { @MainActor in
+            repeat { await read(quiet: true) }
+            while refreshes.finished() && identity == CLIApprovalCard.readIdentity(namespace: store.writeNamespace, member: member)
+            refreshes = CLIApprovalRefresh()
+        }
+    }
+
+    @MainActor private func read(quiet: Bool = false) async {
         let namespace = store.writeNamespace
-        readSeq += 1
-        let token = readSeq
-        reading = true
-        defer { if token == readSeq { reading = false } }
+        var token = 0
+        if !quiet { readSeq += 1; token = readSeq; reading = true }
+        defer { if !quiet, token == readSeq { reading = false } }
         do {
             let next = try await store.readCLIApproval(member)
             guard !Task.isCancelled, namespace == store.writeNamespace else { return }
@@ -199,6 +217,24 @@ struct CLIApprovalCard: View {
             picked = nil
             await read()
         }
+    }
+}
+
+/// 승인 창 자동 다시 읽기의 합치기: 한 번에 하나만 읽고, 읽는 동안 온 요청은 끝난 뒤 한 번만 더 읽는다.
+struct CLIApprovalRefresh: Equatable {
+    private(set) var running = false
+    private(set) var queued = false
+    /// true면 지금 읽기를 시작한다. false면 진행 중인 읽기 뒤로 미뤘다.
+    mutating func request() -> Bool {
+        if running { queued = true; return false }
+        running = true
+        return true
+    }
+    /// 읽기 하나가 끝났다. true면 미뤄 둔 요청이 있어 한 번 더 읽는다.
+    mutating func finished() -> Bool {
+        if queued { queued = false; return true }
+        running = false
+        return false
     }
 }
 

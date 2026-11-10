@@ -273,6 +273,16 @@ final class DraftStore {
         return restored
     }
 
+    /// 지운 전송 기록의 인수 영수증만 지운다. 남은 기록의 영수증은 건드리지 않는다.
+    func pruneHandoffs(_ ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        var changed = false
+        for host in Array(hosts.keys) {
+            for id in ids where hosts[host]?.handoffs?.removeValue(forKey: id) != nil { changed = true }
+        }
+        if changed { save() }
+    }
+
     private func updateSubmission<Value>(_ change: () -> Value) throws -> Value {
         guard canPersist else { throw APIError(status: 0, message: persistenceError ?? "초안을 저장하지 못했습니다") }
         let previous = hosts

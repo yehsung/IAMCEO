@@ -187,6 +187,52 @@ final class KoreanIMETests: XCTestCase {
         XCTAssertEqual(submissions, 1)
     }
 
+    /// 한글 입력기는 조합 중 Return 을 받으면 글자를 확정(insertText)한 뒤 키를 그대로 넘겨 insertNewline: 이 온다.
+    /// 그때 줄바꿈이 아니라 마지막 글자까지 담아 한 번에 보내야 한다.
+    func testReturnForwardedByTheKoreanIMEAfterCommitSubmitsInsteadOfAddingALine() throws {
+        func key(_ flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+                timestamp: 0, windowNumber: 0, context: nil, characters: "\r", charactersIgnoringModifiers: "\r",
+                isARepeat: false, keyCode: 36))
+        }
+        let newline = #selector(NSResponder.insertNewline(_:))
+        let fixture = EditorFixture("확인해")
+        var sent: [String] = []
+        fixture.editor.submit = { sent.append(fixture.draft.value) }
+        fixture.mark("줘")
+        fixture.editor.composingReturn = try key()
+        fixture.commit("줘")
+        fixture.editor.doCommand(by: newline)
+        XCTAssertEqual(sent, ["확인해줘"])
+        XCTAssertEqual(fixture.editor.string, "확인해줘", "줄바꿈이 들어가면 안 된다")
+        XCTAssertNil(fixture.editor.composingReturn)
+
+        // 조합 중이 아닌 곳에서 온 줄바꿈 명령(메뉴·키 바인딩)은 그대로 줄바꿈이다.
+        fixture.editor.doCommand(by: newline)
+        XCTAssertEqual(sent.count, 1)
+        XCTAssertEqual(fixture.editor.string, "확인해줘\n")
+
+        // Shift+Return 은 조합을 확정한 뒤에도 줄바꿈이다.
+        let shifted = EditorFixture("첫 줄")
+        var shiftedSends = 0
+        shifted.editor.submit = { shiftedSends += 1 }
+        shifted.mark("한")
+        shifted.editor.composingReturn = try key(.shift)
+        shifted.commit("한")
+        shifted.editor.doCommand(by: newline)
+        XCTAssertEqual(shiftedSends, 0)
+        XCTAssertEqual(shifted.editor.string, "첫 줄한\n")
+
+        // 입력기가 아직 조합을 쥐고 있으면(확정 전) 보내지 않는다.
+        let composing = EditorFixture("앞 ")
+        var composingSends = 0
+        composing.editor.submit = { composingSends += 1 }
+        composing.mark("한")
+        composing.editor.composingReturn = try key()
+        composing.editor.doCommand(by: newline)
+        XCTAssertEqual(composingSends, 0)
+    }
+
     /// Exercises the actual NSViewRepresentable updateNSView path, not just its synchronization helper.
     func testHostedBindingRoundTripPreservesMarkedTextThenAcceptsExternalClear() async throws {
         _ = NSApplication.shared

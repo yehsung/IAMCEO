@@ -496,6 +496,22 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
   let syncGeneration = "";
   const syncCache = new Map<string, string>();
   const notices = (id: string) => monitor.run("delivery:notices", () => ctx.delivery!.notices(id));
+  // 스냅샷의 전달 알림은 선택 장식이다. 전달 행 하나가 어긋났다고 대화·결재까지 못 읽게 두지 않는다.
+  // 전용 조회(/delivery-notices)는 오류를 그대로 돌려줘 문제를 숨기지 않는다.
+  const noticeFailureLoggedAt = new Map<string, number>();
+  const snapshotNotices = (id: string): { deliveryNotices?: ReturnType<typeof notices> } => {
+    if (!ctx.delivery) return {};
+    try { return { deliveryNotices: notices(id) }; }
+    catch (error) {
+      // 스냅샷은 이벤트마다 다시 만든다. 같은 원인을 프로젝트당 1분에 한 줄만 남긴다.
+      const at = Date.now();
+      if (at - (noticeFailureLoggedAt.get(id) ?? -Infinity) >= 60_000) {
+        noticeFailureLoggedAt.set(id, at);
+        console.error(`전달 알림 계산 실패(${id}): ${error instanceof ApiError ? `${error.status} ${error.message}` : error instanceof Error ? error.name : "unknown"}`);
+      }
+      return {};
+    }
+  };
   // 재전송이 앞 요청의 orch 처리가 끝나기 전에 와도 두 번 전달되지 않게 한다.
   const inFlight = new Map<string, Promise<unknown>>();
   const once = <T>(key: string, run: () => Promise<T>): Promise<T> => {
@@ -701,7 +717,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
           protocol: 2, requestedProjectId, projectStatus,
           bootstrap: { apiOutage: store.apiOutage(), version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr,
             home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides },
-          state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!), ...(ctx.delivery ? { deliveryNotices: notices(requestedProjectId!) } : {}) } : null,
+          state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!), ...snapshotNotices(requestedProjectId!) } : null,
           revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },
           cursor: bus.cursor,
         };
@@ -763,7 +779,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       // 보관한 프로젝트는 없는 것으로 친다. 화면이 본사로 돌아간다.
       if (store.requireProject(id!).archived) throw new ApiError(404, "보관된 프로젝트입니다");
       const state = store.projectState(id!);
-      const snapshot = ctx.delivery ? { ...state, deliveryNotices: notices(id!) } : state;
+      const snapshot = { ...state, ...snapshotNotices(id!) };
       return Response.json(wantsLite(url) ? { ...snapshot, files: state.files.map(liteFile) } : snapshot);
     }),
     route("GET", "/api/projects/:id/messages", (req, url, params) => {

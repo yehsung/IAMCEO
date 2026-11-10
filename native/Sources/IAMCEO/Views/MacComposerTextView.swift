@@ -275,13 +275,32 @@ struct MacComposerTextView: NSViewRepresentable {
             }
             return receive(items)
         }
+        /// 조합 중에 눌린 Return. 입력기가 글자를 확정한 뒤 키를 그대로 넘기는지 doCommand 에서 본다.
+        var composingReturn: NSEvent?
+
         override func keyDown(with event: NSEvent) {
-            if (event.keyCode == 36 || event.keyCode == 76) && !hasMarkedText() {
+            let isReturn = event.keyCode == 36 || event.keyCode == 76
+            if isReturn && !hasMarkedText() {
                 if event.modifierFlags.intersection([.shift, .option]).isEmpty { submit?() }
                 else { insertNewline(nil) }
                 return
             }
+            if isReturn { composingReturn = event }
+            defer { composingReturn = nil }
             super.keyDown(with: event)
+        }
+
+        /// 한글 입력기는 Return 을 받으면 조합 중인 글자를 확정(insertText)한 뒤 키를 그대로 통과시켜
+        /// insertNewline: 이 온다. 그대로 두면 보내기가 아니라 줄바꿈이 된다. 확정만 하고 끝나는 입력기
+        /// (일본어 등)는 이 명령이 오지 않으므로 영향이 없다.
+        override func doCommand(by selector: Selector) {
+            if selector == #selector(insertNewline(_:)), let event = composingReturn, !hasMarkedText(),
+               event.modifierFlags.intersection([.shift, .option]).isEmpty {
+                composingReturn = nil
+                submit?()
+                return
+            }
+            super.doCommand(by: selector)
         }
         // Files and images become attachments; anything else (a dragged text snippet) keeps NSTextView's own drop.
         override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {

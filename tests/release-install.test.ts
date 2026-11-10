@@ -158,7 +158,7 @@ test("service update: fake launchctl success cannot hide authenticated readiness
   await service(["install"], dependencies);
   calls.length = 0; ready = false;
   await expect(service(["install", "--restart"], dependencies)).rejects.toThrow("복구 완료 대기");
-  expect(calls).toEqual(["print", "bootout", "bootstrap", "readiness"]);
+  expect(calls).toEqual(["print", "bootout", "print", "bootstrap", "readiness"]);
 });
 
 test("installer: checksum mismatch never mounts or changes existing app", () => {

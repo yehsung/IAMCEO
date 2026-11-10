@@ -129,6 +129,8 @@ struct HomeView: View {
     // MARK: - Layout
 
     private func content(_ state: ProjectState) -> some View {
+        // 경과 시간 표시('3분 전', 'n시간째 기다림')와 오래된 결재 우선 정렬이 조용한 화면에서도 맞도록 1분마다 다시 그린다.
+        _ = MinuteClock.shared.minute
         let turn = turnRows(attention)
         return ScrollView {
             VStack(alignment: .leading, spacing: CESpace.m) {

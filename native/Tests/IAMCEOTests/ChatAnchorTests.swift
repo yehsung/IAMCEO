@@ -128,6 +128,75 @@ import UIKit
         probe.disconnect()
     }
 
+    private func eventually(_ what: String, timeout: Duration = .seconds(10), _ condition: () -> Bool) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !condition() {
+            guard clock.now < deadline else { XCTFail("기다린 상태가 오지 않았습니다: \(what)"); return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    /// 휠 마우스·키보드 스크롤은 willStart/didEnd 없이 didLiveScroll 만 온다. 그것도 사용자의 스크롤이다.
+    func testUnbracketedLiveScrollCountsAsInteractionUntilItGoesQuiet() async {
+        let scroll = NSScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 400))
+        let document = Document(flipped: true, height: 2000)
+        scroll.documentView = document
+        let anchor = ChatScrollAnchor(scope: "a")
+        anchor.looseScrollQuiet = .milliseconds(20)
+        let probe = ChatScrollProbeView(anchor: anchor, scope: "a")
+        document.addSubview(probe)
+        XCTAssertFalse(anchor.isInteracting)
+        NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: scroll)
+        XCTAssertTrue(anchor.isInteracting, "휠 스크롤 중에는 위치 보정이 끼어들면 안 된다")
+        await eventually("휠 스크롤이 조용해지면 상호작용이 끝난다") { !anchor.isInteracting }
+
+        // 제스처(트랙패드)로 감싸진 스크롤은 손을 멈추고 있어도 didEnd 까지 이어진다.
+        anchor.looseScrollQuiet = .milliseconds(1)
+        NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: scroll)
+        NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: scroll)
+        for _ in 0..<20 { await Task.yield() }
+        try? await Task.sleep(for: .milliseconds(30))
+        XCTAssertTrue(anchor.isInteracting)
+        NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: scroll)
+        XCTAssertFalse(anchor.isInteracting)
+
+        // 다른 스크롤 뷰의 알림은 듣지 않는다.
+        NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: NSScrollView())
+        XCTAssertFalse(anchor.isInteracting)
+        probe.disconnect()
+    }
+
+    /// 위쪽을 읽는 중에 온, 어떤 행의 높이도 바꾸지 않는 갱신(전달 상태 글자 등)은 프레임 보고가 다시 오지 않는다.
+    func testPreservationEndsByItselfWhenTheMutationMovesNoRow() async {
+        let scroll = NSScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 400))
+        let document = Document(flipped: true, height: 2000)
+        scroll.documentView = document
+        scroll.contentView.scroll(to: CGPoint(x: 0, y: 500))
+        let anchor = ChatScrollAnchor(scope: "a")
+        anchor.restorationTimeout = .milliseconds(10)
+        let probe = ChatScrollProbeView(anchor: anchor, scope: "a")
+        document.addSubview(probe)
+        anchor.setViewport(height: 400, scope: "a")
+        anchor.observe(frames: ["m:1": CGRect(x: 0, y: -37.25, width: 300, height: 200)], scope: "a")
+        let offset = scroll.contentView.bounds.minY
+        var applied = 0
+        XCTAssertTrue(anchor.prepend(scope: "a") { applied += 1 })
+        XCTAssertEqual(applied, 1)
+        XCTAssertTrue(anchor.isPreservingPosition)
+        await eventually("높이가 안 바뀐 갱신 뒤 보존 상태가 풀린다") { !anchor.isPreservingPosition }
+        XCTAssertEqual(scroll.contentView.bounds.minY, offset, "움직인 행이 없으면 스크롤도 그대로다")
+        XCTAssertEqual(anchor.lastRestorationError, 0)
+        // 풀린 뒤에는 다음 갱신이 다시 적용된다(대기열에 갇히지 않는다).
+        XCTAssertTrue(anchor.prepend(scope: "a") { applied += 1 })
+        XCTAssertEqual(applied, 2)
+
+        // 기준 행이 사라져 맞출 자리가 없을 때도 영영 붙잡지 않는다.
+        anchor.observe(frames: [:], scope: "a")
+        await eventually("기준 행이 사라져도 보존 상태가 풀린다") { !anchor.isPreservingPosition }
+        probe.disconnect()
+    }
+
     @Observable final class PrototypeMessages {
         var ids = Array(0..<20)
     }

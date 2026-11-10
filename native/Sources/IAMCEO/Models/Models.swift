@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 // String-valued server enums deliberately preserve newly introduced daemon values.
 
@@ -170,14 +171,14 @@ extension Member {
         createdAt = try c.decodeIfPresent(String.self, forKey: ModelKey("createdAt")) ?? ""
         contextWindow = try c.decodeIfPresent(Int.self, forKey: ModelKey("contextWindow"))
         contextWindowSource = try c.decodeIfPresent(String.self, forKey: ModelKey("contextWindowSource"))
-        contextState = try c.decodeIfPresent(CoreContextState.self, forKey: ModelKey("contextState"))
+        contextState = c.lenient(CoreContextState.self, forKey: ModelKey("contextState"))
         blockedReason = try c.decodeIfPresent(String.self, forKey: ModelKey("blockedReason"))
         nowAt = try c.decodeIfPresent(String.self, forKey: ModelKey("nowAt"))
         manualActivityAt = try c.decodeIfPresent(String.self, forKey: ModelKey("manualActivityAt"))
-        statusObservation = try c.decodeIfPresent(StatusObservation.self, forKey: ModelKey("statusObservation"))
-        subagentState = try c.decodeIfPresent(SubagentState.self, forKey: ModelKey("subagentState"))
-        executionState = try c.decodeIfPresent(MemberExecutionState.self, forKey: ModelKey("executionState"))
-        lifecycleState = try c.decodeIfPresent(MemberLifecycleState.self, forKey: ModelKey("lifecycleState"))
+        statusObservation = c.lenient(StatusObservation.self, forKey: ModelKey("statusObservation"))
+        subagentState = c.lenient(SubagentState.self, forKey: ModelKey("subagentState"))
+        executionState = c.lenient(MemberExecutionState.self, forKey: ModelKey("executionState"))
+        lifecycleState = c.lenient(MemberLifecycleState.self, forKey: ModelKey("lifecycleState"))
         lastActiveAt = try c.decodeIfPresent(String.self, forKey: ModelKey("lastActiveAt"))
     }
 }
@@ -257,14 +258,14 @@ extension Decision {
         memberId = try c.decodeIfPresent(String.self, forKey: ModelKey("memberId"))
         who = try c.decodeIfPresent(String.self, forKey: ModelKey("who")) ?? ""
         kind = try c.decodeIfPresent(String.self, forKey: ModelKey("kind"))
-        usageLimit = try c.decodeIfPresent(UsageLimit.self, forKey: ModelKey("usageLimit"))
+        usageLimit = c.lenient(UsageLimit.self, forKey: ModelKey("usageLimit"))
         title = try c.decodeIfPresent(String.self, forKey: ModelKey("title")) ?? ""
         detail = try c.decodeIfPresent(String.self, forKey: ModelKey("detail")) ?? ""
-        options = try c.decodeIfPresent([DecisionOption].self, forKey: ModelKey("options")) ?? []
+        options = try c.lossyArray(DecisionOption.self, forKey: ModelKey("options")) ?? []
         rec = try c.decodeIfPresent(String.self, forKey: ModelKey("rec"))
         group = try c.decodeIfPresent(String.self, forKey: ModelKey("group"))
         fileId = try c.decodeIfPresent(String.self, forKey: ModelKey("fileId"))
-        images = try c.decodeIfPresent([Attachment].self, forKey: ModelKey("images")) ?? []
+        images = try c.lossyArray(Attachment.self, forKey: ModelKey("images")) ?? []
         status = try c.decodeIfPresent(String.self, forKey: ModelKey("status")) ?? "open"
         choice = try c.decodeIfPresent(String.self, forKey: ModelKey("choice"))
         note = try c.decodeIfPresent(String.self, forKey: ModelKey("note"))
@@ -414,8 +415,8 @@ extension Message {
         supersedes = try c.decodeIfPresent(String.self, forKey: ModelKey("supersedes"))
         supersededBy = try c.decodeIfPresent(String.self, forKey: ModelKey("supersededBy"))
         contextFileId = try c.decodeIfPresent(String.self, forKey: ModelKey("contextFileId"))
-        deliveryInfo = try c.decodeIfPresent([MessageDeliveryInfo].self, forKey: ModelKey("deliveryInfo"))
-        attachments = try c.decodeIfPresent([Attachment].self, forKey: ModelKey("attachments")) ?? []
+        deliveryInfo = c.lenientArray(MessageDeliveryInfo.self, forKey: ModelKey("deliveryInfo"))
+        attachments = try c.lossyArray(Attachment.self, forKey: ModelKey("attachments")) ?? []
         delivery = try c.decodeIfPresent(String.self, forKey: ModelKey("delivery"))
         if try c.decodeIfPresent(String.self, forKey: ModelKey("deliveryDisposition")) == "dismissed" { delivery = "dismissed" }
         deliveryNote = try c.decodeIfPresent(String.self, forKey: ModelKey("deliveryNote"))
@@ -450,7 +451,7 @@ extension FileDoc {
         summary = try c.decodeIfPresent(String.self, forKey: ModelKey("summary")) ?? ""
         body = try c.decodeIfPresent(String.self, forKey: ModelKey("body")) ?? ""
         path = try c.decodeIfPresent(String.self, forKey: ModelKey("path"))
-        attachments = try c.decodeIfPresent([Attachment].self, forKey: ModelKey("attachments")) ?? []
+        attachments = try c.lossyArray(Attachment.self, forKey: ModelKey("attachments")) ?? []
         createdAt = try c.decodeIfPresent(String.self, forKey: ModelKey("createdAt")) ?? ""
         reused = try c.decodeIfPresent(Bool.self, forKey: ModelKey("reused"))
         order = try c.decodeIfPresent(Int.self, forKey: ModelKey("order")) ?? 0
@@ -552,11 +553,12 @@ struct Bootstrap: Codable, Sendable, Equatable {
 extension Bootstrap {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: ModelKey.self)
-        apiOutage = try c.decodeIfPresent(APIOutage.self, forKey: ModelKey("apiOutage"))
-        runtime = try c.decodeIfPresent(RuntimeDiagnostics.self, forKey: ModelKey("runtime"))
+        apiOutage = c.lenient(APIOutage.self, forKey: ModelKey("apiOutage"))
+        runtime = c.lenient(RuntimeDiagnostics.self, forKey: ModelKey("runtime"))
         version = try c.decodeIfPresent(String.self, forKey: ModelKey("version")) ?? ""
         settings = try c.decodeIfPresent(Settings.self, forKey: ModelKey("settings")) ?? Settings()
-        projects = try c.decode([ProjectSummary].self, forKey: ModelKey("projects"))
+        // 키 자체는 필수로 둔다: 목록이 없는 응답을 빈 회사로 읽지 않는다.
+        projects = try c.requiredLossyArray(ProjectSummary.self, forKey: ModelKey("projects"))
         herdr = try c.decodeIfPresent(HerdrInfo.self, forKey: ModelKey("herdr")) ?? HerdrInfo()
         home = try c.decodeIfPresent(String.self, forKey: ModelKey("home")) ?? ""
         urls = try c.decodeIfPresent([String].self, forKey: ModelKey("urls")) ?? []
@@ -580,14 +582,14 @@ extension ProjectState {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: ModelKey.self)
         project = try c.decode(Project.self, forKey: ModelKey("project"))
-        members = try c.decodeIfPresent([Member].self, forKey: ModelKey("members")) ?? []
-        decisions = try c.decodeIfPresent([Decision].self, forKey: ModelKey("decisions")) ?? []
+        members = try c.lossyArray(Member.self, forKey: ModelKey("members")) ?? []
+        decisions = try c.lossyArray(Decision.self, forKey: ModelKey("decisions")) ?? []
         doneDecisionCount = try c.decodeIfPresent(Int.self, forKey: ModelKey("doneDecisionCount")) ?? 0
-        todos = try c.decodeIfPresent([Todo].self, forKey: ModelKey("todos")) ?? []
-        work = try c.decodeIfPresent([WorkItem].self, forKey: ModelKey("work")) ?? []
-        messages = try c.decodeIfPresent([Message].self, forKey: ModelKey("messages")) ?? []
-        files = try c.decodeIfPresent([FileDoc].self, forKey: ModelKey("files")) ?? []
-        deliveryNotices = try c.decodeIfPresent(DeliveryNotices.self, forKey: ModelKey("deliveryNotices"))
+        todos = try c.lossyArray(Todo.self, forKey: ModelKey("todos")) ?? []
+        work = try c.lossyArray(WorkItem.self, forKey: ModelKey("work")) ?? []
+        messages = try c.lossyArray(Message.self, forKey: ModelKey("messages")) ?? []
+        files = try c.lossyArray(FileDoc.self, forKey: ModelKey("files")) ?? []
+        deliveryNotices = c.lenient(DeliveryNotices.self, forKey: ModelKey("deliveryNotices"))
     }
 }
 
@@ -637,6 +639,58 @@ private struct ModelKey: CodingKey {
     init(_ value: String) { stringValue = value }
     init?(stringValue: String) { self.stringValue = stringValue }
     init?(intValue: Int) { return nil }
+}
+
+/// 읽지 못해 건너뛴 항목의 기록. 형과 위치만 남기고 값은 남기지 않는다.
+enum ContractLog {
+    private static let logger = Logger(subsystem: "com.iamceo.native", category: "Contract")
+    static func skipped(_ type: Any.Type, _ error: any Error, fallback: [any CodingKey]) {
+        var reason = "other", keys = fallback
+        if let decoding = error as? DecodingError {
+            switch decoding {
+            case .typeMismatch(_, let context): reason = "typeMismatch"; keys = context.codingPath
+            case .valueNotFound(_, let context): reason = "valueNotFound"; keys = context.codingPath
+            case .keyNotFound(let key, let context): reason = "keyNotFound"; keys = context.codingPath + [key]
+            case .dataCorrupted(let context): reason = "dataCorrupted"; keys = context.codingPath
+            @unknown default: break
+            }
+        }
+        let path = keys.map { key in key.intValue.map { String($0) } ?? key.stringValue }.joined(separator: ".")
+        let name = String(describing: type)
+        logger.error("skipped \(name, privacy: .public) \(reason, privacy: .public) at \(path, privacy: .public)")
+    }
+}
+
+/// 원소 하나가 어긋나도 배열 전체를 버리지 않게 원소 단위로 읽는다.
+private struct LossyElement<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: Decoder) {
+        do { value = try T(from: decoder) }
+        catch { ContractLog.skipped(T.self, error, fallback: decoder.codingPath); value = nil }
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// 없어도 화면이 성립하는 부가 정보용. 형이 어긋나면 구형 서버처럼 '없음'으로 읽어 동기화 전체를 막지 않는다.
+    func lenient<T: Decodable>(_ type: T.Type, forKey key: Key) -> T? {
+        do { return try decodeIfPresent(type, forKey: key) }
+        catch { ContractLog.skipped(type, error, fallback: codingPath + [key]); return nil }
+    }
+    /// 읽지 못한 원소만 버린다. 값이 배열이 아니면 그대로 실패한다.
+    func lossyArray<T: Decodable>(_ type: T.Type, forKey key: Key) throws -> [T]? {
+        try decodeIfPresent([LossyElement<T>].self, forKey: key)?.compactMap(\.value)
+    }
+    func requiredLossyArray<T: Decodable>(_ type: T.Type, forKey key: Key) throws -> [T] {
+        guard let items = try lossyArray(type, forKey: key) else {
+            throw DecodingError.keyNotFound(key, .init(codingPath: codingPath, debugDescription: "Missing required array"))
+        }
+        return items
+    }
+    /// 부가 정보 배열: 원소는 하나씩 버리고, 배열 자체가 어긋나면 '없음'.
+    func lenientArray<T: Decodable>(_ type: T.Type, forKey key: Key) -> [T]? {
+        do { return try lossyArray(type, forKey: key) }
+        catch { ContractLog.skipped([T].self, error, fallback: codingPath + [key]); return nil }
+    }
 }
 
 extension RankConfig {
@@ -813,6 +867,17 @@ struct DeliveryNotices: Codable, Sendable, Equatable {
     var reportNotices: [MissingReportNotice]? = nil
     var unassignedItems: [UnassignedDeliveryItem]? = nil
 }
+extension DeliveryNotices {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: ModelKey.self)
+        version = try c.decode(Int.self, forKey: ModelKey("version"))
+        // 한 줄이 어긋나도 나머지 직원의 전달 안내는 남긴다.
+        members = try c.lossyArray(MemberDeliverySummary.self, forKey: ModelKey("members")) ?? []
+        unassigned = try c.decode(UnassignedDeliverySummary.self, forKey: ModelKey("unassigned"))
+        reportNotices = c.lenientArray(MissingReportNotice.self, forKey: ModelKey("reportNotices"))
+        unassignedItems = c.lenientArray(UnassignedDeliveryItem.self, forKey: ModelKey("unassignedItems"))
+    }
+}
 enum UnassignedRecoveryAction: String, SafeStringEnum {
     case sendToConductor = "send_to_conductor", dismiss, unknown
 }
@@ -862,6 +927,14 @@ struct DeliveryReasonCount: Codable, Sendable, Equatable {
     let code: String
     let count: Int
     let note: String
+}
+extension DeliveryReasonCount {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: ModelKey.self)
+        code = try c.decode(String.self, forKey: ModelKey("code"))
+        count = try c.decode(Int.self, forKey: ModelKey("count"))
+        note = try c.decodeIfPresent(String.self, forKey: ModelKey("note")) ?? ""
+    }
 }
 struct DeliveryNoticePage: Codable, Sendable {
     let memberId: String
@@ -945,6 +1018,13 @@ struct DeliveryRecoveryResult: Codable, Sendable {
 struct CoreContextState: Codable, Sendable, Equatable {
     var measurement: ContextMeasurement? = nil
     var compaction: ContextCompaction? = nil
+}
+extension CoreContextState {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: ModelKey.self)
+        measurement = c.lenient(ContextMeasurement.self, forKey: ModelKey("measurement"))
+        compaction = c.lenient(ContextCompaction.self, forKey: ModelKey("compaction"))
+    }
 }
 struct ContextMeasurement: Codable, Sendable, Equatable {
     var sessionId: String? = nil

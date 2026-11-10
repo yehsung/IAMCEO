@@ -44,6 +44,10 @@ struct GitHubCloneView: View {
                         Text("저장소를 받는 중입니다").font(CEFont.note).foregroundStyle(CE.ink2)
                     }
                     .accessibilityIdentifier(jobID ?? "clone")
+                    // 큰 저장소나 느린 네트워크에서는 10분 넘게 걸린다. 그동안 갇히지 않게 닫을 수 있다.
+                    Text("닫아도 서버는 계속 받습니다. 다 받은 폴더는 새 프로젝트를 만들 때 고를 수 있습니다.")
+                        .font(CEFont.meta).foregroundStyle(CE.ink3)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if store.isDemo { Text("샘플 저장소 · 읽기 전용").font(CEFont.meta).foregroundStyle(CE.ink2) }
                 if let error {
@@ -54,7 +58,7 @@ struct GitHubCloneView: View {
                 }
             }.disabled(cloning || jobID != nil)
         } footer: {
-            Button("취소") { dismiss() }.ceSecondaryButton().disabled(cloning)
+            Button(cloning ? "닫기" : "취소") { cloneTask?.cancel(); dismiss() }.ceSecondaryButton()
             Button(jobID == nil ? "가져오기" : "결과 확인") { cloneTask = Task { await clone() } }
                 .ceProminentButton().keyboardShortcut(.defaultAction).disabled(!canClone)
         }
@@ -212,8 +216,11 @@ struct GitHubCloneView: View {
             }
             guard cloneServerKey == serverKey else { throw APIError(status: 0, message: "원래 서버에 다시 연결한 뒤 결과를 확인해 주세요.") }
             guard let jobID else { return }
+            let deadline = ContinuousClock.now.advanced(by: Self.pollLimit)
             while true {
                 try Task.checkCancellation()
+                // 서버의 단계별 제한(10분 × 2)보다 넉넉한 상한. 넘으면 '결과 확인'으로 다시 물을 수 있다.
+                guard ContinuousClock.now < deadline else { throw APIError(status: 0, message: "가져오기가 오래 걸리고 있습니다. 잠시 뒤 '결과 확인'을 눌러 주세요.") }
                 guard cloneServerKey == serverKey, store.api === client else { throw APIError(status: 0, message: "서버 연결이 바뀌었습니다. 원래 서버에서 가져오기 결과를 확인해 주세요.") }
                 let job = try await client.cloneJob(jobID)
                 try Task.checkCancellation()
@@ -229,8 +236,15 @@ struct GitHubCloneView: View {
                 }
             }
         } catch is CancellationError { }
+        catch let issue as APIError where jobID != nil && (issue.status == 404 || issue.status == 410) {
+            // 서버가 다시 시작되면 작업 기록이 사라진다. 같은 작업을 계속 묻지 않고 처음부터 다시 할 수 있게 한다.
+            jobID = nil
+            error = "서버가 다시 시작되어 가져오기 결과를 알 수 없습니다. 받을 위치의 폴더를 확인한 뒤 다시 시도해 주세요."
+        }
         catch { self.error = friendlyLoadError(error, what: "저장소", verb: "읽지") }
     }
+
+    private static let pollLimit: Duration = .seconds(25 * 60)
 }
 
 /// A repository in the list: a plain row (white .06 on hover); the picked one is drawn as a picked choice

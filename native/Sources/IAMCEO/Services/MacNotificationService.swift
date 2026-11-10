@@ -23,45 +23,78 @@ struct MacNotificationTracker {
     private var todos: Set<String> = []
     private var reports: Set<String> = []
     private var reportOrder: [String] = []
+    private var held: Set<String> = []
+    private var latestMessageAt: [String: String] = [:]
 
     mutating func seed(_ state: ProjectState) {
-        for decision in state.decisions { decisions[key(state.project.id, decision.id)] = decision.status }
-        for member in state.members { members[key(state.project.id, member.id)] = approvalState(member) }
-        for todo in state.todos { todos.insert(key(state.project.id, todo.id)) }
-        for message in state.messages { rememberReport(key(state.project.id, message.id)) }
+        let project = state.project.id
+        for decision in state.decisions { decisions[key(project, decision.id)] = decision.status }
+        for member in state.members { members[key(project, member.id)] = approvalState(member) }
+        for todo in state.todos { todos.insert(key(project, todo.id)) }
+        for message in state.messages { rememberReport(key(project, message.id)); sawMessage(project, at: message.at) }
+        held.remove(project)
+    }
+
+    /// 기준 상태를 읽지 못한 프로젝트. 다시 읽을 때까지 그 프로젝트의 이벤트는 기록만 하고 알리지 않는다(이미 있던 것을 새것으로 알리지 않게).
+    mutating func hold(projectID: String) { held.insert(projectID) }
+    func isHeld(_ projectID: String) -> Bool { held.contains(projectID) }
+
+    /// 다시 연결한 뒤 읽은 상태를 기준과 견줘, 끊긴 동안 새로 생긴 것만 돌려준다. 기준이 없던 프로젝트는 조용히 기준만 잡는다.
+    mutating func reconcile(_ state: ProjectState) -> [MacNotificationEvent] {
+        let project = state.project.id
+        guard !held.contains(project) else { seed(state); return [] }
+        var found: [MacNotificationEvent] = []
+        for decision in state.decisions { if let event = note(decision, project: project) { found.append(event) } }
+        for member in state.members { if let event = note(member, project: project) { found.append(event) } }
+        for todo in state.todos { if let event = note(todo, project: project) { found.append(event) } }
+        // 기억하는 보고 수에는 상한이 있다. 이미 본 시각보다 뒤의 글만 알려 옛 보고가 한꺼번에 다시 뜨지 않게 한다.
+        let seenUntil = latestMessageAt[project] ?? ""
+        for message in state.messages {
+            if let event = note(message, project: project), message.at > seenUntil { found.append(event) }
+        }
+        return found
     }
 
     mutating func event(_ event: RealtimeEvent) -> MacNotificationEvent? {
-        if let decision = event.decision {
-            let id = key(decision.projectId, decision.id), previous = decisions[id]
-            decisions[id] = decision.status
-            if decision.status == "open", previous != "open" {
-                return MacNotificationEvent(kind: "decision", sourceID: decision.id,
-                                            target: .inbox(projectId: decision.projectId, decisionId: decision.id))
-            }
+        if let decision = event.decision, let found = note(decision, project: decision.projectId) {
+            return held.contains(decision.projectId) ? nil : found
         }
-        if let member = event.member {
-            let id = key(member.projectId, member.id), current = approvalState(member), previous = members[id]
-            members[id] = current
-            if !current.isEmpty, previous != current {
-                return MacNotificationEvent(kind: "approval_wait", sourceID: member.id,
-                                            target: .team(projectId: member.projectId, memberId: member.id))
-            }
+        if let member = event.member, let found = note(member, project: member.projectId) {
+            return held.contains(member.projectId) ? nil : found
         }
-        if let todo = event.todo, todos.insert(key(todo.projectId, todo.id)).inserted, !todo.done {
-            return MacNotificationEvent(kind: "todo_created", sourceID: todo.id,
-                                        target: .projectHome(projectId: todo.projectId))
+        if let todo = event.todo, let found = note(todo, project: todo.projectId) {
+            return held.contains(todo.projectId) ? nil : found
         }
         if let message = event.message {
-            let id = key(message.projectId, message.id)
-            guard !reports.contains(id) else { return nil }
-            rememberReport(id)
-            guard !message.mine, ["완료", "막힘"].contains(message.kind) else { return nil }
-            return MacNotificationEvent(kind: message.kind == "완료" ? "report_complete" : "report_blocked",
-                                        sourceID: message.id,
-                                        target: .chat(projectId: message.projectId, memberId: message.memberId, messageId: message.id))
+            let found = note(message, project: message.projectId)
+            return held.contains(message.projectId) ? nil : found
         }
         return nil
+    }
+
+    private mutating func note(_ decision: Decision, project: String) -> MacNotificationEvent? {
+        let id = key(project, decision.id), previous = decisions[id]
+        decisions[id] = decision.status
+        guard decision.status == "open", previous != "open" else { return nil }
+        return MacNotificationEvent(kind: "decision", sourceID: decision.id, target: .inbox(projectId: project, decisionId: decision.id))
+    }
+    private mutating func note(_ member: Member, project: String) -> MacNotificationEvent? {
+        let id = key(project, member.id), current = approvalState(member), previous = members[id]
+        members[id] = current
+        guard !current.isEmpty, previous != current else { return nil }
+        return MacNotificationEvent(kind: "approval_wait", sourceID: member.id, target: .team(projectId: project, memberId: member.id))
+    }
+    private mutating func note(_ todo: Todo, project: String) -> MacNotificationEvent? {
+        guard todos.insert(key(project, todo.id)).inserted, !todo.done else { return nil }
+        return MacNotificationEvent(kind: "todo_created", sourceID: todo.id, target: .projectHome(projectId: project))
+    }
+    private mutating func note(_ message: Message, project: String) -> MacNotificationEvent? {
+        let id = key(project, message.id)
+        guard !reports.contains(id) else { return nil }
+        rememberReport(id); sawMessage(project, at: message.at)
+        guard !message.mine, ["완료", "막힘"].contains(message.kind) else { return nil }
+        return MacNotificationEvent(kind: message.kind == "완료" ? "report_complete" : "report_blocked", sourceID: message.id,
+                                    target: .chat(projectId: project, memberId: message.memberId, messageId: message.id))
     }
 
     private func key(_ project: String, _ id: String) -> String { project + ":" + id }
@@ -75,6 +108,9 @@ struct MacNotificationTracker {
         reportOrder.append(id)
         if reportOrder.count > 2000 { reports.remove(reportOrder.removeFirst()) }
     }
+    private mutating func sawMessage(_ project: String, at: String) {
+        if at > latestMessageAt[project] ?? "" { latestMessageAt[project] = at }
+    }
 }
 
 enum MacNotificationPolicy {
@@ -83,6 +119,10 @@ enum MacNotificationPolicy {
             sum(total, max(0, project.needsCount ?? sum(max(0, project.inboxCount), max(0, project.blockedCount))))
         }
         return count == 0 ? nil : String(count)
+    }
+    /// 연결 실패가 이어지면 3초에서 60초까지 늘린다. 느린 서버를 3초마다 두드리지 않는다.
+    static func reconnectDelay(failures: Int) -> Duration {
+        .seconds(min(60, 3 << (min(6, max(1, failures)) - 1)))
     }
     private static func sum(_ lhs: Int, _ rhs: Int) -> Int {
         let result = lhs.addingReportingOverflow(rhs)
@@ -250,28 +290,58 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
                     return // An uncertain settings PATCH is never replayed by the reconnect loop.
                 }
             }
-            var seeded = false
+            // 알림을 꺼 두면 기준 상태를 읽지 않는다. 이 소켓은 앱이 뒤에 있을 때의 Dock 배지만 맡는다.
+            var seeded = false, failures = 0
+            var unread: Set<String> = []
+            var retryUnreadAt = ContinuousClock.now
             while !Task.isCancelled {
+                var greeted = false
                 do {
                     let stream = try await client.connect(api: api)
-                    if !seeded {
-                        for project in store.projects {
-                            let snapshot: ProjectState = try await api.request("/api/projects/\(APIClient.segment(project.id))/state")
-                            guard let self, self.hostGeneration == id, !Task.isCancelled else { return }
-                            self.tracker.seed(snapshot)
-                        }
-                        seeded = true
+                    if self?.enabled == true {
+                        // 처음에는 기준만 잡고, 다시 연결한 뒤에는 끊긴 동안 생긴 것을 알린다.
+                        guard let read = await self?.readStates(store.projects.map(\.id), baseline: !seeded, api: api, serverID: serverID, generation: id) else { return }
+                        unread = read; seeded = true
+                        retryUnreadAt = ContinuousClock.now + .seconds(60)
                     }
                     for try await event in stream {
                         guard let self, self.hostGeneration == id, !Task.isCancelled else { return }
+                        greeted = true
                         if let projects = event.projects { NSApp.dockTile.badgeLabel = MacNotificationPolicy.badge(projects) }
+                        guard self.enabled, seeded else { continue }
                         if let notice = self.tracker.event(event) { await self.post(notice, serverID: serverID, generation: id) }
+                        if !unread.isEmpty, ContinuousClock.now >= retryUnreadAt {
+                            // 읽지 못한 프로젝트만 가끔 다시 읽는다. 실패 하나가 전체 재연결로 번지지 않는다.
+                            guard let read = await self.readStates(unread.sorted(), baseline: false, api: api, serverID: serverID, generation: id) else { return }
+                            unread = read
+                            retryUnreadAt = ContinuousClock.now + .seconds(60)
+                        }
                     }
                 } catch { if Task.isCancelled { return } }
                 await client.disconnect()
-                do { try await Task.sleep(for: store.isRestarting ? .milliseconds(500) : .seconds(3)) } catch { return }
+                failures = greeted ? 0 : failures + 1
+                do { try await Task.sleep(for: store.isRestarting ? .milliseconds(500) : MacNotificationPolicy.reconnectDelay(failures: failures)) } catch { return }
             }
         }
+    }
+
+    /// 프로젝트 상태를 읽어 기준을 잡거나(baseline) 끊긴 동안 생긴 것을 알린다. 읽지 못한 프로젝트 ID를 돌려주고, 연결이 바뀌었으면 nil.
+    private func readStates(_ projectIDs: [String], baseline: Bool, api: APIClient, serverID: String, generation: UUID) async -> Set<String>? {
+        var unread: Set<String> = []
+        for projectID in projectIDs {
+            do {
+                let snapshot: ProjectState = try await api.request("/api/projects/\(APIClient.segment(projectID))/state")
+                guard hostGeneration == generation, !Task.isCancelled else { return nil }
+                if baseline { tracker.seed(snapshot) }
+                else { for notice in tracker.reconcile(snapshot) { await post(notice, serverID: serverID, generation: generation) } }
+            } catch {
+                guard hostGeneration == generation, !Task.isCancelled else { return nil }
+                if let failure = error as? APIError, failure.status == 404 { continue } // 지워졌거나 보관된 프로젝트
+                unread.insert(projectID)
+                if baseline { tracker.hold(projectID: projectID) }
+            }
+        }
+        return unread
     }
 
     private func post(_ event: MacNotificationEvent, serverID: String, generation: UUID) async {

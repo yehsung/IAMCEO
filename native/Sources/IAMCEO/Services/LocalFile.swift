@@ -243,7 +243,7 @@ extension APIClient {
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
         configuration.urlCache = nil
-        configuration.timeoutIntervalForResource = 160
+        configuration.timeoutIntervalForResource = TransferTimeout.resource(bytes: attachment.size)
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         let (url, response) = try await session.download(for: attachmentDownloadRequest(attachment), delegate: FileDownloadProgress(progress))

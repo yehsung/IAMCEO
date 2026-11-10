@@ -132,14 +132,35 @@ export function serializeAPNsPayload(payload: PushPayload): string {
 }
 
 type Connector = (origin: string, options: { servername: string; rejectUnauthorized: true; ALPNProtocols: string[] }) => ClientHttp2Session;
-interface Connection { session: ClientHttp2Session; draining: boolean; ready: Promise<boolean>; failed: boolean }
+interface Connection { session: ClientHttp2Session; draining: boolean; ready: Promise<boolean>; failed: boolean; usedAt: number; retire: () => void }
+export interface HTTP2APNsTransportOptions {
+  /** A session idle at least this long is PINGed before it carries a request. */
+  idleProbeMs?: number;
+  probeTimeoutMs?: number;
+}
 
 export class HTTP2APNsTransport implements APNsTransport {
   #connections = new Map<string, Connection>();
   #sessions = new Set<ClientHttp2Session>();
   #failures = new Map<string, { count: number; until: number }>();
   #closed = false;
-  constructor(private readonly connector: Connector = (origin, options) => connect(origin, options), private readonly now: () => number = Date.now) {}
+  private readonly idleProbeMs: number;
+  private readonly probeTimeoutMs: number;
+  constructor(private readonly connector: Connector = (origin, options) => connect(origin, options), private readonly now: () => number = Date.now,
+    options: HTTP2APNsTransportOptions = {}) {
+    this.idleProbeMs = Math.max(0, options.idleProbeMs ?? 30_000);
+    this.probeTimeoutMs = Math.max(1, options.probeTimeoutMs ?? 3_000);
+  }
+  /** An idle session can be silently dead (NAT expiry, sleep). PING proves it before any HEADERS are written. */
+  private alive(session: ClientHttp2Session, timeoutMs: number): Promise<boolean> {
+    if (typeof session.ping !== "function") return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const done = (ok: boolean) => { if (settled) return; settled = true; clearTimeout(timer); resolve(ok); };
+      const timer = setTimeout(() => done(false), Math.max(1, timeoutMs));
+      try { if (session.ping((error) => done(!error)) === false) done(false); } catch { done(false); }
+    });
+  }
   private backoff(key: string): void {
     const count = Math.min(7, (this.#failures.get(key)?.count ?? 0) + 1);
     this.#failures.set(key, { count, until: this.now() + Math.min(60_000, 1000 * 2 ** (count - 1)) });
@@ -148,18 +169,27 @@ export class HTTP2APNsTransport implements APNsTransport {
     if (this.#closed) return { type: "not_sent", reason: "shutdown" };
     const deadline = Date.now() + request.timeoutMs;
     let connection = this.#connections.get(request.credential.cacheKey);
+    if (connection && !connection.draining && !connection.session.closed && !connection.session.destroyed &&
+        !connection.session.connecting && this.now() - connection.usedAt >= this.idleProbeMs) {
+      // Nothing has been submitted yet, so a dead session costs a reconnect, never an unknown delivery.
+      const idle = connection;
+      if (await this.alive(idle.session, Math.min(this.probeTimeoutMs, deadline - Date.now()))) idle.usedAt = this.now();
+      else { idle.retire(); idle.session.destroy(); }
+      if (this.#closed) return { type: "not_sent", reason: "shutdown" };
+      connection = this.#connections.get(request.credential.cacheKey);
+    }
     if (!connection || connection.draining || connection.session.closed || connection.session.destroyed) {
       if ((this.#failures.get(request.credential.cacheKey)?.until ?? 0) > this.now()) return { type: "not_sent", reason: "network_error" };
       try {
         const origin = APNS_ORIGINS[request.credential.environment];
         const session = this.connector(origin, { servername: new URL(origin).hostname, rejectUnauthorized: true, ALPNProtocols: ["h2"] });
-        connection = { session, draining: false, ready: Promise.resolve(false), failed: false };
-        this.#sessions.add(session);
-        const entry = connection;
         const retire = () => {
           entry.draining = true;
           if (this.#connections.get(request.credential.cacheKey) === entry) this.#connections.delete(request.credential.cacheKey);
         };
+        const entry: Connection = { session, draining: false, ready: Promise.resolve(false), failed: false, usedAt: this.now(), retire };
+        connection = entry;
+        this.#sessions.add(session);
         const failed = () => {
           if (!entry.failed && !this.#closed) { entry.failed = true; this.backoff(request.credential.cacheKey); }
           retire(); session.destroy();
@@ -187,13 +217,14 @@ export class HTTP2APNsTransport implements APNsTransport {
         }).then(ready => { if (ready) this.#failures.delete(request.credential.cacheKey); return ready; });
       } catch { this.backoff(request.credential.cacheKey); return { type: "not_sent", reason: "network_error" }; }
     }
-    const { session } = connection;
+    const current = connection;
+    const { session } = current;
     let failure: "network_error" | "timeout" = "network_error";
     const ready = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => { failure = "timeout"; resolve(false); }, Math.max(1, deadline - Date.now()));
-      void connection.ready.then(ok => { clearTimeout(timer); resolve(ok); });
+      void current.ready.then(ok => { clearTimeout(timer); resolve(ok); });
     });
-    if (!ready || connection.draining || this.#closed || Date.now() >= deadline) {
+    if (!ready || current.draining || this.#closed || Date.now() >= deadline) {
       session.destroy();
       return { type: "not_sent", reason: this.#closed ? "shutdown" : Date.now() >= deadline ? "timeout" : failure };
     }
@@ -208,6 +239,9 @@ export class HTTP2APNsTransport implements APNsTransport {
         settled = true; clearTimeout(timer); session.off("goaway", goaway); session.off("close", closed); session.off("error", closed);
         resolve(result);
         if (result.type !== "response" && stream && !stream.closed) stream.close(constants.NGHTTP2_CANCEL);
+        current.usedAt = this.now();
+        // A session that swallowed a request is not reused: the next send must open a fresh connection.
+        if (result.type !== "response" && result.reason === "timeout") { current.retire(); if (!session.destroyed) session.destroy(); }
       };
       const closed = () => finish({ type: !stream || stream.rstCode === constants.NGHTTP2_REFUSED_STREAM ? "not_sent" : "unknown", reason: "network_error" });
       // Bun 1.3.14 exposes the local maximum ID instead of the peer's ID.
@@ -287,7 +321,7 @@ export class APNsClient {
   #tokens = new Map<string, APNsTokenCache>();
   #tails = new Map<PushEnvironment, Promise<unknown>>();
   #suspended = new Map<PushEnvironment, APNsResult>();
-  #networkErrors = new Set<PushEnvironment>();
+  #networkErrors = new Map<PushEnvironment, number>();
   #closed = false;
   private readonly transport: APNsTransport;
   private readonly now: () => number;
@@ -301,7 +335,9 @@ export class APNsClient {
       if (suspension && (suspension.retryAt === undefined || suspension.retryAt > this.now())) return { ...provider,
         state: suspension.reason === "auth_failed" || suspension.reason === "invalid_key" ? "configuration_error" : "temporarily_unavailable",
         lastError: suspension.reason === "invalid_key" ? "invalid_key" : suspension.reason === "auth_failed" || suspension.reason === "ExpiredProviderToken" ? "auth_failed" : "network_error" };
-      if (this.#networkErrors.has(provider.environment)) return { ...provider, state: "temporarily_unavailable", lastError: "network_error" };
+      // The flag records the last attempt only. Without traffic nothing would clear it, so it ages out.
+      const failedAt = this.#networkErrors.get(provider.environment);
+      if (failedAt !== undefined && this.now() - failedAt < 60_000) return { ...provider, state: "temporarily_unavailable", lastError: "network_error" };
       return { ...provider };
     });
   }
@@ -339,16 +375,17 @@ export class APNsClient {
         const token = tokens.get();
         let response: APNsTransportResult;
         try {
-          response = await this.transport.send({ credential, body, timeoutMs: Math.min(10_000, Math.max(1, this.options.timeoutMs ?? 10_000)), headers: {
+          // Shorter than the worker's 10s guard, so a definite not_sent arrives before the guard records unknown.
+          response = await this.transport.send({ credential, body, timeoutMs: Math.min(10_000, Math.max(1, this.options.timeoutMs ?? 8_000)), headers: {
             ":method": "POST", ":path": `/3/device/${notification.deviceToken.toLowerCase()}`, ":scheme": "https",
             ":authority": new URL(APNS_ORIGINS[notification.environment]).hostname,
             authorization: `bearer ${token}`, "apns-topic": credential.bundleId, "apns-push-type": "alert", "apns-priority": "10",
             "apns-id": notification.deliveryId, "apns-collapse-id": notification.eventId, "apns-expiration": String(Math.floor(expiresAt / 1000)),
             "content-type": "application/json",
           } });
-        } catch { this.#networkErrors.add(notification.environment); return { state: "unknown", reason: "network_error" }; }
+        } catch { this.#networkErrors.set(notification.environment, this.now()); return { state: "unknown", reason: "network_error" }; }
         if (response.type !== "response") {
-          this.#networkErrors.add(notification.environment);
+          this.#networkErrors.set(notification.environment, this.now());
           return { state: response.type === "not_sent" ? "retry" : "unknown", reason: response.reason };
         }
         this.#networkErrors.delete(notification.environment);

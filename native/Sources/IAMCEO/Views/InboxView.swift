@@ -34,6 +34,24 @@ private struct InboxBlock: Identifiable {
     let decisions: [Decision]
 }
 
+extension InboxReviewState {
+    /// 방문이 끝날 때 부른다. 여기서 답한 카드, 손댔지만 다른 곳에서 이미 처리된 카드, 목록에서 사라진 카드를
+    /// '결재할 항목'에서 치운다. 그러지 않으면 탭을 계속 올려 두는 Mac에서는 이런 카드가 하루 종일 쌓이고 치울 방법이 없다.
+    /// 열린 카드의 선택·메모·펼침과 보내는 중인 카드는 건드리지 않는다. 메모 초안은 DraftStore에 남는다.
+    /// `decisions`가 nil이면(아직 상태를 받지 못함) 여기서 답한 카드만 치운다.
+    func settleVisit(decisions: [Decision]?) {
+        var settled = answeredHere
+        if let decisions {
+            let status = Dictionary(decisions.map { ($0.id, $0.status) }, uniquingKeysWith: { first, _ in first })
+            for id in engaged where !inFlight.contains(id) && status[id] != "open" { settled.insert(id) }
+        }
+        engaged.subtract(settled)
+        memoOnly.subtract(settled)
+        for id in settled { cardErrors[id] = nil }
+        answeredHere = []; batchArmed = [:]
+    }
+}
+
 struct InboxView: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
@@ -66,6 +84,8 @@ struct InboxView: View {
     @State private var revealRequest: RevealRequest?
 
     var body: some View {
+        // 'n시간째 기다림' 표시와 오래된 결재 우선 정렬이 조용한 화면에서도 맞도록 1분마다 다시 그린다.
+        let _ = MinuteClock.shared.minute
         ScrollViewReader { proxy in
             ScrollView {
                 // Web .ibx: 22 between the pill and each section; cards inside a section are 10 apart.
@@ -82,17 +102,22 @@ struct InboxView: View {
             .scrollDismissesKeyboard(.interactively)
             .refreshable { await store.refresh() }
             .onAppear { sync(); restoreScroll(proxy); handleLink(proxy) }
-            .onDisappear { router.inlineFieldFocused = false; scrollRestoreID = UUID() }
+            .onDisappear {
+                router.inlineFieldFocused = false; scrollRestoreID = UUID()
+                // iPhone: 다른 탭으로 갔을 때만(같은 탭 안에서 자료·팀원을 연 것은 제외).
+                if router.destination != .inbox { settleVisit() }
+            }
             .onChange(of: router.decisionID) { _, _ in handleLink(proxy) }
             .onChange(of: versionSignature) { _, _ in
                 sync()
                 if router.decisionID != nil { handleLink(proxy) }
             }
             .onChange(of: olderDone.count) { _, _ in if router.decisionID != nil { handleLink(proxy) } }
-            .onChange(of: session.segment) { _, _ in
-                session.engaged.subtract(session.answeredHere)
-                session.answeredHere = []; session.batchArmed = [:]
-                sync()
+            .onChange(of: session.segment) { _, _ in settleVisit() }
+            // Mac은 탭을 계속 올려 두어 onDisappear가 오지 않는다. 결재함을 떠나면 방문이 끝난 것으로 본다.
+            // 자료 열람(결재 카드의 파일을 보고 돌아오는 길)은 방문을 끝내지 않는다.
+            .onChange(of: router.destination) { old, new in
+                if old == .inbox, new != .inbox, new != .files { settleVisit() }
             }
             .onChange(of: store.selectedProjectID) { _, _ in resetProject() }
             .onChange(of: drafts.namespace) { _, _ in resetProject() }
@@ -651,6 +676,12 @@ struct InboxView: View {
             let cards = liveDecisions.filter { $0.group == group }
             if batchTargets(cards).map(\.id) != ids { session.batchArmed[group] = nil }
         }
+    }
+
+    /// 방문이 끝났다: 이미 처리된 카드를 '결재할 항목'에서 치운다(구획 전환, 결재함을 떠남).
+    private func settleVisit() {
+        session.settleVisit(decisions: store.state == nil ? nil : store.decisions)
+        sync()
     }
 
     private func resetProject() {
@@ -1598,6 +1629,8 @@ private struct DecisionThumb: View {
     @State private var image: Image?
     @State private var pixelSize: CGSize = .zero
     @State private var fileURL: URL?
+    /// 받아 둔 원본. 공용 캐시가 같은 그림을 다시 내려받지 않게 하고, 놓으면 임시 파일도 지워진다.
+    @State private var resource: FileResource?
     @State private var loading = false
     @State private var failure: String?
     @State private var quickLook: URL?
@@ -1659,14 +1692,11 @@ private struct DecisionThumb: View {
         loading = true
         defer { loading = false }
         do {
-            let data = try await api.attachmentData(attachment)
-            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("IAMCEO-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let fileName = attachment.name.isEmpty ? "image" : URL(fileURLWithPath: attachment.name).lastPathComponent
-            let destination = folder.appendingPathComponent(fileName)
-            try data.write(to: destination)
+            // 카드가 다시 만들어질 때마다 원본을 새로 받아 새 임시 폴더에 쌓지 않도록, 한도가 있는 공용 캐시를 쓴다.
+            let loaded = try await FileResources.attachment(attachment, api: api)
+            let data = try loaded.read()
             if let decoded = decodeThumbnail(data, maxPixel: 900) { image = decoded.image; pixelSize = decoded.size }
-            fileURL = destination
+            resource = loaded; fileURL = loaded.url
             failure = nil
         } catch {
             failure = friendlyLoadError(error, what: "첨부")

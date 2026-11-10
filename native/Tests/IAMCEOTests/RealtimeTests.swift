@@ -111,7 +111,9 @@ final class RealtimeTests: XCTestCase {
         let clock = TestRealtimeClock(); let socket = TestRealtimeSocket()
         let client = RealtimeClient(factory: TestRealtimeFactory(socket), clock: clock)
         let stream = try await client.connect(api: api())
-        await clock.advance(10)
+        // 서버가 바빠 hello 가 십수 초 늦을 수 있다. 20초까지 기다린다(예전 10초).
+        XCTAssertEqual(RealtimeClient.helloTimeoutSeconds, 20)
+        await clock.advance(20)
         var iterator = stream.makeAsyncIterator()
         do { _ = try await iterator.next(); XCTFail("No hello") }
         catch { XCTAssertEqual(error as? RealtimeClientError, .helloTimeout) }
@@ -158,7 +160,7 @@ final class RealtimeTests: XCTestCase {
         let client = RealtimeClient(factory: factory, clock: clock)
         let stream = try await client.connect(api: api())
         await eventually { await factory.waiter != nil }
-        await clock.advance(10)
+        await clock.advance(20)
         var iterator = stream.makeAsyncIterator()
         do { _ = try await iterator.next(); XCTFail("Connect timeout") }
         catch { XCTAssertEqual(error as? RealtimeClientError, .helloTimeout) }

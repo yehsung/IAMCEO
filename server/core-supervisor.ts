@@ -68,7 +68,8 @@ export class CoreSupervisor {
   watch(member: RunnerMember): void {
     if (this.stopped) return;
     const existing = this.members.get(member.id);
-    if (existing && existing.member.sessionGeneration === member.sessionGeneration && existing.member.projectId === member.projectId) { existing.member = { ...member }; return; }
+    // Same generation: update in place. Swapping the object discarded the result of the reattachment in flight.
+    if (existing && existing.member.sessionGeneration === member.sessionGeneration && existing.member.projectId === member.projectId) { Object.assign(existing.member, member); return; }
     this.members.set(member.id, { member: { ...member }, state: { memberId: member.id, outcome: "unknown", lastObservedAt: null, failures: 0, code: null, nextAttemptAt: 0 } });
   }
   unwatch(memberId: string): void { this.members.delete(memberId); }

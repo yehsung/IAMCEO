@@ -51,6 +51,14 @@ interface Track {
   setupAttempted: string | null;
   setupError: { code: string; note: string } | null;
   member: RunnerMember; terminal: CoreTerminal; sessionId: string | null; pending: boolean; uncertain: boolean; status: string | null;
+  /** Uncertainty from input that has no dispatch (manual control, approval keys, parallel command). The store cannot resolve it. */
+  controlUncertain: boolean;
+  /** The status report is gone but the turn is known to be over (decided by observe, which also reads the screen). */
+  lost: boolean;
+  /** When a live terminal's status report first went missing (pollNow). */
+  silentSince: number | null;
+  /** Last store re-read of the uncertain fence (pollNow) and how many re-reads left it in place. */
+  settledAt: number; settleTries: number;
   epoch: number; endedTurn: number; completing: boolean; refresh: Promise<CoreTerminal> | null;
   nonce: string | null; bindingSince: string; binding: CodexBindingCursor | null; compact: CoreCompactState | null;
   dispatches: DeliveryDispatch[]; evidence: Map<string, DeliveryEvidenceCursor>; lastError: string | null;
@@ -58,6 +66,9 @@ interface Track {
   observedAt: string; failures: number; failure: string | null;
 }
 const REQUIRED_METHODS = ["terminal.run", "terminal.list", "terminal.get", "terminal.read", "terminal.send", "terminal.interrupt", "terminal.kill"];
+/** herdr-core actually sends permission, question and auth; the other words are legacy. */
+const BLOCKED_KINDS: Record<string, "permission" | "selection" | "setup"> = { permission: "permission", selection: "selection", setup: "setup", question: "selection", auth: "setup" };
+const SILENT_SETTLE_MS = 750;
 const unsupported = (detail: string): Extract<SendResult, { ok: false }> => ({ ok: false, reason: "error", retryable: false, deliveryEffect: "not_written", detail });
 
 /** Capture an EOF baseline, not an exhaustive delivery/absence scan of history. */
@@ -210,6 +221,31 @@ export class CoreRunner implements Runner {
       track.compact = { ...compact, phase: "uncertain" }; track.uncertain = true;
     }
   }
+  /**
+   * A fence that came from a dispatch is lifted once the store has resolved that dispatch. It used to stay until
+   * the server restarted, so the member accepted nothing (real 2026-11-07 and 11-10 runs). Fences from manual
+   * input or compaction are left alone.
+   */
+  private settleUncertain(track: Track, marker?: string, polled = false): boolean {
+    if (!track.uncertain || track.controlUncertain || !this.deps.recoveryStore) return false;
+    if (track.compact && !["failed", "succeeded"].includes(track.compact.phase)) return false;
+    // The store read costs as much as the dispatch history. Recheck a fresh fence soon, a long one (waiting for the owner) every 5s.
+    const now = this.pollNow();
+    if (polled && now >= track.settledAt && now - track.settledAt < Math.min(5000, 500 * 2 ** Math.min(track.settleTries, 4))) return false;
+    track.settledAt = now; track.settleTries++;
+    let unresolved: DeliveryDispatch[];
+    try { unresolved = this.deps.recoveryStore.inputState(track.member.id).unresolvedDispatches; }
+    catch { return false; } // Unreadable (e.g. the member is being removed): stay fenced.
+    // The dispatch being written right now is not a previous unresolved write.
+    track.dispatches = unresolved.filter(d => d.transportState !== "rejected" && (!marker || d.bundleMarker !== marker));
+    if (track.dispatches.length) return false;
+    track.uncertain = false; track.settleTries = 0;
+    return true;
+  }
+  /** A terminal whose report vanished after a finished turn reads as done. */
+  private stateOf(track: Track | undefined, terminal: CoreTerminal): string | undefined {
+    return track?.lost && track.terminal === terminal && !terminal.status ? "done" : terminal.status?.state;
+  }
   private validateTrack(track: Track): void {
     this.operation.getStore()?.signal.throwIfAborted();
     if (this.closed || this.tracks.get(track.member.id) !== track) throw new CoreError("conflict", "Terminal generation changed during operation");
@@ -226,7 +262,7 @@ export class CoreRunner implements Runner {
     if (this.closed) throw new CoreError("closed", "CoreRunner shut down while starting; terminal remains owned by core");
     const launch = terminal.labels["iamceo.operation"] ? this.deps.recoveryStore?.getLifecycleJournal?.(terminal.labels["iamceo.operation"]) : null;
     const launchedAt = launch?.memberId === member.id && launch.intent === "start" ? launch.createdAt : null;
-    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, status: null, statusKey: null, composerEmpty: null, statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
+    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, controlUncertain: false, lost: false, silentSince: null, settledAt: -Infinity, settleTries: 0, status: null, statusKey: null, composerEmpty: null, statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
       epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, bindingSince: terminal.labels["iamceo.startedAt"] || launchedAt || new Date().toISOString(), binding: null, compact: null,
       dispatches: [], evidence: new Map(), lastError: null, nextPollAt: 0, pollDelay: this.pollMs, observedAt: new Date().toISOString(), failures: 0, failure: null };
     this.restore(track);
@@ -292,17 +328,36 @@ export class CoreRunner implements Runner {
     return { sessionId: launch.sessionId, paneId: terminal.address };
   }
   async reattachOwned(member: RunnerMember): Promise<RunnerReattachResult> {
-    const release = this.reserve(member.id);
+    // Re-observing an attached terminal only reads. Holding the input lock for it made the periodic supervisor
+    // pass collide with deliveries, sleep and manual control ("busy"). Lock only when a terminal must be bound.
+    const attached = this.tracks.get(member.id);
+    if (attached && attached.member.sessionGeneration === member.sessionGeneration) {
+      const result = await this.reattachWith(member, attached);
+      if (result.outcome === "rejoined" || result.code !== "rebind_required") return result;
+    }
+    return this.reattachWith(member, null);
+  }
+  /** observed: re-observe that track without the lock; rebind_required means another terminal must be bound under it. */
+  private async reattachWith(member: RunnerMember, observed: Track | null): Promise<RunnerReattachResult> {
+    let release: (() => void) | null = null;
     try {
+      if (!observed) release = this.reserve(member.id);
       const hello = await this.call<CoreHello>("hello", { generation: 1 });
       if (hello.generation !== 1) return { outcome: "conflict", code: "unsupported_generation" };
       this.methods = new Set(hello.methods);
       const snapshot = await this.call<{ terminals: CoreTerminal[] }>("terminal.list");
-      return await this.reattachFrom(member, snapshot.terminals.filter((terminal) => terminal.state === "live"));
-    } catch (error) { return { outcome: error instanceof CoreError && error.kind === "conflict" ? "conflict" : "unknown", code: error instanceof CoreError ? error.kind : "error", detail: error instanceof Error ? error.message : String(error) }; }
-    finally { release(); }
+      const result = await this.reattachFrom(member, snapshot.terminals.filter((terminal) => terminal.state === "live"), observed);
+      // A mutation ran while we looked without the lock: do not judge absence or conflict from that snapshot.
+      if (observed && result.outcome !== "rejoined" && (this.sending.has(member.id) || this.tracks.get(member.id) !== observed)) return { outcome: "unknown", code: "mutation_in_progress" };
+      return result;
+    } catch (error) {
+      // Sleep or start replaced the terminal while we looked without the lock; the observation is stale.
+      if (observed && !this.closed && this.tracks.get(member.id) !== observed) return { outcome: "unknown", code: "mutation_in_progress" };
+      return { outcome: error instanceof CoreError && error.kind === "conflict" ? "conflict" : "unknown", code: error instanceof CoreError ? error.kind : "error", detail: error instanceof Error ? error.message : String(error) };
+    }
+    finally { release?.(); }
   }
-  private async reattachFrom(member: RunnerMember, live: CoreTerminal[]): Promise<RunnerReattachResult> {
+  private async reattachFrom(member: RunnerMember, live: CoreTerminal[], observed: Track | null = null): Promise<RunnerReattachResult> {
     const matches = live.filter((terminal) => terminal.labels?.["iamceo.member"] === member.id && terminal.labels?.["iamceo.project"] === member.projectId);
     if (live.some(terminal => (terminal.address === member.paneId || terminal.labels?.["iamceo.member"] === member.id) && !this.owns(terminal, member))) return { outcome: "conflict", code: "ownership_changed", detail: "A recorded terminal or member label has conflicting ownership" };
     if (member.sessionId && live.some((terminal) => terminal.labels?.["iamceo.session"] === member.sessionId && !this.owns(terminal, member))) return { outcome: "conflict", code: "session_owned", detail: "CLI session is already owned by another live terminal" };
@@ -313,8 +368,13 @@ export class CoreRunner implements Runner {
       (member.sessionId && terminal.labels["iamceo.session"] && terminal.labels["iamceo.session"] !== member.sessionId)) return { outcome: "conflict", code: "ownership_changed", detail: "Core terminal ownership, provider, cwd or generation changed" };
     const current = this.tracks.get(member.id);
     const sessionId = terminal.labels["iamceo.session"] || member.sessionId || (current?.terminal.address === terminal.address ? current.sessionId : null);
-    const track = current && current.terminal.address === terminal.address && current.member.sessionGeneration === member.sessionGeneration ? current : await this.bind(member, terminal, sessionId);
+    const same = !!current && current.terminal.address === terminal.address && current.member.sessionGeneration === member.sessionGeneration;
+    // A lock-free re-observation never binds: back off if the track changed, retry under the lock if another terminal is live.
+    if (observed && current !== observed) return { outcome: "unknown", code: "mutation_in_progress" };
+    if (observed && !same) return { outcome: "unknown", code: "rebind_required" };
+    const track = same ? current! : await this.bind(member, terminal, sessionId);
     if (track === current) await this.refresh(track);
+    if (observed && this.tracks.get(member.id) !== track) return { outcome: "unknown", code: "mutation_in_progress" };
     this.unknownStarts.delete(member.id);
     return { outcome: "rejoined", started: { sessionId: track.sessionId, paneId: terminal.address, rejoined: true, identity: this.identity(track) } };
   }
@@ -324,16 +384,27 @@ export class CoreRunner implements Runner {
     if (terminal.turn !== undefined && (!Number.isSafeInteger(terminal.turn) || terminal.turn < 0)) throw new CoreError("protocol", "Invalid core turn counter");
     if (terminal.address !== previous.address || (previous.pid && terminal.pid && previous.pid !== terminal.pid)) throw new CoreError("conflict", "Core terminal process identity changed");
     if ((terminal.turn ?? 0) < (previous.turn ?? 0)) throw new CoreError("stale", "Discarded older core turn");
-    track.terminal = terminal;
+    track.terminal = terminal; track.lost = false;
+    if (terminal.state !== "live" || terminal.status) track.silentSince = null; else track.silentSince ??= this.pollNow();
     track.observedAt = new Date().toISOString();
-    const state = terminal.status?.state;
-    let status: "working" | "idle" | "blocked" | "gone" = terminal.state !== "live" ? "gone" : state === "working" ? "working" : ["idle", "done", "error"].includes(state || "") ? "idle" : "blocked";
-    if (!initial && (terminal.turn !== previous.turn || state !== previous.status?.state)) this.bump(track);
+    const reported = terminal.status?.state;
+    let status: "working" | "idle" | "blocked" | "gone" = terminal.state !== "live" ? "gone" : reported === "working" ? "working" : ["idle", "done", "error"].includes(reported || "") ? "idle" : "blocked";
+    if (!initial && (terminal.turn !== previous.turn || reported !== previous.status?.state)) this.bump(track);
     if (status === "gone" && providerFor(track.member) === "codex" && !track.sessionId) this.lostCodex.set(track.member.id, track.member.sessionGeneration);
     // Pump input has its own mandatory composer read. Diagnostic screen reads must
     // not consume that attempt's deadline or hide its pre-write timeout boundary.
     const screen = terminal.state === "live" && (!this.operation.getStore() || status === "blocked") ? await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 }).then(r => r.text, () => null) : null;
     this.validateTrack(track);
+    // A CLI that has run turns, cleared its status report and shows its normal composer has finished its turn.
+    // Real 2026-11-09/10 runs: after a turn ended with an API error the report vanished; the CLI reports again only
+    // after input and IAMCEO typed only after a report, so the member was dead until slept by hand.
+    // A CLI that never reported (turn 0) and any screen without the composer (dialog, setup) stay blocked.
+    // A turn whose end was not seen (counter moved, no report) is ended only after the gap has lasted a moment.
+    track.lost = track.silentSince !== null && terminal.reported !== false && (terminal.turn ?? 0) > 0 && screen !== null &&
+      ((terminal.turn ?? 0) <= track.endedTurn || this.pollNow() - track.silentSince >= SILENT_SETTLE_MS) &&
+      (providerFor(track.member) === "claude" ? inputText(screen) : codexDraft(screen)) !== null;
+    const state = track.lost ? "done" : reported;
+    if (track.lost) status = "idle";
     const usage = screen !== null && state !== "working" ? usageLimitMenu(screen) : null;
     const retry = state === "working" && (screen === null ? track.setupError?.code === "network_retry" : networkRetryScreen(screen));
     if (initial && state === "error" && !track.compact) {
@@ -360,7 +431,7 @@ export class CoreRunner implements Runner {
     const setup = screen !== null && !usage && status === "blocked" ? (providerFor(track.member) === "claude" ? claudeFolderTrust : codexFolderTrust)(screen, track.member.cwd) : null;
     track.setupError = usage ? { code: "usage_limit", note: usage.raw } : retry ? { code: "network_retry", note: "API 연결 복구를 기다리며 CLI가 재시도하고 있습니다" } : setup ? { code: "folder_trust", note: `폴더 신뢰 확인 창에서 멈췄습니다: ${track.member.cwd}` } : null;
     if (usage) { status = "blocked"; track.pending = false; }
-    const blockedReason = usage ? "usage_limit" : setup ? "setup" : state === "blocked" ? (["permission", "selection", "setup"].includes(terminal.status?.kind || "") ? terminal.status!.kind as "permission" | "selection" | "setup" : "status_unknown") : status === "blocked" ? "status_unknown" : null;
+    const blockedReason = usage ? "usage_limit" : setup ? "setup" : state === "blocked" ? BLOCKED_KINDS[terminal.status?.kind || ""] ?? "status_unknown" : status === "blocked" ? "status_unknown" : null;
     if (state === "error") {
       if (track.statusTimer) clearTimeout(track.statusTimer);
       track.statusTimer = null; track.pendingStatus = null;
@@ -417,6 +488,8 @@ export class CoreRunner implements Runner {
         if (!this.manualLease(track.member.id)) this.discoverBinding(track);
         await this.observe(track, terminal);
         track.failures = 0; track.failure = null;
+        // Lifted: tell the orchestrator to push the deliveries it had been holding back.
+        if (!this.sending.has(track.member.id) && this.settleUncertain(track, undefined, true)) this.event(track, { type: "input_ready", memberId: track.member.id });
         return track.terminal;
       } catch (error) {
         const previousFailure = track.failure;
@@ -490,13 +563,14 @@ export class CoreRunner implements Runner {
     try {
       if (!track) { await this.startLocked(member, opts); track = this.tracks.get(member.id)!; }
       this.assertMember(track, member);
+      this.settleUncertain(track, opts.marker);
       if (track.pending || track.uncertain || track.completing || track.compact && !["failed", "succeeded"].includes(track.compact.phase)) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written", detail: "A previous send is still running or delivery is uncertain; inspect the terminal" };
       const terminal = await this.refresh(track);
       if (terminal.state !== "live") return { ok: false, reason: "gone", retryable: false, deliveryEffect: "not_written" };
-      const state = terminal.status?.state;
+      const state = this.stateOf(track, terminal);
       if (state === "working") return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
       if (state === "blocked") return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: `Complete the CLI dialog with iamceo attach ${member.id}` };
-      if (!["idle", "done", "error"].includes(state || "")) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written", detail: `No trustworthy idle OSC 7501 status; inspect CLI setup with iamceo attach ${member.id}` };
+      if (!["idle", "done", "error"].includes(state || "")) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written", detail: `No trustworthy idle OSC 7501 status; inspect CLI setup with iamceo attach ${member.id} (status=${JSON.stringify(terminal.status?.state ?? null)}, turn=${terminal.turn ?? null}, reported=${terminal.reported ?? null})` };
       const inputEpoch = track.epoch;
       const screen = await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 });
       const usage = usageLimitMenu(screen.text);
@@ -527,7 +601,7 @@ export class CoreRunner implements Runner {
       if (this.manualLease(member.id)) return { ok: false, reason: "input_busy", retryable: true, deliveryEffect: "not_written", detail: "Manual terminal control is active" };
       const current = await this.refresh(track);
       this.validateTrack(track);
-      if (current.state !== "live" || current.status?.state !== state || track.epoch !== inputEpoch) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
+      if (current.state !== "live" || this.stateOf(track, current) !== state || track.epoch !== inputEpoch) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
       track.pending = true; this.bump(track);
       deliveryAttempted = true;
       const result = await this.call<{ turn: number; started?: boolean | null }>("terminal.send", { terminal: terminal.address, text: cleaned, ...(state === "idle" ? { if: "idle" } : {}), force: false, wait: false }, this.sendTimeoutMs);
@@ -536,7 +610,7 @@ export class CoreRunner implements Runner {
       await this.refresh(track).catch(() => undefined);
       return { ok: true, started: result.started ?? null, turn: result.turn };
     } catch (error) {
-      if (track && deliveryAttempted && (!(error instanceof CoreError) || error.uncertain)) { track.pending = false; track.uncertain = true; return { ...unsupported(`Delivery may have occurred; do not resend automatically. ${error instanceof Error ? error.message : String(error)}`), deliveryEffect: "unknown" }; }
+      if (track && deliveryAttempted && (!(error instanceof CoreError) || error.uncertain)) { track.pending = false; track.uncertain = true; track.controlUncertain ||= !opts.marker; return { ...unsupported(`Delivery may have occurred; do not resend automatically. ${error instanceof Error ? error.message : String(error)}`), deliveryEffect: "unknown" }; }
       if (track && deliveryAttempted) track.pending = false;
       if (error instanceof CoreError && ["blocked", "status_mismatch", "busy"].includes(error.kind)) return { ok: false, reason: error.kind === "blocked" ? "blocked" : "busy", retryable: true, detail: error.message, deliveryEffect: deliveryAttempted ? "rejected" : "not_written" };
       return { ok: false, reason: error instanceof CoreError && error.deliveryEffect === "not_written" ? "down" : "error", retryable: error instanceof CoreError && error.deliveryEffect === "not_written", deliveryEffect: !deliveryAttempted ? "not_written" : error instanceof CoreError ? error.deliveryEffect : "unknown", detail: error instanceof Error ? error.message : String(error) };
@@ -643,7 +717,7 @@ export class CoreRunner implements Runner {
       track.pending = true;
       // The previous write was proved absent and this exact resend has a verified receipt.
       track.dispatches = track.dispatches.filter(item => item.dispatchId !== dispatch.dispatchId);
-      track.uncertain = track.dispatches.length > 0;
+      track.controlUncertain = false; track.uncertain = track.dispatches.length > 0;
       return { ok: true, turn: result.turn, started: result.started ?? null, receipt: { dispatchId: dispatch.dispatchId, receivedAt: new Date().toISOString(), source: "transport" } };
     } catch (error) {
       if (track && attempted) track.uncertain = true;
@@ -667,7 +741,7 @@ export class CoreRunner implements Runner {
       // After any turn core reports "done" until the next input, so "idle only" meant a compact requested after the
       // first turn never ran and fenced the member's queue forever (real 2026-11-07 run). Use the same rule as a
       // normal delivery: idle is sent with the core-side if:"idle" guard, done after the same client-side checks.
-      if (terminal.state !== "live" || !["idle", "done"].includes(terminal.status?.state || "")) return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: "Compact requires an idle or finished CLI" };
+      if (terminal.state !== "live" || !["idle", "done"].includes(this.stateOf(track, terminal) || "")) return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: "Compact requires an idle or finished CLI" };
       const epoch = track.epoch;
       const screen = await this.screen(member);
       if ((providerFor(member) === "claude" ? inputText(screen) : codexDraft(screen)) !== "") return { ok: false, reason: "input_busy", retryable: true, deliveryEffect: "not_written" };
@@ -677,7 +751,7 @@ export class CoreRunner implements Runner {
       const baseline = compactLogBaseline(root, path);
       if (!baseline) return { ...unsupported("Compact log baseline is incomplete"), deliveryEffect: "not_written" };
       const current = await this.refresh(track);
-      const currentState = current.status?.state;
+      const currentState = this.stateOf(track, current);
       if (current.state !== "live" || !["idle", "done"].includes(currentState || "") || track.epoch !== epoch || this.manualLease(member.id) || !readJsonlRange(root, path, baseline, { maxBytes: 0 }).complete) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
       this.saveCompact(track, { id: crypto.randomUUID(), phase: "sending", startedAt: Date.now(), cursor: null, baseline: { path, fileIdentity: baseline.fileIdentity, offset: baseline.offset,
         sessionId: track.sessionId, terminalId: current.address, generation: member.sessionGeneration, turn: current.turn ?? null, model: member.model } });
@@ -694,7 +768,7 @@ export class CoreRunner implements Runner {
         if (!uncertain) track.pending = false;
         const next: CoreCompactState = { ...track.compact, phase: uncertain ? "uncertain" : "failed" };
         track.compact = next; // Preserve in-memory fence even when persistence fails after input.
-        try { this.saveCompact(track, next); } catch { track.uncertain = true; }
+        try { this.saveCompact(track, next); } catch { track.uncertain = true; track.controlUncertain = true; }
       }
       return { ok: false, reason: "error", retryable: false, deliveryEffect: !attempted ? "not_written" : error instanceof CoreError ? error.deliveryEffect : "unknown", detail: error instanceof Error ? error.message : String(error) };
     } finally { release(); }
@@ -710,7 +784,7 @@ export class CoreRunner implements Runner {
       }
       if (["idle", "done"].includes(state || "") && (resolution.unsettled || resolution.turn !== null && (track.terminal.turn ?? -1) > resolution.turn)) {
         this.saveCompact(track, { ...operation, phase: "failed", reason: "user_resolved" });
-        track.pending = false; track.uncertain = track.dispatches.length > 0;
+        track.pending = false; track.controlUncertain = false; track.uncertain = track.dispatches.length > 0;
         this.event(track, { type: "activity", memberId: track.member.id, kind: "system", text: "사용자 확인으로 압축 대기를 해제했습니다", runId: operation.id });
         return;
       }
@@ -721,12 +795,12 @@ export class CoreRunner implements Runner {
       settled: track.terminal.state === "live" && ["idle", "done"].includes(state || ""), providerError: state === "error", cursor: operation.cursor });
     if (result.outcome === "succeeded") {
       this.saveCompact(track, { ...operation, cursor: result.cursor, phase: "succeeded" });
-      track.pending = false; track.uncertain = track.dispatches.length > 0; track.endedTurn = Math.max(track.endedTurn, track.terminal.turn ?? 0);
+      track.pending = false; track.controlUncertain = false; track.uncertain = track.dispatches.length > 0; track.endedTurn = Math.max(track.endedTurn, track.terminal.turn ?? 0);
       this.event(track, { type: "compacted", memberId: track.member.id, runId: operation.id });
       // Post-compact usage is collected by the next fresh provider sample; never emit 0%.
     } else if (state === "error") {
       this.saveCompact(track, { ...operation, cursor: result.cursor, phase: "failed" });
-      track.pending = false; track.uncertain = track.dispatches.length > 0;
+      track.pending = false; track.controlUncertain = false; track.uncertain = track.dispatches.length > 0;
       track.lastError = track.terminal.status?.msg || "CLI reported a compact error";
       this.event(track, { type: "activity", memberId: track.member.id, kind: "error", text: "CLI reported that context compaction failed", runId: operation.id });
     } else if (Date.now() - operation.startedAt >= (this.deps.compactTimeoutMs ?? 600_000) || result.outcome === "unknown") {
@@ -769,7 +843,7 @@ export class CoreRunner implements Runner {
     this.configuring.add(member.id);
     try {
       const terminal = await this.refresh(track);
-      if (!["idle", "done"].includes(terminal.status?.state || "")) return { ok: false, reason: "blocked", retryable: true };
+      if (!["idle", "done"].includes(this.stateOf(track, terminal) || "")) return { ok: false, reason: "blocked", retryable: true };
       const screen = await this.screen(member);
       const draft = providerFor(member) === "claude" ? inputText(screen) : codexDraft(screen);
       if (draft !== "") return { ok: false, reason: "input_busy", retryable: false, detail: "Configuration reload requires an identifiable empty composer; the user draft is preserved" };
@@ -798,7 +872,7 @@ export class CoreRunner implements Runner {
       if (track) this.bump(track);
       const result = await this.call<{ outcome: string }>("terminal.interrupt", { terminal: terminal.address, timeout: 3 }, 6000);
       if (!["stopped", "exited"].includes(result.outcome)) throw new CoreError("not_stopped", `CLI interrupt outcome: ${result.outcome}`);
-      if (track?.compact) { this.saveCompact(track, { ...track.compact, phase: "failed" }); track.pending = false; track.uncertain = track.dispatches.length > 0; }
+      if (track?.compact) { this.saveCompact(track, { ...track.compact, phase: "failed" }); track.pending = false; track.controlUncertain = false; track.uncertain = track.dispatches.length > 0; }
     } finally { release(); }
   }
   async checkStop(member: RunnerMember, opts: { whileWorking?: boolean } = {}): Promise<void> {
@@ -808,7 +882,7 @@ export class CoreRunner implements Runner {
     if (!opts.whileWorking && track && this.isBusy(member.id)) throw new CoreError("busy", "A turn or unresolved input is still active");
     const terminal = await this.owned(member);
     if (terminal.state !== "live") return;
-    const state = terminal.status?.state;
+    const state = this.stateOf(track, terminal);
     if (!opts.whileWorking && !["idle", "done"].includes(state || "")) throw new CoreError("busy", "Resolve the current CLI turn/dialog before changing its provider or configuration");
     if (["idle", "done"].includes(state || "")) {
       const screen = await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 });
@@ -830,7 +904,7 @@ export class CoreRunner implements Runner {
       throw error;
     }
     if (terminal.state === "live") {
-      if (!opts.whileWorking && !["idle", "done"].includes(terminal.status?.state || "")) throw new CoreError("busy", "CLI state changed before stop");
+      if (!opts.whileWorking && !["idle", "done"].includes(this.stateOf(this.tracks.get(member.id), terminal) || "")) throw new CoreError("busy", "CLI state changed before stop");
       try {
         const result = await this.call<CoreTerminal>("terminal.kill", { terminal: terminal.address }, 15_000);
         if (result.state !== "finished") throw new CoreError("not_stopped", "Core did not confirm terminal termination");
@@ -937,6 +1011,7 @@ export class CoreRunner implements Runner {
     try { release = this.reserve(member.id); } catch { return { ok: false, note: "입력 처리 중입니다" }; }
     try {
       const track = this.tracks.get(member.id);
+      if (track) this.settleUncertain(track);
       if (!track || this.manualLease(member.id) || track.pending || track.uncertain || track.compact && !["failed", "succeeded"].includes(track.compact.phase) || !this.methods.has("terminal.keys")) return { ok: false, note: "창을 닫지 못했습니다" };
       this.assertMember(track, member);
       const snapshot = await this.usageLimitSnapshot(member);
@@ -975,6 +1050,7 @@ export class CoreRunner implements Runner {
     try {
       if (!track) return { ok: false, reason: "gone" };
       this.assertMember(track, member);
+      this.settleUncertain(track);
       if (this.manualLease(member.id) || track.uncertain || track.compact && !["failed", "succeeded"].includes(track.compact.phase)) return { ok: false, reason: "input_busy" };
       if (!this.methods.has("terminal.keys")) return { ok: false, reason: "unrecognized" };
       const identity = this.identity(track);
@@ -1001,7 +1077,7 @@ export class CoreRunner implements Runner {
       await this.refresh(track).catch(() => undefined); // Exit after 'No' is an observed exit, never a successful work turn.
       return { ok: true, prompt: current, chosen };
     } catch (error) {
-      if (track && attempted && (!(error instanceof CoreError) || error.uncertain)) track.uncertain = true;
+      if (track && attempted && (!(error instanceof CoreError) || error.uncertain)) track.uncertain = track.controlUncertain = true;
       if (!attempted && error instanceof CoreError && error.kind === "not_found") return { ok: false, reason: "gone" };
       if (!attempted && error instanceof CoreError && error.kind === "conflict") return { ok: false, reason: "changed" };
       throw error;
@@ -1066,7 +1142,7 @@ export class CoreRunner implements Runner {
         if (action.action === "input") await this.call("terminal.send", { terminal: terminal.address, text: cleanText(action.text!), force: true, wait: false }, this.sendTimeoutMs);
         else await this.call("terminal.keys", { terminal: terminal.address, keys: [action.key] }, this.sendTimeoutMs);
       } catch (error) {
-        if (!(error instanceof CoreError) || error.uncertain) track.uncertain = true;
+        if (!(error instanceof CoreError) || error.uncertain) track.uncertain = track.controlUncertain = true;
         throw error;
       }
       // Drain any observation started before the ACK while resolution remains

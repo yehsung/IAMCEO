@@ -2,6 +2,7 @@ import { z } from "zod";
 import { DEFAULT_PUSH_BUNDLE_ID } from "../../shared/push.ts";
 import type { PushProviderStatus, PushTestResult } from "../../shared/push.ts";
 import { ApiError } from "../store.ts";
+import { providerUsable } from "./store.ts";
 import type { PushStore } from "./store.ts";
 
 export interface PushRoutesContext {
@@ -132,7 +133,7 @@ export function createPushHandler(ctx: PushRoutesContext): (req: Request, url: U
         const at = push.timestamp();
         if (!device.enabled || device.state !== "active" || !deviceToken ||
             !["authorized", "provisional", "ephemeral"].includes(device.authorization) || device.expiresAt <= at ||
-            !ctx.providers().some((provider) => provider.environment === device.environment && provider.bundleId === device.bundleId && provider.state === "ready")) {
+            !ctx.providers().some((provider) => provider.environment === device.environment && provider.bundleId === device.bundleId && providerUsable(provider))) {
           throw new ApiError(409, "이 기기에서 시험 알림을 보낼 수 없습니다");
         }
         const cutoff = new Date(Date.parse(at) - 60_000).toISOString();

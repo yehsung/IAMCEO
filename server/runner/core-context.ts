@@ -40,10 +40,14 @@ export function discoverCodexSession(options: { home: string; cwd: string; gener
   } catch { return result("unknown", "path_unavailable"); }
   // Filename time excludes historical schemas before reading their potentially huge bodies.
   const cutoff = options.since ? Date.parse(options.since) - 120_000 : null;
+  // Codex names the file in local time. Read as UTC, the real file was filtered out in every zone west of UTC and
+  // the session never bound. The name is only a coarse filter (slack beyond any zone/DST difference); the exact
+  // check is the session_meta UTC timestamp below.
+  const nameCutoff = cutoff === null ? null : cutoff - 26 * 3_600_000;
   paths = paths.filter(path => {
-    const stamp = /^rollout-(\d{4}-\d{2}-\d{2}T\d{2}[-:]\d{2}[-:]\d{2})/.exec(basename(path))?.[1];
-    const time = stamp ? Date.parse(stamp.slice(0, 13) + ":" + stamp.slice(14, 16) + ":" + stamp.slice(17, 19) + "Z") : NaN;
-    return cutoff === null || !Number.isFinite(time) || time >= cutoff;
+    const stamp = /^rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})[-:](\d{2})[-:](\d{2})/.exec(basename(path));
+    const time = stamp ? new Date(+stamp[1]!, +stamp[2]! - 1, +stamp[3]!, +stamp[4]!, +stamp[5]!, +stamp[6]!).getTime() : NaN;
+    return nameCutoff === null || !Number.isFinite(time) || time >= nameCutoff;
   });
   if (!paths.length) return result("pending", "session_unbound");
   // A disappeared/rotated candidate cannot retain a positive nonce match.

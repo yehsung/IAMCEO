@@ -97,11 +97,7 @@ struct MemberStatusInfo: Sendable {
         guard isProgressAdvisory(member.statusObservation?.error?.code), !observationUnavailable(member) else { return nil }
         let run = member.executionState
         let since = run?.lastProgressAt ?? run?.startedAt ?? run?.inputReceivedAt
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let fractional = since.flatMap { formatter.date(from: $0) }
-        formatter.formatOptions = [.withInternetDateTime]
-        let date = fractional ?? since.flatMap { formatter.date(from: $0) }
+        let date = parseISODate(since)
         if let date {
             let minutes = max(0, Int(now.timeIntervalSince(date) / 60))
             return "화면 출력 없이 \(minutes)분째 진행 중"

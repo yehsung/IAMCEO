@@ -223,7 +223,14 @@ final class TerminalSession {
         else if missingTerminal, TerminalAvailability.isReady(member), member.paneId != missingPaneID, !ending {
             missingTerminal = false; notice = nil
             open(store: store, member: member)
-        }
+        } else if TerminalAvailability.isReady(member) { reopenIfRefused(store: store, member: member) }
+    }
+
+    /// 거절로 멈춘 보기 연결은 느린 재시도를 기다리지 않고 바로 다시 붙는다(직원 상태가 바뀌었거나 창으로 돌아왔을 때).
+    private func reopenIfRefused(store: AppStore, member: Member) {
+        guard !missingTerminal, visible, active, !starting, !ending, !controlling, readOnly,
+              case .closed(reason: "refused", message: _) = client.state else { return }
+        open(store: store, member: member)
     }
 
     func streamChanged(store: AppStore, member: Member) {
@@ -271,7 +278,11 @@ final class TerminalSession {
             return
         }
         inactiveSince = nil; inactivityTask?.cancel(); inactivityTask = nil
-        guard self.active != active else { return }
+        guard self.active != active else {
+            // Mac 유예 중에는 active 가 그대로라 돌아와도 다시 열 계기가 없다.
+            if active { reopenIfRefused(store: store, member: member) }
+            return
+        }
         self.active = active
         if !active {
             revalidationTask?.cancel()

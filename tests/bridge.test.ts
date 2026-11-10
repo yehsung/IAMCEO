@@ -204,7 +204,8 @@ describe("잘못된 호출", () => {
 
   test("서버 연결 실패는 도구 오류로 알려 준다", async () => {
     const dead = "http://127.0.0.1:9";
-    const client = await connect(store.getMemberToken(lead.id), { url: dead });
+    // 재시도 창을 짧게 둔다. 기본값은 서버 재시작을 넘기려고 수십 초를 버틴다.
+    const client = await connect(store.getMemberToken(lead.id), { url: dead, env: { IAMCEO_CONNECT_RETRY_MS: "50" } });
     await expect(client.listTools()).rejects.toThrow("연결할 수 없습니다");
     const r = await callText(client, "status", { now: "x" });
     expect(r.isError).toBe(true);
@@ -350,6 +351,50 @@ describe("operation ID 계약", () => {
     expect(received.at(-1)!.args).not.toHaveProperty("operation_id");
     expect(effects).toBe(1);
   });
+
+  test("서버 재시작 구간(503 STARTING)은 같은 ID로 다시 보내 넘기고, 도구 목록도 기다린다", async () => {
+    const received: string[] = [];
+    let lists = 0, polls = 0;
+    const starting = () => Response.json({ error: "서버를 시작하는 중입니다", code: "STARTING" }, { status: 503 });
+    const fake = runtime.serve(async req => {
+      const path = new URL(req.url).pathname;
+      if (path === "/agent/tools") return ++lists <= 2 ? starting() : Response.json([{ name: "post", description: "보고", inputSchema: { type: "object", properties: {} } }]);
+      if (path === "/agent/ask/wait") return ++polls === 1 ? starting() : Response.json({ done: true, text: "재시작 뒤 답", decision: {} });
+      const body = await req.json() as { operationId: string; name: string };
+      received.push(body.operationId);
+      // 종료 중인 서버는 처리 전에 돌려보낸다: 세 번째에야 받는다.
+      if (received.length <= 2) return starting();
+      return body.name === "ask" ? Response.json({ text: "질문 등록", wait: { decisionId: "d_restart" } }) : Response.json({ text: "보고 접수" });
+    });
+    const client = await connect("tk_fixture", { url: fake.url });
+    expect((await client.listTools()).tools.map(t => t.name)).toEqual(["post"]);
+    expect(lists).toBe(3);
+    expect(await callText(client, "post", { kind: "완료", title: "재시작 중 보고" })).toEqual({ text: "보고 접수", isError: false });
+    expect(received).toHaveLength(3);
+    expect(new Set(received).size).toBe(1);
+    // 답을 기다리는 롱폴도 503 에 포기하지 않는다.
+    expect(await callText(client, "ask", { title: "재시작 질문", detail: "배경" })).toEqual({ text: "재시작 뒤 답", isError: false });
+    expect(polls).toBe(2);
+  }, 15_000);
+
+  test("재시도 창이 지나도 서버가 없으면 ID를 담은 도구 오류로 끝난다", async () => {
+    let requests = 0;
+    const fake = runtime.serve(async () => { requests++; return Response.json({ error: "서버를 시작하는 중입니다", code: "STARTING" }, { status: 503 }); });
+    const client = await connect("tk_fixture", { url: fake.url, env: { IAMCEO_CONNECT_RETRY_MS: "0" } });
+    const operationId = randomUUID();
+    const result = await callText(client, "post", { kind: "완료", title: "서버 없음", operation_id: operationId });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("다시 시작하는 중");
+    expect(result.text).toContain(operationId);
+    // 창이 0 이어도 예전처럼 바로 한 번은 다시 보낸다.
+    expect(requests).toBe(2);
+    // 503 이라도 STARTING 이 아니면 서버가 판단한 거절이다. 다시 보내지 않는다.
+    let refusals = 0;
+    const refusing = runtime.serve(async () => { refusals++; return Response.json({ error: "실행기가 없습니다: core" }, { status: 503 }); });
+    const refused = await callText(await connect("tk_fixture", { url: refusing.url }), "post", { kind: "완료", title: "거절" });
+    expect(refused.isError).toBe(true); expect(refused.text).toContain("실행기가 없습니다");
+    expect(refusals).toBe(1);
+  }, 15_000);
 
   test("미지원 서비스는 ID를 보존한 오류이며 v1 재실행을 하지 않는다", async () => {
     const requests: unknown[] = [];

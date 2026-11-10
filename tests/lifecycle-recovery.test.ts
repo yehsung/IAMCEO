@@ -39,6 +39,7 @@ async function fixture(healthMs = 60_000, rpcTimeoutMs = 100) {
   let killLost = false;
   let rejectSend = false;
   let unknownSend = false;
+  let silentBoot = false;
   const server = createServer(socket => {
     sockets.add(socket); socket.on("close", () => sockets.delete(socket)); socket.setEncoding("utf8");
     let buffer = "";
@@ -53,7 +54,7 @@ async function fixture(healthMs = 60_000, rpcTimeoutMs = 100) {
         if (request.method === "hello") result = { generation: 1, version: "fake", methods: ["terminal.run", "terminal.list", "terminal.get", "terminal.read", "terminal.send", "terminal.keys", "terminal.kill", "terminal.interrupt"], features: [] };
         if (request.method === "terminal.list") result = { terminals: [...terminals.values()] };
         if (request.method === "terminal.run") {
-          const created: CoreTerminal = { address: `t${terminals.size + 1}`, argv: request.params.argv!, cwd: request.params.cwd!, labels: request.params.labels!, state: "live", turn: 0, status: { state: "idle", app: "claude-code" } };
+          const created: CoreTerminal = { address: `t${terminals.size + 1}`, argv: request.params.argv!, cwd: request.params.cwd!, labels: request.params.labels!, state: "live", turn: 0, ...(silentBoot ? {} : { status: { state: "idle", app: "claude-code" } }) };
           terminals.set(created.address, created); result = created;
           if (runLost) { socket.destroy(); continue; }
         }
@@ -95,7 +96,7 @@ async function fixture(healthMs = 60_000, rpcTimeoutMs = 100) {
     count: (method: string) => calls.filter(c => c.method === method).length,
     loseRun: (value: boolean) => { runLost = value; }, loseKeys: () => { keysLost = true; },
     loseKill: (value: boolean) => { killLost = value; }, unavailable: (value: boolean) => { getUnavailable = value; },
-    rejectSend: (value: boolean) => { rejectSend = value; }, unknownSend: () => { unknownSend = true; },
+    rejectSend: (value: boolean) => { rejectSend = value; }, unknownSend: () => { unknownSend = true; }, silentBoot: (value: boolean) => { silentBoot = value; },
     draft: (text: string) => { draft = text; }, started: (value: boolean) => { sendStarted = value; } };
 }
 
@@ -519,4 +520,69 @@ for (const started of [false, true]) test(`${started ? "progress" : "start"} adv
   await emit({ type: "status", memberId: member.id, terminalId: member.paneId, sessionGeneration: run.identity.sessionGeneration, status: "working",
     observation: { source: "core", observedAt: since, freshness: "stale", ownership: "unknown", consecutiveFailures: 1, error: { code: "timeout", note: "Observation failed" } } });
   expect(f.store.requireMember(member.id).statusObservation).toMatchObject({ freshness: "stale", error: { code: "timeout" } });
+});
+
+test("a just-woken CLI that has not reported ready is not written to; its idle signal sends once with no rejected attempt", async () => {
+  const f = await fixture(), member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  await f.orch.sleepMember(member.id);
+  f.silentBoot(true);
+  const d = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "report", text: "깨우는 보고", wake: true });
+  await f.orch.pump(member.id);
+  expect(f.count("terminal.run")).toBe(2);
+  expect(f.count("terminal.send")).toBe(0);
+  // Previously the pump wrote at once, core refused ("No trustworthy idle OSC 7501 status") and every wake left a
+  // rejected envelope plus an error run, then waited out a retry interval although the CLI became ready meanwhile.
+  expect(f.store.listDispatches(member.id)).toHaveLength(0);
+  expect(f.store.requireDelivery(d.id)).toMatchObject({ status: "queued", attempts: 0 });
+  f.terminals.get(f.store.requireMember(member.id).paneId!)!.status = { state: "idle", app: "claude-code" };
+  await until(() => f.store.requireDelivery(d.id).status === "delivered");
+  expect(f.count("terminal.send")).toBe(1);
+  expect(f.store.listDispatches(member.id).map(dispatch => dispatch.transportState)).toEqual(["accepted"]);
+});
+
+test("a turn end dropped while the member was closing is replayed from the next observation, never by elapsed time", async () => {
+  const f = await fixture(), member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  const internal = f.orch as unknown as { runtime(id: string): { closing: boolean; turn: unknown }; probeHealth(): Promise<void> };
+  f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "report", text: "첫 일", wake: true });
+  await f.orch.pump(member.id);
+  expect(f.count("terminal.send")).toBe(1);
+  // Same turn, still working: nothing to replay however long it takes.
+  await internal.probeHealth();
+  expect(f.store.listPendingExecutions()).toHaveLength(1);
+  const first = f.store.listPendingExecutions()[0]!;
+  // A refused stop holds the member in closing; core events arriving meanwhile are dropped and never repeated.
+  const emitted: RunnerEvent[] = []; f.runner.on(event => { emitted.push(event); });
+  internal.runtime(member.id).closing = true;
+  const terminal = f.terminals.get(member.paneId!)!;
+  terminal.status = { state: "idle" }; terminal.turn = 1;
+  // Both the turn end and the (debounced) idle status that follows it must have been emitted, and so dropped.
+  await until(() => emitted.some(e => e.type === "turn_end" && e.turn === 1) && emitted.some(e => e.type === "status" && e.status === "idle" && e.turn === 1) && !f.runner.isBusy(member.id));
+  internal.runtime(member.id).closing = false;
+  expect(f.store.listPendingExecutions()).toHaveLength(1);
+  expect(internal.runtime(member.id).turn).not.toBeNull();
+  const next = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "report", text: "다음 일", wake: true });
+  await f.orch.pump(member.id);
+  expect(f.count("terminal.send")).toBe(1);
+  await internal.probeHealth();
+  await until(() => f.store.requireDelivery(next.id).status === "delivered");
+  expect(f.count("terminal.send")).toBe(2);
+  expect(f.store.getExecutionJournal(first.runId)).toMatchObject({ phase: "ended", result: "success", turn: 1, reason: "재관측으로 놓친 턴 종료를 확인했습니다" });
+});
+
+test("an unknown stop is finished by recovery even though a wake arrived meanwhile, and that wake reopens the member", async () => {
+  const f = await fixture(), member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  f.loseKill(true);
+  await expect(f.orch.sleepMember(member.id)).rejects.toThrow();
+  expect(f.store.listPendingLifecycleJournals()[0]).toMatchObject({ intent: "sleep", phase: "unknown" });
+  // The open journal fences the pump; the queued wake used to make every recovery attempt refuse ("대기열이 남아 있습니다").
+  const d = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "report", text: "잠드는 사이 온 보고", wake: true });
+  await f.orch.pump(member.id);
+  expect(f.count("terminal.send")).toBe(0);
+  f.loseKill(false);
+  await (f.orch as unknown as { probeHealth(): Promise<void> }).probeHealth();
+  await until(() => f.store.requireDelivery(d.id).status === "delivered");
+  expect(f.store.listPendingLifecycleJournals()).toHaveLength(0);
+  expect(f.count("terminal.run")).toBe(2);
+  expect(f.count("terminal.send")).toBe(1);
+  expect(f.store.requireMember(member.id)).toMatchObject({ sessionId: member.sessionId, lastError: null });
 });

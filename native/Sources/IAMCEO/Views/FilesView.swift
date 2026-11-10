@@ -6,6 +6,7 @@ import ImageIO
 import AVKit
 #if os(macOS)
 import AppKit
+import AttachmentException
 #else
 import UIKit
 #endif
@@ -1316,13 +1317,27 @@ private struct TableBlock: View {
                 } else {
                     ViewerNote(text: "표를 정리하는 중입니다", loading: true)
                 }
+            } else if text.utf8.count > Self.backgroundParseBytes {
+                ViewerNote(text: "표를 정리하는 중입니다", loading: true)
             }
         }
         .task(id: text.utf8.count) { await prepare() }
     }
 
+    /// 이보다 큰 표는 메인 스레드 밖에서 읽는다(1MB 표는 수백 ms가 걸린다).
+    private static let backgroundParseBytes = 64 * 1024
+
     private func prepare() async {
-        let table = parsed ?? parseTable(text, tab: tabSeparated, truncated: truncated)
+        let table: ParsedTable
+        if let parsed {
+            table = parsed
+        } else if text.utf8.count <= Self.backgroundParseBytes {
+            table = parseTable(text, tab: tabSeparated, truncated: truncated)
+        } else {
+            let source = text, tab = tabSeparated, cut = truncated
+            table = await Task.detached(priority: .userInitiated) { parseTable(source, tab: tab, truncated: cut) }.value
+            guard !Task.isCancelled else { return }
+        }
         parsed = table
         tall = table.rows.count > 40
         guard widths == nil, !table.header.isEmpty else { return }
@@ -1431,22 +1446,7 @@ private struct TableBlock: View {
             sort = (column, true)
         }
         guard let sort else { sortedRows = nil; return }
-        let numeric = table.numeric[column]
-        let indexed = Array(table.rows.enumerated())
-        sortedRows = indexed.sorted { a, b in
-            let x = column < a.element.count ? a.element[column].trimmingCharacters(in: .whitespaces) : ""
-            let y = column < b.element.count ? b.element[column].trimmingCharacters(in: .whitespaces) : ""
-            if x.isEmpty || y.isEmpty { return x.isEmpty == y.isEmpty ? a.offset < b.offset : !x.isEmpty }
-            let order: ComparisonResult
-            if numeric, let nx = cellNumber(x), let ny = cellNumber(y) {
-                order = nx == ny ? .orderedSame : nx < ny ? .orderedAscending : .orderedDescending
-            } else {
-                order = x.localizedStandardCompare(y)
-            }
-            if order == .orderedSame { return a.offset < b.offset }
-            return sort.ascending ? order == .orderedAscending : order == .orderedDescending
-        }
-        .map(\.element)
+        sortedRows = sortedTableRows(table.rows, column: column, numeric: table.numeric[column], ascending: sort.ascending)
     }
 }
 
@@ -1584,12 +1584,65 @@ private func sniffDelimiter(_ scalars: [Unicode.Scalar]) -> Unicode.Scalar {
     return (counts[best] ?? 0) > 0 ? best : ","
 }
 
+/// 표 정렬: 빈 칸은 항상 뒤, 같은 값은 원래 순서. 비교 키(다듬은 글자, 숫자)는 행마다 한 번만 만든다
+/// (비교할 때마다 만들면 수천 행 숫자 열 정렬이 몇 초씩 메인 스레드를 막는다).
+func sortedTableRows(_ rows: [[String]], column: Int, numeric: Bool, ascending: Bool) -> [[String]] {
+    struct Key { let offset: Int; let text: String; let number: Double? }
+    let keys = rows.enumerated().map { offset, row in
+        let text = column < row.count ? row[column].trimmingCharacters(in: .whitespaces) : ""
+        return Key(offset: offset, text: text, number: numeric && !text.isEmpty ? cellNumber(text) : nil)
+    }
+    return keys.sorted { a, b in
+        let x = a.text, y = b.text
+        if x.isEmpty || y.isEmpty { return x.isEmpty == y.isEmpty ? a.offset < b.offset : !x.isEmpty }
+        let order: ComparisonResult
+        if numeric, let nx = a.number, let ny = b.number {
+            order = nx == ny ? .orderedSame : nx < ny ? .orderedAscending : .orderedDescending
+        } else {
+            order = x.localizedStandardCompare(y)
+        }
+        if order == .orderedSame { return a.offset < b.offset }
+        return ascending ? order == .orderedAscending : order == .orderedDescending
+    }
+    .map { rows[$0.offset] }
+}
+
 /// 1,234 · -3.5 · 12% count as numbers; long numbers starting with 0 (phone numbers) do not.
-private func cellNumber(_ cell: String) -> Double? {
+/// 문법은 `[-+]?(\d{1,3}(,\d{3})+|\d+)?(\.\d+)?%?` 이고 숫자가 하나는 있어야 한다. 정규식 리터럴은 부를 때마다
+/// 다시 컴파일되어 칸 하나에 수십 µs가 들므로(수천 행 표에서 몇 초) 손으로 읽는다.
+func cellNumber(_ cell: String) -> Double? {
     let s = cell.trimmingCharacters(in: .whitespaces)
-    guard s.wholeMatch(of: #/^[-+]?(\d{1,3}(,\d{3})+|\d+)?(\.\d+)?%?$/#) != nil, s.contains(where: \.isNumber) else { return nil }
-    if s.wholeMatch(of: #/^[-+]?0\d.*/#) != nil { return nil }
-    return Double(s.replacingOccurrences(of: ",", with: "").replacingOccurrences(of: "%", with: ""))
+    var digits = [UInt8]()
+    digits.reserveCapacity(s.utf8.count)
+    var bytes = s.utf8.makeIterator()
+    var next = bytes.next()
+    func isDigit(_ byte: UInt8?) -> Bool { byte.map { $0 >= 48 && $0 <= 57 } ?? false }
+    if next == 45 || next == 43 { digits.append(next!); next = bytes.next() }
+    let signLength = digits.count
+    var lead = 0
+    while isDigit(next) { digits.append(next!); lead += 1; next = bytes.next() }
+    if next == 44 {
+        // 천 단위 쉼표: 앞 묶음은 1~3자리, 뒤 묶음은 모두 정확히 3자리.
+        guard (1...3).contains(lead) else { return nil }
+        while next == 44 {
+            next = bytes.next()
+            var group = 0
+            while isDigit(next) { digits.append(next!); group += 1; next = bytes.next() }
+            guard group == 3 else { return nil }
+        }
+    }
+    let wholeLength = digits.count - signLength
+    if next == 46 {
+        digits.append(46); next = bytes.next()
+        var fraction = 0
+        while isDigit(next) { digits.append(next!); fraction += 1; next = bytes.next() }
+        guard fraction > 0 else { return nil }
+    }
+    if next == 37 { next = bytes.next() }
+    guard next == nil, digits.count - signLength > 0 else { return nil }
+    // 0으로 시작하는 긴 숫자(전화번호, 우편번호)는 글자다.
+    if wholeLength >= 2, digits[signLength] == 48, s.utf8.dropFirst(signLength).dropFirst().first.map({ $0 >= 48 && $0 <= 57 }) == true { return nil }
+    return Double(String(decoding: digits, as: UTF8.self))
 }
 
 private func isNumericColumn(_ rows: [[String]], _ column: Int) -> Bool {
@@ -1616,11 +1669,14 @@ private struct ArtifactViewer: View {
     @State private var error: String?
     /// The page height reported by the fitted preview (0 until measured).
     @State private var pageHeight: CGFloat = 0
+    /// 높이가 뷰포트를 따라 커지는 페이지. 이런 페이지의 높이를 기억하면 다시 열 때마다 그만큼 더 커진다.
+    @State private var viewportBound = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// One height from the first frame to the drawn page (A-70): the page's last measured height when it was opened
     /// before, 360 the first time. The loading frame, the unmeasured page and the page share it, so nothing jumps.
     private var reservedHeight: CGFloat { ArtifactHeights.byFile[file.id] ?? 360 }
+    private static let coverTimeout: Duration = .seconds(10)
 
     private var unavailableReason: String? {
         if store.isDemo { return "샘플 자료라 페이지를 열 수 없습니다." }
@@ -1705,7 +1761,7 @@ private struct ArtifactViewer: View {
         // As tall as the page once measured (the web's frame grows the same way); the reserved height until then,
         // under a loading cover (web ArtifactFrame) so an empty frame never shows. The cover fades and the height
         // eases to the page's own.
-        SandboxedHTML(html: artifact.html, rule: artifact.rule, title: file.title, height: $pageHeight)
+        SandboxedHTML(html: artifact.html, rule: artifact.rule, title: file.title, height: $pageHeight, viewportBound: $viewportBound)
             .frame(maxWidth: .infinity)
             .frame(height: pageHeight > 0 ? max(pageHeight, 120) : reservedHeight)
             .overlay {
@@ -1721,7 +1777,13 @@ private struct ArtifactViewer: View {
                 }
             }
             .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: pageHeight)
-            .onChange(of: pageHeight) { _, height in if height > 0 { ArtifactHeights.byFile[file.id] = max(height, 120) } }
+            .onChange(of: pageHeight) { _, height in if height > 0, !viewportBound { ArtifactHeights.byFile[file.id] = max(height, 120) } }
+            .onChange(of: viewportBound) { _, bound in if bound { ArtifactHeights.byFile[file.id] = nil } }
+            // 높이 보고가 끝내 오지 않아도 '불러오는 중' 덮개가 영영 남지 않게, 잡아 둔 높이로 페이지를 보여 준다.
+            .task(id: file.id) {
+                do { try await Task.sleep(for: Self.coverTimeout) } catch { return }
+                if pageHeight == 0 { pageHeight = reservedHeight }
+            }
             .background(CE.bg)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CE.line) }
@@ -2822,10 +2884,8 @@ private func fileTime(_ iso: String, now: Date = Date()) -> String {
     let clock = koTime(date)
     if calendar.isDateInToday(date) { return clock }
     if calendar.isDateInYesterday(date) { return "어제 \(clock)" }
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "ko_KR")
-    formatter.dateFormat = calendar.component(.year, from: date) == calendar.component(.year, from: now) ? "M월 d일" : "yyyy년 M월 d일"
-    return "\(formatter.string(from: date)) \(clock)"
+    let day = koFormatted(date, calendar.component(.year, from: date) == calendar.component(.year, from: now) ? "M월 d일" : "yyyy년 M월 d일")
+    return "\(day) \(clock)"
 }
 
 /// Downsampled decode so a thread full of screenshots does not hold full-size bitmaps.
@@ -3066,27 +3126,121 @@ func artifactAllowsChildNavigation(loaded: Bool, url: URL?, type: WKNavigationTy
         || (loaded && value.hasPrefix("about:srcdoc#") && type == .linkActivated)
 }
 
+/// 맞춤 높이 미리보기의 수렴 감시. 측정한 높이에 프레임(=페이지의 뷰포트)을 맞추므로, 높이가 뷰포트에 따라
+/// 정해지는 페이지(`min-height:100vh` 등)는 측정→맞춤→재측정이 끝없이 돌며 계속 커진다.
+/// 맞추자마자 다시 커지는 보고가 연달아 오면 더 따라가지 않고 그 높이에 묶어 둔다.
+struct ArtifactHeightFit: Equatable {
+    enum Step: Equatable {
+        case ignore
+        /// 프레임과 미리보기를 이 높이에 맞춘다.
+        case fit(CGFloat)
+    }
+    /// 연달아 이만큼 커지면 뷰포트를 따라 커지는 페이지로 본다.
+    static let growthLimit = 4
+    /// 맞춘 뒤 이 시간 안에 온 증가만 '연달아'로 센다(되먹임은 수십 ms 간격, 사람의 조작은 그보다 느리다).
+    static let quick: TimeInterval = 1
+    private var applied: CGFloat?
+    private var appliedAt: TimeInterval = 0
+    /// 처음 측정한 높이. 폭이 바뀌면 여기서부터 다시 맞춘다.
+    private var floor: CGFloat?
+    private var growths = 0
+    private var ceiling: CGFloat = 0
+    private var escapes = 0
+    /// 지금 묶여 있는지.
+    private(set) var held = false
+    /// 뷰포트를 따라 커지는 페이지로 판정된 적이 있는지.
+    private(set) var viewportBound = false
+
+    mutating func report(_ height: CGFloat, at time: TimeInterval) -> Step {
+        guard let applied else {
+            self.applied = height; appliedAt = time; floor = height
+            return .fit(height)
+        }
+        if held {
+            // 뷰포트보다 작아질 수 없는 페이지가 줄었다면 내용이 줄어든 것이다.
+            if height < applied - 0.5 { return follow(height, at: time, growths: 0) }
+            guard height > ceiling + 0.5 else { return .ignore }
+            // 묶은 뒤에는 프레임이 그대로라 되먹임 보고는 한 번(이미 오던 것)으로 끝난다.
+            // 한참 뒤에 오거나 계속 커지면 내용이 스스로 자라는 것이다.
+            ceiling = height; escapes += 1
+            if escapes >= 2 || time - appliedAt > Self.quick {
+                viewportBound = false
+                return follow(height, at: time, growths: 0)
+            }
+            return .ignore
+        }
+        if abs(height - applied) <= 0.5 { return .ignore }
+        let rapid = height > applied && time - appliedAt <= Self.quick
+        let next = rapid ? growths + 1 : 0
+        let step = follow(height, at: time, growths: next)
+        if next >= Self.growthLimit {
+            held = true; viewportBound = true; ceiling = height; escapes = 0
+        }
+        return step
+    }
+
+    /// 폭이 바뀌면 높이도 달라진다. 묶였던 페이지는 처음 높이에서 다시 맞춰, 폭이 바뀔 때마다 높이가 쌓이지 않게 한다.
+    mutating func widthChanged(at time: TimeInterval) -> Step {
+        growths = 0
+        guard viewportBound, let floor else { return .ignore }
+        return follow(floor, at: time, growths: 0)
+    }
+
+    private mutating func follow(_ height: CGFloat, at time: TimeInterval, growths: Int) -> Step {
+        applied = height; appliedAt = time; self.growths = growths
+        held = false; escapes = 0
+        return .fit(height)
+    }
+}
+
 @MainActor
 final class ArtifactNavigationDelegate: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     private var childLoaded = false
     private(set) var childFrame: WKFrameInfo?
     var onLink: ((String) -> Void)?
+    private(set) var heightFit = ArtifactHeightFit()
+    /// 뷰포트를 따라 커지는 페이지로 판정되거나 풀렸을 때. 그런 페이지의 높이는 다음에 열 때 쓸 값으로 기억하지 않는다.
+    var onViewportBound: ((Bool) -> Void)?
+    /// 높이 보고 시각(시험에서 바꾼다).
+    var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// 웹 콘텐츠 프로세스가 종료됐을 때 같은 문서를 다시 넣기 위한 것.
+    var sandboxDocument: (() -> String)?
+    private(set) var processReloads = 0
+    static let processReloadLimit = 2
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard !message.frameInfo.isMainFrame, message.frameInfo.request.url?.absoluteString.hasPrefix("about:srcdoc") == true else { return }
         if message.name == "artifactHeight", let number = message.body as? NSNumber {
             let height = number.doubleValue
             guard height.isFinite, height > 0 else { return }
             childFrame = message.frameInfo
-            onHeight?(CGFloat(height))
-            if let view = message.webView as? ArtifactWebView, view.fitted {
-                view.evaluateJavaScript("document.getElementById('artifact').style.height='" + String(height) + "px'", in: nil, in: .defaultClient, completionHandler: { _ in })
-            }
+            report(CGFloat(height), in: message.webView)
         } else if message.name == "artifactLink", let value = message.body as? String { onLink?(value) }
         else if message.name == "artifactAnchor", let value = message.body as? NSNumber,
                 value.doubleValue.isFinite, value.doubleValue >= 0,
                 let view = message.webView as? ArtifactWebView, view.fitted {
             view.scrollToAnchor(CGFloat(value.doubleValue))
         }
+    }
+
+    /// 측정된 페이지 높이를 반영한다. 맞춤 미리보기는 수렴 감시를 거친다.
+    private func report(_ height: CGFloat, in webView: WKWebView?) {
+        guard let view = webView as? ArtifactWebView, view.fitted else { onHeight?(height); return }
+        let bound = heightFit.viewportBound
+        let step = heightFit.report(height, at: uptime())
+        if heightFit.viewportBound != bound { onViewportBound?(heightFit.viewportBound) }
+        apply(step, to: view)
+    }
+
+    private func apply(_ step: ArtifactHeightFit.Step, to view: ArtifactWebView) {
+        guard case .fit(let height) = step else { return }
+        onHeight?(height)
+        view.evaluateJavaScript("document.getElementById('artifact').style.height='" + String(Double(height)) + "px'", in: nil, in: .defaultClient, completionHandler: { _ in })
+    }
+
+    /// 폭이 바뀐 뒤(WebKit이 새 폭으로 배치한 다음) 다시 잰다.
+    fileprivate func widthChanged(_ view: ArtifactWebView) {
+        apply(heightFit.widthChanged(at: uptime()), to: view)
+        measure(view)
     }
     private var firstAction = true
     /// Reports the page's content height (fitted previews only).
@@ -3107,15 +3261,26 @@ final class ArtifactNavigationDelegate: NSObject, WKNavigationDelegate, WKUIDele
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { measure(webView) }
 
+    /// 웹 콘텐츠 프로세스가 종료되면(iPhone이 뒤에 있는 앱의 프로세스를 거둘 때 등) 페이지가 빈 상자로 남는다.
+    /// 앱이 만든 같은 문서를 처음 여는 것과 똑같은 규칙으로 다시 넣는다. 반복 종료에 대비해 횟수를 제한한다.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard let sandboxDocument, processReloads < Self.processReloadLimit else { return }
+        processReloads += 1
+        firstAction = true; childLoaded = false; childFrame = nil
+        if heightFit.viewportBound { onViewportBound?(false) }
+        heightFit = ArtifactHeightFit()
+        webView.loadHTMLString(sandboxDocument(), baseURL: nil)
+    }
+
     /// The page height as the web measures it (the body's scroll height plus its margins), read from the app's own
     /// isolated script world: page scripts run inside the opaque sandbox, and nothing the page defines can answer for it.
     func measure(_ webView: WKWebView) {
-        guard let onHeight else { return }
+        guard onHeight != nil else { return }
         let script = "(function(){var b=document.body;if(!b)return 0;var c=getComputedStyle(b);return Math.ceil(b.scrollHeight+(parseFloat(c.marginTop)||0)+(parseFloat(c.marginBottom)||0))})()"
         guard let childFrame else { return }
-        webView.evaluateJavaScript(script, in: childFrame, in: .defaultClient) { result in
-            if case .success(let value) = result, let height = (value as? NSNumber)?.doubleValue, height > 0 {
-                onHeight(CGFloat(height))
+        webView.evaluateJavaScript(script, in: childFrame, in: .defaultClient) { [weak self, weak webView] result in
+            if case .success(let value) = result, let height = (value as? NSNumber)?.doubleValue, height.isFinite, height > 0 {
+                self?.report(CGFloat(height), in: webView)
             }
         }
     }
@@ -3168,7 +3333,7 @@ private final class ArtifactWebView: WKWebView {
         // After WebKit has laid the page out at the new width.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             guard let self, !self.isLoading else { return }
-            self.measurer?.measure(self)
+            self.measurer?.widthChanged(self)
         }
     }
 }
@@ -3196,14 +3361,20 @@ func makeArtifactWebView(html: String, title: String?, rule: WKContentRuleList, 
     view.uiDelegate = delegate
     // No white flash before the kit's dark page paints.
     #if os(macOS)
-    view.setValue(false, forKey: "drawsBackground")
+    // 공개되지 않은 KVC 키다. 없어지면 예외가 나는데, 앱은 AppKit 예외를 즉시 종료로 다루므로 여기서 막는다
+    // (실패하면 배경만 불투명하게 남는다).
+    if IAMCEOCatchException({ view.setValue(false, forKey: "drawsBackground") }) != nil {
+        NSLog("[IAMCEO] Artifact web view background could not be made clear")
+    }
     #else
     view.isOpaque = false
     view.backgroundColor = .clear
     view.scrollView.backgroundColor = .clear
     if fitted { view.scrollView.isScrollEnabled = false }
     #endif
-    view.loadHTMLString(ArtifactKit.sandboxDocument(html, title: title, fitted: fitted), baseURL: nil)
+    let document = { ArtifactKit.sandboxDocument(html, title: title, fitted: fitted) }
+    delegate.sandboxDocument = document
+    view.loadHTMLString(document(), baseURL: nil)
     return view
 }
 #if os(macOS)
@@ -3213,18 +3384,20 @@ private struct SandboxedHTMLSurface: NSViewRepresentable {
     var title: String? = nil
     /// Fitted: as tall as the page (reported here); otherwise the page scrolls inside the view.
     var height: Binding<CGFloat>? = nil
+    var viewportBound: Binding<Bool>? = nil
     var onLink: (String) -> Void
     func makeCoordinator() -> ArtifactNavigationDelegate {
         let delegate = ArtifactNavigationDelegate(); delegate.onLink = onLink; return delegate
     }
     func makeNSView(context: Context) -> WKWebView {
         if let height { context.coordinator.onHeight = { value in if abs(height.wrappedValue - value) > 0.5 { height.wrappedValue = value } } }
+        if let viewportBound { context.coordinator.onViewportBound = { value in if viewportBound.wrappedValue != value { viewportBound.wrappedValue = value } } }
         return makeArtifactWebView(html: html, title: title, rule: rule, delegate: context.coordinator, fitted: height != nil)
     }
     func updateNSView(_ nsView: WKWebView, context: Context) {}
     static func dismantleNSView(_ view: WKWebView, coordinator: ArtifactNavigationDelegate) {
         view.stopLoading(); view.configuration.userContentController.removeAllScriptMessageHandlers(from: .defaultClient)
-        coordinator.onHeight = nil; coordinator.onLink = nil
+        coordinator.onHeight = nil; coordinator.onLink = nil; coordinator.sandboxDocument = nil; coordinator.onViewportBound = nil
     }
 }
 #else
@@ -3233,18 +3406,20 @@ private struct SandboxedHTMLSurface: UIViewRepresentable {
     let rule: WKContentRuleList
     var title: String? = nil
     var height: Binding<CGFloat>? = nil
+    var viewportBound: Binding<Bool>? = nil
     var onLink: (String) -> Void
     func makeCoordinator() -> ArtifactNavigationDelegate {
         let delegate = ArtifactNavigationDelegate(); delegate.onLink = onLink; return delegate
     }
     func makeUIView(context: Context) -> WKWebView {
         if let height { context.coordinator.onHeight = { value in if abs(height.wrappedValue - value) > 0.5 { height.wrappedValue = value } } }
+        if let viewportBound { context.coordinator.onViewportBound = { value in if viewportBound.wrappedValue != value { viewportBound.wrappedValue = value } } }
         return makeArtifactWebView(html: html, title: title, rule: rule, delegate: context.coordinator, fitted: height != nil)
     }
     func updateUIView(_ uiView: WKWebView, context: Context) {}
     static func dismantleUIView(_ view: WKWebView, coordinator: ArtifactNavigationDelegate) {
         view.stopLoading(); view.configuration.userContentController.removeAllScriptMessageHandlers(from: .defaultClient)
-        coordinator.onHeight = nil; coordinator.onLink = nil
+        coordinator.onHeight = nil; coordinator.onLink = nil; coordinator.sandboxDocument = nil; coordinator.onViewportBound = nil
     }
 }
 #endif
@@ -3260,9 +3435,11 @@ struct SandboxedHTML: View {
     let rule: WKContentRuleList
     var title: String? = nil
     var height: Binding<CGFloat>? = nil
+    /// 맞춤 미리보기에서: 페이지 높이가 뷰포트를 따라 커지는 것으로 판정됐는지.
+    var viewportBound: Binding<Bool>? = nil
     @State private var pendingLink: String?
     var body: some View {
-        SandboxedHTMLSurface(html: html, rule: rule, title: title, height: height, onLink: { pendingLink = $0 })
+        SandboxedHTMLSurface(html: html, rule: rule, title: title, height: height, viewportBound: viewportBound, onLink: { pendingLink = $0 })
             .alert("바깥 링크를 엽니다: " + (pendingLink ?? ""),
                    isPresented: Binding(get: { pendingLink != nil }, set: { if !$0 { pendingLink = nil } })) {
                 if let pendingLink, let url = ArtifactKit.externalURL(pendingLink) {
@@ -3394,7 +3571,15 @@ private struct FileActivitySheet: UIViewControllerRepresentable {
 }
 #else
 private struct FileActivitySheet: View {
+    @Environment(\.dismiss) private var dismiss
     let url: URL
-    var body: some View { ShareLink(item: url) { Label("공유", systemImage: "square.and.arrow.up") }.padding(24) }
+    // Mac 시트는 닫는 버튼(Esc)이 없으면 창 전체를 막은 채 닫을 수 없다.
+    var body: some View {
+        CESheet("공유", subtitle: url.lastPathComponent, icon: "square.and.arrow.up", width: 360) {
+            ShareLink(item: url) { Label("공유", systemImage: "square.and.arrow.up") }
+        } footer: {
+            Button("닫기") { dismiss() }.ceSecondaryButton()
+        }
+    }
 }
 #endif

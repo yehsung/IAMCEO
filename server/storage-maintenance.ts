@@ -38,7 +38,8 @@ export function createStorageReferences(store: Store, inboxDir: string): FileRef
       const encoded = JSON.stringify(value);
       return encoded.includes(file.id) || encoded.includes(JSON.stringify(file.path).slice(1, -1));
     };
-    for (const project of store.listProjects({ includeArchived: true })) {
+    // One read snapshot per project: paging the whole history must not reload its deliveries for every page.
+    const projectMentions = (project: { id: string; archived: boolean }) => store.withDeliveryRead(project.id, () => {
       if (store.listFiles(project.id).some(mentions) || store.listDecisions(project.id).some(mentions)) return true;
       let cursor: string | undefined;
       do {
@@ -55,7 +56,9 @@ export function createStorageReferences(store: Store, inboxDir: string): FileRef
         }
         if (store.listDispatches(member.id).some(mentions)) return true;
       }
-    }
+      return false;
+    });
+    for (const project of store.listProjects({ includeArchived: true })) if (projectMentions(project)) return true;
     // Includes failed/held/unknown and deleted-member deliveries, with no recent-row cap.
     return store.listDeliveries().some(mentions) || store.listDeliveryRecoveries().some(mentions);
   } };

@@ -228,7 +228,7 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
     ready = !options.signal?.aborted;
     const startupMs = performance.now() - startedAt;
     if (ready) {
-      console.info(`[startup] ready durationMs=${startupMs.toFixed(1)}`);
+      console.info(`[startup] ready durationMs=${startupMs.toFixed(1)} pid=${process.pid} version=${VERSION}`);
       maintenanceTimer = setTimeout(() => {
         backups!.start();
         sweep();
@@ -254,17 +254,40 @@ export async function shutdownWithinBudget(stop: () => Promise<void>, timeoutMs 
   } finally { clearTimeout(timer); }
 }
 
+/** 서버가 떠 있는 동안 Mac 의 유휴 잠자기만 막는다(화면 꺼짐·덮개 닫기는 그대로). -w 라 서버가 어떻게 끝나도 함께 끝난다.
+ * config.json 의 keepAwake: false 로 끈다. */
+export function keepAwake(config: Pick<Config, "keepAwake">, options: {
+  platform?: string; test?: boolean; pid?: number; spawn?: (command: string[]) => { kill(): void };
+} = {}): (() => void) | undefined {
+  if (config.keepAwake === false || (options.test ?? process.env.IAMCEO_TEST === "1") || (options.platform ?? process.platform) !== "darwin") return undefined;
+  try {
+    const spawn = options.spawn ?? ((command: string[]) => {
+      const child = Bun.spawn(command, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      child.unref();
+      return child;
+    });
+    const child = spawn(["/usr/bin/caffeinate", "-i", "-w", String(options.pid ?? process.pid)]);
+    return () => { try { child.kill(); } catch { /* 이미 끝났다 */ } };
+  } catch {
+    console.error("잠자기 방지를 켜지 못했습니다. 자리를 비우면 Mac 이 잠들 수 있습니다.");
+    return undefined;
+  }
+}
+
 async function serve(): Promise<void> {
   const { acquireHomeOwner } = await import("../server/home-owner.ts");
   const owner = acquireHomeOwner(homeDir());
   let runtime: Awaited<ReturnType<typeof startOpsRuntime>> | undefined;
   let starting: Promise<Awaited<ReturnType<typeof startOpsRuntime>>> | undefined;
   let stopping = false;
+  let awake: (() => void) | undefined;
   const shutdown = new AbortController();
-  const stop = async () => {
+  const stop = async (signal?: string) => {
     if (stopping) return;
     stopping = true;
+    console.info(`[shutdown] ${typeof signal === "string" ? signal : "stop"} pid=${process.pid}`);
     shutdown.abort();
+    awake?.();
     const hardStop = setTimeout(() => process.exit(1), 15_000);
     try {
       await shutdownWithinBudget(async () => { runtime ??= await starting; await runtime?.stop(); });
@@ -280,6 +303,7 @@ async function serve(): Promise<void> {
     starting = startOpsRuntime(config, { owner, signal: shutdown.signal });
     runtime = await starting;
     if (!stopping) {
+      awake = keepAwake(config);
       console.log(`IAMCEO 서버: ${runtime.server.urls.join(" · ")}`);
       console.log("접속 코드는 iamceo open 으로 봅니다.");
     }
@@ -544,7 +568,7 @@ export async function waitForReadiness(config: Config, options: {
 
 /** launchd owns only /dev/null FDs. This dedicated supervisor owns and rotates both real log FDs. */
 async function serviceRun(): Promise<void> {
-  const { BoundedLogWriter } = await import("../server/log-writer.ts");
+  const { BoundedLogWriter, lineStamper } = await import("../server/log-writer.ts");
   const { acquireHomeOwner } = await import("../server/home-owner.ts");
   const logs = join(homeDir(), "logs");
   using logsOwner = acquireHomeOwner(logs);
@@ -563,7 +587,9 @@ async function serviceRun(): Promise<void> {
     process.on("SIGTERM", term); process.on("SIGINT", interrupt); process.on("SIGHUP", hup);
     const pump = async (stream: ReadableStream<Uint8Array>, writer: InstanceType<typeof BoundedLogWriter>) => {
       const reader = stream.getReader();
-      try { for (;;) { const { done, value } = await reader.read(); if (done) return; writer.write(value); } }
+      // 언제 멈췄고 언제 다시 떴는지 찾을 수 있게 줄마다 받은 시각을 붙인다.
+      const stamp = lineStamper();
+      try { for (;;) { const { done, value } = await reader.read(); if (done) return; writer.write(stamp(value)); } }
       finally { reader.releaseLock(); }
     };
     const guard = (job: Promise<void>) => job.catch(error => { term(); throw error; });
@@ -594,6 +620,7 @@ export function servicePath(home: string, found: (string | null)[] = []): string
   return [...new Set([...extra, ...base])].join(":");
 }
 
+/** ProcessType 을 비우면 launchd 가 CPU·디스크를 조이는 '표준 데몬' 등급으로 돌린다. 앱 응답이 이 서버에 달려 있어 Interactive 로 둔다. */
 export function launchdPlist(opts: { program: string[]; home: string; logDir: string; workingDir: string; env?: Record<string, string>; path?: string }): string {
   const string = (s: string) => `<string>${xmlEscape(s)}</string>`;
   const env: Record<string, string> = {
@@ -620,6 +647,8 @@ export function launchdPlist(opts: { program: string[]; home: string; logDir: st
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
   <key>StandardOutPath</key>
   ${string("/dev/null")}
   <key>StandardErrorPath</key>
@@ -660,6 +689,7 @@ export interface ServiceDependencies {
   program: string[];
   launchctl: (...args: string[]) => { ok: boolean; output: string };
   readiness: (config: Config) => Promise<void>;
+  sleep?: (ms: number) => Promise<unknown>;
 }
 
 export async function service(args: string[], dependencies?: ServiceDependencies): Promise<void> {
@@ -673,6 +703,7 @@ export async function service(args: string[], dependencies?: ServiceDependencies
   const home = dependencies?.home ?? homedir();
   const control = dependencies?.launchctl ?? launchctl;
   const readiness = dependencies?.readiness ?? waitForReadiness;
+  const sleep = dependencies?.sleep ?? ((ms: number) => Bun.sleep(ms));
   const plistPath = join(home, "Library", "LaunchAgents", `${SERVICE_LABEL}.plist`);
   const target = `gui/${userInfo().uid}`;
   if (action === "uninstall") {
@@ -704,18 +735,35 @@ export async function service(args: string[], dependencies?: ServiceDependencies
     requireOwnedService(plistPath, config.home);
     if (active.ok && !values.restart) {
       await readiness(config);
+      // 떠 있는 서비스는 건드리지 않는다. 등록된 설정이 지금 것과 다르면 갱신 방법만 알린다.
+      let installed: string | null = null;
+      try { installed = readFileSync(plistPath, "utf8"); } catch {}
+      if (installed !== plist) console.log("등록된 서비스 설정이 이 버전과 다릅니다. iamceo service install --restart 로 갱신하세요(서버가 잠깐 다시 시작됩니다).");
       return console.log(`서비스 준비 확인 완료: ${plistPath}`);
     }
     if (active.ok) {
       const unloaded = control("bootout", `${target}/${SERVICE_LABEL}`);
-      if (!unloaded.ok) throw new CliError(`서비스 재시작 실패: ${unloaded.output}`);
+      // 서버가 내려가는 동안(최대 15초) bootout 은 36(in progress)을 준다. 실패가 아니라 기다릴 일이다.
+      if (!unloaded.ok && !/failed: 36\b|in progress/i.test(unloaded.output)) throw new CliError(`서비스 재시작 실패: ${unloaded.output}`);
+      // 다 내려가기 전에 다시 올리면 bootstrap 이 거절돼 서비스가 꺼진 채 남는다.
+      for (let i = 0; i < 60 && control("print", `${target}/${SERVICE_LABEL}`).ok; i++) await sleep(500);
     }
   }
   mkdirSync(logDir, { recursive: true, mode: 0o700 });
   mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
   writeFileSync(plistPath, plist);
-  const loaded = control("bootstrap", target, plistPath);
-  if (!loaded.ok) throw new CliError(`launchd 등록 실패: ${loaded.output}`);
+  let loaded = control("bootstrap", target, plistPath);
+  // 앞 인스턴스 정리가 덜 끝났으면 5(Input/output error)·37(already)로 거절된다. 잠깐 뒤 다시 건다.
+  for (let i = 0; i < 5 && !loaded.ok && /failed: (5|37)\b|Input\/output error|already|in progress/i.test(loaded.output); i++) {
+    await sleep(1000);
+    loaded = control("bootstrap", target, plistPath);
+  }
+  if (!loaded.ok) {
+    const stillLoaded = control("print", `${target}/${SERVICE_LABEL}`).ok;
+    throw new CliError(`launchd 등록 실패: ${loaded.output}\n${stillLoaded
+      ? "이전 서비스가 아직 내려가지 않았습니다. 잠시 뒤 iamceo service install --restart 를 다시 실행하세요."
+      : "지금 서비스가 내려가 있습니다. iamceo service install 을 다시 실행해 올리세요."}`);
+  }
   await readiness(config);
   console.log(`서비스를 등록했습니다: ${plistPath}\n로그: ${logDir}\n주소: ${publicUrls(config).join(" · ")}`);
 }

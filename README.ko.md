@@ -25,6 +25,7 @@ Mac과 iPhone 한 화면에서 지시하고 결재합니다.
 - **결과물은 자료에** — 문서·표·이미지·영상·HTML 페이지를 경로가 아니라 앱 안에서 바로 엽니다.
 - **자리를 떠도 계속** — iPhone으로 지시하고 결재하고 알림을 받습니다. Mac이 깨어 있는 동안 일은 멈추지 않습니다.
 - **기록은 내 Mac에** — 대화·결재·자료는 내 Mac의 SQLite에 남습니다. AI 계정을 바꿔도 그대로입니다.
+- **바퀴를 다시 만들지 않았습니다** — 공식 CLI·herdr-core·MCP·SQLite·Tailscale은 그대로 쓰고, 그 위에서 '회사처럼 일하게 하는' 부분만 만들었습니다. → [설계](#어떻게-돌아가나)
 
 Mac·iPhone 네이티브 앱을 사용합니다. 웹 버전은 2026-11-10 제거했으며 기존 앱의 API 계약은 유지합니다.
 
@@ -64,18 +65,51 @@ brew install --cask yehsung/tap/iamceo
 
 ## 어떻게 돌아가나
 
+**이미 잘 만들어진 것은 그대로 쓰고, 없던 부분만 직접 만들었습니다.** AI 모델도, 터미널도, AI와 주고받는 규약도 새로 만들지 않았습니다. IAMCEO가 만든 것은 그 위에서 여러 세션을 회사처럼 일하게 하는 층입니다. 그래서 프로그램이 작고, 각 부품이 좋아지면 IAMCEO도 같이 좋아집니다.
+
 ```mermaid
 flowchart LR
-    APP["Mac · iPhone 앱"] -- "REST · WebSocket" --> D["IAMCEO 데몬<br/>(Bun · SQLite)"]
+    APP["Mac · iPhone 앱<br/>(SwiftUI)"] -- "REST · WebSocket<br/>Tailscale" --> D["IAMCEO 서버<br/>전달 대기열 · 결재 · 자료"]
+    D --- DB[("SQLite")]
     D -- "터미널 잡기" --> CORE["herdr-core"]
     CORE --> L["총괄<br/>Claude Code"] & W["직원<br/>Claude Code · Codex"]
     L & W -- "MCP 도구<br/>post · ask · file · team_assign" --> D
+    classDef own fill:#8b5cf6,stroke:#6d28d9,color:#ffffff
+    classDef reuse fill:#f4f1fa,stroke:#b8a9d9,color:#1f1633
+    class APP,D own
+    class DB,CORE,L,W reuse
 ```
 
-- **공식 CLI를 그대로 씁니다.** Claude Code와 Codex가 내 계정 로그인으로 대화형 터미널에서 돕니다. IAMCEO는 역할 지침과 MCP 연결만 더합니다.
-- **세션은 앱과 서버보다 오래 삽니다.** [herdr-core](https://github.com/herdrdev/herdr-core)가 터미널을 붙잡고 있어서, 앱을 닫거나 서버를 다시 켜도 일은 이어집니다.
+<sub>보라색은 IAMCEO가 직접 만든 것, 옅은 색은 가져다 쓴 것입니다.</sub>
+
+### 가져다 쓴 것
+
+| 맡은 일 | 쓰는 것 | 그래서 얻는 것 |
+|---|---|---|
+| AI와 코딩 도구 | 공식 [Claude Code](https://claude.com/claude-code) · [Codex CLI](https://github.com/openai/codex) | 내 구독과 로그인을 그대로 씁니다. API 키가 필요 없고 IAMCEO 때문에 드는 요금도 없습니다. CLI에 새 기능이 나오면 그대로 따라옵니다. |
+| 터미널 붙잡기 | [herdr-core](https://github.com/herdrdev/herdr-core) | 앱을 닫거나 서버를 다시 켜도 세션이 살아 있습니다. |
+| AI와 주고받기 | [MCP](https://modelcontextprotocol.io) 표준 규약 | 화면 글자를 긁지 않습니다. 보고와 요청이 도구 호출로 와서 전부 기록으로 남습니다. |
+| 서버와 데이터 | [Bun](https://bun.sh) · SQLite | DB 서버를 따로 설치하지 않습니다. 데이터가 파일 하나라 백업은 복사 한 번입니다. 실행에 필요한 외부 패키지는 2개뿐입니다. |
+| 터미널 화면 | [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) | 앱 안에서 직원의 실제 터미널을 그대로 보고 직접 칠 수 있습니다. |
+| 밖에서 접속 | [Tailscale](https://tailscale.com) | 포트를 열지 않고 중계 서버도 두지 않습니다. IAMCEO가 운영하는 서버는 없습니다. |
+| 알림 · 비밀 보관 · 상시 실행 | APNs · Keychain · launchd | macOS와 iOS가 원래 하는 방식 그대로입니다. |
+
+### 직접 만든 것
+
+- **회사 구조** — 프로젝트마다 총괄이 일을 나눠 직원에게 맡깁니다. 직원마다 세션이 따로라 맥락이 섞이지 않습니다.
+- **결재함** — 직원의 질문과 승인 요청을 배경·선택지별 결과·추천이 붙은 카드로 바꿉니다.
+- **전달 대기열** — 보낸 말이 CLI에 실제로 들어갔는지 세션 기록으로 확인합니다. 확실하지 않으면 같은 말을 두 번 넣지 않습니다. 인터넷이 끊기거나 사용 한도에 걸리면 풀린 뒤에 이어서 보냅니다.
+- **대표 발언 확인** — 총괄이 대표 말을 인용하면 서버가 원문과 대조해 표시합니다.
+- **자료** — 직원이 만든 문서·표·이미지·영상·HTML 페이지를 앱 안에서 바로 엽니다.
+- **Mac·iPhone 앱** — SwiftUI 코드 하나로 두 기기에서 같은 화면을 씁니다.
+
+### 설계 원칙
+
+- **공식 CLI를 고치지 않습니다.** Claude Code와 Codex가 내 계정 로그인으로 대화형 터미널에서 돕니다. IAMCEO는 역할 지침과 MCP 연결만 더하고, CLI의 전역 설정 파일은 건드리지 않습니다.
+- **세션은 앱과 서버보다 오래 삽니다.** herdr-core가 터미널을 붙잡고 있어서, 앱을 닫거나 서버를 다시 켜도 일은 이어집니다.
+- **상태를 추측하지 않습니다.** 일하는 중인지 끝났는지는 CLI가 남기는 기록으로 판단합니다. 알 수 없으면 자동 입력을 멈추고 확인을 요청합니다.
 - **보고는 화면 긁기가 아니라 도구 호출입니다.** 보고(`post`), 결재 요청(`ask`), 자료(`file`), 일 맡기기(`team_assign`)가 모두 기록으로 남습니다.
-- **대표만 결정합니다.** 외부로 보내기, 커밋·푸시, 삭제, 결제는 대표가 쓴 문장이 있어야 합니다. 총괄이 대표 말을 인용하면 서버가 원문과 대조해 표시합니다.
+- **대표만 결정합니다.** 외부로 보내기, 커밋·푸시, 삭제, 결제는 대표가 쓴 문장이 있어야 합니다.
 
 구성 요소는 [구조](docs/architecture.md), 모든 규칙은 [운영 원칙](docs/operating-model.md)에 있습니다.
 
@@ -103,7 +137,7 @@ iPhone에 직접 설치하려면 `native/project.yml`의 번들 ID와 팀을 자
 
 ## 감사
 
-터미널을 붙잡아 두는 일은 [herdr-core](https://github.com/herdrdev/herdr-core)(Apache-2.0)가 합니다. 함께 쓰는 오픈소스의 고지는 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)에 있습니다.
+IAMCEO는 좋은 도구들 위에 서 있습니다. 터미널을 붙잡아 두는 일은 [herdr-core](https://github.com/herdrdev/herdr-core)(Apache-2.0)가, 터미널 화면은 [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)(MIT)이, AI와의 연결은 [MCP SDK](https://github.com/modelcontextprotocol/typescript-sdk)(MIT)가 맡습니다. 함께 쓰는 오픈소스의 고지는 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)에 있습니다.
 
 ## 라이선스
 

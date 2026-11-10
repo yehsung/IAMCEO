@@ -153,7 +153,10 @@ final class ConnectionLossTests: XCTestCase {
                 default: $0.syncBody = #"{"protocol":2,"cursor":{"epoch":"E","seq":0},"requestedProjectId":"wrong","projectStatus":"archived","bootstrap":{"projects":[]},"state":null}"#
                 }
             }
-            await refresh(store, clock, helper)
+            // Past the minimum snapshot interval the read goes out at once, so its retry (500ms for a
+            // consistency failure) is still pending when the server recovers below.
+            await clock.advance(.seconds(1)); await helper.settle()
+            await store.refresh(); await helper.settle()
             XCTAssertEqual(store.connectionStatus, .connected, failure)
             XCTAssertFalse(store.showsOffline, failure)
             XCTAssertNotEqual(store.realtimeStatus, .blocked, failure)

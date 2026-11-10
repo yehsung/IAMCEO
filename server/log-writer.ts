@@ -3,6 +3,29 @@ import { basename, dirname } from "node:path";
 
 export interface LogWriterOptions { maxBytes?: number; generations?: number; maxPendingBytes?: number }
 
+/** Prefixes each non-empty line with the time the supervisor received it, so runtime warnings and
+ * stack dumps the server never formatted are also datable. State carries across chunk boundaries. */
+export function lineStamper(now: () => Date = () => new Date()): (chunk: Uint8Array) => Uint8Array {
+  let lineStart = true;
+  return (chunk) => {
+    let stamp: Buffer | undefined;
+    const parts: Uint8Array[] = [];
+    let from = 0;
+    for (let i = 0; i < chunk.length; i++) {
+      const newline = chunk[i] === 0x0a;
+      if (lineStart && !newline) {
+        stamp ??= Buffer.from(`${now().toISOString()} `);
+        parts.push(chunk.subarray(from, i), stamp);
+        from = i;
+      }
+      lineStart = newline;
+    }
+    if (!parts.length) return chunk;
+    parts.push(chunk.subarray(from));
+    return Buffer.concat(parts);
+  };
+}
+
 /** Runs in the service supervisor, separately from the HTTP/runner event loop.
  * The queue and each file are bounded in bytes. Overflow is counted, never buffered indefinitely.
  * generations includes the current file: the default disk bound is 10 MiB × 5 per stream.

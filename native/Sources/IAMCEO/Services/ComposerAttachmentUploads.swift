@@ -279,6 +279,14 @@ final class ComposerAttachmentUploads {
     }
 }
 
+/// 전송 전체 상한을 크기에 맞춘다. 고정 160초면 느린 연결에서 큰 파일은 몇 번을 다시 보내도 같은 자리에서 끊긴다.
+/// 멈춘 연결은 요청의 무응답 제한이 따로 끊는다.
+enum TransferTimeout {
+    static func resource(bytes: Int) -> TimeInterval {
+        max(160, Double(max(0, bytes)) / (64 * 1024) + 60) // 초당 64KB 는 나온다고 본다: 50MB 면 약 14분
+    }
+}
+
 /// URLSession reports bytes actually written. Redirects are always refused, including same-origin redirects.
 final class ComposerUploadTransport: NSObject, URLSessionTaskDelegate, Sendable {
     let progress: @Sendable (Double) -> Void
@@ -298,7 +306,7 @@ final class ComposerUploadTransport: NSObject, URLSessionTaskDelegate, Sendable 
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
         configuration.urlCache = nil
-        configuration.timeoutIntervalForResource = 160
+        configuration.timeoutIntervalForResource = TransferTimeout.resource(bytes: body.count)
         let session = URLSession(configuration: configuration, delegate: ComposerUploadTransport(progress: progress), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         let (data, response) = try await session.upload(for: request, from: body)

@@ -74,7 +74,7 @@ struct IAMCEOApp: App {
             #endif
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
-            lifecycle.active = phase == .active
+            lifecycle.active = ApplicationLifecycle.syncs(in: phase)
             lifecycle.apply(to: store)
         }
         #if os(macOS)
@@ -140,10 +140,19 @@ extension EnvironmentValues {
 }
 
 @MainActor @Observable
-private final class ApplicationLifecycle {
+final class ApplicationLifecycle {
     var active = false
     var sleeping = false
     var protectedDataAvailable = true
+    /// Mac은 다른 앱을 쓰는 동안에도 창이 옆에 떠 있다. 맨 앞 앱이 아니라고(.inactive) 동기화를 멈추면
+    /// 화면이 얼고 돌아올 때마다 전체를 다시 읽는다. 창이 모두 사라졌을 때(.background)와 잠자기에서만 쉰다.
+    nonisolated static func syncs(in phase: ScenePhase) -> Bool {
+        #if os(macOS)
+        phase != .background
+        #else
+        phase == .active
+        #endif
+    }
     func apply(to store: AppStore) { store.setForeground(active && !sleeping && protectedDataAvailable) }
 }
 

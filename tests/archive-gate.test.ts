@@ -1,5 +1,5 @@
 // 보관·전달·편입·연결의 경계(spec §3.1·§6). 실행기는 가짜, 저장소·전달 펌프·도구·HTTP 는 진짜다.
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -76,8 +76,9 @@ class Fake {
 }
 
 const closers: (() => Promise<void> | void)[] = [];
-afterAll(async () => {
-  for (const close of closers) await close();
+// 시험마다 닫는다. 파일 끝까지 두면 15ms 틱이 스무 개 넘게 쌓여 뒤 시험의 시간 판정을 민다.
+afterEach(async () => {
+  for (const close of closers.splice(0).reverse()) await close();
 });
 
 async function setup(opts: { timings?: Partial<OrchestratorTimings>; runnerEnabled?: boolean } = {}) {
@@ -470,20 +471,30 @@ describe("편입", () => {
 
 describe("죽은 직접 세션", () => {
   test("답을 기다리다 조용해지면 offline 으로 내려 게이트가 닫히고, 롱폴이 살아 있으면 내려가지 않는다", async () => {
-    const t = await setup({ runnerEnabled: false, timings: { manualOfflineMs: 150, manualIdleMs: 50 } });
+    // 실제 시계를 기다리지 않는다: 마지막 활동 시각을 옮기고 틱을 직접 부른다.
+    const t = await setup({ runnerEnabled: false, timings: { tickMs: 60_000, manualOfflineMs: 60_000, manualIdleMs: 30_000 } });
     const m = await t.manual();
+    const tick = () => (t.orch as unknown as { onTick(): void }).onTick();
+    const quietFor = (ms: number) => {
+      const at = new Date(Date.now() - ms).toISOString();
+      t.store.db.query("UPDATE members SET updated_at = ?, manual_activity_at = ? WHERE id = ?").run(at, at, m.member.id);
+    };
     const ask = await t.api("POST", "/agent/tool", { name: "ask", args: { title: "물음", detail: "내용" } }, m.token);
     const { wait } = (await ask.json()) as { wait: { decisionId: string } };
     await until(() => t.store.requireMember(m.member.id).status === "waiting", "대기");
-    // 살아 있는 동안
-    for (let i = 0; i < 6; i++) {
+    // 살아 있는 동안: 기준에 못 미치면 그대로고, 기준을 넘겼어도 롱폴이 다시 걸리면 시각이 새로워진다.
+    for (let i = 0; i < 3; i++) {
+      quietFor(50_000); tick();
+      expect(t.store.requireMember(m.member.id).status).toBe("waiting");
+      quietFor(61_000);
       await t.api("POST", "/agent/ask/wait", { decisionId: wait.decisionId, timeoutMs: 1 }, m.token);
-      await Bun.sleep(50);
+      tick();
       expect(t.store.requireMember(m.member.id).status).toBe("waiting");
     }
     expect(t.store.requireProject(t.project.id).connection.ok).toBe(true);
     // 죽은 뒤
-    await until(() => t.store.requireMember(m.member.id).status === "offline", "offline");
+    quietFor(61_000); tick();
+    expect(t.store.requireMember(m.member.id).status).toBe("offline");
     expect(t.store.requireProject(t.project.id).connection).toMatchObject({ ok: false, reason: "runner_off" });
     // 맥이 잠들었다 깬 것처럼 브리지가 다시 부르면 되살아난다.
     await t.api("POST", "/agent/ask/wait", { decisionId: wait.decisionId, timeoutMs: 1 }, m.token);

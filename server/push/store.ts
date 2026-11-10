@@ -11,6 +11,11 @@ import type { PatchPushDeviceRequest, PushDevice, PushEventTarget, PushEventTarg
 import { extendPushSchema } from "./schema.ts";
 
 const DAY = 86_400_000;
+/** A network error is cleared only by the next response, so new deliveries must still be queued: the next
+ * one is the recovery probe (PushWorker.available allows it). Configuration errors stay fail-closed. */
+export function providerUsable(provider: PushProviderStatus | undefined): boolean {
+  return provider?.state === "ready" || (provider?.state === "temporarily_unavailable" && provider.lastError === "network_error");
+}
 export interface PushStoreOptions {
   now?: () => number;
   /** No configured provider is the fail-closed default; no secret files are read here. */
@@ -109,7 +114,7 @@ export class PushStore implements PushReportGroupStore {
   private provider(bundleId: string, environment: PushEnvironment): PushProviderStatus | undefined {
     return this.providers().find((p) => p.environment === environment && p.bundleId === bundleId);
   }
-  private ready(row: DeviceRow): boolean { return this.provider(row.bundle_id, row.environment)?.state === "ready"; }
+  private ready(row: DeviceRow): boolean { return providerUsable(this.provider(row.bundle_id, row.environment)); }
   private eligible(row: DeviceRow, kind: PushEvent["kind"], at: string): boolean {
     return row.state === "active" && !!row.token && !!row.enabled && authorized(row.authorization) && row.expires_at > at &&
       this.ready(row) && (kind === "test" || storedPushPreferences(row.preferences)[kind]);

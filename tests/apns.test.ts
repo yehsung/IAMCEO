@@ -175,7 +175,8 @@ describe("APNs request and result contract", () => {
     expect(JSON.parse(request.body)).toEqual({ aps: { alert: { title: "IAMCEO", body: "새 결재가 도착했습니다." }, sound: "default", "thread-id": `iamceo:${n.serverId}` },
       iamceo: { v: 1, serverId: n.serverId, eventId: n.eventId, kind: "decision", target: { screen: "inbox", projectId: "p_1", decisionId: "d_1" } } });
     for (const secret of ["canary", n.deviceToken, "PRIVATE KEY", f.path, f.entry.teamId, f.entry.keyId]) expect(request.body).not.toContain(secret);
-    expect(request.timeoutMs).toBe(10_000);
+    // 워커의 10초 감시보다 짧아야 '보내지 못함'이 '모름'으로 기록되지 않는다.
+    expect(request.timeoutMs).toBe(8_000);
   });
   test("all four kinds plus test have fixed text, valid targets and TTL", async () => {
     const f = fixture(); const transport = new FakeTransport(); const sender = client(f.config, transport);
@@ -381,13 +382,13 @@ async function tlsPeer(handler: (stream: ServerHttp2Stream, headers: IncomingHtt
   const port = (server.address() as { port: number }).port;
   cleanups.push(async () => { for (const socket of sockets) socket.destroy(); for (const session of sessions) session.destroy(); await new Promise<void>((resolve) => server.close(() => resolve())); });
   const origins: string[] = [];
-  function transport(trust = true, servername = "localhost") {
+  function transport(trust = true, servername = "localhost", now?: () => number) {
     const result = new HTTP2APNsTransport((origin, options) => {
       origins.push(origin);
       expect(options.rejectUnauthorized).toBe(true); expect(options.ALPNProtocols).toEqual(["h2"]);
       expect(options.servername).toBe(new URL(origin).hostname);
       return connect(`https://127.0.0.1:${port}`, { ...options, servername, ...(trust ? { ca: cert } : {}) });
-    });
+    }, now);
     cleanups.push(() => result.close());
     return result;
   }
@@ -442,6 +443,59 @@ describe("TLS HTTP/2 peer (loopback port0, per-connection CA)", () => {
     expect(requests).toBe(1);
     const lost = await tlsPeer((stream) => { stream.resume(); stream.on("end", () => stream.session?.destroy()); });
     expect((await client(lost.config, lost.transport(), undefined, 1000).send(notification())).state).toBe("unknown");
+  });
+  test("a request that timed out retires its session: the next send opens a new connection", async () => {
+    let requests = 0;
+    const f = await tlsPeer((stream) => {
+      stream.resume();
+      if (++requests > 1) stream.on("end", () => { stream.respond({ ":status": 200 }); stream.end(); });
+    });
+    const sender = client(f.config, f.transport(), undefined, 150);
+    expect(await sender.send(notification())).toEqual({ state: "unknown", reason: "timeout" });
+    expect((await sender.send(notification())).state).toBe("accepted");
+    expect(f.origins).toHaveLength(2);
+  });
+  test("an idle session answers PING and is reused; a session that never answers is replaced before any HEADERS", async () => {
+    let now = 1_800_000_000_000;
+    const f = await tlsPeer((stream) => { stream.resume(); stream.on("end", () => { stream.respond({ ":status": 200 }); stream.end(); }); });
+    const sender = client(f.config, f.transport(true, "localhost", () => now));
+    expect((await sender.send(notification())).state).toBe("accepted");
+    now += 31_000;
+    expect((await sender.send(notification())).state).toBe("accepted");
+    expect(f.origins).toHaveLength(1);
+
+    const sessions: { requests: number; pings: number; destroyed: boolean }[] = [];
+    const transport = new HTTP2APNsTransport(() => {
+      const record = { requests: 0, pings: 0, destroyed: false }; sessions.push(record);
+      const first = sessions.length === 1;
+      const session = Object.assign(new EventEmitter(), { connecting: false, alpnProtocol: "h2", closed: false, destroyed: false,
+        // 첫 연결은 쉬는 동안 조용히 죽는다: PING 에 답이 없다.
+        ping(callback: (error: Error | null) => void) { record.pings++; if (!first || record.requests === 0) queueMicrotask(() => callback(null)); return true; },
+        request() {
+          record.requests++;
+          const stream = Object.assign(new EventEmitter(), { id: 1, rstCode: 0, closed: false,
+            end() { queueMicrotask(() => { stream.emit("response", { ":status": 200 }); stream.emit("end"); }); },
+            close() { stream.closed = true; stream.emit("close"); } });
+          return stream;
+        },
+        close() { session.closed = true; session.emit("close"); },
+        destroy() { record.destroyed = true; session.destroyed = true; session.emit("close"); },
+      });
+      return session as unknown as ClientHttp2Session;
+    }, () => now, { probeTimeoutMs: 20 });
+    cleanups.push(() => transport.close());
+    const fake = client(f.config, transport, () => now);
+    expect((await fake.send(notification())).state).toBe("accepted");
+    now += 29_999;
+    expect((await fake.send(notification())).state).toBe("accepted");
+    expect(sessions).toHaveLength(1); expect(sessions[0]!.pings).toBe(0);
+    now += 30_000;
+    // 죽은 연결에는 요청을 싣지 않는다. 결과가 '모름'이 아니라 새 연결에서의 접수다.
+    expect(await fake.send(notification())).toEqual({ state: "accepted", reason: "accepted", status: 200 });
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]).toEqual({ requests: 2, pings: 1, destroyed: true });
+    expect(sessions[1]).toEqual({ requests: 1, pings: 0, destroyed: false });
+    expect(fake.status()[0].state).toBe("ready");
   });
   test("wire GOAWAY: Bun 1.3.14 loses peer lastStreamID, so ambiguous requests stay unknown", async () => {
     for (const processed of [false, true]) {

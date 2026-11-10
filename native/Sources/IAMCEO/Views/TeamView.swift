@@ -1795,6 +1795,10 @@ struct ActivityList: View {
         }
     }
 
+    static func same(_ a: [Activity], _ b: [Activity]) -> Bool {
+        a.count == b.count && zip(a, b).allSatisfy { $0.id == $1.id && $0.at == $1.at && $0.kind == $1.kind && $0.text == $1.text && $0.memberId == $1.memberId }
+    }
+
     private func load(_ id: String) async {
         guard !store.isDemo else { return }
         guard let api = store.api else { return }
@@ -1806,7 +1810,9 @@ struct ActivityList: View {
         do {
             let result = try await api.activity(memberID: id)
             guard request == mine, shownFor == id, !Task.isCancelled else { return }
-            items = result.sorted { $0.id > $1.id }
+            let sorted = result.sorted { $0.id > $1.id }
+            // 3초마다 같은 목록을 통째로 바꿔 다시 그리지 않는다.
+            if !Self.same(items, sorted) { items = sorted }
             error = nil
             loaded = true
         } catch {

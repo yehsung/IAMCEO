@@ -42,6 +42,8 @@ actor APIClient {
     let endpoint: ServerEndpoint
     private let accessCode: String
     private let session: URLSession
+    /// 직접 만든 세션만 정리한다. 주입받은 세션의 수명은 넘겨준 쪽 것이다.
+    private let ownsSession: Bool
     // Enable only after T8 switches every file reader to fileBody(id:).
     let liteStateEnabled: Bool
     private var fileBodyCache: [String: FileDoc] = [:]
@@ -50,6 +52,7 @@ actor APIClient {
         self.endpoint = endpoint
         self.accessCode = accessCode
         self.liteStateEnabled = liteStateEnabled
+        ownsSession = session == nil
         if let session { self.session = session }
         else {
             let config = URLSessionConfiguration.ephemeral
@@ -59,6 +62,8 @@ actor APIClient {
             self.session = URLSession(configuration: config, delegate: OriginRedirectDelegate(), delegateQueue: nil)
         }
     }
+    // 무효화하지 않은 URLSession은 delegate와 유휴 연결을 앱이 꺼질 때까지 붙잡는다.
+    deinit { if ownsSession { session.finishTasksAndInvalidate() } }
 
     func acknowledgePairing(code: String, confirmationToken: String) async throws -> PairingCompletion {
         struct Acknowledgement: Encodable, Sendable { let code: String; let confirmationToken: String }

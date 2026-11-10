@@ -11,6 +11,8 @@ import { fileSearchMigration, refreshFileSearchIndex, scheduleFileSearchBackfill
 import type { FileSearchResult } from "../shared/types.ts";
 
 const cleanups: (() => void | Promise<void>)[] = [];
+// 벽시계 상한은 기준 장비에서만 판정한다(bun run test:perf). 평소에는 수치만 남기고 결정적 단언만 본다.
+const strictPerf = process.env.IAMCEO_PERF_STRICT === "1";
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 function fixture(disk = false) {
@@ -402,15 +404,17 @@ test("v31 startup defers 2,000 HTML bodies and yields between bounded backfill b
   const firstSearch = performance.now() - beforeSearch;
   const left = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM file_search_pending").get()!.n;
   expect(left).toBeGreaterThan(1900);
-  expect(opened).toBeLessThan(3000);
-  expect(listening).toBeLessThan(3000);
-  const deadline = performance.now() + 10_000;
+  if (strictPerf) {
+    expect(opened).toBeLessThan(3000);
+    expect(listening).toBeLessThan(3000);
+  }
+  const deadline = performance.now() + 60_000;
   let yields = 0;
   while (db.query("SELECT 1 FROM file_search_pending LIMIT 1").get() && performance.now() < deadline) { await Bun.sleep(10); yields++; }
   expect(db.query("SELECT COUNT(*) AS n FROM file_search_pending").get()).toEqual({ n: 0 });
   expect(yields).toBeGreaterThan(1);
   console.info(JSON.stringify({ scenario: "v31 HTML deferred backfill", files: 2000, htmlCharacters: html.length, openDbMs: opened, listeningMs: listening, healthMs: health, firstSearchMs: firstSearch, pendingAfterSearch: left, backfillMs: performance.now() - started, yields }));
-}, 20_000);
+}, 90_000);
 
 test("performance: 2,000 files including text bodies, store and authenticated HTTP latency", async () => {
   const { store, project, bus, dir, add } = fixture(true);
@@ -441,5 +445,5 @@ test("performance: 2,000 files including text bodies, store and authenticated HT
   console.info(JSON.stringify({ files: 2000, bodyCharacters: body.length, bodyBytes: Buffer.byteLength(body), query: "결제 실패", limit: 50, firstMs: first,
     storeMedianMs: times[15], storeP95Ms: times[28], httpMedianMs: http[15], httpP95Ms: http[28], httpMaxMs: http[29] }));
   // Loose regression ceiling: report observed latency instead of a flaky 50 ms CI assertion.
-  expect(times[28]).toBeLessThan(250);
-});
+  if (strictPerf) expect(times[28]).toBeLessThan(250);
+}, 60_000);

@@ -1,5 +1,5 @@
 // 검수에서 확인한 결함의 회귀 시험. 실행기는 가짜, 저장소·전달 펌프·도구·HTTP 는 진짜다.
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -115,8 +115,9 @@ class FakeRunner implements Runner {
 }
 
 const closers: (() => Promise<void> | void)[] = [];
-afterAll(async () => {
-  for (const close of closers) await close();
+// 시험마다 닫는다. 파일 끝까지 두면 틱·서버·DB 가 쌓여 뒤 시험의 시간 판정을 민다.
+afterEach(async () => {
+  for (const close of closers.splice(0).reverse()) await close();
 });
 
 async function setup(opts: { timings?: Partial<OrchestratorTimings>; runnerEnabled?: boolean; notifier?: (t: string, b: string) => void; kind?: Backend; serve?: boolean; second?: FakeRunner } = {}) {
@@ -697,15 +698,27 @@ describe("직접 띄운 CLI", () => {
   });
 
   test("상태: 도구 호출이면 일하는 중, wait 면 대기, 오래 조용하면 안 보임. 화면에서 뺄 수 있다", async () => {
-    const t = await setup({ serve: true, timings: { tickMs: 15, manualIdleMs: 40, manualOfflineMs: 120 } });
+    // 실제 시계를 기다리지 않는다: 마지막 활동 시각을 옮기고 틱을 직접 부른다.
+    const t = await setup({ serve: true, timings: { tickMs: 60_000, manualIdleMs: 30_000, manualOfflineMs: 60_000 } });
     await t.orch.recover();
     const { member, token } = await joined(t);
+    const tick = () => (t.orch as unknown as { onTick(): void }).onTick();
+    const quietFor = (ms: number) => {
+      const at = new Date(Date.now() - ms).toISOString();
+      t.store.db.query("UPDATE members SET updated_at = ?, manual_activity_at = ? WHERE id = ?").run(at, at, member.id);
+    };
     await tool(t, token, "status", { now: "빌드" });
     expect(t.store.requireMember(member.id).status).toBe("working");
-    await until(() => t.store.requireMember(member.id).status === "offline", "안 보임");
-    const waiting = tool(t, token, "wait", { timeout_sec: 1 });
-    await Bun.sleep(20);
+    quietFor(29_000); tick();
+    expect(t.store.requireMember(member.id).status).toBe("working");
+    quietFor(31_000); tick();
     expect(t.store.requireMember(member.id).status).toBe("idle");
+    quietFor(59_000); tick();
+    expect(t.store.requireMember(member.id).status).toBe("idle");
+    quietFor(61_000); tick();
+    expect(t.store.requireMember(member.id).status).toBe("offline");
+    const waiting = tool(t, token, "wait", { timeout_sec: 1 });
+    await until(() => t.store.requireMember(member.id).status === "idle", "wait 면 대기");
     await waiting;
     const res = await fetch(`${t.base}/api/members/${member.id}/close`, { method: "POST", headers: { Authorization: "Bearer code" } });
     expect(res.status).toBe(200);

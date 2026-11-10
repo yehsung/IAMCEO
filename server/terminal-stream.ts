@@ -11,6 +11,10 @@ export interface TerminalSocketData { kind: "terminal"; authGeneration: number; 
 export interface RealtimeSocketData { kind: "realtime"; authGeneration: number; protocol: 1 | 2 }
 export type SocketData = TerminalSocketData | RealtimeSocketData;
 const MAX_BUFFER = 4 * 1024 * 1024;
+export interface TerminalStreamsOptions {
+  /** How long a dropped control socket may reattach with its lease before the server releases it. */
+  orphanLeaseMs?: number;
+}
 
 export function terminalSize(cols: unknown, rows: unknown): { cols: number; rows: number } {
   const integer = (raw: unknown, fallback: number) => {
@@ -31,6 +35,9 @@ export class TerminalStreams {
   private readonly unsubscribeLease?: () => void;
   private stopped = false;
   private readonly restores = new Map<string, { paneId: string; cols: number; rows: number }>();
+  private readonly orphans = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly orphanLeaseMs: number;
+  private lastTick = performance.now();
   async restore(memberId: string): Promise<void> {
     const target = this.restores.get(memberId);
     if (!target) return;
@@ -60,9 +67,49 @@ export class TerminalStreams {
     } else if (stream.restoreSize) this.restores.set(stream.memberId, { paneId: stream.paneId, ...stream.restoreSize });
     // Only a live control attach can create a restore target. Await detach first;
     // terminal disappearance or the bounded check ends the delivery fence.
+    // A crashed app or a lost network never sends the HTTP release. Without this the lease
+    // fences this member's deliveries until its five-minute expiry.
+    if (reason !== "replaced" && reason !== "lease_ended" && reason !== "terminal_gone" && stream.leaseId && !this.stopped) {
+      let seenExpiresAt: number | undefined;
+      try { seenExpiresAt = this.orch.terminalStreamLease?.(stream.memberId)?.expiresAt; } catch { /* checked again when due */ }
+      this.watchOrphan(stream.memberId, stream.leaseId, seenExpiresAt);
+    }
   }
-  constructor(readonly config: Config, readonly store: Store, readonly orch: OrchestratorApi) {
-    this.timer = setInterval(() => { for (const stream of this.streams) stream.check(); }, 1000);
+  private watchOrphan(memberId: string, leaseId: string, seenExpiresAt: number | undefined, attempt = 0): void {
+    clearTimeout(this.orphans.get(memberId));
+    const timer = setTimeout(() => {
+      this.orphans.delete(memberId);
+      void this.releaseOrphanLease(memberId, leaseId, seenExpiresAt).then(outcome => {
+        // Release is refused while a session operation runs. Try a few more times before the expiry does it.
+        if (outcome === "retry" && attempt < 5 && !this.stopped && !this.orphans.has(memberId)) this.watchOrphan(memberId, leaseId, seenExpiresAt, attempt + 1);
+      });
+    }, attempt === 0 ? this.orphanLeaseMs : Math.min(this.orphanLeaseMs, 5_000));
+    timer.unref();
+    this.orphans.set(memberId, timer);
+  }
+  /** Releases a lease whose control socket never came back. A reattached or otherwise renewed lease is left alone. */
+  async releaseOrphanLease(memberId: string, leaseId: string, seenExpiresAt?: number): Promise<"released" | "kept" | "retry"> {
+    if (this.stopped) return "kept";
+    if ([...this.streams].some(s => s.memberId === memberId && s.mode === "control" && s.leaseId === leaseId && !s.closed)) return "kept";
+    let lease: ReturnType<NonNullable<OrchestratorApi["terminalStreamLease"]>>;
+    try { lease = this.orch.terminalStreamLease?.(memberId) ?? null; } catch { return "retry"; }
+    if (!lease || lease.leaseId !== leaseId) return "kept";
+    // Renewed since the socket dropped: the holder is alive on another path (HTTP input).
+    if (seenExpiresAt !== undefined && lease.expiresAt > seenExpiresAt) return "kept";
+    if (!this.orch.terminalControl) return "kept";
+    try { await this.orch.terminalControl(memberId, { action: "release", leaseId }); }
+    catch { return "retry"; }
+    try { this.store.appendActivity(memberId, "system", "터미널 연결이 끊겨 직접 조작을 자동으로 끝냈습니다"); } catch { /* member may have been removed */ }
+    return "released";
+  }
+  constructor(readonly config: Config, readonly store: Store, readonly orch: OrchestratorApi, options: TerminalStreamsOptions = {}) {
+    this.orphanLeaseMs = Math.max(1, options.orphanLeaseMs ?? 20_000);
+    this.timer = setInterval(() => {
+      // While the loop was blocked no ping could leave and no pong could be read.
+      const now = performance.now(), stalled = now - this.lastTick > 3000;
+      this.lastTick = now;
+      for (const stream of this.streams) stream.check(stalled);
+    }, 1000);
     this.timer.unref();
     if ("onTerminalStreamShutdown" in orch) this.unsubscribe = orch.onTerminalStreamShutdown?.(() => this.close());
     if ("onTerminalLeaseEnded" in orch) this.unsubscribeLease = orch.onTerminalLeaseEnded?.(async (memberId, leaseId) => {
@@ -109,6 +156,8 @@ export class TerminalStreams {
   async close(): Promise<void> {
     this.stopped = true;
     clearInterval(this.timer);
+    for (const timer of this.orphans.values()) clearTimeout(timer);
+    this.orphans.clear();
     this.unsubscribe?.();
     this.unsubscribeLease?.();
     await Promise.all([...this.streams].map(s => s.close("terminal_gone")));
@@ -131,13 +180,15 @@ export class TerminalStream {
   private queuedInput: Uint8Array[] = [];
   private inputScheduled = false;
   private sizeCheck = false;
+  private sizeFailures = 0;
   restoreSize?: { cols: number; rows: number };
   private lastSizeCheck = 0;
   private lastPong = Date.now();
   private lastPing = Date.now();
   constructor(private readonly owner: TerminalStreams, readonly memberId: string, readonly paneId: string,
-    readonly mode: TerminalMode, public size: { cols: number; rows: number }, private readonly leaseId: string | null,
+    readonly mode: TerminalMode, public size: { cols: number; rows: number }, readonly leaseId: string | null,
     readonly sizePolicy: TerminalSizePolicy = "fit") {}
+  get closed(): boolean { return this.ended; }
 
   requireLease(force = false): void {
     if (this.ended) throw new LeaseEnded();
@@ -236,25 +287,34 @@ export class TerminalStream {
     this.sizeCheck = true;
     try {
       const size = await this.owner.orch.terminalStreamInfo!(this.memberId);
+      this.sizeFailures = 0;
       if (!this.ended && (size.cols !== this.size.cols || size.rows !== this.size.rows)) {
         this.size = size;
         if (this.mode === "control") this.resizePTY();
         if (this.ready) this.sendText({ type: "resize", ...size });
       }
-    } catch (error) { this.fail(error); }
+    } catch (error) {
+      // One failed size check (a slow core call, a brief session operation) must not drop a healthy
+      // screen and its scrollback. Only a gone terminal or about ten seconds of failures closes it.
+      if ((error instanceof ApiError && error.code === "TERMINAL_GONE") || ++this.sizeFailures >= 5) this.fail(error);
+    }
     finally { this.sizeCheck = false; }
   }
-  check(): void {
+  check(stalled = false): void {
     if (this.ended) return;
     try { this.requireLease(true); } catch (error) { this.fail(error); return; }
     if (this.ws) {
       const now = Date.now();
+      // A blocked event loop is not client silence: give the peer one ping interval after it resumes.
+      if (stalled) this.lastPong = Math.max(this.lastPong, now - 15_000);
       if (now - this.lastPong >= 30_000) { void this.close("timeout"); return; }
       if (now - this.lastPing >= 15_000) { this.lastPing = now; this.ws.ping(); }
       if (this.ws.getBufferedAmount() > MAX_BUFFER) void this.close("slow_client");
     }
     if (this.started && Date.now() - this.lastSizeCheck >= 2000) {
       this.lastSizeCheck = Date.now();
+      // This attach shows the old terminal once the member moved to another one. Control is covered by its lease identity.
+      if (this.mode === "observe" && this.owner.store.getMember(this.memberId)?.paneId !== this.paneId) { void this.close("terminal_gone"); return; }
       void this.refreshSize();
     }
   }

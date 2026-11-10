@@ -187,6 +187,8 @@ describe("service", () => {
     expect(plist).toContain("/opt/homebrew/bin");
     expect(plist).toContain("/Users/u/.local/bin");
     expect(plist).toContain("<key>StandardOutPath</key>\n  <string>/dev/null</string>");
+    // 등급을 비우면 launchd 가 서버를 낮은 우선순위로 돌린다.
+    expect(plist).toContain("<key>ProcessType</key>\n  <string>Interactive</string>");
     expect(plist).toContain("/a&amp;b/iamceo.ts");
     expect(plist).toContain("/x&lt;y");
     const file = join(newHome(), "t.plist");
@@ -548,11 +550,13 @@ describe("운영 CLI readiness·등록·복원", () => {
     expect(calls).toEqual(["print", "readiness"]);
     calls.length = 0;
     await service(["install", "--restart"], dependencies);
-    expect(calls).toEqual(["print", "bootout", "bootstrap", "readiness"]);
+    // bootout 뒤에는 서비스가 다 내려갔는지 print 로 확인하고 올린다.
+    expect(calls).toEqual(["print", "bootout", "print", "bootstrap", "readiness"]);
     expect(readFileSync(join(home, "Library/LaunchAgents/com.iamceo.server.plist"), "utf8")).toContain("service-run");
     calls.length = 0; fail = true;
     await expect(service(["install", "--restart"], dependencies)).rejects.toThrow("등록 실패");
-    expect(calls).toEqual(["print", "bootout", "bootstrap"]);
+    // 마지막 print 는 실패 안내에 서비스가 내려가 있는지 적기 위한 확인이다.
+    expect(calls).toEqual(["print", "bootout", "print", "bootstrap", "print"]);
   });
 
   test("백업/별도 경로 복원을 CLI로 실행하며 복원본의 발신은 격리되고 사용 중 홈은 거부한다", async () => {

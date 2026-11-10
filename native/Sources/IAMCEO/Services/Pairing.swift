@@ -108,10 +108,12 @@ enum Tailnet {
 }
 
 enum PairingClient {
+    /// 서버 루프가 십수 초 막혀도 기다린다. 먼저 포기하면 서버가 뒤늦게 코드를 소비해 QR을 다시 만들어야 한다. 코드 수명(5분) 안이다.
+    static let claimTimeout: TimeInterval = 30
     /// Trades the one-time code for the access code, trying each address in the QR. Returns the origin that answered.
     static func claim(_ link: PairingLink, device: String, session: URLSession? = nil) async throws -> (endpoint: String, accessCode: String, confirmationToken: String?) {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 8
+        config.timeoutIntervalForRequest = claimTimeout
         config.httpShouldSetCookies = false
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
@@ -122,7 +124,7 @@ enum PairingClient {
         for base in link.urls {
             var request = URLRequest(url: base.appendingPathComponent("pair/claim"))
             request.httpMethod = "POST"
-            request.timeoutInterval = 8
+            request.timeoutInterval = claimTimeout
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONEncoder().encode(PairClaimRequest(code: link.code, device: device))
             do {

@@ -629,7 +629,8 @@ describe("serialized observations and generation protection", () => {
     const runner = f.runner(10000), events: RunnerEvent[] = []; runner.on(e => events.push(e)); await runner.reattachOwned(member({ sessionId: started.sessionId, paneId: started.paneId }));
     terminal.status = { state: "idle" }; await runner.screen(member()); expect(events.filter(e => e.type === "turn_end")).toHaveLength(1);
     expect(events.some(e => e.type === "status" && e.status === "idle")).toBe(false); expect(runner.observationState(member().id)?.lastError).toBe("quota exhausted");
-    terminal.status = null; await runner.screen(member()); expect(events.findLast(e => e.type === "status")).toMatchObject({ status: "blocked", blockedReason: "status_unknown" });
+    // 입력칸이 보이는 채 보고만 사라진 끝난 턴은 이제 쉬는 중으로 읽는다(stab-srv-runner-core). 입력칸이 안 보이는 화면은 그대로 막는다.
+    f.setScreen("An unrecognized dialog"); terminal.status = null; await runner.screen(member()); expect(events.findLast(e => e.type === "status")).toMatchObject({ status: "blocked", blockedReason: "status_unknown" });
   });
   test("read-only reattach refuses generation conflicts and duplicate owners without run/kill", async () => {
     const f = await fixture(), runner = f.runner(10000); const started = await runner.start(member(), f.opts); f.calls.length = 0;

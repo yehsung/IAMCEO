@@ -69,6 +69,10 @@ extension View {
     private var transaction: UUID?
     private var deferredMutation: (() -> Void)?
     private var settling: Task<Void, Never>?
+    /// 높이가 안 바뀌는 갱신은 프레임 보고가 다시 오지 않는다. 그때 보존 상태를 스스로 끝내는 감시.
+    @ObservationIgnored private var restorationWatch: Task<Void, Never>?
+    /// 감시 간격. 시험에서 줄인다.
+    @ObservationIgnored var restorationTimeout: Duration = .milliseconds(300)
     private var probeID: UUID?
     #if os(macOS)
     private weak var host: NSScrollView?
@@ -139,6 +143,7 @@ extension View {
     /// Also used by the explicit "맨 아래로" action and scope changes; no old response can restore afterwards.
     func cancelPreservation() {
         settling?.cancel(); settling = nil; deferredMutation = nil; target = nil
+        restorationWatch?.cancel(); restorationWatch = nil
         transaction = nil; isPreservingPosition = false; lastRestorationError = nil
     }
 
@@ -163,11 +168,36 @@ extension View {
         target = visibleAnchor; deferredMutation = nil
         var transaction = Transaction(); transaction.disablesAnimations = true
         withTransaction(transaction) { mutation() }
+        watchRestoration()
     }
 
     private func finishRestoration() {
         target = nil; transaction = nil; isPreservingPosition = false
         settling?.cancel(); settling = nil
+        restorationWatch?.cancel(); restorationWatch = nil
+    }
+
+    /// 전달 상태 글자만 바뀌는 갱신처럼 어떤 행의 높이도 안 바뀌면 observe 가 다시 불리지 않아 보존 상태가
+    /// 영영 안 풀리고, 그동안 이후 갱신이 전부 대기열에만 쌓인다. 잠시 뒤에도 그대로면 지금 프레임으로 끝낸다.
+    private func watchRestoration() {
+        restorationWatch?.cancel()
+        guard let token = transaction, isPreservingPosition else { restorationWatch = nil; return }
+        let timeout = restorationTimeout
+        restorationWatch = Task { [weak self] in
+            for _ in 0..<4 {
+                do { try await Task.sleep(for: timeout) } catch { return }
+                guard let self, self.transaction == token, self.deferredMutation == nil else { return }
+                // 새 제스처가 화면을 잡았으면 되돌리지 않는다.
+                if self.isInteracting { break }
+                self.observe(frames: self.frames, scope: self.scope)
+                guard self.transaction == token else { return }
+                // 기준 행이 화면에서 사라졌으면 맞출 자리가 없다.
+                guard let target = self.target, self.frames[target.messageID] != nil else { break }
+            }
+            guard let self, self.transaction == token else { return }
+            self.restorationWatch = nil
+            self.cancelPreservation()
+        }
     }
 
     private func waitForSettling() {
@@ -223,7 +253,33 @@ extension View {
 
     #if os(macOS)
     private var macLiveScrolling = false
+    /// willStart/didEnd 로 감싸진 스크롤(트랙패드 제스처, 스크롤바) 안인지.
+    @ObservationIgnored private var macBracketedScroll = false
+    /// 휠 마우스·키보드 스크롤은 didLiveScroll 만 온다. 마지막 알림 뒤 이만큼 조용하면 끝난 것으로 본다.
+    @ObservationIgnored var looseScrollQuiet: Duration = .milliseconds(200)
+    @ObservationIgnored private var looseScrollEnd: Task<Void, Never>?
     private let notifications = ChatScrollNotifications()
+
+    private func endLooseScroll() {
+        looseScrollEnd?.cancel(); looseScrollEnd = nil
+    }
+
+    /// 감싸지지 않은 사용자 스크롤. 이것을 상호작용으로 보지 않으면 위치 보정이 사용자의 스크롤을 되돌린다.
+    private func looseScrolled() {
+        guard !macBracketedScroll else { return }
+        if !macLiveScrolling {
+            macLiveScrolling = true
+            if isPreservingPosition && deferredMutation == nil { cancelPreservation() }
+        }
+        looseScrollEnd?.cancel()
+        let quiet = looseScrollQuiet
+        looseScrollEnd = Task { [weak self] in
+            do { try await Task.sleep(for: quiet) } catch { return }
+            guard let self, !self.macBracketedScroll else { return }
+            self.looseScrollEnd = nil
+            self.macLiveScrolling = false
+        }
+    }
 
     func attach(_ host: NSScrollView?, probeID: UUID, scope: String) {
         guard scope == self.scope else { return }
@@ -234,16 +290,27 @@ extension View {
         notifications.tokens.append(NotificationCenter.default.addObserver(forName: NSScrollView.willStartLiveScrollNotification, object: host, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                self.endLooseScroll()
+                self.macBracketedScroll = true
                 self.macLiveScrolling = true
                 if self.isPreservingPosition && self.deferredMutation == nil { self.cancelPreservation() }
             }
         })
+        notifications.tokens.append(NotificationCenter.default.addObserver(forName: NSScrollView.didLiveScrollNotification, object: host, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.looseScrolled() }
+        })
         notifications.tokens.append(NotificationCenter.default.addObserver(forName: NSScrollView.didEndLiveScrollNotification, object: host, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.macLiveScrolling = false }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.endLooseScroll()
+                self.macBracketedScroll = false
+                self.macLiveScrolling = false
+            }
         })
     }
     private func removeObservers() {
         notifications.removeAll()
+        endLooseScroll(); macBracketedScroll = false
     }
     #else
     func attach(_ host: UIScrollView?, probeID: UUID, scope: String) {
@@ -256,7 +323,7 @@ extension View {
         guard self.probeID == probeID else { return }
         cancelPreservation(); host = nil; hostFound = false; self.probeID = nil
         #if os(macOS)
-        removeObservers()
+        removeObservers(); macLiveScrolling = false
         #endif
     }
 }

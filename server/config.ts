@@ -21,6 +21,8 @@ export interface ConfigFile {
   coreBin?: string;
   coreSocket?: string;
   herdrSocket?: string;
+  /** false 면 서버가 Mac 의 유휴 잠자기를 막지 않는다. 없으면 막는다. */
+  keepAwake?: boolean;
 }
 
 export interface Config {
@@ -42,6 +44,8 @@ export interface Config {
   coreBin?: string;
   coreSocket?: string;
   herdrSocket: string;
+  /** 서버가 떠 있는 동안 Mac 의 유휴 잠자기를 막는다. config.json 에서 false 로만 끈다. */
+  keepAwake?: boolean;
 }
 
 // 폰에서 손으로 칠 수 있게 헷갈리는 글자(0 O 1 l I)를 뺀다.
@@ -92,6 +96,7 @@ function validateConfig(value: unknown, path: string): Partial<ConfigFile> {
   if (file.hosts !== undefined && (!Array.isArray(file.hosts) || file.hosts.some((host) => typeof host !== "string" || !host || host.includes("\0")))) {
     throw new Error(`설정 파일 hosts가 잘못되었습니다: ${path}`);
   }
+  if (file.keepAwake !== undefined && typeof file.keepAwake !== "boolean") throw new Error(`설정 파일 필드가 잘못되었습니다(keepAwake): ${path}`);
   return file as Partial<ConfigFile>;
 }
 
@@ -258,5 +263,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     coreSocket: env.IAMCEO_CORE_SOCKET || file.coreSocket || join(home, "run", "core.sock"),
     // $HERDR_SOCKET_PATH 는 일부러 보지 않는다: 라이브 세션 서버를 건드리면 안 된다(spec §5).
     herdrSocket: env.IAMCEO_HERDR_SOCKET || file.herdrSocket || join(homedir(), ".config", "herdr", "herdr.sock"),
+    ...(file.keepAwake === false ? { keepAwake: false } : {}),
   };
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import Observation
 
 // Shared building blocks. Screens must compose these instead of inventing new card styles.
 //
@@ -20,6 +21,16 @@ import SwiftUI
 // ContextMeter(pct:)                              tiny bar + "문맥 n%"
 // MarkdownText(text:size:)                        the web board's markdown: tables, quotes, lists, code
 // relativeTime(_ iso:) / clockTime(_ iso:)        "방금", "3분 전", "14:20", "어제 14:20", "11월 4일"
+
+private struct TabVisibleKey: EnvironmentKey { static let defaultValue = true }
+extension EnvironmentValues {
+    /// Mac은 방문한 탭을 투명하게 계속 올려 둔다(onDisappear가 오지 않는다). 지금 보이는 탭에서만 true.
+    /// 반복 애니메이션과 주기 갱신은 이 값이 false인 동안 멈춘다.
+    var ceTabVisible: Bool {
+        get { self[TabVisibleKey.self] }
+        set { self[TabVisibleKey.self] = newValue }
+    }
+}
 
 private struct InsideGlassKey: EnvironmentKey { static let defaultValue = false }
 extension EnvironmentValues {
@@ -327,7 +338,7 @@ struct StatusDot: View {
     var pulsing = false
     var size: CGFloat = 8
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var expanded = false
+    @Environment(\.ceTabVisible) private var tabVisible
     var body: some View {
         Group {
             if tone == .dim {
@@ -338,14 +349,30 @@ struct StatusDot: View {
             }
         }
         .background {
-            if pulsing && !reduceMotion {
-                Circle().fill(tone.color.opacity(0.45)).frame(width: size, height: size)
-                    .scaleEffect(expanded ? 2.4 : 1).opacity(expanded ? 0 : 0.9)
-                    .animation(.easeOut(duration: 1.8).repeatForever(autoreverses: false), value: expanded)
+            // 숨은 탭에서는 맥동을 그리지 않는다(반복 애니메이션이 화면 주사율로 계속 돈다).
+            if StatusDot.pulses(pulsing: pulsing, reduceMotion: reduceMotion, tabVisible: tabVisible) {
+                StatusPulse(color: tone.color, size: size)
             }
         }
-        .onAppear { if pulsing { expanded = true } }
         .accessibilityHidden(true)
+    }
+
+    static func pulses(pulsing: Bool, reduceMotion: Bool, tabVisible: Bool) -> Bool {
+        pulsing && !reduceMotion && tabVisible
+    }
+}
+
+/// 맥동 원. 나타날 때마다 자기 상태로 애니메이션을 새로 시작하므로, 나중에 일하기 시작한 직원의 점이나
+/// 다시 보이게 된 탭의 점도 맥동한다.
+private struct StatusPulse: View {
+    let color: Color
+    let size: CGFloat
+    @State private var expanded = false
+    var body: some View {
+        Circle().fill(color.opacity(0.45)).frame(width: size, height: size)
+            .scaleEffect(expanded ? 2.4 : 1).opacity(expanded ? 0 : 0.9)
+            .animation(.easeOut(duration: 1.8).repeatForever(autoreverses: false), value: expanded)
+            .onAppear { expanded = true }
     }
 }
 
@@ -1222,23 +1249,75 @@ private struct MarkdownTableLayout: Layout {
 
 // MARK: - Time
 
+/// 조용한 화면(이벤트가 없어 스냅샷이 적용되지 않는 동안)에서도 '방금 · n분 전 · n시간째 기다림'이 맞게 보이도록
+/// 1분마다 올라가는 값. 본문에서 읽기만 하면 그 화면이 1분마다 다시 그려진다. 상태는 건드리지 않는다.
+@MainActor @Observable final class MinuteClock {
+    static let shared = MinuteClock()
+    private(set) var minute = 0
+    @ObservationIgnored private var task: Task<Void, Never>?
+    private init() {
+        task = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(60)) } catch { return }
+                self?.minute &+= 1
+            }
+        }
+    }
+}
+
+/// 날짜 문자열 파싱과 포매터 생성은 건당 수십~수백 µs라, 화면을 그릴 때마다 되풀이하지 않게 결과를 기억한다.
+/// 뷰 본문과 백그라운드 양쪽에서 불리므로 잠금으로 보호한다. 결과는 기억하지 않을 때와 같다.
+final class ISODateCache: @unchecked Sendable {
+    static let shared = ISODateCache()
+    private let lock = NSLock()
+    private let limit: Int
+    private let fractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private let plain = ISO8601DateFormatter()
+    private var dates: [String: Date?] = [:]
+    private var formatters: [String: DateFormatter] = [:]
+    /// 실제로 파싱한 횟수(시험용).
+    private(set) var parses = 0
+
+    init(limit: Int = 4096) { self.limit = max(1, limit) }
+
+    func date(_ value: String) -> Date? {
+        lock.lock(); defer { lock.unlock() }
+        if let known = dates[value] { return known }
+        parses += 1
+        let date = fractional.date(from: value) ?? plain.date(from: value)
+        if dates.count >= limit { dates.removeAll(keepingCapacity: true) }
+        dates.updateValue(date, forKey: value)
+        return date
+    }
+
+    func korean(_ date: Date, format: String) -> String {
+        lock.lock(); defer { lock.unlock() }
+        if let formatter = formatters[format] { return formatter.string(from: date) }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        // 기억해 둔 포매터도 시스템 시간대 변경을 따라간다.
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateFormat = format
+        formatters[format] = formatter
+        return formatter.string(from: date)
+    }
+}
+
 func parseISODate(_ value: String?) -> Date? {
     guard let value, !value.isEmpty else { return nil }
-    let fractional = ISO8601DateFormatter()
-    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    return ISODateCache.shared.date(value)
 }
 
-private func koreanFormatter(_ format: String) -> DateFormatter {
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "ko_KR")
-    formatter.dateFormat = format
-    return formatter
-}
+/// 한국어 로케일의 고정 형식 날짜 글자. 포매터는 형식마다 한 번만 만든다.
+func koFormatted(_ date: Date, _ format: String) -> String { ISODateCache.shared.korean(date, format: format) }
 
 /// 24-hour Korean clock ("14:20"), independent of the system locale so the UI never mixes "PM" into Korean text.
-func koTime(_ date: Date, seconds: Bool = false) -> String { koreanFormatter(seconds ? "HH:mm:ss" : "HH:mm").string(from: date) }
-func koDateTime(_ date: Date) -> String { koreanFormatter("yyyy년 M월 d일 HH:mm").string(from: date) }
+func koTime(_ date: Date, seconds: Bool = false) -> String { koFormatted(date, seconds ? "HH:mm:ss" : "HH:mm") }
+func koDateTime(_ date: Date) -> String { koFormatted(date, "yyyy년 M월 d일 HH:mm") }
 
 func clockTime(_ value: String?) -> String {
     guard let date = parseISODate(value) else { return "" }
@@ -1256,9 +1335,9 @@ func relativeTime(_ value: String?, now: Date = Date()) -> String {
     if calendar.isDateInToday(date) { return koTime(date) }
     if calendar.isDateInYesterday(date) { return "어제 \(koTime(date))" }
     if calendar.component(.year, from: date) == calendar.component(.year, from: now) {
-        return koreanFormatter("M월 d일").string(from: date)
+        return koFormatted(date, "M월 d일")
     }
-    return koreanFormatter("yyyy년 M월 d일").string(from: date)
+    return koFormatted(date, "yyyy년 M월 d일")
 }
 
 // MARK: - Lean list helpers (iteration 2)

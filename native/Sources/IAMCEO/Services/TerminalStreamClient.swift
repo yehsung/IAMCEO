@@ -109,15 +109,17 @@ final class TerminalStreamClient {
     @ObservationIgnored private var outputOwner: UUID?
     @ObservationIgnored private var sizePolicy: TerminalSizePolicy = .fit
     @ObservationIgnored private let resizeSender: ((String) async throws -> Void)?
+    @ObservationIgnored private let retryPause: ((Double) async throws -> Void)?
 
     func attachOutput(owner: UUID, handler: @escaping (Data) -> Void) { outputOwner = owner; onOutput = handler }
     func detachOutput(owner: UUID) { if outputOwner == owner { onOutput = nil; outputOwner = nil } }
 
     init(session: URLSession? = nil, resizeSender: ((String) async throws -> Void)? = nil,
          messageSender: ((URLSessionWebSocketTask.Message) async throws -> Void)? = nil,
-         receiveMessage: ((URLRequest) async throws -> URLSessionWebSocketTask.Message)? = nil) {
+         receiveMessage: ((URLRequest) async throws -> URLSessionWebSocketTask.Message)? = nil,
+         retryPause: ((Double) async throws -> Void)? = nil) {
         self.messageSender = messageSender; self.receiveMessage = receiveMessage
-        self.resizeSender = resizeSender
+        self.resizeSender = resizeSender; self.retryPause = retryPause
         self.session = session
     }
     /// A sample terminal only renders bundled output; it must never allocate a network session.
@@ -135,6 +137,8 @@ final class TerminalStreamClient {
     deinit { session?.invalidateAndCancel() }
     static func isUnsupported(status: Int) -> Bool { [404, 405, 501].contains(status) }
     static func reconnectDelay(attempt: Int) -> Double { [1, 2, 4, 8, 15][min(4, max(0, attempt))] }
+    /// 거절이 이어질 때의 느린 재시도 간격. 서버는 세션을 다시 여는 동안에도 같은 거절 코드로 답한다.
+    static let refusedRetryDelay: Double = 30
 
     func connect(api: APIClient, memberID: String, mode: TerminalStreamMode, cols: Int = 100, rows: Int = 30, leaseID: String? = nil,
                  sizePolicy: TerminalSizePolicy = TerminalPlatform.current.controlSizePolicy) {
@@ -208,11 +212,16 @@ final class TerminalStreamClient {
                     }
                     let stable = liveSince.map { Date().timeIntervalSince($0) >= 15 } ?? false
                     liveSince = nil
-                    guard let delay = retry.failed(status: status, code: refusal?.code, stable: stable) else {
+                    var delay = Self.refusedRetryDelay
+                    if let next = retry.failed(status: status, code: refusal?.code, stable: stable) { delay = next }
+                    else {
+                        // 거절이 이어져도 보기 연결을 죽이지 않는다. 안내를 보인 채 느리게 다시 붙어 본다.
                         self.state = .closed(reason: "refused", message: refusal?.message ?? "터미널 연결이 계속 거절되었습니다")
-                        return
                     }
-                    do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                    do {
+                        if let pause = self.retryPause { try await pause(delay) }
+                        else { try await Task.sleep(for: .seconds(delay)) }
+                    } catch { return }
                 }
             }
         }
@@ -303,7 +312,8 @@ final class TerminalStreamClient {
     /// Sheet teardown breaks callbacks that capture SwiftUI State and invalidates the session.
     func dispose() {
         onReady = nil; onLease = nil; onControlEnded = nil; onOutput = nil; outputOwner = nil
-        close(); session?.invalidateAndCancel()
+        // 무효화한 세션에 새 태스크를 만들면 NSException 으로 앱이 꺼진다. 비워 두어 다음 연결이 새 세션을 만들게 한다.
+        close(); session?.invalidateAndCancel(); session = nil
     }
     private struct StreamEnded: Error {}
 }

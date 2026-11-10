@@ -160,7 +160,10 @@ final class SubmissionStore {
     func acceptMessage(id: String, message: Message) throws {
         guard var attempt = state.messages[id], message.id == id, message.projectId == attempt.projectID,
               message.mine, message.targetMemberId == attempt.targetMemberID else { throw SubmissionError.mismatchedResult }
-        attempt.status = .accepted; attempt.message = message.mergingDelivery(from: attempt.message)
+        let merged = message.mergingDelivery(from: attempt.message)
+        // 이미 접수된 같은 내용을 다시 받으면 저장하지 않는다. 스냅샷마다 전체 기록을 다시 쓰지 않게 한다.
+        if attempt.status == .accepted, attempt.message == merged { return }
+        attempt.status = .accepted; attempt.message = merged
         try update { $0.messages[id] = attempt }
     }
 
@@ -185,7 +188,7 @@ final class SubmissionStore {
             }
         }
         // Network/401/5xx/decoding errors propagate, preserving checking and the original ID.
-        return state.messages[id]!.status
+        return state.messages[id]?.status ?? attempt.status
     }
 
     @discardableResult func detachMessage(id: String, drafts: DraftStore) throws -> Bool {
@@ -276,6 +279,18 @@ final class SubmissionStore {
         if let error = drafts.persistenceError { throw APIError(status: 0, message: error) }
         attempt.draftConsumed = true
         try update { $0.messages[id] = attempt }
+    }
+
+    /// 접수와 초안 정리가 끝난 기록, 닫은 실패 알림은 최근 것만 남긴다. 결과가 남은 기록은 지우지 않는다.
+    /// 지운 기록의 초안 인수 영수증 ID를 돌려준다.
+    @discardableResult func pruneMessageHistory(keeping recent: Int = 50) throws -> Set<String> {
+        let finished = state.messages.values.filter {
+            ($0.status == .accepted && $0.draftConsumed) || $0.failureDisposition == .dismissed
+        }
+        guard finished.count > max(0, recent) else { return [] }
+        let obsolete = finished.sorted { ($0.message?.at ?? "", $0.id) > ($1.message?.at ?? "", $1.id) }.dropFirst(max(0, recent))
+        try update { state in for attempt in obsolete { state.messages.removeValue(forKey: attempt.id) } }
+        return Set(obsolete.flatMap { [$0.handoffID, "insert:\($0.id)"].compactMap { $0 } })
     }
 
     func terminalInput(namespace: String, memberID: String) -> TerminalInputSnapshot {

@@ -50,7 +50,8 @@ export function parseTranscriptTail(text: string): TranscriptTail {
     if (!message) continue;
     if (typeof message.model === "string" && message.model !== "<synthetic>") tail.model = message.model;
     const usage = message.usage;
-    if (usage) {
+    // API 오류·한도 안내 같은 가짜 응답(<synthetic>)의 usage 는 전부 0 이다. 직전 실제 응답의 값을 지킨다.
+    if (usage && message.model !== "<synthetic>" && entry.isApiErrorMessage !== true) {
       tail.contextTokens = (Number(usage.input_tokens) || 0) + (Number(usage.cache_read_input_tokens) || 0) + (Number(usage.cache_creation_input_tokens) || 0);
     }
     if (!Array.isArray(message.content)) continue;

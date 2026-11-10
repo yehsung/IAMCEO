@@ -1,0 +1,35 @@
+# main·native-redesign 에 올릴 때마다 릴리스와 같은 검사를 돌린다.
+# 불안정한 시험이 릴리스 태그를 민 순간에 처음 드러나지 않게 하려는 것이다.
+# release-mac.ts --upload 는 이 워크플로(또는 release)가 그 커밋에서 성공했는지 확인한다.
+name: ci
+on:
+  push:
+    branches: [main, native-redesign]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  server:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bun run check:ts
+      - name: 단위 시험
+        run: bun run test:server
+  native:
+    # 결과를 쌓는 단계다. 아직은 실패해도 막지 않는다. 안정되면 continue-on-error 를 뺀다.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: 네이티브 시험
+        run: bash scripts/check.sh swift

@@ -6,7 +6,7 @@ import type { ServerWebSocket } from "bun";
 import { loadConfig } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
 import { Bus } from "../server/bus.ts";
-import { Store } from "../server/store.ts";
+import { ApiError, Store } from "../server/store.ts";
 import { CoreRunner } from "../server/runner/core.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
 import { startServer } from "../server/http.ts";
@@ -749,6 +749,149 @@ describe("terminal stream", () => {
     await new Promise<void>(resolve=>realtime.onopen=()=>resolve());
     const response = await fetch(`${f.origin}/api/auth/rotate`,{method:"POST",headers:f.headers}); expect(response.status).toBe(200);
     await until(()=>stream.closed&&realtimeClosed); await until(()=>f.pids().every(p=>!alive(p.pid)));
+  });
+  test("a dropped control socket releases its lease after the grace period and queued delivery resumes", async () => {
+    const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const manager = new TerminalStreams(f.config, f.store, f.orch, { orphanLeaseMs: 40 }); cleanups.push(() => manager.close());
+    const stream = await manager.prepare(f.member.id, new URL(`http://localhost/?mode=control&lease=${lease.leaseId}`));
+    const events: any[] = [];
+    stream.open({ send: (text: string) => events.push(JSON.parse(text)), sendBinary: () => {}, close: () => {}, getBufferedAmount: () => 0 } as unknown as ServerWebSocket<SocketData>);
+    await until(() => events.some(e => e.type === "ready"));
+    f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "instruction", text: "queued-behind-control", wake: true });
+    await f.orch.pump(f.member.id);
+    expect(f.sent).toHaveLength(0);
+    // The app crashed: the socket closes and no HTTP release ever arrives.
+    await stream.close();
+    expect(f.store.inputState(f.member.id).lease?.leaseId).toBe(lease.leaseId);
+    await until(() => f.store.inputState(f.member.id).lease === null);
+    await until(() => f.sent.length === 1);
+    expect(f.store.listPending(f.member.id)).toHaveLength(0);
+    expect(f.store.listActivity(f.member.id).some(a => a.text.includes("직접 조작을 자동으로 끝냈습니다"))).toBe(true);
+    // A late client release is the already-released refusal the app treats as done.
+    await expect(f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId })).rejects.toMatchObject({ status: 409 });
+  });
+  test("an orphaned lease is kept while its holder reattached, renewed it elsewhere, or was replaced", async () => {
+    const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    // The grace timer itself never fires in this test; the decision is exercised directly.
+    const manager = new TerminalStreams(f.config, f.store, f.orch, { orphanLeaseMs: 600_000 }); cleanups.push(() => manager.close());
+    const socket = () => ({ send: () => {}, sendBinary: () => {}, close: () => {}, getBufferedAmount: () => 0 }) as unknown as ServerWebSocket<SocketData>;
+    const url = new URL(`http://localhost/?mode=control&lease=${lease.leaseId}`);
+    const first = await manager.prepare(f.member.id, url); first.open(socket());
+    await until(() => f.pids().some(p => !p.observe));
+    const seen = f.store.inputState(f.member.id).lease!.expiresAt;
+    await first.close();
+    // Same lease reattached within the grace period (the client's single transport retry).
+    const again = await manager.prepare(f.member.id, url);
+    expect(await manager.releaseOrphanLease(f.member.id, lease.leaseId!, seen)).toBe("kept");
+    expect(f.store.inputState(f.member.id).lease?.leaseId).toBe(lease.leaseId);
+    await again.close();
+    // Renewed through another path since the socket dropped: the holder is alive.
+    f.store.saveLease({ ...f.store.inputState(f.member.id).lease!, expiresAt: seen + 60_000 });
+    expect(await manager.releaseOrphanLease(f.member.id, lease.leaseId!, seen)).toBe("kept");
+    expect(f.store.inputState(f.member.id).lease?.leaseId).toBe(lease.leaseId);
+    // A different lease now holds control: never release someone else's.
+    expect(await manager.releaseOrphanLease(f.member.id, "stale-lease", seen)).toBe("kept");
+    expect(f.store.inputState(f.member.id).lease?.leaseId).toBe(lease.leaseId);
+    // A refused release (session operation in progress) asks for another try and keeps the lease.
+    (f.orch as any).runtime(f.member.id).closing = true;
+    expect(await manager.releaseOrphanLease(f.member.id, lease.leaseId!)).toBe("retry");
+    (f.orch as any).runtime(f.member.id).closing = false;
+    expect(f.store.inputState(f.member.id).lease?.leaseId).toBe(lease.leaseId);
+    expect(await manager.releaseOrphanLease(f.member.id, lease.leaseId!)).toBe("released");
+    expect(f.store.inputState(f.member.id).lease).toBeNull();
+  });
+  test("explicit endings never arm the orphan release: replaced, lease_ended, terminal_gone and server stop", async () => {
+    const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const manager = new TerminalStreams(f.config, f.store, f.orch, { orphanLeaseMs: 600_000 }); cleanups.push(() => manager.close());
+    const orphans = (manager as any).orphans as Map<string, unknown>;
+    const socket = () => ({ send: () => {}, sendBinary: () => {}, close: () => {}, getBufferedAmount: () => 0 }) as unknown as ServerWebSocket<SocketData>;
+    const url = new URL(`http://localhost/?mode=control&lease=${lease.leaseId}`);
+    for (const reason of ["replaced", "lease_ended", "terminal_gone"]) {
+      const stream = await manager.prepare(f.member.id, url); stream.open(socket());
+      await stream.close(reason);
+      expect(orphans.size).toBe(0);
+    }
+    const dropped = await manager.prepare(f.member.id, url); dropped.open(socket());
+    await dropped.close();
+    expect(orphans.size).toBe(1);
+    await manager.close();
+    expect(orphans.size).toBe(0);
+    expect(await manager.releaseOrphanLease(f.member.id, lease.leaseId!)).toBe("kept");
+    expect(f.store.inputState(f.member.id).lease?.leaseId).toBe(lease.leaseId);
+  });
+  test("one failed size check keeps the observer; five in a row or a gone terminal closes it", async () => {
+    const f = await fixture();
+    const manager = new TerminalStreams(f.config, f.store, f.orch); cleanups.push(() => manager.close());
+    const open = async () => {
+      const stream = await manager.prepare(f.member.id, new URL("http://localhost/?mode=observe"));
+      const events: any[] = [];
+      stream.open({ send: (text: string) => events.push(JSON.parse(text)), sendBinary: () => {}, close: () => {}, getBufferedAmount: () => 0 } as unknown as ServerWebSocket<SocketData>);
+      await until(() => events.some(e => e.type === "ready"));
+      return { stream, events };
+    };
+    const info = spyOn(f.orch, "terminalStreamInfo");
+    try {
+      const refused = () => { throw new ApiError(409, "터미널 소유와 크기를 확인할 수 없습니다", "TERMINAL_REFUSED"); };
+      const first = await open();
+      info.mockImplementation(async () => refused());
+      for (let i = 0; i < 4; i++) await first.stream.refreshSize();
+      expect(first.events.some(e => e.type === "closed")).toBe(false);
+      // A success in between starts the count again.
+      info.mockImplementation(async () => ({ cols: 132, rows: 43 }));
+      await first.stream.refreshSize();
+      expect(first.events.at(-1)).toEqual({ type: "resize", cols: 132, rows: 43 });
+      info.mockImplementation(async () => refused());
+      for (let i = 0; i < 4; i++) await first.stream.refreshSize();
+      expect(first.events.some(e => e.type === "closed")).toBe(false);
+      await first.stream.refreshSize();
+      expect(first.events.find(e => e.type === "closed")).toMatchObject({ reason: "refused" });
+      await first.stream.close();
+
+      info.mockRestore();
+      const second = await open();
+      spyOn(f.orch, "terminalStreamInfo").mockImplementation(async () => { throw new ApiError(409, "터미널이 끝났거나 없습니다", "TERMINAL_GONE"); });
+      await second.stream.refreshSize();
+      expect(second.events.find(e => e.type === "closed")).toMatchObject({ reason: "terminal_gone" });
+      await second.stream.close();
+    } finally { (f.orch.terminalStreamInfo as any).mockRestore?.(); }
+  });
+  test("an observer of a replaced terminal closes on the next check instead of waiting out failures", async () => {
+    const f = await fixture();
+    const manager = new TerminalStreams(f.config, f.store, f.orch); cleanups.push(() => manager.close());
+    const stream = await manager.prepare(f.member.id, new URL("http://localhost/?mode=observe"));
+    const events: any[] = [];
+    stream.open({ send: (text: string) => events.push(JSON.parse(text)), sendBinary: () => {}, ping: () => {}, close: () => {}, getBufferedAmount: () => 0 } as unknown as ServerWebSocket<SocketData>);
+    await until(() => events.some(e => e.type === "ready"));
+    const base = Date.now(), now = spyOn(Date, "now");
+    try {
+      now.mockReturnValue(base + 2_000); stream.pong(); stream.check();
+      expect(events.some(e => e.type === "closed")).toBe(false);
+      f.store.patchMember(f.member.id, { paneId: "t-replacement" });
+      now.mockReturnValue(base + 4_000); stream.pong(); stream.check();
+      expect(events.find(e => e.type === "closed")).toMatchObject({ reason: "terminal_gone" });
+    } finally { now.mockRestore(); }
+    await stream.close();
+  });
+  test("a stalled event loop is not client silence: the timeout waits one ping interval after it resumes", async () => {
+    const f = await fixture();
+    const manager = new TerminalStreams(f.config, f.store, f.orch); cleanups.push(() => manager.close());
+    const stream = await manager.prepare(f.member.id, new URL("http://localhost/?mode=observe"));
+    const events: any[] = []; let pings = 0;
+    stream.open({ send: (text: string) => events.push(JSON.parse(text)), sendBinary: () => {}, ping: () => pings++, close: () => {}, getBufferedAmount: () => 0 } as unknown as ServerWebSocket<SocketData>);
+    await until(() => events.some(e => e.type === "ready"));
+    const base = Date.now(), now = spyOn(Date, "now");
+    try {
+      now.mockReturnValue(base + 14_000); stream.check(); expect(pings).toBe(0);
+      // The loop was blocked from 14s to 31s: no ping left and no pong could be read.
+      now.mockReturnValue(base + 31_000); stream.check(true);
+      expect(pings).toBe(1); expect(events.some(e => e.type === "closed")).toBe(false);
+      now.mockReturnValue(base + 45_000); stream.check();
+      expect(events.some(e => e.type === "closed")).toBe(false);
+      // Still silent a full ping interval after the stall: now it is a dead peer.
+      now.mockReturnValue(base + 46_000); stream.check();
+      expect(events.find(e => e.type === "closed")).toMatchObject({ reason: "timeout" });
+    } finally { now.mockRestore(); }
+    await stream.close();
   });
   test("integer size parsing", () => {
     expect(terminalSize(-5,999)).toEqual({cols:40,rows:200});

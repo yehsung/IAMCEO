@@ -91,9 +91,24 @@ function formatUsageReset(at: string): string {
   return `${part("month")} ${part("day")}일 ${part("dayPeriod")} ${part("hour")}시${Number(part("minute")) ? ` ${Number(part("minute"))}분` : ""}`;
 }
 
-interface Affected { memberId: string; ended: boolean; attempts: number; resumeId: string | null; awaitingResult: boolean; exhausted: boolean; errorKey?: string }
+/** 이어가기 3회 실패 뒤에도 영영 멈추지는 않는다. 장애가 끝난 채 이만큼 지나면 한 번씩 다시 이어 본다. */
+const EXHAUSTED_RETRY_MS = [15 * 60_000, 30 * 60_000, 60 * 60_000, 120 * 60_000];
+/** 한도 자동 이어가기를 시도조차 못했을 때(화면 읽기 실패·창 닫기 실패) 다시 해 보는 간격. */
+const USAGE_RETRY_MS = [60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000];
+/** 초기화 시각을 모르거나, 이어갔는데 다시 한도에 걸렸을 때 다시 이어 보는 간격. */
+const USAGE_PROBE_MS = [60 * 60_000, 120 * 60_000, 240 * 60_000, 360 * 60_000];
+const step = (table: number[], index: number) => table[Math.min(Math.max(index, 0), table.length - 1)]!;
+
+/** 잠들었거나 사라진 세션이라 읽을 화면이 없다. 한도 창도 그 프로세스와 함께 없어졌다. */
+export class NoTerminalError extends Error {
+  constructor() { super("세션 터미널이 없습니다"); }
+}
+
+interface Affected { memberId: string; ended: boolean; attempts: number; resumeId: string | null; awaitingResult: boolean; exhausted: boolean; errorKey?: string; exhaustedAt?: string | null; slowRetries?: number; exhaustNotified?: boolean }
 interface Outage { id: string; since: string; active: boolean; lastProbeAt: string | null; successes: number; revision?: number; affected: Affected[]; notifiedProjects?: string[]; recoveredProjects?: string[]; recoveryNotified?: boolean }
-interface Limited { memberId: string; fingerprint: string | null; raw: string; resetsAt: string | null; resumeId: string | null; awaitingResult: boolean; autoAttempted: string | null; failure: string | null; dismissStarted?: boolean; errorKey?: string }
+interface Limited { memberId: string; fingerprint: string | null; raw: string; resetsAt: string | null; resumeId: string | null; awaitingResult: boolean; autoAttempted: string | null; failure: string | null; dismissStarted?: boolean; errorKey?: string;
+  /** 자동 이어가기 일정. 한 번 실패했다고 멈추지 않도록 다음 시도 시각과 횟수를 둔다. */
+  limitedAt?: string; autoAttempts?: number; autoNextAt?: string | null; relimits?: number }
 interface LimitGroup { cli: CliProvider; decisionId: string; stillLimited: boolean; members: Limited[]; rawEvidence?: string[] }
 interface RecoveryState { outage: Outage | null; limits: LimitGroup[]; resumeOrder?: string[]; continuations?: Record<string, string> }
 export interface ApiRecoveryOptions {
@@ -122,6 +137,17 @@ export class ApiRecovery {
   constructor(private readonly options: ApiRecoveryOptions) {
     this.now = options.now ?? Date.now;
     this.state = options.store.loadApiRecovery<RecoveryState>("api_recovery") ?? { outage: null, limits: [] };
+    // 이전 판이 남긴 상태에는 일정 기준 시각이 없다. 지금부터 센다.
+    const at = new Date(this.now()).toISOString();
+    for (const a of this.state.outage?.affected ?? []) if (a.exhausted) a.exhaustedAt ??= at;
+    for (const g of this.state.limits) for (const m of g.members) m.limitedAt ??= at;
+  }
+  private exhaust(a: Affected, member: Member): void {
+    a.exhausted = true;
+    a.exhaustedAt = new Date(this.now()).toISOString();
+    // 느린 재시도가 또 실패할 때마다 같은 알림을 되풀이하지 않는다.
+    if (!a.exhaustNotified) this.options.notify(member.projectId, `${member.name}의 인터넷 연결 복구 후 이어가기가 3회 실패했습니다. 터미널을 확인해 주세요.`);
+    a.exhaustNotified = true;
   }
   private transaction<T>(action: () => T): T {
     const before = structuredClone(this.state);
@@ -157,10 +183,7 @@ export class ApiRecovery {
       if (errorKey) a.errorKey = errorKey;
       a.ended ||= ended;
       a.awaitingResult = false;
-      if (ended && a.attempts >= 3 && !a.exhausted) {
-        a.exhausted = true;
-        this.options.notify(member.projectId, `${member.name}의 인터넷 연결 복구 후 이어가기가 3회 실패했습니다. 터미널을 확인해 주세요.`);
-      }
+      if (ended && a.attempts >= 3 && !a.exhausted) this.exhaust(a, member);
       this.state.outage = o;
       if (ended) store.patchMember(member.id, { status: "idle", lastError: "인터넷 연결 문제로 멈춤", statusObservation: { source: member.backend ?? "core", observedAt: new Date(this.now()).toISOString(), freshness: "fresh", ownership: member.statusObservation?.ownership ?? "verified", consecutiveFailures: 0, error: { code: "network_outage", note: "인터넷 연결 문제로 멈춤" } } });
       this.holdPending(member.id, "api_outage");
@@ -190,6 +213,26 @@ export class ApiRecovery {
     const a = this.state.outage?.affected.find(a => a.memberId === memberId);
     if (a?.awaitingResult) { a.awaitingResult = false; a.ended = false; this.save(); }
   }
+  /**
+   * 이어가기를 포기해 멈춰 둔 직원을 대표의 뜻으로 다시 푼다(전달 '다시 확인', 그 직원에게 새로 보낸 말).
+   * 장애가 진행 중이면 그대로 둔다. 풀린 뒤 또 실패하면 새 사고로 다시 센다.
+   */
+  releaseExhausted(memberId: string): boolean {
+    const o = this.state.outage, a = o?.affected.find(a => a.memberId === memberId);
+    if (!o || o.active || !a?.exhausted) return false;
+    a.exhausted = false; a.exhaustedAt = null; a.ended = false; a.awaitingResult = false;
+    const member = this.options.store.getMember(memberId);
+    if (member && ["network_outage", "network_retry"].includes(member.statusObservation?.error?.code ?? "")) this.options.store.patchMember(member.id, { lastError: null, statusObservation: { ...member.statusObservation!, error: null } });
+    this.save();
+    return true;
+  }
+  /** 포기한 뒤에 대표가 새로 보낸 말·결재 답이 기다리고 있으면 푼다. */
+  releaseForOwnerInput(memberId: string, pending: Delivery[]): boolean {
+    const o = this.state.outage, a = o?.affected.find(a => a.memberId === memberId);
+    if (!o || o.active || !a?.exhausted) return false;
+    const since = a.exhaustedAt ?? "";
+    return pending.some(d => (d.kind === "user_message" || d.kind === "answer") && d.createdAt > since) && this.releaseExhausted(memberId);
+  }
   /** Send a continuation alone before any previously queued input. */
   prioritize(memberId: string, deliveries: Delivery[]): Delivery[] {
     const ids = [this.state.continuations?.[memberId], this.state.outage?.affected.find(a => a.memberId === memberId)?.resumeId, ...this.state.limits.flatMap(g => g.members.filter(m => m.memberId === memberId).map(m => m.resumeId))];
@@ -208,13 +251,23 @@ export class ApiRecovery {
       }
       let limited = group.members.find(m => m.memberId === member.id);
       if (!menu && errorKey && limited?.errorKey === errorKey) return;
-      if (!limited) { limited = { memberId: member.id, fingerprint: menu?.fingerprint ?? null, raw, resetsAt: menu?.resetsAt ?? parseUsageReset(raw, this.now()), resumeId: null, awaitingResult: false, autoAttempted: null, failure: null }; group.members.push(limited); }
+      if (!limited) { limited = { memberId: member.id, fingerprint: menu?.fingerprint ?? null, raw, resetsAt: menu?.resetsAt ?? parseUsageReset(raw, this.now()), resumeId: null, awaitingResult: false, autoAttempted: null, failure: null, limitedAt: new Date(this.now()).toISOString() }; group.members.push(limited); }
       else {
-        if (limited.awaitingResult) { group.stillLimited = true; limited.awaitingResult = false; if (!menu) limited.fingerprint = null; }
+        const before = limited.resetsAt;
+        const again = limited.awaitingResult;
+        if (again) {
+          group.stillLimited = true; limited.awaitingResult = false; if (!menu) limited.fingerprint = null;
+          // 이어갔는데 다시 걸렸다. 한 번으로 끝내지 않고 간격을 벌려 가며 다시 이어 본다.
+          limited.relimits = (limited.relimits ?? 0) + 1;
+          limited.autoNextAt = new Date(this.now() + step(USAGE_PROBE_MS, limited.relimits - 1)).toISOString();
+        }
         limited.fingerprint = menu?.fingerprint ?? limited.fingerprint;
         limited.raw = raw;
         // Relative reset text is parsed once per occurrence, never moved forward by polling.
-        limited.resetsAt = menu?.resetsAt ?? limited.resetsAt ?? parseUsageReset(raw, this.now());
+        // A failed continuation is a new occurrence, so its text is read again.
+        limited.resetsAt = menu?.resetsAt ?? (again ? parseUsageReset(raw, this.now()) ?? limited.resetsAt : limited.resetsAt ?? parseUsageReset(raw, this.now()));
+        // 새 초기화 시각이 나왔으면 그 시각에 맞춰 처음부터 다시 센다.
+        if (limited.resetsAt && limited.resetsAt !== before && Date.parse(limited.resetsAt) > this.now()) { limited.autoAttempts = 0; limited.autoNextAt = null; limited.relimits = 0; }
       }
       if (!limited.resetsAt) {
         group.rawEvidence ??= [];
@@ -233,7 +286,7 @@ export class ApiRecovery {
     const waiting = group.members.filter(m => !m.awaitingResult || !m.resumeId || this.options.store.getDelivery(m.resumeId)?.status !== "delivered");
     const times = waiting.map(m => m.resetsAt).filter((t): t is string => !!t).sort();
     const resetsAt = times.at(-1) ?? null;
-    const first = group.stillLimited ? "아직 같은 계정이라 한도가 남아 있지 않습니다. 다른 계정으로 로그인한 뒤 다시 누르세요." : resetsAt ? `${formatUsageReset(resetsAt)}에 풀리면 자동으로 이어 갑니다. 다른 계정으로 로그인했다면 지금 이어갈 수 있습니다.` : "초기화 시각을 확인하지 못했습니다. 다른 계정으로 로그인했다면 지금 이어갈 수 있습니다.";
+    const first = group.stillLimited ? "아직 같은 계정이라 한도가 남아 있지 않습니다. 다른 계정으로 로그인한 뒤 다시 누르세요." : resetsAt ? `${formatUsageReset(resetsAt)}에 풀리면 자동으로 이어 갑니다. 다른 계정으로 로그인했다면 지금 이어갈 수 있습니다.` : "초기화 시각을 확인하지 못했습니다. 풀렸는지 가끔 자동으로 다시 이어 봅니다. 다른 계정으로 로그인했다면 지금 이어갈 수 있습니다.";
     const names = waiting.map(m => `${this.options.store.getMember(m.memberId)?.name ?? m.memberId}${m.failure ? ` — ${m.failure}` : ""}`).join("\n");
     const raw = (group.rawEvidence ?? group.members.filter(m => !m.resetsAt).map(m => m.raw)).join("\n\n");
     const card = this.options.store.requireDecision(group.decisionId);
@@ -259,6 +312,13 @@ export class ApiRecovery {
     return id;
   }
 
+  /** 초기화 시각 +1분(모르면 처음 걸린 지 한 시간) 뒤이고, 앞선 시도가 정한 다음 시각도 지났는가. */
+  private autoDue(limited: Limited): boolean {
+    const now = this.now();
+    const base = limited.resetsAt ? Date.parse(limited.resetsAt) + 60_000 : Date.parse(limited.limitedAt ?? "") + step(USAGE_PROBE_MS, 0);
+    return now >= base && (!limited.autoNextAt || now >= Date.parse(limited.autoNextAt));
+  }
+
   resumeUsage(decisionId: string, automatic = false): Promise<Decision> {
     const task = this.resumeUsageOnce(decisionId, automatic);
     this.resumeTasks.add(task);
@@ -277,15 +337,28 @@ export class ApiRecovery {
         const member = this.options.store.getMember(limited.memberId);
         if (!member) { group.members = group.members.filter(m => m !== limited); continue; }
         if (this.options.store.requireProject(member.projectId).archived || this.state.outage?.active) continue;
-        if (automatic && (!limited.resetsAt || this.now() < Date.parse(limited.resetsAt) + 60_000 || limited.autoAttempted === limited.resetsAt)) continue;
-        if (automatic) { limited.autoAttempted = limited.resetsAt; this.save(); }
+        if (automatic && !this.autoDue(limited)) continue;
+        if (automatic) {
+          // 시도 전에 다음 시각을 적어 둔다. 이번에 못 하면(화면 읽기 실패 등) 그때 다시 한다.
+          const tried = limited.autoAttempts ?? 0;
+          limited.autoAttempts = tried + 1;
+          limited.autoNextAt = new Date(this.now() + step(USAGE_RETRY_MS, tried)).toISOString();
+          limited.autoAttempted = limited.resetsAt;
+          this.save();
+        }
         try {
-          const snapshot = await this.options.inspect(member);
+          let gone = false;
+          const snapshot = await this.options.inspect(member).catch((error: unknown) => {
+            if (!(error instanceof NoTerminalError)) throw error;
+            // 닫을 창이 없다. 이어가기만 넣어 두면 깨우면서 나간다.
+            gone = true; limited.fingerprint = null; limited.dismissStarted = false;
+            return { menu: null, state: null };
+          });
           limited.fingerprint ??= snapshot.menu?.fingerprint ?? null;
           if (limited.fingerprint) {
             if (!snapshot.menu && !limited.dismissStarted) { group.members = group.members.filter(m => m !== limited); this.clearUsage(member, snapshot.state); continue; }
             if (snapshot.menu) {
-              if (snapshot.menu.fingerprint !== limited.fingerprint) { limited.fingerprint = snapshot.menu.fingerprint; limited.failure = "화면이 바뀌었습니다. 다시 눌러 주세요"; if (automatic) limited.autoAttempted = null; continue; }
+              if (snapshot.menu.fingerprint !== limited.fingerprint) { limited.fingerprint = snapshot.menu.fingerprint; limited.failure = "화면이 바뀌었습니다. 다시 눌러 주세요"; if (automatic) { limited.autoAttempted = null; limited.autoNextAt = null; } continue; }
               limited.dismissStarted = true;
               this.save();
               const result = await this.options.dismiss(member, limited.fingerprint);
@@ -299,7 +372,7 @@ export class ApiRecovery {
             limited.awaitingResult = true;
             limited.dismissStarted = false;
             limited.failure = null;
-            this.options.store.patchMember(member.id, { status: "idle", blockedReason: null, lastError: null, statusObservation: member.statusObservation ? { ...member.statusObservation, error: null } : null });
+            this.options.store.patchMember(member.id, { ...(gone ? {} : { status: "idle" as const }), blockedReason: null, lastError: null, statusObservation: member.statusObservation ? { ...member.statusObservation, error: null } : null });
             this.save();
           });
           await this.options.pump(member.id);
@@ -310,14 +383,19 @@ export class ApiRecovery {
       return this.options.store.requireDecision(decisionId);
     } finally { this.resuming.delete(group.cli); }
   }
+  /** 성공한 턴은 연결도 한도도 풀렸다는 증거다. 서버가 이어가기를 넣지 않았어도(대표가 터미널에서 직접 풀었어도) 그 직원을 놓아준다. */
   completed(memberId: string): void {
     const a = this.state.outage?.affected.find(a => a.memberId === memberId);
-    if (!a && !this.preservesOrder(memberId) && !this.state.limits.some(g => g.members.some(m => m.memberId === memberId && m.awaitingResult))) return;
-    if (a) { a.awaitingResult = false; a.ended = false; a.exhausted = false; }
+    if (!a && !this.preservesOrder(memberId) && !this.state.limits.some(g => g.members.some(m => m.memberId === memberId))) return;
+    if (a) { a.awaitingResult = false; a.ended = false; a.exhausted = false; a.exhaustedAt = null; a.attempts = 0; a.slowRetries = 0; a.exhaustNotified = false; }
     if (!this.options.store.listPending(memberId).length) this.state.resumeOrder = this.state.resumeOrder?.filter(id => id !== memberId);
     for (const g of this.state.limits) {
-      if (!g.members.some(m => m.memberId === memberId && m.awaitingResult)) continue;
+      const mine = g.members.filter(m => m.memberId === memberId);
+      if (!mine.length) continue;
       g.members = g.members.filter(m => m.memberId !== memberId);
+      const member = mine.some(m => !m.awaitingResult) ? this.options.store.getMember(memberId) : null;
+      if (member) this.options.store.patchMember(member.id, { blockedReason: null, ...(member.lastError === "사용 한도 해제를 기다립니다" ? { lastError: null } : {}),
+        ...(member.statusObservation?.error?.code === "usage_limit" ? { statusObservation: { ...member.statusObservation, error: null } } : {}) });
       this.updateCard(g);
     }
     this.save();
@@ -361,8 +439,7 @@ export class ApiRecovery {
             if (!a.exhausted && ["network_outage", "network_retry"].includes(member.statusObservation?.error?.code ?? "")) this.options.store.patchMember(member.id, { lastError: null, statusObservation: { ...member.statusObservation!, error: null } });
             if (!a.ended) continue;
             if (a.attempts >= 3) {
-              if (!a.exhausted) this.options.notify(member.projectId, `${member.name}의 인터넷 연결 복구 후 이어가기가 3회 실패했습니다. 터미널을 확인해 주세요.`);
-              a.exhausted = true;
+              if (!a.exhausted) this.exhaust(a, member);
               continue;
             }
             a.resumeId = this.enqueueResume(member);
@@ -382,6 +459,7 @@ export class ApiRecovery {
         for (const a of o.affected) this.options.pump(a.memberId);
       } else this.save();
     }
+    this.retryExhausted();
     if (this.now() - this.lastUsageCheck < 5000) return;
     this.lastUsageCheck = this.now();
     for (const group of [...this.state.limits]) {
@@ -402,6 +480,29 @@ export class ApiRecovery {
       this.save();
       await this.resumeUsage(group.decisionId, !group.members.some(m => m.dismissStarted));
     }
+  }
+  /** 이어가기를 포기한 직원: 장애가 끝난 채로 충분히 지났으면 이어가기를 한 번 더 넣는다. 또 실패하면 간격을 벌린다. */
+  private retryExhausted(): void {
+    const o = this.state.outage;
+    if (this.closed || !o || o.active) return;
+    const due = o.affected.filter(a => a.exhausted && this.now() - Date.parse(a.exhaustedAt ?? "") >= step(EXHAUSTED_RETRY_MS, a.slowRetries ?? 0));
+    if (!due.length) return;
+    const resumed: string[] = [];
+    this.transaction(() => {
+      for (const a of due) {
+        const member = this.options.store.getMember(a.memberId);
+        if (!member || this.options.store.requireProject(member.projectId).archived) continue;
+        a.exhausted = false; a.exhaustedAt = null;
+        a.slowRetries = (a.slowRetries ?? 0) + 1;
+        a.resumeId = this.enqueueResume(member);
+        a.awaitingResult = true;
+        a.ended = false;
+        if (["network_outage", "network_retry"].includes(member.statusObservation?.error?.code ?? "")) this.options.store.patchMember(member.id, { lastError: null, statusObservation: { ...member.statusObservation!, error: null } });
+        resumed.push(member.id);
+      }
+      this.save();
+    });
+    for (const id of resumed) this.options.pump(id);
   }
   async shutdown(): Promise<void> { this.closed = true; if (this.timer) clearInterval(this.timer); await this.running; await Promise.allSettled([...this.resumeTasks]); }
 }

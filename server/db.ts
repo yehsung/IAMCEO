@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, statSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fileSearchMigration, scheduleFileSearchBackfill } from "./store.ts";
 
 export const MIGRATIONS: string[] = [
@@ -692,7 +693,36 @@ export const MIGRATIONS: string[] = [
    ALTER TABLE deliveries ADD COLUMN delay_notified_at TEXT;`,
 ];
 
+const PRE_MIGRATION_KEEP = 3;
+const PRE_MIGRATION_KEEP_MS = 86_400_000;
+
+/** 이 DB가 만든 이주 전 사본만 고른다(최신순). 이름이 다른 수동 사본·링크·폴더는 건드리지 않는다. */
+function preMigrationBackups(path: string): { path: string; version: number; at: number }[] {
+  const dir = dirname(path), prefix = `${basename(path)}.pre-v`;
+  const found: { path: string; version: number; at: number }[] = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith(prefix)) continue;
+    const match = /^(\d+)-(\d+)-[a-f0-9]{8}\.bak$/.exec(name.slice(prefix.length));
+    if (!match) continue;
+    try { if (!lstatSync(join(dir, name)).isFile()) continue; } catch { continue; }
+    found.push({ path: join(dir, name), version: Number(match[1]), at: Number(match[2]) });
+  }
+  return found.sort((a, b) => b.at - a.at || b.path.localeCompare(a.path));
+}
+
+/** 정리 실패는 시작을 막지 않는다. 지운 것은 한 줄로 남긴다. */
+function removePreMigrationBackups(path: string, select: (all: ReturnType<typeof preMigrationBackups>) => ReturnType<typeof preMigrationBackups>): void {
+  try {
+    const removed: string[] = [];
+    for (const entry of select(preMigrationBackups(path))) {
+      try { unlinkSync(entry.path); removed.push(basename(entry.path)); } catch { /* 다음 이주 때 다시 본다. */ }
+    }
+    if (removed.length) console.info(`[db] 이주 전 사본 ${removed.length}개 정리: ${removed.join(", ")}`);
+  } catch { /* 목록을 못 읽으면 그대로 둔다. */ }
+}
+
 export function openDb(path: string): Database {
+  let backup: string | undefined;
   // 읽기/쓰기 연결은 close만으로도 남아 있던 WAL을 checkpoint할 수 있다.
   // 기존 DB의 버전 검사와 이주 전 백업은 읽기 전용 연결에서 끝내야 실패 시 원본이 그대로다.
   if (path !== ":memory:" && path !== "" && existsSync(path)) {
@@ -712,14 +742,20 @@ export function openDb(path: string): Database {
       probe.exec("PRAGMA busy_timeout = 5000");
       if (current < MIGRATIONS.length &&
           (current > 0 || probe.query("SELECT 1 FROM sqlite_schema LIMIT 1").get())) {
-        const backup = `${path}.pre-v${current}-${Date.now()}-${randomBytes(4).toString("hex")}.bak`;
+        const target = `${path}.pre-v${current}-${Date.now()}-${randomBytes(4).toString("hex")}.bak`;
+        const fresh = !existsSync(target);
         try {
           // VACUUM INTO는 읽기 전용 원본에서도 commit된 WAL을 포함하는 독립 snapshot을 만든다.
-          probe.query("VACUUM INTO ?").run(backup);
-          chmodSync(backup, 0o600);
+          probe.query("VACUUM INTO ?").run(target);
+          chmodSync(target, 0o600);
         } catch (e) {
+          // 만들다 만 사본은 되돌리는 데 쓸 수 없고 디스크만 차지한다.
+          if (fresh) try { unlinkSync(target); } catch { /* 만들어지지 않았다. */ }
           throw new Error(`마이그레이션 전 백업을 만들지 못했습니다. 원본은 변경하지 않았습니다: ${(e as Error).message}`);
         }
+        backup = target;
+        // 실패한 이주는 그 단계를 되돌려 같은 버전에 머문다. 다시 뜰 때마다 쌓이지 않게 같은 버전의 앞선 사본은 방금 것으로 갈음한다.
+        removePreMigrationBackups(path, all => all.filter(entry => entry.version === current && basename(entry.path) !== basename(target)));
       }
     } finally { probe.close(); }
   }
@@ -738,6 +774,8 @@ export function openDb(path: string): Database {
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA synchronous = NORMAL");
     migrate(db);
+    // 이주가 끝났으면 최근 사본 몇 개만 남긴다. 하루 안에 만든 것은 개수와 상관없이 둔다.
+    if (backup) removePreMigrationBackups(path, all => all.slice(PRE_MIGRATION_KEEP).filter(entry => Date.now() - entry.at > PRE_MIGRATION_KEEP_MS));
     // Source parsing/index failures cannot roll back the schema or delay server startup.
     // Durable pending rows survive shutdown and resume in bounded, best-effort batches.
     scheduleFileSearchBackfill(db);

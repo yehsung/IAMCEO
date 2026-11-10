@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { ApiRecovery, API_RESUME_TEXT, USAGE_RESUME_TEXT, classifyTurnError, networkRetryScreen, parseUsageReset, usageLimitMenu, type ApiRecoveryOptions } from "../server/api-outage.ts";
+import { ApiRecovery, API_RESUME_TEXT, NoTerminalError, USAGE_RESUME_TEXT, classifyTurnError, networkRetryScreen, parseUsageReset, usageLimitMenu, type ApiRecoveryOptions } from "../server/api-outage.ts";
 import { openDb } from "../server/db.ts";
 import { Store } from "../server/store.ts";
 import { Bus } from "../server/bus.ts";
@@ -351,4 +351,132 @@ test("파싱 못한 한도 원문은 직원이 풀리고 카드가 닫힌 뒤에
   expect(f.store.requireDecision(id).status).toBe("closed");
   expect(f.store.requireDecision(id).detail).toContain(raw);
   expect(f.store.listActivity(m.id).some(activity => activity.text === raw)).toBe(true);
+});
+
+
+describe("포기·실패 뒤에도 영구 보류로 남지 않는다", () => {
+  const MIN = 60_000;
+  /** 같은 사고에서 이어가기 3회가 모두 실패해 포기한 상태. 장애 자체는 끝나 있다. */
+  async function exhausted(f: ReturnType<typeof fixture>, settled = true) {
+    f.service.networkFailure(f.member);
+    for (let i = 0; i < 3; i++) {
+      await f.recover();
+      f.store.markDelivered(f.store.listPending(f.member.id).at(-1)!.id);
+      f.service.networkFailure(f.member); f.now += 30_000;
+    }
+    if (settled) { await f.recover(); expect(f.service.outage()).toBeNull(); }
+    expect(f.service.holdReason(f.member.id)).toBe("api_outage");
+  }
+  const resumes = (f: ReturnType<typeof fixture>, text = API_RESUME_TEXT) => f.store.listDeliveries(f.project.id).filter(d => d.text === text).length;
+
+  test("이어가기 3회 실패 뒤 장애가 끝난 채 15분이 지나면 한 번 더 이어 보고, 또 실패하면 간격을 벌린다(알림은 한 번)", async () => {
+    const f = fixture(); await exhausted(f);
+    f.now += 13 * MIN; await f.service.tick();
+    expect(resumes(f)).toBe(3); expect(f.service.holdReason(f.member.id)).toBe("api_outage");
+    f.now += 2 * MIN; await f.service.tick();
+    expect(resumes(f)).toBe(4); expect(f.service.holdReason(f.member.id)).toBeNull();
+    expect(f.service.prioritize(f.member.id, f.store.listPending(f.member.id)).map(d => d.text)).toEqual([API_RESUME_TEXT]);
+    expect(f.store.requireMember(f.member.id).statusObservation?.error ?? null).toBeNull();
+    // 다시 이어 본 턴도 실패: 곧바로 포기 상태로 돌아가되 같은 알림을 되풀이하지 않고, 다음은 30분 뒤다.
+    f.store.markDelivered(f.store.listPending(f.member.id).at(-1)!.id);
+    f.service.networkFailure(f.member); f.restart(); f.now += 30_000; await f.recover();
+    expect(f.service.holdReason(f.member.id)).toBe("api_outage");
+    expect(f.notices.filter(n => n.includes("3회 실패"))).toHaveLength(1);
+    f.now += 20 * MIN; await f.service.tick(); expect(resumes(f)).toBe(4);
+    f.now += 11 * MIN; await f.service.tick(); expect(resumes(f)).toBe(5);
+    // 성공한 턴이 오면 처음부터 다시 센다.
+    f.store.markDelivered(f.store.listPending(f.member.id).at(-1)!.id);
+    f.service.completed(f.member.id);
+    expect(f.service.holdReason(f.member.id)).toBeNull();
+    f.now += MIN; f.service.networkFailure(f.member); await f.recover();
+    expect(resumes(f)).toBe(6); expect(f.service.holdReason(f.member.id)).toBeNull();
+  });
+
+  test("포기한 직원은 대표의 다시 확인이나 그 뒤에 보낸 말로 풀리고, 장애가 진행 중이면 풀지 않는다", async () => {
+    // 전달의 생성 시각은 실제 시계다. 포기 시각이 그보다 앞서도록 가짜 시계를 과거에 둔다.
+    const f = fixture(); f.now = Date.now() - 60 * MIN;
+    const old = f.enqueue(); await exhausted(f);
+    expect(f.service.releaseForOwnerInput(f.member.id, f.store.listPending(f.member.id))).toBe(false);
+    const said = f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "user_message", text: "[대표] 이어서 해 주세요" });
+    expect(f.service.releaseForOwnerInput(f.member.id, f.store.listPending(f.member.id))).toBe(true);
+    expect(f.service.holdReason(f.member.id)).toBeNull();
+    expect(f.store.listPending(f.member.id).map(d => d.id)).toEqual(expect.arrayContaining([old.id, said.id]));
+    f.restart(); expect(f.service.holdReason(f.member.id)).toBeNull();
+
+    // 포기하기 전에 와 있던 말은 근거가 아니다(가짜 시계를 미래에 둔다). 다시 확인은 언제든 푼다.
+    const g = fixture(); g.now = Date.now() + 60 * MIN;
+    g.store.enqueue({ projectId: g.project.id, memberId: g.member.id, kind: "user_message", text: "[대표] 먼저 와 있던 말" });
+    await exhausted(g, false);
+    expect(g.service.outage()).not.toBeNull();
+    expect(g.service.releaseExhausted(g.member.id)).toBe(false);
+    await g.recover();
+    expect(g.service.releaseForOwnerInput(g.member.id, g.store.listPending(g.member.id))).toBe(false);
+    expect(g.service.holdReason(g.member.id)).toBe("api_outage");
+    expect(g.service.releaseExhausted(g.member.id)).toBe(true);
+    expect(g.service.holdReason(g.member.id)).toBeNull();
+  });
+
+  test("한도 자동 이어가기가 화면 읽기 실패로 못 나가면 간격을 두고 다시 시도한다", async () => {
+    const f = fixture(), m = f.makeMember("codex", "codex");
+    f.service.usageFailure(m, "You've hit your usage limit. try again in 1m");
+    f.inspect = async () => { throw new Error("terminal.read: no reply"); };
+    f.now += 2 * MIN + 1; await f.service.tick();
+    expect(f.store.listPending(m.id)).toHaveLength(0);
+    expect(f.card("codex").detail).toContain("창을 닫지 못했습니다");
+    expect(f.service.holdReason(m.id)).toBe("usage_limit");
+    f.inspect = async () => ({ menu: null, state: "error" });
+    f.now += 30_000; await f.service.tick();
+    expect(f.store.listPending(m.id)).toHaveLength(0);
+    f.restart(); f.now += 31_000; await f.service.tick();
+    expect(f.store.listPending(m.id).map(d => d.text)).toEqual([USAGE_RESUME_TEXT]);
+    expect(f.service.holdReason(m.id)).toBeNull();
+  });
+
+  test("잠든 직원은 닫을 창이 없으므로 이어가기만 넣고 상태를 깨어 있는 것처럼 바꾸지 않는다", async () => {
+    for (const automatic of [false, true]) {
+      const f = fixture(), menu = usageLimitMenu(menuText(), f.now)!;
+      f.service.usageFailure(f.member, menu.raw, menu);
+      f.store.patchMember(f.member.id, { status: "asleep", paneId: null });
+      f.inspect = async () => { throw new NoTerminalError(); };
+      if (automatic) { f.now = Date.parse(menu.resetsAt!) + 61_000; await f.service.tick(); }
+      else await f.service.resumeUsage(f.card().id);
+      expect(f.dismissed).toHaveLength(0);
+      expect(f.store.listPending(f.member.id).map(d => d.text)).toEqual([USAGE_RESUME_TEXT]);
+      expect(f.store.requireMember(f.member.id)).toMatchObject({ status: "asleep", blockedReason: null, lastError: null });
+      expect(f.service.holdReason(f.member.id)).toBeNull();
+      expect(f.pumps).toContain(f.member.id);
+    }
+  });
+
+  test("서버가 이어가기를 넣지 않았어도 성공한 턴이면 한도 보류를 푼다", () => {
+    const f = fixture(), m = f.makeMember("codex", "codex"); const d = f.enqueue(m);
+    f.service.usageFailure(m, "usage limit reached: unknown reset raw");
+    expect(f.store.requireDelivery(d.id).holdReason).toBe("usage_limit");
+    f.service.completed(m.id);
+    expect(f.service.holdReason(m.id)).toBeNull();
+    expect(f.card("codex")).toMatchObject({ status: "closed", usageLimit: { memberIds: [] } });
+    expect(f.store.requireMember(m.id)).toMatchObject({ blockedReason: null, lastError: null });
+    expect(f.store.requireMember(m.id).statusObservation?.error ?? null).toBeNull();
+    f.restart(); expect(f.service.holdReason(m.id)).toBeNull();
+  });
+
+  test("초기화 시각을 모르고 대표가 카드를 닫아도 한 시간 뒤부터 자동으로 이어 보고, 다시 걸리면 간격을 벌린다", async () => {
+    const f = fixture(), m = f.makeMember("codex", "codex"), raw = "usage limit reached: unknown reset raw";
+    f.service.usageFailure(m, raw);
+    f.store.setDecisionStatus(f.card("codex").id, "closed");
+    f.now += 59 * MIN; await f.service.tick();
+    expect(resumes(f, USAGE_RESUME_TEXT)).toBe(0); expect(f.service.holdReason(m.id)).toBe("usage_limit");
+    f.restart(); f.now += 2 * MIN; await f.service.tick();
+    expect(resumes(f, USAGE_RESUME_TEXT)).toBe(1); expect(f.service.holdReason(m.id)).toBeNull();
+    // 이어 봤지만 아직 한도다: 한 시간 뒤에 다시, 그다음은 두 시간 뒤.
+    const first = f.store.listPending(m.id)[0]!; f.store.markDelivered(first.id); f.service.received(first.id);
+    f.service.usageFailure(m, raw);
+    expect(f.service.holdReason(m.id)).toBe("usage_limit");
+    f.now += 59 * MIN; await f.service.tick(); expect(resumes(f, USAGE_RESUME_TEXT)).toBe(1);
+    f.now += 2 * MIN; await f.service.tick(); expect(resumes(f, USAGE_RESUME_TEXT)).toBe(2);
+    const second = f.store.listPending(m.id)[0]!; f.store.markDelivered(second.id); f.service.received(second.id);
+    f.service.usageFailure(m, raw);
+    f.now += 61 * MIN; await f.service.tick(); expect(resumes(f, USAGE_RESUME_TEXT)).toBe(2);
+    f.now += 60 * MIN; await f.service.tick(); expect(resumes(f, USAGE_RESUME_TEXT)).toBe(3);
+  });
 });

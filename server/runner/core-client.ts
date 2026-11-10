@@ -26,6 +26,7 @@ export function coreSocketPath(session = process.env.HC_SESSION || "default"): s
 
 let nextId = 0;
 const MAX_RESPONSE = 16 * 1024 * 1024;
+const SLICE_MS = 250, STALL_MS = 100;
 export function coreRpc<T>(socketPath: string, method: string, params: Record<string, unknown> = {}, timeoutMs = 8000): Promise<T> {
   const id = `iamceo-core-${++nextId}`;
   return new Promise((resolve, reject) => {
@@ -43,7 +44,20 @@ export function coreRpc<T>(socketPath: string, method: string, params: Record<st
       if (error) reject(error); else resolve(result as T);
     };
     const fail = (kind: string, message: string, causeCode?: string) => finish(new CoreError(kind, `${method}: ${message}`, sent, sent ? "unknown" : "not_written", causeCode));
-    const timer = setTimeout(() => fail("timeout", `no reply within ${timeoutMs}ms`), timeoutMs);
+    // Count the deadline in time the event loop actually ran. After a stall the expired timer runs before the
+    // reply that already arrived, which reported a timeout (and "delivery may have occurred") for an answered request.
+    let left = timeoutMs, armed = 0, armedAt = 0, graced = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const arm = (ms: number) => { armed = ms; armedAt = performance.now(); timer = setTimeout(expire, ms); };
+    const expire = () => {
+      const stalled = performance.now() - armedAt > armed + STALL_MS;
+      left -= armed;
+      if (left > 0) return arm(Math.min(left, SLICE_MS));
+      // Stalled during the last slice with the request already written: let the pending reply be read once.
+      if (sent && stalled && !graced) { graced = true; return arm(SLICE_MS); }
+      fail("timeout", `no reply within ${timeoutMs}ms`);
+    };
+    arm(Math.min(left, SLICE_MS));
     socket.on("connect", () => {
       // Once a write is attempted, transport failure is ambiguous. Never retry it.
       sent = true;

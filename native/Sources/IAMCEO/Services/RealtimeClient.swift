@@ -30,11 +30,11 @@ struct URLSessionRealtimeTransportFactory: RealtimeTransportFactory {
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
         config.httpShouldSetCookies = false
-        config.timeoutIntervalForRequest = 10
+        config.timeoutIntervalForRequest = RealtimeClient.helloTimeoutSeconds
         config.timeoutIntervalForResource = 0
         let session = URLSession(configuration: config, delegate: RealtimeRedirectDelegate(), delegateQueue: nil)
         var request = request
-        request.timeoutInterval = 10
+        request.timeoutInterval = RealtimeClient.helloTimeoutSeconds
         let task = session.webSocketTask(with: request)
         task.maximumMessageSize = RealtimeClient.maximumMessageSize
         task.resume()
@@ -67,6 +67,9 @@ private actor URLSessionRealtimeTransport: RealtimeTransport {
 /// Transport only: the host coordinator owns cursor reconciliation, snapshots and reconnect policy.
 actor RealtimeClient {
     static let maximumMessageSize = 16 * 1024 * 1024
+    /// 연결과 첫 hello 를 기다리는 시간. 서버 루프가 십수 초 막히는 동안 10초에 끊으면 붙을 때마다 다시 끊겨 '연결 중'이 풀리지 않는다.
+    /// 살아 있는 연결의 무응답 판정(45초)보다는 짧게 둔다.
+    static let helloTimeoutSeconds: TimeInterval = 20
     private let factory: any RealtimeTransportFactory
     private let clock: any RealtimeClock
     private var generation = UUID()
@@ -165,7 +168,7 @@ actor RealtimeClient {
             while id == generation, !Task.isCancelled {
                 let now = await clock.now()
                 guard id == generation, !Task.isCancelled else { return }
-                let remaining = lastMessage + (receivedHello ? .seconds(45) : .seconds(10)) - now
+                let remaining = lastMessage + (receivedHello ? .seconds(45) : .seconds(Self.helloTimeoutSeconds)) - now
                 if remaining <= .zero {
                     await stop(id: id, error: receivedHello ? RealtimeClientError.stale : RealtimeClientError.helloTimeout)
                     return

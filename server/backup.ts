@@ -5,7 +5,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { VERSION } from "./config.ts";
 import { MIGRATIONS } from "./db.ts";
-import { normalizeHome, withHomeOwner } from "./home-owner.ts";
+import { acquireHomeOwner, HomeOwnershipError, normalizeHome, withHomeOwner } from "./home-owner.ts";
 import { toStorageError } from "./storage-errors.ts";
 import type { LoopMonitor } from "./loop-monitor.ts";
 
@@ -28,6 +28,16 @@ const manifestSchema = z.object({
 export type BackupManifest = z.infer<typeof manifestSchema>;
 export interface BackupSnapshot { directory: string; manifest: BackupManifest }
 export interface BackupOptions { home: string; backupDir: string; now?: Date }
+
+/** Work with a yield point after each file or DB check. Synchronous callers drain it; the daemon's scheduled backup releases the event loop in between. */
+type Steps<T> = Generator<void, T, void>;
+
+function drain<T>(steps: Steps<T>): T {
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+  }
+}
 
 /** Reject symlink components and escapes before opening an attachment or package member. */
 export function backupPath(root: string, path: string): string {
@@ -115,6 +125,10 @@ function checkConfig(path: string): void {
 
 /** Fully verify candidates without migration, recovery, network, or source-home access. */
 export function verifyBackup(directory: string): BackupSnapshot {
+  return drain(verifySteps(directory));
+}
+
+function* verifySteps(directory: string): Steps<BackupSnapshot> {
   directory = normalizeHome(directory);
   if (["-wal", "-shm", "-journal"].some((suffix) => existsSync(join(directory, `iamceo.db${suffix}`)))) throw new Error("Backup DB must be standalone without sidecars");
   const manifestPath = backupPath(directory, join(directory, "manifest.json"));
@@ -126,11 +140,13 @@ export function verifyBackup(directory: string): BackupSnapshot {
   for (const entry of [manifest.database, ...manifest.configs, ...manifest.attachments]) {
     const actual = backupFile(backupPath(directory, join(directory, entry.path)));
     if (actual.size !== entry.size || actual.sha256 !== entry.sha256) throw new Error("Backup size/hash mismatch");
+    yield;
   }
   for (const config of manifest.configs) checkConfig(join(directory, config.path));
   const db = new Database(join(directory, manifest.database.path), { readonly: true });
   try {
     if (checkBackupDatabase(db) !== manifest.schemaVersion) throw new Error("Backup schema mismatch");
+    yield;
     const rows = attachmentRows(db);
     if (rows.length !== manifest.attachments.length) throw new Error("Backup attachment inventory mismatch");
     const entries = new Map(manifest.attachments.map((entry) => [entry.id, entry]));
@@ -152,101 +168,184 @@ export function verifyBackup(directory: string): BackupSnapshot {
   return { directory, manifest };
 }
 
+const STALE_PENDING_MS = 3_600_000;
+
+/** Only stages abandoned by a killed process. While the backup root is owned, no other backup can be in flight. */
+function removeStalePending(root: string): void {
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^\.pending-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(entry.name)) continue;
+    try {
+      const path = backupPath(root, join(root, entry.name));
+      if (Date.now() - lstatSync(path).mtimeMs < STALE_PENDING_MS) continue;
+      rmSync(path, { recursive: true });
+    } catch { /* Retried by the next backup. */ }
+  }
+}
+
+function backupRoot(home: string, backupDir: string): string {
+  const root = normalizeHome(backupDir);
+  if (root === home || home.startsWith(root + sep) || root.startsWith(join(home, "uploads") + sep) || root === join(home, "uploads")) throw new Error("Unsafe backup directory");
+  return root;
+}
+
 /** Caller may hold the daemon's home owner; all I/O is synchronous within that owner. */
 export function createBackup(options: BackupOptions): BackupSnapshot {
   try {
     return withHomeOwner(options.home, (home) => {
-      const root = normalizeHome(options.backupDir);
-      if (root === home || home.startsWith(root + sep) || root.startsWith(join(home, "uploads") + sep) || root === join(home, "uploads")) throw new Error("Unsafe backup directory");
-      return withHomeOwner(root, () => {
-        const now = options.now ?? new Date();
-        const createdAt = now.toISOString();
-        const id = `snapshot-${String(now.getTime()).padStart(13, "0")}-${randomUUID()}`;
-        if (!/^snapshot-\d{13}-/.test(id)) throw new Error("Unsupported snapshot time");
-        const stage = join(root, `.pending-${randomUUID()}`);
-        mkdirSync(stage, { mode: 0o700 });
-        let published: string | undefined;
-        try {
-          mkdirSync(join(stage, "attachments"), { mode: 0o700 });
-          const source = new Database(backupPath(home, join(home, "iamceo.db")), { readonly: true });
-          try {
-            checkBackupDatabase(source);
-            source.exec("PRAGMA busy_timeout = 5000");
-            source.query("VACUUM INTO ?").run(join(stage, "iamceo.db"));
-          } finally { source.close(); }
-          chmodSync(join(stage, "iamceo.db"), 0o600);
-          const db = new Database(join(stage, "iamceo.db"), { readonly: true });
-          let schemaVersion: number;
-          const attachments: BackupManifest["attachments"] = [];
-          try {
-            schemaVersion = checkBackupDatabase(db);
-            for (const [index, row] of attachmentRows(db).entries()) {
-              if (/\.p8$/i.test(row.name) || /\.p8$/i.test(row.path)) throw new Error("p8 cannot be included in backups");
-              // Config keeps IAMCEO_HOME's spelling; only the home itself may be an alias.
-              const aliases = [home, resolve(options.home)];
-              const root = aliases.find((alias) => {
-                const tail = relative(join(alias, "uploads"), row.path);
-                return tail && tail !== ".." && !tail.startsWith(`..${sep}`) && !isAbsolute(tail);
-              });
-              if (!root) throw new Error("Backup attachment escapes uploads");
-              const sourcePath = backupPath(join(home, "uploads"), join(home, relative(root, row.path)));
-              const path = `attachments/${index}.bin`;
-              const copied = backupFile(sourcePath, join(stage, path));
-              if (copied.size !== row.size) throw new Error("Backup attachment size mismatch");
-              attachments.push({ id: row.id, sourcePath: row.path, path, ...copied });
-            }
-          } finally { db.close(); }
-          const configs: BackupManifest["configs"] = [];
-          for (const path of ["config.json", "apns.json"] as const) {
-            if (path === "apns.json" && !existsSync(join(home, path))) continue;
-            const copied = backupFile(backupPath(home, join(home, path)), join(stage, path));
-            checkConfig(join(stage, path));
-            configs.push({ path, ...copied });
-          }
-          const manifest: BackupManifest = {
-            format: 1, id, createdAt, applicationVersion: VERSION, sourceHome: home,
-            sourceHomeAliases: home === resolve(options.home) ? [] : [resolve(options.home)], schemaVersion,
-            database: { path: "iamceo.db", ...backupFile(join(stage, "iamceo.db")) }, configs, attachments,
-            externalSecrets: { apnsP8: "separate_backup_required_not_included" },
-            verification: { integrity: "ok", foreignKeys: "ok", attachments: "ok" },
-          };
-          writeFileSync(join(stage, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600, flag: "wx" });
-          verifyBackup(stage);
-          for (const path of ["iamceo.db", "manifest.json"]) {
-            const fd = openSync(join(stage, path), constants.O_RDONLY | constants.O_NOFOLLOW);
-            try { fsyncSync(fd); } finally { closeSync(fd); }
-          }
-          syncBackupDirectory(join(stage, "attachments"));
-          syncBackupDirectory(stage);
-          const directory = join(root, id);
-          renameSync(stage, directory);
-          published = directory;
-          syncBackupDirectory(root);
-          return { directory, manifest };
-        } catch (error) {
-          if (published) rmSync(published, { recursive: true });
-          throw error;
-        } finally {
-          if (existsSync(stage)) rmSync(stage, { recursive: true });
-        }
-      });
+      const root = backupRoot(home, options.backupDir);
+      return withHomeOwner(root, () => drain(createSteps(home, root, options)));
     });
   } catch (error) { throw toStorageError(error, "백업 실패"); }
 }
 
+/** The caller owns both home and root for every step. */
+function* createSteps(home: string, root: string, options: BackupOptions): Steps<BackupSnapshot> {
+  const now = options.now ?? new Date();
+  const createdAt = now.toISOString();
+  const id = `snapshot-${String(now.getTime()).padStart(13, "0")}-${randomUUID()}`;
+  if (!/^snapshot-\d{13}-/.test(id)) throw new Error("Unsupported snapshot time");
+  removeStalePending(root);
+  const stage = join(root, `.pending-${randomUUID()}`);
+  mkdirSync(stage, { mode: 0o700 });
+  let published: string | undefined;
+  try {
+    mkdirSync(join(stage, "attachments"), { mode: 0o700 });
+    const source = new Database(backupPath(home, join(home, "iamceo.db")), { readonly: true });
+    try {
+      checkBackupDatabase(source);
+      yield;
+      source.exec("PRAGMA busy_timeout = 5000");
+      source.query("VACUUM INTO ?").run(join(stage, "iamceo.db"));
+    } finally { source.close(); }
+    chmodSync(join(stage, "iamceo.db"), 0o600);
+    yield;
+    const db = new Database(join(stage, "iamceo.db"), { readonly: true });
+    let schemaVersion: number;
+    const attachments: BackupManifest["attachments"] = [];
+    try {
+      schemaVersion = checkBackupDatabase(db);
+      yield;
+      for (const [index, row] of attachmentRows(db).entries()) {
+        if (/\.p8$/i.test(row.name) || /\.p8$/i.test(row.path)) throw new Error("p8 cannot be included in backups");
+        // Config keeps IAMCEO_HOME's spelling; only the home itself may be an alias.
+        const aliases = [home, resolve(options.home)];
+        const root = aliases.find((alias) => {
+          const tail = relative(join(alias, "uploads"), row.path);
+          return tail && tail !== ".." && !tail.startsWith(`..${sep}`) && !isAbsolute(tail);
+        });
+        if (!root) throw new Error("Backup attachment escapes uploads");
+        const sourcePath = backupPath(join(home, "uploads"), join(home, relative(root, row.path)));
+        const path = `attachments/${index}.bin`;
+        const copied = backupFile(sourcePath, join(stage, path));
+        if (copied.size !== row.size) throw new Error("Backup attachment size mismatch");
+        attachments.push({ id: row.id, sourcePath: row.path, path, ...copied });
+        yield;
+      }
+    } finally { db.close(); }
+    const configs: BackupManifest["configs"] = [];
+    for (const path of ["config.json", "apns.json"] as const) {
+      if (path === "apns.json" && !existsSync(join(home, path))) continue;
+      const copied = backupFile(backupPath(home, join(home, path)), join(stage, path));
+      checkConfig(join(stage, path));
+      configs.push({ path, ...copied });
+    }
+    const manifest: BackupManifest = {
+      format: 1, id, createdAt, applicationVersion: VERSION, sourceHome: home,
+      sourceHomeAliases: home === resolve(options.home) ? [] : [resolve(options.home)], schemaVersion,
+      database: { path: "iamceo.db", ...backupFile(join(stage, "iamceo.db")) }, configs, attachments,
+      externalSecrets: { apnsP8: "separate_backup_required_not_included" },
+      verification: { integrity: "ok", foreignKeys: "ok", attachments: "ok" },
+    };
+    writeFileSync(join(stage, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+    yield;
+    yield* verifySteps(stage);
+    yield;
+    // No yield from here until the snapshot is published.
+    for (const path of ["iamceo.db", "manifest.json"]) {
+      const fd = openSync(join(stage, path), constants.O_RDONLY | constants.O_NOFOLLOW);
+      try { fsyncSync(fd); } finally { closeSync(fd); }
+    }
+    syncBackupDirectory(join(stage, "attachments"));
+    syncBackupDirectory(stage);
+    const directory = join(root, id);
+    renameSync(stage, directory);
+    published = directory;
+    syncBackupDirectory(root);
+    return { directory, manifest };
+  } catch (error) {
+    if (published) rmSync(published, { recursive: true });
+    throw error;
+  } finally {
+    if (existsSync(stage)) rmSync(stage, { recursive: true });
+  }
+}
+
+const SNAPSHOT_NAME = /^snapshot-\d{13}-[a-f0-9-]{36}$/;
+const newestFirst = (a: BackupSnapshot, b: BackupSnapshot) => b.manifest.createdAt.localeCompare(a.manifest.createdAt) || b.manifest.id.localeCompare(a.manifest.id);
+
 /** Invalid/incomplete candidates are never advertised as successful snapshots. */
 export function listBackups(backupDir: string): BackupSnapshot[] {
+  return drain(listSteps(backupDir));
+}
+
+/** Snapshots this process has fully verified (directory → manifest file identity). Published snapshots are immutable. */
+type Verified = Map<string, string>;
+
+function manifestStamp(directory: string): string | null {
+  try {
+    const stat = lstatSync(join(directory, "manifest.json"));
+    return stat.isFile() ? `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}` : null;
+  } catch { return null; }
+}
+
+function remember(verified: Verified, directory: string): void {
+  const stamp = manifestStamp(directory);
+  if (stamp) verified.set(directory, stamp);
+}
+
+/** Manifest only, no hashing. Use it only for ordering or for snapshots verified elsewhere. */
+function readCandidate(directory: string, name: string): BackupSnapshot {
+  directory = normalizeHome(directory);
+  const manifest = manifestSchema.parse(readBackupJson(backupPath(directory, join(directory, "manifest.json"))));
+  if (manifest.id !== name) throw new Error("Backup identity mismatch");
+  return { directory, manifest };
+}
+
+function* listSteps(backupDir: string, verified?: Verified): Steps<BackupSnapshot[]> {
   const root = normalizeHome(backupDir);
   if (!existsSync(root)) return [];
   const snapshots: BackupSnapshot[] = [];
   for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !/^snapshot-\d{13}-[a-f0-9-]{36}$/.test(entry.name)) continue;
+    if (!entry.isDirectory() || !SNAPSHOT_NAME.test(entry.name)) continue;
     try {
-      const snapshot = verifyBackup(join(root, entry.name));
-      if (snapshot.manifest.id === entry.name) snapshots.push(snapshot);
+      const directory = join(root, entry.name);
+      const known = verified?.get(directory);
+      if (known !== undefined && known === manifestStamp(directory)) {
+        // Do not re-hash every retained snapshot each day. Deletion and restore always verify in full.
+        snapshots.push(readCandidate(directory, entry.name));
+        continue;
+      }
+      const snapshot = yield* verifySteps(directory);
+      if (snapshot.manifest.id !== entry.name) continue;
+      snapshots.push(snapshot);
+      if (verified) remember(verified, snapshot.directory);
     } catch { /* Keep damaged candidates for diagnosis; they cannot suppress a new backup. */ }
+    yield;
   }
-  return snapshots.sort((a, b) => b.manifest.createdAt.localeCompare(a.manifest.createdAt) || b.manifest.id.localeCompare(a.manifest.id));
+  return snapshots.sort(newestFirst);
+}
+
+/** Candidates by name and manifest only, newest first. */
+function backupCandidates(backupDir: string): BackupSnapshot[] {
+  const root = normalizeHome(backupDir);
+  if (!existsSync(root)) return [];
+  const candidates: BackupSnapshot[] = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !SNAPSHOT_NAME.test(entry.name)) continue;
+    try { candidates.push(readCandidate(join(root, entry.name), entry.name)); }
+    catch { /* An unreadable candidate is never counted as a successful backup. */ }
+  }
+  return candidates.sort(newestFirst);
 }
 
 function policyValue(policy: Partial<BackupPolicy>): BackupPolicy {
@@ -256,35 +355,78 @@ function policyValue(policy: Partial<BackupPolicy>): BackupPolicy {
 /** Latest snapshot per UTC day/week; overlapping daily/weekly representatives count once. */
 export function pruneBackups(backupDir: string, policy: Partial<BackupPolicy> = {}): string[] {
   const { daily, weekly } = policyValue(policy);
-  return withHomeOwner(backupDir, (root) => {
-    const snapshots = listBackups(root);
-    const homes = new Map<string, { days: Set<string>; weeks: Set<string> }>();
-    const removed: string[] = [];
-    for (const snapshot of snapshots) {
-      // A shared backup volume must not let one home's snapshots evict another's.
-      let buckets = homes.get(snapshot.manifest.sourceHome);
-      if (!buckets) { buckets = { days: new Set(), weeks: new Set() }; homes.set(snapshot.manifest.sourceHome, buckets); }
-      const { days, weeks } = buckets;
-      const day = snapshot.manifest.createdAt.slice(0, 10);
-      const date = new Date(snapshot.manifest.createdAt);
-      date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7);
-      const week = date.toISOString().slice(0, 10);
-      const keepDay = !days.has(day) && days.size < daily;
-      const keepWeek = !weeks.has(week) && weeks.size < weekly;
-      days.add(day);
-      weeks.add(week);
-      if (keepDay || keepWeek) continue;
-      // Recheck immediately before deleting; never traverse unrelated directories.
-      verifyBackup(snapshot.directory);
-      rmSync(backupPath(root, snapshot.directory), { recursive: true });
-      removed.push(snapshot.directory);
-    }
-    syncBackupDirectory(root);
-    return removed;
-  });
+  return withHomeOwner(backupDir, (root) => drain(pruneSteps(root, daily, weekly)));
 }
 
-const pending = new Map<string, Promise<BackupSnapshot | null>>();
+/** The caller owns root for every step. */
+function* pruneSteps(root: string, daily: number, weekly: number, verified?: Verified): Steps<string[]> {
+  const snapshots = yield* listSteps(root, verified);
+  const homes = new Map<string, { days: Set<string>; weeks: Set<string> }>();
+  const removed: string[] = [];
+  for (const snapshot of snapshots) {
+    // A shared backup volume must not let one home's snapshots evict another's.
+    let buckets = homes.get(snapshot.manifest.sourceHome);
+    if (!buckets) { buckets = { days: new Set(), weeks: new Set() }; homes.set(snapshot.manifest.sourceHome, buckets); }
+    const { days, weeks } = buckets;
+    const day = snapshot.manifest.createdAt.slice(0, 10);
+    const date = new Date(snapshot.manifest.createdAt);
+    date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7);
+    const week = date.toISOString().slice(0, 10);
+    const keepDay = !days.has(day) && days.size < daily;
+    const keepWeek = !weeks.has(week) && weeks.size < weekly;
+    days.add(day);
+    weeks.add(week);
+    if (keepDay || keepWeek) continue;
+    // Recheck immediately before deleting; never traverse unrelated directories.
+    verified?.delete(snapshot.directory);
+    try { yield* verifySteps(snapshot.directory); }
+    // Damaged since it was listed: keep it for diagnosis like any other damaged candidate instead of failing the prune.
+    catch { continue; }
+    rmSync(backupPath(root, snapshot.directory), { recursive: true });
+    removed.push(snapshot.directory);
+    yield;
+  }
+  syncBackupDirectory(root);
+  return removed;
+}
+
+class BackupCancelled extends Error {}
+
+/** Keep ownership across yields. A home this process already owns is borrowed; one owned by another process fails as before. */
+function holdOwner(path: string): { home: string; release(): void } {
+  try {
+    const owner = acquireHomeOwner(path);
+    return { home: owner.home, release: () => owner.release() };
+  } catch (error) {
+    if (!(error instanceof HomeOwnershipError)) throw error;
+    return { home: withHomeOwner(path, (home) => home), release() {} };
+  }
+}
+
+interface Cooperation {
+  /** Runs one slice (loop-monitor attribution). */
+  step<R>(next: () => R): R;
+  cancelled(): boolean;
+  sliceMs: number;
+}
+
+/** Releases the event loop between slices. On cancellation or failure the generator's cleanup (finally) still runs. */
+async function cooperate<T>(steps: Steps<T>, cooperation: Cooperation, guard: <R>(next: () => R) => R): Promise<T> {
+  try {
+    let sliceStart = performance.now();
+    for (;;) {
+      if (cooperation.cancelled()) throw new BackupCancelled("backup cancelled");
+      const result = guard(() => cooperation.step(() => steps.next()));
+      if (result.done) return result.value;
+      if (performance.now() - sliceStart < cooperation.sliceMs) continue;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      sliceStart = performance.now();
+    }
+  } finally { steps.return(undefined as never); }
+}
+
+const pending = new Map<string, { job: Promise<BackupSnapshot | null>; cancel(): void }>();
+const RETRY_BASE_MS = 300_000;
 
 /** W6 runtime owns start/stop. Construction has no timers, network or implicit home. */
 export class BackupManager {
@@ -292,44 +434,98 @@ export class BackupManager {
   lastError: Error | null = null;
   private timer?: ReturnType<typeof setInterval>;
   private lastSuccessAt?: number;
-  constructor(readonly options: { home: string; backupDir: string; policy?: Partial<BackupPolicy>; now?: () => Date; loopMonitor?: LoopMonitor }) {
+  private failures = 0;
+  private retryAt = 0;
+  private readonly verified: Verified = new Map();
+  constructor(readonly options: { home: string; backupDir: string; policy?: Partial<BackupPolicy>; now?: () => Date; loopMonitor?: LoopMonitor; sliceMs?: number }) {
     this.policy = Object.freeze(policyValue(options.policy ?? {}));
   }
   run(force = false): Promise<BackupSnapshot | null> {
     // One in-flight operation per source home, even across manager instances/aliases.
     const key = normalizeHome(this.options.home);
     const existing = pending.get(key);
-    if (existing) return existing;
-    const run = () => {
+    if (existing) return existing.job;
+    let cancelled = false;
+    const monitor = this.options.loopMonitor;
+    const cooperation: Cooperation = {
+      step: (next) => monitor ? monitor.run("timer:backup", next) : next(),
+      cancelled: () => cancelled,
+      sliceMs: Math.max(0, this.options.sliceMs ?? 8),
+    };
+    const run = async () => {
       const now = this.options.now?.() ?? new Date();
       if (this.lastSuccessAt === undefined) {
-        const last = listBackups(this.options.backupDir).find((snapshot) => snapshot.manifest.sourceHome === key);
-        if (last) this.lastSuccessAt = Date.parse(last.manifest.createdAt);
+        // Revalidate the newest persisted package on restart, not on every timer tick. A damaged candidate cannot suppress a new backup.
+        for (const candidate of backupCandidates(this.options.backupDir)) {
+          if (candidate.manifest.sourceHome !== key) continue;
+          try {
+            await cooperate(verifySteps(candidate.directory), cooperation, (next) => next());
+            remember(this.verified, candidate.directory);
+            this.lastSuccessAt = Date.parse(candidate.manifest.createdAt);
+            break;
+          } catch (error) { if (error instanceof BackupCancelled) throw error; }
+        }
       }
-      // Revalidate persisted packages on restart/daily work, not on every timer tick.
       if (!force && this.lastSuccessAt !== undefined && now.getTime() - this.lastSuccessAt < this.policy.intervalMs) return null;
-      const snapshot = createBackup({ ...this.options, now });
-      pruneBackups(this.options.backupDir, this.policy);
+      let snapshot: BackupSnapshot;
+      try {
+        const home = holdOwner(this.options.home);
+        try {
+          const root = holdOwner(backupRoot(home.home, this.options.backupDir));
+          try {
+            snapshot = await cooperate(createSteps(home.home, root.home, { ...this.options, now }), cooperation,
+              (next) => withHomeOwner(home.home, () => withHomeOwner(root.home, next)));
+          } finally { root.release(); }
+        } finally { home.release(); }
+      } catch (error) { throw error instanceof BackupCancelled ? error : toStorageError(error, "백업 실패"); }
+      // The snapshot exists now: a failed prune must not make the retry create another full copy.
       this.lastSuccessAt = Date.parse(snapshot.manifest.createdAt);
+      remember(this.verified, snapshot.directory);
+      const root = holdOwner(this.options.backupDir);
+      try {
+        await cooperate(pruneSteps(root.home, this.policy.daily, this.policy.weekly, this.verified), cooperation, (next) => withHomeOwner(root.home, next));
+      } finally { root.release(); }
       this.lastError = null;
+      this.failures = 0;
+      this.retryAt = 0;
       return snapshot;
     };
-    const job = Promise.resolve().then(() => this.options.loopMonitor ? this.options.loopMonitor.run("timer:backup", run) : run())
-      .catch((error) => { this.lastError = toStorageError(error, "정기 백업 실패"); throw this.lastError; })
+    const job = Promise.resolve().then(run)
+      .catch((error) => {
+        // Stopped by shutdown, not a failure. The next start runs it again.
+        if (error instanceof BackupCancelled) return null;
+        this.lastError = toStorageError(error, "정기 백업 실패");
+        // Repeated failures push the timer's next attempt out: 5 minutes, doubling, capped at the backup interval.
+        this.failures++;
+        this.retryAt = (this.options.now?.() ?? new Date()).getTime() + Math.min(this.policy.intervalMs, RETRY_BASE_MS * 2 ** Math.min(this.failures - 1, 16));
+        throw this.lastError;
+      })
       .finally(() => { pending.delete(key); });
-    pending.set(key, job);
+    pending.set(key, { job, cancel: () => { cancelled = true; } });
     return job;
+  }
+  /** Timer entry. Unlike an explicit run(), it waits out the failure backoff. */
+  tick(): Promise<void> {
+    try {
+      if ((this.options.now?.() ?? new Date()).getTime() < this.retryAt) return Promise.resolve();
+      return this.run().then(() => {}, () => { /* lastError is exposed to runtime diagnostics. */ });
+    } catch (error) {
+      this.lastError = toStorageError(error, "정기 백업 실패");
+      return Promise.resolve();
+    }
   }
   start(): void {
     if (this.timer) return;
-    const tick = () => { void this.run().catch(() => { /* lastError is exposed to runtime diagnostics. */ }); };
-    tick();
-    this.timer = setInterval(tick, Math.min(this.policy.intervalMs, 60_000));
+    void this.tick();
+    this.timer = setInterval(() => { void this.tick(); }, Math.min(this.policy.intervalMs, 60_000));
     this.timer.unref();
   }
   async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    await pending.get(normalizeHome(this.options.home));
+    const active = pending.get(normalizeHome(this.options.home));
+    // Shutdown does not wait for a backup: the in-flight stage is removed and the job ends.
+    active?.cancel();
+    await active?.job;
   }
 }

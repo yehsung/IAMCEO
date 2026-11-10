@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { chmodSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Bus } from "../server/bus.ts";
 import { MIGRATIONS, openDb } from "../server/db.ts";
@@ -413,6 +413,81 @@ describe("append-only migrations", () => {
     expect(version(db)).toBe(MIGRATIONS.length);
     expect(db.query("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
     expect(backups(runtime)).toHaveLength(2);
+  });
+
+  test("repeated failures at one version keep a single pre-migration copy instead of one per boot", () => {
+    const { runtime, path } = fixture();
+    const old = historicalDb(path, beforeLastActive);
+    old.exec("CREATE TRIGGER reject_backfill BEFORE UPDATE ON members BEGIN SELECT RAISE(ABORT, 'reject backfill'); END");
+    old.query("INSERT INTO activity (member_id,at,kind,text) VALUES ('m',?,'tool','작업')").run(at);
+    old.close();
+    // A killed boot can leave a truncated copy of the same version; a hand-made copy must survive.
+    const truncated = `${path}.pre-v${beforeLastActive}-1700000000000-deadbeef.bak`;
+    writeFileSync(truncated, "truncated");
+    const manual = `${path}.pre-v${beforeLastActive}-manual-copy.bak`;
+    writeFileSync(manual, "manual");
+    const seen = new Set<string>();
+    for (let boot = 0; boot < 4; boot++) {
+      expect(() => openDb(path)).toThrow("reject backfill");
+      const names = backups(runtime).filter((name) => !name.includes("manual"));
+      expect(names).toHaveLength(1);
+      seen.add(names[0]!);
+      const snapshot = new Database(join(runtime.paths.iamceoHome, names[0]!), { readonly: true });
+      try {
+        expect(version(snapshot)).toBe(beforeLastActive);
+        expect(snapshot.query("SELECT body FROM messages").get()).toEqual({ body: "원본 보고" });
+      } finally { snapshot.close(); }
+    }
+    expect(seen.size).toBe(4);
+    expect(existsSync(truncated)).toBe(false);
+    expect(readFileSync(manual, "utf8")).toBe("manual");
+    const repair = new Database(path);
+    repair.exec("DROP TRIGGER reject_backfill");
+    repair.close();
+    const db = track(openDb(path));
+    expect(version(db)).toBe(MIGRATIONS.length);
+    expect(backups(runtime).filter((name) => !name.includes("manual"))).toHaveLength(1);
+  });
+
+  test("a finished migration keeps the three newest pre-migration copies and everything from the last day", () => {
+    const { runtime, path } = fixture();
+    historicalDb(path, afterWindow).close();
+    const name = (v: number, at: number, id: string) => `iamceo.db.pre-v${v}-${at}-${id}.bak`;
+    const now = Date.now(), day = 86_400_000;
+    const old = [name(3, now - 9 * day, "00000001"), name(4, now - 8 * day, "00000002"), name(5, now - 3 * day, "00000003"), name(6, now - 2 * day, "00000004")];
+    const recent = [name(7, now - day + 600_000, "00000005"), name(8, now - 3_600_000, "00000006")];
+    // Not ours: another DB's copies, other suffixes, a directory and a link with a matching name.
+    const foreign = ["other.db.pre-v3-1700000000000-00000001.bak", "iamceo.db.pre-v3-1700000000000-00000001.bak.keep", "iamceo.db.pre-v3-1700000000000-0000000g.bak", "iamceo.db.backup-before-update"];
+    for (const file of [...old, ...recent, ...foreign]) writeFileSync(join(runtime.paths.iamceoHome, file), file);
+    const directory = name(2, now - 30 * day, "0000000a"), link = name(2, now - 29 * day, "0000000b");
+    mkdirSync(join(runtime.paths.iamceoHome, directory));
+    const target = join(runtime.paths.work, "linked-target");
+    writeFileSync(target, "linked");
+    symlinkSync(target, join(runtime.paths.iamceoHome, link));
+    const db = track(openDb(path));
+    expect(version(db)).toBe(MIGRATIONS.length);
+    const kept = backups(runtime).filter((file) => /^iamceo\.db\.pre-v\d+-\d+-[a-f0-9]{8}\.bak$/.test(file)).sort();
+    const created = kept.filter((file) => file.startsWith(`iamceo.db.pre-v${afterWindow}-`));
+    expect(created).toHaveLength(1);
+    // Newest three = the new copy and both from the last day; the rest are older than a day.
+    expect(kept).toEqual([directory, link, ...recent, created[0]!].sort());
+    for (const file of foreign) expect(readFileSync(join(runtime.paths.iamceoHome, file), "utf8")).toBe(file);
+    expect(readFileSync(target, "utf8")).toBe("linked");
+    db.close();
+    // Reopening at the current version neither copies nor cleans.
+    openDb(path).close();
+    expect(backups(runtime).filter((file) => /^iamceo\.db\.pre-v\d+-\d+-[a-f0-9]{8}\.bak$/.test(file)).sort()).toEqual(kept);
+  });
+
+  test("more than three copies made within a day all survive a finished migration", () => {
+    const { runtime, path } = fixture();
+    historicalDb(path, afterWindow).close();
+    const now = Date.now();
+    const recent = [1, 2, 3, 4, 5].map((v) => `iamceo.db.pre-v${v}-${now - v * 3_600_000}-0000000${v}.bak`);
+    for (const file of recent) writeFileSync(join(runtime.paths.iamceoHome, file), file);
+    track(openDb(path));
+    expect(backups(runtime)).toHaveLength(6);
+    for (const file of recent) expect(readFileSync(join(runtime.paths.iamceoHome, file), "utf8")).toBe(file);
   });
 });
 

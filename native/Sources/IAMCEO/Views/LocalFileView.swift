@@ -31,6 +31,95 @@ struct LocalFilePresentation: ViewModifier {
     }
 }
 
+/// 로컬 파일 미리보기의 표시 한도. 서버는 텍스트를 2MB까지 주는데, 그것을 Text 하나나 통째 마크다운으로 그리면
+/// 시트가 몇 초 멈추고 수십만 pt 높이의 뷰가 제대로 그려지지 않는다. 자료의 코드 뷰어와 같은 한도를 쓴다.
+struct LocalTextPreview: Equatable, Sendable {
+    static let lineLimit = 5000
+    static let chunkLines = 200
+    static let markdownBytes = 200_000
+    /// 그릴 조각(조각마다 Text 하나).
+    let chunks: [String]
+    let totalLines: Int
+    let shownLines: Int
+    var cut: Bool { totalLines > shownLines }
+
+    init(code text: String) {
+        var all = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
+        if all.count > 1, all.last == "" { all.removeLast() }
+        totalLines = all.count
+        let lines = all.prefix(Self.lineLimit)
+        shownLines = lines.count
+        chunks = stride(from: 0, to: lines.count, by: Self.chunkLines).map { start in
+            let part = lines[start..<min(start + Self.chunkLines, lines.count)]
+            // Text는 끝의 줄바꿈을 버린다. 빈 줄로 끝나는 조각도 그 줄의 높이를 지킨다.
+            return part.last?.isEmpty == true ? part.joined(separator: "\n") + " " : part.joined(separator: "\n")
+        }
+    }
+
+    /// 긴 마크다운은 줄 경계에서 자른 앞부분만 그린다.
+    static func markdownHead(_ text: String) -> (text: String, cut: Bool) {
+        guard text.utf8.count > markdownBytes else { return (text, false) }
+        let head = text.utf8.prefix(markdownBytes)
+        guard let end = head.lastIndex(of: 10) else { return ("", true) }
+        return (String(text[..<end]), true)
+    }
+}
+
+private struct LocalMarkdownBody: View {
+    let text: String
+    var body: some View {
+        let head = LocalTextPreview.markdownHead(text)
+        MarkdownText(text: head.text)
+        if head.cut { MetaText(["긴 문서라 앞부분만 표시합니다", "전체는 '내용 복사'"]) }
+    }
+}
+
+/// Web .vw-code: mono 12.5 / 1.6 in a deep well.
+private struct LocalCodeBody: View {
+    let text: String
+    @State private var prepared: LocalTextPreview?
+    var body: some View {
+        let model = prepared ?? (text.utf8.count <= 200_000 ? LocalTextPreview(code: text) : nil)
+        let leading = CELeading.spacing(12.5, 1.6)
+        Group {
+            if let model {
+                ScrollView(.horizontal) {
+                    // 아주 긴 Text 하나는 제대로 그려지지 않는다. 200줄 조각으로 나눠 그린다.
+                    VStack(alignment: .leading, spacing: leading) {
+                        ForEach(Array(model.chunks.enumerated()), id: \.offset) { _, chunk in
+                            Text(chunk)
+                                .font(CEFont.mono).foregroundStyle(CE.ink)
+                                .lineSpacing(leading)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: true, vertical: true)
+                        }
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 12)
+                }
+                .scrollIndicators(.automatic)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("내용을 정리하는 중입니다").font(CEFont.meta).foregroundStyle(CE.ink2)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 12)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(CE.bgDeep.opacity(0.5), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(CE.line) }
+        .task(id: text.utf8.count) {
+            guard prepared == nil else { return }
+            let source = text
+            let model = await Task.detached(priority: .userInitiated) { LocalTextPreview(code: source) }.value
+            if !Task.isCancelled { prepared = model }
+        }
+        if let model, model.cut {
+            MetaText(["미리보기는 앞 \(model.shownLines.formatted())줄까지 표시합니다", "전체 \(model.totalLines.formatted())줄"])
+        }
+    }
+}
+
 struct LocalFileView: View {
     let path: String
     let projectID: String
@@ -138,21 +227,9 @@ struct LocalFileView: View {
             Button("열기") { Task { await openOriginal() } }.ceSecondaryButton().disabled(publishing)
         } else if let text = preview.info.content {
             if ["md", "markdown"].contains((preview.info.name as NSString).pathExtension.lowercased()) {
-                MarkdownText(text: text)
+                LocalMarkdownBody(text: text)
             } else {
-                // Web .vw-code: mono 12.5 / 1.6 in a deep well.
-                ScrollView(.horizontal) {
-                    Text(text)
-                        .font(CEFont.mono).foregroundStyle(CE.ink)
-                        .lineSpacing(CELeading.spacing(12.5, 1.6))
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: true, vertical: true)
-                        .padding(.horizontal, 14).padding(.vertical, 12)
-                }
-                .scrollIndicators(.automatic)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(CE.bgDeep.opacity(0.5), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
-                .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(CE.line) }
+                LocalCodeBody(text: text)
             }
         } else if let data = preview.imageData, let image = platformImage(data) {
             image.resizable().scaledToFit()

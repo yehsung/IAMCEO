@@ -24,6 +24,22 @@ extension PushAuthorizationProvider {
     func offerNotificationSetup() async -> Bool? { nil }
 }
 
+/// 알림 켜기 안내의 답을 한 번만 돌려준다. 버튼 없이 알림창이 사라지면(밑의 화면이 닫히며 함께 닫힘, 띄우기 실패)
+/// 버튼 핸들러와 함께 이 객체가 풀리므로 그때 '판단 보류'(nil)로 끝내 대기가 영영 남지 않게 한다.
+final class PendingSetupChoice: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool?, Never>?
+    init(_ continuation: CheckedContinuation<Bool?, Never>) { self.continuation = continuation }
+    func resolve(_ value: Bool?) {
+        lock.lock()
+        let waiting = continuation
+        continuation = nil
+        lock.unlock()
+        waiting?.resume(returning: value)
+    }
+    deinit { continuation?.resume(returning: nil) }
+}
+
 enum PushRegistrationState: Equatable {
     case disabled, needsHost, requestingPermission, denied, registering, awaitingHost
     case enabled, requiresOptIn, revocationPending, unsupported, failed

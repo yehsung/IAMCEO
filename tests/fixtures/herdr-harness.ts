@@ -61,14 +61,17 @@ export async function startIsolatedHerdr(opts: IsolatedOptions = {}): Promise<Is
   writeFileSync(join(zdot, ".zshrc"), `export PATH=${binDir}:$PATH\nunalias claude 2>/dev/null\nPS1='fake-shell$ '\nPROMPT_EOL_MARK=''\n`);
   for (const f of [".zshenv", ".zprofile", ".zlogin"]) writeFileSync(join(zdot, f), "");
 
+  // 격리 herdr 가 사용자 설정(~/.config/herdr/config.toml)을 읽으면 가짜 칸이 끝날 때마다 macOS 알림과 소리가 난다.
+  const herdrConfig = join(dir, "herdr-config.toml");
+  writeFileSync(herdrConfig, `[ui.toast]\ndelivery = "off"\n\n[ui.sound]\nenabled = false\n`);
   const name = `iamceo-test-${Math.random().toString(36).slice(2, 10)}`;
   const socketPath = join(homedir(), ".config", "herdr", "sessions", name, "herdr.sock");
   assertIsolatedSocket(socketPath);
   const client = Bun.spawn(["herdr", "--session", name], {
     cwd: join(dir, "work"),
     env: opts.realClaude
-      ? cleanEnv({ SHELL: "/bin/zsh", TERM: process.env.TERM ?? "xterm-256color" })
-      : cleanEnv({ PATH: `${binDir}:${process.env.PATH}`, SHELL: "/bin/zsh", ZDOTDIR: zdot, IAMCEO_FAKE_DIR: fakeDir }),
+      ? cleanEnv({ SHELL: "/bin/zsh", TERM: process.env.TERM ?? "xterm-256color", HERDR_CONFIG_PATH: herdrConfig })
+      : cleanEnv({ PATH: `${binDir}:${process.env.PATH}`, SHELL: "/bin/zsh", ZDOTDIR: zdot, IAMCEO_FAKE_DIR: fakeDir, HERDR_CONFIG_PATH: herdrConfig }),
     terminal: { cols: opts.cols ?? 160, rows: opts.rows ?? 50, data() {} },
   });
 

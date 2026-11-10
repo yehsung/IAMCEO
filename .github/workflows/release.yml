@@ -6,11 +6,14 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # 실패한 태그를 다시 돌릴 때: gh workflow run release.yml --ref vX.Y.Z (태그가 아니면 버전 확인에서 멈춘다)
+  workflow_dispatch:
 permissions:
   contents: write
 jobs:
   release:
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2

@@ -1,5 +1,7 @@
 /** Developer ID release, run by the supervisor outside the sandbox.
- * bun scripts/release-mac.ts --dry-run [--ref COMMIT] [--upload [--publish]]
+ * bun scripts/release-mac.ts --dry-run [--ref COMMIT] [--upload [--publish]] [--skip-tests] [--allow-untested]
+ * Native tests run before the build (--skip-tests omits them, and says so). --upload also requires a
+ * successful CI run of the commit (--allow-untested overrides, and says so).
  * Credentials ONLY: SIGN_IDENTITY, NOTARY_KEY_PATH, NOTARY_KEY_ID, NOTARY_ISSUER.
  * Commit changes first: only git archive inputs are built, never the working tree.
  */
@@ -8,7 +10,7 @@ import { closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readFi
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-export interface ReleaseOptions { ref: string; dryRun: boolean; upload: boolean; publish: boolean }
+export interface ReleaseOptions { ref: string; dryRun: boolean; upload: boolean; publish: boolean; skipTests?: boolean; allowUntested?: boolean }
 export function parseReleaseOptions(args: string[]): ReleaseOptions {
   const options: ReleaseOptions = { ref: "HEAD", dryRun: false, upload: false, publish: false };
   for (let i = 0; i < args.length; i++) {
@@ -19,6 +21,8 @@ export function parseReleaseOptions(args: string[]): ReleaseOptions {
       case "--dry-run": options.dryRun = true; break;
       case "--upload": options.upload = true; break;
       case "--publish": options.publish = true; break;
+      case "--skip-tests": options.skipTests = true; break;
+      case "--allow-untested": options.allowUntested = true; break;
       default: throw new Error(`Unknown argument: ${args[i]}`);
     }
   }
@@ -31,6 +35,14 @@ export function renderCask(template: string, version: string, sha256: string): s
   if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error("A SHA-256 digest is required");
   if (!template.includes('sha256 "@SHA256@"') || !/version "\d+\.\d+\.\d+"/.test(template)) throw new Error("Invalid cask template");
   return template.replace(/version "\d+\.\d+\.\d+"/, `version "${version}"`).replace('sha256 "@SHA256@"', `sha256 "${sha256}"`);
+}
+
+/** `gh run list --commit SHA --json workflowName,conclusion` output. A failed, cancelled or running check is not a pass. */
+export function hasPassingCheckRun(runsJson: string): boolean {
+  let runs: unknown;
+  try { runs = JSON.parse(runsJson); } catch { return false; }
+  return Array.isArray(runs) && runs.some(run => !!run && typeof run === "object" &&
+    ["release", "ci"].includes((run as { workflowName?: unknown }).workflowName as string) && (run as { conclusion?: unknown }).conclusion === "success");
 }
 
 /** codesign -d --verbose=4 output; signed time alone is not a secure timestamp. */
@@ -104,12 +116,12 @@ export function releaseMac(options: ReleaseOptions): void {
   const dmg = join(work, dmgName);
   const entitlements = join(work, "bun-entitlements.plist");
   const identity = dry ? "$SIGN_IDENTITY" : env.SIGN_IDENTITY!;
-  function run(command: string[], cwd = source, allowFailure = false): void {
+  function run(command: string[], cwd = source, allowFailure = false, childEnv?: Record<string, string | undefined>): void {
     // Redact API credentials even in the printed command, and never read the keychain in dry-run.
     const display = command.map((part, i) => ["--key", "--key-id", "--issuer"].includes(command[i - 1]) ? `<${command[i - 1].slice(2)} from env>` : part);
     console.log(`${dry ? "[dry-run] " : ""}${display.map(p => `'${p.replaceAll("'", "'\\''")}'`).join(" ")}`);
     if (dry) return;
-    const result = Bun.spawnSync(command, { cwd, stdin: "ignore", stdout: "inherit", stderr: "inherit" });
+    const result = Bun.spawnSync(command, { cwd, stdin: "ignore", stdout: "inherit", stderr: "inherit", ...(childEnv ? { env: childEnv } : {}) });
     if (result.exitCode !== 0 && !allowFailure) throw new Error(`Command failed (${result.exitCode}): ${command[0]}`);
   }
   function sign(path: string, extra: string[] = []): void {
@@ -138,11 +150,19 @@ export function releaseMac(options: ReleaseOptions): void {
         if (!release.isDraft) throw new Error("Upload requires an existing draft release; refuse to replace assets in a public release");
         if (read(remoteCommit) !== commit) throw new Error("The remote release tag differs from the archived commit");
       }
+      // A hand-made draft must not carry an untested commit to users: the commit's own checks must have passed.
+      const checks = ["gh", "run", "list", "--repo", "yehsung/IAMCEO", "--commit", commit, "--json", "workflowName,conclusion", "--limit", "50"];
+      if (options.allowUntested) console.log(`WARNING: --allow-untested: uploading ${tag} without a successful CI run of ${commit}.`);
+      else if (dry) { run(checks, root); console.log("[dry-run] Require a successful release or ci workflow run of this commit; abort otherwise"); }
+      else if (!hasPassingCheckRun(read(checks))) throw new Error(`No successful CI run (release or ci workflow) of ${commit}. Fix or re-run the checks first; --allow-untested overrides and is logged`);
     }
     if (!dry) mkdirSync(source);
     run(["git", "archive", "--format=tar", "--output", join(work, "source.tar"), commit], root);
     run(["tar", "-xf", join(work, "source.tar"), "-C", source], root);
     run([process.execPath, "install", "--frozen-lockfile"]);
+    // Native tests run nowhere else on the release path. They test the archived sources, without the signing credentials.
+    if (options.skipTests) console.log("WARNING: --skip-tests: native tests were NOT run for this build.");
+    else run(["bash", "scripts/check.sh", "swift"], source, false, { ...env, SIGN_IDENTITY: undefined, NOTARY_KEY_PATH: undefined, NOTARY_KEY_ID: undefined, NOTARY_ISSUER: undefined });
     run([process.execPath, "run", "build:native"]);
     if (!dry) {
       if (read(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", join(app, "Contents", "Info.plist")], source) !== pkg.version) throw new Error("Built app version differs from release version");
@@ -225,6 +245,7 @@ export function releaseMac(options: ReleaseOptions): void {
       writeFileSync(join(out, "iamceo.rb"), renderCask(readFileSync(join(source, "packaging", "homebrew", "Casks", "iamceo.rb"), "utf8"), pkg.version, digest));
     }
     console.log(`${dry ? "[dry-run] Write " : "Wrote "}${out}/{${dmgName},SHA256SUMS,iamceo.rb}; checksum is taken AFTER stapling.`);
+    console.log("Before installing over existing data: bun run smoke:db <path to iamceo.db> (opens a copy in an isolated server, never the original).");
     if (options.upload) run(["gh", "release", "upload", tag, "--repo", "yehsung/IAMCEO", join(out, dmgName), join(out, "SHA256SUMS"), "--clobber"]);
     if (options.publish) run(["gh", "release", "edit", tag, "--repo", "yehsung/IAMCEO", "--draft=false", "--latest"]);
   } finally {

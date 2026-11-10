@@ -20,6 +20,7 @@ export function isForbiddenTestSocket(socketPath: string): boolean {
 }
 
 let seq = 0;
+const SLICE_MS = 250, STALL_MS = 100;
 
 export function rpc<T = any>(socketPath: string, method: string, params: Record<string, unknown> = {}, timeoutMs = 8000): Promise<T> {
   if (isForbiddenTestSocket(socketPath)) {
@@ -40,7 +41,19 @@ export function rpc<T = any>(socketPath: string, method: string, params: Record<
       try { sock?.end(); } catch { /* 이미 닫힘 */ }
     };
     const fail = (code: string, detail: string) => finish(() => rej(new HerdrError(code, detail, written ? "unknown" : "not_written")));
-    const timer = setTimeout(() => fail("timeout", `${method}: ${timeoutMs}ms 안에 답 없음`), timeoutMs);
+    // 기한은 루프가 실제로 돈 시간으로 잰다. 루프가 멈췄다 풀리면 만료된 타이머가 이미 도착한 답보다 먼저 돌아 가짜 timeout 이 난다.
+    let left = timeoutMs, armed = 0, armedAt = 0, graced = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const arm = (ms: number) => { armed = ms; armedAt = performance.now(); timer = setTimeout(expire, ms); };
+    const expire = () => {
+      const stalled = performance.now() - armedAt > armed + STALL_MS;
+      left -= armed;
+      if (left > 0) return arm(Math.min(left, SLICE_MS));
+      // 마지막 구간에서 멈췄고 요청은 이미 썼다면, 와 있을 답을 한 번 읽게 둔다.
+      if (written && stalled && !graced) { graced = true; return arm(SLICE_MS); }
+      fail("timeout", `${method}: ${timeoutMs}ms 안에 답 없음`);
+    };
+    arm(Math.min(left, SLICE_MS));
     const down = (e: unknown) => fail("down", `herdr 소켓 연결 실패: ${String(e)}`);
     Bun.connect({
       unix: socketPath,

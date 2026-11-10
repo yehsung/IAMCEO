@@ -66,6 +66,7 @@ final class AppStore: ProjectManagementStore {
     private(set) var isPairing = false
     private(set) var pendingActions: Set<String> = []
     private(set) var terminalLeases: [String: TerminalLease] = [:]
+    private(set) var apiOutage: APIOutage?
     private(set) var bootstrap: Bootstrap?
     private(set) var runtime: RuntimeDiagnostics?
     private(set) var selectedProjectID: String?
@@ -424,6 +425,7 @@ final class AppStore: ProjectManagementStore {
         let previousProject = selectedProjectID
         let previousArchive = isArchive
         let previousState = state
+        let previousOutage = apiOutage
         let previousBootstrap = bootstrap
         releaseAllTerminals()
         stopRequests()
@@ -455,8 +457,9 @@ final class AppStore: ProjectManagementStore {
         pendingActions.removeAll()
         errorMessage = nil
         if sameServer {
+            apiOutage = previousOutage
             bootstrap = previousBootstrap; state = previousState; selectedProjectID = previousProject; isArchive = previousArchive
-        } else { bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil }
+        } else { apiOutage = nil; bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil }
         isLoading = true
         defer { if epoch == generation { isLoading = false } }
         do {
@@ -472,6 +475,7 @@ final class AppStore: ProjectManagementStore {
             writeNamespace = DraftStore.endpointNamespace(validated)
             drafts.selectNamespace(writeNamespace)
             bootstrap = initial
+            apiOutage = initial.apiOutage
             runtime = initial.runtime
             endpoint = validated.url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             if persistCredentials { UserDefaults.standard.set(endpoint, forKey: "iamceo.endpoint") }
@@ -561,7 +565,7 @@ final class AppStore: ProjectManagementStore {
         realtimeStatus = .paused; isRevalidating = false
         receivedCursor = nil; appliedSnapshotCursor = nil
         modelCatalog = .fallback
-        api = nil; accessCode = ""; bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil
+        api = nil; accessCode = ""; apiOutage = nil; bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil
         connectedCredentials = nil; transportFailures = 0; connectionIssue = nil
         pendingConnect = false
         connectionStatus = .disconnected
@@ -882,6 +886,8 @@ final class AppStore: ProjectManagementStore {
                 try applyWriteContext(snapshot)
                 if changedEpoch { dirty.formUnion([.diagnostics, .history, .activity, .delivery]) }
             } else if supportsSync, !optionalWriteContext { syncSupported = false }
+            // Probe timestamps can change even when the domain cursor stays the same.
+            apiOutage = result.sync.map { $0.apiOutage } ?? result.bootstrap.apiOutage
             if applyDomain {
                 if bootstrap != result.bootstrap { bootstrap = result.bootstrap }
                 if let diagnostics = result.bootstrap.runtime, runtime != diagnostics { runtime = diagnostics }
@@ -1321,7 +1327,7 @@ final class AppStore: ProjectManagementStore {
             stopRequests(); resetReadCollections(); projectCache.removeAll(); validatedProjectGeneration = nil; validatedWriteGeneration = nil
             generation = UUID(); projectGeneration = UUID()
             realtimeStatus = .blocked; isRevalidating = true
-            api = nil; bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil
+            api = nil; apiOutage = nil; bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil
             terminalLeases.removeAll()
             drafts.selectNamespace("unassigned"); writeNamespace = "unassigned"
             writeRevisions = nil; settingsEdit = nil; settingsConflict = nil
@@ -1566,6 +1572,11 @@ final class AppStore: ProjectManagementStore {
         } catch { if epoch == generation { handle(error) }; return nil }
     }
 
+    @discardableResult func resumeUsageLimit(_ decision: Decision) async -> Bool {
+        guard decision.kind == "usage_limit", decision.status == "open" else { return false }
+        return await answerDecision(decision, choice: UsageLimitInfo.resumeChoice, note: nil)
+    }
+
     @discardableResult func answerDecision(_ decision: Decision, choice: String?, note: String?) async -> Bool {
         let req = AnswerRequest(choice: choice, note: note, batch: false, expectedVersion: decision.updatedAt)
         let result: Decision? = await mutate("decision:\(decision.id)") { api in
@@ -1584,7 +1595,7 @@ final class AppStore: ProjectManagementStore {
         let epoch = generation, namespace = writeNamespace
         var results: [String: CardWriteStatus] = [:]
         for decision in decisions {
-            guard epoch == generation, canWrite,
+            guard epoch == generation, canWrite, decision.kind != "usage_limit",
                   let rec = decision.rec, decision.options.contains(where: { $0.k == rec }) else {
                 results[decision.id] = .notSent; continue
             }

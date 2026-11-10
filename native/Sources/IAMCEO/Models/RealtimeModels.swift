@@ -40,9 +40,10 @@ struct SyncSnapshot: Codable, Sendable {
     let bootstrap: Bootstrap
     let state: ProjectState?
     let revisions: SyncRevisions?
+    var apiOutage: APIOutage? = nil
 
     enum CodingKeys: String, CodingKey {
-        case protocolVersion = "protocol", cursor, requestedProjectId, projectStatus, bootstrap, state, revisions
+        case protocolVersion = "protocol", cursor, requestedProjectId, projectStatus, bootstrap, state, revisions, apiOutage
     }
 }
 extension SyncSnapshot {
@@ -55,6 +56,7 @@ extension SyncSnapshot {
         bootstrap = try c.decode(Bootstrap.self, forKey: .bootstrap)
         state = try c.decodeIfPresent(ProjectState.self, forKey: .state)
         revisions = try c.decodeIfPresent(SyncRevisions.self, forKey: .revisions)
+        apiOutage = try c.decodeIfPresent(APIOutage.self, forKey: .apiOutage)
         guard protocolVersion == 2 else {
             throw DecodingError.dataCorruptedError(forKey: .protocolVersion, in: c, debugDescription: "Unsupported sync protocol")
         }

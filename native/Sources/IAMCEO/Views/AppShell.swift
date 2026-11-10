@@ -1090,6 +1090,9 @@ struct StatusStrips: View {
                                detail: store.connectionIssue.map(ConnectionRecovery.reason), actionTitle: "다시 연결",
                                action: { Task { await store.restartRealtime() } }, lines: 3))
         }
+        if let outage = APIOutageInfo(store.apiOutage, showsOffline: offline) {
+            items.append(Strip(id: "api-outage", tone: outage.tone, icon: "wifi.exclamationmark", text: outage.text, lines: 3))
+        }
         if let notice = store.connectionNotice {
             items.append(Strip(id: "connection-check", tone: .neutral, icon: "arrow.triangle.2.circlepath", text: notice, busy: true))
         }

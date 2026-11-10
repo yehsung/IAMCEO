@@ -139,7 +139,7 @@ struct InboxView: View {
 
     private var openDecisions: [Decision] { store.decisions.filter { $0.status == "open" } }
     private var blocked: [Member] { InboxHomePolicy.approvals(store.members) }
-    private var uncertainMembers: [Member] { store.members.filter { MemberStatusInfo.isUncertain($0) } }
+    private var uncertainMembers: [Member] { store.members.filter { MemberStatusInfo.isUncertain($0) && !MemberStatusInfo.isNetworkPause($0.statusObservation?.error?.code) } }
     private var gateOpen: Bool { store.canWrite && store.state?.project.connection.ok == true }
     /// Why answers are impossible right now (nil = open). Every reason is global, so it is explained once:
     /// demo and disconnection by the pinned StatusStrips, plus one notice above the list (disconnected / runner).
@@ -172,7 +172,7 @@ struct InboxView: View {
         for id in session.engaged.sorted() where !seen.contains(id) {
             if let snapshot = session.reviews[id]?.decision { result.append(snapshot) }
         }
-        return InboxHomePolicy.prioritized(result, members: store.members, notices: store.deliveryNotices)
+        return UsageLimitInfo.prioritized(InboxHomePolicy.prioritized(result, members: store.members, notices: store.deliveryNotices))
     }
 
     private var blocks: [InboxBlock] {
@@ -180,11 +180,11 @@ struct InboxView: View {
         var placed = Set<String>()
         var out: [InboxBlock] = []
         for decision in live {
-            if let group = decision.group, !group.isEmpty {
+            if let group = decision.group, !group.isEmpty, decision.kind != "usage_limit" {
                 guard !placed.contains(group) else { continue }
                 placed.insert(group)
                 // Keep the same waiting/blocking priority inside a group as between groups.
-                out.append(InboxBlock(id: "group:\(group)", group: group, decisions: live.filter { $0.group == group }))
+                out.append(InboxBlock(id: "group:\(group)", group: group, decisions: live.filter { $0.group == group && $0.kind != "usage_limit" }))
             } else {
                 out.append(InboxBlock(id: decision.id, group: nil, decisions: [decision]))
             }
@@ -235,13 +235,20 @@ struct InboxView: View {
                     }
                 }
             }
+            if blocks.contains(where: { $0.decisions.first?.kind == "usage_limit" }) {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(blocks.filter { $0.decisions.first?.kind == "usage_limit" }) { block in
+                        blockView(block).id(block.id)
+                    }
+                }
+            }
             if !blocked.isEmpty { approvalSection }
             if blocks.isEmpty && blocked.isEmpty {
                 emptyCard(title: "결재할 항목이 없습니다", detail: emptyDetail)
             }
-            if !blocks.isEmpty {
+            if blocks.contains(where: { $0.decisions.first?.kind != "usage_limit" }) {
                 VStack(alignment: .leading, spacing: 10) {
-                    ForEach(blocks) { block in blockView(block).id(block.id) }
+                    ForEach(blocks.filter { $0.decisions.first?.kind != "usage_limit" }) { block in blockView(block).id(block.id) }
                 }
             }
         }
@@ -627,7 +634,10 @@ struct InboxView: View {
             session.reviews[decision.id] = makeReview(decision)
         }
         for (id, review) in session.reviews where !session.inFlight.contains(id) && review.isStale(comparedTo: byID[id]) {
-            if session.engaged.contains(id) && !session.answeredHere.contains(id) {
+            if review.decision.kind == "usage_limit", let current = byID[id], current.status == "open" {
+                // This is a notice, with no approval choice or memo to preserve for review.
+                session.reviews[id] = makeReview(current)
+            } else if session.engaged.contains(id) && !session.answeredHere.contains(id) {
                 // The person was working on this card: keep it, clear the pick, keep the memo, ask for review.
                 if review.choice != nil { session.reviews[id]?.choice = nil }
                 session.memoOnly.remove(id)
@@ -659,7 +669,7 @@ struct InboxView: View {
         guard gateOpen, !session.inFlight.contains(id), let review = session.reviews[id] else { return }
         let current = latest(id)
         let note = review.note.trimmingCharacters(in: .whitespacesAndNewlines)
-        let noteOnly = session.memoOnly.contains(id) && !review.decision.options.isEmpty
+        let noteOnly = review.decision.kind != "usage_limit" && session.memoOnly.contains(id) && !review.decision.options.isEmpty
         if noteOnly {
             guard review.decision.status == "open", !review.isStale(comparedTo: current), !note.isEmpty else { return }
         } else {
@@ -674,7 +684,12 @@ struct InboxView: View {
         guard session.beginSubmission(id) else { return }
         session.engaged.insert(id)
         session.cardErrors[id] = nil
-        let ok = await store.answerDecision(review.decision, choice: noteOnly ? nil : review.choice, note: note.isEmpty ? nil : note)
+        let ok: Bool
+        if review.decision.kind == "usage_limit" {
+            ok = await store.resumeUsageLimit(review.decision)
+        } else {
+            ok = await store.answerDecision(review.decision, choice: noteOnly ? nil : review.choice, note: note.isEmpty ? nil : note)
+        }
         guard session.contextID == context, drafts.namespace == namespace, store.selectedProjectID == projectID else { return }
         if ok, session.visitID == visit, session.memoRevisions[id, default: 0] == revision, drafts.memo(for: id) == memo {
             drafts.clearMemo(id)
@@ -682,7 +697,12 @@ struct InboxView: View {
         session.inFlight.remove(id)
         guard session.visitID == visit else { return }
         if ok {
-            session.answeredHere.insert(id)
+            if review.decision.kind == "usage_limit", let current = latest(id), current.status == "open" {
+                // A resume attempt may leave the same card open with stillLimited=true.
+                session.reviews[id] = makeReview(current)
+                session.engaged.remove(id)
+                session.answeredHere.remove(id)
+            } else { session.answeredHere.insert(id) }
             session.memoOnly.remove(id)
             if session.memoRevisions[id, default: 0] == revision { session.reviews[id]?.note = "" }
         } else {
@@ -936,7 +956,7 @@ private struct DecisionCard: View {
                     }
                     if !decision.images.isEmpty { ImageStrip(images: decision.images) }
                     if let fileID = decision.fileId { FileChip(title: fileTitle) { onOpenFile(fileID) } }
-                    answerArea
+                    if decision.kind == "usage_limit" { usageLimitArea } else { answerArea }
                 } else {
                     // The person reviewed the latest version and it is no longer open.
                     AnsweredBody(decision: decision, asker: asker)
@@ -949,7 +969,7 @@ private struct DecisionCard: View {
         }
         .overlay { FlashRing(on: flash) }
         .modifier(ApprovalKeyboardShortcuts(
-            enabled: !busy && !stale && !store.isDemo && !store.isArchive && decision.status == "open",
+            enabled: decision.kind != "usage_limit" && !busy && !stale && !store.isDemo && !store.isArchive && decision.status == "open",
             onNumber: { number in
                 guard decision.options.indices.contains(number - 1) else { return false }
                 review.choice = decision.options[number - 1].k; memoOnly = false
@@ -969,6 +989,7 @@ private struct DecisionCard: View {
         let state = asker.map { MemberStatusInfo($0) }
         // Web .ibx-top: who 13 / 600 ink-1, time 12.5 ink-2 at the far end.
         return HStack(alignment: .center, spacing: 8) {
+            if decision.kind == "usage_limit" { Tag("사용 한도", tone: .attention) }
             StatusDot(tone: state?.tone ?? .attention)
             Text(whoName).font(CEFont.secondary.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
             Spacer(minLength: 6)
@@ -977,7 +998,7 @@ private struct DecisionCard: View {
         }
         .help(state.map { "\(whoName) · \($0.label)" } ?? whoName)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([whoName, state?.label, relativeTime(decision.createdAt)].compactMap { $0 }.joined(separator: ", "))
+        .accessibilityLabel([decision.kind == "usage_limit" ? "사용 한도" : nil, whoName, state?.label, relativeTime(decision.createdAt)].compactMap { $0 }.joined(separator: ", "))
     }
 
     @ViewBuilder private var reopenLine: some View {
@@ -1024,6 +1045,38 @@ private struct DecisionCard: View {
             }
         }
         if let reopenError, !stale { ErrorLine(text: reopenError) }
+    }
+
+    // MARK: Usage limit notice
+
+    private var usageLimitArea: some View {
+        let info = UsageLimitInfo(decision, members: store.members)
+        return VStack(alignment: .leading, spacing: 10) {
+            if let resumes = info.resumesText {
+                Text(resumes).font(CEFont.meta).foregroundStyle(CE.ink2)
+            }
+            if !info.memberNames.isEmpty {
+                ChipFlow(spacing: 6) {
+                    ForEach(Array(info.memberNames.enumerated()), id: \.offset) { _, name in
+                        Tag(name, tone: .attention)
+                    }
+                }
+            }
+            if let warning = info.warning {
+                Text(warning).font(CEFont.note).foregroundStyle(Tone.attention.color)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Button(UsageLimitInfo.resumeLabel) {
+                review.choice = UsageLimitInfo.resumeChoice
+                memoOnly = false
+                onSubmit()
+            }
+            .ceProminentButton()
+            .disabled(locked || busy || stale)
+            if busy { ProgressView().controlSize(.small) }
+            if let lockHint { Text(lockHint).font(CEFont.meta).foregroundStyle(CE.ink2) }
+            if let error { ErrorLine(text: error) }
+        }
     }
 
     // MARK: Answer area
@@ -1269,6 +1322,7 @@ private struct AnsweredBody: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .center, spacing: 8) {
                 Text(who).font(CEFont.secondary.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
+                if decision.kind == "usage_limit" { Tag("사용 한도", tone: .attention) }
                 if closed { Tag("닫힘") } else { AnswerFlow(decision: decision) }
                 Spacer(minLength: 6)
                 Text(relativeTime(decision.answeredAt ?? decision.closedAt ?? decision.createdAt))
@@ -1719,13 +1773,14 @@ struct DecisionReview {
         return latest.id != decision.id || latest.updatedAt != decision.updatedAt || latest.status != decision.status
     }
     func showsConfirmation(comparedTo latest: Decision?, memoOnly: Bool, busy: Bool = false) -> Bool {
-        guard decision.status == "open", busy || !isStale(comparedTo: latest) else { return false }
+        guard decision.kind != "usage_limit", decision.status == "open", busy || !isStale(comparedTo: latest) else { return false }
         let typed = !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return decision.options.contains { $0.k == choice }
             || (typed && (memoOnly || (decision.options.isEmpty && !freeConfirmationCancelled)))
     }
     func canSubmit(comparedTo latest: Decision?) -> Bool {
         guard decision.status == "open", !isStale(comparedTo: latest) else { return false }
+        if decision.kind == "usage_limit" { return choice == UsageLimitInfo.resumeChoice }
         if decision.options.isEmpty { return !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         return decision.options.contains { $0.k == choice }
     }

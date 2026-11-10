@@ -26,6 +26,18 @@ struct MemberStatusInfo: Sendable {
 
     init(_ status: String) {
         switch status {
+        case "network_outage":
+            label = "인터넷 끊김으로 멈춤"; tone = .attention; icon = "wifi.slash"; live = false; needsMe = false
+            explanation = "인터넷 연결이 돌아오면 자동으로 이어 갑니다."
+        case "network_retry":
+            label = "네트워크 재시도 중"; tone = .attention; icon = "arrow.clockwise"; live = false; needsMe = false
+            explanation = "네트워크 연결을 다시 확인하고 있습니다."
+        case "usage_limit":
+            label = "사용 한도 도달"; tone = .attention; icon = "hourglass"; live = false; needsMe = true
+            explanation = "계정을 바꾸거나 한도가 초기화되면 이어 갈 수 있습니다."
+        case "unknown":
+            label = "상태 확인 불가"; tone = .attention; icon = "questionmark.circle"; live = false; needsMe = false
+            explanation = "지금 상태를 확인하지 못했습니다."
         case "working":
             label = "일하는 중"; tone = .live; icon = "bolt.fill"; live = true; needsMe = false
             explanation = "지금 일을 처리하고 있습니다. 뒤에서 도는 작업을 기다리는 동안도 일하는 중으로 봅니다."
@@ -56,6 +68,10 @@ struct MemberStatusInfo: Sendable {
     /// Display order for summaries (most urgent first).
     static let order = ["blocked", "waiting", "error", "working", "idle", "offline", "asleep"]
     static func rank(_ status: String) -> Int { order.firstIndex(of: status) ?? order.count }
+
+    static func isNetworkPause(_ code: String?) -> Bool {
+        ["network_outage", "network_retry", "usage_limit"].contains(code ?? "")
+    }
 
     static func isProgressAdvisory(_ code: String?) -> Bool {
         code == "progress_stalled" || code == "start_stalled"
@@ -99,6 +115,8 @@ struct MemberStatusInfo: Sendable {
         if observation?.ownership == "conflict" {
             self.init(label: "소유 관계 확인 필요", tone: .attention, icon: "lock.trianglebadge.exclamationmark",
                       explanation: "이 직원의 화면을 다른 곳에서도 잡고 있어 마지막 상태만 보여 줍니다. 자동 전달은 멈춰 둡니다.", needsMe: true)
+        } else if let code = observation?.error?.code, Self.isNetworkPause(code) {
+            self = Self(code)
         } else if Self.observationUnavailable(member) {
             self.init(label: "상태 확인 불가", tone: .attention, icon: "questionmark.circle",
                       explanation: observation?.error?.note ?? "지금 상태를 읽지 못했습니다. 마지막으로 본 상태를 보여 주며 다시 확인하고 있습니다.")
@@ -604,3 +622,44 @@ func plainDeliveryNote(_ note: String) -> String {
         .replacingOccurrences(of: "세션 기록", with: "대화 기록")
 }
 
+
+/// The app's own server connection takes precedence over the server's internet notice.
+struct APIOutageInfo: Sendable {
+    let text: String
+    let tone: Tone = .attention
+
+    init?(_ outage: APIOutage?, showsOffline: Bool) {
+        guard let outage, !showsOffline else { return nil }
+        text = "인터넷 연결이 불안정합니다 · 직원 \(Set(outage.affectedMemberIds).count)명 대기 중 · 돌아오면 자동으로 이어 갑니다"
+    }
+}
+
+struct UsageLimitInfo: Sendable {
+    static let resumeChoice = "resume"
+    static let resumeLabel = "계정을 바꿨어요 · 모두 이어가기"
+    static let stillLimitedText = "아직 같은 계정이라 한도가 남아 있지 않습니다. 다른 계정으로 로그인한 뒤 다시 누르세요."
+    let resumesText: String?
+    let memberNames: [String]
+    let warning: String?
+
+    init(_ decision: Decision, members: [Member], timeZone: TimeZone = .current) {
+        if let date = parseISODate(decision.usageLimit?.resetsAt) {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "ko_KR")
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.timeZone = timeZone
+            formatter.dateFormat = "M월 d일 a h시" + (Calendar(identifier: .gregorian).dateComponents(in: timeZone, from: date).minute == 0 ? "" : " m분")
+            resumesText = "\(formatter.string(from: date))에 자동으로 이어 갑니다"
+        } else { resumesText = nil }
+        var seen = Set<String>()
+        memberNames = (decision.usageLimit?.memberIds ?? []).filter { seen.insert($0).inserted }.map { id in
+            members.first { $0.id == id }.map { $0.name.isEmpty ? id : $0.name } ?? id
+        }
+        warning = decision.usageLimit?.stillLimited == true ? Self.stillLimitedText : nil
+    }
+
+    /// Stable partition: preserve the existing priority within each kind.
+    static func prioritized(_ decisions: [Decision]) -> [Decision] {
+        decisions.filter { $0.kind == "usage_limit" } + decisions.filter { $0.kind != "usage_limit" }
+    }
+}

@@ -196,11 +196,35 @@ extension DecisionOption {
     }
 }
 
+struct APIOutage: Codable, Sendable, Equatable {
+    var since: String
+    var affectedMemberIds: [String]
+    var lastProbeAt: String?
+}
+
+struct UsageLimit: Codable, Sendable, Equatable {
+    var cli: String
+    var resetsAt: String? = nil
+    var memberIds: [String] = []
+    var stillLimited: Bool = false
+}
+extension UsageLimit {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: ModelKey.self)
+        cli = try c.decodeIfPresent(String.self, forKey: ModelKey("cli")) ?? ""
+        resetsAt = try c.decodeIfPresent(String.self, forKey: ModelKey("resetsAt"))
+        memberIds = try c.decodeIfPresent([String].self, forKey: ModelKey("memberIds")) ?? []
+        stillLimited = try c.decodeIfPresent(Bool.self, forKey: ModelKey("stillLimited")) ?? false
+    }
+}
+
 struct Decision: Codable, Sendable, Identifiable, Equatable {
     var id: String = ""
     var projectId: String = ""
     var memberId: String? = nil
     var who: String = ""
+    var kind: String? = nil
+    var usageLimit: UsageLimit? = nil
     var title: String = ""
     var detail: String = ""
     var options: [DecisionOption] = []
@@ -232,6 +256,8 @@ extension Decision {
         projectId = try c.decodeIfPresent(String.self, forKey: ModelKey("projectId")) ?? ""
         memberId = try c.decodeIfPresent(String.self, forKey: ModelKey("memberId"))
         who = try c.decodeIfPresent(String.self, forKey: ModelKey("who")) ?? ""
+        kind = try c.decodeIfPresent(String.self, forKey: ModelKey("kind"))
+        usageLimit = try c.decodeIfPresent(UsageLimit.self, forKey: ModelKey("usageLimit"))
         title = try c.decodeIfPresent(String.self, forKey: ModelKey("title")) ?? ""
         detail = try c.decodeIfPresent(String.self, forKey: ModelKey("detail")) ?? ""
         options = try c.decodeIfPresent([DecisionOption].self, forKey: ModelKey("options")) ?? []
@@ -512,6 +538,7 @@ extension HerdrInfo {
 }
 
 struct Bootstrap: Codable, Sendable, Equatable {
+    var apiOutage: APIOutage? = nil
     var runtime: RuntimeDiagnostics? = nil
     var version: String = ""
     var settings: Settings = Settings()
@@ -525,6 +552,7 @@ struct Bootstrap: Codable, Sendable, Equatable {
 extension Bootstrap {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: ModelKey.self)
+        apiOutage = try c.decodeIfPresent(APIOutage.self, forKey: ModelKey("apiOutage"))
         runtime = try c.decodeIfPresent(RuntimeDiagnostics.self, forKey: ModelKey("runtime"))
         version = try c.decodeIfPresent(String.self, forKey: ModelKey("version")) ?? ""
         settings = try c.decodeIfPresent(Settings.self, forKey: ModelKey("settings")) ?? Settings()
@@ -952,6 +980,13 @@ struct StatusObservation: Codable, Sendable, Equatable {
     var error: ObservationError? = nil
 }
 struct ObservationError: Codable, Sendable, Equatable { let code: String; let note: String }
+extension ObservationError {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: ModelKey.self)
+        code = try c.decode(String.self, forKey: ModelKey("code"))
+        note = try c.decodeIfPresent(String.self, forKey: ModelKey("note")) ?? ""
+    }
+}
 struct SubagentState: Codable, Sendable, Equatable {
     var quality: String? = nil
     var count: Int? = nil

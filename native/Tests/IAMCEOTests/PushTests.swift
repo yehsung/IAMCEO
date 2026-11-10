@@ -113,6 +113,22 @@ private final class PushTestDate: @unchecked Sendable {
 
 @MainActor
 final class PushTests: XCTestCase {
+    func testReturningToConnectionDoesNotPersistOrRequestPushUntilConnected() throws {
+        let defaults = MemoryPushDefaults(), os = MockPushOS()
+        let service = PushNotificationService(provider: os, environment: .sandbox, defaults: defaults,
+                                              persistOnInitialization: false)
+        XCTAssertTrue(defaults.bytes.isEmpty)
+        XCTAssertEqual(os.prompts, 0)
+        XCTAssertTrue(os.registrations.isEmpty)
+        service.setHost(nil)
+        XCTAssertTrue(defaults.bytes.isEmpty)
+        // A subsequent real connection still enables normal persistence.
+        service.setHost(try host(MockPushAPI(server)))
+        XCTAssertFalse(defaults.bytes.isEmpty)
+        XCTAssertEqual(os.prompts, 0)
+        XCTAssertTrue(os.registrations.isEmpty)
+    }
+
     private let server = "277551bf-cf60-4ecd-a450-1fd3e695a8d8"
     private func host(_ api: MockPushAPI, demo: Bool = false) throws -> PushHostContext {
         PushHostContext(serverID: server, endpoint: try ServerEndpoint("https://fixture.invalid"), service: api, isDemo: demo)

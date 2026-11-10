@@ -1,6 +1,21 @@
 import XCTest
 @testable import IAMCEO
 
+private final class SampleConnectionDefaults: UserDefaults, @unchecked Sendable {
+    private let lock = NSLock()
+    private var bytes: Data?
+    private var writes = 0
+    var writeCount: Int { lock.withLock { writes } }
+    override func data(forKey key: String) -> Data? { lock.withLock { bytes } }
+    override func dictionary(forKey key: String) -> [String: Any]? {
+        key == "iamceo.chatDrafts" ? ["p:chief": "saved draft"] : nil
+    }
+    override func set(_ value: Any?, forKey key: String) {
+        lock.withLock { bytes = value as? Data; writes += 1 }
+    }
+    override func synchronize() -> Bool { true }
+}
+
 final class ContractTests: XCTestCase {
     func testDecodesOlderMemberAndUnknownEnumWithoutInventingRuntime() throws {
         let member = try JSONDecoder().decode(Member.self, from: Data(#"{"id":"worker-1","name":"A","cli":"codex","status":"starting","contextPct":37.5}"#.utf8))
@@ -63,6 +78,109 @@ final class ContractTests: XCTestCase {
         let sent = await store.sendMessage(text: "Test")
         XCTAssertFalse(sent)
         XCTAssertTrue(store.errorMessage?.contains("읽기 전용") == true)
+    }
+
+    @MainActor func testSampleSessionReplacesNavigationAndDraftsWithoutChangingOriginalCredentials() throws {
+        let network = try IsolatedTestNetwork()
+        let original = AppStore(session: network.session, persistCredentials: false)
+        original.endpoint = network.endpoint.url.absoluteString
+        original.accessCode = "fixture-only"
+        let key = DraftStore.key(project: "original", target: nil)
+        original.drafts.setText("keep this draft", for: key)
+        let originalRouter = Router(destination: .files)
+        originalRouter.showSettings = true
+        var connectionStoresCreated = 0
+        let session = AppSession(store: original, router: originalRouter, makeConnectionStore: {
+            connectionStoresCreated += 1
+            return AppStore(session: network.session, persistCredentials: false, restoreCredentials: false)
+        })
+
+        session.browseSample()
+        let sample = session.store
+        let sampleRouter = session.router
+        XCTAssertTrue(sample.isDemo)
+        XCTAssertFalse(sample === original)
+        XCTAssertFalse(sample.drafts === original.drafts)
+        XCTAssertFalse(sampleRouter === originalRouter)
+        XCTAssertEqual(sampleRouter.destination, .home)
+        XCTAssertFalse(sampleRouter.showSettings)
+        XCTAssertEqual(original.endpoint, network.endpoint.url.absoluteString)
+        XCTAssertEqual(original.accessCode, "fixture-only")
+        XCTAssertEqual(original.drafts.text(for: key), "keep this draft")
+        session.browseSample()
+        XCTAssertTrue(session.store === sample)
+
+        sampleRouter.showSettings = true
+        sample.drafts.setText("sample-only", for: key)
+        session.connectToMac()
+        XCTAssertEqual(connectionStoresCreated, 1)
+        XCTAssertFalse(session.store.isDemo)
+        XCTAssertFalse(session.store === original)
+        XCTAssertFalse(session.store === sample)
+        XCTAssertFalse(session.store.drafts === sample.drafts)
+        XCTAssertFalse(session.router === sampleRouter)
+        XCTAssertEqual(session.router.destination, .home)
+        XCTAssertFalse(session.router.showSettings)
+        XCTAssertNil(session.store.bootstrap)
+        XCTAssertTrue(session.store.accessCode.isEmpty)
+        XCTAssertEqual(session.store.drafts.text(for: key), "")
+        session.connectToMac()
+        XCTAssertEqual(connectionStoresCreated, 1)
+        XCTAssertTrue(network.requests.isEmpty)
+    }
+
+    @MainActor func testDemoDisablesClientsAndPersistenceEvenWithDefaultCredentialOption() async throws {
+        let network = try IsolatedTestNetwork()
+        // Deliberately omit persistCredentials: demo must override its default true value.
+        let demo = AppStore(demo: true)
+        let fields = Dictionary(uniqueKeysWithValues: Mirror(reflecting: demo).children.compactMap { child in
+            child.label.map { ($0, child.value) }
+        })
+        XCTAssertEqual(fields["persistCredentials"] as? Bool, false)
+        for field in ["realtime", "pathMonitor", "pushNotifications", "navigationDefaults"] {
+            let value = try XCTUnwrap(fields[field], field)
+            XCTAssertTrue(Mirror(reflecting: value).children.isEmpty, field)
+        }
+        XCTAssertFalse(demo.members.isEmpty)
+        XCTAssertFalse(demo.decisions.isEmpty)
+        XCTAssertFalse(demo.messages.isEmpty)
+        XCTAssertFalse(demo.files.isEmpty)
+        XCTAssertFalse(demo.projects.isEmpty)
+        await demo.connect()
+        await demo.refresh()
+        demo.setForeground(false)
+        demo.setForeground(true)
+        XCTAssertNil(demo.api)
+        XCTAssertEqual(demo.connectionStatus, .demo)
+        XCTAssertFalse(demo.canWrite)
+        let injectedDemo = AppStore(demo: true, session: network.session, persistCredentials: false)
+        await injectedDemo.connect()
+        await injectedDemo.refresh()
+        XCTAssertNil(injectedDemo.api)
+        XCTAssertTrue(network.requests.isEmpty)
+        await network.close()
+    }
+
+    @MainActor func testSampleTerminalDoesNotAllocateANetworkSession() throws {
+        let terminal = TerminalStreamClient()
+        var rendered = Data()
+        terminal.attachOutput(owner: UUID()) { rendered.append($0) }
+        terminal.showDemo()
+        let session = try XCTUnwrap(Mirror(reflecting: terminal).children.first { $0.label == "session" })
+        XCTAssertTrue(Mirror(reflecting: session.value).children.isEmpty)
+        XCTAssertFalse(rendered.isEmpty)
+        terminal.dispose()
+    }
+
+    @MainActor func testReturningToConnectionKeepsLegacyDraftsWithoutWritingDefaults() {
+        let defaults = SampleConnectionDefaults()
+        let drafts = DraftStore(defaults: defaults, persistMigration: false)
+        let key = DraftStore.key(project: "p", target: nil)
+        XCTAssertEqual(drafts.text(for: key), "saved draft")
+        XCTAssertEqual(defaults.writeCount, 0)
+        drafts.setText("edited after connecting", for: key)
+        XCTAssertGreaterThan(defaults.writeCount, 0)
+        XCTAssertEqual(DraftStore(defaults: defaults).text(for: key), "edited after connecting")
     }
     func testClearingRankDefaultsSendsExplicitNull() throws {
         let data = try JSONEncoder().encode(Settings(ranks: ["manager": RankConfig()]))

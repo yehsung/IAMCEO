@@ -8,7 +8,9 @@ struct TerminalMirrorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     let member: Member
-    @AppStorage(TerminalReadingScale.preferenceKey) private var readingZoom = 1.0
+    @AppStorage(TerminalReadingScale.preferenceKey) private var savedReadingZoom = 1.0
+    @State private var sampleReadingZoom = 1.0
+    private var readingZoom: Double { store.isDemo ? sampleReadingZoom : savedReadingZoom }
     @GestureState private var pinch = 1.0
     @State private var windowOwner = UUID()
     @State private var screen = ""
@@ -257,7 +259,10 @@ struct TerminalMirrorView: View {
         }
         .simultaneousGesture(MagnifyGesture().updating($pinch) { value, state, _ in
             state = value.magnification
-        }.onEnded { value in readingZoom = TerminalReadingScale.zoom(readingZoom * value.magnification) })
+        }.onEnded { value in
+            let zoom = TerminalReadingScale.zoom(readingZoom * value.magnification)
+            if store.isDemo { sampleReadingZoom = zoom } else { savedReadingZoom = zoom }
+        })
         .frame(minHeight: keyboardUp ? 120 : 220, maxHeight: .infinity)
         .background(CE.bgDeep.opacity(0.78), in: shape)
         .clipShape(shape)

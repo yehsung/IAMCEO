@@ -43,19 +43,19 @@ struct IAMCEOApp: App {
     #if os(iOS)
     @UIApplicationDelegateAdaptor(NotificationAppDelegate.self) private var notificationDelegate
     #endif
-    @State private var store: AppStore
-    @State private var drafts: DraftStore
+    @State private var session: AppSession
+    private var store: AppStore { session.store }
+    private var drafts: DraftStore { session.store.drafts }
     @State private var lifecycle = ApplicationLifecycle()
     #if os(macOS)
-    @State private var sharedRouter = LaunchOptions.makeRouter()
+    private var sharedRouter: Router { session.router }
     #endif
     init() {
         #if os(macOS)
         UserDefaults.standard.register(defaults: ["NSApplicationCrashOnExceptions": true])
         #endif
         let store = AppStore(demo: LaunchOptions.demo, persistCredentials: !LaunchOptions.demo)
-        _store = State(initialValue: store)
-        _drafts = State(initialValue: store.drafts)
+        _session = State(initialValue: AppSession(store: store, router: LaunchOptions.makeRouter()))
     }
     var body: some Scene {
         // A fixed id keeps the scene identity stable across builds (the default id is derived from the root view type).
@@ -67,7 +67,9 @@ struct IAMCEOApp: App {
                 // for the app's life (it only posts when the owner turned Mac notifications on in 설정).
                 .task { MacNotificationService.shared.start(store: store, router: sharedRouter) }
             #else
-            MainWindow(store: store, drafts: drafts)
+            MainWindow(store: store, drafts: drafts, sharedRouter: session.router)
+                .environment(\.appSession, session)
+                .id(ObjectIdentifier(store))
                 .modifier(ApplicationLifecycleHooks(lifecycle: lifecycle, store: store))
             #endif
         }
@@ -90,6 +92,50 @@ struct IAMCEOApp: App {
                 .modifier(ApplicationLifecycleHooks(lifecycle: lifecycle, store: store))
         }
         #endif
+    }
+}
+
+/// Replacing the workspace also discards its navigation, sheets and in-memory drafts.
+/// No mode preference is persisted; normal launches still use the real connection flow.
+@MainActor @Observable
+final class AppSession {
+    private(set) var store: AppStore
+    private(set) var router: Router
+    @ObservationIgnored private let makeConnectionStore: () -> AppStore
+
+    init(store: AppStore, router: Router = Router(),
+         makeConnectionStore: @escaping () -> AppStore = { AppStore(restoreCredentials: false) }) {
+        self.store = store
+        self.router = router
+        self.makeConnectionStore = makeConnectionStore
+    }
+
+    func browseSample() {
+        guard !store.isDemo else { return }
+        replaceStore(AppStore(demo: true, persistCredentials: false))
+    }
+
+    func connectToMac() {
+        guard store.isDemo else { return }
+        replaceStore(makeConnectionStore())
+    }
+
+    private func replaceStore(_ next: AppStore) {
+        store.prepareForReplacement()
+        router.cancelPendingNavigation()
+        router = Router()
+        store = next
+    }
+}
+
+private struct AppSessionKey: EnvironmentKey {
+    static let defaultValue: AppSession? = nil
+}
+
+extension EnvironmentValues {
+    var appSession: AppSession? {
+        get { self[AppSessionKey.self] }
+        set { self[AppSessionKey.self] = newValue }
     }
 }
 

@@ -651,6 +651,7 @@ private func settingsTrim(_ value: String) -> String { value.trimmingCharacters(
 /// First screen without a connection (web Setup): one centred glass card. Never shows sample-like data.
 struct ConnectionView: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.appSession) private var appSession
     @State private var revealCode = false
     /// iPhone: manual address + code entry is a fallback behind the QR flow.
     @State private var showManual = false
@@ -779,6 +780,18 @@ struct ConnectionView: View {
             }
             .buttonStyle(.plain)
             if showManual { manualFields }
+            if !restoringConnection {
+                orDivider
+                Button { appSession?.browseSample() } label: {
+                    Text("샘플로 둘러보기")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .ceSecondaryButton()
+                .accessibilityLabel("샘플로 둘러보기")
+                Text("Mac 없이 화면을 둘러봅니다. 예시 데이터이며 읽기 전용입니다.")
+                    .font(CEFont.meta).foregroundStyle(CE.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             #else
             localStart
             orDivider
@@ -863,7 +876,6 @@ struct ConnectionView: View {
                 .padding(.top, 4)
     }
 
-    #if os(macOS)
     private var orDivider: some View {
         HStack(spacing: 10) {
             Rectangle().fill(CE.line).frame(height: 1)
@@ -874,6 +886,7 @@ struct ConnectionView: View {
         .accessibilityHidden(true)
     }
 
+    #if os(macOS)
     private var localStart: some View {
         VStack(spacing: 8) {
             Button { startLocal() } label: {

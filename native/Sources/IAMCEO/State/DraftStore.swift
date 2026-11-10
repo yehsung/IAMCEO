@@ -137,7 +137,8 @@ final class DraftStore {
     @ObservationIgnored private let storage: LocalStateStorage
     @ObservationIgnored private var canPersist = true
 
-    init(persist: Bool = true, namespace: String = "unassigned", storageURL: URL? = nil, defaults: UserDefaults? = nil) {
+    init(persist: Bool = true, namespace: String = "unassigned", storageURL: URL? = nil, defaults: UserDefaults? = nil,
+         persistMigration: Bool = true) {
         self.namespace = namespace
         storage = LocalStateStorage(enabled: persist, url: storageURL, defaults: defaults ?? .standard, key: "iamceo.drafts.v2")
         do {
@@ -155,7 +156,7 @@ final class DraftStore {
                 }
                 legacy.memos = source.dictionary(forKey: "iamceo.decisionMemos") as? [String: String] ?? [:]
                 hosts["unassigned"] = legacy
-                save()
+                if persistMigration { save() }
             }
         } catch { persistenceError = error.localizedDescription; canPersist = false }
     }

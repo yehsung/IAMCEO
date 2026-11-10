@@ -65,13 +65,14 @@ final class PushNotificationService {
     private static let persistenceKey = "iamceo.push.registration.v1"
 
     init(provider: any PushAuthorizationProvider, environment: PushEnvironment, defaults: UserDefaults? = .standard,
-         settingsStore: PushSettingsStore? = nil, now: @escaping @Sendable () -> Date = { Date() }) {
+         settingsStore: PushSettingsStore? = nil, now: @escaping @Sendable () -> Date = { Date() },
+         persistOnInitialization: Bool = true) {
         self.provider = provider; self.environment = environment; self.defaults = defaults; self.now = now
         self.settingsStore = settingsStore ?? PushSettingsStore()
         if let data = defaults?.data(forKey: Self.persistenceKey), let saved = try? JSONDecoder().decode(PushLocalState.self, from: data),
            UUID(uuidString: saved.installationID) != nil { local = saved }
         else { local = PushLocalState() }
-        persist()
+        if persistOnInitialization { persist() }
         provider.onToken = { [weak self] data, id in Task { await self?.receiveToken(data, generation: id) } }
         provider.onFailure = { [weak self] id in self?.registrationFailed(generation: id) }
     }

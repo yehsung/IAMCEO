@@ -309,6 +309,7 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored private var selectionRequestID = UUID()
     @ObservationIgnored private var appliedSyncIdentity: AppliedSyncIdentity?
     @ObservationIgnored private let navigationDefaults: UserDefaults?
+    @ObservationIgnored private var pendingDraftRecovery = false
     @ObservationIgnored private var catalogDiscoveryTask: Task<Void, Never>?
 
     init(demo: Bool = false, session: URLSession? = nil, persistCredentials: Bool = true,
@@ -316,31 +317,34 @@ final class AppStore: ProjectManagementStore {
          realtime: RealtimeClient? = nil, clock: any RealtimeClock = SystemRealtimeClock(),
          retryJitter: @escaping @Sendable (Double) -> Double = { $0 * Double.random(in: 0.8...1.2) },
          lowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled,
-         pushNotifications: PushNotificationService? = nil, navigationDefaults: UserDefaults? = nil) {
-        self.navigationDefaults = navigationDefaults ?? (persistCredentials && !demo ? .standard : nil)
+         pushNotifications: PushNotificationService? = nil, navigationDefaults: UserDefaults? = nil,
+         restoreCredentials: Bool = true) {
+        self.navigationDefaults = demo ? nil : (navigationDefaults ?? (persistCredentials ? .standard : nil))
         injectedSession = session
         // URLProtocol cannot intercept a WebSocket upgrade. Injected HTTP sessions must also
         // inject a socket transport to opt in; tests can never escape to the real network.
-        self.realtime = realtime ?? (session == nil ? RealtimeClient() : nil)
+        self.realtime = demo ? nil : (realtime ?? (session == nil ? RealtimeClient() : nil))
         syncClock = clock; self.retryJitter = retryJitter; self.lowPowerMode = lowPowerMode
-        self.persistCredentials = persistCredentials
+        self.persistCredentials = persistCredentials && !demo
         isDemo = demo
         #if os(iOS)
-        self.pushNotifications = pushNotifications ?? (!demo && persistCredentials ? PushNotificationService(
+        self.pushNotifications = demo ? nil : (pushNotifications ?? (persistCredentials ? PushNotificationService(
             provider: SystemPushAuthorizationProvider.shared,
-            environment: PushNotificationService.environment(infoValue: Bundle.main.object(forInfoDictionaryKey: "IAMCEOPushEnvironment") as? String)) : nil)
+            environment: PushNotificationService.environment(infoValue: Bundle.main.object(forInfoDictionaryKey: "IAMCEOPushEnvironment") as? String),
+            persistOnInitialization: restoreCredentials) : nil))
         #else
-        self.pushNotifications = pushNotifications
+        self.pushNotifications = demo ? nil : pushNotifications
         #endif
         pushSettings = self.pushNotifications?.settingsStore ?? PushSettingsStore()
-        let composerDrafts = drafts ?? DraftStore(persist: persistCredentials && !demo)
+        let composerDrafts = drafts ?? DraftStore(persist: persistCredentials && !demo, persistMigration: restoreCredentials)
         self.drafts = composerDrafts
         writeStorage = LocalStateStorage(enabled: !demo && (persistCredentials || writeStorageURL != nil),
                                          url: writeStorageURL, defaults: .standard, key: "iamceo.appWrites.v1")
         do {
             let restored = try writeStorage.read(AppWriteJournal.self) ?? AppWriteJournal()
             let restoredSubmissions = try submissions ?? SubmissionStore(persist: persistCredentials && !demo)
-            try restoredSubmissions.recoverMessageDrafts(drafts: composerDrafts)
+            if restoreCredentials { try restoredSubmissions.recoverMessageDrafts(drafts: composerDrafts) }
+            else { pendingDraftRecovery = !demo }
             self.submissions = restoredSubmissions
             journal = restored
         } catch {
@@ -353,9 +357,9 @@ final class AppStore: ProjectManagementStore {
         #else
         let defaultEndpoint = ""
         #endif
-        let savedEndpoint = persistCredentials ? (UserDefaults.standard.string(forKey: "iamceo.endpoint") ?? defaultEndpoint) : defaultEndpoint
+        let savedEndpoint = self.persistCredentials && restoreCredentials ? (UserDefaults.standard.string(forKey: "iamceo.endpoint") ?? defaultEndpoint) : defaultEndpoint
         endpoint = savedEndpoint
-        accessCode = persistCredentials ? (KeychainStore.accessCode(for: savedEndpoint) ?? "") : ""
+        accessCode = self.persistCredentials && restoreCredentials ? (KeychainStore.accessCode(for: savedEndpoint) ?? "") : ""
         if demo {
             modelCatalog = .demo
             let fixture = DemoFixtures.workspace()
@@ -394,6 +398,16 @@ final class AppStore: ProjectManagementStore {
 
     func connect() async {
         guard !isDemo else { return }
+        // Returning from a sample must not write saved state until the owner actually connects.
+        if pendingDraftRecovery {
+            do {
+                try submissions?.recoverMessageDrafts(drafts: drafts)
+                pendingDraftRecovery = false
+            } catch {
+                errorMessage = error.localizedDescription
+                return
+            }
+        }
         // Canonical origins make a trailing slash or default port the same server.
         if let creds = connectedCredentials,
            let requested = try? ServerEndpoint(endpoint), let connected = try? ServerEndpoint(creds.endpoint),
@@ -549,6 +563,23 @@ final class AppStore: ProjectManagementStore {
         let saved = navigationDefaults?.dictionary(forKey: navigationKey)?["destination"] as? String
         let destination = saved.flatMap(Destination.init(rawValue:)) ?? .home
         for item in routers { item.value?.restoreDestination(destination) }
+    }
+
+    /// Stop a discarded workspace without logging out, deleting credentials or saving navigation.
+    func prepareForReplacement() {
+        foreground = false
+        pendingConnect = false
+        foregroundGeneration = UUID()
+        generation = UUID()
+        projectGeneration = UUID()
+        stopRequests()
+        pushNotifications?.setHost(nil)
+        pushSettings.setHost(nil)
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        lifecycleObservers.forEach(NotificationCenter.default.removeObserver)
+        lifecycleObservers.removeAll()
+        api = nil
     }
 
     func disconnect() {

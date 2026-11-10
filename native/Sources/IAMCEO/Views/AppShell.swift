@@ -61,7 +61,13 @@ struct AppShell: View {
         }
         .foregroundStyle(CE.ink)
         .projectManagementSheets(enabled: !router.showSettings && !showArchive)
-        .sheet(isPresented: $showArchive) { ArchiveLibraryView() }
+        .sheet(isPresented: $showArchive) {
+            #if os(iOS)
+            ArchiveLibraryView().ceStatusStrips()
+            #else
+            ArchiveLibraryView()
+            #endif
+        }
         #if DEBUG && os(iOS)
         .sheet(isPresented: $keyBarPreview) { TerminalKeyBarPreview() }
         #endif
@@ -73,7 +79,7 @@ struct AppShell: View {
         .sheet(isPresented: $router.showNewProject) { NewProjectView() }
         .sheet(isPresented: $router.showNewMember) { NewMemberView() }
         #if os(iOS)
-        .sheet(item: rootTerminal) { TerminalSessionContent(member: $0) }
+        .sheet(item: rootTerminal) { TerminalSessionContent(member: $0).ceStatusStrips() }
         #endif
         #if os(macOS)
         // Mac: a terminal is its own window (A-54), so two members can sit side by side and the screen behind stays
@@ -100,7 +106,7 @@ struct AppShell: View {
             router.memberID = nil
         }
         #else
-        .sheet(isPresented: $router.showSettings) { SettingsView() }
+        .sheet(isPresented: $router.showSettings) { SettingsView().ceStatusStrips() }
         #endif
         #if DEBUG && os(iOS)
         // Development hook (simulator has no camera and cannot tap the system "open in IAMCEO?" prompt):
@@ -1052,6 +1058,7 @@ extension View {
 /// (full text in the tooltip): wrapped text in a bar outside a scroll view must not size the split view.
 struct StatusStrips: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.appSession) private var appSession
     @Environment(Router.self) private var router
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The realtime socket drops and comes back within a second on every return to the app or Wi-Fi change, and
@@ -1079,7 +1086,8 @@ struct StatusStrips: View {
         var items: [Strip] = []
         // Mac shows sample mode in the rail's connection mark and on the composer, so no strip there.
         if store.isDemo && !isMac {
-            items.append(Strip(id: "demo", tone: .accent, icon: "eye", text: "샘플 데이터 · 읽기 전용"))
+            items.append(Strip(id: "demo", tone: .neutral, icon: "eye", text: "샘플 둘러보기 · 읽기 전용",
+                               actionTitle: "Mac과 연결", action: { appSession?.connectToMac() }))
         }
         if offline && !store.isRestarting {
             // A-90: what to check, not the system's raw error (that stays in the Mac tooltip). The iPhone usually
@@ -1170,11 +1178,14 @@ struct StatusStrips: View {
                     .lineSpacing(CELeading.spacing(13.5, 1.35))
                     .lineLimit(isMac ? 1 : item.lines).truncationMode(.tail)
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(full)
             Spacer(minLength: 6)
             if let title = item.actionTitle, let action = item.action {
                 Button(title, action: action)
                     .buttonStyle(StripActionStyle(color: palette.action))
                     .fixedSize()
+                    .accessibilityLabel(title)
             }
         }
         // web: padding 8 8 8 14 around a 32pt button. iPhone: the button's 44pt hit area sets the height.
@@ -1194,7 +1205,7 @@ struct StatusStrips: View {
         }
         .overlay { shape.strokeBorder(palette.ring) }
         .help(full)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
     }
 }
 

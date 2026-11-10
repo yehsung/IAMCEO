@@ -103,7 +103,7 @@ final class TerminalStreamClient {
     @ObservationIgnored private let messageSender: ((URLSessionWebSocketTask.Message) async throws -> Void)?
     @ObservationIgnored private let receiveMessage: ((URLRequest) async throws -> URLSessionWebSocketTask.Message)?
     @ObservationIgnored private var resizeTask: Task<Void, Never>?
-    @ObservationIgnored private var session: URLSession
+    @ObservationIgnored private var session: URLSession?
     @ObservationIgnored private var pendingOutput: [Data] = []
     @ObservationIgnored private var connection = UUID()
     @ObservationIgnored private var outputOwner: UUID?
@@ -118,14 +118,21 @@ final class TerminalStreamClient {
          receiveMessage: ((URLRequest) async throws -> URLSessionWebSocketTask.Message)? = nil) {
         self.messageSender = messageSender; self.receiveMessage = receiveMessage
         self.resizeSender = resizeSender
+        self.session = session
+    }
+    /// A sample terminal only renders bundled output; it must never allocate a network session.
+    private func networkSession() -> URLSession {
+        if let session { return session }
         let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
         config.timeoutIntervalForResource = 0
-        self.session = session ?? URLSession(configuration: config, delegate: OriginRedirectDelegate(), delegateQueue: nil)
+        let session = URLSession(configuration: config, delegate: OriginRedirectDelegate(), delegateQueue: nil)
+        self.session = session
+        return session
     }
-    deinit { session.invalidateAndCancel() }
+    deinit { session?.invalidateAndCancel() }
     static func isUnsupported(status: Int) -> Bool { [404, 405, 501].contains(status) }
     static func reconnectDelay(attempt: Int) -> Double { [1, 2, 4, 8, 15][min(4, max(0, attempt))] }
 
@@ -146,7 +153,7 @@ final class TerminalStreamClient {
                 do {
                     let request = try await api.terminalStreamRequest(memberID: memberID, mode: mode, cols: cols, rows: rows, leaseID: leaseID, sizePolicy: sizePolicy)
                     guard !Task.isCancelled, self.connection == token else { return }
-                    let ws = self.session.webSocketTask(with: request)
+                    let ws = self.networkSession().webSocketTask(with: request)
                     self.socket = ws
                     if self.receiveMessage == nil { ws.resume() }
                     while !Task.isCancelled {
@@ -296,7 +303,7 @@ final class TerminalStreamClient {
     /// Sheet teardown breaks callbacks that capture SwiftUI State and invalidates the session.
     func dispose() {
         onReady = nil; onLease = nil; onControlEnded = nil; onOutput = nil; outputOwner = nil
-        close(); session.invalidateAndCancel()
+        close(); session?.invalidateAndCancel()
     }
     private struct StreamEnded: Error {}
 }

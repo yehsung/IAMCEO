@@ -24,6 +24,7 @@ struct TerminalGridLayout: Equatable {
 
 /// SwiftTerm owns VT parsing, selection, accessibility and (on iOS) the input accessory.
 struct LiveTerminalSurface: View {
+    @Environment(AppStore.self) private var store
     let client: TerminalStreamClient
     let mode: TerminalStreamMode
     let cols: Int
@@ -34,7 +35,8 @@ struct LiveTerminalSurface: View {
     var onRequestInput: (Data) -> Void
     var body: some View {
         TerminalRepresentable(client: client, mode: mode, cols: cols, rows: rows, following: $following,
-                              onPendingInput: onPendingInput, onSize: onSize, onRequestInput: onRequestInput)
+                              onPendingInput: onPendingInput, onSize: onSize, onRequestInput: onRequestInput,
+                              persistReadingZoom: !store.isDemo)
     }
 }
 
@@ -201,6 +203,7 @@ struct TerminalRepresentable: NSViewRepresentable {
     let onPendingInput: (Data) -> Void
     let onSize: (Int, Int) -> Void
     var onRequestInput: (Data) -> Void = { _ in }
+    var persistReadingZoom = true
     func makeCoordinator() -> TerminalSurfaceCoordinator { TerminalSurfaceCoordinator(self) }
     func makeNSView(context: Context) -> TerminalSurfaceHost {
         let host = TerminalSurfaceHost(frame: .zero, coordinator: context.coordinator)
@@ -526,6 +529,7 @@ struct TerminalRepresentable: UIViewRepresentable {
     let onPendingInput: (Data) -> Void
     let onSize: (Int, Int) -> Void
     var onRequestInput: (Data) -> Void = { _ in }
+    var persistReadingZoom = true
     func makeCoordinator() -> TerminalSurfaceCoordinator { TerminalSurfaceCoordinator(self) }
     func makeUIView(context: Context) -> TerminalSurfaceHost {
         let host = TerminalSurfaceHost(frame: .zero, coordinator: context.coordinator)
@@ -580,7 +584,8 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
         canvas.addSubview(terminal); addSubview(canvas); delegate = self
         keyboardDismissMode = .interactive
         minimumZoomScale = 1; maximumZoomScale = 3
-        zoomScale = TerminalReadingScale.zoom(UserDefaults.standard.double(forKey: TerminalReadingScale.preferenceKey))
+        zoomScale = coordinator.parent.persistReadingZoom
+            ? TerminalReadingScale.zoom(UserDefaults.standard.double(forKey: TerminalReadingScale.preferenceKey)) : 1
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     static func font(_ size: CGFloat) -> UIFont {
@@ -638,7 +643,9 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
         }
     }
     func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
-        UserDefaults.standard.set(TerminalReadingScale.zoom(Double(scale)), forKey: TerminalReadingScale.preferenceKey)
+        if coordinator.parent.persistReadingZoom {
+            UserDefaults.standard.set(TerminalReadingScale.zoom(Double(scale)), forKey: TerminalReadingScale.preferenceKey)
+        }
         updateReadingDensity()
     }
     private func updateReadingDensity() {

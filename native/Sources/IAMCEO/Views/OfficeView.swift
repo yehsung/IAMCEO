@@ -153,7 +153,14 @@ struct OfficeView: View {
     @State private var hovered: String?
     @State private var visible = true
     @State private var fadeUntil: Double = 0
-    @AppStorage("teamOfficeList") private var showsList = false
+    @AppStorage("teamOfficeList") private var savedShowsList = false
+    @State private var sampleShowsList = false
+    private var showsList: Bool { store.isDemo ? sampleShowsList : savedShowsList }
+    private var listSelection: Binding<Bool> {
+        Binding(get: { showsList }, set: {
+            if store.isDemo { sampleShowsList = $0 } else { savedShowsList = $0 }
+        })
+    }
     @State private var fadeTick = 0
     @FocusState private var focused: String?
     #if DEBUG
@@ -194,7 +201,7 @@ struct OfficeView: View {
                 }
                 .padding(.horizontal, isMac ? 2 : 4)
                 #if os(iOS)
-                CESegmentPill(selection: $showsList, items: [(false, "사무실"), (true, "목록")])
+                CESegmentPill(selection: listSelection, items: [(false, "사무실"), (true, "목록")])
                     .accessibilityLabel("팀 보기")
                 if showsList {
                     OfficeNowList(members: list, decisions: openDecisions, selected: router.memberID,

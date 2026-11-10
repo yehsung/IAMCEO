@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, type Server, type Socket } from "node:net";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { CoreRunner, type CoreRunnerDeps } from "../server/runner/core.ts";
+import { CoreRunner, screenTurnError, type CoreRunnerDeps } from "../server/runner/core.ts";
 import type { CoreTerminal } from "../server/runner/core-client.ts";
 import type { DeliveryDispatch, RunnerRecoveryStore, TerminalLease } from "../server/service-contracts.ts";
 import type { RunnerEvent, RunnerMember, StartOpts } from "../server/runner/types.ts";
@@ -210,6 +210,73 @@ describe("턴이 끝난 뒤 상태 보고가 사라진 CLI", () => {
     now += 200; terminal.status = { state: "error", msg: "API Error: overloaded" }; await runner.screen(member());
     expect(events.filter(e => e.type === "turn_end")).toMatchObject([{ isError: true, errorText: "API Error: overloaded" }]);
   });
+  // review runner-recovery-2·4: 보고 없이 끝난 턴을 성공한 턴으로 알려 장애·한도 보류가 풀렸고, 지켜보는 0.75초 동안 거짓 '승인 대기'가 나갔다.
+  const above = (text: string) => `${text}\n${"─".repeat(30)}\n❯ \n${"─".repeat(30)}\n`;
+  async function silentEnd(screen: string) {
+    let now = 1_000_000;
+    const f = await fixture(), runner = f.runner({ pollNow: () => now }), events: RunnerEvent[] = []; runner.on(e => events.push(e));
+    const started = await runner.start(member(), f.opts), terminal = f.terminals.get(started.paneId)!;
+    expect(await runner.send(member(), "first", f.opts)).toMatchObject({ ok: true });
+    terminal.turn = 1; terminal.status = null; f.setScreen(screen);
+    await runner.screen(member());
+    // 끝을 지켜보는 동안에는 막힘도 턴 끝도 알리지 않는다.
+    expect(events.some(e => e.type === "turn_end" || e.type === "status" && e.status === "blocked")).toBe(false);
+    now += 800; await runner.screen(member());
+    expect(events.some(e => e.type === "status" && e.status === "blocked")).toBe(false);
+    return { f, runner, ends: () => events.filter(e => e.type === "turn_end"), terminal };
+  }
+  test("보고 없이 끝난 턴은 추정으로 알리고, 입력칸 위에 CLI 의 연결 오류 줄이 있으면 그 오류로 끝낸다", async () => {
+    const failed = await silentEnd(above("⏺ 파일을 고치는 중입니다\n  ⎿  API Error: Connection error.\n     Retrying failed after 10 attempts\n"));
+    expect(failed.ends()).toMatchObject([{ isError: true, errorText: "API Error: Connection error.", inferred: true, turn: 1 }]);
+    expect(failed.runner.observationState(member().id)).toMatchObject({ state: "done", lastError: "API Error: Connection error." });
+    const limited = await silentEnd(above("  ⎿  You've hit your weekly limit · resets 3am"));
+    expect(limited.ends()).toMatchObject([{ isError: true, errorText: "You've hit your weekly limit · resets 3am", inferred: true }]);
+    // 한도 안내 글에는 어떤 키도 넣지 않는다.
+    expect(limited.f.calls.some(c => c.method === "terminal.keys")).toBe(false);
+  });
+  test("오류 줄이 없으면 오류 없이 끝내되 추정이라고 알리고, 보고가 있는 턴 끝에는 붙이지 않는다", async () => {
+    const plain = await silentEnd(above("⏺ 원인은 API Error: 529 overloaded 였습니다. 한도 문제는 아닙니다."));
+    expect(plain.ends()).toMatchObject([{ isError: false, inferred: true, turn: 1 }]);
+    expect(plain.ends()[0]).not.toHaveProperty("errorText");
+    expect(await plain.runner.send(member(), "다음 글", plain.f.opts)).toMatchObject({ ok: true });
+    plain.terminal.turn = 2; plain.terminal.status = { state: "idle" }; await plain.runner.screen(member());
+    expect(plain.ends()).toHaveLength(2);
+    expect(plain.ends()[1]).toMatchObject({ isError: false, turn: 2 });
+    expect(plain.ends()[1]).not.toHaveProperty("inferred");
+  });
+  test("화면 끝의 오류 줄 판독: 줄 머리가 CLI 의 오류 꼴이고 연결·한도일 때만", () => {
+    expect(screenTurnError(above("  ⎿  API Error: 529 {\"type\":\"overloaded_error\"}"))).toBe('API Error: 529 {"type":"overloaded_error"}');
+    expect(screenTurnError(above("■ stream disconnected before completion: error sending request"))).toBe("stream disconnected before completion: error sending request");
+    expect(screenTurnError(above("⏺ You've reached your usage limit. Try again in 3h 2m"))).toBe("You've reached your usage limit. Try again in 3h 2m");
+    // 인증·그 밖의 오류는 장애·한도 경로로 보내지 않는다.
+    expect(screenTurnError(above("  ⎿  API Error: 401 authentication_error"))).toBeNull();
+    expect(screenTurnError(above("  ⎿  API Error: 400 invalid_request_error"))).toBeNull();
+    // 대화 글 속의 낱말, 입력칸에서 먼 옛 오류 줄은 세지 않는다.
+    expect(screenTurnError(above("⏺ 사용 한도와 rate limit 처리를 고쳤습니다. API Error: 529 도 다시 시도합니다."))).toBeNull();
+    expect(screenTurnError(above(["  ⎿  API Error: Connection error.", ...Array.from({ length: 12 }, (_, i) => `⏺ 이어서 한 일 ${i}`)].join("\n")))).toBeNull();
+    expect(screenTurnError(composer())).toBeNull();
+  });
+  test("보고가 사라진 CLI 의 수신 검사도 send 와 같이 끝난 상태(done)로 읽는다", async () => {
+    const { runner, terminal } = await ended();
+    terminal.status = null; await runner.screen(member());
+    expect((await runner.inspectDelivery(member(), envelope(runner, "lost"))).snapshot).toMatchObject({ status: "done", blockedReason: null });
+  });
+
+  // review runner-recovery-5
+  test("Claude 세션 기록: 다른 프로젝트 폴더 아래에 있어도 찾고, 폴더를 읽지 못한 것은 '없음'이 아니다", async () => {
+    const f = await fixture(), runner = f.runner(), home = join(f.dir, "claude-home"), who = member({ sessionId: "session-moved" });
+    // 기록 폴더가 아예 없으면 세션도 없다.
+    expect(runner.sessionExists(who)).toBe(false);
+    mkdirSync(join(home, "projects", "-some-other-folder"), { recursive: true });
+    expect(runner.sessionExists(who)).toBe(false);
+    writeFileSync(join(home, "projects", "-some-other-folder", "session-moved.jsonl"), "{}\n");
+    expect(runner.sessionExists(who)).toBe(true);
+    const broken = await fixture(), other = broken.runner();
+    mkdirSync(join(broken.dir, "claude-home"), { recursive: true });
+    writeFileSync(join(broken.dir, "claude-home", "projects"), "not a directory");
+    expect(other.sessionExists(who)).toBe(true);
+  });
+
   test("core 가 실제로 보내는 kind(question·auth)를 차단 사유로 옮긴다", async () => {
     const f = await fixture(), runner = f.runner(), events: RunnerEvent[] = []; runner.on(e => events.push(e));
     const started = await runner.start(member(), f.opts), terminal = f.terminals.get(started.paneId)!;

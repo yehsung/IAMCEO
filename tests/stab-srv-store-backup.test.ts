@@ -165,6 +165,52 @@ describe("정기 백업은 서버를 멈추지 않는다", () => {
     expect(listBackups(f.root).map((snapshot) => snapshot.manifest.id)).toEqual([third.manifest.id]);
   });
 
+  // review store-edge-1: 정리 실패를 백업 실패로 적어 하루 동안 '백업 실패'로 보였고, 예고한 재시도와 정리는 일어나지 않았다.
+  test("새 백업을 만든 뒤 옛 보관분 정리가 실패해도 백업은 성공이고, 정리만 간격을 두고 다시 한다", async () => {
+    const f = fixture(1);
+    let now = Date.parse("2026-11-05T00:00:00.000Z");
+    const logs: string[] = [];
+    const manager = new BackupManager({ home: f.home, backupDir: f.root, policy: { daily: 1, weekly: 0 }, now: () => new Date(now), log: line => logs.push(line) });
+    const first = (await manager.run())!;
+    const original = fs.rmSync;
+    let removable = false, attempts = 0;
+    const spy = spyOn(fs, "rmSync").mockImplementation(((path: fs.PathLike, options?: fs.RmOptions) => {
+      if (String(path).endsWith(first.manifest.id) || String(path) === first.directory) {
+        attempts++;
+        if (!removable) throw Object.assign(new Error("EACCES: permission denied, rm"), { code: "EACCES" });
+      }
+      return original(path, options);
+    }) as typeof fs.rmSync);
+    try {
+      now += 86_400_000;
+      await manager.tick();
+      expect(attempts).toBe(1);
+      expect(f.names()).toHaveLength(2);
+      expect(manager.status()).toEqual({ lastSuccessAt: new Date(now).toISOString(), failing: false, failures: 0, cause: null, nextAttemptAt: null });
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toContain("오래된 백업 정리 실패");
+      // 5분 안에는 다시 하지 않고, 새 백업을 또 만들지도 않는다.
+      now += 299_999; await manager.tick();
+      expect(attempts).toBe(1);
+      // 또 실패하면 10분 뒤다. 같은 실패를 되풀이해 적지 않는다.
+      now += 1; await manager.tick();
+      expect(attempts).toBe(2);
+      now += 599_999; await manager.tick();
+      expect(attempts).toBe(2);
+      removable = true;
+      now += 1; await manager.tick();
+      expect(attempts).toBe(3);
+      expect(fs.existsSync(first.directory)).toBe(false);
+      expect(f.names()).toHaveLength(1);
+      expect(logs).toHaveLength(1);
+      expect(manager.status()).toMatchObject({ failing: false, failures: 0 });
+      // 정리가 끝나면 다음 틱은 아무것도 하지 않는다.
+      now += 3_600_000; await manager.tick();
+      expect(attempts).toBe(3);
+    } finally { spy.mockRestore(); }
+    await manager.stop();
+  });
+
   test("타이머의 재시도는 실패가 이어질수록 간격을 늘리고, 성공하면 처음으로 돌아간다", async () => {
     const f = fixture(1);
     let now = Date.parse(at);

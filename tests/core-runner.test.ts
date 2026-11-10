@@ -762,6 +762,43 @@ describe("delivery evidence and guarded repair", () => {
     expect(await runner.repairDelivery(member(), { ...request, expectedRecoveryVersion: 2 })).toMatchObject({ ok: false, deliveryEffect: "not_written" });
     expect(await runner.repairDelivery(member(), request)).toMatchObject({ ok: true, receipt: { dispatchId: "dispatch" } });
     expect(d.f.calls.filter(c => c.method === "terminal.send").map(c => c.params.text)).toEqual([d.dispatch.wireText]);
+    expect(d.f.calls.find(c => c.method === "terminal.send")!.params).toMatchObject({ if: "idle", force: false });
+  });
+  // review runner-recovery-3: after any turn the CLI reports done; the repair write refused it and the resend went
+  // round through reject → requeue → ordinary send, outside the three-attempt cap.
+  test("a CLI that finished a turn (done) takes the repair write directly, under the same rule as an ordinary send", async () => {
+    const d = await deliveryFixture(); await d.runner.shutdown(); d.dispatch.transportState = "rejected"; let prepared = 0;
+    const runner = d.f.runner(10000, { recoveryStore: d.recovery.port, quiescence: () => ({ originalWrite: "rejected", externalInput: false }), repair: { load: () => d.dispatch, prepare: () => { prepared++; return true; } } });
+    await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    d.f.terminals.get(d.started.paneId)!.status = { state: "done" };
+    const inspection = await runner.inspectDelivery(member(), d.dispatch);
+    expect(inspection).toMatchObject({ finding: "not_received", snapshot: { status: "done", composer: "empty" } });
+    const request: DeliveryRepair = { action: "resend", dispatchId: "dispatch", expectedRecoveryVersion: 1, expectedSessionGeneration: 1, expectedSessionId: d.started.sessionId, expectedTerminalId: d.started.paneId, expectedInputEpoch: inspection.snapshot!.inputEpoch! };
+    // A draft in the composer or a working CLI still refuses before the durable prepare.
+    d.f.setScreen(composer("someone is typing"));
+    expect(await runner.repairDelivery(member(), request)).toMatchObject({ ok: false, deliveryEffect: "not_written" });
+    d.f.setScreen(composer()); d.f.terminals.get(d.started.paneId)!.status = { state: "working" };
+    expect(await runner.repairDelivery(member(), request)).toMatchObject({ ok: false, deliveryEffect: "not_written" });
+    expect(prepared).toBe(0); expect(d.f.calls.some(c => c.method === "terminal.send")).toBe(false);
+    d.f.terminals.get(d.started.paneId)!.status = { state: "done" };
+    const again = await runner.inspectDelivery(member(), d.dispatch);
+    expect(await runner.repairDelivery(member(), { ...request, expectedInputEpoch: again.snapshot!.inputEpoch! })).toMatchObject({ ok: true, receipt: { dispatchId: "dispatch" } });
+    const sent = d.f.calls.filter(c => c.method === "terminal.send"); expect(sent).toHaveLength(1);
+    expect(sent[0]!.params.text).toBe(d.dispatch.wireText); expect(sent[0]!.params.force).toBe(false); expect(sent[0]!.params.if).toBeUndefined();
+  });
+  // review runner-recovery-1: the evidence cursor is kept per envelope, but a check may ask about only some items.
+  test("a check about fewer items of a bundle is read afresh instead of staying generation_changed", async () => {
+    const d = await deliveryFixture();
+    const bundle: DeliveryDispatch = { ...d.dispatch, markers: [...d.dispatch.markers, { deliveryId: "memo", marker: "#iamceo_" + "C".repeat(22) }], items: [...d.dispatch.items, { deliveryId: "memo", ordinal: 1, sourceRevision: null }] };
+    d.recovery.dispatches([bundle]);
+    const whole = await d.runner.inspectDelivery(member(), bundle);
+    expect(whole.evidence[0]).toMatchObject({ verdict: "absent", complete: true });
+    for (const query of [{ ...bundle, markers: bundle.markers.slice(0, 1) }, { ...bundle, markers: bundle.markers.slice(1) }, bundle]) {
+      expect((await d.runner.inspectDelivery(member(), query)).evidence[0]).toMatchObject({ verdict: "absent", complete: true, code: whole.evidence[0]!.code });
+    }
+    // The partial question still finds a receipt written after the earlier reads.
+    writeFileSync(d.path, d.user(`task\n${bundle.markers[0]!.marker}\n\nmemo\n${bundle.markers[1]!.marker}\n${bundle.bundleMarker}`, "receipt"), { flag: "a" });
+    expect((await d.runner.inspectDelivery(member(), { ...bundle, markers: bundle.markers.slice(1) })).receivedDeliveryIds).toEqual(["memo"]);
   });
 });
 

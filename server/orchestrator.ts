@@ -483,6 +483,8 @@ interface Runtime {
   compactTimer: ReturnType<typeof setTimeout> | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
   inputBusySince: number | null;
+  /** 준비 보고(idle)를 기다리기 시작한 때. */
+  readySince: number | null;
   /** 압축을 넣으려다 입력칸·창 때문에 미루기 시작한 시각. 오래 이어지면 압축을 접고 전달을 먼저 보낸다. */
   compactBusySince: number | null;
   wantParallel: boolean | null;
@@ -529,8 +531,8 @@ const WAKE_POST_KINDS = new Set<string>(["완료", "막힘", "질문"]);
 
 /** Domain references also include orphan answers and todo correction notices. */
 class OrchestratorDeliveryRecovery extends DeliveryRecovery {
-  constructor(private readonly sourceStore: Store, runner: (member: Member) => Pick<Runner, "inspectDelivery" | "repairDelivery"> | null, writerDone?: (dispatch: DeliveryDispatch) => boolean) {
-    super({ store: sourceStore, runner, writerDone, legacyMessageText: message => {
+  constructor(private readonly sourceStore: Store, runner: (member: Member) => Pick<Runner, "inspectDelivery" | "repairDelivery"> | null, writerDone?: (dispatch: DeliveryDispatch) => boolean, admit?: (memberId: string) => boolean) {
+    super({ store: sourceStore, runner, writerDone, admit, legacyMessageText: message => {
       const file = message.contextFileId ? sourceStore.getFile(message.contextFileId) : null;
       const context = file && file.projectId === message.projectId
         ? `\n[시스템 자료 맥락 · 대표 원문 아님]\n대표가 보던 자료: ${file.title.replace(/[\r\n]+/g, " ")} (${file.id})` : "";
@@ -601,7 +603,7 @@ export function coreCompactStore(store: Store): NonNullable<CoreRunnerDeps["comp
 export function createOrchestrator(config: Config, store: Store): Orchestrator {
   const runners = new Map<Backend, Runner>();
   let orchestrator: Orchestrator | null = null;
-  const deliveryRecovery = new OrchestratorDeliveryRecovery(store, member => orchestrator?.recoveryRunner(member) ?? null, dispatch => orchestrator?.writerDone(dispatch) ?? false);
+  const deliveryRecovery = new OrchestratorDeliveryRecovery(store, member => orchestrator?.recoveryRunner(member) ?? null, dispatch => orchestrator?.writerDone(dispatch) ?? false, memberId => orchestrator?.repairAdmitted(memberId) ?? false);
   runners.set("core", new CoreRunner({ contextHome: config.home, coreBin: config.coreBin, socketPath: config.coreSocket, session: "iamceo", stateDir: join(config.home, "core-state"), configDir: join(config.home, "core-config"), claudeBin: config.claudeBin, codexBin: config.codexBin }, {
     recoveryStore: store,
     compactStore: coreCompactStore(store),
@@ -700,7 +702,7 @@ export class Orchestrator implements OrchestratorApi {
       this.store.retryDeferredConfigNow(id);
       this.recheckMemberDelivery(id);
     }, id => this.nudgeStalled(id));
-    this.deliveryRecovery = deps.deliveryRecovery ?? new OrchestratorDeliveryRecovery(this.store, member => this.recoveryRunner(member), dispatch => this.writerDone(dispatch));
+    this.deliveryRecovery = deps.deliveryRecovery ?? new OrchestratorDeliveryRecovery(this.store, member => this.recoveryRunner(member), dispatch => this.writerDone(dispatch), memberId => this.repairAdmitted(memberId));
     if (!this.runners.has("core")) {
       const selected = this.store.getSettings().backend;
       this.store.setRuntimeBackend(selected && this.runners.has(selected) ? selected : this.runners.has("headless") ? "headless" : "herdr");
@@ -1481,9 +1483,14 @@ export class Orchestrator implements OrchestratorApi {
   /** 전송 호출이 아직 끝나지 않은 봉투. 단계 제한으로 펌프가 먼저 풀려도 호출이 끝날 때까지 남는다. */
   private readonly liveWrites = new Set<string>();
 
-  /** 이 봉투의 쓰기에서 더 올 것이 없다: 전송 호출이 끝났고(또는 쓴 프로세스가 죽었고) 그 뒤 writeSettleMs 가 지났다. */
+  private readonly startedAt = Date.now();
+
+  /**
+   * 이 봉투의 쓰기에서 더 올 것이 없다: 전송 호출이 끝났고(또는 쓴 프로세스가 죽었고) 그 뒤 writeSettleMs 가 지났다.
+   * 이전 프로세스의 쓰기는 이 프로세스가 뜬 때부터 센다. 적힌 시각은 쓰기를 시작한 때라, 죽기 직전까지 돌던 호출을 일찍 끝난 것으로 본다.
+   */
   writerDone(dispatch: DeliveryDispatch): boolean {
-    return !this.liveWrites.has(dispatch.dispatchId) && Date.now() - Date.parse(dispatch.updatedAt) >= this.timings.writeSettleMs;
+    return !this.liveWrites.has(dispatch.dispatchId) && Date.now() - Math.max(Date.parse(dispatch.updatedAt), this.startedAt) >= this.timings.writeSettleMs;
   }
 
   /**
@@ -1533,7 +1540,8 @@ export class Orchestrator implements OrchestratorApi {
    */
   private scheduleRecoveryCheck(): void {
     if (this.closed || this.recoveryTimer) return;
-    const next = this.store.nextDeliveryCheckAt(), now = Date.now();
+    // 방금 돈 확인이 그대로 둔 지난 시각(보관된 프로젝트, 직접 조작 중, 읽기 실패)은 30초 틱에 맡긴다. 세면 1초마다 영원히 다시 돈다.
+    const next = this.store.nextDeliveryCheckAt(this.deliveryRecovery.lastRunAt), now = Date.now();
     // 일하는 직원을 기다리는 확인은 몇 시간씩 이어질 수 있다. 5초보다 자주 보지 않는다.
     const due = Math.min(next.active ?? Infinity, next.waiting === null ? Infinity : Math.max(next.waiting, now + 5000));
     if (due - now >= this.timings.tickMs) return;
@@ -4194,9 +4202,18 @@ export class Orchestrator implements OrchestratorApi {
     const observedState = runner instanceof CoreRunner ? runner.observationState(member.id)?.state : undefined;
     if (runner instanceof CoreRunner && (opened || observedState !== undefined) && !["idle", "done", "error"].includes(observedState ?? "")) {
       rt.pumpStage = "await_ready";
+      // 끝내 준비를 보고하지 않는 CLI(로그인 요구, 이어 열기 선택 창 등)는 사유 없이 대기로만 남았다. 오래 이어지면 막힘으로 드러낸다(준비 신호가 오면 풀린다).
+      if (opened || rt.readySince === null) rt.readySince = Date.now();
+      if (Date.now() - rt.readySince >= this.timings.inputBusyLimitMs) {
+        rt.readySince = null;
+        this.markBlocked(member);
+        for (const d of pending) this.hold(d, "blocked");
+        return;
+      }
       this.scheduleRetry(memberId, rt, Date.now() + this.timings.retryMs);
       return;
     }
+    rt.readySince = null;
 
     if ((runner.kind === "headless" || runner.kind === "core") && this.activeAutomaticTurns() >= this.store.getSettings().maxConcurrentTurns) {
       this.waiting.add(memberId);
@@ -4309,7 +4326,9 @@ export class Orchestrator implements OrchestratorApi {
           return false;
         }
         rt.configGaveUp = JSON.stringify(want);
-        this.store.deferMemberConfig(member.id, JSON.stringify(want), true);
+        // switchProvider 가 같은 실패를 이미 적었으면 다시 세지 않는다. 두 번 세면 첫 재시도가 60초가 아니라 5분 뒤가 된다.
+        const noted = this.store.deferredMemberConfig(member.id);
+        if (!(noted?.failed && noted.signature === rt.configGaveUp)) this.store.deferMemberConfig(member.id, rt.configGaveUp, true);
         this.store.patchMember(member.id, { lastError: `설정 적용 보류: ${(e as Error).message}` });
         return false;
       }
@@ -4441,6 +4460,18 @@ export class Orchestrator implements OrchestratorApi {
     return result;
   }
 
+  /**
+   * 복구 쓰기를 지금 넣을 수 있는가(동시 턴 상한·장애 보류·재시도 간격·세션 처리 중이 아님). 전달 복구는 새 봉투를 남기기 전에도
+   * 이것을 묻는다: 넣지 못하는 동안 확인할 때마다 쓰지 못한 봉투가 하나씩 쌓였다.
+   */
+  repairAdmitted(memberId: string): boolean {
+    this.reconcileRejectedExecutions();
+    const member = this.store.getMember(memberId), rt = this.runtime(memberId);
+    if (member && !this.apiRecovery.holdReason(memberId) && !this.closed && !this.recovering && !this.settingsWriting && !this.configWrites.has(memberId) && !rt.turn && !rt.starting && !rt.closing && !rt.reopening && this.retryDue(member) <= Date.now() && this.activeAutomaticTurns() < this.store.getSettings().maxConcurrentTurns) return true;
+    if (member) this.waiting.add(memberId);
+    return false;
+  }
+
   /** Recovery writes share admission with ordinary work; inspection remains read-only. */
   recoveryRunner(member: Member): Pick<Runner, "inspectDelivery" | "repairDelivery"> | null {
     const runner = this.runners.get(this.backendOf(member));
@@ -4448,13 +4479,9 @@ export class Orchestrator implements OrchestratorApi {
     return {
       ...(runner.inspectDelivery ? { inspectDelivery: runner.inspectDelivery.bind(runner) } : {}),
       ...(runner.repairDelivery ? { repairDelivery: async (m: RunnerMember, request: DeliveryRepair): Promise<SendResult> => {
-        this.reconcileRejectedExecutions();
         const rt = this.runtime(member.id);
         const dispatch = this.store.getDispatch(request.dispatchId);
-        if (!dispatch || this.apiRecovery.holdReason(member.id) || this.closed || this.recovering || this.settingsWriting || this.configWrites.has(member.id) || rt.turn || rt.starting || rt.closing || rt.reopening || this.retryDue(member) > Date.now() || this.activeAutomaticTurns() >= this.store.getSettings().maxConcurrentTurns) {
-          this.waiting.add(member.id);
-          return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
-        }
+        if (!this.repairAdmitted(member.id) || !dispatch) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
         const turn: Turn = { kind: "work", admitted: runner.kind === "core" || runner.kind === "headless", text: dispatch.wireText, interrupted: false, deliveries: dispatch.items.map(item => this.store.requireDelivery(item.deliveryId)) };
         rt.turn = turn; rt.posted = false; rt.delegated = false;
         try {
@@ -5057,7 +5084,8 @@ export class Orchestrator implements OrchestratorApi {
     } else if (e.isError) {
       await this.onTurnError(member, e.errorText ?? "오류", errorKey);
     } else {
-      this.apiRecovery.completed(member.id);
+      // 상태 보고가 사라져 끝난 것으로 읽은 턴은 성공의 증거가 아니다(주로 API 오류 뒤다). 장애·한도 보류를 풀지 않는다.
+      if (!e.inferred) this.apiRecovery.completed(member.id);
       // 턴을 잘 마쳤으니 입력을 받을 수 있다. '아직 못 받음'으로 미뤄 둔 재시도 간격을 지금 푼다(한도·인증 간격은 그대로).
       void this.recheckMemberDelivery(member.id, false, true);
       this.settle(member, true);
@@ -5236,7 +5264,7 @@ export class Orchestrator implements OrchestratorApi {
   private runtime(memberId: string): Runtime {
     let rt = this.runtimes.get(memberId);
     if (!rt) {
-      rt = { contextCandidate: null, turn: null, pumping: null, pumpStage: null, pumpSince: null, pumpReported: false, again: false, posted: false, delegated: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, compactBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, reattaching: false, holdUntil: 0, configFails: 0, configGaveUp: null, background: null, launchedAt: null, quickExits: 0, quickExitAt: 0, quickExitNotified: false };
+      rt = { contextCandidate: null, turn: null, pumping: null, pumpStage: null, pumpSince: null, pumpReported: false, again: false, posted: false, delegated: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, readySince: null, compactBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, reattaching: false, holdUntil: 0, configFails: 0, configGaveUp: null, background: null, launchedAt: null, quickExits: 0, quickExitAt: 0, quickExitNotified: false };
       this.runtimes.set(memberId, rt);
     }
     return rt;

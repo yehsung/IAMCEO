@@ -2969,10 +2969,14 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     });
   }
 
-  /** 확인을 이어 가는 전달 중 가장 이른 다음 확인 시각. 대표를 기다리는 것(needs_owner)은 틱이 본다. waiting 은 직원이 일하는 동안 계속 이어지므로 따로 준다. */
-  nextDeliveryCheckAt(): { active: number | null; waiting: number | null } {
+  /**
+   * 확인을 이어 가는 전달 중 가장 이른 다음 확인 시각. 대표를 기다리는 것(needs_owner)은 틱이 본다. waiting 은 직원이 일하는 동안 계속 이어지므로 따로 준다.
+   * from: 그보다 앞선 확인 시각은 세지 않는다. 방금 돈 확인이 그대로 둔 행(보관된 프로젝트, 직접 조작 중)이다.
+   */
+  nextDeliveryCheckAt(from: number | null = null): { active: number | null; waiting: number | null } {
+    const since = from === null ? [] : [new Date(from).toISOString()];
     const min = (phases: string) => {
-      const at = this.row(`SELECT MIN(next_check_at) AS at FROM delivery_recovery WHERE phase IN (${phases}) AND next_check_at IS NOT NULL`)?.at as string | null | undefined;
+      const at = this.row(`SELECT MIN(next_check_at) AS at FROM delivery_recovery WHERE phase IN (${phases}) AND next_check_at IS NOT NULL${since.length ? " AND next_check_at >= ?" : ""}`, ...since)?.at as string | null | undefined;
       return at ? Date.parse(at) : null;
     };
     return { active: min("'checking','retry_wait'"), waiting: min("'waiting'") };

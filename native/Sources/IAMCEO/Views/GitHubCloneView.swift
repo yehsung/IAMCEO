@@ -33,7 +33,7 @@ struct GitHubCloneView: View {
     }
     var body: some View {
         CESheet("GitHub에서 가져오기", subtitle: "저장소를 서버 컴퓨터에 받아 그 폴더로 프로젝트를 만듭니다.", icon: "arrow.down.circle",
-                width: 580, maxBodyHeight: 600, onClose: { if !cloning { dismiss() } }) {
+                width: 580, maxBodyHeight: 600, onClose: { cloneTask?.cancel(); dismiss() }) {
             VStack(alignment: .leading, spacing: 18) {
                 repositorySection
                 addressSection

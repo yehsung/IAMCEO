@@ -3137,10 +3137,16 @@ struct ArtifactHeightFit: Equatable {
     private var growths = 0
     private var ceiling: CGFloat = 0
     private var escapes = 0
+    /// 묶은 뒤 조용해졌을 때 한 걸음 따라가 보는 중인지.
+    private var trial = false
+    /// 따라가 보자마자 또 커져, 뷰포트를 따라 커지는 페이지로 확인했는지.
+    private var confirmed = false
     /// 지금 묶여 있는지.
     private(set) var held = false
     /// 뷰포트를 따라 커지는 페이지로 판정된 적이 있는지.
     private(set) var viewportBound = false
+    /// 묶었지만 아직 확인하지 못했다. 조용해진 뒤(`quick` 뒤) 한 번 다시 재야 한다.
+    var needsRecheck: Bool { held && !confirmed }
 
     mutating func report(_ height: CGFloat, at time: TimeInterval) -> Step {
         guard let applied else {
@@ -3150,11 +3156,19 @@ struct ArtifactHeightFit: Equatable {
         if held {
             // 뷰포트보다 작아질 수 없는 페이지가 줄었다면 내용이 줄어든 것이다.
             if height < applied - 0.5 { return follow(height, at: time, growths: 0) }
+            guard height > applied + 0.5 else { return .ignore }
+            let late = time - appliedAt > Self.quick
+            if late, !confirmed {
+                // 조용해진 뒤에도 프레임보다 크다. 자라다 멈춘 내용일 수 있으니 한 걸음만 따라가 본다.
+                // 뷰포트를 따라 커지는 페이지라면 맞추자마자 또 커지므로, 아래에서 확인하고 다시 묶는다.
+                viewportBound = false; trial = true
+                return follow(height, at: time, growths: 0)
+            }
             guard height > ceiling + 0.5 else { return .ignore }
             // 묶은 뒤에는 프레임이 그대로라 되먹임 보고는 한 번(이미 오던 것)으로 끝난다.
             // 한참 뒤에 오거나 계속 커지면 내용이 스스로 자라는 것이다.
             ceiling = height; escapes += 1
-            if escapes >= 2 || time - appliedAt > Self.quick {
+            if escapes >= 2 || late {
                 viewportBound = false
                 return follow(height, at: time, growths: 0)
             }
@@ -3162,6 +3176,14 @@ struct ArtifactHeightFit: Equatable {
         }
         if abs(height - applied) <= 0.5 { return .ignore }
         let rapid = height > applied && time - appliedAt <= Self.quick
+        if trial {
+            trial = false
+            if rapid {
+                // 따라가 보자마자 또 커졌다. 뷰포트를 따라 커지는 페이지다. 더 따라가지 않고, 다시 확인하지도 않는다.
+                held = true; viewportBound = true; confirmed = true; ceiling = height; escapes = 1
+                return .ignore
+            }
+        }
         let next = rapid ? growths + 1 : 0
         let step = follow(height, at: time, growths: next)
         if next >= Self.growthLimit {
@@ -3172,7 +3194,7 @@ struct ArtifactHeightFit: Equatable {
 
     /// 폭이 바뀌면 높이도 달라진다. 묶였던 페이지는 처음 높이에서 다시 맞춰, 폭이 바뀔 때마다 높이가 쌓이지 않게 한다.
     mutating func widthChanged(at time: TimeInterval) -> Step {
-        growths = 0
+        growths = 0; trial = false
         guard viewportBound, let floor else { return .ignore }
         return follow(floor, at: time, growths: 0)
     }
@@ -3194,6 +3216,8 @@ final class ArtifactNavigationDelegate: NSObject, WKNavigationDelegate, WKUIDele
     var onViewportBound: ((Bool) -> Void)?
     /// 높이 보고 시각(시험에서 바꾼다).
     var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// 묶은 뒤 다시 재기까지의 시간. `quick`보다 길어야 한다.
+    var recheckDelay: TimeInterval = ArtifactHeightFit.quick + 0.2
     /// 웹 콘텐츠 프로세스가 종료됐을 때 같은 문서를 다시 넣기 위한 것.
     var sandboxDocument: (() -> String)?
     private(set) var processReloads = 0
@@ -3216,10 +3240,22 @@ final class ArtifactNavigationDelegate: NSObject, WKNavigationDelegate, WKUIDele
     /// 측정된 페이지 높이를 반영한다. 맞춤 미리보기는 수렴 감시를 거친다.
     private func report(_ height: CGFloat, in webView: WKWebView?) {
         guard let view = webView as? ArtifactWebView, view.fitted else { onHeight?(height); return }
-        let bound = heightFit.viewportBound
+        let bound = heightFit.viewportBound, waiting = heightFit.needsRecheck
         let step = heightFit.report(height, at: uptime())
         if heightFit.viewportBound != bound { onViewportBound?(heightFit.viewportBound) }
         apply(step, to: view)
+        if heightFit.needsRecheck, !waiting { recheck(view) }
+    }
+
+    /// 묶은 직후의 증가는 되먹임인지 내용이 자란 것인지 알 수 없어 무시한다. 조용해진 뒤 한 번 다시 재서,
+    /// 자라다 멈춘 페이지의 마지막 한 걸음이 잘린 채 남지 않게 한다.
+    private func recheck(_ view: ArtifactWebView) {
+        let delay = recheckDelay
+        Task { @MainActor [weak self, weak view] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, let view, self.heightFit.needsRecheck else { return }
+            self.measure(view)
+        }
     }
 
     private func apply(_ step: ArtifactHeightFit.Step, to view: ArtifactWebView) {

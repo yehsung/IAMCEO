@@ -1719,8 +1719,10 @@ struct ActivityList: View {
             let id = memberID
             expanded = []
             // 화면에 떠 있는 동안만 등록한다. 사라지면 task가 취소되어 풀린다.
+            // 다시 연결되면 store가 등록을 통째로 비우고 새 task가 다시 등록한다. 늦게 끝난 옛 task는 그 등록을 풀지 않는다.
             var registered = false
-            defer { if registered { store.deactivateActivity(memberID: id) } }
+            let epoch = store.activityEpoch
+            defer { if registered { store.deactivateActivity(memberID: id, epoch: epoch) } }
             request &+= 1
             let mine = request
             loading = !store.isDemo && store.api != nil

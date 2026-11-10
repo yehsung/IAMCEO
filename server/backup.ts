@@ -448,6 +448,8 @@ export class BackupManager {
   private retryAt = 0;
   private readonly verified: Verified = new Map();
   private loggedCause: string | null = null;
+  private pruneFailures = 0;
+  private pruneRetryAt = 0;
   constructor(readonly options: { home: string; backupDir: string; policy?: Partial<BackupPolicy>; now?: () => Date; loopMonitor?: LoopMonitor; sliceMs?: number; freeBytes?: (root: string) => number; log?: (line: string) => void }) {
     this.policy = Object.freeze(policyValue(options.policy ?? {}));
   }
@@ -463,6 +465,24 @@ export class BackupManager {
   status(): { lastSuccessAt: string | null; failing: boolean; failures: number; cause: string | null; nextAttemptAt: string | null } {
     return { lastSuccessAt: this.lastSuccessAt === undefined ? null : new Date(this.lastSuccessAt).toISOString(), failing: this.lastError !== null, failures: this.failures,
       cause: this.lastError ? this.cause(this.lastError) : null, nextAttemptAt: this.retryAt ? new Date(this.retryAt).toISOString() : null };
+  }
+  /**
+   * 오래된 보관분 정리. 실패해도 방금 만든 백업은 성공이다: 정리만 간격을 늘려 가며 다시 한다.
+   * 예전에는 백업 전체를 실패로 적어 하루 동안 '백업 실패'로 보였고 정리도 다음 날까지 다시 하지 않았다.
+   */
+  private async prune(cooperation: Cooperation, now: Date): Promise<void> {
+    try {
+      const root = holdOwner(this.options.backupDir);
+      try {
+        await cooperate(pruneSteps(root.home, this.policy.daily, this.policy.weekly, this.verified), cooperation, (next) => withHomeOwner(root.home, next));
+      } finally { root.release(); }
+      this.pruneFailures = 0;
+    } catch (error) {
+      if (error instanceof BackupCancelled) throw error;
+      if (!this.pruneFailures) (this.options.log ?? (line => console.error(line)))(`[backup] 오래된 백업 정리 실패: ${this.cause(error)} (새 백업은 만들어졌습니다. 정리는 다시 시도합니다)`);
+      this.pruneFailures++;
+      this.pruneRetryAt = now.getTime() + Math.min(this.policy.intervalMs, RETRY_BASE_MS * 2 ** Math.min(this.pruneFailures - 1, 16));
+    }
   }
   run(force = false): Promise<BackupSnapshot | null> {
     // One in-flight operation per source home, even across manager instances/aliases.
@@ -490,7 +510,10 @@ export class BackupManager {
           } catch (error) { if (error instanceof BackupCancelled) throw error; }
         }
       }
-      if (!force && this.lastSuccessAt !== undefined && now.getTime() - this.lastSuccessAt < this.policy.intervalMs) return null;
+      if (!force && this.lastSuccessAt !== undefined && now.getTime() - this.lastSuccessAt < this.policy.intervalMs) {
+        if (this.pruneFailures && now.getTime() >= this.pruneRetryAt) await this.prune(cooperation, now);
+        return null;
+      }
       let snapshot: BackupSnapshot;
       try {
         const home = holdOwner(this.options.home);
@@ -505,10 +528,7 @@ export class BackupManager {
       // The snapshot exists now: a failed prune must not make the retry create another full copy.
       this.lastSuccessAt = Date.parse(snapshot.manifest.createdAt);
       remember(this.verified, snapshot.directory);
-      const root = holdOwner(this.options.backupDir);
-      try {
-        await cooperate(pruneSteps(root.home, this.policy.daily, this.policy.weekly, this.verified), cooperation, (next) => withHomeOwner(root.home, next));
-      } finally { root.release(); }
+      await this.prune(cooperation, now);
       if (this.loggedCause !== null) (this.options.log ?? (line => console.error(line)))(`[backup] 정기 백업이 다시 성공했습니다 (${snapshot.manifest.createdAt})`);
       this.lastError = null;
       this.failures = 0;

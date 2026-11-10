@@ -44,14 +44,15 @@ struct LocalTextPreview: Equatable, Sendable {
     var cut: Bool { totalLines > shownLines }
 
     init(code text: String) {
-        var all = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
-        if all.count > 1, all.last == "" { all.removeLast() }
-        totalLines = all.count
-        let lines = all.prefix(Self.lineLimit)
-        shownLines = lines.count
+        let all = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
+        // 줄 수에는 끝 줄바꿈 뒤의 빈 줄을 세지 않는다. 그릴 때는 전처럼(Text 하나에 통째로 넣던 때처럼) 그 빈 줄도 그린다.
+        let trailing = all.count > 1 && all.last == ""
+        totalLines = all.count - (trailing ? 1 : 0)
+        let lines = all.prefix(totalLines > Self.lineLimit ? Self.lineLimit : all.count)
+        shownLines = min(totalLines, lines.count)
         chunks = stride(from: 0, to: lines.count, by: Self.chunkLines).map { start in
             let part = lines[start..<min(start + Self.chunkLines, lines.count)]
-            // Text는 끝의 줄바꿈을 버린다. 빈 줄로 끝나는 조각도 그 줄의 높이를 지킨다.
+            // 빈 줄로 끝나는 조각도 그 줄의 높이를 지킨다.
             return part.last?.isEmpty == true ? part.joined(separator: "\n") + " " : part.joined(separator: "\n")
         }
     }

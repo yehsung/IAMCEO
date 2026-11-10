@@ -20,6 +20,8 @@ export interface DeliveryRecoveryOptions {
   legacyMessageText?: (message: Message) => string;
   /** True once nothing more can arrive from the write of this envelope (its call ended, or its process died). */
   writerDone?: (dispatch: DeliveryDispatch) => boolean;
+  /** False while a repair write cannot be handed to the runner now (turn cap, outage hold, retry interval). */
+  admit?: (memberId: string) => boolean;
   now?: () => number;
   random?: () => number;
 }
@@ -70,6 +72,8 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   private readonly now: () => number;
   private readonly random: () => number;
   private running: Promise<void> | null = null;
+  /** Start of the latest check run. A check time before it that the run left in place was skipped, not missed. */
+  lastRunAt: number | null = null;
   private closed = false;
   private readonly mutations = new Set<string>();
 
@@ -355,6 +359,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     return this.running;
   }
   private async run(): Promise<void> {
+    this.lastRunAt = this.now();
     this.store.detectDeliveryStalls(this.now());
     const members = new Map<string, Delivery[]>();
     const dispatches = new Map<string, DeliveryDispatch[]>();
@@ -502,7 +507,9 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       if (r.phase === "needs_owner" && !risk || r.autoAttempts >= 3 && !risk) { phase = "needs_owner"; reason = "retry_exhausted"; }
       else {
         phase = "retry_wait";
-        const due = retry.nextAttemptAt ?? this.iso(this.now() + RETRY_MS[Math.min(r.autoAttempts, 2)] * (1 + 0.2 * Math.min(Math.max(this.random(), 0), 1)));
+        // One retry time per envelope: items that fall due apart are probed as a partial bundle and resent late.
+        const due = retry.nextAttemptAt ?? dispatch.items.map(item => item.deliveryId !== d.id && this.record(item.deliveryId).phase === "retry_wait" ? this.store.getDeliveryRetry(item.deliveryId).nextAttemptAt : null).find(at => !!at)
+          ?? this.iso(this.now() + RETRY_MS[Math.min(r.autoAttempts, 2)] * (1 + 0.2 * Math.min(Math.max(this.random(), 0), 1)));
         this.store.patchDeliveryRetry(d.id, { nextAttemptAt: due });
         nextCheckAt = due;
       }
@@ -526,24 +533,34 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     })) return;
     let dispatch = original;
     if (action === "submit_only" && unresolved.length !== original.items.length) return;
-    if (action === "resend") {
-      dispatch = this.store.transaction(() => {
-        // Every attempt has its own envelope so a late result can only settle its own RPC.
-        // Delivery IDs/markers remain stable, and this new subset has never been written.
-        this.settlePhysical(original, inspection);
-        return this.saveEnvelope(unresolved, original.identity, original.baseline, "prepared");
-      });
-    }
-    // A bundle uses one reviewed CAS version. Store increments can differ after partial corrections;
-    // align with no-op CAS updates rather than weakening the runner's exact version check.
-    const version = Math.max(...unresolved.map(d => this.record(d.id).version));
-    this.store.transaction(() => {
-      for (const d of unresolved) while (this.record(d.id).version < version) this.store.updateDeliveryRecovery(d.id, this.record(d.id).version, {});
-    });
     const s = inspection.snapshot!;
-    const request: DeliveryRepair = { action, dispatchId: dispatch.dispatchId, expectedRecoveryVersion: version, expectedSessionGeneration: s.identity.sessionGeneration,
-      expectedSessionId: s.identity.sessionId, expectedTerminalId: s.identity.terminalId!, expectedInputEpoch: s.inputEpoch! };
-    if (!this.loadRepair(dispatch.memberId, request)) return;
+    let request!: DeliveryRepair;
+    // The new envelope is kept only when the write can be handed to the runner now. While it could not be
+    // (turn cap, outage hold, retry interval), every check used to leave one more never-written envelope.
+    const refused = new Error("repair not admitted");
+    let admitted = true;
+    try {
+      this.store.transaction(() => {
+        if (action === "resend") {
+          // Every attempt has its own envelope so a late result can only settle its own RPC.
+          // Delivery IDs/markers remain stable, and this new subset has never been written.
+          this.settlePhysical(original, inspection);
+          dispatch = this.saveEnvelope(unresolved, original.identity, original.baseline, "prepared");
+        }
+        // A bundle uses one reviewed CAS version. Store increments can differ after partial corrections;
+        // align with no-op CAS updates rather than weakening the runner's exact version check.
+        const version = Math.max(...unresolved.map(d => this.record(d.id).version));
+        for (const d of unresolved) while (this.record(d.id).version < version) this.store.updateDeliveryRecovery(d.id, this.record(d.id).version, {});
+        request = { action, dispatchId: dispatch.dispatchId, expectedRecoveryVersion: version, expectedSessionGeneration: s.identity.sessionGeneration,
+          expectedSessionId: s.identity.sessionId, expectedTerminalId: s.identity.terminalId!, expectedInputEpoch: s.inputEpoch! };
+        admitted = this.options.admit?.(dispatch.memberId) !== false;
+        if (!admitted || !this.loadRepair(dispatch.memberId, request)) throw refused;
+      });
+    } catch (error) {
+      if (error !== refused) throw error;
+      if (!admitted) for (const d of unresolved) this.wait(d.id, "busy");
+      return;
+    }
     this.mutations.add(dispatch.memberId);
     try {
       let result: SendResult;

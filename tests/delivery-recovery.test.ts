@@ -29,6 +29,7 @@ function setup() {
   const writes: DeliveryRepair[] = [];
   let service: DeliveryRecovery;
   let finalHook = (_request: DeliveryRepair) => {};
+  let admit = true;
   let inspect = async (_member: RunnerMember, query: DeliveryProbe): Promise<DeliveryInspection> => observation(query);
   let result: SendResult = { ok: false, reason: "error", retryable: false, deliveryEffect: "unknown" };
   function observation(query: DeliveryProbe, patch: Partial<DeliveryInspection> = {}): DeliveryInspection {
@@ -54,7 +55,7 @@ function setup() {
       return result.ok ? { ...result, receipt: { dispatchId: request.dispatchId, receivedAt: new Date(time).toISOString(), source: "transport" } } : result;
     },
   };
-  function restart() { service = new DeliveryRecovery({ store, runner: () => runner, now: () => time, random: () => random }); return service; }
+  function restart() { service = new DeliveryRecovery({ store, runner: () => runner, admit: () => admit, now: () => time, random: () => random }); return service; }
   restart();
   function enqueue(target = member, text = "지시"): Delivery {
     return store.enqueue({ projectId: project.id, memberId: target.id, kind: "instruction", text });
@@ -69,7 +70,7 @@ function setup() {
   return { db, store, bus, project, member, makeMember, enqueue, envelope, r, calls, writes, events, observation, absent, due, restart,
     get service() { return service; }, get now() { return time; }, set now(value: number) { time = value; },
     set inspect(value: typeof inspect) { inspect = value; }, set result(value: SendResult) { result = value; },
-    set finalHook(value: typeof finalHook) { finalHook = value; }, set random(value: number) { random = value; } };
+    set finalHook(value: typeof finalHook) { finalHook = value; }, set random(value: number) { random = value; }, set admit(value: boolean) { admit = value; } };
 }
 
 async function errorStatus(work: Promise<unknown>, status: number) {
@@ -212,6 +213,80 @@ describe("자동 재전송과 제출 복구", () => {
     const before = f.r(d.id); const count = f.events.length;
     f.service.notices(f.project.id); f.service.memberNotices(f.member.id);
     expect(f.r(d.id)).toEqual(before); expect(f.events).toHaveLength(count);
+  });
+
+  // review orchestrator-1: 자리(동시 턴 상한·보류·재시도 간격)가 없어 재전송이 미뤄지는 동안 확인할 때마다 쓰지 못한 봉투가 하나씩 쌓였다.
+  test("넣을 자리가 없어 재전송이 미뤄지는 동안 새 봉투는 쌓이지 않고, 자리가 나면 한 번만 보낸다", async () => {
+    const f = setup(); const d = f.enqueue(); f.envelope([d]);
+    f.inspect = async (_m, q) => f.absent(q); f.admit = false;
+    await f.service.tick();
+    for (let i = 0; i < 6; i++) {
+      await f.due(d.id);
+      expect(f.r(d.id)).toMatchObject({ phase: "waiting", reason: "busy", autoAttempts: 0 });
+      expect(f.store.listDispatches(f.member.id)).toHaveLength(1);
+    }
+    expect(f.writes).toHaveLength(0);
+    f.admit = true; f.result = { ok: true, started: true };
+    await f.due(d.id);
+    expect(f.writes.map(w => w.action)).toEqual(["resend"]);
+    expect(f.store.listDispatches(f.member.id).map(x => x.transportState)).toEqual(["accepted", "accepted"]);
+    expect(f.store.requireDelivery(d.id).status).toBe("delivered");
+  });
+
+  test("복구 쓰기를 넘길 수 없는 상태(실행 꺼짐)에서도 쓰지 못한 봉투를 남기지 않는다", async () => {
+    const f = setup(); const d = f.enqueue(); f.envelope([d]);
+    f.inspect = async (_m, q) => f.absent(q);
+    await f.service.tick();
+    f.store.patchProject(f.project.id, { runnerEnabled: false });
+    for (let i = 0; i < 4; i++) await f.due(d.id);
+    expect(f.store.listDispatches(f.member.id)).toHaveLength(1);
+    expect(f.writes).toHaveLength(0);
+    f.store.patchProject(f.project.id, { runnerEnabled: true }); f.result = { ok: true, started: true };
+    await f.due(d.id);
+    expect(f.writes).toHaveLength(1);
+    expect(f.store.listDispatches(f.member.id)).toHaveLength(2);
+  });
+
+  // review runner-recovery-1: 항목마다 재시도 시각을 따로 흔들어 묶음이 갈라져 검사됐다.
+  test("묶음의 재시도 시각은 봉투 하나에 하나다: 따로 확인된 항목도 같은 때에 함께 다시 나간다", async () => {
+    const f = setup(); const a = f.enqueue(), b = f.enqueue(f.member, "둘째 지시"); f.envelope([a, b]);
+    f.inspect = async (_m, q) => f.absent(q);
+    const start = f.now;
+    // 둘째 항목의 확인 시각만 0.5초 늦다. 첫 확인은 첫 항목만 본다.
+    f.store.updateDeliveryRecovery(b.id, f.r(b.id).version, { nextCheckAt: new Date(start + 500).toISOString() });
+    await f.service.tick();
+    expect(f.r(a.id).phase).toBe("retry_wait"); expect(f.r(b.id).phase).toBe("checking");
+    f.random = 1; f.now = start + 500; await f.service.tick();
+    expect(f.r(b.id).phase).toBe("retry_wait");
+    expect(f.store.getDeliveryRetry(b.id).nextAttemptAt).toBe(f.store.getDeliveryRetry(a.id).nextAttemptAt);
+    expect(f.r(b.id).nextCheckAt).toBe(f.r(a.id).nextCheckAt);
+    f.result = { ok: true, started: true };
+    await f.due(a.id);
+    expect(f.writes).toHaveLength(1);
+    expect(f.store.getDispatch(f.writes[0]!.dispatchId)!.items.map(item => item.deliveryId)).toEqual([a.id, b.id]);
+  });
+
+  // review orchestrator-3: 확인이 건너뛰는 행(보관된 프로젝트)의 지난 확인 시각 때문에 전달 확인이 1초마다 영원히 다시 돌았다.
+  test("확인이 건너뛴 행의 지난 확인 시각은 다음 확인 시각으로 다시 세지 않는다", async () => {
+    const f = setup(); const d = f.enqueue(); f.envelope([d]);
+    const at = Date.parse(f.r(d.id).nextCheckAt!);
+    expect(f.service.lastRunAt).toBeNull();
+    expect(f.store.nextDeliveryCheckAt(f.service.lastRunAt).active).toBe(at);
+    f.store.patchProject(f.project.id, { archived: true });
+    f.now += 1_000; await f.service.tick();
+    expect(f.calls).toHaveLength(0);
+    expect(f.r(d.id)).toMatchObject({ phase: "checking", nextCheckAt: new Date(at).toISOString() });
+    expect(f.service.lastRunAt).toBe(f.now);
+    expect(f.store.nextDeliveryCheckAt(f.service.lastRunAt)).toEqual({ active: null, waiting: null });
+    // 그 확인이 시작된 뒤에 생긴 확인 시각은 그대로 센다.
+    const other = f.makeMember("other"); const later = f.enqueue(other); f.now += 10;
+    f.store.patchProject(f.project.id, { archived: false }); f.envelope([later]); f.store.patchProject(f.project.id, { archived: true });
+    expect(f.store.nextDeliveryCheckAt(f.service.lastRunAt).active).toBe(f.now);
+    // 보관을 풀면 다음 틱이 그 행을 다시 본다.
+    f.store.patchProject(f.project.id, { archived: false });
+    await f.service.tick();
+    expect(f.calls.length).toBeGreaterThan(0);
+    expect(Date.parse(f.r(d.id).nextCheckAt!)).toBeGreaterThan(f.now);
   });
 
   test("옛 시도의 늦은 실패는 새 봉투의 unknown 물리 입력 fence를 해제하지 않는다", async () => {

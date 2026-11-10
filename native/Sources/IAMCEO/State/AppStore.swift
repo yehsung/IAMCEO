@@ -1386,11 +1386,19 @@ final class AppStore: ProjectManagementStore {
             scope.insert(.delivery)
             // 대화 범위는 팀장이 누구인지에만 달려 있다. 상태만 바뀐 직원 때문에 대화를 다시 읽지 않는다.
             let current = members.first { $0.id == event.member?.id }
-            if event.cursor == nil || current == nil || current?.kind != event.member?.kind { scope.insert(.history) }
+            // 다만 전달을 기다리는 내 글의 대기 사유(승인 대기, 사용 한도, 동시 실행 한도 등)는 서버가 읽을 때 직원 상태로
+            // 계산하고, 바뀌어도 글 이벤트가 따로 오지 않는다. 그런 글이 보이는 동안에는 다시 읽어 문구를 맞춘다.
+            if event.cursor == nil || current == nil || current?.kind != event.member?.kind || historyAwaitsDelivery { scope.insert(.history) }
         } else if event.type == "member_removed" {
             scope.formUnion([.delivery, .history])
         } else if !known { scope.insert(.delivery) }
         Task { [weak self] in await self?.enqueueRefresh(scope) }
+    }
+
+    /// 지금 보는 대화에 아직 전달을 기다리는 내 글이 있는가.
+    private var historyAwaitsDelivery: Bool {
+        guard historyVisible, let history else { return false }
+        return history.items.contains { $0.mine && ["queued", "held", "delivering"].contains($0.delivery ?? "") }
     }
 
     /// 활동 목록이 화면에 떠 있는 동안만 등록한다. 목록은 한 번 읽고, 그 뒤는 실시간 이벤트가 채운다.
@@ -1403,7 +1411,10 @@ final class AppStore: ProjectManagementStore {
         await enqueueRefresh(.activity, immediate: true)
         return true
     }
-    func deactivateActivity(memberID: String) {
+    /// `epoch`는 등록할 때의 `activityEpoch`. 그 뒤 등록이 통째로 비워졌으면(다시 연결) 늦게 온 해제가
+    /// 새로 한 등록을 지우지 않게 아무것도 하지 않는다.
+    func deactivateActivity(memberID: String, epoch: Int? = nil) {
+        if let epoch, epoch != activityEpoch { return }
         let left = (activityWatchCounts[memberID] ?? 0) - 1
         if left > 0 { activityWatchCounts[memberID] = left; return }
         activityWatchCounts[memberID] = nil
@@ -1419,12 +1430,18 @@ final class AppStore: ProjectManagementStore {
         guard foreground, let api, connectionStatus == .connected else { return }
         let epoch = generation, projectEpoch = projectGeneration, phase = foregroundGeneration
         for memberID in openActivityMembers {
-            let activityToken = activityTokens[memberID]
+            let activityToken = activityTokens[memberID], seen = activityRevisions[memberID], top = activities[memberID]?.first?.id
             do {
                 let items = try await api.activity(memberID: memberID)
                 guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration else { return }
                 guard openActivityMembers.contains(memberID), activityTokens[memberID] == activityToken else { continue }
-                let sorted = items.sorted { $0.id > $1.id }
+                var sorted = items.sorted { $0.id > $1.id }
+                // 읽는 동안 이벤트로 끼운 줄(읽기 전의 맨 위보다도, 이 응답보다도 새것)은 지우지 않는다.
+                if activityRevisions[memberID] != seen, let rows = activities[memberID] {
+                    let floor = max(top ?? .min, sorted.first?.id ?? .min)
+                    let newer = rows.filter { $0.id > floor }
+                    if !newer.isEmpty { sorted = Array((newer + sorted).prefix(100)) }
+                }
                 // 같은 목록을 통째로 바꿔 다시 그리지 않는다.
                 if activities[memberID].map({ ActivityList.same($0, sorted) }) != true { activities[memberID] = sorted }
                 if activityErrors[memberID] != nil { activityErrors[memberID] = nil }
@@ -1733,8 +1750,10 @@ final class AppStore: ProjectManagementStore {
         defer {
             // A persisted refusal already explains the failure. Every other false result also
             // gets a composer-scoped explanation, including early guards and local errors.
-            if completed || explainedFailure { messageSendNotices.removeValue(forKey: noticeKey) }
-            else { messageSendNotices[noticeKey] = SendNotice(text: failureReason, whileBlocked: blockedOnly) }
+            // 끝난 글의 안내는 끝난 자리에서 지운다. 접수 뒤에는 잠금이 풀려, 여기 올 때의 안내는 같은 입력칸의
+            // 다음 전송이 쓴 것일 수 있다.
+            if explainedFailure { messageSendNotices.removeValue(forKey: noticeKey) }
+            else if !completed { messageSendNotices[noticeKey] = SendNotice(text: failureReason, whileBlocked: blockedOnly) }
         }
         guard !isDemo else { failureReason = "샘플은 읽기 전용입니다."; errorMessage = failureReason; return false }
         guard canWrite else { failureReason = writeBlockedReason ?? "최신 상태를 확인한 뒤 보내 주세요."; return false }
@@ -1767,7 +1786,7 @@ final class AppStore: ProjectManagementStore {
                 if let current = submissions.messageAttempt(id: attempt.id), current.status == .accepted,
                    current.draft.text == text, current.request.attachmentIds == attachmentIDs {
                     try submissions.consumeAccepted(id: attempt.id, drafts: drafts)
-                    completed = true
+                    completed = true; messageSendNotices.removeValue(forKey: noticeKey)
                     return true
                 }
             }
@@ -1808,10 +1827,10 @@ final class AppStore: ProjectManagementStore {
                 try submissions.acceptMessage(id: attempt.id, message: message)
                 receiveHistoryMessage(message)
                 try submissions.consumeAccepted(id: attempt.id, drafts: drafts)
+                completed = true; messageSendNotices.removeValue(forKey: noticeKey)
                 // 서버가 받았고 입력칸도 비웠다. 새로고침이 끝나기 전에도 다음 글을 보낼 수 있게 잠금을 푼다.
                 releaseAction(actionKey, owner: actionOwner)
                 await refresh()
-                completed = true
                 return true
             }
             if outcome.error != nil {
@@ -1840,8 +1859,8 @@ final class AppStore: ProjectManagementStore {
         var blockedOnly = true
         var failureReason = "지금은 다시 보낼 수 없습니다. 연결과 이전 전송 결과를 확인해 주세요."
         defer {
-            if completed { messageSendNotices.removeValue(forKey: noticeKey) }
-            else { messageSendNotices[noticeKey] = SendNotice(text: failureReason, whileBlocked: blockedOnly) }
+            // 끝난 글의 안내는 끝난 자리에서 지운다(sendMessage와 같다).
+            if !completed { messageSendNotices[noticeKey] = SendNotice(text: failureReason, whileBlocked: blockedOnly) }
         }
         guard canWrite, let submissions, let attempt = submissions.messageAttempt(id: id),
               attempt.namespace == writeNamespace, attempt.projectID == selectedProjectID,
@@ -1862,7 +1881,8 @@ final class AppStore: ProjectManagementStore {
             }
             if Self.definiteRefusal(outcome.error) {
                 try submissions.refuseMessage(id: id, reason: outcome.error?.localizedDescription)
-                completed = true // The retained failure notice explains this definitive rejection.
+                // The retained failure notice explains this definitive rejection.
+                completed = true; messageSendNotices.removeValue(forKey: noticeKey)
                 return false
             }
             guard epoch == generation else { return false }
@@ -1870,9 +1890,9 @@ final class AppStore: ProjectManagementStore {
                 try submissions.acceptMessage(id: id, message: message)
                 receiveHistoryMessage(message)
                 try submissions.consumeAccepted(id: id, drafts: drafts)
+                completed = true; messageSendNotices.removeValue(forKey: noticeKey)
                 releaseAction(actionKey, owner: actionOwner)
                 await refresh()
-                completed = true
                 return true
             }
             failureReason = outcome.error == nil ? (errorMessage ?? failureReason) : "접수 확인 중입니다. 같은 전송 ID로 조회합니다."
@@ -2762,7 +2782,8 @@ final class AppStore: ProjectManagementStore {
             try applyReceipt(receipt, tracked: tracked, announce: announce)
         } catch {
             guard epoch == generation else { return }
-            if (error as? APIError)?.status == 404 { absentOperations.insert(tracked.id) }
+            // '서버에 기록 없음'은 바로 앞 조회가 404였을 때만 믿는다. 다른 실패 뒤에는 예전 404로 닫지 않는다.
+            if (error as? APIError)?.status == 404 { absentOperations.insert(tracked.id) } else { absentOperations.remove(tracked.id) }
             if (error as? APIError)?.status == 401 { handle(error) }
             else if announce, tracked.status == .unknown || tracked.status == .pending {
                 errorMessage = "작업 결과 확인 중입니다. 미확인 작업은 재실행하지 않습니다."
@@ -2772,9 +2793,10 @@ final class AppStore: ProjectManagementStore {
 
     /// 결과를 끝내 확인하지 못한 작업을 다시 보내지 않고 닫는다. 닫지 않으면 그 직원의 직접 조작·새 세션이
     /// 이 기기에서 영영 막힌다. 닫은 뒤에 나가는 것은 대표가 새로 누른 조작뿐이다.
-    @discardableResult private func expireStaleOperation(_ id: String, now: Double = Date().timeIntervalSince1970) -> Bool {
+    @discardableResult private func expireStaleOperation(_ id: String) -> Bool {
         guard let tracked = journal.operations[id], tracked.namespace == writeNamespace,
               tracked.status == .unknown || tracked.status == .pending else { return false }
+        let now = wallClock()
         // 예전 기록에는 시각이 없다. 처음 본 때부터 센다.
         if tracked.createdAt == nil { _ = try? saveJournal { $0.operations[id]?.createdAt = now } }
         let age = now - (tracked.createdAt ?? now)

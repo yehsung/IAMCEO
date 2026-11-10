@@ -1,9 +1,9 @@
-import { usageLimitMenu, networkRetryScreen } from "../api-outage.ts";
+import { classifyTurnError, usageLimitMenu, networkRetryScreen } from "../api-outage.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { capturedContext } from "./statusline.ts";
 import { readCodexContextFile } from "./codex-context.ts";
 import { createHash } from "node:crypto";
-import { constants, closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
+import { constants, closeSync, existsSync, fstatSync, openSync, readdirSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ApprovalPrompt, Backend } from "../../shared/types.ts";
@@ -16,7 +16,7 @@ import { providerFor, providerLaunch, isProviderArgv, type ProviderBins } from "
 import { codexBindingMarker, discoverCodexSession, observeCompactBoundary, type CodexBindingCursor, type CompactBoundaryBaseline, type CompactBoundaryCursor } from "./core-context.ts";
 import { readDeliveryEvidence, readJsonlRange, parseCodexSessionMeta, providerLogPath, type DeliveryEvidenceCursor, type JsonlCursor } from "./delivery-evidence.ts";
 import type { DeliveryDispatch, RunnerRecoveryStore, TerminalLease } from "../service-contracts.ts";
-import { readTranscriptTail } from "./transcript.ts";
+import { readTranscriptTail, transcriptPath } from "./transcript.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, DeliveryProbe, DeliveryInspection, DeliveryRepair, DeliveryLogBaseline, RunnerTerminalIdentity, RunnerReattachResult, RunnerObservation } from "./types.ts";
 
 /** claudeHome: Claude session transcripts (default CLAUDE_CONFIG_DIR or ~/.claude), read for context usage only. */
@@ -437,9 +437,9 @@ export class CoreRunner implements Runner {
     // after input and IAMCEO typed only after a report, so the member was dead until slept by hand.
     // A CLI that never reported (turn 0) and any screen without the composer (dialog, setup) stay blocked.
     // A turn whose end was not seen (counter moved, no report) is ended only after the gap has lasted a moment.
-    track.lost = track.silentSince !== null && terminal.reported !== false && (terminal.turn ?? 0) > 0 && screen !== null &&
-      ((terminal.turn ?? 0) <= track.endedTurn || this.pollNow() - track.silentSince >= SILENT_SETTLE_MS) &&
+    const silent = track.silentSince !== null && terminal.reported !== false && (terminal.turn ?? 0) > 0 && screen !== null &&
       (providerFor(track.member) === "claude" ? inputText(screen) : codexDraft(screen)) !== null;
+    track.lost = silent && ((terminal.turn ?? 0) <= track.endedTurn || this.pollNow() - track.silentSince! >= SILENT_SETTLE_MS);
     const state = track.lost ? "done" : reported;
     if (track.lost) status = "idle";
     const usage = screen !== null && state !== "working" ? usageLimitMenu(screen) : null;
@@ -457,8 +457,11 @@ export class CoreRunner implements Runner {
       track.endedTurn = terminal.turn ?? track.endedTurn;
       track.pending = false;
       // An idle report never clears an unresolved external write fence.
-      track.lastError = usage?.raw ?? (state === "error" ? terminal.status?.msg || "CLI reported an error" : null);
-      this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: state === "error" || !!usage, ...(state === "error" || usage ? { errorText: track.lastError! } : {}) });
+      // A turn read as over only because its report vanished mostly ended in an API error, so it is no proof of a
+      // working connection (inferred). When the CLI's own error line sits above the composer, end it as that error.
+      const failed = track.lost && !usage ? screenTurnError(screen!) : null;
+      track.lastError = usage?.raw ?? (state === "error" ? terminal.status?.msg || "CLI reported an error" : failed);
+      this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: state === "error" || !!usage || !!failed, ...(state === "error" || usage || failed ? { errorText: track.lastError! } : {}), ...(track.lost ? { inferred: true } : {}) });
     }
     if (status === "gone") track.pending = false;
     if (screen !== null && track.composerEmpty === false && ["idle", "done", "error"].includes(state ?? "") && !usage && (providerFor(track.member) === "claude" ? inputText(screen) : codexDraft(screen)) === "") {
@@ -474,6 +477,9 @@ export class CoreRunner implements Runner {
       track.statusTimer = null; track.pendingStatus = null;
     }
     const statusKey = JSON.stringify([status, blockedReason, setup?.prompt.fingerprint ?? null, usage?.fingerprint ?? null, retry]);
+    // While the end of a silent turn is being watched (SILENT_SETTLE_MS) nothing is blocked yet: publishing it sent the
+    // owner an approval alert for a dialog that does not exist. The next observation decides.
+    if (silent && !track.lost && !track.failure && blockedReason === "status_unknown") return;
     if (statusKey !== track.statusKey || track.failure) {
       track.status = status;
       track.statusKey = statusKey;
@@ -659,7 +665,13 @@ export class CoreRunner implements Runner {
   sessionExists(member: RunnerMember): boolean {
     if (!member.sessionId) return false;
     const home = this.providerHome(member);
-    if (providerFor(member) === "claude") return findSessionFile(home, member.cwd, member.sessionId) !== null;
+    if (providerFor(member) === "claude") {
+      if (existsSync(transcriptPath(member.cwd, member.sessionId, home))) return true;
+      // A session that changed directory is recorded under another project folder. Only a missing store is absence.
+      const projects = join(home, "projects");
+      try { return readdirSync(projects).some(dir => existsSync(join(projects, dir, `${member.sessionId}.jsonl`))); }
+      catch (error) { return (error as NodeJS.ErrnoException).code !== "ENOENT"; }
+    }
     try {
       for (const _ of new Bun.Glob(`**/rollout-*-${member.sessionId}.jsonl`).scanSync({ cwd: join(home, "sessions"), onlyFiles: true, followSymlinks: false })) return true;
       return false;
@@ -732,7 +744,7 @@ export class CoreRunner implements Runner {
     if (track.epoch !== inputEpoch) return unknown("input_epoch_changed");
     const draft = providerFor(member) === "claude" ? inputText(screen) : codexDraft(screen);
     const composer = draft === null ? "unknown" : draft === "" ? "empty" : dispatch && exactComposer(screen, providerFor(member)) === dispatch.wireText ? "matches" : "different";
-    const state = terminal.status?.state;
+    const state = this.stateOf(track, terminal);
     const status = terminal.state !== "live" ? "gone" : ["idle", "done", "working", "blocked"].includes(state || "") ? state as "idle" | "done" | "working" | "blocked" : "unknown";
     const snapshot: NonNullable<DeliveryInspection["snapshot"]> = { identity: this.identity(track), observedAt: track.observedAt, turn: terminal.turn ?? null, inputEpoch: track.epoch, ownership: "verified", status,
       blockedReason: status === "blocked" ? terminal.status?.kind === "permission" ? "permission" : "status_unknown" : null,
@@ -744,6 +756,9 @@ export class CoreRunner implements Runner {
       sessionGeneration: query.identity.sessionGeneration, markers: query.markers, bundleMarker: query.bundleMarker, baseline,
       since: baseline ? undefined : query.baseline.capturedAt, cursor: track.evidence.get(query.dispatchId) });
     let read = scan();
+    // The cursor belongs to one exact question. A check that asks about fewer items of the envelope (they fall due
+    // apart) is another question: without a fresh read every later check stayed generation_changed.
+    if (read.evidence.code === "generation_changed" && track.evidence.delete(query.dispatchId)) read = scan();
     if (read.cursor) track.evidence.set(query.dispatchId, read.cursor);
     // An envelope without a log baseline (written by an older build) is read from the start. Keep reading in this
     // inspection, yielding between 4 MiB pieces, instead of one piece per 30 s check.
@@ -776,13 +791,13 @@ export class CoreRunner implements Runner {
       if (!dispatch || dispatch.memberId !== member.id || dispatch.projectId !== member.projectId || dispatch.dispatchId !== request.dispatchId || createHash("sha256").update(dispatch.wireText).digest("hex") !== dispatch.wireSha256 || cleanText(dispatch.wireText) !== dispatch.wireText) return { ...unsupported("Stored delivery or reviewed recovery version changed"), deliveryEffect: "not_written" };
       const inspected = await this.inspectLocked(member, dispatch);
       const snapshot = inspected.snapshot;
-      if (!snapshot || request.expectedSessionGeneration !== snapshot.identity.sessionGeneration || request.expectedSessionId !== snapshot.identity.sessionId || request.expectedTerminalId !== snapshot.identity.terminalId || request.expectedInputEpoch !== snapshot.inputEpoch || snapshot.externalInput !== false || snapshot.leaseActive || snapshot.status !== "idle") return { ok: false, reason: "input_busy", retryable: false, deliveryEffect: "not_written", detail: "Delivery identity, epoch or safe idle state changed" };
+      if (!snapshot || request.expectedSessionGeneration !== snapshot.identity.sessionGeneration || request.expectedSessionId !== snapshot.identity.sessionId || request.expectedTerminalId !== snapshot.identity.terminalId || request.expectedInputEpoch !== snapshot.inputEpoch || snapshot.externalInput !== false || snapshot.leaseActive || !["idle", "done"].includes(snapshot.status)) return { ok: false, reason: "input_busy", retryable: false, deliveryEffect: "not_written", detail: "Delivery identity, epoch or safe idle state changed" };
       if (inspected.receivedDeliveryIds.length) return { ...unsupported("User receipt already exists; reconcile delivery without input"), deliveryEffect: "not_written" };
       // The owner's explicit consent replaces the proof of absence, never the idle state or the empty composer.
       const consented = this.deps.quiescence?.(member.id, dispatch)?.riskApproved === true && inspected.finding === "unknown" && snapshot.composer === "empty";
       if (request.action === "resend" ? inspected.finding !== "not_received" && !consented : inspected.finding !== "draft_only" || !this.deps.submitKeyVerified || !this.methods.has("terminal.keys") || dispatch.submitAttempts !== 0) return { ...unsupported("No verified safe repair or submit-key barrier"), deliveryEffect: "not_written" };
       const final = await this.inspectLocked(member, dispatch);
-      if (final.finding !== inspected.finding || final.receivedDeliveryIds.length || !final.snapshot || final.snapshot.status !== "idle" || final.snapshot.inputEpoch !== request.expectedInputEpoch || this.manualLease(member.id)) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
+      if (final.finding !== inspected.finding || final.receivedDeliveryIds.length || !final.snapshot || !["idle", "done"].includes(final.snapshot.status) || final.snapshot.inputEpoch !== request.expectedInputEpoch || this.manualLease(member.id)) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
       const latest = track.terminal;
       // This port revalidates recovery version, source revisions and cancellation,
       // then commits the one write attempt in the same synchronous transaction.
@@ -792,7 +807,8 @@ export class CoreRunner implements Runner {
         await this.call("terminal.keys", { terminal: latest.address, keys: ["enter"] }, this.sendTimeoutMs);
         return { ...unsupported("Submit key was sent once; await user-record evidence before further input"), deliveryEffect: "unknown" };
       }
-      const result = await this.call<{ turn: number; started?: boolean }>("terminal.send", { terminal: latest.address, text: dispatch.wireText, if: "idle", force: false, wait: false }, this.sendTimeoutMs);
+      // Same rule as send(): after any turn the CLI reports done until its next input, and core has no conditional for it.
+      const result = await this.call<{ turn: number; started?: boolean }>("terminal.send", { terminal: latest.address, text: dispatch.wireText, ...(final.snapshot.status === "idle" ? { if: "idle" } : {}), force: false, wait: false }, this.sendTimeoutMs);
       if (!Number.isSafeInteger(result.turn)) throw new CoreError("protocol", "Invalid repair send receipt", true);
       track.pending = true;
       // The previous write was proved absent and this exact resend has a verified receipt.
@@ -1272,6 +1288,19 @@ function exactComposer(screen: string, provider: "claude" | "codex"): string | n
     return [first[1], ...lines.slice(top + 2, bottom)].join("\n");
   }
   return null;
+}
+
+/** How a CLI starts its own error line. Only the start of a line counts, so conversation text that mentions an error is not one. */
+const SCREEN_ERROR_LINE = /^(?:API Error\b|you['’]ve (?:hit|reached) your\b|you['’]re out of usage credits\b|your org is out of usage\b|stream disconnected\b|error sending request\b)/i;
+/**
+ * The CLI's own connection or usage-limit error line among the last lines of the screen (just above the composer),
+ * for a turn that ended without a status report. Any other ending is null.
+ */
+export function screenTurnError(screen: string): string | null {
+  const lines = screen.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").split(/\r?\n/)
+    .map(line => line.replace(/^[^\p{L}\p{N}]+/u, "").trimEnd()).filter(Boolean).slice(-12);
+  const line = lines.findLast(line => SCREEN_ERROR_LINE.test(line));
+  return line && ["network", "usage_limit"].includes(classifyTurnError(line)) ? line : null;
 }
 
 /** Input safety only. Unknown composer layouts refuse delivery. */

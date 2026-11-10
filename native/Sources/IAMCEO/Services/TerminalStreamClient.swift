@@ -150,6 +150,8 @@ final class TerminalStreamClient {
                  sizePolicy: TerminalSizePolicy = TerminalPlatform.current.controlSizePolicy) {
         close()
         self.sizePolicy = sizePolicy
+        // 새 연결에서만 지운다. 같은 조작권으로 다시 붙을 때(ready가 또 온다)는 이미 타자한 조작으로 남는다.
+        sentInput = false
         let token = UUID(); connection = token
         state = .connecting
         receiveTask = Task { [weak self] in
@@ -237,7 +239,6 @@ final class TerminalStreamClient {
         case let .ready(mode, cols, rows, expiry):
             pendingOutput.removeAll()
             grid = (cols, rows); outputGeneration = UUID()
-            sentInput = false
             expiresAt = expiry; state = .live(mode: mode, cols: cols, rows: rows); onReady?(mode)
         case let .resize(cols, rows):
             guard case let .live(mode, _, _) = state else { return }

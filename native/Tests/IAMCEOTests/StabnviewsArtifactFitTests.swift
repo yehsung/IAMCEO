@@ -16,12 +16,80 @@ final class StabnviewsArtifactFitTests: XCTestCase {
             time += 0.017
             if case .fit(let value) = fit.report(height, at: time) { fits.append(value); height = value + 48 }
         }
-        XCTAssertEqual(fits, [528, 576, 624, 672, 720])
+        // 네 번 만에 묶고, 조용해진 뒤 한 걸음(768)만 따라가 본 다음 다시 커지는 것을 보고 그대로 묶어 둔다.
+        XCTAssertEqual(fits, [528, 576, 624, 672, 720, 768])
         XCTAssertTrue(fit.held)
         XCTAssertTrue(fit.viewportBound)
+        XCTAssertFalse(fit.needsRecheck)
         // 한참 뒤 같은 값을 다시 재도(로드 완료 측정 등) 움직이지 않는다.
         XCTAssertEqual(fit.report(height, at: time + 60), .ignore)
-        XCTAssertEqual(fit.report(720, at: time + 61), .ignore)
+        XCTAssertEqual(fit.report(768, at: time + 61), .ignore)
+        XCTAssertEqual(fit.report(height, at: time + 600), .ignore)
+    }
+
+    /// 묶은 직후 1초 안에는 같은 되먹임 보고가 몇 번 와도(ResizeObserver, load, 로드 완료 측정) 움직이지 않는다.
+    func testRepeatedEchoRightAfterTheHoldIsIgnoredUntilTheRecheck() {
+        var fit = ArtifactHeightFit()
+        for step in 0..<5 { _ = fit.report(528 + CGFloat(step) * 48, at: Double(step) * 0.02) }
+        XCTAssertTrue(fit.held)
+        XCTAssertTrue(fit.needsRecheck)
+        for tick in 1...20 { XCTAssertEqual(fit.report(768, at: 0.08 + Double(tick) * 0.04), .ignore) }
+        XCTAssertTrue(fit.held)
+        XCTAssertTrue(fit.viewportBound)
+    }
+
+    /// review native-views-1: 빠르게 몇 번 자라다 멈춘 정상 페이지의 마지막 한 걸음이 잘린 채 남지 않는다.
+    /// 묶인 뒤 무시한 증가는 조용해진 뒤의 재측정이 되살린다. 자라는 횟수가 몇 번이든 같다.
+    func testPageThatStopsGrowingRightAfterTheHoldIsFullyShownByTheRecheck() {
+        var cutShort: [Int] = []
+        for growths in 3...12 {
+            var fit = ArtifactHeightFit()
+            var frame: CGFloat = 0, time: TimeInterval = 0
+            func feed(_ height: CGFloat) { if case .fit(let value) = fit.report(height, at: time) { frame = value } }
+            feed(400)
+            for step in 1...growths { time += 0.05; feed(400 + CGFloat(step) * 100) }
+            let page = 400 + CGFloat(growths) * 100
+            // 같은 높이를 곧바로 다시 재는 것(load, 로드 완료)은 아직 판단을 바꾸지 않는다.
+            time += 0.05; feed(page)
+            if frame < page {
+                // 마지막 한 걸음이 묶인 직후에 와서 무시됐다. 조용해지면 화면이 한 번 다시 잰다.
+                cutShort.append(growths)
+                XCTAssertTrue(fit.needsRecheck, "\(growths)번")
+                time += ArtifactHeightFit.quick + 0.2; feed(page)
+                XCTAssertFalse(fit.held, "\(growths)번")
+                XCTAssertFalse(fit.viewportBound, "\(growths)번")
+                // 그대로인 페이지는 따라가 본 뒤에도 다시 묶이지 않는다.
+                time += 0.02; feed(page)
+                XCTAssertFalse(fit.held, "\(growths)번")
+            }
+            XCTAssertEqual(frame, page, "\(growths)번 자란 페이지의 아래가 잘렸다")
+            // 나중의 느린 변화도 따라간다.
+            time += 30; feed(page + 240)
+            XCTAssertEqual(frame, page + 240, "\(growths)번")
+        }
+        XCTAssertEqual(cutShort, [5, 11], "이 시험이 겨냥한 경우(묶인 직후 한 번 더 자라고 멈춤)가 재현되지 않았다")
+    }
+
+    /// 한 걸음 따라가 보는 것은 페이지마다 한 번이다. 폭이 바뀌어 다시 묶여도 확인된 페이지는 더 커지지 않는다.
+    func testConfirmedViewportPageIsNotProbedAgainAfterAWidthChange() {
+        var fit = ArtifactHeightFit()
+        var time: TimeInterval = 0, height: CGFloat = 528, fits: [CGFloat] = []
+        func run(_ ticks: Int) {
+            for _ in 0..<ticks {
+                time += 0.017
+                if case .fit(let value) = fit.report(height, at: time) { fits.append(value); height = value + 48 }
+            }
+        }
+        run(200)
+        XCTAssertEqual(fits.last, 768)
+        XCTAssertFalse(fit.needsRecheck)
+        guard case .fit(let floor) = fit.widthChanged(at: time) else { return XCTFail("묶인 페이지는 처음 높이로 돌아간다") }
+        XCTAssertEqual(floor, 528)
+        fits = []; height = floor + 48
+        run(400)
+        XCTAssertEqual(fits, [576, 624, 672, 720])
+        XCTAssertTrue(fit.held)
+        XCTAssertFalse(fit.needsRecheck)
     }
 
     func testOrdinaryPageFollowsEveryChangeAndNeverLocks() {
@@ -152,12 +220,57 @@ final class StabnviewsArtifactRuntimeTests: XCTestCase {
         // 묶이지 않았더라도 끝없이 맞추고 있으면 안 된다.
         XCTAssertLessThanOrEqual(heights.count, ArtifactHeightFit.growthLimit + 2, "맞춤이 끝없이 되풀이된다: \(heights.suffix(6))")
         guard delegate.heightFit.held else { throw XCTSkip("화면 밖 WebKit 이 이 실행에서는 높이 되먹임을 만들지 않았습니다") }
+        // 조용해진 뒤 한 번 다시 재서 한 걸음만 따라가 보고, 또 커지는 것을 확인하면 그대로 묶어 둔다.
+        let before = heights
+        let checked = clock.now.advanced(by: .seconds(8))
+        while !(delegate.heightFit.held && !delegate.heightFit.needsRecheck), clock.now < checked { try await Task.sleep(for: .milliseconds(20)) }
+        guard delegate.heightFit.held, !delegate.heightFit.needsRecheck else { throw XCTSkip("화면 밖 WebKit 이 이 실행에서는 다시 잰 뒤의 되먹임을 만들지 않았습니다") }
+        XCTAssertEqual(heights.count, before.count + 1, "확인은 한 걸음뿐이다: \(heights.suffix(6))")
         let settled = heights
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertEqual(heights, settled, "묶인 뒤에는 높이가 더 바뀌지 않는다")
         XCTAssertEqual(heights, heights.sorted())
         // 이런 페이지의 높이는 다음에 열 때 쓸 값으로 기억하지 않도록 알린다.
-        XCTAssertEqual(bound, [true])
+        XCTAssertEqual(bound.last, true)
+        XCTAssertEqual(delegate.heightFit.viewportBound, true)
+    }
+
+    /// review native-views-1 (실제 WebKit): 빠르게 다섯 번 자라고 멈추는 페이지는 묶였더라도 끝까지 보인다.
+    @MainActor func testPageGrowingInFiveQuickStepsEndsFullyShownInARealFittedWebView() async throws {
+        let compiled = await artifactBlockRule()
+        let rule = try XCTUnwrap(compiled)
+        let delegate = ArtifactNavigationDelegate()
+        var last: CGFloat = 0
+        delegate.onHeight = { last = $0 }
+        let html = """
+        <style>body{margin:0}.b{height:100px}</style><div class="b">0</div>
+        <script>var n=0,t=setInterval(function(){var d=document.createElement('div');d.className='b';d.textContent=++n;document.body.appendChild(d);if(n==5){clearInterval(t);document.body.dataset.done='1'}},40)</script>
+        """
+        let view = makeArtifactWebView(html: html, title: "자람", rule: rule, delegate: delegate, fitted: true)
+        defer {
+            view.stopLoading()
+            view.configuration.userContentController.removeAllScriptMessageHandlers(from: .defaultClient)
+        }
+        /// 다 자란 페이지의 높이. 아직 자라는 중이면 nil.
+        func grown() async -> CGFloat? {
+            guard let frame = delegate.childFrame else { return nil }
+            let script = "(function(){var b=document.body;if(!b||b.dataset.done!=='1')return 0;var c=getComputedStyle(b);return Math.ceil(b.scrollHeight+(parseFloat(c.marginTop)||0)+(parseFloat(c.marginBottom)||0))})()"
+            let value = try? await view.evaluateJavaScript(script, in: frame, contentWorld: .defaultClient)
+            return (value as? NSNumber).map { CGFloat($0.doubleValue) }.flatMap { $0 > 0 ? $0 : nil }
+        }
+        var wasHeld = false, page: CGFloat?
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(15))
+        while clock.now < deadline {
+            wasHeld = wasHeld || delegate.heightFit.held
+            if page == nil { page = await grown() }
+            if let page, last >= page { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        guard let page else { throw XCTSkip("화면 밖 WebKit 이 이 실행에서는 페이지 스크립트를 끝까지 돌리지 않았습니다") }
+        XCTAssertGreaterThanOrEqual(page, 600)
+        if last < page, !wasHeld { throw XCTSkip("화면 밖 WebKit 이 이 실행에서는 높이 보고를 보내지 않았습니다") }
+        XCTAssertEqual(last, page, "자라다 멈춘 페이지의 아래가 잘렸다 (묶임: \(wasHeld))")
     }
 
     @MainActor private func waitUntil(_ what: String, timeout: Duration = .seconds(20), _ condition: () async -> Bool) async throws {

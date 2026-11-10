@@ -166,11 +166,28 @@ import XCTest
     // MARK: 로컬 파일 미리보기
 
     func testLongLocalTextIsDrawnInBoundedChunksAndShortTextIsUnchanged() {
+        // 줄바꿈으로 끝나는 파일은 전처럼(Text 하나에 통째로 넣던 때처럼) 끝의 빈 줄까지 그린다. 줄 수에는 세지 않는다.
         let short = LocalTextPreview(code: "a\r\nb\rc\n")
-        XCTAssertEqual(short.chunks, ["a\nb\nc"])
+        XCTAssertEqual(short.chunks, ["a\nb\nc\n "])
         XCTAssertEqual(short.totalLines, 3)
+        XCTAssertEqual(short.shownLines, 3)
         XCTAssertFalse(short.cut)
+        XCTAssertEqual(LocalTextPreview(code: "a\nb\nc").chunks, ["a\nb\nc"])
         XCTAssertEqual(LocalTextPreview(code: "").chunks, [" "])
+        // 그리는 줄 수는 원문의 줄바꿈 수 + 1 그대로다(조각 경계에 걸려도).
+        for count in [1, 199, 200, 201, 400] {
+            let text = String(repeating: "x\n", count: count)
+            let drawn = LocalTextPreview(code: text)
+            XCTAssertEqual(drawn.chunks.reduce(0) { $0 + $1.components(separatedBy: "\n").count }, count + 1, "\(count)줄")
+            XCTAssertEqual(drawn.totalLines, count)
+            XCTAssertFalse(drawn.cut)
+        }
+        // 한도를 넘는 파일은 앞 5,000줄만 그리고, 줄 수는 끝 줄바꿈과 무관하다.
+        let capped = LocalTextPreview(code: String(repeating: "x\n", count: LocalTextPreview.lineLimit + 1))
+        XCTAssertEqual(capped.totalLines, LocalTextPreview.lineLimit + 1)
+        XCTAssertEqual(capped.shownLines, LocalTextPreview.lineLimit)
+        XCTAssertTrue(capped.cut)
+        XCTAssertEqual(capped.chunks.reduce(0) { $0 + $1.components(separatedBy: "\n").count }, LocalTextPreview.lineLimit)
 
         let lines = (0..<17_068).map { "line \($0)" }
         let long = LocalTextPreview(code: lines.joined(separator: "\n"))

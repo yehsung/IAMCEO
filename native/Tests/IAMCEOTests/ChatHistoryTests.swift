@@ -347,8 +347,10 @@ final class ChatHistoryTests: XCTestCase {
         XCTAssertFalse(history.settled(message(60)), "A row older than the loaded tail is not shown until the page is read")
         let latest = history.begin(.latest)!
         history.receive(message(104))
-        XCTAssertTrue(history.settled(message(104)), "The page read in flight will place it")
+        // review native-state-2: 읽는 중에 받은 글은 놓인 것으로 치지 않는다(그 읽기가 실패하면 화면에 나오지 않는다).
+        XCTAssertFalse(history.settled(message(104)), "A read in flight may fail; the row is placed only once a page holds it")
         XCTAssertTrue(history.apply(page(100..<105), request: latest))
+        XCTAssertTrue(history.settled(message(104)))
         XCTAssertTrue(history.settled(Message(id: "elsewhere", projectId: "other")), "Another project's message is not this history's concern")
     }
 }

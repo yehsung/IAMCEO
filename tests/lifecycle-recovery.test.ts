@@ -669,6 +669,29 @@ test("a just-woken CLI that has not reported ready is not written to; its idle s
   expect(f.store.listDispatches(member.id).map(dispatch => dispatch.transportState)).toEqual(["accepted"]);
 });
 
+// review orchestrator-5: the wait for a ready report had no limit and no reason; the delivery just stayed queued.
+test("a woken CLI that never reports ready becomes visibly blocked after the limit, and its idle signal still delivers", async () => {
+  const f = await fixture(), member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  await f.orch.sleepMember(member.id);
+  await f.orch.shutdown();
+  const next = f.orchestrator({ inputBusyLimitMs: 60 });
+  await next.orch.recover();
+  f.silentBoot(true);
+  const d = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "report", text: "깨우는 보고", wake: true });
+  await next.orch.pump(member.id);
+  // Within the limit nothing is written and nothing is held.
+  expect(f.store.requireDelivery(d.id)).toMatchObject({ status: "queued", attempts: 0 });
+  await until(() => f.store.requireDelivery(d.id).status === "held");
+  expect(f.store.requireMember(member.id).status).toBe("blocked");
+  expect(f.store.requireDelivery(d.id)).toMatchObject({ status: "held", holdReason: "blocked", attempts: 0 });
+  expect(f.count("terminal.send")).toBe(0);
+  expect(f.store.listDispatches(member.id)).toHaveLength(0);
+  f.terminals.get(f.store.requireMember(member.id).paneId!)!.status = { state: "idle", app: "claude-code" };
+  await until(() => f.store.requireDelivery(d.id).status === "delivered");
+  expect(f.count("terminal.send")).toBe(1);
+  expect(f.store.requireMember(member.id).status).not.toBe("blocked");
+});
+
 test("a turn end dropped while the member was closing is replayed from the next observation, never by elapsed time", async () => {
   const f = await fixture(), member = await f.orch.createMember(f.project.id, { name: "Worker" });
   const internal = f.orch as unknown as { runtime(id: string): { closing: boolean; turn: unknown }; probeHealth(): Promise<void> };
@@ -745,6 +768,52 @@ test("a write that never landed (restart mid-send) is proven absent after the re
   expect(f.store.inputState(member.id).unresolvedDispatches).toHaveLength(0);
   expect(next.orch.deliveryRecovery.fenced(member.id)).toBe(false);
 }, 20_000);
+
+// review runner-recovery-1: 두 건 이상 묶인 봉투는 항목이 따로 확인되면서 수신 확인이 굳어 자동 재전송이 끝내 나가지 않았다.
+test("a two-item envelope that never landed is sent again as one envelope", async () => {
+  const f = await fixture();
+  const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  f.unknownSend();
+  const memo = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "system", text: "[시스템] 함께 나가는 메모", wake: false });
+  await f.orch.assign(f.project.id, member.handle, { text: "들어가지 못한 지시" });
+  const instruction = f.store.listDeliveries(f.project.id).find(d => d.kind === "instruction")!;
+  expect(f.store.listDispatches(member.id).map(d => [d.transportState, d.items.length])).toEqual([["unknown", 2]]);
+  await f.orch.shutdown(); f.unknownSend(false);
+  const next = f.orchestrator({ writeSettleMs: 0 }, true);
+  await next.orch.recover();
+  await tickUntil(next.orch, () => [memo, instruction].every(d => f.store.requireDelivery(d.id).status === "delivered"));
+  expect(f.count("terminal.send")).toBe(2);
+  expect(f.store.listDispatches(member.id).map(d => d.items.length)).toEqual([2, 2]);
+  expect(next.orch.deliveryRecovery.fenced(member.id)).toBe(false);
+}, 20_000);
+
+// review orchestrator-1: 동시 턴 자리가 없어 재전송이 미뤄지는 동안 확인할 때마다 쓰지 못한 봉투가 하나씩 쌓였다.
+test("while the turn cap is full a pending resend leaves no extra envelope, and goes out once a slot frees", async () => {
+  const f = await fixture();
+  const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  const other = await f.orch.createMember(f.project.id, { name: "Other" });
+  f.unknownSend();
+  await f.orch.assign(f.project.id, member.handle, { text: "들어가지 못한 지시" });
+  const delivery = f.store.listDeliveries(f.project.id).find(d => d.kind === "instruction")!;
+  await f.orch.shutdown(); f.unknownSend(false);
+  // 다른 직원이 일하는 중이라 하나뿐인 자리가 찼다.
+  f.store.patchSettings({ maxConcurrentTurns: 1 });
+  const at = new Date().toISOString(), busy = f.store.requireMember(other.id);
+  const run = { runId: crypto.randomUUID(), memberId: busy.id, projectId: busy.projectId, identity: { terminalId: busy.paneId, sessionId: busy.sessionId, sessionGeneration: f.store.memberRevisions(busy.id).sessionGeneration, process: null },
+    turn: 0, deliveryIds: [], phase: "running" as const, inputReceivedAt: at, startedAt: at, lastProgressAt: at, endedAt: null, result: null, reason: null, exitCode: null, interruptionNotifiedAt: null, reportRequestedAt: null, createdAt: at, updatedAt: at };
+  f.store.saveExecutionJournal(run);
+  const next = f.orchestrator({ writeSettleMs: 0 }, true);
+  await next.orch.recover();
+  await tickUntil(next.orch, () => f.store.getDeliveryRecovery(delivery.id)?.phase === "waiting" && f.store.getDeliveryRecovery(delivery.id)?.reason === "busy");
+  expect(f.store.listDispatches(member.id).map(d => d.transportState)).toEqual(["accepted"]);
+  expect(f.count("terminal.send")).toBe(1);
+  // 자리가 나면 한 번만 다시 나간다. 이 직원 자신의 끝난 쓰기는 자리를 차지하지 않는다.
+  const ended = new Date().toISOString();
+  f.store.saveExecutionJournal({ ...run, phase: "ended", result: "success", endedAt: ended, updatedAt: ended });
+  await tickUntil(next.orch, () => f.store.requireDelivery(delivery.id).status === "delivered");
+  expect(f.count("terminal.send")).toBe(2);
+  expect(f.store.listDispatches(member.id).map(d => d.transportState)).toEqual(["accepted", "accepted"]);
+}, 30_000);
 
 test("when the CLI moved on since the send nothing is re-sent on its own, but '그만 보내기' really releases the member", async () => {
   const { f, member, delivery, next } = await lostWrite(true);

@@ -117,10 +117,11 @@ struct ChatHistory: Sendable {
             return rows.values.sorted(by: Self.ordered)
         }
     }
-    /// 실시간으로 받은 글이 이 대화에 이미 놓였거나, 진행 중인 읽기가 놓아 줄 예정인가. false면 최신 쪽을 다시 읽어야 보인다.
+    /// 실시간으로 받은 글이 이 대화에 이미 놓였거나, 이어 붙이는 중인 읽기가 놓아 줄 예정인가. false면 최신 쪽을 다시 읽어야 보인다.
+    /// 읽는 중에 받은 글은 놓인 것으로 치지 않는다. 그 읽기가 실패하면 글이 화면에 나오지 않은 채 남기 때문이다.
     func settled(_ message: Message) -> Bool {
         guard contains(message) else { return true }
-        return confirmed[Data(message.id.utf8)] != nil || loading?.kind == .latest || loading?.kind == .initial || bridge != nil
+        return confirmed[Data(message.id.utf8)] != nil || bridge != nil
     }
     var confirmedItems: [Message] { confirmed.values.sorted(by: Self.ordered) }
     var optimisticIDs: [String] { optimistic.values.map(\.id) }

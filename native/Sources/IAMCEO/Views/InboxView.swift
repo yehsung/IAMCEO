@@ -35,6 +35,11 @@ private struct InboxBlock: Identifiable {
 }
 
 extension InboxReviewState {
+    /// 탭 이동으로 결재함 방문이 끝났는가. 자료는 결재 카드의 파일을 보고 돌아오는 길이라 끝으로 치지 않고,
+    /// 결재함이나 자료에서 그 밖의 탭으로 나가면 끝난 것이다.
+    static func visitEnds(from old: Destination, to new: Destination) -> Bool {
+        new != .inbox && new != .files && (old == .inbox || old == .files)
+    }
     /// 방문이 끝날 때 부른다. 여기서 답한 카드, 손댔지만 다른 곳에서 이미 처리된 카드, 목록에서 사라진 카드를
     /// '결재할 항목'에서 치운다. 그러지 않으면 탭을 계속 올려 두는 Mac에서는 이런 카드가 하루 종일 쌓이고 치울 방법이 없다.
     /// 열린 카드의 선택·메모·펼침과 보내는 중인 카드는 건드리지 않는다. 메모 초안은 DraftStore에 남는다.
@@ -115,9 +120,9 @@ struct InboxView: View {
             .onChange(of: olderDone.count) { _, _ in if router.decisionID != nil { handleLink(proxy) } }
             .onChange(of: session.segment) { _, _ in settleVisit() }
             // Mac은 탭을 계속 올려 두어 onDisappear가 오지 않는다. 결재함을 떠나면 방문이 끝난 것으로 본다.
-            // 자료 열람(결재 카드의 파일을 보고 돌아오는 길)은 방문을 끝내지 않는다.
+            // 자료 열람(결재 카드의 파일을 보고 돌아오는 길)은 방문을 끝내지 않는다. 자료에서 다른 탭으로 가면 끝난다.
             .onChange(of: router.destination) { old, new in
-                if old == .inbox, new != .inbox, new != .files { settleVisit() }
+                if InboxReviewState.visitEnds(from: old, to: new) { settleVisit() }
             }
             .onChange(of: store.selectedProjectID) { _, _ in resetProject() }
             .onChange(of: drafts.namespace) { _, _ in resetProject() }

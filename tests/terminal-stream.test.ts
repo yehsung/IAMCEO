@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { createServer, type Socket } from "node:net";
 import { existsSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -13,12 +13,16 @@ import { startServer } from "../server/http.ts";
 import { terminalSize, TerminalStreams, type SocketData } from "../server/terminal-stream.ts";
 
 const VT = "\x1bc\x1b[31mhello 터미널\x1b[0m\r\n";
+// These are real shell/PTY/Bun processes. Startup scheduling is not a stream
+// latency requirement; keep the explicit restoration/renewal timing assertions below.
+setDefaultTimeout(30_000);
 const NativeWebSocket = WebSocket as unknown as new (url: string, options: Bun.WebSocketOptions) => WebSocket;
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const until = async (predicate: () => boolean) => {
-  for (let n = 0; n < 250 && !predicate(); n++) await Bun.sleep(10);
-  expect(predicate()).toBe(true);
+  const deadline = performance.now() + 5_000;
+  while (!predicate() && performance.now() < deadline) await Bun.sleep(10);
+  expect(predicate(), `Timed out waiting for ${predicate}`).toBe(true);
 };
 
 async function fixture(simulateDetach = false, restoreDelay = 150, cli: "claude" | "codex" = "claude") {
@@ -123,10 +127,10 @@ exec ${quote(process.execPath)} ${quote(script)} "$@"
   function connect(query = "mode=observe", id = member.id) {
     const ws = new NativeWebSocket(`${origin.replace("http", "ws")}/api/members/${id}/terminal/stream?${query}`, { headers });
     ws.binaryType = "arraybuffer"; sockets.push(ws);
-    const events: any[] = []; const output: Buffer[] = []; let closed = false;
+    const events: any[] = []; const output: Buffer[] = []; let closed = false; let closeCode: number | undefined; let closeReason: string | undefined;
     ws.addEventListener("message", e => { if (typeof e.data === "string") events.push(JSON.parse(e.data)); else output.push(Buffer.from(e.data)); });
-    ws.addEventListener("close", () => { closed = true; });
-    return { ws, events, output, get text() { return Buffer.concat(output).toString(); }, get closed() { return closed; } };
+    ws.addEventListener("close", event => { closed = true; closeCode = event.code; closeReason = event.reason; });
+    return { ws, events, output, get text() { return Buffer.concat(output).toString(); }, get closed() { return closed; }, get closeCode() { return closeCode; }, get closeReason() { return closeReason; } };
   }
   return { dir, config, store, runner, orch, server, project, member, terminals, status, connect, pids, sent, origin, headers };
 }
@@ -713,6 +717,20 @@ describe("terminal stream", () => {
     await until(()=>observe.text.includes("hello")&&control.text.includes("PTY_READY"));
     await f.orch.shutdown(); expect(f.pids().every(p=>!alive(p.pid))).toBe(true);
     expect(f.terminals.get(f.member.paneId!).state).toBe("live");
+  });
+  test("server restart closes observe and control with 1012 restarting", async () => {
+    const f = await fixture();
+    const lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
+    const observe = f.connect();
+    const control = f.connect(`mode=control&lease=${lease.leaseId}`);
+    await until(() => observe.text.includes("hello") && control.text.includes("PTY_READY"));
+    await f.server.stop();
+    await until(() => observe.closed && control.closed);
+    for (const stream of [observe, control]) {
+      expect(stream.closeCode).toBe(1012);
+      expect(stream.closeReason).toBe("restarting");
+    }
+    expect(f.pids().every(p => !alive(p.pid))).toBe(true);
   });
   test("slow client closes at 4MB and reaps its process", async () => {
     const f = await fixture(); const manager = new TerminalStreams(f.config,f.store,f.orch);

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { Bus } from "../server/bus.ts";
 import { loadConfig, updateConfigFile } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
-import { startServer } from "../server/http.ts";
+import { startServer, type ServerContext } from "../server/http.ts";
 import type { OrchestratorApi } from "../server/orchestrator-api.ts";
 import { Store } from "../server/store.ts";
 import type { HerdrInfo, RealtimeEvent, SyncCursor, SyncSnapshot, WsEvent } from "../shared/types.ts";
@@ -15,7 +15,7 @@ const unavailable: HerdrInfo = { installed: false, running: false, version: null
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const stop of cleanup.splice(0).reverse()) await stop(); });
 
-async function fixture(herdrInfo: () => Promise<HerdrInfo> = async () => unavailable, suppliedBus = new Bus()) {
+async function fixture(herdrInfo: () => Promise<HerdrInfo> = async () => unavailable, suppliedBus = new Bus(), context: Partial<ServerContext> = {}) {
   const home = mkdtempSync("/private/tmp/iamceo-realtime-");
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
   updateConfigFile({ accessCode: CODE, hosts: ["127.0.0.1"] }, env);
@@ -29,7 +29,7 @@ async function fixture(herdrInfo: () => Promise<HerdrInfo> = async () => unavail
       return () => { calls.push(String(key)); throw new Error(`Unexpected orchestrator call: ${String(key)}`); };
     },
   }) as unknown as OrchestratorApi;
-  let server = await startServer({ config, store, bus, orch });
+  let server = await startServer({ config, store, bus, orch, ...context });
   while (server.port === 7878) { await server.stop(); server = await startServer({ config, store, bus, orch }); }
   const base = `http://127.0.0.1:${server.port}`;
   cleanup.push(async () => { await Bun.sleep(0); await server.stop(); store.db.close(); rmSync(home, { recursive: true }); });
@@ -98,6 +98,45 @@ describe("Bus emit cursor", () => {
 });
 
 describe("sync snapshot", () => {
+  test("ready 전 상태 조회는 STARTING이고 준비 뒤 기존 계약으로 응답한다", async () => {
+    let ready = false;
+    const f = await fixture(undefined, undefined, { daemon: () => ({ ready, buildId: "fixture", version: "fixture" }) });
+    for (const path of ["/api/sync?projectId=hq", "/api/health", "/api/readiness", "/api/runtime", "/api/bootstrap", "/api/projects/hq/state", "/api/push/status"]) {
+      const response = await fetch(f.base + path, { headers: auth });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "서버를 시작하는 중입니다", code: "STARTING" });
+    }
+    expect(f.calls).toEqual([]);
+    expect((await fetch(f.base + "/api/sync")).status).toBe(401);
+    ready = true;
+    expect((await f.sync("?projectId=hq")).projectStatus).toBe("ok");
+  });
+
+  test("sync bytes는 동시·반복 요청에 재사용하고 lite·project·seq·epoch마다 분리한다", async () => {
+    const f = await fixture();
+    const build = spyOn(f.store, "projectState");
+    try {
+      const snapshots = await Promise.all(Array.from({ length: 8 }, () => f.sync("?projectId=hq")));
+      expect(build).toHaveBeenCalledTimes(1);
+      for (const snapshot of snapshots) expect(snapshot).toEqual(snapshots[0]);
+      await f.sync("?projectId=hq");
+      expect(build).toHaveBeenCalledTimes(1);
+      await f.sync("?projectId=hq&lite=1");
+      expect(build).toHaveBeenCalledTimes(2);
+      const project = f.store.createProject({ name: "other", cwd: "/fixture", runnerEnabled: false });
+      await f.sync(`?projectId=${project.id}`);
+      expect(build).toHaveBeenCalledTimes(3);
+      const message = f.store.createMessage({ projectId: "hq", kind: "알림", body: "new seq" });
+      expect((await f.sync("?projectId=hq")).state!.messages.some(m => m.id === message.id)).toBe(true);
+      expect(build).toHaveBeenCalledTimes(4);
+      const seq = f.bus.seq;
+      f.bus.seq = Number.MAX_SAFE_INTEGER - 1;
+      f.bus.emit({ type: "projects", projects: [] });
+      f.bus.seq = seq;
+      expect((await f.sync("?projectId=hq")).cursor.epoch).toBe(f.bus.epoch);
+      expect(build).toHaveBeenCalledTimes(5);
+    } finally { build.mockRestore(); }
+  });
   test("선택 상태·revision·cursor는 같은 동기 경계이고 실행기를 갱신하지 않는다", async () => {
     const f = await fixture();
     const p = f.store.createProject({ name: "sync", cwd: "/fixture", runnerEnabled: false });
@@ -268,8 +307,10 @@ describe("v1/v2 WebSocket", () => {
     await c.opened;
     expect(await c.next((e) => e.type === "hello")).toMatchObject({ epoch: f.bus.epoch, seq: 1 });
     await f.server.stop();
-    expect(await a.closed).toBe(1006);
-    expect(await c.closed).toBe(1006);
+    expect(await a.closed).toBe(1012);
+    expect(await c.closed).toBe(1012);
+    expect(a.events as unknown[]).toContainEqual({ type: "restarting" });
+    expect(c.events as unknown[]).toContainEqual({ type: "restarting" });
     await expect(fetch(`${f.base}/api/health`)).rejects.toThrow();
   });
 });

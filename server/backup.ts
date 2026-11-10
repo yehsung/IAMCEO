@@ -7,6 +7,7 @@ import { VERSION } from "./config.ts";
 import { MIGRATIONS } from "./db.ts";
 import { normalizeHome, withHomeOwner } from "./home-owner.ts";
 import { toStorageError } from "./storage-errors.ts";
+import type { LoopMonitor } from "./loop-monitor.ts";
 
 export interface BackupPolicy { intervalMs: number; daily: number; weekly: number }
 export const DEFAULT_BACKUP_POLICY: Readonly<BackupPolicy> = Object.freeze({ intervalMs: 86_400_000, daily: 7, weekly: 4 });
@@ -291,7 +292,7 @@ export class BackupManager {
   lastError: Error | null = null;
   private timer?: ReturnType<typeof setInterval>;
   private lastSuccessAt?: number;
-  constructor(readonly options: { home: string; backupDir: string; policy?: Partial<BackupPolicy>; now?: () => Date }) {
+  constructor(readonly options: { home: string; backupDir: string; policy?: Partial<BackupPolicy>; now?: () => Date; loopMonitor?: LoopMonitor }) {
     this.policy = Object.freeze(policyValue(options.policy ?? {}));
   }
   run(force = false): Promise<BackupSnapshot | null> {
@@ -299,7 +300,7 @@ export class BackupManager {
     const key = normalizeHome(this.options.home);
     const existing = pending.get(key);
     if (existing) return existing;
-    const job = Promise.resolve().then(() => {
+    const run = () => {
       const now = this.options.now?.() ?? new Date();
       if (this.lastSuccessAt === undefined) {
         const last = listBackups(this.options.backupDir).find((snapshot) => snapshot.manifest.sourceHome === key);
@@ -312,7 +313,9 @@ export class BackupManager {
       this.lastSuccessAt = Date.parse(snapshot.manifest.createdAt);
       this.lastError = null;
       return snapshot;
-    }).catch((error) => { this.lastError = toStorageError(error, "정기 백업 실패"); throw this.lastError; })
+    };
+    const job = Promise.resolve().then(() => this.options.loopMonitor ? this.options.loopMonitor.run("timer:backup", run) : run())
+      .catch((error) => { this.lastError = toStorageError(error, "정기 백업 실패"); throw this.lastError; })
       .finally(() => { pending.delete(key); });
     pending.set(key, job);
     return job;

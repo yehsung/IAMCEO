@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -6,6 +6,10 @@ import { service, waitForReadiness } from "../bin/iamceo.ts";
 import { loadConfig } from "../server/config.ts";
 import { hasNotarizationSignature, parseReleaseOptions, renderCask, signingTargets } from "../scripts/release-mac";
 import pkg from "../package.json";
+
+// Exercise the real installer and checksum tool. Fresh executable fixtures can
+// take seconds to start on macOS; bound each scenario independently of that cost.
+setDefaultTimeout(15_000);
 
 const root = resolve(import.meta.dir, "..");
 const temporary: string[] = [];
@@ -165,14 +169,21 @@ test("installer: checksum mismatch never mounts or changes existing app", () => 
   expect(readFileSync(join(f.dir, "IAMCEO.app/old"), "utf8")).toBe("keep");
 });
 
-test("installer: rejects CLI-only latest, duplicate digest, unsupported version and platform", () => {
-  for (const extra of [{ MOCK_PLATFORM: "Linux" }, { MOCK_ARCH: "x86_64" }, { MOCK_OS: "13.7" }, { IAMCEO_VERSION: "v0.2.0/../../evil" }]) {
-    const f = fixture(); expect(f.run(extra).code).not.toBe(0); expect(existsSync(join(f.path, "hdiutil.log"))).toBe(false);
-  }
-  for (const sums of [`${"a".repeat(64)}  iamceo-darwin-arm64\n`, `${"a".repeat(64)}  IAMCEO-${pkg.version}-arm64.dmg\n`.repeat(2)]) {
-    const f = fixture(); writeFileSync(join(f.release, "SHA256SUMS"), sums);
-    expect(f.run().code).not.toBe(0); expect(existsSync(join(f.path, "hdiutil.log"))).toBe(false);
-  }
+test.each([{ MOCK_PLATFORM: "Linux" }, { MOCK_ARCH: "x86_64" }, { MOCK_OS: "13.7" }, { IAMCEO_VERSION: "v0.2.0/../../evil" }])("installer: rejects unsupported version and platform %j", extra => {
+  const f = fixture();
+  const result = f.run(extra);
+  expect(result.code, result.output).not.toBe(0);
+  expect(existsSync(join(f.path, "hdiutil.log"))).toBe(false);
+});
+
+test.each([
+  ["CLI-only latest", `${"a".repeat(64)}  iamceo-darwin-arm64\n`],
+  ["duplicate digest", `${"a".repeat(64)}  IAMCEO-${pkg.version}-arm64.dmg\n`.repeat(2)],
+])("installer: rejects %s", (_name, sums) => {
+  const f = fixture(); writeFileSync(join(f.release, "SHA256SUMS"), sums);
+  const result = f.run();
+  expect(result.code, result.output).not.toBe(0);
+  expect(existsSync(join(f.path, "hdiutil.log"))).toBe(false);
 });
 
 test("installer: Rosetta recognizes arm64 host", () => {
@@ -198,13 +209,11 @@ test("installer: app-owned service is never changed", () => {
   const result = f.run(); expect(result.code, result.output).toBe(0); expect(readFileSync(f.plist, "utf8")).toBe("app service");
 });
 
-test("installer: copy or bundle version failure preserves old app and unmounts", () => {
-  for (const extra of [{ MOCK_COPY_FAIL: "1" }, { MOCK_VERSION: `${pkg.version}-old` }]) {
-    const f = fixture(); mkdirSync(join(f.dir, "IAMCEO.app")); writeFileSync(join(f.dir, "IAMCEO.app/old"), "keep");
-    const result = f.run(extra); expect(result.code).not.toBe(0);
-    expect(readFileSync(join(f.dir, "IAMCEO.app/old"), "utf8")).toBe("keep");
-    expect(readFileSync(join(f.path, "hdiutil.log"), "utf8")).toContain("detach");
-  }
+test.each([{ MOCK_COPY_FAIL: "1" }, { MOCK_VERSION: `${pkg.version}-old` }])("installer: copy or bundle version failure %j preserves old app and unmounts", extra => {
+  const f = fixture(); mkdirSync(join(f.dir, "IAMCEO.app")); writeFileSync(join(f.dir, "IAMCEO.app/old"), "keep");
+  const result = f.run(extra); expect(result.code, result.output).not.toBe(0);
+  expect(readFileSync(join(f.dir, "IAMCEO.app/old"), "utf8")).toBe("keep");
+  expect(readFileSync(join(f.path, "hdiutil.log"), "utf8")).toContain("detach");
 });
 
 test("installer: replacement move failure rolls back the old app", () => {

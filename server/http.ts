@@ -26,6 +26,7 @@ import { Folders } from "./folders.ts";
 import { checkLocalImportPath, readLocalFile } from "./local-files.ts";
 import { createStorageReferences } from "./storage-maintenance.ts";
 import { GitHub } from "./github.ts";
+import { LoopMonitor } from "./loop-monitor.ts";
 
 export interface ServerContext {
   config: Config;
@@ -42,6 +43,7 @@ export interface ServerContext {
   /** Isolated fake-clone tests need not depend on host disk availability. */
   githubFreeBytes?: (path: string) => Promise<number>;
   daemon?: () => { ready: boolean; buildId: string; version: string };
+  loopMonitor?: LoopMonitor;
 }
 
 export interface HostBinding {
@@ -485,12 +487,15 @@ function wantsLite(url: URL): boolean {
   return value === "1";
 }
 
-function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, readHerdr: () => Promise<HerdrInfo>, currentHerdr: () => HerdrInfo): Route[] {
+function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, readHerdr: () => Promise<HerdrInfo>, currentHerdr: () => HerdrInfo, monitor: LoopMonitor): Route[] {
   const { config, store, orch, bus } = ctx;
   const models = new ModelCatalogReader(config);
   const folders = new Folders(ctx.folderHome);
   const github = new GitHub(folders, { ...process.env }, 600_000, { stateHome: config.home, freeBytes: ctx.githubFreeBytes });
   const legacyProjectPatches = new Set<string>();
+  let syncGeneration = "";
+  const syncCache = new Map<string, string>();
+  const notices = (id: string) => monitor.run("delivery:notices", () => ctx.delivery!.notices(id));
   // 재전송이 앞 요청의 orch 처리가 끝나기 전에 와도 두 번 전달되지 않게 한다.
   const inFlight = new Map<string, Promise<unknown>>();
   const once = <T>(key: string, run: () => Promise<T>): Promise<T> => {
@@ -504,7 +509,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
   const route = (method: string, path: string, handler: Handler): Route => ({
     method,
     pattern: new RegExp(`^${path.replace(/:[a-z]+/g, "([^/]+)")}$`),
-    handler,
+    handler: (req, url, params) => monitor.runAsync(`${method} ${path}`, async () => handler(req, url, params)),
   });
 
   /** 연결되어 있지 않으면 409. 화면도 입력을 막지만 다른 기기·늦게 온 요청이 있다. */
@@ -634,12 +639,12 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       const before = url.searchParams.get("before");
       if (before !== null && (!before || before.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(before))) throw new ApiError(400, "전달 조회 위치가 올바르지 않습니다");
       if (!ctx.delivery) throw new ApiError(501, "전달 조회를 지원하지 않습니다");
-      return Response.json(ctx.delivery.memberNotices(id!, { limit: rawLimit === null ? 50 : Number(rawLimit), before: before ?? undefined }));
+      return Response.json(monitor.run("delivery:memberNotices", () => ctx.delivery!.memberNotices(id!, { limit: rawLimit === null ? 50 : Number(rawLimit), before: before ?? undefined })));
     }),
     route("GET", "/api/projects/:id/delivery-notices", (_req, url, [id]) => {
       strictQuery(url, []);
       if (!ctx.delivery) throw new ApiError(501, "전달 조회를 지원하지 않습니다");
-      return Response.json(ctx.delivery.notices(id!));
+      return Response.json(notices(id!));
     }),
     route("POST", "/api/messages/:id/recovery", async (req, url, [id]) => {
       contractV2(req);
@@ -678,21 +683,33 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       const requestedProjectId = url.searchParams.get("projectId");
       if (requestedProjectId !== null && (!requestedProjectId.trim() || Buffer.byteLength(requestedProjectId) > 256)) throw new ApiError(400, "프로젝트 ID가 잘못되었습니다");
       await readHerdr();
-      // 이 뒤 직렬화까지 await가 없다. 도메인 쓰기는 이 데몬의 Store가 소유한다.
-      const herdr = currentHerdr();
-      const project = requestedProjectId === null ? null : store.getProject(requestedProjectId);
-      const projectStatus = requestedProjectId === null ? "none" : !project ? "not_found" : project.archived ? "archived" : "ok";
-      const rankOverrides = { manager: 0, lead: 0 };
-      for (const m of store.listAllMembers()) if (m.origin !== "manual" && (m.modelOverride || m.effortOverride)) rankOverrides[memberRank(m.kind)]++;
-      const body: SyncSnapshot = {
-        protocol: 2, requestedProjectId, projectStatus,
-        bootstrap: { version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr,
-          home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides },
-        state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!), ...(ctx.delivery ? { deliveryNotices: ctx.delivery.notices(requestedProjectId!) } : {}) } : null,
-        revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },
-        cursor: bus.cursor,
-      };
-      return Response.json(lite && body.state ? { ...body, state: { ...body.state, files: body.state.files.map(liteFile) } } : body);
+      return monitor.run("GET /api/sync build", () => {
+        // No await from the generation check through serialization. Concurrent readers share these bytes.
+        const generation = JSON.stringify([bus.epoch, bus.seq, urls()]);
+        if (syncGeneration !== generation) { syncCache.clear(); syncGeneration = generation; }
+        const key = JSON.stringify([requestedProjectId, lite]);
+        const cached = syncCache.get(key);
+        if (cached !== undefined) return new Response(cached, { headers: { "Content-Type": "application/json" } });
+        // 이 뒤 직렬화까지 await가 없다. 도메인 쓰기는 이 데몬의 Store가 소유한다.
+        const herdr = currentHerdr();
+        const project = requestedProjectId === null ? null : store.getProject(requestedProjectId);
+        const projectStatus = requestedProjectId === null ? "none" : !project ? "not_found" : project.archived ? "archived" : "ok";
+        const rankOverrides = { manager: 0, lead: 0 };
+        for (const m of store.listAllMembers()) if (m.origin !== "manual" && (m.modelOverride || m.effortOverride)) rankOverrides[memberRank(m.kind)]++;
+        const body: SyncSnapshot = {
+          protocol: 2, requestedProjectId, projectStatus,
+          bootstrap: { version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr,
+            home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides },
+          state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!), ...(ctx.delivery ? { deliveryNotices: notices(requestedProjectId!) } : {}) } : null,
+          revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },
+          cursor: bus.cursor,
+        };
+        const serialized = JSON.stringify(lite && body.state ? { ...body, state: { ...body.state, files: body.state.files.map(liteFile) } } : body);
+        // Bound arbitrary not-found project IDs and old project selections within this generation.
+        if (syncCache.size >= 32) syncCache.delete(syncCache.keys().next().value!);
+        syncCache.set(key, serialized);
+        return new Response(serialized, { headers: { "Content-Type": "application/json" } });
+      });
     }),
     route("GET", "/api/bootstrap", async () => {
       await orch.refreshConnection?.();
@@ -744,7 +761,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       // 보관한 프로젝트는 없는 것으로 친다. 화면이 본사로 돌아간다.
       if (store.requireProject(id!).archived) throw new ApiError(404, "보관된 프로젝트입니다");
       const state = store.projectState(id!);
-      const snapshot = ctx.delivery ? { ...state, deliveryNotices: ctx.delivery.notices(id!) } : state;
+      const snapshot = ctx.delivery ? { ...state, deliveryNotices: notices(id!) } : state;
       return Response.json(wantsLite(url) ? { ...snapshot, files: state.files.map(liteFile) } : snapshot);
     }),
     route("GET", "/api/projects/:id/messages", (req, url, params) => {
@@ -1245,6 +1262,7 @@ const WS_V2_TOPIC = "events-v2";
 const WS_LITE_TOPIC = "events-lite";
 const WS_V2_LITE_TOPIC = "events-v2-lite";
 export async function startServer(ctx: ServerContext): Promise<RunningServer> {
+  const monitor = ctx.loopMonitor ?? new LoopMonitor();
   const { config, store, bus } = ctx;
   const ipRule = buildIpRule(config.hosts);
   const hosts: string[] = [];
@@ -1260,13 +1278,14 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     if (herdrCache) return Promise.resolve(herdrCache);
     return herdrPending ??= ctx.orch.herdrInfo().then((info) => herdrCache ??= info).finally(() => { herdrPending = undefined; });
   };
-  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, readHerdr, () => herdrCache!);
+  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, readHerdr, () => herdrCache!, monitor);
   const pushHandler = ctx.push ? createPushHandler(ctx.push) : null;
   const sockets = new Set<ServerWebSocket<SocketData>>();
   const v2Sockets = new Set<ServerWebSocket<SocketData>>();
   const requests = new Set<Promise<Response | undefined>>();
   let socketsDrained: (() => void) | undefined;
   let stopPromise: Promise<void> | undefined;
+  let stopping = false;
   let closedEpochSockets = false;
   const webIndex = await loadWebIndex();
   const development = process.env.IAMCEO_DEV === "1";
@@ -1284,6 +1303,9 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
 
   const route = (req: Request, url: URL, server: Server<SocketData>): Response | Promise<Response | undefined> | undefined => {
     const path = url.pathname;
+    const starting = () => fail(503, "서버를 시작하는 중입니다", "STARTING");
+    if (stopping) return starting();
+    if (ctx.daemon?.().ready === false && path === "/api/health") return starting();
     if (path === "/api/health") return Response.json({ ok: true, version: VERSION });
     // 짝 맺기 코드를 낸 폰에만 접속 코드를 준다. 코드 자체가 인증이라 접속 코드 검사 앞에 둔다.
     if (path === "/pair/claim") return handlePairClaim(req, server);
@@ -1301,6 +1323,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     }
     if (path.startsWith("/api/")) {
       if (!hasAccessCode(req, url, false)) return fail(401, "인증이 필요합니다");
+      if (ctx.daemon?.().ready === false && (path === "/api/sync" || path === "/api/readiness" || path === "/api/runtime" || path === "/api/bootstrap" || /^\/api\/projects\/[^/]+\/state$/.test(path) || path === "/api/push/status")) return starting();
       const terminal = /^\/api\/members\/([^/]+)\/terminal\/stream$/.exec(path);
       if (terminal) {
         if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다");
@@ -1455,6 +1478,12 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
         closeOnBackpressureLimit: true,
         open(ws) {
           sockets.add(ws);
+          if (stopping) {
+            closedEpochSockets = true;
+            if (ws.data.kind === "realtime") ws.send(JSON.stringify({ type: "restarting" }));
+            ws.close(1012, "restarting");
+            return;
+          }
           if (ws.data.authGeneration !== authGeneration) {
             closedEpochSockets = true;
             ws.close(4001, "접속 코드가 바뀌었습니다. 다시 연결하세요");
@@ -1482,8 +1511,15 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     });
 
   const [firstHost, ...otherHosts] = config.hosts;
-  if (!firstHost) throw new Error("listen 할 주소가 없습니다");
-  const servers = [serve(firstHost, config.port)];
+  const servers: Server<SocketData>[] = [];
+  try {
+    if (!firstHost) throw new Error("listen 할 주소가 없습니다");
+    servers.push(serve(firstHost, config.port));
+  } catch (error) {
+    if (!ctx.loopMonitor) monitor.stop();
+    await Promise.allSettled([terminalStreams.close(), webServer?.stop(true)]);
+    throw error;
+  }
   const port = servers[0]!.port!;
   boundPort = port;
   hosts.push(firstHost);
@@ -1512,10 +1548,10 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     const desired = [...new Set([...otherHosts, ...(config.hostsAuto ? detect() : [])])];
     for (const host of desired) if (!hosts.includes(host)) open(host);
   };
-  const hostTimer = setInterval(syncHosts, HOST_SYNC_MS);
+  const hostTimer = setInterval(() => monitor.run("timer:syncHosts", syncHosts), HOST_SYNC_MS);
   hostTimer.unref?.();
   // 화면이 조용히 죽은 소켓을 알아채는 신호. 망이 바뀌면 소켓은 닫히지 않고 그냥 멈춘다.
-  const pingTimer = setInterval(() => {
+  const pingTimer = setInterval(() => monitor.run("timer:wsPing", () => {
     const payload = JSON.stringify({ type: "ping" });
     const v2Payload = JSON.stringify({ type: "ping", ...bus.cursor });
     for (const server of servers) {
@@ -1524,7 +1560,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       server.publish(WS_LITE_TOPIC, payload);
       server.publish(WS_V2_LITE_TOPIC, v2Payload);
     }
-  }, WS_PING_MS);
+  }), WS_PING_MS);
   pingTimer.unref?.();
 
   let publishedEpoch = bus.epoch;
@@ -1561,16 +1597,27 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     syncHosts,
     stop() {
       return stopPromise ??= (async () => {
+        stopping = true;
         clearInterval(hostTimer);
         clearInterval(pingTimer);
         unsubscribe();
-        await terminalStreams.close();
+        // Queue notice before the close frame, including legacy and lite realtime sockets.
+        closedEpochSockets ||= sockets.size > 0;
+        for (const ws of sockets) {
+          if (ws.data.kind === "realtime") ws.send(JSON.stringify({ type: "restarting" }));
+          ws.close(1012, "restarting");
+        }
         const drained = sockets.size === 0 ? Promise.resolve() : new Promise<void>((resolve) => { socketsDrained = resolve; });
+        let closeDeadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.all([terminalStreams.close(), Promise.race([drained, new Promise<void>(resolve => { closeDeadline = setTimeout(resolve, 1_000); })])]);
+        } finally { clearTimeout(closeDeadline); }
         const stopped = servers.map((s) => s.stop(true));
         // Bun 1.3.14는 서버가 먼저 닫은 WS를 pendingWebSockets에 남긴다.
         // force stop은 한 번만 호출하고 실제 요청/소켓의 종료를 직접 기다린다.
-        await (closedEpochSockets ? Promise.all([drained, ...requests]) : Promise.all(stopped));
+        await (closedEpochSockets ? Promise.all([...requests]) : Promise.all(stopped));
         await webServer?.stop(true);
+        if (!ctx.loopMonitor) monitor.stop();
       })();
     },
   };

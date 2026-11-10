@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -34,6 +34,94 @@ function client(send: (notification: APNsNotification) => Promise<APNsResult> = 
 }
 
 describe("operations runtime", () => {
+  test("shutdown signal closes ingress during pending initialization without releasing DB ownership early", async () => {
+    const settings = config();
+    const shutdown = new AbortController();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const initializing = new Promise<void>(resolve => { entered = resolve; });
+    let server!: Awaited<ReturnType<typeof startServer>>;
+    const starting = startOpsRuntime(settings, { signal: shutdown.signal, client: client(),
+      createOrchestrator: (c, state) => {
+        const orch = fakeOrchestrator(c, state);
+        orch.initializeRuntime = async () => { entered(); await gate; };
+        orch.recover = async () => { throw new Error("Recovery must not start after shutdown was requested"); };
+        return orch;
+      },
+      startServer: async context => { server = await startServer(context); return server; },
+    });
+    await initializing;
+    const stop = spyOn(server, "stop");
+    try {
+      shutdown.abort();
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(() => acquireHomeOwner(settings.home)).toThrow("다른 작업");
+    } finally { release(); }
+    const runtime = await starting;
+    stops.push(runtime.stop);
+    await runtime.stop();
+    expect(existsSync(join(settings.home, "backups"))).toBe(false);
+    using owner = acquireHomeOwner(settings.home);
+  });
+
+  test("runtime attributes slow onTick work to its timer", async () => {
+    const warnings = spyOn(console, "warn").mockImplementation(() => {});
+    let orch!: Orchestrator;
+    const runtime = await startOpsRuntime(config(), { client: client(), createOrchestrator: (c, store) => {
+      orch = fakeOrchestrator(c, store);
+      Reflect.set(orch, "onTick", () => {
+        const until = performance.now() + 820;
+        while (performance.now() < until) { /* injected synchronous timer workload */ }
+      });
+      return orch;
+    } });
+    stops.push(runtime.stop);
+    try {
+      (Reflect.get(orch, "onTick") as () => void).call(orch);
+      await Bun.sleep(20);
+      expect(warnings.mock.calls.some(([line]) => String(line).includes("slow timer:onTick"))).toBe(true);
+      expect(warnings.mock.calls.some(([line]) => String(line).includes("lag work=timer:onTick"))).toBe(true);
+    } finally { await runtime.stop(); warnings.mockRestore(); }
+  });
+
+  test("runtime initialization gates sync and status; ready does not await backup or sweep", async () => {
+    const settings = config();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const initializing = new Promise<void>(resolve => { entered = resolve; });
+    let origin = "";
+    const starting = startOpsRuntime(settings, {
+      client: client(),
+      createOrchestrator: (c, store) => {
+        const orch = fakeOrchestrator(c, store);
+        orch.initializeRuntime = async () => { entered(); await gate; };
+        return orch;
+      },
+      startServer: async context => {
+        const server = await startServer(context);
+        origin = server.urls[0]!;
+        return server;
+      },
+    });
+    await initializing;
+    try {
+      for (const path of ["/api/sync", "/api/readiness", "/api/runtime"]) {
+        const response = await fetch(origin + path, { headers: { Authorization: `Bearer ${settings.accessCode}` } });
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: "서버를 시작하는 중입니다", code: "STARTING" });
+      }
+    } finally { release(); }
+    const runtime = await starting;
+    stops.push(runtime.stop);
+    expect(runtime.startupMs).toBeGreaterThan(0);
+    expect(existsSync(join(settings.home, "backups"))).toBe(false);
+    expect((await fetch(origin + "/api/readiness", { headers: { Authorization: `Bearer ${settings.accessCode}` } })).status).toBe(200);
+    await runtime.stop();
+    expect(existsSync(join(settings.home, "backups"))).toBe(false);
+  });
+
   test("production assembly records in the domain transaction, mounts authenticated push HTTP, wakes only after commit and backs up", async () => {
     const settings = config();
     const sent: APNsNotification[] = [];
@@ -141,8 +229,12 @@ describe("operations runtime", () => {
       failedAt: Date.now() - STAGING_GRACE_MS - 1_000 });
     db.close();
     const runtime = await startOpsRuntime(settings, { client: client(), createOrchestrator: fakeOrchestrator,
-      backupPolicy: { intervalMs: 20 }, sweepIntervalMs: 20 });
+      backupPolicy: { intervalMs: 20 }, sweepIntervalMs: 20, maintenanceDelayMs: 10 });
     stops.push(runtime.stop);
+    expect(existsSync(publication.directory)).toBe(true);
+    expect(existsSync(join(settings.home, "backups"))).toBe(false);
+    const maintenanceDeadline = Date.now() + 2_000;
+    while (existsSync(publication.directory) && Date.now() < maintenanceDeadline) await Bun.sleep(10);
     expect(existsSync(join(settings.uploadsDir, ".quarantine", manifest.id))).toBe(true);
     expect(existsSync(publication.directory)).toBe(false);
     expect(runtime.storage.usage().quarantine.files).toBeGreaterThan(0);

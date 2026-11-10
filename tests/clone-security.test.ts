@@ -1,9 +1,15 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { rename } from "node:fs/promises";
 import { Folders } from "../server/folders.ts";
 import { GitHub, githubEnvironment } from "../server/github.ts";
+
+// Security assertions concern filesystem identity, argv and environment, not
+// how quickly the host starts a newly written fake executable. Timeout killing
+// itself is covered with a short injected timeout in github.test.ts.
+setDefaultTimeout(30_000);
+const commandTimeoutMs = 10_000;
 
 function fixture(script = 'printf cloned > content') {
   const root = mkdtempSync("/private/tmp/iamceo-clone-security-");
@@ -15,15 +21,17 @@ function fixture(script = 'printf cloned > content') {
   return { root, home, stateHome, bin, outside, folders, env };
 }
 async function finish(service: GitHub, id: string) {
-  for (let n = 0; n < 500; n++) {
+  const deadline = performance.now() + commandTimeoutMs + 2_000;
+  while (performance.now() < deadline) {
     const result = service.job(id);
     if (result.status !== "running") return result;
     await Bun.sleep(5);
   }
-  throw new Error("job did not finish");
+  throw new Error(`job ${id} did not finish: ${JSON.stringify(service.job(id))}`);
 }
 async function waitFor(path: string) {
-  for (let n = 0; n < 500; n++) { if (existsSync(path)) return; await Bun.sleep(5); }
+  const deadline = performance.now() + commandTimeoutMs;
+  while (performance.now() < deadline) { if (existsSync(path)) return; await Bun.sleep(5); }
   throw new Error("signal did not arrive");
 }
 const freeBytes = async () => 20 * 1024 ** 3;
@@ -79,7 +87,7 @@ test("clone parent swap during download never writes outside or cleans the user 
   const signal = join(f.root, "started"), proceed = join(f.root, "proceed");
   const git = join(f.bin, "git");
   writeFileSync(git, `#!/bin/sh\nprintf started > '${signal}'\nwhile [ ! -f '${proceed}' ]; do /bin/sleep 0.01; done\nprintf probe > probe\n`);
-  const service = new GitHub(f.folders, f.env, 2000, { freeBytes });
+  const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes });
   const { jobId } = await service.clone({ repo: "owner/swap", parent });
   await waitFor(signal);
   expect(lstatSync(join(f.stateHome, "clone-staging", jobId)).mode & 0o777).toBe(0o700);
@@ -92,7 +100,7 @@ test("clone parent swap during download never writes outside or cleans the user 
 });
 test("a target created while cloning is never overwritten or deleted", async () => {
   const f = fixture(); const target = join(f.home, "repo");
-  const service = new GitHub(f.folders, f.env, 2000, { freeBytes, beforePublish: async () => {
+  const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes, beforePublish: async () => {
     mkdirSync(target); writeFileSync(join(target, "keep"), "keep");
   } });
   const { jobId } = await service.clone({ repo: "owner/repo", parent: f.home });
@@ -106,7 +114,7 @@ test("cleanup verifies quarantined inode and preserves a replacement user direct
   const f = fixture("printf partial > partial; exit 1");
   const victim = join(f.home, "victim"); mkdirSync(victim); writeFileSync(join(victim, "keep"), "keep");
   let movedVictim = "";
-  const service = new GitHub(f.folders, f.env, 2000, { freeBytes, beforeCleanup: async path => {
+  const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes, beforeCleanup: async path => {
     renameSync(path, path + "-original"); renameSync(victim, path); movedVictim = path;
   } });
   const { jobId } = await service.clone({ repo: "owner/fail", parent: f.home });
@@ -118,7 +126,7 @@ test("cleanup verifies quarantined inode and preserves a replacement user direct
 });
 test("cleanup refuses a staging symlink replacement", async () => {
   const f = fixture(); let original = "";
-  const service = new GitHub(f.folders, f.env, 2000, { freeBytes, beforePublish: async path => {
+  const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes, beforePublish: async path => {
     original = path + "-original"; renameSync(path, original); symlinkSync(f.outside, path);
     writeFileSync(join(f.outside, "keep"), "keep");
   } });
@@ -132,7 +140,7 @@ test("cleanup refuses a staging symlink replacement", async () => {
 test("EXDEV reclones into private local staging and publishes only by rename", async () => {
   const f = fixture('printf "%s" "$PWD" > cwd; printf cloned > content');
   const stages: string[] = [];
-  const service = new GitHub(f.folders, f.env, 2000, { freeBytes, publishRename: async (source, target) => {
+  const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes, publishRename: async (source, target) => {
     stages.push(String(source));
     expect(lstatSync(source).mode & 0o777).toBe(0o700);
     if (stages.length === 1) throw Object.assign(new Error("volume"), { code: "EXDEV" });
@@ -148,7 +156,7 @@ test("EXDEV reclones into private local staging and publishes only by rename", a
 test("local fallback failure cleans only its verified temp directory, with an EXDEV explanation", async () => {
   const f = fixture();
   mkdirSync(join(f.home, "keep")); writeFileSync(join(f.home, "keep/data"), "keep");
-  const service = new GitHub(f.folders, f.env, 2000, { freeBytes, publishRename: async () => {
+  const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes, publishRename: async () => {
     throw Object.assign(new Error("private command output"), { code: "EXDEV" });
   } });
   const { jobId } = await service.clone({ repo: "owner/local-fail", parent: f.home });
@@ -158,7 +166,7 @@ test("local fallback failure cleans only its verified temp directory, with an EX
 });
 test("local cleanup also preserves a directory swapped in after ownership check", async () => {
   const f = fixture(), victim = join(f.home, "victim"); mkdirSync(victim); writeFileSync(join(victim, "keep"), "keep");
-  const service = new GitHub(f.folders, f.env, 2000, { freeBytes,
+  const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes,
     publishRename: async () => { throw Object.assign(new Error("volume"), { code: "EXDEV" }); },
     beforeCleanup: async path => {
       if (!path.includes(".iamceo-clone-")) return;
@@ -174,7 +182,7 @@ test("local cleanup also preserves a directory swapped in after ownership check"
 // F5: fake size/space hooks never fill the disk; final-check uses a sparse file.
 test("less than 5 GiB free is refused before starting a clone", async () => {
   const f = fixture("exit 97");
-  const service = new GitHub(f.folders, f.env, 2000, { freeBytes: async () => 5 * 1024 ** 3 - 1 });
+  const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes: async () => 5 * 1024 ** 3 - 1 });
   await expect(service.clone({ repo: "owner/no-space", parent: f.home })).rejects.toMatchObject({ status: 403, message: "디스크 여유 공간이 부족합니다(5GB 필요)" });
   expect(readdirSync(join(f.stateHome, "clone-staging"))).toEqual([]);
   expect(readdirSync(f.home)).toEqual([]);
@@ -182,7 +190,7 @@ test("less than 5 GiB free is refused before starting a clone", async () => {
 test("periodic 2 GiB limit kills the clone process group and removes staging only", async () => {
   const f = fixture('(/bin/sleep 0.3; printf leaked > late) &\nwait');
   let measurements = 0;
-  const service = new GitHub(f.folders, f.env, 2000, { freeBytes, monitorMs: 10,
+  const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes, monitorMs: 10,
     sizeBytes: async () => { measurements++; return 2 * 1024 ** 3 + 1; },
   });
   const { jobId } = await service.clone({ repo: "owner/large", parent: f.home });
@@ -198,7 +206,7 @@ test("final size check catches a fast large clone using sparse logical bytes", a
   const script = join(f.root, "sparse.ts");
   writeFileSync(script, 'import {openSync, ftruncateSync, closeSync} from "node:fs"; const fd=openSync("huge", "w"); ftruncateSync(fd, 2*1024**3+1); closeSync(fd);');
   writeFileSync(join(f.bin, "git"), `#!/bin/sh\nexec '${process.execPath}' '${script}'\n`);
-  const service = new GitHub(f.folders, f.env, 2000, { freeBytes });
+  const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes });
   const { jobId } = await service.clone({ repo: "owner/fast-large", parent: f.home });
   expect((await finish(service, jobId)).error).toBe("저장소가 너무 큽니다(2GB 초과)");
   expect(readdirSync(join(f.stateHome, "clone-staging"))).toEqual([]);
@@ -211,7 +219,7 @@ test("clone sanitizes Git control env while preserving auth and passes hardening
     const script = `#!/bin/sh\nprintf '%s\\n' "$@" > args\n/usr/bin/env > environment\n`;
     writeFileSync(join(f.bin, tool), script); chmodSync(join(f.bin, tool), 0o755);
     const env = { ...f.env, HOME: f.home, GH_TOKEN: "fake-auth", KEEP_ME: "inherited", GIT_SSH_COMMAND: "evil", GIT_PROXY_COMMAND: "evil", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "x", GIT_CONFIG_VALUE_0: "evil", GIT_EXEC_PATH: "evil", GIT_ASKPASS: "evil", GIT_TRACE: "evil", GIT_TEMPLATE_DIR: "evil" };
-    const service = new GitHub(f.folders, env, 2000, { freeBytes });
+    const service = new GitHub(f.folders, env, commandTimeoutMs, { freeBytes });
     const { jobId } = await service.clone({ repo: "owner/hardened", parent: f.home });
     const result = await finish(service, jobId); expect(result.status).toBe("done");
     const environment = readFileSync(join(result.path!, "environment"), "utf8");
@@ -227,7 +235,7 @@ test("clone sanitizes Git control env while preserving auth and passes hardening
 // F7: injected wall clock, running jobs never count against terminal history cap/TTL.
 test("terminal jobs are limited to 50, expire at one hour, and retain running jobs", async () => {
   const f = fixture('case "$6" in *fail.git) exit 1;; esac; printf cloned > content'); let now = 0;
-  const service = new GitHub(f.folders, f.env, 2000, { freeBytes, now: () => now });
+  const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes, now: () => now });
   const ids: string[] = [];
   for (let n = 0; n < 53; n++) {
     const { jobId } = await service.clone({ repo: n % 2 ? "owner/fail" : "owner/repo", parent: f.home, name: `repo-${n}` });
@@ -249,13 +257,13 @@ test("terminal jobs are limited to 50, expire at one hour, and retain running jo
 
 test("exactly 5 GiB free and exactly 2 GiB measured size are accepted", async () => {
   const f = fixture();
-  const service = new GitHub(f.folders, f.env, 2000, { freeBytes: async () => 5 * 1024 ** 3, sizeBytes: async () => 2 * 1024 ** 3 });
+  const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes: async () => 5 * 1024 ** 3, sizeBytes: async () => 2 * 1024 ** 3 });
   const { jobId } = await service.clone({ repo: "owner/boundary", parent: f.home });
   expect((await finish(service, jobId)).status).toBe("done");
 });
 test("same target is reserved in memory during staging without creating a user directory", async () => {
   const f = fixture("/bin/sleep 0.1; printf cloned > content");
-  const service = new GitHub(f.folders, f.env, 2000, { freeBytes });
+  const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes });
   const { jobId } = await service.clone({ repo: "owner/reserved", parent: f.home });
   expect(existsSync(join(f.home, "reserved"))).toBe(false);
   await expect(service.clone({ repo: "owner/reserved", parent: f.home })).rejects.toMatchObject({ status: 409 });
@@ -265,7 +273,7 @@ test("server staging root refuses symlinks and nonprivate permissions", async ()
   for (const link of [true, false]) {
     const f = fixture(), root = join(f.stateHome, "clone-staging");
     if (link) symlinkSync(f.outside, root); else mkdirSync(root, { mode: 0o755 });
-    const service = new GitHub(f.folders, f.env, 2000, { freeBytes });
+    const service = new GitHub(f.folders, f.env, commandTimeoutMs, { freeBytes });
     await expect(service.clone({ repo: "owner/refused", parent: f.home })).rejects.toMatchObject({ status: 403 });
     expect(readdirSync(f.outside)).toEqual([]); expect(readdirSync(f.home)).toEqual([]);
   }

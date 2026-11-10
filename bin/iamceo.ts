@@ -126,10 +126,16 @@ export interface OpsRuntimeOptions {
   client?: Pick<import("../server/push/apns.ts").APNsClient, "send" | "status" | "close">;
   backupPolicy?: Partial<import("../server/backup.ts").BackupPolicy>;
   sweepIntervalMs?: number;
+  /** First expensive maintenance runs after readiness and a quiet startup window. */
+  maintenanceDelayMs?: number;
+  /** Close ingress immediately on a planned shutdown, even while recovery is awaiting I/O. */
+  signal?: AbortSignal;
 }
 
 /** Owns every resource from the pre-DB lock through the last background write. */
 export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions = {}) {
+  const startedAt = performance.now();
+  const { LoopMonitor } = await import("../server/loop-monitor.ts");
   const { acquireHomeOwner } = await import("../server/home-owner.ts");
   const owner = options.owner ?? acquireHomeOwner(config.home);
   let db: import("bun:sqlite").Database | undefined;
@@ -139,12 +145,20 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
   let backups: import("../server/backup.ts").BackupManager | undefined;
   let client = options.client;
   let sweepTimer: ReturnType<typeof setInterval> | undefined;
+  let maintenanceTimer: ReturnType<typeof setTimeout> | undefined;
+  const loopMonitor = new LoopMonitor();
+  const stopIngress = () => {
+    ready = false;
+    // The runtime's stop collects failures after initialization releases its DB work.
+    void server?.stop().catch(() => {});
+  };
   let unsubscribe: (() => void) | undefined;
   let ready = false;
   let stopped: Promise<void> | undefined;
   const stop = (): Promise<void> => stopped ??= (async () => {
     ready = false;
     clearInterval(sweepTimer);
+    clearTimeout(maintenanceTimer);
     unsubscribe?.();
     // Stop ingress and all producers/consumers together, within one outer deadline.
     const results = await Promise.allSettled([
@@ -154,9 +168,11 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
       Promise.resolve().then(() => backups?.stop()),
     ]);
     const failures = results.filter((result) => result.status === "rejected");
-    try { db?.close(); } finally { owner.release(); }
+    options.signal?.removeEventListener("abort", stopIngress);
+    try { db?.close(); } finally { loopMonitor.stop(); owner.release(); }
     if (failures.length) throw new AggregateError(failures.map((result) => result.reason), "운영 자원 종료 실패");
   })();
+  options.signal?.addEventListener("abort", stopIngress, { once: true });
   try {
     const [{ Bus }, { openDb }, http, orchestration, { Store }, { PushStore }, { PushEventRecorder }, { PushWorker },
       { APNsClient }, { loadAPNsConfig }, { BackupManager }, { StorageMaintenance, createStorageReferences }, { requireRestoreOutboundEnabled }] = await Promise.all([
@@ -179,36 +195,49 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
         code: "restart_reconciliation_required", error: "서버 재시작 후 외부 효과 확인 필요" });
     });
     orch = (options.createOrchestrator ?? orchestration.createOrchestrator)(config, store);
+    // TS private methods are ordinary properties at runtime; preserve this and the existing scheduler.
+    // The runtime timer test guards this coupling to the onTick method name.
+    const onTick = Reflect.get(orch, "onTick") as () => void;
+    const tickOwner = orch;
+    Reflect.set(orch, "onTick", () => loopMonitor.run("timer:onTick", () => onTick.call(tickOwner)));
     const runtimeInfo = orch.runtimeInfo.bind(orch);
     orch.runtimeInfo = async () => ({ ...await runtimeInfo(), daemon: { ready, buildId: identity, version: VERSION } });
-    const context = { config, store, bus, orch, delivery: orch.deliveryRecovery,
+    const context = { config, store, bus, orch, delivery: orch.deliveryRecovery, loopMonitor,
       daemon: () => ({ ready, buildId: identity, version: VERSION }),
       push: { store: push, providers: () => client!.status(), wake: () => worker?.wake() } };
     server = await (options.startServer ?? http.startServer)(context);
+    if (options.signal?.aborted) stopIngress();
     orch.setServerUrl(server.urls[0]!);
-    await orch.initializeRuntime();
+    if (!options.signal?.aborted) await orch.initializeRuntime();
     // CoreRunner restores persisted identity-bound leases as it reattaches; only recover may resume the queue.
-    await orch.recover();
+    if (!options.signal?.aborted) await orch.recover();
     worker = new PushWorker(push, client, { onError: () => console.error("푸시 저장 오류") });
-    unsubscribe = bus.subscribe(() => { void worker!.wake().catch(() => console.error("푸시 저장 오류")); });
-    worker.start();
+    if (!options.signal?.aborted) {
+      unsubscribe = bus.subscribe(() => { void worker!.wake().catch(() => console.error("푸시 저장 오류")); });
+      worker.start();
+    }
     const backupDir = join(config.home, "backups");
-    backups = new BackupManager({ home: config.home, backupDir, policy: options.backupPolicy });
-    // Surface the first backup failure; periodic failures remain visible in diagnostics.
-    try { await backups.run(); } catch { console.error("정기 백업 실패"); }
-    backups.start();
+    backups = new BackupManager({ home: config.home, backupDir, policy: options.backupPolicy, loopMonitor });
     const storage = new StorageMaintenance({ uploadsDir: config.uploadsDir, inboxDir: config.inboxDir, backupDir,
       references: createStorageReferences(store, config.inboxDir) });
-    const sweep = () => {
+    const sweep = () => loopMonitor.run("timer:storageSweep", () => {
       try { if (storage.sweep().errors.length) console.error("저장소 정리 중 보존된 오류 항목이 있습니다"); }
       catch { console.error("저장소 정리 실패"); }
       if (backups?.lastError) console.error("정기 백업 실패");
-    };
-    sweep();
-    sweepTimer = setInterval(sweep, Math.max(1, options.sweepIntervalMs ?? 3_600_000));
-    sweepTimer.unref();
-    ready = true;
-    return { config, store, push, worker, server, backups, storage, stop };
+    });
+    ready = !options.signal?.aborted;
+    const startupMs = performance.now() - startedAt;
+    if (ready) {
+      console.info(`[startup] ready durationMs=${startupMs.toFixed(1)}`);
+      maintenanceTimer = setTimeout(() => {
+        backups!.start();
+        sweep();
+        sweepTimer = setInterval(sweep, Math.max(1, options.sweepIntervalMs ?? 3_600_000));
+        sweepTimer.unref();
+      }, Math.max(0, options.maintenanceDelayMs ?? 120_000));
+      maintenanceTimer.unref();
+    }
+    return { config, store, push, worker, server, backups, storage, startupMs, stop };
   } catch (error) {
     try { await stop(); } catch (cleanup) { throw new AggregateError([error, cleanup], "시작 및 정리 실패"); }
     throw error;
@@ -231,9 +260,11 @@ async function serve(): Promise<void> {
   let runtime: Awaited<ReturnType<typeof startOpsRuntime>> | undefined;
   let starting: Promise<Awaited<ReturnType<typeof startOpsRuntime>>> | undefined;
   let stopping = false;
+  const shutdown = new AbortController();
   const stop = async () => {
     if (stopping) return;
     stopping = true;
+    shutdown.abort();
     const hardStop = setTimeout(() => process.exit(1), 15_000);
     try {
       await shutdownWithinBudget(async () => { runtime ??= await starting; await runtime?.stop(); });
@@ -246,7 +277,7 @@ async function serve(): Promise<void> {
     const config = loadConfig();
     if (!COMPILED) process.chdir(resolve(import.meta.dir, ".."));
     if (config.port !== 0 && await portInUse(config.hosts[0]!, config.port)) throw new CliError(`포트 ${config.port} 을 이미 쓰고 있습니다. iamceo status 로 확인하세요.`);
-    starting = startOpsRuntime(config, { owner });
+    starting = startOpsRuntime(config, { owner, signal: shutdown.signal });
     runtime = await starting;
     if (!stopping) {
       console.log(`IAMCEO 서버: ${runtime.server.urls.join(" · ")}`);

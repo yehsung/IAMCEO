@@ -168,8 +168,8 @@ describe("global access code rotation", () => {
     f.setReady(false); f.setCore(true);
     response = await f.request("/api/readiness");
     expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({ ok: false, daemon: { ready: false }, core: { available: true } });
-    expect((await fetch(`${f.base}/api/health`)).status).toBe(200);
+    expect(await response.json()).toEqual({ error: "서버를 시작하는 중입니다", code: "STARTING" });
+    expect((await fetch(`${f.base}/api/health`)).status).toBe(503);
   });
 
   test("CLI rotates over loopback without redirects or replay, and a lost response points to local open", async () => {

@@ -2443,6 +2443,57 @@ private struct PDFBlock: View {
     }
 }
 
+// Reference AVKit's native classes directly: the SwiftUI overlay's player metadata can fail to initialize on macOS.
+#if os(macOS)
+@MainActor
+struct MediaPlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .inline
+        view.player = player
+        return view
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) {
+        if view.player !== player {
+            view.player?.pause()
+            view.player = player
+        }
+    }
+
+    static func dismantleNSView(_ view: AVPlayerView, coordinator: ()) {
+        view.player?.pause()
+        view.player = nil
+    }
+}
+#else
+@MainActor
+struct MediaPlayerView: UIViewControllerRepresentable {
+    let player: AVPlayer
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.showsPlaybackControls = true
+        controller.player = player
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        if controller.player !== player {
+            controller.player?.pause()
+            controller.player = player
+        }
+    }
+
+    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: ()) {
+        controller.player?.pause()
+        controller.player = nil
+    }
+}
+#endif
+
 /// Web MediaViewer: video full width up to min(68% of the view, 720) on black, or an audio strip, then a bar with the
 /// name · size and 받기.
 private struct MediaBlock: View {
@@ -2468,7 +2519,7 @@ private struct MediaBlock: View {
             if unplayable {
                 ViewerNote(text: "여기서 재생할 수 없는 형식입니다. 받아서 열어 주세요.", bad: true)
             } else if let player, video {
-                VideoPlayer(player: player)
+                MediaPlayerView(player: player)
                     .frame(maxWidth: .infinity)
                     .frame(height: videoHeight)
                     .background(Color.black)

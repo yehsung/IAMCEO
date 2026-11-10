@@ -50,6 +50,9 @@ struct IAMCEOApp: App {
     @State private var sharedRouter = LaunchOptions.makeRouter()
     #endif
     init() {
+        #if os(macOS)
+        UserDefaults.standard.register(defaults: ["NSApplicationCrashOnExceptions": true])
+        #endif
         let store = AppStore(demo: LaunchOptions.demo, persistCredentials: !LaunchOptions.demo)
         _store = State(initialValue: store)
         _drafts = State(initialValue: store.drafts)

@@ -115,7 +115,10 @@ final class NetworkTests: XCTestCase {
         XCTAssertEqual(store.selectedProjectID, "missing-project")
         XCTAssertNil(store.state)
         XCTAssertTrue(store.messages.isEmpty)
-        XCTAssertNotNil(store.errorMessage)
+        XCTAssertNil(store.errorMessage)
+        XCTAssertEqual(store.connectionNotice, "잠시 연결을 확인하는 중")
+        XCTAssertFalse(store.showsOffline)
+        XCTAssertEqual(store.connectionStatus, .connected)
         XCTAssertFalse(store.isLoading)
         store.disconnect()
     }

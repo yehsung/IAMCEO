@@ -11,7 +11,8 @@ struct SystemRealtimeClock: RealtimeClock {
 }
 
 enum RealtimeClientError: Error, Equatable {
-    case helloTimeout, stale, invalidFrame, messageTooLarge, consumerTooSlow
+    case helloTimeout, stale, invalidFrame, messageTooLarge, consumerTooSlow, restarting
+    static func forCloseCode(_ code: Int) -> Self? { code == 1012 ? .restarting : nil }
 }
 
 private final class RealtimeRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
@@ -46,10 +47,15 @@ private actor URLSessionRealtimeTransport: RealtimeTransport {
     let task: URLSessionWebSocketTask
     init(session: URLSession, task: URLSessionWebSocketTask) { self.session = session; self.task = task }
     func receive() async throws -> Data {
-        switch try await task.receive() {
-        case .data(let data): return data
-        case .string(let text): return Data(text.utf8)
-        @unknown default: throw RealtimeClientError.invalidFrame
+        do {
+            switch try await task.receive() {
+            case .data(let data): return data
+            case .string(let text): return Data(text.utf8)
+            @unknown default: throw RealtimeClientError.invalidFrame
+            }
+        } catch {
+            if let reason = RealtimeClientError.forCloseCode(task.closeCode.rawValue) { throw reason }
+            throw error
         }
     }
     func close() async {
@@ -130,6 +136,8 @@ actor RealtimeClient {
                 do { event = try JSONDecoder().decode(RealtimeEvent.self, from: data) }
                 catch { throw RealtimeClientError.invalidFrame }
                 guard !event.type.isEmpty else { throw RealtimeClientError.invalidFrame }
+                // Restart announcements are control frames, including before hello and without a cursor.
+                if event.type == "restarting" { throw RealtimeClientError.restarting }
                 if !receivedHello {
                     guard event.type == "hello" else { throw RealtimeClientError.invalidFrame }
                     receivedHello = true

@@ -114,7 +114,9 @@ struct ChatMineRow: View {
     /// Why a resend cannot go out right now (shown as the button's tooltip, not as a line).
     private var lockReason: String? {
         if store.isDemo { return "샘플은 읽기 전용입니다" }
-        if store.connectionStatus != .connected { return "서버에 연결되지 않아 지금은 다시 보낼 수 없습니다" }
+        if let notice = store.connectionNotice { return notice }
+        if store.showsOffline { return "서버에 연결되지 않아 지금은 다시 보낼 수 없습니다" }
+        if store.connectionStatus != .connected { return "잠시 연결을 확인하는 중" }
         if let connection = store.state?.project.connection, !connection.ok {
             return connection.ownerDetail ?? "이 프로젝트의 실행 연결에 문제가 있어 지금은 다시 보낼 수 없습니다"
         }
@@ -652,7 +654,9 @@ private struct ChatConversation: View {
                     .ceSecondaryButton()
             } else if store.isDemo {
                 Text("샘플 대화 · 읽기 전용").foregroundStyle(CE.ink3)
-            } else if store.connectionStatus != .connected {
+            } else if let notice = store.connectionNotice {
+                Text(notice).foregroundStyle(CE.ink2)
+            } else if store.showsOffline {
                 Text("연결이 끊겼습니다. 다시 연결하면 이전 글을 불러올 수 있습니다").foregroundStyle(CE.attention)
             } else if history?.storeChanged == true {
                 Text("서버의 대화 기록이 변경되었습니다").foregroundStyle(CE.attention)

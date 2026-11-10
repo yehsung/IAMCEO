@@ -408,7 +408,8 @@ struct AppShell: View {
 
     private var connectionLabel: String {
         if store.isDemo { return "샘플 데이터 · 읽기 전용" }
-        return store.connectionStatus == .connected ? "서버 연결됨" : "서버 끊김"
+        if let notice = store.connectionNotice { return notice }
+        return store.showsOffline ? "서버 끊김" : store.connectionStatus == .connected ? "서버 연결됨" : "잠시 연결을 확인하는 중"
     }
 
     /// Title = project switcher (web phone header). What waits in the *other* projects (which the tab badges, selected
@@ -665,10 +666,12 @@ struct ProjectSidebar: View {
 
     private var connectionState: (text: String, color: Color, glow: Bool, danger: Bool) {
         if store.isDemo { return ("샘플 데이터 · 읽기 전용", CE.accent, true, false) }
+        if let notice = store.connectionNotice { return (notice, CE.ink2, false, false) }
+        if store.showsOffline { return ("서버 끊김", CE.danger, false, true) }
         switch store.connectionStatus {
         case .connected: return (store.localizedSyncDescription, store.realtimeStatus == .fallback ? CE.attention : CE.success, store.realtimeStatus == .live, false)
         case .connecting: return ("서버 연결 중", CE.warn, false, false)
-        default: return ("서버 끊김", CE.danger, false, true)
+        default: return ("잠시 연결을 확인하는 중", CE.ink2, false, false)
         }
     }
 
@@ -1051,14 +1054,11 @@ struct StatusStrips: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Web OfflineBand waits 1.5 s before it shows: a short blip (window back in front, server restart) never
-    /// flashes the strip. The composer says at once that it cannot send.
-    @State private var offlineShown = false
     /// The realtime socket drops and comes back within a second on every return to the app or Wi-Fi change, and
     /// REST keeps the screen current meanwhile (nothing for the CEO to do): only a fallback that lasts 10 s shows.
     @State private var fallbackShown = false
 
-    private var offline: Bool { store.connectionStatus != .connected && !store.isDemo && store.bootstrap != nil }
+    private var offline: Bool { store.showsOffline }
     private var fallback: Bool { store.connectionStatus == .connected && !store.isDemo && store.realtimeStatus == .fallback }
 
     private struct Strip: Identifiable {
@@ -1081,7 +1081,7 @@ struct StatusStrips: View {
         if store.isDemo && !isMac {
             items.append(Strip(id: "demo", tone: .accent, icon: "eye", text: "샘플 데이터 · 읽기 전용"))
         }
-        if offline && offlineShown {
+        if offline && !store.isRestarting {
             // A-90: what to check, not the system's raw error (that stays in the Mac tooltip). The iPhone usually
             // reaches the Mac over Wi-Fi or Tailscale, so say which two things to look at.
             items.append(Strip(id: "offline", tone: .attention, icon: "wifi.slash",
@@ -1090,13 +1090,16 @@ struct StatusStrips: View {
                                detail: store.connectionIssue.map(ConnectionRecovery.reason), actionTitle: "다시 연결",
                                action: { Task { await store.restartRealtime() } }, lines: 3))
         }
+        if let notice = store.connectionNotice {
+            items.append(Strip(id: "connection-check", tone: .neutral, icon: "arrow.triangle.2.circlepath", text: notice, busy: true))
+        }
         if store.isArchive {
             items.append(Strip(id: "archive", tone: .neutral, icon: "archivebox", text: "보관한 프로젝트 · 읽기 전용",
                                actionTitle: "관리", action: {
                 if let id = store.selectedProjectID { router.manageProject(id: id, mode: .restore) }
             }))
         }
-        if fallback && fallbackShown {
+        if fallback && fallbackShown && !offline && store.connectionNotice == nil {
             items.append(Strip(id: "fallback", tone: .neutral, icon: "arrow.triangle.2.circlepath",
                                text: "실시간 연결을 다시 잇는 중입니다. 그동안 몇 초마다 새 소식을 확인합니다.",
                                actionTitle: "다시 연결", action: { Task { await store.restartRealtime() } }))
@@ -1130,11 +1133,6 @@ struct StatusStrips: View {
         .frame(maxWidth: 880)
         .frame(maxWidth: .infinity)
         .animation(.easeOut(duration: 0.2), value: items.map(\.id))
-        .task(id: offline) {
-            guard offline else { offlineShown = false; return }
-            try? await Task.sleep(for: .milliseconds(1500))
-            if !Task.isCancelled { offlineShown = true }
-        }
         .task(id: fallback) {
             guard fallback else { fallbackShown = false; return }
             try? await Task.sleep(for: .seconds(10))
@@ -1165,7 +1163,7 @@ struct StatusStrips: View {
                     Image(systemName: item.icon).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(item.tone.color)
                 }
                 // web 13.5px at line-height 1.35.
-                Text(item.text).font(CEFont.note).foregroundStyle(palette.text)
+                Text(item.text).font(CEFont.note).foregroundStyle(item.id == "connection-check" ? CE.ink2 : palette.text)
                     .lineSpacing(CELeading.spacing(13.5, 1.35))
                     .lineLimit(isMac ? 1 : item.lines).truncationMode(.tail)
             }

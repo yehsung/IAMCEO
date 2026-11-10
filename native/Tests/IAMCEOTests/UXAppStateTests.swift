@@ -348,12 +348,16 @@ private final class UXStateServer: @unchecked Sendable {
         XCTAssertEqual(demo.writeBlockedReason, "샘플은 읽기 전용입니다")
         let server = UXStateServer(), network = try IsolatedTestNetwork(handler: server.handle), store = makeStore(network)
         defer { store.disconnect() }
-        XCTAssertEqual(store.writeBlockedReason, "서버와 연결이 끊겼습니다")
+        XCTAssertFalse(store.showsOffline)
+        XCTAssertEqual(store.writeBlockedReason, "잠시 연결을 확인하는 중")
         await store.connect(); XCTAssertNil(store.writeBlockedReason)
         server.setConnection(false); await store.refresh()
         XCTAssertEqual(store.writeBlockedReason, "프로젝트의 실행 연결을 확인해 주세요"); XCTAssertFalse(store.uiCanWrite)
         server.fail("hq", status: 503); await store.refresh()
-        XCTAssertEqual(store.writeBlockedReason, "서버와 연결이 끊겼습니다"); XCTAssertFalse(store.uiCanWrite)
+        XCTAssertFalse(store.showsOffline, "One failed read cannot confirm a connection loss")
+        XCTAssertEqual(store.connectionStatus, .connected)
+        XCTAssertEqual(store.state?.project.id, "hq")
+        XCTAssertEqual(store.writeBlockedReason, "잠시 연결을 확인하는 중"); XCTAssertFalse(store.uiCanWrite)
     }
 
     func testNotificationMovesImmediatelyChecksInParallelAndUserTabCancels() async throws {

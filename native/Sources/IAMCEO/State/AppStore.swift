@@ -1,5 +1,7 @@
 import Foundation
 import Observation
+import Network
+import OSLog
 #if os(iOS)
 import UIKit
 
@@ -83,7 +85,7 @@ final class AppStore: ProjectManagementStore {
     private(set) var todos: [Todo] = []
     private(set) var files: [FileDoc] = []
     private(set) var work: [WorkItem] = []
-    var canWrite: Bool { capabilitiesLoaded && hasFreshProject && connectionStatus == .connected && !isRevalidating && !isDemo && !isArchive && state?.project.archived != true
+    var canWrite: Bool { capabilitiesLoaded && hasFreshProject && !showsOffline && !isRestarting && connectionStatus == .connected && !isRevalidating && !isDemo && !isArchive && state?.project.archived != true
         && selectedProjectID.map { projectResults[$0] != .checking } != false }
     /// A cached snapshot is for reading only. Realtime hosts need an atomic sync for this selection.
     /// Operations-only hosts validate revisions per write; an optional sync failure cannot lock all writes.
@@ -98,7 +100,9 @@ final class AppStore: ProjectManagementStore {
     var writeBlockedReason: String? {
         if isDemo { return "샘플은 읽기 전용입니다" }
         if isArchive || state?.project.archived == true { return "보관한 프로젝트는 읽기 전용입니다" }
-        if connectionStatus != .connected { return "서버와 연결이 끊겼습니다" }
+        if let connectionNotice { return connectionNotice }
+        if showsOffline { return "서버와 연결이 끊겼습니다" }
+        if connectionStatus != .connected { return "잠시 연결을 확인하는 중" }
         if !hasFreshProject || (selectedProjectID != nil && state == nil) { return "프로젝트를 불러오는 중입니다" }
         if isRevalidating || !capabilitiesLoaded || selectedProjectID.map({ projectResults[$0] == .checking }) == true {
             return "최신 상태를 다시 확인하는 중입니다"
@@ -189,7 +193,15 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored private var archiveLoad = UUID()
     /// The server stopped answering after a successful connect. The last snapshot stays on screen (read-only),
     /// fallback keeps retrying, and the next successful refresh returns to `.connected`.
-    var connectionLost: Bool { connectionStatus == .disconnected && api != nil && bootstrap != nil && !isDemo }
+    var connectionLost: Bool { showsOffline }
+    private(set) var showsOffline = false
+    private(set) var isRestarting = false
+    private(set) var isCheckingConnection = false
+    var connectionNotice: String? {
+        if isRestarting { return "서버를 다시 시작하는 중" }
+        if !showsOffline, isCheckingConnection { return "잠시 연결을 확인하는 중" }
+        return nil
+    }
     /// Why the last sync failed while `connectionLost` (system wording, e.g. no internet vs. server not answering).
     private(set) var connectionIssue: String?
     private(set) var realtimeStatus: RealtimeStatus = .paused
@@ -241,9 +253,24 @@ final class AppStore: ProjectManagementStore {
     private var capabilitiesLoaded = false
     @ObservationIgnored private var socketHello = false
     @ObservationIgnored private var highestRelevantSeq = 0
-    @ObservationIgnored private var socketFailures = 0
-    @ObservationIgnored private var restFailures = 0
-    @ObservationIgnored private var stableSince: Duration?
+    private(set) var socketFailures = 0
+    private(set) var restFailures = 0
+    @ObservationIgnored private var lastSocketFrame: Duration?
+    @ObservationIgnored private var firstTransportFailure: Duration?
+    @ObservationIgnored private var transportFailureReason = "transport"
+    @ObservationIgnored private var retriedConsistencyFailure = false
+    @ObservationIgnored private var offlineChangedAt: Duration?
+    @ObservationIgnored private var offlineTask: Task<Void, Never>?
+    @ObservationIgnored private var syncRetryTask: Task<Void, Never>?
+    @ObservationIgnored private var restartTask: Task<Void, Never>?
+    @ObservationIgnored private var restartDeadline: Duration?
+    @ObservationIgnored private var restartWindowUsed = false
+    @ObservationIgnored private var foregroundGraceUntil: Duration?
+    @ObservationIgnored private var foregroundRetry = 0
+    @ObservationIgnored private var pathMonitor: NWPathMonitor?
+    @ObservationIgnored private var pathWasSatisfied: Bool?
+    @ObservationIgnored private var lifecycleObservers: [NSObjectProtocol] = []
+    private static let connectionLogger = Logger(subsystem: "com.iamceo.native", category: "Connection")
     @ObservationIgnored private var openActivityMembers: Set<String> = []
     @ObservationIgnored private var activityTokens: [String: UUID] = [:]
     @ObservationIgnored private var initialTask: Task<Bootstrap, Error>?
@@ -337,6 +364,21 @@ final class AppStore: ProjectManagementStore {
             connectionStatus = .demo
         }
         updateStateCollections()
+        // Injected test sessions never subscribe to the machine's network or application lifecycle.
+        if session == nil, !demo {
+            let monitor = NWPathMonitor()
+            pathMonitor = monitor
+            monitor.pathUpdateHandler = { [weak self] path in
+                let satisfied = path.status == .satisfied
+                Task { @MainActor [weak self] in self?.networkPathChanged(satisfied: satisfied) }
+            }
+            monitor.start(queue: DispatchQueue(label: "com.iamceo.connection-path"))
+            #if os(iOS)
+            lifecycleObservers.append(NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.setForeground(false) }
+            })
+            #endif
+        }
     }
 
     /// Collection consumers observe only their own slice, even when another slice changes.
@@ -377,6 +419,7 @@ final class AppStore: ProjectManagementStore {
             drafts.selectNamespace("unassigned"); writeNamespace = "unassigned"
             return
         }
+        resetConnectionEvidence()
         pendingConnect = false
         let previousProject = selectedProjectID
         let previousArchive = isArchive
@@ -505,6 +548,7 @@ final class AppStore: ProjectManagementStore {
     }
 
     func disconnect() {
+        resetConnectionEvidence()
         beginPushLogout()
         clearHostNavigation()
         NotificationInbox.shared.discardPending()
@@ -610,6 +654,10 @@ final class AppStore: ProjectManagementStore {
     }
 
     func setForeground(_ active: Bool) {
+        #if os(iOS)
+        // SwiftUI sends false for .inactive (Control Center, permission dialogs). Only background pauses.
+        if !active, injectedSession == nil, UIApplication.shared.applicationState != .background { return }
+        #endif
         guard foreground != active else { return }
         foreground = active; foregroundGeneration = UUID()
         if active {
@@ -618,13 +666,17 @@ final class AppStore: ProjectManagementStore {
                 return
             }
             guard api != nil, connectionStatus == .connected || connectionLost else { return }
-            isRevalidating = true; restFailures = 0
+            isRevalidating = true; isCheckingConnection = true
+            socketFailures = 0; restFailures = 0; transportFailures = 0; firstTransportFailure = nil
+            foregroundRetry = 0; nextSnapshotAt = .zero
             startSocket(); startFallback()
             var scope: RefreshScope = runtime == nil ? [.all, .diagnostics] : .all
             if archiveObserved { scope.insert(.archive) }
             Task { [weak self] in
                 guard let self else { return }
                 let epoch = generation, phase = foregroundGeneration
+                foregroundGraceUntil = await syncClock.now() + .seconds(5)
+                guard epoch == generation, phase == foregroundGeneration, foreground else { return }
                 // An initial probe invalidated by backgrounding must get another chance.
                 async let discovery: Void = discoverCapabilities()
                 await enqueueRefresh(scope, immediate: true)
@@ -798,8 +850,10 @@ final class AppStore: ProjectManagementStore {
             return RefreshSnapshot(bootstrap: next, state: state, sync: context)
         }
         refreshTask = task
+        defer { if requestID == refreshGeneration { refreshTask = nil } }
         do {
             let result = try await task.value
+            let completedAt = await syncClock.now()
             guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration,
                   socketEpoch == socketGeneration, requestID == refreshGeneration else { return }
             if let next = result.state {
@@ -842,14 +896,15 @@ final class AppStore: ProjectManagementStore {
             if result.sync != nil { validatedWriteGeneration = projectEpoch }
             if state == nil, let projectID { projectCache.remove(projectID: projectID) }
             reconcileContextChanges()
-            markReachable(); restFailures = 0; isRevalidating = false
+            markReachable(at: completedAt); restFailures = 0; isRevalidating = false
+            syncRetryTask?.cancel(); syncRetryTask = nil
+            if socketHello { socketFailures = 0 }
             lastUpdated = Date(); lastSuccessfulSyncAt = lastUpdated
             clearReadError()
             resyncRevision &+= 1
             if foreground, socketHello, !dirty.contains(.snapshot) {
                 realtimeStatus = receivedCursor == nil ? .legacy : .live
                 fallbackTask?.cancel(); fallbackTask = nil
-                if stableSince == nil { stableSince = await syncClock.now() }
             }
             if projectID != nil, result.state == nil {
                 // /sync explicitly distinguishes a missing/archived selection from a missing route.
@@ -865,20 +920,43 @@ final class AppStore: ProjectManagementStore {
             guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration,
                   socketEpoch == socketGeneration, requestID == refreshGeneration else { return }
             if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
+            if (error as? APIError)?.status == 401 { handle(error); return }
+            if let apiError = error as? APIError, apiError.status == 503, apiError.code == "STARTING", !restartWindowUsed || isRestarting {
+                await beginRestart()
+                guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration,
+                      socketEpoch == socketGeneration, requestID == refreshGeneration else { return }
+                scheduleSyncRetry(after: .milliseconds(500))
+                return
+            }
+            if isRestarting {
+                scheduleSyncRetry(after: .milliseconds(500))
+                return
+            }
             restFailures += 1
-            if !markUnreachable(error) { handle(error); lastReadError = errorMessage }
-            guard self.api != nil else { return }
-            if realtimeSupported {
-                connectionStatus = .disconnected; connectionIssue = error.localizedDescription
+            if Self.isUnreachable(error) {
+                await markUnreachable(error)
+            } else {
+                // A response or a local consistency failure is a sync problem, never loss evidence.
+                transportFailures = 0; firstTransportFailure = nil
+                offlineTask?.cancel(); offlineTask = nil
+                isRevalidating = true; isCheckingConnection = true
+                connectionIssue = "동기화 다시 시도 중"
+                clearReadError()
             }
-            if Self.permanentReadFailure(error) {
-                stopSocket(); fallbackTask?.cancel(); fallbackTask = nil
-                reconnectTask?.cancel(); reconnectTask = nil
-                realtimeStatus = .blocked; isRevalidating = true
-                connectionIssue = (error as? APIError)?.status == 403 ? "서버 주소나 접근 허용 설정을 확인해 주세요." : error.localizedDescription
-            } else if foreground {
-                socketFailed()
+            let now = await syncClock.now()
+            guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration,
+                  socketEpoch == socketGeneration, requestID == refreshGeneration else { return }
+            let delay: Duration
+            if Self.isUnreachable(error), let until = foregroundGraceUntil, now < until {
+                delay = [.milliseconds(300), .seconds(1), .seconds(2)][min(foregroundRetry, 2)]
+                foregroundRetry += 1
+            } else if !retriedConsistencyFailure, error as? RealtimeClientError == .invalidFrame || Self.isConsistencyFailure(error) {
+                retriedConsistencyFailure = true
+                delay = .milliseconds(500)
+            } else {
+                delay = .seconds(min(retryCap, max(1, pow(2, Double(min(restFailures - 1, 5))))))
             }
+            scheduleSyncRetry(after: delay)
         }
     }
 
@@ -887,7 +965,7 @@ final class AppStore: ProjectManagementStore {
         reconnectTask?.cancel(); reconnectTask = nil
         socketGeneration = UUID(); let socketID = socketGeneration
         let epoch = generation, phase = foregroundGeneration
-        socketHello = false; stableSince = nil
+        socketHello = false; lastSocketFrame = nil
         realtimeStatus = .connecting
         let transition = socketTransition
         socketTask = Task { [weak self] in
@@ -899,15 +977,20 @@ final class AppStore: ProjectManagementStore {
                     guard !Task.isCancelled, socketID == socketGeneration, epoch == generation, phase == foregroundGeneration else { return }
                     await receive(event)
                 }
-            } catch { /* Socket status never authenticates a user; REST does that. */ }
+            } catch {
+                // Socket status never authenticates a user; REST does that.
+                guard !Task.isCancelled, socketID == socketGeneration, epoch == generation, phase == foregroundGeneration else { return }
+                if error as? RealtimeClientError == .restarting { await beginRestart() }
+            }
             guard !Task.isCancelled, socketID == socketGeneration, epoch == generation, phase == foregroundGeneration else { return }
             socketFailed()
+            nextSnapshotAt = .zero
             Task { [weak self] in await self?.enqueueRefresh(.all, immediate: true) }
         }
     }
 
     private func stopSocket() {
-        socketGeneration = UUID(); socketHello = false; stableSince = nil
+        socketGeneration = UUID(); socketHello = false; lastSocketFrame = nil
         socketTask?.cancel(); socketTask = nil
         guard let realtime else { return }
         let previous = socketTransition
@@ -920,8 +1003,8 @@ final class AppStore: ProjectManagementStore {
         realtimeStatus = .fallback
         startFallback()
         guard realtime != nil, reconnectTask == nil else { return }
-        let delay = min(30, max(0, retryJitter(min(30, 0.5 * pow(2, Double(min(socketFailures, 6)))))))
-        socketFailures += 1
+        let delay = isRestarting ? 0.5 : min(retryCap, max(0, retryJitter(min(retryCap, 0.5 * pow(2, Double(min(socketFailures, 6)))))))
+        if !isRestarting { socketFailures += 1 }
         let epoch = generation, phase = foregroundGeneration
         reconnectTask = Task { [weak self, syncClock] in
             do { try await syncClock.sleep(for: .seconds(delay)) } catch { return }
@@ -938,7 +1021,7 @@ final class AppStore: ProjectManagementStore {
             while !Task.isCancelled {
                 guard let self, epoch == generation, phase == foregroundGeneration, foreground else { return }
                 let base = lowPowerMode ? 10.0 : 3.0
-                let interval = restFailures == 0 ? base : min(30, max(0, retryJitter(min(30, base * pow(2, Double(min(restFailures - 1, 4)))))))
+                let interval = isRestarting ? 0.5 : restFailures == 0 ? min(retryCap, base) : min(retryCap, max(0, retryJitter(min(retryCap, base * pow(2, Double(min(restFailures - 1, 4)))))))
                 do { try await syncClock.sleep(for: .seconds(interval)) } catch { return }
                 guard !Task.isCancelled, epoch == generation, phase == foregroundGeneration, foreground else { return }
                 await enqueueRefresh(.all, immediate: true)
@@ -947,15 +1030,23 @@ final class AppStore: ProjectManagementStore {
     }
 
     private func receive(_ event: RealtimeEvent) async {
+        let epoch = generation, phase = foregroundGeneration, socketID = socketGeneration
+        let now = await syncClock.now()
+        guard !Task.isCancelled, epoch == generation, phase == foregroundGeneration, socketID == socketGeneration else { return }
         lastHeartbeatAt = Date()
+        lastSocketFrame = now
+        if event.type == "restarting" { await beginRestart(); socketFailed(); return }
         if event.type == "hello" {
             // Optional discovery can fail independently. A valid v2 hello is sufficient to
             // probe /sync; only that route's 404 permits bootstrap/state compatibility.
             if event.cursor != nil { syncSupported = true; realtimeSupported = true }
             receivedCursor = event.cursor; highestRelevantSeq = event.cursor?.seq ?? 0
             socketHello = true; realtimeStatus = .syncing
-            invalidateCoordinator()
-            Task { [weak self] in await self?.enqueueRefresh(.all, immediate: true) }
+            // Join an in-flight snapshot. Its result is checked against this hello's cursor below.
+            if refreshTask == nil {
+                if showsOffline || restFailures > 0 || isRestarting { nextSnapshotAt = .zero }
+                Task { [weak self] in await self?.enqueueRefresh(.all, immediate: true) }
+            }
             return
         }
         if let cursor = event.cursor, let previous = receivedCursor {
@@ -969,7 +1060,7 @@ final class AppStore: ProjectManagementStore {
                     receivedCursor = cursor; highestRelevantSeq = max(highestRelevantSeq, cursor.seq)
                     realtimeStatus = .syncing
                     Task { [weak self] in await self?.enqueueRefresh(.all) }
-                } else if let stableSince, realtimeStatus == .live, await syncClock.now() - stableSince >= .seconds(30) { socketFailures = 0 }
+                }
                 return
             }
             guard cursor.seq > previous.seq else { return }
@@ -1046,31 +1137,91 @@ final class AppStore: ProjectManagementStore {
         }
     }
 
-    private static func permanentReadFailure(_ error: Error) -> Bool {
-        if (error as? APIError)?.status == 403 { return true }
-        return [.serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot,
-                .serverCertificateNotYetValid, .secureConnectionFailed, .unsupportedURL, .badURL].contains((error as? URLError)?.code)
+    private var retryCap: Double {
+        ["127.0.0.1", "localhost", "::1"].contains(api?.endpoint.url.host ?? "") ? 3 : 30
     }
-    /// Transport failures (no network, host unreachable, timeout, or Tailscale Serve's 502–504 while the daemon is down)
-    /// move to the offline state instead of pretending the connection is healthy. Returns whether it handled `error`.
-    private func markUnreachable(_ error: Error) -> Bool {
-        let code = (error as? URLError)?.code
+
+    private static func isConsistencyFailure(_ error: Error) -> Bool {
+        if case SubmissionError.mismatchedResult = error { return true }
+        return false
+    }
+
+    private static func isUnreachable(_ error: Error) -> Bool {
         let transport: Set<URLError.Code> = [.notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost,
-                                              .dnsLookupFailed, .timedOut, .internationalRoamingOff, .dataNotAllowed, .callIsActive]
-        let gateway = [502, 503, 504].contains((error as? APIError)?.status ?? 0)
-        guard api != nil, bootstrap != nil, gateway || code.map(transport.contains) == true else { return false }
-        transportFailures += 1
-        connectionIssue = error.localizedDescription
-        if lastReadError != nil { clearReadError() }
-        guard connectionStatus == .connected else { return true }
-        connectionStatus = .disconnected
-        return true
+            .dnsLookupFailed, .timedOut, .internationalRoamingOff, .dataNotAllowed, .callIsActive]
+        return [502, 503, 504].contains((error as? APIError)?.status ?? 0)
+            || (error as? URLError).map { transport.contains($0.code) } == true
     }
-    private func markReachable() {
-        transportFailures = 0
-        connectionIssue = nil
-        if connectionLost {
-            pagingSupport = .unknown; connectionStatus = .connected
+
+    private func socketIsHealthy(at now: Duration) -> Bool {
+        socketHello && socketTask != nil && lastSocketFrame.map { now - $0 < .seconds(20) } == true
+    }
+
+    private func markUnreachable(_ error: Error) async {
+        let epoch = generation, phase = foregroundGeneration
+        let now = await syncClock.now()
+        guard !Task.isCancelled, epoch == generation, phase == foregroundGeneration, api != nil, bootstrap != nil else { return }
+        transportFailures += 1
+        if firstTransportFailure == nil { firstTransportFailure = now }
+        transportFailureReason = (error as? URLError).map { "transport_\($0.code.rawValue)" }
+            ?? "gateway_\((error as? APIError)?.status ?? 0)"
+        connectionIssue = error.localizedDescription
+        clearReadError()
+        if !socketIsHealthy(at: now) { isRevalidating = true; isCheckingConnection = true }
+        await evaluateOffline()
+    }
+
+    private func evaluateOffline() async {
+        offlineTask?.cancel(); offlineTask = nil
+        guard foreground, !isRestarting, transportFailures >= 2, let firstTransportFailure else { return }
+        let epoch = generation, phase = foregroundGeneration
+        let now = await syncClock.now()
+        guard epoch == generation, phase == foregroundGeneration, foreground, !isRestarting,
+              transportFailures >= 2, self.firstTransportFailure == firstTransportFailure else { return }
+        var deadline = firstTransportFailure + .seconds(3)
+        if let foregroundGraceUntil { deadline = max(deadline, foregroundGraceUntil) }
+        if socketIsHealthy(at: now), let lastSocketFrame { deadline = max(deadline, lastSocketFrame + .seconds(20)) }
+        if !showsOffline, let offlineChangedAt { deadline = max(deadline, offlineChangedAt + .seconds(2)) }
+        if now >= deadline {
+            setOffline(true, at: now, reason: transportFailureReason, duration: now - firstTransportFailure)
+            connectionStatus = .disconnected; isRevalidating = true; isCheckingConnection = false
+        } else {
+            offlineTask = Task { [weak self, syncClock] in
+                do { try await syncClock.sleep(for: deadline - now) } catch { return }
+                guard !Task.isCancelled else { return }
+                await self?.evaluateOffline()
+            }
+        }
+    }
+
+    private func setOffline(_ value: Bool, at now: Duration, reason: String, duration: Duration) {
+        guard showsOffline != value else { return }
+        showsOffline = value; offlineChangedAt = now
+        let seconds = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+        Self.connectionLogger.notice("showsOffline=\(value, privacy: .public) reason=\(reason, privacy: .public) duration_seconds=\(seconds, privacy: .public)")
+    }
+
+    private func markReachable(at now: Duration) {
+        transportFailures = 0; firstTransportFailure = nil
+        offlineTask?.cancel(); offlineTask = nil
+        connectionIssue = nil; isCheckingConnection = false; retriedConsistencyFailure = false
+        isRestarting = false; restartDeadline = nil; restartWindowUsed = false
+        restartTask?.cancel(); restartTask = nil
+        let wasDisconnected = connectionStatus == .disconnected
+        connectionStatus = .connected
+        if showsOffline, let changed = offlineChangedAt, now < changed + .seconds(2) {
+            let epoch = generation
+            offlineTask = Task { [weak self, syncClock] in
+                do { try await syncClock.sleep(for: changed + .seconds(2) - now) } catch { return }
+                let recoveredAt = await syncClock.now()
+                guard let self, !Task.isCancelled, epoch == generation, transportFailures == 0, offlineChangedAt == changed else { return }
+                setOffline(false, at: recoveredAt, reason: "sync_recovered", duration: recoveredAt - changed)
+            }
+        } else if showsOffline {
+            setOffline(false, at: now, reason: "sync_recovered", duration: now - (offlineChangedAt ?? now))
+        }
+        if wasDisconnected {
+            pagingSupport = .unknown
             let epoch = generation
             Task { [weak self] in
                 guard let self, epoch == generation else { return }
@@ -1078,7 +1229,78 @@ final class AppStore: ProjectManagementStore {
             }
         }
     }
+
+    private func scheduleSyncRetry(after delay: Duration) {
+        guard foreground, api != nil, syncRetryTask == nil else { return }
+        let epoch = generation, phase = foregroundGeneration
+        syncRetryTask = Task { [weak self, syncClock] in
+            do { try await syncClock.sleep(for: delay) } catch { return }
+            guard let self, !Task.isCancelled, epoch == generation, phase == foregroundGeneration, foreground else { return }
+            syncRetryTask = nil
+            let now = await syncClock.now()
+            guard !Task.isCancelled, epoch == generation, phase == foregroundGeneration, foreground else { return }
+            if isRestarting || foregroundGraceUntil.map({ now < $0 }) == true { nextSnapshotAt = .zero }
+            await enqueueRefresh(.snapshot, immediate: true)
+        }
+    }
+
+    private func beginRestart() async {
+        guard !restartWindowUsed else { return }
+        let epoch = generation, phase = foregroundGeneration
+        let now = await syncClock.now()
+        guard !Task.isCancelled, epoch == generation, phase == foregroundGeneration, !restartWindowUsed else { return }
+        restartWindowUsed = true; isRestarting = true; isRevalidating = true; isCheckingConnection = false
+        transportFailures = 0; firstTransportFailure = nil
+        offlineTask?.cancel(); offlineTask = nil
+        syncRetryTask?.cancel(); syncRetryTask = nil
+        reconnectTask?.cancel(); reconnectTask = nil
+        fallbackTask?.cancel(); fallbackTask = nil
+        let deadline = now + .seconds(30)
+        restartDeadline = deadline
+        if socketTask == nil { socketFailed() }
+        restartTask = Task { [weak self, syncClock] in
+            do { try await syncClock.sleep(for: .seconds(30)) } catch { return }
+            guard let self, !Task.isCancelled, restartDeadline == deadline else { return }
+            isRestarting = false; restartDeadline = nil; restartTask = nil
+            isCheckingConnection = true
+            scheduleSyncRetry(after: .zero)
+        }
+    }
+
+    private func resetConnectionEvidence() {
+        offlineTask?.cancel(); offlineTask = nil
+        restartTask?.cancel(); restartTask = nil
+        restartDeadline = nil; restartWindowUsed = false; isRestarting = false
+        transportFailures = 0; firstTransportFailure = nil; foregroundGraceUntil = nil; retriedConsistencyFailure = false
+        isCheckingConnection = false
+        if showsOffline {
+            // Logout/host replacement ends the old connection's display lifetime.
+            setOffline(false, at: .seconds(ProcessInfo.processInfo.systemUptime), reason: "session_ended", duration: .zero)
+        }
+        offlineChangedAt = nil
+    }
+
+    func networkPathChanged(satisfied: Bool) {
+        let restored = pathWasSatisfied == false && satisfied
+        pathWasSatisfied = satisfied
+        guard restored, foreground, api != nil else { return }
+        socketFailures = 0; restFailures = 0
+        reconnectTask?.cancel(); reconnectTask = nil
+        syncRetryTask?.cancel(); syncRetryTask = nil
+        nextSnapshotAt = .zero
+        let epoch = generation, phase = foregroundGeneration
+        Task { [weak self] in
+            guard let self else { return }
+            let now = await syncClock.now()
+            guard epoch == generation, phase == foregroundGeneration, foreground else { return }
+            if !socketIsHealthy(at: now) { stopSocket(); startSocket() }
+            await enqueueRefresh(.all, immediate: true)
+        }
+    }
+
     private func stopRequests() {
+        offlineTask?.cancel(); offlineTask = nil
+        syncRetryTask?.cancel(); syncRetryTask = nil
         catalogDiscoveryTask?.cancel(); catalogDiscoveryTask = nil
         modelsTask?.cancel(); modelsTask = nil
         modelsRequestID = UUID()
@@ -1093,6 +1315,7 @@ final class AppStore: ProjectManagementStore {
     private func handle(_ error: Error) {
         errorMessage = error.localizedDescription
         if (error as? APIError)?.status == 401 {
+            resetConnectionEvidence()
             beginPushLogout(); clearHostNavigation()
             NotificationInbox.shared.discardPending()
             stopRequests(); resetReadCollections(); projectCache.removeAll(); validatedProjectGeneration = nil; validatedWriteGeneration = nil

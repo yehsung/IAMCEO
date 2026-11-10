@@ -120,7 +120,7 @@ final class IsolatedTestNetwork: @unchecked Sendable {
 /// Implements the W1 transport boundary directly. URLProtocol does not intercept
 /// URLSessionWebSocketTask upgrades, so no real WS task/session is created here.
 actor IsolatedTestWebSocket: RealtimeTransport {
-    private var frames: [Result<Data, URLError>] = []
+    private var frames: [Result<Data, any Error>] = []
     private var waiter: (UUID, TestDeadlineContinuation<Data, any Error>)?
     private var closed = false
     private(set) var receiveCount = 0
@@ -144,7 +144,7 @@ actor IsolatedTestWebSocket: RealtimeTransport {
         waiter = nil
         continuation?.resume(throwing: CancellationError())
     }
-    func enqueue(_ frame: Result<Data, URLError>) throws {
+    func enqueue(_ frame: Result<Data, any Error>) throws {
         guard !closed else { throw URLError(.cancelled) }
         if let (_, continuation) = waiter {
             waiter = nil

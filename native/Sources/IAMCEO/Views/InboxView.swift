@@ -145,12 +145,13 @@ struct InboxView: View {
     /// demo and disconnection by the pinned StatusStrips, plus one notice above the list (disconnected / runner).
     private var answerLock: AnswerLock? {
         if store.isDemo { return .demo }
-        if store.connectionStatus != .connected { return .disconnected }
+        if store.showsOffline { return .disconnected }
         if store.state?.project.connection.ok != true { return .runner }
         return nil
     }
     /// Fallback for the per-card lock explanation. Draft fields remain available while disconnected.
     private var lockHint: String? {
+        if let notice = store.connectionNotice { return notice }
         guard let answerLock, answerLock != .demo else { return nil }
         return "연결 문제로 지금은 답할 수 없습니다"
     }
@@ -276,7 +277,7 @@ struct InboxView: View {
 
     /// Once above the list (the pinned strip says the link dropped; this says what happens to the CEO's memos).
     @ViewBuilder private var disconnectedNotice: some View {
-        if answerLock == .disconnected, !openDecisions.isEmpty {
+        if answerLock == .disconnected, !store.isRestarting, !openDecisions.isEmpty {
             InlineNotice(tone: .attention, icon: "wifi.slash", title: "지금은 결재에 답할 수 없습니다",
                          detail: "쓰던 메모는 이 기기에 남아 있고, 다시 연결되면 보낼 수 있습니다.")
         }

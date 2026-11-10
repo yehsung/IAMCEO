@@ -46,6 +46,7 @@ final class CoordinatorServer: @unchecked Sendable {
     var epoch = "E"
     var seq = 0
     var syncStatus = 200
+    var syncBody: String?
     var syncError: URLError.Code?
     var missing = false
     var gate: DispatchSemaphore?
@@ -84,6 +85,7 @@ final class CoordinatorServer: @unchecked Sendable {
         case "/api/sync":
             syncs += 1
             if let syncError { throw URLError(syncError) }
+            if let syncBody { return IsolatedTestHTTPReply(status: syncStatus, data: Data(syncBody.utf8)) }
             if syncStatus != 200 { return IsolatedTestHTTPReply(status: syncStatus) }
             simultaneous += 1; maximumSimultaneous = max(maximumSimultaneous, simultaneous)
             let snapshot = try reply(SyncSnapshot(protocolVersion: 2, cursor: SyncCursor(epoch: epoch, seq: seq),
@@ -135,7 +137,7 @@ final class CoordinatorServer: @unchecked Sendable {
         let query = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems }
         XCTAssertEqual(query?.filter { $0.name == "lite" }, [URLQueryItem(name: "lite", value: "1")])
         try await hello(socket)
-        await eventually { store.realtimeStatus == .syncing }
+        await eventually { store.realtimeStatus == .syncing || store.realtimeStatus == .live }
         await settle(); await clock.advance(lowPower ? .seconds(1) : .milliseconds(500))
         await eventually { store.realtimeStatus == .live }
         XCTAssertTrue(store.canWrite)
@@ -371,7 +373,7 @@ final class CoordinatorServer: @unchecked Sendable {
         await eventually { store.appliedSnapshotCursor?.seq == 2 }
     }
 
-    func testSocketFlappingBackoffOnlyResetsAfterThirtyStableSeconds() async throws {
+    func testSocketBackoffResetsAfterHelloAndSuccessfulSync() async throws {
         let server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
         guard let store = try await connected(server, network, clock, factory) else { return }
@@ -386,9 +388,11 @@ final class CoordinatorServer: @unchecked Sendable {
         try await hello(socket)
         await settle(); await clock.advance(.milliseconds(500))
         await eventually { store.realtimeStatus == .live }
+        XCTAssertEqual(store.socketFailures, 0)
+        XCTAssertEqual(store.restFailures, 0)
         try await socket.enqueue(.failure(URLError(.networkConnectionLost)))
         await eventually { store.realtimeStatus == .fallback }
-        await settle(); await clock.advance(.milliseconds(999)); await settle()
+        await settle(); await clock.advance(.milliseconds(499)); await settle()
         let before = await factory.sockets.count; XCTAssertEqual(before, 2)
         await clock.advance(.milliseconds(1))
         await eventually { await factory.sockets.count == 3 }

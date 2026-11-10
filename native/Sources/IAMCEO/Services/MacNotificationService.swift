@@ -269,7 +269,7 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
                     }
                 } catch { if Task.isCancelled { return } }
                 await client.disconnect()
-                do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                do { try await Task.sleep(for: store.isRestarting ? .milliseconds(500) : .seconds(3)) } catch { return }
             }
         }
     }

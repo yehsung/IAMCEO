@@ -179,6 +179,9 @@ struct MacComposerTextView: NSViewRepresentable {
         var canReceive: (() -> Bool)?
         var focusChanged: ((Bool) -> Void)?
         var receive: (([MacAttachmentItem]) -> Bool)?
+        var readDrop: @MainActor (NSPasteboard) throws -> [MacAttachmentItem] = MacAttachmentItem.readDrop
+        var readPaste: @MainActor (NSPasteboard) throws -> [MacAttachmentItem] = MacAttachmentItem.read
+        var supportsAttachments: @MainActor (NSPasteboard) -> Bool = MacAttachmentItem.supports
         var rejectionReason: (() -> String?)?
         var intake: MacAttachmentIntake?
         var submit: (() -> Void)?
@@ -240,9 +243,25 @@ struct MacComposerTextView: NSViewRepresentable {
             if !pasteAttachments(from: .general) { super.paste(sender) }
         }
         @discardableResult func pasteAttachments(from pasteboard: NSPasteboard) -> Bool {
-            guard MacAttachmentItem.supports(pasteboard) else { return false }
+            guard supportsAttachments(pasteboard) else { return false }
             // Consume recognized files/images even if writes are blocked; never fall back to path insertion.
-            _ = acceptAttachments(MacAttachmentItem.read(pasteboard))
+            guard attachmentPreflight() else { return true }
+            do {
+                let items = try readPaste(pasteboard)
+                if items.isEmpty { intake?.reportRejection(MacAttachmentReadError.pasted.localizedDescription) }
+                else { _ = acceptAttachments(items) }
+            } catch { intake?.reportRejection(MacAttachmentReadError.pasted.localizedDescription) }
+            return true
+        }
+        private func attachmentPreflight() -> Bool {
+            guard canReceive?() == true else {
+                intake?.reportRejection(rejectionReason?() ?? "지금은 이 입력칸에 첨부할 수 없습니다")
+                return false
+            }
+            guard receive != nil else {
+                intake?.reportRejection("입력칸을 준비 중이라 첨부하지 못했습니다. 다시 놓아 주세요")
+                return false
+            }
             return true
         }
         private func acceptAttachments(_ items: [MacAttachmentItem]) -> Bool {
@@ -266,11 +285,11 @@ struct MacComposerTextView: NSViewRepresentable {
         }
         // Files and images become attachments; anything else (a dragged text snippet) keeps NSTextView's own drop.
         override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-            guard MacAttachmentItem.supports(sender.draggingPasteboard) else { return super.draggingEntered(sender) }
+            guard supportsAttachments(sender.draggingPasteboard) else { return super.draggingEntered(sender) }
             return updateDrag(sender)
         }
         override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
-            guard MacAttachmentItem.supports(sender.draggingPasteboard) else { return super.draggingUpdated(sender) }
+            guard supportsAttachments(sender.draggingPasteboard) else { return super.draggingUpdated(sender) }
             return updateDrag(sender)
         }
         private func updateDrag(_ sender: any NSDraggingInfo) -> NSDragOperation {
@@ -278,20 +297,17 @@ struct MacComposerTextView: NSViewRepresentable {
             return canReceive?() == true && sender.draggingSourceOperationMask.contains(.copy) ? .copy : []
         }
         override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-            guard MacAttachmentItem.supports(sender.draggingPasteboard) else { return super.prepareForDragOperation(sender) }
-            guard canReceive?() == true else {
-                intake?.reportRejection(rejectionReason?() ?? "지금은 이 입력칸에 첨부할 수 없습니다")
-                return false
-            }
-            return true
+            guard supportsAttachments(sender.draggingPasteboard) else { return super.prepareForDragOperation(sender) }
+            return attachmentPreflight()
         }
         override func draggingExited(_ sender: (any NSDraggingInfo)?) { intake?.targeted = false; super.draggingExited(sender) }
         override func draggingEnded(_ sender: any NSDraggingInfo) { intake?.targeted = false; super.draggingEnded(sender) }
         override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-            guard MacAttachmentItem.supports(sender.draggingPasteboard) else { return super.performDragOperation(sender) }
+            guard supportsAttachments(sender.draggingPasteboard) else { return super.performDragOperation(sender) }
             defer { intake?.targeted = false }
-            let items = MacAttachmentItem.read(sender.draggingPasteboard)
-            return acceptAttachments(items)
+            guard attachmentPreflight() else { return false }
+            do { return acceptAttachments(try readDrop(sender.draggingPasteboard)) }
+            catch { intake?.reportRejection(MacAttachmentReadError.dropped.localizedDescription); return false }
         }
     }
 }

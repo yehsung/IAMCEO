@@ -374,7 +374,7 @@ final class MacAttachmentUploadTests: XCTestCase {
         intake.install(owner: UUID()) { items in
             store.composerUploads.receive(items, context: captured, store: store)
         }
-        XCTAssertTrue(intake.accept(MacAttachmentItem.read(items: entries), policy: writable))
+        XCTAssertTrue(intake.accept(try MacAttachmentItem.read(items: entries), policy: writable))
         XCTAssertEqual(store.composerUploads.pending.count, 3, "Send must be blocked before the first suspension")
         try await drain(store)
         XCTAssertEqual(store.drafts.files(for: captured.token.key).count, 3)
@@ -383,7 +383,7 @@ final class MacAttachmentUploadTests: XCTestCase {
         await store.composerUploads.upload(files.map(\.url), context: captured, store: store).value
         let image = NSPasteboardItem()
         image.setData(try png(), forType: .png)
-        XCTAssertTrue(intake.accept(MacAttachmentItem.read(items: [image]), policy: writable))
+        XCTAssertTrue(intake.accept(try MacAttachmentItem.read(items: [image]), policy: writable))
         try await drain(store)
         let uploads = net.requests.filter { $0.url?.path == "/api/uploads" }
         XCTAssertEqual(uploads.count, 7)

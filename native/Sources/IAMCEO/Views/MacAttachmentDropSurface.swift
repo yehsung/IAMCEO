@@ -17,6 +17,7 @@ struct MacAttachmentDropSurface: NSViewRepresentable {
 
     final class DropView: NSView {
         var intake: MacAttachmentIntake?
+        var readDrop: @MainActor (NSPasteboard) throws -> [MacAttachmentItem] = MacAttachmentItem.readDrop
         var policy = MacAttachmentPolicy(archived: false, demo: false, connected: false,
                                          writable: false, missingTarget: false)
         override init(frame: NSRect) {
@@ -37,16 +38,13 @@ struct MacAttachmentDropSurface: NSViewRepresentable {
         override func draggingExited(_ sender: (any NSDraggingInfo)?) { intake?.targeted = false }
         override func draggingEnded(_ sender: any NSDraggingInfo) { intake?.targeted = false }
         override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-            if let reason = policy.reason { intake?.reportRejection(reason); return false }
-            guard intake?.receive != nil else {
-                intake?.reportRejection("입력칸을 준비 중이라 첨부하지 못했습니다. 다시 놓아 주세요")
-                return false
-            }
-            return true
+            intake?.preflight(policy: policy) ?? false
         }
         override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
             defer { intake?.targeted = false }
-            return intake?.accept(MacAttachmentItem.read(sender.draggingPasteboard), policy: policy) ?? false
+            return intake?.acceptDrop(policy: policy) {
+                try readDrop(sender.draggingPasteboard)
+            } ?? false
         }
     }
 }

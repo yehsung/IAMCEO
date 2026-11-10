@@ -18,9 +18,40 @@ packages:
     url: https://github.com/migueldeicaza/SwiftTerm
     exactVersion: 1.18.0
 targets:
+  AttachmentException-macOS:
+    type: framework.static
+    platform: macOS
+    sources: [Sources/AttachmentException]
+    settings:
+      base:
+        PRODUCT_MODULE_NAME: AttachmentException
+        PRODUCT_NAME: AttachmentException
+        PRODUCT_BUNDLE_IDENTIFIER: com.iamceo.attachmentexception.mac
+        GENERATE_INFOPLIST_FILE: YES
+        DEFINES_MODULE: YES
+        CLANG_ENABLE_MODULES: YES
+        HEADER_SEARCH_PATHS: $(SRCROOT)/Sources/AttachmentException/include
+    headers:
+      public: [Sources/AttachmentException/include/AttachmentException.h]
+  AttachmentException-iOS:
+    type: framework.static
+    platform: iOS
+    sources: [Sources/AttachmentException]
+    settings:
+      base:
+        PRODUCT_MODULE_NAME: AttachmentException
+        PRODUCT_NAME: AttachmentException
+        PRODUCT_BUNDLE_IDENTIFIER: com.iamceo.attachmentexception.ios
+        GENERATE_INFOPLIST_FILE: YES
+        DEFINES_MODULE: YES
+        CLANG_ENABLE_MODULES: YES
+        HEADER_SEARCH_PATHS: $(SRCROOT)/Sources/AttachmentException/include
+    headers:
+      public: [Sources/AttachmentException/include/AttachmentException.h]
   IAMCEO-macOS:
     dependencies:
       - package: SwiftTerm
+      - target: AttachmentException-macOS
     type: application
     platform: macOS
     sources: [Sources/IAMCEO, Resources/macOS]
@@ -52,6 +83,7 @@ targets:
   IAMCEO-iOS:
     dependencies:
       - package: SwiftTerm
+      - target: AttachmentException-iOS
     type: application
     platform: iOS
     attributes:

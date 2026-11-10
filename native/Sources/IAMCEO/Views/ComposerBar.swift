@@ -657,7 +657,7 @@ struct ComposerBar: View {
             #if os(macOS)
             MacComposerTextView(text: text, focused: Binding(get: { focused }, set: { focused = $0 }),
                                 placeholder: "\(recipientName)에게 보낼 글", intake: attachmentIntake,
-                                canReceive: { macAttachmentPolicy.canAccept && attachmentIntake.receive != nil },
+                                canReceive: { macAttachmentPolicy.canAccept && attachmentIntake.receive != nil && store.selectedProjectID != nil },
                                 receive: { attachmentIntake.accept($0, policy: macAttachmentPolicy) },
                                 submit: { Task { await send() } },
                                 rejectionReason: { macAttachmentPolicy.reason ?? "입력칸을 준비 중이라 첨부하지 못했습니다" },
@@ -802,7 +802,7 @@ struct ComposerBar: View {
 
     private func installAttachmentReceiver() {
         let uploads = store.composerUploads
-        attachmentIntake.install(owner: attachmentReceiverID, receive: receiveMacAttachments) { detail in
+        attachmentIntake.install(owner: attachmentReceiverID, canReceive: { uploadContext() != nil }, receive: receiveMacAttachments) { detail in
             uploads.reportRejection(detail)
         }
     }

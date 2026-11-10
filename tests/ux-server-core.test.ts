@@ -170,6 +170,8 @@ test("wait reason distinguishes working, approval, manual control, disabled and 
 test("wake=1 reasonless stall creates one durable visible notice; recheck is idempotent and never creates a new delivery", async () => {
   const f = fixture(); const member = f.member(), delivery = f.enqueue(member);
   const future = Date.parse(delivery.createdAt) + 120_001;
+  // 서버는 이제 알리기 전에 한 번 스스로 다시 민다(delivery-1). 이 시험은 그러고도 남은 정체의 알림을 본다: 밀기 없는 저장소로 판정한다.
+  f.store.setDeliveryWaitContext(() => ({ busy: false, waking: false, used: 0 }), () => {});
   f.store.detectDeliveryStalls(future);
   const restart = new Store(f.db, new Bus());
   restart.detectDeliveryStalls(future + 10_000);

@@ -137,7 +137,12 @@ actor RealtimeClient {
                 guard data.count <= Self.maximumMessageSize else { throw RealtimeClientError.messageTooLarge }
                 let event: RealtimeEvent
                 do { event = try JSONDecoder().decode(RealtimeEvent.self, from: data) }
-                catch { throw RealtimeClientError.invalidFrame }
+                catch {
+                    ContractLog.unreadable("realtime frame", error)
+                    // 본문만 읽지 못한 변경 프레임 하나 때문에 연결을 끊지 않는다. 끊으면 같은 종류의 이벤트가 올 때마다 다시 붙는다.
+                    guard receivedHello, let unread = RealtimeEvent.unreadable(from: data) else { throw RealtimeClientError.invalidFrame }
+                    event = unread
+                }
                 guard !event.type.isEmpty else { throw RealtimeClientError.invalidFrame }
                 // Restart announcements are control frames, including before hello and without a cursor.
                 if event.type == "restarting" { throw RealtimeClientError.restarting }

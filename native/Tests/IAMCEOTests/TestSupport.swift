@@ -305,3 +305,39 @@ func withThrowingTestDeadline<Value: Sendable>(isolation: isolated (any Actor)? 
         body(TestDeadlineContinuation(continuation, timeout: .failure(TestDeadlineError.expired), file: file, line: line))
     }
 }
+
+/// 조건이 풀릴 때까지 기다린다. 기한을 넘기면 조용히 다음 줄로 넘어가지 않고 그 자리에서 실패한다
+/// (예전 `for _ in 0..<200 where 조건 { sleep 10ms }`는 2초 뒤 그냥 지나가 엉뚱한 단언에서 실패했다).
+@MainActor func waitWhile(_ busy: @MainActor () -> Bool, timeout: Duration = .seconds(10),
+                          file: StaticString = #filePath, line: UInt = #line) async throws {
+    let deadline = ContinuousClock.now + timeout
+    while busy() {
+        guard ContinuousClock.now < deadline else {
+            XCTFail("Condition did not settle within \(timeout)", file: file, line: line)
+            throw TestDeadlineError.expired
+        }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+}
+
+/// 대기 시간을 실제로 흘려보내지 않는 가짜 대기. 요청된 시간을 기록하고, 시험이 fire() 할 때 깨어난다.
+@MainActor final class ManualPause {
+    private(set) var requested: [Duration] = []
+    private var pending: [UUID: CheckedContinuation<Void, any Error>] = [:]
+    var waiting: Int { pending.count }
+    func pause(_ duration: Duration) async throws {
+        requested.append(duration)
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                if Task.isCancelled { continuation.resume(throwing: CancellationError()) } else { pending[id] = continuation }
+            }
+        } onCancel: {
+            Task { @MainActor in self.pending.removeValue(forKey: id)?.resume(throwing: CancellationError()) }
+        }
+    }
+    func fire() {
+        let all = pending; pending = [:]
+        all.values.forEach { $0.resume() }
+    }
+}

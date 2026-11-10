@@ -174,6 +174,40 @@ final class ConnectionLossTests: XCTestCase {
         }
     }
 
+    /// n-net-6: 이 Mac 안의 서버가 답은 하는데 응답을 해석하지 못하는 동안에는 3초마다 전체 읽기를 되풀이하지 않는다.
+    /// 세 번 거듭되면 '연결 확인 중'이 아니라 이유를 그대로 알린다.
+    @MainActor func testUnreadableSyncOnThisMacBacksOffPastThreeSecondsAndSaysWhy() async throws {
+        let helper = RealtimeNetworkTests(), server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
+        let network = try IsolatedTestNetwork(handler: server.handle)
+        guard let store = try await helper.connected(server, network, clock, factory) else { return }
+        defer { store.disconnect() }
+        server.change { $0.syncBody = "not-json" }
+        await clock.advance(.seconds(1)); await helper.settle()
+        await store.refresh(); await helper.settle()
+        XCTAssertEqual(store.restFailures, 1)
+        XCTAssertEqual(store.connectionNotice, "잠시 연결을 확인하는 중")
+        await clock.advance(.seconds(1))
+        await helper.eventually { store.restFailures == 2 }
+        await helper.settle()
+        await clock.advance(.seconds(2))
+        await helper.eventually { store.restFailures == 3 }
+        await helper.settle()
+        XCTAssertEqual(store.connectionNotice, "앱과 서버 버전이 맞지 않아 최신 상태를 읽지 못했습니다")
+        XCTAssertEqual(store.connectionStatus, .connected); XCTAssertFalse(store.showsOffline)
+        // The fourth attempt waits 4s. The loopback cap of 3s is for a server that is not answering at all.
+        let attempts = server.read { $0.syncs }
+        await clock.advance(.milliseconds(3500)); await helper.settle()
+        XCTAssertEqual(server.read { $0.syncs }, attempts)
+        await clock.advance(.milliseconds(500))
+        await helper.eventually { store.restFailures == 4 }
+        await helper.settle()
+        server.change { $0.syncBody = nil }
+        await clock.advance(.seconds(8))
+        await helper.eventually { store.restFailures == 0 }
+        XCTAssertNil(store.connectionNotice)
+        XCTAssertTrue(store.canWrite)
+    }
+
     @MainActor func testOfflineRequiresTwoFailuresThreeSecondsAndStaysForTwoSeconds() async throws {
         let helper = RealtimeNetworkTests(), server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)

@@ -4,11 +4,14 @@ import { loadConfig } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
 import { Bus } from "../server/bus.ts";
 import { ApiError, Store } from "../server/store.ts";
-import { Orchestrator } from "../server/orchestrator.ts";
+import { Orchestrator, type OrchestratorTimings } from "../server/orchestrator.ts";
 import { CoreRunner } from "../server/runner/core.ts";
 import type { CoreTerminal } from "../server/runner/core-client.ts";
 import type { RunnerEvent } from "../server/runner/types.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
+import { transcriptPath } from "../server/runner/transcript.ts";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 interface Rpc {
   id: string;
@@ -33,6 +36,8 @@ async function fixture(healthMs = 60_000, rpcTimeoutMs = 100) {
   const sockets = new Set<Socket>();
   let draft = "";
   let runLost = false;
+  let runDropped = false;
+  let transcripts = true;
   let keysLost = false;
   let sendStarted = true;
   let getUnavailable = false;
@@ -53,9 +58,17 @@ async function fixture(healthMs = 60_000, rpcTimeoutMs = 100) {
         const terminal = terminals.get(request.params.terminal ?? "");
         if (request.method === "hello") result = { generation: 1, version: "fake", methods: ["terminal.run", "terminal.list", "terminal.get", "terminal.read", "terminal.send", "terminal.keys", "terminal.kill", "terminal.interrupt"], features: [] };
         if (request.method === "terminal.list") result = { terminals: [...terminals.values()] };
+        if (request.method === "terminal.run" && runDropped) { socket.destroy(); continue; }
         if (request.method === "terminal.run") {
           const created: CoreTerminal = { address: `t${terminals.size + 1}`, argv: request.params.argv!, cwd: request.params.cwd!, labels: request.params.labels!, state: "live", turn: 0, ...(silentBoot ? {} : { status: { state: "idle", app: "claude-code" } }) };
           terminals.set(created.address, created); result = created;
+          // 대화를 한 번이라도 한 CLI 는 세션 기록을 남긴다. 기록이 없는 세션은 이어 열 수 없다.
+          const session = request.params.argv![request.params.argv!.indexOf("--session-id") + 1];
+          if (transcripts && request.params.argv!.includes("--session-id") && session) {
+            const path = transcriptPath(request.params.cwd!, session, isolated.providerHomes.claudeHome);
+            mkdirSync(dirname(path), { recursive: true });
+            writeFileSync(path, JSON.stringify({ type: "user", sessionId: session, cwd: request.params.cwd, uuid: "boot", message: { role: "user", content: "첫 인사" } }) + "\n");
+          }
           if (runLost) { socket.destroy(); continue; }
         }
         if (request.method === "terminal.get" && !getUnavailable) result = terminal;
@@ -79,9 +92,15 @@ async function fixture(healthMs = 60_000, rpcTimeoutMs = 100) {
   await new Promise<void>(resolve => server.listen(isolated.socketPath, resolve));
   const orchestrators: Orchestrator[] = [];
   const runners: CoreRunner[] = [];
-  function orchestrator() {
-    const runner = new CoreRunner({ ...isolated.runnerOptions(isolated.providerHomes) }, { recoveryStore: store, pollMs: 20, rpcTimeoutMs, sendTimeoutMs: rpcTimeoutMs });
-    const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]), timings: { tickMs: 60_000, healthMs, retryMs: 10, inputBusyRetryMs: 10 } });
+  /** live: 실제 서버처럼 실행기에 원래 쓰기의 상태(quiescence)와 복구 쓰기(repair) 포트를 잇는다. */
+  function orchestrator(timings: Partial<OrchestratorTimings> = {}, live = false) {
+    const wired: { orch?: Orchestrator } = {};
+    const runner = new CoreRunner({ ...isolated.runnerOptions(isolated.providerHomes) }, { recoveryStore: store, pollMs: 20, rpcTimeoutMs, sendTimeoutMs: rpcTimeoutMs, ...(live ? {
+      quiescence: (memberId, dispatch) => wired.orch!.dispatchQuiescence(memberId, dispatch),
+      repair: { load: (memberId, request) => wired.orch!.deliveryRecovery.repair.load(memberId, request), prepare: (memberId, request, dispatch) => wired.orch!.deliveryRecovery.repair.prepare(memberId, request, dispatch) },
+    } : {}) });
+    const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]), timings: { tickMs: 60_000, healthMs, retryMs: 10, inputBusyRetryMs: 10, ...timings } });
+    wired.orch = orch;
     runners.push(runner); orchestrators.push(orch);
     return { orch, runner };
   }
@@ -92,11 +111,11 @@ async function fixture(healthMs = 60_000, rpcTimeoutMs = 100) {
     db.close(); await isolated.stop();
   });
   const current = orchestrator();
-  return { ...current, store, bus, db, project, config, calls, terminals, runners, orchestrator,
+  return { ...current, store, bus, db, project, config, calls, terminals, runners, orchestrator, claudeHome: isolated.providerHomes.claudeHome,
     count: (method: string) => calls.filter(c => c.method === method).length,
-    loseRun: (value: boolean) => { runLost = value; }, loseKeys: () => { keysLost = true; },
+    loseRun: (value: boolean) => { runLost = value; }, dropRun: (value: boolean) => { runDropped = value; }, transcripts: (value: boolean) => { transcripts = value; }, loseKeys: () => { keysLost = true; },
     loseKill: (value: boolean) => { killLost = value; }, unavailable: (value: boolean) => { getUnavailable = value; },
-    rejectSend: (value: boolean) => { rejectSend = value; }, unknownSend: () => { unknownSend = true; }, silentBoot: (value: boolean) => { silentBoot = value; },
+    rejectSend: (value: boolean) => { rejectSend = value; }, unknownSend: (value = true) => { unknownSend = value; }, silentBoot: (value: boolean) => { silentBoot = value; },
     draft: (text: string) => { draft = text; }, started: (value: boolean) => { sendStarted = value; } };
 }
 
@@ -112,6 +131,116 @@ test("lost creation reply preserves intent/member and restart rejoins labels wit
   expect(f.store.requireMember(member.id).paneId).toBe("t1");
   expect(f.store.listPendingLifecycleJournals()).toHaveLength(0);
   expect(f.count("terminal.run")).toBe(1);
+});
+
+// orch-b-1: 깨우다 결과를 놓친 기동이 직원을 영구히 막았다. 잠든 직원은 감시에서도 빠졌다.
+test("a sleeping member whose wake reply was lost and whose terminal never appeared is released after the grace and woken again", async () => {
+  const f = await fixture(5);
+  const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  await f.orch.sleepMember(member.id);
+  await f.orch.shutdown();
+  const next = f.orchestrator({ startGraceMs: 0 });
+  f.dropRun(true);
+  await next.orch.assign(f.project.id, member.handle, { text: "깨어나서 할 일" });
+  expect(f.store.listPendingLifecycleJournals()[0]).toMatchObject({ memberId: member.id, intent: "start", phase: "unknown" });
+  expect(f.store.requireMember(member.id)).toMatchObject({ status: "asleep", paneId: null });
+  await expect(next.orch.resumeMember(member.id)).rejects.toThrow();
+  await expect(next.orch.sleepMember(member.id, { force: true })).rejects.toThrow("미확정 세션 작업");
+  const runs = f.count("terminal.run");
+  f.dropRun(false);
+  for (let i = 0; i < 200 && f.count("terminal.send") === 0; i++) { await next.orch.refreshConnection(); await Bun.sleep(5); }
+  expect(f.store.listPendingLifecycleJournals()).toHaveLength(0);
+  expect(f.count("terminal.run")).toBe(runs + 1);
+  expect(f.count("terminal.send")).toBe(1);
+  expect(f.store.requireMember(member.id)).toMatchObject({ lastError: null, paneId: "t2" });
+  expect(f.store.listPending(member.id)).toHaveLength(0);
+});
+
+test("a wake that is still within the grace keeps its unknown start journal", async () => {
+  const f = await fixture(5);
+  const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  await f.orch.sleepMember(member.id);
+  f.dropRun(true);
+  await f.orch.assign(f.project.id, member.handle, { text: "깨어나서 할 일" });
+  f.dropRun(false);
+  for (let i = 0; i < 6; i++) { await f.orch.refreshConnection(); await Bun.sleep(5); }
+  expect(f.store.listPendingLifecycleJournals()[0]).toMatchObject({ memberId: member.id, intent: "start", phase: "unknown" });
+  expect(f.count("terminal.run")).toBe(2);
+});
+
+test("a sleeping member whose wake reply was lost but whose terminal exists is rejoined although it still reads asleep", async () => {
+  const f = await fixture(5);
+  const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  await f.orch.sleepMember(member.id);
+  f.loseRun(true);
+  await f.orch.assign(f.project.id, member.handle, { text: "깨어나서 할 일" });
+  expect(f.store.listPendingLifecycleJournals()[0]).toMatchObject({ memberId: member.id, intent: "start", phase: "unknown" });
+  expect(f.store.requireMember(member.id).status).toBe("asleep");
+  f.loseRun(false);
+  for (let i = 0; i < 200 && f.count("terminal.send") === 0; i++) { await f.orch.refreshConnection(); await Bun.sleep(5); }
+  expect(f.store.listPendingLifecycleJournals()).toHaveLength(0);
+  expect(f.count("terminal.run")).toBe(2);
+  expect(f.count("terminal.send")).toBe(1);
+  expect(f.store.requireMember(member.id)).toMatchObject({ paneId: "t2", lastError: null });
+  expect(f.store.requireMember(member.id).status).not.toBe("asleep");
+});
+
+// orch-b-2: core 는 터미널만 뜨면 성공으로 답해, 기록이 없는 세션을 --resume 하면 CLI 가 곧바로 끝나기를 끝없이 되풀이했다.
+test("waking a member whose session has no record starts a fresh session instead of resuming a missing one", async () => {
+  const f = await fixture(); f.transcripts(false);
+  const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  await f.orch.sleepMember(member.id);
+  await f.orch.assign(f.project.id, member.handle, { text: "깨어나서 할 일" });
+  const runs = f.calls.filter(c => c.method === "terminal.run");
+  expect(runs).toHaveLength(2);
+  expect(runs[1]!.params.argv).not.toContain("--resume");
+  expect(runs[1]!.params.argv).toContain("--session-id");
+  const now = f.store.requireMember(member.id);
+  expect(now.sessionId).not.toBe(member.sessionId);
+  expect(now.sessionId).toBe(runs[1]!.params.argv![runs[1]!.params.argv!.indexOf("--session-id") + 1]!);
+  expect(f.calls.find(c => c.method === "terminal.send")?.params.text).toContain("이전 세션을 찾지 못해 새 세션으로 시작합니다");
+});
+
+test("a session with a record is still resumed", async () => {
+  const f = await fixture();
+  const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  await f.orch.sleepMember(member.id);
+  await f.orch.resumeMember(member.id);
+  const run = f.calls.filter(c => c.method === "terminal.run")[1]!;
+  expect(run.params.argv).toContain("--resume");
+  expect(f.store.requireMember(member.id).sessionId).toBe(member.sessionId);
+});
+
+test("a fresh session whose launch reply was lost is rejoined by its new session label", async () => {
+  const f = await fixture(5); f.transcripts(false);
+  const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  await f.orch.sleepMember(member.id);
+  f.loseRun(true);
+  await f.orch.assign(f.project.id, member.handle, { text: "깨어나서 할 일" });
+  expect(f.store.listPendingLifecycleJournals()[0]).toMatchObject({ memberId: member.id, intent: "start", phase: "unknown" });
+  f.loseRun(false);
+  for (let i = 0; i < 200 && f.count("terminal.send") === 0; i++) { await f.orch.refreshConnection(); await Bun.sleep(5); }
+  expect(f.store.listPendingLifecycleJournals()).toHaveLength(0);
+  expect(f.count("terminal.run")).toBe(2);
+  expect(f.store.requireMember(member.id)).toMatchObject({ paneId: "t2", sessionId: f.terminals.get("t2")!.labels["iamceo.session"] });
+  expect(f.store.requireMember(member.id).statusObservation?.ownership).toBe("verified");
+});
+
+test("a start that fails before anything is sent to the runner is refused, not left unknown", async () => {
+  const f = await fixture();
+  const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  await f.orch.sleepMember(member.id);
+  const runs = f.count("terminal.run");
+  const internals = f.orch as unknown as { writeRunFiles: () => never };
+  const original = internals.writeRunFiles;
+  internals.writeRunFiles = () => { throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" }); };
+  await expect(f.orch.resumeMember(member.id)).rejects.toThrow();
+  expect(f.store.listPendingLifecycleJournals()).toHaveLength(0);
+  expect(f.count("terminal.run")).toBe(runs);
+  internals.writeRunFiles = original;
+  await f.orch.resumeMember(member.id);
+  expect(f.count("terminal.run")).toBe(runs + 1);
+  expect(f.store.requireMember(member.id).status).toBe("idle");
 });
 
 test("uncertain creation with duplicate owners is quarantined without run or kill", async () => {
@@ -586,3 +715,110 @@ test("an unknown stop is finished by recovery even though a wake arrived meanwhi
   expect(f.count("terminal.send")).toBe(1);
   expect(f.store.requireMember(member.id)).toMatchObject({ sessionId: member.sessionId, lastError: null });
 });
+
+// x-restart-2: core 에서는 영수증 없는 쓰기가 영원히 '미해결'이라, 전송 중 재시작 한 번이 그 직원의 대기열을 영영 막았다.
+async function lostWrite(turnMoved: boolean) {
+  const f = await fixture();
+  const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  f.unknownSend();
+  await f.orch.assign(f.project.id, member.handle, { text: "들어가지 못한 지시" });
+  const delivery = f.store.listDeliveries(f.project.id).find(d => d.kind === "instruction")!;
+  expect(f.store.listDispatches(member.id)[0]).toMatchObject({ transportState: "unknown", baseline: { turn: 0, logs: [{ offset: expect.any(Number), eventId: null }] } });
+  expect(f.store.listDispatches(member.id)[0]!.baseline.logs[0]!.offset).toBeGreaterThan(0);
+  await f.orch.shutdown(); f.unknownSend(false);
+  if (turnMoved) f.terminals.get(member.paneId!)!.turn = 3;
+  const next = f.orchestrator({ writeSettleMs: 0 }, true);
+  await next.orch.recover();
+  return { f, member, delivery, next };
+}
+const tickUntil = async (orch: Orchestrator, done: () => boolean, limitMs = 8000) => {
+  for (const started = Date.now(); !done() && Date.now() - started < limitMs;) { await orch.deliveryRecovery.tick(); await Bun.sleep(50); }
+  expect(done()).toBe(true);
+};
+
+test("a write that never landed (restart mid-send) is proven absent after the restart and sent again without the owner", async () => {
+  const { f, member, delivery, next } = await lostWrite(false);
+  expect(next.orch.deliveryRecovery.fenced(member.id)).toBe(true);
+  await tickUntil(next.orch, () => f.store.requireDelivery(delivery.id).status === "delivered");
+  expect(f.count("terminal.send")).toBe(2);
+  expect(f.store.getDeliveryRecovery(delivery.id)?.phase).toBe("resolved");
+  expect(f.store.inputState(member.id).unresolvedDispatches).toHaveLength(0);
+  expect(next.orch.deliveryRecovery.fenced(member.id)).toBe(false);
+}, 20_000);
+
+test("when the CLI moved on since the send nothing is re-sent on its own, but '그만 보내기' really releases the member", async () => {
+  const { f, member, delivery, next } = await lostWrite(true);
+  for (let i = 0; i < 3; i++) { await next.orch.deliveryRecovery.tick(); await Bun.sleep(20); }
+  expect(f.count("terminal.send")).toBe(1);
+  expect(next.orch.deliveryRecovery.fenced(member.id)).toBe(true);
+  await next.orch.recoverDelivery(delivery.id, { operationId: crypto.randomUUID(), expectedVersion: f.store.getDeliveryRecovery(delivery.id)!.version, action: "stop_retry" });
+  expect(next.orch.deliveryRecovery.fenced(member.id)).toBe(false);
+  expect(f.store.inputState(member.id).unresolvedDispatches).toHaveLength(0);
+  await next.orch.assign(f.project.id, member.handle, { text: "그 뒤의 지시" });
+  const later = f.store.listDeliveries(f.project.id).filter(d => d.kind === "instruction").at(-1)!;
+  await until(() => f.store.requireDelivery(later.id).status === "delivered");
+  expect(f.calls.filter(c => c.method === "terminal.send").at(-1)!.params.text).toContain("그 뒤의 지시");
+}, 20_000);
+
+test("'중복 위험에 동의하고 다시 보내기' actually sends once the original write is over", async () => {
+  const { f, member, delivery, next } = await lostWrite(true);
+  await next.orch.deliveryRecovery.tick();
+  const before = f.store.getDeliveryRecovery(delivery.id)!;
+  f.store.updateDeliveryRecovery(delivery.id, before.version, { phase: "needs_owner", reason: "log_incomplete" });
+  const result = await next.orch.recoverDelivery(delivery.id, { operationId: crypto.randomUUID(), expectedVersion: f.store.getDeliveryRecovery(delivery.id)!.version, action: "retry_with_risk", acceptDuplicateRisk: true });
+  expect(result.outcome).toBe("retry_scheduled");
+  await tickUntil(next.orch, () => f.store.requireDelivery(delivery.id).status === "delivered");
+  expect(f.count("terminal.send")).toBe(2);
+  expect(next.orch.deliveryRecovery.fenced(member.id)).toBe(false);
+}, 20_000);
+
+test("while the original send call may still be running its write stays unresolved", async () => {
+  const f = await fixture();
+  const live = f.orchestrator({ writeSettleMs: 60_000 }, true);
+  await f.orch.shutdown();
+  const member = await live.orch.createMember(f.project.id, { name: "Worker" });
+  f.unknownSend();
+  await live.orch.assign(f.project.id, member.handle, { text: "결과를 모르는 지시" });
+  f.unknownSend(false);
+  const dispatch = f.store.listDispatches(member.id)[0]!;
+  expect(live.orch.dispatchQuiescence(member.id, dispatch)).toEqual({ originalWrite: "unresolved", externalInput: null });
+  for (let i = 0; i < 3; i++) { await live.orch.deliveryRecovery.tick(); await Bun.sleep(20); }
+  expect(f.count("terminal.send")).toBe(1);
+  expect(live.orch.deliveryRecovery.fenced(member.id)).toBe(true);
+});
+
+// mem-growth-9: 닫은 직원의 토큰이 든 MCP 설정 파일이 데이터 폴더에 계속 남았다.
+test("closing a member removes its run files", async () => {
+  const f = await fixture(), member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  const run = join(f.config.home, "run");
+  expect(existsSync(join(run, `${member.id}.mcp.json`))).toBe(true);
+  await f.orch.closeMember(member.id);
+  expect(f.store.getMember(member.id)).toBeNull();
+  expect(readdirSync(run).filter(name => name.startsWith(member.id))).toEqual([]);
+});
+
+// runner-core-1 인계: 응답을 잃은 전송이 실제로는 들어갔고 그 턴이 이미 끝났다. 수신이 확인되면 다시 시작하지 않아도 다음 지시가 나가야 한다.
+for (const restart of [false, true]) test(`a send whose reply was lost but that the CLI received is confirmed from its log and the next instruction goes out (${restart ? "after a restart" : "same process"})`, async () => {
+  const f = await fixture();
+  const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  f.unknownSend();
+  await f.orch.assign(f.project.id, member.handle, { text: "응답만 잃은 지시" });
+  f.unknownSend(false);
+  const first = f.store.listDeliveries(f.project.id).find(d => d.kind === "instruction")!;
+  const dispatch = f.store.listDispatches(member.id)[0]!;
+  expect(dispatch.transportState).toBe("unknown");
+  // CLI 는 그 글을 받아 턴을 마쳤다.
+  const terminal = f.terminals.get(member.paneId!)!;
+  const log = f.calls.find(c => c.method === "terminal.run")!;
+  const path = transcriptPath(log.params.cwd!, member.sessionId!, f.claudeHome);
+  writeFileSync(path, JSON.stringify({ type: "user", sessionId: member.sessionId, cwd: log.params.cwd, uuid: "received", message: { role: "user", content: dispatch.wireText } }) + "\n", { flag: "a" });
+  terminal.turn = 1; terminal.status = { state: "idle" };
+  let orch = f.orch;
+  if (restart) { await f.orch.shutdown(); orch = f.orchestrator().orch; await orch.recover(); }
+  await tickUntil(orch, () => f.store.requireDelivery(first.id).status === "delivered");
+  await orch.refreshConnection();
+  await orch.assign(f.project.id, member.handle, { text: "그 다음 지시" });
+  const second = f.store.listDeliveries(f.project.id).filter(d => d.kind === "instruction").at(-1)!;
+  await until(() => f.store.requireDelivery(second.id).status === "delivered");
+  expect(f.count("terminal.send")).toBe(2);
+}, 20_000);

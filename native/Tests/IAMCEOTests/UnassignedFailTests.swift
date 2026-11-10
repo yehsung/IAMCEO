@@ -144,6 +144,35 @@ private final class UnassignedFailHTTP: @unchecked Sendable {
             XCTAssertEqual(fixture.recoveryBodies[1]["expectedVersion"] as? Int, 0)
         }
     }
+    /// n-appstore-6: 응답을 잃고 서버에도 닿지 않은 미배정 글 조치는 요청이 더는 도착할 수 없는 시간이 지나면 닫힌다.
+    func testLostUnassignedActionThatNeverArrivedStopsBlockingAfterItsTimeLimit() async throws {
+        try await bounded {
+            let fixture = UnassignedFailHTTP(), network = try IsolatedTestNetwork(handler: fixture.handle)
+            let store = await self.connect(network); defer { store.disconnect() }
+            let start = Date().timeIntervalSince1970
+            store.wallClock = { start }
+            fixture.change { $0.status = 500 } // answered without applying: the outcome is unknown to the app
+            let lost = await store.dismissUndelivered(messageID: "legacy")
+            XCTAssertFalse(lost)
+            XCTAssertTrue(store.deliveryChecking.contains("message:legacy"))
+            store.wallClock = { start + 59 }
+            await store.refresh()
+            XCTAssertTrue(store.deliveryChecking.contains("message:legacy"))
+            let opposite = await store.sendUnassignedToConductor(messageID: "legacy")
+            XCTAssertFalse(opposite)
+            XCTAssertEqual(fixture.recoveryBodies.count, 1)
+            store.wallClock = { start + 61 }
+            await store.refresh()
+            XCTAssertFalse(store.deliveryChecking.contains("message:legacy"), "The message must not stay locked forever")
+            XCTAssertEqual(fixture.recoveryBodies.count, 1)
+            fixture.change { $0.status = nil }
+            let sent = await store.sendUnassignedToConductor(messageID: "legacy")
+            XCTAssertTrue(sent)
+            XCTAssertEqual(fixture.recoveryBodies.count, 2)
+            XCTAssertEqual(fixture.recoveryBodies[1]["action"] as? String, "send_to_conductor")
+            XCTAssertNotEqual(fixture.recoveryBodies[0]["operationId"] as? String, fixture.recoveryBodies[1]["operationId"] as? String)
+        }
+    }
     func testWriteLockBlocksConcurrentOppositeActionAndLateProjectResultIsIsolated() async throws {
         try await bounded {
             let fixture = UnassignedFailHTTP(), network = try IsolatedTestNetwork(handler: fixture.handle)

@@ -201,4 +201,38 @@ final class RealtimeTests: XCTestCase {
         do { for try await _ in stream {}; XCTFail("Consumer overflow must fail") }
         catch { XCTAssertEqual(error as? RealtimeClientError, .consumerTooSlow) }
     }
+
+    /// n-net-6: 본문만 읽지 못한 변경 프레임은 봉투(type·순번)를 살려 넘긴다. 봉투가 깨졌거나 본문이 없는 종류는 여전히 잘못된 프레임이다.
+    func testUnreadablePayloadSurvivesAsItsEnvelopeButABrokenEnvelopeDoesNot() async throws {
+        let socket = TestRealtimeSocket(); let client = RealtimeClient(factory: TestRealtimeFactory(socket))
+        let stream = try await client.connect(api: api())
+        await socket.send(hello)
+        await socket.send(#"{"type":"member","epoch":"epoch","seq":1,"member":{"projectId":"p","status":7}}"#)
+        await socket.send(#"{"type":"decision","epoch":"epoch","seq":2}"#)
+        await socket.send(#"{"type":"ping","epoch":"epoch","seq":2}"#)
+        await socket.send(#"{"type":"member","epoch":"","seq":3,"member":{"id":"m"}}"#)
+        var iterator = stream.makeAsyncIterator()
+        _ = try await iterator.next()
+        let member = try await iterator.next()
+        XCTAssertEqual(member?.type, "member"); XCTAssertEqual(member?.cursor?.seq, 1)
+        XCTAssertEqual(member?.payloadUnreadable, true); XCTAssertNil(member?.member)
+        let decision = try await iterator.next()
+        XCTAssertEqual(decision?.cursor?.seq, 2); XCTAssertEqual(decision?.payloadUnreadable, true)
+        let ping = try await iterator.next()
+        XCTAssertEqual(ping?.type, "ping"); XCTAssertEqual(ping?.payloadUnreadable, false)
+        do { _ = try await iterator.next(); XCTFail("A broken envelope must end the stream") }
+        catch { XCTAssertEqual(error as? RealtimeClientError, .invalidFrame) }
+    }
+
+    func testUnreadableEnvelopeRulesMatchTheStrictDecoder() {
+        func envelope(_ text: String) -> RealtimeEvent? { RealtimeEvent.unreadable(from: Data(text.utf8)) }
+        XCTAssertEqual(envelope(#"{"type":"todo","epoch":"e","seq":4,"todo":7}"#)?.cursor?.seq, 4)
+        XCTAssertNil(envelope(#"{"type":"todo","todo":7}"#)?.cursor, "A legacy frame has no cursor")
+        XCTAssertNotNil(envelope(#"{"type":"todo","todo":7}"#))
+        for broken in [#"{"type":"hello","seq":1}"#, #"{"type":"ping","epoch":"e"}"#, #"{"type":"future","epoch":"e","seq":1}"#,
+                       #"{"type":"todo","epoch":"e","seq":-1}"#, #"{"type":"todo","epoch":"e"}"#, #"{"type":"todo","seq":3}"#,
+                       #"{"type":"todo","protocol":2,"epoch":"e","seq":1}"#, #"{"todo":{}}"#, "not json"] {
+            XCTAssertNil(envelope(broken), broken)
+        }
+    }
 }

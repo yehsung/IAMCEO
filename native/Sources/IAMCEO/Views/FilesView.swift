@@ -557,10 +557,10 @@ private struct RowThumb: View {
 
     private func loadThumb() async {
         guard let api = store.api, !store.isDemo,
-              let data = try? await FileResources.data(attachment, api: api),
-              let decoded = decodePreviewImage(data, maxPixel: 160) else { return }
+              let resource = try? await FileResources.attachment(attachment, api: api),
+              let decoded = await PreviewImages.image(resource, maxPixel: 160) else { return }
         guard store.api === api, !Task.isCancelled else { return }
-        thumbAPI = api; thumb = decoded.image
+        thumbAPI = api; thumb = Image(decorative: decoded, scale: 1)
     }
 }
 
@@ -2046,8 +2046,9 @@ private struct AttachmentView: View {
             let result = try loaded.read()
             resource = loaded
             let destination = loaded.url
-            if attachment.isImage, let decoded = decodePreviewImage(result, maxPixel: 1400) {
-                image = decoded.image; pixelSize = decoded.size
+            if attachment.isImage, let decoded = await PreviewImages.image(loaded, maxPixel: 1400) {
+                guard store.api === api, !Task.isCancelled else { return }
+                image = Image(decorative: decoded, scale: 1); pixelSize = CGSize(width: decoded.width, height: decoded.height)
             }
             data = result; fileURL = destination; error = nil
         } catch { self.error = friendlyLoadError(error) }
@@ -2080,7 +2081,8 @@ private extension Attachment {
             error = store.isDemo ? "샘플에는 원본 파일이 없습니다." : "서버 연결 후 원본을 불러올 수 있습니다."
             return
         }
-        if resource?.api === api { return }
+        // 며칠 켜 둔 앱에서는 시스템이 오래된 임시 파일을 지웠을 수 있다. 파일이 없으면 다시 받는다.
+        if let resource, resource.api === api, FileManager.default.fileExists(atPath: resource.url.path) { return }
         let project = store.selectedProjectID
         loading = true; progress = nil; defer { loading = false }
         do {
@@ -2089,8 +2091,9 @@ private extension Attachment {
             let report: @Sendable (Double?) -> Void = { [weak self] value in Task { @MainActor in self?.progress = value } }
             let result = try await FileResources.attachment(attachment, api: api, progress: trackProgress ? report : nil)
             guard store.api === api, store.selectedProjectID == project, !Task.isCancelled else { return }
-            if attachment.isImage, let decoded = decodePreviewImage(try result.read(), maxPixel: maxPixel) {
-                image = decoded.image; pixelSize = decoded.size
+            if attachment.isImage, let decoded = await PreviewImages.image(result, maxPixel: maxPixel) {
+                guard store.api === api, store.selectedProjectID == project, !Task.isCancelled else { return }
+                image = Image(decorative: decoded, scale: 1); pixelSize = CGSize(width: decoded.width, height: decoded.height)
             }
             resource = result; url = result.url; error = nil
         } catch {
@@ -2886,18 +2889,6 @@ private func fileTime(_ iso: String, now: Date = Date()) -> String {
     if calendar.isDateInYesterday(date) { return "어제 \(clock)" }
     let day = koFormatted(date, calendar.component(.year, from: date) == calendar.component(.year, from: now) ? "M월 d일" : "yyyy년 M월 d일")
     return "\(day) \(clock)"
-}
-
-/// Downsampled decode so a thread full of screenshots does not hold full-size bitmaps.
-private func decodePreviewImage(_ data: Data, maxPixel: Int) -> (image: Image, size: CGSize)? {
-    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-    let options: [CFString: Any] = [
-        kCGImageSourceCreateThumbnailFromImageAlways: true,
-        kCGImageSourceCreateThumbnailWithTransform: true,
-        kCGImageSourceThumbnailMaxPixelSize: maxPixel
-    ]
-    guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
-    return (Image(decorative: cgImage, scale: 1), CGSize(width: cgImage.width, height: cgImage.height))
 }
 
 @MainActor private func copyToPasteboard(_ text: String) {

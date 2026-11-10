@@ -198,6 +198,11 @@ export interface Runner {
   repairDelivery?(m: RunnerMember, request: DeliveryRepair): Promise<SendResult>;
   isBusy(memberId: string): boolean;
   /**
+   * 일하는 중인 턴에 긴급 글을 끼워 넣을 수 있는가. false 면 긴급도 턴이 끝난 뒤 보통 묶음으로 나간다
+   * (넣을 수 없는 실행기에 시도하면 거절 기록만 쌓여 그 직원의 대기열이 통째로 미뤄졌다). 없으면 넣을 수 있다고 본다.
+   */
+  readonly interjects?: boolean;
+  /**
    * Whether this member is actually running (or may be running) a CLI turn and so holds one of maxConcurrentTurns.
    * A write whose result is unknown on a CLI that is observed idle/done is a delivery fence, not a running turn.
    * Absent: isBusy is used.

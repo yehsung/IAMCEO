@@ -450,6 +450,19 @@ describe("원본 판, operation과 읽기 집계", () => {
     await errorStatus(f.service.recover(d.id, { operationId: randomUUID(), expectedVersion: f.r(d.id).version, action: "recheck" }), 404);
   });
 
+  test("세션 기록을 아직 읽는 중인 확인은 '대표 확인 필요'로 넘어가는 시간에 세지 않고 곧 다시 본다", async () => {
+    const f = setup(), d = f.enqueue(); f.envelope([d]);
+    const scanning = (q: DeliveryProbe) => f.observation(q, { evidence: [{ source: "claude_log", verdict: "unknown", location: "none", code: "scan_pending", complete: false, checkedAt: new Date(f.now).toISOString() }] });
+    f.inspect = async (_m, q) => scanning(q);
+    for (let i = 0; i < 8; i++) { f.now += 30_000; await f.service.tick(); }
+    expect(f.r(d.id)).toMatchObject({ phase: "checking", activeCheckMs: 0 });
+    expect(Date.parse(f.r(d.id).nextCheckAt!) - f.now).toBe(1_000);
+    // 다 읽고도 판단할 수 없으면 예전처럼 2분 뒤 대표에게 넘긴다.
+    f.inspect = async (_m, q) => f.observation(q);
+    for (let i = 0; i < 6; i++) { f.now += 30_000; await f.service.tick(); }
+    expect(f.r(d.id).phase).toBe("needs_owner");
+  });
+
   test("프로젝트 attention 빠른 집계는 일반 대기를 건너뛰고 실제 알림 집계와 일치한다", () => {
     const f = setup(), d = f.enqueue();
     const count = () => f.store.projectSummaries().find(p => p.id === f.project.id)!.needsCount;
@@ -464,7 +477,8 @@ describe("원본 판, operation과 읽기 집계", () => {
     expect(count()).toBe(1); expect(count()).toBe(noticeCount());
     f.store.updateDeliveryRecovery(d.id, f.r(d.id).version, { phase: "none", reason: null });
     expect(count()).toBe(0);
-    f.store.detectDeliveryStalls(f.now + 120_001);
+    // 전달의 createdAt 은 실제 시계로 찍힌다. setup 때 잡은 f.now 가 아니라 그 시각에서 잰다.
+    f.store.detectDeliveryStalls(Date.parse(d.createdAt) + 120_001);
     expect(count()).toBe(1); expect(count()).toBe(noticeCount());
     f.store.patchMember(f.member.id, { status: "working" });
     expect(count()).toBe(0); expect(count()).toBe(noticeCount());

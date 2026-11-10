@@ -3,6 +3,8 @@ import SwiftUI
 import XCTest
 @testable import IAMCEO
 
+@MainActor private final class WakePolls { var count = 0 }
+
 @MainActor final class UXTeamTerminalTests: XCTestCase {
     private func connect(_ network: IsolatedTestNetwork) async -> AppStore {
         let store = AppStore(session: network.session, persistCredentials: false)
@@ -93,14 +95,20 @@ import XCTest
     }
 
     func testSlowWakeBeyondFormerTwentySecondCutoffContinuesWhenPaneArrives() async throws {
-        let wake = TerminalWake()
+        // 21초를 실제로 기다리지 않는다. 50ms 간격의 준비 확인이 420번(=21초) 넘게 돈 뒤에도 기다리고 있는지 본다.
+        let polls = WakePolls()
+        let wake = TerminalWake(pause: { duration in
+            XCTAssertEqual(duration, .milliseconds(50))
+            polls.count += 1
+            await Task.yield()
+        })
         var member = Member(id: "m", projectId: "p", backend: "core", status: "asleep")
         var resumes = 0
         let waiting = Task {
             await wake.wake(memberID: member.id, resume: { resumes += 1; return nil }, current: { member }, allowed: { true })
         }
         try await eventually { resumes == 1 }
-        try await Task.sleep(for: .seconds(21))
+        try await eventually(timeout: .seconds(10)) { polls.count > 420 }
         XCTAssertTrue(wake.members.contains(member.id))
         let duplicate = await wake.wake(memberID: member.id, resume: { XCTFail("Duplicate resume"); return nil }, current: { member }, allowed: { true })
         XCTAssertEqual(duplicate, .duplicate)
@@ -157,15 +165,22 @@ import XCTest
     }
 
     #if os(macOS)
+    /// 열려 있는 활동 목록은 store가 한 번 읽고 따라간다(실시간이 없는 이 시험 환경에서는 주기적인 전체 읽기가 함께 읽는다).
+    /// 화면에서 사라지면 더 읽지 않는다. 예전에는 뷰가 실제 시간 3초마다 직접 읽었고, 앱이 뒤에 있어도 멈추지 않았다.
     func testActivityListRefreshesWhileOpenAndStopsAfterRemoval() async throws {
-        let server = WriteTestServer()
+        let server = WriteTestServer(), clock = CoordinatorClock()
         let network = try IsolatedTestNetwork { request in
             if request.url?.path.hasSuffix("/activity") == true {
-                return IsolatedTestHTTPReply(data: Data("[]".utf8))
+                return IsolatedTestHTTPReply(data: Data(#"[{"id":3,"memberId":"m","text":"read"}]"#.utf8))
             }
             return try server.handle(request)
         }
-        let store = await connect(network), member = try XCTUnwrap(store.members.first)
+        let store = AppStore(session: network.session, persistCredentials: false, clock: clock, retryJitter: { $0 })
+        store.endpoint = network.endpoint.url.absoluteString; store.accessCode = "test"
+        await store.connect()
+        let member = try XCTUnwrap(store.members.first)
+        func reads() -> Int { network.requests.filter { $0.url?.path.hasSuffix("/activity") == true }.count }
+        func syncs() -> Int { network.requests.filter { $0.url?.path == "/api/sync" }.count }
         let host = NSHostingView(rootView: AnyView(ActivityList(memberID: member.id).environment(store)))
         let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 500, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = host
@@ -174,15 +189,18 @@ import XCTest
         // NSHostingView alone does not establish that lifecycle on macOS.
         window.orderFront(nil)
         host.layoutSubtreeIfNeeded()
-        try await eventually { network.requests.contains { $0.url?.path.hasSuffix("/activity") == true } }
-        try await eventually(timeout: .seconds(8)) {
-            network.requests.filter { $0.url?.path.hasSuffix("/activity") == true }.count >= 2
-        }
-        let reads = network.requests.filter { $0.url?.path.hasSuffix("/activity") == true }.count
-        XCTAssertGreaterThanOrEqual(reads, 2)
+        try await eventually { store.activities[member.id]?.map(\.id) == [3] }
+        XCTAssertEqual(reads(), 1)
+        await clock.advance(.seconds(3))
+        try await eventually { reads() == 2 }
         host.rootView = AnyView(EmptyView()); host.layoutSubtreeIfNeeded()
-        try await Task.sleep(for: .milliseconds(3300))
-        XCTAssertEqual(network.requests.filter { $0.url?.path.hasSuffix("/activity") == true }.count, reads)
+        try await eventually { store.activities[member.id] == nil }
+        let before = syncs()
+        await clock.advance(.seconds(3))
+        try await eventually { syncs() > before }
+        await clock.advance(.seconds(3))
+        try await eventually { syncs() > before + 1 }
+        XCTAssertEqual(reads(), 2, "A list that left the screen is not read again")
     }
     #endif
 }

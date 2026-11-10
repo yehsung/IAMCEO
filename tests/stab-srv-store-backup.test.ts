@@ -260,3 +260,32 @@ describe("강제 종료로 남은 백업 스테이징", () => {
     expect(listBackups(f.root)).toHaveLength(1);
   });
 });
+
+describe("store-5: 백업 실패가 보이고, 공간이 모자라면 쓰기 전에 그만둔다", () => {
+  test("남은 공간이 스냅샷의 1.5배에 못 미치면 아무것도 쓰지 않고 storage_full 로 실패한다", () => {
+    const f = fixture(2);
+    expect(() => createBackup({ home: f.home, backupDir: f.root, now: new Date(at), freeBytes: () => 1 })).toThrow("storage_full");
+    expect(fs.existsSync(f.root) ? fs.readdirSync(f.root).filter(name => name.startsWith("snapshot-")) : []).toHaveLength(0);
+    // 남은 공간을 알 수 없으면 예전처럼 진행한다.
+    expect(createBackup({ home: f.home, backupDir: f.root, now: new Date(at), freeBytes: () => { throw new Error("statfs unavailable"); } }).manifest.attachments).toHaveLength(2);
+  });
+
+  test("실패 원인은 경로 없이 한 줄로 한 번만 남고, 진단 상태에서 읽을 수 있다", async () => {
+    const f = fixture(2);
+    let now = Date.parse(at), free = 1;
+    const lines: string[] = [];
+    const manager = new BackupManager({ home: f.home, backupDir: f.root, now: () => new Date(now), freeBytes: () => free, log: line => lines.push(line) });
+    expect(manager.status()).toEqual({ lastSuccessAt: null, failing: false, failures: 0, cause: null, nextAttemptAt: null });
+    await manager.tick();
+    expect(manager.status()).toMatchObject({ failing: true, failures: 1, cause: "storage_full", lastSuccessAt: null });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("storage_full"); expect(lines[0]).not.toContain(f.home);
+    // 같은 실패가 이어지는 동안에는 되풀이해 적지 않는다.
+    now += 6 * 60_000; await manager.tick();
+    expect(manager.status().failures).toBe(2);
+    expect(lines).toHaveLength(1);
+    free = Number.MAX_SAFE_INTEGER; now += 11 * 60_000; await manager.tick();
+    expect(manager.status()).toMatchObject({ failing: false, failures: 0, cause: null, nextAttemptAt: null, lastSuccessAt: new Date(now).toISOString() });
+    expect(lines).toHaveLength(2); expect(lines[1]).toContain("다시 성공");
+  });
+});

@@ -313,4 +313,42 @@ final class ChatHistoryTests: XCTestCase {
         XCTAssertFalse(cache.history(for: a)!.isBridging)
         XCTAssertEqual(cache.history(for: a)?.items.count, 900)
     }
+
+    /// n-chat-5: 정렬한 목록은 내용이 바뀔 때만 다시 만든다. 복사본끼리 캐시가 섞이지 않는다.
+    func testSortedItemsAreRebuiltOnlyWhenRowsChangeAndCopiesStayIndependent() {
+        var history = ChatHistory(key: key())
+        seed(&history, 100..<103, cursor: nil)
+        XCTAssertEqual(history.items.map(\.id), ["0100", "0101", "0102"])
+        XCTAssertEqual(history.items.map(\.id), ["0100", "0101", "0102"])
+        let before = history
+        history.receive(message(103))
+        XCTAssertEqual(history.items.map(\.id), ["0100", "0101", "0102", "0103"])
+        XCTAssertEqual(before.items.map(\.id), ["0100", "0101", "0102"], "A copy taken earlier keeps its own rows")
+        history.addOptimistic(Message(id: "9999", projectId: "p", at: "same-time", mine: true))
+        XCTAssertEqual(history.items.last?.id, "9999")
+        history.receive(message(101, delivery: "delivered"))
+        XCTAssertEqual(history.items.first { $0.id == "0101" }?.delivery, "delivered")
+        var copy = history
+        copy.receive(Message(id: "9999", projectId: "p", at: "same-time", mine: true, delivery: "queued"))
+        XCTAssertEqual(copy.items.last?.delivery, "queued")
+        XCTAssertNil(history.items.last?.delivery)
+    }
+
+    /// n-appstore-2: 실시간으로 받은 글이 대화에 놓였는지에 따라 최신 쪽을 다시 읽을지 정한다.
+    func testSettledTellsWhetherARealtimeMessageStillNeedsAPageRead() {
+        var history = ChatHistory(key: key())
+        let early = message(50)
+        history.receive(early)
+        XCTAssertFalse(history.settled(early), "Nothing is loaded yet: only a page read can place it")
+        seed(&history, 100..<103, cursor: "old")
+        history.receive(message(103))
+        XCTAssertTrue(history.settled(message(103)), "A newer row is appended directly")
+        history.receive(message(60))
+        XCTAssertFalse(history.settled(message(60)), "A row older than the loaded tail is not shown until the page is read")
+        let latest = history.begin(.latest)!
+        history.receive(message(104))
+        XCTAssertTrue(history.settled(message(104)), "The page read in flight will place it")
+        XCTAssertTrue(history.apply(page(100..<105), request: latest))
+        XCTAssertTrue(history.settled(Message(id: "elsewhere", projectId: "other")), "Another project's message is not this history's concern")
+    }
 }

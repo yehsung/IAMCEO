@@ -22,6 +22,7 @@ import type {
   Delivery,
   DeliveryKind,
   DeliveryWaitInfo,
+  DeliveryWaitReason,
   MissingReportNotice,
   DeliveryStatus,
   Effort,
@@ -780,6 +781,15 @@ export interface DeliveryRetryState {
   correctionRevision: number | null;
 }
 
+/** 대기 사유 판정에 쓰는, 저장소 밖(실행기·사고 복구)의 지금 상태. hold·contradiction 이 없으면 저장된 값만으로 판정한다. */
+export interface DeliveryWaitContext {
+  busy: boolean; waking: boolean; used: number;
+  /** 사고·한도 복구가 지금 이 직원을 보류 중이면 그 사유. null 은 보류 아님. */
+  hold?: "api_outage" | "usage_limit" | null;
+  /** 바쁘다고 보는데 실행기는 CLI 가 쉬는 중이라고 관측한다. */
+  contradiction?: boolean;
+}
+
 export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecoveryStore {
   readonly db: Database;
   private readonly sqlTransaction: Database["transaction"];
@@ -835,25 +845,42 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.project_id = m.project_id AND d.ref_type = 'message' AND d.ref_id = m.id)
       ORDER BY m.at DESC, m.id DESC`, projectId).map(toMessage);
   }
-  private waitContext: ((memberId: string) => { busy: boolean; waking: boolean; used: number }) | null = null;
+  private waitContext: ((memberId: string) => DeliveryWaitContext) | null = null;
   private recheckPending: ((memberId: string) => void) | null = null;
+  private stallNudge: ((memberId: string) => void) | null = null;
+  /** 정체로 알리기 전에 한 번 스스로 다시 밀어 본 전달. */
+  private readonly stallNudged = new Set<string>();
+  /** 이유가 붙은 대기가 실제와 어긋난 채 이어지는지 본다(일하는 중이라는데 CLI 는 쉬는 중, 끝나지 않는 깨우는 중). */
+  private readonly waitWatch = new Map<string, { reason: DeliveryWaitReason; since: number }>();
+  private readonly suspectWaits = new Set<string>();
 
+  /** failed 는 실패한 시각과 같은 설정으로 실패한 횟수를 함께 적는다(꺼진 세션을 다시 여는 간격에 쓴다). 옛 판은 두 값을 무시한다. */
   deferMemberConfig(memberId: string, signature: string, failed = false): void {
-    this.run("UPDATE members SET config_deferred_json = ? WHERE id = ?", JSON.stringify({ signature, failed }), memberId);
+    const before = failed ? this.deferredMemberConfig(memberId) : null;
+    this.run("UPDATE members SET config_deferred_json = ? WHERE id = ?", JSON.stringify(failed
+      ? { signature, failed, failedAt: nowIso(), attempts: (before?.failed && before.signature === signature ? before.attempts ?? 1 : 0) + 1 }
+      : { signature, failed }), memberId);
   }
 
-  deferredMemberConfig(memberId: string): { signature: string; failed: boolean } | null {
+  deferredMemberConfig(memberId: string): { signature: string; failed: boolean; failedAt?: string; attempts?: number } | null {
     const row = this.row("SELECT config_deferred_json FROM members WHERE id = ?", memberId);
     return row?.config_deferred_json ? json(row.config_deferred_json) : null;
+  }
+
+  /** 대표가 다시 확인을 눌렀다. 실패한 설정으로 다시 여는 것을 간격을 기다리지 않고 해 본다. */
+  retryDeferredConfigNow(memberId: string): void {
+    const deferred = this.deferredMemberConfig(memberId);
+    if (deferred?.failed && deferred.failedAt) this.run("UPDATE members SET config_deferred_json = ? WHERE id = ?", JSON.stringify({ ...deferred, failedAt: new Date(0).toISOString() }), memberId);
   }
 
   clearDeferredMemberConfig(memberId: string): void {
     this.run("UPDATE members SET config_deferred_json = NULL WHERE id = ?", memberId);
   }
 
-  setDeliveryWaitContext(read: (memberId: string) => { busy: boolean; waking: boolean; used: number }, recheck: (memberId: string) => void): void {
+  setDeliveryWaitContext(read: (memberId: string) => DeliveryWaitContext, recheck: (memberId: string) => void, nudge?: (memberId: string) => void): void {
     this.waitContext = read;
     this.recheckPending = recheck;
+    this.stallNudge = nudge ?? null;
   }
 
   recheckPendingDelivery(memberId: string): void {
@@ -865,16 +892,26 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   private readDeliveryWait(delivery: Delivery): DeliveryWaitInfo {
-    if (delivery.holdReason === "api_outage" || delivery.holdReason === "usage_limit") return { waitReason: delivery.holdReason, waitingSince: delivery.createdAt };
+    const wait = this.rawDeliveryWait(delivery);
+    // 어긋난 채 오래 이어진 대기는 '이유 없는 대기'로 돌려, 정체 알림과 '다시 확인'이 닿게 한다.
+    return this.suspectWaits.has(delivery.id) && ["member_busy", "waking"].includes(wait.waitReason) ? { waitReason: "unknown", waitingSince: wait.waitingSince } : wait;
+  }
+
+  private rawDeliveryWait(delivery: Delivery): DeliveryWaitInfo {
     const member = this.requireMember(delivery.memberId), project = this.requireProject(delivery.projectId);
-    const input = this.inputState(member.id), recovery = this.getDeliveryRecovery(delivery.id);
     const context = this.deliveryReadMemo(`context:${member.id}`, () => this.waitContext?.(member.id));
+    // 저장된 보류 사유는 사고·한도가 끝난 뒤에도 행에 남는다. 지금 그 직원이 실제로 보류 중일 때만 그 사유를 말한다.
+    if (context?.hold === "api_outage" || context?.hold === "usage_limit") return { waitReason: context.hold, waitingSince: delivery.createdAt };
+    if (context?.hold === undefined && (delivery.holdReason === "api_outage" || delivery.holdReason === "usage_limit")) return { waitReason: delivery.holdReason, waitingSince: delivery.createdAt };
+    const input = this.inputState(member.id), recovery = this.getDeliveryRecovery(delivery.id);
     const waitingSince = delivery.createdAt;
+    // 거절이 이어져 다시 보낼 때를 기다리는 중이다. 수신 확인이 아니다.
+    const backoff = recovery?.phase === "waiting" && recovery.reason === "input_busy";
     if (project.archived) return { waitReason: "archived", waitingSince };
     if (!project.runnerEnabled) return { waitReason: "runner_off", waitingSince };
     if (input.lease) return { waitReason: "manual_control", waitingSince };
     if (member.status === "blocked" || delivery.holdReason === "blocked") return { waitReason: "approval", waitingSince };
-    if (input.unresolvedDispatches.length || recovery && !["none", "resolved", "stopped"].includes(recovery.phase) || (this.deliveryRead?.projectId === project.id ? this.deliveryRead.receiptMembers.has(member.id) : this.listDeliveries(project.id).some(d => d.memberId === member.id && (d.status === "delivering" || d.holdReason === "delivery_unknown")))) return { waitReason: "receipt_check", waitingSince };
+    if (input.unresolvedDispatches.length || recovery && !backoff && !["none", "resolved", "stopped"].includes(recovery.phase) || (this.deliveryRead?.projectId === project.id ? this.deliveryRead.receiptMembers.has(member.id) : this.listDeliveries(project.id).some(d => d.memberId === member.id && (d.status === "delivering" || d.holdReason === "delivery_unknown")))) return { waitReason: "receipt_check", waitingSince };
     if (context?.waking || member.lifecycleState && ["starting", "starting_unknown", "reconnecting"].includes(member.lifecycleState.phase)) return { waitReason: "waking", waitingSince };
     if (project.connection.reason === "backend_down" || ["backend_down", "runner_disabled"].includes(delivery.holdReason ?? "")) return { waitReason: "runner_off", waitingSince };
     // A passive input belongs to the next turn, not the turn already in flight.
@@ -894,6 +931,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     const used = context?.used ?? new Set(this.listPendingExecutions().map(run => run.memberId)).size;
     const limit = this.getSettings().maxConcurrentTurns;
     if (!missedNextTurn && member.origin !== "manual" && ["core", "headless"].includes(member.backend ?? this.effectiveBackend()) && used >= limit) return { waitReason: "run_limit", waitingSince, runLimit: { used, limit } };
+    // 다시 보낼 시각이 아직 오지 않았다. 그 시각이 지나고도 안 나가면 이유 없는 대기다.
+    const nextAttemptAt = (this.deliveryRead?.rows.get(delivery.id) ?? this.row("SELECT next_attempt_at FROM deliveries WHERE id = ?", delivery.id))?.next_attempt_at as string | null | undefined;
+    if (nextAttemptAt && Date.parse(nextAttemptAt) > Date.now()) return { waitReason: "retry_wait", waitingSince };
     return { waitReason: "unknown", waitingSince };
   }
 
@@ -903,24 +943,42 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   detectDeliveryStalls(now = Date.now(), thresholdMs = 120_000): void {
-    this.run("UPDATE delivery_stalls SET resolved_at = ? WHERE resolved_at IS NULL AND delivery_id IN (SELECT id FROM deliveries WHERE status IN ('delivered','failed'))", new Date(now).toISOString());
+    // 풀리지 않은 정체 표시에서 출발한다. 전달된 이력 전체의 ID 목록을 매번 만들지 않는다.
+    this.run("UPDATE delivery_stalls SET resolved_at = ? WHERE resolved_at IS NULL AND EXISTS (SELECT 1 FROM deliveries d WHERE d.id = delivery_stalls.delivery_id AND d.status IN ('delivered','failed'))", new Date(now).toISOString());
     const byProject = new Map<string, Delivery[]>();
+    const live = new Set<string>();
     for (const delivery of this.listUndelivered()) {
       const own = byProject.get(delivery.projectId) ?? [];
       own.push(delivery); byProject.set(delivery.projectId, own);
+      live.add(delivery.id);
     }
+    for (const id of this.stallNudged) if (!live.has(id)) this.stallNudged.delete(id);
+    for (const id of this.waitWatch.keys()) if (!live.has(id)) { this.waitWatch.delete(id); this.suspectWaits.delete(id); }
+    const nudges = new Set<string>();
     for (const [projectId, deliveries] of byProject) {
       const observations = this.withDeliveryRead(projectId, () => deliveries.map(delivery => {
+        this.watchWait(delivery, now, thresholdMs);
         const waiting = this.deliveryWait(delivery).waitReason !== "unknown";
         const progress = waiting ? delivery.createdAt : this.listDispatches(delivery.memberId).filter(d => d.items.some(i => i.deliveryId === delivery.id)).at(-1)?.updatedAt ?? delivery.createdAt;
         return { delivery, waiting, stalled: this.deliveryStalled(delivery.id), progress };
       }));
       for (const { delivery, waiting, stalled, progress } of observations) {
         if (waiting) {
-          if (stalled) this.run("UPDATE delivery_stalls SET resolved_at = ? WHERE delivery_id = ? AND resolved_at IS NULL", new Date(now).toISOString(), delivery.id);
+          if (stalled) {
+            this.run("UPDATE delivery_stalls SET resolved_at = ? WHERE delivery_id = ? AND resolved_at IS NULL", new Date(now).toISOString(), delivery.id);
+            this.emitMember(delivery.memberId);
+          }
+          this.stallNudged.delete(delivery.id);
           continue;
         }
-        if (now - Date.parse(progress) < thresholdMs || stalled) continue;
+        if (stalled) continue;
+        const suspect = this.suspectWaits.has(delivery.id);
+        // 알리기 전에 '다시 확인'과 같은 안전한 동작(재시도 간격을 풀고 다시 밀기)을 스스로 한 번 해 본다.
+        if (this.stallNudge && !this.stallNudged.has(delivery.id) && (suspect || now - Date.parse(progress) >= thresholdMs / 2)) {
+          this.stallNudged.add(delivery.id); nudges.add(delivery.memberId);
+          continue;
+        }
+        if (!suspect && now - Date.parse(progress) < thresholdMs) continue;
         this.transaction(() => {
           this.run(`INSERT INTO delivery_stalls (delivery_id, detected_at) VALUES (?, ?)
             ON CONFLICT(delivery_id) DO UPDATE SET detected_at = excluded.detected_at, resolved_at = NULL`, delivery.id, new Date(now).toISOString());
@@ -928,6 +986,29 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
           this.createMessage({ id: `msg_delivery_stalled_${delivery.id}`, projectId: delivery.projectId, who: "시스템", kind: "시스템", title: "전달 확인 필요", body: `${this.requireMember(delivery.memberId).name}에게 전달이 진행되지 않고 있습니다. 전달 정보에서 '다시 확인'을 눌러 주세요. 원래 입력을 중복해서 보내지 않습니다.` });
         });
       }
+    }
+    for (const memberId of nudges) {
+      try { this.stallNudge?.(memberId); } catch (e) { console.error("정체 전달 다시 밀기 실패:", memberId, e); }
+    }
+  }
+
+  /** 일하는 중이라는데 실행기는 쉬는 중으로 보거나, 깨우는 중이 끝나지 않는 대기를 센다. 기준을 넘기면 '이유 없는 대기'로 다룬다. */
+  private watchWait(delivery: Delivery, now: number, thresholdMs: number): void {
+    const wait = this.rawDeliveryWait(delivery);
+    const context = this.deliveryReadMemo(`context:${delivery.memberId}`, () => this.waitContext?.(delivery.memberId));
+    const odd = wait.waitReason === "waking" || wait.waitReason === "member_busy" && context?.contradiction === true;
+    if (!odd) {
+      this.waitWatch.delete(delivery.id);
+      if (this.suspectWaits.delete(delivery.id)) { this.deliveryRead?.memo.delete(`wait:${delivery.id}`); this.emitMember(delivery.memberId); }
+      return;
+    }
+    const seen = this.waitWatch.get(delivery.id);
+    if (seen?.reason !== wait.waitReason) { this.waitWatch.set(delivery.id, { reason: wait.waitReason, since: now }); return; }
+    // 깨우는 데는 기동 제한(45초)과 재결합 유예가 들어 있다. 일하는 중 모순보다 넉넉히 기다린다.
+    if (now - seen.since >= (wait.waitReason === "waking" ? thresholdMs * 2.5 : thresholdMs) && !this.suspectWaits.has(delivery.id)) {
+      this.suspectWaits.add(delivery.id);
+      this.deliveryRead?.memo.delete(`wait:${delivery.id}`);
+      this.emitMember(delivery.memberId);
     }
   }
 
@@ -1584,6 +1665,12 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       if (!changed.length) return before;
       const observationOnly = changed.every(([key]) => key === "statusObservation") && patch.statusObservation && before.statusObservation &&
         JSON.stringify({ ...patch.statusObservation, observedAt: null }) === JSON.stringify({ ...before.statusObservation, observedAt: null });
+      // 관측 시각만 새로워진 것은 30초에 한 번만 적는다. 살아 있는 직원마다 5초에 한 번씩 적으면 스냅샷마다 전 직원이
+      // 바뀐 것으로 보여 앱이 화면 전체를 다시 계산한다. 승인 창 앞(blocked)은 앱이 이 시각으로 창을 다시 읽으므로 그대로 적는다.
+      if (observationOnly && before.status !== "blocked") {
+        const last = Date.parse(before.statusObservation!.observedAt ?? ""), next = Date.parse(patch.statusObservation!.observedAt ?? "");
+        if (Number.isFinite(last) && Number.isFinite(next) && next - last < 30_000 && next >= last) return before;
+      }
       const { set, values } = buildSet({
         ...patch,
         statusObservation: patch.statusObservation == null ? patch.statusObservation : JSON.stringify(patch.statusObservation),
@@ -2456,7 +2543,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   cancelPendingFor(refType: NonNullable<Delivery["refType"]>, refId: string): number {
     return this.transaction(() => {
       const rows = this.rows(`SELECT id, member_id FROM deliveries WHERE ref_type = ? AND ref_id = ? AND status IN ('queued','held')
-        AND NOT EXISTS (SELECT 1 FROM delivery_recovery r WHERE r.delivery_id = deliveries.id AND r.phase NOT IN ('none','resolved','stopped'))
+        AND NOT EXISTS (SELECT 1 FROM delivery_recovery r WHERE r.delivery_id = deliveries.id AND r.phase NOT IN ('none','resolved','stopped')
+          AND NOT (r.phase = 'waiting' AND r.reason = 'input_busy'))
         AND NOT EXISTS (SELECT 1 FROM delivery_dispatch_items i JOIN delivery_dispatches x ON x.id = i.dispatch_id WHERE i.delivery_id = deliveries.id AND x.transport_state != 'rejected')
         AND NOT EXISTS (SELECT 1 FROM manual_inbox_items i JOIN manual_inbox_batches b ON b.id = i.batch_id WHERE i.delivery_id = deliveries.id AND b.acknowledged_at IS NULL)`, refType, refId);
       for (const r of rows) {
@@ -2483,13 +2571,17 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   setDeliveryStatus(id: string, status: DeliveryStatus, update: DeliveryUpdate = {}): Delivery {
     return this.transaction(() => {
       const before = this.requireDelivery(id);
+      const holdReason = status === "held" ? (update.holdReason ?? before.holdReason) : null;
+      const lastError = update.lastError !== undefined ? update.lastError : before.lastError;
+      // 보류 중인 직원은 펌프마다 같은 값을 다시 적었다. 바뀐 것이 없으면 쓰지도 알리지도 않는다.
+      if (!update.attempt && before.status === status && before.holdReason === holdReason && before.lastError === lastError) return before;
       this.run(
         `UPDATE deliveries SET status = ?, hold_reason = ?, last_error = ?, attempts = attempts + ?,
            delivered_at = CASE WHEN ? = 'delivered' THEN COALESCE(delivered_at, ?) ELSE delivered_at END
          WHERE id = ?`,
         status,
-        status === "held" ? (update.holdReason ?? before.holdReason) : null,
-        update.lastError !== undefined ? update.lastError : before.lastError,
+        holdReason,
+        lastError,
         update.attempt ? 1 : 0,
         status,
         nowIso(),
@@ -2714,8 +2806,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   deliveryRetryDue(memberId: string, backend: Backend): number {
-    return this.rows(`SELECT next_attempt_at FROM deliveries WHERE next_attempt_at IS NOT NULL
-      AND ((member_id = ? AND status IN ('queued','held')) OR retry_scope = ? OR retry_scope = ?)`,
+    // 펌프마다 부른다. 조건을 둘로 나눠 각각 인덱스를 타게 한다(한 문장의 OR 는 전달 이력 전체를 훑었다).
+    return this.rows(`SELECT next_attempt_at FROM deliveries WHERE member_id = ? AND status IN ('queued','held') AND next_attempt_at IS NOT NULL
+      UNION ALL SELECT next_attempt_at FROM deliveries WHERE status IN ('queued','held','delivering','delivered','failed') AND next_attempt_at IS NOT NULL AND retry_scope IN (?, ?)`,
       memberId, `member:${memberId}`, `backend:${backend}`).reduce((due, row) => Math.max(due, Date.parse(row.next_attempt_at)), 0);
   }
 
@@ -2867,9 +2960,22 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       if (before.marker !== null && patch.marker !== undefined && patch.marker !== before.marker) throw new ApiError(409, "저장된 전달 표식은 바꿀 수 없습니다");
       const { set, values } = buildSet({ ...patch, evidence: patch.evidence === undefined ? undefined : JSON.stringify(patch.evidence) }, { marker: "marker", phase: "phase", reason: "reason", autoAttempts: "auto_attempts", checkCount: "check_count", activeCheckMs: "active_check_ms", nextCheckAt: "next_check_at", lastCheckedAt: "last_checked_at", evidence: "evidence_json" });
       this.run(`UPDATE delivery_recovery SET ${[...set, "version = version + 1", "updated_at = ?"].join(", ")} WHERE delivery_id = ? AND version = ?`, ...values, nowIso(), deliveryId, expectedVersion);
-      if (patch.phase !== undefined && patch.phase !== before.phase && (patch.phase === "needs_owner" || before.phase === "needs_owner")) this.emitProjects();
+      const phaseChanged = patch.phase !== undefined && patch.phase !== before.phase;
+      if (phaseChanged && (patch.phase === "needs_owner" || before.phase === "needs_owner")) this.emitProjects();
+      // 전달 단계·사유는 스냅샷(전달 알림)에 보인다. 이벤트 없이 바뀌면 cursor 로 묶인 /api/sync 캐시와 앱이 낡은 상태를 계속 보여 준다.
+      // 확인할 때마다 바뀌는 시각(nextCheckAt·lastCheckedAt)만의 변경은 알리지 않는다.
+      if (phaseChanged || patch.reason !== undefined && patch.reason !== before.reason) this.emitMember(this.requireDelivery(deliveryId).memberId);
       return this.getDeliveryRecovery(deliveryId)!;
     });
+  }
+
+  /** 확인을 이어 가는 전달 중 가장 이른 다음 확인 시각. 대표를 기다리는 것(needs_owner)은 틱이 본다. waiting 은 직원이 일하는 동안 계속 이어지므로 따로 준다. */
+  nextDeliveryCheckAt(): { active: number | null; waiting: number | null } {
+    const min = (phases: string) => {
+      const at = this.row(`SELECT MIN(next_check_at) AS at FROM delivery_recovery WHERE phase IN (${phases}) AND next_check_at IS NOT NULL`)?.at as string | null | undefined;
+      return at ? Date.parse(at) : null;
+    };
+    return { active: min("'checking','retry_wait'"), waiting: min("'waiting'") };
   }
 
   listDeliveryRecoveries(projectId?: string): DeliveryRecoveryRecord[] {
@@ -2918,6 +3024,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       }
       return this.rows("SELECT * FROM delivery_dispatches WHERE member_id = ? ORDER BY created_at, rowid", memberId).map(row => this.dispatchFrom(row, items.get(row.id) ?? []));
     });
+  }
+
+  /** 아직 쓰기를 시작하지 않은 봉투. 재시작 복구가 직원별 봉투 이력을 다 읽지 않고 찾는다. */
+  listPreparedDispatches(): DeliveryDispatch[] {
+    return this.rows("SELECT id FROM delivery_dispatches WHERE transport_state = 'prepared' ORDER BY created_at, rowid").map(row => this.getDispatch(row.id)!);
   }
 
   updateDispatch(id: string, expected: DeliveryDispatch["transportState"], state: DeliveryDispatch["transportState"], submit = false): DeliveryDispatch {

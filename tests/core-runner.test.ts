@@ -80,15 +80,17 @@ const trustScreen = (cwd = "/tmp", selected = 0) => ` Accessing workspace:\n ${c
 describe("core Claude folder trust approval", () => {
   test("real orchestrator and supervisor keep folder trust evidence through reconnect and clear it on unknown screens", async () => {
     const f = await fixture(); const runner = f.runner();
+    // 폴더 신뢰 창은 160칸 미만의 한 줄 경로만 인정한다. 임시 폴더 경로가 길면 짧은 작업 폴더를 따로 쓴다.
+    const cwd = Bun.stringWidth(f.dir) < 120 ? f.dir : mkdtempSync("/tmp/iamceo-ct-");
     const config = loadConfig({ IAMCEO_HOME: join(f.dir, "iamceo"), IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: f.socketPath,
       IAMCEO_CLAUDE_BIN: "/fake/claude", IAMCEO_CODEX_BIN: "/fake/codex", IAMCEO_CORE_BIN: "/usr/bin/false" });
     const db = openDb(config.dbPath); const store = new Store(db, new Bus());
     const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]),
       providerHomes: { claudeHome: join(f.dir, "claude-home"), codexHome: join(f.dir, "codex-home") }, timings: { healthMs: 1, tickMs: 60000 } });
     try {
-      const project = store.createProject({ name: "신뢰", cwd: f.dir });
+      const project = store.createProject({ name: "신뢰", cwd });
       const m = await orch.createMember(project.id, { name: "worker" });
-      f.terminals.get(m.paneId!)!.status = null; f.setScreen(trustScreen(f.dir));
+      f.terminals.get(m.paneId!)!.status = null; f.setScreen(trustScreen(cwd));
       await until(() => store.requireMember(m.id).statusObservation?.error?.code === "folder_trust");
       expect(store.requireMember(m.id).blockedReason).toBe("setup");
       await orch.refreshConnection();
@@ -101,7 +103,7 @@ describe("core Claude folder trust approval", () => {
       expect(store.requireMember(m.id)).toMatchObject({ status: "blocked", blockedReason: "status_unknown", statusObservation: { error: null } });
       expect(await orch.memberApproval(m.id)).toBeNull();
       expect(f.calls.some(r => r.method === "terminal.keys")).toBe(false);
-    } finally { await orch.shutdown(); db.close(); }
+    } finally { await orch.shutdown(); db.close(); if (cwd !== f.dir) rmSync(cwd, { recursive: true, force: true }); }
   });
   async function trust(cli: "claude" | "codex" = "claude") {
     const f = await fixture(); const runner = f.runner(10000); const m = member({ cli });
@@ -709,6 +711,36 @@ describe("delivery evidence and guarded repair", () => {
     writeFileSync(d.path, d.user(d.dispatch.wireText, "receipt"), { flag: "a" });
     expect(await d.runner.inspectDelivery(member(), d.dispatch)).toMatchObject({ finding: "received", receivedDeliveryIds: ["delivery"] });
     expect(d.f.calls.some(c => c.method === "terminal.send")).toBe(false);
+  });
+  // delivery-3: 수신 확인이 세션 기록을 처음부터 4MB 씩 읽어, 기록이 큰 직원은 전달된 글도 확인에 수십 분이 걸렸다.
+  test("an envelope's log baseline makes one inspection read only what was appended after the send", async () => {
+    const d = await deliveryFixture();
+    // 9MB 의 지난 기록: 예전 방식이면 검사 한 번에 4MB 씩이라 세 번째 검사에서야 끝에 닿는다.
+    const filler = d.user("x".repeat(900), "old");
+    writeFileSync(d.path, filler.repeat(Math.ceil(9 * 1024 * 1024 / filler.length)), { flag: "a" });
+    const logs = d.runner.deliveryBaseline(member());
+    expect(logs).toEqual([{ path: d.path, fileIdentity: expect.any(String), offset: statSync(d.path).size, eventId: null }]);
+    d.dispatch.baseline = { ...d.dispatch.baseline, logs }; d.recovery.dispatches([d.dispatch]);
+    const before = await d.runner.inspectDelivery(member(), d.dispatch);
+    expect(before.evidence[0]).toMatchObject({ verdict: "absent", complete: true, code: "complete_range_without_marker" });
+    writeFileSync(d.path, d.user(d.dispatch.wireText, "receipt"), { flag: "a" });
+    expect(await d.runner.inspectDelivery(member(), d.dispatch)).toMatchObject({ finding: "received", receivedDeliveryIds: ["delivery"] });
+  });
+  test("a log that ends in a partial line gives no baseline, and an unknown session gives none either", async () => {
+    const d = await deliveryFixture();
+    writeFileSync(d.path, '{"type":"user","sessionId":"', { flag: "a" });
+    expect(d.runner.deliveryBaseline(member())).toEqual([]);
+    expect(d.runner.deliveryBaseline(member({ id: "someone-else" }))).toEqual([]);
+  });
+  test("an envelope without a baseline keeps reading within one inspection instead of 4 MiB per check", async () => {
+    const d = await deliveryFixture(); await d.runner.shutdown();
+    const runner = d.f.runner(10000, { recoveryStore: d.recovery.port, evidenceScanMs: 60_000 });
+    await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    const filler = d.user("x".repeat(900), "old");
+    writeFileSync(d.path, filler.repeat(Math.ceil(13 * 1024 * 1024 / filler.length)), { flag: "a" });
+    writeFileSync(d.path, d.user(d.dispatch.wireText, "receipt"), { flag: "a" });
+    expect(statSync(d.path).size).toBeGreaterThan(12 * 1024 * 1024);
+    expect(await runner.inspectDelivery(member(), d.dispatch)).toMatchObject({ finding: "received", receivedDeliveryIds: ["delivery"] });
   });
   test("resend needs durable source/version validation; discovery just before repair sends nothing", async () => {
     const d = await deliveryFixture(); await d.runner.shutdown(); d.dispatch.transportState = "rejected";

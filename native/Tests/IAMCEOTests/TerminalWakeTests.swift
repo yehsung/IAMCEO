@@ -50,7 +50,10 @@ import XCTest
     }
 
     func testWakeWaitsForBothLivePaneAndAwakeStatusAndRejectsDuplicate() async throws {
-        let wake = TerminalWake()
+        // '아직 안 열림'을 80ms sleep으로 판정하지 않는다. 준비 확인이 몇 번 더 돈 뒤에도 기다리는지 본다.
+        final class Polls { var count = 0 }
+        let polls = Polls()
+        let wake = TerminalWake(pause: { _ in polls.count += 1; await Task.yield() })
         var member = sleeping(), resumes = 0
         let task = Task {
             await wake.wake(memberID: member.id, timeout: .seconds(2), resume: { resumes += 1; return nil }, current: { member }, allowed: { true })
@@ -59,10 +62,12 @@ import XCTest
         let duplicate = await wake.wake(memberID: member.id, resume: { resumes += 1; return nil }, current: { member }, allowed: { true })
         XCTAssertEqual(duplicate, .duplicate); XCTAssertEqual(resumes, 1)
         member.paneId = "pane"
-        try await Task.sleep(for: .milliseconds(80))
+        var seen = polls.count
+        try await eventually { polls.count >= seen + 3 }
         XCTAssertTrue(wake.members.contains(member.id), "A pane while asleep must not open")
         member.paneId = nil; member.status = "idle"
-        try await Task.sleep(for: .milliseconds(80))
+        seen = polls.count
+        try await eventually { polls.count >= seen + 3 }
         XCTAssertTrue(wake.members.contains(member.id), "An awake status without a pane must not open")
         member.paneId = "pane"
         let result = await task.value

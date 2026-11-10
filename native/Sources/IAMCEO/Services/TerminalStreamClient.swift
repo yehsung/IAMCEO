@@ -110,6 +110,11 @@ final class TerminalStreamClient {
     @ObservationIgnored private var sizePolicy: TerminalSizePolicy = .fit
     @ObservationIgnored private let resizeSender: ((String) async throws -> Void)?
     @ObservationIgnored private let retryPause: ((Double) async throws -> Void)?
+    @ObservationIgnored private let debouncePause: ((Duration) async throws -> Void)?
+    /// 이번 조작 연결에서 실제로 보낸 입력이 있는가.
+    @ObservationIgnored private(set) var sentInput = false
+    /// false면 입력을 보내기 전에는 마우스·스크롤만으로 조작권을 연장하지 않는다(클릭 한 번으로 잡힌 조작권).
+    @ObservationIgnored var renewsBeforeInput = true
 
     func attachOutput(owner: UUID, handler: @escaping (Data) -> Void) { outputOwner = owner; onOutput = handler }
     func detachOutput(owner: UUID) { if outputOwner == owner { onOutput = nil; outputOwner = nil } }
@@ -117,9 +122,10 @@ final class TerminalStreamClient {
     init(session: URLSession? = nil, resizeSender: ((String) async throws -> Void)? = nil,
          messageSender: ((URLSessionWebSocketTask.Message) async throws -> Void)? = nil,
          receiveMessage: ((URLRequest) async throws -> URLSessionWebSocketTask.Message)? = nil,
-         retryPause: ((Double) async throws -> Void)? = nil) {
+         retryPause: ((Double) async throws -> Void)? = nil,
+         debouncePause: ((Duration) async throws -> Void)? = nil) {
         self.messageSender = messageSender; self.receiveMessage = receiveMessage
-        self.resizeSender = resizeSender; self.retryPause = retryPause
+        self.resizeSender = resizeSender; self.retryPause = retryPause; self.debouncePause = debouncePause
         self.session = session
     }
     /// A sample terminal only renders bundled output; it must never allocate a network session.
@@ -231,6 +237,7 @@ final class TerminalStreamClient {
         case let .ready(mode, cols, rows, expiry):
             pendingOutput.removeAll()
             grid = (cols, rows); outputGeneration = UUID()
+            sentInput = false
             expiresAt = expiry; state = .live(mode: mode, cols: cols, rows: rows); onReady?(mode)
         case let .resize(cols, rows):
             guard case let .live(mode, _, _) = state else { return }
@@ -251,6 +258,7 @@ final class TerminalStreamClient {
     func send(_ bytes: Data) {
         guard !bytes.isEmpty, case .live(mode: .control, cols: _, rows: _) = state,
               socket != nil || messageSender != nil else { return }
+        sentInput = true
         inputBytes.append(bytes)
         guard inputFlushTask == nil else { return }
         let token = connection
@@ -263,7 +271,7 @@ final class TerminalStreamClient {
         }
     }
     func activity(windowIsKey: Bool, now: Date = Date()) {
-        guard windowIsKey, case .live(mode: .control, cols: _, rows: _) = state,
+        guard windowIsKey, renewsBeforeInput || sentInput, case .live(mode: .control, cols: _, rows: _) = state,
               socket != nil || messageSender != nil,
               lastActivity.map({ now.timeIntervalSince($0) >= 30 }) ?? true else { return }
         lastActivity = now
@@ -289,9 +297,11 @@ final class TerminalStreamClient {
         guard sizePolicy == .fit, case .live(mode: .control, cols: _, rows: _) = state, socket != nil || resizeSender != nil else { return }
         let socket = socket
         let token = connection
+        let pause = debouncePause
         resizeTask = Task { [weak self] in
             do {
-                try await Task.sleep(for: .milliseconds(150))
+                if let pause { try await pause(.milliseconds(150)) } else { try await Task.sleep(for: .milliseconds(150)) }
+                try Task.checkCancellation()
                 guard let self, self.connection == token else { return }
                 let data = try JSONSerialization.data(withJSONObject: ["type": "resize", "cols": cols, "rows": rows])
                 let text = String(decoding: data, as: UTF8.self)

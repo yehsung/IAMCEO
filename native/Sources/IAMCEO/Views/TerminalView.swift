@@ -59,7 +59,8 @@ struct TerminalView: View {
             else { liveSheet }
         }
         .task(id: member.id) { if TerminalAvailability.needsWake(current) { await wake() } }
-        .onAppear { session.appear(store: store, member: member, active: scenePhase == .active) }
+        // Mac 창은 앞에 있지 않아도 보인다(복원된 창, 옆에 띄운 창). 뒤로 간 장면만 비활성으로 연다.
+        .onAppear { session.appear(store: store, member: member, active: TerminalPlatform.current == .mac ? scenePhase != .background : scenePhase == .active) }
         .onChange(of: "\(current.status)|\(current.paneId ?? "")") { _, _ in session.memberChanged(store: store, member: current) }
         .onChange(of: client.state) { _, _ in session.streamChanged(store: store, member: current) }
         .onChange(of: scenePhase) { _, phase in
@@ -78,10 +79,15 @@ struct TerminalView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             if scenePhase == .active { session.setActive(true, store: store, member: member) }
         }
+        // 잠금 화면 없이 깨어나면 앱이 계속 활성이라 다른 신호가 오지 않는다. 깨어난 것 자체로 다시 연다.
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)) { _ in
+            if scenePhase != .background { session.setActive(true, store: store, member: member) }
+        }
         .background {
             Button("닫기") { dismiss() }.keyboardShortcut("w", modifiers: .command)
                 .frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
         }
+        .background { TerminalWindowKeyReader { session.windowKeyChanged($0, store: store, member: member) } }
         #endif
     }
 
@@ -118,9 +124,9 @@ struct TerminalView: View {
                     Button("입력 끝내기") { Task { await session.finishInput(store: store, member: member, resume: true) } }
                         .ceSecondaryButton().disabled(session.ending)
                 } else if !missingTerminal {
-                    Button("입력 시작") { session.beginInput(store: store, member: member) }
+                    Button("입력 시작") { session.userBeginInput(store: store, member: member) }
                         .ceProminentButton()
-                        .disabled(store.isDemo || !store.canWrite || session.ending)
+                        .disabled(store.isDemo || !store.canWrite || session.ending || !TerminalSession.canControl(member, in: store))
                 }
             }
         }
@@ -140,7 +146,7 @@ struct TerminalView: View {
                     .ceSecondaryButton().controlSize(.small).accessibilityLabel("터미널 맨 아래로")
             }
             if !missingTerminal, !session.starting, case .closed = client.state {
-                Button("다시 연결") { session.observe(store: store, member: member) }
+                Button("다시 연결") { session.userReconnect(store: store, member: member) }
                     .ceSecondaryButton().controlSize(.small).disabled(session.ending)
             }
         }
@@ -230,15 +236,51 @@ struct TerminalWindowContent: View {
     @State private var retained: Member?
     var body: some View {
         Group {
-            if let member = store.members.first(where: { $0.id == memberID }) ?? retained {
+            if let retained, store.members.first(where: { $0.id == memberID }) == nil, store.state?.project.id == retained.projectId {
+                // 같은 프로젝트를 보고 있는데 명부에 없다: 직원이 빠진 것이다. 옛 서버용 화면으로 바꿔 실패하는 조회를 되풀이하지 않는다.
+                EmptyTile(icon: "terminal", title: "직원이 명부에서 빠졌습니다", detail: "이 터미널은 닫혔습니다. 팀에서 직원을 다시 선택해 주세요.")
+            } else if let member = store.members.first(where: { $0.id == memberID }) ?? retained {
                 TerminalSessionContent(member: member).environment(\.terminalWindow, true)
             } else {
                 EmptyTile(icon: "terminal", title: "직원을 찾을 수 없습니다", detail: "팀에서 직원을 다시 선택해 주세요.")
             }
         }
         .onAppear { retained = store.members.first { $0.id == memberID } }
+        // 실행 때 복원된 창은 명부보다 먼저 뜬다. 명부가 오면 그때 기억한다.
+        .onChange(of: store.members.contains { $0.id == memberID }) { _, present in
+            if present, retained == nil { retained = store.members.first { $0.id == memberID } }
+        }
         .frame(minWidth: 640, minHeight: 400)
         .preferredColorScheme(.dark).tint(CE.accent)
+    }
+}
+
+/// 이 뷰가 들어 있는 창이 key인지 알린다. NSApp.keyWindow는 다른 창일 수 있어 쓰지 않는다.
+private struct TerminalWindowKeyReader: NSViewRepresentable {
+    let changed: (Bool) -> Void
+    func makeNSView(context: Context) -> TerminalWindowKeyView {
+        let view = TerminalWindowKeyView()
+        view.changed = changed
+        return view
+    }
+    func updateNSView(_ view: TerminalWindowKeyView, context: Context) { view.changed = changed }
+}
+
+private final class TerminalWindowKeyView: NSView {
+    var changed: ((Bool) -> Void)?
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        NotificationCenter.default.removeObserver(self)
+        guard let window else { return }
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            // Selector observers are automatically removed when this view is deallocated.
+            NotificationCenter.default.addObserver(self, selector: #selector(keyChanged), name: name, object: window)
+        }
+    }
+    @objc private func keyChanged(_ notification: Notification) {
+        let isKey = notification.name == NSWindow.didBecomeKeyNotification
+        // 알림은 SwiftUI 갱신 중에 올 수 있다. 다음 차례에 알린다.
+        Task { @MainActor [weak self] in self?.changed?(isKey) }
     }
 }
 #endif

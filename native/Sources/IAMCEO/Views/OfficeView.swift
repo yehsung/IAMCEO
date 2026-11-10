@@ -603,7 +603,7 @@ struct OfficeView: View {
     /// "일하는 중 2 · 내 답 기다림 1 · …" as items, so a line never breaks inside one; zero counts drop out.
     static func counts(_ members: [Member]) -> [OfficeCount] {
         let counts = MemberStatusInfo.summaryCounts(members)
-        return ["working", "waiting", "blocked", "error", "idle", "offline", "asleep", "unknown"].compactMap { status in
+        return (["working", "waiting", "blocked", "error", "idle", "offline", "asleep"] + MemberStatusInfo.networkPauseCodes + ["unknown"]).compactMap { status in
             let count = counts[status, default: 0]
             return count > 0 ? OfficeCount(status: status, label: officeStateLabel(status), count: count) : nil
         }

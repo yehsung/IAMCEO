@@ -245,6 +245,77 @@ private final class DeliveryNoticeServer: @unchecked Sendable {
         XCTAssertFalse(store.pendingActions.contains("delivery:d"))
     }
 
+    /// n-lists-4: 한 번 열어 본 직원의 전달 안내를 새로 읽을 때마다 전부 다시 읽지 않는다. 화면에 떠 있는 것만 읽는다.
+    func testOnlyDeliveryNoticesOnScreenAreReadAgainWithEachRefresh() async throws {
+        let server = DeliveryNoticeServer(), network = try IsolatedTestNetwork(handler: { try server.handle($0) })
+        let clock = CoordinatorClock()
+        let store = AppStore(session: network.session, persistCredentials: false, clock: clock, retryJitter: { $0 })
+        store.endpoint = network.endpoint.url.absoluteString; store.accessCode = "fixture"
+        await store.connect()
+        defer { store.disconnect() }
+        func reads() -> Int { network.requests.filter { $0.url?.path.hasSuffix("delivery-notices") == true }.count }
+        // Each pass is paced on the manual clock. Stay under the 3s fallback interval in total.
+        func refresh() async {
+            let task = Task { await store.refresh() }
+            for _ in 0..<30 { await Task.yield() }
+            try? await Task.sleep(for: .milliseconds(10))
+            await clock.advance(.milliseconds(600))
+            await task.value
+        }
+        await store.loadDeliveryNotices(memberID: "m")
+        XCTAssertEqual(reads(), 1)
+        await refresh(); await refresh()
+        XCTAssertEqual(reads(), 1, "A page that is no longer on screen is not refreshed")
+        XCTAssertNotNil(store.deliveryPages["m"])
+        let owner = UUID()
+        store.watchDeliveryNotices(memberID: "m", owner: owner)
+        await refresh()
+        XCTAssertEqual(reads(), 2)
+        store.unwatchDeliveryNotices(owner: owner)
+        await refresh()
+        XCTAssertEqual(reads(), 2)
+    }
+
+    /// n-appstore-6: 응답을 잃은 전달 조치는 요청이 더는 도착할 수 없는 시간이 지나면 닫힌다.
+    /// 닫히기 전에는 지금처럼 다른 조치를 막고, 닫힌 뒤에는 방금 읽은 상태를 기준으로 새 조치를 받는다.
+    func testLostRecoveryStopsBlockingTheItemOnceTheRequestCanNoLongerArrive() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let server = DeliveryNoticeServer(), network = try IsolatedTestNetwork(handler: { try server.handle($0) })
+        let journal = root.appendingPathComponent("writes")
+        let start = Date().timeIntervalSince1970
+        let first = await connect(network, journal: journal)
+        first.wallClock = { start }
+        // The server answers 500 without applying anything: the outcome is unknown to the app.
+        server.change { $0.recoveryStatus = 500 }
+        let lost = await first.recoverDelivery(server.read { $0.item }, action: .recheck)
+        XCTAssertFalse(lost)
+        XCTAssertTrue(first.deliveryChecking.contains("d"))
+        first.wallClock = { start + 59 }
+        await first.refresh()
+        XCTAssertTrue(first.deliveryChecking.contains("d"), "Still inside the window in which the request could arrive")
+        let other = await first.recoverDelivery(server.read { $0.item }, action: .stopRetry)
+        XCTAssertFalse(other)
+        XCTAssertEqual(server.read { $0.recoveryBodies.count }, 1)
+        first.disconnect()
+        // The time of the attempt survives a restart.
+        let restored = await connect(network, journal: journal)
+        defer { restored.disconnect() }
+        XCTAssertTrue(restored.deliveryChecking.contains("d"))
+        restored.wallClock = { start + 61 }
+        await restored.refresh()
+        XCTAssertFalse(restored.deliveryChecking.contains("d"), "The item must not stay locked forever")
+        XCTAssertEqual(server.read { $0.recoveryBodies.count }, 1, "Closing never re-sends the old request")
+        server.change { $0.recoveryStatus = nil }
+        let stopped = await restored.recoverDelivery(server.read { $0.item }, action: .stopRetry)
+        XCTAssertTrue(stopped)
+        let bodies = server.read { $0.recoveryBodies }
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertNotEqual(bodies[0]["operationId"] as? String, bodies[1]["operationId"] as? String)
+        XCTAssertEqual(bodies[1]["action"] as? String, "stop_retry")
+    }
+
     func testMismatchedRecoveryResultCannotBecomeSuccess() async throws {
         let server = DeliveryNoticeServer(), network = try IsolatedTestNetwork(handler: { try server.handle($0) })
         let store = await connect(network)

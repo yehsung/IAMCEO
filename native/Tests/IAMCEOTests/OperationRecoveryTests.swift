@@ -116,6 +116,44 @@ import XCTest
         }
     }
 
+    /// n-appstore-4(4): 스냅샷 읽기 안에서 도는 복구가 409를 만나 새로고침을 부르면, 그 새로고침은 자기 자신(돌고 있는 읽기)을
+    /// 기다리게 되어 읽기가 다시는 끝나지 않았다. 표시만 남기고 돌아와야 한다.
+    func testRecoveryThatAsksForARefreshInsideTheRunningPassDoesNotWaitForItself() async throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let server = WriteTestServer()
+        let network = try IsolatedTestNetwork { request in
+            if request.url?.path.hasPrefix("/api/operations/") == true, server.read({ $0.dropTerminal }) { throw URLError(.timedOut) }
+            if request.url?.path.hasSuffix("/terminal/control") == true {
+                let body = try WriteTestServer.body(request)
+                if body["action"] as? String == "release", !server.read({ $0.terminalBodies.contains { $0["action"] as? String == "release" } }) {
+                    let receipt = OperationReceipt(operationId: body["operationId"] as! String, kind: .terminalControl,
+                                                   memberId: "m", status: .refused, error: "세션을 처리하는 중입니다")
+                    server.change { $0.terminalBodies.append(body); $0.receipts[receipt.operationId] = receipt }
+                    return IsolatedTestHTTPReply(status: 409, data: try JSONSerialization.data(withJSONObject: ["error": "세션을 처리하는 중입니다"]))
+                }
+            }
+            return try server.handle(request)
+        }
+        let store = try await connect(network, root: root), member = store.members[0], owner = UUID()
+        defer { store.disconnect() }
+        server.change { $0.dropTerminal = true }
+        let claimed = await store.claimTerminalSession(member, owner: owner); XCTAssertNil(claimed)
+        _ = await store.releaseTerminalSession(member, owner: owner)
+        server.change { $0.dropTerminal = false }
+        // The same recovery as above, but run where the app runs it: inside a snapshot pass.
+        let returned = XCTestExpectation(description: "refresh returns")
+        Task { await store.refresh(); returned.fulfill() }
+        guard await XCTWaiter().fulfillment(of: [returned], timeout: 5) == .completed else {
+            // 고치기 전에는 여기서 영영 돌아오지 않았다. 이어지는 읽기도 함께 멈추므로 더 진행하지 않는다.
+            XCTFail("A refresh requested from inside the running pass waited for itself"); return
+        }
+        XCTAssertEqual(server.read { $0.terminalBodies.filter { $0["action"] as? String == "release" }.count } >= 1, true)
+        await store.refresh()
+        XCTAssertNil(store.terminalLeases[member.id])
+        XCTAssertEqual(server.read { $0.terminalBodies.filter { $0["action"] as? String == "release" }.count }, 2)
+        XCTAssertFalse(try operations(root).values.contains { $0["cancelledClaim"] as? Bool == true })
+    }
+
     func testCancelledCleanupQueriesPendingOrUnknownReleaseWithoutResendingAcrossRestart() async throws {
         for status in [OperationStatus.pending, .unknown] {
             let root = try root(); defer { try? FileManager.default.removeItem(at: root) }

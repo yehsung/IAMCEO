@@ -219,6 +219,70 @@ final class ManagementNavigationServer: @unchecked Sendable {
         XCTAssertEqual(network.requests.filter { $0.httpMethod == "PATCH" }.count, 1)
         store.disconnect()
     }
+    /// n-appstore-5: 응답을 잃고 끝내 반영되지 않은 변경은 요청 제한 시간(150초)을 한참 넘기면 닫힌다.
+    /// 닫히지 않으면 그 프로젝트의 모든 쓰기가 이 기기에서 영영 막힌다(재시작해도).
+    func testLostProjectChangeThatNeverAppliedUnlocksTheProjectAfterFiveMinutes() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("iamceo-stab2-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = directory.appendingPathComponent("writes.json")
+        let server = ManagementNavigationServer(), network = try IsolatedTestNetwork { try server.handle($0) }
+        let start = Date().timeIntervalSince1970
+        var store = await connected(network, storage: storage)
+        store.wallClock = { start }
+        server.change { $0.losePatchResponse = true; $0.applyPatch = false }
+        let result = await store.patchProject(id: "p", request: PatchProjectRequest(name: "Never arrives"))
+        XCTAssertFalse(result); XCTAssertEqual(store.projectResults["p"], .checking); XCTAssertFalse(store.canWrite)
+        store.wallClock = { start + 299 }
+        await store.recheckProject(id: "p")
+        XCTAssertEqual(store.projectResults["p"], .checking, "Inside the window the request may still land")
+        store.disconnect()
+        // The attempt's time survives a restart.
+        store = await connected(network, storage: storage)
+        defer { store.disconnect() }
+        XCTAssertEqual(store.projectResults["p"], .checking)
+        store.wallClock = { start + 301 }
+        await store.recheckProject(id: "p")
+        XCTAssertEqual(store.projectResults["p"], .refused)
+        XCTAssertTrue(store.canWrite, "The project must not stay read-only on this device")
+        XCTAssertTrue(store.projectNotice?.contains("반영되지 않아") == true)
+        XCTAssertEqual(network.requests.filter { $0.httpMethod == "PATCH" }.count, 1, "Closing never re-sends the change")
+        server.change { $0.losePatchResponse = false; $0.applyPatch = true }
+        let retried = await store.patchProject(id: "p", request: PatchProjectRequest(name: "Now"))
+        XCTAssertTrue(retried)
+        XCTAssertEqual(store.state?.project.name, "Now")
+    }
+    func testDiscardingALostProjectChangeUnlocksAtOnceAndStaysUnlockedAfterRestart() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("iamceo-stab2-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = directory.appendingPathComponent("writes.json")
+        let server = ManagementNavigationServer(), network = try IsolatedTestNetwork { try server.handle($0) }
+        var store = await connected(network, storage: storage)
+        server.change { $0.losePatchResponse = true; $0.applyPatch = false }
+        _ = await store.patchProject(id: "p", request: PatchProjectRequest(archived: true))
+        XCTAssertFalse(store.canWrite)
+        store.discardProjectChange(id: "p")
+        XCTAssertEqual(store.projectResults["p"], .refused); XCTAssertTrue(store.canWrite)
+        XCTAssertEqual(network.requests.filter { $0.httpMethod == "PATCH" }.count, 1)
+        store.disconnect()
+        store = await connected(network, storage: storage)
+        defer { store.disconnect() }
+        XCTAssertNil(store.projectResults["p"]); XCTAssertTrue(store.canWrite)
+    }
+    func testFolderChangeWrittenWithTildeIsRecognisedOnceTheServerExpandsIt() async throws {
+        let server = ManagementNavigationServer(), network = try IsolatedTestNetwork { try server.handle($0) }
+        let store = await connected(network); defer { store.disconnect() }
+        server.change { $0.losePatchResponse = true; $0.applyPatch = false }
+        let result = await store.patchProject(id: "p", request: PatchProjectRequest(cwd: "~/work/p/"))
+        XCTAssertFalse(result); XCTAssertEqual(store.projectResults["p"], .checking)
+        // The server applied it and stores the absolute path under its own home.
+        server.change { $0.projects["p"]?.cwd = "/Users/owner/work/p" }
+        await store.recheckProject(id: "p")
+        XCTAssertEqual(store.projectResults["p"], .current)
+        XCTAssertTrue(store.canWrite)
+        XCTAssertEqual(store.state?.project.cwd, "/Users/owner/work/p")
+    }
     func testCommittedPatchResponseLossIsCurrentStateNotClaimedSuccess() async throws {
         let server = ManagementNavigationServer(), network = try IsolatedTestNetwork { try server.handle($0) }
         let store = await connected(network); defer { store.disconnect() }

@@ -55,12 +55,23 @@ final class AppStore: ProjectManagementStore {
         get { rawErrorMessage.map(TerminalPresentation.message) }
         set { rawErrorMessage = newValue }
     }
-    private var messageSendNotices: [String: String] = [:]
-    func messageSendNotice(targetMemberID: String?) -> String? {
-        messageSendNotices[Self.scoped(writeNamespace, DraftStore.key(project: selectedProjectID, target: targetMemberID))]
+    /// whileBlocked: 보낼 수 없던 사정(연결 확인 중, 앞선 글 전송 중, 빈 입력칸)을 알린 안내. 사정이 풀리면 지운다.
+    private struct SendNotice { let text: String; let whileBlocked: Bool }
+    private var messageSendNotices: [String: SendNotice] = [:]
+    private func sendNoticeKey(_ targetMemberID: String?) -> String {
+        Self.scoped(writeNamespace, DraftStore.key(project: selectedProjectID, target: targetMemberID))
     }
-    func explainMessageSendBlock(_ reason: String, targetMemberID: String?) {
-        messageSendNotices[Self.scoped(writeNamespace, DraftStore.key(project: selectedProjectID, target: targetMemberID))] = reason
+    func messageSendNotice(targetMemberID: String?) -> String? { messageSendNotices[sendNoticeKey(targetMemberID)]?.text }
+    func messageSendNoticeEndsWithBlock(targetMemberID: String?) -> Bool {
+        messageSendNotices[sendNoticeKey(targetMemberID)]?.whileBlocked == true
+    }
+    func explainMessageSendBlock(_ reason: String, targetMemberID: String?, whileBlocked: Bool = true) {
+        messageSendNotices[sendNoticeKey(targetMemberID)] = SendNotice(text: reason, whileBlocked: whileBlocked)
+    }
+    /// 입력칸이 다시 보낼 수 있게 되면 부른다. 실제 전송 실패의 설명은 남긴다.
+    func clearBlockedSendNotice(targetMemberID: String?) {
+        let key = sendNoticeKey(targetMemberID)
+        if messageSendNotices[key]?.whileBlocked == true { messageSendNotices.removeValue(forKey: key) }
     }
     let terminalWake = TerminalWake()
     private(set) var isLoading = false
@@ -202,6 +213,8 @@ final class AppStore: ProjectManagementStore {
     private(set) var isCheckingConnection = false
     var connectionNotice: String? {
         if isRestarting { return "서버를 다시 시작하는 중" }
+        // 연결은 되는데 응답을 거듭 해석하지 못하는 것은 '연결 확인'이 아니다. 기다려도 풀리지 않으니 사실대로 알린다.
+        if !showsOffline, isCheckingConnection, unreadableFailures >= 3 { return "앱과 서버 버전이 맞지 않아 최신 상태를 읽지 못했습니다" }
         if !showsOffline, isCheckingConnection { return "잠시 연결을 확인하는 중" }
         return nil
     }
@@ -218,6 +231,8 @@ final class AppStore: ProjectManagementStore {
     private(set) var resyncRevision = 0
     private(set) var activityRevisions: [String: Int] = [:]
     private(set) var activities: [String: [Activity]] = [:]
+    /// 등록을 store가 비울 때마다 오른다. 떠 있는 활동 목록이 이것을 보고 다시 등록한다.
+    private(set) var activityEpoch = 0
     private(set) var activityErrors: [String: String] = [:]
     var syncDescription: String {
         if isDemo { return "Sample workspace · read-only" }
@@ -252,7 +267,18 @@ final class AppStore: ProjectManagementStore {
     /// 쓰기 뒤 새로고침에서 스냅샷이 반영되는 즉시 한 번 부른다. 나머지 읽기는 기다리지 않는다.
     @ObservationIgnored private var snapshotHooks: [UUID: (revision: Int, action: @MainActor () -> Void)] = [:]
     @ObservationIgnored private var dirty: RefreshScope = []
-    @ObservationIgnored private var nextSnapshotAt: Duration = .zero
+    @ObservationIgnored private var nextSnapshotAt: Duration = .zero {
+        didSet { if nextSnapshotAt == .zero { eventSnapshotAt = .zero } }
+    }
+    /// 실시간 이벤트가 부르는 읽기는 직전 읽기에 걸린 시간만큼 더 쉰다. 서버가 느릴수록 앱이 물러난다.
+    /// 대표가 누른 새로고침·쓰기 뒤 읽기·재연결(immediate)은 이 간격을 기다리지 않는다.
+    @ObservationIgnored private var eventSnapshotAt: Duration = .zero
+    @ObservationIgnored private var urgentRefresh = false
+    @ObservationIgnored private var pacingTask: Task<Void, Never>?
+    /// 읽기 한 번의 끝에 도는 복구 조회의 표식. 복구가 띄운 작업에도 이어진다. 그 안에서 부른 새로고침은
+    /// 자기 자신(돌고 있는 읽기)이 끝나기를 기다리게 되므로 구분한다.
+    @TaskLocal private static var recoveryPass: UUID?
+    @ObservationIgnored private var activeRecoveryPass: UUID?
     @ObservationIgnored private var syncSupported = false
     @ObservationIgnored private var realtimeSupported = false
     private var capabilitiesLoaded = false
@@ -264,6 +290,9 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored private var firstTransportFailure: Duration?
     @ObservationIgnored private var transportFailureReason = "transport"
     @ObservationIgnored private var retriedConsistencyFailure = false
+    /// 직전 읽기 실패가 '서버가 답했지만 쓸 수 없는 응답'이었는가(연결 불가와 구분).
+    @ObservationIgnored private var answeredFailure = false
+    private var unreadableFailures = 0
     @ObservationIgnored private var offlineChangedAt: Duration?
     @ObservationIgnored private var offlineTask: Task<Void, Never>?
     @ObservationIgnored private var syncRetryTask: Task<Void, Never>?
@@ -277,6 +306,9 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored private var lifecycleObservers: [NSObjectProtocol] = []
     private static let connectionLogger = Logger(subsystem: "com.iamceo.native", category: "Connection")
     @ObservationIgnored private var openActivityMembers: Set<String> = []
+    @ObservationIgnored private var activityWatchCounts: [String: Int] = [:]
+    /// 지금 화면에 떠 있는 직원 상세만 전달 안내를 자동으로 다시 읽는다. 열어 봤던 직원 전부가 아니다.
+    @ObservationIgnored private var deliveryWatchers: [UUID: String] = [:]
     @ObservationIgnored private var activityTokens: [String: UUID] = [:]
     @ObservationIgnored private var initialTask: Task<Bootstrap, Error>?
     @ObservationIgnored private var pendingConnect = false
@@ -331,6 +363,11 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored private var pushRetryTask: Task<Void, Never>?
     @ObservationIgnored private var pushRetryAttempt = 0
     @ObservationIgnored private var actionOwners: [String: UUID] = [:]
+    @ObservationIgnored private var projectRechecks: [String: Double] = [:]
+    /// 응답을 잃은 쓰기를 닫을 때 재는 시각(초). 시험에서 바꿔 끼운다.
+    @ObservationIgnored var wallClock: @MainActor () -> Double = { Date().timeIntervalSince1970 }
+    /// 쓰기 요청 제한 시간(20초)을 넉넉히 넘긴 시간. 이만큼 지나도 서버 상태가 그대로면 요청은 도착하지 않은 것이다.
+    private static let lostWriteLimit: Double = 60
     @ObservationIgnored private var activePassRevision: Int?
 
     init(demo: Bool = false, session: URLSession? = nil, persistCredentials: Bool = true,
@@ -737,7 +774,7 @@ final class AppStore: ProjectManagementStore {
         // Selection invalidates only project reads. The host socket continues receiving cursors.
         invalidateCoordinator()
         nextSnapshotAt = .zero
-        openActivityMembers.removeAll(); activities = [:]; activityErrors = [:]
+        openActivityMembers.removeAll(); activityWatchCounts = [:]; activities = [:]; activityErrors = [:]; activityEpoch &+= 1
         await enqueueRefresh(.all, immediate: true, allowPaused: true)
         guard epoch == generation, projectEpoch == projectGeneration else { return }
     }
@@ -838,7 +875,8 @@ final class AppStore: ProjectManagementStore {
         coordinatorTask?.cancel(); coordinatorTask = nil
         refreshTask?.cancel(); refreshTask = nil
         initialTask?.cancel(); initialTask = nil
-        dirty = []; activePassRevision = nil
+        dirty = []; activePassRevision = nil; urgentRefresh = false
+        pacingTask?.cancel(); pacingTask = nil
         finishRefreshWaiters()
     }
 
@@ -872,6 +910,10 @@ final class AppStore: ProjectManagementStore {
         guard !isDemo, api != nil, foreground || allowPaused else { return }
         dirty.formUnion(scope); dirtyRevision &+= 1
         if scope.contains(.history) { historyInvalidationRevision &+= 1 }
+        if immediate { urgentRefresh = true; pacingTask?.cancel() }
+        // 돌고 있는 읽기의 복구 조회 안에서 부른 새로고침은 표시만 남긴다. 이 읽기가 끝나면 이어서 한 번 더 돈다.
+        // 여기서 기다리면 읽기가 자기 자신을 기다려 다시는 끝나지 않는다.
+        if coordinatorTask != nil, let pass = Self.recoveryPass, pass == activeRecoveryPass { return }
         let requestedRevision = dirtyRevision
         let waiterID = UUID()
         await withTaskCancellationHandler {
@@ -895,16 +937,28 @@ final class AppStore: ProjectManagementStore {
                             let delay = max(scope.contains(.snapshot) ? nextSnapshotAt - now : .zero, immediate ? .zero : (lowPowerMode ? .milliseconds(500) : .milliseconds(250)))
                             if delay > .zero { try await syncClock.sleep(for: delay) }
                             while !Task.isCancelled, token == coordinatorGeneration, epoch == generation, phase == foregroundGeneration, !dirty.isEmpty {
+                                if dirty.contains(.snapshot), !urgentRefresh {
+                                    // 이벤트만으로 도는 읽기는 서버가 느린 만큼 간격을 벌린다. 급한 요청이 오면 바로 깬다.
+                                    let wait = eventSnapshotAt - (await syncClock.now())
+                                    if wait > .zero, !urgentRefresh, token == coordinatorGeneration {
+                                        let pause = Task { [syncClock] in _ = try? await syncClock.sleep(for: wait) }
+                                        pacingTask = pause
+                                        await pause.value
+                                        if pacingTask == pause { pacingTask = nil }
+                                    }
+                                    guard !Task.isCancelled, token == coordinatorGeneration, epoch == generation, phase == foregroundGeneration else { return }
+                                }
                                 let scopes = dirty, passRevision = dirtyRevision, passStart = resyncRevision
-                                dirty = []
+                                dirty = []; urgentRefresh = false
                                 let now = await syncClock.now()
                                 if scopes.contains(.snapshot) {
                                     let delay = nextSnapshotAt - now
                                     if delay > .zero { try await syncClock.sleep(for: delay) }
                                     guard !Task.isCancelled, token == coordinatorGeneration else { return }
-                                    nextSnapshotAt = await syncClock.now() + (lowPowerMode ? .seconds(1) : .milliseconds(500))
+                                    let startedAt = await syncClock.now()
+                                    nextSnapshotAt = startedAt + (lowPowerMode ? .seconds(1) : .milliseconds(500))
                                     activePassRevision = passRevision
-                                    await readSnapshot()
+                                    await readSnapshot(startedAt: startedAt)
                                     if token == coordinatorGeneration {
                                         activePassRevision = nil
                                         releaseSnapshotWaiters(through: passRevision)
@@ -914,7 +968,7 @@ final class AppStore: ProjectManagementStore {
                                 guard !Task.isCancelled, token == coordinatorGeneration, epoch == generation, phase == foregroundGeneration else { return }
                                 if scopes.contains(.history), historyVisible { await refreshHistory() }
                                 if scopes.contains(.delivery), foreground {
-                                    for memberID in Set(deliveryPages.keys).union(deliveryFlights.keys) {
+                                    for memberID in Set(deliveryWatchers.values).union(deliveryFlights.keys) {
                                         if memberID.isEmpty { await loadUnassignedDeliveries() }
                                         else { await loadDeliveryNotices(memberID: memberID) }
                                         guard !Task.isCancelled, token == coordinatorGeneration else { return }
@@ -963,7 +1017,7 @@ final class AppStore: ProjectManagementStore {
         }
     }
 
-    private func readSnapshot() async {
+    private func readSnapshot(startedAt: Duration) async {
         guard let api else { return }
         let epoch = generation, projectEpoch = projectGeneration, phase = foregroundGeneration
         let socketEpoch = socketGeneration, requestID = UUID()
@@ -1029,6 +1083,7 @@ final class AppStore: ProjectManagementStore {
             let completedAt = await syncClock.now()
             guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration,
                   requestID == refreshGeneration else { return }
+            paceEvents(readStarted: startedAt, finished: completedAt)
             if let next = result.state {
                 guard next.project.id == projectID, next.project.archived == archived else { throw SubmissionError.mismatchedResult }
             }
@@ -1094,8 +1149,13 @@ final class AppStore: ProjectManagementStore {
             }
             // 스냅샷이 화면에 반영됐다. 쓰기 뒤 잠금은 여기서 풀어 아래 복구 조회가 붙잡지 않게 한다.
             if let activePassRevision { releaseSnapshotWaiters(through: activePassRevision) }
-            await reconcileProjectChanges()
-            await recoverWrites()
+            let recovery = UUID()
+            activeRecoveryPass = recovery
+            await Self.$recoveryPass.withValue(recovery) {
+                await reconcileProjectChanges()
+                await recoverWrites()
+            }
+            if activeRecoveryPass == recovery { activeRecoveryPass = nil }
         } catch {
             // 읽는 사이 소켓이 다시 붙었어도 이 요청의 실패는 버리지 않는다. 버리면 끊김 판정이 영영 시작되지 않는다.
             guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration,
@@ -1114,6 +1174,10 @@ final class AppStore: ProjectManagementStore {
                 return
             }
             restFailures += 1
+            answeredFailure = !Self.isUnreachable(error)
+            let unreadable = (error as? APIError)?.code == APIClient.unreadableCode
+            unreadableFailures = unreadable ? unreadableFailures + 1 : 0
+            Self.connectionLogger.error("sync_failed status=\((error as? APIError)?.status ?? -1, privacy: .public) code=\((error as? APIError)?.code ?? "-", privacy: .public) unreadable=\(unreadable, privacy: .public) failures=\(self.restFailures, privacy: .public)")
             if Self.isUnreachable(error) {
                 await markUnreachable(error)
             } else {
@@ -1127,6 +1191,7 @@ final class AppStore: ProjectManagementStore {
             let now = await syncClock.now()
             guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration,
                   requestID == refreshGeneration else { return }
+            paceEvents(readStarted: startedAt, finished: now)
             let delay: Duration
             if Self.isUnreachable(error), let until = foregroundGraceUntil, now < until {
                 delay = [.milliseconds(300), .seconds(1), .seconds(2)][min(foregroundRetry, 2)]
@@ -1139,6 +1204,12 @@ final class AppStore: ProjectManagementStore {
             }
             scheduleSyncRetry(after: delay)
         }
+    }
+
+    /// 읽기에 걸린 시간의 두 배(최대 5초)만큼 다음 이벤트 읽기를 미룬다. 빠른 서버에서는 기본 간격(0.5초) 그대로다.
+    private func paceEvents(readStarted: Duration, finished: Duration) {
+        let cost = max(.zero, finished - readStarted)
+        eventSnapshotAt = finished + min(.seconds(5), cost * 2)
     }
 
     private func startSocket() {
@@ -1265,10 +1336,27 @@ final class AppStore: ProjectManagementStore {
                 return
             }
         } else if event.type == "ping" { return }
+        if event.payloadUnreadable {
+            // 본문을 읽지 못한 변경이다. 무엇이 바뀌었는지 모르니 열려 있는 것을 모두 다시 읽는다.
+            if let cursor = event.cursor { highestRelevantSeq = max(highestRelevantSeq, cursor.seq) }
+            Task { [weak self] in await self?.enqueueRefresh(.all) }
+            return
+        }
         if event.type == "activity" {
-            if event.projectId == selectedProjectID, let memberID = event.activity?.memberId, openActivityMembers.contains(memberID) {
+            if event.projectId == selectedProjectID, let item = event.activity, openActivityMembers.contains(item.memberId) {
+                let memberID = item.memberId
                 activityRevisions[memberID, default: 0] &+= 1
-                Task { [weak self] in await self?.enqueueRefresh(.activity) }
+                if event.cursor != nil, var rows = activities[memberID] {
+                    // 이벤트에 실린 항목을 그대로 끼운다. 순번이 건너뛰면 위에서 전체를 다시 읽는다.
+                    if !rows.contains(where: { $0.id == item.id }) {
+                        rows.append(item); rows.sort { $0.id > $1.id }
+                        if rows.count > 100 { rows.removeLast(rows.count - 100) }
+                        activities[memberID] = rows
+                    }
+                } else {
+                    // 아직 목록을 읽지 못했거나 순번이 없는 구형 서버다. 목록을 다시 읽는다.
+                    Task { [weak self] in await self?.enqueueRefresh(.activity) }
+                }
             }
             return
         }
@@ -1282,23 +1370,50 @@ final class AppStore: ProjectManagementStore {
         let global = ["projects", "settings", "herdr"].contains(event.type)
         let known = ["project", "member", "member_removed", "decision", "todo", "work", "message", "file"].contains(event.type)
         guard global || !known || project == selectedProjectID else { return }
+        // projects 이벤트는 따로 이벤트가 없는 변화(API 장애 표시, 전달 안내 집계)를 알리는 신호로도 온다. 실린 목록만 쓰고 넘기지 않는다.
         if let cursor = event.cursor { highestRelevantSeq = max(highestRelevantSeq, cursor.seq) }
         var scope: RefreshScope = !known && !global ? .all : .snapshot
         if event.type == "message" {
-            if let message = event.message { receiveHistoryMessage(message) }
-            scope.formUnion([.history, .delivery])
-        } else if event.type == "member" || event.type == "member_removed" {
+            var placed = false
+            if let message = event.message {
+                receiveHistoryMessage(message)
+                // 순번이 이어진 글은 이미 대화에 놓였다. 놓을 자리를 찾지 못한 글만 최신 쪽을 다시 읽는다.
+                placed = event.cursor != nil && history?.settled(message) != false
+            }
+            scope.insert(.delivery)
+            if !placed { scope.insert(.history) }
+        } else if event.type == "member" {
+            scope.insert(.delivery)
+            // 대화 범위는 팀장이 누구인지에만 달려 있다. 상태만 바뀐 직원 때문에 대화를 다시 읽지 않는다.
+            let current = members.first { $0.id == event.member?.id }
+            if event.cursor == nil || current == nil || current?.kind != event.member?.kind { scope.insert(.history) }
+        } else if event.type == "member_removed" {
             scope.formUnion([.delivery, .history])
         } else if !known { scope.insert(.delivery) }
         Task { [weak self] in await self?.enqueueRefresh(scope) }
     }
 
-    func activateActivity(memberID: String) async {
-        guard members.contains(where: { $0.id == memberID }) else { return }
+    /// 활동 목록이 화면에 떠 있는 동안만 등록한다. 목록은 한 번 읽고, 그 뒤는 실시간 이벤트가 채운다.
+    /// 실시간이 끊긴 동안에는 주기적인 전체 읽기가 함께 다시 읽는다.
+    /// 등록했으면 true. 등록한 쪽만 deactivateActivity로 푼다.
+    @discardableResult func activateActivity(memberID: String) async -> Bool {
+        guard members.contains(where: { $0.id == memberID }) else { return false }
+        activityWatchCounts[memberID, default: 0] += 1
         openActivityMembers.insert(memberID); activityTokens[memberID] = UUID()
         await enqueueRefresh(.activity, immediate: true)
+        return true
     }
-    func deactivateActivity(memberID: String) { openActivityMembers.remove(memberID); activityTokens[memberID] = nil }
+    func deactivateActivity(memberID: String) {
+        let left = (activityWatchCounts[memberID] ?? 0) - 1
+        if left > 0 { activityWatchCounts[memberID] = left; return }
+        activityWatchCounts[memberID] = nil
+        openActivityMembers.remove(memberID); activityTokens[memberID] = nil
+        activities[memberID] = nil; activityErrors[memberID] = nil
+    }
+    func refreshActivity() async { await enqueueRefresh(.activity, immediate: true) }
+
+    func watchDeliveryNotices(memberID: String, owner: UUID) { deliveryWatchers[owner] = memberID }
+    func unwatchDeliveryNotices(owner: UUID) { deliveryWatchers.removeValue(forKey: owner) }
 
     private func readActivities() async {
         guard foreground, let api, connectionStatus == .connected else { return }
@@ -1309,11 +1424,16 @@ final class AppStore: ProjectManagementStore {
                 let items = try await api.activity(memberID: memberID)
                 guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration else { return }
                 guard openActivityMembers.contains(memberID), activityTokens[memberID] == activityToken else { continue }
-                activities[memberID] = items.sorted { $0.id > $1.id }; activityErrors[memberID] = nil
+                let sorted = items.sorted { $0.id > $1.id }
+                // 같은 목록을 통째로 바꿔 다시 그리지 않는다.
+                if activities[memberID].map({ ActivityList.same($0, sorted) }) != true { activities[memberID] = sorted }
+                if activityErrors[memberID] != nil { activityErrors[memberID] = nil }
             } catch {
                 guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration else { return }
                 if (error as? APIError)?.status == 401 { handle(error); return }
-                if openActivityMembers.contains(memberID), activityTokens[memberID] == activityToken { activityErrors[memberID] = error.localizedDescription }
+                if openActivityMembers.contains(memberID), activityTokens[memberID] == activityToken {
+                    activityErrors[memberID] = friendlyLoadError(error, what: "활동", verb: "읽지")
+                }
             }
         }
     }
@@ -1331,8 +1451,10 @@ final class AppStore: ProjectManagementStore {
         }
     }
 
+    /// 이 Mac 안의 서버는 꺼졌다 켜지는 것을 빨리 따라가려고 3초까지만 물러난다. 다만 서버가 답은 하는데
+    /// 읽기가 실패하는 동안(응답 해석 실패, 5xx)에는 3초마다 전체 읽기를 되풀이하지 않도록 원격과 같은 30초를 쓴다.
     private var retryCap: Double {
-        ["127.0.0.1", "localhost", "::1"].contains(api?.endpoint.url.host ?? "") ? 3 : 30
+        ["127.0.0.1", "localhost", "::1"].contains(api?.endpoint.url.host ?? "") && !answeredFailure ? 3 : 30
     }
 
     private static func isConsistencyFailure(_ error: Error) -> Bool {
@@ -1400,6 +1522,7 @@ final class AppStore: ProjectManagementStore {
         offlineTask?.cancel(); offlineTask = nil
         resumeNoticeTask?.cancel(); resumeNoticeTask = nil
         connectionIssue = nil; isCheckingConnection = false; retriedConsistencyFailure = false
+        answeredFailure = false; unreadableFailures = 0
         isRestarting = false; restartDeadline = nil; restartWindowUsed = false
         restartTask?.cancel(); restartTask = nil
         let wasDisconnected = connectionStatus == .disconnected
@@ -1467,6 +1590,7 @@ final class AppStore: ProjectManagementStore {
         restartTask?.cancel(); restartTask = nil
         restartDeadline = nil; restartWindowUsed = false; isRestarting = false
         transportFailures = 0; firstTransportFailure = nil; foregroundGraceUntil = nil; retriedConsistencyFailure = false
+        answeredFailure = false; unreadableFailures = 0
         isCheckingConnection = false
         if showsOffline {
             // Logout/host replacement ends the old connection's display lifetime.
@@ -1604,12 +1728,13 @@ final class AppStore: ProjectManagementStore {
         messageSendNotices.removeValue(forKey: noticeKey)
         var completed = false
         var explainedFailure = false
+        var blockedOnly = true
         var failureReason = "연결이나 초안이 바뀌어 보내지 않았습니다. 글을 확인하고 다시 보내 주세요."
         defer {
             // A persisted refusal already explains the failure. Every other false result also
             // gets a composer-scoped explanation, including early guards and local errors.
             if completed || explainedFailure { messageSendNotices.removeValue(forKey: noticeKey) }
-            else { messageSendNotices[noticeKey] = failureReason }
+            else { messageSendNotices[noticeKey] = SendNotice(text: failureReason, whileBlocked: blockedOnly) }
         }
         guard !isDemo else { failureReason = "샘플은 읽기 전용입니다."; errorMessage = failureReason; return false }
         guard canWrite else { failureReason = writeBlockedReason ?? "최신 상태를 확인한 뒤 보내 주세요."; return false }
@@ -1625,6 +1750,7 @@ final class AppStore: ProjectManagementStore {
         let actionKey = sendActionKey(projectID: projectID, targetMemberID: targetMemberID)
         let actionOwner = holdAction(actionKey)
         defer { if epoch == generation { releaseAction(actionKey, owner: actionOwner) } }
+        blockedOnly = false
         let key = DraftStore.key(project: projectID, target: targetMemberID)
         do {
             // Query unresolved attempts before considering any edited replacement.
@@ -1705,16 +1831,17 @@ final class AppStore: ProjectManagementStore {
     /// Explicit retry sends the retained immutable attempt and never detaches the user's next draft.
     @discardableResult func retryFailedMessage(id: String) async -> Bool {
         guard let attempt = submissions?.messageAttempt(id: id) else {
-            explainMessageSendBlock("보내지 못한 글의 기록을 찾지 못했습니다.", targetMemberID: nil)
+            explainMessageSendBlock("보내지 못한 글의 기록을 찾지 못했습니다.", targetMemberID: nil, whileBlocked: false)
             return false
         }
         let noticeKey = Self.scoped(attempt.namespace, attempt.draft.key)
         messageSendNotices.removeValue(forKey: noticeKey)
         var completed = false
+        var blockedOnly = true
         var failureReason = "지금은 다시 보낼 수 없습니다. 연결과 이전 전송 결과를 확인해 주세요."
         defer {
             if completed { messageSendNotices.removeValue(forKey: noticeKey) }
-            else { messageSendNotices[noticeKey] = failureReason }
+            else { messageSendNotices[noticeKey] = SendNotice(text: failureReason, whileBlocked: blockedOnly) }
         }
         guard canWrite, let submissions, let attempt = submissions.messageAttempt(id: id),
               attempt.namespace == writeNamespace, attempt.projectID == selectedProjectID,
@@ -1725,6 +1852,7 @@ final class AppStore: ProjectManagementStore {
         let actionKey = sendActionKey(projectID: attempt.projectID, targetMemberID: attempt.targetMemberID)
         let actionOwner = holdAction(actionKey)
         defer { if epoch == generation { releaseAction(actionKey, owner: actionOwner) } }
+        blockedOnly = false
         do {
             let outcome: (value: Message?, error: Error?) = await perform(actionKey, refreshAfter: false,
                 deferRefusalToReceipt: true, ownsPendingAction: true) { api in
@@ -1766,6 +1894,11 @@ final class AppStore: ProjectManagementStore {
                 try submissions.consumeAccepted(id: id, drafts: drafts)
             } else if submissions.messageAttempt(id: id)?.status == .notAccepted {
                 try submissions.restoreMessage(id: id, drafts: drafts)
+            }
+            if let attempt = submissions.messageAttempt(id: id), attempt.status == .accepted || attempt.status == .notAccepted {
+                // 결과가 확정됐다. '접수 확인 중' 안내를 입력칸 아래와 위쪽 오류 줄에 남기지 않는다.
+                messageSendNotices.removeValue(forKey: Self.scoped(attempt.namespace, attempt.draft.key))
+                if rawErrorMessage?.hasPrefix("접수 확인 중입니다") == true { errorMessage = nil }
             }
             return true
         } catch {
@@ -1976,6 +2109,8 @@ final class AppStore: ProjectManagementStore {
     }
 
     private func submitTodoCompletion(_ pending: PendingTodo) async -> Bool {
+        var pending = pending
+        pending.createdAt = wallClock()
         let epoch = generation, namespace = pending.namespace
         let id = pending.id, revision = pending.revision, done = pending.done
         do {
@@ -2518,17 +2653,20 @@ final class AppStore: ProjectManagementStore {
         recoveryInFlight = true
         defer { recoveryInFlight = false }
         let epoch = generation, namespace = writeNamespace
-        for operation in journal.deliveryRecoveries?.values ?? Dictionary<String, PendingDeliveryRecovery>().values
+        pruneFinishedRecoveries()
+        for operation in Array(journal.deliveryRecoveries?.values ?? Dictionary<String, PendingDeliveryRecovery>().values)
             where operation.namespace == namespace && operation.projectID == selectedProjectID && operation.result == nil && !operation.refused {
             deliveryChecking.insert(operation.deliveryID)
             await loadDeliveryNotices(memberID: operation.memberID)
             guard epoch == generation, canWrite else { return }
+            settleDeliveryRecovery(operation)
         }
-        for operation in journal.unassignedRecoveries?.values ?? Dictionary<String, PendingUnassignedRecovery>().values
+        for operation in Array(journal.unassignedRecoveries?.values ?? Dictionary<String, PendingUnassignedRecovery>().values)
             where operation.namespace == namespace && operation.projectID == selectedProjectID && operation.result == nil && !operation.refused {
             deliveryChecking.insert("message:\(operation.messageID)")
             await loadUnassignedDeliveries()
             guard epoch == generation, canWrite else { return }
+            settleUnassignedRecovery(operation)
         }
         if let submissions {
             do { drafts.pruneHandoffs(try submissions.pruneMessageHistory()) }
@@ -2575,6 +2713,43 @@ final class AppStore: ProjectManagementStore {
         }
         // Retry unfinished cleanup on every recovery, even when leaseReceiptOrder already consumed the claim.
         _ = await recoverCancelledTerminalClaims()
+    }
+
+    /// 응답을 잃은 전달 조치를 요청 제한 시간이 한참 지난 뒤 닫는다. 닫지 않으면 그 항목의 버튼이 이 기기에서 영영 꺼진 채 남는다.
+    /// 닫은 뒤에는 방금 다시 읽은 서버 상태가 기준이다. 서버는 expectedVersion으로 옛 상태를 본 조치를 거절한다.
+    private func settleDeliveryRecovery(_ tracked: PendingDeliveryRecovery) {
+        let key = Self.scoped(tracked.namespace, tracked.deliveryID), now = wallClock()
+        guard journal.deliveryRecoveries?[key]?.id == tracked.id, !pendingActions.contains("delivery:\(tracked.deliveryID)") else { return }
+        // 예전 기록에는 시각이 없다. 처음 본 때부터 센다.
+        if tracked.createdAt == nil { _ = try? saveJournal { $0.deliveryRecoveries?[key]?.createdAt = now } }
+        // 그 전까지는 같은 조치를 같은 작업 ID로 다시 보내 서버가 기억한 결과를 받을 수 있게 둔다.
+        guard now - (tracked.createdAt ?? now) >= Self.lostWriteLimit else { return }
+        do {
+            try saveJournal { $0.deliveryRecoveries?.removeValue(forKey: key) }
+            deliveryChecking.remove(tracked.deliveryID)
+        } catch { handle(error) }
+    }
+
+    private func settleUnassignedRecovery(_ tracked: PendingUnassignedRecovery) {
+        let key = Self.scoped(tracked.namespace, tracked.messageID), now = wallClock()
+        guard journal.unassignedRecoveries?[key]?.id == tracked.id, !pendingActions.contains("unassigned:\(tracked.messageID)") else { return }
+        if tracked.createdAt == nil { _ = try? saveJournal { $0.unassignedRecoveries?[key]?.createdAt = now } }
+        guard now - (tracked.createdAt ?? now) >= Self.lostWriteLimit else { return }
+        do {
+            try saveJournal { $0.unassignedRecoveries?.removeValue(forKey: key) }
+            deliveryChecking.remove("message:\(tracked.messageID)")
+        } catch { handle(error) }
+    }
+
+    /// 끝난 전달 조치 기록은 다시 읽는 곳이 없다. 쌓이지 않게 가끔 비운다.
+    private func pruneFinishedRecoveries() {
+        let deliveries = journal.deliveryRecoveries?.filter { $0.value.result != nil || $0.value.refused }.map(\.key) ?? []
+        let unassigned = journal.unassignedRecoveries?.filter { $0.value.result != nil || $0.value.refused }.map(\.key) ?? []
+        guard deliveries.count + unassigned.count > 50 else { return }
+        _ = try? saveJournal { journal in
+            for key in deliveries { journal.deliveryRecoveries?.removeValue(forKey: key) }
+            for key in unassigned { journal.unassignedRecoveries?.removeValue(forKey: key) }
+        }
     }
 
     private func reconcileOperation(_ tracked: TrackedOperation, announce: Bool = true) async {
@@ -2713,7 +2888,15 @@ final class AppStore: ProjectManagementStore {
             if revision > pending.revision {
                 try saveJournal { $0.todos.removeValue(forKey: Self.scoped(pending.namespace, pending.id)) }
                 todoWrites[pending.id] = (todo.done == pending.done && (pending.dropped != true || todo.outcome == "dropped")) ? .confirmedCurrent : .conflict
-            } else { todoWrites[pending.id] = .checking }
+            } else if !pendingActions.contains("todo:\(pending.id)"), let created = pending.createdAt, wallClock() - created >= Self.lostWriteLimit {
+                // 요청 제한 시간을 한참 넘겨도 revision이 그대로면 도착하지 않은 변경이다. 닫아야 다시 누를 수 있다.
+                try saveJournal { $0.todos.removeValue(forKey: Self.scoped(pending.namespace, pending.id)) }
+                todoWrites[pending.id] = .notApplied
+            } else {
+                // 예전 기록에는 시각이 없다. 처음 본 때부터 센다.
+                if pending.createdAt == nil { let now = wallClock(); try saveJournal { $0.todos[Self.scoped(pending.namespace, pending.id)]?.createdAt = now } }
+                todoWrites[pending.id] = .checking
+            }
         }
     }
 
@@ -2962,6 +3145,7 @@ final class AppStore: ProjectManagementStore {
         guard unresolved != nil || (item?.version == 0 && item?.allowedActions.contains(action) == true) else { return false }
         var tracked = unresolved ?? PendingUnassignedRecovery(id: UUID().uuidString, namespace: namespace,
             projectID: projectID, messageID: messageID, version: item!.version, action: action)
+        tracked.createdAt = wallClock()
         do {
             try saveJournal {
                 if $0.unassignedRecoveries == nil { $0.unassignedRecoveries = [:] }
@@ -3070,6 +3254,7 @@ final class AppStore: ProjectManagementStore {
             ?? PendingDeliveryRecovery(id: UUID().uuidString, namespace: namespace, projectID: projectID,
                                        memberID: memberID, deliveryID: deliveryID, version: version,
                                        action: action, acceptDuplicateRisk: acceptDuplicateRisk)
+        tracked.createdAt = wallClock()
         do {
             try saveJournal {
                 if $0.deliveryRecoveries == nil { $0.deliveryRecoveries = [:] }
@@ -3143,7 +3328,8 @@ final class AppStore: ProjectManagementStore {
             errorMessage = "본사는 보관할 수 없습니다."; return false
         }
         let epoch = generation
-        let tracked = PendingProjectChange(namespace: writeNamespace, projectID: id, request: request)
+        var tracked = PendingProjectChange(namespace: writeNamespace, projectID: id, request: request)
+        tracked.createdAt = wallClock()
         do { try saveJournal { if $0.projectChanges == nil { $0.projectChanges = [:] }; $0.projectChanges?[journalKey] = tracked } }
         catch { handle(error); return false }
         pendingActions.insert(key); projectResults[id] = .sending; errorMessage = nil
@@ -3179,10 +3365,14 @@ final class AppStore: ProjectManagementStore {
     }
 
     /// Reads only. Matching current metadata is observable; it is not an operation receipt.
-    func recheckProject(id: String) async {
+    func recheckProject(id: String) async { await recheckProject(id: id, now: wallClock()) }
+    private func recheckProject(id: String, now: Double) async {
         guard foreground, let api, connectionStatus == .connected else { return }
         let epoch = generation, phase = foregroundGeneration, key = Self.scoped(writeNamespace, id)
         guard let tracked = journal.projectChanges?[key] else { return }
+        projectRechecks[key] = now
+        // 예전 기록에는 시각이 없다. 처음 본 때부터 센다.
+        if tracked.createdAt == nil { _ = try? saveJournal { $0.projectChanges?[key]?.createdAt = now } }
         do {
             let archived = try await api.archivedProjects()
             guard epoch == generation, phase == foregroundGeneration, foreground else { return }
@@ -3193,8 +3383,13 @@ final class AppStore: ProjectManagementStore {
             guard project.id == id else { throw SubmissionError.mismatchedResult }
             if tracked.matches(project) {
                 try saveJournal { $0.projectChanges?.removeValue(forKey: key) }
+                projectRechecks[key] = nil
                 projectResults[id] = .current
                 await applyManagedProject(project)
+            } else if now - (tracked.createdAt ?? now) >= Self.projectChangeLimit {
+                // 요청 제한 시간(150초)을 한참 넘겨도 서버 상태가 요청과 다르면 반영되지 않은 것이다.
+                // 계속 '확인 중'으로 두면 이 프로젝트의 모든 쓰기가 이 기기에서 막힌 채 남는다.
+                try endProjectChange(id: id, key: key, notice: "프로젝트 변경이 반영되지 않아 확인을 끝냈습니다. 필요하면 다시 시도해 주세요.")
             } else { projectResults[id] = .checking }
         } catch {
             guard epoch == generation, journal.projectChanges?[key]?.id == tracked.id else { return }
@@ -3203,13 +3398,31 @@ final class AppStore: ProjectManagementStore {
         }
     }
 
+    /// 결과 확인을 그만두고 서버의 지금 상태를 그대로 쓴다. 요청은 다시 보내지 않는다.
+    func discardProjectChange(id: String) {
+        let key = Self.scoped(writeNamespace, id)
+        guard journal.projectChanges?[key] != nil, !pendingActions.contains("project:\(id)") else { return }
+        do { try endProjectChange(id: id, key: key, notice: nil) } catch { handle(error) }
+    }
+
+    private func endProjectChange(id: String, key: String, notice: String?) throws {
+        try saveJournal { $0.projectChanges?.removeValue(forKey: key) }
+        projectRechecks[key] = nil
+        projectResults[id] = .refused
+        if let notice { projectNotice = notice }
+    }
+
+    private static let projectChangeLimit: Double = 300
+
     private func reconcileProjectChanges() async {
-        let epoch = generation, phase = foregroundGeneration, namespace = writeNamespace
+        let epoch = generation, phase = foregroundGeneration, namespace = writeNamespace, now = wallClock()
         for tracked in Array(journal.projectChanges?.values ?? Dictionary<String, PendingProjectChange>().values)
             where tracked.namespace == namespace && !pendingActions.contains("project:\(tracked.projectID)") {
             guard epoch == generation, phase == foregroundGeneration, foreground else { return }
             projectResults[tracked.projectID] = .checking
-            await recheckProject(id: tracked.projectID)
+            // 스냅샷마다 조회 두 번을 얹지 않는다. '결과 확인' 버튼과 변경 직후의 확인은 이 간격과 무관하다.
+            if let last = projectRechecks[Self.scoped(namespace, tracked.projectID)], now - last < 10, now >= last { continue }
+            await recheckProject(id: tracked.projectID, now: now)
         }
     }
 
@@ -3516,7 +3729,8 @@ final class AppStore: ProjectManagementStore {
         archiveLoad = UUID(); isLoadingArchive = false; archiveObserved = false
         projectResults = [:]; projectNotice = nil; contextChecking = []
         deliveryPages = [:]; deliveryErrors = [:]; deliveryResults = [:]; deliveryChecking = []; deliveryFlights = [:]; deliveryRefreshPending = []
-        openActivityMembers = []; activityTokens = [:]; activityRevisions = [:]; activities = [:]; activityErrors = [:]
+        openActivityMembers = []; activityWatchCounts = [:]; activityTokens = [:]; activityRevisions = [:]; activities = [:]; activityErrors = [:]
+        activityEpoch &+= 1
     }
 
     private func saveJournal(_ change: (inout AppWriteJournal) -> Void) throws {
@@ -3582,7 +3796,7 @@ struct SettingsEdit: Sendable {
     let revision: Int
 }
 enum CardWriteStatus: String, Sendable { case accepted, conflict, unknown, refused, notSent }
-enum TodoWriteState: String, Sendable { case sending, checking, confirmed, confirmedCurrent, conflict }
+enum TodoWriteState: String, Sendable { case sending, checking, confirmed, confirmedCurrent, conflict, notApplied }
 private struct TrackedOperation: Codable {
     let id: String
     let namespace: String
@@ -3606,6 +3820,7 @@ private struct PendingTodo: Codable {
     let fileIds: [String]?
     var dropReason: String? = nil
     var dropped: Bool? = nil
+    var createdAt: Double? = nil // 예전 기록에는 없다. 응답을 잃은 변경을 닫을 때의 기준 시각(초).
 }
 private struct AppWriteJournal: Codable {
     var operations: [String: TrackedOperation] = [:]
@@ -3650,6 +3865,7 @@ private struct PendingProjectChange: Codable {
     let runnerEnabled: Bool?
     let now: String?
     let archived: Bool?
+    var createdAt: Double? = nil // 예전 기록에는 없다. 끝내 반영되지 않은 변경을 닫을 때의 기준 시각(초).
     init(namespace: String, projectID: String, request: PatchProjectRequest) {
         id = UUID()
         self.namespace = namespace; self.projectID = projectID
@@ -3657,8 +3873,15 @@ private struct PendingProjectChange: Codable {
     }
     func matches(_ project: Project) -> Bool {
         (name == nil || name?.trimmingCharacters(in: .whitespacesAndNewlines) == project.name)
-            && (cwd == nil || cwd == project.cwd) && (runnerEnabled == nil || runnerEnabled == project.runnerEnabled)
+            && (cwd == nil || Self.samePath(cwd!, project.cwd)) && (runnerEnabled == nil || runnerEnabled == project.runnerEnabled)
             && (now == nil || now == project.now) && (archived == nil || archived == project.archived)
+    }
+    /// 서버는 '~/…'를 자기 홈 아래 절대 경로로 펼치고 끝의 '/'를 떼어 돌려준다.
+    static func samePath(_ requested: String, _ actual: String) -> Bool {
+        func trimmed(_ path: String) -> String { path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path }
+        let wanted = trimmed(requested), current = trimmed(actual)
+        if wanted == current { return true }
+        return wanted.hasPrefix("~/") && current.hasPrefix("/") && current.hasSuffix(String(wanted.dropFirst(1)))
     }
 }
 private struct PendingContextRequest: Codable {
@@ -3684,6 +3907,7 @@ private struct PendingUnassignedRecovery: Codable {
     let action: UnassignedRecoveryAction
     var result: UnassignedRecoveryResult? = nil
     var refused = false
+    var createdAt: Double? = nil // 예전 기록에는 없다. 응답을 잃은 조치를 닫을 때의 기준 시각(초).
 }
 private struct PendingDeliveryRecovery: Codable {
     let id: String
@@ -3696,6 +3920,7 @@ private struct PendingDeliveryRecovery: Codable {
     let acceptDuplicateRisk: Bool
     var result: DeliveryRecoveryResult? = nil
     var refused = false
+    var createdAt: Double? = nil // 예전 기록에는 없다. 응답을 잃은 조치를 닫을 때의 기준 시각(초).
 }
 private actor HistoryRequestFailure {
     private(set) var error: Error?

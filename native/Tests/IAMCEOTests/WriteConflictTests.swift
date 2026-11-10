@@ -111,6 +111,36 @@ import XCTest
         store.disconnect()
     }
 
+    /// n-appstore-6: 응답을 잃고 서버에도 닿지 않은 할 일 변경은 요청 제한 시간을 한참 넘기면 닫힌다.
+    /// 닫히지 않으면 그 할 일을 이 기기에서 다시 체크할 수 없다.
+    func testTodoChangeThatNeverArrivedStopsBlockingAfterItsTimeLimit() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connect(network)
+        defer { store.disconnect() }
+        let start = Date().timeIntervalSince1970
+        store.wallClock = { start }
+        server.change { $0.dropTodo = true }
+        let first = await store.setTodoDone(store.todos[0], done: true)
+        XCTAssertFalse(first)
+        XCTAssertEqual(store.todoWrites["t"], .checking)
+        // The request never reached the server: nothing changed there.
+        server.change { $0.dropTodo = false; $0.syncFailure = false; $0.state.todos[0].done = false; $0.revisions.todos?["t"] = 1 }
+        store.wallClock = { start + 59 }
+        await store.refresh()
+        XCTAssertEqual(store.todoWrites["t"], .checking)
+        let blocked = await store.setTodoDone(store.todos[0], done: true)
+        XCTAssertFalse(blocked)
+        XCTAssertEqual(server.read { $0.todoSends }, 1)
+        store.wallClock = { start + 61 }
+        await store.refresh()
+        XCTAssertEqual(store.todoWrites["t"], .notApplied)
+        XCTAssertFalse(store.todos[0].done)
+        let again = await store.setTodoDone(store.todos[0], done: true)
+        XCTAssertTrue(again)
+        XCTAssertEqual(server.read { $0.todoSends }, 2)
+        XCTAssertTrue(store.todos[0].done)
+    }
+
     func testStaleTodoCASCannotOverwriteOtherDevice() async throws {
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connect(network)

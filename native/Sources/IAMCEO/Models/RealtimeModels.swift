@@ -109,6 +109,40 @@ struct RealtimeEvent: Decodable, Sendable {
     var activity: Activity? = nil
     var settings: Settings? = nil
     var herdr: HerdrInfo? = nil
+    /// 봉투(type·순번)는 멀쩡한데 본문을 읽지 못한 프레임. 받는 쪽은 '무엇인지 모르는 변경'으로 보고 전체를 다시 읽는다.
+    var payloadUnreadable = false
+
+    private static let payloadTypes: Set<String> = ["projects", "project", "member", "member_removed", "decision", "todo", "work", "message", "file", "activity", "settings", "herdr"]
+    /// 본문 해석에 실패한 프레임에서 봉투만 살린다. hello·ping처럼 본문이 없는 프레임이나 봉투가 깨진 프레임은 nil(잘못된 프레임)이다.
+    static func unreadable(from data: Data) -> RealtimeEvent? {
+        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data), payloadTypes.contains(envelope.type) else { return nil }
+        return RealtimeEvent(type: envelope.type, cursor: envelope.cursor)
+    }
+    private init(type: String, cursor: SyncCursor?) {
+        self.type = type; self.cursor = cursor
+        protocolVersion = nil; seq = cursor?.seq; heartbeatMs = nil; staleAfterMs = nil
+        payloadUnreadable = true
+    }
+    private struct Envelope: Decodable {
+        let type: String
+        let cursor: SyncCursor?
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            type = try c.decode(String.self, forKey: .type)
+            // 변경 프레임에는 protocol이 없다. 순번 규칙은 정식 해석과 같다.
+            guard try c.decodeIfPresent(Int.self, forKey: .protocolVersion) == nil else {
+                throw DecodingError.dataCorruptedError(forKey: .protocolVersion, in: c, debugDescription: "Unexpected protocol")
+            }
+            if c.contains(.epoch) {
+                cursor = try SyncCursor(epoch: c.decode(String.self, forKey: .epoch), seq: c.decode(Int.self, forKey: .seq))
+            } else {
+                cursor = nil
+                guard try c.decodeIfPresent(Int.self, forKey: .seq) == nil else {
+                    throw DecodingError.dataCorruptedError(forKey: .seq, in: c, debugDescription: "Invalid legacy sequence")
+                }
+            }
+        }
+    }
 
     private enum CodingKeys: String, CodingKey {
         case type, protocolVersion = "protocol", epoch, seq, heartbeatMs, staleAfterMs

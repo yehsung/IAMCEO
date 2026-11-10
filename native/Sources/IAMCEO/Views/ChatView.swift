@@ -1904,7 +1904,7 @@ private struct ChatAttachmentItem: View {
                         }
                     }
                     .padding(10)
-                } else if data != nil {
+                } else if resource != nil {
                     VStack(spacing: 4) {
                         Image(systemName: "photo").foregroundStyle(CE.ink3)
                         Text("여기서 그릴 수 없는 형식 · 눌러서 열기").font(CEFont.caption).foregroundStyle(CE.ink2)
@@ -2007,7 +2007,7 @@ private struct ChatAttachmentItem: View {
     // MARK: Loading (authenticated, same origin only)
 
     private func load() async {
-        guard data == nil, !loading else { return }
+        guard resource == nil, !loading else { return }
         guard let api = store.api else {
             error = store.isDemo ? "샘플에는 원본 파일이 없습니다." : "서버 연결 후 원본을 불러올 수 있습니다."
             return
@@ -2016,10 +2016,11 @@ private struct ChatAttachmentItem: View {
         do {
             // 행이 다시 만들어질 때마다 원본을 새로 받아 새 임시 폴더에 쌓지 않도록, 한도가 있는 공용 캐시를 쓴다.
             let loaded = try await FileResources.attachment(attachment, api: api)
-            let result = try loaded.read()
-            // A thumbnail only needs ~2× its 208×148 box: decode small so a thread of screenshots stays light.
-            if attachment.isImage { image = chatThumbnail(result, maxPixel: 720) }
-            data = result; resource = loaded; fileURL = loaded.url; error = nil
+            // A thumbnail only needs ~2× its 208×148 box: decode small (off the main thread) so a thread of screenshots stays light.
+            if attachment.isImage { image = await PreviewImages.image(loaded, maxPixel: 720).map { Image(decorative: $0, scale: 1) } }
+            // 원본 바이트는 글자로 펼쳐 볼 파일만 쥔다. 그림은 캐시의 파일과 축소본만 쓴다.
+            if isTextual { data = try loaded.read() }
+            resource = loaded; fileURL = loaded.url; error = nil
         } catch { self.error = friendlyLoadError(error, what: "첨부", verb: "받지") }
     }
 }
@@ -2043,17 +2044,6 @@ private func chatFileSize(_ size: Int) -> String {
     if size < 1024 { return "\(size) B" }
     if size < 1024 * 1024 { return "\(Int((Double(size) / 1024).rounded())) KB" }
     return String(format: "%.1f MB", Double(size) / (1024 * 1024))
-}
-
-private func chatThumbnail(_ data: Data, maxPixel: Int) -> Image? {
-    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-    let options: [CFString: Any] = [
-        kCGImageSourceCreateThumbnailFromImageAlways: true,
-        kCGImageSourceCreateThumbnailWithTransform: true,
-        kCGImageSourceThumbnailMaxPixelSize: maxPixel
-    ]
-    guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
-    return Image(decorative: cgImage, scale: 1)
 }
 
 /// Web delivery tones: 받음 ok, 보류 warn, 실패 danger, 전달 대기 / 보냄 muted.

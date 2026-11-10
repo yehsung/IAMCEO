@@ -53,6 +53,9 @@ export interface CoreSupervisorDeps {
   presence(): Promise<"owned" | "absent" | "conflict" | "unknown">;
   startOwned(): Promise<void>;
   now?: () => number; pollMs?: number; retryMs?: number; maxStartAttempts?: number;
+  /** After the fast burst the core is still started again, this far apart (doubling up to five times this). */
+  slowRetryMs?: number;
+  log?: (line: string) => void;
   observed?: (state: CoreSupervisorObservation) => void;
 }
 /** Queue-independent read-only reattachment. Runtime integration belongs to W6-O. */
@@ -64,6 +67,9 @@ export class CoreSupervisor {
   private starts = 0;
   private nextStartAt = 0;
   private startUncertain = false;
+  private uncertainAt = 0;
+  /** Since when nothing has answered on the socket path, without interruption. */
+  private absentSince: number | null = null;
   constructor(private readonly deps: CoreSupervisorDeps) {}
   watch(member: RunnerMember): void {
     if (this.stopped) return;
@@ -76,8 +82,10 @@ export class CoreSupervisor {
   observations(): CoreSupervisorObservation[] { return [...this.members.values()].map(({ state }) => ({ ...state })); }
   start(): void {
     if (this.timer || this.stopped) return;
-    this.timer = setInterval(() => { void this.tick(); }, this.deps.pollMs ?? 1000); this.timer.unref?.();
-    void this.tick();
+    // A rejected pass must not become an unhandled rejection (that ends the server process).
+    const pass = () => { void this.tick().catch(error => console.error("core 감독 점검 실패:", error)); };
+    this.timer = setInterval(pass, this.deps.pollMs ?? 1000); this.timer.unref?.();
+    pass();
   }
   tick(): Promise<void> {
     if (this.stopped) return Promise.resolve();
@@ -91,11 +99,30 @@ export class CoreSupervisor {
     let presence: Awaited<ReturnType<CoreSupervisorDeps["presence"]>>;
     try { presence = await this.deps.presence(); } catch { presence = "unknown"; }
     if (this.stopped) return;
-    if (presence === "owned") { this.starts = 0; this.startUncertain = false; }
-    if (presence === "absent" && !this.startUncertain && this.starts < (this.deps.maxStartAttempts ?? 3) && now >= this.nextStartAt) {
-      this.starts++; this.nextStartAt = now + (this.deps.retryMs ?? 5000) * 2 ** (this.starts - 1);
+    const log = this.deps.log ?? (line => console.warn(line));
+    const burst = this.deps.maxStartAttempts ?? 3, slowMs = this.deps.slowRetryMs ?? 60_000;
+    if (presence === "owned") {
+      if (this.starts > 0) log("[core] herdr-core 가 다시 응답합니다");
+      this.starts = 0; this.startUncertain = false; this.nextStartAt = 0;
+    }
+    this.absentSince = presence === "absent" ? this.absentSince ?? now : null;
+    // A start whose result was unknown may have produced a daemon. If the socket path then stays verifiably empty
+    // for a whole slow interval, it did not: allow another start. It used to stay disarmed until the service restarted.
+    if (this.startUncertain && this.absentSince !== null && now - Math.max(this.absentSince, this.uncertainAt) >= slowMs) {
+      this.startUncertain = false;
+      log("[core] 결과를 모르던 herdr-core 기동 뒤에도 소켓이 비어 있어 다시 띄웁니다");
+    }
+    if (presence === "absent" && !this.startUncertain && now >= this.nextStartAt) {
+      this.starts++;
+      // A fast burst first, then keep trying one to five minutes apart. It used to stop for good after the burst,
+      // leaving every member unreachable until someone restarted the service by hand.
+      this.nextStartAt = now + (this.starts < burst ? (this.deps.retryMs ?? 5000) * 2 ** (this.starts - 1) : Math.min(5 * slowMs, slowMs * 2 ** (this.starts - burst)));
       try { await this.deps.startOwned(); }
-      catch (error) { if (!(error instanceof CoreError) || error.uncertain) this.startUncertain = true; }
+      catch (error) {
+        const uncertain = !(error instanceof CoreError) || error.uncertain;
+        if (uncertain) { this.startUncertain = true; this.uncertainAt = this.deps.now?.() ?? Date.now(); }
+        if (this.starts <= burst || this.starts % 5 === 0) log(`[core] herdr-core 기동 실패(${this.starts}번째): ${error instanceof CoreError ? error.kind : "error"}${uncertain ? " · 결과를 몰라 소켓이 계속 비어 있는지 본 뒤 다시 시도합니다" : this.starts >= burst ? " · 1~5분 간격으로 계속 시도합니다" : ""}`);
+      }
     }
     if (this.stopped) return;
     for (const [id, entry] of this.members) {
@@ -112,7 +139,8 @@ export class CoreSupervisor {
       entry.state = { memberId: id, outcome: result.outcome, lastObservedAt: success ? now : entry.state.lastObservedAt,
         failures: success ? 0 : entry.state.failures + 1, code: result.outcome === "rejoined" ? null : result.code,
         nextAttemptAt: now + (success ? this.deps.pollMs ?? 1000 : Math.min(60_000, (this.deps.retryMs ?? 1000) * 2 ** Math.min(entry.state.failures, 6))) };
-      this.deps.observed?.({ ...entry.state });
+      // One member's failing callback must not stop the pass for the members after it.
+      try { this.deps.observed?.({ ...entry.state }); } catch (error) { console.error("core 감독 관측 처리 실패:", id, error); }
     }
   }
   async shutdown(): Promise<void> {

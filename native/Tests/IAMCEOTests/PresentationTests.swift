@@ -322,6 +322,57 @@ final class PresentationTests: XCTestCase {
         c.detail = ""
         XCTAssertNil(c.ownerDetail)
     }
+
+    /// n-models-4: 서버가 실제로 보내는 대기 이유는 모두 제 문구가 있다(shared/types.ts DeliveryWaitReason).
+    func testEveryServerWaitReasonHasItsOwnLabelAndHeldDeliveriesSayWhy() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let reasons = ["next_turn", "run_limit", "member_busy", "waking", "receipt_check", "approval", "manual_control",
+                       "runner_off", "archived", "api_outage", "usage_limit"]
+        for reason in reasons {
+            XCTAssertNotEqual(waitReasonLabel(reason, now: now), "전달을 기다리는 중", reason)
+        }
+        XCTAssertEqual(Set(reasons.compactMap { waitReasonLabel($0, now: now) }).count, reasons.count)
+        XCTAssertEqual(waitReasonLabel("api_outage", now: now), "인터넷 연결이 돌아오면 전달")
+        XCTAssertEqual(waitReasonLabel("usage_limit", now: now), "사용 한도가 풀리면 전달")
+        XCTAssertEqual(waitReasonLabel("unknown", now: now), "전달을 기다리는 중")
+        XCTAssertEqual(waitReasonTone("usage_limit"), .neutral)
+    }
+
+    /// n-models-4: 서버가 쓰는 사유(멈춘 전달 감시, 오래된 지시, 옛 전달)는 서버의 설명을 그대로 보인다.
+    func testServerDeliveryReasonsKeepTheServersExplanation() {
+        for reason in ["stalled", "stale_instruction", "legacy_unknown"] {
+            let item = DeliveryNoticeItem(id: "d", deliveryId: "d", memberId: "m", projectId: "p", phase: .needsOwner, reason: reason,
+                                          note: "서버가 적은 설명", version: 1, allowedActions: [.recheck, .retryWithRisk, .stopRetry])
+            XCTAssertEqual(item.reasonDescription, "서버가 적은 설명", reason)
+            // 재전송은 여전히 허용 사유가 따로 정한다. 이 사유들에는 열리지 않는다.
+            XCTAssertEqual(deliveryPanelActions(item), [.recheck, .stopRetry], reason)
+        }
+        let future = DeliveryNoticeItem(id: "d", deliveryId: "d", memberId: "m", projectId: "p", phase: .needsOwner, reason: "future",
+                                        note: "서버가 적은 설명", version: 1, allowedActions: [.recheck, .retryWithRisk])
+        XCTAssertEqual(future.reasonDescription, "상세 내용을 확인해 주세요")
+    }
+
+    /// n-models-4: 인터넷 끊김·사용 한도로 멈춘 직원은 '상태 확인 불가'가 아니라 그 이유로 센다.
+    @MainActor func testNetworkAndUsagePausesAreCountedByTheirReasonNotAsUnknown() {
+        var members: [Member] = []
+        for (index, code) in MemberStatusInfo.networkPauseCodes.enumerated() {
+            members.append(Member(id: "m\(index)", status: "working", statusObservation:
+                StatusObservation(freshness: "fresh", ownership: "verified", error: ObservationError(code: code, note: code))))
+        }
+        members.append(Member(id: "limit2", status: "idle", statusObservation:
+            StatusObservation(freshness: "stale", ownership: "verified", error: ObservationError(code: "usage_limit", note: "limit"))))
+        members.append(Member(id: "timeout", status: "working", statusObservation:
+            StatusObservation(freshness: "fresh", ownership: "verified", error: ObservationError(code: "timeout", note: "t"))))
+        members.append(Member(id: "conflict", status: "working", statusObservation:
+            StatusObservation(freshness: "fresh", ownership: "conflict", error: ObservationError(code: "usage_limit", note: "limit"))))
+        let counts = MemberStatusInfo.summaryCounts(members)
+        XCTAssertEqual(counts, ["network_outage": 1, "network_retry": 1, "usage_limit": 2, "unknown": 2])
+        let office = OfficeView.counts(members)
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: office.map { ($0.status, $0.count) }), counts)
+        XCTAssertEqual(office.first { $0.status == "usage_limit" }?.label, "사용 한도 도달")
+        XCTAssertEqual(office.first { $0.status == "network_outage" }?.label, MemberStatusInfo(members[0]).label)
+        XCTAssertEqual(office.last?.status, "unknown")
+    }
 }
 
 

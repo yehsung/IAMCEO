@@ -14,8 +14,9 @@ import { ARTIFACT_CSP, buildArtifactSrcdoc } from "../shared/artifact-kit.ts";
 import type { Bus } from "./bus.ts";
 import { VERSION, type Config } from "./config.ts";
 import { FilePublication, prepareImport, MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES, resolveInside, saveUpload, type SavedFile } from "./files.ts";
-import type { OrchestratorApi } from "./orchestrator-api.ts";
+import { briefly, type OrchestratorApi } from "./orchestrator-api.ts";
 import { ApiError, type Store } from "./store.ts";
+import { classifyStorageError } from "./storage-errors.ts";
 import { SESSION_ID_RE } from "./text.ts";
 import { Pairing, PAIR_CODE_TTL_MS, tailnetUrls, withMagicDnsNames } from "./pairing.ts";
 import { createPushHandler, type PushRoutesContext } from "./push/routes.ts";
@@ -487,7 +488,7 @@ function wantsLite(url: URL): boolean {
   return value === "1";
 }
 
-function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, readHerdr: () => Promise<HerdrInfo>, currentHerdr: () => HerdrInfo, monitor: LoopMonitor): Route[] {
+function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, readHerdr: () => Promise<HerdrInfo>, currentHerdr: () => HerdrInfo, monitor: LoopMonitor, freshHerdr: () => Promise<HerdrInfo> = () => ctx.orch.herdrInfo()): Route[] {
   const { config, store, orch, bus } = ctx;
   const models = new ModelCatalogReader(config);
   const folders = new Folders(ctx.folderHome);
@@ -530,7 +531,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
 
   /** 연결되어 있지 않으면 409. 화면도 입력을 막지만 다른 기기·늦게 온 요청이 있다. */
   const requireReachable = async (projectId: string, targetId: string | null): Promise<void> => {
-    await orch.refreshConnection?.();
+    await (orch.refreshHealth ?? orch.refreshConnection)?.call(orch);
     store.requireReachable(projectId, targetId ? store.getMember(targetId) : null);
   };
 
@@ -729,16 +730,20 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       });
     }),
     route("GET", "/api/bootstrap", async () => {
-      await orch.refreshConnection?.();
+      // 앱의 첫 연결 확인(제한 3초)이다. 실행기 정리나 느린 조회를 기다리지 않고 마지막으로 아는 값으로 답한다.
+      const [runtime, herdr] = await Promise.all([
+        Promise.resolve((orch.refreshHealth ?? orch.refreshConnection)?.call(orch)).then(() => orch.runtimeInfo?.()),
+        briefly(freshHerdr(), 1000, () => currentHerdr() ?? { installed: false, running: false, version: null, protocol: null, compatible: false, warning: null }),
+      ]);
       const rankOverrides = { manager: 0, lead: 0 };
       for (const m of store.listAllMembers()) if (m.origin !== "manual" && (m.modelOverride || m.effortOverride)) rankOverrides[memberRank(m.kind)]++;
       const body: Bootstrap = {
         apiOutage: store.apiOutage(),
         version: VERSION,
-        runtime: await orch.runtimeInfo?.(),
+        runtime,
         settings: store.getSettings(),
         projects: store.projectSummaries(),
-        herdr: await orch.herdrInfo(),
+        herdr,
         home: config.home,
         urls: urls(),
         cli: orch.cliCommand?.() ?? "iamceo",
@@ -1375,8 +1380,12 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       return noStore(await route(req, url, server));
     } catch (e) {
       if (e instanceof ApiError) return noStore(fail(e.status, e.message, e.code));
+      // 디스크 가득·읽기 쓰기 오류는 앱이 알아볼 수 있게 분류해 답한다. SQLite 원문은 로그에만 남긴다.
+      const storage = classifyStorageError(e);
       // 오류 객체도 요청 URL/헤더를 품을 수 있다. 경로와 오류 종류만 남긴다.
-      console.error("요청 처리 오류:", req.method, url.pathname, e instanceof Error ? e.name : "unknown");
+      console.error("요청 처리 오류:", req.method, url.pathname, e instanceof Error ? e.name : "unknown", ...(storage ? [storage] : []));
+      if (storage === "storage_full") return noStore(fail(507, "저장 공간이 부족해 처리하지 못했습니다. Mac 의 디스크 공간을 확보한 뒤 다시 시도해 주세요", storage));
+      if (storage === "storage_io") return noStore(fail(500, "저장소를 읽거나 쓰는 중 오류가 나 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요", storage));
       return noStore(fail(500, e instanceof Error ? e.message : "서버 오류"));
     }
   };

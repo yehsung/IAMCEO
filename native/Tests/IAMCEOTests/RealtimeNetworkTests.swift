@@ -227,29 +227,136 @@ final class CoordinatorServer: @unchecked Sendable {
         await eventually { store.appliedSnapshotCursor?.seq == 7 }
     }
 
-    func testActivityOnlyRefreshesOpenMemberAndMessagesRefreshVisibleHistory() async throws {
+    /// 이벤트에 실린 활동 한 줄과 글은 그대로 화면에 놓는다. 이벤트마다 활동 100건·대화 200건을 다시 읽지 않는다.
+    /// (예전에는 이벤트마다 둘 다 다시 읽었다. 그 읽기 수를 고정하던 시험을 고친 결과에 맞게 바꿨다.)
+    func testActivityAndMessageEventsFillOpenListsWithoutReadingThemAgain() async throws {
         let server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
         let network = try IsolatedTestNetwork(handler: server.handle)
         guard let store = try await connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
         guard let socket = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
         await store.activateHistory(); await store.activateActivity(memberID: "m")
+        XCTAssertEqual(store.activities["m"]?.map(\.id), [1])
         let before = server.read { ($0.syncs, $0.activityReads, $0.pageReads) }
-        try await frame(socket, #"{"type":"activity","epoch":"E","seq":1,"projectId":"p","activity":{"id":1,"memberId":"m"}}"#)
+        try await frame(socket, #"{"type":"activity","epoch":"E","seq":1,"projectId":"p","activity":{"id":7,"memberId":"m","text":"pushed"}}"#)
         await eventually { store.activityRevisions["m"] == 1 }
-        await settle(); await clock.advance(.milliseconds(250))
-        await eventually { server.read { $0.activityReads } == before.1 + 1 }
+        await settle(); await clock.advance(.milliseconds(250)); await settle()
+        XCTAssertEqual(store.activities["m"]?.map(\.id), [7, 1])
+        XCTAssertEqual(server.read { $0.activityReads }, before.1)
         XCTAssertEqual(server.read { $0.syncs }, before.0)
+        // A repeated frame for the same row is not shown twice.
+        try await frame(socket, #"{"type":"activity","epoch":"E","seq":2,"projectId":"p","activity":{"id":7,"memberId":"m","text":"pushed"}}"#)
+        await eventually { store.activityRevisions["m"] == 2 }
+        XCTAssertEqual(store.activities["m"]?.map(\.id), [7, 1])
         store.deactivateActivity(memberID: "m")
-        try await frame(socket, #"{"type":"activity","epoch":"E","seq":2,"projectId":"p","activity":{"id":2,"memberId":"m"}}"#)
+        XCTAssertNil(store.activities["m"])
+        try await frame(socket, #"{"type":"activity","epoch":"E","seq":3,"projectId":"p","activity":{"id":8,"memberId":"m"}}"#)
         await settle(); await clock.advance(.seconds(1)); await settle()
-        XCTAssertEqual(server.read { $0.activityReads }, before.1 + 1)
-        server.change { $0.seq = 3 }
-        try await frame(socket, #"{"type":"message","epoch":"E","seq":3,"message":{"id":"new","projectId":"p","body":"hello"}}"#)
-        await eventually { store.receivedCursor?.seq == 3 }
+        XCTAssertEqual(server.read { $0.activityReads }, before.1)
+        XCTAssertNil(store.activities["m"])
+        server.change { $0.seq = 4 }
+        try await frame(socket, #"{"type":"message","epoch":"E","seq":4,"message":{"id":"new","projectId":"p","body":"hello"}}"#)
+        await eventually { store.receivedCursor?.seq == 4 }
         await settle(); await clock.advance(.milliseconds(250))
-        await eventually { server.read { $0.pageReads } == before.2 + 1 }
+        await eventually { store.appliedSnapshotCursor?.seq == 4 }
+        await settle()
         XCTAssertEqual(store.historyMessages.last?.id, "new")
+        XCTAssertEqual(server.read { $0.pageReads }, before.2, "The message came with the event; the page is not read again")
+        // A skipped sequence means something was missed: everything open is read again.
+        await store.activateActivity(memberID: "m")
+        let reopened = server.read { ($0.activityReads, $0.pageReads) }
+        await clock.advance(.seconds(1)); await settle()
+        server.change { $0.seq = 9 }
+        try await frame(socket, #"{"type":"activity","epoch":"E","seq":9,"projectId":"p","activity":{"id":20,"memberId":"m"}}"#)
+        await eventually { store.receivedCursor?.seq == 9 }
+        await settle(); await clock.advance(.milliseconds(250))
+        await eventually { server.read { $0.activityReads } == reopened.0 + 1 && server.read { $0.pageReads } == reopened.1 + 1 }
+    }
+
+    /// n-appstore-2: 서버가 느리면 이벤트가 부르는 읽기는 직전 읽기에 걸린 시간의 두 배만큼 쉰다.
+    /// 대표가 누른 새로고침은 그 간격을 기다리지 않는다.
+    func testEventReadsBackOffByTheLastReadsDurationButAnExplicitRefreshDoesNot() async throws {
+        let server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
+        let network = try IsolatedTestNetwork(handler: server.handle)
+        guard let store = try await connected(server, network, clock, factory) else { return }
+        defer { store.disconnect() }
+        guard let socket = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
+        await clock.advance(.seconds(1)); await settle()
+        // A read that takes two seconds on the coordinator's clock.
+        let gate = DispatchSemaphore(value: 0), entered = expectation(description: "slow read")
+        server.change { $0.gate = gate; $0.entered = entered; $0.seq = 1 }
+        try await frame(socket, #"{"type":"decision","epoch":"E","seq":1,"decision":{"id":"d","projectId":"p"}}"#)
+        await eventually { store.receivedCursor?.seq == 1 }
+        await settle(); await clock.advance(.milliseconds(250))
+        await fulfillment(of: [entered], timeout: 2)
+        await clock.advance(.seconds(2))
+        gate.signal()
+        await eventually { store.appliedSnapshotCursor?.seq == 1 }
+        await settle()
+        let slow = server.read { $0.syncs }
+        // The next event waits 2 x 2s after that read finished, not the fixed 500ms.
+        server.change { $0.seq = 2 }
+        try await frame(socket, #"{"type":"decision","epoch":"E","seq":2,"decision":{"id":"d","projectId":"p"}}"#)
+        await eventually { store.receivedCursor?.seq == 2 }
+        await settle(); await clock.advance(.milliseconds(250)); await settle()
+        await clock.advance(.milliseconds(3500)); await settle()
+        XCTAssertEqual(server.read { $0.syncs }, slow, "An event-driven read must wait out the back-off")
+        XCTAssertEqual(store.appliedSnapshotCursor?.seq, 1)
+        await clock.advance(.milliseconds(250))
+        await eventually { store.appliedSnapshotCursor?.seq == 2 }
+        // That read was instant, so events are followed at the base interval again.
+        server.change { $0.seq = 3 }
+        try await frame(socket, #"{"type":"decision","epoch":"E","seq":3,"decision":{"id":"d","projectId":"p"}}"#)
+        await eventually { store.receivedCursor?.seq == 3 }
+        await settle(); await clock.advance(.milliseconds(500))
+        await eventually { store.appliedSnapshotCursor?.seq == 3 }
+        // Slow again, then an explicit refresh: it reads without waiting for the event back-off.
+        let again = DispatchSemaphore(value: 0), reentered = expectation(description: "second slow read")
+        server.change { $0.gate = again; $0.entered = reentered; $0.seq = 4 }
+        try await frame(socket, #"{"type":"decision","epoch":"E","seq":4,"decision":{"id":"d","projectId":"p"}}"#)
+        await eventually { store.receivedCursor?.seq == 4 }
+        await settle(); await clock.advance(.milliseconds(500))
+        await fulfillment(of: [reentered], timeout: 2)
+        await clock.advance(.seconds(2))
+        again.signal()
+        await eventually { store.appliedSnapshotCursor?.seq == 4 }
+        await settle()
+        let before = server.read { $0.syncs }
+        server.change { $0.seq = 5 }
+        try await frame(socket, #"{"type":"decision","epoch":"E","seq":5,"decision":{"id":"d","projectId":"p"}}"#)
+        await eventually { store.receivedCursor?.seq == 5 }
+        await settle(); await clock.advance(.milliseconds(250)); await settle()
+        XCTAssertEqual(server.read { $0.syncs }, before)
+        await store.refresh()
+        XCTAssertEqual(server.read { $0.syncs }, before + 1)
+        XCTAssertEqual(store.appliedSnapshotCursor?.seq, 5)
+    }
+
+    /// n-net-6: 본문을 읽지 못한 변경 프레임 하나 때문에 실시간 연결을 끊지 않는다. 모르는 변경으로 보고 전체를 다시 읽는다.
+    func testUnreadableChangeFrameKeepsTheSocketAndReadsEverythingAgain() async throws {
+        let server = CoordinatorServer(), clock = CoordinatorClock(), factory = CoordinatorSockets()
+        let network = try IsolatedTestNetwork(handler: server.handle)
+        guard let store = try await connected(server, network, clock, factory) else { return }
+        defer { store.disconnect() }
+        guard let socket = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
+        await store.activateHistory()
+        await clock.advance(.seconds(1)); await settle()
+        let before = server.read { ($0.syncs, $0.pageReads) }
+        server.change { $0.seq = 1 }
+        // A member row without its id cannot be decoded; the envelope (type, epoch, seq) is intact.
+        try await frame(socket, #"{"type":"member","epoch":"E","seq":1,"member":{"projectId":"p","status":7}}"#)
+        await eventually { store.receivedCursor?.seq == 1 }
+        await settle(); await clock.advance(.milliseconds(250))
+        await eventually { store.appliedSnapshotCursor?.seq == 1 }
+        await eventually { server.read { $0.pageReads } == before.1 + 1 }
+        XCTAssertEqual(server.read { $0.syncs }, before.0 + 1)
+        let sockets = await factory.sockets.count
+        XCTAssertEqual(sockets, 1, "The socket must stay open")
+        XCTAssertEqual(store.socketFailures, 0)
+        XCTAssertEqual(store.realtimeStatus, .live)
+        // A broken envelope is still an invalid frame and reconnects.
+        try await frame(socket, #"{"type":"member","epoch":"","seq":2,"member":{"id":"m"}}"#)
+        await eventually { store.socketFailures == 1 }
     }
 
     func testForegroundResumeRevalidatesWithoutNewHostSocketOnProjectSwitch() async throws {

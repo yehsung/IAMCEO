@@ -308,6 +308,9 @@ struct ComposerBar: View {
         .onChange(of: draftText) { old, new in
             if new.count > old.count { sentTo = nil }
         }
+        .onChange(of: canSend) { _, ready in
+            if ready { store.clearBlockedSendNotice(targetMemberID: target) }
+        }
     }
 
     // MARK: Meta row
@@ -520,7 +523,9 @@ struct ComposerBar: View {
 
     @ViewBuilder private var noticeLine: some View {
         ForEach(failures) { failure in failureNotice(failure) }
-        if let reason = store.messageSendNotice(targetMemberID: target) {
+        // 보낼 수 없던 사정을 알린 안내는 사정이 풀리면 더 보이지 않는다.
+        if let reason = store.messageSendNotice(targetMemberID: target),
+           !(canSend && store.messageSendNoticeEndsWithBlock(targetMemberID: target)) {
             notice(reason, icon: "exclamationmark.circle", color: CE.attention)
         }
         if checkingAttempt {

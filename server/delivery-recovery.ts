@@ -18,6 +18,8 @@ export interface DeliveryRecoveryOptions {
   store: DeliveryRecoveryStore;
   runner: (member: Member) => Pick<Runner, "inspectDelivery" | "repairDelivery"> | null;
   legacyMessageText?: (message: Message) => string;
+  /** True once nothing more can arrive from the write of this envelope (its call ended, or its process died). */
+  writerDone?: (dispatch: DeliveryDispatch) => boolean;
   now?: () => number;
   random?: () => number;
 }
@@ -195,10 +197,11 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   }
 
   /** A durable pre-write refusal needs no log, identity or quiescence evidence. */
-  requeueRejected(deliveryId: string): boolean {
+  requeueRejected(deliveryId: string, refusal?: string): boolean {
     return this.store.transaction(() => {
       const d = this.store.requireDelivery(deliveryId), r = this.record(deliveryId);
-      if (this.latest(d)?.transportState !== "rejected" || d.status === "delivered" || r.phase === "stopped") return false;
+      // The cheap checks come first: latest() reads the member's whole dispatch history.
+      if (d.status === "delivered" || r.phase === "stopped" || this.latest(d)?.transportState !== "rejected") return false;
       if (r.phase === "needs_owner" && r.reason === "stale_instruction") return false;
       if (r.phase === "resolved" && r.reason === "not_received" || r.phase === "waiting" && r.reason === "input_busy") return true;
       const exhausted = this.rejectedCount(d) >= MAX_REJECTED;
@@ -206,16 +209,19 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       this.store.updateDeliveryRecovery(d.id, r.version, { phase: exhausted ? "waiting" : "resolved", reason: exhausted ? "input_busy" : "not_received", nextCheckAt: null });
       this.store.setDeliveryStatus(d.id, exhausted ? "held" : "queued", { holdReason: exhausted ? "input_busy" : null });
       this.store.patchDeliveryRetry(d.id, { nextAttemptAt, retryReason: exhausted ? "input_busy" : null });
-      if (d.refType === "message" && d.refId) this.store.setMessageDelivery(d.refId, exhausted ? "held" : "queued", exhausted ? "직원의 입력칸이 비기를 기다리는 중입니다" : null);
+      // 거절이 이어진 까닭을 그대로 말한다. 일하는 중이거나 승인 창 앞인데 '입력칸이 비기를 기다린다'고 하면 대표가 엉뚱한 곳을 본다.
+      const why = refusal === "busy" ? "직원이 일하는 중이라 넣지 못했습니다. 잠시 뒤 다시 보냅니다" : refusal === "blocked" ? "승인 창 앞이라 넣지 못했습니다. 잠시 뒤 다시 보냅니다"
+        : refusal === "down" || refusal === "gone" ? "세션에 닿지 않아 넣지 못했습니다. 잠시 뒤 다시 보냅니다" : "직원의 입력칸이 비기를 기다리는 중입니다";
+      if (d.refType === "message" && d.refId) this.store.setMessageDelivery(d.refId, exhausted ? "held" : "queued", exhausted ? why : null);
       return true;
     });
   }
 
-  beginRecovery(deliveryId: string, reason = "inflight_unsettled"): void {
+  beginRecovery(deliveryId: string, reason = "inflight_unsettled", refusal?: string): void {
     this.store.transaction(() => {
       const d = this.store.requireDelivery(deliveryId);
       const r = this.record(deliveryId);
-      if (this.requeueRejected(deliveryId)) return;
+      if (this.requeueRejected(deliveryId, refusal)) return;
       if (["resolved", "stopped"].includes(r.phase) || d.status === "delivered") return;
       this.store.updateDeliveryRecovery(d.id, r.version, { phase: r.phase === "needs_owner" ? "needs_owner" : "checking", reason: r.phase === "needs_owner" ? r.reason : reason, nextCheckAt: this.iso() });
       this.projectStatus(d, "held", CHECK_NOTE);
@@ -267,7 +273,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       this.store.updateDispatch(dispatchId, dispatch.transportState, !result.ok && ["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown") ? "rejected" : "unknown");
       for (const item of dispatch.items) {
         const d = this.store.requireDelivery(item.deliveryId);
-        if (this.latest(d)?.dispatchId === dispatchId && !["resolved", "stopped"].includes(this.record(d.id).phase)) this.beginRecovery(d.id);
+        if (this.latest(d)?.dispatchId === dispatchId && !["resolved", "stopped"].includes(this.record(d.id).phase)) this.beginRecovery(d.id, undefined, result.ok ? undefined : result.reason);
       }
     });
   }
@@ -438,7 +444,14 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
         const d = this.store.getDelivery(item.deliveryId), r = this.store.getDeliveryRecovery(item.deliveryId);
         return d?.status === "delivered" && r?.phase === "resolved" && r.evidence.some(e => e.location === "received_input" && e.verdict === "present" && e.source !== "transport");
       });
-      if (proven) this.store.updateDispatch(dispatch.dispatchId, dispatch.transportState, "accepted");
+      // The physical fence exists for a write that may still land. Once its writer is done and every item has been
+      // decided another way (received, stopped by the owner, or re-sent in a newer envelope), nothing is left to wait
+      // for: '그만 보내기' used to leave the member fenced forever.
+      const closed = !proven && this.options.writerDone?.(dispatch) === true && dispatch.items.every(item => {
+        const d = this.store.getDelivery(item.deliveryId), r = this.store.getDeliveryRecovery(item.deliveryId);
+        return !d || d.status === "delivered" || r?.phase === "stopped" || this.latest(d)?.dispatchId !== dispatch.dispatchId;
+      });
+      if (proven || closed) this.store.updateDispatch(dispatch.dispatchId, dispatch.transportState, "accepted");
     }
   }
   private settlePhysical(dispatch: DeliveryDispatch, inspection: DeliveryInspection): void {
@@ -471,14 +484,16 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       this.wait(d.id, waiting);
       return;
     }
-    const elapsed = r.lastCheckedAt && r.phase !== "waiting" ? Math.max(0, this.now() - Date.parse(r.lastCheckedAt)) : 0;
+    // Still reading the provider log is progress, not an unanswered check: it does not count toward 'needs owner'.
+    const scanning = inspection.evidence[0]?.code === "scan_pending";
+    const elapsed = r.lastCheckedAt && r.phase !== "waiting" && !scanning ? Math.max(0, this.now() - Date.parse(r.lastCheckedAt)) : 0;
     const activeCheckMs = Math.min(120_000, r.activeCheckMs + elapsed);
     let reason = inspection.evidence[0]?.code ?? "inflight_unsettled";
     if (["partial_log", "partial_line", "scan_incomplete"].includes(reason)) reason = "log_incomplete";
     if (["file_missing", "permission_denied"].includes(reason)) reason = "log_missing";
     if (dispatch && s && !this.sameIdentity(dispatch.identity, s.identity) || s?.status === "gone") reason = "session_lost";
     let phase: DeliveryRecoveryRecord["phase"] = r.phase === "needs_owner" ? "needs_owner" : "checking";
-    let nextCheckAt = this.iso(this.now() + CHECK_MS[Math.min(r.checkCount, CHECK_MS.length - 1)]);
+    let nextCheckAt = this.iso(this.now() + (scanning ? CHECK_MS[0] : CHECK_MS[Math.min(r.checkCount, CHECK_MS.length - 1)]));
     const retry = this.store.getDeliveryRetry(d.id);
     const risk = retry.retryReason?.startsWith("delivery_risk:");
     if (dispatch && !this.sourceValid(dispatch, d)) { reason = "source_changed"; phase = "needs_owner"; }

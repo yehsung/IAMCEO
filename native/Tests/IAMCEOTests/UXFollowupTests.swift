@@ -344,6 +344,61 @@ private final class FollowupMessagePosts: @unchecked Sendable {
         await finish(Task { await network.close() })
     }
 
+    /// n-chat-4: 보낼 수 없던 사정을 알린 안내는 그 사정이 풀리면 지워지고, 실제 전송 실패의 설명은 남는다.
+    func testBlockedSendNoticeEndsWithItsCauseButAFailedAttemptKeepsItsExplanation() async throws {
+        let server = WriteTestServer()
+        server.change { $0.state.project.connection = ProjectConnection(ok: true) }
+        let network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connect(network)
+        defer { store.disconnect() }
+        let empty = await finish(Task { await ComposerBar.submit(in: store, targetMemberID: nil) })
+        XCTAssertFalse(empty)
+        XCTAssertEqual(store.messageSendNotice(targetMemberID: nil), "보낼 글이나 첨부를 넣어 주세요.")
+        XCTAssertTrue(store.messageSendNoticeEndsWithBlock(targetMemberID: nil))
+        // Typing makes the composer sendable again; the bar then drops the notice (its onChange(of: canSend)).
+        store.drafts.setText("글", for: key)
+        XCTAssertNil(ComposerBar.sendBlockReason(in: store, targetMemberID: nil))
+        store.clearBlockedSendNotice(targetMemberID: nil)
+        XCTAssertNil(store.messageSendNotice(targetMemberID: nil))
+        // An attempt that really failed explains itself until the next attempt.
+        let failed = await finish(Task { await store.sendMessage(text: "글", attachmentIDs: ["not-in-draft"]) })
+        XCTAssertFalse(failed)
+        XCTAssertTrue(store.messageSendNotice(targetMemberID: nil)?.contains("첨부 초안") == true)
+        XCTAssertFalse(store.messageSendNoticeEndsWithBlock(targetMemberID: nil))
+        store.clearBlockedSendNotice(targetMemberID: nil)
+        XCTAssertTrue(store.messageSendNotice(targetMemberID: nil)?.contains("첨부 초안") == true)
+        XCTAssertEqual(server.read { $0.sentIDs.count }, 0)
+        await finish(Task { await network.close() })
+    }
+
+    /// n-chat-4: '접수 확인 중' 안내는 접수가 확인되면 입력칸 아래와 위쪽 오류 줄에서 함께 사라진다.
+    func testCheckingNoticeAndBannerClearOnceTheMessageIsConfirmedAccepted() async throws {
+        let server = WriteTestServer()
+        let entered = expectation(description: "unknown response held"), gate = FollowupGate(entered)
+        let network = try IsolatedTestNetwork { request in
+            let reply = try server.handle(request)
+            if request.url?.path == "/api/projects/p/messages" {
+                return IsolatedTestHTTPReply(status: 503, beforeDelivery: { await gate.wait() })
+            }
+            return reply
+        }
+        let store = await connect(network)
+        defer { store.disconnect() }
+        let post = Task { await store.sendMessage(text: "원문") }
+        await fulfillment(of: [entered], timeout: 3)
+        await gate.release()
+        let result = await finish(post)
+        XCTAssertFalse(result)
+        XCTAssertTrue(store.messageSendNotice(targetMemberID: nil)?.contains("접수 확인 중") == true)
+        XCTAssertTrue(store.errorMessage?.contains("접수 확인 중") == true)
+        await finish(Task { await store.recoverWrites() })
+        let id = try XCTUnwrap(server.read { $0.sentIDs.first })
+        XCTAssertEqual(store.submissions?.messageAttempt(id: id)?.status, .accepted)
+        XCTAssertNil(store.messageSendNotice(targetMemberID: nil))
+        XCTAssertNil(store.errorMessage)
+        await network.close()
+    }
+
     func testUnknownResultQueriesAcceptanceWithoutRestoringOrPostingAgain() async throws {
         let server = WriteTestServer()
         let entered = expectation(description: "unknown response held"), gate = FollowupGate(entered)

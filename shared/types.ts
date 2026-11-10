@@ -339,7 +339,8 @@ export interface FileDoc {
 }
 
 /** 대기 중인 동안의 연속 대기 시작 시각. runLimit은 run_limit일 때만 있다. */
-export type DeliveryWaitReason = "next_turn" | "run_limit" | "member_busy" | "waking" | "receipt_check" | "approval" | "manual_control" | "runner_off" | "archived" | "api_outage" | "usage_limit" | "unknown";
+/** retry_wait: 거절이 이어져 다시 보낼 시각을 기다리는 중. 모르는 값은 앱이 '전달을 기다리는 중'으로 보여 준다. */
+export type DeliveryWaitReason = "next_turn" | "run_limit" | "member_busy" | "waking" | "receipt_check" | "approval" | "manual_control" | "runner_off" | "archived" | "api_outage" | "usage_limit" | "retry_wait" | "unknown";
 export interface DeliveryWaitInfo {
   waitReason: DeliveryWaitReason;
   waitingSince: string;

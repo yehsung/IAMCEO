@@ -104,6 +104,8 @@ export interface OrchestratorApi {
   recoverDelivery?(deliveryId: string, request: DeliveryRecoveryRequest): Promise<DeliveryRecoveryResult>;
   /** 실행기를 지금 다시 본다. 입력을 받기 전에 부른다. */
   refreshConnection?(): Promise<void>;
+  /** 연결 상태만 다시 보고 뒤따르는 정리는 기다리지 않는다. 없으면 refreshConnection 을 쓴다. */
+  refreshHealth?(): Promise<void>;
   startConductor(projectId: string): Promise<Member>;
   /** http.ts 가 프로젝트·대상·첨부·멱등(같은 id 재전송)을 먼저 걸러 준다. */
   sendUserMessage(projectId: string, req: SendMessageReq): Promise<Message>;
@@ -150,4 +152,10 @@ export interface OrchestratorApi {
   acknowledgeManualInbox?(memberId: string, request: ManualInboxAckRequest): Promise<ManualInboxAckResult>;
   /** 답이 오거나 timeoutMs(최대 50초)가 지나면 돌아온다. */
   askWait(member: Member, decisionId: string, timeoutMs: number, signal?: AbortSignal): Promise<AskWaitResult>;
+}
+
+/** 기다리되 ms 를 넘기면 fallback 으로 답한다. 원래 작업은 계속 돈다. */
+export function briefly<T>(work: Promise<T>, ms: number, fallback: () => T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([work, new Promise<T>(resolve => { timer = setTimeout(() => resolve(fallback()), ms); })]).finally(() => { if (timer) clearTimeout(timer); });
 }

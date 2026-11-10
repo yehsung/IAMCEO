@@ -176,10 +176,13 @@ test("stall: 900 messages/deliveries, busy core output and three realtime client
     expect(consumedBytes).toBeGreaterThan(0);
     for (const seqs of cursors) expect(seqs.every((seq, i) => i === 0 || seq > seqs[i - 1]!)).toBe(true);
     expect(eventTimes.length).toBeGreaterThan(0);
-    expect(stats(latency.health).p95).toBeLessThan(50);
-    expect(stats(latency.health).max).toBeLessThan(200);
-    expect(stats(latency.notices).p95).toBeLessThan(150);
-    expect(stats(latency.state).p95).toBeLessThan(150);
+    // 벽시계 상한은 기준 장비에서만 판정한다(bun run test:perf). 표본이 적으면 p95 는 최댓값 하나라 판정하지 않는다.
+    if (process.env.IAMCEO_PERF_STRICT === "1") {
+      if (latency.health.length >= 20) expect(stats(latency.health).p95).toBeLessThan(50);
+      expect(stats(latency.health).max).toBeLessThan(200);
+      if (latency.notices.length >= 20) expect(stats(latency.notices).p95).toBeLessThan(150);
+      if (latency.state.length >= 20) expect(stats(latency.state).p95).toBeLessThan(150);
+    }
     expect(perSecond).toBeLessThanOrEqual(16);
     expect(stats(spans.notices.map(v => v.queries)).max).toBeLessThan(150);
     expect(stats(spans.state.map(v => v.queries)).max).toBeLessThan(150);

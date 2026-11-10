@@ -645,6 +645,16 @@ private struct ModelKey: CodingKey {
 enum ContractLog {
     private static let logger = Logger(subsystem: "com.iamceo.native", category: "Contract")
     static func skipped(_ type: Any.Type, _ error: any Error, fallback: [any CodingKey]) {
+        let (reason, path) = describe(error, fallback: fallback)
+        let name = String(describing: type)
+        logger.error("skipped \(name, privacy: .public) \(reason, privacy: .public) at \(path, privacy: .public)")
+    }
+    /// 응답이나 실시간 프레임 전체를 읽지 못했을 때. 어디서(경로·종류) 무엇이(필드 위치) 어긋났는지만 남긴다.
+    static func unreadable(_ source: String, _ error: any Error) {
+        let (reason, path) = describe(error, fallback: [])
+        logger.error("unreadable \(source, privacy: .public) \(reason, privacy: .public) at \(path, privacy: .public)")
+    }
+    static func describe(_ error: any Error, fallback: [any CodingKey]) -> (reason: String, path: String) {
         var reason = "other", keys = fallback
         if let decoding = error as? DecodingError {
             switch decoding {
@@ -655,9 +665,7 @@ enum ContractLog {
             @unknown default: break
             }
         }
-        let path = keys.map { key in key.intValue.map { String($0) } ?? key.stringValue }.joined(separator: ".")
-        let name = String(describing: type)
-        logger.error("skipped \(name, privacy: .public) \(reason, privacy: .public) at \(path, privacy: .public)")
+        return (reason, keys.map { key in key.intValue.map { String($0) } ?? key.stringValue }.joined(separator: "."))
     }
 }
 
@@ -984,7 +992,9 @@ struct DeliveryNoticeItem: Codable, Sendable, Identifiable {
         "archived", "legacy_session", "send_error", "turn_error", "manual_control", "busy",
         "draft_pending", "duplicate_draft", "log_missing", "log_incomplete", "session_unbound",
         "session_lost", "inflight_unsettled", "unsupported_schema", "source_changed", "retry_exhausted",
-        "identity_changed", "complete_range_without_marker", "not_received"
+        "identity_changed", "complete_range_without_marker", "not_received",
+        // 서버가 실제로 내보내는 사유. 빠져 있으면 서버의 설명을 버리고 '상세 내용을 확인해 주세요'만 보인다.
+        "stalled", "stale_instruction", "legacy_unknown"
     ]
 }
 struct DeliveryRecommendation: Codable, Sendable { let code: String; let text: String }

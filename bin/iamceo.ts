@@ -145,8 +145,9 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
   let backups: import("../server/backup.ts").BackupManager | undefined;
   let client = options.client;
   let sweepTimer: ReturnType<typeof setInterval> | undefined;
+  let vitalsTimer: ReturnType<typeof setInterval> | undefined;
   let maintenanceTimer: ReturnType<typeof setTimeout> | undefined;
-  const loopMonitor = new LoopMonitor();
+  const loopMonitor = new LoopMonitor({ cpu: () => { const used = process.cpuUsage(); return (used.user + used.system) / 1000; } });
   const stopIngress = () => {
     ready = false;
     // The runtime's stop collects failures after initialization releases its DB work.
@@ -158,6 +159,7 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
   const stop = (): Promise<void> => stopped ??= (async () => {
     ready = false;
     clearInterval(sweepTimer);
+    clearInterval(vitalsTimer);
     clearTimeout(maintenanceTimer);
     unsubscribe?.();
     // Stop ingress and all producers/consumers together, within one outer deadline.
@@ -201,7 +203,7 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
     const tickOwner = orch;
     Reflect.set(orch, "onTick", () => loopMonitor.run("timer:onTick", () => onTick.call(tickOwner)));
     const runtimeInfo = orch.runtimeInfo.bind(orch);
-    orch.runtimeInfo = async () => ({ ...await runtimeInfo(), daemon: { ready, buildId: identity, version: VERSION } });
+    orch.runtimeInfo = async () => ({ ...await runtimeInfo(), daemon: { ready, buildId: identity, version: VERSION }, ...(backups ? { backup: backups.status() } : {}) });
     const context = { config, store, bus, orch, delivery: orch.deliveryRecovery, loopMonitor,
       daemon: () => ({ ready, buildId: identity, version: VERSION }),
       push: { store: push, providers: () => client!.status(), wake: () => worker?.wake() } };
@@ -220,10 +222,15 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
     backups = new BackupManager({ home: config.home, backupDir, policy: options.backupPolicy, loopMonitor });
     const storage = new StorageMaintenance({ uploadsDir: config.uploadsDir, inboxDir: config.inboxDir, backupDir,
       references: createStorageReferences(store, config.inboxDir) });
+    const { readVitals, vitalsLine } = await import("../server/vitals.ts");
+    const vitals = () => loopMonitor.run("timer:vitals", () => {
+      try { const { line, warn } = vitalsLine(readVitals(db!, config.dbPath)); (warn ? console.warn : console.info)(line); }
+      catch { /* 진단 한 줄이 서버를 흔들면 안 된다 */ }
+    });
     const sweep = () => loopMonitor.run("timer:storageSweep", () => {
       try { if (storage.sweep().errors.length) console.error("저장소 정리 중 보존된 오류 항목이 있습니다"); }
       catch { console.error("저장소 정리 실패"); }
-      if (backups?.lastError) console.error("정기 백업 실패");
+      if (backups?.lastError) console.error(`정기 백업 실패 중: ${backups.status().cause} (연속 ${backups.status().failures}회)`);
     });
     ready = !options.signal?.aborted;
     const startupMs = performance.now() - startedAt;
@@ -234,6 +241,9 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
         sweep();
         sweepTimer = setInterval(sweep, Math.max(1, options.sweepIntervalMs ?? 3_600_000));
         sweepTimer.unref();
+        vitals();
+        vitalsTimer = setInterval(vitals, 5 * 60_000);
+        vitalsTimer.unref();
       }, Math.max(0, options.maintenanceDelayMs ?? 120_000));
       maintenanceTimer.unref();
     }
@@ -296,6 +306,9 @@ async function serve(): Promise<void> {
     } catch { process.exit(1); }
   };
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, stop);
+  // 타이머 콜백의 예외나 놓친 거부 한 번에 서버가 통째로 죽지 않게 한다. 계속 쏟아질 때만 정상 종료로 내려간다.
+  const { createCrashGuard } = await import("../server/crash-guard.ts");
+  const uninstallGuard = createCrashGuard({ restart: () => { void stop("crash-guard"); } }).install();
   try {
     const config = loadConfig();
     if (!COMPILED) process.chdir(resolve(import.meta.dir, ".."));
@@ -310,6 +323,7 @@ async function serve(): Promise<void> {
   } catch (error) {
     if (!starting) owner.release();
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.off(signal, stop);
+    uninstallGuard();
     throw error;
   }
 }

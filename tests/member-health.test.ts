@@ -232,7 +232,8 @@ for (const operation of ["send", "send_urgent", "parallel", "compact", "start_se
   test(`runner ${operation} never settles: pump releases and side effects are fenced`, async () => {
     const f = await fixture({}, 35), member = await f.create(), other = await f.create("Other");
     if (operation === "send" || operation === "send_urgent") f.runner.send = () => never<SendResult>();
-    if (operation === "send_urgent") { f.store.patchMember(member.id, { status: "working" }); f.runner.isBusy = id => id === member.id; }
+    // core 는 일하는 턴에 끼워 넣지 못해 긴급을 시도하지 않는다(delivery-1). 끼워 넣는 실행기의 긴급 경로가 멈춰도 펌프가 풀리는지는 계속 본다.
+    if (operation === "send_urgent") { f.store.patchMember(member.id, { status: "working" }); f.runner.isBusy = id => id === member.id; (f.runner as { interjects: boolean }).interjects = true; }
     if (operation === "parallel") { f.internal.runtime(member.id).wantParallel = true; f.runner.setParallel = () => never<SendResult>(); }
     if (operation === "compact") { f.internal.queueCoreCompact(member, "manual", "focus"); f.runner.compact = () => never<SendResult>(); }
     if (operation === "start_session") {

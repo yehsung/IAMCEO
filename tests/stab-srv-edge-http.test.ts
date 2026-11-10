@@ -75,3 +75,27 @@ test("n-models-3: 전달 알림 계산이 실패해도 sync·state 는 200 이�
   // 조용히 삼키지 않는다: 원인이 서버 로그에 남는다.
   expect(errors.some(line => line.includes("전달 알림 계산 실패") && line.includes(projectId))).toBe(true);
 });
+
+test("store-7: 디스크 가득·저장소 I/O 오류는 분류한 코드와 안내로 답하고 SQLite 원문을 내보내지 않는다", async () => {
+  const original = store.listMessagePage;
+  const errors: unknown[][] = [], log = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  try {
+    store.listMessagePage = () => { throw Object.assign(new Error("database or disk is full"), { code: "SQLITE_FULL", errno: 13 }); };
+    const full = await get(`/api/projects/${projectId}/messages/page`);
+    expect(full.status).toBe(507);
+    const body = await full.json() as { error: string; code?: string };
+    expect(body.code).toBe("storage_full");
+    expect(body.error).toContain("저장 공간이 부족");
+    expect(body.error).not.toContain("database or disk");
+    store.listMessagePage = () => { throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" }); };
+    const io = await get(`/api/projects/${projectId}/messages/page`);
+    expect(io.status).toBe(500);
+    expect(await io.json()).toMatchObject({ code: "storage_io" });
+    store.listMessagePage = () => { throw new Error("그 밖의 오류"); };
+    const other = await get(`/api/projects/${projectId}/messages/page`);
+    expect(other.status).toBe(500);
+    expect(await other.json()).toEqual({ error: "그 밖의 오류" });
+  } finally { store.listMessagePage = original; console.error = log; }
+  expect(errors.some(args => args.includes("storage_full"))).toBe(true);
+});

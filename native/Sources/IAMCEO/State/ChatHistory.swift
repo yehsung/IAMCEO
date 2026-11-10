@@ -83,8 +83,21 @@ struct ChatHistory: Sendable {
     private(set) var change: ChatHistoryChange = .initial
     var anchor: ChatHistoryAnchor?
     var pinnedToBottom = true
-    private var confirmed: [Data: Message] = [:]
-    private var optimistic: [Data: Message] = [:]
+    private var confirmed: [Data: Message] = [:] { didSet { sorted = SortedRows() } }
+    private var optimistic: [Data: Message] = [:] { didSet { sorted = SortedRows() } }
+    /// 정렬한 목록은 내용이 바뀔 때만 다시 만든다. 화면은 스크롤 프레임마다 items를 읽는다.
+    private final class SortedRows: @unchecked Sendable {
+        private let lock = NSLock()
+        private var rows: [Message]?
+        func value(_ make: () -> [Message]) -> [Message] {
+            lock.lock(); defer { lock.unlock() }
+            if let rows { return rows }
+            let made = make()
+            rows = made
+            return made
+        }
+    }
+    private var sorted = SortedRows()
     private var overlay: [Data: Message] = [:]
     private var journal: [Message] = []
     private struct Bridge: Sendable {
@@ -98,9 +111,16 @@ struct ChatHistory: Sendable {
 
     var isBridging: Bool { bridge != nil }
     var items: [Message] {
-        var rows = confirmed
-        for (id, row) in optimistic where rows[id] == nil { rows[id] = row }
-        return rows.values.sorted(by: Self.ordered)
+        sorted.value {
+            var rows = confirmed
+            for (id, row) in optimistic where rows[id] == nil { rows[id] = row }
+            return rows.values.sorted(by: Self.ordered)
+        }
+    }
+    /// 실시간으로 받은 글이 이 대화에 이미 놓였거나, 진행 중인 읽기가 놓아 줄 예정인가. false면 최신 쪽을 다시 읽어야 보인다.
+    func settled(_ message: Message) -> Bool {
+        guard contains(message) else { return true }
+        return confirmed[Data(message.id.utf8)] != nil || loading?.kind == .latest || loading?.kind == .initial || bridge != nil
     }
     var confirmedItems: [Message] { confirmed.values.sorted(by: Self.ordered) }
     var optimisticIDs: [String] { optimistic.values.map(\.id) }

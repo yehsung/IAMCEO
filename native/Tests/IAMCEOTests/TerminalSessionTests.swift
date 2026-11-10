@@ -39,7 +39,7 @@ import SwiftUI
         coordinator.send(source: host.terminal, data: Array("a".utf8)[...])
         coordinator.send(source: host.terminal, data: Array("b".utf8)[...])
         XCTAssertTrue(session.starting); XCTAssertTrue(sent.isEmpty)
-        for _ in 0..<200 where modes.last != .control { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { modes.last != .control }
         XCTAssertEqual(modes, [.observe, .control])
         XCTAssertEqual(server.read { $0.terminalBodies.compactMap { $0["action"] as? String } }, ["claim"])
         session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
@@ -56,7 +56,7 @@ import SwiftUI
         let session = TerminalSession(platform: .mac, connect: { _, _, mode, _, _, _, _ in modes.append(mode) })
         session.appear(store: store, member: member, active: true); session.sizeChanged(cols: 100, rows: 30)
         session.beginInput(store: store, member: member)
-        for _ in 0..<200 where modes.last != .control { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { modes.last != .control }
         session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
         let now = Date()
         session.setActive(false, store: store, member: member, now: now)
@@ -69,12 +69,134 @@ import SwiftUI
         session.setActive(false, store: store, member: member, now: now)
         session.setActive(false, store: store, member: member, now: now.addingTimeInterval(100))
         session.endInputIfInactive(store: store, member: member, now: now.addingTimeInterval(180))
-        for _ in 0..<200 where session.controlling || session.ending || session.ownedLeaseID != nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { session.controlling || session.ending || session.ownedLeaseID != nil }
         XCTAssertTrue(session.readOnly)
         XCTAssertEqual(session.inputEndedStatus, "자리를 비운 사이 입력을 끝냈습니다 · 클릭하면 다시 시작합니다")
         XCTAssertEqual(server.read { $0.terminalBodies.compactMap { $0["action"] as? String } }, ["claim", "release"])
         session.setActive(true, store: store, member: member)
         XCTAssertEqual(modes.last, .observe)
+        session.disappear(store: store, member: member); store.disconnect()
+    }
+
+    /// n-term-2: 화면을 클릭만 하고 아무것도 치지 않은 조작권은 자리를 뜨면 곧 놓는다(3분이 아니라 10초).
+    /// 그동안 스크롤·클릭만으로는 조작권을 연장하지 않는다. 한 글자라도 치면 예전 그대로다.
+    func testClickOnlyClaimIsReleasedSoonAfterLeavingAndTypingRestoresTheLongGrace() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        var modes: [TerminalStreamMode] = [], frames: [String] = []
+        let client = TerminalStreamClient(messageSender: { message in
+            if case .string(let text) = message { frames.append(text) } else { frames.append("data") }
+        })
+        let session = TerminalSession(platform: .mac, client: client, connect: { _, _, mode, _, _, _, _ in modes.append(mode) })
+        session.appear(store: store, member: member, active: true); session.sizeChanged(cols: 100, rows: 30)
+        session.requestInput(Data(), store: store, member: member) // a click on the read-only screen
+        try await waitWhile { modes.last != .control }
+        client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
+        XCTAssertTrue(session.controlling)
+        client.activity(windowIsKey: true)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertTrue(frames.isEmpty, "Mouse and scroll alone do not extend a lease taken by one click")
+        let now = Date()
+        session.setActive(false, store: store, member: member, now: now)
+        session.endInputIfInactive(store: store, member: member, now: now.addingTimeInterval(9.9))
+        XCTAssertTrue(session.controlling)
+        session.endInputIfInactive(store: store, member: member, now: now.addingTimeInterval(10))
+        try await waitWhile { session.controlling || session.ending || session.ownedLeaseID != nil }
+        XCTAssertEqual(server.read { $0.terminalBodies.compactMap { $0["action"] as? String } }, ["claim", "release"])
+        XCTAssertEqual(session.inputEndedStatus, TerminalPresentation.inactiveStatus)
+        // n-term-6: only the input ends. The window keeps showing the terminal read-only.
+        XCTAssertEqual(modes.last, .observe); XCTAssertTrue(session.readOnly)
+        // The same click, followed by typing, is a real input session: three minutes as before, and activity renews it.
+        client.accept(.ready(mode: .observe, cols: 100, rows: 30, expiresAt: nil))
+        session.requestInput(Data(), store: store, member: member)
+        try await waitWhile { modes.last != .control }
+        client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
+        session.requestInput(Data("a".utf8), store: store, member: member)
+        try await waitWhile { !frames.contains("data") }
+        client.activity(windowIsKey: true)
+        try await waitWhile { !frames.contains(#"{"type":"activity"}"#) }
+        session.setActive(false, store: store, member: member, now: now)
+        session.endInputIfInactive(store: store, member: member, now: now.addingTimeInterval(179.9))
+        XCTAssertTrue(session.controlling)
+        session.endInputIfInactive(store: store, member: member, now: now.addingTimeInterval(180))
+        try await waitWhile { session.controlling || session.ending || session.ownedLeaseID != nil }
+        XCTAssertEqual(server.read { $0.terminalBodies.compactMap { $0["action"] as? String } }, ["claim", "release", "claim", "release"])
+        session.disappear(store: store, member: member); store.disconnect()
+    }
+
+    #if os(macOS)
+    /// n-term-2: 터미널 창이 key를 잃는 것도 '자리를 뜬 것'이다. 다만 클릭만으로 잡은 조작권에만 적용한다.
+    func testWindowLosingKeyStartsTheShortGraceOnlyForAClickOnlyClaim() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        var modes: [TerminalStreamMode] = []
+        let session = TerminalSession(platform: .mac, connect: { _, _, mode, _, _, _, _ in modes.append(mode) })
+        session.appear(store: store, member: member, active: true); session.sizeChanged(cols: 100, rows: 30)
+        session.beginInput(store: store, member: member) // the 입력 시작 button
+        try await waitWhile { modes.last != .control }
+        session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
+        session.windowKeyChanged(false, store: store, member: member)
+        session.endInputIfInactive(store: store, member: member, now: Date().addingTimeInterval(170))
+        XCTAssertTrue(session.controlling, "An explicit input session is not ended by another window taking focus")
+        await session.finishInput(store: store, member: member, resume: true)
+        session.client.accept(.ready(mode: .observe, cols: 100, rows: 30, expiresAt: nil))
+        session.requestInput(Data(), store: store, member: member) // a click
+        try await waitWhile { modes.last != .control }
+        session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
+        session.windowKeyChanged(false, store: store, member: member)
+        session.windowKeyChanged(true, store: store, member: member) // back at once: the grace is cancelled
+        session.endInputIfInactive(store: store, member: member, now: Date().addingTimeInterval(60))
+        XCTAssertTrue(session.controlling)
+        session.windowKeyChanged(false, store: store, member: member)
+        session.endInputIfInactive(store: store, member: member, now: Date().addingTimeInterval(11))
+        try await waitWhile { session.controlling || session.ending || session.ownedLeaseID != nil }
+        XCTAssertEqual(server.read { $0.terminalBodies.compactMap { $0["action"] as? String } }, ["claim", "release", "claim", "release"])
+        session.disappear(store: store, member: member); store.disconnect()
+    }
+    #endif
+
+    /// n-term-4: 메인 창이 다른 프로젝트를 보는 동안에는 조작권을 요청하지 않는다. 보기 연결을 끊었다 다시 붙이지도 않는다.
+    func testInputForAMemberOutsideTheSelectedProjectIsExplainedWithoutClaimingOrReconnecting() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connectedStore(network)
+        let other = Member(id: "elsewhere", projectId: "q", backend: "core", status: "idle", paneId: "pane")
+        var modes: [TerminalStreamMode] = []
+        let session = TerminalSession(platform: .mac, connect: { _, _, mode, _, _, _, _ in modes.append(mode) })
+        session.appear(store: store, member: other, active: true)
+        XCTAssertEqual(modes, [.observe])
+        XCTAssertFalse(TerminalSession.canControl(other, in: store))
+        session.requestInput(Data("a".utf8), store: store, member: other)
+        session.requestInput(Data("b".utf8), store: store, member: other)
+        XCTAssertEqual(session.notice, "메인 창이 다른 프로젝트를 보고 있어 입력할 수 없습니다. 이 직원의 프로젝트로 돌아온 뒤 다시 시도하세요.")
+        XCTAssertFalse(session.starting); XCTAssertTrue(session.readOnly)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(modes, [.observe], "The viewer is left alone")
+        XCTAssertTrue(server.read { $0.terminalBodies.isEmpty })
+        session.disappear(store: store, member: other); store.disconnect()
+    }
+
+    /// n-term-6: 잠자기 뒤처럼 active가 꺼진 채 남아도 '다시 연결'·'입력 시작' 버튼은 반응한다.
+    func testButtonsRespondAfterTheSessionWasLeftInactive() async throws {
+        let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connectedStore(network), member = try XCTUnwrap(store.members.first)
+        var modes: [TerminalStreamMode] = []
+        let session = TerminalSession(platform: .mac, connect: { _, _, mode, _, _, _, _ in modes.append(mode) })
+        session.appear(store: store, member: member, active: true); session.sizeChanged(cols: 100, rows: 30)
+        // The Mac went to sleep. Let the queued end-of-input run before pressing anything.
+        func sleepMac() async throws {
+            session.setActive(false, store: store, member: member, immediately: true)
+            for _ in 0..<30 { await Task.yield() }
+            try await waitWhile { session.ending }
+        }
+        try await sleepMac()
+        session.observe(store: store, member: member)
+        XCTAssertEqual(modes, [.observe], "The bare call is ignored while inactive")
+        session.userReconnect(store: store, member: member)
+        XCTAssertEqual(modes, [.observe, .observe])
+        try await sleepMac()
+        session.userBeginInput(store: store, member: member)
+        try await waitWhile { modes.last != .control }
+        XCTAssertEqual(server.read { $0.terminalBodies.compactMap { $0["action"] as? String } }, ["claim"])
         session.disappear(store: store, member: member); store.disconnect()
     }
 
@@ -133,10 +255,10 @@ import SwiftUI
         let session = controlSession(platform: .mac) { _, _, mode, _, _, _, _ in attached = mode == .control }
         session.appear(store: store, member: member, active: true); session.sizeChanged(cols: 100, rows: 30)
         session.beginInput(store: store, member: member)
-        for _ in 0..<200 where !attached { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { !attached }
         session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
         session.setActive(false, store: store, member: member, immediately: true)
-        for _ in 0..<200 where session.controlling || session.ending || session.ownedLeaseID != nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { session.controlling || session.ending || session.ownedLeaseID != nil }
         XCTAssertTrue(session.readOnly); XCTAssertNil(session.ownedLeaseID)
         session.disappear(store: store, member: member); store.disconnect()
     }
@@ -155,7 +277,7 @@ import SwiftUI
         session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         XCTAssertTrue(session.starting); XCTAssertEqual(session.surfaceMode, .control); XCTAssertFalse(session.readOnly)
         // Explicit input claims even before SwiftUI has reported the first viewport.
-        for _ in 0..<200 where store.terminalLeases[member.id] == nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { store.terminalLeases[member.id] == nil }
         XCTAssertNotNil(store.terminalLeases[member.id])
         XCTAssertEqual(server.read { $0.terminalBodies.first?["action"] as? String }, "claim")
         XCTAssertTrue(modes.isEmpty, "Never attach using the placeholder 100x30 grid")
@@ -165,7 +287,7 @@ import SwiftUI
         session.client.accept(.ready(mode: .control, cols: 113, rows: 37, expiresAt: 9_999_999_999_999))
         XCTAssertFalse(session.starting); XCTAssertTrue(session.controlling)
         session.disappear(store: store, member: member)
-        for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { store.terminalLeases[member.id] != nil }
         XCTAssertNil(store.terminalLeases[member.id])
         XCTAssertEqual(server.read { $0.terminalBodies.last?["action"] as? String }, "release")
         XCTAssertEqual(session.client.state, .closed(reason: "client_closed", message: nil))
@@ -219,7 +341,7 @@ import SwiftUI
         XCTAssertEqual(claims.map { $0["action"] as? String }, ["claim", "claim", "claim"])
         XCTAssertEqual(Set(claims.compactMap { $0["operationId"] as? String }).count, 3, "Explicit retries must send fresh claims after definite refusals")
         session.disappear(store: store, member: member)
-        for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { store.terminalLeases[member.id] != nil }
         store.disconnect()
     }
 
@@ -260,7 +382,7 @@ import SwiftUI
         session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         XCTAssertTrue(session.starting); XCTAssertFalse(session.readOnly)
         XCTAssertTrue(session.platform.acceptsKeyboard(mode: session.surfaceMode))
-        for _ in 0..<200 where store.terminalLeases[member.id] == nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { store.terminalLeases[member.id] == nil }
         XCTAssertNotNil(store.terminalLeases[member.id])
         XCTAssertEqual(server.read { $0.terminalBodies.first?["action"] as? String }, "claim")
         XCTAssertTrue(modes.isEmpty, "Claim immediately, but wait for the phone viewport before attaching")
@@ -270,7 +392,7 @@ import SwiftUI
         session.client.accept(.ready(mode: .control, cols: 55, rows: 24, expiresAt: nil))
         XCTAssertFalse(session.starting); XCTAssertTrue(session.controlling)
         session.disappear(store: store, member: member)
-        for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { store.terminalLeases[member.id] != nil }
         XCTAssertNil(store.terminalLeases[member.id]); XCTAssertNil(session.ownedLeaseID)
         XCTAssertEqual(server.read { $0.terminalBodies.map { $0["action"] as? String } }, ["claim", "release"])
         XCTAssertEqual(session.client.state, .closed(reason: "client_closed", message: nil))
@@ -317,7 +439,7 @@ import SwiftUI
         XCTAssertEqual(claims.map { $0["action"] as? String }, ["claim", "claim"])
         XCTAssertEqual(Set(claims.compactMap { $0["operationId"] as? String }).count, 2)
         session.disappear(store: store, member: member)
-        for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { store.terminalLeases[member.id] != nil }
         store.disconnect()
     }
 
@@ -372,7 +494,7 @@ import SwiftUI
         session.client.accept(.ready(mode: .control, cols: 55, rows: 24, expiresAt: nil))
         XCTAssertEqual(sent.count, 1, "A ready event must never replay the same input twice")
         session.disappear(store: store, member: member)
-        for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { store.terminalLeases[member.id] != nil }
         store.disconnect()
     }
 
@@ -385,20 +507,20 @@ import SwiftUI
         }
         session.sizeChanged(cols: 55, rows: 24)
         session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
-        for _ in 0..<200 where attaches == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { attaches == 0 }
         XCTAssertEqual(attaches, 1)
         session.client.accept(.ready(mode: .control, cols: 55, rows: 24, expiresAt: nil))
         session.setActive(false, store: store, member: member)
-        for _ in 0..<200 where session.controlling || session.ending || store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { session.controlling || session.ending || store.terminalLeases[member.id] != nil }
         XCTAssertFalse(session.controlling); XCTAssertNil(store.terminalLeases[member.id])
         XCTAssertEqual(session.surfaceMode, .observe, "Background cleanup disables the phone keyboard")
         XCTAssertEqual(attaches, 1)
         XCTAssertEqual(server.read { $0.terminalBodies.map { $0["action"] as? String } }, ["claim", "release"])
         session.setActive(true, store: store, member: member); session.beginInput(store: store, member: member)
-        for _ in 0..<200 where attaches < 2 { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { attaches < 2 }
         XCTAssertEqual(attaches, 2); XCTAssertFalse(session.readOnly)
         session.disappear(store: store, member: member)
-        for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { store.terminalLeases[member.id] != nil }
         XCTAssertEqual(server.read { $0.terminalBodies.map { $0["action"] as? String } }, ["claim", "release", "claim", "release"])
         store.disconnect()
     }
@@ -451,7 +573,7 @@ import SwiftUI
         session.client.accept(.ready(mode: .control, cols: 120, rows: 40, expiresAt: nil))
         XCTAssertTrue(session.notice?.contains("친 키를 버렸습니다") == true)
         session.disappear(store: store, member: member)
-        for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { store.terminalLeases[member.id] != nil }
         store.disconnect()
     }
 
@@ -479,7 +601,7 @@ import SwiftUI
         XCTAssertTrue(second.controlling)
         XCTAssertEqual(server.read { $0.terminalBodies.map { $0["action"] as? String } }, ["claim", "release", "claim"])
         second.disappear(store: store, member: member)
-        for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { store.terminalLeases[member.id] != nil }
         XCTAssertNil(store.terminalLeases[member.id]); store.disconnect()
     }
 
@@ -504,7 +626,7 @@ import SwiftUI
         XCTAssertEqual(Set(claims).count, 2)
         XCTAssertEqual(store.terminalLeases[member.id]?.leaseId, second.ownedLeaseID)
         second.disappear(store: store, member: member)
-        for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { store.terminalLeases[member.id] != nil }
         store.disconnect()
     }
 
@@ -521,10 +643,10 @@ import SwiftUI
             var controlAttaches = 0, sent: [Data] = []
             let session = controlSession(platform: .mac, connect: { _, _, mode, _, _, _, _ in if mode == .control { controlAttaches += 1 } }, send: { sent.append($0) })
             session.sizeChanged(cols: 100, rows: 30); session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
-            for _ in 0..<200 where controlAttaches == 0 { try await Task.sleep(for: .milliseconds(10)) }
+            try await waitWhile { controlAttaches == 0 }
             session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
             session.setActive(false, store: store, member: member, immediately: true)
-            for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+            try await waitWhile { store.terminalLeases[member.id] != nil }
             let gate = DispatchSemaphore(value: 0), entered = expectation(description: "sync held")
             server.change { $0.gate = gate; $0.entered = entered }
             store.setForeground(true); session.setActive(true, store: store, member: member); session.beginInput(store: store, member: member)
@@ -534,7 +656,7 @@ import SwiftUI
             XCTAssertEqual(controlAttaches, 1)
             if closeDuringWait { session.disappear(store: store, member: member) }
             server.change { $0.gate = nil; $0.entered = nil }; gate.signal()
-            for _ in 0..<200 where store.isRevalidating || (!closeDuringWait && controlAttaches < 2) { try await Task.sleep(for: .milliseconds(10)) }
+            try await waitWhile { store.isRevalidating || (!closeDuringWait && controlAttaches < 2) }
             try await Task.sleep(for: .milliseconds(100))
             XCTAssertEqual(controlAttaches, closeDuringWait ? 1 : 2)
             if !closeDuringWait {
@@ -543,7 +665,7 @@ import SwiftUI
                 XCTAssertEqual(sent, [Data("ab".utf8)])
             } else { XCTAssertTrue(sent.isEmpty) }
             session.disappear(store: store, member: member)
-            for _ in 0..<200 where store.terminalLeases[member.id] != nil { try await Task.sleep(for: .milliseconds(10)) }
+            try await waitWhile { store.terminalLeases[member.id] != nil }
             store.disconnect()
         }
     }
@@ -558,7 +680,7 @@ import SwiftUI
         server.change { $0.dropTerminal = true }
         let session = controlSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { XCTFail("Unconfirmed claim attached") } }
         session.sizeChanged(cols: 100, rows: 30); session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
-        for _ in 0..<200 where session.starting { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { session.starting }
         XCTAssertNil(store.terminalLeases[member.id])
         session.disappear(store: store, member: member)
         try await Task.sleep(for: .milliseconds(50))
@@ -587,7 +709,7 @@ import SwiftUI
         server.change { $0.dropTerminal = true }
         let session = controlSession(platform: .mac) { _, _, mode, _, _, _, _ in if mode == .control { XCTFail("Unconfirmed claim attached") } }
         session.sizeChanged(cols: 100, rows: 30); session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
-        for _ in 0..<200 where session.starting { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { session.starting }
         session.disappear(store: store, member: member)
         try await Task.sleep(for: .milliseconds(100)); store.disconnect()
         server.change { $0.dropTerminal = false }
@@ -600,21 +722,34 @@ import SwiftUI
         XCTAssertNil(restarted.terminalLeases[member.id]); restarted.disconnect()
     }
 
+    /// 150ms 디바운스를 실제 시간(100ms sleep 세 번)으로 재지 않는다. 주입한 대기가 끝나기 전에는 0건, 끝나면 최신 1건이다.
     func testResizeDebouncesAndSendsOnlyLatestGridAfter150Milliseconds() async throws {
         var packets: [String] = []
-        let client = TerminalStreamClient(resizeSender: { packets.append($0) })
+        let debounce = ManualPause()
+        let client = TerminalStreamClient(resizeSender: { packets.append($0) }, debouncePause: { try await debounce.pause($0) })
         defer { client.dispose() }
         client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
         client.resize(cols: 80, rows: 24)
-        try await Task.sleep(for: .milliseconds(100)); XCTAssertTrue(packets.isEmpty)
+        try await waitWhile { debounce.waiting != 1 }
+        XCTAssertEqual(debounce.requested, [.milliseconds(150)])
+        XCTAssertTrue(packets.isEmpty)
+        // A newer size replaces the waiting one; the first is never sent.
         client.resize(cols: 120, rows: 40)
-        try await Task.sleep(for: .milliseconds(100)); XCTAssertTrue(packets.isEmpty)
-        try await Task.sleep(for: .milliseconds(100)); XCTAssertEqual(packets.count, 1)
+        try await waitWhile { debounce.requested.count != 2 || debounce.waiting != 1 }
+        XCTAssertTrue(packets.isEmpty)
+        debounce.fire()
+        try await waitWhile { packets.isEmpty }
+        XCTAssertEqual(packets.count, 1)
         let packet = try XCTUnwrap(packets.first)
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(packet.utf8)) as? [String: Any])
         XCTAssertEqual(body["cols"] as? Int, 120); XCTAssertEqual(body["rows"] as? Int, 40)
-        client.resize(cols: 90, rows: 25); client.close()
-        try await Task.sleep(for: .milliseconds(200)); XCTAssertEqual(packets.count, 1)
+        client.resize(cols: 90, rows: 25)
+        try await waitWhile { debounce.requested.count != 3 }
+        client.close()
+        try await waitWhile { debounce.waiting != 0 }
+        debounce.fire()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(packets.count, 1)
     }
 
     #if os(macOS)
@@ -689,7 +824,7 @@ import SwiftUI
         hosting.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(100))
         session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
-        for _ in 0..<200 where session.ownedLeaseID == nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitWhile { session.ownedLeaseID == nil }
         session.client.accept(.ready(mode: .control, cols: session.naturalCols, rows: session.naturalRows, expiresAt: nil))
         var previousWidth: CGFloat = 0, previousCols = 0
         for width: CGFloat in [720, 960, 1120] {

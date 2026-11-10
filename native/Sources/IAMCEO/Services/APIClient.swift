@@ -159,8 +159,14 @@ actor APIClient {
     func request<T: Decodable & Sendable>(_ path: String, method: String = "GET", body: Data? = nil, timeout: TimeInterval? = nil, ifMatch: Int? = nil, contractVersion: Int? = nil) async throws -> T {
         let (data, _) = try await raw(path, method: method, body: body, contentType: body == nil ? nil : "application/json", timeout: timeout, ifMatch: ifMatch, contractVersion: contractVersion)
         do { return try JSONDecoder().decode(T.self, from: data) }
-        catch { throw APIError(status: 0, message: "서버 응답이 이 앱과 호환되지 않습니다. 앱과 서버 버전을 확인해 주세요.") }
+        catch {
+            // 어느 응답의 어느 필드가 어긋났는지 남긴다(값·본문·쿼리는 남기지 않는다).
+            ContractLog.unreadable("\(method) \(URLComponents(string: path)?.path ?? "?")", error)
+            throw APIError(status: 0, message: "서버 응답이 이 앱과 호환되지 않습니다. 앱과 서버 버전을 확인해 주세요.", code: Self.unreadableCode)
+        }
     }
+    /// 서버는 답했지만 이 앱이 응답을 해석하지 못했다는 표시. 서버가 주는 code와 겹치지 않는다.
+    static let unreadableCode = "CLIENT_DECODE"
     func send<T: Decodable & Sendable, B: Encodable & Sendable>(_ path: String, method: String = "POST", body: B, timeout: TimeInterval? = nil, ifMatch: Int? = nil, contractVersion: Int? = nil) async throws -> T {
         try await request(path, method: method, body: JSONEncoder().encode(body), timeout: timeout, ifMatch: ifMatch, contractVersion: contractVersion)
     }
@@ -179,6 +185,7 @@ actor APIClient {
         let url = try authorizedURL(readPath)
         var req = URLRequest(url: url)
         req.httpMethod = method
+        // 쓰기 기본값(20초)을 60초 가까이 올리면 AppStore의 '도착하지 않은 쓰기' 판정(60초)도 함께 올려야 한다.
         req.timeoutInterval = timeout ?? (method == "GET" ? 30 : 20)
         req.cachePolicy = .reloadIgnoringLocalCacheData
         req.httpShouldHandleCookies = false

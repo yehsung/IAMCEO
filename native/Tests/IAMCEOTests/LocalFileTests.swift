@@ -132,4 +132,45 @@ final class LocalFileTests: XCTestCase {
             await fixture.close()
         }
     }
+
+    /// n-files-9, n-chat-3: 지난 실행이 남긴 임시 폴더만 치운다. 최근 것, 이 앱이 만들지 않은 것은 건드리지 않는다.
+    func testStaleTemporaryFoldersOfThisAppAreSweptAndEverythingElseIsLeft() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("iamceo-stab2-sweep-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date(), old = now.addingTimeInterval(-2 * 24 * 60 * 60)
+        func make(_ name: String, modified: Date, file: Bool = false) throws -> URL {
+            let url = root.appendingPathComponent(name)
+            if file { try Data("x".utf8).write(to: url) }
+            else {
+                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                try Data("payload".utf8).write(to: url.appendingPathComponent("a.png"))
+            }
+            try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
+            return url
+        }
+        let stale = try [make("IAMCEO-cache-\(UUID().uuidString)", modified: old), make("IAMCEO-\(UUID().uuidString)", modified: old),
+                         make("iamceo-photo-\(UUID())", modified: old), make("iamceo-promise-\(UUID())", modified: old)]
+        let kept = try [make("IAMCEO-cache-\(UUID().uuidString)", modified: now.addingTimeInterval(-60)),
+                        make("IAMCEO-cache-not-a-uuid", modified: old), make("IAMCEO-settings", modified: old),
+                        make("someone-else-\(UUID().uuidString)", modified: old),
+                        make("IAMCEO-\(UUID().uuidString)", modified: old, file: true)]
+        XCTAssertEqual(TemporaryFiles.sweepStale(in: root, now: now), 4)
+        for url in stale { XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), url.lastPathComponent) }
+        for url in kept { XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), url.lastPathComponent) }
+        XCTAssertEqual(TemporaryFiles.sweepStale(in: root, now: now), 0)
+    }
+
+    /// n-files-7: 경로 링크 처리 결과는 정규식을 한 번만 만들게 바꾼 뒤에도 같고, 같은 문단은 다시 해석하지 않는다.
+    func testInlineMarkdownIsMemoisedAndMatchesAFreshParse() {
+        let samples = ["`docs/spec.md` 와 ~/Downloads/영상.mp4, user@example.com, https://example.com/a.md.",
+                       "굵게 **bold** 와 0.0~3.9 그리고 ~~지움~~", "src/views 를 고쳤습니다. and/or 는 그대로.", ""]
+        for sample in samples {
+            let fresh = markdownInlineUncached(sample)
+            XCTAssertEqual(markdownInline(sample), fresh, sample)
+            XCTAssertEqual(markdownInline(sample), fresh, sample)
+        }
+        let long = String(repeating: "긴 문단 docs/spec.md ", count: 400)
+        XCTAssertEqual(markdownInline(long), markdownInlineUncached(long))
+    }
 }

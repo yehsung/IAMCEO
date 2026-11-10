@@ -424,7 +424,12 @@ struct MemberDetailView: View {
                 }
             }
             .task(id: "\(store.writeNamespace)|\(m.projectId)|\(m.id)") {
-                await store.loadDeliveryNotices(memberID: m.id)
+                // 이 상세가 화면에 떠 있는 동안만 전달 안내를 자동으로 다시 읽게 한다. 닫으면 task가 취소되어 풀린다.
+                let owner = UUID(), memberID = m.id
+                store.watchDeliveryNotices(memberID: memberID, owner: owner)
+                defer { store.unwatchDeliveryNotices(owner: owner) }
+                await store.loadDeliveryNotices(memberID: memberID)
+                while !Task.isCancelled { do { try await Task.sleep(for: .seconds(3600)) } catch { break } }
             }
         }
     }
@@ -1676,18 +1681,18 @@ private struct TeamContextBar: View {
 struct ActivityList: View {
     @Environment(AppStore.self) private var store
     let memberID: String
-    @State private var items: [Activity] = []
     @State private var loading = false
-    @State private var loaded = false
-    @State private var error: String?
     @State private var expanded: Set<Int> = []
-    /// Member the list currently shows. @State reads after an await see the latest value, unlike the captured `memberID`.
-    @State private var shownFor: String?
-    /// Bumped per request; only the newest request may write results.
+    /// Bumped per request; only the newest request may clear the spinner.
     @State private var request = 0
     @ScaledMetric(relativeTo: .caption) private var metaWidth: CGFloat = 84
 
     init(memberID: String) { self.memberID = memberID }
+
+    // 목록은 store가 한 번 읽고 실시간 이벤트로 채운다. 3초마다 다시 읽지 않는다.
+    private var items: [Activity] { store.activities[memberID] ?? [] }
+    private var loaded: Bool { store.activities[memberID] != nil }
+    private var error: String? { store.activityErrors[memberID] }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -1697,7 +1702,7 @@ struct ActivityList: View {
                 }
                 Spacer(minLength: 0)
                 if loading { ProgressView().controlSize(.mini) }
-                Button { Task { await load(memberID) } } label: {
+                Button { Task { await reload() } } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .semibold)).frame(width: 26, height: 26)
                         .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
                         .contentShape(Rectangle())
@@ -1710,17 +1715,18 @@ struct ActivityList: View {
             }
             list
         }
-        .task(id: "\(store.writeNamespace)|\(memberID)") {
-            shownFor = memberID
-            items = []; loaded = false; expanded = []; error = nil
-            await load(memberID)
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(3)) } catch { return }
-                if store.connectionStatus == .connected, !loading { await load(memberID) }
-            }
-        }
-        .onChange(of: store.connectionStatus) { _, status in
-            if status == .connected { Task { await load(memberID) } }
+        .task(id: "\(store.writeNamespace)|\(memberID)|\(store.activityEpoch)") {
+            let id = memberID
+            expanded = []
+            // 화면에 떠 있는 동안만 등록한다. 사라지면 task가 취소되어 풀린다.
+            var registered = false
+            defer { if registered { store.deactivateActivity(memberID: id) } }
+            request &+= 1
+            let mine = request
+            loading = !store.isDemo && store.api != nil
+            registered = await store.activateActivity(memberID: id)
+            if request == mine { loading = false }
+            while !Task.isCancelled { do { try await Task.sleep(for: .seconds(3600)) } catch { break } }
         }
     }
 
@@ -1799,27 +1805,13 @@ struct ActivityList: View {
         a.count == b.count && zip(a, b).allSatisfy { $0.id == $1.id && $0.at == $1.at && $0.kind == $1.kind && $0.text == $1.text && $0.memberId == $1.memberId }
     }
 
-    private func load(_ id: String) async {
-        guard !store.isDemo else { return }
-        guard let api = store.api else { return }
-        // A newer request (another member, or a reload) supersedes this one instead of being skipped by it.
+    private func reload() async {
+        guard !store.isDemo, store.api != nil else { return }
         request &+= 1
         let mine = request
         loading = true
         defer { if request == mine { loading = false } }
-        do {
-            let result = try await api.activity(memberID: id)
-            guard request == mine, shownFor == id, !Task.isCancelled else { return }
-            let sorted = result.sorted { $0.id > $1.id }
-            // 3초마다 같은 목록을 통째로 바꿔 다시 그리지 않는다.
-            if !Self.same(items, sorted) { items = sorted }
-            error = nil
-            loaded = true
-        } catch {
-            if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
-            guard request == mine, shownFor == id else { return }
-            self.error = friendlyLoadError(error, what: "활동", verb: "읽지")
-        }
+        await store.refreshActivity()
     }
 }
 

@@ -108,7 +108,7 @@ struct HomeView: View {
     private func todoBusy(_ id: String) -> Bool {
         store.pendingActions.contains("todo:\(id)") || [.sending, .checking].contains(store.todoWrites[id])
     }
-    private func todoNeedsNotice(_ id: String) -> Bool { todoBusy(id) || store.todoWrites[id] == .conflict }
+    private func todoNeedsNotice(_ id: String) -> Bool { todoBusy(id) || store.todoWrites[id] == .conflict || store.todoWrites[id] == .notApplied }
     /// AI가 '필요 없어짐'으로 정리한 할 일은 할 일도, 한 일도 아니다.
     private var visibleTodos: [Todo] { store.todos.filter { $0.outcome != "dropped" || todoNeedsNotice($0.id) }.sorted { $0.createdAt < $1.createdAt } }
     private var liveTodos: [Todo] { visibleTodos.filter { !$0.done || todoNeedsNotice($0.id) } }
@@ -842,6 +842,7 @@ struct HomeView: View {
         case nil where store.pendingActions.contains("todo:\(id)"): ("보내는 중", .neutral)
         case .checking: ("결과 확인 중 · 확인이 끝나면 다시 바꿀 수 있습니다", .attention)
         case .conflict: ("이전 상태의 변경은 반영하지 않았습니다. 최신 내용과 정리 이유를 확인하세요.", .attention)
+        case .notApplied: ("변경이 서버에 닿지 않았습니다. 다시 바꿔 주세요.", .attention)
         case .confirmedCurrent: ("최신 상태를 확인했습니다", .neutral)
         default: nil
         }
@@ -896,7 +897,8 @@ struct HomeView: View {
 
     private var teamSummary: [(status: String, label: String, count: Int)] {
         let counts = MemberStatusInfo.summaryCounts(store.members)
-        return (Self.summaryParts + [("unknown", "상태 확인 불가")]).compactMap { part in
+        let paused: [(status: String, label: String)] = MemberStatusInfo.networkPauseCodes.map { (status: $0, label: MemberStatusInfo($0).label) }
+        return (Self.summaryParts + paused + [("unknown", "상태 확인 불가")]).compactMap { part in
             let count = counts[part.status] ?? 0
             return count > 0 ? (part.status, part.label, count) : nil
         }

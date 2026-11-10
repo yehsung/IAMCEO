@@ -17,7 +17,7 @@ import { writeStatuslineWrapper } from "./runner/statusline.ts";
 //   handleAgentTool(orch, member, name, args): Promise<AgentToolResult>
 //
 // 조립 순서: createOrchestrator(config, store) → startServer(ctx) → setServerUrl(url) → recover() · 끝낼 때 shutdown().
-import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type {
@@ -60,24 +60,25 @@ import type {
 } from "../shared/types.ts";
 import { adoptRefusal, memberConfig } from "../shared/types.ts";
 import type { Config } from "./config.ts";
-import type { AgentToolDef, AgentToolResult, AskWaitResult, OrchestratorApi } from "./orchestrator-api.ts";
+import { briefly, type AgentToolDef, type AgentToolResult, type AskWaitResult, type OrchestratorApi } from "./orchestrator-api.ts";
 import { sanitizeName } from "./files.ts";
 import { josa, renderRole } from "./roles.ts";
 import { CoreError, coreRpc, type CoreHello, type CoreTerminal } from "./runner/core-client.ts";
 import { CoreSupervisor } from "./core-supervisor.ts";
 import type { DeliveryDispatch, ReportReferences, LifecycleJournal } from "./service-contracts.ts";
+import type { DeliveryRecoveryRequest, DeliveryRecoveryResult } from "../shared/types.ts";
 import type { AgentOperationContext, ManualInboxBatch, ManualInboxAckRequest, ManualInboxAckResult, FreshSessionRequest, MemberConfigWriteResult, OperationReceipt, RevisionPrecondition, SettingsWriteResult, TerminalControlRequestV2, TodoDoneRequest, TodoWriteResult } from "../shared/operations.ts";
 import { coreContextMeasurement, observeCompactBoundary, type CompactBoundaryBaseline } from "./runner/core-context.ts";
 import { readJsonlRange, parseCodexSessionMeta, jsonObject } from "./runner/delivery-evidence.ts";
 import { defaultClaudeHome, findSessionFile } from "./runner/herdr.ts";
 import { providerLaunch } from "./runner/providers.ts";
-import { CoreRunner, ensureCoreServer, type CoreCompactState, type CoreRunnerDeps } from "./runner/core.ts";
+import { CoreRunner, ensureCoreServer, eofLogBaseline, type CoreCompactState, type CoreRunnerDeps } from "./runner/core.ts";
 import { isMissingSessionError } from "./runner/headless.ts";
 import { HerdrError } from "./runner/herdr-client.ts";
 import { detectHerdr, HerdrRunner, inspectPane, listAgents, type PaneInspection } from "./runner/herdr.ts";
 import { approvalSummary } from "./runner/approval.ts";
 import { exactSource, measureContext, validWindow } from "./runner/context.ts";
-import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, RunnerStartResult, RunnerTerminalIdentity, DeliveryRepair } from "./runner/types.ts";
+import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, RunnerStartResult, RunnerTerminalIdentity, RunnerReattachResult, DeliveryRepair } from "./runner/types.ts";
 import { ApiError, type AppliedConfig, type ExecutionJournal, type NewDelivery, type Store } from "./store.ts";
 import { cleanText, RESERVED_HANDLES } from "./text.ts";
 import { conductorHandle, conductorName } from "./text.ts";
@@ -295,6 +296,17 @@ export interface OrchestratorTimings {
   healthMs: number;
   /** 종료할 때 진행 중인 전달·세션 기동이 결과를 기록하기를 기다리는 상한. */
   shutdownDrainMs: number;
+  /** 결과를 모르는 세션 기동을 '뜨지 않음'으로 닫기 전에 기다리는 시간. 기동 요청 제한(20초)과 단계 제한보다 길어야 한다. */
+  startGraceMs: number;
+  /** 화면 요청(bootstrap·readiness·보내기 전 확인)이 실행기 응답을 기다리는 상한. 넘으면 마지막으로 아는 상태로 답한다. */
+  screenWaitMs: number;
+  /** 띄운 뒤 이 시간 안에 끝난 세션은 '시작 직후 종료'로 센다. 3번 이어지면 quickExitRetryMs 동안 자동으로 다시 띄우지 않는다. */
+  quickExitMs: number;
+  quickExitRetryMs: number;
+  /** 새 설정으로 다시 여는 데 실패한 꺼진 직원을 다시 열어 보기까지. 두 번째 실패부터는 5배. */
+  configRetryMs: number;
+  /** 전송 호출이 끝난 뒤 이만큼 지나면 그 쓰기에서 더 올 것이 없다고 본다. 전송 제한(20초)보다 길어야 한다. */
+  writeSettleMs: number;
 }
 
 const DEFAULT_TIMINGS: OrchestratorTimings = {
@@ -310,7 +322,17 @@ const DEFAULT_TIMINGS: OrchestratorTimings = {
   manualOfflineMs: 30 * 60_000,
   healthMs: 5000,
   shutdownDrainMs: 5000,
+  startGraceMs: 90_000,
+  screenWaitMs: 1000,
+  quickExitMs: 60_000,
+  quickExitRetryMs: 10 * 60_000,
+  configRetryMs: 60_000,
+  writeSettleMs: 30_000,
 };
+
+class MissingSessionError extends Error {
+  constructor() { super("이어갈 세션 기록이 없습니다"); }
+}
 
 /** 설정·병렬 제어 오류의 제한된 재시도 상한. 업무 입력은 전달 복구만 재시도한다. */
 const MAX_TURN_ERROR_ATTEMPTS = 3;
@@ -480,6 +502,12 @@ interface Runtime {
   configGaveUp: string | null;
   /** 턴을 마치고 뒤 작업(워크플로 등)을 기다리는 중이면 그 작업. 그 팀은 일하는 중이고 세션은 글을 바로 받는다(herdr). */
   background: string | null;
+  /** 서버가 이 직원의 CLI 를 새로 띄운 시각. 곧바로 끝나는 세션을 세는 데만 쓴다. */
+  launchedAt: number | null;
+  /** 띄우자마자 끝난 횟수(연속)와 마지막 시각. 턴이 한 번이라도 끝나거나 대표가 직접 깨우면 0 으로 돌아간다. */
+  quickExits: number;
+  quickExitAt: number;
+  quickExitNotified: boolean;
 }
 
 const HOLD_NOTES: Record<string, string> = {
@@ -501,8 +529,8 @@ const WAKE_POST_KINDS = new Set<string>(["완료", "막힘", "질문"]);
 
 /** Domain references also include orphan answers and todo correction notices. */
 class OrchestratorDeliveryRecovery extends DeliveryRecovery {
-  constructor(private readonly sourceStore: Store, runner: (member: Member) => Pick<Runner, "inspectDelivery" | "repairDelivery"> | null) {
-    super({ store: sourceStore, runner, legacyMessageText: message => {
+  constructor(private readonly sourceStore: Store, runner: (member: Member) => Pick<Runner, "inspectDelivery" | "repairDelivery"> | null, writerDone?: (dispatch: DeliveryDispatch) => boolean) {
+    super({ store: sourceStore, runner, writerDone, legacyMessageText: message => {
       const file = message.contextFileId ? sourceStore.getFile(message.contextFileId) : null;
       const context = file && file.projectId === message.projectId
         ? `\n[시스템 자료 맥락 · 대표 원문 아님]\n대표가 보던 자료: ${file.title.replace(/[\r\n]+/g, " ")} (${file.id})` : "";
@@ -573,14 +601,14 @@ export function coreCompactStore(store: Store): NonNullable<CoreRunnerDeps["comp
 export function createOrchestrator(config: Config, store: Store): Orchestrator {
   const runners = new Map<Backend, Runner>();
   let orchestrator: Orchestrator | null = null;
-  const deliveryRecovery = new OrchestratorDeliveryRecovery(store, member => orchestrator?.recoveryRunner(member) ?? null);
+  const deliveryRecovery = new OrchestratorDeliveryRecovery(store, member => orchestrator?.recoveryRunner(member) ?? null, dispatch => orchestrator?.writerDone(dispatch) ?? false);
   runners.set("core", new CoreRunner({ contextHome: config.home, coreBin: config.coreBin, socketPath: config.coreSocket, session: "iamceo", stateDir: join(config.home, "core-state"), configDir: join(config.home, "core-config"), claudeBin: config.claudeBin, codexBin: config.codexBin }, {
     recoveryStore: store,
     compactStore: coreCompactStore(store),
     repair: deliveryRecovery.repair,
-    // Generation 1 has no post-write drain or external-attach barrier. Unknown
-    // writes stay unresolved; do not manufacture externalInput:false here.
-    quiescence: (_memberId, dispatch) => ({ originalWrite: dispatch.transportState === "rejected" ? "rejected" : dispatch.transportState === "accepted" ? "settled" : "unresolved", externalInput: null }),
+    // Generation 1 has no post-write drain or external-attach barrier. A write stays unresolved while its call may
+    // still be running; see Orchestrator.dispatchQuiescence for when it is over.
+    quiescence: (memberId, dispatch) => orchestrator?.dispatchQuiescence(memberId, dispatch) ?? { originalWrite: dispatch.transportState === "rejected" ? "rejected" : dispatch.transportState === "accepted" ? "settled" : "unresolved", externalInput: null },
   }));
   const herdr: HerdrQueries = { info: () => detectHerdr(config.herdrSocket), agents: () => listAgents(config.herdrSocket), inspect: (a) => inspectPane(config.herdrSocket, a) };
   orchestrator = new Orchestrator({ config, store, runners, herdr, deliveryRecovery, providerHomes: { claudeHome: defaultClaudeHome(), codexHome: process.env.CODEX_HOME || join(homedir(), ".codex") }, notifier: macNotifier() });
@@ -630,11 +658,15 @@ export class Orchestrator implements OrchestratorApi {
   private lastHerdrInfo: string | null = null;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private healthProbe: Promise<void> | null = null;
+  private healthKnown: Promise<void> | null = null;
   private switching = false;
   private recovering = false;
   private stopRecovery: Promise<void> | null = null;
   private readonly coreSupervisor: CoreSupervisor | null;
   private readonly absentCoreMembers = new Map<string, number>();
+  /** 미확정 기동 저널이 있는 직원의 소유 터미널이 연속으로 안 보인 횟수. */
+  private readonly absentStarts = new Map<string, number>();
+  private readonly resolvedStarts = new Set<string>();
   private readonly eventQueues = new Map<string, Promise<void>>();
   private readonly observedTurns = new Map<string, { generation: number; terminal: string | null; turn: number; ended: number }>();
   private readonly configWrites = new Set<string>();
@@ -654,13 +686,21 @@ export class Orchestrator implements OrchestratorApi {
     this.runners = deps.runners;
     this.store.setDeliveryWaitContext(id => {
       const member = this.store.requireMember(id), rt = this.runtimes.get(id);
-      return { busy: this.isBusy(member), waking: !!(rt?.starting || rt?.reopening || ["reopen", "start_session"].includes(rt?.pumpStage ?? "")), used: this.activeAutomaticTurns() };
+      // 대기 사유는 화면 표시와 정체 감지가 읽는다. 읽을 수 없는 압축 상태 하나가 그 전체를 실패시키면 안 된다.
+      let busy = true, fenced = true;
+      try { busy = this.isBusy(member); fenced = this.coreCompactFenced(member); } catch { /* 자동 입력을 보류하는 상태다: 바쁜 것으로 본다 */ }
+      const runner = this.runners.get(this.backendOf(member));
+      const observed = runner instanceof CoreRunner ? runner.observationState(id) : null;
+      // 압축 보류는 따로 드러난다. 그 밖에 바쁘다고 보는데 CLI 는 쉬는 중으로 관측되면 어긋난 것이다.
+      const contradiction = !fenced && (busy || member.status === "working") && !!observed && observed.failures === 0 && ["idle", "done"].includes(observed.state ?? "") && !rt?.pumping;
+      return { busy, waking: !!(rt?.starting || rt?.reopening || ["reopen", "start_session"].includes(rt?.pumpStage ?? "")), used: this.activeAutomaticTurns(), hold: this.apiRecovery.holdReason(id), contradiction };
     }, id => {
       // 대표의 '다시 확인'은 이어가기를 포기해 멈춰 둔 직원도 다시 보내 보라는 뜻이다.
       this.apiRecovery.releaseExhausted(id);
+      this.store.retryDeferredConfigNow(id);
       this.recheckMemberDelivery(id);
-    });
-    this.deliveryRecovery = deps.deliveryRecovery ?? new OrchestratorDeliveryRecovery(this.store, member => this.recoveryRunner(member));
+    }, id => this.nudgeStalled(id));
+    this.deliveryRecovery = deps.deliveryRecovery ?? new OrchestratorDeliveryRecovery(this.store, member => this.recoveryRunner(member), dispatch => this.writerDone(dispatch));
     if (!this.runners.has("core")) {
       const selected = this.store.getSettings().backend;
       this.store.setRuntimeBackend(selected && this.runners.has(selected) ? selected : this.runners.has("headless") ? "headless" : "herdr");
@@ -693,8 +733,10 @@ export class Orchestrator implements OrchestratorApi {
         if (!(core instanceof CoreRunner)) return (await core.available()).ok ? "owned" : "unknown";
         try {
           const hello = await coreRpc<CoreHello>(this.coreSocket(), "hello", { generation: 1 }, 1000);
+          this.coreRefusedSince = null;
           return hello.generation === 1 ? "owned" : "conflict";
         } catch (error) {
+          this.noteCoreRefused(error instanceof CoreError && error.causeCode === "ECONNREFUSED");
           return error instanceof CoreError && error.causeCode === "ENOENT" && error.deliveryEffect === "not_written" ? "absent" : "unknown";
         }
       },
@@ -713,24 +755,33 @@ export class Orchestrator implements OrchestratorApi {
             }
             const current = this.store.requireMember(member.id);
             if (current.lastError?.startsWith("starting_unknown") || current.lastError?.startsWith("core 재연결 보류")) this.store.patchMember(member.id, { lastError: null });
+            // 깨우다 결과를 놓친 기동이 실제로는 떠 있었다. 잠듦으로 두면 살아 있는 CLI 가 명부에서는 잠든 채 남는다.
+            if (current.status === "asleep") this.settle(current);
             await this.reconcileExecutions(member.id);
           }
+          const resolvedStart = this.resolveAbsentStart(member, result.outcome);
+          // 한 번도 뜨지 못한 세션이다. 쉬는 중으로 두면 소유 미확인 관측 때문에 전달이 계속 멈춘다.
+          if (resolvedStart && !member.paneId && !["asleep", "offline"].includes(member.status)) this.store.patchMember(member.id, { status: "offline" });
           if (result.outcome === "not_found" && !this.pendingLifecycle(member.id) && (member.paneId || member.status === "offline")) {
             if (member.paneId && !(await this.reconcileAbsentTerminal(member))) return { outcome: "unknown", code: "terminal_absence_unverified" };
             this.store.patchMember(member.id, { status: "offline", paneId: null });
             rt.turn = null;
             this.releaseSlots();
           }
+          if (resolvedStart) this.resolvedStarts.add(member.id);
           return result;
         } finally { rt.reattaching = false; }
       },
       observed: state => {
         const member = this.store.getMember(state.memberId);
         if (!member || this.closed || state.code === "mutation_in_progress") return;
-        if (state.outcome === "not_found" && member.status === "offline" && !member.paneId && !this.pendingLifecycle(member.id)) {
-          this.absentCoreMembers.set(member.id, this.store.memberRevisions(member.id).sessionGeneration);
+        const resolvedStart = this.resolvedStarts.delete(member.id);
+        if (state.outcome === "not_found" && (member.status === "offline" || member.status === "asleep") && !member.paneId && !this.pendingLifecycle(member.id)) {
+          if (member.status === "offline") this.absentCoreMembers.set(member.id, this.store.memberRevisions(member.id).sessionGeneration);
           this.store.patchMember(member.id, { statusObservation: null });
           this.coreSupervisor?.unwatch(member.id);
+          // 취소한 기동을 기다리던 전달이 있으면 다시 깨워 보낸다.
+          if (resolvedStart && !this.recovering) void this.pump(member.id);
           return;
         }
         const setupError = state.outcome === "rejoined" && core instanceof CoreRunner ? core.observationState(member.id)?.setupError ?? null : null;
@@ -768,6 +819,20 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private coreSocket(): string { return this.config.coreSocket ?? join(this.config.home, "run", "core.sock"); }
+
+  private coreRefusedSince: number | null = null;
+  private coreRefusedLogged = false;
+  /**
+   * 소켓 파일은 있는데 아무도 받지 않는 상태가 이어지면 죽은 core 가 남긴 소켓일 수 있다. 살아 있는 core 를 둘로 만들 위험이 있어
+   * 자동으로 지우거나 새로 띄우지는 않는다. 왜 실행기가 안 닿는지는 로그에 한 번 남긴다.
+   */
+  private noteCoreRefused(refused: boolean): void {
+    if (!refused) { this.coreRefusedSince = null; this.coreRefusedLogged = false; return; }
+    this.coreRefusedSince ??= Date.now();
+    if (this.coreRefusedLogged || Date.now() - this.coreRefusedSince < 60_000) return;
+    this.coreRefusedLogged = true;
+    console.error("[core] herdr-core 소켓 파일은 있지만 1분 넘게 아무도 받지 않습니다. 죽은 core 가 남긴 소켓일 수 있습니다. 자동으로 지우거나 새로 띄우지 않습니다: core 가 정말 내려갔는지 확인한 뒤 소켓 파일을 지우면 다시 띄웁니다");
+  }
 
   private readonly terminalStreamClosers = new Set<() => Promise<void>>();
   private readonly terminalLeaseListeners = new Set<(memberId: string, leaseId: string | null) => Promise<void>>();
@@ -858,22 +923,44 @@ export class Orchestrator implements OrchestratorApi {
     }
   }
 
+  /** 실행 파일이 바뀌지 않는 한 버전은 한 번만 묻는다. 요청마다 프로세스를 띄우면 앱의 연결 확인이 그만큼 늦어진다. */
+  private coreVersion: { key: string; value: Promise<string | null> } | null = null;
+  private coreVersionOf(binary: string): Promise<string | null> {
+    const path = Bun.which(binary);
+    if (!path) return Promise.resolve(null);
+    let key = path;
+    try { const stat = statSync(path); key = `${path}:${stat.mtimeMs}:${stat.size}`; } catch {}
+    if (this.coreVersion?.key === key) return this.coreVersion.value;
+    const value = (async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const result = Bun.spawn([path, "--version"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+        timer = setTimeout(() => result.kill(), 2000);
+        const output = await new Response(result.stdout).text();
+        return await result.exited === 0 ? output.trim().slice(0, 200) || null : null;
+      } catch { return null; }
+      finally { if (timer) clearTimeout(timer); }
+    })();
+    this.coreVersion = { key, value };
+    // 실패한 조회는 기억하지 않는다. 다음에 다시 묻는다.
+    void value.then(found => { if (found === null && this.coreVersion?.value === value) this.coreVersion = null; });
+    return value;
+  }
+
+  /** 겹친 요청은 한 번만 묻고, 답이 늦으면 마지막으로 아는 상태로 답한다(앱의 연결 확인은 3~4초 제한이다). */
+  private coreAvailability: Promise<{ ok: boolean; detail?: string }> | null = null;
+  private lastCoreAvailability: { ok: boolean; detail?: string } | null = null;
   async runtimeInfo(): Promise<RuntimeInfo> {
     const runner = this.runners.get("core");
-    const available = runner ? await runner.available().catch((e: Error) => ({ ok: false, detail: e.message })) : { ok: false, detail: "core 실행기가 없습니다" };
+    if (runner) this.coreAvailability ??= runner.available().catch((e: Error) => ({ ok: false, detail: e.message }))
+      .then(state => { this.lastCoreAvailability = state; return state; }).finally(() => { this.coreAvailability = null; });
     const configured = this.config as OrchestratorDeps["config"] & Partial<Config>;
     const binary = configured.coreBin ?? "herdr-core";
     const installed = !!Bun.which(binary);
-    let version: string | null = null;
-    if (installed) {
-      try {
-        const result = Bun.spawn([binary, "--version"], { stdout: "pipe", stderr: "ignore" });
-        const timer = setTimeout(() => result.kill(), 2000);
-        const output = await new Response(result.stdout).text();
-        if (await result.exited === 0) version = output.trim().slice(0, 200) || null;
-        clearTimeout(timer);
-      } catch {}
-    }
+    const [available, version] = await Promise.all([
+      runner ? briefly(this.coreAvailability!, this.timings.screenWaitMs, () => this.lastCoreAvailability ?? { ok: false, detail: "실행기 응답을 기다리는 중입니다" }) : { ok: false, detail: "core 실행기가 없습니다" },
+      installed ? briefly(this.coreVersionOf(binary), this.timings.screenWaitMs, () => null) : null,
+    ]);
     return { backend: "core", core: { installed, available: available.ok, version, detail: available.ok ? null : available.detail ?? null }, providers: {
       claude: { installed: !!Bun.which(configured.claudeBin ?? "claude") }, codex: { installed: !!Bun.which(configured.codexBin ?? "codex") },
     } };
@@ -908,6 +995,33 @@ export class Orchestrator implements OrchestratorApi {
     return this.store.listPendingLifecycleJournals().find(j => j.memberId === memberId && j.identity.sessionGeneration === generation);
   }
 
+  private watchesCore(member: Member, project: Project): boolean {
+    return member.backend === "core" && member.origin !== "manual" && !project.archived && !this.coreAbsenceConfirmed(member) &&
+      (member.status !== "asleep" || this.pendingLifecycle(member.id)?.intent === "start");
+  }
+
+  /**
+   * 결과를 모르는 기동(start) 저널은 터미널이 나타나야만 닫혔다. 끝내 안 나타나면 그 직원은 깨우기·재우기·전달이
+   * 모두 막힌 채 남았다. core 가 답했고 이 직원 라벨의 터미널이 없다는 관측이 유예 시간 뒤에도 두 번 이어지면
+   * '뜨지 않음'으로 닫는다. 뒤늦게 터미널이 나타나도 다음 기동이 라벨로 먼저 찾아 붙으므로 둘이 되지 않는다.
+   */
+  private resolveAbsentStart(member: Member, outcome: RunnerReattachResult["outcome"]): boolean {
+    const journal = this.pendingLifecycle(member.id);
+    if (outcome !== "not_found" || journal?.intent !== "start") { this.absentStarts.delete(member.id); return false; }
+    const seen = (this.absentStarts.get(member.id) ?? 0) + 1;
+    this.absentStarts.set(member.id, seen);
+    // prepared 는 기동 요청을 보내기 전이다. 이 프로세스가 지금 띄우는 중이 아니면(호출부가 확인) 보낸 적이 없다.
+    if (seen < 2 || journal.phase !== "prepared" && Date.now() - Date.parse(journal.updatedAt) < this.timings.startGraceMs) return false;
+    this.absentStarts.delete(member.id);
+    this.finishLifecycle(journal, "refused", "소유 터미널이 생기지 않았습니다");
+    const runner = this.runners.get("core");
+    if (runner instanceof CoreRunner) runner.forgetUnknownStart(member.id);
+    const current = this.store.requireMember(member.id);
+    if (current.lastError?.startsWith("starting_unknown")) this.store.patchMember(member.id, { lastError: null });
+    this.store.appendActivity(member.id, "system", "세션 기동 결과를 확인하지 못했고 터미널이 생기지 않아 기동을 취소했습니다. 필요하면 다시 깨웁니다");
+    return true;
+  }
+
   private prepareLifecycle(member: Member, intent: LifecycleJournal["intent"]): LifecycleJournal {
     const before = this.pendingLifecycle(member.id);
     if (before) {
@@ -932,16 +1046,19 @@ export class Orchestrator implements OrchestratorApi {
     const entry = prepared ?? this.prepareLifecycle(member, "start");
     const runner = this.runnerOf(member);
     this.finishLifecycle(entry, "started", null);
+    // 실행기에 넘기기 전의 실패(보관·실행 꺼짐, 실행 파일 쓰기)는 터미널을 만들었을 수 없다.
+    let launched = false;
     try {
       this.requireActive(this.store.requireProject(project.id));
       this.absentCoreMembers.delete(member.id);
-      const started = await this.pumpWait(member.id, this.runtime(member.id).closing ? "sync_config.start" : ["offline", "asleep"].includes(member.status) ? "reopen" : "start_session", () => runner.start(this.runnerMember(member, project), { ...this.writeRunFiles(member, project, resume), operationId: entry.operationId }), runner);
+      const target = this.runnerMember(member, project), opts = { ...this.writeRunFiles(member, project, resume), operationId: entry.operationId };
+      const started = await this.pumpWait(member.id, this.runtime(member.id).closing ? "sync_config.start" : ["offline", "asleep"].includes(member.status) ? "reopen" : "start_session", () => { launched = true; return runner.start(target, opts); }, runner);
       if (!this.store.getMember(member.id)) return started;
       const identity = started.identity ?? { ...entry.identity, sessionId: started.sessionId, terminalId: started.paneId };
       this.finishLifecycle(entry, "confirmed", null, identity);
       return started;
     } catch (error) {
-      const unknown = runner.kind === "core" && (!(error instanceof CoreError) || error.uncertain || ["starting_unknown", "conflict", "unknown"].includes(error.kind));
+      const unknown = launched && runner.kind === "core" && (!(error instanceof CoreError) || error.uncertain || ["starting_unknown", "conflict", "unknown"].includes(error.kind));
       this.finishLifecycle(entry, unknown ? "unknown" : "refused", (error as Error).message.slice(0, 500));
       if (unknown) {
         this.store.patchMember(member.id, { lastError: `starting_unknown: ${(error as Error).message.slice(0, 500)}` });
@@ -1086,7 +1203,8 @@ export class Orchestrator implements OrchestratorApi {
    * stays received and fenced: elapsed time alone never ends it.
    */
   private settleRecoveredStart(member: Member, run: ExecutionJournal, observed: { turn: number | null; state: string | null }): boolean {
-    if (run.phase !== "starting" || run.inputReceivedAt || !run.deliveryIds.length) return false;
+    // 응답을 잃어 결과를 모른 채(unknown) 남은 실행도 같다: 같은 프로세스가 그렇게 적어 둔 뒤 재시작하면 턴 끝 이벤트는 다시 오지 않는다.
+    if (!["starting", "unknown"].includes(run.phase) || run.inputReceivedAt || !run.deliveryIds.length) return false;
     const dispatch = this.store.getDispatch(run.runId);
     if (!dispatch || dispatch.transportState === "rejected" || !run.deliveryIds.every(id => this.store.getDelivery(id)?.status === "delivered")) return false;
     const at = new Date().toISOString(), base = dispatch.baseline.turn ?? null;
@@ -1253,40 +1371,47 @@ export class Orchestrator implements OrchestratorApi {
     try {
       for (const member of this.store.listAllMembers()) {
         if (this.backendOf(member) !== "core") continue;
-        const state = this.store.ensureContextState(member.id);
-        this.store.saveContextState({ ...state, measurement: state.measurement ? { ...state.measurement, fresh: false } : null,
-          compaction: state.compaction && ["sending", "running"].includes(state.compaction.phase) ? { ...state.compaction, phase: "uncertain", reason: "send_uncertain" } : state.compaction });
+        this.recoverStep(`${member.id} 문맥 상태`, () => {
+          const state = this.store.ensureContextState(member.id);
+          this.store.saveContextState({ ...state, measurement: state.measurement ? { ...state.measurement, fresh: false } : null,
+            compaction: state.compaction && ["sending", "running"].includes(state.compaction.phase) ? { ...state.compaction, phase: "uncertain", reason: "send_uncertain" } : state.compaction });
+        });
       }
       // An interrupted external mutation is never replayed on restart.
       for (const receipt of this.store.listPendingOperations()) if (receipt.status === "pending") this.store.finishOperation({ ...receipt, status: "unknown", code: "RESTART_UNKNOWN", error: "서버 재시작으로 작업 결과를 확인할 수 없습니다. 같은 입력을 재생하지 않습니다" });
       await this.recoverStops();
       // 서버가 강제로 죽었으면 전 턴의 자식이 살아 있다. 먼저 끝내야 같은 세션을 둘이 쓰지 않는다.
       await Promise.all([...this.runners.values()].map((r) => r.reapOrphans?.().catch((e) => console.warn("남은 자식 정리 실패:", (e as Error).message))));
-      for (const d of this.store.listDeliveries()) this.deliveryRecovery.requeueRejected(d.id);
-      for (const d of this.store.listDelivering()) this.deliveryRecovery.beginRecovery(d.id);
+      // 봉투는 쓰기 직전에야 write_started 가 된다. 이전 프로세스가 prepared 로 남긴 것은 쓴 적이 없으니 거절로 닫아 다시 보내게 한다.
+      for (const dispatch of this.store.listPreparedDispatches()) this.recoverStep(`봉투 ${dispatch.dispatchId}`, () => {
+        if (dispatch.baseline.serverEpoch !== this.deliveryEpoch) this.store.updateDispatch(dispatch.dispatchId, "prepared", "rejected");
+      });
+      // 이미 전달된 것은 되살릴 일이 없다. 전부 훑으면 이력만큼 시작이 느려진다(실측 2,442건에 1.25초).
+      for (const d of this.store.listDeliveries()) if (d.status !== "delivered") this.recoverStep(`전달 ${d.id}`, () => this.deliveryRecovery.requeueRejected(d.id));
+      for (const d of this.store.listDelivering()) this.recoverStep(`전달 ${d.id}`, () => this.deliveryRecovery.beginRecovery(d.id));
       this.store.releaseHeldBeforeConnection();
       await this.refreshConnection();
       const herdrMembers: Member[] = [];
-      for (const member of this.store.listAllMembers()) {
+      for (const member of this.store.listAllMembers()) this.recoverStep(`${member.id} 세션 복구`, () => {
         if (member.subagents !== 0 || !member.subagentState) this.store.patchMember(member.id, { subagents: 0, subagentState: { quality: "unknown", count: null, observedAt: null, sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration } });
-        if (member.origin === "manual") continue;
+        if (member.origin === "manual") return;
         const project = this.store.requireProject(member.projectId);
         if (this.runners.has("core")) {
           if (member.backend !== "core" && (member.sessionId || member.paneId)) {
             for (const d of this.store.listPending(member.id)) this.hold(d, "legacy_session");
             this.store.patchMember(member.id, { lastError: "이전 실행기의 세션입니다. 새 core 세션으로 명시적으로 전환해야 합니다" });
-            continue;
+            return;
           }
-          if (member.backend === "core" && member.status !== "asleep" && !project.archived && !this.coreAbsenceConfirmed(member)) {
+          if (this.watchesCore(member, project)) {
             this.coreSupervisor?.watch(this.runnerMember(member, project));
             if (!this.coreSupervisor && member.paneId) this.store.patchMember(member.id, { lastError: "core 재연결 보류: 읽기 재결합을 지원하지 않습니다" });
           }
-          continue;
+          return;
         }
         if (this.backendOf(member) === "herdr") {
           // 가져온 명부의 직원은 세션도 칸도 없어 재결합할 것이 없다.
           if (member.status !== "asleep" && (member.sessionId || member.paneId)) herdrMembers.push(member);
-          continue;
+          return;
         }
         if (member.status === "working" || member.status === "blocked") {
           this.settle(member);
@@ -1302,7 +1427,7 @@ export class Orchestrator implements OrchestratorApi {
             });
           }
         }
-      }
+      });
       await this.coreSupervisor?.tick();
       await Promise.all([...this.eventQueues.values()]);
       await this.reconcileExecutions();
@@ -1316,21 +1441,138 @@ export class Orchestrator implements OrchestratorApi {
     await this.retryOrphans();
   }
 
+  /** 읽을 수 없는 행 하나가 서버 시작 전체를 막지 않게 한다. 그 항목은 건너뛰고 기록만 남긴다(다음 틱·점검이 다시 본다). */
+  private recoverStep(what: string, step: () => unknown): void {
+    try { step(); } catch (e) { console.error("재시작 복구 중 건너뜀:", what, (e as Error).message); }
+  }
+
   /** Every backend uses persisted item evidence; legacy missing envelopes stay fenced. */
   private async settleInFlight(): Promise<void> {
-    await this.deliveryRecovery.tick();
-    this.reconcileTodoCorrections();
-    this.reconcileRejectedExecutions();
-    this.releaseSlots();
+    try {
+      await this.deliveryRecovery.tick();
+      this.reconcileTodoCorrections();
+      this.reconcileRejectedExecutions();
+      this.releaseSlots();
+    } finally { this.scheduleRecoveryCheck(); }
+  }
+
+  /**
+   * 여러 직원의 펌프를 한 번에 쏟아내면 그 동기 구간과 뒤따르는 마이크로태스크가 소켓·타이머보다 먼저 돌아
+   * HTTP·WebSocket·터미널 스트림이 그동안 멈춘다. 직원마다 차례를 넘겨 사이에 다른 일이 돌게 한다(직원별 순서는 rt.pumping 이 지킨다).
+   */
+  private pumpEach(ids: string[]): void {
+    const [first, ...rest] = ids;
+    if (first === undefined || this.closed) return;
+    void this.pump(first);
+    if (rest.length) setImmediate(() => this.pumpEach(rest));
+  }
+
+  private lastStallCheck = 0;
+  /**
+   * 정체 감지는 프로젝트의 전달 이력을 통째로 읽는다. 5초 점검·30초 틱·전달 확인이 저마다 돌리던 것을 10초에 한 번으로 묶는다
+   * (판정 기준이 60초·120초라 그보다 자주 볼 까닭이 없다).
+   */
+  private detectStallsSoon(): void {
+    if (Date.now() - this.lastStallCheck < Math.min(10_000, this.timings.healthMs * 2)) return;
+    this.lastStallCheck = Date.now();
+    this.store.detectDeliveryStalls();
+  }
+
+  /** 전송 호출이 아직 끝나지 않은 봉투. 단계 제한으로 펌프가 먼저 풀려도 호출이 끝날 때까지 남는다. */
+  private readonly liveWrites = new Set<string>();
+
+  /** 이 봉투의 쓰기에서 더 올 것이 없다: 전송 호출이 끝났고(또는 쓴 프로세스가 죽었고) 그 뒤 writeSettleMs 가 지났다. */
+  writerDone(dispatch: DeliveryDispatch): boolean {
+    return !this.liveWrites.has(dispatch.dispatchId) && Date.now() - Date.parse(dispatch.updatedAt) >= this.timings.writeSettleMs;
+  }
+
+  /**
+   * core 실행기에 원래 쓰기의 상태를 알려 준다. 예전에는 영수증이 없으면 언제나 '미해결'이라 자동 재전송, 위험 동의 재전송,
+   * '그만 보내기' 뒤의 해제가 모두 동작하지 않았고, 전송 중 재시작 한 번이 그 직원의 대기열을 영영 막았다.
+   * - prepared: 쓰기 직전에야 write_started 로 바뀐다. 쓴 적이 없다.
+   * - write_started/unknown: 전송 호출이 끝나고 writeSettleMs 가 지나면 더 올 것이 없다(결과는 모른다: unconfirmed).
+   * - 다른 입력이 없었다는 판단: 대표가 중복 위험에 동의했거나, 보낸 뒤 CLI 의 턴 번호가 그대로다.
+   * 실제로 다시 쓸지는 실행기가 기록·입력칸·쉬는 상태를 다시 확인해 정한다.
+   */
+  dispatchQuiescence(memberId: string, dispatch: DeliveryDispatch): { originalWrite: "not_written" | "rejected" | "settled" | "unresolved"; externalInput: boolean | null; unconfirmed?: boolean; riskApproved?: boolean } {
+    const riskApproved = dispatch.items.length > 0 && dispatch.items.every(item => this.store.getDelivery(item.deliveryId) && this.store.getDeliveryRetry(item.deliveryId).retryReason?.startsWith("delivery_risk:"));
+    const runner = this.runners.get("core");
+    const observed = runner instanceof CoreRunner ? runner.observationState(memberId) : null;
+    const untouched = !!observed && observed.failures === 0 && dispatch.baseline.turn !== null && observed.turn === dispatch.baseline.turn;
+    const externalInput = riskApproved || untouched ? false : null;
+    if (dispatch.transportState === "rejected") return { originalWrite: "rejected", externalInput, riskApproved };
+    if (dispatch.transportState === "prepared") return { originalWrite: "not_written", externalInput, riskApproved };
+    if (dispatch.transportState === "accepted") {
+      const delivered = dispatch.items.every(item => this.store.getDelivery(item.deliveryId)?.status === "delivered");
+      return { originalWrite: "settled", externalInput: delivered ? null : externalInput, unconfirmed: !delivered, riskApproved };
+    }
+    if (!this.writerDone(dispatch)) return { originalWrite: "unresolved", externalInput: null };
+    return { originalWrite: "settled", externalInput, unconfirmed: true, riskApproved };
+  }
+
+  /** 단계 제한 뒤 늦게 끝난 전송 호출의 확정 결과(쓰지 않음·거절·수신)를 받아 '확인 필요'로 남은 봉투를 닫는다. */
+  private lateSendResult(memberId: string, dispatch: DeliveryDispatch, late: SendResult): void {
+    if (this.closed || !this.store.getMember(memberId)) return;
+    if (!late.ok && !["not_written", "rejected"].includes(late.deliveryEffect ?? "unknown")) return;
+    const at = new Date().toISOString();
+    try {
+      this.deliveryRecovery.recordResult(dispatch.dispatchId, late.ok ? { ...late, receipt: late.receipt ?? { dispatchId: dispatch.dispatchId, receivedAt: at, source: "transport" } } : late);
+      const run = this.store.getExecutionJournal(dispatch.dispatchId);
+      if (run && run.phase === "unknown") this.store.saveExecutionJournal({ ...run, ...(late.ok
+        ? { phase: late.started ? "running" as const : "received" as const, inputReceivedAt: at, startedAt: late.started ? at : null, turn: late.turn ?? run.turn }
+        : { phase: "ended" as const, result: "error" as const, reason: late.detail ?? late.reason, endedAt: at }), updatedAt: at });
+      this.store.appendActivity(memberId, "system", late.ok ? "늦게 도착한 수신 확인으로 전달을 확정했습니다" : "늦게 도착한 결과로 넣지 못한 것을 확인했습니다. 다시 보냅니다", `late-result:${dispatch.dispatchId}`);
+    } catch (e) { console.warn("늦은 전송 결과 처리 실패:", memberId, (e as Error).message); return; }
+    void this.pump(memberId);
+  }
+
+  private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * 전달 확인은 1·3·10초 간격으로 다시 보도록 적어 두지만 도는 곳은 30초 틱뿐이었다. 그래서 실제로 전달된 글도
+   * 최대 30초씩 '확인 중'으로 그 직원의 대기열을 막았다. 다음 확인 시각이 틱보다 이르면 그때 한 번 더 본다.
+   */
+  private scheduleRecoveryCheck(): void {
+    if (this.closed || this.recoveryTimer) return;
+    const next = this.store.nextDeliveryCheckAt(), now = Date.now();
+    // 일하는 직원을 기다리는 확인은 몇 시간씩 이어질 수 있다. 5초보다 자주 보지 않는다.
+    const due = Math.min(next.active ?? Infinity, next.waiting === null ? Infinity : Math.max(next.waiting, now + 5000));
+    if (due - now >= this.timings.tickMs) return;
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      void this.settleInFlight().catch(e => console.warn("전달 확인 실패:", e));
+    }, Math.max(due - Date.now(), 1000));
+    this.recoveryTimer.unref?.();
   }
 
   private reconcileRejectedExecutions(): void {
     for (const run of this.store.listPendingExecutions()) {
       const dispatch = this.store.getDispatch(run.runId);
-      if (dispatch?.transportState !== "rejected" || run.startedAt || run.inputReceivedAt) continue;
+      if (!dispatch || run.startedAt || run.inputReceivedAt) continue;
+      // 받았는지 모른 채 닫힌 봉투: 쓰기는 끝났고 항목은 모두 '그만 보내기'나 새 봉투로 넘어갔다. 그 실행 기록이 남으면
+      // 끝날 턴이 없는데도 '일하는 중'으로 세어져 그 직원의 전달이 계속 멈춘다.
+      const abandoned = dispatch.transportState === "accepted" && dispatch.items.every(item => {
+        const d = this.store.getDelivery(item.deliveryId);
+        return !d || d.status !== "delivered" && (this.store.getDeliveryRecovery(d.id)?.phase === "stopped" ||
+          this.store.listDispatches(d.memberId).filter(other => other.items.some(i => i.deliveryId === d.id)).at(-1)?.dispatchId !== dispatch.dispatchId);
+      });
+      if (dispatch.transportState !== "rejected" && !abandoned) continue;
       const at = new Date().toISOString();
-      this.store.saveExecutionJournal({ ...run, phase: "ended", result: "error", reason: run.reason ?? "not_written", endedAt: at, updatedAt: at });
+      this.store.saveExecutionJournal({ ...run, phase: "ended", result: "error", reason: dispatch.transportState === "rejected" ? run.reason ?? "not_written" : "unconfirmed_closed", endedAt: at, updatedAt: at });
     }
+  }
+
+  /** 대표의 전달 복구 요청(다시 확인·위험 동의 재전송·그만 보내기). 결정이 다음 틱을 기다리지 않고 곧바로 반영되게 한다. */
+  async recoverDelivery(deliveryId: string, request: DeliveryRecoveryRequest): Promise<DeliveryRecoveryResult> {
+    const result = await this.deliveryRecovery.recover(deliveryId, request);
+    try {
+      const delivery = this.store.getDelivery(deliveryId);
+      if (delivery && !this.closed) {
+        // 끝난 쓰기의 펜스와 실행 기록을 닫고, 확인·재전송을 지금 한 번 돌린 뒤 그 직원의 대기열을 민다.
+        this.deliveryRecovery.fenced(delivery.memberId);
+        void this.settleInFlight().catch(e => console.warn("전달 확인 실패:", e)).then(() => this.pump(delivery.memberId));
+      }
+    } catch (e) { console.warn("전달 복구 뒤 처리 실패:", (e as Error).message); }
+    return result;
   }
 
   /** 일하던 칸을 잃었거나 턴이 끊겼다. 대기열이 없으면 아무도 깨우지 않아 팀이 조용히 멈춘다. 총괄이 기다리는 일이라 깨운다. */
@@ -1401,10 +1643,25 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 전역 실행기가 지금 쓸 수 있는지 다시 본다. 달라졌으면 화면에 알리고, 돌아왔으면 보류된 것을 민다. 겹쳐 불러도 한 번만 묻는다. */
   refreshConnection(): Promise<void> {
-    this.healthProbe ??= this.probeHealth().finally(() => {
-      this.healthProbe = null;
-    });
+    if (!this.healthProbe) {
+      let known!: () => void;
+      this.healthKnown = new Promise<void>(resolve => { known = resolve; });
+      this.healthProbe = this.probeHealth(known).finally(() => {
+        known();
+        this.healthProbe = null; this.healthKnown = null;
+      });
+    }
     return this.healthProbe;
+  }
+
+  /**
+   * 화면 요청용. 연결 상태(실행기가 답하는지)만 다시 보고, 뒤따르는 정리(멈춤 복구·전 직원 재관측·정체 감지)는
+   * 기다리지 않는다. 실행기가 늦게 답하면 마지막으로 아는 상태로 진행한다. 정리는 같은 점검이 뒤에서 끝낸다.
+   */
+  async refreshHealth(waitMs = this.timings.screenWaitMs): Promise<void> {
+    const probe = this.refreshConnection();
+    probe.catch(e => console.warn("실행기 상태 확인 실패:", (e as Error).message));
+    await briefly(this.healthKnown ?? probe.catch(() => {}), waitMs, () => undefined);
   }
 
   /**
@@ -1436,22 +1693,24 @@ export class Orchestrator implements OrchestratorApi {
       this.absentCoreMembers.get(member.id) === this.store.memberRevisions(member.id).sessionGeneration;
   }
 
-  private async probeHealth(): Promise<void> {
+  private async probeHealth(known?: () => void): Promise<void> {
     const backend = this.store.effectiveBackend();
     const runner = this.runners.get(backend);
     const state = runner ? await runner.available().catch((e: Error) => ({ ok: false, detail: e.message })) : { ok: false, detail: "실행기가 없습니다" };
     if (this.closed) return;
+    if (backend === "core") this.lastCoreAvailability = state;
     const changed = this.store.setRunnerHealth(backend, { ok: state.ok, detail: state.ok ? null : state.detail });
+    known?.();
     await this.recoverStops();
     for (const member of this.store.listAllMembers()) {
       const project = this.store.requireProject(member.projectId);
-      if (member.backend === "core" && member.origin !== "manual" && member.status !== "asleep" && !project.archived && !this.coreAbsenceConfirmed(member)) this.coreSupervisor?.watch(this.runnerMember(member, project));
+      if (this.watchesCore(member, project)) this.coreSupervisor?.watch(this.runnerMember(member, project));
       else this.coreSupervisor?.unwatch(member.id);
     }
     await this.coreSupervisor?.tick();
     await this.reconcileExecutions();
     this.reportStuckPumps();
-    this.store.detectDeliveryStalls();
+    this.detectStallsSoon();
     if (!changed) return;
     await this.broadcastHerdr();
     if (!state.ok) return;
@@ -1459,41 +1718,60 @@ export class Orchestrator implements OrchestratorApi {
     void this.retryOrphans().catch((e) => console.warn("보류된 말 전달 재시도 실패:", (e as Error).message));
   }
 
+  /**
+   * 틱의 한 단계나 직원 한 명의 읽을 수 없는 상태가 나머지 단계와 다른 직원의 전달을 막지 않게 한다.
+   * 타이머 콜백에서 새어 나간 예외는 서버 프로세스를 끝낸다.
+   */
+  private tickStep(name: string, step: () => void): void {
+    try { step(); } catch (e) { this.tickFailed(name, e); }
+  }
+  private readonly tickFailures = new Map<string, number>();
+  private tickFailed(name: string, error: unknown): void {
+    // 같은 실패가 틱마다 되풀이되면 1분에 한 줄만 남긴다.
+    const now = Date.now(), key = `${name}:${(error as Error)?.message ?? error}`;
+    if (now - (this.tickFailures.get(key) ?? 0) < 60_000) return;
+    if (this.tickFailures.size >= 100) this.tickFailures.clear();
+    this.tickFailures.set(key, now);
+    console.error("틱 단계 실패:", name, error);
+  }
+
   private onTick(): void {
-    void this.apiRecovery.tick().catch(e => console.warn("API 복구 확인 실패:", e));
-    if (Date.now() - this.lastDeliveryNoticeCheck >= 30_000) { this.lastDeliveryNoticeCheck = Date.now(); this.notifyDelayedDeliveries(); }
-    this.store.detectDeliveryStalls();
-    for (const member of this.store.listAllMembers()) {
-      if (this.backendOf(member) !== "core") continue;
+    this.tickStep("api_recovery", () => void this.apiRecovery.tick().catch(e => console.warn("API 복구 확인 실패:", e)));
+    this.tickStep("delayed_notice", () => { if (Date.now() - this.lastDeliveryNoticeCheck >= 30_000) { this.lastDeliveryNoticeCheck = Date.now(); this.notifyDelayedDeliveries(); } });
+    this.tickStep("stalls", () => this.detectStallsSoon());
+    let members: Member[] = [];
+    this.tickStep("members", () => { members = this.store.listAllMembers(); });
+    for (const member of members) this.tickStep(`compact:${member.id}`, () => {
+      if (this.backendOf(member) !== "core") return;
       this.reconcileCoreCompact(member);
       if (this.store.getContextState(member.id)?.compaction?.phase === "queued") void this.pump(member.id);
-    }
-    void this.settleInFlight().catch(e => console.warn("전달 확인 실패:", e));
-    for (const id of [...this.unattached]) {
+    });
+    this.tickStep("in_flight", () => void this.settleInFlight().catch(e => console.warn("전달 확인 실패:", e)));
+    for (const id of [...this.unattached]) this.tickStep(`reattach:${id}`, () => {
       const member = this.store.getMember(id);
       if (member && member.status !== "asleep") void this.reattachHerdr(member);
       else this.unattached.delete(id);
-    }
-    this.checkManualMembers();
+    });
+    this.tickStep("manual_members", () => this.checkManualMembers());
     // 입력칸을 못 찾았거나(선택 창 등) 소켓이 끊겨 못 맞춘 새 설정을 다시 시도한다.
-    for (const m of this.store.listAllMembers()) {
+    for (const m of members) this.tickStep(`config:${m.id}`, () => {
       if ((m.status === "idle" || m.status === "waiting") && this.configPending(m)) void this.pump(m.id);
-    }
-    void this.retryOrphans().catch((e) => console.warn("보류된 말 전달 재시도 실패:", (e as Error).message));
-    void this.broadcastHerdr();
-    const ids = new Set(
-      this.store
-        .listUndelivered()
-        .filter((d) => !(d.status === "held" && (d.holdReason === "asleep" || d.holdReason === "runner_disabled")))
-        .map((d) => d.memberId),
-    );
-    for (const id of ids) void this.pump(id);
-    try {
+    });
+    this.tickStep("orphans", () => void this.retryOrphans().catch((e) => console.warn("보류된 말 전달 재시도 실패:", (e as Error).message)));
+    this.tickStep("herdr", () => void this.broadcastHerdr().catch(e => console.warn("herdr 상태 확인 실패:", (e as Error).message)));
+    this.tickStep("pump", () => {
+      const ids = new Set(
+        this.store
+          .listUndelivered()
+          .filter((d) => !(d.status === "held" && (d.holdReason === "asleep" || d.holdReason === "runner_disabled")))
+          .map((d) => d.memberId),
+      );
+      this.pumpEach([...ids]);
+    });
+    this.tickStep("board", () => {
       this.checkStaleTodos();
       this.checkBoardTidy();
-    } catch (e) {
-      console.warn("판 정리 확인 실패:", (e as Error).message);
-    }
+    });
   }
 
   /** Passive reminders never pump, start a session, or wake a sleeping member. */
@@ -1627,6 +1905,8 @@ export class Orchestrator implements OrchestratorApi {
     await Promise.all([...this.eventQueues.values()]);
     if (this.tick) clearInterval(this.tick);
     if (this.healthTimer) clearInterval(this.healthTimer);
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null;
     for (const rt of this.runtimes.values()) {
       if (rt.compactTimer) clearTimeout(rt.compactTimer);
       if (rt.retryTimer) clearTimeout(rt.retryTimer);
@@ -2140,7 +2420,7 @@ export class Orchestrator implements OrchestratorApi {
     if (current.delivery !== "failed") return current;
     const target = current.targetMemberId ? this.store.getMember(current.targetMemberId) : null;
     if (current.targetMemberId && !target) throw new ApiError(409, "그 직원이 닫혀 다시 보낼 수 없습니다. 새 글로 보내세요");
-    await this.refreshConnection();
+    await this.refreshHealth();
     this.store.requireReachable(current.projectId, target);
     let deliveries = this.store.listDeliveries(current.projectId).filter(d => d.refType === "message" && d.refId === current.id);
     if (!deliveries.length) deliveries = [this.deliveryRecovery.materializeLegacyMessage(current.id)];
@@ -2421,10 +2701,12 @@ export class Orchestrator implements OrchestratorApi {
     if (r.chosen.reject && note) await this.sendUserMessage(member.projectId, { text: note, targetMemberId: member.id });
   }
 
-  async herdrInfo(): Promise<HerdrInfo> {
+  private herdrProbe: Promise<HerdrInfo> | null = null;
+  /** 겹친 조회는 하나로 합친다(틱·bootstrap 이 각자 프로세스와 소켓을 새로 열지 않게). */
+  herdrInfo(): Promise<HerdrInfo> {
     const fallback: HerdrInfo = { installed: false, running: false, version: null, protocol: null, compatible: false, warning: null };
-    if (!this.herdr) return fallback;
-    return this.herdr.info().catch((e: Error) => ({ ...fallback, warning: e.message }));
+    if (!this.herdr) return Promise.resolve(fallback);
+    return this.herdrProbe ??= this.herdr.info().catch((e: Error) => ({ ...fallback, warning: e.message })).finally(() => { this.herdrProbe = null; });
   }
 
   async herdrAgents(): Promise<LiveAgent[]> {
@@ -2499,7 +2781,7 @@ export class Orchestrator implements OrchestratorApi {
     } catch (e: unknown) {
       if (member) {
         if (placeholder) this.store.patchMember(member.id, { status: "offline", sessionId: null, paneId: null, backend: null });
-        else this.store.removeMember(member.id);
+        else this.forgetMember(member.id);
       }
       // 거부된 편입이 실행을 켠 채 남기면 다음 대표 말에 총괄이 뜬다.
       if (turnedOnRunner) {
@@ -2752,11 +3034,16 @@ export class Orchestrator implements OrchestratorApi {
           const started = await this.startManaged(member, project, false, intent);
           this.applyStarted(member.id, project, started, sent);
         })().then(resolve, e => {
-          if (retainOnFailure) {
-            this.store.patchMember(member.id, { status: "offline", lastError: (e as Error).message });
-            for (const d of this.store.listPending(member.id)) this.hold(d, "backend_down");
-          } else if (this.backendOf(member) !== "core" || (e instanceof CoreError && !e.uncertain && !["starting_unknown", "conflict", "unknown"].includes(e.kind))) this.abandonSpawn(member.id);
-          reject(new ApiError(502, `세션을 띄우지 못했습니다: ${(e as Error).message}`));
+          // 정리 중의 오류가 reject 를 건너뛰면 rt.starting 이 영영 남아 이 직원의 전달이 멈춘다.
+          try {
+            const journal = this.store.getLifecycleJournal(intent.operationId);
+            if (journal?.phase === "prepared") this.finishLifecycle(journal, "refused", (e as Error).message.slice(0, 500));
+            if (retainOnFailure) {
+              this.store.patchMember(member.id, { status: "offline", lastError: (e as Error).message });
+              for (const d of this.store.listPending(member.id)) this.hold(d, "backend_down");
+            } else if (this.backendOf(member) !== "core" || (e instanceof CoreError && !e.uncertain && !["starting_unknown", "conflict", "unknown"].includes(e.kind))) this.abandonSpawn(member.id);
+          } catch (cleanup) { console.error("세션 기동 실패 정리 오류:", member.id, cleanup); }
+          finally { reject(new ApiError(502, `세션을 띄우지 못했습니다: ${(e as Error).message}`)); }
         });
       });
     });
@@ -2779,7 +3066,17 @@ export class Orchestrator implements OrchestratorApi {
     }
     const rt = this.runtimes.get(memberId);
     if (rt) this.clearRuntime(memberId, rt);
+    this.forgetMember(memberId);
+  }
+
+  /** 명부에서 뺀다. 그 직원의 실행 파일(규칙·MCP 설정·CLI 설정)도 지운다: MCP 설정에는 그 직원의 토큰이 들어 있다. */
+  private forgetMember(memberId: string): void {
     this.store.removeMember(memberId);
+    this.store.afterCommit(() => {
+      for (const suffix of ["rules.md", "mcp.json", "settings.json"]) {
+        try { unlinkSync(join(this.config.home, "run", `${memberId}.${suffix}`)); } catch { /* 만든 적이 없거나 이미 없다 */ }
+      }
+    });
   }
 
   /** sent 는 start 에 실제로 넘긴 설정이다. 띄우는 동안 바뀐 값을 적으면 옛 값으로 돌면서 맞춘 것으로 기록된다. */
@@ -2787,6 +3084,7 @@ export class Orchestrator implements OrchestratorApi {
     const runner = this.runnerOf(this.store.requireMember(memberId));
     const currentError = runner instanceof CoreRunner ? runner.observationState(memberId)?.lastError : null;
     this.store.patchMember(memberId, { sessionId: started.sessionId, paneId: started.paneId, ...(!currentError && !(started.rejoined && this.store.requireMember(memberId).lastError?.startsWith("control_unknown:")) ? { lastError: null } : {}) });
+    if (!started.rejoined) this.runtime(memberId).launchedAt = Date.now();
     // 이미 떠 있던 칸에 붙었으면 이번 인자가 들어간 것이 아니다.
     if (!started.rejoined && sent) {
       this.store.setAppliedConfig(memberId, sent);
@@ -2853,7 +3151,8 @@ export class Orchestrator implements OrchestratorApi {
         text: [formatInstruction(target.name, input.text, quote), ...attachmentLines(this.attachmentsFor(target, attachments))].join("\n"),
         urgent: input.urgent,
       });
-      if (assignedBy) { this.store.setDeliveryAuthor(delivery.id, assignedBy.id); this.store.noteDelegation(assignedBy.id, delivery, busy && !input.urgent); }
+      // 끼워 넣을 수 없는 실행기에서는 긴급도 턴이 끝나야 나간다. 지시한 쪽에 '대기'로 알린다.
+      if (assignedBy) { this.store.setDeliveryAuthor(delivery.id, assignedBy.id); this.store.noteDelegation(assignedBy.id, delivery, busy && !(input.urgent && this.interjects(this.runners.get(this.backendOf(target))))); }
       return delivery;
     });
     const position = busy ? this.store.listPending(target.id).length : 0;
@@ -2939,14 +3238,23 @@ export class Orchestrator implements OrchestratorApi {
       return path ? { path, home } : null;
     }
     const root = join(home, "sessions");
+    // 턴이 끝날 때마다 부른다. 찾은 경로는 기억하고, 못 찾았을 때만 다시 훑는다.
+    const known = this.codexLogs.get(member.id);
+    if (known && known.sessionId === member.sessionId && known.cwd === member.cwd && existsSync(known.path)) return { path: known.path, home };
     try {
-      const paths = [...new Bun.Glob("**/rollout-*.jsonl").scanSync({ cwd: root, absolute: true, onlyFiles: true, followSymlinks: false })].filter(path => {
+      const matching = (pattern: string) => [...new Bun.Glob(pattern).scanSync({ cwd: root, absolute: true, onlyFiles: true, followSymlinks: false })].filter(path => {
         const meta = parseCodexSessionMeta(readJsonlRange(root, path, null, { maxBytes: 1024 * 1024 }).records[0]?.value);
         return meta?.sessionId === member.sessionId && meta.cwd === member.cwd;
       });
-      return paths.length === 1 ? { path: paths[0]!, home } : null;
+      // Codex 는 기록 이름 끝에 세션 ID 를 붙인다. 그 이름부터 본다: 전체 rollout(수백 개)의 앞 1MB 를 다 읽으면 0.5초씩 멈춘다.
+      let paths = matching(`**/rollout-*-${member.sessionId}.jsonl`);
+      if (!paths.length) paths = matching("**/rollout-*.jsonl");
+      if (paths.length !== 1) return null;
+      this.codexLogs.set(member.id, { sessionId: member.sessionId, cwd: member.cwd, path: paths[0]! });
+      return { path: paths[0]!, home };
     } catch { return null; }
   }
+  private readonly codexLogs = new Map<string, { sessionId: string; cwd: string; path: string }>();
 
   private invalidateCoreMeasurement(member: Member): void {
     if (this.backendOf(member) !== "core") return;
@@ -3097,6 +3405,8 @@ export class Orchestrator implements OrchestratorApi {
     if (member.status === "asleep" || member.status === "offline") {
       // 가져온 프로젝트는 총괄을 시작하거나 편입하기 전에는 어떤 세션도 움직이지 않는다고 약속했다.
       if (!this.store.requireProject(member.projectId).runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다. 총괄을 시작하거나 기존 세션을 편입하세요");
+      const rt = this.runtime(memberId);
+      rt.quickExits = 0; rt.quickExitNotified = false;
       const reopened = await this.reopen(member);
       if (!reopened) {
         const why = this.store.requireMember(memberId).lastError;
@@ -3112,6 +3422,26 @@ export class Orchestrator implements OrchestratorApi {
     return this.store.requireMember(memberId);
   }
 
+  /**
+   * 띄우자마자 끝나는 세션을 틱마다 다시 띄우면 CLI 프로세스만 계속 만들고 전달은 엉뚱한 사유로 남는다.
+   * 세 번 이어지면 한동안 자동으로 깨우지 않고 이유를 한 번 알린다. 대표가 직접 깨우면 바로 다시 시도한다.
+   */
+  private quickExitHeld(member: Member, rt: Runtime, pending: Delivery[]): boolean {
+    if (rt.quickExits < 3) return false;
+    const until = rt.quickExitAt + this.timings.quickExitRetryMs;
+    if (Date.now() >= until) { rt.quickExits = 2; return false; } // 한 번 더 띄워 본다. 또 끝나면 다시 멈춘다.
+    for (const d of pending) this.hold(d, "offline");
+    this.scheduleRetry(member.id, rt, until);
+    if (!rt.quickExitNotified) {
+      rt.quickExitNotified = true;
+      const text = `${member.name}의 세션이 시작하자마자 끝나기를 되풀이해 자동으로 다시 깨우지 않습니다. 터미널에서 원인을 확인한 뒤 직원을 깨워 주세요.${member.lastError ? ` (${member.lastError})` : ""}`;
+      this.store.appendActivity(member.id, "error", text);
+      this.systemMessage(member.projectId, text);
+      this.notifyInbox(`${member.name} 세션 시작 실패`, text);
+    }
+    return true;
+  }
+
   /** 깨우기와 전달 펌프가 함께 불러도 세션은 하나만 연다. */
   private reopen(member: Member): Promise<Member | null> {
     const rt = this.runtime(member.id);
@@ -3125,6 +3455,8 @@ export class Orchestrator implements OrchestratorApi {
     const project = this.store.requireProject(member.projectId);
     const runner = this.openRunner(member);
     try {
+      // core 는 터미널만 만들면 성공으로 답하므로, 없는 세션을 --resume 하면 오류 없이 CLI 가 곧바로 끝나고 끝없이 되풀이됐다.
+      if (runner.kind === "core" && member.sessionId && runner.sessionExists?.(this.runnerMember(member, project)) === false) throw new MissingSessionError();
       const sent = this.desiredConfig(member);
       const started = await this.startManaged(member, project, !!member.sessionId);
       if (await this.dropIfClosed(member, project, runner, started)) return null;
@@ -3138,7 +3470,7 @@ export class Orchestrator implements OrchestratorApi {
     } catch (e) {
       const message = (e as Error).message;
       // 잠깐의 시간 초과·소켓 끊김으로 멀쩡한 세션을 버리면 직원이 맥락을 잃는다. 세션이 정말 없을 때만 새로 연다.
-      const missing = isMissingSessionError(message) || runner.sessionExists?.(this.runnerMember(member, project)) === false;
+      const missing = e instanceof MissingSessionError || isMissingSessionError(message) || runner.sessionExists?.(this.runnerMember(member, project)) === false;
       if (!missing) {
         console.warn(`${member.name} 이어 열기 실패, 세션을 그대로 두고 다시 시도합니다:`, message);
         if (this.store.getMember(member.id)) this.store.patchMember(member.id, { lastError: message });
@@ -3154,7 +3486,12 @@ export class Orchestrator implements OrchestratorApi {
         this.store.patchMember(member.id, { contextPct: null, parallel: false, ...(member.origin === "adopted" ? { origin: "runner" as const } : {}) });
         this.store.enqueue({ projectId: project.id, memberId: member.id, kind: "system", text: this.newSessionNote(member), wake: false });
       } catch (e2) {
-        this.store.patchMember(member.id, { lastError: (e2 as Error).message });
+        // 새 세션을 띄운 결과를 모른다. 옛 세션 ID 를 그대로 두면 뒤늦게 뜬 새 터미널이 '다른 세션'으로 보여 재결합이 영영 막힌다.
+        if (this.store.getMember(member.id) && member.sessionId && this.pendingLifecycle(member.id)?.intent === "start") {
+          this.store.patchMember(member.id, { sessionId: null, contextPct: null, parallel: false });
+          this.store.enqueue({ projectId: project.id, memberId: member.id, kind: "system", text: this.newSessionNote(member), wake: false });
+        }
+        if (this.store.getMember(member.id)) this.store.patchMember(member.id, { lastError: (e2 as Error).message });
         return null;
       }
     }
@@ -3215,7 +3552,7 @@ export class Orchestrator implements OrchestratorApi {
       }
       this.clearRuntime(memberId, rt);
       (this.runners.get("herdr") as HerdrCapable | undefined)?.dropMember?.(memberId);
-      this.store.removeMember(memberId);
+      this.forgetMember(memberId);
       this.releaseSlots();
       // 대표가 체크한 '했음'은 받을 직원이 사라져도 잃으면 안 된다. 총괄에게 넘긴다.
       const conductor = this.store.getConductor(member.projectId);
@@ -3615,18 +3952,51 @@ export class Orchestrator implements OrchestratorApi {
           await this.pumpOnce(memberId);
         } while (rt.again && !this.closed);
       } catch (e) {
-        const turn = rt.turn;
-        if (turn && !this.store.listPendingExecutions().some(run => run.memberId === memberId)) rt.turn = null;
-        this.releaseSlots();
-        if (this.store.getMember(memberId)) for (const delivery of this.store.listPending(memberId)) {
-          if (delivery.attempts === 0 && this.store.getDeliveryRecovery(delivery.id)?.phase === "none") this.hold(delivery, "backend_down");
-        }
+        // 정리 중의 오류가 다시 새면 rt.pumping 이 거부되고, 호출부 대부분은 void 라 프로세스가 끝난다.
+        try { this.pumpFailed(memberId, rt, e); }
+        catch (cleanup) { console.error("전달 펌프 오류 정리 실패:", memberId, cleanup); }
         console.error("전달 펌프 오류:", memberId, e);
       } finally {
         rt.pumping = null; rt.pumpStage = null; rt.pumpSince = null;
       }
     })();
     return rt.pumping;
+  }
+
+  /**
+   * 이유 없이(또는 실제와 어긋난 이유로) 멈춘 전달을 알리기 전에 한 번 스스로 다시 민다. 입력은 하지 않는다:
+   * '아직 못 받음'으로 미룬 재시도 간격을 풀고(한도·인증 간격은 그대로) 펌프를 돌릴 뿐이다.
+   * 실행 기록도 없이 남은 턴 표시는, CLI 가 쉬는 중으로 관측될 때에만 지운다.
+   */
+  private nudgeStalled(memberId: string): void {
+    const member = this.store.getMember(memberId);
+    if (!member || this.closed || this.recovering) return;
+    const rt = this.runtime(memberId), runner = this.runners.get(this.backendOf(member));
+    const observed = runner instanceof CoreRunner ? runner.observationState(memberId) : null;
+    if (rt.turn?.kind === "work" && !rt.pumping && !rt.starting && !rt.reopening && !this.eventQueues.has(memberId) && observed?.failures === 0 && ["idle", "done"].includes(observed.state ?? "") &&
+      !runner!.isBusy(memberId) && !this.store.listPendingExecutions().some(run => run.memberId === memberId)) {
+      rt.turn = null;
+      this.store.appendActivity(memberId, "system", "끝난 턴의 표시가 남아 전달이 멈춰 있었습니다. 표시를 지우고 다시 보냅니다");
+      if (member.status === "working") this.settle(member);
+      this.releaseSlots();
+    }
+    void this.recheckMemberDelivery(memberId, true, true);
+  }
+
+  private pumpFailed(memberId: string, rt: Runtime, error: unknown): void {
+    const turn = rt.turn;
+    if (turn && !this.store.listPendingExecutions().some(run => run.memberId === memberId)) rt.turn = null;
+    this.releaseSlots();
+    if (!this.store.getMember(memberId)) return;
+    // 실행기와 통신하다 난 오류만 '실행기에 연결할 수 없음'이다. 그 밖의 내부 오류에 그 사유를 붙이면 대표가 멀쩡한 실행기를 의심한다.
+    if (error instanceof CoreError || error instanceof HerdrError) {
+      for (const delivery of this.store.listPending(memberId)) {
+        if (delivery.attempts === 0 && this.store.getDeliveryRecovery(delivery.id)?.phase === "none") this.hold(delivery, "backend_down");
+      }
+      return;
+    }
+    const detail = `전달 처리 오류: ${((error as Error)?.message ?? String(error)).slice(0, 300)}`;
+    if (this.store.requireMember(memberId).lastError !== detail) this.store.patchMember(memberId, { lastError: detail });
   }
 
   /** readyOnly: CLI 가 입력을 받을 수 있게 됐다는 신호로 부른다. '아직 못 받음' 때문에 미룬 것만 풀고 한도·인증 간격은 그대로 둔다. */
@@ -3701,8 +4071,21 @@ export class Orchestrator implements OrchestratorApi {
     if (this.controlFenced(member)) return;
     if (this.deliveryRecovery.fenced(memberId)) return;
     const rt = this.runtime(memberId);
+    // 설정을 바꿔 다시 여는 데 실패한 직원. 세션이 살아 있으면(멈추지 못했거나 재결합으로 돌아왔으면) 옛 설정으로 계속 일하고
+    // 설정은 다음 기동 때 맞춘다. 꺼져 있으면 곧바로 다시 열기를 되풀이하지 않고 간격을 두되, 영영 막지는 않는다.
     const deferred = this.store.deferredMemberConfig(memberId);
-    if (deferred?.failed && deferred.signature === JSON.stringify(this.desiredConfig(member))) return;
+    const configFailed = !!deferred?.failed && deferred.signature === JSON.stringify(this.desiredConfig(member));
+    if (configFailed && (member.status === "offline" || member.status === "asleep")) {
+      const retryAt = (Date.parse(deferred!.failedAt ?? "") || 0) + this.timings.configRetryMs * ((deferred!.attempts ?? 1) > 1 ? 5 : 1);
+      if (Date.now() < retryAt) {
+        for (const d of pending) if (!(d.status === "held" && d.holdReason === "asleep")) {
+          if (!(d.status === "held" && d.holdReason === "offline")) this.store.markHeld(d.id, "offline");
+          if (d.refType === "message" && d.refId) this.store.setMessageDelivery(d.refId, "held", "새 설정으로 다시 여는 데 실패해 잠시 뒤 다시 엽니다");
+        }
+        if (pending.some(d => d.wake)) this.scheduleRetry(memberId, rt, retryAt);
+        return;
+      }
+    }
     this.reconcileCoreCompact(member);
     if (this.coreCompactFenced(member)) return;
     if (rt.closing) return; // 닫는 중에 다시 열면 명부 밖 칸이 남는다.
@@ -3736,9 +4119,12 @@ export class Orchestrator implements OrchestratorApi {
       // 잠들 때 보류된 것만 있으면 깨우지 않는다. 새 깨움이 와야 함께 나간다.
       const wakes = pending.some((d) => d.wake && !(d.status === "held" && d.holdReason === "asleep"));
       if (!wakes) return;
+      if (this.quickExitHeld(member, rt, pending)) return;
       rt.pumpStage = "reopen";
       const reopened = await this.reopen(member);
       if (!reopened) {
+        // 실패한 설정으로 다시 여는 것이 또 실패했다. 다음 시도는 더 멀리 둔다.
+        if (configFailed && this.store.getMember(memberId)) this.store.deferMemberConfig(memberId, deferred!.signature, true);
         for (const d of pending) this.hold(d, member.status === "offline" ? "offline" : "backend_down");
         return;
       }
@@ -3757,8 +4143,8 @@ export class Orchestrator implements OrchestratorApi {
     if (this.isBusy(member)) {
       this.deferCoreCompact(member, "working");
       const urgent = pending.filter((d) => d.urgent);
-      // headless 는 돌고 있는 턴에 끼워 넣을 수 없다. 끝나면 묶어서 나간다.
-      if (urgent.length > 0 && runner.kind !== "headless") { rt.pumpStage = "send_urgent"; await this.sendUrgent(member, project, runner, urgent); }
+      // headless 와 core 는 돌고 있는 턴에 끼워 넣을 수 없다. 끝나면 묶어서 나간다.
+      if (urgent.length > 0 && this.interjects(runner)) { rt.pumpStage = "send_urgent"; await this.sendUrgent(member, project, runner, urgent); }
       return;
     }
 
@@ -3803,8 +4189,11 @@ export class Orchestrator implements OrchestratorApi {
       opened = true;
     }
 
-    // 방금 띄운 core CLI 는 아직 입력을 받지 못한다. 지금 넣으면 거절 기록만 남는다. 준비 신호(idle)가 다시 밀고, 안 오면 조금 뒤 예전처럼 시도한다.
-    if (opened && runner instanceof CoreRunner && !["idle", "done", "error"].includes(runner.observationState(member.id)?.state ?? "")) {
+    // 아직 준비를 보고하지 않은 core CLI(방금 띄웠거나 상태 보고 전)는 입력을 받지 못한다. 지금 넣으면 거절 기록만 쌓여
+    // 그 직원의 대기열이 통째로 미뤄진다. 준비 신호(idle)가 다시 밀고, 안 오면 조금 뒤 다시 본다.
+    const observedState = runner instanceof CoreRunner ? runner.observationState(member.id)?.state : undefined;
+    if (runner instanceof CoreRunner && (opened || observedState !== undefined) && !["idle", "done", "error"].includes(observedState ?? "")) {
+      rt.pumpStage = "await_ready";
       this.scheduleRetry(memberId, rt, Date.now() + this.timings.retryMs);
       return;
     }
@@ -3843,7 +4232,7 @@ export class Orchestrator implements OrchestratorApi {
       }
     }
 
-    const fresh = this.sendablePending(memberId);
+    const fresh = this.dropChangedSources(this.sendablePending(memberId));
     if (!fresh.some(d => d.wake) || this.retryDue(member) > Date.now()) {
       rt.turn = null;
       this.releaseSlots();
@@ -3970,6 +4359,29 @@ export class Orchestrator implements OrchestratorApi {
     }
   }
 
+  /**
+   * 원본이 바뀐 전달(체크를 푼 할 일의 완료 알림, 다시 열린 결재의 답, 지워진 글)은 봉투에 넣을 수 없다.
+   * 한 건이 봉투 전체를 거절시켜 그 직원의 대기열이 통째로 영영 막혔다. 보낼 뜻이 없어진 것만 거두고 나머지는 보낸다.
+   */
+  private dropChangedSources(deliveries: Delivery[]): Delivery[] {
+    return deliveries.filter(d => {
+      if (d.kind === "compact" || this.deliveryRecovery.sourceRevision(d) !== null) return true;
+      this.store.transaction(() => {
+        const r = this.store.getDeliveryRecovery(d.id);
+        if (r && r.phase !== "stopped") this.store.updateDeliveryRecovery(d.id, r.version, { phase: "stopped", reason: "source_changed", nextCheckAt: null });
+        this.store.patchDeliveryRetry(d.id, { nextAttemptAt: null, retryReason: null });
+        this.store.markFailed(d.id, "원본이 바뀌어 보내지 않았습니다");
+        if (d.refType === "message" && d.refId && this.store.getMessage(d.refId)) this.store.setMessageDelivery(d.refId, "failed", "원본이 바뀌어 보내지 않았습니다");
+        this.store.appendActivity(d.memberId, "system", `원본이 바뀐 전달을 보내지 않고 거뒀습니다 (${d.id})`, `source-changed:${d.id}`);
+      });
+      return false;
+    });
+  }
+
+  private interjects(runner: Runner | undefined): boolean {
+    return !!runner && runner.kind !== "headless" && runner.interjects !== false;
+  }
+
   private async sendUrgent(member: Member, project: Project, runner: Runner, urgent: Delivery[]): Promise<void> {
     await this.sendEnvelope(member, project, runner, orderForBundle(urgent), true);
   }
@@ -3980,7 +4392,8 @@ export class Orchestrator implements OrchestratorApi {
     const observed = runner instanceof CoreRunner ? runner.observationState(member.id) : null;
     const dispatch = this.deliveryRecovery.prepareDispatch(deliveries.map(d => d.id), observed?.identity ?? {
       terminalId: member.paneId, sessionId: member.sessionId, sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration, process: null,
-    }, { serverEpoch: this.deliveryEpoch, turn: observed?.turn ?? null, inputEpoch: observed?.inputEpoch ?? null, logs: [], capturedAt: new Date().toISOString() });
+    // 세션 기록의 지금 끝 위치를 함께 적는다. 수신 확인이 이 봉투 뒤에 덧붙은 부분만 읽게 된다.
+    }, { serverEpoch: this.deliveryEpoch, turn: observed?.turn ?? null, inputEpoch: observed?.inputEpoch ?? null, logs: runner instanceof CoreRunner ? runner.deliveryBaseline(this.runnerMember(member, project)) : [], capturedAt: new Date().toISOString() });
     this.store.transaction(() => {
       this.store.updateDispatch(dispatch.dispatchId, "prepared", "write_started");
       for (const d of deliveries) this.store.setDeliveryStatus(d.id, "delivering", { attempt: true });
@@ -3998,13 +4411,27 @@ export class Orchestrator implements OrchestratorApi {
       this.store.saveExecutionJournal(run);
       this.store.beginDelegationAck(run.runId, member.id, run.deliveryIds.map(id => this.store.requireDelivery(id)));
     });
-    let result = await this.safeSend(() => this.pumpWait(member.id, this.runtime(member.id).pumpStage?.startsWith("send_urgent") ? "send_urgent" : "send", send, this.runnerOf(member)));
+    let original: Promise<SendResult> | null = null;
+    this.liveWrites.add(dispatch.dispatchId);
+    const tracked = (): Promise<SendResult> => {
+      const call = send();
+      original = call;
+      void call.then(() => {}, () => {}).finally(() => this.liveWrites.delete(dispatch.dispatchId));
+      return call;
+    };
+    let result = await this.safeSend(() => this.pumpWait(member.id, this.runtime(member.id).pumpStage?.startsWith("send_urgent") ? "send_urgent" : "send", tracked, this.runnerOf(member)));
+    if (!original) this.liveWrites.delete(dispatch.dispatchId);
+    const first = result;
     if (result.ok && result.receipt && result.receipt.dispatchId !== dispatch.dispatchId) result = { ok: false, reason: "error", retryable: false, deliveryEffect: "unknown", detail: "다른 봉투의 수신 영수증입니다" };
     // The existing Runner.send success contract guarantees received input,
     // including core started:false. Bind legacy ACKs to the submitted envelope;
     // adapters with explicit receipts must identify this exact dispatch.
     this.deliveryRecovery.recordResult(dispatch.dispatchId, result.ok ? { ...result, receipt: result.receipt ?? { dispatchId: dispatch.dispatchId, receivedAt: new Date().toISOString(), source: "transport" } } : result);
     for (const item of dispatch.items) if (this.store.getDelivery(item.deliveryId)?.status === "delivered") this.apiRecovery.received(item.deliveryId);
+    if (!result.ok) this.scheduleRecoveryCheck();
+    // 단계 제한이 먼저 끝났어도 호출은 계속 돈다. 그 확정 결과가 뒤에 오면 버리지 않는다.
+    const pending = original as Promise<SendResult> | null;
+    if (!result.ok && !["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown") && pending) void pending.then(late => { if (late !== first) this.lateSendResult(member.id, dispatch, late); }, () => {});
     this.reconcileTodoCorrections();
     const current = this.store.getExecutionJournal(run.runId)!;
     if (!["ended", "interrupted"].includes(current.phase)) {
@@ -4053,7 +4480,8 @@ export class Orchestrator implements OrchestratorApi {
       return await Promise.race([
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
-            this.reportStuckPumps(memberId);
+            // 진단 기록이 실패해도 단계 제한은 반드시 걸려야 한다. 안 그러면 이 펌프가 영영 끝나지 않는다.
+            try { this.reportStuckPumps(memberId); } catch (e) { console.error("전달 펌프 정체 기록 실패:", memberId, e); }
             const error = new CoreError("timeout", `Pump stage ${rt.pumpStage ?? stage} exceeded ${this.timings.pumpStageTimeoutMs}ms`, true);
             controller.abort(error);
             reject(error);
@@ -4307,7 +4735,8 @@ export class Orchestrator implements OrchestratorApi {
       if (rt.turn === turn) {
         rt.compactTimer = setTimeout(() => {
           rt.compactTimer = null;
-          if (rt.turn === turn) this.endCompact(member.id, rt, "압축이 끝났다는 신호를 받지 못했습니다");
+          try { if (rt.turn === turn) this.endCompact(member.id, rt, "압축이 끝났다는 신호를 받지 못했습니다"); }
+          catch (e) { console.error("압축 시간 초과 처리 실패:", member.id, e); }
         }, this.timings.compactTimeoutMs);
       }
       return;
@@ -4343,10 +4772,12 @@ export class Orchestrator implements OrchestratorApi {
       const id = latest.compaction?.id;
       rt.compactTimer = setTimeout(() => {
         rt.compactTimer = null;
-        const current = this.store.getContextState(member.id);
-        if (!current?.compaction || current.compaction.id !== id || !["sending", "running"].includes(current.compaction.phase)) return;
-        this.store.saveContextState({ ...current, compaction: { ...current.compaction, phase: "uncertain", reason: "completion_timeout" } });
-        this.store.appendActivity(member.id, "error", "압축 완료를 확인할 수 없어 후속 자동 입력을 보류합니다");
+        try {
+          const current = this.store.getContextState(member.id);
+          if (!current?.compaction || current.compaction.id !== id || !["sending", "running"].includes(current.compaction.phase)) return;
+          this.store.saveContextState({ ...current, compaction: { ...current.compaction, phase: "uncertain", reason: "completion_timeout" } });
+          this.store.appendActivity(member.id, "error", "압축 완료를 확인할 수 없어 후속 자동 입력을 보류합니다");
+        } catch (e) { console.error("압축 시간 초과 처리 실패:", member.id, e); }
       }, this.timings.compactTimeoutMs);
       return;
     }
@@ -4559,6 +4990,11 @@ export class Orchestrator implements OrchestratorApi {
         this.markBlocked(member);
         break;
       case "gone":
+        if (rt.launchedAt !== null) {
+          if (Date.now() - rt.launchedAt < this.timings.quickExitMs) { rt.quickExits++; rt.quickExitAt = Date.now(); }
+          else rt.quickExits = 0;
+          rt.launchedAt = null;
+        }
         this.interruptCoreCompaction(member);
         if (rt.compactTimer) clearTimeout(rt.compactTimer);
         rt.compactTimer = null;
@@ -4600,6 +5036,7 @@ export class Orchestrator implements OrchestratorApi {
     rt.posted = false;
     rt.direct = false;
     rt.skipCompact = false;
+    rt.quickExits = 0; rt.quickExitNotified = false; rt.launchedAt = null;
     if (this.backendOf(member) === "core") {
       const state = this.store.ensureContextState(member.id);
       this.store.saveContextState({ ...state, baseline: { ...state.baseline, completedTurn: e.turn ?? null } });
@@ -4621,6 +5058,8 @@ export class Orchestrator implements OrchestratorApi {
       await this.onTurnError(member, e.errorText ?? "오류", errorKey);
     } else {
       this.apiRecovery.completed(member.id);
+      // 턴을 잘 마쳤으니 입력을 받을 수 있다. '아직 못 받음'으로 미뤄 둔 재시도 간격을 지금 푼다(한도·인증 간격은 그대로).
+      void this.recheckMemberDelivery(member.id, false, true);
       this.settle(member, true);
       const tidied = member.kind !== "worker" && !!turn?.deliveries?.some(isTidy);
       // 판 정리만 받은 턴은 바뀐 게 없으면 아무것도 올리지 않기로 했다. 마지막 글은 활동에만 남긴다.
@@ -4718,8 +5157,9 @@ export class Orchestrator implements OrchestratorApi {
       const old = state.baseline?.measurementLog as CompactBoundaryBaseline | undefined;
       let builtin = false;
       if (log && old) builtin = observeCompactBoundary({ cli: member.cli, home: log.home, cwd: member.cwd, baseline: old, current: identity, settled: true, providerError: false }).outcome === "succeeded";
-      const range = log ? readJsonlRange(join(log.home, member.cli === "codex" ? "sessions" : "projects"), log.path) : null;
-      const baseline = range?.complete && range.cursor && log ? { ...identity, path: log.path, fileIdentity: range.cursor.fileIdentity, offset: range.cursor.offset } : null;
+      // 지금 기록의 끝 위치만 적는다. 처음부터 4MB 를 읽으면 큰 기록(수십~수백 MB)에서는 끝에 닿지 못해 읽은 것을 버렸다.
+      const end = log ? eofLogBaseline(join(log.home, member.cli === "codex" ? "sessions" : "projects"), log.path) : null;
+      const baseline = end?.fileIdentity && log ? { ...identity, path: log.path, fileIdentity: end.fileIdentity, offset: end.offset } : null;
       this.store.saveContextState({ ...state, measurement, baseline: { ...state.baseline, configRevision: this.store.memberRevisions(member.id).configRevision,
         measurementLog: baseline, ...(builtin ? { autoTurn: measurement.turn } : {}) } },
         { contextPct: measured?.pct ?? null, ...(measured?.learned !== null && measured?.learned !== undefined ? { contextWindow: measured.learned, contextWindowSource: measured.source } : {}) });
@@ -4796,7 +5236,7 @@ export class Orchestrator implements OrchestratorApi {
   private runtime(memberId: string): Runtime {
     let rt = this.runtimes.get(memberId);
     if (!rt) {
-      rt = { contextCandidate: null, turn: null, pumping: null, pumpStage: null, pumpSince: null, pumpReported: false, again: false, posted: false, delegated: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, compactBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, reattaching: false, holdUntil: 0, configFails: 0, configGaveUp: null, background: null };
+      rt = { contextCandidate: null, turn: null, pumping: null, pumpStage: null, pumpSince: null, pumpReported: false, again: false, posted: false, delegated: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, compactBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, reattaching: false, holdUntil: 0, configFails: 0, configGaveUp: null, background: null, launchedAt: null, quickExits: 0, quickExitAt: 0, quickExitNotified: false };
       this.runtimes.set(memberId, rt);
     }
     return rt;
@@ -4807,6 +5247,7 @@ export class Orchestrator implements OrchestratorApi {
     if (rt.retryTimer) clearTimeout(rt.retryTimer);
     this.waiting.delete(memberId);
     this.absentCoreMembers.delete(memberId);
+    this.codexLogs.delete(memberId);
     this.runtimes.delete(memberId);
   }
 

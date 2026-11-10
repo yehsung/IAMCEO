@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { capturedContext } from "./statusline.ts";
 import { readCodexContextFile } from "./codex-context.ts";
 import { createHash } from "node:crypto";
-import { constants, closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { constants, closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ApprovalPrompt, Backend } from "../../shared/types.ts";
@@ -17,7 +17,7 @@ import { codexBindingMarker, discoverCodexSession, observeCompactBoundary, type 
 import { readDeliveryEvidence, readJsonlRange, parseCodexSessionMeta, providerLogPath, type DeliveryEvidenceCursor, type JsonlCursor } from "./delivery-evidence.ts";
 import type { DeliveryDispatch, RunnerRecoveryStore, TerminalLease } from "../service-contracts.ts";
 import { readTranscriptTail } from "./transcript.ts";
-import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, DeliveryProbe, DeliveryInspection, DeliveryRepair, RunnerTerminalIdentity, RunnerReattachResult, RunnerObservation } from "./types.ts";
+import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, DeliveryProbe, DeliveryInspection, DeliveryRepair, DeliveryLogBaseline, RunnerTerminalIdentity, RunnerReattachResult, RunnerObservation } from "./types.ts";
 
 /** claudeHome: Claude session transcripts (default CLAUDE_CONFIG_DIR or ~/.claude), read for context usage only. */
 export interface CoreRunnerOptions extends ProviderBins { coreBin?: string; socketPath?: string; session?: string; stateDir?: string; configDir?: string; claudeHome?: string; codexHome?: string; contextHome?: string }
@@ -33,11 +33,17 @@ export interface CoreRunnerDeps {
   /** Poll scheduling clock; does not change persisted observation timestamps or RPC deadlines. */
   pollNow?: () => number;
   contextTimeoutMs?: number; usageLimitCloseTimeoutMs?: number;
+  /** How long one inspection keeps reading a legacy (baseline-less) provider log before returning scan_pending. */
+  evidenceScanMs?: number;
   readContext?: typeof capturedContext;
   recoveryStore?: RunnerRecoveryStore;
   /** Synchronous transaction ports. A throw prevents external input. */
   repair?: { load(memberId: string, request: DeliveryRepair): DeliveryDispatch | null; prepare(memberId: string, request: DeliveryRepair, dispatch: DeliveryDispatch): boolean };
-  quiescence?: (memberId: string, dispatch: DeliveryDispatch) => { originalWrite: "not_written" | "rejected" | "settled" | "unresolved"; externalInput: boolean | null };
+  /**
+   * unconfirmed: the write ended without a receipt (its outcome is unknown, but nothing more can arrive from it).
+   * riskApproved: the owner accepted the risk of a duplicate for every item of this envelope.
+   */
+  quiescence?: (memberId: string, dispatch: DeliveryDispatch) => { originalWrite: "not_written" | "rejected" | "settled" | "unresolved"; externalInput: boolean | null; unconfirmed?: boolean; riskApproved?: boolean };
   submitKeyVerified?: boolean;
   compactStore?: { load(memberId: string): CoreCompactState | null; save(memberId: string, state: CoreCompactState): void };
 }
@@ -53,6 +59,8 @@ interface Track {
   member: RunnerMember; terminal: CoreTerminal; sessionId: string | null; pending: boolean; uncertain: boolean; status: string | null;
   /** Uncertainty from input that has no dispatch (manual control, approval keys, parallel command). The store cannot resolve it. */
   controlUncertain: boolean;
+  /** The Codex rollout file of this session, once found. */
+  logFile: { sessionId: string; path: string } | null;
   /** The status report is gone but the turn is known to be over (decided by observe, which also reads the screen). */
   lost: boolean;
   /** When a live terminal's status report first went missing (pollNow). */
@@ -101,9 +109,35 @@ function compactLogBaseline(root: string, path: string): JsonlCursor | null {
   finally { closeSync(fd); }
 }
 
+/**
+ * EOF position of the provider log at a line boundary, without reading its history. A delivery envelope stores it so
+ * that receipt checks read only what was appended after the send. Evidence used to be scanned from byte 0, 4 MiB per
+ * check: on the real 200-500 MB transcripts a delivered message took 20 minutes to 2 hours to confirm.
+ */
+export function eofLogBaseline(root: string, path: string): DeliveryLogBaseline | null {
+  const target = providerLogPath(root, path);
+  if (!target) return null;
+  let fd: number;
+  try { fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch { return null; }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || providerLogPath(root, path) !== target) return null;
+    if (stat.size > 0) {
+      // A partial last line cannot anchor a scan; that envelope falls back to the full scan.
+      const last = Buffer.alloc(1);
+      if (readSync(fd, last, 0, 1, stat.size - 1) !== 1 || last[0] !== 10) return null;
+    }
+    return { path, fileIdentity: `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`, offset: stat.size, eventId: null };
+  } catch { return null; }
+  finally { closeSync(fd); }
+}
+
 /** Terminals belong to core's holders. IAMCEO shutdown only detaches. */
 export class CoreRunner implements Runner {
   readonly kind: Backend = "core";
+  /** send() never writes into a working CLI: an urgent delivery waits for the turn to end like any other. */
+  readonly interjects: boolean = false;
   readonly socketPath: string;
   private readonly rpcTimeoutMs: number;
   private readonly sendTimeoutMs: number;
@@ -240,6 +274,7 @@ export class CoreRunner implements Runner {
     track.dispatches = unresolved.filter(d => d.transportState !== "rejected" && (!marker || d.bundleMarker !== marker));
     if (track.dispatches.length) return false;
     track.uncertain = false; track.settleTries = 0;
+    track.evidence.clear();
     return true;
   }
   /** A terminal whose report vanished after a finished turn reads as done. */
@@ -264,7 +299,7 @@ export class CoreRunner implements Runner {
     const launchedAt = launch?.memberId === member.id && launch.intent === "start" ? launch.createdAt : null;
     const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, controlUncertain: false, lost: false, silentSince: null, settledAt: -Infinity, settleTries: 0, status: null, statusKey: null, composerEmpty: null, statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
       epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, bindingSince: terminal.labels["iamceo.startedAt"] || launchedAt || new Date().toISOString(), binding: null, compact: null,
-      dispatches: [], evidence: new Map(), lastError: null, nextPollAt: 0, pollDelay: this.pollMs, observedAt: new Date().toISOString(), failures: 0, failure: null };
+      dispatches: [], evidence: new Map(), logFile: null, lastError: null, nextPollAt: 0, pollDelay: this.pollMs, observedAt: new Date().toISOString(), failures: 0, failure: null };
     this.restore(track);
     this.tracks.set(member.id, track);
     await this.observe(track, terminal, true);
@@ -327,6 +362,8 @@ export class CoreRunner implements Runner {
     await this.bind(member, terminal, launch.sessionId);
     return { sessionId: launch.sessionId, paneId: terminal.address };
   }
+  /** The orchestrator verified that no owned terminal appeared; a later start may create one again. */
+  forgetUnknownStart(memberId: string): void { this.unknownStarts.delete(memberId); }
   async reattachOwned(member: RunnerMember): Promise<RunnerReattachResult> {
     // Re-observing an attached terminal only reads. Holding the input lock for it made the periodic supervisor
     // pass collide with deliveries, sleep and manual control ("busy"). Lock only when a terminal must be bound.
@@ -513,7 +550,8 @@ export class CoreRunner implements Runner {
   observationState(memberId: string): { observedAt: string; failures: number; failure: string | null; lastError: string | null; identity: RunnerTerminalIdentity; inputEpoch: number; setupError: Track["setupError"]; turn: number | null; state: string | null } | null {
     const track = this.tracks.get(memberId);
     return track ? { observedAt: track.observedAt, failures: track.failures, failure: track.failure, lastError: track.lastError, identity: this.identity(track), inputEpoch: track.epoch, setupError: track.setupError,
-      turn: track.terminal.state === "live" ? track.terminal.turn ?? null : null, state: track.terminal.state === "live" ? track.terminal.status?.state ?? null : null } : null;
+      // A finished turn whose report vanished reads as done here too, exactly as send() judges it.
+      turn: track.terminal.state === "live" ? track.terminal.turn ?? null : null, state: track.terminal.state === "live" ? this.stateOf(track, track.terminal) ?? null : null } : null;
   }
   private get pollMs(): number { return Math.max(1, this.deps.pollMs ?? 1000); }
   private pollNow(): number { return (this.deps.pollNow ?? Date.now)(); }
@@ -617,6 +655,16 @@ export class CoreRunner implements Runner {
     } finally { this.sending.delete(member.id); }
   }
 
+  /** False only when the provider's own store holds no record of this session; an unreadable store is not proof. */
+  sessionExists(member: RunnerMember): boolean {
+    if (!member.sessionId) return false;
+    const home = this.providerHome(member);
+    if (providerFor(member) === "claude") return findSessionFile(home, member.cwd, member.sessionId) !== null;
+    try {
+      for (const _ of new Bun.Glob(`**/rollout-*-${member.sessionId}.jsonl`).scanSync({ cwd: join(home, "sessions"), onlyFiles: true, followSymlinks: false })) return true;
+      return false;
+    } catch { return true; }
+  }
   private providerHome(member: RunnerMember): string {
     return providerFor(member) === "claude" ? this.options.claudeHome ?? defaultClaudeHome() : this.options.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), ".codex");
   }
@@ -637,13 +685,27 @@ export class CoreRunner implements Runner {
       const matches = track.binding.files.filter((file) => file.matched && !file.invalid && file.meta?.sessionId === track.sessionId);
       if (matches.length === 1) return matches[0].path;
     }
+    // Asked on every send, inspection and turn end: remember the file once found.
+    if (track.logFile?.sessionId === track.sessionId && existsSync(track.logFile.path)) return track.logFile.path;
     try {
       const matches = [...new Bun.Glob(`**/rollout-*-${track.sessionId}.jsonl`).scanSync({ cwd: join(home, "sessions"), absolute: true, onlyFiles: true, followSymlinks: false })].filter((path) => {
         const meta = parseCodexSessionMeta(readJsonlRange(join(home, "sessions"), path, null, { maxBytes: 1024 * 1024 }).records[0]?.value);
         return meta?.sessionId === track.sessionId && meta.cwd === track.member.cwd;
       });
-      return matches.length === 1 ? matches[0] : null;
+      if (matches.length !== 1) return null;
+      track.logFile = { sessionId: track.sessionId, path: matches[0] };
+      return matches[0];
     } catch { return null; }
+  }
+  /** Captured just before an envelope is written. Empty when the log is not known yet or ends in a partial line. */
+  deliveryBaseline(member: RunnerMember): DeliveryLogBaseline[] {
+    const track = this.tracks.get(member.id);
+    if (!track || !track.sessionId) return [];
+    try {
+      const path = this.logPath(track);
+      const baseline = path ? eofLogBaseline(join(this.providerHome(member), providerFor(member) === "claude" ? "projects" : "sessions"), path) : null;
+      return baseline ? [baseline] : [];
+    } catch { return []; }
   }
   async inspectDelivery(member: RunnerMember, query: DeliveryProbe): Promise<DeliveryInspection> {
     const release = this.reserve(member.id);
@@ -658,7 +720,9 @@ export class CoreRunner implements Runner {
     const terminal = await this.refresh(track);
     if (query.cli !== providerFor(member) || query.backend !== "core" || (!this.sameIdentity(query.identity, this.identity(track)) && (!query.identity.sessionId || query.identity.sessionId !== track.sessionId))) return unknown("identity_changed");
     const stored = this.deps.recoveryStore?.inputState(member.id).unresolvedDispatches ?? track.dispatches;
-    const dispatch = stored.find((item) => item.dispatchId === query.dispatchId && item.wireSha256 === query.wireSha256);
+    const settledBefore = this.deps.recoveryStore?.getDispatch?.(query.dispatchId);
+    const dispatch = stored.find((item) => item.dispatchId === query.dispatchId && item.wireSha256 === query.wireSha256) ??
+      (settledBefore && settledBefore.memberId === member.id && settledBefore.wireSha256 === query.wireSha256 ? settledBefore : undefined);
     const barrier = dispatch && this.deps.quiescence?.(member.id, dispatch);
     const originalWrite = barrier?.originalWrite ?? (dispatch?.transportState === "accepted" ? "settled" : dispatch?.transportState === "rejected" ? "rejected" : "unresolved");
     const externalInput = barrier?.externalInput ?? null;
@@ -676,14 +740,28 @@ export class CoreRunner implements Runner {
     const path = this.logPath(track);
     if (!path || !track.sessionId) return { ...unknown("session_unbound"), snapshot };
     const baseline = query.baseline.logs.find((log) => log.path === path);
-    const read = readDeliveryEvidence({ cli: providerFor(member), home: this.providerHome(member), path, cwd: member.cwd, sessionId: track.sessionId,
+    const scan = () => readDeliveryEvidence({ cli: providerFor(member), home: this.providerHome(member), path, cwd: member.cwd, sessionId: track.sessionId!,
       sessionGeneration: query.identity.sessionGeneration, markers: query.markers, bundleMarker: query.bundleMarker, baseline,
       since: baseline ? undefined : query.baseline.capturedAt, cursor: track.evidence.get(query.dispatchId) });
+    let read = scan();
     if (read.cursor) track.evidence.set(query.dispatchId, read.cursor);
+    // An envelope without a log baseline (written by an older build) is read from the start. Keep reading in this
+    // inspection, yielding between 4 MiB pieces, instead of one piece per 30 s check.
+    for (let pieces = 1, started = Date.now(); read.evidence.code === "scan_pending" && pieces < 16 && Date.now() - started < (this.deps.evidenceScanMs ?? 250); pieces++) {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      if (this.closed || this.tracks.get(member.id) !== track || track.epoch !== inputEpoch || this.manualLease(member.id)) break;
+      read = scan();
+      if (read.cursor) track.evidence.set(query.dispatchId, read.cursor);
+    }
     const settled = originalWrite !== "unresolved";
     const allReceived = query.markers.length > 0 && query.markers.every((marker) => read.receivedDeliveryIds.includes(marker.deliveryId));
     const completeAbsence = read.evidence.complete && read.evidence.verdict === "absent";
-    const finding = allReceived ? "received" : ["working", "blocked"].includes(status) ? "wait" : completeAbsence && settled && externalInput === false && composer === "matches" ? "draft_only" : completeAbsence && ["not_written", "rejected"].includes(originalWrite) && externalInput === false && composer === "empty" ? "not_received" : "unknown";
+    // A write that ended without a receipt was not received when the whole log range since the send holds no record
+    // of it, the composer is empty and the CLI's turn counter has not moved since the send. It used to stay unknown
+    // forever (real restarts mid-send), fencing the member's whole queue until the member was removed.
+    const untouched = query.baseline.turn !== null && (terminal.turn ?? null) === query.baseline.turn;
+    const absentWrite = ["not_written", "rejected"].includes(originalWrite) || originalWrite === "settled" && barrier?.unconfirmed === true && untouched;
+    const finding = allReceived ? "received" : ["working", "blocked"].includes(status) ? "wait" : completeAbsence && settled && externalInput === false && composer === "matches" ? "draft_only" : completeAbsence && absentWrite && externalInput === false && composer === "empty" ? "not_received" : "unknown";
     return { evidence: [read.evidence, { source: "core_screen", verdict: composer === "unknown" ? "unknown" : "present", location: "composer", code: composer, complete: composer !== "unknown", checkedAt: new Date().toISOString() }], finding, receivedDeliveryIds: read.receivedDeliveryIds, snapshot, quiescence: settled ? "settled" : "unresolved" };
   }
   async repairDelivery(member: RunnerMember, request: DeliveryRepair): Promise<SendResult> {
@@ -700,7 +778,9 @@ export class CoreRunner implements Runner {
       const snapshot = inspected.snapshot;
       if (!snapshot || request.expectedSessionGeneration !== snapshot.identity.sessionGeneration || request.expectedSessionId !== snapshot.identity.sessionId || request.expectedTerminalId !== snapshot.identity.terminalId || request.expectedInputEpoch !== snapshot.inputEpoch || snapshot.externalInput !== false || snapshot.leaseActive || snapshot.status !== "idle") return { ok: false, reason: "input_busy", retryable: false, deliveryEffect: "not_written", detail: "Delivery identity, epoch or safe idle state changed" };
       if (inspected.receivedDeliveryIds.length) return { ...unsupported("User receipt already exists; reconcile delivery without input"), deliveryEffect: "not_written" };
-      if (request.action === "resend" ? inspected.finding !== "not_received" : inspected.finding !== "draft_only" || !this.deps.submitKeyVerified || !this.methods.has("terminal.keys") || dispatch.submitAttempts !== 0) return { ...unsupported("No verified safe repair or submit-key barrier"), deliveryEffect: "not_written" };
+      // The owner's explicit consent replaces the proof of absence, never the idle state or the empty composer.
+      const consented = this.deps.quiescence?.(member.id, dispatch)?.riskApproved === true && inspected.finding === "unknown" && snapshot.composer === "empty";
+      if (request.action === "resend" ? inspected.finding !== "not_received" && !consented : inspected.finding !== "draft_only" || !this.deps.submitKeyVerified || !this.methods.has("terminal.keys") || dispatch.submitAttempts !== 0) return { ...unsupported("No verified safe repair or submit-key barrier"), deliveryEffect: "not_written" };
       const final = await this.inspectLocked(member, dispatch);
       if (final.finding !== inspected.finding || final.receivedDeliveryIds.length || !final.snapshot || final.snapshot.status !== "idle" || final.snapshot.inputEpoch !== request.expectedInputEpoch || this.manualLease(member.id)) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
       const latest = track.terminal;

@@ -63,3 +63,22 @@ test("an unobserved pause is not blamed on the last fast route", () => {
     expect(lines).toEqual(["[loop-monitor] lag work=unattributed count=1 maxMs=650.0"]);
   } finally { monitor.stop(); }
 });
+
+// perf-9: 지연이 계산 때문인지 차례를 못 받은 것인지 로그로는 알 수 없었다.
+test("a lag report carries the CPU time of that interval when a CPU clock is given", () => {
+  let now = 0, cpu = 0;
+  const lines: string[] = [];
+  const monitor = new LoopMonitor({ now: () => now, cpu: () => cpu, log: line => lines.push(line) });
+  try {
+    // 벽시계로 900ms 가 지났지만 이 프로세스가 쓴 CPU 는 12ms 뿐이다: 굶은 것이다.
+    now = 900; cpu = 12;
+    monitor.sample();
+    expect(lines).toEqual(["[loop-monitor] lag work=unattributed count=1 maxMs=650.0 cpuMs=12.0"]);
+    // 이번에는 그 구간 내내 계산했다. 가장 긴 지연의 값이 남는다.
+    monitor.run("timer:onTick", () => { now += 2000; cpu += 1990; });
+    monitor.sample();
+    monitor.stop();
+    expect(lines.at(-1)).toContain("lag work=timer:onTick count=1 maxMs=1750.0 cpuMs=1990.0");
+    expect(lines.filter(line => line.startsWith("[loop-monitor] slow")).every(line => !line.includes("cpuMs"))).toBe(true);
+  } finally { monitor.stop(); }
+});

@@ -1055,6 +1055,29 @@ enum MarkdownBlock: Equatable {
 /// Inline markdown for Text: bold, italic, `code` (monospaced on a faint chip), links and ~~strikethrough~~. A single
 /// `~` is kept as a tilde: Apple's parser would strike out everything between two of them ("0.0~3.9 ... 3.9~7.3").
 func markdownInline(_ value: String) -> AttributedString {
+    // 같은 문단은 다시 그릴 때마다 다시 해석하지 않는다(대화·자료는 스크롤할 때마다 본문을 다시 계산한다).
+    guard value.utf8.count <= 4_000 else { return markdownInlineUncached(value) }
+    return MarkdownInlineCache.shared.value(value) { markdownInlineUncached(value) }
+}
+
+private final class MarkdownInlineCache: @unchecked Sendable {
+    static let shared = MarkdownInlineCache()
+    private let lock = NSLock()
+    private var values: [String: AttributedString] = [:]
+    func value(_ key: String, make: () -> AttributedString) -> AttributedString {
+        lock.lock()
+        if let hit = values[key] { lock.unlock(); return hit }
+        lock.unlock()
+        let made = make()
+        lock.lock()
+        if values.count >= 600 { values.removeAll(keepingCapacity: true) }
+        values[key] = made
+        lock.unlock()
+        return made
+    }
+}
+
+func markdownInlineUncached(_ value: String) -> AttributedString {
     let source = markdownEscapingSingleTildes(value)
     var result = (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
         ?? AttributedString(value)

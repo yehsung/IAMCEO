@@ -349,16 +349,33 @@ export function screenContextPct(screen: string): number | null {
   return m ? Math.min(100, Number(m[1])) : null;
 }
 
+/** 실행 파일이 그대로면 버전은 한 번만 묻는다. 멈춘 자식은 2초 뒤 끝낸다. */
+let herdrVersion: { key: string; value: Promise<string | null> } | null = null;
+function herdrVersionOf(bin: string): Promise<string | null> {
+  let key = bin;
+  try { const stat = statSync(bin); key = `${bin}:${stat.mtimeMs}:${stat.size}`; } catch {}
+  if (herdrVersion?.key === key) return herdrVersion.value;
+  const value = (async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("HERDR_"))) as Record<string, string>;
+      const p = Bun.spawn([bin, "--version"], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env });
+      timer = setTimeout(() => p.kill(), 2000);
+      const text = await new Response(p.stdout).text();
+      await p.exited;
+      return /(\d+\.\d+\.\d+\S*)/.exec(text)?.[1] ?? null;
+    } catch { return null; }
+    finally { if (timer) clearTimeout(timer); }
+  })();
+  herdrVersion = { key, value };
+  // 실패한 조회는 기억하지 않는다. 다음에 다시 묻는다.
+  void value.then(found => { if (found === null && herdrVersion?.value === value) herdrVersion = null; });
+  return value;
+}
+
 export async function detectHerdr(socketPath: string): Promise<HerdrInfo> {
   const bin = Bun.which("herdr");
-  let version: string | null = null;
-  if (bin) {
-    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("HERDR_"))) as Record<string, string>;
-    const p = Bun.spawn([bin, "--version"], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env });
-    const text = await new Response(p.stdout).text();
-    await p.exited;
-    version = /(\d+\.\d+\.\d+\S*)/.exec(text)?.[1] ?? null;
-  }
+  const version = bin ? await herdrVersionOf(bin) : null;
   try {
     const pong = await rpc<{ version: string; protocol: number }>(socketPath, "ping", {}, 2000);
     const compatible = pong.protocol === SUPPORTED_PROTOCOL;

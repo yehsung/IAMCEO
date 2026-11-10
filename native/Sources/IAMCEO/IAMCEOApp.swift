@@ -56,6 +56,8 @@ struct IAMCEOApp: App {
         #endif
         let store = AppStore(demo: LaunchOptions.demo, persistCredentials: !LaunchOptions.demo)
         _session = State(initialValue: AppSession(store: store, router: LaunchOptions.makeRouter()))
+        // 지난 실행이 임시 폴더에 남긴 첨부 캐시를 치운다. 화면 준비를 기다리게 하지 않는다.
+        Task.detached(priority: .utility) { TemporaryFiles.sweepStale() }
     }
     var body: some Scene {
         // A fixed id keeps the scene identity stable across builds (the default id is derived from the root view type).

@@ -14,6 +14,12 @@ final class TerminalSession {
     private(set) var inputEndedStatus: String?
     @ObservationIgnored private var inactiveSince: Date?
     @ObservationIgnored private var inactivityTask: Task<Void, Never>?
+    /// 화면을 한 번 클릭해서 시작된 조작인가(버튼이나 타자로 시작한 것이 아님).
+    @ObservationIgnored private var clickStarted = false
+    /// 클릭만 하고 아무것도 치지 않은 조작권. 자리를 뜨면 곧 놓아 그 직원의 자동 전달을 오래 막지 않는다.
+    private var holdsUntypedClick: Bool { clickStarted && !client.sentInput }
+    static let inactiveGrace: TimeInterval = 180
+    static let untypedClickGrace: TimeInterval = 10
     private(set) var missingTerminal = false
     private(set) var naturalCols = 100
     private(set) var naturalRows = 30
@@ -89,6 +95,14 @@ final class TerminalSession {
         else { observe(store: store, member: member) }
     }
 
+    #if os(macOS)
+    /// 터미널 창이 key를 잃거나 되찾았다. 클릭만으로 잡은 조작권에만 쓴다: 직접 시작했거나 타자한 조작은 지금처럼 앱 단위로 판단한다.
+    func windowKeyChanged(_ isKey: Bool, store: AppStore, member: Member) {
+        if isKey { if inactiveSince != nil { setActive(true, store: store, member: member) } }
+        else if holdsUntypedClick, controlling || starting { setActive(false, store: store, member: member) }
+    }
+    #endif
+
     func sizeChanged(cols: Int, rows: Int) {
         naturalCols = cols; naturalRows = rows; hasNaturalSize = true
         attachControlIfSized()
@@ -108,11 +122,20 @@ final class TerminalSession {
     /// All human input uses the same claim/refusal path as the input button.
     func requestInput(_ bytes: Data, store: AppStore, member: Member) {
         if controlling { if !bytes.isEmpty { send(bytes) }; return }
-        if !starting { beginInput(store: store, member: member) }
+        if !starting { startInput(store: store, member: member, byClick: bytes.isEmpty) }
+        else if !bytes.isEmpty { clickStarted = false }
         pendingInput(bytes)
     }
 
-    func beginInput(store: AppStore, member: Member) {
+    func beginInput(store: AppStore, member: Member) { startInput(store: store, member: member, byClick: false) }
+
+    private func startInput(store: AppStore, member: Member, byClick: Bool) {
+        clickStarted = byClick
+        client.renewsBeforeInput = !byClick
+        beginClaim(store: store, member: member)
+    }
+
+    private func beginClaim(store: AppStore, member: Member) {
         let member = store.members.first { $0.id == member.id } ?? member
         if TerminalAvailability.needsWake(member) { memberChanged(store: store, member: member); return }
         guard !missingTerminal else { return }
@@ -129,12 +152,18 @@ final class TerminalSession {
                 }
                 guard !Task.isCancelled, requestID == token, visible, active else { return }
                 starting = false
-                beginInput(store: store, member: member)
+                beginClaim(store: store, member: member)
             }
             return
         }
         guard !store.isDemo, store.canWrite else {
             fallback(store: store, member: member, message: store.isDemo ? "샘플은 읽기 전용입니다." : "서버에 연결되지 않아 조작할 수 없습니다.")
+            return
+        }
+        // 메인 창이 다른 프로젝트를 보는 동안에는 이 직원의 조작권을 받을 수 없다. 보기 연결은 건드리지 않고 이유만 알린다.
+        guard Self.canControl(member, in: store) else {
+            starting = false
+            notice = "메인 창이 다른 프로젝트를 보고 있어 입력할 수 없습니다. 이 직원의 프로젝트로 돌아온 뒤 다시 시도하세요."
             return
         }
         starting = true; readOnly = false; notice = nil; inputEndedStatus = nil
@@ -157,7 +186,7 @@ final class TerminalSession {
             guard claimed, let lease = acquired?.leaseId, let api = store.api else {
                 if store.isRevalidating, store.api != nil, store.connectionStatus == .connected || store.connectionLost {
                     starting = false
-                    beginInput(store: store, member: member)
+                    beginClaim(store: store, member: member)
                     return
                 }
                 // Use this claim's own server reason even when its missing-terminal
@@ -176,6 +205,19 @@ final class TerminalSession {
             pendingControl = (api, member.id, lease)
             attachControlIfSized()
         }
+    }
+
+    /// 조작권 요청은 지금 선택된 프로젝트의 직원에게만 보낼 수 있다(쓰기 revision이 그 프로젝트 것뿐이다).
+    static func canControl(_ member: Member, in store: AppStore) -> Bool {
+        store.members.contains { $0.id == member.id }
+    }
+
+    /// 버튼을 눌렀다는 것은 창이 보이고 쓰이고 있다는 뜻이다. 잠자기 뒤처럼 active가 꺼진 채 남아 있어도 반응한다.
+    func userReconnect(store: AppStore, member: Member) { markActive(); observe(store: store, member: member) }
+    func userBeginInput(store: AppStore, member: Member) { markActive(); beginInput(store: store, member: member) }
+    private func markActive() {
+        inactiveSince = nil; inactivityTask?.cancel(); inactivityTask = nil
+        if visible { active = true }
     }
 
     func observe(store: AppStore, member: Member) {
@@ -271,8 +313,9 @@ final class TerminalSession {
         if !active, platform == .mac, !immediately {
             guard self.active, inactiveSince == nil else { return }
             inactiveSince = now
+            let grace = holdsUntypedClick ? Self.untypedClickGrace : Self.inactiveGrace
             inactivityTask = Task { [weak self] in
-                do { try await Task.sleep(for: .seconds(180)) } catch { return }
+                do { try await Task.sleep(for: .seconds(grace)) } catch { return }
                 self?.endInputIfInactive(store: store, member: member)
             }
             return
@@ -295,12 +338,13 @@ final class TerminalSession {
     }
 
     func endInputIfInactive(store: AppStore, member: Member, now: Date = Date()) {
-        guard let inactiveSince, now.timeIntervalSince(inactiveSince) >= 180, visible, active else { return }
+        guard let inactiveSince, visible, active,
+              now.timeIntervalSince(inactiveSince) >= (holdsUntypedClick ? Self.untypedClickGrace : Self.inactiveGrace) else { return }
         self.inactiveSince = nil; inactivityTask?.cancel(); inactivityTask = nil
         guard controlling || starting || ownedLeaseID != nil else { return }
-        active = false
         inputEndedStatus = TerminalPresentation.inactiveStatus
-        Task { await finishInput(store: store, member: member, resume: false) }
+        // 조작만 끝낸다. 옆에 띄워 둔 창이 멈춘 화면이 되지 않도록 읽기 전용 보기는 이어 간다.
+        Task { await finishInput(store: store, member: member, resume: true) }
     }
 
     func disappear(store: AppStore, member: Member) {

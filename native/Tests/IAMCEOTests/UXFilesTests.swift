@@ -254,6 +254,58 @@ final class UXFilesTests: XCTestCase {
         _ = try await network.makeAPIClient().sendMessage(projectID: "p", request: SendMessageRequest(id: "m", text: "  이 자료를 확인해 주세요\n", targetMemberId: nil, attachmentIds: []), contextFileID: "reading")
         await network.close()
     }
+
+    /// n-chat-3: 같은 첨부를 여러 행이 동시에 열어도 한 번만 받는다.
+    @MainActor func testConcurrentOpensOfOneAttachmentShareASingleDownload() async throws {
+        let network = try IsolatedTestNetwork { _ in IsolatedTestHTTPReply(data: Data("shared bytes".utf8)) }
+        let attachment = Attachment(id: "shared-file", name: "shared.txt", mime: "text/plain", url: "/api/uploads/shared-file")
+        let api = network.makeAPIClient()
+        async let first = FileResources.attachment(attachment, api: api)
+        async let second = FileResources.attachment(attachment, api: api)
+        async let third = FileResources.attachment(attachment, api: api)
+        let resources = try await [first, second, third]
+        XCTAssertTrue(resources[0] === resources[1] && resources[1] === resources[2])
+        XCTAssertEqual(network.requests.count, 1)
+        XCTAssertEqual(try resources[0].read(), Data("shared bytes".utf8))
+        // A failed download is not remembered: the next open asks again.
+        let failing = try IsolatedTestNetwork { _ in IsolatedTestHTTPReply(status: 500) }
+        let failingAPI = failing.makeAPIClient()
+        do { _ = try await FileResources.attachment(attachment, api: failingAPI); XCTFail("Expected the download to fail") } catch {}
+        do { _ = try await FileResources.attachment(attachment, api: failingAPI); XCTFail("Expected the download to fail") } catch {}
+        XCTAssertEqual(failing.requests.count, 2)
+        await network.close(); await failing.close()
+    }
+
+    /// n-files-5: 축소 디코드는 메인 밖에서 하고, 같은 원본·크기는 한 번 푼 것을 다시 쓴다.
+    @MainActor func testPreviewImageIsDownsampledOnceAndReusedForTheSameOriginal() async throws {
+        let network = try IsolatedTestNetwork()
+        let api = network.makeAPIClient()
+        let png = try Self.png(width: 64, height: 32)
+        let resource = try FileResource(api: api, data: png, name: "shot.png")
+        let small = await PreviewImages.image(resource, maxPixel: 16)
+        XCTAssertEqual(small?.width, 16); XCTAssertEqual(small?.height, 8)
+        let again = await PreviewImages.image(resource, maxPixel: 16)
+        XCTAssertTrue(small === again, "The decoded thumbnail is reused")
+        let large = await PreviewImages.image(resource, maxPixel: 64)
+        XCTAssertEqual(large?.width, 64)
+        let text = try FileResource(api: api, data: Data("not an image".utf8), name: "note.txt")
+        let none = await PreviewImages.image(text, maxPixel: 16)
+        XCTAssertNil(none)
+        await network.close()
+    }
+
+    private static func png(width: Int, height: Int) throws -> Data {
+        let context = try XCTUnwrap(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                              space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let image = try XCTUnwrap(context.makeImage())
+        let data = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return data as Data
+    }
 }
 
 

@@ -280,7 +280,7 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 
 자동 입력은 항상 `force:false`다. idle은 `if:idle`을 사용한다. upstream generation 1의 if 열거형은 idle/working뿐이라 done은 해당 조건 없이 보낸다. 읽은 상태·초안과 외부 raw attach 사이의 경쟁을 원자적으로 제거할 수는 없으며, 앱의 직접 조작 lease는 알려진 앱 입력과 자동 전달을 분리한다. Codex plain screen의 고정 placeholder와 같은 문장을 직접 친 경우도 구별할 수 없다.
 
-상태는 OSC 7501 root record와 turn counter만 읽는다. 미보고/알 수 없음은 입력을 막는 상태다. working→blocked counter 증가만으로 턴을 완료하지 않는다. 완료된 root idle/done/error 전환은 빈 finalText의 turn_end를 낸다. 업무 완료·최종 답변은 MCP post/file 등으로 기록하며 화면을 복원한 가짜 보고를 만들지 않는다.
+상태는 OSC 7501 root record와 turn counter만 읽는다. 미보고/알 수 없음은 입력을 막는 상태다. 예외는 하나다(2026-11-11 대표 승인): 턴을 한 번 이상 돈(turn > 0) 살아 있는 CLI의 root 상태 기록이 비어 있고 화면에 평소 입력칸이 식별되면 끝난 턴(done과 같음)으로 읽는다. 끝을 보지 못한 턴은 그 상태가 0.75초 이상 이어질 때만 끝낸다. 한 번도 보고하지 않은 CLI, 입력칸이 안 보이는 화면, reported:false, 모르는 상태 단어는 계속 막는다. 이 예외가 없으면 API 오류로 끝난 턴 뒤에 상태 기록이 비어 전달이 재시작 전까지 막힌다. working→blocked counter 증가만으로 턴을 완료하지 않는다. 완료된 root idle/done/error 전환은 빈 finalText의 turn_end를 낸다. 업무 완료·최종 답변은 MCP post/file 등으로 기록하며 화면을 복원한 가짜 보고를 만들지 않는다.
 
 새 Codex native ID는 모르면 null이다. 살아 있는 core pane은 재결합하되 pane을 잃었고 native ID도 모르면 자동 새 대화 실행을 거부한다. 멤버 소유권 라벨이 다른 터미널에는 입력·종료하지 않는다. 이전 track의 늦은 폴링은 새 세션 상태를 덮어쓰지 않는다.
 

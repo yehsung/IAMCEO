@@ -130,6 +130,8 @@ export interface RunnerRecoveryStore {
   /** Start journal supplies launch time for terminals created before the startedAt label. */
   getLifecycleJournal?(operationId: string): LifecycleJournal | null;
   inputState(memberId: string): RunnerRecoveryState;
+  /** An inspection may be asked about an envelope that is no longer unresolved; its stored state then answers. */
+  getDispatch?(dispatchId: string): DeliveryDispatch | null;
   saveLease(lease: TerminalLease): void;
   removeLease(memberId: string, claimId: string): void;
 }

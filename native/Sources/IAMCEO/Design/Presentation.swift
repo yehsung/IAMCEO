@@ -89,8 +89,13 @@ struct MemberStatusInfo: Sendable {
             (member.status == "blocked" && !["permission", "selection"].contains(member.blockedReason ?? "") && !member.hasFolderTrustApproval)
     }
 
+    static let networkPauseCodes = ["network_outage", "network_retry", "usage_limit"]
+    /// 인터넷 끊김·사용 한도로 멈춘 직원은 이유를 아는 대기다. '상태 확인 불가'로 세지 않고 그 이유로 묶는다(배지와 같은 판정).
     static func summaryCounts(_ members: [Member]) -> [String: Int] {
-        Dictionary(grouping: members, by: { isUncertain($0) ? "unknown" : $0.status }).mapValues(\.count)
+        Dictionary(grouping: members, by: { member in
+            if member.statusObservation?.ownership != "conflict", let code = member.statusObservation?.error?.code, isNetworkPause(code) { return code }
+            return isUncertain(member) ? "unknown" : member.status
+        }).mapValues(\.count)
     }
 
     static func progressNote(_ member: Member, now: Date = Date()) -> String? {
@@ -567,7 +572,8 @@ private func hasFinalConsonant(_ word: String) -> Bool {
 
 /// Why a delivery is still waiting, in the CEO's words (server `waitReason`, wave UX-T1), with how long it has waited.
 /// Shared by the chat bubble's status line, 홈 and the member page: one wording everywhere.
-/// `reason`: run_limit · member_busy · waking · receipt_check · approval · manual_control · runner_off · archived · unknown.
+/// `reason`: next_turn · run_limit · member_busy · waking · receipt_check · approval · manual_control · runner_off · archived
+/// · api_outage · usage_limit · unknown (shared/types.ts DeliveryWaitReason).
 /// `since`: ISO time the delivery started waiting. `used`/`limit`: the run-limit slots when reason is run_limit.
 func waitReasonLabel(_ reason: String?, since: String? = nil, used: Int? = nil, limit: Int? = nil, now: Date = Date()) -> String? {
     guard let reason, !reason.isEmpty else { return nil }
@@ -585,6 +591,10 @@ func waitReasonLabel(_ reason: String?, since: String? = nil, used: Int? = nil, 
     case "manual_control": base = "터미널에서 직접 조작 중이라 대기"
     case "runner_off": base = "이 프로젝트 실행이 꺼져 있어 대기"
     case "archived": base = "보관한 프로젝트라 보내지 않음"
+    // 서버가 일부러 붙잡아 둔 전달이다. 이유가 풀리면 저절로 나간다.
+    case "api_outage": base = "인터넷 연결이 돌아오면 전달"
+    case "usage_limit": base = "사용 한도가 풀리면 전달"
+    case "retry_wait": base = "잠시 뒤 다시 보내는 중"
     default: base = "전달을 기다리는 중"
     }
     guard let since, let start = parseISODate(since) else { return base }

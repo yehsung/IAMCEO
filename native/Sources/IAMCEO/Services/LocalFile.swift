@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import SwiftUI
 
 struct LocalFileInfo: Decodable, Sendable {
@@ -31,15 +32,21 @@ enum LocalFileLinks {
         guard url.scheme == scheme, url.host == "preview" else { return nil }
         return URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "path" }?.value
     }
+    // 문단마다, 토큰마다 불린다. 정규식과 확장자 집합은 한 번만 만든다.
+    private static let extensions: Set<String> = Set("md markdown txt csv tsv json jsonl yaml yml html htm pdf png jpg jpeg gif webp heic mp4 mov m4v webm mp3 wav m4a zip swift ts tsx js jsx py rb sh sql css scss xml toml log c h cpp rs go java kt vue svelte xlsx docx pptx".split(separator: " ").map(String.init))
+    private static let emailPattern = try! NSRegularExpression(pattern: #"^[^/\s@]+@[^/\s@]+(?:/.*)?$"#)
+    private static let urlPattern = try! NSRegularExpression(pattern: #"(?:[A-Za-z][A-Za-z0-9+.-]*://|mailto:|www\.)[^\s<>\"']+"#, options: .caseInsensitive)
+    private static let tokenPattern = try! NSRegularExpression(pattern: #"[^\s`<>\[\](){}\"']+"#)
+    private static let trailingPunctuation = try! NSRegularExpression(pattern: #"[.,;!?，。]+$"#)
+
     static func isPath(_ value: String) -> Bool {
         guard !value.isEmpty, !value.contains("://"), !value.contains(":"),
               !value.contains("\n"), !value.lowercased().hasPrefix("www."), value != "/", value != "~/", !value.hasPrefix("//") else { return false }
         // Exclude email/host forms, while explicit filesystem paths may contain @.
         let explicit = value.hasPrefix("/") || value.hasPrefix("~/") || value.hasPrefix("./") || value.hasPrefix("../")
-        if !explicit && value.range(of: #"^[^/\s@]+@[^/\s@]+(?:/.*)?$"#, options: .regularExpression) != nil { return false }
+        if !explicit && value.contains("@") && emailPattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil { return false }
         if value.hasPrefix("/") || value.hasPrefix("~/") || value.hasPrefix("./") || value.hasPrefix("../") { return true }
         let ext = (value as NSString).pathExtension.lowercased()
-        let extensions = Set("md markdown txt csv tsv json jsonl yaml yml html htm pdf png jpg jpeg gif webp heic mp4 mov m4v webm mp3 wav m4a zip swift ts tsx js jsx py rb sh sql css scss xml toml log c h cpp rs go java kt vue svelte xlsx docx pptx".split(separator: " ").map(String.init))
         if extensions.contains(ext) { return true }
         guard value.contains("/"), !value.contains(" ") else { return false }
         let components = value.split(separator: "/", omittingEmptySubsequences: false)
@@ -64,13 +71,12 @@ enum LocalFileLinks {
         }
         // Reserve whole URLs before punctuation splits path candidates. Parentheses,
         // query strings and fragments can all contain path-looking substrings.
-        let urls = try! NSRegularExpression(pattern: #"(?:[A-Za-z][A-Za-z0-9+.-]*://|mailto:|www\.)[^\s<>\"']+"#, options: .caseInsensitive)
-        let urlRanges = urls.matches(in: plain, range: NSRange(plain.startIndex..., in: plain)).map(\.range)
-        let regex = try! NSRegularExpression(pattern: #"[^\s`<>\[\](){}\"']+"#)
-        for match in regex.matches(in: plain, range: NSRange(plain.startIndex..., in: plain)) {
+        let urlRanges = urlPattern.matches(in: plain, range: NSRange(plain.startIndex..., in: plain)).map(\.range)
+        for match in tokenPattern.matches(in: plain, range: NSRange(plain.startIndex..., in: plain)) {
             if urlRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) { continue }
             guard let range = Range(match.range, in: plain) else { continue }
-            let candidate = String(plain[range]).replacingOccurrences(of: #"[.,;!?，。]+$"#, with: "", options: .regularExpression)
+            let token = String(plain[range])
+            let candidate = trailingPunctuation.stringByReplacingMatches(in: token, range: NSRange(token.startIndex..., in: token), withTemplate: "")
             guard isPath(candidate), let start = AttributedString.Index(range.lowerBound, within: result),
                   let endString = plain.index(range.lowerBound, offsetBy: candidate.count, limitedBy: range.upperBound),
                   let end = AttributedString.Index(endString, within: result) else { continue }
@@ -279,15 +285,35 @@ private final class FileDownloadProgress: NSObject, URLSessionDownloadDelegate, 
 }
 
 @MainActor enum FileResources {
+    private static var flights: [FileResourceCache.Key: Task<FileResource, any Error>] = [:]
     static func attachment(_ attachment: Attachment, api: APIClient,
                            progress: (@Sendable (Double?) -> Void)? = nil) async throws -> FileResource {
         let path = "attachment:" + attachment.url
         if let cached = FileResourceCache.shared.resource(api: api, path: path) { progress?(1); return cached }
-        let resource: FileResource
-        if let progress { resource = try await api.downloadAttachment(attachment, progress: progress) }
-        else { resource = try FileResource(api: api, data: try await api.attachmentData(attachment), name: attachment.name) }
+        if let progress {
+            // 진행률을 보이는 큰 파일은 여는 화면이 닫히면 받기도 함께 멈춘다.
+            let resource = try await api.downloadAttachment(attachment, progress: progress)
+            try Task.checkCancellation()
+            FileResourceCache.shared.insert(resource, path: path)
+            return resource
+        }
+        // 같은 첨부를 여러 행·화면이 동시에 열어도 한 번만 받는다. 받은 것은 연 쪽이 사라져도 캐시에 남는다.
+        let key = FileResourceCache.Key(api: ObjectIdentifier(api), path: path)
+        let flight = flights[key] ?? {
+            let name = attachment.name
+            let task = Task<FileResource, any Error> {
+                defer { flights[key] = nil }
+                let data = try await api.attachmentData(attachment)
+                // 원본을 임시 파일로 쓰는 일은 메인 밖에서 한다.
+                let resource = try await Task.detached(priority: .userInitiated) { try FileResource(api: api, data: data, name: name) }.value
+                FileResourceCache.shared.insert(resource, path: path)
+                return resource
+            }
+            flights[key] = task
+            return task
+        }()
+        let resource = try await flight.value
         try Task.checkCancellation()
-        FileResourceCache.shared.insert(resource, path: path)
         return resource
     }
     static func data(_ attachment: Attachment, api: APIClient) async throws -> Data {
@@ -303,6 +329,65 @@ private final class FileDownloadProgress: NSObject, URLSessionDownloadDelegate, 
     }
 }
 
+
+/// 미리보기용 축소 디코드. 스크린샷 한 장을 푸는 데 수십 ms가 들어 메인 밖에서 하고, 같은 원본·크기는 한 번만 푼다.
+@MainActor enum PreviewImages {
+    private final class Entry { let image: CGImage; init(_ image: CGImage) { self.image = image } }
+    private struct Decoded: @unchecked Sendable { let image: CGImage? }
+    private static let cache: NSCache<NSString, Entry> = {
+        let cache = NSCache<NSString, Entry>()
+        cache.countLimit = 200; cache.totalCostLimit = 96 * 1024 * 1024
+        return cache
+    }()
+
+    static func image(_ resource: FileResource, maxPixel: Int) async -> CGImage? {
+        // 받아 둔 원본마다 폴더가 다르다. 같은 원본이면 같은 키다.
+        let key = "\(resource.url.path)|\(maxPixel)" as NSString
+        if let hit = cache.object(forKey: key) { return hit.image }
+        let decoded = await Task.detached(priority: .userInitiated) {
+            Decoded(image: (try? resource.read()).flatMap { decode($0, maxPixel: maxPixel) })
+        }.value
+        guard let image = decoded.image else { return nil }
+        cache.setObject(Entry(image), forKey: key, cost: image.bytesPerRow * image.height)
+        return image
+    }
+
+    /// Downsampled decode so a thread full of screenshots does not hold full-size bitmaps.
+    nonisolated static func decode(_ data: Data, maxPixel: Int) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    }
+}
+
+/// 앱이 임시 폴더에 만든 첨부 캐시·사진 사본은 프로세스가 살아 있는 동안만 쓴다. 충돌·강제 종료로 남은 것은
+/// 다음 실행 때 치운다. 지금 떠 있는 다른 실행(시험, 개발용 빌드)의 것은 건드리지 않도록 하루 넘은 것만 지운다.
+enum TemporaryFiles {
+    static let prefixes = ["IAMCEO-cache-", "iamceo-photo-", "iamceo-promise-", "IAMCEO-"]
+    /// 지운 폴더 수를 돌려준다.
+    @discardableResult static func sweepStale(in directory: URL = FileManager.default.temporaryDirectory,
+                                              olderThan age: TimeInterval = 24 * 60 * 60, now: Date = Date()) -> Int {
+        let manager = FileManager.default
+        guard let entries = try? manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+                                                             options: [.skipsSubdirectoryDescendants]) else { return 0 }
+        var removed = 0
+        for entry in entries {
+            let name = entry.lastPathComponent
+            guard let prefix = prefixes.first(where: { name.hasPrefix($0) }),
+                  // 접두 뒤가 UUID인 것만 이 앱이 만든 폴더다.
+                  UUID(uuidString: String(name.dropFirst(prefix.count))) != nil,
+                  let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey]),
+                  values.isDirectory == true, values.isSymbolicLink != true,
+                  let modified = values.contentModificationDate, now.timeIntervalSince(modified) >= age else { continue }
+            if (try? manager.removeItem(at: entry)) != nil { removed += 1 }
+        }
+        return removed
+    }
+}
 
 @MainActor final class FileBodyMemory {
     static let shared = FileBodyMemory()

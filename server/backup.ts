@@ -1,12 +1,12 @@
 import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statfsSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { VERSION } from "./config.ts";
 import { MIGRATIONS } from "./db.ts";
 import { acquireHomeOwner, HomeOwnershipError, normalizeHome, withHomeOwner } from "./home-owner.ts";
-import { toStorageError } from "./storage-errors.ts";
+import { classifyStorageError, toStorageError } from "./storage-errors.ts";
 import type { LoopMonitor } from "./loop-monitor.ts";
 
 export interface BackupPolicy { intervalMs: number; daily: number; weekly: number }
@@ -27,7 +27,7 @@ const manifestSchema = z.object({
 
 export type BackupManifest = z.infer<typeof manifestSchema>;
 export interface BackupSnapshot { directory: string; manifest: BackupManifest }
-export interface BackupOptions { home: string; backupDir: string; now?: Date }
+export interface BackupOptions { home: string; backupDir: string; now?: Date; /** 시험용: 백업 폴더의 남은 바이트. */ freeBytes?: (root: string) => number }
 
 /** Work with a yield point after each file or DB check. Synchronous callers drain it; the daemon's scheduled backup releases the event loop in between. */
 type Steps<T> = Generator<void, T, void>;
@@ -198,6 +198,14 @@ export function createBackup(options: BackupOptions): BackupSnapshot {
   } catch (error) { throw toStorageError(error, "백업 실패"); }
 }
 
+/** 스냅샷 하나에는 DB 사본과 첨부 전체가 든다. 그 1.5배가 남아 있지 않으면 쓰기 전에 그만둔다. */
+function requireBackupSpace(root: string, bytes: number, freeBytes?: (root: string) => number): void {
+  let free: number;
+  try { free = freeBytes ? freeBytes(root) : (() => { const disk = statfsSync(root); return Number(disk.bavail) * Number(disk.bsize); })(); }
+  catch { return; } // 남은 공간을 알 수 없으면 예전처럼 진행한다.
+  if (free < bytes * 1.5) throw Object.assign(new Error("Not enough free space for a backup snapshot"), { code: "ENOSPC" });
+}
+
 /** The caller owns both home and root for every step. */
 function* createSteps(home: string, root: string, options: BackupOptions): Steps<BackupSnapshot> {
   const now = options.now ?? new Date();
@@ -212,6 +220,8 @@ function* createSteps(home: string, root: string, options: BackupOptions): Steps
     mkdirSync(join(stage, "attachments"), { mode: 0o700 });
     const source = new Database(backupPath(home, join(home, "iamceo.db")), { readonly: true });
     try {
+      // 공간이 모자란 채로 시작하면 수백 MB 를 썼다 지우기를 되풀이하고, 같은 디스크를 쓰는 다른 세션의 쓰기까지 실패시킨다.
+      requireBackupSpace(root, statSync(join(home, "iamceo.db")).size + (source.query<{ total: number | null }, []>("SELECT SUM(size) AS total FROM attachments").get()?.total ?? 0), options.freeBytes);
       checkBackupDatabase(source);
       yield;
       source.exec("PRAGMA busy_timeout = 5000");
@@ -437,8 +447,22 @@ export class BackupManager {
   private failures = 0;
   private retryAt = 0;
   private readonly verified: Verified = new Map();
-  constructor(readonly options: { home: string; backupDir: string; policy?: Partial<BackupPolicy>; now?: () => Date; loopMonitor?: LoopMonitor; sliceMs?: number }) {
+  private loggedCause: string | null = null;
+  constructor(readonly options: { home: string; backupDir: string; policy?: Partial<BackupPolicy>; now?: () => Date; loopMonitor?: LoopMonitor; sliceMs?: number; freeBytes?: (root: string) => number; log?: (line: string) => void }) {
     this.policy = Object.freeze(policyValue(options.policy ?? {}));
+  }
+  /** 실패 원인을 경로·내용 없이 한 낱말로 줄인다(분류 > 오류 코드 > 경로가 없는 고정 문구). */
+  private cause(error: unknown): string {
+    const chain: unknown[] = [];
+    for (let e: unknown = error; e && typeof e === "object" && !chain.includes(e); e = (e as { cause?: unknown }).cause) chain.push(e);
+    const coded = chain.map(e => (e as { code?: unknown }).code).find(code => typeof code === "string" && /^[A-Z][A-Z0-9_]+$/.test(code)) as string | undefined;
+    const message = chain.map(e => (e as Error).message).findLast(text => typeof text === "string" && text.length > 0 && text.length <= 80 && !/[\/\\]/.test(text));
+    return classifyStorageError(error) ?? coded ?? message ?? (error instanceof Error ? error.name : "unknown");
+  }
+  /** 진단용. 백업이 며칠째 실패하고 있어도 알 길이 없던 것을 화면·로그가 읽을 수 있게 한다. */
+  status(): { lastSuccessAt: string | null; failing: boolean; failures: number; cause: string | null; nextAttemptAt: string | null } {
+    return { lastSuccessAt: this.lastSuccessAt === undefined ? null : new Date(this.lastSuccessAt).toISOString(), failing: this.lastError !== null, failures: this.failures,
+      cause: this.lastError ? this.cause(this.lastError) : null, nextAttemptAt: this.retryAt ? new Date(this.retryAt).toISOString() : null };
   }
   run(force = false): Promise<BackupSnapshot | null> {
     // One in-flight operation per source home, even across manager instances/aliases.
@@ -485,9 +509,11 @@ export class BackupManager {
       try {
         await cooperate(pruneSteps(root.home, this.policy.daily, this.policy.weekly, this.verified), cooperation, (next) => withHomeOwner(root.home, next));
       } finally { root.release(); }
+      if (this.loggedCause !== null) (this.options.log ?? (line => console.error(line)))(`[backup] 정기 백업이 다시 성공했습니다 (${snapshot.manifest.createdAt})`);
       this.lastError = null;
       this.failures = 0;
       this.retryAt = 0;
+      this.loggedCause = null;
       return snapshot;
     };
     const job = Promise.resolve().then(run)
@@ -498,6 +524,12 @@ export class BackupManager {
         // Repeated failures push the timer's next attempt out: 5 minutes, doubling, capped at the backup interval.
         this.failures++;
         this.retryAt = (this.options.now?.() ?? new Date()).getTime() + Math.min(this.policy.intervalMs, RETRY_BASE_MS * 2 ** Math.min(this.failures - 1, 16));
+        // 원인이 바뀔 때마다 한 줄. 같은 실패가 이어지는 동안에는 되풀이하지 않는다.
+        const cause = this.cause(this.lastError);
+        if (cause !== this.loggedCause) {
+          this.loggedCause = cause;
+          (this.options.log ?? (line => console.error(line)))(`[backup] 정기 백업 실패: ${cause} (연속 ${this.failures}회, 다음 시도 ${new Date(this.retryAt).toISOString()})`);
+        }
         throw this.lastError;
       })
       .finally(() => { pending.delete(key); });

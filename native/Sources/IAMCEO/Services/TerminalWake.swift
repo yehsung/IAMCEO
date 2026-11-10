@@ -38,6 +38,12 @@ final class TerminalWake {
         }
     }
     private(set) var members: Set<String> = []
+    /// 준비 여부를 다시 보는 간격의 대기. 시험에서는 실제 시간을 쓰지 않도록 바꿔 끼운다.
+    @ObservationIgnored private let pause: @MainActor @Sendable (Duration) async throws -> Void
+
+    init(pause: @escaping @MainActor @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
+        self.pause = pause
+    }
 
     @MainActor private final class Attempt {
         var continuation: CheckedContinuation<Outcome, Never>?
@@ -61,6 +67,7 @@ final class TerminalWake {
         guard members.insert(memberID).inserted else { return .duplicate }
         defer { members.remove(memberID) }
         let attempt = Attempt()
+        let pause = pause
         // Interactive terminal opening waits for readiness; legacy callers may still supply a deadline.
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -77,7 +84,7 @@ final class TerminalWake {
                         guard allowed() else { attempt.finish(.failed("서버 연결 또는 프로젝트 상태를 확인해 주세요")); return }
                         guard let member = current() else { attempt.finish(.failed("직원을 찾을 수 없습니다")); return }
                         if TerminalAvailability.isReady(member) { attempt.finish(.ready); return }
-                        do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+                        do { try await pause(.milliseconds(50)) } catch { return }
                     }
                 }
                 if let timeout {

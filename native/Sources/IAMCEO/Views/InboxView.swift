@@ -1694,26 +1694,16 @@ private struct DecisionThumb: View {
         do {
             // 카드가 다시 만들어질 때마다 원본을 새로 받아 새 임시 폴더에 쌓지 않도록, 한도가 있는 공용 캐시를 쓴다.
             let loaded = try await FileResources.attachment(attachment, api: api)
-            let data = try loaded.read()
-            if let decoded = decodeThumbnail(data, maxPixel: 900) { image = decoded.image; pixelSize = decoded.size }
+            // 디코드는 메인 밖에서 한다.
+            if let decoded = await PreviewImages.image(loaded, maxPixel: 900) {
+                image = Image(decorative: decoded, scale: 1); pixelSize = CGSize(width: decoded.width, height: decoded.height)
+            }
             resource = loaded; fileURL = loaded.url
             failure = nil
         } catch {
             failure = friendlyLoadError(error, what: "첨부")
         }
     }
-}
-
-/// Downsampled decode so a card of screenshots does not hold full-size bitmaps.
-private func decodeThumbnail(_ data: Data, maxPixel: Int) -> (image: Image, size: CGSize)? {
-    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-    let options: [CFString: Any] = [
-        kCGImageSourceCreateThumbnailFromImageAlways: true,
-        kCGImageSourceCreateThumbnailWithTransform: true,
-        kCGImageSourceThumbnailMaxPixelSize: maxPixel,
-    ]
-    guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
-    return (Image(decorative: cgImage, scale: 1), CGSize(width: cgImage.width, height: cgImage.height))
 }
 
 /// Web .ibx-file: "자료 보기: 제목" opens the file in 자료 (14 / 500 in the focus colour, white .05 well, ring .1).

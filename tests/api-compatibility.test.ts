@@ -394,3 +394,101 @@ test("v1 Message.delivery 5값·이전 목록/state의 exact JSON과 사용자/a
   await json(await f.request("/ws?v=2&t=legacy"), 400);
   await json(await f.request("/ws?v=2", "GET", undefined, { Authorization: "" }), 401);
 });
+
+// n-models-1: 이미 나간 0.2.x 네이티브 앱은 고칠 수 없다. 그 앱의 디코더가 꼭 필요로 하는 필드를 실제 응답과 이벤트에서 고정한다.
+// 필드를 빼거나 타입을 바꾸면(정수 → 실수·null·문자열) 옛 앱은 스냅샷 전체를 버리고 '연결 중'에 머문다. 새 필드를 더하는 것은 괜찮다.
+test("native 0.2.x 필수 필드: /api/sync, /api/bootstrap 과 member·message·decision 이벤트", async () => {
+  const f = await fixture();
+  const events: unknown[] = [];
+  f.bus.subscribe(event => events.push(JSON.parse(JSON.stringify(event))));
+  // 화면에 보이는 상태를 고루 만든다: 실행 중인 턴, 수명주기 기록, 압축 기록, 관측 오류, 보류된 전달, 결재, 할 일.
+  await json(await f.request(`/api/projects/${f.project.id}/messages`, "POST", { text: "지시", targetMemberId: f.member.id }));
+  const at = new Date().toISOString(), generation = f.store.memberRevisions(f.member.id).sessionGeneration;
+  f.store.saveLifecycleJournal({ operationId: randomUUID(), memberId: f.member.id, projectId: f.project.id, intent: "start", phase: "confirmed",
+    identity: { terminalId: "fake:worker", sessionId: f.member.sessionId, sessionGeneration: generation, process: null }, runId: null, deliveryIds: [], baseline: null, reason: null, exitCode: null, createdAt: at, updatedAt: at });
+  const context = f.store.ensureContextState(f.member.id);
+  f.store.saveContextState({ ...context, compaction: { id: randomUUID(), trigger: "manual", phase: "failed", reason: "draft", requestedAt: at, startedAt: null, finishedAt: at },
+    measurement: { quality: "exact", tokens: 1200, window: 200000, pct: 1, turn: 1, model: "claude-sonnet", sessionId: f.member.sessionId!, sessionGeneration: generation, terminalId: "fake:worker", fresh: true, measuredAt: at } as never });
+  f.store.patchMember(f.member.id, { statusObservation: { source: "core", observedAt: at, freshness: "stale", ownership: "unknown", consecutiveFailures: 2, error: { code: "timeout", note: "다시 관측 중" } } });
+  const held = f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "instruction", text: "[지시] 보류될 일" });
+  f.store.markHeld(held.id, "blocked");
+  f.store.createDecision({ projectId: f.project.id, memberId: f.member.id, who: "직원", title: "고를 것", options: [{ k: "a", label: "가" }, { k: "b", label: "나", desc: "설명" }] });
+  f.store.createTodo({ projectId: f.project.id, memberId: f.member.id, title: "할 일" });
+
+  const int = (value: unknown) => typeof value === "number" && Number.isInteger(value);
+  const str = (value: unknown) => typeof value === "string";
+  const problems: string[] = [];
+  const need = (path: string, ok: boolean) => { if (!ok) problems.push(path); };
+  type Any = Record<string, any>;
+  const checkMember = (m: Any, where: string) => {
+    need(`${where}.id`, str(m.id) && str(m.projectId) && str(m.handle) && str(m.name) && str(m.status));
+    need(`${where}.subagents`, int(m.subagents)); need(`${where}.queuedCount`, int(m.queuedCount));
+    need(`${where}.contextWindow`, m.contextWindow === null || int(m.contextWindow));
+    need(`${where}.contextPct`, m.contextPct === null || typeof m.contextPct === "number");
+    if (m.statusObservation) { need(`${where}.statusObservation.consecutiveFailures`, m.statusObservation.consecutiveFailures == null || int(m.statusObservation.consecutiveFailures)); if (m.statusObservation.error) need(`${where}.statusObservation.error.code`, str(m.statusObservation.error.code)); }
+    if (m.subagentState) need(`${where}.subagentState`, (m.subagentState.count == null || int(m.subagentState.count)) && (m.subagentState.sessionGeneration == null || int(m.subagentState.sessionGeneration)));
+    if (m.executionState) need(`${where}.executionState`, str(m.executionState.runId) && (m.executionState.turn == null || int(m.executionState.turn)) && (m.executionState.exitCode == null || int(m.executionState.exitCode)) && Array.isArray(m.executionState.deliveryIds) && m.executionState.deliveryIds.every(str));
+    if (m.lifecycleState) need(`${where}.lifecycleState`, str(m.lifecycleState.operationId) && int(m.lifecycleState.sessionGeneration) && (m.lifecycleState.exitCode == null || int(m.lifecycleState.exitCode)));
+    if (m.contextState?.measurement) { const me = m.contextState.measurement; need(`${where}.contextState.measurement`, (me.tokens == null || int(me.tokens)) && (me.window == null || int(me.window)) && (me.turn == null || int(me.turn)) && int(me.sessionGeneration)); }
+    if (m.contextState?.compaction) need(`${where}.contextState.compaction.id`, str(m.contextState.compaction.id) && str(m.contextState.compaction.phase));
+  };
+  const checkMessage = (m: Any, where: string) => {
+    need(`${where}.id`, str(m.id) && str(m.projectId) && str(m.kind) && str(m.body) && str(m.at));
+    need(`${where}.deliveryRevision`, m.deliveryRevision == null || int(m.deliveryRevision));
+    need(`${where}.attachments`, Array.isArray(m.attachments) && m.attachments.every((a: Any) => str(a.id) && int(a.size)));
+    need(`${where}.fileIds`, (m.fileIds ?? []).every(str));
+    for (const info of m.deliveryInfo ?? []) need(`${where}.deliveryInfo`, str(info.deliveryId) && str(info.memberId) && str(info.waitReason) && str(info.waitingSince));
+  };
+  const checkDecision = (d: Any, where: string) => {
+    need(`${where}.id`, str(d.id) && str(d.projectId) && str(d.title) && str(d.status));
+    need(`${where}.options`, Array.isArray(d.options) && d.options.every((o: Any) => str(o.k) && str(o.label) && (o.desc == null || str(o.desc))));
+    need(`${where}.images`, d.images == null || Array.isArray(d.images));
+  };
+
+  const sync = await json<Any>(await f.request(`/api/sync?projectId=${f.project.id}`));
+  need("sync.protocol", sync.protocol === 2 && sync.projectStatus === "ok" && int(sync.cursor.seq) && str(sync.cursor.epoch));
+  need("sync.bootstrap.projects", Array.isArray(sync.bootstrap.projects) && sync.bootstrap.projects.length > 0);
+  for (const p of sync.bootstrap.projects) for (const key of ["decisionCount", "todoCount", "inboxCount", "workingCount", "blockedCount", "errorCount", "memberCount", "needsCount"]) need(`summary.${key}`, int(p[key]));
+  const settings = sync.bootstrap.settings;
+  need("settings", int(settings.maxConcurrentTurns) && int(settings.compactAtPct) && int(settings.maxAwakeWorkers) && int(settings.contextWindowDefault) && Object.values(settings.contextWindows).every(int) && typeof settings.boardTidyHours === "number");
+  need("apiOutage", sync.apiOutage == null || (str(sync.apiOutage.since) && Array.isArray(sync.apiOutage.affectedMemberIds)));
+  need("revisions", int(sync.revisions.settings) && Object.values<Any>(sync.revisions.members).every(m => int(m.configRevision) && int(m.sessionGeneration)) && Object.values(sync.revisions.todos).every(int));
+  const state = sync.state as Any, notices = state.deliveryNotices as Any;
+  need("notices.version", int(notices?.version) && Array.isArray(notices?.members));
+  need("notices.unassigned", notices && typeof notices.unassigned === "object" && int(notices.unassigned.needsOwnerCount));
+  for (const m of notices.members) {
+    need("notices.members.memberId", str(m.memberId));
+    for (const key of ["undeliveredCount", "unknownCount", "deliveringCount", "checkingCount", "needsOwnerCount", "waitingBehindCount"]) need(`notices.members.${key}`, int(m[key]));
+    need("notices.members.oldestAt", m.oldestAt === null || str(m.oldestAt));
+    need("notices.members.reasons", Array.isArray(m.reasons) && m.reasons.every((r: Any) => str(r.code) && int(r.count) && str(r.note)));
+    for (const w of m.waitReasons ?? []) need("notices.members.waitReasons", str(w.waitReason) && str(w.waitingSince) && int(w.count));
+    if (m.runLimit) need("notices.members.runLimit", int(m.runLimit.used) && int(m.runLimit.limit));
+  }
+  for (const u of notices.unassignedItems ?? []) need("notices.unassignedItems", str(u.id) && str(u.messageId) && str(u.projectId) && str(u.memberId) && int(u.version) && str(u.preview) && str(u.createdAt) && Array.isArray(u.allowedActions));
+  for (const r of notices.reportNotices ?? []) need("notices.reportNotices", str(r.kind) && str(r.runId) && str(r.memberId) && str(r.messageId) && str(r.createdAt) && str(r.title));
+  for (const [index, m] of state.members.entries()) checkMember(m, `state.members[${index}]`);
+  for (const [index, m] of state.messages.entries()) checkMessage(m, `state.messages[${index}]`);
+  for (const [index, d] of state.decisions.entries()) checkDecision(d, `state.decisions[${index}]`);
+  for (const t of state.todos) need("state.todos", str(t.id) && Array.isArray(t.completionFileIds) && t.completionFileIds.every(str));
+  for (const w of state.work) need("state.work", str(w.id) && int(w.order));
+  for (const file of state.files) need("state.files", str(file.id) && int(file.order) && file.attachments.every((a: Any) => str(a.id) && int(a.size)));
+
+  // 만든 상태가 실제로 응답에 실렸는지: 비어 있어서 통과한 것이 아니어야 한다.
+  const worker = state.members.find((m: Any) => m.id === f.member.id);
+  expect(worker).toMatchObject({ executionState: { runId: expect.any(String) }, lifecycleState: { operationId: expect.any(String) },
+    contextState: { compaction: { id: expect.any(String) }, measurement: { tokens: 1200, window: 200000 } }, statusObservation: { consecutiveFailures: 2, error: { code: "timeout" } } });
+  expect(notices.members.find((m: Any) => m.memberId === f.member.id)).toMatchObject({ undeliveredCount: 1, waitReason: "approval", waitReasons: [{ waitReason: "approval", count: 1 }] });
+  expect(state.decisions).toHaveLength(1); expect(state.todos).toHaveLength(1);
+  expect(state.messages.some((m: Any) => (m.deliveryInfo ?? []).length === 0 || m.deliveryInfo.every((info: Any) => str(info.deliveryId)))).toBe(true);
+
+  const bootstrap = await json<Any>(await f.request("/api/bootstrap"));
+  need("bootstrap.projects", Array.isArray(bootstrap.projects) && str(bootstrap.version) && typeof bootstrap.settings === "object" && typeof bootstrap.herdr === "object" && Array.isArray(bootstrap.urls));
+  need("bootstrap.runtime", bootstrap.runtime == null || (typeof bootstrap.runtime.core.installed === "boolean" && typeof bootstrap.runtime.core.available === "boolean"));
+
+  const typed = (type: string) => (events as Any[]).filter(event => event.type === type);
+  expect(typed("member").length).toBeGreaterThan(0); expect(typed("message").length).toBeGreaterThan(0); expect(typed("decision").length).toBeGreaterThan(0);
+  for (const event of typed("member")) checkMember(event.member, "event.member");
+  for (const event of typed("message")) checkMessage(event.message, "event.message");
+  for (const event of typed("decision")) checkDecision(event.decision, "event.decision");
+  expect([...new Set(problems)]).toEqual([]);
+});

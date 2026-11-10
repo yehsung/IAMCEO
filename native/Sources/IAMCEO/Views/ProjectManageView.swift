@@ -181,6 +181,9 @@ struct ProjectManageView: View {
                     InlineNotice(title: "변경 결과를 확인 중입니다", detail: "같은 요청은 다시 보내지 않습니다.", actionTitle: "결과 확인", action: {
                         Task { await store.recheckProject(id: selection.projectID) }
                     })
+                    // 응답을 잃은 변경이 끝내 반영되지 않았을 때 직접 푸는 출구. 5분이 지나면 저절로도 풀린다.
+                    Button("확인을 그만두고 지금 서버 상태로 계속하기") { store.discardProjectChange(id: selection.projectID) }
+                        .ceGhostButton().controlSize(.small)
                 }
                 if succeeded {
                     InlineNotice(tone: .success, icon: "checkmark.circle", title: selection.mode == .restore ? "프로젝트를 보관함에서 꺼냈습니다" : "저장했습니다")

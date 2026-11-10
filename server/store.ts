@@ -862,6 +862,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   private readDeliveryWait(delivery: Delivery): DeliveryWaitInfo {
+    if (delivery.holdReason === "api_outage" || delivery.holdReason === "usage_limit") return { waitReason: delivery.holdReason, waitingSince: delivery.createdAt };
     const member = this.requireMember(delivery.memberId), project = this.requireProject(delivery.projectId);
     const input = this.inputState(member.id), recovery = this.getDeliveryRecovery(delivery.id);
     const context = this.deliveryReadMemo(`context:${member.id}`, () => this.waitContext?.(member.id));
@@ -1017,6 +1018,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.loadApiRecovery("outage_public");
   }
   updateUsageDecision(id: string, usage: NonNullable<Decision["usageLimit"]>, title: string, detail: string, open: boolean): Decision {
+    if (!open) usage = { ...usage, stillLimited: false };
     return this.transaction(() => {
       const before = this.requireDecision(id);
       const status = open ? "open" : "closed";
@@ -1799,6 +1801,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         this.run("UPDATE decisions SET status = 'answered', delivered_at = NULL, updated_at = ? WHERE id = ?", stamp, id);
       } else {
         this.run("UPDATE decisions SET status = 'closed', updated_at = ? WHERE id = ?", stamp, id);
+        if (before.usageLimit) this.run("UPDATE decisions SET usage_limit_json = ? WHERE id = ?", JSON.stringify({ ...before.usageLimit, stillLimited: false }), id);
       }
       const decision = this.requireDecision(id);
       this.recorder?.decision(before, decision);
@@ -1818,6 +1821,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const before = this.requireDecision(id);
       if (before.status !== "open") throw new ApiError(409, before.status === "closed" ? "이미 닫힌 결재입니다" : "대표가 이미 답한 결재입니다");
       const at = nowIso();
+      if (before.usageLimit) this.run("UPDATE decisions SET usage_limit_json = ? WHERE id = ?", JSON.stringify({ ...before.usageLimit, stillLimited: false }), id);
       this.run(
         "UPDATE decisions SET status = 'closed', close_kind = ?, close_reason = ?, close_quote = ?, closed_by = ?, closed_at = ?, updated_at = ? WHERE id = ? AND status = 'open'",
         input.kind,

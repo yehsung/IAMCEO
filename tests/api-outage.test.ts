@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { ApiRecovery, API_RESUME_TEXT, classifyTurnError, networkRetryScreen, parseUsageReset, usageLimitMenu, type ApiRecoveryOptions } from "../server/api-outage.ts";
+import { ApiRecovery, API_RESUME_TEXT, USAGE_RESUME_TEXT, classifyTurnError, networkRetryScreen, parseUsageReset, usageLimitMenu, type ApiRecoveryOptions } from "../server/api-outage.ts";
 import { openDb } from "../server/db.ts";
 import { Store } from "../server/store.ts";
 import { Bus } from "../server/bus.ts";
@@ -34,6 +34,35 @@ function fixture() {
 }
 
 describe("순수 오류·화면·시각 분류", () => {
+  test("상태줄 숫자·화면 앞 기록·끝 공백은 창 지문과 초기화 시각에 영향을 주지 않는다", () => {
+    const first = usageLimitMenu(`old record: resets Nov 12 at 9am (Asia/Seoul)\n${menuText()}\n◆ Opus │ ███░ │ 70% │ $716.43 │ 7일: 11% (412s)\n⏵⏵ bypass permissions on`)!;
+    const second = usageLimitMenu(menuText().split("\n").map(line => line + "  ").join("\r\n") + "\r\n◆ Opus │ ███░ │ 71% │ $717.43 │ 7일: 12% (413s)\r\n⏵⏵ bypass permissions on")!;
+    expect(first.raw).toBe(menuText());
+    expect(second.fingerprint).toBe(first.fingerprint);
+    expect(first.resetsAt).toBe("2026-11-13T01:00:00.000Z");
+    expect(usageLimitMenu(menuText().replace(" · resets Nov 13 at 10am (Asia/Seoul)", "") + "\nresets Nov 13 at 10am (Asia/Seoul)")?.resetsAt).toBeNull();
+  });
+  test.each(["weekly limit", "5-hour limit", "Opus limit", "Sonnet limit", "Fable limit", "usage credit limit", "monthly spend limit", "team's shared budget", "channel's monthly spend limit"])("실제 제목: %s", title => {
+    expect(usageLimitMenu(menuText().replace("weekly limit", title))).not.toBeNull();
+    expect(classifyTurnError(`You've hit your ${title}`)).toBe("usage_limit");
+  });
+  test.each(["You've reached your weekly limit", "You're out of usage credits", "Your org is out of usage credits"])("추가 제목: %s", title => {
+    expect(usageLimitMenu(menuText().replace("You've hit your weekly limit", title))).not.toBeNull();
+    expect(classifyTurnError(title)).toBe("usage_limit");
+  });
+  test.each(["Stop", "Switch to usage credits", "Don’t continue automatically", "Don't continue automatically", "Wait here, then continue automatically shortly", "Wait here, then continue automatically when the limit resets", "Add funds to continue with usage", "Ask your admin for more usage", "Upgrade your plan", "Continue with lower priority"])("번호 없는 선택지 한 개: %s", option => {
+    expect(usageLimitMenu(`You've hit your 5-hour limit\nWhat do you want to do?\n❯ ${option}\nEsc to cancel`)).not.toBeNull();
+  });
+  test("Add funds 기본 선택과 순서 변경을 허용하고 인용 아래 살아 있는 입력칸을 거부한다", () => {
+    const menu = "You've hit your 5-hour limit\nWhat do you want to do?\n❯ 1. Add funds to continue with usage credits\n2. Switch to usage credits\n3. Stop\nEnter to confirm · Esc to cancel";
+    expect(usageLimitMenu(menu)).not.toBeNull();
+    expect(usageLimitMenu(menu + `\n${"─".repeat(30)}\n❯ representative draft\n${"─".repeat(30)}\nstatus`)).toBeNull();
+    expect(usageLimitMenu(menu.replace("Enter to confirm", `${"─".repeat(30)}\n❯\n${"─".repeat(30)}\nEnter to confirm`))).toBeNull();
+    expect(usageLimitMenu(menu.replace("What do you want to do?", "another question"))).toBeNull();
+    expect(usageLimitMenu("What do you want to do?\nStop\nYou've hit your 5-hour limit\nEsc to cancel")).toBeNull();
+    expect(usageLimitMenu("You've hit your 5-hour limit\nWhat do you want to do?\nChoose a color\nEsc to cancel")).toBeNull();
+    expect(usageLimitMenu(menu.replace("5-hour limit", "unverified restriction"))).toBeNull();
+  });
   test.each(["response stopped arriving", "No response from API", "Connection error", "fetch failed", "ECONNRESET", "ETIMEDOUT", "socket hang up", "Request timed out", "overloaded", "529", "API Error: 500", "check your network", "stream disconnected", "error sending request", "Reconnecting"])("network: %s", text => expect(classifyTurnError(text)).toBe("network"));
   test.each(["You've hit your usage limit", "usage limit reached", "rate limit", "quota exceeded", "You've hit your weekly limit"])("usage: %s", text => expect(classifyTurnError(text)).toBe("usage_limit"));
   test("인증·기타 오류와 network retry 화면", () => {
@@ -64,6 +93,25 @@ describe("순수 오류·화면·시각 분류", () => {
 });
 
 describe("영속 API 사고와 이어가기", () => {
+  test("사고마다 프로젝트별 시작·복구 1회와 프로젝트 직원 수, 대표 알림은 각 1회", async () => {
+    const f = fixture(), second = f.makeMember("second");
+    const project = f.store.createProject({ name: "another", cwd: "/private/tmp/fake-other-work" });
+    const other = f.store.createMember({ projectId: project.id, handle: "other", name: "다른 직원", kind: "worker" });
+    const notices: { projectId: string; text: string; alertOwner: boolean }[] = [];
+    f.options.notify = (projectId, text, alertOwner = true) => notices.push({ projectId, text, alertOwner });
+    f.service.networkFailure(f.member); f.service.networkFailure(second, false); f.restart();
+    f.service.networkFailure(other); f.service.networkFailure(other); f.service.networkFailure(second);
+    expect(notices.map(n => [n.projectId, n.alertOwner])).toEqual([[f.project.id, true], [project.id, false]]);
+    expect(notices.every(n => n.text.includes("직원 1명"))).toBe(true);
+    f.restart(); await f.recover();
+    expect(notices.slice(2).map(n => [n.projectId, n.alertOwner])).toEqual([[f.project.id, true], [project.id, false]]);
+    expect(notices[2]!.text).toContain("직원 2명"); expect(notices[3]!.text).toContain("직원 1명");
+    f.now += 30_000; f.service.networkFailure(f.member); await f.recover();
+    expect(notices).toHaveLength(4);
+    f.service.completed(f.member.id); f.service.completed(second.id); f.service.completed(other.id);
+    f.now += 30_000; f.service.networkFailure(f.member); await f.recover();
+    expect(notices.slice(4).map(n => n.alertOwner)).toEqual([true, true]);
+  });
   test("시작 알림 1회·보류·재시작·HTTP 오류 코드도 성공·2회 연속 성공·멱등 순서", async () => {
     const f = fixture(), second = f.makeMember("conductor"); const d = f.enqueue();
     f.service.networkFailure(f.member); f.service.networkFailure(second); f.service.networkFailure(f.member);
@@ -104,6 +152,32 @@ describe("영속 API 사고와 이어가기", () => {
 });
 
 describe("CLI별 한도 알림과 안전한 이어가기", () => {
+  test.each(["10am", "10:30am"])("카드 시각 %s는 서버 시간대로 쓰고 계약 필드는 ISO로 보존한다", time => {
+    const f = fixture(), previous = process.env.TZ;
+    process.env.TZ = "Asia/Seoul";
+    try {
+      const menu = usageLimitMenu(menuText(`Nov 13 at ${time} (Asia/Seoul)`), f.now)!;
+      f.service.usageFailure(f.member, menu.raw, menu);
+      expect(f.card().detail).toContain(time === "10am" ? "11월 13일 오전 10시에" : "11월 13일 오전 10시 30분에");
+      expect(f.card().detail).not.toContain("2026-11-13T");
+      expect(f.card().usageLimit?.resetsAt).toBe(time === "10am" ? "2026-11-13T01:00:00.000Z" : "2026-11-13T01:30:00.000Z");
+    } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
+  });
+  test.each(["received", "disappeared", "setDecisionStatus", "closeDecision"])("닫힌 카드의 stillLimited 초기화: %s", async closeBy => {
+    const f = fixture(), menu = usageLimitMenu(menuText(), f.now)!;
+    f.service.usageFailure(f.member, menu.raw, menu); f.inspect = async () => ({ menu, state: "blocked" });
+    await f.service.resumeUsage(f.card().id); f.service.usageFailure(f.member, menu.raw, menu);
+    expect(f.card().usageLimit?.stillLimited).toBe(true);
+    if (closeBy === "received") {
+      await f.service.resumeUsage(f.card().id);
+      const d = f.service.prioritize(f.member.id, f.store.listPending(f.member.id))[0]!;
+      f.store.markDelivered(d.id); f.service.received(d.id);
+    } else if (closeBy === "disappeared") {
+      f.inspect = async () => ({ menu: null, state: "idle" }); await f.service.tick();
+    } else if (closeBy === "setDecisionStatus") f.store.setDecisionStatus(f.card().id, "closed");
+    else f.store.closeDecision(f.card().id, { kind: null, reason: "정리", by: "대표" });
+    expect(f.card()).toMatchObject({ status: "closed", usageLimit: { stillLimited: false } });
+  });
   test("CLI별 한 카드·원문 보존·전달 보류·재시작", () => {
     const f = fixture(), second = f.makeMember("second"), codex = f.makeMember("codex", "codex");
     const menu = usageLimitMenu(menuText(), f.now)!; const d = f.enqueue();
@@ -121,7 +195,7 @@ describe("CLI별 한도 알림과 안전한 이어가기", () => {
     f.service.usageFailure(f.member, menu.raw, menu); f.inspect = async () => ({ menu, state: "blocked" });
     await f.service.resumeUsage(f.card().id);
     expect(f.dismissed).toEqual([menu.fingerprint]);
-    expect(f.service.prioritize(f.member.id, f.store.listPending(f.member.id)).map(d => d.text)).toEqual([API_RESUME_TEXT]);
+    expect(f.service.prioritize(f.member.id, f.store.listPending(f.member.id)).map(d => d.text)).toEqual([USAGE_RESUME_TEXT]);
     expect(f.service.holdReason(f.member.id)).toBeNull();
     f.service.usageFailure(f.member, menu.raw, menu);
     expect(f.card()).toMatchObject({ status: "open", usageLimit: { stillLimited: true } });
@@ -145,7 +219,7 @@ describe("CLI별 한도 알림과 안전한 이어가기", () => {
     expect(f.store.listDeliveries(f.project.id)).toHaveLength(0);
     f.now += 5001; await f.service.tick();
     expect(f.dismissed).toHaveLength(0);
-    expect(f.store.listPending(m.id)[0]?.text).toBe(API_RESUME_TEXT);
+    expect(f.store.listPending(m.id)[0]?.text).toBe(USAGE_RESUME_TEXT);
     f.service.completed(m.id);
     expect(f.card("codex").status).toBe("closed");
   });
@@ -207,7 +281,7 @@ test("대표가 알림을 닫아도 초기화 +1분에는 자동으로 이어간
   f.service.usageFailure(member, "usage limit reached: try again in 1m");
   f.store.setDecisionStatus(f.card("codex").id, "closed");
   f.now += 120000; await f.service.tick();
-  expect(f.store.listPending(member.id)[0]?.text).toBe(API_RESUME_TEXT);
+  expect(f.store.listPending(member.id)[0]?.text).toBe(USAGE_RESUME_TEXT);
 });
 
 test("Esc 뒤 재시작해도 저장된 이어가기 의도를 살리고 Esc를 다시 보내지 않는다", async () => {
@@ -217,7 +291,7 @@ test("Esc 뒤 재시작해도 저장된 이어가기 의도를 살리고 Esc를 
   saved.limits[0]!.members[0]!.dismissStarted = true;
   f.store.saveApiRecovery("api_recovery", saved); f.restart();
   await f.service.tick();
-  expect(f.dismissed).toHaveLength(0); expect(f.store.listPending(f.member.id)[0]?.text).toBe(API_RESUME_TEXT);
+  expect(f.dismissed).toHaveLength(0); expect(f.store.listPending(f.member.id)[0]?.text).toBe(USAGE_RESUME_TEXT);
 });
 
 test("실제 SQLite 연결을 닫았다 열어도 사고와 1회 성공·이어가기 멱등성을 보존한다", async () => {

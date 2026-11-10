@@ -2,10 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import type { ApiOutageState, CliProvider, Decision, Delivery, Member } from "../shared/types.ts";
 import { ApiError, type Store } from "./store.ts";
 
+function usageLimitTitle(text: string): boolean {
+  return /(?:you['’]ve hit your (?:weekly limit|5-hour limit|Opus limit|Sonnet limit|Fable limit|usage credit limit|monthly spend limit|team['’]s shared budget|channel['’]s monthly spend limit)\b|you['’]ve reached your .+?\blimit\b|you['’]re out of usage credits\b|your org is out of usage\b)/i.test(text);
+}
+
 export type TurnErrorKind = "network" | "usage_limit" | "auth" | "error";
 export function classifyTurnError(text: string): TurnErrorKind {
   if (/authentication|unauthorized|invalid.?api.?key|authentication_error|\b401\b|인증/i.test(text)) return "auth";
-  if (/quota|usage.?limit|rate.?limit|weekly limit|hit your .*limit|한도/i.test(text)) return "usage_limit";
+  if (usageLimitTitle(text) || /quota|usage.?limit|rate.?limit|weekly limit|hit your .*limit|한도/i.test(text)) return "usage_limit";
   if (/response stopped arriving|no response from API|connection error|fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|request timed out|overloaded|\b529\b|API Error:\s*5|check your network|stream disconnected|error sending request|reconnecting/i.test(text)) return "network";
   return "error";
 }
@@ -60,19 +64,35 @@ export function parseUsageReset(text: string, now = Date.now(), serverZone = Int
 
 export interface UsageMenu { fingerprint: string; raw: string; resetsAt: string | null }
 export function usageLimitMenu(screen: string, now = Date.now()): UsageMenu | null {
-  if (!/you['’]ve hit your weekly limit/i.test(screen) || !/What do you want to do\?/i.test(screen) ||
-      !/1\.\s*Stop and wait for limit to reset/i.test(screen) || !/2\.\s*Wait here, then continue automatically/i.test(screen) ||
-      !/3\.\s*Add funds to continue with usage credits/i.test(screen) || !/Enter to confirm\s*·\s*Esc to cancel/i.test(screen) || screen.includes("\x1b")) return null;
-  if (screen.trimEnd().split(/\r?\n/).at(-1)?.trim() !== "Enter to confirm · Esc to cancel") return null;
-  return { fingerprint: createHash("sha256").update(screen).digest("hex"), raw: screen, resetsAt: parseUsageReset(screen, now) };
+  if (screen.includes("\x1b")) return null;
+  const lines = screen.split(/\r?\n/).map(line => line.trimEnd());
+  for (let title = lines.length - 1; title >= 0; title--) {
+    if (!usageLimitTitle(lines[title]!)) continue;
+    const question = lines.findIndex((line, i) => i > title && /What do you want to do\?/i.test(line));
+    if (question < 0) continue;
+    // A live composer below quoted dialog text is never a limit menu.
+    if (/(?:^|\n)\s*[─━-]{3,}\s*\n\s*❯[^\n]*\n(?:[^\n]*\n)*?\s*[─━-]{3,}\s*(?:\n|$)/.test(lines.slice(question + 1).join("\n"))) return null;
+    const footer = lines.findIndex((line, i) => i > question && /\bEsc to cancel\b/i.test(line));
+    if (footer < 0 || !lines.slice(question + 1, footer).some(line => /\b(?:Stop(?: and wait for limit to reset)?|Wait here, then continue automatically(?: at\b| shortly\b| when the limit resets\b)?|Don['’]t continue automatically|Add funds to continue with usage(?: credits)?|Switch to usage credits|Ask your admin for more usage|Upgrade your plan|lower priority)\b/i.test(line))) continue;
+    const raw = lines.slice(title, footer + 1).join("\n");
+    return { fingerprint: createHash("sha256").update(raw).digest("hex"), raw, resetsAt: parseUsageReset(lines[title]!, now) };
+  }
+  return null;
 }
 export function networkRetryScreen(screen: string): boolean {
   return /Waiting for API response[\s\S]*check your network/i.test(screen);
 }
 export const API_RESUME_TEXT = "[시스템] 인터넷 연결이 끊겨 하던 턴이 중단됐습니다. 연결이 돌아왔습니다. 중단된 일을 이어서 하세요. 이미 끝낸 부분은 다시 하지 말고, 다 끝났으면 결과만 post 하세요.";
+export const USAGE_RESUME_TEXT = "[시스템] 사용 한도로 하던 턴이 멈췄습니다. 이제 이어서 할 수 있습니다. 중단된 일을 이어서 하세요. 이미 끝낸 부분은 다시 하지 말고, 다 끝났으면 결과만 post 하세요.";
+
+function formatUsageReset(at: string): string {
+  const parts = new Intl.DateTimeFormat("ko-KR", { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, month: "long", day: "numeric", hour: "numeric", minute: "numeric", hour12: true }).formatToParts(new Date(at));
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find(p => p.type === type)!.value;
+  return `${part("month")} ${part("day")}일 ${part("dayPeriod")} ${part("hour")}시${Number(part("minute")) ? ` ${Number(part("minute"))}분` : ""}`;
+}
 
 interface Affected { memberId: string; ended: boolean; attempts: number; resumeId: string | null; awaitingResult: boolean; exhausted: boolean; errorKey?: string }
-interface Outage { id: string; since: string; active: boolean; lastProbeAt: string | null; successes: number; revision?: number; affected: Affected[] }
+interface Outage { id: string; since: string; active: boolean; lastProbeAt: string | null; successes: number; revision?: number; affected: Affected[]; notifiedProjects?: string[]; recoveredProjects?: string[]; recoveryNotified?: boolean }
 interface Limited { memberId: string; fingerprint: string | null; raw: string; resetsAt: string | null; resumeId: string | null; awaitingResult: boolean; autoAttempted: string | null; failure: string | null; dismissStarted?: boolean; errorKey?: string }
 interface LimitGroup { cli: CliProvider; decisionId: string; stillLimited: boolean; members: Limited[]; rawEvidence?: string[] }
 interface RecoveryState { outage: Outage | null; limits: LimitGroup[]; resumeOrder?: string[]; continuations?: Record<string, string> }
@@ -82,7 +102,7 @@ export interface ApiRecoveryOptions {
   now?: () => number;
   urls?: string[];
   intervalMs?: number; probeTimeoutMs?: number;
-  notify: (projectId: string, text: string) => void;
+  notify: (projectId: string, text: string, alertOwner?: boolean) => void;
   pump: (memberId: string) => void | Promise<void>;
   inspect: (member: Member) => Promise<{ menu: UsageMenu | null; state: string | null }>;
   dismiss: (member: Member, fingerprint: string) => Promise<{ ok: boolean; note?: string }>;
@@ -126,6 +146,8 @@ export class ApiRecovery {
       if (errorKey && previous?.errorKey === errorKey) return;
       const starting = !o || !o.active && !previous?.awaitingResult && !previous?.exhausted;
       if (!o || !o.active && !previous?.awaitingResult && !previous?.exhausted) o = { id: randomUUID(), since: new Date(this.now()).toISOString(), active: true, lastProbeAt: null, successes: 0, affected: [] };
+      // Older recovery state only announced the first affected project.
+      o.notifiedProjects ??= o.affected.length ? [store.getMember(o.affected[0]!.memberId)?.projectId].filter((id): id is string => !!id) : [];
       o.active = true;
       if (starting) o.successes = 0;
       let a = o.affected.find(a => a.memberId === member.id);
@@ -142,9 +164,15 @@ export class ApiRecovery {
       this.state.outage = o;
       if (ended) store.patchMember(member.id, { status: "idle", lastError: "인터넷 연결 문제로 멈춤", statusObservation: { source: member.backend ?? "core", observedAt: new Date(this.now()).toISOString(), freshness: "fresh", ownership: member.statusObservation?.ownership ?? "verified", consecutiveFailures: 0, error: { code: "network_outage", note: "인터넷 연결 문제로 멈춤" } } });
       this.holdPending(member.id, "api_outage");
+      const notifyProject = !o.notifiedProjects.includes(member.projectId);
+      const alertOwner = o.notifiedProjects.length === 0;
+      if (notifyProject) o.notifiedProjects.push(member.projectId);
       this.save();
       if (this.started) this.start();
-      if (starting) this.options.notify(member.projectId, `인터넷 연결이 불안정해 직원 ${o.affected.length}명이 멈췄습니다. 연결이 돌아오면 자동으로 이어 갑니다.`);
+      if (notifyProject) {
+        const count = o.affected.filter(a => store.getMember(a.memberId)?.projectId === member.projectId).length;
+        this.options.notify(member.projectId, `인터넷 연결이 불안정해 직원 ${count}명이 멈췄습니다. 연결이 돌아오면 자동으로 이어 갑니다.`, alertOwner);
+      }
     });
   }
   holdReason(memberId: string): "api_outage" | "usage_limit" | null {
@@ -205,11 +233,12 @@ export class ApiRecovery {
     const waiting = group.members.filter(m => !m.awaitingResult || !m.resumeId || this.options.store.getDelivery(m.resumeId)?.status !== "delivered");
     const times = waiting.map(m => m.resetsAt).filter((t): t is string => !!t).sort();
     const resetsAt = times.at(-1) ?? null;
-    const first = group.stillLimited ? "아직 같은 계정이라 한도가 남아 있지 않습니다. 다른 계정으로 로그인한 뒤 다시 누르세요." : resetsAt ? `${resetsAt}에 풀리면 자동으로 이어 갑니다. 다른 계정으로 로그인했다면 지금 이어갈 수 있습니다.` : "초기화 시각을 확인하지 못했습니다. 다른 계정으로 로그인했다면 지금 이어갈 수 있습니다.";
+    const first = group.stillLimited ? "아직 같은 계정이라 한도가 남아 있지 않습니다. 다른 계정으로 로그인한 뒤 다시 누르세요." : resetsAt ? `${formatUsageReset(resetsAt)}에 풀리면 자동으로 이어 갑니다. 다른 계정으로 로그인했다면 지금 이어갈 수 있습니다.` : "초기화 시각을 확인하지 못했습니다. 다른 계정으로 로그인했다면 지금 이어갈 수 있습니다.";
     const names = waiting.map(m => `${this.options.store.getMember(m.memberId)?.name ?? m.memberId}${m.failure ? ` — ${m.failure}` : ""}`).join("\n");
     const raw = (group.rawEvidence ?? group.members.filter(m => !m.resetsAt).map(m => m.raw)).join("\n\n");
     const card = this.options.store.requireDecision(group.decisionId);
     const open = waiting.length > 0 && (card.status !== "closed" || card.usageLimit?.memberIds.length === 0);
+    if (!open) group.stillLimited = false;
     this.options.store.updateUsageDecision(card.id, { cli: group.cli, resetsAt, memberIds: waiting.map(m => m.memberId), stillLimited: group.stillLimited }, waiting.length ? `${group.cli === "claude" ? "Claude" : "Codex"} 사용 한도 도달 · 직원 ${waiting.length}명 멈춤` : card.title, waiting.length ? [first, names, raw].filter(Boolean).join("\n\n") : card.detail, open);
   }
   received(deliveryId: string): void {
@@ -220,12 +249,12 @@ export class ApiRecovery {
     this.options.pump(member.id);
   }
 
-  private enqueueResume(member: Member, previousId: string | null = null): string {
+  private enqueueResume(member: Member, previousId: string | null = null, text = API_RESUME_TEXT): string {
     this.state.resumeOrder ??= [];
     if (!this.state.resumeOrder.includes(member.id)) this.state.resumeOrder.push(member.id);
     this.state.continuations ??= {};
     const previous = this.options.store.getDelivery(previousId ?? this.state.continuations[member.id] ?? "");
-    const id = previous && ["queued", "held"].includes(previous.status) ? previous.id : this.options.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "system", text: API_RESUME_TEXT, wake: true }).id;
+    const id = previous && ["queued", "held"].includes(previous.status) ? previous.id : this.options.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "system", text, wake: true }).id;
     this.state.continuations[member.id] = id;
     return id;
   }
@@ -266,7 +295,7 @@ export class ApiRecovery {
           if (this.closed) break;
           this.transaction(() => {
             this.options.store.clearUsageRetry(member.id);
-            limited.resumeId = this.enqueueResume(member, limited.resumeId);
+            limited.resumeId = this.enqueueResume(member, limited.resumeId, USAGE_RESUME_TEXT);
             limited.awaitingResult = true;
             limited.dismissStarted = false;
             limited.failure = null;
@@ -324,7 +353,6 @@ export class ApiRecovery {
       if (this.closed || o !== this.state.outage || revision !== o.revision) return;
       o.successes = results.length > 0 && results.every(Boolean) ? o.successes + 1 : 0;
       if (o.successes >= 2) {
-        const resumed: Member[] = [];
         this.transaction(() => {
           o.active = false;
           for (const a of o.affected) {
@@ -341,11 +369,15 @@ export class ApiRecovery {
             a.attempts++;
             a.awaitingResult = true;
             a.ended = false;
-            resumed.push(member);
           }
+          o.recoveredProjects ??= [];
+          const notifications = [...new Set([...(o.notifiedProjects ?? []), ...o.affected.map(a => this.options.store.getMember(a.memberId)?.projectId).filter((id): id is string => !!id)])]
+            .filter(id => !o.recoveredProjects!.includes(id))
+            .map(projectId => ({ projectId, count: o.affected.filter(a => this.options.store.getMember(a.memberId)?.projectId === projectId).length, alertOwner: false }));
+          if (notifications.length && !o.recoveryNotified) { notifications[0]!.alertOwner = true; o.recoveryNotified = true; }
+          o.recoveredProjects.push(...notifications.map(n => n.projectId));
           this.save();
-          const projectId = resumed[0]?.projectId ?? this.options.store.getMember(o.affected[0]?.memberId ?? "")?.projectId;
-          if (projectId) this.options.notify(projectId, `인터넷 연결이 돌아와 직원 ${resumed.length}명이 이어서 일합니다.`);
+          for (const n of notifications) this.options.notify(n.projectId, `인터넷 연결이 돌아와 직원 ${n.count}명이 이어서 일합니다.`, n.alertOwner);
         });
         for (const a of o.affected) this.options.pump(a.memberId);
       } else this.save();

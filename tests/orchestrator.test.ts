@@ -846,7 +846,7 @@ class ScriptedRunner implements Runner {
   }
 }
 
-function scripted(timings: Partial<OrchestratorTimings> = {}, backend: Backend = "herdr", apiRecovery?: Pick<ApiRecoveryOptions, "probe" | "now" | "urls" | "intervalMs">, withPush = false) {
+function scripted(timings: Partial<OrchestratorTimings> = {}, backend: Backend = "herdr", apiRecovery?: Pick<ApiRecoveryOptions, "probe" | "now" | "urls" | "intervalMs">, withPush = false, notifier?: (title: string, body: string) => void) {
   const home = mkdtempSync(join(tmpdir(), "iamceo-script-"));
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
   updateConfigFile({ accessCode: "code", hosts: ["127.0.0.1"] }, env);
@@ -860,6 +860,7 @@ function scripted(timings: Partial<OrchestratorTimings> = {}, backend: Backend =
     config,
     store,
     apiRecovery,
+    notifier,
     runners: new Map<Backend, Runner>([[backend, runner]]),
     herdr: {
       info: async () => ({ installed: true, running: true, version: "1", protocol: 22, compatible: true, warning: null }),
@@ -1391,19 +1392,40 @@ describe("네트워크 자동 복구와 대표 전달 지연", () => {
     await waitFor("전달", () => t.store.requireMessage(message.id).delivery === "delivered");
     expect(t.runner.sent).toHaveLength(1);
   });
-  test("대표 답 30분 미전달 알림과 총괄 알림은 전달별 한 번", async () => {
+  test.each([["answer", "결재 답이"], ["user_message", "메시지가"]] as const)("대표 %s 30분 미전달 알림의 조사와 총괄 알림은 전달별 한 번", async (kind, label) => {
     const t = scripted({}, "herdr", undefined, true);
     const worker = (await t.orch.addMember(t.project.id, { name: "직원", handle: "late-worker" })).member;
     const lead = t.store.createMember({ projectId: t.project.id, handle: "late-lead", name: "총괄", kind: "conductor" });
-    const d = t.store.enqueue({ projectId: t.project.id, memberId: worker.id, kind: "answer", text: "대표의 결재 답" });
+    const d = t.store.enqueue({ projectId: t.project.id, memberId: worker.id, kind, text: "대표의 결재 답" });
     const now = Date.now(); t.store.db.query("UPDATE deliveries SET created_at = ? WHERE id = ?").run(new Date(now - 31 * 60000).toISOString(), d.id);
     t.orch.notifyDelayedDeliveries(now); t.orch.notifyDelayedDeliveries(now + 60000);
     expect(t.store.listMessages(t.project.id).filter(m => m.title === "대표 전달 지연")).toHaveLength(1);
+    expect(t.store.listMessages(t.project.id).find(m => m.title === "대표 전달 지연")!.body).toContain(`대표 ${label} 30분 넘게`);
     expect(t.push!.listEvents().filter(e => e.kind === "report_blocked")).toHaveLength(1);
     expect(t.store.listDeliveries(t.project.id).filter(d => d.memberId === lead.id && d.text.includes("30분 넘게"))).toHaveLength(1);
   });
 });
 
+
+test("인터넷 사고 기록은 프로젝트마다 남기고 Mac 알림은 시작·복구 각 한 번이다", async () => {
+  let now = Date.now();
+  const alerts: string[] = [];
+  const t = scripted({}, "core", { now: () => now, urls: ["https://fake.invalid"], probe: async () => ({}) }, true, (_title, body) => alerts.push(body));
+  t.store.patchSettings({ notifyMac: true, macScriptNotifications: true });
+  const other = t.store.createProject({ name: "두 번째", cwd: t.home });
+  const makeMember = (projectId: string, handle: string) => t.store.createMember({ projectId, handle, name: handle, kind: "worker", backend: "core" });
+  const first = makeMember(t.project.id, "first"), second = makeMember(t.project.id, "second"), third = makeMember(other.id, "third");
+  t.orch.apiRecovery.networkFailure(first); t.orch.apiRecovery.networkFailure(second); t.orch.apiRecovery.networkFailure(third);
+  await t.orch.apiRecovery.tick(); now += 30_000; await t.orch.apiRecovery.tick();
+  const firstMessages = t.store.listMessages(t.project.id).filter(m => m.body.includes("인터넷 연결"));
+  const secondMessages = t.store.listMessages(other.id).filter(m => m.body.includes("인터넷 연결"));
+  expect(firstMessages).toHaveLength(2); expect(secondMessages).toHaveLength(2);
+  expect(firstMessages.find(m => m.body.includes("돌아와"))!.body).toContain("직원 2명");
+  expect(secondMessages.find(m => m.body.includes("돌아와"))!.body).toContain("직원 1명");
+  expect(alerts).toHaveLength(2);
+  expect(alerts.filter(body => body.includes("불안정"))).toHaveLength(1);
+  expect(alerts.filter(body => body.includes("돌아와"))).toHaveLength(1);
+});
 
 test("사용 한도 답은 기존 HTTP 답 경로에서 200이며 카드가 닫혀도 같은 계정 재발 시 다시 열린다", async () => {
   const t = scripted({}, "core", undefined, true);

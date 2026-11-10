@@ -17,7 +17,7 @@ import { openDb } from "../server/db.ts";
 import { Bus } from "../server/bus.ts";
 import { Store } from "../server/store.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
-import { usageLimitMenu } from "../server/api-outage.ts";
+import { USAGE_RESUME_TEXT, usageLimitMenu } from "../server/api-outage.ts";
 import { claudeFolderTrust, codexFolderTrust } from "../server/runner/core-approval.ts";
 import { wrappedTrustScreens } from "./fixtures/folder-trust-160.ts";
 
@@ -302,26 +302,46 @@ describe("delivery safety and OSC7501 turns", () => {
     f.setHook(null); const terminal = f.terminals.get(start.paneId)!; terminal.status = { state: "working" }; await until(() => events.some((event) => event.type === "status" && event.status === "working")); expect(f.calls.filter((request) => request.method === "terminal.run")).toHaveLength(1);
   });
   test("a held slow employee does not block healthy polls; only that employee backs off and recovers", async () => {
-    const f = await fixture(); const runner = f.runner(20, { rpcTimeoutMs: 500, pollConcurrency: 2 });
+    // Measure scheduling time independently of host load, while keeping real
+    // sockets, the held reply, RPC deadlines and concurrent polling intact.
+    let now = -1;
+    const f = await fixture(); const runner = f.runner(20, { rpcTimeoutMs: 500, pollConcurrency: 2, pollNow: () => now });
     const slow = await runner.start(member({ id: "slow" }), f.opts);
     const fast = await runner.start(member({ id: "fast" }), f.opts);
     const gets: { terminal: string; at: number }[] = [];
     let held: { request: Request; socket: Socket } | null = null;
     f.setHook((request, socket) => {
       if (request.method !== "terminal.get") return false;
-      gets.push({ terminal: request.params.terminal, at: Date.now() });
+      gets.push({ terminal: request.params.terminal, at: now });
       if (request.params.terminal !== slow.paneId || held) return false;
       held = { request, socket }; return true;
     });
-    await until(() => gets.filter(r => r.terminal === fast.paneId).length >= 4);
+    const polling = runner as unknown as { poll(): void; polling: Set<unknown>; tracks: Map<string, { refresh: Promise<unknown> | null }> };
+    let released = false;
+    async function pollAt(at: number) {
+      now = at;
+      polling.poll();
+      await until(() => [...polling.tracks].every(([id, track]) =>
+        (id === "slow" && !released) || (!track.refresh && !polling.polling.has(track))));
+    }
+    for (const at of [0, 20, 40, 60]) await pollAt(at);
+    expect(gets.filter(r => r.terminal === fast.paneId).map(r => r.at)).toEqual([0, 20, 40, 60]);
     expect(gets.filter(r => r.terminal === slow.paneId)).toHaveLength(1);
-    const resolvedAt = Date.now();
+    expect(polling.polling.size).toBe(1);
+    const resolvedAt = now;
     const reply = held as unknown as { request: Request; socket: Socket };
+    released = true;
     reply.socket.write(JSON.stringify({ jsonrpc: "2.0", id: reply.request.id, result: f.terminals.get(slow.paneId) }) + "\n");
-    await until(() => gets.filter(r => r.terminal === slow.paneId).length >= 3);
+    await until(() => polling.polling.size === 0 && [...polling.tracks.values()].every(track => !track.refresh));
+    await pollAt(99); expect(gets.filter(r => r.terminal === slow.paneId)).toHaveLength(1);
+    await pollAt(100);
+    await pollAt(119); expect(gets.filter(r => r.terminal === slow.paneId)).toHaveLength(2);
+    await pollAt(120);
     const slowGets = gets.filter(r => r.terminal === slow.paneId);
+    expect(slowGets.map(r => r.at)).toEqual([0, 100, 120]);
     expect(slowGets[1].at - resolvedAt).toBeGreaterThanOrEqual(35);
     expect(slowGets[2].at - slowGets[1].at).toBeLessThan(75);
+    expect(runner.observationState("slow")?.failures).toBe(0);
     expect(f.calls.some(r => ["terminal.send", "terminal.keys", "terminal.kill"].includes(r.method))).toBe(false);
   });
   test("poll concurrency is bounded, each employee has one in-flight read and waiting employees get the next slot", async () => {
@@ -1330,6 +1350,33 @@ What do you want to do?
 3. Add funds to continue with usage credits
 Enter to confirm · Esc to cancel`;
 describe("API 오류 후 Core 입력과 사용 한도 키 안전", () => {
+  test("상태줄이 매번 바뀌는 Add funds 기본 선택 한도도 재검증 뒤 Esc 1회만 보낸다", async () => {
+    const f = await fixture(), runner = f.runner(10000), m = member();
+    const started = await runner.start(m, f.opts), terminal = f.terminals.get(started.paneId)!;
+    const menu = "You've hit your 5-hour limit · resets Nov 13 at 10am (Asia/Seoul)\nWhat do you want to do?\n❯ 1. Add funds to continue with usage credits\n2. Stop\n3. Switch to usage credits\nEnter to confirm · Esc to cancel";
+    const screen = (tick: number) => `${menu}\n◆ Opus │ ███░ │ ${70 + tick}% │ $${716.43 + tick} │ 7일: 11% (${412 + tick}s)\n⏵⏵ bypass permissions on`;
+    terminal.status = { state: "blocked" }; f.setScreen(screen(0));
+    const snapshot = await runner.usageLimitSnapshot(m);
+    expect(snapshot.menu?.fingerprint).toBe(usageLimitMenu(screen(1))!.fingerprint);
+    let reads = 1, dismissed = false;
+    f.setHook(r => {
+      if (r.method === "terminal.read" && !dismissed) f.setScreen(screen(reads++));
+      if (r.method === "terminal.keys") { dismissed = true; terminal.status = { state: "error" }; f.setScreen(composer()); }
+      return false;
+    });
+    expect(await runner.dismissUsageLimit(m, snapshot.menu!.fingerprint)).toEqual({ ok: true });
+    expect(reads).toBeGreaterThan(2);
+    expect(f.calls.filter(r => r.method === "terminal.keys").map(r => r.params.keys)).toEqual([["esc"]]);
+    expect(f.calls.some(r => r.method === "terminal.send" || r.method === "terminal.interrupt")).toBe(false);
+  });
+  test("대화 기록에 인용된 한도와 살아 있는 입력칸에는 Esc를 보내지 않는다", async () => {
+    const f = await fixture(), runner = f.runner(10000), m = member();
+    const started = await runner.start(m, f.opts), terminal = f.terminals.get(started.paneId)!;
+    terminal.status = { state: "idle" }; f.setScreen(usageScreen + "\n" + composer("live draft"));
+    expect((await runner.usageLimitSnapshot(m)).menu).toBeNull();
+    expect(await runner.dismissUsageLimit(m, usageLimitMenu(usageScreen)!.fingerprint)).toMatchObject({ ok: false });
+    expect(f.calls.some(r => r.method === "terminal.keys" || r.method === "terminal.send")).toBe(false);
+  });
   test("error 뒤 다음 전달은 terminal.send에 도달하며 force:false와 초안 보호를 유지한다", async () => {
     const f = await fixture(), runner = f.runner(10000); const m = member();
     const started = await runner.start(m, f.opts), terminal = f.terminals.get(started.paneId)!;
@@ -1375,7 +1422,7 @@ describe("API 오류 후 Core 입력과 사용 한도 키 안전", () => {
     terminal.status = { state: "blocked" }; f.setScreen(usageScreen);
     const fingerprint = usageLimitMenu(usageScreen)!.fingerprint;
     let reads = 0;
-    f.setHook(r => { if (r.method === "terminal.read" && ++reads === 4) f.setScreen(usageScreen + "\nchanged"); return false; });
+    f.setHook(r => { if (r.method === "terminal.read" && ++reads === 4) f.setScreen(usageScreen.replace("Nov 13", "Nov 14")); return false; });
     expect(await runner.dismissUsageLimit(m, fingerprint)).toMatchObject({ ok: false });
     expect(f.calls.some(r => r.method === "terminal.keys")).toBe(false);
     f.setHook(null); f.setScreen(usageScreen);
@@ -1419,7 +1466,7 @@ test("관리 턴 도중 OSC blocked 한도 메뉴는 실행 자리를 풀고 Esc
     await until(() => f.calls.filter(r => r.method === "terminal.send").length === 2);
     await until(() => store.requireDecision(card.id).status === "closed");
     expect(f.calls.filter(r => r.method === "terminal.keys").map(r => r.params.keys)).toEqual([["esc"]]);
-    expect(f.calls.filter(r => r.method === "terminal.send")[1]?.params.text).toContain("연결이 돌아왔습니다");
+    expect(f.calls.filter(r => r.method === "terminal.send")[1]?.params.text).toContain(USAGE_RESUME_TEXT);
   } finally { await orch.shutdown(); db.close(); }
 });
 

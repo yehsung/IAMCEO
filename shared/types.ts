@@ -339,7 +339,7 @@ export interface FileDoc {
 }
 
 /** 대기 중인 동안의 연속 대기 시작 시각. runLimit은 run_limit일 때만 있다. */
-export type DeliveryWaitReason = "next_turn" | "run_limit" | "member_busy" | "waking" | "receipt_check" | "approval" | "manual_control" | "runner_off" | "archived" | "unknown";
+export type DeliveryWaitReason = "next_turn" | "run_limit" | "member_busy" | "waking" | "receipt_check" | "approval" | "manual_control" | "runner_off" | "archived" | "api_outage" | "usage_limit" | "unknown";
 export interface DeliveryWaitInfo {
   waitReason: DeliveryWaitReason;
   waitingSince: string;

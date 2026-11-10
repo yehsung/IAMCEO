@@ -662,7 +662,7 @@ export class Orchestrator implements OrchestratorApi {
     this.notifier = deps.notifier ?? null;
     this.store.repairRejectedLimit();
     this.apiRecovery = new ApiRecovery({ ...deps.apiRecovery, store: this.store,
-      notify: (projectId, text) => { this.systemMessage(projectId, text); this.notifyInbox("API 연결·사용 한도", text); },
+      notify: (projectId, text, alertOwner = true) => { this.systemMessage(projectId, text); if (alertOwner) this.store.afterCommit(() => this.notifyInbox("API 연결·사용 한도", text)); },
       pump: id => this.recheckMemberDelivery(id),
       inspect: async member => {
         const runner = this.runners.get(this.backendOf(member));
@@ -3575,7 +3575,7 @@ export class Orchestrator implements OrchestratorApi {
     this.store.transaction(() => {
       for (const d of this.store.claimDelayedDeliveries(now)) {
         const member = this.store.requireMember(d.memberId);
-        const text = `${member.name}에게 보낸 대표 ${d.kind === "answer" ? "결재 답" : "메시지"}가 30분 넘게 전달되지 않았습니다. 전달 #${d.id}를 확인해 주세요.`;
+        const text = `${member.name}에게 보낸 대표 ${josa(d.kind === "answer" ? "결재 답" : "메시지", "이")} 30분 넘게 전달되지 않았습니다. 전달 #${d.id}를 확인해 주세요.`;
         // Existing report_blocked path persists one APNs event with the domain message.
         this.store.createMessage({ projectId: d.projectId, memberId: member.id, who: "시스템", kind: "막힘", title: "대표 전달 지연", body: text });
         const conductor = this.store.getConductor(d.projectId);

@@ -78,6 +78,15 @@ async function errorStatus(work: Promise<unknown>, status: number) {
 }
 
 describe("영속 확인과 안전 fence", () => {
+  test.each([["api_outage", "인터넷 연결이 돌아오면 보냅니다"], ["usage_limit", "사용 한도가 풀리면 보냅니다"]] as const)("사고 보류 %s는 대기 이유와 설명을 유지한다", (reason, note) => {
+    const f = setup(), d = f.enqueue();
+    f.store.patchMember(f.member.id, { status: "blocked", blockedReason: "usage_limit" });
+    f.store.markHeld(d.id, reason);
+    expect(f.store.deliveryWait(f.store.requireDelivery(d.id))).toMatchObject({ waitReason: reason, waitingSince: d.createdAt });
+    const page = f.service.memberNotices(f.member.id);
+    expect(page.items.find(item => item.id === d.id)).toMatchObject({ holdReason: reason, waitReason: reason, note });
+    expect(f.service.notices(f.project.id).members.find(member => member.memberId === f.member.id)).toMatchObject({ waitReason: reason });
+  });
   test("주 세션 수신은 실패 표시와 메시지만 원자 정정하고 활동은 한 번이다", async () => {
     const f = setup();
     const message = f.store.createMessage({ projectId: f.project.id, mine: true, kind: "나", body: "대표 지시", targetMemberId: f.member.id, delivery: "failed" });

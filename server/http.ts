@@ -697,8 +697,9 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
         const rankOverrides = { manager: 0, lead: 0 };
         for (const m of store.listAllMembers()) if (m.origin !== "manual" && (m.modelOverride || m.effortOverride)) rankOverrides[memberRank(m.kind)]++;
         const body: SyncSnapshot = {
+          apiOutage: store.apiOutage(),
           protocol: 2, requestedProjectId, projectStatus,
-          bootstrap: { version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr,
+          bootstrap: { apiOutage: store.apiOutage(), version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr,
             home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides },
           state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!), ...(ctx.delivery ? { deliveryNotices: notices(requestedProjectId!) } : {}) } : null,
           revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },
@@ -716,6 +717,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       const rankOverrides = { manager: 0, lead: 0 };
       for (const m of store.listAllMembers()) if (m.origin !== "manual" && (m.modelOverride || m.effortOverride)) rankOverrides[memberRank(m.kind)]++;
       const body: Bootstrap = {
+        apiOutage: store.apiOutage(),
         version: VERSION,
         runtime: await orch.runtimeInfo?.(),
         settings: store.getSettings(),
@@ -873,6 +875,9 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     route("POST", "/api/decisions/:id/answer", async (req, _url, [id]) => {
       store.requireDecision(id!);
       const body = await parseBody(req, contractV2(req) ? AnswerV2Schema : AnswerSchema);
+      if (store.requireDecision(id!).kind === "usage_limit") {
+        return Response.json(await once(`decision:${id}`, () => orch.answerDecision(id!, body)));
+      }
       const duplicate = store.checkAnswer(id!, body);
       if (duplicate) return Response.json(duplicate);
       const decision = store.requireDecision(id!);
@@ -881,6 +886,11 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       // 동시에 온 다른 답이 앞 요청의 결과를 받아 가면 안 된다.
       store.checkAnswer(id!, body);
       return Response.json(answered);
+    }),
+    route("POST", "/api/decisions/:id/close", (_req, _url, [id]) => {
+      const decision = store.requireDecision(id!);
+      if (decision.kind !== "usage_limit") throw new ApiError(400, "사용 한도 알림만 닫을 수 있습니다");
+      return Response.json(decision.status === "closed" ? decision : store.setDecisionStatus(decision.id, "closed"));
     }),
     route("POST", "/api/decisions/:id/reopen", async (_req, _url, [id]) => {
       store.requireDecision(id!);

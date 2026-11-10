@@ -685,6 +685,11 @@ export const MIGRATIONS: string[] = [
    CREATE INDEX unassigned_recoveries_message ON unassigned_message_recoveries(message_id);`,
   // File search schema and durable invalidations only; body backfill yields after startup.
   fileSearchMigration(),
+  // v33: durable API recovery, usage notifications and delivery ownership/alerts.
+  `CREATE TABLE api_recovery_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+   ALTER TABLE decisions ADD COLUMN usage_limit_json TEXT;
+   ALTER TABLE deliveries ADD COLUMN assigned_by TEXT;
+   ALTER TABLE deliveries ADD COLUMN delay_notified_at TEXT;`,
 ];
 
 export function openDb(path: string): Database {

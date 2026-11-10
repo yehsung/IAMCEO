@@ -901,3 +901,17 @@ describe("/agent", () => {
     expect(byCwd.member.handle).toMatch(/^[a-z]/);
   });
 });
+
+
+test("API outage is additive on bootstrap and both sync levels and invalidates cached snapshots", async () => {
+  const outage = { since: "2026-11-10T00:00:00.000Z", affectedMemberIds: ["network-worker"], lastProbeAt: null };
+  store.saveApiRecovery("outage_public", outage);
+  try {
+    const bootstrap = await (await api("/api/bootstrap")).json();
+    const sync = await (await api("/api/sync")).json();
+    expect(bootstrap.apiOutage).toEqual(outage);
+    expect(sync.apiOutage).toEqual(outage); expect(sync.bootstrap.apiOutage).toEqual(outage);
+    store.saveApiRecovery("outage_public", null);
+    expect((await (await api("/api/sync")).json()).bootstrap.apiOutage).toBeNull();
+  } finally { store.saveApiRecovery("outage_public", null); }
+});

@@ -435,7 +435,7 @@ describe("턴 정리", () => {
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
     const d = t.store.createDecision({ projectId: t.project.id, memberId: w.id, who: "철수", title: "배포?", options: [{ k: "a", label: "예" }] });
     await t.orch.answerDecision(d.id, { choice: "a", note: "검토한 답" });
-    t.runner.end(w.id, { isError: true, errorText: "사용량 한도", noOutput: true });
+    t.runner.end(w.id, { isError: true, errorText: "도구 실행 오류", noOutput: true });
     await until(() => t.store.requireMember(w.id).status === "error");
     await t.orch.pump(w.id);
     expect(t.runner.sent.filter(s => s.memberId === w.id)).toHaveLength(1);
@@ -1017,7 +1017,7 @@ describe("2차 검수 회귀: 전달", () => {
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
     await t.orch.recordPost(w, { kind: "완료", title: "로그인 고침" });
     await t.orch.recordPost(w, { kind: "완료", title: "나중 보고" });
-    t.runner.end(lead.id, { isError: true, noOutput: true, errorText: "사용량 한도" });
+    t.runner.end(lead.id, { isError: true, noOutput: true, errorText: "도구 실행 오류" });
     await until(() => t.runner.sent.filter(s => s.memberId === lead.id).length === 2);
     const sent = t.runner.sent.filter(s => s.memberId === lead.id);
     expect(sent[1]!.text).toContain("나중 보고");
@@ -1030,7 +1030,7 @@ describe("2차 검수 회귀: 전달", () => {
     const lead = await t.orch.ensureConductor(t.project.id);
     const first = await t.orch.sendUserMessage(t.project.id, { text: "첫째" });
     const second = await t.orch.sendUserMessage(t.project.id, { text: "둘째" });
-    t.runner.end(lead.id, { isError: true, noOutput: true, errorText: "한도" });
+    t.runner.end(lead.id, { isError: true, noOutput: true, errorText: "도구 실행 오류" });
     await until(() => t.store.requireMessage(second.id).delivery === "delivered");
     expect(t.store.requireMessage(first.id).delivery).toBe("delivered");
     expect(t.runner.sent.filter(s => s.text.includes("첫째"))).toHaveLength(1);

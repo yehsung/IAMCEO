@@ -517,6 +517,7 @@ function toMember(r: Row): Member {
 
 function toDecision(r: Row): Decision {
   return {
+    ...(r.usage_limit_json ? { kind: "usage_limit" as const, usageLimit: json<NonNullable<Decision["usageLimit"]>>(r.usage_limit_json) } : {}),
     id: r.id,
     projectId: r.project_id,
     memberId: r.member_id,
@@ -1001,6 +1002,70 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     this.ensureHq();
   }
 
+  loadApiRecovery<T>(key: string): T | null {
+    const row = this.row("SELECT value FROM api_recovery_state WHERE key = ?", key);
+    return row ? json<T>(row.value) : null;
+  }
+  saveApiRecovery(key: string, value: unknown): void {
+    const encoded = JSON.stringify(value);
+    if (this.row("SELECT value FROM api_recovery_state WHERE key = ?", key)?.value === encoded) return;
+    this.run("INSERT INTO api_recovery_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key, encoded);
+    // Invalidate /sync's generation without introducing a new WS event for old apps.
+    this.emitProjects();
+  }
+  apiOutage(): import("../shared/types.ts").ApiOutageState | null {
+    return this.loadApiRecovery("outage_public");
+  }
+  updateUsageDecision(id: string, usage: NonNullable<Decision["usageLimit"]>, title: string, detail: string, open: boolean): Decision {
+    return this.transaction(() => {
+      const before = this.requireDecision(id);
+      const status = open ? "open" : "closed";
+      if (JSON.stringify(before.usageLimit) === JSON.stringify(usage) && before.title === title && before.detail === detail && before.status === status) return before;
+      this.run("UPDATE decisions SET usage_limit_json = ?, title = ?, detail = ?, status = ?, updated_at = ? WHERE id = ?",
+        JSON.stringify(usage), title, detail, status, status === before.status ? before.updatedAt : this.nextDecisionStamp(id), id);
+      const decision = this.requireDecision(id);
+      this.recorder?.decision(before, decision);
+      this.bumpBoard(decision.projectId);
+      this.emit({ type: "decision", decision });
+      this.emitProjects();
+      return decision;
+    });
+  }
+  clearUsageRetry(memberId: string): void {
+    this.run("UPDATE deliveries SET next_attempt_at = NULL, retry_scope = NULL, retry_reason = NULL WHERE member_id = ? AND retry_reason = 'processing_quota'", memberId);
+  }
+  setDeliveryAuthor(id: string, memberId: string): void { this.run("UPDATE deliveries SET assigned_by = ? WHERE id = ?", memberId, id); }
+  withdrawInstruction(id: string, actor: Member): void {
+    this.transaction(() => {
+      const d = this.requireDelivery(id);
+      if (actor.kind !== "conductor" || actor.projectId !== d.projectId || d.kind !== "instruction" || this.row("SELECT assigned_by FROM deliveries WHERE id = ?", id)?.assigned_by !== actor.id) throw new ApiError(403, "자신이 보낸 지시만 거둘 수 있습니다");
+      if (!["queued", "held"].includes(d.status) || this.listDispatches(d.memberId).some(x => x.items.some(i => i.deliveryId === id) && ["write_started", "unknown", "accepted"].includes(x.transportState))) throw new ApiError(409, "이미 쓰기 시작한 지시는 거둘 수 없습니다");
+      for (const dispatch of this.listDispatches(d.memberId)) if (dispatch.transportState === "prepared" && dispatch.items.some(i => i.deliveryId === id)) this.updateDispatch(dispatch.dispatchId, "prepared", "rejected");
+      const r = this.getDeliveryRecovery(id)!;
+      this.updateDeliveryRecovery(id, r.version, { phase: "stopped", reason: "withdrawn", nextCheckAt: null });
+      this.markFailed(id, "총괄이 미전달 지시를 거뒀습니다");
+    });
+  }
+  claimDelayedDeliveries(at: number): Delivery[] {
+    return this.transaction(() => {
+      const deliveries = this.rows("SELECT * FROM deliveries WHERE status IN ('queued','held') AND kind IN ('answer','user_message') AND delay_notified_at IS NULL AND created_at <= ?", new Date(at - 30 * 60_000).toISOString()).map(toDelivery);
+      for (const d of deliveries) this.run("UPDATE deliveries SET delay_notified_at = ? WHERE id = ?", new Date(at).toISOString(), d.id);
+      return deliveries;
+    });
+  }
+  repairRejectedLimit(at = Date.now()): void {
+    this.transaction(() => {
+      for (const row of this.rows("SELECT * FROM deliveries WHERE status = 'held' AND retry_reason = 'rejected_limit'")) {
+        const d = toDelivery(row), r = this.getDeliveryRecovery(d.id)!;
+        const stale = ["instruction", "system", "report"].includes(d.kind) && at - Date.parse(d.createdAt) > 3_600_000;
+        this.patchDeliveryRetry(d.id, { retryReason: null, nextAttemptAt: null });
+        if (!this.listDispatches(d.memberId).some(x => x.items.some(i => i.deliveryId === d.id))) this.run("UPDATE deliveries SET attempts = 0 WHERE id = ?", d.id);
+        this.updateDeliveryRecovery(d.id, r.version, { phase: stale ? "needs_owner" : "resolved", reason: stale ? "stale_instruction" : "not_received", nextCheckAt: null });
+        this.setDeliveryStatus(d.id, stale ? "held" : "queued", { holdReason: stale ? "stale_instruction" : null });
+      }
+    });
+  }
+
   /** 동기 SQL 전용. await/외부 I/O는 이 경계 밖에서 한다. 중첩 실패는 해당 savepoint의 알림도 버린다. */
   transaction<T>(write: () => T, mode: "deferred" | "immediate" | "exclusive" = "deferred"): T {
     if (this.db.inTransaction && this.commitFrames.length === 0) {
@@ -1331,6 +1396,14 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   private needsOwnerCounter: ((projectId: string) => number) | null = null;
   setNeedsOwnerCounter(counter: (projectId: string) => number): void { this.needsOwnerCounter = counter; }
 
+  /** A negative result avoids hydrating ordinary queued deliveries for a summary count.
+   * Positive candidates still use the full notice rules (including superseded sources). */
+  hasDeliveryAttention(projectId: string): boolean {
+    return !!this.row(`SELECT 1 FROM delivery_recovery r JOIN deliveries d ON d.id = r.delivery_id
+      WHERE d.project_id = ? AND (r.phase = 'needs_owner' OR (r.phase IN ('none','resolved')
+        AND EXISTS (SELECT 1 FROM delivery_stalls s WHERE s.delivery_id = d.id AND s.resolved_at IS NULL))) LIMIT 1`, projectId);
+  }
+
   projectSummaries(): ProjectSummary[] {
     return this.rows(
       `SELECT p.id, p.name, p.is_hq, p.cwd, p.now, p.runner_enabled, p.archived,
@@ -1521,7 +1594,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       }
       const member = this.requireMember(id);
       if (observationOnly) return member;
-      this.recorder?.member(before, member);
+      // API incidents and usage cards own their notifications; avoid one generic error push per employee.
+      if (!["network_outage", "network_retry", "usage_limit"].includes(member.statusObservation?.error?.code ?? "")) this.recorder?.member(before, member);
       this.emit({ type: "member", member });
       if (member.status !== before.status || member.blockedReason !== before.blockedReason) this.emitProjects();
       return member;
@@ -2337,7 +2411,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   listSendablePending(memberId: string): Delivery[] {
-    return this.rows("SELECT * FROM deliveries WHERE member_id = ? AND status IN ('queued','held') AND (retry_reason IS NULL OR retry_reason != 'rejected_limit') ORDER BY rowid", memberId).map(toDelivery);
+    return this.rows(`SELECT d.* FROM deliveries d WHERE d.member_id = ? AND d.status IN ('queued','held')
+      AND NOT EXISTS (SELECT 1 FROM delivery_recovery r WHERE r.delivery_id = d.id AND r.phase = 'needs_owner' AND r.reason = 'stale_instruction') ORDER BY d.rowid`, memberId).map(toDelivery);
   }
 
   /** 서버 재시작 복구용: 프로젝트 전체의 미전달 + 전달 중이던 것. */
@@ -2752,7 +2827,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   private readInputState(memberId: string): RunnerRecoveryState {
     const generation = this.memberRevisions(memberId).sessionGeneration;
     const r = this.row("SELECT * FROM terminal_leases WHERE member_id = ? AND generation = ? AND expires_at > ?", memberId, generation, Date.now());
-    return { lease: r ? { memberId, claimId: r.claim_id, leaseId: r.lease_id, identity: json(r.terminal_identity_json), expiresAt: r.expires_at, lastInputSequence: r.last_input_sequence } : null, unresolvedDispatches: this.listDispatches(memberId).filter((d) => ["prepared", "write_started", "unknown"].includes(d.transportState) || d.items.some((item) => { const phase = this.getDeliveryRecovery(item.deliveryId)?.phase; return phase !== undefined && !["none", "resolved", "stopped"].includes(phase); })) };
+    return { lease: r ? { memberId, claimId: r.claim_id, leaseId: r.lease_id, identity: json(r.terminal_identity_json), expiresAt: r.expires_at, lastInputSequence: r.last_input_sequence } : null, unresolvedDispatches: this.listDispatches(memberId).filter((d) => ["prepared", "write_started", "unknown"].includes(d.transportState) || d.items.some((item) => { const recovery = this.getDeliveryRecovery(item.deliveryId); return recovery !== null && !(recovery.phase === "waiting" && recovery.reason === "input_busy" || recovery.phase === "needs_owner" && recovery.reason === "stale_instruction") && !["none", "resolved", "stopped"].includes(recovery.phase); })) };
   }
 
   // ---- 전달 복구 CAS / 봉투 ----

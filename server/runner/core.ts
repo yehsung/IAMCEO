@@ -1,3 +1,4 @@
+import { usageLimitMenu, networkRetryScreen } from "../api-outage.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { capturedContext } from "./statusline.ts";
 import { readCodexContextFile } from "./codex-context.ts";
@@ -29,7 +30,9 @@ export interface CoreCompactState {
 }
 export interface CoreRunnerDeps {
   pollMs?: number; pollConcurrency?: number; rpcTimeoutMs?: number; sendTimeoutMs?: number; compactTimeoutMs?: number;
-  contextTimeoutMs?: number;
+  /** Poll scheduling clock; does not change persisted observation timestamps or RPC deadlines. */
+  pollNow?: () => number;
+  contextTimeoutMs?: number; usageLimitCloseTimeoutMs?: number;
   readContext?: typeof capturedContext;
   recoveryStore?: RunnerRecoveryStore;
   /** Synchronous transaction ports. A throw prevents external input. */
@@ -39,6 +42,7 @@ export interface CoreRunnerDeps {
   compactStore?: { load(memberId: string): CoreCompactState | null; save(memberId: string, state: CoreCompactState): void };
 }
 interface Track {
+  composerEmpty: boolean | null;
   statusPublishedAt: number;
   publishedStatus: string | null;
   pendingStatus: Extract<RunnerEvent, { type: "status" }> | null;
@@ -222,7 +226,7 @@ export class CoreRunner implements Runner {
     if (this.closed) throw new CoreError("closed", "CoreRunner shut down while starting; terminal remains owned by core");
     const launch = terminal.labels["iamceo.operation"] ? this.deps.recoveryStore?.getLifecycleJournal?.(terminal.labels["iamceo.operation"]) : null;
     const launchedAt = launch?.memberId === member.id && launch.intent === "start" ? launch.createdAt : null;
-    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, status: null, statusKey: null, statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
+    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, status: null, statusKey: null, composerEmpty: null, statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
       epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, bindingSince: terminal.labels["iamceo.startedAt"] || launchedAt || new Date().toISOString(), binding: null, compact: null,
       dispatches: [], evidence: new Map(), lastError: null, nextPollAt: 0, pollDelay: this.pollMs, observedAt: new Date().toISOString(), failures: 0, failure: null };
     this.restore(track);
@@ -323,11 +327,17 @@ export class CoreRunner implements Runner {
     track.terminal = terminal;
     track.observedAt = new Date().toISOString();
     const state = terminal.status?.state;
-    const status = terminal.state !== "live" ? "gone" : state === "working" ? "working" : ["idle", "done", "error"].includes(state || "") ? "idle" : "blocked";
+    let status: "working" | "idle" | "blocked" | "gone" = terminal.state !== "live" ? "gone" : state === "working" ? "working" : ["idle", "done", "error"].includes(state || "") ? "idle" : "blocked";
     if (!initial && (terminal.turn !== previous.turn || state !== previous.status?.state)) this.bump(track);
     if (status === "gone" && providerFor(track.member) === "codex" && !track.sessionId) this.lostCodex.set(track.member.id, track.member.sessionGeneration);
+    // Pump input has its own mandatory composer read. Diagnostic screen reads must
+    // not consume that attempt's deadline or hide its pre-write timeout boundary.
+    const screen = terminal.state === "live" && (!this.operation.getStore() || status === "blocked") ? await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 }).then(r => r.text, () => null) : null;
+    this.validateTrack(track);
+    const usage = screen !== null && state !== "working" ? usageLimitMenu(screen) : null;
+    const retry = state === "working" && (screen === null ? track.setupError?.code === "network_retry" : networkRetryScreen(screen));
     if (initial && state === "error" && !track.compact) {
-      track.lastError = terminal.status?.msg || "CLI reported an error";
+      track.lastError = usage?.raw ?? (terminal.status?.msg || "CLI reported an error");
       this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: true, errorText: track.lastError });
     }
     // A compact OSC turn belongs exclusively to its control operation.
@@ -339,23 +349,28 @@ export class CoreRunner implements Runner {
       track.endedTurn = terminal.turn ?? track.endedTurn;
       track.pending = false;
       // An idle report never clears an unresolved external write fence.
-      track.lastError = state === "error" ? terminal.status?.msg || "CLI reported an error" : null;
-      this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: state === "error", ...(state === "error" ? { errorText: track.lastError! } : {}) });
+      track.lastError = usage?.raw ?? (state === "error" ? terminal.status?.msg || "CLI reported an error" : null);
+      this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: state === "error" || !!usage, ...(state === "error" || usage ? { errorText: track.lastError! } : {}) });
     }
     if (status === "gone") track.pending = false;
-    const setup = status === "blocked" ? await this.readSetup(track) : null;
-    track.setupError = setup ? { code: "folder_trust", note: `폴더 신뢰 확인 창에서 멈췄습니다: ${track.member.cwd}` } : null;
-    const blockedReason = setup ? "setup" : state === "blocked" ? (["permission", "selection", "setup"].includes(terminal.status?.kind || "") ? terminal.status!.kind as "permission" | "selection" | "setup" : "status_unknown") : status === "blocked" ? "status_unknown" : null;
+    if (screen !== null && track.composerEmpty === false && ["idle", "done", "error"].includes(state ?? "") && !usage && (providerFor(track.member) === "claude" ? inputText(screen) : codexDraft(screen)) === "") {
+      track.composerEmpty = true;
+      this.event(track, { type: "input_ready", memberId: track.member.id });
+    }
+    const setup = screen !== null && !usage && status === "blocked" ? (providerFor(track.member) === "claude" ? claudeFolderTrust : codexFolderTrust)(screen, track.member.cwd) : null;
+    track.setupError = usage ? { code: "usage_limit", note: usage.raw } : retry ? { code: "network_retry", note: "API 연결 복구를 기다리며 CLI가 재시도하고 있습니다" } : setup ? { code: "folder_trust", note: `폴더 신뢰 확인 창에서 멈췄습니다: ${track.member.cwd}` } : null;
+    if (usage) { status = "blocked"; track.pending = false; }
+    const blockedReason = usage ? "usage_limit" : setup ? "setup" : state === "blocked" ? (["permission", "selection", "setup"].includes(terminal.status?.kind || "") ? terminal.status!.kind as "permission" | "selection" | "setup" : "status_unknown") : status === "blocked" ? "status_unknown" : null;
     if (state === "error") {
       if (track.statusTimer) clearTimeout(track.statusTimer);
       track.statusTimer = null; track.pendingStatus = null;
     }
-    const statusKey = JSON.stringify([status, blockedReason, setup?.prompt.fingerprint ?? null]);
+    const statusKey = JSON.stringify([status, blockedReason, setup?.prompt.fingerprint ?? null, usage?.fingerprint ?? null, retry]);
     if (statusKey !== track.statusKey || track.failure) {
       track.status = status;
       track.statusKey = statusKey;
-      if (state === "error") return; // Keep the error result from being overwritten by an earlier queued status.
-      this.publishStatus(track, { type: "status", memberId: track.member.id, status, blockedReason, observation: { source: "core", observedAt: track.observedAt, freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: track.setupError }, ...(status === "gone" ? { exit: { reason: terminal.reason ?? null, exitCode: terminal.exit_code ?? null } } : {}) });
+      if (state === "error" && !usage) return; // Keep the error result from being overwritten by an earlier queued status.
+      this.publishStatus(track, { type: "status", memberId: track.member.id, status, blockedReason, ...(usage ? { usageLimit: usage } : {}), observation: { source: "core", observedAt: track.observedAt, freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: track.setupError }, ...(status === "gone" ? { exit: { reason: terminal.reason ?? null, exitCode: terminal.exit_code ?? null } } : {}) });
     }
   }
   /** 턴 끝 실측 창·사용량. core 는 문맥 표시만 하고 자동 압축은 하지 않는다. */
@@ -393,7 +408,7 @@ export class CoreRunner implements Runner {
   }
   private refresh(track: Track): Promise<CoreTerminal> {
     if (track.refresh) return track.refresh;
-    const startedAt = Date.now();
+    const startedAt = this.pollNow();
     const pending = (async () => {
       try {
         const terminal = await this.call<CoreTerminal>("terminal.get", { terminal: track.terminal.address });
@@ -413,7 +428,7 @@ export class CoreRunner implements Runner {
     })().finally(() => {
       if (track.refresh === pending) track.refresh = null;
       // A slow read is local to this employee, even when it eventually succeeds.
-      const completedAt = Date.now();
+      const completedAt = this.pollNow();
       const delayed = track.failures > 0 || completedAt - startedAt >= this.pollMs;
       track.pollDelay = delayed
         ? Math.min(Math.max(this.pollMs, 30_000), track.pollDelay * 2) : this.pollMs;
@@ -428,11 +443,12 @@ export class CoreRunner implements Runner {
       turn: track.terminal.state === "live" ? track.terminal.turn ?? null : null, state: track.terminal.state === "live" ? track.terminal.status?.state ?? null : null } : null;
   }
   private get pollMs(): number { return Math.max(1, this.deps.pollMs ?? 1000); }
+  private pollNow(): number { return (this.deps.pollNow ?? Date.now)(); }
   private poll(): void {
     if (this.closed) return;
     const limit = Math.max(1, Math.floor(this.deps.pollConcurrency ?? 4));
     const active = new Set([...this.polling, ...[...this.tracks.values()].filter(track => track.refresh)]);
-    const now = Date.now();
+    const now = this.pollNow();
     const due = [...this.tracks.values()].filter(track => !track.refresh && !this.polling.has(track) && track.nextPollAt <= now)
       .sort((a, b) => a.nextPollAt - b.nextPollAt);
     for (const track of due) {
@@ -480,12 +496,22 @@ export class CoreRunner implements Runner {
       const state = terminal.status?.state;
       if (state === "working") return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
       if (state === "blocked") return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: `Complete the CLI dialog with iamceo attach ${member.id}` };
-      if (!["idle", "done"].includes(state || "")) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written", detail: `No trustworthy idle OSC 7501 status; inspect CLI setup with iamceo attach ${member.id}` };
+      if (!["idle", "done", "error"].includes(state || "")) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written", detail: `No trustworthy idle OSC 7501 status; inspect CLI setup with iamceo attach ${member.id}` };
       const inputEpoch = track.epoch;
       const screen = await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 });
+      const usage = usageLimitMenu(screen.text);
+      if (usage) {
+        track.status = "blocked";
+        track.statusKey = JSON.stringify(["blocked", "usage_limit", null, usage.fingerprint, false]);
+        track.setupError = { code: "usage_limit", note: usage.raw };
+        this.publishStatus(track, { type: "status", memberId: member.id, status: "blocked", blockedReason: "usage_limit", usageLimit: usage,
+          observation: { source: "core", observedAt: track.observedAt, freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: track.setupError } });
+        return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: "사용 한도 메뉴는 확인 후 Esc로만 닫을 수 있습니다" };
+      }
       // Never erase a person's draft or deliver through an unidentified dialog.
-      // Status is taken exclusively from OSC7501, never this screen guard.
+      // An empty composer never establishes readiness; only the OSC gate above can permit input.
       const draft = providerFor(member) === "claude" ? inputText(screen.text) : codexDraft(screen.text);
+      track.composerEmpty = draft === "";
       if (draft !== "") return { ok: false, reason: "input_busy", retryable: false, deliveryEffect: "not_written", detail: draft === null ? "Cannot identify an empty CLI composer" : "A user draft is present; IAMCEO leaves it untouched" };
       const preference = this.parallelPreferences.get(member.id) ?? member.parallel;
       const prefix = providerFor(member) === "codex" && preference !== undefined
@@ -493,7 +519,7 @@ export class CoreRunner implements Runner {
       const binding = providerFor(member) === "codex" && !track.sessionId && track.nonce ? codexBindingMarker(track.nonce) + "\n\n" : "";
       const cleaned = cleanText(binding + prefix + text);
       if (!cleaned.trim()) return unsupported("Message is empty");
-      // Core generation 1 only permits if:idle|working. A done report has
+      // Core generation 1 only permits if:idle|working. A done/error report has
       // no exact conditional; force:false still refuses any approval dialog.
       // IAMCEO manual controls use a lease; direct external attach cannot be
       // made atomic with this guard by the current core API.
@@ -893,6 +919,45 @@ export class CoreRunner implements Runner {
     const screen = await this.call<{ text: string }>("terminal.read", { terminal: track.terminal.address, lines: 0 });
     this.validateTrack(track);
     return epoch === track.epoch ? (providerFor(track.member) === "claude" ? claudeFolderTrust : codexFolderTrust)(screen.text, track.member.cwd) : null;
+  }
+  async usageLimitSnapshot(member: RunnerMember): Promise<{ menu: ReturnType<typeof usageLimitMenu>; state: string | null }> {
+    const track = this.tracks.get(member.id);
+    if (!track) throw new CoreError("not_found", "No owned terminal");
+    this.assertMember(track, member);
+    await this.refresh(track);
+    const identity = this.identity(track), epoch = track.epoch;
+    const screen = await this.call<{ text: string }>("terminal.read", { terminal: track.terminal.address, lines: 0 });
+    this.validateTrack(track);
+    if (track.terminal.state !== "live" || epoch !== track.epoch || !this.sameIdentity(identity, this.identity(track))) throw new CoreError("conflict", "Terminal changed while reading usage menu");
+    const state = track.terminal.status?.state ?? null;
+    return { menu: state === "working" ? null : usageLimitMenu(screen.text), state };
+  }
+  async dismissUsageLimit(member: RunnerMember, fingerprint: string): Promise<{ ok: boolean; note?: string }> {
+    let release: () => void;
+    try { release = this.reserve(member.id); } catch { return { ok: false, note: "입력 처리 중입니다" }; }
+    try {
+      const track = this.tracks.get(member.id);
+      if (!track || this.manualLease(member.id) || track.pending || track.uncertain || track.compact && !["failed", "succeeded"].includes(track.compact.phase) || !this.methods.has("terminal.keys")) return { ok: false, note: "창을 닫지 못했습니다" };
+      this.assertMember(track, member);
+      const snapshot = await this.usageLimitSnapshot(member);
+      if (!snapshot.menu || snapshot.menu.fingerprint !== fingerprint) return { ok: false, note: "화면이 바뀌었습니다. 다시 눌러 주세요" };
+      const identity = this.identity(track), epoch = track.epoch;
+      await this.refresh(track);
+      const final = await this.usageLimitSnapshot(member);
+      if (!final.menu || final.menu.fingerprint !== fingerprint || track.epoch !== epoch || !this.sameIdentity(identity, this.identity(track)) || this.manualLease(member.id)) return { ok: false, note: "화면이 바뀌었습니다. 다시 눌러 주세요" };
+      this.bump(track);
+      // This path must never select a paid option, submit, or move the selection.
+      await this.call("terminal.keys", { terminal: track.terminal.address, keys: ["esc"] }, this.sendTimeoutMs);
+      const deadline = Date.now() + Math.min(Math.max(this.deps.usageLimitCloseTimeoutMs ?? 10_000, 1), 10_000);
+      do {
+        const after = await this.waitFor("usage_limit_close", () => this.usageLimitSnapshot(member), Math.max(deadline - Date.now(), 1));
+        if (after.menu) return { ok: false, note: "창을 닫지 못했습니다" };
+        if (after.state !== "blocked") return { ok: true };
+        await Bun.sleep(Math.min(100, Math.max(deadline - Date.now(), 0)));
+      } while (Date.now() < deadline);
+      return { ok: false, note: "창을 닫지 못했습니다" };
+    } catch { return { ok: false, note: "창을 닫지 못했습니다" }; }
+    finally { release(); }
   }
   async approval(member: RunnerMember): Promise<ApprovalPrompt | null> {
     const track = this.tracks.get(member.id);

@@ -152,8 +152,9 @@ export type SendResult =
   | { ok: false; reason: "busy" | "blocked" | "input_busy" | "down" | "gone" | "error"; detail?: string; retryable: boolean; /** 누락/모르는 오류는 unknown으로 다룬다. */ deliveryEffect?: DeliveryEffect };
 
 export type RunnerEvent = RunnerObservation & (
-  | { type: "status"; memberId: string; status: "working" | "idle" | "blocked" | "gone"; blockedReason?: BlockedReason | null; observation?: StatusObservation; exit?: { reason: string | null; exitCode: number | null } }
+  | { type: "status"; memberId: string; status: "working" | "idle" | "blocked" | "gone"; blockedReason?: BlockedReason | null; usageLimit?: import("../api-outage.ts").UsageMenu; observation?: StatusObservation; exit?: { reason: string | null; exitCode: number | null } }
   /** noOutput는 처리 진단이며 미수신 증거가 아니다. 원문 재전송 판정은 전달 복구가 맡는다. */
+  | { type: "input_ready"; memberId: string }
   | { type: "turn_end"; memberId: string; finalText: string; isError: boolean; errorText?: string; noOutput?: boolean; exitCode?: number | null; reason?: string | null }
   | { type: "activity"; memberId: string; kind: ActivityKind; text: string }
   /** 실제 창 크기로 잰 문맥 %(headless 의 modelUsage, 압축 직후 0). */
@@ -215,6 +216,8 @@ export interface Runner {
   checkStop?(m: RunnerMember, opts?: RunnerStopOptions): Promise<void>;
   screen(m: RunnerMember): Promise<string>;
   /** 실행기가 확인할 수 있는 승인·설정 창을 읽는다. 아니거나 알아볼 수 없는 창이면 null. */
+  usageLimitSnapshot?(m: RunnerMember): Promise<{ menu: import("../api-outage.ts").UsageMenu | null; state: string | null }>;
+  dismissUsageLimit?(m: RunnerMember, fingerprint: string): Promise<{ ok: boolean; note?: string }>;
   approval?(m: RunnerMember): Promise<ApprovalPrompt | null>;
   /** 화면을 다시 읽어 fingerprint 가 같을 때만 고른 선택지에 맞는 키를 한 번 보내고 상태를 다시 관측한다. */
   answerApproval?(m: RunnerMember, fingerprint: string, option: number): Promise<ApprovalAnswer>;

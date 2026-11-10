@@ -9,7 +9,7 @@ import type { DeliveryBaseline, DeliveryInspection, DeliveryRepair, Runner, Runn
 export type DeliveryRecoveryStore = Pick<Store,
   "legacyAssignedMember" | "getConductor" | "unassignedMessageOperation" | "setNeedsOwnerCounter" | "transaction" | "afterCommit" | "requireProject" | "listProjects" | "requireMember" | "getMember" | "listMembers" | "memberRevisions" | "getSettings" |
   "listDeliveries" | "requireDelivery" | "getDelivery" | "enqueue" | "getDeliveryRecovery" | "updateDeliveryRecovery" | "listDeliveryRecoveries" |
-  "withDeliveryRead" | "deliveryNoticePreviews" | "listUnlinkedFailedMessages" | "listDeliveryRecoveryCandidates" |
+  "withDeliveryRead" | "deliveryNoticePreviews" | "listUnlinkedFailedMessages" | "listDeliveryRecoveryCandidates" | "hasDeliveryAttention" |
   "getDeliveryRetry" | "patchDeliveryRetry" | "saveDispatch" | "getDispatch" | "listDispatches" | "updateDispatch" | "inputState" |
   "deliveryRecoveryOperation" | "markDelivered" | "markHeld" | "markFailed" | "setDeliveryStatus" | "setMessageDelivery" |
   "listMissingReportNotices" | "deliveryWait" | "detectDeliveryStalls" | "deliveryStalled" | "recheckPendingDelivery" | "getMessage" | "requireMessage" | "listMessagePage" | "getDecision" | "setDecisionStatus" | "getTodo" | "todoRevision" | "appendActivity">;
@@ -38,6 +38,8 @@ function compare(a: string, b: string): number { return Buffer.compare(Buffer.fr
 function note(reason: string | null, evidence: DeliveryEvidence[] = []): string {
   switch (reason) {
     case "manual_control": return "직접 조작이 끝나면 다시 확인합니다";
+    case "stale_instruction": return "오래된 미전달 지시입니다. 지금 다시 시도하거나 그만 보내세요";
+    case "input_busy": return "직원의 입력칸이 비기를 기다리는 중입니다";
     case "busy": return "받을 수 있을 때 다시 확인합니다";
     case "blocked": return "승인 창이 닫히면 다시 확인합니다";
     case "duplicate_draft": return "이미 받은 지시가 입력칸에도 남아 있습니다. 초안을 확인해 주세요";
@@ -71,7 +73,9 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
 
   constructor(private readonly options: DeliveryRecoveryOptions) {
     this.store = options.store;
-    this.store.setNeedsOwnerCounter(projectId => this.items(projectId).filter(item => item.phase === "needs_owner").length);
+    this.store.setNeedsOwnerCounter(projectId => this.store.hasDeliveryAttention(projectId)
+      ? this.items(projectId, false).filter(item => item.phase === "needs_owner").length
+      : this.store.listUnlinkedFailedMessages(projectId).length);
     this.now = options.now ?? Date.now;
     this.random = options.random ?? Math.random;
   }
@@ -138,7 +142,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   }
   private logicalFence(d: Delivery): boolean {
     const r = this.record(d.id);
-    return !["none", "resolved", "stopped"].includes(r.phase) || (r.phase === "none" && (d.status === "delivering" || d.status === "held" && d.holdReason === "delivery_unknown"));
+    return !(r.phase === "waiting" && r.reason === "input_busy" || r.phase === "needs_owner" && r.reason === "stale_instruction") && !["none", "resolved", "stopped"].includes(r.phase) || (r.phase === "none" && (d.status === "delivering" || d.status === "held" && d.holdReason === "delivery_unknown"));
   }
 
   prepareDispatch(deliveryIds: string[], identity: RunnerTerminalIdentity, baseline: DeliveryBaseline): DeliveryDispatch {
@@ -152,7 +156,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       for (const d of deliveries) {
         const previous = this.latest(d), phase = this.record(d.id).phase;
         const admissible = previous
-          ? previous.transportState === "rejected" && this.rejectedCount(d) < MAX_REJECTED && ["none", "resolved"].includes(phase)
+          ? previous.transportState === "rejected" && (["none", "resolved"].includes(phase) || phase === "waiting" && this.record(d.id).reason === "input_busy")
           : d.attempts === 0 && phase === "none";
         if (d.memberId !== first.memberId || d.projectId !== first.projectId || d.kind === "compact" || !["queued", "held"].includes(d.status) || !admissible || this.sourceRevision(d) === null) throw new ApiError(409, "새 전달 봉투를 만들 수 없습니다");
       }
@@ -195,12 +199,14 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     return this.store.transaction(() => {
       const d = this.store.requireDelivery(deliveryId), r = this.record(deliveryId);
       if (this.latest(d)?.transportState !== "rejected" || d.status === "delivered" || r.phase === "stopped") return false;
-      if (r.phase === "resolved" && r.reason === "not_received") return true;
+      if (r.phase === "needs_owner" && r.reason === "stale_instruction") return false;
+      if (r.phase === "resolved" && r.reason === "not_received" || r.phase === "waiting" && r.reason === "input_busy") return true;
       const exhausted = this.rejectedCount(d) >= MAX_REJECTED;
-      this.store.updateDeliveryRecovery(d.id, r.version, { phase: "resolved", reason: "not_received", nextCheckAt: null });
+      const nextAttemptAt = exhausted ? this.iso(this.now() + [30_000, 60_000, 120_000, 300_000][Math.min(this.rejectedCount(d) - MAX_REJECTED, 3)]!) : null;
+      this.store.updateDeliveryRecovery(d.id, r.version, { phase: exhausted ? "waiting" : "resolved", reason: exhausted ? "input_busy" : "not_received", nextCheckAt: null });
       this.store.setDeliveryStatus(d.id, exhausted ? "held" : "queued", { holdReason: exhausted ? "input_busy" : null });
-      this.store.patchDeliveryRetry(d.id, { nextAttemptAt: null, retryReason: exhausted ? "rejected_limit" : null });
-      if (d.refType === "message" && d.refId) this.store.setMessageDelivery(d.refId, exhausted ? "held" : "queued", exhausted ? "입력 전에 5회 거절되어 자동 전달을 보류했습니다. 터미널의 입력칸과 승인 창을 확인한 뒤 다시 보내세요" : null);
+      this.store.patchDeliveryRetry(d.id, { nextAttemptAt, retryReason: exhausted ? "input_busy" : null });
+      if (d.refType === "message" && d.refId) this.store.setMessageDelivery(d.refId, exhausted ? "held" : "queued", exhausted ? "직원의 입력칸이 비기를 기다리는 중입니다" : null);
       return true;
     });
   }
@@ -309,13 +315,16 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     this.activeProject(d.projectId);
     return this.store.deliveryRecoveryOperation(deliveryId, request.operationId, request, () => {
       const r = this.record(deliveryId);
-      if (["recheck", "stop_retry"].includes(request.action) && ["none", "resolved"].includes(r.phase) && this.store.deliveryStalled(d.id) && ["queued", "held"].includes(d.status)) {
+      if (["recheck", "stop_retry"].includes(request.action) && ["queued", "held"].includes(d.status) && r.phase !== "stopped" && (!this.latest(d) || this.latest(d)?.transportState === "rejected")) {
         if (this.closed || r.version !== request.expectedVersion || this.mutations.has(d.memberId)) throw new ApiError(409, "전달 상태가 바뀌었습니다. 다시 확인해 주세요");
-        const next = this.store.updateDeliveryRecovery(d.id, r.version, { phase: request.action === "stop_retry" ? "stopped" : r.phase, lastCheckedAt: this.iso(), nextCheckAt: null });
+        const next = this.store.updateDeliveryRecovery(d.id, r.version, { phase: request.action === "stop_retry" ? "stopped" : this.latest(d) ? "resolved" : "none", reason: this.latest(d) ? "not_received" : null, lastCheckedAt: this.iso(), nextCheckAt: null });
         if (request.action === "stop_retry") {
           this.projectStatus(d, "failed", STOP_NOTE);
           this.store.patchDeliveryRetry(d.id, { nextAttemptAt: null, retryReason: null });
-        } else this.store.recheckPendingDelivery(d.memberId);
+        } else {
+          this.store.patchDeliveryRetry(d.id, { nextAttemptAt: null, retryReason: null });
+          this.store.recheckPendingDelivery(d.memberId);
+        }
         return { operationId: request.operationId, deliveryId, outcome: request.action === "stop_retry" ? "stopped" : "check_scheduled", committedVersion: next.version };
       }
       if (this.closed || r.version !== request.expectedVersion || ["resolved", "stopped"].includes(r.phase) || r.phase === "none" || this.mutations.has(d.memberId)) throw new ApiError(409, "전달 상태가 바뀌었습니다. 다시 확인해 주세요");
@@ -345,6 +354,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     const dispatches = new Map<string, DeliveryDispatch[]>();
     for (const d of this.store.listDeliveryRecoveryCandidates()) {
       const r = this.record(d.id);
+      if (r.phase === "needs_owner" && r.reason === "stale_instruction") continue;
       if (!["none", "resolved", "stopped"].includes(r.phase) && this.requeueRejected(d.id)) continue;
       if (!dispatches.has(d.memberId)) dispatches.set(d.memberId, this.store.listDispatches(d.memberId));
       const physical = dispatches.get(d.memberId)!.some(item => item.items.some(item => item.deliveryId === d.id) && ["prepared", "write_started", "unknown"].includes(item.transportState));
@@ -544,8 +554,9 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   }
 
   private actions(d: Delivery, r: DeliveryRecoveryRecord): DeliveryNoticeItem["allowedActions"] {
+    if (["queued", "held"].includes(d.status) && !["needs_owner", "stopped"].includes(r.phase)) return ["recheck", "stop_retry"];
     if (["resolved", "stopped", "none"].includes(r.phase)) return [];
-    if (r.phase !== "needs_owner") return ["recheck"];
+    if (r.phase !== "needs_owner") return ["recheck", "stop_retry"];
     if (r.reason === "duplicate_draft") return ["recheck", "stop_retry"];
     const dispatch = this.latest(d);
     const retry = dispatch && this.validDispatch(dispatch) && this.sourceValid(dispatch, d) && (["retry_exhausted", "log_missing", "log_incomplete", "unsupported_schema"].includes(r.reason ?? "") || r.evidence.some(e => e.code === "complete_range_without_marker" && e.verdict === "absent" && e.complete)) && this.store.memberRevisions(d.memberId).sessionGeneration === dispatch.identity.sessionGeneration && this.store.requireMember(d.memberId).sessionId === dispatch.identity.sessionId;
@@ -606,17 +617,17 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     const sourceKey = `${d.refType}:${d.refId}`;
     const preview = previews.get(sourceKey) ?? ({ user_message: "대표 메시지", answer: "결재 답변", todo_done: "업무 완료 알림", instruction: "업무 지시", report: "보고 전달", system: "시스템 지시", compact: "문맥 정리" }[d.kind]);
     return { ...wait, id: d.id, deliveryId: d.id, messageId: d.refType === "message" && previews.has(sourceKey) ? d.refId : null, memberId: d.memberId, projectId: d.projectId, kind: d.kind, status: d.status,
-      phase: stalled ? "needs_owner" : r.phase === "resolved" ? "none" : r.phase, holdReason: d.holdReason, reason: stalled ? "stalled" : r.reason, note: stalled ? "전달이 진행되지 않고 있습니다. 다시 확인해 주세요" : this.store.getDeliveryRetry(d.id).retryReason === "rejected_limit" ? "입력 전에 5회 거절되어 자동 전달을 보류했습니다. 터미널의 입력칸과 승인 창을 확인한 뒤 다시 보내세요" : r.phase === "none" ? d.status === "failed" ? note("legacy_unknown") : "전달 대기" : note(r.reason, r.evidence),
+      phase: stalled ? "needs_owner" : r.phase === "resolved" ? "none" : r.phase, holdReason: d.holdReason, reason: stalled ? "stalled" : r.reason, note: stalled ? "전달이 진행되지 않고 있습니다. 다시 확인해 주세요" : r.phase === "none" ? d.status === "failed" ? note("legacy_unknown") : "전달 대기" : note(r.reason, r.evidence),
       version: r.version, createdAt: d.createdAt, lastCheckedAt: r.lastCheckedAt, nextCheckAt: r.nextCheckAt, autoAttempts: r.autoAttempts, evidence: r.evidence,
       recommendation: stalled ? { code: "recheck", text: "다시 확인" } : r.phase === "needs_owner" ? { code: r.reason ?? "unknown", text: note(r.reason, r.evidence) } : null, allowedActions: stalled ? ["recheck", "stop_retry"] : this.actions(d, r),
       ref: d.refType && d.refId ? { type: d.refType, id: d.refId } : null, preview: preview.length > 160 ? preview.slice(0, 157) + "..." : preview };
   }
-  private items(projectId: string): DeliveryNoticeItem[] {
-    return this.store.withDeliveryRead(projectId, () => this.readItems(projectId));
+  private items(projectId: string, includePreviews = true): DeliveryNoticeItem[] {
+    return this.store.withDeliveryRead(projectId, () => this.readItems(projectId, includePreviews));
   }
-  private readItems(projectId: string): DeliveryNoticeItem[] {
+  private readItems(projectId: string, includePreviews: boolean): DeliveryNoticeItem[] {
     const deliveries = this.store.listDeliveries(projectId);
-    const previews = this.store.deliveryNoticePreviews(projectId);
+    const previews = includePreviews ? this.store.deliveryNoticePreviews(projectId) : new Map<string, string>();
     const last = new Map<string, string>();
     const key = (d: Delivery) => { const revision = this.store.getDeliveryRetry(d.id).sourceRevision; return d.refType && d.refId && revision ? JSON.stringify([d.memberId, d.refType, d.refId, revision]) : null; };
     for (const d of deliveries) { const k = key(d); if (k) last.set(k, d.id); }
@@ -671,7 +682,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   notices(projectId: string): DeliveryNotices {
     return this.store.transaction(() => this.store.withDeliveryRead(projectId, () => {
       this.activeProject(projectId);
-      const items = this.items(projectId);
+      const items = this.items(projectId, false);
       const unassigned = this.summarize("", items);
       return { version: 2, unassignedItems: items.filter(item => item.memberId === ""), reportNotices: this.store.listMissingReportNotices(projectId), members: this.store.listMembers(projectId).map(m => this.summarize(m.id, items)), unassigned: { undeliveredCount: unassigned.undeliveredCount, unknownCount: unassigned.unknownCount, needsOwnerCount: unassigned.needsOwnerCount } };
     }));

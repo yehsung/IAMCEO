@@ -441,6 +441,29 @@ describe("원본 판, operation과 읽기 집계", () => {
     await errorStatus(f.service.recover(d.id, { operationId: randomUUID(), expectedVersion: f.r(d.id).version, action: "recheck" }), 404);
   });
 
+  test("프로젝트 attention 빠른 집계는 일반 대기를 건너뛰고 실제 알림 집계와 일치한다", () => {
+    const f = setup(), d = f.enqueue();
+    const count = () => f.store.projectSummaries().find(p => p.id === f.project.id)!.needsCount;
+    const noticeCount = () => {
+      const notices = f.service.notices(f.project.id);
+      return notices.unassigned.needsOwnerCount + notices.members.reduce((sum, member) => sum + member.needsOwnerCount, 0);
+    };
+    const previews = f.store.deliveryNoticePreviews.bind(f.store);
+    f.store.deliveryNoticePreviews = () => { throw new Error("summary must not load previews"); };
+    expect(count()).toBe(0);
+    f.store.updateDeliveryRecovery(d.id, f.r(d.id).version, { phase: "needs_owner", reason: "log_missing" });
+    expect(count()).toBe(1); expect(count()).toBe(noticeCount());
+    f.store.updateDeliveryRecovery(d.id, f.r(d.id).version, { phase: "none", reason: null });
+    expect(count()).toBe(0);
+    f.store.detectDeliveryStalls(f.now + 120_001);
+    expect(count()).toBe(1); expect(count()).toBe(noticeCount());
+    f.store.patchMember(f.member.id, { status: "working" });
+    expect(count()).toBe(0); expect(count()).toBe(noticeCount());
+    f.store.createMessage({ projectId: f.project.id, mine: true, kind: "나", body: "수신자 없는 실패", delivery: "failed" });
+    expect(count()).toBe(1); expect(count()).toBe(noticeCount());
+    f.store.deliveryNoticePreviews = previews;
+  });
+
   test("500건 밖 virtual failed도 집계하며 수신자 null을 총괄에게 추측 배정하지 않는다", () => {
     const f = setup();
     const old = f.store.createMessage({ id: "old-가", projectId: f.project.id, mine: true, kind: "나", body: "a".repeat(200), targetMemberId: f.member.id, delivery: "failed" });
@@ -525,7 +548,7 @@ describe("확정 미기록은 불확실 복구와 분리", () => {
     expect(f.store.requireDelivery(d.id).status).toBe("queued"); expect(f.calls).toHaveLength(0);
     expect(f.service.fenced(f.member.id)).toBe(false);
   });
-  test("연속 거절 5회는 재시작 뒤에도 보류하고 후속 전달 fence를 만들지 않는다", () => {
+  test("연속 거절 5회도 대기 상태로 재시도하며 후속 전달 fence를 만들지 않는다", () => {
     const f = setup(), d = f.enqueue(); let old = f.envelope([d]);
     for (let i = 0; i < 5; i++) {
       f.service.recordResult(old.dispatchId, { ok: false, reason: "busy", retryable: true, deliveryEffect: "rejected" });
@@ -533,10 +556,11 @@ describe("확정 미기록은 불확실 복구와 분리", () => {
       if (i < 4) old = f.service.prepareDispatch([d.id], old.identity, old.baseline);
     }
     expect(f.store.requireDelivery(d.id)).toMatchObject({ status: "held", holdReason: "input_busy" });
-    expect(f.service.memberNotices(f.member.id).items[0].note).toContain("5회");
-    expect(() => f.service.prepareDispatch([d.id], old.identity, old.baseline)).toThrow();
+    expect(f.service.memberNotices(f.member.id).items[0]).toMatchObject({ phase: "waiting", allowedActions: ["recheck", "stop_retry"] });
+    expect(f.service.memberNotices(f.member.id).items[0].note).toContain("입력칸");
+    expect(f.store.getDeliveryRetry(d.id).nextAttemptAt).not.toBeNull();
     expect(f.service.fenced(f.member.id)).toBe(false);
-    const later = f.enqueue(); expect(f.service.prepareDispatch([later.id], old.identity, old.baseline)).toBeDefined();
+    expect(f.service.prepareDispatch([d.id], old.identity, old.baseline)).toBeDefined();
   });
   test("부재 확정+다른 초안에는 사실을 안내하고 위험 동의 행동을 제공한다", async () => {
     const f = setup(), d = f.enqueue(); f.envelope([d]);
@@ -573,4 +597,58 @@ test("different native session records identity_changed for owner review instead
   expect(f.r(d.id)).toMatchObject({ phase: "needs_owner", reason: "identity_changed" });
   expect(f.service.memberNotices(f.member.id).items[0].note).toContain("세션이 다시 열려");
   expect(f.writes).toHaveLength(0);
+});
+
+
+describe("미전달 항목의 수동 제어와 일회성 정리", () => {
+  test("stalled가 아니어도 queued와 rejected의 recheck·stop_retry는 409 없이 동작한다", async () => {
+    const f = setup(), d = f.enqueue();
+    let calls = 0; f.store.setDeliveryWaitContext(() => ({ busy: false, waking: false, used: 0 }), () => { calls++; });
+    expect(f.service.memberNotices(f.member.id).items[0].allowedActions).toEqual(["recheck", "stop_retry"]);
+    await f.service.recover(d.id, { operationId: randomUUID(), expectedVersion: f.r(d.id).version, action: "recheck" });
+    expect(calls).toBe(1);
+    f.envelope([d], "not_written");
+    await f.service.recover(d.id, { operationId: randomUUID(), expectedVersion: f.r(d.id).version, action: "stop_retry" });
+    expect(f.r(d.id).phase).toBe("stopped");
+    expect(f.store.requireDelivery(d.id).status).toBe("failed");
+  });
+  test("5회 이후 백오프는 30초·1분·2분·5분 상한이며 재시작 후에도 다시 보낼 수 있다", () => {
+    const f = setup(), d = f.enqueue();
+    for (let i = 1; i <= 10; i++) {
+      f.envelope([f.store.requireDelivery(d.id)], "not_written");
+      f.restart();
+      expect(f.service.fenced(f.member.id)).toBe(false);
+      if (i >= 5) expect(Date.parse(f.store.getDeliveryRetry(d.id).nextAttemptAt!) - f.now).toBe([30000, 60000, 120000, 300000][Math.min(i - 5, 3)]!);
+    }
+  });
+  test("rejected_limit 옛 답은 살리고 한 시간 지난 지시는 needs_owner로 두며 정리는 멱등", async () => {
+    const f = setup(), instruction = f.enqueue();
+    const answer = f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "answer", text: "대표 답" });
+    for (const d of [instruction, answer]) {
+      f.store.markHeld(d.id, "input_busy"); f.store.patchDeliveryRetry(d.id, { retryReason: "rejected_limit" });
+      f.db.query("UPDATE deliveries SET created_at = ? WHERE id = ?").run(new Date(f.now - 7_200_000).toISOString(), d.id);
+    }
+    f.store.repairRejectedLimit(f.now);
+    expect(f.r(instruction.id)).toMatchObject({ phase: "needs_owner", reason: "stale_instruction" });
+    expect(f.store.requireDelivery(answer.id).status).toBe("queued");
+    const version = f.r(instruction.id).version;
+    f.store.repairRejectedLimit(f.now); expect(f.r(instruction.id).version).toBe(version);
+    await f.service.recover(instruction.id, { operationId: randomUUID(), expectedVersion: version, action: "recheck" });
+    expect(f.r(instruction.id).phase).toBe("none");
+  });
+  test("withdraw는 총괄 자신의 지시만 허용하며 쓰기 시작 뒤에는 거부한다", () => {
+    const f = setup();
+    const actor = f.store.createMember({ projectId: f.project.id, handle: "lead", name: "총괄", kind: "conductor" });
+    const other = f.store.createMember({ projectId: f.project.id, handle: "other-lead", name: "다른 총괄", kind: "conductor" });
+    const d = f.enqueue(); f.store.setDeliveryAuthor(d.id, actor.id);
+    expect(() => f.store.withdrawInstruction(d.id, other)).toThrow();
+    expect(() => f.store.withdrawInstruction(d.id, f.member)).toThrow();
+    f.store.withdrawInstruction(d.id, actor);
+    expect(f.r(d.id).phase).toBe("stopped"); expect(f.store.requireDelivery(d.id).status).toBe("failed");
+    const written = f.enqueue(); f.store.setDeliveryAuthor(written.id, actor.id); const envelope = f.envelope([written]);
+    expect(() => f.store.withdrawInstruction(written.id, actor)).toThrow();
+    expect(f.store.getDispatch(envelope.dispatchId)?.transportState).toBe("unknown");
+    const answer = f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "answer", text: "답" }); f.store.setDeliveryAuthor(answer.id, actor.id);
+    expect(() => f.store.withdrawInstruction(answer.id, actor)).toThrow();
+  });
 });

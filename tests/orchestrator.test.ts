@@ -1,3 +1,6 @@
+import { PushStore } from "../server/push/store.ts";
+import { PushEventRecorder } from "../server/push/events.ts";
+import { API_RESUME_TEXT, type UsageMenu, type ApiRecoveryOptions } from "../server/api-outage.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -276,10 +279,10 @@ describe("턴 종료 처리", () => {
     const t = await setup();
     await conductor(t);
     const w = await worker(t);
-    await t.orch.assign(t.project.id, w.handle, { text: "@fake:error=한도초과" });
+    await t.orch.assign(t.project.id, w.handle, { text: "@fake:error=도구실패" });
     await waitFor("오류 상태", () => t.member(w.id).status === "error");
-    expect(t.member(w.id).lastError).toBe("한도초과");
-    expect(t.texts().some((m) => m.kind === "시스템" && m.body.includes("한도초과"))).toBe(true);
+    expect(t.member(w.id).lastError).toBe("도구실패");
+    expect(t.texts().some((m) => m.kind === "시스템" && m.body.includes("도구실패"))).toBe(true);
     await waitFor("총괄 막힘 보고", () => t.starts().some((c) => c.prompt.includes("[보고 철수] 막힘: (자동) 턴 오류")));
     await t.orch.assign(t.project.id, w.handle, { text: "다시 @fake:silent" });
     await waitFor("회복", () => t.member(w.id).status === "idle" && t.member(w.id).lastError === null);
@@ -809,6 +812,10 @@ class ScriptedRunner implements Runner {
   async screen() {
     return "화면 글";
   }
+  usageMenu: UsageMenu | null = null;
+  usageState: string | null = "error";
+  async usageLimitSnapshot() { return { menu: this.usageMenu, state: this.usageState }; }
+  async dismissUsageLimit() { this.usageMenu = null; this.usageState = "error"; return { ok: true }; }
   approvalPrompt: ApprovalPrompt | null = null;
   answerResult: ApprovalAnswer | null = null;
   answers: { fingerprint: string; option: number }[] = [];
@@ -839,17 +846,20 @@ class ScriptedRunner implements Runner {
   }
 }
 
-function scripted(timings: Partial<OrchestratorTimings> = {}, backend: Backend = "herdr") {
+function scripted(timings: Partial<OrchestratorTimings> = {}, backend: Backend = "herdr", apiRecovery?: Pick<ApiRecoveryOptions, "probe" | "now" | "urls" | "intervalMs">, withPush = false) {
   const home = mkdtempSync(join(tmpdir(), "iamceo-script-"));
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
   updateConfigFile({ accessCode: "code", hosts: ["127.0.0.1"] }, env);
   const config = loadConfig(env);
-  const store = new Store(openDb(config.dbPath), new Bus());
+  const db = openDb(config.dbPath);
+  const push = withPush ? new PushStore(db) : null;
+  const store = new Store(db, new Bus(), push ? new PushEventRecorder(push) : undefined);
   const runner = new ScriptedRunner(backend);
   runner.store = store;
   const orch = new Orchestrator({
     config,
     store,
+    apiRecovery,
     runners: new Map<Backend, Runner>([[backend, runner]]),
     herdr: {
       info: async () => ({ installed: true, running: true, version: "1", protocol: 22, compatible: true, warning: null }),
@@ -863,7 +873,7 @@ function scripted(timings: Partial<OrchestratorTimings> = {}, backend: Backend =
   cleanups.push(() => orch.shutdown());
   store.patchSettings({ backend });
   const project = store.createProject({ name: "칸", cwd: home });
-  return { store, runner, orch, project, home };
+  return { store, runner, orch, project, home, push };
 }
 
 async function pendingOf(t: ReturnType<typeof scripted>, id: string): Promise<Delivery[]> {
@@ -1342,3 +1352,77 @@ describe("전달 실패 사유(herdr 자리)", () => {
   });
 });
 
+
+
+describe("네트워크 자동 복구와 대표 전달 지연", () => {
+  test("network 오류는 총괄 오류·보고 보완 없이 보류하고 이어가기 뒤 기존 전달을 흘린다", async () => {
+    let now = Date.now();
+    const t = scripted({}, "core", { now: () => now, intervalMs: 30000, urls: ["https://fake.invalid"], probe: async () => ({ status: 500 }) });
+    const worker = (await t.orch.addMember(t.project.id, { name: "직원", handle: "net-worker" })).member;
+    const conductor = t.store.createMember({ projectId: t.project.id, handle: "net-lead", name: "총괄", kind: "conductor" });
+    await t.orch.assign(t.project.id, worker.handle, { text: "첫 업무" });
+    t.runner.emit({ type: "turn_end", memberId: worker.id, isError: true, errorText: "API Error: The response stopped arriving. The response above may be incomplete.", finalText: "" });
+    await waitFor("network outage", () => t.store.requireMember(worker.id).statusObservation?.error?.code === "network_outage");
+    t.runner.emit({ type: "status", memberId: worker.id, status: "idle" });
+    await Bun.sleep(5);
+    expect(t.store.requireMember(worker.id).lastError).toBe("인터넷 연결 문제로 멈춤");
+    await t.orch.assign(t.project.id, worker.handle, { text: "보류된 다음 지시" });
+    expect(t.runner.sent).toHaveLength(1);
+    expect(t.store.listPending(worker.id)[0]?.holdReason).toBe("api_outage");
+    expect(t.store.listPending(conductor.id).some(d => d.text.includes("(자동) 턴 오류"))).toBe(false);
+    expect(t.store.listDeliveries(t.project.id).some(d => d.text.includes("보고 보완"))).toBe(false);
+    expect(t.store.listMessages(t.project.id).filter(m => m.body.includes("인터넷 연결이 불안정"))).toHaveLength(1);
+    await t.orch.apiRecovery.tick(); now += 30000; await t.orch.apiRecovery.tick();
+    await waitFor("resume", () => t.runner.sent.length === 2);
+    expect(t.runner.sent[1]?.text).toContain(API_RESUME_TEXT);
+    expect(t.runner.sent[1]?.text).not.toContain("보류된 다음 지시");
+    t.runner.emit({ type: "turn_end", memberId: worker.id, isError: false, finalText: "" });
+    await waitFor("held delivery", () => t.runner.sent.length === 3);
+    expect(t.runner.sent[2]?.text).toContain("보류된 다음 지시");
+  });
+  test("5회 넘게 거절된 입력도 idle 이벤트 뒤 전달된다", async () => {
+    const t = scripted({ retryMs: 1 }, "core");
+    const w = (await t.orch.addMember(t.project.id, { name: "직원", handle: "reject-worker" })).member;
+    t.runner.results = Array.from({ length: 6 }, () => ({ ok: false as const, reason: "input_busy" as const, retryable: true, deliveryEffect: "not_written" as const }));
+    const message = await t.orch.sendUserMessage(t.project.id, { text: "대표의 답", targetMemberId: w.id });
+    for (let i = 0; i < 6; i++) { t.store.recheckPendingDelivery(w.id); await t.orch.pump(w.id); }
+    t.runner.results = [];
+    t.runner.emit({ type: "input_ready", memberId: w.id });
+    await waitFor("전달", () => t.store.requireMessage(message.id).delivery === "delivered");
+    expect(t.runner.sent).toHaveLength(1);
+  });
+  test("대표 답 30분 미전달 알림과 총괄 알림은 전달별 한 번", async () => {
+    const t = scripted({}, "herdr", undefined, true);
+    const worker = (await t.orch.addMember(t.project.id, { name: "직원", handle: "late-worker" })).member;
+    const lead = t.store.createMember({ projectId: t.project.id, handle: "late-lead", name: "총괄", kind: "conductor" });
+    const d = t.store.enqueue({ projectId: t.project.id, memberId: worker.id, kind: "answer", text: "대표의 결재 답" });
+    const now = Date.now(); t.store.db.query("UPDATE deliveries SET created_at = ? WHERE id = ?").run(new Date(now - 31 * 60000).toISOString(), d.id);
+    t.orch.notifyDelayedDeliveries(now); t.orch.notifyDelayedDeliveries(now + 60000);
+    expect(t.store.listMessages(t.project.id).filter(m => m.title === "대표 전달 지연")).toHaveLength(1);
+    expect(t.push!.listEvents().filter(e => e.kind === "report_blocked")).toHaveLength(1);
+    expect(t.store.listDeliveries(t.project.id).filter(d => d.memberId === lead.id && d.text.includes("30분 넘게"))).toHaveLength(1);
+  });
+});
+
+
+test("사용 한도 답은 기존 HTTP 답 경로에서 200이며 카드가 닫혀도 같은 계정 재발 시 다시 열린다", async () => {
+  const t = scripted({}, "core", undefined, true);
+  const worker = (await t.orch.addMember(t.project.id, { name: "한도 직원", handle: "usage-http" })).member;
+  await t.orch.assign(t.project.id, worker.handle, { text: "원래 업무" });
+  t.runner.emit({ type: "turn_end", memberId: worker.id, isError: true, finalText: "", errorText: "usage limit reached: try again in 2h 30m" });
+  await waitFor("한도 카드", () => t.store.listDecisions(t.project.id).some(d => d.kind === "usage_limit"));
+  const card = t.store.listDecisions(t.project.id).find(d => d.kind === "usage_limit")!;
+  expect(t.store.deliveryRetryDue(worker.id, "core")).toBeGreaterThan(Date.now());
+  expect(t.push!.listEvents().filter(e => e.kind === "decision")).toHaveLength(1);
+  expect(t.push!.isEventCurrent(t.push!.listEvents().find(e => e.kind === "decision")!)).toBe(true);
+  const server = await startServer({ config: loadConfig({ IAMCEO_HOME: t.home, IAMCEO_PORT: "0" }), store: t.store, bus: new Bus(), orch: t.orch });
+  try {
+    const response = await fetch(server.urls[0] + `/api/decisions/${card.id}/answer`, { method: "POST", headers: { Authorization: "Bearer code", "Content-Type": "application/json" }, body: JSON.stringify({ choice: "resume" }) });
+    expect(response.status).toBe(200);
+    await waitFor("한도 이어가기", () => t.runner.sent.length === 2);
+    await waitFor("카드 닫힘", () => t.store.requireDecision(card.id).status === "closed");
+    expect(t.store.listDeliveries(t.project.id).some(d => d.kind === "answer")).toBe(false);
+    t.orch.apiRecovery.usageFailure(t.store.requireMember(worker.id), "usage limit reached: try again in 2h 30m");
+    expect(t.store.requireDecision(card.id)).toMatchObject({ status: "open", usageLimit: { stillLimited: true } });
+  } finally { await server.stop(); }
+});

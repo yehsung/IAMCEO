@@ -129,7 +129,7 @@ test("schema backfill audits once and keeps failed projections pending without f
   const db = new Database(":memory:");
   cleanups.push(() => db.close());
   db.exec("PRAGMA foreign_keys=ON");
-  for (const sql of MIGRATIONS.slice(0, -1)) db.exec(sql);
+  for (const sql of MIGRATIONS.slice(0, MIGRATIONS.indexOf(fileSearchMigration()))) db.exec(sql);
   const store = new Store(db, new Bus());
   const project = store.createProject({ name: "이주 전 자료", cwd: "/fixture" });
   const file = store.createFile({ projectId: project.id, title: "기존 자료", kind: "document", body: "기존 결제 실패 화면 문구" });

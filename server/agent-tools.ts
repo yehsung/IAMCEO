@@ -134,7 +134,7 @@ function requireOther(orch: Orchestrator, self: Member, ref: string): Member {
 }
 
 function assignNote(result: AssignResult): string {
-  const place = result.position > 0 ? `일하는 중이라 대기열 ${result.position}번째입니다. 끝나면 서버가 넣습니다` : "전달했습니다";
+  const place = (result.position > 0 ? `일하는 중이라 대기열 ${result.position}번째입니다. 끝나면 서버가 넣습니다` : result.delivery.status === "delivered" ? "전달했습니다" : "전달 대기 중입니다. 받을 수 있을 때 서버가 넣습니다") + ` · 전달 ${result.delivery.id}`;
   if (result.verified === null) return place;
   if (result.needsContext) return `${place}. 인용이 버튼 글이나 짧은 글이라 '문맥 확인 필요'로 전달됩니다. 직원은 이 줄만으로 승인으로 치지 않으니, 승인이 필요한 일이면 대표의 문장을 인용하세요`;
   return result.verified ? `${place}. 인용은 대표 글과 맞아 서버 확인으로 전달됩니다` : `${place}. 인용을 대표 글에서 찾지 못해 미확인으로 전달됩니다. 직원은 이것을 승인으로 치지 않습니다`;
@@ -389,6 +389,12 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       }, member);
       return reply(`${added.name}(${added.handle}) 직원을 띄웠습니다${assigned ? `. ${assignNote(assigned)}` : ""}`);
     },
+  ),
+
+  withdraw: tool(
+    "자신이 보낸 아직 쓰기 시작하지 않은 지시를 거둔다. 대체 지시를 보내기 전에 사용한다.",
+    z.strictObject({ deliveryId: text }),
+    async (orch, member, a) => { orch.store.withdrawInstruction(a.deliveryId, member); return reply(`미전달 지시 ${a.deliveryId}를 거뒀습니다`); },
   ),
 
   team_assign: tool(

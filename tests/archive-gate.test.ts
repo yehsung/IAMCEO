@@ -240,7 +240,7 @@ describe("보관", () => {
       const a = mk("aa", "가", "pa");
       const b = mk("bb", "나", "pb");
       // 입력칸이 차 있어 전달이 줄에 남아 있다.
-      t.runner.sendResult = { ok: false, reason: "input_busy", retryable: true };
+      t.runner.sendResult = { ok: false, reason: "input_busy", retryable: true, deliveryEffect: "not_written" };
       const d = t.store.enqueue({ projectId: t.project.id, memberId: a.id, kind: "system", text: "줄 선 말" });
       const archive = () => t.api("PATCH", `/api/projects/${t.project.id}`, { archived: true });
       return { t, a, b, d, archive };

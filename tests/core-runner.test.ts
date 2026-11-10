@@ -17,6 +17,7 @@ import { openDb } from "../server/db.ts";
 import { Bus } from "../server/bus.ts";
 import { Store } from "../server/store.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
+import { usageLimitMenu } from "../server/api-outage.ts";
 import { claudeFolderTrust, codexFolderTrust } from "../server/runner/core-approval.ts";
 import { wrappedTrustScreens } from "./fixtures/folder-trust-160.ts";
 
@@ -343,26 +344,45 @@ describe("delivery safety and OSC7501 turns", () => {
     const calls = f.calls.length; await Bun.sleep(50); expect(f.calls).toHaveLength(calls);
   });
   test("failed observations back off per employee without reporting death, and a healthy reply resets the cadence", async () => {
-    const f = await fixture(); const runner = f.runner(20);
+    // Freeze only scheduling time. Socket RPCs remain real, so a loaded host's
+    // read latency cannot accidentally turn the healthy employee into a slow one.
+    let now = -1;
+    const f = await fixture(); const runner = f.runner(20, { pollNow: () => now });
     const slow = await runner.start(member({ id: "failing" }), f.opts);
     const fast = await runner.start(member({ id: "healthy" }), f.opts);
     const events: RunnerEvent[] = []; runner.on(e => events.push(e));
     const times: number[] = []; let failing = true;
     f.setHook((request, socket) => {
       if (request.method !== "terminal.get" || request.params.terminal !== slow.paneId) return false;
-      times.push(Date.now());
+      times.push(now);
       if (!failing) return false;
       socket.destroy(); return true;
     });
-    await until(() => times.length >= 3);
-    expect(times[1] - times[0]).toBeGreaterThanOrEqual(35);
-    expect(times[2] - times[1]).toBeGreaterThanOrEqual(75);
+    const polling = runner as unknown as { poll(): void; polling: Set<unknown>; tracks: Map<string, { refresh: Promise<unknown> | null }> };
+    async function pollAt(at: number) {
+      now = at;
+      polling.poll();
+      await until(() => polling.polling.size === 0 && [...polling.tracks.values()].every(track => !track.refresh));
+    }
+    await pollAt(0);
+    await pollAt(20);
+    await pollAt(39); expect(times).toEqual([0]);
+    await pollAt(40);
+    for (const at of [60, 80, 100, 119]) await pollAt(at);
+    expect(times).toEqual([0, 40]);
+    await pollAt(120);
+    expect(times).toEqual([0, 40, 120]);
     expect(f.calls.filter(r => r.method === "terminal.get" && r.params.terminal === fast.paneId).length).toBeGreaterThan(times.length);
     expect(events.some(e => e.type === "status" && e.status === "gone")).toBe(false);
     failing = false;
-    await until(() => times.length >= 6);
-    expect(times[5] - times[4]).toBeLessThan(75);
+    await pollAt(279); expect(times).toEqual([0, 40, 120]);
+    await pollAt(280);
+    await pollAt(299); expect(times).toEqual([0, 40, 120, 280]);
+    await pollAt(300);
+    await pollAt(320);
+    expect(times).toEqual([0, 40, 120, 280, 300, 320]);
     expect(runner.observationState("failing")?.failures).toBe(0);
+    expect(f.calls.some(r => ["terminal.send", "terminal.keys", "terminal.kill"].includes(r.method))).toBe(false);
   });
   test("Codex uses official interactive command and scoped TOML MCP; unknown native id is not invented", async () => {
     const f = await fixture(); const codex = member({ cli: "codex", model: "gpt-test", effort: "xhigh" }); const launch = providerLaunch(codex, f.opts, { codexBin: "/fake/codex" });
@@ -1300,4 +1320,117 @@ test.each(["claude", "codex"] as const)("%s new 160x50 sessions preserve screen,
   expect(await runner.answerApproval(m, prompt!.fingerprint!, cli === "claude" ? 2 : 1)).toMatchObject({ ok: true });
   expect(f.calls.filter(c => c.method === "terminal.keys")).toHaveLength(1);
   expect(f.calls.filter(c => c.method === "terminal.read").every(c => c.params.lines === 0)).toBe(true);
+});
+
+
+const usageScreen = `You've hit your weekly limit · resets Nov 13 at 10am (Asia/Seoul)
+What do you want to do?
+1. Stop and wait for limit to reset
+2. Wait here, then continue automatically at reset
+3. Add funds to continue with usage credits
+Enter to confirm · Esc to cancel`;
+describe("API 오류 후 Core 입력과 사용 한도 키 안전", () => {
+  test("error 뒤 다음 전달은 terminal.send에 도달하며 force:false와 초안 보호를 유지한다", async () => {
+    const f = await fixture(), runner = f.runner(10000); const m = member();
+    const started = await runner.start(m, f.opts), terminal = f.terminals.get(started.paneId)!;
+    terminal.turn = 1; terminal.status = { state: "error", msg: "API Error: No response from API" };
+    f.setScreen(composer("대표가 쓰던 초안"));
+    expect(await runner.send(m, "이어서", f.opts)).toMatchObject({ ok: false, reason: "input_busy", deliveryEffect: "not_written" });
+    expect(f.calls.filter(r => r.method === "terminal.send")).toHaveLength(0);
+    f.setScreen(composer());
+    expect(await runner.send(m, "이어서", f.opts)).toMatchObject({ ok: true });
+    expect(f.calls.filter(r => r.method === "terminal.send").map(r => r.params)).toEqual([expect.objectContaining({ text: "이어서", force: false, wait: false })]);
+  });
+  test.each(["blocked", "idle", "error", null] as const)("OSC %s에서도 한도 화면을 인식한다", async state => {
+    const f = await fixture(), runner = f.runner(10000), m = member();
+    const started = await runner.start(m, f.opts), terminal = f.terminals.get(started.paneId)!;
+    terminal.status = state ? { state } : null; f.setScreen(usageScreen);
+    const events: RunnerEvent[] = []; runner.on(e => events.push(e));
+    expect((await runner.usageLimitSnapshot(m)).menu).not.toBeNull();
+    expect(events.find(e => e.type === "status" && e.blockedReason === "usage_limit")).toMatchObject({ status: "blocked", observation: { error: { code: "usage_limit" } } });
+    expect(f.calls.some(r => r.method === "terminal.keys")).toBe(false);
+  });
+  test("working은 한도 화면 판독 대신 network_retry를 표시한다", async () => {
+    const f = await fixture(), runner = f.runner(10000), m = member();
+    const started = await runner.start(m, f.opts), terminal = f.terminals.get(started.paneId)!;
+    terminal.status = { state: "working" }; f.setScreen(usageScreen + "\nWaiting for API response · will retry in 1m 2s · check your network");
+    const events: RunnerEvent[] = []; runner.on(e => events.push(e));
+    expect((await runner.usageLimitSnapshot(m)).menu).toBeNull();
+    await until(() => events.some(e => e.type === "status" && e.observation?.error?.code === "network_retry"));
+    expect(events.find(e => e.type === "status")).toMatchObject({ status: "working", observation: { error: { code: "network_retry" } } });
+  });
+  test("재검증 지문이 같을 때 Esc만 전송하고 닫힘·error 입력 가능을 확인한다", async () => {
+    const f = await fixture(), runner = f.runner(10000), m = member();
+    const started = await runner.start(m, f.opts), terminal = f.terminals.get(started.paneId)!;
+    terminal.status = { state: "blocked" }; f.setScreen(usageScreen);
+    const fingerprint = usageLimitMenu(usageScreen)!.fingerprint;
+    f.setHook(r => { if (r.method === "terminal.keys") { terminal.status = { state: "error" }; f.setScreen(composer()); } return false; });
+    expect(await runner.dismissUsageLimit(m, fingerprint)).toEqual({ ok: true });
+    expect(f.calls.filter(r => r.method === "terminal.keys").map(r => r.params.keys)).toEqual([["esc"]]);
+    expect(await runner.send(m, "이어서", f.opts)).toMatchObject({ ok: true });
+  });
+  test("Esc 직전 지문 변경·닫히지 않은 메뉴에는 추가 키나 본문을 넣지 않는다", async () => {
+    const f = await fixture(), runner = f.runner(10000), m = member();
+    const started = await runner.start(m, f.opts), terminal = f.terminals.get(started.paneId)!;
+    terminal.status = { state: "blocked" }; f.setScreen(usageScreen);
+    const fingerprint = usageLimitMenu(usageScreen)!.fingerprint;
+    let reads = 0;
+    f.setHook(r => { if (r.method === "terminal.read" && ++reads === 4) f.setScreen(usageScreen + "\nchanged"); return false; });
+    expect(await runner.dismissUsageLimit(m, fingerprint)).toMatchObject({ ok: false });
+    expect(f.calls.some(r => r.method === "terminal.keys")).toBe(false);
+    f.setHook(null); f.setScreen(usageScreen);
+    expect(await runner.dismissUsageLimit(m, fingerprint)).toEqual({ ok: false, note: "창을 닫지 못했습니다" });
+    expect(f.calls.filter(r => r.method === "terminal.keys").map(r => r.params.keys)).toEqual([["esc"]]);
+    expect(f.calls.some(r => r.method === "terminal.send")).toBe(false);
+  });
+});
+
+
+test("한도 메뉴가 사라져도 OSC blocked가 계속되면 대기 상한 후 본문을 보내지 않는다", async () => {
+  const f = await fixture(), runner = f.runner(10000, { usageLimitCloseTimeoutMs: 50 }), m = member();
+  const started = await runner.start(m, f.opts), terminal = f.terminals.get(started.paneId)!;
+  terminal.status = { state: "blocked" }; f.setScreen(usageScreen);
+  f.setHook(r => { if (r.method === "terminal.keys") f.setScreen(composer()); return false; });
+  expect(await runner.dismissUsageLimit(m, usageLimitMenu(usageScreen)!.fingerprint)).toEqual({ ok: false, note: "창을 닫지 못했습니다" });
+  expect(f.calls.filter(r => r.method === "terminal.keys").map(r => r.params.keys)).toEqual([["esc"]]);
+  expect(f.calls.some(r => r.method === "terminal.send")).toBe(false);
+});
+
+
+test("관리 턴 도중 OSC blocked 한도 메뉴는 실행 자리를 풀고 Esc 뒤 이어가기를 실제로 전달한다", async () => {
+  const f = await fixture();
+  const config = loadConfig({ IAMCEO_HOME: join(f.dir, "iamceo"), IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: f.socketPath,
+    IAMCEO_CLAUDE_BIN: "/fake/claude", IAMCEO_CODEX_BIN: "/fake/codex", IAMCEO_CORE_BIN: "/usr/bin/false" });
+  const db = openDb(config.dbPath), store = new Store(db, new Bus());
+  const runner = f.runner(20, { recoveryStore: store });
+  const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]), providerHomes: { claudeHome: join(f.dir, "claude-home"), codexHome: join(f.dir, "codex-home") }, timings: { tickMs: 60000, healthMs: 60000 } });
+  try {
+    const project = store.createProject({ name: "한도 작업", cwd: f.dir });
+    const worker = await orch.createMember(project.id, { name: "직원" });
+    await orch.assign(project.id, worker.handle, { text: "원래 작업" });
+    const terminal = f.terminals.get(worker.paneId!)!;
+    terminal.status = { state: "blocked" }; f.setScreen(usageScreen);
+    await until(() => store.listDecisions(project.id).some(d => d.kind === "usage_limit"));
+    const card = store.listDecisions(project.id).find(d => d.kind === "usage_limit")!;
+    expect(store.listPendingExecutions().filter(run => run.memberId === worker.id)).toHaveLength(0);
+    expect(store.listDeliveries(project.id).some(d => d.text.includes("보고 보완"))).toBe(false);
+    f.setHook(r => { if (r.method === "terminal.keys") { terminal.status = { state: "error" }; f.setScreen(composer()); } return false; });
+    await orch.answerDecision(card.id, { choice: "resume" });
+    await until(() => f.calls.filter(r => r.method === "terminal.send").length === 2);
+    await until(() => store.requireDecision(card.id).status === "closed");
+    expect(f.calls.filter(r => r.method === "terminal.keys").map(r => r.params.keys)).toEqual([["esc"]]);
+    expect(f.calls.filter(r => r.method === "terminal.send")[1]?.params.text).toContain("연결이 돌아왔습니다");
+  } finally { await orch.shutdown(); db.close(); }
+});
+
+
+test("입력 직전 한도 메뉴는 OSC idle과 과거의 빈 composer가 보여도 본문·Enter를 보내지 않는다", async () => {
+  const f = await fixture(), runner = f.runner(10000), m = member();
+  const started = await runner.start(m, f.opts), terminal = f.terminals.get(started.paneId)!;
+  terminal.status = { state: "idle" }; f.setScreen(composer() + usageScreen);
+  const events: RunnerEvent[] = []; runner.on(event => events.push(event));
+  const result = await runner.withSignal(new AbortController().signal, () => {}, () => runner.send(m, "업무 본문", f.opts), Date.now() + 1000);
+  expect(result).toMatchObject({ ok: false, reason: "blocked", deliveryEffect: "not_written" });
+  expect(events.some(event => event.type === "status" && event.blockedReason === "usage_limit")).toBe(true);
+  expect(f.calls.some(request => request.method === "terminal.send" || request.method === "terminal.keys")).toBe(false);
 });

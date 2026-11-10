@@ -184,6 +184,8 @@ test("stall: 900 messages/deliveries, busy core output and three realtime client
     expect(stats(spans.notices.map(v => v.queries)).max).toBeLessThan(150);
     expect(stats(spans.state.map(v => v.queries)).max).toBeLessThan(150);
     expect(stats(spans.onTick.map(v => v.queries)).max).toBeLessThan(200);
+    // Project summaries need only attention counts, even with a large queue.
+    expect(stats(spans.summaries.map(v => v.rows)).max).toBeLessThan(50);
   } finally {
     measuring = false;
     for (const socket of sockets) socket.close();

@@ -63,7 +63,7 @@ export interface ProjectSummary extends Pick<Project, "id" | "name" | "isHq" | "
 export type ContextWindowSource = "statusline" | "codex" | "headless" | "screen";
 
 /** blocked는 입력 보류다. permission만 증거로 확인된 승인 대기로 집계한다. */
-export type BlockedReason = "permission" | "selection" | "setup" | "status_unknown";
+export type BlockedReason = "permission" | "selection" | "setup" | "usage_limit" | "status_unknown";
 export interface StatusObservation {
   source: Backend | "manual";
   observedAt: string | null;
@@ -189,7 +189,11 @@ export type DecisionCloseFollowUp = { kind: "none" }
 
 export interface DecisionOption { k: string; label: string; desc?: string }
 export type DecisionStatus = "open" | "answered" | "delivered" | "closed";
+export interface UsageLimit { cli: CliProvider; resetsAt: string | null; memberIds: string[]; stillLimited: boolean }
+export interface ApiOutageState { since: string; affectedMemberIds: string[]; lastProbeAt: string | null }
 export interface Decision {
+  kind?: "usage_limit";
+  usageLimit?: UsageLimit;
   id: string;
   projectId: string;
   memberId: string | null; // 물은 직원
@@ -520,6 +524,7 @@ export interface HerdrInfo { installed: boolean; running: boolean; version: stri
 export interface LiveAgent { paneId: string; name: string | null; agent: string | null; status: string; cwd: string | null; sessionId: string | null; workspaceId: string | null; tabId: string | null; adopted: boolean }
 
 export interface Bootstrap {
+  apiOutage?: ApiOutageState | null;
   version: string;
   runtime?: RuntimeInfo;
   settings: Settings;
@@ -553,6 +558,7 @@ export type ArchiveMessagePage = MessagePage;
 
 export interface SyncCursor { epoch: string; seq: number }
 export interface SyncSnapshot {
+  apiOutage?: ApiOutageState | null;
   protocol: 2;
   cursor: SyncCursor;
   requestedProjectId: string | null;
@@ -664,6 +670,6 @@ export function fileKindOf(name: string, mime = ""): FileKind {
 // ---- 에이전트 도구 이름 ----
 /** ask_close·todo_close: 직원은 자기가 올린 결재·할 일만, 총괄·본사 AI 는 프로젝트 전체를 정리한다. */
 export const WORKER_TOOLS = ["status", "ask", "post", "file", "todo", "ask_close", "todo_close"] as const;
-export const CONDUCTOR_TOOLS = ["team_add", "team_assign", "team_compact", "team_sleep", "team_resume", "team_close", "roster", "project_now", "work_set", "work_list", "work_remove", "board"] as const;
+export const CONDUCTOR_TOOLS = ["withdraw", "team_add", "team_assign", "team_compact", "team_sleep", "team_resume", "team_close", "roster", "project_now", "work_set", "work_list", "work_remove", "board"] as const;
 export const ROOT_TOOLS = ["project_create", "project_list", "board"] as const;
 export const MANUAL_TOOLS = ["wait"] as const;

@@ -349,6 +349,8 @@ test("manual batch는 HTTP 재조회·같은 ACK를 보존하고 다른 직원/�
 
 test("연결된 recovery는 202/멱등 결과와 200 중지를 보존하고 진단은 readiness와 구분한다", async () => {
   const f = await fixture();
+  // Recheck now immediately schedules never-written input; keep the receiver busy to exercise cancellation.
+  f.runner.isBusy = () => true;
   const delivery = f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "instruction", text: "복구 대상" });
   const recovery = f.store.getDeliveryRecovery(delivery.id)!;
   f.store.updateDeliveryRecovery(delivery.id, recovery.version, { phase: "needs_owner", reason: "log_missing" });

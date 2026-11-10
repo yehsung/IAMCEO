@@ -48,7 +48,7 @@ Or `curl -fsSL https://raw.githubusercontent.com/yehsung/IAMCEO/main/install.sh 
    > Lead: Got it — assigned to Screen copy.
 4. Decisions collect in the **Inbox**, deliverables in **Files**, and your own to-dos on **Home**.
 
-**iPhone:** join your Mac and iPhone to [Tailscale](https://tailscale.com), then scan the **iPhone 연결** (Connect iPhone) QR in the Mac app. For now the iPhone app is built from source → [guide](native/README.md)
+**iPhone:** join your Mac and iPhone to [Tailscale](https://tailscale.com), then scan the **iPhone 연결** (Connect iPhone) QR in the Mac app. Get the iPhone app [on the App Store](https://apps.apple.com/app/id6831782194).
 
 ## Screens
 

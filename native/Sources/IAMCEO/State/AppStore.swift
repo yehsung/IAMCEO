@@ -46,6 +46,8 @@ private struct AppliedSyncIdentity: Equatable {
 final class AppStore: ProjectManagementStore {
     var endpoint: String
     var accessCode: String
+    /// Captured at launch; typing credentials must never turn first-time setup into recovery.
+    private(set) var restoredCredentials = false
     private(set) var connectionStatus: ConnectionStatus = .disconnected
     // Keep the server reason available for internal decisions; only the UI getter translates it.
     private(set) var rawErrorMessage: String?
@@ -360,6 +362,7 @@ final class AppStore: ProjectManagementStore {
         let savedEndpoint = self.persistCredentials && restoreCredentials ? (UserDefaults.standard.string(forKey: "iamceo.endpoint") ?? defaultEndpoint) : defaultEndpoint
         endpoint = savedEndpoint
         accessCode = self.persistCredentials && restoreCredentials ? (KeychainStore.accessCode(for: savedEndpoint) ?? "") : ""
+        restoredCredentials = ConnectionRecovery.showsSavedConnection(endpoint: endpoint, accessCode: accessCode, useQR: false)
         if demo {
             modelCatalog = .demo
             let fixture = DemoFixtures.workspace()
@@ -597,6 +600,7 @@ final class AppStore: ProjectManagementStore {
         receivedCursor = nil; appliedSnapshotCursor = nil
         modelCatalog = .fallback
         api = nil; accessCode = ""; apiOutage = nil; bootstrap = nil; state = nil; runtime = nil; selectedProjectID = nil
+        restoredCredentials = false
         connectedCredentials = nil; transportFailures = 0; connectionIssue = nil
         pendingConnect = false
         connectionStatus = .disconnected

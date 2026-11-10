@@ -667,13 +667,13 @@ struct ConnectionView: View {
     @State private var useQR = false
 
     private var restoringConnection: Bool {
-        ConnectionRecovery.showsSavedConnection(endpoint: store.endpoint, accessCode: store.accessCode, useQR: useQR)
+        store.restoredCredentials && !useQR
     }
 
     /// Prints the server's addresses and access code on the server computer.
     private static let accessCommand = "iamceo open"
 
-    private var connecting: Bool { store.connectionStatus == .connecting }
+    private var connecting: Bool { store.isPairing || store.connectionStatus == .connecting }
     private var localHostBusy: Bool {
         #if os(macOS)
         localHost.isStarting
@@ -758,7 +758,7 @@ struct ConnectionView: View {
                 .padding(.bottom, 6)
             #if os(iOS)
             if restoringConnection {
-                if connecting || store.connectionStatus == .disconnected && store.errorMessage == nil {
+                if connecting {
                     ProgressView("연결 중")
                 } else {
                     connectionFailure
@@ -780,7 +780,7 @@ struct ConnectionView: View {
             }
             .buttonStyle(.plain)
             if showManual { manualFields }
-            if !restoringConnection {
+            if !store.isDemo && !connecting {
                 orDivider
                 Button { appSession?.browseSample() } label: {
                     Text("샘플로 둘러보기")
@@ -798,6 +798,10 @@ struct ConnectionView: View {
             DisclosureGroup("다른 컴퓨터의 서버에 연결", isExpanded: $showManual) { manualFields }
             #endif
             foot
+            #if os(iOS)
+            Link("개인정보 처리방침", destination: URL(string: "https://github.com/yehsung/IAMCEO/blob/main/PRIVACY.md")!)
+                .font(CEFont.meta).foregroundStyle(CE.ink3)
+            #endif
         }
         .padding(.horizontal, 22).padding(.top, 26).padding(.bottom, 20)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1382,6 +1386,14 @@ struct SettingsView: View {
             case .ai: aiSection
             case .notifications: notificationsSection
             case .connection: connectionSection
+            }
+        }
+        if item == .general {
+            SettingsGroup {
+                Link("개인정보 처리방침", destination: URL(string: "https://github.com/yehsung/IAMCEO/blob/main/PRIVACY.md")!)
+                    .font(CEFont.meta).foregroundStyle(CE.ink3)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, minHeight: isMac ? 56 : 52, alignment: .leading)
             }
         }
     }

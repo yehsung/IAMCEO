@@ -111,7 +111,8 @@ targets:
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: true
-        NSLocalNetworkUsageDescription: Connect to your IAMCEO daemon on your own network.
+        NSLocalNetworkUsageDescription: 내 Mac의 IAMCEO 서버에 연결합니다.
+        NSPhotoLibraryAddUsageDescription: 받은 이미지를 사진 앱에 저장합니다.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
           NSExceptionDomains:

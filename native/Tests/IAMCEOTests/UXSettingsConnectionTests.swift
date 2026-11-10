@@ -111,6 +111,22 @@ private final class UXMemoryDefaults: UserDefaults, @unchecked Sendable {
         XCTAssertFalse(ConnectionRecovery.showsSavedConnection(endpoint: "https://mac.example", accessCode: "\n", useQR: false))
     }
 
+    func testTypingManualCredentialsDoesNotRestoreSavedConnection() async throws {
+        let network = try IsolatedTestNetwork()
+        let store = AppStore(session: network.session, persistCredentials: false)
+        store.endpoint = ""
+        XCTAssertFalse(store.restoredCredentials)
+        store.endpoint = "anything"
+        store.accessCode = "anything"
+        XCTAssertFalse(store.restoredCredentials)
+        XCTAssertEqual(store.connectionStatus, .disconnected)
+        XCTAssertNil(store.errorMessage)
+        XCTAssertFalse(store.isDemo)
+        store.disconnect()
+        XCTAssertFalse(store.restoredCredentials)
+        await network.close()
+    }
+
     func testConnectionFailureExplainsRecoveryWithoutRawSystemErrorOrSleepGuess() {
         let raw = "The operation couldn’t be completed. NSURLErrorDomain -1004 private-canary"
         XCTAssertFalse(ConnectionRecovery.reason(raw).contains("private-canary"))

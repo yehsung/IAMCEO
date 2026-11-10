@@ -337,7 +337,9 @@ final class CoordinatorServer: @unchecked Sendable {
         await settle(); await clock.advance(.milliseconds(500))
         await fulfillment(of: [entered], timeout: 2)
         let selection = Task { await store.selectProject(id: "q") }
-        await settle()
+        // Selection first encodes the departing state off MainActor. Wait for that
+        // work to finish while the old response is still gated, not a fixed delay.
+        await eventually { store.selectedProjectID == "q" }
         XCTAssertEqual(store.selectedProjectID, "q")
         XCTAssertNil(store.state)
         gate.signal()

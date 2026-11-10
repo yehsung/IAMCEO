@@ -22,6 +22,7 @@ Thank you for helping improve IAMCEO. A Korean version follows the English one.
 
 ## Practical notes
 
+- **Clients.** IAMCEO supports native Mac and iPhone apps. Preserve released app HTTP/WebSocket and MCP bridge contracts; the web client was removed on 2026-11-10.
 - **Repository rules.** Follow the project's existing rules in the repository documentation. Tests use temporary homes and never a live server.
 - **Third-party code.** Keep its original license and notices. Add it to [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
@@ -34,4 +35,5 @@ Thank you for helping improve IAMCEO. A Korean version follows the English one.
 - **서명:** 커밋마다 `git commit -s`로 서명해 주세요(DCO 1.1). 서명은 "이 내용을 프로젝트 라이선스로 낼 권리가 있다"는 확인일 뿐, 관리자에게 그 이상의 권리를 주지 않습니다.
 - **앞으로의 재라이선스:** 관리자가 별도 상업 허락을 주거나 전체 라이선스를 바꿀 수 있는 범위는 관리자가 저작권을 가진 코드입니다. 다른 사람의 기여가 섞이면 그분들의 동의가 필요할 수 있습니다.
 - **CLA:** 그런 경우를 대비해 CLA를 도입할 수 있습니다. 초안은 [docs/legal/CLA-draft.md](docs/legal/CLA-draft.md)에 있고, 아직 적용하지 않습니다. 도입하더라도 이후의 새 기여에만, 기여자의 명시적 동의로만 적용하며 소급하지 않습니다.
+- **클라이언트:** Mac·iPhone 네이티브 앱과 배포된 앱의 HTTP/WebSocket·MCP 계약을 유지합니다. 웹 버전은 2026-11-10 제거했습니다.
 - **외부 코드:** 원래 라이선스와 고지를 유지하고 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)에 추가해 주세요.

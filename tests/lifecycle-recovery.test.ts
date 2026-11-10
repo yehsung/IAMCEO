@@ -280,24 +280,45 @@ test("a write whose reply was lost settles from log receipt once a later turn is
   await f.orch.assign(f.project.id, member.handle, { text: "Crash-window task" });
   const run = f.store.listPendingExecutions()[0]!;
   expect(f.store.getDispatch(run.runId)?.baseline.turn).toBe(0);
-  f.store.saveExecutionJournal({ ...run, phase: "starting", inputReceivedAt: null, startedAt: null, turn: null });
   await f.orch.shutdown();
+  // Save the crash snapshot only after the old runner has stopped publishing.
+  f.store.saveExecutionJournal({ ...run, phase: "starting", inputReceivedAt: null, startedAt: null, turn: null });
   const terminal = f.terminals.get(member.paneId!)!; terminal.turn = 1; terminal.status = { state: "done" };
   const next = f.orchestrator(); await next.orch.recover(); await next.orch.refreshConnection();
+  // Recovery deliberately schedules the missing report after retryMs. It may
+  // already be sending by the time recover/refresh returns. Observe its ACK and
+  // drain the pump before checking journals or closing the fixture database.
+  const reports = f.store.listDeliveries(f.project.id).filter(d => d.memberId === member.id && d.kind === "system" && d.text.includes("보고 보완:"));
+  expect(reports).toHaveLength(1);
+  await until(() => f.store.requireDelivery(reports[0]!.id).status === "delivered");
+  await next.orch.pump(member.id);
   expect(f.store.getExecutionJournal(run.runId)).toMatchObject({ phase: "ended", result: "success" });
-  expect(f.store.listPendingExecutions()).toHaveLength(0);
-  expect(f.store.listPending(member.id).some(d => d.kind === "system" && d.text.includes("보고 보완"))).toBe(true);
-  expect(f.count("terminal.send")).toBe(1); expect(f.count("terminal.interrupt")).toBe(0);
+  expect(f.store.listPendingExecutions()).toMatchObject([{ deliveryIds: [reports[0]!.id], phase: "running" }]);
+  expect(f.store.listPending(member.id)).toHaveLength(0);
+  const sends = f.calls.filter(c => c.method === "terminal.send");
+  expect(sends).toHaveLength(2);
+  expect(sends[0]!.params.text).toContain("Crash-window task");
+  expect(sends[1]!.params.text).toContain("보고 보완:");
+  expect(sends[1]!.params.text).not.toContain("Crash-window task");
+  await next.orch.refreshConnection(); await next.orch.pump(member.id);
+  expect(f.store.listDeliveries(f.project.id).filter(d => d.text.includes("보고 보완:"))).toHaveLength(1);
+  expect(f.count("terminal.send")).toBe(2); expect(f.count("terminal.run")).toBe(1);
+  expect(f.count("terminal.interrupt")).toBe(0);
 });
 
 test("a recovered start with no later turn stays received and fenced; time alone never ends it", async () => {
   const f = await fixture(60_000, 5_000); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
-  await f.orch.assign(f.project.id, member.handle, { text: "Crash-window task, not yet counted" });
+  // Receipt without a started turn is the premise of this crash window. Do not
+  // manufacture a working notification and race it against the saved snapshot.
+  f.started(false);
+  const assigned = await f.orch.assign(f.project.id, member.handle, { text: "Crash-window task, not yet counted" });
+  await until(() => f.store.requireDelivery(assigned.delivery.id).status === "delivered");
   await f.orch.shutdown();
   const run = f.store.listPendingExecutions()[0]!;
+  expect(run).toMatchObject({ phase: "received", deliveryIds: [assigned.delivery.id], turn: 0, startedAt: null });
   const old = new Date(Date.now() - 60_000).toISOString();
   // Freeze the crash-window snapshot after old runner events have drained.
-  f.store.saveExecutionJournal({ ...run, phase: "starting", inputReceivedAt: null, startedAt: null, turn: null, createdAt: old });
+  f.store.saveExecutionJournal({ ...run, phase: "starting", inputReceivedAt: null, startedAt: null, lastProgressAt: null, turn: null, createdAt: old });
   const terminal = f.terminals.get(member.paneId!)!; terminal.turn = 0; terminal.status = { state: "done" };
   const next = f.orchestrator(); await next.orch.recover(); await next.orch.refreshConnection();
   await until(() => f.store.getExecutionJournal(run.runId)?.phase === "received");
@@ -308,7 +329,8 @@ test("a recovered start with no later turn stays received and fenced; time alone
   const received = f.store.getExecutionJournal(run.runId)!;
   f.store.saveExecutionJournal({ ...received, inputReceivedAt: old, updatedAt: old });
   await next.orch.refreshConnection(); await next.orch.pump(member.id);
-  expect(f.store.getExecutionJournal(run.runId)).toMatchObject({ phase: "received", turn: 0, endedAt: null, result: null });
+  expect(f.store.getExecutionJournal(run.runId)).toMatchObject({ phase: "received", turn: 0, startedAt: null, endedAt: null, result: null });
+  expect(f.store.requireMember(member.id).statusObservation?.error?.code).toBe("start_stalled");
   expect(f.store.listPendingExecutions()).toHaveLength(1);
   expect(f.store.listPending(member.id)).toHaveLength(1);
   expect(f.count("terminal.send")).toBe(1);

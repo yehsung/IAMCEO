@@ -2,7 +2,6 @@
 # 감독자: 같은 태그를 release-mac.ts --ref vX.Y.Z --upload 로 빌드/서명/공증/첨부,
 # DMG와 설치를 확인한 다음 gh release edit vX.Y.Z --draft=false --latest 로 공개한다.
 # release-mac.ts --upload --publish 는 확인을 마친 감독자용 선택 경로다.
-# 화면 시험은 여기서도 따로 돌려 결과를 남기지만 릴리스를 막지 않는다(러너에서 잠깐의 상태를 놓치거나 WebKit 이 느린 일이 있다).
 name: release
 on:
   push:
@@ -31,16 +30,3 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/release/iamceo-darwin-arm64 dist/release/iamceo-darwin-x64 dist/release/SHA256SUMS LICENSE THIRD-PARTY-NOTICES.md --draft --title "$GITHUB_REF_NAME" --generate-notes
-
-  screens:
-    runs-on: macos-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
-      - run: bun install --frozen-lockfile
-      - run: bunx playwright install chromium webkit
-      - name: 화면 시험
-        run: bash scripts/check.sh server tests/browser.test.ts

@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, symlinkSync } from "node:fs";
 import { networkInterfaces, tmpdir } from "node:os";
@@ -254,9 +255,13 @@ describe("접근 제어", () => {
     expect((await api("/api/bootstrap", { method: "DELETE" })).status).toBe(405);
   });
 
-  test("화면 경로는 서버를 죽이지 않는다", async () => {
+  test("루트는 네이티브 앱 안내이며 웹 파일은 제공하지 않는다", async () => {
     const res = await fetch(`${base}/`);
-    expect([200, 503]).toContain(res.status);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toStartWith("text/plain");
+    expect(await res.text()).toContain("Mac·iPhone 앱");
+    expect((await fetch(`${base}/index.html`)).status).toBe(404);
+    expect((await fetch(`${base}/artifact-frame`)).status).toBe(404);
   });
 
   test("한 주소라도 열리면 뜬다", async () => {
@@ -626,23 +631,16 @@ describe("업로드·다운로드", () => {
     expect((await fetch(base + html.url, { headers: { ...auth, "Sec-Fetch-Dest": "empty" } })).status).toBe(200);
   });
 
-  test("첨부 쿠키: files-session 이 주고 /files 에만 통하며 접속 코드가 아니다", async () => {
+  test("웹 파일 세션과 기존 파일 쿠키를 더 이상 받지 않는다", async () => {
     const png = await json<Attachment>(upload(new File(["x"], "c.png", { type: "image/png" })));
-    const set = (await api("/api/files-session", { method: "POST" })).headers.get("set-cookie") ?? "";
-    expect(set).toContain("Path=/files");
-    expect(set).toContain("HttpOnly");
-    expect(set).toContain("SameSite=Strict");
-    expect(set).not.toContain(CODE);
-    const pair = set.split(";")[0]!;
-    const value = pair.slice(pair.indexOf("=") + 1);
-    expect((await fetch(base + png.url, { headers: { Cookie: pair } })).status).toBe(200);
-    expect((await fetch(base + png.url, { headers: { Cookie: `${pair}x` } })).status).toBe(401);
-    expect((await fetch(`${base}/api/bootstrap`, { headers: { Cookie: pair } })).status).toBe(401);
-    expect((await fetch(`${base}/api/bootstrap`, { headers: { Authorization: `Bearer ${value}` } })).status).toBe(401);
-    expect((await fetch(`${base}${png.url}?t=${value}`)).status).toBe(401);
-    expect((await fetch(`${base}/api/files-session`, { method: "POST" })).status).toBe(401);
-    const cleared = await fetch(`${base}/api/files-session`, { method: "DELETE" });
-    expect(cleared.headers.get("set-cookie")).toContain("Max-Age=0");
+    for (const method of ["POST", "DELETE"]) {
+      const response = await api("/api/files-session", { method });
+      expect(response.status).toBe(404);
+      expect(response.headers.get("set-cookie")).toBeNull();
+      expect((await fetch(`${base}/api/files-session`, { method })).status).toBe(401);
+    }
+    expect((await fetch(base + png.url, { headers: { Cookie: `iamceo_files_${server.port}=${createHmac("sha256", CODE).update("iamceo-files").digest("hex")}` } })).status).toBe(401);
+    expect((await fetch(base + png.url, { headers: auth })).status).toBe(200);
   });
 
   test("이미지·첨부를 메시지에 붙일 수 있다", async () => {
@@ -693,9 +691,9 @@ describe("업로드·다운로드", () => {
 });
 
 describe("WebSocket", () => {
-  function connect(url: string): Promise<{ ws: WebSocket; events: WsEvent[]; next: (pred: (e: WsEvent) => boolean) => Promise<WsEvent> }> {
+  function connect(url: string, headers: Record<string, string> = auth): Promise<{ ws: WebSocket; events: WsEvent[]; next: (pred: (e: WsEvent) => boolean) => Promise<WsEvent> }> {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
+      const ws = new (WebSocket as unknown as new (url: string, options: Bun.WebSocketOptions) => WebSocket)(url, { headers });
       const events: WsEvent[] = [];
       const waiters: { pred: (e: WsEvent) => boolean; done: (e: WsEvent) => void }[] = [];
       ws.onmessage = (m) => {
@@ -723,7 +721,7 @@ describe("WebSocket", () => {
   const wsUrl = () => `ws://127.0.0.1:${server.port}/ws`;
 
   test("tool activity sends no extra member broadcasts and turn notifications carry lastActiveAt", async () => {
-    const connection = await connect(`${wsUrl()}?t=${CODE}`);
+    const connection = await connect(wsUrl());
     try {
       await connection.next(event => event.type === "hello");
       const member = store.createMember({ projectId, handle: "wsactivity", name: "활동방송직원", kind: "worker" });
@@ -742,7 +740,7 @@ describe("WebSocket", () => {
   });
 
   test("코드 틀리면 연결 안 됨", async () => {
-    await expect(connect(`${wsUrl()}?t=wrong`)).rejects.toThrow("WS 연결 실패");
+    await expect(connect(wsUrl(), { Authorization: "Bearer wrong" })).rejects.toThrow("WS 연결 실패");
     const res = await fetch(`${base}/ws`);
     expect(res.status).toBe(401);
   });
@@ -755,8 +753,8 @@ describe("WebSocket", () => {
   });
 
   test("hello 뒤 store 쓰기와 REST 쓰기를 모든 연결에 방송한다", async () => {
-    const a = await connect(`${wsUrl()}?t=${CODE}`);
-    const b = await connect(`${wsUrl()}?t=${CODE}`);
+    const a = await connect(wsUrl());
+    const b = await connect(wsUrl());
     const hello = await a.next((e) => e.type === "hello");
     expect(hello).toEqual({ type: "hello", seq: expect.any(Number) });
 

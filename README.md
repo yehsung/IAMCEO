@@ -26,6 +26,8 @@ then give instructions and approve decisions from one Mac and iPhone app.
 - **Keep going away from the desk** — instruct, approve and get notified from your iPhone while your Mac keeps the work running.
 - **Your records, on your Mac** — conversations, decisions and files live in SQLite on your Mac and survive AI account changes.
 
+Mac and iPhone native apps are the supported clients. The web client was removed on 2026-11-10; existing native app API contracts remain supported.
+
 ## Install
 
 ```sh

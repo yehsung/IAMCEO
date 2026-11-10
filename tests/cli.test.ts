@@ -123,9 +123,10 @@ describe("serve·status·open·join", () => {
     const state = (await (await fetch(`${base}/api/projects/${project.id}/state`, { headers })).json()) as ProjectState;
     expect(state.members.find((m: Member) => m.name === "내 세션")).toMatchObject({ origin: "manual", role: "조사" });
 
-    const web = await fetch(`${base}/`);
-    expect(web.status).toBe(200);
-    expect(await web.text()).toContain("<html");
+    const root = await fetch(`${base}/`);
+    expect(root.status).toBe(200);
+    expect(root.headers.get("content-type")).toStartWith("text/plain");
+    expect(await root.text()).toContain("Mac·iPhone 앱");
 
     proc.kill("SIGTERM");
     expect(await proc.exited).toBe(0);

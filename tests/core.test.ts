@@ -405,10 +405,11 @@ describe("bus", () => {
     });
     const off = bus.subscribe((e) => got.push(e.type));
     const silenced = spyOn(console, "error").mockImplementation(() => {});
-    bus.emit({ type: "hello", seq: 0 });
-    silenced.mockRestore();
-    off();
-    bus.emit({ type: "hello", seq: 0 });
+    try {
+      bus.emit({ type: "hello", seq: 0 });
+      off();
+      bus.emit({ type: "hello", seq: 0 });
+    } finally { silenced.mockRestore(); }
     expect(got).toEqual(["hello"]);
     expect(bus.seq).toBe(2);
   });

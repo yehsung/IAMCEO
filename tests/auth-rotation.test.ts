@@ -42,7 +42,7 @@ async function fixture() {
 
 function socket(base: string, code: string, v2: boolean) {
   const Socket = WebSocket as unknown as new (url: string, options: Bun.WebSocketOptions) => WebSocket;
-  const ws = new Socket(`${base.replace("http:", "ws:")}/ws${v2 ? "?v=2" : `?t=${code}`}`, { headers: v2 ? { Authorization: `Bearer ${code}` } : {} });
+  const ws = new Socket(`${base.replace("http:", "ws:")}/ws${v2 ? "?v=2" : ""}`, { headers: { Authorization: `Bearer ${code}` } });
   const messages: unknown[] = [];
   const hello = new Promise<void>((resolve, reject) => {
     ws.onmessage = event => { messages.push(JSON.parse(String(event.data))); resolve(); };
@@ -54,12 +54,11 @@ function socket(base: string, code: string, v2: boolean) {
 }
 
 describe("global access code rotation", () => {
-  test("durable 0600 save precedes new auth; both WS protocols, file cookies and pending QR are revoked without secret logs", async () => {
+  test("durable 0600 save precedes new auth; both Bearer WS protocols and pending QR are revoked without secret logs", async () => {
     const f = await fixture();
     const logs = [spyOn(console, "info"), spyOn(console, "log"), spyOn(console, "warn"), spyOn(console, "error")];
     try {
       const qr = await (await f.request("/api/pair/start", oldCode, "POST")).json() as { code: string };
-      const cookie = (await f.request("/api/files-session", oldCode, "POST")).headers.get("set-cookie")!.split(";")[0]!;
       const legacy = socket(f.base, oldCode, false);
       const native = socket(f.base, oldCode, true);
       await Promise.all([legacy.hello, native.hello]);
@@ -74,7 +73,7 @@ describe("global access code rotation", () => {
       expect((await f.request("/api/capabilities", oldCode)).status).toBe(401);
       expect((await f.request("/ws?v=2", oldCode)).status).toBe(401);
       expect((await f.request("/api/capabilities", accessCode)).status).toBe(200);
-      expect((await fetch(`${f.base}/files/missing/file.txt`, { headers: { Cookie: cookie } })).status).toBe(401);
+      expect((await fetch(`${f.base}/files/missing/file.txt`, { headers: { Authorization: `Bearer ${oldCode}` } })).status).toBe(401);
       expect(await Promise.all([legacy.closed, native.closed])).toEqual([4001, 4001]);
       f.bus.emit({ type: "projects", projects: [] });
       expect(legacy.messages).toHaveLength(1);

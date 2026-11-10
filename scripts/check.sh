@@ -2,7 +2,8 @@
 # Public, isolated checks. Usage: bash scripts/check.sh all|ts|server [test files...]|swift|build
 set -euo pipefail
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-CHECK_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/iamceo-check.XXXXXX")
+CHECK_TMP=${TMPDIR:-/tmp}
+CHECK_ROOT=$(mktemp -d "${CHECK_TMP%/}/iamceo-check.XXXXXX")
 cleanup() {
   python3 - "$CHECK_ROOT" <<'PY'
 import shutil, sys
@@ -31,7 +32,7 @@ server() {
   else
     local files=() file
     for file in tests/*.test.ts; do
-      case "$file" in tests/herdr.test.ts|tests/browser.test.ts) continue ;; esac
+      case "$file" in tests/herdr.test.ts) continue ;; esac
       files+=("$file")
     done
     bun test "${files[@]}"

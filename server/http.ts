@@ -1,5 +1,5 @@
 import { configuredSecretRoots } from "./secret-paths.ts";
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { detectTailscaleIp, generateAccessCode, updateConfigFile } from "./config.ts";
@@ -927,7 +927,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       return Response.json(file, { headers: { "Cache-Control": "no-store" } });
     }),
     route("GET", "/api/files/:id/artifact", async (_req, url, [id]) => {
-      // JSON 으로만 준다. 이 출처의 문서로 열리면 스크립트가 접속 코드에 닿는다. 화면은 /artifact-frame 격리 칸에 넣는다.
+      // 원본은 JSON, 네이티브 render는 sandbox CSP를 보존한 격리 WKWebView에서 연다.
       const html = await artifactHtml(ctx, id!);
       if (url.searchParams.get("render") === "1") return new Response(buildArtifactSrcdoc(html, { title: store.getFile(id!)!.title }), { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": `sandbox allow-scripts; ${ARTIFACT_CSP}`, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" } });
       return Response.json({ html }, { headers: { "Cache-Control": "no-store", "Content-Security-Policy": `sandbox allow-scripts; ${ARTIFACT_CSP}`, "X-Content-Type-Options": "nosniff" } });
@@ -1161,23 +1161,6 @@ function deriveHandle(store: Store, projectId: string, name: string): string {
   return `m${randomBytes(4).toString("hex")}`;
 }
 
-// <img>·<video> 는 헤더를 못 붙인다. 주소에 접속 코드를 실으면 '이미지 주소 복사'로 새므로 /files 에만 통하는 쿠키를 쓴다.
-// 값은 접속 코드에서 파생해 /api 에 통하지 않고, 코드를 바꾸면 함께 무효가 된다. Strict 라 바깥 사이트의 링크·불투명 출처인 격리 칸에는 실리지 않는다.
-const FILES_COOKIE_MAX_AGE = 365 * 24 * 60 * 60;
-const filesCookieName = (url: URL) => `iamceo_files_${url.port || (url.protocol === "https:" ? "443" : "80")}`; // 쿠키는 포트를 가리지 않는다
-const filesCookieValue = (accessCode: string) => createHmac("sha256", accessCode).update("iamceo-files").digest("hex");
-function filesCookie(url: URL, value: string, maxAge: number): string {
-  return `${filesCookieName(url)}=${value}; Path=/files; Max-Age=${maxAge}; HttpOnly; SameSite=Strict${url.protocol === "https:" ? "; Secure" : ""}`;
-}
-function readCookie(req: Request, name: string): string | null {
-  for (const part of (req.headers.get("cookie") ?? "").split(";")) {
-    const eq = part.indexOf("=");
-    if (eq > 0 && part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
-  }
-  return null;
-}
-
-/** <img>·<video>·<audio> 로 그리는 형식만 inline. 나머지(html·svg·xml 포함)는 어떻게 와도 문서로 열리지 않는다. 태그와 fetch 는 이 값을 보지 않는다. */
 const INLINE_MIME = /^(image\/(png|jpeg|gif|webp|avif|bmp)|video\/[\w.+-]+|audio\/[\w.+-]+)$/i;
 
 function filesResponse(url: URL, { config, store }: ServerContext): Response {
@@ -1200,61 +1183,6 @@ function filesResponse(url: URL, { config, store }: ServerContext): Response {
       "Content-Security-Policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'",
     },
   });
-}
-
-/**
- * 아티팩트를 그리는 빈 칸. srcdoc 은 부모 페이지의 CSP(script-src 'self')를 물려받아 인라인 스크립트가 돌지 않는다(Chromium·WebKit 실측).
- * 그래서 이 빈 문서를 응답 헤더 sandbox 로 불투명 출처에 가두고, 부모가 postMessage 로 buildArtifactSrcdoc 결과를 넣어 준다.
- * 원본은 서버 출처로 나가지 않으며, 이 문서는 접속 코드·저장소·이 서버 API 어디에도 닿지 못한다.
- */
-const ARTIFACT_FRAME_HTML = `<!doctype html><meta charset="utf-8"><script>addEventListener("message",function(e){if(e.source!==parent||!e.data||typeof e.data.iamceoSrcdoc!=="string")return;document.open();document.write(e.data.iamceoSrcdoc);document.close()},{once:false});parent.postMessage({iamceoFrameReady:true},"*")</script>`;
-
-function artifactFrameResponse(): Response {
-  return new Response(ARTIFACT_FRAME_HTML, {
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy": `sandbox allow-scripts; ${ARTIFACT_CSP}; frame-ancestors 'self'`,
-      "X-Content-Type-Options": "nosniff",
-      "Referrer-Policy": "no-referrer",
-      "Cache-Control": "no-store",
-    },
-  });
-}
-
-/** 직원 글에 뭐가 들어와도 외부로 요청이 나가거나 스크립트가 돌지 못하게 하는 마지막 줄. */
-function pageHeaders(host: string): Record<string, string> {
-  const csp = [
-    "default-src 'self'",
-    "script-src 'self'",
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob:",
-    "font-src 'self' data:",
-    `connect-src 'self' ws://${host} wss://${host}`,
-    "frame-src 'self' blob:", // 아티팩트 빈 칸과 PDF(blob, 형식은 화면이 application/pdf 로 정한다)
-    "object-src 'none'",
-    "base-uri 'none'",
-    "form-action 'self'",
-    "frame-ancestors 'none'",
-  ].join("; ");
-  return { "Content-Security-Policy": csp, "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" };
-}
-
-/** HTML 번들은 Bun 이 routes 에서만 내준다. 안쪽 주소에 띄워 두고, IP·Origin 검사를 지난 요청만 넘겨준다. */
-async function proxyWeb(origin: string, req: Request, url: URL): Promise<Response> {
-  if (req.method !== "GET" && req.method !== "HEAD") return fail(405, "허용되지 않는 메서드입니다");
-  const res = await fetch(`${origin}${url.pathname}${url.search}`, { method: req.method });
-  const headers = new Headers(res.headers);
-  for (const name of ["content-encoding", "content-length", "transfer-encoding"]) headers.delete(name);
-  for (const [k, v] of Object.entries(pageHeaders(req.headers.get("host") ?? url.host))) headers.set(k, v);
-  return new Response(res.body, { status: res.status, headers });
-}
-
-async function loadWebIndex(): Promise<Bun.HTMLBundle | null> {
-  try {
-    return (await import("./web-index.ts")).default;
-  } catch {
-    return null;
-  }
 }
 
 const WS_TOPIC = "events";
@@ -1287,17 +1215,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   let stopPromise: Promise<void> | undefined;
   let stopping = false;
   let closedEpochSockets = false;
-  const webIndex = await loadWebIndex();
-  const development = process.env.IAMCEO_DEV === "1";
-  // 개발 모드는 HMR 소켓까지 Bun 이 직접 맡아야 해서 그대로 둔다.
-  const webServer =
-    webIndex && !development
-      ? Bun.serve({ hostname: "127.0.0.1", port: 0, development: false, routes: { "/*": webIndex }, fetch: () => new Response("없는 경로입니다", { status: 404 }) })
-      : null;
-  const webOrigin = webServer ? `http://127.0.0.1:${webServer.port}` : null;
-
-  const hasAccessCode = (req: Request, url: URL, allowQuery: boolean): boolean => {
-    const given = bearer(req) ?? (allowQuery ? url.searchParams.get("t") : null);
+  const hasAccessCode = (req: Request): boolean => {
+    const given = bearer(req);
     return given !== null && safeEqual(given, config.accessCode);
   };
 
@@ -1313,16 +1232,12 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       strictQuery(url, ["v", "t", "lite"]);
       const version = url.searchParams.get("v");
       if (version !== null && version !== "2") return fail(400, "실시간 연결 버전이 잘못되었습니다");
+      if (!hasAccessCode(req)) return fail(401, "인증이 필요합니다");
       if (version === "2" && url.searchParams.has("t")) return fail(400, "실시간 연결 주소에 접속 코드를 넣지 마세요");
-      if (!hasAccessCode(req, url, version === null)) return fail(401, "인증이 필요합니다");
       return server.upgrade(req, { data: { kind: "realtime", protocol: version === "2" ? 2 : 1, authGeneration, lite: wantsLite(url) } }) ? undefined : fail(400, "WebSocket 요청이 아닙니다");
     }
-    // 코드가 틀려 나가는 기기도 지울 수 있어야 하므로 인증 앞에 둔다. 지우기뿐이고 바깥 사이트는 Origin 검사에 걸린다.
-    if (path === "/api/files-session" && req.method === "DELETE") {
-      return new Response(null, { status: 204, headers: { "Set-Cookie": filesCookie(url, "", 0) } });
-    }
     if (path.startsWith("/api/")) {
-      if (!hasAccessCode(req, url, false)) return fail(401, "인증이 필요합니다");
+      if (!hasAccessCode(req)) return fail(401, "인증이 필요합니다");
       if (ctx.daemon?.().ready === false && (path === "/api/sync" || path === "/api/readiness" || path === "/api/runtime" || path === "/api/bootstrap" || /^\/api\/projects\/[^/]+\/state$/.test(path) || path === "/api/push/status")) return starting();
       const terminal = /^\/api\/members\/([^/]+)\/terminal\/stream$/.exec(path);
       if (terminal) {
@@ -1344,20 +1259,13 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       if (path === "/api/push" || path.startsWith("/api/push/")) {
         return pushHandler ? pushHandler(req, url) : fail(501, "푸시를 지원하지 않습니다");
       }
-      if (path === "/api/files-session" && req.method === "POST") {
-        return new Response(null, { status: 204, headers: { "Set-Cookie": filesCookie(url, filesCookieValue(config.accessCode), FILES_COOKIE_MAX_AGE) } });
-      }
       return dispatch(routes, req, url);
     }
     if (path.startsWith("/files/")) {
       if (req.method !== "GET" && req.method !== "HEAD") return fail(405, "허용되지 않는 메서드입니다");
-      // 헤더 또는 첨부 쿠키만 받는다. ?t= 는 받지 않는다: Sec-Fetch-Dest 는 평문 HTTP(폰의 100.x 주소)에서 오지 않아 문서 이동을 가려낼 수 없다.
-      const cookie = readCookie(req, filesCookieName(url));
-      const byCookie = cookie !== null && safeEqual(cookie, filesCookieValue(config.accessCode));
-      if (!byCookie && !hasAccessCode(req, url, false)) return fail(401, "인증이 필요합니다");
+      if (!hasAccessCode(req)) return fail(401, "인증이 필요합니다");
       return filesResponse(url, ctx);
     }
-    if (path === "/artifact-frame") return artifactFrameResponse();
     if (path === "/agent/join") return handleJoin(req, ctx);
     if (path.startsWith("/agent/")) {
       const token = bearer(req);
@@ -1365,8 +1273,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       if (!member) return fail(401, "인증이 필요합니다");
       return dispatch(agentRoutes(ctx, member), req, url);
     }
-    if (webOrigin) return proxyWeb(webOrigin, req, url);
-    if (path === "/" && !webIndex) return fail(503, "화면이 아직 빌드되지 않았습니다");
+    if (path === "/") return new Response("IAMCEO: Mac·iPhone 앱으로 연결하세요.\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
     return fail(404, "없는 경로입니다");
   };
 
@@ -1390,7 +1297,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     if (peer !== "::1" && (v4 === null || !inSubnet(v4, LOOPBACK_V4.base, LOOPBACK_V4.mask))) return fail(403, "접속 코드 회전은 이 Mac에서만 할 수 있습니다");
     if (req.body !== null) await parseBody(req, z.strictObject({}));
     // body를 읽는 동안 다른 회전이 완료됐을 수 있다.
-    if (!hasAccessCode(req, url, false)) return fail(401, "인증이 필요합니다");
+    if (!hasAccessCode(req)) return fail(401, "인증이 필요합니다");
     const accessCode = generateAccessCode();
     let durabilityUnknown = false;
     try { updateConfigFile({ accessCode }, { IAMCEO_HOME: config.home }); }
@@ -1459,7 +1366,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     Bun.serve({
       hostname,
       port,
-      development,
+      development: false,
       // 롱폴(/agent/ask/wait, wait 도구)이 끊기지 않게 최대로 둔다. 기본 10초.
       idleTimeout: 255,
       maxRequestBodySize: MAX_UPLOAD_BYTES + 1024 * 1024,
@@ -1467,11 +1374,9 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
         "/api/*": handle,
         "/agent/*": handle,
         "/files/*": handle,
-        "/artifact-frame": handle,
         "/pair/*": handle,
         "/ws": handle,
-        ...(webIndex && !webOrigin ? { "/*": webIndex } : {}),
-      } as Record<string, Bun.HTMLBundle | typeof handle>,
+      },
       fetch: handle as (req: Request, server: Server<SocketData>) => Promise<Response>,
       websocket: {
         backpressureLimit: 16 * 1024 * 1024,
@@ -1517,7 +1422,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     servers.push(serve(firstHost, config.port));
   } catch (error) {
     if (!ctx.loopMonitor) monitor.stop();
-    await Promise.allSettled([terminalStreams.close(), webServer?.stop(true)]);
+    await Promise.allSettled([terminalStreams.close()]);
     throw error;
   }
   const port = servers[0]!.port!;
@@ -1616,7 +1521,6 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
         // Bun 1.3.14는 서버가 먼저 닫은 WS를 pendingWebSockets에 남긴다.
         // force stop은 한 번만 호출하고 실제 요청/소켓의 종료를 직접 기다린다.
         await (closedEpochSockets ? Promise.all([...requests]) : Promise.all(stopped));
-        await webServer?.stop(true);
         if (!ctx.loopMonitor) monitor.stop();
       })();
     },

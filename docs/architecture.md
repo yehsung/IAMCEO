@@ -1,15 +1,15 @@
 # 아키텍처
 
-Bun 서버가 데이터와 AI 세션으로의 전달을 맡고, SwiftUI macOS·iOS 앱과 레거시 React 웹이 같은 API를 쓴다. 현재 소스는 `herdr-core`와 공식 대화형 Claude Code·Codex CLI를 연결한다.
+Bun 서버가 데이터와 AI 세션으로의 전달을 맡고, SwiftUI macOS·iOS 앱이 API를 쓴다. 현재 소스는 `herdr-core`와 공식 대화형 Claude Code·Codex CLI를 연결한다.
 
-IAMCEO는 소스 공개형(Sustainable Use License 1.0 + IAMCEO 추가 허락)이며 [LICENSE](../LICENSE)와 [라이선스 설명](LICENSING.ko.md)을 따른다. 웹은 임시로 남겨 둔 레거시로 곧 없앤다. 그때까지 기존 v1 API 호환만 유지한다.
+IAMCEO는 소스 공개형(Sustainable Use License 1.0 + IAMCEO 추가 허락)이며 [LICENSE](../LICENSE)와 [라이선스 설명](LICENSING.ko.md)을 따른다. 2026-11-10 웹 버전을 제거했다. Mac·iPhone 네이티브 앱과 배포된 앱의 v1/v2 API 호환을 유지한다.
 
 ## 구성과 역할
 
 ```text
 SwiftUI macOS / iOS ── REST sync + WS v2 ─┐
-React 레거시 웹 ────── REST + WS v1 ──────┼─ Bun 서버 ─ SQLite / 첨부
-세션 안의 iamceo mcp ─ HTTP /agent/* ────┘      │
+세션 안의 iamceo mcp ─ HTTP /agent/* ────┴─ Bun 서버 ─ SQLite / 첨부
+                                             │
                                        Orchestrator
                                              │ CoreRunner / Unix JSON-RPC
                                        herdr-core daemon
@@ -36,8 +36,7 @@ React 레거시 웹 ────── REST + WS v1 ──────┼─ Bun
 | `server/storage-maintenance.ts`, `server/log-writer.ts` | 참조를 보존하는 저장소 정리, 크기 제한 로그 회전 |
 | `bin/iamceo.ts`, `bin/mcp-bridge.ts` | 서비스·attach·MCP CLI와 표준 입출력 브리지 |
 | `native/` | SwiftUI 앱, 동기화·대화 이력·초안, iPhone 알림과 Keychain |
-| `web/` | 레거시 React 웹 |
-| `shared/types.ts` | 서버·웹 공통 타입과 네이티브 모델의 기준 |
+| `shared/types.ts` | 서버 도메인 타입과 네이티브 모델의 기준 |
 | `vendor/herdr-core/` | 고정된 core 버전과 라이선스·외부 구성요소 고지 |
 
 ## core와 공식 CLI
@@ -98,11 +97,11 @@ APNs 발신 대기열은 CLI 입력 대기열과 별개다. 새 기기는 알림
 
 ## 인증·자료 안전
 
-사용자 API는 접속 코드, `/agent/*`는 멤버별 MCP 토큰을 쓴다. MCP 토큰은 멤버 JSON에 내보내지 않는다. 서버는 기본적으로 loopback과 사용 가능한 Tailscale 주소에서 듣고 요청 IP·Host·Origin을 확인한다. 웹 첨부 쿠키는 `/files`에만 통한다.
+사용자 API는 접속 코드, `/agent/*`는 멤버별 MCP 토큰을 쓴다. MCP 토큰은 멤버 JSON에 내보내지 않는다. 서버는 기본적으로 loopback과 사용 가능한 Tailscale 주소에서 듣고 요청 IP·Host·Origin을 확인한다. 사용자 HTTP·WebSocket·첨부는 Bearer 헤더로 인증하며 URL 접속 코드와 파일 쿠키는 받지 않는다.
 
 `file`·`ask`의 파일 경로는 심볼릭 링크를 따라간 실제 작업 폴더 경계로 검사한다. 비밀 폴더·환경 파일·개인 키·IAMCEO 데이터·다중 하드 링크는 거부한다. 이 검사가 같은 OS 사용자로 실행되는 CLI의 Bash 권한까지 제한하지는 않는다. 실제 도구 권한과 승인은 제공자 CLI가 처리한다.
 
-레거시 웹 아티팩트는 사용자가 실행할 때 격리 iframe에서 그린다. 불투명 출처와 CSP로 API·저장소·일반 외부 요청을 막지만 WebKit의 일부 외부 접속 한계가 있어 민감한 데이터를 싣지 않는다. 네이티브는 비영속 WKWebView에서 JavaScript와 외부 연결을 막은 미리보기를 제공한다. 자세한 차이는 [구현 계약](spec.md)에 있다.
+네이티브 아티팩트는 인증된 서버 render 응답을 비영속 WKWebView에서 연다. 인라인 JavaScript는 허용하고 sandbox CSP와 앱 탐색 정책으로 외부 요청·쿠키·서버 API를 막는다. 자세한 계약은 [구현 계약](spec.md)에 있다.
 
 ## 데이터·백업·복원
 

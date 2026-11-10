@@ -224,7 +224,7 @@ describe("v1/v2 WebSocket", () => {
     const f = await fixture();
     for (const [query, headers, status] of [
       ["?v=2&t=secret", auth, 400], ["?v=2&t=", auth, 400], ["?v=3", auth, 400], ["?v=", auth, 400],
-      ["?v=2&v=2", auth, 400], ["?v=2&since=0", auth, 400], ["?v=2", {}, 401],
+      ["?v=2&v=2", auth, 400], ["?v=2&since=0", auth, 400], ["?v=2", {}, 401], ["?t=" + CODE, {}, 401], ["?v=2&t=" + CODE, {}, 401],
       ["?v=2", { Authorization: "Bearer wrong" }, 401], ["?v=2", auth, 400],
       ["?v=2", { ...auth, Origin: "http://evil.example" }, 403], ["?v=2", { ...auth, Host: "evil.example" }, 403],
     ] as const) {
@@ -242,7 +242,7 @@ describe("v1/v2 WebSocket", () => {
     const bus = new Bus();
     bus.subscribe((event) => { if (event.type === "herdr") bus.emit({ type: "projects", projects: [] }); });
     const f = await fixture(undefined, bus);
-    const v1 = connect(`${f.wsURL}?t=${CODE}`);
+    const v1 = connect(f.wsURL, auth);
     const v2 = connect(`${f.wsURL}?v=2`, auth);
     await Promise.all([v1.opened, v2.opened]);
     expect(await v1.next((e) => e.type === "hello")).toEqual({ type: "hello", seq: bus.seq });
@@ -265,7 +265,7 @@ describe("v1/v2 WebSocket", () => {
 
   test("heartbeat는 high-water를 보내고 seq를 증가시키지 않는다", async () => {
     const f = await fixture();
-    const a = connect(`${f.wsURL}?t=${CODE}`);
+    const a = connect(f.wsURL, auth);
     const b = connect(`${f.wsURL}?v=2`, auth);
     await Promise.all([a.opened, b.opened]);
     const cursor = f.bus.cursor;
@@ -294,7 +294,7 @@ describe("v1/v2 WebSocket", () => {
       return;
     }
     const f = await fixture();
-    const a = connect(`${f.wsURL}?t=${CODE}`);
+    const a = connect(f.wsURL, auth);
     const b = connect(`${f.wsURL}?v=2`, auth);
     await Promise.all([a.opened, b.opened]);
     const epoch = f.bus.epoch;

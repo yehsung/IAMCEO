@@ -409,16 +409,19 @@ describe("자료 종류", () => {
     expect(raw.headers.get("content-security-policy")).toContain("sandbox");
   });
 
-  test("빈 칸(/artifact-frame)은 불투명 출처로 격리되고 원본을 담지 않는다", async () => {
+  test("네이티브 render는 인증 뒤 불투명 출처 CSP와 아티팩트 원본을 유지한다", async () => {
     const t = await setup();
-    const res = await fetch(`${t.base}/artifact-frame`);
+    const file = t.store.createFile({ projectId: t.project.id, title: "격리", kind: "artifact", html: "<h1>native artifact</h1>" });
+    const path = `${t.base}/api/files/${file.id}/artifact?render=1`;
+    expect((await fetch(path)).status).toBe(401);
+    const res = await fetch(path, { headers: { Authorization: "Bearer code" } });
     expect(res.status).toBe(200);
     const csp = res.headers.get("content-security-policy")!;
     expect(csp).toStartWith("sandbox allow-scripts;");
     expect(csp).not.toContain("allow-same-origin");
     expect(csp).toContain("connect-src 'none'");
-    expect(csp).toContain("frame-ancestors 'self'");
-    expect(await res.text()).toContain("e.source!==parent");
+    expect(await res.text()).toContain("<h1>native artifact</h1>");
+    expect((await fetch(`${t.base}/artifact-frame`)).status).toBe(404);
   });
 
   test("역할 템플릿: 아티팩트 안내가 들어 있고 금지는 외부 게시로 좁혔다", () => {

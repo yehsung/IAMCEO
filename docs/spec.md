@@ -20,8 +20,8 @@ IAMCEO는 **소스 공개형**이며 Sustainable Use License 1.0 + IAMCEO 추가
 
 ```text
 SwiftUI macOS/iOS ── REST sync·WS v2 ─┐
-React 레거시 웹 ─── REST·WS v1 ───────┼─ Bun / SQLite / Orchestrator
-MCP stdio ── iamceo mcp /agent/* ──┘             │
+MCP stdio ── iamceo mcp /agent/* ───┴─ Bun / SQLite / Orchestrator
+                                               │
                                            CoreRunner
                                                │ Unix NDJSON JSON-RPC
                                            herdr-core / holder
@@ -32,18 +32,18 @@ MCP stdio ── iamceo mcp /agent/* ──┘             │
 | 경로 | 내용 |
 |---|---|
 | `server/config.ts` | IAMCEO_HOME, 포트·주소, `IAMCEO_CLAUDE_BIN`, `IAMCEO_CODEX_BIN`, `IAMCEO_CORE_BIN`, `IAMCEO_CORE_SOCKET` |
-| `server/db.ts`, `store.ts`, `bus.ts` | WAL DB·마이그레이션 전 백업·도메인 상태·웹 이벤트 |
-| `server/http.ts`, `orchestrator-api.ts` | 인증된 REST·웹 WS·접근 제어 |
+| `server/db.ts`, `store.ts`, `bus.ts` | WAL DB·마이그레이션 전 백업·도메인 상태·실시간 이벤트 |
+| `server/http.ts`, `orchestrator-api.ts` | 인증된 REST·WebSocket·접근 제어 |
 | `server/orchestrator.ts`, `agent-tools.ts` | 전달·세션 교체·재결합과 MCP 업무 도구 |
 | `server/runner/core-client.ts`, `core.ts`, `providers.ts` | core protocol, 멤버 소유권·입력·수동 제어, 공식 CLI 인자 |
 | `server/runner/types.ts` | Runner·TerminalControl 계약 |
 | `server/roles/`, `bin/mcp-bridge.ts` | 역할 프롬프트·stdio MCP 브리지 |
 | `bin/iamceo.ts` | serve·service·status·attach·MCP·직접 CLI join |
 | `native/` | SwiftUI macOS/iOS, REST·Keychain·로컬 호스트 기능 |
-| `web/`, `shared/types.ts`, `shared/artifact-kit.ts` | React, 공통 도메인 타입·아티팩트 문서 조립 |
+| `shared/types.ts`, `shared/artifact-kit.ts` | 도메인 타입·네이티브 아티팩트 문서 조립 |
 | `vendor/herdr-core/`, `scripts/setup-core.ts` | 고정 release·라이선스·checksum·macOS 서명 검증 |
 
-`herdr.ts`, `herdr-client.ts`, `headless.ts`, `transcript.ts`는 기존 데이터·시험을 위한 호환 어댑터다. 현재 소스의 `createOrchestrator()`는 core를 조립하지만 이전 herdr 실행 방식은 호환을 위해 유지한다. 웹은 곧 폐기할 레거시로 기능을 추가하지 않고 v1 API 호환만 유지한다. 기존 세션을 core 주소로 해석하거나 자동으로 새 CLI에 옮기지 않는다.
+`herdr.ts`, `herdr-client.ts`, `headless.ts`, `transcript.ts`는 기존 데이터·시험을 위한 호환 어댑터다. 현재 소스의 `createOrchestrator()`는 core를 조립하지만 이전 herdr 실행 방식은 호환을 위해 유지한다. 웹 버전은 제거했고 배포된 네이티브 앱의 v1 API 호환은 유지한다. 기존 세션을 core 주소로 해석하거나 자동으로 새 CLI에 옮기지 않는다.
 
 ## 2. DB
 `shared/types.ts`의 타입과 1:1. 테이블 projects, members, decisions, todos, work, messages, files, attachments, deliveries, activity(직원당 최근 500만 유지), settings(kv). JSON 필드(options, images, attachments)는 TEXT. `project_settings_v4` 는 프로젝트별 설정을 전체 설정으로 합칠 때 옛 값을 남겨 둔 표다(마이그레이션만 읽는다. 저장한 전역 권한과 프로젝트 값 중 가장 엄격한 것을 적고 바뀌면 대표에게 알린다. 프로젝트 모델이 하나로 모이면 직급 기본값의 빈 칸으로 올리고, 저장된 값과 다르면 직원별 지정으로 남긴 뒤 알린다). `files.html` 은 아티팩트 원본(FileDoc 에 싣지 않는다), `members.applied_config` 는 세션에 실제로 들어간 설정이다. `members.adopted_info` 는 편입 표시(JSON, `turnedOnRunner`)다. 판 정리: `decisions.close_kind`(decided·obsolete, AI 가 닫았을 때만)·`close_reason`·`close_quote`·`closed_by`·`closed_at`, `todos.outcome`(done·dropped)·`close_reason`·`closed_by`·`updated_at`, `projects.board_tidied_at`(마지막 판 정리). 멤버 `token`(MCP 인증, 화면에 안 나감) 컬럼 포함. id는 접두어+짧은 난수(`p_`, `m_`, `d_`, `t_`, `w_`, `msg_`, `f_`, `a_`, `dl_`). 시각은 ISO UTC. 첫 실행 때 본사 프로젝트(`id='hq'`, name '본사', cwd=홈, runnerEnabled=true)를 만든다.
@@ -78,7 +78,6 @@ MCP stdio ── iamceo mcp /agent/* ──┘             │
 - `POST /api/projects/:id/tidy` → TidyResult(`{already}`). 총괄(본사는 본사 AI)에게 판 정리 지시를 넣는다. 연결되어 있지 않으면 409, 총괄이 없거나 잠들었으면 띄운다. 이미 기다리거나 도는 정리가 있으면 `already:true`
 - `GET /api/files/:id` → `FileDoc` 전체 본문(인증, 없는 ID는 404).
 - `GET /api/files/:id/artifact` → `{html}`(인증. kind=artifact만, 아니면 404). 기존 html 원문 JSON을 유지한다. `?render=1`은 키트로 조립한 HTML 문서이며 `sandbox allow-scripts` CSP로 불투명 출처에 격리한다. 앱은 쿠키·API·외부 탐색을 차단한 WKWebView에서 연다.
-- `GET /artifact-frame`(인증 없음, 빈 문서) 아티팩트를 그리는 격리 칸(§3.2)
 - `POST /api/projects/:id/members` `{name,role?,cli?:"claude"|"codex",modelOverride?:string|null}` → Member. 새 core 직원 세션을 만든다
 - `PATCH /api/members/:id` `{cli?:"claude"|"codex",modelOverride?:string|null,effortOverride?:Effort|null}` → Member. null은 적용 가능한 기본값으로 되돌린다. 직접 띄운 세션은 400. CLI 변경 시 생략한 기존 override가 새 제공자의 모델·모델별 effort 목록에 없으면 null로 비우고 직급 기본값으로 돌아간다. 이때 활동 기록과 응답의 `resetOverrides` 배열에 비운 필드 이름을 남긴다(v2는 `member.resetOverrides`). 같은 요청에 명시한 모델·effort는 새 제공자 목록으로 검증한다. 제공자·살아 있는 세션 설정 변경은 §6의 이력·토큰 회전·안전한 교체 절차를 따른다
 - `GET /api/members/:id/activity?limit=` → Activity[] · `GET /api/members/:id/screen` → `{text}` (core 현재 화면, `lines:0`; 터미널이 없으면 빈 글)
@@ -87,7 +86,7 @@ MCP stdio ── iamceo mcp /agent/* ──┘             │
 - `POST /api/members/:id/fresh-session`은 같은 제공자의 새 세션으로 명시적으로 인계한다. 작업 중·승인 대기·불확실한 전달·직접 관리하는 세션은 거부한다. 잃어버린 Codex 세션과 기존 실행기 멤버를 복구하는 경로이며, 기존 실행기 터미널은 건드리지 않는다. 멤버 기록을 유지하고 세션 이력·토큰을 회전한다.
 - `POST /api/members/:id/sleep`(`{force?}` 는 대표가 '그래도 재우기'를 눌렀을 때만) · `POST /api/members/:id/resume|compact`(resume 은 실행이 꺼진 프로젝트면 409) · `POST /api/members/:id/interrupt` · `POST /api/members/:id/close`(직접 띄운 세션만)
 - `PUT /api/settings`(SettingsPatch) → Settings. `ranks`·`codexRanks`는 고친 칸만 보내도 된다. `ranks`는 Claude, `codexRanks`는 Codex의 manager/lead/staff별 `{model,effort}` 기본값이다. 직원별 지정이 먼저이며 null이면 해당 CLI 자체 기본값을 쓴다. Codex 기본값은 모두 null이고 effort는 선택한 모델의 `/api/models` efforts 목록으로 검증한다. 모델이 기본값이거나 efforts가 비어 있으면 제공자 기본 목록(Claude low/medium/high/xhigh/max, Codex minimal/low/medium/high/xhigh)을 쓴다. 캐시에 새 effort가 추가되면 같은 문자열을 저장할 수 있다. effort만 고치는 PATCH/PUT도 저장된 모델로 검증한다. 직급 model만 바꾸어 기존 effort가 새 목록에서 빠지면 null로 비우며 응답의 `resetEfforts`에 `codexRanks.lead.effort` 같은 필드 경로를 남긴다(v2는 `settings.resetEfforts`). 이 배열은 응답 전용이며 저장하지 않는다. Codex staff 노력은 저장만 하며 실행에 전달하지 않고, staff 모델은 `agents.default_subagent_model`로 전달한다. 필드 없는 레거시 저장은 기존 codexRanks를 유지한다. 실행 중인 턴을 중단하지 않고 기존 ranks와 같은 다음 설정 적용 경로를 따른다. 저장된 과거 backend 값과 무관하게 이 소스의 새 실행은 core다. 제공자 선택은 멤버의 cli로 한다
-- `GET /files/<attachment id>/<name>` 첨부(인증: 헤더 또는 첨부 쿠키. `<img>`·`<video>`·`<audio>` 는 헤더를 못 붙이므로 `POST /api/files-session` 이 주는 쿠키(`iamceo_files_<포트>`, `Path=/files`, HttpOnly, SameSite=Strict, 접속 코드에서 파생해 `/api` 에 통하지 않음)로 받는다. `?t=` 는 받지 않는다. `DELETE /api/files-session` 이 쿠키를 지운다. 래스터 이미지·영상·오디오만 inline, html·svg·xml 을 포함한 나머지는 attachment. `no-store`, `no-referrer`. 화면의 내려받기는 헤더로 받아 저장한다), `WS /ws?t=<접속 코드>`
+- `GET /files/<attachment id>/<name>` 첨부는 Bearer 헤더로만 인증한다. 래스터 이미지·영상·오디오만 inline, html·svg·xml 등은 attachment다. Range/HEAD, `no-store`, `no-referrer`, sandbox CSP를 유지한다. 파일 쿠키 세션은 제거했다. `WS /ws` v1도 Bearer 헤더를 쓴다. `/`는 짧은 네이티브 앱 안내를 내며 웹 HTML·정적 자산은 제공하지 않는다.
 접근: 설정된 host 에만 listen(기본 127.0.0.1 + Tailscale IP가 있으면 그 주소. `hosts`를 안 적었으면 Tailscale 이 늦게 올라와도 30초 안에 그 주소를 연다). 요청 IP가 127.0.0.1·::1·100.64.0.0/10·fd7a:115c:a1e0::/48 이외면 403(`hosts`에 LAN을 넣으면 그 대역 허용, `iamceo setup --hosts lan`). 화면 파일(HTML·JS)도 같은 검사를 거친다. 비교는 상수 시간. `Origin`이 있으면 Host 와 같아야 한다. Host 는 IP·localhost·설정한 hosts·점 없는 이름·`.local`·`.ts.net` 만 받는다(DNS 리바인딩 차단). 페이지에는 CSP(`script-src 'self'`, `img-src 'self' data: blob:`, `frame-src 'self' blob:`)를 건다. WS 는 15초마다 `ping` 을 보내고, 화면은 45초 조용하면 소켓을 새로 잇는다.
 
 ### 3.1 연결 상태
@@ -96,8 +95,9 @@ MCP stdio ── iamceo mcp /agent/* ──┘             │
 
 core가 응답해도 각 CLI의 trust/auth/권한 창이나 상태 미보고로 멤버 입력이 보류될 수 있다. 코어 설치·연결 진단과 모델 로그인 성공은 같은 뜻이 아니다. 서버 재시작의 delivering 또는 PTY 응답 손실은 `delivery_unknown`으로 보류하며 재시도 틱이 자동 재전송하지 않는다. 오래된 herdr/headless 세션은 `legacy_session`으로 보류하고 명시적 전환 전에는 새 core를 열지 않는다.
 
-### 3.2 웹 아티팩트
-`FileDoc.kind`: document·artifact·image·pdf·table·code·video·audio·file. 저장값이 없는 옛 행은 첨부·본문으로 계산한다(`fileKindOf`). table·code 는 1MB 이하면 `body` 에 원문이 있고, 첨부로도 받는다(.txt 는 예전처럼 body 만). 아티팩트는 대표가 실행을 눌러야 칸을 만든다(자동 선택·주소 복원에서도 돌지 않는다, 이 창에서 한 번 실행한 자료는 다시 묻지 않는다). 그릴 때 `srcdoc` 을 쓰지 않는다: srcdoc 문서는 부모 페이지의 CSP(`script-src 'self'`)를 물려받아 인라인 스크립트가 안 돈다(Chromium·WebKit 실측). 대신 `<iframe sandbox="allow-scripts" src="/artifact-frame">` 을 만들고, 칸이 `{iamceoFrameReady:true}` 를 보내면(`e.source` 확인) `contentWindow.postMessage({iamceoSrcdoc: buildArtifactSrcdoc(html,{title})},'*')`. 문서는 칸마다 한 번만 넣는다. 칸은 `{iamceoHeight:n}`(범위 검사 뒤 높이에 쓴다, 칸 높이를 따라 자라면 멈추고 칸 안 스크롤)·`{iamceoLink:url}`(칸 안에서 누른 바깥 링크, 칸 아래 줄에 보여 주고 대표가 연다)·`{iamceoEscape:true}`(전체 화면 닫기)를 보낸다. 모두 `e.source` 확인 뒤에만 읽는다. 첨부 주소를 칸으로 넘기지 않는다. 전체 화면은 칸을 옮기면 다시 읽히므로 칸을 담은 `<dialog>` 를 `showModal` 로 올린다. 빈 칸은 응답 헤더 `sandbox allow-scripts` 로 불투명 출처에 갇혀 있어 접속 코드·저장소·서버 API 에 닿지 못하고 일반 바깥 요청도 막힌다(`tests/artifact.browser.ts`). WebRTC(STUN UDP, Chromium·WebKit)와 WebKit 의 preconnect 는 CSP 로 막지 못한다(실측). 앞머리에서 `RTCPeerConnection` 을 지우고 `iframe`·`frame`·`link` 를 글에서 이름을 바꾸고 나중에 들어오면 지우는 것은 보조책이다. 관찰자를 피할 그림자 DOM·`document.write` 도 지운다. 남은 길: WebKit 은 스크립트가 넣은 `link` 로 넣는 즉시 TCP 접속한다(실측, 요청 내용 없음, 페이지 쪽에서 막을 수 없음). 열어 본 시각·IP 가 알려질 수 있으므로 민감한 데이터는 아티팩트에 싣지 않는다. 칸이 바깥 주소로 넘어가는 것은 칸의 CSP 가 아니라 페이지의 `frame-src` 가 막는다(`tests/files.browser.ts`).
+### 3.2 네이티브 아티팩트
+
+`FileDoc.kind`: document·artifact·image·pdf·table·code·video·audio·file. 저장값이 없는 옛 행은 첨부·본문으로 계산한다(`fileKindOf`). table·code는 1MB 이하면 `body`에 원문이 있고 첨부로도 받는다. 네이티브는 `/api/files/:id/artifact` 원본 또는 `?render=1`의 키트 포함 HTML을 Bearer로 읽는다. 프로젝트 로컬 HTML은 `/api/projects/:id/local-file?path=…&render=1`을 쓴다. render 응답은 `sandbox allow-scripts`와 ARTIFACT_CSP를 유지한다. 앱의 비영속 WKWebView에서 인라인 JavaScript를 허용하며 외부 네트워크·쿠키·직접 탐색을 차단하고 링크는 앱이 확인 후 연다. 민감한 데이터는 HTML에 싣지 않는다. 웹 iframe 부트스트랩 `/artifact-frame`과 웹 화면은 제거했다.
 
 ### 3.3 strict v2 쓰기와 v1 잔여 제약
 
@@ -119,7 +119,7 @@ terminal 공통 body는 `{operationId:"UUID",expectedSessionGeneration:<정수>,
 
 `GET /api/operations/:operationId` → `{operationId,kind,projectId,memberId,createdAt,updatedAt,status,...}`. status는 `pending|applied|refused|unknown`; applied만 허용된 `result`, refused/unknown은 `code,error`를 가진다. fresh result는 `{member,sessionGeneration}`, terminal result는 `{memberId,action,claimId,sessionGeneration,inputSequence?,leaseId?,expiresAt?}`(expiresAt은 Unix ms)다. 없는 작업 404, 잘못된 UUID 400, 미지원 501. 인증·소속을 항상 검사하며 임의 요청 body나 MCP 토큰을 반환하지 않는다. 같은 operation ID/요청의 receipt를 세대 재검사보다 먼저 돌려주되 다른 body/대상 재사용은 409다. `unknown`은 실패로 추정해 재입력하지 않는다. fresh/terminal의 실행·세대/lease 거부는 HTTP 200 receipt의 `status:"refused"`로도 반환하므로 HTTP 성공만으로 적용됐다고 보지 않는다. CAS 경로의 오래된 revision은 HTTP 409다.
 
-v1은 기존 Settings/Member/Todo 객체 자체, 무본문 fresh, terminal `{leaseId?,expiresAt?}`, 선택적 결재 버전과 `Message.delivery`의 `queued|held|delivering|delivered|failed`를 유지한다. 따라서 버전 없는 v1 설정·결재·fresh·terminal은 v2와 같은 충돌/재생 보호를 보장하지 않는다. 레거시 웹이 사용하는 v1 경로는 남아 있으며 기기별 API 인증 철회는 제공하지 않는다. APNs 기기 해지는 API 접속 권한 회수가 아니다.
+v1은 기존 Settings/Member/Todo 객체 자체, 무본문 fresh, terminal `{leaseId?,expiresAt?}`, 선택적 결재 버전과 `Message.delivery`의 `queued|held|delivering|delivered|failed`를 유지한다. 따라서 버전 없는 v1 설정·결재·fresh·terminal은 v2와 같은 충돌/재생 보호를 보장하지 않는다. 배포된 네이티브 앱이 사용하는 v1 경로는 유지하며 기기별 API 인증 철회는 제공하지 않는다. APNs 기기 해지는 API 접속 권한 회수가 아니다.
 
 ### 3.4 대화 페이지와 보관 읽기
 
@@ -157,7 +157,7 @@ history는 snapshot과 별도 캐시다. ID 중복 제거·진행 중 이벤트/
 - `ProjectState.deliveryNotices.unassignedItems` 및 `GET /api/projects/:id/delivery-notices`의 `unassignedItems`는 전체 DB의 수신자 없는 가상 실패 목록이다. 기존 version 2·members·unassigned 집계는 그대로이며 새 목록은 하위 호환 추가 필드다. 각 항목은 `id:"message:<messageId>",messageId,projectId,memberId:"",preview,createdAt,version:0,allowedActions:["send_to_conductor","dismiss"]`와 기존 notice 메타데이터를 갖는다. GET은 입력이나 자동 수신자 배정을 하지 않는다. 새 앱의 `unassignedDeliveries`/`loadUnassignedDeliveries()`가 이 목록을 읽으며 목록이 없는 구형 서버는 빈 목록으로 처리한다.
 - 대표 Bearer 인증의 `POST /api/messages/:id/recovery` body는 `{operationId:"UUID",expectedVersion:0,action:"send_to_conductor"|"dismiss"}`다. 추가 키·음수/소수/비안전 정수는 400, 다른 검토 버전·이미 실제 전달이 있는 메시지·대표가 쓰지 않은 글·보관 프로젝트는 409다. 총괄 전송은 현재 수신자가 없는 옛 failed 메시지만 받으며 현재 총괄이 없으면 이유와 함께 409다. 존재하지 않는 글 404, 미지원 서비스 501, 잘못된 계약 헤더 400이다. 새 앱은 `X-IAMCEO-Contract: 2`를 붙이며 검토 버전/operationId는 기존 전달 복구와 같은 body 계약이다. 헤더 없는 구형 클라이언트에도 기존 경로는 유지한다.
 - `send_to_conductor`는 원본 메시지의 ID·본문·생성 시각·기존 target을 보존하고 현재 총괄에 연결된 새 queued/wake 전달 한 건을 저장한 뒤 기존 pump를 예약한다. 실행기가 받았다는 판정은 하지 않는다. 202와 `{operationId,messageId,deliveryId,outcome:"send_scheduled",committedVersion:1}`을 반환하며 unassigned/needsOwner에서 빠지고 총괄의 undelivered로 이동한다. 생산용 전달에는 기존 대표 접두어·메시지 참조·첨부 경로·자료 맥락을 포함한다. 없는 총괄을 자동 생성하지 않는다.
-- `dismiss`는 전달 없이 메시지의 DB delivery를 `dismissed`로 저장하고 200과 `{operationId,messageId,deliveryId:null,outcome:"dismissed",committedVersion:1}`을 반환한다. 메시지는 삭제하지 않으며 needsOwner·unassigned·undelivered 집계에서 제외된다. 수신자가 있는 가상 실패에도 dismiss를 허용한다. 구형 웹·앱의 다섯 delivery 값 계약을 보존하기 위해 모든 읽기/WS 응답은 `delivery:"held",deliveryDisposition:"dismissed"`를 내보낸다. 새 네이티브 모델은 disposition을 `Message.delivery == "dismissed"`로 해석한다. 새 deliveryRevision이 늦은 failed 응답의 덮어쓰기를 막는다. held는 수신 성공 표시가 아니며 실제 전달 행도 생기지 않는다. 표시 문구는 View 담당이 정한다.
+- `dismiss`는 전달 없이 메시지의 DB delivery를 `dismissed`로 저장하고 200과 `{operationId,messageId,deliveryId:null,outcome:"dismissed",committedVersion:1}`을 반환한다. 메시지는 삭제하지 않으며 needsOwner·unassigned·undelivered 집계에서 제외된다. 수신자가 있는 가상 실패에도 dismiss를 허용한다. 구형 앱의 다섯 delivery 값 계약을 보존하기 위해 모든 읽기/WS 응답은 `delivery:"held",deliveryDisposition:"dismissed"`를 내보낸다. 새 네이티브 모델은 disposition을 `Message.delivery == "dismissed"`로 해석한다. 새 deliveryRevision이 늦은 failed 응답의 덮어쓰기를 막는다. held는 수신 성공 표시가 아니며 실제 전달 행도 생기지 않는다. 표시 문구는 View 담당이 정한다.
 - DB v31의 `unassigned_message_recoveries`가 메시지 ID·operationId·정규화 요청·결과·action·주체 `owner`(대표)·지정 총괄 ID·UTC 시각을 같은 트랜잭션에 저장한다. 같은 operationId/요청은 검토 버전 검사보다 먼저 저장 결과를 재현한다. 다른 메시지/본문으로 ID를 재사용하면 409다. 새 operationId라도 같은 메시지/동작/검토 버전이면 동일 결과를 재현하고 새 전달·상태 변경은 하지 않는다. 다른 동작으로 뒤집기는 409다. 보관 프로젝트는 재요청도 409다.
 - 모든 needs_owner 항목은 가상이면 dismiss, 실제면 stop_retry를 최소 하나 갖는다. duplicate_draft의 stop_retry는 이미 delivered인 원래 수신 표시를 보존하며 추가 전달만 중지한다. 물리 입력의 미종료 fence는 기존 안전 규칙대로 유지한다.
 - 앱의 `@discardableResult func sendUnassignedToConductor(messageID: String) async -> Bool` 및 `@discardableResult func dismissUndelivered(messageID: String) async -> Bool`는 기존 canWrite·프로젝트/연결 세대 검사·항목별 잠금·디스크 journal을 따른다. 응답 유실 시 원래 operationId/검토 버전을 재사용하고 다른 동작은 막는다. 완료 후 notices/state와 원본 메시지 단건을 다시 읽어 최근 200건 밖 대화 기록에도 반영한다. 자동 재전송은 하지 않는다.
@@ -187,7 +187,7 @@ history는 snapshot과 별도 캐시다. ID 중복 제거·진행 중 이벤트/
 
 `GET /api/sync?projectId=<id>`는 사용자 Bearer 아래 `{protocol:2,cursor:{epoch,seq},requestedProjectId,projectStatus,bootstrap,state,revisions}`를 반환한다. projectStatus는 `none|ok|not_found|archived`; 부재/보관도 HTTP 200과 state=null이다. bootstrap은 runtime을 제외하고 revisions는 `{settings,members:{[id]:{configRevision,sessionGeneration}},todos:{[id]:revision}}`다. state와 cursor/revisions는 같은 동기 읽기 경계다. projectId 외 query·빈 값·중복은 400이다.
 
-`WS /ws?v=2`는 **Bearer 헤더만**, `t` query는 400이다. 웹 v2용 ws-session 쿠키는 만들지 않는다. hello는 `{type:"hello",protocol:2,epoch,seq,heartbeatMs:15000,staleAfterMs:45000}`, ping은 `{type:"ping",epoch,seq}`, domain event는 기존 payload에 epoch/seq를 더한다. 모든 이벤트의 순번을 먼저 확인하고 gap·heartbeat 앞섬·epoch 교체·재접속·전경 복귀에는 sync한다. 영속 replay/since API는 없다. snapshot 이전 순번과 오래된 연결/요청 세대는 폐기한다.
+`WS /ws?v=2`와 v1 `/ws`는 **Bearer 헤더만** 받는다. `?t=`만으로 인증하면 401이며 유효한 Bearer가 있어도 v2의 `t` query는 400이다. WS 쿠키는 없다. hello는 `{type:"hello",protocol:2,epoch,seq,heartbeatMs:15000,staleAfterMs:45000}`, ping은 `{type:"ping",epoch,seq}`, domain event는 기존 payload에 epoch/seq를 더한다. 모든 이벤트의 순번을 먼저 확인하고 gap·heartbeat 앞섬·epoch 교체·재접속·전경 복귀에는 sync한다. 영속 replay/since API는 없다. snapshot 이전 순번과 오래된 연결/요청 세대는 폐기한다.
 
 정상 연결에서는 이벤트를 250ms로 묶어 snapshot을 최대 초당 2회/동시 1개 읽고 진행 중 dirty를 보존한다. WS만 실패하면 REST 3초 fallback, REST도 실패하면 3→6→12→24→30초+jitter, WS는 0.5→30초 backoff다. 저전력은 500ms/초당 1회·fallback 10초다. 확인된 401만 인증을 종료하며 403/TLS 오류는 설정 확인을 안내한다. v1 WS의 URL 인증은 호환 부채로 남기고 로그에서 query를 제거한다.
 
@@ -326,15 +326,15 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 
 - `tests/core-runner.test.ts`: 임시 Unix socket fake core. hello·RPC 오류/timeout·재결합·소유권·초안 보호·불확실 전달·OSC turn·수동 lease·제공자 인자·설정 교체를 검증한다. 실제 유료 모델을 호출하지 않는다.
 - `tests/server-runtime.test.ts`: 현재 소스의 core 기본값, 독립 제공자, 안전한 세션 교체·토큰 회전·이력·재시작 보류·DB 백업·REST 계약을 검증한다.
-- `tests/cli.test.ts`, `tests/web-runtime.test.ts`: 격리 CLI 서버·웹 runtime 계약. unavailable socket의 동시 진단도 서버를 죽이지 않아야 한다.
+- `tests/cli.test.ts`, `tests/native-api-contract.test.ts`, `tests/server-runtime.test.ts`: 격리 CLI 서버·네이티브 HTTP/WS·runtime 계약. unavailable socket의 동시 진단도 서버를 죽이지 않아야 한다.
 - `native/Tests/IAMCEOTests`: Swift 계약 디코딩·요청 인증·origin 제한·네트워크 오류·stable message id·expectedVersion을 URLSession mock으로 검증한다. SwiftPM 시험·macOS 빌드·iOS simulator 빌드는 별도 검증이며 실기기 설치·서명·공증은 별도로 확인한다.
 - 실제 PTY 시작·daemon 재시작 검증은 임시 IAMCEO_HOME·HC_SESSION·HC_SOCKET·XDG 경로에서만 한다. 사용자 원래 daemon·터미널을 끄거나 전역 CLI를 업데이트하지 않는다. CLI 시작만 검증하는 시험에 자동 유료 prompt를 넣지 않는다.
-- 기존 `tests/fixtures/fake-claude.ts`, herdr fixture, headless·adopt 브라우저 시험은 과거 어댑터의 회귀 시험이다. 현재 core UX·수명·상태 계약의 근거로 사용하지 않는다.
-- 기존 `tests/e2e-real/*`는 명시적으로 승인된 유료 모델 시험에서만 실행한다. 일반 unit/integration/typecheck에 포함해 유료 작업을 유발하지 않는다.
+- 기존 `tests/fixtures/fake-claude.ts`, herdr fixture, headless·adopt 서버 시험은 과거 어댑터의 회귀 시험이다. 현재 core UX·수명·상태 계약의 근거로 사용하지 않는다.
+- 남은 `tests/e2e-real/*`는 명시적으로 승인된 유료 모델 시험에서만 실행한다. 일반 unit/integration/typecheck에 포함해 유료 작업을 유발하지 않는다.
 
 ## 10. 클라이언트와 검증 경계
 
-네이티브는 홈·결재함·팀·대화·자료·설정, 보관함·프로젝트 관리·푸시 설정을 제공한다. macOS 14+/iOS 17+, Swift 6을 대상으로 한다. `--demo`만 명시적 읽기 전용 예시이며 접속 실패를 예시나 로컬 성공으로 숨기지 않는다. 웹은 곧 폐기할 레거시이고 기능 추가 없이 API 하위 호환만 유지한다.
+네이티브는 홈·결재함·팀·대화·자료·설정, 보관함·프로젝트 관리·푸시 설정을 제공한다. macOS 14+/iOS 17+, Swift 6을 대상으로 한다. `--demo`만 명시적 읽기 전용 예시이며 접속 실패를 예시나 로컬 성공으로 숨기지 않는다. 웹 화면은 제공하지 않으며 배포된 네이티브 앱의 API 하위 호환을 유지한다.
 
 - AppStore의 단일 coordinator가 REST snapshot/history/delivery/활동 갱신을 합친다. 정상 WS에서는 3초 상태·history 폴링이 없다. 비활성/잠금·Mac sleep에서는 소켓·fallback·재시도·읽기를 멈추고 복귀 시 새 연결 세대로 sync한다. 열린 터미널의 active-only 2초 screen 조회는 별도다.
 - endpoint별 Keychain·Bearer, 외부 첨부 origin/redirect 차단을 유지한다. 원격은 HTTPS/WSS를 권장하며 기존 tailnet HTTP 호환 허용과 iOS ATS의 실제 전송 가능성은 별개다. iPhone loopback은 Mac 주소가 아니다.
@@ -342,7 +342,7 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 - 설정은 편집 base와 dirty 필드를 보존하고 CAS 충돌에서 재검토한다. 묶음 결재는 자기 요청이 수락된 카드의 메모만 소비한다. todo는 불명 결과를 조회하며 최신 revision을 보호한다. terminal `unknown`은 재생하지 않고 제출 뒤 추가 편집도 보존한다.
 - terminal은 plain screen·lease 아래 직접 input/key다. 전체 VT 스트림 렌더러는 아니다. 확인된 승인, setup/status_unknown, 마지막 관측·오류, 마지막 보고 시각, 미수집 subagent를 구분한다. 미수집을 0명으로 단정하지 않는다.
 - macOS 로컬 시작은 명시적 선택에만 실행하며 다른 서비스·포트·인증 오류를 덮어쓰지 않는다. 빌드는 서비스 등록·실행이 아니다. macOS는 로컬 서비스용 App Sandbox 비활성, iOS는 플랫폼 sandbox다.
-- 웹 아티팩트는 §3.2의 수동 실행 sandbox다. 네이티브 아티팩트의 서버 계약은 인라인 JavaScript를 허용하는 비영속 WKWebView다. 서버 render 응답의 sandbox CSP를 유지하고 외부 요청·쿠키·서버 API·직접 탐색을 차단한다. 링크는 앱이 목적지를 확인한 뒤 연다. Liquid Glass는 지원 OS에서 쓰고 이전 OS는 material fallback이다.
+- 네이티브 아티팩트(§3.2)의 서버 계약은 인라인 JavaScript를 허용하는 비영속 WKWebView다. 서버 render 응답의 sandbox CSP를 유지하고 외부 요청·쿠키·서버 API·직접 탐색을 차단한다. 링크는 앱이 목적지를 확인한 뒤 연다. Liquid Glass는 지원 OS에서 쓰고 이전 OS는 material fallback이다.
 
 격리 자동 시험의 통과, 실제 CLI 의미 검증, Mac/iPhone 화면·스크롤 위치·접근성, APNs 실기기 sandbox/production, Tailscale·잠금·24시간 병렬 인수는 각각 다른 증거다. 격리 시험 명령과 운영 절차는 [운영 모델](operating-model.md), 서명·앱 빌드는 [native README](../native/README.md)를 본다.
 
@@ -390,7 +390,7 @@ core 업무 턴의 최종 결과가 없으면 기존 업무를 다시 실행하�
 - `ProjectSummary.needsCount`: 열린 결재 + 안 끝난 대표 할 일 + status=blocked이고 blockedReason=permission/selection인 직원 수 + status=error 직원 수 + 전달 notice의 phase=needs_owner 건수. 항목별 합이며 한 직원에게 결재와 전달 확인이 함께 있으면 각각 센다. `needsDanger`는 오류 직원 수가 1 이상인지를 뜻한다. 기존 inboxCount(결재+할 일), blockedCount(permission만), errorCount는 유지한다. needs_owner는 복구 엔진의 동일 projection을 사용하므로 가상 옛 실패·정체 notice도 포함한다.
 - `GET /api/projects/:id/state?lite=1`, `GET /api/sync?projectId=:id&lite=1`: files에서 body를 생략하며 HTML 원본은 원래 목록에 없다. 나머지 메타데이터·첨부 목록은 보존한다. lite 생략/0은 기존 전체 응답이다. `/ws?v=2&lite=1`(또는 v1 `/ws?lite=1`)은 같은 원칙으로 file 사건에서 body를 생략하며 epoch/seq·heartbeat·인증 경계는 같다. WebSocket 주소에는 접속 코드를 넣지 않고 헤더를 사용한다.
 - 앱의 `APIClient(liteStateEnabled:false)`가 기본이다. T8이 모든 자료 리더를 `fileBody(id:forceRefresh:)`로 전환한 뒤 켠다. 켜면 상태·sync·WS 모두 lite를 요청한다. 본문 캐시는 API actor별(호스트·인증 경계별), 최대 32개다. 자료 ID는 새 판마다 달라지며 legacy 제자리 수정 시 forceRefresh를 쓴다.
-- Message에 `fileIds`, `supersedes`, `supersededBy`, `contextFileId`를 추가한다. 첫 자료용 fileId와 웹 본문 링크는 유지한다. fileIds는 저장된 전체 report_references를 읽고, 옛 보고는 첫 자료 및 프로젝트 소속을 확인한 웹 자료 링크를 복원한다. `post/report` 정정은 명시적인 `supersedes` 또는 기존 `corrects_message_id`를 받는다. 같은 직원·같은 프로젝트의 최신 보고만 정정하고, 둘을 다 주면 같아야 한다. 자동 추정은 서로 다른 업무의 보고를 잘못 숨길 수 있으므로 하지 않는다. 앞 보고는 삭제하지 않으며 양쪽 ID를 읽기 응답·WS에 싣는다.
+- Message에 `fileIds`, `supersedes`, `supersededBy`, `contextFileId`를 추가한다. 첫 자료용 fileId와 과거 본문의 자료 링크는 유지한다. fileIds는 저장된 전체 report_references를 읽고, 옛 보고는 첫 자료 및 프로젝트 소속을 확인한 과거 자료 링크를 복원한다. `post/report` 정정은 명시적인 `supersedes` 또는 기존 `corrects_message_id`를 받는다. 같은 직원·같은 프로젝트의 최신 보고만 정정하고, 둘을 다 주면 같아야 한다. 자동 추정은 서로 다른 업무의 보고를 잘못 숨길 수 있으므로 하지 않는다. 앞 보고는 삭제하지 않으며 양쪽 ID를 읽기 응답·WS에 싣는다.
 - `POST /api/todos/:id/done`의 선택 필드: `note`(최대 100,000자), `fileIds`(업로드된 첨부 ID, 최대 50개). v1/v2 모두 지원하며 v2의 If-Match는 유지한다. 완료 답·첨부는 Todo.completionNote/completionFileIds에 원문 그대로 저장하고 요청 직원과 총괄의 완료 알림에 싣는다. 받을 총괄이 없으면 영속 보류하며 이후 전달 때도 같은 원문을 쓴다. 재완료는 기존 완료를 덮어쓰지 않는다. 체크를 풀면 답·첨부를 지우고 기존 정정 절차를 따른다. 완료 답은 해당 할 일 ID·제목·완료 시각을 붙인 대표 원문 대조 근거다. 첨부 안의 글은 승인 근거가 아니다. 비밀번호 등 비밀을 대화에 남기지 말라는 안내는 앱 담당이다.
 - `POST /api/projects/:id/messages`의 선택 필드 `contextFileId`는 같은 프로젝트의 자료 ID만 허용한다. 저장된 대표 body는 그대로 유지하고 전달문 끝에 `[시스템 자료 맥락 · 대표 원문 아님]`과 `대표가 보던 자료: <제목> (<파일 ID>)`를 별도 줄로 붙인다. 직원 직접 지시라면 총괄의 판 맞춤 알림에도 같은 맥락을 붙인다. 이 시스템 줄은 대표 원문 대조 근거가 아니다.
 - 로컬 미리보기 `GET /api/projects/:id/local-file?path=...`: `kind=html`은 content와 `?render=1` 안전 HTML 응답, `kind=csv`는 원문 content와 인용/줄바꿈을 보존한 rows 배열, `kind=pdf`는 application/pdf 원본 바이트 응답과 X-Local-File-Metadata(base64 JSON), `kind=xlsx`는 previewAvailable=false·previewNote·원본 path를 반환한다. xlsx는 별도 변환 의존성 없이 '미리보기 불가 + 열기' 계약을 택했다. PDF는 50MiB 상한이며 안전 검사한 같은 FD에서 읽은 바이트만 응답한다. 기존 text/image/other와 server/secret-paths.ts의 비밀·링크·TOCTOU 정책은 유지한다.

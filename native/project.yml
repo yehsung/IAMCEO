@@ -52,6 +52,7 @@ targets:
     dependencies:
       - package: SwiftTerm
       - target: AttachmentException-macOS
+        embed: false
     type: application
     platform: macOS
     sources: [Sources/IAMCEO, Resources/macOS]
@@ -84,6 +85,7 @@ targets:
     dependencies:
       - package: SwiftTerm
       - target: AttachmentException-iOS
+        embed: false
     type: application
     platform: iOS
     attributes:

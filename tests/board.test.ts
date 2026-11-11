@@ -26,6 +26,8 @@ const nudgeOnly = (text: string) => isReportNudge({ prompt: text }) && text.spli
  */
 class FakeRunner implements Runner {
   readonly kind: Backend = "core";
+  /** 운영의 CoreRunner 와 같다: 돌고 있는 턴에 끼워 넣지 못한다. 급한 글도 턴이 끝난 뒤 나간다. */
+  readonly interjects = false;
   sent: { memberId: string; text: string }[] = [];
   nudges: { memberId: string; text: string }[] = [];
   busy = new Set<string>();
@@ -83,6 +85,18 @@ const until = async (cond: () => boolean, label = "조건", ms = 4000) => {
     await Bun.sleep(5);
   }
 };
+
+/**
+ * runner.end() 가 낸 턴 끝을 총괄이 처리하고, 그 끝에 도는 전달 펌프까지 끝날 때까지 기다린다(그 직원의 활동에 '턴 끝'이 n 건 남는다).
+ * 실행 종결·판 정리 완료·보고 보완 요청은 그 활동 줄보다 먼저 적히므로, 이 뒤에는 '있어야 하는 값'도 '없어야 하는 값'도 정해져 있다.
+ * 펌프까지 기다리는 까닭: 펌프가 도는 동안의 팀장 닫기는 409 "세션을 처리하는 중입니다"이고 주기 판 정리도 그 총괄을 건너뛴다.
+ * 고정 대기(Bun.sleep) 자리에 쓴다: 기계가 바빠 처리가 늦어도 떨어지지 않고, 처리 전에 보고 지나가지도 않는다.
+ */
+const ended = async (t: { store: Store; orch: Orchestrator }, memberId: string, n = 1) => {
+  await until(() => t.store.listActivity(memberId).filter((a) => a.kind === "turn_end").length >= n, "턴 끝 처리");
+  await t.orch.pump(memberId);
+};
+
 
 const HOUR = 3_600_000;
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
@@ -203,7 +217,7 @@ describe("ask_close", () => {
     const w = await t.worker();
     const d = await t.asked(w);
     t.runner.end(w.id);
-    await Bun.sleep(20);
+    await ended(t, w.id);
     expect(t.store.requireMember(w.id).status).toBe("waiting");
     const said = t.say("그건 가 안으로 하기로 했어요. 나 안은 안 씁니다");
     const sentBefore = t.runner.sent.length;
@@ -281,7 +295,7 @@ describe("ask_close", () => {
     const w = await t.worker();
     const d = await t.asked(w);
     t.runner.end(w.id);
-    await Bun.sleep(20);
+    await ended(t, w.id);
     await t.call(t.lead, "ask_close", { id: d.id, kind: "obsolete", reason: "필요 없어 보임" });
     expect(t.store.requireMember(w.id).status).toBe("idle");
     const res = await t.api("POST", `/api/decisions/${d.id}/reopen`);
@@ -301,7 +315,7 @@ describe("ask_close", () => {
     const v = await t.worker("영희", "yh");
     const e = await t.asked(v, "영희의 물음");
     t.runner.end(v.id);
-    await Bun.sleep(20);
+    await ended(t, v.id);
     await t.orch.closeMember(v.id);
     expect(t.store.requireDecision(e.id)).toMatchObject({ status: "closed", closeKind: null, closedBy: "시스템" });
     expect(t.store.requireDecision(e.id).closeReason).toContain("명부에서 빠져");
@@ -383,7 +397,7 @@ describe("주기 판 정리", () => {
     expect(t.store.getSettings().boardTidyHours).toBe(6);
     stale(t);
     expect(t.orch.checkBoardTidy()).toEqual([t.project.id]);
-    await Bun.sleep(20);
+    await until(() => tidies(t).length > 0, "판 정리 전달");
     expect(tidies(t)).toHaveLength(1);
     expect(tidies(t)[0]).toMatchObject({ memberId: t.lead.id });
     expect(deliveryBody(t.store, tidies(t)[0]!)).toBe(formatTidy("conductor", false));
@@ -458,12 +472,15 @@ describe("주기 판 정리", () => {
     // 검토한 요청 revision 뒤의 변경은 다음 정리 대상으로 보존한다.
     await t.call(t.lead, "board");
     t.store.upsertWork({ projectId: t.project.id, sec: "done", title: "정리하며 옮김" });
-    await Bun.sleep(5);
+    await Bun.sleep(5); // 시각 차이를 두는 대기(판 변경 시각 < 정리 시각). 조건을 기다리는 자리가 아니다.
     t.runner.end(t.lead.id);
-    await Bun.sleep(30);
+    // 턴 끝 처리가 끝난 뒤에 본다. 보고 보완은 그 처리 안에서 전달로 적히므로, 여기서 전달이 없으면 뒤늦게 올 것도 없다
+    // (고정 대기 뒤 nudges 0건만 보면, 늦게 온 보완을 아래의 '보고 보완' 기다림이 정상 보완으로 받아 준다).
+    await ended(t, t.lead.id);
     expect(t.store.listMessages(t.project.id)).toHaveLength(before);
     // 달라진 점: 옛 실행기는 턴의 마지막 글("정리할 것이 없습니다")을 받아 활동에 '판 정리: …' 로 남겼다.
     // core 는 마지막 글을 서버에 넘기지 않아 그 활동 줄이 없다. 대신 판 정리만 받은 턴은 보고가 없어도 보고 보완을 받지 않는다.
+    expect(t.store.listDeliveries(t.project.id).some((d) => d.text.includes("보고 보완"))).toBe(false);
     expect(t.runner.nudges).toHaveLength(0);
     const tidiedAt = t.store.requireProject(t.project.id).tidiedAt!;
     expect(tidiedAt >= t.store.lastBoardChangeAt(t.project.id)!).toBe(true);
@@ -487,7 +504,7 @@ describe("지금 판 정리 API·설정", () => {
     const t = await setup();
     const res = await t.api("POST", `/api/projects/${t.project.id}/tidy`);
     expect(res).toEqual({ status: 200, body: { already: false } });
-    await Bun.sleep(20);
+    await until(() => t.runner.sent.length > 0, "판 정리 전달");
     expect(t.runner.sent.at(-1)!.memberId).toBe(t.lead.id);
     expect(deliveryBody(t.store, t.runner.sent.at(-1)!)).toBe(formatTidy("conductor", true));
     expect((await t.api("POST", `/api/projects/${t.project.id}/tidy`)).body).toEqual({ already: true });
@@ -496,7 +513,7 @@ describe("지금 판 정리 API·설정", () => {
     expect((await t.api("POST", "/api/projects/hq/tidy")).body).toEqual({ already: false });
     const root = t.store.getConductor("hq")!;
     expect(root.kind).toBe("root");
-    await Bun.sleep(20);
+    await until(() => t.runner.sent.some((s) => s.memberId === root.id), "본사 AI 에게 판 정리 전달");
     const sent = t.runner.sent.find((s) => s.memberId === root.id)!;
     expect(deliveryBody(t.store, sent)).toBe(formatTidy("root", true));
     expect(sent.text).not.toContain("work_set");
@@ -567,12 +584,12 @@ test("board completion covers the read revision and leaves changes during tidy f
   t.store.setBoardTidiedAt(t.project.id, ago(7 * HOUR));
   t.say("새 변경");
   expect(t.orch.checkBoardTidy()).toEqual([t.project.id]);
-  await Bun.sleep(10);
+  await until(() => t.runner.sent.some((s) => s.memberId === t.lead.id && s.text.includes(TIDY_HEAD)), "판 정리 전달");
   await t.call(t.lead, "board");
   const requested = t.store.getBoardReview(t.project.id)!;
   t.store.createTodo({ projectId: t.project.id, title: "정리 중 추가한 할 일" });
   t.runner.end(t.lead.id);
-  await Bun.sleep(20);
+  await ended(t, t.lead.id);
   const completed = t.store.getBoardReview(t.project.id)!;
   expect(completed.completedAt).toEqual(expect.any(String));
   expect(completed.reviewedRevision).toBe(requested.requestedRevision);
@@ -583,8 +600,10 @@ test("board completion covers the read revision and leaves changes during tidy f
 test("ending tidy without reading board does not claim a successful review", async () => {
   const t = await setup();
   await t.orch.tidyBoard(t.project.id);
+  await until(() => t.runner.sent.some((s) => s.memberId === t.lead.id && s.text.includes(TIDY_HEAD)), "판 정리 전달");
   t.runner.end(t.lead.id);
-  await Bun.sleep(20);
+  // '없음'을 보는 자리다. 턴 끝 처리가 끝난 것을 확인한 뒤에 본다(처리 전에 보면 늘 비어 있다).
+  await ended(t, t.lead.id);
   expect(t.store.getBoardReview(t.project.id)!.completedAt).toBeNull();
   expect(t.store.requireProject(t.project.id).tidiedAt).toBeNull();
 });

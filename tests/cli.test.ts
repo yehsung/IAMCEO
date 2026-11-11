@@ -380,6 +380,10 @@ describe("가져오기", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("가져왔습니다: '운영판'");
     expect(r.stdout).toContain("실행 꺼짐");
+    // 끝 안내는 지금 되는 길만 적는다: 없어진 herdr·편입을 가리키지 않고, 가져온 자리는 총괄을 시작한 뒤 일을 맡기면 새 세션으로 열린다.
+    expect(r.stdout).toContain("총괄을 시작하기 전에는 어떤 세션도 움직이지 않습니다.");
+    expect(r.stdout).toContain("가져온 팀원 자리는 세션이 없습니다. 총괄을 시작한 뒤 일을 맡기거나 깨우면 새 세션으로 열립니다.");
+    expect(r.stdout).not.toMatch(/herdr|편입/);
     expect((await cli(home, ["import"])).code).toBe(1);
     expect((await cli(home, ["import", file, "--name", "다른", "--cwd", join(home, "없음")])).stderr).toContain("폴더가 없습니다");
     expect((await cli(home, ["import", join(home, "없음.json")])).stderr).toContain("덤프를 읽을 수 없습니다");
@@ -408,7 +412,8 @@ describe("가져오기", () => {
   // 옛 시험: "가져온 프로젝트는 대표 말·서버 복구로 세션을 띄우지 않고, 편입은 그 직원 자리를 잇는다".
   // 뒤 절반(편입: herdr 칸 넘겨받기)은 옛 실행기 전용이라 지웠다. 앞 절반을 운영과 같은 실행기 종류(core)로 본다.
   test("가져온 프로젝트는 대표 말·서버 복구로 세션을 띄우지 않는다", async () => {
-    const t = await coreSetup({ agentTools: { listAgentTools: () => [], handleAgentTool: async () => ({ text: "" }) } });
+    // live: false — 가져온 뒤의 첫 복구를 보는 시험이라 틀이 미리 복구를 돌리지 않게 한다.
+    const t = await coreSetup({ live: false, agentTools: { listAgentTools: () => [], handleAgentTool: async () => ({ text: "" }) } });
     stops.push(() => t.close());
     const { projectId } = importArtifact(t.store, DUMP, { cwd: t.home, fallbackName: "x", now: NOW });
     await t.orch.recover();

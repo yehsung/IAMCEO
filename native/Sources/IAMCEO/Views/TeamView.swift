@@ -2293,7 +2293,7 @@ private extension View {
     }
 }
 
-private let teamLegacyNote = "이전 실행기의 세션입니다. 기존 터미널에서 확인하세요. herdr-core에서는 기존 세션 편입과 도구를 붙여 다시 열기를 지원하지 않습니다."
+private let teamLegacyNote = "이전 실행기의 세션이라 여기서 이어 쓸 수 없습니다. … 메뉴의 새 세션으로 이어가기로 옮기세요."
 
 /// Web .tm-note--left: 13.5 / 1.5, ink-2.
 private func teamNote(_ text: String) -> some View {

@@ -985,7 +985,13 @@ export class CoreRunner implements FullRunner {
     if (this.manualLease(member.id)) throw new CoreError("input_busy", "Manual terminal control lease is active");
     const track = this.tracks.get(member.id);
     if (!opts.whileWorking && track && this.isBusy(member.id)) throw new CoreError("busy", "A turn or unresolved input is still active");
-    const terminal = await this.owned(member);
+    let terminal: CoreTerminal;
+    try { terminal = await this.owned(member); }
+    catch (error) {
+      // A terminal confirmed absent has nothing left to close: stop() treats the same error as success.
+      if (error instanceof CoreError && error.kind === "not_found" && !error.uncertain) return;
+      throw error;
+    }
     if (terminal.state !== "live") return;
     const state = this.stateOf(track, terminal);
     if (!opts.whileWorking && !["idle", "done"].includes(state || "")) throw new CoreError("busy", "Resolve the current CLI turn/dialog before changing its provider or configuration");

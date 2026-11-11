@@ -216,7 +216,7 @@ const GONE_ROUTES: [method: string, path: string, message: string][] = [
   ["GET", "/api/herdr/agents", "herdr 세션 목록은 없어졌습니다. 서버는 herdr 를 보지 않고, 팀장은 모두 herdr-core 에서 띄웁니다"],
   ["GET", "/api/projects/:id/adopt/preview", "기존 터미널 세션 편입은 없어졌습니다. 팀 화면에서 팀장을 새로 만들거나, 직접 띄운 세션에서 iamceo join 으로 붙이세요"],
   ["POST", "/api/projects/:id/adopt", "기존 터미널 세션 편입은 없어졌습니다. 팀 화면에서 팀장을 새로 만들거나, 직접 띄운 세션에서 iamceo join 으로 붙이세요"],
-  ["POST", "/api/members/:id/release", "편입 해제는 없어졌습니다. 팀장을 명부에서 빼려면 총괄에게 그 팀장을 닫으라고 하세요"],
+  ["POST", "/api/members/:id/release", "편입 해제는 없어졌습니다. 이전 실행기의 세션이 남은 팀장은 팀 화면의 '새 세션으로 이어가기'로 옮겨 계속 쓸 수 있습니다. 명부에서 빼려면 총괄에게 그 팀장을 닫으라고 하세요"],
   ["POST", "/api/members/:id/reopen-with-tools", "'도구 붙여 다시 열기'는 없어졌습니다. 이전 실행기의 세션은 그 터미널에서 확인하고, 이어서 맡기려면 팀장을 새로 만드세요"],
 ];
 

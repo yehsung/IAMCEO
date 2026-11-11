@@ -290,9 +290,10 @@ export async function runImport(argv: { file: string; name?: string; cwd?: strin
 
 export function describeImport(s: ImportSummary): string {
   return [
-    `가져왔습니다: '${s.name}' #${s.projectId} (실행 꺼짐, herdr)`,
+    `가져왔습니다: '${s.name}' #${s.projectId} (실행 꺼짐)`,
     `팀원 ${s.members} · 결재 ${s.decisions}(답 ${s.answered}) · 내 할 일 ${s.todos} · 일 ${s.work} · 자료 ${s.files} · 소식 ${s.feed} · 내 말 ${s.userMessages}(보류 ${s.heldMessages})`,
-    "서버가 켜져 있으면 화면을 새로 고치면 보입니다. 총괄을 시작하거나 기존 세션을 편입하기 전에는 어떤 세션도 움직이지 않습니다.",
+    "서버가 켜져 있으면 화면을 새로 고치면 보입니다. 총괄을 시작하기 전에는 어떤 세션도 움직이지 않습니다.",
+    "가져온 팀원 자리는 세션이 없습니다. 총괄을 시작한 뒤 일을 맡기거나 깨우면 새 세션으로 열립니다.",
   ].join("\n");
 }
 

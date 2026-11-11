@@ -8,7 +8,7 @@
 //
 // 불러오기만으로는 아무것도 하지 않는다(환경 읽기·소켓 열기·파일 쓰기 없음).
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type Socket } from "node:net";
+import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Bus } from "../../server/bus.ts";
@@ -299,7 +299,7 @@ export async function startFakeCore(options: FakeCoreOptions) {
     }
     return { error: { kind: "unsupported", message: `모르는 메서드: ${call.method}` } };
   }
-  const server = createServer(socket => {
+  const accept = (socket: Socket) => {
     sockets.add(socket); socket.on("close", () => sockets.delete(socket)); socket.on("error", () => {}); socket.setEncoding("utf8");
     let buffer = "";
     socket.on("data", chunk => {
@@ -319,8 +319,25 @@ export async function startFakeCore(options: FakeCoreOptions) {
         socket.write(`${JSON.stringify("result" in reply ? { jsonrpc: "2.0", id: call.id, result: reply.result } : { jsonrpc: "2.0", id: call.id, error: { code: -32000, message: reply.error.message, data: { kind: reply.error.kind } } })}\n`);
       }
     });
-  });
-  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+  };
+  // 듣는 쪽은 닫았다가 다시 열 수 있다(setRefusing). 터미널·기록은 그대로 남는다.
+  let server: Server | null = null;
+  const listen = async () => {
+    if (server) return;
+    rmSync(socketPath, { force: true });
+    const next = createServer(accept);
+    await new Promise<void>((resolve, reject) => { next.once("error", reject); next.listen(socketPath, resolve); });
+    server = next;
+  };
+  const unlisten = async () => {
+    const current = server;
+    if (!current) return;
+    server = null;
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>(resolve => current.close(() => resolve()));
+    rmSync(socketPath, { force: true });
+  };
+  await listen();
 
   const holderOf = (memberId: string) => [...holders.values()].findLast(h => h.run.memberId === memberId) ?? null;
   const need = (memberId: string) => { const holder = holderOf(memberId); if (!holder) throw new Error(`이 직원의 터미널이 없습니다: ${memberId}`); return holder; };
@@ -369,8 +386,18 @@ export async function startFakeCore(options: FakeCoreOptions) {
     /** RPC 를 가로챈다. undefined 를 돌려주면 평소대로 처리한다. "drop" 은 답하지 않는다(제한 시간까지 기다리게 됨). */
     intercept(fn: ((call: FakeCoreCall) => FakeCoreReply) | null) { interceptor = fn; },
     onKeys(fn: typeof onKeys) { onKeys = fn; },
-    /** 엔진이 내려간 것처럼 모든 연결을 끊는다. false 로 되돌리면 터미널은 그대로 남아 있다. */
+    /**
+     * 연결은 받고, 요청을 읽은 뒤 답 없이 끊는다(엔진이 요청을 받은 직후 죽은 모양). false 로 되돌리면 터미널은 그대로 남아 있다.
+     * CoreRunner 에게는 "보냈는데 답이 없다"라서 결과를 모르는 실패다(CoreError kind "closed", deliveryEffect "unknown").
+     * 글을 넣거나 터미널을 끝내는 요청이면 '했는지 모름' 갈래를 탄다. 엔진이 처음부터 내려가 있는 상황(다시 시도해도 되는 실패)은 setRefusing 이다.
+     */
     setDown(down: boolean) { state.down = down; if (down) for (const socket of sockets) socket.destroy(); },
+    /**
+     * 엔진이 내려가 있다: 소켓을 닫아 연결 자체가 거절된다(소켓 파일 없음, ENOENT). false 로 되돌리면 같은 자리에서 다시 듣고 터미널은 그대로 남아 있다.
+     * CoreRunner 에게는 "보내지 못했다"라서 확정된 실패다(CoreError kind "down", deliveryEffect "not_written"). 전달은 `down` 사유로 돌아오고 다시 시도된다.
+     * 내려간 동안의 요청은 calls 에 남지 않는다(받은 적이 없다).
+     */
+    async setRefusing(refusing: boolean) { await (refusing ? unlisten() : listen()); },
     setDirectives(directives: string) { state.directives = directives; },
     setScript(script: FakeScriptRule[]) { state.script = script; },
     setOnTurn(fn: FakeCoreOptions["onTurn"] | null) { state.onTurn = fn ?? null; },
@@ -379,8 +406,7 @@ export async function startFakeCore(options: FakeCoreOptions) {
       return stopped ??= (async () => {
         stopping = true;
         for (const holder of holders.values()) holder.abort?.abort(new Error("fixture stopped"));
-        for (const socket of sockets) socket.destroy();
-        await new Promise<void>(resolve => server.close(() => resolve()));
+        await unlisten();
         if (ownedDir) rmSync(ownedDir, { recursive: true, force: true });
       })();
     },
@@ -411,6 +437,11 @@ export interface CoreSetupOptions {
   herdrSocket?: string;
   /** 새 프로젝트를 만들지 않고 이 홈에 이미 있는 프로젝트를 쓴다(같은 홈으로 다시 띄울 때). */
   projectId?: string;
+  /**
+   * 운영 조립(bin/iamceo.ts)처럼 서버를 띄운 뒤 initializeRuntime()·recover() 를 부른다(감시 시작·연결 확인·틱 시작). 기본 true.
+   * false 면 감시와 틱이 한 번도 시작되지 않은 총괄이다. 복구 전의 상태를 손으로 만들고 recover() 를 직접 부르는 시험에만 쓴다.
+   */
+  live?: boolean;
 }
 const FAST_RUNNER: NonNullable<CoreRunnerDeps> = { pollMs: 20, rpcTimeoutMs: 2000, sendTimeoutMs: 2000, contextTimeoutMs: 300 };
 
@@ -422,10 +453,10 @@ export async function coreSetup(opts: CoreSetupOptions = {}): Promise<CoreEnv> {
   const base = await assemble(opts);
   return {
     ...base,
-    /** 서버를 내리고 같은 홈·같은 core 에 새 서버를 붙인다. recover() 는 부르지 않는다(시험이 고른다). */
+    /** 서버를 내리고 같은 홈·같은 core 에 새 서버를 붙인다. 운영의 재시작처럼 initializeRuntime()·recover() 까지 돈 뒤에 돌아온다(live: false 로 끌 수 있다). */
     async restart(next = {}) {
       await base.stopServer();
-      return coreSetup({ timings: opts.timings, agentTools: opts.agentTools, notifier: opts.notifier, runnerDeps: opts.runnerDeps, herdrSocket: opts.herdrSocket, ...next, home: base.home, core: base.core, projectId: base.project.id });
+      return coreSetup({ timings: opts.timings, agentTools: opts.agentTools, notifier: opts.notifier, runnerDeps: opts.runnerDeps, herdrSocket: opts.herdrSocket, live: opts.live, ...next, home: base.home, core: base.core, projectId: base.project.id });
     },
   };
 }
@@ -465,6 +496,8 @@ async function assemble(opts: CoreSetupOptions) {
   const server: RunningServer = await startServer({ config, store, bus, orch });
   const base = server.urls[0]!;
   orch.setServerUrl(base);
+  // 운영과 같은 순서: 서버 주소를 알린 뒤 감시를 시작하고(initializeRuntime) 복구를 돌려 틱을 시작한다(recover).
+  if (opts.live ?? true) { await orch.initializeRuntime(); await orch.recover(); }
   let closed: Promise<void> | null = null;
   /** 서버만 내린다. 터미널은 core 에 남는다(운영에서 IAMCEO 를 내릴 때와 같다). */
   const stopServer = () => closed ??= (async () => { await orch.shutdown(); await server.stop(); db.close(); })();

@@ -26,6 +26,10 @@ Only changes that matter to users, by version. The full history is in `git log`.
 - **Tailscale 주소는 확인한 뒤에 엽니다.** 주소가 Tailscale 대역이라는 이유만으로 열지 않고, 실제 Tailscale 연결의 주소로 확인됐을 때만 엽니다. 확인하지 못하면 이 Mac 안에서만 엽니다. 그럴 때는 `~/.iamceo/config.json`의 `hosts`에 주소를 직접 적으면 열립니다.
 - **샘플 화면을 정리했습니다.** '샘플로 둘러보기'가 오류나 막힘 없이 잘 돌아가는 회사의 모습을 보여 줍니다.
 - **예전 실행 방식을 지웠습니다.** 팀장은 모두 실행 엔진(herdr-core)에서 띄웁니다. 예전 방식 두 가지(herdr, headless)의 코드와, 그 방식에만 있던 '기존 터미널 세션 편입'을 없앴습니다. 서버는 이제 개인 herdr에 아무것도 묻지 않습니다. 앱 화면은 그대로이고, 예전 방식의 세션이 남은 팀장은 전처럼 보류됩니다.
+- **말을 걸기 전의 팀장도 설정을 바꾸고 보관할 수 있습니다.** 총괄만 시작하고 아직 말을 걸지 않은 상태에서 모델을 바꾸면 그 세션이 오류와 함께 꺼지던 문제를 고쳤습니다(새 세션으로 엽니다). 그런 프로젝트와, 터미널이 꺼진 팀장이 섞인 프로젝트도 이제 보관됩니다. 입력칸에 쓰던 글이 있으면 전처럼 보관하지 않습니다.
+- **팀장이 끝내 보고하지 않으면 총괄에게도 알립니다.** 팀장이 보고 없이 일을 끝내고 보고를 다시 요청해도 답이 없으면, 홈 화면 알림과 함께 그 프로젝트의 총괄을 깨워 한 번 알립니다. 전에는 대표가 알림을 보고 말을 걸 때까지 프로젝트가 멈춰 있었습니다.
+- **가져온 팀원 자리를 깨울 수 있습니다.** `iamceo import`로 가져온 팀원 자리는 총괄을 시작한 뒤 일을 맡기거나 깨우면 새 세션으로 열립니다. 전에는 영어 오류와 함께 열리지 않았습니다.
+- **꺼진 터미널의 화면 조회가 오류를 내지 않습니다.** 잠들었거나 터미널이 끝난 팀장의 화면을 조회하면 서버 오류 대신 빈 화면으로 답합니다. 예전 실행 방식의 세션이 남은 팀장도 명부에서 닫을 수 있습니다.
 - **문서.** [보안 설명서](docs/security.md)와 [취약점 신고 안내](SECURITY.md)를 더했습니다. README의 iPhone 알림과 권한 방식 서술을 실제 동작에 맞췄고, 개인정보 처리방침에 빠져 있던 네 가지를 적었습니다. 일을 맡는 세션의 이름을 앱 화면과 같은 '팀장'으로 맞췄습니다.
 
 ### 0.2.2 — 2026-11-10
@@ -85,6 +89,10 @@ The stability pass of 2026-11-11 and the completeness pass that followed. Not re
 - **A Tailscale address is confirmed before the server listens on it.** An address is not opened just because it is in Tailscale's range, only when it is confirmed to belong to a real Tailscale connection. If it cannot be confirmed, the server opens on this Mac only; writing the address into `hosts` in `~/.iamceo/config.json` opens it.
 - **The sample tour is tidied up.** "샘플로 둘러보기" (Look around with a sample) now shows a company that is running well, without errors or stuck members.
 - **The old ways of running sessions are gone.** All staff now run on the bundled engine (herdr-core). The code for the two earlier modes (herdr and headless) is removed, along with the one feature only they had: taking over a terminal session you had already opened. The server no longer queries your personal herdr. The app looks the same, and staff still holding a session from an earlier mode stay on hold as before.
+- **Staff you have not written to yet can be reconfigured and archived.** Changing the model right after starting the lead, before writing to it, used to switch that session off with an error; it now opens as a new session. Such a project, and a project with a staff member whose terminal has gone, can now be archived. Text left in an input box still blocks archiving, as before.
+- **The lead is told when a staff member never reports.** When a staff member ends a job without reporting and stays silent after being asked again, the server wakes that project's lead once to tell it, alongside the Home notice. Before, the project sat idle until you saw the notice and wrote something.
+- **Imported staff slots can be woken.** A slot brought in with `iamceo import` opens as a new session when you start the lead and then assign it work or wake it. Before, it failed with an English error.
+- **Reading the screen of a closed terminal no longer errors.** For a staff member who is asleep or whose terminal has ended, the screen request returns an empty screen instead of a server error. Staff still holding a session from an earlier mode can now be removed from the roster.
 - **Docs.** Added a [security overview](docs/security.en.md) and a [vulnerability reporting policy](SECURITY.md). The README now states how iPhone notifications and the permission mode really work, and the privacy policy lists four things it had left out.
 
 ### 0.2.2 — 2026-11-10

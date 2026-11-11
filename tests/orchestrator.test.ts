@@ -189,6 +189,8 @@ describe("턴 종료 처리", () => {
     const texts = t.texts();
     expect(texts.some((m) => m.title === "끝냄" && m.kind === "완료" && m.memberId === w.id)).toBe(true);
     expect(texts.some((m) => m.body === "턴마지막글")).toBe(false);
+    // 서버는 도구 호출에 답하기 전에 총괄에게 보고를 넘긴다. 총괄의 턴이 먼저 보일 수 있으므로 가짜 CLI 가 답을 받아 적을 때까지 기다린다.
+    await waitFor("도구 답", () => t.turns(w.id)[0]!.tools.length === 1);
     expect(t.turns(w.id)[0]!.tools).toMatchObject([{ name: "post", status: 200 }]);
   });
 
@@ -196,22 +198,35 @@ describe("턴 종료 처리", () => {
     const t = await setup();
     const lead = await conductor(t);
     const w = await worker(t);
-    await t.orch.assign(t.project.id, w.handle, { text: "@fake:post=하는중 @fake:postkind=진행 @fake:text=잠시" });
-    await waitFor("대기열", () => t.member(lead.id).queuedCount === 1 && t.store.listPending(lead.id)[0]);
-    // 달라진 점: 진행 글은 결과 보고가 아니다. core 에서는 서버가 '보고 보완'을 한 번 요청하고, 그래도 없으면 누락 글을 남긴다.
-    // 그 과정에서도 총괄은 깨지 않는다.
-    await waitFor("보고 보완 턴", () => t.turns(w.id).length === 2 && isReportNudge(t.turns(w.id)[1]!));
-    await waitFor("누락 글", () => t.texts().some((m) => m.kind === "시스템" && m.title === "결과 보고 누락"));
-    await t.idle(w.id);
-    await Bun.sleep(50);
-    expect(t.turns().filter((c) => c.prompt.includes("[보고")).length).toBe(0);
+    // 진행 글을 올린 턴을 잡아 둔다: 턴이 끝난 뒤의 일(보고 보완)과 섞이지 않게 진행 글만의 결과를 본다.
+    await t.orch.assign(t.project.id, w.handle, { text: "@fake:post=하는중 @fake:postkind=진행 @fake:text=잠시 @fake:hold" });
+    await waitFor("대기열", () => t.core.held(w.id) && t.member(lead.id).queuedCount === 1 && t.store.listPending(lead.id)[0]);
+    await Bun.sleep(50); // '없음'을 보는 대기.
+    expect(t.core.count("terminal.send")).toBe(1);
     expect(t.turns(lead.id)).toHaveLength(0);
     expect(t.member(lead.id).queuedCount).toBe(1);
     expect(t.store.listPending(lead.id)[0]!.wake).toBe(false);
+    // 달라진 점: 진행 글은 결과 보고가 아니다. core 에서는 서버가 '보고 보완'을 한 번 요청하고, 그래도 없으면 누락 글을 남긴다.
+    // 그때 일을 맡긴 총괄이 모른 채 멈추지 않게 총괄을 한 번 깨워 알린다. 쌓아 둔 진행 글은 그 깨움에 함께 간다.
+    t.core.release(w.id);
+    await waitFor("보고 보완 턴", () => t.turns(w.id).length === 2 && isReportNudge(t.turns(w.id)[1]!));
+    await waitFor("누락 글", () => t.texts().some((m) => m.kind === "시스템" && m.title === "결과 보고 누락"));
+    const notice = await waitFor("총괄에게 누락 알림", () => t.turns(lead.id).find((c) => c.prompt.includes("[시스템] 철수의 결과 보고가 보완 요청 뒤에도 없습니다")));
+    expect(notice.prompt).toContain("[보고 철수] 진행: 하는중");
+    expect(notice.at).toBeGreaterThanOrEqual(t.turns(w.id)[1]!.endedAt!);
+    await t.idle(w.id);
+    await t.idle(lead.id);
+    await Bun.sleep(50); // '없음'을 보는 대기.
+    // 알림은 한 번이다. 시스템 글로 깬 총괄에게는 보고 보완이 붙지 않고, 팀장에게도 보완을 다시 묻지 않는다.
+    expect(t.turns(lead.id)).toHaveLength(1);
+    expect(t.turns(w.id)).toHaveLength(2);
+    expect(t.turns().filter(isReportNudge)).toHaveLength(1);
+    expect(t.store.listPending(lead.id)).toHaveLength(0);
+    expect(t.texts().filter((m) => m.title === "결과 보고 누락")).toHaveLength(1);
   });
 
   // 옛 이름: "post 안 부른 직원: (자동) 표시로 대화에 남기고 총괄에게 보고"
-  test("post 안 부른 직원: 보고 보완을 한 번 요청하고, 그래도 없으면 '결과 보고 누락'을 남긴다", async () => {
+  test("post 안 부른 직원: 보고 보완을 한 번 요청하고, 그래도 없으면 '결과 보고 누락'을 남기고 총괄에게 알린다", async () => {
     const t = await setup();
     const lead = await conductor(t);
     const w = await worker(t);
@@ -228,6 +243,30 @@ describe("턴 종료 처리", () => {
     expect(t.texts().some((m) => m.body === "알아서끝냄")).toBe(false);
     expect(t.texts().some((m) => m.memberId === w.id)).toBe(false);
     expect(t.turns(lead.id).some((c) => c.prompt.includes("(자동) 알림"))).toBe(false);
+    // 일을 맡긴 총괄은 보고가 와야 깬다. 끝내 보고가 없으면 조용히 멈추므로 서버가 총괄을 한 번 깨워 알린다.
+    const notice = await waitFor("총괄에게 누락 알림", () => t.turns(lead.id).find((c) => c.prompt.startsWith("[시스템] 철수의 결과 보고가 보완 요청 뒤에도 없습니다(실행 ")));
+    const source = /^\[시스템\] 보고 보완: 실행 (\S+)의 결과만/.exec(t.turns(w.id)[1]!.prompt)![1]!;
+    expect(notice.prompt).toStartWith(`[시스템] 철수의 결과 보고가 보완 요청 뒤에도 없습니다(실행 ${source}). 기존 업무를 다시 시키기 전에 기존 변경과 진행 상태를 확인한 뒤 후속 지시를 결정하세요.\n#iamceo_`);
+    expect(t.store.listDeliveries(t.project.id).find((d) => d.memberId === lead.id && d.text.includes("보완 요청 뒤에도 없습니다"))).toMatchObject({ kind: "system", wake: true, status: "delivered" });
+    // 알림은 실행마다 한 번이고, 알림으로 깬 총괄이 보고 없이 끝내도 총괄에게 보고 보완을 묻지 않는다.
+    await t.idle(lead.id);
+    await Bun.sleep(60); // '없음'을 보는 대기.
+    expect(t.turns(lead.id)).toEqual([notice]);
+    expect(t.turns(w.id)).toHaveLength(2);
+    expect(t.turns().filter(isReportNudge)).toHaveLength(1);
+    expect(t.texts().filter((m) => m.title === "결과 보고 누락")).toHaveLength(1);
+  });
+
+  test("총괄 자신의 보고가 끝내 없으면 누락 글만 남긴다: 총괄에게 다시 알리지 않는다", async () => {
+    const t = await setup();
+    const lead = await conductor(t);
+    await t.orch.sendUserMessage(t.project.id, { text: "안녕 @fake:silent" });
+    await waitFor("보고 보완 턴", () => t.turns(lead.id).length === 2 && isReportNudge(t.turns(lead.id)[1]!));
+    await waitFor("누락 글", () => t.texts().some((m) => m.kind === "시스템" && m.title === "결과 보고 누락" && m.body.includes(lead.name)));
+    await t.idle(lead.id);
+    await Bun.sleep(60); // '없음'을 보는 대기.
+    expect(t.turns(lead.id)).toHaveLength(2);
+    expect(t.store.listDeliveries(t.project.id).some((d) => d.text.includes("보완 요청 뒤에도 없습니다"))).toBe(false);
   });
 
   // 옛 이름: "글 없는 턴은 아무것도 올리지 않는다"
@@ -289,8 +328,12 @@ describe("대기열·동시 상한", () => {
     expect(a.delivery.status).toBe("queued");
     t.store.enqueue({ projectId: t.project.id, memberId: w.id, kind: "system", text: "[시스템] 참고 사실", wake: false });
     expect(t.member(w.id).queuedCount).toBe(3);
-    // 일하는 중인 CLI 에는 넣지 않았다.
-    expect(t.turns(w.id)).toHaveLength(1);
+    // 일하는 중인 CLI 에는 넣지 않았다. 가짜 core 는 일하는 중에 온 글을 턴으로 적지 않으므로(busy 로 거절) 턴 수가 아니라
+    // 받은 terminal.send 수와 전달의 시도 횟수·봉투 수로 본다. 총괄이 넣으려 들지도 않았다.
+    await t.orch.pump(w.id);
+    expect(t.core.count("terminal.send")).toBe(1);
+    expect(t.store.listDispatches(w.id)).toHaveLength(1);
+    expect([a, b].map((x) => t.store.requireDelivery(x.delivery.id).attempts)).toEqual([0, 0]);
 
     expect(t.core.release(w.id)).toBe(true);
     await waitFor("묶음 턴", () => t.turns(w.id).length >= 2);
@@ -301,6 +344,9 @@ describe("대기열·동시 상한", () => {
     expect(bundled.indexOf("둘째")).toBeLessThan(bundled.indexOf("셋째"));
     expect(t.member(w.id).queuedCount).toBe(0);
     expect(t.store.requireDelivery(a.delivery.id).status).toBe("delivered");
+    // 구간 전체: core 가 받은 글은 모두 턴이 됐다(일하는 중에 거절된 글이 한 번도 없었다).
+    expect(t.core.count("terminal.send")).toBe(t.turns().length);
+    expect(t.store.listDispatches(w.id)).toHaveLength(2);
   });
 
   test("wake=false 만 있으면 보내지 않는다", async () => {
@@ -308,7 +354,7 @@ describe("대기열·동시 상한", () => {
     const w = await worker(t);
     t.store.enqueue({ projectId: t.project.id, memberId: w.id, kind: "system", text: "[시스템] 사실", wake: false });
     await t.orch.pump(w.id);
-    await Bun.sleep(60);
+    await Bun.sleep(60); // '없음'을 보는 대기.
     expect(t.turns().length).toBe(0);
     expect(t.member(w.id).queuedCount).toBe(1);
   });
@@ -469,7 +515,9 @@ describe("자동 압축", () => {
     await t.orch.assign(t.project.id, w.handle, { text: "하던 일 @fake:hold @fake:post=일끝" });
     await waitFor("일하는 중", () => t.core.held(w.id) && t.member(w.id).status === "working");
     await t.orch.memberCompact(w.id);
-    await Bun.sleep(80);
+    await Bun.sleep(80); // '없음'을 보는 대기.
+    // 일하는 중인 터미널에 온 글은 가짜 core 가 턴으로 적지 않는다. 받은 terminal.send 로 본다: /compact 를 넣으려 들지도 않았다.
+    expect(t.core.calls.filter((c) => c.method === "terminal.send").map((c) => String(c.params.text).startsWith("/compact"))).toEqual([false]);
     expect(t.turns(w.id).filter((c) => c.prompt.startsWith("/compact")).length).toBe(0);
     expect(t.turns(w.id)[0]!.outcome).toBe("running");
     expect(t.core.release(w.id)).toBe(true);
@@ -491,7 +539,8 @@ describe("자동 압축", () => {
 
 describe("재시작 복구", () => {
   test("재시작의 delivering은 부재로 추정하지 않고 뒤 지시도 막는다", async () => {
-    const t = await setup();
+    // live: false — 복구 전의 저장 상태를 손으로 만든 뒤 recover() 를 한 번만 돌린다.
+    const t = await setup({ live: false });
     const w = await worker(t);
     const stuck = t.store.enqueue({ projectId: t.project.id, memberId: w.id, kind: "instruction", text: "미확인 입력" });
     t.store.setDeliveryStatus(stuck.id, "delivering");
@@ -512,7 +561,7 @@ describe("재시작 복구", () => {
     expect(session).toBeTruthy();
     await t.orch.assign(t.project.id, w.handle, { text: "이어감" });
     await waitFor("세션 오류", () => t.member(w.id).status === "error");
-    await Bun.sleep(100);
+    await Bun.sleep(100); // '없음'을 보는 대기.
     expect(t.member(w.id).lastError).toBe("No conversation found with session ID: x");
     expect(t.turns()).toHaveLength(1);
     expect(t.runs(w.id)).toHaveLength(1);
@@ -548,7 +597,7 @@ describe("runnerEnabled=false 와 총괄 시작", () => {
     const lead = await conductor(t);
     let project: Project = t.store.patchProject(t.project.id, { runnerEnabled: false });
     await t.orch.onProjectPatched(project, { runnerEnabled: false });
-    const m = await t.orch.sendUserMessage(t.project.id, { text: "기다려 @fake:silent", targetMemberId: w.id });
+    const m = await t.orch.sendUserMessage(t.project.id, { text: "기다려 @fake:silent @fake:hold", targetMemberId: w.id });
     // 달라진 점: 옛 실행기에서는 보내기 호출이 돌아올 때 이미 보류였다. core 직원의 전달 펌프는 실행 꺼짐을 보기 전에
     // 터미널 조작권 정리를 한 번 기다리므로, 호출은 '대기'로 돌아오고 곧바로 보류로 바뀐다.
     expect(m.delivery).toBe("queued");
@@ -561,10 +610,16 @@ describe("runnerEnabled=false 와 총괄 시작", () => {
     project = t.store.patchProject(t.project.id, { runnerEnabled: true });
     await t.orch.onProjectPatched(project, { runnerEnabled: true });
     await waitFor("전달", () => t.turns(w.id).some((c) => c.prompt.includes("기다려")));
-    await t.idle(w.id);
-    expect(t.store.requireMessage(m.id).delivery).toBe("delivered");
+    await waitFor("수신 확인", () => t.core.held(w.id) && t.store.requireMessage(m.id).delivery === "delivered");
     // wake=false 알림은 보류에서 대기로 돌아와 다음 깨움을 기다린다.
+    // (팀장의 턴을 잡아 둔 채로 본다. 보고 없이 끝나면 보고 보완을 거쳐 총괄이 누락 알림으로 깨어나 이 알림도 함께 받는다.)
     expect(t.store.listPending(lead.id)[0]).toMatchObject({ status: "queued", wake: false });
+    expect(t.turns(lead.id)).toHaveLength(0);
+    t.core.release(w.id);
+    const woken = await waitFor("다음 깨움", () => t.turns(lead.id).find((c) => c.prompt.includes("[시스템] 철수의 결과 보고가 보완 요청 뒤에도 없습니다")));
+    await t.idle(lead.id);
+    expect(t.turns(lead.id)).toEqual([woken]);
+    expect(t.store.listPending(lead.id)).toHaveLength(0);
   });
 
   test("createProject: goal·startConductor", async () => {
@@ -595,9 +650,11 @@ describe("잠재우기·다시 열기", () => {
     expect(slept.status).toBe("asleep");
     expect(slept.sessionId).toBeTruthy();
     expect(t.runner.isBusy(w.id)).toBe(false);
-    await Bun.sleep(50);
+    await Bun.sleep(50); // '없음'을 보는 대기.
     expect(t.member(w.id).status).toBe("asleep");
-    expect(t.store.listPending(w.id)[0]).toMatchObject({ status: "held", holdReason: "asleep" });
+    expect(t.store.listPending(w.id)[0]).toMatchObject({ status: "held", holdReason: "asleep", attempts: 0 });
+    // 끝난 터미널에 온 글은 가짜 core 가 턴으로 적지 않는다. 받은 terminal.send 수로 본다.
+    expect(t.core.count("terminal.send")).toBe(1);
     expect(t.turns().length).toBe(1);
     // core 에서는 재우면 그 터미널이 끝난다(돌던 턴도 함께). 세션 ID 는 남아 깨울 때 이어 연다.
     expect(t.core.terminals().find((x) => x.address === terminal)!.state).toBe("finished");
@@ -622,6 +679,8 @@ describe("잠재우기·다시 열기", () => {
     const firstTerminal = t.member(w.id).paneId!;
     await t.orch.memberSleep(w.id);
     expect(t.member(w.id).status).toBe("asleep");
+    // 재우면 core 의 터미널이 끝난다(headless 는 턴 사이에 프로세스가 없어 끝낼 것이 없었다).
+    expect(t.core.terminals().find((x) => x.address === firstTerminal)!.state).toBe("finished");
     t.store.enqueue({ projectId: t.project.id, memberId: w.id, kind: "system", text: "[시스템] 사실", wake: false });
     await t.orch.pump(w.id);
     expect(t.member(w.id).status).toBe("asleep");
@@ -691,7 +750,7 @@ describe("잠재우기·다시 열기", () => {
     expect(t.runner.isBusy(w.id)).toBe(false);
     expect(t.store.requireDecision(d.id).status).toBe("closed");
     expect(t.store.requireMessage(q.id).delivery).toBe("failed");
-    await Bun.sleep(50);
+    await Bun.sleep(50); // '없음'을 보는 대기.
     expect(t.turns().length).toBe(1);
   });
 
@@ -728,13 +787,16 @@ describe("ask", () => {
     expect(t.store.listPending(lead.id).some((d) => d.text.includes("대표에게 질문했습니다") && !d.wake)).toBe(true);
 
     // 열린 결재는 보고로 친다: 답이 오기 전까지 '보고 보완' 턴이 붙지 않는다.
-    await Bun.sleep(60);
+    await Bun.sleep(60); // '없음'을 보는 대기.
     expect(t.turns(w.id)).toHaveLength(1);
     const answered = await t.orch.answerDecision(decision.id, { choice: "a", note: "조심해서" });
     expect(["answered", "delivered"]).toContain(answered.status);
     await waitFor("결재 수신", () => t.store.requireDecision(decision.id).status === "delivered");
     const turn = await waitFor("답 전달", () => t.turns(w.id).find((c) => c.prompt.includes("[대표 답(원문)")));
     expect(turn.prompt).toStartWith(`[대표 답(원문) '배포할까요'] "그렇게 하세요"(추천) 메모 "조심해서" #${decision.id}\n#iamceo_`);
+    // 답은 새로 띄운 터미널이 아니라 결재를 올린 그 터미널의 다음 턴으로 들어간다.
+    expect(turn.terminal).toBe(t.turns(w.id)[0]!.terminal);
+    expect(t.runs(w.id)).toHaveLength(1);
     // 총괄에게는 wake=false 알림.
     // 총괄의 다른 턴에 묶여 이미 나갔을 수 있어 대기 목록이 아니라 전달 기록 전체를 본다.
     const notices = t.store.db.query<{ text: string; wake: number }, [string]>("SELECT text, wake FROM deliveries WHERE member_id = ?").all(lead.id);
@@ -803,7 +865,7 @@ describe("ask", () => {
     const count = t.turns().length;
     expect(t.core.release(w.id)).toBe(true);
     await t.idle(w.id);
-    await Bun.sleep(80);
+    await Bun.sleep(80); // '없음'을 보는 대기.
     expect(t.turns().length).toBe(count);
     expect(t.turns().some((c) => c.prompt.includes("도장 찍기"))).toBe(false);
   });
@@ -813,6 +875,8 @@ describe("ask", () => {
 // 전달·턴·압축·다시 열기가 주제인 시험은 위의 setup()(실제 CoreRunner)으로 돈다.
 class ScriptedRunner implements Runner {
   readonly kind: Backend = "core";
+  /** 운영의 CoreRunner 와 같다: 돌고 있는 턴에 끼워 넣지 못한다. 급한 글도 턴이 끝난 뒤 나간다. */
+  readonly interjects = false;
   store: Store | null = null;
   results: SendResult[] = [];
   sent: { text: string; urgent: boolean }[] = [];
@@ -912,33 +976,43 @@ describe("'내 답 기다림'", () => {
     const second = (await t.orch.registerAsk(t.member(w.id), { title: "둘째 물음", options: [{ k: "a", label: "네" }] })).decision;
     expect(t.member(w.id).status).toBe("waiting");
     // CoreRunner 가 일하는 중인 터미널을 계속 관측해도 waiting 을 지킨다.
-    await Bun.sleep(80);
+    await Bun.sleep(80); // '없음'을 보는 대기.
     expect(t.member(w.id).status).toBe("waiting");
     await t.orch.answerDecision(first.id, { choice: "a" });
     expect(t.member(w.id).status).toBe("waiting");
     await t.orch.closeAsk(t.member(w.id), { id: second.id, kind: "obsolete", reason: "필요 없어짐" });
     expect(t.member(w.id).status).toBe("working");
     // 일하는 중인 CLI 에는 답을 끼워 넣지 않는다. 턴이 끝나면 들어간다.
-    expect(t.turns(w.id)).toHaveLength(1);
+    // (가짜 core 는 일하는 중에 온 글을 턴으로 적지 않는다. 받은 terminal.send 수와 답 전달의 시도 횟수로 본다.)
+    await t.orch.pump(w.id);
+    const answer = t.store.listPending(w.id).find((d) => d.kind === "answer" && d.refId === first.id)!;
+    expect(answer).toMatchObject({ status: "queued", attempts: 0 });
+    expect(t.core.count("terminal.send")).toBe(1);
+    expect(t.store.listDispatches(w.id)).toHaveLength(1);
     expect(t.core.release(w.id)).toBe(true);
     await waitFor("답 전달", () => t.turns(w.id).some((c) => c.prompt.includes("[대표 답(원문) '첫 물음']")));
     await t.idle(w.id);
+    expect(t.core.count("terminal.send")).toBe(t.turns().length);
   });
 });
 
 describe("승인 창 답", () => {
-  const prompt: ApprovalPrompt = {
-    title: "Bash command",
-    body: "rm -rf out",
-    question: "Do you want to proceed?",
-    options: [{ n: 1, label: "Yes", reject: false }, { n: 2, label: "No", reject: true }],
-    fingerprint: "abcdef0123456789abcdef01",
-  };
+  // CoreRunner 가 돌려주는 승인 창은 폴더 신뢰 창 한 가지다(server/runner/core-approval.ts). 권한 승인 창(Bash command 등)을 읽던 해석기는
+  // 옛 실행기와 함께 지워졌다. 아래 시험은 모두 폴더 신뢰 창 모양을 쓴다: 1번 "No, exit"(거절, CLI 가 끝난다), 2번 "Yes, I trust this folder".
+  /** Claude Code 가 실제로 그리는 폴더 신뢰 창(2.1.319). selected 는 ❯ 가 놓인 줄(0 = No, exit). */
+  const trustScreen = (cwd: string, selected = 0) => ` Accessing workspace:\n ${cwd}\n Quick safety check: Is this a project you created or one you trust?\n ${selected === 0 ? "❯" : " "} No, exit\n ${selected === 1 ? "❯" : " "} Yes, I trust this folder\n Enter to confirm · Esc to cancel\n`;
+  /** 띄운 CLI 가 준비를 알리지 않고 폴더 신뢰 창 앞에 서 있다. 실제 CoreRunner 가 화면을 읽어 승인 창으로 돌려준다. */
+  async function atTrustDialog(t: Env, w: Member, selected = 0): Promise<ApprovalPrompt> {
+    t.core.setStatus(w.id, null);
+    t.core.setScreen(w.id, trustScreen(t.member(w.id).cwd ?? t.project.cwd, selected));
+    await waitFor("폴더 신뢰 창 앞", () => t.member(w.id).status === "blocked" && t.member(w.id).blockedReason === "setup" && t.member(w.id).statusObservation?.error?.code === "folder_trust");
+    return (await t.orch.memberApproval(w.id))!;
+  }
 
   test("core setup 근거는 처음 blocked로 바뀔 때도 보존하고 같은 승인 API에서 stale·lease는 409, 종료는 offline", async () => {
     const t = scripted();
     const w = (await t.orch.addMember(t.project.id, { name: "신뢰 확인", handle: "trust" })).member;
-    const trust: ApprovalPrompt = { ...prompt, title: "폴더 신뢰 확인", body: t.home,
+    const trust: ApprovalPrompt = { title: "폴더 신뢰 확인", body: t.home, question: "Is this a project you created or one you trust?", fingerprint: "abcdef0123456789abcdef01",
       options: [{ n: 1, label: "No, exit", reject: true }, { n: 2, label: "Yes, I trust this folder", reject: false }] };
     t.runner.approvalPrompt = trust;
     t.runner.emit({ type: "status", memberId: w.id, status: "blocked", blockedReason: "setup",
@@ -958,39 +1032,76 @@ describe("승인 창 답", () => {
     expect(t.store.listActivity(w.id).some(a => a.text.includes("No, exit"))).toBe(true);
   });
 
-  test("거절하며 남긴 말은 창이 닫힌 뒤 대표가 직접 보낸 글로 들어가고, 고른 것은 활동에 남는다", async () => {
-    const t = scripted();
-    const w = (await t.orch.addMember(t.project.id, { name: "영희", handle: "yh" })).member;
-    t.runner.emit({ type: "status", memberId: w.id, status: "blocked" });
-    expect(t.store.requireMember(w.id).status).toBe("blocked");
-    t.runner.approvalPrompt = prompt;
-    expect(await t.orch.memberApproval(w.id)).toEqual(prompt);
-
-    t.runner.answerResult = { ok: true, prompt, chosen: prompt.options[1]! };
-    await t.orch.answerApproval(w.id, { fingerprint: prompt.fingerprint, option: 2, note: "out 말고 tmp 를 지워" });
-    expect(t.runner.answers).toEqual([{ fingerprint: prompt.fingerprint, option: 2 }]);
-    expect(t.store.listActivity(w.id).map((a) => a.text)).toContain("대표가 승인 창에서 2번 'No' 을 골랐습니다 · Bash command: rm -rf out");
-    const msg = t.store.listMessages(t.project.id).find((m) => m.body === "out 말고 tmp 를 지워")!;
-    expect(msg.targetMemberId).toBe(w.id);
-    // 거절 직후에는 아직 승인 창 상태라 보류였다가, 칸이 쉬면 들어간다.
-    t.runner.emit({ type: "status", memberId: w.id, status: "idle" });
-    await waitFor("거절 이유 전달", () => t.runner.sent.find((x) => x.text.includes("out 말고 tmp 를 지워")));
+  // 옛 시험: "거절하며 남긴 말은 창이 닫힌 뒤 대표가 직접 보낸 글로 들어가고, 고른 것은 활동에 남는다" — 권한 승인 창(Bash command)을
+  // 거절하면 창만 닫히고 CLI 는 쉬는 상태가 되어 남긴 말이 그 세션에 들어갔다. core 의 거절은 폴더 신뢰 창의 "No, exit" 라 CLI 가 끝난다.
+  test("실제 core 터미널: 폴더 신뢰 창을 거절(No, exit)하면 CLI 가 끝나고 고른 것은 활동에 남는다. 남긴 말은 대표가 직접 보낸 글이 되어 그 팀장을 새 세션으로 다시 연다", async () => {
+    const t = await setup();
+    const w = await worker(t);
+    const terminal = t.member(w.id).paneId!;
+    const session = t.member(w.id).sessionId;
+    const prompt = await atTrustDialog(t, w);
+    expect(prompt).toEqual({ title: "폴더 신뢰 확인", body: `${t.home}\n이 폴더에서 AI가 파일을 읽고 고치고 실행할 수 있게 됩니다`, question: "Is this a project you created or one you trust?",
+      options: [{ n: 1, label: "No, exit", reject: true }, { n: 2, label: "Yes, I trust this folder", reject: false }], fingerprint: expect.stringMatching(/^[0-9a-f]{24}$/) });
+    // 실제 CLI 는 "No, exit" 에서 Enter 를 받으면 끝난다.
+    t.core.onKeys((_terminal, keys) => { if (keys.includes("enter")) t.core.exit(w.id, 0); });
+    await t.orch.answerApproval(w.id, { fingerprint: prompt.fingerprint, option: 1, note: "다른 폴더에서 다시 열어 주세요" });
+    // 이미 ❯ 가 놓인 줄이라 Enter 만 누른다.
+    expect(t.core.keys).toEqual([{ terminal, keys: ["enter"] }]);
+    expect(t.store.listActivity(w.id).map((a) => a.text)).toContain(`대표가 승인 창에서 1번 'No, exit' 을 골랐습니다 · 폴더 신뢰 확인: ${t.home} · 이 폴더에서 AI가 파일을 읽고 고치고 실행할 수 있게 됩니다`);
+    // 거절하며 남긴 말은 대표가 그 팀장에게 직접 보낸 글로 대화에 남는다.
+    const msg = t.store.listMessages(t.project.id).find((m) => m.body === "다른 폴더에서 다시 열어 주세요")!;
+    expect(msg).toMatchObject({ mine: true, targetMemberId: w.id });
+    // CLI 가 끝난 것이 기록에 남고, 끝난 터미널에는 아무 글도 넣지 않았다.
+    await waitFor("종료 기록", () => t.store.listActivity(w.id).some((a) => a.kind === "error" && a.text === "초기/실행 종료: exited (exit_code=0)"));
+    expect(t.core.terminals().find((x) => x.address === terminal)).toMatchObject({ state: "finished", reason: "exited", exit_code: 0 });
+    // 달라진 점: 옛 권한 승인 창은 거절해도 CLI 가 살아 있어 남긴 말이 그 세션에 들어갔다. 폴더 신뢰 창의 거절은 CLI 를 끝낸다.
+    // 남긴 말은 깨우는 글이라 서버가 그 팀장을 다시 연다: 턴이 없던 세션이라 이어 열지 않고 새 세션이며, 남긴 말은 그 세션의 첫 턴으로 들어간다.
+    // (가짜 CLI 는 새로 뜨면 곧바로 준비를 알린다. 실제 CLI 는 같은 폴더에서 폴더 신뢰 창을 다시 띄울 것이다.)
+    const turn = await waitFor("남긴 말 전달", () => t.turns(w.id).find((c) => c.prompt.includes('[대표 직접] "다른 폴더에서 다시 열어 주세요"')));
+    await waitFor("수신 확인", () => t.store.requireMessage(msg.id).delivery === "delivered");
+    expect(turn.terminal).not.toBe(terminal);
+    expect(t.runs(w.id)).toHaveLength(2);
+    expect(t.runs(w.id)[1]).toMatchObject({ terminal: turn.terminal, resumeFlag: null });
+    expect(t.runs(w.id)[1]!.sessionFlag).not.toBe(session);
+    expect(t.turns().filter((c) => c.terminal === terminal)).toHaveLength(0);
+    expect(t.core.count("terminal.send")).toBe(t.turns().length);
   });
 
-  test("승인이면 남긴 말을 보내지 않고, 실행기가 거절하면 409 와 이유", async () => {
-    const t = scripted();
-    const w = (await t.orch.addMember(t.project.id, { name: "민수", handle: "ms" })).member;
-    t.runner.answerResult = { ok: true, prompt, chosen: prompt.options[0]! };
-    await t.orch.answerApproval(w.id, { fingerprint: prompt.fingerprint, option: 1, note: "무시됨" });
+  test("실제 core 터미널: 폴더 신뢰 창을 승인(Yes)하면 남긴 말을 보내지 않고 CLI 가 쉬는 상태로 풀린다. 실행기가 거절하면 409 와 이유", async () => {
+    const t = await setup();
+    const w = await worker(t);
+    const terminal = t.member(w.id).paneId!;
+    const prompt = await atTrustDialog(t, w);
+    // 실제 CLI 는 "Yes" 에서 Enter 를 받으면 창을 닫고 준비를 알린다.
+    t.core.onKeys((_terminal, keys) => { if (keys.includes("enter")) { t.core.setScreen(w.id, null); t.core.setStatus(w.id, { state: "idle", app: "claude-code" }); } });
+    await t.orch.answerApproval(w.id, { fingerprint: prompt.fingerprint, option: 2, note: "무시됨" });
+    // ❯ 는 1번 줄에 있었다: 한 칸 내려 Enter.
+    expect(t.core.keys).toEqual([{ terminal, keys: ["down", "enter"] }]);
+    expect(t.store.listActivity(w.id).map((a) => a.text)).toContain(`대표가 승인 창에서 2번 'Yes, I trust this folder' 을 골랐습니다 · 폴더 신뢰 확인: ${t.home} · 이 폴더에서 AI가 파일을 읽고 고치고 실행할 수 있게 됩니다`);
+    await waitFor("풀림", () => t.member(w.id).status === "idle" && t.member(w.id).blockedReason === null);
     expect(t.store.listMessages(t.project.id).some((m) => m.body === "무시됨")).toBe(false);
+    expect(t.store.listDeliveries(t.project.id).some((d) => d.text.includes("무시됨"))).toBe(false);
+    expect(await t.orch.memberApproval(w.id)).toBeNull();
+    // 창 앞이 아닌데 답하면 409: 읽히는 승인 창이 없다.
+    const none = await t.orch.answerApproval(w.id, { fingerprint: prompt.fingerprint, option: 2 }).catch((e) => e);
+    expect(none).toBeInstanceOf(ApiError);
+    expect(none.status).toBe(409);
+    expect(none.message).toContain("승인 창으로 읽히지 않는 창입니다");
 
-    t.runner.answerResult = { ok: false, reason: "changed", current: prompt };
-    const err = await t.orch.answerApproval(w.id, { fingerprint: "0".repeat(24), option: 1 }).catch((e) => e);
-    expect(err).toBeInstanceOf(ApiError);
-    expect(err.status).toBe(409);
-    expect(err.message).toContain("창이 바뀌었습니다");
-    t.runner.answerResult = { ok: false, reason: "no_option" };
-    expect((await t.orch.answerApproval(w.id, { fingerprint: prompt.fingerprint, option: 5 }).catch((e) => e)).status).toBe(400);
+    // 창이 다시 떴다(❯ 가 2번 줄). 앞서 본 창의 지문으로 답하면 409 '창이 바뀌었습니다', 없는 번호는 400.
+    t.core.onKeys(null);
+    const again = await atTrustDialog(t, w, 1);
+    expect(again.fingerprint).not.toBe(prompt.fingerprint);
+    const stale = await t.orch.answerApproval(w.id, { fingerprint: prompt.fingerprint, option: 2 }).catch((e) => e);
+    expect(stale).toBeInstanceOf(ApiError);
+    expect(stale.status).toBe(409);
+    expect(stale.message).toContain("창이 바뀌었습니다");
+    const missing = await t.orch.answerApproval(w.id, { fingerprint: again.fingerprint, option: 5 }).catch((e) => e);
+    expect(missing).toBeInstanceOf(ApiError);
+    expect(missing.status).toBe(400);
+    // 거절된 답으로는 키를 누르지 않았다.
+    expect(t.core.keys).toHaveLength(1);
+    expect(t.core.count("terminal.send")).toBe(0);
   });
 });
 
@@ -999,19 +1110,156 @@ describe("전달 실패 사유", () => {
     return (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
   }
 
-  test.each(["blocked", "input_busy", "down", "gone", "error"] as const)("%s 결과만으로 재전송하지 않고 직원 fence를 유지한다", async reason => {
+  // 옛 시험은 blocked·input_busy·down·gone·error 다섯 사유를 쓴 여부 표시(deliveryEffect) 없이 돌려주고 모두 '결과 모름'으로 단정했다.
+  // CoreRunner 는 그런 모양을 내지 않는다(server/runner/core.ts 의 send): blocked·input_busy·down·gone 은 늘 "쓰지 않음"(not_written)과
+  // 함께 오고, 결과를 모르는 실패는 terminal.send 를 보낸 뒤 답을 못 받았을 때의 error·unknown 한 가지다.
+  // 손으로 짠 실행기에는 그 한 가지만 남기고(실제 CoreRunner 로는 바로 아래 "글을 넣은 RPC 의 답이 오지 않으면…" 이 본다),
+  // 나머지 넷은 그 아래에서 실제 CoreRunner 를 거쳐 사유별 보류를 본다.
+  test("결과를 모르는 실패(error·unknown)만으로 재전송하지 않고 직원 fence를 유지한다", async () => {
     const t = scripted();
     const w = await ready(t);
-    t.runner.results = [{ ok: false, reason, retryable: true }];
+    t.runner.results = [{ ok: false, reason: "error", retryable: false, deliveryEffect: "unknown", detail: "Delivery may have occurred; do not resend automatically. terminal.send: no reply within 2000ms" }];
     const message = await t.orch.sendUserMessage(t.project.id, { text: "미확인", targetMemberId: w.id });
     await t.orch.pump(w.id);
     expect(t.store.requireMessage(message.id).delivery).toBe("held");
-    expect(t.store.listPending(w.id)[0]!.holdReason).toBe("delivery_unknown");
+    expect(t.store.listPending(w.id)[0]).toMatchObject({ status: "held", holdReason: "delivery_unknown", attempts: 1 });
     t.runner.emit({ type: "status", memberId: w.id, status: "idle" });
     await t.orch.pump(w.id);
     await t.orch.deliveryRecovery.tick();
     expect(t.runner.sent).toHaveLength(0);
     expect(t.orch.deliveryRecovery.fenced(w.id)).toBe(true);
+  });
+
+  /**
+   * 총괄이 다음 봉투를 실행기에 넘기는 순간에 상황을 만들고, 실제 CoreRunner 가 돌려준 결과를 모은다.
+   * 미리 만들어 두면 상태 감시가 먼저 알아채 전달이 실행기까지 가지 않을 수 있다. 넘기는 순간에 만들면 늘 CoreRunner 의 판정을 거친다.
+   */
+  function onNextSend(t: Env, arm: () => void | Promise<void>): SendResult[] {
+    const results: SendResult[] = [];
+    const send = t.runner.send.bind(t.runner);
+    let pending: typeof arm | null = arm;
+    t.runner.send = async (...args) => {
+      const now = pending;
+      pending = null;
+      await now?.();
+      const result = await send(...args);
+      results.push(result);
+      return result;
+    };
+    return results;
+  }
+
+  test("실제 core 터미널: 승인 창 앞(blocked)이면 쓰지 않고 '승인 창 앞'으로 보류한다. fence 는 걸지 않고, 창이 풀리면 한 번만 넣는다", async () => {
+    const t = await setup();
+    const w = await worker(t);
+    const results = onNextSend(t, () => t.core.setStatus(w.id, { state: "blocked", kind: "permission" }));
+    const message = await t.orch.sendUserMessage(t.project.id, { text: "창 앞 @fake:post=받음", targetMemberId: w.id });
+    await waitFor("보류", () => t.store.requireMessage(message.id).delivery === "held");
+    expect(results).toEqual([{ ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: `Complete the CLI dialog with iamceo attach ${w.id}` }]);
+    expect(t.store.requireMessage(message.id).deliveryNote).toBe("승인 창 앞에서 멈춤");
+    expect(t.store.listPending(w.id)[0]).toMatchObject({ status: "held", holdReason: "blocked", attempts: 1 });
+    // 실행기가 방금 읽은 까닭(승인 창)을 펌프가 들고 있던 옛 명부 값으로 덮어 '확인 안 됨'으로 만들지 않는다.
+    expect(t.member(w.id)).toMatchObject({ status: "blocked", blockedReason: "permission" });
+    // 쓰지 않은 것이 확정됐으므로 결과 모름의 fence 는 없다. 창이 열려 있는 동안은 다시 넣지도 않는다.
+    expect(t.orch.deliveryRecovery.fenced(w.id)).toBe(false);
+    await t.orch.pump(w.id);
+    await t.orch.deliveryRecovery.tick();
+    expect(results).toHaveLength(1);
+    expect(t.core.count("terminal.send")).toBe(0);
+    t.core.setStatus(w.id, { state: "idle" });
+    await waitFor("전달", () => t.store.requireMessage(message.id).delivery === "delivered");
+    await t.idle(w.id);
+    expect(results.at(-1)).toMatchObject({ ok: true });
+    expect(t.core.count("terminal.send")).toBe(1);
+    expect(t.turns(w.id).map((c) => c.prompt.includes("창 앞"))).toEqual([true]);
+  });
+
+  test("실제 core 터미널: 입력칸에 쓰던 글(input_busy)이 있으면 쓰지 않고 몇 번 다시 보다가 '입력칸이 비기를 기다림'으로 보류한다. 쓰던 글은 그대로 두고, 비면 한 번만 넣는다", async () => {
+    // 다시 보는 간격만 줄인다. 운영 기본값(5초 간격, 한도 60초)에서도 거절 다섯 번이 한도보다 먼저 찬다.
+    const t = await setup({ timings: { retryMs: 20, inputBusyRetryMs: 20 } });
+    const w = await worker(t);
+    const results = onNextSend(t, () => t.core.setDraft(w.id, "사람이 쓰던 글"));
+    const message = await t.orch.sendUserMessage(t.project.id, { text: "입력칸 @fake:post=받음", targetMemberId: w.id });
+    await waitFor("보류", () => t.store.requireMessage(message.id).delivery === "held");
+    // 거절이 다섯 번 이어지면 그만 두드리고 길게(30초 뒤) 다시 본다. 그 전에 입력칸이 비면 바로 나간다.
+    expect(results).toHaveLength(5);
+    for (const result of results) expect(result).toEqual({ ok: false, reason: "input_busy", retryable: false, deliveryEffect: "not_written", detail: "A user draft is present; IAMCEO leaves it untouched" });
+    expect(t.store.requireMessage(message.id).deliveryNote).toBe("팀원의 입력칸이 비기를 기다리는 중입니다");
+    const held = t.store.listPending(w.id)[0]!;
+    expect(held).toMatchObject({ status: "held", holdReason: "input_busy", attempts: 5 });
+    expect(t.store.getDeliveryRecovery(held.id)).toMatchObject({ phase: "waiting", reason: "input_busy" });
+    expect(Date.parse(t.store.getDeliveryRetry(held.id).nextAttemptAt!) - Date.now()).toBeGreaterThan(20_000);
+    expect(t.member(w.id).status).toBe("idle");
+    expect(t.orch.deliveryRecovery.fenced(w.id)).toBe(false);
+    // 쓰던 글을 지우거나 덮어쓰지 않았다.
+    expect(t.core.count("terminal.send")).toBe(0);
+    expect(t.core.count("terminal.keys")).toBe(0);
+    expect(t.core.screenOf(w.id)).toContain("❯ 사람이 쓰던 글");
+    t.core.setDraft(w.id, "");
+    await waitFor("전달", () => t.store.requireMessage(message.id).delivery === "delivered");
+    await t.idle(w.id);
+    expect(t.core.count("terminal.send")).toBe(1);
+    expect(t.turns(w.id).map((c) => c.prompt.includes("입력칸"))).toEqual([true]);
+  });
+
+  test("실제 core 터미널: 엔진이 내려가 연결이 거절되면(down) 쓰지 않고 '연결할 수 없음'으로 보류한다. 엔진이 돌아오면 같은 터미널에 한 번만 넣는다", async () => {
+    const t = await setup();
+    const w = await worker(t);
+    const terminal = t.member(w.id).paneId!;
+    const results = onNextSend(t, () => t.core.setRefusing(true));
+    const message = await t.orch.sendUserMessage(t.project.id, { text: "엔진 없음 @fake:post=받음", targetMemberId: w.id });
+    await waitFor("보류", () => t.store.requireMessage(message.id).delivery === "held");
+    expect(results).toEqual([{ ok: false, reason: "down", retryable: true, deliveryEffect: "not_written", detail: expect.stringMatching(/^terminal\.get: connect ENOENT /) }]);
+    expect(t.store.requireMessage(message.id).deliveryNote).toBe("실행기에 연결할 수 없음");
+    expect(t.store.listPending(w.id)[0]).toMatchObject({ status: "held", holdReason: "backend_down", attempts: 1 });
+    expect(t.member(w.id).lastError).toMatch(/^terminal\.get: connect ENOENT /);
+    // 보내지 못한 것이 확정됐다. 결과 모름의 fence 는 없고, 터미널을 잃은 것으로 치지도 않는다.
+    expect(t.orch.deliveryRecovery.fenced(w.id)).toBe(false);
+    expect(t.member(w.id).paneId).toBe(terminal);
+    await t.core.setRefusing(false);
+    // 운영에서는 상태 확인 타이머(healthMs)가 부른다.
+    await t.orch.refreshConnection();
+    await waitFor("전달", () => t.store.requireMessage(message.id).delivery === "delivered");
+    await t.idle(w.id);
+    expect(t.runs(w.id)).toHaveLength(1);
+    expect(t.core.count("terminal.send")).toBe(1);
+    expect(t.turns(w.id).map((c) => [c.terminal, c.prompt.includes("엔진 없음")])).toEqual([[terminal, true]]);
+    expect(t.member(w.id).lastError).toBeNull();
+  });
+
+  test("실제 core 터미널: 넣으려는 순간 CLI 가 이미 끝나 있으면(gone) 죽은 터미널에 쓰지 않고, 같은 세션을 새 터미널에 이어 열어 한 번만 넣는다", async () => {
+    const t = await setup();
+    const w = await worker(t);
+    await t.orch.assign(t.project.id, w.handle, { text: "첫 일 @fake:post=첫일끝" });
+    await waitFor("첫 턴", () => t.turns(w.id).length === 1);
+    await t.idle(w.id);
+    const session = t.member(w.id).sessionId;
+    const dead = t.member(w.id).paneId!;
+    const results = onNextSend(t, () => t.core.exit(w.id, 0));
+    const message = await t.orch.sendUserMessage(t.project.id, { text: "죽은 뒤 @fake:post=받음", targetMemberId: w.id });
+    await waitFor("보류", () => t.store.requireMessage(message.id).delivery === "held");
+    expect(results).toEqual([{ ok: false, reason: "gone", retryable: false, deliveryEffect: "not_written" }]);
+    expect(t.store.requireMessage(message.id).deliveryNote).toBe("세션이 보이지 않음");
+    expect(t.store.listPending(w.id)[0]).toMatchObject({ status: "held", holdReason: "offline", attempts: 1 });
+    await waitFor("offline", () => t.member(w.id).status === "offline" && t.member(w.id).lastError === "초기/실행 종료: exited (exit_code=0)");
+    expect(t.member(w.id)).toMatchObject({ paneId: null, sessionId: session });
+    expect(t.orch.deliveryRecovery.fenced(w.id)).toBe(false);
+    expect(t.core.count("terminal.send")).toBe(1);
+    // 운영에서는 다음 틱(30초)이 보류된 전달을 다시 민다. 깨우는 글이 있으므로 세션을 다시 연다.
+    await t.orch.pump(w.id);
+    await waitFor("전달", () => t.store.requireMessage(message.id).delivery === "delivered");
+    await t.idle(w.id);
+    expect(results.filter((r) => !r.ok)).toHaveLength(1);
+    expect(t.orch.deliveryRecovery.fenced(w.id)).toBe(false);
+    expect(t.runs(w.id)).toHaveLength(2);
+    expect(t.runs(w.id)[1]).toMatchObject({ resumeFlag: session, sessionFlag: null });
+    const turn = t.turns(w.id).find((c) => c.prompt.includes("죽은 뒤"))!;
+    expect(turn.terminal).not.toBe(dead);
+    expect(turn.terminal).toBe(t.member(w.id).paneId!);
+    // 글은 한 번만 들어갔다: core 가 받은 글은 모두 턴이 됐다.
+    expect(t.turns(w.id)).toHaveLength(2);
+    expect(t.core.count("terminal.send")).toBe(2);
+    expect(t.store.requireDelivery(t.store.listDeliveries(t.project.id).find((d) => d.refId === message.id)!.id)).toMatchObject({ status: "delivered", attempts: 2 });
   });
 
   test("실제 core 터미널: 글을 넣은 RPC 의 답이 오지 않으면 결과를 모르는 전달로 보류하고 다시 넣지 않는다. 받은 근거가 보이면 전달로 확정한다", async () => {
@@ -1031,7 +1279,7 @@ describe("전달 실패 사유", () => {
     expect(t.orch.deliveryRecovery.fenced(w.id)).toBe(true);
     await t.orch.pump(w.id);
     await t.orch.deliveryRecovery.tick();
-    await Bun.sleep(200);
+    await Bun.sleep(200); // '없음'을 보는 대기.
     // 같은 글을 두 번 넣지 않았다.
     expect(t.core.count("terminal.send")).toBe(1);
     expect(t.turns(w.id)).toHaveLength(1);
@@ -1051,13 +1299,17 @@ describe("전달 실패 사유", () => {
     const w = await worker(t);
     await t.orch.assign(t.project.id, w.handle, { text: "일 @fake:hold @fake:post=일끝" });
     await waitFor("잡힘", () => t.core.held(w.id) && t.member(w.id).status === "working");
-    await t.orch.assign(t.project.id, w.handle, { text: "보통" });
-    await t.orch.assign(t.project.id, w.handle, { text: "급함 @fake:post=묶음끝", urgent: true });
-    await Bun.sleep(80);
+    const normal = await t.orch.assign(t.project.id, w.handle, { text: "보통" });
+    const urgent = await t.orch.assign(t.project.id, w.handle, { text: "급함 @fake:post=묶음끝", urgent: true });
+    await t.orch.pump(w.id);
+    await Bun.sleep(80); // '없음'을 보는 대기: 이 사이에 끼워 넣기가 없었음을 아래에서 본다.
     // 달라진 점: 옛 herdr 실행기는 급한 글을 돌고 있는 턴에 끼워 넣었다. core 는 끼워 넣지 못한다(interjects=false).
     // 시도조차 하지 않는다: 넣으려다 거절되면 그 직원의 대기열이 통째로 미뤄지기 때문이다.
+    // core 가 받은 글 수만으로는 '시도하지 않음'을 가릴 수 없다(CoreRunner 가 RPC 전에 거절해도 0 이다).
+    // 총괄이 실행기에 넘기지 않았다는 것은 전달의 시도 횟수와 봉투 수로 본다.
     expect(t.core.count("terminal.send")).toBe(1);
-    expect(t.turns(w.id)).toHaveLength(1);
+    expect(t.store.listDispatches(w.id)).toHaveLength(1);
+    expect([normal, urgent].map((x) => t.store.requireDelivery(x.delivery.id))).toMatchObject([{ status: "queued", attempts: 0 }, { status: "queued", attempts: 0 }]);
     expect(t.member(w.id).queuedCount).toBe(2);
     expect(t.core.release(w.id)).toBe(true);
     await waitFor("묶음 턴", () => t.turns(w.id).length === 2);
@@ -1068,6 +1320,9 @@ describe("전달 실패 사유", () => {
     await t.idle(w.id);
     expect(t.turns(w.id)).toHaveLength(2);
     expect(t.member(w.id).queuedCount).toBe(0);
+    // 구간 전체: core 가 받은 글은 모두 턴이 됐다(일하는 중에 거절된 글이 없었다).
+    expect(t.core.count("terminal.send")).toBe(t.turns().length);
+    expect(t.store.listDispatches(w.id)).toHaveLength(2);
   });
 
   /** 문맥을 상한 위로 올려 두고(usage), 다음 지시가 자동 압축을 먼저 부르게 한다. */
@@ -1091,7 +1346,7 @@ describe("전달 실패 사유", () => {
     // 달라진 점: 옛 실행기는 시간 제한 뒤 '압축 실패'로 적고 대기열을 이어 갔다. core 는 압축이 됐는지 모르는 채로
     // 다음 글을 넣지 않는다(끝난 줄 알고 넣은 글이 압축에 섞이지 않게). 대표가 터미널에서 확인해 풀어야 한다.
     await waitFor("확인 불가", () => t.store.listActivity(w.id).some((a) => a.kind === "error" && a.text === "압축 완료를 확인할 수 없어 후속 자동 입력을 보류합니다"));
-    await Bun.sleep(150);
+    await Bun.sleep(150); // '없음'을 보는 대기.
     expect(compactSends(t)).toHaveLength(1);
     expect(t.turns(w.id)).toHaveLength(1);
     expect(t.store.requireDelivery(d.delivery.id).status).not.toBe("delivered");
@@ -1149,7 +1404,7 @@ describe("전달 실패 사유", () => {
     await waitFor("일하는 중", () => t.member(w.id).status === "working");
     expect(t.core.release(w.id)).toBe(true);
     await waitFor("턴 끝", () => t.turns(w.id)[0]!.outcome === "done" && t.member(w.id).status === "idle");
-    await Bun.sleep(100);
+    await Bun.sleep(100); // '없음'을 보는 대기.
     // 달라진 점: 옛 herdr 실행기는 화면에서 마지막 글을 읽어 '(자동) 알림'으로 올렸다. core 는 마지막 글을 서버에 넘기지 않는다.
     expect(t.core.screenOf(w.id)).toContain("⏺ 칸에서끝남");
     expect(t.texts().some((m) => m.body === "칸에서끝남")).toBe(false);
@@ -1213,19 +1468,19 @@ describe("전달 실패 사유", () => {
     t.core.exit(w.id, 1);
     const next = await t.restart();
     cleanups.push(() => next.close());
-    await next.orch.recover();
     await next.waitFor("offline", () => next.member(w.id).status === "offline");
     expect(next.texts().some((m) => m.title === "중간보고")).toBe(true);
     expect(next.member(w.id)).toMatchObject({ status: "offline", paneId: null, lastError: "초기/실행 종료: exited (exit_code=1)" });
     // 끊긴 실행은 다시 돌리지 않고 중단으로 닫는다.
     expect(next.member(w.id).executionState).toMatchObject({ phase: "interrupted", reason: "exited", exitCode: 1 });
     expect(next.turns(w.id)).toHaveLength(1);
-    // 달라진 점: 옛 시험의 손으로 짠 실행기는 터미널이 없어도 화면 글을 돌려줬다. core 는 끝난 터미널의 화면을 읽을 수 없어
-    // 화면 조회가 오류로 끝난다(HTTP 로는 500 "No core terminal for member"). 대화 조회는 그대로다.
-    await expect(next.orch.memberScreen(w.id)).rejects.toMatchObject({ name: "CoreError", kind: "not_found" });
+    // core 는 끝난 터미널의 화면을 읽을 수 없다. 화면 조회는 오류가 아니라 빈 글로 답한다(앱은 빈 글에 '열린 세션이 없습니다'를 보인다).
+    // 터미널 조작 쪽의 409 "No core terminal for member" 는 그대로다(출시된 앱이 그 문구로 잠든 터미널을 가린다).
+    expect(await next.orch.memberScreen(w.id)).toBe("");
     const screen = await next.api("GET", `/api/members/${w.id}/screen`);
-    expect(screen.status).toBe(500);
-    expect(await screen.json()).toEqual({ error: "No core terminal for member" });
+    expect(screen.status).toBe(200);
+    expect(await screen.json()).toEqual({ text: "" });
+    await expect(next.runner.screen({ ...next.member(w.id), cli: "claude" } as unknown as RunnerMember)).rejects.toMatchObject({ name: "CoreError", kind: "not_found", message: "No core terminal for member" });
     expect((await (await next.api("GET", `/api/projects/${next.project.id}/messages`)).json() as { title: string }[]).some((m) => m.title === "중간보고")).toBe(true);
     // 서버는 herdr 를 보지 않는다. 0.2.2 앱이 읽는 필드는 '쓰지 않음' 고정값이다.
     expect(((await (await next.api("GET", "/api/bootstrap")).json()) as Bootstrap).herdr).toEqual({ installed: false, running: false, version: null, protocol: null, compatible: false, warning: null });

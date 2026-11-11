@@ -2258,7 +2258,7 @@ final class AppStore: ProjectManagementStore {
         return result != nil
     }
     @discardableResult func memberAction(_ member: Member, action: String) async -> Bool {
-        guard ["interrupt", "resume", "sleep", "compact", "reopen-with-tools", "fresh-session"].contains(action) else { errorMessage = "지원하지 않는 팀원 조작입니다."; return false }
+        guard ["interrupt", "resume", "sleep", "compact", "fresh-session"].contains(action) else { errorMessage = "지원하지 않는 팀원 조작입니다."; return false }
         if action == "fresh-session" { return await freshSession(member) }
         if action == "compact" { return await compactMember(member) }
         let result: Member? = await mutate("member:\(member.id)") { api in try await api.request("/api/members/\(APIClient.segment(member.id))/\(action)", method: "POST", timeout: 150) }

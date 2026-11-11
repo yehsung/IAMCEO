@@ -42,6 +42,8 @@ class FakeRunner implements Runner {
     return { ok: false, reason: "error", retryable: false, deliveryEffect: "not_written" };
   }
   kind: Backend = "core";
+  /** 운영의 CoreRunner 와 같다: 돌고 있는 턴에 끼워 넣지 못한다. 급한 글도 턴이 끝난 뒤 나간다. */
+  readonly interjects = false;
   sent: { memberId: string; text: string }[] = [];
   nudges: { memberId: string; text: string }[] = [];
   /** false 면 세션 기록이 디스크에 없다(sessionExists). core 는 이어 열기 전에 이것으로 새 세션을 열지 정한다. */
@@ -64,6 +66,8 @@ class FakeRunner implements Runner {
     return { ok: true };
   }
   async start(m: RunnerMember, o: StartOpts) {
+    // 실제 CoreRunner 처럼 넘겨받은 명부(origin adopted)는 띄우지 않는다. 총괄이 서버 세션(origin runner)으로 바꿔 넘긴 것만 뜬다.
+    if (m.origin === "adopted") throw new CoreError("unsupported", "Core does not adopt terminals without IAMCEO ownership labels");
     this.starts.push({ memberId: m.id, at: Date.now(), resume: o.resume });
     if (this.startDelay) await Bun.sleep(this.startDelay);
     if (this.failStarts > 0) {
@@ -155,10 +159,17 @@ async function setup(opts: { timings?: Partial<OrchestratorTimings>; runnerEnabl
   /**
    * 보고 없이 끝낸 턴의 뒤처리를 기다린다. core 에서는 그런 턴 뒤에 '보고 보완' 턴이 한 번 지나가고, 그것도 보고 없이 끝나면
    * '결과 보고 누락' 글이 남는다. 이 프로젝트에 그 글이 n 건이 되고 뒤따르는 전달 펌프가 끝나면 그 직원은 다시 쉰다.
+   * 총괄이 따로 있는 프로젝트면 서버가 그때 총괄도 깨워 한 번 알린다. 그 글이 총괄에게 나간 것까지 확인하고 총괄의 그 턴을 끝낸 뒤에 돌아온다
+   * (기다리지 않으면 뒤늦게 나간 알림이 시험이 보는 '마지막으로 보낸 글'·총괄의 대기열에 끼어든다).
    */
   const quiet = async (member: Member, n = 1) => {
     await until(() => store.listMessages(project.id, { limit: 500 }).filter((m) => m.title === "결과 보고 누락").length >= n, "보고 보완 지나감");
     await orch.pump(member.id);
+    const conductor = store.getConductor(project.id);
+    if (member.kind !== "worker" || !conductor || conductor.id === member.id) return;
+    await until(() => runner.sent.filter((s) => s.memberId === conductor.id && s.text.includes(`[시스템] ${member.name}의 결과 보고가 보완 요청 뒤에도 없습니다(실행 `)).length >= n, "총괄에게 누락 알림");
+    runner.end(conductor.id);
+    await orch.pump(conductor.id);
   };
   return { home, work, config, store, bus, orch, runner, project, call, quiet, server, base: server?.urls[0] ?? "" };
 }
@@ -706,6 +717,8 @@ describe("일 목록·알림·자료·보관", () => {
 
   // 옛 시험: "편입: 전역이 herdr 가 아니면 거부, 다시 열면 origin=runner" 의 뒷부분.
   // 편입(herdr 칸 넘겨받기)과 그 거부 조건은 옛 실행기 전용이라 옮기지 않았다. 넘겨받은 명부가 남는 길은 가져온 명부(offline)다.
+  // 이 파일의 가짜 실행기도 실제 CoreRunner 처럼 origin adopted 를 거절한다. 세션도 터미널도 없는 자리는 총괄이 서버 세션으로 바꿔 넘기므로 뜬다
+  // (실제 CoreRunner 로는 tests/rr-proof.test.ts 의 '넘겨받은 명부' 시험이 본다).
   test("넘겨받은 명부의 직원을 깨우면 서버가 띄운 세션(origin=runner)이 되고 도구가 연결됐다고 알린다", async () => {
     const t = await setup();
     const m = t.store.createMember({ projectId: t.project.id, handle: "im", name: "가져옴", kind: "worker", origin: "adopted", status: "offline" });
@@ -956,7 +969,6 @@ describe("2차 검수 회귀: 전달", () => {
     t.core.exit(w.id, 1); // 서버가 꺼진 사이 CLI 가 죽었다.
     const next = await t.restart();
     closers.push(() => next.close());
-    await next.orch.recover();
     await next.waitFor("총괄에게 알림", () => next.turns(lead.id).some((c) => c.prompt.includes("철수")));
     expect(next.texts().some((x) => x.kind === "시스템" && x.body.includes("철수"))).toBe(true);
     // 끊긴 일을 다시 넣지 않는다.
@@ -975,7 +987,6 @@ describe("2차 검수 회귀: 전달", () => {
       t.core.setStatus(w.id, { state: "blocked", kind: "permission" }); // 서버가 꺼진 사이 CLI 가 승인 창 앞에 섰다.
       const next = await t.restart();
       closers.push(() => next.close());
-      await next.orch.recover();
       await next.waitFor(`${before} → blocked`, () => next.member(w.id).status === "blocked");
       expect(next.member(w.id).blockedReason).toBe("permission");
     }
@@ -983,11 +994,11 @@ describe("2차 검수 회귀: 전달", () => {
 
   // 옛 시험: 같은 시험의 '끝난 글이 없음'. 옛 실행기는 "턴이 끊겼습니다"를 대화와 총괄에 알렸다.
   // 달라진 점: core 는 꺼진 사이 턴이 끝난 것을 터미널의 턴 번호로 확인한다. 끊긴 것이 아니라 보고 없이 끝난 실행이므로
-  // 직원에게 보고 보완을 한 번 묻고, 그래도 없으면 대화에 '결과 보고 누락'을 남긴다. 총괄에게는 따로 알리지 않는다.
-  test("재시작: 꺼진 사이 보고 없이 끝난 턴은 보고 보완을 묻고, 그래도 없으면 대화에 알린다", async () => {
+  // 직원에게 보고 보완을 한 번 묻고, 그래도 없으면 대화에 '결과 보고 누락'을 남기고 일을 맡긴 총괄을 깨워 한 번 알린다.
+  test("재시작: 꺼진 사이 보고 없이 끝난 턴은 보고 보완을 묻고, 그래도 없으면 대화와 총괄에게 알린다", async () => {
     const t = await coreSetup({ agentTools: { listAgentTools, handleAgentTool } });
     closers.push(() => t.close());
-    await t.orch.ensureConductor(t.project.id);
+    const lead = await t.orch.ensureConductor(t.project.id);
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
     await t.orch.assign(t.project.id, w.handle, { text: "일 @fake:hold" });
     await t.waitFor("일하는 중", () => t.core.held(w.id) && t.member(w.id).status === "working");
@@ -996,12 +1007,55 @@ describe("2차 검수 회귀: 전달", () => {
     await t.waitFor("턴 끝", () => t.turns(w.id)[0]!.outcome === "done");
     const next = await t.restart();
     closers.push(() => next.close());
-    await next.orch.recover();
     await next.waitFor("보고 보완 턴", () => next.turns(w.id).length === 2);
     expect(isReportNudge(next.turns(w.id)[1]!)).toBe(true);
     await next.waitFor("누락 글", () => next.texts().some((x) => x.kind === "시스템" && x.title === "결과 보고 누락" && x.body.includes("철수")));
     await next.idle(w.id);
     expect(next.turns(w.id)).toHaveLength(2);
+    // 총괄은 그때까지 받은 글이 없었다. 누락 알림으로 한 번 깬다. 그 턴에는 보고 보완이 붙지 않는다.
+    const notice = await next.waitFor("총괄에게 누락 알림", () => next.turns(lead.id).find((c) => c.prompt.includes("[시스템] 철수의 결과 보고가 보완 요청 뒤에도 없습니다")));
+    expect(notice.at).toBeGreaterThanOrEqual(next.turns(w.id)[1]!.endedAt!);
+    await next.idle(lead.id);
+    await Bun.sleep(60); // '없음'을 보는 대기.
+    expect(next.turns(lead.id)).toEqual([notice]);
+    expect(next.turns(w.id)).toHaveLength(2);
+    expect(next.texts().filter((x) => x.title === "결과 보고 누락")).toHaveLength(1);
+  });
+
+  // 보고 보완 턴까지 서버가 꺼진 사이에 끝난 경우: 재시작 복구가 그 끝을 확인하는 자리에서 누락을 남기고 총괄에게 알린다.
+  test("재시작: 보고 보완 턴이 꺼진 사이 보고 없이 끝났어도 누락을 남기고 총괄에게 한 번 알린다. 다시 재시작해도 되풀이하지 않는다", async () => {
+    const t = await coreSetup({ agentTools: { listAgentTools, handleAgentTool }, directives: "@fake:hold" });
+    closers.push(() => t.close());
+    const lead = await t.orch.ensureConductor(t.project.id);
+    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
+    await t.orch.assign(t.project.id, w.handle, { text: "일" });
+    await t.waitFor("일하는 중", () => t.core.held(w.id) && t.member(w.id).status === "working");
+    expect(t.core.release(w.id)).toBe(true);
+    await t.waitFor("보고 보완 턴이 도는 중", () => t.turns(w.id).length === 2 && isReportNudge(t.turns(w.id)[1]!) && t.core.held(w.id) && t.member(w.id).status === "working");
+    expect(t.turns(lead.id)).toHaveLength(0);
+    expect(t.texts().some((x) => x.title === "결과 보고 누락")).toBe(false);
+    await t.stopServer();
+    t.core.setDirectives("");
+    expect(t.core.release(w.id)).toBe(true); // 서버가 꺼진 사이 보완 턴이 보고 없이 끝났다.
+    await t.waitFor("보완 턴 끝", () => t.turns(w.id)[1]!.outcome === "done");
+    const next = await t.restart({ directives: "" });
+    closers.push(() => next.close());
+    await next.waitFor("누락 글", () => next.texts().some((x) => x.kind === "시스템" && x.title === "결과 보고 누락" && x.body.includes("철수")));
+    const notice = await next.waitFor("총괄에게 누락 알림", () => next.turns(lead.id).find((c) => c.prompt.includes("[시스템] 철수의 결과 보고가 보완 요청 뒤에도 없습니다")));
+    await next.idle(lead.id);
+    await next.idle(w.id);
+    await Bun.sleep(60); // '없음'을 보는 대기.
+    expect(next.turns(lead.id)).toEqual([notice]);
+    expect(next.turns(w.id)).toHaveLength(2);
+    expect(next.texts().filter((x) => x.title === "결과 보고 누락")).toHaveLength(1);
+    // 한 번 더 재시작해도 같은 실행으로 다시 알리거나 다시 묻지 않는다.
+    const third = await next.restart({ directives: "" });
+    closers.push(() => third.close());
+    await Bun.sleep(120); // '없음'을 보는 대기.
+    expect(third.turns(lead.id)).toEqual([notice]);
+    expect(third.turns(w.id)).toHaveLength(2);
+    expect(third.texts().filter((x) => x.title === "결과 보고 누락")).toHaveLength(1);
+    expect(third.store.listDeliveries(third.project.id).filter((d) => d.memberId === lead.id && d.text.includes("결과 보고가 보완 요청 뒤에도 없습니다"))).toHaveLength(1);
   });
 
   // 옛 시험: "재시작: 턴이 도는 중이면 이미 한 post 를 기억해 (자동) 보고가 겹치지 않는다"
@@ -1017,11 +1071,10 @@ describe("2차 검수 회귀: 전달", () => {
     await t.idle(lead.id);
     const next = await t.restart();
     closers.push(() => next.close());
-    await next.orch.recover();
     expect(next.core.release(w.id)).toBe(true);
     await next.waitFor("턴 끝", () => next.turns(w.id)[0]!.outcome === "done");
     await next.idle(w.id);
-    await Bun.sleep(100);
+    await Bun.sleep(100); // '없음'을 보는 대기.
     expect(next.turns(w.id)).toHaveLength(1);
     const mine = next.texts().filter((m) => m.memberId === w.id);
     expect(mine.map((m) => m.title)).toEqual(["로그인고침"]);
@@ -1037,7 +1090,7 @@ describe("2차 검수 회귀: 전달", () => {
     t.store.setDeliveryStatus(d.id, "delivering", { attempt: true });
     const before = t.runner.sent.length;
     await t.orch.recover();
-    await Bun.sleep(20);
+    await Bun.sleep(20); // '없음'을 보는 대기.
     expect(t.runner.sent.length).toBe(before);
     expect(t.store.requireMessage(m.id).delivery).toBe("held");
     expect(t.store.requireDelivery(d.id).status).toBe("held");
@@ -1128,7 +1181,7 @@ describe("2차 검수 회귀: 전달", () => {
     await Bun.sleep(5);
     (t.orch as unknown as { onTick(): void }).onTick();
     await closing;
-    await Bun.sleep(20);
+    await Bun.sleep(20); // '없음'을 보는 대기.
     expect(t.runner.starts.length).toBe(starts);
     expect(t.store.getMember(w.id)).toBeNull();
 
@@ -1375,9 +1428,17 @@ describe("W5 전달 통합", () => {
     const { member, assigned } = await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", firstInstruction: "첫 업무" });
     expect(firstIntent).toBe(true);
     expect(assigned?.delivery.status).toBe("delivered");
-    await t.orch.assign(t.project.id, member.handle, { text: "긴급", urgent: true });
+    // 운영(core, interjects=false): 일하는 중인 팀장에게는 급한 글도 끼워 넣지 않는다. 봉투도 만들지 않고 턴이 끝난 뒤에 나간다.
+    const urgent = await t.orch.assign(t.project.id, member.handle, { text: "긴급", urgent: true });
+    expect(urgent.delivery).toMatchObject({ status: "queued", attempts: 0 });
+    await t.orch.pump(member.id);
+    expect(t.store.listDispatches(member.id)).toHaveLength(1);
+    expect(t.runner.sent.map(s => s.text.includes("긴급"))).toEqual([false]);
+    t.runner.end(member.id);
+    await until(() => t.store.listDispatches(member.id).length === 2, "턴이 끝난 뒤 급한 글 전달");
     const dispatches = t.store.listDispatches(member.id);
-    expect(dispatches).toHaveLength(2);
+    expect(dispatches[1]!.items.map(item => item.deliveryId)).toContain(urgent.delivery.id);
+    expect(t.runner.sent.at(-1)!.text).toContain("긴급");
     expect(dispatches[0]!.bundleMarker).not.toBe(dispatches[1]!.bundleMarker);
     expect(dispatches[0]!.markers[0]!.marker).not.toBe(dispatches[1]!.markers[0]!.marker);
   });

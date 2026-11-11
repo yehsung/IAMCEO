@@ -222,6 +222,8 @@ describe("저장과 초기화", () => {
 const REPORT_NUDGE = "[시스템] 보고 보완:";
 class UsageRunner implements Runner {
   readonly kind = "core" as const;
+  /** 운영의 CoreRunner 와 같다: 돌고 있는 턴에 끼워 넣지 못한다. 급한 글도 턴이 끝난 뒤 나간다. */
+  readonly interjects = false;
   sent: string[] = [];
   compacts: string[] = [];
   private cb: (e: RunnerEvent) => void = () => {};
@@ -330,10 +332,50 @@ describe("서버: 턴 끝 사용량으로 % 를 정하고 창 크기를 배운�
     await waitFor("75%", () => t.store.requireMember(w.id).contextPct === 75);
     // 달라진 점: 옛 실행기 분기는 배운 200k 창의 75% 가 압축 기준(70%)을 넘어 다음 일 전에 압축했다.
     // core 는 상태줄 기록으로 실측한 측정에서만 자동 압축한다. 화면에서 추정한 창으로는 압축하지 않고 일을 그대로 넣는다.
+    // (이 읽기에는 실측 경로가 요구하는 칸이 없어 이 단정만으로는 추정과 실측을 가리지 못한다. 가리는 것은 바로 아래의 한 쌍이다.)
     const sent = t.runner.sent.length;
     await t.orch.assign(w.projectId, w.handle, { text: "다음 일" });
     await waitFor("다음 일 전달", () => t.runner.sent.length > sent);
     expect(t.runner.compacts).toEqual([]);
+  });
+
+  // "core 는 실측에서만 자동 압축한다"를 한 쌍으로 본다. 두 읽기는 실측 경로가 요구하는 칸(지금 터미널·세션 세대·턴 번호·모델)을
+  // 똑같이 싣고 75%(기준 70% 위)로 같다. 다른 것은 창 크기의 출처뿐이다: 상태줄 기록의 실측(exact)인가, 화면에 보인 % 에서 거꾸로 셈한 추정인가.
+  // 실측 쪽에서 압축이 일어나므로, 추정 쪽의 '압축하지 않음'은 이 틀에서 실패할 수 있는 단정이다.
+  test.each([
+    ["상태줄 기록으로 실측한 창이면 다음 일 전에 자동 압축한다", { window: 200_000, source: "statusline" as const }, null, "exact", 1],
+    ["화면에 보인 % 로 추정한 창이면 압축하지 않고 일을 그대로 넣는다", null, 75, "estimated", 0],
+  ] as const)("자동 압축은 실측에서만: %s", async (_name, exact, shownPct, quality, compacts) => {
+    const t = await server();
+    const w = await worker(t);
+    expect(t.store.getSettings().compactAtPct).toBe(70);
+    const identity = { terminalId: t.store.requireMember(w.id).paneId, sessionGeneration: t.store.memberRevisions(w.id).sessionGeneration, turn: 1 };
+    expect(identity.terminalId).toBe("p1");
+    await t.orch.assign(w.projectId, w.handle, { text: "일" });
+    await waitFor("전달", () => t.runner.sent.length === 1);
+    // 팀장이 보고하고 턴을 끝낸다. 보고가 없으면 서버가 '보고 보완' 글을 넣는데, 그 글도 깨우는 글이라 이 시험이 보려는 '다음 일'보다 먼저 압축을 부른다.
+    await t.orch.recordPost(t.store.requireMember(w.id), { kind: "완료", title: "끝" });
+    t.runner.emit({ type: "context_usage", memberId: w.id, tokens: 150_000, shownPct, model: "fake-model", ...(exact ? { exact } : {}), ...identity });
+    t.runner.emit({ type: "turn_end", memberId: w.id, finalText: "", isError: false, ...identity });
+    await waitFor("쉼", () => t.store.requireMember(w.id).status === "idle" && t.store.getContextState(w.id)?.baseline?.completedTurn === 1);
+    // 두 경우 모두 같은 75% 로 보이고 창 크기도 같다. 출처와 측정의 질만 다르다.
+    expect(t.store.requireMember(w.id)).toMatchObject({ contextPct: 75, contextWindow: 200_000, contextWindowSource: exact ? "statusline" : "screen" });
+    expect(t.store.getContextState(w.id)!.measurement).toMatchObject({ quality, fresh: quality === "exact", turn: 1, tokens: 150_000, window: 200_000 });
+    expect(t.store.getContextState(w.id)!.baseline).toMatchObject({ completedTurn: 1 });
+    expect(t.runner.compacts).toEqual([]);
+
+    await t.orch.assign(w.projectId, w.handle, { text: "다음 일" });
+    if (compacts) {
+      // 실측: 일을 넣기 전에 압축을 먼저 부른다. 압축이 끝나기 전에는 일을 넣지 않는다.
+      await waitFor("압축 요청", () => t.runner.compacts.length === 1);
+      expect(t.store.getContextState(w.id)!.compaction).toMatchObject({ trigger: "auto" });
+      expect(t.runner.sent.some((text) => text.includes("다음 일"))).toBe(false);
+    } else {
+      // 추정: 압축 없이 일이 그대로 들어간다.
+      await waitFor("다음 일 전달", () => t.runner.sent.some((text) => text.includes("다음 일")));
+      expect(t.runner.compacts).toEqual([]);
+      expect(t.store.getContextState(w.id)!.compaction).toBeNull();
+    }
   });
 
   test("새 세션이 열리면 배운 값을 지우고 다시 배운다", async () => {

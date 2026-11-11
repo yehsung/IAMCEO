@@ -26,6 +26,8 @@ const nudgeOnly = (text: string) => isReportNudge({ prompt: text }) && text.spli
  */
 class FakeRunner implements Runner {
   readonly kind: Backend = "core";
+  /** 운영의 CoreRunner 와 같다: 돌고 있는 턴에 끼워 넣지 못한다. 급한 글도 턴이 끝난 뒤 나간다. */
+  readonly interjects = false;
   sent: { memberId: string; text: string }[] = [];
   nudges: { memberId: string; text: string }[] = [];
   busy = new Set<string>();
@@ -131,13 +133,22 @@ async function setup() {
   /**
    * 보고 없이 끝낸 턴의 뒤처리를 기다린다. core 에서는 그런 턴 뒤에 '보고 보완' 턴이 한 번 지나가고, 그것도 보고 없이 끝나면
    * '결과 보고 누락' 글이 남는다. 이 프로젝트에 그 글이 n 건이 되고 뒤따르는 전달 펌프가 끝나면 그 직원은 다시 쉰다.
+   * 그때 서버는 일을 맡긴 총괄도 깨워 한 번 알린다. 그 글이 총괄에게 나간 것까지 확인하고 총괄의 그 턴을 끝낸 뒤에 돌아온다
+   * (기다리지 않으면 뒤늦게 나간 알림이 시험이 보는 '마지막으로 보낸 글' 자리에 끼어든다).
    */
   const quiet = async (member: Member, n = 1) => {
     await until(() => store.listMessages(project.id, { limit: 500 }).filter((m) => m.title === "결과 보고 누락").length >= n, "보고 보완 지나감");
     await orch.pump(member.id);
+    await until(() => missingReportNotices(runner, lead, member).length >= n, "총괄에게 누락 알림");
+    runner.end(lead.id);
+    await orch.pump(lead.id);
   };
   return { home, store, bus, orch, runner, server, project, lead, call, quiet };
 }
+
+/** 보고 보완 뒤에도 보고가 없을 때 서버가 총괄에게 보낸 알림(깨우는 시스템 글). */
+const missingReportNotices = (runner: FakeRunner, lead: Member, member: Member) =>
+  runner.sent.filter((s) => s.memberId === lead.id && s.text.includes(`[시스템] ${member.name}의 결과 보고가 보완 요청 뒤에도 없습니다(실행 `));
 
 /** 표식을 제거해 비교하는 대신, 저장 봉투와 송신 문자열도 일치해야 한다. */
 function deliveryBody(store: Store, sent: { memberId: string; text: string }): string {
@@ -276,7 +287,7 @@ describe("공통 도구", () => {
 
   // 옛 시험: "거부된 post 는 보고로 치지 않아 턴 마지막 글이 자동 보고된다"
   test("거부된 post 는 보고로 치지 않아 보고 보완을 요청받는다", async () => {
-    const { store, project, orch, runner, call } = await setup();
+    const { store, project, orch, runner, lead, call } = await setup();
     const { member: w } = await orch.addMember(project.id, { name: "철수", handle: "cs", role: "개발", firstInstruction: "일" });
     await until(() => runner.sent.some((s) => s.memberId === w.id), "첫 지시 전달");
     expect(await call(w, "post", { kind: "완료", title: "t", file_ids: ["f_없음"] })).toMatchObject({ isError: true });
@@ -286,6 +297,20 @@ describe("공통 도구", () => {
     await until(() => runner.nudges.length === 1, "보고 보완");
     expect(runner.nudges[0]).toMatchObject({ memberId: w.id });
     expect(store.listMessages(project.id).some((m) => m.memberId === w.id)).toBe(false);
+    // 보완 턴도 보고 없이 끝났다(가짜 실행기는 곧바로 끝낸다). 대화에 누락 글이 남고, 일을 맡긴 총괄이 깨어나 한 번 알림을 받는다.
+    await until(() => missingReportNotices(runner, lead, w).length === 1, "총괄에게 누락 알림");
+    expect(store.listMessages(project.id).filter((m) => m.title === "결과 보고 누락")).toHaveLength(1);
+    const notice = store.listDeliveries(project.id).find((d) => d.memberId === lead.id && d.text.includes("결과 보고가 보완 요청 뒤에도 없습니다"))!;
+    expect(notice).toMatchObject({ kind: "system", wake: true });
+    expect(notice.text).toContain(`(실행 ${/실행 (\S+)의 결과만/.exec(runner.nudges[0]!.text)![1]})`);
+    // 알림으로 깬 총괄이 보고 없이 턴을 끝내도 총괄에게 보고 보완을 묻지 않고, 알림도 되풀이하지 않는다.
+    runner.end(lead.id);
+    await orch.pump(lead.id);
+    await Bun.sleep(40); // '없음'을 보는 대기: 이 사이에 보완·알림이 더 오지 않았음을 아래에서 본다.
+    expect(runner.nudges).toHaveLength(1);
+    expect(missingReportNotices(runner, lead, w)).toHaveLength(1);
+    expect(runner.sent.filter((s) => s.memberId === lead.id)).toHaveLength(1);
+    expect(store.listMessages(project.id).filter((m) => m.title === "결과 보고 누락")).toHaveLength(1);
   });
 
   test("file: 글·md 경로·첨부·이미지", async () => {
@@ -535,7 +560,7 @@ describe("총괄 도구", () => {
     expect(JSON.parse((await call(lead, "roster")).text).find((m: { handle: string }) => m.handle === "cs")).toMatchObject({ status: "working", queued: 2 });
     expect(runner.sent).toHaveLength(1);
     runner.end(w.id);
-    await Bun.sleep(30);
+    await until(() => runner.sent.length >= 2, "기다리던 지시 전달");
     expect(runner.sent[1]!.text).toContain("둘째 일");
     expect(runner.sent[1]!.text).toContain("셋째 일");
   });
@@ -654,7 +679,7 @@ describe("직접 띄운 CLI", () => {
     expect((await call(m, "wait")).text).toContain("할 일: 밀린 일");
     expect((await call(m, "wait", { timeout_sec: 1 })).text).toContain("새 지시가 없습니다");
     const waiting = call(m, "wait", { timeout_sec: 10 });
-    await Bun.sleep(30);
+    await Bun.sleep(30); // 기다림(롱폴)이 서버에 걸릴 틈을 준다. 값을 기다리는 자리가 아니다: 먼저 도착해도 wait 는 그 지시를 받는다.
     await orch.assign(project.id, "m", { text: "새 일" });
     expect((await waiting).text).toContain("할 일: 새 일");
     expect(await call(m, "wait", { timeout_sec: 999 })).toMatchObject({ isError: true });

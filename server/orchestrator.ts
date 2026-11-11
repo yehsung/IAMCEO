@@ -1282,6 +1282,15 @@ export class Orchestrator implements OrchestratorApi {
       if (supplementOnly) {
         this.store.createMessage({ id: `msg_missing_report_${run.runId}`, projectId: member.projectId, who: "시스템", kind: "시스템", title: "결과 보고 누락", body: `${member.name}의 결과 보고가 보완 요청 뒤에도 남지 않았습니다. 기존 업무를 다시 실행하지 않고 결과를 확인해 주세요.` });
         this.store.appendActivity(member.id, "error", "결과 보고 누락: 보완 요청 뒤에도 결과가 남지 않았습니다", `${run.runId}:missing_report_final`);
+        // 일을 맡긴 총괄은 보고가 와야 깨어난다. 끝내 보고가 없으면 프로젝트가 조용히 멈추므로, 중단 알림과 같은 길로 총괄에게 한 번 알린다.
+        // 시스템 글로 깬 총괄의 턴에는 보고 보완이 붙지 않고(위 조건), 이 자리는 실행마다 한 번만 돈다(claimExecutionNotice).
+        const conductor = member.kind === "worker" ? this.store.getConductor(member.projectId) : null;
+        if (conductor && conductor.id !== member.id) {
+          const source = deliveries.map(d => /^\[시스템\] 보고 보완: 실행 (\S+)의 결과만 post로/.exec(d.text)?.[1]).find(Boolean) ?? run.runId;
+          this.store.enqueue({ projectId: member.projectId, memberId: conductor.id, kind: "system", text: formatSystem(`${member.name}의 결과 보고가 보완 요청 뒤에도 없습니다(실행 ${source}). 기존 업무를 다시 시키기 전에 기존 변경과 진행 상태를 확인한 뒤 후속 지시를 결정하세요.`), wake: true });
+          // 이 자리는 DB 트랜잭션 안이다. 총괄의 전달은 트랜잭션이 끝난 뒤에 민다(재시작 복구 중이면 복구 끝의 펌프가 민다).
+          setImmediate(() => void this.pump(conductor.id));
+        }
         return;
       }
       this.store.appendActivity(member.id, "system", "필수 보고가 없어 보고 보완을 요청했습니다", `${run.runId}:missing_report`);
@@ -1924,6 +1933,8 @@ export class Orchestrator implements OrchestratorApi {
       member = this.store.requireMember(member.id);
     }
     if (!member.sessionId) throw new ApiError(409, "이어갈 native 세션 기록을 확인하는 중입니다");
+    // 한 번도 턴을 돌지 않은 세션은 이어갈 기록이 없는 것이 정상이다. 잃을 대화가 없으니 보관을 막지 않는다(꺼내서 깨우면 새 세션으로 열린다).
+    if (this.neverRan(member, runner)) return;
     if ((runner as Runner).sessionExists?.(this.runnerMember(member, this.store.requireProject(member.projectId))) === false) throw new ApiError(409, "이어갈 native 세션 기록을 확인할 수 없습니다");
     if (runner instanceof CoreRunner) {
       const log = this.contextLog(member);
@@ -1934,6 +1945,19 @@ export class Orchestrator implements OrchestratorApi {
         return entry?.sessionId === member.sessionId && entry.cwd === member.cwd && !entry.isSidechain;
       })) throw new ApiError(409, "현재 native 세션과 일치하는 주 세션 기록을 확인할 수 없습니다");
     }
+  }
+
+  /**
+   * 띄우기만 하고 한 번도 턴을 돌지 않은 세션인가(총괄만 시작한 프로젝트, 첫 지시 없이 추가한 팀장).
+   * 기록 파일이 없고, 이 세대에 받아들여진 전달이 없고, 관측된 턴도 0 일 때만 그렇다. 대표가 터미널에 직접 쳐서 턴을 돌렸으면 기록이 생겨 해당하지 않는다.
+   * Codex 는 세션 ID 를 스스로 정하고 모르는 채로는 다시 띄울 수 없어(session_unknown) 여기서 다루지 않는다.
+   */
+  private neverRan(member: Member, runner: Runner): boolean {
+    if (!(runner instanceof CoreRunner) || member.cli === "codex" || !member.sessionId) return false;
+    if (runner.sessionExists(this.runnerMember(member, this.store.requireProject(member.projectId))) !== false) return false;
+    const generation = this.store.memberRevisions(member.id).sessionGeneration;
+    if (this.store.listDispatches(member.id).some(dispatch => dispatch.identity.sessionGeneration === generation && dispatch.transportState !== "rejected")) return false;
+    return !runner.observationState(member.id)?.turn;
   }
 
   /** 안 보이는 직원의 칸은 소켓이 안 닿아도 보관을 막지 않는다. 쓰던 글이 있다는 거절은 언제나 막는다. */
@@ -1976,9 +2000,12 @@ export class Orchestrator implements OrchestratorApi {
     let changedSession = false;
     let sessionReady = false;
     try {
-      // Validate the target invocation before stopping a working installation.
-      const target = { ...member, ...patch, cli: patch.cli!, sessionId: !freshSession && patch.cli === member.cli ? member.sessionId : null, paneId: null };
       const targetRunner = this.runners.get(this.store.effectiveBackend());
+      // 같은 CLI 라도 세션 기록이 없으면(한 번도 턴을 돌지 않은 세션) 이어 열 것이 없다. reopenOnce 와 같은 판정이다:
+      // 없는 세션을 --resume 하면 CLI 가 곧바로 끝나 offline·오류가 됐다. 저장소를 못 읽은 것은 없다는 증거가 아니다.
+      const resumable = !freshSession && patch.cli === member.cli && !!member.sessionId && targetRunner?.sessionExists?.(this.runnerMember(member, project)) !== false;
+      // Validate the target invocation before stopping a working installation.
+      const target = { ...member, ...patch, cli: patch.cli!, sessionId: resumable ? member.sessionId : null, paneId: null };
       if (targetRunner instanceof CoreRunner) {
         const model = this.desiredConfig(target).model;
         if (target.cli === "codex" && model && /^(?:claude[-:]|opus(?:-|$)|sonnet(?:-|$)|haiku(?:-|$))/i.test(model)) throw new ApiError(400, "Codex용 모델을 고르거나 팀원 모델 지정을 기본값으로 되돌리세요");
@@ -1999,11 +2026,11 @@ export class Orchestrator implements OrchestratorApi {
         this.confirmStop(member.id);
         this.store.archiveAndRotateSession(member.id, patch.cli!, freshSession ? "fresh_session" : sameProvider ? "settings_change" : "provider_switch");
       });
-      if (!freshSession && sameProvider) this.store.patchMember(member.id, { sessionId: member.sessionId });
+      if (resumable) this.store.patchMember(member.id, { sessionId: member.sessionId });
       this.store.patchMember(member.id, { ...patch, ...(freshSession ? { origin: "runner" as const } : {}), backend: this.store.effectiveBackend(), status: "idle", lastError: null });
       if (member.kind !== "worker") this.store.setChiefCli(project.id, patch.cli!);
       const handoff = [
-        `CLI 설정 변경: ${member.cli} → ${patch.cli}. ${!freshSession && sameProvider && member.sessionId ? "같은 세션을 새 설정으로 이어 열었습니다" : "이전 제공자의 세션을 재개하지 않는 새 세션입니다"}.`,
+        `CLI 설정 변경: ${member.cli} → ${patch.cli}. ${resumable ? "같은 세션을 새 설정으로 이어 열었습니다" : !freshSession && sameProvider ? "이어 열 세션 기록이 없어 새 세션으로 열었습니다" : "이전 제공자의 세션을 재개하지 않는 새 세션입니다"}.`,
         `역할: ${member.role}. 현재 상황: ${member.now}. 다음: ${member.next}.`,
         `프로젝트 상황: ${project.now}. board 도구로 대화·결재·작업을 확인하고 계속하세요.`,
       ].join("\n");
@@ -2478,7 +2505,12 @@ export class Orchestrator implements OrchestratorApi {
     const member = this.store.requireMember(memberId);
     if (this.runtime(memberId).closing) return ""; // 빠지는 중이다. 화면을 읽으려고 칸을 다시 묶지 않는다.
     const project = this.store.requireProject(member.projectId);
-    return (await this.runners.get(this.backendOf(member))?.screen(this.runnerMember(member, project))) ?? "";
+    try { return (await this.runners.get(this.backendOf(member))?.screen(this.runnerMember(member, project))) ?? ""; }
+    catch (e) {
+      // 터미널이 끝났거나 없는 팀장(잠듦·offline)은 보여 줄 화면이 없을 뿐이다. 빈 글로 답한다. 소유 불일치·연결 실패는 그대로 오류다.
+      if (e instanceof CoreError && !e.uncertain && ["not_found", "finished"].includes(e.kind)) return "";
+      throw e;
+    }
   }
 
   async memberApproval(memberId: string): Promise<ApprovalPrompt | null> {
@@ -3109,16 +3141,27 @@ export class Orchestrator implements OrchestratorApi {
   private async reopenOnce(member: Member): Promise<Member | null> {
     const project = this.store.requireProject(member.projectId);
     const runner = this.openRunner(member);
+    // 세션도 터미널도 없는 넘겨받은 명부(가져온 팀)는 넘겨받을 것이 없다. 서버가 새 세션을 띄운다. 실행기는 남의 터미널을 건드리지 않으려고
+    // origin adopted 를 거절하므로 띄울 때만 서버 세션으로 넘기고, 명부의 origin 은 뜬 뒤에 바꾼다.
+    // 세션 ID 가 남은 행은 대표의 터미널에서 살아 있을 수 있어 그대로 둔다('새 세션으로 이어가기'로 푼다).
+    const launch = member.origin === "adopted" && !member.sessionId && !member.paneId ? { ...member, origin: "runner" as const } : member;
+    const claimed = launch !== member;
+    // 띄운 결과를 모르면 이 팀장 라벨의 터미널이 뒤늦게 나타날 수 있다. 그것은 서버가 띄운 것이라 명부도 서버 세션으로 맞춘다
+    // (넘겨받은 채로 두면 재우기·닫기가 그 터미널을 끝내지 못한다).
+    const claimIfUnknown = () => {
+      if (claimed && this.store.getMember(member.id) && this.pendingLifecycle(member.id)?.intent === "start") this.store.patchMember(member.id, { origin: "runner" });
+    };
     try {
       // core 는 터미널만 만들면 성공으로 답하므로, 없는 세션을 --resume 하면 오류 없이 CLI 가 곧바로 끝나고 끝없이 되풀이됐다.
       if (member.sessionId && runner.sessionExists?.(this.runnerMember(member, project)) === false) throw new MissingSessionError();
       const sent = this.desiredConfig(member);
-      const started = await this.startManaged(member, project, !!member.sessionId);
-      if (await this.dropIfClosed(member, project, runner, started)) return null;
+      const started = await this.startManaged(launch, project, !!member.sessionId);
+      if (await this.dropIfClosed(launch, project, runner, started)) return null;
       this.applyStarted(member.id, started, sent);
       // 넘겨받은 세션도 서버가 다시 띄우면 도구와 규칙을 갖고 뜬다. 이제 서버가 띄운 세션과 같다.
       // 대표가 칸에서 그 세션을 다시 열어 거기 붙었으면(rejoined) 도구가 없는 그대로다.
-      if (member.origin === "adopted" && !started.rejoined) {
+      // 세션 없이 서버가 띄운 자리(claimed)는 다시 붙은 터미널도 서버가 띄운 것이다(이 팀장의 소유 라벨로만 붙는다).
+      if (member.origin === "adopted" && (claimed || !started.rejoined)) {
         this.store.patchMember(member.id, { origin: "runner" });
         this.store.enqueue({ projectId: project.id, memberId: member.id, kind: "system", text: formatSystem("이제 이 세션에 iamceo 도구(post·ask·status·file·todo)가 연결되었습니다. 앞서 받은 '도구가 없다'는 안내는 취소입니다. 보고와 질문은 도구로 하세요."), wake: false });
       }
@@ -3129,14 +3172,15 @@ export class Orchestrator implements OrchestratorApi {
       if (!missing) {
         console.warn(`${member.name} 이어 열기 실패, 세션을 그대로 두고 다시 시도합니다:`, message);
         if (this.store.getMember(member.id)) this.store.patchMember(member.id, { lastError: message });
+        claimIfUnknown();
         return null;
       }
       console.warn(`${member.name}의 이전 세션이 없어 새 세션을 엽니다:`, message);
       try {
-        const fresh = { ...member, sessionId: null };
+        const fresh = { ...launch, sessionId: null };
         const sent = this.desiredConfig(fresh);
         const started = await this.startManaged(fresh, project, false);
-        if (await this.dropIfClosed(member, project, runner, started)) return null;
+        if (await this.dropIfClosed(launch, project, runner, started)) return null;
         this.applyStarted(member.id, started, sent);
         this.store.patchMember(member.id, { contextPct: null, parallel: false, ...(member.origin === "adopted" ? { origin: "runner" as const } : {}) });
         this.store.enqueue({ projectId: project.id, memberId: member.id, kind: "system", text: this.newSessionNote(member), wake: false });
@@ -3147,6 +3191,7 @@ export class Orchestrator implements OrchestratorApi {
           this.store.enqueue({ projectId: project.id, memberId: member.id, kind: "system", text: this.newSessionNote(member), wake: false });
         }
         if (this.store.getMember(member.id)) this.store.patchMember(member.id, { lastError: (e2 as Error).message });
+        claimIfUnknown();
         return null;
       }
     }
@@ -3183,7 +3228,8 @@ export class Orchestrator implements OrchestratorApi {
     try {
       if (member.origin !== "manual") {
         // 넘겨받은 명부(origin adopted)의 세션은 서버가 띄운 것이 아니다. 닫아도 끝내지 않고 명부에서만 뺀다.
-        if (member.origin !== "adopted") await this.stopManaged(member, "close", true);
+        // 지워진 옛 실행기(backend 가 core 가 아닌 값)의 세션도 같다. 다룰 실행기가 없어 끝낼 수 없으니('실행기가 없습니다' 503 이 났다) 명부에서만 뺀다.
+        if (member.origin !== "adopted" && this.backendOf(member) === "core") await this.stopManaged(member, "close", true);
       }
       this.endExecution(member, "interrupted", "팀원을 닫아 실행을 종료했습니다");
       if (rt.turn) rt.turn.interrupted = true;
@@ -4554,8 +4600,10 @@ export class Orchestrator implements OrchestratorApi {
     const observation = code && !member.statusObservation?.error ? { statusObservation: {
       ...(member.statusObservation ?? { source: this.backendOf(member), observedAt: new Date().toISOString(), freshness: "unknown" as const, ownership: "unknown" as const, consecutiveFailures: 0 }),
       error: { code, note: "띄운 뒤 60초 넘게 준비를 알리지 않았습니다. 터미널을 열어 화면을 확인해 주세요" } } } : {};
-    // The observation's verified reason may have arrived before this status transition.
-    const blocked = this.store.patchMember(member.id, { status: "blocked", blockedReason: member.blockedReason ?? "status_unknown", ...observation });
+    // The observation's verified reason may have arrived before this status transition. `member` can be an older
+    // snapshot than the roster (the pump holds one from its start), so the stored reason wins over it.
+    const storedReason = this.store.getMember(member.id)?.blockedReason;
+    const blocked = this.store.patchMember(member.id, { status: "blocked", blockedReason: storedReason ?? member.blockedReason ?? "status_unknown", ...observation });
     // 이미 막혀 있던 팀장은 이 막힘에서 처음 보는 까닭이 붙을 때만 다시 알린다(까닭이 오가도 한 번씩만).
     if (entering) this.blockedNotices.delete(member.id); else this.recallBlockedNotice(member);
     const key = blocked.blockedCode ?? "blocked";
@@ -4699,8 +4747,6 @@ export class Orchestrator implements OrchestratorApi {
     const errorKey = e.turn == null ? undefined : JSON.stringify([this.store.memberRevisions(member.id).sessionGeneration, e.terminalId ?? member.paneId, e.turn]);
     if (turn?.interrupted) {
       this.settle(member);
-    } else if (e.isError && e.noOutput && turn?.deliveries?.length) {
-      await this.onTurnUnread(member, rt, turn.deliveries, e.errorText ?? "오류", errorKey);
     } else if (e.isError) {
       await this.onTurnError(member, e.errorText ?? "오류", errorKey);
     } else {
@@ -4729,14 +4775,6 @@ export class Orchestrator implements OrchestratorApi {
     this.store.patchMember(member.id, { status: "error", lastError: errorText });
     this.systemMessage(member.projectId, `${member.name} 오류: ${errorText}`);
     if (member.kind === "worker") await this.reportToConductor(member, "막힘", "(자동) 턴 오류", errorText, true);
-  }
-
-  /** noOutput diagnoses execution, never whether an input was received. */
-  private async onTurnUnread(member: Member, _rt: Runtime, deliveries: Delivery[], errorText: string, errorKey?: string): Promise<void> {
-    for (const d of deliveries) {
-      if (this.store.getDelivery(d.id)?.status !== "delivered") this.deliveryRecovery.beginRecovery(d.id);
-    }
-    await this.onTurnError(member, errorText, errorKey);
   }
 
   /** post 를 안 부른 턴의 마지막 글(§6). 직원은 총괄에게 보고, 총괄·본사 AI 는 대표에게 하는 말. */

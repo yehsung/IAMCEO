@@ -18,7 +18,7 @@ async function setup(opts: { timings?: Partial<OrchestratorTimings>; runnerEnabl
   closers.push(() => core.close());
   const { store, orch, runner } = core;
   const project = store.createProject({ name: "시험", cwd: core.home, runnerEnabled: opts.runnerEnabled ?? true });
-  await orch.recover(); // 틱을 돌린다. 아직 정리할 것이 없다.
+  // 틱은 틀(coreSetup)이 운영 조립처럼 recover() 를 불러 이미 돌고 있다.
   const api = (method: string, path: string, body?: unknown, token = "code") =>
     fetch(`${core.base}${path}`, { method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
   const manual = async (name = "직접") => (await (await api("POST", "/agent/join", { project: project.id, name })).json()) as { member: Member; token: string };
@@ -31,8 +31,8 @@ async function setup(opts: { timings?: Partial<OrchestratorTimings>; runnerEnabl
   runner.checkStop = async (m, o) => { checks.push({ id: m.id, whileWorking: o?.whileWorking }); await hooks.beforeCheck?.(m); return realCheck(m, o); };
   runner.stop = async (m, o) => { await hooks.beforeStop?.(m); await realStop(m, o); stopped.push(m.id); };
   /**
-   * 서버가 띄운 직원. core 의 보관은 이어갈 세션 기록을 확인하므로(verifyArchiveSession) 실제 턴을 한 번 돌려 둔다.
-   * 보고하고 끝내 '보고 보완' 턴이 붙지 않게 한다.
+   * 서버가 띄운 직원. core 의 보관은 턴을 돈 세션이면 이어갈 세션 기록을 확인하므로(verifyArchiveSession) 실제 턴을 한 번 돌려 둔다.
+   * 보고하고 끝내 '보고 보완' 턴이 붙지 않게 한다. 턴이 없던 세션의 보관은 아래 "보관: 턴이 없던 세션과 터미널이 없는 팀장" 묶음이 본다.
    */
   const firstTurn = async (m: Member) => {
     if (m.kind === "worker") await orch.assign(m.projectId, m.handle, { text: "준비 @fake:post=준비됨" });
@@ -42,7 +42,15 @@ async function setup(opts: { timings?: Partial<OrchestratorTimings>; runnerEnabl
     return store.requireMember(m.id);
   };
   const managed = async (handle: string, name = handle) => firstTurn((await orch.addMember(project.id, { name, handle, role: "개발" })).member);
-  return { ...core, project, api, manual, tool, checks, stopped, hooks, firstTurn, managed };
+  /**
+   * 막 띄운(턴이 없던) 세션이 가라앉기를 기다린다. 띄운 직후에는 실행기의 첫 관측이 전달 펌프를 몇 번 돌리고, 펌프가 도는 순간의
+   * 보관은 409 "…의 세션을 처리하는 중입니다" 다(그 거절은 이 시험들의 주제가 아니다).
+   */
+  const settled = async (...members: Member[]) => {
+    await Bun.sleep(60);
+    for (const m of members) { await core.idle(m.id); await orch.pump(m.id); }
+  };
+  return { ...core, project, api, manual, tool, checks, stopped, hooks, firstTurn, managed, settled };
 }
 type Env = Awaited<ReturnType<typeof setup>>;
 
@@ -64,7 +72,7 @@ describe("보관", () => {
     const starts = t.runs().length;
     const sends = t.turns().length;
     expect((await t.tool(m.token, "post", { kind: "완료", title: "끝" })).isError).toBeFalsy();
-    await Bun.sleep(80);
+    await Bun.sleep(80); // '없음'을 보는 대기.
     expect(t.store.requireMember(lead.id).status).toBe("asleep");
     expect(t.runs().length).toBe(starts);
     expect(t.turns().length).toBe(sends);
@@ -171,6 +179,141 @@ describe("보관", () => {
   });
 });
 
+// 보관 전 검사가 '이어갈 세션 기록'과 '끝낼 터미널'을 요구하던 자리. 기록이 없는 것이 정상인 세션과 터미널이 이미 없는 팀장은 보관을 막지 않는다.
+describe("보관: 턴이 없던 세션과 터미널이 없는 팀장", () => {
+  // 전에는 409 "…의 칸을 끝내지 못해 보관할 수 없습니다: 이어갈 native 세션 기록을 확인할 수 없습니다" 였다(푸는 법도 없었다).
+  test("총괄만 시작하고 한 마디도 안 건 프로젝트도 보관된다. 꺼내서 깨우면 이어 열지 않고 새 세션으로 연다", async () => {
+    // 턴이 없던 총괄에게는 깨우지 않는 '지금 상황' 글이 줄에 남아 있어 틱마다 전달 펌프가 돈다. 틱은 이 시험의 주제가 아니라 사실상 꺼 둔다.
+    const t = await setup({ timings: { tickMs: 60_000, healthMs: 60_000 } });
+    const lead = await t.orch.ensureConductor(t.project.id); // 목표 없이 시작: 턴이 돌지 않는다.
+    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member; // 첫 지시 없이 추가한 팀장.
+    await t.settled(lead, w);
+    expect(t.turns()).toHaveLength(0);
+    const firstLead = t.runs(lead.id)[0]!, firstWorker = t.runs(w.id)[0]!;
+    for (const m of [lead, w]) expect(t.runner.sessionExists({ ...m, cli: "claude" } as unknown as RunnerMember)).toBe(false);
+
+    const archived = await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: true });
+    expect(archived.status).toBe(200);
+    expect(t.store.requireProject(t.project.id).archived).toBe(true);
+    // 세션 기록은 묻지 않지만 쓰던 글 검사(종료 전 검사)는 두 사람 모두 그대로 거친다: 보관 전 한 번, 재우기 직전 한 번, 실제 종료 안에서 한 번.
+    expect(t.checks.filter(c => c.id === lead.id)).toHaveLength(3);
+    expect(t.checks.filter(c => c.id === w.id)).toHaveLength(3);
+    expect(t.checks.every(c => c.whileWorking === false)).toBe(true);
+    expect(t.stopped.sort()).toEqual([lead.id, w.id].sort());
+    expect(t.core.count("terminal.kill")).toBe(2);
+    for (const m of [lead, w]) expect(t.store.requireMember(m.id)).toMatchObject({ status: "asleep", paneId: null, sessionId: m.sessionId });
+
+    // 꺼내기만 해서는 아무도 깨우지 않는다.
+    expect((await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: false })).status).toBe(200);
+    await Bun.sleep(60);
+    expect(t.runs()).toHaveLength(2);
+    expect(t.store.requireMember(lead.id).status).toBe("asleep");
+
+    // 말을 걸면 총괄이 깬다. 이어 열 기록이 없으니 --resume 이 아니라 새 세션이다.
+    expect((await t.api("POST", `/api/projects/${t.project.id}/messages`, { text: "안녕 @fake:post=받았습니다" })).status).toBe(200);
+    const turn = await t.waitFor("깨운 총괄의 첫 턴", () => t.turns(lead.id).find(c => c.prompt.includes("안녕") && c.outcome === "done"));
+    expect(t.runs(lead.id)).toHaveLength(2);
+    expect(turn.run).toBe(t.runs(lead.id)[1]!);
+    expect(turn.run.resumeFlag).toBeNull();
+    expect(turn.run.sessionFlag).not.toBeNull();
+    expect(turn.run.sessionFlag).not.toBe(firstLead.sessionFlag);
+    await t.idle(lead.id);
+    expect(t.store.requireMember(lead.id)).toMatchObject({ status: "idle", lastError: null, sessionId: turn.run.sessionFlag, paneId: turn.run.terminal });
+
+    // 팀 화면의 깨우기도 같다.
+    expect((await t.api("POST", `/api/members/${w.id}/resume`)).status).toBe(200);
+    expect(t.runs(w.id)).toHaveLength(2);
+    expect(t.runs(w.id)[1]!.resumeFlag).toBeNull();
+    expect(t.runs(w.id)[1]!.sessionFlag).not.toBe(firstWorker.sessionFlag);
+    expect(t.store.requireMember(w.id)).toMatchObject({ status: "idle", lastError: null, sessionId: t.runs(w.id)[1]!.sessionFlag });
+    // 없는 세션을 --resume 으로 띄운 적이 한 번도 없다.
+    expect(t.runs().filter(run => run.resumeFlag !== null)).toEqual([]);
+  });
+
+  test("턴이 없던 세션이어도 입력칸에 쓰던 글이 있으면 보관을 거절하고, 지우면 보관된다", async () => {
+    const t = await setup({ timings: { tickMs: 60_000, healthMs: 60_000 } });
+    const lead = await t.orch.ensureConductor(t.project.id);
+    await t.settled(lead);
+    t.core.setDraft(lead.id, "대표가 쓰던 글");
+    const refused = await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: true });
+    expect(refused.status).toBe(409);
+    const why = ((await refused.json()) as { error: string }).error;
+    expect(why).toContain("의 칸을 끝내지 못해 보관할 수 없습니다");
+    expect(why).toContain("user draft");
+    expect(why).not.toContain("세션 기록");
+    expect(t.core.count("terminal.kill")).toBe(0);
+    expect(t.store.requireProject(t.project.id).archived).toBe(false);
+    expect(t.store.requireMember(lead.id)).toMatchObject({ status: "idle", paneId: lead.paneId });
+    t.core.setDraft(lead.id, "");
+    await t.settled(lead);
+    expect((await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: true })).status).toBe(200);
+    expect(t.store.requireMember(lead.id).status).toBe("asleep");
+  });
+
+  // 대표가 터미널에 직접 쳐서 턴을 돌린 세션은 빈 세션이 아니다. 기록이 있으니 보통의 확인 길을 거쳐 보관되고, 깨우면 그 세션을 이어 연다.
+  test("터미널에 직접 쳐서 턴을 돌린 세션은 기록이 있는 세션으로 다룬다: 보관했다 깨우면 --resume 이다", async () => {
+    const t = await setup({ timings: { tickMs: 60_000, healthMs: 60_000 } });
+    const lead = await t.orch.ensureConductor(t.project.id);
+    await t.settled(lead);
+    t.core.typeDirectly(lead.id, "직접 친 글");
+    await t.waitFor("직접 친 턴 끝", () => t.turns(lead.id).some(c => c.outcome === "done"));
+    await t.settled(lead);
+    expect(t.runner.sessionExists({ ...t.member(lead.id), cli: "claude" } as unknown as RunnerMember)).toBe(true);
+    expect((await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: true })).status).toBe(200);
+    expect((await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: false })).status).toBe(200);
+    expect((await t.api("POST", `/api/projects/${t.project.id}/messages`, { text: "이어서 @fake:post=받았습니다" })).status).toBe(200);
+    const turn = await t.waitFor("깨운 뒤 턴", () => t.turns(lead.id).find(c => c.prompt.includes("이어서") && c.outcome === "done"));
+    expect(turn.run.resumeFlag).toBe(lead.sessionId);
+  });
+
+  // 전에는 503 "…의 칸을 확인하지 못해 보관할 수 없습니다: No core terminal for member" 였다. 깨우거나 재우기 전에는 다시 해도 같았다.
+  test("서버가 꺼진 사이 CLI 가 죽어 offline 인 팀장이 섞인 프로젝트도 보관된다. 꺼내서 깨우면 그 세션을 이어 연다", async () => {
+    const t = await setup({ timings: { tickMs: 60_000, healthMs: 60_000 } });
+    const lead = await t.firstTurn(await t.orch.ensureConductor(t.project.id));
+    const w = await t.managed("worker");
+    await t.stopServer();
+    t.core.exit(w.id, 1);
+    const next = await t.restart();
+    closers.push(() => next.close());
+    await next.waitFor("offline", () => next.member(w.id).status === "offline" && next.member(w.id).paneId === null);
+    expect(next.member(w.id).sessionId).toBe(w.sessionId);
+    // 실행기는 이 팀장의 터미널을 모른다. 실제 종료(stop)는 이것을 '끝낼 것이 없다'로 보고, 미리 보는 검사(checkStop)도 이제 같다.
+    const target = { ...next.member(w.id), cli: "claude" } as unknown as RunnerMember;
+    await expect(next.runner.screen(target)).rejects.toMatchObject({ kind: "not_found", message: "No core terminal for member" });
+    await expect(next.runner.checkStop(target, { whileWorking: false })).resolves.toBeUndefined();
+    const kills = next.core.count("terminal.kill");
+
+    const archived = await next.api("PATCH", `/api/projects/${t.project.id}`, { archived: true });
+    expect(archived.status).toBe(200);
+    expect(next.store.requireProject(t.project.id).archived).toBe(true);
+    expect(next.member(w.id)).toMatchObject({ status: "asleep", paneId: null, sessionId: w.sessionId });
+    expect(next.member(lead.id)).toMatchObject({ status: "asleep", paneId: null, sessionId: lead.sessionId });
+    // 살아 있던 총괄의 터미널만 끝낸다. 이미 없는 팀장에게는 끝낼 것이 없다.
+    expect(next.core.count("terminal.kill")).toBe(kills + 1);
+    expect(next.store.listPendingLifecycleJournals()).toHaveLength(0);
+
+    expect((await next.api("PATCH", `/api/projects/${t.project.id}`, { archived: false })).status).toBe(200);
+    expect((await next.api("POST", `/api/members/${w.id}/resume`)).status).toBe(200);
+    expect(next.runs(w.id).at(-1)!.resumeFlag).toBe(w.sessionId);
+    expect(next.member(w.id)).toMatchObject({ status: "idle", lastError: null });
+  });
+
+  // 대조: 터미널이 있는지 확인하지 못한 것(엔진에 닿지 않음)은 '없음'이 아니다. 그때는 지금처럼 보관을 거절한다.
+  test("터미널이 없는지 확인하지 못하면(엔진에 닿지 않음) 통과로 보지 않는다", async () => {
+    const t = await setup({ timings: { tickMs: 60_000, healthMs: 60_000 } });
+    const w = await t.managed("worker");
+    t.core.setDown(true);
+    await expect(t.runner.checkStop({ ...t.member(w.id), cli: "claude" } as unknown as RunnerMember, { whileWorking: false })).rejects.toMatchObject({ name: "CoreError" });
+    const refused = await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: true });
+    expect(refused.status).toBe(503);
+    expect(((await refused.json()) as { error: string }).error).toContain("worker의 칸을 확인하지 못해 보관할 수 없습니다");
+    expect(t.store.requireProject(t.project.id).archived).toBe(false);
+    expect(t.store.requireMember(w.id)).toMatchObject({ paneId: w.paneId, sessionId: w.sessionId });
+    expect(t.core.count("terminal.kill")).toBe(0);
+    t.core.setDown(false);
+  });
+});
+
 describe("단일 프로젝트 변경 장벽", () => {
   test("전체 patch/HQ 검증이 종료보다 먼저이며 같은 값은 부작용이 없다", async () => {
     const t = await setup(); await t.managed("worker");
@@ -184,10 +327,13 @@ describe("단일 프로젝트 변경 장벽", () => {
   });
 
   test("runner 직원도 전원 사전 검사하고, 마지막 검사에서 거부하면 한 명도 종료하지 않는다", async () => {
-    const t = await setup(); const a = await t.managed("first"), b = await t.managed("second");
+    // 둘째 직원은 첫 지시 없이 추가만 했다(턴이 없던 세션). 세션 기록이 없어도 보관 전 검사는 거기서 멈추지 않고 쓰던 글 검사까지 간다.
+    const t = await setup(); const a = await t.managed("first"), b = (await t.orch.addMember(t.project.id, { name: "second", handle: "second", role: "개발" })).member;
+    await t.settled(b);
+    expect(t.turns(b.id)).toHaveLength(0);
     // 옛 시험은 가짜 실행기가 HerdrError("cannot_exit") 를 던졌다. core 에서는 입력칸에 사람이 쓰던 글이 있으면 실제 CoreRunner 가 종료를 거절한다.
     t.core.setDraft(b.id, "초안 보존");
-    await expect(t.orch.patchProject(t.project.id, { archived: true, name: "새 이름" })).rejects.toMatchObject({ status: 409 });
+    await expect(t.orch.patchProject(t.project.id, { archived: true, name: "새 이름" })).rejects.toMatchObject({ status: 409, message: expect.stringContaining("user draft") });
     await until(() => t.checks.length === 2, "전원 검사");
     expect(t.stopped).toHaveLength(0);
     expect(t.store.requireProject(t.project.id)).toMatchObject({ archived: false, name: "시험" });
@@ -270,7 +416,6 @@ describe("단일 프로젝트 변경 장벽", () => {
     t.core.intercept(null); t.core.setDown(false);
     const next = await t.restart({ timings: { tickMs: 60_000, healthMs: 60_000 } });
     closers.push(() => next.close());
-    await next.orch.recover();
     expect(next.store.requireMember(b.id)).toMatchObject({ status: "asleep", paneId: null, sessionId: b.sessionId });
     expect(next.store.listPendingLifecycleJournals()).toHaveLength(0);
     expect(next.store.requireProject(t.project.id).archived).toBe(false);

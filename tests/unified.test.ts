@@ -24,17 +24,17 @@ afterEach(async () => {
   for (const close of closers.splice(0).reverse()) await close();
 });
 
-async function setup(opts: { runnerEnabled?: boolean; ticks?: boolean } = {}) {
+async function setup(opts: { runnerEnabled?: boolean; ticks?: boolean; live?: boolean } = {}) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-unified-")));
   const work = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-unified-work-")));
   // 모델 목록은 CLI 설정 폴더의 .claude.json 에서 읽는다. 틀이 그 폴더를 <home>/claude-home 으로 잡는다.
   mkdirSync(join(home, "claude-home"));
   writeFileSync(join(home, "claude-home", ".claude.json"), JSON.stringify({ additionalModelOptionsCache: [{ value: "claude-fable-5-1[1m]", label: "Fable" }] }));
   // ticks: 틱과 실행기 상태 확인을 빠르게 돌린다(죽은 터미널을 알아채고 다시 여는 흐름을 볼 때). 기본은 옛 시험처럼 사실상 돌지 않는다.
-  const core = await coreSetup({ home, timings: { retryMs: 10, inputBusyRetryMs: 10, ...(opts.ticks ? { tickMs: 20, healthMs: 20 } : { tickMs: 60_000, healthMs: 60_000 }) } });
+  // 틀이 운영 조립처럼 initializeRuntime()·recover() 를 부른다. live: false 는 복구 전 상태를 손으로 만들고 recover() 를 직접 부르는 시험만 쓴다.
+  const core = await coreSetup({ home, live: opts.live, timings: { retryMs: 10, inputBusyRetryMs: 10, ...(opts.ticks ? { tickMs: 20, healthMs: 20 } : { tickMs: 60_000, healthMs: 60_000 }) } });
   closers.push(() => core.close());
   const { store, orch, base } = core;
-  if (opts.ticks) await orch.recover();
   const events: WsEvent[] = [];
   core.bus.subscribe((e) => events.push(e));
   // 작업 폴더를 IAMCEO 홈과 따로 둔다(파일 도구의 폴더 밖 검사). 틀이 만든 기본 프로젝트는 쓰지 않는다.
@@ -65,6 +65,9 @@ function launch(run: FakeRun) {
   return { id: run.memberId, model: flag("--model"), effort: flag("--effort"), permissionMode: flag("--permission-mode"), subagentModel: run.env.CLAUDE_CODE_SUBAGENT_MODEL ?? null,
     subagentForce: run.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE ?? null, resume: run.resumeFlag, settings: flag("--settings") };
 }
+
+/** 방송된 그 팀장의 상태를 차례로. 잠깐 거쳐 간 offline·error 도 여기에는 남는다. */
+const statusesOf = (events: WsEvent[], memberId: string) => events.flatMap((e) => e.type === "member" && e.member.id === memberId ? [e.member.status] : []);
 
 const until = async (cond: () => boolean, label = "조건", ms = 4000) => {
   const end = Date.now() + ms;
@@ -168,7 +171,7 @@ describe("연결 상태", () => {
   });
 
   test("일회성 정리: 보류된 결재 답은 다시 열고 대표 글은 실패로 돌린다. 재전송도 연결을 본다. 두 번 돌려도 같다", async () => {
-    const t = await setup({ runnerEnabled: false });
+    const t = await setup({ runnerEnabled: false, live: false });
     const pid = t.project.id;
     const lead = t.store.createMember({ projectId: pid, handle: "lead", name: "총괄", kind: "conductor", origin: "adopted", status: "offline" });
     const worker = t.store.createMember({ projectId: pid, handle: "w", name: "철수", kind: "worker", origin: "adopted", status: "offline" });
@@ -208,9 +211,22 @@ describe("연결 상태", () => {
     expect(again.status).toBe(409);
     await expect(t.orch.resendMessage(t.store.requireMessage(m1.id))).rejects.toThrow("연결");
     await t.api("PATCH", `/api/projects/${pid}`, { runnerEnabled: true });
-    t.store.patchMember(lead.id, { origin: "runner", status: "asleep" });
+    // 달라진 점: 세션도 터미널도 없는 넘겨받은 총괄(origin adopted)은 실행을 켜면 보류돼 있던 보고로 깨어나 서버가 띄운 새 세션이 된다
+    // (전에는 실행기가 넘겨받은 명부를 거절해 깨워지지 않았다). 그 뒤에는 서버 세션처럼 재울 수 있다.
+    const woken = await t.waitFor("넘겨받은 총괄이 새 세션으로 열림", () => t.turns(lead.id).find((c) => c.prompt.includes("보고") && c.outcome === "done"));
+    await t.idle(lead.id);
+    expect(t.runs(lead.id)).toHaveLength(1);
+    expect(woken.run).toMatchObject({ resumeFlag: null, sessionFlag: t.store.requireMember(lead.id).sessionId });
+    expect(t.store.requireMember(lead.id)).toMatchObject({ origin: "runner", status: "idle", backend: "core" });
+    expect(t.store.listPending(lead.id)).toHaveLength(0);
+    // 맡은 일이 없는 넘겨받은 팀장은 그대로다.
+    expect(t.store.requireMember(worker.id)).toMatchObject({ origin: "adopted", status: "offline", sessionId: null });
+    expect(t.runs(worker.id)).toHaveLength(0);
+    await t.orch.sleepMember(lead.id);
+    expect(t.store.requireMember(lead.id).status).toBe("asleep");
     // 옛 전달 행이 사라진 메시지는 현재 총괄을 옛 수신자로 추정하지 않는다.
     const sentBefore = t.turns(lead.id).length;
+    const dispatchedBefore = t.store.listDispatches(lead.id).length;
     const resent = await t.api("POST", `/api/projects/${pid}/messages`, { id: m1.id, text: "총괄에게" });
     expect(resent.status).toBe(409);
     expect(t.store.requireMessage(m1.id).delivery).toBe("failed");
@@ -226,8 +242,12 @@ describe("연결 상태", () => {
     expect(deliveries[0]!.attempts).toBe(0);
     expect(t.orch.deliveryRecovery.fenced(lead.id)).toBe(true);
     // 이 프로젝트의 총괄에게는 새 입력이 없다(켜진 다른 프로젝트의 총괄은 제 말을 받는다).
+    // 응답 직후의 턴 수만으로는 '넣지 않음'을 가릴 수 없다(띄우기·넣기는 소켓 왕복 뒤에야 보인다).
+    // 서버가 실행기에 넘긴 봉투가 늘지 않았고 그 전달은 한 번도 시도되지 않았다(위의 attempts 0).
+    expect(t.store.listDispatches(lead.id)).toHaveLength(dispatchedBefore);
     expect(t.turns(lead.id)).toHaveLength(sentBefore);
-    expect(t.runs(lead.id)).toHaveLength(0);
+    expect(t.runs(lead.id)).toHaveLength(1);
+    expect(t.core.count("terminal.send")).toBe(t.turns().length);
     expect(t.store.listMessages(pid).filter((m) => m.id === m1.id)).toHaveLength(1);
   });
 
@@ -417,6 +437,27 @@ describe("설정 통일", () => {
     expect(t.store.requireMember(old.id)).toMatchObject({ backend: "headless", sessionId: "22222222-2222-4222-8222-222222222222" });
     expect(t.runs()).toHaveLength(0);
   });
+
+  // 편입 뒤 '도구 붙여 다시 열기'를 거친 팀장은 origin runner·옛 backend·세션 ID 가 남는다. 전에는 닫기가 503 "실행기가 없습니다: herdr" 로 끝났다.
+  test("옛 멤버: 없앤 편입 해제 주소는 새 세션으로 이어가기를 먼저 안내하고, 닫으면 실행기를 찾지 않고 명부에서만 뺀다", async () => {
+    const t = await setup();
+    const lead = await t.orch.ensureConductor(t.project.id);
+    const old = t.store.createMember({ projectId: t.project.id, handle: "old", name: "옛직원", role: "개발", kind: "worker", origin: "runner", status: "idle", backend: "herdr", paneId: "old:p1", sessionId: "22222222-2222-4222-8222-222222222222" });
+    const waiting = await t.orch.assign(t.project.id, "old", { text: "못 나간 일" }, lead);
+    const released = await t.api("POST", `/api/members/${old.id}/release`);
+    expect(released.status).toBe(410);
+    expect(released.body.error).toMatch(/^편입 해제는 없어졌습니다\. 이전 실행기의 세션이 남은 팀장은 팀 화면의 '새 세션으로 이어가기'로 .*명부에서 빼려면 총괄에게 그 팀장을 닫으라고 하세요$/);
+    expect(t.store.requireMember(old.id)).toMatchObject({ backend: "herdr", paneId: "old:p1" });
+
+    const closed = await t.call(lead, "team_close", { member: "old" });
+    expect(closed.isError).toBeUndefined();
+    expect(closed.text).toContain("옛직원을 닫았습니다. 나가지 않은 지시 1건");
+    expect(t.store.findMember(t.project.id, "old")).toBeNull();
+    expect(t.store.getDelivery(waiting.delivery.id)?.status).not.toBe("delivered");
+    // 다룰 실행기가 없는 세션이다. core 에는 아무것도 묻거나 시키지 않는다.
+    expect(t.core.calls.filter((c) => c.params?.terminal === "old:p1" || c.params?.labels?.["iamceo.member"] === old.id)).toEqual([]);
+    expect(t.core.count("terminal.kill")).toBe(0);
+  });
 });
 
 describe("띄우는 동안 바뀐 설정", () => {
@@ -449,13 +490,70 @@ describe("띄우는 동안 바뀐 설정", () => {
     await until(() => t.runs(member.id).length >= 2, "새 설정으로 다시 열기");
     expect(launch(t.runs(member.id)[1]!).model).toBe("sonnet");
     await until(() => t.store.requireMember(member.id).appliedModel === "sonnet", "적용 기록");
-    // 달라진 점: core 의 '다시 열기'는 같은 세션을 --resume 으로 새로 띄우는 것이다. 아직 턴이 없던 세션은 이어 열 기록이 없어
-    // 그 CLI 가 곧바로 끝난다(가짜 CLI 도 실제 Claude 처럼 끝난다). 서버는 끝난 것을 알아채고, 다음 일이 오면 새 세션을 새 설정으로 연다.
-    // 여기서는 그 끝만 본다: 맡긴 일이 새 설정으로 뜬 CLI 에서 돈다.
+    // core 의 '다시 열기'는 같은 세션을 --resume 으로 새로 띄우는 것이다. 아직 턴이 없던 세션은 이어 열 기록이 없으므로
+    // --resume 으로 띄우지 않고(그 CLI 는 곧바로 끝나 offline·오류가 됐다) 새 세션을 새 설정으로 연다.
+    expect(t.runs(member.id)[1]!.resumeFlag).toBeNull();
+    expect(t.runs(member.id)[1]!.sessionFlag).not.toBe(t.runs(member.id)[0]!.sessionFlag);
+    expect(t.store.requireMember(member.id).sessionId).toBe(t.runs(member.id)[1]!.sessionFlag);
+    // 틱·상태 확인이 20ms 마다 돈다. 다시 연 CLI 가 죽었다면 이 사이에 offline 이 된다.
+    await Bun.sleep(150);
+    expect(t.store.requireMember(member.id)).toMatchObject({ status: "idle", lastError: null, paneId: t.runs(member.id)[1]!.terminal });
+    // 맡긴 일은 그 CLI 에서 돈다. 세 번째로 띄우지 않는다.
     await t.orch.assign(t.project.id, "cs", { text: "일 @fake:post=끝" });
     const turn = await t.waitFor("새 설정의 세션에서 일함", () => t.turns(member.id).find((c) => c.prompt.includes("할 일: 일") && c.outcome === "done"));
+    expect(turn.run).toBe(t.runs(member.id)[1]!);
     expect(launch(turn.run).model).toBe("sonnet");
     expect(t.store.requireMember(member.id).appliedModel).toBe("sonnet");
+    expect(t.runs(member.id)).toHaveLength(2);
+    expect(statusesOf(t.events, member.id).filter((status) => status === "offline" || status === "error")).toEqual([]);
+  });
+
+  // 첫 실행 때 흔한 순서다: 총괄만 시작하고 말을 걸기 전에 모델을 바꾼다. 총괄은 목표 없이 시작하면 턴이 돌지 않아 세션 기록이 없다.
+  test("턴이 없던 세션의 설정을 바꿔도 offline·오류를 거치지 않는다: 이어 열지 않고 새 세션으로 연다", async () => {
+    // 틱은 켜지 않는다: 턴이 없던 총괄에게는 깨우지 않는 '지금 상황' 글이 줄에 남아 틱마다 전달 펌프가 돌고, 펌프가 도는 순간의 설정 변경은
+    // 409 "…턴이 끝난 뒤 CLI를 바꾸세요" 다(다시 하면 되는 알려진 거절이고 이 시험의 주제가 아니다). 죽은 CLI 는 틱 없이도 실행기의 관측으로 드러난다.
+    const t = await setup();
+    const lead = await t.orch.ensureConductor(t.project.id);
+    expect(t.turns(lead.id)).toHaveLength(0);
+    expect(t.runs(lead.id)).toHaveLength(1);
+    const first = t.runs(lead.id)[0]!;
+    expect(first.sessionFlag).toBe(lead.sessionId);
+    expect(t.runner.sessionExists({ ...lead, cli: "claude" } as never)).toBe(false);
+    /** 띄운 직후·턴 직후의 전달 펌프가 끝난 뒤에 팀장 개인 설정을 바꾼다(앱의 '적용'이 부르는 길). */
+    const change = async (modelOverride: string) => {
+      await Bun.sleep(60);
+      await t.idle(lead.id);
+      await t.orch.pump(lead.id);
+      return t.orch.patchMemberConfig(lead.id, { modelOverride });
+    };
+
+    expect(await change("sonnet")).toMatchObject({ status: "idle", lastError: null, appliedModel: "sonnet" });
+    expect(t.runs(lead.id)).toHaveLength(2);
+    const second = t.runs(lead.id)[1]!;
+    expect(launch(second)).toMatchObject({ model: "sonnet", resume: null });
+    expect(second.sessionFlag).not.toBeNull();
+    expect(second.sessionFlag).not.toBe(first.sessionFlag);
+    expect(t.core.terminalOf(lead.id)).toMatchObject({ address: second.terminal, state: "live" });
+    // 실행기는 20ms 마다 터미널을 본다. 없는 세션을 --resume 했다면 그 CLI 가 곧바로 끝나 이 사이에 offline·'초기/실행 종료' 오류가 된다.
+    await Bun.sleep(150);
+    expect(t.store.requireMember(lead.id)).toMatchObject({ status: "idle", lastError: null, sessionId: second.sessionFlag, paneId: second.terminal, appliedModel: "sonnet" });
+    expect(statusesOf(t.events, lead.id).filter((status) => status === "offline" || status === "error")).toEqual([]);
+    expect(t.store.listActivity(lead.id).some((a) => a.text.includes("초기/실행 종료"))).toBe(false);
+    // 인계 글도 사실대로 적는다: 이어 연 것이 아니라 새 세션이다.
+    expect(t.store.listActivity(lead.id).some((a) => a.text.includes("이어 열 세션 기록이 없어 새 세션으로 열었습니다"))).toBe(true);
+    expect(t.store.listActivity(lead.id).some((a) => a.text.includes("같은 세션을 새 설정으로 이어 열었습니다"))).toBe(false);
+
+    // 첫 말은 그 CLI 에 그대로 들어간다. 세 번째로 띄우지 않는다.
+    await t.orch.sendUserMessage(t.project.id, { text: "안녕 @fake:post=받았습니다" });
+    const turn = await t.waitFor("첫 말", () => t.turns(lead.id).find((c) => c.prompt.includes("안녕") && c.outcome === "done"));
+    expect(turn.run).toBe(second);
+    expect(t.runs(lead.id)).toHaveLength(2);
+
+    // 대조: 턴을 돈 세션은 기록이 있으므로 같은 세션을 --resume 으로 이어 연다.
+    expect(await change("haiku")).toMatchObject({ status: "idle", lastError: null, appliedModel: "haiku" });
+    expect(t.runs(lead.id)).toHaveLength(3);
+    expect(launch(t.runs(lead.id)[2]!)).toMatchObject({ model: "haiku", resume: second.sessionFlag });
+    expect(t.store.requireMember(lead.id).sessionId).toBe(second.sessionFlag);
   });
 });
 
@@ -733,7 +831,7 @@ describe("직급별 모델·effort", () => {
     await t.orch.assign(t.project.id, "cs", { text: "일 @fake:hold @fake:post=끝" });
     await t.waitFor("일하는 중", () => t.core.held(w.id) && t.store.requireMember(w.id).status === "working");
     await t.api("PUT", "/api/settings", { ranks: { lead: { model: "sonnet", effort: "low" } } });
-    await Bun.sleep(30);
+    await Bun.sleep(30); // '없음'을 보는 대기.
     expect(t.runs(w.id)).toHaveLength(1);
     expect(t.store.requireMember(w.id).appliedModel).toBeNull();
     expect(t.core.release(w.id)).toBe(true);
@@ -806,7 +904,7 @@ describe("직급별 모델·effort", () => {
     const asleep = await t.firstTurn((await t.orch.addMember(t.project.id, { name: "잠듦", handle: "zz", role: "개발" })).member);
     await t.orch.sleepMember(asleep.id);
     await t.api("PUT", "/api/settings", { ranks: { lead: { model: "sonnet" } } });
-    await Bun.sleep(30);
+    await Bun.sleep(30); // '없음'을 보는 대기.
     expect(t.runs(asleep.id)).toHaveLength(1);
     await t.orch.resumeMember(asleep.id);
     expect(t.runs(asleep.id)).toHaveLength(2);

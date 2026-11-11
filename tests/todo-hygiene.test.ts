@@ -6,7 +6,7 @@ import { Bus } from "../server/bus.ts";
 import { loadConfig, updateConfigFile } from "../server/config.ts";
 import { MIGRATIONS, openDb } from "../server/db.ts";
 import { startServer } from "../server/http.ts";
-import { Orchestrator, formatTidy } from "../server/orchestrator.ts";
+import { Orchestrator, TIDY_HEAD, formatTidy } from "../server/orchestrator.ts";
 import type { Runner, RunnerEvent, SendResult } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
 import type { Backend, Member } from "../shared/types.ts";
@@ -16,6 +16,8 @@ const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 class HygieneRunner implements Runner {
   readonly kind: Backend = "core";
+  /** 운영의 CoreRunner 와 같다: 돌고 있는 턴에 끼워 넣지 못한다. 급한 글도 턴이 끝난 뒤 나간다. */
+  readonly interjects = false;
   sent: string[] = [];
   private listener: (event: RunnerEvent) => void = () => {};
   async available() { return { ok: true }; }
@@ -31,6 +33,14 @@ class HygieneRunner implements Runner {
   on(listener: (event: RunnerEvent) => void) { this.listener = listener; }
   end(memberId: string) { this.listener({ type: "turn_end", memberId, finalText: "", isError: false }); }
 }
+/** 고정 대기 대신 조건을 기다린다. 끝내 안 맞으면 무엇을 기다렸는지 말하고 떨어진다. */
+const until = async (cond: () => boolean, label: string, ms = 4000) => {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error(`${label} 시간 초과`);
+    await Bun.sleep(5);
+  }
+};
 async function setup() {
   if (!process.env.IAMCEO_TEST || !process.env.IAMCEO_HOME) throw new Error("Use bun run test:server");
   const home = mkdtempSync(join(process.env.IAMCEO_HOME, "hygiene-"));
@@ -126,9 +136,11 @@ test("stale board review runs without changes, no more than daily, and keeps ope
   t.store.completeBoardReview(t.project.id, revision, revision);
   // Unchanged and below the normal 6-hour interval, but stale work must be reviewed.
   expect(t.orch.checkBoardTidy(now)).toEqual([t.project.id]);
-  await Bun.sleep(20);
+  await until(() => t.runner.sent.some(text => text.includes(TIDY_HEAD)), "판 정리 전달");
   t.runner.end(t.lead.id);
-  await Bun.sleep(20);
+  // 턴 끝이 처리되고 그 끝에 도는 전달 펌프까지 끝난 뒤에 본다(펌프가 도는 총괄은 주기 판 정리가 건너뛴다).
+  await until(() => t.store.listActivity(t.lead.id).some(a => a.kind === "turn_end"), "턴 끝 처리");
+  await t.orch.pump(t.lead.id);
   expect(t.orch.checkBoardTidy(now + DAY - 1)).toEqual([]);
   expect(t.orch.checkBoardTidy(now + DAY)).toEqual([t.project.id]);
   expect(formatTidy("conductor", false)).toContain("대표 브라우저");

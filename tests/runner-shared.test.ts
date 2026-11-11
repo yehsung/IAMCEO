@@ -2,11 +2,17 @@
 //   - Claude Code 화면 해석(server/runner/claude-screen.ts): tests/herdr.test.ts '화면 해석', tests/herdr-contract.test.ts 의 화면 해석 시험
 //   - CLI 자식 환경(server/runner/env.ts): tests/headless.test.ts '도움 함수'
 //   - "세션이 없다"는 오류 판정(server/runner/session-files.ts): tests/headless.test.ts 가 실행기를 거쳐 보던 것
+//   - 세션 기록 해석(server/runner/transcript.ts)·역할 글(server/roles.ts): tests/headless.test.ts '도움 함수'. CoreRunner 의 문맥 측정이 쓴다.
 // 함께 있던 backgroundWait·transcriptTurnEnded·exitHintShown 단정은 옛 herdr 실행기에만 있는 함수라 옮기지 않았다.
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { renderRole } from "../server/roles.ts";
 import { inputLooksEmpty, inputText, screenContextPct } from "../server/runner/claude-screen.ts";
 import { childEnv } from "../server/runner/env.ts";
 import { isMissingSessionError } from "../server/runner/session-files.ts";
+import { contextPct, parseTranscriptTail, readTranscriptTail, transcriptPath } from "../server/runner/transcript.ts";
 
 const SCREEN = (input: string, tail = "") => [
   "이전 출력", "> 인용된 줄", "─".repeat(40), `❯ ${input}`, "─".repeat(40),
@@ -101,7 +107,18 @@ describe("화면 해석", () => {
 
 describe("CLI 자식 환경", () => {
   test("childEnv 는 HERDR_*·CLAUDE 진입 변수만 지운다", () => {
-    expect(childEnv({ HERDR_X: "1", CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "a", CLAUDE_CODE_SSE_PORT: "2", PATH: "/bin", IAMCEO_HOME: "/h", CLAUDE_CONFIG_DIR: "/c" })).toEqual({ PATH: "/bin", IAMCEO_HOME: "/h", CLAUDE_CONFIG_DIR: "/c" });
+    expect(childEnv({ HERDR_X: "1", CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "a", CLAUDE_CODE_SSE_PORT: "2", PATH: "/bin", IAMCEO_HOME: "/h", CLAUDE_CONFIG_DIR: "/c", USER: "ceo" })).toEqual({ PATH: "/bin", IAMCEO_HOME: "/h", CLAUDE_CONFIG_DIR: "/c", USER: "ceo" });
+  });
+
+  // Claude Code 는 USER 없이 뜨면 키체인에 계정 "unknown" 의 빈 로그인 항목을 만든다(2026-11-11 실측).
+  test("childEnv 는 USER 가 없으면 이 Mac 의 사용자 이름으로 채우고, 있는 값은 건드리지 않는다", () => {
+    expect(childEnv({ PATH: "/bin" }, () => "ceo")).toEqual({ PATH: "/bin", USER: "ceo", LOGNAME: "ceo" });
+    expect(childEnv({ PATH: "/bin", USER: "", LOGNAME: "kept" }, () => "ceo")).toEqual({ PATH: "/bin", USER: "ceo", LOGNAME: "kept" });
+    expect(childEnv({ USER: "me" }, () => "other")).toEqual({ USER: "me" });
+    // 사용자 이름을 알 수 없으면 지어내지 않는다.
+    expect(childEnv({ PATH: "/bin" }, () => { throw new Error("no passwd entry"); })).toEqual({ PATH: "/bin" });
+    expect(childEnv({ PATH: "/bin" }, () => "")).toEqual({ PATH: "/bin" });
+    expect(childEnv({ PATH: "/bin" }).USER).toBeTruthy();
   });
 });
 
@@ -113,5 +130,51 @@ describe("세션 기록", () => {
     expect(isMissingSessionError("session.snapshot: 8000ms 안에 답 없음")).toBe(false);
     expect(isMissingSessionError("")).toBe(false);
     expect(isMissingSessionError(null)).toBe(false);
+  });
+
+  // 아래 둘은 옛 시험(tests/headless.test.ts '도움 함수')을 단정 그대로 옮긴 것이다.
+  // 시험 틀(core-harness)의 가짜 CLI 와 CoreRunner 는 같은 transcriptPath 를 불러 쓰므로, 폴더 이름 규칙은 여기서 값으로 고정해야 틀려도 드러난다.
+  test("transcript: 마지막 입력 뒤 같은 응답의 글을 잇고, usage·사이드체인을 가른다", () => {
+    const lines = [
+      '{"type":"assistant","message":{"id":"old","content":[{"type":"text","text":"지난 턴"}],"usage":{"input_tokens":1}}}',
+      '{"type":"user","message":{"content":"새 입력"}}',
+      '{"type":"assistant","isSidechain":true,"message":{"id":"s","content":[{"type":"text","text":"곁가지"}],"usage":{"input_tokens":999}}}',
+      '{"type":"assistant","message":{"id":"a","model":"m1","content":[{"type":"text","text":"첫 응답"}],"usage":{"input_tokens":5}}}',
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"x"}]}}',
+      '{"type":"assistant","message":{"id":"b","model":"m2","content":[{"type":"text","text":"가"}],"usage":{"input_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":30}}}',
+      '{"type":"assistant","message":{"id":"b","model":"m2","content":[{"type":"text","text":"나"},{"type":"tool_use","name":"x"}],"usage":{"input_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":30}}}',
+      "잘린 줄",
+      '{"type":"system","subtype":"turn_duration"}',
+    ];
+    // 서브에이전트(사이드체인)의 usage 999 는 문맥에 섞이지 않고, 같은 message.id 의 조각은 한 번만 센다.
+    expect(parseTranscriptTail(lines.join("\n"))).toEqual({ finalText: "가\n나", contextTokens: 60, model: "m2" });
+    expect(parseTranscriptTail(lines.slice(0, 2).join("\n")).finalText).toBe("");
+  });
+
+  test("transcript 파일: 없으면 null, 꼬리만 읽어 잘린 첫 줄을 버린다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "iamceo-transcript-"));
+    expect(transcriptPath("/Users/a.b/c_d", "sid", dir)).toBe(join(dir, "projects", "-Users-a-b-c-d", "sid.jsonl"));
+    expect(readTranscriptTail(join(dir, "없음.jsonl"))).toBeNull();
+    const file = join(dir, "s.jsonl");
+    const last = '{"type":"assistant","message":{"id":"z","content":[{"type":"text","text":"끝"}],"usage":{"input_tokens":7}}}';
+    writeFileSync(file, `${"x".repeat(5000)}\n${last}\n`);
+    expect(readTranscriptTail(file, last.length + 500)).toEqual({ finalText: "끝", contextTokens: 7, model: null });
+    expect(contextPct(50_000)).toBe(25);
+    expect(contextPct(500_000)).toBe(100);
+  });
+});
+
+describe("역할 글", () => {
+  // 옛 시험(tests/headless.test.ts '도움 함수')을 단정 그대로 옮긴 것이다.
+  test("renderRole: 치환, 사용자 템플릿 우선, 값 안의 자리표시는 그대로", () => {
+    const vars = { PROJECT: "{{NAME}}", NAME: "철수", ROLE: "개발", CONDUCTOR: "총괄" };
+    const text = renderRole("worker", vars);
+    expect(text).toContain("철수");
+    expect(text).toContain("{{NAME}}");
+    expect(text).not.toContain("{{ROLE}}");
+    const dir = mkdtempSync(join(tmpdir(), "iamceo-roles-"));
+    writeFileSync(join(dir, "worker.md"), "맞춤 {{NAME}}/{{ROLE}}");
+    expect(renderRole("worker", vars, dir)).toBe("맞춤 철수/개발");
+    expect(renderRole("root", vars, dir)).not.toContain("맞춤");
   });
 });

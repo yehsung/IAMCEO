@@ -471,7 +471,8 @@ describe("REST", () => {
       ["GET", `/api/projects/${p.id}/adopt/preview`, undefined, /편입은 없어졌습니다/],
       ["POST", `/api/projects/${p.id}/adopt`, { paneId: "p1", name: "편입 직원", role: "일", handle: "adopt1" }, /편입은 없어졌습니다.*iamceo join/],
       ["POST", `/api/projects/${p.id}/adopt`, { paneId: "" }, /편입은 없어졌습니다/],
-      ["POST", `/api/members/${m.id}/release`, undefined, /편입 해제는 없어졌습니다/],
+      // 옛 실행기의 세션이 남은 팀장도 따라 할 수 있게 '새 세션으로 이어가기'를 먼저, 명부에서 빼는 길을 그다음에 안내한다.
+      ["POST", `/api/members/${m.id}/release`, undefined, /편입 해제는 없어졌습니다.*'새 세션으로 이어가기'.*총괄에게 그 팀장을 닫으라고 하세요/],
       ["POST", `/api/members/${m.id}/reopen-with-tools`, undefined, /도구 붙여 다시 열기'는 없어졌습니다/],
       // 없는 프로젝트·팀원이어도 '없어진 기능'이 먼저다(404 로 답하면 앱은 주소가 틀렸다고 본다).
       ["POST", "/api/projects/p_none/adopt", { paneId: "p1", name: "x", role: "r" }, /편입은 없어졌습니다/],

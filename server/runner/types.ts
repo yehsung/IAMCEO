@@ -149,9 +149,8 @@ export type SendResult =
 
 export type RunnerEvent = RunnerObservation & (
   | { type: "status"; memberId: string; status: "working" | "idle" | "blocked" | "gone"; blockedReason?: BlockedReason | null; usageLimit?: import("../api-outage.ts").UsageMenu; observation?: StatusObservation; exit?: { reason: string | null; exitCode: number | null } }
-  /** noOutput는 처리 진단이며 미수신 증거가 아니다. 원문 재전송 판정은 전달 복구가 맡는다. */
   | { type: "input_ready"; memberId: string }
-  | { type: "turn_end"; memberId: string; finalText: string; isError: boolean; errorText?: string; noOutput?: boolean; exitCode?: number | null; reason?: string | null;
+  | { type: "turn_end"; memberId: string; finalText: string; isError: boolean; errorText?: string; exitCode?: number | null; reason?: string | null;
       /** 상태 보고가 사라져 끝난 것으로 읽은 턴. 끝난 것은 맞지만 성공했다는 증거는 아니다. */
       inferred?: boolean }
   | { type: "activity"; memberId: string; kind: ActivityKind; text: string }

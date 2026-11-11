@@ -729,6 +729,10 @@ final class TerminalStreamTests: XCTestCase {
                     host.feed(Data("\u{1b}[?2026l".utf8))
                     try? await Task.sleep(for: .milliseconds(80))
                 }
+                // The catch-up runs on the main run loop after the guard lifts. A loaded machine (CI) can need more than
+                // the fixed wait above, so allow it time; the viewport must still arrive at the cursor.
+                let settled = Date().addingTimeInterval(3)
+                while abs(host.scrollLocation.viewportY) > 0.5 && Date() < settled { try? await Task.sleep(for: .milliseconds(20)) }
                 XCTAssertFalse(host.terminal.getTerminal().synchronizedOutputActive)
                 XCTAssertEqual(host.scrollLocation.viewportY, 0, accuracy: 0.5)
                 XCTAssertNotEqual(host.terminal.caretFrame, displayedCaret, "Display and viewport catch up after synchronization")

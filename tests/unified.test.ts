@@ -915,8 +915,8 @@ describe("직급별 모델·effort", () => {
 
 describe("실행기 인자", () => {
   test("childEnv: 바깥 세션의 서브에이전트·effort 값이 새지 않는다", () => {
-    const env = childEnv({ PATH: "/bin", CLAUDE_CODE_SUBAGENT_MODEL: "x", CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1", CLAUDE_CODE_EFFORT_LEVEL: "max", CLAUDE_EFFORT: "max" });
-    expect(env).toEqual({ PATH: "/bin" });
+    const env = childEnv({ PATH: "/bin", USER: "ceo", CLAUDE_CODE_SUBAGENT_MODEL: "x", CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1", CLAUDE_CODE_EFFORT_LEVEL: "max", CLAUDE_EFFORT: "max" });
+    expect(env).toEqual({ PATH: "/bin", USER: "ceo" });
   });
 
   test("Claude 설정은 항상 상태줄을 수집하고, 바이패스 모드만 경고 창을 건너뛴다", async () => {

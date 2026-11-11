@@ -7,9 +7,9 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
-### 아직 내지 않은 것
+### 0.2.3 — 2026-11-12
 
-2026-11-11 안정성 수정과 그 뒤의 완성도 손질입니다. 아직 버전을 붙여 내지 않았습니다.
+2026-11-11 안정성 수정과 그 뒤의 완성도 손질입니다. iPhone 앱 0.2.2는 이 버전의 Mac 서버와 그대로 맞습니다.
 
 - **멈춘 팀장이 스스로 풀립니다.** 뜨지 않은 세션은 90초 뒤 닫고 다시 깨웁니다. 사용 한도나 인터넷 장애로 멈춘 팀장은 간격을 두고 다시 이어 가고, 대표가 새로 말을 걸면 바로 풉니다.
 - **확인되지 않은 전달을 안전할 때만 다시 보냅니다.** 세션 기록에 그 글이 없고, 입력칸이 비었고, 턴이 그대로일 때만 자동으로 다시 보냅니다(최대 3회). 그 밖에는 전과 같이 다시 보내지 않습니다.
@@ -30,6 +30,8 @@ Only changes that matter to users, by version. The full history is in `git log`.
 - **팀장이 끝내 보고하지 않으면 총괄에게도 알립니다.** 팀장이 보고 없이 일을 끝내고 보고를 다시 요청해도 답이 없으면, 홈 화면 알림과 함께 그 프로젝트의 총괄을 깨워 한 번 알립니다. 전에는 대표가 알림을 보고 말을 걸 때까지 프로젝트가 멈춰 있었습니다.
 - **가져온 팀원 자리를 깨울 수 있습니다.** `iamceo import`로 가져온 팀원 자리는 총괄을 시작한 뒤 일을 맡기거나 깨우면 새 세션으로 열립니다. 전에는 영어 오류와 함께 열리지 않았습니다.
 - **꺼진 터미널의 화면 조회가 오류를 내지 않습니다.** 잠들었거나 터미널이 끝난 팀장의 화면을 조회하면 서버 오류 대신 빈 화면으로 답합니다. 예전 실행 방식의 세션이 남은 팀장도 명부에서 닫을 수 있습니다.
+- **멈춘 까닭이 '확인 안 됨'으로 바뀌지 않습니다.** 승인 창 앞에서 멈춘 팀장에게 말을 보내면, 방금 읽은 까닭(승인 창)이 '확인 안 됨'으로 덮이던 문제를 고쳤습니다.
+- **CLI에 Mac 사용자 이름을 꼭 넘깁니다.** 서버가 사용자 이름 없이 떠 있어도 Claude Code에는 채워서 넘깁니다. 이름 없이 뜬 Claude Code가 키체인에 빈 로그인 항목을 하나 더 만드는 일을 막습니다.
 - **문서.** [보안 설명서](docs/security.md)와 [취약점 신고 안내](SECURITY.md)를 더했습니다. README의 iPhone 알림과 권한 방식 서술을 실제 동작에 맞췄고, 개인정보 처리방침에 빠져 있던 네 가지를 적었습니다. 일을 맡는 세션의 이름을 앱 화면과 같은 '팀장'으로 맞췄습니다.
 
 ### 0.2.2 — 2026-11-10
@@ -70,9 +72,9 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 
 ## English
 
-### Unreleased
+### 0.2.3 — 2026-11-12
 
-The stability pass of 2026-11-11 and the completeness pass that followed. Not released under a version number yet.
+The stability pass of 2026-11-11 and the completeness pass that followed. The iPhone app 0.2.2 keeps working with this version of the Mac server.
 
 - **Stuck staff recover on their own.** A session that never appeared is closed after 90 seconds and woken again. Staff stopped by a usage limit or a network outage are retried at intervals, and released at once when you write to them.
 - **An unconfirmed delivery is resent only when that is safe.** Only when the session record does not contain the text, the input box is empty and the turn has not moved (at most 3 times). Otherwise, as before, nothing is resent.
@@ -93,6 +95,8 @@ The stability pass of 2026-11-11 and the completeness pass that followed. Not re
 - **The lead is told when a staff member never reports.** When a staff member ends a job without reporting and stays silent after being asked again, the server wakes that project's lead once to tell it, alongside the Home notice. Before, the project sat idle until you saw the notice and wrote something.
 - **Imported staff slots can be woken.** A slot brought in with `iamceo import` opens as a new session when you start the lead and then assign it work or wake it. Before, it failed with an English error.
 - **Reading the screen of a closed terminal no longer errors.** For a staff member who is asleep or whose terminal has ended, the screen request returns an empty screen instead of a server error. Staff still holding a session from an earlier mode can now be removed from the roster.
+- **A blocked reason is no longer replaced by "unknown".** Writing to a staff member stopped at a confirmation dialog used to overwrite the reason just read from the terminal with "unknown".
+- **The CLI always gets the Mac user name.** Even when the server runs without a user name in its environment, it passes one to Claude Code. This stops Claude Code from creating a second, empty login entry in the keychain.
 - **Docs.** Added a [security overview](docs/security.en.md) and a [vulnerability reporting policy](SECURITY.md). The README now states how iPhone notifications and the permission mode really work, and the privacy policy lists four things it had left out.
 
 ### 0.2.2 — 2026-11-10

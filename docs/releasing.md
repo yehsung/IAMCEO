@@ -52,7 +52,7 @@ bash scripts/check.sh server tests/w1-tooling-version.test.ts
 
 ### 순서
 
-1. **(사람)** 버전을 올린 커밋을 `main`에 올리고 CI가 통과했는지 확인합니다.
+1. **(사람)** 버전을 올린 커밋을 `main`에 올리고 CI가 통과했는지 확인합니다. CI는 서버 시험(`server`)과 앱 시험(`native`) 두 작업이고, 둘 다 통과해야 초록입니다. 앱 시험은 릴리스를 빌드하는 것과 같은 Xcode 27.2로 돕니다(GitHub의 `xcode-27` 이미지).
 2. **(사람)** 태그를 만들어 올립니다.
    ```sh
    git tag v0.0.0 && git push origin v0.0.0

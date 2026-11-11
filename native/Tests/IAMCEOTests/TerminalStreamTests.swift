@@ -37,7 +37,10 @@ final class TerminalStreamTests: XCTestCase {
         client.send(Data("a".utf8)); client.send(Data("b".utf8)); client.send(Data([27, 91, 65]))
         try await Task.sleep(for: .milliseconds(15))
         client.send(Data("c".utf8)); client.send(Data("d".utf8))
-        try await Task.sleep(for: .milliseconds(90))
+        // Wait for the second frame rather than a fixed time: a loaded machine (CI) takes longer than the sender's 35 ms.
+        let arrived = Date().addingTimeInterval(3)
+        while frames.count < 2 && Date() < arrived { try await Task.sleep(for: .milliseconds(10)) }
+        try await Task.sleep(for: .milliseconds(40)) // a third frame would be a failure: give it time to show up
         XCTAssertEqual(frames, [Data([97, 98, 27, 91, 65]), Data("cd".utf8)])
         client.send(Data("must not leak".utf8)); client.close()
         try await Task.sleep(for: .milliseconds(20))

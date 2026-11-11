@@ -80,7 +80,34 @@ swift_check() {
     report "SKIPPED native tests ($(printf '%s\n' "$skipped" | wc -l | tr -d ' ')):"
     report "$skipped"
   fi
-  if [ "$status" -ne 0 ]; then return "$status"; fi
+  if [ "$status" -ne 0 ]; then
+    # The server rule, for native tests: the tests that failed run once more in a fresh process. Failing twice fails
+    # the gate; passing the second time is reported as FLAKY, never hidden. A failure that names no test (a compile
+    # error, a crash) is not retried. IAMCEO_TEST_RETRY=0 turns the re-run off.
+    local failed again count name retry="$CHECK_ROOT/swift-retry.log" filters=()
+    local pick="s/^Test Case '-\\[\\(IAMCEOTests\\.[A-Za-z0-9_]*\\) \\([A-Za-z0-9_]*\\)\\]' failed .*/\\1\\/\\2/p"
+    failed=$(sed -n "$pick" "$log" | sort -u)
+    if [ -z "$failed" ] || [ "${IAMCEO_TEST_RETRY:-1}" = 0 ]; then
+      if [ -n "$failed" ]; then report "FAILED native tests:"; report "$failed"; fi
+      return "$status"
+    fi
+    count=$(printf '%s\n' "$failed" | wc -l | tr -d ' ')
+    while IFS= read -r name; do filters+=(--filter "^${name}\$"); done <<EOF_FAILED
+$failed
+EOF_FAILED
+    printf '\n== re-run in a fresh process: %s native test(s)\n' "$count"
+    status=0
+    swift test "${args[@]}" "${filters[@]}" 2>&1 | tee "$retry" || status=$?
+    again=$(sed -n "$pick" "$retry" | sort -u)
+    if [ "$status" -ne 0 ] || [ -n "$again" ] || ! grep -Eq "Executed $count tests?, with (.* and )?0 failures" "$retry"; then
+      report "FAILED native tests (failed twice):"; report "${again:-$failed}"
+      return 1
+    fi
+    report "native tests: $count flaky"
+    while IFS= read -r name; do report "FLAKY: $name (failed once, passed on re-run)"; done <<EOF_FLAKY
+$failed
+EOF_FLAKY
+  fi
   if [ "${IAMCEO_REQUIRE_APPKIT_TESTS:-0}" = 1 ] && printf '%s\n' "$skipped" | grep -q 'MacAttachmentUploadTests '; then
     report "FAILED: drag-and-drop upload tests were skipped; run outside the sandbox"
     return 1

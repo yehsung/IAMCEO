@@ -130,6 +130,60 @@ test("check.sh swift: 건너뛴 시험을 이름으로 알리고, 요구하면 �
   expect(readdirSync(f.scratch)).toEqual([]);
 });
 
+test("check.sh swift: 실패한 시험만 새 프로세스에서 한 번 더 돌린다. 통과하면 FLAKY 로 남기고, 또 실패하면 막는다", () => {
+  const f = fixture();
+  const line = (name: string, result: string) => `Test Case '-[IAMCEOTests.${name}]' started.\nTest Case '-[IAMCEOTests.${name}]' ${result} (0.100 seconds).\n`;
+  // 첫 실행은 swift-test.out, --filter 가 붙은 재실행은 swift-retry.out 을 낸다.
+  f.script("swift", `printf 'swift %s\\n' "$*" >> "$FIXTURE/calls.log"
+if [ "$1" != test ]; then exit 0; fi
+case "$*" in
+  *--filter*) cat "$FIXTURE/swift-retry.out"; exit "$(cat "$FIXTURE/swift-retry.code")" ;;
+esac
+cat "$FIXTURE/swift-test.out"; exit "$(cat "$FIXTURE/swift-test.code")"`);
+  const put = (name: string, text: string, code: number) => { writeFileSync(join(f.dir, `${name}.out`), text); writeFileSync(join(f.dir, `${name}.code`), String(code)); };
+  const first = line("StoreTests testOne", "passed") + line("TerminalStreamTests testSlow", "failed") + line("TerminalSessionTests testWidth", "failed")
+    + "\t Executed 3 tests, with 2 failures (0 unexpected) in 0.3 (0.3) seconds\n";
+
+  put("swift-test", first, 1);
+  put("swift-retry", line("TerminalSessionTests testWidth", "passed") + line("TerminalStreamTests testSlow", "passed") + "\t Executed 2 tests, with 0 failures (0 unexpected) in 0.2 (0.2) seconds\n", 0);
+  const flaky = f.check(["swift"]);
+  expect(flaky.code, flaky.output).toBe(0);
+  expect(flaky.output).toContain("native tests: 2 flaky");
+  expect(flaky.output).toContain("FLAKY: IAMCEOTests.TerminalStreamTests/testSlow (failed once, passed on re-run)");
+  expect(readFileSync(f.summary, "utf8")).toContain("FLAKY: IAMCEOTests.TerminalSessionTests/testWidth");
+  const retry = f.calls().filter((call) => call.includes("--filter"));
+  expect(retry).toHaveLength(1);
+  // 실패한 둘만 고른다. 통과한 시험은 다시 돌리지 않는다.
+  expect(retry[0]).toContain("--filter ^IAMCEOTests.TerminalSessionTests/testWidth$ --filter ^IAMCEOTests.TerminalStreamTests/testSlow$");
+  expect(retry[0]).not.toContain("StoreTests");
+
+  // 다시 돌려도 실패하면 막고, 어느 시험인지 알린다.
+  put("swift-retry", line("TerminalSessionTests testWidth", "passed") + line("TerminalStreamTests testSlow", "failed") + "\t Executed 2 tests, with 1 failure (0 unexpected) in 0.2 (0.2) seconds\n", 1);
+  const broken = f.check(["swift"]);
+  expect(broken.code).toBe(1);
+  expect(broken.output).toContain("FAILED native tests (failed twice):");
+  expect(broken.output).toContain("IAMCEOTests.TerminalStreamTests/testSlow");
+  expect(broken.output).not.toContain("FLAKY");
+
+  // 고른 시험이 하나도 돌지 않았으면(이름이 맞지 않음) 통과로 치지 않는다.
+  put("swift-retry", "\t Executed 0 tests, with 0 failures (0 unexpected) in 0.0 (0.0) seconds\n", 0);
+  expect(f.check(["swift"]).code).toBe(1);
+
+  // 재실행을 끄면 한 번 실패로 막는다.
+  writeFileSync(join(f.dir, "calls.log"), "");
+  const off = f.check(["swift"], { IAMCEO_TEST_RETRY: "0" });
+  expect(off.code).toBe(1);
+  expect(off.output).toContain("FAILED native tests:");
+  expect(f.calls().some((call) => call.includes("--filter"))).toBe(false);
+
+  // 시험 이름 없이 실패하면(컴파일 오류·충돌) 다시 돌리지 않는다.
+  put("swift-test", "error: fatal error encountered during compilation\n", 1);
+  writeFileSync(join(f.dir, "calls.log"), "");
+  expect(f.check(["swift"]).code).toBe(1);
+  expect(f.calls().some((call) => call.includes("--filter"))).toBe(false);
+  expect(readdirSync(f.scratch)).toEqual([]);
+});
+
 test("release: CI 판정은 release·ci 워크플로의 성공만 통과로 본다", () => {
   expect(hasPassingCheckRun(JSON.stringify([{ workflowName: "release", conclusion: "failure" }, { workflowName: "ci", conclusion: "success" }]))).toBe(true);
   expect(hasPassingCheckRun(JSON.stringify([{ workflowName: "release", conclusion: "success" }]))).toBe(true);

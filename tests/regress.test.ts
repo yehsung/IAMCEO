@@ -1,23 +1,35 @@
 // 검수에서 확인한 결함의 회귀 시험. 실행기는 가짜, 저장소·전달 펌프·도구·HTTP 는 진짜다.
+// 가짜 실행기의 종류는 운영과 같은 core 다(옛 herdr·headless 전용 시험은 옮기지 않았다).
+// 재시작처럼 실제 CoreRunner 의 관측이 있어야 하는 시험만 시험용 core 틀(tests/fixtures/core-harness.ts)로 돈다.
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Backend, Member } from "../shared/types.ts";
-import { handleAgentTool } from "../server/agent-tools.ts";
+import { handleAgentTool, listAgentTools } from "../server/agent-tools.ts";
 import { Bus } from "../server/bus.ts";
 import { loadConfig, updateConfigFile } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
 import { startServer, type RunningServer } from "../server/http.ts";
 import { formatAnswer, formatInstruction, formatReport, formatTodoDone, formatUserMessage, guardLines, Orchestrator, type OrchestratorTimings } from "../server/orchestrator.ts";
-import { HeadlessRunner, StreamParser } from "../server/runner/headless.ts";
+import { CoreError } from "../server/runner/core-client.ts";
+import { providerLaunch } from "../server/runner/providers.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, DeliveryProbe, DeliveryInspection, DeliveryRepair } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
 import { cleanName, workerNameProblem } from "../server/text.ts";
 import { sanitizeName } from "../server/files.ts";
+import { coreSetup, isReportNudge } from "./fixtures/core-harness.ts";
 
 const SID = "11111111-1111-4111-8111-111111111111";
 
+/** 서버가 스스로 붙인 '보고 보완'만 든 턴인가. 다른 전달과 묶여 나간 턴은 일하는 턴이다(전달마다 표식 줄이 하나씩 붙는다). */
+const nudgeOnly = (text: string) => isReportNudge({ prompt: text }) && text.split("\n").filter((line) => /^#iamceo_[A-Za-z0-9_-]{22}$/.test(line)).length === 1;
+
+/**
+ * 실행기 종류는 운영과 같은 core 다. core 에서는 깨우는 지시를 받고 보고 없이 끝난 턴 뒤에 서버가 '보고 보완' 턴을 한 번 넣는다.
+ * 이 시험들의 주제가 아니라 sent 가 아닌 nudges 에 따로 적고, 가짜 CLI 처럼 보고 없이 곧바로 끝낸다
+ * (서버는 '결과 보고 누락'을 남기고 더 묻지 않는다). 기다릴 때는 quiet() 를 쓴다.
+ */
 class FakeRunner implements Runner {
   store: Store | null = null;
   inspections: DeliveryProbe[] = [];
@@ -29,8 +41,11 @@ class FakeRunner implements Runner {
   async repairDelivery(_m: RunnerMember, _request: DeliveryRepair): Promise<SendResult> {
     return { ok: false, reason: "error", retryable: false, deliveryEffect: "not_written" };
   }
-  kind: Backend = "herdr";
+  kind: Backend = "core";
   sent: { memberId: string; text: string }[] = [];
+  nudges: { memberId: string; text: string }[] = [];
+  /** false 면 세션 기록이 디스크에 없다(sessionExists). core 는 이어 열기 전에 이것으로 새 세션을 열지 정한다. */
+  sessionOnDisk = true;
   starts: { memberId: string; at: number; resume: boolean }[] = [];
   stops: string[] = [];
   compacts = 0;
@@ -38,7 +53,6 @@ class FakeRunner implements Runner {
   parallelResults: SendResult[] = [];
   parallelCalls = 0;
   stopDelay = 0;
-  seen: string[] | null = null;
   startError = "주입된 start 실패";
   interrupts = 0;
   busy = new Set<string>();
@@ -46,9 +60,6 @@ class FakeRunner implements Runner {
   startDelay = 0;
   autoBusy = true;
   cb: (e: RunnerEvent) => void = () => {};
-  reattachImpl: ((m: RunnerMember) => Promise<{ paneId: string; tabId: string | null } | null>) | null = null;
-  away: { finalText: string; isError: boolean } | null = null;
-  reattachCalls = 0;
   async available() {
     return { ok: true };
   }
@@ -57,12 +68,20 @@ class FakeRunner implements Runner {
     if (this.startDelay) await Bun.sleep(this.startDelay);
     if (this.failStarts > 0) {
       this.failStarts--;
-      throw new Error(this.startError);
+      // core 실행기의 확정 실패(터미널을 만들지 못함)는 CoreError 다. 그 밖의 오류는 '결과를 모르는 기동'으로 남아
+      // 터미널이 없다는 것을 감시가 확인할 때까지 그 직원의 기동·전달이 막힌다.
+      throw new CoreError("unavailable", this.startError, false, "not_written");
     }
-    return { sessionId: m.sessionId ?? crypto.randomUUID(), paneId: `w1:p${this.starts.length}`, tabId: "w1:t1" };
+    return { sessionId: m.sessionId ?? crypto.randomUUID(), paneId: `t${this.starts.length}` };
+  }
+  sessionExists() {
+    return this.sessionOnDisk;
   }
   async send(m: RunnerMember, text: string): Promise<SendResult> {
-    this.sent.push({ memberId: m.id, text });
+    if (nudgeOnly(text)) {
+      this.nudges.push({ memberId: m.id, text });
+      setTimeout(() => this.end(m.id), 0);
+    } else this.sent.push({ memberId: m.id, text });
     if (this.autoBusy) this.busy.add(m.id);
     const dispatch = this.store?.listDispatches(m.id).find(d => d.wireText === text && d.transportState === "write_started");
     return { ok: true, ...(dispatch ? { receipt: { dispatchId: dispatch.dispatchId, receivedAt: new Date().toISOString(), source: "transport" as const } } : {}) };
@@ -70,10 +89,13 @@ class FakeRunner implements Runner {
   isBusy(id: string) {
     return this.busy.has(id);
   }
-  async compact(_m: RunnerMember, focus: string): Promise<SendResult> {
+  // core 의 압축: 실행기가 저장소에 진행 상태를 적는다. 끝은 저장된 결과와 compacted 이벤트다(turn_end 는 완료 근거가 아니다).
+  async compact(m: RunnerMember, focus: string): Promise<SendResult> {
     this.compacts++;
     this.focuses.push(focus);
-    return { ok: true };
+    const state = this.store?.getContextState(m.id);
+    if (state?.compaction) this.store!.saveContextState({ ...state, measurement: null, compaction: { ...state.compaction, phase: "running" } }, { contextPct: null });
+    return { ok: true, started: false };
   }
   async setParallel(_m: RunnerMember, _on: boolean): Promise<SendResult> {
     this.parallelCalls++;
@@ -82,7 +104,7 @@ class FakeRunner implements Runner {
   async interrupt() {
     this.interrupts++;
   }
-  // 실제 HerdrRunner 처럼 칸만 닫고 turn_end 를 내지 않는다.
+  // 터미널만 닫고 turn_end 를 내지 않는다.
   async stop(m: RunnerMember) {
     if (this.stopDelay) await Bun.sleep(this.stopDelay);
     this.stops.push(m.id);
@@ -99,19 +121,6 @@ class FakeRunner implements Runner {
     this.busy.delete(memberId);
     this.cb({ type: "turn_end", memberId, finalText: "", isError: false, ...over });
   }
-  async reattach(m: RunnerMember) {
-    this.reattachCalls++;
-    return this.reattachImpl ? this.reattachImpl(m) : { paneId: m.paneId ?? "w1:p9", tabId: "w1:t1" };
-  }
-  async adopt() {
-    return { sessionId: SID, paneId: "w1:p7", tabId: "w1:t1" };
-  }
-  finishedWhileAway() {
-    return this.away;
-  }
-  async promptSeen(_m: RunnerMember, markers: string[]) {
-    return this.seen !== null && markers.some((marker) => this.seen!.includes(marker));
-  }
 }
 
 const closers: (() => Promise<void> | void)[] = [];
@@ -120,7 +129,7 @@ afterEach(async () => {
   for (const close of closers.splice(0).reverse()) await close();
 });
 
-async function setup(opts: { timings?: Partial<OrchestratorTimings>; runnerEnabled?: boolean; notifier?: (t: string, b: string) => void; kind?: Backend; serve?: boolean; second?: FakeRunner } = {}) {
+async function setup(opts: { timings?: Partial<OrchestratorTimings>; runnerEnabled?: boolean; notifier?: (t: string, b: string) => void; serve?: boolean } = {}) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-regress-")));
   const work = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-regress-work-")));
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
@@ -130,9 +139,7 @@ async function setup(opts: { timings?: Partial<OrchestratorTimings>; runnerEnabl
   const store = new Store(openDb(config.dbPath), bus);
   const runner = new FakeRunner();
   runner.store = store;
-  if (opts.kind) runner.kind = opts.kind;
   const runners = new Map<Backend, Runner>([[runner.kind, runner]]);
-  if (opts.second) runners.set(opts.second.kind, opts.second);
   store.patchSettings({ backend: runner.kind });
   const orch = new Orchestrator({ config, store, runners, notifier: opts.notifier, timings: { tickMs: 60_000, retryMs: 10, inputBusyRetryMs: 10, ...opts.timings } });
   closers.push(() => orch.shutdown());
@@ -145,7 +152,15 @@ async function setup(opts: { timings?: Partial<OrchestratorTimings>; runnerEnabl
     closers.push(() => s.stop());
   }
   const call = (member: Member, name: string, args: Record<string, unknown>) => handleAgentTool(orch, store.requireMember(member.id), name, args);
-  return { home, work, config, store, bus, orch, runner, project, call, server, base: server?.urls[0] ?? "" };
+  /**
+   * 보고 없이 끝낸 턴의 뒤처리를 기다린다. core 에서는 그런 턴 뒤에 '보고 보완' 턴이 한 번 지나가고, 그것도 보고 없이 끝나면
+   * '결과 보고 누락' 글이 남는다. 이 프로젝트에 그 글이 n 건이 되고 뒤따르는 전달 펌프가 끝나면 그 직원은 다시 쉰다.
+   */
+  const quiet = async (member: Member, n = 1) => {
+    await until(() => store.listMessages(project.id, { limit: 500 }).filter((m) => m.title === "결과 보고 누락").length >= n, "보고 보완 지나감");
+    await orch.pump(member.id);
+  };
+  return { home, work, config, store, bus, orch, runner, project, call, quiet, server, base: server?.urls[0] ?? "" };
 }
 
 const until = async (cond: () => boolean, label = "조건", ms = 4000) => {
@@ -431,12 +446,13 @@ describe("턴 정리", () => {
     expect(t.store.requireMember(w.id).status).toBe("working");
   });
 
-  test("noOutput는 수신된 결재 답을 재전송하거나 다시 열지 않는다", async () => {
+  // 옛 시험: "noOutput는 수신된 결재 답을 재전송하거나 다시 열지 않는다". core 는 noOutput 표시를 내지 않는다(오류로 끝난 턴일 뿐이다).
+  test("오류로 끝난 턴은 수신된 결재 답을 재전송하거나 다시 열지 않는다", async () => {
     const t = await setup({ timings: { turnErrorRetryMs: 5 } });
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
     const d = t.store.createDecision({ projectId: t.project.id, memberId: w.id, who: "철수", title: "배포?", options: [{ k: "a", label: "예" }] });
     await t.orch.answerDecision(d.id, { choice: "a", note: "검토한 답" });
-    t.runner.end(w.id, { isError: true, errorText: "도구 실행 오류", noOutput: true });
+    t.runner.end(w.id, { isError: true, errorText: "도구 실행 오류" });
     await until(() => t.store.requireMember(w.id).status === "error");
     await t.orch.pump(w.id);
     expect(t.runner.sent.filter(s => s.memberId === w.id)).toHaveLength(1);
@@ -457,11 +473,18 @@ describe("턴 정리", () => {
   test("자동 압축을 끊으면 곧바로 다시 압축하지 않고 대기 입력이 나간다", async () => {
     const t = await setup();
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
-    t.store.patchMember(w.id, { contextPct: 95 });
+    // 달라진 점: 옛 실행기는 문맥 % 만 넘으면 자동 압축했다. core 는 끝난 턴의 정확한 측정(상태줄이 알린 창 크기)이 있어야 한다.
+    const m = t.store.requireMember(w.id);
+    t.runner.cb({ type: "context_usage", memberId: w.id, sessionId: m.sessionId!, sessionGeneration: t.store.memberRevisions(w.id).sessionGeneration, terminalId: m.paneId,
+      turn: 1, tokens: 950_000, shownPct: null, model: "model", exact: { window: 1_000_000, source: "statusline" } });
+    t.runner.end(w.id, { terminalId: m.paneId, turn: 1 });
+    await until(() => t.store.requireMember(w.id).contextPct === 95 && t.store.getContextState(w.id)?.baseline?.completedTurn === 1, "문맥 95%");
     await t.orch.assign(t.project.id, "cs", { text: "일" });
     expect(t.runner.compacts).toBe(1);
+    expect(t.runner.sent).toHaveLength(0);
+    // 달라진 점: 옛 실행기는 끊은 뒤 turn_end 가 와야 압축 턴이 끝났다. core 는 중단 자체가 압축을 실패(interrupted)로 닫는다.
     await t.orch.memberInterrupt(w.id);
-    t.runner.end(w.id);
+    expect(t.store.getContextState(w.id)?.compaction).toMatchObject({ phase: "failed", reason: "interrupted" });
     await until(() => t.runner.sent.length === 1, "대기 입력 전달");
     expect(t.runner.compacts).toBe(1);
   });
@@ -491,106 +514,6 @@ describe("턴 정리", () => {
   });
 });
 
-describe("재시작 복구(herdr)", () => {
-  async function restarted(prepare: (r: FakeRunner, m: Member) => void, status: Member["status"]) {
-    const t = await setup({ timings: { tickMs: 20 } });
-    const m = t.store.createMember({ projectId: t.project.id, handle: "cs", name: "철수", kind: "worker", status, sessionId: SID, paneId: "w1:p1" });
-    prepare(t.runner, m);
-    return { ...t, m };
-  }
-
-  test("승인 창 앞의 칸은 blocked 를 유지한다(이전 상태가 무엇이든)", async () => {
-    for (const before of ["blocked", "working", "waiting", "error"] as const) {
-      let cb: FakeRunner | null = null;
-      const t = await restarted((r) => {
-        cb = r;
-      }, before);
-      t.runner.reattachImpl = async (m) => {
-        cb!.cb({ type: "status", memberId: m.id, status: "blocked" });
-        return { paneId: "w1:p1", tabId: "w1:t1" };
-      };
-      await t.orch.recover();
-      expect(t.store.requireMember(t.m.id).status).toBe("blocked");
-    }
-  });
-
-  test("소켓이 안 닿아 재결합에 실패하면 틱이 다시 시도하고 끝내 풀린다", async () => {
-    const t = await restarted(() => {}, "working");
-    let up = false;
-    t.runner.reattachImpl = async () => {
-      if (!up) throw new Error("연결 실패");
-      return { paneId: "w1:p1", tabId: "w1:t1" };
-    };
-    await t.orch.recover();
-    expect(t.store.requireMember(t.m.id).lastError).toContain("재결합 실패");
-    expect(t.store.requireMember(t.m.id).status).toBe("working");
-    const calls = t.runner.reattachCalls;
-    up = true;
-    await until(() => t.runner.reattachCalls > calls && t.store.requireMember(t.m.id).status === "idle", "재시도");
-    expect(t.store.requireMember(t.m.id).lastError).toBe(null);
-  });
-
-  test("서버가 꺼진 사이 끝난 턴의 마지막 글이 대화와 총괄에게 간다", async () => {
-    const t = await restarted(() => {}, "working");
-    const lead = t.store.createMember({ projectId: t.project.id, handle: "lead", name: "총괄", kind: "conductor", status: "idle", sessionId: "22222222-2222-4222-8222-222222222222", paneId: "w1:p2" });
-    t.store.appendActivity(t.m.id, "turn_start", "일");
-    t.runner.away = { finalText: "다 끝냈습니다", isError: false };
-    await t.orch.recover();
-    expect(t.store.requireMember(t.m.id).status).toBe("idle");
-    const messages = t.store.listMessages(t.project.id);
-    expect(messages.some((m) => m.memberId === t.m.id && m.body === "다 끝냈습니다")).toBe(true);
-    await until(() => t.runner.sent.some((s) => s.memberId === lead.id && s.text.includes("다 끝냈습니다")), "총괄 보고");
-  });
-
-  test("이미 post 한 턴은 자동 보고를 또 하지 않는다", async () => {
-    const t = await restarted(() => {}, "working");
-    t.store.appendActivity(t.m.id, "turn_start", "일");
-    await Bun.sleep(3);
-    t.store.createMessage({ projectId: t.project.id, memberId: t.m.id, who: "철수", kind: "완료", title: "끝", body: "보고함" });
-    t.runner.away = { finalText: "다 끝냈습니다", isError: false };
-    await t.orch.recover();
-    expect(t.store.listMessages(t.project.id).filter((m) => m.memberId === t.m.id)).toHaveLength(1);
-  });
-
-  test("칸이 쉬는데 입력 뒤의 글이 없으면 합성하지 않는다", async () => {
-    const t = await restarted(() => {}, "working");
-    t.store.appendActivity(t.m.id, "turn_start", "일");
-    t.runner.away = null;
-    await t.orch.recover();
-    expect(t.store.requireMember(t.m.id).status).toBe("idle");
-    expect(t.store.listMessages(t.project.id).filter((m) => m.memberId === t.m.id)).toHaveLength(0);
-  });
-});
-
-describe("실행 방식 변경", () => {
-  test("일하는 직원이 있으면 409, 없으면 옛 칸을 닫고 paneId 를 비운다", async () => {
-    const other = new FakeRunner();
-    other.kind = "headless";
-    const t = await setup({ serve: true, second: other });
-    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
-    expect(t.store.requireMember(w.id).paneId).toBeTruthy();
-    await t.orch.assign(t.project.id, "cs", { text: "일" });
-    const patch = (body: unknown) => fetch(`${t.base}/api/settings`, { method: "PUT", headers: { Authorization: "Bearer code", "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    expect((await patch({ backend: "headless" })).status).toBe(409);
-    expect(t.store.getSettings().backend).toBe("herdr");
-    expect(t.store.requireMember(w.id).backend).toBe("herdr");
-    expect(t.runner.stops).toHaveLength(0);
-    t.runner.end(w.id);
-    await until(() => t.store.requireMember(w.id).status === "idle", "쉼");
-    expect((await patch({ backend: "headless" })).status).toBe(200);
-    expect(t.runner.stops).toEqual([w.id]);
-    expect(t.store.requireMember(w.id).paneId).toBe(null);
-    expect(t.store.requireMember(w.id).sessionId).toBeTruthy();
-    expect(t.store.requireMember(w.id).backend).toBe("headless");
-    expect(t.store.getSettings().backend).toBe("headless");
-    // 다음 전달은 새 실행기로 같은 세션을 잇는다.
-    const session = t.store.requireMember(w.id).sessionId;
-    await t.orch.assign(t.project.id, "cs", { text: "다음 일" });
-    expect(other.sent.at(-1)!.text).toContain("다음 일");
-    expect(t.store.requireMember(w.id).sessionId).toBe(session);
-  });
-});
-
 describe("할 일 체크 해제", () => {
   test("이미 나간 '했음'은 바로잡고, 안 나간 것은 거둔다", async () => {
     const t = await setup();
@@ -598,11 +521,14 @@ describe("할 일 체크 해제", () => {
     const a = t.store.createTodo({ projectId: t.project.id, memberId: w.id, who: "철수", title: "할일X" });
     await t.orch.setTodoDone(a.id, true);
     expect(t.runner.sent.at(-1)!.text).toContain("했음");
+    // core 에서는 '했음'으로 깬 직원이 보고 없이 턴을 끝낼 때마다 보고 보완 턴이 한 번 지나간다. 그 뒤에 다음 일을 넣는다.
     t.runner.end(w.id);
-    await until(() => !t.runner.isBusy(w.id), "쉼");
+    await t.quiet(w, 1);
+    expect(t.runner.isBusy(w.id)).toBe(false);
     await t.orch.setTodoDone(a.id, false);
     await until(() => t.runner.sent.at(-1)!.text.includes("아직 안 했음"), "해제 전달");
     t.runner.end(w.id);
+    await t.quiet(w, 2);
 
     await t.orch.assign(t.project.id, "cs", { text: "일" });
     const n = t.runner.sent.length;
@@ -610,36 +536,9 @@ describe("할 일 체크 해제", () => {
     await t.orch.setTodoDone(b.id, true);
     await t.orch.setTodoDone(b.id, false);
     t.runner.end(w.id);
-    await Bun.sleep(30);
+    await t.quiet(w, 3);
     expect(t.runner.sent.slice(n).map((s) => s.text).join("\n")).not.toContain("할일Y");
     expect(t.store.requireMember(w.id).queuedCount).toBe(0);
-  });
-});
-
-describe("직접 친 일", () => {
-  test("서버 전달 없이 칸이 일을 시작하면 (직접) 표시가 총괄과 대화에 간다", async () => {
-    const t = await setup();
-    const lead = await t.orch.ensureConductor(t.project.id);
-    const w = (await t.orch.addMember(t.project.id, { name: "민수", handle: "ms", role: "개발" })).member;
-    t.runner.cb({ type: "status", memberId: w.id, status: "working" });
-    await t.call(w, "post", { kind: "완료", title: "칸에서 시킨 일 끝" });
-    t.runner.end(w.id);
-    await until(() => t.runner.sent.some((s) => s.memberId === lead.id && s.text.includes("(직접) 완료")), "(직접) 보고");
-    const report = t.store.listMessages(t.project.id).find((m) => m.memberId === w.id)!;
-    expect(report.title).toBe("(직접) 칸에서 시킨 일 끝");
-  });
-
-  test("재결합 때 이미 일하던 칸은 직접으로 치지 않는다", async () => {
-    const t = await setup();
-    const m = t.store.createMember({ projectId: t.project.id, handle: "ms", name: "민수", kind: "worker", status: "idle", sessionId: SID, paneId: "w1:p1" });
-    t.runner.reattachImpl = async (rm) => {
-      t.runner.busy.add(rm.id);
-      t.runner.cb({ type: "status", memberId: rm.id, status: "working" });
-      return { paneId: "w1:p1", tabId: "w1:t1" };
-    };
-    await t.orch.recover();
-    await t.call(m, "post", { kind: "완료", title: "끝" });
-    expect(t.store.listMessages(t.project.id).find((x) => x.memberId === m.id)!.title).toBe("끝");
   });
 });
 
@@ -735,46 +634,19 @@ describe("직접 띄운 CLI", () => {
   });
 });
 
-describe("headless 실행기", () => {
-  test("세션 id 가 UUID 가 아니면 claude 를 띄우지 않는다", async () => {
-    const marker = join(realpathSync(mkdtempSync(join(tmpdir(), "iamceo-regress-"))), "spawned");
-    const runner = new HeadlessRunner({ claudeBin: "/bin/false" });
-    closers.push(() => runner.shutdown());
+describe("core 실행기의 CLI 인자", () => {
+  // 옛 시험: "headless 실행기 > 세션 id 가 UUID 가 아니면 claude 를 띄우지 않는다"
+  // 달라진 점: headless 는 UUID 만 받았다. core 는 Codex 의 세션 id 도 다뤄서 글자·숫자로 시작하는 [A-Za-z0-9_-] 128자까지 받는다.
+  // 옵션처럼 생긴 값(-- 로 시작)이 CLI 인자로 들어가지 못한다는 점은 같다.
+  test("세션 id 가 옵션처럼 생겼으면 CLI 인자를 만들지 않는다", () => {
     const m: RunnerMember = { id: "m1", projectId: "p", handle: "w", name: "w", cwd: tmpdir(), sessionId: "--dangerously-skip-permissions", paneId: null, model: null, effort: null, subagentModel: null, permissionMode: "auto", kind: "worker" };
-    const r = await runner.send(m, "x", { systemPromptFile: "/s", mcpConfigFile: "/m", resume: true, projectName: "P" });
-    expect(r).toMatchObject({ ok: false, reason: "error", retryable: false });
-    expect(runner.isBusy("m1")).toBe(false);
-    expect(existsSync(marker)).toBe(false);
-  });
-
-  test("스트림: CLI 가 지어낸 오류 안내는 일한 흔적이 아니다", () => {
-    const parse = (...lines: unknown[]) => {
-      const p = new StreamParser("m", () => {}, { reportContext: false, contextWindow: null });
-      for (const l of lines) p.feed(JSON.stringify(l));
-      return p;
-    };
-    const limit = { type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text: "weekly limit" }] } };
-    const real = { type: "assistant", message: { model: "haiku", content: [{ type: "text", text: "네" }] } };
-    expect(parse(limit, { type: "result", is_error: true, result: "weekly limit" }).sawOutput).toBe(false);
-    expect(parse(real, limit).sawOutput).toBe(true);
-  });
-});
-
-describe("herdr 상태 방송", () => {
-  test("연결 상태가 바뀌면 화면에 알린다", async () => {
-    const t = await setup({ timings: { tickMs: 15 } });
-    let running = true;
-    (t.orch as unknown as { herdr: unknown }).herdr = { info: async () => ({ installed: true, running, version: "1", protocol: 22, compatible: true, warning: null }), agents: async () => [] };
-    const seen: boolean[] = [];
-    t.bus.subscribe((e) => {
-      if (e.type === "herdr") seen.push(e.herdr.running);
-    });
-    await t.orch.recover();
-    await Bun.sleep(50);
-    expect(seen).toEqual([]);
-    running = false;
-    await until(() => seen.length === 1, "방송");
-    expect(seen).toEqual([false]);
+    const opts = { systemPromptFile: "/s", mcpConfigFile: "/m", resume: true };
+    for (const sessionId of ["--dangerously-skip-permissions", "-x", "a b", "a;rm", `${SID}\n--model`]) {
+      expect(() => providerLaunch({ ...m, sessionId }, opts, { claudeBin: "/bin/false" })).toThrow("Invalid CLI session id");
+    }
+    const launch = providerLaunch({ ...m, sessionId: SID }, opts, { claudeBin: "/bin/false" });
+    expect(launch.argv.slice(0, 3)).toEqual(["/bin/false", "--resume", SID]);
+    expect(launch.argv).not.toContain("--dangerously-skip-permissions");
   });
 });
 
@@ -832,21 +704,14 @@ describe("일 목록·알림·자료·보관", () => {
     expect((await fetch(`${t.base}/api/projects/${t.project.id}/state`, { headers: h })).status).toBe(404);
   });
 
-  test("편입: 전역이 herdr 가 아니면 거부, 다시 열면 origin=runner", async () => {
-    const other = new FakeRunner();
-    other.kind = "headless";
-    const t = await setup({ second: other });
-    (t.orch as unknown as { herdr: unknown }).herdr = { info: async () => ({}), agents: async () => [{ paneId: "w9:p1", name: "x", agent: "claude", status: "idle", cwd: t.work, sessionId: SID, workspaceId: "w9", tabId: "w9:t1", adopted: false }] };
-    t.store.patchSettings({ backend: "headless" });
-    await expect(t.orch.adopt(t.project.id, { paneId: "w9:p1", name: "편입", role: "r" })).rejects.toThrow("편입할 수 있습니다");
-    t.store.patchSettings({ backend: "herdr" });
-    const adopted = await t.orch.adopt(t.project.id, { paneId: "w9:p1", name: "편입", role: "r" });
-    expect(adopted.origin).toBe("adopted");
-    t.runner.end(adopted.id);
-    await until(() => t.store.requireMember(adopted.id).status === "idle", "쉼");
-    await t.orch.sleepMember(adopted.id);
-    await t.orch.resumeMember(adopted.id);
-    expect(t.store.requireMember(adopted.id).origin).toBe("runner");
+  // 옛 시험: "편입: 전역이 herdr 가 아니면 거부, 다시 열면 origin=runner" 의 뒷부분.
+  // 편입(herdr 칸 넘겨받기)과 그 거부 조건은 옛 실행기 전용이라 옮기지 않았다. 넘겨받은 명부가 남는 길은 가져온 명부(offline)다.
+  test("넘겨받은 명부의 직원을 깨우면 서버가 띄운 세션(origin=runner)이 되고 도구가 연결됐다고 알린다", async () => {
+    const t = await setup();
+    const m = t.store.createMember({ projectId: t.project.id, handle: "im", name: "가져옴", kind: "worker", origin: "adopted", status: "offline" });
+    await t.orch.resumeMember(m.id);
+    expect(t.store.requireMember(m.id)).toMatchObject({ origin: "runner", status: "idle", backend: "core" });
+    expect(t.store.listPending(m.id).some((d) => !d.wake && d.text.includes("iamceo 도구"))).toBe(true);
   });
 
   test("Tailscale 이 늦게 올라와도 그 주소를 열고, 화면 주소 목록에 나온다", async () => {
@@ -902,12 +767,12 @@ describe("2차 검수 회귀: 입력 위조", () => {
     expect(sent).toContain("블로그 초안 올릴까요");
     expect(sent).not.toContain("서버 확인");
     t.runner.end(deploy.id);
-    await Bun.sleep(5);
+    await t.quiet(deploy, 1);
     t.store.createMessage({ id: "msg_go", projectId: t.project.id, mine: true, who: "나", kind: "나", body: "좋아" });
     await t.orch.assign(t.project.id, "dep", { text: "x", userQuote: "좋아" });
     expect(t.runner.sent.at(-1)!.text).toMatch(/사용자 요청\(문맥 확인 필요\): "좋아" #msg_go \d{4}-/);
     t.runner.end(deploy.id);
-    await Bun.sleep(5);
+    await t.quiet(deploy, 2);
     t.store.createMessage({ id: "msg_long", projectId: t.project.id, mine: true, who: "나", kind: "나", body: "오늘 저녁에 배포해 주세요" });
     await t.orch.assign(t.project.id, "dep", { text: "x", userQuote: "오늘 저녁에 배포해 주세요" });
     expect(t.runner.sent.at(-1)!.text).toMatch(/사용자 요청\(원문, 서버 확인\): "오늘 저녁에 배포해 주세요" #msg_long \d{4}-/);
@@ -1024,13 +889,14 @@ describe("2차 검수 회귀: 폴더·파일 경계", () => {
 });
 
 describe("2차 검수 회귀: 전달", () => {
-  test("noOutput 뒤 받은 보고는 보존하고 새로운 보고만 다음 턴에 보낸다", async () => {
+  // 옛 시험: "noOutput 뒤 받은 보고는 보존하고 새로운 보고만 다음 턴에 보낸다". core 는 noOutput 표시를 내지 않는다.
+  test("오류로 끝난 턴 뒤 받은 보고는 보존하고 새로운 보고만 다음 턴에 보낸다", async () => {
     const t = await setup();
     const lead = await t.orch.ensureConductor(t.project.id);
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
     await t.orch.recordPost(w, { kind: "완료", title: "로그인 고침" });
     await t.orch.recordPost(w, { kind: "완료", title: "나중 보고" });
-    t.runner.end(lead.id, { isError: true, noOutput: true, errorText: "도구 실행 오류" });
+    t.runner.end(lead.id, { isError: true, errorText: "도구 실행 오류" });
     await until(() => t.runner.sent.filter(s => s.memberId === lead.id).length === 2);
     const sent = t.runner.sent.filter(s => s.memberId === lead.id);
     expect(sent[1]!.text).toContain("나중 보고");
@@ -1038,12 +904,13 @@ describe("2차 검수 회귀: 전달", () => {
     expect(t.store.listDeliveries(t.project.id).filter(d => d.kind === "report").every(d => d.status === "delivered" && d.attempts === 1)).toBe(true);
   });
 
-  test("noOutput 뒤에도 대표 글의 수신은 보존하고 새 글은 독립 전달한다", async () => {
+  // 옛 시험: "noOutput 뒤에도 대표 글의 수신은 보존하고 새 글은 독립 전달한다". core 는 noOutput 표시를 내지 않는다.
+  test("오류로 끝난 턴 뒤에도 대표 글의 수신은 보존하고 새 글은 독립 전달한다", async () => {
     const t = await setup();
     const lead = await t.orch.ensureConductor(t.project.id);
     const first = await t.orch.sendUserMessage(t.project.id, { text: "첫째" });
     const second = await t.orch.sendUserMessage(t.project.id, { text: "둘째" });
-    t.runner.end(lead.id, { isError: true, noOutput: true, errorText: "도구 실행 오류" });
+    t.runner.end(lead.id, { isError: true, errorText: "도구 실행 오류" });
     await until(() => t.store.requireMessage(second.id).delivery === "delivered");
     expect(t.store.requireMessage(first.id).delivery).toBe("delivered");
     expect(t.runner.sent.filter(s => s.text.includes("첫째"))).toHaveLength(1);
@@ -1076,49 +943,89 @@ describe("2차 검수 회귀: 전달", () => {
     expect([count(m.id), count(d.id), count(todo.id)]).toEqual([1, 1, 1]);
   });
 
-  test("재시작: 일하던 직원의 칸이 없거나 끝난 글이 없으면 대화와 총괄에 알린다", async () => {
-    for (const away of ["no-pane", "no-report"] as const) {
-      const t = await setup();
-      const lead = await t.orch.ensureConductor(t.project.id);
+  // 아래 재시작 시험 세 건은 실제 CoreRunner 의 관측이 있어야 해서 시험용 core 틀로 돈다(가짜 core 소켓 + 실제 CoreRunner + 운영 배선).
+  // 옛 시험: "재시작: 일하던 직원의 칸이 없거나 끝난 글이 없으면 대화와 총괄에 알린다" 의 '칸이 없음'
+  test("재시작: 일하던 직원의 터미널이 사라졌으면 대화와 총괄에 알린다", async () => {
+    const t = await coreSetup({ agentTools: { listAgentTools, handleAgentTool } });
+    closers.push(() => t.close());
+    const lead = await t.orch.ensureConductor(t.project.id);
+    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
+    await t.orch.assign(t.project.id, w.handle, { text: "일 @fake:hold" });
+    await t.waitFor("일하는 중", () => t.core.held(w.id) && t.member(w.id).status === "working");
+    await t.stopServer();
+    t.core.exit(w.id, 1); // 서버가 꺼진 사이 CLI 가 죽었다.
+    const next = await t.restart();
+    closers.push(() => next.close());
+    await next.orch.recover();
+    await next.waitFor("총괄에게 알림", () => next.turns(lead.id).some((c) => c.prompt.includes("철수")));
+    expect(next.texts().some((x) => x.kind === "시스템" && x.body.includes("철수"))).toBe(true);
+    // 끊긴 일을 다시 넣지 않는다.
+    expect(next.turns(w.id)).toHaveLength(1);
+  });
+
+  // 옛 시험: "재시작 복구(herdr) > 승인 창 앞의 칸은 blocked 를 유지한다(이전 상태가 무엇이든)"
+  test("재시작: 승인 창 앞의 터미널은 blocked 로 보인다(이전 상태가 무엇이든)", async () => {
+    for (const before of ["blocked", "working", "waiting", "error"] as const) {
+      const t = await coreSetup({ agentTools: { listAgentTools, handleAgentTool } });
+      closers.push(() => t.close());
       const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
-      t.store.patchMember(w.id, { status: "working" });
-      t.store.appendActivity(w.id, "turn_start", "일");
-      t.runner.autoBusy = false;
-      t.runner.reattachImpl = async (m) => (away === "no-pane" && m.id === w.id ? null : { paneId: m.paneId ?? "w1:p9", tabId: "w1:t1" });
-      await t.orch.recover();
-      await until(() => t.runner.sent.some((s) => s.memberId === lead.id && s.text.includes("철수")), away);
-      expect(t.store.listMessages(t.project.id, { limit: 50 }).some((x) => x.kind === "시스템" && x.body.includes("철수"))).toBe(true);
+      await t.idle(w.id);
+      t.store.patchMember(w.id, { status: before });
+      await t.stopServer();
+      t.core.setStatus(w.id, { state: "blocked", kind: "permission" }); // 서버가 꺼진 사이 CLI 가 승인 창 앞에 섰다.
+      const next = await t.restart();
+      closers.push(() => next.close());
+      await next.orch.recover();
+      await next.waitFor(`${before} → blocked`, () => next.member(w.id).status === "blocked");
+      expect(next.member(w.id).blockedReason).toBe("permission");
     }
   });
 
-  test("재시작: 턴 시작 뒤 활동이 100개를 넘어도, 500개 제한을 지나도 꺼진 사이 끝난 보고를 살린다", async () => {
-    for (const n of [100, 200, 700]) {
-      const t = await setup();
-      await t.orch.ensureConductor(t.project.id);
-      const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
-      t.store.patchMember(w.id, { status: "working" });
-      t.store.appendActivity(w.id, "turn_start", "일");
-      for (let i = 0; i < n; i++) t.store.appendActivity(w.id, "tool", `도구 ${i}`);
-      t.runner.away = { finalText: "다 끝냈습니다", isError: false };
-      await t.orch.recover();
-      await until(() => t.store.listMessages(t.project.id, { limit: 20 }).some((m) => m.memberId === w.id && m.body === "다 끝냈습니다"), `활동 ${n}`);
-    }
-  });
-
-  test("재시작: 턴이 도는 중이면 이미 한 post 를 기억해 (자동) 보고가 겹치지 않는다", async () => {
-    const t = await setup();
+  // 옛 시험: 같은 시험의 '끝난 글이 없음'. 옛 실행기는 "턴이 끊겼습니다"를 대화와 총괄에 알렸다.
+  // 달라진 점: core 는 꺼진 사이 턴이 끝난 것을 터미널의 턴 번호로 확인한다. 끊긴 것이 아니라 보고 없이 끝난 실행이므로
+  // 직원에게 보고 보완을 한 번 묻고, 그래도 없으면 대화에 '결과 보고 누락'을 남긴다. 총괄에게는 따로 알리지 않는다.
+  test("재시작: 꺼진 사이 보고 없이 끝난 턴은 보고 보완을 묻고, 그래도 없으면 대화에 알린다", async () => {
+    const t = await coreSetup({ agentTools: { listAgentTools, handleAgentTool } });
+    closers.push(() => t.close());
     await t.orch.ensureConductor(t.project.id);
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
-    t.store.patchMember(w.id, { status: "working" });
-    t.store.appendActivity(w.id, "turn_start", "일");
-    await Bun.sleep(2);
-    t.store.createMessage({ projectId: t.project.id, memberId: w.id, who: "철수", kind: "완료", title: "로그인 고침" });
-    t.runner.busy.add(w.id);
-    await t.orch.recover();
-    t.runner.end(w.id, { finalText: "로그인 고쳤습니다" });
-    await Bun.sleep(30);
-    const mine = t.store.listMessages(t.project.id, { limit: 20 }).filter((m) => m.memberId === w.id);
-    expect(mine.map((m) => m.title)).toEqual(["로그인 고침"]);
+    await t.orch.assign(t.project.id, w.handle, { text: "일 @fake:hold" });
+    await t.waitFor("일하는 중", () => t.core.held(w.id) && t.member(w.id).status === "working");
+    await t.stopServer();
+    expect(t.core.release(w.id)).toBe(true); // 서버가 꺼진 사이 턴이 끝났다.
+    await t.waitFor("턴 끝", () => t.turns(w.id)[0]!.outcome === "done");
+    const next = await t.restart();
+    closers.push(() => next.close());
+    await next.orch.recover();
+    await next.waitFor("보고 보완 턴", () => next.turns(w.id).length === 2);
+    expect(isReportNudge(next.turns(w.id)[1]!)).toBe(true);
+    await next.waitFor("누락 글", () => next.texts().some((x) => x.kind === "시스템" && x.title === "결과 보고 누락" && x.body.includes("철수")));
+    await next.idle(w.id);
+    expect(next.turns(w.id)).toHaveLength(2);
+  });
+
+  // 옛 시험: "재시작: 턴이 도는 중이면 이미 한 post 를 기억해 (자동) 보고가 겹치지 않는다"
+  // 달라진 점: core 에는 마지막 글로 만드는 (자동) 보고가 없다. 같은 자리의 운영 동작은 '이미 보고한 실행에는 보고 보완을 묻지 않는다'이다.
+  test("재시작: 턴이 도는 중이면 이미 한 post 를 기억해 보고 보완을 묻지 않는다", async () => {
+    const t = await coreSetup({ agentTools: { listAgentTools, handleAgentTool } });
+    closers.push(() => t.close());
+    const lead = await t.orch.ensureConductor(t.project.id);
+    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
+    await t.orch.assign(t.project.id, w.handle, { text: "일 @fake:post=로그인고침 @fake:hold" });
+    await t.waitFor("보고하고 계속 일함", () => t.core.held(w.id) && t.texts().some((m) => m.memberId === w.id && m.title === "로그인고침"));
+    await t.waitFor("총괄이 보고를 받음", () => t.turns(lead.id).some((c) => c.prompt.includes("로그인고침")));
+    await t.idle(lead.id);
+    const next = await t.restart();
+    closers.push(() => next.close());
+    await next.orch.recover();
+    expect(next.core.release(w.id)).toBe(true);
+    await next.waitFor("턴 끝", () => next.turns(w.id)[0]!.outcome === "done");
+    await next.idle(w.id);
+    await Bun.sleep(100);
+    expect(next.turns(w.id)).toHaveLength(1);
+    const mine = next.texts().filter((m) => m.memberId === w.id);
+    expect(mine.map((m) => m.title)).toEqual(["로그인고침"]);
+    expect(next.texts().some((m) => m.title === "결과 보고 누락")).toBe(false);
   });
 
   test("재시작: 옛 원본 표식은 전체 묶음의 수신 증거가 아니다", async () => {
@@ -1128,7 +1035,6 @@ describe("2차 검수 회귀: 전달", () => {
     const m = t.store.createMessage({ projectId: t.project.id, mine: true, who: "나", kind: "나", body: "한 번만", delivery: "queued" });
     const d = t.store.enqueue({ projectId: t.project.id, memberId: lead.id, kind: "user_message", text: `[대표] "한 번만"\n#${m.id}`, refType: "message", refId: m.id });
     t.store.setDeliveryStatus(d.id, "delivering", { attempt: true });
-    t.runner.seen = [`#${m.id}`];
     const before = t.runner.sent.length;
     await t.orch.recover();
     await Bun.sleep(20);
@@ -1143,7 +1049,6 @@ describe("2차 검수 회귀: 전달", () => {
     t.runner.autoBusy = false;
     const d = t.store.enqueue({ projectId: t.project.id, memberId: lead.id, kind: "instruction", text: "[총괄] 지시" });
     t.store.setDeliveryStatus(d.id, "delivering", { attempt: true });
-    t.runner.seen = [];
     await t.orch.recover();
     expect(t.runner.sent).toHaveLength(0);
     expect(t.store.requireDelivery(d.id)).toMatchObject({ status: "held", attempts: 1 });
@@ -1153,19 +1058,23 @@ describe("2차 검수 회귀: 전달", () => {
     const t = await setup({ timings: { retryMs: 5, inputBusyRetryMs: 5 } });
     const lead = await t.orch.ensureConductor(t.project.id);
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
-    t.runner.parallelResults = [{ ok: false, reason: "input_busy", retryable: true }, { ok: true }];
+    // core 실행기는 넣지 못한 까닭과 함께 '쓰지 않았다'(not_written)·'거절됐다'(rejected)를 알린다. 그 표시가 없는 실패는 결과를 모르는 것으로 보고 자동 입력을 보류한다.
+    t.runner.parallelResults = [{ ok: false, reason: "input_busy", retryable: true, deliveryEffect: "not_written" }, { ok: true }];
     await t.orch.assign(t.project.id, "cs", { text: "병렬 일", parallel: true });
     await until(() => t.runner.parallelCalls === 2, "다시 시도");
     await until(() => t.runner.sent.some((s) => s.memberId === w.id));
     expect(t.store.requireMember(w.id).parallel).toBe(true);
     t.runner.end(w.id);
-    await until(() => !t.runner.busy.has(w.id));
+    await t.quiet(w, 1);
+    expect(t.runner.busy.has(w.id)).toBe(false);
 
     t.runner.parallelCalls = 0;
+    // 달라진 점: 옛 herdr 의 "화면 확인 안 됨"은 넣은 뒤 확인하지 못한 경우였다. core 는 그 경우를 결과 모름(unknown)으로 보고해
+    // 다시 시도하지 않고 자동 입력을 보류한다. 여기서는 세 번 모두 확실히 거절된(rejected) 경우를 본다.
     t.runner.parallelResults = [
-      { ok: false, reason: "error", detail: "화면 확인 안 됨", retryable: true },
-      { ok: false, reason: "error", detail: "화면 확인 안 됨", retryable: true },
-      { ok: false, reason: "error", detail: "화면 확인 안 됨", retryable: true },
+      { ok: false, reason: "error", detail: "명령 거절", retryable: true, deliveryEffect: "rejected" },
+      { ok: false, reason: "error", detail: "명령 거절", retryable: true, deliveryEffect: "rejected" },
+      { ok: false, reason: "error", detail: "명령 거절", retryable: true, deliveryEffect: "rejected" },
     ];
     const before = t.runner.sent.filter((s) => s.memberId === w.id).length;
     await t.orch.assign(t.project.id, "cs", { text: "순차 일", parallel: false });
@@ -1185,8 +1094,9 @@ describe("2차 검수 회귀: 전달", () => {
     await expect(t.orch.resumeMember(w.id)).rejects.toMatchObject({ status: 502 });
     expect(t.store.requireMember(w.id).sessionId).toBe(SID);
     expect(t.store.requireMember(w.id).lastError).toContain("8000ms");
-    t.runner.failStarts = 1;
-    t.runner.startError = "No conversation found with session ID";
+    // 달라진 점: 옛 실행기는 이어 열기가 "No conversation found" 로 실패해야 세션이 없는 줄 알았다.
+    // core 는 터미널만 만들면 성공으로 답하므로, 띄우기 전에 세션 기록이 디스크에 있는지부터 본다(sessionExists).
+    t.runner.sessionOnDisk = false;
     await t.orch.resumeMember(w.id);
     expect(t.store.requireMember(w.id).sessionId).not.toBe(SID);
   });
@@ -1207,7 +1117,8 @@ describe("2차 검수 회귀: 전달", () => {
     expect(handed.member_id).toBe(lead.id);
   });
 
-  test("닫는 중 틱이 돌아도 직원을 다시 열지 않고, 띄우는 중에 닫혔으면 띄운 칸을 닫는다", async () => {
+  // 옛 시험: "닫는 중 틱이 돌아도 직원을 다시 열지 않고, 띄우는 중에 닫혔으면 띄운 칸을 닫는다"
+  test("닫는 중 틱이 돌아도 직원을 다시 열지 않고, 띄우는 중인 직원의 닫기는 거절한다", async () => {
     const t = await setup();
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
     t.store.enqueue({ projectId: t.project.id, memberId: w.id, kind: "instruction", text: "일" });
@@ -1221,18 +1132,24 @@ describe("2차 검수 회귀: 전달", () => {
     expect(t.runner.starts.length).toBe(starts);
     expect(t.store.getMember(w.id)).toBeNull();
 
-    // 이미 띄우기가 시작된 뒤 닫힌 경우
+    // 이미 띄우기가 시작된 뒤 닫으려는 경우.
+    // 달라진 점: 옛 실행기는 닫기를 받아 두고 뜬 칸을 뒤따라 닫았다. core 는 띄우는 중인 직원의 닫기를 409 로 거절한다
+    // (명부에서 먼저 빠지고 터미널만 남는 일이 없다). 다 뜬 뒤에 닫으면 터미널을 끝내고 명부에서 뺀다.
     t.runner.stopDelay = 0;
     const w2 = (await t.orch.addMember(t.project.id, { name: "영희", handle: "yh" })).member;
     t.store.patchMember(w2.id, { status: "asleep" });
     t.runner.startDelay = 40;
-    const opening = t.orch.resumeMember(w2.id).catch(() => null);
+    const opening = t.orch.resumeMember(w2.id);
     await Bun.sleep(5);
     t.runner.startDelay = 0;
-    await t.orch.closeMember(w2.id);
-    const stopsBefore = t.runner.stops.filter((id) => id === w2.id).length;
+    await expect(t.orch.closeMember(w2.id)).rejects.toMatchObject({ status: 409 });
     await opening;
-    await until(() => t.runner.stops.filter((id) => id === w2.id).length > stopsBefore, "띄운 칸 닫기");
+    expect(t.store.requireMember(w2.id).status).toBe("idle");
+    const stopsBefore = t.runner.stops.filter((id) => id === w2.id).length;
+    await t.orch.pump(w2.id);
+    await t.orch.closeMember(w2.id);
+    expect(t.runner.stops.filter((id) => id === w2.id).length).toBe(stopsBefore + 1);
+    expect(t.store.getMember(w2.id)).toBeNull();
   });
 
   test("할 일을 체크·해제·체크·해제해도 직원에게 나간 '했음'을 바로잡는다", async () => {
@@ -1323,7 +1240,10 @@ describe("2차 검수 회귀: REST", () => {
     const d = t.store.createDecision({ projectId: t.project.id, memberId: w.id, who: "철수", title: "t", options: [{ k: "a", label: "가" }] });
     expect((await authed(t, "PATCH", `/api/projects/${t.project.id}`, { archived: true })).status).toBe(409);
     await t.orch.answerDecision(d.id, { choice: "a" });
+    await until(() => t.runner.sent.some((s) => s.memberId === w.id), "답 전달");
     t.runner.end(w.id);
+    // 답으로 깬 직원이 보고 없이 끝냈다: core 에서는 보고 보완 턴이 한 번 지나간다.
+    await t.quiet(w, 1);
     const todo = t.store.createTodo({ projectId: t.project.id, who: "x", title: "할 일" });
     expect((await authed(t, "PATCH", `/api/projects/${t.project.id}`, { archived: true })).status).toBe(409);
     await t.orch.setTodoDone(todo.id, true);
@@ -1515,7 +1435,13 @@ describe("W5 전달 통합", () => {
     // The old items were corrected by evidence, never passed through send again.
     expect(t.store.requireDelivery(first.id).attempts).toBe(1);
     expect(t.store.requireDelivery(second.id).attempts).toBe(1);
+    // 달라진 점: 옛 herdr 는 증거로 정리되자마자 기다리던 긴급 글을 넣었다. core 는 받은 입력의 실행이 끝난 것을 확인한 뒤에야
+    // 다음 입력을 넣는다(일하는 중인 CLI 에는 급한 글도 끼워 넣지 않는다).
+    expect(t.store.listDispatches(a.id)).toHaveLength(1);
+    t.runner.end(a.id);
+    await until(() => t.store.listDispatches(a.id).length === 2, "긴급 전달");
     expect(t.store.listDispatches(a.id)).toHaveLength(2);
+    expect(t.store.listDispatches(a.id)[1]!.wireText).toContain("긴급");
     expect(t.store.listDispatches(a.id)[1]!.wireText).not.toContain("첫 입력");
     expect(t.store.listDispatches(a.id)[1]!.wireText).not.toContain("둘째 입력");
   });

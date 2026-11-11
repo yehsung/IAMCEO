@@ -5,7 +5,7 @@ import { basename } from "node:path";
 import type { RunnerMember, StartOpts } from "./types.ts";
 import { CoreError } from "./core-client.ts";
 import { writeStatuslineWrapper } from "./statusline.ts";
-import { subagentEnv } from "./headless.ts";
+import { subagentEnv } from "./env.ts";
 
 export type CoreProvider = "claude" | "codex";
 export interface ProviderLaunch { argv: string[]; env: Record<string, string>; sessionId: string | null }

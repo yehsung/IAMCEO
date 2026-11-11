@@ -7,7 +7,6 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createServer, type Socket } from "node:net";
 import type { CoreTerminal } from "../server/runner/core-client.ts";
-import { parseApproval } from "../server/runner/approval.ts";
 import { PushEventRecorder } from "../server/push/events.ts";
 import { DEFAULT_PUSH_BUNDLE_ID } from "../shared/push.ts";
 import type { TerminalControlAction, TerminalControlResult } from "../server/runner/types.ts";
@@ -21,6 +20,7 @@ import { PushStore } from "../server/push/store.ts";
 import type { Runner, RunnerMember, RunnerStopOptions, SendResult } from "../server/runner/types.ts";
 import { ApiError, Store } from "../server/store.ts";
 import type { OperationReceipt } from "../shared/operations.ts";
+import type { ApprovalPrompt } from "../shared/types.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
 // HTTP/Store/Orchestrator는 실제 구현, 외부 실행 경계만 대역이다.
@@ -55,7 +55,10 @@ class FakeRunner implements Runner {
     if (this.stopError) throw this.stopError;
   }
   async screen() { return "fixture screen"; }
-  async approval() { return parseApproval("────────────────────\nBash command\necho fixture\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel\n"); }
+  async approval(): Promise<ApprovalPrompt> {
+    return { title: "Bash command", body: "echo fixture", question: "Do you want to proceed?", fingerprint: "9e4fef861d54b7c7a9005d63",
+      options: [{ n: 1, label: "Yes", reject: false }, { n: 2, label: "No", reject: true }] };
+  }
   async answerApproval() {
     const prompt = (await this.approval())!;
     return { ok: true as const, prompt, chosen: prompt.options[0]! };

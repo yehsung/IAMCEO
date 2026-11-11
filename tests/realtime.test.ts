@@ -15,7 +15,10 @@ const unavailable: HerdrInfo = { installed: false, running: false, version: null
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const stop of cleanup.splice(0).reverse()) await stop(); });
 
-async function fixture(herdrInfo: () => Promise<HerdrInfo> = async () => unavailable, suppliedBus = new Bus(), context: Partial<ServerContext> = {}) {
+/** 옛 herdr 실행기를 지운 뒤 bootstrap.herdr 로 내려가는 고정값. 서버는 herdr 를 보지 않는다. */
+const unused: HerdrInfo = { installed: false, running: false, version: null, protocol: null, compatible: false, warning: null };
+
+async function fixture(suppliedBus = new Bus(), context: Partial<ServerContext> = {}) {
   const home = mkdtempSync("/private/tmp/iamceo-realtime-");
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
   updateConfigFile({ accessCode: CODE, hosts: ["127.0.0.1"] }, env);
@@ -24,7 +27,7 @@ async function fixture(herdrInfo: () => Promise<HerdrInfo> = async () => unavail
   const store = new Store(openDb(config.dbPath), bus);
   const calls: string[] = [];
   // w1: 스냅샷이 실행 엔진 상태를 싣는다. 이미 아는 값을 읽기만 하고 실행기를 다시 보지 않으므로 허용 목록에 둔다.
-  const orch = new Proxy({ herdrInfo: async () => { calls.push("herdrInfo"); return herdrInfo(); }, cliCommand: () => "fixture-cli", engineStatus: () => null }, {
+  const orch = new Proxy({ cliCommand: () => "fixture-cli", engineStatus: () => null }, {
     get(target, key) {
       if (key in target) return Reflect.get(target, key);
       return () => { calls.push(String(key)); throw new Error(`Unexpected orchestrator call: ${String(key)}`); };
@@ -101,7 +104,7 @@ describe("Bus emit cursor", () => {
 describe("sync snapshot", () => {
   test("ready 전 상태 조회는 STARTING이고 준비 뒤 기존 계약으로 응답한다", async () => {
     let ready = false;
-    const f = await fixture(undefined, undefined, { daemon: () => ({ ready, buildId: "fixture", version: "fixture" }) });
+    const f = await fixture(undefined, { daemon: () => ({ ready, buildId: "fixture", version: "fixture" }) });
     for (const path of ["/api/sync?projectId=hq", "/api/health", "/api/readiness", "/api/runtime", "/api/bootstrap", "/api/projects/hq/state", "/api/push/status"]) {
       const response = await fetch(f.base + path, { headers: auth });
       expect(response.status).toBe(503);
@@ -151,14 +154,14 @@ describe("sync snapshot", () => {
     expect(snapshot.cursor).toEqual(f.bus.cursor);
     expect(snapshot.revisions).toEqual(f.store.syncRevisions(p.id));
     expect(snapshot.bootstrap).not.toHaveProperty("runtime");
-    expect(snapshot.bootstrap.herdr).toEqual(unavailable);
+    expect(snapshot.bootstrap.herdr).toEqual(unused);
     expect(snapshot.bootstrap.rankOverrides).toEqual({ manager: 0, lead: 1 });
     expect(JSON.stringify(snapshot)).not.toContain(f.store.getMemberToken(m.id));
     expect(await f.sync()).toMatchObject({ requestedProjectId: null, projectStatus: "none", state: null, revisions: { members: {}, todos: {} } });
     expect(await f.sync("?projectId=missing")).toMatchObject({ requestedProjectId: "missing", projectStatus: "not_found", state: null });
     f.store.patchProject(p.id, { archived: true });
     expect(await f.sync(`?projectId=${p.id}`)).toMatchObject({ requestedProjectId: p.id, projectStatus: "archived", state: null, revisions: { members: {}, todos: {} } });
-    expect(f.calls).toEqual(["herdrInfo"]);
+    expect(f.calls).toEqual([]);
     for (const query of ["?projectId=", "?projectId=%20", "?projectId=hq&projectId=hq", "?unknown=1", `?projectId=${"x".repeat(257)}`]) {
       const response = await fetch(`${f.base}/api/sync${query}`, { headers: auth });
       expect([query, response.status]).toEqual([query, 400]);
@@ -166,47 +169,17 @@ describe("sync snapshot", () => {
     }
   });
 
-  test("초기 진단은 single flight이며 대기 중 herdr 이벤트가 오래된 결과보다 우선한다", async () => {
-    let resolveInfo!: (value: HerdrInfo) => void;
-    let entered!: () => void;
-    const started = new Promise<void>((resolve) => { entered = resolve; });
-    const pending = new Promise<HerdrInfo>((resolve) => { resolveInfo = resolve; });
-    const f = await fixture(() => { entered(); return pending; });
-    const a = f.sync("?projectId=hq");
-    const b = f.sync("?projectId=hq");
-    await started;
-    const latest = { ...unavailable, running: true, warning: "newer observation" };
-    f.bus.emit({ type: "herdr", herdr: latest });
-    const message = f.store.createMessage({ projectId: "hq", kind: "알림", body: "during diagnostic await" });
-    resolveInfo(unavailable);
-    for (const snapshot of await Promise.all([a, b])) {
-      expect(snapshot.bootstrap.herdr).toEqual(latest);
-      expect(snapshot.state!.messages.some((m) => m.id === message.id)).toBe(true);
-      expect(snapshot.cursor).toEqual(f.bus.cursor);
-    }
-    expect((await f.sync()).bootstrap.herdr).toEqual(latest);
-    expect(f.calls).toEqual(["herdrInfo"]);
-  });
-
-  test("진단 실패는 500이며 다음 조회에서 재시도한다", async () => {
-    let attempts = 0;
-    const f = await fixture(async () => { if (++attempts === 1) throw new Error("fixture diagnostic failed"); return unavailable; });
-    const response = await fetch(`${f.base}/api/sync`, { headers: auth });
-    expect(response.status).toBe(500);
-    expect(response.headers.get("cache-control")).toBe("no-store");
-    expect((await f.sync()).bootstrap.herdr).toEqual(unavailable);
-    expect(attempts).toBe(2);
-  });
-
-  test("중첩 herdr 발행은 늦게 관측한 바깥 이벤트로 캐시를 되돌리지 않는다", async () => {
-    const bus = new Bus();
-    const latest = { ...unavailable, warning: "inner newer" };
-    bus.subscribe((event) => {
-      if (event.type === "herdr" && event.herdr.warning === "outer older") bus.emit({ type: "herdr", herdr: latest });
-    });
-    const f = await fixture(undefined, bus);
-    bus.emit({ type: "herdr", herdr: { ...unavailable, warning: "outer older" } });
-    expect((await f.sync()).bootstrap.herdr).toEqual(latest);
+  // 옛 시험 3건: "초기 진단은 single flight이며 대기 중 herdr 이벤트가 오래된 결과보다 우선한다",
+  // "진단 실패는 500이며 다음 조회에서 재시도한다", "중첩 herdr 발행은 늦게 관측한 바깥 이벤트로 캐시를 되돌리지 않는다".
+  // 서버가 herdr 상태를 조회해 캐시하던 길을 검증하던 시험이다. 조회와 캐시가 없어져 지웠고, 남은 약속 하나를 단정한다.
+  test("bootstrap.herdr 는 '쓰지 않음' 고정값이다: 총괄을 부르지 않고, herdr 이벤트가 지나가도 바뀌지 않는다", async () => {
+    const f = await fixture();
+    const first = f.sync("?projectId=hq");
+    f.bus.emit({ type: "herdr", herdr: { ...unavailable, running: true, warning: "stray event" } });
+    const message = f.store.createMessage({ projectId: "hq", kind: "알림", body: "after stray event" });
+    for (const snapshot of [await first, await f.sync("?projectId=hq"), await f.sync()]) expect(snapshot.bootstrap.herdr).toEqual(unused);
+    expect((await f.sync("?projectId=hq")).state!.messages.some((m) => m.id === message.id)).toBe(true);
+    // 스냅샷은 총괄을 한 번도 부르지 않는다(GET /api/bootstrap 의 같은 값은 tests/http.test.ts 가 본다).
     expect(f.calls).toEqual([]);
   });
 });
@@ -242,7 +215,7 @@ describe("v1/v2 WebSocket", () => {
   test("각 topic은 v1 모양과 emit cursor를 유지하며 snapshot 이후 이벤트로 이어진다", async () => {
     const bus = new Bus();
     bus.subscribe((event) => { if (event.type === "herdr") bus.emit({ type: "projects", projects: [] }); });
-    const f = await fixture(undefined, bus);
+    const f = await fixture(bus);
     const v1 = connect(f.wsURL, auth);
     const v2 = connect(`${f.wsURL}?v=2`, auth);
     await Promise.all([v1.opened, v2.opened]);

@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import { childEnv } from "./runner/headless.ts";
+import { childEnv } from "./runner/env.ts";
 import { CoreError, coreRpc, type CoreHello } from "./runner/core-client.ts";
 import type { CoreRunnerOptions } from "./runner/core.ts";
 import type { RunnerMember, RunnerReattachResult } from "./runner/types.ts";

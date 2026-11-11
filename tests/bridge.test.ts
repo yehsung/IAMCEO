@@ -1,57 +1,41 @@
-// 실제 서버 + 실제 브리지 프로세스 + SDK 클라이언트. 세션은 fake-claude 로만 돈다.
+// 실제 서버 + 실제 브리지 프로세스 + SDK 클라이언트. 세션은 시험용 core 틀(가짜 core 안의 가짜 CLI)로만 돈다.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
-import type { Backend, Member } from "../shared/types.ts";
-import { Bus } from "../server/bus.ts";
-import { type Config, loadConfig, updateConfigFile } from "../server/config.ts";
-import { openDb } from "../server/db.ts";
-import { startServer, type RunningServer } from "../server/http.ts";
-import { Orchestrator } from "../server/orchestrator.ts";
-import { HeadlessRunner } from "../server/runner/headless.ts";
-import type { Runner } from "../server/runner/types.ts";
-import { ApiError, Store } from "../server/store.ts";
+import type { Member } from "../shared/types.ts";
+import type { Orchestrator } from "../server/orchestrator.ts";
+import { ApiError, type Store } from "../server/store.ts";
 import type { AgentToolResult } from "../server/orchestrator-api.ts";
 import type { AgentOperationService } from "../server/service-contracts.ts";
+import { coreSetup, type CoreEnv } from "./fixtures/core-harness.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
+// 브리지 프로세스의 환경과 가짜 HTTP 서버만 이 격리 틀에서 받는다. 서버·실행기는 시험용 core 틀이 만든다.
 const runtime = createIsolatedRuntime();
-const FAKE = resolve(import.meta.dir, "fixtures", "fake-claude.ts");
-runtime.assertFakeExecutable(FAKE);
 const CLI = resolve(import.meta.dir, "..", "bin", "iamceo.ts");
-const CODE = "bridge-code";
+const CODE = "code"; // 시험용 core 틀의 접속 코드
 
+let t: CoreEnv;
 let home: string;
-let config: Config;
-let bus: Bus;
 let store: Store;
 let orch: Orchestrator;
-let server: RunningServer;
 let url: string;
 let projectId: string;
 let lead: Member;
-let logPath: string;
 const clients: Client[] = [];
 const operationRequests: { operationId: string; memberId: string; name: string; args: Record<string, unknown> }[] = [];
 
 beforeAll(async () => {
-  home = runtime.paths.iamceoHome;
-  const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
-  updateConfigFile({ accessCode: CODE, hosts: ["127.0.0.1"], claudeBin: FAKE }, env);
-  config = loadConfig(env);
-  bus = new Bus();
-  store = new Store(openDb(config.dbPath), bus);
-  logPath = join(home, "calls.jsonl");
-  const runner = new HeadlessRunner(
-    { claudeBin: FAKE },
-    { env: { ...runtime.childEnv(), FAKE_CLAUDE_LOG: logPath, FAKE_CLAUDE_DIRECTIVES: "" } },
-  );
-  orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["headless", runner]]) });
+  // 도구 구현은 넘기지 않는다: 총괄이 실제 도구(server/agent-tools.ts)를 쓴다.
+  // core 는 턴의 마지막 글을 서버에 넘기지 않아, 대표의 결재 답으로 깬 총괄이 보고 없이 끝나면 '보고 보완' 턴이 붙는다.
+  // 실제 총괄처럼 답을 받은 턴에 보고하게 해서 뒤 시험의 글 수 세기가 흔들리지 않게 한다.
+  t = await coreSetup({ script: [{ when: "[대표 답(원문) '고르세요']", tools: [{ name: "post", args: { kind: "완료", title: "답을 받았습니다" } }], silent: true }] });
+  home = t.home; store = t.store; orch = t.orch; url = t.base;
   // W1 AgentOperationService fake. The actual receipt engine is owned by the
   // orchestration integration; this fixture checks bridge identity, never invents success.
   const pending = new Map<string, { request: string; result: Promise<AgentToolResult> }>();
@@ -70,19 +54,13 @@ beforeAll(async () => {
     },
   };
   Object.assign(orch, { handleAgentOperation: operations.execute.bind(operations) });
-  server = await startServer({ config, store, bus, orch });
-  while (server.port === 7878) { await server.stop(); server = await startServer({ config, store, bus, orch }); }
-  url = server.urls[0]!;
-  orch.setServerUrl(url);
-  projectId = store.createProject({ name: "브리지 시험", cwd: home }).id;
+  projectId = t.project.id;
   lead = await orch.ensureConductor(projectId);
 });
 
 afterAll(async () => {
   await Promise.all(clients.map((c) => c.close().catch(() => {})));
-  await orch.shutdown();
-  await server.stop();
-  store.db.close();
+  await t.close();
   await runtime.stop();
 });
 
@@ -144,10 +122,12 @@ describe("브리지 왕복", () => {
 
     // 답은 다음 턴 입력으로 들어간다.
     await orch.answerDecision(decision.id, { choice: "a" });
-    await waitFor("답 전달", () => existsSync(logPath) && readFileSync(logPath, "utf8").includes(`[대표 답(원문) '고르세요'] \\"가\\" #${decision.id}`));
-    await waitFor("총괄 쉼", () => store.requireMember(lead.id).status === "idle");
+    await waitFor("답 전달", () => t.turns(lead.id).some((c) => c.prompt.includes(`[대표 답(원문) '고르세요'] "가" #${decision.id}`)));
+    await t.idle(lead.id);
+    // 답은 띄워 둔 총괄의 터미널에 다음 턴으로 들어갔다(새로 띄우지 않는다).
+    expect(t.runs(lead.id)).toHaveLength(1);
 
-    const added = await callText(client, "team_add", { name: "철수", role: "개발", handle: "chulsu", first_instruction: "로그인 고치기 @fake:delay=500" });
+    const added = await callText(client, "team_add", { name: "철수", role: "개발", handle: "chulsu", first_instruction: "로그인 고치기 @fake:delay=500 @fake:post=로그인고침" });
     expect(added).toMatchObject({ isError: false });
     expect(added.text).toContain("철수(chulsu)");
     const worker = store.findMember(projectId, "chulsu")!;
@@ -161,9 +141,9 @@ describe("브리지 왕복", () => {
     const roster = JSON.parse((await callText(client, "roster")).text) as { handle: string; queued: number }[];
     expect(roster.map((r) => r.handle)).toEqual(["lead", "chulsu"]);
 
-    // 대기열의 지시가 실제로 흘러가고 fake-claude 의 post 가 대화까지 돌아온다.
+    // 대기열의 지시가 실제로 흘러가고 가짜 CLI 의 post 가 대화까지 돌아온다.
     await waitFor("직원 보고", () => store.listMessages(projectId).find((m) => m.who === "철수" && m.title === "끝났습니다"));
-    const prompts = readFileSync(logPath, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { event: string; prompt: string }).filter((l) => l.event === "start").map((l) => l.prompt);
+    const prompts = t.turns(worker.id).map((c) => c.prompt);
     expect(prompts.some((p) => p.includes('총괄 인용(미확인): "대표가 안 한 말"') && p.includes("둘째 일"))).toBe(true);
     await waitFor("직원 쉼", () => store.requireMember(worker.id).status === "idle" && store.requireMember(lead.id).status === "idle");
   }, 30_000);

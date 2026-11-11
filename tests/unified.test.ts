@@ -1,120 +1,43 @@
-// 설정 통일·연결 상태·직급별 모델·자료 종류(spec §3·§5·§6·§7). 실행기는 가짜, 저장소·전달 펌프·도구·HTTP 는 진짜다.
+// 설정 통일·연결 상태·직급별 모델·자료 종류(spec §3·§5·§6·§7).
+// 운영과 같은 실행기 종류(core)로 돈다: 가짜 core 소켓 + 실제 CoreRunner + 운영 배선의 총괄. 저장소·전달 펌프·도구·HTTP 는 진짜다.
+// 옛 시험은 herdr·headless 두 벌의 가짜 실행기를 끼웠다. 실행 방식 전환·편입·옛 실행기의 인자 조립만 보던 시험은 지웠다.
 import { Database } from "bun:sqlite";
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import type { Backend, Member, ProjectSummary, WsEvent } from "../shared/types.ts";
+import { join } from "node:path";
+import type { Member, ProjectSummary, WsEvent } from "../shared/types.ts";
 import { DEFAULT_RANKS, fileKindOf, memberConfig, memberRank } from "../shared/types.ts";
 import { handleAgentTool } from "../server/agent-tools.ts";
 import { Bus } from "../server/bus.ts";
-import { loadConfig, updateConfigFile } from "../server/config.ts";
 import { MIGRATIONS, openDb } from "../server/db.ts";
 import { MAX_ARTIFACT_BYTES } from "../server/files.ts";
-import { startServer } from "../server/http.ts";
-import { Orchestrator } from "../server/orchestrator.ts";
 import { renderRole } from "../server/roles.ts";
-import { buildClaudeArgs, childEnv, HeadlessRunner, StreamParser } from "../server/runner/headless.ts";
-import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "../server/runner/types.ts";
+import { childEnv } from "../server/runner/env.ts";
+import type { StartOpts } from "../server/runner/types.ts";
 import { ApiError, Store } from "../server/store.ts";
-import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
-
-const FAKE = resolve(import.meta.dir, "fixtures", "fake-claude.ts");
-
-class FakeRunner implements Runner {
-  kind: Backend;
-  health: { ok: boolean; detail?: string } = { ok: true };
-  sent: { memberId: string; text: string; m: RunnerMember }[] = [];
-  starts: RunnerMember[] = [];
-  stops: string[] = [];
-  applied: RunnerMember[] = [];
-  applyResults: SendResult[] = [];
-  autoBusy = false;
-  busy = new Set<string>();
-  cb: (e: RunnerEvent) => void = () => {};
-  applyConfig?: (m: RunnerMember, o: StartOpts) => Promise<SendResult>;
-  constructor(kind: Backend, withApply = kind === "herdr") {
-    this.kind = kind;
-    if (withApply) {
-      this.applyConfig = async (m) => {
-        this.applied.push(m);
-        return this.applyResults.shift() ?? { ok: true };
-      };
-    }
-  }
-  async available() {
-    return this.health;
-  }
-  async start(m: RunnerMember) {
-    this.starts.push(m);
-    return { sessionId: m.sessionId ?? crypto.randomUUID(), paneId: this.kind === "herdr" ? `w1:p${this.starts.length}` : null, tabId: this.kind === "herdr" ? "w1:t1" : null };
-  }
-  async send(m: RunnerMember, text: string): Promise<SendResult> {
-    this.sent.push({ memberId: m.id, text, m });
-    if (this.autoBusy) this.busy.add(m.id);
-    return { ok: true };
-  }
-  isBusy(id: string) {
-    return this.busy.has(id);
-  }
-  async compact(): Promise<SendResult> {
-    return { ok: true };
-  }
-  async setParallel(): Promise<SendResult> {
-    return { ok: true };
-  }
-  async interrupt() {}
-  async stop(m: RunnerMember) {
-    this.stops.push(m.id);
-    this.busy.delete(m.id);
-  }
-  async screen() {
-    return "";
-  }
-  on(cb: (e: RunnerEvent) => void) {
-    this.cb = cb;
-  }
-  async shutdown() {}
-  async reattach(m: RunnerMember) {
-    return { paneId: m.paneId ?? "w1:p9", tabId: "w1:t1" };
-  }
-  async adopt() {
-    return { sessionId: "33333333-3333-4333-8333-333333333333", paneId: "w1:p7", tabId: "w1:t1" };
-  }
-  end(memberId: string) {
-    this.busy.delete(memberId);
-    this.cb({ type: "turn_end", memberId, finalText: "", isError: false });
-  }
-}
+import { coreSetup, type FakeRun } from "./fixtures/core-harness.ts";
 
 const closers: (() => Promise<void> | void)[] = [];
-afterAll(async () => {
-  for (const close of closers) await close();
+// 시험마다 닫는다. 실제 CoreRunner 는 터미널마다 짧은 간격으로 상태를 읽어서, 파일 끝까지 두면 서른 벌이 함께 돈다.
+afterEach(async () => {
+  for (const close of closers.splice(0).reverse()) await close();
 });
 
-async function setup(opts: { backend?: Backend | null; runnerEnabled?: boolean } = {}) {
+async function setup(opts: { runnerEnabled?: boolean; ticks?: boolean } = {}) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-unified-")));
   const work = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-unified-work-")));
-  const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0", CLAUDE_CONFIG_DIR: join(home, "claude"), CODEX_HOME: join(home, "codex") };
-  mkdirSync(env.CLAUDE_CONFIG_DIR); mkdirSync(env.CODEX_HOME);
-  writeFileSync(join(env.CLAUDE_CONFIG_DIR, ".claude.json"), JSON.stringify({ additionalModelOptionsCache: [{ value: "claude-fable-5-1[1m]", label: "Fable" }] }));
-  updateConfigFile({ accessCode: "code", hosts: ["127.0.0.1"], claudeBin: "/bin/false" }, env);
-  const config = loadConfig(env);
-  const bus = new Bus();
+  // 모델 목록은 CLI 설정 폴더의 .claude.json 에서 읽는다. 틀이 그 폴더를 <home>/claude-home 으로 잡는다.
+  mkdirSync(join(home, "claude-home"));
+  writeFileSync(join(home, "claude-home", ".claude.json"), JSON.stringify({ additionalModelOptionsCache: [{ value: "claude-fable-5-1[1m]", label: "Fable" }] }));
+  // ticks: 틱과 실행기 상태 확인을 빠르게 돌린다(죽은 터미널을 알아채고 다시 여는 흐름을 볼 때). 기본은 옛 시험처럼 사실상 돌지 않는다.
+  const core = await coreSetup({ home, timings: { retryMs: 10, inputBusyRetryMs: 10, ...(opts.ticks ? { tickMs: 20, healthMs: 20 } : { tickMs: 60_000, healthMs: 60_000 }) } });
+  closers.push(() => core.close());
+  const { store, orch, base } = core;
+  if (opts.ticks) await orch.recover();
   const events: WsEvent[] = [];
-  bus.subscribe((e) => events.push(e));
-  const store = new Store(openDb(config.dbPath), bus);
-  const herdr = new FakeRunner("herdr");
-  const headless = new FakeRunner("headless");
-  const backend = opts.backend === undefined ? "herdr" : opts.backend;
-  if (backend) store.patchSettings({ backend });
-  const orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["herdr", herdr], ["headless", headless]]), timings: { tickMs: 60_000, retryMs: 10, inputBusyRetryMs: 10, healthMs: 60_000 } });
-  closers.push(() => orch.shutdown());
-  const server = await startServer({ config, store, bus, orch });
-  closers.push(() => server.stop());
-  if (server.port === 7878) { await server.stop(); throw new Error("Fixture allocated live port"); }
-  orch.setServerUrl(server.urls[0]!);
-  const base = server.urls[0]!;
+  core.bus.subscribe((e) => events.push(e));
+  // 작업 폴더를 IAMCEO 홈과 따로 둔다(파일 도구의 폴더 밖 검사). 틀이 만든 기본 프로젝트는 쓰지 않는다.
   const project = store.createProject({ name: "시험", cwd: work, runnerEnabled: opts.runnerEnabled ?? true });
   const api = async (method: string, path: string, body?: unknown) => {
     const res = await fetch(`${base}${path}`, { method, headers: { Authorization: "Bearer code", "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -122,7 +45,25 @@ async function setup(opts: { backend?: Backend | null; runnerEnabled?: boolean }
     return { status: res.status, body: text ? JSON.parse(text) : null };
   };
   const call = (member: Member, name: string, args: Record<string, unknown>) => handleAgentTool(orch, store.requireMember(member.id), name, args);
-  return { home, work, config, store, orch, herdr, headless, project, api, base, events, call };
+  /**
+   * 실제 턴을 한 번 돌려 이어갈 세션 기록을 만든다. 설정을 바꾸면 core 는 같은 세션을 --resume 으로 다시 여는데, 턴이 없던 세션은 이어 열 기록이 없다.
+   * 보고하고 끝내 '보고 보완' 턴이 붙지 않게 한다.
+   */
+  const firstTurn = async (m: Member) => {
+    if (m.kind === "worker") await orch.assign(m.projectId, m.handle, { text: "준비 @fake:post=준비됨" });
+    else await orch.sendUserMessage(m.projectId, { text: "준비 @fake:post=준비됨" });
+    await core.waitFor("첫 턴", () => core.turns(m.id).some((c) => c.outcome === "done"));
+    await core.idle(m.id);
+    return store.requireMember(m.id);
+  };
+  return { ...core, work, project, api, events, call, firstTurn };
+}
+
+/** 가짜 core 가 받은 CLI 띄움(terminal.run)에서, 옛 가짜 실행기의 start 가 받던 값(모델·effort·권한·서브에이전트 모델)을 읽는다. */
+function launch(run: FakeRun) {
+  const flag = (name: string) => { const at = run.argv.indexOf(name); return at >= 0 ? run.argv[at + 1] ?? null : null; };
+  return { id: run.memberId, model: flag("--model"), effort: flag("--effort"), permissionMode: flag("--permission-mode"), subagentModel: run.env.CLAUDE_CODE_SUBAGENT_MODEL ?? null,
+    subagentForce: run.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE ?? null, resume: run.resumeFlag, settings: flag("--settings") };
 }
 
 const until = async (cond: () => boolean, label = "조건", ms = 4000) => {
@@ -153,25 +94,30 @@ describe("연결 상태", () => {
     const archived = t.store.patchProject(off.id, { archived: true });
     expect(archived.connection).toMatchObject({ ok: false, reason: "archived" });
 
-    t.herdr.health = { ok: false, detail: "herdr 서버에 연결할 수 없습니다" };
+    // 옛 시험은 가짜 실행기의 health 를 내렸다. core 에서는 엔진(가짜 core)이 내려가면 실제 CoreRunner 가 못 쓴다고 답한다.
+    t.core.setDown(true);
     await t.orch.refreshConnection();
     expect(t.store.requireProject(t.project.id).connection).toMatchObject({ ok: false, reason: "backend_down" });
     expect(t.store.requireProject("hq").connection.reason).toBe("backend_down");
-    expect(t.store.requireProject(t.project.id).connection.detail).toContain("herdr 서버에 연결할 수 없습니다");
+    // 실행기가 준 까닭이 그대로 붙는다.
+    const down = await t.runner.available();
+    expect(down.ok).toBe(false);
+    expect(t.store.requireProject(t.project.id).connection.detail).toContain("herdr-core에 연결할 수 없습니다");
+    expect(t.store.requireProject(t.project.id).connection.detail).toContain(down.detail!);
   });
 
   test("실행기가 꺼지거나 켜지면 projects·project 를 방송하고, 켜지면 보류된 것을 민다", async () => {
     const t = await setup();
     await t.orch.refreshConnection();
     t.events.length = 0;
-    t.herdr.health = { ok: false, detail: "꺼짐" };
+    t.core.setDown(true);
     await t.orch.refreshConnection();
     expect(t.events.some((e) => e.type === "project" && e.project.id === t.project.id && e.project.connection.reason === "backend_down")).toBe(true);
     expect(t.events.some((e) => e.type === "projects" && e.projects.every((p) => !p.connection.ok))).toBe(true);
     t.events.length = 0;
     await t.orch.refreshConnection();
     expect(t.events.filter((e) => e.type === "projects")).toHaveLength(0);
-    t.herdr.health = { ok: true };
+    t.core.setDown(false);
     await t.orch.refreshConnection();
     expect(t.events.some((e) => e.type === "project" && e.project.id === t.project.id && e.project.connection.ok)).toBe(true);
   });
@@ -212,7 +158,10 @@ describe("연결 상태", () => {
     const t = await setup();
     const decision = t.store.createDecision({ projectId: t.project.id, who: "x", title: "고르세요", options: [{ k: "a", label: "에이" }] });
     expect((await t.api("POST", `/api/decisions/${decision.id}/answer`, { choice: "a" })).status).toBe(200);
-    t.herdr.health = { ok: false, detail: "꺼짐" };
+    // 옛 가짜 실행기는 그 답을 곧바로 받았다. core 에서는 총괄이 떠서 답을 받은 뒤에 엔진을 내린다(띄우는 도중에 내리면 다른 상황이 된다).
+    const lead = await t.waitFor("답을 받을 총괄", () => t.store.getConductor(t.project.id));
+    await t.waitFor("답 전달", () => t.turns(lead.id).some((c) => c.prompt.includes(decision.id)));
+    t.core.setDown(true);
     await t.orch.refreshConnection(); // 접수 API는 마지막 health 관측을 읽고 probe를 기다리지 않는다.
     expect((await t.api("POST", `/api/decisions/${decision.id}/answer`, { choice: "a" })).status).toBe(200);
     expect((await t.api("POST", `/api/projects/${t.project.id}/messages`, { text: "안녕" })).status).toBe(409);
@@ -261,7 +210,7 @@ describe("연결 상태", () => {
     await t.api("PATCH", `/api/projects/${pid}`, { runnerEnabled: true });
     t.store.patchMember(lead.id, { origin: "runner", status: "asleep" });
     // 옛 전달 행이 사라진 메시지는 현재 총괄을 옛 수신자로 추정하지 않는다.
-    const sentBefore = t.herdr.sent.length;
+    const sentBefore = t.turns(lead.id).length;
     const resent = await t.api("POST", `/api/projects/${pid}/messages`, { id: m1.id, text: "총괄에게" });
     expect(resent.status).toBe(409);
     expect(t.store.requireMessage(m1.id).delivery).toBe("failed");
@@ -276,13 +225,15 @@ describe("연결 상태", () => {
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]!.attempts).toBe(0);
     expect(t.orch.deliveryRecovery.fenced(lead.id)).toBe(true);
-    expect(t.herdr.sent).toHaveLength(sentBefore);
+    // 이 프로젝트의 총괄에게는 새 입력이 없다(켜진 다른 프로젝트의 총괄은 제 말을 받는다).
+    expect(t.turns(lead.id)).toHaveLength(sentBefore);
+    expect(t.runs(lead.id)).toHaveLength(0);
     expect(t.store.listMessages(pid).filter((m) => m.id === m1.id)).toHaveLength(1);
   });
 
   test("/api/bootstrap 은 실행기를 다시 보고 답한다", async () => {
     const t = await setup();
-    t.herdr.health = { ok: false, detail: "꺼짐" };
+    t.core.setDown(true);
     const boot = await t.api("GET", "/api/bootstrap");
     expect(boot.body.projects.find((p: ProjectSummary) => p.id === t.project.id).connection.reason).toBe("backend_down");
   });
@@ -450,75 +401,25 @@ describe("설정 통일", () => {
     expect((await t.api("PUT", "/api/settings", { permissionMode: "acceptEdits" })).status).toBe(400);
   });
 
-  test("멤버는 시작한 실행기를 기억하고, 잠들었다 깨면 새 전역 방식을 따른다", async () => {
+  // 옛 시험: "옛 멤버: 다른 실행기로 시작한 세션은 그 실행기로 계속 다룬다. 다시 열면 전역을 따른다".
+  // 달라진 점: 운영에는 실행기가 core 하나뿐이라 옛 실행기로 시작한 세션을 다룰 실행기가 없다.
+  // 그 직원에게 가는 글은 넣지 않고 보류하고(legacy_session), 깨워도 core 로 스스로 옮기지 않는다.
+  test("옛 멤버: 다른 실행기로 시작한 세션에는 넣지 않고 보류한다. 깨워도 core 로 스스로 옮기지 않는다", async () => {
     const t = await setup();
-    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
-    expect(w.backend).toBe("herdr");
-    expect(t.store.requireMember(w.id).paneId).toBeTruthy();
-    // 실행 방식이 달라도 이미 쉬는 멤버를 기억에 맞춰 옮기는 일은 PUT 이 한다.
-    expect((await t.api("PUT", "/api/settings", { backend: "headless" })).status).toBe(200);
-    expect(t.herdr.stops).toContain(w.id);
-    expect(t.store.requireMember(w.id)).toMatchObject({ backend: "headless", paneId: null });
-    await t.orch.assign(t.project.id, "cs", { text: "일" });
-    expect(t.headless.sent.at(-1)!.memberId).toBe(w.id);
-    expect(t.herdr.sent.some((s) => s.memberId === w.id)).toBe(false);
-  });
-
-  test("옮기기 전에 일하는 직원이 있으면 프로젝트를 가리지 않고 409, 쉬게 되면 된다", async () => {
-    const t = await setup();
-    t.herdr.autoBusy = true;
-    const other = t.store.createProject({ name: "딴 곳", cwd: t.work });
-    const w = (await t.orch.addMember(other.id, { name: "영희", handle: "yh", role: "개발" })).member;
-    await t.orch.assign(other.id, "yh", { text: "일" });
-    const refused = await t.api("PUT", "/api/settings", { backend: "headless" });
-    expect(refused.status).toBe(409);
-    expect(refused.body.error).toContain("딴 곳");
-    expect(t.store.getSettings().backend).toBe("herdr");
-    t.herdr.end(w.id);
-    await until(() => t.store.requireMember(w.id).status === "idle", "쉼");
-    expect((await t.api("PUT", "/api/settings", { backend: "headless" })).status).toBe(200);
-    expect(t.store.requireMember(w.id).backend).toBe("headless");
-  });
-
-  test("이전 실행기가 죽어 있어도 옮길 수 있다. 전역 실행기 기준으로 연결이 바뀐다", async () => {
-    const t = await setup();
-    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
-    t.herdr.stop = async () => {
-      throw new Error("소켓 없음");
-    };
-    t.herdr.health = { ok: false, detail: "꺼짐" };
-    await t.orch.refreshConnection();
-    expect(t.store.requireProject(t.project.id).connection.ok).toBe(false);
-    expect((await t.api("PUT", "/api/settings", { backend: "headless" })).status).toBe(200);
-    expect(t.store.requireProject(t.project.id).connection.ok).toBe(true);
-    expect(t.store.listActivity(w.id).some((a) => a.text.includes("닫지 못했습니다"))).toBe(true);
-  });
-
-  test("옛 멤버: 다른 실행기로 시작한 세션은 그 실행기로 계속 다룬다. 다시 열면 전역을 따른다", async () => {
-    const t = await setup();
-    const lead = (await t.orch.addMember(t.project.id, { name: "옛직원", handle: "old", role: "개발" })).member;
-    t.store.patchMember(lead.id, { backend: "headless", sessionId: "22222222-2222-4222-8222-222222222222", paneId: null });
-    await t.orch.assign(t.project.id, "old", { text: "일" });
-    expect(t.headless.sent.at(-1)!.memberId).toBe(lead.id);
-    t.headless.end(lead.id);
-    await until(() => t.store.requireMember(lead.id).status === "idle", "쉼");
-    await t.orch.sleepMember(lead.id);
-    await t.orch.resumeMember(lead.id);
-    expect(t.store.requireMember(lead.id).backend).toBe("herdr");
-    expect(t.herdr.starts.at(-1)!.id).toBe(lead.id);
-  });
-
-  test("편입은 전역이 herdr 일 때만", async () => {
-    const t = await setup({ backend: "headless" });
-    (t.orch as unknown as { herdr: unknown }).herdr = { info: async () => ({}), agents: async () => [{ paneId: "w9:p1", name: "x", agent: "claude", status: "idle", cwd: t.work, sessionId: "44444444-4444-4444-8444-444444444444", workspaceId: "w9", tabId: "w9:t1", adopted: false }] };
-    await expect(t.orch.adopt(t.project.id, { paneId: "w9:p1", name: "편입", role: "r" })).rejects.toThrow("herdr 일 때만");
-    t.store.patchSettings({ backend: "herdr" });
-    const adopted = await t.orch.adopt(t.project.id, { paneId: "w9:p1", name: "편입", role: "r" });
-    expect(adopted).toMatchObject({ origin: "adopted", backend: "herdr", appliedModel: null });
+    const old = t.store.createMember({ projectId: t.project.id, handle: "old", name: "옛직원", role: "개발", kind: "worker", origin: "runner", status: "idle", backend: "headless", sessionId: "22222222-2222-4222-8222-222222222222" });
+    const assigned = await t.orch.assign(t.project.id, "old", { text: "일" });
+    await t.orch.pump(old.id);
+    expect(t.store.requireDelivery(assigned.delivery.id)).toMatchObject({ status: "held", holdReason: "legacy_session" });
+    expect(t.runs()).toHaveLength(0);
+    expect(t.turns()).toHaveLength(0);
+    t.store.patchMember(old.id, { status: "asleep" });
+    await expect(t.orch.resumeMember(old.id)).rejects.toMatchObject({ status: 409 });
+    expect(t.store.requireMember(old.id)).toMatchObject({ backend: "headless", sessionId: "22222222-2222-4222-8222-222222222222" });
+    expect(t.runs()).toHaveLength(0);
   });
 });
 
-describe("실행 방식 전환의 안전", () => {
+describe("띄우는 동안 바뀐 설정", () => {
   const gate = () => {
     let open!: () => void;
     const wait = new Promise<void>((r) => {
@@ -527,91 +428,34 @@ describe("실행 방식 전환의 안전", () => {
     return { wait, open };
   };
 
-  test("시간 초과로 칸을 못 닫았는데 실행기가 살아 있으면 409, 아무것도 안 바뀐다", async () => {
-    const t = await setup();
-    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
-    const pane = t.store.requireMember(w.id).paneId;
-    t.herdr.stop = async () => {
-      throw new Error("시간 초과");
-    };
-    const r = await t.api("PUT", "/api/settings", { backend: "headless" });
-    expect(r.status).toBe(409);
-    expect(t.store.getSettings().backend).toBe("herdr");
-    expect(t.store.requireMember(w.id)).toMatchObject({ backend: "herdr", paneId: pane });
-  });
-
-  test("넘겨받은 칸을 끝내면 잠들고, 깨우면 새 방식의 서버 세션이 된다", async () => {
-    const t = await setup();
-    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
-    t.store.patchMember(w.id, { origin: "adopted" });
-    expect((await t.api("PUT", "/api/settings", { backend: "headless" })).status).toBe(200);
-    expect(t.store.requireMember(w.id)).toMatchObject({ status: "asleep", backend: "headless", paneId: null, origin: "adopted" });
-    await t.orch.resumeMember(w.id);
-    expect(t.store.requireMember(w.id)).toMatchObject({ origin: "runner", backend: "headless" });
-    expect(t.herdr.sent.some((s) => s.memberId === w.id)).toBe(false);
-  });
-
-  test("칸을 닫는 동안 온 지시는 기다렸다가 새 방식으로 나간다", async () => {
-    const t = await setup();
-    const a = (await t.orch.addMember(t.project.id, { name: "갑수", handle: "ga", role: "개발" })).member;
-    const b = (await t.orch.addMember(t.project.id, { name: "을수", handle: "eul", role: "개발" })).member;
-    const hold = gate();
-    const stopped = gate();
-    const stop = t.herdr.stop.bind(t.herdr);
-    t.herdr.stop = async (m) => {
-      stopped.open();
-      await hold.wait;
-      await stop(m);
-    };
-    const put = t.api("PUT", "/api/settings", { backend: "headless" });
-    await stopped.wait;
-    await t.orch.assign(t.project.id, "eul", { text: "전환 중 지시" });
-    expect(t.herdr.sent).toHaveLength(0);
-    await expect(t.orch.addMember(t.project.id, { name: "병수", handle: "byeong", role: "개발" })).rejects.toThrow("바꾸는 중");
-    hold.open();
-    expect((await put).status).toBe(200);
-    await until(() => t.headless.sent.some((s) => s.memberId === b.id), "새 방식 전달");
-    expect(t.herdr.sent).toHaveLength(0);
-    t.headless.end(b.id);
-    await until(() => t.store.requireMember(b.id).status === "idle", "쉼");
-    expect(t.store.requireMember(a.id).status).toBe("idle");
-  });
-
-  test("병렬은 전환 뒤 풀렸다가 다음 일 전에 새 실행기에 되살린다", async () => {
-    const t = await setup();
-    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
-    t.store.patchMember(w.id, { parallel: true });
-    expect((await t.api("PUT", "/api/settings", { backend: "headless" })).status).toBe(200);
-    expect(t.store.requireMember(w.id).parallel).toBe(false);
-    let calls = 0;
-    t.headless.setParallel = async () => {
-      calls++;
-      return { ok: true };
-    };
-    await t.orch.assign(t.project.id, "cs", { text: "일" });
-    expect(calls).toBe(1);
-    expect(t.store.requireMember(w.id).parallel).toBe(true);
-  });
-
+  // 옛 시험(묶음 "실행 방식 전환의 안전"): 같은 이름. 옛 가짜 실행기의 applyConfig 호출을 세던 자리를 실제 CoreRunner 가 CLI 를 다시 띄운 기록으로 본다.
   test("띄우는 동안 바뀐 설정은 적용된 것으로 적지 않고, 다 뜨면 새 값으로 다시 연다", async () => {
-    const t = await setup();
+    const t = await setup({ ticks: true });
     const hold = gate();
     const entered = gate();
-    const start = t.herdr.start.bind(t.herdr);
-    t.herdr.start = async (m) => {
+    const start = t.runner.start.bind(t.runner);
+    t.runner.start = async (m, o) => {
+      t.runner.start = start;
       entered.open();
       await hold.wait;
-      return start(m);
+      return start(m, o);
     };
     const adding = t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" });
     await entered.wait;
     expect((await t.api("PUT", "/api/settings", { ranks: { lead: { model: "sonnet" } } })).status).toBe(200);
     hold.open();
     const { member } = await adding;
-    expect(t.herdr.starts.at(-1)!.model).toBeNull();
-    await until(() => t.herdr.applied.length === 1, "새 설정으로 다시 열기");
-    expect(t.herdr.applied[0]!.model).toBe("sonnet");
+    expect(launch(t.runs(member.id)[0]!).model).toBeNull();
+    await until(() => t.runs(member.id).length >= 2, "새 설정으로 다시 열기");
+    expect(launch(t.runs(member.id)[1]!).model).toBe("sonnet");
     await until(() => t.store.requireMember(member.id).appliedModel === "sonnet", "적용 기록");
+    // 달라진 점: core 의 '다시 열기'는 같은 세션을 --resume 으로 새로 띄우는 것이다. 아직 턴이 없던 세션은 이어 열 기록이 없어
+    // 그 CLI 가 곧바로 끝난다(가짜 CLI 도 실제 Claude 처럼 끝난다). 서버는 끝난 것을 알아채고, 다음 일이 오면 새 세션을 새 설정으로 연다.
+    // 여기서는 그 끝만 본다: 맡긴 일이 새 설정으로 뜬 CLI 에서 돈다.
+    await t.orch.assign(t.project.id, "cs", { text: "일 @fake:post=끝" });
+    const turn = await t.waitFor("새 설정의 세션에서 일함", () => t.turns(member.id).find((c) => c.prompt.includes("할 일: 일") && c.outcome === "done"));
+    expect(launch(turn.run).model).toBe("sonnet");
+    expect(t.store.requireMember(member.id).appliedModel).toBe("sonnet");
   });
 });
 
@@ -785,7 +629,9 @@ describe("마이그레이션", () => {
     // 마이그레이션이 쓴 값과 같은 모양(키 순서가 달라도 같다).
     t.store.db.query("UPDATE members SET applied_config = ? WHERE id = ?").run('{"effort":null,"model":null,"staffEffort":null,"staffModel":null}', w.id);
     await t.orch.pump(w.id);
-    expect(t.herdr.applied).toHaveLength(0);
+    // 옛 가짜 실행기의 applyConfig 호출 0회 자리: 다시 띄우지도, 끝내지도 않았다.
+    expect(t.runs(w.id)).toHaveLength(1);
+    expect(t.core.count("terminal.kill")).toBe(0);
   });
 });
 
@@ -816,16 +662,22 @@ describe("직급별 모델·effort", () => {
     const t = await setup();
     await t.api("PUT", "/api/settings", { permissionMode: "auto", ranks: { manager: { model: "opus", effort: "high" }, lead: { model: "sonnet", effort: "medium" }, staff: { model: "haiku", effort: "low" } } });
     const lead = await t.orch.ensureConductor(t.project.id);
-    expect(t.herdr.starts.at(-1)).toMatchObject({ id: lead.id, model: "opus", effort: "high", subagentModel: "haiku", permissionMode: "auto" });
+    expect(launch(t.runs().at(-1)!)).toMatchObject({ id: lead.id, model: "opus", effort: "high", subagentModel: "haiku", permissionMode: "auto" });
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
-    expect(t.herdr.starts.at(-1)).toMatchObject({ id: w.id, model: "sonnet", effort: "medium", subagentModel: "haiku" });
+    expect(launch(t.runs().at(-1)!)).toMatchObject({ id: w.id, model: "sonnet", effort: "medium", subagentModel: "haiku" });
+    // 서브에이전트 모델은 CLI 의 환경으로 강제한다(옛 headless 시험이 보던 것).
+    expect(launch(t.runs().at(-1)!).subagentForce).toBe("1");
     expect(t.store.requireMember(w.id)).toMatchObject({ appliedModel: "sonnet", appliedEffort: "medium" });
     const roster = t.orch.roster(t.project.id).find((r) => r.handle === "cs")!;
     expect(roster).toMatchObject({ model: "sonnet", effort: "medium", subagentModel: "haiku", subagentEffort: "low" });
 
+    await t.firstTurn(w);
     const patched = await t.api("PATCH", `/api/members/${w.id}`, { modelOverride: "fable", effortOverride: "max" });
     expect(patched.body).toMatchObject({ modelOverride: "fable", effortOverride: "max" });
     expect(t.orch.roster(t.project.id).find((r) => r.handle === "cs")).toMatchObject({ model: "fable", effort: "max" });
+    // core 는 개인 지정을 받으면 같은 세션을 새 인자로 다시 띄운다.
+    expect(launch(t.runs(w.id).at(-1)!)).toMatchObject({ model: "fable", effort: "max", resume: w.sessionId });
+    expect(t.runs(w.id)).toHaveLength(2);
     expect((await t.api("PATCH", `/api/members/${w.id}`, { modelOverride: "--x" })).status).toBe(400);
     expect((await t.api("PATCH", `/api/members/${w.id}`, { name: "바꿈" })).status).toBe(400);
     expect((await t.api("PATCH", "/api/members/없음", { modelOverride: null })).status).toBe(404);
@@ -833,12 +685,13 @@ describe("직급별 모델·effort", () => {
     expect((await t.api("PATCH", `/api/members/${manual.id}`, { modelOverride: "haiku" })).status).toBe(400);
     expect((await t.api("PATCH", `/api/members/${w.id}`, { modelOverride: null, effortOverride: null })).body.modelOverride).toBeNull();
     expect(t.orch.roster(t.project.id).find((r) => r.handle === "cs")).toMatchObject({ model: "sonnet", effort: "medium" });
+    expect(launch(t.runs(w.id).at(-1)!)).toMatchObject({ model: "sonnet", effort: "medium", resume: w.sessionId });
   });
 
   test("설정 화면에 쓸 직원별 지정 수를 직급별로 준다", async () => {
     const t = await setup();
-    const lead = await t.orch.ensureConductor(t.project.id);
-    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
+    const lead = await t.firstTurn(await t.orch.ensureConductor(t.project.id));
+    const w = await t.firstTurn((await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member);
     expect((await t.api("GET", "/api/bootstrap")).body.rankOverrides).toEqual({ manager: 0, lead: 0 });
     await t.api("PATCH", `/api/members/${w.id}`, { effortOverride: "max" });
     await t.api("PATCH", `/api/members/${lead.id}`, { modelOverride: "haiku" });
@@ -872,157 +725,126 @@ describe("직급별 모델·effort", () => {
     expect(readFileSync(join(t.home, "run", `${w.id}.rules.md`), "utf8")).toContain("effort=xhigh");
   });
 
-  test("herdr: 쉬는 세션은 설정이 바뀌면 다시 열고 적용을 적는다. 일하는 세션은 끝난 뒤에", async () => {
+  // 옛 시험: "herdr: 쉬는 세션은 설정이 바뀌면 다시 열고 적용을 적는다. 일하는 세션은 끝난 뒤에".
+  // 옛 가짜 실행기의 applyConfig 호출 자리를, 실제 CoreRunner 가 같은 세션을 --resume 으로 다시 띄운 기록으로 본다.
+  test("쉬는 세션은 설정이 바뀌면 다시 열고 적용을 적는다. 일하는 세션은 끝난 뒤에", async () => {
     const t = await setup();
-    t.herdr.autoBusy = true;
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
-    await t.orch.assign(t.project.id, "cs", { text: "일" });
+    await t.orch.assign(t.project.id, "cs", { text: "일 @fake:hold @fake:post=끝" });
+    await t.waitFor("일하는 중", () => t.core.held(w.id) && t.store.requireMember(w.id).status === "working");
     await t.api("PUT", "/api/settings", { ranks: { lead: { model: "sonnet", effort: "low" } } });
     await Bun.sleep(30);
-    expect(t.herdr.applied).toHaveLength(0);
+    expect(t.runs(w.id)).toHaveLength(1);
     expect(t.store.requireMember(w.id).appliedModel).toBeNull();
-    t.herdr.end(w.id);
-    await until(() => t.herdr.applied.length === 1, "일 끝난 뒤 적용");
-    expect(t.herdr.applied[0]).toMatchObject({ id: w.id, model: "sonnet", effort: "low" });
+    expect(t.core.release(w.id)).toBe(true);
+    await until(() => t.runs(w.id).length === 2, "일 끝난 뒤 적용");
+    expect(launch(t.runs(w.id)[1]!)).toMatchObject({ id: w.id, model: "sonnet", effort: "low", resume: w.sessionId });
+    // 서브에이전트 모델 값이 없으면 그 환경을 주지 않는다(옛 headless 시험이 보던 것).
+    expect(launch(t.runs(w.id)[1]!)).toMatchObject({ subagentModel: null, subagentForce: null });
     await until(() => t.store.requireMember(w.id).appliedModel === "sonnet", "적용 기록");
     expect(t.store.requireMember(w.id).appliedEffort).toBe("low");
-    expect(t.store.listActivity(w.id).some((a) => a.text.includes("새 설정으로 다시 열었습니다"))).toBe(true);
+    // 달라진 점: 활동에 남는 글. 옛 실행기 분기는 "새 설정으로 다시 열었습니다: 모델 …" 이었다.
+    expect(t.store.listActivity(w.id).some((a) => a.text.includes("같은 세션을 새 설정으로 이어 열었습니다"))).toBe(true);
     // 값이 같으면 다시 열지 않는다.
     await t.orch.pump(w.id);
-    expect(t.herdr.applied).toHaveLength(1);
-    // 서브에이전트 값이 바뀌어도 칸 환경·규칙이 달라지므로 다시 연다.
+    expect(t.runs(w.id)).toHaveLength(2);
+    // 서브에이전트 값이 바뀌어도 CLI 환경·규칙이 달라지므로 다시 연다.
     await t.api("PUT", "/api/settings", { ranks: { staff: { model: "haiku" } } });
-    await until(() => t.herdr.applied.length === 2, "서브에이전트 값 적용");
-    expect(t.herdr.applied[1]!.subagentModel).toBe("haiku");
+    await until(() => t.runs(w.id).length === 3, "서브에이전트 값 적용");
+    expect(launch(t.runs(w.id)[2]!)).toMatchObject({ subagentModel: "haiku", subagentForce: "1", resume: w.sessionId });
     // 개인 지정도 같다.
     await t.api("PATCH", `/api/members/${w.id}`, { modelOverride: "fable" });
-    await until(() => t.herdr.applied.length === 3, "개인 지정 적용");
-    expect(t.herdr.applied[2]!.model).toBe("fable");
+    await until(() => t.runs(w.id).length === 4, "개인 지정 적용");
+    expect(launch(t.runs(w.id)[3]!).model).toBe("fable");
   });
 
-  test("herdr: 입력칸에 글이 있으면 기다리고, 병렬은 되살리고, 끝내 안 되면 알리고 일을 막지 않는다", async () => {
+  // 옛 시험: "herdr: 입력칸에 글이 있으면 기다리고, 병렬은 되살리고, 끝내 안 되면 알리고 일을 막지 않는다".
+  // 달라진 점(core 의 설정 적용은 같은 세션을 끝내고 --resume 으로 다시 띄우는 것이다):
+  //  - 입력칸에 사람이 쓰던 글이 있으면 기다렸다 다시 해 보지 않는다. 터미널을 끝내지 않고, 그 설정의 적용을 보류로 알린다.
+  //  - 옛 실행기 분기의 '세 번 실패하면 포기' 대신, 보류한 설정은 스스로 다시 시도하지 않고 설정이 또 바뀔 때 다시 시도한다.
+  //  - 옛 실행기 분기는 다시 연 뒤 병렬을 다음 일 전에 되살렸다. core 는 다시 열면서 병렬 표시를 끄고 되살리지 않는다.
+  test("입력칸에 글이 있으면 다시 열지 않고 적용을 보류로 알린다. 일을 막지 않고, 설정이 또 바뀌면 다시 시도한다", async () => {
     const t = await setup();
-    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
+    const w = await t.firstTurn((await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member);
     t.store.patchMember(w.id, { parallel: true });
-    t.herdr.applyResults = [{ ok: false, reason: "input_busy", retryable: true }, { ok: true }];
+    t.core.setDraft(w.id, "사람이 쓰던 글");
     await t.api("PUT", "/api/settings", { ranks: { lead: { model: "sonnet" } } });
-    await until(() => t.store.requireMember(w.id).appliedModel === "sonnet", "입력칸이 빈 뒤 적용");
-    expect(t.herdr.applied).toHaveLength(2);
-    expect(t.store.requireMember(w.id).parallel).toBe(false);
+    await until(() => t.store.requireMember(w.id).lastError?.startsWith("설정 적용 보류") === true, "적용 보류");
+    expect(t.store.requireMember(w.id).lastError).toContain("입력칸에 글이 남아");
+    expect(t.runs(w.id)).toHaveLength(1);
+    expect(t.core.count("terminal.kill")).toBe(0);
+    expect(t.core.screenOf(w.id)).toContain("사람이 쓰던 글");
+    expect(t.store.requireMember(w.id)).toMatchObject({ appliedModel: null, paneId: w.paneId, parallel: true });
 
-    t.herdr.applyResults = [1, 2, 3].map(() => ({ ok: false as const, reason: "error" as const, detail: "확인 실패", retryable: true }));
-    await t.api("PUT", "/api/settings", { ranks: { lead: { model: "opus" } } });
-    await until(() => t.store.listActivity(w.id).some((a) => a.text.includes("새 설정을 적용하지 못했습니다")), "포기 기록");
-    expect(t.store.requireMember(w.id).appliedModel).toBe("sonnet");
-    await t.orch.assign(t.project.id, "cs", { text: "그래도 일" });
-    expect(t.herdr.sent.at(-1)!.text).toContain("그래도 일");
-    const applyCount = t.herdr.applied.length;
-    t.herdr.end(w.id);
-    await until(() => t.store.requireMember(w.id).status === "idle", "쉼");
+    // 일을 막지 않는다: 입력칸이 비면 일은 띄워 둔 터미널에 옛 설정 그대로 들어간다.
+    t.core.setDraft(w.id, "");
+    await t.orch.assign(t.project.id, "cs", { text: "그래도 일 @fake:post=했음" });
+    const worked = await t.waitFor("그래도 일", () => t.turns(w.id).find((c) => c.prompt.includes("그래도 일")));
+    expect(worked.terminal).toBe(w.paneId!);
+    await t.idle(w.id);
+    // 보류한 설정을 스스로 다시 시도하지 않는다.
     await t.orch.pump(w.id);
-    expect(t.herdr.applied).toHaveLength(applyCount);
+    expect(t.runs(w.id)).toHaveLength(1);
+    expect(t.store.requireMember(w.id).appliedModel).toBeNull();
     // 설정이 또 바뀌면 다시 시도한다.
     await t.api("PUT", "/api/settings", { ranks: { lead: { model: "haiku" } } });
     await until(() => t.store.requireMember(w.id).appliedModel === "haiku", "다시 시도");
+    expect(t.runs(w.id)).toHaveLength(2);
+    expect(launch(t.runs(w.id)[1]!)).toMatchObject({ model: "haiku", resume: w.sessionId });
+    // 다시 열면 병렬 표시는 꺼지고, 다음 일 전에 되살리지 않는다.
+    expect(t.store.requireMember(w.id).parallel).toBe(false);
+    await t.orch.assign(t.project.id, "cs", { text: "다음 일 @fake:post=다음끝" });
+    await t.waitFor("다음 일", () => t.turns(w.id).find((c) => c.prompt.includes("다음 일") && c.outcome === "done"));
+    expect(t.turns(w.id).some((c) => c.prompt.startsWith("/effort ultracode"))).toBe(false);
+    expect(t.store.requireMember(w.id).parallel).toBe(false);
   });
 
-  test("herdr: 넘겨받은 세션·잠든 세션은 스스로 다시 열지 않고, 깨울 때 들어간다", async () => {
+  // 옛 시험: "herdr: 넘겨받은 세션·잠든 세션은 스스로 다시 열지 않고, 깨울 때 들어간다".
+  // 넘겨받은 세션(편입)은 옛 실행기 전용이라 그 절반은 뺐다.
+  test("잠든 세션은 스스로 다시 열지 않고, 깨울 때 새 설정이 들어간다", async () => {
     const t = await setup();
-    (t.orch as unknown as { herdr: unknown }).herdr = { info: async () => ({}), agents: async () => [{ paneId: "w9:p1", name: "x", agent: "claude", status: "idle", cwd: t.work, sessionId: "44444444-4444-4444-8444-444444444444", workspaceId: "w9", tabId: "w9:t1", adopted: false }] };
-    const adopted = await t.orch.adopt(t.project.id, { paneId: "w9:p1", name: "편입", role: "r" });
-    const asleep = (await t.orch.addMember(t.project.id, { name: "잠듦", handle: "zz", role: "개발" })).member;
+    const asleep = await t.firstTurn((await t.orch.addMember(t.project.id, { name: "잠듦", handle: "zz", role: "개발" })).member);
     await t.orch.sleepMember(asleep.id);
     await t.api("PUT", "/api/settings", { ranks: { lead: { model: "sonnet" } } });
     await Bun.sleep(30);
-    expect(t.herdr.applied).toHaveLength(0);
+    expect(t.runs(asleep.id)).toHaveLength(1);
     await t.orch.resumeMember(asleep.id);
-    expect(t.herdr.starts.at(-1)).toMatchObject({ id: asleep.id, model: "sonnet" });
+    expect(t.runs(asleep.id)).toHaveLength(2);
+    expect(launch(t.runs(asleep.id).at(-1)!)).toMatchObject({ id: asleep.id, model: "sonnet", resume: asleep.sessionId });
     expect(t.store.requireMember(asleep.id).appliedModel).toBe("sonnet");
-    expect(t.store.requireMember(adopted.id).appliedModel).toBeNull();
-  });
-
-  test("headless: 다음 턴부터 인자가 자동으로 바뀌고 다시 열기는 없다", async () => {
-    const t = await setup({ backend: "headless" });
-    const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
-    await t.orch.assign(t.project.id, "cs", { text: "하나" });
-    t.headless.end(w.id);
-    await until(() => t.store.requireMember(w.id).status === "idle", "쉼");
-    await t.api("PUT", "/api/settings", { permissionMode: "default", ranks: { lead: { model: "sonnet", effort: "low" }, staff: { model: "haiku" } } });
-    await t.orch.assign(t.project.id, "cs", { text: "둘" });
-    expect(t.headless.sent.at(-1)!.m).toMatchObject({ model: "sonnet", effort: "low", subagentModel: "haiku", permissionMode: "default" });
-    expect(t.store.requireMember(w.id)).toMatchObject({ appliedModel: "sonnet", appliedEffort: "low" });
-    expect(t.headless.applied).toHaveLength(0);
   });
 });
 
 describe("실행기 인자", () => {
-  const member = (over: Partial<RunnerMember> = {}): RunnerMember => ({ id: "m", projectId: "p", handle: "h", name: "n", cwd: "/", sessionId: "s", paneId: null, model: null, effort: null, subagentModel: null, permissionMode: "bypassPermissions", kind: "worker", ...over });
-  const opts: StartOpts = { systemPromptFile: "r", mcpConfigFile: "c", resume: true, projectName: "p" };
-
-  test("--effort·--model 은 값이 있을 때만, --permission-prompts none 은 언제나", () => {
-    const plain = buildClaudeArgs(member(), opts, true);
-    expect(plain).not.toContain("--model");
-    expect(plain).not.toContain("--effort");
-    expect(plain.slice(plain.indexOf("--permission-mode"), plain.indexOf("--permission-mode") + 4)).toEqual(["--permission-mode", "bypassPermissions", "--permission-prompts", "none"]);
-    const full = buildClaudeArgs(member({ model: "haiku", effort: "max", permissionMode: "default" }), opts, false);
-    expect(full[full.indexOf("--model") + 1]).toBe("haiku");
-    expect(full[full.indexOf("--effort") + 1]).toBe("max");
-    expect(full[full.indexOf("--permission-mode") + 1]).toBe("default");
-    expect(full[full.indexOf("--permission-prompts") + 1]).toBe("none");
-  });
-
   test("childEnv: 바깥 세션의 서브에이전트·effort 값이 새지 않는다", () => {
     const env = childEnv({ PATH: "/bin", CLAUDE_CODE_SUBAGENT_MODEL: "x", CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1", CLAUDE_CODE_EFFORT_LEVEL: "max", CLAUDE_EFFORT: "max" });
     expect(env).toEqual({ PATH: "/bin" });
   });
 
-  test("headless 자식에게 서브에이전트 모델 환경을 주고, 값이 없으면 안 준다. 막힌 도구는 활동에 남는다", async () => {
-    const runtime = createIsolatedRuntime();
-    const dir = runtime.paths.work;
-    const log = join(runtime.dir, "fake.jsonl");
-    const runner = new HeadlessRunner({ claudeBin: runtime.bins.claudeBin }, { env: { ...runtime.childEnv(), CLAUDE_CODE_SUBAGENT_MODEL: "바깥값", CLAUDE_CODE_EFFORT_LEVEL: "max" } });
-    closers.push(async () => { await runner.shutdown(); await runtime.stop(); });
-    const events: RunnerEvent[] = [];
-    runner.on((e) => events.push(e));
-    const m = member({ id: `m_${Date.now()}`, cwd: dir, sessionId: null, subagentModel: "haiku", effort: "low" });
-    const started = await runner.start(m, opts);
-    expect(await runner.send({ ...m, ...started }, "일 @fake:denied", opts)).toEqual({ ok: true });
-    await until(() => events.some((e) => e.type === "turn_end"), "턴 끝", 8000);
-    expect(events.some((e) => e.type === "activity" && e.kind === "error" && e.text.includes("승인 창이 없어 막혔습니다") && e.text.includes("Bash"))).toBe(true);
-    events.length = 0;
-    expect(await runner.send({ ...m, ...started, subagentModel: null }, "둘", opts)).toEqual({ ok: true });
-    await until(() => events.some((e) => e.type === "turn_end"), "턴 끝", 8000);
-    const starts = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((c) => c.prompt?.length && c.event === "start");
-    expect(starts[0]).toMatchObject({ subagentModel: "haiku", subagentForce: "1" });
-    expect(starts[0].args[starts[0].args.indexOf("--effort") + 1]).toBe("low");
-    expect(starts[0].env).not.toContain("CLAUDE_CODE_EFFORT_LEVEL");
-    expect(starts[1]).toMatchObject({ subagentModel: null, subagentForce: null });
-  });
-
-  test("StreamParser: 막힌 도구가 없으면 활동을 만들지 않는다", () => {
-    const events: RunnerEvent[] = [];
-    const p = new StreamParser("m", (e) => events.push(e), { reportContext: false, contextWindow: null });
-    p.feed(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "끝", permission_denials: [] }));
-    expect(events).toHaveLength(0);
-  });
-
   test("Claude 설정은 항상 상태줄을 수집하고, 바이패스 모드만 경고 창을 건너뛴다", async () => {
     const t = await setup();
+    // 총괄이 실행기에 넘긴 띄움 설정을 적는다. 실제 CoreRunner 의 start 를 그대로 부른다.
     const opened: StartOpts[] = [];
-    const start = t.herdr.start.bind(t.herdr);
-    t.herdr.start = async (m: RunnerMember, o?: StartOpts) => {
-      opened.push(o!);
-      return start(m);
+    const start = t.runner.start.bind(t.runner);
+    t.runner.start = async (m, o) => {
+      opened.push(o);
+      return start(m, o);
     };
     // w1: 경고 창을 건너뛰는 것은 대표가 권한 방식을 확인한 뒤다. 새 DB 는 확인 전이므로 먼저 확인을 보낸다.
     expect((await t.api("PUT", "/api/settings", { permissionAcknowledged: true })).body).toMatchObject({ permissionAcknowledged: true });
     await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" });
-    expect(JSON.parse(readFileSync(opened[0]!.settingsFile!, "utf8"))).toMatchObject({ skipDangerousModePermissionPrompt: true, statusLine: { type: "command", command: expect.stringContaining("iamceo-context-statusline") } });
+    const expected = { skipDangerousModePermissionPrompt: true, statusLine: { type: "command", command: expect.stringContaining("iamceo-context-statusline") } };
+    expect(JSON.parse(readFileSync(opened[0]!.settingsFile!, "utf8"))).toMatchObject(expected);
+    // CLI 가 실제로 받은 --settings 도 같다.
+    expect(JSON.parse(launch(t.runs()[0]!).settings!)).toMatchObject(expected);
     await t.api("PUT", "/api/settings", { permissionMode: "auto" });
     await t.orch.addMember(t.project.id, { name: "영희", handle: "yh", role: "개발" });
     const settings = JSON.parse(readFileSync(opened[1]!.settingsFile!, "utf8"));
     expect(settings.statusLine.type).toBe("command");
     expect(settings.skipDangerousModePermissionPrompt).toBeUndefined();
+    const given = JSON.parse(launch(t.runs()[1]!).settings!);
+    expect(given.statusLine.type).toBe("command");
+    expect(given.skipDangerousModePermissionPrompt).toBeUndefined();
     expect(existsSync(join(t.home, "run"))).toBe(true);
   });
 });

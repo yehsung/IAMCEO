@@ -111,7 +111,6 @@ export type MemberPatch = Partial<
   >
 >;
 
-export interface AdoptedInfo { turnedOnRunner: boolean }
 
 /** 지금 세션에 실제로 들어간 설정. 값이 달라지면 쉴 때 세션을 다시 연다. */
 export interface AppliedConfig {
@@ -946,7 +945,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     if (!missedNextTurn && (context?.busy || member.status === "working")) return { waitReason: "member_busy", waitingSince };
     const used = context?.used ?? new Set(this.listPendingExecutions().map(run => run.memberId)).size;
     const limit = this.getSettings().maxConcurrentTurns;
-    if (!missedNextTurn && member.origin !== "manual" && ["core", "headless"].includes(member.backend ?? this.effectiveBackend()) && used >= limit) return { waitReason: "run_limit", waitingSince, runLimit: { used, limit } };
+    if (!missedNextTurn && member.origin !== "manual" && (member.backend ?? this.effectiveBackend()) === "core" && used >= limit) return { waitReason: "run_limit", waitingSince, runLimit: { used, limit } };
     // 다시 보낼 시각이 아직 오지 않았다. 그 시각이 지나고도 안 나가면 이유 없는 대기다.
     const nextAttemptAt = (this.deliveryRead?.rows.get(delivery.id) ?? this.row("SELECT next_attempt_at FROM deliveries WHERE id = ?", delivery.id))?.next_attempt_at as string | null | undefined;
     if (nextAttemptAt && Date.parse(nextAttemptAt) > Date.now()) return { waitReason: "retry_wait", waitingSince };
@@ -1212,7 +1211,6 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     }
     const frame: (() => void)[] = [];
     const messageMs = this.lastMessageMs;
-    const backend = this.runtimeBackend;
     this.commitFrames.push(frame);
     let result: T;
     try {
@@ -1224,7 +1222,6 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     } catch (error) {
       this.commitFrames.pop();
       this.lastMessageMs = messageMs;
-      this.runtimeBackend = backend;
       throw error;
     }
     this.commitFrames.pop();
@@ -1306,11 +1303,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   // ---- 연결 ----
-  /** Production runtime is fixed to core. Historical backend values remain readable for migration. */
-  private runtimeBackend: Backend = "core";
-  /** Runtime is fixed in production; injected legacy runners can select their isolated test adapter. */
-  setRuntimeBackend(backend: Backend): void { this.runtimeBackend = backend; }
-  effectiveBackend(): Backend { return this.runtimeBackend; }
+  /** The runtime is fixed to core. Historical backend values on member and settings rows remain readable, never selectable. */
+  effectiveBackend(): Backend { return "core"; }
 
   chiefCli(projectId: string): CliProvider {
     return this.row("SELECT chief_cli FROM projects WHERE id = ?", projectId)?.chief_cli === "codex" ? "codex" : "claude";
@@ -1353,10 +1347,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   private connectionOf(id: string, runnerEnabled: boolean, archived: boolean): ProjectConnection {
     if (archived) return { ok: false, reason: "archived", detail: "보관된 프로젝트입니다. 보관함에서 꺼내면 쓸 수 있습니다" };
     if (this.runnerUsable(runnerEnabled) || this.hasLiveManual(id)) return { ok: true, reason: null, detail: null };
-    if (!runnerEnabled) return { ok: false, reason: "runner_off", detail: "AI가 아직 연결되지 않았습니다. 총괄을 시작하거나 기존 세션을 편입하세요" };
-    const backend = this.effectiveBackend();
-    const health = this.runnerHealth.get(backend);
-    return { ok: false, reason: "backend_down", detail: `${backend === "core" ? "herdr-core" : backend === "herdr" ? "herdr" : "claude"}에 연결할 수 없습니다. 연결되면 쓸 수 있습니다${health?.detail ? ` (${health.detail})` : ""}` };
+    if (!runnerEnabled) return { ok: false, reason: "runner_off", detail: "AI가 아직 연결되지 않았습니다. 총괄을 시작하세요" };
+    const health = this.runnerHealth.get(this.effectiveBackend());
+    return { ok: false, reason: "backend_down", detail: `herdr-core에 연결할 수 없습니다. 연결되면 쓸 수 있습니다${health?.detail ? ` (${health.detail})` : ""}` };
   }
 
   private projectFrom(r: Row): Project {
@@ -1528,7 +1521,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     });
   }
 
-  /** 실행을 켠 것이 편입인가. 맞으면 대표가 시키지 않은 총괄을 띄우지 않고, 남은 세션이 없을 때 실행을 끈다. */
+  /**
+   * 옛 herdr 실행기 시절, 편입이 이 프로젝트의 실행을 켰다는 기록. 편입은 없어져 새로 켜지지 않는다.
+   * 남아 있는 행에서는 대표가 시키지 않은 총괄을 띄우지 않는다. 대표가 총괄을 시작하면 꺼진다.
+   */
   runnerByAdopt(id: string): boolean {
     return !!this.row("SELECT runner_by_adopt FROM projects WHERE id = ?", id)?.runner_by_adopt;
   }
@@ -1650,16 +1646,6 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return r ? toMember(r) : null;
   }
 
-  getMemberBySession(sessionId: string): Member | null {
-    const r = this.row(`${MEMBER_SELECT} WHERE m.session_id = ?`, sessionId);
-    return r ? toMember(r) : null;
-  }
-
-  getMemberByPane(paneId: string): Member | null {
-    const r = this.row(`${MEMBER_SELECT} WHERE m.pane_id = ?`, paneId);
-    return r ? toMember(r) : null;
-  }
-
   createMember(input: NewMember): Member {
     return this.transaction(() => {
       const project = this.requireProject(input.projectId);
@@ -1778,17 +1764,6 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       if (modelChanged) this.run("UPDATE member_context_state SET measurement_json = NULL, updated_at = ? WHERE member_id = ?", nowIso(), id);
       this.emitMember(id);
     });
-  }
-
-  /** 편입 표시. turnedOnRunner: 이 편입이 프로젝트 실행을 켰다(해제할 때 되돌린다). */
-  setAdoptedInfo(id: string, info: AdoptedInfo | null): void {
-    this.run("UPDATE members SET adopted_info = ? WHERE id = ?", info ? JSON.stringify(info) : null, id);
-    this.emitMember(id);
-  }
-
-  getAdoptedInfo(id: string): AdoptedInfo | null {
-    const raw = this.row("SELECT adopted_info FROM members WHERE id = ?", id)?.adopted_info;
-    return raw ? json<AdoptedInfo>(raw) : null;
   }
 
   /** 도구 활동 시각은 일반 수정 시각과 분리한다. 잦아서 방송하지 않는다. */
@@ -2773,11 +2748,6 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.row("SELECT 1 FROM messages WHERE project_id = ? AND mine = 1 AND attachments LIKE ? LIMIT 1", projectId, `%"${attachmentId}"%`) !== null;
   }
 
-  /** Store 를 거치지 않는 값(herdr 연결 상태 등)을 화면에 알린다. */
-  broadcast(event: WsEvent): void {
-    this.emit(event);
-  }
-
   // ---- 설정 ----
   getSettings(): Settings {
     return this.deliveryReadMemo("settings", () => this.readSettings());
@@ -2798,7 +2768,6 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   patchSettings(patch: SettingsPatch): Settings {
     return this.transaction(() => {
       const before = this.getSettings();
-      if (this.runtimeBackend !== "core" && patch.backend) this.runtimeBackend = patch.backend;
       const next: Record<string, unknown> = { ...patch };
       // 권한 방식 확인은 되돌리지 않는다.
       if (next.permissionAcknowledged === false && before.permissionAcknowledged !== false) delete next.permissionAcknowledged;

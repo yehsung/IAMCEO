@@ -4,12 +4,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { coreRpc } from "../server/runner/core-client.ts";
-import { rpc } from "../server/runner/herdr-client.ts";
 
 /** 서버의 동기 작업(큰 DB 조회 등)이 이벤트 루프를 붙잡는 상황. */
 const stall = (ms: number) => { const end = performance.now() + ms; while (performance.now() < end) { /* 루프를 붙잡는다 */ } };
 const servers: { dir: string; server: Server; sockets: Set<Socket> }[] = [];
-/** 답을 쓴 바로 그 순간부터 루프가 멈추게 할 수 있는 가짜 소켓 서버. 두 클라이언트의 응답 형식을 함께 만족한다. */
+/** 답을 쓴 바로 그 순간부터 루프가 멈추게 할 수 있는 가짜 소켓 서버. */
 async function fake(options: { silent?: boolean; stallAfterReply?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "iamceo-stab-rpc-")), path = join(dir, "s.sock"), sockets = new Set<Socket>();
   const server = createServer((socket) => {
@@ -32,7 +31,6 @@ afterEach(async () => { for (const s of servers.splice(0)) { for (const socket o
 
 const clients = [
   ["coreRpc", (path: string, timeoutMs: number) => coreRpc<{ ok: boolean }>(path, "terminal.get", {}, timeoutMs)],
-  ["herdr rpc", (path: string, timeoutMs: number) => rpc<{ ok: boolean }>(path, "agent.get", {}, timeoutMs)],
 ] as const;
 
 describe.each(clients)("%s: 루프가 멈췄던 시간은 답을 기다린 시간이 아니다", (_name, call) => {
@@ -58,5 +56,4 @@ describe.each(clients)("%s: 루프가 멈췄던 시간은 답을 기다린 시�
 test("답이 없는 요청은 전과 같은 분류로 실패한다: 쓴 뒤 timeout 은 unknown", async () => {
   const path = await fake({ silent: true });
   await expect(coreRpc(path, "terminal.send", {}, 120)).rejects.toMatchObject({ kind: "timeout", uncertain: true, deliveryEffect: "unknown" });
-  await expect(rpc(path, "agent.prompt", {}, 120)).rejects.toMatchObject({ code: "timeout", deliveryEffect: "unknown" });
 });

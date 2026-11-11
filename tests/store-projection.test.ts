@@ -118,7 +118,6 @@ describe("Member journal 상태 투영", () => {
     const reads = [
       f.store.getMember(f.member.id), f.store.getMemberByToken(f.store.getMemberToken(f.member.id)),
       f.store.getMemberByHandle(f.project.id, f.member.handle), f.store.findMember(f.project.id, f.member.name),
-      f.store.getMemberBySession("session"), f.store.getMemberByPane("terminal"),
       f.store.listMembers(f.project.id).find(m => m.id === f.member.id),
       f.store.listAllMembers().find(m => m.id === f.member.id),
       f.store.projectState(f.project.id).members.find(m => m.id === f.member.id),

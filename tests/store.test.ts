@@ -64,7 +64,7 @@ describe("Member.lastActiveAt", () => {
     const activity = store.appendActivity(member.id, "turn_start", "작업 시작");
     store.db.exec("DROP TABLE activity");
     const results = [store.getMember(member.id), store.getMemberByHandle(project.id, member.handle),
-      store.findMember(project.id, member.name), store.getMemberBySession("session"), store.getMemberByPane("pane"),
+      store.findMember(project.id, member.name),
       store.getMemberByToken(store.getMemberToken(member.id)), store.listMembers(project.id)[0],
       store.listAllMembers().find(m => m.id === member.id), store.projectState(project.id).members[0]];
     for (const result of results) expect(result?.lastActiveAt).toBe(activity.at);

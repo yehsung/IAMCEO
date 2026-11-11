@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { ServerWebSocket, Subprocess, Terminal } from "bun";
 import { defaultCoreBin, type Config } from "./config.ts";
 import type { OrchestratorApi } from "./orchestrator-api.ts";
-import { childEnv } from "./runner/headless.ts";
+import { childEnv } from "./runner/env.ts";
 import { ApiError, type Store } from "./store.ts";
 
 export type TerminalMode = "observe" | "control";

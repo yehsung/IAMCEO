@@ -23,7 +23,6 @@ export interface ConfigFile {
   codexHome?: string;
   coreBin?: string;
   coreSocket?: string;
-  herdrSocket?: string;
   /** false 면 서버가 Mac 의 유휴 잠자기를 막지 않는다. 없으면 막는다. */
   keepAwake?: boolean;
 }
@@ -46,7 +45,6 @@ export interface Config {
   codexHome?: string;
   coreBin?: string;
   coreSocket?: string;
-  herdrSocket: string;
   /** 서버가 떠 있는 동안 Mac 의 유휴 잠자기를 막는다. config.json 에서 false 로만 끈다. */
   keepAwake?: boolean;
 }
@@ -167,7 +165,8 @@ export function homeDir(env: NodeJS.ProcessEnv = process.env): string {
 function validateConfig(value: unknown, path: string): Partial<ConfigFile> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`설정 파일 형식이 잘못되었습니다: ${path}`);
   const file = value as Record<string, unknown>;
-  for (const key of ["accessCode", "claudeBin", "codexBin", "coreBin", "coreSocket", "herdrSocket"]) {
+  // 옛 herdr 실행기의 소켓 설정(herdrSocket)은 더 읽지 않는다. 파일에 남아 있어도 값을 보지 않고 그대로 둔다.
+  for (const key of ["accessCode", "claudeBin", "codexBin", "coreBin", "coreSocket"]) {
     if (file[key] !== undefined && (typeof file[key] !== "string" || !file[key] || (file[key] as string).includes("\0"))) {
       throw new Error(`설정 파일 필드가 잘못되었습니다(${key}): ${path}`);
     }
@@ -343,8 +342,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     codexBin: resolveCliExecutable(env.IAMCEO_CODEX_BIN || file.codexBin || "codex", env) ?? env.IAMCEO_CODEX_BIN ?? file.codexBin ?? "codex",
     coreBin: env.IAMCEO_CORE_BIN || file.coreBin || defaultCoreBin(),
     coreSocket: env.IAMCEO_CORE_SOCKET || file.coreSocket || join(home, "run", "core.sock"),
-    // $HERDR_SOCKET_PATH 는 일부러 보지 않는다: 라이브 세션 서버를 건드리면 안 된다(spec §5).
-    herdrSocket: env.IAMCEO_HERDR_SOCKET || file.herdrSocket || join(homedir(), ".config", "herdr", "herdr.sock"),
     ...(file.keepAwake === false ? { keepAwake: false } : {}),
   };
 }

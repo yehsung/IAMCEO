@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseTranscriptTail } from "../server/runner/transcript.ts";
 import { codexBindingMarker, discoverCodexSession } from "../server/runner/core-context.ts";
-import { inputLooksEmpty, inputText } from "../server/runner/herdr.ts";
+import { inputLooksEmpty, inputText } from "../server/runner/claude-screen.ts";
 
 const line = (value: unknown) => JSON.stringify(value);
 

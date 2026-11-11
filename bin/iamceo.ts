@@ -428,10 +428,8 @@ async function status(): Promise<void> {
   const config = loadConfig();
   const health = await api<{ ok: boolean; version: string }>(config, "/api/health");
   const boot = await api<Bootstrap>(config, "/api/bootstrap");
-  const herdr = boot.herdr;
   console.log(`IAMCEO ${health.version} 실행 중: ${boot.urls.join(" · ")}`);
   console.log(`실행기: herdr-core · ${boot.runtime?.core.available ? "연결됨" : "연결 안 됨"}${boot.runtime?.core.detail ? ` (${boot.runtime.core.detail})` : ""}`);
-  if (herdr.warning) console.log(`  ${herdr.warning}`);
   try {
     const response = await fetch(`${localUrl(config)}/api/readiness`, { headers: { Authorization: `Bearer ${config.accessCode}` },
       redirect: "error", signal: AbortSignal.timeout(5_000) });
@@ -628,7 +626,7 @@ function xmlEscape(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/** launchd 는 로그인 셸의 PATH 를 모른다. 기본 자리에 더해, 등록하는 셸에서 찾은 claude·herdr 폴더(nvm·npm 전역 등)를 앞에 둔다. */
+/** launchd 는 로그인 셸의 PATH 를 모른다. 기본 자리에 더해, 등록하는 셸에서 찾은 CLI·herdr-core 폴더(nvm·npm 전역 등)를 앞에 둔다. */
 export function servicePath(home: string, found: (string | null)[] = []): string {
   const base = [join(home, ".bun/bin"), join(home, ".npm-global/bin"), join(home, ".npm/bin"), join(home, ".volta/bin"), join(home, ".asdf/shims"), "/opt/homebrew/bin", join(home, ".local/bin"), "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
   const extra = found.filter((p): p is string => !!p && p.startsWith("/")).map((p) => dirname(p));

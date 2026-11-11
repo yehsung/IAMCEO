@@ -1,8 +1,12 @@
 // IAMCEO 공유 계약: 서버·웹·MCP가 함께 쓰는 타입. 바꾸려면 docs/spec.md 와 같이 바꾼다.
 
+/**
+ * 실행기 종류. 지금 쓰는 것은 "core" 하나다. "herdr"·"headless" 는 지워진 옛 실행기의 값으로,
+ * 저장된 팀장·설정 행과 출시된 앱(0.2.2)이 아는 값이라 목록에만 남긴다. 그 값이 남은 팀장은 legacy_session 으로 보류된다.
+ */
 export type Backend = "core" | "herdr" | "headless";
 export type CliProvider = "claude" | "codex";
-/** bypassPermissions 묻지 않음(기본) · auto 위험한 것만 멈춤 · default 전부 승인 필요(herdr 는 승인 창, headless 는 창이 없어 막히고 활동에 남는다) */
+/** bypassPermissions 묻지 않음(기본) · auto 위험한 것만 멈춤 · default 전부 승인 필요(CLI 의 승인 창에서 멈춘다. 터미널에서 직접 답한다) */
 export type PermissionMode = "bypassPermissions" | "auto" | "default";
 export const PERMISSION_MODES = ["bypassPermissions", "auto", "default"] as const;
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -16,7 +20,7 @@ export interface RankConfig { model: string | null; effort: Effort | null }
 export type Ranks = Record<Rank, RankConfig>;
 export type MemberKind = "root" | "conductor" | "worker";
 export type MemberOrigin = "runner" | "adopted" | "manual";
-/** working 일하는 중 · waiting 내 답 기다림 · idle 대기 · blocked 승인 창 앞(herdr) · asleep 잠듦 · offline 안 보임 · error 오류 */
+/** working 일하는 중 · waiting 내 답 기다림 · idle 대기 · blocked 승인·확인 창 앞 · asleep 잠듦 · offline 안 보임 · error 오류 */
 export type MemberStatus = "working" | "waiting" | "idle" | "blocked" | "asleep" | "offline" | "error";
 
 /**
@@ -145,7 +149,7 @@ export interface Member {
   role: string;
   kind: MemberKind;
   origin: MemberOrigin;
-  /** 편입으로 들어온 세션. 다시 열어 origin 이 runner 가 되어도 남는다. 편입 해제의 근거다. */
+  /** 옛 herdr 실행기 시절 편입으로 들어온 세션이었다는 기록. 편입은 없어졌고, 출시된 앱이 읽는 칸이라 값만 내려간다. */
   wasAdopted: boolean;
   cli: CliProvider;
   /** 이 직원의 세션을 다루는 실행기. 띄울 때 기억한다. 세션이 없으면 null(다음에 띄울 때 전역 설정을 따른다). */
@@ -163,7 +167,7 @@ export interface Member {
   next: string;
   cwd: string;
   sessionId: string | null; // CLI 세션 UUID
-  paneId: string | null; // herdr pane
+  paneId: string | null; // core 터미널 주소
   contextPct: number | null;
   /** 이 세션에서 실측하거나 상태줄로 추정한 문맥 창 크기(토큰). 모르면 null. 세션·CLI·모델이 바뀌면 지운다. */
   contextWindow: number | null;
@@ -364,7 +368,7 @@ export interface Delivery {
   kind: DeliveryKind;
   text: string; // 서버가 접두어까지 붙인 최종 글
   wake: boolean; // false 면 다음 깨움에 묶어서만 전달
-  urgent: boolean; // 일하는 중에도 넣기(herdr)
+  urgent: boolean; // 급한 글. core 는 도는 턴에 끼워 넣지 못해 턴이 끝난 뒤 묶음으로 나간다
   status: DeliveryStatus;
   holdReason: string | null; // blocked · input_busy · asleep · offline · backend_down · runner_disabled · archived
   refType: "message" | "decision" | "todo" | null;
@@ -485,7 +489,7 @@ export interface Activity { id: number; memberId: string; at: string; kind: Acti
 
 /**
  * 실행기가 확인한 CLI 승인·설정 창. 선택지는 화면 원문 순서 그대로다.
- * fingerprint 는 창 근거의 해시다(herdr: 추출 내용, core 폴더 신뢰: 경로·선택 위치를 포함한 평문 화면).
+ * fingerprint 는 창 근거의 해시다(core 폴더 신뢰: 경로·선택 위치를 포함한 평문 화면).
  * 누를 때 다시 읽어 같을 때만 누른다. 설정 창에는 앱의 사실 설명을 붙일 수 있다.
  */
 export interface ApprovalOption { n: number; label: string; /** 거절(No) 선택지 */ reject: boolean }
@@ -543,8 +547,8 @@ export interface EngineStatus {
 
 export interface RuntimeInfo { backend: "core"; core: { installed: boolean; available: boolean; version: string | null; detail: string | null }; providers: Record<CliProvider, { installed: boolean }> }
 
+/** 옛 herdr 실행기의 상태 칸. 서버는 herdr 를 보지 않는다: 출시된 앱(0.2.2)이 풀어 읽는 칸이라 '쓰지 않음' 고정값으로만 내려간다. */
 export interface HerdrInfo { installed: boolean; running: boolean; version: string | null; protocol: number | null; compatible: boolean; warning: string | null }
-export interface LiveAgent { paneId: string; name: string | null; agent: string | null; status: string; cwd: string | null; sessionId: string | null; workspaceId: string | null; tabId: string | null; adopted: boolean }
 
 export interface Bootstrap {
   apiOutage?: ApiOutageState | null;
@@ -610,6 +614,7 @@ export type WsEvent =
   | { type: "file"; file: FileDoc }
   | { type: "activity"; projectId: string; activity: Activity }
   | { type: "settings"; settings: Settings }
+  /** 서버는 더 내지 않는다. 출시된 앱(0.2.2)이 풀 줄 아는 종류라 목록에만 남긴다. */
   | { type: "herdr"; herdr: HerdrInfo };
 
 export type WsChangeEvent = Exclude<WsEvent, { type: "hello" } | { type: "ping" }>;
@@ -636,27 +641,8 @@ export type SettingsPatch = Partial<Omit<Settings, "ranks" | "codexRanks" | "res
 export interface PatchMemberReq { cli?: CliProvider; modelOverride?: string | null; effortOverride?: Effort | null }
 export interface SendMessageReq { id?: string; text: string; targetMemberId?: string | null; attachmentIds?: string[]; contextFileId?: string | null }
 export interface AnswerReq { expectedVersion?: string; choice?: string | null; note?: string | null; batch?: boolean }
-export interface AdoptReq { paneId: string; name: string; role: string; handle?: string; kind?: "conductor" | "worker" }
-/** conductor 다른 지휘자의 흔적 · folder 프로젝트 밖 폴더 · input 입력칸에 쓰던 글(넘겨받을 때 지운다). 편입을 막지는 않는다. */
-export interface AdoptWarning { kind: "conductor" | "folder" | "input"; text: string }
-/** GET /api/projects/:id/adopt/preview?pane=. 읽기만 한다. */
-export interface AdoptPreview { paneId: string; name: string | null; cwd: string | null; status: string; sessionId: string | null; screen: string; refuse: string | null; warnings: AdoptWarning[] }
 /** POST /api/projects/:id/tidy. already: 이미 판 정리 지시가 기다리거나 도는 중이라 새로 넣지 않았다. */
 export interface TidyResult { already: boolean }
-/** POST /api/members/:id/release. notified: 세션에 규칙이 풀렸다고 알렸다. paneKept: 칸은 그대로 있다. false 면 서버 칸을 닫았고 resumeCommand 로 이어 연다. */
-export interface ReleaseResult { notified: boolean; paneKept: boolean; resumeCommand: string | null }
-
-/** 지금 넘겨받을 수 없는 이유. null 이면 받을 수 있다(서버·화면 공통). */
-export function adoptRefusal(a: Pick<LiveAgent, "agent" | "status" | "sessionId" | "adopted">): string | null {
-  if (a.adopted) return "이미 팀원 자리인 세션입니다";
-  if (a.agent !== "claude") return `Claude 세션만 편입할 수 있습니다: ${a.agent ?? "알 수 없음"}`;
-  if (a.status === "working") return "일하는 중입니다. 지금 턴이 끝나면 다시 시도하세요";
-  if (a.status === "blocked") return "승인 창 앞에서 멈춰 있습니다. 터미널에서 푼 뒤 다시 시도하세요";
-  if (a.status !== "idle" && a.status !== "done") return "아직 뜨는 중이거나 상태를 알 수 없습니다. 잠시 뒤 다시 시도하세요";
-  // 세션 ID 를 모르면 턴 마지막 글을 읽을 수 없어 보고가 끊기고, 재시작 뒤 어느 칸인지도 가릴 수 없다.
-  if (!a.sessionId) return "세션 ID 를 알 수 없어 받을 수 없습니다(herdr 의 Claude 연동을 확인하세요)";
-  return null;
-}
 
 // ---- 직급 ----
 export const DEFAULT_RANKS: Ranks = { manager: { model: null, effort: null }, lead: { model: null, effort: null }, staff: { model: null, effort: null } };

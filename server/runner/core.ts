@@ -9,15 +9,16 @@ import { join } from "node:path";
 import type { ApprovalPrompt, Backend } from "../../shared/types.ts";
 import { claudeFolderTrust, codexFolderTrust, looksLikeFolderTrust } from "./core-approval.ts";
 import { cleanText } from "../text.ts";
-import { childEnv } from "./headless.ts";
-import { defaultClaudeHome, findSessionFile, inputText, screenContextPct } from "./herdr.ts";
+import { childEnv } from "./env.ts";
+import { inputText, screenContextPct } from "./claude-screen.ts";
+import { defaultClaudeHome, findSessionFile } from "./session-files.ts";
 import { CoreError, coreRpc, coreSocketPath, type CoreHello, type CoreTerminal } from "./core-client.ts";
 import { providerFor, providerLaunch, isProviderArgv, type ProviderBins } from "./providers.ts";
 import { codexBindingMarker, discoverCodexSession, observeCompactBoundary, type CodexBindingCursor, type CompactBoundaryBaseline, type CompactBoundaryCursor } from "./core-context.ts";
 import { readDeliveryEvidence, readJsonlRange, parseCodexSessionMeta, providerLogPath, type DeliveryEvidenceCursor, type JsonlCursor } from "./delivery-evidence.ts";
 import type { DeliveryDispatch, RunnerRecoveryStore, TerminalLease } from "../service-contracts.ts";
 import { readTranscriptTail, transcriptPath } from "./transcript.ts";
-import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, DeliveryProbe, DeliveryInspection, DeliveryRepair, DeliveryLogBaseline, RunnerTerminalIdentity, RunnerReattachResult, RunnerObservation } from "./types.ts";
+import type { FullRunner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, DeliveryProbe, DeliveryInspection, DeliveryRepair, DeliveryLogBaseline, RunnerTerminalIdentity, RunnerReattachResult, RunnerObservation } from "./types.ts";
 
 /** claudeHome: Claude session transcripts (default CLAUDE_CONFIG_DIR or ~/.claude), read for context usage only. */
 export interface CoreRunnerOptions extends ProviderBins { coreBin?: string; socketPath?: string; session?: string; stateDir?: string; configDir?: string; claudeHome?: string; codexHome?: string; contextHome?: string }
@@ -136,7 +137,7 @@ export function eofLogBaseline(root: string, path: string): DeliveryLogBaseline 
 }
 
 /** Terminals belong to core's holders. IAMCEO shutdown only detaches. */
-export class CoreRunner implements Runner {
+export class CoreRunner implements FullRunner {
   readonly kind: Backend = "core";
   /** send() never writes into a working CLI: an urgent delivery waits for the turn to end like any other. */
   readonly interjects: boolean = false;

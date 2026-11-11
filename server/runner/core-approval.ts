@@ -97,3 +97,12 @@ export function looksLikeFolderTrust(screen: string): boolean {
   if (selected < 1 || lines.length - 1 - selected > 8) return false;
   return TRUST_WORDING.test(lines.slice(0, selected).join("\n"));
 }
+
+/** 알림·기록에 쓸 한 줄 요약. 예: "폴더 신뢰 확인: /work/app · 이 폴더에서 AI가 파일을 읽고 고치고 실행할 수 있게 됩니다" */
+export function approvalSummary(a: ApprovalPrompt, max = 160): string {
+  const lines = a.body.split("\n").map((l) => l.trim()).filter((l) => l && !/^Tip:/.test(l));
+  // 명령·파일 이름처럼 가장 구체적인 줄은 보통 마지막 쪽이다. 짧은 창이면 다 붙인다.
+  const detail = lines.length <= 2 ? lines.join(" · ") : lines[lines.length - 1]!;
+  const s = [a.title, detail].filter(Boolean).join(": ");
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}

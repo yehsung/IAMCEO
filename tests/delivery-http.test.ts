@@ -41,9 +41,7 @@ beforeAll(async () => {
   }
   store.enqueue({ projectId, memberId: other.id, kind: "instruction", text: "다른 직원 봉투" });
   recovery = new DeliveryRecovery({ store, runner: () => { runnerCalls.push("runner"); throw new Error("HTTP read must not observe runner"); } });
-  const orch = {
-    herdrInfo: async () => ({ installed: false, running: false, version: null, protocol: null, compatible: false, warning: null }),
-  } as unknown as OrchestratorApi;
+  const orch = {} as unknown as OrchestratorApi;
   ctx = { config, store, bus, orch, delivery: recovery };
   server = await startServer(ctx);
   while (server.port === 7878) { await server.stop(); server = await startServer(ctx); }

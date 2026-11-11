@@ -1,9 +1,6 @@
 // http.ts 가 부르는 Orchestrator 의 겉면. 비즈니스 흐름은 구현체(orchestrator.ts)가 맡는다.
 // 처리할 수 없는 요청은 ApiError(status, 한국어 메시지)를 던지면 그대로 응답이 된다.
 import type {
-  AdoptPreview,
-  AdoptReq,
-  ReleaseResult,
   AnswerApprovalReq,
   AnswerReq,
   ApprovalPrompt,
@@ -11,8 +8,6 @@ import type {
   CreateMemberReq,
   RuntimeInfo,
   Decision,
-  HerdrInfo,
-  LiveAgent,
   Member,
   Message,
   PatchMemberReq,
@@ -86,7 +81,7 @@ export interface OrchestratorApi {
   onProjectPatched(project: Project, patch: PatchProjectReq): void | Promise<void>;
   /** 저장 전에 부른다. 보관할 수 없으면 ApiError 를 던진다. */
   beforeProjectPatch?(project: Project, patch: PatchProjectReq): void | Promise<void>;
-  /** 전체 설정. 실행 방식을 바꿀 수 없으면(일하는 직원이 있으면) ApiError 를 던지고, 바꿀 수 있으면 이전 실행기의 칸을 닫는다. */
+  /** 전체 설정. 실행 방식은 core 하나라 다른 값은 ApiError(400)다. */
   updateSettings(patch: SettingsPatch): Promise<Settings>;
   /** 직원별 모델·effort. */
   patchMemberConfig(memberId: string, patch: PatchMemberReq): Promise<Member>;
@@ -130,20 +125,12 @@ export interface OrchestratorApi {
   memberClose?(memberId: string): Promise<void>;
   /** 직접 띄운 CLI 의 도구 호출로 상태를 고친다. */
   noteManualCall?(member: Member, tool: string): void;
-  /** herdr 칸 화면. 없으면 빈 글. */
+  /** 팀원 터미널의 화면 글. */
   memberScreen(memberId: string): Promise<string>;
   /** 칸이 권한 승인 창 앞이면 그 창. 아니면 null. */
   memberApproval?(memberId: string): Promise<ApprovalPrompt | null>;
   /** 대표가 승인 창의 선택지를 고른다. 창이 바뀌었거나 닫혔으면 409. AI 도구에는 없다. */
   answerApproval?(memberId: string, req: AnswerApprovalReq): Promise<void>;
-  herdrInfo(): Promise<HerdrInfo>;
-  herdrAgents(): Promise<LiveAgent[]>;
-  adopt(projectId: string, req: AdoptReq): Promise<Member>;
-  adoptPreview?(projectId: string, paneId: string): Promise<AdoptPreview>;
-  /** 편입 해제: 대화·세션은 그대로 두고 관리에서 뺀다. */
-  releaseMember?(memberId: string): Promise<ReleaseResult>;
-  /** 넘겨받은 세션을 도구를 붙여 다시 연다. */
-  reopenWithTools?(memberId: string): Promise<Member>;
   /** 터미널에서 CLI 를 부르는 명령. */
   cliCommand?(): string;
   listAgentTools(member: Member): AgentToolDef[] | Promise<AgentToolDef[]>;

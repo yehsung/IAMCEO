@@ -119,10 +119,9 @@ describe("CLI model catalog (isolated fake homes only)", () => {
     const env = { IAMCEO_HOME: join(f.home, "app"), IAMCEO_PORT: "0", CLAUDE_CONFIG_DIR: f.claudeHome, CODEX_HOME: f.codexHome };
     updateConfigFile({ accessCode: "models-test", hosts: ["127.0.0.1"] }, env);
     const config = loadConfig(env), bus = new Bus(), store = new Store(openDb(config.dbPath), bus);
-    const orch: Pick<OrchestratorApi, "patchMemberConfig" | "updateSettings" | "patchMemberConfigV2" | "updateSettingsV2" | "herdrInfo"> = {
+    const orch: Pick<OrchestratorApi, "patchMemberConfig" | "updateSettings" | "patchMemberConfigV2" | "updateSettingsV2"> = {
       async patchMemberConfig(id, patch) { return store.patchMember(id, patch); },
       async updateSettings(patch) { return store.patchSettings(patch); },
-      async herdrInfo() { return { installed: false, running: false, version: null, protocol: null, compatible: false, warning: null }; },
       async patchMemberConfigV2(id, patch) { return { member: store.patchMember(id, patch), ...store.memberRevisions(id) }; },
       async updateSettingsV2(patch) { return { settings: store.patchSettings(patch), revision: store.settingsRevision() }; },
     };

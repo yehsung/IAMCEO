@@ -85,30 +85,8 @@ function fakeOrch(store: Store) {
       log("answerApproval", id, req);
       if (req.fingerprint !== "abcdef0123456789abcdef01") throw new ApiError(409, "창이 바뀌었습니다. 새 창을 보고 다시 고르세요");
     },
-    async herdrInfo() {
-      return { installed: false, running: false, version: null, protocol: null, compatible: false, warning: null };
-    },
-    async herdrAgents() {
-      return [{ paneId: "p1", name: "a", agent: "claude", status: "idle", cwd: "/x", sessionId: null, workspaceId: null, tabId: null, adopted: false }];
-    },
-    async adoptPreview(_projectId, paneId) {
-      return { paneId, name: "a", cwd: "/x", status: "idle", sessionId: "s", screen: "화면", refuse: null, warnings: [] };
-    },
-    async releaseMember(id) {
-      log("release", id);
-      store.removeMember(id);
-      return { notified: true, paneKept: true, resumeCommand: null };
-    },
-    async reopenWithTools(id) {
-      log("reopenWithTools", id);
-      return store.requireMember(id);
-    },
     cliCommand() {
       return "iamceo-시험";
-    },
-    async adopt(projectId, req) {
-      log("adopt", projectId, req);
-      return store.createMember({ projectId, handle: req.handle ?? "adopted", name: req.name, role: req.role, kind: req.kind ?? "worker", origin: "adopted", paneId: req.paneId });
     },
     listAgentTools(member) {
       return [{ name: "status", description: `${member.handle} 전용`, inputSchema: { type: "object" } }];
@@ -471,22 +449,43 @@ describe("REST", () => {
     expect(callsOf("answerApproval").length).toBe(2);
   });
 
-  test("총괄 띄우기·herdr 목록·편입", async () => {
-    const p = store.createProject({ name: "편입", cwd });
+  test("총괄 띄우기, bootstrap 의 CLI 명령과 herdr 고정값", async () => {
+    const p = store.createProject({ name: "총괄", cwd });
     const lead = await json<Member>(api(`/api/projects/${p.id}/conductor/start`, { method: "POST" }));
     expect(lead.kind).toBe("conductor");
-    const agents = await json<{ paneId: string }[]>(api("/api/herdr/agents"));
-    expect(agents[0]!.paneId).toBe("p1");
-    await json(api(`/api/projects/${p.id}/adopt`, { method: "POST", body: { paneId: "", name: "x", role: "r" } }), 400);
-    await json(api(`/api/projects/${p.id}/adopt`, { method: "POST", body: { paneId: "p1", name: "x", role: "r", handle: "BAD" } }), 400);
-    const adopted = await json<Member>(api(`/api/projects/${p.id}/adopt`, { method: "POST", body: { paneId: "p1", name: "편입 직원", role: "일", handle: "adopt1" } }));
-    expect(adopted).toMatchObject({ origin: "adopted", paneId: "p1", handle: "adopt1" });
-    await json(api(`/api/projects/${p.id}/adopt/preview`), 400);
-    expect(await json(api(`/api/projects/${p.id}/adopt/preview?pane=p1`))).toMatchObject({ paneId: "p1", screen: "화면" });
-    expect(await json(api(`/api/members/${adopted.id}/reopen-with-tools`, { method: "POST" }))).toMatchObject({ id: adopted.id });
-    expect(await json(api(`/api/members/${adopted.id}/release`, { method: "POST" }))).toEqual({ notified: true, paneKept: true, resumeCommand: null });
-    await json(api(`/api/members/${adopted.id}/release`, { method: "POST" }), 404);
-    expect((await json<{ cli: string }>(api("/api/bootstrap"))).cli).toBe("iamceo-시험");
+    const boot = await json<{ cli: string; herdr: unknown }>(api("/api/bootstrap"));
+    expect(boot.cli).toBe("iamceo-시험");
+    // 출시된 앱(0.2.2)이 푸는 칸이다. 옛 herdr 실행기를 지운 뒤에도 같은 모양의 '쓰지 않음' 값이 내려간다.
+    expect(boot.herdr).toEqual({ installed: false, running: false, version: null, protocol: null, compatible: false, warning: null });
+  });
+
+  // 옛 시험: "총괄 띄우기·herdr 목록·편입" 의 herdr 목록·편입·편입 해제·도구 붙여 다시 열기.
+  // 옛 herdr 실행기와 함께 없앤 기능이다. 주소는 404 가 아니라 410 과 한국어 안내로 답하고, 총괄 쪽으로는 아무것도 넘기지 않는다.
+  test("없앤 herdr·편입 주소는 410 과 한국어 안내로 답한다: 인증은 그대로 보고, 아무것도 만들거나 바꾸지 않는다", async () => {
+    const p = store.createProject({ name: "편입", cwd });
+    const m = store.createMember({ projectId: p.id, handle: "old", name: "옛 팀장", kind: "worker", origin: "adopted", status: "offline" });
+    const before = { calls: calls.length, members: store.listMembers(p.id).length };
+    const gone: [string, string, unknown, RegExp][] = [
+      ["GET", "/api/herdr/agents", undefined, /herdr 세션 목록은 없어졌습니다/],
+      ["GET", `/api/projects/${p.id}/adopt/preview?pane=p1`, undefined, /편입은 없어졌습니다.*iamceo join/],
+      ["GET", `/api/projects/${p.id}/adopt/preview`, undefined, /편입은 없어졌습니다/],
+      ["POST", `/api/projects/${p.id}/adopt`, { paneId: "p1", name: "편입 직원", role: "일", handle: "adopt1" }, /편입은 없어졌습니다.*iamceo join/],
+      ["POST", `/api/projects/${p.id}/adopt`, { paneId: "" }, /편입은 없어졌습니다/],
+      ["POST", `/api/members/${m.id}/release`, undefined, /편입 해제는 없어졌습니다/],
+      ["POST", `/api/members/${m.id}/reopen-with-tools`, undefined, /도구 붙여 다시 열기'는 없어졌습니다/],
+      // 없는 프로젝트·팀원이어도 '없어진 기능'이 먼저다(404 로 답하면 앱은 주소가 틀렸다고 본다).
+      ["POST", "/api/projects/p_none/adopt", { paneId: "p1", name: "x", role: "r" }, /편입은 없어졌습니다/],
+      ["POST", "/api/members/m_none/release", undefined, /편입 해제는 없어졌습니다/],
+    ];
+    for (const [method, path, body, message] of gone) {
+      const res = await api(path, { method, body });
+      expect(res.status, `${method} ${path}`).toBe(410);
+      expect(((await res.json()) as { error: string }).error).toMatch(message);
+      expect((await fetch(base + path, { method })).status, `${method} ${path} 인증 없음`).toBe(401);
+    }
+    expect(calls.length).toBe(before.calls);
+    expect(store.listMembers(p.id)).toHaveLength(before.members);
+    expect(store.requireMember(m.id)).toMatchObject({ origin: "adopted", status: "offline" });
   });
 
   test("설정: 범위 검사·모르는 키 거부·저장", async () => {

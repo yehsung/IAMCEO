@@ -44,12 +44,13 @@ exit 0`);
   return { dir, bin, scratch, summary, env, script, check, calls };
 }
 
-test("check.sh server: 파일마다 따로 30초 제한으로 돌리고 herdr.test.ts 는 뺀다. 임시 폴더는 남지 않는다", () => {
+// 옛 실행기를 지우며 herdr.test.ts 를 빼던 줄도 없앴다. 이제 빼는 파일이 없다: *.test.ts 는 모두 돌고, 시험이 아닌 파일만 건너뛴다.
+test("check.sh server: *.test.ts 를 빠짐없이 파일마다 따로 30초 제한으로 돌린다. 임시 폴더는 남지 않는다", () => {
   const f = fixture(["a.test.ts", "b.test.ts", "herdr.test.ts", "helper.ts"]);
   const result = f.check(["server"]);
   expect(result.code, result.output).toBe(0);
-  expect(f.calls()).toEqual(["test --timeout=30000 ./tests/a.test.ts", "test --timeout=30000 ./tests/b.test.ts"]);
-  expect(result.output).toContain("server tests: 2 files, 0 failed, 0 flaky");
+  expect(f.calls()).toEqual(["test --timeout=30000 ./tests/a.test.ts", "test --timeout=30000 ./tests/b.test.ts", "test --timeout=30000 ./tests/herdr.test.ts"]);
+  expect(result.output).toContain("server tests: 3 files, 0 failed, 0 flaky");
   expect(readdirSync(f.scratch)).toEqual([]);
 });
 

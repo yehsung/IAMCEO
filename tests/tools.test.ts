@@ -14,30 +14,48 @@ import type { Runner, RunnerEvent, SendResult } from "../server/runner/types.ts"
 import { Store } from "../server/store.ts";
 import { FilePublication } from "../server/files.ts";
 import { StorageError } from "../server/storage-errors.ts";
+import { isReportNudge } from "./fixtures/core-harness.ts";
 
-/** 세션을 띄우지 않고 받은 글만 기록한다. 턴은 end() 로 끝낸다. */
+/** 서버가 스스로 붙인 '보고 보완'만 든 턴인가. 다른 전달과 묶여 나간 턴은 일하는 턴이다(전달마다 표식 줄이 하나씩 붙는다). */
+const nudgeOnly = (text: string) => isReportNudge({ prompt: text }) && text.split("\n").filter((line) => /^#iamceo_[A-Za-z0-9_-]{22}$/.test(line)).length === 1;
+
+/**
+ * 세션을 띄우지 않고 받은 글만 기록한다. 턴은 end() 로 끝낸다. 실행기 종류는 운영과 같은 core 다.
+ * core 에서는 깨우는 지시를 받고 보고 없이 끝난 턴 뒤에 서버가 '보고 보완' 턴을 한 번 넣는다. 이 시험들의 주제가 아니라
+ * sent 가 아닌 nudges 에 따로 적고, 가짜 CLI 처럼 보고 없이 곧바로 끝낸다(서버는 '결과 보고 누락'을 남기고 더 묻지 않는다).
+ */
 class FakeRunner implements Runner {
-  readonly kind: Backend = "headless";
+  readonly kind: Backend = "core";
   sent: { memberId: string; text: string }[] = [];
+  nudges: { memberId: string; text: string }[] = [];
   busy = new Set<string>();
   parallel: { memberId: string; on: boolean }[] = [];
   private cb: (e: RunnerEvent) => void = () => {};
+  private terminals = 0;
+  constructor(private readonly store: Store) {}
   async available() {
     return { ok: true };
   }
+  // core 직원은 터미널 주소(paneId)를 받는다.
   async start() {
-    return { sessionId: crypto.randomUUID(), paneId: null };
+    return { sessionId: crypto.randomUUID(), paneId: `t${++this.terminals}` };
   }
   async send(m: { id: string }, text: string): Promise<SendResult> {
-    this.sent.push({ memberId: m.id, text });
     this.busy.add(m.id);
+    if (nudgeOnly(text)) {
+      this.nudges.push({ memberId: m.id, text });
+      setTimeout(() => this.end(m.id), 0);
+    } else this.sent.push({ memberId: m.id, text });
     return { ok: true };
   }
   isBusy(id: string) {
     return this.busy.has(id);
   }
-  async compact(): Promise<SendResult> {
-    return { ok: true };
+  // core 의 압축: 실행기가 저장소에 진행 상태를 적는다. 끝은 compacted() 다.
+  async compact(m: { id: string }): Promise<SendResult> {
+    const state = this.store.ensureContextState(m.id);
+    this.store.saveContextState({ ...state, measurement: null, compaction: { ...state.compaction!, phase: "running" } }, { contextPct: null });
+    return { ok: true, started: false };
   }
   async setParallel(m: { id: string }, on: boolean): Promise<SendResult> {
     this.parallel.push({ memberId: m.id, on });
@@ -54,9 +72,16 @@ class FakeRunner implements Runner {
     this.cb = cb;
   }
   async shutdown() {}
-  end(memberId: string, finalText = "") {
+  /** core 는 턴의 마지막 글을 서버에 넘기지 않는다(finalText 는 늘 빈 글). */
+  end(memberId: string) {
     this.busy.delete(memberId);
-    this.cb({ type: "turn_end", memberId, finalText, isError: false });
+    this.cb({ type: "turn_end", memberId, finalText: "", isError: false });
+  }
+  /** core 의 압축 완료: 실행기가 저장소에 결과(succeeded)를 적고 compacted 를 낸다. turn_end 는 완료 근거가 아니다. */
+  compacted(memberId: string) {
+    const state = this.store.ensureContextState(memberId);
+    this.store.saveContextState({ ...state, compaction: { ...state.compaction!, phase: "succeeded", finishedAt: new Date().toISOString() } });
+    this.cb({ type: "compacted", memberId, runId: state.compaction!.id });
   }
 }
 
@@ -64,6 +89,14 @@ const cleanups: (() => Promise<void>)[] = [];
 afterAll(async () => {
   await Promise.all(cleanups.map((c) => c()));
 });
+
+const until = async (cond: () => boolean, label = "조건", ms = 4000) => {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error(`${label} 시간 초과`);
+    await Bun.sleep(5);
+  }
+};
 
 async function setup() {
   const root = mkdtempSync(join(tmpdir(), "iamceo-tools-"));
@@ -74,8 +107,8 @@ async function setup() {
   const config = loadConfig(env);
   const bus = new Bus();
   const store = new Store(openDb(config.dbPath), bus);
-  const runner = new FakeRunner();
-  const orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["headless", runner]]) });
+  const runner = new FakeRunner(store);
+  const orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["core", runner]]) });
   const server: RunningServer = await startServer({ config, store, bus, orch });
   orch.setServerUrl(server.urls[0]!);
   cleanups.push(async () => {
@@ -84,6 +117,8 @@ async function setup() {
   });
   const project = store.createProject({ name: "시험", cwd: home });
   const lead = await orch.ensureConductor(project.id);
+  // core 직원의 전달 펌프는 터미널 조작 임대 정리를 기다리는 구간이 있어 한 박자 늦게 끝난다. 띄운 직후의 펌프가 끝난 뒤에 시험을 시작한다.
+  await orch.pump(lead.id);
   const call = async (member: Member, name: string, args: Record<string, unknown> = {}): Promise<AgentToolResult> => {
     const res = await fetch(`${server.urls[0]}/agent/tool`, {
       method: "POST",
@@ -93,7 +128,15 @@ async function setup() {
     expect(res.status).toBe(200);
     return (await res.json()) as AgentToolResult;
   };
-  return { home, store, bus, orch, runner, server, project, lead, call };
+  /**
+   * 보고 없이 끝낸 턴의 뒤처리를 기다린다. core 에서는 그런 턴 뒤에 '보고 보완' 턴이 한 번 지나가고, 그것도 보고 없이 끝나면
+   * '결과 보고 누락' 글이 남는다. 이 프로젝트에 그 글이 n 건이 되고 뒤따르는 전달 펌프가 끝나면 그 직원은 다시 쉰다.
+   */
+  const quiet = async (member: Member, n = 1) => {
+    await until(() => store.listMessages(project.id, { limit: 500 }).filter((m) => m.title === "결과 보고 누락").length >= n, "보고 보완 지나감");
+    await orch.pump(member.id);
+  };
+  return { home, store, bus, orch, runner, server, project, lead, call, quiet };
 }
 
 /** 표식을 제거해 비교하는 대신, 저장 봉투와 송신 문자열도 일치해야 한다. */
@@ -120,8 +163,13 @@ test("team_add and config writes accept catalog models/null and reject unlisted 
       expect((await f.call(f.lead, "team_add", { name, role: "시험", cli, model: value })).isError).toBeUndefined();
       const member = f.store.listMembers(f.project.id).find(m => m.name === name)!;
       expect(member.modelOverride).toBe(value);
+      // core 는 살아 있는 세션의 모델 지정을 바꾸면 세션을 새 설정으로 다시 연다. 전달 펌프가 도는 순간에는 409 로 거절하므로
+      // (설정 쓰기가 끝날 때마다 펌프를 한 번 민다) 펌프가 끝난 뒤에 바꾼다.
+      await f.orch.pump(member.id);
       await expect(f.orch.patchMemberConfig(member.id, { modelOverride: "unlisted" })).rejects.toMatchObject({ status: 400, message: "목록에 없는 모델입니다" });
+      await f.orch.pump(member.id);
       await f.orch.patchMemberConfig(member.id, { modelOverride: valid });
+      await f.orch.pump(member.id);
       await f.orch.patchMemberConfig(member.id, { modelOverride: null });
     }
     const key = cli === "claude" ? "ranks" : "codexRanks";
@@ -226,13 +274,18 @@ describe("공통 도구", () => {
     expect(await call(w, "post", { kind: "완료", title: "t", file_ids: ["f_없음"] })).toMatchObject({ isError: true });
   });
 
-  test("거부된 post 는 보고로 치지 않아 턴 마지막 글이 자동 보고된다", async () => {
+  // 옛 시험: "거부된 post 는 보고로 치지 않아 턴 마지막 글이 자동 보고된다"
+  test("거부된 post 는 보고로 치지 않아 보고 보완을 요청받는다", async () => {
     const { store, project, orch, runner, call } = await setup();
     const { member: w } = await orch.addMember(project.id, { name: "철수", handle: "cs", role: "개발", firstInstruction: "일" });
+    await until(() => runner.sent.some((s) => s.memberId === w.id), "첫 지시 전달");
     expect(await call(w, "post", { kind: "완료", title: "t", file_ids: ["f_없음"] })).toMatchObject({ isError: true });
-    runner.end(w.id, "결과 글");
-    await Bun.sleep(30);
-    expect(store.listMessages(project.id).at(-1)).toMatchObject({ who: "철수", title: "(자동) 결과 글" });
+    runner.end(w.id);
+    // 달라진 점: 옛 실행기는 턴의 마지막 글을 '(자동) …' 알림으로 올렸다. core 는 마지막 글을 받지 못한다.
+    // 대신 보고 없이 끝난 실행으로 보고(거부된 post 는 보고가 아니다) 보고 보완을 한 번 요청한다.
+    await until(() => runner.nudges.length === 1, "보고 보완");
+    expect(runner.nudges[0]).toMatchObject({ memberId: w.id });
+    expect(store.listMessages(project.id).some((m) => m.memberId === w.id)).toBe(false);
   });
 
   test("file: 글·md 경로·첨부·이미지", async () => {
@@ -369,7 +422,7 @@ describe("총괄 도구", () => {
   });
 
   test("user_quote 라벨: 대표 글에 있으면 서버 확인, 없으면 미확인", async () => {
-    const { store, project, runner, lead, call } = await setup();
+    const { store, project, runner, lead, call, quiet } = await setup();
     store.createMessage({ projectId: project.id, mine: true, who: "나", kind: "나", body: "로그인 고쳐서\n  배포까지 진행해 주세요" });
     await call(lead, "team_add", { name: "철수", role: "개발", handle: "cs" });
 
@@ -379,7 +432,7 @@ describe("총괄 도구", () => {
 
     const worker = store.findMember(project.id, "cs")!;
     runner.end(worker.id);
-    await Bun.sleep(20);
+    await quiet(worker, 1);
 
     const bad = await call(lead, "team_assign", { member: "철수", text: "지워", user_quote: "다 지워도 된다고 하셨다" });
     expect(bad.text).toContain("미확인");
@@ -388,7 +441,7 @@ describe("총괄 도구", () => {
 
     // 총괄 자신의 글은 대표 원문이 아니다.
     runner.end(worker.id);
-    await Bun.sleep(20);
+    await quiet(worker, 2);
     store.createMessage({ projectId: project.id, memberId: lead.id, who: "총괄", kind: "답변", body: "총괄이 쓴 승인 문장" });
     expect((await call(lead, "team_assign", { member: "cs", text: "x", user_quote: "총괄이 쓴 승인 문장" })).text).toContain("미확인");
   });
@@ -457,12 +510,13 @@ describe("총괄 도구", () => {
   });
 
   test("user_quote: 결재 답의 버튼 글은 맞아도 '문맥 확인 필요'이고 카드 제목·id 가 함께 간다", async () => {
-    const { store, project, orch, runner, lead, call } = await setup();
+    const { store, project, orch, runner, lead, call, quiet } = await setup();
     const { member: w } = await orch.addMember(project.id, { name: "철수", handle: "cs", role: "개발" });
     await call(w, "ask", { title: "배포?", detail: "d", options: [{ k: "y", label: "지금 배포하세요" }] });
     await orch.answerDecision(store.listDecisions(project.id)[0]!.id, { choice: "y" });
+    await until(() => runner.sent.some((s) => s.memberId === w.id), "답 전달");
     runner.end(w.id);
-    await Bun.sleep(20);
+    await quiet(w, 1);
     const d = store.listDecisions(project.id)[0]!;
     expect((await call(lead, "team_assign", { member: "cs", text: "배포", user_quote: "지금 배포하세요" })).text).toContain("문맥 확인 필요");
     const sent = runner.sent.at(-1)!.text;
@@ -487,14 +541,14 @@ describe("총괄 도구", () => {
   });
 
   test("team_assign: parallel 이 다를 때만 먼저 바꾼다", async () => {
-    const { store, project, runner, lead, call } = await setup();
+    const { store, project, runner, lead, call, quiet } = await setup();
     await call(lead, "team_add", { name: "철수", role: "개발", handle: "cs" });
     const w = store.findMember(project.id, "cs")!;
     await call(lead, "team_assign", { member: "cs", text: "큰 일", parallel: true });
     expect(runner.parallel).toEqual([{ memberId: w.id, on: true }]);
     expect(store.requireMember(w.id).parallel).toBe(true);
     runner.end(w.id);
-    await Bun.sleep(20);
+    await quiet(w, 1);
     await call(lead, "team_assign", { member: "cs", text: "또 큰 일", parallel: true });
     expect(runner.parallel).toHaveLength(1);
   });
@@ -529,22 +583,25 @@ describe("총괄 도구", () => {
   });
 
   test("team_sleep·resume·close·compact", async () => {
-    const { store, project, runner, lead, call } = await setup();
+    const { store, project, runner, lead, call, quiet } = await setup();
     await call(lead, "team_add", { name: "철수", role: "개발", handle: "cs", first_instruction: "일" });
     const w = store.findMember(project.id, "cs")!;
     expect(await call(lead, "team_sleep", { member: "cs" })).toMatchObject({ isError: true });
     runner.end(w.id);
-    await Bun.sleep(20);
+    await quiet(w, 1);
     expect((await call(lead, "team_compact", { member: "cs", focus: "요약" })).isError).toBeUndefined();
-    runner.end(w.id);
-    await Bun.sleep(20);
+    // 달라진 점: 옛 실행기는 압축 턴도 turn_end 로 끝났다. core 는 실행기가 남긴 압축 결과(compacted)로 끝난다.
+    await until(() => store.getContextState(w.id)?.compaction?.phase === "running", "압축 시작");
+    runner.compacted(w.id);
+    await until(() => store.requireMember(w.id).status === "idle", "압축 끝");
     expect((await call(lead, "team_sleep", { member: "cs" })).isError).toBeUndefined();
     expect(store.requireMember(w.id).status).toBe("asleep");
     expect((await call(lead, "team_resume", { member: "철수", first_instruction: "다시" })).isError).toBeUndefined();
     expect(store.requireMember(w.id).status).not.toBe("asleep");
+    await until(() => runner.sent.at(-1)!.text.includes("할 일: 다시"), "다시 지시 전달");
     expect(runner.sent.at(-1)!.text).toContain("할 일: 다시");
     runner.end(w.id);
-    await Bun.sleep(20);
+    await quiet(w, 2);
     expect((await call(lead, "team_close", { member: "cs" })).isError).toBeUndefined();
     expect(store.getMember(w.id)).toBeNull();
   });

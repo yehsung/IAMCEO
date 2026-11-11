@@ -4,17 +4,15 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import pkg from "../package.json";
-import type { Backend, Member, Project, ProjectState } from "../shared/types.ts";
+import type { Member, Project, ProjectState } from "../shared/types.ts";
 import { buildId, launchdPlist, service, servicePath, waitForReadiness } from "../bin/iamceo.ts";
 import { Bus } from "../server/bus.ts";
 import { loadConfig, updateConfigFile } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
-import { startServer } from "../server/http.ts";
-import { Orchestrator, type HerdrCapable, type HerdrQueries } from "../server/orchestrator.ts";
 import { renderRole } from "../server/roles.ts";
-import type { RunnerEvent } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
 import { importArtifact, normalizeCollection, parseWhen } from "../scripts/import-artifact.ts";
+import { coreSetup } from "./fixtures/core-harness.ts";
 
 const CLI = resolve(import.meta.dir, "..", "bin", "iamceo.ts");
 
@@ -407,55 +405,20 @@ describe("가져오기", () => {
     expect((await cli(home, ["help"])).stdout).toContain("roles export");
   });
 
-  test("가져온 프로젝트는 대표 말·서버 복구로 세션을 띄우지 않고, 편입은 그 직원 자리를 잇는다", async () => {
-    const home = newHome();
-    const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
-    updateConfigFile({ accessCode: "code", hosts: ["127.0.0.1"] }, env);
-    const config = loadConfig(env);
-    const bus = new Bus();
-    const store = new Store(openDb(config.dbPath), bus);
-    const calls: string[] = [];
-    const runner: HerdrCapable = {
-      kind: "herdr",
-      available: async () => ({ ok: true }),
-      start: async () => (calls.push("start"), { sessionId: "s", paneId: "p" }),
-      send: async (_m, text) => (calls.push(`send:${text.split("\n")[0]}`), { ok: true }),
-      isBusy: () => false,
-      compact: async () => ({ ok: true }),
-      setParallel: async () => ({ ok: true }),
-      interrupt: async () => {},
-      stop: async () => {},
-      screen: async () => "",
-      on: (_cb: (e: RunnerEvent) => void) => {},
-      shutdown: async () => {},
-      reattach: async () => (calls.push("reattach"), null),
-      adopt: async (_m, paneId) => (calls.push("adopt"), { sessionId: "sess-live", paneId, tabId: null }),
-      release: async () => ({ notified: true }),
-    };
-    const herdr: HerdrQueries = {
-      info: async () => ({ installed: true, running: true, version: "1", protocol: 22, compatible: true, warning: null }),
-      agents: async () => [{ paneId: "live", name: "insta", agent: "claude", status: "idle", cwd: home, sessionId: "sess-live", workspaceId: "w", tabId: "t", adopted: false }],
-    };
-    const orch = new Orchestrator({ config, store, runners: new Map<Backend, HerdrCapable>([["herdr", runner]]), herdr, agentTools: { listAgentTools: () => [], handleAgentTool: async () => ({ text: "" }) } });
-    const server = await startServer({ config, store, bus, orch });
-    stops.push(async () => {
-      await orch.shutdown();
-      await server.stop();
-    });
-
-    store.patchSettings({ backend: "herdr" });
-    const { projectId } = importArtifact(store, DUMP, { cwd: home, fallbackName: "x", now: NOW });
-    await orch.recover();
-    const message = await orch.sendUserMessage(projectId, { text: "안녕" });
+  // 옛 시험: "가져온 프로젝트는 대표 말·서버 복구로 세션을 띄우지 않고, 편입은 그 직원 자리를 잇는다".
+  // 뒤 절반(편입: herdr 칸 넘겨받기)은 옛 실행기 전용이라 지웠다. 앞 절반을 운영과 같은 실행기 종류(core)로 본다.
+  test("가져온 프로젝트는 대표 말·서버 복구로 세션을 띄우지 않는다", async () => {
+    const t = await coreSetup({ agentTools: { listAgentTools: () => [], handleAgentTool: async () => ({ text: "" }) } });
+    stops.push(() => t.close());
+    const { projectId } = importArtifact(t.store, DUMP, { cwd: t.home, fallbackName: "x", now: NOW });
+    await t.orch.recover();
+    const message = await t.orch.sendUserMessage(projectId, { text: "안녕" });
     expect(message.delivery).toBe("held");
-    expect(calls).toEqual([]);
-    expect(store.getConductor(projectId)).toBeNull();
-
-    const adopted = await orch.adopt(projectId, { paneId: "live", name: "인스타", role: "콘텐츠", handle: "insta" });
-    expect(adopted).toMatchObject({ handle: "insta", origin: "adopted", paneId: "live", sessionId: "sess-live", now: "릴스 3편" });
-    expect(store.listMembers(projectId).filter((m) => m.name === "인스타")).toHaveLength(1);
-    expect(calls[0]).toBe("adopt");
-    await expect(orch.adopt(projectId, { paneId: "live", name: "또", role: "" })).rejects.toMatchObject({ status: 409 });
+    // 옛 가짜 실행기의 start·send 자리: CLI 를 띄우지도, 글을 넣지도 않았다.
+    expect(t.core.calls.filter(c => c.method === "terminal.run" || c.method === "terminal.send")).toEqual([]);
+    expect(t.runs()).toEqual([]);
+    expect(t.turns()).toEqual([]);
+    expect(t.store.getConductor(projectId)).toBeNull();
   }, 15_000);
 });
 

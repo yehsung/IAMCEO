@@ -29,7 +29,7 @@ const fixtures: { dir: string; server: Server; sockets: Set<Socket>; runners: Co
 async function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "iamceo-core-test-"));
   const socketPath = join(dir, "c.sock");
-  const opts: StartOpts = { systemPromptFile: join(dir, "rules.md"), mcpConfigFile: join(dir, "mcp.json"), resume: false, projectName: "Test" };
+  const opts: StartOpts = { systemPromptFile: join(dir, "rules.md"), mcpConfigFile: join(dir, "mcp.json"), resume: false };
   writeFileSync(opts.systemPromptFile, "IAMCEO test instructions\nKeep user tools.");
   writeFileSync(opts.mcpConfigFile, JSON.stringify({ mcpServers: { iamceo: { command: "/bin/echo", args: ["bridge", "a'b"], env: { IAMCEO_TOKEN: "secret", IAMCEO_URL: "http://localhost:1" } } } }));
   const calls: Request[] = [];
@@ -533,7 +533,8 @@ test("Claude turn end reports context usage from the transcript and status line;
   await until(() => events.filter((event) => event.type === "context_usage").length === 2);
   expect(events.filter((event) => event.type === "context_usage")[1]).toMatchObject({ tokens: 268_000, shownPct: 27 });
   // The runner never guesses a % itself.
-  expect(events.every((event) => event.type !== "context")).toBe(true);
+  // (옛 실행기의 "context" 이벤트 종류는 계약에서 없앴다. 문맥에 관한 이벤트는 사용량 보고뿐이어야 한다.)
+  expect(events.filter((event) => event.type.startsWith("context")).every((event) => event.type === "context_usage")).toBe(true);
 });
 
 test("Codex with unknown session id reports no context usage", async () => {

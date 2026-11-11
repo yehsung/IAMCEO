@@ -18,7 +18,7 @@ const fixtures: { dir: string; server: Server; sockets: Set<Socket>; runners: Co
 async function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "iamceo-stab-core-"));
   const socketPath = join(dir, "c.sock");
-  const opts: StartOpts = { systemPromptFile: join(dir, "rules.md"), mcpConfigFile: join(dir, "mcp.json"), resume: false, projectName: "Test" };
+  const opts: StartOpts = { systemPromptFile: join(dir, "rules.md"), mcpConfigFile: join(dir, "mcp.json"), resume: false };
   writeFileSync(opts.systemPromptFile, "IAMCEO test instructions");
   writeFileSync(opts.mcpConfigFile, JSON.stringify({ mcpServers: {} }));
   const calls: Request[] = [];

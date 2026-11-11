@@ -14,11 +14,20 @@ import type { AgentToolResult, AskWaitResult } from "../server/orchestrator-api.
 import { formatTidy, Orchestrator, TIDY_HEAD } from "../server/orchestrator.ts";
 import type { Runner, RunnerEvent, SendResult } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
+import { isReportNudge } from "./fixtures/core-harness.ts";
 
-/** 세션을 띄우지 않고 받은 글만 기록한다. 턴은 end() 로 끝낸다. */
+/** 서버가 스스로 붙인 '보고 보완'만 든 턴인가. 다른 전달과 묶여 나간 턴은 일하는 턴이다(전달마다 표식 줄이 하나씩 붙는다). */
+const nudgeOnly = (text: string) => isReportNudge({ prompt: text }) && text.split("\n").filter((line) => /^#iamceo_[A-Za-z0-9_-]{22}$/.test(line)).length === 1;
+
+/**
+ * 세션을 띄우지 않고 받은 글만 기록한다. 턴은 end() 로 끝낸다. 실행기 종류는 운영과 같은 core 다.
+ * core 에서는 깨우는 지시를 받고 보고 없이 끝난 턴 뒤에 서버가 '보고 보완' 턴을 한 번 넣는다. 이 시험들의 주제가 아니라
+ * sent 가 아닌 nudges 에 따로 적고, 가짜 CLI 처럼 보고 없이 곧바로 끝낸다(서버는 '결과 보고 누락'을 남기고 더 묻지 않는다).
+ */
 class FakeRunner implements Runner {
-  readonly kind: Backend = "headless";
+  readonly kind: Backend = "core";
   sent: { memberId: string; text: string }[] = [];
+  nudges: { memberId: string; text: string }[] = [];
   busy = new Set<string>();
   private cb: (e: RunnerEvent) => void = () => {};
   async available() {
@@ -28,8 +37,11 @@ class FakeRunner implements Runner {
     return { sessionId: crypto.randomUUID(), paneId: null };
   }
   async send(m: { id: string }, text: string): Promise<SendResult> {
-    this.sent.push({ memberId: m.id, text });
     this.busy.add(m.id);
+    if (nudgeOnly(text)) {
+      this.nudges.push({ memberId: m.id, text });
+      setTimeout(() => this.end(m.id), 0);
+    } else this.sent.push({ memberId: m.id, text });
     return { ok: true };
   }
   isBusy(id: string) {
@@ -52,9 +64,10 @@ class FakeRunner implements Runner {
     this.cb = cb;
   }
   async shutdown() {}
-  end(memberId: string, finalText = "") {
+  /** core 는 턴의 마지막 글을 서버에 넘기지 않는다(finalText 는 늘 빈 글). */
+  end(memberId: string) {
     this.busy.delete(memberId);
-    this.cb({ type: "turn_end", memberId, finalText, isError: false });
+    this.cb({ type: "turn_end", memberId, finalText: "", isError: false });
   }
 }
 
@@ -62,6 +75,14 @@ const cleanups: (() => Promise<void>)[] = [];
 afterAll(async () => {
   await Promise.all(cleanups.map((c) => c()));
 });
+
+const until = async (cond: () => boolean, label = "조건", ms = 4000) => {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error(`${label} 시간 초과`);
+    await Bun.sleep(5);
+  }
+};
 
 const HOUR = 3_600_000;
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
@@ -85,7 +106,7 @@ async function setup() {
   const bus = new Bus();
   const store = new Store(openDb(config.dbPath), bus);
   const runner = new FakeRunner();
-  const orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["headless", runner]]) });
+  const orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["core", runner]]) });
   const server: RunningServer = await startServer({ config, store, bus, orch });
   const url = server.urls[0]!;
   orch.setServerUrl(url);
@@ -95,6 +116,8 @@ async function setup() {
   });
   const project = store.createProject({ name: "시험", cwd: home });
   const lead = await orch.ensureConductor(project.id);
+  // core 직원의 전달 펌프는 터미널 조작 임대 정리를 기다리는 구간이 있어 한 박자 늦게 끝난다. 띄운 직후의 펌프가 끝난 뒤에 시험을 시작한다.
+  await orch.pump(lead.id);
   const call = async (member: Member, name: string, args: Record<string, unknown> = {}): Promise<AgentToolResult> => {
     const res = await fetch(`${url}/agent/tool`, {
       method: "POST",
@@ -164,8 +187,10 @@ describe("ask_close", () => {
     const w = await t.worker();
     const first = await t.asked(w, "먼저 물은 것");
     await t.orch.answerDecision(first.id, { choice: "a" });
+    await until(() => t.runner.sent.some((s) => s.memberId === w.id), "답 전달");
     t.runner.end(w.id);
-    await Bun.sleep(20);
+    // 답으로 깬 직원이 보고 없이 끝냈다: core 에서는 보고 보완 턴이 한 번 지나간다.
+    await until(() => t.runner.nudges.some((n) => n.memberId === w.id) && !t.runner.busy.has(w.id), "보고 보완 지나감");
     const d = await t.asked(w, "다음 물음");
     t.say("네");
     expect((await t.call(t.lead, "ask_close", { id: d.id, kind: "decided", reason: "정함", user_quote: "네" })).text).toContain("근거가 못 되어");
@@ -267,6 +292,7 @@ describe("ask_close", () => {
     expect(t.pendingTexts(w).some((p) => !p.wake && p.text.includes(`대표가 결재 #${d.id} 를 다시 열었습니다`))).toBe(true);
     // 다시 연 카드는 평소처럼 답할 수 있고 답은 물은 직원에게 간다.
     await t.orch.answerDecision(d.id, { choice: "b" });
+    await until(() => t.runner.sent.at(-1)?.memberId === w.id, "답 전달");
     expect(t.runner.sent.at(-1)).toMatchObject({ memberId: w.id });
     expect(t.runner.sent.at(-1)!.text).toContain(`[대표 답(원문) '어느 쪽으로 갈까요'] "나 안"`);
     // 열린 카드, 답한 카드는 다시 열 수 없다.
@@ -418,34 +444,41 @@ describe("주기 판 정리", () => {
     expect(t.orch.checkBoardTidy()).toEqual([]);
     t.store.patchProject(t.project.id, { runnerEnabled: true });
     expect(t.orch.checkBoardTidy()).toEqual([t.project.id]);
+    await until(() => t.runner.sent.some((s) => s.text.includes(TIDY_HEAD)), "판 정리 전달");
     expect(t.runner.sent.filter((s) => s.text.includes(TIDY_HEAD))).toHaveLength(1);
   });
 
-  test("판 정리 턴이 끝나면 그 시각으로 적고, 할 말이 없던 마지막 글은 대화에 올리지 않는다", async () => {
+  // 옛 시험: "판 정리 턴이 끝나면 그 시각으로 적고, 할 말이 없던 마지막 글은 대화에 올리지 않는다"
+  test("판 정리 턴이 끝나면 그 시각으로 적고, 판 정리만 받은 턴은 대화에 아무것도 올리지 않으며 보고 보완도 받지 않는다", async () => {
     const t = await setup();
     stale(t);
     t.orch.checkBoardTidy();
-    await Bun.sleep(20);
+    await until(() => tidies(t).length === 1, "판 정리 전달");
     const before = t.store.listMessages(t.project.id).length;
     // 검토한 요청 revision 뒤의 변경은 다음 정리 대상으로 보존한다.
     await t.call(t.lead, "board");
     t.store.upsertWork({ projectId: t.project.id, sec: "done", title: "정리하며 옮김" });
     await Bun.sleep(5);
-    t.runner.end(t.lead.id, "정리할 것이 없습니다");
+    t.runner.end(t.lead.id);
     await Bun.sleep(30);
     expect(t.store.listMessages(t.project.id)).toHaveLength(before);
-    expect(t.store.listActivity(t.lead.id).some((a) => a.text.includes("판 정리: 정리할 것이 없습니다"))).toBe(true);
+    // 달라진 점: 옛 실행기는 턴의 마지막 글("정리할 것이 없습니다")을 받아 활동에 '판 정리: …' 로 남겼다.
+    // core 는 마지막 글을 서버에 넘기지 않아 그 활동 줄이 없다. 대신 판 정리만 받은 턴은 보고가 없어도 보고 보완을 받지 않는다.
+    expect(t.runner.nudges).toHaveLength(0);
     const tidiedAt = t.store.requireProject(t.project.id).tidiedAt!;
     expect(tidiedAt >= t.store.lastBoardChangeAt(t.project.id)!).toBe(true);
     expect(t.store.boardRevision(t.project.id)).toBeGreaterThan(t.store.getBoardReview(t.project.id)!.reviewedRevision!);
-    // 대표의 말과 함께 묶여 간 턴의 마지막 글은 평소처럼 올라간다.
+    // 달라진 점: 대표의 말과 함께 묶여 간 턴. 옛 실행기에서는 마지막 글이 '답변'으로 올라갔다.
+    // core 에서는 마지막 글이 오지 않고, 대표 말로 깬 총괄이 보고 없이 끝냈으니 보고 보완을 한 번 받는다.
     t.store.setBoardTidiedAt(t.project.id, ago(7 * HOUR));
     t.store.enqueue({ projectId: t.project.id, memberId: t.lead.id, kind: "system", text: formatTidy("conductor", false) });
     await t.orch.sendUserMessage(t.project.id, { text: "요즘 어때요" });
-    await Bun.sleep(20);
-    t.runner.end(t.lead.id, "잘 되고 있습니다");
-    await Bun.sleep(30);
-    expect(t.store.listMessages(t.project.id).at(-1)).toMatchObject({ who: t.lead.name, body: "잘 되고 있습니다" });
+    await until(() => t.runner.sent.at(-1)!.text.includes("요즘 어때요"), "대표 말 전달");
+    expect(t.runner.sent.at(-1)!.text).toContain(TIDY_HEAD);
+    t.runner.end(t.lead.id);
+    await until(() => t.runner.nudges.length === 1, "보고 보완");
+    expect(t.runner.nudges[0]).toMatchObject({ memberId: t.lead.id });
+    expect(t.store.listMessages(t.project.id).some((m) => m.memberId === t.lead.id)).toBe(false);
   });
 });
 

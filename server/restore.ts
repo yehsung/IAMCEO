@@ -216,7 +216,7 @@ export function restoreBackup(options: RestoreOptions): RestoreResult {
     }
     const configPath = join(stage, "config.json");
     const config = readBackupJson(configPath) as Record<string, unknown>;
-    for (const key of ["claudeBin", "codexBin", "coreBin", "coreSocket", "herdrSocket"]) {
+    for (const key of ["claudeBin", "codexBin", "coreBin", "coreSocket"]) {
       if (typeof config[key] === "string") config[key] = relocatePath(config[key], snapshot.manifest.sourceHome, destination);
     }
     writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });

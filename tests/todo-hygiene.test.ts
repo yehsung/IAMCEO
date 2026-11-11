@@ -15,7 +15,7 @@ const DAY = 86_400_000;
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 class HygieneRunner implements Runner {
-  readonly kind: Backend = "headless";
+  readonly kind: Backend = "core";
   sent: string[] = [];
   private listener: (event: RunnerEvent) => void = () => {};
   async available() { return { ok: true }; }
@@ -38,14 +38,16 @@ async function setup() {
   updateConfigFile({ accessCode: "code", hosts: ["127.0.0.1"] }, env);
   const config = loadConfig(env), bus = new Bus();
   const store = new Store(openDb(config.dbPath), bus), runner = new HygieneRunner();
-  const orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["headless", runner]]) });
+  const orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["core", runner]]) });
   const server = await startServer({ config, store, bus, orch });
   const url = server.urls[0]!;
   orch.setServerUrl(url);
   cleanups.push(async () => { await orch.shutdown(); await server.stop(); });
   const project = store.createProject({ name: "hygiene", cwd: home });
   const lead = await orch.ensureConductor(project.id);
-  const worker = store.createMember({ projectId: project.id, handle: "worker", name: "직원", kind: "worker", backend: "headless" });
+  // core 직원의 전달 펌프는 터미널 조작 임대 정리를 기다리는 구간이 있어 한 박자 늦게 끝난다. 띄운 직후의 펌프가 끝난 뒤에 시험을 시작한다.
+  await orch.pump(lead.id);
+  const worker = store.createMember({ projectId: project.id, handle: "worker", name: "직원", kind: "worker", backend: "core" });
   const oldTodo = (memberId: string | null = worker.id, age = 4 * DAY) => {
     const todo = store.createTodo({ projectId: project.id, memberId, title: "ASC 로그인" });
     store.db.query("UPDATE todos SET created_at = ? WHERE id = ?").run(new Date(Date.now() - age).toISOString(), todo.id);

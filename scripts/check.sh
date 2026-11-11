@@ -48,8 +48,6 @@ server() {
   local limit=${IAMCEO_TEST_TIMEOUT_MS:-30000} file total=0
   local failed=() flaky=() broken=()
   for file in tests/*.test.ts; do
-    # Excluded: needs a real herdr for its middle section, and its mock-socket sections are stale.
-    case "$file" in tests/herdr.test.ts) continue ;; esac
     total=$((total + 1))
     bun test --timeout="$limit" "./$file" || failed+=("$file")
   done

@@ -7,14 +7,14 @@ import { MIGRATIONS } from "./db.ts";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { z } from "zod";
-import { fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type EngineStatus, type HerdrInfo, type Member, type MessagePageOptions, type SyncCursor, type SyncSnapshot, type FileDoc, type WsEvent } from "../shared/types.ts";
+import { fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type EngineStatus, type HerdrInfo, type Member, type MessagePageOptions, type SyncSnapshot, type FileDoc, type WsEvent } from "../shared/types.ts";
 import type { OperationReceipt, ServerCapabilities } from "../shared/operations.ts";
 import type { DeliveryRecoveryService } from "./service-contracts.ts";
 import { ARTIFACT_CSP, buildArtifactSrcdoc } from "../shared/artifact-kit.ts";
 import type { Bus } from "./bus.ts";
 import { VERSION, type Config } from "./config.ts";
 import { FilePublication, prepareImport, MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES, resolveInside, saveUpload, type SavedFile } from "./files.ts";
-import { briefly, type OrchestratorApi } from "./orchestrator-api.ts";
+import type { OrchestratorApi } from "./orchestrator-api.ts";
 import { ApiError, type Store } from "./store.ts";
 import { classifyStorageError } from "./storage-errors.ts";
 import { SESSION_ID_RE } from "./text.ts";
@@ -205,6 +205,21 @@ function bearer(req: Request): string | null {
   return m ? m[1]!.trim() : null;
 }
 
+/**
+ * bootstrap.herdr 의 고정값. 옛 herdr 실행기는 없고 서버는 herdr 소켓을 열지 않는다.
+ * 출시된 앱(0.2.2)이 이 칸을 풀어 읽으므로 같은 모양으로 계속 싣는다.
+ */
+const HERDR_UNUSED: HerdrInfo = Object.freeze({ installed: false, running: false, version: null, protocol: null, compatible: false, warning: null });
+
+/** 옛 herdr 실행기 전용이던 주소와 그 자리에 답할 안내. */
+const GONE_ROUTES: [method: string, path: string, message: string][] = [
+  ["GET", "/api/herdr/agents", "herdr 세션 목록은 없어졌습니다. 서버는 herdr 를 보지 않고, 팀장은 모두 herdr-core 에서 띄웁니다"],
+  ["GET", "/api/projects/:id/adopt/preview", "기존 터미널 세션 편입은 없어졌습니다. 팀 화면에서 팀장을 새로 만들거나, 직접 띄운 세션에서 iamceo join 으로 붙이세요"],
+  ["POST", "/api/projects/:id/adopt", "기존 터미널 세션 편입은 없어졌습니다. 팀 화면에서 팀장을 새로 만들거나, 직접 띄운 세션에서 iamceo join 으로 붙이세요"],
+  ["POST", "/api/members/:id/release", "편입 해제는 없어졌습니다. 팀장을 명부에서 빼려면 총괄에게 그 팀장을 닫으라고 하세요"],
+  ["POST", "/api/members/:id/reopen-with-tools", "'도구 붙여 다시 열기'는 없어졌습니다. 이전 실행기의 세션은 그 터미널에서 확인하고, 이어서 맡기려면 팀장을 새로 만드세요"],
+];
+
 // ---- 요청 검증 ----
 const nonEmpty = z.string().trim().min(1);
 const backend = z.enum(["core", "herdr", "headless"]);
@@ -268,13 +283,6 @@ const AnswerSchema = z.object({
 const TodoDropSchema = z.object({ reason: z.string().max(100_000).optional() });
 const TodoDoneSchema = z.object({ done: z.boolean(), note: z.string().max(100_000).optional(), fileIds: z.array(z.string().min(1)).max(50).optional() });
 const SleepSchema = z.object({ force: z.boolean().optional() });
-const AdoptSchema = z.object({
-  paneId: nonEmpty,
-  name: nonEmpty,
-  role: z.string(),
-  handle: handle.optional(),
-  kind: z.enum(["conductor", "worker"]).optional(),
-});
 const SettingsSchema = z
   .object({
     backend,
@@ -537,7 +545,7 @@ function engineField(orch: OrchestratorApi): { engine?: EngineStatus } {
   return engine ? { engine } : {};
 }
 
-function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, readHerdr: () => Promise<HerdrInfo>, currentHerdr: () => HerdrInfo, monitor: LoopMonitor, freshHerdr: () => Promise<HerdrInfo> = () => ctx.orch.herdrInfo()): Route[] {
+function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, monitor: LoopMonitor): Route[] {
   const { config, store, orch, bus } = ctx;
   const models = new ModelCatalogReader(config);
   const folders = new Folders(ctx.folderHome);
@@ -748,7 +756,6 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       const lite = wantsLite(url);
       const requestedProjectId = url.searchParams.get("projectId");
       if (requestedProjectId !== null && (!requestedProjectId.trim() || Buffer.byteLength(requestedProjectId) > 256)) throw new ApiError(400, "프로젝트 ID가 잘못되었습니다");
-      await readHerdr();
       return monitor.run("GET /api/sync build", () => {
         // No await from the generation check through serialization. Concurrent readers share these bytes.
         const generation = JSON.stringify([bus.epoch, bus.seq, urls()]);
@@ -757,7 +764,6 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
         const cached = syncCache.get(key);
         if (cached !== undefined) return new Response(cached, { headers: { "Content-Type": "application/json" } });
         // 이 뒤 직렬화까지 await가 없다. 도메인 쓰기는 이 데몬의 Store가 소유한다.
-        const herdr = currentHerdr();
         const project = requestedProjectId === null ? null : store.getProject(requestedProjectId);
         const projectStatus = requestedProjectId === null ? "none" : !project ? "not_found" : project.archived ? "archived" : "ok";
         const rankOverrides = { manager: 0, lead: 0 };
@@ -765,7 +771,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
         const body: SyncSnapshot = {
           apiOutage: store.apiOutage(),
           protocol: 2, requestedProjectId, projectStatus,
-          bootstrap: { apiOutage: store.apiOutage(), version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr,
+          bootstrap: { apiOutage: store.apiOutage(), version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr: HERDR_UNUSED,
             home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides, ...engineField(orch) },
           state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!), ...snapshotNotices(requestedProjectId!) } : null,
           revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },
@@ -780,10 +786,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     }),
     route("GET", "/api/bootstrap", async () => {
       // 앱의 첫 연결 확인(제한 3초)이다. 실행기 정리나 느린 조회를 기다리지 않고 마지막으로 아는 값으로 답한다.
-      const [runtime, herdr] = await Promise.all([
-        Promise.resolve((orch.refreshHealth ?? orch.refreshConnection)?.call(orch)).then(() => orch.runtimeInfo?.()),
-        briefly(freshHerdr(), 1000, () => currentHerdr() ?? { installed: false, running: false, version: null, protocol: null, compatible: false, warning: null }),
-      ]);
+      const runtime = await Promise.resolve((orch.refreshHealth ?? orch.refreshConnection)?.call(orch)).then(() => orch.runtimeInfo?.());
       const rankOverrides = { manager: 0, lead: 0 };
       for (const m of store.listAllMembers()) if (m.origin !== "manual" && (m.modelOverride || m.effortOverride)) rankOverrides[memberRank(m.kind)]++;
       const body: Bootstrap = {
@@ -792,7 +795,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
         runtime,
         settings: store.getSettings(),
         projects: store.projectSummaries(),
-        herdr,
+        herdr: HERDR_UNUSED,
         home: config.home,
         urls: urls(),
         cli: orch.cliCommand?.() ?? "iamceo",
@@ -1081,28 +1084,9 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       if (!orch.memberClose) throw new ApiError(501, "지원하지 않습니다");
       await orch.memberClose(id);
     })),
-    route("GET", "/api/herdr/agents", async () => Response.json(await orch.herdrAgents())),
-    route("GET", "/api/projects/:id/adopt/preview", async (_req, url, [id]) => {
-      store.requireProject(id!);
-      const pane = url.searchParams.get("pane");
-      if (!pane) throw new ApiError(400, "칸을 지정하세요");
-      if (!orch.adoptPreview) throw new ApiError(501, "지원하지 않습니다");
-      return Response.json(await orch.adoptPreview(id!, pane));
-    }),
-    route("POST", "/api/members/:id/release", async (_req, _url, [id]) => {
-      store.requireMember(id!);
-      if (!orch.releaseMember) throw new ApiError(501, "지원하지 않습니다");
-      return Response.json(await orch.releaseMember(id!));
-    }),
-    route("POST", "/api/members/:id/reopen-with-tools", async (_req, _url, [id]) => {
-      store.requireMember(id!);
-      if (!orch.reopenWithTools) throw new ApiError(501, "지원하지 않습니다");
-      return Response.json(await orch.reopenWithTools(id!));
-    }),
-    route("POST", "/api/projects/:id/adopt", async (req, _url, [id]) => {
-      store.requireProject(id!);
-      return Response.json(await orch.adopt(id!, await parseBody(req, AdoptSchema)));
-    }),
+    // 옛 herdr 실행기와 함께 없앤 기능의 주소. 출시된 앱(0.2.2)은 부르지 않지만, 옛 화면·스크립트가 불러도 404(없는 주소)가 아니라
+    // 410(없어진 기능)과 다음에 할 일을 받게 한다. 무엇도 읽거나 바꾸지 않는다.
+    ...GONE_ROUTES.map(([method, path, message]) => route(method, path, async () => { throw new ApiError(410, message); })),
     route("PATCH", "/api/settings", async req => {
       const expected = contractV2(req) ? precondition(req) : null;
       const body = await parseBody(req, z.strictObject({ macScriptNotifications: z.boolean().optional(), permissionAcknowledged: z.literal(true).optional() })
@@ -1281,14 +1265,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   let boundPort = 0;
   const pairing = new Pairing();
   const terminalStreams = new TerminalStreams(config, store, ctx.orch);
-  let herdrCache: HerdrInfo | undefined;
-  let herdrPending: Promise<HerdrInfo> | undefined;
-  let herdrCursor: Readonly<SyncCursor> | undefined;
-  const readHerdr = (): Promise<HerdrInfo> => {
-    if (herdrCache) return Promise.resolve(herdrCache);
-    return herdrPending ??= ctx.orch.herdrInfo().then((info) => herdrCache ??= info).finally(() => { herdrPending = undefined; });
-  };
-  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, readHerdr, () => herdrCache!, monitor);
+  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, monitor);
   const pushHandler = ctx.push ? createPushHandler(ctx.push) : null;
   const sockets = new Set<ServerWebSocket<SocketData>>();
   const v2Sockets = new Set<ServerWebSocket<SocketData>>();
@@ -1566,10 +1543,6 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
 
   let publishedEpoch = bus.epoch;
   const unsubscribe = bus.subscribe((event, cursor) => {
-    if (event.type === "herdr" && cursor.epoch === bus.epoch && (!herdrCursor || herdrCursor.epoch !== cursor.epoch || herdrCursor.seq < cursor.seq)) {
-      herdrCache = event.herdr;
-      herdrCursor = cursor;
-    }
     const epochChanged = publishedEpoch !== bus.epoch;
     if (epochChanged) {
       publishedEpoch = bus.epoch;

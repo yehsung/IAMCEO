@@ -13,7 +13,7 @@ IAMCEO는 **소스 공개형**이며 Sustainable Use License 1.0 + IAMCEO 추가
 ## 0. 실행과 시험의 경계
 
 - 사용자 실제 `~/.iamceo`, 기존 herdr/core 소켓·세션·서비스에 개발 쓰기 요청을 보내지 않는다. 시험은 임시 `IAMCEO_HOME`, 명시적 시험 소켓, 격리된 `HC_SESSION`·XDG 경로를 사용한다.
-- 단위·통합 시험은 실제 유료 모델을 부르지 않는다. core는 fake JSON-RPC 서버, 기존 headless 회귀 시험은 fake Claude를 쓴다. 실제 모델 호출·전역 도구 설치·업데이트·배포·launchd 등록은 해당 작업이 명시적으로 요청된 경우만 한다.
+- 단위·통합 시험은 실제 유료 모델을 부르지 않는다. core는 fake JSON-RPC 서버(가짜 core 소켓과 그 안의 가짜 CLI)를 쓴다. 실제 모델 호출·전역 도구 설치·업데이트·배포·launchd 등록은 해당 작업이 명시적으로 요청된 경우만 한다.
 - core shutdown은 detach다. 앱·서버 종료를 이유로 holder나 제공자 CLI를 끝내지 않는다. 명시적 멤버 종료·잠재우기·안전한 세션 교체와 구분한다.
 - 공식 CLI의 사용자 설정·로그인·도구를 유지한다. 호출별 인자·MCP 설정을 쓰고 전역 Claude/Codex 설정 파일을 수정하지 않는다. 부모의 외부 `HC_*`·`HERDR_*`·Claude 중첩 세션 변수는 전달하지 않고, 사용자 HOME·XDG 설정 경로를 복원한다.
 - 초안을 지우거나 불확실한 PTY 입력을 자동 재전송하지 않는다. 화면은 입력 안전 확인·사람의 조작을 위해 읽을 수 있지만 실행 상태나 최종 답변을 추측하는 근거로 쓰지 않는다.
@@ -45,7 +45,9 @@ MCP stdio ── iamceo mcp /agent/* ───┴─ Bun / SQLite / Orchestrator
 | `shared/types.ts`, `shared/artifact-kit.ts` | 도메인 타입·네이티브 아티팩트 문서 조립 |
 | `vendor/herdr-core/`, `scripts/setup-core.ts` | 고정 release·라이선스·checksum·macOS 서명 검증 |
 
-`herdr.ts`, `herdr-client.ts`, `headless.ts`, `transcript.ts`는 기존 데이터·시험을 위한 호환 어댑터다. 현재 소스의 `createOrchestrator()`는 core를 조립하지만 이전 herdr 실행 방식은 호환을 위해 유지한다. 웹 버전은 제거했고 배포된 네이티브 앱의 v1 API 호환은 유지한다. 기존 세션을 core 주소로 해석하거나 자동으로 새 CLI에 옮기지 않는다.
+실행기는 core 하나다. 옛 실행기 둘(herdr 터미널 멀티플렉서를 쓰던 `herdr.ts`·`herdr-client.ts`, `claude -p`를 턴마다 띄우던 `headless.ts`)과 그 전용 코드(권한 승인 창 해석 `approval.ts`, 실행 방식 전환, herdr 칸 재결합, 기존 세션 편입·해제, herdr 상태 조회)는 지웠다. 서버는 herdr 소켓을 열지 않고, 설정의 `herdrSocket`·`IAMCEO_HERDR_SOCKET` 값은 있어도 읽지 않는다. 두 실행기가 함께 쓰던 화면 해석·자식 환경·세션 기록 찾기는 `runner/claude-screen.ts`·`env.ts`·`session-files.ts`에 남아 core가 쓴다.
+
+배포된 네이티브 앱(0.2.2)의 v1 API 호환은 유지한다. `Backend` 타입의 값 목록(`core`·`herdr`·`headless`), 팀장·설정의 `backend` 칸, `bootstrap.herdr` 칸은 그대로 내려간다. `bootstrap.herdr`는 `{installed:false,running:false,version:null,protocol:null,compatible:false,warning:null}` 고정값이다. 옛 `backend` 값이 남은 팀장 행은 지우지 않는다. 세션이나 터미널 주소가 남아 있으면 `legacy_session`으로 보류하고, core 주소로 해석하거나 자동으로 새 CLI에 옮기지 않는다. 웹 버전은 제거했다.
 
 ## 2. DB
 `shared/types.ts`의 타입과 1:1. 테이블 projects, members, decisions, todos, work, messages, files, attachments, deliveries, activity(팀장당 최근 500만 유지), settings(kv). JSON 필드(options, images, attachments)는 TEXT. `project_settings_v4` 는 프로젝트별 설정을 전체 설정으로 합칠 때 옛 값을 남겨 둔 표다(마이그레이션만 읽는다. 저장한 전역 권한과 프로젝트 값 중 가장 엄격한 것을 적고 바뀌면 대표에게 알린다. 프로젝트 모델이 하나로 모이면 직급 기본값의 빈 칸으로 올리고, 저장된 값과 다르면 팀장별 지정으로 남긴 뒤 알린다). `files.html` 은 아티팩트 원본(FileDoc 에 싣지 않는다), `members.applied_config` 는 세션에 실제로 들어간 설정이다. `members.adopted_info` 는 편입 표시(JSON, `turnedOnRunner`)다. 판 정리: `decisions.close_kind`(decided·obsolete, AI 가 닫았을 때만)·`close_reason`·`close_quote`·`closed_by`·`closed_at`, `todos.outcome`(done·dropped)·`close_reason`·`closed_by`·`updated_at`, `projects.board_tidied_at`(마지막 판 정리). 멤버 `token`(MCP 인증, 화면에 안 나감) 컬럼 포함. id는 접두어+짧은 난수(`p_`, `m_`, `d_`, `t_`, `w_`, `msg_`, `f_`, `a_`, `dl_`). 시각은 ISO UTC. 첫 실행 때 본사 프로젝트(`id='hq'`, name '본사', cwd=홈, runnerEnabled=true)를 만든다.
@@ -84,7 +86,8 @@ MCP stdio ── iamceo mcp /agent/* ───┴─ Bun / SQLite / Orchestrator
 - `PATCH /api/members/:id` `{cli?:"claude"|"codex",modelOverride?:string|null,effortOverride?:Effort|null}` → Member. null은 적용 가능한 기본값으로 되돌린다. 직접 띄운 세션은 400. CLI 변경 시 생략한 기존 override가 새 제공자의 모델·모델별 effort 목록에 없으면 null로 비우고 직급 기본값으로 돌아간다. 이때 활동 기록과 응답의 `resetOverrides` 배열에 비운 필드 이름을 남긴다(v2는 `member.resetOverrides`). 같은 요청에 명시한 모델·effort는 새 제공자 목록으로 검증한다. 제공자·살아 있는 세션 설정 변경은 §6의 이력·토큰 회전·안전한 교체 절차를 따른다
 - `GET /api/members/:id/activity?limit=` → Activity[] · `GET /api/members/:id/screen` → `{text}` (core 현재 화면, `lines:0`; 터미널이 없으면 빈 글)
 - `POST /api/members/:id/terminal/control` `{action:"claim"|"release"|"input"|"key",leaseId?,text?,key?}` → `{leaseId?,expiresAt?}`. 사용자 접속 코드로만 인증한다. lease는 5분, input은 128 KiB까지, key는 enter/up/down/esc/tab/ctrl+c/backspace. claim 외에는 같은 활성 token이 필요하고 직접 조작 중 자동 입력은 보류한다. CLI의 신뢰·인증·권한 선택은 이 명시적 사람 조작이나 `iamceo attach <memberId>`로 처리한다
-- `/api/members/:id/approval`의 fingerprint 승인, `/api/herdr/*`, adopt/release/reopen-with-tools는 과거 herdr 연동의 호환 경로다. core는 구조화된 승인 창 파싱·자동 선택·기존 외부 칸 편입을 구현하지 않는다. 예외는 실측한 폴더 신뢰 창(Claude `Accessing workspace:`, Codex `Folder access`)뿐이다. core는 이 창을 글자와 폴더 경로가 정확히 같을 때만 읽어 `blockedReason:"setup"`·`folder_trust`로 올리고 대표가 같은 승인 API로 답한다. `POST /api/projects`에 `trustFolder:true`를 실어 만든 프로젝트에서는 그 프로젝트 폴더의 이 창에 서버가 '신뢰'를 대신 고른다(조건은 아래 '추가 계약(1차 완성도)')
+- 옛 herdr 연동의 주소 `GET /api/herdr/agents`, `GET /api/projects/:id/adopt/preview`, `POST /api/projects/:id/adopt`, `POST /api/members/:id/release`, `POST /api/members/:id/reopen-with-tools`는 기능을 지웠다. 인증을 통과한 요청에 `410`과 한국어 안내(`{error}`)로 답하고 아무것도 읽거나 바꾸지 않는다. 출시된 앱(0.2.2)은 이 주소를 부르지 않는다.
+- `/api/members/:id/approval`의 fingerprint 승인은 남아 있다. core는 권한 승인 창을 구조화해 읽거나 대신 고르지 않고, 기존 외부 터미널을 편입하지 않는다. 읽는 창은 실측한 폴더 신뢰 창(Claude `Accessing workspace:`, Codex `Folder access`)뿐이다. core는 이 창을 글자와 폴더 경로가 정확히 같을 때만 읽어 `blockedReason:"setup"`·`folder_trust`로 올리고 대표가 같은 승인 API로 답한다. `POST /api/projects`에 `trustFolder:true`를 실어 만든 프로젝트에서는 그 프로젝트 폴더의 이 창에 서버가 '신뢰'를 대신 고른다(조건은 아래 '추가 계약(1차 완성도)')
 - `POST /api/members/:id/fresh-session`은 같은 제공자의 새 세션으로 명시적으로 인계한다. 작업 중·승인 대기·불확실한 전달·직접 관리하는 세션은 거부한다. 잃어버린 Codex 세션과 기존 실행기 멤버를 복구하는 경로이며, 기존 실행기 터미널은 건드리지 않는다. 멤버 기록을 유지하고 세션 이력·토큰을 회전한다.
 - `POST /api/members/:id/sleep`(`{force?}` 는 대표가 '그래도 재우기'를 눌렀을 때만) · `POST /api/members/:id/resume|compact`(resume 은 실행이 꺼진 프로젝트면 409) · `POST /api/members/:id/interrupt` · `POST /api/members/:id/close`(직접 띄운 세션만)
 - `PUT /api/settings`(SettingsPatch) → Settings. `ranks`·`codexRanks`는 고친 칸만 보내도 된다. `ranks`는 Claude, `codexRanks`는 Codex의 manager/lead/staff별 `{model,effort}` 기본값이다. 팀장별 지정이 먼저이며 null이면 해당 CLI 자체 기본값을 쓴다. Codex 기본값은 모두 null이고 effort는 선택한 모델의 `/api/models` efforts 목록으로 검증한다. 모델이 기본값이거나 efforts가 비어 있으면 제공자 기본 목록(Claude low/medium/high/xhigh/max, Codex minimal/low/medium/high/xhigh)을 쓴다. 캐시에 새 effort가 추가되면 같은 문자열을 저장할 수 있다. effort만 고치는 PATCH/PUT도 저장된 모델로 검증한다. 직급 model만 바꾸어 기존 effort가 새 목록에서 빠지면 null로 비우며 응답의 `resetEfforts`에 `codexRanks.lead.effort` 같은 필드 경로를 남긴다(v2는 `settings.resetEfforts`). 이 배열은 응답 전용이며 저장하지 않는다. Codex staff 노력은 저장만 하며 실행에 전달하지 않고, staff 모델은 `agents.default_subagent_model`로 전달한다. 필드 없는 레거시 저장은 기존 codexRanks를 유지한다. 실행 중인 턴을 중단하지 않고 기존 ranks와 같은 다음 설정 적용 경로를 따른다. 저장된 과거 backend 값과 무관하게 이 소스의 새 실행은 core다. 제공자 선택은 멤버의 cli로 한다
@@ -95,7 +98,7 @@ MCP stdio ── iamceo mcp /agent/* ───┴─ Bun / SQLite / Orchestrator
 
 `Project.connection`·`ProjectSummary.connection`은 `{ok,reason:'runner_off'|'backend_down'|'archived'|null,detail}`다. 보관 아님이고 실행 켜짐과 core availability가 충족되거나 살아 있는 직접 CLI가 있어야 한다. 서버는 주기적으로, 입력 직전에 다시 확인한다. 연결 게이트는 메시지·결재 답·재전송·프로젝트 첨부를 409로 막고 화면도 같은 사유를 보인다. `ask`·`todo`·`post` 같은 세션 도구와 대표의 할 일 체크는 별도다. 보관 중에는 세션을 자동으로 깨우지 않는다.
 
-core가 응답해도 각 CLI의 trust/auth/권한 창이나 상태 미보고로 멤버 입력이 보류될 수 있다. 코어 설치·연결 진단과 모델 로그인 성공은 같은 뜻이 아니다. 서버 재시작의 delivering 또는 PTY 응답 손실은 `delivery_unknown`으로 보류하며 재시도 틱이 자동 재전송하지 않는다. 오래된 herdr/headless 세션은 `legacy_session`으로 보류하고 명시적 전환 전에는 새 core를 열지 않는다.
+core가 응답해도 각 CLI의 trust/auth/권한 창이나 상태 미보고로 멤버 입력이 보류될 수 있다. 코어 설치·연결 진단과 모델 로그인 성공은 같은 뜻이 아니다. 서버 재시작의 delivering 또는 PTY 응답 손실은 `delivery_unknown`으로 보류하며 재시도 틱이 자동 재전송하지 않는다. 지워진 옛 실행기(herdr·headless)의 세션이 남은 팀장은 `legacy_session`으로 보류하고 명시적 전환 전에는 새 core를 열지 않는다.
 
 ### 3.2 네이티브 아티팩트
 
@@ -255,7 +258,7 @@ Mac·iPhone의 공통 MarkdownText(인라인 code·일반 글·표 포함)는 �
 - 총괄 지시: `[총괄] <화면 이름>에게\n사용자 요청(원문, 서버 확인): "<인용>"\n[대표 글 전문 #<id>: "<전문>"]\n할 일: <글>` (할 일의 둘째 줄부터는 `> `). 인용이 그 프로젝트 대표 메시지·결재 메모에 낱말 경계까지 그대로(공백 정규화) 있으면 `서버 확인`, 아니면 `총괄 인용(미확인): "..."`. 인용이 글의 일부면 전문 줄이 함께 가고, 글 전체면 인용 줄 끝에 `#<id> <시각>`이 붙는다. 버튼 글과 4자 미만 인용은 맞아도 `사용자 요청(문맥 확인 필요): "<인용>"`이다: 무엇에 대한 답인지 글만으로 알 수 없으므로 버튼 글이면 `결재 #<id> '<카드 제목>'에서 고른 답 <시각>`을 함께 싣는다. 버튼의 설명은 팀장이 쓴 글이라 근거가 아니다. 승인 대조는 처리된 결재 전부를 본다(화면의 최근 50건 제한을 받지 않는다).
 - 팀장 보고: `[보고 <이름>] <kind>: <제목>\n> <본문>` (총괄에게)
 - 시스템: `[시스템] <글>`
-- herdr 호환 어댑터의 긴 글(>1500자)은 `~/.iamceo/inbox/<팀장 id>/<id>.md`에 쓰고 경로를 넣는다. 첨부도 그 폴더로 이어(하드 링크) 경로를 알린다. herdr 칸은 이 폴더만 `--add-dir`로 연다.
+- 첨부는 `~/.iamceo/inbox/<팀장 id>/`로 이어(하드 링크, 안 되면 복사) 그 경로를 글에 알린다. 긴 글(>1500자)을 같은 폴더의 파일로 빼던 것은 옛 herdr 실행기의 동작이었고 실행기와 함께 지웠다. core는 글을 그대로 넣는다.
 - 큐 전달마다 영속 `#iamceo_<토큰>`, 묶음마다 `#iamceo_b_<토큰>`을 사용한다. 기존 원본 `#id`는 참조로 남기며, 긴 글 파일과 봉투 표식의 관계도 보존한다(§3.5). 표식은 인증 수단이 아니다.
 
 ## 5. Runner와 core protocol
@@ -288,7 +291,7 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 
 수동 조작은 5분 token lease다. claim과 동일 token 갱신, input·key, release를 제공한다. input만 명시적 사람 요청 아래 `force:true`를 쓸 수 있다. 앱·서버의 일반 자동 전달이나 MCP 에이전트 도구에서 승인 bypass로 쓰지 않는다. lease 종료·만료 시 자동 펌프가 다시 진행할 수 있고 멤버 종료·제공자 교체 시 token은 무효다.
 
-과거 headless의 `claude -p`, herdr의 `agent.prompt`·화면 지우기·transcript 복원·background 화면 탐지는 회귀 코드에만 남아 있다. core 계약에 적용하지 않는다.
+과거 headless의 `claude -p`, herdr의 `agent.prompt`·화면 지우기·transcript 복원·background 화면 탐지는 실행기와 함께 지웠다. 코드에도 시험에도 남아 있지 않다.
 
 ## 6. Orchestrator 규칙
 
@@ -301,13 +304,13 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 - post의 완료·막힘·질문은 총괄을 깨우고 진행·알림은 다음 깨움에 간다. `ask_close`·`todo_close`의 소유권·사용자 원문 대조는 §7과 같다. 할 일 체크를 되돌리면 나가지 않은 알림은 거두고 이미 전달된 완료는 정정한다.
 - team_add는 유일한 핸들·이름과 역할·규칙·선택한 CLI로 독립 core 세션을 만든다. team_assign은 대기열과 병렬 선호를 다룬다. Claude는 Ultracode 명령 응답을 확인하고 Codex는 native subagent 기능과 다음 과제의 선호 지시를 쓴다. 실제 병렬 실행 수를 보장하지 않는다.
 - 잠재우기·종료는 명시적 액션이다. 일하는 턴·열린 결재·큐를 무시하는 force는 대표가 선택했을 때만 쓴다. core는 소유권이 확인된 terminal만 종료하고 idle 초안·알 수 없는 composer를 지우지 않는다.
-- 서버 재시작은 기존 core holder를 보존하고 멤버·프로젝트·CLI 라벨로 재결합한다. 단절이나 start timeout만으로 동일 CLI를 다시 띄우지 않는다. 기존 herdr/headless 세션은 원본을 보존하고 `legacy_session`으로 보류한다. 자동 backend 전환이나 이전 프로세스 일괄 종료를 하지 않는다.
+- 서버 재시작은 기존 core holder를 보존하고 멤버·프로젝트·CLI 라벨로 재결합한다. 단절이나 start timeout만으로 동일 CLI를 다시 띄우지 않는다. 옛 실행기(herdr·headless)의 세션이 남은 팀장 행은 원본을 보존하고 `legacy_session`으로 보류한다. 그 세션을 이어 열거나 넘겨받는 코드는 없고, 자동 backend 전환이나 이전 프로세스 일괄 종료도 하지 않는다. `PUT /api/settings`의 `backend`는 `core`만 받는다(다른 값은 400).
 - 이 소스의 backend 조립은 core다. 운영 절차는 [운영 모델](operating-model.md)을 따른다. 제공자 기본은 Claude, 프로젝트의 chiefCli와 각 Member.cli는 독립적으로 저장된다. 같은 멤버의 제공자를 바꾸어도 멤버 id·역할·업무·대화·결재·파일은 유지한다.
 - 제공자·살아 있는 세션의 모델/effort 변경은 working·blocked·처리 중·불확실한 전달이 있으면 409다. 새 CLI 인자를 먼저 검증하고, 이전 종료 확인 뒤 `member_session_history`를 남기고 MCP 토큰·session_generation을 회전한다. 이전 종료 실패면 제공자와 토큰을 유지하고, 이후 새 시작 실패면 오류로 남긴다.
 - 같은 제공자의 설정 변경은 Claude와 Codex 모두 native session ID를 보존해 resume한다. native ID를 모르거나 resume이 실패하면 즉시 새 세션을 만들지 않고 설정 적용을 다음 자연 기동으로 보류한다. 보류 설정과 실패 여부는 DB에 남아 서버 재시작으로 재기동을 반복하지 않는다. 실패 시 미확정 입력·종료 검증을 우회해 옛 설정으로 무조건 전달하지 않는다. 명시적 새 세션/제공자 변경은 별도의 새 세션 경로다. 역할·현재 일·다음 일·프로젝트 상황과 board 확인 안내를 넣는다. 같은 대화 문맥·숨은 추론을 다른 제공자에게 옮기는 기능은 없다.
 - 모델은 멤버별 덮어쓰기, 적용 가능한 직급 값, CLI 기본 순이다. Claude용 직급 모델·staff 설정을 Codex에 자동 상속하지 않는다. 설정은 실행 인자로 적용하고 사용자 전역 CLI 기본값을 수정하지 않는다. null 모델·effort는 기본으로 돌아간다.
 - 판 정리는 기존 주기·변경 여부·연결·총괄 idle·중복 지시 조건을 따르며 정리만 하려고 새 총괄을 띄우지 않는다. 명시적 tidy는 총괄에게 지시를 넣는다. 업무 완료 보고는 MCP에 남긴다.
-- 직접 `iamceo join`한 CLI는 실행기 밖이다. 서버가 그 프로세스를 띄우거나 입력하지 않고 wait/ask 롱폴로 지시·답을 받는다. 과거 herdr adopt·release는 새 core 편입 수단이 아니다.
+- 직접 `iamceo join`한 CLI는 실행기 밖이다. 서버가 그 프로세스를 띄우거나 입력하지 않고 wait/ask 롱폴로 지시·답을 받는다. 기존 터미널 세션을 넘겨받던 herdr 편입(adopt)·해제(release)는 지웠다. 이미 떠 있는 CLI를 붙이는 길은 `iamceo join`뿐이다.
 
 ## 7. 에이전트 도구 (`POST /agent/tool` `{name,args}`, Bearer 멤버 토큰. `GET /agent/tools` → 그 멤버의 도구 목록)
 `/agent/*`(`/agent/join`·`/agent/tool`·`/agent/tools`·`/agent/inbox/*`·`/agent/ask/wait`)는 이 Mac 안에서 온 요청만 받는다. 실제 상대 주소가 loopback(127.0.0.0/8·::1)이거나 이 컴퓨터 자신의 주소여야 하고, 대리 전달 헤더(`Forwarded`·`X-Forwarded-For`·`X-Forwarded-Host`·`X-Forwarded-Proto`·`X-Real-IP`·`Tailscale-User-Login`)가 하나라도 있으면 거부한다. 아니면 토큰을 보기 전에 403 `{error,code:"LOCAL_ONLY"}`. tailnet 의 다른 기기와 `tailscale serve` 를 거친 요청은 이 통로를 쓸 수 없다. MCP 브리지와 `iamceo join` 은 같은 Mac 에서 127.0.0.1 로 부른다.
@@ -333,8 +336,9 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 - `tests/cli.test.ts`, `tests/native-api-contract.test.ts`, `tests/server-runtime.test.ts`: 격리 CLI 서버·네이티브 HTTP/WS·runtime 계약. unavailable socket의 동시 진단도 서버를 죽이지 않아야 한다.
 - `native/Tests/IAMCEOTests`: Swift 계약 디코딩·요청 인증·origin 제한·네트워크 오류·stable message id·expectedVersion을 URLSession mock으로 검증한다. SwiftPM 시험·macOS 빌드·iOS simulator 빌드는 별도 검증이며 실기기 설치·서명·공증은 별도로 확인한다.
 - 실제 PTY 시작·daemon 재시작 검증은 임시 IAMCEO_HOME·HC_SESSION·HC_SOCKET·XDG 경로에서만 한다. 사용자 원래 daemon·터미널을 끄거나 전역 CLI를 업데이트하지 않는다. CLI 시작만 검증하는 시험에 자동 유료 prompt를 넣지 않는다.
-- 기존 `tests/fixtures/fake-claude.ts`, herdr fixture, headless·adopt 서버 시험은 과거 어댑터의 회귀 시험이다. 현재 core UX·수명·상태 계약의 근거로 사용하지 않는다.
-- 남은 `tests/e2e-real/*`는 명시적으로 승인된 유료 모델 시험에서만 실행한다. 일반 unit/integration/typecheck에 포함해 유료 작업을 유발하지 않는다.
+- 옛 실행기 전용 시험(`tests/herdr.test.ts`, `herdr-contract.test.ts`, `headless.test.ts`)과 herdr fixture, 실제 모델을 부르던 `tests/e2e-real/*`는 실행기와 함께 지웠다. 총괄 시험은 운영과 같은 실행기 종류로 돈다: `tests/fixtures/core-harness.ts`가 가짜 core 소켓에 실제 `CoreRunner`·실제 총괄·실제 HTTP 서버를 붙인다. `scripts/check.sh server`는 `tests/*.test.ts`를 빠짐없이 돌린다.
+- `tests/fixtures/fake-claude.ts`는 격리 실행 틀(`isolated-runtime.ts`)의 CLI 자리에만 남아 있다. core UX·수명·상태 계약의 근거가 아니다.
+- 실제 CLI와 실제 herdr-core를 붙여 보는 자동 시험은 없다. 유료 모델 호출이 필요한 확인은 명시적으로 승인된 경우에만 손으로 한다.
 
 ## 10. 클라이언트와 검증 경계
 

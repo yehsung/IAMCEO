@@ -43,19 +43,33 @@ describe("config", () => {
     expect(loadConfig(env).accessCode).toBe(a.accessCode);
   });
 
-  test("환경 변수가 파일보다 우선하고 $HERDR_SOCKET_PATH 는 무시한다", () => {
+  test("환경 변수가 파일보다 우선한다", () => {
     const home = tempDir();
-    updateConfigFile({ accessCode: "abc", port: 1234, claudeBin: "/x/claude", herdrSocket: "/x/sock", hosts: ["127.0.0.1"] }, { IAMCEO_HOME: home });
-    const fromFile = loadConfig({ IAMCEO_HOME: home, HERDR_SOCKET_PATH: "/live/sock" });
-    expect(fromFile).toMatchObject({ accessCode: "abc", port: 1234, claudeBin: "/x/claude", herdrSocket: "/x/sock", hosts: ["127.0.0.1"] });
-    const fromEnv = loadConfig({ IAMCEO_HOME: home, IAMCEO_PORT: "0", IAMCEO_CLAUDE_BIN: "/y/claude", IAMCEO_HERDR_SOCKET: "/y/sock" });
-    expect(fromEnv).toMatchObject({ port: 0, claudeBin: "/y/claude", herdrSocket: "/y/sock" });
+    updateConfigFile({ accessCode: "abc", port: 1234, claudeBin: "/x/claude", hosts: ["127.0.0.1"] }, { IAMCEO_HOME: home });
+    const fromFile = loadConfig({ IAMCEO_HOME: home });
+    expect(fromFile).toMatchObject({ accessCode: "abc", port: 1234, claudeBin: "/x/claude", hosts: ["127.0.0.1"] });
+    const fromEnv = loadConfig({ IAMCEO_HOME: home, IAMCEO_PORT: "0", IAMCEO_CLAUDE_BIN: "/y/claude" });
+    expect(fromEnv).toMatchObject({ port: 0, claudeBin: "/y/claude" });
   });
 
-  test("기본 herdr 소켓은 $HERDR_SOCKET_PATH 를 따라가지 않는다", () => {
-    const c = loadConfig({ IAMCEO_HOME: tempDir(), HERDR_SOCKET_PATH: "/live/sock" });
-    expect(c.herdrSocket).toBe(join(homedir(), ".config", "herdr", "herdr.sock"));
-    expect(c.hosts[0]).toBe("127.0.0.1");
+  // 옛 시험: "…$HERDR_SOCKET_PATH 는 무시한다", "기본 herdr 소켓은 $HERDR_SOCKET_PATH 를 따라가지 않는다".
+  // 옛 herdr 실행기를 지우며 소켓 설정 자체가 없어졌다. 남은 약속은 "값이 있어도 읽지 않고 오류도 내지 않는다"이다.
+  test("옛 herdr 소켓 설정은 파일·환경에 어떤 값이 있어도 무시한다: 오류 없이 읽고, 설정에 싣지 않고, 파일의 값은 지우지 않는다", () => {
+    const home = tempDir();
+    const env = { IAMCEO_HOME: home, IAMCEO_HERDR_SOCKET: "/y/sock", HERDR_SOCKET_PATH: "/live/sock" };
+    updateConfigFile({ accessCode: "abc", hosts: ["127.0.0.1"] }, env);
+    const path = join(home, "config.json");
+    for (const value of ["/x/sock", "", 7, null, { path: "/x" }]) {
+      writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), herdrSocket: value }), { mode: 0o600 });
+      const config = loadConfig(env);
+      expect(config).toMatchObject({ accessCode: "abc", hosts: ["127.0.0.1"] });
+      expect(config).not.toHaveProperty("herdrSocket");
+      for (const leaked of ["/x/sock", "/y/sock", "/live/sock"]) expect(JSON.stringify(config)).not.toContain(leaked);
+    }
+    // 다른 설정을 고쳐 써도 사용자가 적어 둔 값은 그대로 남는다(읽지 않을 뿐 지우지 않는다).
+    writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), herdrSocket: "/x/sock" }), { mode: 0o600 });
+    updateConfigFile({ port: 4321 }, env);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ herdrSocket: "/x/sock", port: 4321, accessCode: "abc" });
   });
 
   test("깨진 설정과 잘못된 포트는 분명한 오류를 낸다", () => {
@@ -168,7 +182,7 @@ describe("store", () => {
     events.length = 0;
     store.patchMember(m.id, { contextPct: 42, sessionId: "s1", parallel: true, lastError: null });
     expect(events.map((e) => e.type)).toEqual(["member"]);
-    expect(store.getMemberBySession("s1")!.contextPct).toBe(42);
+    expect(store.getMember(m.id)).toMatchObject({ contextPct: 42, sessionId: "s1" });
     expect(store.getMember(m.id)!.parallel).toBe(true);
     events.length = 0;
     store.patchMember(m.id, { status: "working" });

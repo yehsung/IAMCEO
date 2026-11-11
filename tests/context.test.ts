@@ -1,9 +1,10 @@
-import { HerdrRunner, inputLooksEmpty, screenContextPct } from "../server/runner/herdr.ts";
+import { inputLooksEmpty, screenContextPct } from "../server/runner/claude-screen.ts";
 import { CoreRunner } from "../server/runner/core.ts";
 import { transcriptPath } from "../server/runner/transcript.ts";
 import { capturedContext, readContextRecord, STATUSLINE_MARKER, writeStatuslineWrapper } from "../server/runner/statusline.ts";
 import { readCodexContext } from "../server/runner/codex-context.ts";
 // 문맥 % 의 창 크기: 배우기·맞추기·고르는 순서·저장·초기화. 임시 IAMCEO_HOME 만 쓴다(라이브 홈·herdr 소켓을 건드리지 않는다).
+// 서버 쪽 시험은 운영과 같은 실행기 종류(core)로 돈다. 옛 실행기(herdr·headless)의 내부만 보던 시험은 지웠다.
 import { afterAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -16,9 +17,9 @@ import { MIGRATIONS, openDb } from "../server/db.ts";
 import { startServer, type RunningServer } from "../server/http.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
 import { contextWindowFor, DEFAULT_CONTEXT_WINDOW, inferContextWindow, KNOWN_CONTEXT_WINDOWS, measureContext } from "../server/runner/context.ts";
-import { StreamParser } from "../server/runner/headless.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
+import { coreSetup, startFakeCore } from "./fixtures/core-harness.ts";
 
 const cleanups: (() => Promise<void> | void)[] = [];
 afterAll(async () => {
@@ -139,7 +140,7 @@ describe("저장과 초기화", () => {
     const db = openDb(config.dbPath);
     const s = new Store(db, new Bus());
     const p = s.createProject({ name: "창 시험", cwd: config.home });
-    const m = s.createMember({ projectId: p.id, handle: "w", name: "직원", kind: "worker", backend: "herdr", sessionId: "s1", paneId: "p1" });
+    const m = s.createMember({ projectId: p.id, handle: "w", name: "직원", kind: "worker", backend: "core", sessionId: "s1", paneId: "p1" });
     return { s, m, db, config };
   }
 
@@ -216,39 +217,22 @@ describe("저장과 초기화", () => {
   });
 });
 
-describe("headless: modelUsage 에 창 크기가 없을 때만 서버가 정한다", () => {
-  const usage = (tokens: number) => JSON.stringify({ type: "assistant", message: { model: "claude-opus-5-5", content: [{ type: "text", text: "끝" }], usage: { input_tokens: tokens } } });
-
-  test("창 크기를 알면 context, 모르면 context_usage", () => {
-    const events: RunnerEvent[] = [];
-    const known = new StreamParser("m", (e) => events.push(e), { reportContext: true, contextWindow: null });
-    known.feed(usage(190_000));
-    known.feed(JSON.stringify({ type: "result", subtype: "success", result: "끝", modelUsage: { "claude-opus-5-5": { contextWindow: 1_000_000 } } }));
-    expect(events.filter((e) => e.type === "context" || e.type === "context_usage")).toEqual([{ type: "context", memberId: "m", pct: 19, window: 1_000_000 }]);
-
-    events.length = 0;
-    const unknown = new StreamParser("m", (e) => events.push(e), { reportContext: true, contextWindow: null });
-    unknown.feed(usage(190_000));
-    unknown.feed(JSON.stringify({ type: "result", subtype: "success", result: "끝" }));
-    expect(events.filter((e) => e.type === "context" || e.type === "context_usage")).toEqual([{ type: "context_usage", memberId: "m", tokens: 190_000, shownPct: null, model: "claude-opus-5-5" }]);
-
-    events.length = 0;
-    const quiet = new StreamParser("m", (e) => events.push(e), { reportContext: false, contextWindow: null });
-    quiet.feed(usage(190_000));
-    quiet.feed(JSON.stringify({ type: "result", subtype: "success", result: "끝" }));
-    expect(events.filter((e) => e.type === "context" || e.type === "context_usage")).toEqual([]);
-  });
-});
-
-// 서버 처리: 칸 실행기 자리에 가짜를 끼워 턴 끝 사용량을 흘린다.
+// 서버 처리: 실행기 자리에 core 종류의 가짜를 끼워 턴 끝 사용량을 흘린다(총괄의 core 분기가 그 읽기를 처리한다).
+// 실제 CoreRunner 가 읽기를 만드는 쪽은 아래 "core reportContext" 시험과 "회귀" 시험이 본다.
+const REPORT_NUDGE = "[시스템] 보고 보완:";
 class UsageRunner implements Runner {
-  readonly kind = "herdr" as const;
+  readonly kind = "core" as const;
   sent: string[] = [];
   compacts: string[] = [];
   private cb: (e: RunnerEvent) => void = () => {};
   async available() { return { ok: true }; }
   async start(m: RunnerMember, _o: StartOpts) { return { sessionId: m.sessionId ?? crypto.randomUUID(), paneId: "p1", tabId: "tab1" }; }
-  async send(_m: RunnerMember, text: string): Promise<SendResult> { this.sent.push(text); return { ok: true }; }
+  async send(m: RunnerMember, text: string): Promise<SendResult> {
+    // core 종류에서는 보고 없이 끝난 턴에 서버가 '보고 보완'을 한 번 보낸다. 이 파일의 주제가 아니라, 그것만 든 글은 받자마자 끝난 턴으로 답하고 세지 않는다.
+    if (text.startsWith(REPORT_NUDGE) && !text.includes("할 일:")) { setTimeout(() => this.cb({ type: "turn_end", memberId: m.id, finalText: "", isError: false }), 0); return { ok: true }; }
+    this.sent.push(text);
+    return { ok: true };
+  }
   isBusy() { return false; }
   async compact(_m: RunnerMember, focus: string): Promise<SendResult> { this.compacts.push(focus); return { ok: true }; }
   async setParallel(): Promise<SendResult> { return { ok: true }; }
@@ -268,8 +252,7 @@ async function server(home?: { home: string; env: Record<string, string> }) {
   const db = openDb(config.dbPath);
   const store = new Store(db, bus);
   const runner = new UsageRunner();
-  const orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["herdr", runner]]), timings: { tickMs: 60_000, healthMs: 60_000 } });
-  store.patchSettings({ backend: "herdr" });
+  const orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["core", runner]]), timings: { tickMs: 60_000, healthMs: 60_000 } });
   const http: RunningServer = await startServer({ config, store, bus, orch });
   orch.setServerUrl(http.urls[0]!);
   let closed = false;
@@ -307,21 +290,36 @@ async function turn(t: Server, m: Member, usage: { tokens: number | null; shownP
 
 describe("서버: 턴 끝 사용량으로 % 를 정하고 창 크기를 배운다", () => {
   test("회귀: 상태줄이 잘린 1M 세션(190k 토큰)은 19% 이고, 다음 일 전에 압축하지 않는다", async () => {
-    const t = await server();
-    const w = await worker(t);
-    await turn(t, w, { tokens: 190_000, shownPct: null, model: "claude-opus-5-5" });
-    expect(t.store.requireMember(w.id)).toMatchObject({ contextPct: 19, contextWindow: null });
-    const sent = t.runner.sent.length;
-    await t.orch.assign(w.projectId, w.handle, { text: "다음 일" });
-    await waitFor("다음 일 전달", () => t.runner.sent.length > sent);
-    expect(t.runner.compacts).toEqual([]);
+    // 실제 CoreRunner 로 끝까지 본다: 가짜 CLI 의 세션 기록 → CoreRunner 의 턴 끝 읽기 → 총괄.
+    // 상태줄이 잘린 세션이라 가짜 CLI 가 상태줄 기록을 쓰지 않게 한다(contextHome 을 주지 않는다). 창 크기 실측이 없는 읽기가 된다.
+    const home = mkdtempSync(join(tmpdir(), "iamceo-ctx-core-"));
+    const core = await startFakeCore({ claudeHome: join(home, "claude-home") });
+    const t = await coreSetup({ home, core });
+    cleanups.push(async () => { await t.close(); await core.stop(); });
+    const w = (await t.orch.addMember(t.project.id, { name: "플레이스토어", handle: "store" })).member;
+    const seen: RunnerEvent[] = [];
+    t.runner.on(e => { if (e.memberId === w.id && (e.type === "context_usage" || e.type === "turn_end")) seen.push(e); });
+    await t.orch.assign(t.project.id, w.handle, { text: "일 @fake:usage=190000 @fake:post=끝" });
+    await t.waitFor("19%", () => t.member(w.id).contextPct === 19);
+    await t.idle(w.id);
+    expect(t.member(w.id)).toMatchObject({ contextPct: 19, contextWindow: null });
+    // 읽기는 창 크기 실측 없이(exact 없음) 턴 끝보다 먼저 나온다.
+    expect(seen.map(e => e.type)).toEqual(["context_usage", "turn_end"]);
+    expect(seen[0]).toMatchObject({ tokens: 190_000, shownPct: null, model: "fake-model" });
+    expect((seen[0] as Extract<RunnerEvent, { type: "context_usage" }>).exact).toBeUndefined();
+    await t.orch.assign(t.project.id, w.handle, { text: "다음 일 @fake:post=다음끝" });
+    await t.waitFor("다음 일 전달", () => t.turns(w.id).some(c => c.prompt.includes("다음 일")));
+    expect(t.turns(w.id).some(c => c.prompt.startsWith("/compact"))).toBe(false);
+    expect(t.turns(w.id)).toHaveLength(2);
   });
 
   test("상태줄이 보이면 그 직원의 창 크기를 배워 저장하고, 잘린 뒤에는 그 크기로 잰다(재시작 뒤에도)", async () => {
     const first = await server();
     const w = await worker(first);
     await turn(first, w, { tokens: 54_000, shownPct: 27 });
-    expect(first.store.requireMember(w.id)).toMatchObject({ contextPct: 27, contextWindow: null });
+    // 달라진 점: 옛 실행기 분기는 토큰이 달라진 두 번의 일치 읽기 뒤에야 화면 추정을 저장했다(첫 읽기 뒤 null).
+    // core 분기에는 그 후보 단계가 없다. 화면 추정을 읽은 그 턴에 저장한다.
+    expect(first.store.requireMember(w.id)).toMatchObject({ contextPct: 27, contextWindow: 200_000, contextWindowSource: "screen" });
     await turn(first, w, { tokens: 56_000, shownPct: 28 });
     expect(first.store.requireMember(w.id)).toMatchObject({ contextPct: 28, contextWindow: 200_000, contextWindowSource: "screen" });
     await first.close();
@@ -330,22 +328,26 @@ describe("서버: 턴 끝 사용량으로 % 를 정하고 창 크기를 배운�
     expect(t.store.requireMember(w.id).contextWindow).toBe(200_000);
     t.runner.emit({ type: "context_usage", memberId: w.id, tokens: 150_000, shownPct: null, model: null });
     await waitFor("75%", () => t.store.requireMember(w.id).contextPct === 75);
-    // 배운 200k 창에서 75% 는 압축 기준(70%)을 넘는다. 다음 일 전에 압축한다.
+    // 달라진 점: 옛 실행기 분기는 배운 200k 창의 75% 가 압축 기준(70%)을 넘어 다음 일 전에 압축했다.
+    // core 는 상태줄 기록으로 실측한 측정에서만 자동 압축한다. 화면에서 추정한 창으로는 압축하지 않고 일을 그대로 넣는다.
+    const sent = t.runner.sent.length;
     await t.orch.assign(w.projectId, w.handle, { text: "다음 일" });
-    await waitFor("압축", () => t.runner.compacts.length === 1);
+    await waitFor("다음 일 전달", () => t.runner.sent.length > sent);
+    expect(t.runner.compacts).toEqual([]);
   });
 
   test("새 세션이 열리면 배운 값을 지우고 다시 배운다", async () => {
     const t = await server();
     const w = await worker(t);
+    // 달라진 점: core 분기는 첫 읽기에 저장한다(옛 실행기 분기는 둘째 읽기 뒤).
     await turn(t, w, { tokens: 268_000, shownPct: 27 });
-    expect(t.store.requireMember(w.id).contextWindow).toBeNull();
+    expect(t.store.requireMember(w.id).contextWindow).toBe(1_000_000);
     await turn(t, w, { tokens: 280_000, shownPct: 28 });
     expect(t.store.requireMember(w.id).contextWindow).toBe(1_000_000);
     t.runner.emit({ type: "session", memberId: w.id, sessionId: crypto.randomUUID() });
     await waitFor("지움", () => t.store.requireMember(w.id).contextWindow === null);
     await turn(t, w, { tokens: 54_000, shownPct: 27 });
-    expect(t.store.requireMember(w.id).contextWindow).toBeNull();
+    expect(t.store.requireMember(w.id).contextWindow).toBe(200_000);
     await turn(t, w, { tokens: 56_000, shownPct: 28 });
     expect(t.store.requireMember(w.id).contextWindow).toBe(200_000);
   });
@@ -366,62 +368,21 @@ describe("서버: 턴 끝 사용량으로 % 를 정하고 창 크기를 배운�
     await waitFor("10%", () => t.store.requireMember(w.id).contextPct === 10);
   });
 
-  test("토큰이 줄고 남은 높은 % 는 다음 읽기와 다르면 배우지 않고 잘린 뒤에도 압축하지 않는다", async () => {
+  // 옛 시험: "토큰이 줄고 남은 높은 % 는 다음 읽기와 다르면 배우지 않고 잘린 뒤에도 압축하지 않는다".
+  // 달라진 점: 옛 실행기 분기는 두 읽기가 맞을 때만 배워서, 토큰이 줄어든 뒤 화면에 남은 옛 % 로는 창 크기를 배우지 않았다(끝까지 null).
+  // core 분기에는 그 확인이 없다. 어긋난 % 로도 그 턴에 추정 창을 저장하고, 다음 화면 읽기가 덮어쓴다. 추정 창으로는 압축하지 않는다.
+  test("토큰이 줄고 남은 높은 % 로도 그 턴에는 추정 창을 저장하고 다음 읽기가 덮어쓴다. 잘린 뒤에도 압축하지 않는다", async () => {
     const t = await server(); const w = await worker(t);
     await turn(t, w, { tokens: 40_000, shownPct: 20 });
-    expect(t.store.requireMember(w.id)).toMatchObject({ contextPct: 20, contextWindow: null });
+    expect(t.store.requireMember(w.id)).toMatchObject({ contextPct: 20, contextWindow: 200_000, contextWindowSource: "screen" });
     await turn(t, w, { tokens: 45_000, shownPct: 5 });
-    expect(t.store.requireMember(w.id)).toMatchObject({ contextPct: 5, contextWindow: null });
+    expect(t.store.requireMember(w.id)).toMatchObject({ contextPct: 5, contextWindow: 1_000_000, contextWindowSource: "screen" });
     await turn(t, w, { tokens: 150_000, shownPct: null });
-    expect(t.store.requireMember(w.id)).toMatchObject({ contextPct: 15, contextWindow: null });
+    expect(t.store.requireMember(w.id)).toMatchObject({ contextPct: 15, contextWindow: 1_000_000 });
     const sent = t.runner.sent.length;
     await t.orch.assign(w.projectId, w.handle, { text: "다음 일" });
     await waitFor("다음 일 전달", () => t.runner.sent.length > sent);
     expect(t.runner.compacts).toEqual([]);
-  });
-
-  test("같은 토큰의 반복은 저장하지 않고 토큰이 달라진 일치 읽기만 저장한다", async () => {
-    const t = await server(); const w = await worker(t);
-    await turn(t, w, { tokens: 54_000, shownPct: 27 });
-    await turn(t, w, { tokens: 54_000, shownPct: 27 });
-    expect(t.store.requireMember(w.id)).toMatchObject({ contextPct: 27, contextWindow: null, contextWindowSource: null });
-    await turn(t, w, { tokens: 56_000, shownPct: 28 });
-    expect(t.store.requireMember(w.id)).toMatchObject({ contextWindow: 200_000, contextWindowSource: "screen" });
-  });
-
-  for (const window of [420_000, 424_000]) test(`화면 추정 5% 허용: 400k 다음 ${window} 은 최신 값을 쓴다`, async () => {
-    const t = await server(); const w = await worker(t);
-    await turn(t, w, { tokens: 200_000, shownPct: 50 });
-    await turn(t, w, { tokens: window / 2, shownPct: 50 });
-    expect(t.store.requireMember(w.id).contextWindow).toBe(window === 420_000 ? window : null);
-    if (window === 424_000) {
-      await turn(t, w, { tokens: 216_000, shownPct: 50 });
-      expect(t.store.requireMember(w.id)).toMatchObject({ contextWindow: 432_000, contextWindowSource: "screen" });
-    }
-  });
-
-  test("새 세션에서는 이전 후보와 같아도 다시 두 번 읽는다", async () => {
-    const t = await server(); const w = await worker(t);
-    await turn(t, w, { tokens: 54_000, shownPct: 27 });
-    t.runner.emit({ type: "session", memberId: w.id, sessionId: crypto.randomUUID() });
-    await turn(t, w, { tokens: 56_000, shownPct: 28 });
-    expect(t.store.requireMember(w.id).contextWindow).toBeNull();
-    await turn(t, w, { tokens: 58_000, shownPct: 29 });
-    expect(t.store.requireMember(w.id)).toMatchObject({ contextWindow: 200_000, contextWindowSource: "screen" });
-  });
-
-  for (const source of ["statusline", "codex", "headless", "context"] as const) test(`실측 ${source} 읽기는 이전 화면 후보를 비운다`, async () => {
-    const t = await server(); const w = await worker(t);
-    const usage = { type: "context_usage" as const, memberId: w.id, tokens: 54_000, shownPct: 27, model: null };
-    t.runner.emit(usage);
-    if (source === "context") t.runner.emit({ type: "context", memberId: w.id, pct: 27, window: 200_000 });
-    else t.runner.emit({ ...usage, exact: { window: 200_000, source } });
-    expect(t.store.requireMember(w.id).contextWindowSource).toBe(source === "context" ? "headless" : source);
-    // 모델 교체로 실측이 지워져도 옛 화면 후보는 되살아나지 않는다.
-    t.store.setAppliedConfig(w.id, { model: "new-model", effort: null, staffModel: null, staffEffort: null });
-    expect(t.store.requireMember(w.id).contextWindow).toBeNull();
-    t.runner.emit({ ...usage, tokens: 56_000, shownPct: 28 });
-    expect(t.store.requireMember(w.id)).toMatchObject({ contextPct: 28, contextWindow: null });
   });
 });
 
@@ -588,62 +549,11 @@ test("토큰이 아직 없는 실측 창도 출처와 함께 저장한다", asyn
   expect(t.store.requireMember(w.id)).toMatchObject({ contextWindow: 475_000, contextPct: null });
 });
 
-// 생성자는 소켓·타이머를 열므로 호출하지 않는다. 실제 finishTurn 만 가짜 칸/기록에 연결한다.
-function herdrTurnFixture({ model = "opus[1m]", screen = "", tokens = 190_000 }: { model?: string | null; screen?: string; tokens?: number } = {}) {
-  const events: RunnerEvent[] = [];
-  const track = { m: { id: "fake-herdr", model }, sessionId: "session-1", paneId: "fake-pane", inTurn: true, bgTurn: null, turnGen: 0 };
-  const runner = Object.assign(Object.create(HerdrRunner.prototype), {
-    tracks: new Map([[track.m.id, track]]), stopped: false, contextHome: mkdtempSync(join(tmpdir(), "iamceo-finish-turn-")),
-    stopTail() {}, lastTurn: () => ({ finalText: "done", isError: true, noOutput: true, contextTokens: tokens, model: "claude-opus-5-5" }),
-    readPane: async () => screen, report: () => events.push({ type: "status", memberId: track.m.id, status: "idle" }),
-    emit: (e: RunnerEvent) => events.push(e),
-  });
-  return { runner, track, events };
-}
-
-for (const stale of ["stopped", "replaced", "session"] as const) {
-  test(`herdr finishTurn: ${stale} 중에도 turn_end 는 유지하고 오래된 context_usage 만 버린다`, async () => {
-    const { runner, track, events } = herdrTurnFixture();
-    const finished = runner.finishTurn(track);
-    await waitFor("idle 먼저", () => events.some(e => e.type === "status"));
-    if (stale === "stopped") runner.stopped = true;
-    else if (stale === "replaced") runner.tracks.set(track.m.id, { ...track });
-    else track.sessionId = "session-2";
-    await finished;
-    expect(events.map(e => e.type)).toEqual(["status", "turn_end"]);
-    expect(events[1]).toEqual({ type: "turn_end", memberId: track.m.id, finalText: "done", isError: true, errorText: "done", noOutput: true });
-  });
-}
-
-test("herdr configured [1m] 은 transcript 모델보다 먼저이고 context 는 turn_end 전에 나온다", async () => {
-  const { runner, track, events } = herdrTurnFixture(); await runner.finishTurn(track);
-  expect(events.map(e => e.type)).toEqual(["status", "context_usage", "turn_end"]);
-  const reading = events.find((e): e is Extract<RunnerEvent, { type: "context_usage" }> => e.type === "context_usage")!;
-  expect(reading.model).toBe("opus[1m]");
-  expect(measureContext(reading, { learned: null, fallback: 200_000 })?.pct).toBe(19);
-});
-
 const TRUNCATED_SCREEN = ["⏺ 작업을 마쳤습니다", "─".repeat(30), "│ > │", "─".repeat(30), "  ◆ Opus │ ██░░░░░░…", "  ⏵⏵ bypass permissions on"].join("\n");
 
-for (const model of ["claude-opus-5-5", null]) test(`herdr finishTurn: 모델 ${model}, 잘린 상태줄의 190k 는 19% 이고 다음 일에 압축하지 않는다`, async () => {
-  expect(inputLooksEmpty(TRUNCATED_SCREEN)).toBe(true);
-  expect(screenContextPct(TRUNCATED_SCREEN)).toBeNull();
-  const { runner, track, events } = herdrTurnFixture({ model, screen: TRUNCATED_SCREEN, tokens: 190_000 });
-  expect(readContextRecord(runner.contextHome, track.sessionId)).toBeNull();
-  await runner.finishTurn(track);
-  const reading = events.find((e): e is Extract<RunnerEvent, { type: "context_usage" }> => e.type === "context_usage")!;
-  expect(reading).toMatchObject({ tokens: 190_000, model: "claude-opus-5-5", shownPct: null });
-  expect(reading.exact).toBeUndefined();
-  const t = await server(); const w = await worker(t);
-  t.runner.emit({ ...reading, memberId: w.id, sessionId: w.sessionId ?? undefined });
-  expect(t.store.requireMember(w.id)).toMatchObject({ contextPct: 19, contextWindow: null });
-  const sent = t.runner.sent.length;
-  await t.orch.assign(w.projectId, w.handle, { text: "다음 일" });
-  await waitFor("다음 일 전달", () => t.runner.sent.length > sent);
-  expect(t.runner.compacts).toEqual([]);
-});
-
-for (const model of ["claude-opus-5-5", null]) test(`core reportContext: 모델 ${model}, 잘린 상태줄과 임시 transcript 로 19% 를 보고한다`, async () => {
+// 생성자는 소켓·타이머를 열므로 호출하지 않는다. 실제 보고 경로(CoreRunner.reportContext)만 가짜 터미널·임시 세션 기록에 연결한다.
+// 화면은 상태줄이 잘려 있고, 세션 기록의 마지막 답은 190k 토큰(모델 claude-opus-5-5)이다.
+function coreTurnFixture({ model = "opus[1m]" as string | null } = {}) {
   const home = mkdtempSync(join(tmpdir(), "iamceo-core-context-"));
   const claudeHome = join(home, "claude"); const contextHome = join(home, "context-home");
   mkdirSync(contextHome);
@@ -652,16 +562,23 @@ for (const model of ["claude-opus-5-5", null]) test(`core reportContext: 모델 
   const path = transcriptPath(home, track.sessionId, claudeHome);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify({ type: "assistant", message: { id: "a1", model: "claude-opus-5-5", content: [{ type: "text", text: "done" }], usage: { input_tokens: 10_000, cache_read_input_tokens: 170_000, cache_creation_input_tokens: 10_000, output_tokens: 5000 } } }) + "\n");
-  // 생성자 없이 실제 보고 경로만 실행한다.
+  const hooks = { onRead: () => {} };
   const runner = Object.assign(Object.create(CoreRunner.prototype), {
     options: { claudeHome, contextHome }, tracks: new Map([[track.member.id, track]]), closed: false,
     call: async (method: string, params: unknown) => {
       expect(method).toBe("terminal.read");
       expect(params).toEqual({ terminal: track.terminal.address, lines: 0 });
+      hooks.onRead();
       return { text: TRUNCATED_SCREEN };
     },
     emit: (e: RunnerEvent) => events.push(e),
   });
+  return { runner, track, events, contextHome, hooks };
+}
+
+for (const model of ["claude-opus-5-5", null]) test(`core reportContext: 모델 ${model}, 잘린 상태줄과 임시 transcript 로 19% 를 보고한다`, async () => {
+  const { runner, track, events, contextHome } = coreTurnFixture({ model });
+  expect(inputLooksEmpty(TRUNCATED_SCREEN)).toBe(true);
   expect(screenContextPct(TRUNCATED_SCREEN)).toBeNull();
   expect(readContextRecord(contextHome, track.sessionId)).toBeNull();
   await runner.reportContext(track);
@@ -672,33 +589,38 @@ for (const model of ["claude-opus-5-5", null]) test(`core reportContext: 모델 
   expect(measureContext(reading, { learned: null, fallback: DEFAULT_CONTEXT_WINDOW })).toEqual({ pct: 19, learned: null });
 });
 
+// 옛 시험: "herdr configured [1m] 은 transcript 모델보다 먼저이고 context 는 turn_end 전에 나온다". 같은 것을 core 의 보고 경로로 본다.
+// (읽기가 turn_end 보다 먼저 나오는 순서는 위 "회귀" 시험이 실제 CoreRunner 로 본다.)
+test("core reportContext: 설정된 [1m] 은 세션 기록의 모델보다 먼저다", async () => {
+  const { runner, track, events } = coreTurnFixture();
+  await runner.reportContext(track);
+  expect(events.map(e => e.type)).toEqual(["context_usage"]);
+  const reading = events[0] as Extract<RunnerEvent, { type: "context_usage" }>;
+  expect(reading.model).toBe("opus[1m]");
+  expect(measureContext(reading, { learned: null, fallback: 200_000 })?.pct).toBe(19);
+});
+
+// 옛 시험: "herdr finishTurn: … 중에도 turn_end 는 유지하고 오래된 context_usage 만 버린다". core 의 보고 경로는 읽기만 내므로(turn_end 는 따로 낸다)
+// 읽는 사이 실행기가 닫히거나 직원의 터미널·세션이 바뀌면 그 읽기를 내지 않는 것을 본다.
+for (const stale of ["stopped", "replaced", "session"] as const) {
+  test(`core reportContext: 화면을 읽는 사이 ${stale} 이면 오래된 context_usage 를 버린다`, async () => {
+    const { runner, track, events, hooks } = coreTurnFixture();
+    hooks.onRead = () => {
+      if (stale === "stopped") runner.closed = true;
+      else if (stale === "replaced") runner.tracks.set(track.member.id, { ...track });
+      else track.sessionId = "session-2";
+    };
+    await runner.reportContext(track);
+    expect(events).toEqual([]);
+  });
+}
+
 test("기본 창을 넘은 토큰은 더 큰 알려진 창, 표까지 넘으면 여유 있는 창으로 잰다", () => {
   const hints = { learned: null, model: null, fallback: 200_000 };
   expect(contextWindowFor(300_000, hints)).toBe(475_000);
   expect(measureContext({ tokens: 300_000, model: null, shownPct: null }, hints)?.pct).toBe(63);
   expect(contextWindowFor(1_200_000, hints)).toBeGreaterThan(1_200_000);
   expect(measureContext({ tokens: 1_200_000, model: null, shownPct: null }, hints)?.pct).toBeLessThan(100);
-});
-
-test("headless 는 주 모델의 실측 창만 저장하고 폴백·압축 % 는 출처를 덮지 않는다", async () => {
-  const t = await server(); const w = await worker(t);
-  const feed = (modelUsage?: object, cachedWindow: number | null = null) => {
-    const parser = new StreamParser(w.id, e => t.runner.emit(e), { reportContext: true, contextWindow: cachedWindow });
-    parser.feed(JSON.stringify({ type: "assistant", message: { model: "main", usage: { input_tokens: 190_000 }, content: [] } }));
-    parser.feed(JSON.stringify({ type: "result", subtype: "success", modelUsage }));
-  };
-  feed({ subagent: { contextWindow: 1_000_000 } });
-  await waitFor("폴백 %", () => t.store.requireMember(w.id).contextPct === 19);
-  expect(t.store.requireMember(w.id)).toMatchObject({ contextWindow: null, contextWindowSource: null });
-  feed(undefined, 200_000);
-  await waitFor("이전 창의 %", () => t.store.requireMember(w.id).contextPct === 95);
-  expect(t.store.requireMember(w.id)).toMatchObject({ contextWindow: null, contextWindowSource: null });
-  feed({ main: { contextWindow: 475_000 }, subagent: { contextWindow: 1_000_000 } });
-  await waitFor("주 모델 실측", () => t.store.requireMember(w.id).contextWindowSource === "headless");
-  expect(t.store.requireMember(w.id)).toMatchObject({ contextPct: 40, contextWindow: 475_000, contextWindowSource: "headless" });
-  t.runner.emit({ type: "context", memberId: w.id, pct: 0 });
-  await waitFor("압축 뒤 %", () => t.store.requireMember(w.id).contextPct === 0);
-  expect(t.store.requireMember(w.id)).toMatchObject({ contextWindow: 475_000, contextWindowSource: "headless" });
 });
 
 const quoteCommandPath = (path: string) => "'" + path.replaceAll("'", "'\\''") + "'";

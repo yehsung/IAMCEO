@@ -32,9 +32,7 @@ beforeAll(async () => {
   const member = store.createMember({ projectId, handle: "worker", name: "직원", kind: "worker", sessionId: "fixture-session", paneId: "fixture-terminal" });
   deliveryId = store.enqueue({ projectId, memberId: member.id, kind: "instruction", text: "전달 하나" }).id;
   recovery = new DeliveryRecovery({ store, runner: () => { throw new Error("HTTP read must not observe runner"); } });
-  const orch = {
-    herdrInfo: async () => ({ installed: false, running: false, version: null, protocol: null, compatible: false, warning: null }),
-  } as unknown as OrchestratorApi;
+  const orch = {} as unknown as OrchestratorApi;
   server = await startServer({ config, store, bus, orch, delivery: recovery });
   while (server.port === 7878) { await server.stop(); server = await startServer({ config, store, bus, orch, delivery: recovery }); }
   base = `http://127.0.0.1:${server.port}`;

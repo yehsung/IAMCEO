@@ -231,7 +231,7 @@ describe("실제 CoreRunner와 Store 압축 포트", () => {
     const runner = new CoreRunner(options, deps); runners.push(runner);
     const model = f.store.getSettings().ranks.lead.model;
     const member: RunnerMember = { ...f.member, model, effort: null, subagentModel: null, permissionMode: "default", sessionGeneration: f.store.memberRevisions(f.member.id).sessionGeneration };
-    const opts = { systemPromptFile: join(f.runtime.paths.work, "rules"), mcpConfigFile: join(f.runtime.paths.work, "mcp"), projectName: "시험", resume: true };
+    const opts = { systemPromptFile: join(f.runtime.paths.work, "rules"), mcpConfigFile: join(f.runtime.paths.work, "mcp"), resume: true };
     writeFileSync(opts.systemPromptFile, "test"); writeFileSync(opts.mcpConfigFile, "{}");
     await runner.start(member, opts);
     const path = transcriptPath(member.cwd, member.sessionId!, f.runtime.paths.claudeHome);

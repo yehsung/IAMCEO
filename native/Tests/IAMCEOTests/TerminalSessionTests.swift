@@ -837,6 +837,10 @@ import SwiftUI
             XCTAssertGreaterThan(host.terminal.getTerminal().cols, previousCols)
             XCTAssertEqual(host.documentView?.frame.size, host.documentView?.bounds.size)
             XCTAssertEqual(session.naturalCols, host.terminal.getTerminal().cols)
+            // The resize leaves through a debounced sender on the main run loop. A loaded machine (CI) needs more than
+            // the fixed wait above, so wait for the packet; it must still carry this width's columns.
+            let sent = Date().addingTimeInterval(3)
+            while resizePackets.last?["cols"] != session.naturalCols && Date() < sent { try await Task.sleep(for: .milliseconds(20)) }
             XCTAssertEqual(resizePackets.last?["cols"], session.naturalCols, "Real sheet geometry reaches the debounced wire sender")
             previousWidth = host.contentSize.width; previousCols = host.terminal.getTerminal().cols
         }

@@ -72,6 +72,9 @@ struct ChatHistoryRequest: Equatable, Sendable {
 /// Byte keys are deliberate: Swift String equality folds canonically equivalent Unicode, SQLite BINARY does not.
 struct ChatHistory: Sendable {
     let key: ChatHistoryKey
+    /// Written out: with private stored properties the synthesized memberwise initializer is private on Swift 6.3
+    /// (the CI runner's compiler), internal only from 6.4 on.
+    init(key: ChatHistoryKey) { self.key = key }
     private(set) var generation = UUID()
     private(set) var initialized = false
     private(set) var nextCursor: String?

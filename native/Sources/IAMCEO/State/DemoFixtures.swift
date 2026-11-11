@@ -1,8 +1,9 @@
 import Foundation
 
-/// This data is used only with the explicit `--demo` launch argument. It never connects or mutates the daemon.
-/// It deliberately covers parallel work, every member state, open/answered/closed decisions and delivery problems
-/// so the design can be reviewed against realistic situations.
+/// The sample workspace (`--demo` on Mac, "샘플로 둘러보기" on iPhone). It never connects or mutates the daemon.
+/// It shows a team that is running well: people working in parallel, one waiting on the owner's answer, finished
+/// reports, resting and sleeping members, and a couple of decisions waiting (the heart of the product). It holds no
+/// errors, stuck approval windows or failed deliveries: a first look must not read as an unstable system.
 enum DemoFixtures {
     static func workspace(now: Date = Date()) -> (Bootstrap, ProjectState) {
         let formatter = ISO8601DateFormatter()
@@ -10,22 +11,22 @@ enum DemoFixtures {
         let connection = ProjectConnection(ok: true)
         let pid = "demo-pay"
         let project = Project(id: pid, name: "결제 페이지 개편", cwd: "~/Projects/shop-web", runnerEnabled: true,
-                              now: "**자료 조사**가 결제 방식 비교표를 올렸습니다. PG사·문구 결정 4건이 대표의 답을 기다리고, **카드 결제 구현**은 테스트 실행 승인에서 멈춰 있습니다.",
+                              now: "**자료 조사**가 결제 방식 비교표를 올렸고, **카드 결제 구현**은 결제 화면을 만들고 있습니다. PG사와 완료 문구 결정 2건이 대표의 답을 기다립니다.",
                               nowAt: ago(6), createdAt: ago(60 * 26), updatedAt: ago(6), connection: connection)
 
         let members = [
             Member(id: "m-chief", projectId: pid, handle: "chief", name: "결제 총괄", role: "프로젝트 총괄", kind: "conductor", cli: "claude", appliedModel: "opus", status: "working",
-                   now: "PG 연동 결과와 문구 결정을 묶어 다음 지시를 정리하는 중", next: "결재 답이 오면 구현 팀장에게 전달", cwd: "~/Projects/shop-web", contextPct: 38, queuedCount: 1, updatedAt: ago(1)),
+                   now: "PG 연동 결과와 문구 결정을 묶어 다음 지시를 정리하는 중", next: "결재 답이 오면 구현 팀장에게 전달", cwd: "~/Projects/shop-web", contextPct: 38, updatedAt: ago(1)),
             Member(id: "m-pg", projectId: pid, handle: "pg", name: "결제 연동", role: "PG 시험 연동 · 실패 코드", cli: "codex", appliedModel: "gpt-6-astra", status: "waiting",
                    now: "PG 시험 연동 — 실패 응답 코드 정리", next: "완료 문구가 정해지면 화면에 반영", cwd: "~/Projects/shop-web", contextPct: 22, updatedAt: ago(9)),
             Member(id: "m-copy", projectId: pid, handle: "copy", name: "화면 문구", role: "완료·실패 화면 문구", cli: "claude", appliedModel: "sonnet", status: "working",
                    now: "완료 화면 문구를 다듬는 중", next: "실패 화면 문구", cwd: "~/Projects/shop-web", contextPct: 51, subagents: 2, updatedAt: ago(0.5)),
-            Member(id: "m-card", projectId: pid, handle: "card", name: "카드 결제 구현", role: "카드 결제 화면", cli: "codex", appliedModel: "gpt-6-astra", status: "blocked",
-                   now: "카드 결제 화면 구현 — 테스트 실행 권한 메뉴에서 멈춤", next: "시험 통과 후 결과 보고", cwd: "~/Projects/shop-web", contextPct: 64, queuedCount: 1, updatedAt: ago(14), blockedReason: "permission"),
+            Member(id: "m-card", projectId: pid, handle: "card", name: "카드 결제 구현", role: "카드 결제 화면", cli: "codex", appliedModel: "gpt-6-astra", status: "working",
+                   now: "카드 결제 화면 구현 — 결제 버튼과 입력 검증을 잇는 중", next: "시험 통과 후 결과 보고", cwd: "~/Projects/shop-web", contextPct: 44, subagents: 1, updatedAt: ago(2)),
             Member(id: "m-research", projectId: pid, handle: "research", name: "자료 조사", role: "PG 비교 · 계약 조건", cli: "claude", appliedModel: "sonnet", status: "idle",
                    now: "결제 방식 비교표를 정리했다고 보고", next: "PG 결정 뒤 계약 조건 요약", cwd: "~/Projects/shop-web", contextPct: 17, updatedAt: ago(20)),
-            Member(id: "m-funnel", projectId: pid, handle: "funnel", name: "이탈률 측정", role: "결제 단계별 이벤트", cli: "codex", modelOverride: "gpt-6-sol", appliedModel: "gpt-6-astra", status: "error",
-                   now: "이탈 이벤트 설계", next: "", cwd: "~/Projects/shop-web", lastError: "세션을 다시 열지 못했습니다: codex가 사용 한도 오류로 종료했습니다 (exit 1).", updatedAt: ago(7)),
+            Member(id: "m-funnel", projectId: pid, handle: "funnel", name: "이탈률 측정", role: "결제 단계별 이벤트", cli: "codex", appliedModel: "gpt-6-astra", status: "idle",
+                   now: "결제 단계별 이탈 이벤트 이름을 정리했다고 보고", next: "구현이 끝나면 이벤트 심기", cwd: "~/Projects/shop-web", contextPct: 28, updatedAt: ago(5)),
             Member(id: "m-qa", projectId: pid, handle: "qa", name: "결제 QA", role: "회귀 시험", cli: "claude", status: "asleep",
                    now: "", next: "구현이 끝나면 결제 회귀 시험", cwd: "~/Projects/shop-web", updatedAt: ago(90)),
             Member(id: "m-mail", projectId: pid, handle: "mail", name: "영수증 메일", role: "결제 완료 메일", cli: "claude", appliedModel: "sonnet", status: "idle",
@@ -60,22 +61,20 @@ enum DemoFixtures {
                      options: [DecisionOption(k: "a", label: "토스페이먼츠", desc: "수수료 2.9%, 정산 D+2. 연동 문서가 가장 좋아 구현이 이틀 빠릅니다."),
                                DecisionOption(k: "b", label: "KG이니시스", desc: "수수료 2.7%, 정산 D+3. 기존 계약을 그대로 씁니다."),
                                DecisionOption(k: "c", label: "둘 다 붙이고 비교", desc: "구현이 3일 늘고, 2주 뒤 전환율로 고릅니다.")],
-                     rec: "a", fileId: fee.id, createdAt: ago(25), updatedAt: ago(5), reopenNote: "자료 조사가 수수료 표를 고쳐 다시 올렸습니다."),
+                     rec: "a", fileId: fee.id, createdAt: ago(25), updatedAt: ago(25)),
             Decision(id: "d-done-copy", projectId: pid, memberId: "m-pg", who: "결제 연동", title: "결제 완료 문구를 골라 주세요", detail: "완료 화면 첫 줄입니다. 사용자가 결제 성공을 바로 알아야 합니다.",
                      options: [DecisionOption(k: "a", label: "결제가 끝났습니다", desc: "결과를 바로 말합니다. 영수증 링크를 아래에 둡니다."), DecisionOption(k: "b", label: "감사합니다", desc: "친근하지만 성공 여부가 덜 분명합니다.")],
-                     rec: "a", group: "문구", createdAt: ago(12), updatedAt: ago(12)),
-            Decision(id: "d-fail-copy", projectId: pid, memberId: "m-pg", who: "결제 연동", title: "실패 문구를 골라 주세요", detail: "실패 화면 첫 줄입니다. 가장 흔한 실패 원인은 카드 한도와 인증 취소입니다.",
+                     rec: "a", createdAt: ago(12), updatedAt: ago(12)),
+            Decision(id: "d-fail-copy", projectId: pid, memberId: "m-copy", who: "화면 문구", title: "실패 문구를 골라 주세요", detail: "실패 화면 첫 줄입니다. 가장 흔한 실패 원인은 카드 한도와 인증 취소입니다.",
                      options: [DecisionOption(k: "a", label: "다시 시도해 주세요", desc: "원인을 말하지 않아 같은 실패가 반복될 수 있습니다."), DecisionOption(k: "b", label: "카드를 확인해 주세요", desc: "가장 흔한 원인을 바로 안내합니다.")],
-                     rec: "b", group: "문구", createdAt: ago(10), updatedAt: ago(10)),
-            Decision(id: "d-refund", projectId: pid, memberId: "m-copy", who: "화면 문구", title: "환불 정책 링크 주소를 알려 주세요",
-                     detail: "실패 화면 아래에 환불 정책 링크를 넣으려 합니다. 공개된 정책 페이지 주소가 있으면 알려 주세요. 없으면 링크 없이 진행합니다.",
-                     createdAt: ago(3), updatedAt: ago(3)),
+                     rec: "b", status: "delivered", choice: "b", note: "고객센터 번호도 함께 보여 주세요.",
+                     createdAt: ago(55), updatedAt: ago(9), answeredAt: ago(9), deliveredAt: ago(8)),
             Decision(id: "d-button", projectId: pid, memberId: "m-card", who: "카드 결제 구현", title: "결제 버튼 색을 정해 주세요", detail: "브랜드 보라와 기본 파랑 중 하나입니다.",
                      options: [DecisionOption(k: "a", label: "기본 파랑"), DecisionOption(k: "b", label: "브랜드 보라")], rec: "a", status: "delivered", choice: "a", note: "접근성 대비 기준을 지켜 주세요.",
                      createdAt: ago(60 * 3), updatedAt: ago(60 * 2), answeredAt: ago(60 * 2), deliveredAt: ago(60 * 2 - 1)),
             Decision(id: "d-receipt", projectId: pid, memberId: "m-pg", who: "결제 연동", title: "영수증 메일을 보낼까요?", detail: "결제 완료 직후 영수증 메일을 자동 발송할지 정해 주세요.",
-                     options: [DecisionOption(k: "a", label: "보낸다"), DecisionOption(k: "b", label: "보내지 않는다")], status: "answered", choice: "a",
-                     createdAt: ago(50), updatedAt: ago(2), answeredAt: ago(2)),
+                     options: [DecisionOption(k: "a", label: "보낸다"), DecisionOption(k: "b", label: "보내지 않는다")], status: "delivered", choice: "a",
+                     createdAt: ago(50), updatedAt: ago(32), answeredAt: ago(32), deliveredAt: ago(31)),
             Decision(id: "d-old", projectId: pid, memberId: "m-research", who: "자료 조사", title: "비교 대상에 페이팔을 넣을까요?", detail: "해외 결제가 필요하면 넣습니다.", status: "closed",
                      createdAt: ago(60 * 5), updatedAt: ago(60 * 4), closeKind: "decided", closeReason: "대화에서 국내 결제만 한다고 정했습니다.", closeQuote: "해외 결제는 이번엔 빼죠", closedBy: "자료 조사", closedAt: ago(60 * 4))
         ]
@@ -90,7 +89,7 @@ enum DemoFixtures {
         let work = [
             WorkItem(id: "w1", projectId: pid, sec: "doing", title: "PG 시험 연동", detail: "실패 응답 코드 표 정리", who: "결제 연동", order: 1),
             WorkItem(id: "w2", projectId: pid, sec: "doing", title: "완료·실패 화면 문구", who: "화면 문구", order: 2),
-            WorkItem(id: "w3", projectId: pid, sec: "doing", title: "카드 결제 화면 구현", detail: "테스트 실행 승인 대기", who: "카드 결제 구현", order: 3),
+            WorkItem(id: "w3", projectId: pid, sec: "doing", title: "카드 결제 화면 구현", detail: "결제 버튼·입력 검증 연결", who: "카드 결제 구현", order: 3),
             WorkItem(id: "w4", projectId: pid, sec: "next", title: "이탈률 측정 넣기", who: "이탈률 측정", order: 4),
             WorkItem(id: "w5", projectId: pid, sec: "next", title: "결제 회귀 시험", who: "결제 QA", order: 5),
             WorkItem(id: "w6", projectId: pid, sec: "hold", title: "간편결제 추가", detail: "PG 결정 뒤 재개", who: "결제 총괄", order: 6),
@@ -103,34 +102,28 @@ enum DemoFixtures {
             Message(id: "x1", projectId: pid, at: ago(40), memberId: "m-chief", who: "결제 총괄", kind: "진행", title: "오늘 계획", body: "1. PG사 결정 받기\n2. 완료·실패 문구 확정\n3. 카드 결제 화면 시험 통과"),
             Message(id: "x2", projectId: pid, at: ago(38), mine: true, who: "나", kind: "나", body: "PG 연동은 이번 주 안에 끝내 주세요.", delivery: "delivered"),
             Message(id: "x3", projectId: pid, at: ago(20), memberId: "m-research", who: "자료 조사", kind: "완료", title: "결제 방식 비교표를 올렸습니다", body: "수수료·정산 주기·연동 난이도를 비교했습니다. PG사 결정은 결재함에 올렸습니다.", fileId: fee.id),
-            Message(id: "x4", projectId: pid, at: ago(14), memberId: "m-card", who: "카드 결제 구현", kind: "알림", title: "테스트 실행 권한이 필요합니다", body: "Codex가 `bun test` 실행 승인을 묻고 있습니다. 터미널에서 직접 승인해 주세요."),
+            Message(id: "x4", projectId: pid, at: ago(14), memberId: "m-card", who: "카드 결제 구현", kind: "진행", title: "카드 결제 화면 1차 구현", body: "- 카드 번호·유효기간 입력 검증\n- 결제 버튼 상태(대기·진행·완료)\n- 다음: 결제 버튼과 PG 시험 연동 잇기"),
             Message(id: "x5", projectId: pid, at: ago(12), memberId: "m-pg", who: "결제 연동", kind: "질문", title: "결제 완료 문구 결정 요청", body: "두 안 중 하나를 골라 주세요.", decisionId: "d-done-copy"),
             Message(id: "x6", projectId: pid, at: ago(8), mine: true, who: "나", kind: "나", body: "실패 화면에는 고객센터 번호도 넣어 주세요.", targetMemberId: "m-copy", targetName: "화면 문구", delivery: "delivered"),
-            Message(id: "x7", projectId: pid, at: ago(6), mine: true, who: "나", kind: "나", body: "이탈 이벤트 이름부터 정리해 주세요.", targetMemberId: "m-funnel", targetName: "이탈률 측정", delivery: "failed", deliveryNote: "자동 재시도로 해결 안 됨 → 대표 확인 필요"),
+            Message(id: "x7", projectId: pid, at: ago(7), mine: true, who: "나", kind: "나", body: "이탈 이벤트 이름부터 정리해 주세요.", targetMemberId: "m-funnel", targetName: "이탈률 측정", delivery: "delivered"),
+            Message(id: "x11", projectId: pid, at: ago(5), memberId: "m-funnel", who: "이탈률 측정", kind: "완료", title: "이탈 이벤트 이름을 정리했습니다", body: "장바구니 → 주문서 → 결제 수단 선택 → 결제 완료, 네 단계의 이벤트 이름과 속성을 정했습니다. 지난 4주 이탈률 표는 자료에 있습니다.", fileId: "f-funnel"),
             Message(id: "x8", projectId: pid, at: ago(4), memberId: "m-copy", who: "화면 문구", kind: "진행", title: "완료 화면 문구 초안", body: "- 짧게 한 줄\n- 다음 행동 안내 한 줄\n- 영수증 링크는 버튼으로"),
-            Message(id: "x9", projectId: pid, at: ago(2), mine: true, who: "나", kind: "나", body: "권한 메뉴 처리됐나요?", targetMemberId: "m-card", targetName: "카드 결제 구현", delivery: "held", deliveryNote: "승인 메뉴가 떠 있어 자동 전달을 멈췄습니다."),
-            Message(id: "x10", projectId: pid, at: ago(1), mine: true, who: "나", kind: "나", body: "문구 결정은 오늘 오후에 할게요.", delivery: "queued")
+            Message(id: "x9", projectId: pid, at: ago(2), mine: true, who: "나", kind: "나", body: "결제 버튼은 화면 아래에 고정해 주세요.", targetMemberId: "m-card", targetName: "카드 결제 구현", delivery: "delivered"),
+            Message(id: "x10", projectId: pid, at: ago(1), mine: true, who: "나", kind: "나", body: "문구 결정은 오늘 오후에 할게요.", delivery: "delivered")
         ]
 
         let summaries = [
             ProjectSummary(id: "demo-hq", name: "본사", isHq: true, cwd: "~", now: "새 프로젝트 요청을 기다립니다.", runnerEnabled: true, connection: connection, memberCount: 1),
-            ProjectSummary(id: pid, name: project.name, cwd: project.cwd, now: "PG사·문구 결정 4건 대기", runnerEnabled: true, connection: connection,
-                           decisionCount: 4, todoCount: 3, inboxCount: 7, workingCount: 2, blockedCount: 1, errorCount: 1, memberCount: members.count),
+            ProjectSummary(id: pid, name: project.name, cwd: project.cwd, now: "PG사·완료 문구 결정 2건 대기", runnerEnabled: true, connection: connection,
+                           decisionCount: 2, todoCount: 3, inboxCount: 5, workingCount: 3, memberCount: members.count),
             ProjectSummary(id: "demo-ir", name: "투자 IR 자료", cwd: "~/Projects/ir", now: "재무 요약 슬라이드 작성 중", runnerEnabled: true, connection: connection,
                            decisionCount: 1, todoCount: 0, inboxCount: 1, workingCount: 1, memberCount: 3)
         ]
         let bootstrap = Bootstrap(version: "sample", settings: Settings(backend: "core"), projects: summaries)
-        let deliveryNotices = DeliveryNotices(version: 2, members: [
-            MemberDeliverySummary(memberId: "m-funnel", undeliveredCount: 1, unknownCount: 0, deliveringCount: 0,
-                                  checkingCount: 0, needsOwnerCount: 1, waitingBehindCount: 0, oldestAt: ago(6),
-                                  reasons: [DeliveryReasonCount(code: "retry_exhausted", count: 1, note: "자동 재시도로 해결 안 됨 → 대표 확인 필요")]),
-            MemberDeliverySummary(memberId: "m-card", undeliveredCount: 1, unknownCount: 0, deliveringCount: 0,
-                                  checkingCount: 0, needsOwnerCount: 0, waitingBehindCount: 0, oldestAt: ago(2),
-                                  reasons: [DeliveryReasonCount(code: "blocked", count: 1, note: "승인 메뉴가 떠 있어 자동 전달을 멈췄습니다.")]),
-            MemberDeliverySummary(memberId: "m-chief", undeliveredCount: 1, unknownCount: 0, deliveringCount: 0,
-                                  checkingCount: 0, needsOwnerCount: 0, waitingBehindCount: 0, oldestAt: ago(1), reasons: [])
-        ], unassigned: UnassignedDeliverySummary(undeliveredCount: 0, unknownCount: 0, needsOwnerCount: 0))
-        let state = ProjectState(project: project, members: members, decisions: decisions, doneDecisionCount: 3, todos: todos, work: work, messages: messages, files: files, deliveryNotices: deliveryNotices)
+        // Every instruction arrived: nothing undelivered, nothing for the owner to chase.
+        let deliveryNotices = DeliveryNotices(version: 2, members: [],
+                                              unassigned: UnassignedDeliverySummary(undeliveredCount: 0, unknownCount: 0, needsOwnerCount: 0))
+        let state = ProjectState(project: project, members: members, decisions: decisions, doneDecisionCount: 4, todos: todos, work: work, messages: messages, files: files, deliveryNotices: deliveryNotices)
         return (bootstrap, state)
     }
 }

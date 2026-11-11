@@ -813,6 +813,8 @@ struct MemberDetailView: View {
     private func approvalBox(_ m: Member) -> some View {
         let info = MemberStatusInfo(m)
         let readable = m.canReadCLIApproval
+        // A stuck start the server named (an unread folder-trust window, a slow start): the terminal is the way through.
+        let terminalTitle = readable ? BlockedGuide.openTerminal : (BlockedGuide(m)?.actionTitle ?? BlockedGuide.openTerminal)
         return stateBox(tone: info.tone, icon: info.icon, title: "CLI 화면에서 처리가 필요합니다") {
             if readable {
                 CLIApprovalCard(member: m)
@@ -825,9 +827,9 @@ struct MemberDetailView: View {
             if m.origin != "manual" && !teamIsLegacy(m) {
                 Group {
                     if readable {
-                        Button { openTerminal(m) } label: { Label("터미널 열기", systemImage: "terminal") }.ceSecondaryButton()
+                        Button { openTerminal(m) } label: { Label(terminalTitle, systemImage: "terminal") }.ceSecondaryButton()
                     } else {
-                        Button { openTerminal(m) } label: { Label("터미널 열기", systemImage: "terminal") }.ceProminentButton()
+                        Button { openTerminal(m) } label: { Label(terminalTitle, systemImage: "terminal") }.ceProminentButton()
                     }
                 }
                 .controlSize(.small)
@@ -962,7 +964,7 @@ struct MemberDetailView: View {
                                     .foregroundStyle(summary?.waitReason.map { waitReasonTone($0) == .attention } == true ? CE.attention : CE.ink)
                                     .monospacedDigit()
                                     .fixedSize(horizontal: false, vertical: true)
-                                    .help("아직 이 직원에게 넣지 않은 지시입니다")
+                                    .help("아직 이 팀원에게 넣지 않은 지시입니다")
                             }
                         }
                         if decisions > 0 {
@@ -1840,16 +1842,16 @@ final class MemberCreationNotice {
     func create(store: AppStore, name: String, role: String, provider: String, model: String?) async -> Outcome {
         guard !running, store.canWrite, !store.pendingActions.contains("create-member"),
               let client = store.api, let project = store.state?.project,
-              !project.isHq, project.runnerEnabled else { return .failed("지금은 직원을 추가할 수 없습니다.") }
+              !project.isHq, project.runnerEnabled else { return .failed("지금은 팀장을 추가할 수 없습니다.") }
         namespace = ProjectCreationNotice.scope(store)
         projectID = project.id; memberID = nil; failed = false; running = true
-        message = "직원을 만드는 중입니다. 창을 닫아도 계속됩니다."
+        message = "팀장을 만드는 중입니다. 창을 닫아도 계속됩니다."
         defer { running = false }
         let before = Set(store.members.map(\.id))
         let sameHost = { self.namespace == ProjectCreationNotice.scope(store) && store.api === client }
         func hostChanged() -> Outcome {
             failed = true
-            message = "연결이 바뀌었습니다. 원래 Mac에 연결해 직원 만들기 결과를 확인해 주세요."
+            message = "연결이 바뀌었습니다. 원래 Mac에 연결해 팀장 만들기 결과를 확인해 주세요."
             return .hostChanged
         }
         do {
@@ -1858,14 +1860,14 @@ final class MemberCreationNotice {
             guard sameHost() else { return hostChanged() }
             guard member.projectId == project.id, !member.id.isEmpty else { throw URLError(.badServerResponse) }
             memberID = member.id
-            message = "직원을 만들었습니다. 이 직원에게 첫 일을 맡겨 보세요."
+            message = "팀장을 만들었습니다. 이 팀장에게 첫 일을 맡겨 보세요."
             await store.refresh()
             guard sameHost() else { memberID = nil; return hostChanged() }
             return .created(member.id)
         } catch {
             guard sameHost() else { return hostChanged() }
             failed = true
-            let detail = friendlyLoadError(error, what: "직원 만들기 결과", verb: "확인하지")
+            let detail = friendlyLoadError(error, what: "팀장 만들기 결과", verb: "확인하지")
             // Read the original project even if the user switched projects while waiting.
             let snapshot: ProjectState? = try? await client.request("/api/projects/\(APIClient.segment(project.id))/state")
             guard sameHost() else { return hostChanged() }
@@ -1873,7 +1875,7 @@ final class MemberCreationNotice {
                 ? snapshot?.members.filter { !before.contains($0.id) && $0.name == name && $0.cli == provider } ?? [] : []
             if matches.count == 1, let member = matches.first {
                 memberID = member.id
-                message = "직원은 등록됐습니다. 준비 상태를 확인해 주세요. \(detail)"
+                message = "팀장은 등록됐습니다. 준비 상태를 확인해 주세요. \(detail)"
                 await store.refresh()
                 guard sameHost() else { memberID = nil; return hostChanged() }
                 return .partial(member.id, message!)
@@ -1891,7 +1893,7 @@ final class MemberCreationNotice {
         guard namespace == ProjectCreationNotice.scope(store), store.api === client,
               router.navigationRevision == navigation else { return false }
         guard store.state?.project.id == projectID, store.members.contains(where: { $0.id == memberID }) else {
-            router.navigationNotice = "직원을 열지 못했습니다. 팀에서 준비 상태를 확인해 주세요."
+            router.navigationNotice = "팀장을 열지 못했습니다. 팀에서 준비 상태를 확인해 주세요."
             return false
         }
         router.openChat(memberID)
@@ -1910,8 +1912,8 @@ struct MemberCreationBanner: View {
         let notice = MemberCreationNotice.shared
         if notice.namespace == ProjectCreationNotice.scope(store), let message = notice.message {
             InlineNotice(tone: notice.failed ? .attention : notice.running ? .neutral : .success,
-                         title: notice.running ? "직원 준비 중" : "직원 만들기 결과", detail: message,
-                         actionTitle: notice.memberID == nil || notice.running ? "닫기" : "이 직원에게 첫 일 맡기기") {
+                         title: notice.running ? "팀장 준비 중" : "팀장 만들기 결과", detail: message,
+                         actionTitle: notice.memberID == nil || notice.running ? "닫기" : "이 팀장에게 첫 일 맡기기") {
                 if notice.memberID != nil, !notice.running {
                     Task { if await notice.openMember(store: store, router: router) { onOpen?() } }
                 } else { notice.clear() }

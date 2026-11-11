@@ -12,12 +12,27 @@
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>ko</string>
+	</array>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.iamceo.open</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>iamceo</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSApplicationCategoryType</key>
@@ -38,10 +53,6 @@
 		</dict>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Connect to your IAMCEO daemon on your own network.</string>
-	<key>CFBundleLocalizations</key>
-	<array>
-		<string>ko</string>
-	</array>
+	<string>내 Mac의 IAMCEO 서버에 연결합니다.</string>
 </dict>
 </plist>

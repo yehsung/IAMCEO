@@ -1420,8 +1420,8 @@ test("인터넷 사고 기록은 프로젝트마다 남기고 Mac 알림은 시�
   const firstMessages = t.store.listMessages(t.project.id).filter(m => m.body.includes("인터넷 연결"));
   const secondMessages = t.store.listMessages(other.id).filter(m => m.body.includes("인터넷 연결"));
   expect(firstMessages).toHaveLength(2); expect(secondMessages).toHaveLength(2);
-  expect(firstMessages.find(m => m.body.includes("돌아와"))!.body).toContain("직원 2명");
-  expect(secondMessages.find(m => m.body.includes("돌아와"))!.body).toContain("직원 1명");
+  expect(firstMessages.find(m => m.body.includes("돌아와"))!.body).toContain("팀원 2명");
+  expect(secondMessages.find(m => m.body.includes("돌아와"))!.body).toContain("팀원 1명");
   expect(alerts).toHaveLength(2);
   expect(alerts.filter(body => body.includes("불안정"))).toHaveLength(1);
   expect(alerts.filter(body => body.includes("돌아와"))).toHaveLength(1);

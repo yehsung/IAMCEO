@@ -177,7 +177,11 @@ const callsOf = (fn: string) => calls.filter((c) => c.fn === fn);
 
 describe("접근 제어", () => {
   test("isIpAllowed: 루프백·Tailscale 통과, 나머지 거부", () => {
-    const rule = buildIpRule(["127.0.0.1"]);
+    // Tailscale 대역의 상대는 이 서버가 Tailscale 주소에서 듣고 있을 때만 받는다(w1: 대역만으로 Tailscale 이라 가정하지 않는다).
+    const local = buildIpRule(["127.0.0.1"]);
+    for (const ip of ["100.64.0.1", "100.92.10.20", "fd7a:115c:a1e0::1"]) expect([ip, isIpAllowed(ip, local)]).toEqual([ip, false]);
+    for (const ip of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) expect([ip, isIpAllowed(ip, local)]).toEqual([ip, true]);
+    const rule = buildIpRule(["127.0.0.1", "100.64.0.9"]);
     for (const ip of ["127.0.0.1", "::1", "::ffff:127.0.0.1", "100.64.0.1", "100.127.255.254", "100.92.10.20", "fd7a:115c:a1e0::1", "FD7A:115C:A1E0:ab12::9"]) {
       expect([ip, isIpAllowed(ip, rule)]).toEqual([ip, true]);
     }

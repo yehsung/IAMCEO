@@ -2,12 +2,12 @@ import { configuredSecretRoots } from "./secret-paths.ts";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
-import { detectTailscaleIp, generateAccessCode, updateConfigFile } from "./config.ts";
+import { detectTailscaleIp, generateAccessCode, isTailscaleV4, isTailscaleV6, updateConfigFile } from "./config.ts";
 import { MIGRATIONS } from "./db.ts";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { z } from "zod";
-import { fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type HerdrInfo, type Member, type MessagePageOptions, type SyncCursor, type SyncSnapshot, type FileDoc, type WsEvent } from "../shared/types.ts";
+import { fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type EngineStatus, type HerdrInfo, type Member, type MessagePageOptions, type SyncCursor, type SyncSnapshot, type FileDoc, type WsEvent } from "../shared/types.ts";
 import type { OperationReceipt, ServerCapabilities } from "../shared/operations.ts";
 import type { DeliveryRecoveryService } from "./service-contracts.ts";
 import { ARTIFACT_CSP, buildArtifactSrcdoc } from "../shared/artifact-kit.ts";
@@ -72,6 +72,11 @@ const WS_PING_MS = 15_000;
 export interface IpRule {
   subnets: { base: number; mask: number }[];
   exact: Set<string>;
+  /**
+   * Tailscale 대역(100.64.0.0/10, fd7a:115c:a1e0::/48)에서 온 상대를 받는가. 이 서버가 확인된(또는 대표가 hosts 에 직접 적은)
+   * Tailscale 주소에서 듣고 있을 때만 참이다. 대역만 같은 다른 망(통신사·공유기)의 상대를 Tailscale 로 여기지 않는다.
+   */
+  tailnet: boolean;
 }
 
 function v4ToInt(ip: string): number | null {
@@ -92,9 +97,14 @@ function inSubnet(ip: number, base: number, mask: number): boolean {
 const LOOPBACK_V4 = { base: v4ToInt("127.0.0.0")!, mask: 0xff000000 };
 const TAILSCALE_V4 = { base: v4ToInt("100.64.0.0")!, mask: 0xffc00000 };
 
+/** 듣는 주소 가운데 Tailscale 대역이 있는가. 자동 감지는 확인된 주소만 돌려주고, 나머지는 대표가 hosts 에 직접 적은 주소다. */
+export function listensOnTailnet(hosts: string[]): boolean {
+  return hosts.some(host => isTailscaleV4(host) || isTailscaleV6(host));
+}
+
 /** `hosts` 에 넣은 LAN 주소의 대역을 허용 목록으로 바꾼다. 와일드카드 주소는 대역을 넓히지 않는다. */
 export function buildIpRule(hosts: string[]): IpRule {
-  const rule: IpRule = { subnets: [], exact: new Set() };
+  const rule: IpRule = { subnets: [], exact: new Set(), tailnet: listensOnTailnet(hosts) };
   const interfaces = Object.values(networkInterfaces()).flat();
   for (const host of hosts) {
     if (host === "0.0.0.0" || host === "::" || host === "localhost") continue;
@@ -114,10 +124,33 @@ export function isIpAllowed(rawIp: string | null | undefined, rule: IpRule): boo
   const ip = rawIp.toLowerCase().replace(/^::ffff:/, "");
   const v4 = v4ToInt(ip);
   if (v4 !== null) {
-    if (inSubnet(v4, LOOPBACK_V4.base, LOOPBACK_V4.mask) || inSubnet(v4, TAILSCALE_V4.base, TAILSCALE_V4.mask)) return true;
+    if (inSubnet(v4, LOOPBACK_V4.base, LOOPBACK_V4.mask) || (rule.tailnet && inSubnet(v4, TAILSCALE_V4.base, TAILSCALE_V4.mask))) return true;
     return rule.subnets.some((s) => inSubnet(v4, s.base, s.mask));
   }
-  return ip === "::1" || ip.startsWith("fd7a:115c:a1e0:") || rule.exact.has(ip);
+  return ip === "::1" || (rule.tailnet && isTailscaleV6(ip)) || rule.exact.has(ip);
+}
+
+/** 프록시가 대신 전한 요청에 붙는 헤더. 하나라도 있으면 이 Mac 안에서 온 요청으로 보지 않는다(tailscale serve 같은 대리 연결). */
+const FORWARDED_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip", "tailscale-user-login"];
+let ownAddresses: { at: number; set: Set<string> } | null = null;
+function isOwnAddress(ip: string): boolean {
+  const now = Date.now();
+  if (!ownAddresses || now - ownAddresses.at >= 5000) {
+    ownAddresses = { at: now, set: new Set(Object.values(networkInterfaces()).flat().flatMap(a => a ? [a.address.toLowerCase().replace(/%.*$/, "")] : [])) };
+  }
+  return ownAddresses.set.has(ip);
+}
+
+/**
+ * 이 Mac 안에서 온 요청인가. 실제 상대 주소만 본다: loopback 이거나 이 컴퓨터 자신의 주소에서 온 연결이다
+ * (hosts 에 loopback 을 빼고 적은 설치는 자기 주소로 자기에게 붙는다). 대리 전달 헤더가 있으면 거부한다.
+ */
+export function isLocalRequest(rawIp: string | null | undefined, headers: Headers): boolean {
+  if (!rawIp || FORWARDED_HEADERS.some(name => headers.has(name))) return false;
+  const ip = rawIp.toLowerCase().replace(/^::ffff:/, "").replace(/%.*$/, "");
+  const v4 = v4ToInt(ip);
+  if (ip === "::1" || (v4 !== null && inSubnet(v4, LOOPBACK_V4.base, LOOPBACK_V4.mask))) return true;
+  return isOwnAddress(ip);
 }
 
 /** 길이가 달라도 시간이 새지 않게 해시를 비교한다. */
@@ -193,6 +226,7 @@ const CreateProjectSchema = z.strictObject({
   goal: z.string().optional(),
   startConductor: z.boolean().optional(),
   chiefCli: cliProvider.optional(),
+  trustFolder: z.boolean().optional(),
 });
 const PatchProjectSchema = z.strictObject({
   name: nonEmpty.optional(),
@@ -257,6 +291,8 @@ const SettingsSchema = z
     macScriptNotifications: z.boolean(),
     // 0 이면 끈다. 화면은 끔·3·6·12·24 를 고르게 한다.
     boardTidyHours: z.number().int().min(0).max(168),
+    // 확인은 되돌리지 않는다. 받은 설정을 통째로 돌려보내는 화면이 있어 false 도 받되, 바꾸지는 않는다(acknowledged).
+    permissionAcknowledged: z.boolean(),
   })
   .partial()
   .strict();
@@ -316,7 +352,7 @@ function receiptMember(member: Member): object {
   return publicFields({ ...member, lastActiveAt: member.lastActiveAt ?? null }, ["id", "projectId", "handle", "name", "role", "kind", "origin", "wasAdopted", "cli", "backend",
     "modelOverride", "effortOverride", "appliedModel", "appliedEffort", "status", "now", "next", "cwd", "sessionId", "paneId",
     "contextPct", "contextWindow", "contextWindowSource", "subagents", "parallel", "queuedCount", "lastError", "lastActiveAt", "updatedAt", "createdAt",
-    "statusObservation", "blockedReason", "subagentState", "nowAt", "manualActivityAt", "executionState", "lifecycleState", "contextState"]);
+    "statusObservation", "blockedReason", "blockedCode", "subagentState", "nowAt", "manualActivityAt", "executionState", "lifecycleState", "contextState"]);
 }
 
 /** receipt의 내부 request/token 등 임의 필드를 직렬화하지 않는다. */
@@ -332,7 +368,7 @@ function operationResponse(receipt: OperationReceipt): Response {
       const { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt } = receipt.result;
       result = { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt }; break;
     }
-    case "settings": result = { settings: publicFields(receipt.result.settings, ["backend", "permissionMode", "ranks", "codexRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault", "contextWindows", "maxAwakeWorkers", "notifyMac", "macScriptNotifications", "boardTidyHours"]), revision: receipt.result.revision }; break;
+    case "settings": result = { settings: publicFields(receipt.result.settings, ["backend", "permissionMode", "ranks", "codexRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault", "contextWindows", "maxAwakeWorkers", "notifyMac", "macScriptNotifications", "boardTidyHours", "permissionAcknowledged"]), revision: receipt.result.revision }; break;
     case "member_config": result = { member: receiptMember(receipt.result.member), configRevision: receipt.result.configRevision, sessionGeneration: receipt.result.sessionGeneration }; break;
     case "todo_done": result = { todo: publicFields(receipt.result.todo, ["id", "projectId", "memberId", "who", "title", "detail", "done", "doneAt", "createdAt", "outcome", "closeReason", "closedBy"]), revision: receipt.result.revision }; break;
   }
@@ -486,6 +522,19 @@ function wantsLite(url: URL): boolean {
   const value = url.searchParams.get("lite");
   if (value !== null && value !== "1" && value !== "0") throw new ApiError(400, "lite 값이 잘못되었습니다");
   return value === "1";
+}
+
+/** 권한 방식 확인은 true 로만 바뀐다. 통째로 돌아온 설정의 false 는 '바꾸지 않음'으로 읽는다. */
+function acknowledged<T extends { permissionAcknowledged?: boolean }>(body: T): T {
+  if (body.permissionAcknowledged === true) return body;
+  const { permissionAcknowledged: _unchanged, ...rest } = body;
+  return rest as T;
+}
+
+/** 실행 엔진 상태. 엔진이 없는 실행 방식이나 구형 조립에서는 싣지 않는다. */
+function engineField(orch: OrchestratorApi): { engine?: EngineStatus } {
+  const engine = orch.engineStatus?.() ?? null;
+  return engine ? { engine } : {};
 }
 
 function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, readHerdr: () => Promise<HerdrInfo>, currentHerdr: () => HerdrInfo, monitor: LoopMonitor, freshHerdr: () => Promise<HerdrInfo> = () => ctx.orch.herdrInfo()): Route[] {
@@ -717,7 +766,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
           apiOutage: store.apiOutage(),
           protocol: 2, requestedProjectId, projectStatus,
           bootstrap: { apiOutage: store.apiOutage(), version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr,
-            home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides },
+            home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides, ...engineField(orch) },
           state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!), ...snapshotNotices(requestedProjectId!) } : null,
           revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },
           cursor: bus.cursor,
@@ -748,6 +797,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
         urls: urls(),
         cli: orch.cliCommand?.() ?? "iamceo",
         rankOverrides,
+        ...engineField(orch),
       };
       return Response.json(body);
     }),
@@ -777,7 +827,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     }),
     route("POST", "/api/projects/:id/members", async (req, _url, [id]) => {
       store.requireProject(id!);
-      if (!orch.createMember) throw new ApiError(501, "직원 만들기를 지원하지 않습니다");
+      if (!orch.createMember) throw new ApiError(501, "팀장 만들기를 지원하지 않습니다");
       return Response.json(await orch.createMember(id!, await parseBody(req, CreateMemberSchema)));
     }),
     route("GET", "/api/projects/:id/state", (_req, url, [id]) => {
@@ -869,7 +919,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
       }
       if (!body.text.trim() && !body.attachmentIds?.length) throw new ApiError(400, "글이나 첨부가 필요합니다");
       if (body.targetMemberId && store.getMember(body.targetMemberId)?.projectId !== id) {
-        throw new ApiError(400, "이 프로젝트의 직원이 아닙니다");
+        throw new ApiError(400, "이 프로젝트의 팀원이 아닙니다");
       }
       store.requireReachable(id!, body.targetMemberId ? store.getMember(body.targetMemberId) : null);
       for (const attachmentId of body.attachmentIds ?? []) {
@@ -980,7 +1030,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
         const expected = precondition(req);
         const body = await parseBody(req, PatchMemberSchema);
         models.memberPatch(store.requireMember(id!), body, store.getSettings());
-        if (!orch.patchMemberConfigV2) throw new ApiError(501, "검토 버전이 있는 직원 설정을 지원하지 않습니다");
+        if (!orch.patchMemberConfigV2) throw new ApiError(501, "검토 버전이 있는 팀원 설정을 지원하지 않습니다");
         return Response.json(await orch.patchMemberConfigV2(id!, body, expected));
       }
       const body = await parseBody(req, PatchMemberSchema);
@@ -1055,7 +1105,8 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     }),
     route("PATCH", "/api/settings", async req => {
       const expected = contractV2(req) ? precondition(req) : null;
-      const body = await parseBody(req, z.strictObject({ macScriptNotifications: z.boolean() }));
+      const body = await parseBody(req, z.strictObject({ macScriptNotifications: z.boolean().optional(), permissionAcknowledged: z.literal(true).optional() })
+        .refine(value => value.macScriptNotifications !== undefined || value.permissionAcknowledged !== undefined, "바꿀 설정이 필요합니다"));
       if (expected) {
         if (!orch.updateSettingsV2) throw new ApiError(501, "검토 버전이 있는 설정 변경을 지원하지 않습니다");
         return Response.json(await orch.updateSettingsV2(body, expected));
@@ -1065,14 +1116,14 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, r
     route("PUT", "/api/settings", async (req) => {
       if (contractV2(req)) {
         const expected = precondition(req);
-        const body = await parseBody(req, SettingsSchema);
+        const body = acknowledged(await parseBody(req, SettingsSchema));
         const normalized = models.settingsPatch(body, store.getSettings());
         if (!orch.updateSettingsV2) throw new ApiError(501, "검토 버전이 있는 설정 변경을 지원하지 않습니다");
         const result = await orch.updateSettingsV2(normalized.patch, expected);
         if (normalized.resetEfforts.length) result.settings = { ...result.settings, resetEfforts: normalized.resetEfforts };
         return Response.json(result);
       }
-      const body = await parseBody(req, SettingsSchema);
+      const body = acknowledged(await parseBody(req, SettingsSchema));
       const normalized = models.settingsPatch(body, store.getSettings());
       const settings = await orch.updateSettings(normalized.patch);
       return Response.json(normalized.resetEfforts.length ? { ...settings, resetEfforts: normalized.resetEfforts } : settings);
@@ -1160,7 +1211,7 @@ async function handleJoin(req: Request, { config, store }: ServerContext): Promi
 
   const existing = store.findMember(projectId, body.handle ?? body.name ?? "");
   if (existing) {
-    if (existing.origin !== "manual") throw new ApiError(409, `이미 실행기가 관리하는 직원입니다: ${existing.name}`);
+    if (existing.origin !== "manual") throw new ApiError(409, `이미 실행기가 관리하는 팀원입니다: ${existing.name}`);
     const member = store.patchMember(existing.id, {
       status: "idle",
       lastError: null,
@@ -1297,6 +1348,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       if (!hasAccessCode(req)) return fail(401, "인증이 필요합니다");
       return filesResponse(url, ctx);
     }
+    // 팀장용 통로는 이 Mac 안에서만 쓴다. 팀장의 도구 연결과 `iamceo join` 은 같은 컴퓨터에서 부른다.
+    if (path.startsWith("/agent/") && !isLocalRequest(server.requestIP(req)?.address, req.headers)) return fail(403, "이 Mac 안에서만 쓸 수 있는 경로입니다", "LOCAL_ONLY");
     if (path === "/agent/join") return handleJoin(req, ctx);
     if (path.startsWith("/agent/")) {
       const token = bearer(req);
@@ -1316,7 +1369,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     const schemaVersion = store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
     const ok = daemon?.ready === true && schemaVersion === MIGRATIONS.length;
     return Response.json({ ok, version: VERSION, daemon, schema: { version: schemaVersion, supportedVersion: MIGRATIONS.length },
-      core: runtime?.core ?? null, hosts: [...bindings.values()].map(binding => ({ ...binding })) }, { status: ok ? 200 : 503 });
+      core: runtime?.core ?? null, ...engineField(ctx.orch), hosts: [...bindings.values()].map(binding => ({ ...binding })) }, { status: ok ? 200 : 503 });
   };
 
   const rotate = async (req: Request, url: URL, server: Server<SocketData>): Promise<Response> => {
@@ -1464,6 +1517,12 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   boundPort = port;
   hosts.push(firstHost);
   bindings.set(firstHost, { host: firstHost, state: "bound", attempts: 1, lastAttemptAt: new Date().toISOString(), error: null });
+  // 실제로 듣고 있는 주소로 다시 정한다. 묶지 못한 주소 때문에 그 대역의 상대를 받지 않는다.
+  // 모든 주소(0.0.0.0 등)로 듣는 설치는 Tailscale 이 확인될 때만 그 대역을 받는다.
+  const refreshTailnet = () => {
+    ipRule.tailnet = listensOnTailnet(hosts) || (hosts.some(host => host === "0.0.0.0" || host === "::") && (ctx.detectHosts ? listensOnTailnet(ctx.detectHosts()) : detectTailscaleIp() !== null));
+  };
+  refreshTailnet();
   const open = (host: string) => {
     const attempts = (bindings.get(host)?.attempts ?? 0) + 1;
     const lastAttemptAt = new Date().toISOString();
@@ -1471,6 +1530,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       servers.push(serve(host, port));
       hosts.push(host);
       bindings.set(host, { host, state: "bound", attempts, lastAttemptAt, error: null });
+      refreshTailnet();
     } catch {
       // Tailscale 이 꺼져 주소가 사라졌어도 로컬은 떠야 한다.
       bindings.set(host, { host, state: "failed", attempts, lastAttemptAt, error: "HOST_BIND_FAILED" });
@@ -1487,6 +1547,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     if (stopPromise) return;
     const desired = [...new Set([...otherHosts, ...(config.hostsAuto ? detect() : [])])];
     for (const host of desired) if (!hosts.includes(host)) open(host);
+    if (hosts.some(host => host === "0.0.0.0" || host === "::")) refreshTailnet();
   };
   const hostTimer = setInterval(() => monitor.run("timer:syncHosts", syncHosts), HOST_SYNC_MS);
   hostTimer.unref?.();

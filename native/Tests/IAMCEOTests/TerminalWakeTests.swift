@@ -77,7 +77,7 @@ import XCTest
     func testWakeFailureAndTimeoutHaveKoreanMessages() async {
         let wake = TerminalWake(), member = sleeping()
         let failed = await wake.wake(memberID: member.id, resume: { "No core terminal for member" }, current: { member }, allowed: { true })
-        XCTAssertEqual(failed.message, "깨우지 못했습니다: 이 직원은 잠들어 있어 터미널이 없습니다")
+        XCTAssertEqual(failed.message, "깨우지 못했습니다: 이 팀원은 잠들어 있어 터미널이 없습니다")
         let timeout = await wake.wake(memberID: member.id, timeout: .milliseconds(30), resume: { nil }, current: { member }, allowed: { true })
         XCTAssertEqual(timeout, .timedOut)
         XCTAssertEqual(timeout.message, "깨우는 데 시간이 걸립니다. 잠시 뒤 다시 여세요")
@@ -228,7 +228,7 @@ import XCTest
 
     func testDisplayTranslationPreservesRawErrorsAndLeaseGoneDecisions() async throws {
         let translations = [
-            ("No core terminal for member", "이 직원은 잠들어 있어 터미널이 없습니다"),
+            ("No core terminal for member", "이 팀원은 잠들어 있어 터미널이 없습니다"),
             ("Terminal has finished", "터미널이 종료되었습니다"),
             ("A matching active terminal control lease is required", "직접 조작 시간이 끝났습니다. 다시 시작하세요"),
             ("Another terminal control lease is active", "다른 기기에서 터미널을 조작하고 있습니다")

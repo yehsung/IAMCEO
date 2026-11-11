@@ -115,7 +115,7 @@ struct TerminalView: View {
             HStack {
                 // What the CEO's choice does to the member, in plain words: looking never pauses the work.
                 Text(controlling ? "직접 입력하는 동안 보낸 지시는 잠시 기다립니다. 끝내면 이어서 들어갑니다."
-                                 : "보는 중에도 직원은 계속 일하고, 보낸 지시도 그대로 들어갑니다.")
+                                 : "보는 중에도 팀원은 계속 일하고, 보낸 지시도 그대로 들어갑니다.")
                     .font(CEFont.note).foregroundStyle(CE.ink2)
                     .lineSpacing(CELeading.spacing(13.5, 1.45))
                     .fixedSize(horizontal: false, vertical: true)
@@ -186,7 +186,7 @@ struct TerminalView: View {
         wakeNotice = nil
         let namespace = store.writeNamespace
         let outcome = await store.terminalWake.wake(memberID: member.id, resume: {
-            await store.memberAction(current, action: "resume") ? nil : (store.errorMessage ?? "직원을 깨우지 못했습니다")
+            await store.memberAction(current, action: "resume") ? nil : (store.errorMessage ?? "팀원을 깨우지 못했습니다")
         }, current: {
             store.members.first { $0.id == member.id }
         }, allowed: {
@@ -238,11 +238,11 @@ struct TerminalWindowContent: View {
         Group {
             if let retained, store.members.first(where: { $0.id == memberID }) == nil, store.state?.project.id == retained.projectId {
                 // 같은 프로젝트를 보고 있는데 명부에 없다: 직원이 빠진 것이다. 옛 서버용 화면으로 바꿔 실패하는 조회를 되풀이하지 않는다.
-                EmptyTile(icon: "terminal", title: "직원이 명부에서 빠졌습니다", detail: "이 터미널은 닫혔습니다. 팀에서 직원을 다시 선택해 주세요.")
+                EmptyTile(icon: "terminal", title: "팀원이 명부에서 빠졌습니다", detail: "이 터미널은 닫혔습니다. 팀에서 팀원을 다시 선택해 주세요.")
             } else if let member = store.members.first(where: { $0.id == memberID }) ?? retained {
                 TerminalSessionContent(member: member).environment(\.terminalWindow, true)
             } else {
-                EmptyTile(icon: "terminal", title: "직원을 찾을 수 없습니다", detail: "팀에서 직원을 다시 선택해 주세요.")
+                EmptyTile(icon: "terminal", title: "팀원을 찾을 수 없습니다", detail: "팀에서 팀원을 다시 선택해 주세요.")
             }
         }
         .onAppear { retained = store.members.first { $0.id == memberID } }

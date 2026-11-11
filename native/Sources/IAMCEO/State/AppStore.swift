@@ -77,10 +77,20 @@ final class AppStore: ProjectManagementStore {
     private(set) var isLoading = false
     /// A QR pairing claim is in flight (phone).
     private(set) var isPairing = false
+    /// A pairing link waiting for the owner's yes. Nothing is sent to its address before that.
+    private(set) var pairingRequest: PairingRequest?
+    @ObservationIgnored private var pairingExpiryTask: Task<Void, Never>?
+    /// The server this run already told its permission choice to (it may answer before its next snapshot does).
+    /// It belongs to one connection to one server: disconnecting, or a different server answering at the same
+    /// address, forgets it.
+    private(set) var permissionChosenNamespace: String?
+    @ObservationIgnored private var permissionChoiceOffered: String?
     private(set) var pendingActions: Set<String> = []
     private(set) var terminalLeases: [String: TerminalLease] = [:]
     private(set) var apiOutage: APIOutage?
-    private(set) var bootstrap: Bootstrap?
+    private(set) var bootstrap: Bootstrap? {
+        didSet { if bootstrap?.urls != oldValue?.urls { rememberServerAddresses() } }
+    }
     private(set) var runtime: RuntimeDiagnostics?
     private(set) var selectedProjectID: String?
     private(set) var state: ProjectState? {
@@ -575,6 +585,7 @@ final class AppStore: ProjectManagementStore {
             do { if persistCredentials { try KeychainStore.save(accessCode, for: endpoint) } }
             catch { errorMessage = error.localizedDescription }
             connectedCredentials = (endpoint, accessCode.trimmingCharacters(in: .whitespacesAndNewlines))
+            rememberServerAddresses()
             connectionStatus = .connected
             connectRetryAttempt = 0
             // Reading the workspace never waits for the model catalog, and waits for the capability probe only briefly.
@@ -705,6 +716,8 @@ final class AppStore: ProjectManagementStore {
 
     func disconnect() {
         retryableConnect = nil; retriesSavedConnection = false
+        permissionChoiceOffered = nil; permissionChosenNamespace = nil; holdPairingRequest(nil)
+        forgetServerAddresses(for: endpoint)
         resetConnectionEvidence()
         beginPushLogout()
         clearHostNavigation()
@@ -2050,6 +2063,77 @@ final class AppStore: ProjectManagementStore {
         }
     }
 
+    /// Every pairing link or QR comes in here. A link opened from outside the app always waits for a yes; a QR the
+    /// owner scanned inside the app waits only when it would replace a Mac that is already connected or saved.
+    func receivePairingLink(_ link: PairingLink, device: String, external: Bool) async {
+        guard !isDemo else { errorMessage = "샘플 모드에서는 연결하지 않습니다."; return }
+        let current = currentServerEndpoint
+        let replaces = PairingRequest.replaces(currentEndpoint: current, serverAddresses: current.map { serverAddresses(for: $0) } ?? [], link: link)
+        if external || replaces {
+            holdPairingRequest(PairingRequest(link: link, device: device, replacesCurrent: replaces))
+            return
+        }
+        await pair(with: link, device: device)
+    }
+
+    /// The request the owner read and confirmed (the one on screen, even if the dialog already cleared the pending one).
+    @discardableResult func confirmPairing(_ request: PairingRequest) async -> Bool {
+        if pairingRequest?.id == request.id { holdPairingRequest(nil) }
+        guard !request.isExpired() else { errorMessage = PairingRequest.expiredMessage; return false }
+        return await pair(with: request.link, device: request.device)
+    }
+
+    /// With a request: only that one is dropped, so a dialog closing late cannot cancel a newer link.
+    func cancelPairing(_ request: PairingRequest? = nil) {
+        if let request, pairingRequest?.id != request.id { return }
+        holdPairingRequest(nil)
+    }
+
+    /// Sets the pending request and its end: a request nobody answers is dropped when the one-time code has run out,
+    /// with a line saying so, instead of staying behind.
+    private func holdPairingRequest(_ request: PairingRequest?) {
+        pairingExpiryTask?.cancel(); pairingExpiryTask = nil
+        pairingRequest = request
+        guard let request else { return }
+        pairingExpiryTask = Task { [weak self, syncClock] in
+            do { try await syncClock.sleep(for: PairingRequest.lifetime) } catch { return }
+            guard let self, !Task.isCancelled, pairingRequest?.id == request.id else { return }
+            pairingExpiryTask = nil; pairingRequest = nil
+            errorMessage = PairingRequest.expiredMessage
+        }
+    }
+
+    /// The Mac this app is connected to, or the saved one it is still trying to reach.
+    private var currentServerEndpoint: String? {
+        if let connected = connectedCredentials?.endpoint { return connected }
+        return restoredCredentials && !accessCode.isEmpty ? endpoint : nil
+    }
+
+    // The addresses a server reports are kept with its saved connection, so a new QR from the same Mac is still
+    // recognised while that Mac cannot be reached (a changed access code, the usual reason to scan again).
+    private static let serverAddressesPrefix = "iamceo.serverAddresses.v1."
+    private static func serverAddressesKey(_ endpoint: String) -> String? {
+        (try? ServerEndpoint(endpoint)).map { serverAddressesPrefix + DraftStore.endpointNamespace($0) }
+    }
+    private func serverAddresses(for endpoint: String) -> [String] {
+        let saved = Self.serverAddressesKey(endpoint).flatMap { navigationDefaults?.stringArray(forKey: $0) } ?? []
+        return (connectedCredentials?.endpoint == endpoint ? bootstrap?.urls ?? [] : []) + saved
+    }
+    private func rememberServerAddresses() {
+        guard let navigationDefaults, let endpoint = connectedCredentials?.endpoint,
+              let key = Self.serverAddressesKey(endpoint), let urls = bootstrap?.urls else { return }
+        let addresses = Array(urls.prefix(16))
+        guard navigationDefaults.stringArray(forKey: key) != addresses else { return }
+        // One saved connection, one list: a Mac this app has moved away from is forgotten.
+        for old in navigationDefaults.dictionaryRepresentation().keys where old.hasPrefix(Self.serverAddressesPrefix) && old != key {
+            navigationDefaults.removeObject(forKey: old)
+        }
+        navigationDefaults.set(addresses, forKey: key)
+    }
+    private func forgetServerAddresses(for endpoint: String) {
+        if let key = Self.serverAddressesKey(endpoint) { navigationDefaults?.removeObject(forKey: key) }
+    }
+
     /// Phone: trades the QR's one-time code for the access code over Tailscale, then connects like a manual login.
     @discardableResult func pair(with link: PairingLink, device: String) async -> Bool {
         guard !isDemo else { errorMessage = "샘플 모드에서는 연결하지 않습니다."; return false }
@@ -2159,8 +2243,10 @@ final class AppStore: ProjectManagementStore {
         await refreshWriteContext()
         return false
     }
-    @discardableResult func createProject(name: String, cwd: String, goal: String = "", provider: String = "claude") async -> Bool {
-        let req = CreateProjectRequest(name: name, cwd: cwd, goal: goal, startConductor: true, chiefCli: provider)
+    /// `trustFolder`: the owner agreed in the app that this folder may run commands, so the server answers the CLI's own
+    /// "trust this folder?" window. The key is only sent when true.
+    @discardableResult func createProject(name: String, cwd: String, goal: String = "", provider: String = "claude", trustFolder: Bool = false) async -> Bool {
+        let req = CreateProjectRequest(name: name, cwd: cwd, goal: goal, startConductor: true, chiefCli: provider, trustFolder: trustFolder ? true : nil)
         let result: Project? = await mutate("create-project") { api in try await api.send("/api/projects", body: req, timeout: 150) }
         if let result { await selectProject(id: result.id) }
         return result != nil
@@ -2216,12 +2302,78 @@ final class AppStore: ProjectManagementStore {
         }
         guard let revision = writeRevisions?.members?[member.id]?.configRevision,
               let reviewed = reviewedMembers[member.id], Self.same(reviewed, member) else {
-            errorMessage = "최신 직원 설정을 확인한 뒤 변경하세요."; return false
+            errorMessage = "최신 팀원 설정을 확인한 뒤 변경하세요."; return false
         }
         let result = await mutate("member:\(member.id)") { api in
             try await api.patchMember(id: member.id, request: req, revision: revision)
         }
         return result != nil
+    }
+
+    // MARK: First-run permission choice
+
+    /// True while a freshly installed server says nobody has chosen how sessions run commands yet. Older servers
+    /// (no such field) and the sample never ask.
+    var needsPermissionChoice: Bool {
+        !isDemo && bootstrap?.settings.permissionAcknowledged == false && permissionChosenNamespace != writeNamespace
+    }
+
+    /// Right after connecting, on whichever device connects: true once per connection, so one window opens the
+    /// choice. (Until it is made the server holds sessions back, and this device may be the only screen there is.)
+    func takePermissionChoiceOffer() -> Bool {
+        guard needsPermissionChoice, connectionStatus == .connected, permissionChoiceOffered != writeNamespace else { return false }
+        permissionChoiceOffered = writeNamespace
+        return true
+    }
+
+    /// The choice was closed by the app itself before the owner answered (to make room for a pairing confirmation):
+    /// it may be offered again.
+    func returnPermissionChoiceOffer() {
+        if needsPermissionChoice { permissionChoiceOffered = nil }
+    }
+
+    /// The Mac app talking to the server on the same Mac. An iPhone, or a Mac reaching another Mac over Tailscale,
+    /// talks about "the connected Mac" instead.
+    var serverIsThisMac: Bool { Self.serverIsThisMac(endpoint: connectedCredentials?.endpoint ?? endpoint, onMac: isMac) }
+    static func serverIsThisMac(endpoint: String, onMac: Bool) -> Bool { onMac && isLoopback(endpoint) }
+
+    /// Sends the picked mode and "the owner has chosen" in one settings change (the existing settings route).
+    @discardableResult func acknowledgePermission(mode: String) async -> Bool {
+        guard needsPermissionChoice, canWrite, !pendingActions.contains("settings"), let current = bootstrap?.settings else { return false }
+        let namespace = writeNamespace, epoch = generation
+        if !strictWriteContract {
+            // A server without revisions takes the whole settings object, as the settings screen sends it there.
+            var whole = current
+            whole.permissionMode = mode; whole.permissionAcknowledged = true
+            let payload = whole
+            let result: Settings? = await mutate("settings") { api in
+                try await api.send("/api/settings", method: "PUT", body: payload)
+            }
+            guard epoch == generation, result != nil else { return false }
+            permissionChosenNamespace = namespace
+            return true
+        }
+        guard let revision = writeRevisions?.settings else {
+            errorMessage = "설정을 아직 읽지 못했습니다. 잠시 뒤 다시 눌러 주세요."; return false
+        }
+        let result = await perform("settings", refreshAfter: false) { api in
+            try await api.patchSettings(request: SettingsPatchRequest(permissionMode: mode, permissionAcknowledged: true), revision: revision)
+        }
+        guard epoch == generation else { return false }
+        guard let saved = result.value else { await refreshWriteContext(); return false }
+        refreshTask?.cancel(); refreshGeneration = UUID()
+        writeContextGeneration = UUID()
+        if saved.revision >= (writeRevisions?.settings ?? 0) {
+            bootstrap?.settings = saved.settings; reviewedSettings = saved.settings
+            writeRevisions?.settings = saved.revision
+        }
+        // An untouched settings editor restarts from the new values. One with edits keeps its old revision, so its
+        // save is refused and the owner reviews it against the new values (the existing conflict path).
+        if let current = settingsEdit, Self.same(current.draft, current.base) { settingsEdit = nil }
+        permissionChosenNamespace = namespace
+        dirty.insert(.diagnostics)
+        await refresh()
+        return true
     }
 
     /// Call when opening an editor; its baseline remains pinned while background sync advances.
@@ -2240,8 +2392,12 @@ final class AppStore: ProjectManagementStore {
     @discardableResult func updateSettings(_ settings: Settings) async -> Bool {
         guard canWrite, !pendingActions.contains("settings") else { return false }
         if !strictWriteContract {
+            // The whole object goes back. "Not chosen yet" is the server's to say, never the app's: only true is sent.
+            var whole = settings
+            if whole.permissionAcknowledged != true { whole.permissionAcknowledged = nil }
+            let payload = whole
             let result: Settings? = await mutate("settings") { api in
-                try await api.send("/api/settings", method: "PUT", body: settings)
+                try await api.send("/api/settings", method: "PUT", body: payload)
             }
             return result != nil
         }
@@ -3584,6 +3740,8 @@ final class AppStore: ProjectManagementStore {
             let id = status.serverId.lowercased()
             if serverID != id || pushSettings.host == nil {
                 if serverID != nil, serverID != id {
+                    // Another server now answers at this address: what was chosen and offered belonged to the old one.
+                    permissionChosenNamespace = nil; permissionChoiceOffered = nil
                     pendingNotification = nil; leaveNotificationAnchor()
                     for router in routers { router.value?.resetForConnectionChange() }
                 }
@@ -3693,7 +3851,7 @@ final class AppStore: ProjectManagementStore {
                 if decision.status != "open" { route.notice = "이미 처리된 결재입니다." }
             case .team(let project, let id):
                 guard snapshot?.members.contains(where: { $0.id == id && $0.projectId == project }) == true else {
-                    throw APIError(status: 404, message: "직원을 찾을 수 없습니다.")
+                    throw APIError(status: 404, message: "팀원을 찾을 수 없습니다.")
                 }
             case .chat(let project, _, let id, _):
                 if context.missingReport { route.notice = "보고를 찾을 수 없습니다." }
@@ -3782,7 +3940,12 @@ final class AppStore: ProjectManagementStore {
     }
     private static func settingsPatch(base: Settings, draft: Settings) -> SettingsPatchRequest {
         var patch = SettingsPatchRequest()
-        if base.permissionMode != draft.permissionMode { patch.permissionMode = draft.permissionMode }
+        if base.permissionMode != draft.permissionMode {
+            patch.permissionMode = draft.permissionMode
+            // Picking a mode in settings is the same decision as the first-run choice: do not ask again.
+            if base.permissionAcknowledged == false { patch.permissionAcknowledged = true }
+        }
+        if draft.permissionAcknowledged == true, base.permissionAcknowledged == false { patch.permissionAcknowledged = true }
         if base.maxConcurrentTurns != draft.maxConcurrentTurns { patch.maxConcurrentTurns = draft.maxConcurrentTurns }
         if base.compactAtPct != draft.compactAtPct { patch.compactAtPct = draft.compactAtPct }
         if base.contextWindowDefault != draft.contextWindowDefault { patch.contextWindowDefault = draft.contextWindowDefault }

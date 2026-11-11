@@ -27,11 +27,11 @@ final class ProjectCreationNotice {
 
     static func scope(_ store: AppStore) -> String { store.writeNamespace + ":" + (store.serverID ?? "") }
 
-    func create(store: AppStore, name: String, cwd: String, provider: String) async -> Outcome {
+    func create(store: AppStore, name: String, cwd: String, provider: String, trustFolder: Bool = false) async -> Outcome {
         guard !running, !store.pendingActions.contains("create-project") else { return .failed("이미 프로젝트를 만드는 중입니다.") }
         let namespace = Self.scope(store), id = UUID(), before = Set(store.projects.map(\.id))
         begin(id: id, namespace: namespace)
-        let accepted = await store.createProject(name: name, cwd: cwd, goal: "", provider: provider)
+        let accepted = await store.createProject(name: name, cwd: cwd, goal: "", provider: provider, trustFolder: trustFolder)
         guard namespace == Self.scope(store) else {
             finish(id: id, projectID: nil, message: "연결이 바뀌었습니다. 원래 Mac에 연결해 만들기 결과를 확인해 주세요.", failed: true)
             return .hostChanged
@@ -108,8 +108,8 @@ struct ProjectManageView: View {
         let blocked = snapshot.members.filter { $0.status == "blocked" }
         let decisions = snapshot.decisions.filter { $0.status == "open" }
         let todos = snapshot.todos.filter { !$0.done }
-        if !working.isEmpty { rows.append(("일하는 직원 \(working.count)명", working.map(\.name).joined(separator: ", "), .team)) }
-        if !blocked.isEmpty { rows.append(("승인을 기다리는 직원 \(blocked.count)명", blocked.map(\.name).joined(separator: ", "), .team)) }
+        if !working.isEmpty { rows.append(("일하는 팀원 \(working.count)명", working.map(\.name).joined(separator: ", "), .team)) }
+        if !blocked.isEmpty { rows.append(("승인을 기다리는 팀원 \(blocked.count)명", blocked.map(\.name).joined(separator: ", "), .team)) }
         if !decisions.isEmpty { rows.append(("열린 결재 \(decisions.count)건", decisions.map(\.title).joined(separator: ", "), .inbox)) }
         if !todos.isEmpty { rows.append(("미완료 할 일 \(todos.count)건", todos.map(\.title).joined(separator: ", "), .home)) }
         return rows
@@ -228,7 +228,7 @@ struct ProjectManageView: View {
                     .ceField(focused: nameFocused)
             }
             if selection.mode == .settings {
-                SetupField("폴더", hint: "새로 뜨는 직원부터 적용됩니다.") {
+                SetupField("폴더", hint: "새로 뜨는 세션부터 적용됩니다.") {
                     HStack {
                         Text(cwd).font(CEFont.mono).lineLimit(2).textSelection(.enabled)
                         Spacer()

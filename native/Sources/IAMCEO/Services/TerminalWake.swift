@@ -82,7 +82,7 @@ final class TerminalWake {
                 attempt.updates = Task {
                     while !Task.isCancelled {
                         guard allowed() else { attempt.finish(.failed("서버 연결 또는 프로젝트 상태를 확인해 주세요")); return }
-                        guard let member = current() else { attempt.finish(.failed("직원을 찾을 수 없습니다")); return }
+                        guard let member = current() else { attempt.finish(.failed("팀원을 찾을 수 없습니다")); return }
                         if TerminalAvailability.isReady(member) { attempt.finish(.ready); return }
                         do { try await pause(.milliseconds(50)) } catch { return }
                     }

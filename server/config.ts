@@ -3,10 +3,13 @@ import * as fs from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
 import pkg from "../package.json";
+import coreLock from "../vendor/herdr-core/release-lock.json";
 import { withHomeOwner } from "./home-owner.ts";
 import { toStorageError } from "./storage-errors.ts";
 
 export const VERSION: string = pkg.version;
+/** 이 서버가 고정해 둔 herdr-core 버전. 값은 vendor/herdr-core/release-lock.json 한 곳에만 둔다. */
+export const CORE_VERSION: string = coreLock.version;
 export const DEFAULT_PORT = 7878;
 
 /** config.json 에 저장되는 값. accessCode 외에는 없으면 기본값을 쓴다. */
@@ -57,18 +60,97 @@ export function generateAccessCode(length = 16): string {
   return code;
 }
 
+/** 100.64.0.0/10 대역인가. 대역만 본다: 통신사·공유기도 이 대역을 주므로 Tailscale 이라는 증거는 아니다. */
 export function isTailscaleV4(ip: string): boolean {
   const parts = ip.split(".").map(Number);
   return parts.length === 4 && parts[0] === 100 && parts[1]! >= 64 && parts[1]! <= 127;
 }
 
-export function detectTailscaleIp(): string | null {
-  for (const addrs of Object.values(networkInterfaces())) {
-    for (const a of addrs ?? []) {
-      if (a.family === "IPv4" && isTailscaleV4(a.address)) return a.address;
-    }
+/** Tailscale 이 기기마다 주는 IPv6 대역(fd7a:115c:a1e0::/48). */
+export function isTailscaleV6(ip: string): boolean {
+  return ip.toLowerCase().startsWith("fd7a:115c:a1e0:");
+}
+
+type InterfaceTable = Record<string, { address: string; family: string | number }[] | undefined>;
+export interface TailscaleProbeDeps {
+  interfaces?: () => InterfaceTable;
+  /** `tailscale ip -4` 의 답. 명령이 없거나 답하지 않으면 null. */
+  cliAddresses?: () => string[] | null;
+}
+export interface TailscaleProbe {
+  /** 실제로 Tailscale 주소라고 확인한 IPv4. 없으면 null. */
+  ip: string | null;
+  via: "interface" | "cli" | null;
+  /** 100.64.0.0/10 대역이지만 Tailscale 인지 확인하지 못한 주소. 이 주소에는 열지 않는다. */
+  unverified: string[];
+  /** 확인하지 못한 까닭(로그용). */
+  reason: string | null;
+}
+
+const TUNNEL_INTERFACE = /^(utun|tun)\d+$/i;
+const TAILSCALE_INTERFACE = /^tailscale/i;
+const TAILSCALE_CLI_PATHS = ["/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale", "/usr/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
+
+/** 명령이 없는 설치(Mac App Store 판)도 앱 묶음 안의 실행 파일로 물어본다. 1.5초 안에 답이 없으면 모르는 것으로 둔다. */
+function tailscaleCliAddresses(): string[] | null {
+  const found = Bun.which("tailscale");
+  for (const bin of [...new Set([...(found ? [found] : []), ...TAILSCALE_CLI_PATHS])]) {
+    if (!fs.existsSync(bin)) continue;
+    try {
+      const result = Bun.spawnSync([bin, "ip", "-4"], { stdout: "pipe", stderr: "ignore", stdin: "ignore", timeout: 1500 });
+      if (result.exitCode !== 0) continue;
+      const addresses = result.stdout.toString().split(/\s+/).filter(isTailscaleV4);
+      if (addresses.length) return addresses;
+    } catch { /* 다음 후보로 넘어간다 */ }
   }
   return null;
+}
+
+/**
+ * 100.64.0.0/10 주소가 정말 Tailscale 것인지 확인한다. 대역만으로는 믿지 않는다(통신사·공유기가 같은 대역을 주는 망이 있다).
+ * 1) 이름이 tailscale 로 시작하는 인터페이스, 또는 터널 인터페이스(utun·tun)에 Tailscale 의 IPv6(fd7a:115c:a1e0::/48)가 같이 붙어 있으면 확인.
+ *    터널 인터페이스는 이 컴퓨터의 프로그램만 만들 수 있어, 같은 망의 남이 주소 광고로 흉내 낼 수 없다.
+ * 2) 그렇게 확인되지 않은 후보가 있으면 `tailscale ip -4` 의 답에 그 주소가 있는지 본다.
+ * 둘 다 아니면 확인하지 못한 것으로 두고 그 주소에는 열지 않는다.
+ */
+export function probeTailscale(deps: TailscaleProbeDeps = {}): TailscaleProbe {
+  const table = (deps.interfaces ?? (networkInterfaces as () => InterfaceTable))();
+  const candidates: { name: string; address: string; tunnelWithV6: boolean }[] = [];
+  for (const [name, addrs] of Object.entries(table)) {
+    const v4 = (addrs ?? []).filter(a => (a.family === "IPv4" || a.family === 4) && isTailscaleV4(a.address));
+    if (!v4.length) continue;
+    const hasV6 = (addrs ?? []).some(a => (a.family === "IPv6" || a.family === 6) && isTailscaleV6(a.address));
+    for (const a of v4) candidates.push({ name, address: a.address, tunnelWithV6: TAILSCALE_INTERFACE.test(name) || (TUNNEL_INTERFACE.test(name) && hasV6) });
+  }
+  if (!candidates.length) return { ip: null, via: null, unverified: [], reason: null };
+  const byInterface = candidates.find(c => c.tunnelWithV6);
+  if (byInterface) return { ip: byInterface.address, via: "interface", unverified: candidates.filter(c => !c.tunnelWithV6).map(c => c.address), reason: null };
+  const answered = (deps.cliAddresses ?? cachedCliAddresses)();
+  const byCli = answered ? candidates.find(c => answered.includes(c.address)) : undefined;
+  if (byCli) return { ip: byCli.address, via: "cli", unverified: candidates.filter(c => c !== byCli).map(c => c.address), reason: null };
+  return { ip: null, via: null, unverified: candidates.map(c => c.address),
+    reason: answered ? "tailscale 명령이 알려 준 주소와 다릅니다" : "Tailscale 인터페이스로 확인되지 않고 tailscale 명령도 답하지 않습니다" };
+}
+
+// 확인되지 않는 주소가 있는 동안 30초마다 명령을 띄우지 않게 답을 잠깐 기억한다(답이 없었으면 2분 뒤 다시 묻는다).
+let cliCache: { at: number; value: string[] | null } | null = null;
+function cachedCliAddresses(): string[] | null {
+  const now = Date.now();
+  if (!cliCache || now - cliCache.at >= (cliCache.value ? 60_000 : 2 * 60_000)) cliCache = { at: now, value: tailscaleCliAddresses() };
+  return cliCache.value;
+}
+
+const loggedUnverified = new Set<string>();
+/** 확인된 Tailscale IPv4 주소. 대역만 맞고 확인되지 않은 주소는 돌려주지 않고, 까닭을 주소마다 한 번 로그에 남긴다. */
+export function detectTailscaleIp(deps: TailscaleProbeDeps = {}): string | null {
+  const probe = probeTailscale(deps);
+  for (const address of probe.ip ? [] : probe.unverified) {
+    const key = `${address}|${probe.reason}`;
+    if (loggedUnverified.has(key)) continue;
+    loggedUnverified.add(key);
+    console.warn(`[hosts] ${address} 는 100.64.0.0/10 대역이지만 Tailscale 주소인지 확인하지 못해 열지 않습니다(${probe.reason}). Tailscale 이 맞다면 config.json 의 hosts 에 이 주소를 직접 적어 주세요`);
+  }
+  return probe.ip;
 }
 
 export function defaultHosts(): string[] {
@@ -195,8 +277,8 @@ export function resolveCliExecutable(command: string, env: NodeJS.ProcessEnv = p
 export function defaultCoreBin(): string {
   const candidates = [
     resolve(process.execPath, "..", "herdr-core"),
-    resolve(import.meta.dir, "..", ".runtime", "herdr-core", "0.1.18", "Herdr Core.app", "Contents", "MacOS", "herdr-core"),
-    resolve(import.meta.dir, "..", ".runtime", "herdr-core", "0.1.18", "herdr-core"),
+    resolve(import.meta.dir, "..", ".runtime", "herdr-core", CORE_VERSION, "Herdr Core.app", "Contents", "MacOS", "herdr-core"),
+    resolve(import.meta.dir, "..", ".runtime", "herdr-core", CORE_VERSION, "herdr-core"),
   ];
   return candidates.find((path) => fs.existsSync(path)) ?? "herdr-core";
 }

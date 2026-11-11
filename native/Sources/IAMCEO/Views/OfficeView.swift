@@ -132,7 +132,7 @@ struct OfficeView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.displayScale) private var displayScale
     @Environment(\.scenePhase) private var scenePhase
-    /// Mac and regular-width iPad: the wide office (more columns, the rest area a column at the right edge).
+    /// Mac: the wide office (more columns, the rest area a column at the right edge). iPad is not supported.
     @Environment(\.ceWide) private var wide
     /// Mac은 숨은 탭도 계속 올려 둔다. 보이지 않는 동안에는 장면을 한 프레임만 그리고 멈춘다.
     @Environment(\.ceTabVisible) private var tabVisible
@@ -909,7 +909,7 @@ private struct OfficeBench: View {
     let decisions: [String: Int]
     let open: (String) -> Void
 
-    private static let explanation = "오래 쉬어 책상을 비운 직원입니다. 일을 맡기면 다시 자리에 앉습니다."
+    private static let explanation = "오래 쉬어 책상을 비운 팀장입니다. 일을 맡기면 다시 자리에 앉습니다."
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {

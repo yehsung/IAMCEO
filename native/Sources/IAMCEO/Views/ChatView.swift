@@ -14,7 +14,8 @@ import UIKit
 // Delivery stays honest and compact: "시간  전달 대기 / 보냄 / 보류 / 받음 / 실패". "받음" is never "done"; what a label
 // means is a tooltip (Mac) or a tap popover, never a standing line of text.
 // Mac: AppShell docks the shared ComposerBar under this screen, bound to `router.chatTarget`, so no composer here.
-// iOS: the composer is inline at the bottom; the recipient is picked by the column (iPad regular) or chips (iPhone).
+// iOS: the composer is inline at the bottom; the recipient is picked by chips. (The recipients column is the wide
+// layout, which only Mac reaches: the iOS app is iPhone-only and iPad is not supported.)
 
 struct ChatView: View {
     @Environment(AppStore.self) private var store
@@ -1064,7 +1065,8 @@ private func chatMessageRowID(_ id: String) -> String { "m:" + Data(id.utf8).bas
 
 // MARK: - Recipients
 
-/// Wide (Mac / iPad regular): recipients column in the web sidebar-row style. Selection is the shared composer target.
+/// Wide (Mac; iPad is not supported): recipients column in the web sidebar-row style. Selection is the shared
+/// composer target.
 private struct ChatRecipientList: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router

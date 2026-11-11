@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 /// 홈 — "지금". It answers four questions, in this order, and nothing else:
 /// 지금 상황 (what is going on) · 내 차례 (what waits on me) · 팀 (who is working on what) · 진척 (how far along),
-/// plus 최근 (the latest results). Mac/iPad: 지금 상황 full width, then 내 차례 | 팀·진척·최근. iPhone: one column.
+/// plus 최근 (the latest results). Mac: 지금 상황 full width, then 내 차례 | 팀·진척·최근. iPhone: one column.
 /// Cards with nothing to show are not drawn. Rows are compact (mark · title · quiet context · at most one action);
 /// explanations live in tooltips and details. CLI state is never presented as task completion.
 struct HomeView: View {
@@ -23,7 +23,7 @@ struct HomeView: View {
     /// Mac: the pointing hand pushed while the pointer is over the collapsed 지금 상황 body.
     @State private var nowCursorPushed = false
     @State private var tidyNote: HomeNote?
-    /// iPhone/iPad: 판 정리 asks once (no tooltip there, and the circular-arrows mark reads as "refresh").
+    /// iPhone: 판 정리 asks once (no tooltip there, and the circular-arrows mark reads as "refresh").
     @State private var confirmTidy = false
     @State private var startError: String?
     @State private var completion: TodoCompletionReview?
@@ -159,7 +159,7 @@ struct HomeView: View {
         .onChange(of: turn.waiting) { _, _ in lastTodoShift = Date() }
     }
 
-    /// Mac/iPad: left = 내 차례 (the primary card), right = 팀 · 진척 · 최근.
+    /// Mac: left = 내 차례 (the primary card), right = 팀 · 진척 · 최근.
     /// iPhone: one column, 내 차례 → 팀 → 진척 → 최근. An empty column gives its width to the other.
     /// Nothing waiting (finished todos may remain): one full-width quiet line instead of the card, with the 완료 fold
     /// at its end, and the right-column cards take the full width under it.
@@ -359,7 +359,7 @@ struct HomeView: View {
     }
 
     /// A labelled capsule ("판 정리") on every platform: the circular arrows alone read as "refresh". Mac runs it at
-    /// once, with the explanation in the tooltip; iPhone/iPad (no tooltip, next to pull-to-refresh) asks once before
+    /// once, with the explanation in the tooltip; iPhone (no tooltip, next to pull-to-refresh) asks once before
     /// it hands the lead a turn.
     private func tidyButton(_ project: Project) -> some View {
         let busy = store.pendingActions.contains("tidy")
@@ -502,7 +502,7 @@ struct HomeView: View {
                         }) {
                             Text(notice.title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
                         }
-                        Button(memberName(notice.memberId) ?? "직원 보기") { router.openMember(notice.memberId) }
+                        Button(memberName(notice.memberId) ?? "팀원 보기") { router.openMember(notice.memberId) }
                             .ceSecondaryButton().ceCompactControl()
                     }
                 }
@@ -1517,7 +1517,7 @@ private struct HomeIconButton: View {
     private var fill: Color { Color.white.opacity(isEnabled ? (hovering ? 0.12 : 0.07) : 0.035) }
 }
 
-/// iPhone/iPad row action that has no room for words (다시 보내기): a 34pt quiet glass circle — the same look as the
+/// iPhone row action that has no room for words (다시 보내기): a 34pt quiet glass circle — the same look as the
 /// row's text capsules (터미널) — in a 44pt hit area, its edge on the card's text edge.
 private struct HomeCircleButton: View {
     let icon: String

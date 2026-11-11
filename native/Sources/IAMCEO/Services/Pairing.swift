@@ -44,15 +44,31 @@ struct PairingLink: Sendable, Equatable {
     }
 
     init?(url: URL) {
-        guard url.scheme?.lowercased() == Self.scheme, url.host?.lowercased() == "pair",
+        guard Self.isPairingURL(url),
               let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
         let code = items.first { $0.name == "c" }?.value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        // Only plain origins on a Tailscale address (or loopback for the simulator / same Mac) are accepted.
+        // Only plain origins on a Tailscale address (or loopback for the simulator / same Mac) are accepted. Any other
+        // address in a link is dropped, HTTPS included: a link must not be able to point the app at an outside server.
+        // (Typing an address by hand on the connection screen is a separate path and still takes any HTTPS host.)
         let urls = items.filter { $0.name == "u" }.compactMap { $0.value }.compactMap { (try? ServerEndpoint($0))?.url }
+            .filter { Self.acceptsHost($0.host ?? "") }
         guard !code.isEmpty, !urls.isEmpty else { return nil }
         self.code = code
         self.urls = urls
     }
+
+    /// An `iamceo://pair` link at all, whether or not its addresses are acceptable (to say why it was not opened).
+    static func isPairingURL(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == scheme && url.host?.lowercased() == "pair"
+    }
+
+    /// Tailscale addresses (100.64.0.0/10, the tailnet's IPv6 range, *.ts.net device names) and this device itself.
+    static func acceptsHost(_ raw: String) -> Bool {
+        let host = raw.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        return host == "localhost" || host == "127.0.0.1" || host == "::1" || Tailnet.isTailnetHost(host)
+    }
+
+    static let rejectedMessage = "연결 링크를 열지 않았습니다. 주소가 Tailscale 주소가 아니거나 링크가 온전하지 않습니다. Mac의 설정 → iPhone 연결에서 나온 QR을 써 주세요."
 
     var url: URL {
         var parts = URLComponents()
@@ -60,6 +76,59 @@ struct PairingLink: Sendable, Equatable {
         parts.host = "pair"
         parts.queryItems = [URLQueryItem(name: "c", value: code)] + urls.map { URLQueryItem(name: "u", value: $0.absoluteString) }
         return parts.url!
+    }
+}
+
+/// A pairing link held until the owner confirms where it leads. Built by `AppStore.receivePairingLink`.
+struct PairingRequest: Sendable, Equatable, Identifiable {
+    /// The Mac's one-time code lives five minutes (server `PAIR_CODE_TTL_MS`). A request older than that cannot
+    /// succeed, so it is dropped instead of waiting on screen.
+    static let lifetimeSeconds: TimeInterval = 300
+    static var lifetime: Duration { .seconds(lifetimeSeconds) }
+    static let expiredMessage = "연결 QR의 유효 시간이 지났습니다. Mac에서 새 QR을 만들어 다시 찍어 주세요."
+
+    let id = UUID()
+    let link: PairingLink
+    let device: String
+    /// A Mac is already connected (or saved) and this link leads to a different one.
+    let replacesCurrent: Bool
+    var receivedAt = Date()
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
+
+    func isExpired(at now: Date = Date()) -> Bool { now.timeIntervalSince(receivedAt) >= Self.lifetimeSeconds }
+
+    /// The addresses the one-time code would be sent to, as the owner can check them against the Mac's screen.
+    var addresses: String {
+        var seen: Set<String> = []
+        return link.urls.compactMap(\.host).filter { seen.insert($0).inserted }.joined(separator: ", ")
+    }
+    var title: String { replacesCurrent ? "연결할 Mac을 바꿀까요?" : "이 Mac에 연결할까요?" }
+    var message: String {
+        "주소: \(addresses)" + (replacesCurrent ? "\n지금 연결된 Mac을 끊고 이 서버로 바꿉니다." : "")
+    }
+    var confirmTitle: String { replacesCurrent ? "이 서버로 바꾸기" : "연결" }
+
+    /// True when a server is already in use and the link could lead anywhere else: it is the same Mac only when
+    /// every address in the link is one that Mac is known by (the address in use, plus the Tailscale addresses the
+    /// Mac itself reported over the signed-in connection). One address outside that set makes it a replacement,
+    /// because the one-time code is offered to the link's addresses in order.
+    static func replaces(currentEndpoint: String?, serverAddresses: [String] = [], link: PairingLink) -> Bool {
+        guard let currentEndpoint, host(currentEndpoint) != nil else { return false }
+        let known = knownHosts(endpoint: currentEndpoint, serverAddresses: serverAddresses)
+        return !link.urls.allSatisfy { url in host(url.absoluteString).map(known.contains) ?? false }
+    }
+
+    /// The hosts one Mac is known by. Of what the server reports, only Tailscale addresses count: every server
+    /// also listens on 127.0.0.1, which on another device is not that Mac.
+    static func knownHosts(endpoint: String, serverAddresses: [String]) -> Set<String> {
+        Set([endpoint].compactMap(host) + serverAddresses.compactMap(host).filter(Tailnet.isTailnetHost))
+    }
+
+    private static func host(_ address: String) -> String? {
+        guard let host = URLComponents(string: address.trimmingCharacters(in: .whitespacesAndNewlines))?.host?
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased(), !host.isEmpty else { return nil }
+        return host
     }
 }
 

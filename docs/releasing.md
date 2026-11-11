@@ -1,0 +1,168 @@
+# 릴리스 절차
+
+Mac 앱과 iPhone 앱을 내보내는 순서를 한 장에 적었습니다. 스크립트가 해 주는 단계와 사람이 직접 해야 하는 단계를 구분해 두었습니다. 비밀 값(키 파일, 키 ID, 발급자 ID, 연락처)은 이 문서와 저장소 어디에도 적지 않습니다. 필요한 환경 변수의 이름만 적습니다. 팀 ID는 비밀이 아닙니다. 서명한 앱에 드러나는 공개 값이라 설치 스크립트(`install.sh`)의 서명 확인과 `native/project.yml`에 들어 있습니다. 다만 릴리스 도구와 이 문서에는 적지 않고 환경 변수로 받습니다.
+
+## 한눈에 보기
+
+| 단계 | Mac | iPhone | 누가 |
+|---|---|---|---|
+| 버전 올리기 | 같은 커밋 | 같은 커밋 | 사람 |
+| 태그 만들고 올리기 | `git tag`, `git push` | 필요 없음 | 사람 |
+| CLI 자산과 초안 릴리스 | `release.yml` | 해당 없음 | 자동 |
+| 빌드·서명·올리기 | `scripts/release-mac.ts` | `scripts/release-ios.ts upload` | 스크립트 |
+| 실제로 깔아서 확인 | DMG 설치 | TestFlight 설치 | 사람 |
+| 공개 | `gh release edit` 또는 `--publish` | App Store Connect에서 버전 만들기 → `release-ios.ts submit` → 심사 → 출시 | 사람 + 스크립트 |
+| 공개 뒤 | Homebrew tap에 cask 올리기 | README 링크 확인 | 사람 |
+
+두 스크립트 모두 **커밋된 내용만** 빌드합니다(`git archive`). 작업 폴더에만 있는 변경은 들어가지 않으니 먼저 커밋합니다.
+
+## 1. 버전 올리기
+
+버전의 기준은 `package.json` 하나입니다. 같은 숫자가 아래 세 곳에 더 적혀 있어서 함께 바꿉니다.
+
+| 파일 | 위치 |
+|---|---|
+| `package.json` | `version` (기준) |
+| `native/project.yml` | `MARKETING_VERSION` 두 곳 (공통 설정, iPhone 타깃) |
+| `packaging/homebrew/Casks/iamceo.rb` | `version` |
+
+한 곳이라도 다르면 `tests/w1-tooling-version.test.ts`가 실패합니다. 바꾼 뒤 바로 확인합니다.
+
+```sh
+bash scripts/check.sh server tests/w1-tooling-version.test.ts
+```
+
+실제 앱에 들어가는 버전은 빌드할 때 `package.json` 값으로 넣습니다. Mac은 `scripts/build-native.ts`가 빌드한 앱에 써넣고, iPhone은 `scripts/release-ios.ts`가 `xcodebuild`에 넘깁니다. 그래서 `native/Configuration`의 plist는 실제 버전을 담지 않습니다. iPhone plist는 빌드 설정(`$(MARKETING_VERSION)`, `$(CURRENT_PROJECT_VERSION)`)을 참조합니다. Mac plist의 버전 `1.0`은 자리만 채운 값이고, `build-native.ts`가 빌드한 앱에 실제 버전을 써넣습니다(빌드 번호 `1`은 그대로 둡니다). 저장소의 plist에서 이 숫자를 고칠 필요는 없습니다.
+
+`native/Configuration/iOS-Info.plist`와 `macOS-Info.plist`는 XcodeGen이 `native/project.yml`에서 만드는 파일입니다. `project.yml`의 앱 정보(권한 문구 등)를 바꿨다면 `native` 폴더에서 `xcodegen generate`를 돌리고 바뀐 plist를 함께 커밋합니다. 어긋나면 같은 시험이 실패합니다.
+
+## 2. Mac 릴리스
+
+### 준비물
+
+- Apple Silicon Mac, Xcode, XcodeGen, `gh`(GitHub 로그인 상태), Bun
+- 환경 변수
+
+| 이름 | 내용 |
+|---|---|
+| `SIGN_IDENTITY` | 키체인에 있는 Developer ID Application 인증서 이름 전체 |
+| `NOTARY_KEY_PATH` | 공증용 App Store Connect API 키 파일(.p8) 경로 |
+| `NOTARY_KEY_ID` | 그 키의 ID |
+| `NOTARY_ISSUER` | 발급자 ID |
+
+### 순서
+
+1. **(사람)** 버전을 올린 커밋을 `main`에 올리고 CI가 통과했는지 확인합니다.
+2. **(사람)** 태그를 만들어 올립니다.
+   ```sh
+   git tag v0.0.0 && git push origin v0.0.0
+   ```
+3. **(자동)** `.github/workflows/release.yml`이 태그와 `package.json` 버전이 같은지 보고, 타입 검사와 서버 시험을 돌린 뒤, CLI 실행 파일 두 개와 `SHA256SUMS`를 붙인 **초안(draft)** 릴리스를 만듭니다. 초안은 "최신 릴리스"를 바꾸지 않습니다.
+   - 워크플로가 실패하면 원인을 고친 뒤 `gh workflow run release.yml --ref v0.0.0`으로 다시 돌립니다.
+4. **(스크립트)** 먼저 무엇을 할지 봅니다. 아무것도 만들거나 올리지 않습니다.
+   ```sh
+   bun scripts/release-mac.ts --ref v0.0.0 --dry-run --upload
+   ```
+5. **(스크립트)** 빌드, 서명, 공증, DMG 만들기, 초안에 올리기까지 한 번에 합니다.
+   ```sh
+   bun scripts/release-mac.ts --ref v0.0.0 --upload
+   ```
+   - 그 커밋의 CI(`ci` 또는 `release`)가 성공해 있어야 올립니다. `--allow-untested`로 건너뛸 수 있지만, 실패 원인이 코드가 아니라는 것을 확인했을 때만 쓰고 릴리스 기록에 남깁니다.
+   - 앱 시험(`check.sh swift`)을 빌드 전에 돌립니다. `--skip-tests`는 같은 조건에서만 씁니다.
+   - 결과물은 `dist/release/`에 남습니다: `IAMCEO-버전-arm64.dmg`, `SHA256SUMS`, `iamceo.rb`.
+6. **(사람)** 초안에 올라간 DMG를 받아 직접 깔아 봅니다. 기존 데이터 위에 올리기 전에는 DB 사본으로 먼저 띄워 봅니다.
+   ```sh
+   bun run smoke:db <iamceo.db 경로>
+   ```
+7. **(사람)** 공개합니다.
+   ```sh
+   gh release edit v0.0.0 --repo yehsung/IAMCEO --draft=false --latest
+   ```
+   확인을 이미 마쳤다면 5번에서 `--upload --publish`를 함께 줘도 됩니다. 한번 공개한 릴리스의 파일은 스크립트가 덮어쓰지 않습니다.
+8. **(사람)** Homebrew tap에 cask를 올립니다. `dist/release/iamceo.rb`(버전과 SHA-256이 채워진 파일)를 tap 저장소의 `Casks/iamceo.rb`로 복사해 커밋하고 올립니다. 저장소 안의 `packaging/homebrew/Casks/iamceo.rb`는 틀이라서 그대로 올리면 안 됩니다.
+9. **(사람)** 공개 뒤 두 경로를 각각 확인합니다.
+   ```sh
+   brew upgrade --cask yehsung/tap/iamceo
+   curl -fsSL https://raw.githubusercontent.com/yehsung/IAMCEO/main/install.sh | sh
+   ```
+
+### install.sh가 확인하는 것
+
+`install.sh`는 `main` 브랜치의 파일을 그대로 받아 실행하므로, 고친 내용은 `main`에 올라간 순간부터 적용됩니다. 받은 DMG에 대해 다음을 차례로 확인하고, 하나라도 실패하면 설치를 멈추고 이전 앱을 그대로 둡니다.
+
+1. `SHA256SUMS`와 체크섬이 같은지
+2. 앱의 서명이 배포자의 Developer ID 인증서인지 (`codesign`, 스크립트 안의 `SIGN_REQUIREMENT`)
+3. Apple 공증을 통과한 앱인지 (`spctl`)
+
+**서명 인증서의 팀이나 Mac 앱의 번들 ID를 바꾸면 `install.sh`의 `SIGN_REQUIREMENT`도 같은 릴리스에서 함께 바꿔야 합니다.** 그렇지 않으면 새 버전 설치가 모두 거절됩니다. 번들 ID가 어긋나면 `tests/w1-tooling-install.test.ts`가 실패합니다.
+
+## 3. iPhone 릴리스
+
+### 준비물
+
+- Mac, Xcode, XcodeGen, Bun
+- Apple Developer Program의 최신 약관에 동의한 상태(동의가 밀려 있으면 올리기가 거절됩니다)
+- App Store Connect API 키. 서명 프로파일을 자동으로 만들 수 있는 권한이 있어야 합니다.
+- 환경 변수
+
+| 이름 | 내용 | 쓰는 명령 |
+|---|---|---|
+| `ASC_KEY_PATH` | App Store Connect API 키 파일(.p8) 경로 | 전부 |
+| `ASC_KEY_ID` | 그 키의 ID | 전부 |
+| `ASC_ISSUER_ID` | 발급자 ID | 전부 |
+| `APPLE_TEAM_ID` | Apple 개발자 팀 ID | `upload` |
+
+스크립트는 이 값들을 화면에 찍지 않습니다. `--dry-run`은 키 파일을 읽지 않고 네트워크에도 연결하지 않습니다.
+
+### 빌드 번호 규칙
+
+빌드 번호는 올리는 시각의 **연월일시 10자리**입니다(예: 2026년 11월 10일 17시 → `2026111017`). 항상 커지므로 App Store Connect가 새 빌드로 받습니다. 같은 시간 안에 한 번 더 올려야 하면 `--build`로 더 큰 숫자를 직접 줍니다.
+
+### 순서
+
+1. **(사람)** 버전을 올린 커밋이 있는지 확인합니다. 올릴 커밋을 `--ref`로 고를 수 있고, 생략하면 `HEAD`입니다.
+2. **(스크립트)** 먼저 무엇을 할지 봅니다.
+   ```sh
+   bun scripts/release-ios.ts upload --dry-run
+   ```
+3. **(스크립트)** 아카이브하고 올립니다. 끝나면 빌드 번호를 알려 줍니다.
+   ```sh
+   bun scripts/release-ios.ts upload
+   ```
+   - 아카이브에 들어간 버전과 빌드 번호가 기대와 다르면 올리지 않고 멈춥니다.
+4. **(사람)** Apple이 빌드를 처리할 때까지 기다립니다(보통 5~30분). TestFlight 앱으로 iPhone에 깔아 연결, 대화, 알림, 보내기를 직접 확인합니다. 출시된 이전 버전 앱이 새 서버와 계속 맞는지도 이때 봅니다.
+5. **(사람)** App Store Connect에서 새 버전을 만듭니다. 스크립트는 이 단계를 대신하지 않습니다.
+   - 버전 번호(`package.json`과 같게)
+   - "이 버전의 새로운 기능" 문구
+   - 화면이 바뀌었다면 스크린샷. 올리기는 스크립트로 할 수 있습니다.
+     ```sh
+     bun scripts/release-ios.ts screenshots --localization <현지화 ID> --display-type <종류> 1.png 2.png
+     ```
+     기존 스크린샷을 지우지 않고 뒤에 덧붙이므로, 바꿀 때는 App Store Connect에서 옛것을 먼저 지웁니다.
+   - 심사 정보(연락처와 심사 메모). App Store Connect에 직접 적고 저장소에는 두지 않습니다.
+   - 출시 방식(심사 통과 뒤 수동 출시 또는 자동 출시)
+6. **(스크립트)** 심사에 제출합니다. 빌드 처리가 끝나기를 기다렸다가(30초 간격, 최대 45분) 그 버전에 붙이고 제출합니다.
+   ```sh
+   bun scripts/release-ios.ts submit --build 2026111017 --dry-run
+   bun scripts/release-ios.ts submit --build 2026111017
+   ```
+   - 버전이 App Store Connect에 없으면 아무것도 바꾸지 않고 멈춥니다.
+   - 빌드 처리가 실패했거나 같은 번호의 빌드가 둘이면 붙이지 않고 멈춥니다.
+   - 이전에 제출하다 만 심사 건이 열려 있으면 Apple이 거절합니다. App Store Connect에서 그 건을 정리한 뒤 다시 돌립니다.
+7. **(사람)** 심사 결과를 기다립니다. 반려되면 App Store Connect의 사유를 읽고 고친 뒤 3번부터 다시 합니다(빌드 번호는 새로 받습니다). 제출을 거두는 것도 App Store Connect에서 합니다.
+8. **(사람)** 통과하면 출시합니다(수동 출시로 뒀다면 버튼을 누릅니다). 스토어에 새 버전이 보이는지, README의 App Store 링크가 맞는지 확인합니다.
+
+### 그 밖의 App Store Connect 작업
+
+스크립트에 없는 조회나 수정은 API를 직접 부를 수 있습니다. 응답을 그대로 보여 줍니다.
+
+```sh
+bun scripts/release-ios.ts api GET '/v1/apps?fields[apps]=bundleId'
+```
+
+앱을 처음 등록할 때만 하는 일(앱 정보, 개인정보 처리방침 주소, 연령 등급, 개인정보 수집 항목 답변, 은행·세금 정보)은 App Store Connect에서 사람이 합니다.
+
+## 4. 두 플랫폼을 함께 낼 때
+
+- iPhone 심사는 며칠 걸릴 수 있고, 사용자는 앱을 제때 올리지 않습니다. 서버(=Mac 앱에 들어 있는 것)는 출시된 이전 iPhone 앱과도 맞아야 합니다. 서버 응답에는 선택 항목을 더하기만 하고 기존 항목의 이름과 형식은 바꾸지 않습니다.
+- 새 iPhone 앱이 새 서버 기능에 기대면, Mac 릴리스를 먼저 공개하고 iPhone 출시를 그 뒤에 합니다(수동 출시로 두면 순서를 맞추기 쉽습니다).

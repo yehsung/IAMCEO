@@ -115,9 +115,12 @@ struct MemberStatusInfo: Sendable {
         let observation = member.statusObservation
         if observation?.ownership == "conflict" {
             self.init(label: "소유 관계 확인 필요", tone: .attention, icon: "lock.trianglebadge.exclamationmark",
-                      explanation: "이 직원의 화면을 다른 곳에서도 잡고 있어 마지막 상태만 보여 줍니다. 자동 전달은 멈춰 둡니다.", needsMe: true)
+                      explanation: "이 팀원의 화면을 다른 곳에서도 잡고 있어 마지막 상태만 보여 줍니다. 자동 전달은 멈춰 둡니다.", needsMe: true)
         } else if let code = observation?.error?.code, Self.isNetworkPause(code) {
             self = Self(code)
+        } else if let guide = BlockedGuide(member), !member.hasFolderTrustApproval {
+            // The server said why it is stuck: say that and point at the terminal, instead of "상태 확인 불가".
+            self.init(label: guide.label, tone: .attention, icon: "terminal", explanation: guide.explanation, needsMe: true)
         } else if Self.observationUnavailable(member) {
             self.init(label: "상태 확인 불가", tone: .attention, icon: "questionmark.circle",
                       explanation: observation?.error?.note ?? "지금 상태를 읽지 못했습니다. 마지막으로 본 상태를 보여 주며 다시 확인하고 있습니다.")
@@ -141,6 +144,75 @@ struct MemberStatusInfo: Sendable {
         self.label = label; self.tone = tone; self.icon = icon; self.explanation = explanation
         self.live = live; self.needsMe = needsMe
     }
+}
+
+/// A blocked member whose server gave a reason code this app knows: what to tell the owner and what the terminal
+/// button says. Unknown or missing codes give nil, and the member is shown exactly as before.
+struct BlockedGuide: Sendable, Equatable {
+    static let openTerminal = "터미널 열기"
+    let label: String
+    let explanation: String
+    let actionTitle: String
+
+    init?(_ member: Member) {
+        guard member.status == "blocked" else { return nil }
+        switch member.blockedCode {
+        case "trust_dialog_unrecognized":
+            label = "폴더 신뢰 확인 필요"
+            // Named after the session's own CLI, as the first-run choice names them; an unknown kind is left unnamed
+            // rather than called Claude Code.
+            let cli = ["claude": "Claude Code", "codex": "Codex"][member.cli]
+            explanation = (cli.map { "\($0)\(subjectParticle($0)) 이 폴더를 신뢰할지 묻고 있습니다." } ?? "이 폴더를 신뢰할지 묻는 창이 떠 있습니다.")
+                + " 터미널에서 직접 답해 주세요."
+            actionTitle = "터미널 열어 직접 답하기"
+        case "start_not_ready":
+            label = "시작 지연"
+            explanation = "시작이 늦어지고 있습니다. 터미널을 열어 상태를 확인해 주세요."
+            actionTitle = Self.openTerminal
+        default: return nil
+        }
+    }
+}
+
+/// The execution engine line of the status strips. Only the two states the server names; anything else is silent.
+struct EngineNotice: Sendable, Equatable {
+    let text: String
+    init?(_ engine: EngineState?) {
+        switch engine?.state {
+        case "unresponsive": text = "실행 엔진이 응답하지 않습니다. Mac에서 IAMCEO를 다시 시작해 주세요."
+        case "version_mismatch": text = "실행 엔진 버전이 맞지 않습니다. IAMCEO를 최신 버전으로 다시 설치해 주세요."
+        default: return nil
+        }
+    }
+}
+
+/// How sessions may run commands. Settings and the first-run choice use the same three names.
+struct PermissionModeChoice: Identifiable, Sendable, Equatable {
+    let id: String
+    let title: String
+    let detail: String
+    var badge: String? = nil
+
+    static let bypass = "bypassPermissions"
+    /// Settings › 일반 › 권한.
+    static let settings = [
+        PermissionModeChoice(id: bypass, title: "묻지 않기", detail: "팀장이 승인 창 없이 명령을 실행합니다", badge: "기본"),
+        PermissionModeChoice(id: "auto", title: "위험할 때만 묻기", detail: "위험해 보이는 작업만 멈추고 묻습니다"),
+        PermissionModeChoice(id: "default", title: "매번 묻기", detail: "도구를 쓸 때마다 승인을 기다립니다")
+    ]
+    /// The first-run choice: the same three, with 묻지 않기 spelled out because it is the one picked to begin with.
+    static let firstRun = settings.map { choice in
+        choice.id == bypass
+            ? PermissionModeChoice(id: choice.id, title: choice.title,
+                                   detail: "승인 창에서 멈추지 않고 맡긴 일을 끝까지 합니다. 잘못된 명령도 묻지 않고 실행됩니다.", badge: choice.badge)
+            : choice
+    }
+    static let firstRunTitle = "팀장이 명령을 실행하는 방식"
+    /// `onThisMac`: the Mac app on the server's own Mac. An iPhone or a remote Mac says "연결된 Mac".
+    static func firstRunLead(onThisMac: Bool) -> String {
+        "팀장은 \(onThisMac ? "이 Mac" : "연결된 Mac")에서 Claude Code·Codex로 명령을 실행합니다. 파일을 고치고 지우는 일, 프로그램 설치, git 명령이 포함됩니다. 어떻게 실행할지 골라 주세요. 설정에서 언제든 바꿀 수 있습니다."
+    }
+    static let firstRunConfirm = "이대로 시작"
 }
 
 extension Member {
@@ -580,8 +652,8 @@ func waitReasonLabel(_ reason: String?, since: String? = nil, used: Int? = nil, 
     let base: String
     switch reason {
     case "run_limit":
-        if let used, let limit, limit > 0 { base = "동시에 일하는 직원이 다 차서 차례를 기다리는 중(\(used)/\(limit))" }
-        else { base = "동시에 일하는 직원이 다 차서 차례를 기다리는 중" }
+        if let used, let limit, limit > 0 { base = "동시에 일하는 팀원이 다 차서 차례를 기다리는 중(\(used)/\(limit))" }
+        else { base = "동시에 일하는 팀원이 다 차서 차례를 기다리는 중" }
     case "member_busy": base = "지금 하던 일이 끝나면 전달"
     // A report or note that does not wake its reader: it goes in with that member's next turn, by design.
     case "next_turn": base = "다음에 일할 때 함께 전달"
@@ -636,7 +708,7 @@ struct APIOutageInfo: Sendable {
 
     init?(_ outage: APIOutage?, showsOffline: Bool) {
         guard let outage, !showsOffline else { return nil }
-        text = "인터넷 연결이 불안정합니다 · 직원 \(Set(outage.affectedMemberIds).count)명 대기 중 · 돌아오면 자동으로 이어 갑니다"
+        text = "인터넷 연결이 불안정합니다 · 팀원 \(Set(outage.affectedMemberIds).count)명 대기 중 · 돌아오면 자동으로 이어 갑니다"
     }
 }
 

@@ -186,7 +186,7 @@ private struct ApplicationLifecycleHooks: ViewModifier {
 }
 
 /// One window. The store and drafts are shared; navigation (tab, selection, open sheets) belongs to the window, so a
-/// second iPad window neither mirrors nor resets the first.
+/// second window neither mirrors nor resets the first. (Only Mac opens more than one: the iOS app is iPhone-only.)
 private struct MainWindow: View {
     let store: AppStore
     let drafts: DraftStore

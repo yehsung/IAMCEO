@@ -77,6 +77,10 @@ detach) test "\${MOCK_DETACH_FAIL:-0}" != 1 ;;
 esac`);
   script("ditto", '[ "${MOCK_COPY_FAIL:-0}" != 1 ] || exit 1\n/bin/cp -R "$1" "$2"');
   script("open", 'printf "%s\\n" "$1" > "$FIXTURE_ROOT/open.log"');
+  // install.sh verifies the mounted app's signature and notarization; the fixture app is not a signed bundle.
+  // The checks themselves are covered in tests/w1-tooling-install.test.ts.
+  script("codesign", 'printf "%s\\n" "$*" >> "$FIXTURE_ROOT/codesign.log"');
+  script("spctl", 'printf "%s\\n" "$*" >> "$FIXTURE_ROOT/spctl.log"');
   const env = {
     PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: home, TMPDIR: join(path, "tmp"),
     FIXTURE_ROOT: path, IAMCEO_INSTALL_DIR: dir, IAMCEO_DOWNLOAD_URL: `file://${release}`, IAMCEO_TEST: "1",

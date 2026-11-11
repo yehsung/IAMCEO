@@ -349,7 +349,7 @@ struct TerminalPresentation {
     /// Display only: APIError.message, stream state and receipts retain the server's original text.
     static func message(_ raw: String) -> String {
         let translations = [
-            ("No core terminal for member", "이 직원은 잠들어 있어 터미널이 없습니다"),
+            ("No core terminal for member", "이 팀원은 잠들어 있어 터미널이 없습니다"),
             ("Terminal has finished", "터미널이 종료되었습니다"),
             ("A matching active terminal control lease is required", "직접 조작 시간이 끝났습니다. 다시 시작하세요"),
             ("Another terminal control lease is active", "다른 기기에서 터미널을 조작하고 있습니다")

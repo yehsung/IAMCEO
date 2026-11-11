@@ -67,7 +67,8 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(MemberStatusInfo(trust).label, "승인 창 앞")
     }
 
-    func testDemoHomeKeepsApprovalErrorAndOwnerDeliveryVisible() throws {
+    /// 샘플은 잘 돌아가는 팀이다(대표 요청 2026-11-11): 홈의 '내 차례'에 오류·승인 창·전달 실패가 없고, 관측도 모두 정상이다.
+    func testDemoHomeHasNoErrorApprovalOrFailedDelivery() throws {
         let (_, state) = DemoFixtures.workspace(now: Date(timeIntervalSince1970: 1_800_000_000))
         for member in state.members {
             XCTAssertEqual(member.statusObservation?.freshness, "fresh", member.id)
@@ -77,18 +78,16 @@ final class PresentationTests: XCTestCase {
             XCTAssertNotEqual(MemberStatusInfo(member).label, "상태 확인 불가", member.id)
         }
         let attention = HomeAttention(members: state.members, notices: state.deliveryNotices, messages: state.messages)
-        XCTAssertEqual(attention.members.map { $0.member.id }, ["m-card", "m-funnel"])
-        let card = try XCTUnwrap(attention.members.first?.member)
-        XCTAssertEqual(MemberStatusInfo(card).label, "승인 창 앞")
-        XCTAssertEqual(MemberStatusInfo(card).tone, .approval)
-        XCTAssertEqual(MemberStatusInfo(attention.members[1].member).label, "오류")
-        XCTAssertEqual(attention.failedMessages.map(\.id), ["x7"])
-        let failed = try XCTUnwrap(attention.failedMessages.first)
-        XCTAssertEqual(failed.body, "이탈 이벤트 이름부터 정리해 주세요.")
-        XCTAssertEqual(failed.delivery, "failed")
-        XCTAssertEqual(failed.deliveryNote, "자동 재시도로 해결 안 됨 → 대표 확인 필요")
+        XCTAssertTrue(attention.members.isEmpty)
+        XCTAssertTrue(attention.failedMessages.isEmpty)
+        XCTAssertTrue(attention.missingMembers.isEmpty)
+        XCTAssertEqual(attention.unassigned, 0)
+        XCTAssertTrue(InboxHomePolicy.approvals(state.members).isEmpty)
         XCTAssertEqual(state.deliveryNotices?.version, 2)
-        XCTAssertEqual(state.deliveryNotices?.members.first?.reasons.first?.code, "retry_exhausted")
+        // 결재 대기는 남아 있다: 한 팀장이 대표의 답을 기다린다.
+        XCTAssertEqual(state.members.filter { $0.status == "waiting" }.map(\.id), ["m-pg"])
+        XCTAssertEqual(MemberStatusInfo(try XCTUnwrap(state.members.first { $0.id == "m-pg" })).label, "내 답 기다림")
+        XCTAssertFalse(state.decisions.filter { $0.status == "open" }.isEmpty)
     }
 
     func testHomeOnlyAddsFailedMessageWhenRecoveryNeedsOwner() {
@@ -112,12 +111,16 @@ final class PresentationTests: XCTestCase {
         let store = AppStore(demo: true, persistCredentials: false)
         XCTAssertFalse(store.canWrite)
         XCTAssertFalse(store.uiCanWrite)
+        // 샘플에는 전달 실패 글이 없다. 실패한 글이 있었다 해도 다시 보내기는 샘플에서 아무것도 보내거나 바꾸지 않는다.
         guard let message = store.messages.first(where: { $0.id == "x7" }) else {
-            return XCTFail("샘플 전달 실패 지시가 없습니다")
+            return XCTFail("샘플에 대표가 팀장에게 보낸 지시가 없습니다")
         }
-        let sent = await store.resend(message)
+        XCTAssertEqual(message.delivery, "delivered")
+        var failed = message; failed.delivery = "failed"
+        let sent = await store.resend(failed)
         XCTAssertFalse(sent)
-        XCTAssertEqual(store.messages.first(where: { $0.id == message.id })?.delivery, "failed")
+        XCTAssertTrue(store.errorMessage?.contains("읽기 전용") == true)
+        XCTAssertEqual(store.messages.first(where: { $0.id == message.id })?.delivery, "delivered")
     }
 
     func testObservationFailureKeepsLastStateAndDedicatedTimestamp() {
@@ -430,7 +433,7 @@ final class WaitReasonLabelTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let tenMinutesAgo = ISO8601DateFormatter().string(from: now.addingTimeInterval(-600))
         XCTAssertEqual(waitReasonLabel("run_limit", since: tenMinutesAgo, used: 4, limit: 4, now: now),
-                       "동시에 일하는 직원이 다 차서 차례를 기다리는 중(4/4) · 10분째")
+                       "동시에 일하는 팀원이 다 차서 차례를 기다리는 중(4/4) · 10분째")
         XCTAssertEqual(waitReasonLabel("waking", now: now), "깨우는 중")
         XCTAssertEqual(waitReasonLabel("member_busy", since: ISO8601DateFormatter().string(from: now.addingTimeInterval(-7300)), now: now),
                        "지금 하던 일이 끝나면 전달 · 2시간째")

@@ -7,6 +7,8 @@ set -eu
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'IAMCEO 설치 실패: %s\n' "$*" >&2; exit 1; }
+# Both languages: a failed signature check is the one error a non-Korean reader must not misread.
+die2() { printf 'IAMCEO 설치 실패: %s\nIAMCEO install failed: %s\n' "$1" "$2" >&2; exit 1; }
 [ "$(uname -s)" = Darwin ] || die 'macOS에서만 설치할 수 있습니다.'
 case "$(uname -m)" in
   arm64) ;;
@@ -21,7 +23,12 @@ case "$DIR" in /*) ;; *) die 'IAMCEO_INSTALL_DIR은 절대 경로여야 합니�
 APP="$DIR/IAMCEO.app"
 LABEL=com.iamceo.server
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-for tool in curl shasum hdiutil ditto plutil pgrep; do
+# The publisher's Developer ID Application certificate (Apple team MQ2KQK37WD) and the app's bundle identifier.
+# SHA256SUMS comes from the same release as the DMG, so a matching checksum only proves the download is intact.
+# This requirement proves who signed the app; the Gatekeeper assessment proves Apple notarized it. A file fetched
+# with curl carries no quarantine flag, so macOS would not run either check on its own at first launch.
+SIGN_REQUIREMENT='=identifier "com.iamceo.native.mac" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "MQ2KQK37WD"'
+for tool in curl shasum hdiutil ditto plutil pgrep codesign spctl; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool 명령이 필요합니다."
 done
 
@@ -113,6 +120,15 @@ GOT=$(shasum -a 256 "$TMP/$ASSET" | awk '{print $1}')
 hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$TMP/mount" "$TMP/$ASSET" >/dev/null || die 'DMG를 마운트하지 못했습니다.'
 MOUNTED=1
 [ -d "$TMP/mount/IAMCEO.app" ] && [ ! -L "$TMP/mount/IAMCEO.app" ] || die 'DMG에 IAMCEO.app이 없습니다.'
+# Verify on the read-only mount, before anything is read from the bundle or written to the install folder:
+# a failure here leaves the installed app exactly as it was.
+say '서명과 공증을 확인하는 중입니다. (Verifying the signature and notarization.)'
+codesign --verify --deep --strict -R "$SIGN_REQUIREMENT" "$TMP/mount/IAMCEO.app" >/dev/null || die2 \
+  '받은 앱의 서명이 IAMCEO 배포자의 것이 아니거나, 서명한 뒤에 앱이 바뀌었습니다. 아무것도 설치하거나 바꾸지 않았습니다.' \
+  'The downloaded app is not signed by the IAMCEO publisher, or it was modified after signing. Nothing was installed or changed.'
+spctl -a -t execute "$TMP/mount/IAMCEO.app" >/dev/null || die2 \
+  'macOS가 받은 앱을 통과시키지 않았습니다(Apple 공증 확인 실패). 아무것도 설치하거나 바꾸지 않았습니다.' \
+  'macOS Gatekeeper rejected the downloaded app (Apple notarization check failed). Nothing was installed or changed.'
 APP_VERSION=$(plutil -extract CFBundleShortVersionString raw -o - "$TMP/mount/IAMCEO.app/Contents/Info.plist") || die '앱 버전을 읽지 못했습니다.'
 [ "$APP_VERSION" = "$VERSION" ] || die 'DMG 이름과 앱 버전이 다릅니다.'
 mkdir -p "$DIR" || die "$DIR 폴더를 만들 수 없습니다."

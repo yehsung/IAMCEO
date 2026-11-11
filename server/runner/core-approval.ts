@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import type { ApprovalPrompt } from "../../shared/types.ts";
 
-/** Claude Code 2.1.319's observed plain-text setup menu only. No inferred Codex menus. */
+/**
+ * Claude Code's observed plain-text setup menu only (2.1.319, 2.1.322). No inferred Codex menus.
+ * 2.1.322 puts an explanation row and a "Security guide" row between the question and the options; rows there
+ * that are not one of the two options are not read as options. An empty folder shows no dialog at all (2.1.322).
+ */
 export function claudeFolderTrust(screen: string, cwd: string): { prompt: ApprovalPrompt; selected: number } | null {
   if (screen.includes("\x1b")) return null;
   const rawLines = screen.split(/\r?\n/);
@@ -71,4 +75,25 @@ function matchesWorkspacePath(lines: string[], heading: number, question: number
   // Even an exact row at the 160-cell edge could have a clipped continuation.
   if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/u.test(path) || /\s$/u.test(path) || Bun.stringWidth(path) >= 160) return false;
   return path === cwd || path === " ".repeat(indent) + cwd;
+}
+
+const ANSI = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b./g;
+const TRUST_WORDING = /\btrust(?:ed|ing)?\b[^\n]{0,80}\b(?:folder|directory|workspace|files|project)\b|\b(?:folder|directory|workspace|project)\b[^\n]{0,80}\btrust(?:ed)?\b|^\s*Accessing workspace:\s*$|^\s*Folder access\s*$/im;
+/** An option row carrying the selection mark of a CLI menu (Claude `❯`, Codex `›`), optionally inside a drawn box. */
+const SELECTED_OPTION = /^\s*[│┃]?\s*[❯›]\s*\S/;
+/**
+ * Guidance only. Says that the bottom of the screen reads like a folder-trust dialog of some CLI version, so the
+ * owner can be told to open the terminal and answer it. It never yields options or keys: only the exact parsers
+ * above may answer a dialog.
+ *
+ * Trust wording alone is not a dialog: a start banner's path (`directory: ~/workspace/trust-api`) or a sentence in
+ * the conversation reads the same. A dialog is a menu, so a selected option row must sit among the last rows, below
+ * the wording. A composer also starts with that mark, so the caller must first rule out a visible input box
+ * (`trustDialogLike` in core.ts): a real folder-trust dialog has none.
+ */
+export function looksLikeFolderTrust(screen: string): boolean {
+  const lines = screen.replace(ANSI, "").split(/\r?\n/).filter(line => line.trim()).slice(-40);
+  const selected = lines.findLastIndex(line => SELECTED_OPTION.test(line));
+  if (selected < 1 || lines.length - 1 - selected > 8) return false;
+  return TRUST_WORDING.test(lines.slice(0, selected).join("\n"));
 }

@@ -8,7 +8,7 @@ struct MacNotificationEvent: Sendable, Equatable {
     var title: String {
         switch kind {
         case "decision": "새 결재가 있습니다"
-        case "approval_wait": "직원이 승인·선택을 기다립니다"
+        case "approval_wait": "팀원이 승인·선택을 기다립니다"
         case "report_complete": "완료 보고가 도착했습니다"
         case "report_blocked": "막힘 보고가 도착했습니다"
         default: "대표님이 할 일이 있습니다"

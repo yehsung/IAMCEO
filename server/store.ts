@@ -49,7 +49,7 @@ import type {
   WorkSec,
   WsEvent,
 } from "../shared/types.ts";
-import { DEFAULT_CODEX_RANKS, DEFAULT_RANKS, fileKindOf } from "../shared/types.ts";
+import { BLOCKED_CODES, DEFAULT_CODEX_RANKS, DEFAULT_RANKS, fileKindOf, type BlockedCode } from "../shared/types.ts";
 import type { MemberRevisions, OperationKind, OperationReceipt, OperationStatus, SyncRevisions, ManualInboxBatch } from "../shared/operations.ts";
 import type { DeliveryDispatch, DeliveryIntentResult, DeliveryRecoveryRecord, DomainRecorder, LifecycleJournal, MessageReadStore, ProjectPatchStore, RunnerRecoveryStore, TerminalLease, RunnerRecoveryState, ReportReferences, BoardReview } from "./service-contracts.ts";
 import type { RunnerTerminalIdentity } from "./runner/types.ts";
@@ -369,7 +369,19 @@ export const DEFAULT_SETTINGS: Settings = {
   notifyMac: false,
   macScriptNotifications: true,
   boardTidyHours: 6,
+  // 저장된 값이 없는 DB 는 이 Store 를 처음 열 때 정한다(initPermissionAcknowledged). 여기 값은 그 전의 안전한 기본이다.
+  permissionAcknowledged: true,
 };
+
+/** 대표가 새 프로젝트를 만들며 신뢰한다고 답한 폴더(프로젝트 id → 그때의 폴더). settings 표의 별도 키라 스키마를 바꾸지 않는다. */
+const FOLDER_TRUST_KEY = "folderTrust";
+
+/** 막힘의 까닭은 관측 기록의 오류 코드에서 읽는다. 막힘이 아니면 싣지 않는다. */
+function blockedCodeOf(status: string, observation: Member["statusObservation"]): BlockedCode | undefined {
+  if (status !== "blocked") return undefined;
+  const code = observation?.error?.code;
+  return BLOCKED_CODES.find(known => known === code);
+}
 
 type TimeField = "createdAt" | "updatedAt" | "answeredAt" | "deliveredAt" | "doneAt";
 const RESTORABLE_TIMES = {
@@ -486,6 +498,10 @@ function toMember(r: Row): Member {
     createdAt: r.created_at,
     statusObservation: r.status_observation_json === null ? null : json<Member["statusObservation"]>(r.status_observation_json),
     blockedReason: r.blocked_reason,
+    ...(() => {
+      const blockedCode = blockedCodeOf(r.status, r.status_observation_json === null ? null : json<Member["statusObservation"]>(r.status_observation_json));
+      return blockedCode ? { blockedCode } : {};
+    })(),
     subagentState: r.subagent_state_json === null ? null : json<Member["subagentState"]>(r.subagent_state_json),
     nowAt: r.now_at,
     manualActivityAt: r.manual_activity_at,
@@ -1084,7 +1100,44 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
+    const existing = !!this.getProject("hq");
     this.ensureHq();
+    this.initPermissionAcknowledged(existing);
+  }
+
+  /**
+   * 권한 방식 확인 여부를 한 번만 정해 적는다. 새로 만든 DB 와 아무것도 하지 않은 DB 는 false(앱이 첫 실행에서 묻는다),
+   * 이미 쓰던 DB(본사 말고 프로젝트가 있거나 팀장·대화가 있는 DB)는 true 다. 쓰던 사람의 세션이 갑자기 경고 창에 멈추면 안 된다.
+   */
+  private initPermissionAcknowledged(existing: boolean): void {
+    if (this.row("SELECT 1 FROM settings WHERE key = 'permissionAcknowledged'")) return;
+    const used = existing && !!(this.row("SELECT 1 FROM projects WHERE is_hq = 0 LIMIT 1") ?? this.row("SELECT 1 FROM members LIMIT 1") ?? this.row("SELECT 1 FROM messages LIMIT 1"));
+    this.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('permissionAcknowledged', ?)", JSON.stringify(used));
+  }
+
+  /** 새 프로젝트를 만들 때 대표가 그 폴더를 신뢰한다고 답했다. 폴더가 바뀌면 이 기록은 더 맞지 않는다. */
+  trustProjectFolder(projectId: string, cwd: string): void {
+    this.transaction(() => {
+      this.requireProject(projectId);
+      const saved = this.folderTrust();
+      saved[projectId] = cwd;
+      this.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", FOLDER_TRUST_KEY, JSON.stringify(saved));
+    });
+  }
+
+  /** 그 프로젝트를 만들 때 신뢰한다고 답한 바로 그 폴더인가. 글자 그대로 같을 때만 참이다. */
+  projectFolderTrusted(projectId: string, cwd: string): boolean {
+    return !!cwd && this.folderTrust()[projectId] === cwd;
+  }
+
+  private folderTrust(): Record<string, string> {
+    const row = this.row("SELECT value FROM settings WHERE key = ?", FOLDER_TRUST_KEY);
+    if (!row) return {};
+    try {
+      const saved: unknown = JSON.parse(row.value);
+      if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {};
+      return Object.fromEntries(Object.entries(saved).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+    } catch { return {}; }
   }
 
   loadApiRecovery<T>(key: string): T | null {
@@ -1231,6 +1284,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   private run(sql: string, ...params: SQLQueryBindings[]): void {
     if (this.deliveryRead) throw new Error("Cannot write inside a delivery read snapshot");
     this.db.query<Row, SQLQueryBindings[]>(sql).run(...params);
+  }
+
+  /** 따로 이벤트가 없는 변화(실행 엔진 상태 등)를 알린다. 화면은 이 신호로 스냅샷을 다시 읽는다. */
+  touchSnapshot(): void {
+    this.emitProjects();
   }
 
   private emitProjects(): void {
@@ -1438,7 +1496,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const lead = this.getConductor(id);
       const name = this.projectConductorName(patch.name);
       if (lead?.kind === "conductor" && (lead.name === conductorName(project.name) || lead.name === this.projectConductorName(project.name)) && this.row("SELECT 1 FROM members WHERE project_id = ? AND id != ? AND name = ?", id, lead.id, name)) {
-        throw new ApiError(409, "새 총괄 이름과 같은 직원이 있습니다");
+        throw new ApiError(409, "새 총괄 이름과 같은 팀장이 있습니다");
       }
     }
     return { ...patch };
@@ -1549,7 +1607,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   requireMember(id: string): Member {
     const m = this.getMember(id);
-    if (!m) throw new ApiError(404, "직원을 찾을 수 없습니다");
+    if (!m) throw new ApiError(404, "팀원을 찾을 수 없습니다");
     return m;
   }
 
@@ -1563,7 +1621,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   /** MCP 설정 파일을 쓸 때만 쓴다. 화면으로 보내지 않는다. */
   getMemberToken(id: string): string {
     const r = this.row("SELECT token FROM members WHERE id = ?", id);
-    if (!r) throw new ApiError(404, "직원을 찾을 수 없습니다");
+    if (!r) throw new ApiError(404, "팀원을 찾을 수 없습니다");
     return r.token;
   }
 
@@ -1606,7 +1664,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.transaction(() => {
       const project = this.requireProject(input.projectId);
       checkMemberText(input.name, input.role, input.kind);
-      if (input.kind === "worker" && RESERVED_HANDLES.has(input.handle)) throw new ApiError(400, `총괄 자리의 핸들이라 직원에게 쓸 수 없습니다: ${input.handle}`);
+      if (input.kind === "worker" && RESERVED_HANDLES.has(input.handle)) throw new ApiError(400, `총괄 자리의 핸들이라 팀장에게 쓸 수 없습니다: ${input.handle}`);
       if (!HANDLE_RE.test(input.handle)) throw new ApiError(400, "핸들은 영문 소문자로 시작하고 영문 소문자·숫자·_·- 만 쓸 수 있습니다(32자 이내)");
       if (this.getMemberByHandle(input.projectId, input.handle)) throw new ApiError(409, `이미 있는 핸들입니다: ${input.handle}`);
       if (this.row("SELECT 1 FROM members WHERE project_id = ? AND name = ?", input.projectId, input.name)) {
@@ -2483,7 +2541,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   enqueue(input: NewDelivery): Delivery {
     return this.transaction(() => {
       const member = this.requireMember(input.memberId);
-      if (member.projectId !== input.projectId) throw new ApiError(400, "다른 프로젝트의 직원입니다");
+      if (member.projectId !== input.projectId) throw new ApiError(400, "다른 프로젝트의 팀원입니다");
       const id = newId("dl_");
       this.run(
         `INSERT INTO deliveries (id, project_id, member_id, kind, text, wake, urgent, status, hold_reason, ref_type, ref_id, created_at)
@@ -2667,7 +2725,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       if (eventKey !== undefined) {
         const before = this.row("SELECT * FROM activity WHERE delivery_event_key = ?", eventKey);
         if (before) {
-          if (before.member_id !== memberId) throw new ApiError(409, "다른 직원의 활동 표식입니다");
+          if (before.member_id !== memberId) throw new ApiError(409, "다른 팀원의 활동 표식입니다");
           return toActivity(before);
         }
       }
@@ -2742,6 +2800,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const before = this.getSettings();
       if (this.runtimeBackend !== "core" && patch.backend) this.runtimeBackend = patch.backend;
       const next: Record<string, unknown> = { ...patch };
+      // 권한 방식 확인은 되돌리지 않는다.
+      if (next.permissionAcknowledged === false && before.permissionAcknowledged !== false) delete next.permissionAcknowledged;
       if (patch.ranks) {
         next.ranks = Object.fromEntries((Object.keys(DEFAULT_RANKS) as Rank[]).map((rank) => [rank, { ...before.ranks[rank], ...patch.ranks![rank] }]));
       }
@@ -2873,7 +2933,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   beginOperation(input: { operationId: string; kind: OperationKind; projectId: string | null; memberId: string | null; request: unknown }): OperationReceipt {
     return this.transaction(() => {
       if (input.projectId !== null) this.requireProject(input.projectId);
-      if (input.memberId !== null && this.requireMember(input.memberId).projectId !== input.projectId) throw new ApiError(400, "다른 프로젝트의 직원입니다");
+      if (input.memberId !== null && this.requireMember(input.memberId).projectId !== input.projectId) throw new ApiError(400, "다른 프로젝트의 팀원입니다");
       const r = this.row("SELECT * FROM operation_receipts WHERE operation_id = ?", input.operationId);
       if (r) {
         if (r.kind !== input.kind || r.project_id !== input.projectId || r.member_id !== input.memberId || r.request_json !== stableJson(input.request)) throw new ApiError(409, "다른 요청에 사용된 operationId입니다", "OPERATION_CONFLICT");
@@ -2989,7 +3049,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   saveDispatch(dispatch: DeliveryDispatch): void {
     this.transaction(() => {
-      if (this.requireMember(dispatch.memberId).projectId !== dispatch.projectId) throw new ApiError(400, "다른 프로젝트의 직원입니다");
+      if (this.requireMember(dispatch.memberId).projectId !== dispatch.projectId) throw new ApiError(400, "다른 프로젝트의 팀원입니다");
       this.checkRevision(this.memberRevisions(dispatch.memberId).sessionGeneration, dispatch.identity.sessionGeneration);
       if (this.getDispatch(dispatch.dispatchId)) throw new ApiError(409, "이미 저장된 봉투입니다");
       if (!dispatch.items.length || dispatch.items.length !== dispatch.markers.length) throw new ApiError(400, "봉투 항목이 올바르지 않습니다");

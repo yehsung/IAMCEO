@@ -42,7 +42,7 @@ export function renderRole(kind: MemberKind, vars: RoleVars, rolesDir?: string):
   const template = useCustom ? readFileSync(custom, "utf8") : BUILT_IN[kind];
   if (useCustom && !warned.has(custom) && !template.includes("승인")) {
     warned.add(custom);
-    console.warn(`역할 템플릿 ${custom} 에 승인 규칙이 없습니다. 기본 규칙 전체를 대체하므로 직원이 승인 없이 일할 수 있습니다. 'iamceo roles export' 로 기본 규칙을 꺼내 고치세요`);
+    console.warn(`역할 템플릿 ${custom} 에 승인 규칙이 없습니다. 기본 규칙 전체를 대체하므로 팀원이 승인 없이 일할 수 있습니다. 'iamceo roles export' 로 기본 규칙을 꺼내 고치세요`);
   }
   const rule = vars.SUBAGENT_EFFORT ?? "";
   // 줄이 통째로 자리표시면 비었을 때 빈 줄을 남기지 않는다. 고쳐 쓴 템플릿에 자리표시가 없어도 규칙은 빠지지 않게 끝에 붙인다.

@@ -29,8 +29,10 @@ import type {
   AnswerReq,
   Attachment,
   Backend,
+  BlockedCode,
   CliProvider,
   CreateMemberReq,
+  EngineStatus,
   RuntimeInfo,
   CreateProjectReq,
   Decision,
@@ -59,7 +61,7 @@ import type {
   WorkSec,
 } from "../shared/types.ts";
 import { adoptRefusal, memberConfig } from "../shared/types.ts";
-import type { Config } from "./config.ts";
+import { CORE_VERSION, type Config } from "./config.ts";
 import { briefly, type AgentToolDef, type AgentToolResult, type AskWaitResult, type OrchestratorApi } from "./orchestrator-api.ts";
 import { sanitizeName } from "./files.ts";
 import { josa, renderRole } from "./roles.ts";
@@ -307,6 +309,8 @@ export interface OrchestratorTimings {
   configRetryMs: number;
   /** 전송 호출이 끝난 뒤 이만큼 지나면 그 쓰기에서 더 올 것이 없다고 본다. 전송 제한(20초)보다 길어야 한다. */
   writeSettleMs: number;
+  /** 실행 엔진(herdr-core)이 이만큼 이어서 답하지 않으면 화면에 '응답 없음'으로 알린다. */
+  engineUnresponsiveMs: number;
 }
 
 const DEFAULT_TIMINGS: OrchestratorTimings = {
@@ -328,7 +332,18 @@ const DEFAULT_TIMINGS: OrchestratorTimings = {
   quickExitRetryMs: 10 * 60_000,
   configRetryMs: 60_000,
   writeSettleMs: 30_000,
+  engineUnresponsiveMs: 60_000,
 };
+
+/** 대표가 프로젝트를 만들며 폴더를 신뢰한다고 답했을 때만 고르는 선택지. 실측한 창의 글자와 정확히 같아야 한다. */
+const TRUST_OPTION_LABELS = ["Yes, I trust this folder", "Trust and continue"];
+/** 한 세션에서 폴더 신뢰 창에 자동으로 답해 보는 횟수의 상한. 넘으면 대표에게 맡긴다. */
+const MAX_AUTO_TRUST_ATTEMPTS = 2;
+
+/** "hc 1.2.3" 같은 글에서 버전만 고른다. 버전 꼴이 없으면 글자 그대로 비교한다. */
+function versionIn(raw: string): string {
+  return /\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/.exec(raw)?.[0] ?? raw.trim();
+}
 
 class MissingSessionError extends Error {
   constructor() { super("이어갈 세션 기록이 없습니다"); }
@@ -736,8 +751,10 @@ export class Orchestrator implements OrchestratorApi {
         try {
           const hello = await coreRpc<CoreHello>(this.coreSocket(), "hello", { generation: 1 }, 1000);
           this.coreRefusedSince = null;
+          this.noteEngine(hello);
           return hello.generation === 1 ? "owned" : "conflict";
         } catch (error) {
+          this.noteEngine(null);
           this.noteCoreRefused(error instanceof CoreError && error.causeCode === "ECONNREFUSED");
           return error instanceof CoreError && error.causeCode === "ENOENT" && error.deliveryEffect === "not_written" ? "absent" : "unknown";
         }
@@ -834,6 +851,38 @@ export class Orchestrator implements OrchestratorApi {
     if (this.coreRefusedLogged || Date.now() - this.coreRefusedSince < 60_000) return;
     this.coreRefusedLogged = true;
     console.error("[core] herdr-core 소켓 파일은 있지만 1분 넘게 아무도 받지 않습니다. 죽은 core 가 남긴 소켓일 수 있습니다. 자동으로 지우거나 새로 띄우지 않습니다: core 가 정말 내려갔는지 확인한 뒤 소켓 파일을 지우면 다시 띄웁니다");
+  }
+
+  private engine: EngineStatus | null = null;
+  private engineSilentSince: number | null = null;
+  /**
+   * 실행 엔진이 답했는지(hello)와 그 버전을 적는다. 잠깐의 끊김(다시 띄우는 몇 초)에는 상태를 바꾸지 않고,
+   * engineUnresponsiveMs 넘게 이어서 답이 없을 때만 '응답 없음'으로 바꾼다. 달라지면 화면이 다시 읽게 알린다.
+   */
+  private noteEngine(hello: CoreHello | null): void {
+    let next = this.engine;
+    if (hello) {
+      this.engineSilentSince = null;
+      const version = typeof hello.version === "string" && hello.version.trim() ? versionIn(hello.version) : undefined;
+      next = { state: hello.generation === 1 && version === CORE_VERSION ? "ok" : "version_mismatch", ...(version ? { version } : {}), expectedVersion: CORE_VERSION };
+    } else {
+      this.engineSilentSince ??= Date.now();
+      if (Date.now() - this.engineSilentSince >= this.timings.engineUnresponsiveMs) next = { state: "unresponsive", expectedVersion: CORE_VERSION };
+    }
+    if (JSON.stringify(next) === JSON.stringify(this.engine)) return;
+    const before = this.engine;
+    this.engine = next;
+    if (next && next.state !== "ok") console.warn(next.state === "unresponsive"
+      ? `[core] 실행 엔진(herdr-core)이 ${Math.round(this.timings.engineUnresponsiveMs / 1000)}초 넘게 답하지 않습니다`
+      : `[core] 떠 있는 실행 엔진의 버전(${next.version ?? "알 수 없음"})이 고정 버전(${CORE_VERSION})과 다릅니다`);
+    else if (before && before.state !== "ok") console.warn("[core] 실행 엔진 상태가 정상으로 돌아왔습니다");
+    // 따로 이벤트가 없는 변화다. 화면이 스냅샷을 다시 읽게 기존 신호를 보낸다.
+    if (!this.closed) this.store.touchSnapshot();
+  }
+
+  /** 실행 엔진 상태. 아직 한 번도 확인하지 못했거나 엔진이 없는 실행 방식이면 null. */
+  engineStatus(): EngineStatus | null {
+    return this.engine ? { ...this.engine } : null;
   }
 
   private readonly terminalStreamClosers = new Set<() => Promise<void>>();
@@ -1332,8 +1381,8 @@ export class Orchestrator implements OrchestratorApi {
 
   async patchMemberConfigV2(memberId: string, patch: PatchMemberReq, precondition: RevisionPrecondition): Promise<MemberConfigWriteResult> {
     this.store.requireMember(memberId);
-    if (this.configWrites.has(memberId)) throw new ApiError(409, "직원 설정을 적용하는 중입니다");
-    if (this.store.memberRevisions(memberId).configRevision !== precondition.expectedRevision) throw new ApiError(409, "직원 설정이 변경되었습니다", "REVISION_CONFLICT");
+    if (this.configWrites.has(memberId)) throw new ApiError(409, "팀원 설정을 적용하는 중입니다");
+    if (this.store.memberRevisions(memberId).configRevision !== precondition.expectedRevision) throw new ApiError(409, "팀원 설정이 변경되었습니다", "REVISION_CONFLICT");
     this.configWrites.add(memberId);
     try {
       const member = await this.patchMemberConfigOnce(memberId, patch);
@@ -1932,6 +1981,8 @@ export class Orchestrator implements OrchestratorApi {
     const goal = req.goal?.trim();
     const project = this.store.createProject({ name: req.name, cwd: req.cwd, now: goal, creationGoal: req.goal ?? null });
     this.store.setChiefCli(project.id, req.chiefCli ?? "claude");
+    // 총괄을 띄우기 전에 남긴다. 첫 기동의 폴더 신뢰 창을 이 답으로 처리한다.
+    if (req.trustFolder === true) this.store.trustProjectFolder(project.id, project.cwd);
     if (req.startConductor) {
       const conductor = await this.ensureConductor(project.id);
       if (goal) await this.deliver({ projectId: project.id, memberId: conductor.id, kind: "system", text: formatSystem(`프로젝트 목표: ${guardLines(goal)}`) });
@@ -2073,7 +2124,7 @@ export class Orchestrator implements OrchestratorApi {
       const targetRunner = this.runners.get(this.store.effectiveBackend());
       if (targetRunner instanceof CoreRunner) {
         const model = this.desiredConfig(target).model;
-        if (target.cli === "codex" && model && /^(?:claude[-:]|opus(?:-|$)|sonnet(?:-|$)|haiku(?:-|$))/i.test(model)) throw new ApiError(400, "Codex용 모델을 고르거나 직원 모델 지정을 기본값으로 되돌리세요");
+        if (target.cli === "codex" && model && /^(?:claude[-:]|opus(?:-|$)|sonnet(?:-|$)|haiku(?:-|$))/i.test(model)) throw new ApiError(400, "Codex용 모델을 고르거나 팀원 모델 지정을 기본값으로 되돌리세요");
         try { providerLaunch(this.runnerMember(target, project), this.writeRunFiles(target, project, !!target.sessionId), this.config); }
         catch (e) { throw new ApiError(400, `CLI 설정을 적용할 수 없습니다: ${(e as Error).message}`); }
       }
@@ -2249,7 +2300,7 @@ export class Orchestrator implements OrchestratorApi {
   /** 직원별 모델·effort. null 이면 직급 기본으로 돌아간다. */
   async patchMemberConfig(memberId: string, patch: PatchMemberReq): Promise<Member> {
     this.requireActive(this.store.requireProject(this.store.requireMember(memberId).projectId));
-    if (this.configWrites.has(memberId)) throw new ApiError(409, "직원 설정을 적용하는 중입니다");
+    if (this.configWrites.has(memberId)) throw new ApiError(409, "팀원 설정을 적용하는 중입니다");
     this.configWrites.add(memberId);
     try { return await this.patchMemberConfigOnce(memberId, patch); }
     finally { this.releaseConfigWrite(memberId); }
@@ -2427,7 +2478,7 @@ export class Orchestrator implements OrchestratorApi {
     const current = this.store.requireMessage(existing.id);
     if (current.delivery !== "failed") return current;
     const target = current.targetMemberId ? this.store.getMember(current.targetMemberId) : null;
-    if (current.targetMemberId && !target) throw new ApiError(409, "그 직원이 닫혀 다시 보낼 수 없습니다. 새 글로 보내세요");
+    if (current.targetMemberId && !target) throw new ApiError(409, "그 팀원이 닫혀 다시 보낼 수 없습니다. 새 글로 보내세요");
     await this.refreshHealth();
     this.store.requireReachable(current.projectId, target);
     let deliveries = this.store.listDeliveries(current.projectId).filter(d => d.refType === "message" && d.refId === current.id);
@@ -2451,7 +2502,7 @@ export class Orchestrator implements OrchestratorApi {
     if (req.contextFileId && this.store.getFile(req.contextFileId)?.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 자료가 아닙니다");
     const attachments = (req.attachmentIds ?? []).map(id => this.store.getAttachment(id)).filter((a): a is Attachment => a !== null);
     const target = req.targetMemberId ? this.store.requireMember(req.targetMemberId) : null;
-    if (target && target.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 직원이 아닙니다");
+    if (target && target.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 팀원이 아닙니다");
     let recipient = target ?? this.store.getConductor(projectId);
     let booting: Promise<void> | null = null;
     const { value: message, deliveries } = this.store.withDeliveryIntents(() => {
@@ -2756,7 +2807,7 @@ export class Orchestrator implements OrchestratorApi {
     if (!live) throw new ApiError(404, "그 칸을 찾을 수 없습니다");
     if (this.store.getMemberByPane(req.paneId)) throw new ApiError(409, "이미 등록된 칸입니다");
     const sameSession = live.sessionId ? this.store.getMemberBySession(live.sessionId) : null;
-    if (sameSession) throw new ApiError(409, `이 세션은 이미 ${sameSession.name} 자리입니다. 그 직원을 깨우거나 터미널 칸을 닫으세요`);
+    if (sameSession) throw new ApiError(409, `이 세션은 이미 ${sameSession.name} 자리입니다. 그 팀원을 깨우거나 터미널 칸을 닫으세요`);
     // 실행기는 claude 세션만 다룰 수 있다. 일하는 중·승인 창 앞이면 규칙이 턴 중간에 끼어들고, 쓰던 턴의 마지막 글이 보고로 나간다.
     const refusal = adoptRefusal(live);
     if (refusal) throw new ApiError(409, refusal);
@@ -2817,7 +2868,7 @@ export class Orchestrator implements OrchestratorApi {
    */
   async releaseMember(memberId: string): Promise<ReleaseResult> {
     const member = this.store.requireMember(memberId);
-    if (!member.wasAdopted || member.kind !== "worker") throw new ApiError(400, "편입한 직원만 해제할 수 있습니다");
+    if (!member.wasAdopted || member.kind !== "worker") throw new ApiError(400, "편입한 팀장만 해제할 수 있습니다");
     const project = this.store.requireProject(member.projectId);
     this.requireActive(project);
     let notified = false;
@@ -2884,7 +2935,7 @@ export class Orchestrator implements OrchestratorApi {
   /** 영속 예약을 먼저 커밋한다. 프로세스가 죽으면 미확인 결과를 반환하며 효과를 재생하지 않는다. */
   async handleAgentOperation(member: Member, name: string, args: Record<string, unknown>, context: AgentOperationContext, signal?: AbortSignal): Promise<AgentToolResult> {
     const current = this.store.requireMember(member.id);
-    if (current.projectId !== member.projectId) throw new ApiError(404, "직원을 찾을 수 없습니다");
+    if (current.projectId !== member.projectId) throw new ApiError(404, "팀원을 찾을 수 없습니다");
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(context.operationId)) throw new ApiError(400, "operationId가 잘못되었습니다");
     let reserved = false;
     const previous = this.store.agentOperation(current.id, name, context.operationId, args, () => {
@@ -3079,6 +3130,8 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 명부에서 뺀다. 그 직원의 실행 파일(규칙·MCP 설정·CLI 설정)도 지운다: MCP 설정에는 그 직원의 토큰이 들어 있다. */
   private forgetMember(memberId: string): void {
+    this.blockedNotices.delete(memberId);
+    this.autoTrusts.delete(memberId);
     this.store.removeMember(memberId);
     this.store.afterCommit(() => {
       for (const suffix of ["rules.md", "mcp.json", "settings.json"]) {
@@ -3206,7 +3259,7 @@ export class Orchestrator implements OrchestratorApi {
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 압축할 수 없습니다");
     const project = this.store.requireProject(member.projectId);
     this.requireActive(project);
-    if (!project.runnerEnabled || ["asleep", "offline"].includes(member.status)) throw new ApiError(409, "깨어 있고 실행이 켜진 직원만 압축할 수 있습니다");
+    if (!project.runnerEnabled || ["asleep", "offline"].includes(member.status)) throw new ApiError(409, "깨어 있고 실행이 켜진 팀원만 압축할 수 있습니다");
     if (!member.sessionId) throw new ApiError(this.backendOf(member) === "core" ? 409 : 400, "아직 native 세션을 확인하지 못했습니다");
     const normalized = (focus ? normalizeSpace(focus) : "") || this.compactFocus(member);
     if (this.backendOf(member) === "core") {
@@ -3373,7 +3426,7 @@ export class Orchestrator implements OrchestratorApi {
         }
       }
       if (!adopted) await this.stopManaged(member, opts.holdAs === "archived" ? "archive" : "sleep", !!opts.force && !opts.holdAs);
-      this.endExecution(member, "interrupted", "직원을 잠재워 실행을 종료했습니다");
+      this.endExecution(member, "interrupted", "팀원을 잠재워 실행을 종료했습니다");
       if (rt.turn) rt.turn.interrupted = true;
       rt.compactRequest = null;
       this.store.transaction(() => {
@@ -3442,7 +3495,7 @@ export class Orchestrator implements OrchestratorApi {
     this.scheduleRetry(member.id, rt, until);
     if (!rt.quickExitNotified) {
       rt.quickExitNotified = true;
-      const text = `${member.name}의 세션이 시작하자마자 끝나기를 되풀이해 자동으로 다시 깨우지 않습니다. 터미널에서 원인을 확인한 뒤 직원을 깨워 주세요.${member.lastError ? ` (${member.lastError})` : ""}`;
+      const text = `${member.name}의 세션이 시작하자마자 끝나기를 되풀이해 자동으로 다시 깨우지 않습니다. 터미널에서 원인을 확인한 뒤 팀원을 깨워 주세요.${member.lastError ? ` (${member.lastError})` : ""}`;
       this.store.appendActivity(member.id, "error", text);
       this.systemMessage(member.projectId, text);
       this.notifyInbox(`${member.name} 세션 시작 실패`, text);
@@ -3512,7 +3565,7 @@ export class Orchestrator implements OrchestratorApi {
     if (this.store.getMember(member.id)) return false;
     // 방금 띄운 칸은 서버 칸이다. 대표의 칸에 다시 붙은 경우(rejoined)만 넘겨받은 칸으로 다룬다.
     const origin = member.origin === "adopted" && !started.rejoined ? "runner" : member.origin;
-    await this.pumpWait(member.id, "drop_closed_session", () => runner.stop(this.runnerMember({ ...member, origin, sessionId: started.sessionId, paneId: started.paneId }, project)), runner).catch((e) => console.warn("닫힌 직원의 칸을 닫지 못했습니다:", (e as Error).message));
+    await this.pumpWait(member.id, "drop_closed_session", () => runner.stop(this.runnerMember({ ...member, origin, sessionId: started.sessionId, paneId: started.paneId }, project)), runner).catch((e) => console.warn("닫힌 팀원의 칸을 닫지 못했습니다:", (e as Error).message));
     return true;
   }
 
@@ -3530,7 +3583,7 @@ export class Orchestrator implements OrchestratorApi {
     if (rt.closing || (this.backendOf(member) === "core" && (rt.starting || rt.reopening || rt.pumping))) throw new ApiError(409, "세션을 처리하는 중입니다");
     if (this.backendOf(member) !== "core") {
       const starting = this.pendingLifecycle(memberId);
-      if (starting?.intent === "start") this.finishLifecycle(starting, "refused", "띄우는 동안 직원이 닫혔습니다");
+      if (starting?.intent === "start") this.finishLifecycle(starting, "refused", "띄우는 동안 팀원이 닫혔습니다");
     }
     rt.closing = true;
     try {
@@ -3541,7 +3594,7 @@ export class Orchestrator implements OrchestratorApi {
           if (!opts.paneDone) await this.releasePane(member, project);
         } else await this.stopManaged(member, "close", true);
       }
-      this.endExecution(member, "interrupted", "직원을 닫아 실행을 종료했습니다");
+      this.endExecution(member, "interrupted", "팀원을 닫아 실행을 종료했습니다");
       if (rt.turn) rt.turn.interrupted = true;
       if (member.origin !== "manual") this.store.patchMember(memberId, { status: "asleep" });
       this.confirmStop(memberId);
@@ -4206,7 +4259,8 @@ export class Orchestrator implements OrchestratorApi {
       if (opened || rt.readySince === null) rt.readySince = Date.now();
       if (Date.now() - rt.readySince >= this.timings.inputBusyLimitMs) {
         rt.readySince = null;
-        this.markBlocked(member);
+        // 한 번도 준비를 알리지 않은 CLI 다. 승인 창이라고 단정하지 않고 '시작이 늦어짐'으로 알린다.
+        this.markBlocked(member, runner.observationState(member.id)?.turn ? undefined : "start_not_ready");
         for (const d of pending) this.hold(d, "blocked");
         return;
       }
@@ -4894,6 +4948,8 @@ export class Orchestrator implements OrchestratorApi {
     switch (e.type) {
       case "input_ready": this.recheckMemberDelivery(member.id); return;
       case "status":
+        // 관측을 명부에 적기 전에, 저장돼 있던 막힘의 까닭을 이미 알린 것으로 잇는다.
+        if (e.status === "blocked") this.recallBlockedNotice(member);
         if (this.apiRecovery.holdReason(member.id) === "api_outage" && this.store.requireMember(member.id).statusObservation?.error?.code === "network_outage" && e.status === "idle") return;
         if (["idle", "working"].includes(e.status) && (!e.observation || e.observation.freshness === "fresh") && member.lastError && !member.lastError.startsWith("control_unknown:")) this.store.patchMember(member.id, { lastError: null });
         if (e.status === "working" || e.observation?.freshness === "stale") this.invalidateCoreMeasurement(member);
@@ -4979,15 +5035,85 @@ export class Orchestrator implements OrchestratorApi {
     }
   }
 
-  /** 승인 창 앞에서는 대표가 풀어 줘야 움직인다. 결재함에 안 보이므로 다른 창을 보고 있어도 알린다. */
-  private markBlocked(member: Member): void {
-    if (member.status !== "blocked") void this.notifyBlocked(member);
+  /** 지금의 막힘에서 이미 알린 까닭들. 메모리에만 있다. */
+  private readonly blockedNotices = new Map<string, Set<string>>();
+  /**
+   * 서버를 다시 띄운 뒤 처음 보는 팀장이 이미 막혀 있었다면, 저장돼 있던 까닭은 지난 실행에서 알린 것이다.
+   * 알림 기록이 메모리에만 있어, 잇지 않으면 재시작(배포)마다 같은 알림이 다시 나갔다. stored 는 이번 관측을 적기 전의 명부 값이어야 한다.
+   */
+  private recallBlockedNotice(stored: Member): void {
+    if (stored.status === "blocked" && !this.blockedNotices.has(stored.id)) this.blockedNotices.set(stored.id, new Set([stored.blockedCode ?? "blocked"]));
+  }
+  private readonly autoTrusts = new Map<string, { generation: number; fingerprints: Set<string> }>();
+  /**
+   * 승인 창 앞에서는 대표가 풀어 줘야 움직인다. 결재함에 안 보이므로 다른 창을 보고 있어도 알린다.
+   * code 는 서버가 스스로 판단한 까닭(준비 신호 없음)이다. 실행기가 이미 까닭을 관측했으면 그것을 둔다.
+   */
+  private markBlocked(member: Member, code?: BlockedCode): void {
+    const entering = member.status !== "blocked";
+    const observation = code && !member.statusObservation?.error ? { statusObservation: {
+      ...(member.statusObservation ?? { source: this.backendOf(member), observedAt: new Date().toISOString(), freshness: "unknown" as const, ownership: "unknown" as const, consecutiveFailures: 0 }),
+      error: { code, note: "띄운 뒤 60초 넘게 준비를 알리지 않았습니다. 터미널을 열어 화면을 확인해 주세요" } } } : {};
     // The observation's verified reason may have arrived before this status transition.
-    this.store.patchMember(member.id, { status: "blocked", blockedReason: member.blockedReason ?? "status_unknown" });
+    const blocked = this.store.patchMember(member.id, { status: "blocked", blockedReason: member.blockedReason ?? "status_unknown", ...observation });
+    // 이미 막혀 있던 팀장은 이 막힘에서 처음 보는 까닭이 붙을 때만 다시 알린다(까닭이 오가도 한 번씩만).
+    if (entering) this.blockedNotices.delete(member.id); else this.recallBlockedNotice(member);
+    const key = blocked.blockedCode ?? "blocked";
+    const noticed = this.blockedNotices.get(member.id) ?? new Set<string>();
+    const notify = entering || (!!blocked.blockedCode && !noticed.has(key));
+    this.blockedNotices.set(member.id, noticed.add(key));
+    if (this.trustsFolder(blocked)) {
+      // 대표가 프로젝트를 만들며 이미 답했다. 정확히 알아본 창에만 답하고, 안 되면 평소처럼 알린다.
+      void this.autoTrust(blocked).then(answered => answered, e => { console.warn("폴더 신뢰 자동 답 실패:", member.id, (e as Error).message); return false; })
+        .then(answered => { if (!answered && notify && !this.closed && this.store.getMember(member.id)?.status === "blocked") void this.notifyBlocked(blocked); });
+      return;
+    }
+    if (notify) void this.notifyBlocked(blocked);
+  }
+
+  /** 이 팀장이 멈춘 곳이, 대표가 프로젝트를 만들 때 신뢰한다고 답한 바로 그 폴더의 폴더 신뢰 창인가. */
+  private trustsFolder(member: Member): boolean {
+    if (member.blockedReason !== "setup" || member.statusObservation?.error?.code !== "folder_trust" || member.origin !== "runner") return false;
+    const project = this.store.getProject(member.projectId);
+    return !!project && !project.archived && project.runnerEnabled && member.cwd === project.cwd && this.store.projectFolderTrusted(project.id, member.cwd);
+  }
+
+  /**
+   * 기존 승인 답 경로(runner.answerApproval)로 '신뢰'를 고른다. 실행기가 누르기 직전 창을 다시 읽어 폴더 경로와 글자가
+   * 정확히 맞을 때만 누른다. 창을 못 읽었거나 선택지가 실측과 다르면 아무것도 누르지 않는다.
+   */
+  private async autoTrust(member: Member): Promise<boolean> {
+    const runner = this.runners.get(this.backendOf(member));
+    // herdr 호환 경로의 approval 은 권한 승인 창이다. 폴더 신뢰 창만 돌려주는 core 에서만 한다.
+    if (!(runner instanceof CoreRunner) || this.runtime(member.id).closing) return false;
+    const generation = this.store.memberRevisions(member.id).sessionGeneration;
+    let tried = this.autoTrusts.get(member.id);
+    if (!tried || tried.generation !== generation) this.autoTrusts.set(member.id, tried = { generation, fingerprints: new Set() });
+    const target = this.runnerMember(member, this.store.requireProject(member.projectId));
+    const prompt = await runner.approval(target);
+    if (!prompt || prompt.options.length !== 2 || tried.fingerprints.has(prompt.fingerprint) || tried.fingerprints.size >= MAX_AUTO_TRUST_ATTEMPTS) return false;
+    const trust = prompt.options.find(option => !option.reject && TRUST_OPTION_LABELS.includes(option.label));
+    if (!trust || !prompt.options.some(option => option !== trust && option.reject)) return false;
+    // 누르기 전에 다시 본다: 그 사이 폴더가 바뀌었거나 프로젝트가 보관됐으면 그만둔다.
+    const current = this.store.getMember(member.id);
+    if (!current || !this.trustsFolder(current)) return false;
+    tried.fingerprints.add(prompt.fingerprint);
+    let result = await runner.answerApproval(target, prompt.fingerprint, trust.n);
+    // 막 띄운 직후에는 기동이 입력 자리를 잠깐 잡고 있다. 그때의 거절은 아무것도 누르지 않은 것이라 조금 뒤 다시 해 본다.
+    for (let i = 0; i < 5 && !result.ok && result.reason === "input_busy" && !this.closed; i++) {
+      await Bun.sleep(200);
+      result = await runner.answerApproval(target, prompt.fingerprint, trust.n);
+    }
+    if (!result.ok) return false;
+    this.store.appendActivity(member.id, "system", `프로젝트를 만들 때 대표가 이 폴더를 신뢰한다고 답해, 폴더 신뢰 확인 창에서 '${trust.label}' 을 골랐습니다 · ${member.cwd}`);
+    return true;
   }
 
   /** 무엇을 승인할지 알림에 같이 싣는다. 창을 못 읽으면 예전 문구다. */
   private async notifyBlocked(member: Member): Promise<void> {
+    // 승인 창이 아닌 막힘은 승인 대기라고 알리지 않는다.
+    if (member.blockedCode === "start_not_ready") return this.notifyInbox(`${member.name} 시작 지연`, "시작이 늦어지고 있습니다. 터미널을 열어 화면을 확인해 주세요");
+    if (member.blockedCode === "trust_dialog_unrecognized") return this.notifyInbox(`${member.name} 확인 필요`, "폴더 신뢰 확인 창을 읽지 못했습니다. 터미널을 열어 직접 답해 주세요");
     let body = "승인 창 앞에서 멈췄습니다";
     try {
       const a = await this.memberApproval(member.id);
@@ -5294,7 +5420,7 @@ export class Orchestrator implements OrchestratorApi {
   /** 세션을 새로 띄우거나 다시 열 때. 전역 실행 방식을 따르고 그것을 기억한다. */
   private openRunner(member: Member): Runner {
     if (this.runners.has("core") && member.backend !== "core" && (member.sessionId || member.paneId)) {
-      throw new ApiError(409, "이전 실행기의 세션은 자동 전환하지 않습니다. 새 직원을 만들거나 CLI 전환으로 새 세션을 시작하세요");
+      throw new ApiError(409, "이전 실행기의 세션은 자동 전환하지 않습니다. 새 팀장을 만들거나 CLI 전환으로 새 세션을 시작하세요");
     }
     const backend = this.store.effectiveBackend();
     const runner = this.runners.get(backend);
@@ -5346,12 +5472,13 @@ export class Orchestrator implements OrchestratorApi {
     chmodSync(mcpConfigFile, 0o600);
     // 넘겨받은 칸은 대표의 탭에 있다. 그 세션을 근거로 대표의 탭을 프로젝트 탭으로 믿으면 새 칸이 거기 생긴다.
     const projectSessions = this.store.listMembers(project.id).flatMap((m) => (m.origin === "adopted" ? [] : (m.sessionId ?? [])));
-    // 바이패스는 대표가 설정에서 고른 모드다. 첫 경고 창이 아무도 안 보는 칸에서 일을 막지 않게 한다.
+    // 바이패스는 대표가 확인한 모드일 때만 경고 창을 끈다. 그래야 첫 경고 창이 아무도 안 보는 칸에서 일을 막지 않는다.
     let settingsFile: string | undefined;
     if (member.cli !== "codex") {
       settingsFile = join(dir, `${member.id}.settings.json`);
       const settings = { statusLine: writeStatuslineWrapper(this.config.home),
-        ...(this.store.getSettings().permissionMode === "bypassPermissions" ? { skipDangerousModePermissionPrompt: true } : {}) };
+        // 대표가 권한 방식을 확인하기 전에는 CLI 의 위험 모드 경고를 대신 꺼 주지 않는다.
+        ...(this.store.getSettings().permissionMode === "bypassPermissions" && this.store.getSettings().permissionAcknowledged !== false ? { skipDangerousModePermissionPrompt: true } : {}) };
       writeFileSync(settingsFile, `${JSON.stringify(settings)}\n`, { mode: 0o600 });
     }
     return { systemPromptFile, mcpConfigFile, resume, herdrTabId: project.herdrTabId, projectName: project.name, projectSessions, settingsFile };

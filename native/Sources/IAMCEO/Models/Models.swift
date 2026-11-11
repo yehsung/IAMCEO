@@ -138,6 +138,9 @@ struct Member: Codable, Sendable, Identifiable, Equatable {
     var lifecycleState: MemberLifecycleState? = nil
     /// When the member's CLI last did work (its latest turn or tool call); nil from older servers or if it never ran.
     var lastActiveAt: String? = nil
+    /// Why the server thinks a blocked member is stuck ("trust_dialog_unrecognized", "start_not_ready"); nil from older
+    /// servers. An unknown code is shown like no code at all.
+    var blockedCode: String? = nil
 }
 extension Member {
     init(from decoder: Decoder) throws {
@@ -180,6 +183,7 @@ extension Member {
         executionState = c.lenient(MemberExecutionState.self, forKey: ModelKey("executionState"))
         lifecycleState = c.lenient(MemberLifecycleState.self, forKey: ModelKey("lifecycleState"))
         lastActiveAt = try c.decodeIfPresent(String.self, forKey: ModelKey("lastActiveAt"))
+        blockedCode = c.lenient(String.self, forKey: ModelKey("blockedCode"))
     }
 }
 
@@ -501,6 +505,9 @@ struct Settings: Codable, Sendable, Equatable {
     var boardTidyHours: Double = 6
     var contextWindowDefault: Int? = nil
     var contextWindows: [String: Int]? = nil
+    /// false only on a server that has not been told how sessions may run commands yet (a brand-new install).
+    /// nil from older servers, which is read as "already chosen": the first-run choice is never shown for them.
+    var permissionAcknowledged: Bool? = nil
 }
 extension Settings {
     init(from decoder: Decoder) throws {
@@ -517,6 +524,7 @@ extension Settings {
         boardTidyHours = try c.decodeIfPresent(Double.self, forKey: ModelKey("boardTidyHours")) ?? 6
         contextWindowDefault = try c.decodeIfPresent(Int.self, forKey: ModelKey("contextWindowDefault"))
         contextWindows = try c.decodeIfPresent([String: Int].self, forKey: ModelKey("contextWindows"))
+        permissionAcknowledged = c.lenient(Bool.self, forKey: ModelKey("permissionAcknowledged"))
     }
 }
 
@@ -549,6 +557,8 @@ struct Bootstrap: Codable, Sendable, Equatable {
     var urls: [String] = []
     var cli: String = "iamceo"
     var rankOverrides: [String: Int] = [:]
+    /// Health of the execution engine (herdr-core); nil from older servers.
+    var engine: EngineState? = nil
 }
 extension Bootstrap {
     init(from decoder: Decoder) throws {
@@ -564,6 +574,22 @@ extension Bootstrap {
         urls = try c.decodeIfPresent([String].self, forKey: ModelKey("urls")) ?? []
         cli = try c.decodeIfPresent(String.self, forKey: ModelKey("cli")) ?? "iamceo"
         rankOverrides = try c.decodeIfPresent([String: Int].self, forKey: ModelKey("rankOverrides")) ?? [:]
+        engine = c.lenient(EngineState.self, forKey: ModelKey("engine"))
+    }
+}
+
+/// `state` stays a plain string: a value this app does not know ("ok" included) shows nothing.
+struct EngineState: Codable, Sendable, Equatable {
+    var state: String = "ok"
+    var version: String? = nil
+    var expectedVersion: String? = nil
+}
+extension EngineState {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: ModelKey.self)
+        state = try c.decode(String.self, forKey: ModelKey("state"))
+        version = c.lenient(String.self, forKey: ModelKey("version"))
+        expectedVersion = c.lenient(String.self, forKey: ModelKey("expectedVersion"))
     }
 }
 

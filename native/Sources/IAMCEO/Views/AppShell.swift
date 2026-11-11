@@ -13,6 +13,9 @@ struct AppShell: View {
     @State private var showArchive = false
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The pairing request whose confirmation is on screen. It follows `store.pairingRequest`, but only once every
+    /// sheet is gone: an alert cannot open over a sheet, or while one is still closing.
+    @State private var pairingAlert: PairingRequest?
     #endif
     #if DEBUG
     /// `--sheet localfile:md|code|image|other`: the chat file-path preview with sample content (review hook).
@@ -78,6 +81,17 @@ struct AppShell: View {
         #endif
         .sheet(isPresented: $router.showNewProject) { NewProjectView() }
         .sheet(isPresented: $router.showNewMember) { NewMemberView() }
+        // First connection to a newly installed server, from any device: how sessions run commands is chosen once,
+        // before anything is handed to them. (A new project asks the same thing first while it is still unchosen.)
+        .sheet(isPresented: $router.showPermissionChoice) { PermissionChoiceSheet() }
+        .task(id: wantsPermissionOffer) {
+            guard wantsPermissionOffer else { return }
+            #if os(iOS)
+            // Not over another sheet or a dialog that is still up (the notification invitation, a pairing confirmation).
+            guard await PresentedSheets.waitUntilNone(), wantsPermissionOffer else { return }
+            #endif
+            if store.takePermissionChoiceOffer() { router.showPermissionChoice = true }
+        }
         #if os(iOS)
         .sheet(item: rootTerminal) { TerminalSessionContent(member: $0).ceStatusStrips() }
         #endif
@@ -118,21 +132,47 @@ struct AppShell: View {
             await store.pair(with: link, device: UIDevice.current.name)
         }
         #endif
-        // A pairing QR read by the system camera opens iamceo://pair?… — trade it for a connection right away.
+        // A pairing QR read by the system camera, or any link tapped outside the app, opens iamceo://pair?… Nothing is
+        // sent to its address until the owner has seen where it leads and said yes (a link must not be able to move the
+        // app to another server by itself).
         .onOpenURL { url in
             guard !store.isDemo else { return }
             if let notification = NotificationLink(url: url) {
                 NotificationInbox.shared.receive(notification, tapped: true)
                 return
             }
-            guard let link = PairingLink(url: url) else { return }
+            guard PairingLink.isPairingURL(url) else { return }
             #if os(iOS)
-            Task { await store.pair(with: link, device: UIDevice.current.name) }
+            guard let link = PairingLink(url: url) else { store.errorMessage = PairingLink.rejectedMessage; return }
+            Task { await store.receivePairingLink(link, device: UIDevice.current.name, external: true) }
             #else
             store.errorMessage = "이 링크는 iPhone에서 여는 연결 QR입니다."
-            _ = link
             #endif
         }
+        #if os(iOS)
+        // The confirmation opens over the bare screen: sheets the shell owns are closed first, and it waits for them
+        // (and for anything else on top, such as a preview or a dialog) to be gone. A newer link, a cancelled or an
+        // expired request restarts this, so the dialog never shows a request the store no longer holds.
+        .task(id: store.pairingRequest?.id) {
+            pairingAlert = nil
+            guard let request = store.pairingRequest else { return }
+            closeSheetsForPairing()
+            guard await PresentedSheets.waitUntilNone(), store.pairingRequest?.id == request.id else { return }
+            pairingAlert = request
+        }
+        .alert(pairingAlert?.title ?? "",
+               isPresented: Binding(get: { pairingAlert != nil }, set: { shown in
+                   guard !shown, let request = pairingAlert else { return }
+                   pairingAlert = nil; store.cancelPairing(request)
+               }),
+               presenting: pairingAlert) { request in
+            // The request is captured: the alert clears the pending one as it closes, before this runs.
+            Button(request.confirmTitle) { Task { await store.confirmPairing(request) } }
+            Button("취소", role: .cancel) { store.cancelPairing(request) }
+        } message: { request in
+            Text(request.message)
+        }
+        #endif
         .onChange(of: "\(scenePhase == .active):\(store.connectionStatus.rawValue):\(store.isRevalidating):\(store.serverID ?? ""):\(NotificationInbox.shared.refreshRevision):\(NotificationInbox.shared.pending.count)", initial: true) { _, _ in
             store.registerRouter(router)
             guard scenePhase == .active else { router.cancelPendingNavigation(); return }
@@ -141,7 +181,7 @@ struct AppShell: View {
         }
         // Foreground/background polling is driven by the App's aggregate scene phase (IAMCEOApp).
         .onChange(of: "\(store.selectedProjectID ?? ""):\(store.isArchive)") { _, _ in router.resetForProjectChange() }
-        // The store is shared by every window: a window that appears later (second iPad window, Mac window reopened
+        // The store is shared by every window: a window that appears later (a second Mac window, or one reopened
         // after ⌘W) must not tear down a live or in-progress connection.
         .task {
             guard !store.isDemo, store.bootstrap == nil, store.connectionStatus != .connecting,
@@ -205,6 +245,25 @@ struct AppShell: View {
         }
         #endif
     }
+
+    /// Asked right after connecting while the server says nobody has chosen, unless a pairing confirmation is pending
+    /// (that one goes first; the choice comes back when it is answered).
+    private var wantsPermissionOffer: Bool {
+        store.needsPermissionChoice && store.connectionStatus == .connected && store.pairingRequest == nil
+    }
+
+    #if os(iOS)
+    /// Sheets presented from this shell. What was typed in the composer or a decision memo lives in DraftStore and
+    /// stays. A half-filled 새 프로젝트/새 팀장 form and unsaved settings edits go with their sheet (as they already do
+    /// when a tapped notification closes settings).
+    private func closeSheetsForPairing() {
+        if router.closeSheets() { store.returnPermissionChoiceOffer() }
+        showArchive = false
+        #if DEBUG
+        localFileSample = nil; keyBarPreview = false
+        #endif
+    }
+    #endif
 
     /// Terminal sheet from the window root, on both platforms. The Mac member drawer lives inside the window, so the
     /// terminal it opens is presented here too and stays open if the drawer closes.
@@ -376,7 +435,7 @@ struct AppShell: View {
     // ⌘1…⌘5, ⌘R and the other shortcuts are menu bar commands (IAMCEOApp MacCommands).
     #endif
 
-    // MARK: iPhone / iPad
+    // MARK: iPhone (iPad is not supported: the iOS app is iPhone-only)
 
     #if os(iOS)
     private var phone: some View {
@@ -519,7 +578,7 @@ func projectRailLine(_ project: ProjectSummary) -> String {
     if !project.isHq && !project.runnerEnabled { return "총괄 시작 전" }
     // "N명 대기" read as N people waiting on the CEO; idle members are simply resting (the status label's wording).
     if project.memberCount > 0 { return "모두 쉬는 중" }
-    return "아직 직원 없음"
+    return "아직 팀원 없음"
 }
 
 // MARK: - Mac rail
@@ -1102,6 +1161,11 @@ struct StatusStrips: View {
         if let outage = APIOutageInfo(store.apiOutage, showsOffline: offline) {
             items.append(Strip(id: "api-outage", tone: outage.tone, icon: "wifi.exclamationmark", text: outage.text, lines: 3))
         }
+        // The server answers but the engine that runs the sessions does not (or is another version). While the
+        // server itself is out of reach the last word about the engine is stale, so the connection strip speaks alone.
+        if !offline, !store.isRestarting, store.connectionStatus == .connected, let engine = EngineNotice(store.bootstrap?.engine) {
+            items.append(Strip(id: "engine", tone: .attention, icon: "exclamationmark.triangle", text: engine.text, lines: 3))
+        }
         if let notice = store.connectionNotice {
             items.append(Strip(id: "connection-check", tone: .neutral, icon: "arrow.triangle.2.circlepath", text: notice, busy: true))
         }
@@ -1429,3 +1493,22 @@ private struct ScrollPocketUnderToolbar: ViewModifier {
 private extension Array {
     func appending(_ element: Element) -> [Element] { self + [element] }
 }
+
+#if os(iOS)
+/// What UIKit has on top of the app's windows right now: sheets, covers, dialogs and alerts, from any screen,
+/// including one that is still closing.
+@MainActor enum PresentedSheets {
+    static var isEmpty: Bool {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+            .allSatisfy { $0.rootViewController?.presentedViewController == nil }
+    }
+
+    /// Returns true once nothing is presented, false when the task is cancelled first.
+    static func waitUntilNone() async -> Bool {
+        while !isEmpty {
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return false }
+        }
+        return !Task.isCancelled
+    }
+}
+#endif

@@ -23,7 +23,8 @@ async function fixture(herdrInfo: () => Promise<HerdrInfo> = async () => unavail
   const bus = suppliedBus;
   const store = new Store(openDb(config.dbPath), bus);
   const calls: string[] = [];
-  const orch = new Proxy({ herdrInfo: async () => { calls.push("herdrInfo"); return herdrInfo(); }, cliCommand: () => "fixture-cli" }, {
+  // w1: 스냅샷이 실행 엔진 상태를 싣는다. 이미 아는 값을 읽기만 하고 실행기를 다시 보지 않으므로 허용 목록에 둔다.
+  const orch = new Proxy({ herdrInfo: async () => { calls.push("herdrInfo"); return herdrInfo(); }, cliCommand: () => "fixture-cli", engineStatus: () => null }, {
     get(target, key) {
       if (key in target) return Reflect.get(target, key);
       return () => { calls.push(String(key)); throw new Error(`Unexpected orchestrator call: ${String(key)}`); };

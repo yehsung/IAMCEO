@@ -993,7 +993,7 @@ export class HerdrRunner implements Runner {
 
   private bind(m: RunnerMember, a: AgentInfo): Track {
     const holder = this.byPane.get(a.pane_id);
-    if (holder !== undefined && holder !== m.id) throw new HerdrError("pane_taken", `칸 ${a.pane_id} 은 이미 다른 직원의 칸입니다`);
+    if (holder !== undefined && holder !== m.id) throw new HerdrError("pane_taken", `칸 ${a.pane_id} 은 이미 다른 팀원의 칸입니다`);
     const existing = this.tracks.get(m.id);
     // Every envelope already present at bind may have been written by the previous
     // process. Only inspect/repair may act on it; ordinary send cannot replay it.

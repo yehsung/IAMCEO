@@ -65,7 +65,8 @@ struct MacPairingSheet: View {
     private static let steps = [
         "iPhone과 이 Mac 모두 Tailscale을 켭니다.",
         "iPhone 카메라로 QR을 비추고 뜨는 알림을 누릅니다.",
-        "IAMCEO 앱이 열리며 바로 연결됩니다.",
+        // Says "if": the iPhone app released before the confirmation (0.2.2) connects without asking.
+        "IAMCEO 앱이 열립니다. 확인 창이 뜨면 주소를 보고 연결을 누릅니다.",
     ]
 
     var body: some View {
@@ -227,6 +228,8 @@ struct PhonePairingSection: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var tailnetUp = Tailnet.isConnected()
     @State private var scanning = false
+    /// What the scanner read, handled once its sheet has closed (a confirmation cannot open over a closing sheet).
+    @State private var scanned: String?
     private var canScanInApp: Bool { DataScannerViewController.isSupported && DataScannerViewController.isAvailable }
 
     var body: some View {
@@ -259,14 +262,20 @@ struct PhonePairingSection: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in if phase == .active { tailnetUp = Tailnet.isConnected() } }
-        .sheet(isPresented: $scanning) {
+        .sheet(isPresented: $scanning, onDismiss: {
+            guard let text = scanned else { return }
+            scanned = nil
+            guard let url = URL(string: text), PairingLink.isPairingURL(url) else {
+                store.errorMessage = "IAMCEO 연결 QR이 아닙니다. Mac의 설정 → iPhone 연결에서 나온 QR을 찍어 주세요."
+                return
+            }
+            guard let link = PairingLink(url: url) else { store.errorMessage = PairingLink.rejectedMessage; return }
+            // A first connection goes straight through; replacing a Mac that is already connected asks first.
+            Task { await store.receivePairingLink(link, device: UIDevice.current.name, external: false) }
+        }) {
             QRScannerSheet { text in
+                scanned = text
                 scanning = false
-                guard let url = URL(string: text), let link = PairingLink(url: url) else {
-                    store.errorMessage = "IAMCEO 연결 QR이 아닙니다. Mac의 설정 → iPhone 연결에서 나온 QR을 찍어 주세요."
-                    return
-                }
-                Task { await store.pair(with: link, device: UIDevice.current.name) }
             }
         }
     }

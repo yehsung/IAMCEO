@@ -64,6 +64,12 @@ export type ContextWindowSource = "statusline" | "codex" | "headless" | "screen"
 
 /** blocked는 입력 보류다. permission만 증거로 확인된 승인 대기로 집계한다. */
 export type BlockedReason = "permission" | "selection" | "setup" | "usage_limit" | "status_unknown";
+/**
+ * 승인 창으로 확인하지 못한 막힘(status_unknown)의 까닭. 앱은 이 값이 있으면 '터미널 열어 직접 답하기'를 보인다.
+ * trust_dialog_unrecognized: 폴더 신뢰 창으로 보이지만 정확히 읽지 못했다. start_not_ready: 띄운 뒤 60초 넘게 준비를 알리지 않았다.
+ */
+export type BlockedCode = "trust_dialog_unrecognized" | "start_not_ready";
+export const BLOCKED_CODES: readonly BlockedCode[] = ["trust_dialog_unrecognized", "start_not_ready"];
 export interface StatusObservation {
   source: Backend | "manual";
   observedAt: string | null;
@@ -173,6 +179,8 @@ export interface Member {
   /** 추가 메타데이터의 누락은 구형/미지원이다. 기존 status/문맥 창 필드는 유지한다. */
   statusObservation?: StatusObservation | null;
   blockedReason?: BlockedReason | null;
+  /** 막힘(status=blocked)일 때만 싣는다. 없으면 구형 서버이거나 따로 알릴 까닭이 없다. */
+  blockedCode?: BlockedCode;
   subagentState?: SubagentState | null;
   /** now는 마지막 자기 보고이며 일반 updatedAt과 별도로 기록한다. next 생략 시 보존한다. */
   nowAt?: string | null;
@@ -517,6 +525,20 @@ export interface Settings {
   macScriptNotifications?: boolean; // 기본 true; notifyMac 동의와 별개인 서버 알림 경로 스위치
   /** 총괄에게 판 정리(결재·내 할 일·진행판·지금 상황)를 맡기는 간격(시간). 0 이면 끈다. 기본 6. */
   boardTidyHours: number;
+  /**
+   * 대표가 권한 방식(묻지 않고 실행 등)을 확인했는가. 새로 만든 빈 DB 는 false, 이미 쓰던 DB 는 true 로 시작한다.
+   * true 로만 바꿀 수 있다. 없으면 구형 서버이며 앱은 true 로 읽는다.
+   */
+  permissionAcknowledged?: boolean;
+}
+
+/** 실행 엔진(herdr-core) 상태. ok 가 아니면 앱이 안내 한 줄을 보인다. */
+export interface EngineStatus {
+  state: "ok" | "unresponsive" | "version_mismatch";
+  /** 떠 있는 엔진이 알려 준 버전. 응답이 없으면 생략한다. */
+  version?: string;
+  /** 이 서버가 고정해 둔 버전(vendor/herdr-core/release-lock.json). */
+  expectedVersion?: string;
 }
 
 export interface RuntimeInfo { backend: "core"; core: { installed: boolean; available: boolean; version: string | null; detail: string | null }; providers: Record<CliProvider, { installed: boolean }> }
@@ -538,6 +560,8 @@ export interface Bootstrap {
   cli: string;
   /** 직급 값 대신 자기 값을 쓰는 직원 수. 직급 값을 바꿔도 이들에게는 먹지 않는다. */
   rankOverrides: Record<Exclude<Rank, "staff">, number>;
+  /** 없으면 구형 서버이거나 이 실행 방식에 엔진이 없다. */
+  engine?: EngineStatus;
 }
 
 export interface ProjectState {
@@ -596,7 +620,11 @@ export type RealtimeEvent =
   | (WsChangeEvent & SyncCursor);
 
 // ---- REST 요청 ----
-export interface CreateProjectReq { name: string; cwd: string; goal?: string; startConductor?: boolean; chiefCli?: CliProvider }
+export interface CreateProjectReq {
+  name: string; cwd: string; goal?: string; startConductor?: boolean; chiefCli?: CliProvider;
+  /** 대표가 이 폴더를 신뢰한다고 답했다. 이 프로젝트 폴더에서 뜬 '폴더 신뢰' 창을 정확히 알아봤을 때만 서버가 '신뢰'를 고른다. */
+  trustFolder?: boolean;
+}
 export interface CreateMemberReq { name: string; role?: string; cli?: CliProvider; modelOverride?: string | null }
 export interface PatchProjectReq { name?: string; cwd?: string; runnerEnabled?: boolean; now?: string; archived?: boolean }
 /** PUT /api/settings. ranks·codexRanks 는 고친 칸만 보내도 된다(나머지 유지). */
@@ -620,7 +648,7 @@ export interface ReleaseResult { notified: boolean; paneKept: boolean; resumeCom
 
 /** 지금 넘겨받을 수 없는 이유. null 이면 받을 수 있다(서버·화면 공통). */
 export function adoptRefusal(a: Pick<LiveAgent, "agent" | "status" | "sessionId" | "adopted">): string | null {
-  if (a.adopted) return "이미 직원 자리인 세션입니다";
+  if (a.adopted) return "이미 팀원 자리인 세션입니다";
   if (a.agent !== "claude") return `Claude 세션만 편입할 수 있습니다: ${a.agent ?? "알 수 없음"}`;
   if (a.status === "working") return "일하는 중입니다. 지금 턴이 끝나면 다시 시도하세요";
   if (a.status === "blocked") return "승인 창 앞에서 멈춰 있습니다. 터미널에서 푼 뒤 다시 시도하세요";

@@ -17,9 +17,9 @@ const USAGE = `쓰는 법: iamceo <명령>
                          첫 설정(herdr-core·포트·접근 범위)
   open                   접속 주소와 접속 코드를 보여 준다
   status                 서버와 프로젝트 상태를 본다
-  attach <직원ID>        관리 중인 CLI 터미널을 연다
+  attach <팀원ID>        관리 중인 CLI 터미널을 연다
   join [--project 이름] [--name 이름] [--role 역할] [--handle 핸들] [--session UUID]
-                         내가 띄운 CLI 를 직원으로 등록하고 연결 명령을 알려 준다
+                         내가 띄운 CLI 를 팀장으로 등록하고 연결 명령을 알려 준다
   import <덤프.json> [--name 이름] [--cwd 폴더]
                          기존 운영판 덤프를 프로젝트로 가져온다
   backup [--directory 경로] 검증된 DB·첨부·설정 백업
@@ -209,7 +209,8 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
       push: { store: push, providers: () => client!.status(), wake: () => worker?.wake() } };
     server = await (options.startServer ?? http.startServer)(context);
     if (options.signal?.aborted) stopIngress();
-    orch.setServerUrl(server.urls[0]!);
+    // 팀장의 도구 연결은 이 Mac 안에서만 받는다. loopback 주소가 열려 있으면 그 주소를 쓴다.
+    orch.setServerUrl(server.urls.find(url => /^http:\/\/(127\.\d+\.\d+\.\d+|\[::1\]|localhost)[:/]/.test(url)) ?? server.urls[0]!);
     if (!options.signal?.aborted) await orch.initializeRuntime();
     // CoreRunner restores persisted identity-bound leases as it reattaches; only recover may resume the queue.
     if (!options.signal?.aborted) await orch.recover();
@@ -329,7 +330,7 @@ async function serve(): Promise<void> {
 }
 
 async function attach(args: string[]): Promise<void> {
-  if (args.length !== 1 || !/^m_[A-Za-z0-9_-]+$/.test(args[0]!)) throw new CliError("쓰는 법: iamceo attach <직원ID>");
+  if (args.length !== 1 || !/^m_[A-Za-z0-9_-]+$/.test(args[0]!)) throw new CliError("쓰는 법: iamceo attach <팀원ID>");
   const config = loadConfig();
   const member = await api<Member>(config, `/api/members/${encodeURIComponent(args[0]!)}`);
   if (member.backend !== "core" || !member.paneId) throw new CliError("연결할 core 터미널이 없습니다");
@@ -409,7 +410,7 @@ async function setup(args: string[]): Promise<void> {
     if (port !== config.port) updateConfigFile({ port });
     if (hosts !== null) updateConfigFile({ hosts });
     const after = loadConfig();
-    console.log(`\n설정했습니다: herdr-core, 포트 ${port}\n주소: ${publicUrls({ ...after, port }).join(" · ")}\n접속 코드: ${config.accessCode}\n서버 켜기: iamceo serve (서비스로 두려면 iamceo service install). 이미 켜져 있으면 다시 켜야 적용됩니다.\n직원 규칙을 고치려면: iamceo roles export (${config.rolesDir})`);
+    console.log(`\n설정했습니다: herdr-core, 포트 ${port}\n주소: ${publicUrls({ ...after, port }).join(" · ")}\n접속 코드: ${config.accessCode}\n서버 켜기: iamceo serve (서비스로 두려면 iamceo service install). 이미 켜져 있으면 다시 켜야 적용됩니다.\n팀원 규칙을 고치려면: iamceo roles export (${config.rolesDir})`);
     if (process.env.IAMCEO_PORT) console.log(`IAMCEO_PORT=${process.env.IAMCEO_PORT} 환경변수가 설정 파일보다 앞섭니다.`);
   } finally {
     reader.close();
@@ -447,7 +448,7 @@ async function status(): Promise<void> {
   }
   console.log("프로젝트:");
   for (const p of boot.projects) {
-    console.log(`  ${p.name} (${p.id})${p.runnerEnabled ? "" : " [실행 꺼짐]"}: 결재 ${p.inboxCount} · 일하는 중 ${p.workingCount} · 직원 ${p.memberCount}${p.now ? ` · ${p.now.split("\n")[0]}` : ""}`);
+    console.log(`  ${p.name} (${p.id})${p.runnerEnabled ? "" : " [실행 꺼짐]"}: 결재 ${p.inboxCount} · 일하는 중 ${p.workingCount} · 팀원 ${p.memberCount}${p.now ? ` · ${p.now.split("\n")[0]}` : ""}`);
   }
 }
 
@@ -503,7 +504,7 @@ async function join_(args: string[]): Promise<void> {
 
   // --env 는 값을 여러 개 받는 옵션이라 서버 이름이 뒤에 오면 그것까지 값으로 먹는다(claude mcp add 가 거부한다, 실측).
   const add = ["claude", "mcp", "add", "iamceo", "--transport", "stdio", "--scope", "local", "--env", `IAMCEO_URL=${localUrl(config)}`, "--env", `IAMCEO_TOKEN=${joined.token}`, "--", ...selfCommand("mcp")];
-  console.log(`${joined.project.name} 의 직원 ${joined.member.name}(${joined.member.handle})으로 등록했습니다.\n`);
+  console.log(`${joined.project.name} 의 팀원 ${joined.member.name}(${joined.member.handle})으로 등록했습니다.\n`);
   console.log(`1. 이 폴더(${cwd})에서 MCP 를 연결합니다(토큰이 들어 있으니 남에게 보이지 마세요):\n   ${add.map(shellQuote).join(" ")}\n`);
   console.log(`2. 규칙 파일: ${rulesFile}\n   새로 띄울 때: claude --append-system-prompt-file ${shellQuote(rulesFile)}\n   이미 떠 있는 세션이면 /mcp 로 다시 연결한 뒤 이 파일을 읽고 따르라고 입력합니다.`);
 }

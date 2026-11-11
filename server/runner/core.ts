@@ -7,7 +7,7 @@ import { constants, closeSync, existsSync, fstatSync, openSync, readdirSync, rea
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ApprovalPrompt, Backend } from "../../shared/types.ts";
-import { claudeFolderTrust, codexFolderTrust } from "./core-approval.ts";
+import { claudeFolderTrust, codexFolderTrust, looksLikeFolderTrust } from "./core-approval.ts";
 import { cleanText } from "../text.ts";
 import { childEnv } from "./headless.ts";
 import { defaultClaudeHome, findSessionFile, inputText, screenContextPct } from "./herdr.ts";
@@ -33,6 +33,8 @@ export interface CoreRunnerDeps {
   /** Poll scheduling clock; does not change persisted observation timestamps or RPC deadlines. */
   pollNow?: () => number;
   contextTimeoutMs?: number; usageLimitCloseTimeoutMs?: number;
+  /** How long a launched CLI may stay without any status report before the block is labelled start_not_ready. Default 60s. */
+  startNotReadyMs?: number;
   /** How long one inspection keeps reading a legacy (baseline-less) provider log before returning scan_pending. */
   evidenceScanMs?: number;
   readContext?: typeof capturedContext;
@@ -469,14 +471,20 @@ export class CoreRunner implements Runner {
       this.event(track, { type: "input_ready", memberId: track.member.id });
     }
     const setup = screen !== null && !usage && status === "blocked" ? (providerFor(track.member) === "claude" ? claudeFolderTrust : codexFolderTrust)(screen, track.member.cwd) : null;
-    track.setupError = usage ? { code: "usage_limit", note: usage.raw } : retry ? { code: "network_retry", note: "API 연결 복구를 기다리며 CLI가 재시도하고 있습니다" } : setup ? { code: "folder_trust", note: `폴더 신뢰 확인 창에서 멈췄습니다: ${track.member.cwd}` } : null;
+    // Labels for the owner only; neither sends a key. A dialog that merely reads like folder trust is never answered.
+    const unreported = status === "blocked" && !usage && !setup && !reported;
+    const trustLike = unreported && screen !== null && trustDialogLike(screen, providerFor(track.member));
+    const notReady = unreported && !trustLike && (terminal.turn ?? 0) === 0 && Date.now() - Date.parse(track.bindingSince) >= (this.deps.startNotReadyMs ?? 60_000);
+    track.setupError = usage ? { code: "usage_limit", note: usage.raw } : retry ? { code: "network_retry", note: "API 연결 복구를 기다리며 CLI가 재시도하고 있습니다" } : setup ? { code: "folder_trust", note: `폴더 신뢰 확인 창에서 멈췄습니다: ${track.member.cwd}` }
+      : trustLike ? { code: "trust_dialog_unrecognized", note: `폴더 신뢰 확인 창으로 보이지만 정확히 읽지 못했습니다. 터미널을 열어 직접 답해 주세요: ${track.member.cwd}` }
+      : notReady ? { code: "start_not_ready", note: "띄운 뒤 60초 넘게 준비를 알리지 않았습니다. 터미널을 열어 화면을 확인해 주세요" } : null;
     if (usage) { status = "blocked"; track.pending = false; }
     const blockedReason = usage ? "usage_limit" : setup ? "setup" : state === "blocked" ? BLOCKED_KINDS[terminal.status?.kind || ""] ?? "status_unknown" : status === "blocked" ? "status_unknown" : null;
     if (state === "error") {
       if (track.statusTimer) clearTimeout(track.statusTimer);
       track.statusTimer = null; track.pendingStatus = null;
     }
-    const statusKey = JSON.stringify([status, blockedReason, setup?.prompt.fingerprint ?? null, usage?.fingerprint ?? null, retry]);
+    const statusKey = JSON.stringify([status, blockedReason, setup?.prompt.fingerprint ?? null, usage?.fingerprint ?? null, retry, trustLike ? "trust_dialog_unrecognized" : notReady ? "start_not_ready" : null]);
     // While the end of a silent turn is being watched (SILENT_SETTLE_MS) nothing is blocked yet: publishing it sent the
     // owner an approval alert for a dialog that does not exist. The next observation decides.
     if (silent && !track.lost && !track.failure && blockedReason === "status_unknown") return;
@@ -1301,6 +1309,15 @@ export function screenTurnError(screen: string): string | null {
     .map(line => line.replace(/^[^\p{L}\p{N}]+/u, "").trimEnd()).filter(Boolean).slice(-12);
   const line = lines.findLast(line => SCREEN_ERROR_LINE.test(line));
   return line && ["network", "usage_limit"].includes(classifyTurnError(line)) ? line : null;
+}
+
+/**
+ * Guidance only, never a key: the screen reads like some version's folder-trust dialog. A screen that shows the
+ * CLI's input box is not one (a real folder-trust dialog has no input box), whatever its banner path or its
+ * conversation says about trust.
+ */
+export function trustDialogLike(screen: string, provider: "claude" | "codex"): boolean {
+  return (provider === "claude" ? inputText(screen) : codexDraft(screen)) === null && looksLikeFolderTrust(screen);
 }
 
 /** Input safety only. Unknown composer layouts refuse delivery. */

@@ -175,7 +175,7 @@ struct ArchiveView: View {
                                         .padding(.horizontal, 4)
                                 }
                             } else if destination == .team {
-                                if state.members.isEmpty { empty("직원 기록이 없습니다") }
+                                if state.members.isEmpty { empty("팀원 기록이 없습니다") }
                                 ForEach(state.members) { member in
                                     record(member.name, detail: member.now, status: rankName(member.kind), result: nil)
                                         .id(member.id)

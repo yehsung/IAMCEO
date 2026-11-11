@@ -77,11 +77,11 @@ private actor NetAppGate {
     func testOutageStripPresenceCountToneAndServerConnectionPrecedence() {
         let outage = APIOutage(since: "now", affectedMemberIds: ["a", "b", "a"], lastProbeAt: nil)
         let info = APIOutageInfo(outage, showsOffline: false)
-        XCTAssertEqual(info?.text, "인터넷 연결이 불안정합니다 · 직원 2명 대기 중 · 돌아오면 자동으로 이어 갑니다")
+        XCTAssertEqual(info?.text, "인터넷 연결이 불안정합니다 · 팀원 2명 대기 중 · 돌아오면 자동으로 이어 갑니다")
         XCTAssertEqual(info?.tone, .attention)
         XCTAssertNil(APIOutageInfo(nil, showsOffline: false))
         XCTAssertNil(APIOutageInfo(outage, showsOffline: true))
-        XCTAssertTrue(APIOutageInfo(APIOutage(since: "now", affectedMemberIds: [], lastProbeAt: nil), showsOffline: false)?.text.contains("직원 0명") == true)
+        XCTAssertTrue(APIOutageInfo(APIOutage(since: "now", affectedMemberIds: [], lastProbeAt: nil), showsOffline: false)?.text.contains("팀원 0명") == true)
     }
 
     func testThreeStatusLabelsAndDotsShareAttentionIncludingOffice() {

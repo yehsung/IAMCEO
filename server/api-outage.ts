@@ -194,7 +194,7 @@ export class ApiRecovery {
       if (this.started) this.start();
       if (notifyProject) {
         const count = o.affected.filter(a => store.getMember(a.memberId)?.projectId === member.projectId).length;
-        this.options.notify(member.projectId, `인터넷 연결이 불안정해 직원 ${count}명이 멈췄습니다. 연결이 돌아오면 자동으로 이어 갑니다.`, alertOwner);
+        this.options.notify(member.projectId, `인터넷 연결이 불안정해 팀원 ${count}명이 멈췄습니다. 연결이 돌아오면 자동으로 이어 갑니다.`, alertOwner);
       }
     });
   }
@@ -292,7 +292,7 @@ export class ApiRecovery {
     const card = this.options.store.requireDecision(group.decisionId);
     const open = waiting.length > 0 && (card.status !== "closed" || card.usageLimit?.memberIds.length === 0);
     if (!open) group.stillLimited = false;
-    this.options.store.updateUsageDecision(card.id, { cli: group.cli, resetsAt, memberIds: waiting.map(m => m.memberId), stillLimited: group.stillLimited }, waiting.length ? `${group.cli === "claude" ? "Claude" : "Codex"} 사용 한도 도달 · 직원 ${waiting.length}명 멈춤` : card.title, waiting.length ? [first, names, raw].filter(Boolean).join("\n\n") : card.detail, open);
+    this.options.store.updateUsageDecision(card.id, { cli: group.cli, resetsAt, memberIds: waiting.map(m => m.memberId), stillLimited: group.stillLimited }, waiting.length ? `${group.cli === "claude" ? "Claude" : "Codex"} 사용 한도 도달 · 팀원 ${waiting.length}명 멈춤` : card.title, waiting.length ? [first, names, raw].filter(Boolean).join("\n\n") : card.detail, open);
   }
   received(deliveryId: string): void {
     for (const group of this.state.limits) if (group.members.some(m => m.resumeId === deliveryId)) this.updateCard(group);
@@ -454,7 +454,7 @@ export class ApiRecovery {
           if (notifications.length && !o.recoveryNotified) { notifications[0]!.alertOwner = true; o.recoveryNotified = true; }
           o.recoveredProjects.push(...notifications.map(n => n.projectId));
           this.save();
-          for (const n of notifications) this.options.notify(n.projectId, `인터넷 연결이 돌아와 직원 ${n.count}명이 이어서 일합니다.`, n.alertOwner);
+          for (const n of notifications) this.options.notify(n.projectId, `인터넷 연결이 돌아와 팀원 ${n.count}명이 이어서 일합니다.`, n.alertOwner);
         });
         for (const a of o.affected) this.options.pump(a.memberId);
       } else this.save();

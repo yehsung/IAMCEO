@@ -13,6 +13,8 @@ final class WriteTestServer: @unchecked Sendable {
     var sentIDs: [String] = []
     var terminalBodies: [[String: Any]] = []
     var settingsBodies: [[String: Any]] = []
+    /// false: a server that takes the settings write but keeps reporting the permission choice as unmade.
+    var acceptsPermissionChoice = true
     var todoSends = 0
     var freshSends = 0
     var dropMessage = false
@@ -75,6 +77,9 @@ final class WriteTestServer: @unchecked Sendable {
             settingsBodies.append(body)
             guard request.value(forHTTPHeaderField: "If-Match") == "\"\(revisions.settings!)\"" else { return IsolatedTestHTTPReply(status: 409) }
             if let value = body["permissionMode"] as? String { bootstrap.settings.permissionMode = value }
+            if body["permissionAcknowledged"] as? Bool == true, bootstrap.settings.permissionAcknowledged != nil, acceptsPermissionChoice {
+                bootstrap.settings.permissionAcknowledged = true
+            }
             if let value = body["compactAtPct"] as? Int { bootstrap.settings.compactAtPct = value }
             revisions.settings! += 1
             return try reply(SettingsWriteResult(settings: bootstrap.settings, revision: revisions.settings!))

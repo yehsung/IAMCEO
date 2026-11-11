@@ -66,7 +66,7 @@ targets:
           - CFBundleURLName: com.iamceo.open
             CFBundleURLSchemes: [iamceo]
         LSApplicationCategoryType: public.app-category.productivity
-        NSLocalNetworkUsageDescription: Connect to your IAMCEO daemon on your own network.
+        NSLocalNetworkUsageDescription: 내 Mac의 IAMCEO 서버에 연결합니다.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
           NSExceptionDomains:

@@ -12,12 +12,16 @@
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>ko</string>
+	</array>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -30,7 +34,11 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>IAMCEOPushEnvironment</key>
+	<string>$(APNS_ENVIRONMENT)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -49,7 +57,9 @@
 	<key>NSCameraUsageDescription</key>
 	<string>연결 QR을 읽고, 대화에 붙일 사진을 찍습니다.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Connect to your IAMCEO daemon on your own network.</string>
+	<string>내 Mac의 IAMCEO 서버에 연결합니다.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>받은 이미지를 사진 앱에 저장합니다.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -57,9 +67,9 @@
 	</dict>
 	<key>UILaunchScreen</key>
 	<dict/>
-	<key>CFBundleLocalizations</key>
+	<key>UISupportedInterfaceOrientations</key>
 	<array>
-		<string>ko</string>
+		<string>UIInterfaceOrientationPortrait</string>
 	</array>
 </dict>
 </plist>

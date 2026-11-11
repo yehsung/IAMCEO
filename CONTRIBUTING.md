@@ -25,6 +25,9 @@ Thank you for helping improve IAMCEO. A Korean version follows the English one.
 - **Clients.** IAMCEO supports native Mac and iPhone apps. Preserve released app HTTP/WebSocket and MCP bridge contracts; the web client was removed on 2026-11-10.
 - **Repository rules.** Follow the project's existing rules in the repository documentation. Tests use temporary homes and never a live server.
 - **Third-party code.** Keep its original license and notices. Add it to [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+- **Security problems.** Do not open a public issue or pull request for a vulnerability. Report it privately as described in [SECURITY.md](SECURITY.md).
+- **Changelog.** Add a line under "Unreleased" in [CHANGELOG.md](CHANGELOG.md) when a change matters to users.
+- **Releases.** The steps for publishing the Mac and iPhone apps, and where the version number lives, are in [docs/releasing.md](docs/releasing.md) (Korean).
 
 ---
 
@@ -37,3 +40,6 @@ Thank you for helping improve IAMCEO. A Korean version follows the English one.
 - **CLA:** 그런 경우를 대비해 CLA를 도입할 수 있습니다. 초안은 [docs/legal/CLA-draft.md](docs/legal/CLA-draft.md)에 있고, 아직 적용하지 않습니다. 도입하더라도 이후의 새 기여에만, 기여자의 명시적 동의로만 적용하며 소급하지 않습니다.
 - **클라이언트:** Mac·iPhone 네이티브 앱과 배포된 앱의 HTTP/WebSocket·MCP 계약을 유지합니다. 웹 버전은 2026-11-10 제거했습니다.
 - **외부 코드:** 원래 라이선스와 고지를 유지하고 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)에 추가해 주세요.
+- **보안 문제:** 취약점은 공개 이슈나 PR로 올리지 말고 [SECURITY.md](SECURITY.md)의 방법으로 비공개 신고해 주세요.
+- **변경 기록:** 사용자에게 의미 있는 변화는 [CHANGELOG.md](CHANGELOG.md)의 '아직 내지 않은 것'에 한 줄 더해 주세요.
+- **릴리스:** Mac·iPhone 앱을 내보내는 순서와 버전 숫자를 바꾸는 곳은 [docs/releasing.md](docs/releasing.md)에 있습니다.

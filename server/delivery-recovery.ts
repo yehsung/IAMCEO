@@ -43,7 +43,7 @@ function note(reason: string | null, evidence: DeliveryEvidence[] = []): string 
   switch (reason) {
     case "manual_control": return "직접 조작이 끝나면 다시 확인합니다";
     case "stale_instruction": return "오래된 미전달 지시입니다. 지금 다시 시도하거나 그만 보내세요";
-    case "input_busy": return "직원의 입력칸이 비기를 기다리는 중입니다";
+    case "input_busy": return "팀원의 입력칸이 비기를 기다리는 중입니다";
     case "busy": return "받을 수 있을 때 다시 확인합니다";
     case "blocked": return "승인 창이 닫히면 다시 확인합니다";
     case "duplicate_draft": return "이미 받은 지시가 입력칸에도 남아 있습니다. 초안을 확인해 주세요";
@@ -214,8 +214,8 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       this.store.setDeliveryStatus(d.id, exhausted ? "held" : "queued", { holdReason: exhausted ? "input_busy" : null });
       this.store.patchDeliveryRetry(d.id, { nextAttemptAt, retryReason: exhausted ? "input_busy" : null });
       // 거절이 이어진 까닭을 그대로 말한다. 일하는 중이거나 승인 창 앞인데 '입력칸이 비기를 기다린다'고 하면 대표가 엉뚱한 곳을 본다.
-      const why = refusal === "busy" ? "직원이 일하는 중이라 넣지 못했습니다. 잠시 뒤 다시 보냅니다" : refusal === "blocked" ? "승인 창 앞이라 넣지 못했습니다. 잠시 뒤 다시 보냅니다"
-        : refusal === "down" || refusal === "gone" ? "세션에 닿지 않아 넣지 못했습니다. 잠시 뒤 다시 보냅니다" : "직원의 입력칸이 비기를 기다리는 중입니다";
+      const why = refusal === "busy" ? "팀원이 일하는 중이라 넣지 못했습니다. 잠시 뒤 다시 보냅니다" : refusal === "blocked" ? "승인 창 앞이라 넣지 못했습니다. 잠시 뒤 다시 보냅니다"
+        : refusal === "down" || refusal === "gone" ? "세션에 닿지 않아 넣지 못했습니다. 잠시 뒤 다시 보냅니다" : "팀원의 입력칸이 비기를 기다리는 중입니다";
       if (d.refType === "message" && d.refId) this.store.setMessageDelivery(d.refId, exhausted ? "held" : "queued", exhausted ? why : null);
       return true;
     });

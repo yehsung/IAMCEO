@@ -37,7 +37,7 @@ export function workerNameProblem(value: string): string | null {
   const basic = nameProblem(value);
   if (basic) return basic;
   const plain = value.normalize("NFKC").replace(/\s+/g, "");
-  return RESERVED_NAME_PREFIX.test(plain) || RESERVED_NAMES.has(plain) || (plain.endsWith("총괄") && !plain.startsWith("직원")) ? `대표·총괄·서버로 보이는 이름은 직원 이름으로 쓸 수 없습니다: ${value}` : null;
+  return RESERVED_NAME_PREFIX.test(plain) || RESERVED_NAMES.has(plain) || (plain.endsWith("총괄") && !plain.startsWith("직원")) ? `대표·총괄·서버로 보이는 이름은 팀장 이름으로 쓸 수 없습니다: ${value}` : null;
 }
 
 /** 가져오기처럼 거부할 수 없는 경로에서 이름을 안전하게 깎는다. */

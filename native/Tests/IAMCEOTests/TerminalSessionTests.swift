@@ -167,7 +167,7 @@ import SwiftUI
         XCTAssertFalse(TerminalSession.canControl(other, in: store))
         session.requestInput(Data("a".utf8), store: store, member: other)
         session.requestInput(Data("b".utf8), store: store, member: other)
-        XCTAssertEqual(session.notice, "메인 창이 다른 프로젝트를 보고 있어 입력할 수 없습니다. 이 직원의 프로젝트로 돌아온 뒤 다시 시도하세요.")
+        XCTAssertEqual(session.notice, "메인 창이 다른 프로젝트를 보고 있어 입력할 수 없습니다. 이 팀원의 프로젝트로 돌아온 뒤 다시 시도하세요.")
         XCTAssertFalse(session.starting); XCTAssertTrue(session.readOnly)
         for _ in 0..<20 { await Task.yield() }
         XCTAssertEqual(modes, [.observe], "The viewer is left alone")

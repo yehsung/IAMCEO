@@ -1014,6 +1014,8 @@ describe("실행기 인자", () => {
       opened.push(o!);
       return start(m);
     };
+    // w1: 경고 창을 건너뛰는 것은 대표가 권한 방식을 확인한 뒤다. 새 DB 는 확인 전이므로 먼저 확인을 보낸다.
+    expect((await t.api("PUT", "/api/settings", { permissionAcknowledged: true })).body).toMatchObject({ permissionAcknowledged: true });
     await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" });
     expect(JSON.parse(readFileSync(opened[0]!.settingsFile!, "utf8"))).toMatchObject({ skipDangerousModePermissionPrompt: true, statusLine: { type: "command", command: expect.stringContaining("iamceo-context-statusline") } });
     await t.api("PUT", "/api/settings", { permissionMode: "auto" });

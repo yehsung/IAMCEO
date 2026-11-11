@@ -79,6 +79,8 @@ export interface OrchestratorApi {
   patchProject?(projectId: string, patch: PatchProjectReq): Promise<Project>;
   createMember?(projectId: string, req: CreateMemberReq): Promise<Member>;
   runtimeInfo?(): Promise<RuntimeInfo>;
+  /** 실행 엔진(herdr-core) 상태. 아직 모르거나 엔진이 없으면 null. */
+  engineStatus?(): import("../shared/types.ts").EngineStatus | null;
   terminalControl?(memberId: string, action: TerminalControlAction): Promise<TerminalControlResult>;
   /** http.ts 가 store.patchProject 를 끝낸 뒤 부른다(runnerEnabled 변화 등에 반응). */
   onProjectPatched(project: Project, patch: PatchProjectReq): void | Promise<void>;

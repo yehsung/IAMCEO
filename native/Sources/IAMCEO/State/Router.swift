@@ -66,6 +66,8 @@ final class Router {
     var terminalMemberID: String?
     var showSettings = false
     var showNewProject = false
+    /// The first-run choice of how sessions run commands (right after connecting to a server nobody has chosen on).
+    var showPermissionChoice = false
     var showNewMember = false
     /// Mac: the QR sheet for connecting an iPhone.
     var showPairing = false
@@ -91,7 +93,7 @@ final class Router {
 
     func go(_ destination: Destination) { cancelPendingNavigation(); self.destination = destination }
     func openDecision(_ id: String) { cancelPendingNavigation(); phonePaths[.inbox] = []; decisionID = id; destination = .inbox }
-    /// Mac: the shell's member sheet opens over the current screen. iPhone/iPad: 팀 pushes the detail.
+    /// Mac: the shell's member sheet opens over the current screen. iPhone: 팀 pushes the detail.
     func openMember(_ id: String) {
         cancelPendingNavigation()
         if usesPhoneNavigation { phonePaths[destination, default: []].append(.member(id)) }
@@ -167,9 +169,19 @@ final class Router {
         navigationNotice = route.notice
     }
 
+    /// Closes every sheet the shell presents, so a confirmation can open: an alert cannot open over a sheet. The
+    /// screen underneath, its selections and the composer stay as they are. True when the first-run permission
+    /// choice was one of them (it was not answered, so it may be offered again).
+    @discardableResult func closeSheets() -> Bool {
+        let wasChoosingPermission = showPermissionChoice
+        terminalMemberID = nil; projectManagement = nil
+        showSettings = false; showNewProject = false; showNewMember = false; showPermissionChoice = false; showPairing = false
+        return wasChoosingPermission
+    }
+
     func resetForConnectionChange() {
         cancelPendingNavigation(); resetForProjectChange()
-        projectManagement = nil; showSettings = false; showPairing = false; showNewProject = false
+        projectManagement = nil; showSettings = false; showPairing = false; showNewProject = false; showPermissionChoice = false
     }
     /// Selections belong to one project; never carry them into another.
     func resetForProjectChange() {
@@ -185,7 +197,8 @@ final class Router {
 
 private struct WideLayoutKey: EnvironmentKey { static let defaultValue = isMac }
 extension EnvironmentValues {
-    /// True on Mac and regular-width iPad: use master–detail instead of push navigation.
+    /// True on Mac: use master–detail instead of push navigation. iPad is not supported (the iOS app is iPhone-only
+    /// and portrait, so it never has a regular width); the regular-width iOS branch is kept but not reached.
     var ceWide: Bool {
         get { self[WideLayoutKey.self] }
         set { self[WideLayoutKey.self] = newValue }

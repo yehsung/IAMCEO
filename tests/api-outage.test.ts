@@ -102,10 +102,10 @@ describe("영속 API 사고와 이어가기", () => {
     f.service.networkFailure(f.member); f.service.networkFailure(second, false); f.restart();
     f.service.networkFailure(other); f.service.networkFailure(other); f.service.networkFailure(second);
     expect(notices.map(n => [n.projectId, n.alertOwner])).toEqual([[f.project.id, true], [project.id, false]]);
-    expect(notices.every(n => n.text.includes("직원 1명"))).toBe(true);
+    expect(notices.every(n => n.text.includes("팀원 1명"))).toBe(true);
     f.restart(); await f.recover();
     expect(notices.slice(2).map(n => [n.projectId, n.alertOwner])).toEqual([[f.project.id, true], [project.id, false]]);
-    expect(notices[2]!.text).toContain("직원 2명"); expect(notices[3]!.text).toContain("직원 1명");
+    expect(notices[2]!.text).toContain("팀원 2명"); expect(notices[3]!.text).toContain("팀원 1명");
     f.now += 30_000; f.service.networkFailure(f.member); await f.recover();
     expect(notices).toHaveLength(4);
     f.service.completed(f.member.id); f.service.completed(second.id); f.service.completed(other.id);

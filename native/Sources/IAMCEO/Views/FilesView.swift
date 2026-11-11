@@ -11,7 +11,7 @@ import AttachmentException
 import UIKit
 #endif
 
-// 자료 (web Files): wide (Mac, iPad regular) = a 300pt list beside the reader, both on glass plates and scrolling on
+// 자료 (web Files): wide (Mac; iPad is not supported) = a 300pt list beside the reader, both on glass plates and scrolling on
 // their own; iPhone = list → pushed reader on a glass panel. Rows follow the web .fl-row: title, two lines of summary,
 // kind tag · who · time, and the first picture as a thumbnail on the right. Links and the original path live in the
 // reader; each kind has its own viewer (code, table, pictures, PDF, video/audio, file cards).
@@ -183,7 +183,7 @@ struct FilesView: View {
 
     private var emptyLibrary: some View {
         ScrollView {
-            EmptyTile(icon: "folder", title: "아직 올린 자료가 없습니다", detail: "직원이 자료를 올리면 여기에 모입니다.")
+            EmptyTile(icon: "folder", title: "아직 올린 자료가 없습니다", detail: "팀원이 자료를 올리면 여기에 모입니다.")
                 .ceContentColumn()
         }
         #if os(iOS)
@@ -994,7 +994,7 @@ private struct FileReaderContent: View {
     private var emptyDetail: String {
         if store.isDemo { return "샘플 자료에는 원본 파일이 없습니다." }
         if let path { return "작업하는 컴퓨터의 원본 위치: \(path)" }
-        return "올린 직원에게 원본을 다시 올려 달라고 요청할 수 있습니다."
+        return "올린 팀원에게 원본을 다시 올려 달라고 요청할 수 있습니다."
     }
 
     private var isTabSeparated: Bool {
@@ -1718,7 +1718,7 @@ private struct ArtifactViewer: View {
                 Image(systemName: "lock.shield").font(.system(size: 17, weight: .medium)).foregroundStyle(CE.accent)
                     .frame(width: 22)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("직원이 만든 페이지입니다").font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                    Text("팀원이 만든 페이지입니다").font(CEFont.rowTitle).foregroundStyle(CE.ink)
                     Text("인터넷에 연결하지 않고 안전하게 엽니다.")
                         .font(gateNoteFont).foregroundStyle(CE.ink2)
                         .lineSpacing(CELeading.secondary)

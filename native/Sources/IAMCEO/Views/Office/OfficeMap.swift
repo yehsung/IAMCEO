@@ -8,7 +8,7 @@ import SwiftUI
 // (a monitor facing the viewer). Nameplates sit on the outer side of each row, each within its own column.
 //
 // The pixel scale comes from the width, always a whole number of device pixels: as large as fits (iPhone up to about
-// 2.33pt per sprite pixel; Mac and iPad up to 2.5pt, and up to 3.5pt for a single band that fills the width), one
+// 2.33pt per sprite pixel; Mac up to 2.5pt, and up to 3.5pt for a single band that fills the width), one
 // step smaller when that saves a band. A wide column never grows past `cellMax`: a team too small to fill the width
 // is centred instead of spread thin. There is no rest area: everyone stays at its own desk, resting or asleep there
 // too, so desks depend only on who has one (`OfficeSeating`) and the width, never on anyone's state.
@@ -209,7 +209,7 @@ struct OfficeLayoutInput {
     var width: CGFloat
     /// Device pixels per point.
     var displayScale: CGFloat
-    /// Mac and regular-width iPad: up to as many columns as fit comfortably. iPhone: 3 columns (4 when that saves a band).
+    /// Mac: up to as many columns as fit comfortably. iPhone: 3 columns (4 when that saves a band).
     var wide: Bool
     var decor: OfficeDecor
     /// A forced pixel size (DEBUG review hook).
@@ -258,7 +258,7 @@ extension OfficeMap {
     }
 
     /// The pixel size (a whole number of device pixels) and the column grid.
-    /// - Mac and iPad: as many columns as fit at `cellComfort` (at least 4 when there are that many), the bands
+    /// - Mac: as many columns as fit at `cellComfort` (at least 4 when there are that many), the bands
     ///   balanced; the largest pixel up to 2.5pt, or up to 3.5pt for one band of two or more columns within
     ///   `boostHeight`.
     /// - iPhone: 3 columns at the largest pixel up to 2.33pt, or 4 (at `cellPhone4`) when that saves a band or leaves

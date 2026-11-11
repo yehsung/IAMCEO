@@ -401,11 +401,13 @@ private struct SettingsChoiceTiles: View {
     let options: [Option]
     let selection: String
     let label: String
+    /// One tile per line on Mac too (a sheet narrower than the settings window, with longer explanations).
+    var stacked = false
     let onSelect: (String) -> Void
     @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
-        let layout = isMac ? AnyLayout(HStackLayout(alignment: .top, spacing: 8)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+        let layout = isMac && !stacked ? AnyLayout(HStackLayout(alignment: .top, spacing: 8)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
         layout {
             ForEach(options) { option in tile(option) }
         }
@@ -1011,6 +1013,9 @@ private enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
 }
 
 struct SettingsView: View {
+    /// What the server does at this percentage: the bar on 팀 marks it, and a member past it is compacted by the
+    /// server before its next piece of work (orchestrator `autoCompact`).
+    static let compactAtHint = "이 비율을 넘으면 팀 화면에 표시하고, 다음 업무 전에 자동으로 압축합니다."
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
     @Environment(DraftStore.self) private var drafts
@@ -1050,17 +1055,9 @@ struct SettingsView: View {
 
     private enum Busy { case sync, runtime }
 
-    private struct PermissionChoice: Identifiable {
-        let id: String
-        let title: String
-        let detail: String
-        var badge: String? = nil
-    }
-    private static let permissionChoices = [
-        PermissionChoice(id: "bypassPermissions", title: "묻지 않기", detail: "직원이 승인 창 없이 명령을 실행합니다", badge: "기본"),
-        PermissionChoice(id: "auto", title: "위험할 때만 묻기", detail: "위험해 보이는 작업만 멈추고 묻습니다"),
-        PermissionChoice(id: "default", title: "매번 묻기", detail: "도구를 쓸 때마다 승인을 기다립니다")
-    ]
+    /// The same three choices the first-run sheet offers (`PermissionModeChoice`).
+    private typealias PermissionChoice = PermissionModeChoice
+    private static let permissionChoices = PermissionModeChoice.settings
 
     private struct RankRow: Identifiable {
         let key: String
@@ -1072,7 +1069,7 @@ struct SettingsView: View {
     }
     private static let rankRows = RankSettingsCLI.allCases.flatMap { cli in [
         RankRow(key: "manager", title: "총괄", scope: "본사 AI도 같음", cli: cli),
-        RankRow(key: "lead", title: "팀장", scope: "일을 맡는 직원", cli: cli),
+        RankRow(key: "lead", title: "팀장", scope: "총괄이 일을 맡기는 팀원", cli: cli),
         RankRow(key: "staff", title: "서브에이전트", scope: "팀장이 나눠 맡기는 일", cli: cli)
     ] }
     private static let tidyChoices = [0, 3, 6, 12, 24]
@@ -1421,7 +1418,7 @@ struct SettingsView: View {
                     numberControl("팀장 수 경보", unit: "명", value: $draft.maxAwakeWorkers, range: 1...256)
                 }
                 RowDivider(inset: 0)
-                SettingsRow("문맥 기준", hint: "이 비율을 넘으면 팀 화면에 표시합니다. 직원 상세의 '문맥 압축'으로 줄일 수 있습니다.", hintBelowOnPhone: true) {
+                SettingsRow("문맥 기준", hint: Self.compactAtHint, hintBelowOnPhone: true) {
                     numberControl("문맥 기준", unit: "%", value: $draft.compactAtPct, range: 1...100, step: 5)
                 }
                 RowDivider(inset: 0)
@@ -1509,7 +1506,7 @@ struct SettingsView: View {
                 }
             }) {
                 SettingsRow("실행 엔진", hint: runtime?.core.detail, monoHint: true) { DotValue(tone: coreState(runtime).tone, text: coreState(runtime).text) }
-                    .help("모든 AI 직원은 이 실행 엔진(herdr-core) 위에서 일합니다. 직원마다 Claude Code 또는 Codex를 고릅니다.")
+                    .help("모든 팀원은 이 실행 엔진(herdr-core) 위에서 일합니다. 팀원마다 Claude Code 또는 Codex를 고릅니다.")
                 RowDivider(inset: 0)
                 SettingsRow("Claude Code") { DotValue(tone: providerState(runtime, "claude").tone, text: providerState(runtime, "claude").text) }
                 RowDivider(inset: 0)
@@ -1537,7 +1534,7 @@ struct SettingsView: View {
     private func rankGroup(_ cli: RankSettingsCLI) -> some View {
         let rows = Self.rankRows.filter { $0.cli == cli }
         let last = cli == RankSettingsCLI.allCases.last
-        return SettingsGroup(cli.title, footnote: last ? "직원별로 지정한 값이 먼저입니다. 바꾼 값은 세션을 다시 열 때 적용됩니다." : nil, accessory: {
+        return SettingsGroup(cli.title, footnote: last ? "팀원별로 지정한 값이 먼저입니다. 바꾼 값은 세션을 다시 열 때 적용됩니다." : nil, accessory: {
             // web .st-ranks thead th: 13/600 ink-2, over the value in each select.
             #if os(macOS)
             HStack(spacing: 8) {
@@ -1560,7 +1557,7 @@ struct SettingsView: View {
     private func rankRow(_ rank: RankRow) -> some View {
         let overrides = rank.cli == .claude && rank.key != "staff" ? (store.bootstrap?.rankOverrides[rank.key] ?? 0) : 0
         let invalid = modelError(for: rank)
-        let scope = overrides > 0 ? "\(rank.scope) · 직원별 지정 \(overrides)명" : rank.scope
+        let scope = overrides > 0 ? "\(rank.scope) · 팀원별 지정 \(overrides)명" : rank.scope
         #if os(macOS)
         // web .st-ranks: 8 above and below a 44pt line (min-height 60); the rank 14.5/620, its scope 12.5 ink-2.
         return HStack(alignment: invalid != nil ? .top : .center, spacing: 16) {
@@ -2153,6 +2150,66 @@ private struct SettingsProjectsGroup: View {
     }
 }
 
+// MARK: - First-run permission choice (sheet)
+
+/// Shown once on a newly installed server, on whichever device connects first: how sessions run commands, before
+/// anything is handed to them. The three
+/// choices and their names are the ones in Settings › 일반 › 권한, with 묻지 않기 picked to begin with. Closing it without
+/// choosing leaves the server as it was; starting a new project asks again.
+struct PermissionChoiceSheet: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    /// false inside 새 프로젝트: there the form takes this sheet's place once the choice is saved.
+    var closesWhenChosen = true
+    @State private var mode = PermissionModeChoice.bypass
+    @State private var working = false
+    @State private var error: String?
+
+    var body: some View {
+        CESheet(PermissionModeChoice.firstRunTitle, icon: "hand.raised", width: 520, onClose: { dismiss() }) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(PermissionModeChoice.firstRunLead(onThisMac: store.serverIsThisMac)).font(CEFont.note).foregroundStyle(CE.ink2)
+                    .lineSpacing(CELeading.note)
+                    .fixedSize(horizontal: false, vertical: true)
+                SettingsChoiceTiles(options: PermissionModeChoice.firstRun.map {
+                    SettingsChoiceTiles.Option(id: $0.id, title: $0.title, detail: $0.detail, badge: $0.badge)
+                }, selection: mode, label: "권한", stacked: true) { mode = $0 }
+                    .disabled(working)
+                // Only a real loss of connection is said out loud: right after connecting, writes open a moment later.
+                if store.showsOffline || store.connectionStatus != .connected {
+                    InlineNotice(tone: .attention, icon: "wifi.slash", title: "서버에 연결되지 않았습니다", detail: "연결된 뒤에 고를 수 있습니다.")
+                }
+                if let error { SetupError(error) }
+            }
+        } footer: {
+            Button { Task { await confirm() } } label: {
+                HStack(spacing: 6) {
+                    if working { ProgressView().controlSize(.small).tint(.white) }
+                    Text(PermissionModeChoice.firstRunConfirm)
+                }
+            }
+            .ceProminentButton()
+            .keyboardShortcut(.defaultAction)
+            .disabled(working || !store.canWrite)
+        }
+        .interactiveDismissDisabled(working)
+        // Chosen here, or meanwhile on another device: nothing left to ask.
+        .onChange(of: store.needsPermissionChoice) { _, needed in
+            if !needed, closesWhenChosen { dismiss() }
+        }
+    }
+
+    private func confirm() async {
+        guard !working else { return }
+        working = true; error = nil
+        defer { working = false }
+        if await store.acknowledgePermission(mode: mode) { return }
+        if store.needsPermissionChoice {
+            error = store.errorMessage.map(friendlyError) ?? "선택을 저장하지 못했습니다. 잠시 뒤 다시 눌러 주세요."
+        }
+    }
+}
+
 // MARK: - New project (sheet)
 
 struct NewProjectView: View {
@@ -2167,6 +2224,8 @@ struct NewProjectView: View {
     @State private var clonedRepository: String?
     @State private var legacyFolderInput = false
     @State private var provider = "claude"
+    /// "이 폴더를 신뢰하고…": on to begin with. The server then answers the CLI's own folder-trust window itself.
+    @State private var trustFolder = true
     @State private var working = false
     @State private var error: String?
     /// The daemon keeps a project whose conductor failed to start; retrying "만들기" would make a second one.
@@ -2190,7 +2249,21 @@ struct NewProjectView: View {
         return core
     }
 
+    static let trustFolderLabel = "이 폴더를 신뢰하고 AI가 이 안에서 명령을 실행하게 합니다"
+    /// Servers that know the folder-trust field are the ones that also report the permission choice; an older
+    /// server would ignore the switch, so it is not shown there. The sample shows it (nothing is sent).
+    private var showsFolderTrust: Bool { store.isDemo || store.bootstrap?.settings.permissionAcknowledged != nil }
+
     var body: some View {
+        // How sessions run commands is chosen once before the first project, on whichever device makes it.
+        if store.needsPermissionChoice {
+            PermissionChoiceSheet(closesWhenChosen: false)
+        } else {
+            projectSheet
+        }
+    }
+
+    private var projectSheet: some View {
         CESheet("새 프로젝트", subtitle: "작업 폴더를 고르면 총괄이 바로 일을 시작합니다.", icon: "folder.badge.plus", width: 520,
                 onClose: { dismiss() }) {
             form
@@ -2268,6 +2341,8 @@ struct NewProjectView: View {
                     } else {
                         chosenFolder
                     }
+                    // One line for every way a folder gets here (picked, newly made, cloned from GitHub).
+                    if showsFolderTrust { folderTrustRow }
                 }
                 SetupField("총괄이 쓸 AI") {
                     SettingsSegments(options: ["claude", "codex"].map { SettingsSegments.Option(id: $0, title: providerLabel($0)) },
@@ -2296,6 +2371,21 @@ struct NewProjectView: View {
             }
             if let error { SetupError(error) }
         }
+    }
+
+    /// The folder-trust line under the folder: the sentence in the note face, the settings switch at the right.
+    private var folderTrustRow: some View {
+        HStack(alignment: .center, spacing: 16) {
+            // The switch carries the same sentence as its (hidden) label, so the text is not read twice.
+            Text(Self.trustFolderLabel).font(CEFont.note).foregroundStyle(CE.ink)
+                .lineSpacing(CELeading.note)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityHidden(true)
+            Toggle(Self.trustFolderLabel, isOn: $trustFolder).labelsHidden().settingsSwitch()
+        }
+        .frame(minHeight: isMac ? nil : 44)
+        .padding(.top, 4)
     }
 
     /// The chosen folder as one quiet tile: where the project will live, where it came from, and a way to change it.
@@ -2347,7 +2437,8 @@ struct NewProjectView: View {
         error = nil
         working = true
         defer { working = false }
-        let result = await ProjectCreationNotice.shared.create(store: store, name: settingsTrim(name), cwd: settingsTrim(cwd), provider: provider)
+        let result = await ProjectCreationNotice.shared.create(store: store, name: settingsTrim(name), cwd: settingsTrim(cwd), provider: provider,
+                                                                trustFolder: showsFolderTrust && trustFolder)
         switch result {
         case .created(let id): createdID = id
         case .partial(let id, let detail): partial = Partial(id: id, detail: detail)

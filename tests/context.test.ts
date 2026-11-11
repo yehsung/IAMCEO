@@ -537,6 +537,10 @@ describe("Claude 상태줄 래퍼", () => {
     let settings = JSON.parse(readFileSync(write(w).settingsFile!, "utf8"));
     expect(settings.statusLine.command).toContain(STATUSLINE_MARKER); expect(settings.skipDangerousModePermissionPrompt).toBeUndefined();
     t.store.patchSettings({ permissionMode: "bypassPermissions" });
+    // w1: 새 DB 는 대표가 권한 방식을 확인하기 전이다. 그동안에는 CLI 의 위험 모드 경고를 대신 꺼 주지 않는다.
+    expect(t.store.getSettings().permissionAcknowledged).toBe(false);
+    expect(JSON.parse(readFileSync(write(w).settingsFile!, "utf8")).skipDangerousModePermissionPrompt).toBeUndefined();
+    t.store.patchSettings({ permissionAcknowledged: true });
     settings = JSON.parse(readFileSync(write(w).settingsFile!, "utf8"));
     expect(settings.skipDangerousModePermissionPrompt).toBe(true); expect(settings.statusLine.type).toBe("command");
     expect(write({ ...w, cli: "codex" }).settingsFile).toBeUndefined();

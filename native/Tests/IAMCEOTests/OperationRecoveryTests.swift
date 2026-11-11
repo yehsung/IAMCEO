@@ -307,7 +307,7 @@ import XCTest
         }
         let store = try await connect(network, root: root)
         let claimed = await store.claimTerminal(store.members[0]); XCTAssertFalse(claimed)
-        XCTAssertEqual(store.errorMessage, "이 직원은 잠들어 있어 터미널이 없습니다")
+        XCTAssertEqual(store.errorMessage, "이 팀원은 잠들어 있어 터미널이 없습니다")
         store.errorMessage = nil
         for _ in 0..<2 { await store.recoverWrites(); XCTAssertNil(store.errorMessage) }
         store.disconnect()

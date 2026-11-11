@@ -386,7 +386,11 @@ struct AnswerRequest: Encodable, Sendable {
     let batch: Bool
     let expectedVersion: String
 }
-struct CreateProjectRequest: Encodable, Sendable { let name: String; let cwd: String; let goal: String; let startConductor: Bool; let chiefCli: String }
+struct CreateProjectRequest: Encodable, Sendable {
+    let name: String; let cwd: String; let goal: String; let startConductor: Bool; let chiefCli: String
+    /// true: the server answers the CLI's own "trust this folder?" window for this project. Left out otherwise.
+    var trustFolder: Bool? = nil
+}
 struct CreateMemberRequest: Encodable, Sendable { let name: String; let role: String; let cli: String; let modelOverride: String? }
 struct PatchMemberRequest: Encodable, Sendable {
     let cli: String; let modelOverride: String?; let effortOverride: String?

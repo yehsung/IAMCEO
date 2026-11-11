@@ -163,7 +163,7 @@ final class TerminalSession {
         // 메인 창이 다른 프로젝트를 보는 동안에는 이 직원의 조작권을 받을 수 없다. 보기 연결은 건드리지 않고 이유만 알린다.
         guard Self.canControl(member, in: store) else {
             starting = false
-            notice = "메인 창이 다른 프로젝트를 보고 있어 입력할 수 없습니다. 이 직원의 프로젝트로 돌아온 뒤 다시 시도하세요."
+            notice = "메인 창이 다른 프로젝트를 보고 있어 입력할 수 없습니다. 이 팀원의 프로젝트로 돌아온 뒤 다시 시도하세요."
             return
         }
         starting = true; readOnly = false; notice = nil; inputEndedStatus = nil

@@ -83,9 +83,16 @@ async function bounded(promise: Promise<void>, ms = 600) {
   finally { if (timer) clearTimeout(timer); }
 }
 
+/** 실패했을 때 왜 안 나갔는지 보이게, 전달의 상태와 보류 사유·팀장 상태를 함께 단정한다(CI 에서 사유 없이 held 만 찍혔다). */
+function deliveryState(f: Awaited<ReturnType<typeof fixture>>, deliveryId: string, memberId: string) {
+  const d = f.store.requireDelivery(deliveryId), m = f.store.requireMember(memberId);
+  return { status: d.status, holdReason: d.holdReason ?? null, attempts: d.attempts, member: m.status, blockedReason: m.blockedReason ?? null,
+    lastError: m.lastError ?? null, stage: f.internal.runtime(memberId).pumpStage, observed: m.statusObservation?.error?.code ?? null };
+}
+
 async function otherMemberDelivers(f: Awaited<ReturnType<typeof fixture>>, id: string) {
   const delivery = f.enqueue(id); await bounded(f.orch.pump(id));
-  expect(f.store.requireDelivery(delivery.id).status).toBe("delivered");
+  expect(deliveryState(f, delivery.id, id)).toMatchObject({ status: "delivered" });
 }
 
 test("verified absent offline member leaves the watch list and wakes with exactly one new terminal", async () => {
@@ -132,8 +139,8 @@ for (const [method, skip] of [["terminal.get", 0], ["terminal.read", 0], ["termi
     f.internal.runtime(member.id).holdUntil = 0;
     await f.internal.probeHealth();
     await bounded(f.orch.pump(member.id));
+    expect(deliveryState(f, delivery.id, member.id)).toMatchObject({ status: "delivered" });
     expect(f.count("terminal.send", member.paneId!)).toBe(1);
-    expect(f.store.requireDelivery(delivery.id).status).toBe("delivered");
   });
 }
 

@@ -26,17 +26,16 @@ jobs:
         run: bun run test:server
   native:
     # 결과를 쌓는 단계다. 아직은 실패해도 막지 않는다. 안정되면 continue-on-error 를 뺀다.
-    runs-on: macos-latest
+    # macos-latest 에는 Xcode 26.6(Swift 6.3)까지만 있고 그 컴파일러는 이 코드에서 죽는다. 릴리스를 빌드하는 Xcode 27 이미지를 쓴다.
+    runs-on: xcode-27
     timeout-minutes: 45
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Xcode 고르기
-        # 릴리스를 빌드하는 것과 같은 세대의 컴파일러로 시험한다. 러너 기본값(Swift 6.3)은 이 코드에서 컴파일러가 죽는다.
+        # 릴리스를 빌드하는 것과 같은 Xcode 로 시험한다.
         run: |
-          ls -d /Applications/Xcode*.app
-          NEW=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1)
-          if [ -n "$NEW" ]; then sudo xcode-select -s "$NEW"; fi
+          sudo xcode-select -s /Applications/Xcode_27.2.app
           xcodebuild -version
           swift --version
       - name: 네이티브 시험

@@ -532,6 +532,16 @@ class OrchestratorDeliveryRecovery extends DeliveryRecovery {
   }
 }
 
+/** 터미널을 붙잡던 실행 엔진이나 Mac 이 다시 시작돼 CLI 가 함께 꺼진 경우. CLI 의 잘못이 아니고, 깨우면 같은 세션을 이어 연다. */
+function endedByRestart(reason: string | null | undefined): boolean {
+  return reason === "holder_lost" || reason === "stopped_by_restart";
+}
+/** 팀장의 lastError·활동에 남는 터미널 종료 글. */
+function exitDetail(reason: string | null | undefined, exitCode: number | null | undefined): string {
+  if (endedByRestart(reason)) return "Mac이나 실행 엔진이 다시 시작되어 세션이 꺼졌습니다. 말을 걸거나 깨우면 하던 대화를 이어서 엽니다";
+  return `초기/실행 종료: ${reason ?? "원인 미확인"} (exit_code=${exitCode ?? "unknown"})`;
+}
+
 /** Runner의 외부 입력 baseline/cursor도 기존 세대별 문맥 행에 함께 저장한다. */
 export function coreCompactStore(store: Store): NonNullable<CoreRunnerDeps["compactStore"]> {
   return {
@@ -1134,8 +1144,8 @@ export class Orchestrator implements OrchestratorApi {
       const settled = ["idle", "done"].includes(terminal.status?.state ?? "") && run?.turn !== null && run?.turn !== undefined && (terminal.turn ?? -1) > run.turn;
       const result = terminal.status?.state === "error" ? "error" : settled ? "success" : "interrupted";
       this.endExecution(member, result, terminal.reason ?? terminal.status?.msg ?? "소유 터미널이 종료되었습니다", terminal.exit_code ?? null, terminal.turn);
-      const detail = `초기/실행 종료: ${terminal.reason ?? "원인 미확인"} (exit_code=${terminal.exit_code ?? "unknown"})`;
-      if (member.lastError !== detail) this.store.appendActivity(member.id, result === "success" ? "system" : "error", detail.slice(0, 500));
+      const detail = exitDetail(terminal.reason, terminal.exit_code);
+      if (member.lastError !== detail) this.store.appendActivity(member.id, result === "success" || endedByRestart(terminal.reason) ? "system" : "error", detail.slice(0, 500));
       this.store.patchMember(member.id, { lastError: result === "success" ? null : detail.slice(0, 500) });
       return true;
     } catch (error) {
@@ -2978,8 +2988,34 @@ export class Orchestrator implements OrchestratorApi {
     this.runtime(member.id).skipCompact = true;
   }
 
+  /**
+   * 미확정 압축(sending·running·uncertain)은 그 명령을 받은 터미널에 묶여 있다. 실행기는 같은 터미널에 다시 붙을 때만 그 압축을
+   * 이어 확인하므로(CoreRunner.restore), 터미널이 사라졌으면(Mac 재시작, 터미널 종료 뒤 새로 열림) 아무도 결과를 확정하지 못하고
+   * 자동 입력이 끝없이 막힌다. 2026-11-12 실측: 재시작 뒤 14시간 동안 한 팀장이 지시를 하나도 받지 못했다.
+   * 그 터미널이 없으면 거기서 돌던 압축도 없다: '중단'으로 닫고 대기열을 이어 간다. 띄우기·끝내기 결과를 모르는 동안은 닫지 않는다.
+   */
+  private releaseOrphanCompact(memberId: string): void {
+    const member = this.store.getMember(memberId);
+    if (!member || this.backendOf(member) !== "core") return;
+    const state = this.store.getContextState(member.id);
+    const compact = state?.compaction;
+    if (!state || !compact || !["sending", "running", "uncertain"].includes(compact.phase)) return;
+    if (this.pendingLifecycle(member.id)) return;
+    const saved = state.baseline?.coreCompact as CoreCompactState | undefined;
+    const bound = saved?.id === compact.id ? saved.baseline.terminalId : null;
+    if (!bound || bound === member.paneId) return;
+    this.store.saveContextState({ ...state, measurement: state.measurement ? { ...state.measurement, fresh: false } : null,
+      baseline: { ...state.baseline, coreCompact: { ...saved!, phase: "failed" } },
+      compaction: { ...compact, phase: "failed", reason: "interrupted", finishedAt: new Date().toISOString() } });
+    const rt = this.runtime(member.id);
+    rt.compactRequest = null;
+    rt.skipCompact = true; // 밀린 일이 먼저다. 압축은 다음 측정에서 다시 판단한다.
+    this.store.appendActivity(member.id, "system", "압축을 받은 터미널이 끝나 그 압축을 닫았습니다. 밀린 전달을 이어 갑니다", `${compact.id}:orphan_compact`);
+  }
+
   private coreCompactFenced(member: Member): boolean {
     if (this.backendOf(member) !== "core") return false;
+    this.releaseOrphanCompact(member.id);
     const compact = this.store.getContextState(member.id)?.compaction;
     if (compact && !["queued", "sending", "running", "uncertain", "succeeded", "failed"].includes(compact.phase)) throw new ApiError(409, "압축 상태를 읽을 수 없어 자동 입력을 보류합니다");
     return !!compact && ["sending", "running", "uncertain"].includes(compact.phase);
@@ -4517,8 +4553,8 @@ export class Orchestrator implements OrchestratorApi {
         if (e.status === "gone") {
           this.endExecution(member, "interrupted", e.exit?.reason ?? "소유 터미널이 종료되거나 사라졌습니다", e.exit?.exitCode ?? null, e.turn);
           if (e.exit) {
-            const detail = `초기/실행 종료: ${e.exit.reason ?? "원인 미확인"} (exit_code=${e.exit.exitCode ?? "unknown"})`;
-            if (member.lastError !== detail) this.store.appendActivity(member.id, "error", detail.slice(0, 500));
+            const detail = exitDetail(e.exit.reason, e.exit.exitCode);
+            if (member.lastError !== detail) this.store.appendActivity(member.id, endedByRestart(e.exit.reason) ? "system" : "error", detail.slice(0, 500));
             this.store.patchMember(member.id, { lastError: detail.slice(0, 500) });
           }
         }

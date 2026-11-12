@@ -1354,6 +1354,50 @@ describe("전달 실패 사유", () => {
     expect(t.store.listActivity(w.id).some((a) => a.text.includes("압축 실패"))).toBe(false);
   });
 
+  // 2026-11-12 실측: 자동 압축이 '확인 불가'로 남은 팀장이 Mac 재시작 뒤 14시간 동안 지시를 하나도 받지 못했다.
+  // 미확정 압축은 그 명령을 받은 터미널에 묶여 있는데, 터미널이 사라지면 실행기가 그 압축을 다시 잡지 않아 아무도 결과를 확정하지 못했다.
+  test("미확정 압축을 받은 터미널이 서버가 꺼진 사이 사라졌으면, 다시 뜬 서버가 그 압축을 닫고 밀린 지시를 새 터미널에 넣는다", async () => {
+    const t = await setup({ timings: { compactTimeoutMs: 60 } });
+    const w = await overLimit(t);
+    t.core.intercept((call) => call.method === "terminal.send" && String(call.params.text).startsWith("/compact") ? { result: { turn: t.core.terminalOf(w.id)!.turn ?? 0, started: true } } : undefined);
+    const d = await t.orch.assign(t.project.id, w.handle, { text: "밀린 일 @fake:post=밀린일끝" });
+    await waitFor("확인 불가", () => t.store.getContextState(w.id)!.compaction?.phase === "uncertain");
+    const oldPane = t.member(w.id).paneId;
+    // Mac 을 껐다 켰다: 서버도 터미널도 사라진다.
+    await t.stopServer();
+    t.core.exit(w.id, 1, "holder_lost");
+    const next = await t.restart();
+    cleanups.push(() => next.close());
+    await next.waitFor("밀린 지시 전달", () => next.store.requireDelivery(d.delivery.id).status === "delivered");
+    await next.waitFor("밀린 일 보고", () => next.texts().some((m) => m.title === "밀린일끝"));
+    // 그 압축은 '중단'으로 닫히고, 왜 닫았는지 활동에 남는다. 새 터미널은 같은 세션을 이어 연 것이다.
+    expect(next.store.getContextState(w.id)!.compaction).toMatchObject({ phase: "failed", reason: "interrupted" });
+    expect(next.store.listActivity(w.id).some((a) => a.kind === "system" && a.text.includes("압축을 받은 터미널이 끝나"))).toBe(true);
+    expect(next.member(w.id).paneId).not.toBe(oldPane);
+    expect(next.runs(w.id).at(-1)).toMatchObject({ resumeFlag: next.member(w.id).sessionId });
+    // 재시작으로 꺼진 것은 CLI 오류가 아니다: 엔진의 내부 낱말(holder_lost) 대신 무슨 일이고 어떻게 되는지를 적는다.
+    const ended = next.store.listActivity(w.id).filter((a) => a.text.includes("다시 시작되어 세션이 꺼졌습니다"));
+    expect(ended.map((a) => a.kind)).toEqual(["system"]);
+    expect(next.store.listActivity(w.id).some((a) => a.text.includes("holder_lost"))).toBe(false);
+    // 닫은 직후 곧바로 다시 압축하지 않는다(밀린 일이 먼저다).
+    expect(next.turns(w.id).filter((turn) => turn.prompt.startsWith("/compact"))).toHaveLength(0);
+  });
+
+  // 살아 있는 터미널의 미확정 압축은 건드리지 않는다(그 터미널에서 압축이 아직 돌고 있을 수 있다).
+  test("미확정 압축을 받은 터미널이 그대로 살아 있으면 서버를 다시 띄워도 보류를 풀지 않는다", async () => {
+    const t = await setup({ timings: { compactTimeoutMs: 60 } });
+    const w = await overLimit(t);
+    t.core.intercept((call) => call.method === "terminal.send" && String(call.params.text).startsWith("/compact") ? { result: { turn: t.core.terminalOf(w.id)!.turn ?? 0, started: true } } : undefined);
+    const d = await t.orch.assign(t.project.id, w.handle, { text: "밀린 일 @fake:post=밀린일끝" });
+    await waitFor("확인 불가", () => t.store.getContextState(w.id)!.compaction?.phase === "uncertain");
+    const next = await t.restart();
+    cleanups.push(() => next.close());
+    await next.orch.pump(w.id);
+    await Bun.sleep(150); // '없음'을 보는 대기.
+    expect(next.store.getContextState(w.id)!.compaction).toMatchObject({ phase: "uncertain" });
+    expect(next.store.requireDelivery(d.delivery.id).status).not.toBe("delivered");
+  });
+
   // 옛 이름: "압축 턴의 오류 turn_end 도 대기열을 멈추지 않는다"
   test("압축이 CLI 오류로 끝나도 대기열을 멈추지 않는다", async () => {
     const t = await setup();

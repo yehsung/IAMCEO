@@ -231,7 +231,7 @@ Claude statusline·공통 measureContext와 Codex rollout parser를 재사용한
 
 자동 압축은 **fresh exact + 기준 이상 + 실제 wake 큐 + 다음 업무 전**에만 한 번 판단한다. lease·초안·승인·working·미확인 입력을 우회하지 않고 압축을 위해 CLI를 새로 띄우지 않는다. manual POST compact는 기존 200 Member를 유지하며 식별 가능한 세션에서 예약할 수 있다. `contextState.compaction.phase`의 queued/sending/running/succeeded/failed/uncertain으로 접수와 완료를 구별한다.
 
-Claude는 `/compact <focus>`, Codex는 인자 없는 `/compact`이며 nonce·delivery marker·병렬 prefix를 붙이지 않는다. sending/baseline을 DB에 먼저 저장하고 idle 조건에서 한 번 보낸다. generation 1에서 done 조건을 안전하게 지정할 수 없으면 압축 전송을 보류한다. ACK만으로 성공이 아니며 baseline 뒤 Claude compact_boundary/Codex compacted 기록과 같은 소유 CLI의 settled 복귀·오류 부재가 있어야 완료다. CLI 자체 압축도 중복 방지에 반영한다. timeout/재시작 중 sending/running은 uncertain으로 관측을 재개하고 재송신·후속 자동 입력을 막는다. claim/release만으로 해소하지 않는다. 압축 기록과 완료 판정은 사용하는 실제 CLI 버전에서도 별도 인수 시험으로 확인한다.
+Claude는 `/compact <focus>`, Codex는 인자 없는 `/compact`이며 nonce·delivery marker·병렬 prefix를 붙이지 않는다. sending/baseline을 DB에 먼저 저장하고 idle 조건에서 한 번 보낸다. generation 1에서 done 조건을 안전하게 지정할 수 없으면 압축 전송을 보류한다. ACK만으로 성공이 아니며 baseline 뒤 Claude compact_boundary/Codex compacted 기록과 같은 소유 CLI의 settled 복귀·오류 부재가 있어야 완료다. CLI 자체 압축도 중복 방지에 반영한다. timeout/재시작 중 sending/running은 uncertain으로 관측을 재개하고 재송신·후속 자동 입력을 막는다. claim/release만으로 해소하지 않는다. 단, 미확정 압축은 그 명령을 받은 터미널에 묶인다: 그 터미널이 명부에서 사라졌거나 다른 터미널로 바뀌었으면(Mac·엔진 재시작, 종료 뒤 다시 열림) 그 압축을 `failed/interrupted`로 닫고 대기열을 이어 간다. 띄우기·끝내기 결과를 모르는 동안은 닫지 않는다. 압축 기록과 완료 판정은 사용하는 실제 CLI 버전에서도 별도 인수 시험으로 확인한다.
 
 ### 3.8 서버 로컬 파일 보기와 자료 등록
 

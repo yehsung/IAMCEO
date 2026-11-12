@@ -7,6 +7,11 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
+### 아직 내지 않은 것
+
+- **Mac을 다시 시작한 뒤 지시를 못 받던 팀장이 풀립니다.** 자동 압축의 결과를 확인하지 못한 채 Mac이 꺼지면, 그 팀장은 다시 열어도 지시를 받지 못했습니다(압축을 받은 터미널이 사라져 아무도 결과를 확정하지 못했습니다). 이제 그 터미널이 없으면 압축을 닫고 밀린 지시를 이어서 넣습니다.
+- **재시작으로 꺼진 세션을 오류처럼 보이지 않게.** Mac이나 실행 엔진이 다시 시작되어 꺼진 팀장에게 내부 용어(`holder_lost`) 대신 무슨 일이고 어떻게 되는지를 적습니다.
+
 ### 0.2.3 — 2026-11-12
 
 2026-11-11 안정성 수정과 그 뒤의 완성도 손질입니다. iPhone 앱 0.2.2는 이 버전의 Mac 서버와 그대로 맞습니다.
@@ -71,6 +76,11 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - 첫 공개. 내 Mac에서 서버를 켜고 브라우저로 Claude Code 세션 여럿을 총괄과 팀으로 부립니다. 홈·결재함·팀·대화·자료 다섯 화면. Claude Code 전용, AGPL-3.0-only.
 
 ## English
+
+### Unreleased
+
+- **Staff that stopped receiving work after a Mac restart recover.** If the Mac went down while an automatic compaction was still unconfirmed, that staff member received nothing after being reopened (the terminal that took the compaction was gone, so nobody could confirm it). The server now closes that compaction when its terminal no longer exists and delivers the queued work.
+- **A session ended by a restart no longer looks like an error.** Staff switched off by a Mac or engine restart show what happened and what to do instead of an internal term (`holder_lost`).
 
 ### 0.2.3 — 2026-11-12
 

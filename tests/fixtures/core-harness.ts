@@ -444,6 +444,8 @@ export interface CoreSetupOptions {
   live?: boolean;
 }
 const FAST_RUNNER: NonNullable<CoreRunnerDeps> = { pollMs: 20, rpcTimeoutMs: 2000, sendTimeoutMs: 2000, contextTimeoutMs: 300 };
+/** 재시작으로 꺼진 팀장을 다시 여는 줄의 빠른 시험용 간격. 한 번에 여는 수와 자리 잡기를 기다리는 상한은 운영 값 그대로다. */
+const FAST_RESTART_WAKE: Partial<OrchestratorTimings> = { restartWakeGapMs: 0, restartWakePollMs: 15 };
 
 /**
  * 총괄 시험 한 벌: 가짜 core + 실제 CoreRunner + 운영 배선의 Orchestrator + 실제 HTTP 서버.
@@ -490,7 +492,7 @@ async function assemble(opts: CoreSetupOptions) {
   const orch: Orchestrator = createOrchestrator(config, store, {
     runner: { claudeHome, codexHome },
     runnerDeps: { ...FAST_RUNNER, ...opts.runnerDeps },
-    orchestrator: { providerHomes: { claudeHome, codexHome }, agentTools: opts.agentTools, timings: opts.timings, notifier: opts.notifier },
+    orchestrator: { providerHomes: { claudeHome, codexHome }, agentTools: opts.agentTools, timings: { ...FAST_RESTART_WAKE, ...opts.timings }, notifier: opts.notifier },
   });
   const runner = (orch as unknown as { runners: Map<Backend, Runner> }).runners.get("core") as CoreRunner;
   const server: RunningServer = await startServer({ config, store, bus, orch });

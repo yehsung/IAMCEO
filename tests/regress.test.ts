@@ -1247,17 +1247,94 @@ describe("2차 검수 회귀: 전달", () => {
 
   test("승인 창 앞으로 바뀌면 알리고 프로젝트 요약에 센다", async () => {
     const seen: string[] = [];
-    const t = await setup({ notifier: (title) => seen.push(title) });
+    // 알림은 막힘이 blockedNoticeMs 동안 이어진 뒤에 나간다(여기서는 30ms). 명부의 막힘은 곧바로 보인다.
+    const t = await setup({ notifier: (title) => seen.push(title), timings: { blockedNoticeMs: 30 } });
     t.store.patchSettings({ notifyMac: true });
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
     t.runner.cb({ type: "status", memberId: w.id, status: "blocked", blockedReason: "permission" });
     await until(() => t.store.requireMember(w.id).status === "blocked");
+    expect(seen).toEqual([]);
     t.runner.cb({ type: "status", memberId: w.id, status: "blocked", blockedReason: "permission" });
-    await Bun.sleep(5);
+    await until(() => seen.length > 0, "막힘 알림");
+    await Bun.sleep(80);
     expect(seen.filter((s) => s.includes("승인 대기"))).toHaveLength(1);
     expect(t.store.projectSummaries().find((p) => p.id === t.project.id)).toMatchObject({ blockedCount: 1, errorCount: 0 });
     t.store.patchMember(w.id, { status: "error" });
     expect(t.store.projectSummaries().find((p) => p.id === t.project.id)).toMatchObject({ blockedCount: 0, errorCount: 1 });
+  });
+
+  // 2026-11-12 실측: 꺼진 팀장을 깨우자 '승인 대기 · 승인 창 앞에서 멈췄습니다' 알림이 떴는데, 그 팀장은 6초 안에 쉬는 중이 됐고 승인 창은 없었다.
+  // 알림은 막힘이 이어질 때만 보낸다. 앱에 보이는 상태(명부의 막힘)는 늦추지 않는다.
+  describe("막힘 알림은 막힘이 이어진 뒤에만", () => {
+    const blockedFor = async (delay: number) => {
+      const seen: string[] = [];
+      const t = await setup({ notifier: (title) => seen.push(title), timings: { blockedNoticeMs: delay } });
+      t.store.patchSettings({ notifyMac: true });
+      const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
+      const status = (status: "blocked" | "idle", code?: "trust_dialog_unrecognized") => t.runner.cb({ type: "status", memberId: w.id, status, ...(status === "blocked" ? { blockedReason: code ? "status_unknown" as const : "permission" as const } : {}),
+        ...(code ? { observation: { source: "core" as const, observedAt: new Date().toISOString(), freshness: "fresh" as const, ownership: "verified" as const, consecutiveFailures: 0, error: { code, note: "창을 읽지 못함" } } } : {}) });
+      const blocked = () => until(() => t.store.requireMember(w.id).status === "blocked", "막힘");
+      return { t, w, seen, status, blocked };
+    };
+
+    test("막힘이 잠깐 스치고 쉬는 중이 되면 알리지 않는다", async () => {
+      const f = await blockedFor(80);
+      f.status("blocked");
+      await f.blocked();
+      // 명부에는 곧바로 막힘으로 보인다.
+      expect(f.t.store.projectSummaries().find((p) => p.id === f.t.project.id)).toMatchObject({ blockedCount: 1 });
+      f.status("idle");
+      await until(() => f.t.store.requireMember(f.w.id).status === "idle", "풀림");
+      await Bun.sleep(200);
+      expect(f.seen).toEqual([]);
+      // 보내지 않은 알림은 '알린 것'이 아니다: 그 뒤의 진짜 막힘은 알린다.
+      f.status("blocked");
+      await until(() => f.seen.length === 1, "다음 막힘의 알림");
+      expect(f.seen[0]).toContain("승인 대기");
+    });
+
+    test("막힘이 이어지면 기다린 뒤 한 번 알린다", async () => {
+      const f = await blockedFor(80);
+      f.status("blocked");
+      await f.blocked();
+      await Bun.sleep(30);
+      expect(f.seen).toEqual([]);
+      f.status("blocked"); // 같은 막힘이 다시 관측돼도 알림은 하나다.
+      await until(() => f.seen.length > 0, "막힘 알림");
+      await Bun.sleep(200);
+      expect(f.seen).toHaveLength(1);
+      expect(f.seen[0]).toContain("승인 대기");
+    });
+
+    test("이미 알린 막힘에 까닭이 나중에 붙으면 그때 한 번 더 알린다. 알리기 전에 까닭이 붙으면 그 까닭으로 한 번만 알린다", async () => {
+      const f = await blockedFor(60);
+      f.status("blocked");
+      await until(() => f.seen.length === 1, "첫 알림");
+      f.status("blocked", "trust_dialog_unrecognized");
+      await until(() => f.seen.length === 2, "까닭이 붙은 알림");
+      expect(f.seen[1]).toContain("확인 필요");
+      f.status("blocked", "trust_dialog_unrecognized");
+      await Bun.sleep(200);
+      expect(f.seen).toHaveLength(2);
+
+      const g = await blockedFor(80);
+      g.status("blocked");
+      await g.blocked();
+      g.status("blocked", "trust_dialog_unrecognized"); // 기다리는 동안 까닭이 붙었다.
+      await until(() => g.seen.length > 0, "까닭의 알림");
+      await Bun.sleep(200);
+      expect(g.seen).toHaveLength(1);
+      expect(g.seen[0]).toContain("확인 필요");
+    });
+
+    test("알림을 기다리는 중에 서버를 닫으면 보내지 않는다", async () => {
+      const f = await blockedFor(80);
+      f.status("blocked");
+      await f.blocked();
+      await f.t.orch.shutdown();
+      await Bun.sleep(250);
+      expect(f.seen).toEqual([]);
+    });
   });
 
   test("team_assign attachments: 이 프로젝트 대표 글의 첨부만 그 직원 폴더로 잇는다", async () => {

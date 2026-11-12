@@ -36,6 +36,11 @@ export interface CoreRunnerDeps {
   contextTimeoutMs?: number; usageLimitCloseTimeoutMs?: number;
   /** How long a launched CLI may stay without any status report before the block is labelled start_not_ready. Default 60s. */
   startNotReadyMs?: number;
+  /**
+   * How long a just-launched CLI that has not reported yet is treated as starting rather than blocked. Default 0 (off);
+   * the production assembly (createOrchestrator) turns it on. Recognized dialogs are never held back.
+   */
+  startQuietMs?: number;
   /** How long one inspection keeps reading a legacy (baseline-less) provider log before returning scan_pending. */
   evidenceScanMs?: number;
   readContext?: typeof capturedContext;
@@ -489,6 +494,12 @@ export class CoreRunner implements FullRunner {
     // While the end of a silent turn is being watched (SILENT_SETTLE_MS) nothing is blocked yet: publishing it sent the
     // owner an approval alert for a dialog that does not exist. The next observation decides.
     if (silent && !track.lost && !track.failure && blockedReason === "status_unknown") return;
+    // A CLI launched a moment ago that has not reported yet is starting, not stopped at a dialog. Publishing it as
+    // blocked showed 'blocked' in the roster for a few seconds and alerted the owner to an approval dialog on every wake
+    // (real 2026-11-12: a member woken by hand was idle 6 s later, no dialog). A recognized dialog (folder trust, usage
+    // limit) is published at once; a CLI still silent after startQuietMs is published as before.
+    const starting = unreported && !trustLike && !notReady && (terminal.turn ?? 0) === 0 && Date.now() - Date.parse(track.bindingSince) < (this.deps.startQuietMs ?? 0);
+    if (starting && !track.failure) return;
     if (statusKey !== track.statusKey || track.failure) {
       track.status = status;
       track.statusKey = statusKey;

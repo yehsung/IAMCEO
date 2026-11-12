@@ -58,6 +58,7 @@ import { newId, nowIso } from "./db.ts";
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOWS, exactSource } from "./runner/context.ts";
 import { MAX_PROJECT_NAME, MAX_ROLE, nameProblem, oneLineProblem, RESERVED_HANDLES, workerNameProblem } from "./text.ts";
 import { cleanName, cleanText, conductorName } from "./text.ts";
+import { parseRestartWake, type RestartWake } from "./restart-wake.ts";
 
 /** status 가 그대로 HTTP 응답 코드가 되는 오류. */
 export class ApiError extends Error {
@@ -374,6 +375,8 @@ export const DEFAULT_SETTINGS: Settings = {
 
 /** 대표가 새 프로젝트를 만들며 신뢰한다고 답한 폴더(프로젝트 id → 그때의 폴더). settings 표의 별도 키라 스키마를 바꾸지 않는다. */
 const FOLDER_TRUST_KEY = "folderTrust";
+/** 재시작으로 꺼졌고 아직 다시 열지 않은 팀장의 표식(팀장 id → RestartWake). 같은 까닭으로 settings 표의 별도 키다. */
+const RESTART_WAKE_KEY = "restartWake";
 
 /** 이 설치가 Tailscale 주소를 연 적이 있다는 기록({ address, at }). 같은 표의 별도 키라 설정 응답에는 나가지 않는다. */
 const TAILNET_SEEN_KEY = "tailnetSeen";
@@ -2763,6 +2766,39 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   /** 대표가 이 프로젝트에서 보낸 글에 그 첨부가 붙어 있는가. 다른 프로젝트의 첨부를 지시로 끌어오지 못하게 한다. */
   isProjectAttachment(projectId: string, attachmentId: string): boolean {
     return this.row("SELECT 1 FROM messages WHERE project_id = ? AND mine = 1 AND attachments LIKE ? LIMIT 1", projectId, `%"${attachmentId}"%`) !== null;
+  }
+
+  // ---- 재시작으로 꺼진 팀장의 표식 ----
+  /** 표식 전부. 읽을 수 없는 값은 없는 것으로 본다(그 팀장은 예전처럼 꺼진 채 남는다). */
+  restartWakes(): Record<string, RestartWake> {
+    const row = this.row("SELECT value FROM settings WHERE key = ?", RESTART_WAKE_KEY);
+    if (!row) return {};
+    try {
+      const saved: unknown = JSON.parse(row.value);
+      if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {};
+      const wakes: Record<string, RestartWake> = {};
+      for (const [memberId, value] of Object.entries(saved)) {
+        const wake = parseRestartWake(value);
+        if (wake) wakes[memberId] = wake;
+      }
+      return wakes;
+    } catch { return {}; }
+  }
+
+  getRestartWake(memberId: string): RestartWake | null {
+    return this.restartWakes()[memberId] ?? null;
+  }
+
+  /** null 이면 지운다. 화면에 나가는 값이 아니라 알림(event)은 내지 않는다. */
+  setRestartWake(memberId: string, wake: RestartWake | null): void {
+    this.transaction(() => {
+      const saved = this.restartWakes();
+      if (wake) saved[memberId] = wake;
+      else if (memberId in saved) delete saved[memberId];
+      else return;
+      if (Object.keys(saved).length === 0) this.run("DELETE FROM settings WHERE key = ?", RESTART_WAKE_KEY);
+      else this.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", RESTART_WAKE_KEY, JSON.stringify(saved));
+    });
   }
 
   // ---- 설정 ----

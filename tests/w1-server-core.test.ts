@@ -81,7 +81,8 @@ async function fixture(options: Options = {}) {
     const runner = new CoreRunner(isolated.runnerOptions(isolated.providerHomes), { recoveryStore: store, pollMs: 20, rpcTimeoutMs: 500, sendTimeoutMs: 500, ...options.deps });
     const notices: { title: string; body: string }[] = [];
     const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]), notifier: (title, body) => { notices.push({ title, body }); },
-      timings: { tickMs: 60_000, healthMs: 60_000, retryMs: 5, ...options.timings } });
+      // 막힘 알림은 막힘이 이어진 뒤에 나간다(운영 5초). 여기서는 짧게 두고 알림을 기다린다.
+      timings: { tickMs: 60_000, healthMs: 60_000, retryMs: 5, blockedNoticeMs: 30, ...options.timings } });
     running.push(orch);
     const supervise = () => (orch as unknown as { coreSupervisor: { tick(): Promise<void> } }).coreSupervisor.tick();
     return { orch, runner, notices, supervise };

@@ -4,6 +4,7 @@ import { ModelCatalogReader } from "./models.ts";
 import { ApiRecovery, classifyTurnError, NoTerminalError, type ApiRecoveryOptions } from "./api-outage.ts";
 import { DeliveryRecovery } from "./delivery-recovery.ts";
 import { writeStatuslineWrapper } from "./runner/statusline.ts";
+import { endedByRestart, RESTART_EXIT_NOTE, RESTART_REOPENED_NOTE, RESTART_RESUME_TEXT, RESTART_WAKE_MAX_ATTEMPTS, RESTART_WAKE_PACING, restartNoteIn, type RestartWake, type RestartWakePacing } from "./restart-wake.ts";
 // Orchestrator: 전달 펌프, 턴 종료 처리, 압축 판단, 띄우기·잠재우기·다시 열기, 승인 근거 확인(spec §4·§6·§7).
 //
 // server/agent-tools.ts 가 쓰는 공개 메서드:
@@ -246,7 +247,7 @@ export interface AgentToolsImpl {
   handleAgentTool(orch: Orchestrator, member: Member, name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<AgentToolResult>;
 }
 
-export interface OrchestratorTimings {
+export interface OrchestratorTimings extends RestartWakePacing {
   inputBusyRetryMs: number;
   /** Maximum wait for one external pump operation, including its read guards. */
   pumpStageTimeoutMs: number;
@@ -278,6 +279,11 @@ export interface OrchestratorTimings {
   writeSettleMs: number;
   /** 실행 엔진(herdr-core)이 이만큼 이어서 답하지 않으면 화면에 '응답 없음'으로 알린다. */
   engineUnresponsiveMs: number;
+  /**
+   * 막힘이 이만큼 이어진 뒤에만 대표에게 알린다(Mac 알림). 명부의 막힘 표시와 승인 카드는 곧바로 보인다.
+   * 깨운 직후 CLI 가 준비를 알리기 전의 몇 초가 막힘으로 스쳐, 승인 창이 없는데도 '승인 대기' 알림이 떴다(2026-11-12 실측).
+   */
+  blockedNoticeMs: number;
 }
 
 const DEFAULT_TIMINGS: OrchestratorTimings = {
@@ -300,6 +306,8 @@ const DEFAULT_TIMINGS: OrchestratorTimings = {
   configRetryMs: 60_000,
   writeSettleMs: 30_000,
   engineUnresponsiveMs: 60_000,
+  blockedNoticeMs: 5000,
+  ...RESTART_WAKE_PACING,
 };
 
 /** 대표가 프로젝트를 만들며 폴더를 신뢰한다고 답했을 때만 고르는 선택지. 실측한 창의 글자와 정확히 같아야 한다. */
@@ -532,14 +540,18 @@ class OrchestratorDeliveryRecovery extends DeliveryRecovery {
   }
 }
 
-/** 터미널을 붙잡던 실행 엔진이나 Mac 이 다시 시작돼 CLI 가 함께 꺼진 경우. CLI 의 잘못이 아니고, 깨우면 같은 세션을 이어 연다. */
-function endedByRestart(reason: string | null | undefined): boolean {
-  return reason === "holder_lost" || reason === "stopped_by_restart";
-}
-/** 팀장의 lastError·활동에 남는 터미널 종료 글. */
+/**
+ * 팀장의 lastError·활동에 남는 터미널 종료 글. 터미널을 붙잡던 실행 엔진이나 Mac 이 다시 시작돼 CLI 가 함께 꺼진 것(endedByRestart)은
+ * CLI 의 잘못이 아니다: 서버가 같은 세션을 스스로 다시 연다(restart-wake.ts).
+ */
 function exitDetail(reason: string | null | undefined, exitCode: number | null | undefined): string {
-  if (endedByRestart(reason)) return "Mac이나 실행 엔진이 다시 시작되어 세션이 꺼졌습니다. 말을 걸거나 깨우면 하던 대화를 이어서 엽니다";
+  if (endedByRestart(reason)) return RESTART_EXIT_NOTE;
   return `초기/실행 종료: ${reason ?? "원인 미확인"} (exit_code=${exitCode ?? "unknown"})`;
+}
+/** 재시작으로 터미널을 잃은 종료를 표식의 사유로. 엔진이 그 터미널을 모른다(not_found)는 것도 엔진이 다시 시작된 것이다. CLI 가 스스로 끝났으면 null. */
+function restartLossOf(reason: string | null | undefined, exitCode: number | null | undefined): RestartWake["reason"] | null {
+  if (reason === "holder_lost" || reason === "stopped_by_restart") return reason;
+  return reason === "not_found" && (exitCode === null || exitCode === undefined) ? "terminal_absent" : null;
 }
 
 /** Runner의 외부 입력 baseline/cursor도 기존 세대별 문맥 행에 함께 저장한다. */
@@ -595,6 +607,12 @@ export interface AssemblyOverrides {
 }
 
 /**
+ * 갓 띄운 CLI 가 아직 준비를 알리지 않은 것을 '막힘'으로 보지 않는 시간(CoreRunnerDeps.startQuietMs). 2026-11-12 라이브에서 깨운 팀장이
+ * 6초 뒤 쉬는 중이 됐는데 그사이 '승인 대기' 알림이 떴다. 이보다 오래 조용하면 예전처럼 막힘으로 보이고, 60초를 넘기면 '시작 지연'이다.
+ */
+const CORE_START_QUIET_MS = 20_000;
+
+/**
  * 실제 실행기로 조립한다. 실행기는 core 하나다.
  * 옛 herdr·headless 실행기는 없다. 서버는 대표 개인의 herdr 소켓에 아무것도 보내지 않는다.
  */
@@ -603,6 +621,7 @@ export function createOrchestrator(config: Config, store: Store, overrides: Asse
   let orchestrator: Orchestrator | null = null;
   const deliveryRecovery = new OrchestratorDeliveryRecovery(store, member => orchestrator?.recoveryRunner(member) ?? null, dispatch => orchestrator?.writerDone(dispatch) ?? false, memberId => orchestrator?.repairAdmitted(memberId) ?? false);
   runners.set("core", new CoreRunner({ contextHome: config.home, coreBin: config.coreBin, socketPath: config.coreSocket, session: "iamceo", stateDir: join(config.home, "core-state"), configDir: join(config.home, "core-config"), claudeBin: config.claudeBin, codexBin: config.codexBin, ...overrides.runner }, {
+    startQuietMs: CORE_START_QUIET_MS,
     ...overrides.runnerDeps,
     recoveryStore: store,
     compactStore: coreCompactStore(store),
@@ -747,6 +766,9 @@ export class Orchestrator implements OrchestratorApi {
           if (current.lastError?.startsWith("starting_unknown") || current.lastError?.startsWith("core 재연결 보류")) this.store.patchMember(member.id, { lastError: null });
           // 깨우다 결과를 놓친 기동이 실제로는 떠 있었다. 잠듦으로 두면 살아 있는 CLI 가 명부에서는 잠든 채 남는다.
           if (current.status === "asleep") this.settle(current);
+          // 재시작으로 꺼진 줄 알았던 팀장의 터미널이 떠 있다. 서버가 다시 열다 결과를 놓친 것이면 이어 연 것으로 닫는다.
+          const lost = this.store.getRestartWake(member.id);
+          if (lost && lost.state !== "resumed") this.settleRestartWake(member.id, lost.state === "opening" ? "resumed" : "dropped");
           await this.reconcileExecutions(member.id);
         }
         const resolvedStart = this.resolveAbsentStart(member, result.outcome);
@@ -1143,14 +1165,16 @@ export class Orchestrator implements OrchestratorApi {
       const run = this.store.listPendingExecutions().find(r => r.memberId === member.id);
       const settled = ["idle", "done"].includes(terminal.status?.state ?? "") && run?.turn !== null && run?.turn !== undefined && (terminal.turn ?? -1) > run.turn;
       const result = terminal.status?.state === "error" ? "error" : settled ? "success" : "interrupted";
-      this.endExecution(member, result, terminal.reason ?? terminal.status?.msg ?? "소유 터미널이 종료되었습니다", terminal.exit_code ?? null, terminal.turn);
+      const lost = restartLossOf(terminal.reason, terminal.exit_code);
+      this.endExecution(member, result, terminal.reason ?? terminal.status?.msg ?? "소유 터미널이 종료되었습니다", terminal.exit_code ?? null, terminal.turn, lost !== null && this.noteRestartLoss(member, lost));
       const detail = exitDetail(terminal.reason, terminal.exit_code);
       if (member.lastError !== detail) this.store.appendActivity(member.id, result === "success" || endedByRestart(terminal.reason) ? "system" : "error", detail.slice(0, 500));
       this.store.patchMember(member.id, { lastError: result === "success" ? null : detail.slice(0, 500) });
       return true;
     } catch (error) {
       if (error instanceof CoreError && error.kind === "not_found" && !error.uncertain) {
-        this.endExecution(member, "interrupted", "소유 터미널의 부재를 확인했습니다");
+        // 엔진이 답했고 그 터미널을 모른다: 엔진(또는 Mac)이 다시 시작되며 터미널이 사라졌다.
+        this.endExecution(member, "interrupted", "소유 터미널의 부재를 확인했습니다", null, undefined, this.noteRestartLoss(member, "terminal_absent"));
         return true;
       }
       return false;
@@ -1246,7 +1270,11 @@ export class Orchestrator implements OrchestratorApi {
     return false;
   }
 
-  private endExecution(member: Member, result: "success" | "error" | "interrupted", reason: string | null, exitCode: number | null = null, turn?: number | null): void {
+  /**
+   * restartLost: 재시작으로 터미널을 잃었고 서버가 그 팀장을 스스로 다시 연다(noteRestartLoss 가 참). 그때 끊긴 실행은 여기서 알리지 않고
+   * 표식에 적어 둔다. 다시 열면 이어가기 글을 넣고, 못 열면 그때 예전처럼 총괄에게 알린다(settleRestartWake). 어느 쪽이든 실행마다 한 번이다.
+   */
+  private endExecution(member: Member, result: "success" | "error" | "interrupted", reason: string | null, exitCode: number | null = null, turn?: number | null, restartLost = false): void {
     const at = new Date().toISOString();
     this.store.transaction(() => {
       for (const run of this.store.listPendingExecutions().filter(r => r.memberId === member.id && r.identity.sessionGeneration === this.store.memberRevisions(member.id).sessionGeneration)) {
@@ -1261,13 +1289,216 @@ export class Orchestrator implements OrchestratorApi {
         } else if (run.deliveryIds.some(id => this.store.getDelivery(id)?.text.startsWith(formatSystem("보고 보완")))) {
           this.requestMissingReport(member, run);
         }
-        if (outcome === "interrupted") this.store.claimExecutionNotice(run.runId, "interruption", () => {
-          this.systemMessage(member.projectId, `${member.name}: 실행 ${run.runId} 중단 — ${reason ?? "종료 근거 없이 세션이 사라졌습니다"}`);
-          const conductor = this.store.getConductor(member.projectId);
-          if (conductor && conductor.id !== member.id) this.store.enqueue({ projectId: member.projectId, memberId: conductor.id, kind: "system", text: formatSystem(`${member.name}의 실행 ${run.runId}이 중단되었습니다. 전달 ${run.deliveryIds.join(", ")}. 기존 변경과 보고를 확인한 뒤 후속 지시를 결정하세요.`), wake: true });
-        });
+        if (outcome !== "interrupted") continue;
+        const wake = restartLost ? this.store.getRestartWake(member.id) : null;
+        // 받았는지조차 모르는 입력(수신도 시작도 확인되지 않은 실행)은 '하던 일'이 아니다. 이어가기 글을 넣지 않고 예전처럼 알린다.
+        if (wake && wake.generation === run.identity.sessionGeneration && ["pending", "opening"].includes(wake.state) && (run.inputReceivedAt || run.startedAt)) {
+          if (!wake.runIds.includes(run.runId)) this.store.setRestartWake(member.id, { ...wake, runIds: [...wake.runIds, run.runId] });
+          continue;
+        }
+        this.store.claimExecutionNotice(run.runId, "interruption", () => this.noticeInterrupted(member, run,
+          endedByRestart(reason) ? "Mac이나 실행 엔진이 다시 시작되어 세션이 꺼졌습니다" : reason ?? "종료 근거 없이 세션이 사라졌습니다"));
       }
     });
+  }
+
+  /** 끊긴 실행을 대화에 남기고 총괄을 깨워 알린다. 실행마다 한 번이다(claimExecutionNotice 안에서만 부른다). */
+  private noticeInterrupted(member: Member, run: ExecutionJournal, why: string): void {
+    this.systemMessage(member.projectId, `${member.name}: 실행 ${run.runId} 중단 — ${why}`);
+    const conductor = this.store.getConductor(member.projectId);
+    if (conductor && conductor.id !== member.id) this.store.enqueue({ projectId: member.projectId, memberId: conductor.id, kind: "system", text: formatSystem(`${member.name}의 실행 ${run.runId}이 중단되었습니다. 전달 ${run.deliveryIds.join(", ")}. 기존 변경과 보고를 확인한 뒤 후속 지시를 결정하세요.`), wake: true });
+  }
+
+  // ---- 재시작(Mac 또는 실행 엔진)으로 꺼진 팀장을 서버가 스스로 다시 열기 ----
+  // 대상·속도·글은 restart-wake.ts. '깨우기'와 같은 길(reopen)로 같은 세션을 이어 연다. 입력은 넣지 않는다.
+  // 턴 도중에 끊긴 실행이 있었을 때만, 다시 연 뒤 이어가기 글을 실행마다 한 번 넣는다.
+
+  private quickExitLocked(rt: Runtime): boolean {
+    return rt.quickExits >= 3 && Date.now() < rt.quickExitAt + this.timings.quickExitRetryMs;
+  }
+
+  /**
+   * 서버가 스스로 다시 열어도 되는 팀장인가. 서버가 띄운 core 세션이고 세션 ID 가 있으며, 프로젝트가 보관되지 않았고 실행이 켜져 있어야 한다.
+   * 잠든 팀장(대표나 총괄이 재운 것)·직접 붙인 세션·넘겨받은 명부·옛 실행기의 세션은 아니다.
+   */
+  private restartWakeTarget(member: Member): boolean {
+    const project = this.store.getProject(member.projectId);
+    return member.origin === "runner" && member.backend === "core" && !!member.sessionId && member.status !== "asleep" &&
+      !!project && !project.archived && !this.archiving.has(project.id) && project.runnerEnabled;
+  }
+
+  /**
+   * 재시작으로 터미널을 잃은 것을 표식으로 적는다. 서버가 스스로 다시 열 대상이면 true.
+   * 띄우기·끝내기 결과를 모르는 팀장, 닫는 중인 팀장, 시작하자마자 끝나기를 되풀이한 팀장은 적지 않는다(예전처럼 꺼진 채 남는다).
+   */
+  private noteRestartLoss(snapshot: Member, reason: RestartWake["reason"]): boolean {
+    const member = this.store.getMember(snapshot.id);
+    if (!member) return false;
+    const rt = this.runtime(member.id);
+    if (!this.restartWakeTarget(member) || this.pendingLifecycle(member.id) || rt.closing || this.quickExitLocked(rt)) return false;
+    const generation = this.store.memberRevisions(member.id).sessionGeneration;
+    const before = this.store.getRestartWake(member.id);
+    const lostAt = new Date().toISOString();
+    if (before && before.generation === generation) {
+      // 같은 꺼짐을 두 번 본다(종료 이벤트, 그 뒤의 재결합 조회): 기다리거나 여는 중인 표식은 그대로 둔다.
+      // 실패로 닫았거나 다시 연 뒤의 표식이면 새로 꺼진 것이다. 처음부터 다시 센다(나가지 않은 이어가기 글은 그대로 쓴다).
+      if (before.state === "failed" || before.state === "resumed") this.store.setRestartWake(member.id, { ...before, reason, lostAt, state: "pending", attempts: 0 });
+      return true;
+    }
+    this.store.setRestartWake(member.id, { generation, reason, lostAt, state: "pending", attempts: 0, runIds: [], resumeId: null });
+    return true;
+  }
+
+  /**
+   * 이 기능 전에 재시작으로 꺼진 팀장은 표식 없이 lastError 의 글만 남아 있다(라이브 DB 의 옛 글 포함). 서버가 뜰 때 한 번 표식으로 옮긴다.
+   * 끊긴 실행은 그때 이미 총괄에게 알렸으므로 세션만 다시 연다.
+   */
+  private adoptRestartNotes(): void {
+    const wakes = this.store.restartWakes();
+    for (const member of this.store.listAllMembers()) {
+      if (wakes[member.id] || member.status !== "offline" || member.paneId || !restartNoteIn(member.lastError)) continue;
+      if (!this.restartWakeTarget(member) || this.pendingLifecycle(member.id)) continue;
+      this.store.setRestartWake(member.id, { generation: this.store.memberRevisions(member.id).sessionGeneration, reason: "legacy_note", lostAt: member.updatedAt, state: "pending", attempts: 0, runIds: [], resumeId: null });
+    }
+  }
+
+  /**
+   * 표식을 닫는다.
+   * - resumed: 같은 세션을 이어 열었다. 활동에 한 줄 남기고, 끊긴 실행마다 이어가기 글을 한 번 넣는다(총괄에게는 깨우지 않는 소식).
+   * - dropped: 대상에서 빠졌다(대표가 재우거나 닫음, 새 세션, 보관 등). 끊긴 실행은 예전처럼 총괄을 깨워 알린다.
+   * - failed: 여는 데 실패했다. dropped 와 같되 표식을 남겨, 같은 꺼짐에 다시 스스로 열지 않는다.
+   * 알림과 이어가기 글은 실행 기록의 통지 칸(claimExecutionNotice)으로 한 번만 만든다. 서버가 또 재시작해도 두 번 만들지 않는다.
+   */
+  private settleRestartWake(memberId: string, outcome: "resumed" | "dropped" | "failed"): void {
+    const wake = this.store.getRestartWake(memberId);
+    if (!wake) return;
+    const member = this.store.getMember(memberId);
+    if (!member) { this.store.setRestartWake(memberId, null); return; }
+    let wakeConductor: string | null = null;
+    this.store.transaction(() => {
+      const conductor = this.store.getConductor(member.projectId);
+      const lead = conductor && conductor.id !== member.id ? conductor : null;
+      let resumeId = wake.resumeId && ["queued", "held"].includes(this.store.getDelivery(wake.resumeId)?.status ?? "") ? wake.resumeId : null;
+      for (const runId of wake.runIds) {
+        const run = this.store.getExecutionJournal(runId);
+        if (!run || run.memberId !== member.id) continue;
+        this.store.claimExecutionNotice(runId, "interruption", () => {
+          if (outcome !== "resumed") {
+            this.noticeInterrupted(member, run, `Mac이나 실행 엔진이 다시 시작되어 끊겼습니다${outcome === "failed" ? ". 세션을 다시 열지 못했습니다" : ""}`);
+            wakeConductor = lead?.id ?? null;
+            return;
+          }
+          resumeId ??= this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "system", text: RESTART_RESUME_TEXT, wake: true }).id;
+          this.systemMessage(member.projectId, `${member.name}: 실행 ${run.runId} — 재시작으로 끊겨 이어서 하게 했습니다`);
+          // 총괄이 같은 일을 또 맡겨 두 번 하게 되지 않도록, 깨우지 않는 소식으로만 알린다.
+          if (lead) this.store.enqueue({ projectId: member.projectId, memberId: lead.id, kind: "system", wake: false,
+            text: formatSystem(`${member.name}의 일(실행 ${run.runId})이 Mac이나 실행 엔진의 재시작으로 끊겼습니다. 세션을 다시 열어 끊긴 곳부터 이어서 하게 했으니 같은 일을 다시 지시하지 마세요. 결과는 ${member.name}의 보고로 옵니다. 전달 ${run.deliveryIds.join(", ")}.`) });
+        });
+      }
+      if (outcome === "resumed" && wake.state !== "resumed") this.store.appendActivity(member.id, "system", RESTART_REOPENED_NOTE);
+      this.store.setRestartWake(memberId, outcome === "failed" ? { ...wake, state: "failed", runIds: [] }
+        : outcome === "resumed" && resumeId ? { ...wake, state: "resumed", runIds: [], resumeId } : null);
+      // 총괄의 전달은 트랜잭션이 끝난 뒤에 민다(재시작 복구 중이면 복구 끝의 펌프가 민다).
+      this.store.afterCommit(() => { if (wakeConductor && !this.closed && !this.recovering) void this.pump(wakeConductor); });
+    });
+  }
+
+  /** 지금 스스로 열 차례인 팀장들(총괄 먼저, 그다음 만든 순서). 대상에서 빠진 표식은 여기서 닫는다. */
+  private restartWakeQueue(): Member[] {
+    const ready: Member[] = [];
+    for (const [memberId, saved] of Object.entries(this.store.restartWakes())) {
+      const member = this.store.getMember(memberId);
+      if (!member) { this.store.setRestartWake(memberId, null); continue; }
+      let wake = saved;
+      if (wake.state === "resumed") {
+        // 이어가기 글이 나갔거나 없어졌으면 표식의 일은 끝났다.
+        const resume = wake.resumeId ? this.store.getDelivery(wake.resumeId) : null;
+        if (!resume || !["queued", "held", "delivering"].includes(resume.status)) this.store.setRestartWake(memberId, null);
+        continue;
+      }
+      if (wake.generation !== this.store.memberRevisions(memberId).sessionGeneration || !this.restartWakeTarget(member)) { this.settleRestartWake(memberId, "dropped"); continue; }
+      const rt = this.runtime(memberId);
+      // 띄우기·끝내기가 진행 중이거나 결과를 모른다. 정해진 뒤에 다시 본다.
+      if (this.pendingLifecycle(memberId) || rt.closing || rt.reopening || rt.starting) continue;
+      // 다른 길(대표의 말, 깨우기, 재결합)로 이미 깨어 있다.
+      if (member.status !== "offline") { this.settleRestartWake(memberId, "dropped"); continue; }
+      if (wake.state === "failed") continue;
+      if (wake.state === "opening") {
+        // 여는 중이던 시도가 결과를 남기지 못했다(그사이 서버가 내려갔거나, 뜨지 않은 것으로 정리됐다). 한 번만 더 해 본다.
+        if (wake.attempts >= RESTART_WAKE_MAX_ATTEMPTS) { this.settleRestartWake(memberId, "failed"); continue; }
+        wake = { ...wake, state: "pending" };
+        this.store.setRestartWake(memberId, wake);
+      }
+      if (this.quickExitLocked(rt)) { this.settleRestartWake(memberId, "dropped"); continue; }
+      // 엔진이 답했고 이 팀장의 터미널이 없다는 것이 확인돼야 연다. 엔진이 아직 답하지 않으면(부팅 직후) 기다린다.
+      if (member.paneId || !this.coreAbsenceConfirmed(member)) continue;
+      ready.push(member);
+    }
+    ready.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return [...ready.filter(m => m.kind !== "worker"), ...ready.filter(m => m.kind === "worker")];
+  }
+
+  private restartWaking: Promise<void> | null = null;
+  /**
+   * 재시작으로 꺼진 팀장을 차례로 다시 연다. recover 가 끝난 뒤와 실행기 상태를 볼 때마다 부른다(엔진이 늦게 뜨면 그때 이어진다).
+   * 한 번에 restartWakeParallel 명씩만 연다. 대표의 말이나 지시로 깨우는 기존 길(전달 펌프, 깨우기)은 이 줄을 기다리지 않고,
+   * 같은 팀장을 함께 열어도 세션은 하나다(reopen).
+   */
+  private kickRestartWakes(): void {
+    if (this.closed || this.recovering || this.restartWaking) return;
+    try { if (!this.restartWakeQueue().length) return; }
+    catch (e) { console.error("재시작으로 꺼진 팀장 확인 실패:", e); return; }
+    const opened = new Set<string>();
+    const lanes = Math.max(1, Math.floor(this.timings.restartWakeParallel) || 1);
+    const run: Promise<void> = Promise.all(Array.from({ length: lanes }, () => this.restartWakeLane(opened)))
+      // 원래 깨어 있던 팀장들이다. 상한을 넘으면 프로젝트마다 한 번만 총괄에게 알린다.
+      .then(() => { if (!this.closed) for (const projectId of opened) this.checkAwakeLimit(projectId); })
+      .catch(e => console.error("재시작으로 꺼진 팀장을 다시 여는 중 오류:", e))
+      .finally(() => { if (this.restartWaking === run) this.restartWaking = null; });
+    this.restartWaking = run;
+  }
+
+  private async restartWakeLane(opened: Set<string>): Promise<void> {
+    while (!this.closed && !this.recovering) {
+      const member = this.restartWakeQueue()[0];
+      if (!member) return;
+      const wake = this.store.getRestartWake(member.id)!;
+      // 열기 전에 적는다. 서버가 도중에 내려가도 '한 번 해 봤다'가 남는다.
+      this.store.setRestartWake(member.id, { ...wake, state: "opening", attempts: wake.attempts + 1 });
+      let reopened: Member | null = null;
+      try { reopened = await this.reopen(member); }
+      catch (e) { console.warn(`${member.name} 스스로 다시 열기 실패:`, (e as Error).message); }
+      if (this.closed) return;
+      if (reopened) {
+        opened.add(member.projectId);
+        void this.pump(member.id);
+      } else if (this.store.getMember(member.id) && this.pendingLifecycle(member.id)?.intent !== "start") {
+        // 꺼진 채 두고 다음 팀장으로 넘어간다. 오류 안내는 reopen 이 lastError 에 남겼다.
+        this.settleRestartWake(member.id, "failed");
+      }
+      // 띄운 결과를 모르면(미확정 기동) 표식을 '여는 중'으로 둔다. 재결합이 떴다고 확인하거나, 뜨지 않은 것으로 정리된 뒤에 다시 본다.
+      await this.restartWakeSettle(member.id);
+    }
+  }
+
+  /** 방금 연 팀장이 자리를 잡을 때까지 다음 차례를 미룬다: CLI 가 상태를 알렸거나(쉬는 중·일하는 중·막힘), restartWakeSettleMs 가 지났다. */
+  private async restartWakeSettle(memberId: string): Promise<void> {
+    const since = Date.now();
+    for (;;) {
+      if (this.closed) return;
+      const elapsed = Date.now() - since;
+      if (elapsed >= this.timings.restartWakeGapMs && (elapsed >= this.timings.restartWakeSettleMs || this.restartWakeSettled(memberId))) return;
+      await new Promise<void>(resolve => { const timer = setTimeout(resolve, Math.max(1, this.timings.restartWakePollMs)); timer.unref?.(); });
+    }
+  }
+
+  private restartWakeSettled(memberId: string): boolean {
+    const member = this.store.getMember(memberId);
+    if (!member || !member.paneId || member.status === "offline" || member.status === "asleep") return true;
+    const runner = this.runners.get(this.backendOf(member));
+    const observed = runner instanceof CoreRunner ? runner.observationState(memberId) : null;
+    // CLI 가 스스로 알린 상태가 있거나, 알아본 창(폴더 신뢰·사용 한도 등) 앞이다. 아직 아무것도 알리지 않았으면 뜨는 중이다.
+    return !observed || !!observed.setupError || ["idle", "done", "error", "working", "blocked"].includes(observed.state ?? "");
   }
 
   private completeExecutionReview(member: Member, run: ExecutionJournal): void {
@@ -1436,6 +1667,8 @@ export class Orchestrator implements OrchestratorApi {
     } finally { this.recovering = false; }
     this.coreSupervisor?.start();
     this.startTick();
+    // 재시작으로 꺼진 팀장을 천천히 다시 연다. 기다리지 않는다: 아래의 전달·깨우기는 이 줄과 따로 간다.
+    this.recoverStep("재시작으로 꺼진 팀장 다시 열기", () => { this.adoptRestartNotes(); this.kickRestartWakes(); });
     const checking = this.settleInFlight();
     const ids = new Set(this.store.listUndelivered().map((d) => d.memberId));
     await Promise.all([checking, ...[...ids].map(id => this.pump(id))]);
@@ -1659,6 +1892,8 @@ export class Orchestrator implements OrchestratorApi {
     }
     await this.coreSupervisor?.tick();
     await this.reconcileExecutions();
+    // 엔진이 이제 답해 '터미널 없음'이 확인된 팀장, 서버가 떠 있는 동안 엔진이 다시 시작돼 꺼진 팀장을 이어서 연다.
+    this.kickRestartWakes();
     this.reportStuckPumps();
     this.detectStallsSoon();
     if (!changed) return;
@@ -1840,6 +2075,7 @@ export class Orchestrator implements OrchestratorApi {
     if (this.healthTimer) clearInterval(this.healthTimer);
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
+    for (const memberId of [...this.blockedNoticeTimers.keys()]) this.cancelBlockedNotices(memberId);
     for (const rt of this.runtimes.values()) {
       if (rt.compactTimer) clearTimeout(rt.compactTimer);
       if (rt.retryTimer) clearTimeout(rt.retryTimer);
@@ -2779,7 +3015,9 @@ export class Orchestrator implements OrchestratorApi {
   /** 명부에서 뺀다. 그 직원의 실행 파일(규칙·MCP 설정·CLI 설정)도 지운다: MCP 설정에는 그 직원의 토큰이 들어 있다. */
   private forgetMember(memberId: string): void {
     this.blockedNotices.delete(memberId);
+    this.cancelBlockedNotices(memberId);
     this.autoTrusts.delete(memberId);
+    this.store.setRestartWake(memberId, null);
     this.store.removeMember(memberId);
     this.store.afterCommit(() => {
       for (const suffix of ["rules.md", "mcp.json", "settings.json"]) {
@@ -3095,6 +3333,8 @@ export class Orchestrator implements OrchestratorApi {
       this.store.transaction(() => {
         this.interruptCoreCompaction(member);
         this.store.patchMember(memberId, { status: "asleep", subagents: 0, paneId: null });
+        // 재시작으로 꺼진 팀장을 재웠다: 스스로 다시 열지 않는다. 잠든 팀장은 그대로 잔다.
+        this.settleRestartWake(memberId, "dropped");
         for (const d of this.store.listPending(memberId)) {
           const history = this.store.listDispatches(memberId).filter(dispatch => dispatch.items.some(item => item.deliveryId === d.id));
           const unwritten = history.length ? history.every(dispatch => dispatch.transportState === "rejected") : d.attempts === 0 && d.holdReason !== "delivery_unknown";
@@ -3187,6 +3427,8 @@ export class Orchestrator implements OrchestratorApi {
     const claimIfUnknown = () => {
       if (claimed && this.store.getMember(member.id) && this.pendingLifecycle(member.id)?.intent === "start") this.store.patchMember(member.id, { origin: "runner" });
     };
+    // 같은 세션을 이어 열었는가. 세션 기록이 없어 새 세션으로 열면 끊긴 턴의 맥락이 없다.
+    let continued = !!member.sessionId;
     try {
       // core 는 터미널만 만들면 성공으로 답하므로, 없는 세션을 --resume 하면 오류 없이 CLI 가 곧바로 끝나고 끝없이 되풀이됐다.
       if (member.sessionId && runner.sessionExists?.(this.runnerMember(member, project)) === false) throw new MissingSessionError();
@@ -3212,6 +3454,7 @@ export class Orchestrator implements OrchestratorApi {
         return null;
       }
       console.warn(`${member.name}의 이전 세션이 없어 새 세션을 엽니다:`, message);
+      continued = false;
       try {
         const fresh = { ...launch, sessionId: null };
         const sent = this.desiredConfig(fresh);
@@ -3231,6 +3474,8 @@ export class Orchestrator implements OrchestratorApi {
         return null;
       }
     }
+    // 재시작으로 꺼졌던 팀장이면(누가 깨웠든) 표식을 닫는다. 턴 도중에 끊긴 실행이 있었으면 이어가기 글이 여기서 줄에 선다.
+    this.settleRestartWake(member.id, continued ? "resumed" : "dropped");
     this.settle(this.store.requireMember(member.id));
     return this.store.requireMember(member.id);
   }
@@ -3284,6 +3529,7 @@ export class Orchestrator implements OrchestratorApi {
         this.store.closeDecision(d.id, { kind: null, reason: `${josa(member.name, "이")} 명부에서 빠져 함께 닫혔습니다`, by: "시스템" });
         this.wakeAll(this.askWaiters, d.id);
       }
+      this.settleRestartWake(memberId, "dropped");
       this.clearRuntime(memberId, rt);
       this.forgetMember(memberId);
       this.releaseSlots();
@@ -3769,7 +4015,14 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private sendablePending(memberId: string): Delivery[] {
-    return this.apiRecovery.prioritize(memberId, this.store.listSendablePending(memberId));
+    const pending = this.apiRecovery.prioritize(memberId, this.store.listSendablePending(memberId));
+    // 재시작으로 끊긴 일의 이어가기 글은 기다리던 다른 전달보다 먼저, 혼자 나간다(끊긴 일을 정리한 뒤 새 일).
+    const wake = this.store.getRestartWake(memberId);
+    if (!wake?.resumeId) return pending;
+    const resume = pending.find(d => d.id === wake.resumeId);
+    if (resume) return [resume];
+    if (wake.state === "resumed" && !["queued", "held", "delivering"].includes(this.store.getDelivery(wake.resumeId)?.status ?? "")) this.store.setRestartWake(memberId, null);
+    return pending;
   }
 
   private async pumpOnce(memberId: string): Promise<void> {
@@ -4561,7 +4814,8 @@ export class Orchestrator implements OrchestratorApi {
           this.releaseSlots();
         }
         if (e.status === "gone") {
-          this.endExecution(member, "interrupted", e.exit?.reason ?? "소유 터미널이 종료되거나 사라졌습니다", e.exit?.exitCode ?? null, e.turn);
+          const lost = restartLossOf(e.exit?.reason, e.exit?.exitCode);
+          this.endExecution(member, "interrupted", e.exit?.reason ?? "소유 터미널이 종료되거나 사라졌습니다", e.exit?.exitCode ?? null, e.turn, lost !== null && this.noteRestartLoss(member, lost));
           if (e.exit) {
             const detail = exitDetail(e.exit.reason, e.exit.exitCode);
             if (member.lastError !== detail) this.store.appendActivity(member.id, endedByRestart(e.exit.reason) ? "system" : "error", detail.slice(0, 500));
@@ -4629,6 +4883,38 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 지금의 막힘에서 이미 알린 까닭들. 메모리에만 있다. */
   private readonly blockedNotices = new Map<string, Set<string>>();
+  /** 막힘이 이어지는지 지켜보는 중인 알림(팀장 → 까닭 → 타이머). 아직 보내지 않았으므로 '알린 것'이 아니다. */
+  private readonly blockedNoticeTimers = new Map<string, Map<string, ReturnType<typeof setTimeout>>>();
+  private cancelBlockedNotices(memberId: string): void {
+    for (const timer of this.blockedNoticeTimers.get(memberId)?.values() ?? []) clearTimeout(timer);
+    this.blockedNoticeTimers.delete(memberId);
+  }
+  /**
+   * 막힘이 blockedNoticeMs 동안 이어지면 그때 대표에게 알린다. 그사이 풀렸거나 까닭이 달라졌거나 서버가 닫히는 중이면 보내지 않고,
+   * 보내지 않은 것은 '알린 것'으로 적지 않는다(같은 막힘이 다시 이어질 때의 알림을 삼키지 않는다). waited 는 이미 지켜본 시간이다.
+   */
+  private scheduleBlockedNotice(memberId: string, key: string, waited = 0): void {
+    if (this.closed) return;
+    const pending = this.blockedNoticeTimers.get(memberId) ?? new Map<string, ReturnType<typeof setTimeout>>();
+    if (pending.has(key)) return;
+    const fire = () => {
+      pending.delete(key);
+      if (!pending.size && this.blockedNoticeTimers.get(memberId) === pending) this.blockedNoticeTimers.delete(memberId);
+      if (this.closed) return;
+      const current = this.store.getMember(memberId);
+      if (!current || current.status !== "blocked" || (current.blockedCode ?? "blocked") !== key) return;
+      const noticed = this.blockedNotices.get(memberId) ?? new Set<string>();
+      if (noticed.has(key)) return;
+      this.blockedNotices.set(memberId, noticed.add(key));
+      void this.notifyBlocked(current).catch(e => console.warn("막힘 알림 실패:", memberId, (e as Error).message));
+    };
+    const delay = this.timings.blockedNoticeMs - waited;
+    if (!(delay > 0)) { fire(); return; }
+    this.blockedNoticeTimers.set(memberId, pending);
+    const timer = setTimeout(() => { try { fire(); } catch (e) { console.error("막힘 알림 처리 실패:", memberId, e); } }, delay);
+    timer.unref?.();
+    pending.set(key, timer);
+  }
   /**
    * 서버를 다시 띄운 뒤 처음 보는 팀장이 이미 막혀 있었다면, 저장돼 있던 까닭은 지난 실행에서 알린 것이다.
    * 알림 기록이 메모리에만 있어, 잇지 않으면 재시작(배포)마다 같은 알림이 다시 나갔다. stored 는 이번 관측을 적기 전의 명부 값이어야 한다.
@@ -4651,18 +4937,24 @@ export class Orchestrator implements OrchestratorApi {
     const storedReason = this.store.getMember(member.id)?.blockedReason;
     const blocked = this.store.patchMember(member.id, { status: "blocked", blockedReason: storedReason ?? member.blockedReason ?? "status_unknown", ...observation });
     // 이미 막혀 있던 팀장은 이 막힘에서 처음 보는 까닭이 붙을 때만 다시 알린다(까닭이 오가도 한 번씩만).
-    if (entering) this.blockedNotices.delete(member.id); else this.recallBlockedNotice(member);
+    // 새 막힘이면 앞선 막힘에서 지켜보던 알림은 거둔다.
+    // 빈 기록을 둔다: 이 막힘은 이 서버가 처음 본 것이다(지난 실행에서 알린 막힘으로 잇지 않는다. recallBlockedNotice).
+    if (entering) { this.blockedNotices.set(member.id, new Set()); this.cancelBlockedNotices(member.id); } else this.recallBlockedNotice(member);
     const key = blocked.blockedCode ?? "blocked";
-    const noticed = this.blockedNotices.get(member.id) ?? new Set<string>();
-    const notify = entering || (!!blocked.blockedCode && !noticed.has(key));
-    this.blockedNotices.set(member.id, noticed.add(key));
+    const notify = entering || (!!blocked.blockedCode && !this.blockedNotices.get(member.id)?.has(key));
+    // 명부의 막힘과 승인 카드는 위에서 곧바로 반영됐다. 늦추는 것은 대표에게 가는 알림뿐이다(scheduleBlockedNotice).
     if (this.trustsFolder(blocked)) {
       // 대표가 프로젝트를 만들며 이미 답했다. 정확히 알아본 창에만 답하고, 안 되면 평소처럼 알린다.
+      const since = Date.now();
       void this.autoTrust(blocked).then(answered => answered, e => { console.warn("폴더 신뢰 자동 답 실패:", member.id, (e as Error).message); return false; })
-        .then(answered => { if (!answered && notify && !this.closed && this.store.getMember(member.id)?.status === "blocked") void this.notifyBlocked(blocked); });
+        .then(answered => {
+          // 스스로 답한 창은 알린 것으로 친다: 그 창을 두고 대표에게 승인 대기라고 알리지 않는다.
+          if (answered) this.blockedNotices.set(member.id, (this.blockedNotices.get(member.id) ?? new Set<string>()).add(key));
+          else if (notify) this.scheduleBlockedNotice(member.id, key, Date.now() - since);
+        });
       return;
     }
-    if (notify) void this.notifyBlocked(blocked);
+    if (notify) this.scheduleBlockedNotice(member.id, key);
   }
 
   /** 이 팀장이 멈춘 곳이, 대표가 프로젝트를 만들 때 신뢰한다고 답한 바로 그 폴더의 폴더 신뢰 창인가. */

@@ -12,6 +12,9 @@ Only changes that matter to users, by version. The full history is in `git log`.
 - **Mac을 다시 시작한 뒤 지시를 못 받던 팀장이 풀립니다.** 자동 압축의 결과를 확인하지 못한 채 Mac이 꺼지면, 그 팀장은 다시 열어도 지시를 받지 못했습니다(압축을 받은 터미널이 사라져 아무도 결과를 확정하지 못했습니다). 이제 그 터미널이 없으면 압축을 닫고 밀린 지시를 이어서 넣습니다.
 - **재시작으로 꺼진 세션을 오류처럼 보이지 않게.** Mac이나 실행 엔진이 다시 시작되어 꺼진 팀장에게 내부 용어(`holder_lost`) 대신 무슨 일이고 어떻게 되는지를 적습니다.
 - **Tailscale이 꺼져 있으면 알려 줍니다.** iPhone을 연결해 쓰던 Mac에서 Tailscale이 1분 넘게 꺼져 있으면 Mac 알림과 Mac 앱의 안내 한 줄로 알립니다. Tailscale을 켜면 다시 연결되고 안내는 사라집니다.
+- **Mac을 다시 시작하면 꺼진 팀장을 스스로 다시 엽니다.** 깨어 있던 팀장이 Mac이나 실행 엔진의 재시작으로 꺼지면, 서버가 다시 뜬 뒤 총괄부터 한 명씩 같은 대화를 이어서 엽니다. 대표나 총괄이 재운 팀장은 그대로 자고, 스스로 죽은 세션은 다시 띄우지 않습니다. 여는 데 실패하면 한 번만 해 보고 꺼진 채 둡니다.
+- **재시작으로 끊긴 일을 팀장이 이어서 합니다.** 일하던 도중에 꺼진 팀장은 다시 열린 뒤 "끊긴 곳을 확인하고 끝나지 않은 부분만 이어서 하라"는 글을 한 번 받습니다. 총괄에게는 다시 지시하지 말라는 소식만 가므로 같은 일을 두 번 하지 않습니다. 다시 열지 못했을 때만 전처럼 총괄을 깨워 중단을 알립니다.
+- **깨운 직후의 잘못된 '승인 대기' 알림이 없어집니다.** 팀장을 깨우면 준비를 알리기 전 몇 초가 막힘으로 스쳐, 승인 창이 없는데도 알림이 떴습니다. 갓 띄운 세션은 막힘으로 보지 않고, 막힘 알림은 막힘이 5초 이어진 뒤에만 보냅니다.
 
 ### 0.2.3 — 2026-11-12
 
@@ -83,6 +86,9 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - **Staff that stopped receiving work after a Mac restart recover.** If the Mac went down while an automatic compaction was still unconfirmed, that staff member received nothing after being reopened (the terminal that took the compaction was gone, so nobody could confirm it). The server now closes that compaction when its terminal no longer exists and delivers the queued work.
 - **A session ended by a restart no longer looks like an error.** Staff switched off by a Mac or engine restart show what happened and what to do instead of an internal term (`holder_lost`).
 - **You are told when Tailscale is off.** On a Mac that an iPhone has been connecting to, Tailscale being off for more than a minute raises a Mac notification and a line in the Mac app. Turn Tailscale back on and the iPhone connects again; the line goes away.
+- **Staff switched off by a Mac restart are reopened automatically.** When staff who were awake are switched off by a Mac or engine restart, the server reopens the same conversations once it is back, the lead first, one at a time. Staff you or the lead put to sleep stay asleep, and a session that ended on its own is not relaunched. A reopen that fails is tried once and left off.
+- **Work cut off by a restart is continued by the same staff member.** A staff member switched off mid-task gets one note after reopening: check where the work stopped and finish only what is left. The lead only gets a notice not to assign it again, so the work is not done twice. The lead is woken about the interruption, as before, only when the reopen fails.
+- **No more false "waiting for approval" alert right after a wake.** A woken session showed as blocked for a few seconds before it reported ready, which raised an alert with no dialog on screen. A session that has just started is no longer treated as blocked, and a blocked alert is sent only after the block has lasted 5 seconds.
 
 ### 0.2.3 — 2026-11-12
 

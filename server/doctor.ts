@@ -6,7 +6,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync, realpathSync, statfsSync, statSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
-import { DOCTOR_CHECK_IDS, DOCTOR_ROLES_CHECK_ID, type CliProvider, type CliVersionInfo, type DoctorCheck, type DoctorReport, type EngineStatus, type RuntimeInfo, type TailnetStatus } from "../shared/types.ts";
+import { DOCTOR_CHECK_IDS, DOCTOR_ROLES_CHECK_ID, type CliProvider, type CliVersionInfo, type DoctorCheck, type DoctorReport, type EngineStatus, type RuntimeInfo, type TailnetHttpsStatus, type TailnetStatus } from "../shared/types.ts";
 import { readCliVersions } from "./cli-version.ts";
 import { CORE_VERSION, defaultCoreBin, detectTailscaleIp, VERSION, type Config } from "./config.ts";
 import { roleCustomizations, type RoleCustomization } from "./roles.ts";
@@ -43,6 +43,8 @@ export interface TailscaleFacts {
   everOpened: boolean;
   /** 서버의 꺼짐 판정(60초 유예 뒤 off). 서버가 꺼져 있으면 null. */
   status: TailnetStatus | null;
+  /** N(C8): 대표가 켠 HTTPS 주소(tailscale serve)의 상태. 서버가 꺼져 있거나 모르면 없다. 켠 적이 없으면 off 라 점검표에 아무것도 더하지 않는다. */
+  https?: TailnetHttpsStatus | null;
 }
 
 export type ServiceFacts =
@@ -215,14 +217,32 @@ function cliVersionCheck(f: DoctorFacts, lang: DoctorLang): DoctorCheck {
   return check("cli_version", "ok", title, t(lang, `${list} (확인된 버전)`, `${list} (verified)`));
 }
 
+/**
+ * N(C8) 합치기: HTTPS 주소를 켜 두었을 때만 tailscale 항목의 설명 끝에 붙인다(켠 적이 없으면 아무것도 붙이지 않는다).
+ * 확인이 안 되면 설정의 HTTPS 주소 줄과 같은 문장을 그대로 보인다. 주소(이 Mac 의 이름)는 싣지 않는다(진단 파일에도 들어간다).
+ */
+function httpsNote(ts: TailscaleFacts, lang: DoctorLang): string {
+  const https = ts.https;
+  if (!https) return "";
+  if (https.state === "on") return t(lang, " · HTTPS 주소 켜짐", " · HTTPS address on");
+  if (!https.problem) return https.state === "pending" ? t(lang, " · HTTPS 주소 확인 중", " · HTTPS address being checked") : "";
+  return t(lang, ` · HTTPS 주소 확인 필요: ${https.problem.message}`, " · HTTPS address needs attention (see the HTTPS address row in Settings › Connection)");
+}
+
 function tailscaleCheck(f: DoctorFacts, lang: DoctorLang): DoctorCheck {
   const ts = f.tailscale;
   const turnOn = t(lang, "메뉴 막대에서 Tailscale을 켜세요.", "Turn on Tailscale from the menu bar.");
   if (ts.status?.state === "off") {
     return check("tailscale", "fail", "Tailscale", t(lang, "꺼져 있습니다 · iPhone에서 연결할 수 없습니다", "Off · the iPhone cannot connect"), turnOn);
   }
-  if (ts.address) return check("tailscale", "ok", "Tailscale", t(lang, `켜짐 · ${ts.address}`, `On · ${ts.address}`));
-  if (!ts.auto) return check("tailscale", "unknown", "Tailscale", t(lang, "접속 주소를 직접 정해 둔 설치라 확인하지 않습니다", "Addresses are set by hand; not checked"));
+  // 이 서버를 가리키는 HTTPS 주소가 Tailscale Funnel 로 인터넷에 열려 있다. 정상(ok)으로 두지 않고 끄는 법을 낸다.
+  if (ts.https?.problem?.code === "tailnet_https_funnel" && (ts.address || !ts.auto)) {
+    return check("tailscale", "warn", "Tailscale", (ts.address ? t(lang, `켜짐 · ${ts.address}`, `On · ${ts.address}`) : t(lang, "접속 주소를 직접 정해 둔 설치", "Addresses are set by hand")) + httpsNote(ts, lang),
+      t(lang, "터미널에서 tailscale funnel --https=443 off 로 인터넷 공개를 끄세요. IAMCEO는 인터넷 공개를 켜지 않습니다.",
+        "Turn off the internet exposure in Terminal: tailscale funnel --https=443 off. IAMCEO never opens the server to the internet."));
+  }
+  if (ts.address) return check("tailscale", "ok", "Tailscale", t(lang, `켜짐 · ${ts.address}`, `On · ${ts.address}`) + httpsNote(ts, lang));
+  if (!ts.auto) return check("tailscale", "unknown", "Tailscale", t(lang, "접속 주소를 직접 정해 둔 설치라 확인하지 않습니다", "Addresses are set by hand; not checked") + httpsNote(ts, lang));
   if (ts.everOpened) {
     return check("tailscale", "fail", "Tailscale", t(lang, "Tailscale 주소를 찾지 못했습니다 · iPhone에서 연결할 수 없습니다", "No Tailscale address · the iPhone cannot connect"), turnOn);
   }
@@ -283,7 +303,7 @@ function diskCheck(f: DoctorFacts, lang: DoctorLang): DoctorCheck {
 
 /**
  * E10: 고쳐 둔 역할 지침. 고친 것이 있을 때만 붙는다(고정 목록 밖의 `roles`). 통째 교체 파일에 기준판 표지가 없거나 옛것이면,
- * 또는 승인 규칙이 빠졌으면 확인 필요. 덧붙임(<kind>.extra.md)은 기본 규칙 개선을 그대로 받으므로 정상이다.
+ * 또는 승인 규칙이 빠졌으면, 또는 덧붙임 파일을 읽지 못하면 확인 필요. 읽을 수 있는 덧붙임(<kind>.extra.md)은 기본 규칙 개선을 그대로 받으므로 정상이다.
  */
 function rolesCheck(roles: RoleCustomization[], lang: DoctorLang): DoctorCheck {
   const name = (kind: RoleCustomization["kind"]) => kind === "conductor" ? t(lang, "총괄", "lead") : kind === "worker" ? t(lang, "팀장", "staff") : t(lang, "본사 AI", "HQ agent");
@@ -293,24 +313,41 @@ function rolesCheck(roles: RoleCustomization[], lang: DoctorLang): DoctorCheck {
     unmarked: t(lang, "기준판 표지 없음", "no base marker"),
     other_kind: t(lang, "다른 역할의 기본 지침 기준", "based on another role's defaults"),
   };
-  const flagged: RoleCustomization["kind"][] = [];
+  // 문제마다 고치는 법이 다르다: 기준판(옛 표지·표지 없음·다른 역할) → 새 기본 지침으로 옮기기, 승인 규칙 없음 → 승인 절 남기기,
+  // 읽지 못하는 덧붙임 → 파일로 고치거나 지우기. 승인만 빠졌으면 표지를 바꾸라는 말은 하지 않는다(그래도 경고가 남는다).
+  const staleBase: RoleCustomization["kind"][] = [], noApproval: RoleCustomization["kind"][] = [], unreadable: string[] = [];
   const parts = roles.map(role => {
     const notes: string[] = [];
     if (role.replacement) {
       notes.push(t(lang, "통째 교체", "replaced"));
-      if (base[role.replacement.base]) notes.push(base[role.replacement.base]!);
-      if (!role.replacement.approval) notes.push(t(lang, "승인 규칙 없음", "no approval rule"));
-      if (base[role.replacement.base] || !role.replacement.approval) flagged.push(role.kind);
+      if (base[role.replacement.base]) { notes.push(base[role.replacement.base]!); staleBase.push(role.kind); }
+      if (!role.replacement.approval) { notes.push(t(lang, "승인 규칙 없음", "no approval rule")); noApproval.push(role.kind); }
     }
-    if (role.extra) notes.push(t(lang, "덧붙임", "additions"));
+    if (role.extra?.unreadable) { notes.push(t(lang, "덧붙임을 읽지 못함", "additions unreadable")); unreadable.push(`${role.kind}.extra.md`); }
+    else if (role.extra) notes.push(t(lang, "덧붙임", "additions"));
     return `${name(role.kind)}: ${notes.join(", ")}`;
   });
-  const extra = flagged.map(kind => `${kind}.extra.md`).join(", ");
-  const replaced = flagged.map(kind => `${kind}.md`).join(", ");
-  const fix = flagged.length ? t(lang,
-    `새 기본 지침을 꺼내(iamceo roles export) 고친 부분을 옮기고, 첫 줄의 기준판 표지를 새 파일의 것으로 바꾸세요. 규칙을 더하기만 했다면 더한 부분만 ${extra} 로 옮기면 ${replaced} 는 필요 없습니다.`,
-    `Export the new defaults (iamceo roles export), carry your edits over, and replace the base marker on the first line with the new file's. If you only added rules, move just those to ${extra}; then ${replaced} is not needed.`) : undefined;
-  return { id: DOCTOR_ROLES_CHECK_ID, state: flagged.length ? "warn" : "ok", title: t(lang, "고쳐 쓴 역할 지침", "Edited role rules"), detail: parts.join(" · "), ...(fix ? { fix } : {}) };
+  const fixes: string[] = [];
+  if (staleBase.length) {
+    const extra = staleBase.map(kind => `${kind}.extra.md`).join(", ");
+    const replaced = staleBase.map(kind => `${kind}.md`).join(", ");
+    fixes.push(t(lang,
+      `새 기본 지침을 꺼내(iamceo roles export) 고친 부분을 옮기고, 첫 줄의 기준판 표지를 새 파일의 것으로 바꾸세요. 규칙을 더하기만 했다면 더한 부분만 ${extra} 로 옮기면 ${replaced} 는 필요 없습니다.`,
+      `Export the new defaults (iamceo roles export), carry your edits over, and replace the base marker on the first line with the new file's. If you only added rules, move just those to ${extra}; then ${replaced} is not needed.`));
+  }
+  if (noApproval.length) {
+    const files = noApproval.map(kind => `${kind}.md`).join(", ");
+    fixes.push(t(lang,
+      `통째로 바꾼 지침(${files})에 기본 지침의 승인 절을 그대로 남기세요(iamceo roles export 로 꺼낸 파일에 있습니다). 승인 규칙이 없으면 팀원이 승인 없이 일할 수 있습니다.`,
+      `Keep the approval section of the default rules in ${files} (it is in the file iamceo roles export writes). Without it, sessions may act without your approval.`));
+  }
+  if (unreadable.length) {
+    const files = unreadable.join(", ");
+    fixes.push(t(lang, `${files} 를 읽을 수 없어 넣지 않았습니다(폴더이거나 읽기 권한이 없음). 글 파일로 고치거나 지우세요.`,
+      `${files} could not be read, so it was left out (it is a folder or not readable). Make it a plain text file or delete it.`));
+  }
+  const fix = fixes.length ? fixes.join(" ") : undefined;
+  return { id: DOCTOR_ROLES_CHECK_ID, state: fixes.length ? "warn" : "ok", title: t(lang, "고쳐 쓴 역할 지침", "Edited role rules"), detail: parts.join(" · "), ...(fix ? { fix } : {}) };
 }
 
 /** 사실에서 점검표를 만든다. 항목 순서는 DOCTOR_CHECK_IDS 그대로이고, 고친 역할 지침이 있으면 끝에 `roles` 가 붙는다. */
@@ -500,6 +537,8 @@ export interface ServerDoctorInput {
   runtime: (RuntimeInfo & { backup?: BackupStatusLike }) | null;
   engine: EngineStatus | null;
   tailnet: TailnetStatus | null;
+  /** N(C8): HTTPS 주소의 상태(TailnetHttps.status()). 모르면 없다. */
+  tailnetHttps?: TailnetHttpsStatus | null;
   /** 이 설치가 Tailscale 주소를 연 적이 있다(settings 의 tailnetSeen). */
   tailnetSeen: boolean;
   /** 지금 확인된 Tailscale 주소(서버의 주소 감지). */
@@ -543,6 +582,7 @@ export async function serverDoctorFacts(input: ServerDoctorInput): Promise<Docto
       address: input.detectedTailnet[0] ?? null,
       everOpened: input.tailnetSeen,
       status: input.tailnet,
+      https: input.tailnetHttps ?? null,
     },
     service,
     backup: {

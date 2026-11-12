@@ -23,8 +23,24 @@ export interface TailscaleResult {
 }
 export type TailscaleRunner = (args: string[], timeoutMs: number) => Promise<TailscaleResult>;
 
-/** 서버가 켠 HTTPS 주소의 기록(settings 표의 키 하나. DB 판 번호를 올리지 않는다). */
-export interface SavedTailnetHttps { url: string; port: number; at: string }
+/**
+ * 서버가 켠 HTTPS 주소의 기록(settings 표의 키 하나. DB 판 번호를 올리지 않는다).
+ * home 은 켠 설치의 데이터 폴더다. 기록은 DB 에 있어 사본(백업·'설치 전 실제 흐름 확인'의 시험 서버)으로 옮겨 가므로,
+ * 같은 데이터 폴더에서 켠 기록일 때만 그 포트를 '이 서버의 옛 포트'로 믿는다(아래 classifyServe 의 savedPort).
+ */
+export interface SavedTailnetHttps { url: string; port: number; at: string; home?: string }
+
+/** settings 표의 키. */
+export const TAILNET_HTTPS_KEY = "tailnetHttps";
+
+/** settings 의 HTTPS 기록 한 줄을 읽는다. 모양이 어긋난 값은 없는 것으로 본다(저장소와 수명 명령이 함께 쓴다). */
+export function parseTailnetHttpsRecord(value: string): SavedTailnetHttps | null {
+  try {
+    const saved = JSON.parse(value) as { url?: unknown; port?: unknown; at?: unknown; home?: unknown } | null;
+    return saved && typeof saved.url === "string" && saved.url.startsWith("https://") && typeof saved.port === "number" && Number.isInteger(saved.port)
+      && typeof saved.at === "string" ? { url: saved.url, port: saved.port, at: saved.at, ...(typeof saved.home === "string" ? { home: saved.home } : {}) } : null;
+  } catch { return null; }
+}
 
 export interface TailnetHttpsDeps {
   /** 서버가 듣는 포트. serve 가 넘길 곳이다. */
@@ -33,6 +49,8 @@ export interface TailnetHttpsDeps {
   loopbackListening: () => boolean;
   load(): SavedTailnetHttps | null;
   save(value: SavedTailnetHttps | null): void;
+  /** 이 서버의 데이터 폴더(config.home). 켠 기록에 함께 남기고, 기록의 포트를 믿을지 가린다. */
+  home?: string;
   run?: TailscaleRunner;
   now?: () => number;
   log?: (line: string) => void;
@@ -94,9 +112,10 @@ interface ServeConfig {
 
 /**
  * 443 의 serve 설정이 누구 것인가. ours: 이 서버의 지금 포트를 가리킨다. ours_other_port: 이 서버가 전에 켠 기록의 포트를
- * 가리킨다(그 뒤 서버 포트가 바뀌었다). 그 밖에 127.0.0.1 의 다른 포트를 가리키는 것은 남의 서비스일 수 있어 other 다.
+ * 가리킨다(그 뒤 서버 포트가 바뀌었다). ours_funnel: 이 서버(지금 포트나 기록의 포트)를 가리키는데 Funnel 로 인터넷에도 열려 있다
+ * (IAMCEO 는 Funnel 을 켜지 않는다. 누가 켰다). 그 밖에 127.0.0.1 의 다른 포트를 가리키는 것은 남의 서비스일 수 있어 other 다.
  */
-export type Serve443 = "none" | "ours" | "ours_other_port" | "other";
+export type Serve443 = "none" | "ours" | "ours_other_port" | "ours_funnel" | "other";
 
 function proxyPort(target: unknown): number | null {
   if (typeof target !== "string") return null;
@@ -112,16 +131,17 @@ export function classifyServe(raw: unknown, dnsName: string, port: number, saved
   const tcp = config.TCP?.["443"];
   const webEntries = Object.entries(config.Web ?? {}).filter(([key, value]) => value && key.toLowerCase().endsWith(":443"));
   if (!tcp && webEntries.length === 0) return "none";
-  // 인터넷에 연 설정(funnel)이나 다른 이름·여러 경로·TCP 넘기기는 이 서버가 만든 모양이 아니다.
-  if (config.AllowFunnel && Object.entries(config.AllowFunnel).some(([key, on]) => on === true && key.toLowerCase().endsWith(":443"))) return "other";
+  // 다른 이름·여러 경로·TCP 넘기기는 이 서버가 만든 모양이 아니다.
   if (!tcp || tcp.HTTPS !== true || tcp.TCPForward !== undefined) return "other";
   if (webEntries.length !== 1 || webEntries[0]![0].toLowerCase() !== host) return "other";
   const handlers = Object.entries(webEntries[0]![1]?.Handlers ?? {});
   if (handlers.length !== 1 || handlers[0]![0] !== "/") return "other";
   const target = proxyPort(handlers[0]![1]?.Proxy);
   if (target === null) return "other";
-  if (target === port) return "ours";
-  return savedPort !== undefined && target === savedPort ? "ours_other_port" : "other";
+  const mine: Serve443 = target === port ? "ours" : savedPort !== undefined && target === savedPort ? "ours_other_port" : "other";
+  // 인터넷에 연 설정(funnel). 이 서버를 가리키면 '지워짐'으로 보지 않고 따로 알린다(이 서버가 인터넷에 열려 있다).
+  const funnel = !!config.AllowFunnel && Object.entries(config.AllowFunnel).some(([key, on]) => on === true && key.toLowerCase().endsWith(":443"));
+  return funnel && mine !== "other" ? "ours_funnel" : mine;
 }
 
 interface Inspection {
@@ -181,10 +201,18 @@ export class TailnetHttps {
     if (text) {
       try { config = JSON.parse(text); } catch { return { dnsName, certificates, problem: "tailnet_https_failed" }; }
     }
-    return { dnsName, certificates, serve: classifyServe(config, dnsName, this.deps.port(), this.deps.load()?.port) };
+    // 기록의 포트는 같은 데이터 폴더에서 켠 기록일 때만 믿는다. 라이브 DB 사본으로 띄운 시험 서버가 라이브의 설정을 '내 옛 포트'로 보고
+    // 끄거나(serve off) 가져가지(지우고 제 포트로 다시 켜기) 않게 한다.
+    const saved = this.deps.load();
+    const savedPort = saved && saved.home === this.deps.home ? saved.port : undefined;
+    return { dnsName, certificates, serve: classifyServe(config, dnsName, this.deps.port(), savedPort) };
   }
 
   private urlOf(dnsName: string): string { return `https://${dnsName}`; }
+
+  private record(url: string, at: string): SavedTailnetHttps {
+    return { url, port: this.deps.port(), at, ...(this.deps.home !== undefined ? { home: this.deps.home } : {}) };
+  }
 
   /** 기록과 지금 설정을 맞춰 본 상태. 켠 기록이 없으면 명령을 부르지 않는다. */
   private async refresh(): Promise<TailnetHttpsStatus> {
@@ -203,9 +231,14 @@ export class TailnetHttps {
       return this.off("tailnet_https_removed");
     }
     const url = this.urlOf(seen.dnsName!);
+    // 이 서버가 인터넷에 열려 있다. 기록은 지우지 않고(이 서버의 설정이다) QR 에는 싣지 않으며 끄는 법을 알린다.
+    if (seen.serve === "ours_funnel") {
+      this.log("[https] 이 서버를 가리키는 Tailscale HTTPS 설정이 Funnel 로 인터넷에 열려 있습니다");
+      return this.stamp({ state: "pending", url, problem: tailnetHttpsProblem("tailnet_https_funnel") });
+    }
     if (seen.serve === "ours_other_port") return this.stamp({ state: "pending", url, problem: tailnetHttpsProblem("tailnet_https_port_changed") });
     if (!seen.certificates) return this.stamp({ state: "pending", url, problem: tailnetHttpsProblem("tailnet_https_disabled") });
-    if (url !== saved.url || saved.port !== this.deps.port()) this.deps.save({ url, port: this.deps.port(), at: saved.at });
+    if (url !== saved.url || saved.port !== this.deps.port() || saved.home !== this.deps.home) this.deps.save(this.record(url, saved.at));
     return this.stamp({ state: "on", url });
   }
 
@@ -241,6 +274,8 @@ export class TailnetHttps {
     const seen = await this.inspect();
     if (seen.problem) return this.off(seen.problem);
     if (!seen.certificates) return this.off("tailnet_https_disabled");
+    // 이 서버를 가리키지만 인터넷에 열려 있다. 그 위에 겹쳐 켜지 않고 끄는 법을 알린다.
+    if (seen.serve === "ours_funnel") return this.off("tailnet_https_funnel");
     if (seen.serve === "other") return this.off("tailnet_https_port_taken");
     if (!this.deps.loopbackListening()) return this.off("tailnet_https_no_loopback");
     const dnsName = seen.dnsName!;
@@ -270,7 +305,7 @@ export class TailnetHttps {
       return this.off(after.problem ?? "tailnet_https_failed");
     }
     const url = this.urlOf(dnsName);
-    this.deps.save({ url, port, at: new Date(this.now()).toISOString() });
+    this.deps.save(this.record(url, new Date(this.now()).toISOString()));
     this.log(`[https] ${url} → http://127.0.0.1:${port} 를 켰습니다`);
     return this.stamp({ state: "on", url });
   }
@@ -284,12 +319,14 @@ export class TailnetHttps {
       return this.off();
     }
     if (seen.problem) return this.stamp({ state: saved ? "pending" : "off", ...(saved ? { url: saved.url } : {}), problem: tailnetHttpsProblem(seen.problem) });
-    if (seen.serve === "ours" || seen.serve === "ours_other_port") {
+    if (seen.serve === "ours" || seen.serve === "ours_other_port" || seen.serve === "ours_funnel") {
+      // Funnel 이 붙은 이 서버의 설정도 지운다(대표가 끄기를 골랐고, 지우면 인터넷 공개도 닫힌다). 못 지우면 Funnel 을 끄는 법을 알린다.
       const result = await this.run(["serve", "--https=443", "off"], SERVE_TIMEOUT_MS);
       const after = result.code === 0 ? await this.inspect() : null;
       if (!after || after.problem || (after.serve !== "none" && after.serve !== "other")) {
         this.log(`[https] tailscale serve 를 끄지 못했습니다(${result.timedOut ? "시간 초과" : `종료 ${result.code}`})`);
-        return this.stamp({ state: saved ? "pending" : "off", ...(saved ? { url: saved.url } : {}), problem: tailnetHttpsProblem("tailnet_https_off_failed") });
+        const problem = seen.serve === "ours_funnel" || after?.serve === "ours_funnel" ? "tailnet_https_funnel" : "tailnet_https_off_failed";
+        return this.stamp({ state: saved ? "pending" : "off", ...(saved ? { url: saved.url } : {}), problem: tailnetHttpsProblem(problem) });
       }
       this.log("[https] Tailscale 의 HTTPS 설정을 껐습니다");
     }

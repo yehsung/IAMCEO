@@ -187,11 +187,29 @@ enum Tailnet {
         if needsTailnet(url), !connected() { throw offError() }
     }
 
-    /// True when this device itself has a Tailscale address, i.e. the Tailscale VPN is on and logged in.
-    static func isConnected() -> Bool {
+    /// 인터페이스 이름과 주소 한 쌍(getifaddrs 의 결과). 판정은 이 목록만 보므로 시험이 직접 넣는다.
+    struct InterfaceAddress: Equatable, Sendable {
+        let name: String
+        let address: String
+    }
+
+    /// True when this device itself is on the tailnet, i.e. the Tailscale VPN is on and logged in.
+    static func isConnected() -> Bool { isConnected(interfaces: interfaceAddresses()) }
+
+    /// Tailscale 은 켜지면 터널 인터페이스(utun*)에 tailnet 전용 IPv6(fd7a:115c:a1e0::/48)를 단다. 그 주소가 utun 에 있을 때만 켜진 것으로 본다.
+    /// 100.64.0.0/10 은 통신사 CGNAT(셀룰러 pdp_ip0·Wi-Fi 에 직접 붙기도 한다)와 Cloudflare WARP(100.96/12, utun)도 쓴다.
+    /// 그 주소 하나로 켜진 것으로 보면 Tailscale 이 꺼진 채 평문 요청이 그 망으로 나간다. 그래서 100.x 는 같은 utun 에 fd7a 주소가 함께 있을 때만 근거가 된다
+    /// (그때는 fd7a 만으로 이미 켜진 것이다).
+    static func isConnected(interfaces: [InterfaceAddress]) -> Bool {
+        interfaces.contains { $0.name.hasPrefix("utun") && $0.address.lowercased().hasPrefix("fd7a:115c:a1e0:") }
+    }
+
+    /// 이 기기의 IPv4·IPv6 주소(인터페이스 이름과 함께). 링크 범위 표시(%en0)는 뗀다.
+    static func interfaceAddresses() -> [InterfaceAddress] {
         var head: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&head) == 0, let first = head else { return false }
+        guard getifaddrs(&head) == 0, let first = head else { return [] }
         defer { freeifaddrs(head) }
+        var found: [InterfaceAddress] = []
         var cursor: UnsafeMutablePointer<ifaddrs>? = first
         while let entry = cursor {
             defer { cursor = entry.pointee.ifa_next }
@@ -202,9 +220,9 @@ enum Tailnet {
             let length = socklen_t(family == UInt8(AF_INET) ? MemoryLayout<sockaddr_in>.size : MemoryLayout<sockaddr_in6>.size)
             guard getnameinfo(address, length, &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
             let text = String(cString: buffer).split(separator: "%").first.map(String.init) ?? ""
-            if isTailnetHost(text) { return true }
+            found.append(InterfaceAddress(name: String(cString: entry.pointee.ifa_name), address: text))
         }
-        return false
+        return found
     }
 }
 

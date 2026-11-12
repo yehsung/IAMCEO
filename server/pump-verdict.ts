@@ -25,6 +25,8 @@ export const PUMP_VERDICTS = {
   no_wake: { wait: "unknown", ko: "깨울 전달이 없다(수동 전달은 다음 턴에 함께)", rejudge: false },
   asleep_hold: { wait: "next_turn", ko: "잠들 때 보류된 전달은 다음에 깨울 때 함께 나간다", rejudge: false },
   approval: { wait: "approval", ko: "승인 창 앞에서 멈췄다", rejudge: false },
+  // K(E2) 합치기: 도구 승인 카드가 결재함에 열려 있다(앱에는 새 값 없이 approval). 카드가 답·시간 초과로 닫히면 사건 없이 낡으므로 다시 판정한다.
+  tool_permission: { wait: "approval", ko: "도구 승인 카드에 대표의 답을 기다린다", rejudge: true },
   manual_control: { wait: "manual_control", ko: "대표가 터미널을 직접 조작하는 중", rejudge: false },
   receipt_check: { wait: "receipt_check", ko: "앞 전달의 수신을 확인하는 중", rejudge: false },
   sending: { wait: "receipt_check", ko: "보내는 중(수신 확인 전)", rejudge: false },

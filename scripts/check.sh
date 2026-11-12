@@ -124,7 +124,7 @@ EOF_FLAKY
   fi
 }
 build() {
-  bun build bin/iamceo.ts --compile --outfile "$CHECK_ROOT/iamceo-bin"
+  bun build bin/iamceo.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --outfile "$CHECK_ROOT/iamceo-bin"
   mkdir -p "$CHECK_ROOT/native"
   cp -R native/Sources native/Configuration native/Resources native/project.yml "$CHECK_ROOT/native/"
   xcodegen generate --spec "$CHECK_ROOT/native/project.yml" --project "$CHECK_ROOT/native" --quiet

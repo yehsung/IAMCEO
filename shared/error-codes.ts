@@ -445,6 +445,8 @@ export const ERROR_CODES = {
   tailnet_https_off_failed: { ko: "Tailscale의 HTTPS 설정을 지우지 못했습니다. 잠시 뒤 다시 시도해 주세요" },
   tailnet_https_port_changed: { ko: "Tailscale의 HTTPS 설정이 서버의 지금 포트를 가리키지 않습니다. 끈 뒤 다시 켜 주세요" },
   tailnet_https_removed: { ko: "Tailscale에서 HTTPS 설정이 지워져 꺼진 것으로 바꿨습니다. 다시 쓰려면 켜기를 눌러 주세요" },
+  /** 이 서버를 가리키는 443 이 Tailscale Funnel 로 인터넷에도 열려 있다. IAMCEO 는 Funnel 을 켜지 않는다. 그동안 QR 에는 싣지 않는다. */
+  tailnet_https_funnel: { ko: "이 Mac의 HTTPS 주소(443)가 Tailscale Funnel로 인터넷에도 열려 있어 연결 QR에 싣지 않았습니다. IAMCEO는 인터넷 공개를 켜지 않습니다. 터미널에서 tailscale funnel status로 확인하고 tailscale funnel --https=443 off로 꺼 주세요" },
 
   // ---- 도구 승인(K, E2) — 팀장의 CLI 승인 창을 결재함에서 답하기 ----
   /** 도구 승인 카드에만 쓰는 경로·답에 다른 결재가 왔다. 400. */

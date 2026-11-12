@@ -1,6 +1,7 @@
 // 사용자 설정은 읽기만 한다. 실행 파일은 IAMCEO 홈 안에만 쓴다.
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { bunScriptCommand, shellQuote as quote } from "./bun-script.ts";
 import type { ContextReading } from "./context.ts";
 import { validWindow } from "./context.ts";
 
@@ -76,7 +77,6 @@ clearTimeout(deadline);
 process.exit(0);
 `;
 
-function quote(value: string): string { return "'" + value.replaceAll("'", "'\\''") + "'"; }
 export function writeStatuslineWrapper(home: string, options: { execPath?: string; managedSettingsPath?: string; /** 테스트의 대기 시간만 줄인다. 실제 호출은 기본 30초. */ safetyTimeoutMs?: number } = {}): { type: "command"; command: string } {
   const dir = join(home, "run");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -93,7 +93,8 @@ export function writeStatuslineWrapper(home: string, options: { execPath?: strin
     finally { try { unlinkSync(tmp); } catch { /* rename 성공 */ } }
   }
   chmodSync(path, 0o600);
-  return { type: "command", command: `BUN_BE_BUN=1 ${quote(options.execPath ?? process.execPath)} ${quote(path)} ${quote(home)}` };
+  // 작업 폴더(팀장 프로젝트)의 bunfig.toml preload·.env 를 읽지 않는다(bun-script.ts). 사용자 상태줄 명령은 그 폴더에서 그대로 돈다(cd 하지 않는다).
+  return { type: "command", command: `${bunScriptCommand(options.execPath ?? process.execPath, dir, path)} ${quote(home)}` };
 }
 
 interface ContextRecord { session_id: string; model: string | null; context_window_size: number; used_percentage: number | null; tokens: number | null; at: number }

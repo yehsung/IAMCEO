@@ -82,7 +82,11 @@ describe("443 의 serve 설정 읽기", () => {
     // 다른 서비스, 여러 경로, 인터넷 공개(funnel), TCP 넘기기, 다른 이름은 이 서버의 것이 아니다.
     expect(classifyServe({ TCP: { "443": { HTTPS: true } }, Web: { [`${DNS}:443`]: { Handlers: { "/": { Proxy: "http://192.168.0.4:7878" } } } } }, DNS, 7878)).toBe("other");
     expect(classifyServe({ TCP: { "443": { HTTPS: true } }, Web: { [`${DNS}:443`]: { Handlers: { "/": { Proxy: "http://127.0.0.1:7878" }, "/grafana": { Proxy: "http://127.0.0.1:3000" } } } } }, DNS, 7878)).toBe("other");
-    expect(classifyServe({ ...ours(7878), AllowFunnel: { [`${DNS}:443`]: true } }, DNS, 7878)).toBe("other");
+    // 이 서버(지금 포트나 기록의 포트)를 가리키는데 인터넷에 열려 있으면 따로 본다. 남의 설정이면 그대로 other.
+    expect(classifyServe({ ...ours(7878), AllowFunnel: { [`${DNS}:443`]: true } }, DNS, 7878)).toBe("ours_funnel");
+    expect(classifyServe({ ...ours(7000), AllowFunnel: { [`${DNS}:443`]: true } }, DNS, 7878, 7000)).toBe("ours_funnel");
+    expect(classifyServe({ ...ours(3000), AllowFunnel: { [`${DNS}:443`]: true } }, DNS, 7878)).toBe("other");
+    expect(classifyServe({ ...ours(7878), AllowFunnel: { [`${DNS}:443`]: false } }, DNS, 7878)).toBe("ours");
     expect(classifyServe({ TCP: { "443": { TCPForward: "127.0.0.1:22" } } }, DNS, 7878)).toBe("other");
     expect(classifyServe({ TCP: { "443": { HTTPS: true } }, Web: { "other-mac.tail0000.ts.net:443": { Handlers: { "/": { Proxy: "http://127.0.0.1:7878" } } } } }, DNS, 7878)).toBe("other");
     expect(classifyServe({ TCP: { "443": { HTTPS: true } }, Web: { [`${DNS}:443`]: { Handlers: { "/": { Text: "hello" } } } } }, DNS, 7878)).toBe("other");
@@ -199,6 +203,64 @@ describe("HTTPS 주소 켜기·끄기(가짜 tailscale)", () => {
     expect(kept.value).toBeNull();
   });
 
+  test("기록의 포트는 같은 데이터 폴더에서 켠 기록일 때만 믿는다: 라이브 DB 사본으로 띄운 시험 서버는 라이브의 설정을 끄거나 가져가지 않는다(리뷰 https-4)", async () => {
+    const live = "/Users/someone/.iamceo", copy = "/private/tmp/smoke/.iamceo";
+    // 라이브(7878)가 켠 기록이 DB 사본에 실려 왔다. 시험 서버는 7879, 데이터 폴더가 다르다.
+    const fake = fakeTailscale({ serve: ours(7878) });
+    const saved = memory({ url: `https://${DNS}`, port: 7878, at: "2026-11-13T00:00:00.000Z", home: live });
+    const smoke = new TailnetHttps({ port: () => 7879, loopbackListening: () => true, load: saved.load, save: saved.save, home: copy, run: fake.run, log: () => {} });
+    // 끄기: 남의 설정(라이브)이라 건드리지 않고 사본의 기록만 지운다.
+    expect((await smoke.disable()).state).toBe("off");
+    expect(mutations(fake.calls)).toEqual([]);
+    expect(saved.value).toBeNull();
+    // 켜기: 443 을 남이 쓰고 있다. 지우고 제 포트로 다시 켜지 않는다.
+    const again = memory({ url: `https://${DNS}`, port: 7878, at: "2026-11-13T00:00:00.000Z", home: live });
+    const fake2 = fakeTailscale({ serve: ours(7878) });
+    const smoke2 = new TailnetHttps({ port: () => 7879, loopbackListening: () => true, load: again.load, save: again.save, home: copy, run: fake2.run, log: () => {} });
+    expect((await smoke2.enable()).problem?.code).toBe("tailnet_https_port_taken");
+    expect(mutations(fake2.calls)).toEqual([]);
+    // 같은 데이터 폴더(포트만 바뀐 라이브)면 지금처럼 옛 포트를 이 서버의 것으로 본다.
+    const own = memory({ url: `https://${DNS}`, port: 7878, at: "2026-11-13T00:00:00.000Z", home: live });
+    const fake3 = fakeTailscale({ serve: ours(7878) });
+    const moved = new TailnetHttps({ port: () => 7879, loopbackListening: () => true, load: own.load, save: own.save, home: live, run: fake3.run, log: () => {} });
+    expect((await moved.status()).problem?.code).toBe("tailnet_https_port_changed");
+    expect((await moved.enable()).state).toBe("on");
+    expect(own.value).toMatchObject({ port: 7879, home: live });
+    // 켤 때 데이터 폴더를 함께 남긴다.
+    const fresh = memory();
+    const fake4 = fakeTailscale();
+    expect((await new TailnetHttps({ port: () => 7878, loopbackListening: () => true, load: fresh.load, save: fresh.save, home: live, run: fake4.run, log: () => {} }).enable()).state).toBe("on");
+    expect(fresh.value).toMatchObject({ url: `https://${DNS}`, port: 7878, home: live });
+  });
+
+  test("이 서버를 가리키는 443 이 Funnel 로 인터넷에 열려 있으면 '지워짐'으로 보지 않고 기록을 두며 끄는 법을 알린다(리뷰 https-5)", async () => {
+    const funnel = { ...ours(7878), AllowFunnel: { [`${DNS}:443`]: true } };
+    const fake = fakeTailscale({ serve: funnel });
+    const saved = memory({ url: `https://${DNS}`, port: 7878, at: "2026-11-13T00:00:00.000Z" });
+    const https = subject(fake, saved);
+    const status = await https.status();
+    expect(status).toMatchObject({ state: "pending", url: `https://${DNS}`, problem: { code: "tailnet_https_funnel" } });
+    expect(status.problem!.message).toContain("tailscale funnel --https=443 off");
+    expect(saved.value).not.toBeNull();
+    expect(await https.pairingUrl()).toBeNull();
+    expect(mutations(fake.calls)).toEqual([]);
+    // 켜기(기록이 없는 경우): 그 위에 겹쳐 켜지 않는다.
+    const none = memory();
+    const fake2 = fakeTailscale({ serve: funnel });
+    expect((await subject(fake2, none).enable()).problem?.code).toBe("tailnet_https_funnel");
+    expect(mutations(fake2.calls)).toEqual([]);
+    expect(none.value).toBeNull();
+    // 끄기: 이 서버의 설정이라 지운다(인터넷 공개도 닫힌다).
+    expect((await https.disable()).state).toBe("off");
+    expect(mutations(fake.calls)).toEqual([["serve", "--https=443", "off"]]);
+    expect(saved.value).toBeNull();
+    // 끄지 못하면 Funnel 을 끄는 법을 알리고 기록을 둔다.
+    const stuck = fakeTailscale({ serve: funnel, serveOff: { code: 1, stdout: "", stderr: "funnel is on" } });
+    const kept = memory({ url: `https://${DNS}`, port: 7878, at: "2026-11-13T00:00:00.000Z" });
+    expect(await subject(stuck, kept).disable()).toMatchObject({ state: "pending", problem: { code: "tailnet_https_funnel" } });
+    expect(kept.value).not.toBeNull();
+  });
+
   test("끄지 못하면 켠 기록을 남기고 그렇다고 말한다", async () => {
     const fake = fakeTailscale({ serve: ours(7878), serveOff: { code: 1, stdout: "", stderr: "denied" } });
     const saved = memory({ url: `https://${DNS}`, port: 7878, at: "2026-11-13T00:00:00.000Z" });
@@ -278,7 +340,8 @@ describe("HTTPS 주소 HTTP 경로", () => {
     const bus = new Bus();
     store = new Store(openDb(config.dbPath), bus);
     const orch = {} as OrchestratorApi;
-    const start = () => startServer({ config, store, bus, orch, detectHosts: () => [], tailnetHttps: { run: fake.run, log: () => {} } });
+    const start = () => startServer({ config, store, bus, orch, detectHosts: () => [], tailnetHttps: { run: fake.run, log: () => {} },
+      doctorProbes: { service: async () => ({ state: "running" as const }), disk: () => ({ freeBytes: 50e9, totalBytes: 100e9 }), login: () => "yes" as const, cliVersions: async () => null } });
     server = await start();
     while (server.port === 7878) { await server.stop(); server = await start(); }
     base = `http://127.0.0.1:${server.port}`;
@@ -329,6 +392,11 @@ describe("HTTPS 주소 HTTP 경로", () => {
     // 출시된 Mac 앱은 urls 를 차례대로 QR 에 싣는다. 모양(문자열 배열)은 그대로다.
     expect(await pairUrls()).toEqual([`https://${DNS}`]);
     expect(((await (await call("GET")).json()) as TailnetHttpsStatus).state).toBe("on");
+    // 합치기(N): 점검표의 Tailscale 항목 설명 끝에 붙는다(새 항목 없이, 주소 없이).
+    const doctor = (await (await fetch(`${base}/api/doctor`, { headers: auth })).json()) as { checks: { id: string; detail?: string }[] };
+    const tailscaleDetail = doctor.checks.find(check => check.id === "tailscale")!.detail ?? "";
+    expect(tailscaleDetail).toEndWith(" · HTTPS 주소 켜짐");
+    expect(tailscaleDetail).not.toContain(DNS);
 
     const off = await call("POST", { enabled: false });
     expect(await off.json()).toMatchObject({ state: "off" });
@@ -348,6 +416,12 @@ describe("HTTPS 주소 HTTP 경로", () => {
     const devices = (await (await fetch(`${base}/api/devices`, { headers: auth })).json()) as { events: { kind: string; address: string | null }[] };
     expect(devices.events.find(event => event.kind === "paired")?.address).toBe("100.64.0.10");
     expect(devices.events.some(event => event.kind === "pair_failed" && event.address === "100.64.0.9")).toBe(true);
+    // 합치기: HTTPS 주소를 거쳐 한 대만 끊어도 접속 기록에는 127.0.0.1 이 아니라 그 기기 주소가 남는다.
+    const paired = ((await (await fetch(`${base}/api/devices`, { headers: auth })).json()) as { devices: { id: string }[] }).devices[0]!;
+    const revoke = await fetch(`${base}/api/devices/${paired.id}`, { method: "DELETE", headers: { ...auth, ...viaServe, "X-Forwarded-For": "100.64.0.10" } });
+    expect(revoke.status).toBe(200);
+    const after = (await (await fetch(`${base}/api/devices`, { headers: auth })).json()) as { events: { kind: string; address: string | null }[] };
+    expect(after.events.find(event => event.kind === "device_revoked")?.address).toBe("100.64.0.10");
   });
 
   test("HTTPS 주소를 거쳐 온 요청은 접속 코드 교체·모두 끊기도 할 수 없다", async () => {

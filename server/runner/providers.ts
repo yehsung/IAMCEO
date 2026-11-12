@@ -29,10 +29,13 @@ const toml = (value: unknown) => JSON.stringify(value);
  */
 function claudeHooks(member: RunnerMember, home: string, bins: ProviderBins, mcpConfigFile: string): Record<string, unknown> | null {
   const events = bins.hookEvents ?? process.env.IAMCEO_HOOK_EVENTS !== "0";
-  try {
-    const hooks = hookSettings({ memberId: member.id, eventsDir: hookEventsDir(home), events, permissionHook: toolPermissionHook(member, home, bins, mcpConfigFile) });
-    return Object.keys(hooks).length ? hooks : null;
-  } catch { return null; }
+  const eventsDir = hookEventsDir(home);
+  // 합치기: 사건 기록과 도구 승인을 따로 만든다. 한쪽을 만들지 못해도(잘못된 팀장 ID, 잘못된 승인 명령) 다른 쪽은 그대로 넣는다.
+  const hooks: Record<string, unknown> = {};
+  if (events) { try { Object.assign(hooks, hookSettings({ memberId: member.id, eventsDir })); } catch { /* 기록 훅 없이 */ } }
+  const permission = toolPermissionHook(member, home, bins, mcpConfigFile);
+  if (permission) { try { Object.assign(hooks, hookSettings({ memberId: member.id, eventsDir, events: false, permissionHook: permission })); } catch { /* 승인 훅 없이 */ } }
+  return Object.keys(hooks).length ? hooks : null;
 }
 
 /**

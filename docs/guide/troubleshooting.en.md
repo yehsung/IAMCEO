@@ -47,7 +47,7 @@ When it starts, the server reads the installed Claude Code and Codex versions, r
 
 ### A tool-approval card closed
 
-With the permission mode set to "ask only when risky" or "ask every time", a staff member's tool-permission prompt also appears in 결재함 (Inbox) as a "도구 승인" (tool approval) card. **허용** (Allow) runs it this one time; **거절** (Deny) does not run it and tells the staff member, with your note. The card closes when you have not answered within 10 minutes, when the prompt was answered in the terminal first, or when the server restarts. A closed card cannot be reopened: if the staff member is still stopped, open that staff member's terminal from the team screen and answer the prompt there. If no card appears at all, check whether that staff member runs in "don't ask" mode or is a Codex staff member (cards appear for Claude Code staff only).
+With the permission mode set to "ask only when risky" or "ask every time", a staff member's tool-permission prompt also appears in 결재함 (Inbox) as a "도구 승인" (tool approval) card. **허용** (Allow) runs it this one time; **거절** (Deny) does not run it and tells the staff member, with your note. Pick one of the two. A note sent without choosing counts as **거절** (Deny). The card closes when you have not answered within 10 minutes, when the prompt was answered in the terminal first, or when the server stops or restarts. A closed card cannot be reopened: if the staff member is still stopped, open that staff member's terminal from the team screen and answer the prompt there. If no card appears at all, check whether that staff member runs in "don't ask" mode or is a Codex staff member (cards appear for Claude Code staff only).
 
 ### A usage limit was hit
 
@@ -111,7 +111,7 @@ The server logs are `~/.iamceo/logs/server.log` and `server.err.log`. Each line 
 
 You can add rules to the role instructions the lead, staff and HQ agent receive, or replace them entirely. In file names the lead is `conductor`, staff is `worker` and the HQ agent is `root`.
 
-**Add rules (recommended).** Write only the rules you want to add in `~/.iamceo/roles/<kind>.extra.md`. They go at the end of the default rules, and you keep getting improvements to the defaults when IAMCEO updates.
+**Add rules (recommended).** Write only the rules you want to add in `~/.iamceo/roles/<kind>.extra.md`. They go at the very end of the rules (without a heading of their own they go under "이 Mac에서 더한 규칙", rules added on this Mac), and you keep getting improvements to the defaults when IAMCEO updates. With the report language set to English, these rules still apply as written.
 
 ```sh
 mkdir -p ~/.iamceo/roles

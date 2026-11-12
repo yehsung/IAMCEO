@@ -4,14 +4,14 @@
 // 기준본: tests/fixtures/roles-baseline/*.md 는 정리 직전(7f30d95)의 server/roles/*.md 그대로다. 손대지 않는다.
 // 규칙 하나 = 기준본의 문장 하나다(줄을 나누고, 목록 표시를 떼고, 마침표 뒤에서 자른다). 제목 줄은 구조라 뺀다.
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DOCTOR_CHECK_IDS, DOCTOR_ROLES_CHECK_ID, type Member, type MemberKind } from "../shared/types.ts";
 import { listAgentTools } from "../server/agent-tools.ts";
 import { doctorChecks, type DoctorFacts } from "../server/doctor.ts";
 import {
-  assembleRole, builtInRole, ENGLISH_REPORT_RULE, exportRoles, readRoleBase, renderRole, ROLE_PARTS, roleBaseHash, roleBaseMarker, roleCustomizations,
+  assembleRole, builtInRole, ENGLISH_REPORT_RULE, EXTRA_RULES_HEADING, exportRoles, hasApprovalRule, readRoleBase, renderRole, ROLE_PARTS, roleBaseHash, roleBaseMarker, roleCustomizations,
 } from "../server/roles.ts";
 
 const KINDS: MemberKind[] = ["conductor", "worker", "root"];
@@ -61,14 +61,73 @@ const REWORDED: { kinds: MemberKind[]; from: string; to: string; why: string }[]
     why: "같은 뜻(총괄·팀장 판의 표현)" },
 ];
 
-/** 문장은 그대로인데 줄이 나뉘거나 다른 줄과 합쳐진 곳. 여기 없는 기준본의 줄은 새 지침에 한 줄 그대로 있어야 한다. */
-const RESTRUCTURED: { kind: MemberKind; startsWith: string; why: string }[] = [
+/**
+ * 문장은 그대로인데 줄이 나뉘거나 다른 줄과 합쳐진 곳. 여기 없는 기준본의 줄은 새 지침에 한 줄 그대로 있어야 한다.
+ * 나눈 줄의 문장은 같은 절 안에서 같은 순서로 이어져야 한다. reordered 는 공통 조각으로 합치며 같은 절 안에서 자리만 옮긴 문장이다
+ * (서로 독립한 규칙이라 순서가 뜻을 바꾸지 않는다). 그 문장도 같은 절 안에는 있어야 한다.
+ */
+const RESTRUCTURED: { kind: MemberKind; startsWith: string; why: string; reordered?: string[] }[] = [
   { kind: "conductor", startsWith: "판 맞추기:", why: "962자 한 항목을 하위 항목 여섯으로 나눴다(문장·순서 그대로)" },
-  { kind: "conductor", startsWith: "대표가 읽거나 복사하거나", why: "자료 규칙을 공통 조각(deliverables)과 총괄 몫 한 줄로 나눴다" },
-  { kind: "worker", startsWith: "대표가 읽거나 복사하거나", why: "자료 규칙을 공통 조각(deliverables)과 팀장 몫 한 줄로 나눴다" },
-  { kind: "root", startsWith: "한 번에 끝나는 조사", why: "자료 규칙을 공통 조각(deliverables)으로 옮겼다" },
+  { kind: "conductor", startsWith: "대표가 읽거나 복사하거나", why: "자료 규칙을 공통 조각(deliverables)과 총괄 몫 한 줄로 나눴다",
+    reordered: ["보고서 전문은 직원이 올리고, 네가 만든 산출물도 같은 기준을 따른다.", "외부 사이트에 따로 게시하지 않는다."] },
+  { kind: "worker", startsWith: "대표가 읽거나 복사하거나", why: "자료 규칙을 공통 조각(deliverables)과 팀장 몫 한 줄로 나눴다",
+    reordered: ["외부 사이트에 따로 게시하지 않는다."] },
+  { kind: "root", startsWith: "한 번에 끝나는 조사", why: "자료 규칙을 공통 조각(deliverables)으로 옮겼다",
+    reordered: ["외부 사이트에 따로 게시하지 않는다."] },
   { kind: "root", startsWith: "대표가 읽거나 복사하거나", why: "자료 규칙을 공통 조각(deliverables)으로 합쳤다" },
 ];
+
+/**
+ * 직접 붙인 세션(MANUAL)에만 들어가는 문장(parts/manual-session.md). 기준본 worker.md 의 wait 단락 다섯 문장을 글자 그대로 적는다.
+ * 서버가 띄우는 세션(MANUAL=false)에서 빠져도 되는 문장은 이것뿐이다. 다른 규칙을 이 조각으로 옮기면 아래 대조가 잡는다(리뷰 roles-1).
+ */
+const MANUAL_ONLY = [
+  "`wait` 도구가 있으면 네가 직접 띄워진 세션이다.",
+  "`ask`는 답이 올 때까지 결과로 돌아오고, 일이 끝나면 `wait`로 다음 지시 batch를 받는다.",
+  "batch의 내용을 읽고 `wait({ack_batch_id: \"받은 batch id\"})`로 ACK한 뒤 처리한다.",
+  "ACK 전 재조회는 같은 batch이며 같은 deliveryId를 중복 실행하지 않는다.",
+  "ACK는 수신 확인이며 업무 완료가 아니다.",
+];
+
+/**
+ * 기준본에서 절 밖으로 붙어 있던 줄(파일 끝 '## 도구 응답 유실' 뒤)을 제 절로 옮긴 곳. 여기 없는 기준본 줄은 같은 절·같은 들여쓰기·같은
+ * 목록 표시(번호 포함)로, 같은 절 안의 순서 그대로 있어야 한다(리뷰 roles-2). 옮긴 줄은 문단에서 목록 항목이 되기도 했다.
+ */
+const MOVED: { kind: MemberKind; startsWith: string; from: string; to: string; why: string }[] = [
+  { kind: "conductor", startsWith: "아티팩트 공통 계약", from: "## 도구 응답 유실", to: "## 보고 받기", why: "결과물 규칙(deliverables) 바로 뒤로" },
+  { kind: "conductor", startsWith: "판 정리 때 3일 넘은", from: "## 도구 응답 유실", to: "## 보고 받기", why: "할 일 정리는 보고 받기의 판 정리 규칙과 함께" },
+  { kind: "conductor", startsWith: "지시를 다시 보낼 때", from: "## 도구 응답 유실", to: "## 지시", why: "지시 거두기는 지시 절의 일" },
+  { kind: "worker", startsWith: "아티팩트 공통 계약", from: "## 도구 응답 유실", to: "## 일하는 법", why: "결과물 규칙(deliverables) 바로 뒤로" },
+  { kind: "worker", startsWith: "네가 `todo`로 부탁한 일이 다시 필요해지면", from: "## 도구 응답 유실", to: "## 질문: `ask`", why: "todo 부탁은 질문 절의 일" },
+  { kind: "root", startsWith: "직원 보고로만 깨어난 확인 턴은", from: "## 도구 응답 유실", to: "## 대표에게 말하기", why: "확인 턴의 보고 규칙" },
+  { kind: "root", startsWith: "아티팩트 공통 계약", from: "## 도구 응답 유실", to: "## 잡다한 일", why: "결과물 규칙(deliverables) 바로 뒤로" },
+];
+
+interface RuleLine { section: string; depth: number; marker: string; text: string }
+/** 줄마다 절 제목, 들여쓰기 깊이, 목록 표시(번호는 그대로), 글. 제목·빈 줄은 뺀다(ruleLines 와 같은 줄을 낸다). */
+function structuredLines(text: string): RuleLine[] {
+  let section = "(맨 앞)";
+  const out: RuleLine[] = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith("#")) { section = line; continue; }
+    const m = /^([ \t]*)((?:[-*]|\d+\.)\s+)?(.*)$/.exec(raw.replace(/\s+$/, ""))!;
+    out.push({ section, depth: m[1]!.length, marker: (m[2] ?? "").trim(), text: m[3]!.trim() });
+  }
+  return out;
+}
+
+/** a 가 b 의 부분 수열인가(순서 그대로). 아니면 처음 어긋난 a 의 항목. */
+function firstOutOfOrder(a: string[], b: string[]): string | null {
+  let at = 0;
+  for (const item of a) {
+    const found = b.indexOf(item, at);
+    if (found < 0) return item;
+    at = found + 1;
+  }
+  return null;
+}
 
 /**
  * 이 정리 뒤에 새로 더한 규칙 조각(예: 도구 승인 설명). 이 조각의 문장은 '기준본에 없던 문장' 검사에서 뺀다.
@@ -109,13 +168,61 @@ describe("규칙 대조: 지금 지침의 규칙이 새 지침에 모두 있다"
       expect({ kind, lost, added }).toEqual({ kind, lost: [], added: [] });
     });
 
+    test(`${kind}: 서버가 띄우는 세션(MANUAL=false)도 기준본과 대조한다. 빠져도 되는 문장은 직접 붙인 세션의 wait 안내(MANUAL_ONLY)뿐이다`, () => {
+      const expected = multiset(sentences(baseline(kind)));
+      for (const change of REWORDED.filter(c => c.kinds.includes(kind))) {
+        expect(take(expected, change.from)).toBe(true);
+        expected.set(change.to, (expected.get(change.to) ?? 0) + 1);
+      }
+      if (kind === "worker") for (const only of MANUAL_ONLY) expect({ kind, only, inBaseline: take(expected, only) }).toEqual({ kind, only, inBaseline: true });
+      const actual = multiset(sentences(assembled(kind, false)));
+      for (const later of laterSentences(kind)) take(actual, later);
+      const lost = [...expected].flatMap(([s, n]) => Array(Math.max(0, n - (actual.get(s) ?? 0))).fill(s));
+      const added = [...actual].flatMap(([s, n]) => Array(Math.max(0, n - (expected.get(s) ?? 0))).fill(s));
+      expect({ kind, lost, added }).toEqual({ kind, lost: [], added: [] });
+    });
+
     test(`${kind}: 손대지 않은 줄은 한 줄 그대로 남아 있다(문맥이 바뀌지 않았다)`, () => {
       const now = new Set(ruleLines(assembled(kind)));
       const exempt = RESTRUCTURED.filter(r => r.kind === kind);
       const missing = ruleLines(baseline(kind)).filter(line => !now.has(line) && !exempt.some(r => line.startsWith(r.startsWith)));
       expect({ kind, missing }).toEqual({ kind, missing: [] });
     });
+
+    test(`${kind}: 손대지 않은 줄은 같은 절·같은 들여쓰기·같은 목록 표시로, 절 안의 순서 그대로 있다(옮긴 줄은 MOVED 표대로)`, () => {
+      const before = structuredLines(baseline(kind)), after = structuredLines(assembled(kind));
+      const moved = MOVED.filter(m => m.kind === kind), restructured = RESTRUCTURED.filter(r => r.kind === kind);
+      const exempt = (text: string) => moved.some(m => text.startsWith(m.startsWith)) || restructured.some(r => text.startsWith(r.startsWith));
+      // 1) 같은 글의 줄이 같은 절에 같은 깊이·표시로 있다(번호 목록은 번호까지 같아야 순서가 같다).
+      const misplaced = before.filter(line => !exempt(line.text)).filter(line => !after.some(n => n.text === line.text && n.section === line.section && n.depth === line.depth && n.marker === line.marker))
+        .map(line => ({ section: line.section, depth: line.depth, marker: line.marker, text: line.text.slice(0, 40) }));
+      expect({ kind, misplaced }).toEqual({ kind, misplaced: [] });
+      // 2) 절마다 기준본 줄의 순서가 그대로다(다른 줄이 끼어든 것은 된다).
+      for (const section of new Set(before.map(line => line.section))) {
+        const want = before.filter(line => line.section === section && !exempt(line.text)).map(line => line.text);
+        const have = after.filter(line => line.section === section).map(line => line.text);
+        expect({ kind, section, outOfOrder: firstOutOfOrder(want, have) }).toEqual({ kind, section, outOfOrder: null });
+      }
+      // 3) 옮긴 줄은 표에 적은 절에서 왔고 표에 적은 절에 있다.
+      for (const m of moved) {
+        expect({ kind, line: m.startsWith, from: before.find(line => line.text.startsWith(m.startsWith))?.section }).toEqual({ kind, line: m.startsWith, from: m.from });
+        expect({ kind, line: m.startsWith, to: after.filter(line => line.text.startsWith(m.startsWith)).map(line => line.section) }).toEqual({ kind, line: m.startsWith, to: [m.to] });
+      }
+      // 4) 나눈 줄(RESTRUCTURED)의 문장은 같은 절 안에서 같은 순서로 이어진다(고친 문장은 고친 뒤의 글로 본다).
+      for (const r of restructured) {
+        const line = before.find(item => item.text.startsWith(r.startsWith))!;
+        const reworded = (text: string) => REWORDED.find(c => c.kinds.includes(kind) && c.from === text)?.to ?? text;
+        const want = sentences(line.text).map(reworded);
+        const have = after.filter(item => item.section === line.section).flatMap(item => sentences(item.text));
+        for (const moved of r.reordered ?? []) expect({ kind, line: r.startsWith, moved, sameSection: want.includes(moved) && have.includes(moved) }).toMatchObject({ sameSection: true });
+        expect({ kind, line: r.startsWith, outOfOrder: firstOutOfOrder(want.filter(item => !r.reordered?.includes(item)), have) }).toEqual({ kind, line: r.startsWith, outOfOrder: null });
+      }
+    });
   }
+
+  test("MOVED 표의 줄은 모두 쓰인다", () => {
+    for (const m of MOVED) expect({ m, used: structuredLines(baseline(m.kind)).some(line => line.text.startsWith(m.startsWith)) }).toMatchObject({ used: true });
+  });
 
   test("고친 문장·나눈 줄 목록에 쓰이지 않는 항목이 없다", () => {
     for (const change of REWORDED) for (const kind of change.kinds) {
@@ -126,11 +233,12 @@ describe("규칙 대조: 지금 지침의 규칙이 새 지침에 모두 있다"
   });
 
   test("서버가 띄우는 세션은 wait 안내만 빠진다(그 세션에는 wait 도구가 없다)", () => {
-    const manualOnly = sentences(readFileSync(join(import.meta.dir, "..", "server", "roles", "parts", "manual-session.md"), "utf8"));
-    expect(manualOnly[0]).toBe("`wait` 도구가 있으면 네가 직접 띄워진 세션이다.");
+    // manual-session.md 는 정확히 기준본의 wait 단락 다섯 문장이다. 다른 규칙이 이 조각에 들어가면 서버가 띄우는 세션에서 빠진다.
+    expect(sentences(readFileSync(join(import.meta.dir, "..", "server", "roles", "parts", "manual-session.md"), "utf8"))).toEqual(MANUAL_ONLY);
+    expect(sentences(baseline("worker")).filter(s => MANUAL_ONLY.includes(s))).toEqual(MANUAL_ONLY);
     for (const kind of KINDS) {
       const withManual = multiset(sentences(assembled(kind, true)));
-      if (kind === "worker") for (const s of manualOnly) expect(take(withManual, s)).toBe(true);
+      if (kind === "worker") for (const s of MANUAL_ONLY) expect(take(withManual, s)).toBe(true);
       expect(sentences(assembled(kind, false)).sort()).toEqual([...withManual].flatMap(([s, n]) => Array(n).fill(s)).sort());
     }
     expect(renderRole("worker", VARS)).not.toContain("`wait` 도구가 있으면");
@@ -197,18 +305,24 @@ describe("대표가 최근에 넣은 규칙이 남는다", () => {
     expect(tool("team_add")).toContain("역할이 맞는 직원이 없을 때만");
   });
 
-  test("보고 언어 줄은 기본·통째 교체·덧붙임 어느 경우에도 맨 끝에 한 번만 붙는다", () => {
+  test("보고 언어 줄은 기본 규칙(통째 교체 파일 포함) 끝에 한 번만 붙고, 사용자 덧붙임은 그 뒤에 와서 대체되지 않는다", () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-w3m-lang-")));
     writeFileSync(join(dir, "worker.extra.md"), "## 이 팀의 규칙\n- 커밋 메시지는 한국어로 쓴다.\n");
     writeFileSync(join(dir, "root.md"), `${roleBaseMarker("root")}\n${builtInRole("root")}`);
     writeFileSync(join(dir, "root.extra.md"), "- 덧붙인 규칙\n");
     for (const kind of KINDS) {
       const english = renderRole(kind, { ...VARS, REPORT_LANGUAGE: "en" }, dir);
-      expect(english.trimEnd().endsWith(ENGLISH_REPORT_RULE)).toBe(true);
       expect(english.split("## Report language").length).toBe(2);
       expect(renderRole(kind, { ...VARS, REPORT_LANGUAGE: "ko" }, dir)).not.toContain("## Report language");
     }
-    expect(renderRole("worker", { ...VARS, REPORT_LANGUAGE: "en" }, dir)).toContain("- 커밋 메시지는 한국어로 쓴다.\n\n## Report language");
+    // 덧붙임이 없으면 맨 끝이다.
+    expect(renderRole("conductor", { ...VARS, REPORT_LANGUAGE: "en" }, dir).trimEnd().endsWith(ENGLISH_REPORT_RULE)).toBe(true);
+    // 덧붙임이 있으면 보고 언어 줄 뒤에 온다: 'This replaces any rule above that asks for Korean' 이 대표가 더한 규칙을 덮지 않는다(리뷰 roles-3).
+    const worker = renderRole("worker", { ...VARS, REPORT_LANGUAGE: "en" }, dir);
+    expect(worker.trimEnd().endsWith(`${ENGLISH_REPORT_RULE}\n\n## 이 팀의 규칙\n- 커밋 메시지는 한국어로 쓴다.`)).toBe(true);
+    expect(worker.indexOf("커밋 메시지는 한국어로")).toBeGreaterThan(worker.indexOf("This replaces any rule above"));
+    const root = renderRole("root", { ...VARS, REPORT_LANGUAGE: "en" }, dir);
+    expect(root.trimEnd().endsWith(`${ENGLISH_REPORT_RULE}\n\n${EXTRA_RULES_HEADING}\n- 덧붙인 규칙`)).toBe(true);
   });
 
   test("승인 규칙의 핵심 문장이 그대로다", () => {
@@ -260,7 +374,36 @@ describe("사용자 덧붙임 <kind>.extra.md", () => {
     writeFileSync(join(dir, "worker.md"), "승인 없이 커밋하지 않는다. {{NAME}}\n");
     writeFileSync(join(dir, "worker.extra.md"), "- 덧붙인 규칙\n");
     const { value } = captureWarn(() => renderRole("worker", VARS, dir));
-    expect(value).toBe("승인 없이 커밋하지 않는다. 결제 연동\n\n- 덧붙인 규칙\n");
+    expect(value).toBe(`승인 없이 커밋하지 않는다. 결제 연동\n\n${EXTRA_RULES_HEADING}\n- 덧붙인 규칙\n`);
+  });
+
+  test("제목 없이 쓴 덧붙임은 '## 이 Mac에서 더한 규칙' 절에 들어가 기본 지침의 마지막 절(도구 응답 유실) 안으로 섞이지 않는다", () => {
+    const dir = rolesDir();
+    writeFileSync(join(dir, "worker.extra.md"), "- 커밋 메시지는 한국어로 쓴다.\n");
+    writeFileSync(join(dir, "conductor.extra.md"), "# 우리 회사 규칙\n- 금요일에는 배포하지 않는다.\n");
+    const sectionOf = (text: string, needle: string) => structuredLines(text).find(line => line.text.includes(needle))!.section;
+    for (const language of ["ko", "en"] as const) {
+      const worker = renderRole("worker", { ...VARS, REPORT_LANGUAGE: language }, dir);
+      expect(sectionOf(worker, "커밋 메시지는 한국어로")).toBe(EXTRA_RULES_HEADING);
+      expect(worker.trimEnd().endsWith(`${EXTRA_RULES_HEADING}\n- 커밋 메시지는 한국어로 쓴다.`)).toBe(true);
+      // 제목으로 시작하는 덧붙임은 그대로 둔다.
+      const conductor = renderRole("conductor", { ...VARS, REPORT_LANGUAGE: language }, dir);
+      expect(sectionOf(conductor, "금요일에는 배포하지 않는다")).toBe("# 우리 회사 규칙");
+      expect(conductor).not.toContain(EXTRA_RULES_HEADING);
+    }
+    // 덧붙임이 없으면 제목도 없다.
+    expect(renderRole("root", VARS, dir)).not.toContain(EXTRA_RULES_HEADING);
+  });
+
+  test("덧붙임 파일을 읽지 못하면(폴더·권한 없음) 띄우기·전달을 막지 않고 덧붙임 없이 만든다. 로그에 한 번, 점검표에 알린다", () => {
+    const dir = rolesDir();
+    mkdirSync(join(dir, "worker.extra.md"));
+    const first = captureWarn(() => renderRole("worker", VARS, dir));
+    expect(first.value).toBe(renderRole("worker", VARS));
+    expect(first.warned).toHaveLength(1);
+    expect(first.warned[0]).toContain(join(dir, "worker.extra.md"));
+    expect(captureWarn(() => renderRole("worker", VARS, dir)).warned).toEqual([]);
+    expect(roleCustomizations(dir)).toEqual([{ kind: "worker", replacement: null, extra: { path: join(dir, "worker.extra.md"), unreadable: true } }]);
   });
 
   test("점검 목록에 덧붙임만 있으면 정상으로 보인다", () => {
@@ -358,5 +501,36 @@ describe("점검표의 '고쳐 쓴 역할 지침'", () => {
     const english = doctorChecks(facts(roleCustomizations(dir)), "en").at(-1)!;
     expect(english.title).toBe("Edited role rules");
     expect(english.detail).toBe("lead: replaced, no base marker, no approval rule · staff: additions · HQ agent: replaced");
+  });
+
+  test("승인 규칙만 빠졌으면 승인 절을 남기라고 하고, 표지를 바꾸라고 하지 않는다. 영어로 옮긴 파일의 Approval 은 승인 규칙으로 본다(리뷰 roles-6)", () => {
+    const dir = rolesDir();
+    // 지금 표지 + 승인 절을 지운 교체 파일.
+    writeFileSync(join(dir, "worker.md"), `${roleBaseMarker("worker")}\n## 일하는 법\n- 맡은 일을 끝까지 한다.\n`);
+    const warn = doctorChecks(facts(roleCustomizations(dir))).at(-1)!;
+    expect(warn).toMatchObject({ state: "warn", detail: "팀장: 통째 교체, 승인 규칙 없음" });
+    expect(warn.fix).toContain("승인 절을 그대로 남기세요");
+    expect(warn.fix).toContain("worker.md");
+    expect(warn.fix).not.toContain("기준판 표지를 새 파일의 것으로 바꾸세요");
+    expect(doctorChecks(facts(roleCustomizations(dir)), "en").at(-1)!.fix).toBe("Keep the approval section of the default rules in worker.md (it is in the file iamceo roles export writes). Without it, sessions may act without your approval.");
+    // 그 고치는 법대로 승인 절을 남기면 경고가 사라진다.
+    writeFileSync(join(dir, "worker.md"), `${roleBaseMarker("worker")}\n${builtInRole("worker")}`);
+    expect(doctorChecks(facts(roleCustomizations(dir))).at(-1)!.state).toBe("ok");
+    // 영어로 옮긴 교체 파일(승인 절 'Approval').
+    writeFileSync(join(dir, "worker.md"), `${roleBaseMarker("worker")}\n## Approval\n- Only the owner's own words approve work.\n`);
+    expect(roleCustomizations(dir)[0]!.replacement!.approval).toBe(true);
+    expect(doctorChecks(facts(roleCustomizations(dir))).at(-1)!.state).toBe("ok");
+    expect(hasApprovalRule("approve before pushing")).toBe(true);
+    expect(hasApprovalRule(`${roleBaseMarker("worker")}\n맡은 일만 한다`)).toBe(false);
+  });
+
+  test("읽지 못하는 덧붙임은 확인 필요와 그 파일 이름으로 보인다(리뷰 roles-5)", () => {
+    const dir = rolesDir();
+    mkdirSync(join(dir, "conductor.extra.md"));
+    writeFileSync(join(dir, "worker.extra.md"), "- 덧붙인 규칙\n");
+    const check = doctorChecks(facts(roleCustomizations(dir))).at(-1)!;
+    expect(check).toMatchObject({ state: "warn", detail: "총괄: 덧붙임을 읽지 못함 · 팀장: 덧붙임" });
+    expect(check.fix).toBe("conductor.extra.md 를 읽을 수 없어 넣지 않았습니다(폴더이거나 읽기 권한이 없음). 글 파일로 고치거나 지우세요.");
+    expect(doctorChecks(facts(roleCustomizations(dir)), "en").at(-1)!.detail).toBe("lead: additions unreadable · staff: additions");
   });
 });

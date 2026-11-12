@@ -56,6 +56,7 @@ import type { DeliveryDispatch, DeliveryIntentResult, DeliveryRecoveryRecord, Do
 import type { RunnerTerminalIdentity } from "./runner/types.ts";
 import type { Bus } from "./bus.ts";
 import { ensureDeliveryVerdicts, newId, nowIso } from "./db.ts";
+import { parseTailnetHttpsRecord, TAILNET_HTTPS_KEY } from "./tailnet-https.ts";
 import { isDeliveryWaitReason, MEMBER_GATE_WAITS, verdictPatience, verdictWait, WATCHED_WAITS, type PumpVerdict, type StoredPumpVerdict } from "./pump-verdict.ts";
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOWS, exactSource } from "./runner/context.ts";
 import { MAX_PROJECT_NAME, MAX_ROLE, nameProblem, oneLineProblem, RESERVED_HANDLES, workerNameProblem } from "./text.ts";
@@ -395,7 +396,7 @@ const RESTART_WAKE_KEY = "restartWake";
 /** 이 설치가 Tailscale 주소를 연 적이 있다는 기록({ address, at }). 같은 표의 별도 키라 설정 응답에는 나가지 않는다. */
 const TAILNET_SEEN_KEY = "tailnetSeen";
 /** C8: 대표가 켠 HTTPS 주소(tailscale serve)의 기록({ url, port, at }). 같은 표의 별도 키라 설정 응답에 나가지 않고 이전 판도 무시한다. */
-const TAILNET_HTTPS_KEY = "tailnetHttps";
+
 
 /** 막힘의 까닭은 관측 기록의 오류 코드에서 읽는다. 막힘이 아니면 싣지 않는다. */
 function blockedCodeOf(status: string, observation: Member["statusObservation"]): BlockedCode | undefined {
@@ -824,13 +825,15 @@ export interface DeliveryRetryState {
 }
 
 /**
- * 저장소가 전달 펌프 쪽에 부탁하는 두 가지. 대기 사유는 여기서 읽지 않는다(펌프가 남긴 판정 줄을 읽는다).
+ * 저장소가 전달 펌프 쪽에 부탁하는 일. 대기 사유는 여기서 읽지 않는다(펌프가 남긴 판정 줄을 읽는다).
  * - recheck: 대표가 '다시 확인'을 눌렀다(이어가기를 포기한 팀장도 다시 보내 본다).
  * - nudge: 정체로 알리기 전에 한 번 스스로 다시 밀어 본다(입력은 하지 않는다).
+ * - judge: 아직 판정 줄이 없는 팀장을 펌프가 판정하게 한다(재시도 간격은 그대로 둔다). 업그레이드 첫 시작처럼 판정 표가 빈 때.
  */
 export interface DeliveryHooks {
   recheck?: (memberId: string) => void;
   nudge?: (memberId: string) => void;
+  judge?: (memberId: string) => void;
 }
 
 /** member_delivery_verdicts 한 줄. 알 수 없는 사유(다른 판의 서버가 적은 값)는 '이유 없는 대기'로 읽는다. */
@@ -902,6 +905,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
   private recheckPending: ((memberId: string) => void) | null = null;
   private stallNudge: ((memberId: string) => void) | null = null;
+  private judgeMember: ((memberId: string) => void) | null = null;
+  /** 판정 줄이 없어 펌프에 판정을 처음 부탁한 시각(팀장별). 판정이 남거나 기다리는 전달이 없어지면 지운다. */
+  private readonly judgeAsked = new Map<string, number>();
   /** 정체로 알리기 전에 한 번 스스로 다시 밀어 본 전달. */
   private readonly stallNudged = new Set<string>();
   /** 판정 표(member_delivery_verdicts)를 쓸 수 있는가. 만들지 못했으면 판정 없이(이유 없는 대기로) 읽는다. */
@@ -933,6 +939,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   setDeliveryHooks(hooks: DeliveryHooks): void {
     this.recheckPending = hooks.recheck ?? null;
     this.stallNudge = hooks.nudge ?? null;
+    this.judgeMember = hooks.judge ?? null;
   }
 
   recheckPendingDelivery(memberId: string): void {
@@ -1054,18 +1061,23 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       live.add(delivery.id);
     }
     for (const id of this.stallNudged) if (!live.has(id)) this.stallNudged.delete(id);
-    this.markOverdueVerdicts(new Set([...byProject.values()].flat().map(delivery => delivery.memberId)), now, thresholdMs);
-    const nudges = new Set<string>();
+    const waitingMembers = new Set([...byProject.values()].flat().map(delivery => delivery.memberId));
+    for (const id of this.judgeAsked.keys()) if (!waitingMembers.has(id) || this.pumpVerdict(id)) this.judgeAsked.delete(id);
+    this.markOverdueVerdicts(waitingMembers, now, thresholdMs);
+    const nudges = new Set<string>(), judges = new Set<string>();
     for (const [projectId, deliveries] of byProject) {
       const observations = this.withDeliveryRead(projectId, () => deliveries.map(delivery => {
         const waiting = this.deliveryWait(delivery).waitReason !== "unknown";
         // 기한을 넘긴 판정 때문에 이유 없는 대기가 됐다: 경과 시간을 기다리지 않고 곧바로 한 번 다시 밀고, 그래도 그대로면 알린다.
         const verdict = this.pumpVerdict(delivery.memberId);
         const suspect = !waiting && !!verdict?.overdueAt && WATCHED_WAITS.has(verdict.waitReason);
+        // 판정 표는 있는데 이 팀장의 줄이 아직 없다(업그레이드 첫 시작, 새 판으로 처음 보는 팀장): '이유 없는 대기'가 아니라 '판정 전'이다.
+        // 판정할 펌프가 붙어 있을 때만 그렇게 본다(펌프 없는 저장소·읽기 전용 도구는 예전처럼 이유 없는 대기로 다룬다).
+        const unjudged = this.verdictsReady && !verdict && !!this.judgeMember;
         const progress = waiting ? delivery.createdAt : this.listDispatches(delivery.memberId).filter(d => d.items.some(i => i.deliveryId === delivery.id)).at(-1)?.updatedAt ?? delivery.createdAt;
-        return { delivery, waiting, suspect, stalled: this.deliveryStalled(delivery.id), progress };
+        return { delivery, waiting, suspect, unjudged, stalled: this.deliveryStalled(delivery.id), progress };
       }));
-      for (const { delivery, waiting, suspect, stalled, progress } of observations) {
+      for (const { delivery, waiting, suspect, unjudged, stalled, progress } of observations) {
         if (waiting) {
           if (stalled) {
             this.run("UPDATE delivery_stalls SET resolved_at = ? WHERE delivery_id = ? AND resolved_at IS NULL", new Date(now).toISOString(), delivery.id);
@@ -1075,6 +1087,15 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
           continue;
         }
         if (stalled) continue;
+        // 판정 전: 펌프가 판정하게만 하고(재시도 간격은 그대로) 알리지 않는다. '다시 밀어 봄'으로 세지도 않는다.
+        // 판정이 남은 다음 점검부터 평소대로 본다. 판정 표를 만들지 못한 DB(verdictsReady=false)는 예전처럼 이유 없는 대기로 다룬다.
+        // 판정을 부탁한 지 정체 기준 시간이 지나도 판정이 없으면(펌프가 막혔다 등) 아래의 평소 길(다시 밀기 → 알림)로 간다.
+        if (unjudged) {
+          if (now - Date.parse(progress) < thresholdMs / 2) continue;
+          const asked = this.judgeAsked.get(delivery.memberId) ?? now;
+          this.judgeAsked.set(delivery.memberId, asked);
+          if (now - asked < thresholdMs) { judges.add(delivery.memberId); continue; }
+        }
         // 알리기 전에 '다시 확인'과 같은 안전한 동작(재시도 간격을 풀고 다시 밀기)을 스스로 한 번 해 본다.
         if (this.stallNudge && !this.stallNudged.has(delivery.id) && (suspect || now - Date.parse(progress) >= thresholdMs / 2)) {
           this.stallNudged.add(delivery.id); nudges.add(delivery.memberId);
@@ -1091,6 +1112,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     }
     for (const memberId of nudges) {
       try { this.stallNudge?.(memberId); } catch (e) { console.error("정체 전달 다시 밀기 실패:", memberId, e); }
+    }
+    for (const memberId of judges) {
+      if (nudges.has(memberId)) continue;
+      try { this.judgeMember?.(memberId); } catch (e) { console.error("전달 판정 요청 실패:", memberId, e); }
     }
   }
 
@@ -1223,20 +1248,16 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   /** C8: 대표가 켠 HTTPS 주소의 기록. 켠 적이 없거나 껐으면 null. 모양이 어긋난 값은 없는 것으로 본다. */
-  tailnetHttps(): { url: string; port: number; at: string } | null {
+  tailnetHttps(): { url: string; port: number; at: string; home?: string } | null {
     const row = this.row("SELECT value FROM settings WHERE key = ?", TAILNET_HTTPS_KEY);
-    if (!row) return null;
-    try {
-      const saved = JSON.parse(row.value) as { url?: unknown; port?: unknown; at?: unknown } | null;
-      return saved && typeof saved.url === "string" && saved.url.startsWith("https://") && typeof saved.port === "number" && Number.isInteger(saved.port)
-        && typeof saved.at === "string" ? { url: saved.url, port: saved.port, at: saved.at } : null;
-    } catch { return null; }
+    return row ? parseTailnetHttpsRecord(row.value) : null;
   }
 
-  rememberTailnetHttps(value: { url: string; port: number; at: string } | null): void {
+  /** home: 켠 설치의 데이터 폴더(tailnet-https.ts SavedTailnetHttps). 없던 판의 기록은 home 없이 읽는다. */
+  rememberTailnetHttps(value: { url: string; port: number; at: string; home?: string } | null): void {
     if (!value) { this.run("DELETE FROM settings WHERE key = ?", TAILNET_HTTPS_KEY); return; }
     this.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", TAILNET_HTTPS_KEY,
-      JSON.stringify({ url: value.url, port: value.port, at: value.at }));
+      JSON.stringify({ url: value.url, port: value.port, at: value.at, ...(typeof value.home === "string" ? { home: value.home } : {}) }));
   }
 
   loadApiRecovery<T>(key: string): T | null {

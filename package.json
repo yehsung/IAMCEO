@@ -29,7 +29,7 @@
     "build:check": "bash scripts/check.sh build",
     "release:mac": "bun scripts/release-mac.ts",
     "typecheck": "tsc --noEmit",
-    "build": "bun build bin/iamceo.ts --compile --outfile dist/iamceo",
+    "build": "bun build bin/iamceo.ts --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --outfile dist/iamceo",
     "build:release": "bun scripts/build-release.ts",
     "setup:core": "bun scripts/setup-core.ts",
     "native:build": "swift build --package-path native",

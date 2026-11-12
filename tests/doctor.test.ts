@@ -121,6 +121,41 @@ describe("점검 판정", () => {
     expect(ts({ status: null }).detail).toBe("켜짐 · 100.64.0.7");
   });
 
+  test("합치기(N): HTTPS 주소는 켜 두었을 때만 Tailscale 항목의 설명 끝에 붙고, 판정·항목 수는 그대로다", () => {
+    const at = NOW.toISOString();
+    const ts = (https: DoctorFacts["tailscale"]["https"], lang: "ko" | "en" = "ko") =>
+      doctorReport(healthy({ tailscale: { ...healthy().tailscale, https } }), lang).checks.find(c => c.id === "tailscale")!;
+    // 켠 적이 없으면(off, 까닭 없음) 지금과 똑같다.
+    expect(ts(null).detail).toBe("켜짐 · 100.64.0.7");
+    expect(ts({ state: "off", checkedAt: at }).detail).toBe("켜짐 · 100.64.0.7");
+    // 켜짐: 주소(이 Mac 의 tailnet 이름)는 싣지 않는다.
+    expect(ts({ state: "on", url: "https://mac.tail0000.ts.net", checkedAt: at })).toMatchObject({ state: "ok", detail: "켜짐 · 100.64.0.7 · HTTPS 주소 켜짐" });
+    expect(ts({ state: "on", url: "https://mac.tail0000.ts.net", checkedAt: at }).detail).not.toContain("ts.net");
+    expect(ts({ state: "on", checkedAt: at }, "en").detail).toBe("On · 100.64.0.7 · HTTPS address on");
+    // 확인이 안 되면 설정 화면의 HTTPS 줄과 같은 문장. 판정(ok)과 고치는 법은 Tailscale 자체의 것 그대로.
+    const removed = ts({ state: "off", problem: { code: "tailnet_https_removed", message: "Tailscale에서 HTTPS 설정이 지워져 꺼진 것으로 바꿨습니다. 다시 쓰려면 켜기를 눌러 주세요" }, checkedAt: at });
+    expect(removed).toMatchObject({ state: "ok", detail: "켜짐 · 100.64.0.7 · HTTPS 주소 확인 필요: Tailscale에서 HTTPS 설정이 지워져 꺼진 것으로 바꿨습니다. 다시 쓰려면 켜기를 눌러 주세요" });
+    expect(removed.fix).toBeUndefined();
+    expect(ts({ state: "pending", url: "https://mac.tail0000.ts.net", problem: { code: "tailscale_not_running", message: "꺼짐" }, checkedAt: at }, "en").detail)
+      .toBe("On · 100.64.0.7 · HTTPS address needs attention (see the HTTPS address row in Settings › Connection)");
+    // Tailscale 이 꺼져 있으면 그 안내만(HTTPS 는 덧붙이지 않는다).
+    expect(doctorReport(healthy({ tailscale: { ...healthy().tailscale, status: { state: "off", lastAddress: "100.64.0.7" }, https: { state: "on", checkedAt: at } } }), "ko")
+      .checks.find(c => c.id === "tailscale")!.detail).toBe("꺼져 있습니다 · iPhone에서 연결할 수 없습니다");
+  });
+
+  test("이 서버의 HTTPS 주소가 Funnel 로 인터넷에 열려 있으면 Tailscale 항목은 확인 필요와 끄는 법이다(리뷰 https-5)", () => {
+    const at = NOW.toISOString();
+    const funnel = { state: "pending" as const, url: "https://mac.tail0000.ts.net", problem: { code: "tailnet_https_funnel" as const, message: "인터넷에도 열려 있습니다" }, checkedAt: at };
+    const ts = (patch: Partial<DoctorFacts["tailscale"]>, lang: "ko" | "en" = "ko") =>
+      doctorReport(healthy({ tailscale: { ...healthy().tailscale, https: funnel, ...patch } }), lang).checks.find(c => c.id === "tailscale")!;
+    expect(ts({})).toMatchObject({ state: "warn", detail: "켜짐 · 100.64.0.7 · HTTPS 주소 확인 필요: 인터넷에도 열려 있습니다" });
+    expect(ts({}).fix).toContain("tailscale funnel --https=443 off");
+    expect(ts({}, "en").fix).toContain("tailscale funnel --https=443 off");
+    expect(ts({ address: null, auto: false }).state).toBe("warn");
+    // Tailscale 이 꺼져 있으면 그 안내가 먼저다.
+    expect(ts({ status: { state: "off", lastAddress: "100.64.0.7" } }).state).toBe("fail");
+  });
+
   test("백업·저장 공간", () => {
     const backup = (patch: Partial<NonNullable<DoctorFacts["backup"]>>) => byId(healthy({ backup: { ...healthy().backup!, ...patch } })).backup!;
     expect(backup({ failing: true, failures: 3, cause: "ENOSPC" })).toMatchObject({ state: "fail", detail: "정기 백업이 3번 이어서 실패했습니다 (ENOSPC)" });

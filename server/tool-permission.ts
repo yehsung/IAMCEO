@@ -186,6 +186,9 @@ function fence(text: string): string {
   return "`".repeat(Math.max(3, longest + 1));
 }
 
+/** 카드 본문의 마지막 줄. 선택 없이 메모만 보낸 답은 거절이다(answer). */
+export const TOOL_PERMISSION_NOTE_ONLY = "허용·거절 가운데 하나를 고르세요. 메모만 보내면 거절로 처리합니다.";
+
 export function toolPermissionCard(member: Pick<Member, "name">, info: ToolPermissionInfo, ttlMs: number): { title: string; detail: string } {
   const minutes = Math.max(1, Math.round(ttlMs / 60_000));
   const bar = fence(info.target);
@@ -197,6 +200,8 @@ export function toolPermissionCard(member: Pick<Member, "name">, info: ToolPermi
     ...(info.cwd ? [`폴더: ${homeShort(info.cwd)}`] : []),
     "",
     `${minutes}분 안에 답하지 않으면 이 카드는 닫히고, 터미널의 승인 창에서 직접 답해야 합니다. 터미널에서 먼저 답해도 닫힙니다.`,
+    // 출시된 앱(0.2.2·0.2.3)은 이 카드에도 '메모만 보내기'를 낸다. answer() 는 선택 없는 메모를 거절로 처리한다.
+    TOOL_PERMISSION_NOTE_ONLY,
   ].join("\n");
   return { title: clip(`${info.action}: ${oneLine(info.target)}`, MAX_TITLE_TARGET + info.action.length + 2), detail };
 }
@@ -234,9 +239,15 @@ export class ToolPermissions {
     return closed;
   }
 
+  /** 이 팀장에게 대표의 답을 기다리는 카드가 열려 있다(답했거나 닫힌 카드는 빼고). 전달 펌프의 판정(tool_permission)이 쓴다. */
+  waiting(memberId: string): boolean {
+    for (const entry of this.entries.values()) if (entry.memberId === memberId && !entry.closed && !entry.answer) return true;
+    return false;
+  }
+
   /** 이 팀장에게 열린 카드가 있거나 방금 답했다. 그동안 '승인 대기' 알림을 따로 내지 않는다. */
   covers(memberId: string): boolean {
-    for (const entry of this.entries.values()) if (entry.memberId === memberId && !entry.closed && !entry.answer) return true;
+    if (this.waiting(memberId)) return true;
     const at = this.answeredAt.get(memberId);
     return at !== undefined && this.now() - at < ANSWERED_QUIET_MS;
   }
@@ -432,13 +443,19 @@ export class ToolPermissions {
     }
   }
 
-  /** 서버를 닫는다. 기다리는 훅은 곧 연결이 끊겨 원래 승인 창으로 간다. 카드는 다음 시작 때 닫는다(closeLeftovers). */
+  /**
+   * 서버를 닫는다(DB 가 열려 있는 동안 부른다: Orchestrator.shutdown). 기다리는 훅은 '닫힘'을 받아 터미널의 원래 승인 창으로 간다.
+   * 답을 기다리던 카드는 여기서 닫는다. 다음 시작까지 열어 두면, 그 사이 이 카드를 모르는 옛 판(되돌리기)이 보통 결재로 보여
+   * 팀장을 '결재 대기'로 두고 그 판의 답을 팀장에게 글로 보낸다. 비정상 종료로 남은 카드는 다음 시작의 closeLeftovers 가 닫는다.
+   */
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
     clearInterval(this.sweeper);
-    for (const entry of this.entries.values()) {
-      if (entry.grace) clearTimeout(entry.grace);
-      for (const wake of [...entry.wake]) wake();
+    for (const entry of [...this.entries.values()]) {
+      if (entry.grace) { clearTimeout(entry.grace); entry.grace = null; }
+      if (!entry.answer && !entry.closed) this.close(entry, "서버가 멈춰 승인 요청이 끊겼습니다. 터미널의 승인 창에서 답해 주세요");
+      else for (const wake of [...entry.wake]) wake();
     }
   }
 }

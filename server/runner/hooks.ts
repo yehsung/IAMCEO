@@ -9,6 +9,7 @@
 // - 팀장마다 파일 하나, 상한을 넘으면 .1 로 한 번 돌린다(팀장당 최대 약 2배 상한).
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
+import { bunScriptCommand, shellQuote as quote } from "./bun-script.ts";
 
 export const HOOK_RECORDER_MARKER = "iamceo-hook-recorder";
 /** 나란히 모으는 다섯 사건. PermissionRequest 는 K(도구 승인)가 permissionHook 으로 따로 넣는다. */
@@ -104,8 +105,6 @@ clearTimeout(deadline);
 finish();
 `;
 
-function quote(value: string): string { return "'" + value.replaceAll("'", "'\\''") + "'"; }
-
 export interface HookRecorderOptions {
   execPath?: string;
   /** 시험에서만 줄인다. */
@@ -145,7 +144,8 @@ export interface HookSettingsInput {
 
 /**
  * --settings 의 `hooks` 키에 넣을 값을 돌려준다(이벤트 이름 → 매처 묶음 배열). 매처는 두지 않아 모든 경우에 돈다.
- * 기록 훅의 명령은 `BUN_BE_BUN=1 <실행 파일> <스크립트> <사건 폴더> <팀장> >/dev/null 2>&1; exit 0` 이다.
+ * 기록 훅의 명령은 `cd <run> && BUN_BE_BUN=1 <실행 파일> --config=<빈 설정> --no-env-file <스크립트> <사건 폴더> <팀장> >/dev/null 2>&1; exit 0` 이다.
+ * 팀장의 작업 폴더에 있는 bunfig.toml(preload)·.env 를 읽지 않는다(bun-script.ts). 입력·턴마다 그 폴더의 코드가 돌지 않게 한다.
  * 잘못된 팀장 ID·상대 경로면 던진다. 부르는 쪽(providers.ts)은 던지면 훅 없이 CLI 를 띄운다.
  */
 export function hookSettings(input: HookSettingsInput): Record<string, unknown> {
@@ -153,8 +153,9 @@ export function hookSettings(input: HookSettingsInput): Record<string, unknown> 
   if (input.events !== false) {
     if (!MEMBER_ID_RE.test(input.memberId)) throw new Error("Invalid member id for hook events");
     if (!isAbsolute(input.eventsDir)) throw new Error("Hook events directory must be absolute");
-    const script = writeHookRecorder(dirname(input.eventsDir), input.recorder);
-    const command = `BUN_BE_BUN=1 ${quote(input.recorder?.execPath ?? process.execPath)} ${quote(script)} ${quote(input.eventsDir)} ${quote(input.memberId)} >/dev/null 2>&1; exit 0`;
+    const runDir = dirname(input.eventsDir);
+    const script = writeHookRecorder(runDir, input.recorder);
+    const command = `cd ${quote(runDir)} 2>/dev/null && ${bunScriptCommand(input.recorder?.execPath ?? process.execPath, runDir, script)} ${quote(input.eventsDir)} ${quote(input.memberId)} >/dev/null 2>&1; exit 0`;
     for (const name of HOOK_EVENTS) hooks[name] = [{ hooks: [{ type: "command", command, timeout: HOOK_TIMEOUT_SEC }] }];
   }
   if (input.permissionHook) {

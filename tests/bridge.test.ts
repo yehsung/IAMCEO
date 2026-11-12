@@ -165,6 +165,18 @@ describe("브리지 왕복", () => {
     const list = JSON.parse((await callText(client, "project_list")).text) as { id: string }[];
     expect(list.map((p) => p.id)).toContain(project.id);
   }, 15_000);
+
+  test("CLI 환경에 HTTP_PROXY 가 있어도 이 Mac 의 서버로 바로 간다(팀장 열쇠가 프록시로 나가지 않는다, 리뷰 hooks-1)", async () => {
+    const proxied: string[] = [];
+    const proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) { proxied.push(req.url); return new Response("{}", { status: 502 }); } });
+    try {
+      const proxyUrl = `http://127.0.0.1:${proxy.port}`;
+      const client = await connect(store.getMemberToken(lead.id), { env: { HTTP_PROXY: proxyUrl, http_proxy: proxyUrl, NO_PROXY: "example.internal" } });
+      expect(await callText(client, "status", { now: "프록시 확인" })).toMatchObject({ isError: false });
+      expect(store.requireMember(lead.id).now).toBe("프록시 확인");
+      expect(proxied).toEqual([]);
+    } finally { proxy.stop(true); }
+  }, 15_000);
 });
 
 describe("잘못된 호출", () => {

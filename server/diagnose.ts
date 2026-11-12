@@ -107,6 +107,10 @@ function databaseSummary(db: Database): Record<string, unknown> {
     if (!SETTINGS_KEYS.includes(key)) continue;
     try { settings[key] = JSON.parse(String(row.value)); } catch { settings[key] = "?"; }
   }
+  // L(E3) 합치기: 팀장마다 전달 펌프의 마지막 판정(서버가 정한 코드·그 판정이 이어진 시작 시각·기한 넘김 시각). '왜 안 갔나'를 바로 본다.
+  // 판정 표가 없는 옛 DB 면 비운다.
+  const verdicts = new Map(safeRows(() => all("SELECT member_id, code, since, overdue_at FROM member_delivery_verdicts"), [])
+    .map(row => [String(row.member_id), { code: row.code, since: row.since, overdueAt: row.overdue_at }]));
   return {
     schemaVersion: safeRows(() => db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? null, null),
     rowCounts: counts,
@@ -118,6 +122,7 @@ function databaseSummary(db: Database): Record<string, unknown> {
         "context_window", "subagents", "parallel", "created_at", "updated_at", "now_at", "fence_code"]),
       hasSession: row.session_id != null, hasTerminal: row.pane_id != null,
       errorCode: codeOf(row.last_error), blockedCode: codeOf(row.blocked_reason),
+      pumpVerdict: verdicts.get(String(row.id)) ?? null,
     })), []),
     deliveriesByStatus: safeRows(() => all("SELECT status, COUNT(*) AS n FROM deliveries GROUP BY status"), []),
     openDeliveries: safeRows(() => all(`SELECT * FROM deliveries WHERE status IN ('queued','held','delivering') ORDER BY created_at LIMIT ${ROW_LIMIT}`).map(row => ({

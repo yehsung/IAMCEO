@@ -147,7 +147,9 @@ describe("턴 왕복", () => {
     expect(statSync(path).mode & 0o777).toBe(0o600);
     const mcp = JSON.parse(readFileSync(path, "utf8")).mcpServers.iamceo;
     expect(mcp.command).toBe(process.execPath);
-    expect(mcp.args).toEqual([resolve(import.meta.dir, "..", "bin", "iamceo.ts"), "mcp"]);
+    // 소스로 돌 때는 팀장 작업 폴더의 bunfig.toml·.env 를 읽지 않게 빈 설정과 --no-env-file 을 붙인다(리뷰 hooks-1).
+    expect(mcp.args).toEqual([`--config=${join(t.home, "run", "iamceo-empty-bunfig.toml")}`, "--no-env-file", resolve(import.meta.dir, "..", "bin", "iamceo.ts"), "mcp"]);
+    expect(readFileSync(join(t.home, "run", "iamceo-empty-bunfig.toml"), "utf8")).toBe("");
     expect(mcp.env.IAMCEO_TOKEN).toBe(t.store.getMemberToken(w.id));
     expect(mcp.env.IAMCEO_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
     expect(mcp.env.IAMCEO_URL).not.toEndWith(":0");

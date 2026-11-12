@@ -61,6 +61,19 @@ private let pong = IsolatedTestHTTPReply(data: Data(#"{"ok":true}"#.utf8))
 private let claimed = IsolatedTestHTTPReply(data: Data(#"{"accessCode":"dk1.fixture.secret","confirmationToken":"token"}"#.utf8))
 
 final class TailnetGuardTests: XCTestCase {
+    /// 리뷰 https-1: 100.64/10 주소 하나로는 켜진 것으로 보지 않는다(통신사 CGNAT·Cloudflare WARP). utun 의 tailnet IPv6 가 근거다.
+    func testTailscaleCountsAsOnOnlyWithTailnetIPv6OnATunnel() {
+        func list(_ pairs: [(String, String)]) -> [Tailnet.InterfaceAddress] { pairs.map { Tailnet.InterfaceAddress(name: $0.0, address: $0.1) } }
+        XCTAssertFalse(Tailnet.isConnected(interfaces: []))
+        XCTAssertFalse(Tailnet.isConnected(interfaces: list([("pdp_ip0", "100.70.1.2")])), "셀룰러 CGNAT 주소")
+        XCTAssertFalse(Tailnet.isConnected(interfaces: list([("en0", "100.64.12.7"), ("en0", "192.168.0.4")])), "Wi-Fi 의 CGNAT 주소")
+        XCTAssertFalse(Tailnet.isConnected(interfaces: list([("utun4", "100.96.0.5")])), "Cloudflare WARP 의 100.96/12")
+        XCTAssertFalse(Tailnet.isConnected(interfaces: list([("utun4", "100.96.0.5"), ("utun4", "2606:4700:110:8a3c::1")])), "WARP 의 IPv6")
+        XCTAssertFalse(Tailnet.isConnected(interfaces: list([("en0", "fd7a:115c:a1e0::1")])), "터널이 아닌 인터페이스")
+        XCTAssertTrue(Tailnet.isConnected(interfaces: list([("pdp_ip0", "100.70.1.2"), ("utun3", "100.101.2.3"), ("utun3", "fd7a:115c:a1e0:ab12:4843:cd96:6258:b240")])))
+        XCTAssertTrue(Tailnet.isConnected(interfaces: list([("utun7", "FD7A:115C:A1E0::5")])), "IPv4 를 끈 tailnet")
+    }
+
     func testOnlyPlainRequestsToTailscaleAddressesNeedTailscale() throws {
         for raw in ["http://100.64.0.7:7878", "http://sample-mac.tail0000.ts.net:7878", "ws://100.64.0.7:7878/ws", "http://[fd7a:115c:a1e0::1]:7878"] {
             XCTAssertTrue(Tailnet.needsTailnet(URL(string: raw)!), raw)

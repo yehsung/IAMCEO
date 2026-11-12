@@ -18,7 +18,7 @@ export interface RoleVars {
   CONDUCTOR: string;
   /** 서브에이전트 effort 규칙 한 줄. 정하지 않았으면 빈 글. */
   SUBAGENT_EFFORT?: string;
-  /** B1: 설정의 보고 언어. en 이면 지침 끝에 ENGLISH_REPORT_RULE 을 붙인다. 없거나 ko 면 그대로. */
+  /** B1: 설정의 보고 언어. en 이면 기본 규칙 끝(사용자 덧붙임 앞)에 ENGLISH_REPORT_RULE 을 붙인다. 없거나 ko 면 그대로. */
   REPORT_LANGUAGE?: ReportLanguage;
   /**
    * E10: 직접 붙인 세션(`iamceo join`, origin=manual)이면 true. 그 세션에만 있는 `wait` 도구의 안내(parts/manual-session.md)를
@@ -29,7 +29,8 @@ export interface RoleVars {
 
 /**
  * B1: 보고 언어가 영어일 때 지침 끝에 붙는 글. 첫 줄은 대표에게 쓰는 글을 영어로, 둘째 줄은 서버 머리말의 뜻.
- * 머리말([대표]·[총괄] 등)은 서버만 붙이는 규약 표지라 번역하지 않는다. 고쳐 쓴 템플릿에도 빠지지 않게 끝에 붙인다.
+ * 머리말([대표]·[총괄] 등)은 서버만 붙이는 규약 표지라 번역하지 않는다. 고쳐 쓴 템플릿에도 빠지지 않게 그 끝에 붙인다.
+ * 사용자 덧붙임(<kind>.extra.md)은 이 줄 뒤에 온다. 'any rule above' 가 대표가 일부러 더한 규칙을 덮지 않는다(renderRole).
  */
 export const ENGLISH_REPORT_RULE = `## Report language
 - Write everything the owner (대표) reads in English: \`post\` reports, \`ask\` cards (title, background, options, recommendation), \`todo\` items, \`status\` lines, file titles and replies. This replaces any rule above that asks for Korean or for a Korean translation of English text. Keep code, commands, paths and quoted text as they are.
@@ -101,14 +102,26 @@ export type RoleBaseState = "current" | "stale" | "unmarked" | "other_kind";
 /** 이 Mac 사용자가 고쳐 둔 역할 지침 하나(`<rolesDir>/<kind>.md`, `<kind>.extra.md`). */
 export interface RoleCustomization {
   kind: MemberKind;
-  /** `<kind>.md`: 기본 규칙 전체를 대신한다. base 는 기준판 표지와 지금 기본 규칙의 비교, approval 은 '승인' 낱말이 있는지. */
+  /** `<kind>.md`: 기본 규칙 전체를 대신한다. base 는 기준판 표지와 지금 기본 규칙의 비교, approval 은 승인 규칙이 남아 있는지(hasApprovalRule). */
   replacement: { path: string; base: RoleBaseState; baseKind: string | null; approval: boolean } | null;
-  /** `<kind>.extra.md`: 기본 규칙(또는 통째 교체 파일) 끝에 덧붙는다. 기본 규칙 개선은 그대로 받는다. */
-  extra: { path: string } | null;
+  /**
+   * `<kind>.extra.md`: 기본 규칙(또는 통째 교체 파일) 끝에 덧붙는다. 기본 규칙 개선은 그대로 받는다.
+   * unreadable: 그 이름의 것이 있지만 읽지 못한다(폴더이거나 권한 없음). 그때 덧붙임은 세션에 들어가지 않는다(renderRole).
+   */
+  extra: { path: string; unreadable?: boolean } | null;
 }
 
 function readIfExists(path: string): string | null {
   return existsSync(path) ? readFileSync(path, "utf8") : null;
+}
+
+/**
+ * 통째 교체 파일에 승인 규칙이 남아 있는가. 기본 지침의 승인 절(팀장 '## 승인', 총괄 '## 질문·승인', 본사 AI '## 승인과 일하는 법')을 지우면
+ * 팀원이 승인 없이 일할 수 있다. 낱말로 본다: 한국어 '승인' 또는 영어로 옮긴 파일의 approve·approval.
+ */
+export function hasApprovalRule(text: string): boolean {
+  const body = stripRoleBase(text);
+  return body.includes("승인") || /\bapprov/i.test(body);
 }
 
 function baseState(kind: MemberKind, text: string): { base: RoleBaseState; baseKind: string | null } {
@@ -119,7 +132,7 @@ function baseState(kind: MemberKind, text: string): { base: RoleBaseState; baseK
 }
 
 function replacementStatus(kind: MemberKind, path: string, text: string): NonNullable<RoleCustomization["replacement"]> {
-  return { path, ...baseState(kind, text), approval: stripRoleBase(text).includes("승인") };
+  return { path, ...baseState(kind, text), approval: hasApprovalRule(text) };
 }
 
 /** 고쳐 둔 역할 지침을 모은다(점검표의 `roles` 항목). 고친 것이 없으면 빈 배열. 읽지 못한 파일은 표지가 없는 것으로 본다. */
@@ -138,7 +151,10 @@ export function roleCustomizations(rolesDir: string): RoleCustomization[] {
     }
     try {
       if ((readIfExists(extraPath) ?? "").trim()) extra = { path: extraPath };
-    } catch { /* 읽지 못한 덧붙임은 세션에도 들어가지 않는다 */ }
+    } catch {
+      // 읽지 못한 덧붙임은 세션에도 들어가지 않는다(renderRole 이 건너뛰고 로그에 남긴다). 점검표에 알린다.
+      extra = { path: extraPath, unreadable: true };
+    }
     if (replacement || extra) out.push({ kind, replacement, extra });
   }
   return out;
@@ -149,7 +165,7 @@ export function replacementWarnings(kind: MemberKind, status: NonNullable<RoleCu
   const { path } = status;
   const extraName = `${kind}.extra.md`;
   const out: string[] = [];
-  if (!status.approval) out.push(`역할 템플릿 ${path} 에 승인 규칙이 없습니다. 기본 규칙 전체를 대체하므로 팀원이 승인 없이 일할 수 있습니다. 'iamceo roles export' 로 기본 규칙을 꺼내 고치세요`);
+  if (!status.approval) out.push(`역할 템플릿 ${path} 에 승인 규칙이 없습니다. 기본 규칙 전체를 대체하므로 팀원이 승인 없이 일할 수 있습니다. 'iamceo roles export' 로 꺼낸 기본 규칙의 승인 절을 이 파일에 그대로 남기세요`);
   if (status.base === "unmarked") {
     out.push(`역할 템플릿 ${path} 에 기준판 표지가 없어, 기본 규칙이 바뀌어도 이 파일에는 들어가지 않고 알 수도 없습니다. 'iamceo roles export' 로 새 기본 규칙을 꺼내 고친 부분을 옮기거나, 더할 규칙만 ${extraName} 로 옮기세요`);
   } else if (status.base === "stale") {
@@ -198,18 +214,37 @@ function placeLine(template: string, key: "SUBAGENT_EFFORT" | "MANUAL_SESSION", 
   return appendIfMissing && value ? `${template.trimEnd()}\n${value}\n` : template;
 }
 
+/** 제목 없이 쓴 덧붙임을 넣는 절. 그대로 이으면 기본 지침의 마지막 절(도구 응답 유실) 안의 규칙으로 읽힌다. */
+export const EXTRA_RULES_HEADING = "## 이 Mac에서 더한 규칙";
+
+/** 덧붙임 글. 제목(#)으로 시작하지 않으면 EXTRA_RULES_HEADING 아래에 둔다. */
+function extraSection(extra: string): string {
+  return /^#{1,6}[ \t]/.test(extra) ? extra : `${EXTRA_RULES_HEADING}\n${extra}`;
+}
+
+/** 덧붙임 파일을 읽는다. 읽지 못하면(폴더·권한 없음) 덧붙임 없이 렌더하고 로그에 한 번 남긴다. 띄우기·전달을 막지 않는다. */
+function readExtra(path: string): string {
+  try { return stripRoleBase(readIfExists(path) ?? "").trim(); }
+  catch (error) {
+    warnOnce(path, [`역할 덧붙임 ${path} 을 읽지 못해 넣지 않았습니다(${(error as NodeJS.ErrnoException).code ?? (error as Error).message}). 파일로 고치거나 지우세요`]);
+    return "";
+  }
+}
+
 /**
  * 역할 지침을 만든다(spec §8).
  * - `<rolesDir>/<kind>.md` 가 있으면 기본 규칙 대신 그것을 쓴다(통째 교체). 기준판 표지 줄은 지우고, 표지가 없거나 옛것이면 로그에 경고한다.
- * - `<rolesDir>/<kind>.extra.md` 가 있으면 그 끝에 덧붙인다(사용자 덧붙임, 기본으로 권하는 방식).
- * - 보고 언어 줄은 언제나 맨 끝이다. 값 안의 {{...}} 는 다시 치환하지 않는다.
+ * - `<rolesDir>/<kind>.extra.md` 가 있으면 맨 끝에 덧붙인다(사용자 덧붙임, 기본으로 권하는 방식). 제목 없이 쓴 덧붙임은
+ *   '## 이 Mac에서 더한 규칙' 절 아래에 둔다. 읽지 못하면 덧붙임 없이 만든다(로그에 남기고 점검표에 알린다).
+ * - 보고 언어 줄은 기본 규칙(또는 통째 교체 파일) 끝, 덧붙임 앞에 온다. 그 줄의 '위의 한국어 요구 규칙은 대체된다'가
+ *   대표가 일부러 더한 규칙까지 덮지 않게, 덧붙임이 마지막 말이 된다. 값 안의 {{...}} 는 다시 치환하지 않는다.
  */
 export function renderRole(kind: MemberKind, vars: RoleVars, rolesDir?: string): string {
   const customPath = rolesDir ? join(rolesDir, `${kind}.md`) : null;
   const custom = customPath ? readIfExists(customPath) : null;
   if (customPath && custom !== null) warnOnce(customPath, replacementWarnings(kind, replacementStatus(kind, customPath, custom)));
   const extraPath = rolesDir ? join(rolesDir, `${kind}.extra.md`) : null;
-  const extra = extraPath ? stripRoleBase(readIfExists(extraPath) ?? "").trim() : "";
+  const extra = extraPath ? readExtra(extraPath) : "";
 
   const rule = vars.SUBAGENT_EFFORT ?? "";
   const manual = vars.MANUAL ? manualSession.replace(/\n+$/, "") : "";
@@ -218,9 +253,11 @@ export function renderRole(kind: MemberKind, vars: RoleVars, rolesDir?: string):
   let template = custom !== null ? stripRoleBase(custom) : BUILT_IN[kind];
   template = placeLine(template, "SUBAGENT_EFFORT", rule, true);
   template = placeLine(template, "MANUAL_SESSION", manual, false);
-  if (extra) template = `${template.trimEnd()}\n\n${extra}\n`;
 
   const values: Record<string, string> = { PROJECT: vars.PROJECT, NAME: vars.NAME, ROLE: vars.ROLE, CONDUCTOR: vars.CONDUCTOR, SUBAGENT_EFFORT: rule, MANUAL_SESSION: manual };
-  const rendered = template.replace(/\{\{(PROJECT|NAME|ROLE|CONDUCTOR|SUBAGENT_EFFORT|MANUAL_SESSION)\}\}/g, (_, key: string) => values[key] ?? "");
-  return vars.REPORT_LANGUAGE === "en" ? `${rendered.trimEnd()}\n\n${ENGLISH_REPORT_RULE}\n` : rendered;
+  const fill = (text: string) => text.replace(/\{\{(PROJECT|NAME|ROLE|CONDUCTOR|SUBAGENT_EFFORT|MANUAL_SESSION)\}\}/g, (_, key: string) => values[key] ?? "");
+  let rendered = fill(template);
+  if (vars.REPORT_LANGUAGE === "en") rendered = `${rendered.trimEnd()}\n\n${ENGLISH_REPORT_RULE}\n`;
+  if (extra) rendered = `${rendered.trimEnd()}\n\n${fill(extraSection(extra))}\n`;
+  return rendered;
 }

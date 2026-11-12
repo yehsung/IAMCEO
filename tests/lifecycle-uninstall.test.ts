@@ -19,7 +19,7 @@ const entry = resolve(import.meta.dir, "../bin/iamceo.ts");
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-function fixture(options: { serviceHome?: string; home?: (root: string) => string; program?: (root: string) => string[] | null } = {}) {
+function fixture(options: { serviceHome?: string; home?: (root: string) => string; program?: (root: string) => string[] | null; https?: boolean } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-uninstall-")));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const userHome = join(root, "user"), home = options.home?.(root) ?? join(userHome, ".iamceo");
@@ -27,7 +27,10 @@ function fixture(options: { serviceHome?: string; home?: (root: string) => strin
   const env: NodeJS.ProcessEnv = { ...process.env, IAMCEO_HOME: home, IAMCEO_PORT: "47999", IAMCEO_TEST: "1" };
   updateConfigFile({ accessCode: "uninstall-fixture-code", hosts: ["127.0.0.1"] }, env);
   const db = openDb(join(home, "iamceo.db"));
-  new Store(db, new Bus()).createProject({ name: "멈출 프로젝트", cwd: root });
+  const store = new Store(db, new Bus());
+  store.createProject({ name: "멈출 프로젝트", cwd: root });
+  // 대표가 설정에서 켠 HTTPS 주소(tailscale serve)의 기록.
+  if (options.https) store.rememberTailnetHttps({ url: "https://sample-mac.tail0000.ts.net", port: 47999, at: "2026-11-13T00:00:00.000Z", home });
   db.close();
   const plistPath = join(userHome, "Library", "LaunchAgents", "com.iamceo.server.plist");
   mkdirSync(dirname(plistPath), { recursive: true });
@@ -45,6 +48,8 @@ function fixture(options: { serviceHome?: string; home?: (root: string) => strin
     return { ok: false, output: "unexpected" };
   };
   const sleeps: { id: string; body: unknown }[] = [];
+  const httpsCalls: unknown[] = [];
+  let httpsReply: () => Response = () => Response.json({ state: "off", checkedAt: "2026-11-13T00:00:00.000Z" });
   const members: Record<string, { id: string; name: string; origin: string; status: string }[]> = {
     hq: [{ id: "m_root", name: "본사 AI", origin: "runner", status: "idle" }],
     p1: [
@@ -61,6 +66,7 @@ function fixture(options: { serviceHome?: string; home?: (root: string) => strin
     if (url.pathname === "/api/health") return json({ ok: true, version: "0.2.3" });
     if (new Headers(init?.headers).get("authorization") !== "Bearer uninstall-fixture-code") return json({ error: "인증이 필요합니다" }, 401);
     if (url.pathname === "/api/bootstrap") return json({ projects: [{ id: "hq" }, { id: "p1" }] });
+    if (url.pathname === "/api/tailnet/https" && init?.method === "POST") { httpsCalls.push(JSON.parse(String(init.body))); return httpsReply(); }
     const state = /^\/api\/projects\/([^/]+)\/state$/.exec(url.pathname);
     if (state) return json({ members: members[state[1]!] ?? [] });
     const sleep = /^\/api\/members\/([^/]+)\/sleep$/.exec(url.pathname);
@@ -85,7 +91,8 @@ function fixture(options: { serviceHome?: string; home?: (root: string) => strin
     launchctl: control, userHome, uid: 501, env, sleep: async () => {}, log: line => logs.push(line), fetch: fakeFetch, core: coreControl,
     confirm: async () => { throw new Error("확인 없이 진행해야 한다"); }, stopTimeoutMs: 50, ...extra,
   });
-  return { root, userHome, home, env, plistPath, launchctl, sleeps, core, logs, deps,
+  return { root, userHome, home, env, plistPath, launchctl, sleeps, core, logs, deps, httpsCalls,
+    setHttpsReply(reply: () => Response) { httpsReply = reply; },
     get loaded() { return loaded; }, downServer() { serverUp = false; }, keepServerOutsideService() { serverOutsideService = true; } };
 }
 
@@ -125,6 +132,83 @@ describe("uninstall", () => {
     expect(removed.purged).toBe(true);
     expect(existsSync(g.home)).toBe(false);
     replies = [];
+  });
+
+  describe("켜 둔 HTTPS 주소(tailscale serve, 리뷰 https-2)", () => {
+    const DNS = "sample-mac.tail0000.ts.net";
+    const RUNNING = { BackendState: "Running", Self: { DNSName: `${DNS}.` }, CertDomains: [DNS] };
+    const servedAt = (port: number) => ({ TCP: { "443": { HTTPS: true } }, Web: { [`${DNS}:443`]: { Handlers: { "/": { Proxy: `http://127.0.0.1:${port}` } } } } });
+    /** 가짜 tailscale: serve 끄기를 적고, 끄면 serve status 를 비운다. */
+    function fakeTailscale(serve: unknown, offWorks = true) {
+      const calls: string[] = [];
+      let current = serve;
+      const run = async (args: string[]) => {
+        const key = args.join(" ");
+        calls.push(key);
+        if (key === "status --json") return { code: 0, stdout: JSON.stringify(RUNNING), stderr: "" };
+        if (key === "serve status --json") return { code: 0, stdout: JSON.stringify(current), stderr: "" };
+        if (key === "serve --https=443 off") { if (!offWorks) return { code: 1, stdout: "", stderr: "denied" }; current = {}; return { code: 0, stdout: "", stderr: "" }; }
+        return { code: 1, stdout: "", stderr: `unexpected ${key}` };
+      };
+      return { run, calls };
+    }
+    const recordOf = (home: string) => {
+      const db = openDb(join(home, "iamceo.db"));
+      try { return new Store(db, new Bus()).tailnetHttps(); } finally { db.close(); }
+    };
+
+    test("서버가 떠 있으면 서버에게 끄게 하고(팀장 재우기 전), 계획에도 보인다", async () => {
+      const f = fixture({ https: true });
+      await uninstall({ dryRun: true }, f.deps());
+      expect(f.logs.join("\n")).toContain("켜 둔 HTTPS 주소(이 서버가 만든 tailscale serve 설정)를 끄고");
+      expect(f.httpsCalls).toEqual([]);
+      const outcome = await uninstall({ yes: true }, f.deps());
+      expect(f.httpsCalls).toEqual([{ enabled: false }]);
+      expect(outcome.tailnetHttps).toBe("off");
+      expect(f.logs.join("\n")).toContain("HTTPS 주소(tailscale serve)를 껐습니다");
+      expect(f.logs.findIndex(line => line.includes("HTTPS 주소(tailscale serve)를 껐습니다"))).toBeLessThan(f.logs.findIndex(line => line.includes("팀장 2명을 재웠습니다")));
+    });
+
+    test("서버가 꺼져 있으면 DB 의 기록으로 이 서버의 설정일 때만 직접 끄고 기록을 지운다. 남의 설정은 건드리지 않는다", async () => {
+      const f = fixture({ https: true });
+      f.downServer();
+      const tailscale = fakeTailscale(servedAt(47999));
+      const outcome = await uninstall({ yes: true }, f.deps({ tailscale: tailscale.run }));
+      expect(tailscale.calls).toContain("serve --https=443 off");
+      expect(outcome.tailnetHttps).toBe("off");
+      expect(recordOf(f.home)).toBeNull();
+
+      const g = fixture({ https: true });
+      g.downServer();
+      const foreign = fakeTailscale(servedAt(3000));
+      expect((await uninstall({ yes: true }, g.deps({ tailscale: foreign.run }))).tailnetHttps).toBe("off");
+      expect(foreign.calls).not.toContain("serve --https=443 off");
+    });
+
+    test("끄지 못하면 남은 명령을 알리고 나머지는 계속한다", async () => {
+      const f = fixture({ https: true });
+      f.downServer();
+      const tailscale = fakeTailscale(servedAt(47999), false);
+      const outcome = await uninstall({ yes: true }, f.deps({ tailscale: tailscale.run }));
+      expect(outcome.tailnetHttps).toBe("failed");
+      expect(f.logs.join("\n")).toContain("tailscale serve --https=443 off 로 끄세요");
+      expect(outcome.core.stopped).toBe(true);
+      // 서버가 끄지 못했다고 답해도 같다.
+      const g = fixture({ https: true });
+      g.setHttpsReply(() => Response.json({ state: "pending", url: "https://sample-mac.tail0000.ts.net", problem: { code: "tailnet_https_off_failed", message: "Tailscale의 HTTPS 설정을 지우지 못했습니다" } }));
+      const failed = await uninstall({ yes: true }, g.deps());
+      expect(failed.tailnetHttps).toBe("failed");
+      expect(g.logs.join("\n")).toContain("Tailscale의 HTTPS 설정을 지우지 못했습니다");
+    });
+
+    test("켠 기록이 없으면 HTTPS 단계는 없다(서버에도 tailscale 에도 묻지 않는다)", async () => {
+      const f = fixture();
+      const tailscale = fakeTailscale(servedAt(47999));
+      const outcome = await uninstall({ yes: true }, f.deps({ tailscale: tailscale.run }));
+      expect(outcome.tailnetHttps).toBe("none");
+      expect(f.httpsCalls).toEqual([]);
+      expect(tailscale.calls).toEqual([]);
+    });
   });
 
   test("확인을 받지 못하면 아무것도 멈추지 않는다", async () => {

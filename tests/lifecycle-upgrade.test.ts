@@ -302,6 +302,62 @@ describe("설치판 업그레이드", () => {
     expect(readinessBudget(120_000, 60_000)).toBe(210_000);
   });
 
+  describe("켜 둔 HTTPS 주소(tailscale serve)는 되돌리기 전에 끈다(리뷰 https-3)", () => {
+    const remember = (home: string) => {
+      const db = openDb(join(home, "iamceo.db"));
+      try { new Store(db, new Bus()).rememberTailnetHttps({ url: "https://sample-mac.tail0000.ts.net", port: 0, at: "2026-11-13T00:00:00.000Z", home }); } finally { db.close(); }
+    };
+    /** 지금 도는 서버의 POST /api/tailnet/https. */
+    const fakeServer = (reply: () => Response) => {
+      const calls: unknown[] = [];
+      const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.pathname === "/api/tailnet/https" && init?.method === "POST") { calls.push(JSON.parse(String(init.body))); return reply(); }
+        return new Response("{}", { status: 404 });
+      }) as typeof globalThis.fetch;
+      return { fetch, calls };
+    };
+
+    test("rollback: 지금 서버에게 끄게 하고 되돌린다. 계획에도 보인다", async () => {
+      const f = releaseFixture();
+      await upgrade({ from: f.release("0.2.4") }, f.deps());
+      remember(f.home);
+      const server = fakeServer(() => Response.json({ state: "off", checkedAt: "2026-11-13T00:00:00.000Z" }));
+      await rollback({ dryRun: true }, f.deps({ fetch: server.fetch }));
+      expect(f.logs.join("\n")).toContain("켜 둔 HTTPS 주소(tailscale serve)는 바꾸기 전에 끕니다");
+      expect(server.calls).toEqual([]);
+      expect(await rollback({}, f.deps({ fetch: server.fetch }))).toMatchObject({ status: "rolled_back", to: "0.2.3" });
+      expect(server.calls).toEqual([{ enabled: false }]);
+      expect(versionAt(f.app)).toBe("0.2.3");
+      expect(f.logs.join("\n")).toContain("설정 → 연결 → HTTPS 주소에서 켜세요");
+    });
+
+    test("rollback: 끄지 못하면 되돌리지 않고 까닭을 말한다(서비스·앱·기록 그대로)", async () => {
+      const f = releaseFixture();
+      await upgrade({ from: f.release("0.2.4") }, f.deps());
+      remember(f.home);
+      const bootouts = f.service.calls.filter(call => call === "bootout").length;
+      const server = fakeServer(() => Response.json({ state: "pending", url: "https://sample-mac.tail0000.ts.net", problem: { code: "tailnet_https_off_failed", message: "Tailscale의 HTTPS 설정을 지우지 못했습니다" } }));
+      await expect(rollback({}, f.deps({ fetch: server.fetch }))).rejects.toThrow("HTTPS 주소를 끄지 못해 되돌리지 않았습니다");
+      expect(versionAt(f.app)).toBe("0.2.4");
+      expect(f.service.calls.filter(call => call === "bootout").length).toBe(bootouts);
+      expect(latestRollbackTarget(f.home)?.phase).toBe("done");
+    });
+
+    test("낮은 판으로 바꾸는 upgrade(--allow-downgrade)도 먼저 끈다. 앞으로 가는 upgrade 는 묻지 않는다", async () => {
+      const f = releaseFixture();
+      remember(f.home);
+      const server = fakeServer(() => Response.json({ state: "off", checkedAt: "2026-11-13T00:00:00.000Z" }));
+      await upgrade({ from: f.release("0.2.4") }, f.deps({ fetch: server.fetch }));
+      expect(server.calls).toEqual([]);
+      const refused = fakeServer(() => new Response("{}", { status: 503 }));
+      await expect(upgrade({ from: f.release("0.2.2"), allowDowngrade: true }, f.deps({ fetch: refused.fetch }))).rejects.toThrow("HTTPS 주소를 끄지 못해 낮은 판으로 바꾸지 않았습니다");
+      expect(versionAt(f.app)).toBe("0.2.4");
+      expect(await upgrade({ from: f.release("0.2.2"), allowDowngrade: true }, f.deps({ fetch: server.fetch }))).toMatchObject({ status: "upgraded", to: "0.2.2" });
+      expect(server.calls).toEqual([{ enabled: false }]);
+    });
+  });
+
   test("--dry-run 은 계획만 보여 주고 받지도 바꾸지도 않는다(시험 환경에서도 된다)", async () => {
     const f = releaseFixture();
     const outcome = await upgrade({ from: f.release("0.2.4"), dryRun: true }, { ...f.deps(), launchctl: undefined });

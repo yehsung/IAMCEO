@@ -42,6 +42,9 @@ function toolError(text: string) {
 }
 
 export async function runBridge(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  // 이 Mac 의 서버(127.0.0.1)로 가는 요청은 프록시를 거치지 않는다. Bun 은 HTTP_PROXY 가 있으면 127.0.0.1 로 가는 요청도 프록시로 보내
+  // 팀장 열쇠가 실린 요청이 밖으로 나간다(runner/permission-hook.ts 와 같은 처리).
+  for (const key of ["NO_PROXY", "no_proxy"]) process.env[key] = [process.env[key], "127.0.0.1", "localhost", "::1"].filter(Boolean).join(",");
   const base = env.IAMCEO_URL?.replace(/\/+$/, "");
   const token = env.IAMCEO_TOKEN;
   if (!base || !token) {

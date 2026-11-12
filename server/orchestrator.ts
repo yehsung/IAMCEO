@@ -6,6 +6,7 @@ import { ApiRecovery, classifyTurnError, limitedModelName, modelCreditLimit, NoT
 import { DeliveryRecovery, type RecoveryRunner } from "./delivery-recovery.ts";
 import { verdictRejudged, type PumpVerdictCode } from "./pump-verdict.ts";
 import { writeStatuslineWrapper } from "./runner/statusline.ts";
+import { emptyBunfig } from "./runner/bun-script.ts";
 import { endedByRestart, RESTART_EXIT_NOTE, RESTART_REOPENED_NOTE, RESTART_RESUME_TEXT, RESTART_WAKE_MAX_ATTEMPTS, RESTART_WAKE_PACING, restartNoteIn, type RestartWake, type RestartWakePacing } from "./restart-wake.ts";
 // Orchestrator: 전달 펌프, 턴 종료 처리, 압축 판단, 띄우기·잠재우기·다시 열기, 승인 근거 확인(spec §4·§6·§7).
 //
@@ -730,6 +731,8 @@ export class Orchestrator implements OrchestratorApi {
         this.recheckMemberDelivery(id);
       },
       nudge: id => this.nudgeStalled(id),
+      // 판정 줄이 아직 없는 팀장(업그레이드 첫 시작). 재시도 간격은 풀지 않고 펌프만 돌려 판정을 남기게 한다. 복구 중이면 복구 끝의 펌프가 한다.
+      judge: id => { if (!this.closed && !this.recovering && !this.runtimes.get(id)?.pumping) void this.pump(id); },
     });
     this.deliveryRecovery = deps.deliveryRecovery ?? new OrchestratorDeliveryRecovery(this.store, member => this.recoveryRunner(member), dispatch => this.writerDone(dispatch), memberId => this.repairAdmitted(memberId), dispatch => this.writing(dispatch));
     this.timings = { ...DEFAULT_TIMINGS, ...deps.timings };
@@ -1889,6 +1892,9 @@ export class Orchestrator implements OrchestratorApi {
    * (판정 기준이 60초·120초라 그보다 자주 볼 까닭이 없다).
    */
   private detectStallsSoon(): void {
+    // 복구 중에는 보지 않는다. 그동안 다시 밀기(nudgeStalled)는 아무것도 하지 않는데 '이미 밀어 봄'으로 세져, 다음 점검이 곧바로 알리게 된다.
+    // 복구가 끝나면 recover() 의 전달 확인(settleInFlight)이 곧바로 다시 본다.
+    if (this.recovering || this.closed) return;
     if (Date.now() - this.lastStallCheck < Math.min(10_000, this.timings.healthMs * 2)) return;
     this.lastStallCheck = Date.now();
     this.rejudgeQuietVerdicts();
@@ -2827,10 +2833,9 @@ export class Orchestrator implements OrchestratorApi {
     } finally { this.archiving.delete(project.id); }
     // E3: 보관하거나 실행을 끄면 기다리던 전달의 까닭이 바뀐다. 펌프가 다시 판정해 남기게 한다(펌프는 그 상태에서 보내지 않는다).
     if (patch.archived === true || patch.runnerEnabled === false) for (const id of new Set(this.store.listUndelivered(project.id).map(d => d.memberId))) void this.pump(id);
-    if (patch.archived === false) {
-      const stopped = this.store.listUndelivered(project.id).filter(d => d.status === "held" && d.holdReason === "archived");
-      for (const id of new Set(stopped.map(d => d.memberId))) void this.pump(id);
-    }
+    // 보관을 풀면 그 프로젝트에 기다리는 전달이 있는 팀장을 모두 다시 판정한다. 보관 전에 잠들어 '잠들 때 보류'만 남은 팀장도
+    // 판정이 '보관됨'으로 남지 않게 한다(펌프는 그 팀장을 깨우지 않고 asleep_hold 로 판정만 한다. 30초 틱은 이런 팀장을 건너뛴다).
+    if (patch.archived === false) for (const id of new Set(this.store.listUndelivered(project.id).map(d => d.memberId))) void this.pump(id);
   }
 
   async startConductor(projectId: string): Promise<Member> {
@@ -4648,13 +4653,15 @@ export class Orchestrator implements OrchestratorApi {
     if (member.status === "blocked") {
       this.deferCoreCompact(member, "blocked");
       for (const d of pending) this.hold(d, "blocked");
-      return this.judged(memberId, "approval");
+      // K(E2) 합치기: 결재함에 도구 승인 카드가 열려 있으면 그 판정으로 남긴다(앱에는 같은 approval).
+      return this.judged(memberId, this.toolPermissions.waiting(memberId) ? "tool_permission" : "approval");
     }
     if (this.isBusy(member)) {
       this.deferCoreCompact(member, "working");
       const urgent = pending.filter((d) => d.urgent);
       // 일하는 중이라는 판정은 긴급을 넣기 전에 남긴다(넣는 동안 화면이 앞 판정을 보여 주지 않게).
-      this.judged(memberId, this.busyVerdict(member, "busy"));
+      // 도구 승인 카드가 열려 있으면 CLI 는 승인 창 앞이다(창을 blocked 로 알리지 않는 CLI 라도): 일하는 중이 아니라 승인 대기로 보인다. 동작은 같다.
+      this.judged(memberId, this.toolPermissions.waiting(memberId) ? "tool_permission" : this.busyVerdict(member, "busy"));
       // core 는 돌고 있는 턴에 끼워 넣을 수 없다(interjects=false). 끝나면 묶어서 나간다.
       if (urgent.length > 0 && this.interjects(runner)) { rt.pumpStage = "send_urgent"; await this.sendUrgent(member, project, runner, urgent); }
       return;
@@ -5876,7 +5883,7 @@ export class Orchestrator implements OrchestratorApi {
     const mcpConfigFile = join(dir, `${member.id}.mcp.json`);
     writeFileSync(systemPromptFile, this.rulesFor(member, project));
     const env = { IAMCEO_URL: this.serverUrl, IAMCEO_TOKEN: this.store.getMemberToken(member.id) };
-    writeFileSync(mcpConfigFile, `${JSON.stringify({ mcpServers: { iamceo: { ...mcpCommand(), env } } }, null, 2)}\n`, { mode: 0o600 });
+    writeFileSync(mcpConfigFile, `${JSON.stringify({ mcpServers: { iamceo: { ...mcpBridgeCommand(dir), env } } }, null, 2)}\n`, { mode: 0o600 });
     chmodSync(mcpConfigFile, 0o600);
     // 바이패스는 대표가 확인한 모드일 때만 경고 창을 끈다. 그래야 첫 경고 창이 아무도 안 보는 칸에서 일을 막지 않는다.
     let settingsFile: string | undefined;
@@ -5925,4 +5932,15 @@ export function cliCommand(): string {
 export function mcpCommand(): { command: string; args: string[] } {
   if (import.meta.path.startsWith("/$bunfs/")) return { command: process.execPath, args: ["mcp"] };
   return { command: process.execPath, args: [resolve(import.meta.dir, "..", "bin", "iamceo.ts"), "mcp"] };
+}
+
+/**
+ * 팀장 MCP 설정의 다리 명령. CLI 는 다리를 팀장의 작업 폴더에서 띄운다. 소스로 돌 때(bun bin/iamceo.ts)는 그 폴더의 bunfig.toml(preload)·.env 를
+ * 읽지 않게 한다(runner/bun-script.ts 와 같은 까닭: 팀장 열쇠를 쥔 프로세스에서 남의 저장소 코드가 돌거나 HTTP_PROXY 가 요청을 돌리지 않게).
+ * 컴파일 실행 파일은 빌드할 때 그 자동 읽기를 끈다(--no-compile-autoload-dotenv·--no-compile-autoload-bunfig).
+ */
+export function mcpBridgeCommand(runDir: string): { command: string; args: string[] } {
+  const { command, args } = mcpCommand();
+  if (import.meta.path.startsWith("/$bunfs/")) return { command, args };
+  return { command, args: [`--config=${emptyBunfig(runDir)}`, "--no-env-file", ...args] };
 }

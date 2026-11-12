@@ -16,7 +16,7 @@ import { permissionHook, PERMISSION_HOOK_MARKER, PERMISSION_HOOK_TIMEOUT_SEC, TO
 import { providerLaunch } from "../server/runner/providers.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
-import { describeToolRequest, redactSecrets, ToolPermissions, type ToolPermissionDeps } from "../server/tool-permission.ts";
+import { describeToolRequest, redactSecrets, TOOL_PERMISSION_NOTE_ONLY, ToolPermissions, type ToolPermissionDeps } from "../server/tool-permission.ts";
 import type { Decision, Member } from "../shared/types.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
@@ -215,11 +215,11 @@ describe("ToolPermissions: 카드를 띄우고 대표의 답을 훅에 돌려준
     expect((await next).state).toBe("closed");
   });
 
-  test("서버가 다시 시작되면 지난 카드를 닫고, 모르는 카드를 기다리면 closed", async () => {
+  test("서버가 비정상으로 끝났다 다시 시작되면 지난 카드를 닫고, 모르는 카드를 기다리면 closed", async () => {
     const { store, member } = storeFixture();
     const before = permissions(store, { pollMs: 30 });
     const left = await before.tp.request(member, bash());
-    before.tp.dispose();
+    // 비정상 종료: dispose 없이 프로세스가 사라졌다(카드는 열린 채 DB 에 남는다).
     const after = permissions(store);
     expect(after.tp.closeLeftovers()).toBe(1);
     expect(store.requireDecision(left.id!).closeReason).toContain("서버가 다시 시작되어");
@@ -230,6 +230,42 @@ describe("ToolPermissions: 카드를 띄우고 대표의 답을 훅에 돌려준
     expect(await after.tp.wait(member, orphan.id)).toMatchObject({ state: "closed" });
     expect(store.requireDecision(orphan.id).status).toBe("closed");
     expect(() => after.tp.answer(orphan.id, { choice: "allow" })).toThrow();
+  });
+
+  test("정상 종료(dispose)는 답을 기다리던 카드를 닫는다: 되돌린 옛 판(카드 종류를 모름)에 보통 결재로 남지 않는다", async () => {
+    const { store, member, db } = storeFixture();
+    const before = permissions(store, { pollMs: 5_000 });
+    const waiting = before.tp.request(member, bash("git push"));
+    const id = store.listOpenToolPermissions()[0]!.id;
+    // 답한 뒤 아직 훅에 건네지 않은 카드는 답한 그대로 둔다.
+    const answeredWait = before.tp.request(member, bash("ls"));
+    const answeredId = store.listOpenToolPermissions().find(card => card.id !== id)!.id;
+    before.tp.answer(answeredId, { choice: "allow" });
+    before.tp.dispose();
+    before.tp.dispose();
+    expect(await waiting).toEqual({ id, state: "closed" });
+    expect(await answeredWait).toEqual({ id: answeredId, state: "allow" });
+    expect(store.requireDecision(id)).toMatchObject({ status: "closed", closeKind: null });
+    expect(store.requireDecision(id).closeReason).toContain("서버가 멈춰 승인 요청이 끊겼습니다");
+    expect(store.requireDecision(answeredId).status).toBe("delivered");
+    // 옛 판(089f2ab)의 결재 대기 질의는 종류를 거르지 않았다. 그 질의로도 열린 결재가 없다.
+    expect(db.query("SELECT COUNT(*) AS n FROM decisions WHERE member_id = ? AND status = 'open'").get(member.id)).toEqual({ n: 0 });
+    expect(permissions(store).tp.closeLeftovers()).toBe(0);
+    // 닫은 뒤의 요청은 카드를 열지 않는다.
+    expect(await before.tp.request(member, bash())).toEqual({ id: null, state: "closed" });
+  });
+
+  test("카드 본문은 메모만 보내면 거절로 처리한다고 알린다", async () => {
+    const { store, member } = storeFixture();
+    const { tp } = permissions(store, { pollMs: 30 });
+    await tp.request(member, bash());
+    const card = store.listOpenToolPermissions()[0]!;
+    expect(card.detail!.split("\n").at(-1)).toBe(TOOL_PERMISSION_NOTE_ONLY);
+    expect(TOOL_PERMISSION_NOTE_ONLY).toBe("허용·거절 가운데 하나를 고르세요. 메모만 보내면 거절로 처리합니다.");
+    for (const file of ["troubleshooting.md", "troubleshooting.en.md"]) {
+      const text = readFileSync(join(import.meta.dir, "..", "docs", "guide", file), "utf8");
+      expect(text).toContain(file.endsWith(".en.md") ? "A note sent without choosing counts as **거절** (Deny)" : "메모만 보내면 거절로 처리합니다");
+    }
   });
 
   test("보관한 프로젝트·사람이 직접 답하는 도구(질문 창)에는 카드를 띄우지 않는다", async () => {
@@ -382,6 +418,21 @@ describe("providerLaunch: 도구 승인 훅을 넣는 팀장", () => {
     expect(Object.keys(both)).toContain("PermissionRequest");
     expect(Object.keys(both)).toContain("Stop");
   });
+
+  test("합치기: 한쪽 훅을 만들지 못해도 다른 쪽은 그대로 넣는다(사건 기록과 도구 승인이 서로를 빼지 않는다)", () => {
+    const dir = temp();
+    // 승인 훅을 만들 수 없다(상대 경로 MCP 설정): 사건 기록 다섯 개는 남는다.
+    const noPermission = hooksOf(providerLaunch(member(), { ...opts(dir), mcpConfigFile: "relative.mcp.json" }, { claudeBin: "/fake/claude", contextHome: dir, toolPermission: true }).argv)!;
+    expect(Object.keys(noPermission).sort()).toEqual(["PostCompact", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
+    // 사건 기록을 만들 수 없다(팀장 ID 모양이 틀림): 승인 훅은 남는다.
+    const noEvents = hooksOf(providerLaunch(member({ id: "bad id/.." }), opts(dir), { claudeBin: "/fake/claude", contextHome: dir, toolPermission: true }).argv)!;
+    expect(Object.keys(noEvents)).toEqual(["PermissionRequest"]);
+    // permissionHook 은 늘 hookSettings 가 받는 값(빈 아닌 명령, 양의 정수 제한 시간)을 준다.
+    const hook = permissionHook({ runDir: join(dir, "run"), mcpConfigFile: join(dir, "m_one.mcp.json") });
+    expect(hook.command.trim().length).toBeGreaterThan(0);
+    expect(Number.isSafeInteger(hook.timeoutSec) && hook.timeoutSec > 0).toBe(true);
+    expect(() => permissionHook({ runDir: "run", mcpConfigFile: "x.json" })).toThrow();
+  });
 });
 
 // ---- 서버 끝까지: 팀장 통로 + 대표의 결재 답(출시된 앱과 같은 요청) ----
@@ -476,6 +527,17 @@ describe("서버: 팀장 통로로 올리고 결재 답 경로로 답한다", ()
     expect(late.status).toBe(409);
     expect((await f.owner(`/api/decisions/${orphan.id}/reopen`, {})).status).toBe(409);
     expect(f.store.requireDecision(orphan.id).closeKind).toBeNull();
+  });
+
+  test("서버를 멈추면(shutdown) 열린 카드가 닫히고 기다리던 훅은 닫힘을 받는다(리뷰 hooks-2)", async () => {
+    const f = await serverFixture();
+    const pending = f.agent("/agent/permission", { toolName: "Bash", toolInput: { command: "make deploy" } }).then(r => r.json()).catch(() => null);
+    await until(() => f.store.listOpenToolPermissions().length === 1);
+    const card = f.store.listOpenToolPermissions()[0]!;
+    await f.orch.shutdown();
+    expect(f.store.requireDecision(card.id)).toMatchObject({ status: "closed" });
+    expect(f.store.requireDecision(card.id).closeReason).toContain("서버가 멈춰");
+    expect(await pending).toEqual({ id: card.id, state: "closed" });
   });
 
   test("CLI 가 승인 창 앞이 아니게 되면(터미널에서 답함) 카드를 닫고, 열린 카드가 있으면 '승인 대기' 알림을 따로 내지 않는다", async () => {

@@ -1,5 +1,6 @@
 // `iamceo uninstall` 과 Mac 앱의 '이 Mac에서 완전히 멈추기'.
-// 순서: 팀장 재우기(서버가 떠 있으면 기존 안전 종료 경로로) → 서비스 해제(서버가 내려간다) → 실행 엔진의 터미널 종료와 엔진 종료 → (원하면) 데이터 삭제.
+// 순서: (켜 둔) HTTPS 주소 끄기 → 팀장 재우기(서버가 떠 있으면 기존 안전 종료 경로로) → 서비스 해제(서버가 내려간다) → 실행 엔진의 터미널 종료와 엔진 종료 → (원하면) 데이터 삭제.
+// HTTPS 주소(tailscale serve)는 tailscaled 에 남으므로 서버를 내리기 전에 끈다(tailnet-off.ts). 끄지 못하면 남은 명령을 알리고 계속한다.
 // 실행 엔진을 서비스보다 먼저 끄면 떠 있는 서버가 엔진을 다시 띄우므로, 서비스를 먼저 내린다.
 // 데이터는 기본으로 남긴다. 지우기(--purge)는 따로 한 번 더 확인한다.
 // 이 명령이 내리는 서비스는 앱 묶음 안의 실행 파일로 등록된 설치판(같은 데이터 폴더)뿐이다. 소스 체크아웃에서 도는 서버(대표 라이브)는
@@ -17,6 +18,8 @@ import {
   type Launchctl, type ServiceControl, type ServicePlist,
 } from "./launchd.ts";
 import { databaseSchema, localBase } from "./runtime.ts";
+import { savedTailnetHttps, TAILNET_SERVE_OFF_COMMAND, turnOffTailnetHttps } from "./tailnet-off.ts";
+import type { TailscaleRunner } from "../tailnet-https.ts";
 
 export interface CoreTerminalInfo { address: string; state: string; labels?: Record<string, string> }
 /** 실행 엔진(herdr-core)과 말하는 길. 시험은 가짜 소켓·가짜 실행 파일을 쓴다. */
@@ -47,6 +50,8 @@ export interface UninstallDeps {
   confirm?: (question: string, answer: string) => Promise<boolean>;
   /** 서버가 내려가기를 기다리는 시간. */
   stopTimeoutMs?: number;
+  /** 서버가 답하지 않을 때 HTTPS 주소를 끄는 tailscale(시험은 가짜). */
+  tailscale?: TailscaleRunner;
 }
 
 export interface UninstallOutcome {
@@ -57,6 +62,8 @@ export interface UninstallOutcome {
   serviceCopy?: string;
   core: { absent: boolean; killed: number; stopped: boolean };
   purged: boolean;
+  /** Tailscale 의 HTTPS 주소(tailscale serve). none: 켠 기록 없음, off: 껐다, failed: 끄지 못했다(남은 명령을 알렸다). */
+  tailnetHttps: "none" | "off" | "failed";
 }
 
 export function defaultCoreControl(socket: string, coreBin: string | null, home: string): CoreControl {
@@ -224,12 +231,16 @@ export async function uninstall(options: UninstallOptions, deps: UninstallDeps =
   const coreBin = (owned ? plist!.env.IAMCEO_CORE_BIN : undefined) ?? config?.coreBin ?? Bun.which("herdr-core");
   const core = deps.core ?? defaultCoreControl(socket, coreBin && coreBin.includes("/") ? coreBin : coreBin ? Bun.which(coreBin) : null, home);
   const outcome: UninstallOutcome = { home, members: { reachable: false, stopped: 0, failed: [] }, service: plist ? (owned ? "removed" : "foreign") : "absent",
-    core: { absent: true, killed: 0, stopped: false }, purged: false };
+    core: { absent: true, killed: 0, stopped: false }, purged: false, tailnetHttps: "none" };
+  const httpsOn = config !== null && savedTailnetHttps(home) !== null;
   const checkoutHint = ownership?.kind === "git" && ownership.sameHome && !owned;
 
   log(say(`이 Mac 에서 IAMCEO 를 완전히 멈춥니다 (데이터 폴더 ${home})`, `Stopping IAMCEO completely on this Mac (data folder ${home})`));
   for (const line of [
-    say("  1. 서버가 떠 있으면 관리하는 팀장을 모두 재웁니다(직접 띄운 세션은 건드리지 않습니다)", "  1. If the server is running, put every managed session to sleep (sessions you started yourself are left alone)"),
+    httpsOn
+      ? say("  1. 켜 둔 HTTPS 주소(이 서버가 만든 tailscale serve 설정)를 끄고, 서버가 떠 있으면 관리하는 팀장을 모두 재웁니다(직접 띄운 세션은 건드리지 않습니다)",
+        "  1. Turn off the HTTPS address you turned on (the tailscale serve setting this server made), then, if the server is running, put every managed session to sleep (sessions you started yourself are left alone)")
+      : say("  1. 서버가 떠 있으면 관리하는 팀장을 모두 재웁니다(직접 띄운 세션은 건드리지 않습니다)", "  1. If the server is running, put every managed session to sleep (sessions you started yourself are left alone)"),
     plist ? owned ? ownership!.kind === "git"
         ? say(`  2. 소스 체크아웃에서 도는 로그인 서비스를 해제합니다. 서비스 설정은 지우지 않고 사본을 남깁니다: ${control.plistPath}`,
           `  2. Remove the login service that runs from a source checkout; its settings file is kept as a copy: ${control.plistPath}`)
@@ -269,6 +280,14 @@ export async function uninstall(options: UninstallOptions, deps: UninstallDeps =
   const confirm = deps.confirm ?? askOnTerminal;
   if (!options.yes && !await confirm(say("계속하려면 y 를 입력하세요:", "Type y to continue:"), "y")) throw new LifecycleError(say("멈추지 않았습니다", "Nothing was stopped"));
 
+  // 1. HTTPS 주소. 서버가 떠 있는 동안 서버에게 끄게 한다(서버가 없으면 같은 판정으로 직접). 서비스를 내리면 tailscaled 에 설정만 남는다.
+  if (httpsOn && config) {
+    const off = await turnOffTailnetHttps(config, home, { fetch: fetchImpl, ...(deps.tailscale ? { run: deps.tailscale } : {}), log });
+    outcome.tailnetHttps = off.state === "failed" ? "failed" : off.state === "off" ? "off" : "none";
+    if (off.state === "off") log(say("HTTPS 주소(tailscale serve)를 껐습니다", "Turned off the HTTPS address (tailscale serve)"));
+    else if (off.state === "failed") log(say(`경고: HTTPS 주소를 끄지 못했습니다(${off.detail ?? "?"}). 터미널에서 ${TAILNET_SERVE_OFF_COMMAND} 로 끄세요. 나머지는 계속합니다.`,
+      `Warning: could not turn off the HTTPS address (${off.detail ?? "?"}). Turn it off in Terminal with ${TAILNET_SERVE_OFF_COMMAND}. Continuing with the rest.`));
+  }
   // 1. 팀장
   if (config) {
     outcome.members = await sleepMembers(config, fetchImpl);
@@ -343,6 +362,8 @@ export async function uninstall(options: UninstallOptions, deps: UninstallDeps =
       log(outcome.purged ? say(`데이터 폴더를 지웠습니다: ${home}`, `Deleted the data folder: ${home}`) : say("지울 데이터 폴더가 없습니다", "There is no data folder to delete"));
     }
   } else log(say(`데이터는 그대로 남아 있습니다: ${home}. 지우려면 iamceo uninstall --purge`, `Your data is still in ${home}. To delete it: iamceo uninstall --purge`));
+  if (outcome.tailnetHttps === "failed") log(say(`HTTPS 주소(tailscale serve)가 아직 남아 있을 수 있습니다. 터미널에서 ${TAILNET_SERVE_OFF_COMMAND} 로 끄세요.`,
+    `The HTTPS address (tailscale serve) may still be on. Turn it off in Terminal with ${TAILNET_SERVE_OFF_COMMAND}.`));
   log(say("앱도 지우려면 응용 프로그램 폴더의 IAMCEO 를 휴지통으로 옮기세요(Homebrew 로 설치했다면 brew uninstall --cask iamceo).",
     "To remove the app too, move IAMCEO from Applications to the Trash (or brew uninstall --cask iamceo if you installed it with Homebrew)."));
   return outcome;

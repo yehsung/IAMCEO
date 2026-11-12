@@ -39,7 +39,7 @@ iPhone과 Mac 사이는 기본으로 Tailscale이 암호화하고, 앱은 그 �
 - **끄기:** 같은 자리의 **끄기**를 누릅니다. 서버가 만든 Tailscale 설정만 지웁니다. HTTPS 주소로 연결한 iPhone은 끊기므로 새 QR로 다시 연결합니다.
 - 켜고 끄기는 서버가 도는 Mac의 앱에서만 됩니다.
 
-**iPhone의 Tailscale이 꺼져 있으면 보내지 않습니다(다음 iPhone 앱부터).** 보통 주소의 연결은 Tailscale이 켜져 있어야만 암호화됩니다. 그래서 iPhone 앱은 보통 주소로 요청을 보내기 전에 그 iPhone의 Tailscale이 켜져 있는지 봅니다. 꺼져 있으면 보내지 않고 "이 iPhone의 Tailscale이 꺼져 있어 보내지 않았습니다"라고 알립니다. Tailscale을 켜면 알아서 다시 연결합니다. HTTPS 주소로 연결한 iPhone은 HTTPS가 지키므로 이 확인과 상관없습니다.
+**iPhone의 Tailscale이 꺼져 있으면 보내지 않습니다(다음 iPhone 앱부터).** 보통 주소의 연결은 Tailscale이 켜져 있어야만 암호화됩니다. 그래서 iPhone 앱은 보통 주소로 요청을 보내기 전에 그 iPhone의 Tailscale이 켜져 있는지 봅니다(Tailscale 연결에 붙는 tailnet 주소로 봅니다. 통신사나 다른 VPN이 주는 100.x 주소만으로는 켜진 것으로 보지 않습니다). 꺼져 있으면 보내지 않고 "이 iPhone의 Tailscale이 꺼져 있어 보내지 않았습니다"라고 알립니다. Tailscale을 켜면 알아서 다시 연결합니다. HTTPS 주소로 연결한 iPhone은 HTTPS가 지키므로 이 확인과 상관없습니다.
 
 ## 알림
 

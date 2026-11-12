@@ -9,6 +9,7 @@
 // - 허용은 '이번 한 번만'이다. 승인 규칙(updatedPermissions)은 보내지 않는다.
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { bunScriptCommand, shellQuote as quote } from "./bun-script.ts";
 
 /** 도구 승인 카드가 열려 있는 최대 시간. 지나면 닫히고 터미널의 원래 승인 창에서 답해야 한다(server/tool-permission.ts). */
 export const TOOL_PERMISSION_TTL_MS = 10 * 60_000;
@@ -22,6 +23,9 @@ export const PERMISSION_HOOK_TIMEOUT_SEC = Math.ceil(TOOL_PERMISSION_TTL_MS / 10
 /** 독립 JS: 소스·컴파일 실행 모두 같은 파일을 Bun 으로 실행한다(statusline.ts·hooks.ts 와 같은 방식). */
 const SCRIPT = String.raw`
 import { readFileSync, writeSync } from 'node:fs';
+// 이 Mac 의 서버(127.0.0.1)로 가는 요청은 프록시를 거치지 않는다. CLI 의 환경에 HTTP_PROXY 가 있으면 Bun 은 127.0.0.1 로 가는 요청도
+// 프록시로 보내 팀장 열쇠가 실린 요청이 밖으로 나가고, 프록시의 답을 대표의 답으로 쓰게 된다.
+for (const key of ['NO_PROXY', 'no_proxy']) process.env[key] = [process.env[key], '127.0.0.1', 'localhost', '::1'].filter(Boolean).join(',');
 let finished = false;
 // 답이 있을 때만 쓰고, 어떤 경우에도 0 으로 끝낸다.
 const finish = (out) => {
@@ -97,8 +101,6 @@ clearTimeout(safety);
 finish();
 `;
 
-function quote(value: string): string { return "'" + value.replaceAll("'", "'\\''") + "'"; }
-
 export interface PermissionHookOptions {
   execPath?: string;
   /** 시험에서만 줄인다. 실제로는 TOOL_PERMISSION_TTL_MS 보다 조금 길다. */
@@ -126,12 +128,14 @@ export function writePermissionHook(runDir: string, options: PermissionHookOptio
 }
 
 /**
- * hooks.ts 의 permissionHook 칸에 넣을 값. 명령은 `BUN_BE_BUN=1 <실행 파일> <스크립트> <MCP 설정 파일> 2>/dev/null; exit 0` 이다.
+ * hooks.ts 의 permissionHook 칸에 넣을 값. 명령은
+ * `cd <run> && BUN_BE_BUN=1 <실행 파일> --config=<빈 설정> --no-env-file <스크립트> <MCP 설정 파일> 2>/dev/null; exit 0` 이다.
+ * 팀장의 작업 폴더에 있는 bunfig.toml(preload)·.env 를 읽지 않는다(bun-script.ts). 그 폴더의 코드가 허용·거절 답을 위조하지 못한다.
  * MCP 설정 파일(팀장 열쇠가 든 0600 파일)의 경로만 싣고 열쇠는 싣지 않는다. 상대 경로면 던진다.
  */
 export function permissionHook(input: { runDir: string; mcpConfigFile: string } & PermissionHookOptions): { command: string; timeoutSec: number } {
   if (!isAbsolute(input.runDir) || !isAbsolute(input.mcpConfigFile)) throw new Error("Permission hook paths must be absolute");
   const script = writePermissionHook(input.runDir, input);
-  const command = `BUN_BE_BUN=1 ${quote(input.execPath ?? process.execPath)} ${quote(script)} ${quote(input.mcpConfigFile)} 2>/dev/null; exit 0`;
+  const command = `cd ${quote(input.runDir)} 2>/dev/null && ${bunScriptCommand(input.execPath ?? process.execPath, input.runDir, script)} ${quote(input.mcpConfigFile)} 2>/dev/null; exit 0`;
   return { command, timeoutSec: PERMISSION_HOOK_TIMEOUT_SEC };
 }

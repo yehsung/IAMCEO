@@ -21,7 +21,8 @@ mkdirSync(out, { recursive: true });
 const sums: string[] = [];
 for (const t of TARGETS) {
   const file = join(out, `iamceo-${t}`);
-  run(["bun", "build", "bin/iamceo.ts", "--compile", `--target=bun-${t}`, "--outfile", file]);
+  // 팀장의 작업 폴더에서 뜨는 MCP 다리(iamceo mcp)가 그 폴더의 .env·bunfig.toml 을 읽지 않게 한다(리뷰 hooks-1).
+  run(["bun", "build", "bin/iamceo.ts", "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", `--target=bun-${t}`, "--outfile", file]);
   // Apple Silicon 은 서명 없는 실행 파일을 죽인다. 맥에서 만들면 임시(ad-hoc) 서명을 다시 붙여 확실히 한다.
   if (process.platform === "darwin") run(["codesign", "--force", "--sign", "-", file]);
   sums.push(`${createHash("sha256").update(readFileSync(file)).digest("hex")}  iamceo-${t}`);

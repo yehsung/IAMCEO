@@ -39,7 +39,7 @@ By default Tailscale encrypts the link between the iPhone and the Mac, and the a
 - **Turning it off:** press **끄기** (Turn off) in the same place. Only the Tailscale setting the server made is removed. iPhones connected through the HTTPS address are cut off; pair them again with a new QR.
 - Turning it on and off works only from the app on the Mac that runs the server.
 
-**Nothing is sent while the iPhone's Tailscale is off (from the next iPhone app).** A plain address is encrypted only while Tailscale is on, so before sending a request to a plain address the iPhone app checks that this iPhone's Tailscale is on. If it is off, the app sends nothing and says so ("이 iPhone의 Tailscale이 꺼져 있어 보내지 않았습니다", Tailscale is off on this iPhone, nothing was sent). It reconnects by itself once Tailscale is on. An iPhone connected through the HTTPS address is protected by HTTPS and does not need this check.
+**Nothing is sent while the iPhone's Tailscale is off (from the next iPhone app).** A plain address is encrypted only while Tailscale is on, so before sending a request to a plain address the iPhone app checks that this iPhone's Tailscale is on (by the tailnet address on the Tailscale tunnel; a 100.x address from a carrier or another VPN alone does not count). If it is off, the app sends nothing and says so ("이 iPhone의 Tailscale이 꺼져 있어 보내지 않았습니다", Tailscale is off on this iPhone, nothing was sent). It reconnects by itself once Tailscale is on. An iPhone connected through the HTTPS address is protected by HTTPS and does not need this check.
 
 ## Notifications
 

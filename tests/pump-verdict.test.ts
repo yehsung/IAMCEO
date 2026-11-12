@@ -5,7 +5,7 @@ import { Bus } from "../server/bus.ts";
 import { loadConfig } from "../server/config.ts";
 import { MIGRATIONS, openDb } from "../server/db.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
-import { DELIVERY_WAIT_REASONS, PUMP_VERDICTS, verdictPatience } from "../server/pump-verdict.ts";
+import { DELIVERY_WAIT_REASONS, PUMP_VERDICTS, verdictPatience, verdictRejudged } from "../server/pump-verdict.ts";
 import type { Runner, RunnerEvent, RunnerMember, RunnerStartResult, SendResult } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
 import type { Backend, Member, WsEvent } from "../shared/types.ts";
@@ -163,6 +163,41 @@ describe("판정 기록", () => {
     f.db.query("DELETE FROM members WHERE id = ?").run(w.id);
     expect(f.verdictRow(w.id)).toBeNull();
   });
+
+  test("합치기(K·L): 도구 승인 카드가 열려 있으면 판정은 tool_permission, 앱에는 새 값 없이 approval 로 내려간다", async () => {
+    const f = fixture(), w = f.worker();
+    const d = f.say(w);
+    // 정체 점검이 카드의 답·시간 초과(사건이 없다) 뒤에 다시 판정하게 한다. 기한은 재지 않는다(카드가 10분 뒤 스스로 닫힌다).
+    expect(PUMP_VERDICTS.tool_permission.wait).toBe("approval");
+    expect(verdictRejudged("tool_permission")).toBe(true);
+    expect(verdictPatience("tool_permission", 120_000)).toBeNull();
+    // 승인 창 앞(blocked) + 결재함의 카드.
+    f.store.patchMember(w.id, { status: "blocked" });
+    const hook = new AbortController();
+    const asked = f.orch.toolPermissions.request(f.store.requireMember(w.id), { toolName: "Bash", toolInput: { command: "touch /tmp/x" } }, hook.signal);
+    await Bun.sleep(5);
+    const card = f.store.listOpenToolPermissions().find(decision => decision.memberId === w.id)!;
+    expect(card).toBeDefined();
+    await f.orch.pump(w.id);
+    expect(f.verdictRow(w.id)).toMatchObject({ code: "tool_permission", wait_reason: "approval" });
+    expect(f.store.deliveryWait(f.store.requireDelivery(d.id)).waitReason).toBe("approval");
+    // 승인 창을 blocked 로 알리지 않는 CLI(일하는 중으로 보임)여도 카드가 열려 있으면 승인 대기로 보인다. 보내는 동작은 같다(넣지 않음).
+    f.store.patchMember(w.id, { status: "working" });
+    f.core.busy.add(w.id); f.core.observed.set(w.id, "working");
+    await f.orch.pump(w.id);
+    expect(f.verdictRow(w.id)).toMatchObject({ code: "tool_permission", wait_reason: "approval" });
+    expect(f.core.sent).toHaveLength(0);
+    // 대표가 답하면 카드는 더는 기다리지 않는다: 다음 판정은 일하는 중.
+    await f.orch.answerDecision(card.id, { choice: "allow" });
+    expect(await asked).toMatchObject({ state: "allow" });
+    await f.orch.pump(w.id);
+    expect(f.verdictRow(w.id)).toMatchObject({ code: "busy", wait_reason: "member_busy" });
+    // 카드가 없으면 승인 창은 지금처럼 approval.
+    f.store.patchMember(w.id, { status: "blocked" });
+    await f.orch.pump(w.id);
+    expect(f.verdictRow(w.id)).toMatchObject({ code: "approval", wait_reason: "approval" });
+    hook.abort();
+  });
 });
 
 describe("기한을 넘긴 판정과 정체 알림", () => {
@@ -218,18 +253,98 @@ describe("기한을 넘긴 판정과 정체 알림", () => {
     expect(f.store.listMessages(f.project.id).filter(m => m.title === "전달 확인 필요")).toHaveLength(0);
   });
 
-  test("판정이 없는 팀장의 미전달은 이유 없는 대기다: 스스로 다시 밀어 판정을 남긴다", async () => {
+  test("판정이 없는 팀장의 미전달은 '판정 전'이다: 알리지 않고 펌프가 판정하게 해 판정을 남긴다", async () => {
     const f = fixture(), w = f.worker();
     f.core.busy.add(w.id);
     const d = f.say(w);
     expect(f.verdictRow(w.id)).toBeNull();
     expect(f.store.deliveryWait(d).waitReason).toBe("unknown");
-    f.store.detectDeliveryStalls(Date.parse(d.createdAt) + 61_000);
+    // 판정이 남기 전에는 몇 번을 봐도(기준 시간을 한참 넘겨도) 정체로 알리지 않는다.
+    f.store.detectDeliveryStalls(Date.parse(d.createdAt) + 600_000);
+    f.store.detectDeliveryStalls(Date.parse(d.createdAt) + 601_000);
+    expect(f.store.deliveryStalled(d.id)).toBe(false);
     for (let i = 0; i < 100 && !f.verdictRow(w.id); i++) await Bun.sleep(5);
     expect(f.verdictRow(w.id)).toMatchObject({ code: "busy" });
     expect(f.store.deliveryWait(f.store.requireDelivery(d.id)).waitReason).toBe("member_busy");
-    f.store.detectDeliveryStalls(Date.parse(d.createdAt) + 300_000);
+    f.store.detectDeliveryStalls(Date.parse(d.createdAt) + 900_000);
     expect(f.store.deliveryStalled(d.id)).toBe(false);
+    expect(f.store.listMessages(f.project.id).filter(m => m.title === "전달 확인 필요")).toEqual([]);
+  });
+
+  test("판정을 부탁한 지 정체 기준 시간이 지나도 판정이 없으면(펌프가 막힘) 평소대로 다시 밀어 본 뒤 알린다", () => {
+    const f = fixture(), w = f.worker();
+    const d = f.say(w), created = Date.parse(d.createdAt);
+    const judged: string[] = [], nudged: string[] = [];
+    f.store.setDeliveryHooks({ judge: id => judged.push(id), nudge: id => nudged.push(id) });
+    f.store.detectDeliveryStalls(created + 30_000);
+    expect(judged).toEqual([]);
+    f.store.detectDeliveryStalls(created + 61_000);
+    f.store.detectDeliveryStalls(created + 150_000);
+    expect(judged).toEqual([w.id, w.id]);
+    expect(nudged).toEqual([]);
+    expect(f.store.deliveryStalled(d.id)).toBe(false);
+    // 처음 부탁한 때(+61초)부터 120초가 지났는데도 판정 줄이 없다.
+    f.store.detectDeliveryStalls(created + 181_000);
+    expect(nudged).toEqual([w.id]);
+    f.store.detectDeliveryStalls(created + 191_000);
+    expect(f.store.deliveryStalled(d.id)).toBe(true);
+    expect(f.store.listMessages(f.project.id).filter(m => m.title === "전달 확인 필요")).toHaveLength(1);
+  });
+
+  test("판정 표를 쓰지 못하는 DB 에서는 예전처럼 이유 없는 대기로 다룬다(다시 밀어 본 뒤 알린다)", () => {
+    const f = fixture(), w = f.worker();
+    const d = f.say(w);
+    (f.store as unknown as { verdictsReady: boolean }).verdictsReady = false;
+    const nudged: string[] = [];
+    f.store.setDeliveryHooks({ nudge: id => nudged.push(id), judge: () => { throw new Error("판정 표가 없으면 판정을 기다리지 않는다"); } });
+    f.store.detectDeliveryStalls(Date.parse(d.createdAt) + 61_000);
+    expect(nudged).toEqual([w.id]);
+    f.store.detectDeliveryStalls(Date.parse(d.createdAt) + 121_000);
+    expect(f.store.deliveryStalled(d.id)).toBe(true);
+  });
+});
+
+describe("업그레이드 첫 시작(판정 표가 비어 있음, 리뷰 pump-1)", () => {
+  test("승인 대기·보관 프로젝트의 오래된 전달이 recover() 와 그 뒤 정체 점검에서 '전달 확인 필요'가 되지 않는다", async () => {
+    const f = fixture(), w = f.worker();
+    // 승인 창 앞에서 멈춘 팀장에게 10분 전에 보낸 대표 말(보류: blocked).
+    const d = f.say(w);
+    f.store.patchMember(w.id, { status: "blocked" });
+    f.store.markHeld(d.id, "blocked");
+    // 보관된 프로젝트에 남은 전달(보류: archived).
+    const archived = f.store.createProject({ name: "보관함", cwd: f.runtime.paths.work, runnerEnabled: true });
+    const a = f.store.createMember({ projectId: archived.id, handle: "arch", name: "보관 팀장", kind: "worker", origin: "runner", backend: "core", status: "asleep", paneId: null, sessionId: "session-arch" } as never);
+    const d2 = f.store.enqueue({ projectId: archived.id, memberId: a.id, kind: "user_message", text: "[대표] 보관 전" });
+    f.store.markHeld(d2.id, "archived");
+    f.db.query("UPDATE projects SET archived = 1 WHERE id = ?").run(archived.id);
+    f.db.query("UPDATE deliveries SET created_at = ?").run(new Date(Date.now() - 10 * 60_000).toISOString());
+    f.db.query("DELETE FROM member_delivery_verdicts").run();
+    expect(f.store.deliveryWait(f.store.requireDelivery(d.id)).waitReason).toBe("unknown");
+    await f.orch.recover();
+    for (let i = 0; i < 100 && !(f.verdictRow(w.id) && f.verdictRow(a.id)); i++) await Bun.sleep(5);
+    expect(f.store.deliveryWait(f.store.requireDelivery(d.id)).waitReason).toBe("approval");
+    expect(f.store.deliveryWait(f.store.requireDelivery(d2.id)).waitReason).toBe("archived");
+    // 그 뒤의 정체 점검(10초 점검과 전달 복구의 점검)도 알리지 않는다.
+    (f.orch as unknown as { lastStallCheck: number }).lastStallCheck = 0;
+    f.stallCheck();
+    f.store.detectDeliveryStalls(Date.now() + 5 * 60_000);
+    const alerts = [...f.store.listMessages(f.project.id), ...f.store.listMessages(archived.id)].filter(m => m.title === "전달 확인 필요");
+    expect(alerts).toEqual([]);
+    expect(f.store.deliveryStalled(d.id)).toBe(false);
+    expect(f.store.deliveryStalled(d2.id)).toBe(false);
+    expect(f.core.sent).toEqual([]);
+  });
+
+  test("복구 중에는 정체 점검을 건너뛴다(그동안 다시 밀기가 아무것도 하지 않으므로)", () => {
+    const f = fixture();
+    const orch = f.orch as unknown as { recovering: boolean; lastStallCheck: number };
+    orch.recovering = true;
+    orch.lastStallCheck = 0;
+    f.stallCheck();
+    expect(orch.lastStallCheck).toBe(0);
+    orch.recovering = false;
+    f.stallCheck();
+    expect(orch.lastStallCheck).toBeGreaterThan(0);
   });
 });
 
@@ -256,6 +371,24 @@ describe("펌프 밖에서 보류하는 곳도 판정을 남긴다", () => {
     for (let i = 0; i < 100 && f.verdictRow(w.id)?.code !== "archived"; i++) await Bun.sleep(5);
     expect(f.verdictRow(w.id)).toMatchObject({ code: "archived", wait_reason: "archived" });
     expect(f.store.deliveryWait(f.store.requireDelivery(waiting.id)).waitReason).toBe("archived");
+  });
+
+  test("보관 전에 잠든 팀장의 '잠들 때 보류'는 보관을 풀면 다시 '다음 턴'으로 읽고, 깨우거나 보내지 않는다(리뷰 pump-2)", async () => {
+    const f = fixture(), w = f.worker();
+    const note = f.store.enqueue({ projectId: f.project.id, memberId: w.id, kind: "system", text: "[시스템] 참고", wake: false });
+    await f.orch.sleepMember(w.id, { force: true });
+    expect(f.store.requireDelivery(note.id)).toMatchObject({ status: "held", holdReason: "asleep" });
+    expect(f.verdictRow(w.id)).toMatchObject({ code: "asleep_hold" });
+    await f.orch.patchProject(f.project.id, { archived: true });
+    for (let i = 0; i < 100 && f.verdictRow(w.id)?.code !== "archived"; i++) await Bun.sleep(5);
+    expect(f.store.deliveryWait(f.store.requireDelivery(note.id)).waitReason).toBe("archived");
+    await f.orch.patchProject(f.project.id, { archived: false });
+    for (let i = 0; i < 100 && f.verdictRow(w.id)?.code !== "asleep_hold"; i++) await Bun.sleep(5);
+    expect(f.verdictRow(w.id)).toMatchObject({ code: "asleep_hold", wait_reason: "next_turn" });
+    expect(f.store.deliveryWait(f.store.requireDelivery(note.id)).waitReason).toBe("next_turn");
+    expect(f.store.requireMember(w.id).status).toBe("asleep");
+    expect(f.store.requireDelivery(note.id)).toMatchObject({ status: "held", holdReason: "asleep" });
+    expect(f.core.sent).toEqual([]);
   });
 });
 

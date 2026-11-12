@@ -34,7 +34,8 @@ try {
   for (const entry of ["Sources", "Configuration", "Resources", "project.yml"]) cpSync(join(root, "native", entry), join(source, entry), { recursive: true });
   run(["xcodegen", "generate", "--spec", join(source, "project.yml")]);
   const daemon = join(staging, "iamceo");
-  run([process.execPath, "build", "bin/iamceo.ts", "--compile", `--target=bun-darwin-${process.arch}`, "--outfile", daemon]);
+  // 팀장의 작업 폴더에서 뜨는 MCP 다리(iamceo mcp)가 그 폴더의 .env·bunfig.toml 을 읽지 않게 한다(리뷰 hooks-1).
+  run([process.execPath, "build", "bin/iamceo.ts", "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", `--target=bun-darwin-${process.arch}`, "--outfile", daemon]);
   chmodSync(daemon, 0o755);
   run(["/usr/bin/codesign", "--force", "--sign", "-", daemon]);
   const derived = join(staging, "DerivedData");

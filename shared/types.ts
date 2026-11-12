@@ -600,7 +600,7 @@ export interface TailnetStatus {
 export type TailnetHttpsProblemCode =
   | "tailscale_cli_missing" | "tailscale_not_running" | "tailscale_too_old"
   | "tailnet_https_disabled" | "tailnet_https_port_taken" | "tailnet_https_no_loopback" | "tailnet_https_cert_failed"
-  | "tailnet_https_failed" | "tailnet_https_off_failed" | "tailnet_https_port_changed" | "tailnet_https_removed";
+  | "tailnet_https_failed" | "tailnet_https_off_failed" | "tailnet_https_port_changed" | "tailnet_https_removed" | "tailnet_https_funnel";
 export interface TailnetHttpsProblem {
   code: TailnetHttpsProblemCode;
   message: string;

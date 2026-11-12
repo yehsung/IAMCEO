@@ -17,6 +17,8 @@ import { describeRehearsal, rehearseDatabase, type Rehearse } from "./rehearse.t
 import { compareVersions, releaseSource, stageRelease, type ReleaseTools } from "./release.ts";
 import { databaseSchema, moveBundle, restoreDatabase, snapshotDatabase, waitHomeOwner, waitReady, type ReadinessCheck } from "./runtime.ts";
 import { keptAsideCopies, latestRollbackTarget, newUpgradeId, pruneUpgradeRecords, saveUpgradeRecord, upgradeDir, type UpgradeRecord } from "./state.ts";
+import { savedTailnetHttps, TAILNET_SERVE_OFF_COMMAND, turnOffTailnetHttps } from "./tailnet-off.ts";
+import type { TailscaleRunner } from "../tailnet-https.ts";
 
 export type CommandRunner = (command: string[], options?: { cwd?: string; timeoutMs?: number }) => { code: number; stdout: string; stderr: string };
 
@@ -38,6 +40,8 @@ export interface LifecycleDeps {
   brewCaskrooms?: string[];
   scratch?: string;
   stopTimeoutMs?: number;
+  /** 서버가 답하지 않을 때 HTTPS 주소를 끄는 tailscale(시험은 가짜). */
+  tailscale?: TailscaleRunner;
 }
 
 export interface UpgradeOptions {
@@ -73,6 +77,7 @@ interface Context {
   env: NodeJS.ProcessEnv; userHome: string; control: ServiceControl; log: (line: string) => void; now: () => Date;
   run: CommandRunner; rehearse: Rehearse; readiness: ReadinessCheck; releaseTools?: ReleaseTools; fetch?: typeof fetch;
   appRunning: () => boolean; brewCaskrooms: string[]; scratch?: string; stopTimeoutMs: number; sleep: (ms: number) => Promise<unknown>;
+  tailscale?: TailscaleRunner;
 }
 
 function context(deps: LifecycleDeps, dryRun: boolean): Context {
@@ -87,7 +92,7 @@ function context(deps: LifecycleDeps, dryRun: boolean): Context {
     control: { launchctl: deps.launchctl ?? realLaunchctl, domain: serviceDomain(deps.uid), plistPath: servicePlistPath(userHome), sleep },
     run: deps.run ?? defaultRun, rehearse: deps.rehearse ?? (input => rehearseDatabase({ ...input, scratch: deps.scratch })),
     readiness: deps.readiness ?? ((config, expected, timeoutMs) => waitReady(config, expected, timeoutMs, { fetch: deps.fetch })),
-    releaseTools: deps.releaseTools, fetch: deps.fetch, scratch: deps.scratch, stopTimeoutMs: deps.stopTimeoutMs ?? 30_000,
+    releaseTools: deps.releaseTools, fetch: deps.fetch, scratch: deps.scratch, stopTimeoutMs: deps.stopTimeoutMs ?? 30_000, tailscale: deps.tailscale,
     appRunning: deps.appRunning ?? (() => Bun.spawnSync(["/usr/bin/pgrep", "-x", "IAMCEO"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exitCode === 0),
     brewCaskrooms: deps.brewCaskrooms ?? ["/opt/homebrew/Caskroom/iamceo", "/usr/local/Caskroom/iamceo"],
   };
@@ -267,6 +272,27 @@ async function rollBack(record: UpgradeRecord, inst: Installation, ctx: Context,
   }
 }
 
+/**
+ * 켜 둔 HTTPS 주소(tailscale serve)를 판을 바꾸기 전에 끈다. 되돌리는 판(rollback, 낮은 판으로의 upgrade)은 HTTPS 이전 판일 수 있고,
+ * 그 판은 serve 를 거친 tailnet 기기의 요청을 이 Mac(127.0.0.1)의 요청으로 보아 접속 코드 교체·모두 끊기를 기기 열쇠로 받아 준다.
+ * 끄지 못하면 바꾸지 않고 멈춘다. 앞으로 가는 upgrade 와 그 자동 되돌리기(켤 때 쓰던 판으로 돌아간다)는 끄지 않는다.
+ */
+async function turnOffHttpsBeforeGoingBack(ctx: Context, inst: Installation, config: Config, what: string): Promise<void> {
+  const off = await turnOffTailnetHttps(config, inst.home, { fetch: ctx.fetch, ...(ctx.tailscale ? { run: ctx.tailscale } : {}), log: ctx.log });
+  if (off.state === "failed") {
+    throw new LifecycleError(say(`HTTPS 주소를 끄지 못해 ${what} 않았습니다(${off.detail ?? "?"}). 설정 → 연결 → HTTPS 주소에서 끄거나 터미널에서 ${TAILNET_SERVE_OFF_COMMAND} 로 끈 뒤 다시 실행하세요.`,
+      `Could not turn off the HTTPS address (${off.detail ?? "?"}), so nothing was changed. Turn it off in Settings › Connection › HTTPS address or in Terminal with ${TAILNET_SERVE_OFF_COMMAND}, then run this again.`));
+  }
+  if (off.state === "off") ctx.log(say("HTTPS 주소(tailscale serve)를 껐습니다. 바꾼 뒤 다시 쓰려면 설정 → 연결 → HTTPS 주소에서 켜세요.",
+    "Turned off the HTTPS address (tailscale serve). To use it again afterwards, turn it on in Settings › Connection › HTTPS address."));
+}
+
+/** 되돌리기 미리 보기·계획의 HTTPS 한 줄. 켠 기록이 있을 때만. */
+function httpsPlanLine(inst: Installation): string | null {
+  return savedTailnetHttps(inst.home) ? say("  · 켜 둔 HTTPS 주소(tailscale serve)는 바꾸기 전에 끕니다(되돌린 판이 그 주소로 온 요청을 이 Mac 의 요청으로 볼 수 있어서입니다). 다시 올린 뒤 설정 → 연결 → HTTPS 주소에서 켜세요.",
+    "  · The HTTPS address (tailscale serve) is turned off before switching (the older build may treat requests through it as coming from this Mac). Turn it on again afterwards in Settings › Connection › HTTPS address.") : null;
+}
+
 /** 교체 뒤 새 판이 뜨지 않았다. 직전 판으로 돌리고 무엇을 했는지 오류로 알린다. */
 async function autoRollback(record: UpgradeRecord, inst: Installation, ctx: Context, config: Config, timeoutMs: number, reason: string): Promise<never> {
   ctx.log(say(`새 판이 준비되지 않았습니다(${reason}). 직전 판 ${record.from.version} 으로 되돌립니다.`, `The new build was not ready (${reason}). Rolling back to ${record.from.version}.`));
@@ -307,6 +333,8 @@ async function upgradeRelease(inst: Extract<Installation, { kind: "release" }>, 
       say(`  2. 새 판으로 DB 사본 미리 돌려 보기: ${join(inst.home, "iamceo.db")} (원본은 읽기만)`, `  2. Rehearse the new build on a copy of ${join(inst.home, "iamceo.db")} (the original is only read)`),
       say(`  3. 직전 판 기록: ${join(inst.home, "upgrades")}/<id>/ (plist·DB 사본·이전 앱)`, `  3. Record the previous build in ${join(inst.home, "upgrades")}/<id>/ (plist, database copy, previous app)`),
       say(`  4. 서비스 내림 → ${inst.app} 교체 → 올림 → ${Math.round(timeoutMs / 1000)}초 안에 준비 확인, 아니면 직전 판으로 되돌림`, `  4. Stop the service, replace ${inst.app}, start it, wait ${Math.round(timeoutMs / 1000)} s for readiness or roll back`),
+      ...(options.allowDowngrade && savedTailnetHttps(inst.home) ? [say("  · 지금보다 낮은 판이면 켜 둔 HTTPS 주소(tailscale serve)를 바꾸기 전에 끕니다. 다시 올린 뒤 설정 → 연결 → HTTPS 주소에서 켜세요.",
+        "  · If the build is older than the current one, the HTTPS address (tailscale serve) is turned off before switching. Turn it on again afterwards in Settings › Connection › HTTPS address.")] : []),
     ]) ctx.log(line);
     return { status: "dry_run", mode: "release", from: current, to: source.version ?? "latest" };
   }
@@ -326,6 +354,8 @@ async function upgradeRelease(inst: Extract<Installation, { kind: "release" }>, 
     }
     if (order < 0 && !options.allowDowngrade) throw new LifecycleError(say(`받은 판(${staged.version})이 지금 판(${current})보다 낮습니다. 직전 판으로 돌아가려면 iamceo rollback 을 쓰세요.`,
       `The downloaded build (${staged.version}) is older than the current one (${current}). Use iamceo rollback to return to the previous build.`));
+    // 낮은 판은 HTTPS 이전 판일 수 있다. 켜 둔 HTTPS 주소를 먼저 끈다(끄지 못하면 바꾸지 않는다).
+    if (order < 0) await turnOffHttpsBeforeGoingBack(ctx, inst, config, say("낮은 판으로 바꾸지", "downgrade"));
     const daemon = join(staged.app, "Contents", "Resources", "runtime", "iamceo");
     if (probe(ctx, [daemon], "version") !== staged.version) throw new LifecycleError(say("받은 앱의 서버가 다른 버전을 답합니다", "The server inside the downloaded app reports a different version"));
     const newBuild = probe(ctx, [daemon], "build-id"), oldBuild = probe(ctx, [inst.daemon], "build-id");
@@ -530,10 +560,14 @@ export async function rollback(options: { dryRun?: boolean; yes?: boolean; timeo
   if (needsDatabase) ctx.log(say(
     `DB 스키마가 올라가 있어(${record.from.schemaVersion} → ${schema}) 업그레이드 전 DB 사본으로 되돌립니다. 업그레이드 뒤 쌓인 대화·결재는 지우지 않고 ${upgradeDir(inst.home, record.id)} 안에 옆 사본으로 남깁니다(오래된 업그레이드 기록을 정리할 때도 지우지 않습니다).`,
     `The database schema moved up (${record.from.schemaVersion} → ${schema}), so the pre-upgrade copy is restored. Conversations and decisions made after the upgrade are kept aside in ${upgradeDir(inst.home, record.id)} (old upgrade records are cleaned up without touching it).`));
+  const httpsLine = httpsPlanLine(inst);
+  if (httpsLine) ctx.log(httpsLine);
   if (options.dryRun) return { status: "dry_run", mode: inst.kind, from: record.to.version, to: record.from.version, id: record.id, databaseRestored: needsDatabase };
   if (needsDatabase && !options.yes) throw new LifecycleError(say("DB 까지 되돌리려면 --yes 를 붙여 다시 실행하세요", "Run again with --yes to roll back the database as well"));
   if (inst.kind === "release" && ctx.appRunning()) throw new LifecycleError(say("IAMCEO 앱을 종료한 뒤 다시 실행하세요. 실행 중인 앱은 바꾸지 않습니다.", "Quit the IAMCEO app and run this again. A running app is never replaced."));
   const config = serviceConfig(inst, ctx);
+  // 직전 판은 HTTPS 이전 판일 수 있다. 켜 둔 HTTPS 주소를 먼저 끈다(지금 도는 서버가 끈다. 끄지 못하면 되돌리지 않는다).
+  if (httpsLine) await turnOffHttpsBeforeGoingBack(ctx, inst, config, say("되돌리지", "roll back"));
   let restored: boolean;
   try { restored = await rollBack(record, inst, ctx, config, options.timeoutMs ?? 120_000); }
   catch (error) {

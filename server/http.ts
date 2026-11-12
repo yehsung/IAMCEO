@@ -1411,6 +1411,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     loopbackListening: () => hosts.some(host => host === "127.0.0.1" || host === "localhost" || host === "0.0.0.0" || host === "::"),
     load: () => store.tailnetHttps(),
     save: value => store.rememberTailnetHttps(value),
+    home: config.home,
     ...ctx.tailnetHttps,
   });
   // D9: 시작할 때 CLI 버전을 한 번 읽어 기록하고(처음 본 버전은 로그 한 줄), 실행 파일이 바뀌면 다시 읽는다. 바뀌면 앱이 스냅샷을 다시 읽게 한다.
@@ -1600,6 +1601,10 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   // ---- A(B3·D8): 점검표와 진단 파일 ----
   /** 서버가 이미 아는 값(실행 엔진·Tailscale 꺼짐·백업)에 이 Mac 에서 읽은 사실(자동 시작·로그인 기록·저장 공간)을 더한다. */
   const doctorFacts = async () => {
+    // N(C8) 합치기: HTTPS 주소 상태는 다른 확인과 함께 읽고 6초까지만 기다린다(켠 기록이 없으면 tailscale 명령을 부르지 않고 바로 off).
+    let httpsWait: ReturnType<typeof setTimeout> | undefined;
+    const httpsStatus = Promise.race([tailnetHttps.status().catch(() => null), new Promise<null>(resolve => { httpsWait = setTimeout(() => resolve(null), 6_000); })])
+      .finally(() => clearTimeout(httpsWait));
     const runtime = await Promise.resolve(ctx.orch.runtimeInfo?.()).catch(() => null) ?? null;
     const activeProjects = new Set(store.listProjects().map(project => project.id));
     const facts = await serverDoctorFacts({
@@ -1607,6 +1612,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       runtime: runtime as Parameters<typeof serverDoctorFacts>[0]["runtime"],
       engine: ctx.orch.engineStatus?.() ?? null,
       tailnet: tailnet.status() ?? null,
+      tailnetHttps: await httpsStatus,
       tailnetSeen: store.tailnetSeen() !== null,
       detectedTailnet: (() => { try { return detect(); } catch { return []; } })(),
       codexInUse: store.listAllMembers().some(member => activeProjects.has(member.projectId) && member.cli === "codex"),
@@ -1647,6 +1653,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
           requestedBy: readAppClient(req.headers),
           schema: { version: store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? null, supportedVersion: MIGRATIONS.length },
           core: runtime?.core ?? null, engine: ctx.orch.engineStatus?.() ?? null, tailnet: tailnet.status() ?? null,
+          // N(C8) 합치기: HTTPS 주소의 상태와 까닭 코드만(주소 = 이 Mac 의 tailnet 이름은 넣지 않는다).
+          tailnetHttps: facts.tailscale.https ? { state: facts.tailscale.https.state, problem: facts.tailscale.https.problem?.code ?? null, checkedAt: facts.tailscale.https.checkedAt } : null,
           hosts: [...bindings.values()].map(binding => ({ host: binding.host, state: binding.state, attempts: binding.attempts, error: binding.error })),
           backup: extra?.backup ?? null, apiOutage: store.apiOutage(),
           vitals: (() => { try { return readVitals(store.db, config.dbPath); } catch { return null; } })(),
@@ -1739,7 +1747,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     if (!match) return fail(404, "없는 경로입니다", "route_not_found");
     if (req.method !== "DELETE") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
     const [id] = decodeParams(match);
-    const device = deviceKeys.revoke(id!, peerAddress(req, server));
+    // 접속 기록의 주소: HTTPS 주소를 거친 iPhone 이 끊으면 127.0.0.1 이 아니라 그 기기 주소를 남긴다(N 의 clientAddress, 위 인증·QR 교환과 같다).
+    const device = deviceKeys.revoke(id!, clientAddress(req, server));
     if (!device) return fail(404, ERROR_CODES.device_not_found.ko, "device_not_found");
     // 그 기기의 실시간 연결과 터미널 스트림을 바로 닫는다. HTTP 는 다음 요청부터 401 device_revoked.
     dropSockets(data => data.deviceId === id, "이 기기의 연결이 끊겼습니다. 다시 연결하세요");

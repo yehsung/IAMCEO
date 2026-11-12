@@ -101,6 +101,8 @@ describe("진단 파일 만들기", () => {
     process.env.IAMCEO_DIAG_SECRET = ENV_VALUE;
     cleanups.push(() => { delete process.env.IAMCEO_DIAG_SECRET; });
     const now = new Date("2026-11-13T03:04:05.000Z");
+    // 합치기(L): 전달 펌프의 판정이 팀장 줄에 실린다.
+    t.store.recordPumpVerdict(t.member.id, { code: "runner_off" }, Date.parse("2026-11-13T03:00:00.000Z"));
     const result = await createDiagnostics({
       home: t.home, dbPath: t.config.dbPath, config: t.config, db: t.store.db, source: "server",
       versions: { server: VERSION, buildId: "build-1" },
@@ -148,6 +150,7 @@ describe("진단 파일 만들기", () => {
     expect(database.members).toHaveLength(1);
     expect(database.members[0]).toMatchObject({ id: t.member.id, kind: "worker", errorCode: "control_unknown" });
     expect(database.members[0].name).toBeUndefined();
+    expect(database.members[0].pumpVerdict).toEqual({ code: "runner_off", since: "2026-11-13T03:00:00.000Z", overdueAt: null });
     expect(database.openDeliveries).toEqual([expect.objectContaining({ id: "dl_1", status: "held", hold_reason: "runner_off", errorCode: "text" })]);
     expect(database.openDeliveries[0].text).toBeUndefined();
     expect(database.pushDevices).toEqual([{ environment: "sandbox", state: "active", enabled: 1, n: 1 }]);
@@ -236,6 +239,8 @@ describe("POST /api/diagnose", () => {
     expect(summary.source).toBe("server");
     expect(summary.versions.buildId).toBe("build-http");
     expect(summary.server).toMatchObject({ ready: true, pid: process.pid, requestedBy: { version: "0.2.4", platform: "macos" } });
+    // 합치기(N): HTTPS 주소의 상태와 까닭 코드만(켠 적이 없으면 off, tailscale 을 부르지 않는다).
+    expect(summary.server.tailnetHttps).toMatchObject({ state: "off", problem: null });
     const doctor = JSON.parse(readFileSync(join(dir, "doctor.json"), "utf8"));
     expect(doctor.checks.find((check: { id: string }) => check.id === "server").state).toBe("ok");
     for (const secret of SECRETS(t.token)) expect(folderText(dir)).not.toContain(secret);

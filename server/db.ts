@@ -832,7 +832,8 @@ export function ensureDeliveryVerdicts(db: Database): boolean {
 /**
  * K(E2): 도구 승인 카드의 요약 열(decisions.tool_permission_json). 있으면 그 결재는 kind "tool_permission" 이다.
  * 색인과 같은 까닭으로 MIGRATIONS 에 넣지 않는다: 판 번호를 올리면 이전 판 서버가 이 DB 를 열지 못한다. 열을 더하기만 한다.
- * 이전 판 서버는 이 열을 모른 채 그 카드를 보통 결재로 본다(열린 카드는 새 서버가 시작할 때 닫는다).
+ * 이전 판 서버는 이 열을 모른 채 그 카드를 보통 결재로 본다. 그래서 열린 카드는 서버가 멈출 때 닫고(ToolPermissions.dispose),
+ * 비정상 종료로 남은 것은 새 서버가 시작할 때 닫는다(closeLeftovers).
  * 실패하면 서버가 뜨지 않는다: 결재 조회가 이 열을 늘 쓴다.
  */
 export function ensureToolPermissionColumn(db: Database): void {

@@ -1071,13 +1071,24 @@ export class CoreRunner implements FullRunner {
       throw error;
     }
     if (terminal.state !== "live") return;
-    const state = this.stateOf(track, terminal);
-    if (!opts.whileWorking && !["idle", "done"].includes(state || "")) throw new CoreError("busy", "Resolve the current CLI turn/dialog before changing its provider or configuration");
-    if (["idle", "done"].includes(state || "")) {
+    const quiet = this.quietForStop(track, terminal);
+    if (!opts.whileWorking && !quiet) throw new CoreError("busy", "Resolve the current CLI turn/dialog before changing its provider or configuration");
+    if (quiet) {
       const screen = await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 });
       const draft = providerFor(member) === "claude" ? inputText(screen.text) : codexDraft(screen.text);
       if (draft !== "") throw new CoreError("input_busy", "Cannot close a CLI with a user draft or unknown composer; the draft is preserved");
     }
+  }
+  /**
+   * 일을 끊지 않고 끝낼 수 있는 CLI 인가: 쉬는 중(idle·done), 또는 오류 보고(error)로 끝난 턴의 끝을 이미 본 CLI.
+   * 오류로 끝난 턴(API 오류·사용 한도)은 창이 아니라 입력을 기다리는 CLI 다. 예전에는 error 를 '처리 중'으로 읽어,
+   * 사용 한도로 멈춘 팀장을 재우거나 설정을 바꿔 다시 열 수 없었다(2026-11-13 라이브). 초안 확인은 쉬는 CLI 와 같다.
+   * 끝을 보지 못한 턴(턴 번호가 앞섰다)이나 이 서버가 지켜보지 않는 터미널의 error 는 지금처럼 막는다.
+   */
+  private quietForStop(track: Track | undefined, terminal: CoreTerminal): boolean {
+    const state = this.stateOf(track, terminal);
+    if (["idle", "done"].includes(state || "")) return true;
+    return state === "error" && !!track && track.terminal.address === terminal.address && (terminal.turn ?? 0) <= track.endedTurn;
   }
   async stop(member: RunnerMember, opts: { whileWorking?: boolean } = {}): Promise<void> {
     const release = this.reserve(member.id);
@@ -1093,7 +1104,7 @@ export class CoreRunner implements FullRunner {
       throw error;
     }
     if (terminal.state === "live") {
-      if (!opts.whileWorking && !["idle", "done"].includes(this.stateOf(this.tracks.get(member.id), terminal) || "")) throw new CoreError("busy", "CLI state changed before stop");
+      if (!opts.whileWorking && !this.quietForStop(this.tracks.get(member.id), terminal)) throw new CoreError("busy", "CLI state changed before stop");
       try {
         const result = await this.call<CoreTerminal>("terminal.kill", { terminal: terminal.address }, 15_000);
         if (result.state !== "finished") throw new CoreError("not_stopped", "Core did not confirm terminal termination");

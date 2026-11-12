@@ -1173,14 +1173,21 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   apiOutage(): import("../shared/types.ts").ApiOutageState | null {
     return this.loadApiRecovery("outage_public");
   }
-  updateUsageDecision(id: string, usage: NonNullable<Decision["usageLimit"]>, title: string, detail: string, open: boolean): Decision {
+  /**
+   * 사용 한도 카드를 고친다. options 를 주면 선택지도 바꾼다(모델 선택지·이어가기). 선택지만 바뀌어서는 판(updatedAt)을 올리지 않는다:
+   * 카드의 푸시 알림이 그 판(`ask:<id>:<updatedAt>`)에 묶여 있어, 올리면 아직 안 나간 알림이 취소된다. 바뀐 카드는 decision 이벤트로 나가고,
+   * 앱은 선택지가 바뀌면 카드를 새로 그리며, 서버는 답을 지금 선택지로 검사한다(없는 선택지는 400).
+   */
+  updateUsageDecision(id: string, usage: NonNullable<Decision["usageLimit"]>, title: string, detail: string, open: boolean, options?: DecisionOption[]): Decision {
     if (!open) usage = { ...usage, stillLimited: false };
     return this.transaction(() => {
       const before = this.requireDecision(id);
       const status = open ? "open" : "closed";
-      if (JSON.stringify(before.usageLimit) === JSON.stringify(usage) && before.title === title && before.detail === detail && before.status === status) return before;
-      this.run("UPDATE decisions SET usage_limit_json = ?, title = ?, detail = ?, status = ?, updated_at = ? WHERE id = ?",
-        JSON.stringify(usage), title, detail, status, status === before.status ? before.updatedAt : this.nextDecisionStamp(id), id);
+      const nextOptions = options ?? before.options;
+      const optionsChanged = JSON.stringify(nextOptions) !== JSON.stringify(before.options);
+      if (JSON.stringify(before.usageLimit) === JSON.stringify(usage) && before.title === title && before.detail === detail && before.status === status && !optionsChanged) return before;
+      this.run("UPDATE decisions SET usage_limit_json = ?, title = ?, detail = ?, status = ?, options = ?, updated_at = ? WHERE id = ?",
+        JSON.stringify(usage), title, detail, status, JSON.stringify(nextOptions), status === before.status ? before.updatedAt : this.nextDecisionStamp(id), id);
       const decision = this.requireDecision(id);
       this.recorder?.decision(before, decision);
       this.bumpBoard(decision.projectId);
@@ -3238,6 +3245,17 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   listPendingExecutions(): ExecutionJournal[] {
     return this.rows("SELECT run_id FROM execution_journal WHERE phase NOT IN ('ended','interrupted') ORDER BY created_at, rowid").map((r) => this.getExecutionJournal(r.run_id)!);
+  }
+
+  /**
+   * 이 세션 세대에서 입력이 CLI 에 들어간 마지막 실행: 수신·시작이 적혔거나 그 봉투를 CLI 가 받았다(accepted).
+   * 곧바로 오류로 끝난 턴은 수신을 적기 전에 끝나 수신 칸이 비어 있을 수 있어 봉투로도 본다. 넣지 못한 실행(거절·결과 모름)은 세지 않는다.
+   */
+  lastWrittenExecution(memberId: string, generation: number): ExecutionJournal | null {
+    const r = this.row(`SELECT e.run_id FROM execution_journal e LEFT JOIN delivery_dispatches d ON d.id = e.run_id
+      WHERE e.member_id = ? AND e.generation = ? AND (e.input_received_at IS NOT NULL OR e.started_at IS NOT NULL OR d.transport_state = 'accepted')
+      ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1`, memberId, generation);
+    return r ? this.getExecutionJournal(r.run_id) : null;
   }
 
   claimExecutionNotice(runId: string, kind: "interruption" | "report", write: () => void): boolean {

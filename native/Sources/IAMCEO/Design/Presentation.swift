@@ -34,7 +34,7 @@ struct MemberStatusInfo: Sendable {
             explanation = "네트워크 연결을 다시 확인하고 있습니다."
         case "usage_limit":
             label = "사용 한도 도달"; tone = .attention; icon = "hourglass"; live = false; needsMe = true
-            explanation = "계정을 바꾸거나 한도가 초기화되면 이어 갈 수 있습니다."
+            explanation = "한도가 풀리면 자동으로 이어 갑니다. 다른 모델로 바꾸면 바로 이어 갑니다."
         case "unknown":
             label = "상태 확인 불가"; tone = .attention; icon = "questionmark.circle"; live = false; needsMe = false
             explanation = "지금 상태를 확인하지 못했습니다."
@@ -616,7 +616,7 @@ func friendlyError(_ raw: String) -> String {
         return "AI 서버가 응답하지 않습니다. 잠시 뒤 다시 시도합니다."
     }
     if has("usage limit") || has("rate limit") || has("사용 한도") || has("limit reached") {
-        return "사용 한도에 닿았습니다. 한도가 풀리면 다시 이어서 할 수 있습니다."
+        return "사용 한도에 닿았습니다. 한도가 풀리면 자동으로 이어 갑니다. 다른 모델로 바꾸면 바로 이어 갑니다."
     }
     if has("not logged in") || has("please run /login") || has("authentication") || has("unauthorized") {
         return "AI 계정 로그인이 풀렸습니다. Mac 터미널에서 다시 로그인해 주세요."
@@ -752,10 +752,21 @@ struct APIOutageInfo: Sendable {
     }
 }
 
+/// One button on a usage-limit card.
+struct UsageLimitButton: Sendable, Equatable {
+    let choice: String
+    let label: String
+    let primary: Bool
+}
+
 struct UsageLimitInfo: Sendable {
+    /// Shipped iPhones (0.2.2, 0.2.3) answer with this key: never rename it.
     static let resumeChoice = "resume"
-    static let resumeLabel = "계정을 바꿨어요 · 모두 이어가기"
-    static let stillLimitedText = "아직 같은 계정이라 한도가 남아 있지 않습니다. 다른 계정으로 로그인한 뒤 다시 누르세요."
+    /// `model:<value>`: switch the card's staff to that model and continue the same conversations.
+    static let modelChoicePrefix = "model:"
+    /// Used only when the server sends no options. Does not assume the person has another account.
+    static let resumeLabel = "계정을 바꿨거나 한도를 늘렸어요 · 이어가기"
+    static let stillLimitedText = "아직 한도가 남아 있지 않습니다. 기다리거나 다른 모델을 고르세요."
     let resumesText: String?
     let memberNames: [String]
     let warning: String?
@@ -774,6 +785,31 @@ struct UsageLimitInfo: Sendable {
             members.first { $0.id == id }.map { $0.name.isEmpty ? id : $0.name } ?? id
         }
         warning = decision.usageLimit?.stillLimited == true ? Self.stillLimitedText : nil
+    }
+
+    /// The card's buttons in the server's order (models first, then `resume`). Waiting is not a button: the server continues on its own
+    /// when the limit lifts. The first model choice is the prominent button, the rest are secondary. An older server sends only `resume`,
+    /// which stays the one prominent button with the server's label, as before.
+    static func buttons(_ decision: Decision) -> [UsageLimitButton] {
+        let options = decision.options.filter { $0.k == resumeChoice || $0.k.hasPrefix(modelChoicePrefix) }
+        guard !options.isEmpty else { return [UsageLimitButton(choice: resumeChoice, label: resumeLabel, primary: true)] }
+        let primary = options.first { $0.k.hasPrefix(modelChoicePrefix) }?.k ?? options[0].k
+        return options.map { option in
+            UsageLimitButton(choice: option.k, label: option.label.isEmpty ? (option.k == resumeChoice ? resumeLabel : option.k) : option.label, primary: option.k == primary)
+        }
+    }
+
+    /// The server recomputes a usage card's model choices (a member left, the model list changed) without moving `updatedAt`,
+    /// which the card's push notification is keyed to. A shown card whose options differ from the latest is redrawn.
+    static func optionsChanged(_ shown: Decision, latest: Decision?) -> Bool {
+        guard shown.kind == "usage_limit", let latest else { return false }
+        return latest.options != shown.options
+    }
+
+    /// A choice this card can be answered with: `resume`, or one of the model choices the server offered on it.
+    static func accepts(_ decision: Decision, choice: String?) -> Bool {
+        guard let choice else { return false }
+        return choice == resumeChoice || (choice.hasPrefix(modelChoicePrefix) && decision.options.contains { $0.k == choice })
     }
 
     /// Stable partition: preserve the existing priority within each kind.

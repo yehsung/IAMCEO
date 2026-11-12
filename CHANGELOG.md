@@ -9,6 +9,7 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ### 아직 내지 않은 것
 
+- **사용 한도로 멈춘 팀장은 모델만 바꾸면 같은 대화로 바로 이어 갑니다.** 결재함의 사용 한도 카드에서 다른 모델을 고르거나, 팀장 설정에서 모델을 바꾸거나, 총괄에게 바꾸라고 하면(새 도구 `team_model`), 한도 창은 Esc로만 닫고 같은 세션을 새 모델로 이어 연 뒤 멈춘 곳부터 이어서 하게 합니다. 새 팀장을 띄우지 않으므로 오류 표시가 남은 팀장도 생기지 않습니다. 카드는 계정이 하나인 사람도 기준으로 삼아, 기다리면 저절로 이어 간다는 것과 어느 모델의 크레딧이 떨어졌는지를 먼저 알려 줍니다. 한도로 멈춘 팀장도 이제 재우거나 닫을 수 있습니다.
 - **Mac을 다시 시작한 뒤 지시를 못 받던 팀장이 풀립니다.** 자동 압축의 결과를 확인하지 못한 채 Mac이 꺼지면, 그 팀장은 다시 열어도 지시를 받지 못했습니다(압축을 받은 터미널이 사라져 아무도 결과를 확정하지 못했습니다). 이제 그 터미널이 없으면 압축을 닫고 밀린 지시를 이어서 넣습니다.
 - **재시작으로 꺼진 세션을 오류처럼 보이지 않게.** Mac이나 실행 엔진이 다시 시작되어 꺼진 팀장에게 내부 용어(`holder_lost`) 대신 무슨 일이고 어떻게 되는지를 적습니다.
 - **Tailscale이 꺼져 있으면 알려 줍니다.** iPhone을 연결해 쓰던 Mac에서 Tailscale이 1분 넘게 꺼져 있으면 Mac 알림과 Mac 앱의 안내 한 줄로 알립니다. Tailscale을 켜면 다시 연결되고 안내는 사라집니다.
@@ -85,6 +86,7 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 
 ### Unreleased
 
+- **Staff stopped by a usage limit continue the same conversation once you change their model.** Pick another model on the usage-limit card in the inbox, change it in the staff member's settings, or ask the lead to (new tool `team_model`): the limit menu is closed with Esc only, the same session is reopened on the new model, and the work picks up where it stopped. No replacement staff member is started, so no one is left showing an error. The card no longer assumes you have a second account: it says waiting continues on its own and names the model whose credits ran out. Staff stopped by a usage limit can now also be put to sleep or closed.
 - **Staff that stopped receiving work after a Mac restart recover.** If the Mac went down while an automatic compaction was still unconfirmed, that staff member received nothing after being reopened (the terminal that took the compaction was gone, so nobody could confirm it). The server now closes that compaction when its terminal no longer exists and delivers the queued work.
 - **A session ended by a restart no longer looks like an error.** Staff switched off by a Mac or engine restart show what happened and what to do instead of an internal term (`holder_lost`).
 - **You are told when Tailscale is off.** On a Mac that an iPhone has been connecting to, Tailscale being off for more than a minute raises a Mac notification and a line in the Mac app. Turn Tailscale back on and the iPhone connects again; the line goes away.

@@ -1,14 +1,14 @@
 import { configuredSecretRoots } from "./secret-paths.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { ModelCatalogReader } from "./models.ts";
-import { ApiRecovery, classifyTurnError, NoTerminalError, type ApiRecoveryOptions } from "./api-outage.ts";
+import { ApiRecovery, classifyTurnError, limitedModelName, NoTerminalError, USAGE_MODEL_PREFIX, usageModelResumeText, withRo, type ApiRecoveryOptions } from "./api-outage.ts";
 import { DeliveryRecovery, type RecoveryRunner } from "./delivery-recovery.ts";
 import { writeStatuslineWrapper } from "./runner/statusline.ts";
 import { endedByRestart, RESTART_EXIT_NOTE, RESTART_REOPENED_NOTE, RESTART_RESUME_TEXT, RESTART_WAKE_MAX_ATTEMPTS, RESTART_WAKE_PACING, restartNoteIn, type RestartWake, type RestartWakePacing } from "./restart-wake.ts";
 // Orchestrator: 전달 펌프, 턴 종료 처리, 압축 판단, 띄우기·잠재우기·다시 열기, 승인 근거 확인(spec §4·§6·§7).
 //
 // server/agent-tools.ts 가 쓰는 공개 메서드:
-//   팀       addMember · assign · compactMember · sleepMember · resumeMember · closeMember · roster
+//   팀       addMember · assign · compactMember · sleepMember · resumeMember · closeMember · changeMemberModel · roster
 //   보고     recordPost · registerAsk · setMemberStatus · setProjectNow · setWork
 //   직접 CLI waitInbox · askWait
 //   프로젝트 createProject · ensureConductor
@@ -439,6 +439,9 @@ export interface RosterEntry {
   subagentEffort: Effort | null;
 }
 
+/** 사용 한도로 보류 중인 팀장의 설정 변경. runId: 멈출 때 하던 실행(이어가기 글을 넣을 것). 쉬던 중 걸렸으면 null. */
+interface UsageStop { runId: string | null }
+
 interface Turn {
   kind: "work" | "compact" | "control";
   boardReview?: { requestedRevision: number; reviewedRevision: number | null };
@@ -732,6 +735,7 @@ export class Orchestrator implements OrchestratorApi {
         const runner = this.runners.get(this.backendOf(member));
         return runner?.dismissUsageLimit ? runner.dismissUsageLimit(this.runnerMember(member, this.store.requireProject(member.projectId)), fingerprint) : { ok: false, note: "창을 닫지 못했습니다" };
       },
+      choices: (cli, limited) => this.usageModelChoices(cli, limited),
     });
     this.serverUrl = deps.serverUrl ?? `http://127.0.0.1:${deps.config.port}`;
     const core = this.runners.get("core");
@@ -2377,11 +2381,16 @@ export class Orchestrator implements OrchestratorApi {
     return this.switchProvider(member, { cli: member.cli }, false, true);
   }
 
-  private async switchProvider(member: Member, patch: PatchMemberReq, fromPump = false, freshSession = false): Promise<Member> {
+  /**
+   * usage: 사용 한도로 멈춘 팀장의 모델을 바꿔 다시 연다(patchMemberConfig). 그 턴은 이미 한도 오류로 끝났으므로, 한도 메뉴 때문에 적힌 막힘(blocked)으로는
+   * 거절하지 않는다. 끝내기 전에 한도 메뉴를 Esc 로만 닫고, 끝낸 뒤 그 팀장의 한도 보류를 풀고 하던 일의 이어가기 글을 넣는다(resumeAfterUsageStop).
+   * 정말 일하는 중이거나(턴·실행기의 일하는 중·불확실한 입력) 입력칸에 쓰던 글이 있으면 지금처럼 거절한다.
+   */
+  private async switchProvider(member: Member, patch: PatchMemberReq, fromPump = false, freshSession = false, usage: UsageStop | null = null): Promise<Member> {
     const project = this.store.requireProject(member.projectId);
     this.requireActive(project);
     const rt = this.runtime(member.id);
-    if (rt.closing || rt.starting || (!fromPump && rt.pumping) || rt.reopening || rt.turn || this.isBusy(member) || member.status === "working" || member.status === "blocked") {
+    if (rt.closing || rt.starting || (!fromPump && rt.pumping) || rt.reopening || rt.turn || this.isBusy(member) || member.status === "working" || (member.status === "blocked" && !usage)) {
       throw new ApiError(409, "일하거나 세션을 처리하는 중입니다. 턴이 끝난 뒤 CLI를 바꾸세요");
     }
     if (this.store.listDelivering().some((d) => d.memberId === member.id) || this.store.listPending(member.id).some((d) => d.holdReason === "delivery_unknown")) {
@@ -2403,6 +2412,8 @@ export class Orchestrator implements OrchestratorApi {
         try { providerLaunch(this.runnerMember(target, project), this.writeRunFiles(target, project, !!target.sessionId), this.config); }
         catch (e) { throw new ApiError(400, `CLI 설정을 적용할 수 없습니다: ${(e as Error).message}`); }
       }
+      // 사용 한도 메뉴가 떠 있으면 Esc 로만 닫는다. 끝내는 동안(closing) 온 턴 끝 이벤트는 버려지므로, 닫으며 끝난 턴이 한도 보류를 다시 걸지 않는다.
+      if (usage) await this.closeUsageMenu(member);
       // Complete the old session before rotating credentials. Failure leaves the original identity intact.
       if ((member.sessionId || member.paneId) && !(freshSession && member.backend !== "core")) {
         try { await this.stopManaged(member, "fresh_session", false); }
@@ -2416,6 +2427,8 @@ export class Orchestrator implements OrchestratorApi {
         this.endExecution(member, "interrupted", freshSession ? "명시적 새 세션으로 전환했습니다" : "세션 설정을 변경했습니다");
         this.confirmStop(member.id);
         this.store.archiveAndRotateSession(member.id, patch.cli!, freshSession ? "fresh_session" : sameProvider ? "settings_change" : "provider_switch");
+        // 옛 터미널은 끝났다. 새 터미널을 띄우기 전에 보류를 풀고 이어가기 글을 줄에 세운다: 띄우기가 실패해도 다음 기동이 그 글부터 넣는다.
+        if (usage) this.resumeAfterUsageStop(member, usage, resumable, this.modelLabel(target));
       });
       if (resumable) this.store.patchMember(member.id, { sessionId: member.sessionId });
       this.store.patchMember(member.id, { ...patch, ...(freshSession ? { origin: "runner" as const } : {}), backend: this.store.effectiveBackend(), status: "idle", lastError: null });
@@ -2505,6 +2518,8 @@ export class Orchestrator implements OrchestratorApi {
     }
     if (member.backend === "core" && (member.sessionId || member.paneId) &&
         ((patch.modelOverride !== undefined && patch.modelOverride !== member.modelOverride) || (patch.effortOverride !== undefined && patch.effortOverride !== member.effortOverride))) {
+      // 사용 한도로 멈춘 팀장이면 모델을 바꿔 같은 세션을 이어 연다. 한도 보류·한도 메뉴의 막힘 때문에 미루지 않는다.
+      const usage = member.sessionId ? this.usageStop(member) : null;
       if (!member.sessionId || ["asleep", "offline"].includes(member.status)) {
         const saved = this.store.patchMember(memberId, patch);
         if (!member.sessionId && member.paneId && !["asleep", "offline"].includes(member.status)) {
@@ -2512,11 +2527,138 @@ export class Orchestrator implements OrchestratorApi {
           this.store.deferMemberConfig(memberId, JSON.stringify(this.desiredConfig(saved)));
           this.store.appendActivity(memberId, "system", "설정 적용 보류: 같은 대화의 세션 ID를 확인하지 못했습니다. 다음 자연 기동 때 적용합니다");
         }
-        return saved;
+        if (!usage) return saved;
+        // 터미널 없이(잠듦·꺼짐) 보류된 팀장: 보류를 풀고, 하던 일이 있었으면 이어가기 글을 넣는다. 그 글이 다음 펌프에서 새 모델로 같은 세션을 연다.
+        const project = this.store.requireProject(saved.projectId);
+        const continued = this.runners.get(this.store.effectiveBackend())?.sessionExists?.(this.runnerMember(saved, project)) !== false;
+        this.store.transaction(() => this.resumeAfterUsageStop(saved, usage, continued, this.modelLabel(saved)));
+        return this.store.requireMember(memberId);
       }
-      return this.switchProvider(member, { ...patch, cli: member.cli });
+      return this.switchProvider(member, { ...patch, cli: member.cli }, false, false, usage);
     }
     return this.store.patchMember(memberId, patch);
+  }
+
+  /**
+   * 총괄의 team_model: 있는 팀장의 모델(과 effort)을 바꾼다. 앱의 팀장 설정 변경(patchMemberConfig)과 같은 길이다.
+   * 살아 있는 세션은 같은 세션을 새 모델로 이어 연다. 사용 한도로 멈춘 팀장은 그 보류를 풀고 멈춘 일을 이어서 하게 한다.
+   */
+  async changeMemberModel(memberId: string, patch: Pick<PatchMemberReq, "modelOverride" | "effortOverride">): Promise<{ member: Member; model: string; opened: "resumed" | "fresh" | "later"; usage: boolean; continued: boolean }> {
+    const before = this.store.requireMember(memberId);
+    const stop = before.sessionId ? this.usageStop(before) : null;
+    const same = (patch.modelOverride === undefined || patch.modelOverride === before.modelOverride) && (patch.effortOverride === undefined || patch.effortOverride === before.effortOverride);
+    if (same) throw new ApiError(400, `${josa(before.name, "은")} 이미 그 모델·effort 입니다${stop ? ". 사용 한도로 멈춘 직원은 다른 모델로 바꿔야 이어 갑니다" : ""}`);
+    const member = await this.patchMemberConfig(memberId, patch);
+    const run = stop?.runId ? this.store.getExecutionJournal(stop.runId) : null;
+    // 잠든·꺼진 팀장은 설정만 저장했다(다음에 열 때 적용). 살아 있던 팀장은 다시 열었다: 세션 ID 가 같으면 같은 대화를 이어 연 것이다.
+    const opened = ["asleep", "offline"].includes(before.status) || !before.sessionId ? "later" : member.sessionId === before.sessionId ? "resumed" : "fresh";
+    // 새 세션으로 열었으면 이어가기 글 대신 총괄에게 중단을 알렸다(resumeAfterUsageStop).
+    return { member, model: this.modelLabel(member), opened, usage: !!stop, continued: opened !== "fresh" && !!run?.interruptionNotifiedAt };
+  }
+
+  /**
+   * 사용 한도로 보류 중인 팀장이면, 멈출 때 하던 실행: 이 세대에서 입력이 들어간 마지막 실행이 한도 오류로 끝났고 아직 이어가기·중단 알림을 만들지 않은 것.
+   * 쉬던 중 한도에 걸렸으면(마지막 실행이 성공했거나, 한도 메뉴 때문에 넣지 못한 입력뿐이면) runId 는 null 이다. 보류 중이 아니면 null.
+   */
+  private usageStop(member: Member): UsageStop | null {
+    if (!this.apiRecovery.usageLimited(member.id)) return null;
+    const run = this.store.lastWrittenExecution(member.id, this.store.memberRevisions(member.id).sessionGeneration);
+    const stopped = !!run && run.phase === "ended" && run.result === "error" && classifyTurnError(run.reason ?? "") === "usage_limit" && !run.interruptionNotifiedAt;
+    return { runId: stopped ? run!.runId : null };
+  }
+
+  /** 사용 한도 메뉴가 떠 있으면 Esc 로만 닫는다(ApiRecovery.closeMenu). 못 닫으면 409: 세션을 끝내거나 다시 열지 않고 그대로 둔다. */
+  private async closeUsageMenu(member: Member): Promise<void> {
+    let result: { ok: boolean; note?: string };
+    try { result = await this.apiRecovery.closeMenu(member); }
+    catch (e) {
+      // 이 서버가 지켜보지 않는 터미널이다(끝났거나 없다). 닫을 메뉴도 없다. 끝내기 쪽이 그대로 판정한다.
+      if (e instanceof CoreError && e.kind === "not_found" && !e.uncertain) return;
+      throw new ApiError(409, `사용 한도 창을 확인하지 못했습니다: ${(e as Error).message}. 잠시 뒤 다시 해 주세요`);
+    }
+    if (!result.ok) throw new ApiError(409, `사용 한도 창을 Esc로 닫지 못했습니다(${result.note ?? "창을 닫지 못했습니다"}). 터미널을 확인한 뒤 다시 해 주세요`);
+  }
+
+  /**
+   * 사용 한도로 멈춘 팀장을 새 모델로 다시 열 때(설정 변경). 그 팀장의 한도 보류만 풀고(같은 계정의 다른 팀장은 그대로), 멈출 때 하던 일이 있었으면
+   * 이어가기 글을 넣는다. 재시작 이어가기와 같은 장치다: execution journal 의 중단 통지 칸으로 실행마다 한 번(서버를 다시 띄워도),
+   * 기다리던 다른 전달보다 먼저 혼자 나가고, 원래 지시는 다시 넣지 않는다. 총괄에게는 깨우지 않는 소식만 간다.
+   * 같은 대화를 이어 열지 못하면(세션 기록 없음) 이어가기 글 대신 예전처럼 총괄을 깨워 중단을 알린다.
+   */
+  private resumeAfterUsageStop(member: Member, stop: UsageStop, continued: boolean, model: string): void {
+    this.apiRecovery.releaseMember(member.id);
+    this.store.appendActivity(member.id, "system", `사용 한도로 멈춘 세션의 모델을 ${withRo(model)} 바꿔 ${continued ? "같은 대화를 이어 엽니다" : "엽니다"}`);
+    const run = stop.runId ? this.store.getExecutionJournal(stop.runId) : null;
+    if (!run || run.memberId !== member.id) return;
+    let wakeConductor: string | null = null;
+    this.store.claimExecutionNotice(run.runId, "interruption", () => {
+      const conductor = this.store.getConductor(member.projectId);
+      const lead = conductor && conductor.id !== member.id ? conductor : null;
+      if (!continued) {
+        this.noticeInterrupted(member, run, `사용 한도로 멈췄습니다. 모델을 ${withRo(model)} 바꿨지만 이어 열 세션 기록이 없어 새 세션으로 엽니다`);
+        wakeConductor = lead?.id ?? null;
+        return;
+      }
+      this.apiRecovery.continueAfter(member, usageModelResumeText(model));
+      this.systemMessage(member.projectId, `${member.name}: 실행 ${run.runId} — 사용 한도로 멈춰 모델을 ${withRo(model)} 바꿔 이어서 하게 했습니다`);
+      // 총괄이 같은 일을 또 맡기거나 새 직원에게 넘겨 두 번 하게 되지 않도록, 깨우지 않는 소식으로만 알린다.
+      if (lead) this.store.enqueue({ projectId: member.projectId, memberId: lead.id, kind: "system", wake: false,
+        text: formatSystem(`${member.name}의 일(실행 ${run.runId})이 사용 한도로 멈춰, 모델을 ${withRo(model)} 바꿔 같은 대화를 이어 열고 멈춘 곳부터 이어서 하게 했습니다. 같은 일을 다시 지시하거나 다른 직원을 새로 띄워 넘기지 마세요. 결과는 ${member.name}의 보고로 옵니다. 전달 ${run.deliveryIds.join(", ")}.`) });
+    });
+    this.store.afterCommit(() => { if (wakeConductor && !this.closed && !this.recovering) void this.pump(wakeConductor); });
+  }
+
+  /** 화면·글에 쓰는 모델 이름: 모델 목록의 표시 이름, 목록에 없으면 값 그대로, 정하지 않았으면 'CLI 기본 모델'. */
+  private modelLabel(member: Member): string {
+    const model = this.desiredConfig(member).model;
+    if (!model) return "CLI 기본 모델";
+    return this.models.read()[member.cli].models.find(option => option.value === model)?.label ?? model;
+  }
+
+  /**
+   * 사용 한도 카드의 모델 선택지(`model:<값>`, 글 '<표시 이름>로 바꿔 이어가기'): 그 CLI 의 모델 목록(/api/models 와 같은 목록)에서
+   * 카드 전체에서 한도에 걸린 모델을 뺀 것. 한도에 걸린 모델은 카드의 팀장들이 지금 쓰는 모델(설정)과 한도 글에 이름이 나온 모델이다
+   * (예: 'keep using Fable 5.2' 의 Fable 5.2). 팀장마다 모델이 달라도 교집합이 아니라 카드 전체에서 걸린 모델들을 뺀다.
+   */
+  private usageModelChoices(cli: CliProvider, limited: { memberId: string; raw: string }[]): DecisionOption[] {
+    const catalog = this.models.read()[cli].models;
+    const blocked = new Set<string>();
+    for (const entry of limited) {
+      const member = this.store.getMember(entry.memberId);
+      const model = member ? this.desiredConfig(member).model : null;
+      if (model) blocked.add(model.toLowerCase());
+      const named = limitedModelName(entry.raw)?.toLowerCase();
+      if (!named) continue;
+      for (const option of catalog) {
+        const label = option.label.toLowerCase();
+        if (named === label || named === option.value.toLowerCase() || named.startsWith(`${label} `)) blocked.add(option.value.toLowerCase());
+      }
+    }
+    return catalog.filter(option => !blocked.has(option.value.toLowerCase())).map(option => ({ k: `${USAGE_MODEL_PREFIX}${option.value}`, label: `${withRo(option.label)} 바꿔 이어가기` }));
+  }
+
+  /**
+   * 사용 한도 카드에서 다른 모델을 골랐다: 카드에 남은(아직 기다리는) 팀장마다 모델을 그 값으로 바꾼다. 대표가 팀장 설정에서 바꾼 것과 같은 길이라
+   * (patchMemberConfig) 같은 세션을 새 모델로 이어 열고, 일하던 중이었으면 이어가기 글이 한 번 들어가며, 그 팀장은 카드에서 빠진다.
+   * 새 모델이 그 팀장의 effort 를 받지 않으면 effort 지정은 직급 기본으로 되돌린다. 바꾸지 못한 팀장은 까닭과 함께 카드에 남는다.
+   */
+  private async switchUsageCard(card: Decision, choice: string, model: string): Promise<Decision> {
+    this.apiRecovery.noteAnswer(card.id, choice);
+    const ids = (card.usageLimit?.memberIds ?? []).filter(id => this.apiRecovery.usageLimited(id));
+    const failures: string[] = [];
+    for (const id of ids) {
+      const member = this.store.getMember(id);
+      if (!member) continue;
+      const effort = member.effortOverride && !this.models.efforts(member.cli, model).includes(member.effortOverride) ? { effortOverride: null } : {};
+      try { await this.patchMemberConfig(id, { modelOverride: model, ...effort }); }
+      catch (e) {
+        const why = (e as Error).message;
+        failures.push(`${member.name}: ${why}`);
+        if (this.store.getMember(id) && this.apiRecovery.usageLimited(id)) this.apiRecovery.noteFailure(id, `모델을 바꾸지 못했습니다(${why})`);
+      }
+    }
+    if (ids.length && failures.length === ids.length) throw new ApiError(409, `모델을 바꾸지 못했습니다. ${failures.join(" / ")}`);
+    return this.store.requireDecision(card.id);
   }
 
   /** 보관하면 화면에서 사라진다. 답을 기다리는 세션이나 일하는 세션을 두고 사라지면 아무도 풀어 줄 수 없다. */
@@ -2733,9 +2875,17 @@ export class Orchestrator implements OrchestratorApi {
     if (this.store.requireDecision(decisionId).kind === "usage_limit") {
       const card = this.store.requireDecision(decisionId);
       this.requireActive(this.store.requireProject(card.projectId));
-      if (req.choice !== "resume") throw new ApiError(400, "이어가기만 선택할 수 있습니다");
+      const choice = req.choice ?? "";
+      if (choice !== "resume" && !choice.startsWith(USAGE_MODEL_PREFIX)) throw new ApiError(400, "이어가기나 다른 모델만 선택할 수 있습니다");
+      const model = choice.startsWith(USAGE_MODEL_PREFIX) ? choice.slice(USAGE_MODEL_PREFIX.length) : null;
+      // 그 CLI 의 모델 목록에 없는 값(다른 CLI 의 모델 포함)은 거절한다.
+      if (model !== null && !this.models.read()[card.usageLimit?.cli ?? "claude"].models.some(option => option.value === model)) throw new ApiError(400, "이 사용 한도의 CLI 모델 목록에 없는 모델입니다");
+      // 같은 모델 답이 다시 왔다(응답을 잃은 앱의 재시도 등). 이미 바꿔 카드가 닫혔으면 한 번만 한 것으로 답한다.
+      if (model !== null && card.status !== "open" && this.apiRecovery.answeredWith(decisionId) === choice) return card;
       if (card.status !== "open" || req.expectedVersion && req.expectedVersion !== card.updatedAt) throw new ApiError(409, "알림 상태가 바뀌었습니다. 다시 확인해 주세요");
-      return this.apiRecovery.resumeUsage(decisionId);
+      if (model === null) return this.apiRecovery.resumeUsage(decisionId);
+      if (!card.options.some(option => option.k === choice)) throw new ApiError(400, "한도에 걸린 모델이거나 선택지에 없는 모델입니다. 카드를 다시 확인해 주세요");
+      return this.switchUsageCard(card, choice, model);
     }
     let booting: Promise<void> | null = null;
     const { value: { decision, changed }, deliveries } = this.store.withDeliveryIntents(() => this.store.answerDecision(decisionId, req), ({ decision, changed }) => {
@@ -3479,6 +3629,8 @@ export class Orchestrator implements OrchestratorApi {
         await runner.checkStop?.(target, { whileWorking: true });
         if (member.status !== "blocked") await runner.interrupt(target);
       }
+      // 사용 한도로 멈춘 팀장: 그 턴은 이미 한도 오류로 끝났다. 한도 메뉴가 떠 있으면 Esc 로만 닫은 뒤, 쉬는 CLI 처럼 끝낸다(초안 확인은 그대로).
+      if (!opts.force && !opts.holdAs && this.apiRecovery.usageLimited(memberId)) await this.closeUsageMenu(member);
       await this.stopManaged(member, opts.holdAs === "archived" ? "archive" : "sleep", !!opts.force && !opts.holdAs);
       this.endExecution(member, "interrupted", "팀원을 잠재워 실행을 종료했습니다");
       if (rt.turn) rt.turn.interrupted = true;

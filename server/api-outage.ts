@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { ApiOutageState, CliProvider, Decision, Delivery, Member } from "../shared/types.ts";
+import type { ApiOutageState, CliProvider, Decision, DecisionOption, Delivery, Member } from "../shared/types.ts";
 import { ApiError, type Store } from "./store.ts";
 
 function usageLimitTitle(text: string): boolean {
@@ -84,6 +84,55 @@ export function networkRetryScreen(screen: string): boolean {
 }
 export const API_RESUME_TEXT = "[시스템] 인터넷 연결이 끊겨 하던 턴이 중단됐습니다. 연결이 돌아왔습니다. 중단된 일을 이어서 하세요. 이미 끝낸 부분은 다시 하지 말고, 다 끝났으면 결과만 post 하세요.";
 export const USAGE_RESUME_TEXT = "[시스템] 사용 한도로 하던 턴이 멈췄습니다. 이제 이어서 할 수 있습니다. 중단된 일을 이어서 하세요. 이미 끝낸 부분은 다시 하지 말고, 다 끝났으면 결과만 post 하세요.";
+/** 사용 한도로 보류한 직원의 lastError. 한도가 풀리면 이 글일 때만 지운다. */
+export const USAGE_WAIT_NOTE = "사용 한도 해제를 기다립니다";
+/**
+ * 사용 한도 카드의 '이어가기' 선택지. 키는 출시된 iPhone(0.2.2·0.2.3)이 이 값으로 답하므로 바꾸지 않는다.
+ * 계정이 하나뿐인 사람도 있으니 계정을 바꿨다고 가정하지 않는다. 기다리기는 버튼이 아니라 기본 동작이다(풀리면 저절로 이어 간다).
+ */
+export const USAGE_RESUME_OPTION: DecisionOption = { k: "resume", label: "계정을 바꿨거나 한도를 늘렸어요 · 이어가기" };
+/** 사용 한도 카드의 모델 선택지 키: `model:<모델 목록의 값>`. 고르면 카드의 팀장 모두를 그 모델로 바꿔 같은 세션을 이어 연다. */
+export const USAGE_MODEL_PREFIX = "model:";
+
+/**
+ * '로'/'으로'. 한글은 받침으로 정하고(받침 없음·ㄹ 받침은 '로'), 숫자·영문은 우리말로 읽을 때의 끝소리로 정한다
+ * (Opus로, Fable 5.2로, Haiku로, Sonnet으로, gpt-6.1-sol로). 정할 수 없으면 '(으)로'.
+ */
+export function particleRo(word: string): string {
+  const text = word.trim();
+  const last = text.at(-1) ?? "";
+  const code = last.charCodeAt(0) - 0xac00;
+  if (code >= 0 && code <= 11171) return code % 28 === 0 || code % 28 === 8 ? "로" : "으로";
+  // 영(0)·삼(3)·육(6)만 받침이 ㄹ 이 아닌 소리로 끝난다.
+  if (/[0-9]/.test(last)) return "036".includes(last) ? "으로" : "로";
+  const lower = text.toLowerCase();
+  if (!/[a-z]$/.test(lower)) return "(으)로";
+  return /(?:ng|[mnbckpt])$/.test(lower) ? "으로" : "로";
+}
+/** 낱말에 '로'/'으로'를 붙인다. */
+export function withRo(word: string): string { return `${word}${particleRo(word)}`; }
+
+/**
+ * 특정 모델의 사용 크레딧만 떨어진 한도인가(다른 모델로 바꾸면 바로 된다). 라이브 원문:
+ * "You're out of usage credits. Run /usage-credits to keep using Fable 5.2 or /model to switch models." → { model: "Fable 5.2" }.
+ * 모델 이름이 없고 '/model to switch models' 만 있으면 model 은 null. 아니면 null.
+ */
+export function modelCreditLimit(raw: string): { model: string | null } | null {
+  const keep = /keep using\s+(.+?)\s+or\s+\/model\b/i.exec(raw) ?? /keep using\s+(.+?)\s*(?:\.\s|\.$|,|$)/im.exec(raw);
+  if (keep?.[1]?.trim()) return { model: keep[1].trim() };
+  return /\/model to switch models/i.test(raw) ? { model: null } : null;
+}
+/** 한도 글에 이름이 나온, 한도에 걸린 모델(카드의 모델 선택지에서 뺀다): 모델 크레딧 소진의 그 모델, 또는 'You've hit your Opus limit' 의 Opus. */
+export function limitedModelName(raw: string): string | null {
+  return modelCreditLimit(raw)?.model ?? /you['’]ve hit your (Opus|Sonnet|Fable|Haiku) limit\b/i.exec(raw)?.[1] ?? null;
+}
+/**
+ * 사용 한도로 일하던 도중 멈춘 직원의 모델을 바꿔 같은 대화를 이어 열었을 때, 멈춘 실행마다 한 번 넣는 글(재시작 이어가기와 같은 꼴).
+ * 원래 지시를 다시 넣지 않는다(세션 기록에 멈춘 턴이 그대로 있다). 이 글로 시작한 턴에도 평소의 보고 의무와 보고 보완이 그대로 적용된다.
+ */
+export function usageModelResumeText(model: string): string {
+  return `[시스템] 사용 한도로 하던 일이 중간에 멈췄습니다. 모델을 ${withRo(model)} 바꿔 같은 대화를 이어 엽니다. 멈추기 직전까지 한 일을 먼저 확인하고(파일, 명령 결과, 외부 서비스의 상태), 끝나지 않은 부분만 이어서 하세요. 이미 끝낸 일을 다시 하지 마세요. 끝나면 평소처럼 보고하세요.`;
+}
 
 function formatUsageReset(at: string): string {
   const parts = new Intl.DateTimeFormat("ko-KR", { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, month: "long", day: "numeric", hour: "numeric", minute: "numeric", hour12: true }).formatToParts(new Date(at));
@@ -109,7 +158,9 @@ interface Outage { id: string; since: string; active: boolean; lastProbeAt: stri
 interface Limited { memberId: string; fingerprint: string | null; raw: string; resetsAt: string | null; resumeId: string | null; awaitingResult: boolean; autoAttempted: string | null; failure: string | null; dismissStarted?: boolean; errorKey?: string;
   /** 자동 이어가기 일정. 한 번 실패했다고 멈추지 않도록 다음 시도 시각과 횟수를 둔다. */
   limitedAt?: string; autoAttempts?: number; autoNextAt?: string | null; relimits?: number }
-interface LimitGroup { cli: CliProvider; decisionId: string; stillLimited: boolean; members: Limited[]; rawEvidence?: string[] }
+interface LimitGroup { cli: CliProvider; decisionId: string; stillLimited: boolean; members: Limited[]; rawEvidence?: string[];
+  /** 대표가 카드에서 고른 마지막 모델 선택지(`model:<값>`). 같은 답이 다시 오면 한 번만 한다. */
+  answered?: string }
 interface RecoveryState { outage: Outage | null; limits: LimitGroup[]; resumeOrder?: string[]; continuations?: Record<string, string> }
 export interface ApiRecoveryOptions {
   store: Store;
@@ -121,6 +172,11 @@ export interface ApiRecoveryOptions {
   pump: (memberId: string) => void | Promise<void>;
   inspect: (member: Member) => Promise<{ menu: UsageMenu | null; state: string | null }>;
   dismiss: (member: Member, fingerprint: string) => Promise<{ ok: boolean; note?: string }>;
+  /**
+   * 카드의 모델 선택지(`model:<값>`): 그 CLI 의 모델 목록에서 카드의 팀장들이 한도에 걸린 모델을 뺀 것. 없으면 '이어가기'만 둔다.
+   * 모델 목록과 팀장의 설정은 총괄이 안다(ModelCatalogReader·desiredConfig).
+   */
+  choices?: (cli: CliProvider, limited: { memberId: string; raw: string }[]) => DecisionOption[];
 }
 
 /** A single host-owned tick; all intent/attempt receipts are committed before external input. */
@@ -205,7 +261,67 @@ export class ApiRecovery {
   private holdPending(memberId: string, reason: string): void {
     for (const d of this.options.store.listPending(memberId)) {
       this.options.store.markHeld(d.id, reason);
-      if (d.refType === "message" && d.refId) this.options.store.setMessageDelivery(d.refId, "held", reason === "api_outage" ? "인터넷 연결 복구를 기다립니다" : "사용 한도 해제를 기다립니다");
+      if (d.refType === "message" && d.refId) this.options.store.setMessageDelivery(d.refId, "held", reason === "api_outage" ? "인터넷 연결 복구를 기다립니다" : USAGE_WAIT_NOTE);
+    }
+  }
+  /** 이 직원이 사용 한도로 보류 중인가(한도가 풀려 이어가기를 넣고 결과를 기다리는 중이면 아니다). */
+  usageLimited(memberId: string): boolean {
+    return this.state.limits.some(g => g.members.some(m => m.memberId === memberId && !m.awaitingResult));
+  }
+  /**
+   * 사용 한도로 멈춘 직원의 모델을 바꿔 같은 대화를 이어 열 때(팀장 설정·총괄의 team_model). 그 직원의 한도 보류만 푼다.
+   * 같은 계정(같은 CLI)의 다른 직원은 그대로 보류하고, 한도 카드는 남은 직원으로 고친다(남은 직원이 없으면 닫힌다).
+   * 한도로 붙잡아 둔 전달은 다시 줄에 세운다. 새 모델도 한도에 걸리면 평소처럼 다시 보류된다(usageFailure).
+   */
+  releaseMember(memberId: string): void {
+    const store = this.options.store;
+    this.transaction(() => {
+      for (const group of this.state.limits) {
+        if (!group.members.some(m => m.memberId === memberId)) continue;
+        group.members = group.members.filter(m => m.memberId !== memberId);
+        this.updateCard(group);
+      }
+      store.clearUsageRetry(memberId);
+      for (const d of store.listPending(memberId)) {
+        if (d.status !== "held" || d.holdReason !== "usage_limit") continue;
+        store.setDeliveryStatus(d.id, "queued");
+        if (d.refType === "message" && d.refId) store.setMessageDelivery(d.refId, "queued");
+      }
+      const member = store.getMember(memberId);
+      if (member) store.patchMember(member.id, { blockedReason: null, ...(member.lastError === USAGE_WAIT_NOTE ? { lastError: null } : {}),
+        ...(member.statusObservation?.error?.code === "usage_limit" ? { statusObservation: { ...member.statusObservation, error: null } } : {}) });
+      this.save();
+    });
+  }
+  /** 이어가기 글을 넣는다. 기다리던 다른 전달보다 먼저, 혼자 나간다(prioritize). 아직 나가지 않은 이어가기 글이 있으면 그것을 쓴다. */
+  continueAfter(member: Member, text: string): string {
+    return this.transaction(() => {
+      const id = this.enqueueResume(member, null, text);
+      this.save();
+      return id;
+    });
+  }
+  /**
+   * 이 직원 화면의 사용 한도 메뉴를 Esc 로만 닫는다(재우기·모델 변경으로 세션을 끝내기 전에). Enter·숫자·화살표는 보내지 않는다:
+   * 메뉴의 선택지가 유료 크레딧 구매일 수 있다(dismiss 가 지문을 다시 확인하고 Esc 한 번만 보낸다). 메뉴가 없으면 할 일이 없다.
+   * 닫는 동안과 닫은 뒤에, 메뉴가 사라진 것을 '대표가 터미널에서 직접 풀었다'로 읽어 보류를 풀지 않게 적어 둔다.
+   */
+  async closeMenu(member: Member): Promise<{ ok: boolean; note?: string }> {
+    const snapshot = await this.options.inspect(member).catch((error: unknown) => {
+      if (error instanceof NoTerminalError) return { menu: null, state: null };
+      throw error;
+    });
+    if (!snapshot.menu) return { ok: true };
+    const limited = this.state.limits.flatMap(g => g.members).filter(m => m.memberId === member.id);
+    for (const m of limited) m.dismissStarted = true;
+    if (limited.length) this.save();
+    try {
+      const result = await this.options.dismiss(member, snapshot.menu.fingerprint);
+      if (result.ok) for (const m of limited) m.fingerprint = null;
+      return result;
+    } finally {
+      for (const m of limited) m.dismissStarted = false;
+      if (limited.length) this.save();
     }
   }
   preservesOrder(memberId: string): boolean { return this.state.resumeOrder?.includes(memberId) ?? false; }
@@ -245,7 +361,7 @@ export class ApiRecovery {
       this.state.limits = this.state.limits.filter(g => g.members.length > 0);
       let group = this.state.limits.find(g => g.cli === member.cli);
       if (!group) {
-        const card = store.createDecision({ projectId: member.projectId, who: "시스템", title: "사용 한도 도달", options: [{ k: "resume", label: "계정을 바꿨어요 · 모두 이어가기" }] });
+        const card = store.createDecision({ projectId: member.projectId, who: "시스템", title: "사용 한도 도달", options: [USAGE_RESUME_OPTION] });
         group = { cli: member.cli, decisionId: card.id, stillLimited: false, members: [] };
         this.state.limits.push(group);
       }
@@ -275,7 +391,7 @@ export class ApiRecovery {
       }
       if (errorKey) limited.errorKey = errorKey;
       store.appendActivity(member.id, "error", raw, `usage:${group.decisionId}:${member.id}:${createHash("sha256").update(raw).digest("hex")}`);
-      store.patchMember(member.id, { status: menu ? "blocked" : "error", lastError: "사용 한도 해제를 기다립니다", blockedReason: "usage_limit", statusObservation: { source: member.backend ?? "core", observedAt: new Date(this.now()).toISOString(), freshness: "fresh", ownership: member.statusObservation?.ownership ?? "verified", consecutiveFailures: 0, error: { code: "usage_limit", note: raw } } });
+      store.patchMember(member.id, { status: menu ? "blocked" : "error", lastError: USAGE_WAIT_NOTE, blockedReason: "usage_limit", statusObservation: { source: member.backend ?? "core", observedAt: new Date(this.now()).toISOString(), freshness: "fresh", ownership: member.statusObservation?.ownership ?? "verified", consecutiveFailures: 0, error: { code: "usage_limit", note: raw } } });
       this.holdPending(member.id, "usage_limit");
       this.updateCard(group);
       this.save();
@@ -286,13 +402,50 @@ export class ApiRecovery {
     const waiting = group.members.filter(m => !m.awaitingResult || !m.resumeId || this.options.store.getDelivery(m.resumeId)?.status !== "delivered");
     const times = waiting.map(m => m.resetsAt).filter((t): t is string => !!t).sort();
     const resetsAt = times.at(-1) ?? null;
-    const first = group.stillLimited ? "아직 같은 계정이라 한도가 남아 있지 않습니다. 다른 계정으로 로그인한 뒤 다시 누르세요." : resetsAt ? `${formatUsageReset(resetsAt)}에 풀리면 자동으로 이어 갑니다. 다른 계정으로 로그인했다면 지금 이어갈 수 있습니다.` : "초기화 시각을 확인하지 못했습니다. 풀렸는지 가끔 자동으로 다시 이어 봅니다. 다른 계정으로 로그인했다면 지금 이어갈 수 있습니다.";
+    const card = this.options.store.requireDecision(group.decisionId);
+    // 선택지: 한도에 걸리지 않은 모델마다 하나(먼저), 그다음 이어가기. 팀장이 빠지거나 모델 목록이 바뀌면 다시 계산한다(틱마다 이 함수가 돈다).
+    const models = waiting.length ? this.options.choices?.(group.cli, waiting.map(m => ({ memberId: m.memberId, raw: m.raw }))) ?? [] : card.options.filter(o => o.k.startsWith(USAGE_MODEL_PREFIX));
+    const first = this.cardLead(group, waiting, resetsAt, models.length > 0);
     const names = waiting.map(m => `${this.options.store.getMember(m.memberId)?.name ?? m.memberId}${m.failure ? ` — ${m.failure}` : ""}`).join("\n");
     const raw = (group.rawEvidence ?? group.members.filter(m => !m.resetsAt).map(m => m.raw)).join("\n\n");
-    const card = this.options.store.requireDecision(group.decisionId);
     const open = waiting.length > 0 && (card.status !== "closed" || card.usageLimit?.memberIds.length === 0);
     if (!open) group.stillLimited = false;
-    this.options.store.updateUsageDecision(card.id, { cli: group.cli, resetsAt, memberIds: waiting.map(m => m.memberId), stillLimited: group.stillLimited }, waiting.length ? `${group.cli === "claude" ? "Claude" : "Codex"} 사용 한도 도달 · 팀원 ${waiting.length}명 멈춤` : card.title, waiting.length ? [first, names, raw].filter(Boolean).join("\n\n") : card.detail, open);
+    this.options.store.updateUsageDecision(card.id, { cli: group.cli, resetsAt, memberIds: waiting.map(m => m.memberId), stillLimited: group.stillLimited }, waiting.length ? `${group.cli === "claude" ? "Claude" : "Codex"} 사용 한도 도달 · 팀원 ${waiting.length}명 멈춤` : card.title, waiting.length ? [first, names, raw].filter(Boolean).join("\n\n") : card.detail, open, [...models, USAGE_RESUME_OPTION]);
+  }
+  /**
+   * 카드의 첫 문단. 계정이 여러 개라고 가정하지 않는다: 기다리면 저절로 이어 간다는 것, 바로 이어 가려면 다른 모델을 고르면 된다는 것,
+   * 다른 계정으로 로그인했거나 한도를 늘렸으면 '이어가기'를 누르면 된다는 것을 차례로 적는다.
+   */
+  private cardLead(group: LimitGroup, waiting: Limited[], resetsAt: string | null, hasModels: boolean): string {
+    if (group.stillLimited) return hasModels ? "아직 한도가 남아 있지 않습니다. 기다리거나 다른 모델을 고르세요." : "아직 한도가 남아 있지 않습니다. 한도가 풀리면 자동으로 이어 갑니다.";
+    const credit = waiting.map(m => modelCreditLimit(m.raw)).find(c => c !== null) ?? null;
+    const when = resetsAt ? `${formatUsageReset(resetsAt)}에 ` : "";
+    const lead = credit ? `${credit.model ? `${credit.model} ` : "이 모델의 "}사용 크레딧이 떨어졌습니다. 다른 모델로 바꾸면 바로 이어 갑니다. 기다리면 ${when}크레딧이 채워질 때 자동으로 이어 갑니다.`
+      : resetsAt ? `${when}한도가 풀리면 자동으로 이어 갑니다. 기다리셔도 됩니다.` : "한도가 풀렸는지 가끔 다시 확인해 자동으로 이어 갑니다. 기다리셔도 됩니다.";
+    return `${lead} ${hasModels ? "바로 이어 가려면 다른 모델을 고르세요. " : ""}다른 계정으로 로그인했거나 한도를 늘렸다면 '이어가기'를 누르세요.`;
+  }
+  /** 이 카드에서 대표가 고른 마지막 모델 선택지. */
+  answeredWith(decisionId: string): string | null {
+    return this.state.limits.find(g => g.decisionId === decisionId)?.answered ?? null;
+  }
+  /** 카드에서 모델 선택지를 골랐다. 같은 답이 다시 오면 한 번만 하도록 적어 둔다. */
+  noteAnswer(decisionId: string, choice: string): void {
+    const group = this.state.limits.find(g => g.decisionId === decisionId);
+    if (!group) return;
+    group.answered = choice;
+    this.save();
+  }
+  /** 카드에서 고른 모델로 바꾸지 못한 팀장: 카드에 남기고 이름 옆에 까닭을 적는다. */
+  noteFailure(memberId: string, note: string): void {
+    this.transaction(() => {
+      for (const group of this.state.limits) {
+        const limited = group.members.filter(m => m.memberId === memberId);
+        if (!limited.length) continue;
+        for (const m of limited) m.failure = note;
+        this.updateCard(group);
+      }
+      this.save();
+    });
   }
   received(deliveryId: string): void {
     for (const group of this.state.limits) if (group.members.some(m => m.resumeId === deliveryId)) this.updateCard(group);
@@ -354,6 +507,8 @@ export class ApiRecovery {
             gone = true; limited.fingerprint = null; limited.dismissStarted = false;
             return { menu: null, state: null };
           });
+          // 기다리는 사이 이 직원의 보류가 풀렸다(모델을 바꿔 이어 열었다: releaseMember). 이어가기를 또 넣지 않는다.
+          if (!group.members.includes(limited)) continue;
           limited.fingerprint ??= snapshot.menu?.fingerprint ?? null;
           if (limited.fingerprint) {
             if (!snapshot.menu && !limited.dismissStarted) { group.members = group.members.filter(m => m !== limited); this.clearUsage(member, snapshot.state); continue; }
@@ -366,6 +521,7 @@ export class ApiRecovery {
             } else if (snapshot.state === "blocked" || snapshot.state === "working") { limited.failure = "창을 닫지 못했습니다"; continue; }
           } else if (snapshot.state === "blocked" || snapshot.state === "working") { limited.failure = "창을 닫지 못했습니다"; continue; }
           if (this.closed) break;
+          if (!group.members.includes(limited)) continue;
           this.transaction(() => {
             this.options.store.clearUsageRetry(member.id);
             limited.resumeId = this.enqueueResume(member, limited.resumeId, USAGE_RESUME_TEXT);
@@ -394,7 +550,7 @@ export class ApiRecovery {
       if (!mine.length) continue;
       g.members = g.members.filter(m => m.memberId !== memberId);
       const member = mine.some(m => !m.awaitingResult) ? this.options.store.getMember(memberId) : null;
-      if (member) this.options.store.patchMember(member.id, { blockedReason: null, ...(member.lastError === "사용 한도 해제를 기다립니다" ? { lastError: null } : {}),
+      if (member) this.options.store.patchMember(member.id, { blockedReason: null, ...(member.lastError === USAGE_WAIT_NOTE ? { lastError: null } : {}),
         ...(member.statusObservation?.error?.code === "usage_limit" ? { statusObservation: { ...member.statusObservation, error: null } } : {}) });
       this.updateCard(g);
     }
@@ -470,6 +626,7 @@ export class ApiRecovery {
         if (!limited.fingerprint || limited.awaitingResult) continue;
         try {
           const snapshot = await this.options.inspect(member);
+          if (!group.members.includes(limited)) continue;
           if (!snapshot.menu && snapshot.state !== "blocked" && !limited.dismissStarted) {
             group.members = group.members.filter(m => m !== limited);
             this.clearUsage(member, snapshot.state);

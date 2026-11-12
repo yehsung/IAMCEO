@@ -663,7 +663,8 @@ struct InboxView: View {
         for decision in store.decisions where decision.status == "open" && session.reviews[decision.id] == nil {
             session.reviews[decision.id] = makeReview(decision)
         }
-        for (id, review) in session.reviews where !session.inFlight.contains(id) && review.isStale(comparedTo: byID[id]) {
+        for (id, review) in session.reviews where !session.inFlight.contains(id)
+            && (review.isStale(comparedTo: byID[id]) || UsageLimitInfo.optionsChanged(review.decision, latest: byID[id])) {
             if review.decision.kind == "usage_limit", let current = byID[id], current.status == "open" {
                 // This is a notice, with no approval choice or memo to preserve for review.
                 session.reviews[id] = makeReview(current)
@@ -722,7 +723,7 @@ struct InboxView: View {
         session.cardErrors[id] = nil
         let ok: Bool
         if review.decision.kind == "usage_limit" {
-            ok = await store.resumeUsageLimit(review.decision)
+            ok = await store.answerUsageLimit(review.decision, choice: review.choice ?? UsageLimitInfo.resumeChoice)
         } else {
             ok = await store.answerDecision(review.decision, choice: noteOnly ? nil : review.choice, note: note.isEmpty ? nil : note)
         }
@@ -1102,16 +1103,32 @@ private struct DecisionCard: View {
                 Text(warning).font(CEFont.note).foregroundStyle(Tone.attention.color)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Button(UsageLimitInfo.resumeLabel) {
-                review.choice = UsageLimitInfo.resumeChoice
-                memoOnly = false
-                onSubmit()
+            // The server's options in order: other models first, then 'resume'. An older server sends only 'resume'.
+            let buttons = UsageLimitInfo.buttons(decision)
+            if buttons.count == 1, let only = buttons.first {
+                usageLimitButton(only)
+            } else {
+                // Same 8pt gap as the approval card's option list.
+                ChipFlow(spacing: 8) {
+                    ForEach(buttons, id: \.choice) { button in usageLimitButton(button) }
+                }
             }
-            .ceProminentButton()
-            .disabled(locked || busy || stale)
             if busy { ProgressView().controlSize(.small) }
             if let lockHint { Text(lockHint).font(CEFont.meta).foregroundStyle(CE.ink2) }
             if let error { ErrorLine(text: error) }
+        }
+    }
+
+    @ViewBuilder private func usageLimitButton(_ button: UsageLimitButton) -> some View {
+        let press = {
+            review.choice = button.choice
+            memoOnly = false
+            onSubmit()
+        }
+        if button.primary {
+            Button(button.label, action: press).ceProminentButton().disabled(locked || busy || stale)
+        } else {
+            Button(button.label, action: press).ceSecondaryButton().disabled(locked || busy || stale)
         }
     }
 
@@ -1805,7 +1822,7 @@ struct DecisionReview {
     }
     func canSubmit(comparedTo latest: Decision?) -> Bool {
         guard decision.status == "open", !isStale(comparedTo: latest) else { return false }
-        if decision.kind == "usage_limit" { return choice == UsageLimitInfo.resumeChoice }
+        if decision.kind == "usage_limit" { return UsageLimitInfo.accepts(decision, choice: choice) }
         if decision.options.isEmpty { return !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         return decision.options.contains { $0.k == choice }
     }

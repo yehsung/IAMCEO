@@ -384,6 +384,9 @@ final class FriendlyErrorTests: XCTestCase {
         XCTAssertTrue(friendlyError("Claude Code can't use your Claude subscription, usually because a payment is past due · Pay or renew").contains("결제"))
         XCTAssertTrue(friendlyError("API Error: No response from API (waited 3m)").contains("응답하지 않습니다"))
         XCTAssertTrue(friendlyError("codex가 사용 한도 오류로 종료했습니다 (exit 1)").contains("사용 한도"))
+        // 계정 수를 가정하지 않는다: 기다리면 저절로, 다른 모델로 바꾸면 바로 이어 간다(2026-11-13).
+        XCTAssertEqual(friendlyError("사용 한도 해제를 기다립니다"), "사용 한도에 닿았습니다. 한도가 풀리면 자동으로 이어 갑니다. 다른 모델로 바꾸면 바로 이어 갑니다.")
+        XCTAssertEqual(MemberStatusInfo("usage_limit").explanation, "한도가 풀리면 자동으로 이어 갑니다. 다른 모델로 바꾸면 바로 이어 갑니다.")
         XCTAssertEqual(friendlyError("글을 넣었지만 턴이 시작되지 않았습니다"), "글을 넣었지만 일을 시작하지 않았습니다")
         XCTAssertEqual(friendlyError("세션이 끝났습니다 (exit_code=2)"), "세션이 끝났습니다 (종료 코드 2)")
     }

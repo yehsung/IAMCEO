@@ -1961,8 +1961,13 @@ final class AppStore: ProjectManagementStore {
     }
 
     @discardableResult func resumeUsageLimit(_ decision: Decision) async -> Bool {
-        guard decision.kind == "usage_limit", decision.status == "open" else { return false }
-        return await answerDecision(decision, choice: UsageLimitInfo.resumeChoice, note: nil)
+        await answerUsageLimit(decision, choice: UsageLimitInfo.resumeChoice)
+    }
+
+    /// Answers a usage-limit card: `resume`, or `model:<value>` (the server switches the card's staff to that model and continues the same sessions).
+    @discardableResult func answerUsageLimit(_ decision: Decision, choice: String) async -> Bool {
+        guard decision.kind == "usage_limit", decision.status == "open", UsageLimitInfo.accepts(decision, choice: choice) else { return false }
+        return await answerDecision(decision, choice: choice, note: nil)
     }
 
     @discardableResult func answerDecision(_ decision: Decision, choice: String?, note: String?) async -> Bool {

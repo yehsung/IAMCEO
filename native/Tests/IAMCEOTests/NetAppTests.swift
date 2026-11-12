@@ -10,8 +10,13 @@ private final class NetAppServer: @unchecked Sendable {
     private var failure = false
     private var keepLimited = false
     private var resumeAttempts = 0
+    private var modelChoices = false
+    private var lastChoice: String?
     private let sync: Bool
     init(sync: Bool = false) { self.sync = sync }
+    /// The server offers other models before 'resume' (2026-11-13 card).
+    func offerModels() { lock.withLock { modelChoices = true } }
+    var answeredChoice: String? { lock.withLock { lastChoice } }
     func clearOutage() { lock.withLock { outage = nil } }
     func setDown(_ value: Bool) { lock.withLock { down = value } }
     func failAnswer(_ value: Bool) { lock.withLock { failure = value } }
@@ -26,7 +31,7 @@ private final class NetAppServer: @unchecked Sendable {
             let card = Decision(id: "limit", projectId: "p", kind: "usage_limit",
                 usageLimit: UsageLimit(cli: "claude", resetsAt: "2026-11-13T01:00:00Z", memberIds: ["m", "n"], stillLimited: true),
                 title: "서버가 정한 제목", detail: "서버가 정한 본문",
-                options: [DecisionOption(k: "resume", label: "서버 선택지")], rec: "resume",
+                options: (modelChoices ? [DecisionOption(k: "model:opus", label: "Opus로 바꿔 이어가기")] : []) + [DecisionOption(k: "resume", label: "서버 선택지")], rec: "resume",
                 group: "shared", status: answered ? "answered" : "open", updatedAt: resumeAttempts > 0 ? "v2" : "v1")
             let state = ProjectState(project: Project(id: "p", connection: ProjectConnection(ok: true)),
                 members: [Member(id: "m", name: "민지"), Member(id: "n", name: "준호")], decisions: [card])
@@ -44,8 +49,9 @@ private final class NetAppServer: @unchecked Sendable {
                 if failure { return IsolatedTestHTTPReply(status: 503) }
                 resumeAttempts += 1
                 answered = !keepLimited
+                lastChoice = (try? WriteTestServer.body(request))?["choice"] as? String
                 var result = card
-                result.status = answered ? "answered" : "open"; result.choice = "resume"
+                result.status = answered ? "answered" : "open"; result.choice = lastChoice ?? "resume"
                 return try reply(result)
             default: return IsolatedTestHTTPReply(status: 404)
             }
@@ -133,8 +139,9 @@ private actor NetAppGate {
         XCTAssertEqual(card.options.map(\.k), ["resume"])
         XCTAssertEqual(info.resumesText, "11월 13일 오전 10시에 자동으로 이어 갑니다")
         XCTAssertEqual(info.memberNames, ["민지", "missing"])
-        XCTAssertEqual(info.warning, "아직 같은 계정이라 한도가 남아 있지 않습니다. 다른 계정으로 로그인한 뒤 다시 누르세요.")
-        XCTAssertEqual(UsageLimitInfo.resumeLabel, "계정을 바꿨어요 · 모두 이어가기")
+        // 계정이 하나인 사람도 있다: 계정을 바꿨다고 가정하지 않는다(2026-11-13).
+        XCTAssertEqual(info.warning, "아직 한도가 남아 있지 않습니다. 기다리거나 다른 모델을 고르세요.")
+        XCTAssertEqual(UsageLimitInfo.resumeLabel, "계정을 바꿨거나 한도를 늘렸어요 · 이어가기")
         card.usageLimit?.resetsAt = "invalid"; card.usageLimit?.stillLimited = false
         XCTAssertNil(UsageLimitInfo(card, members: []).resumesText)
         XCTAssertNil(UsageLimitInfo(card, members: []).warning)
@@ -143,6 +150,39 @@ private actor NetAppGate {
         card.usageLimit = nil
         XCTAssertNil(UsageLimitInfo(card, members: []).resumesText)
         XCTAssertTrue(UsageLimitInfo(card, members: []).memberNames.isEmpty)
+    }
+
+    func testUsageLimitButtonsFollowServerOptionsWithFirstModelProminent() {
+        let card = Decision(id: "limit", kind: "usage_limit", options: [
+            DecisionOption(k: "model:opus", label: "Opus로 바꿔 이어가기"),
+            DecisionOption(k: "model:sonnet", label: "Sonnet으로 바꿔 이어가기"),
+            DecisionOption(k: "resume", label: "계정을 바꿨거나 한도를 늘렸어요 · 이어가기"),
+        ])
+        XCTAssertEqual(UsageLimitInfo.buttons(card), [
+            UsageLimitButton(choice: "model:opus", label: "Opus로 바꿔 이어가기", primary: true),
+            UsageLimitButton(choice: "model:sonnet", label: "Sonnet으로 바꿔 이어가기", primary: false),
+            UsageLimitButton(choice: "resume", label: "계정을 바꿨거나 한도를 늘렸어요 · 이어가기", primary: false),
+        ])
+        XCTAssertTrue(UsageLimitInfo.accepts(card, choice: "model:sonnet"))
+        XCTAssertTrue(UsageLimitInfo.accepts(card, choice: "resume"))
+        XCTAssertFalse(UsageLimitInfo.accepts(card, choice: "model:haiku"))
+        XCTAssertFalse(UsageLimitInfo.accepts(card, choice: nil))
+        // An older server sends only 'resume': one prominent button with its own label, as before.
+        let old = Decision(id: "old", kind: "usage_limit", options: [DecisionOption(k: "resume", label: "계정을 바꿨어요 · 모두 이어가기")])
+        XCTAssertEqual(UsageLimitInfo.buttons(old), [UsageLimitButton(choice: "resume", label: "계정을 바꿨어요 · 모두 이어가기", primary: true)])
+        XCTAssertEqual(UsageLimitInfo.buttons(Decision(id: "none", kind: "usage_limit", options: [])),
+                       [UsageLimitButton(choice: "resume", label: "계정을 바꿨거나 한도를 늘렸어요 · 이어가기", primary: true)])
+        // The server recomputes choices without moving updatedAt (the card's push is keyed to it): the shown card is redrawn.
+        var fewer = card; fewer.options.removeFirst()
+        XCTAssertTrue(UsageLimitInfo.optionsChanged(card, latest: fewer))
+        XCTAssertFalse(UsageLimitInfo.optionsChanged(card, latest: card))
+        XCTAssertFalse(UsageLimitInfo.optionsChanged(card, latest: nil))
+        XCTAssertFalse(UsageLimitInfo.optionsChanged(Decision(id: "regular", options: [DecisionOption(k: "a")]), latest: Decision(id: "regular", options: [])))
+        var review = DecisionReview(decision: card)
+        review.choice = "model:opus"
+        XCTAssertTrue(review.canSubmit(comparedTo: card))
+        review.choice = "model:haiku"
+        XCTAssertFalse(review.canSubmit(comparedTo: card))
     }
 
     func testUsageLimitIsFirstAndIncludedInBadge() {
@@ -213,6 +253,28 @@ private actor NetAppGate {
         XCTAssertEqual(body["batch"] as? Bool, false)
         XCTAssertNil(body["note"])
         XCTAssertEqual(requests.first?.httpMethod, "POST")
+        await network.close()
+    }
+
+    func testModelChoiceSendsOneExactAnswerAndUnofferedModelSendsNothing() async throws {
+        let server = NetAppServer()
+        server.offerModels()
+        let network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connect(network)
+        defer { store.disconnect() }
+        let card = try XCTUnwrap(store.decisions.first)
+        XCTAssertEqual(UsageLimitInfo.buttons(card).map(\.choice), ["model:opus", "resume"])
+        let unoffered = await store.answerUsageLimit(card, choice: "model:haiku")
+        XCTAssertFalse(unoffered)
+        XCTAssertFalse(network.requests.contains { $0.url?.path.hasSuffix("/answer") == true })
+        let accepted = await store.answerUsageLimit(card, choice: "model:opus")
+        XCTAssertTrue(accepted)
+        let requests = network.requests.filter { $0.url?.path == "/api/decisions/limit/answer" }
+        XCTAssertEqual(requests.count, 1)
+        let body = try WriteTestServer.body(XCTUnwrap(requests.first))
+        XCTAssertEqual(body["choice"] as? String, "model:opus")
+        XCTAssertEqual(body["expectedVersion"] as? String, "v1")
+        XCTAssertNil(body["note"])
         await network.close()
     }
 

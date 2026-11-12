@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { ApiRecovery, API_RESUME_TEXT, NoTerminalError, USAGE_RESUME_TEXT, classifyTurnError, networkRetryScreen, parseUsageReset, usageLimitMenu, type ApiRecoveryOptions } from "../server/api-outage.ts";
+import { ApiRecovery, API_RESUME_TEXT, NoTerminalError, USAGE_RESUME_OPTION, USAGE_RESUME_TEXT, classifyTurnError, limitedModelName, modelCreditLimit, networkRetryScreen, parseUsageReset, usageLimitMenu, withRo, type ApiRecoveryOptions } from "../server/api-outage.ts";
 import { openDb } from "../server/db.ts";
 import { Store } from "../server/store.ts";
 import { Bus } from "../server/bus.ts";
@@ -184,7 +184,7 @@ describe("CLI별 한도 알림과 안전한 이어가기", () => {
     f.service.usageFailure(f.member, menu.raw, menu); f.service.usageFailure(second, menu.raw, menu);
     f.service.usageFailure(codex, "usage limit reached: unknown reset raw"); f.restart();
     expect(f.card().usageLimit?.memberIds).toEqual([f.member.id, second.id]);
-    expect(f.card().options).toEqual([{ k: "resume", label: "계정을 바꿨어요 · 모두 이어가기" }]);
+    expect(f.card().options).toEqual([{ k: "resume", label: "계정을 바꿨거나 한도를 늘렸어요 · 이어가기" }]);
     expect(f.card("codex").detail).toContain("unknown reset raw");
     expect(f.store.listDecisions(f.project.id).filter(d => d.kind === "usage_limit")).toHaveLength(2);
     expect(f.store.requireDelivery(d.id).holdReason).toBe("usage_limit");
@@ -199,7 +199,7 @@ describe("CLI별 한도 알림과 안전한 이어가기", () => {
     expect(f.service.holdReason(f.member.id)).toBeNull();
     f.service.usageFailure(f.member, menu.raw, menu);
     expect(f.card()).toMatchObject({ status: "open", usageLimit: { stillLimited: true } });
-    expect(f.card().detail).toStartWith("아직 같은 계정");
+    expect(f.card().detail).toStartWith("아직 한도가 남아 있지 않습니다.");
     expect(f.store.requireDelivery(old.id).holdReason).toBe("usage_limit");
   });
   test("지문 변경·닫기 실패는 이어가기를 보내지 않음", async () => {
@@ -478,5 +478,77 @@ describe("포기·실패 뒤에도 영구 보류로 남지 않는다", () => {
     f.service.usageFailure(m, raw);
     f.now += 61 * MIN; await f.service.tick(); expect(resumes(f, USAGE_RESUME_TEXT)).toBe(2);
     f.now += 60 * MIN; await f.service.tick(); expect(resumes(f, USAGE_RESUME_TEXT)).toBe(3);
+  });
+});
+
+// 2026-11-13 대표 지적: 사용 한도 카드가 계정을 여러 개 쓰는 사람에게만 맞춰져 있었다(버튼이 '계정을 바꿨어요 · 모두 이어가기' 하나).
+// 계정이 하나인 사람은 기다리면 되고, 특정 모델의 크레딧만 떨어졌으면 다른 모델로 바꾸면 바로 된다.
+describe("사용 한도 카드: 계정 수를 가정하지 않는 글과 모델 선택지", () => {
+  const LIVE = "You're out of usage credits. Run /usage-credits to keep using Fable 5.2 or /model to switch models.";
+  const OPUS = { k: "model:opus", label: "Opus로 바꿔 이어가기" }, SONNET = { k: "model:sonnet", label: "Sonnet으로 바꿔 이어가기" };
+  const COMMON = "바로 이어 가려면 다른 모델을 고르세요. 다른 계정으로 로그인했거나 한도를 늘렸다면 '이어가기'를 누르세요.";
+  const lead = (f: ReturnType<typeof fixture>) => f.card().detail.split("\n\n")[0];
+
+  test("로/으로, 모델 크레딧 소진 판별, 글에 이름이 나온 한도 모델", () => {
+    expect(["Opus", "Sonnet", "Haiku", "Fable 5.2", "gpt-6.1-sol", "gpt-6-luna", "CLI 기본 모델", "오푸스", "별", "3", "Opus 4.7"].map(withRo))
+      .toEqual(["Opus로", "Sonnet으로", "Haiku로", "Fable 5.2로", "gpt-6.1-sol로", "gpt-6-luna로", "CLI 기본 모델로", "오푸스로", "별로", "3으로", "Opus 4.7로"]);
+    expect(modelCreditLimit(LIVE)).toEqual({ model: "Fable 5.2" });
+    expect(modelCreditLimit("Run /usage-credits to keep using Opus 4.7.")).toEqual({ model: "Opus 4.7" });
+    expect(modelCreditLimit("You're out of usage credits. Use /model to switch models.")).toEqual({ model: null });
+    expect(modelCreditLimit("You've hit your weekly limit · resets Nov 13 at 10am (Asia/Seoul)")).toBeNull();
+    expect(limitedModelName(LIVE)).toBe("Fable 5.2");
+    expect(limitedModelName("You've hit your Opus limit · resets Nov 13 at 10am (Asia/Seoul)")).toBe("Opus");
+    expect(limitedModelName("You've hit your weekly limit")).toBeNull();
+    expect(classifyTurnError(LIVE)).toBe("usage_limit");
+  });
+
+  test("모델 크레딧 소진: 그 모델 이름과 '다른 모델로 바꾸면 바로'를 먼저 말하고, 선택지는 모델 먼저·이어가기(키 resume) 마지막", () => {
+    const f = fixture();
+    f.options.choices = () => [OPUS, SONNET];
+    f.service.usageFailure(f.member, LIVE);
+    expect(lead(f)).toBe(`Fable 5.2 사용 크레딧이 떨어졌습니다. 다른 모델로 바꾸면 바로 이어 갑니다. 기다리면 크레딧이 채워질 때 자동으로 이어 갑니다. ${COMMON}`);
+    expect(f.card().options).toEqual([OPUS, SONNET, USAGE_RESUME_OPTION]);
+    expect(USAGE_RESUME_OPTION).toEqual({ k: "resume", label: "계정을 바꿨거나 한도를 늘렸어요 · 이어가기" });
+    expect(f.card().detail).not.toContain("같은 계정");
+  });
+
+  test("초기화 시각을 알 때·모를 때·선택할 모델이 없을 때·이어가기 뒤 또 걸렸을 때", async () => {
+    const known = fixture(), menu = usageLimitMenu(menuText(), known.now)!;
+    known.options.choices = () => [OPUS];
+    known.service.usageFailure(known.member, menu.raw, menu);
+    expect(lead(known)).toMatch(new RegExp(`^\\d+월 \\d+일 오[전후] \\d+시에 한도가 풀리면 자동으로 이어 갑니다\\. 기다리셔도 됩니다\\. ${COMMON.replace(/[.'?]/g, "\\$&")}$`));
+    const unknown = fixture();
+    unknown.options.choices = () => [OPUS];
+    unknown.service.usageFailure(unknown.member, "usage limit reached");
+    expect(lead(unknown)).toBe(`한도가 풀렸는지 가끔 다시 확인해 자동으로 이어 갑니다. 기다리셔도 됩니다. ${COMMON}`);
+    const none = fixture();
+    none.service.usageFailure(none.member, "usage limit reached");
+    expect(lead(none)).toBe("한도가 풀렸는지 가끔 다시 확인해 자동으로 이어 갑니다. 기다리셔도 됩니다. 다른 계정으로 로그인했거나 한도를 늘렸다면 '이어가기'를 누르세요.");
+    expect(none.card().options).toEqual([USAGE_RESUME_OPTION]);
+    // 이어가기를 눌렀는데 또 걸렸다.
+    known.inspect = async () => ({ menu, state: "blocked" });
+    await known.service.resumeUsage(known.card().id);
+    known.service.usageFailure(known.member, menu.raw, menu);
+    expect(known.card()).toMatchObject({ status: "open", usageLimit: { stillLimited: true } });
+    expect(lead(known)).toBe("아직 한도가 남아 있지 않습니다. 기다리거나 다른 모델을 고르세요.");
+  });
+
+  test("팀장이 빠지거나 모델 목록이 바뀌면 선택지를 다시 계산한다. 판(updatedAt)은 그대로라 카드의 푸시 알림이 취소되지 않는다", () => {
+    const f = fixture(), second = f.makeMember("second");
+    let catalog = [OPUS, SONNET];
+    // 카드의 팀장이 둘이면 둘째가 쓰던 sonnet 도 한도에 걸린 모델이다.
+    f.options.choices = (_cli, limited) => catalog.filter(o => !(o === SONNET && limited.some(l => l.memberId === second.id)));
+    f.service.usageFailure(f.member, LIVE); f.service.usageFailure(second, LIVE);
+    const before = f.card();
+    expect(before.options).toEqual([OPUS, USAGE_RESUME_OPTION]);
+    f.service.releaseMember(second.id);
+    const after = f.card();
+    expect(after.options).toEqual([OPUS, SONNET, USAGE_RESUME_OPTION]);
+    expect(after.updatedAt).toBe(before.updatedAt);
+    expect(after.usageLimit?.memberIds).toEqual([f.member.id]);
+    catalog = [SONNET];
+    f.service.noteFailure(f.member.id, "모델을 바꾸지 못했습니다(시험)");
+    expect(f.card().options).toEqual([SONNET, USAGE_RESUME_OPTION]);
+    expect(f.card().detail).toContain("worker — 모델을 바꾸지 못했습니다(시험)");
   });
 });

@@ -701,6 +701,6 @@ export function fileKindOf(name: string, mime = ""): FileKind {
 // ---- 에이전트 도구 이름 ----
 /** ask_close·todo_close: 직원은 자기가 올린 결재·할 일만, 총괄·본사 AI 는 프로젝트 전체를 정리한다. */
 export const WORKER_TOOLS = ["status", "ask", "post", "file", "todo", "ask_close", "todo_close"] as const;
-export const CONDUCTOR_TOOLS = ["withdraw", "team_add", "team_assign", "team_compact", "team_sleep", "team_resume", "team_close", "roster", "project_now", "work_set", "work_list", "work_remove", "board"] as const;
+export const CONDUCTOR_TOOLS = ["withdraw", "team_add", "team_assign", "team_compact", "team_sleep", "team_resume", "team_close", "team_model", "roster", "project_now", "work_set", "work_list", "work_remove", "board"] as const;
 export const ROOT_TOOLS = ["project_create", "project_list", "board"] as const;
 export const MANUAL_TOOLS = ["wait"] as const;

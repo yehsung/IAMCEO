@@ -11,6 +11,7 @@ import type { AgentToolDef, AgentToolResult, OrchestratorApi } from "./orchestra
 import type { AgentWorkflowService } from "./service-contracts.ts";
 import type { AssignResult, Orchestrator } from "./orchestrator.ts";
 import { josa } from "./roles.ts";
+import { withRo } from "./api-outage.ts";
 import { ApiError } from "./store.ts";
 import { oneLineProblem } from "./text.ts";
 import { canonicalPath as realOrSelf, isInside, isSecretPath, rejectHardLink, SECRET_DIRS } from "./secret-paths.ts";
@@ -363,7 +364,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
   ),
 
   team_add: tool(
-    "직원을 새로 띄운다. 역할이 맞는 직원이 없을 때만. 잠든 직원의 역할이 맞으면 team_resume 을 쓴다.",
+    "직원을 새로 띄운다. 역할이 맞는 직원이 없을 때만. 잠든 직원의 역할이 맞으면 team_resume 을 쓴다. 사용 한도로 멈춘 직원의 일을 넘기려고 새로 띄우지 않는다. team_model 로 그 직원의 모델을 바꾼다.",
     z.strictObject({
       name: oneLine(40).describe("화면 이름: 맡은 일(예: 결제 연동). 사람 이름은 쓰지 않는다. 한국어, 프로젝트 안에서 유일, 한 줄. 같은 역할이 더 필요하면 뒤에 2, 3"),
       role: oneLine(300).describe("맡을 역할(한 줄)"),
@@ -450,6 +451,24 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     },
   ),
 
+  team_model: tool(
+    "직원의 모델(과 effort)을 바꾼다. 같은 세션(대화 기록)을 새 모델로 이어 연다. 사용 한도로 멈춘 직원은 새로 띄우지 말고 이것으로 모델을 바꾼다: 서버가 그 직원의 한도 보류를 풀고, 하던 일이 있었으면 멈춘 곳부터 이어서 하게 한다(원래 지시를 다시 보내지 않는다). 같은 계정의 다른 직원은 그대로 보류된다. 일하는 중이면 거부되니 턴이 끝난 뒤 다시 부른다(사용 한도로 멈춘 것은 일하는 중이 아니다). 잠든 직원은 다음에 열 때 새 모델로 연다(사용 한도로 멈춘 일이 있으면 바로 다시 열어 이어 간다).",
+    z.strictObject({
+      member: memberRef,
+      model: z.string().nullable().describe("서버 모델 목록의 값(team_add 의 model 과 같다). null이면 직급 기본값"),
+      effort: z.string().nullable().optional().describe("effort. 그 모델이 허용하는 값만(서버가 확인한다). null이면 직급 기본값, 생략하면 그대로"),
+    }),
+    async (orch, member, a) => {
+      const target = requireOther(orch, member, a.member);
+      const result = await orch.changeMemberModel(target.id, { modelOverride: a.model, ...(a.effort !== undefined ? { effortOverride: a.effort } : {}) });
+      const name = result.member.name;
+      const handled = "같은 일을 다시 맡기거나 새 직원에게 넘기지 마세요";
+      if (result.opened === "later") return reply(`${name}의 모델을 ${withRo(result.model)} 바꿨습니다. ${result.continued ? `사용 한도로 멈춘 일을 이어서 하도록 새 모델로 다시 엽니다. ${handled}` : result.usage ? "사용 한도 보류를 풀었습니다. 다음에 열 때 새 모델로 엽니다" : "다음에 열 때 새 모델로 엽니다"}`);
+      const opened = result.opened === "resumed" ? "같은 세션을 이어 열었습니다" : "이어 열 세션 기록이 없어 새 세션으로 열었습니다";
+      return reply(`${name}의 모델을 ${withRo(result.model)} 바꿔 ${opened}${result.continued ? `. 사용 한도로 멈춘 일은 ${josa(name, "이")} 멈춘 곳부터 이어서 합니다. ${handled}` : result.usage ? ". 사용 한도 보류를 풀었습니다" : ""}`);
+    },
+  ),
+
   work_list: tool(
     "일 항목(진행 중·예정·보류·완료)을 id 와 함께 본다. 압축 뒤 항목을 옮기거나 지울 때 먼저 부른다.",
     z.strictObject({}),
@@ -466,7 +485,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     },
   ),
 
-  roster: tool("팀 명부를 본다: 역할·상태·지금 일·다음·대기열·열린 결재·문맥 %·서브에이전트·병렬·모델·effort(대표가 설정에서 정한다. null 은 CLI 기본). status 가 idle·asleep 이면 now 는 마지막에 하던 일이다.", z.strictObject({}), (orch, member) => reply(JSON.stringify(orch.roster(member.projectId)))),
+  roster: tool("팀 명부를 본다: 역할·상태·지금 일·다음·대기열·열린 결재·문맥 %·서브에이전트·병렬·모델·effort(대표가 설정에서 정한다. 바꿀 때는 team_model. null 은 CLI 기본). status 가 idle·asleep 이면 now 는 마지막에 하던 일이다.", z.strictObject({}), (orch, member) => reply(JSON.stringify(orch.roster(member.projectId)))),
 
   project_now: tool(
     "팀 화면 맨 위 '지금 상황'을 고친다. 전체 상태와 대표에게 필요한 것을 늘 최신으로.",

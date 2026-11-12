@@ -416,7 +416,7 @@ describe("delivery-1: 보낼 수 없는 시도로 거절 횟수를 태우지 않
     const stuck = f.say(w), created = Date.parse(stuck.createdAt);
     const bare = new Store(f.db, new Bus());
     const nudged: string[] = [];
-    bare.setDeliveryWaitContext(() => ({ busy: false, waking: false, used: 0 }), () => {}, id => { nudged.push(id); });
+    bare.setDeliveryHooks({ nudge: id => { nudged.push(id); } });
     bare.detectDeliveryStalls(created + 59_000);
     expect(nudged).toHaveLength(0);
     bare.detectDeliveryStalls(created + 61_000);
@@ -438,9 +438,13 @@ describe("delivery-10 · delivery-7 · http-4: 대기 사유와 이벤트", () =
     // 지금 이 직원을 보류 중인 사고는 없다.
     expect(f.orch.apiRecovery.holdReason(w.id)).toBeNull();
     expect(f.store.deliveryWait(f.store.requireDelivery(d.id)).waitReason).not.toBe("api_outage");
-    // 실행기 문맥이 없는 저장소(옛 동작)는 저장된 사유를 그대로 쓴다.
+    // E3: 펌프는 행에 남은 사유가 아니라 지금 상태로 판정한다(일하는 중이라 다음 턴을 기다린다). 화면은 그 판정을 읽는다.
+    f.fake.busy.add(w.id);
+    await f.orch.pump(w.id);
+    expect(f.store.deliveryWait(f.store.requireDelivery(d.id)).waitReason).toBe("member_busy");
+    // 판정은 DB 에 남는다: 실행기 문맥이 없는 저장소(재시작한 서버)도 저장된 보류 사유로 돌아가지 않고 같은 판정을 읽는다.
     const bare = new Store(f.db, new Bus());
-    expect(bare.deliveryWait(bare.requireDelivery(d.id)).waitReason).toBe("api_outage");
+    expect(bare.deliveryWait(bare.requireDelivery(d.id)).waitReason).toBe("member_busy");
   });
 
   test("같은 사유로 다시 보류해도 쓰지 않고 이벤트도 내지 않는다", async () => {
@@ -552,6 +556,8 @@ describe("x-restart-7: 이유가 붙은 채 어긋난 대기를 스스로 알아
     // 미확정 기동 저널이 남은 상태를 만든다: 대기 사유는 '깨우는 중'이고 펌프는 저널 때문에 멈춘다.
     const at = new Date().toISOString();
     f.store.saveLifecycleJournal({ operationId: crypto.randomUUID(), memberId: w.id, projectId: f.project.id, intent: "start", phase: "unknown", identity: { terminalId: w.paneId, sessionId: w.sessionId, sessionGeneration: f.store.memberRevisions(w.id).sessionGeneration, process: null }, runId: null, deliveryIds: [], baseline: null, reason: "시험", exitCode: null, createdAt: at, updatedAt: at });
+    // E3: 펌프가 그 저널 때문에 멈추며 '세션 처리 중(깨우는 중)'으로 판정한다. 화면과 정체 점검은 그 판정을 읽는다.
+    await f.orch.pump(w.id);
     const t0 = Date.parse(d.createdAt);
     expect(f.store.deliveryWait(f.store.requireDelivery(d.id)).waitReason).toBe("waking");
     f.store.detectDeliveryStalls(t0 + 1_000);

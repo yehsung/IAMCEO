@@ -31,6 +31,7 @@ import { createStorageReferences } from "./storage-maintenance.ts";
 import { GitHub } from "./github.ts";
 import { LoopMonitor } from "./loop-monitor.ts";
 import { TailnetWatch } from "./tailnet.ts";
+import { TailnetHttps, type TailnetHttpsDeps } from "./tailnet-https.ts";
 import { doctorReport, serverDoctorFacts, type DoctorLang, type DoctorProbes } from "./doctor.ts";
 import { createDiagnostics, type DiagnoseInput } from "./diagnose.ts";
 import { readVitals } from "./vitals.ts";
@@ -68,6 +69,8 @@ export interface ServerContext {
   diagnose?: Partial<Pick<DiagnoseInput, "service" | "logDir" | "crashReportsDir" | "now" | "keep">>;
   /** D9: CLI 버전 캐시. 없으면 서버가 만든다. 시험(IAMCEO_TEST)에서는 넣은 것만 쓴다: 진짜 CLI 를 부르지 않는다. */
   cliVersions?: CliVersionSource;
+  /** N(C8): HTTPS 주소(tailscale serve)의 명령 실행기·시계. 시험이 가짜 tailscale 을 넣는다. */
+  tailnetHttps?: Partial<Pick<TailnetHttpsDeps, "run" | "now" | "log">>;
 }
 
 export interface HostBinding {
@@ -326,6 +329,17 @@ const SettingsSchema = z
   .strict();
 const AgentToolSchema = z.object({ name: nonEmpty, args: z.record(z.string(), z.unknown()).optional() });
 const AskWaitSchema = z.object({ decisionId: nonEmpty, timeoutMs: z.number().int().positive().optional() });
+// K(E2): 도구 승인 훅(server/runner/permission-hook.ts)이 올리는 요청. 도구 입력은 훅이 줄여 보내고 서버가 가리고 요약한다.
+const optionalText = (max: number) => z.string().max(max).nullable().optional();
+const ToolPermissionRequestSchema = z.object({
+  toolName: z.string().min(1).max(200),
+  toolInput: z.unknown().optional(),
+  sessionId: optionalText(128),
+  cwd: optionalText(4096),
+  permissionMode: optionalText(64),
+  agentId: optionalText(128),
+});
+const ToolPermissionWaitSchema = z.strictObject({ id: z.string().min(1).max(64) });
 const revision = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const operationIdSchema = z.uuid();
 const FreshSessionSchema = z.strictObject({ operationId: operationIdSchema, expectedSessionGeneration: revision });
@@ -585,7 +599,10 @@ type StillAuthorized = (req: Request) => boolean;
 /** G: 인증을 통과한 요청의 자격. 인증 전 요청이면 null. */
 type PrincipalOf = (req: Request) => Principal | null;
 
-function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, monitor: LoopMonitor, tailnetField: TailnetField, stillAuthorized: StillAuthorized, principalOf: PrincipalOf): Route[] {
+/** N(C8): 연결 QR 주소의 맨 앞에 실을 HTTPS 주소. 대표가 켜고 지금 확인될 때만. */
+type PairHttpsUrl = () => Promise<string | null>;
+
+function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, monitor: LoopMonitor, tailnetField: TailnetField, stillAuthorized: StillAuthorized, principalOf: PrincipalOf, pairHttpsUrl: PairHttpsUrl = async () => null): Route[] {
   const { config, store, orch, bus } = ctx;
   const models = new ModelCatalogReader(config);
   const folders = new Folders(ctx.folderHome);
@@ -858,7 +875,12 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       // 그 기기를 끊거나 코드를 바꿔도 쫓아낼 수 없다. QR 만들기 화면은 Mac 앱에만 있고(출시된 0.2.2·0.2.3 도 같다) Mac 앱은 공용 코드를 쓴다.
       const principal = principalOf(req);
       if (principal?.kind !== "shared") throw new ApiError(403, ERROR_CODES.pair_start_shared_only.ko, "pair_start_shared_only");
-      const availableUrls = await withMagicDnsNames(tailnetUrls(urls()));
+      // N(C8): HTTPS 주소를 켜 두었으면 맨 앞에 싣는다. 앱은 QR 의 주소를 차례로 시도하므로(출시된 앱도 같다) 새 연결은 https 로 붙는다.
+      // 확인이 늦으면 기다리지 않고 지금까지처럼 Tailscale 주소만 싣는다.
+      let httpsWait: ReturnType<typeof setTimeout> | undefined;
+      const httpsUrl = await Promise.race([pairHttpsUrl().catch(() => null), new Promise<null>(resolve => { httpsWait = setTimeout(() => resolve(null), 6_000); })])
+        .finally(() => clearTimeout(httpsWait));
+      const availableUrls = [...(httpsUrl ? [httpsUrl] : []), ...await withMagicDnsNames(tailnetUrls(urls()))];
       // 이름을 찾는 사이 코드가 바뀌었거나 이 기기를 끊었으면 QR 을 만들지 않는다.
       if (!stillAuthorized(req)) throw new ApiError(401, "접속 코드가 바뀌었습니다. 다시 연결하세요", "auth_changed");
       const { code, expiresAt } = pairing.start(principalKey(principal));
@@ -1021,6 +1043,15 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
         // 같은 답의 재전송만 앞 요청의 결과를 함께 받는다. 다른 답은 총괄이 판정한다(도는 답이 있으면 409): 결재 id 하나로만 묶으면
         // 모델을 바꾸는 동안 온 다른 선택이 앞 답의 결과를 200 으로 받아 갔다.
         return Response.json(await once(`decision:${id}:${body.choice ?? ""}`, () => orch.answerDecision(id!, body)));
+      }
+      if (store.requireDecision(id!).kind === "tool_permission") {
+        // K(E2): 도구 승인 카드의 답은 기다리는 훅에 바로 간다. 실행 엔진 연결과 상관없어 도달 검사를 하지 않는다. 같은 답의 재전송은 그 카드를 돌려준다.
+        const repeated = store.checkAnswer(id!, body);
+        if (repeated) return Response.json(repeated);
+        const answered = await once(`decision:${id}`, () => orch.answerDecision(id!, body));
+        // 동시에 온 다른 답이 앞 요청의 결과를 받아 가면 안 된다.
+        store.checkAnswer(id!, body);
+        return Response.json(answered);
       }
       const duplicate = store.checkAnswer(id!, body);
       if (duplicate) return Response.json(duplicate);
@@ -1232,6 +1263,20 @@ function agentRoutes({ store, orch }: ServerContext, member: Member): Route[] {
       orch.noteManualCall?.(member, "ask_wait");
       return Response.json(await orch.askWait(member, decisionId, Math.min(timeoutMs ?? ASK_WAIT_MAX_MS, ASK_WAIT_MAX_MS), req.signal));
     }),
+    // K(E2): 팀장의 CLI 가 도구 승인 창 앞에 섰다(PermissionRequest 훅). 결재 카드를 띄우고 대표의 답을 한 번(50초까지) 기다린다.
+    // pending 이면 훅이 /agent/permission/wait 로 다시 기다린다. 연결이 끊기면 카드를 닫는다(CLI 는 터미널의 원래 승인 창).
+    route("POST", "/agent/permission", async (req, url) => {
+      strictQuery(url, []);
+      const body = await parseBody(req, ToolPermissionRequestSchema);
+      if (!orch.requestToolPermission) throw new ApiError(501, "도구 승인 요청을 지원하지 않습니다", "tool_permission_unsupported");
+      return Response.json(await orch.requestToolPermission(member, body, req.signal));
+    }),
+    route("POST", "/agent/permission/wait", async (req, url) => {
+      strictQuery(url, []);
+      const { id } = await parseBody(req, ToolPermissionWaitSchema);
+      if (!orch.waitToolPermission) throw new ApiError(501, "도구 승인 요청을 지원하지 않습니다", "tool_permission_unsupported");
+      return Response.json(await orch.waitToolPermission(member, id, req.signal));
+    }),
   ];
 }
 
@@ -1360,6 +1405,14 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     ...ctx.tailnetWatch,
   });
   const tailnetField: TailnetField = () => { const status = tailnet.status(); return status ? { tailnet: status } : {}; };
+  // N(C8): 대표가 설정에서 켤 때만 tailscale serve 로 HTTPS 주소를 낸다. serve 는 127.0.0.1:<포트> 로 넘긴다.
+  const tailnetHttps = new TailnetHttps({
+    port: () => boundPort,
+    loopbackListening: () => hosts.some(host => host === "127.0.0.1" || host === "localhost" || host === "0.0.0.0" || host === "::"),
+    load: () => store.tailnetHttps(),
+    save: value => store.rememberTailnetHttps(value),
+    ...ctx.tailnetHttps,
+  });
   // D9: 시작할 때 CLI 버전을 한 번 읽어 기록하고(처음 본 버전은 로그 한 줄), 실행 파일이 바뀌면 다시 읽는다. 바뀌면 앱이 스냅샷을 다시 읽게 한다.
   // 문맥은 복사하지 않고 그 자리에 붙인다: 경로들은 같은 문맥 객체를 읽는다(시험이 뒤에 포트를 바꾼다).
   if (!ctx.cliVersions && process.env.IAMCEO_TEST !== "1") {
@@ -1375,11 +1428,23 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   const grants = new WeakMap<Request, { principal: Principal; generation: number }>();
   const peerAddress = (req: Request, server: Server<SocketData>): string | null =>
     server.requestIP(req)?.address.toLowerCase().replace(/^::ffff:/, "") ?? null;
+  /**
+   * N(C8): 접속 기록과 QR 시도 제한에 쓸 상대 주소. HTTPS 주소(tailscale serve)를 거친 요청은 모두 127.0.0.1 에서 오므로,
+   * 실제 상대가 loopback 이고 X-Forwarded-For 에 주소가 있으면 그 주소(tailnet 기기)를 쓴다. 기기마다 따로 세고 기록에 그 기기가 남는다.
+   * '이 Mac 에서 온 요청' 판정에는 쓰지 않는다(그 판정은 머리글이 있으면 거절한다).
+   */
+  const clientAddress = (req: Request, server: Server<SocketData>): string | null => {
+    const peer = peerAddress(req, server);
+    const v4 = peer ? v4ToInt(peer) : null;
+    if (peer !== "::1" && (v4 === null || !inSubnet(v4, LOOPBACK_V4.base, LOOPBACK_V4.mask))) return peer;
+    const forwarded = req.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim().toLowerCase().replace(/^::ffff:/, "");
+    return forwarded && (v4ToInt(forwarded) !== null || /^[0-9a-f:]+$/.test(forwarded)) && forwarded.length <= 45 ? forwarded : peer;
+  };
   const accessPlatform = (req: Request, address: string | null): AccessPlatform =>
     readAppClient(req.headers)?.platform ?? (isLocalRequest(address, req.headers) ? "local" : "other");
   const authorize = (req: Request, server: Server<SocketData>): AuthOutcome => {
     const outcome = authenticate(bearer(req), config.accessCode, deviceKeys);
-    const address = peerAddress(req, server);
+    const address = clientAddress(req, server);
     if (outcome.ok) {
       grants.set(req, { principal: outcome.principal, generation: authGeneration });
       // 메모리에만 남긴다. 조회 요청은 DB 를 쓰지 않는다(accessLogTimer 가 1분마다 쓴다).
@@ -1392,6 +1457,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   };
   /** 실제 연결의 상대가 이 Mac(loopback)인가. 프록시 머리글이나 Host 는 증거로 쓰지 않는다(코드 교체·모두 끊기). */
   const fromLoopback = (req: Request, server: Server<SocketData>): boolean => {
+    // N(C8): tailscale serve(HTTPS 주소)는 tailnet 의 다른 기기 요청을 127.0.0.1 에서 넘겨준다. 대리 전달 머리글이 붙은 요청은 이 Mac 의 것이 아니다.
+    if (FORWARDED_HEADERS.some(name => req.headers.has(name))) return false;
     const peer = peerAddress(req, server);
     const v4 = peer ? v4ToInt(peer) : null;
     return peer === "::1" || (v4 !== null && inSubnet(v4, LOOPBACK_V4.base, LOOPBACK_V4.mask));
@@ -1405,7 +1472,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     !!grant && (grant.principal.kind === "device" ? deviceKeys.isActive(grant.principal.id) : grant.generation === authGeneration);
   const stillAuthorized: StillAuthorized = req => grantIsCurrent(grants.get(req));
   const principalOf: PrincipalOf = req => grants.get(req)?.principal ?? null;
-  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, monitor, tailnetField, stillAuthorized, principalOf);
+  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, monitor, tailnetField, stillAuthorized, principalOf, () => tailnetHttps.pairingUrl());
   const pushHandler = ctx.push ? createPushHandler(ctx.push) : null;
   const sockets = new Set<ServerWebSocket<SocketData>>();
   const v2Sockets = new Set<ServerWebSocket<SocketData>>();
@@ -1475,6 +1542,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       if (path === "/api/auth/rotate") return rotate(req, url, server);
       // G(C3): 연결된 기기 목록과 한 대만 끊기.
       if (path === "/api/devices" || path.startsWith("/api/devices/")) return devicesRoute(req, url, server);
+      if (path === "/api/tailnet/https") return tailnetHttpsRoute(req, url, server);
       if (path === "/api/readiness") return readiness(req, url);
       if (path === "/api/doctor") return doctor(req, url);
       if (path === "/api/diagnose") return diagnose(req, url, server);
@@ -1514,6 +1582,19 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     return Response.json({ ok, version: VERSION, daemon, schema: { version: schemaVersion, supportedVersion: MIGRATIONS.length },
       core: runtime?.core ?? null, ...engineField(ctx.orch), ...tailnetField(), hosts: [...bindings.values()].map(binding => ({ ...binding })),
       ...seenAppsField() }, { status: ok ? 200 : 503 });
+  };
+
+  // ---- N(C8): HTTPS 주소(tailscale serve) ----
+  /** GET 은 지금 상태(켠 적이 없으면 tailscale 명령을 부르지 않는다). POST {enabled} 는 이 Mac 의 앱에서만 켜고 끈다. */
+  const tailnetHttpsRoute = async (req: Request, url: URL, server: Server<SocketData>): Promise<Response> => {
+    strictQuery(url, []);
+    if (req.method === "GET") return Response.json(await tailnetHttps.status());
+    if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
+    // 이 Mac 의 Tailscale 설정을 바꾸는 일이다. tailnet 의 다른 기기(HTTPS 주소를 거친 요청 포함)에서는 하지 못한다.
+    if (!fromLoopback(req, server)) return fail(403, ERROR_CODES.tailnet_https_local_only.ko, "tailnet_https_local_only");
+    const body = await parseBody(req, z.strictObject({ enabled: z.boolean() }));
+    if (!stillAuthorized(req)) return fail(401, ERROR_CODES.auth_changed.ko, "auth_changed");
+    return Response.json(await (body.enabled ? tailnetHttps.enable() : tailnetHttps.disable()));
   };
 
   // ---- A(B3·D8): 점검표와 진단 파일 ----
@@ -1619,7 +1700,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     const body = (await req.json().catch(() => null)) as { code?: unknown; device?: unknown } | null;
     if (generation !== authGeneration) return fail(401, "접속 코드가 바뀌었습니다. Mac에서 새 QR을 만들어 주세요", "auth_changed");
     if (!body || typeof body.code !== "string") return fail(400, "짝 맺기 코드가 필요합니다", "pair_code_missing");
-    const from = peerAddress(req, server);
+    const from = clientAddress(req, server);
     const result = pairing.claim(body.code, from ?? "unknown");
     if (result === "limited") { deviceKeys.recordFailure("pair_failed", from); return fail(429, "너무 많이 시도했습니다. 잠시 뒤 Mac에서 새 QR을 만들어 다시 찍어 주세요", "pair_limited"); }
     if (result === "invalid") { deviceKeys.recordFailure("pair_failed", from); return fail(401, "QR이 맞지 않거나 시간이 지났습니다. Mac에서 새 QR을 만들어 주세요", "pair_expired"); }
@@ -1803,6 +1884,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   };
   // 켜진 채로 뜬 서버는 여기서 '연 적 있음'을 남긴다. 꺼진 채로 뜬 서버는 이때부터 유예 시간을 센다.
   if (config.hostsAuto) tailnet.observe(detect(), hosts);
+  // N(C8): 켠 기록이 있으면 시작할 때 한 번 맞춰 본다(누가 지웠으면 기록을 지우고 로그 한 줄). 기다리지 않는다.
+  if (store.tailnetHttps()) void tailnetHttps.status().catch(() => undefined);
   const hostTimer = setInterval(() => monitor.run("timer:syncHosts", syncHosts), HOST_SYNC_MS);
   hostTimer.unref?.();
   // 화면이 조용히 죽은 소켓을 알아채는 신호. 망이 바뀌면 소켓은 닫히지 않고 그냥 멈춘다.

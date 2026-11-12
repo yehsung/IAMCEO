@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { handleAgentTool, listAgentTools } from "../server/agent-tools.ts";
+import { renderRole } from "../server/roles.ts";
 import { Bus } from "../server/bus.ts";
 import { openDb } from "../server/db.ts";
 import type { Orchestrator } from "../server/orchestrator.ts";
@@ -168,8 +169,9 @@ describe("manual batch 수신", () => {
 });
 
 test("역할 지침은 core 명시 post와 정상 미보고 예외·응답 유실 ID를 설명한다", () => {
-  for (const name of ["root", "conductor", "worker"]) {
-    const role = readFileSync(join(import.meta.dir, "..", "server", "roles", `${name}.md`), "utf8");
+  // 3차 M: 응답 유실 절은 공통 조각(server/roles/parts/tool-retry.md)으로 옮겨 조립한다. 원본 파일 대신 조립한 지침을 본다.
+  for (const name of ["root", "conductor", "worker"] as const) {
+    const role = renderRole(name, { PROJECT: "P", NAME: "N", ROLE: "R", CONDUCTOR: "C" });
     expect(role).toContain("core는 턴 마지막 글을 자동 게시하지 않는다");
     expect(role).toContain("미보고 예외");
     expect(role).toContain("operation_id");

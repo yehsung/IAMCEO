@@ -260,6 +260,9 @@ final class AppStore: ProjectManagementStore {
         }
     }
     @ObservationIgnored private let injectedSession: URLSession?
+    /// C8: 이 기기의 Tailscale 이 켜져 있는가. 연결(APIClient)과 QR 교환이 Tailscale 주소로 평문을 보내기 전에 본다.
+    /// 시험은 시험 기기의 Tailscale 상태에 기대지 않게 바꿔 넣는다. 바꾼 값은 다음 연결부터 쓴다.
+    @ObservationIgnored var tailnetConnected: @Sendable () -> Bool = { Tailnet.isConnected() }
     @ObservationIgnored private let persistCredentials: Bool
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var projectGeneration = UUID()
@@ -563,7 +566,8 @@ final class AppStore: ProjectManagementStore {
         do {
             let validated = try ServerEndpoint(endpoint)
             guard !accessCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw APIError(status: 0, message: "접속 코드를 넣어 주세요.") }
-            let client = APIClient(endpoint: validated, accessCode: accessCode.trimmingCharacters(in: .whitespacesAndNewlines), session: injectedSession, liteStateEnabled: true)
+            let client = APIClient(endpoint: validated, accessCode: accessCode.trimmingCharacters(in: .whitespacesAndNewlines), session: injectedSession, liteStateEnabled: true,
+                                   tailnetConnected: tailnetConnected)
             let task = Task { try await client.request("/api/bootstrap") as Bootstrap }
             initialTask = task
             let initial = try await task.value
@@ -2181,7 +2185,7 @@ final class AppStore: ProjectManagementStore {
         defer { isPairing = false }
         let pairingEpoch = generation
         do {
-            let result = try await PairingClient.claim(link, device: device, session: injectedSession)
+            let result = try await PairingClient.claim(link, device: device, session: injectedSession, tailnetConnected: tailnetConnected)
             guard pairingEpoch == generation, !Task.isCancelled else { return false }
             endpoint = result.endpoint
             accessCode = result.accessCode

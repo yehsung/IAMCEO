@@ -413,6 +413,8 @@ test("native 0.2.x 필수 필드: /api/sync, /api/bootstrap 과 member·message�
   f.store.patchMember(f.member.id, { statusObservation: { source: "core", observedAt: at, freshness: "stale", ownership: "unknown", consecutiveFailures: 2, error: { code: "timeout", note: "다시 관측 중" } } });
   const held = f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "instruction", text: "[지시] 보류될 일" });
   f.store.markHeld(held.id, "blocked");
+  // 대기 사유는 펌프의 판정이다(E3). 승인 창 앞에서 보류할 때 펌프가 남기는 판정을 적는다.
+  f.store.recordPumpVerdict(f.member.id, { code: "approval" });
   f.store.createDecision({ projectId: f.project.id, memberId: f.member.id, who: "직원", title: "고를 것", options: [{ k: "a", label: "가" }, { k: "b", label: "나", desc: "설명" }] });
   f.store.createTodo({ projectId: f.project.id, memberId: f.member.id, title: "할 일" });
 

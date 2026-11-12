@@ -45,6 +45,7 @@ import type {
   SettingsPatch,
   Todo,
   TodoOutcome,
+  ToolPermissionInfo,
   WorkItem,
   WorkSec,
   WsEvent,
@@ -54,7 +55,8 @@ import type { MemberRevisions, OperationKind, OperationReceipt, OperationStatus,
 import type { DeliveryDispatch, DeliveryIntentResult, DeliveryRecoveryRecord, DomainRecorder, LifecycleJournal, MessageReadStore, ProjectPatchStore, RunnerRecoveryStore, TerminalLease, RunnerRecoveryState, ReportReferences, BoardReview } from "./service-contracts.ts";
 import type { RunnerTerminalIdentity } from "./runner/types.ts";
 import type { Bus } from "./bus.ts";
-import { newId, nowIso } from "./db.ts";
+import { ensureDeliveryVerdicts, newId, nowIso } from "./db.ts";
+import { isDeliveryWaitReason, MEMBER_GATE_WAITS, verdictPatience, verdictWait, WATCHED_WAITS, type PumpVerdict, type StoredPumpVerdict } from "./pump-verdict.ts";
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOWS, exactSource } from "./runner/context.ts";
 import { MAX_PROJECT_NAME, MAX_ROLE, nameProblem, oneLineProblem, RESERVED_HANDLES, workerNameProblem } from "./text.ts";
 import { cleanName, cleanText, conductorName } from "./text.ts";
@@ -392,6 +394,8 @@ const RESTART_WAKE_KEY = "restartWake";
 
 /** 이 설치가 Tailscale 주소를 연 적이 있다는 기록({ address, at }). 같은 표의 별도 키라 설정 응답에는 나가지 않는다. */
 const TAILNET_SEEN_KEY = "tailnetSeen";
+/** C8: 대표가 켠 HTTPS 주소(tailscale serve)의 기록({ url, port, at }). 같은 표의 별도 키라 설정 응답에 나가지 않고 이전 판도 무시한다. */
+const TAILNET_HTTPS_KEY = "tailnetHttps";
 
 /** 막힘의 까닭은 관측 기록의 오류 코드에서 읽는다. 막힘이 아니면 싣지 않는다. */
 function blockedCodeOf(status: string, observation: Member["statusObservation"]): BlockedCode | undefined {
@@ -553,6 +557,8 @@ function toMember(r: Row): Member {
 function toDecision(r: Row): Decision {
   return {
     ...(r.usage_limit_json ? { kind: "usage_limit" as const, usageLimit: json<NonNullable<Decision["usageLimit"]>>(r.usage_limit_json) } : {}),
+    // K(E2): 도구 승인 카드. 열(tool_permission_json)은 db.ts 의 ensureToolPermissionColumn 이 더한다.
+    ...(r.tool_permission_json ? { kind: "tool_permission" as const, toolPermission: json<NonNullable<Decision["toolPermission"]>>(r.tool_permission_json) } : {}),
     id: r.id,
     projectId: r.project_id,
     memberId: r.member_id,
@@ -817,13 +823,24 @@ export interface DeliveryRetryState {
   correctionRevision: number | null;
 }
 
-/** 대기 사유 판정에 쓰는, 저장소 밖(실행기·사고 복구)의 지금 상태. hold·contradiction 이 없으면 저장된 값만으로 판정한다. */
-export interface DeliveryWaitContext {
-  busy: boolean; waking: boolean; used: number;
-  /** 사고·한도 복구가 지금 이 직원을 보류 중이면 그 사유. null 은 보류 아님. */
-  hold?: "api_outage" | "usage_limit" | null;
-  /** 바쁘다고 보는데 실행기는 CLI 가 쉬는 중이라고 관측한다. */
-  contradiction?: boolean;
+/**
+ * 저장소가 전달 펌프 쪽에 부탁하는 두 가지. 대기 사유는 여기서 읽지 않는다(펌프가 남긴 판정 줄을 읽는다).
+ * - recheck: 대표가 '다시 확인'을 눌렀다(이어가기를 포기한 팀장도 다시 보내 본다).
+ * - nudge: 정체로 알리기 전에 한 번 스스로 다시 밀어 본다(입력은 하지 않는다).
+ */
+export interface DeliveryHooks {
+  recheck?: (memberId: string) => void;
+  nudge?: (memberId: string) => void;
+}
+
+/** member_delivery_verdicts 한 줄. 알 수 없는 사유(다른 판의 서버가 적은 값)는 '이유 없는 대기'로 읽는다. */
+function toPumpVerdict(row: Row): StoredPumpVerdict {
+  let detail: { runLimit?: { used?: unknown; limit?: unknown } } = {};
+  try { if (row.detail_json) detail = json(row.detail_json) ?? {}; } catch { /* 읽을 수 없는 상세는 버린다 */ }
+  const limit = detail.runLimit;
+  return { memberId: row.member_id, code: row.code, waitReason: isDeliveryWaitReason(row.wait_reason) ? row.wait_reason : "unknown", since: row.since,
+    runLimit: limit && Number.isInteger(limit.used) && Number.isInteger(limit.limit) ? { used: limit.used as number, limit: limit.limit as number } : null,
+    overdueAt: row.overdue_at ?? null, updatedAt: row.updated_at };
 }
 
 export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecoveryStore {
@@ -833,7 +850,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   private lastMessageMs = 0;
   private deliveryRead: {
     projectId: string; deliveries: Delivery[]; rows: Map<string, Row>; recoveries: Map<string, Row>;
-    stalls: Set<string>; receiptMembers: Set<string>; startedRuns: Map<string, number>;
+    stalls: Set<string>; startedRuns: Map<string, number>; verdicts: Map<string, StoredPumpVerdict | null>;
     reportRefs: Map<string, Row>; superseded: Map<string, string>; messageDeliveries: Map<string, Delivery[]>; memo: Map<string, unknown>;
   } | null = null;
 
@@ -851,7 +868,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     this.deliveryRead = { projectId, rows: new Map(rows.map(row => [row.id, row])), deliveries: rows.map(toDelivery),
       recoveries: new Map(this.rows("SELECT r.* FROM delivery_recovery r JOIN deliveries d ON d.id = r.delivery_id WHERE d.project_id = ?", projectId).map(row => [row.delivery_id, row])),
       stalls: new Set(this.rows("SELECT s.delivery_id FROM delivery_stalls s JOIN deliveries d ON d.id = s.delivery_id WHERE d.project_id = ? AND s.resolved_at IS NULL", projectId).map(row => row.delivery_id)),
-      receiptMembers: new Set(rows.filter(row => row.status === "delivering" || row.hold_reason === "delivery_unknown").map(row => row.member_id)),
+      // 그 프로젝트의 팀장마다 펌프의 마지막 판정(없으면 null). 전달마다 따로 읽지 않는다.
+      verdicts: new Map(this.verdictsReady ? this.rows("SELECT m.id AS owner_id, v.* FROM members m LEFT JOIN member_delivery_verdicts v ON v.member_id = m.id WHERE m.project_id = ?", projectId)
+        .map(row => [row.owner_id as string, row.member_id ? toPumpVerdict(row) : null]) : []),
       startedRuns: new Map(this.rows("SELECT member_id, MAX(rowid) AS last_run FROM execution_journal WHERE project_id = ? AND started_at IS NOT NULL GROUP BY member_id", projectId).map(row => [row.member_id, row.last_run])),
       reportRefs: new Map(reportRefs.map(row => [row.source_message_id, row])), superseded: new Map(reportRefs.filter(row => row.corrects_message_id).map(row => [row.corrects_message_id, row.source_message_id])),
       messageDeliveries, memo: new Map() };
@@ -881,14 +900,12 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.project_id = m.project_id AND d.ref_type = 'message' AND d.ref_id = m.id)
       ORDER BY m.at DESC, m.id DESC`, projectId).map(toMessage);
   }
-  private waitContext: ((memberId: string) => DeliveryWaitContext) | null = null;
   private recheckPending: ((memberId: string) => void) | null = null;
   private stallNudge: ((memberId: string) => void) | null = null;
   /** 정체로 알리기 전에 한 번 스스로 다시 밀어 본 전달. */
   private readonly stallNudged = new Set<string>();
-  /** 이유가 붙은 대기가 실제와 어긋난 채 이어지는지 본다(일하는 중이라는데 CLI 는 쉬는 중, 끝나지 않는 깨우는 중). */
-  private readonly waitWatch = new Map<string, { reason: DeliveryWaitReason; since: number }>();
-  private readonly suspectWaits = new Set<string>();
+  /** 판정 표(member_delivery_verdicts)를 쓸 수 있는가. 만들지 못했으면 판정 없이(이유 없는 대기로) 읽는다. */
+  private verdictsReady = false;
 
   /** failed 는 실패한 시각과 같은 설정으로 실패한 횟수를 함께 적는다(꺼진 세션을 다시 여는 간격에 쓴다). 옛 판은 두 값을 무시한다. */
   deferMemberConfig(memberId: string, signature: string, failed = false): void {
@@ -913,47 +930,73 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     this.run("UPDATE members SET config_deferred_json = NULL WHERE id = ?", memberId);
   }
 
-  setDeliveryWaitContext(read: (memberId: string) => DeliveryWaitContext, recheck: (memberId: string) => void, nudge?: (memberId: string) => void): void {
-    this.waitContext = read;
-    this.recheckPending = recheck;
-    this.stallNudge = nudge ?? null;
+  setDeliveryHooks(hooks: DeliveryHooks): void {
+    this.recheckPending = hooks.recheck ?? null;
+    this.stallNudge = hooks.nudge ?? null;
   }
 
   recheckPendingDelivery(memberId: string): void {
     this.afterCommit(() => this.recheckPending?.(memberId));
   }
 
+  /** 전달 펌프가 남긴 이 팀장의 마지막 판정. 아직 판정한 적이 없으면 null. */
+  pumpVerdict(memberId: string): StoredPumpVerdict | null {
+    if (!this.verdictsReady) return null;
+    if (this.deliveryRead?.verdicts.has(memberId)) return this.deliveryRead.verdicts.get(memberId) ?? null;
+    const row = this.row("SELECT * FROM member_delivery_verdicts WHERE member_id = ?", memberId);
+    return row ? toPumpVerdict(row) : null;
+  }
+
+  /**
+   * 전달 펌프가 판정을 남긴다(pumpOnce 의 return 마다, 그리고 오래 걸리는 단계에 들어갈 때). 값이 바뀔 때만 쓴다.
+   * 같은 판정이 이어지면 since 와 기한 넘김 표시를 그대로 둔다. 화면에 보이는 값이 바뀌었고 기다리는 전달이 있으면 member 이벤트를 낸다.
+   * 판정을 적지 못해도 전달은 막지 않는다(그때 화면은 '이유 없는 대기'로 보고 정체 점검이 다시 민다).
+   */
+  recordPumpVerdict(memberId: string, verdict: PumpVerdict, at = Date.now()): void {
+    if (!this.verdictsReady || this.deliveryRead) return;
+    const wait = verdictWait(verdict.code);
+    const detail = verdict.runLimit ? JSON.stringify({ runLimit: { used: verdict.runLimit.used, limit: verdict.runLimit.limit } }) : null;
+    try {
+      const before = this.row("SELECT code, wait_reason, detail_json, overdue_at FROM member_delivery_verdicts WHERE member_id = ?", memberId);
+      if (before && before.code === verdict.code && before.wait_reason === wait && (before.detail_json ?? null) === detail) return;
+      const iso = new Date(at).toISOString();
+      this.run(`INSERT INTO member_delivery_verdicts (member_id, code, wait_reason, since, detail_json, overdue_at, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?)
+        ON CONFLICT(member_id) DO UPDATE SET code = excluded.code, wait_reason = excluded.wait_reason, detail_json = excluded.detail_json, updated_at = excluded.updated_at,
+          since = CASE WHEN member_delivery_verdicts.code = excluded.code THEN member_delivery_verdicts.since ELSE excluded.since END,
+          overdue_at = CASE WHEN member_delivery_verdicts.code = excluded.code THEN member_delivery_verdicts.overdue_at ELSE NULL END`,
+        memberId, verdict.code, wait, iso, detail, iso);
+      const visible = !before || before.wait_reason !== wait || (before.detail_json ?? null) !== detail || (before.code !== verdict.code && !!before.overdue_at);
+      if (visible && this.row("SELECT 1 FROM deliveries WHERE member_id = ? AND status IN ('queued','held','delivering') LIMIT 1", memberId)) this.emitMember(memberId);
+    } catch (e) {
+      // 지운 팀장(외래 키) 등. 같은 실패를 펌프마다 쏟지 않게 한 줄로만 남긴다.
+      if (this.getMember(memberId)) console.warn("전달 판정을 적지 못했습니다:", memberId, (e as Error).message);
+    }
+  }
+
   deliveryWait(delivery: Delivery): DeliveryWaitInfo {
-    return this.deliveryReadMemo(`wait:${delivery.id}`, () => this.readDeliveryWait(delivery));
+    return this.deliveryReadMemo(`wait:${delivery.id}`, () => this.rawDeliveryWait(delivery));
   }
 
-  private readDeliveryWait(delivery: Delivery): DeliveryWaitInfo {
-    const wait = this.rawDeliveryWait(delivery);
-    // 어긋난 채 오래 이어진 대기는 '이유 없는 대기'로 돌려, 정체 알림과 '다시 확인'이 닿게 한다.
-    return this.suspectWaits.has(delivery.id) && ["member_busy", "waking"].includes(wait.waitReason) ? { waitReason: "unknown", waitingSince: wait.waitingSince } : wait;
-  }
-
+  /**
+   * 화면의 대기 사유. 그 팀장의 일(일하는 중·깨우는 중·승인 대기·직접 조작·보관·실행기·장애·한도·동시 상한·재시도 대기·수신 확인)은
+   * 펌프가 남긴 판정을 그대로 읽는다. 다시 추측하지 않는다. 전달 하나하나의 사정(이 전달 자신의 수신 확인, 다음 턴에 묶인 수동 전달,
+   * 이 전달의 다시 보낼 시각)만 이 전달의 기록에서 읽는다.
+   */
   private rawDeliveryWait(delivery: Delivery): DeliveryWaitInfo {
-    const member = this.requireMember(delivery.memberId), project = this.requireProject(delivery.projectId);
-    const context = this.deliveryReadMemo(`context:${member.id}`, () => this.waitContext?.(member.id));
-    // 저장된 보류 사유는 사고·한도가 끝난 뒤에도 행에 남는다. 지금 그 직원이 실제로 보류 중일 때만 그 사유를 말한다.
-    if (context?.hold === "api_outage" || context?.hold === "usage_limit") return { waitReason: context.hold, waitingSince: delivery.createdAt };
-    if (context?.hold === undefined && (delivery.holdReason === "api_outage" || delivery.holdReason === "usage_limit")) return { waitReason: delivery.holdReason, waitingSince: delivery.createdAt };
-    const input = this.inputState(member.id), recovery = this.getDeliveryRecovery(delivery.id);
     const waitingSince = delivery.createdAt;
-    // 거절이 이어져 다시 보낼 때를 기다리는 중이다. 수신 확인이 아니다.
+    const verdict = this.pumpVerdict(delivery.memberId);
+    // 기한을 넘긴 판정(일한다는데 CLI 는 쉬는 중, 끝나지 않는 깨우는 중)은 '이유 없는 대기'로 읽어 정체 알림과 '다시 확인'이 닿게 한다.
+    const judged: DeliveryWaitReason | null = !verdict ? null : verdict.overdueAt && WATCHED_WAITS.has(verdict.waitReason) ? "unknown" : verdict.waitReason;
+    if (judged && MEMBER_GATE_WAITS.has(judged)) return { waitReason: judged, waitingSince };
+    // 이 전달 자신의 수신 확인. 거절이 이어져 다시 보낼 때를 기다리는 것은 수신 확인이 아니다.
+    const recovery = this.getDeliveryRecovery(delivery.id);
     const backoff = recovery?.phase === "waiting" && recovery.reason === "input_busy";
-    if (project.archived) return { waitReason: "archived", waitingSince };
-    if (!project.runnerEnabled) return { waitReason: "runner_off", waitingSince };
-    if (input.lease) return { waitReason: "manual_control", waitingSince };
-    if (member.status === "blocked" || delivery.holdReason === "blocked") return { waitReason: "approval", waitingSince };
-    if (input.unresolvedDispatches.length || recovery && !backoff && !["none", "resolved", "stopped"].includes(recovery.phase) || (this.deliveryRead?.projectId === project.id ? this.deliveryRead.receiptMembers.has(member.id) : this.listDeliveries(project.id).some(d => d.memberId === member.id && (d.status === "delivering" || d.holdReason === "delivery_unknown")))) return { waitReason: "receipt_check", waitingSince };
-    if (context?.waking || member.lifecycleState && ["starting", "starting_unknown", "reconnecting"].includes(member.lifecycleState.phase)) return { waitReason: "waking", waitingSince };
-    if (project.connection.reason === "backend_down" || ["backend_down", "runner_disabled"].includes(delivery.holdReason ?? "")) return { waitReason: "runner_off", waitingSince };
+    if (delivery.status === "delivering" || delivery.holdReason === "delivery_unknown" || recovery && !backoff && !["none", "resolved", "stopped"].includes(recovery.phase)) return { waitReason: "receipt_check", waitingSince };
+    if (judged === "waking") return { waitReason: "waking", waitingSince };
     // A passive input belongs to the next turn, not the turn already in flight.
     // Persisted insertion order avoids same-millisecond and restart ambiguity.
     if (!delivery.wake && delivery.attempts === 0 && ["queued", "held"].includes(delivery.status) && !(this.deliveryRead?.rows.has(delivery.id)
-      ? (this.deliveryRead.startedRuns.get(member.id) ?? 0) > this.deliveryRead.rows.get(delivery.id)!.next_turn_after_run
+      ? (this.deliveryRead.startedRuns.get(delivery.memberId) ?? 0) > this.deliveryRead.rows.get(delivery.id)!.next_turn_after_run
       : this.row(`
       SELECT 1 FROM execution_journal e JOIN deliveries d ON d.id = ?
       WHERE e.member_id = d.member_id AND e.project_id = d.project_id AND e.rowid > d.next_turn_after_run
@@ -963,14 +1006,36 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     // Once a later turn started, leaving this passive delivery behind is
     // unexplained even while that turn is busy or the global slots are full.
     const missedNextTurn = !delivery.wake && delivery.attempts === 0;
-    if (!missedNextTurn && (context?.busy || member.status === "working")) return { waitReason: "member_busy", waitingSince };
-    const used = context?.used ?? new Set(this.listPendingExecutions().map(run => run.memberId)).size;
-    const limit = this.getSettings().maxConcurrentTurns;
-    if (!missedNextTurn && member.origin !== "manual" && (member.backend ?? this.effectiveBackend()) === "core" && used >= limit) return { waitReason: "run_limit", waitingSince, runLimit: { used, limit } };
-    // 다시 보낼 시각이 아직 오지 않았다. 그 시각이 지나고도 안 나가면 이유 없는 대기다.
+    if (!missedNextTurn && judged === "member_busy") return { waitReason: "member_busy", waitingSince };
+    if (!missedNextTurn && judged === "run_limit") return { waitReason: "run_limit", waitingSince, ...(verdict?.runLimit ? { runLimit: verdict.runLimit } : {}) };
+    // 다시 보낼 시각이 아직 오지 않았다(펌프가 그 팀장의 재시도 시각을 기다리거나, 이 전달의 시각이 남았다). 그 시각이 지나고도 안 나가면 이유 없는 대기다.
     const nextAttemptAt = (this.deliveryRead?.rows.get(delivery.id) ?? this.row("SELECT next_attempt_at FROM deliveries WHERE id = ?", delivery.id))?.next_attempt_at as string | null | undefined;
-    if (nextAttemptAt && Date.parse(nextAttemptAt) > Date.now()) return { waitReason: "retry_wait", waitingSince };
+    if (judged === "retry_wait" || nextAttemptAt && Date.parse(nextAttemptAt) > Date.now()) return { waitReason: "retry_wait", waitingSince };
+    if (!missedNextTurn && judged === "next_turn") return { waitReason: "next_turn", waitingSince };
     return { waitReason: "unknown", waitingSince };
+  }
+
+  /**
+   * 서버가 다시 뜰 때 부른다. 지난 프로세스의 판정은 사유만 이어 보이고, 기한을 재는 시각(since)과 기한 넘김 표시는 지금부터 다시 센다.
+   * 그대로 두면 재시작 전에 시작한 '깨우는 중'이 다시 뜨자마자 기한을 넘긴 것으로 읽혀 거짓 정체 알림이 난다.
+   */
+  restartPumpVerdictClocks(at = Date.now()): void {
+    if (!this.verdictsReady) return;
+    const iso = new Date(at).toISOString();
+    this.run("UPDATE member_delivery_verdicts SET since = ?, overdue_at = NULL, updated_at = ?", iso, iso);
+  }
+
+  /** 정체 점검: 기한을 재는 판정(일한다는데 CLI 는 쉬는 중, 깨우는 중)이 기한을 넘겼으면 그 줄에 적는다. 판정은 펌프가, 기한은 여기서 잰다. */
+  private markOverdueVerdicts(memberIds: Iterable<string>, now: number, thresholdMs: number): void {
+    if (!this.verdictsReady) return;
+    for (const memberId of memberIds) {
+      const verdict = this.pumpVerdict(memberId);
+      if (!verdict || verdict.overdueAt) continue;
+      const patience = verdictPatience(verdict.code, thresholdMs);
+      if (patience === null || now - Date.parse(verdict.since) < patience) continue;
+      this.run("UPDATE member_delivery_verdicts SET overdue_at = ? WHERE member_id = ? AND code = ? AND overdue_at IS NULL", new Date(now).toISOString(), memberId, verdict.code);
+      this.emitMember(memberId);
+    }
   }
 
   deliveryStalled(id: string): boolean {
@@ -989,16 +1054,18 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       live.add(delivery.id);
     }
     for (const id of this.stallNudged) if (!live.has(id)) this.stallNudged.delete(id);
-    for (const id of this.waitWatch.keys()) if (!live.has(id)) { this.waitWatch.delete(id); this.suspectWaits.delete(id); }
+    this.markOverdueVerdicts(new Set([...byProject.values()].flat().map(delivery => delivery.memberId)), now, thresholdMs);
     const nudges = new Set<string>();
     for (const [projectId, deliveries] of byProject) {
       const observations = this.withDeliveryRead(projectId, () => deliveries.map(delivery => {
-        this.watchWait(delivery, now, thresholdMs);
         const waiting = this.deliveryWait(delivery).waitReason !== "unknown";
+        // 기한을 넘긴 판정 때문에 이유 없는 대기가 됐다: 경과 시간을 기다리지 않고 곧바로 한 번 다시 밀고, 그래도 그대로면 알린다.
+        const verdict = this.pumpVerdict(delivery.memberId);
+        const suspect = !waiting && !!verdict?.overdueAt && WATCHED_WAITS.has(verdict.waitReason);
         const progress = waiting ? delivery.createdAt : this.listDispatches(delivery.memberId).filter(d => d.items.some(i => i.deliveryId === delivery.id)).at(-1)?.updatedAt ?? delivery.createdAt;
-        return { delivery, waiting, stalled: this.deliveryStalled(delivery.id), progress };
+        return { delivery, waiting, suspect, stalled: this.deliveryStalled(delivery.id), progress };
       }));
-      for (const { delivery, waiting, stalled, progress } of observations) {
+      for (const { delivery, waiting, suspect, stalled, progress } of observations) {
         if (waiting) {
           if (stalled) {
             this.run("UPDATE delivery_stalls SET resolved_at = ? WHERE delivery_id = ? AND resolved_at IS NULL", new Date(now).toISOString(), delivery.id);
@@ -1008,7 +1075,6 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
           continue;
         }
         if (stalled) continue;
-        const suspect = this.suspectWaits.has(delivery.id);
         // 알리기 전에 '다시 확인'과 같은 안전한 동작(재시도 간격을 풀고 다시 밀기)을 스스로 한 번 해 본다.
         if (this.stallNudge && !this.stallNudged.has(delivery.id) && (suspect || now - Date.parse(progress) >= thresholdMs / 2)) {
           this.stallNudged.add(delivery.id); nudges.add(delivery.memberId);
@@ -1025,26 +1091,6 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     }
     for (const memberId of nudges) {
       try { this.stallNudge?.(memberId); } catch (e) { console.error("정체 전달 다시 밀기 실패:", memberId, e); }
-    }
-  }
-
-  /** 일하는 중이라는데 실행기는 쉬는 중으로 보거나, 깨우는 중이 끝나지 않는 대기를 센다. 기준을 넘기면 '이유 없는 대기'로 다룬다. */
-  private watchWait(delivery: Delivery, now: number, thresholdMs: number): void {
-    const wait = this.rawDeliveryWait(delivery);
-    const context = this.deliveryReadMemo(`context:${delivery.memberId}`, () => this.waitContext?.(delivery.memberId));
-    const odd = wait.waitReason === "waking" || wait.waitReason === "member_busy" && context?.contradiction === true;
-    if (!odd) {
-      this.waitWatch.delete(delivery.id);
-      if (this.suspectWaits.delete(delivery.id)) { this.deliveryRead?.memo.delete(`wait:${delivery.id}`); this.emitMember(delivery.memberId); }
-      return;
-    }
-    const seen = this.waitWatch.get(delivery.id);
-    if (seen?.reason !== wait.waitReason) { this.waitWatch.set(delivery.id, { reason: wait.waitReason, since: now }); return; }
-    // 깨우는 데는 기동 제한(45초)과 재결합 유예가 들어 있다. 일하는 중 모순보다 넉넉히 기다린다.
-    if (now - seen.since >= (wait.waitReason === "waking" ? thresholdMs * 2.5 : thresholdMs) && !this.suspectWaits.has(delivery.id)) {
-      this.suspectWaits.add(delivery.id);
-      this.deliveryRead?.memo.delete(`wait:${delivery.id}`);
-      this.emitMember(delivery.memberId);
     }
   }
 
@@ -1120,6 +1166,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
+    // L: 판정 표는 openDb 가 만든다. 이주 도중의 DB 를 바로 넘겨받은 경우에도 쓸 수 있게 없으면 여기서 만든다(있으면 쓰지 않는다).
+    this.verdictsReady = ensureDeliveryVerdicts(db);
     const existing = !!this.getProject("hq");
     this.ensureHq();
     this.initPermissionAcknowledged(existing);
@@ -1172,6 +1220,23 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   rememberTailnetSeen(seen: { address: string; at: string }): void {
     this.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", TAILNET_SEEN_KEY, JSON.stringify({ address: seen.address, at: seen.at }));
+  }
+
+  /** C8: 대표가 켠 HTTPS 주소의 기록. 켠 적이 없거나 껐으면 null. 모양이 어긋난 값은 없는 것으로 본다. */
+  tailnetHttps(): { url: string; port: number; at: string } | null {
+    const row = this.row("SELECT value FROM settings WHERE key = ?", TAILNET_HTTPS_KEY);
+    if (!row) return null;
+    try {
+      const saved = JSON.parse(row.value) as { url?: unknown; port?: unknown; at?: unknown } | null;
+      return saved && typeof saved.url === "string" && saved.url.startsWith("https://") && typeof saved.port === "number" && Number.isInteger(saved.port)
+        && typeof saved.at === "string" ? { url: saved.url, port: saved.port, at: saved.at } : null;
+    } catch { return null; }
+  }
+
+  rememberTailnetHttps(value: { url: string; port: number; at: string } | null): void {
+    if (!value) { this.run("DELETE FROM settings WHERE key = ?", TAILNET_HTTPS_KEY); return; }
+    this.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", TAILNET_HTTPS_KEY,
+      JSON.stringify({ url: value.url, port: value.port, at: value.at }));
   }
 
   loadApiRecovery<T>(key: string): T | null {
@@ -1879,8 +1944,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return new Date(Math.max(Date.now(), prev + 1)).toISOString();
   }
 
+  /**
+   * 팀장이 ask 로 올려 답을 기다리는 결재. 도구 승인 카드(K)는 뺀다: CLI 의 승인 창에 딸린 잠깐의 카드라 팀장의 '결재 대기'·잠재우기 판단에 넣지 않는다.
+   */
   listOpenDecisionsByMember(memberId: string): Decision[] {
-    return this.rows("SELECT * FROM decisions WHERE member_id = ? AND status = 'open' ORDER BY created_at, rowid", memberId).map(toDecision);
+    return this.rows("SELECT * FROM decisions WHERE member_id = ? AND status = 'open' AND tool_permission_json IS NULL ORDER BY created_at, rowid", memberId).map(toDecision);
   }
 
   createDecision(input: NewDecision): Decision {
@@ -2034,6 +2102,53 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       this.emitProjects();
       return decision;
     });
+  }
+
+  // ---- K(E2): 도구 승인 카드 ----
+  /** CLI 의 PermissionRequest 훅이 올린 요청을 카드로 연다. 요약(toolPermission)만 저장한다. 질문 글·총괄 알림은 만들지 않는다. */
+  createToolPermissionDecision(input: NewDecision & { memberId: string; toolPermission: ToolPermissionInfo }): Decision {
+    return this.transaction(() => {
+      this.requireProject(input.projectId);
+      const id = newId("d_");
+      const at = nowIso();
+      this.run(
+        `INSERT INTO decisions (id, project_id, member_id, who, title, detail, options, rec, grp, file_id, images, status, created_at, updated_at, tool_permission_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, '[]', 'open', ?, ?, ?)`,
+        id, input.projectId, input.memberId, input.who, input.title, input.detail ?? "", JSON.stringify(input.options ?? []), at, at, JSON.stringify(input.toolPermission),
+      );
+      const decision = this.requireDecision(id);
+      this.recorder?.decision(null, decision);
+      this.bumpBoard(decision.projectId);
+      this.emit({ type: "decision", decision });
+      this.emitProjects();
+      return decision;
+    });
+  }
+
+  /**
+   * 도구 승인 카드의 답. 훅이 기다리는 동안에만 부르며, 답은 곧바로 그 훅에 돌아가므로 answered 를 거치지 않고 delivered 로 둔다
+   * (answered 로 남으면 결재 답 재전달 흐름이 팀장에게 글로 다시 보낸다). 열려 있지 않으면 409.
+   */
+  answerToolPermission(id: string, answer: { choice: string | null; note: string | null }): Decision {
+    return this.transaction(() => {
+      const before = this.requireDecision(id);
+      if (before.kind !== "tool_permission") throw new ApiError(400, "도구 승인 카드가 아닙니다", "tool_permission_only");
+      if (before.status !== "open") throw new ApiError(409, "이미 닫혔거나 대표가 답한 결재입니다", "decision_closed");
+      const at = nowIso();
+      this.run("UPDATE decisions SET status = 'delivered', choice = ?, note = ?, batch = 0, answered_at = ?, delivered_at = ?, updated_at = ? WHERE id = ? AND status = 'open'",
+        answer.choice, answer.note, at, at, this.nextDecisionStamp(id), id);
+      const decision = this.requireDecision(id);
+      this.recorder?.decision(before, decision);
+      this.bumpBoard(decision.projectId);
+      this.emit({ type: "decision", decision });
+      this.emitProjects();
+      return decision;
+    });
+  }
+
+  /** 열린 도구 승인 카드 전부(서버가 시작할 때 지난 실행의 것을 닫는다). */
+  listOpenToolPermissions(): Decision[] {
+    return this.rows("SELECT * FROM decisions WHERE status = 'open' AND tool_permission_json IS NOT NULL ORDER BY created_at, rowid").map(toDecision);
   }
 
   /** 답했지만 아직 누구에게도 가지 않은 결재. */

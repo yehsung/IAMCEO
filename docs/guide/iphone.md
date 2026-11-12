@@ -29,6 +29,18 @@ iPhone 앱은 내 Mac의 IAMCEO 서버에 [Tailscale](https://tailscale.com)을 
 
 QR 대신 주소와 접속 코드를 직접 넣을 수도 있습니다(iPhone 첫 화면의 **주소와 접속 코드를 직접 입력**). 연결 화면 맨 아래의 명령을 복사해 Mac의 터미널에서 실행하면 주소와 접속 코드가 나옵니다. 앱이 그 Mac의 서버가 앱 안에서 도는 것을 알면(전에 연결한 적이 있거나, 같은 Mac의 Mac 앱이면) 명령은 앱 안 경로(`/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo open`)로 나오고, 모를 때는 `iamceo open`으로 나옵니다. `iamceo`를 줄여 쓰는 이름으로 등록해 두지 않았다면 앱 안 경로로 실행합니다 → [시작하기](getting-started.md#명령줄-도구)
 
+## HTTPS 주소(선택)
+
+iPhone과 Mac 사이는 기본으로 Tailscale이 암호화하고, 앱은 그 위에서 보통 주소(`http://<기기 이름>.<tailnet>.ts.net:7878`)로 붙습니다. 원하면 앱의 연결도 따로 암호화되는 HTTPS 주소를 쓸 수 있습니다.
+
+- **켜기:** Mac 앱의 **설정 → 연결 → iPhone 연결** 아래 **HTTPS 주소**의 **켜기**를 누르고 확인합니다. 서버가 이 Mac의 Tailscale에서 `tailscale serve`로 HTTPS(443)를 열어 IAMCEO 서버로 넘깁니다. 같은 Tailscale 망의 기기만 닿고 인터넷에는 열리지 않습니다. 처음에는 인증서를 받느라 1분쯤 걸릴 수 있습니다. 서버가 스스로 켜지는 않습니다(내 Tailscale 설정을 바꾸는 일이라서).
+- **켠 뒤:** 새로 만드는 연결 QR의 맨 앞 주소가 `https://<기기 이름>.<tailnet>.ts.net`이 되어, 새로 연결하는 iPhone은 HTTPS로 붙습니다. 출시된 iPhone 앱(0.2.2·0.2.3)도 그대로 따라옵니다. 이미 연결한 iPhone은 끊기지 않고 지금 주소를 계속 쓰며, 새 QR로 한 번 다시 연결하면 HTTPS로 옮겨 갑니다.
+- **켤 수 없다고 나오면:** 안내를 따릅니다. 가장 흔한 것은 tailnet의 HTTPS 인증서가 꺼져 있는 경우입니다. [Tailscale 관리 화면의 DNS 설정](https://login.tailscale.com/admin/dns)에서 **MagicDNS**와 **HTTPS Certificates**를 켠 뒤 다시 누릅니다(줄의 **Tailscale 관리 화면** 단추가 그 화면을 엽니다). 이 Mac의 HTTPS(443)를 다른 설정이 이미 쓰고 있으면 그 설정을 건드리지 않고 켜지 않습니다.
+- **끄기:** 같은 자리의 **끄기**를 누릅니다. 서버가 만든 Tailscale 설정만 지웁니다. HTTPS 주소로 연결한 iPhone은 끊기므로 새 QR로 다시 연결합니다.
+- 켜고 끄기는 서버가 도는 Mac의 앱에서만 됩니다.
+
+**iPhone의 Tailscale이 꺼져 있으면 보내지 않습니다(다음 iPhone 앱부터).** 보통 주소의 연결은 Tailscale이 켜져 있어야만 암호화됩니다. 그래서 iPhone 앱은 보통 주소로 요청을 보내기 전에 그 iPhone의 Tailscale이 켜져 있는지 봅니다. 꺼져 있으면 보내지 않고 "이 iPhone의 Tailscale이 꺼져 있어 보내지 않았습니다"라고 알립니다. Tailscale을 켜면 알아서 다시 연결합니다. HTTPS 주소로 연결한 iPhone은 HTTPS가 지키므로 이 확인과 상관없습니다.
+
 ## 알림
 
 - **Mac:** 됩니다. Mac 앱의 **설정 → 알림 → Mac 알림**을 켭니다. 새 결재, 승인·선택 대기, 완료·막힘 보고, 대표 할 일을 알립니다.

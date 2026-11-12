@@ -28,8 +28,7 @@ function setup() {
     } });
   }) as Database["query"];
   const store = new Store(db, new Bus());
-  // 운영에서는 오케스트레이터가 실행 상황을 준다. 없으면 전달마다 실행 기록을 따로 센다.
-  store.setDeliveryWaitContext(() => ({ busy: false, waking: false, used: 0 }), () => {});
+  // 대기 사유는 펌프가 남긴 판정 줄을 읽는다(오케스트레이터의 메모리 상태를 콜백으로 묻지 않는다). 판정이 없으면 이유 없는 대기다.
   const project = store.createProject({ name: "읽기 시험", cwd: runtime.paths.work });
   const member = store.createMember({ projectId: project.id, name: "직원", handle: "worker", kind: "worker", origin: "manual" });
   const measure = <T>(read: () => T): { result: T; sql: string[] } => {

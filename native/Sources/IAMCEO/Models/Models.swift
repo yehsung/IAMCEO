@@ -223,6 +223,25 @@ extension UsageLimit {
     }
 }
 
+/// 팀장의 CLI 가 도구 승인 창 앞에서 올린 요청(kind "tool_permission"). 서버가 가리고 자른 요약만 온다.
+struct ToolPermission: Codable, Sendable, Equatable {
+    var tool: String = ""
+    var action: String = ""
+    var target: String = ""
+    var cwd: String? = nil
+    var expiresAt: String? = nil
+}
+extension ToolPermission {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: ModelKey.self)
+        tool = try c.decodeIfPresent(String.self, forKey: ModelKey("tool")) ?? ""
+        action = try c.decodeIfPresent(String.self, forKey: ModelKey("action")) ?? ""
+        target = try c.decodeIfPresent(String.self, forKey: ModelKey("target")) ?? ""
+        cwd = try c.decodeIfPresent(String.self, forKey: ModelKey("cwd"))
+        expiresAt = try c.decodeIfPresent(String.self, forKey: ModelKey("expiresAt"))
+    }
+}
+
 struct Decision: Codable, Sendable, Identifiable, Equatable {
     var id: String = ""
     var projectId: String = ""
@@ -230,6 +249,7 @@ struct Decision: Codable, Sendable, Identifiable, Equatable {
     var who: String = ""
     var kind: String? = nil
     var usageLimit: UsageLimit? = nil
+    var toolPermission: ToolPermission? = nil
     var title: String = ""
     var detail: String = ""
     var options: [DecisionOption] = []
@@ -263,6 +283,7 @@ extension Decision {
         who = try c.decodeIfPresent(String.self, forKey: ModelKey("who")) ?? ""
         kind = try c.decodeIfPresent(String.self, forKey: ModelKey("kind"))
         usageLimit = c.lenient(UsageLimit.self, forKey: ModelKey("usageLimit"))
+        toolPermission = c.lenient(ToolPermission.self, forKey: ModelKey("toolPermission"))
         title = try c.decodeIfPresent(String.self, forKey: ModelKey("title")) ?? ""
         detail = try c.decodeIfPresent(String.self, forKey: ModelKey("detail")) ?? ""
         options = try c.lossyArray(DecisionOption.self, forKey: ModelKey("options")) ?? []
@@ -287,6 +308,11 @@ extension Decision {
         closedBy = try c.decodeIfPresent(String.self, forKey: ModelKey("closedBy"))
         closedAt = try c.decodeIfPresent(String.self, forKey: ModelKey("closedAt"))
     }
+}
+
+extension Decision {
+    /// 도구 승인 카드. 선택지는 허용(이번 한 번만)·거절 둘이고, 답은 기다리는 CLI 에 바로 간다.
+    var isToolPermission: Bool { kind == "tool_permission" }
 }
 
 struct Todo: Codable, Sendable, Identifiable, Equatable {

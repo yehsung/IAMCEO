@@ -29,6 +29,18 @@ The pairing QR does not contain the access code. It holds a code that works once
 
 Instead of the QR you can type the address and the access code (**주소와 접속 코드를 직접 입력**, enter the address and access code, on the iPhone's first screen). Copy the command at the bottom of the connection screen and run it in a terminal on the Mac: it prints the address and the access code. When the app knows that Mac's server runs from inside the app (it connected to it before, or it is the Mac app on that same Mac), the command uses the path inside the app (`/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo open`); otherwise it reads `iamceo open`. Unless you set up a short name for `iamceo`, run it with the path inside the app → [Getting started](getting-started.en.md#the-command-line-tool)
 
+## HTTPS address (optional)
+
+By default Tailscale encrypts the link between the iPhone and the Mac, and the app connects over it with a plain address (`http://<device name>.<tailnet>.ts.net:7878`). If you want the app's own connection encrypted as well, you can use an HTTPS address.
+
+- **Turning it on:** in the Mac app, under **설정 → 연결 → iPhone 연결** (Settings → Connection → Connect iPhone), press **켜기** (Turn on) on the **HTTPS 주소** (HTTPS address) row and confirm. The server opens HTTPS (port 443) on this Mac's Tailscale with `tailscale serve` and hands it to the IAMCEO server. Only devices in the same tailnet can reach it; nothing is opened to the internet. The first time can take about a minute while the certificate is issued. The server never turns this on by itself, because it changes your Tailscale settings.
+- **After that:** the first address in every new pairing QR is `https://<device name>.<tailnet>.ts.net`, so newly paired iPhones connect over HTTPS. The released iPhone apps (0.2.2, 0.2.3) follow it without an update. iPhones that are already connected stay connected on their current address; pairing one again with a new QR moves it to HTTPS.
+- **If it says it cannot turn on:** follow the message. The most common cause is that HTTPS certificates are off for the tailnet. Turn on **MagicDNS** and **HTTPS Certificates** in the [DNS settings of the Tailscale admin console](https://login.tailscale.com/admin/dns) and press it again (the row's **Tailscale 관리 화면** (Tailscale admin console) button opens that page). If something else already uses HTTPS (443) on this Mac, IAMCEO leaves it alone and does not turn on.
+- **Turning it off:** press **끄기** (Turn off) in the same place. Only the Tailscale setting the server made is removed. iPhones connected through the HTTPS address are cut off; pair them again with a new QR.
+- Turning it on and off works only from the app on the Mac that runs the server.
+
+**Nothing is sent while the iPhone's Tailscale is off (from the next iPhone app).** A plain address is encrypted only while Tailscale is on, so before sending a request to a plain address the iPhone app checks that this iPhone's Tailscale is on. If it is off, the app sends nothing and says so ("이 iPhone의 Tailscale이 꺼져 있어 보내지 않았습니다", Tailscale is off on this iPhone, nothing was sent). It reconnects by itself once Tailscale is on. An iPhone connected through the HTTPS address is protected by HTTPS and does not need this check.
+
 ## Notifications
 
 - **Mac:** works. Turn on **설정 → 알림 → Mac 알림** (Settings → Notifications → Mac notifications) in the Mac app. It tells you about new decisions, approval or choice waits, finished and blocked reports, and to-dos for you.

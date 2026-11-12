@@ -18,6 +18,8 @@ import { codexBindingMarker, discoverCodexSession, observeCompactBoundary, type 
 import { readDeliveryEvidence, readJsonlRange, parseCodexSessionMeta, providerLogPath, type DeliveryEvidenceCursor, type JsonlCursor } from "./delivery-evidence.ts";
 import type { DeliveryDispatch, RunnerRecoveryStore, TerminalLease } from "../service-contracts.ts";
 import { readTranscriptTail, transcriptPath } from "./transcript.ts";
+import { HookShadow } from "./hook-compare.ts";
+import { hookEventsDir } from "./hooks.ts";
 import type { FullRunner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, DeliveryProbe, DeliveryInspection, DeliveryRepair, DeliveryLogBaseline, RunnerTerminalIdentity, RunnerReattachResult, RunnerObservation } from "./types.ts";
 
 /** claudeHome: Claude session transcripts (default CLAUDE_CONFIG_DIR or ~/.claude), read for context usage only. */
@@ -54,6 +56,8 @@ export interface CoreRunnerDeps {
   quiescence?: (memberId: string, dispatch: DeliveryDispatch) => { originalWrite: "not_written" | "rejected" | "settled" | "unresolved"; externalInput: boolean | null; unconfirmed?: boolean; riskApproved?: boolean };
   submitKeyVerified?: boolean;
   compactStore?: { load(memberId: string): CoreCompactState | null; save(memberId: string, state: CoreCompactState): void };
+  /** E1: 훅 기록과 지금 판정을 맞대어 세기만 한다. 없으면 contextHome 이 있고 훅을 넣을 때 만든다. false 면 끈다. */
+  hookShadow?: HookShadow | false;
 }
 interface Track {
   composerEmpty: boolean | null;
@@ -166,11 +170,15 @@ export class CoreRunner implements FullRunner {
   private readonly inputRefreshes = new Map<Track, ReturnType<typeof setTimeout>>();
   private closed = false;
   private methods = new Set<string>();
+  /** E1 나란히 모으기. 판정에는 쓰지 않는다. */
+  private readonly hookShadow: HookShadow | null;
 
   constructor(private readonly options: CoreRunnerOptions = {}, private readonly deps: CoreRunnerDeps = {}) {
     this.socketPath = options.socketPath || coreSocketPath(options.session);
     this.rpcTimeoutMs = deps.rpcTimeoutMs ?? 8000;
     this.sendTimeoutMs = deps.sendTimeoutMs ?? 20_000;
+    // 훅은 contextHome 이 있을 때만 넣는다(providers.ts). 같은 조건에서만 비교한다.
+    this.hookShadow = deps.hookShadow === false ? null : deps.hookShadow ?? (options.contextHome && (options.hookEvents ?? process.env.IAMCEO_HOOK_EVENTS !== "0") ? new HookShadow({ eventsDir: hookEventsDir(options.contextHome) }) : null);
   }
   /** Scope cancellation to this attempt; a late read must never initiate another input. */
   withSignal<T>(signal: AbortSignal, waiting: (stage: string) => void, action: () => Promise<T>, deadline: number): Promise<T> {
@@ -223,7 +231,11 @@ export class CoreRunner implements FullRunner {
   private observation(track: Track): RunnerObservation {
     return { terminalId: track.terminal.address, ...(track.member.sessionGeneration !== undefined ? { sessionGeneration: track.member.sessionGeneration } : {}), turn: track.terminal.turn ?? null, inputEpoch: track.epoch, observedAt: track.observedAt };
   }
-  private event(track: Track, event: RunnerEvent): void { this.emit({ ...this.observation(track), ...event }); }
+  private event(track: Track, event: RunnerEvent): void {
+    const observed = { ...this.observation(track), ...event };
+    this.hookShadow?.observe(observed, providerFor(track.member));
+    this.emit(observed);
+  }
   private publishStatus(track: Track, event: Extract<RunnerEvent, { type: "status" }>): void {
     const delay = 250 - (Date.now() - track.statusPublishedAt);
     if (["working", "idle"].includes(event.status) && ["working", "idle"].includes(track.publishedStatus ?? "") && event.observation?.freshness === "fresh" && delay > 0) {
@@ -686,6 +698,7 @@ export class CoreRunner implements FullRunner {
       deliveryAttempted = true;
       const result = await this.call<{ turn: number; started?: boolean | null }>("terminal.send", { terminal: terminal.address, text: cleaned, ...(state === "idle" ? { if: "idle" } : {}), force: false, wait: false }, this.sendTimeoutMs);
       if (!Number.isSafeInteger(result.turn)) throw new CoreError("protocol", "Send reply has no valid turn counter", true);
+      this.hookShadow?.sent(member.id, providerFor(member), { sessionId: track.sessionId, text: cleaned });
       // started:false still means paste+Enter was delivered. Never resend it.
       await this.refresh(track).catch(() => undefined);
       return { ok: true, started: result.started ?? null, turn: result.turn };
@@ -894,6 +907,7 @@ export class CoreRunner implements FullRunner {
       // Same rule as send(): after any turn the CLI reports done until its next input, and core has no conditional for it.
       const result = await this.call<{ turn: number; started?: boolean }>("terminal.send", { terminal: latest.address, text: dispatch.wireText, ...(final.snapshot.status === "idle" ? { if: "idle" } : {}), force: false, wait: false }, this.sendTimeoutMs);
       if (!Number.isSafeInteger(result.turn)) throw new CoreError("protocol", "Invalid repair send receipt", true);
+      this.hookShadow?.sent(member.id, providerFor(member), { sessionId: track.sessionId, text: dispatch.wireText });
       track.pending = true;
       // The previous write was proved absent and this exact resend has a verified receipt.
       track.dispatches = track.dispatches.filter(item => item.dispatchId !== dispatch.dispatchId);
@@ -1370,6 +1384,7 @@ export class CoreRunner implements FullRunner {
     this.inputRefreshes.clear();
     for (const track of this.tracks.values()) if (track.statusTimer) clearTimeout(track.statusTimer);
     this.tracks.clear();
+    this.hookShadow?.stop();
   }
 }
 

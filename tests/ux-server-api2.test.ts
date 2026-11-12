@@ -230,7 +230,8 @@ test("artifact JSON remains compatible and rendered HTML has isolated CSP with i
   expect(csp).toContain("script-src 'unsafe-inline'"); expect(csp).not.toContain("allow-same-origin");
   expect(csp).toContain(ARTIFACT_CSP); expect(await rendered.text()).toContain("window.answer=42");
   for (const name of ["worker", "conductor", "root"] as const) {
-    const role = await Bun.file(join(import.meta.dir, `../server/roles/${name}.md`)).text();
+    // 3차 M: 아티팩트 공통 계약은 공통 조각(server/roles/parts/artifact-contract.md)으로 옮겨 조립한다. 조립한 지침을 본다.
+    const role = renderRole(name, { PROJECT: "P", NAME: "N", ROLE: "R", CONDUCTOR: "C" });
     expect(role).toContain("외부 CDN 금지"); expect(role).toContain("링크는 앱이 확인 후 연다");
   }
 });

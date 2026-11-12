@@ -87,7 +87,7 @@ export interface TailscaleProbe {
 
 const TUNNEL_INTERFACE = /^(utun|tun)\d+$/i;
 const TAILSCALE_INTERFACE = /^tailscale/i;
-const TAILSCALE_CLI_PATHS = ["/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale", "/usr/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
+export const TAILSCALE_CLI_PATHS = ["/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale", "/usr/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
 
 /** 명령이 없는 설치(Mac App Store 판)도 앱 묶음 안의 실행 파일로 물어본다. 1.5초 안에 답이 없으면 모르는 것으로 둔다. */
 function tailscaleCliAddresses(): string[] | null {

@@ -1896,6 +1896,8 @@ struct SettingsView: View {
                             .fixedSize()
                             .disabled(store.connectionStatus != .connected)
                     }
+                    // N(C8): 대표가 고를 때만 켜는 HTTPS 주소(tailscale serve). 이 Mac 의 서버이고 새 서버일 때만 줄이 생긴다.
+                    TailnetHttpsRow()
                 }
             }
             #endif

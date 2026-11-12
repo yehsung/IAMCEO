@@ -658,6 +658,8 @@ func friendlyLoadError(_ error: Error, what: String = "원본", verb: String = "
         }
     }
     if let url = error as? URLError {
+        // C8: 이 기기의 Tailscale 이 꺼져 있어 앱이 스스로 보내지 않은 요청. 무엇을 켜야 하는지 그대로 말한다.
+        if Tailnet.isOffError(url) { return Tailnet.offMessage }
         switch url.code {
         case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
             return "서버와 연결이 끊겨 \(object) \(verb) 못했습니다."

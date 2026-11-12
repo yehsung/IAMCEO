@@ -209,9 +209,28 @@ export interface DecisionOption { k: string; label: string; desc?: string }
 export type DecisionStatus = "open" | "answered" | "delivered" | "closed";
 export interface UsageLimit { cli: CliProvider; resetsAt: string | null; memberIds: string[]; stillLimited: boolean }
 export interface ApiOutageState { since: string; affectedMemberIds: string[]; lastProbeAt: string | null }
+/**
+ * K(E2): 팀장의 CLI 가 도구 승인 창 앞에 서며 올린 요청(PermissionRequest 훅). kind "tool_permission" 결재 카드에 실린다.
+ * 도구 입력 원문은 싣지도 저장하지도 않는다: 비밀이 담길 수 있어 서버가 자르고 가린 요약만 둔다.
+ * 선택지는 늘 allow(허용, 이번 한 번만)·deny(거절) 둘이다. 출시된 앱(0.2.2·0.2.3)은 이 칸을 모르고 보통 결재로 보여 주며, 같은 답 경로로 답한다.
+ */
+export interface ToolPermissionInfo {
+  /** CLI 의 도구 이름 그대로(Bash, Edit, mcp__서버__도구 등). */
+  tool: string;
+  /** 무엇을 하는지 짧은 한국어(명령 실행, 파일 고치기 등). */
+  action: string;
+  /** 명령·파일 경로·주소의 요약. 비밀로 보이는 값은 가렸고 길면 잘랐다. */
+  target: string;
+  /** 팀장이 일하는 폴더. */
+  cwd: string | null;
+  /** 이때까지 답이 없으면 카드가 닫히고 터미널의 원래 승인 창에서 답해야 한다. */
+  expiresAt: string;
+}
 export interface Decision {
-  kind?: "usage_limit";
+  kind?: "usage_limit" | "tool_permission";
   usageLimit?: UsageLimit;
+  /** kind 가 tool_permission 일 때만 있다. */
+  toolPermission?: ToolPermissionInfo;
   id: string;
   projectId: string;
   memberId: string | null; // 물은 직원
@@ -576,6 +595,31 @@ export interface TailnetStatus {
   macNotified?: boolean;
 }
 
+// ---- HTTPS 연결(N, C8) ----
+/** 켤 수 없거나 확인하지 못한 까닭. 이름과 문장은 shared/error-codes.ts 의 N 덩어리에 있다. */
+export type TailnetHttpsProblemCode =
+  | "tailscale_cli_missing" | "tailscale_not_running" | "tailscale_too_old"
+  | "tailnet_https_disabled" | "tailnet_https_port_taken" | "tailnet_https_no_loopback" | "tailnet_https_cert_failed"
+  | "tailnet_https_failed" | "tailnet_https_off_failed" | "tailnet_https_port_changed" | "tailnet_https_removed";
+export interface TailnetHttpsProblem {
+  code: TailnetHttpsProblemCode;
+  message: string;
+  /** 대표가 열어 고칠 곳(Tailscale 관리 화면의 DNS 설정). */
+  link?: string;
+}
+/**
+ * GET·POST /api/tailnet/https 의 답(새 경로. 옛 서버는 404). 대표가 설정에서 켤 때만 서버가 `tailscale serve` 로
+ * 이 Mac 의 서버를 tailnet 안의 https://<기기>.<tailnet>.ts.net 에 낸다. on 이면 연결 QR 주소의 맨 앞에 그 주소를 싣는다.
+ * off: 꺼짐. on: 이 서버를 가리키는 HTTPS 설정이 있고 인증서를 쓸 수 있다.
+ * pending: 켜고 끄는 중이거나, 켠 기록은 있지만 지금 확인되지 않는다(그동안 QR 에는 싣지 않는다).
+ */
+export interface TailnetHttpsStatus {
+  state: "off" | "on" | "pending";
+  url?: string;
+  problem?: TailnetHttpsProblem;
+  checkedAt: string;
+}
+
 export interface RuntimeInfo { backend: "core"; core: { installed: boolean; available: boolean; version: string | null; detail: string | null }; providers: Record<CliProvider, { installed: boolean }> }
 
 /** 옛 herdr 실행기의 상태 칸. 서버는 herdr 를 보지 않는다: 출시된 앱(0.2.2)이 풀어 읽는 칸이라 '쓰지 않음' 고정값으로만 내려간다. */
@@ -742,6 +786,8 @@ export const MANUAL_TOOLS = ["wait"] as const;
 /** 점검 항목 id. 고정 목록이다(묶음 사이 약속 1). 앱·명령줄·문서가 이 이름으로 항목을 가리킨다. */
 export const DOCTOR_CHECK_IDS = ["server", "engine", "claude", "codex", "cli_version", "tailscale", "service", "backup", "disk"] as const;
 export type DoctorCheckId = (typeof DOCTOR_CHECK_IDS)[number];
+/** 3차 M(E10): 고정 목록 밖의 점검 id. 이 Mac 에서 역할 지침(~/.iamceo/roles)을 고쳐 둔 때만 점검표 끝에 붙는다. 앱은 다른 항목처럼 보인다. */
+export const DOCTOR_ROLES_CHECK_ID = "roles";
 /**
  * 점검 한 항목. ok 정상, warn 확인 필요(돌기는 한다), fail 문제(이대로는 안 된다), unknown 확인하지 못했거나 해당 없음(쓰지 않는 선택 기능).
  * title 은 항목 이름, detail 은 찾은 것, fix 는 일반 사용자가 할 수 있는 고치는 법 한 줄(앱 버튼 이름·설치 명령). 개발자 명령은 쓰지 않는다.

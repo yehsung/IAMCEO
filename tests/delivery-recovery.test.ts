@@ -99,6 +99,8 @@ describe("영속 확인과 안전 fence", () => {
     const f = setup(), d = f.enqueue();
     f.store.patchMember(f.member.id, { status: "blocked", blockedReason: "usage_limit" });
     f.store.markHeld(d.id, reason);
+    // 대기 사유는 펌프의 판정이다(E3). 펌프가 장애·한도로 보류하며 남기는 판정을 그대로 적는다.
+    f.store.recordPumpVerdict(f.member.id, { code: reason });
     expect(f.store.deliveryWait(f.store.requireDelivery(d.id))).toMatchObject({ waitReason: reason, waitingSince: d.createdAt });
     const page = f.service.memberNotices(f.member.id);
     expect(page.items.find(item => item.id === d.id)).toMatchObject({ holdReason: reason, waitReason: reason, note });
@@ -151,6 +153,8 @@ describe("영속 확인과 안전 fence", () => {
 
   test.each(["working", "blocked"] as const)("%s 대기는 예산에서 제외하고 후속 urgent도 막는다", async status => {
     const f = setup(); const d = f.enqueue(); f.envelope([d]);
+    // 결과를 모르는 봉투를 남긴 펌프는 그 팀장을 '수신 확인 중'으로 판정한다(E3). 뒤에 줄 선 전달도 그 판정을 읽는다.
+    f.store.recordPumpVerdict(f.member.id, { code: "receipt_check" });
     const later = f.enqueue(); f.store.setDeliveryStatus(later.id, "queued");
     f.inspect = async (_m, q) => { const x = f.observation(q, { finding: "wait" }); x.snapshot!.status = status; return x; };
     await f.service.tick(); f.now += 1_000_000; await f.service.tick();
@@ -571,7 +575,8 @@ describe("원본 판, operation과 읽기 집계", () => {
     // 전달의 createdAt 은 실제 시계로 찍힌다. setup 때 잡은 f.now 가 아니라 그 시각에서 잰다.
     f.store.detectDeliveryStalls(Date.parse(d.createdAt) + 120_001);
     expect(count()).toBe(1); expect(count()).toBe(noticeCount());
-    f.store.patchMember(f.member.id, { status: "working" });
+    // 펌프가 '일하는 중'으로 판정하면(E3) 이유가 붙은 대기라 알림 집계에서 빠진다.
+    f.store.recordPumpVerdict(f.member.id, { code: "busy" });
     expect(count()).toBe(0); expect(count()).toBe(noticeCount());
     f.store.createMessage({ projectId: f.project.id, mine: true, kind: "나", body: "수신자 없는 실패", delivery: "failed" });
     expect(count()).toBe(1); expect(count()).toBe(noticeCount());
@@ -837,7 +842,7 @@ describe("봉투가 묶인 터미널이 바뀐 뒤", () => {
 describe("미전달 항목의 수동 제어와 일회성 정리", () => {
   test("stalled가 아니어도 queued와 rejected의 recheck·stop_retry는 409 없이 동작한다", async () => {
     const f = setup(), d = f.enqueue();
-    let calls = 0; f.store.setDeliveryWaitContext(() => ({ busy: false, waking: false, used: 0 }), () => { calls++; });
+    let calls = 0; f.store.setDeliveryHooks({ recheck: () => { calls++; } });
     expect(f.service.memberNotices(f.member.id).items[0].allowedActions).toEqual(["recheck", "stop_retry"]);
     await f.service.recover(d.id, { operationId: randomUUID(), expectedVersion: f.r(d.id).version, action: "recheck" });
     expect(calls).toBe(1);

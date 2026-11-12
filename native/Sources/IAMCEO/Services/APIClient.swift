@@ -52,10 +52,14 @@ actor APIClient {
     let liteStateEnabled: Bool
     private var fileBodyCache: [String: FileDoc] = [:]
     private var fileBodyOrder: [String] = []
-    init(endpoint: ServerEndpoint, accessCode: String, session: URLSession? = nil, liteStateEnabled: Bool = false) {
+    /// C8: 이 기기의 Tailscale 이 켜져 있는가. Tailscale 주소로 평문 요청을 보내기 전에 본다(authorizedURL). 시험이 바꿔 넣는다.
+    private let tailnetConnected: @Sendable () -> Bool
+    init(endpoint: ServerEndpoint, accessCode: String, session: URLSession? = nil, liteStateEnabled: Bool = false,
+         tailnetConnected: @escaping @Sendable () -> Bool = { Tailnet.isConnected() }) {
         self.endpoint = endpoint
         self.accessCode = accessCode
         self.liteStateEnabled = liteStateEnabled
+        self.tailnetConnected = tailnetConnected
         ownsSession = session == nil
         if let session { self.session = session }
         else {
@@ -217,6 +221,9 @@ actor APIClient {
               url.user == nil, url.password == nil, url.fragment == nil else {
             throw APIError(status: 0, message: "연결된 서버 밖의 파일 주소는 열지 않습니다.")
         }
+        // C8: 모든 요청(REST·실시간·터미널 스트림·첨부 올리기와 받기·내보내기)이 여기서 주소를 얻는다.
+        // Tailscale 주소로 가는 평문 요청은 이 기기의 Tailscale 이 꺼져 있으면 보내지 않는다.
+        try Tailnet.checkBeforeSending(url, connected: tailnetConnected)
         return url
     }
     /// Credentials are sent only in the header, including when using the legacy protocol.
@@ -464,6 +471,8 @@ extension APIClient {
     nonisolated func releaseTerminalLeaseNow(memberID: String, leaseId: String) {
         guard let url = URL(string: "/api/members/\(Self.segment(memberID))/terminal/control", relativeTo: endpoint.url)?.absoluteURL,
               url.scheme == endpoint.url.scheme, url.host == endpoint.url.host, url.port == endpoint.url.port,
+              // C8: Tailscale 이 꺼진 채 평문으로 보내지 않는다(조작권은 서버가 시간이 지나면 스스로 놓는다).
+              (try? Tailnet.checkBeforeSending(url, connected: tailnetConnected)) != nil,
               let body = try? JSONEncoder().encode(TerminalControlRequest(action: "release", leaseId: leaseId)) else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"

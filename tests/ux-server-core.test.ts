@@ -154,31 +154,40 @@ test("run limit reason includes global used/limit and matches message and member
 
 test("wait reason distinguishes working, approval, manual control, disabled and archived", async () => {
   const f = fixture(); const member = f.member(), delivery = f.enqueue(member);
-  f.store.patchMember(member.id, { status: "working" });
-  expect(f.store.deliveryWait(delivery).waitReason).toBe("member_busy");
+  // E3: 대기 사유는 펌프의 판정이다. 상태를 바꾼 뒤 펌프가 다시 판정한 것을 읽는다(화면이 따로 추측하지 않는다).
+  const judged = async () => { await f.orch.pump(member.id); return f.store.deliveryWait(delivery).waitReason; };
+  f.runner.busy.add(member.id);
+  expect(await judged()).toBe("member_busy");
+  f.runner.busy.delete(member.id);
   f.store.patchMember(member.id, { status: "blocked" });
-  expect(f.store.deliveryWait(delivery).waitReason).toBe("approval");
+  expect(await judged()).toBe("approval");
   f.store.patchMember(member.id, { status: "idle" });
   f.store.saveLease({ memberId: member.id, claimId: "ux-claim", leaseId: "ux-lease", identity: { sessionId: member.sessionId, terminalId: member.paneId, sessionGeneration: 0, process: null }, expiresAt: Date.now() + 60_000, lastInputSequence: 0 });
-  expect(f.store.deliveryWait(delivery).waitReason).toBe("manual_control");
+  expect(await judged()).toBe("manual_control");
+  // 조작 중에 실행을 꺼도 펌프는 조작권에서 먼저 멈춘다. 화면도 펌프가 멈춘 그 까닭을 말한다.
   f.store.patchProject(f.project.id, { runnerEnabled: false });
-  expect(f.store.deliveryWait(delivery).waitReason).toBe("runner_off");
+  expect(await judged()).toBe("manual_control");
+  f.store.removeLease(member.id, "ux-claim");
+  expect(await judged()).toBe("runner_off");
   f.store.patchProject(f.project.id, { archived: true });
-  expect(f.store.deliveryWait(delivery).waitReason).toBe("archived");
+  expect(await judged()).toBe("archived");
+  // 판정은 DB 에 남아 다른 저장소(재시작한 서버)도 같은 사유를 읽는다.
+  expect(new Store(f.db, new Bus()).deliveryWait(delivery).waitReason).toBe("archived");
+  expect(f.runner.sent).toHaveLength(0);
 });
 
 test("wake=1 reasonless stall creates one durable visible notice; recheck is idempotent and never creates a new delivery", async () => {
   const f = fixture(); const member = f.member(), delivery = f.enqueue(member);
   const future = Date.parse(delivery.createdAt) + 120_001;
   // 서버는 이제 알리기 전에 한 번 스스로 다시 민다(delivery-1). 이 시험은 그러고도 남은 정체의 알림을 본다: 밀기 없는 저장소로 판정한다.
-  f.store.setDeliveryWaitContext(() => ({ busy: false, waking: false, used: 0 }), () => {});
+  f.store.setDeliveryHooks({ recheck: () => {} });
   f.store.detectDeliveryStalls(future);
   const restart = new Store(f.db, new Bus());
   restart.detectDeliveryStalls(future + 10_000);
   expect(restart.listMessages(f.project.id).filter(m => m.title === "전달 확인 필요")).toHaveLength(1);
   expect(restart.listActivity(member.id).filter(a => a.text.includes("전달이 진행되지"))).toHaveLength(1);
   let rechecks = 0;
-  restart.setDeliveryWaitContext(() => ({ busy: false, waking: false, used: 0 }), () => { rechecks++; });
+  restart.setDeliveryHooks({ recheck: () => { rechecks++; } });
   const recovery = new DeliveryRecovery({ store: restart, runner: () => null, now: () => future });
   const item = recovery.memberNotices(member.id).items[0];
   expect(item).toMatchObject({ phase: "needs_owner", waitReason: "unknown", allowedActions: ["recheck", "stop_retry"], recommendation: { text: "다시 확인" } });

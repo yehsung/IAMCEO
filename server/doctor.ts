@@ -6,9 +6,10 @@ import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync, realpathSync, statfsSync, statSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
-import { DOCTOR_CHECK_IDS, type CliProvider, type CliVersionInfo, type DoctorCheck, type DoctorReport, type EngineStatus, type RuntimeInfo, type TailnetStatus } from "../shared/types.ts";
+import { DOCTOR_CHECK_IDS, DOCTOR_ROLES_CHECK_ID, type CliProvider, type CliVersionInfo, type DoctorCheck, type DoctorReport, type EngineStatus, type RuntimeInfo, type TailnetStatus } from "../shared/types.ts";
 import { readCliVersions } from "./cli-version.ts";
 import { CORE_VERSION, defaultCoreBin, detectTailscaleIp, VERSION, type Config } from "./config.ts";
+import { roleCustomizations, type RoleCustomization } from "./roles.ts";
 
 export type DoctorLang = "ko" | "en";
 const t = (lang: DoctorLang, ko: string, en: string): string => (lang === "ko" ? ko : en);
@@ -77,6 +78,8 @@ export interface DoctorFacts {
   service: ServiceFacts;
   backup: BackupFacts | null;
   disk: DiskFacts | null;
+  /** E10: 이 Mac 에서 고쳐 둔 역할 지침(~/.iamceo/roles). 고친 것이 없거나 모르면 비거나 없다. 있을 때만 `roles` 항목이 붙는다. */
+  roles?: RoleCustomization[] | null;
 }
 
 // ---- 판정 ----
@@ -278,13 +281,51 @@ function diskCheck(f: DoctorFacts, lang: DoctorLang): DoctorCheck {
   return check("disk", "ok", title, free);
 }
 
-/** 사실에서 점검표를 만든다. 항목 순서는 DOCTOR_CHECK_IDS 그대로다. */
+/**
+ * E10: 고쳐 둔 역할 지침. 고친 것이 있을 때만 붙는다(고정 목록 밖의 `roles`). 통째 교체 파일에 기준판 표지가 없거나 옛것이면,
+ * 또는 승인 규칙이 빠졌으면 확인 필요. 덧붙임(<kind>.extra.md)은 기본 규칙 개선을 그대로 받으므로 정상이다.
+ */
+function rolesCheck(roles: RoleCustomization[], lang: DoctorLang): DoctorCheck {
+  const name = (kind: RoleCustomization["kind"]) => kind === "conductor" ? t(lang, "총괄", "lead") : kind === "worker" ? t(lang, "팀장", "staff") : t(lang, "본사 AI", "HQ agent");
+  const base: Record<string, string> = {
+    current: "",
+    stale: t(lang, "이전 기본 지침 기준", "based on older defaults"),
+    unmarked: t(lang, "기준판 표지 없음", "no base marker"),
+    other_kind: t(lang, "다른 역할의 기본 지침 기준", "based on another role's defaults"),
+  };
+  const flagged: RoleCustomization["kind"][] = [];
+  const parts = roles.map(role => {
+    const notes: string[] = [];
+    if (role.replacement) {
+      notes.push(t(lang, "통째 교체", "replaced"));
+      if (base[role.replacement.base]) notes.push(base[role.replacement.base]!);
+      if (!role.replacement.approval) notes.push(t(lang, "승인 규칙 없음", "no approval rule"));
+      if (base[role.replacement.base] || !role.replacement.approval) flagged.push(role.kind);
+    }
+    if (role.extra) notes.push(t(lang, "덧붙임", "additions"));
+    return `${name(role.kind)}: ${notes.join(", ")}`;
+  });
+  const extra = flagged.map(kind => `${kind}.extra.md`).join(", ");
+  const replaced = flagged.map(kind => `${kind}.md`).join(", ");
+  const fix = flagged.length ? t(lang,
+    `새 기본 지침을 꺼내(iamceo roles export) 고친 부분을 옮기고, 첫 줄의 기준판 표지를 새 파일의 것으로 바꾸세요. 규칙을 더하기만 했다면 더한 부분만 ${extra} 로 옮기면 ${replaced} 는 필요 없습니다.`,
+    `Export the new defaults (iamceo roles export), carry your edits over, and replace the base marker on the first line with the new file's. If you only added rules, move just those to ${extra}; then ${replaced} is not needed.`) : undefined;
+  return { id: DOCTOR_ROLES_CHECK_ID, state: flagged.length ? "warn" : "ok", title: t(lang, "고쳐 쓴 역할 지침", "Edited role rules"), detail: parts.join(" · "), ...(fix ? { fix } : {}) };
+}
+
+/** 사실에서 점검표를 만든다. 항목 순서는 DOCTOR_CHECK_IDS 그대로이고, 고친 역할 지침이 있으면 끝에 `roles` 가 붙는다. */
 export function doctorChecks(facts: DoctorFacts, lang: DoctorLang = "ko"): DoctorCheck[] {
   const builders: Record<(typeof DOCTOR_CHECK_IDS)[number], (f: DoctorFacts, lang: DoctorLang) => DoctorCheck> = {
     server: serverCheck, engine: engineCheck, claude: claudeCheck, codex: codexCheck, cli_version: cliVersionCheck,
     tailscale: tailscaleCheck, service: serviceCheck, backup: backupCheck, disk: diskCheck,
   };
-  return DOCTOR_CHECK_IDS.map(id => builders[id](facts, lang));
+  const checks = DOCTOR_CHECK_IDS.map(id => builders[id](facts, lang));
+  return facts.roles?.length ? [...checks, rolesCheck(facts.roles, lang)] : checks;
+}
+
+/** 고친 역할 지침을 읽는다. 읽다 실패해도 점검 전체를 막지 않는다. */
+function readRoles(home: string): RoleCustomization[] | null {
+  try { return roleCustomizations(join(home, "roles")); } catch { return null; }
 }
 
 export function doctorReport(facts: DoctorFacts, lang: DoctorLang = "ko", serverVersion = VERSION): DoctorReport {
@@ -509,6 +550,7 @@ export async function serverDoctorFacts(input: ServerDoctorInput): Promise<Docto
       intervalMs: input.backupIntervalMs ?? 86_400_000, homeAgeMs: homeAgeMs(config.dbPath, now),
     },
     disk: probes.disk(config.home),
+    roles: readRoles(config.home),
   };
 }
 
@@ -562,6 +604,7 @@ export async function localDoctorFacts(input: LocalDoctorInput): Promise<DoctorF
       intervalMs: 86_400_000, homeAgeMs: homeAgeMs(config.dbPath, now),
     } : null,
     disk: probes.disk(existsSync(input.home) ? input.home : homedir()),
+    roles: existsSync(input.home) ? readRoles(input.home) : null,
   };
 }
 

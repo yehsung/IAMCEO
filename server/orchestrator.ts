@@ -4,6 +4,7 @@ import { ModelCatalogReader } from "./models.ts";
 import { CONTROL_UNKNOWN_NOTE, CORE_RECONNECT_HELD_NOTE, HOLD_NOTES, REOPEN_RETRY_NOTE, startingUnknownNote, stopCheckHeldNote } from "./hold-codes.ts";
 import { ApiRecovery, classifyTurnError, limitedModelName, modelCreditLimit, NoTerminalError, USAGE_MODEL_PREFIX, usageModelResumeText, withRo, type ApiRecoveryOptions } from "./api-outage.ts";
 import { DeliveryRecovery, type RecoveryRunner } from "./delivery-recovery.ts";
+import { verdictRejudged, type PumpVerdictCode } from "./pump-verdict.ts";
 import { writeStatuslineWrapper } from "./runner/statusline.ts";
 import { endedByRestart, RESTART_EXIT_NOTE, RESTART_REOPENED_NOTE, RESTART_RESUME_TEXT, RESTART_WAKE_MAX_ATTEMPTS, RESTART_WAKE_PACING, restartNoteIn, type RestartWake, type RestartWakePacing } from "./restart-wake.ts";
 // Orchestrator: 전달 펌프, 턴 종료 처리, 압축 판단, 띄우기·잠재우기·다시 열기, 승인 근거 확인(spec §4·§6·§7).
@@ -73,6 +74,7 @@ import { defaultClaudeHome, findSessionFile, isMissingSessionError } from "./run
 import { providerLaunch } from "./runner/providers.ts";
 import { CoreRunner, ensureCoreServer, eofLogBaseline, type CoreCompactState, type CoreRunnerDeps, type CoreRunnerOptions } from "./runner/core.ts";
 import { approvalSummary } from "./runner/core-approval.ts";
+import { ToolPermissions, type ToolPermissionPoll, type ToolPermissionRequest } from "./tool-permission.ts";
 import { exactSource, measureContext } from "./runner/context.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, RunnerStartResult, RunnerTerminalIdentity, RunnerReattachResult, DeliveryRepair } from "./runner/types.ts";
 import { ApiError, type AppliedConfig, type ExecutionJournal, type NewDelivery, type Store } from "./store.ts";
@@ -636,7 +638,8 @@ export function createOrchestrator(config: Config, store: Store, overrides: Asse
   const runners = new Map<Backend, Runner>();
   let orchestrator: Orchestrator | null = null;
   const deliveryRecovery = new OrchestratorDeliveryRecovery(store, member => orchestrator?.recoveryRunner(member) ?? null, dispatch => orchestrator?.writerDone(dispatch) ?? false, memberId => orchestrator?.repairAdmitted(memberId) ?? false, dispatch => orchestrator?.writing(dispatch) ?? false);
-  runners.set("core", new CoreRunner({ contextHome: config.home, coreBin: config.coreBin, socketPath: config.coreSocket, session: "iamceo", stateDir: join(config.home, "core-state"), configDir: join(config.home, "core-config"), claudeBin: config.claudeBin, codexBin: config.codexBin, ...overrides.runner }, {
+  // toolPermission(K, E2): 이 서버가 띄우는 Claude 팀장에게 도구 승인 훅을 넣는다(묻지 않기 팀장 제외, providers.ts).
+  runners.set("core", new CoreRunner({ contextHome: config.home, coreBin: config.coreBin, socketPath: config.coreSocket, session: "iamceo", stateDir: join(config.home, "core-state"), configDir: join(config.home, "core-config"), claudeBin: config.claudeBin, codexBin: config.codexBin, toolPermission: true, ...overrides.runner }, {
     startQuietMs: CORE_START_QUIET_MS,
     ...overrides.runnerDeps,
     recoveryStore: store,
@@ -702,6 +705,8 @@ export class Orchestrator implements OrchestratorApi {
   private readonly configWrites = new Set<string>();
   /** 사용 한도 카드마다 지금 도는 답(고른 것과 그 결과). 다른 답이 앞 답의 결과를 받아 가지 않게 한다(answerDecision). */
   private readonly usageAnswers = new Map<string, { choice: string; task: Promise<Decision> }>();
+  /** K(E2): 도구 승인 카드와 그 답을 기다리는 훅(server/tool-permission.ts). */
+  readonly toolPermissions: ToolPermissions;
   private settingsWriting = false;
   private readonly projectPatches = new Set<string>();
   private readonly terminalMutations = new Set<string>();
@@ -716,26 +721,24 @@ export class Orchestrator implements OrchestratorApi {
     this.providerHomes = deps.providerHomes;
     this.config = deps.config;
     this.runners = deps.runners;
-    this.store.setDeliveryWaitContext(id => {
-      const member = this.store.requireMember(id), rt = this.runtimes.get(id);
-      // 대기 사유는 화면 표시와 정체 감지가 읽는다. 읽을 수 없는 압축 상태 하나가 그 전체를 실패시키면 안 된다.
-      let busy = true, fenced = true;
-      try { busy = this.isBusy(member); fenced = this.coreCompactFenced(member); } catch { /* 자동 입력을 보류하는 상태다: 바쁜 것으로 본다 */ }
-      const runner = this.runners.get(this.backendOf(member));
-      const observed = runner instanceof CoreRunner ? runner.observationState(id) : null;
-      // 압축 보류는 따로 드러난다. 그 밖에 바쁘다고 보는데 CLI 는 쉬는 중으로 관측되면 어긋난 것이다.
-      const contradiction = !fenced && (busy || member.status === "working") && !!observed && observed.failures === 0 && ["idle", "done"].includes(observed.state ?? "") && !rt?.pumping;
-      return { busy, waking: !!(rt?.starting || rt?.reopening || ["reopen", "start_session"].includes(rt?.pumpStage ?? "")), used: this.activeAutomaticTurns(), hold: this.apiRecovery.holdReason(id), contradiction };
-    }, id => {
-      // 대표의 '다시 확인'은 이어가기를 포기해 멈춰 둔 직원도 다시 보내 보라는 뜻이다.
-      this.apiRecovery.releaseExhausted(id);
-      this.store.retryDeferredConfigNow(id);
-      this.recheckMemberDelivery(id);
-    }, id => this.nudgeStalled(id));
+    // 대기 사유는 저장소가 펌프의 판정 줄(recordPumpVerdict)을 읽는다. 여기서는 '다시 확인'과 정체 전 스스로 다시 밀기만 잇는다.
+    this.store.setDeliveryHooks({
+      recheck: id => {
+        // 대표의 '다시 확인'은 이어가기를 포기해 멈춰 둔 직원도 다시 보내 보라는 뜻이다.
+        this.apiRecovery.releaseExhausted(id);
+        this.store.retryDeferredConfigNow(id);
+        this.recheckMemberDelivery(id);
+      },
+      nudge: id => this.nudgeStalled(id),
+    });
     this.deliveryRecovery = deps.deliveryRecovery ?? new OrchestratorDeliveryRecovery(this.store, member => this.recoveryRunner(member), dispatch => this.writerDone(dispatch), memberId => this.repairAdmitted(memberId), dispatch => this.writing(dispatch));
     this.timings = { ...DEFAULT_TIMINGS, ...deps.timings };
     this.agentTools = deps.agentTools ?? null;
     this.notifier = deps.notifier ?? null;
+    // K(E2): 허용하며 남긴 메모는 훅의 답에 실을 수 없어 팀장의 다음 입력으로 보낸다(결재와 묶지 않는다: 전달 실패가 카드를 다시 열지 않게).
+    this.toolPermissions = new ToolPermissions({ store: this.store, notify: (title, body) => this.notifyInbox(title, body),
+      deliverNote: (member, decision) => { this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "answer", text: formatAnswer(decision) }); void this.pump(member.id); },
+      stillBlocked: member => this.notifyInbox(`${member.name} 승인 대기`, "도구 승인 요청에 답이 없어 카드를 닫았습니다. 터미널의 승인 창에서 답해 주세요") });
     this.store.repairRejectedLimit();
     this.apiRecovery = new ApiRecovery({ ...deps.apiRecovery, store: this.store,
       notify: (projectId, text, alertOwner = true) => { this.systemMessage(projectId, text); if (alertOwner) this.store.afterCommit(() => this.notifyInbox("API 연결·사용 한도", text)); },
@@ -1800,6 +1803,8 @@ export class Orchestrator implements OrchestratorApi {
   /** 서버 재시작 복구(§6). 끊긴 턴을 정리하고 대기열을 다시 민다. */
   async recover(): Promise<void> {
     this.recovering = true;
+    // E3: 지난 프로세스가 남긴 판정은 사유만 이어 보인다. 기한을 재는 시각은 이 프로세스에서 다시 센다(곧바로 다시 판정한다).
+    this.recoverStep("전달 판정 시각", () => this.store.restartPumpVerdictClocks());
     try {
       for (const member of this.store.listAllMembers()) {
         if (this.backendOf(member) !== "core") continue;
@@ -1820,6 +1825,8 @@ export class Orchestrator implements OrchestratorApi {
       for (const d of this.store.listDeliveries()) if (d.status !== "delivered") this.recoverStep(`전달 ${d.id}`, () => this.deliveryRecovery.requeueRejected(d.id));
       for (const d of this.store.listDelivering()) this.recoverStep(`전달 ${d.id}`, () => this.deliveryRecovery.beginRecovery(d.id));
       this.store.releaseHeldBeforeConnection();
+      // K(E2): 지난 실행이 남긴 도구 승인 카드는 닫는다. 그 훅은 서버와 함께 끊겨 CLI 가 터미널의 원래 승인 창으로 갔다.
+      this.recoverStep("도구 승인 카드", () => this.toolPermissions.closeLeftovers());
       await this.refreshConnection();
       for (const member of this.store.listAllMembers()) this.recoverStep(`${member.id} 세션 복구`, () => {
         if (member.subagents !== 0 || !member.subagentState) this.store.patchMember(member.id, { subagents: 0, subagentState: { quality: "unknown", count: null, observedAt: null, sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration } });
@@ -1884,7 +1891,21 @@ export class Orchestrator implements OrchestratorApi {
   private detectStallsSoon(): void {
     if (Date.now() - this.lastStallCheck < Math.min(10_000, this.timings.healthMs * 2)) return;
     this.lastStallCheck = Date.now();
+    this.rejudgeQuietVerdicts();
     this.store.detectDeliveryStalls();
+  }
+
+  /**
+   * E3: 끝을 알리는 사건이 빠지면 낡는 판정(일하는 중, 직접 띄운 세션)을 펌프가 다시 판정하게 한다. 기다리는 전달이 있는 팀장만.
+   * 예전에는 저장소가 정체 점검 때마다 이 펌프의 메모리 상태를 콜백으로 읽어 '일한다는데 CLI 는 쉬는 중'을 다시 추측했다.
+   * 이제는 펌프가 다시 판정해 남기고(busy_unconfirmed), 정체 점검은 그 판정이 기한을 넘겼는지만 본다.
+   */
+  private rejudgeQuietVerdicts(): void {
+    if (this.closed || this.recovering) return;
+    let ids: string[] = [];
+    try { ids = [...new Set(this.store.listUndelivered().map(d => d.memberId))].filter(id => verdictRejudged(this.store.pumpVerdict(id)?.code ?? "")); }
+    catch (e) { console.warn("전달 판정 다시 보기 실패:", (e as Error).message); return; }
+    this.pumpEach(ids.filter(id => !this.runtimes.get(id)?.pumping));
   }
 
   /** 전송 호출이 아직 끝나지 않은 봉투. 단계 제한으로 펌프가 먼저 풀려도 호출이 끝날 때까지 남는다. */
@@ -2256,6 +2277,7 @@ export class Orchestrator implements OrchestratorApi {
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
     for (const memberId of [...this.blockedNoticeTimers.keys()]) this.cancelBlockedNotices(memberId);
+    this.toolPermissions.dispose();
     for (const rt of this.runtimes.values()) {
       if (rt.compactTimer) clearTimeout(rt.compactTimer);
       if (rt.retryTimer) clearTimeout(rt.retryTimer);
@@ -2803,6 +2825,8 @@ export class Orchestrator implements OrchestratorApi {
         if (patch.archived !== false) await this.enableProject(project.id);
       }
     } finally { this.archiving.delete(project.id); }
+    // E3: 보관하거나 실행을 끄면 기다리던 전달의 까닭이 바뀐다. 펌프가 다시 판정해 남기게 한다(펌프는 그 상태에서 보내지 않는다).
+    if (patch.archived === true || patch.runnerEnabled === false) for (const id of new Set(this.store.listUndelivered(project.id).map(d => d.memberId))) void this.pump(id);
     if (patch.archived === false) {
       const stopped = this.store.listUndelivered(project.id).filter(d => d.status === "held" && d.holdReason === "archived");
       for (const id of new Set(stopped.map(d => d.memberId))) void this.pump(id);
@@ -2986,7 +3010,18 @@ export class Orchestrator implements OrchestratorApi {
     });
   }
 
+  /** K(E2): 팀장의 CLI 가 도구 승인 창 앞에서 올린 요청(/agent/permission). 결재 카드를 띄우고 한 번 기다린다. */
+  async requestToolPermission(member: Member, input: ToolPermissionRequest, signal?: AbortSignal): Promise<ToolPermissionPoll> {
+    return this.toolPermissions.request(member, input, signal);
+  }
+  /** K(E2): 같은 카드를 다시 기다린다(/agent/permission/wait). */
+  async waitToolPermission(member: Member, id: string, signal?: AbortSignal): Promise<ToolPermissionPoll> {
+    return this.toolPermissions.wait(member, id, signal);
+  }
+
   async answerDecision(decisionId: string, req: AnswerReq): Promise<Decision> {
+    // K(E2): 도구 승인 카드의 답은 기다리는 훅에 바로 돌려준다. 팀장에게 결재 답 글로 보내지 않는다.
+    if (this.store.requireDecision(decisionId).kind === "tool_permission") return this.toolPermissions.answer(decisionId, req);
     if (this.store.requireDecision(decisionId).kind === "usage_limit") {
       const card = this.store.requireDecision(decisionId);
       this.requireActive(this.store.requireProject(card.projectId));
@@ -3407,6 +3442,8 @@ export class Orchestrator implements OrchestratorApi {
             if (retainOnFailure) {
               this.store.patchMember(member.id, { status: "offline", lastError: (e as Error).message });
               for (const d of this.store.listPending(member.id)) this.hold(d, "backend_down");
+              // E3: 펌프 밖에서 보류했다. 그 까닭을 판정으로 남긴다.
+              this.judged(member.id, "runner_off");
             } else if (this.backendOf(member) !== "core" || (e instanceof CoreError && !e.uncertain && !["starting_unknown", "conflict", "unknown"].includes(e.kind))) this.abandonSpawn(member.id);
           } catch (cleanup) { console.error("세션 기동 실패 정리 오류:", member.id, cleanup); }
           finally { reject(new ApiError(502, `세션을 띄우지 못했습니다: ${(e as Error).message}`, "session_start_failed")); }
@@ -3787,6 +3824,8 @@ export class Orchestrator implements OrchestratorApi {
         rt.turn = null;
         this.releaseSlots();
       }
+      // E3: 재우며 보류한 전달의 까닭을 남긴다(다시 깨우면 펌프가 새로 판정한다).
+      if (!rewake && this.store.listPending(memberId).length) this.judged(memberId, opts.holdAs === "archived" ? "archived" : "asleep_hold");
       return this.store.requireMember(memberId);
     } finally {
       rt.closing = false;
@@ -4144,6 +4183,8 @@ export class Orchestrator implements OrchestratorApi {
    */
   async closeDecision(member: Member, request: { id: string; kind: "decided" | "obsolete"; reason: string; userQuote?: string; answeredDecisionId?: string; sameIssue?: string; followUp: DecisionCloseFollowUp }): Promise<Decision> {
     if (this.store.requireDecision(request.id).kind === "usage_limit") throw new ApiError(403, "사용 한도 알림은 대표만 닫을 수 있습니다", "usage_notice_owner_only");
+    // K(E2): 도구 승인 카드는 대표만 답한다. AI 가 닫으면 대표가 볼 승인 요청이 사라진다.
+    if (this.store.requireDecision(request.id).kind === "tool_permission") throw new ApiError(403, "도구 승인 요청은 대표만 답할 수 있습니다", "tool_permission_owner_only");
     return this.closeAsk(member, request);
   }
 
@@ -4428,10 +4469,29 @@ export class Orchestrator implements OrchestratorApi {
       for (const delivery of this.store.listPending(memberId)) {
         if (delivery.attempts === 0 && this.store.getDeliveryRecovery(delivery.id)?.phase === "none") this.hold(delivery, "backend_down");
       }
+      this.judged(memberId, "runner_off");
       return;
     }
     const detail = `전달 처리 오류: ${((error as Error)?.message ?? String(error)).slice(0, 300)}`;
     if (this.store.requireMember(memberId).lastError !== detail) this.store.patchMember(memberId, { lastError: detail });
+    this.judged(memberId, "pump_error");
+  }
+
+  /**
+   * E3: 펌프의 판정을 남긴다. 화면의 대기 사유는 이것만 읽는다(store.rawDeliveryWait). 값이 바뀔 때만 적히고, 바뀌면 앱에 알린다.
+   * 판정을 적다 실패해도 전달은 이어 간다.
+   */
+  private judged(memberId: string, code: PumpVerdictCode, runLimit?: { used: number; limit: number }): void {
+    try { this.store.recordPumpVerdict(memberId, runLimit ? { code, runLimit } : { code }); }
+    catch (e) { console.warn("전달 판정 기록 실패:", memberId, code, (e as Error).message); }
+  }
+
+  /** 일하는 중이라는 판정에 CLI 관측이 맞는가. 쉬는 중으로 관측되면(관측 실패 없이) 확인되지 않은 일하는 중이다: 기한을 넘기면 이유 없는 대기로 다룬다. */
+  private busyVerdict(member: Member, confirmed: PumpVerdictCode): PumpVerdictCode {
+    // 관측을 주는 실행기(core)만 본다. 관측이 없으면 일하는 중을 그대로 믿는다.
+    const runner = this.runners.get(this.backendOf(member)) as Partial<Pick<CoreRunner, "observationState">> | undefined;
+    const observed = typeof runner?.observationState === "function" ? runner.observationState(member.id) : null;
+    return observed && observed.failures === 0 && ["idle", "done"].includes(observed.state ?? "") ? "busy_unconfirmed" : confirmed;
   }
 
   /** readyOnly: CLI 가 입력을 받을 수 있게 됐다는 신호로 부른다. '아직 못 받음' 때문에 미룬 것만 풀고 한도·인증 간격은 그대로 둔다. */
@@ -4471,6 +4531,10 @@ export class Orchestrator implements OrchestratorApi {
     return pending;
   }
 
+  /**
+   * 직원 한 명의 대기열을 한 번 민다. return 마다 그 까닭을 판정으로 남긴다(judged, E3): 화면의 대기 사유는 그 판정만 읽는다.
+   * 오래 걸리는 단계(다시 열기·새로 띄우기·설정 적용·보내기)는 들어갈 때 판정을 남긴다. 그동안 화면이 앞 판정을 보여 주지 않게.
+   */
   private async pumpOnce(memberId: string): Promise<void> {
     let member = this.store.getMember(memberId);
     if (!member) return;
@@ -4485,33 +4549,36 @@ export class Orchestrator implements OrchestratorApi {
           this.store.setMessageDelivery(d.refId, "queued", `${member.name}이 wait 를 부르면 전달됩니다`);
         }
       }
-      return;
+      return this.judged(memberId, ["working", "waiting"].includes(this.store.requireMember(memberId).status) ? "manual_busy" : "manual_idle");
     }
     const project = this.store.requireProject(member.projectId);
     let outageHold = this.apiRecovery.holdReason(memberId);
     // 이어가기를 포기해 멈춰 둔 직원에게 대표가 새로 말을 걸었다. 장애가 끝난 뒤라면 그 말은 보낸다.
     if (outageHold === "api_outage" && this.apiRecovery.releaseForOwnerInput(memberId, this.store.listPending(memberId))) outageHold = this.apiRecovery.holdReason(memberId);
-    if (outageHold) { for (const d of this.store.listPending(memberId)) this.hold(d, outageHold); return; }
+    if (outageHold) { for (const d of this.store.listPending(memberId)) this.hold(d, outageHold); return this.judged(memberId, outageHold); }
     let pending = this.store.listPending(memberId);
     if (member.backend && member.backend !== "core" && (member.sessionId || member.paneId)) {
       for (const d of pending) this.hold(d, "legacy_session");
-      return;
+      return this.judged(memberId, "legacy_session");
     }
     // Previously attempted entries must be inspected, including legacy held rows.
     for (const d of pending) if (d.attempts > 0 && !this.deliveryRecovery.requeueRejected(d.id) && this.store.getDeliveryRecovery(d.id)?.phase === "none") this.deliveryRecovery.beginRecovery(d.id);
     pending = this.sendablePending(memberId);
-    if (this.recovering || this.configWrites.has(memberId) || this.terminalMutations.has(memberId) || this.pendingLifecycle(memberId)) return;
-    if (this.store.inputState(memberId).lease) { this.deferCoreCompact(member, "manual_control"); return; }
+    if (this.recovering || this.configWrites.has(memberId) || this.terminalMutations.has(memberId) || this.pendingLifecycle(memberId)) return this.judged(memberId, "session_busy");
+    if (this.store.inputState(memberId).lease) { this.deferCoreCompact(member, "manual_control"); return this.judged(memberId, "manual_control"); }
     // Expiry/replacement can be discovered by the runner/store before the socket timer.
     // Fence every delivery until old control attaches have detached and restored core.
     if (member.backend === "core" && this.terminalLeaseListeners.size) {
       await this.pumpWait(memberId, "lease_cleanup", () => Promise.all([...this.terminalLeaseListeners].map(ended => ended(memberId, null))));
     }
-    if (this.terminalMutations.has(memberId) || this.store.inputState(memberId).lease) return;
-    if (member.backend === "core" && member.statusObservation && member.statusObservation.ownership !== "verified" && !(member.status === "offline" && member.statusObservation.error?.code === "no_owned_terminal")) return;
-    if (member.backend === "core" && this.store.listPendingExecutions().some(run => run.memberId === memberId && run.identity.sessionGeneration === this.store.memberRevisions(memberId).sessionGeneration) && !this.runtime(memberId).turn) return;
-    if (this.controlFenced(member)) return;
-    if (this.deliveryRecovery.fenced(memberId)) return;
+    if (this.store.inputState(memberId).lease) return this.judged(memberId, "manual_control");
+    if (this.terminalMutations.has(memberId)) return this.judged(memberId, "session_busy");
+    if (member.backend === "core" && member.statusObservation && member.statusObservation.ownership !== "verified" && !(member.status === "offline" && member.statusObservation.error?.code === "no_owned_terminal")) return this.judged(memberId, "ownership_unverified");
+    const openRuns = member.backend === "core" ? this.store.listPendingExecutions().filter(run => run.memberId === memberId && run.identity.sessionGeneration === this.store.memberRevisions(memberId).sessionGeneration) : [];
+    // 끝나지 않은 실행 기록이 남았다. 받았는지 모르는 봉투(넣는 중·결과 모름)면 수신 확인 중이고, 받은 뒤면 일하는 중이다.
+    if (openRuns.length && !this.runtime(memberId).turn) return this.judged(memberId, openRuns.some(run => run.phase === "starting" || run.phase === "unknown") ? "receipt_check" : this.busyVerdict(member, "pending_run"));
+    if (this.controlFenced(member)) return this.judged(memberId, "control_unknown");
+    if (this.deliveryRecovery.fenced(memberId)) return this.judged(memberId, "receipt_check");
     const rt = this.runtime(memberId);
     // 설정을 바꿔 다시 여는 데 실패한 직원. 세션이 살아 있으면(멈추지 못했거나 재결합으로 돌아왔으면) 옛 설정으로 계속 일하고
     // 설정은 다음 기동 때 맞춘다. 꺼져 있으면 곧바로 다시 열기를 되풀이하지 않고 간격을 두되, 영영 막지는 않는다.
@@ -4525,50 +4592,51 @@ export class Orchestrator implements OrchestratorApi {
           if (d.refType === "message" && d.refId) this.store.setMessageDelivery(d.refId, "held", REOPEN_RETRY_NOTE);
         }
         if (pending.some(d => d.wake)) this.scheduleRetry(memberId, rt, retryAt);
-        return;
+        return this.judged(memberId, "retry_wait");
       }
     }
     this.reconcileCoreCompact(member);
-    if (this.coreCompactFenced(member)) return;
-    if (rt.closing) return; // 닫는 중에 다시 열면 명부 밖 칸이 남는다.
-    if (this.settingsWriting) return; // 설정 적용이 끝나면 다시 민다.
-    if (rt.starting) return; // 다 뜨면 다시 민다.
+    if (this.coreCompactFenced(member)) return this.judged(memberId, "compacting");
+    if (rt.closing) return this.judged(memberId, "session_busy"); // 닫는 중에 다시 열면 명부 밖 칸이 남는다.
+    if (this.settingsWriting) return this.judged(memberId, "session_busy"); // 설정 적용이 끝나면 다시 민다.
+    if (rt.starting) return this.judged(memberId, "waking"); // 다 뜨면 다시 민다.
     const due = this.retryDue(member);
     if (Date.now() < Math.max(rt.holdUntil, due)) {
       this.scheduleRetry(memberId, rt, Math.max(rt.holdUntil, due));
-      return;
+      return this.judged(memberId, "retry_wait");
     }
 
     // 보관 중에는 아무도 깨우지 않는다. 꺼낼 때 onProjectPatched 가 다시 민다.
     if (project.archived || this.archiving.has(project.id)) {
       for (const d of pending) if (d.status === "queued") this.hold(d, "archived");
-      return;
+      return this.judged(memberId, "archived");
     }
     if (!project.runnerEnabled) {
       for (const d of pending) this.hold(d, "runner_disabled");
-      return;
+      return this.judged(memberId, "runner_off");
     }
     // 세션이 없거나 잠들었으면 새로 연다: 전역 실행 방식을 따른다. 살아 있는 세션은 시작한 실행기로 계속 다룬다.
     const opening = member.status === "asleep" || member.status === "offline" || (!member.sessionId && !member.paneId);
     let runner = this.runners.get(opening ? this.store.effectiveBackend() : this.backendOf(member));
     if (!runner) {
       for (const d of pending) this.hold(d, "backend_down");
-      return;
+      return this.judged(memberId, "runner_off");
     }
 
     let opened = false;
     if (member.status === "asleep" || member.status === "offline") {
       // 잠들 때 보류된 것만 있으면 깨우지 않는다. 새 깨움이 와야 함께 나간다.
       const wakes = pending.some((d) => d.wake && !(d.status === "held" && d.holdReason === "asleep"));
-      if (!wakes) return;
-      if (this.quickExitHeld(member, rt, pending)) return;
+      if (!wakes) return this.judged(memberId, "asleep_hold");
+      if (this.quickExitHeld(member, rt, pending)) return this.judged(memberId, "retry_wait");
       rt.pumpStage = "reopen";
+      this.judged(memberId, "waking");
       const reopened = await this.reopen(member);
       if (!reopened) {
         // 실패한 설정으로 다시 여는 것이 또 실패했다. 다음 시도는 더 멀리 둔다.
         if (configFailed && this.store.getMember(memberId)) this.store.deferMemberConfig(memberId, deferred!.signature, true);
         for (const d of pending) this.hold(d, member.status === "offline" ? "offline" : "backend_down");
-        return;
+        return this.judged(memberId, member.status === "offline" ? "reopen_failed" : "runner_off");
       }
       member = reopened;
       runner = this.runnerOf(member);
@@ -4580,11 +4648,13 @@ export class Orchestrator implements OrchestratorApi {
     if (member.status === "blocked") {
       this.deferCoreCompact(member, "blocked");
       for (const d of pending) this.hold(d, "blocked");
-      return;
+      return this.judged(memberId, "approval");
     }
     if (this.isBusy(member)) {
       this.deferCoreCompact(member, "working");
       const urgent = pending.filter((d) => d.urgent);
+      // 일하는 중이라는 판정은 긴급을 넣기 전에 남긴다(넣는 동안 화면이 앞 판정을 보여 주지 않게).
+      this.judged(memberId, this.busyVerdict(member, "busy"));
       // core 는 돌고 있는 턴에 끼워 넣을 수 없다(interjects=false). 끝나면 묶어서 나간다.
       if (urgent.length > 0 && this.interjects(runner)) { rt.pumpStage = "send_urgent"; await this.sendUrgent(member, project, runner, urgent); }
       return;
@@ -4593,14 +4663,15 @@ export class Orchestrator implements OrchestratorApi {
     // 쉬는 동안 바뀐 설정을 먼저 맞춘다. 일을 넣고 나면 턴이 끝날 때까지 못 맞춘다.
     if (runner.applyConfig && this.configPending(member)) {
       rt.pumpStage = "sync_config";
-      if (!(await this.syncConfig(member, rt))) return;
+      this.judged(memberId, "session_busy");
+      if (!(await this.syncConfig(member, rt))) return this.judged(memberId, rt.holdUntil > Date.now() ? "retry_wait" : "config_failed");
       member = this.store.requireMember(memberId);
     }
 
     const hasWake = pending.some((d) => d.wake);
     if (!hasWake && rt.compactRequest === null) {
       for (const d of pending) if (d.status === "held") this.requeue(d);
-      return;
+      return this.judged(memberId, "no_wake");
     }
 
     // 상한 검사와 자리 잡기(rt.turn) 사이에 await 가 끼면 상한을 넘을 수 있어 세션부터 마련한다.
@@ -4621,11 +4692,12 @@ export class Orchestrator implements OrchestratorApi {
       })();
       rt.starting = started;
       rt.pumpStage = "start_session";
+      this.judged(memberId, "waking");
       await started;
       if (failure) {
         this.store.patchMember(member.id, { lastError: (failure as Error).message });
         for (const d of pending) this.hold(d, "backend_down");
-        return;
+        return this.judged(memberId, "runner_off");
       }
       member = this.store.requireMember(member.id);
       opened = true;
@@ -4643,17 +4715,18 @@ export class Orchestrator implements OrchestratorApi {
         // 한 번도 준비를 알리지 않은 CLI 다. 승인 창이라고 단정하지 않고 '시작이 늦어짐'으로 알린다.
         this.markBlocked(member, runner.observationState(member.id)?.turn ? undefined : "start_not_ready");
         for (const d of pending) this.hold(d, "blocked");
-        return;
+        return this.judged(memberId, "approval");
       }
       this.scheduleRetry(memberId, rt, Date.now() + this.timings.retryMs);
-      return;
+      return this.judged(memberId, "waking");
     }
     rt.readySince = null;
 
-    if (this.activeAutomaticTurns() >= this.store.getSettings().maxConcurrentTurns) {
+    const used = this.activeAutomaticTurns(), limit = this.store.getSettings().maxConcurrentTurns;
+    if (used >= limit) {
       this.waiting.add(memberId);
       for (const d of pending) if (d.status === "held") this.requeue(d);
-      return;
+      return this.judged(memberId, "run_limit", { used, limit });
     }
 
     const compactAt = this.store.getSettings().compactAtPct;
@@ -4667,10 +4740,11 @@ export class Orchestrator implements OrchestratorApi {
     if (autoCompact) this.queueCoreCompact(member, "auto", this.compactFocus(member));
     if (rt.compactRequest !== null || autoCompact) {
       rt.pumpStage = "compact";
+      this.judged(memberId, "compacting");
       await this.beginCompact(member, project, runner, rt, rt.compactRequest ?? this.compactFocus(member));
       return;
     }
-    if (!hasWake) return;
+    if (!hasWake) return this.judged(memberId, "no_wake");
 
     const turn: Turn = { kind: "work", text: "", interrupted: false };
     rt.turn = turn;
@@ -4680,7 +4754,10 @@ export class Orchestrator implements OrchestratorApi {
       if (!go || this.store.requireMember(memberId).status === "asleep") {
         rt.turn = null;
         this.releaseSlots();
-        return;
+        // 병렬 설정을 바꾸지 못해 일을 미뤘다. 미룬 까닭(잠듦·승인 창·결과 모름·장애·재시도 시각)을 그대로 남긴다.
+        const after = this.store.requireMember(memberId), hold = this.apiRecovery.holdReason(memberId);
+        return this.judged(memberId, after.status === "asleep" ? "asleep_hold" : after.status === "blocked" ? "approval" : this.controlFenced(after) ? "control_unknown"
+          : hold ?? (Math.max(rt.holdUntil, this.retryDue(after)) > Date.now() ? "retry_wait" : "parallel_failed"));
       }
     }
 
@@ -4688,7 +4765,7 @@ export class Orchestrator implements OrchestratorApi {
     if (!fresh.some(d => d.wake) || this.retryDue(member) > Date.now()) {
       rt.turn = null;
       this.releaseSlots();
-      return;
+      return this.judged(memberId, fresh.some(d => d.wake) ? "retry_wait" : "no_wake");
     }
     const ordered = this.apiRecovery.preservesOrder(memberId) ? fresh : orderForBundle(fresh);
     turn.text = ordered.map((d) => d.text).join("\n\n");
@@ -4704,6 +4781,7 @@ export class Orchestrator implements OrchestratorApi {
     const current = this.store.requireMember(memberId);
     let result: SendResult;
     rt.pumpStage = "send";
+    this.judged(memberId, "sending");
     try { result = await this.sendEnvelope(current, project, runner, ordered, false); }
     catch (error) {
       if (rt.turn === turn) rt.turn = null;
@@ -4712,10 +4790,12 @@ export class Orchestrator implements OrchestratorApi {
     }
     if (!result.ok) {
       if (rt.turn === turn) rt.turn = null;
-      if (["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown")) this.onSendFailed(member, rt, ordered, result);
+      // 넣었는지 모르는 결과는 전달 확인이 맡는다(수신 확인 중).
+      const failed: PumpVerdictCode = ["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown") ? this.onSendFailed(member, rt, ordered, result) : "receipt_check";
       this.releaseSlots();
-      return;
+      return this.judged(memberId, failed);
     }
+    this.judged(memberId, "sent");
     rt.inputBusySince = null;
     this.store.appendActivity(memberId, "turn_start", normalizeSpace(turn.text).slice(0, 300));
     // 아주 빠른 턴은 send 가 돌아오기 전에 끝날 수 있다. 그때는 이미 정리되어 있다.
@@ -4975,62 +5055,63 @@ export class Orchestrator implements OrchestratorApi {
     return true;
   }
 
-  private onSendFailed(member: Member, rt: Runtime, deliveries: Delivery[], result: Extract<SendResult, { ok: false }>): void {
+  /** 넣지 못한 봉투를 정리한다. 돌려주는 값은 그 뒤 펌프의 판정이다(동작은 그대로, 판정만 함께 정한다). */
+  private onSendFailed(member: Member, rt: Runtime, deliveries: Delivery[], result: Extract<SendResult, { ok: false }>): PumpVerdictCode {
     const memberId = member.id;
     const availability = this.apiRecovery.holdReason(memberId);
-    if (availability) { for (const delivery of deliveries) this.hold(delivery, availability); return; }
+    if (availability) { for (const delivery of deliveries) this.hold(delivery, availability); return availability; }
     if (["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown")) {
       for (const d of deliveries) this.deliveryRecovery.requeueRejected(d.id);
       const waits = deliveries.map(d => this.store.getDeliveryRetry(d.id).nextAttemptAt).filter((at): at is string => !!at);
-      if (waits.length) { this.scheduleRetry(memberId, rt, Math.max(...waits.map(Date.parse))); return; }
+      if (waits.length) { this.scheduleRetry(memberId, rt, Math.max(...waits.map(Date.parse))); return "retry_wait"; }
     }
     if (result.reason === "error" && ["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown")) {
       // A provider's non-retryable refusal is still not an ambiguous write.
       // Durable rejected-count admission bounds these ordinary retries.
       for (const d of deliveries) this.requeue(d);
       this.retryLater(memberId, rt, this.timings.retryMs);
-      return;
+      return "retry_wait";
     }
     if (this.backendOf(member) === "core" && !["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown") && (result.reason === "error" || (result as { reason: string }).reason === "unknown")) {
       for (const d of deliveries) this.hold(d, "delivery_unknown");
       this.store.patchMember(memberId, { lastError: result.detail ?? "전달 여부를 확인할 수 없습니다" });
-      return;
+      return "receipt_check";
     }
     switch (result.reason) {
       case "busy":
         for (const d of deliveries) this.requeue(d);
         this.retryLater(memberId, rt, this.timings.retryMs);
-        return;
+        return "retry_wait";
       case "blocked":
         this.markBlocked(member);
         for (const d of deliveries) this.hold(d, "blocked");
-        return;
+        return "approval";
       case "input_busy": {
         rt.inputBusySince ??= Date.now();
         if (Date.now() - rt.inputBusySince < this.timings.inputBusyLimitMs) {
           for (const d of deliveries) this.requeue(d);
           this.retryLater(memberId, rt, this.timings.inputBusyRetryMs);
-        } else {
-          rt.inputBusySince = null;
-          for (const d of deliveries) this.hold(d, "input_busy");
+          return "retry_wait";
         }
-        return;
+        rt.inputBusySince = null;
+        for (const d of deliveries) this.hold(d, "input_busy");
+        return "input_hold";
       }
       case "down":
         this.store.patchMember(memberId, { lastError: result.detail ?? "실행기에 연결할 수 없습니다" });
         for (const d of deliveries) this.hold(d, "backend_down");
-        return;
+        return "runner_off";
       case "gone":
         this.store.patchMember(memberId, { status: "offline", paneId: null });
         for (const d of deliveries) this.hold(d, "offline");
-        return;
+        return "session_gone";
       case "error": {
         const detail = result.detail ?? "전달 실패";
         const attempts = Math.max(...deliveries.map((d) => this.store.requireDelivery(d.id).attempts));
         if (result.retryable && attempts < 3) {
           for (const d of deliveries) this.requeue(d);
           this.retryLater(memberId, rt, this.timings.retryMs);
-          return;
+          return "retry_wait";
         }
         const first = member.status !== "error" || member.lastError !== detail;
         for (const d of deliveries) {
@@ -5045,9 +5126,10 @@ export class Orchestrator implements OrchestratorApi {
         this.store.patchMember(memberId, { status: "error", lastError: detail });
         this.holdHeld(memberId, rt, this.timings.retryMs);
         if (first) this.systemMessage(member.projectId, `${member.name}에게 전달하지 못했습니다: ${detail}`);
-        return;
+        return "retry_wait";
       }
     }
+    return "pump_error";
   }
 
   /** 보류해 둔 전달을 시간을 두고 다시 보낸다. 틱이 그 전에 밀어도 holdUntil 이 막는다. */
@@ -5264,6 +5346,8 @@ export class Orchestrator implements OrchestratorApi {
     switch (e.type) {
       case "input_ready": this.recheckMemberDelivery(member.id); return;
       case "status":
+        // K(E2): 승인 창 앞이던 팀장이 다른 상태로 가면(터미널에서 먼저 답함) 그 도구 승인 카드를 닫는다.
+        this.toolPermissions.memberStatus(member.id, e.status);
         // 관측을 명부에 적기 전에, 저장돼 있던 막힘의 까닭을 이미 알린 것으로 잇는다.
         if (e.status === "blocked") this.recallBlockedNotice(member);
         if (this.apiRecovery.holdReason(member.id) === "api_outage" && this.store.requireMember(member.id).statusObservation?.error?.code === "network_outage" && e.status === "idle") return;
@@ -5466,6 +5550,8 @@ export class Orchestrator implements OrchestratorApi {
     // 승인 창이 아닌 막힘은 승인 대기라고 알리지 않는다.
     if (member.blockedCode === "start_not_ready") return this.notifyInbox(`${member.name} 시작 지연`, "시작이 늦어지고 있습니다. 터미널을 열어 화면을 확인해 주세요");
     if (member.blockedCode === "trust_dialog_unrecognized") return this.notifyInbox(`${member.name} 확인 필요`, "폴더 신뢰 확인 창을 읽지 못했습니다. 터미널을 열어 직접 답해 주세요");
+    // K(E2): 이 승인 창은 도구 승인 카드로 이미 알렸다(또는 방금 답했다). 같은 일을 두 번 알리지 않는다.
+    if (this.toolPermissions.covers(member.id)) return;
     let body = "승인 창 앞에서 멈췄습니다";
     try {
       const a = await this.memberApproval(member.id);

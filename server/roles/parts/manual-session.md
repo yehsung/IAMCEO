@@ -1,0 +1,1 @@
+- `wait` 도구가 있으면 네가 직접 띄워진 세션이다. `ask`는 답이 올 때까지 결과로 돌아오고, 일이 끝나면 `wait`로 다음 지시 batch를 받는다. batch의 내용을 읽고 `wait({ack_batch_id: "받은 batch id"})`로 ACK한 뒤 처리한다. ACK 전 재조회는 같은 batch이며 같은 deliveryId를 중복 실행하지 않는다. ACK는 수신 확인이며 업무 완료가 아니다.

@@ -45,6 +45,10 @@ More than 60 seconds have passed since the staff member was started and the CLI 
 
 When it starts, the server reads the installed Claude Code and Codex versions, records them with the time it first saw each in `~/.iamceo/cli-versions.json`, and checks whether IAMCEO has been tested against each one. For a version it has not been tested against, the CLI versions item in the self-check turns into "unverified CLI version". Most things keep working. But if the CLI changed the text of a prompt, the server may not recognize it and the staff member can stay blocked. Open the terminal and answer it yourself, and update IAMCEO when a new version is out.
 
+### A tool-approval card closed
+
+With the permission mode set to "ask only when risky" or "ask every time", a staff member's tool-permission prompt also appears in 결재함 (Inbox) as a "도구 승인" (tool approval) card. **허용** (Allow) runs it this one time; **거절** (Deny) does not run it and tells the staff member, with your note. The card closes when you have not answered within 10 minutes, when the prompt was answered in the terminal first, or when the server restarts. A closed card cannot be reopened: if the staff member is still stopped, open that staff member's terminal from the team screen and answer the prompt there. If no card appears at all, check whether that staff member runs in "don't ask" mode or is a Codex staff member (cards appear for Claude Code staff only).
+
 ### A usage limit was hit
 
 A usage-limit card arrives in 결재함 (Inbox). If you wait, work continues on its own once the limit clears.
@@ -77,6 +81,8 @@ If you replaced the Mac app with a new version through the install script or a D
 
 First check that Tailscale is on on the Mac; the Mac app tells you when it is off. The rest is in [Connecting an iPhone](iphone.en.md#when-it-does-not-connect).
 
+If the iPhone app says "이 iPhone의 Tailscale이 꺼져 있어 보내지 않았습니다" (Tailscale is off on this iPhone, nothing was sent), turn Tailscale on in the iPhone's Tailscale app; it reconnects by itself. If the Mac app says the **HTTPS 주소** (HTTPS address) cannot be turned on, follow the row's message (usually: turn on HTTPS certificates in the Tailscale admin console) → [Connecting an iPhone](iphone.en.md#https-address-optional)
+
 ## Making a diagnostic file
 
 A diagnostic file attached to a question or an issue makes the cause much easier to find.
@@ -103,20 +109,31 @@ The server logs are `~/.iamceo/logs/server.log` and `server.err.log`. Each line 
 
 ## Changing the role rules
 
-You can change the role instructions the lead, staff and HQ agent receive. Copy the defaults out, edit one, and save it under the name the server reads:
+You can add rules to the role instructions the lead, staff and HQ agent receive, or replace them entirely. In file names the lead is `conductor`, staff is `worker` and the HQ agent is `root`.
+
+**Add rules (recommended).** Write only the rules you want to add in `~/.iamceo/roles/<kind>.extra.md`. They go at the end of the default rules, and you keep getting improvements to the defaults when IAMCEO updates.
+
+```sh
+mkdir -p ~/.iamceo/roles
+printf '%s\n' '## Our team rules' '- Run the tests before opening a PR.' > ~/.iamceo/roles/worker.extra.md
+```
+
+**Replace them.** Copy the defaults out, edit one, and save it under the name the server reads:
 
 ```sh
 iamceo roles export
 cd ~/.iamceo/roles
 cp worker.example.md worker.md   # conductor for the lead, root for the HQ agent
-# edit worker.md
+# edit worker.md, keeping its first line
 ```
 
-- An edited file (`worker.md`) **replaces the default rules entirely**; they are not merged. Start from the exported default. Improvements to the defaults in later IAMCEO versions do not reach an edited file; after an update, export again and compare.
+- An edited file (`worker.md`) **replaces the default rules entirely**; they are not merged. Start from the exported default. Improvements to the defaults in later IAMCEO versions do not reach an edited file.
+- The first line of an exported file is a marker that records which defaults it came from. When an update changes the defaults, the self-check in Settings (`iamceo doctor`) shows "Edited role rules" as needing attention, and the server log says so too. Export again, carry your edits over, and replace the first line with the new file's to clear it. If you only added rules, move them to `worker.extra.md` and drop `worker.md` instead.
+- `worker.extra.md` is added to the end of `worker.md` too when both exist.
 - No server restart is needed. Sessions already running keep the old rules; put one to sleep and wake it to load the new ones.
 - Rules the server enforces (source labels, checking quotes of your words, file path checks) stay in force whatever the file says.
-- If the file does not contain the word 승인 (approval), the server log shows a warning.
-- With the report language set to English, the line asking for English is added to the end of an edited file too.
+- If a replacement file does not contain the word 승인 (approval), the server log and the self-check show a warning.
+- With the report language set to English, the line asking for English is added at the very end of edited rules too.
 - Edited instructions (`~/.iamceo/roles`) are not in backups. Copy that folder yourself when you move to a new Mac or restore. → [Upgrade, backup and uninstall](upgrade-backup-uninstall.en.md#starting-a-new-mac-from-a-backup)
 
 The placeholders (`{{PROJECT}}`, `{{NAME}}` and the rest) and the full rules are in the [operating model](../operating-model.md#역할-템플릿-고치기) (Korean).

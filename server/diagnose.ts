@@ -10,6 +10,7 @@ import { deflateRawSync } from "node:zlib";
 import type { DiagnoseResult, DoctorReport } from "../shared/types.ts";
 import { formatDoctorReport, SERVICE_LABEL } from "./doctor.ts";
 import type { Config } from "./config.ts";
+import { HOOK_COMPARE_FILE, hookEventsDir } from "./runner/hooks.ts";
 
 export const DIAGNOSTICS_DIR = "diagnostics";
 /** 진단 묶음을 몇 개까지 남기나. 오래된 것부터 지운다. */
@@ -163,7 +164,7 @@ function readTail(path: string, maxBytes: number): string | null {
   finally { if (fd !== undefined) try { closeSync(fd); } catch { /* 읽기만 했다 */ } }
 }
 
-const EVENT_LINE = /\[(startup|shutdown|loop-monitor|vitals|crash-guard|core|backup|hosts|cli|restart|tailnet)\]/;
+const EVENT_LINE = /\[(startup|shutdown|loop-monitor|vitals|crash-guard|core|backup|hosts|cli|restart|tailnet|hooks)\]/;
 
 function eventLines(logDir: string): string[] {
   const lines: string[] = [];
@@ -324,6 +325,7 @@ const README = `IAMCEO 진단 파일 · IAMCEO diagnostics
 - logs/             서버 로그의 끝부분(아는 비밀은 가림) · log tails (known secrets masked)
 - events.txt        시작·종료·멈춤·지연 기록 줄 · startup, shutdown, stall and delay lines
 - crash-reports.txt 충돌 보고 파일 이름·시각 · crash report names and times
+- hook-compare.json CLI 훅 기록과 지금 판정의 일치 수(숫자만) · CLI hook records vs current judgement, counts only
 
 넣지 않은 것 · Not included
 대화·보고·결재·할 일·자료의 본문, 첨부 파일, 접속 코드, 팀장 열쇠, 알림 토큰, 환경 변수 값.
@@ -385,6 +387,9 @@ export async function createDiagnostics(input: DiagnoseInput): Promise<DiagnoseR
   if (crashDir) add("crash-reports.txt", crashReports(crashDir));
   const ledger = safeRows(() => readFileSync(join(input.home, "cli-versions.json"), "utf8"), null);
   if (ledger !== null) add("cli-versions.json", ledger);
+  // E1: 서버가 run/events/compare.json 에 남긴 일치·불일치 숫자. 세션 기록·글 본문은 없다.
+  const hookCompare = safeRows(() => readFileSync(join(hookEventsDir(input.home), HOOK_COMPARE_FILE), "utf8"), null);
+  if (hookCompare !== null) add("hook-compare.json", hookCompare);
 
   const entries: { name: string; data: Uint8Array }[] = [];
   for (const file of files) {

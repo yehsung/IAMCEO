@@ -129,15 +129,23 @@ core가 **정확히 알아본** 창 앞에 멈춘 팀장은 승인 API로 승인
 
 ## 역할 템플릿 고치기
 
-기본 템플릿은 `server/roles/` 의 `conductor.md`(총괄), `worker.md`(팀장), `root.md`(본사 AI)이고, 빌드본에 들어 있다. 코드를 안 고치고 바꾸려면 기본 템플릿을 꺼내 고친다.
+기본 템플릿은 `server/roles/` 의 `conductor.md`(총괄), `worker.md`(팀장), `root.md`(본사 AI)이고, 세 역할이 함께 쓰는 규칙은 `server/roles/parts/` 의 조각 하나에만 있다(템플릿의 `{{> 이름}}` 줄이 조각으로 바뀐다). 모두 빌드본에 들어 있다. 코드를 안 고치고 바꾸는 길은 둘이다.
+
+- **덧붙이기(권함).** `~/.iamceo/roles/<kind>.extra.md` 에 더할 규칙만 쓴다. 기본 규칙 끝(보고 언어 줄 앞)에 붙고, IAMCEO 를 올리면 기본 규칙의 개선도 그대로 받는다.
+- **통째 교체.** 기본 템플릿을 꺼내 고쳐 `<kind>.md` 로 둔다. 기본 규칙 전체를 대체하므로 이후의 기본 규칙 개선은 들어가지 않는다. 꺼낸 파일의 첫 줄(기준판 표지)이 그때의 기본 규칙을 기억해, 기본 규칙이 바뀌면 점검표와 서버 로그가 알린다.
 
 실제로 쓰는 Mac에서는 이렇게 한다. 앱으로 설치했다면 `iamceo` 실행 파일은 앱 안에 있다. 소스에서 설치해 `iamceo` 명령이 있으면 그 명령을 쓴다.
 
 ```sh
+# 덧붙이기
+mkdir -p ~/.iamceo/roles
+printf '%s\n' '## 우리 팀 규칙' '- PR 을 만들기 전에 시험을 돌린다.' > ~/.iamceo/roles/worker.extra.md
+
+# 통째 교체
 /Applications/IAMCEO.app/Contents/Resources/runtime/iamceo roles export
 cd ~/.iamceo/roles
 cp worker.example.md worker.md   # 파일 이름이 <kind>.md 여야 읽힌다
-# worker.md 를 고친다
+# worker.md 를 고친다. 첫 줄의 기준판 표지는 지우지 않는다
 ```
 
 먼저 시험해 보려면 별도 시험 홈을 지정한다.
@@ -148,13 +156,14 @@ cd "<시험 홈>/roles"
 cp worker.example.md worker.md
 ```
 
-- `worker.md` 가 있으면 **기본 규칙 전체를 대체한다.** 합쳐지지 않는다. 그래서 꺼낸 기본 파일에서 고친다.
+- `worker.md` 가 있으면 **기본 규칙 전체를 대체한다.** 합쳐지지 않는다. 그래서 꺼낸 기본 파일에서 고친다. `worker.extra.md` 는 `worker.md` 가 있어도 그 끝에 붙는다.
 - `승인` 이라는 낱말이 없으면 서버 로그에 경고가 나온다. 경고일 뿐 막지는 않는다.
-- `{{PROJECT}}` `{{NAME}}` `{{ROLE}}` `{{CONDUCTOR}}` `{{SUBAGENT_EFFORT}}` 다섯 개를 치환한다. 마지막은 설정의 직원(서브에이전트) effort 를 지키라는 줄이다. 자리표시가 없으면 파일 끝에 붙는다.
+- 기준판 표지(`<!-- iamceo-role-base: worker@<지문> … -->`)가 없거나, 지금 기본 규칙의 지문과 다르거나, 다른 역할의 것이면 서버 로그와 점검표(설정의 실행 환경, `iamceo doctor`)의 '고쳐 쓴 역할 지침'이 확인 필요로 알린다. 새 기본 규칙을 다시 꺼내 고친 곳을 옮긴 뒤 첫 줄을 새 파일의 표지로 바꾸면 사라진다. 표지 줄은 세션에 넘어가지 않는다.
+- `{{PROJECT}}` `{{NAME}}` `{{ROLE}}` `{{CONDUCTOR}}` `{{SUBAGENT_EFFORT}}` `{{MANUAL_SESSION}}` 여섯 개를 치환한다(덧붙임 파일에서도). `{{SUBAGENT_EFFORT}}` 는 설정의 직원(서브에이전트) effort 를 지키라는 줄이다. 자리표시가 없으면 파일 끝에 붙는다. `{{MANUAL_SESSION}}` 은 `iamceo join` 으로 직접 붙인 세션에만 `wait` 도구 안내로 바뀌고, 다른 세션에서는 그 줄이 지워진다. 자리표시가 없으면 넣지 않는다.
 - 서버를 다시 켜지 않아도 된다. 세션을 띄울 때 파일을 읽어 규칙 파일을 만든다.
 - 이미 떠 있는 세션은 옛 규칙 그대로다. 잠재웠다 다시 열면 새 규칙으로 뜬다.
 - `iamceo join` 으로 붙인 세션은 `join` 을 다시 해서 규칙 파일을 새로 받는다.
-- `.example.md` 는 읽히지 않는다. `roles export` 를 다시 하면 덮어쓴다. `worker.md` 는 건드리지 않는다.
+- `.example.md` 는 읽히지 않는다. `roles export` 를 다시 하면 덮어쓴다. `worker.md`·`worker.extra.md` 는 건드리지 않는다.
 - 없앤 규칙이 서버 동작까지 끄지는 않는다. 접두어, 인용 대조, 파일 경로 검사는 템플릿과 무관하다.
 
 ## 전달 문제를 처리하는 순서

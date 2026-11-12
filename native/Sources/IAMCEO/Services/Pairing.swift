@@ -155,6 +155,38 @@ enum Tailnet {
         return parts[0] == 100 && (64...127).contains(parts[1]) && parts.allSatisfy { (0...255).contains($0) }
     }
 
+    // MARK: C8 — 평문 요청 전 Tailscale 확인
+
+    /// Tailscale 주소(100.64/10, tailnet IPv6, *.ts.net)로 가는 평문(http·ws) 요청인가. 이 요청은 Tailscale(WireGuard)이
+    /// 켜져 있어야만 암호화된다. 꺼진 채 보내면 이름을 속이는 Wi-Fi 에서 접속 코드와 대화가 그대로 나갈 수 있다.
+    /// https·wss 는 TLS 가 지키고, 같은 기기(127.0.0.1)와 직접 고른 LAN 주소는 여기 해당하지 않는다.
+    static func needsTailnet(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "ws" else { return false }
+        return isTailnetHost(url.host ?? "")
+    }
+
+    #if os(iOS)
+    static let offMessage = "이 iPhone의 Tailscale이 꺼져 있어 보내지 않았습니다. Tailscale 앱에서 연결을 켜 주세요."
+    #else
+    static let offMessage = "이 Mac의 Tailscale이 꺼져 있어 보내지 않았습니다. Tailscale을 켜 주세요."
+    #endif
+    /// 이 확인이 막은 요청의 표지(URLError 의 userInfo). 앱은 연결이 끊긴 것과 같이 다루고(다시 시도·끊김 표시) 문장만 이것으로 바꾼다.
+    static let offErrorKey = "IAMCEOTailnetOff"
+
+    /// '연결 안 됨'으로 다룬다: 처음 연결은 알아서 다시 시도하고, 연결 중이면 끊김 표시를 띄운다. Tailscale 을 켜면 다시 붙는다.
+    static func offError() -> URLError {
+        URLError(.notConnectedToInternet, userInfo: [NSLocalizedDescriptionKey: offMessage, offErrorKey: true])
+    }
+
+    static func isOffError(_ error: Error) -> Bool {
+        (error as? URLError)?.userInfo[offErrorKey] as? Bool == true
+    }
+
+    /// 평문으로 Tailscale 주소에 보내기 전에 부른다. Tailscale 이 꺼져 있으면 보내지 않고 offError 를 던진다.
+    static func checkBeforeSending(_ url: URL, connected: () -> Bool) throws {
+        if needsTailnet(url), !connected() { throw offError() }
+    }
+
     /// True when this device itself has a Tailscale address, i.e. the Tailscale VPN is on and logged in.
     static func isConnected() -> Bool {
         var head: UnsafeMutablePointer<ifaddrs>?
@@ -179,8 +211,19 @@ enum Tailnet {
 enum PairingClient {
     /// 서버 루프가 십수 초 막혀도 기다린다. 먼저 포기하면 서버가 뒤늦게 코드를 소비해 QR을 다시 만들어야 한다. 코드 수명(5분) 안이다.
     static let claimTimeout: TimeInterval = 30
+    /// C8: TLS 가 맺어지기 전에 끝난 실패. https 요청은 아직 서버에 닿지 않았으므로 코드가 쓰이지 않았고, 다음 주소를 시도해도 된다.
+    static let tlsFailures: Set<URLError.Code> = [.secureConnectionFailed, .serverCertificateHasBadDate, .serverCertificateUntrusted,
+        .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid, .clientCertificateRejected, .clientCertificateRequired]
+    #if os(iOS)
+    static let tailnetOffMessage = "이 iPhone의 Tailscale이 꺼져 있어 연결하지 않았습니다. Tailscale 앱에서 연결을 켠 뒤 QR을 다시 찍어 주세요."
+    #else
+    static let tailnetOffMessage = "이 Mac의 Tailscale이 꺼져 있어 연결하지 않았습니다. Tailscale을 켠 뒤 연결 링크를 다시 열어 주세요."
+    #endif
+
     /// Trades the one-time code for the access code, trying each address in the QR. Returns the origin that answered.
-    static func claim(_ link: PairingLink, device: String, session: URLSession? = nil) async throws -> (endpoint: String, accessCode: String, confirmationToken: String?) {
+    /// C8: Tailscale 주소로 가는 평문 주소는 이 기기의 Tailscale 이 켜져 있을 때만 시도한다(https 주소는 그대로 시도한다).
+    static func claim(_ link: PairingLink, device: String, session: URLSession? = nil,
+                      tailnetConnected: @Sendable () -> Bool = { Tailnet.isConnected() }) async throws -> (endpoint: String, accessCode: String, confirmationToken: String?) {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = claimTimeout
         config.httpShouldSetCookies = false
@@ -190,7 +233,10 @@ enum PairingClient {
         let session = session ?? URLSession(configuration: config, delegate: PairingRedirectDelegate(), delegateQueue: nil)
         defer { if ownedSession { session.invalidateAndCancel() } }
         var lastError: Error = APIError(status: 0, message: "짝 맺기 응답을 확인하지 못했습니다. Mac과 이 기기의 Tailscale 연결을 확인한 뒤 Mac에서 새 QR을 만들어 주세요.")
+        var skippedPlain = false
         for base in link.urls {
+            // 보내지 않았으므로 코드는 그대로다. 다음 주소(https)가 있으면 그것을 시도한다.
+            if Tailnet.needsTailnet(base), !tailnetConnected() { skippedPlain = true; continue }
             var request = URLRequest(url: base.appendingPathComponent("pair/claim"))
             request.httpMethod = "POST"
             request.timeoutInterval = claimTimeout
@@ -218,9 +264,15 @@ enum PairingClient {
                     lastError = APIError(status: 0, message: "Mac에 닿지 않습니다. Tailscale 연결을 확인한 뒤 Mac에서 새 QR을 만들어 주세요.")
                     continue
                 }
+                // C8: HTTPS 주소의 인증서를 맺지 못했다. 요청이 서버에 닿기 전이라 다음 주소를 시도한다.
+                if let network = error as? URLError, base.scheme?.lowercased() == "https", tlsFailures.contains(network.code) {
+                    lastError = APIError(status: 0, message: "Mac의 HTTPS 주소에 안전하게 연결하지 못했습니다. Mac에서 새 QR을 만들어 다시 찍어 주세요.")
+                    continue
+                }
                 throw APIError(status: 0, message: "짝 맺기 응답을 확인하지 못했습니다. 코드는 이미 사용됐을 수 있습니다. Mac에서 새 QR을 만들어 다시 찍어 주세요.")
             }
         }
+        if skippedPlain { throw APIError(status: 0, message: tailnetOffMessage) }
         throw lastError
     }
 }

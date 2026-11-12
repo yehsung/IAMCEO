@@ -75,13 +75,13 @@ While it runs, the server makes a checked backup in `~/.iamceo/backups` **once a
 | The database (conversations, decisions, to-dos, work, the file list, settings) | Files in your project folders (keep your code in git or similar) |
 | The attachments conversations and files refer to | Claude Code and Codex sign-ins and session records |
 | `config.json` (with the access code), and `apns.json` if there is one | The iPhone push key (`.p8`) |
-| | Role instructions you edited in `~/.iamceo/roles` (`<kind>.md`) |
+| | Role instructions you edited in `~/.iamceo/roles` (`<kind>.md`, `<kind>.extra.md`) |
 
 - A backup records a hash for every file and checks the database's integrity.
 - **A backup contains the access code as it is.** Treat a copy like a password. Keys of devices connected with a QR code are stored only as hashes.
 - Backups sit on the same disk, so they do not protect against a disk failure. Copy the newest `snapshot-<id>` folder somewhere else, such as an external disk.
 - `iamceo backup` works only when it can have the data folder to itself. While the server runs it is refused ("The running server is using the data folder, so no backup was made now"); use the backups the server makes every day.
-- If you edited role instructions (`~/.iamceo/roles/<kind>.md`, see [Troubleshooting](troubleshooting.en.md)), that folder is not in the backup. A restore brings back the default instructions, so copy the folder yourself.
+- If you edited role instructions or added rules (`~/.iamceo/roles/<kind>.md`, `<kind>.extra.md`, see [Troubleshooting](troubleshooting.en.md)), that folder is not in the backup. A restore brings back the default instructions, so copy the folder yourself.
 
 ## Starting a new Mac from a backup
 

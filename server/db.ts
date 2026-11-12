@@ -803,6 +803,43 @@ export function ensureErrorCodeColumns(db: Database): void {
   })();
 }
 
+/**
+ * L(E3): 팀장마다 전달 펌프의 마지막 판정 한 줄. 화면의 대기 사유는 이 줄만 읽는다(server/pump-verdict.ts).
+ * 색인과 같은 까닭으로 MIGRATIONS 에 넣지 않는다: 판 번호를 올리면 이전 판 서버가 이 DB 를 열지 못한다.
+ * 이전 판 서버는 이 표를 모른 채 지나가고(예전처럼 대기 사유를 추측한다), 팀장을 지우면 ON DELETE CASCADE 가 함께 지운다.
+ */
+export const DELIVERY_VERDICT_TABLE = `CREATE TABLE IF NOT EXISTS member_delivery_verdicts (
+  member_id TEXT PRIMARY KEY REFERENCES members(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  wait_reason TEXT NOT NULL,
+  since TEXT NOT NULL,
+  detail_json TEXT,
+  overdue_at TEXT,
+  updated_at TEXT NOT NULL
+)`;
+
+/** 만들지 못해도 서버는 뜬다. 그때는 판정을 남기지 못해 미전달이 '이유 없는 대기'로 보이고, 정체 점검이 스스로 다시 민다. */
+export function ensureDeliveryVerdicts(db: Database): boolean {
+  try {
+    if (!db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'member_delivery_verdicts'").get()) db.exec(DELIVERY_VERDICT_TABLE);
+    return true;
+  } catch {
+    console.warn("[db] 전달 판정 표를 만들지 못했습니다(다음 시작 때 다시 합니다)");
+    return false;
+  }
+}
+
+/**
+ * K(E2): 도구 승인 카드의 요약 열(decisions.tool_permission_json). 있으면 그 결재는 kind "tool_permission" 이다.
+ * 색인과 같은 까닭으로 MIGRATIONS 에 넣지 않는다: 판 번호를 올리면 이전 판 서버가 이 DB 를 열지 못한다. 열을 더하기만 한다.
+ * 이전 판 서버는 이 열을 모른 채 그 카드를 보통 결재로 본다(열린 카드는 새 서버가 시작할 때 닫는다).
+ * 실패하면 서버가 뜨지 않는다: 결재 조회가 이 열을 늘 쓴다.
+ */
+export function ensureToolPermissionColumn(db: Database): void {
+  const columns = db.query<{ name: string }, []>("PRAGMA table_info(decisions)").all();
+  if (!columns.some(c => c.name === "tool_permission_json")) db.exec("ALTER TABLE decisions ADD COLUMN tool_permission_json TEXT");
+}
+
 const PRE_MIGRATION_KEEP = 3;
 const PRE_MIGRATION_KEEP_MS = 86_400_000;
 
@@ -890,6 +927,10 @@ export function openDb(path: string): Database {
     ensureAuthTables(db);
     // F: 보류·거절 사유 코드 열. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
     ensureErrorCodeColumns(db);
+    // L: 전달 펌프의 판정 표. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
+    ensureDeliveryVerdicts(db);
+    // K: 도구 승인 카드 열. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
+    ensureToolPermissionColumn(db);
     // 이주가 끝났으면 최근 사본 몇 개만 남긴다. 하루 안에 만든 것은 개수와 상관없이 둔다.
     if (backup) removePreMigrationBackups(path, all => all.slice(PRE_MIGRATION_KEEP).filter(entry => Date.now() - entry.at > PRE_MIGRATION_KEEP_MS));
     // Source parsing/index failures cannot roll back the schema or delay server startup.

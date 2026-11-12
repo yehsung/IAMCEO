@@ -129,6 +129,7 @@ Only what the code actually does.
   - the permission mode you chose in IAMCEO, and permission to call IAMCEO's own tools without a prompt
   - the model and effort, only if you picked them in IAMCEO; otherwise the CLI's own default
   - Claude Code: the status line is wrapped so IAMCEO can read context usage (your own status line command still runs), and prompt suggestions are off
+  - Claude Code: hooks for these sessions only, through which the CLI itself writes session start, prompt received, turn end, error type and compaction to `~/.iamceo/run/events`, one line each and no message text. For now IAMCEO only compares them with its own reading; your own hooks stay as they are
   - Codex: multi-agent is on, the update check at start is off, and the role instructions go in as `developer_instructions`, which takes the place of one set in your `config.toml` for these sessions
 
 **What it does not do**
@@ -179,7 +180,7 @@ flowchart LR
 
 ### Design rules
 
-- **The official CLIs, unchanged.** Claude Code and Codex run in interactive terminals under your own log-ins. IAMCEO only adds role instructions and an MCP connection, and never edits the CLIs' global settings.
+- **The official CLIs, unchanged.** Claude Code and Codex run in interactive terminals under your own log-ins. IAMCEO only adds role instructions, an MCP connection, and a status line and event hooks for its own sessions, and never edits the CLIs' global settings.
 - **Sessions outlive the apps and the server.** herdr-core holds the terminals, so closing the app or restarting the server never stops the work.
 - **No guessing at state.** Whether a member is working or done comes from the record the CLI writes. When that is unknown, IAMCEO stops typing and asks you to check.
 - **Reports are tool calls, not screen scraping.** Reports (`post`), decisions (`ask`), files (`file`) and assignments (`team_assign`) are all recorded.

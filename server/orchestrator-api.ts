@@ -40,6 +40,7 @@ import type {
 } from "../shared/operations.ts";
 
 import type { TerminalControlAction, TerminalControlResult } from "./runner/types.ts";
+import type { ToolPermissionPoll, ToolPermissionRequest } from "./tool-permission.ts";
 
 export { ApiError } from "./store.ts";
 
@@ -133,6 +134,10 @@ export interface OrchestratorApi {
   memberApproval?(memberId: string): Promise<ApprovalPrompt | null>;
   /** 대표가 승인 창의 선택지를 고른다. 창이 바뀌었거나 닫혔으면 409. AI 도구에는 없다. */
   answerApproval?(memberId: string, req: AnswerApprovalReq): Promise<void>;
+  /** K(E2): 팀장의 CLI 가 도구 승인 창 앞에서 PermissionRequest 훅으로 올린 요청. 결재 카드를 띄우고 한 번 기다린다(/agent/permission). */
+  requestToolPermission?(member: Member, input: ToolPermissionRequest, signal?: AbortSignal): Promise<ToolPermissionPoll>;
+  /** K(E2): 같은 카드를 다시 기다린다(/agent/permission/wait). 모르는 카드는 closed. */
+  waitToolPermission?(member: Member, id: string, signal?: AbortSignal): Promise<ToolPermissionPoll>;
   /** 터미널에서 CLI 를 부르는 명령. */
   cliCommand?(): string;
   listAgentTools(member: Member): AgentToolDef[] | Promise<AgentToolDef[]>;

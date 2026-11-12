@@ -46,7 +46,7 @@ const USAGE = `쓰는 법: iamceo <명령>
   uninstall [--purge] [--yes] [--dry-run] [--include-checkout]
                          모든 팀장·실행 엔진·로그인 서비스를 멈춘다. 데이터는 --purge 일 때만(한 번 더 확인하고) 지운다
                          (소스 체크아웃에서 도는 서비스는 --include-checkout 일 때만 내리고 설정 사본을 남긴다)
-  roles export           기본 역할 템플릿을 ~/.iamceo/roles/<kind>.example.md 로 꺼낸다. <kind>.md 로 고쳐 두면 그것을 쓴다
+  roles export           기본 역할 템플릿을 ~/.iamceo/roles/<kind>.example.md 로 꺼낸다. 더할 규칙은 <kind>.extra.md, 통째로 고친 것은 <kind>.md
   version                버전을 보여 준다
   mcp                    MCP 브리지(세션이 부른다)`;
 
@@ -85,7 +85,7 @@ const USAGE_EN = `Usage: iamceo <command>
   uninstall [--purge] [--yes] [--dry-run] [--include-checkout]
                          stop every session, the session engine and the login service; data is deleted only with --purge (asked again)
                          (a service that runs from a source checkout is stopped only with --include-checkout; its settings file is kept as a copy)
-  roles export           copy the default role templates to ~/.iamceo/roles/<kind>.example.md; save one as <kind>.md to use it
+  roles export           copy the default role templates to ~/.iamceo/roles/<kind>.example.md; put added rules in <kind>.extra.md, a full replacement in <kind>.md
   version                show the version
   mcp                    MCP bridge (sessions start it)
 
@@ -615,7 +615,7 @@ async function join_(args: string[]): Promise<void> {
   const runDir = join(config.home, "run");
   mkdirSync(runDir, { recursive: true, mode: 0o700 });
   const rulesFile = join(runDir, `${joined.member.id}.rules.md`);
-  writeFileSync(rulesFile, renderRole(joined.member.kind, { PROJECT: joined.project.name, NAME: joined.member.name, ROLE: joined.member.role, CONDUCTOR: conductor?.name ?? "총괄", REPORT_LANGUAGE: reportLanguage }, config.rolesDir));
+  writeFileSync(rulesFile, renderRole(joined.member.kind, { PROJECT: joined.project.name, NAME: joined.member.name, ROLE: joined.member.role, CONDUCTOR: conductor?.name ?? "총괄", REPORT_LANGUAGE: reportLanguage, MANUAL: joined.member.origin === "manual" }, config.rolesDir));
 
   // --env 는 값을 여러 개 받는 옵션이라 서버 이름이 뒤에 오면 그것까지 값으로 먹는다(claude mcp add 가 거부한다, 실측).
   const add = ["claude", "mcp", "add", "iamceo", "--transport", "stdio", "--scope", "local", "--env", `IAMCEO_URL=${localUrl(config)}`, "--env", `IAMCEO_TOKEN=${joined.token}`, "--", ...selfCommand("mcp")];
@@ -1140,8 +1140,8 @@ async function main(argv: string[]): Promise<void> {
       const { exportRoles } = await import("../server/roles.ts");
       const paths = exportRoles(loadConfig().rolesDir);
       const list = paths.map((p) => `  ${p}`).join("\n");
-      return console.log(say(`기본 역할 템플릿을 꺼냈습니다:\n${list}\n고치려면 .example 을 뺀 이름(<kind>.md)으로 저장하세요. 그 파일이 기본 규칙 전체를 대체합니다.`,
-        `Copied the default role templates:\n${list}\nTo change one, save it without .example (<kind>.md). That file replaces the default rules entirely.`));
+      return console.log(say(`기본 역할 템플릿을 꺼냈습니다:\n${list}\n규칙을 더하려면 더할 글만 <kind>.extra.md 에 쓰세요. 기본 규칙 끝에 붙고, IAMCEO 를 올려도 기본 규칙의 개선을 그대로 받습니다.\n통째로 고치려면 .example 을 뺀 이름(<kind>.md)으로 저장하세요. 그 파일이 기본 규칙 전체를 대체합니다. 첫 줄의 기준판 표지는 지우지 마세요. 기본 규칙이 바뀌면 점검표(iamceo doctor)와 서버 로그가 알려 줍니다.`,
+        `Copied the default role templates:\n${list}\nTo add rules, write only the additions in <kind>.extra.md. They go at the end of the default rules, and you keep getting improvements to the defaults when IAMCEO updates.\nTo change one entirely, save it without .example (<kind>.md). That file replaces the default rules. Keep the base marker on its first line: the self-check (iamceo doctor) and the server log tell you when the defaults change.`));
     }
     case "version":
     case "--version":

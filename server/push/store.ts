@@ -270,12 +270,20 @@ export class PushStore implements PushReportGroupStore {
       return !!this.one("SELECT 1 FROM messages WHERE id=? AND project_id=? AND member_id=? AND mine=0 AND kind='완료'", value.target.messageId, value.projectId, value.memberId);
     }
     if (!this.one("SELECT 1 FROM members WHERE id=? AND project_id=?", value.memberId, value.projectId)) return false;
+    // K(E2): 이 승인 창은 도구 승인 카드(결재 알림)로 이미 알렸다. 같은 일로 '승인 대기' 알림을 또 보내지 않는다.
+    if (value.kind === "approval_wait" && this.openToolPermission(value.memberId)) return false;
     const episode = value.memberId ? this.getEpisode(value.memberId) : null;
     return !!episode && (value.kind === "approval_wait"
       ? episode.blockedActive && value.sourceKey === `blocked:${value.memberId}:${episode.blockedGeneration}`
       : episode.errorActive && value.sourceKey === `error:${value.memberId}:${episode.errorGeneration}`);
   }
   private projectActive(id: string | null): boolean { return !!this.one("SELECT 1 FROM projects WHERE id=? AND archived=0", id); }
+  /** 이 팀장에게 열린 도구 승인 카드가 있다. 열(tool_permission_json)이 없는 DB(옛 판으로 연 시험 등)에서는 없는 것으로 본다. */
+  private openToolPermission(memberId: string | null): boolean {
+    if (!memberId) return false;
+    try { return !!this.one("SELECT 1 FROM decisions WHERE member_id=? AND status='open' AND tool_permission_json IS NOT NULL", memberId); }
+    catch { return false; }
+  }
   cancelInvalidPending(): void {
     this.transaction(() => {
       const at = this.timestamp();

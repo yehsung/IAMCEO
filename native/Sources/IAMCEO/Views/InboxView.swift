@@ -1028,6 +1028,7 @@ private struct DecisionCard: View {
         // Web .ibx-top: who 13 / 600 ink-1, time 12.5 ink-2 at the far end.
         return HStack(alignment: .center, spacing: 8) {
             if decision.kind == "usage_limit" { Tag("사용 한도", tone: .attention) }
+            if decision.isToolPermission { Tag("도구 승인", tone: .attention) }
             StatusDot(tone: state?.tone ?? .attention)
             Text(whoName).font(CEFont.secondary.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
             Spacer(minLength: 6)
@@ -1036,7 +1037,7 @@ private struct DecisionCard: View {
         }
         .help(state.map { "\(whoName) · \($0.label)" } ?? whoName)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([decision.kind == "usage_limit" ? "사용 한도" : nil, whoName, state?.label, relativeTime(decision.createdAt)].compactMap { $0 }.joined(separator: ", "))
+        .accessibilityLabel([decision.kind == "usage_limit" ? "사용 한도" : decision.isToolPermission ? "도구 승인" : nil, whoName, state?.label, relativeTime(decision.createdAt)].compactMap { $0 }.joined(separator: ", "))
     }
 
     @ViewBuilder private var reopenLine: some View {
@@ -1153,7 +1154,8 @@ private struct DecisionCard: View {
                 .accessibilityLabel(free ? "답" : "메모")
             if free && typed && review.freeConfirmationCancelled && !stale {
                 Button("답 확인") { review.freeConfirmationCancelled = false }.ceSecondaryButton().disabled(busy)
-            } else if !free && typed && picked == nil && !memoOnly && !stale {
+            } else if !free && typed && picked == nil && !memoOnly && !stale && !decision.isToolPermission {
+                // 도구 승인 카드는 허용·거절 가운데 하나를 고른다(메모만 보내면 서버가 거절로 본다).
                 Button("메모만 보내기") { memoOnly = true }
                     .ceSecondaryButton().controlSize(.regular).fixedSize()
                     .disabled(busy || store.isDemo || store.isArchive)
@@ -1377,6 +1379,7 @@ private struct AnsweredBody: View {
             HStack(alignment: .center, spacing: 8) {
                 Text(who).font(CEFont.secondary.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
                 if decision.kind == "usage_limit" { Tag("사용 한도", tone: .attention) }
+                if decision.isToolPermission { Tag("도구 승인") }
                 if closed { Tag("닫힘") } else { AnswerFlow(decision: decision) }
                 Spacer(minLength: 6)
                 Text(relativeTime(decision.answeredAt ?? decision.closedAt ?? decision.createdAt))

@@ -431,6 +431,30 @@ export const ERROR_CODES = {
   /** 팀장 통로(/agent/*)에 맞지 않는 팀장 토큰. 401. */
   agent_token_invalid: { ko: "인증이 필요합니다" },
 
+  // ---- HTTPS 연결(N, C8) — GET·POST /api/tailnet/https 의 problem.code 와 거절 ----
+  /** HTTPS 켜고 끄기는 이 Mac 의 앱에서만(실제 loopback 연결, 대리 전달 머리글 없음). 403. */
+  tailnet_https_local_only: { ko: "HTTPS 주소는 서버가 도는 Mac에서만 켜고 끌 수 있습니다" },
+  tailscale_cli_missing: { ko: "이 Mac에서 Tailscale을 찾지 못했습니다. Tailscale 앱을 설치하고 켠 뒤 다시 시도해 주세요" },
+  tailscale_not_running: { ko: "이 Mac의 Tailscale이 꺼져 있거나 로그인되어 있지 않습니다. Tailscale을 켠 뒤 다시 시도해 주세요" },
+  tailscale_too_old: { ko: "이 Mac의 Tailscale이 오래되어 HTTPS 주소를 만들 수 없습니다. Tailscale을 최신 버전으로 올린 뒤 다시 시도해 주세요" },
+  tailnet_https_disabled: { ko: "이 Tailscale 망은 HTTPS 인증서가 꺼져 있습니다. Tailscale 관리 화면의 DNS 설정에서 MagicDNS와 HTTPS Certificates를 켠 뒤 다시 시도해 주세요" },
+  tailnet_https_port_taken: { ko: "이 Mac의 Tailscale HTTPS(443)를 다른 설정이 이미 쓰고 있어 켜지 않았습니다. 그 설정은 건드리지 않았습니다. 터미널에서 tailscale serve status로 확인해 주세요" },
+  tailnet_https_no_loopback: { ko: "서버가 이 Mac 안의 주소(127.0.0.1)에서 듣지 않아 HTTPS 주소를 이을 수 없습니다. config.json의 hosts에 127.0.0.1을 넣고 서버를 다시 켜 주세요" },
+  tailnet_https_cert_failed: { ko: "HTTPS 인증서를 받지 못했습니다. 잠시 뒤 다시 시도해 주세요. 계속되면 Tailscale 관리 화면의 DNS 설정에서 HTTPS Certificates가 켜져 있는지 확인해 주세요" },
+  tailnet_https_failed: { ko: "Tailscale에서 HTTPS 주소를 켜지 못했습니다. 잠시 뒤 다시 시도해 주세요" },
+  tailnet_https_off_failed: { ko: "Tailscale의 HTTPS 설정을 지우지 못했습니다. 잠시 뒤 다시 시도해 주세요" },
+  tailnet_https_port_changed: { ko: "Tailscale의 HTTPS 설정이 서버의 지금 포트를 가리키지 않습니다. 끈 뒤 다시 켜 주세요" },
+  tailnet_https_removed: { ko: "Tailscale에서 HTTPS 설정이 지워져 꺼진 것으로 바꿨습니다. 다시 쓰려면 켜기를 눌러 주세요" },
+
+  // ---- 도구 승인(K, E2) — 팀장의 CLI 승인 창을 결재함에서 답하기 ----
+  /** 도구 승인 카드에만 쓰는 경로·답에 다른 결재가 왔다. 400. */
+  tool_permission_only: { ko: "도구 승인 카드가 아닙니다" },
+  /** 답을 기다리던 훅이 이미 끝났다(시간이 지남·서버 재시작·터미널에서 답함). 카드는 닫혔다. 409. */
+  tool_permission_gone: { ko: "승인 요청이 이미 끝났습니다. 터미널의 승인 창에서 답해 주세요" },
+  /** AI 가 도구 승인 카드를 닫으려 했다. 대표만 답한다. 403. */
+  tool_permission_owner_only: { ko: "도구 승인 요청은 대표만 답할 수 있습니다" },
+  tool_permission_unsupported: { ko: "도구 승인 요청을 지원하지 않습니다" },
+
   // ---- 끝 ----
 } as const satisfies Record<string, ErrorCodeText>;
 

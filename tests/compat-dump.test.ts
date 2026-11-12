@@ -101,6 +101,10 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
     const held = store.enqueue({ projectId: project.id, memberId: member.id, kind: "instruction", text: "[지시] 보류될 일" });
     store.markHeld(held.id, "blocked");
     const decision = store.createDecision({ projectId: project.id, memberId: member.id, who: "결제 연동", title: "고를 것", options: [{ k: "a", label: "가" }, { k: "b", label: "나", desc: "설명" }] });
+    // K(E2): 도구 승인 카드. 출시 앱은 kind 를 글자로 읽고 toolPermission 은 모른 채 보통 결재(허용·거절 두 선택지)로 보여 준다.
+    const toolCard = store.createToolPermissionDecision({ projectId: project.id, memberId: member.id, who: "결제 연동", title: "명령 실행: bun test",
+      detail: "결제 연동이 터미널의 승인 창 앞에서 기다립니다.\n\n**명령 실행**\n```\nbun test\n```", options: [{ k: "allow", label: "허용", desc: "이번 한 번만 실행합니다" }, { k: "deny", label: "거절", desc: "실행하지 않고 팀장에게 알립니다" }],
+      toolPermission: { tool: "Bash", action: "명령 실행", target: "bun test", cwd: isolated.paths.work, expiresAt: new Date(Date.now() + 600_000).toISOString() } });
     store.createTodo({ projectId: project.id, memberId: member.id, title: "할 일" });
     store.upsertWork({ projectId: project.id, sec: "doing", title: "결제 화면" });
     store.createFile({ projectId: project.id, memberId: member.id, who: "결제 연동", title: "결제 설계", summary: "요약", body: "# 결제 설계\n\n본문" });
@@ -147,6 +151,7 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
     await capture("message.json", "Message", `/api/messages/${report.id}`, "메시지 한 건");
     await capture("messages-around.json", "[Message]", `/api/projects/${project.id}/messages?around=${report.id}&limit=41`, "알림에서 연 대화 주변");
     await capture("decision.json", "Decision", `/api/decisions/${decision.id}`, "결재 한 건");
+    await capture("decision-tool-permission.json", "Decision", `/api/decisions/${toolCard.id}`, "도구 승인 카드(K)");
     await capture("activity.json", "[Activity]", `/api/members/${member.id}/activity?limit=100`, "팀장 활동");
     await capture("member-delivery-notices.json", "DeliveryNoticePage", `/api/members/${member.id}/delivery-notices?limit=50`, "팀장 전달 안내");
     await capture("project-delivery-notices.json", "DeliveryNotices", `/api/projects/${project.id}/delivery-notices`, "받는 사람 없는 전달", ["notices-v2"]);
@@ -171,12 +176,13 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
     // 만든 상태가 실제로 실렸는지: 비어 있어서 통과하는 덤프가 아니어야 한다.
     const state = sync.state as Record<string, any>;
     expect(state.members.length).toBeGreaterThan(0);
-    expect(state.decisions.length).toBe(1);
+    expect(state.decisions.length).toBe(2);
+    expect(state.decisions.some((d: Record<string, unknown>) => d.kind === "tool_permission" && d.toolPermission)).toBe(true);
     expect(state.todos.length).toBe(1);
     expect(state.work.length).toBe(1);
     expect(state.files.length).toBe(1);
     expect(state.deliveryNotices.version).toBe(2);
-    expect(entries.length).toBe(27 + EVENT_TYPES.length);
+    expect(entries.length).toBe(28 + EVENT_TYPES.length);
   } finally {
     socket?.close();
     await server?.stop();

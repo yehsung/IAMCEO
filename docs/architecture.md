@@ -45,7 +45,7 @@ SwiftUI macOS / iOS ── REST sync + WS v2 ─┐
 
 ## core와 공식 CLI
 
-기본 core 소켓은 `$IAMCEO_HOME/run/core.sock`, 세션 이름은 `HC_SESSION=iamceo`다. core의 상태·설정은 `$IAMCEO_HOME/core-state`와 `core-config`에 따로 둔다. `IAMCEO_CORE_BIN`·`IAMCEO_CORE_SOCKET`으로 경로를 바꿀 수 있다. 제공자 CLI에는 원래 사용자 HOME·XDG 설정 경로를 넘기고 부모의 외부 `HC_*`·`HERDR_*` 및 Claude 중첩 세션 변수를 제거한다. 호출별 인자와 MCP 설정을 쓰며 전역 CLI 설정 파일은 수정하지 않는다.
+기본 core 소켓은 `$IAMCEO_HOME/run/core.sock`, 세션 이름은 `HC_SESSION=iamceo`다. core의 상태·설정은 `$IAMCEO_HOME/core-state`와 `core-config`에 따로 둔다. `IAMCEO_CORE_BIN`·`IAMCEO_CORE_SOCKET`으로 경로를 바꿀 수 있다. 제공자 CLI에는 원래 사용자 HOME·XDG 설정 경로를 넘기고 부모의 외부 `HC_*`·`HERDR_*` 및 Claude 중첩 세션 변수를 제거한다. 호출별 인자와 MCP 설정을 쓰며 전역 CLI 설정 파일은 수정하지 않는다. Claude 에는 상태줄 래퍼와 사건 기록 훅(SessionStart·UserPromptSubmit·Stop·StopFailure·PostCompact)을 `--settings` JSON 하나로 넣는다. 훅 기록은 지금 판정과 나란히 비교만 하고(`server/runner/hook-compare.ts`) 판정에는 쓰지 않는다.
 
 core는 `terminal.run`에 셸 문자열 대신 인자 배열을 보낸다. 부모가 종료돼도 CLI는 유지하고, 종료된 명령을 자동 재실행하는 옵션은 켜지 않는다. 서버가 다시 시작되면 프로젝트·멤버·CLI 라벨과 고정 이름으로 기존 터미널을 찾는다. 소유권이 겹치거나 제공자·알려진 세션이 다르면 오류로 처리한다. 소켓 연결이 끊겼다는 이유만으로 새 CLI를 띄우지 않는다.
 
@@ -138,6 +138,7 @@ APNs 발신 대기열은 CLI 입력 대기열과 별개다. 새 기기는 알림
 | `backups/` | 정기 백업(일별 7개·주별 4개) |
 | `diagnostics/` | 진단 파일 폴더와 zip, 최근 5개 |
 | `cli-versions.json` | 서버가 읽은 Claude·Codex 버전과 처음 본 시각(비밀 없음) |
+| `run/events/` | Claude 훅 사건 기록(`<팀장>.jsonl`, 1MiB 넘으면 `.1` 로 한 번 돌림, 30일 안 쓰면 지움)과 비교 숫자 `compare.json`. 글 본문 없음. 판정에는 아직 쓰지 않음(spec '추가 계약 3차') |
 | `upgrades/<id>/` | `iamceo upgrade`가 남긴 직전 판 기록(plist·DB 사본·이전 앱 또는 커밋), 최근 2개. 그보다 오래된 기록도 `rollback` 이 옆에 뺀 DB(`after-upgrade-*`·`rollback-attempt-*`)는 남김. 저장소 정리는 건드리지 않음 |
 | `exports/` | 프로젝트 내보내기의 임시 zip(`.export-<uuid>.zip`, 0600). 열어 둔 채 바로 지우고, 서버가 도중에 꺼져 남은 것은 저장소 정리가 1시간 뒤 치움 |
 

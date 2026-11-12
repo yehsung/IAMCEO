@@ -255,6 +255,8 @@ private final class Wave1Bodies: @unchecked Sendable {
         let remote = Wave1RemoteProtocol.session { try server.handle($0) }
         defer { remote.close() }
         let store = AppStore(session: remote.session, persistCredentials: false)
+        // C8: Tailscale 주소로 가는 평문 요청은 Tailscale 이 켜져 있을 때만 나간다. 시험 기기의 Tailscale 상태에 기대지 않는다.
+        store.tailnetConnected = { true }
         store.endpoint = "http://100.64.0.7:45123"; store.accessCode = "test"
         await store.connect(); store.setForeground(false)
         XCTAssertEqual(store.connectionStatus, .connected)
@@ -275,6 +277,7 @@ private final class Wave1Bodies: @unchecked Sendable {
         let old = Wave1Server(), oldRemote = Wave1RemoteProtocol.session { try old.handle($0) }
         defer { oldRemote.close() }
         let oldStore = AppStore(session: oldRemote.session, persistCredentials: false)
+        oldStore.tailnetConnected = { true }
         oldStore.endpoint = "http://100.64.0.7:45123"; oldStore.accessCode = "test"
         await oldStore.connect(); oldStore.setForeground(false)
         XCTAssertEqual(oldStore.connectionStatus, .connected)

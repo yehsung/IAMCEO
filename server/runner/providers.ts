@@ -1,16 +1,48 @@
 // Provider CLIs remain interactive and load their ordinary user/project settings.
 // IAMCEO additions are invocation-scoped; no global CLI configuration is changed.
 import { readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import type { RunnerMember, StartOpts } from "./types.ts";
 import { CoreError } from "./core-client.ts";
 import { writeStatuslineWrapper } from "./statusline.ts";
+import { hookEventsDir, hookSettings, mergeHooks } from "./hooks.ts";
+import { permissionHook } from "./permission-hook.ts";
 import { subagentEnv } from "./env.ts";
 
 export type CoreProvider = "claude" | "codex";
 export interface ProviderLaunch { argv: string[]; env: Record<string, string>; sessionId: string | null }
-export interface ProviderBins { claudeBin?: string; codexBin?: string; contextHome?: string }
+export interface ProviderBins {
+  claudeBin?: string; codexBin?: string; contextHome?: string;
+  /** E1 사건 기록 훅. 없으면 IAMCEO_HOOK_EVENTS=0 일 때만 끈다. contextHome 이 있을 때만 넣는다. */
+  hookEvents?: boolean;
+  /**
+   * K(E2) 도구 승인 훅. 서버가 띄우는 실행기(createOrchestrator)만 true 로 켠다: 받을 서버(/agent/permission)가 있어야 뜻이 있다.
+   * IAMCEO_TOOL_PERMISSION=0 이면 끈다. contextHome 이 있을 때만, 묻지 않기 팀장에게는 넣지 않는다.
+   */
+  toolPermission?: boolean;
+}
 const toml = (value: unknown) => JSON.stringify(value);
+
+/**
+ * 이 팀장의 Claude 훅(--settings 의 hooks 값). 만들지 못하면 null: 훅 때문에 CLI 를 못 띄우는 일은 없게 한다.
+ * K(도구 승인)는 아래 hookSettings 호출에 permissionHook 만 더한다.
+ */
+function claudeHooks(member: RunnerMember, home: string, bins: ProviderBins, mcpConfigFile: string): Record<string, unknown> | null {
+  const events = bins.hookEvents ?? process.env.IAMCEO_HOOK_EVENTS !== "0";
+  try {
+    const hooks = hookSettings({ memberId: member.id, eventsDir: hookEventsDir(home), events, permissionHook: toolPermissionHook(member, home, bins, mcpConfigFile) });
+    return Object.keys(hooks).length ? hooks : null;
+  } catch { return null; }
+}
+
+/**
+ * K(E2): 도구 승인 창을 결재함에서 답하게 하는 PermissionRequest 훅. 묻지 않기(bypassPermissions) 팀장에게는 넣지 않는다(승인 창이 없다).
+ * 만들지 못하면 넣지 않는다: 그때는 지금처럼 터미널의 원래 승인 창만 뜬다.
+ */
+function toolPermissionHook(member: RunnerMember, home: string, bins: ProviderBins, mcpConfigFile: string): { command: string; timeoutSec: number } | undefined {
+  if (member.permissionMode === "bypassPermissions" || bins.toolPermission !== true || process.env.IAMCEO_TOOL_PERMISSION === "0") return undefined;
+  try { return permissionHook({ runDir: join(home, "run"), mcpConfigFile }); } catch { return undefined; }
+}
 
 export function providerFor(member: RunnerMember): CoreProvider { return member.cli ?? "claude"; }
 export function providerLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins = {}): ProviderLaunch {
@@ -30,7 +62,9 @@ export function providerLaunch(member: RunnerMember, opts: StartOpts, bins: Prov
     if (member.effort) args.push("--effort", member.effort);
     if (bins.contextHome) {
       const settings = opts.settingsFile ? JSON.parse(readFileSync(opts.settingsFile, "utf8")) : {};
-      args.push("--settings", JSON.stringify({ ...settings, statusLine: writeStatuslineWrapper(bins.contextHome) }));
+      // E1: 훅은 statusLine 과 같은 --settings 하나에 합친다. 사용자가 넘긴 설정의 hooks 는 덮지 않고 잇는다.
+      const hooks = claudeHooks(member, bins.contextHome, bins, opts.mcpConfigFile);
+      args.push("--settings", JSON.stringify({ ...settings, statusLine: writeStatuslineWrapper(bins.contextHome), ...(hooks ? { hooks: mergeHooks(settings.hooks, hooks) } : {}) }));
     } else if (opts.settingsFile) args.push("--settings", opts.settingsFile);
     Object.assign(env, subagentEnv(member.subagentModel));
     // Claude Code 2.1.3xx shows a dim follow-up suggestion inside an empty composer. core's terminal.read is plain

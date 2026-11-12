@@ -113,7 +113,7 @@ struct MacPairingSheet: View {
         } else if let link, let expiry {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let left = Int(expiry.timeIntervalSince(context.date).rounded(.down))
-                let hosts = link.urls.map { $0.host ?? "" }.joined(separator: " · ")
+                let hosts = Self.hostLine(link.urls)
                 VStack(spacing: 12) {
                     if left > 0 {
                         QRCodeImage(text: link.url.absoluteString)
@@ -152,6 +152,12 @@ struct MacPairingSheet: View {
                 }
             }
         }
+    }
+
+    /// The QR's addresses under it. With the HTTPS address on (C8) the same name comes as https and http; show it once.
+    static func hostLine(_ urls: [URL]) -> String {
+        var shown: Set<String> = []
+        return urls.compactMap(\.host).filter { shown.insert($0).inserted }.joined(separator: " · ")
     }
 
     /// The white tile the QR sits on, also used empty (with a spinner) while the code is being made.

@@ -53,7 +53,7 @@ test("explicit assignment creates exactly one fresh delivery to the current cond
   const f = fixture();
   const conductor = f.store.createMember({ projectId: f.project.id, handle: "chief", name: "총괄", kind: "conductor" });
   const pumps: string[] = [];
-  f.store.setDeliveryWaitContext(() => ({ busy: false, waking: false, used: 0 }), id => pumps.push(id));
+  f.store.setDeliveryHooks({ recheck: id => { pumps.push(id); } });
   const req = f.request("send_to_conductor"), result = f.recovery.recoverUnassignedMessage(f.message.id, req);
   expect(result.outcome).toBe("send_scheduled");
   expect(f.recovery.recoverUnassignedMessage(f.message.id, req)).toEqual(result);

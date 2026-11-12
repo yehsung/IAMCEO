@@ -1197,6 +1197,99 @@ test("resumed native session reads old delivery markers across terminal identity
   expect(different).toMatchObject({ finding: "unknown", receivedDeliveryIds: [], evidence: [{ code: "identity_changed" }] });
 });
 
+test("terminal identity change never authorizes a repair write while the old terminal may be alive; absence is only decided for a terminal confirmed gone", async () => {
+  // 옛 터미널이 살아 있을 수 있는 동안: 지금 터미널의 기록·입력칸이 아무리 깨끗해도 다른 터미널의 봉투를 여기에 다시 쓰지 않는다.
+  let prepared = 0;
+  const d = await deliveryFixture(); await d.runner.shutdown();
+  const runner = d.f.runner(10000, { recoveryStore: d.recovery.port, quiescence: () => ({ originalWrite: "settled", externalInput: false, unconfirmed: true }), repair: { load: () => old, prepare: () => { prepared++; return true; } } });
+  await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+  const identity = runner.observationState(member().id)!.identity;
+  const old = { ...d.dispatch, identity: { ...identity, terminalId: "previous-terminal" } };
+  const seen = await runner.inspectDelivery(member(), old);
+  expect(seen.snapshot?.identity.terminalId).toBe(d.started.paneId);
+  expect(seen.evidence[0]).toMatchObject({ code: "complete_range_without_marker", verdict: "absent", complete: true });
+  const request = { action: "resend" as const, dispatchId: old.dispatchId, expectedRecoveryVersion: 1, expectedSessionGeneration: identity.sessionGeneration, expectedSessionId: identity.sessionId, expectedTerminalId: "previous-terminal", expectedInputEpoch: seen.snapshot!.inputEpoch! };
+  expect(await runner.repairDelivery(member(), request)).toMatchObject({ ok: false, deliveryEffect: "not_written" });
+  expect(prepared).toBe(0); expect(d.f.calls.filter(c => c.method === "terminal.send")).toHaveLength(0);
+
+  // 그 터미널이 사라졌는지는 엔진의 답으로만 정한다: 끝났다고 알리거나, 모른다고 확정해 답해야 한다. 살아 있거나 답이 없으면 아니다.
+  expect(await runner.terminalGone(d.started.paneId)).toBe(false);
+  expect(await runner.terminalGone("previous-terminal")).toBe(true); // not_found
+  d.f.setHook(request => request.method === "terminal.get"); // 엔진이 답하지 않는다
+  const silent = d.f.runner(10000, { rpcTimeoutMs: 40 });
+  expect(await silent.terminalGone("previous-terminal")).toBe(false);
+  d.f.setHook(null);
+  d.f.terminals.get(d.started.paneId)!.state = "finished";
+  expect(await runner.terminalGone(d.started.paneId)).toBe(true);
+
+  // 사라진 것이 확정된 터미널의 봉투는 터미널 없이(RPC 없이) 세션 기록만으로 판정한다.
+  const target = member({ paneId: null, sessionId: d.started.sessionId });
+  const rpcs = d.f.calls.length;
+  expect(runner.inspectGoneDelivery(target, old)).toMatchObject({ finding: "not_received", receivedDeliveryIds: [], snapshot: null, quiescence: "settled", evidence: [{ source: "claude_log", code: "complete_range_without_marker", verdict: "absent", complete: true }] });
+  // 죽은 CLI 가 쓰다 만 줄이 남으면 범위를 끝까지 읽지 못한 것이다: 못 받았다고 하지 않는다.
+  writeFileSync(d.path, '{"type":"user","message":{"role":"us', { flag: "a" });
+  expect(runner.inspectGoneDelivery(target, old)).toMatchObject({ finding: "unknown", receivedDeliveryIds: [], evidence: [{ verdict: "unknown", complete: false }] });
+  // 수신 표지가 있으면 받은 것이다.
+  writeFileSync(d.path, d.user("an earlier unrelated input") + d.user(d.dispatch.wireText, "user-2"));
+  expect(runner.inspectGoneDelivery(target, old)).toMatchObject({ finding: "received", receivedDeliveryIds: ["delivery"], evidence: [{ code: "marker_in_user_input", verdict: "present" }] });
+  // 다른 대화(세션이 바뀜)의 기록으로는 판정하지 않는다.
+  expect(runner.inspectGoneDelivery(member({ paneId: null, sessionId: "another-native" }), old)).toMatchObject({ finding: "unknown", evidence: [{ code: "identity_changed" }] });
+  expect(runner.inspectGoneDelivery(member({ paneId: null, sessionId: d.started.sessionId, sessionGeneration: 2 }), old)).toMatchObject({ finding: "unknown", evidence: [{ code: "identity_changed" }] });
+  expect(d.f.calls.length).toBe(rpcs);
+});
+
+test("a terminal is tracked and fenced, not orphaned, when the persisted input state cannot be read at bind", async () => {
+  // 저장된 압축 상태를 읽지 못하면(예: 기준선 없는 미확정 압축) 예전에는 방금 만든 터미널을 추적에 넣지 못한 채 start 가 실패했다:
+  // 주인 없는 터미널이 남고, 기동 결과를 모르는 것으로 적혀 뒤따르는 깨우기가 모두 막혔다.
+  const f = await fixture(); let broken = true;
+  const store = compactStore();
+  const runner = f.runner(10000, { compactStore: { load: id => { if (broken) throw new Error("미확정 압축의 baseline이 없어 자동 입력을 보류합니다"); return store.port.load(id); }, save: store.port.save } });
+  const started = await runner.start(member(), f.opts);
+  expect(f.terminals.get(started.paneId)?.state).toBe("live");
+  expect(runner.observationState(member().id)?.identity.terminalId).toBe(started.paneId);
+  expect(f.calls.filter(c => c.method === "terminal.run")).toHaveLength(1);
+  // 입력은 넣지 않는다.
+  expect(runner.isBusy(member().id)).toBe(true);
+  expect(await runner.send(member(), "work", f.opts)).toMatchObject({ ok: false, reason: "busy", deliveryEffect: "not_written" });
+  expect(await runner.compact(member({ sessionId: started.sessionId }), "focus", f.opts)).toMatchObject({ ok: false, deliveryEffect: "not_written" });
+  expect(f.calls.filter(c => c.method === "terminal.send")).toHaveLength(0);
+  // 다시 시작해도 같은 터미널에 붙는다(둘이 되지 않는다).
+  expect(await runner.start(member({ paneId: started.paneId, sessionId: started.sessionId }), f.opts)).toMatchObject({ paneId: started.paneId });
+  expect(f.calls.filter(c => c.method === "terminal.run")).toHaveLength(1);
+  // 저장 상태가 다시 읽히면 보류가 풀린다.
+  broken = false;
+  expect(await runner.send(member(), "work", f.opts)).toMatchObject({ ok: true });
+  expect(f.calls.filter(c => c.method === "terminal.send")).toHaveLength(1);
+});
+
+test("a compact attempt the caller gave up on before the baseline was saved never persists or writes afterwards", async () => {
+  // 총괄의 단계 제한이 압축의 확인 읽기 도중에 걸렸다. 그 읽기가 뒤늦게 답해도 실행기는 기준선을 저장하지도, 명령을 넣지도 않는다:
+  // 총괄은 이 시도를 '넣지 못함'으로 적고 다시 예약했으므로, 여기서 진행하면 묶인 곳 없는 압축이 생긴다.
+  const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
+  const runner = d.f.runner(10000, { compactStore: store.port }); await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+  // 압축이 화면을 읽는 순간, 범위 밖의 관측(주기 관측과 같은 길)이 같은 터미널을 읽기 시작한다. 그 조회를 붙잡아 두면
+  // 압축의 마지막 확인 읽기(기준선 저장 직전)는 이 조회에 얹혀 기다린다: 단계 제한이 걸려도 이 조회는 평소대로 답한다.
+  let held: { request: Request; socket: Socket } | null = null, shared: Promise<string> | null = null;
+  d.f.setHook((request, socket) => {
+    if (request.method === "terminal.read" && !shared) { shared = runner.screen(member({ sessionId: d.started.sessionId })); shared.catch(() => {}); return false; }
+    if (request.method === "terminal.get" && shared && !held) { held = { request, socket }; return true; }
+    return false;
+  });
+  const controller = new AbortController();
+  const attempt = runner.withSignal(controller.signal, () => {}, () => runner.compact(member({ sessionId: d.started.sessionId }), "focus", d.f.opts), Date.now() + 5000);
+  await until(() => held !== null);
+  await Bun.sleep(30);
+  controller.abort(new CoreError("timeout", "Pump stage compact exceeded", true));
+  d.f.setHook(null);
+  held!.socket.write(JSON.stringify({ jsonrpc: "2.0", id: held!.request.id, result: d.f.terminals.get(d.started.paneId) }) + "\n");
+  expect(await attempt).toMatchObject({ ok: false, deliveryEffect: "not_written" });
+  expect(store.states.size).toBe(0);
+  expect(d.f.calls.some(c => c.method === "terminal.send")).toBe(false);
+  // 다음 시도는 평소대로 된다.
+  expect(await runner.compact(member({ sessionId: d.started.sessionId }), "focus", d.f.opts)).toMatchObject({ ok: true });
+  expect(d.f.calls.filter(c => c.method === "terminal.send")).toHaveLength(1);
+});
+
 test("Codex legacy terminal launch journal bounds binding even without a startedAt label", async () => {
   const f = await fixture(), first = f.runner(10000), codex = member({ cli: "codex" });
   const started = await first.start(codex, f.opts), terminal = f.terminals.get(started.paneId)!;

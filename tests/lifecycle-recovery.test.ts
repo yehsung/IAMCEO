@@ -311,6 +311,29 @@ test("persistent lease is restored before recovery can pump a wake queue", async
   await until(() => f.count("terminal.send") === 1);
 });
 
+test("a persisted lease whose terminal ended while the server was down no longer holds the wake queue", async () => {
+  // 위 시험의 짝: 조작권을 얻은 터미널이 살아 있으면 재시작 뒤에도 조작권이 대기열을 막는다(그대로다).
+  // 그 터미널이 끝난 것이 확인되면 조작권은 묶일 곳이 없다: 만료(5분)를 기다리지 않고 거두고, 깨우는 전달이 새 터미널을 열어 나간다.
+  const f = await fixture(); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
+  const generation = f.store.memberRevisions(member.id).sessionGeneration;
+  const claim = await f.orch.terminalControlV2(member.id, { operationId: "claim-operation", expectedSessionGeneration: generation, claimId: "claim-one", action: "claim" });
+  expect(claim.status).toBe("applied");
+  f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "instruction", text: "After the terminal ended" });
+  await f.orch.shutdown();
+  f.terminals.get(member.paneId!)!.state = "finished";
+  const next = f.orchestrator(); await next.orch.recover();
+  expect(f.store.inputState(member.id).lease).toBeNull();
+  await until(() => f.count("terminal.send") === 1);
+  expect(f.count("terminal.run")).toBe(2);
+  expect(f.calls.find(c => c.method === "terminal.send")!.params.terminal).toBe(f.store.requireMember(member.id).paneId!);
+  expect(f.store.requireMember(member.id).paneId).not.toBe(member.paneId);
+  expect(f.store.listActivity(member.id).some(a => a.text.includes("직접 조작하던 터미널이 끝나 그 조작권을 거뒀습니다"))).toBe(true);
+  // 새 터미널에서는 같은 앱이 조작권을 곧바로 다시 얻을 수 있다.
+  await next.orch.pump(member.id);
+  const again = await next.orch.terminalControlV2(member.id, { operationId: "claim-again", expectedSessionGeneration: generation, claimId: "claim-one", action: "claim" });
+  expect(again.status).toBe("applied");
+});
+
 test("unknown direct Enter is durable and neither same operation nor same sequence replays", async () => {
   const f = await fixture(); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
   const expectedSessionGeneration = f.store.memberRevisions(member.id).sessionGeneration;

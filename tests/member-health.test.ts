@@ -258,10 +258,31 @@ for (const operation of ["send", "send_urgent", "parallel", "compact", "start_se
       await f.internal.probeHealth();
       expect(f.store.deferredMemberConfig(member.id)?.signature).toStartWith("parallel_unknown:");
     }
-    if (operation === "compact") expect(f.store.getContextState(member.id)?.compaction?.phase).toBe("uncertain");
+    // 압축: 실행기가 기준선(받을 터미널)을 저장하기 전에 단계 제한이 걸렸다. 넣은 적이 없으므로 '불확실'이 아니라 다시 예약으로 남는다.
+    // (예전에는 uncertain 으로 적어, 묶인 터미널이 없는 미확정 압축이 어떤 조작으로도 풀리지 않았다.) 다시 시도하는 동안에도 뒤따르는 전달은 넣지 않는다.
+    if (operation === "compact") {
+      expect(f.store.getContextState(member.id)?.compaction).toMatchObject({ phase: "queued", reason: "backend_down" });
+      expect(f.store.getContextState(member.id)?.baseline?.coreCompact ?? null).toBeNull();
+    }
     const attempts = f.store.requireDelivery(d.id).attempts;
-    for (let i = 0; i < 3; i++) await f.orch.pump(member.id);
+    for (let i = 0; i < 3; i++) await bounded(f.orch.pump(member.id));
     expect(f.store.requireDelivery(d.id).attempts).toBe(attempts);
+    if (operation === "parallel") {
+      // 병렬 설정 명령을 받은 터미널이 살아 있는 동안은 결과 모름 보류가 그대로다(위의 세 번은 아무것도 넣지 않았다).
+      // 그 터미널이 끝난 것이 확인되면 보류는 묶일 곳이 없다: 꺼짐으로 돌리며 지우고, 깨우면 새 터미널에서 전달이 나간다.
+      expect(f.store.deferredMemberConfig(member.id)?.signature).toStartWith("parallel_unknown:");
+      f.terminals.get(member.paneId!)!.state = "finished";
+      const observer = f.runner as unknown as { tracks: Map<string, unknown>; refresh(track: unknown): Promise<unknown> };
+      await observer.refresh(observer.tracks.get(member.id)); // 실행기가 종료를 관측해 알린다(주기 관측을 기다리지 않는다).
+      for (let i = 0; i < 100 && f.store.requireMember(member.id).status !== "offline"; i++) await Bun.sleep(5);
+      expect(f.store.requireMember(member.id).status).toBe("offline");
+      expect(f.store.deferredMemberConfig(member.id)).toBeNull();
+      expect(f.store.requireMember(member.id).lastError ?? "").not.toContain("control_unknown");
+      delete (f.runner as Partial<Runner>).setParallel;
+      await f.orch.resumeMember(member.id);
+      await bounded(f.orch.pump(member.id));
+      expect(deliveryState(f, d.id, member.id)).toMatchObject({ status: "delivered" });
+    }
     // Restore fake send so the second member can demonstrate independent delivery.
     if (operation === "send" || operation === "send_urgent") delete (f.runner as Partial<Runner>).send;
     await otherMemberDelivers(f, other.id);

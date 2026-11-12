@@ -544,8 +544,18 @@ describe("terminal stream", () => {
     await stream.close(ending === "terminal_gone" ? "terminal_gone" : undefined);
     f.store.patchMember(f.member.id, { status: "offline" });
     const start = performance.now();
-    if (expired) f.store.saveLease({ ...f.store.inputState(f.member.id).lease!, expiresAt: Date.now() - 1 });
-    else await f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId });
+    if (ending === "finished") {
+      // 엔진이 그 터미널이 끝났다고 알렸다(위의 조회가 종료를 관측했다): 사라진 것이 확정된 터미널의 조작권은 서버가 스스로 거둔다.
+      // 놓기나 만료(5분)를 기다리지 않는다. 이미 거둔 조작권을 놓으려 하면 만료된 조작권과 같은 거절이다.
+      await until(() => f.store.inputState(f.member.id).lease === null);
+      await expect(f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId })).rejects.toMatchObject({ status: 409, code: "TERMINAL_REFUSED" });
+      expect(f.store.listActivity(f.member.id).some(a => a.text.includes("직접 조작하던 터미널이 끝나 그 조작권을 거뒀습니다"))).toBe(true);
+    } else {
+      // 엔진이 종료를 알리지 않았다(화면 연결만 끊겼거나, 조회가 그 터미널을 찾지 못했을 뿐이다): 조작권은 놓거나 만료될 때까지 그대로다.
+      expect(f.store.inputState(f.member.id).lease?.leaseId).toBe(lease.leaseId);
+      if (expired) f.store.saveLease({ ...f.store.inputState(f.member.id).lease!, expiresAt: Date.now() - 1 });
+      else await f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId });
+    }
     f.store.enqueue({ projectId: f.project.id, memberId: f.member.id, kind: "instruction", text: "wake-after-terminal-exit", wake: true });
     await f.orch.pump(f.member.id);
     await until(() => f.sent.length > 0);

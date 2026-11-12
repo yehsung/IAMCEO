@@ -67,6 +67,8 @@ interface Track {
   member: RunnerMember; terminal: CoreTerminal; sessionId: string | null; pending: boolean; uncertain: boolean; status: string | null;
   /** Uncertainty from input that has no dispatch (manual control, approval keys, parallel command). The store cannot resolve it. */
   controlUncertain: boolean;
+  /** The persisted input state could not be read when this terminal was bound. Input stays fenced until a re-read succeeds. */
+  restorePending: boolean;
   /** The Codex rollout file of this session, once found. */
   logFile: { sessionId: string; path: string } | null;
   /** The status report is gone but the turn is known to be over (decided by observe, which also reads the screen). */
@@ -269,6 +271,17 @@ export class CoreRunner implements FullRunner {
    * input or compaction are left alone.
    */
   private settleUncertain(track: Track, marker?: string, polled = false): boolean {
+    if (track.restorePending) {
+      // Same pacing as the fence re-read below: soon at first, every 5 s while it keeps failing.
+      const now = this.pollNow();
+      if (polled && now >= track.settledAt && now - track.settledAt < Math.min(5000, 500 * 2 ** Math.min(track.settleTries, 4))) return false;
+      track.settledAt = now; track.settleTries++;
+      try { this.restore(track); } catch { return false; }
+      track.restorePending = false; track.settleTries = 0; track.settledAt = -Infinity;
+      // The fence set at bind stood in for whatever the store holds. Now that it was read, keep only what it says.
+      track.uncertain = track.dispatches.length > 0 || !!track.compact && !["failed", "succeeded"].includes(track.compact.phase);
+      if (!track.uncertain) { track.evidence.clear(); return true; }
+    }
     if (!track.uncertain || track.controlUncertain || !this.deps.recoveryStore) return false;
     if (track.compact && !["failed", "succeeded"].includes(track.compact.phase)) return false;
     // The store read costs as much as the dispatch history. Recheck a fresh fence soon, a long one (waiting for the owner) every 5s.
@@ -305,10 +318,13 @@ export class CoreRunner implements FullRunner {
     if (this.closed) throw new CoreError("closed", "CoreRunner shut down while starting; terminal remains owned by core");
     const launch = terminal.labels["iamceo.operation"] ? this.deps.recoveryStore?.getLifecycleJournal?.(terminal.labels["iamceo.operation"]) : null;
     const launchedAt = launch?.memberId === member.id && launch.intent === "start" ? launch.createdAt : null;
-    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, controlUncertain: false, lost: false, silentSince: null, settledAt: -Infinity, settleTries: 0, status: null, statusKey: null, composerEmpty: null, statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
+    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, controlUncertain: false, restorePending: false, lost: false, silentSince: null, settledAt: -Infinity, settleTries: 0, status: null, statusKey: null, composerEmpty: null, statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
       epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, bindingSince: terminal.labels["iamceo.startedAt"] || launchedAt || new Date().toISOString(), binding: null, compact: null,
       dispatches: [], evidence: new Map(), logFile: null, lastError: null, nextPollAt: 0, pollDelay: this.pollMs, observedAt: new Date().toISOString(), failures: 0, failure: null };
-    this.restore(track);
+    // The terminal exists whether or not the persisted input state can be read. Throwing here left a terminal that
+    // nobody tracked (terminal.run had already succeeded) and a start whose result read as unknown: every later
+    // wake then failed the same way. Track it and fence input instead; the fence lifts once the state reads again.
+    try { this.restore(track); } catch { track.restorePending = true; track.uncertain = true; }
     this.tracks.set(member.id, track);
     await this.observe(track, terminal, true);
     this.event(track, { type: "pane", memberId: member.id, paneId: terminal.address });
@@ -604,7 +620,7 @@ export class CoreRunner implements FullRunner {
   }
   isBusy(memberId: string): boolean {
     const track = this.tracks.get(memberId);
-    return !!track && (track.pending || track.uncertain || track.completing || track.status === "working" || !!track.compact && !["failed", "succeeded"].includes(track.compact.phase));
+    return !!track && (track.pending || track.uncertain || track.restorePending || track.completing || track.status === "working" || !!track.compact && !["failed", "succeeded"].includes(track.compact.phase));
   }
   occupiesTurnSlot(memberId: string): boolean {
     const track = this.tracks.get(memberId);
@@ -628,7 +644,7 @@ export class CoreRunner implements FullRunner {
       if (!track) { await this.startLocked(member, opts); track = this.tracks.get(member.id)!; }
       this.assertMember(track, member);
       this.settleUncertain(track, opts.marker);
-      if (track.pending || track.uncertain || track.completing || track.compact && !["failed", "succeeded"].includes(track.compact.phase)) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written", detail: "A previous send is still running or delivery is uncertain; inspect the terminal" };
+      if (track.pending || track.uncertain || track.restorePending || track.completing || track.compact && !["failed", "succeeded"].includes(track.compact.phase)) return { ok: false, reason: "busy", retryable: false, deliveryEffect: "not_written", detail: "A previous send is still running or delivery is uncertain; inspect the terminal" };
       const terminal = await this.refresh(track);
       if (terminal.state !== "live") return { ok: false, reason: "gone", retryable: false, deliveryEffect: "not_written" };
       const state = this.stateOf(track, terminal);
@@ -742,6 +758,54 @@ export class CoreRunner implements FullRunner {
   async inspectDelivery(member: RunnerMember, query: DeliveryProbe): Promise<DeliveryInspection> {
     const release = this.reserve(member.id);
     try { return await this.inspectLocked(member, query); } finally { release(); }
+  }
+  /** Read-only. A live terminal or no answer is false: silence is never proof that a terminal is gone. */
+  async terminalGone(terminalId: string): Promise<boolean> {
+    try { return (await this.call<CoreTerminal>("terminal.get", { terminal: terminalId }, Math.min(this.rpcTimeoutMs, 2000))).state !== "live"; }
+    catch (error) { return error instanceof CoreError && error.kind === "not_found" && !error.uncertain; }
+  }
+  /** Session log of a session that has no attached terminal. Null when it cannot be told apart. */
+  private sessionLogPath(member: RunnerMember, sessionId: string): string | null {
+    const home = this.providerHome(member);
+    try {
+      if (providerFor(member) === "claude") return findSessionFile(home, member.cwd, sessionId);
+      const matches = [...new Bun.Glob(`**/rollout-*-${sessionId}.jsonl`).scanSync({ cwd: join(home, "sessions"), absolute: true, onlyFiles: true, followSymlinks: false })].filter((path) => {
+        const meta = parseCodexSessionMeta(readJsonlRange(join(home, "sessions"), path, null, { maxBytes: 1024 * 1024 }).records[0]?.value);
+        return meta?.sessionId === sessionId && meta.cwd === member.cwd;
+      });
+      return matches.length === 1 ? matches[0]! : null;
+    } catch { return null; }
+  }
+  private readonly goneEvidence = new Map<string, DeliveryEvidenceCursor>();
+  /**
+   * The envelope's terminal is confirmed gone (the caller's precondition): a half-typed draft in its composer can
+   * never be submitted, and its screen and turn counter no longer exist. Only the session log is left to ask.
+   * received: every marker is a submitted user message. not_received: the whole range since the send was read and
+   * holds none of them. Anything else (no log, a partial or unrecognized record, some markers only) is unknown.
+   */
+  inspectGoneDelivery(member: RunnerMember, query: DeliveryProbe): DeliveryInspection {
+    const source = providerFor(member) === "claude" ? "claude_log" as const : "codex_log" as const;
+    const unknown = (code: string): DeliveryInspection => ({ evidence: [{ source, verdict: "unknown", location: "none", code, complete: false, checkedAt: new Date().toISOString() }], finding: "unknown", receivedDeliveryIds: [], snapshot: null, quiescence: "unresolved" });
+    const sessionId = query.identity.sessionId;
+    if (query.cli !== providerFor(member) || query.backend !== "core" || !sessionId || sessionId !== member.sessionId || query.identity.sessionGeneration !== member.sessionGeneration) return unknown("identity_changed");
+    const path = this.sessionLogPath(member, sessionId);
+    if (!path) return unknown("file_missing");
+    const baseline = query.baseline.logs.find((log) => log.path === path);
+    const scan = () => readDeliveryEvidence({ cli: providerFor(member), home: this.providerHome(member), path, cwd: member.cwd, sessionId,
+      sessionGeneration: query.identity.sessionGeneration, markers: query.markers, bundleMarker: query.bundleMarker, baseline,
+      since: baseline ? undefined : query.baseline.capturedAt, cursor: this.goneEvidence.get(query.dispatchId) });
+    let read = scan();
+    if (read.evidence.code === "generation_changed" && this.goneEvidence.delete(query.dispatchId)) read = scan();
+    // An envelope without a log baseline is read from the start, 4 MiB a piece. Bounded here; the next check continues.
+    for (let pieces = 1; read.evidence.code === "scan_pending" && pieces < 8; pieces++) {
+      if (read.cursor) this.goneEvidence.set(query.dispatchId, read.cursor);
+      read = scan();
+    }
+    if (read.evidence.code === "scan_pending" && read.cursor) this.goneEvidence.set(query.dispatchId, read.cursor);
+    else this.goneEvidence.delete(query.dispatchId);
+    const allReceived = query.markers.length > 0 && query.markers.every((marker) => read.receivedDeliveryIds.includes(marker.deliveryId));
+    const absent = read.evidence.complete && read.evidence.verdict === "absent" && !read.receivedDeliveryIds.length;
+    return { evidence: [read.evidence], finding: allReceived ? "received" : absent ? "not_received" : "unknown", receivedDeliveryIds: read.receivedDeliveryIds, snapshot: null, quiescence: "settled" };
   }
   private async inspectLocked(member: RunnerMember, query: DeliveryProbe): Promise<DeliveryInspection> {
     const unknown = (code: string, finding: "unknown" | "wait" = "unknown"): DeliveryInspection => ({ evidence: [{ source: "transport", verdict: "unknown", location: "none", code, complete: false, checkedAt: new Date().toISOString() }], finding, receivedDeliveryIds: [], snapshot: null, quiescence: "unresolved" });
@@ -869,6 +933,9 @@ export class CoreRunner implements FullRunner {
       const current = await this.refresh(track);
       const currentState = this.stateOf(track, current);
       if (current.state !== "live" || !["idle", "done"].includes(currentState || "") || track.epoch !== epoch || this.manualLease(member.id) || !readJsonlRange(root, path, baseline, { maxBytes: 0 }).complete) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
+      // The read above may have been shared with the poller and so outlived this attempt's deadline. Once the caller
+      // gave up (stage limit) nothing is persisted or written: it has already recorded this attempt as not started.
+      this.validateTrack(track);
       this.saveCompact(track, { id: crypto.randomUUID(), phase: "sending", startedAt: Date.now(), cursor: null, baseline: { path, fileIdentity: baseline.fileIdentity, offset: baseline.offset,
         sessionId: track.sessionId, terminalId: current.address, generation: member.sessionGeneration, turn: current.turn ?? null, model: member.model } });
       this.bump(track); track.pending = true; attempted = true;

@@ -15,6 +15,8 @@ Only changes that matter to users, by version. The full history is in `git log`.
 - **Mac을 다시 시작하면 꺼진 팀장을 스스로 다시 엽니다.** 깨어 있던 팀장이 Mac이나 실행 엔진의 재시작으로 꺼지면, 서버가 다시 뜬 뒤 총괄부터 한 명씩 같은 대화를 이어서 엽니다. 대표나 총괄이 재운 팀장은 그대로 자고, 스스로 죽은 세션은 다시 띄우지 않습니다. 여는 데 실패하면 한 번만 해 보고 꺼진 채 둡니다.
 - **재시작으로 끊긴 일을 팀장이 이어서 합니다.** 일하던 도중에 꺼진 팀장은 다시 열린 뒤 "끊긴 곳을 확인하고 끝나지 않은 부분만 이어서 하라"는 글을 한 번 받습니다. 총괄에게는 다시 지시하지 말라는 소식만 가므로 같은 일을 두 번 하지 않습니다. 다시 열지 못했을 때만 전처럼 총괄을 깨워 중단을 알립니다.
 - **깨운 직후의 잘못된 '승인 대기' 알림이 없어집니다.** 팀장을 깨우면 준비를 알리기 전 몇 초가 막힘으로 스쳐, 승인 창이 없는데도 알림이 떴습니다. 갓 띄운 세션은 막힘으로 보지 않고, 막힘 알림은 막힘이 5초 이어진 뒤에만 보냅니다.
+- **재시작 뒤 대기로만 남던 지시가 스스로 풀립니다.** 지시가 들어가는 순간 Mac이나 실행 엔진이 꺼지면, 그 팀장은 다시 열어도 그 지시와 뒤에 온 지시를 모두 받지 못했습니다. 이제 지시를 받던 터미널이 끝난 것이 확인되면 세션 기록을 읽어, 받았으면 전달됨으로 확정하고 못 받았으면 다시 열린 세션에 다시 넣습니다. 기록을 읽지 못했을 때만 대표에게 묻고, 그때의 '중복 위험 동의 재전송'은 이제 실제로 다시 넣습니다.
+- **끊긴 세션 작업 때문에 깨워도 열리지 않던 팀장이 풀립니다.** 설정을 바꾸거나 새 세션을 여는 도중에 연결이 끊기면 그 팀장은 지시도, 깨우기도, 설정 변경도 받지 않았습니다. 터미널이 끝났는지 살아 있는지 확인해 그 작업을 닫고, 직접 조작하던 터미널이 사라졌을 때 조작권이 5분 동안 전달을 막던 것도 없앴습니다.
 
 ### 0.2.3 — 2026-11-12
 
@@ -89,6 +91,8 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - **Staff switched off by a Mac restart are reopened automatically.** When staff who were awake are switched off by a Mac or engine restart, the server reopens the same conversations once it is back, the lead first, one at a time. Staff you or the lead put to sleep stay asleep, and a session that ended on its own is not relaunched. A reopen that fails is tried once and left off.
 - **Work cut off by a restart is continued by the same staff member.** A staff member switched off mid-task gets one note after reopening: check where the work stopped and finish only what is left. The lead only gets a notice not to assign it again, so the work is not done twice. The lead is woken about the interruption, as before, only when the reopen fails.
 - **No more false "waiting for approval" alert right after a wake.** A woken session showed as blocked for a few seconds before it reported ready, which raised an alert with no dialog on screen. A session that has just started is no longer treated as blocked, and a blocked alert is sent only after the block has lasted 5 seconds.
+- **Instructions stuck after a restart now clear on their own.** If the Mac or the engine went down at the moment an instruction was going in, that staff member received neither it nor anything sent later, even after being reopened. Once the terminal that was taking the instruction is confirmed gone, the server reads the session record: received means it is marked delivered, not received means it is sent again to the reopened session. You are asked only when the record cannot be read, and "resend, accepting a possible duplicate" now really resends.
+- **Staff that would not reopen after an interrupted session change recover.** If the connection dropped while changing settings or starting a fresh session, that staff member took no instructions, wake-ups or settings changes. The server now checks whether the terminal ended or is still alive and closes the interrupted operation. Terminal control held on a terminal that has disappeared no longer blocks delivery for five minutes.
 
 ### 0.2.3 — 2026-11-12
 

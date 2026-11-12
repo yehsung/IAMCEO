@@ -3001,7 +3001,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   saveLease(lease: TerminalLease): void {
     this.transaction(() => {
       this.checkRevision(this.memberRevisions(lease.memberId).sessionGeneration, lease.identity.sessionGeneration);
-      const r = this.row("SELECT * FROM terminal_leases WHERE member_id = ?", lease.memberId);
+      // 지금 터미널이 아닌 터미널에 묶인 줄은 조작권이 아니다(leaseRow). 남아 있어도 새 조작권을 막지 않고 덮어쓴다.
+      const r = this.leaseRow(lease.memberId, false);
       if (r && r.expires_at > Date.now() && (r.claim_id !== lease.claimId || r.lease_id !== lease.leaseId || r.terminal_identity_json !== stableJson(lease.identity))) throw new ApiError(409, "다른 조작권이 있습니다");
       if (r && r.claim_id === lease.claimId && lease.lastInputSequence < r.last_input_sequence) throw new ApiError(409, "입력 순번이 오래되었습니다");
       this.run(`INSERT INTO terminal_leases (member_id, claim_id, lease_id, generation, terminal_identity_json, expires_at, last_input_sequence) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -3017,9 +3018,32 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.deliveryReadMemo(`input:${memberId}`, () => this.readInputState(memberId));
   }
 
+  /**
+   * 조작권은 그것을 얻은 터미널에 묶여 있다. 명부의 지금 터미널과 다른 터미널(사라져 비워졌거나 새로 열린 터미널)에 묶인 줄은 유효하지 않다:
+   * 예전에는 Mac 재시작으로 터미널이 사라져도 만료(5분)까지 그 팀장의 전달을 모두 막았다.
+   * current 가 참이면 이 세대의, 만료되지 않은 줄만 돌려준다.
+   */
+  private leaseRow(memberId: string, current: boolean): Row | null {
+    const r = current
+      ? this.row("SELECT * FROM terminal_leases WHERE member_id = ? AND generation = ? AND expires_at > ?", memberId, this.memberRevisions(memberId).sessionGeneration, Date.now())
+      : this.row("SELECT * FROM terminal_leases WHERE member_id = ?", memberId);
+    if (!r) return null;
+    const pane = this.row("SELECT pane_id FROM members WHERE id = ?", memberId)?.pane_id ?? null;
+    return json<RunnerTerminalIdentity>(r.terminal_identity_json).terminalId === pane ? r : null;
+  }
+
+  /** 사라진 것이 확정된 터미널에 묶인 조작권을 지운다. 지웠으면 그 조작권의 leaseId 를 돌려준다. */
+  removeLeaseOfTerminal(memberId: string, terminalId: string): string | null {
+    return this.transaction(() => {
+      const r = this.row("SELECT * FROM terminal_leases WHERE member_id = ?", memberId);
+      if (!r || json<RunnerTerminalIdentity>(r.terminal_identity_json).terminalId !== terminalId) return null;
+      this.run("DELETE FROM terminal_leases WHERE member_id = ? AND claim_id = ?", memberId, r.claim_id);
+      return r.lease_id as string;
+    });
+  }
+
   private readInputState(memberId: string): RunnerRecoveryState {
-    const generation = this.memberRevisions(memberId).sessionGeneration;
-    const r = this.row("SELECT * FROM terminal_leases WHERE member_id = ? AND generation = ? AND expires_at > ?", memberId, generation, Date.now());
+    const r = this.leaseRow(memberId, true);
     return { lease: r ? { memberId, claimId: r.claim_id, leaseId: r.lease_id, identity: json(r.terminal_identity_json), expiresAt: r.expires_at, lastInputSequence: r.last_input_sequence } : null, unresolvedDispatches: this.listDispatches(memberId).filter((d) => ["prepared", "write_started", "unknown"].includes(d.transportState) || d.items.some((item) => { const recovery = this.getDeliveryRecovery(item.deliveryId); return recovery !== null && !(recovery.phase === "waiting" && recovery.reason === "input_busy" || recovery.phase === "needs_owner" && recovery.reason === "stale_instruction") && !["none", "resolved", "stopped"].includes(recovery.phase); })) };
   }
 

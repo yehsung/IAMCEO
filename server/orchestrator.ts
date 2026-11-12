@@ -2,7 +2,7 @@ import { configuredSecretRoots } from "./secret-paths.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { ModelCatalogReader } from "./models.ts";
 import { ApiRecovery, classifyTurnError, NoTerminalError, type ApiRecoveryOptions } from "./api-outage.ts";
-import { DeliveryRecovery } from "./delivery-recovery.ts";
+import { DeliveryRecovery, type RecoveryRunner } from "./delivery-recovery.ts";
 import { writeStatuslineWrapper } from "./runner/statusline.ts";
 import { endedByRestart, RESTART_EXIT_NOTE, RESTART_REOPENED_NOTE, RESTART_RESUME_TEXT, RESTART_WAKE_MAX_ATTEMPTS, RESTART_WAKE_PACING, restartNoteIn, type RestartWake, type RestartWakePacing } from "./restart-wake.ts";
 // Orchestrator: 전달 펌프, 턴 종료 처리, 압축 판단, 띄우기·잠재우기·다시 열기, 승인 근거 확인(spec §4·§6·§7).
@@ -512,8 +512,8 @@ const WAKE_POST_KINDS = new Set<string>(["완료", "막힘", "질문"]);
 
 /** Domain references also include orphan answers and todo correction notices. */
 class OrchestratorDeliveryRecovery extends DeliveryRecovery {
-  constructor(private readonly sourceStore: Store, runner: (member: Member) => Pick<Runner, "inspectDelivery" | "repairDelivery"> | null, writerDone?: (dispatch: DeliveryDispatch) => boolean, admit?: (memberId: string) => boolean) {
-    super({ store: sourceStore, runner, writerDone, admit, legacyMessageText: message => {
+  constructor(private readonly sourceStore: Store, runner: (member: Member) => RecoveryRunner | null, writerDone?: (dispatch: DeliveryDispatch) => boolean, admit?: (memberId: string) => boolean, writing?: (dispatch: DeliveryDispatch) => boolean) {
+    super({ store: sourceStore, runner, writerDone, admit, writing, legacyMessageText: message => {
       const file = message.contextFileId ? sourceStore.getFile(message.contextFileId) : null;
       const context = file && file.projectId === message.projectId
         ? `\n[시스템 자료 맥락 · 대표 원문 아님]\n대표가 보던 자료: ${file.title.replace(/[\r\n]+/g, " ")} (${file.id})` : "";
@@ -619,7 +619,7 @@ const CORE_START_QUIET_MS = 20_000;
 export function createOrchestrator(config: Config, store: Store, overrides: AssemblyOverrides = {}): Orchestrator {
   const runners = new Map<Backend, Runner>();
   let orchestrator: Orchestrator | null = null;
-  const deliveryRecovery = new OrchestratorDeliveryRecovery(store, member => orchestrator?.recoveryRunner(member) ?? null, dispatch => orchestrator?.writerDone(dispatch) ?? false, memberId => orchestrator?.repairAdmitted(memberId) ?? false);
+  const deliveryRecovery = new OrchestratorDeliveryRecovery(store, member => orchestrator?.recoveryRunner(member) ?? null, dispatch => orchestrator?.writerDone(dispatch) ?? false, memberId => orchestrator?.repairAdmitted(memberId) ?? false, dispatch => orchestrator?.writing(dispatch) ?? false);
   runners.set("core", new CoreRunner({ contextHome: config.home, coreBin: config.coreBin, socketPath: config.coreSocket, session: "iamceo", stateDir: join(config.home, "core-state"), configDir: join(config.home, "core-config"), claudeBin: config.claudeBin, codexBin: config.codexBin, ...overrides.runner }, {
     startQuietMs: CORE_START_QUIET_MS,
     ...overrides.runnerDeps,
@@ -714,7 +714,7 @@ export class Orchestrator implements OrchestratorApi {
       this.store.retryDeferredConfigNow(id);
       this.recheckMemberDelivery(id);
     }, id => this.nudgeStalled(id));
-    this.deliveryRecovery = deps.deliveryRecovery ?? new OrchestratorDeliveryRecovery(this.store, member => this.recoveryRunner(member), dispatch => this.writerDone(dispatch), memberId => this.repairAdmitted(memberId));
+    this.deliveryRecovery = deps.deliveryRecovery ?? new OrchestratorDeliveryRecovery(this.store, member => this.recoveryRunner(member), dispatch => this.writerDone(dispatch), memberId => this.repairAdmitted(memberId), dispatch => this.writing(dispatch));
     this.timings = { ...DEFAULT_TIMINGS, ...deps.timings };
     this.agentTools = deps.agentTools ?? null;
     this.notifier = deps.notifier ?? null;
@@ -774,11 +774,20 @@ export class Orchestrator implements OrchestratorApi {
         const resolvedStart = this.resolveAbsentStart(member, result.outcome);
         // 한 번도 뜨지 못한 세션이다. 쉬는 중으로 두면 소유 미확인 관측 때문에 전달이 계속 멈춘다.
         if (resolvedStart && !member.paneId && !["asleep", "offline"].includes(member.status)) this.store.patchMember(member.id, { status: "offline" });
-        if (result.outcome === "not_found" && !this.pendingLifecycle(member.id) && (member.paneId || member.status === "offline")) {
+        // 엔진이 답했고 이 팀장의 터미널이 없다. 결과를 모르는 띄우기·끝내기가 없으면, 서버가 띄운 세션은 명부가 무엇이라 적혀 있든 꺼진 것이다.
+        // 예전에는 터미널 칸이 비어 있고 상태가 '꺼짐'이 아니면(새 세션 띄우기가 확정 실패해 error 로 남은 팀장) 그대로 두어,
+        // 소유 미확인 관측 때문에 전달이 영영 멈추고 깨우기도 아무 일을 하지 않았다. 잠든 팀장은 잠든 그대로 둔다.
+        // 넘겨받은 명부(대표의 터미널에 세션이 살아 있을 수 있다)는 예전 조건 그대로다.
+        if (result.outcome === "not_found" && !this.pendingLifecycle(member.id) && this.store.getMember(member.id)?.status !== "asleep" &&
+            (member.paneId || member.status === "offline" || member.origin === "runner")) {
           if (member.paneId && !(await this.reconcileAbsentTerminal(member))) return { outcome: "unknown", code: "terminal_absence_unverified" };
-          this.store.patchMember(member.id, { status: "offline", paneId: null });
-          rt.turn = null;
-          this.releaseSlots();
+          // 묻는 사이 다른 길(깨우기, 전달)이 이 팀장을 다시 열기 시작했으면 그쪽이 명부를 정한다.
+          const current = this.store.getMember(member.id);
+          if (current && current.status !== "asleep" && current.paneId === member.paneId && !rt.reopening && !rt.starting) {
+            if (current.status !== "offline" || current.paneId) this.store.patchMember(member.id, { status: "offline", paneId: null });
+            rt.turn = null;
+            this.releaseSlots();
+          }
         }
         if (resolvedStart) this.resolvedStarts.add(member.id);
         return result;
@@ -1137,11 +1146,16 @@ export class Orchestrator implements OrchestratorApi {
 
   private async recoverStopsOnce(): Promise<void> {
     for (const journal of this.store.listPendingLifecycleJournals()) {
-      if (!["sleep", "close", "archive"].includes(journal.intent)) continue;
+      if (!["sleep", "close", "archive", "fresh_session"].includes(journal.intent)) continue;
       const member = this.store.getMember(journal.memberId);
       if (!member || this.store.memberRevisions(member.id).sessionGeneration !== journal.identity.sessionGeneration) continue;
       const rt = this.runtime(member.id);
       if (this.archiving.has(member.projectId) || rt.closing || rt.starting || rt.reopening || rt.pumping) continue;
+      if (journal.intent === "fresh_session") {
+        try { await this.recoverFreshStop(member, journal); }
+        catch (error) { console.warn(`${member.name} 설정 변경 끝내기 확인 실패:`, (error as Error).message); }
+        continue;
+      }
       try {
         if (journal.intent === "close") await this.closeMember(member.id);
         else {
@@ -1153,32 +1167,158 @@ export class Orchestrator implements OrchestratorApi {
     }
   }
 
-  private async reconcileAbsentTerminal(member: Member): Promise<boolean> {
+  /**
+   * 세션을 다시 열려고(설정·CLI 변경, 새 세션으로) 옛 터미널을 끝내다가 결과를 놓쳤다(fresh_session 미확정).
+   * 끝내기가 확인돼야 다음 단계(설정 저장, 세션 교체)로 가므로 명부와 세션은 바뀌지 않은 채다.
+   * 예전에는 이 의도를 닫는 자리가 없어, 그 팀장은 지시가 영영 대기하고 깨우기·재우기·설정 변경이 모두 막힌 채 남았다.
+   * - 터미널이 끝났거나 엔진이 모른다고 확정해 답했다: 끝내기는 된 것이다. 의도를 확정하고 꺼짐으로 둔다(세션 ID 는 그대로).
+   *   말을 걸거나 깨우면 같은 대화를 이어 연다(재시작으로 잃은 터미널이면 서버가 스스로 연다).
+   * - 터미널이 살아 있고, 끝내기 요청에서 더 올 것이 없다(writeSettleMs): 끝내지 못한 것이다. 의도를 거절로 닫는다. 세션은 그대로 일한다.
+   * - 엔진이 답하지 않는다: 아무것도 정하지 않고 다음 점검을 기다린다.
+   * 하려던 변경은 어느 쪽이든 적용되지 않았다. 대표의 설정 변경은 그때 실패로 답했으니 다시 하면 되고, 직급 설정을 맞추던 것(syncConfig)은 다음 전달이 다시 한다.
+   */
+  private async recoverFreshStop(member: Member, journal: LifecycleJournal): Promise<void> {
+    if (this.backendOf(member) !== "core" || !(this.runners.get("core") instanceof CoreRunner)) return;
+    if (!member.paneId) {
+      // 끝낼 터미널이 적혀 있지 않다. 끝낸 것이 없으니 의도만 닫는다.
+      this.finishLifecycle(journal, "refused", "끝낼 터미널이 없습니다");
+      void this.pump(member.id);
+      return;
+    }
+    const probe = await this.probeOwnedTerminal(member);
+    const rt = this.runtime(member.id);
+    const current = this.store.getMember(member.id);
+    if (this.closed || !current || current.paneId !== member.paneId || this.pendingLifecycle(member.id)?.operationId !== journal.operationId || rt.closing || rt.starting || rt.reopening) return;
+    if (probe.state === "gone") {
+      // 터미널에 묶인 상태 정리(releaseGoneTerminal)가 이 의도를 확정하고, 뒤이어 끊긴 실행과 재시작 표식을 정리한다.
+      if (!(await this.reconcileAbsentTerminal(current, probe))) return;
+      const after = this.store.getMember(member.id);
+      if (after && after.paneId === member.paneId && !rt.reopening && !rt.starting) {
+        this.store.patchMember(member.id, { status: "offline", paneId: null, subagents: 0 });
+        rt.turn = null;
+        this.releaseSlots();
+      }
+      if (!this.recovering) void this.pump(member.id);
+      return;
+    }
+    if (probe.state !== "live" || Date.now() - Math.max(Date.parse(journal.updatedAt), this.startedAt) < this.timings.writeSettleMs) return;
+    this.finishLifecycle(journal, "refused", "터미널이 그대로 살아 있습니다");
+    this.store.appendActivity(member.id, "system", "세션을 다시 열려던 작업이 끊겨 있었습니다. 터미널이 그대로 살아 있어 그 작업을 닫았습니다. 바꾸려던 설정이나 새 세션은 적용되지 않았으니 다시 해 주세요", `${journal.operationId}:live_stop`);
+    if (!this.recovering) void this.pump(member.id);
+  }
+
+  /**
+   * 명부에 적힌 터미널을 엔진에 한 번 묻는다. gone 은 엔진이 끝났다고 알렸거나(terminal 에 그 기록), 그 터미널을 모른다고 확정해 답한 것(terminal null)이다.
+   * 엔진이 답하지 않거나 그 주소의 터미널이 이 팀장의 것이 아니면 unknown 이다: 사라졌다는 근거가 아니다.
+   */
+  private async probeOwnedTerminal(member: Member): Promise<{ state: "gone"; terminal: CoreTerminal | null } | { state: "live" | "unknown" }> {
+    try {
+      const terminal = await coreRpc<CoreTerminal>(this.coreSocket(), "terminal.get", { terminal: member.paneId! }, 1000);
+      if (terminal.address !== member.paneId || terminal.labels?.["iamceo.member"] !== member.id || terminal.labels["iamceo.project"] !== member.projectId || terminal.labels["iamceo.cli"] !== member.cli || terminal.labels["iamceo.generation"] !== String(this.store.memberRevisions(member.id).sessionGeneration)) return { state: "unknown" };
+      return terminal.state === "live" ? { state: "live" } : { state: "gone", terminal };
+    } catch (error) {
+      // 엔진이 답했고 그 터미널을 모른다: 엔진(또는 Mac)이 다시 시작되며 터미널이 사라졌다.
+      return error instanceof CoreError && error.kind === "not_found" && !error.uncertain ? { state: "gone", terminal: null } : { state: "unknown" };
+    }
+  }
+
+  /** probed: 방금 같은 터미널을 물어 얻은 답이 있으면 다시 묻지 않는다. */
+  private async reconcileAbsentTerminal(member: Member, probed?: Awaited<ReturnType<Orchestrator["probeOwnedTerminal"]>>): Promise<boolean> {
     if (!(this.runners.get("core") instanceof CoreRunner)) {
+      this.releaseGoneTerminal(member.id, member.paneId);
       this.endExecution(member, "interrupted", "재결합 조회에서 소유 터미널의 부재를 확인했습니다");
       return true;
     }
-    try {
-      const terminal = await coreRpc<CoreTerminal>(this.coreSocket(), "terminal.get", { terminal: member.paneId! }, 1000);
-      if (terminal.address !== member.paneId || terminal.labels?.["iamceo.member"] !== member.id || terminal.labels["iamceo.project"] !== member.projectId || terminal.labels["iamceo.cli"] !== member.cli || terminal.labels["iamceo.generation"] !== String(this.store.memberRevisions(member.id).sessionGeneration)) return false;
-      if (terminal.state === "live") return false;
-      const run = this.store.listPendingExecutions().find(r => r.memberId === member.id);
-      const settled = ["idle", "done"].includes(terminal.status?.state ?? "") && run?.turn !== null && run?.turn !== undefined && (terminal.turn ?? -1) > run.turn;
-      const result = terminal.status?.state === "error" ? "error" : settled ? "success" : "interrupted";
-      const lost = restartLossOf(terminal.reason, terminal.exit_code);
-      this.endExecution(member, result, terminal.reason ?? terminal.status?.msg ?? "소유 터미널이 종료되었습니다", terminal.exit_code ?? null, terminal.turn, lost !== null && this.noteRestartLoss(member, lost));
-      const detail = exitDetail(terminal.reason, terminal.exit_code);
-      if (member.lastError !== detail) this.store.appendActivity(member.id, result === "success" || endedByRestart(terminal.reason) ? "system" : "error", detail.slice(0, 500));
-      this.store.patchMember(member.id, { lastError: result === "success" ? null : detail.slice(0, 500) });
+    const probe = probed ?? await this.probeOwnedTerminal(member);
+    if (probe.state !== "gone") return false;
+    // 실행을 끝내기 전에 정리한다. 받지 못한 것이 확인된 전달의 실행은 '중단'이 아니라 '넣지 못함'으로 닫혀 총괄에게 중단을 알리지 않고,
+    // 받은 것이 확인된 전달의 실행은 끊긴 일로 다뤄진다(재시작이면 이어가기 글).
+    this.releaseGoneTerminal(member.id, member.paneId);
+    const terminal = probe.terminal;
+    if (!terminal) {
+      this.endExecution(member, "interrupted", "소유 터미널의 부재를 확인했습니다", null, undefined, this.noteRestartLoss(member, "terminal_absent"));
       return true;
-    } catch (error) {
-      if (error instanceof CoreError && error.kind === "not_found" && !error.uncertain) {
-        // 엔진이 답했고 그 터미널을 모른다: 엔진(또는 Mac)이 다시 시작되며 터미널이 사라졌다.
-        this.endExecution(member, "interrupted", "소유 터미널의 부재를 확인했습니다", null, undefined, this.noteRestartLoss(member, "terminal_absent"));
-        return true;
-      }
-      return false;
     }
+    const run = this.store.listPendingExecutions().find(r => r.memberId === member.id);
+    const settled = ["idle", "done"].includes(terminal.status?.state ?? "") && run?.turn !== null && run?.turn !== undefined && (terminal.turn ?? -1) > run.turn;
+    const result = terminal.status?.state === "error" ? "error" : settled ? "success" : "interrupted";
+    const lost = restartLossOf(terminal.reason, terminal.exit_code);
+    this.endExecution(member, result, terminal.reason ?? terminal.status?.msg ?? "소유 터미널이 종료되었습니다", terminal.exit_code ?? null, terminal.turn, lost !== null && this.noteRestartLoss(member, lost));
+    const detail = exitDetail(terminal.reason, terminal.exit_code);
+    if (member.lastError !== detail) this.store.appendActivity(member.id, result === "success" || endedByRestart(terminal.reason) ? "system" : "error", detail.slice(0, 500));
+    this.store.patchMember(member.id, { lastError: result === "success" ? null : detail.slice(0, 500) });
+    return true;
+  }
+
+  /**
+   * 터미널의 사라짐이 확정되는 순간, 그 터미널에 묶여 있던 미확정 상태를 한곳에서 정리한다.
+   * 부르는 자리는 둘이다: 재결합 조회에서 부재를 확인했을 때(reconcileAbsentTerminal)와 실행기가 종료를 알렸을 때(onRunnerEvent 의 gone).
+   * 확정의 기준은 엔진의 답이다. 터미널이 끝났다고 알렸거나, 그 터미널을 모른다고 확정해 답했다. 엔진이 답하지 않는 것은 확정이 아니어서
+   * 그때는 부르지 않고 아래 상태가 모두 그대로 남는다(살아 있을 수 있는 터미널에 대한 보수적 동작은 바뀌지 않는다).
+   *
+   * 예전에는 상태마다 따로 풀었고 푸는 자리가 대부분 '터미널에 붙어야' 돌아서, 보류라 못 열고 못 열어 보류를 못 푸는 순환이 생겼다.
+   * - 끝내기 결과 모름: 설정 변경으로 다시 열던 끝내기(fresh_session)는 끝난 것으로 확정한다. 재우기·닫기·보관은 recoverStops 가 마저 한다.
+   * - 전달: 받았는지 모르는 봉투를 세션 기록으로 판정한다(DeliveryRecovery.settleGoneTerminal). 그 봉투의 실행 기록도 맞춘다.
+   * - 압축: 그 터미널이 받은 미확정 압축을 닫는다(releaseOrphanCompact).
+   * - 조작 결과 모름: 병렬 설정 명령의 확인 보류를 푼다.
+   * - 조작권: 그 터미널의 조작권을 지운다.
+   * 한 가지가 실패해도 나머지는 정리한다. 여러 번 불러도 결과가 같다(종료 이벤트와 뒤따르는 재결합 조회가 같은 터미널로 한 번씩 부른다).
+   */
+  private releaseGoneTerminal(memberId: string, terminalId: string | null): void {
+    if (!terminalId) return;
+    const steps: [string, (member: Member) => void][] = [
+      ["끝내기", member => this.confirmGoneStop(member, terminalId)],
+      ["전달", member => this.settleGoneDeliveries(member, terminalId)],
+      ["압축", member => this.releaseOrphanCompact(member.id, terminalId)],
+      ["조작 결과", member => this.releaseGoneControl(member, terminalId)],
+      ["조작권", member => this.releaseGoneLease(member, terminalId)],
+    ];
+    for (const [what, step] of steps) {
+      const member = this.store.getMember(memberId);
+      if (!member || this.backendOf(member) !== "core") return;
+      try { step(member); } catch (e) { console.error(`사라진 터미널에 묶인 상태 정리 실패(${what}):`, memberId, (e as Error).message); }
+    }
+  }
+
+  private confirmGoneStop(member: Member, terminalId: string): void {
+    const journal = this.pendingLifecycle(member.id);
+    if (!journal || journal.intent === "start" || (journal.identity.terminalId !== null && journal.identity.terminalId !== terminalId)) return;
+    if (journal.intent !== "fresh_session") {
+      // 재우기·닫기·보관은 대기열 보류와 명부 정리가 따라온다. 끝내기를 마저 확인하는 복구가 한다(이제 끝내기가 곧바로 확인된다).
+      setImmediate(() => { if (!this.closed && !this.recovering) void this.recoverStops().catch(e => console.warn("끝내기 확인 복구 실패:", (e as Error).message)); });
+      return;
+    }
+    this.finishLifecycle(journal, "confirmed", "터미널이 끝난 것을 확인했습니다");
+    this.store.appendActivity(member.id, "system", "세션을 다시 열려던 작업이 끊겨 있었습니다. 터미널이 끝난 것을 확인해 그 작업을 닫았습니다. 바꾸려던 설정이나 새 세션이 적용되지 않았으면 다시 해 주세요", `${journal.operationId}:gone_stop`);
+  }
+
+  private settleGoneDeliveries(member: Member, terminalId: string): void {
+    const settled = this.deliveryRecovery.settleGoneTerminal(member.id, terminalId);
+    if (!settled.received.length && !settled.requeued.length) return;
+    // 넣지 못한 것이 확인된 봉투의 실행은 '넣지 못함'으로 닫고, 받은 것이 확인된 봉투의 실행은 받은 것으로 적는다.
+    this.reconcileRejectedExecutions();
+    for (const run of this.store.listPendingExecutions()) if (run.memberId === member.id && run.identity.terminalId === terminalId) this.settleRecoveredStart(member, run, { turn: null, state: null });
+  }
+
+  private releaseGoneControl(member: Member, terminalId: string): void {
+    // 결과를 모르는 병렬 설정 명령은 그때의 터미널에 들어갔다. 지금 터미널이 따로 있으면 그 보류는 지금 터미널의 것이다.
+    if (member.paneId && member.paneId !== terminalId) return;
+    const parallel = this.store.deferredMemberConfig(member.id)?.signature === `parallel_unknown:${this.store.memberRevisions(member.id).sessionGeneration}`;
+    const noted = !!member.lastError?.startsWith("control_unknown:");
+    if (!parallel && !noted) return;
+    this.store.transaction(() => {
+      if (parallel) this.store.clearDeferredMemberConfig(member.id);
+      if (noted) this.store.patchMember(member.id, { lastError: null });
+      this.store.appendActivity(member.id, "system", "병렬 설정을 받은 터미널이 끝나 그 설정의 확인 대기를 풀었습니다. 밀린 전달을 이어 갑니다");
+    });
+  }
+
+  private releaseGoneLease(member: Member, terminalId: string): void {
+    const leaseId = this.store.removeLeaseOfTerminal(member.id, terminalId);
+    if (!leaseId) return;
+    this.store.appendActivity(member.id, "system", "직접 조작하던 터미널이 끝나 그 조작권을 거뒀습니다. 밀린 전달을 이어 갑니다", `${leaseId}:gone_lease`);
+    // 그 조작권으로 붙어 있던 화면 연결을 닫게 한다. 터미널이 이미 없으니 결과를 기다리지 않는다.
+    for (const ended of this.terminalLeaseListeners) void ended(member.id, leaseId).catch(() => {});
   }
 
   private async reconcileExecutions(memberId?: string): Promise<void> {
@@ -1723,6 +1863,11 @@ export class Orchestrator implements OrchestratorApi {
    */
   writerDone(dispatch: DeliveryDispatch): boolean {
     return !this.liveWrites.has(dispatch.dispatchId) && Date.now() - Math.max(Date.parse(dispatch.updatedAt), this.startedAt) >= this.timings.writeSettleMs;
+  }
+
+  /** 이 프로세스의 전송 호출이 아직 돌아오지 않은 봉투인가. 사라진 터미널의 봉투도 그 호출이 끝난 뒤에 판정한다. */
+  writing(dispatch: DeliveryDispatch): boolean {
+    return this.liveWrites.has(dispatch.dispatchId);
   }
 
   /**
@@ -3230,25 +3375,33 @@ export class Orchestrator implements OrchestratorApi {
    * 미확정 압축(sending·running·uncertain)은 그 명령을 받은 터미널에 묶여 있다. 실행기는 같은 터미널에 다시 붙을 때만 그 압축을
    * 이어 확인하므로(CoreRunner.restore), 터미널이 사라졌으면(Mac 재시작, 터미널 종료 뒤 새로 열림) 아무도 결과를 확정하지 못하고
    * 자동 입력이 끝없이 막힌다. 2026-11-12 실측: 재시작 뒤 14시간 동안 한 팀장이 지시를 하나도 받지 못했다.
-   * 그 터미널이 없으면 거기서 돌던 압축도 없다: '중단'으로 닫고 대기열을 이어 간다. 띄우기·끝내기 결과를 모르는 동안은 닫지 않는다.
+   * 그 터미널이 없으면 거기서 돌던 압축도 없다: '중단'으로 닫고 대기열을 이어 간다.
+   * - gone: 사라진 것이 확정된 터미널(releaseGoneTerminal 이 넘긴다). 그 터미널이 받은 압축은 띄우기·끝내기 결과와 무관하게 닫는다.
+   * - gone 없이(전달 직전의 확인): 묶인 터미널이 지금 터미널과 다를 때 닫는다. 띄우기·끝내기 결과를 모르는 동안은 닫지 않는다.
+   * - 묶인 터미널이 적히지 않은 미확정 압축: 실행기는 명령을 넣기 전에 기준선(받을 터미널)부터 저장하므로, 기준선이 없으면 넣은 적이 없다.
+   *   예전 서버가 '넣기 전의 시간 초과'를 불확실로 적어 남긴 것이다(지금은 beginCompact 가 다시 예약한다). 어떤 조작으로도 풀리지 않았고,
+   *   그 팀장을 다시 여는 것까지 실패시켰다. 터미널과 무관하게 닫는다.
    */
-  private releaseOrphanCompact(memberId: string): void {
+  private releaseOrphanCompact(memberId: string, gone: string | null = null): void {
     const member = this.store.getMember(memberId);
     if (!member || this.backendOf(member) !== "core") return;
     const state = this.store.getContextState(member.id);
     const compact = state?.compaction;
     if (!state || !compact || !["sending", "running", "uncertain"].includes(compact.phase)) return;
-    if (this.pendingLifecycle(member.id)) return;
     const saved = state.baseline?.coreCompact as CoreCompactState | undefined;
-    const bound = saved?.id === compact.id ? saved.baseline.terminalId : null;
-    if (!bound || bound === member.paneId) return;
+    const own = saved?.id === compact.id ? saved : null;
+    const bound = own?.baseline.terminalId ?? null;
+    // 기준선 없는 압축을 넣은 적이 없다고 볼 수 있는 것은 넣기 전에 기준선부터 저장하는 실행기(CoreRunner)뿐이다.
+    // 지금 넣는 중인 압축(기준선 저장 직전)은 건드리지 않는다. 그때의 단계는 queued 라 여기 오지 않지만, 넣는 중의 턴 표시도 함께 본다.
+    if (!own && (!(this.runners.get("core") instanceof CoreRunner) || this.runtime(member.id).turn?.kind === "compact")) return;
+    if (own && !(gone !== null && bound === gone) && (this.pendingLifecycle(member.id) || !bound || bound === member.paneId)) return;
     this.store.saveContextState({ ...state, measurement: state.measurement ? { ...state.measurement, fresh: false } : null,
-      baseline: { ...state.baseline, coreCompact: { ...saved!, phase: "failed" } },
+      baseline: { ...state.baseline, ...(own ? { coreCompact: { ...own, phase: "failed" } } : {}) },
       compaction: { ...compact, phase: "failed", reason: "interrupted", finishedAt: new Date().toISOString() } });
     const rt = this.runtime(member.id);
     rt.compactRequest = null;
     rt.skipCompact = true; // 밀린 일이 먼저다. 압축은 다음 측정에서 다시 판단한다.
-    this.store.appendActivity(member.id, "system", "압축을 받은 터미널이 끝나 그 압축을 닫았습니다. 밀린 전달을 이어 갑니다", `${compact.id}:orphan_compact`);
+    this.store.appendActivity(member.id, "system", own ? "압축을 받은 터미널이 끝나 그 압축을 닫았습니다. 밀린 전달을 이어 갑니다" : "넣지 못한 압축이 확인 대기로 남아 있어 닫았습니다. 밀린 전달을 이어 갑니다", `${compact.id}:orphan_compact`);
   }
 
   private coreCompactFenced(member: Member): boolean {
@@ -3361,14 +3514,25 @@ export class Orchestrator implements OrchestratorApi {
 
   /** --resume 으로 다시 연다. 실패하면 같은 핸들로 새 세션을 띄우고 마지막 일을 첫 지시에 넣는다. */
   async resumeMember(memberId: string, firstInstruction?: string, assignedBy?: Member): Promise<Member> {
-    const member = this.store.requireMember(memberId);
+    let member = this.store.requireMember(memberId);
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 다시 열 수 없습니다");
     this.requireActive(this.store.requireProject(member.projectId));
     if (member.backend !== "core" && (member.sessionId || member.paneId)) throw new ApiError(409, "이전 실행기의 세션은 자동으로 다시 열지 않습니다");
-    if (member.status === "asleep" || member.status === "offline") {
+    // 깨우기가 성공으로 답하고 아무 일도 하지 않는 경우를 남기지 않는다.
+    // 결과를 모르는 끝내기가 남아 있으면 지금 확인해 본다(터미널이 사라졌으면 여기서 닫힌다). 그래도 남으면 그 사실을 답한다.
+    if (this.pendingLifecycle(memberId) && this.pendingLifecycle(memberId)!.intent !== "start") {
+      await this.recoverStops();
+      member = this.store.requireMember(memberId);
+      const stop = this.pendingLifecycle(memberId);
+      if (stop && stop.intent !== "start") throw new ApiError(409, `${member.name}의 세션을 끝내던 작업의 결과를 아직 확인하지 못했습니다. 실행 엔진이 답하면 스스로 정리합니다. 잠시 뒤 다시 깨워 주세요`);
+    }
+    const rt = this.runtime(memberId);
+    if (rt.starting) { await rt.starting; member = this.store.requireMember(memberId); }
+    // 터미널이 없는데 꺼짐·잠듦으로 적히지 않은 팀장(새 세션 띄우기가 확정 실패해 오류로 남은 경우)도 다시 연다.
+    const unopened = member.origin === "runner" && member.backend === "core" && !member.paneId && !this.pendingLifecycle(memberId);
+    if (member.status === "asleep" || member.status === "offline" || unopened) {
       // 가져온 프로젝트는 총괄을 시작하기 전에는 어떤 세션도 움직이지 않는다고 약속했다.
       if (!this.store.requireProject(member.projectId).runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다. 총괄을 먼저 시작하세요");
-      const rt = this.runtime(memberId);
       rt.quickExits = 0; rt.quickExitNotified = false;
       const reopened = await this.reopen(member);
       if (!reopened) {
@@ -4413,11 +4577,13 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   /** Recovery writes share admission with ordinary work; inspection remains read-only. */
-  recoveryRunner(member: Member): Pick<Runner, "inspectDelivery" | "repairDelivery"> | null {
+  recoveryRunner(member: Member): RecoveryRunner | null {
     const runner = this.runners.get(this.backendOf(member));
     if (!runner) return null;
     return {
       ...(runner.inspectDelivery ? { inspectDelivery: runner.inspectDelivery.bind(runner) } : {}),
+      ...(runner.terminalGone ? { terminalGone: runner.terminalGone.bind(runner) } : {}),
+      ...(runner.inspectGoneDelivery ? { inspectGoneDelivery: runner.inspectGoneDelivery.bind(runner) } : {}),
       ...(runner.repairDelivery ? { repairDelivery: async (m: RunnerMember, request: DeliveryRepair): Promise<SendResult> => {
         const rt = this.runtime(member.id);
         const dispatch = this.store.getDispatch(request.dispatchId);
@@ -4692,7 +4858,13 @@ export class Orchestrator implements OrchestratorApi {
   // ---- 압축 ----
   private async beginCompact(member: Member, project: Project, runner: Runner, rt: Runtime, focus: string): Promise<void> {
     const state = this.store.ensureContextState(member.id);
-    if (state.compaction?.phase !== "queued") return;
+    if (state.compaction?.phase !== "queued") {
+      // 예약이 이미 돌았거나 닫혔는데 요청 표시만 남았다. 압축을 넣는 사이(예약이 아직 queued 인 동안) 온 실행기 이벤트가 표시를 되살린 것이다
+      // (reconcileCoreCompact). 남겨 두면 전달마다 여기서 돌아가 그 팀장의 대기열이 영영 멈춘다. 표시를 지우고 전달을 이어 간다.
+      rt.compactRequest = null;
+      rt.again = true;
+      return;
+    }
     this.requireActive(this.store.requireProject(project.id));
     const turn: Turn = { kind: "compact", text: "", interrupted: false };
     rt.turn = turn; // admission은 첫 await 이전에 예약한다.
@@ -4717,15 +4889,20 @@ export class Orchestrator implements OrchestratorApi {
       }, this.timings.compactTimeoutMs);
       return;
     }
-    const uncertain = !["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown");
-    const retryable = !uncertain && (result.deliveryEffect === "rejected" || ["busy", "blocked", "input_busy", "down"].includes(result.reason));
+    // 실행기는 압축 명령을 넣기 전에 기준선(받을 터미널)부터 저장한다. 결과를 모르는 실패(단계 제한, 끊긴 응답)라도 기준선이 없으면 넣은 적이 없고,
+    // 단계 제한 뒤에는 실행기도 더 진행하지 않는다(CoreRunner.compact). 예전에는 이것을 '불확실'로 적어, 묶인 터미널이 없는 미확정 압축이
+    // 어떤 조작으로도 풀리지 않은 채 남았다. 넣지 못한 것으로 보고 다시 예약한다.
+    const unknownEffect = !["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown");
+    const neverWritten = unknownEffect && runner instanceof CoreRunner && (latest.baseline?.coreCompact as CoreCompactState | undefined)?.id !== latest.compaction?.id;
+    const uncertain = unknownEffect && !neverWritten;
+    const retryable = !uncertain && (neverWritten || result.deliveryEffect === "rejected" || ["busy", "blocked", "input_busy", "down"].includes(result.reason));
     // 입력칸의 글·창·CLI 상태 때문에 압축을 못 넣는 동안 전달은 모두 압축 뒤에 선다. 끝없이 되풀이하면 그 직원의 전달이 이유 없이 굶는다.
     if (retryable) rt.compactBusySince ??= Date.now(); else rt.compactBusySince = null;
     const retry = retryable && Date.now() - rt.compactBusySince! < this.timings.inputBusyLimitMs;
     if (retryable && !retry) rt.compactBusySince = null;
     if (latest.compaction && (latest.compaction.phase !== "failed" || retry)) this.store.saveContextState({ ...latest,
       compaction: { ...latest.compaction, phase: uncertain ? "uncertain" : retry ? "queued" : "failed",
-        reason: uncertain ? "send_uncertain" : result.reason === "input_busy" ? "draft" : result.reason === "blocked" ? "blocked" : result.reason === "down" ? "backend_down" : retryable ? "working" : "provider_error",
+        reason: uncertain ? "send_uncertain" : neverWritten ? "backend_down" : result.reason === "input_busy" ? "draft" : result.reason === "blocked" ? "blocked" : result.reason === "down" ? "backend_down" : retryable ? "working" : "provider_error",
         finishedAt: !uncertain && !retry ? new Date().toISOString() : null } });
     if (uncertain) {
       this.store.appendActivity(member.id, "error", "압축 응답을 확인할 수 없어 자동 재전송을 중지했습니다");
@@ -4735,7 +4912,8 @@ export class Orchestrator implements OrchestratorApi {
     if (retry) { rt.compactRequest = focus; this.retryLater(member.id, rt, this.timings.retryMs); }
     else {
       rt.skipCompact = true; rt.again = true;
-      this.store.appendActivity(member.id, "error", retryable ? "압축 실패: 입력칸의 글이나 CLI 화면 때문에 압축을 시작하지 못했습니다. 기다리던 전달을 먼저 보냅니다" : `압축 실패: ${result.detail ?? result.reason}`);
+      this.store.appendActivity(member.id, "error", neverWritten ? "압축 실패: 실행 엔진이 제때 답하지 않아 압축을 시작하지 못했습니다. 기다리던 전달을 먼저 보냅니다"
+        : retryable ? "압축 실패: 입력칸의 글이나 CLI 화면 때문에 압축을 시작하지 못했습니다. 기다리던 전달을 먼저 보냅니다" : `압축 실패: ${result.detail ?? result.reason}`);
     }
     this.settle(this.store.requireMember(member.id));
     this.releaseSlots();
@@ -4814,6 +4992,8 @@ export class Orchestrator implements OrchestratorApi {
           this.releaseSlots();
         }
         if (e.status === "gone") {
+          // 실행기가 종료를 알렸다(엔진이 끝났다고 답했거나 그 터미널을 모른다고 답했다). 실행을 끝내기 전에 그 터미널에 묶인 상태부터 정리한다.
+          this.releaseGoneTerminal(member.id, e.terminalId ?? member.paneId);
           const lost = restartLossOf(e.exit?.reason, e.exit?.exitCode);
           this.endExecution(member, "interrupted", e.exit?.reason ?? "소유 터미널이 종료되거나 사라졌습니다", e.exit?.exitCode ?? null, e.turn, lost !== null && this.noteRestartLoss(member, lost));
           if (e.exit) {

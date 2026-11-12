@@ -189,6 +189,17 @@ export interface Runner {
   /** 미지원 hook은 unknown이다. 성공으로 대체하거나 자동 본문 재전송하지 않는다. */
   inspectDelivery?(m: RunnerMember, query: DeliveryProbe): Promise<DeliveryInspection>;
   repairDelivery?(m: RunnerMember, request: DeliveryRepair): Promise<SendResult>;
+  /**
+   * 엔진이 그 터미널을 끝났다고 알리거나, 모른다고 확정해 답했는가. 살아 있거나 답이 없으면 false 다(답이 없는 것은 사라졌다는 근거가 아니다).
+   * 읽기만 한다.
+   */
+  terminalGone?(terminalId: string): Promise<boolean>;
+  /**
+   * 터미널 없이 세션 기록만 읽어 봉투의 수신 표지를 찾는다. 봉투가 묶인 터미널의 사라짐이 확정된 뒤에만 쓴다:
+   * 그 터미널의 입력칸·턴 번호는 더 볼 수 없고 볼 까닭도 없다. snapshot 은 없고 finding 은 received·not_received·unknown 뿐이다.
+   * not_received 는 판정 범위를 끝까지 읽었고 표지가 없다는 뜻이다.
+   */
+  inspectGoneDelivery?(m: RunnerMember, query: DeliveryProbe): DeliveryInspection;
   isBusy(memberId: string): boolean;
   /**
    * 일하는 중인 턴에 긴급 글을 끼워 넣을 수 있는가. false 면 긴급도 턴이 끝난 뒤 보통 묶음으로 나간다

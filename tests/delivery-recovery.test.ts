@@ -41,7 +41,15 @@ function setup() {
     value.snapshot!.originalWrite = "settled";
     return value;
   }
+  /** 엔진이 사라졌다고 확정해 답한 터미널. 여기 없는 터미널은 살아 있거나 답이 없는 것이다. */
+  const gone = new Set<string>();
+  const probes: string[] = [];
+  const goneReads: string[] = [];
+  let inspectGone = (_member: RunnerMember, query: DeliveryProbe): DeliveryInspection => ({ ...observation(query, { snapshot: null }) });
+  let writing = false;
   const runner = {
+    terminalGone: async (terminalId: string) => { probes.push(terminalId); return gone.has(terminalId); },
+    inspectGoneDelivery: (member: RunnerMember, query: DeliveryProbe) => { goneReads.push(query.dispatchId); return inspectGone(member, query); },
     inspectDelivery: async (member: RunnerMember, query: DeliveryProbe) => { calls.push(member.id); return inspect(member, query); },
     repairDelivery: async (member: RunnerMember, request: DeliveryRepair): Promise<SendResult> => {
       const dispatch = service.repair.load(member.id, request);
@@ -55,7 +63,7 @@ function setup() {
       return result.ok ? { ...result, receipt: { dispatchId: request.dispatchId, receivedAt: new Date(time).toISOString(), source: "transport" } } : result;
     },
   };
-  function restart() { service = new DeliveryRecovery({ store, runner: () => runner, admit: () => admit, now: () => time, random: () => random }); return service; }
+  function restart() { service = new DeliveryRecovery({ store, runner: () => runner, admit: () => admit, writing: () => writing, now: () => time, random: () => random }); return service; }
   restart();
   function enqueue(target = member, text = "지시"): Delivery {
     return store.enqueue({ projectId: project.id, memberId: target.id, kind: "instruction", text });
@@ -67,7 +75,15 @@ function setup() {
     return dispatch;
   }
   async function due(id: string) { time = Date.parse(r(id).nextCheckAt!); await service.tick(); }
-  return { db, store, bus, project, member, makeMember, enqueue, envelope, r, calls, writes, events, observation, absent, due, restart,
+  /** 세션 기록만 읽은 결과(터미널 없음). 판정 범위를 끝까지 읽었고 표지가 없다. */
+  function goneAbsent(query: DeliveryProbe): DeliveryInspection {
+    return { finding: "not_received", receivedDeliveryIds: [], snapshot: null, quiescence: "settled", evidence: [{ source: "claude_log", verdict: "absent", location: "none", code: "complete_range_without_marker", complete: true, checkedAt: new Date(time).toISOString() }] };
+  }
+  function goneReceived(query: DeliveryProbe): DeliveryInspection {
+    return { finding: "received", receivedDeliveryIds: query.markers.map(m => m.deliveryId), snapshot: null, quiescence: "settled", evidence: [{ source: "claude_log", verdict: "present", location: "received_input", code: "marker_in_user_input", complete: true, checkedAt: new Date(time).toISOString() }] };
+  }
+  return { db, store, bus, project, member, makeMember, enqueue, envelope, r, calls, writes, events, observation, absent, due, restart, gone, probes, goneReads, goneAbsent, goneReceived,
+    set inspectGone(value: typeof inspectGone) { inspectGone = value; }, set writing(value: boolean) { writing = value; },
     get service() { return service; }, get now() { return time; }, set now(value: number) { time = value; },
     set inspect(value: typeof inspect) { inspect = value; }, set result(value: SendResult) { result = value; },
     set finalHook(value: typeof finalHook) { finalHook = value; }, set random(value: number) { random = value; }, set admit(value: boolean) { admit = value; } };
@@ -683,8 +699,15 @@ test("same native resume can reconcile log receipt after generation change while
   };
   await f.service.tick();
   expect(f.store.requireDelivery(d.id).status).toBe("delivered");
+  // 옛 터미널이 살아 있을 수 있는 동안(엔진이 사라졌다고 확정하지 않음)은 그 터미널에 한 쓰기의 보류가 그대로 남는다.
+  expect(f.probes).toContain(old.identity.terminalId!);
   expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("unknown");
   expect(f.service.fenced(f.member.id)).toBe(true); expect(f.writes).toHaveLength(0);
+  // 옛 터미널의 사라짐이 확정되면 그 쓰기는 더 들어갈 곳이 없다: 보류가 풀린다.
+  f.gone.add(old.identity.terminalId!);
+  expect(f.service.settleGoneTerminal(f.member.id, old.identity.terminalId!)).toEqual({ received: [], requeued: [], undecided: [] });
+  expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("accepted");
+  expect(f.service.fenced(f.member.id)).toBe(false); expect(f.writes).toHaveLength(0);
 });
 
 test("different native session records identity_changed for owner review instead of silently skipping checks", async () => {
@@ -695,6 +718,119 @@ test("different native session records identity_changed for owner review instead
   expect(f.r(d.id)).toMatchObject({ phase: "needs_owner", reason: "identity_changed" });
   expect(f.service.memberNotices(f.member.id).items[0].note).toContain("세션이 다시 열려");
   expect(f.writes).toHaveLength(0);
+  // 옛 터미널의 사라짐이 확정돼도 다른 대화(세션이 바뀜)의 기록으로는 판정하지 않는다: 스스로 다시 넣지 않고 대표 확인으로 남는다.
+  const old = f.store.listDispatches(f.member.id)[0]!;
+  f.gone.add(old.identity.terminalId!);
+  f.inspectGone = (_m, q) => ({ ...f.observation(q, { snapshot: null }), evidence: [{ source: "claude_log", verdict: "unknown", location: "none", complete: false, code: "identity_changed", checkedAt: new Date(f.now).toISOString() }] });
+  f.now += 60_000; await f.service.tick();
+  expect(f.goneReads).toEqual([old.dispatchId]);
+  expect(f.r(d.id)).toMatchObject({ phase: "needs_owner", reason: "identity_changed" });
+  expect(f.store.requireDelivery(d.id)).toMatchObject({ status: "held", holdReason: "delivery_unknown" });
+  expect(f.service.memberNotices(f.member.id).items[0].allowedActions).toEqual(["recheck", "stop_retry"]);
+  expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("unknown");
+});
+
+describe("봉투가 묶인 터미널이 바뀐 뒤", () => {
+  /** 받았는지 모르는 봉투를 남기고, 같은 대화를 다른 터미널로 다시 연 모양을 만든다. */
+  function reopened() {
+    const f = setup(), d = f.enqueue(), old = f.envelope([d]);
+    f.store.patchMember(f.member.id, { paneId: "reopened-terminal" });
+    return { f, d, old, terminal: old.identity.terminalId! };
+  }
+
+  test("옛 터미널이 살아 있을 수 있는 동안은 기록에 없어도 다시 넣지 않는다(엔진이 사라졌다고 확정하지 않음)", async () => {
+    const { f, d, old, terminal } = reopened();
+    // 지금 터미널의 관측: 기록 범위를 끝까지 읽었고 표지가 없으며 입력칸도 비었다. 그래도 봉투는 다른 터미널의 것이다.
+    f.inspect = async (_m, q) => { const x = f.absent(q); x.snapshot!.identity = { ...q.identity, terminalId: "reopened-terminal" }; return x; };
+    for (let i = 0; i < 8; i++) { await f.service.tick(); f.now += 60_000; }
+    expect(f.probes.length).toBeGreaterThan(0); expect(new Set(f.probes)).toEqual(new Set([terminal]));
+    expect(f.goneReads).toHaveLength(0);
+    expect(f.r(d.id)).toMatchObject({ phase: "needs_owner", reason: "session_lost" });
+    expect(f.store.requireDelivery(d.id)).toMatchObject({ status: "held", holdReason: "delivery_unknown" });
+    expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("unknown");
+    expect(f.service.fenced(f.member.id)).toBe(true);
+    expect(f.writes).toHaveLength(0);
+    // 대표의 중복 위험 동의 재전송도 이때는 다른 터미널에 넣지 않는다.
+    expect(f.service.memberNotices(f.member.id).items[0].allowedActions).toEqual(["recheck", "stop_retry"]);
+  });
+
+  test("옛 터미널의 사라짐이 확정되고 기록에 수신 표지가 있으면 전달됨으로 확정한다", async () => {
+    const { f, d, old, terminal } = reopened();
+    f.gone.add(terminal); f.inspectGone = (_m, q) => f.goneReceived(q);
+    await f.service.tick();
+    expect(f.store.requireDelivery(d.id).status).toBe("delivered");
+    expect(f.r(d.id)).toMatchObject({ phase: "resolved" });
+    expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("accepted");
+    expect(f.service.fenced(f.member.id)).toBe(false);
+    expect(f.calls).toHaveLength(0); expect(f.writes).toHaveLength(0);
+  });
+
+  test("옛 터미널의 사라짐이 확정되고 판정 범위를 끝까지 읽어 표지가 없으면, 봉투를 거절로 닫고 새 봉투로 다시 넣게 대기열로 돌린다", async () => {
+    const { f, d, old, terminal } = reopened();
+    f.gone.add(terminal); f.inspectGone = (_m, q) => f.goneAbsent(q);
+    await f.service.tick();
+    expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("rejected");
+    expect(f.r(d.id)).toMatchObject({ phase: "resolved", reason: "not_received", autoAttempts: 1 });
+    expect(f.store.requireDelivery(d.id).status).toBe("queued");
+    expect(f.service.fenced(f.member.id)).toBe(false);
+    // 옛 터미널에는 아무것도 쓰지 않는다. 다음 전달이 지금 터미널의 새 봉투를 만든다.
+    expect(f.calls).toHaveLength(0); expect(f.writes).toHaveLength(0);
+    const next = f.service.prepareDispatch([d.id], { ...old.identity, terminalId: "reopened-terminal" }, old.baseline);
+    expect(next.dispatchId).not.toBe(old.dispatchId); expect(next.markers).toEqual(old.markers);
+    expect(f.store.listActivity(f.member.id).map(a => a.text)).toEqual([expect.stringContaining("세션 기록에 받은 흔적이 없습니다")]);
+  });
+
+  test("사라짐이 확정돼도 기록을 끝까지 읽지 못하면 대표에게 묻고, 중복 위험 동의 재전송은 지금 터미널의 새 봉투로 나간다", async () => {
+    const { f, d, old, terminal } = reopened();
+    f.gone.add(terminal); // inspectGone 기본값: 기록을 끝까지 읽지 못함(partial_log)
+    await f.service.tick();
+    expect(f.r(d.id)).toMatchObject({ phase: "needs_owner", reason: "log_incomplete" });
+    expect(f.store.requireDelivery(d.id)).toMatchObject({ status: "held", holdReason: "delivery_unknown" });
+    expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("unknown");
+    expect(f.service.fenced(f.member.id)).toBe(true);
+    const item = f.service.memberNotices(f.member.id).items[0];
+    expect(item.allowedActions).toEqual(["recheck", "retry_with_risk", "stop_retry"]);
+    await f.service.recover(d.id, { operationId: randomUUID(), expectedVersion: item.version, action: "retry_with_risk", acceptDuplicateRisk: true });
+    await f.service.tick();
+    expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("rejected");
+    expect(f.store.requireDelivery(d.id).status).toBe("queued");
+    expect(f.r(d.id)).toMatchObject({ phase: "resolved", reason: "not_received" });
+    expect(f.store.getDeliveryRetry(d.id).retryReason).toBeNull();
+    expect(f.service.fenced(f.member.id)).toBe(false);
+    expect(f.writes).toHaveLength(0);
+  });
+
+  test("이미 대표에게 묻고 있던 전달은 사라짐이 확정되고 기록에 없어도 스스로 다시 넣지 않고, 중복 위험 동의를 연다", async () => {
+    const { f, d, old, terminal } = reopened();
+    f.store.updateDeliveryRecovery(d.id, f.r(d.id).version, { phase: "needs_owner", reason: "session_lost", nextCheckAt: new Date(f.now).toISOString() });
+    f.gone.add(terminal); f.inspectGone = (_m, q) => f.goneAbsent(q);
+    await f.service.tick();
+    expect(f.r(d.id)).toMatchObject({ phase: "needs_owner", reason: "complete_range_without_marker" });
+    expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("unknown");
+    expect(f.store.requireDelivery(d.id).status).toBe("held");
+    expect(f.service.memberNotices(f.member.id).items[0].allowedActions).toEqual(["recheck", "retry_with_risk", "stop_retry"]);
+  });
+
+  test("이 프로세스의 전송 호출이 아직 돌고 있는 봉투는 호출이 끝난 뒤에 판정한다", async () => {
+    const { f, d, old, terminal } = reopened();
+    f.gone.add(terminal); f.inspectGone = (_m, q) => f.goneAbsent(q); f.writing = true;
+    expect(f.service.settleGoneTerminal(f.member.id, terminal)).toEqual({ received: [], requeued: [], undecided: [d.id] });
+    expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("unknown");
+    expect(f.goneReads).toHaveLength(0);
+    f.writing = false;
+    expect(f.service.settleGoneTerminal(f.member.id, terminal)).toEqual({ received: [], requeued: [d.id], undecided: [] });
+  });
+
+  test("잠든 팀장의 봉투는 사라짐이 확정돼도 건드리지 않는다(깨어난 뒤에 판정한다)", async () => {
+    const { f, d, old, terminal } = reopened();
+    f.store.patchMember(f.member.id, { status: "asleep", paneId: null });
+    f.gone.add(terminal); f.inspectGone = (_m, q) => f.goneAbsent(q);
+    await f.service.tick();
+    expect(f.service.settleGoneTerminal(f.member.id, terminal)).toEqual({ received: [], requeued: [], undecided: [] });
+    expect(f.store.getDispatch(old.dispatchId)!.transportState).toBe("unknown");
+    expect(f.store.requireDelivery(d.id).status).toBe("held");
+    expect(f.goneReads).toHaveLength(0);
+  });
 });
 
 

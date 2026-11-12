@@ -6,6 +6,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import type { AgentToolsImpl, PostInput } from "../server/orchestrator.ts";
 import { RESTART_REOPENED_NOTE, RESTART_RESUME_TEXT } from "../server/restart-wake.ts";
 import type { DecisionOption, Member } from "../shared/types.ts";
+import { appendFileSync } from "node:fs";
+import { transcriptPath } from "../server/runner/transcript.ts";
 import { coreSetup, type CoreEnv, type CoreSetupOptions, type FakeTurnContext } from "./fixtures/core-harness.ts";
 
 const TOOLS: AgentToolsImpl = {
@@ -403,28 +405,55 @@ describe("재시작으로 끊긴 일 이어가기", () => {
 
 // 스스로 다시 여는 길은 전달 펌프를 거치지 않는다. 펌프는 여는 자리에 닿기 전에 보류(받았는지 모르는 전달 등)에서 돌아가므로,
 // 펌프에 기대면 보류가 남은 팀장은 깨어나지 않는다. 먼저 터미널을 확보하고, 보류는 입력 직전에만 본다.
+// 받았는지 모르는 전달 자체는 그 전달을 받던 터미널의 사라짐이 확정되면 세션 기록으로 판정한다(tests/restart-audit.test.ts).
 describe("보류가 남은 팀장", () => {
-  test("받았는지 모르는 전달이 남은 팀장도 다시 연다. 그 전달을 스스로 다시 넣지는 않는다", async () => {
+  /** 엔진이 입력 요청에 답하지 않아 받았는지 모르는 전달 하나가 남은, 깨어 있는 팀장. */
+  async function unknownInput() {
     const t = await setup({ runnerDeps: { sendTimeoutMs: 300 } });
     const w = await awake(t, "결제 연동", "pay");
-    // 엔진이 입력 요청에 답하지 않는다: 받았는지 모른다.
     t.core.intercept((call) => call.method === "terminal.send" && String(call.params.text).includes("받았는지 모를 일") ? "drop" : undefined);
     const assigned = await t.orch.assign(t.project.id, w.handle, { text: "받았는지 모를 일" });
     await t.waitFor("받았는지 모름", () => t.store.requireDelivery(assigned.delivery.id).holdReason === "delivery_unknown");
+    return { t, w, deliveryId: assigned.delivery.id };
+  }
+
+  test("받았는지 모르는 전달이 남은 팀장도 다시 연다. 세션 기록으로 판정하지 못한 전달을 스스로 다시 넣지는 않는다", async () => {
+    const { t, w, deliveryId } = await unknownInput();
     await t.stopServer();
     t.core.intercept(null);
     t.core.exit(w.id, 1, "holder_lost");
+    // 죽은 CLI 가 쓰다 만 줄이 세션 기록 끝에 남았다: 받았는지 못 받았는지 기록으로는 알 수 없다.
+    appendFileSync(transcriptPath(t.project.cwd, w.sessionId!, t.core.claudeHome), '{"type":"user","message":{"role":"us');
     const next = await restart(t);
     await next.waitFor("다시 열림", () => resumed(next, w.id).length === 1 && next.member(w.id).paneId === next.core.terminalOf(w.id)!.address && !next.store.getRestartWake(w.id));
     expect(reopenNotes(next, w.id)).toHaveLength(1);
     await Bun.sleep(300);
-    // 보류는 그대로다: 받았는지 모르는 전달을 서버가 스스로 다시 넣지 않는다.
-    expect(next.store.requireDelivery(assigned.delivery.id).status).not.toBe("delivered");
+    // 보류는 그대로다: 받았는지 모르는 전달을 서버가 스스로 다시 넣지 않고 대표에게 묻는다.
+    expect(next.store.requireDelivery(deliveryId)).toMatchObject({ status: "held", holdReason: "delivery_unknown" });
+    expect(next.store.getDeliveryRecovery(deliveryId)).toMatchObject({ phase: "needs_owner", reason: "log_incomplete" });
     expect(next.turns(w.id).some((turn) => turn.prompt.includes("받았는지 모를 일"))).toBe(false);
     expect(resumed(next, w.id)).toHaveLength(1);
     // 받았는지조차 모르는 입력은 '하던 일'이 아니다: 이어가기 글을 만들지 않는다.
     expect(next.store.listDeliveries(next.project.id).some((d) => d.text === RESTART_RESUME_TEXT)).toBe(false);
     expect(next.store.getRestartWake(w.id)).toBeNull();
+  }, 20_000);
+
+  test("그 전달을 받던 터미널이 사라진 것이 확인되고 세션 기록에 받은 흔적이 없으면, 다시 연 터미널에 한 번 다시 넣는다", async () => {
+    const { t, w, deliveryId } = await unknownInput();
+    const lead = await t.orch.ensureConductor(t.project.id);
+    await t.stopServer();
+    t.core.intercept(null);
+    t.core.exit(w.id, 1, "holder_lost");
+    const next = await restart(t);
+    await next.waitFor("다시 넣어 전달됨", () => next.store.requireDelivery(deliveryId).status === "delivered");
+    expect(resumed(next, w.id)).toHaveLength(1);
+    const turns = next.turns(w.id).filter((turn) => turn.prompt.includes("받았는지 모를 일"));
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.terminal).toBe(next.member(w.id).paneId!);
+    // 넣지 못한 입력은 '하던 일'도 '끊긴 실행'도 아니다: 이어가기 글을 만들지 않고, 총괄에게 중단을 알리지도 않는다.
+    expect(next.store.listDeliveries(next.project.id).some((d) => d.text === RESTART_RESUME_TEXT)).toBe(false);
+    expect(next.texts().some((m) => m.kind === "시스템" && m.body.includes("중단"))).toBe(false);
+    expect(next.store.listDeliveries(next.project.id).some((d) => d.memberId === lead.id && d.text.includes("중단되었습니다"))).toBe(false);
   }, 20_000);
 });
 

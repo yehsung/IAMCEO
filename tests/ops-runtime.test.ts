@@ -191,7 +191,8 @@ describe("operations runtime", () => {
 
   test("pending receipts are unknown before runtime initialization and durable leases survive", async () => {
     const settings = config(); const db = openDb(settings.dbPath); const store = new Store(db, new Bus());
-    const member = store.createMember({ projectId: "hq", handle: "w", name: "직원", kind: "worker", origin: "manual" });
+    // 조작권은 그것을 얻은 터미널에 묶인다: 명부의 지금 터미널이 그 터미널일 때만 유효하다.
+    const member = store.createMember({ projectId: "hq", handle: "w", name: "직원", kind: "worker", origin: "manual", paneId: "terminal" });
     const operationId = randomUUID();
     store.beginOperation({ operationId, kind: "terminal_control", projectId: "hq", memberId: member.id, request: { text: "never replay" } });
     const identity = { terminalId: "terminal", sessionGeneration: store.memberRevisions(member.id).sessionGeneration, sessionId: null, process: null };
@@ -215,6 +216,14 @@ describe("operations runtime", () => {
     expect(calls).toEqual(["initialize", "recover"]);
     expect(runtime.store.getOperation(operationId)?.status).toBe("unknown");
     expect(runtime.store.inputState(member.id).lease?.lastInputSequence).toBe(3);
+    // 그 터미널이 명부에서 사라지면(끝난 것이 확인돼 비워졌거나 새 터미널로 바뀜) 남은 줄은 조작권이 아니다. 만료(여기서는 60초)를 기다리지 않는다.
+    runtime.store.patchMember(member.id, { paneId: null });
+    expect(runtime.store.inputState(member.id).lease).toBeNull();
+    runtime.store.patchMember(member.id, { paneId: "another-terminal" });
+    expect(runtime.store.inputState(member.id).lease).toBeNull();
+    // 새 터미널에서는 다른 조작권을 곧바로 얻을 수 있다(옛 줄이 막지 않는다).
+    runtime.store.saveLease({ memberId: member.id, claimId: "next-claim", leaseId: "next-lease", identity: { ...identity, terminalId: "another-terminal" }, expiresAt: Date.now() + 60_000, lastInputSequence: 0 });
+    expect(runtime.store.inputState(member.id).lease?.claimId).toBe("next-claim");
   });
 
   test("periodic backups and conservative storage sweep run under ownership and stop with the runtime", async () => {

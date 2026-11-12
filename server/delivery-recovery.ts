@@ -14,12 +14,25 @@ export type DeliveryRecoveryStore = Pick<Store,
   "deliveryRecoveryOperation" | "markDelivered" | "markHeld" | "markFailed" | "setDeliveryStatus" | "setMessageDelivery" |
   "listMissingReportNotices" | "deliveryWait" | "detectDeliveryStalls" | "deliveryStalled" | "recheckPendingDelivery" | "getMessage" | "requireMessage" | "listMessagePage" | "getDecision" | "setDecisionStatus" | "getTodo" | "todoRevision" | "appendActivity">;
 
+export type RecoveryRunner = Pick<Runner, "inspectDelivery" | "repairDelivery" | "terminalGone" | "inspectGoneDelivery">;
+/** What settling the envelopes of a gone terminal decided, by delivery id. */
+export interface GoneTerminalSettlement {
+  /** The session log shows it was received: confirmed as delivered. */
+  received: string[];
+  /** Proven absent from the session log (or the owner accepted the duplicate risk): back in the queue for a new envelope. */
+  requeued: string[];
+  /** The log could not answer: left for the owner. */
+  undecided: string[];
+}
+
 export interface DeliveryRecoveryOptions {
   store: DeliveryRecoveryStore;
-  runner: (member: Member) => Pick<Runner, "inspectDelivery" | "repairDelivery"> | null;
+  runner: (member: Member) => RecoveryRunner | null;
   legacyMessageText?: (message: Message) => string;
   /** True once nothing more can arrive from the write of this envelope (its call ended, or its process died). */
   writerDone?: (dispatch: DeliveryDispatch) => boolean;
+  /** True while this process's own send call for the envelope has not returned yet. */
+  writing?: (dispatch: DeliveryDispatch) => boolean;
   /** False while a repair write cannot be handed to the runner now (turn cap, outage hold, retry interval). */
   admit?: (memberId: string) => boolean;
   now?: () => number;
@@ -30,6 +43,7 @@ const MAX_REJECTED = 5;
 const CHECK_MS = [1_000, 3_000, 10_000, 30_000, 60_000];
 const RETRY_MS = [2_000, 10_000, 30_000];
 const STOP_NOTE = "추가 전달을 중지했습니다. 과거 수신 여부는 알 수 없습니다";
+const PHYSICAL = ["prepared", "write_started", "unknown"];
 const CHECK_NOTE = "전달 여부를 시스템이 확인하고 있습니다";
 const requestSchema = z.discriminatedUnion("action", [
   z.strictObject({ operationId: z.uuid(), expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), action: z.literal("recheck") }),
@@ -380,6 +394,13 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     for (const result of results) if (result.status === "rejected") throw result.reason;
   }
   private async checkMember(deliveries: Delivery[]): Promise<void> {
+    // 사라진 것이 확정된 터미널의 봉투는 터미널 없이 판정했다. 아래의 터미널 조회는 지금 터미널(또는 살아 있을 수 있는 터미널)의 봉투만 본다.
+    const stranded = this.strandedTerminals(deliveries[0].memberId);
+    if (stranded.length) {
+      const settled = await this.settleGoneTerminals(deliveries[0].memberId, stranded);
+      deliveries = deliveries.filter(d => !settled.has(d.id));
+      if (!deliveries.length || this.closed) return;
+    }
     const checked = new Set<string>();
     // An older unknown write is still a physical fence even if a later attempt succeeded.
     // Read it by its own identity/barrier; later success cannot settle that earlier RPC.
@@ -458,6 +479,126 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       });
       if (proven || closed) this.store.updateDispatch(dispatch.dispatchId, dispatch.transportState, "accepted");
     }
+  }
+  /** 이 봉투가 마지막 시도이고 아직 정해지지 않은(전달됨·그만 보내기·다시 보내기로 닫히지 않은) 항목. */
+  private openItems(dispatch: DeliveryDispatch): Delivery[] {
+    const physical = PHYSICAL.includes(dispatch.transportState);
+    return dispatch.items.map(item => this.store.getDelivery(item.deliveryId)).filter((d): d is Delivery => !!d && d.status !== "delivered" &&
+      !["resolved", "stopped"].includes(this.record(d.id).phase) && (physical || this.logicalFence(d)) && this.latest(d)?.dispatchId === dispatch.dispatchId);
+  }
+
+  /**
+   * 봉투가 묶인 터미널의 사라짐이 확정된 뒤에만 부른다(엔진이 끝났다고 알렸거나, 그 터미널을 모른다고 확정해 답했다. 답이 없는 것은 확정이 아니다).
+   * 그 터미널의 입력칸에 반쯤 들어간 글은 되살아날 수 없으므로 터미널 없이 세션 기록만으로 판정한다:
+   * - 수신 표지가 있으면 전달됨으로 확정한다.
+   * - 판정 범위를 끝까지 읽었고 표지가 없으면 그 봉투를 거절로 닫고 대기열로 돌린다. 다음 전달이 지금 터미널에 새 봉투로 넣는다.
+   *   이미 대표에게 묻고 있던 전달과 자동 재전송을 세 번 한 전달은 스스로 다시 넣지 않고, 대표의 '중복 위험 동의 재전송'을 기다린다.
+   * - 대표가 중복 위험에 동의했으면 기록을 끝까지 읽지 못했어도 같은 길로 다시 넣는다(예전에는 터미널이 바뀌면 동의해도 넣지 못했다).
+   * - 기록을 읽지 못했으면 대표 확인으로 둔다.
+   * 옛 터미널이 살아 있을 수 있는 동안에는 부르지 않는다. 그때는 자동으로도 수동으로도 다른 터미널에 다시 넣지 않는 기존 판정(checkMember)이 그대로다.
+   * 잠든 팀장은 건드리지 않는다: 깨어난 뒤의 확인이 같은 판정을 한다.
+   */
+  settleGoneTerminal(memberId: string, terminalId: string): GoneTerminalSettlement {
+    const out: GoneTerminalSettlement = { received: [], requeued: [], undecided: [] };
+    const member = this.store.getMember(memberId);
+    if (this.closed || !member || member.origin === "manual" || member.status === "asleep" || this.mutations.has(memberId) || this.store.requireProject(member.projectId).archived) return out;
+    const runner = this.options.runner(member);
+    // 세션 기록을 터미널 없이 읽지 못하는 실행기에서는 아무것도 바꾸지 않는다.
+    if (!runner?.inspectGoneDelivery) return out;
+    const generation = this.store.memberRevisions(memberId).sessionGeneration;
+    this.store.transaction(() => {
+      for (const dispatch of this.store.listDispatches(memberId)) {
+        if (dispatch.identity.terminalId !== terminalId || dispatch.identity.sessionGeneration !== generation || dispatch.transportState === "rejected") continue;
+        const physical = PHYSICAL.includes(dispatch.transportState);
+        const open = this.openItems(dispatch);
+        if (!physical && !open.length) continue;
+        // 이 프로세스의 전송 호출이 아직 돌고 있다. 끝난 뒤의 확인(tick)이 다시 본다.
+        if (this.options.writing?.(dispatch)) { out.undecided.push(...open.map(d => d.id)); continue; }
+        if (!open.length) {
+          // 항목이 모두 다른 길로 정해졌고, 사라진 터미널에는 더 들어갈 것이 없다.
+          this.store.updateDispatch(dispatch.dispatchId, dispatch.transportState, "accepted");
+          continue;
+        }
+        let inspection: DeliveryInspection;
+        // prepared 는 쓰기 직전에야 write_started 가 된다. 쓴 적이 없으니 기록을 읽을 것도 없다.
+        if (dispatch.transportState === "prepared") inspection = { ...this.unknown("not_written"), finding: "not_received" };
+        else {
+          try { inspection = this.validDispatch(dispatch) ? runner.inspectGoneDelivery!(this.member(member), dispatch) : this.unknown("unsupported_schema"); }
+          catch { inspection = this.unknown("file_missing"); }
+        }
+        const received = new Set(inspection.receivedDeliveryIds);
+        for (const d of open) if (received.has(d.id)) { this.received(d, false, inspection.evidence); out.received.push(d.id); }
+        const rest = open.filter(d => !received.has(d.id));
+        if (!rest.length) {
+          if (physical) this.store.updateDispatch(dispatch.dispatchId, dispatch.transportState, "accepted");
+          continue;
+        }
+        const risk = (d: Delivery) => !!this.store.getDeliveryRetry(d.id).retryReason?.startsWith("delivery_risk:");
+        const absent = inspection.finding === "not_received" && !received.size;
+        // 봉투는 통째로 다시 넣거나 통째로 둔다. 일부만 다시 넣으면 남은 항목의 옛 쓰기를 닫을 근거가 없다.
+        const resend = dispatch.transportState === "prepared" || rest.every(risk) || absent && rest.every(d => { const r = this.record(d.id); return r.phase !== "needs_owner" && r.autoAttempts < 3; });
+        if (!resend) {
+          for (const d of rest) { this.observeGone(d, inspection, absent); out.undecided.push(d.id); }
+          continue;
+        }
+        this.store.updateDispatch(dispatch.dispatchId, dispatch.transportState, "rejected");
+        for (const d of rest) {
+          const r = this.record(d.id), approved = risk(d);
+          this.store.updateDeliveryRecovery(d.id, r.version, { autoAttempts: r.autoAttempts + (approved ? 0 : 1), evidence: inspection.evidence, lastCheckedAt: this.iso() });
+          if (!this.requeueRejected(d.id, "gone")) { out.undecided.push(d.id); continue; }
+          this.store.appendActivity(memberId, "system", `${approved ? "전달을 받던 터미널이 끝났습니다. 중복 위험 동의를 받아 다시 열린 세션에 다시 보냅니다" : "전달을 받던 터미널이 끝났고 세션 기록에 받은 흔적이 없습니다. 다시 열린 세션에 다시 보냅니다"} (${d.id})`, `${dispatch.dispatchId}:${d.id}:gone_resend`);
+          out.requeued.push(d.id);
+        }
+      }
+    });
+    if (out.received.length || out.requeued.length) this.store.recheckPendingDelivery(memberId);
+    return out;
+  }
+  /** 사라진 터미널의 봉투를 세션 기록으로 판정하지 못했다(또는 스스로 다시 넣지 않기로 했다). 대표에게 묻는다. */
+  private observeGone(d: Delivery, inspection: DeliveryInspection, absent: boolean): void {
+    const r = this.record(d.id);
+    const code = inspection.evidence[0]?.code ?? "file_missing";
+    // 큰 기록을 나눠 읽는 중이다. 묻지 않고 곧 이어 읽는다.
+    const scanning = code === "scan_pending" && r.phase !== "needs_owner";
+    const reason = absent ? (r.autoAttempts >= 3 ? "retry_exhausted" : "complete_range_without_marker")
+      : ["identity_changed", "session_unbound", "unsupported_schema"].includes(code) ? code
+      : ["file_missing", "permission_denied"].includes(code) ? "log_missing" : "log_incomplete";
+    this.store.updateDeliveryRecovery(d.id, r.version, { phase: scanning ? "checking" : "needs_owner", reason: scanning ? r.reason ?? "inflight_unsettled" : reason, checkCount: r.checkCount + 1,
+      lastCheckedAt: this.iso(), nextCheckAt: this.iso(this.now() + (scanning ? CHECK_MS[0] : 60_000)), evidence: inspection.evidence });
+    this.projectStatus(d, "held", scanning ? CHECK_NOTE : note(reason, inspection.evidence));
+  }
+  /** 지금 터미널이 아닌 터미널에 묶인 미해결 봉투의 터미널들. 엔진에 물어볼 후보다(읽기만 한다, 동기). */
+  private strandedTerminals(memberId: string): string[] {
+    const member = this.store.getMember(memberId);
+    const runner = member ? this.options.runner(member) : null;
+    if (!member || member.status === "asleep" || !runner?.terminalGone || !runner.inspectGoneDelivery) return [];
+    const generation = this.store.memberRevisions(memberId).sessionGeneration;
+    const terminals = new Set<string>();
+    for (const dispatch of this.store.listDispatches(memberId)) {
+      const terminal = dispatch.identity.terminalId;
+      if (!terminal || terminal === member.paneId || dispatch.identity.sessionGeneration !== generation || dispatch.transportState === "rejected") continue;
+      if (PHYSICAL.includes(dispatch.transportState) || this.openItems(dispatch).length) terminals.add(terminal);
+    }
+    return [...terminals];
+  }
+  /**
+   * 후보 터미널이 사라졌는지 엔진에 묻고, 사라진 것만 터미널 없이 판정한다. 여기서 다룬 전달의 ID 를 돌려준다(뒤따르는 터미널 조회에서 뺀다).
+   * 살아 있거나 답이 없는 터미널의 봉투는 다루지 않는다.
+   */
+  private async settleGoneTerminals(memberId: string, terminals: string[]): Promise<Set<string>> {
+    const handled = new Set<string>();
+    for (const terminal of terminals) {
+      const member = this.store.getMember(memberId);
+      const runner = member ? this.options.runner(member) : null;
+      if (this.closed || !runner?.terminalGone) break;
+      let gone = false;
+      try { gone = await runner.terminalGone(terminal); } catch { /* 답이 없는 것은 사라졌다는 근거가 아니다 */ }
+      // 묻는 사이 명부가 그 터미널로 돌아왔으면(다시 붙음) 살아 있는 터미널이다.
+      if (!gone || this.closed || this.store.getMember(memberId)?.paneId === terminal) continue;
+      const result = this.settleGoneTerminal(memberId, terminal);
+      for (const id of [...result.received, ...result.requeued, ...result.undecided]) handled.add(id);
+    }
+    return handled;
   }
   private settlePhysical(dispatch: DeliveryDispatch, inspection: DeliveryInspection): void {
     const snapshot = inspection.snapshot;

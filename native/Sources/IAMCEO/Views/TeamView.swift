@@ -1486,11 +1486,8 @@ struct MemberDetailView: View {
         if target != m.cli, store.runtime?.providers[target]?.installed == false {
             return "\(providerFullName(target))가 실행 호스트에 설치돼 있지 않습니다. 설정의 실행 환경을 확인하세요."
         }
-        // The server refuses to close a session mid-turn or at an approval window (409).
-        if reopens && ["working", "blocked"].contains(m.status) {
-            return "일하거나 승인 창 앞이면 세션을 다시 열 수 없습니다. 턴이 끝난 뒤 적용하세요."
-        }
-        return nil
+        // The server refuses to close a session mid-turn or at an approval window (409). A usage-limit menu is not one (memberReopenBlock).
+        return memberReopenBlock(m, reopens: reopens)
     }
 
     /// "Opened" is not "handed over": the handoff note waits in the queue until a wake message goes out.

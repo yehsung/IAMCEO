@@ -1730,7 +1730,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         patch = { ...patch, contextWindow: before.contextWindow, contextWindowSource: before.contextWindowSource };
       }
       // blocked 자체는 입력 보류다. 새 진입에서 이전 승인의 증거를 재사용하지 않는다.
-      if (patch.status !== undefined && patch.status !== "blocked") patch = { ...patch, blockedReason: null };
+      // 예외: usage_limit 은 창의 까닭이 아니라 사용 한도 보류의 표시다(메뉴 없이 한도 오류로 멈춘 팀장은 error 와 함께 적힌다. 예전에는 이 줄이 그것마저 지웠다).
+      // 상태만 바뀌어서는(터미널이 사라져 꺼짐, 메뉴를 닫음, 다시 열기) 지우지 않는다. 보류가 풀릴 때 ApiRecovery 가 직접 지운다.
+      // 지우면 화면(쉬는 중·안 보임)과 실제(한도 보류)가 어긋났다.
+      const usageMark = patch.blockedReason === "usage_limit" || (patch.blockedReason === undefined && before.blockedReason === "usage_limit");
+      if (patch.status !== undefined && patch.status !== "blocked" && !usageMark) patch = { ...patch, blockedReason: null };
       else if (patch.status === "blocked" && before.status !== "blocked" && patch.blockedReason === undefined) patch = { ...patch, blockedReason: "status_unknown" };
       const at = nowIso();
       if (patch.now !== undefined && patch.nowAt === undefined) patch = { ...patch, nowAt: at };

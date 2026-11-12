@@ -1076,7 +1076,10 @@ export class CoreRunner implements FullRunner {
     if (quiet) {
       const screen = await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 });
       const draft = providerFor(member) === "claude" ? inputText(screen.text) : codexDraft(screen.text);
-      if (draft !== "") throw new CoreError("input_busy", "Cannot close a CLI with a user draft or unknown composer; the draft is preserved");
+      // 닫기·강제 재우기(whileWorking)는 마지막 탈출구다. 오류로 끝난 CLI 는 예전에 초안 확인 없이 끝냈다: 오류 배너가 입력칸을 가려
+      // 알아보지 못하는(null) 화면은 막지 않는다. 쓰던 글이 보이면 지금처럼 지킨다.
+      const unreadableAfterError = draft === null && !!opts.whileWorking && this.stateOf(track, terminal) === "error";
+      if (draft !== "" && !unreadableAfterError) throw new CoreError("input_busy", "Cannot close a CLI with a user draft or unknown composer; the draft is preserved");
     }
   }
   /**

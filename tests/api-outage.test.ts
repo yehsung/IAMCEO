@@ -432,20 +432,68 @@ describe("포기·실패 뒤에도 영구 보류로 남지 않는다", () => {
     expect(f.service.holdReason(m.id)).toBeNull();
   });
 
-  test("잠든 직원은 닫을 창이 없으므로 이어가기만 넣고 상태를 깨어 있는 것처럼 바꾸지 않는다", async () => {
-    for (const automatic of [false, true]) {
-      const f = fixture(), menu = usageLimitMenu(menuText(), f.now)!;
-      f.service.usageFailure(f.member, menu.raw, menu);
-      f.store.patchMember(f.member.id, { status: "asleep", paneId: null });
-      f.inspect = async () => { throw new NoTerminalError(); };
-      if (automatic) { f.now = Date.parse(menu.resetsAt!) + 61_000; await f.service.tick(); }
-      else await f.service.resumeUsage(f.card().id);
-      expect(f.dismissed).toHaveLength(0);
-      expect(f.store.listPending(f.member.id).map(d => d.text)).toEqual([USAGE_RESUME_TEXT]);
-      expect(f.store.requireMember(f.member.id)).toMatchObject({ status: "asleep", blockedReason: null, lastError: null });
-      expect(f.service.holdReason(f.member.id)).toBeNull();
-      expect(f.pumps).toContain(f.member.id);
+  test("잠든 직원은 닫을 창이 없으므로 '이어가기'를 누르면 이어가기만 넣고 상태를 깨어 있는 것처럼 바꾸지 않는다", async () => {
+    const f = fixture(), menu = usageLimitMenu(menuText(), f.now)!;
+    f.service.usageFailure(f.member, menu.raw, menu);
+    f.store.patchMember(f.member.id, { status: "asleep", paneId: null });
+    f.inspect = async () => { throw new NoTerminalError(); };
+    await f.service.resumeUsage(f.card().id);
+    expect(f.dismissed).toHaveLength(0);
+    expect(f.store.listPending(f.member.id).map(d => d.text)).toEqual([USAGE_RESUME_TEXT]);
+    expect(f.store.requireMember(f.member.id)).toMatchObject({ status: "asleep", blockedReason: null, lastError: null });
+    expect(f.service.holdReason(f.member.id)).toBeNull();
+    expect(f.pumps).toContain(f.member.id);
+  });
+
+  // a176ecf 리뷰 F4: 한도로 멈춘 팀장을 재운 뒤(대표나 총괄이 일부러) 자동 이어가기가 그 팀장을 스스로 깨워 멈춘 일을 다시 시켰다.
+  // 잠든 팀장은 그대로 잔다(재시작 깨우기와 같은 원칙). 카드의 '이어가기'와 모델 변경만 깨운다.
+  test("잠든 직원은 자동 이어가기가 깨우지 않는다. 카드에 남고, 대표가 '이어가기'를 누르면 그때 깨운다", async () => {
+    const f = fixture(), menu = usageLimitMenu(menuText(), f.now)!;
+    f.service.usageFailure(f.member, menu.raw, menu);
+    f.store.patchMember(f.member.id, { status: "asleep", paneId: null });
+    f.inspect = async () => { throw new NoTerminalError(); };
+    for (const at of [Date.parse(menu.resetsAt!) + 61_000, Date.parse(menu.resetsAt!) + 8 * 3_600_000]) {
+      f.now = at; await f.service.tick();
+      expect(f.store.listPending(f.member.id)).toHaveLength(0);
+      expect(f.pumps).not.toContain(f.member.id);
+      expect(f.service.holdReason(f.member.id)).toBe("usage_limit");
     }
+    expect(f.card()).toMatchObject({ status: "open", usageLimit: { memberIds: [f.member.id] } });
+    await f.service.resumeUsage(f.card().id);
+    expect(f.store.listPending(f.member.id).map(d => d.text)).toEqual([USAGE_RESUME_TEXT]);
+    expect(f.pumps).toContain(f.member.id);
+  });
+
+  // a176ecf 리뷰 F2: 재우기·모델 변경 전에 한도 메뉴를 Esc 로 닫는 동안 저장되는 dismissStarted 를 틱이 '대표가 누른 이어가기'로 읽어,
+  // 같은 카드의 다른 팀장에게까지 Esc 와 이어가기 글을 넣었다(서버가 그 사이 죽으면 다시 뜬 뒤 첫 틱이 그랬다).
+  test("한 팀장의 메뉴를 닫는 동안 틱은 그 카드를 이어 가지 않는다: 다른 팀장에게 Esc·이어가기가 가지 않고, 닫는 표시는 저장되지 않는다", async () => {
+    const f = fixture(), other = f.makeMember("other"), menu = usageLimitMenu(menuText(), f.now)!;
+    f.service.usageFailure(f.member, menu.raw, menu);
+    f.service.usageFailure(other, menu.raw, menu);
+    let escSent = false;
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    // 닫는 팀장의 메뉴는 Esc 뒤에 사라졌고(닫혔는지 확인을 기다리는 중), 다른 팀장의 메뉴는 그대로다.
+    f.inspect = async m => m.id === f.member.id && escSent ? { menu: null, state: "error" } : { menu, state: "blocked" };
+    f.dismiss = async m => { if (m.id === f.member.id) { escSent = true; await gate; } return { ok: true }; };
+    const closed = f.service.closeMenu(f.member);
+    while (!escSent) await Bun.sleep(1);
+    // 닫는 표시는 메모리에만 있다: 서버가 지금 죽어도 다시 뜬 서버는 수동 이어가기로 오인하지 않는다.
+    expect(JSON.stringify(f.store.loadApiRecovery("api_recovery"))).not.toContain("dismissStarted\":true");
+    f.now += 10_000; await f.service.tick();
+    f.now += 10_000; await f.service.tick();
+    expect(f.dismissed).toHaveLength(1);
+    expect(f.store.listPending(f.member.id)).toHaveLength(0);
+    expect(f.store.listPending(other.id)).toHaveLength(0);
+    expect(f.service.holdReason(f.member.id)).toBe("usage_limit");
+    expect(f.service.holdReason(other.id)).toBe("usage_limit");
+    finish();
+    expect(await closed).toMatchObject({ ok: true, closed: true });
+    // 닫은 뒤에도 메뉴가 사라진 것을 '대표가 직접 풀었다'로 읽지 않는다.
+    f.now += 10_000; await f.service.tick();
+    expect(f.service.holdReason(f.member.id)).toBe("usage_limit");
+    expect(f.store.listPending(other.id)).toHaveLength(0);
+    expect(f.card().usageLimit?.memberIds.sort()).toEqual([f.member.id, other.id].sort());
   });
 
   test("서버가 이어가기를 넣지 않았어도 성공한 턴이면 한도 보류를 푼다", () => {
@@ -486,7 +534,9 @@ describe("포기·실패 뒤에도 영구 보류로 남지 않는다", () => {
 describe("사용 한도 카드: 계정 수를 가정하지 않는 글과 모델 선택지", () => {
   const LIVE = "You're out of usage credits. Run /usage-credits to keep using Fable 5.2 or /model to switch models.";
   const OPUS = { k: "model:opus", label: "Opus로 바꿔 이어가기" }, SONNET = { k: "model:sonnet", label: "Sonnet으로 바꿔 이어가기" };
-  const COMMON = "바로 이어 가려면 다른 모델을 고르세요. 다른 계정으로 로그인했거나 한도를 늘렸다면 '이어가기'를 누르세요.";
+  // a176ecf 리뷰 F7: 출시된 iPhone(0.2.2·0.2.3)에는 모델 버튼이 없다. 앱 판과 상관없이 되는 길(팀장 설정, 총괄)도 함께 적는다.
+  const HINT = "(고를 버튼이 없으면 팀장 설정에서 모델을 바꾸거나 총괄에게 모델을 바꿔 이어 가라고 하세요)";
+  const COMMON = `바로 이어 가려면 다른 모델을 고르세요${HINT}. 다른 계정으로 로그인했거나 한도를 늘렸다면 '이어가기'를 누르세요.`;
   const lead = (f: ReturnType<typeof fixture>) => f.card().detail.split("\n\n")[0];
 
   test("로/으로, 모델 크레딧 소진 판별, 글에 이름이 나온 한도 모델", () => {
@@ -512,17 +562,18 @@ describe("사용 한도 카드: 계정 수를 가정하지 않는 글과 모델 
     expect(f.card().detail).not.toContain("같은 계정");
   });
 
-  test("초기화 시각을 알 때·모를 때·선택할 모델이 없을 때·이어가기 뒤 또 걸렸을 때", async () => {
-    const known = fixture(), menu = usageLimitMenu(menuText(), known.now)!;
-    known.options.choices = () => [OPUS];
+  test("모델에 한정된 한도에서: 초기화 시각을 알 때·모를 때·선택할 모델이 없을 때·이어가기 뒤 또 걸렸을 때", async () => {
+    // 'Opus limit' 은 그 모델만의 한도다(다른 모델로 바꾸면 바로 된다).
+    const known = fixture(), menu = usageLimitMenu(menuText().replace("weekly limit", "Opus limit"), known.now)!;
+    known.options.choices = () => [SONNET];
     known.service.usageFailure(known.member, menu.raw, menu);
-    expect(lead(known)).toMatch(new RegExp(`^\\d+월 \\d+일 오[전후] \\d+시에 한도가 풀리면 자동으로 이어 갑니다\\. 기다리셔도 됩니다\\. ${COMMON.replace(/[.'?]/g, "\\$&")}$`));
+    expect(lead(known)).toMatch(new RegExp(`^\\d+월 \\d+일 오[전후] \\d+시에 한도가 풀리면 자동으로 이어 갑니다\\. 기다리셔도 됩니다\\. ${COMMON.replace(/[.'?()]/g, "\\$&")}$`));
     const unknown = fixture();
-    unknown.options.choices = () => [OPUS];
-    unknown.service.usageFailure(unknown.member, "usage limit reached");
+    unknown.options.choices = () => [SONNET];
+    unknown.service.usageFailure(unknown.member, "You've hit your Opus limit");
     expect(lead(unknown)).toBe(`한도가 풀렸는지 가끔 다시 확인해 자동으로 이어 갑니다. 기다리셔도 됩니다. ${COMMON}`);
     const none = fixture();
-    none.service.usageFailure(none.member, "usage limit reached");
+    none.service.usageFailure(none.member, "You've hit your Opus limit");
     expect(lead(none)).toBe("한도가 풀렸는지 가끔 다시 확인해 자동으로 이어 갑니다. 기다리셔도 됩니다. 다른 계정으로 로그인했거나 한도를 늘렸다면 '이어가기'를 누르세요.");
     expect(none.card().options).toEqual([USAGE_RESUME_OPTION]);
     // 이어가기를 눌렀는데 또 걸렸다.
@@ -530,7 +581,38 @@ describe("사용 한도 카드: 계정 수를 가정하지 않는 글과 모델 
     await known.service.resumeUsage(known.card().id);
     known.service.usageFailure(known.member, menu.raw, menu);
     expect(known.card()).toMatchObject({ status: "open", usageLimit: { stillLimited: true } });
-    expect(lead(known)).toBe("아직 한도가 남아 있지 않습니다. 기다리거나 다른 모델을 고르세요.");
+    expect(lead(known)).toBe(`아직 한도가 남아 있지 않습니다. 기다리거나 다른 모델을 고르세요${HINT}.`);
+  });
+
+  // a176ecf 리뷰 F1: 5시간·주간·이름 없는 한도와 Codex 한도는 계정 전체의 한도다. 다른 모델로 바꿔도 곧바로 다시 걸리고 모델 지정만 낮아진 채 남는다.
+  test("계정 전체의 한도(5시간·주간·이름 없는 한도·Codex)에는 모델 선택지를 내지 않고 '다른 모델을 고르세요'라고 하지 않는다", async () => {
+    for (const [raw, cli] of [["You've hit your 5-hour limit · resets 3pm (Asia/Seoul)", "claude"], ["You've hit your weekly limit", "claude"], ["usage limit reached", "claude"], ["You've hit your usage limit. try again in 1m", "codex"]] as const) {
+      const f = fixture(), m = cli === "codex" ? f.makeMember("codex", "codex") : f.member;
+      f.options.choices = () => [OPUS, SONNET];
+      f.service.usageFailure(m, raw);
+      expect({ raw, options: f.card(cli).options }).toEqual({ raw, options: [USAGE_RESUME_OPTION] });
+      expect(f.card(cli).detail).not.toContain("다른 모델");
+      // 이어가기 뒤 또 걸려도 모델을 고르라고 하지 않는다.
+      f.inspect = async () => ({ menu: null, state: "error" });
+      await f.service.resumeUsage(f.card(cli).id);
+      f.service.usageFailure(m, raw);
+      expect(f.card(cli).detail.split("\n\n")[0]).toBe("아직 한도가 남아 있지 않습니다. 한도가 풀리면 자동으로 이어 갑니다.");
+    }
+  });
+
+  test("카드에서 한 번 걸린 모델은 그 팀장이 카드에서 빠져도 다시 내지 않는다(서버가 기억한다, 다시 띄워도)", () => {
+    const f = fixture(), second = f.makeMember("second");
+    const seen: string[][] = [];
+    f.options.limitedModels = (m, raw) => [m.id === f.member.id ? "claude-fable-5-2" : "sonnet", ...(raw.includes("Opus") ? ["opus"] : [])];
+    f.options.choices = (_cli, _limited, blocked) => { seen.push([...blocked].sort()); return []; };
+    f.service.usageFailure(f.member, LIVE);
+    f.service.usageFailure(second, "You've hit your Sonnet limit");
+    expect(seen.at(-1)).toEqual(["claude-fable-5-2", "sonnet"]);
+    f.service.releaseMember(f.member.id);
+    expect(seen.at(-1)).toEqual(["claude-fable-5-2", "sonnet"]);
+    f.restart();
+    f.service.usageFailure(f.member, "You've hit your Opus limit");
+    expect(seen.at(-1)).toEqual(["claude-fable-5-2", "opus", "sonnet"]);
   });
 
   test("팀장이 빠지거나 모델 목록이 바뀌면 선택지를 다시 계산한다. 판(updatedAt)은 그대로라 카드의 푸시 알림이 취소되지 않는다", () => {

@@ -186,7 +186,8 @@ struct InboxView: View {
         return "연결 문제로 지금은 답할 수 없습니다"
     }
     private var versionSignature: String {
-        store.decisions.map { "\($0.id)@\($0.updatedAt)" }.joined(separator: "|") + "#\(store.selectedProjectID ?? "")"
+        // A usage card's choices and staff change without updatedAt (its push is keyed to it): include them so the open card redraws.
+        store.decisions.map(UsageLimitInfo.syncSignature).joined(separator: "|") + "#\(store.selectedProjectID ?? "")"
     }
     private func latest(_ id: String) -> Decision? { store.decisions.first { $0.id == id } }
     private func asker(_ decision: Decision) -> Member? { decision.memberId.flatMap { id in store.members.first { $0.id == id } } }

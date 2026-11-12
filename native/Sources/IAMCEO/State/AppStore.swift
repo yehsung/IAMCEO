@@ -1967,13 +1967,18 @@ final class AppStore: ProjectManagementStore {
     /// Answers a usage-limit card: `resume`, or `model:<value>` (the server switches the card's staff to that model and continues the same sessions).
     @discardableResult func answerUsageLimit(_ decision: Decision, choice: String) async -> Bool {
         guard decision.kind == "usage_limit", decision.status == "open", UsageLimitInfo.accepts(decision, choice: choice) else { return false }
+        if choice.hasPrefix(UsageLimitInfo.modelChoicePrefix) {
+            // The server answers a model choice after closing, stopping and reopening each staff member in turn: give it the member-settings
+            // time (150 s) instead of the 20 s default. Send the staff shown on this card so the server refuses (409) if someone joined since.
+            return await answerDecision(decision, choice: choice, note: nil, memberIds: decision.usageLimit?.memberIds ?? [], timeout: 150)
+        }
         return await answerDecision(decision, choice: choice, note: nil)
     }
 
-    @discardableResult func answerDecision(_ decision: Decision, choice: String?, note: String?) async -> Bool {
-        let req = AnswerRequest(choice: choice, note: note, batch: false, expectedVersion: decision.updatedAt)
+    @discardableResult func answerDecision(_ decision: Decision, choice: String?, note: String?, memberIds: [String]? = nil, timeout: TimeInterval? = nil) async -> Bool {
+        let req = AnswerRequest(choice: choice, note: note, batch: false, expectedVersion: decision.updatedAt, memberIds: memberIds)
         let result: Decision? = await mutate("decision:\(decision.id)") { api in
-            try await api.send("/api/decisions/\(APIClient.segment(decision.id))/answer", body: req, contractVersion: strictWriteContract ? 2 : nil)
+            try await api.send("/api/decisions/\(APIClient.segment(decision.id))/answer", body: req, timeout: timeout, contractVersion: strictWriteContract ? 2 : nil)
         }
         return result != nil
     }

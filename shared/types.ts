@@ -677,7 +677,11 @@ export type SettingsPatch = Partial<Omit<Settings, "ranks" | "codexRanks" | "res
 /** PATCH /api/members/:id. null 이면 직급 기본으로 돌아간다. */
 export interface PatchMemberReq { cli?: CliProvider; modelOverride?: string | null; effortOverride?: Effort | null }
 export interface SendMessageReq { id?: string; text: string; targetMemberId?: string | null; attachmentIds?: string[]; contextFileId?: string | null }
-export interface AnswerReq { expectedVersion?: string; choice?: string | null; note?: string | null; batch?: boolean }
+/**
+ * memberIds: 사용 한도 카드의 `model:<값>` 답에만 앱이 싣는다. 앱이 본 카드의 팀장(usageLimit.memberIds)이다. 지금 카드의 팀장과 다르면 409
+ * (카드의 판은 푸시 알림에 묶여 팀장이 붙어도 오르지 않는다). 옛 앱은 보내지 않는다.
+ */
+export interface AnswerReq { expectedVersion?: string; choice?: string | null; note?: string | null; batch?: boolean; memberIds?: string[] }
 /** POST /api/projects/:id/tidy. already: 이미 판 정리 지시가 기다리거나 도는 중이라 새로 넣지 않았다. */
 export interface TidyResult { already: boolean }
 

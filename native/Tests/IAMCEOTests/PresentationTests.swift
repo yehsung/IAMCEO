@@ -394,6 +394,24 @@ final class FriendlyErrorTests: XCTestCase {
     func testUnknownErrorsPassThrough() {
         XCTAssertEqual(friendlyError("  알 수 없는 문제  "), "알 수 없는 문제")
     }
+
+    /// a176ecf review F6: every refusal of a usage card's model answer used to contain "사용 한도", so the card showed
+    /// "…다른 모델로 바꾸면 바로 이어 갑니다" instead of the real reason (close the menu in the terminal) and the person pressed the same button again.
+    /// The server's refusals now pass through unchanged (server/orchestrator.ts closeUsageMenu · answerDecision · switchUsageCard).
+    func testUsageCardModelRefusalsKeepTheirReason() {
+        for refusal in [
+            "한도 창을 Esc로 닫지 못했습니다(창을 닫지 못했습니다). 터미널을 확인한 뒤 다시 해 주세요",
+            "한도 창을 확인하지 못했습니다: terminal.read: no reply. 잠시 뒤 다시 해 주세요",
+            "이 CLI의 모델 목록에 없는 모델입니다",
+            "모델을 바꾸지 못했습니다. B2B 랜딩: 한도 창을 Esc로 닫지 못했습니다(창을 닫지 못했습니다). 터미널을 확인한 뒤 다시 해 주세요",
+            "다른 선택을 처리하는 중입니다. 잠시 뒤 카드를 다시 확인해 주세요",
+            "카드의 팀장이 바뀌었습니다. 카드를 다시 확인해 주세요",
+            "카드의 팀장이 모두 이어가기 결과를 기다리는 중입니다. 잠시 뒤 카드를 다시 확인해 주세요",
+            "한도에 걸린 모델이거나 선택지에 없는 모델입니다. 카드를 다시 확인해 주세요",
+        ] {
+            XCTAssertEqual(friendlyError(refusal), refusal)
+        }
+    }
 }
 
 final class FriendlyLoadErrorTests: XCTestCase {

@@ -89,7 +89,10 @@ final class AppStore: ProjectManagementStore {
     private(set) var terminalLeases: [String: TerminalLease] = [:]
     private(set) var apiOutage: APIOutage?
     private(set) var bootstrap: Bootstrap? {
-        didSet { if bootstrap?.urls != oldValue?.urls { rememberServerAddresses() } }
+        didSet {
+            if bootstrap?.urls != oldValue?.urls { rememberServerAddresses() }
+            if bootstrap?.cli != oldValue?.cli { rememberServerCLI() }
+        }
     }
     private(set) var runtime: RuntimeDiagnostics?
     private(set) var selectedProjectID: String?
@@ -586,6 +589,7 @@ final class AppStore: ProjectManagementStore {
             catch { errorMessage = error.localizedDescription }
             connectedCredentials = (endpoint, accessCode.trimmingCharacters(in: .whitespacesAndNewlines))
             rememberServerAddresses()
+            rememberServerCLI()
             connectionStatus = .connected
             connectRetryAttempt = 0
             // Reading the workspace never waits for the model catalog, and waits for the capability probe only briefly.
@@ -718,6 +722,7 @@ final class AppStore: ProjectManagementStore {
         retryableConnect = nil; retriesSavedConnection = false
         permissionChoiceOffered = nil; permissionChosenNamespace = nil; holdPairingRequest(nil)
         forgetServerAddresses(for: endpoint)
+        forgetServerCLI()
         resetConnectionEvidence()
         beginPushLogout()
         clearHostNavigation()
@@ -2144,6 +2149,25 @@ final class AppStore: ProjectManagementStore {
         if let key = Self.serverAddressesKey(endpoint) { navigationDefaults?.removeObject(forKey: key) }
     }
 
+    // The command a server reports for its own terminal (Bootstrap `cli`) is kept with the saved connection, so the
+    // connection screen can show the right 'open' command while that server cannot be reached. One saved connection, one value.
+    private static let serverCLIKey = "iamceo.serverCLI.v1"
+    private func rememberServerCLI() {
+        guard let navigationDefaults, let endpoint = connectedCredentials?.endpoint, let cli = bootstrap?.cli,
+              let namespace = (try? ServerEndpoint(endpoint)).map(DraftStore.endpointNamespace) else { return }
+        let value = [namespace, String(cli.prefix(1024))]
+        guard navigationDefaults.stringArray(forKey: Self.serverCLIKey) != value else { return }
+        navigationDefaults.set(value, forKey: Self.serverCLIKey)
+    }
+    private func forgetServerCLI() { navigationDefaults?.removeObject(forKey: Self.serverCLIKey) }
+    /// The terminal command the server at `endpoint` reported the last time this app connected to it.
+    func serverCLI(for endpoint: String) -> String? {
+        if let connected = connectedCredentials?.endpoint, connected == endpoint, let cli = bootstrap?.cli { return cli }
+        guard let saved = navigationDefaults?.stringArray(forKey: Self.serverCLIKey), saved.count == 2,
+              let namespace = (try? ServerEndpoint(endpoint)).map(DraftStore.endpointNamespace), saved[0] == namespace else { return nil }
+        return saved[1]
+    }
+
     /// Phone: trades the QR's one-time code for the access code over Tailscale, then connects like a manual login.
     @discardableResult func pair(with link: PairingLink, device: String) async -> Bool {
         guard !isDemo else { errorMessage = "샘플 모드에서는 연결하지 않습니다."; return false }
@@ -2743,11 +2767,11 @@ final class AppStore: ProjectManagementStore {
         guard !strictWriteContract, let api else { terminalLeases.removeAll(); return }
         let leases = terminalLeases
         terminalLeases.removeAll()
-        Task {
-            for (memberID, lease) in leases {
-                guard let id = lease.leaseId else { continue }
-                _ = try? await api.terminalControl(memberID: memberID, request: TerminalControlRequest(action: "release", leaseId: id))
-            }
+        // Sent right here, not from a later Task: by the time a deferred Task runs, whoever handed us the session may
+        // have invalidated it, and creating a request on an invalidated session raises an Objective-C exception.
+        for (memberID, lease) in leases {
+            guard let id = lease.leaseId else { continue }
+            api.releaseTerminalLeaseNow(memberID: memberID, leaseId: id)
         }
     }
 

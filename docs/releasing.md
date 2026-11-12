@@ -52,12 +52,12 @@ bash scripts/check.sh server tests/w1-tooling-version.test.ts
 
 ### 순서
 
-1. **(사람)** 버전을 올린 커밋을 `main`에 올리고 CI가 통과했는지 확인합니다. CI는 서버 시험(`server`)과 앱 시험(`native`) 두 작업이고, 둘 다 통과해야 초록입니다. 앱 시험은 릴리스를 빌드하는 것과 같은 Xcode 27.2로 돕니다(GitHub의 `xcode-27` 이미지).
+1. **(사람)** 버전을 올린 커밋을 `main`에 올리고 CI가 통과했는지 확인합니다. CI는 서버 시험(`server`)과 앱 시험(`native`) 두 작업이고, 둘 다 통과해야 초록입니다. 앱 시험은 릴리스를 빌드하는 것과 같은 Xcode 27.2로 돕니다(GitHub의 `xcode-27` 이미지). `native` 작업은 끝에 출시 앱 호환 검사(§5)도 돌립니다.
 2. **(사람)** 태그를 만들어 올립니다.
    ```sh
    git tag v0.0.0 && git push origin v0.0.0
    ```
-3. **(자동)** `.github/workflows/release.yml`이 태그와 `package.json` 버전이 같은지 보고, 타입 검사와 서버 시험을 돌린 뒤, CLI 실행 파일 두 개와 `SHA256SUMS`를 붙인 **초안(draft)** 릴리스를 만듭니다. 초안은 "최신 릴리스"를 바꾸지 않습니다.
+3. **(자동)** `.github/workflows/release.yml`이 먼저 출시 앱 호환 검사(`compat` 작업, §5)를 돌리고, 통과하면 태그와 `package.json` 버전이 같은지 보고, 타입 검사와 서버 시험을 돌린 뒤, CLI 실행 파일 두 개와 `SHA256SUMS`를 붙인 **초안(draft)** 릴리스를 만듭니다. 초안은 "최신 릴리스"를 바꾸지 않습니다.
    - 워크플로가 실패하면 원인을 고친 뒤 `gh workflow run release.yml --ref v0.0.0`으로 다시 돌립니다.
 4. **(스크립트)** 먼저 무엇을 할지 봅니다. 아무것도 만들거나 올리지 않습니다.
    ```sh
@@ -169,7 +169,8 @@ bun scripts/release-ios.ts api GET '/v1/apps?fields[apps]=bundleId'
 
 ## 5. 출시된 앱과의 호환 확인
 
-- `bash scripts/check.sh compat`은 새 서버의 실제 응답을 출시된 앱(태그마다)의 해석 코드로 풀어 봅니다. `bash scripts/check.sh`(전체)에도 들어 있습니다. 출시 태그를 git에서 읽으므로 태그가 있는 저장소에서 돌립니다.
+- `bash scripts/check.sh compat`(`bun run test:compat`)은 새 서버의 실제 응답을 출시된 앱(태그마다)의 해석 코드로 풀어 봅니다. `bash scripts/check.sh`(전체)에도 들어 있습니다. 출시 태그를 git에서 읽으므로 태그가 있는 저장소에서 돌립니다(태그가 없으면 건너뛰지 않고 실패합니다).
+- CI는 `ci.yml`의 `native` 작업과 `release.yml`의 `compat` 작업에서 이 검사를 돌립니다. 둘 다 Xcode 27.2(`xcode-27` 이미지)를 쓰고, 태그를 받으려고 `actions/checkout`에 `fetch-depth: 0`을 줍니다. `release.yml`은 이 검사가 실패하면 초안을 만들지 않습니다.
 - 새 앱을 출시하면 그 태그를 `scripts/compat-decoders/releases.json`에 더합니다(그 태그에서 따로 빌드할 해석 코드 파일 목록과 함께).
 - 앱은 모든 요청에 `X-IAMCEO-App-Version`, `X-IAMCEO-App-Build`, `X-IAMCEO-App-Platform`(macos|ios), `X-IAMCEO-Api-Level`을 붙입니다. 서버는 머리글을 보낸 앱에만 Bootstrap의 `server`(버전·API 단계)를 싣고, 실제로 맞지 않을 때만 `compat`을 싣습니다. 붙은 앱 목록은 `/api/readiness`의 `apps`에 보입니다.
 - 서버와 앱이 서로 알아야 하는 것이 바뀌어 API 단계를 올릴 때는 `shared/types.ts`의 `API_LEVEL`(필요하면 `MIN_APP_API_LEVEL`)과 앱의 `AppVersion.apiLevel`을 함께 올립니다. `MIN_APP_API_LEVEL`을 올리면 그보다 낮은 앱에 '앱을 업데이트하세요'가 뜨므로, 출시된 앱이 실제로 깨질 때만 올립니다.

@@ -323,6 +323,71 @@ private final class TestClock: @unchecked Sendable {
         XCTAssertNil(fresh.offer)
     }
 
+    /// 리뷰 app-3: 다시 시작은 서버를 내려 연결이 끊긴다. 그때 제안이 지워져, 실패하면 까닭과 다시 할 단추가 사라졌다.
+    func testFailedRestartAfterTheConnectionDroppedStillShowsWhy() async {
+        struct Refused: LocalizedError { var errorDescription: String? { "서버를 다시 시작하지 못했습니다(종료 코드 1)." } }
+        let found = ServerUpgradeOffer(runningVersion: "0.2.3", bundledVersion: "0.2.4", bundledBuildID: "build-a")
+        let during = Box<(() async -> Void)?>(nil)
+        let watch = ServerUpgradeWatch(defaults: freshDefaults(), check: { _ in found }, restart: { _, _ in
+            await during.value?()
+            throw Refused()
+        })
+        let endpoint = "http://127.0.0.1:7878"
+        await watch.evaluate(endpoint: endpoint, onThisMac: true, connected: true, demo: false, serverVersion: "0.2.3", window: UUID())
+        during.value = { await watch.evaluate(endpoint: endpoint, onThisMac: true, connected: false, demo: false, serverVersion: "0.2.3", window: UUID()) }
+        await watch.restart(store: nil)
+        XCTAssertEqual(watch.offer, found, "설정의 줄이 남는다")
+        XCTAssertEqual(watch.error, "서버를 다시 시작하지 못했습니다(종료 코드 1).")
+        XCTAssertFalse(watch.isRestarting)
+    }
+
+    /// 리뷰 app-6: 확인이 중간에 취소되면 '확인했고 제안 없음'으로 기억돼, 같은 연결로는 다시 보지 않았다.
+    func testACancelledCheckIsNotRememberedAsNoOffer() async {
+        let found = ServerUpgradeOffer(runningVersion: "0.2.3", bundledVersion: "0.2.4", bundledBuildID: "build-a")
+        let calls = Box(0)
+        let release = Box<CheckedContinuation<Void, Never>?>(nil)
+        let watch = ServerUpgradeWatch(defaults: freshDefaults(), check: { _ in
+            calls.value += 1
+            if calls.value == 1 {
+                await withCheckedContinuation { release.value = $0 }
+                return Task.isCancelled ? nil : found
+            }
+            return found
+        }, restart: { _, _ in })
+        let endpoint = "http://127.0.0.1:7878"
+        // ① 첫 확인이 기다리는 중 ② 연결이 흔들려 취소되고 끊긴 상태가 들어온다 ③ 같은 연결로 돌아온다 ④ 취소된 첫 확인이 nil 로 돌아온다.
+        let first = Task { await watch.evaluate(endpoint: endpoint, onThisMac: true, connected: true, demo: false, serverVersion: "0.2.3", window: UUID()) }
+        while release.value == nil { await Task.yield() }
+        first.cancel()
+        await watch.evaluate(endpoint: endpoint, onThisMac: true, connected: false, demo: false, serverVersion: "0.2.3", window: UUID())
+        await watch.evaluate(endpoint: endpoint, onThisMac: true, connected: true, demo: false, serverVersion: "0.2.3", window: UUID())
+        XCTAssertEqual(watch.offer, found)
+        release.value?.resume()
+        await first.value
+        XCTAssertEqual(watch.offer, found, "늦게 돌아온 취소된 확인이 제안을 지우지 않는다")
+        XCTAssertEqual(calls.value, 2)
+
+        // 취소된 확인만 있고 그 뒤 아무도 보지 않았으면, 같은 키로 다시 부를 때 다시 본다.
+        let fresh = ServerUpgradeWatch(defaults: freshDefaults(), check: { _ in
+            calls.value += 1
+            if calls.value == 3 {
+                await withCheckedContinuation { release.value = $0 }
+                return nil
+            }
+            return found
+        }, restart: { _, _ in })
+        release.value = nil
+        let cancelled = Task { await fresh.evaluate(endpoint: endpoint, onThisMac: true, connected: true, demo: false, serverVersion: "0.2.3", window: UUID()) }
+        while release.value == nil { await Task.yield() }
+        cancelled.cancel()
+        release.value?.resume()
+        await cancelled.value
+        XCTAssertNil(fresh.offer)
+        await fresh.evaluate(endpoint: endpoint, onThisMac: true, connected: true, demo: false, serverVersion: "0.2.3", window: UUID())
+        XCTAssertEqual(fresh.offer, found)
+        XCTAssertEqual(calls.value, 4)
+    }
+
     func testFailedRestartKeepsTheOfferAndSaysWhy() async {
         struct Refused: LocalizedError { var errorDescription: String? { "서버를 다시 시작하지 못했습니다(종료 코드 1)." } }
         let found = ServerUpgradeOffer(runningVersion: "0.2.3", bundledVersion: "0.2.4", bundledBuildID: "build-a")

@@ -41,8 +41,35 @@ cask "iamceo" do
     must_succeed: true,
   }
 
+  # zap only (`brew uninstall --zap`), never in `uninstall`: the uninstall stanza also runs on every
+  # `brew upgrade`, and stopping here would end every AI session on each upgrade.
+  # Before zap, brew has already run the uninstall stanza (service_cleanup removed the app-owned plist)
+  # and moved the app back to the Caskroom, so the runtime is looked up in staged_path first.
+  # `iamceo uninstall --purge --yes` ends every terminal in the session engine, stops the engine and
+  # deletes ~/.iamceo. A plist that is still present belongs to another installation (legacy CLI or a
+  # source checkout), so nothing is stopped then. If this step fails or finds no runtime, `trash` below
+  # still moves the data folder to the Trash.
+  full_stop = {
+    executable: "/bin/sh",
+    args:       ["-c", <<~SH, "iamceo-zap", staged_path.to_s, appdir.to_s],
+      set -eu
+      plist="$HOME/Library/LaunchAgents/com.iamceo.server.plist"
+      if [ -e "$plist" ] || [ -L "$plist" ]; then exit 0; fi
+      for app in "$1/IAMCEO.app" "$2/IAMCEO.app"; do
+        bin="$app/Contents/Resources/runtime/iamceo"
+        [ -x "$bin" ] || continue
+        core="$app/Contents/Resources/runtime/Herdr Core.app/Contents/MacOS/herdr-core"
+        [ -x "$core" ] || core=""
+        exec /usr/bin/env IAMCEO_CORE_BIN="$core" "$bin" uninstall --purge --yes
+      done
+    SH
+    sudo:       false,
+    must_succeed: false,
+  }
+
   uninstall script: service_cleanup
 
-  zap script: service_cleanup,
+  zap early_script: service_cleanup,
+      script: full_stop,
       trash:  "~/.iamceo"
 end

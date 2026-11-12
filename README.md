@@ -55,7 +55,7 @@ Or `curl -fsSL https://raw.githubusercontent.com/yehsung/IAMCEO/main/install.sh 
 
 **iPhone:** join your Mac and iPhone to [Tailscale](https://tailscale.com), then scan the **iPhone 연결** (Connect iPhone) QR in the Mac app. Get the iPhone app [on the App Store](https://apps.apple.com/app/id6831782194). If an iPhone that used to connect no longer does, check that Tailscale is on on the Mac; the Mac app tells you when it is off. → [Connecting an iPhone](docs/guide/iphone.en.md)
 
-**When stuck:** 설정 → AI 모델 → 실행 환경 (Settings → AI models → Runtime) checks the engine, the Claude Code and Codex sign-ins, Tailscale, start at login and backups, item by item, with a fix for each. `iamceo doctor` does the same from the command line. → [Troubleshooting](docs/guide/troubleshooting.en.md)
+**When stuck (from 0.2.4):** 설정 → AI 모델 → 실행 환경 (Settings → AI models → Runtime) checks the engine, the Claude Code and Codex sign-ins, Tailscale, start at login and backups, item by item, with a fix for each. `iamceo doctor` does the same from the command line. → [Troubleshooting](docs/guide/troubleshooting.en.md)
 
 ### Notifications
 
@@ -71,6 +71,15 @@ Or `curl -fsSL https://raw.githubusercontent.com/yehsung/IAMCEO/main/install.sh 
 | [Connecting an iPhone](docs/guide/iphone.en.md) | Tailscale and MagicDNS, the pairing QR, when notifications work |
 | [Upgrade, backup and uninstall](docs/guide/upgrade-backup-uninstall.en.md) | Updating and rolling back, backups and a new Mac, retention, exporting and deleting projects, stopping everything |
 | [Security](docs/security.en.md) | What IAMCEO trusts, blocks and does not block |
+
+### Uninstall
+
+Moving the app to the Trash alone can leave a running server and AI sessions behind. Stop IAMCEO completely first, then delete the app. The button and `uninstall` in step 1 exist from 0.2.4. On 0.2.3 or earlier, run `/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo service uninstall` in a terminal to remove the login service, then restart the Mac (the engine and the AI sessions end with it).
+
+1. In the Mac app, press **이 Mac에서 완전히 멈추기** (Stop completely on this Mac) at the bottom of **설정 → 연결** (Settings → Connection), or run `/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo uninstall` in a terminal. It puts every session to sleep, removes the login service and stops the engine. Your data (`~/.iamceo`) stays. To delete it too, use `uninstall --purge` (the backups inside it go as well, and it cannot be undone).
+2. Delete the app: `brew uninstall --cask iamceo` if you used Homebrew, otherwise move IAMCEO from Applications to the Trash. `brew uninstall --zap --cask iamceo` does step 1, data deletion included, in one go.
+
+The full order is in [Upgrade, backup and uninstall](docs/guide/upgrade-backup-uninstall.en.md#stopping-iamceo-completely-on-this-mac-uninstall).
 
 ## Terms
 

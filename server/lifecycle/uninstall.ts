@@ -2,7 +2,9 @@
 // 순서: 팀장 재우기(서버가 떠 있으면 기존 안전 종료 경로로) → 서비스 해제(서버가 내려간다) → 실행 엔진의 터미널 종료와 엔진 종료 → (원하면) 데이터 삭제.
 // 실행 엔진을 서비스보다 먼저 끄면 떠 있는 서버가 엔진을 다시 띄우므로, 서비스를 먼저 내린다.
 // 데이터는 기본으로 남긴다. 지우기(--purge)는 따로 한 번 더 확인한다.
-import { existsSync, lstatSync, rmSync } from "node:fs";
+// 이 명령이 내리는 서비스는 앱 묶음 안의 실행 파일로 등록된 설치판(같은 데이터 폴더)뿐이다. 소스 체크아웃에서 도는 서버(대표 라이브)는
+// --include-checkout 을 붙였을 때만 내리고, 그때도 서비스 설정을 지우지 않고 사본을 남긴다. 끌 수 없는 서버가 떠 있으면 아무것도 하지 않는다.
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -14,7 +16,7 @@ import {
   detectInstallation, LifecycleError, readServicePlist, realLaunchctl, serviceDomain, serviceHome, servicePlistPath, serviceLoaded, stopService,
   type Launchctl, type ServiceControl, type ServicePlist,
 } from "./launchd.ts";
-import { localBase } from "./runtime.ts";
+import { databaseSchema, localBase } from "./runtime.ts";
 
 export interface CoreTerminalInfo { address: string; state: string; labels?: Record<string, string> }
 /** 실행 엔진(herdr-core)과 말하는 길. 시험은 가짜 소켓·가짜 실행 파일을 쓴다. */
@@ -27,7 +29,11 @@ export interface CoreControl {
   stop(): Promise<boolean>;
 }
 
-export interface UninstallOptions { purge?: boolean; yes?: boolean; dryRun?: boolean }
+export interface UninstallOptions {
+  purge?: boolean; yes?: boolean; dryRun?: boolean;
+  /** 소스 체크아웃(bun + bin/iamceo.ts)에서 도는 서비스도 내린다. 서비스 설정은 지우지 않고 사본을 남긴다. */
+  includeCheckout?: boolean;
+}
 export interface UninstallDeps {
   launchctl?: Launchctl;
   userHome?: string;
@@ -47,6 +53,8 @@ export interface UninstallOutcome {
   home: string;
   members: { reachable: boolean; stopped: number; failed: string[] };
   service: "removed" | "absent" | "foreign";
+  /** 소스 체크아웃 서비스를 내렸을 때 남긴 서비스 설정 사본. */
+  serviceCopy?: string;
   core: { absent: boolean; killed: number; stopped: boolean };
   purged: boolean;
 }
@@ -85,11 +93,32 @@ async function askOnTerminal(question: string, answer: string): Promise<boolean>
   } finally { rl.close(); }
 }
 
-function ownService(plist: ServicePlist, home: string, userHome: string): boolean {
-  try {
-    detectInstallation(plist, userHome);
-    return normalizeHome(serviceHome(plist, userHome)) === normalizeHome(home);
-  } catch { return false; }
+/**
+ * 등록된 서비스가 이 명령이 내려도 되는 것인가.
+ * - release: 앱 묶음 안의 실행 파일을 serve 로 돌리고 같은 데이터 폴더를 쓴다(앱이 직접 관리하는 설치판). 앱의 LocalHostService·Homebrew 의
+ *   service_cleanup 과 같은 판정이다.
+ * - git: 소스 체크아웃에서 도는 서버. --include-checkout 일 때만 내린다.
+ * - other: 알아볼 수 없는 설치(옛 명령줄 설치 등)나 다른 프로그램. 내리지 않는다.
+ * sameHome 은 그 서비스가 이 명령의 데이터 폴더를 쓰는가(같은 실행 엔진을 쓴다는 뜻).
+ */
+export interface ServiceOwnership { kind: "release" | "git" | "other"; sameHome: boolean; owned: boolean }
+export function serviceOwnership(plist: ServicePlist, home: string, userHome: string, includeCheckout = false): ServiceOwnership {
+  let kind: ServiceOwnership["kind"] = "other";
+  try { kind = detectInstallation(plist, userHome).kind; } catch { kind = "other"; }
+  let sameHome = false;
+  try { sameHome = normalizeHome(serviceHome(plist, userHome)) === normalizeHome(home); } catch { sameHome = false; }
+  return { kind, sameHome, owned: sameHome && (kind === "release" || (kind === "git" && includeCheckout)) };
+}
+
+function stampNow(): string { return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, ""); }
+
+/** 기본이 아닌 데이터 폴더는 터미널에서 경로를 그대로 입력해야 지운다. 물을 수 없는 환경(앱 등)이면 지우지 않는다. */
+async function confirmUnusualHome(confirm: UninstallDeps["confirm"], home: string): Promise<boolean> {
+  const question = say(`이 데이터 폴더는 기본 자리(~/.iamceo)도, 등록된 서비스의 폴더도 아닙니다. 정말 지우려면 경로를 그대로 입력하세요(${home}):`,
+    `This data folder is neither the usual place (~/.iamceo) nor the registered service's folder. To delete it anyway, type its path exactly (${home}):`);
+  if (confirm) return confirm(question, home);
+  if (!process.stdin.isTTY) return false;
+  return askOnTerminal(question, home);
 }
 
 type Json = Record<string, unknown>;
@@ -138,6 +167,20 @@ async function iamceoAnswers(config: Config, fetchImpl: typeof fetch): Promise<b
   } catch { return false; }
 }
 
+/**
+ * IAMCEO 데이터 폴더의 표식: 이주를 한 번이라도 거친 SQLite DB(iamceo.db, user_version > 0)와 접속 코드가 든 config.json 이 **둘 다** 있다.
+ * 하나만으로는 통과시키지 않는다(IAMCEO_HOME 이 잘못 잡혀 다른 폴더를 통째로 지우는 사고를 막는다).
+ */
+export function looksLikeDataHome(dir: string): boolean {
+  const db = join(dir, "iamceo.db"), config = join(dir, "config.json");
+  try {
+    if (!lstatSync(db).isFile() || !lstatSync(config).isFile()) return false;
+    if (databaseSchema(db) <= 0) return false;
+    const parsed = JSON.parse(readFileSync(config, "utf8")) as { accessCode?: unknown } | null;
+    return typeof parsed?.accessCode === "string" && parsed.accessCode.length > 0;
+  } catch { return false; }
+}
+
 /** 지워도 되는 IAMCEO 데이터 폴더인지 보고 지운다. 홈 폴더 자체·그 위·심볼릭 링크·표식 없는 폴더는 지우지 않는다. */
 export function purgeHome(home: string, userHome: string = homedir()): boolean {
   if (!existsSync(home)) return false;
@@ -146,8 +189,9 @@ export function purgeHome(home: string, userHome: string = homedir()): boolean {
   if (real.split("/").filter(Boolean).length < 2 || real === user || user.startsWith(`${real}/`)) {
     throw new LifecycleError(say(`데이터 폴더로 보이지 않는 경로라 지우지 않았습니다: ${real}`, `This does not look like a data folder; it was not deleted: ${real}`));
   }
-  if (!["iamceo.db", "config.json"].some(name => existsSync(join(real, name)))) {
-    throw new LifecycleError(say(`IAMCEO 데이터 폴더가 아니라 지우지 않았습니다: ${real}`, `This is not an IAMCEO data folder; it was not deleted: ${real}`));
+  if (!looksLikeDataHome(real)) {
+    throw new LifecycleError(say(`IAMCEO 데이터 폴더가 아니라 지우지 않았습니다(DB 와 접속 코드가 든 설정 파일이 함께 있어야 합니다): ${real}`,
+      `This is not an IAMCEO data folder, so it was not deleted (it needs both the database and a settings file with an access code): ${real}`));
   }
   let owner;
   try { owner = acquireHomeOwner(real); }
@@ -170,7 +214,8 @@ export async function uninstall(options: UninstallOptions, deps: UninstallDeps =
   const home = homeDir(env);
   const control: ServiceControl = { launchctl: deps.launchctl ?? realLaunchctl, domain: serviceDomain(deps.uid), plistPath: servicePlistPath(userHome), sleep };
   const plist = readServicePlist(control.plistPath);
-  const owned = plist ? ownService(plist, home, userHome) : false;
+  const ownership = plist ? serviceOwnership(plist, home, userHome, options.includeCheckout === true) : null;
+  const owned = ownership?.owned === true;
   let config: Config | null = null;
   if (existsSync(join(home, "config.json"))) {
     try { config = loadConfig({ ...env, ...(owned ? plist!.env : {}), IAMCEO_HOME: home }); } catch { config = null; }
@@ -180,18 +225,47 @@ export async function uninstall(options: UninstallOptions, deps: UninstallDeps =
   const core = deps.core ?? defaultCoreControl(socket, coreBin && coreBin.includes("/") ? coreBin : coreBin ? Bun.which(coreBin) : null, home);
   const outcome: UninstallOutcome = { home, members: { reachable: false, stopped: 0, failed: [] }, service: plist ? (owned ? "removed" : "foreign") : "absent",
     core: { absent: true, killed: 0, stopped: false }, purged: false };
+  const checkoutHint = ownership?.kind === "git" && ownership.sameHome && !owned;
 
   log(say(`이 Mac 에서 IAMCEO 를 완전히 멈춥니다 (데이터 폴더 ${home})`, `Stopping IAMCEO completely on this Mac (data folder ${home})`));
   for (const line of [
     say("  1. 서버가 떠 있으면 관리하는 팀장을 모두 재웁니다(직접 띄운 세션은 건드리지 않습니다)", "  1. If the server is running, put every managed session to sleep (sessions you started yourself are left alone)"),
-    plist ? owned ? say(`  2. 로그인 서비스를 해제합니다: ${control.plistPath}`, `  2. Remove the login service: ${control.plistPath}`)
-      : say(`  2. 등록된 서비스가 다른 설치의 것이라 건드리지 않습니다: ${control.plistPath}`, `  2. The registered service belongs to another installation; it is left alone: ${control.plistPath}`)
+    plist ? owned ? ownership!.kind === "git"
+        ? say(`  2. 소스 체크아웃에서 도는 로그인 서비스를 해제합니다. 서비스 설정은 지우지 않고 사본을 남깁니다: ${control.plistPath}`,
+          `  2. Remove the login service that runs from a source checkout; its settings file is kept as a copy: ${control.plistPath}`)
+        : say(`  2. 로그인 서비스를 해제합니다: ${control.plistPath}`, `  2. Remove the login service: ${control.plistPath}`)
+      : checkoutHint
+        ? say(`  2. 등록된 서비스는 소스 체크아웃에서 도는 서버라 건드리지 않습니다(내리려면 --include-checkout): ${control.plistPath}`,
+          `  2. The registered service runs from a source checkout, so it is left alone (add --include-checkout to stop it): ${control.plistPath}`)
+        : say(`  2. 등록된 서비스가 다른 설치의 것이라 건드리지 않습니다: ${control.plistPath}`, `  2. The registered service belongs to another installation; it is left alone: ${control.plistPath}`)
       : say("  2. 등록된 로그인 서비스가 없습니다", "  2. No login service is registered"),
     say(`  3. 실행 엔진의 터미널을 모두 끝내고 엔진을 끕니다: ${socket}`, `  3. End every terminal in the session engine and stop it: ${socket}`),
     options.purge ? say(`  4. 데이터 폴더를 지웁니다: ${home} (백업 포함, 되돌릴 수 없음)`, `  4. Delete the data folder: ${home} (backups included, cannot be undone)`)
       : say(`  4. 데이터는 남깁니다: ${home}`, `  4. Your data stays in ${home}`),
   ]) log(line);
   if (dry) return outcome;
+
+  // 0. 이 명령으로 끌 수 없는 서버가 떠 있으면 팀장을 재우기 전에 아무것도 하지 않고 멈춘다.
+  //    (다른 설치의 서비스는 엔진을 꺼도 서버가 다시 띄우고, 같은 데이터 폴더면 그 서버의 팀장 세션까지 끝내게 된다.)
+  const loaded = serviceLoaded(control);
+  const answering = config ? await iamceoAnswers(config, fetchImpl) : false;
+  const address = config ? localBase(config) : home;
+  if (plist && !owned && ownership!.sameHome && (loaded || answering)) {
+    throw new LifecycleError(checkoutHint
+      ? say(`등록된 로그인 서비스가 소스 체크아웃에서 도는 서버라 이 명령으로 끄지 않습니다. 아무것도 바꾸지 않았습니다. 그 서버까지 멈추려면 --include-checkout 을 붙이세요(서비스 설정은 사본으로 남깁니다).`,
+        `The registered login service runs from a source checkout, so this command does not stop it. Nothing was changed. To stop that server too, add --include-checkout (its settings file is kept as a copy).`)
+      : say(`등록된 로그인 서비스가 다른 설치(옛 명령줄 설치 등)의 것이라 이 명령으로 끌 수 없습니다. 아무것도 바꾸지 않았습니다. 그 설치의 방법으로 먼저 멈추세요: ${control.plistPath}`,
+        `The registered login service belongs to another installation (such as an older command-line install), so this command cannot stop it. Nothing was changed. Stop it the way that installation is stopped first: ${control.plistPath}`));
+  }
+  if (!plist && loaded) {
+    throw new LifecycleError(say("설정 파일 없이 올라 있는 IAMCEO 서비스가 있어 이 명령으로 끌 수 없습니다. 아무것도 바꾸지 않았습니다. Mac 을 다시 시작한 뒤 다시 실행하세요.",
+      "An IAMCEO service is loaded without a settings file, so this command cannot stop it. Nothing was changed. Restart the Mac, then run this again."));
+  }
+  if (answering && !(owned && loaded)) {
+    throw new LifecycleError(say(`서비스 밖에서 직접 실행 중인 IAMCEO 서버가 있습니다(${address}). 이 명령으로는 끌 수 없어 아무것도 바꾸지 않았습니다. 그 서버를 끈 뒤 다시 실행하세요.`,
+      `An IAMCEO server was started directly, outside the login service (${address}). This command cannot stop it, so nothing was changed. Stop that server and run this again.`));
+  }
+
   const confirm = deps.confirm ?? askOnTerminal;
   if (!options.yes && !await confirm(say("계속하려면 y 를 입력하세요:", "Type y to continue:"), "y")) throw new LifecycleError(say("멈추지 않았습니다", "Nothing was stopped"));
 
@@ -205,11 +279,22 @@ export async function uninstall(options: UninstallOptions, deps: UninstallDeps =
   // 2. 서비스
   if (plist && owned) {
     await stopService(control, deps.stopTimeoutMs ?? 30_000);
-    rmSync(control.plistPath, { force: true });
-    log(say("로그인 서비스를 해제했습니다", "Removed the login service"));
+    if (ownership!.kind === "git") {
+      // 소스 체크아웃의 서비스 설정은 직접 만든 것일 수 있다. 지우지 않고 데이터 폴더 밖(지우기에도 남는 자리)에 사본을 둔다.
+      const dir = join(userHome, "Library", "Application Support", "IAMCEO", "service-backup");
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const copy = join(dir, `com.iamceo.server.${stampNow()}.plist`);
+      copyFileSync(control.plistPath, copy);
+      rmSync(control.plistPath, { force: true });
+      outcome.serviceCopy = copy;
+      log(say(`로그인 서비스를 해제했습니다. 서비스 설정 사본: ${copy} (다시 쓰려면 ${control.plistPath} 로 옮깁니다)`,
+        `Removed the login service. Copy of its settings: ${copy} (move it back to ${control.plistPath} to use it again)`));
+    } else {
+      rmSync(control.plistPath, { force: true });
+      log(say("로그인 서비스를 해제했습니다", "Removed the login service"));
+    }
   } else if (plist) log(say("다른 설치의 서비스라 그대로 두었습니다", "Left the other installation's service alone"));
-  else if (serviceLoaded(control)) log(say("설정 파일 없이 올라 있는 서비스가 있어 건드리지 않았습니다", "A service is loaded without a settings file; it was left alone"));
-  // 서비스 밖에서 도는 서버가 있으면 엔진을 꺼도 다시 띄운다. 그때는 엔진을 건드리지 않고 멈춘다.
+  // 서비스가 내려간 뒤에도 서버가 답하면(서비스 밖에서 새로 띄웠다) 엔진을 꺼도 그 서버가 다시 띄운다. 그때는 엔진을 건드리지 않고 멈춘다.
   if (config) {
     const deadline = Date.now() + (deps.stopTimeoutMs ?? 30_000);
     while (await iamceoAnswers(config, fetchImpl)) {
@@ -221,7 +306,14 @@ export async function uninstall(options: UninstallOptions, deps: UninstallDeps =
   // 3. 실행 엔진
   if (await core.answers()) {
     outcome.core.absent = false;
-    const live = (await core.terminals()).filter(terminal => terminal.state === "live");
+    // 목록을 읽지 못해도(시간 초과 등) 엔진 끄기로 넘어간다. 서비스는 이미 내려갔으므로 여기서 멈추면 세션이 화면 없이 남는다.
+    let live: CoreTerminalInfo[] = [];
+    let listFailed = false;
+    try { live = (await core.terminals()).filter(terminal => terminal.state === "live"); }
+    catch {
+      listFailed = true;
+      log(say("경고: 실행 엔진의 터미널 목록을 읽지 못했습니다. 엔진을 바로 끕니다.", "Warning: could not list the terminals in the session engine. Stopping the engine directly."));
+    }
     const failures: string[] = [];
     for (const terminal of live) {
       try { await core.kill(terminal.address); outcome.core.killed++; }
@@ -232,12 +324,18 @@ export async function uninstall(options: UninstallOptions, deps: UninstallDeps =
     const stillUp = await core.answers();
     log(say(`실행 엔진의 터미널 ${outcome.core.killed}개를 끝냈습니다${outcome.core.stopped && !stillUp ? " · 엔진을 껐습니다" : ""}`,
       `Ended ${outcome.core.killed} terminals in the session engine${outcome.core.stopped && !stillUp ? " · stopped the engine" : ""}`));
+    if (listFailed && stillUp) throw new LifecycleError(say("실행 엔진을 끄지 못했습니다. 팀장 세션이 아직 남아 있을 수 있습니다. Mac 을 다시 시작하면 엔진과 세션이 모두 끝납니다.",
+      "Could not stop the session engine, so sessions may still be running. Restarting the Mac ends the engine and every session."));
     if (failures.length && stillUp) throw new LifecycleError(say(`실행 엔진의 터미널 ${failures.length}개를 끝내지 못했습니다. 잠시 뒤 다시 실행하세요.`, `Could not end ${failures.length} terminals in the session engine. Run this again in a moment.`));
     if (stillUp) log(say("실행 엔진이 아직 답합니다. 터미널은 모두 끝냈습니다. Mac 을 다시 시작하면 엔진도 끝납니다.", "The session engine still answers, but every terminal has ended. Restarting the Mac ends the engine as well."));
   } else log(say("실행 엔진은 이미 꺼져 있습니다", "The session engine is already stopped"));
   // 4. 데이터
   if (options.purge) {
-    if (!options.yes && !await confirm(say(`데이터 폴더 ${home} 를 지웁니다. 대화·결재·자료·첨부·백업이 모두 사라지고 되돌릴 수 없습니다. 지우려면 '지우기' 를 입력하세요:`,
+    // 기본 자리(~/.iamceo)도, 등록된 서비스의 폴더도 아니면 --yes 가 있어도 경로를 직접 입력받는다(IAMCEO_HOME 이 잘못 잡힌 경우).
+    const usual = [join(userHome, ".iamceo"), ...(plist ? [serviceHome(plist, userHome)] : [])].some(path => normalizeHome(path) === normalizeHome(home));
+    if (!usual && !await confirmUnusualHome(deps.confirm, home)) {
+      log(say("데이터는 지우지 않았습니다", "Your data was not deleted"));
+    } else if (!options.yes && !await confirm(say(`데이터 폴더 ${home} 를 지웁니다. 대화·결재·자료·첨부·백업이 모두 사라지고 되돌릴 수 없습니다. 지우려면 '지우기' 를 입력하세요:`,
       `This deletes ${home}: conversations, decisions, files, attachments and backups, permanently. Type DELETE to confirm:`), say("지우기", "DELETE"))) {
       log(say("데이터는 지우지 않았습니다", "Your data was not deleted"));
     } else {

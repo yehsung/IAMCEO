@@ -136,7 +136,8 @@ APNs 발신 대기열은 CLI 입력 대기열과 별개다. 새 기기는 알림
 | `backups/` | 정기 백업(일별 7개·주별 4개) |
 | `diagnostics/` | 진단 파일 폴더와 zip, 최근 5개 |
 | `cli-versions.json` | 서버가 읽은 Claude·Codex 버전과 처음 본 시각(비밀 없음) |
-| `upgrades/<id>/` | `iamceo upgrade`가 남긴 직전 판 기록(plist·DB 사본·이전 앱 또는 커밋) |
+| `upgrades/<id>/` | `iamceo upgrade`가 남긴 직전 판 기록(plist·DB 사본·이전 앱 또는 커밋), 최근 2개. 그보다 오래된 기록도 `rollback` 이 옆에 뺀 DB(`after-upgrade-*`·`rollback-attempt-*`)는 남김. 저장소 정리는 건드리지 않음 |
+| `exports/` | 프로젝트 내보내기의 임시 zip(`.export-<uuid>.zip`, 0600). 열어 둔 채 바로 지우고, 서버가 도중에 꺼져 남은 것은 저장소 정리가 1시간 뒤 치움 |
 
 데몬은 DB를 열거나 복구하기 전에 홈 단위 OS 잠금을 잡는다. 설정은 권한 0600의 임시 파일에 쓰고 디스크 동기화·이름 교체·디렉터리 동기화를 거쳐 저장한다. 지원하지 않는 미래 DB 버전은 쓰기 전에 거부한다. 기존 DB 마이그레이션 전에는 `VACUUM INTO` 백업을 만들며 실패하면 중단한다.
 

@@ -88,7 +88,7 @@ describe("명령줄 도움말과 오류", () => {
     expect(unknown.stderr).toContain("Usage: iamceo <command>");
     const attach = await cli(["attach"], "en");
     expect(attach.code).toBe(1);
-    expect(attach.stderr.trim()).toBe("Usage: iamceo attach <memberID>");
+    expect(attach.stderr.trim()).toBe("Usage: iamceo attach <staffID>");
     const auth = await cli(["auth"], "ko");
     expect(auth.stderr.trim()).toBe("쓰는 법: iamceo auth rotate");
     const service = await cli(["service", "install"], "en");
@@ -205,9 +205,8 @@ describe("역할 지침의 보고 언어 줄", () => {
     expect(ENGLISH_REPORT_RULE.length).toBeLessThan(1400);
   });
 
-  // 지휘자 몫(handoff): server/orchestrator.ts 의 rulesFor 가 REPORT_LANGUAGE: this.store.getSettings().reportLanguage 를 넘기면
-  // 아래 todo 를 test 로 바꾼다. E 묶음은 orchestrator.ts 를 고치지 않는다(다른 팀장이 고치는 중).
-  test.todo("서버가 띄우는 세션의 규칙 파일에도 영어 줄이 들어간다(orchestrator 한 줄 연결 뒤)", async () => {
+  // server/orchestrator.ts 의 rulesFor 가 REPORT_LANGUAGE: this.store.getSettings().reportLanguage 를 넘긴다(합치기 단계에서 연결).
+  test("서버가 띄우는 세션의 규칙 파일에도 영어 줄이 들어간다", async () => {
     const f = await server();
     const project = f.store.createProject({ name: "언어", cwd: f.isolated.paths.work });
     f.store.patchSettings({ reportLanguage: "en" });
@@ -215,6 +214,30 @@ describe("역할 지침의 보고 언어 줄", () => {
     expect(readFileSync(f.runner.started.at(-1)!.systemPromptFile, "utf8")).toContain(ENGLISH_REPORT_RULE);
     f.store.patchSettings({ reportLanguage: "ko" });
     await f.orch.addMember(project.id, { name: "화면 문구", handle: "copy", role: "개발" });
+    expect(readFileSync(f.runner.started.at(-1)!.systemPromptFile, "utf8")).not.toContain("## Report language");
+  });
+
+  test("이미 있는 팀장을 잠재웠다 다시 띄우면 그때의 보고 언어로 규칙 파일을 다시 쓴다", async () => {
+    const f = await server();
+    const project = f.store.createProject({ name: "언어 재시작", cwd: f.isolated.paths.work });
+    const { member } = await f.orch.addMember(project.id, { name: "결제 연동", handle: "pay", role: "개발" });
+    const first = f.runner.started.at(-1)!.systemPromptFile;
+    expect(readFileSync(first, "utf8")).not.toContain("## Report language");
+    // 영어로 바꾼 뒤 다시 띄우면 같은 규칙 파일에 영어 줄이 들어간다.
+    f.store.patchSettings({ reportLanguage: "en" });
+    await f.orch.sleepMember(member.id, { force: true });
+    const before = f.runner.started.length;
+    await f.orch.resumeMember(member.id);
+    expect(f.runner.started.length).toBe(before + 1);
+    const reopened = f.runner.started.at(-1)!;
+    expect(reopened.systemPromptFile).toBe(first);
+    const english = readFileSync(reopened.systemPromptFile, "utf8");
+    expect(english).toContain(ENGLISH_REPORT_RULE);
+    expect(english.split("## Report language").length).toBe(2);
+    // 다시 한국어로 돌리면 다음 띄우기에서 영어 줄이 빠진다.
+    f.store.patchSettings({ reportLanguage: "ko" });
+    await f.orch.sleepMember(member.id, { force: true });
+    await f.orch.resumeMember(member.id);
     expect(readFileSync(f.runner.started.at(-1)!.systemPromptFile, "utf8")).not.toContain("## Report language");
   });
 });

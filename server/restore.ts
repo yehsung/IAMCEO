@@ -179,20 +179,30 @@ function quarantine(db: Database, manifest: BackupManifest, mode: "same-host" | 
   return serverId;
 }
 
-/** Separate-path rehearsal only. Never replaces an installed DB or starts a worker. */
+/** Anything but the home lock file counts as data. A missing folder has none. */
+function hasData(home: string): boolean {
+  return existsSync(home) && readdirSync(home).some((name) => name !== ".owner.lock");
+}
+
+/** Restores into a missing or empty home only. Never replaces an installed DB or starts a worker. */
 export function restoreBackup(options: RestoreOptions): RestoreResult {
   const mode = z.enum(["same-host", "clone"]).parse(options.mode ?? "same-host");
   const at = (options.now ?? new Date()).toISOString();
   const snapshot = verifyBackup(options.snapshotDir);
   const destination = normalizeHome(options.destinationHome);
-  if (destination === snapshot.manifest.sourceHome || destination.startsWith(snapshot.manifest.sourceHome + sep) || snapshot.manifest.sourceHome.startsWith(destination + sep) ||
+  const source = snapshot.manifest.sourceHome;
+  // The backup's own path is allowed: a new Mac with the same user name restores into the same ~/.iamceo.
+  // A live home is still never overwritten: the destination must be missing or empty (below), and a running
+  // server holds the home lock, so acquireHomeOwner refuses. Paths nested in or around either home stay refused.
+  if (destination.startsWith(source + sep) || source.startsWith(destination + sep) ||
       destination === snapshot.directory || destination.startsWith(snapshot.directory + sep) || snapshot.directory.startsWith(destination + sep)) throw new Error("Restore requires a separate destination home");
+  if (destination === source && hasData(destination)) throw new Error("Restore destination must be empty: the data folder this backup came from still has data and is never overwritten");
   // Deliberately do not borrow a daemon's existing owner during restoration.
   const owner = acquireHomeOwner(destination);
   const stage = join(destination, `.restore-${randomUUID()}`);
   const published: string[] = [];
   try {
-    if (readdirSync(destination).some((name) => name !== ".owner.lock")) throw new Error("Restore destination must be empty");
+    if (hasData(destination)) throw new Error("Restore destination must be empty");
     mkdirSync(stage, { mode: 0o700 });
     for (const dir of ["uploads", "inbox", "roles"]) mkdirSync(join(stage, dir), { mode: 0o700 });
     for (const entry of [snapshot.manifest.database, ...snapshot.manifest.configs, ...snapshot.manifest.attachments]) {

@@ -280,6 +280,56 @@ describe("separate-home restore and outbound reconciliation", () => {
     expect(f.db.query("SELECT status FROM deliveries WHERE id='queued'").get()).toEqual({ status: "queued" });
   });
 
+  test("new Mac with the same user name: the backup's own path restores when missing or empty; a home with data is never overwritten", () => {
+    const f = fixture();
+    const snapshot = f.backup();
+    const fileCountBefore = fs.readdirSync(f.home).sort();
+    // 1) 데이터가 남은 그 홈(옛 Mac 자신)은 거절하고 하나도 바꾸지 않는다. 그 안·바깥으로 걸친 경로도 거절한다.
+    expect(() => restoreBackup({ snapshotDir: snapshot.directory, destinationHome: f.home })).toThrow("never overwritten");
+    expect(fs.readdirSync(f.home).sort()).toEqual(fileCountBefore);
+    expect(fs.readFileSync(f.path, "utf8")).toBe("원본");
+    expect(() => restoreBackup({ snapshotDir: snapshot.directory, destinationHome: join(f.home, "nested") })).toThrow("separate destination home");
+    expect(() => restoreBackup({ snapshotDir: snapshot.directory, destinationHome: join(f.home, "..") })).toThrow("separate destination home");
+    expect(() => restoreBackup({ snapshotDir: snapshot.directory, destinationHome: join(snapshot.directory, "inside") })).toThrow("separate destination home");
+    // 2) 새 Mac: 같은 경로에 폴더가 없다(옛 데이터는 다른 Mac 에 있다고 보고 옆으로 옮긴다).
+    const elsewhere = `${f.home}-old-mac`;
+    fs.renameSync(f.home, elsewhere);
+    const restored = restoreBackup({ snapshotDir: snapshot.directory, destinationHome: f.home });
+    expect(restored.home).toBe(fs.realpathSync(f.home));
+    expect(verifyRestoredHome(f.home).snapshotId).toBe(snapshot.manifest.id);
+    expect(json(join(f.home, "config.json")).accessCode).toBe("fixture-secret");
+    const db = readDb(f.home);
+    const attachment = db.query<{ path: string }, []>("SELECT path FROM attachments WHERE id='a'").get()!;
+    expect(attachment.path.startsWith(join(fs.realpathSync(f.home), "uploads"))).toBe(true);
+    expect(fs.readFileSync(attachment.path, "utf8")).toBe("원본");
+    expect(reconcileRestoredHome(f.home).reconciliationRequired).toBe(false);
+    expect(resumeRestoredHome(f.home).outboundEnabled).toBe(true);
+    // 3) 복원이 끝난 그 홈에 다시 복원하는 것은(이제 데이터가 있으므로) 거절한다.
+    expect(() => restoreBackup({ snapshotDir: snapshot.directory, destinationHome: f.home })).toThrow("never overwritten");
+  });
+
+  test("the backup's own path restores into an existing empty folder (only a home lock left)", () => {
+    const f = fixture();
+    const snapshot = f.backup();
+    fs.renameSync(f.home, `${f.home}-old-mac`);
+    fs.mkdirSync(f.home, { mode: 0o700 });
+    acquireHomeOwner(f.home).release();
+    expect(fs.readdirSync(f.home)).toEqual([".owner.lock"]);
+    expect(restoreBackup({ snapshotDir: snapshot.directory, destinationHome: f.home }).reconciliationRequired).toBe(true);
+    expect(verifyRestoredHome(f.home).snapshotId).toBe(snapshot.manifest.id);
+  });
+
+  test("a running server's home lock refuses a restore into its folder", () => {
+    const f = fixture();
+    const snapshot = f.backup();
+    fs.renameSync(f.home, `${f.home}-old-mac`);
+    fs.mkdirSync(f.home, { mode: 0o700 });
+    using owner = acquireHomeOwner(f.home);
+    expect(() => restoreBackup({ snapshotDir: snapshot.directory, destinationHome: f.home })).toThrow();
+    owner.release();
+    expect(fs.readdirSync(f.home)).toEqual([".owner.lock"]);
+  });
+
   test("failed reconciliation/resume commits neither completion nor partial runner enablement", () => {
     const f = fixture();
     seedOutbound(f.db);
@@ -411,7 +461,9 @@ describe("separate-home restore and outbound reconciliation", () => {
   test("refuses source, related, occupied and owned destinations without overwriting files", () => {
     const f = fixture();
     const snapshot = f.backup();
-    for (const destinationHome of [f.home, join(f.home, "other"), f.runtime.dir, snapshot.directory, join(snapshot.directory, "other")]) {
+    // 백업이 나온 그 홈은 데이터가 남아 있으면 거절한다(비었거나 없으면 새 Mac 복원으로 허용 — 위 시험).
+    expect(() => restoreBackup({ snapshotDir: snapshot.directory, destinationHome: f.home })).toThrow("never overwritten");
+    for (const destinationHome of [join(f.home, "other"), f.runtime.dir, snapshot.directory, join(snapshot.directory, "other")]) {
       expect(() => restoreBackup({ snapshotDir: snapshot.directory, destinationHome })).toThrow("separate");
     }
     fs.mkdirSync(f.destination);

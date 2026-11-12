@@ -23,7 +23,9 @@ final class ServerUpgradeWatch {
     @ObservationIgnored private let check: Check
     @ObservationIgnored private let restartAction: Restart
     @ObservationIgnored private var evaluatedKey: String?
-    @ObservationIgnored private var evaluating = false
+    /// 지금 확인 중인 키와 그 확인의 세대. 더 새 확인이나 연결 끊김이 앞서면 늦게 돌아온 결과는 버린다.
+    @ObservationIgnored private var inFlightKey: String?
+    @ObservationIgnored private var generation = 0
     @ObservationIgnored private var endpoint = ""
     private static let askedKey = "IAMCEO.serverUpgrade.askedBuildID"
 
@@ -42,15 +44,24 @@ final class ServerUpgradeWatch {
     /// 연결이 바뀔 때(주소·연결 상태·서버 버전) 한 번 본다. 같은 조합은 다시 보지 않는다.
     /// - window: 질문을 띄울 창. 먼저 부른 창이 맡는다.
     func evaluate(endpoint: String, onThisMac: Bool, connected: Bool, demo: Bool, serverVersion: String?, window: UUID) async {
+        // 다시 시작은 서버를 내리므로 연결이 끊긴다. 그동안 제안을 지우면 실패했을 때 까닭과 '다시 시작' 줄이 함께 사라진다.
+        guard !isRestarting else { return }
         guard onThisMac, connected, !demo, let serverVersion, !serverVersion.isEmpty else {
-            if !connected || !onThisMac { offer = nil; prompt = nil; evaluatedKey = nil }
+            if !connected || !onThisMac { offer = nil; prompt = nil; evaluatedKey = nil; inFlightKey = nil; generation &+= 1 }
             return
         }
         let key = endpoint + "|" + serverVersion
-        guard evaluatedKey != key, !evaluating, !isRestarting else { return }
-        evaluating = true
-        defer { evaluating = false }
+        // 같은 키를 이미 확인했거나 확인하는 중이면(다른 창이 먼저 불렀다) 그 결과를 쓴다.
+        guard evaluatedKey != key, inFlightKey != key else { return }
+        generation &+= 1
+        let mine = generation
+        inFlightKey = key
         let found = await check(endpoint)
+        // 더 새 확인이나 연결 끊김이 앞섰다. 늦게 돌아온 결과로 '확인했고 제안 없음'을 남기지 않는다.
+        guard mine == generation else { return }
+        inFlightKey = nil
+        // 확인이 중간에 취소됐다(연결이 흔들려 .task 가 바뀜). 결과를 믿지 않고, 다음에 같은 키로 다시 본다.
+        guard !Task.isCancelled else { return }
         evaluatedKey = key
         self.endpoint = endpoint
         offer = found
@@ -76,6 +87,8 @@ final class ServerUpgradeWatch {
             await store?.restartRealtime()
         } catch {
             isRestarting = false
+            // 실패하면 시작 때 잡은 제안을 다시 둔다. 설정의 줄이 까닭과 '다시 시작'을 함께 보인다.
+            self.offer = offer
             self.error = error.localizedDescription
         }
     }

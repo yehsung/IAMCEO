@@ -198,7 +198,57 @@ import XCTest
         let input = await store.terminalInput(store.members[0], text: "y"); XCTAssertFalse(input)
         let released = await store.releaseTerminal(store.members[0]); XCTAssertFalse(released)
         XCTAssertEqual(store.terminalLeases["m"]?.leaseId, "legacy")
+        server.change { $0.dropTerminal = false }
+        let before = network.requests.count
         store.disconnect()
+        // 끊을 때 남은 옛 방식 조작권은 놓아 달라고 한 번 보낸다(답은 기다리지 않는다).
+        let deadline = Date().addingTimeInterval(2)
+        var releaseSent = false
+        while !releaseSent, Date() < deadline {
+            releaseSent = network.requests.dropFirst(before).contains {
+                $0.url?.path == "/api/members/m/terminal/control"
+                    && (try? WriteTestServer.body($0))?["action"] as? String == "release"
+                    && (try? WriteTestServer.body($0))?["leaseId"] as? String == "legacy"
+            }
+            if !releaseSent { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        XCTAssertTrue(releaseSent)
+        await network.close()
+    }
+
+    /// 흔들림(xctest 가 죽음): 끊을 때 띄운 조작권 놓기 작업이, 시험이 이미 무효화한 세션으로 요청을 만들어
+    /// Objective-C 예외("Task created in a session that has been invalidated")로 프로세스를 죽였다.
+    /// 놓기 요청은 끊는 그 자리에서 만들고, 그때 세션이 이미 닫혔어도 죽지 않는다.
+    func testDisconnectThenClosedSessionNeverCrashesOnLeaseRelease() async throws {
+        let server = WriteTestServer()
+        let network = try IsolatedTestNetwork { request in
+            if request.url?.path == "/api/capabilities" { return IsolatedTestHTTPReply(status: 404) }
+            if request.url?.path.hasSuffix("/terminal/control") == true {
+                return IsolatedTestHTTPReply(data: Data(#"{"leaseId":"legacy","expiresAt":9999999999999}"#.utf8))
+            }
+            return try server.handle(request)
+        }
+        // 1) 끊자마자 세션을 닫는다(예전에는 나중에 도는 작업이 닫힌 세션으로 요청을 만들었다).
+        let store = await connect(network)
+        let claimed = await store.claimTerminal(store.members[0]); XCTAssertTrue(claimed)
+        store.disconnect()
+        await network.close()
+        // 2) 세션이 이미 닫힌 뒤에 끊어도 죽지 않는다.
+        let second = try IsolatedTestNetwork { request in
+            if request.url?.path == "/api/capabilities" { return IsolatedTestHTTPReply(status: 404) }
+            if request.url?.path.hasSuffix("/terminal/control") == true {
+                return IsolatedTestHTTPReply(data: Data(#"{"leaseId":"legacy-2","expiresAt":9999999999999}"#.utf8))
+            }
+            return try server.handle(request)
+        }
+        let late = await connect(second)
+        let again = await late.claimTerminal(late.members[0]); XCTAssertTrue(again)
+        await second.close()
+        late.disconnect()
+        // 끊은 뒤에 도는 일이 남아 있었다면 이 사이에 프로세스가 죽는다.
+        for _ in 0..<10 { await Task.yield(); try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertTrue(store.terminalLeases.isEmpty)
+        XCTAssertTrue(late.terminalLeases.isEmpty)
     }
 
     func testMalformedSyncDoesNotAuthorizeLegacyTerminalWrites() async throws {

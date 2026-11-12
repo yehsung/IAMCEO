@@ -12,6 +12,10 @@ export const WIRE_TEXT_RETENTION_MS = 30 * 86_400_000;
 export const RECORD_RETENTION_MS = 90 * 86_400_000;
 /** 정리 한 번이 서버를 붙잡는 최대 시간. 남은 것은 다음 정리(한 시간 뒤) 때 이어 한다. */
 export const RECORD_PRUNE_BUDGET_MS = 250;
+/** B5: 서버가 내보내기 도중에 꺼져 남은 임시 zip 을 치우기까지. 쓰는 동안에는 수정 시각이 계속 새로 바뀐다. */
+export const EXPORT_TEMP_GRACE_MS = 3_600_000;
+/** server/lifecycle/project-data.ts 가 만드는 내보내기 임시 파일 이름. 이것 말고는 exports/ 에서 아무것도 지우지 않는다. */
+export const EXPORT_TEMP_NAME = /^\.export-[0-9a-f-]{36}\.zip$/;
 export interface StorageUsage { bytes: number; files: number; symlinks: number }
 export interface StorageMaintenanceOptions {
   uploadsDir: string;
@@ -20,6 +24,8 @@ export interface StorageMaintenanceOptions {
   references: FileReferences;
   /** E4: 안쪽 기록의 보존 기한 정리. 없으면 파일 정리만 한다. */
   records?: Pick<Store, "pruneInternalRecords">;
+  /** B5: 프로젝트 내보내기의 임시 파일 폴더(<홈>/exports). 1시간 넘은 `.export-*.zip` 만 치운다. 업그레이드 기록(<홈>/upgrades)은 넘기지 않는다. */
+  exportsDir?: string;
   /** 시험용. 기본은 위 기한. */
   retention?: { wireTextMs?: number; recordMs?: number; budgetMs?: number; batch?: number };
 }
@@ -102,13 +108,44 @@ export class StorageMaintenance {
     return result;
   }
 
-  sweep(now = Date.now()): { quarantined: string[]; removed: string[]; retained: string[]; errors: string[]; records?: RecordPruneResult } {
+  /**
+   * B5: 서버가 내보내기 도중에 꺼지면 `<홈>/exports/.export-<uuid>.zip` 이 남는다(정상이면 열어 둔 채 바로 지운다).
+   * 이름이 맞고, 링크가 아닌 보통 파일이고, 마지막으로 쓴 지 1시간이 넘은 것만 지운다. 폴더가 링크면 아무것도 하지 않는다.
+   */
+  sweepExports(now = Date.now()): { removed: string[]; errors: string[] } {
+    const out = { removed: [] as string[], errors: [] as string[] };
+    const dir = this.options.exportsDir;
+    if (!dir || !existsSync(dir)) return out;
+    const root = lstatSync(dir);
+    if (!root.isDirectory() || root.isSymbolicLink()) { out.errors.push(dir); return out; }
+    for (const name of readdirSync(dir)) {
+      if (!EXPORT_TEMP_NAME.test(name)) continue;
+      const path = join(dir, name);
+      try {
+        const stat = lstatSync(path);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) continue;
+        if (stat.mtimeMs > now || now - stat.mtimeMs <= EXPORT_TEMP_GRACE_MS) continue;
+        unlinkSync(path);
+        out.removed.push(name);
+      } catch { out.errors.push(name); }
+    }
+    return out;
+  }
+
+  sweep(now = Date.now()): { quarantined: string[]; removed: string[]; retained: string[]; errors: string[]; records?: RecordPruneResult; exports?: string[] } {
     if (!Number.isFinite(now) || now < 0) throw new Error("Invalid maintenance time");
-    const result: { quarantined: string[]; removed: string[]; retained: string[]; errors: string[]; records?: RecordPruneResult } =
+    const result: { quarantined: string[]; removed: string[]; retained: string[]; errors: string[]; records?: RecordPruneResult; exports?: string[] } =
       { quarantined: [] as string[], removed: [] as string[], retained: [] as string[], errors: [] as string[] };
     if (this.options.records) {
       try { result.records = this.pruneRecords(now)!; }
       catch { result.errors.push("records"); }
+    }
+    if (this.options.exportsDir) {
+      try {
+        const leftovers = this.sweepExports(now);
+        result.exports = leftovers.removed;
+        for (const error of leftovers.errors) result.errors.push(`exports:${error}`);
+      } catch { result.errors.push("exports"); }
     }
     if (!existsSync(this.uploadsDir)) return result;
     if (!lstatSync(this.uploadsDir).isDirectory() || lstatSync(this.uploadsDir).isSymbolicLink()) throw new Error("Uploads must be a real directory");

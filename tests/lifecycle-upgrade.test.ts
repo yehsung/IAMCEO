@@ -1,22 +1,25 @@
 // iamceo upgrade · rollback (D2). 임시 홈·가짜 launchctl·가짜 릴리스·가짜 준비 확인만 쓴다. 실제 launchd·앱·네트워크는 부르지 않는다.
-import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { launchdPlist } from "../bin/iamceo.ts";
 import { Bus } from "../server/bus.ts";
 import { updateConfigFile } from "../server/config.ts";
 import { MIGRATIONS, openDb } from "../server/db.ts";
 import { LifecycleError } from "../server/lifecycle/launchd.ts";
-import type { ReleaseTools } from "../server/lifecycle/release.ts";
+import { releaseSource, type ReleaseTools } from "../server/lifecycle/release.ts";
 import type { RehearsalResult } from "../server/lifecycle/rehearse.ts";
 import { listUpgradeRecords, latestRollbackTarget } from "../server/lifecycle/state.ts";
 import { readinessBudget, rollback, upgrade, type CommandRunner, type LifecycleDeps } from "../server/lifecycle/upgrade.ts";
 import { Store } from "../server/store.ts";
 
+// 이 파일의 단언은 한국어 문구를 본다. bun 은 여러 시험 파일을 한 프로세스에서 돌리므로 끝나면 원래 값으로 돌려 놓는다.
+const savedLang = process.env.IAMCEO_LANG;
 beforeAll(() => { process.env.IAMCEO_LANG = "ko"; });
+afterAll(() => { if (savedLang === undefined) delete process.env.IAMCEO_LANG; else process.env.IAMCEO_LANG = savedLang; });
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
 
@@ -185,6 +188,68 @@ describe("설치판 업그레이드", () => {
     await expect(rollback({ yes: true }, f.deps())).rejects.toThrow("되돌릴 업그레이드 기록이 없습니다");
   });
 
+  // 리뷰 safety-2: 되돌리기로 옆에 빼 둔 '업그레이드 뒤 대화' DB 는 오래된 기록을 정리할 때도 지우지 않는다.
+  test("rollback 이 옆에 빼 둔 DB 는 그 뒤 업그레이드를 두 번 더 해도 남는다(큰 사본만 정리한다)", async () => {
+    const f = releaseFixture();
+    let tick = 0;
+    const now = () => new Date(Date.parse("2026-11-13T00:00:00Z") + (tick++) * 60_000);
+    f.onStart(version => { if (version === "0.2.4") bumpSchema(join(f.home, "iamceo.db")); });
+    await upgrade({ from: f.release("0.2.4") }, f.deps({ now }));
+    await rollback({ yes: true }, f.deps({ now }));
+    const first = listUpgradeRecords(f.home)[0]!;
+    const dir = dirname(first.plist);
+    const aside = readdirSync(dir).find(name => name.startsWith("after-upgrade-"))!;
+    expect(f.logs.join("\n")).toContain(join(dir, aside));
+    await upgrade({ from: f.release("0.2.4") }, f.deps({ now }));
+    await upgrade({ from: f.release("0.2.5") }, f.deps({ now }));
+    expect(versionAt(f.app)).toBe("0.2.5");
+    const records = listUpgradeRecords(f.home);
+    expect(records.map(record => record.phase)).toEqual(["done", "done", "rolled_back"]);
+    // 첫 기록 폴더는 옆 사본과 기록만 남기고(업그레이드 뒤에 쌓인 그때의 DB), 앱·업그레이드 전 DB 사본은 지웠다.
+    expect(readdirSync(dir).sort()).toEqual([aside, "upgrade.json"]);
+    expect(schemaOf(join(dir, aside, "iamceo.db"))).toBe(MIGRATIONS.length + 1);
+  });
+
+  // 리뷰 safety-3: 기록 뒤에 다른 방법(DMG 등)으로 판을 바꿨으면 그 기록으로 되돌리지 않는다(여러 판 뒤 + 오래된 DB 사본).
+  test("rollback 은 지금 도는 판이 그 기록이 올린 판일 때만 한다", async () => {
+    const f = releaseFixture();
+    await upgrade({ from: f.release("0.2.4") }, f.deps());
+    makeApp(f.app, "0.2.5"); // 업그레이드 뒤 DMG 로 0.2.5 를 덮어 깔았다
+    const calls = f.service.calls.length;
+    await expect(rollback({ dryRun: true }, f.deps())).rejects.toThrow("다른 방법으로 판이 바뀌었습니다");
+    await expect(rollback({ yes: true }, f.deps())).rejects.toThrow("지금 판: 0.2.5");
+    expect(versionAt(f.app)).toBe("0.2.5");
+    expect(f.service.calls.slice(calls)).not.toContain("bootout");
+    expect(listUpgradeRecords(f.home)[0]!.phase).toBe("done");
+    // 그 판으로 돌아오면 다시 되돌릴 수 있고, 안내에는 지금 판과 기록 시각이 보인다.
+    makeApp(f.app, "0.2.4");
+    expect(await rollback({ yes: true }, f.deps())).toMatchObject({ status: "rolled_back", to: "0.2.3" });
+    expect(f.logs.join("\n")).toMatch(/직전 판으로 되돌립니다: 지금 0\.2\.4 → 0\.2\.3 \(업그레이드 기록 \d{4}-\d\d-\d\d /);
+  });
+
+  // 리뷰 safety-4: 코드를 먼저 되돌리고 DB 를 바꾼다. 도중에 실패하면 바꾼 것을 모두 원래대로 돌리고 다시 되돌릴 수 있게 둔다.
+  test("직전 판이 준비되지 않으면 앱·DB 를 원래대로 돌리고 서비스를 다시 올린다. 기록은 그대로라 다시 되돌릴 수 있다", async () => {
+    const f = releaseFixture();
+    f.onStart(version => { if (version === "0.2.4") bumpSchema(join(f.home, "iamceo.db")); });
+    await upgrade({ from: f.release("0.2.4") }, f.deps());
+    f.failing.add("0.2.3");
+    await expect(rollback({ yes: true }, f.deps())).rejects.toThrow("바꾼 것을 모두 원래대로 돌렸습니다(서비스도 다시 올렸습니다)");
+    expect(versionAt(f.app)).toBe("0.2.4");
+    expect(f.service.current).toBe("0.2.4");
+    expect(schemaOf(join(f.home, "iamceo.db"))).toBe(MIGRATIONS.length + 1);
+    const record = listUpgradeRecords(f.home)[0]!;
+    expect(record.phase).toBe("done");
+    const dir = dirname(record.plist);
+    // 되돌린 판이 잠깐 쓴 DB 도 지우지 않고 옆에 둔다.
+    expect(readdirSync(dir).some(name => name.startsWith("rollback-attempt-"))).toBe(true);
+    expect(readdirSync(dir).some(name => name.startsWith("after-upgrade-"))).toBe(false);
+    expect(versionAt(record.previousApp!)).toBe("0.2.3");
+    f.failing.delete("0.2.3");
+    expect(await rollback({ yes: true }, f.deps())).toMatchObject({ status: "rolled_back", databaseRestored: true });
+    expect(versionAt(f.app)).toBe("0.2.3");
+    expect(schemaOf(join(f.home, "iamceo.db"))).toBe(MIGRATIONS.length);
+  });
+
   test("같은 판이면 바꾸지 않고, 낮은 판은 rollback 으로 안내한다", async () => {
     const f = releaseFixture();
     expect(await upgrade({ from: f.release("0.2.3") }, f.deps())).toMatchObject({ status: "current" });
@@ -217,6 +282,18 @@ describe("설치판 업그레이드", () => {
     await expect(upgrade({ target: "abc123" }, f.deps())).rejects.toThrow("--version");
     expect(versionAt(f.app)).toBe("0.2.3");
     expect(f.service.calls).not.toContain("bootout");
+  });
+
+  // 리뷰 docs-11: 문서는 --from 이 '폴더 경로'를 받는다고 쓴다. 상대 경로가 'https 여야 합니다'로 거절됐다.
+  test("--from 의 상대 폴더 경로는 지금 폴더 기준 절대 경로로 받는다(주소는 그대로)", async () => {
+    expect(releaseSource({ from: "rel/dir/" }).base).toBe(resolve("rel/dir"));
+    expect(releaseSource({ from: "/abs/dir" }).base).toBe("/abs/dir");
+    expect(releaseSource({ from: "https://example.invalid/r/" }).base).toBe("https://example.invalid/r");
+    expect(releaseSource({ from: "file:///abs/dir" }).base).toBe("file:///abs/dir");
+    expect(releaseSource({ env: { IAMCEO_DOWNLOAD_URL: "rel" } }).base).toBe(resolve("rel"));
+    const f = releaseFixture();
+    const outcome = await upgrade({ from: relative(process.cwd(), f.release("0.2.4")) }, f.deps());
+    expect(outcome).toMatchObject({ status: "upgraded", to: "0.2.4" });
   });
 
   test("준비 대기 시간은 예행의 기동 시간에 맞춰 늘어난다(큰 DB 의 첫 이주를 '안 뜸'으로 오인하지 않게)", () => {
@@ -311,6 +388,26 @@ describe("git 체크아웃 업그레이드", () => {
     await expect(upgrade({ target: f.c1 }, f.deps())).rejects.toThrow("앞으로 가는 커밋이 아닙니다");
     await expect(upgrade({ version: "0.2.5" }, f.deps())).rejects.toThrow("커밋으로 올립니다");
     expect(f.sh("rev-parse", "HEAD")).toBe(f.c2);
+  });
+
+  test("rollback: 커밋하지 않은 변경이 있으면 서비스를 내리기 전에 멈추고, 기록 뒤에 커밋을 옮겼으면 되돌리지 않는다", async () => {
+    const f = gitFixture();
+    await upgrade({ target: "next" }, f.deps());
+    writeFileSync(join(f.checkout, "bin", "iamceo.ts"), "// local edit\n");
+    const calls = f.service.calls.length;
+    await expect(rollback({}, f.deps())).rejects.toThrow("커밋하지 않은 변경이 있어 되돌리지 않았습니다");
+    expect(f.service.calls.slice(calls)).not.toContain("bootout");
+    expect(f.service.current).toBe("0.2.4");
+    expect(listUpgradeRecords(f.home)[0]!.phase).toBe("done");
+    f.sh("checkout", "--", "bin/iamceo.ts");
+    // 기록 뒤에 직접 다른 커밋으로 옮겼다.
+    writeFileSync(join(f.checkout, "package.json"), JSON.stringify({ name: "iamceo", version: "0.2.5" }) + "\n");
+    f.sh("commit", "-q", "-am", "0.2.5");
+    await expect(rollback({}, f.deps())).rejects.toThrow("다른 방법으로 판이 바뀌었습니다");
+    expect(f.sh("rev-parse", "HEAD")).not.toBe(f.c1);
+    f.sh("reset", "-q", "--hard", f.c2);
+    expect(await rollback({}, f.deps())).toMatchObject({ status: "rolled_back", mode: "git" });
+    expect(f.sh("rev-parse", "HEAD")).toBe(f.c1);
   });
 
   test("새 코드의 예행이 실패하면 직전 커밋으로 되돌려 다시 올린다", async () => {

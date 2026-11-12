@@ -272,12 +272,17 @@ export function resolveCliExecutable(command: string, env: NodeJS.ProcessEnv = p
   return Bun.which(command, { PATH: path });
 }
 
-/** Prefer a packaged companion or the explicit, pinned local installation. Never install at startup. */
-export function defaultCoreBin(): string {
+/**
+ * Prefer a packaged companion or the explicit, pinned local installation. Never install at startup.
+ * 앱 묶음 안의 서버(…/runtime/iamceo)는 엔진을 옆의 runtime/Herdr Core.app 안에 둔다(LocalHostService·build-native 와 같은 자리).
+ * 그 자리를 모르면 서비스 설정 없이 돈 `iamceo doctor`·`uninstall` 이 엔진을 PATH 에서 찾다가 '실행 엔진 없음'으로 판정한다.
+ */
+export function defaultCoreBin(execPath: string = process.execPath, sourceDir: string = import.meta.dir): string {
   const candidates = [
-    resolve(process.execPath, "..", "herdr-core"),
-    resolve(import.meta.dir, "..", ".runtime", "herdr-core", CORE_VERSION, "Herdr Core.app", "Contents", "MacOS", "herdr-core"),
-    resolve(import.meta.dir, "..", ".runtime", "herdr-core", CORE_VERSION, "herdr-core"),
+    resolve(execPath, "..", "herdr-core"),
+    resolve(execPath, "..", "Herdr Core.app", "Contents", "MacOS", "herdr-core"),
+    resolve(sourceDir, "..", ".runtime", "herdr-core", CORE_VERSION, "Herdr Core.app", "Contents", "MacOS", "herdr-core"),
+    resolve(sourceDir, "..", ".runtime", "herdr-core", CORE_VERSION, "herdr-core"),
   ];
   return candidates.find((path) => fs.existsSync(path)) ?? "herdr-core";
 }

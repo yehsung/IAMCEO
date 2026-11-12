@@ -53,7 +53,7 @@ brew install --cask yehsung/tap/iamceo
 
 **iPhone:** Mac과 iPhone을 [Tailscale](https://tailscale.com)에 연결한 뒤 Mac 앱의 **iPhone 연결** QR을 찍습니다. iPhone 앱은 [App Store에서 받습니다](https://apps.apple.com/app/id6831782194). 쓰던 iPhone이 연결되지 않으면 Mac의 Tailscale이 켜져 있는지 확인해 주세요. 꺼져 있으면 Mac 앱이 알려 줍니다. → [iPhone 연결](docs/guide/iphone.md)
 
-**막히면:** 설정 → AI 모델 → 실행 환경이 실행 엔진, Claude Code·Codex 로그인, Tailscale, 자동 시작, 백업을 항목마다 점검하고 고치는 법을 알려 줍니다. 명령줄의 `iamceo doctor`도 같은 점검을 합니다. → [문제 해결](docs/guide/troubleshooting.md)
+**막히면(0.2.4부터):** 설정 → AI 모델 → 실행 환경이 실행 엔진, Claude Code·Codex 로그인, Tailscale, 자동 시작, 백업을 항목마다 점검하고 고치는 법을 알려 줍니다. 명령줄의 `iamceo doctor`도 같은 점검을 합니다. → [문제 해결](docs/guide/troubleshooting.md)
 
 ### 알림
 
@@ -69,6 +69,15 @@ brew install --cask yehsung/tap/iamceo
 | [iPhone 연결](docs/guide/iphone.md) | Tailscale·MagicDNS, 연결 QR, 알림의 조건 |
 | [업그레이드·백업·제거](docs/guide/upgrade-backup-uninstall.md) | 새 버전과 되돌리기, 백업과 새 Mac, 보존 기한, 프로젝트 내보내기·삭제, 완전히 멈추기 |
 | [보안 설명서](docs/security.md) | 무엇을 믿고, 막고, 막지 못하는지 |
+
+### 제거
+
+앱만 휴지통에 버리면 이미 떠 있는 서버와 AI 세션이 남을 수 있습니다. 먼저 IAMCEO를 완전히 멈춘 뒤 앱을 지웁니다. 아래 1번의 버튼과 `uninstall`은 0.2.4부터 있습니다. 0.2.3 이하에서는 터미널에서 `/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo service uninstall`로 로그인 서비스를 해제한 뒤 Mac을 다시 시작합니다(실행 엔진과 AI 세션이 함께 끝납니다).
+
+1. Mac 앱의 **설정 → 연결** 맨 아래 **이 Mac에서 완전히 멈추기**를 누르거나, 터미널에서 `/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo uninstall`을 실행합니다. 팀장을 모두 재우고, 로그인 서비스를 해제하고, 실행 엔진을 끕니다. 데이터(`~/.iamceo`)는 남습니다. 데이터까지 지우려면 `uninstall --purge`를 씁니다(그 안의 백업도 함께 지워지고, 되돌릴 수 없습니다).
+2. 앱을 지웁니다. Homebrew로 설치했다면 `brew uninstall --cask iamceo`, 아니면 응용 프로그램 폴더의 IAMCEO를 휴지통으로 옮깁니다. `brew uninstall --zap --cask iamceo`는 1번의 멈추기와 데이터 삭제까지 한 번에 합니다.
+
+자세한 순서는 [업그레이드·백업·제거](docs/guide/upgrade-backup-uninstall.md#이-mac에서-완전히-멈추기제거)에 있습니다.
 
 ## 용어
 

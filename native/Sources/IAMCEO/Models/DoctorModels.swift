@@ -97,7 +97,10 @@ struct DiagnosticsFile: Codable, Sendable, Equatable {
     private(set) var diagnostics: DiagnosticsFile?
     private(set) var diagnosing = false
     private(set) var diagnoseError: String?
+    /// 점검표 읽기의 세대. 다시 읽으면 앞 읽기의 결과를 버린다.
     private var token = 0
+    /// 진단 파일 만들기의 세대. 점검표를 다시 읽어도(설정의 '다시 확인') 만드는 중인 진단은 그대로 끝나야 하므로 따로 센다.
+    private var diagnoseToken = 0
     private var owner: ObjectIdentifier?
 
     /// 이 연결의 점검표를 읽는다. 다른 서버(다른 연결)로 바뀌었으면 앞 서버의 결과를 먼저 지운다.
@@ -108,9 +111,9 @@ struct DiagnosticsFile: Codable, Sendable, Equatable {
     }
 
     func reset() {
-        token &+= 1
+        token &+= 1; diagnoseToken &+= 1
         report = nil; unsupported = false; loading = false; error = nil
-        diagnostics = nil; diagnoseError = nil
+        diagnostics = nil; diagnoseError = nil; diagnosing = false
     }
 
     /// 다시 읽는 동안에도 마지막 점검표는 그대로 둔다.
@@ -136,22 +139,23 @@ struct DiagnosticsFile: Codable, Sendable, Equatable {
 
     func makeDiagnostics(_ api: APIClient?) async {
         guard let api, !diagnosing else { return }
-        let mine = token
+        diagnoseToken &+= 1
+        let mine = diagnoseToken
         diagnosing = true; diagnoseError = nil
-        defer { if mine == token { diagnosing = false } }
+        defer { if mine == diagnoseToken { diagnosing = false } }
         do {
             let result: DiagnosticsFile = try await api.request("/api/diagnose", method: "POST", timeout: 90)
-            guard mine == token else { return }
+            guard mine == diagnoseToken else { return }
             diagnostics = result
         } catch let failure as APIError where [404, 405, 501].contains(failure.status) {
-            guard mine == token else { return }
+            guard mine == diagnoseToken else { return }
             diagnoseError = "이 서버 버전은 진단 파일을 만들 수 없습니다. IAMCEO를 새 버전으로 올려 주세요."
         } catch let failure as APIError where failure.code == "LOCAL_ONLY" {
-            guard mine == token else { return }
+            guard mine == diagnoseToken else { return }
             diagnoseError = "진단 파일은 서버가 있는 Mac에서만 만들 수 있습니다."
         } catch is CancellationError {
         } catch {
-            guard mine == token, !Task.isCancelled else { return }
+            guard mine == diagnoseToken, !Task.isCancelled else { return }
             diagnoseError = Self.message(error, fallback: "진단 파일을 만들지 못했습니다.")
         }
     }

@@ -118,3 +118,45 @@ test("백업 → 새 Mac 의 빈 홈에 복원 → 조정 → 재개 → 서버 
   // 옛 Mac 의 데이터는 손대지 않았다.
   expect(readFileSync(upload, "utf8")).toBe("첨부 원본");
 }, 120_000);
+
+// 사용자 이름이 같은 새 Mac: 백업이 나온 경로(~/.iamceo)와 복원할 경로가 같다. 문서의 명령 그대로 밟는다.
+test("사용자 이름이 같은 새 Mac: 같은 ~/.iamceo 경로에 복원 → 조정 → 재개되고, 데이터가 남은 홈에는 복원하지 않는다", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-restore-same-")));
+  cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+  const userHome = join(root, "Users", "owner"), home = join(userHome, ".iamceo"), work = join(root, "work");
+  for (const dir of [home, work]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  updateConfigFile({ accessCode: "same-path-code", hosts: ["127.0.0.1"] }, { IAMCEO_HOME: home, IAMCEO_PORT: "0" });
+  const db = openDb(join(home, "iamceo.db"));
+  const store = new Store(db, new Bus());
+  const project = store.createProject({ name: "같은 경로", cwd: work });
+  store.createMessage({ projectId: project.id, mine: true, who: "대표", kind: "나", body: "새 Mac 에서도 보여야 하는 글" });
+  db.close();
+  // 옛 Mac 에서 외장 디스크로 백업한다.
+  const snapshot = createBackup({ home, backupDir: join(root, "external-disk") });
+  const iamceo = (args: string[], env: Record<string, string> = {}) => {
+    const result = Bun.spawnSync([process.execPath, entry, ...args], {
+      env: { ...process.env, IAMCEO_LANG: "ko", HOME: userHome, ...env }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    return { code: result.exitCode, out: result.stdout.toString() + result.stderr.toString() };
+  };
+  // 옛 Mac 자신(데이터가 남은 홈)에는 복원하지 않고 아무것도 바꾸지 않는다.
+  const before = readFileSync(join(home, "iamceo.db"));
+  const refused = iamceo(["restore", snapshot.directory, "--destination", home]);
+  expect(refused.code).not.toBe(0);
+  expect(refused.out).toContain("never overwritten");
+  expect(readFileSync(join(home, "iamceo.db")).equals(before)).toBe(true);
+  // 새 Mac: 같은 사용자 이름이라 경로가 같고, 아직 '이 Mac에서 시작'을 누르지 않아 폴더가 없다.
+  rmSync(home, { recursive: true, force: true });
+  const restored = iamceo(["restore", snapshot.directory, "--destination", home]);
+  expect(restored.code, restored.out).toBe(0);
+  expect(restored.out).toContain("복원 검증 완료");
+  expect(iamceo(["restore", "reconcile"], { IAMCEO_HOME: home }).code).toBe(0);
+  const resumed = iamceo(["restore", "resume"], { IAMCEO_HOME: home });
+  expect(resumed.code, resumed.out).toBe(0);
+  expect(loadConfig({ IAMCEO_HOME: home, IAMCEO_PORT: "0" }).accessCode).toBe("same-path-code");
+  const reopened = openDb(join(home, "iamceo.db"));
+  try {
+    const restoredStore = new Store(reopened, new Bus());
+    expect(restoredStore.getProject(project.id)?.runnerEnabled).toBe(true);
+    expect(reopened.query<{ body: string }, []>("SELECT body FROM messages").all().map(row => row.body)).toContain("새 Mac 에서도 보여야 하는 글");
+  } finally { reopened.close(); }
+}, 60_000);

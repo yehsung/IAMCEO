@@ -108,6 +108,55 @@ import XCTest
         // 마지막으로 만든 파일은 그대로 보인다.
         XCTAssertNotNil(panel.diagnostics)
     }
+
+    /// 리뷰 app-2: 진단 파일을 만드는 동안 점검표를 다시 읽으면(설정의 '다시 확인') 결과를 버리고 '만드는 중'에서 멈췄다.
+    func testReloadingTheListWhileMakingDiagnosticsStillFinishesIt() async throws {
+        let gate = DoctorGate()
+        let report = Self.report
+        let network = try IsolatedTestNetwork { request in
+            if request.url?.path == "/api/diagnose" {
+                return IsolatedTestHTTPReply(data: Data(#"{"path":"/Users/me/.iamceo/diagnostics/a.zip","sizeBytes":2048,"createdAt":"2026-11-13T03:04:05.000Z"}"#.utf8),
+                                             beforeDelivery: { await gate.wait() })
+            }
+            return IsolatedTestHTTPReply(data: Data(report.utf8))
+        }
+        defer { Task { await network.close() } }
+        let api = network.makeAPIClient()
+        let panel = DoctorPanel()
+        await panel.attach(api)
+        let making = Task { await panel.makeDiagnostics(api) }
+        while !panel.diagnosing { await Task.yield() }
+        await panel.load(api)
+        XCTAssertTrue(panel.diagnosing)
+        await gate.open()
+        await making.value
+        XCTAssertEqual(panel.diagnostics?.path, "/Users/me/.iamceo/diagnostics/a.zip")
+        XCTAssertFalse(panel.diagnosing, "다시 누를 수 있다")
+        XCTAssertEqual(panel.report?.checks.count, 4)
+
+        // 연결이 바뀌어 reset 하면 만드는 중 표시도 풀린다(늦게 온 결과는 버린다).
+        await gate.close()
+        let again = Task { await panel.makeDiagnostics(api) }
+        while !panel.diagnosing { await Task.yield() }
+        panel.reset()
+        XCTAssertFalse(panel.diagnosing)
+        await gate.open()
+        await again.value
+        XCTAssertNil(panel.diagnostics)
+        XCTAssertFalse(panel.diagnosing)
+    }
+}
+
+/// 시험 서버가 답을 내보내기 전에 기다리는 문.
+private actor DoctorGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func open() { isOpen = true; for waiter in waiters { waiter.resume() }; waiters = [] }
+    func close() { isOpen = false }
 }
 
 /// 시험 서버의 답을 바꾸는 자리. URLProtocol 은 다른 스레드에서 읽는다.

@@ -182,7 +182,8 @@ describe("global access code rotation", () => {
     const failing = (async (_url: RequestInfo | URL, init?: RequestInit) => { calls++; expect(init?.redirect).toBe("error"); throw new Error("lost response"); }) as unknown as typeof fetch;
     await expect(rotateAccessCode(client, failing)).rejects.toThrow("iamceo open");
     expect(calls).toBe(1);
-    await expect(rotateAccessCode({ ...client, hosts: ["100.64.0.1"] }, failing)).rejects.toThrow("loopback");
+    // 리뷰 docs-10: 'loopback host' 같은 내부 용어 대신 '이 Mac 주소(127.0.0.1)'로 안내한다(한·영 모두 그 주소를 적는다).
+    await expect(rotateAccessCode({ ...client, hosts: ["100.64.0.1"] }, failing)).rejects.toThrow("127.0.0.1");
     expect(calls).toBe(1);
   });
 

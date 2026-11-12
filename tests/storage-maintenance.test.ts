@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Bus } from "../server/bus.ts";
 import { openDb } from "../server/db.ts";
 import { FilePublication, importPath, MAX_UPLOAD_BYTES, prepareImport, saveUpload, writePublicationManifest, type PublicationManifest } from "../server/files.ts";
-import { createStorageReferences, measureStorage, QUARANTINE_GRACE_MS, STAGING_GRACE_MS, StorageMaintenance } from "../server/storage-maintenance.ts";
+import { createStorageReferences, EXPORT_TEMP_GRACE_MS, measureStorage, QUARANTINE_GRACE_MS, STAGING_GRACE_MS, StorageMaintenance } from "../server/storage-maintenance.ts";
 import { Store } from "../server/store.ts";
 import { createIsolatedRuntime, type IsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
@@ -202,5 +202,55 @@ describe("보수적 저장소 정리", () => {
     expect(result.quarantined).toEqual([a.record.id]);
     expect(result.errors.sort()).toEqual([b.record.id, c.record.id, d.record.id].sort());
     expect(readFileSync(join(backupDir, "hardlink"), "utf8")).toBe("fixture bytes");
+  });
+});
+
+describe("project export leftovers (B5)", () => {
+  test("only .export-<uuid>.zip files untouched for over an hour go; upgrade records and anything else stay", () => {
+    const f = setup();
+    const exportsDir = join(f.home, "exports"), upgradesDir = join(f.home, "upgrades", "20261113T000000Z-abcd");
+    for (const dir of [exportsDir, upgradesDir]) mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    const at = (path: string, ageMs: number) => { utimesSync(path, (now - ageMs) / 1000, (now - ageMs) / 1000); return path; };
+    const stale = join(exportsDir, ".export-0b6c8f2e-1d2c-4f7a-9a51-3f1e2d4c5b6a.zip");
+    writeFileSync(stale, "x"); at(stale, EXPORT_TEMP_GRACE_MS + 60_000);
+    const fresh = join(exportsDir, ".export-1c7d903f-2e3d-4a8b-8b62-4a2f3e5d6c7b.zip");
+    writeFileSync(fresh, "x"); at(fresh, EXPORT_TEMP_GRACE_MS - 60_000);
+    const other = join(exportsDir, "my-project.zip");
+    writeFileSync(other, "x"); at(other, 30 * EXPORT_TEMP_GRACE_MS);
+    const linked = join(exportsDir, ".export-2d8ea14a-3f4e-4b9c-9c73-5b3a4f6e7d8c.zip");
+    writeFileSync(join(f.home, "outside.zip"), "keep"); symlinkSync(join(f.home, "outside.zip"), linked);
+    const upgradeCopy = join(upgradesDir, ".export-3e9fb25b-4a5f-4cad-8d84-6c4b5a7f8e9d.zip");
+    writeFileSync(upgradeCopy, "x"); at(upgradeCopy, 30 * EXPORT_TEMP_GRACE_MS);
+    const record = join(upgradesDir, "upgrade.json");
+    writeFileSync(record, "{}"); at(record, 30 * EXPORT_TEMP_GRACE_MS);
+
+    // 폴더를 넘기지 않은 정리(예전 그대로)는 exports/ 를 보지도 않는다.
+    expect(f.maintenance.sweep(now).exports).toBeUndefined();
+    expect(existsSync(stale)).toBe(true);
+
+    const maintenance = new StorageMaintenance({ uploadsDir: f.uploadsDir, inboxDir: f.inboxDir, backupDir: f.backupDir, references: f.references, exportsDir });
+    const result = maintenance.sweep(now);
+    expect(result.exports).toEqual([".export-0b6c8f2e-1d2c-4f7a-9a51-3f1e2d4c5b6a.zip"]);
+    expect(result.errors).toEqual([]);
+    expect(existsSync(stale)).toBe(false);
+    for (const path of [fresh, other, upgradeCopy, record, join(f.home, "outside.zip")]) expect(existsSync(path)).toBe(true);
+    expect(readdirSync(exportsDir).sort()).toEqual([".export-1c7d903f-2e3d-4a8b-8b62-4a2f3e5d6c7b.zip", ".export-2d8ea14a-3f4e-4b9c-9c73-5b3a4f6e7d8c.zip", "my-project.zip"]);
+  });
+
+  test("a symlinked exports folder is never followed", () => {
+    const f = setup();
+    const real = join(f.runtime.paths.work, "elsewhere");
+    mkdirSync(real);
+    const leftover = join(real, ".export-0b6c8f2e-1d2c-4f7a-9a51-3f1e2d4c5b6a.zip");
+    writeFileSync(leftover, "x");
+    utimesSync(leftover, 1, 1);
+    const exportsDir = join(f.home, "exports");
+    symlinkSync(real, exportsDir);
+    const maintenance = new StorageMaintenance({ uploadsDir: f.uploadsDir, inboxDir: f.inboxDir, backupDir: f.backupDir, references: f.references, exportsDir });
+    const result = maintenance.sweep(Date.now());
+    expect(result.exports).toEqual([]);
+    expect(result.errors).toEqual([`exports:${exportsDir}`]);
+    expect(existsSync(leftover)).toBe(true);
   });
 });

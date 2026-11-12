@@ -19,6 +19,8 @@ The iPhone app reaches the IAMCEO server on your Mac through [Tailscale](https:/
 
 The pairing QR does not contain the access code. It holds a code that works once within five minutes, and the access code goes only to the device that used it. When it runs out, press **새 QR 만들기** (new QR). A link whose address is not a Tailscale address is not opened.
 
+Instead of the QR you can type the address and the access code (**주소와 접속 코드를 직접 입력**, enter the address and access code, on the iPhone's first screen). Copy the command at the bottom of the connection screen and run it in a terminal on the Mac: it prints the address and the access code. When the app knows that Mac's server runs from inside the app (it connected to it before, or it is the Mac app on that same Mac), the command uses the path inside the app (`/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo open`); otherwise it reads `iamceo open`. Unless you set up a short name for `iamceo`, run it with the path inside the app → [Getting started](getting-started.en.md#the-command-line-tool)
+
 ## Notifications
 
 - **Mac:** works. Turn on **설정 → 알림 → Mac 알림** (Settings → Notifications → Mac notifications) in the Mac app. It tells you about new decisions, approval or choice waits, finished and blocked reports, and to-dos for you.

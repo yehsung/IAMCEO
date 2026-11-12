@@ -14,7 +14,7 @@ IAMCEO checks its own setup and shows, for each item, its state and a one-line f
 | Item | What it checks | When it is a problem |
 |---|---|---|
 | Server | Whether the IAMCEO server on this Mac answers | Open the IAMCEO app and press 이 Mac에서 시작 (Start on this Mac). |
-| Engine (herdr-core) | Whether the engine that holds the staff terminals is there and answers | If it stays that way, restart the Mac. If the engine is missing, reinstall the app (`brew reinstall --cask yehsung/tap/iamceo`). |
+| Engine (herdr-core) | Whether the engine that holds the staff terminals is there and answers | If it stays that way, restart the Mac. If the engine is missing, reinstall the app (`brew reinstall --cask yehsung/tap/iamceo`). Homebrew stops the server and removes the login item when it reinstalls, so afterwards press 이 Mac에서 시작 (Start on this Mac) in the app once (staff sessions continue). |
 | Claude Code | Installed, and signed in | Install it, then run `claude` in Terminal and sign in. |
 | Codex | Installed, and signed in (fine if you do not use it) | Run `codex` in Terminal and sign in. |
 | CLI versions | Whether IAMCEO has been tested against the installed CLI versions | See "Unverified CLI version" below. |
@@ -47,13 +47,16 @@ When it starts, the server reads the installed Claude Code and Codex versions, r
 
 ### A usage limit was hit
 
-A usage-limit card arrives in 결재함 (Inbox). If you wait, work continues on its own once the limit clears. To continue now, pick another model on the card or change the staff member's model; the same conversation continues on the new model.
+A usage-limit card arrives in 결재함 (Inbox). If you wait, work continues on its own once the limit clears.
+
+- **A limit on one model only:** pick another model on the card, or change the staff member's model, to continue now. The same conversation continues on the new model.
+- **The 5-hour and weekly limits** are shared by every model, so the card offers no model choice. Wait and it continues on its own.
 
 ### The network or the AI service is down
 
 The app shows a waiting banner. Nothing you sent is lost; it is delivered once the outage clears. While the server believes an AI service is down, it sends an empty check request to see whether it is back.
 
-### A delivery is left at "도움이 필요함" (needs help)
+### A delivery is left at "전달 확인 필요" (delivery needs checking)
 
 The server could not confirm whether your message reached the CLI. Press 다시 확인 (check again) first. When unsure, the server never types the same message twice. To resend anyway, accept the duplicate risk and resend.
 
@@ -68,7 +71,7 @@ The app shows a notice only when the two really do not match, and it tells the t
 - **Update the app:** the app is older than the server. Update the iPhone app in the App Store, or install the new Mac app.
 - **The server is an older version:** the server is older than the app. Update IAMCEO on the Mac that runs the server.
 
-If you replaced the Mac app with a new version and the server is still running the old one, the app asks once whether to restart the server on the new version. The staff sessions continue through the restart, because the engine holds them. → [Upgrade, backup and uninstall](upgrade-backup-uninstall.en.md)
+If you replaced the Mac app with a new version through the install script or a DMG and the server is still running the old one, the app asks once whether to restart the server on the new version. The staff sessions continue through the restart, because the engine holds them. After a Homebrew upgrade or reinstall there is no such question: the server is down, so press 이 Mac에서 시작 (Start on this Mac) in the app once. → [Upgrade, backup and uninstall](upgrade-backup-uninstall.en.md)
 
 ### The iPhone does not connect
 
@@ -85,13 +88,14 @@ It creates a folder `~/.iamceo/diagnostics/<time>/` and a `.zip` of the same nam
 
 | Included | Not included |
 |---|---|
-| Server, engine, CLI and macOS versions (and the app's version when made from the app) | The text of conversations, reports, decisions, to-dos and files |
+| Server, engine, CLI and macOS versions (and the app's version when made from the app), the versions of apps that connected | The text of conversations, reports, decisions, to-dos and files |
 | The self-check result and the service state | Attachments |
 | The end of the server logs (known secrets masked) | The access code, staff keys and push tokens |
 | Stall and restart records, the names of crash reports | Environment variable values |
-| Backup state; a status summary of the database (IDs, states, times, counts) | |
+| Backup state; a status summary of the database (IDs, states, times, counts); setting values | |
+| The connection addresses (including the Tailscale address) and port; the paths of the data folder and the executables (which include your user name) | |
 
-Logs can still contain file paths and project names. Open the file once before posting it anywhere public. For a vulnerability, do not open a public issue; follow [SECURITY.md](../../SECURITY.md).
+The logs and the summary can still contain file paths with your user name, the Tailscale address and project names. Open the file once before posting it anywhere public. For a vulnerability, do not open a public issue; follow [SECURITY.md](../../SECURITY.md).
 
 ## Logs
 
@@ -113,5 +117,6 @@ cp worker.example.md worker.md   # conductor for the lead, root for the HQ agent
 - Rules the server enforces (source labels, checking quotes of your words, file path checks) stay in force whatever the file says.
 - If the file does not contain the word 승인 (approval), the server log shows a warning.
 - With the report language set to English, the line asking for English is added to the end of an edited file too.
+- Edited instructions (`~/.iamceo/roles`) are not in backups. Copy that folder yourself when you move to a new Mac or restore. → [Upgrade, backup and uninstall](upgrade-backup-uninstall.en.md#starting-a-new-mac-from-a-backup)
 
 The placeholders (`{{PROJECT}}`, `{{NAME}}` and the rest) and the full rules are in the [operating model](../operating-model.md#역할-템플릿-고치기) (Korean).

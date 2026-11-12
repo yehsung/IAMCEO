@@ -1,5 +1,5 @@
 // iamceo uninstall · '이 Mac에서 완전히 멈추기'(B5). 가짜 launchctl·가짜 서버 응답·가짜 실행 엔진만 쓴다.
-import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -11,15 +11,18 @@ import { acquireHomeOwner } from "../server/home-owner.ts";
 import { defaultCoreControl, purgeHome, uninstall, type CoreControl, type UninstallDeps } from "../server/lifecycle/uninstall.ts";
 import { Store } from "../server/store.ts";
 
+// 이 파일의 단언은 한국어 문구를 본다. bun 은 여러 시험 파일을 한 프로세스에서 돌리므로 끝나면 원래 값으로 돌려 놓는다.
+const savedLang = process.env.IAMCEO_LANG;
 beforeAll(() => { process.env.IAMCEO_LANG = "ko"; });
+afterAll(() => { if (savedLang === undefined) delete process.env.IAMCEO_LANG; else process.env.IAMCEO_LANG = savedLang; });
 const entry = resolve(import.meta.dir, "../bin/iamceo.ts");
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-function fixture(options: { serviceHome?: string } = {}) {
+function fixture(options: { serviceHome?: string; home?: (root: string) => string; program?: (root: string) => string[] | null } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-uninstall-")));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
-  const userHome = join(root, "user"), home = join(userHome, ".iamceo");
+  const userHome = join(root, "user"), home = options.home?.(root) ?? join(userHome, ".iamceo");
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const env: NodeJS.ProcessEnv = { ...process.env, IAMCEO_HOME: home, IAMCEO_PORT: "47999", IAMCEO_TEST: "1" };
   updateConfigFile({ accessCode: "uninstall-fixture-code", hosts: ["127.0.0.1"] }, env);
@@ -30,9 +33,10 @@ function fixture(options: { serviceHome?: string } = {}) {
   mkdirSync(dirname(plistPath), { recursive: true });
   // 앱 자리는 시험 폴더 안의 없는 경로다. 이 Mac 에 설치된 실제 앱을 가리키지 않는다.
   const runtime = join(root, "Applications", "IAMCEO.app", "Contents", "Resources", "runtime");
-  writeFileSync(plistPath, launchdPlist({ program: [join(runtime, "iamceo"), "serve"], home: userHome, logDir: join(home, "logs"),
+  const program = options.program ? options.program(root) : [join(runtime, "iamceo"), "serve"];
+  if (program) writeFileSync(plistPath, launchdPlist({ program, home: userHome, logDir: join(home, "logs"),
     workingDir: userHome, env: { IAMCEO_HOME: options.serviceHome ?? home, IAMCEO_CORE_BIN: join(runtime, "Herdr Core.app", "Contents", "MacOS", "herdr-core") } }));
-  let loaded = true, serverUp = true, serverOutsideService = false;
+  let loaded = !!program, serverUp = true, serverOutsideService = false;
   const launchctl: string[] = [];
   const control = (...args: string[]) => {
     launchctl.push(args[0]!);
@@ -66,12 +70,15 @@ function fixture(options: { serviceHome?: string } = {}) {
     }
     return json({ error: "없는 경로입니다" }, 404);
   }) as typeof fetch;
-  const core = { answering: true, killed: [] as string[], stopped: 0 };
+  const core = { answering: true, killed: [] as string[], stopped: 0, listFails: false, stopWorks: true };
   const coreControl: CoreControl = {
     answers: async () => core.answering,
-    terminals: async () => [{ address: "t1", state: "live", labels: { "iamceo.member": "m_lead" } }, { address: "t2", state: "finished" }, { address: "t3", state: "live" }],
+    terminals: async () => {
+      if (core.listFails) throw new Error("응답 시간 초과(8000ms)");
+      return [{ address: "t1", state: "live", labels: { "iamceo.member": "m_lead" } }, { address: "t2", state: "finished" }, { address: "t3", state: "live" }];
+    },
     kill: async address => { core.killed.push(address); },
-    stop: async () => { core.stopped++; core.answering = false; return true; },
+    stop: async () => { core.stopped++; if (core.stopWorks) core.answering = false; return core.stopWorks; },
   };
   const logs: string[] = [];
   const deps = (extra: Partial<UninstallDeps> = {}): UninstallDeps => ({
@@ -147,6 +154,83 @@ describe("uninstall", () => {
     expect(f.core.stopped).toBe(0);
   });
 
+  // 리뷰 safety-1: 소스 체크아웃에서 도는 서비스(대표 라이브)는 홈이 같아도 '내 것'이 아니다. 앱의 '멈추기'가 그 서비스를 내리면 안 된다.
+  test("소스 체크아웃 서비스는 건드리지 않고 아무것도 하지 않는다. --include-checkout 이면 내리되 서비스 설정은 사본으로 남긴다", async () => {
+    const live = (root: string) => [join(root, "bun"), join(root, "live", "bin", "iamceo.ts"), "serve"];
+    const f = fixture({ program: live });
+    await expect(uninstall({ yes: true }, f.deps())).rejects.toThrow("소스 체크아웃에서 도는 서버라 이 명령으로 끄지 않습니다");
+    expect(f.sleeps).toEqual([]);
+    expect(f.launchctl).not.toContain("bootout");
+    expect(existsSync(f.plistPath)).toBe(true);
+    expect(f.core.killed).toEqual([]);
+    expect(f.core.stopped).toBe(0);
+    const preview = await uninstall({ dryRun: true }, { ...f.deps(), launchctl: undefined });
+    expect(preview.service).toBe("foreign");
+    expect(f.logs.join("\n")).toContain("--include-checkout");
+
+    const g = fixture({ program: live });
+    const plist = readFileSync(g.plistPath, "utf8");
+    const outcome = await uninstall({ yes: true, includeCheckout: true }, g.deps());
+    expect(outcome.service).toBe("removed");
+    expect(g.launchctl).toContain("bootout");
+    expect(existsSync(g.plistPath)).toBe(false);
+    expect(outcome.serviceCopy).toStartWith(join(g.userHome, "Library", "Application Support", "IAMCEO", "service-backup", "com.iamceo.server."));
+    expect(readFileSync(outcome.serviceCopy!, "utf8")).toBe(plist);
+    expect(g.core.killed).toEqual(["t1", "t3"]);
+  });
+
+  // 리뷰 safety-5: 끌 수 없는 서버면 팀장을 재우기 전에 거절한다.
+  test("옛 설치의 서비스나 서비스 밖에서 직접 띄운 서버가 떠 있으면 팀장을 재우기 전에 아무것도 하지 않고 거절한다", async () => {
+    const old = fixture({ program: () => ["/opt/homebrew/bin/iamceo", "serve"] });
+    await expect(uninstall({ yes: true }, old.deps())).rejects.toThrow("다른 설치(옛 명령줄 설치 등)의 것이라 이 명령으로 끌 수 없습니다");
+    expect(old.sleeps).toEqual([]);
+    expect(old.launchctl).not.toContain("bootout");
+    expect(old.core.killed).toEqual([]);
+
+    const direct = fixture({ program: () => null });
+    await expect(uninstall({ yes: true }, direct.deps())).rejects.toThrow("서비스 밖에서 직접 실행 중인 IAMCEO 서버가 있습니다");
+    expect(direct.sleeps).toEqual([]);
+    expect(direct.core.killed).toEqual([]);
+    expect(direct.core.stopped).toBe(0);
+    // 그 서버가 꺼져 있으면 엔진을 끄고 끝낸다.
+    direct.downServer();
+    const outcome = await uninstall({ yes: true }, direct.deps());
+    expect(outcome).toMatchObject({ service: "absent", members: { reachable: false } });
+    expect(direct.core.killed).toEqual(["t1", "t3"]);
+  });
+
+  // 리뷰 safety-6: 터미널 목록을 읽지 못해도 엔진 끄기로 넘어간다. 서비스는 이미 내려갔기 때문이다.
+  test("실행 엔진의 터미널 목록을 읽지 못해도 엔진을 끈다. 그래도 엔진이 답하면 다시 시작하라고 알린다", async () => {
+    const f = fixture();
+    f.core.listFails = true;
+    const outcome = await uninstall({ yes: true }, f.deps());
+    expect(f.core.stopped).toBe(1);
+    expect(outcome.core).toEqual({ absent: false, killed: 0, stopped: true });
+    expect(f.logs.join("\n")).toContain("터미널 목록을 읽지 못했습니다");
+
+    const g = fixture();
+    g.core.listFails = true;
+    g.core.stopWorks = false;
+    await expect(uninstall({ yes: true }, g.deps())).rejects.toThrow("실행 엔진을 끄지 못했습니다");
+    expect(g.core.stopped).toBe(1);
+    expect(existsSync(g.plistPath)).toBe(false);
+  });
+
+  // 리뷰 safety-7: 기본 자리가 아닌 데이터 폴더는 --yes 여도 경로를 직접 입력해야 지운다.
+  test("기본 자리도 서비스의 폴더도 아닌 데이터 폴더는 경로를 그대로 입력해야 지운다", async () => {
+    const custom = (root: string) => join(root, "custom-home");
+    const f = fixture({ home: custom, serviceHome: "/somewhere/else" });
+    f.downServer();
+    const asked: string[] = [];
+    const kept = await uninstall({ yes: true, purge: true }, f.deps({ confirm: async (question, answer) => { asked.push(answer); return false; } }));
+    expect(kept.purged).toBe(false);
+    expect(asked).toEqual([f.home]);
+    expect(existsSync(join(f.home, "iamceo.db"))).toBe(true);
+    const removed = await uninstall({ yes: true, purge: true }, f.deps({ confirm: async (_question, answer) => answer === f.home }));
+    expect(removed.purged).toBe(true);
+    expect(existsSync(f.home)).toBe(false);
+  });
+
   test("시험 환경에서는 실제 launchd 를 부르지 않는다. 미리 보기는 계획만 보여 준다", async () => {
     const f = fixture();
     await expect(uninstall({ yes: true }, { ...f.deps(), launchctl: undefined })).rejects.toThrow("IAMCEO_TEST=1");
@@ -166,6 +250,17 @@ describe("데이터 폴더 지우기의 안전장치", () => {
     mkdirSync(plain);
     writeFileSync(join(plain, "notes.txt"), "keep");
     expect(() => purgeHome(plain, f.userHome)).toThrow("IAMCEO 데이터 폴더가 아니라");
+    // 표식 하나만으로는 지우지 않는다(리뷰 safety-7): config.json 하나, DB 처럼 보이지 않는 iamceo.db, 접속 코드 없는 설정.
+    writeFileSync(join(plain, "config.json"), JSON.stringify({ accessCode: "x" }));
+    expect(() => purgeHome(plain, f.userHome)).toThrow("IAMCEO 데이터 폴더가 아니라");
+    writeFileSync(join(plain, "iamceo.db"), "not a database");
+    expect(() => purgeHome(plain, f.userHome)).toThrow("IAMCEO 데이터 폴더가 아니라");
+    const halfway = join(f.root, "halfway");
+    mkdirSync(halfway);
+    openDb(join(halfway, "iamceo.db")).close();
+    writeFileSync(join(halfway, "config.json"), JSON.stringify({ port: 7878 }));
+    expect(() => purgeHome(halfway, f.userHome)).toThrow("IAMCEO 데이터 폴더가 아니라");
+    expect(existsSync(join(halfway, "iamceo.db"))).toBe(true);
     const link = join(f.root, "link");
     symlinkSync(f.home, link);
     expect(() => purgeHome(link, f.userHome)).toThrow("심볼릭 링크");

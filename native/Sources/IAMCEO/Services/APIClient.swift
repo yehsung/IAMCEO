@@ -1,3 +1,4 @@
+import AttachmentException
 import Foundation
 
 struct APIError: LocalizedError, Sendable {
@@ -451,6 +452,29 @@ struct TerminalLease: Decodable, Sendable {
 extension APIClient {
     func terminalControl(memberID: String, request body: TerminalControlRequest) async throws -> TerminalLease {
         try await send("/api/members/\(Self.segment(memberID))/terminal/control", body: body)
+    }
+
+    /// 연결을 끊을 때 쥔 옛 방식 터미널 조작권을 놓는다. 최선 노력이고 답은 기다리지 않는다.
+    /// 요청은 부르는 그 자리에서 만들어 보낸다. 나중에 도는 작업이 그사이 무효화된 세션으로 요청을 만들면
+    /// URLSession 이 Objective-C 예외를 던져 프로세스가 죽는다(주입한 세션을 넘겨준 쪽이 먼저 닫는 경우).
+    /// 만드는 순간 이미 무효화돼 있어도 예외를 여기서 받아 조용히 건너뛴다.
+    nonisolated func releaseTerminalLeaseNow(memberID: String, leaseId: String) {
+        guard let url = URL(string: "/api/members/\(Self.segment(memberID))/terminal/control", relativeTo: endpoint.url)?.absoluteURL,
+              url.scheme == endpoint.url.scheme, url.host == endpoint.url.host, url.port == endpoint.url.port,
+              let body = try? JSONEncoder().encode(TerminalControlRequest(action: "release", leaseId: leaseId)) else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 20
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.httpShouldHandleCookies = false
+        req.setValue("Bearer \(accessCode)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        AppVersion.apply(to: &req)
+        req.httpBody = body
+        var task: URLSessionDataTask?
+        _ = IAMCEOCatchException { task = self.session.dataTask(with: req) }
+        task?.resume()
     }
 }
 

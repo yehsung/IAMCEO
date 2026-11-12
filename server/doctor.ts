@@ -8,7 +8,7 @@ import { homedir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { DOCTOR_CHECK_IDS, type CliProvider, type CliVersionInfo, type DoctorCheck, type DoctorReport, type EngineStatus, type RuntimeInfo, type TailnetStatus } from "../shared/types.ts";
 import { readCliVersions } from "./cli-version.ts";
-import { CORE_VERSION, detectTailscaleIp, VERSION, type Config } from "./config.ts";
+import { CORE_VERSION, defaultCoreBin, detectTailscaleIp, VERSION, type Config } from "./config.ts";
 
 export type DoctorLang = "ko" | "en";
 const t = (lang: DoctorLang, ko: string, en: string): string => (lang === "ko" ? ko : en);
@@ -128,8 +128,9 @@ function serverCheck(f: DoctorFacts, lang: DoctorLang): DoctorCheck {
 function engineCheck(f: DoctorFacts, lang: DoctorLang): DoctorCheck {
   const title = t(lang, "실행 엔진", "Engine (herdr-core)");
   const e = f.engine;
-  const reinstall = t(lang, "IAMCEO 앱을 다시 설치하세요. Homebrew로 설치했다면 brew reinstall --cask yehsung/tap/iamceo.",
-    "Reinstall the IAMCEO app. With Homebrew: brew reinstall --cask yehsung/tap/iamceo.");
+  // Homebrew 의 다시 설치는 서버를 내리고 로그인 항목을 지운다. 끝난 뒤 앱에서 다시 등록해야 서버가 뜬다.
+  const reinstall = t(lang, "IAMCEO 앱을 다시 설치하세요. Homebrew로 설치했다면 brew reinstall --cask yehsung/tap/iamceo 뒤 앱에서 ‘이 Mac에서 시작’을 한 번 누르세요.",
+    "Reinstall the IAMCEO app. With Homebrew: brew reinstall --cask yehsung/tap/iamceo, then press 'Start on this Mac' in the app once.");
   if (!e.installed) return check("engine", "fail", title, t(lang, "실행 엔진(herdr-core)을 찾지 못했습니다", "herdr-core was not found"), reinstall);
   if (e.status?.state === "unresponsive") {
     return check("engine", "fail", title, t(lang, "실행 엔진이 60초 넘게 답하지 않습니다", "The engine has not answered for over 60 seconds"),
@@ -529,7 +530,8 @@ export async function localDoctorFacts(input: LocalDoctorInput): Promise<DoctorF
   const config = input.config;
   const claudeBin = config?.claudeBin ?? env.IAMCEO_CLAUDE_BIN ?? "claude";
   const codexBin = config?.codexBin ?? env.IAMCEO_CODEX_BIN ?? "codex";
-  const coreBin = config?.coreBin ?? env.IAMCEO_CORE_BIN ?? "herdr-core";
+  // 설정 파일이 아직 없어도 앱 묶음 안의 엔진(runtime/Herdr Core.app)을 먼저 본다.
+  const coreBin = config?.coreBin ?? env.IAMCEO_CORE_BIN ?? defaultCoreBin();
   const homes = { claudeHome: config?.claudeHome ?? env.CLAUDE_CONFIG_DIR, codexHome: config?.codexHome ?? env.CODEX_HOME };
   const coreInstalled = probes.installed(coreBin);
   const [service, cliVersions, version] = await Promise.all([

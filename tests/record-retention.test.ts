@@ -234,6 +234,48 @@ describe("보존 기한 정리(Store.pruneInternalRecords)", () => {
     expect(first.receipts + rest.receipts).toBe(7);
   });
 
+  // 리뷰 server-1: 한 배치가 기록 수의 제곱으로 느려져(2만 줄 4초) 서버 이벤트 루프를 멈췄다. bun:sqlite 는 동기라 그동안 서버 전체가 선다.
+  test("끝난 실행·생명주기 기록이 3만 줄이어도 한 배치는 금방 끝나고, 기록 표를 보는 하위 질의는 색인의 그 자리부터 찾는다", () => {
+    const { db, store, project } = freshStore();
+    const rows = 30_000, members = 20;
+    const execution = db.query(`INSERT INTO execution_journal (run_id, member_id, project_id, generation, terminal_identity_json, phase, input_received_at, started_at, ended_at, result, created_at, updated_at)
+      VALUES (?1, ?2, ?3, 1, '{}', 'ended', ?4, ?4, ?4, 'success', ?4, ?4)`);
+    const lifecycle = db.query(`INSERT INTO lifecycle_journal (operation_id, member_id, project_id, intent, phase, generation, terminal_identity_json, created_at, updated_at)
+      VALUES (?1, ?2, ?3, 'sleep', 'confirmed', 1, '{}', ?4, ?4)`);
+    const start = NOW - 400 * DAY;
+    db.transaction(() => {
+      for (let i = 0; i < rows; i++) {
+        const at = new Date(start + i * 1000).toISOString();
+        execution.run(`run-${i}`, `m-${i % members}`, project.id, at);
+        lifecycle.run(`op-${i}`, `m-${i % members}`, project.id, at);
+      }
+    })();
+    const source = readFileSync(join(import.meta.dir, "..", "server", "store.ts"), "utf8");
+    for (const [key, table] of [["executions", "execution_journal"], ["lifecycles", "lifecycle_journal"]] as const) {
+      const at = source.indexOf(`["${key}", \``);
+      const sql = source.slice(source.indexOf("`", at) + 1, source.indexOf("`, [recordCutoff]]", at));
+      const explain = db.prepare(`EXPLAIN QUERY PLAN ${sql}`);
+      const plan = (explain.all(ago(90), 500) as { detail: string }[]).map(r => r.detail);
+      explain.finalize(); // 계획 문장이 열린 채 남으면 정리의 트랜잭션이 커밋되지 못한다.
+      // EXISTS 가 조인으로 바뀌면(SEARCH n EXISTS) ORDER BY … LIMIT 과 겹쳐 첫 일치에서 멈추지 않는다.
+      expect(plan.filter(line => / EXISTS USING /.test(line))).toEqual([]);
+      // 기록 표를 다시 보는 하위 질의는 모두 그 직원의 '더 나중' 자리부터 찾는다(직원의 행을 처음부터 훑지 않는다).
+      const inner = plan.filter(line => line.startsWith(`SEARCH n USING`) && line.includes(table));
+      expect(inner.length).toBeGreaterThan(0);
+      for (const line of inner) expect(line).toMatch(/(created_at>\?|rowid>\?)\)$/);
+    }
+    // 예산을 넘겨도 첫 배치는 끝까지 돈다. 그 첫 배치가 금방 끝나야 한다(고치기 전 2만 줄에서 4초, 3만 줄이면 그보다 길다).
+    const began = performance.now();
+    const first = store.pruneInternalRecords({ now: NOW, batch: 500, budgetMs: 250 });
+    expect(performance.now() - began).toBeLessThan(1_500);
+    expect(first.executions).toBeGreaterThanOrEqual(500);
+    // 끝까지 이어 정리하면 직원별 마지막 행만 남는다.
+    let total = first;
+    while (!total.complete) total = store.pruneInternalRecords({ now: NOW, batch: 500, budgetMs: 250 });
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM execution_journal").get()!.n).toBe(members);
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM lifecycle_journal").get()!.n).toBe(members);
+  }, 30_000);
+
   test("잘못된 시각·기한은 거절한다", () => {
     const { store } = freshStore();
     expect(() => store.pruneInternalRecords({ now: Number.NaN })).toThrow();

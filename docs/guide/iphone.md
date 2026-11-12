@@ -19,6 +19,8 @@ iPhone 앱은 내 Mac의 IAMCEO 서버에 [Tailscale](https://tailscale.com)을 
 
 연결 QR에는 접속 코드가 들어 있지 않습니다. 5분 동안 한 번만 쓸 수 있는 코드만 담고, 그 코드를 쓴 기기에만 접속 코드를 돌려줍니다. 시간이 지나면 **새 QR 만들기**를 누릅니다. Tailscale 주소가 아닌 링크는 열지 않습니다.
 
+QR 대신 주소와 접속 코드를 직접 넣을 수도 있습니다(iPhone 첫 화면의 **주소와 접속 코드를 직접 입력**). 연결 화면 맨 아래의 명령을 복사해 Mac의 터미널에서 실행하면 주소와 접속 코드가 나옵니다. 앱이 그 Mac의 서버가 앱 안에서 도는 것을 알면(전에 연결한 적이 있거나, 같은 Mac의 Mac 앱이면) 명령은 앱 안 경로(`/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo open`)로 나오고, 모를 때는 `iamceo open`으로 나옵니다. `iamceo`를 줄여 쓰는 이름으로 등록해 두지 않았다면 앱 안 경로로 실행합니다 → [시작하기](getting-started.md#명령줄-도구)
+
 ## 알림
 
 - **Mac:** 됩니다. Mac 앱의 **설정 → 알림 → Mac 알림**을 켭니다. 새 결재, 승인·선택 대기, 완료·막힘 보고, 대표 할 일을 알립니다.

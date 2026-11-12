@@ -32,6 +32,19 @@ import XCTest
         XCTAssertFalse(SettingsView.reportLanguageHint.contains("직원"))
     }
 
+    /// 리뷰 app-1: 설정 서명에 보고 언어가 빠져 언어만 바꾸면 저장 단추가 켜지지 않았고, 다른 기기에서 바꾼 언어도 화면에 오지 않았다.
+    func testChangingOnlyTheReportLanguageIsAnEditThatCanBeSaved() {
+        var base = Settings(); base.reportLanguage = "ko"
+        var draft = base; draft.reportLanguage = "en"
+        XCTAssertNotEqual(SettingsView.signature(draft), SettingsView.signature(base), "언어만 바꿔도 고친 것이다(저장할 수 있다)")
+        XCTAssertTrue(SettingsView.generalEdited(draft, base), "일반 묶음에 고친 표시가 붙는다")
+        XCTAssertFalse(SettingsView.generalEdited(base, base))
+        // 옛 서버(값 없음)끼리는 같다. 다른 기기가 바꾼 언어는 서버 서명이 달라져 화면이 다시 읽는다.
+        XCTAssertEqual(SettingsView.signature(Settings()), SettingsView.signature(Settings()))
+        var other = base; other.reportLanguage = "en"
+        XCTAssertNotEqual(SettingsView.signature(other), SettingsView.signature(base))
+    }
+
     func testChangedLanguageIsSentAloneToAServerThatReportsIt() async throws {
         let server = WriteTestServer()
         server.change { $0.bootstrap.settings.reportLanguage = "ko" }

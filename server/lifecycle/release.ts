@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { say } from "../cli-text.ts";
 import { LifecycleError } from "./launchd.ts";
 
@@ -54,7 +54,8 @@ export function releaseSource(options: { from?: string; version?: string; env?: 
   const version = options.version ? options.version.replace(/^v/, "") : null;
   if (version !== null && !/^\d+\.\d+\.\d+$/.test(version)) throw new LifecycleError(say("--version 은 v0.2.4 같은 정식 버전이어야 합니다", "--version must be a release version such as v0.2.4"));
   const override = options.from ?? options.env?.IAMCEO_DOWNLOAD_URL;
-  if (override) return { base: override.replace(/\/+$/, ""), version };
+  // 주소(https://, file:// 등)가 아니면 폴더 경로다. 상대 경로는 지금 폴더 기준의 절대 경로로 바꾼다(그대로 두면 'https 여야 합니다'로 거절됐다).
+  if (override) return { base: (/^[a-z][a-z0-9+.-]*:\/\//i.test(override) ? override : resolve(override)).replace(/\/+$/, ""), version };
   return { base: version ? `${RELEASE_BASE}/download/v${version}` : `${RELEASE_BASE}/latest/download`, version };
 }
 

@@ -1,12 +1,12 @@
 // B3 스스로 점검: 판정(사실 → 점검표), 사실 모으기(로그인 기록·자동 시작·백업), GET /api/doctor, `iamceo doctor`(서버가 꺼져 있어도).
 // 진짜 launchctl·Claude·Codex 를 부르지 않는다: 판정은 주입한 사실로, 모으기는 임시 홈과 가짜 명령으로 시험한다.
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DOCTOR_CHECK_IDS, type DoctorReport } from "../shared/types.ts";
 import { Bus } from "../server/bus.ts";
-import { loadConfig, updateConfigFile, VERSION, type Config } from "../server/config.ts";
+import { defaultCoreBin, loadConfig, updateConfigFile, VERSION, type Config } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
 import { askServerDoctor, doctorChecks, doctorReport, formatDoctorReport, newestBackupAt, probeLogin, probeService, type DoctorFacts } from "../server/doctor.ts";
 import { startServer, type RunningServer } from "../server/http.ts";
@@ -387,4 +387,23 @@ describe("iamceo doctor", () => {
     expect(help.stdout).toContain("doctor [--json]");
     expect(help.stdout).toContain("diagnose");
   }, 30_000);
+});
+
+// 리뷰 docs-2·app-8: 앱 설치의 runtime/iamceo 로 점검·제거를 돌리면(서비스 설정 없이) 엔진을 PATH 에서 찾다가 '실행 엔진 없음'으로 판정했다.
+describe("앱 묶음 안의 실행 엔진 자리", () => {
+  test("실행 파일 옆 runtime/Herdr Core.app 의 엔진을 기본 후보로 찾는다", () => {
+    const app = temp("iamceo-core-bin-");
+    cleanups.push(() => rmSync(app, { recursive: true, force: true }));
+    const runtime = join(app, "IAMCEO.app", "Contents", "Resources", "runtime");
+    const engine = join(runtime, "Herdr Core.app", "Contents", "MacOS", "herdr-core");
+    mkdirSync(join(engine, ".."), { recursive: true });
+    writeFileSync(join(runtime, "iamceo"), "", { mode: 0o755 });
+    const nowhere = join(app, "no-source");
+    expect(defaultCoreBin(join(runtime, "iamceo"), nowhere)).toBe("herdr-core");
+    writeFileSync(engine, "", { mode: 0o755 });
+    expect(defaultCoreBin(join(runtime, "iamceo"), nowhere)).toBe(engine);
+    // 바로 옆의 herdr-core 가 있으면(예전 묶음 모양) 그것이 먼저다.
+    writeFileSync(join(runtime, "herdr-core"), "", { mode: 0o755 });
+    expect(defaultCoreBin(join(runtime, "iamceo"), nowhere)).toBe(join(runtime, "herdr-core"));
+  });
 });

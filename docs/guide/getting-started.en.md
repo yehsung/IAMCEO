@@ -83,7 +83,7 @@ alias iamceo=/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo
 | `iamceo diagnose` | Makes a diagnostic file to attach to a question (no conversation content) |
 | `iamceo status` | Server and project status |
 | `iamceo open` | Connection address and access code |
-| `iamceo backup` | A backup right now → [Upgrade, backup and uninstall](upgrade-backup-uninstall.en.md) |
+| `iamceo backup` | A backup right now, with the server stopped (while it runs, use the backups it makes every day) → [Upgrade, backup and uninstall](upgrade-backup-uninstall.en.md) |
 | `iamceo upgrade` · `iamceo rollback` | Move to a new version, go back to the previous one |
 | `iamceo uninstall` | Stop IAMCEO completely on this Mac |
 | `iamceo auth rotate` | Replace the access code → [Security](../security.en.md#if-you-lose-a-device) |

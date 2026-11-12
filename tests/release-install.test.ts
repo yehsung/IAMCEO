@@ -329,8 +329,41 @@ test("cask: generation replaces version/digest, preserves safe cleanup and zap-o
   expect(output).toContain('app "IAMCEO.app"');
   expect(output).toContain('"$program" = "$1/IAMCEO.app/Contents/Resources/runtime/iamceo"');
   expect(output).toContain('"$live" = "$program"');
-  expect(output.indexOf('trash:  "~/.iamceo"')).toBeGreaterThan(output.indexOf("zap script:"));
+  // 데이터 삭제와 '완전히 멈추기'는 zap 에만 있다. uninstall 스탠자는 brew upgrade 때도 돌기 때문이다.
+  const zapAt = output.indexOf("zap early_script: service_cleanup");
+  expect(zapAt).toBeGreaterThan(output.indexOf("uninstall script: service_cleanup"));
+  expect(output.indexOf("script: full_stop")).toBeGreaterThan(zapAt);
+  expect(output.indexOf('trash:  "~/.iamceo"')).toBeGreaterThan(zapAt);
+  expect(output.match(/^\s*uninstall script: (\w+)$/m)?.[1]).toBe("service_cleanup");
+  expect(output.split('"$bin" uninstall --purge --yes').length).toBe(2);
+  expect(output.match(/\bfull_stop\b/g)?.length).toBe(2); // 정의 한 번, zap 에서 한 번
   for (const [version, hash] of [["x\"; evil", "a".repeat(64)], ["0.2.0", "bad"]]) expect(() => renderCask(template, version, hash)).toThrow();
+});
+
+test("cask: zap stops everything with the app's own runtime, only when no other installation's service remains", () => {
+  const body = template.match(/args: {7}\["-c", <<~SH, "iamceo-zap"[^\n]*\n([\s\S]+?)\n {4}SH\n/)![1]!.replace(/^ {6}/gm, "");
+  for (const kind of ["staged", "appdir", "both", "none", "foreign-plist", "no-core"]) {
+    const f = fixture();
+    const staged = join(f.path, "Caskroom", "iamceo", "0.3.1");
+    const roots = { staged: [staged], appdir: [f.dir], both: [staged, f.dir], none: [], "foreign-plist": [staged], "no-core": [staged] }[kind]!;
+    for (const base of roots) {
+      const runtime = join(base, "IAMCEO.app/Contents/Resources/runtime");
+      mkdirSync(join(runtime, "Herdr Core.app/Contents/MacOS"), { recursive: true });
+      writeFileSync(join(runtime, "iamceo"), `#!/bin/sh\nprintf '%s|%s|%s\\n' "${base}" "$IAMCEO_CORE_BIN" "$*" >> "$FIXTURE_ROOT/zap.log"\n`, { mode: 0o755 });
+      if (kind !== "no-core") writeFileSync(join(runtime, "Herdr Core.app/Contents/MacOS/herdr-core"), "#!/bin/sh\n", { mode: 0o755 });
+    }
+    if (kind === "foreign-plist") writeFileSync(f.plist, "legacy service");
+    const shell = join(f.path, "zap.sh");
+    writeFileSync(shell, body);
+    const result = Bun.spawnSync(["/bin/sh", shell, staged, f.dir], { env: f.env, stdout: "pipe", stderr: "pipe" });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    const log = existsSync(join(f.path, "zap.log")) ? readFileSync(join(f.path, "zap.log"), "utf8").trim().split("\n") : [];
+    if (kind === "none" || kind === "foreign-plist") { expect(log).toEqual([]); continue; }
+    // 한 번만, 먼저 찾은 앱(Caskroom 으로 되돌려 놓은 것)의 실행 파일로, 그 앱의 실행 엔진 경로를 넘겨 부른다.
+    const base = kind === "appdir" ? f.dir : staged;
+    const core = kind === "no-core" ? "" : join(base, "IAMCEO.app/Contents/Resources/runtime/Herdr Core.app/Contents/MacOS/herdr-core");
+    expect(log).toEqual([`${base}|${core}|uninstall --purge --yes`]);
+  }
 });
 
 test("cask: cleanup only unloads a matching app-owned service, never legacy/foreign jobs", () => {

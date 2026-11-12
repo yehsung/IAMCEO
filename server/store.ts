@@ -3392,28 +3392,33 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
             WHERE i.dispatch_id = x.id AND (d.status NOT IN ('delivered','failed') OR COALESCE(r.phase, 'none') NOT IN ('none','resolved','stopped')
               OR COALESCE(r.updated_at, '') >= ?))
         ORDER BY x.updated_at LIMIT ?)`, [wireCutoff, wireCutoff]],
+      // 실행·생명주기 기록 정리가 기록 수의 제곱으로 느려지지 않게 하는 쓰기 꼴(tests/record-retention.test.ts 가 계획과 시간을 본다):
+      // - '더 나중 행'은 (created_at, rowid) 순서다. created_at >= 를 따로 두어야 세대별 색인(member_id, generation, created_at)에서 그 자리부터 찾는다
+      //   (OR 만 두면 그 직원의 행을 처음부터 훑는다). +project_id 는 같은 뜻의 조건을 색인 고르기에서만 빼는 표시다.
+      // - 기록 표를 보는 EXISTS 안의 LIMIT 1 은 SQLite 가 EXISTS 를 조인으로 바꾸지 못하게 한다. 조인으로 바뀌면 ORDER BY … LIMIT 과 겹쳐
+      //   첫 일치에서 멈추지 않아, 2만 줄에서 한 배치가 수 초씩 서버를 멈췄다. 상관 부분 질의로 두면 바깥이 시각 순으로 읽다가 LIMIT 에서 끊긴다.
       ["executions", `DELETE FROM execution_journal WHERE rowid IN (
         SELECT e.rowid FROM execution_journal e
         WHERE e.phase IN ('ended','interrupted') AND e.updated_at < ?
           AND e.rowid < (SELECT MAX(rowid) FROM execution_journal)
-          AND EXISTS (SELECT 1 FROM execution_journal n WHERE n.member_id = e.member_id AND n.project_id = e.project_id AND n.generation = e.generation
-            AND (n.created_at > e.created_at OR (n.created_at = e.created_at AND n.rowid > e.rowid)))
+          AND EXISTS (SELECT 1 FROM execution_journal n WHERE n.member_id = e.member_id AND n.generation = e.generation AND +n.project_id = e.project_id
+            AND n.created_at >= e.created_at AND (n.created_at > e.created_at OR n.rowid > e.rowid) LIMIT 1)
           AND (e.started_at IS NULL OR EXISTS (SELECT 1 FROM execution_journal n
-            WHERE n.project_id = e.project_id AND n.member_id = e.member_id AND n.started_at IS NOT NULL AND n.rowid > e.rowid))
+            WHERE n.project_id = e.project_id AND n.member_id = e.member_id AND n.started_at IS NOT NULL AND n.rowid > e.rowid LIMIT 1))
           AND NOT ((e.input_received_at IS NOT NULL OR e.started_at IS NOT NULL
               OR EXISTS (SELECT 1 FROM delivery_dispatches d WHERE d.id = e.run_id AND d.transport_state = 'accepted'))
             AND NOT EXISTS (SELECT 1 FROM execution_journal n LEFT JOIN delivery_dispatches d ON d.id = n.run_id
               WHERE n.member_id = e.member_id AND n.generation = e.generation
                 AND (n.input_received_at IS NOT NULL OR n.started_at IS NOT NULL OR d.transport_state = 'accepted')
-                AND (n.created_at > e.created_at OR (n.created_at = e.created_at AND n.rowid > e.rowid))))
+                AND n.created_at >= e.created_at AND (n.created_at > e.created_at OR n.rowid > e.rowid) LIMIT 1))
           AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = 'msg_missing_report_' || e.run_id)
         ORDER BY e.updated_at LIMIT ?)`, [recordCutoff]],
       ["lifecycles", `DELETE FROM lifecycle_journal WHERE rowid IN (
         SELECT l.rowid FROM lifecycle_journal l
         WHERE l.phase IN ('confirmed','refused') AND l.updated_at < ?
           AND l.rowid < (SELECT MAX(rowid) FROM lifecycle_journal)
-          AND EXISTS (SELECT 1 FROM lifecycle_journal n WHERE n.member_id = l.member_id AND n.project_id = l.project_id AND n.generation = l.generation
-            AND (n.created_at > l.created_at OR (n.created_at = l.created_at AND n.rowid > l.rowid)))
+          AND EXISTS (SELECT 1 FROM lifecycle_journal n WHERE n.member_id = l.member_id AND n.generation = l.generation AND +n.project_id = l.project_id
+            AND n.created_at >= l.created_at AND (n.created_at > l.created_at OR n.rowid > l.rowid) LIMIT 1)
         ORDER BY l.updated_at LIMIT ?)`, [recordCutoff]],
       ["receipts", `DELETE FROM operation_receipts WHERE rowid IN (
         SELECT rowid FROM operation_receipts WHERE status != 'pending' AND updated_at < ? ORDER BY updated_at LIMIT ?)`, [recordCutoff]],

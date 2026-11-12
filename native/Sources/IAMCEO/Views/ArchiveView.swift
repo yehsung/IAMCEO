@@ -43,7 +43,13 @@ struct ArchiveLibraryView: View {
                             titleVisibility: .visible, presenting: pendingDelete) { project in
             Button("지우기", role: .destructive) {
                 deleting = project.id
-                Task { await store.deleteArchivedProject(id: project.id); deleting = nil }
+                exportResult = nil
+                Task {
+                    let deleted = await store.deleteArchivedProject(id: project.id)
+                    deleting = nil
+                    // 이 시트(설정의 보관함·Mac 주 창의 시트)에는 상태 띠가 없다. 실패 이유는 내보내기 결과 자리에 보인다.
+                    if !deleted { exportResult = ArchiveExport.deleteFailure(store.errorMessage) }
+                }
             }
             Button("취소", role: .cancel) {}
         } message: { _ in
@@ -115,8 +121,11 @@ struct ArchiveLibraryView: View {
             Menu {
                 Button("이름 바꾸기…") { management = ProjectManagementSelection(projectID: project.id, mode: .rename) }
                 #if os(macOS)
-                Button("내보내기…") { export(project) }
-                    .disabled(exporting != nil)
+                // 서버는 내보내기를 그 Mac 에서 온 요청만 받는다(LOCAL_ONLY). 다른 Mac 의 서버에 붙어 있으면 저장 자리를 고르게 하지 않는다.
+                if ArchiveExport.canExport(serverIsThisMac: store.serverIsThisMac) {
+                    Button("내보내기…") { export(project) }
+                        .disabled(exporting != nil)
+                }
                 #endif
                 Divider()
                 Button("지우기…", role: .destructive) { pendingDelete = project }
@@ -132,7 +141,7 @@ struct ArchiveLibraryView: View {
             }
             .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
             .disabled(!canManage)
-            .help(isMac ? "이름 바꾸기·내보내기·지우기" : "이름 바꾸기·지우기")
+            .help(isMac && ArchiveExport.canExport(serverIsThisMac: store.serverIsThisMac) ? "이름 바꾸기·내보내기·지우기" : "이름 바꾸기·지우기")
             .accessibilityLabel("\(project.name) 관리")
         }
         .padding(.leading, 4).padding(.trailing, 8).padding(.vertical, 4)
@@ -308,6 +317,14 @@ enum ArchiveExport {
         let name = String(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
         let day = ISO8601DateFormatter.string(from: now, timeZone: .current, formatOptions: [.withFullDate])
         return "IAMCEO-\(name.isEmpty ? "project" : String(name.prefix(80)))-\(day).zip"
+    }
+
+    /// 내보내기는 서버가 도는 Mac 에서만 된다(서버의 LOCAL_ONLY). 진단 파일 줄과 같은 조건이다.
+    static func canExport(serverIsThisMac: Bool) -> Bool { serverIsThisMac }
+
+    /// 지우기에 실패했을 때 시트 안에 보일 한 줄. 이유는 저장소가 남긴 문장(옛 서버 405 포함)을 그대로 쓴다.
+    static func deleteFailure(_ reason: String?) -> ArchiveExportResult {
+        ArchiveExportResult(title: "지우지 못했습니다", detail: reason ?? "잠시 뒤 다시 해 주세요.", file: nil, failed: true)
     }
 
     static func friendly(_ error: any Error) -> String {

@@ -86,14 +86,36 @@ export function latestRollbackTarget(home: string): UpgradeRecord | null {
   return null;
 }
 
-/** 오래된 업그레이드 폴더(앱·DB 사본이 커서)는 최근 keep 개만 남긴다. 진행 중이던 것은 지우지 않는다. */
+/**
+ * 되돌리기가 옆으로 빼 둔 DB(업그레이드 뒤에 쌓인 대화·결재)를 담은 폴더 이름의 앞머리. 대표의 데이터라 정리하지 않는다.
+ * - after-upgrade-<시각>/: 되돌릴 때 빼 둔 그때의 DB
+ * - rollback-attempt-<시각>/: 되돌리기가 실패해 원래대로 돌릴 때 빼 둔, 되돌린 판이 잠깐 쓴 DB
+ */
+export const KEPT_ASIDE_PREFIXES = ["after-upgrade-", "rollback-attempt-"] as const;
+const keptAside = (name: string) => KEPT_ASIDE_PREFIXES.some(prefix => name.startsWith(prefix));
+
+/**
+ * 오래된 업그레이드 폴더(앱·DB 사본이 커서)는 최근 keep 개만 남긴다. 진행 중이던 것은 지우지 않는다.
+ * 옆으로 빼 둔 DB 가 든 폴더는 통째로 지우지 않고, 그 DB 와 기록(upgrade.json)만 남긴 채 큰 사본(앱·업그레이드 전 DB)만 지운다.
+ * 돌려주는 값은 통째로 지운 기록의 id.
+ */
 export function pruneUpgradeRecords(home: string, keep = 2): string[] {
   const removed: string[] = [];
   const records = listUpgradeRecords(home);
   for (const record of records.slice(keep)) {
     if (!["done", "rolled_back", "aborted"].includes(record.phase)) continue;
-    try { rmSync(upgradeDir(home, record.id), { recursive: true }); removed.push(record.id); }
-    catch { /* 다음 업그레이드 때 다시 본다 */ }
+    const dir = upgradeDir(home, record.id);
+    try {
+      const entries = readdirSync(dir);
+      if (!entries.some(keptAside)) { rmSync(dir, { recursive: true }); removed.push(record.id); continue; }
+      for (const name of entries) if (name !== "upgrade.json" && !keptAside(name)) rmSync(join(dir, name), { recursive: true, force: true });
+    } catch { /* 다음 업그레이드 때 다시 본다 */ }
   }
   return removed;
+}
+
+/** 이 기록 폴더 안에 남아 있는 옆 사본 폴더들(절대 경로). */
+export function keptAsideCopies(home: string, id: string): string[] {
+  const dir = upgradeDir(home, id);
+  try { return readdirSync(dir).filter(keptAside).map(name => join(dir, name)); } catch { return []; }
 }

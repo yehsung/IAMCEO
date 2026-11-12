@@ -672,8 +672,13 @@ struct ConnectionView: View {
         store.restoredCredentials && !useQR
     }
 
-    /// Prints the server's addresses and access code on the server computer.
-    private static let accessCommand = "iamceo open"
+    /// Prints the server's addresses and access code on the server computer. A server running from the app bundle
+    /// is not on PATH, so the chip names the app's own executable then (ServerAccessCommand).
+    private var accessCommand: String {
+        ServerAccessCommand.command(serverCLI: store.isDemo ? nil : store.serverCLI(for: settingsTrim(store.endpoint)), serviceProgram: serviceProgram)
+    }
+    /// macOS: ProgramArguments of this Mac's registered service, read when the screen appears.
+    @State private var serviceProgram: [String]?
 
     private var connecting: Bool { store.isPairing || store.connectionStatus == .connecting }
     private var localHostBusy: Bool {
@@ -718,11 +723,22 @@ struct ConnectionView: View {
         .background { localLight }
         #if os(macOS)
         .onAppear {
+            if !store.isDemo { serviceProgram = Self.readServiceProgram() }
             guard !connecting, store.accessCode.isEmpty else { return }
             focus = store.endpoint.isEmpty ? .endpoint : .code
         }
         #endif
     }
+
+    #if os(macOS)
+    /// Reads only; never loads or changes the service.
+    private static func readServiceProgram() -> [String]? {
+        guard let data = try? Data(contentsOf: LocalHostService.servicePlistURL),
+              let plist = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any],
+              plist["Label"] as? String == "com.iamceo.server" else { return nil }
+        return plist["ProgramArguments"] as? [String]
+    }
+    #endif
 
     /// Web Setup LocalLight: violet glow above the card, orchid low right.
     private var localLight: some View {
@@ -945,9 +961,11 @@ struct ConnectionView: View {
             Button { copyAccessCommand() } label: {
                 HStack(spacing: 7) {
                     Image(systemName: "terminal").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(CE.ink2)
-                    Text(Self.accessCommand).font(SetupFont.code).foregroundStyle(CE.ink).lineLimit(1)
+                    Text(accessCommand).font(SetupFont.code).foregroundStyle(CE.ink).lineLimit(1)
+                        .truncationMode(.middle)
                     Text(copiedCommand ? "복사함" : "복사").font(CEFont.meta.weight(.semibold))
                         .foregroundStyle(copiedCommand ? CE.success : CE.accent)
+                        .fixedSize()
                 }
                 .padding(.horizontal, 12)
                 .frame(minHeight: 30)
@@ -957,16 +975,22 @@ struct ConnectionView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(CopyChipStyle())
-            .fixedSize()
-            .help("서버 컴퓨터의 터미널에서 실행하면 주소와 접속 코드를 보여 줍니다")
-            .accessibilityLabel(copiedCommand ? "iamceo open 명령 복사함" : "iamceo open 명령 복사")
+            // The short command never breaks or shortens. The app's own path is long: it may shorten in the middle
+            // to fit the card, and the copy is always the whole command.
+            .fixedSize(horizontal: !ServerAccessCommand.isLong(accessCommand), vertical: true)
+            .help(ServerAccessCommand.isLong(accessCommand)
+                  ? "\(accessCommand)\n서버 컴퓨터의 터미널에서 실행하면 주소와 접속 코드를 보여 줍니다"
+                  : "서버 컴퓨터의 터미널에서 실행하면 주소와 접속 코드를 보여 줍니다")
+            .accessibilityLabel(ServerAccessCommand.isLong(accessCommand)
+                                ? (copiedCommand ? "접속 코드 확인 명령 복사함" : "접속 코드 확인 명령 복사")
+                                : (copiedCommand ? "iamceo open 명령 복사함" : "iamceo open 명령 복사"))
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 4)
     }
 
     private func copyAccessCommand() {
-        setupCopy(Self.accessCommand)
+        setupCopy(accessCommand)
         copiedCommand = true
         copyTick += 1
         let tick = copyTick
@@ -983,7 +1007,12 @@ struct ConnectionView: View {
 
     /// The server's 401 text says nothing about what to do next.
     private func friendlyConnectionError(_ raw: String) -> String {
-        if raw == "인증이 필요합니다" { return "접속 코드가 맞지 않거나 바뀌었습니다. 서버 컴퓨터에서 iamceo\u{00A0}open 으로 확인해 다시 넣어 주세요." }
+        if raw == "인증이 필요합니다" {
+            // The chip under the card carries the exact command (the app's own path for an app install).
+            return ServerAccessCommand.isLong(accessCommand)
+                ? "접속 코드가 맞지 않거나 바뀌었습니다. 서버 컴퓨터의 터미널에서 아래 명령으로 확인해 다시 넣어 주세요."
+                : "접속 코드가 맞지 않거나 바뀌었습니다. 서버 컴퓨터에서 iamceo\u{00A0}open 으로 확인해 다시 넣어 주세요."
+        }
         return ConnectionRecovery.reason(raw)
     }
 }
@@ -1110,10 +1139,7 @@ struct SettingsView: View {
     private func hasEdits(in section: SettingsSection) -> Bool {
         guard loaded else { return false }
         switch section {
-        case .general:
-            return draft.permissionMode != base.permissionMode || draft.maxConcurrentTurns != base.maxConcurrentTurns
-                || draft.maxAwakeWorkers != base.maxAwakeWorkers || draft.compactAtPct != base.compactAtPct
-                || Int(draft.boardTidyHours.rounded()) != Int(base.boardTidyHours.rounded())
+        case .general: return Self.generalEdited(draft, base)
         case .ai: return RankSettingsEditing.signature(draft) != RankSettingsEditing.signature(base) || pendingEmptyCustom
         case .notifications: return draft.notifyMac != base.notifyMac || macAlerts != baseMacAlerts
         case .connection: return false
@@ -2033,6 +2059,7 @@ struct SettingsView: View {
         if mine.maxAwakeWorkers != previous.maxAwakeWorkers { next.maxAwakeWorkers = mine.maxAwakeWorkers }
         if mine.notifyMac != previous.notifyMac { next.notifyMac = mine.notifyMac }
         if mine.boardTidyHours != previous.boardTidyHours { next.boardTidyHours = mine.boardTidyHours }
+        if mine.reportLanguage != previous.reportLanguage { next.reportLanguage = mine.reportLanguage }
         next = RankSettingsEditing.rebase(previous: previous, mine: mine, onto: next)
         base = edit.base; draft = next; store.setSettingsDraft(next)
         saveError = "새 설정과 내 변경을 확인한 뒤 저장해 주세요."
@@ -2150,10 +2177,19 @@ struct SettingsView: View {
     }
 
     /// Compares only what this screen edits, with model names normalized the way they are saved.
-    private static func signature(_ settings: Settings) -> String {
-        var parts = [settings.permissionMode, "\(settings.maxConcurrentTurns)", "\(settings.compactAtPct)", "\(settings.maxAwakeWorkers)", "\(settings.notifyMac)", "\(Int(settings.boardTidyHours.rounded()))"]
+    /// B1: the report language is part of it, so changing only the language can be saved and another device's change shows up here.
+    static func signature(_ settings: Settings) -> String {
+        var parts = [settings.permissionMode, "\(settings.maxConcurrentTurns)", "\(settings.compactAtPct)", "\(settings.maxAwakeWorkers)", "\(settings.notifyMac)", "\(Int(settings.boardTidyHours.rounded()))", settings.reportLanguage ?? ""]
         parts += RankSettingsEditing.signature(settings)
         return parts.joined(separator: "|")
+    }
+
+    /// The 일반 part of `signature` (the dot on its sidebar item / list row).
+    static func generalEdited(_ draft: Settings, _ base: Settings) -> Bool {
+        draft.permissionMode != base.permissionMode || draft.maxConcurrentTurns != base.maxConcurrentTurns
+            || draft.maxAwakeWorkers != base.maxAwakeWorkers || draft.compactAtPct != base.compactAtPct
+            || Int(draft.boardTidyHours.rounded()) != Int(base.boardTidyHours.rounded())
+            || (draft.reportLanguage ?? "") != (base.reportLanguage ?? "")
     }
 }
 

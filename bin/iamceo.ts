@@ -20,19 +20,19 @@ const USAGE = `쓰는 법: iamceo <명령>
   status                 서버와 프로젝트 상태를 본다
   doctor [--json]        이 Mac의 실행 환경을 항목별로 점검하고 고치는 법을 알려 준다(서버가 꺼져 있어도 된다)
   diagnose               진단 파일(~/.iamceo/diagnostics/<시각>.zip)을 만든다. 대화 내용과 접속 코드는 넣지 않는다
-  attach <팀원ID>        관리 중인 CLI 터미널을 연다
+  attach <팀장ID>        관리 중인 CLI 터미널을 연다
   join [--project 이름] [--name 이름] [--role 역할] [--handle 핸들] [--session UUID]
                          내가 띄운 CLI 를 팀장으로 등록하고 연결 명령을 알려 준다
   import <덤프.json> [--name 이름] [--cwd 폴더]
                          기존 운영판 덤프를 프로젝트로 가져온다
   backup [--directory 경로] 검증된 DB·첨부·설정 백업
   restore <백업폴더> --destination 경로 [--clone]
-                         별도 빈 홈에 복원하고 발신을 격리한다
-  restore reconcile      서버가 꺼진 IAMCEO_HOME의 큐·푸시를 보수적으로 조정한다
-  restore resume         조정 완료 후 발신을 허용한다. 이후 serve로 시작한다
-  readiness              인증·복구 완료·실행 build ID를 확인한다
+                         비어 있거나 없는 홈에 복원하고 발신을 격리한다
+  restore reconcile      서버가 꺼진 복원 홈의 보내던 글과 알림을 안전하게 조정한다
+  restore resume         조정한 뒤 발신을 허용한다. 그다음 앱에서 '이 Mac에서 시작'을 누른다
+  readiness              인증·복구 완료·실행 파일 식별값을 확인한다
   auth rotate            이 Mac의 접속 코드를 교체하고 모든 연결·QR을 만료시킨다
-  build-id               실행 파일의 build ID를 보여 준다
+  build-id               실행 파일 식별값(build ID)을 보여 준다
   service install [--restart] [--dry-run] | uninstall [--dry-run]
                          launchd 서비스(com.iamceo.server)를 등록·해제한다
   upgrade [--version vX.Y.Z] [--dry-run]
@@ -40,8 +40,9 @@ const USAGE = `쓰는 법: iamceo <명령>
                          (git 체크아웃에서 도는 서버는 upgrade <커밋>)
   rollback [--yes] [--dry-run]
                          마지막 업그레이드 전의 판으로 되돌린다
-  uninstall [--purge] [--yes] [--dry-run]
+  uninstall [--purge] [--yes] [--dry-run] [--include-checkout]
                          모든 팀장·실행 엔진·로그인 서비스를 멈춘다. 데이터는 --purge 일 때만(한 번 더 확인하고) 지운다
+                         (소스 체크아웃에서 도는 서비스는 --include-checkout 일 때만 내리고 설정 사본을 남긴다)
   roles export           기본 역할 템플릿을 ~/.iamceo/roles/<kind>.example.md 로 꺼낸다. <kind>.md 로 고쳐 두면 그것을 쓴다
   version                버전을 보여 준다
   mcp                    MCP 브리지(세션이 부른다)`;
@@ -55,16 +56,16 @@ const USAGE_EN = `Usage: iamceo <command>
   status                 show the server and project status
   doctor [--json]        check this Mac's setup item by item, with a fix for each (works while the server is down)
   diagnose               make a diagnostics file (~/.iamceo/diagnostics/<time>.zip) without conversations or the access code
-  attach <memberID>      open the terminal of a managed CLI
+  attach <staffID>       open the terminal of a managed CLI
   join [--project name] [--name name] [--role role] [--handle handle] [--session UUID]
                          register a CLI you started yourself as staff and print the commands to connect it
   import <dump.json> [--name name] [--cwd folder]
                          import an old board dump as a project
   backup [--directory path] checked backup of the database, attachments and settings
   restore <backup folder> --destination path [--clone]
-                         restore into a separate empty home with outgoing delivery switched off
-  restore reconcile      reconcile the queue and push of a stopped IAMCEO_HOME, conservatively
-  restore resume         allow outgoing delivery after reconcile; then start it with serve
+                         restore into an empty or missing home with outgoing delivery switched off
+  restore reconcile      settle the pending messages and notifications of a stopped restored home, conservatively
+  restore resume         allow outgoing delivery after reconcile; then press 'Start on this Mac' in the app
   readiness              check authentication, recovery and the running build ID
   auth rotate            replace this Mac's access code; every connection and QR stops working
   build-id               show the build ID of this executable
@@ -75,8 +76,9 @@ const USAGE_EN = `Usage: iamceo <command>
                          rolls back by itself if it does not start (a server run from a git checkout: upgrade <commit>)
   rollback [--yes] [--dry-run]
                          return to the build before the last upgrade
-  uninstall [--purge] [--yes] [--dry-run]
+  uninstall [--purge] [--yes] [--dry-run] [--include-checkout]
                          stop every session, the session engine and the login service; data is deleted only with --purge (asked again)
+                         (a service that runs from a source checkout is stopped only with --include-checkout; its settings file is kept as a copy)
   roles export           copy the default role templates to ~/.iamceo/roles/<kind>.example.md; save one as <kind>.md to use it
   version                show the version
   mcp                    MCP bridge (sessions start it)
@@ -119,8 +121,8 @@ async function api<T>(config: Config, path: string, init?: { method: string; bod
       body: init ? JSON.stringify(init.body) : undefined,
     });
   } catch {
-    throw new CliError(say(`서버가 꺼져 있습니다(${localUrl(config)}). iamceo serve 로 켜세요.`,
-      `The server is not running (${localUrl(config)}). Start it with iamceo serve.`));
+    throw new CliError(say(`서버가 꺼져 있습니다(${localUrl(config)}). IAMCEO 앱에서 ‘이 Mac에서 시작’을 누르세요(앱 없이 쓰면 iamceo service install).`,
+      `The server is not running (${localUrl(config)}). Press 'Start on this Mac' in the IAMCEO app (without the app: iamceo service install).`));
   }
   const parsed = (await res.json().catch(() => null)) as (T & { error?: string }) | null;
   if (!res.ok) throw new CliError(parsed?.error ?? say(`서버 오류(${res.status})`, `Server error (${res.status})`));
@@ -276,7 +278,9 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
     const storage = new StorageMaintenance({ uploadsDir: config.uploadsDir, inboxDir: config.inboxDir, backupDir,
       references: createStorageReferences(store, config.inboxDir),
       // E4: 같은 정리 주기에 끝난 지 오래된 안쪽 기록(보낸 글 사본 30일, 실행 기록·영수증 90일)도 정리한다.
-      records: store });
+      records: store,
+      // B5: 내보내기 도중에 서버가 꺼져 남은 임시 zip(1시간 넘은 것만). 업그레이드 기록(upgrades/)은 넘기지 않는다.
+      exportsDir: join(config.home, "exports") });
     const { readVitals, vitalsLine } = await import("../server/vitals.ts");
     const vitals = () => loopMonitor.run("timer:vitals", () => {
       try { const { line, warn } = vitalsLine(readVitals(db!, config.dbPath)); (warn ? console.warn : console.info)(line); }
@@ -385,10 +389,10 @@ async function serve(): Promise<void> {
 }
 
 async function attach(args: string[]): Promise<void> {
-  if (args.length !== 1 || !/^m_[A-Za-z0-9_-]+$/.test(args[0]!)) throw new CliError(say("쓰는 법: iamceo attach <팀원ID>", "Usage: iamceo attach <memberID>"));
+  if (args.length !== 1 || !/^m_[A-Za-z0-9_-]+$/.test(args[0]!)) throw new CliError(say("쓰는 법: iamceo attach <팀장ID>", "Usage: iamceo attach <staffID>"));
   const config = loadConfig();
   const member = await api<Member>(config, `/api/members/${encodeURIComponent(args[0]!)}`);
-  if (member.backend !== "core" || !member.paneId) throw new CliError(say("연결할 core 터미널이 없습니다", "This member has no core terminal to attach to"));
+  if (member.backend !== "core" || !member.paneId) throw new CliError(say("연결할 실행 엔진 터미널이 없습니다(잠든 팀장일 수 있습니다)", "There is no session engine terminal to attach to (the session may be asleep)"));
   // The screen endpoint verifies the current core ownership labels before local attach.
   await api(config, `/api/members/${encodeURIComponent(member.id)}/screen`);
   const coreBin = config.coreBin ?? "herdr-core";
@@ -471,7 +475,7 @@ async function setup(args: string[]): Promise<void> {
     if (hosts !== null) updateConfigFile({ hosts });
     const after = loadConfig();
     console.log(say(
-      `\n설정했습니다: herdr-core, 포트 ${port}\n주소: ${publicUrls({ ...after, port }).join(" · ")}\n접속 코드: ${config.accessCode}\n서버 켜기: iamceo serve (서비스로 두려면 iamceo service install). 이미 켜져 있으면 다시 켜야 적용됩니다.\n팀원 규칙을 고치려면: iamceo roles export (${config.rolesDir})`,
+      `\n설정했습니다: herdr-core, 포트 ${port}\n주소: ${publicUrls({ ...after, port }).join(" · ")}\n접속 코드: ${config.accessCode}\n서버 켜기: iamceo serve (서비스로 두려면 iamceo service install). 이미 켜져 있으면 다시 켜야 적용됩니다.\n역할 지침을 고치려면: iamceo roles export (${config.rolesDir})`,
       `\nSet up: herdr-core, port ${port}\nAddress: ${publicUrls({ ...after, port }).join(" · ")}\nAccess code: ${config.accessCode}\nStart the server: iamceo serve (to keep it as a service: iamceo service install). If it is already running, restart it to apply this.\nTo change the role rules: iamceo roles export (${config.rolesDir})`));
     if (process.env.IAMCEO_PORT) console.log(say(`IAMCEO_PORT=${process.env.IAMCEO_PORT} 환경변수가 설정 파일보다 앞섭니다.`,
       `The IAMCEO_PORT=${process.env.IAMCEO_PORT} environment variable takes precedence over the settings file.`));
@@ -510,8 +514,8 @@ async function status(): Promise<void> {
   }
   console.log(say("프로젝트:", "Projects:"));
   for (const p of boot.projects) {
-    console.log(say(`  ${p.name} (${p.id})${p.runnerEnabled ? "" : " [실행 꺼짐]"}: 결재 ${p.inboxCount} · 일하는 중 ${p.workingCount} · 팀원 ${p.memberCount}${p.now ? ` · ${p.now.split("\n")[0]}` : ""}`,
-      `  ${p.name} (${p.id})${p.runnerEnabled ? "" : " [stopped]"}: inbox ${p.inboxCount} · working ${p.workingCount} · members ${p.memberCount}${p.now ? ` · ${p.now.split("\n")[0]}` : ""}`));
+    console.log(say(`  ${p.name} (${p.id})${p.runnerEnabled ? "" : " [실행 꺼짐]"}: 결재 ${p.inboxCount} · 일하는 중 ${p.workingCount} · 팀장 ${p.memberCount}${p.now ? ` · ${p.now.split("\n")[0]}` : ""}`,
+      `  ${p.name} (${p.id})${p.runnerEnabled ? "" : " [stopped]"}: inbox ${p.inboxCount} · working ${p.workingCount} · staff ${p.memberCount}${p.now ? ` · ${p.now.split("\n")[0]}` : ""}`));
   }
 }
 
@@ -519,8 +523,8 @@ async function status(): Promise<void> {
 export async function rotateAccessCode(config: Config, request: typeof fetch = fetch): Promise<string> {
   const host = config.hosts.find(host => host === "::1" || host === "localhost" || /^127(?:\.\d{1,3}){3}$/.test(host)) ??
     (config.hosts.includes("0.0.0.0") ? "127.0.0.1" : config.hosts.includes("::") ? "::1" : null);
-  if (!host || config.port === 0) throw new CliError(say("로컬 접속 주소와 실행 포트가 필요합니다. loopback host 설정을 확인하세요.",
-    "A local address and a running port are needed. Check that a loopback host is in the settings."));
+  if (!host || config.port === 0) throw new CliError(say("이 Mac 주소(127.0.0.1)와 실행 포트가 필요합니다. 설정의 접속 주소에 127.0.0.1 이 있는지 확인하세요.",
+    "This Mac's own address (127.0.0.1) and a running port are needed. Check that 127.0.0.1 is among the addresses in the settings."));
   let response: Response;
   try {
     response = await request(`http://${host.includes(":") ? `[${host}]` : host}:${config.port}/api/auth/rotate`, {
@@ -573,7 +577,7 @@ async function join_(args: string[]): Promise<void> {
 
   // --env 는 값을 여러 개 받는 옵션이라 서버 이름이 뒤에 오면 그것까지 값으로 먹는다(claude mcp add 가 거부한다, 실측).
   const add = ["claude", "mcp", "add", "iamceo", "--transport", "stdio", "--scope", "local", "--env", `IAMCEO_URL=${localUrl(config)}`, "--env", `IAMCEO_TOKEN=${joined.token}`, "--", ...selfCommand("mcp")];
-  console.log(say(`${joined.project.name} 의 팀원 ${joined.member.name}(${joined.member.handle})으로 등록했습니다.\n`,
+  console.log(say(`${joined.project.name} 의 팀장 ${joined.member.name}(${joined.member.handle})으로 등록했습니다.\n`,
     `Registered as ${joined.member.name} (${joined.member.handle}) in ${joined.project.name}.\n`));
   console.log(say(`1. 이 폴더(${cwd})에서 MCP 를 연결합니다(토큰이 들어 있으니 남에게 보이지 마세요):\n   ${add.map(shellQuote).join(" ")}\n`,
     `1. Connect MCP in this folder (${cwd}). The command holds a token, so do not show it to anyone:\n   ${add.map(shellQuote).join(" ")}\n`));
@@ -598,7 +602,32 @@ async function importDump(args: string[]): Promise<void> {
 }
 
 // ---- backup / separate-path restore ----
-async function backup(args: string[]): Promise<void> {
+/**
+ * 백업·복원의 오류는 호출 기록 없이 한 줄로 보인다(문서가 이 명령들을 안내한다). 서버가 데이터 폴더를 쥐고 있으면 그 까닭과 할 일을 말한다.
+ * 명령줄 사용법 오류(CliError·ERR_PARSE_ARGS)는 그대로 둔다.
+ */
+async function oneLineErrors(what: "backup" | "restore", run: () => Promise<void>): Promise<void> {
+  try { await run(); }
+  catch (error) {
+    if (error instanceof CliError || !(error instanceof Error) || (error as { code?: string }).code?.startsWith("ERR_PARSE_ARGS")) throw error;
+    if ((error as { code?: string }).code === "home_in_use") {
+      const home = (error as { home?: string }).home ?? homeDir();
+      throw new CliError(what === "backup"
+        ? say(`켜져 있는 서버가 데이터 폴더를 쓰고 있어(다른 작업이 사용 중) 지금 백업하지 않았습니다. 켜져 있는 서버는 매일 스스로 백업합니다(${join(home, "backups")}). 지금 바로 백업하려면 서버를 끈 뒤 다시 실행하세요.`,
+          `The running server is using the data folder, so no backup was made now. A running server backs itself up every day (${join(home, "backups")}). To back up right now, stop the server and run this again.`)
+        : say(`데이터 폴더를 다른 작업(켜져 있는 서버 등)이 사용 중이라 멈췄습니다: ${home}. 서버를 끈 뒤 다시 실행하세요.`,
+          `Another process (such as the running server) is using the data folder, so nothing was done: ${home}. Stop the server and run this again.`));
+    }
+    throw new CliError(what === "backup" ? say(`백업하지 못했습니다: ${error.message}`, `Backup failed: ${error.message}`)
+      : say(`복원하지 못했습니다: ${error.message}`, `Restore failed: ${error.message}`));
+  }
+}
+
+function backup(args: string[]): Promise<void> {
+  return oneLineErrors("backup", () => backupNow(args));
+}
+
+async function backupNow(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { directory: { type: "string" } } });
   const { acquireHomeOwner } = await import("../server/home-owner.ts");
   using owner = acquireHomeOwner(homeDir());
@@ -609,27 +638,45 @@ async function backup(args: string[]): Promise<void> {
   console.log(`${say("백업 검증 완료", "Backup checked")}: ${snapshot!.directory}`);
 }
 
-async function restore(args: string[]): Promise<void> {
+function restore(args: string[]): Promise<void> {
+  return oneLineErrors("restore", () => restoreNow(args));
+}
+
+async function restoreNow(args: string[]): Promise<void> {
   if (args[0] === "reconcile" || args[0] === "resume") {
     if (args.length !== 1) throw new CliError(say("iamceo restore reconcile | iamceo restore resume (IAMCEO_HOME으로 복원 홈 지정, 서버 종료 필요)",
       "iamceo restore reconcile | iamceo restore resume (point IAMCEO_HOME at the restored home; the server must be stopped)"));
     const { reconcileRestoredHome, resumeRestoredHome } = await import("../server/restore.ts");
     const result = args[0] === "reconcile" ? reconcileRestoredHome(homeDir()) : resumeRestoredHome(homeDir());
     console.log(result.outboundEnabled
-      ? say(`복원 발신 재개 허용: ${result.home}\n이 홈에서 iamceo serve 로 시작하세요. 기존 보류 전달·푸시 기기는 자동 재전송·활성화하지 않습니다.`,
-        `Outgoing delivery allowed for the restored home: ${result.home}\nStart it with iamceo serve. Held deliveries are not resent and push devices are not switched back on automatically.`)
-      : say(`복원 큐·푸시 조정 완료: ${result.home}\n발신 꺼짐: iamceo restore resume 으로 명시적으로 재개하세요.`,
-        `Queue and push of the restored home reconciled: ${result.home}\nOutgoing delivery is off: run iamceo restore resume to allow it.`));
+      ? say(`복원 발신 재개 허용: ${result.home}\n${startRestoredHome(result.home, "ko")} 보류했던 전달은 다시 보내지 않고, 알림 기기도 저절로 켜지 않습니다.`,
+        `Outgoing delivery allowed for the restored home: ${result.home}\n${startRestoredHome(result.home, "en")} Held deliveries are not resent and notification devices are not switched back on automatically.`)
+      : say(`복원 홈 조정 완료: ${result.home} (보내던 글과 알림을 안전하게 정리했습니다)\n발신 꺼짐: iamceo restore resume 으로 직접 재개하세요.`,
+        `Restored home settled: ${result.home} (pending messages and notifications were tidied up safely)\nOutgoing delivery is off: run iamceo restore resume to allow it.`));
     return;
   }
   const { values, positionals } = parseArgs({ args, allowPositionals: true,
     options: { destination: { type: "string" }, clone: { type: "boolean" } } });
-  if (positionals.length !== 1 || !values.destination) throw new CliError(say("iamceo restore <백업폴더> --destination <별도 빈 홈> [--clone]",
-    "iamceo restore <backup folder> --destination <separate empty home> [--clone]"));
+  if (positionals.length !== 1 || !values.destination) throw new CliError(say("iamceo restore <백업폴더> --destination <비어 있거나 없는 홈> [--clone]",
+    "iamceo restore <backup folder> --destination <empty or missing home> [--clone]"));
   const { restoreBackup } = await import("../server/restore.ts");
   const result = restoreBackup({ snapshotDir: resolve(positionals[0]!), destinationHome: resolve(values.destination), mode: values.clone ? "clone" : "same-host" });
-  console.log(say(`복원 검증 완료: ${result.home}\n발신 꺼짐: IAMCEO_HOME을 복원 홈으로 지정하고 restore reconcile → restore resume → serve 순서로 실행하세요. 기존 전달·lease 증거는 보존하며 푸시는 다시 등록·활성화해야 합니다.`,
-    `Restore checked: ${result.home}\nOutgoing delivery is off: point IAMCEO_HOME at the restored home and run restore reconcile → restore resume → serve, in that order. Earlier delivery and lease records are kept; push devices must be registered and switched on again.`));
+  const usual = isDefaultHome(result.home);
+  console.log(say(`복원 검증 완료: ${result.home}\n발신 꺼짐: ${usual ? "" : `IAMCEO_HOME=${shellQuote(result.home)} 으로 지정하고 `}iamceo restore reconcile → iamceo restore resume 순서로 실행한 뒤 ${usual ? "IAMCEO 앱에서 ‘이 Mac에서 시작’을 누르세요(앱 없이 쓰면 iamceo service install)" : "같은 IAMCEO_HOME 으로 iamceo service install 을 실행하세요"}. 기존 전달 기록은 그대로 두며, 알림 기기는 다시 등록해 켜야 합니다.`,
+    `Restore checked: ${result.home}\nOutgoing delivery is off: ${usual ? "" : `set IAMCEO_HOME=${shellQuote(result.home)}, then `}run iamceo restore reconcile and then iamceo restore resume, then ${usual ? "press 'Start on this Mac' in the IAMCEO app (without the app: iamceo service install)" : "run iamceo service install with the same IAMCEO_HOME"}. Earlier delivery records are kept; notification devices must be registered and switched on again.`));
+}
+
+/** 복원 홈이 앱이 쓰는 기본 자리(~/.iamceo)인가. 아니면 앱의 '이 Mac에서 시작'이 그 홈을 쓰지 않는다. */
+function isDefaultHome(home: string): boolean {
+  return resolve(home) === resolve(join(homedir(), ".iamceo"));
+}
+
+/** 복원한 홈으로 서버를 켜는 법 한 줄. 기본 홈이면 앱 버튼, 아니면 그 홈을 지정한 서비스 등록. */
+function startRestoredHome(home: string, lang: "ko" | "en"): string {
+  if (isDefaultHome(home)) return lang === "ko" ? "IAMCEO 앱에서 ‘이 Mac에서 시작’을 누르세요(앱 없이 쓰면 iamceo service install)."
+    : "Press 'Start on this Mac' in the IAMCEO app (without the app: iamceo service install).";
+  return lang === "ko" ? `이 홈은 기본 자리(~/.iamceo)가 아니라 앱이 쓰지 않습니다. IAMCEO_HOME=${shellQuote(home)} iamceo service install 로 켜세요.`
+    : `This home is not the usual place (~/.iamceo), so the app does not use it. Start it with IAMCEO_HOME=${shellQuote(home)} iamceo service install.`;
 }
 
 export async function waitForReadiness(config: Config, options: {
@@ -649,8 +696,8 @@ export async function waitForReadiness(config: Config, options: {
       const body = await response.json() as { runtime?: { daemon?: { ready?: boolean; buildId?: string; version?: string } } };
       const daemon = body.runtime?.daemon;
       if (response.ok && daemon?.ready === true && daemon.buildId === expected && daemon.version === VERSION) return;
-      reason = !response.ok ? `HTTP ${response.status}` : !daemon ? say("준비/build ID 계약 없음", "the server does not report readiness or a build ID")
-        : daemon.buildId !== expected || daemon.version !== VERSION ? say("실행 build ID 불일치", "the running build ID is different")
+      reason = !response.ok ? `HTTP ${response.status}` : !daemon ? say("서버가 준비 상태와 실행 파일 식별값을 알리지 않습니다", "the server does not report readiness or a build ID")
+        : daemon.buildId !== expected || daemon.version !== VERSION ? say("다른 실행 파일이 떠 있습니다", "the running build ID is different")
         : say("복구 완료 대기", "waiting for recovery to finish");
     } catch (error) {
       if (error instanceof CliError) throw error;
@@ -970,9 +1017,9 @@ async function rollbackCommand(args: string[]): Promise<void> {
 }
 
 async function uninstallCommand(args: string[]): Promise<void> {
-  const { values } = parseArgs({ args, options: { purge: { type: "boolean" }, yes: { type: "boolean" }, "dry-run": { type: "boolean" } } });
+  const { values } = parseArgs({ args, options: { purge: { type: "boolean" }, yes: { type: "boolean" }, "dry-run": { type: "boolean" }, "include-checkout": { type: "boolean" } } });
   const { uninstall } = await import("../server/lifecycle/uninstall.ts");
-  await lifecycleCommand(() => uninstall({ purge: values.purge, yes: values.yes, dryRun: values["dry-run"] }));
+  await lifecycleCommand(() => uninstall({ purge: values.purge, yes: values.yes, dryRun: values["dry-run"], includeCheckout: values["include-checkout"] }));
 }
 
 // ---- 진입 ----
@@ -989,7 +1036,7 @@ async function main(argv: string[]): Promise<void> {
       return restore(rest);
     case "readiness":
       await waitForReadiness(loadConfig());
-      return console.log(say("인증·복구·build ID 준비 확인 완료", "Authentication, recovery and build ID are ready"));
+      return console.log(say("인증·복구·실행 파일 확인 완료", "Authentication, recovery and build ID are ready"));
     case "auth": {
       if (rest.length !== 1 || rest[0] !== "rotate") throw new CliError(say("쓰는 법: iamceo auth rotate", "Usage: iamceo auth rotate"));
       // say 는 두 문구를 모두 만든다. 교체는 문구 밖에서 한 번만 한다.
@@ -1059,7 +1106,12 @@ if (import.meta.main) {
   try {
     await main(process.argv.slice(2));
   } catch (e) {
-    console.error(e instanceof CliError || (e as { code?: string }).code?.startsWith("ERR_PARSE_ARGS") ? (e as Error).message : e);
+    const code = (e as { code?: string } | null)?.code;
+    // 데이터 폴더를 다른 작업(켜져 있는 서버 등)이 쥐고 있으면 호출 기록 없이 한 줄로 알린다.
+    console.error(e instanceof CliError || code?.startsWith("ERR_PARSE_ARGS") ? (e as Error).message
+      : code === "home_in_use" ? say(`데이터 폴더를 다른 작업(켜져 있는 서버 등)이 사용 중입니다: ${(e as { home?: string }).home ?? homeDir()}. 서버를 끈 뒤 다시 실행하세요.`,
+        `Another process (such as the running server) is using the data folder: ${(e as { home?: string }).home ?? homeDir()}. Stop the server and run this again.`)
+      : e);
     process.exit(1);
   }
 }

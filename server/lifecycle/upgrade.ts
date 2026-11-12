@@ -3,20 +3,20 @@
 //   새 판으로 DB 사본 예행 → 직전 판 기록(plist·DB 사본·이전 앱 또는 커밋) → 서비스 내림 → 교체 → 올림 → 준비 확인.
 // 정해진 시간 안에 준비되지 않으면 스스로 직전 판으로 되돌린다. 자동 되돌리기는 기동 실패 때만 한다
 // (되돌리면 그 사이 쌓인 대화가 옆 사본으로 빠지므로, 이미 잘 돌고 있는 판을 나중에 되돌리는 것은 대표가 rollback 으로 정한다).
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { closeSync, constants, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { say } from "../cli-text.ts";
 import { homeDir, loadConfig, type Config } from "../config.ts";
 import { normalizeHome } from "../home-owner.ts";
 import {
-  detectInstallation, LifecycleError, readServicePlist, realLaunchctl, serviceDomain, servicePlistPath, startService, stopService,
+  detectInstallation, LifecycleError, readServicePlist, realLaunchctl, serviceDomain, serviceLoaded, servicePlistPath, startService, stopService,
   type Installation, type Launchctl, type ServiceControl,
 } from "./launchd.ts";
 import { describeRehearsal, rehearseDatabase, type Rehearse } from "./rehearse.ts";
 import { compareVersions, releaseSource, stageRelease, type ReleaseTools } from "./release.ts";
 import { databaseSchema, moveBundle, restoreDatabase, snapshotDatabase, waitHomeOwner, waitReady, type ReadinessCheck } from "./runtime.ts";
-import { latestRollbackTarget, newUpgradeId, pruneUpgradeRecords, saveUpgradeRecord, upgradeDir, type UpgradeRecord } from "./state.ts";
+import { keptAsideCopies, latestRollbackTarget, newUpgradeId, pruneUpgradeRecords, saveUpgradeRecord, upgradeDir, type UpgradeRecord } from "./state.ts";
 
 export type CommandRunner = (command: string[], options?: { cwd?: string; timeoutMs?: number }) => { code: number; stdout: string; stderr: string };
 
@@ -158,36 +158,113 @@ async function snapshotStopped(ctx: Context, inst: Installation, target: string)
 }
 
 /**
- * 기록된 직전 판으로 돌린다(자동·수동 공용). 서비스를 내리고, 스키마가 올라갔으면 DB 를 사본으로 되돌리고(지금 DB 는 옆에 둔다),
- * 앱 묶음 또는 커밋을 되돌린 뒤 다시 올려 직전 판이 준비됐는지 확인한다. 돌려주는 값은 DB 를 되돌렸는가.
+ * 되돌리기가 아무것도 바꾸지 않았거나, 바꾼 것을 모두 원래대로(서비스가 떠 있었으면 다시 올려) 돌려놓았다.
+ * 기록은 그대로라 원인을 고친 뒤 다시 되돌릴 수 있다.
+ */
+export class RollbackKept extends LifecycleError {}
+
+/** 서비스를 내리기 전에, 되돌리기 도중 실패할 조건을 먼저 본다. 여기서 멈추면 아무것도 바뀌지 않았다. */
+function rollbackPreflight(record: UpgradeRecord, inst: Installation, ctx: Context): void {
+  if (inst.kind === "git" && record.from.rev) {
+    const head = gitOrFail(ctx, inst.checkout, "rev-parse", "HEAD");
+    if (head !== record.from.rev && gitOrFail(ctx, inst.checkout, "status", "--porcelain", "--untracked-files=no")) {
+      throw new RollbackKept(say("체크아웃에 커밋하지 않은 변경이 있어 되돌리지 않았습니다. 아무것도 바꾸지 않았습니다. 정리한 뒤 다시 실행하세요.",
+        "The checkout has uncommitted changes, so nothing was rolled back or changed. Clean it up and run again."));
+    }
+  }
+  if (inst.kind === "release" && record.previousApp && existsSync(record.previousApp)) {
+    const installed = record.installedApp ?? inst.app;
+    if (!existsSync(dirname(installed))) throw new RollbackKept(say(`앱을 둘 폴더가 없어 되돌리지 않았습니다: ${dirname(installed)}`, `The folder for the app is missing, so nothing was rolled back: ${dirname(installed)}`));
+  }
+}
+
+function fsyncDir(path: string): void {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY);
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+/** restoreDatabase 를 되돌린다: 되돌린 판이 쓴 DB 는 attempt 폴더로 빼고, aside 에 빼 두었던 DB 를 제자리로 돌린다. 서버가 꺼져 있어야 한다. */
+async function putDatabaseBack(home: string, aside: string, attempt: string, ctx: Context): Promise<void> {
+  const owner = await waitHomeOwner(home, ctx.stopTimeoutMs, ctx.sleep);
+  try {
+    const live = join(owner.home, "iamceo.db");
+    mkdirSync(attempt, { recursive: true, mode: 0o700 });
+    for (const suffix of ["", "-wal", "-shm"]) if (existsSync(live + suffix)) renameSync(live + suffix, join(attempt, `iamceo.db${suffix}`));
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const kept = join(aside, `iamceo.db${suffix}`);
+      if (existsSync(kept)) renameSync(kept, live + suffix);
+    }
+    fsyncDir(owner.home);
+    try { rmdirSync(aside); } catch { /* 비지 않았으면 남긴다 */ }
+  } finally { owner.release(); }
+}
+
+/**
+ * 기록된 직전 판으로 돌린다(자동·수동 공용). 순서: 실패할 조건 확인 → 서비스 내림 → 앱 묶음 또는 커밋 되돌리기 →
+ * (스키마가 올라갔으면) DB 를 사본으로 되돌리기(지금 DB 는 옆에 둔다) → 올려서 직전 판이 준비됐는지 확인.
+ * 코드를 먼저 되돌리므로, 코드 되돌리기가 실패해도 DB 는 손대지 않은 채다(새 코드가 옛 DB 사본 위에서 뜨는 일이 없다).
+ * 도중에 실패하면 바꾼 것을 거꾸로 되돌리고, 서비스가 떠 있었으면 다시 올린 뒤 RollbackKept 를 던진다.
+ * 그 원상 복구마저 실패하면 일반 LifecycleError 다. 돌려주는 값은 DB 를 되돌렸는가.
  */
 async function rollBack(record: UpgradeRecord, inst: Installation, ctx: Context, config: Config, timeoutMs: number): Promise<boolean> {
   const dir = upgradeDir(inst.home, record.id), when = stamp(ctx);
-  await stopService(ctx.control, ctx.stopTimeoutMs);
-  let databaseRestored = false;
-  const owner = await waitHomeOwner(inst.home, ctx.stopTimeoutMs, ctx.sleep);
-  try {
-    const live = join(owner.home, "iamceo.db");
-    const now = existsSync(live) ? databaseSchema(live) : null;
-    // 직전 판은 미래 스키마의 DB 를 바이트 하나 바꾸지 않고 거절한다. 그때만 DB 를 되돌린다.
-    if (record.database && record.from.schemaVersion !== null && now !== null && now > record.from.schemaVersion) {
-      restoreDatabase(owner, record.database, join(dir, `after-upgrade-${when}`));
-      databaseRestored = true;
-    }
-  } finally { owner.release(); }
-  if (inst.kind === "release") {
-    const installed = record.installedApp ?? inst.app;
-    if (record.previousApp && existsSync(record.previousApp)) {
-      if (existsSync(installed)) moveBundle(installed, join(dir, `rolled-back-${when}.app`));
-      moveBundle(record.previousApp, installed);
-    }
-  } else if (record.from.rev) {
-    if (gitOrFail(ctx, inst.checkout, "rev-parse", "HEAD") !== record.from.rev) gitOrFail(ctx, inst.checkout, "reset", "--keep", record.from.rev);
-    bunInstall(ctx, inst);
+  rollbackPreflight(record, inst, ctx);
+  const wasLoaded = serviceLoaded(ctx.control);
+  try { await stopService(ctx.control, ctx.stopTimeoutMs); }
+  catch (error) {
+    if (wasLoaded) { try { await startService(ctx.control); } catch { /* 아래 오류로 알린다 */ } }
+    throw new RollbackKept(say(`서비스를 내리지 못해 되돌리지 않았습니다: ${error instanceof Error ? error.message : String(error)}`,
+      `Could not stop the service, so nothing was rolled back: ${error instanceof Error ? error.message : String(error)}`));
   }
-  await startService(ctx.control);
-  await ctx.readiness(config, { buildId: record.from.buildId, version: record.from.version }, timeoutMs);
-  return databaseRestored;
+  const undo: (() => void | Promise<void>)[] = [];
+  let databaseRestored = false;
+  try {
+    // 1. 코드
+    if (inst.kind === "release") {
+      const installed = record.installedApp ?? inst.app;
+      const previous = record.previousApp;
+      if (previous && existsSync(previous)) {
+        const parked = join(dir, `rolled-back-${when}.app`);
+        if (existsSync(installed)) { moveBundle(installed, parked); undo.push(() => moveBundle(parked, installed)); }
+        moveBundle(previous, installed);
+        undo.push(() => moveBundle(installed, previous));
+      }
+    } else if (record.from.rev) {
+      const head = gitOrFail(ctx, inst.checkout, "rev-parse", "HEAD");
+      if (head !== record.from.rev) {
+        gitOrFail(ctx, inst.checkout, "reset", "--keep", record.from.rev);
+        undo.push(() => { gitOrFail(ctx, inst.checkout, "reset", "--keep", head); bunInstall(ctx, inst); });
+      }
+      bunInstall(ctx, inst);
+    }
+    // 2. DB — 직전 판은 미래 스키마의 DB 를 바이트 하나 바꾸지 않고 거절한다. 그때만 DB 를 되돌린다.
+    const owner = await waitHomeOwner(inst.home, ctx.stopTimeoutMs, ctx.sleep);
+    try {
+      const live = join(owner.home, "iamceo.db");
+      const now = existsSync(live) ? databaseSchema(live) : null;
+      if (record.database && record.from.schemaVersion !== null && now !== null && now > record.from.schemaVersion) {
+        const aside = join(dir, `after-upgrade-${when}`);
+        restoreDatabase(owner, record.database, aside);
+        databaseRestored = true;
+        undo.push(() => putDatabaseBack(inst.home, aside, join(dir, `rollback-attempt-${when}`), ctx));
+      }
+    } finally { owner.release(); }
+    // 3. 올리고 확인
+    await startService(ctx.control);
+    await ctx.readiness(config, { buildId: record.from.buildId, version: record.from.version }, timeoutMs);
+    return databaseRestored;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    try {
+      await stopService(ctx.control, ctx.stopTimeoutMs);
+      for (const step of undo.reverse()) await step();
+      if (wasLoaded) await startService(ctx.control);
+    } catch (undoError) {
+      throw new LifecycleError(`${reason} / ${say("원래대로 돌리지도 못했습니다", "putting things back failed too")}: ${undoError instanceof Error ? undoError.message : String(undoError)}`);
+    }
+    throw new RollbackKept(say(`되돌리기가 실패해 바꾼 것을 모두 원래대로 돌렸습니다${wasLoaded ? "(서비스도 다시 올렸습니다)" : ""}. 이유: ${reason}`,
+      `The rollback failed, so everything it changed was put back${wasLoaded ? " (and the service was started again)" : ""}. Reason: ${reason}`));
+  }
 }
 
 /** 교체 뒤 새 판이 뜨지 않았다. 직전 판으로 돌리고 무엇을 했는지 오류로 알린다. */
@@ -202,6 +279,12 @@ async function autoRollback(record: UpgradeRecord, inst: Installation, ctx: Cont
   } catch (error) {
     if (error instanceof LifecycleError && record.phase === "rolled_back") throw error;
     const detail = error instanceof Error ? error.message : String(error);
+    // 자동 되돌리기가 실패했지만 바꾼 것은 모두 원래대로다. 기록은 그대로라 iamceo rollback 으로 다시 되돌릴 수 있다.
+    if (error instanceof RollbackKept) {
+      throw new LifecycleError(say(
+        `새 판이 준비되지 않았고(${reason}), 자동 되돌리기도 끝내지 못해 새 판을 그대로 두었습니다(${detail}). 원인을 고친 뒤 iamceo rollback 으로 다시 되돌릴 수 있습니다. 기록 ${upgradeDir(inst.home, record.id)}, 로그 ${join(inst.home, "logs")}`,
+        `The new build was not ready (${reason}) and the automatic rollback did not finish either, so the new build was left in place (${detail}). Fix the cause, then iamceo rollback can try again. Record ${upgradeDir(inst.home, record.id)}, logs ${join(inst.home, "logs")}`));
+    }
     try { save(record, { phase: "rollback_failed", error: `${reason} / ${detail}` }); } catch { /* 기록 실패는 아래 안내로 대신한다 */ }
     throw new LifecycleError(say(
       `업그레이드도, 자동 되돌리기도 끝내지 못했습니다(${detail}). 직접 확인할 것: 기록 ${upgradeDir(inst.home, record.id)}, 로그 ${join(inst.home, "logs")}`,
@@ -384,6 +467,47 @@ export async function upgrade(options: UpgradeOptions, deps: LifecycleDeps = {})
   return inst.kind === "release" ? upgradeRelease(inst, options, ctx) : upgradeGit(inst, options, ctx);
 }
 
+/** 기록의 시각(끝난 시각, 없으면 시작 시각)을 사람이 읽는 모양으로. */
+function recordTime(record: UpgradeRecord): string {
+  const at = record.finishedAt ?? record.startedAt;
+  return at.replace("T", " ").replace(/\.\d{3}Z$|Z$/, " UTC");
+}
+
+/**
+ * 되돌리기 전에 지금 도는 판이 그 기록이 만든 판인지 대조한다. 기록 뒤에 다른 방법(DMG·설치 스크립트·직접 git)으로 판이 바뀌었으면
+ * 그 기록으로 되돌리면 여러 판을 건너뛰고 오래된 DB 사본을 쓰게 되므로 거절한다. 돌려주는 값은 지금 판을 사람이 읽는 이름.
+ * 도중에 멈춘 기록(stopped)은 교체 전이거나 교체 직후일 수 있어 두 판을 모두 받는다.
+ */
+function verifyRunningBuild(record: UpgradeRecord, inst: Installation, ctx: Context): string {
+  const midway = record.phase === "stopped";
+  let label: string, matches: boolean;
+  if (inst.kind === "git") {
+    const head = gitOrFail(ctx, inst.checkout, "rev-parse", "HEAD");
+    let version = "?";
+    try { version = JSON.parse(readFileSync(join(inst.checkout, "package.json"), "utf8")).version ?? "?"; } catch { /* 이름에만 쓴다 */ }
+    label = `${head.slice(0, 12)} (${version})`;
+    matches = head === record.to.rev || (midway && head === record.from.rev);
+  } else {
+    const installed = record.installedApp ?? inst.app;
+    const daemon = join(installed, "Contents", "Resources", "runtime", "iamceo");
+    let build: string | null = null, version: string | null = null;
+    if (existsSync(daemon)) {
+      try { build = probe(ctx, [daemon], "build-id"); } catch { build = null; }
+      try { version = probe(ctx, [daemon], "version"); } catch { version = null; }
+    }
+    label = version ?? (existsSync(installed) ? "?" : say("앱 없음", "no app"));
+    matches = build !== null
+      ? build === record.to.buildId || (midway && build === record.from.buildId)
+      : midway && !existsSync(installed) && !!record.previousApp && existsSync(record.previousApp);
+  }
+  if (!matches) {
+    throw new LifecycleError(say(
+      `기록된 업그레이드(${recordTime(record)}, ${record.from.version} → ${record.to.version}) 뒤에 다른 방법으로 판이 바뀌었습니다. 지금 판: ${label}. 여러 판을 건너뛰어 되돌리거나 오래된 DB 사본을 쓰지 않도록 아무것도 바꾸지 않았습니다.`,
+      `The build was changed some other way after the recorded upgrade (${recordTime(record)}, ${record.from.version} → ${record.to.version}). Running now: ${label}. Nothing was changed, so you do not skip several builds back or get an old database copy.`));
+  }
+  return label;
+}
+
 export async function rollback(options: { dryRun?: boolean; yes?: boolean; timeoutMs?: number }, deps: LifecycleDeps = {}): Promise<RollbackOutcome> {
   const ctx = context(deps, options.dryRun === true);
   const inst = loadInstallation(ctx);
@@ -397,14 +521,15 @@ export async function rollback(options: { dryRun?: boolean; yes?: boolean; timeo
   if (inst.kind === "git" && (!record.from.rev || git(ctx, inst.checkout, "cat-file", "-e", `${record.from.rev}^{commit}`).code !== 0)) {
     throw new LifecycleError(say("직전 커밋을 체크아웃에서 찾지 못했습니다", "The previous commit is not in the checkout"));
   }
+  const running = verifyRunningBuild(record, inst, ctx);
   const live = join(inst.home, "iamceo.db");
   const schema = existsSync(live) ? databaseSchema(live) : null;
   const needsDatabase = !!record.database && record.from.schemaVersion !== null && schema !== null && schema > record.from.schemaVersion;
   const label = record.mode === "git" ? `${record.from.rev?.slice(0, 12)} (${record.from.version})` : record.from.version;
-  ctx.log(say(`직전 판으로 되돌립니다: ${record.to.version} → ${label}`, `Rolling back: ${record.to.version} → ${label}`));
+  ctx.log(say(`직전 판으로 되돌립니다: 지금 ${running} → ${label} (업그레이드 기록 ${recordTime(record)})`, `Rolling back: now ${running} → ${label} (upgrade recorded ${recordTime(record)})`));
   if (needsDatabase) ctx.log(say(
-    `DB 스키마가 올라가 있어(${record.from.schemaVersion} → ${schema}) 업그레이드 전 DB 사본으로 되돌립니다. 업그레이드 뒤 쌓인 대화·결재는 지우지 않고 ${upgradeDir(inst.home, record.id)} 안에 옆 사본으로 남깁니다.`,
-    `The database schema moved up (${record.from.schemaVersion} → ${schema}), so the pre-upgrade copy is restored. Conversations and decisions made after the upgrade are kept aside in ${upgradeDir(inst.home, record.id)}.`));
+    `DB 스키마가 올라가 있어(${record.from.schemaVersion} → ${schema}) 업그레이드 전 DB 사본으로 되돌립니다. 업그레이드 뒤 쌓인 대화·결재는 지우지 않고 ${upgradeDir(inst.home, record.id)} 안에 옆 사본으로 남깁니다(오래된 업그레이드 기록을 정리할 때도 지우지 않습니다).`,
+    `The database schema moved up (${record.from.schemaVersion} → ${schema}), so the pre-upgrade copy is restored. Conversations and decisions made after the upgrade are kept aside in ${upgradeDir(inst.home, record.id)} (old upgrade records are cleaned up without touching it).`));
   if (options.dryRun) return { status: "dry_run", mode: inst.kind, from: record.to.version, to: record.from.version, id: record.id, databaseRestored: needsDatabase };
   if (needsDatabase && !options.yes) throw new LifecycleError(say("DB 까지 되돌리려면 --yes 를 붙여 다시 실행하세요", "Run again with --yes to roll back the database as well"));
   if (inst.kind === "release" && ctx.appRunning()) throw new LifecycleError(say("IAMCEO 앱을 종료한 뒤 다시 실행하세요. 실행 중인 앱은 바꾸지 않습니다.", "Quit the IAMCEO app and run this again. A running app is never replaced."));
@@ -413,11 +538,18 @@ export async function rollback(options: { dryRun?: boolean; yes?: boolean; timeo
   try { restored = await rollBack(record, inst, ctx, config, options.timeoutMs ?? 120_000); }
   catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
+    // 바꾼 것이 모두 원래대로라면 기록을 그대로 두어 다시 되돌릴 수 있게 한다.
+    if (error instanceof RollbackKept) {
+      throw new LifecycleError(say(`${detail}. 기록은 그대로라 원인을 고친 뒤 다시 iamceo rollback 할 수 있습니다. 로그: ${join(inst.home, "logs")}`,
+        `${detail}. The record is unchanged, so you can run iamceo rollback again once the cause is fixed. Logs: ${join(inst.home, "logs")}`));
+    }
     save(record, { phase: "rollback_failed", error: detail });
     throw new LifecycleError(say(`되돌리기를 끝내지 못했습니다(${detail}). 직접 확인할 것: 기록 ${upgradeDir(inst.home, record.id)}, 로그 ${join(inst.home, "logs")}`,
       `The rollback did not finish (${detail}). Check the record ${upgradeDir(inst.home, record.id)} and the logs in ${join(inst.home, "logs")}`));
   }
   save(record, { phase: "rolled_back", rolledBackAt: ctx.now().toISOString() });
-  ctx.log(say(`되돌렸습니다: 지금 ${label}`, `Rolled back: now ${label}`));
+  const kept = keptAsideCopies(inst.home, record.id).filter(path => path.includes("after-upgrade-"));
+  ctx.log(say(`되돌렸습니다: 지금 ${label}${restored && kept.length ? `. 업그레이드 뒤의 DB 사본: ${kept.at(-1)}` : ""}`,
+    `Rolled back: now ${label}${restored && kept.length ? `. Database from after the upgrade: ${kept.at(-1)}` : ""}`));
   return { status: "rolled_back", mode: inst.kind, from: record.to.version, to: record.from.version, id: record.id, databaseRestored: restored };
 }

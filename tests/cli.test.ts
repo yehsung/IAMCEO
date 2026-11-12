@@ -471,6 +471,51 @@ describe("운영 CLI readiness·등록·복원", () => {
     }
   }, 30_000);
 
+  // 리뷰 docs-4·docs-9: 문서가 안내하는 백업·복원 명령. 서버가 홈을 쥐면 호출 기록 없이 한 줄로, 복원 뒤에는 serve 대신 앱의
+  // '이 Mac에서 시작'(기본 자리) 또는 그 홈을 지정한 service install(다른 자리)로 켜라고 한다.
+  test("백업·복원의 거절은 한 줄이고, 복원 뒤에는 '이 Mac에서 시작' 또는 service install 로 켜라고 한다", async () => {
+    const home = newHome();
+    expect((await cli(home, ["setup", "--port", "7005", "--hosts", "127.0.0.1"])).code).toBe(0);
+    const { acquireHomeOwner } = await import("../server/home-owner.ts");
+    {
+      using _owner = acquireHomeOwner(home);
+      const held = await cli(home, ["backup"]);
+      expect(held.code).toBe(1);
+      expect(held.stderr).toContain("켜져 있는 서버가 데이터 폴더를 쓰고 있어");
+      expect(held.stderr).toContain("매일 스스로 백업합니다");
+      expect(held.stderr.trim().split("\n")).toHaveLength(1);
+      expect(held.stderr).not.toContain("    at ");
+      const english = await cli(home, ["backup"], { env: { IAMCEO_LANG: "en" } });
+      expect(english.stderr).toContain("The running server is using the data folder");
+    }
+    const backup = await cli(home, ["backup"]);
+    expect(backup.code).toBe(0);
+    const snapshot = backup.stdout.trim().replace("백업 검증 완료: ", "");
+    // 새 Mac 의 기본 자리(~/.iamceo)에 복원: 앱의 버튼으로 켠다.
+    const user = newHome(), usual = join(user, ".iamceo");
+    const restored = await cli(home, ["restore", snapshot, "--destination", usual], { env: { HOME: user } });
+    expect(restored.code, restored.stderr).toBe(0);
+    expect(restored.stdout).toContain("‘이 Mac에서 시작’");
+    expect(restored.stdout).not.toContain("IAMCEO_HOME=");
+    expect(restored.stdout).not.toContain("serve 순서");
+    expect(restored.stdout).not.toContain("lease");
+    expect((await cli(usual, ["restore", "reconcile"], { env: { HOME: user } })).code).toBe(0);
+    const resumed = await cli(usual, ["restore", "resume"], { env: { HOME: user } });
+    expect(resumed.stdout).toContain("‘이 Mac에서 시작’");
+    expect(resumed.stdout).not.toContain("iamceo serve");
+    // 다른 자리: 앱이 쓰지 않는 홈이라 그 홈을 지정한 service install 을 안내한다.
+    const other = join(newHome(), "restored");
+    const elsewhere = await cli(home, ["restore", snapshot, "--destination", other], { env: { HOME: user } });
+    expect(elsewhere.stdout).toContain(`IAMCEO_HOME=${other}`);
+    expect(elsewhere.stdout).toContain("iamceo service install");
+    expect((await cli(other, ["restore", "reconcile"], { env: { HOME: user } })).code).toBe(0);
+    expect((await cli(other, ["restore", "resume"], { env: { HOME: user } })).stdout).toContain(`IAMCEO_HOME=${other} iamceo service install`);
+    // 서버가 꺼져 있을 때의 안내도 같은 말이다.
+    const down = await cli(home, ["status"]);
+    expect(down.stderr).toContain("‘이 Mac에서 시작’");
+    expect(down.stderr).not.toContain("iamceo serve 로 켜세요");
+  }, 30_000);
+
   test("인증된 준비 확인: health만 성공하는 구형 데몬, 다른 build와 미복구 상태는 성공이 아니다", async () => {
     const home = newHome();
     const config = loadConfig({ IAMCEO_HOME: home, IAMCEO_PORT: "0" });

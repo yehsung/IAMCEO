@@ -31,6 +31,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 출시 앱 호환 검사(scripts/check.sh compat)가 출시 태그의 앱 소스를 git 에서 꺼낸다. 얕은 체크아웃에는 태그가 없다.
+          fetch-depth: 0
       - name: Xcode 고르기
         # 릴리스를 빌드하는 것과 같은 Xcode 로 시험한다.
         run: |
@@ -44,3 +47,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: 네이티브 시험
         run: bash scripts/check.sh swift
+      - name: 출시 앱 호환
+        # 지금 서버의 실제 응답을 출시한 앱(scripts/compat-decoders/releases.json 의 태그)의 해석 코드로 풀어 본다.
+        # Swift 와 bun 이 다 있는 이 작업에서 돈다. 네이티브 시험이 실패해도 결과를 따로 보이게 늘 돌린다.
+        if: ${{ !cancelled() }}
+        run: bash scripts/check.sh compat

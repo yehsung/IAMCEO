@@ -81,7 +81,7 @@ alias iamceo=/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo
 | `iamceo diagnose` | 문의할 때 붙일 진단 파일을 만듭니다(대화 내용은 넣지 않습니다) |
 | `iamceo status` | 서버와 프로젝트 상태 |
 | `iamceo open` | 접속 주소와 접속 코드 |
-| `iamceo backup` | 지금 바로 백업 → [업그레이드·백업·제거](upgrade-backup-uninstall.md) |
+| `iamceo backup` | 서버를 끈 상태에서 지금 바로 백업(켜져 있으면 서버가 매일 만드는 백업을 씁니다) → [업그레이드·백업·제거](upgrade-backup-uninstall.md) |
 | `iamceo upgrade` · `iamceo rollback` | 새 버전으로 올리기, 직전 버전으로 되돌리기 |
 | `iamceo uninstall` | 이 Mac에서 IAMCEO를 완전히 멈추기 |
 | `iamceo auth rotate` | 접속 코드 바꾸기 → [보안 설명서](../security.md#기기를-잃어버렸을-때) |

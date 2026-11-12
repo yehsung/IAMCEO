@@ -1733,16 +1733,16 @@ final class AppStore: ProjectManagementStore {
         } catch {
             guard epoch == generation else { return (nil, error) }
             if cancellationAware && Task.isCancelled { return (nil, error) }
-            if key.hasPrefix("terminal:"), terminalRefusalIsLocal(memberID: String(key.dropFirst("terminal:".count)), error: error.localizedDescription) {
+            if key.hasPrefix("terminal:"), terminalRefusalIsLocal(memberID: String(key.dropFirst("terminal:".count)), error: error) {
                 terminalWindowNotices[String(key.dropFirst("terminal:".count))] = error.localizedDescription
             }
             let deferredRefusal = deferRefusalToReceipt && Self.definiteRefusal(error) && (error as? APIError)?.status != 401
-            if !deferredRefusal && (!key.hasPrefix("terminal:") || !terminalRefusalIsLocal(memberID: String(key.dropFirst("terminal:".count)), error: error.localizedDescription)) {
+            if !deferredRefusal && (!key.hasPrefix("terminal:") || !terminalRefusalIsLocal(memberID: String(key.dropFirst("terminal:".count)), error: error)) {
                 handle(error)
             }
             // A conflict means our copy is stale: show the truth right away. A missing terminal
             // is definitive; do not reconcile its in-flight operation before recording the refusal.
-            if !deferredRefusal, (error as? APIError)?.status == 409, !(key.hasPrefix("terminal:") && error.localizedDescription.contains("No core terminal for member")) {
+            if !deferredRefusal, (error as? APIError)?.status == 409, !(key.hasPrefix("terminal:") && ServerCode.terminalMissing(error)) {
                 if let owner { releaseAction(key, owner: owner) }
                 await refresh()
             }
@@ -2518,8 +2518,8 @@ final class AppStore: ProjectManagementStore {
             terminalWindowNotices.removeValue(forKey: memberID)
         }
     }
-    private func terminalRefusalIsLocal(memberID: String, error: String?) -> Bool {
-        error?.contains("No core terminal for member") == true && terminalWindows.values.contains(memberID)
+    private func terminalRefusalIsLocal(memberID: String, error: Error?) -> Bool {
+        ServerCode.terminalMissing(error) && terminalWindows.values.contains(memberID)
     }
 
     @ObservationIgnored private var terminalSessionTasks: [String: Task<Void, Never>] = [:]
@@ -2686,7 +2686,7 @@ final class AppStore: ProjectManagementStore {
         if outcome.value != nil || Self.leaseGone(outcome.error) {
             terminalLeases.removeValue(forKey: member.id)
             // The server already holds no lease of ours (expired or released elsewhere): that is the state asked for.
-            if let error = outcome.error as? APIError, error.message.contains("A matching active terminal control lease is required") {
+            if let error = outcome.error as? APIError, ServerCode.leaseAlreadyReleased(reason: error.reason, message: error.message) {
                 errorMessage = nil
                 return true
             }
@@ -2734,8 +2734,7 @@ final class AppStore: ProjectManagementStore {
         guard let error = error as? APIError else { return false }
         if error.status == 404 { return true }
         guard error.status == 409 else { return false }
-        return ["A matching active terminal control lease is required", "Another terminal control lease is active",
-                "Terminal has finished", "No core terminal for member", "조작권이 만료되었거나 바뀌었습니다"].contains { error.message.contains($0) }
+        return ServerCode.leaseGone(code: error.code, reason: error.reason, message: error.message)
     }
 
     private func releaseAllTerminals() {
@@ -2824,7 +2823,7 @@ final class AppStore: ProjectManagementStore {
             }
             if operationResults[tracked.id]?.status == .applied { return true }
             if action == .release, let receipt = operationResults[tracked.id], receipt.status == .refused,
-               receipt.error == "조작권이 만료되었거나 바뀌었습니다" {
+               ServerCode.leaseExpiredReceipt(receipt) {
                 terminalLeases.removeValue(forKey: member.id); errorMessage = nil
                 return true
             }
@@ -3015,7 +3014,7 @@ final class AppStore: ProjectManagementStore {
         }
         var endedLeaseCheckpointID: String?
         if tracked.action == .release, receipt.status == .refused,
-           let error = receipt.error, Self.leaseGone(APIError(status: 409, message: error)),
+           let error = receipt.refusalError(), Self.leaseGone(error),
            writeRevisions?.members?[tracked.memberID]?.sessionGeneration == tracked.sessionGeneration,
            tracked.order >= (leaseReceiptOrder[tracked.memberID] ?? -1) {
             // The server definitively says this incarnation is gone, rather than temporarily busy.
@@ -3035,7 +3034,7 @@ final class AppStore: ProjectManagementStore {
         if receipt.status == .unknown || receipt.status == .pending {
             if announce { errorMessage = "작업 결과 확인 중입니다. 미확인 작업은 재실행하지 않습니다." }
         } else if receipt.status == .refused, previousStatus != .refused {
-            if tracked.kind == .terminalControl && terminalRefusalIsLocal(memberID: tracked.memberID, error: receipt.error) {
+            if tracked.kind == .terminalControl && terminalRefusalIsLocal(memberID: tracked.memberID, error: receipt.refusalError()) {
                 terminalWindowNotices[tracked.memberID] = receipt.error
             } else { errorMessage = receipt.error ?? "서버가 작업을 거부했습니다." }
         }
@@ -3045,12 +3044,12 @@ final class AppStore: ProjectManagementStore {
         if journal.operations[tracked.id]?.status == .applied { return }
         let status: OperationStatus = Self.definiteRefusal(error) ? .refused : .unknown
         let receipt = OperationReceipt(operationId: tracked.id, kind: tracked.kind, memberId: tracked.memberID,
-                                       status: status, code: (error as? APIError)?.code, error: error?.localizedDescription)
+                                       status: status, code: (error as? APIError)?.code, error: error?.localizedDescription, reason: (error as? APIError)?.reason)
         do {
             try applyReceipt(receipt, tracked: tracked)
             // Refresh conflicts only after the durable refusal, so recovery cannot query this finished write.
             if status == .refused, (error as? APIError)?.status == 409,
-               error?.localizedDescription.contains("No core terminal for member") != true { await refresh() }
+               !ServerCode.terminalMissing(error) { await refresh() }
         } catch { handle(error) }
     }
 

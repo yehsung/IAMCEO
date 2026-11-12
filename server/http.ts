@@ -1,5 +1,5 @@
 import { configuredSecretRoots } from "./secret-paths.ts";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { detectTailscaleIp, generateAccessCode, isTailscaleV4, isTailscaleV6, updateConfigFile } from "./config.ts";
@@ -17,6 +17,7 @@ import { VERSION, type Config } from "./config.ts";
 import { FilePublication, prepareImport, MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES, resolveInside, saveUpload, type SavedFile } from "./files.ts";
 import type { OrchestratorApi } from "./orchestrator-api.ts";
 import { ApiError, type Store } from "./store.ts";
+import type { ErrorCode } from "../shared/error-codes.ts";
 import { classifyStorageError } from "./storage-errors.ts";
 import { SESSION_ID_RE } from "./text.ts";
 import { Pairing, PAIR_CODE_TTL_MS, tailnetUrls, withMagicDnsNames } from "./pairing.ts";
@@ -38,6 +39,10 @@ import { compatFields, readAppClient, SeenApps } from "./app-version.ts";
 import { CliVersionMonitor, type CliVersionInfo, type CliVersionSource } from "./cli-version.ts";
 import { exportProjectZip, removeDeletedProjectFiles } from "./lifecycle/project-data.ts";
 import type { ProjectDeleteResult } from "../shared/types.ts";
+import { authenticate, DeviceKeys, safeEqual, type AuthOutcome, type Principal } from "./devices.ts";
+import type { AccessPlatform, DeviceRevokeResult } from "../shared/types.ts";
+import { ERROR_CODES } from "../shared/error-codes.ts";
+export { safeEqual };
 
 export interface ServerContext {
   config: Config;
@@ -169,13 +174,6 @@ export function isLocalRequest(rawIp: string | null | undefined, headers: Header
   const v4 = v4ToInt(ip);
   if (ip === "::1" || (v4 !== null && inSubnet(v4, LOOPBACK_V4.base, LOOPBACK_V4.mask))) return true;
   return isOwnAddress(ip);
-}
-
-/** 길이가 달라도 시간이 새지 않게 해시를 비교한다. */
-export function safeEqual(a: string, b: string): boolean {
-  const ha = createHash("sha256").update(a).digest();
-  const hb = createHash("sha256").update(b).digest();
-  return timingSafeEqual(ha, hb);
 }
 
 /** 저장 예외 뒤 rename 여부만 읽는다. loadConfig처럼 누락된 설정을 만들지는 않는다. */
@@ -390,7 +388,7 @@ function operationResponse(receipt: OperationReceipt): Response {
   const { operationId, kind, projectId, memberId, createdAt, updatedAt, status } = receipt;
   const base = { operationId, kind, projectId, memberId, createdAt, updatedAt, status };
   if (receipt.status === "pending") return Response.json(base);
-  if (receipt.status !== "applied") return Response.json({ ...base, code: receipt.code, error: receipt.error });
+  if (receipt.status !== "applied") return Response.json({ ...base, code: receipt.code, error: receipt.error, ...(receipt.reason ? { reason: receipt.reason } : {}) });
   let result;
   switch (receipt.kind) {
     case "fresh_session": result = { member: receiptMember(receipt.result.member), sessionGeneration: receipt.result.sessionGeneration }; break;
@@ -410,7 +408,7 @@ async function parseBody<S extends z.ZodType>(req: Request, schema: S): Promise<
   try {
     raw = await req.json();
   } catch {
-    throw new ApiError(400, "JSON 본문이 필요합니다");
+    throw new ApiError(400, "JSON 본문이 필요합니다", "invalid_json");
   }
   return validateBody(raw, schema);
 }
@@ -419,18 +417,18 @@ function validateBody<S extends z.ZodType>(raw: unknown, schema: S): z.output<S>
   const parsed = schema.safeParse(raw);
   if (parsed.success) return parsed.data;
   const issue = parsed.error.issues[0];
-  throw new ApiError(400, `요청이 잘못되었습니다: ${issue?.path.join(".") || "본문"} ${issue?.message ?? ""}`.trim());
+  throw new ApiError(400, `요청이 잘못되었습니다: ${issue?.path.join(".") || "본문"} ${issue?.message ?? ""}`.trim(), "invalid_body");
 }
 
 function parseLimit(url: URL): number | undefined {
   const raw = url.searchParams.get("limit");
   if (raw === null) return undefined;
   const n = Number(raw);
-  if (!Number.isInteger(n) || n < 1) throw new ApiError(400, "limit 값이 잘못되었습니다");
+  if (!Number.isInteger(n) || n < 1) throw new ApiError(400, "limit 값이 잘못되었습니다", "invalid_limit");
   return n;
 }
 
-function strictQuery(url: URL, allowed: string[], code?: string): void {
+function strictQuery(url: URL, allowed: string[], code: ErrorCode = "invalid_query"): void {
   const seen = new Set<string>();
   for (const key of url.searchParams.keys()) {
     if (!allowed.includes(key) || seen.has(key)) throw new ApiError(400, "조회 조건이 잘못되었습니다", code);
@@ -458,7 +456,7 @@ function messagePageQuery(url: URL): MessagePageOptions {
 
 function expandDir(raw: string): string {
   const path = raw === "~" ? homedir() : raw.startsWith("~/") ? join(homedir(), raw.slice(2)) : raw;
-  if (!isAbsolute(path)) throw new ApiError(400, "폴더는 절대 경로여야 합니다");
+  if (!isAbsolute(path)) throw new ApiError(400, "폴더는 절대 경로여야 합니다", "folder_path_not_absolute");
   const full = resolve(path);
   let isDir = false;
   try {
@@ -466,7 +464,7 @@ function expandDir(raw: string): string {
   } catch {
     // 없는 경로는 아래에서 같은 오류로 처리한다.
   }
-  if (!isDir) throw new ApiError(400, `폴더가 없습니다: ${full}`);
+  if (!isDir) throw new ApiError(400, `폴더가 없습니다: ${full}`, "folder_missing");
   return full;
 }
 
@@ -490,15 +488,16 @@ interface Route {
   handler: Handler;
 }
 
-function fail(status: number, message: string, code?: string): Response {
-  return Response.json({ error: message, ...(code ? { code } : {}) }, { status });
+/** 오류 응답 몸 `{ error, code?, reason? }`. 동작을 가르는 것은 code·reason 이고 error 는 표시용 문장이다(출시된 앱이 읽으므로 이름은 그대로). */
+function fail(status: number, message: string, code?: ErrorCode, reason?: ErrorCode): Response {
+  return Response.json({ error: message, ...(code ? { code } : {}), ...(reason ? { reason } : {}) }, { status });
 }
 
 function decodeParams(match: RegExpExecArray): string[] {
   try {
     return match.slice(1).map(decodeURIComponent);
   } catch {
-    throw new ApiError(400, "경로가 잘못되었습니다");
+    throw new ApiError(400, "경로가 잘못되었습니다", "invalid_path");
   }
 }
 
@@ -510,7 +509,7 @@ function dispatch(routes: Route[], req: Request, url: URL): Response | Promise<R
     pathMatched = true;
     if (route.method === req.method) return route.handler(req, url, decodeParams(match));
   }
-  return pathMatched ? fail(405, "허용되지 않는 메서드입니다") : fail(404, "없는 경로입니다");
+  return pathMatched ? fail(405, "허용되지 않는 메서드입니다", "method_not_allowed") : fail(404, "없는 경로입니다", "route_not_found");
 }
 
 /** 다른 기기에서 들어올 주소. 와일드카드로 들으면 실제 인터페이스 주소를 보여 준다. */
@@ -528,15 +527,15 @@ function reachableUrls(hosts: string[], port: number): string[] {
 /** 아티팩트 원본. 새 자료는 표에 있고, 예전 자료는 첨부로 올라간 .html 이다. */
 async function artifactHtml({ config, store }: ServerContext, id: string): Promise<string> {
   const file = store.getFile(id);
-  if (!file) throw new ApiError(404, "자료를 찾을 수 없습니다");
-  if (file.kind !== "artifact") throw new ApiError(404, "아티팩트 자료가 아닙니다");
+  if (!file) throw new ApiError(404, "자료를 찾을 수 없습니다", "file_not_found");
+  if (file.kind !== "artifact") throw new ApiError(404, "아티팩트 자료가 아닙니다", "not_artifact");
   const html = store.getFileHtml(id);
   if (html !== null) return html;
   const attachment = file.attachments.find((a) => fileKindOf(a.name, a.mime) === "artifact");
   const path = attachment ? resolveInside(config.uploadsDir, attachment.path) : null;
-  if (!path) throw new ApiError(404, "원본을 찾을 수 없습니다");
+  if (!path) throw new ApiError(404, "원본을 찾을 수 없습니다", "file_source_missing");
   const source = Bun.file(path);
-  if (source.size > MAX_ARTIFACT_BYTES) throw new ApiError(413, "아티팩트가 2MB 를 넘습니다. 첨부로 내려받아 보세요");
+  if (source.size > MAX_ARTIFACT_BYTES) throw new ApiError(413, "아티팩트가 2MB 를 넘습니다. 첨부로 내려받아 보세요", "artifact_too_large");
   return source.text();
 }
 
@@ -550,7 +549,7 @@ export function liteEvent(event: WsEvent): unknown {
 }
 function wantsLite(url: URL): boolean {
   const value = url.searchParams.get("lite");
-  if (value !== null && value !== "1" && value !== "0") throw new ApiError(400, "lite 값이 잘못되었습니다");
+  if (value !== null && value !== "1" && value !== "0") throw new ApiError(400, "lite 값이 잘못되었습니다", "invalid_lite");
   return value === "1";
 }
 
@@ -578,7 +577,10 @@ function cliVersionsField(ctx: ServerContext): { cliVersions?: CliVersionInfo[] 
 /** Tailscale 상태. 그 주소를 연 적이 없거나 주소를 직접 정한 설치에서는 싣지 않는다. */
 type TailnetField = () => { tailnet?: TailnetStatus };
 
-function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, monitor: LoopMonitor, tailnetField: TailnetField): Route[] {
+/** G: 요청의 자격(공용 접속 코드·기기 열쇠)이 지금도 통하는가. 기다리는 사이 코드가 바뀌었거나 그 기기를 끊었으면 거짓. */
+type StillAuthorized = (req: Request) => boolean;
+
+function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, monitor: LoopMonitor, tailnetField: TailnetField, stillAuthorized: StillAuthorized): Route[] {
   const { config, store, orch, bus } = ctx;
   const models = new ModelCatalogReader(config);
   const folders = new Folders(ctx.folderHome);
@@ -633,10 +635,10 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
     };
   };
   const activeProject = (id: string): void => {
-    if (store.requireProject(id).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+    if (store.requireProject(id).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다", "project_not_found");
   };
   const archivedProject = (id: string): void => {
-    if (!store.requireProject(id).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+    if (!store.requireProject(id).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다", "project_not_found");
   };
   const fileSearch = (archived: boolean): Handler => (req, url, [id]) => {
     contractV2(req);
@@ -680,7 +682,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
           const attachments: SavedFile[] = [];
           const detectedKind = fileKindOf(local.info.name, local.info.mime);
           if (!["text", "html", "csv"].includes(local.info.kind) || detectedKind === "image") {
-            if (local.info.size > MAX_UPLOAD_BYTES) throw new ApiError(413, "파일은 50MB 까지 올릴 수 있습니다");
+            if (local.info.size > MAX_UPLOAD_BYTES) throw new ApiError(413, "파일은 50MB 까지 올릴 수 있습니다", "file_too_large");
             const input = prepareImport(local.info.path);
             checkLocalImportPath(input.source, ctx.folderHome, configuredSecretRoots(config, process.env, ctx.folderHome));
             // stagePath must copy the inode/contents that passed our security and size checks.
@@ -731,26 +733,26 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
     route("GET", "/api/github/clone/:id", (_req, _url, [id]) => Response.json(github.job(id!))),
     route("GET", "/api/operations/:id", async (_req, url, [id]) => {
       strictQuery(url, []);
-      if (!operationIdSchema.safeParse(id).success) throw new ApiError(400, "operationId가 잘못되었습니다");
-      if (!orch.operation) throw new ApiError(501, "작업 결과 조회를 지원하지 않습니다");
+      if (!operationIdSchema.safeParse(id).success) throw new ApiError(400, "operationId가 잘못되었습니다", "invalid_operation_id");
+      if (!orch.operation) throw new ApiError(501, "작업 결과 조회를 지원하지 않습니다", "operation_lookup_unsupported");
       const receipt = await orch.operation(id!);
       if (receipt.projectId !== null) store.requireProject(receipt.projectId);
-      if (receipt.memberId !== null && store.requireMember(receipt.memberId).projectId !== receipt.projectId) throw new ApiError(404, "작업을 찾을 수 없습니다");
+      if (receipt.memberId !== null && store.requireMember(receipt.memberId).projectId !== receipt.projectId) throw new ApiError(404, "작업을 찾을 수 없습니다", "operation_not_found");
       return operationResponse(receipt);
     }),
     route("GET", "/api/members/:id/delivery-notices", (_req, url, [id]) => {
       activeProject(store.requireMember(id!).projectId);
       strictQuery(url, ["limit", "before"]);
       const rawLimit = url.searchParams.get("limit");
-      if (rawLimit !== null && (!/^[0-9]+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 100)) throw new ApiError(400, "조회 개수가 올바르지 않습니다");
+      if (rawLimit !== null && (!/^[0-9]+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 100)) throw new ApiError(400, "조회 개수가 올바르지 않습니다", "invalid_limit");
       const before = url.searchParams.get("before");
-      if (before !== null && (!before || before.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(before))) throw new ApiError(400, "전달 조회 위치가 올바르지 않습니다");
-      if (!ctx.delivery) throw new ApiError(501, "전달 조회를 지원하지 않습니다");
+      if (before !== null && (!before || before.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(before))) throw new ApiError(400, "전달 조회 위치가 올바르지 않습니다", "invalid_delivery_cursor");
+      if (!ctx.delivery) throw new ApiError(501, "전달 조회를 지원하지 않습니다", "delivery_lookup_unsupported");
       return Response.json(monitor.run("delivery:memberNotices", () => ctx.delivery!.memberNotices(id!, { limit: rawLimit === null ? 50 : Number(rawLimit), before: before ?? undefined })));
     }),
     route("GET", "/api/projects/:id/delivery-notices", (_req, url, [id]) => {
       strictQuery(url, []);
-      if (!ctx.delivery) throw new ApiError(501, "전달 조회를 지원하지 않습니다");
+      if (!ctx.delivery) throw new ApiError(501, "전달 조회를 지원하지 않습니다", "delivery_lookup_unsupported");
       return Response.json(notices(id!));
     }),
     route("POST", "/api/messages/:id/recovery", async (req, url, [id]) => {
@@ -758,7 +760,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       strictQuery(url, []);
       const body = await parseBody(req, z.strictObject({ operationId: operationIdSchema, expectedVersion: revision,
         action: z.enum(["send_to_conductor", "dismiss"]) }));
-      if (!ctx.delivery) throw new ApiError(501, "메시지 정리를 지원하지 않습니다");
+      if (!ctx.delivery) throw new ApiError(501, "메시지 정리를 지원하지 않습니다", "message_cleanup_unsupported");
       const result = ctx.delivery.recoverUnassignedMessage(id!, body);
       return Response.json(result, { status: result.outcome === "dismissed" ? 200 : 202 });
     }),
@@ -767,7 +769,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       strictQuery(url, []);
       const body = await parseBody(req, RecoverySchema);
       const result = orch.recoverDelivery ? await orch.recoverDelivery(id!, body) : ctx.delivery ? await ctx.delivery.recover(id!, body) : null;
-      if (!result) throw new ApiError(501, "전달 복구를 지원하지 않습니다");
+      if (!result) throw new ApiError(501, "전달 복구를 지원하지 않습니다", "delivery_recovery_unsupported");
       return Response.json(result, { status: result.outcome === "stopped" ? 200 : 202 });
     }),
     route("GET", "/api/capabilities", (_req, url) => {
@@ -788,7 +790,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       strictQuery(url, ["projectId", "lite"]);
       const lite = wantsLite(url);
       const requestedProjectId = url.searchParams.get("projectId");
-      if (requestedProjectId !== null && (!requestedProjectId.trim() || Buffer.byteLength(requestedProjectId) > 256)) throw new ApiError(400, "프로젝트 ID가 잘못되었습니다");
+      if (requestedProjectId !== null && (!requestedProjectId.trim() || Buffer.byteLength(requestedProjectId) > 256)) throw new ApiError(400, "프로젝트 ID가 잘못되었습니다", "invalid_project_id");
       // D5: 버전 머리글을 보낸 앱에만 server·compat 을 싣는다. 앱마다 답이 다르니 캐시 열쇠에도 넣는다.
       const versionFields = compatFields(readAppClient(req.headers), VERSION);
       return monitor.run("GET /api/sync build", () => {
@@ -846,37 +848,37 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       return Response.json(body);
     }),
     // 폰 짝 맺기: Mac 화면이 QR 로 보여 줄 일회용 코드와 폰이 닿을 Tailscale 주소.
-    route("POST", "/api/pair/start", async () => {
-      const credential = config.accessCode;
+    route("POST", "/api/pair/start", async (req) => {
       const availableUrls = await withMagicDnsNames(tailnetUrls(urls()));
-      if (!safeEqual(credential, config.accessCode)) throw new ApiError(401, "접속 코드가 바뀌었습니다. 다시 연결하세요");
+      // 이름을 찾는 사이 코드가 바뀌었거나 이 기기를 끊었으면 QR 을 만들지 않는다.
+      if (!stillAuthorized(req)) throw new ApiError(401, "접속 코드가 바뀌었습니다. 다시 연결하세요", "auth_changed");
       const { code, expiresAt } = pairing.start();
       return Response.json({ code, expiresAt: new Date(expiresAt).toISOString(), ttlSeconds: PAIR_CODE_TTL_MS / 1000, urls: availableUrls, version: VERSION });
     }),
     route("GET", "/api/pair/status", (_req, url) => {
       strictQuery(url, ["code"]);
       const code = url.searchParams.get("code");
-      if (!code || code.length > 64) throw new ApiError(400, "짝 맺기 코드가 필요합니다");
+      if (!code || code.length > 64) throw new ApiError(400, "짝 맺기 코드가 필요합니다", "pair_code_missing");
       return Response.json(pairing.status(code));
     }),
     route("POST", "/api/pair/ack", async (req, url) => {
       strictQuery(url, []);
       const body = await parseBody(req, z.object({ code: z.string().min(1).max(64), confirmationToken: z.string().length(64) }).strict());
-      if (!pairing.acknowledge(body.code, body.confirmationToken)) throw new ApiError(409, "연결 확인 시간이 지났습니다. Mac에서 새 QR을 만들어 주세요");
+      if (!pairing.acknowledge(body.code, body.confirmationToken)) throw new ApiError(409, "연결 확인 시간이 지났습니다. Mac에서 새 QR을 만들어 주세요", "pair_confirm_expired");
       return Response.json(pairing.status(body.code));
     }),
     route("GET", "/api/runtime", async () => {
-      if (!orch.runtimeInfo) throw new ApiError(501, "실행기 진단을 지원하지 않습니다");
+      if (!orch.runtimeInfo) throw new ApiError(501, "실행기 진단을 지원하지 않습니다", "runner_diagnostics_unsupported");
       return Response.json(await orch.runtimeInfo());
     }),
     route("POST", "/api/projects/:id/members", async (req, _url, [id]) => {
       store.requireProject(id!);
-      if (!orch.createMember) throw new ApiError(501, "팀장 만들기를 지원하지 않습니다");
+      if (!orch.createMember) throw new ApiError(501, "팀장 만들기를 지원하지 않습니다", "member_create_unsupported");
       return Response.json(await orch.createMember(id!, await parseBody(req, CreateMemberSchema)));
     }),
     route("GET", "/api/projects/:id/state", (_req, url, [id]) => {
       // 보관한 프로젝트는 없는 것으로 친다. 화면이 본사로 돌아간다.
-      if (store.requireProject(id!).archived) throw new ApiError(404, "보관된 프로젝트입니다");
+      if (store.requireProject(id!).archived) throw new ApiError(404, "보관된 프로젝트입니다", "project_archived");
       const state = store.projectState(id!);
       const snapshot = { ...state, ...snapshotNotices(id!) };
       return Response.json(wantsLite(url) ? { ...snapshot, files: state.files.map(liteFile) } : snapshot);
@@ -900,7 +902,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       strictQuery(url, []);
       archivedProject(id!);
       const message = store.requireMessage(messageId!);
-      if (message.projectId !== id) throw new ApiError(404, "메시지를 찾을 수 없습니다");
+      if (message.projectId !== id) throw new ApiError(404, "메시지를 찾을 수 없습니다", "message_not_found");
       return Response.json(message);
     }),
     route("GET", "/api/messages/:id", (_req, url, [id]) => {
@@ -932,7 +934,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       store.requireProject(id!);
       const status = url.searchParams.get("status") ?? "done";
       if (status === "open") return Response.json(store.listOpenDecisions(id!));
-      if (status !== "done") throw new ApiError(400, "status 는 open 또는 done 입니다");
+      if (status !== "done") throw new ApiError(400, "status 는 open 또는 done 입니다", "invalid_status_filter");
       return Response.json(store.listDoneDecisions(id!, { before: url.searchParams.get("before") ?? undefined, limit: parseLimit(url) }));
     }),
     route("GET", "/api/decisions/:id", (_req, _url, [id]) => Response.json(store.requireDecision(id!))),
@@ -947,8 +949,8 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       // 보관 전환/보관된 세션과 v2는 새 진입점의 장벽 없이 처리하지 않는다.
       const project = store.requireProject(id!);
       const validated = store.validateProjectPatch(id!, patch);
-      if (v2 || patch.archived !== undefined || project.archived) throw new ApiError(501, "프로젝트 변경을 지원하지 않습니다");
-      if (legacyProjectPatches.has(id!)) throw new ApiError(409, "프로젝트 변경을 처리하는 중입니다. 잠시 뒤 다시 하세요");
+      if (v2 || patch.archived !== undefined || project.archived) throw new ApiError(501, "프로젝트 변경을 지원하지 않습니다", "project_update_unsupported");
+      if (legacyProjectPatches.has(id!)) throw new ApiError(409, "프로젝트 변경을 처리하는 중입니다. 잠시 뒤 다시 하세요", "project_busy");
       legacyProjectPatches.add(id!);
       try {
         if (Object.entries(validated).every(([key, value]) => project[key as keyof typeof project] === value)) return Response.json(project);
@@ -968,7 +970,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       if (body.id) {
         const existing = store.getMessage(body.id);
         if (existing) {
-          if (existing.projectId !== id) throw new ApiError(409, "다른 프로젝트에서 쓴 메시지 id 입니다");
+          if (existing.projectId !== id) throw new ApiError(409, "다른 프로젝트에서 쓴 메시지 id 입니다", "message_id_conflict");
           // 끝내 실패한 글을 같은 id 로 다시 보내면 그 글을 다시 넣는다. 새 글을 만들면 대화에 실패 줄이 남아 지시가 늘어난다.
           if (existing.delivery === "failed" && existing.mine && orch.resendMessage) {
             await requireReachable(id!, existing.targetMemberId);
@@ -977,13 +979,13 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
           return Response.json(existing);
         }
       }
-      if (!body.text.trim() && !body.attachmentIds?.length) throw new ApiError(400, "글이나 첨부가 필요합니다");
+      if (!body.text.trim() && !body.attachmentIds?.length) throw new ApiError(400, "글이나 첨부가 필요합니다", "message_empty");
       if (body.targetMemberId && store.getMember(body.targetMemberId)?.projectId !== id) {
-        throw new ApiError(400, "이 프로젝트의 팀원이 아닙니다");
+        throw new ApiError(400, "이 프로젝트의 팀원이 아닙니다", "member_not_in_project");
       }
       store.requireReachable(id!, body.targetMemberId ? store.getMember(body.targetMemberId) : null);
       for (const attachmentId of body.attachmentIds ?? []) {
-        if (!store.getAttachment(attachmentId)) throw new ApiError(400, `없는 첨부입니다: ${attachmentId}`);
+        if (!store.getAttachment(attachmentId)) throw new ApiError(400, `없는 첨부입니다: ${attachmentId}`, "attachment_not_found");
       }
       const send = () => orch.sendUserMessage(id!, body);
       return Response.json(await (body.id ? once(`message:${body.id}`, send) : send()));
@@ -996,11 +998,11 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       try {
         form = await req.formData();
       } catch {
-        throw new ApiError(400, "multipart 본문이 필요합니다");
+        throw new ApiError(400, "multipart 본문이 필요합니다", "multipart_required");
       }
       const file = form.get("file");
-      if (!(file instanceof File)) throw new ApiError(400, "file 필드가 필요합니다");
-      if (file.size > MAX_UPLOAD_BYTES) throw new ApiError(413, "파일은 50MB 까지 올릴 수 있습니다");
+      if (!(file instanceof File)) throw new ApiError(400, "file 필드가 필요합니다", "upload_file_missing");
+      if (file.size > MAX_UPLOAD_BYTES) throw new ApiError(413, "파일은 50MB 까지 올릴 수 있습니다", "file_too_large");
       return Response.json(store.createAttachment(await saveUpload(config.uploadsDir, file)));
     }),
     route("POST", "/api/decisions/:id/answer", async (req, _url, [id]) => {
@@ -1022,17 +1024,17 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
     }),
     route("POST", "/api/decisions/:id/close", (_req, _url, [id]) => {
       const decision = store.requireDecision(id!);
-      if (decision.kind !== "usage_limit") throw new ApiError(400, "사용 한도 알림만 닫을 수 있습니다");
+      if (decision.kind !== "usage_limit") throw new ApiError(400, "사용 한도 알림만 닫을 수 있습니다", "usage_notice_only");
       return Response.json(decision.status === "closed" ? decision : store.setDecisionStatus(decision.id, "closed"));
     }),
     route("POST", "/api/decisions/:id/reopen", async (_req, _url, [id]) => {
       store.requireDecision(id!);
-      if (!orch.reopenDecision) throw new ApiError(501, "지원하지 않습니다");
+      if (!orch.reopenDecision) throw new ApiError(501, "지원하지 않습니다", "unsupported");
       return Response.json(await once(`reopen:${id}`, () => orch.reopenDecision!(id!)));
     }),
     route("POST", "/api/projects/:id/tidy", async (_req, _url, [id]) => {
       store.requireProject(id!);
-      if (!orch.tidyBoard) throw new ApiError(501, "지원하지 않습니다");
+      if (!orch.tidyBoard) throw new ApiError(501, "지원하지 않습니다", "unsupported");
       // 대표의 말처럼 총괄에게 가는 입력이다. 연결이 없으면 409.
       await requireReachable(id!, null);
       return Response.json(await once(`tidy:${id}`, () => orch.tidyBoard!(id!)));
@@ -1042,11 +1044,11 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       if (contractV2(req)) {
         const expected = precondition(req);
         const body = await parseBody(req, TodoDropSchema.strict());
-        if (!orch.dropTodoV2) throw new ApiError(501, "검토 버전이 있는 업무 변경을 지원하지 않습니다");
+        if (!orch.dropTodoV2) throw new ApiError(501, "검토 버전이 있는 업무 변경을 지원하지 않습니다", "revisioned_todo_unsupported");
         return Response.json(await orch.dropTodoV2(id!, body, expected));
       }
       const body = await parseBody(req, TodoDropSchema);
-      if (!orch.dropTodo) throw new ApiError(501, "지원하지 않습니다");
+      if (!orch.dropTodo) throw new ApiError(501, "지원하지 않습니다", "unsupported");
       return Response.json(await orch.dropTodo(id!, body.reason));
     }),
     route("POST", "/api/todos/:id/done", async (req, _url, [id]) => {
@@ -1054,19 +1056,19 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       if (contractV2(req)) {
         const expected = precondition(req);
         const body = await parseBody(req, TodoDoneSchema.strict());
-        if (!orch.setTodoDoneV2) throw new ApiError(501, "검토 버전이 있는 업무 변경을 지원하지 않습니다");
+        if (!orch.setTodoDoneV2) throw new ApiError(501, "검토 버전이 있는 업무 변경을 지원하지 않습니다", "revisioned_todo_unsupported");
         return Response.json(await orch.setTodoDoneV2(id!, body, expected));
       }
       const body = await parseBody(req, TodoDoneSchema);
-      if (!body.done && (body.note !== undefined || body.fileIds?.length)) throw new ApiError(400, "완료할 때만 답과 첨부를 붙일 수 있습니다");
-      for (const fileId of body.fileIds ?? []) if (!store.getAttachment(fileId)) throw new ApiError(400, "업로드된 첨부를 찾을 수 없습니다");
+      if (!body.done && (body.note !== undefined || body.fileIds?.length)) throw new ApiError(400, "완료할 때만 답과 첨부를 붙일 수 있습니다", "todo_answer_requires_done");
+      for (const fileId of body.fileIds ?? []) if (!store.getAttachment(fileId)) throw new ApiError(400, "업로드된 첨부를 찾을 수 없습니다", "upload_not_found");
       if (todo.done === body.done) return Response.json(todo);
       return Response.json(await orch.setTodoDone(id!, body.done, body));
     }),
     route("GET", "/api/files/:id", (_req, url, [id]) => {
       strictQuery(url, []);
       const file = store.getFile(id!);
-      if (!file) throw new ApiError(404, "자료를 찾을 수 없습니다");
+      if (!file) throw new ApiError(404, "자료를 찾을 수 없습니다", "file_not_found");
       return Response.json(file, { headers: { "Cache-Control": "no-store" } });
     }),
     route("GET", "/api/files/:id/artifact", async (_req, url, [id]) => {
@@ -1079,10 +1081,10 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       store.requireMember(id!);
       if (contractV2(req)) {
         const body = await parseBody(req, TerminalControlV2Schema);
-        if (!orch.terminalControlV2) throw new ApiError(501, "작업 ID가 있는 터미널 조작을 지원하지 않습니다");
+        if (!orch.terminalControlV2) throw new ApiError(501, "작업 ID가 있는 터미널 조작을 지원하지 않습니다", "terminal_operation_unsupported");
         return operationResponse(await orch.terminalControlV2(id!, body));
       }
-      if (!orch.terminalControl) throw new ApiError(501, "터미널 조작을 지원하지 않습니다");
+      if (!orch.terminalControl) throw new ApiError(501, "터미널 조작을 지원하지 않습니다", "terminal_control_unsupported");
       return Response.json(await orch.terminalControl(id!, await parseBody(req, TerminalControlSchema)));
     }),
     route("GET", "/api/members/:id", (_req, _url, [id]) => Response.json(store.requireMember(id!))),
@@ -1092,7 +1094,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
         const expected = precondition(req);
         const body = await parseBody(req, PatchMemberSchema);
         models.memberPatch(store.requireMember(id!), body, store.getSettings());
-        if (!orch.patchMemberConfigV2) throw new ApiError(501, "검토 버전이 있는 팀원 설정을 지원하지 않습니다");
+        if (!orch.patchMemberConfigV2) throw new ApiError(501, "검토 버전이 있는 팀원 설정을 지원하지 않습니다", "revisioned_member_config_unsupported");
         return Response.json(await orch.patchMemberConfigV2(id!, body, expected));
       }
       const body = await parseBody(req, PatchMemberSchema);
@@ -1114,7 +1116,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
     // 대표만 누른다. agentRoutes 에는 없다(AI 가 자기 일을 스스로 승인하지 못하게).
     route("POST", "/api/members/:id/approval", async (req, _url, [id]) => {
       store.requireMember(id!);
-      if (!orch.answerApproval) throw new ApiError(501, "이 실행 방식에는 승인 창이 없습니다");
+      if (!orch.answerApproval) throw new ApiError(501, "이 실행 방식에는 승인 창이 없습니다", "approval_unsupported");
       await orch.answerApproval(id!, await parseBody(req, AnswerApprovalSchema));
       return Response.json({ ok: true });
     }),
@@ -1128,11 +1130,11 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       store.requireMember(id);
       if (contractV2(req)) {
         const body = await parseBody(req, FreshSessionSchema);
-        if (!orch.freshMemberSessionV2) throw new ApiError(501, "작업 ID가 있는 새 세션을 지원하지 않습니다");
+        if (!orch.freshMemberSessionV2) throw new ApiError(501, "작업 ID가 있는 새 세션을 지원하지 않습니다", "fresh_session_operation_unsupported");
         return operationResponse(await orch.freshMemberSessionV2(id, body));
       }
       return memberAction(async (id) => {
-        if (!orch.freshMemberSession) throw new ApiError(501, "새 세션 시작을 지원하지 않습니다");
+        if (!orch.freshMemberSession) throw new ApiError(501, "새 세션 시작을 지원하지 않습니다", "fresh_session_unsupported");
         return orch.freshMemberSession(id);
       })(req, url, params);
     }),
@@ -1140,18 +1142,18 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
     route("POST", "/api/members/:id/compact", memberAction((id) => orch.memberCompact(id))),
     route("POST", "/api/members/:id/interrupt", memberAction((id) => orch.memberInterrupt(id))),
     route("POST", "/api/members/:id/close", memberAction(async (id) => {
-      if (!orch.memberClose) throw new ApiError(501, "지원하지 않습니다");
+      if (!orch.memberClose) throw new ApiError(501, "지원하지 않습니다", "unsupported");
       await orch.memberClose(id);
     })),
     // 옛 herdr 실행기와 함께 없앤 기능의 주소. 출시된 앱(0.2.2)은 부르지 않지만, 옛 화면·스크립트가 불러도 404(없는 주소)가 아니라
     // 410(없어진 기능)과 다음에 할 일을 받게 한다. 무엇도 읽거나 바꾸지 않는다.
-    ...GONE_ROUTES.map(([method, path, message]) => route(method, path, async () => { throw new ApiError(410, message); })),
+    ...GONE_ROUTES.map(([method, path, message]) => route(method, path, async () => { throw new ApiError(410, message, "feature_removed"); })),
     route("PATCH", "/api/settings", async req => {
       const expected = contractV2(req) ? precondition(req) : null;
       const body = await parseBody(req, z.strictObject({ macScriptNotifications: z.boolean().optional(), permissionAcknowledged: z.literal(true).optional() })
         .refine(value => value.macScriptNotifications !== undefined || value.permissionAcknowledged !== undefined, "바꿀 설정이 필요합니다"));
       if (expected) {
-        if (!orch.updateSettingsV2) throw new ApiError(501, "검토 버전이 있는 설정 변경을 지원하지 않습니다");
+        if (!orch.updateSettingsV2) throw new ApiError(501, "검토 버전이 있는 설정 변경을 지원하지 않습니다", "revisioned_settings_unsupported");
         return Response.json(await orch.updateSettingsV2(body, expected));
       }
       return Response.json(await orch.updateSettings(body));
@@ -1161,7 +1163,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
         const expected = precondition(req);
         const body = acknowledged(await parseBody(req, SettingsSchema));
         const normalized = models.settingsPatch(body, store.getSettings());
-        if (!orch.updateSettingsV2) throw new ApiError(501, "검토 버전이 있는 설정 변경을 지원하지 않습니다");
+        if (!orch.updateSettingsV2) throw new ApiError(501, "검토 버전이 있는 설정 변경을 지원하지 않습니다", "revisioned_settings_unsupported");
         const result = await orch.updateSettingsV2(normalized.patch, expected);
         if (normalized.resetEfforts.length) result.settings = { ...result.settings, resetEfforts: normalized.resetEfforts };
         return Response.json(result);
@@ -1177,8 +1179,8 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
 function agentRoutes({ store, orch }: ServerContext, member: Member): Route[] {
   const route = (method: string, path: string, handler: Handler): Route => ({ method, pattern: new RegExp(`^${path}$`), handler });
   const requireManualInbox = (): void => {
-    if (member.origin !== "manual") throw new ApiError(403, "직접 실행한 직원만 수신함을 사용할 수 있습니다");
-    if (store.requireProject(member.projectId).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+    if (member.origin !== "manual") throw new ApiError(403, "직접 실행한 직원만 수신함을 사용할 수 있습니다", "manual_inbox_only");
+    if (store.requireProject(member.projectId).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다", "project_not_found");
   };
   return [
     route("GET", "/agent/tools", async () => Response.json(await orch.listAgentTools(member))),
@@ -1186,7 +1188,7 @@ function agentRoutes({ store, orch }: ServerContext, member: Member): Route[] {
       const body = await parseBody(req, contractV2(req) ? AgentOperationSchema : AgentToolSchema.extend({ operationId: operationIdSchema.optional() }).passthrough());
       const { name, args, operationId } = body.operationId ? validateBody(body, AgentOperationSchema) : body;
       if (operationId) {
-        if (!orch.handleAgentOperation) throw new ApiError(501, "작업 ID가 있는 도구 호출을 지원하지 않습니다");
+        if (!orch.handleAgentOperation) throw new ApiError(501, "작업 ID가 있는 도구 호출을 지원하지 않습니다", "agent_operation_unsupported");
         store.touchMember(member.id);
         orch.noteManualCall?.(member, name);
         return Response.json(await orch.handleAgentOperation(member, name, args ?? {}, { operationId }, req.signal));
@@ -1199,7 +1201,7 @@ function agentRoutes({ store, orch }: ServerContext, member: Member): Route[] {
       requireManualInbox();
       strictQuery(url, []);
       const { timeoutMs } = await parseBody(req, ManualInboxSchema);
-      if (!orch.manualInbox) throw new ApiError(501, "수신함 batch 조회를 지원하지 않습니다");
+      if (!orch.manualInbox) throw new ApiError(501, "수신함 batch 조회를 지원하지 않습니다", "inbox_batch_unsupported");
       store.touchMember(member.id);
       orch.noteManualCall?.(member, "inbox_wait");
       return Response.json(await orch.manualInbox(member.id, Math.min(timeoutMs ?? ASK_WAIT_MAX_MS, ASK_WAIT_MAX_MS), req.signal));
@@ -1208,14 +1210,14 @@ function agentRoutes({ store, orch }: ServerContext, member: Member): Route[] {
       requireManualInbox();
       strictQuery(url, []);
       const body = await parseBody(req, ManualAckSchema);
-      if (!orch.acknowledgeManualInbox) throw new ApiError(501, "수신함 ACK를 지원하지 않습니다");
+      if (!orch.acknowledgeManualInbox) throw new ApiError(501, "수신함 ACK를 지원하지 않습니다", "inbox_ack_unsupported");
       return Response.json(await orch.acknowledgeManualInbox(member.id, body));
     }),
     route("POST", "/agent/ask/wait", async (req) => {
       const { decisionId, timeoutMs } = await parseBody(req, AskWaitSchema);
       const decision = store.getDecision(decisionId);
-      if (!decision || decision.projectId !== member.projectId) throw new ApiError(404, "결재를 찾을 수 없습니다");
-      if (decision.memberId !== member.id) throw new ApiError(403, "다른 직원의 결재입니다");
+      if (!decision || decision.projectId !== member.projectId) throw new ApiError(404, "결재를 찾을 수 없습니다", "decision_not_found");
+      if (decision.memberId !== member.id) throw new ApiError(403, "다른 직원의 결재입니다", "decision_not_own");
       // 롱폴을 다시 거는 것이 답을 기다리는 세션의 유일한 생존 신호다.
       store.touchMember(member.id);
       orch.noteManualCall?.(member, "ask_wait");
@@ -1224,17 +1226,30 @@ function agentRoutes({ store, orch }: ServerContext, member: Member): Route[] {
   ];
 }
 
-/** 직접 띄운 CLI 의 합류. 멤버 토큰이면 이어 붙이고, 접속 코드면 origin=manual 직원으로 등록한다. */
-async function handleJoin(req: Request, { config, store }: ServerContext): Promise<Response> {
-  if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다");
+/**
+ * G: 사용자 인증 실패 응답. 상태 코드와 몸의 문장은 그대로 두고 코드만 더한다(묶음 사이 약속 2).
+ * 끊은 기기의 열쇠는 device_revoked. 그 문장도 '인증이 필요'로 시작해 출시된 앱이 같은 안내(새 QR 로 다시 연결)를 고른다.
+ */
+function refuseAuth(outcome: AuthOutcome): Response {
+  return !outcome.ok && outcome.reason === "revoked"
+    ? fail(401, ERROR_CODES.device_revoked.ko, "device_revoked")
+    : fail(401, "인증이 필요합니다", "unauthorized");
+}
+
+/** 직접 띄운 CLI 의 합류. 멤버 토큰이면 이어 붙이고, 접속 코드(또는 기기 열쇠)면 origin=manual 직원으로 등록한다. */
+async function handleJoin(req: Request, { store }: ServerContext, authorizeUser: (req: Request) => AuthOutcome): Promise<Response> {
+  if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
   const token = bearer(req);
   const byToken = token ? store.getMemberByToken(token) : null;
-  if (!byToken && !(token && safeEqual(token, config.accessCode))) return fail(401, "인증이 필요합니다");
+  if (!byToken) {
+    const outcome = authorizeUser(req);
+    if (!outcome.ok) return refuseAuth(outcome);
+  }
 
   const body = await parseBody(req, JoinSchema);
   if (byToken) {
     // 실행기가 띄운 세션의 id 를 바꾸면 다른 세션을 이어받게 된다.
-    if (body.sessionId && byToken.origin !== "manual" && body.sessionId !== byToken.sessionId) throw new ApiError(409, "실행기가 관리하는 세션은 합류로 바꿀 수 없습니다");
+    if (body.sessionId && byToken.origin !== "manual" && body.sessionId !== byToken.sessionId) throw new ApiError(409, "실행기가 관리하는 세션은 합류로 바꿀 수 없습니다", "adopt_runner_session");
     const revive = byToken.origin === "manual" && (byToken.status === "offline" || byToken.status === "asleep" || byToken.status === "error");
     const member = store.patchMember(byToken.id, {
       ...(body.sessionId ? { sessionId: body.sessionId } : {}),
@@ -1250,11 +1265,11 @@ async function handleJoin(req: Request, { config, store }: ServerContext): Promi
     : cwd
       ? projectForCwd(store, cwd)
       : null;
-  if (!projectId) throw new ApiError(404, "합류할 프로젝트를 찾지 못했습니다");
+  if (!projectId) throw new ApiError(404, "합류할 프로젝트를 찾지 못했습니다", "project_not_found");
 
   const existing = store.findMember(projectId, body.handle ?? body.name ?? "");
   if (existing) {
-    if (existing.origin !== "manual") throw new ApiError(409, `이미 실행기가 관리하는 팀원입니다: ${existing.name}`);
+    if (existing.origin !== "manual") throw new ApiError(409, `이미 실행기가 관리하는 팀원입니다: ${existing.name}`, "adopt_already_managed");
     const member = store.patchMember(existing.id, {
       status: "idle",
       lastError: null,
@@ -1265,7 +1280,7 @@ async function handleJoin(req: Request, { config, store }: ServerContext): Promi
   }
 
   const name = body.name?.trim() || body.handle;
-  if (!name) throw new ApiError(400, "이름이 필요합니다");
+  if (!name) throw new ApiError(400, "이름이 필요합니다", "name_required");
   const member = store.createMember({
     projectId,
     handle: body.handle ?? deriveHandle(store, projectId, name),
@@ -1290,13 +1305,13 @@ const INLINE_MIME = /^(image\/(png|jpeg|gif|webp|avif|bmp)|video\/[\w.+-]+|audio
 
 function filesResponse(url: URL, { config, store }: ServerContext): Response {
   const m = /^\/files\/([^/]+)\/([^/]+)$/.exec(url.pathname);
-  if (!m) return fail(404, "없는 파일입니다");
+  if (!m) return fail(404, "없는 파일입니다", "attachment_file_not_found");
   const [id, name] = decodeParams(m);
   const attachment = store.getAttachment(id!);
   // 이름까지 맞아야 한다: `..%2f` 같은 탈출 시도는 여기서 끝난다.
-  if (!attachment || attachment.name !== name) return fail(404, "없는 파일입니다");
+  if (!attachment || attachment.name !== name) return fail(404, "없는 파일입니다", "attachment_file_not_found");
   const path = resolveInside(config.uploadsDir, attachment.path);
-  if (!path) return fail(404, "없는 파일입니다");
+  if (!path) return fail(404, "없는 파일입니다", "attachment_file_not_found");
   return new Response(Bun.file(path), {
     headers: {
       "Content-Type": attachment.mime,
@@ -1343,7 +1358,30 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   }
   /** 점검(A, cli_version)도 이 캐시를 쓴다: 실행 파일이 그대로면 --version 을 다시 부르지 않는다. 시험에서 넣지 않았으면 없다. */
   const cliVersions = ctx.cliVersions;
-  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, monitor, tailnetField);
+  // ---- G(C3): 기기 열쇠와 접속 기록. 접속 코드를 보는 모든 자리(HTTP·실시간·터미널 스트림·첨부·합류)가 authorize 하나를 쓴다 ----
+  const deviceKeys = new DeviceKeys(store.db);
+  /** 인증된 요청의 자격과 그때의 공용 코드 세대. 기다린 뒤 다시 볼 때(짝 맺기 시작·코드 교체·터미널 스트림) 쓴다. */
+  const grants = new WeakMap<Request, { principal: Principal; generation: number }>();
+  const peerAddress = (req: Request, server: Server<SocketData>): string | null =>
+    server.requestIP(req)?.address.toLowerCase().replace(/^::ffff:/, "") ?? null;
+  const accessPlatform = (req: Request, address: string | null): AccessPlatform =>
+    readAppClient(req.headers)?.platform ?? (isLocalRequest(address, req.headers) ? "local" : "other");
+  const authorize = (req: Request, server: Server<SocketData>): AuthOutcome => {
+    const outcome = authenticate(bearer(req), config.accessCode, deviceKeys);
+    const address = peerAddress(req, server);
+    if (outcome.ok) {
+      grants.set(req, { principal: outcome.principal, generation: authGeneration });
+      deviceKeys.touch(outcome.principal, accessPlatform(req, address), address);
+    } else if (outcome.reason !== "missing") {
+      // 자격을 내밀었는데 틀린 것만 센다(주소·시각만). 자격 없이 두드린 요청은 세지 않는다.
+      deviceKeys.recordFailure("auth_failed", address, outcome);
+    }
+    return outcome;
+  };
+  const grantIsCurrent = (grant: { principal: Principal; generation: number } | undefined): boolean =>
+    !!grant && (grant.principal.kind === "device" ? deviceKeys.isActive(grant.principal.id) : grant.generation === authGeneration);
+  const stillAuthorized: StillAuthorized = req => grantIsCurrent(grants.get(req));
+  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, monitor, tailnetField, stillAuthorized);
   const pushHandler = ctx.push ? createPushHandler(ctx.push) : null;
   const sockets = new Set<ServerWebSocket<SocketData>>();
   const v2Sockets = new Set<ServerWebSocket<SocketData>>();
@@ -1352,9 +1390,18 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   let stopPromise: Promise<void> | undefined;
   let stopping = false;
   let closedEpochSockets = false;
-  const hasAccessCode = (req: Request): boolean => {
-    const given = bearer(req);
-    return given !== null && safeEqual(given, config.accessCode);
+  /** G: 그 자격으로 열린 실시간 연결과 터미널 스트림을 바로 닫는다(코드 교체는 공용 코드 쪽만, 기기 끊기는 그 기기만). */
+  const dropSockets = (belongs: (data: SocketData) => boolean, reason: string): void => {
+    for (const ws of sockets) {
+      if (!belongs(ws.data)) continue;
+      closedEpochSockets = true;
+      if (ws.data.kind === "terminal") { void ws.data.stream.close("error", reason); continue; }
+      ws.unsubscribe(WS_TOPIC);
+      ws.unsubscribe(WS_LITE_TOPIC);
+      ws.unsubscribe(WS_V2_TOPIC);
+      ws.unsubscribe(WS_V2_LITE_TOPIC);
+      ws.close(4001, reason);
+    }
   };
   /** D5: 버전 머리글을 보낸 앱들(인증된 요청만). /api/readiness 의 apps 로 보인다. */
   const seenApps = new SeenApps();
@@ -1371,49 +1418,58 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     if (path === "/ws") {
       strictQuery(url, ["v", "t", "lite"]);
       const version = url.searchParams.get("v");
-      if (version !== null && version !== "2") return fail(400, "실시간 연결 버전이 잘못되었습니다");
-      if (!hasAccessCode(req)) return fail(401, "인증이 필요합니다");
+      if (version !== null && version !== "2") return fail(400, "실시간 연결 버전이 잘못되었습니다", "realtime_version_invalid");
+      const auth = authorize(req, server);
+      if (!auth.ok) return refuseAuth(auth);
       if (version === "2" && url.searchParams.has("t")) return fail(400, "실시간 연결 주소에 접속 코드를 넣지 마세요");
-      return server.upgrade(req, { data: { kind: "realtime", protocol: version === "2" ? 2 : 1, authGeneration, lite: wantsLite(url) } }) ? undefined : fail(400, "WebSocket 요청이 아닙니다");
+      // G: 기기 열쇠로 연 연결은 그 기기를 끊을 때 닫는다. 공용 코드로 연 연결은 지금처럼 코드 세대로 닫는다.
+      const deviceId = auth.principal.kind === "device" ? auth.principal.id : undefined;
+      return server.upgrade(req, { data: { kind: "realtime", protocol: version === "2" ? 2 : 1, authGeneration, deviceId, lite: wantsLite(url) } }) ? undefined : fail(400, "WebSocket 요청이 아닙니다", "websocket_required");
     }
     if (path.startsWith("/api/")) {
-      if (!hasAccessCode(req)) return fail(401, "인증이 필요합니다");
+      const auth = authorize(req, server);
+      if (!auth.ok) return refuseAuth(auth);
       seenApps.note(readAppClient(req.headers));
       if (ctx.daemon?.().ready === false && (path === "/api/sync" || path === "/api/readiness" || path === "/api/runtime" || path === "/api/bootstrap" || /^\/api\/projects\/[^/]+\/state$/.test(path) || path === "/api/push/status")) return starting();
       const terminal = /^\/api\/members\/([^/]+)\/terminal\/stream$/.exec(path);
       if (terminal) {
-        if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다");
+        if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
         strictQuery(url, ["mode", "cols", "rows", "lease", "size"]);
-        const generation = authGeneration;
+        const grant = grants.get(req);
+        const deviceId = auth.principal.kind === "device" ? auth.principal.id : undefined;
         return terminalStreams.prepare(decodeURIComponent(terminal[1]!), url).then(async stream => {
-          if (generation !== authGeneration || stopPromise) {
+          // G: 준비하는 사이 공용 코드가 바뀌었거나(공용 코드로 연 경우) 이 기기를 끊었으면(기기 열쇠로 연 경우) 열지 않는다.
+          if (!grantIsCurrent(grant) || stopPromise) {
             await stream.close();
-            return fail(401, "접속 코드가 바뀌었거나 서버가 종료됐습니다");
+            return fail(401, "접속 코드가 바뀌었거나 서버가 종료됐습니다", "auth_changed");
           }
-          if (server.upgrade(req, { data: { kind: "terminal", authGeneration, stream } })) return undefined;
+          if (server.upgrade(req, { data: { kind: "terminal", authGeneration, deviceId, stream } })) return undefined;
           await stream.close();
-          return fail(400, "WebSocket 요청이 아닙니다");
+          return fail(400, "WebSocket 요청이 아닙니다", "websocket_required");
         });
       }
       if (path === "/api/auth/rotate") return rotate(req, url, server);
+      // G(C3): 연결된 기기 목록과 한 대만 끊기.
+      if (path === "/api/devices" || path.startsWith("/api/devices/")) return devicesRoute(req, url, server);
       if (path === "/api/readiness") return readiness(req, url);
       if (path === "/api/doctor") return doctor(req, url);
       if (path === "/api/diagnose") return diagnose(req, url, server);
       // B 묶음: 프로젝트 내보내기는 이 Mac 에서 온 요청만(대화 전체와 첨부 원본이 한 파일로 나간다).
       if (/^\/api\/projects\/[^/]+\/export$/.test(path) && !isLocalRequest(server.requestIP(req)?.address, req.headers)) return fail(403, "프로젝트 내보내기는 이 Mac 에서만 할 수 있습니다", "LOCAL_ONLY");
       if (path === "/api/push" || path.startsWith("/api/push/")) {
-        return pushHandler ? pushHandler(req, url) : fail(501, "푸시를 지원하지 않습니다");
+        return pushHandler ? pushHandler(req, url) : fail(501, "푸시를 지원하지 않습니다", "push_unsupported");
       }
       return dispatch(routes, req, url);
     }
     if (path.startsWith("/files/")) {
-      if (req.method !== "GET" && req.method !== "HEAD") return fail(405, "허용되지 않는 메서드입니다");
-      if (!hasAccessCode(req)) return fail(401, "인증이 필요합니다");
+      if (req.method !== "GET" && req.method !== "HEAD") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
+      const auth = authorize(req, server);
+      if (!auth.ok) return refuseAuth(auth);
       return filesResponse(url, ctx);
     }
     // 팀장용 통로는 이 Mac 안에서만 쓴다. 팀장의 도구 연결과 `iamceo join` 은 같은 컴퓨터에서 부른다.
     if (path.startsWith("/agent/") && !isLocalRequest(server.requestIP(req)?.address, req.headers)) return fail(403, "이 Mac 안에서만 쓸 수 있는 경로입니다", "LOCAL_ONLY");
-    if (path === "/agent/join") return handleJoin(req, ctx);
+    if (path === "/agent/join") return handleJoin(req, ctx, joining => authorize(joining, server));
     if (path.startsWith("/agent/")) {
       const token = bearer(req);
       const member = token ? store.getMemberByToken(token) : null;
@@ -1421,11 +1477,11 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       return dispatch(agentRoutes(ctx, member), req, url);
     }
     if (path === "/") return new Response("IAMCEO: Mac·iPhone 앱으로 연결하세요.\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
-    return fail(404, "없는 경로입니다");
+    return fail(404, "없는 경로입니다", "route_not_found");
   };
 
   const readiness = async (req: Request, url: URL): Promise<Response> => {
-    if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다");
+    if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
     strictQuery(url, []);
     const runtime = await ctx.orch.runtimeInfo?.();
     const daemon = ctx.daemon?.() ?? null;
@@ -1456,7 +1512,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   };
 
   const doctor = async (req: Request, url: URL): Promise<Response> => {
-    if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다");
+    if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
     strictQuery(url, ["lang"]);
     if (ctx.daemon?.().ready === false) return fail(503, "서버를 시작하는 중입니다", "STARTING");
     const lang: DoctorLang = url.searchParams.get("lang") === "en" ? "en" : "ko";
@@ -1466,7 +1522,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   // 겹친 요청은 하나로 합친다. 같은 순간에 두 번 눌러도 묶음은 하나다.
   let diagnosing: Promise<DiagnoseResult> | null = null;
   const diagnose = async (req: Request, url: URL, server: Server<SocketData>): Promise<Response> => {
-    if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다");
+    if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
     strictQuery(url, []);
     // 진단 파일은 이 Mac 의 폴더에 남는다. 팀장용 통로와 같은 판정으로 이 Mac 안에서 온 요청만 받는다.
     if (!isLocalRequest(server.requestIP(req)?.address, req.headers)) return fail(403, "이 Mac 안에서만 쓸 수 있는 경로입니다", "LOCAL_ONLY");
@@ -1497,15 +1553,15 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   };
 
   const rotate = async (req: Request, url: URL, server: Server<SocketData>): Promise<Response> => {
-    if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다");
+    if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
     strictQuery(url, []);
     // 요청의 실제 peer만 사용한다. 프록시 헤더나 Host는 로컬 접근의 증거가 아니다.
     const peer = server.requestIP(req)?.address.toLowerCase().replace(/^::ffff:/, "");
     const v4 = peer ? v4ToInt(peer) : null;
-    if (peer !== "::1" && (v4 === null || !inSubnet(v4, LOOPBACK_V4.base, LOOPBACK_V4.mask))) return fail(403, "접속 코드 회전은 이 Mac에서만 할 수 있습니다");
+    if (peer !== "::1" && (v4 === null || !inSubnet(v4, LOOPBACK_V4.base, LOOPBACK_V4.mask))) return fail(403, "접속 코드 회전은 이 Mac에서만 할 수 있습니다", "rotate_local_only");
     if (req.body !== null) await parseBody(req, z.strictObject({}));
-    // body를 읽는 동안 다른 회전이 완료됐을 수 있다.
-    if (!hasAccessCode(req)) return fail(401, "인증이 필요합니다");
+    // body를 읽는 동안 다른 회전이 완료됐거나 이 요청을 낸 기기를 끊었을 수 있다.
+    if (!stillAuthorized(req)) return fail(401, "인증이 필요합니다", "unauthorized");
     const accessCode = generateAccessCode();
     let durabilityUnknown = false;
     try { updateConfigFile({ accessCode }, { IAMCEO_HOME: config.home }); }
@@ -1518,29 +1574,47 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     config.accessCode = accessCode;
     authGeneration++;
     pairing.invalidate();
-    closedEpochSockets ||= sockets.size > 0;
-    for (const ws of sockets) {
-      if (ws.data.kind === "terminal") { void ws.data.stream.close("error", "접속 코드가 바뀌었습니다. 다시 연결하세요"); continue; }
-      ws.unsubscribe(WS_TOPIC);
-      ws.unsubscribe(WS_LITE_TOPIC);
-      ws.unsubscribe(WS_V2_TOPIC);
-      ws.unsubscribe(WS_V2_LITE_TOPIC);
-      ws.close(4001, "접속 코드가 바뀌었습니다. 다시 연결하세요");
-    }
+    // G: 공용 코드로 연 연결만 닫는다. 기기 열쇠로 붙은 기기(새 QR 로 연결한 iPhone)는 그대로다.
+    dropSockets(data => !data.deviceId, "접속 코드가 바뀌었습니다. 다시 연결하세요");
+    deviceKeys.recordRotation(peer ?? null);
     return durabilityUnknown ? fail(500, "교체된 설정의 디스크 동기화를 확인하지 못했습니다. 이 Mac에서 iamceo open으로 현재 코드를 확인하세요", "AUTH_ROTATION_OUTCOME_UNKNOWN") : Response.json({ accessCode, version: VERSION });
   };
 
   const handlePairClaim = async (req: Request, server: Server<SocketData>): Promise<Response> => {
-    if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다");
+    if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
     const generation = authGeneration;
     const body = (await req.json().catch(() => null)) as { code?: unknown; device?: unknown } | null;
-    if (generation !== authGeneration) return fail(401, "접속 코드가 바뀌었습니다. Mac에서 새 QR을 만들어 주세요");
-    if (!body || typeof body.code !== "string") return fail(400, "짝 맺기 코드가 필요합니다");
-    const from = server.requestIP(req)?.address ?? "unknown";
-    const result = pairing.claim(body.code, from);
-    if (result === "limited") return fail(429, "너무 많이 시도했습니다. 잠시 뒤 Mac에서 새 QR을 만들어 다시 찍어 주세요");
-    if (result === "invalid") return fail(401, "QR이 맞지 않거나 시간이 지났습니다. Mac에서 새 QR을 만들어 주세요");
-    return Response.json({ accessCode: config.accessCode, confirmationToken: pairing.confirmationToken(body.code), version: VERSION }, { headers: { "Cache-Control": "no-store" } });
+    if (generation !== authGeneration) return fail(401, "접속 코드가 바뀌었습니다. Mac에서 새 QR을 만들어 주세요", "auth_changed");
+    if (!body || typeof body.code !== "string") return fail(400, "짝 맺기 코드가 필요합니다", "pair_code_missing");
+    const from = peerAddress(req, server);
+    const result = pairing.claim(body.code, from ?? "unknown");
+    if (result === "limited") { deviceKeys.recordFailure("pair_failed", from); return fail(429, "너무 많이 시도했습니다. 잠시 뒤 Mac에서 새 QR을 만들어 다시 찍어 주세요", "pair_limited"); }
+    if (result === "invalid") { deviceKeys.recordFailure("pair_failed", from); return fail(401, "QR이 맞지 않거나 시간이 지났습니다. Mac에서 새 QR을 만들어 주세요", "pair_expired"); }
+    // G: 그 기기만의 열쇠를 accessCode 칸에 담는다. 출시된 앱도 이 값을 접속 코드로 알고 그대로 쓴다.
+    // 열쇠를 저장하지 못하면(표 없음·디스크 가득) 예전처럼 공용 접속 코드를 준다. 짝 맺기 자체는 막지 않는다.
+    const issued = deviceKeys.issue({ name: body.device, address: from, platform: readAppClient(req.headers)?.platform ?? null });
+    return Response.json({ accessCode: issued?.key ?? config.accessCode, confirmationToken: pairing.confirmationToken(body.code), version: VERSION }, { headers: { "Cache-Control": "no-store" } });
+  };
+
+  /** G(C3): GET /api/devices(연결된 기기·공용 코드 접속·최근 실패·기록), DELETE /api/devices/:id(한 대만 끊기). */
+  const devicesRoute = (req: Request, url: URL, server: Server<SocketData>): Response => {
+    strictQuery(url, []);
+    const grant = grants.get(req);
+    if (!grant) return fail(401, "인증이 필요합니다", "unauthorized");
+    if (url.pathname === "/api/devices") {
+      if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
+      return Response.json(deviceKeys.list(grant.principal));
+    }
+    const match = /^\/api\/devices\/([^/]+)$/.exec(url.pathname);
+    if (!match) return fail(404, "없는 경로입니다", "route_not_found");
+    if (req.method !== "DELETE") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
+    const [id] = decodeParams(match);
+    const device = deviceKeys.revoke(id!, peerAddress(req, server));
+    if (!device) return fail(404, ERROR_CODES.device_not_found.ko, "device_not_found");
+    // 그 기기의 실시간 연결과 터미널 스트림을 바로 닫는다. HTTP 는 다음 요청부터 401 device_revoked.
+    dropSockets(data => data.deviceId === id, "이 기기의 연결이 끊겼습니다. 다시 연결하세요");
+    const result: DeviceRevokeResult = { ok: true, device: { ...device, current: grant.principal.kind === "device" && grant.principal.id === id } };
+    return Response.json(result);
   };
 
   const handleRequest = async (req: Request, server: Server<SocketData>): Promise<Response | undefined> => {
@@ -1550,20 +1624,20 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       if (response && (url.pathname.startsWith("/api/") || url.pathname.startsWith("/agent/") || url.pathname.startsWith("/pair/") || url.pathname === "/ws")) response.headers.set("Cache-Control", "no-store");
       return response;
     };
-    if (!isIpAllowed(server.requestIP(req)?.address, ipRule)) return noStore(fail(403, "허용되지 않은 주소입니다"));
-    if (!isHostAllowed(req.headers.get("host"), config.hosts)) return noStore(fail(403, "허용되지 않은 주소입니다"));
-    if (!originMatchesHost(req)) return noStore(fail(403, "허용되지 않은 출처입니다"));
+    if (!isIpAllowed(server.requestIP(req)?.address, ipRule)) return noStore(fail(403, "허용되지 않은 주소입니다", "address_not_allowed"));
+    if (!isHostAllowed(req.headers.get("host"), config.hosts)) return noStore(fail(403, "허용되지 않은 주소입니다", "address_not_allowed"));
+    if (!originMatchesHost(req)) return noStore(fail(403, "허용되지 않은 출처입니다", "origin_not_allowed"));
     try {
       return noStore(await route(req, url, server));
     } catch (e) {
-      if (e instanceof ApiError) return noStore(fail(e.status, e.message, e.code));
+      if (e instanceof ApiError) return noStore(fail(e.status, e.message, e.code, e.reason));
       // 디스크 가득·읽기 쓰기 오류는 앱이 알아볼 수 있게 분류해 답한다. SQLite 원문은 로그에만 남긴다.
       const storage = classifyStorageError(e);
       // 오류 객체도 요청 URL/헤더를 품을 수 있다. 경로와 오류 종류만 남긴다.
       console.error("요청 처리 오류:", req.method, url.pathname, e instanceof Error ? e.name : "unknown", ...(storage ? [storage] : []));
       if (storage === "storage_full") return noStore(fail(507, "저장 공간이 부족해 처리하지 못했습니다. Mac 의 디스크 공간을 확보한 뒤 다시 시도해 주세요", storage));
       if (storage === "storage_io") return noStore(fail(500, "저장소를 읽거나 쓰는 중 오류가 나 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요", storage));
-      return noStore(fail(500, e instanceof Error ? e.message : "서버 오류"));
+      return noStore(fail(500, e instanceof Error ? e.message : "서버 오류", "internal_error"));
     }
   };
 
@@ -1601,9 +1675,10 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
             ws.close(1012, "restarting");
             return;
           }
-          if (ws.data.authGeneration !== authGeneration) {
+          // G: 기기 열쇠로 연 연결은 그 기기가 아직 연결돼 있는지, 공용 코드로 연 연결은 코드 세대가 그대로인지 본다.
+          if (ws.data.deviceId ? !deviceKeys.isActive(ws.data.deviceId) : ws.data.authGeneration !== authGeneration) {
             closedEpochSockets = true;
-            ws.close(4001, "접속 코드가 바뀌었습니다. 다시 연결하세요");
+            ws.close(4001, ws.data.deviceId ? "이 기기의 연결이 끊겼습니다. 다시 연결하세요" : "접속 코드가 바뀌었습니다. 다시 연결하세요");
             return;
           }
           if (ws.data.kind === "terminal") { closedEpochSockets = true; ws.data.stream.open(ws); return; }

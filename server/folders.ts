@@ -7,7 +7,7 @@ import { ApiError } from "./store.ts";
 export function folderName(input: string): string {
   const name = input.trim();
   if (![...name].length || [...name].length > 100 || name.startsWith(".") || /[\/\p{Cc}]/u.test(name)) {
-    throw new ApiError(400, "폴더 이름은 점으로 시작하지 않는 1~100자로 입력하세요. /와 제어문자는 쓸 수 없습니다");
+    throw new ApiError(400, "폴더 이름은 점으로 시작하지 않는 1~100자로 입력하세요. /와 제어문자는 쓸 수 없습니다", "folder_name_invalid");
   }
   return name;
 }
@@ -21,20 +21,20 @@ export class Folders {
   async home(): Promise<string> { return realpath(this.homePath); }
   async directory(input?: string): Promise<string> {
     const home = await this.home();
-    if (input?.split("/").includes("..")) throw new ApiError(403, "서버의 홈 폴더 안에서 골라 주세요");
+    if (input?.split("/").includes("..")) throw new ApiError(403, "서버의 홈 폴더 안에서 골라 주세요", "folder_outside_home");
     const expanded = input === undefined || input === "~" ? home : input.startsWith("~/") ? join(home, input.slice(2)) : input;
-    if (!isAbsolute(expanded) || expanded.includes("\0")) throw new ApiError(400, "절대 폴더 경로가 필요합니다");
+    if (!isAbsolute(expanded) || expanded.includes("\0")) throw new ApiError(400, "절대 폴더 경로가 필요합니다", "folder_path_not_absolute");
     const inside = (path: string) => { const rel = relative(home, path); return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel); };
-    if (!inside(resolve(expanded))) throw new ApiError(403, "서버의 홈 폴더 안에서 골라 주세요");
+    if (!inside(resolve(expanded))) throw new ApiError(403, "서버의 홈 폴더 안에서 골라 주세요", "folder_outside_home");
     try {
       const path = await realpath(expanded);
-      if (!inside(path)) throw new ApiError(403, "서버의 홈 폴더 안에서 골라 주세요");
-      if (!(await stat(path)).isDirectory()) throw new ApiError(400, "폴더가 아닙니다");
+      if (!inside(path)) throw new ApiError(403, "서버의 홈 폴더 안에서 골라 주세요", "folder_outside_home");
+      if (!(await stat(path)).isDirectory()) throw new ApiError(400, "폴더가 아닙니다", "not_a_folder");
       await access(path, constants.R_OK | constants.X_OK);
       return path;
     } catch (error) {
       if (error instanceof ApiError) throw error;
-      throw new ApiError((error as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 403, "폴더를 열 수 없습니다");
+      throw new ApiError((error as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 403, "폴더를 열 수 없습니다", "folder_unreadable");
     }
   }
   async list(input?: string) {
@@ -54,7 +54,7 @@ export class Folders {
           if (count === 1999) truncated = true;
         }
       } finally { await directory.close(); }
-    } catch { throw new ApiError(403, "폴더를 열 수 없습니다"); }
+    } catch { throw new ApiError(403, "폴더를 열 수 없습니다", "folder_unreadable"); }
     children.sort((a, b) => a.name.localeCompare(b.name));
     for (const child of children) {
       if (child.name.startsWith(".") || (!child.isDirectory() && !child.isSymbolicLink())) continue;
@@ -71,8 +71,8 @@ export class Folders {
     await this.hooks.beforeMkdir?.();
     try { await mkdir(path, { mode: 0o755 }); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new ApiError(409, "같은 이름의 폴더가 있습니다");
-      throw new ApiError(403, "폴더를 만들 수 없습니다");
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new ApiError(409, "같은 이름의 폴더가 있습니다", "folder_exists");
+      throw new ApiError(403, "폴더를 만들 수 없습니다", "folder_create_failed");
     }
     let created: Stats | undefined;
     try {
@@ -89,7 +89,7 @@ export class Folders {
         const current = await lstat(path);
         if (created && current.dev === created.dev && current.ino === created.ino && !current.isSymbolicLink()) await rmdir(path);
       } catch { /* A replacement or a nonempty item must be preserved. */ }
-      throw new ApiError(403, "폴더를 만들 수 없습니다");
+      throw new ApiError(403, "폴더를 만들 수 없습니다", "folder_create_failed");
     }
     return { name, path };
   }

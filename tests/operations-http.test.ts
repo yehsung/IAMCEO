@@ -116,7 +116,7 @@ test("v2 CAS 포트는 검토 revision을 그대로 받고 같은 done도 우회
 });
 
 test("receipt 조회와 쓰기는 pending/applied/refused/unknown 및 code를 보존한다", async () => {
-  orch.operation = async id => { const receipt = receipts.get(id); if (!receipt) throw new ApiError(404, "없는 작업"); return receipt; };
+  orch.operation = async id => { const receipt = receipts.get(id); if (!receipt) throw new ApiError(404, "없는 작업", "operation_not_found"); return receipt; };
   const at = new Date().toISOString();
   for (const status of ["pending", "applied", "refused", "unknown"] as const) {
     const id = randomUUID();

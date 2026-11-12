@@ -127,7 +127,7 @@ test("patchProject 미지원의 보관/v2는 501이며 옛 hook/Store로 쓰기�
   const after = spyOn(f.orch, "onProjectPatched");
   try {
     expect(await json(await f.request(`/api/projects/${f.project.id}`, "PATCH", { archived: true, name: "저장 금지" }), 501))
-      .toEqual({ error: "프로젝트 변경을 지원하지 않습니다" });
+      .toEqual({ error: "프로젝트 변경을 지원하지 않습니다", code: "project_update_unsupported" });
     await json(await f.request(`/api/projects/${f.project.id}`, "PATCH", { archived: false }), 501);
     await json(await f.request(`/api/projects/${f.project.id}`, "PATCH", { name: "v2 저장 금지" }, v2), 501);
     await json(await f.request("/api/projects/hq", "PATCH", { archived: true }), 400);
@@ -185,7 +185,7 @@ test("구형 v1 PATCH는 같은 프로젝트 경합과 사전 hook 거부를 저
   let release!: () => void;
   const started = new Promise<void>(resolve => { entered = resolve; });
   const gate = new Promise<void>(resolve => { release = resolve; });
-  const before = spyOn(f.orch, "beforeProjectPatch").mockImplementation(async () => { entered(); await gate; throw new ApiError(409, "변경 거부"); });
+  const before = spyOn(f.orch, "beforeProjectPatch").mockImplementation(async () => { entered(); await gate; throw new ApiError(409, "변경 거부", "project_busy"); });
   const after = spyOn(f.orch, "onProjectPatched").mockImplementation(async () => {});
   const write = spyOn(f.store, "patchProject");
   const path = `/api/projects/${f.project.id}`;
@@ -214,7 +214,7 @@ test("엄격 PATCH/HQ 검증과 보관 종료 실패는 전 필드를 미반영�
   await json(await f.request("/api/projects/hq", "PATCH", { archived: true }), 400);
   await json(await f.request("/api/projects/missing", "PATCH", {}), 404);
   expect(f.runner.stops).toEqual([]);
-  f.runner.checkError = new ApiError(409, "초안 보존");
+  f.runner.checkError = new ApiError(409, "초안 보존", "close_draft_present");
   await json(await f.request(path, "PATCH", { archived: true, name: "반영 금지" }), 409);
   expect(f.runner.stops).toEqual([]);
   f.runner.checkError = null;
@@ -386,8 +386,9 @@ test("v1 Message.delivery 5값·이전 목록/state의 exact JSON과 사용자/a
     .toEqual({ ...f.store.projectState(f.project.id), deliveryNotices: f.orch.deliveryRecovery.notices(f.project.id) });
   const paths = ["/api/capabilities", "/api/runtime", "/api/readiness", "/api/sync", `/api/projects/${f.project.id}/archive/state`, `/api/operations/${randomUUID()}`];
   for (const path of paths) for (const authorization of ["", "Bearer wrong", `Bearer ${f.store.getMemberToken(f.manual.id)}`]) {
+    // G: 상태 코드와 문장은 그대로 두고 코드만 더했다(묶음 사이 약속 2).
     expect(await json(await f.request(path + `?t=${f.config.accessCode}`, "GET", undefined, { Authorization: authorization }), 401))
-      .toEqual({ error: "인증이 필요합니다" });
+      .toEqual({ error: "인증이 필요합니다", code: "unauthorized" });
   }
   await json(await f.request("/agent/inbox/ack", "POST", { batchId: "batch" }), 401);
   await json(await f.request(`/api/projects/${f.project.id}`, "PATCH", { name: "거부" }, { Origin: "http://evil.example" }), 403);

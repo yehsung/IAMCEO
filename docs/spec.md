@@ -370,7 +370,8 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 - `iamceo backup --directory <경로>`는 지정한 `IAMCEO_HOME`의 DB·참조 첨부·설정을 검증해 백업한다. 홈 잠금이 필요하므로 수동 백업과 해당 홈의 데몬 실행은 동시에 할 수 없다. 실행 중 데몬은 자체 정기 백업을 쓴다.
 - `iamceo restore <snapshot> --destination <별도 빈 홈> [--clone]`은 원본을 덮지 않고 새 홈에 복원한다. 결과는 `reconciliationRequired:true,outboundEnabled:false`이며 서버 기동을 실행기·HTTP·APNs 준비 전에 차단한다. 미종결 작업과 직접 조작권·전달 증거는 보존하고 프로젝트 실행·기기 알림은 끈다.
 - 서버가 꺼진 복원 홈을 `IAMCEO_HOME`으로 지정해 `iamceo restore reconcile`을 실행하면 기존 전달·푸시를 격리한 채 조정 완료를 기록한다. 실제 외부 효과를 확인한 뒤 `iamceo restore resume`으로 발신을 허용한다. 이 명령은 서버를 시작하거나 기존 보류 전달·푸시를 일괄 재전송하지 않는다. 복원 전 실행이 켜져 있던 활성 프로젝트를 다시 허용하므로 실제 기동은 별도 운영 전환 절차를 따른다.
-- `POST /api/auth/rotate`는 사용자 Bearer와 실제 loopback 연결을 요구하며 빈 본문 또는 `{}`만 받는다. 저장 성공 뒤 `{accessCode,version}`을 반환하고 이전 인증·첨부 인증·열린 WS·사용하지 않은 연결 QR을 무효화한다. 저장 전 실패는 `AUTH_ROTATION_SAVE_FAILED`, 파일 교체 뒤 디스크 동기화 확인 실패는 `AUTH_ROTATION_OUTCOME_UNKNOWN`이다. 응답 유실 때 반복 교체하지 않고 같은 Mac·같은 홈에서 `iamceo open`으로 확인한다.
+- `POST /api/auth/rotate`는 사용자 Bearer와 실제 loopback 연결을 요구하며 빈 본문 또는 `{}`만 받는다(다른 주소는 403 `rotate_local_only`). 저장 성공 뒤 `{accessCode,version}`을 반환하고 이전 공용 코드의 인증·첨부 인증·그 코드로 연 WS와 터미널 스트림·사용하지 않은 연결 QR을 무효화한다. 기기 열쇠(아래 '기기 열쇠')로 붙은 기기와 그 연결은 그대로다. 교체는 접속 기록에 `code_rotated`(주소·시각)로 남는다. 저장 전 실패는 `AUTH_ROTATION_SAVE_FAILED`, 파일 교체 뒤 디스크 동기화 확인 실패는 `AUTH_ROTATION_OUTCOME_UNKNOWN`이다. 응답 유실 때 반복 교체하지 않고 같은 Mac·같은 홈에서 `iamceo open`으로 확인한다.
+- 복원(same-host)은 공용 접속 코드와 기기 열쇠를 그대로 둔다. 복제(`--clone`)는 원본 기기의 열쇠를 모두 끊고(`revoked_reason='clone'`, 그 열쇠로 오면 401 `device_revoked`) 복제본의 `config.json`에 새 공용 접속 코드를 만든다. 원본 Mac에 붙어 있던 기기는 복제본에 붙지 않는다. 백업 DB에는 열쇠의 SHA-256만 들어간다(공용 코드는 지금처럼 `config.json`에 평문).
 - `GET /api/health`는 생존 확인이다. 인증된 `GET /api/readiness`는 `{ok,version,daemon,schema,core,hosts}`를 반환하며 데몬 준비와 지원 DB 버전이 맞으면 200, 아니면 503이다. core 연결·제공자 로그인·실제 업무 가능 여부까지 `ok`로 보장하지는 않는다.
 
 명령 예시와 복원 후 확인 절차는 [운영 모델](operating-model.md#백업복원)을 따른다.
@@ -380,10 +381,19 @@ Unix socket plain NDJSON JSON-RPC를 사용하고 요청마다 연결을 새로 
 ### iPhone 페어링
 
 - 인증된 `POST /api/pair/start`는 `{code,expiresAt,ttlSeconds,urls,version}`을 반환한다. QR은 접속 코드 대신 5분 유효한 일회용 코드와 Tailscale 주소만 담는다. 미사용 코드는 최대 5개, 전체 상태 기록은 최대 128개이며 오래된 기록부터 폐기한다.
-- `POST /pair/claim`의 `{code,device?}`는 인증 없이 한 번만 교환한다. 성공 응답은 기존 `{accessCode,version}`에 `confirmationToken`을 추가한다. 교환만으로 연결 완료로 간주하지 않는다. 응답 유실 시 교환을 반복하지 않고 새 QR을 만든다.
+- `POST /pair/claim`의 `{code,device?}`는 인증 없이 한 번만 교환한다. 성공 응답은 기존 `{accessCode,version}`에 `confirmationToken`을 추가한다. `accessCode` 칸에는 공용 접속 코드가 아니라 **그 기기만의 열쇠**(`dk1.<기기 ID>.<비밀>`)를 담는다. 출시된 앱(0.2.2·0.2.3)은 이 값을 접속 코드로 알고 그대로 Bearer에 실으므로 고치지 않고 따라온다. 열쇠를 저장하지 못하면(표 없음·디스크 가득) 예전처럼 공용 접속 코드를 준다. 교환만으로 연결 완료로 간주하지 않는다. 응답 유실 시 교환을 반복하지 않고 새 QR을 만든다(받지 못한 열쇠는 한 번도 쓰이지 않은 채 하루가 지나면 `unused`로 끊긴다). 실패는 401 `pair_expired`, 시도 초과는 429 `pair_limited`, 본문 없음은 400 `pair_code_missing`이다.
 - 인증된 `GET /api/pair/status?code=<일회용 코드>`는 `{code,status}`를 반환한다. 정규화된 code와 `pending`(미교환), `claimed`(교환됨), `connected`(아래 ACK 성공), `expired`(만료·폐기·알 수 없는 코드)를 구분한다. 코드 소진·만료 자체는 연결 완료의 증거가 아니다.
 - iPhone의 모든 QR 진입은 `AppStore.pair`를 사용한다. 교환 응답의 접속 코드로 실제 인증 연결에 성공한 뒤 해당 API client로 `POST /api/pair/ack`에 `{code,confirmationToken}`을 보낸다. 인증과 해당 교환 응답의 토큰이 모두 맞는 claimed 코드만 connected로 바꾼다. 같은 ACK는 멱등이며 미교환·만료·잘못된 토큰은 409다. 공유 접속 코드만으로 특정 QR의 연결을 추정하지 않는다.
 - 상태와 ACK도 Bearer 인증·`Cache-Control: no-store`를 따른다. 인증 회전·서버 재시작·원래 5분 만료는 교환 및 완료 기록을 모두 무효화한다. 이전 서버가 토큰을 생략하면 iPhone 연결은 유지하며 ACK를 생략한다. ACK 유실은 이미 성공한 연결을 실패로 바꾸거나 QR을 자동 재교환하지 않는다.
+
+### 기기 열쇠와 접속 기록(C3)
+
+- 사용자 자격은 두 가지다. `config.json`의 **공용 접속 코드**(이 Mac의 앱, 손으로 넣은 연결, 이 판 이전에 QR로 붙은 iPhone)와 QR로 받은 **기기 열쇠**. 둘 다 같은 자리(HTTP `/api/*`, `/ws`, 터미널 스트림, `/files/*`, `/agent/join`)에서 `server/devices.ts`의 `authenticate()` 하나로 판정한다. 공용 코드는 SHA-256 뒤 상수 시간 비교, 기기 열쇠는 기기 ID로 행을 찾아 저장한 SHA-256과 상수 시간으로 비교한다. DB(`auth_devices`)에는 비밀의 해시만 둔다.
+- 인증 실패 응답은 상태 코드와 문장을 그대로 두고 코드만 더한다: 401 `{error:"인증이 필요합니다",code:"unauthorized"}`. 끊은 기기의 열쇠는 401 `device_revoked`이며 문장도 '인증이 필요합니다.'로 시작해 출시된 앱이 같은 안내(새 QR로 다시 연결)를 고른다. 요청을 처리하는 사이 코드가 바뀌었거나 그 기기를 끊었으면 401 `auth_changed`(짝 맺기 시작·터미널 스트림 준비).
+- `GET /api/devices`(사용자 Bearer, 쿼리 없음) → `DeviceAccessList {shared:{lastSeenAt,platforms:[{platform,lastSeenAt}],current,rotatedAt}, devices:[{id,name,platform,pairedAt,lastSeenAt,current}], failures:{count,days,lastAt}, events:[…최근 50줄]}`. `current`는 이 목록을 부른 요청의 자격이다. 공용 코드 접속의 `platform`은 앱 머리글(`X-IAMCEO-App-Platform`)의 `ios`·`macos`, 머리글 없이 이 Mac 안에서 온 요청은 `local`, 그 밖은 `other`. 마지막 접속 시각은 메모리에 바로, DB에는 1분에 한 번 쓴다.
+- `DELETE /api/devices/:id` → `{ok:true, device}`. 그 기기의 실시간 연결과 터미널 스트림을 바로 닫고(4001) 다음 HTTP부터 401 `device_revoked`. 없거나 이미 끊은 기기는 404 `device_not_found`. 범위 구분은 없다(어느 자격으로도 목록을 보고 끊을 수 있다. 공용 코드 교체만 이 Mac에서).
+- 접속 기록(`auth_events`): `auth_failed`(틀린 코드·열쇠 `wrong`, 끊은 기기의 열쇠 `revoked`: 주소·시각, 끊은 기기면 그 이름), `pair_failed`(맞지 않는 QR: 주소·시각), `paired`(기기 이름·주소), `device_revoked`(`owner`·`clone`·`unused`), `code_rotated`. 자격 없이 두드린 요청은 세지 않는다. 같은 주소·까닭의 실패는 10분씩 한 줄로 묶어 `count`로 센다. 코드·열쇠 값은 어느 표에도 넣지 않는다. 90일 지난 기록과 2,000줄을 넘는 기록, 끊은 지 90일 지난 열쇠를 정리한다.
+- 표(`auth_devices`, `auth_events`, `auth_shared_seen`)는 `MIGRATIONS`가 아니라 열 때마다 `CREATE TABLE IF NOT EXISTS`로 만든다(`db.ts` `AUTH_TABLES`). DB 판 번호가 오르지 않아 이전 판 서버도 이 DB를 연다. 다만 이전 판 서버는 기기 열쇠를 모르므로 그 사이 기기 열쇠로 붙은 기기는 401을 받고 새 QR이 필요하다(공용 코드로 붙은 기기는 그대로).
 
 ### 폴더·GitHub 가져오기 보안 한도
 
@@ -435,6 +445,15 @@ core 업무 턴의 최종 결과가 없으면 기존 업무를 다시 실행하�
 - 총괄은 직접 확인할 수 있는 일만 근거를 적어 닫으며 대표 브라우저(Aside 등)는 열지 않는다. 확인할 수 없으면 남기고 부탁한 팀장의 자동 안내를 기다린다.
 - 대기열이 wake=false 소식뿐이면 잠재우기를 허용한다. 소식은 보류로 보존하고 resume 뒤에도 그 소식만으로 턴을 시작하지 않는다. wake=true 입력이나 미수신 결재 답, 열린 결재가 있으면 기존처럼 거절한다.
 - 스키마 v30→v31은 MIGRATIONS 끝에 `todos.stale_notified_at`, `projects.stale_review_at` nullable TEXT를 추가한다. PRAGMA user_version은 기존 마이그레이션 개수 기반으로 1 증가한다. 다운그레이드는 새 DB를 옛 바이너리로 열 수 없으므로 이주 전 백업으로 복원해야 한다.
+
+### 오류·보류 코드(E9)
+- 오류 응답 몸은 `{error, code, reason?}`이다. `error`는 표시용 한국어 문장으로 예전 그대로 싣고, `code`는 `shared/error-codes.ts`의 `ERROR_CODES` 키다. 서버의 모든 `ApiError`는 코드가 필수다(`tests/error-codes.test.ts`가 소스를 훑어 확인한다). 이미 내보낸 코드(`STARTING`·`LOCAL_ONLY`·`TERMINAL_REFUSED`·`MESSAGE_SCOPE_CHANGED`·`project_not_archived` 등)는 이름을 바꾸지 않는다. `reason`은 그런 넓은 코드 아래의 좁은 사유로, 지금은 실행 엔진의 터미널 거절(`core_terminal_missing`·`core_lease_required`·`core_lease_other`·`core_terminal_finished`)에 싣는다. 작업 영수증(`/api/operations/:id` 등)의 거절·불명에도 같은 `reason?`이 있고(옛 영수증에는 없다), 터미널 스트림의 `closed` 프레임은 거절 때 `code?`를 싣는다. 푸시 경로의 오류 몸도 `{error, code}`다.
+- `ERROR_CODES`의 값은 `{ko, en?}`이다. `ko`는 그 코드의 대표 문장(실제 응답은 이름·숫자가 들어간 문장일 수 있다), `en`은 앱 화면 영어화(4차) 때 채운다. 묶음별 덩어리로 나뉘어 있고 남의 덩어리는 고치지 않는다.
+- `Member.fenceCode?`: `lastError`가 자동 입력을 멈춘 보류일 때 그 코드(`control_unknown`·`starting_unknown`·`core_reconnect_held`·`stop_check_held`·`usage_wait`). 서버는 이 값(`members.fence_code`)으로만 가르고 `lastError` 문장은 예전 그대로 쓴다(이전 판 서버는 그 앞머리로 판정한다). `lastError`를 바꾸면서 코드를 주지 않으면 코드를 지운다.
+- `Message.deliveryCode?`: `deliveryNote`가 정해진 보류 문장일 때 그 코드(`held_delivery_unknown`·`held_import`·`held_api_outage`·`held_usage_limit`·`held_<보류 사유>` 등, `server/hold-codes.ts`의 표). 앱의 '전달 여부를 확인할 수 없는 보류' 판정과 재시작 정리의 '가져온 말' 판정은 이 코드로 한다.
+- 세 열(`members.fence_code`·`messages.delivery_code`·`operation_receipts.reason`)은 DB 판 번호를 올리지 않고 더한다(`server/db.ts`의 `ERROR_CODE_COLUMNS`). 이전 판 서버는 열을 모른 채 문장만 고치므로, DB를 열 때마다 문장에서 코드를 다시 맞춘다(`reconcileHoldCodes`). 문장에서 코드를 읽는 곳은 이 이주뿐이다.
+- 앱은 코드가 있으면 코드로, 없으면(옛 서버) 예전처럼 문장으로 가른다(`native/.../Services/ServerCode.swift`).
+- 대표가 이 팀장을 골라 보낸 글이 있는 턴(보고 제목의 `(직접)`)은 전달 글의 `[대표 직접]` 표지가 아니라 원본 메시지의 받는 사람(`targetMemberId`)으로 가른다.
 
 ### 추가 계약 (2차 완성도: 보고 언어·명령줄 언어·점검·진단·프로젝트 삭제와 내보내기)
 - `Settings.reportLanguage?: "ko"|"en"`: 총괄·팀장이 대표에게 쓰는 글(보고·결재 카드·할 일)의 언어. 새 서버는 기본 `"ko"`를 늘 싣는다(settings 표의 키 하나라 옛 판으로 되돌려도 무시된다). `PUT /api/settings`(v1·v2)가 받으며 그 밖의 값은 400이다. 앱은 서버가 이 값을 실었을 때만 설정 줄을 보이고, 바꿨을 때만 이 키를 보낸다(옛 서버의 strict 스키마는 모르는 키가 있으면 저장 전체를 거절한다).

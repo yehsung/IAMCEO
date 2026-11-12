@@ -61,7 +61,7 @@ While it runs, the server makes a checked backup in `~/.iamceo/backups` **once a
 | `config.json` (with the access code), and `apns.json` if there is one | The iPhone push key (`.p8`) |
 
 - A backup records a hash for every file and checks the database's integrity.
-- **A backup contains the access code as it is.** Treat a copy like a password.
+- **A backup contains the access code as it is.** Treat a copy like a password. Keys of devices connected with a QR code are stored only as hashes.
 - Backups sit on the same disk, so they do not protect against a disk failure. Copy the newest `snapshot-<id>` folder somewhere else, such as an external disk.
 - `iamceo backup` works only when it can have the data folder to itself. While the server runs it is refused; use the backups the server makes every day.
 
@@ -79,7 +79,7 @@ When you move to a new Mac or reinstall one, bring conversations, decisions and 
    iamceo restore resume
    ```
 
-   `reconcile` conservatively settles the deliveries and notifications that were in flight when the backup was made, and `resume` then allows outgoing delivery. Neither starts the server or an AI session. To keep using both Macs, add `--clone` to restore as a new server.
+   `reconcile` conservatively settles the deliveries and notifications that were in flight when the backup was made, and `resume` then allows outgoing delivery. Neither starts the server or an AI session. To keep using both Macs, add `--clone` to restore as a new server. The clone refuses the keys of devices connected to the old Mac and gets a new access code (see it with `iamceo open`).
 4. Open the IAMCEO app and press 이 Mac에서 시작. The server is registered with the restored data and access code.
 5. Put each project's working folder (your code) at the same place on the new Mac, or change the project's folder in project management. CLI session records are not in the backup, so staff start new sessions.
 6. The iPhone's address has changed: connect it again with a new QR, and turn notifications on again on a device that used them.

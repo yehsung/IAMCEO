@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileSearchMigration, scheduleFileSearchBackfill } from "./store.ts";
+import { reconcileHoldCodes } from "./hold-codes.ts";
 
 export const MIGRATIONS: string[] = [
   `
@@ -731,6 +732,77 @@ export function ensureLiveIndexes(db: Database): string[] {
   return failed;
 }
 
+/**
+ * G(C3): 기기마다 따로 주는 열쇠(auth_devices)와 접속 기록(auth_events), 공용 접속 코드의 마지막 접속(auth_shared_seen).
+ * 색인과 같은 까닭으로 MIGRATIONS 에 넣지 않는다: 판 번호를 올리면 이전 판 서버가 이 DB 를 열지 못한다.
+ * 이전 판은 이 표들을 모른 채 그대로 지나가고(기기 열쇠는 받지 않고 공용 코드만 받는다), 다시 올리면 그대로 쓴다.
+ * 열쇠는 원문이 아니라 SHA-256 만 둔다. 코드·열쇠 값은 어느 표에도 넣지 않는다(server/devices.ts).
+ */
+export const AUTH_TABLES: readonly string[] = [
+  `CREATE TABLE IF NOT EXISTS auth_devices (
+     id TEXT PRIMARY KEY,
+     secret_hash TEXT NOT NULL,
+     name TEXT NOT NULL,
+     platform TEXT,
+     created_at TEXT NOT NULL,
+     created_address TEXT,
+     last_seen_at TEXT,
+     last_address TEXT,
+     revoked_at TEXT,
+     revoked_reason TEXT
+   )`,
+  `CREATE TABLE IF NOT EXISTS auth_shared_seen (
+     platform TEXT PRIMARY KEY,
+     last_seen_at TEXT NOT NULL,
+     last_address TEXT
+   )`,
+  `CREATE TABLE IF NOT EXISTS auth_events (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     kind TEXT NOT NULL,
+     at TEXT NOT NULL,
+     last_at TEXT NOT NULL,
+     count INTEGER NOT NULL DEFAULT 1,
+     reason TEXT,
+     address TEXT,
+     device_id TEXT,
+     device_name TEXT
+   )`,
+  `CREATE INDEX IF NOT EXISTS auth_events_last_at ON auth_events(last_at)`,
+];
+
+/** 만들지 못해도 서버는 뜬다. 그때 짝 맺기는 예전처럼 공용 접속 코드를 건네고 기록은 남기지 않는다(server/devices.ts). */
+export function ensureAuthTables(db: Database): boolean {
+  try {
+    db.transaction(() => { for (const sql of AUTH_TABLES) db.exec(sql); })();
+    return true;
+  } catch {
+    console.warn("[db] 기기 열쇠·접속 기록 표를 만들지 못했습니다(다음 시작 때 다시 합니다)");
+    return false;
+  }
+}
+
+/**
+ * F(E9): 보류·거절 사유 코드 열. members.fence_code(lastError 가 뜻하는 보류), messages.delivery_code(deliveryNote 가 뜻하는 보류),
+ * operation_receipts.reason(넓은 거절 코드 아래의 좁은 사유). server/hold-codes.ts 가 쓰고 맞춘다.
+ * 색인과 같은 까닭으로 MIGRATIONS 에 넣지 않는다: 판 번호를 올리면 이전 판 서버가 이 DB 를 열지 못한다. 열을 더하기만 한다(지우거나 이름을 바꾸지 않는다).
+ */
+export const ERROR_CODE_COLUMNS: readonly (readonly [table: string, column: string])[] = [
+  ["members", "fence_code"],
+  ["messages", "delivery_code"],
+  ["operation_receipts", "reason"],
+];
+
+/** 열이 없으면 더하고, 이전 판 서버가 고쳤을지 모르는 행의 코드를 문장에서 다시 맞춘다. 실패하면 서버가 뜨지 않는다(이 열을 늘 쓴다). */
+export function ensureErrorCodeColumns(db: Database): void {
+  db.transaction(() => {
+    for (const [table, column] of ERROR_CODE_COLUMNS) {
+      const columns = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
+      if (!columns.some(c => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
+    }
+    reconcileHoldCodes(db);
+  })();
+}
+
 const PRE_MIGRATION_KEEP = 3;
 const PRE_MIGRATION_KEEP_MS = 86_400_000;
 
@@ -814,6 +886,10 @@ export function openDb(path: string): Database {
     migrate(db);
     // E4: 판 번호를 올리지 않는 보조 색인. 이전 판 서버도 이 DB 를 그대로 연다.
     ensureLiveIndexes(db);
+    // G: 기기 열쇠·접속 기록 표. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
+    ensureAuthTables(db);
+    // F: 보류·거절 사유 코드 열. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
+    ensureErrorCodeColumns(db);
     // 이주가 끝났으면 최근 사본 몇 개만 남긴다. 하루 안에 만든 것은 개수와 상관없이 둔다.
     if (backup) removePreMigrationBackups(path, all => all.slice(PRE_MIGRATION_KEEP).filter(entry => Date.now() - entry.at > PRE_MIGRATION_KEEP_MS));
     // Source parsing/index failures cannot roll back the schema or delay server startup.

@@ -4,6 +4,7 @@ import { Socket } from "node:net";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { ErrorCode } from "../../shared/error-codes.ts";
 
 export interface CoreStatus { state: string; app?: string; msg?: string; title?: string; kind?: string | null; progress?: number | null }
 export interface CoreTerminal {
@@ -14,7 +15,8 @@ export interface CoreTerminal {
 }
 export interface CoreHello { generation: number; version: string; methods: string[]; features: string[] }
 export class CoreError extends Error {
-  constructor(readonly kind: string, message: string, readonly uncertain = false, readonly deliveryEffect: "not_written" | "rejected" | "unknown" = uncertain ? "unknown" : "rejected", readonly causeCode?: string) { super(message); this.name = "CoreError"; }
+  /** reason: 앱이 이 거절을 가를 때 쓰는 코드(shared/error-codes.ts). message 는 사람이 읽는 글이라 동작을 가르지 않는다. */
+  constructor(readonly kind: string, message: string, readonly uncertain = false, readonly deliveryEffect: "not_written" | "rejected" | "unknown" = uncertain ? "unknown" : "rejected", readonly causeCode?: string, readonly reason?: ErrorCode) { super(message); this.name = "CoreError"; }
 }
 
 export function coreSocketPath(session = process.env.HC_SESSION || "default"): string {

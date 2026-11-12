@@ -135,6 +135,47 @@ targets:
           APNS_ENVIRONMENT: development
         Release:
           APNS_ENVIRONMENT: production
+  # E8: iPhone 에서도 같은 시험(Tests/IAMCEOTests)을 돌린다. `bash scripts/check.sh ios` 가 시뮬레이터로 돌린다.
+  # 시험을 품는 앱은 출시 앱과 소스는 같고 번들 ID 만 다른 시험 전용 앱이다. 시뮬레이터에 깔린 출시 앱
+  # (com.yehsung.iamceo)의 저장된 연결·키체인을 덮어쓰거나, 시험 중에 그 연결로 실제 서버에 붙지 않게 한다.
+  # 모듈 이름은 IAMCEO 그대로라 시험의 `@testable import IAMCEO` 가 그대로 통한다. 출시 빌드(IAMCEO-iOS 계획)는 이 둘을 만들지 않는다.
+  IAMCEO-iOS-TestHost:
+    dependencies:
+      - package: SwiftTerm
+      - target: AttachmentException-iOS
+        embed: false
+    type: application
+    platform: iOS
+    sources: [Sources/IAMCEO, Resources/iOS]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.iamceo.native.ios.testhost
+        PRODUCT_MODULE_NAME: IAMCEO
+        INFOPLIST_FILE: Configuration/iOS-Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: '1'
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CURRENT_PROJECT_VERSION: '1'
+        APNS_ENVIRONMENT: development
+  IAMCEOTests-iOS:
+    type: bundle.unit-test
+    platform: iOS
+    # 앱 빌드만 하는 곳(scripts/build-native.ts, release-ios.ts, check.sh build)은 Tests 폴더를 복사하지 않는다. 그때도 계획이 만들어지게 둔다.
+    sources:
+      - path: Tests/IAMCEOTests
+        optional: true
+    dependencies:
+      - target: IAMCEO-iOS-TestHost
+      - target: AttachmentException-iOS
+        link: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.iamceo.native.ios.tests
+        # SwiftPM 시험(swift test)과 같은 모듈 이름: 시험 이름이 두 곳에서 같게(IAMCEOTests.이름) 찍힌다.
+        PRODUCT_MODULE_NAME: IAMCEOTests
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: '1'
+        HEADER_SEARCH_PATHS: $(SRCROOT)/Sources/AttachmentException/include
 schemes:
   IAMCEO-macOS:
     build:
@@ -144,3 +185,10 @@ schemes:
     build:
       targets:
         IAMCEO-iOS: all
+  IAMCEO-iOS-Tests:
+    build:
+      targets:
+        IAMCEOTests-iOS: [test]
+    test:
+      config: Debug
+      targets: [IAMCEOTests-iOS]

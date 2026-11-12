@@ -4,11 +4,16 @@ import { defaultCoreBin, type Config } from "./config.ts";
 import type { OrchestratorApi } from "./orchestrator-api.ts";
 import { childEnv } from "./runner/env.ts";
 import { ApiError, type Store } from "./store.ts";
+import type { ErrorCode } from "../shared/error-codes.ts";
 
 export type TerminalMode = "observe" | "control";
 export type TerminalSizePolicy = "core" | "fit";
-export interface TerminalSocketData { kind: "terminal"; authGeneration: number; stream: TerminalStream }
-export interface RealtimeSocketData { kind: "realtime"; authGeneration: number; protocol: 1 | 2 }
+/**
+ * authGeneration: 공용 접속 코드로 연 연결의 코드 세대(코드를 바꾸면 닫는다).
+ * deviceId(G): 기기 열쇠로 연 연결의 기기. 그 기기를 끊으면 닫고, 공용 코드를 바꿔도 그대로다.
+ */
+export interface TerminalSocketData { kind: "terminal"; authGeneration: number; deviceId?: string; stream: TerminalStream }
+export interface RealtimeSocketData { kind: "realtime"; authGeneration: number; deviceId?: string; protocol: 1 | 2 }
 export type SocketData = TerminalSocketData | RealtimeSocketData;
 const MAX_BUFFER = 4 * 1024 * 1024;
 export interface TerminalStreamsOptions {
@@ -20,7 +25,7 @@ export function terminalSize(cols: unknown, rows: unknown): { cols: number; rows
   const integer = (raw: unknown, fallback: number) => {
     if (raw === null || raw === undefined) return fallback;
     if ((typeof raw !== "number" && typeof raw !== "string") || raw === "" || !Number.isSafeInteger(Number(raw))) {
-      throw new ApiError(400, "터미널 크기는 정수여야 합니다");
+      throw new ApiError(400, "터미널 크기는 정수여야 합니다", "terminal_size_invalid");
     }
     return Number(raw);
   };
@@ -119,15 +124,15 @@ export class TerminalStreams {
   }
   async prepare(memberId: string, url: URL): Promise<TerminalStream> {
     const mode = url.searchParams.get("mode") ?? "observe";
-    if (mode !== "observe" && mode !== "control") throw new ApiError(400, "터미널 연결 방식이 잘못되었습니다");
+    if (mode !== "observe" && mode !== "control") throw new ApiError(400, "터미널 연결 방식이 잘못되었습니다", "terminal_mode_invalid");
     const sizePolicy = url.searchParams.get("size") ?? "fit";
-    if (sizePolicy !== "core" && sizePolicy !== "fit") throw new ApiError(400, "터미널 크기 정책이 잘못되었습니다");
+    if (sizePolicy !== "core" && sizePolicy !== "fit") throw new ApiError(400, "터미널 크기 정책이 잘못되었습니다", "terminal_size_policy_invalid");
     const member = this.store.requireMember(memberId);
     const project = this.store.requireProject(member.projectId);
     if (this.stopped || member.backend !== "core" || !member.paneId || member.origin === "manual" || project.archived || !project.runnerEnabled) {
       throw new ApiError(409, "지금 터미널을 열 수 없습니다", "TERMINAL_REFUSED");
     }
-    if (!this.orch.terminalStreamInfo) throw new ApiError(501, "터미널 스트림을 지원하지 않습니다");
+    if (!this.orch.terminalStreamInfo) throw new ApiError(501, "터미널 스트림을 지원하지 않습니다", "terminal_stream_unsupported");
     const size = terminalSize(url.searchParams.get("cols"), url.searchParams.get("rows"));
     const stream = new TerminalStream(this, memberId, member.paneId, mode, size, url.searchParams.get("lease"), sizePolicy);
     this.streams.add(stream);
@@ -140,7 +145,7 @@ export class TerminalStreams {
       }
       await this.restore(memberId);
       const peers = [...this.streams].filter(s => s.memberId === memberId && s.mode === mode);
-      if (this.streams.size > 12 || peers.length > (mode === "observe" ? 3 : 1)) throw new ApiError(429, "열린 터미널이 너무 많습니다");
+      if (this.streams.size > 12 || peers.length > (mode === "observe" ? 3 : 1)) throw new ApiError(429, "열린 터미널이 너무 많습니다", "terminal_stream_limit");
       const currentSize = await this.orch.terminalStreamInfo(memberId);
       if (this.stopped || this.store.requireMember(memberId).paneId !== member.paneId) throw new ApiError(409, "세션이 바뀌었습니다", "TERMINAL_REFUSED");
       stream.requireLease(true);
@@ -280,7 +285,9 @@ export class TerminalStream {
     const reason = failure instanceof LeaseEnded ? "lease_ended"
       : failure instanceof ApiError && failure.code === "TERMINAL_GONE" ? "terminal_gone"
       : failure instanceof ApiError && failure.code === "TERMINAL_REFUSED" ? "refused" : "error";
-    void this.close(reason, reason === "refused" && failure instanceof Error ? failure.message : "터미널에 연결할 수 없습니다");
+    // code: 거절의 좁은 사유(shared/error-codes.ts). 앱은 문장 대신 이것으로 가른다. 없으면 싣지 않는다.
+    const code = reason === "refused" && failure instanceof ApiError ? failure.reason ?? failure.code : undefined;
+    void this.close(reason, reason === "refused" && failure instanceof Error ? failure.message : "터미널에 연결할 수 없습니다", code);
   }
   async refreshSize(): Promise<void> {
     if (this.ended || (this.mode !== "observe" && this.sizePolicy !== "core") || this.sizeCheck) return;
@@ -392,11 +399,11 @@ export class TerminalStream {
   private activity(text: string): void {
     try { this.owner.store.appendActivity(this.memberId, "system", text); } catch { /* member may have been removed */ }
   }
-  close(reason?: string, message?: string): Promise<void> {
+  close(reason?: string, message?: string, code?: ErrorCode): Promise<void> {
     if (this.closing) return this.closing;
     if (this.ended) return Promise.resolve(); // Bun may synchronously re-enter via websocket.close.
     this.ended = true;
-    if (reason) this.sendText({ type: "closed", reason, ...(message ? { message } : {}) });
+    if (reason) this.sendText({ type: "closed", reason, ...(message ? { message } : {}), ...(code ? { code } : {}) });
     this.ws?.close(1000);
     if (this.started && this.mode === "control") this.activity("대표가 터미널에서 직접 입력을 마쳤습니다");
     return this.closing = (async () => {

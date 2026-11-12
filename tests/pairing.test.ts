@@ -123,7 +123,11 @@ describe("짝 맺기 HTTP", () => {
     const ok = await claim(code);
     expect(ok.status).toBe(200);
     expect(ok.headers.get("cache-control")).toBe("no-store");
-    expect(((await ok.json()) as { accessCode: string }).accessCode).toBe(CODE);
+    // G(C3): 공용 접속 코드가 아니라 그 기기만의 열쇠를 같은 칸에 준다. 출시된 앱은 그 값을 그대로 Bearer 로 쓴다.
+    const { accessCode } = (await ok.json()) as { accessCode: string };
+    expect(accessCode).not.toBe(CODE);
+    expect(accessCode.startsWith("dk1.")).toBe(true);
+    expect((await fetch(`${base}/api/pair/status?code=${code}`, { headers: { Authorization: `Bearer ${accessCode}` } })).status).toBe(200);
     const again = await claim(code);
     expect(again.status).toBe(401);
     expect(((await again.json()) as { error: string }).error).toContain("새 QR");

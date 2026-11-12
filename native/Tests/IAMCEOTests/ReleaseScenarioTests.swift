@@ -1,3 +1,5 @@
+// 실제 서버(bun 자식 프로세스)를 띄워 붙는 시험이라 Mac 에서만 돈다. iPhone 시뮬레이터에는 Process 가 없다.
+#if os(macOS)
 import Foundation
 import XCTest
 import Darwin
@@ -203,3 +205,4 @@ private final class ReleaseHost {
         await network.close()
     }
 }
+#endif

@@ -244,16 +244,20 @@ test("native archive, pairing and both Bearer WebSocket protocols survive web re
   const pair = await json(await f.request("/api/pair/start", "POST"));
   await json(await f.request(`/api/pair/status?code=${pair.code}`));
   const claim = await json(await fetch(f.base + "/pair/claim", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: pair.code, device: "iPhone fixture" }) }));
-  expect(claim.accessCode).toBe(f.config.accessCode);
+  // G(C3): QR 은 그 기기만의 열쇠를 같은 칸에 준다. 출시된 앱처럼 그 값을 그대로 쓰면 REST·실시간·터미널 스트림이 모두 열린다.
+  expect(claim.accessCode).not.toBe(f.config.accessCode);
+  expect(String(claim.accessCode).startsWith("dk1.")).toBe(true);
   await json(await f.request("/api/pair/ack", "POST", { code: pair.code, confirmationToken: claim.confirmationToken }));
-  for (const query of ["", "?v=2", "?v=2&lite=1"]) {
-    const ws = socket(f.base.replace("http:", "ws:") + "/ws" + query, f.config.accessCode);
-    try { expect(await ws.received).toMatchObject({ type: "hello", ...(query ? { protocol: 2 } : {}) }); }
-    finally { await ws.close(); }
+  for (const code of [f.config.accessCode, String(claim.accessCode)]) {
+    for (const query of ["", "?v=2", "?v=2&lite=1"]) {
+      const ws = socket(f.base.replace("http:", "ws:") + "/ws" + query, code);
+      try { expect(await ws.received).toMatchObject({ type: "hello", ...(query ? { protocol: 2 } : {}) }); }
+      finally { await ws.close(); }
+    }
+    const terminal = socket(f.base.replace("http:", "ws:") + `/api/members/${f.member.id}/terminal/stream?mode=observe&cols=100&rows=30&size=core`, code);
+    try { expect(await terminal.received).toMatchObject({ type: "ready" }); }
+    finally { await terminal.close(); }
   }
-  const terminal = socket(f.base.replace("http:", "ws:") + `/api/members/${f.member.id}/terminal/stream?mode=observe&cols=100&rows=30&size=core`, f.config.accessCode);
-  try { expect(await terminal.received).toMatchObject({ type: "ready" }); }
-  finally { await terminal.close(); }
   for (const path of ["/ws", "/ws?v=2", "/api/bootstrap", `/api/members/${f.member.id}/terminal/stream?mode=observe`, "/files/missing/native.txt"]) {
     expect((await fetch(f.base + path + (path.includes("?") ? "&" : "?") + `t=${f.config.accessCode}`)).status).toBe(401);
   }

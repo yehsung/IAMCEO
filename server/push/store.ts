@@ -60,14 +60,14 @@ function event(row: EventRow): PushEvent {
     target: JSON.parse(row.target), occurredAt: row.occurred_at, expiresAt: row.expires_at };
 }
 function uuid(id: string): void {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new ApiError(400, "기기 ID가 올바르지 않습니다");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new ApiError(400, "기기 ID가 올바르지 않습니다", "push_device_id_invalid");
 }
 function label(value: string): void {
-  if (Array.from(value).length < 1 || Array.from(value).length > 40 || /[\p{Cc}\p{Cf}]/u.test(value)) throw new ApiError(400, "기기 이름이 올바르지 않습니다");
+  if (Array.from(value).length < 1 || Array.from(value).length > 40 || /[\p{Cc}\p{Cf}]/u.test(value)) throw new ApiError(400, "기기 이름이 올바르지 않습니다", "push_device_name_invalid");
 }
 function authorized(value: PushAuthorization): boolean { return ["authorized", "provisional", "ephemeral"].includes(value); }
 function revision(value: number): void {
-  if (!Number.isSafeInteger(value) || value < 1) throw new ApiError(400, "기기 revision이 올바르지 않습니다");
+  if (!Number.isSafeInteger(value) || value < 1) throw new ApiError(400, "기기 revision이 올바르지 않습니다", "push_device_revision_invalid");
 }
 
 /** Owns only push tables, on the same connection as the domain Store. No network, timers or Bus. */
@@ -98,7 +98,7 @@ export class PushStore implements PushReportGroupStore {
   getDevice(id: string): PushDevice | null { const row = this.row(id); return row ? device(row) : null; }
   requireDevice(id: string): PushDevice {
     const found = this.getDevice(id);
-    if (!found) throw new ApiError(404, "기기를 찾을 수 없습니다");
+    if (!found) throw new ApiError(404, "기기를 찾을 수 없습니다", "push_device_not_found");
     return found;
   }
   listDevices(): PushDevice[] { return this.all<DeviceRow>("SELECT * FROM push_devices ORDER BY last_seen_at DESC,id LIMIT 100").map(device); }
@@ -108,8 +108,8 @@ export class PushStore implements PushReportGroupStore {
   }
   private checkRevision(row: DeviceRow | null, expected: number | null): void {
     if (expected !== null) revision(expected);
-    if (!row && expected !== null) throw new ApiError(404, "기기를 찾을 수 없습니다");
-    if (row && row.revision !== expected) throw new ApiError(409, "기기 등록 상태가 바뀌었습니다. 다시 확인해 주세요");
+    if (!row && expected !== null) throw new ApiError(404, "기기를 찾을 수 없습니다", "push_device_not_found");
+    if (row && row.revision !== expected) throw new ApiError(409, "기기 등록 상태가 바뀌었습니다. 다시 확인해 주세요", "push_device_changed");
   }
   private provider(bundleId: string, environment: PushEnvironment): PushProviderStatus | undefined {
     return this.providers().find((p) => p.environment === environment && p.bundleId === bundleId);
@@ -123,14 +123,14 @@ export class PushStore implements PushReportGroupStore {
     uuid(id);
     if (request.label !== undefined) label(request.label);
     if (request.platform !== "ios" || !["sandbox", "production"].includes(request.environment) || !authorized(request.authorization) ||
-        request.deviceToken.length > 1024 || !/^(?:[0-9a-f]{2})+$/i.test(request.deviceToken)) throw new ApiError(400, "기기 등록 값이 올바르지 않습니다");
+        request.deviceToken.length > 1024 || !/^(?:[0-9a-f]{2})+$/i.test(request.deviceToken)) throw new ApiError(400, "기기 등록 값이 올바르지 않습니다", "push_device_invalid");
     const allowed = this.providers().find((p) => p.environment === request.environment)?.bundleId ?? DEFAULT_PUSH_BUNDLE_ID;
-    if (request.bundleId !== allowed) throw new ApiError(400, "허용되지 않은 앱입니다");
+    if (request.bundleId !== allowed) throw new ApiError(400, "허용되지 않은 앱입니다", "push_bundle_not_allowed");
     return this.transaction(() => {
       this.sweep();
       const before = this.row(id);
       this.checkRevision(before, request.expectedRevision);
-      if (!before && this.one<{ n: number }>("SELECT COUNT(*) n FROM push_devices")!.n >= 100) throw new ApiError(409, "기기 등록 한도입니다");
+      if (!before && this.one<{ n: number }>("SELECT COUNT(*) n FROM push_devices")!.n >= 100) throw new ApiError(409, "기기 등록 한도입니다", "push_device_limit");
       const at = this.timestamp();
       const token = request.deviceToken.toLowerCase();
       const previous = this.one<DeviceRow>("SELECT * FROM push_devices WHERE bundle_id=? AND environment=? AND token=? AND id!=?", request.bundleId, request.environment, token, id);
@@ -157,9 +157,9 @@ export class PushStore implements PushReportGroupStore {
   patchDevice(id: string, patch: PatchPushDeviceRequest): PushDevice {
     uuid(id); revision(patch.expectedRevision);
     if (patch.label !== undefined) label(patch.label);
-    if (patch.authorization !== undefined && !["authorized", "provisional", "ephemeral", "denied", "notDetermined"].includes(patch.authorization)) throw new ApiError(400, "알림 권한이 올바르지 않습니다");
-    if (patch.enabled === undefined && patch.preferences === undefined && patch.label === undefined && patch.authorization === undefined) throw new ApiError(400, "변경할 값이 없습니다");
-    if (patch.preferences && (Object.keys(patch.preferences).length === 0 || Object.keys(patch.preferences).some((k) => !PUSH_KINDS.includes(k as PushKind)))) throw new ApiError(400, "알림 종류가 올바르지 않습니다");
+    if (patch.authorization !== undefined && !["authorized", "provisional", "ephemeral", "denied", "notDetermined"].includes(patch.authorization)) throw new ApiError(400, "알림 권한이 올바르지 않습니다", "push_authorization_invalid");
+    if (patch.enabled === undefined && patch.preferences === undefined && patch.label === undefined && patch.authorization === undefined) throw new ApiError(400, "변경할 값이 없습니다", "nothing_to_change");
+    if (patch.preferences && (Object.keys(patch.preferences).length === 0 || Object.keys(patch.preferences).some((k) => !PUSH_KINDS.includes(k as PushKind)))) throw new ApiError(400, "알림 종류가 올바르지 않습니다", "push_kind_invalid");
     return this.transaction(() => {
       this.sweep();
       const before = this.row(id);
@@ -167,7 +167,7 @@ export class PushStore implements PushReportGroupStore {
       const row = before!;
       const permission = patch.authorization ?? row.authorization;
       const enabled = authorized(permission) && (patch.enabled ?? !!row.enabled);
-      if (patch.enabled && (!authorized(permission) || row.state !== "active" || !row.token || !this.ready(row))) throw new ApiError(409, "이 기기에서 알림을 켤 수 없습니다");
+      if (patch.enabled && (!authorized(permission) || row.state !== "active" || !row.token || !this.ready(row))) throw new ApiError(409, "이 기기에서 알림을 켤 수 없습니다", "push_enable_refused");
       const preferences = { ...storedPushPreferences(row.preferences), ...patch.preferences };
       this.run("UPDATE push_devices SET enabled=?,preferences=?,label=?,authorization=?,revision=revision+1 WHERE id=?",
         enabled ? 1 : 0, JSON.stringify(preferences), patch.label ?? row.label, permission, id);
@@ -301,14 +301,14 @@ export class PushStore implements PushReportGroupStore {
         .map((v) => ({ deviceId: v.device_id, registrationGeneration: v.registration_generation, cancelledAt: v.cancelled_at })) };
   }
   appendReport(message: Message): PushReportGroup {
-    if (message.mine || !message.memberId || message.kind !== "완료") throw new ApiError(400, "완료 보고가 아닙니다");
+    if (message.mine || !message.memberId || message.kind !== "완료") throw new ApiError(400, "완료 보고가 아닙니다", "push_not_completion_report");
     return this.transaction(() => {
       const existing = this.one<{ group_id: string }>("SELECT group_id FROM push_report_group_reports WHERE message_id=?", message.id);
       if (existing) return this.getReportGroup(existing.group_id)!;
       const at = this.timestamp();
       this.closeDueGroups(at);
       if (!this.projectActive(message.projectId) || !this.one("SELECT 1 FROM members WHERE id=? AND project_id=?", message.memberId, message.projectId) ||
-          !this.one("SELECT 1 FROM messages WHERE id=? AND project_id=? AND member_id=? AND mine=0 AND kind='완료'", message.id, message.projectId, message.memberId)) throw new ApiError(404, "보고를 찾을 수 없습니다");
+          !this.one("SELECT 1 FROM messages WHERE id=? AND project_id=? AND member_id=? AND mine=0 AND kind='완료'", message.id, message.projectId, message.memberId)) throw new ApiError(404, "보고를 찾을 수 없습니다", "report_not_found");
       let leading = false;
       let row = this.one<GroupRow>("SELECT * FROM push_report_groups WHERE project_id=? AND member_id=? AND state='open'", message.projectId, message.memberId);
       if (!row) {
@@ -367,12 +367,12 @@ export class PushStore implements PushReportGroupStore {
   }
   eventTarget(id: string): PushEventTargetResult {
     const saved = this.getEvent(id);
-    if (!saved || Date.parse(saved.occurredAt) <= this.now() - 90 * DAY || (saved.kind !== "test" && !this.projectActive(saved.projectId))) throw new ApiError(404, "알림을 찾을 수 없습니다");
-    if (saved.kind === "todo_created" && !this.one("SELECT 1 FROM todos WHERE id=? AND project_id=?", saved.sourceKey.slice("todo:".length), saved.projectId)) throw new ApiError(404, "알림 대상을 찾을 수 없습니다");
+    if (!saved || Date.parse(saved.occurredAt) <= this.now() - 90 * DAY || (saved.kind !== "test" && !this.projectActive(saved.projectId))) throw new ApiError(404, "알림을 찾을 수 없습니다", "push_event_not_found");
+    if (saved.kind === "todo_created" && !this.one("SELECT 1 FROM todos WHERE id=? AND project_id=?", saved.sourceKey.slice("todo:".length), saved.projectId)) throw new ApiError(404, "알림 대상을 찾을 수 없습니다", "push_target_not_found");
     const target = saved.target;
     if (target.screen === "inbox" && !this.one("SELECT 1 FROM decisions WHERE id=? AND project_id=?", target.decisionId, target.projectId) ||
         target.screen === "team" && !this.one("SELECT 1 FROM members WHERE id=? AND project_id=?", target.memberId, target.projectId) ||
-        target.screen === "chat" && !this.one("SELECT 1 FROM messages WHERE id=? AND project_id=?", target.messageId, target.projectId)) throw new ApiError(404, "알림 대상을 찾을 수 없습니다");
+        target.screen === "chat" && !this.one("SELECT 1 FROM messages WHERE id=? AND project_id=?", target.messageId, target.projectId)) throw new ApiError(404, "알림 대상을 찾을 수 없습니다", "push_target_not_found");
     const group = target.screen === "chat" && target.groupId ? this.getReportGroup(target.groupId) : null;
     return { serverId: this.serverId, eventId: id, target, ...(group ? { reportGroup: { id: group.id, projectId: group.projectId, memberId: group.memberId,
       openedAt: group.openedAt, closesAt: group.closesAt, lastMessageId: group.lastMessageId, reportIds: group.reportIds } } : {}) };

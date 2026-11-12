@@ -1,7 +1,8 @@
 import { configuredSecretRoots } from "./secret-paths.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { ModelCatalogReader } from "./models.ts";
-import { ApiRecovery, classifyTurnError, limitedModelName, modelCreditLimit, NoTerminalError, USAGE_MODEL_PREFIX, USAGE_WAIT_NOTE, usageModelResumeText, withRo, type ApiRecoveryOptions } from "./api-outage.ts";
+import { CONTROL_UNKNOWN_NOTE, CORE_RECONNECT_HELD_NOTE, HOLD_NOTES, REOPEN_RETRY_NOTE, startingUnknownNote, stopCheckHeldNote } from "./hold-codes.ts";
+import { ApiRecovery, classifyTurnError, limitedModelName, modelCreditLimit, NoTerminalError, USAGE_MODEL_PREFIX, usageModelResumeText, withRo, type ApiRecoveryOptions } from "./api-outage.ts";
 import { DeliveryRecovery, type RecoveryRunner } from "./delivery-recovery.ts";
 import { writeStatuslineWrapper } from "./runner/statusline.ts";
 import { endedByRestart, RESTART_EXIT_NOTE, RESTART_REOPENED_NOTE, RESTART_RESUME_TEXT, RESTART_WAKE_MAX_ATTEMPTS, RESTART_WAKE_PACING, restartNoteIn, type RestartWake, type RestartWakePacing } from "./restart-wake.ts";
@@ -64,6 +65,7 @@ import { CoreError, coreRpc, type CoreHello, type CoreTerminal } from "./runner/
 import { CoreSupervisor } from "./core-supervisor.ts";
 import type { DeliveryDispatch, ReportReferences, LifecycleJournal } from "./service-contracts.ts";
 import type { DeliveryRecoveryRequest, DeliveryRecoveryResult } from "../shared/types.ts";
+import type { ErrorCode } from "../shared/error-codes.ts";
 import type { AgentOperationContext, ManualInboxBatch, ManualInboxAckRequest, ManualInboxAckResult, FreshSessionRequest, MemberConfigWriteResult, OperationReceipt, RevisionPrecondition, SettingsWriteResult, TerminalControlRequestV2, TodoDoneRequest, TodoWriteResult } from "../shared/operations.ts";
 import { coreContextMeasurement, observeCompactBoundary, type CompactBoundaryBaseline } from "./runner/core-context.ts";
 import { readJsonlRange, parseCodexSessionMeta, jsonObject } from "./runner/delivery-evidence.ts";
@@ -503,22 +505,21 @@ interface Runtime {
   quickExitNotified: boolean;
 }
 
-const HOLD_NOTES: Record<string, string> = {
-  delivery_unknown: "전달 여부를 확인할 수 없어 보류했습니다. 중복 실행 방지를 위해 자동 재전송하지 않습니다",
-  legacy_session: "이전 실행기의 세션입니다. 새 core 세션이 필요합니다",
-  blocked: "승인 창 앞에서 멈춤",
-  input_busy: "입력칸에 넣지 못함(선택 창 등)",
-  asleep: "잠듦",
-  offline: "세션이 보이지 않음",
-  backend_down: "실행기에 연결할 수 없음",
-  runner_disabled: "실행이 꺼져 있음",
-  archived: "보관되어 멈춤",
-};
 
 /** 턴 오류·전달 오류가 이어질 때 ref 없는 전달(보고·지시·완료)을 다시 보내는 간격의 배수. 잃지 않되 사용량을 태우지 않게 멀리 둔다. */
 const HELD_RETRY_FACTOR = 5;
 
 const WAKE_POST_KINDS = new Set<string>(["완료", "막힘", "질문"]);
+
+/**
+ * 작업 영수증의 좁은 사유(reason). 영수증의 code 는 넓은 옛 이름(TERMINAL_REFUSED 등)이라 앱이 사유를 가를 수 없다.
+ * ApiError 면 그 reason 이나(넓은 이름과 다르면) 자기 코드, 실행 엔진 거절이면 그 reason. 모르면 싣지 않는다(앱은 그때 옛 방식대로 문장을 본다).
+ */
+function receiptReason(error: unknown, family: ErrorCode): { reason?: ErrorCode } {
+  const reason = error instanceof ApiError ? error.reason ?? (error.code !== family ? error.code : undefined)
+    : error instanceof CoreError ? error.reason : undefined;
+  return reason ? { reason } : {};
+}
 
 /** Domain references also include orphan answers and todo correction notices. */
 class OrchestratorDeliveryRecovery extends DeliveryRecovery {
@@ -576,10 +577,10 @@ export function coreCompactStore(store: Store): NonNullable<CoreRunnerDeps["comp
       const state = store.ensureContextState(memberId);
       const saved = state?.baseline?.coreCompact as CoreCompactState | undefined;
       if (!saved) {
-        if (state.compaction && ["sending", "running", "uncertain"].includes(state.compaction.phase)) throw new ApiError(409, "미확정 압축의 baseline이 없어 자동 입력을 보류합니다");
+        if (state.compaction && ["sending", "running", "uncertain"].includes(state.compaction.phase)) throw new ApiError(409, "미확정 압축의 baseline이 없어 자동 입력을 보류합니다", "compact_baseline_missing");
         return null;
       }
-      if (!saved.baseline || !["sending", "running", "uncertain", "succeeded", "failed"].includes(saved.phase)) throw new ApiError(409, "압축 기록이 손상되어 자동 입력을 보류합니다");
+      if (!saved.baseline || !["sending", "running", "uncertain", "succeeded", "failed"].includes(saved.phase)) throw new ApiError(409, "압축 기록이 손상되어 자동 입력을 보류합니다", "compact_record_corrupt");
       if (saved.baseline.generation !== state.generation) return null;
       if (["sending", "running"].includes(saved.phase)) {
         const uncertain: CoreCompactState = { ...saved, phase: "uncertain" };
@@ -592,9 +593,9 @@ export function coreCompactStore(store: Store): NonNullable<CoreRunnerDeps["comp
     save(memberId, compact) {
       const state = store.ensureContextState(memberId);
       const member = store.requireMember(memberId);
-      if (state.generation !== compact.baseline.generation || member.sessionId !== compact.baseline.sessionId || member.paneId !== compact.baseline.terminalId) throw new ApiError(409, "문맥 세대나 세션이 변경되었습니다");
+      if (state.generation !== compact.baseline.generation || member.sessionId !== compact.baseline.sessionId || member.paneId !== compact.baseline.terminalId) throw new ApiError(409, "문맥 세대나 세션이 변경되었습니다", "context_generation_changed");
       const before = state.compaction;
-      if (before && before.id !== compact.id && (compact.phase !== "sending" || !["queued", "succeeded", "failed"].includes(before.phase))) throw new ApiError(409, "다른 압축 작업의 결과입니다");
+      if (before && before.id !== compact.id && (compact.phase !== "sending" || !["queued", "succeeded", "failed"].includes(before.phase))) throw new ApiError(409, "다른 압축 작업의 결과입니다", "compact_result_mismatch");
       if (before?.id === compact.id && ["succeeded", "failed"].includes(before.phase) && compact.phase !== before.phase) return;
       const at = new Date().toISOString();
       store.saveContextState({ ...state,
@@ -782,7 +783,7 @@ export class Orchestrator implements OrchestratorApi {
             if (journal.memberId === member.id && journal.intent === "start" && journal.identity.sessionGeneration === watched.sessionGeneration) this.finishLifecycle(journal, "confirmed", null, result.started.identity ?? this.identity(this.store.requireMember(member.id)));
           }
           const current = this.store.requireMember(member.id);
-          if (current.lastError?.startsWith("starting_unknown") || current.lastError?.startsWith("core 재연결 보류")) this.store.patchMember(member.id, { lastError: null });
+          if (current.fenceCode === "starting_unknown" || current.fenceCode === "core_reconnect_held") this.store.patchMember(member.id, { lastError: null });
           // 깨우다 결과를 놓친 기동이 실제로는 떠 있었다. 잠듦으로 두면 살아 있는 CLI 가 명부에서는 잠든 채 남는다.
           if (current.status === "asleep") this.settle(current);
           // 재시작으로 꺼진 줄 알았던 팀장의 터미널이 떠 있다. 서버가 다시 열다 결과를 놓친 것이면 이어 연 것으로 닫는다.
@@ -974,7 +975,7 @@ export class Orchestrator implements OrchestratorApi {
     if (rt.closing || rt.starting || rt.reopening || rt.pumping) throw new ApiError(409, "세션을 처리하는 중입니다. 잠시 뒤 다시 여세요", "TERMINAL_REFUSED");
     const runner = this.runnerOf(member);
     if (!runner.terminalControl) throw new ApiError(501, "터미널 조작을 지원하지 않습니다", "TERMINAL_REFUSED");
-    if (this.terminalMutations.has(memberId)) throw new ApiError(409, "터미널 입력을 처리하는 중입니다");
+    if (this.terminalMutations.has(memberId)) throw new ApiError(409, "터미널 입력을 처리하는 중입니다", "terminal_busy");
     this.terminalMutations.add(memberId);
     try {
       if (action.action === "input" || action.action === "key") this.invalidateCoreMeasurement(member);
@@ -985,7 +986,8 @@ export class Orchestrator implements OrchestratorApi {
       }
       return result;
     } catch (e) {
-      if (e instanceof CoreError && !e.uncertain) throw new ApiError(409, e.message, "TERMINAL_REFUSED");
+      // 넓은 코드 TERMINAL_REFUSED 는 출시된 앱이 보므로 그대로 두고, 실행 엔진의 좁은 사유(core_terminal_missing 등)를 reason 으로 더한다.
+      if (e instanceof CoreError && !e.uncertain) throw new ApiError(409, e.message, "TERMINAL_REFUSED", e.reason);
       throw e;
     } finally {
       this.terminalMutations.delete(memberId);
@@ -1087,7 +1089,7 @@ export class Orchestrator implements OrchestratorApi {
     const runner = this.runners.get("core");
     if (runner instanceof CoreRunner) runner.forgetUnknownStart(member.id);
     const current = this.store.requireMember(member.id);
-    if (current.lastError?.startsWith("starting_unknown")) this.store.patchMember(member.id, { lastError: null });
+    if (current.fenceCode === "starting_unknown") this.store.patchMember(member.id, { lastError: null });
     this.store.appendActivity(member.id, "system", "세션 기동 결과를 확인하지 못했고 터미널이 생기지 않아 기동을 취소했습니다. 필요하면 다시 깨웁니다");
     return true;
   }
@@ -1095,7 +1097,7 @@ export class Orchestrator implements OrchestratorApi {
   private prepareLifecycle(member: Member, intent: LifecycleJournal["intent"]): LifecycleJournal {
     const before = this.pendingLifecycle(member.id);
     if (before) {
-      if (before.intent !== intent) throw new ApiError(409, "미확정 세션 작업을 먼저 확인해야 합니다");
+      if (before.intent !== intent) throw new ApiError(409, "미확정 세션 작업을 먼저 확인해야 합니다", "lifecycle_unresolved");
       return before;
     }
     const at = new Date().toISOString();
@@ -1131,7 +1133,7 @@ export class Orchestrator implements OrchestratorApi {
       const unknown = launched && (!(error instanceof CoreError) || error.uncertain || ["starting_unknown", "conflict", "unknown"].includes(error.kind));
       this.finishLifecycle(entry, unknown ? "unknown" : "refused", (error as Error).message.slice(0, 500));
       if (unknown) {
-        this.store.patchMember(member.id, { lastError: `starting_unknown: ${(error as Error).message.slice(0, 500)}` });
+        this.store.patchMember(member.id, { lastError: startingUnknownNote((error as Error).message), fenceCode: "starting_unknown" });
         this.coreSupervisor?.watch(this.runnerMember(this.store.requireMember(member.id), project));
       }
       throw error;
@@ -1140,7 +1142,7 @@ export class Orchestrator implements OrchestratorApi {
 
   private async stopManaged(member: Member, intent: "sleep" | "close" | "archive" | "fresh_session", whileWorking: boolean): Promise<void> {
     const lease = this.store.inputState(member.id).lease;
-    if (lease && lease.identity.terminalId === member.paneId) throw new ApiError(409, "직접 조작권이 유효한 동안 세션을 종료할 수 없습니다");
+    if (lease && lease.identity.terminalId === member.paneId) throw new ApiError(409, "직접 조작권이 유효한 동안 세션을 종료할 수 없습니다", "terminal_lease_active");
     const entry = this.prepareLifecycle(member, intent);
     this.finishLifecycle(entry, "started", whileWorking ? "while_working:" : "idle_only:");
     try {
@@ -1149,8 +1151,8 @@ export class Orchestrator implements OrchestratorApi {
     } catch (error) {
       const refused = (error instanceof CoreError && !error.uncertain) || error instanceof ApiError;
       this.finishLifecycle(entry, entry.phase !== "unknown" && refused ? "refused" : "unknown", `${whileWorking ? "while_working" : "idle_only"}: ${(error as Error).message.slice(0, 500)}`);
-      if (error instanceof CoreError && !error.uncertain && error.kind === "input_busy") throw new ApiError(409, "입력칸에 글이 남아 있거나 입력 상태를 확인하지 못해 닫지 않았습니다. 터미널에서 지운 뒤 다시 시도하세요");
-      if (error instanceof CoreError && !error.uncertain && error.kind === "busy") throw new ApiError(409, "실행 중인 일이나 미해결 입력이 있어 닫지 않았습니다. 터미널과 전달 결과를 확인해 주세요");
+      if (error instanceof CoreError && !error.uncertain && error.kind === "input_busy") throw new ApiError(409, "입력칸에 글이 남아 있거나 입력 상태를 확인하지 못해 닫지 않았습니다. 터미널에서 지운 뒤 다시 시도하세요", "close_draft_present");
+      if (error instanceof CoreError && !error.uncertain && error.kind === "busy") throw new ApiError(409, "실행 중인 일이나 미해결 입력이 있어 닫지 않았습니다. 터미널과 전달 결과를 확인해 주세요", "close_busy");
       throw error;
     }
   }
@@ -1184,8 +1186,8 @@ export class Orchestrator implements OrchestratorApi {
           await this.sleepMember(member.id, { force: journal.intent === "archive" || (journal.reason?.startsWith("while_working:") ?? false), recovering: true, ...(journal.intent === "archive" ? { holdAs: "archived" as const } : {}) });
           if (journal.intent === "archive" && !this.store.requireProject(member.projectId).archived) for (const d of this.store.listPending(member.id)) if (d.status === "held" && d.holdReason === "archived") this.hold(d, "asleep");
         }
-        if (this.store.getMember(member.id)?.lastError?.startsWith("종료 확인 보류:")) this.store.patchMember(member.id, { lastError: null });
-      } catch (error) { this.store.patchMember(member.id, { lastError: `종료 확인 보류: ${(error as Error).message.slice(0, 500)}` }); }
+        if (this.store.getMember(member.id)?.fenceCode === "stop_check_held") this.store.patchMember(member.id, { lastError: null });
+      } catch (error) { this.store.patchMember(member.id, { lastError: stopCheckHeldNote((error as Error).message), fenceCode: "stop_check_held" }); }
     }
   }
 
@@ -1327,7 +1329,7 @@ export class Orchestrator implements OrchestratorApi {
     // 결과를 모르는 병렬 설정 명령은 그때의 터미널에 들어갔다. 지금 터미널이 따로 있으면 그 보류는 지금 터미널의 것이다.
     if (member.paneId && member.paneId !== terminalId) return;
     const parallel = this.store.deferredMemberConfig(member.id)?.signature === `parallel_unknown:${this.store.memberRevisions(member.id).sessionGeneration}`;
-    const noted = !!member.lastError?.startsWith("control_unknown:");
+    const noted = member.fenceCode === "control_unknown";
     if (!parallel && !noted) return;
     this.store.transaction(() => {
       if (parallel) this.store.clearDeferredMemberConfig(member.id);
@@ -1497,7 +1499,7 @@ export class Orchestrator implements OrchestratorApi {
    * (releaseMember·completed·이어가기). 다시 열기·재결합·CLI 의 쉬는 중 보고·터미널 종료 알림이 지우거나 덮어쓰지 않는다.
    */
   private keepsUsageNote(member: Member): boolean {
-    return member.lastError === USAGE_WAIT_NOTE && !!this.apiRecovery?.usageLimited(member.id);
+    return member.fenceCode === "usage_wait" && !!this.apiRecovery?.usageLimited(member.id);
   }
 
   /**
@@ -1714,9 +1716,9 @@ export class Orchestrator implements OrchestratorApi {
 
   async operation(operationId: string): Promise<OperationReceipt> {
     const receipt = this.store.getOperation(operationId);
-    if (!receipt) throw new ApiError(404, "작업을 찾을 수 없습니다");
+    if (!receipt) throw new ApiError(404, "작업을 찾을 수 없습니다", "operation_not_found");
     if (receipt.projectId) this.store.requireProject(receipt.projectId);
-    if (receipt.memberId && this.store.requireMember(receipt.memberId).projectId !== receipt.projectId) throw new ApiError(404, "작업을 찾을 수 없습니다");
+    if (receipt.memberId && this.store.requireMember(receipt.memberId).projectId !== receipt.projectId) throw new ApiError(404, "작업을 찾을 수 없습니다", "operation_not_found");
     return receipt;
   }
 
@@ -1731,7 +1733,7 @@ export class Orchestrator implements OrchestratorApi {
       return this.store.finishOperation({ ...receipt, status: "applied", result: { member: updated, sessionGeneration: this.store.memberRevisions(memberId).sessionGeneration } }) as OperationReceipt<"fresh_session">;
     } catch (error) {
       const unknown = this.pendingLifecycle(memberId)?.phase === "unknown" || (error instanceof CoreError && error.uncertain);
-      return this.store.finishOperation({ ...receipt, status: unknown ? "unknown" : "refused", code: unknown ? "SESSION_UNKNOWN" : "SESSION_REFUSED", error: (error as Error).message.slice(0, 500) }) as OperationReceipt<"fresh_session">;
+      return this.store.finishOperation({ ...receipt, status: unknown ? "unknown" : "refused", code: unknown ? "SESSION_UNKNOWN" : "SESSION_REFUSED", error: (error as Error).message.slice(0, 500), ...receiptReason(error, "SESSION_REFUSED") }) as OperationReceipt<"fresh_session">;
     }
   }
 
@@ -1744,23 +1746,23 @@ export class Orchestrator implements OrchestratorApi {
     try {
       if (request.action !== "release") this.requireActive(this.store.requireProject(member.projectId));
       const generation = this.store.memberRevisions(memberId).sessionGeneration;
-      if (generation !== request.expectedSessionGeneration) throw new ApiError(409, "세션 세대가 변경되었습니다");
+      if (generation !== request.expectedSessionGeneration) throw new ApiError(409, "세션 세대가 변경되었습니다", "session_generation_changed");
       const lease = this.store.inputState(memberId).lease;
-      if (request.action === "claim" && lease && lease.claimId !== request.claimId) throw new ApiError(409, "다른 조작권이 있습니다");
-      if (request.action !== "claim" && (!lease || lease.claimId !== request.claimId || lease.identity.terminalId !== member.paneId)) throw new ApiError(409, "조작권이 만료되었거나 바뀌었습니다");
-      if ((request.action === "input" || request.action === "key") && request.inputSequence !== lease!.lastInputSequence + 1) throw new ApiError(409, "입력 순번이 변경되었습니다");
+      if (request.action === "claim" && lease && lease.claimId !== request.claimId) throw new ApiError(409, "다른 조작권이 있습니다", "terminal_lease_other");
+      if (request.action !== "claim" && (!lease || lease.claimId !== request.claimId || lease.identity.terminalId !== member.paneId)) throw new ApiError(409, "조작권이 만료되었거나 바뀌었습니다", "terminal_lease_expired");
+      if ((request.action === "input" || request.action === "key") && request.inputSequence !== lease!.lastInputSequence + 1) throw new ApiError(409, "입력 순번이 변경되었습니다", "terminal_input_sequence_stale");
       attempted = true;
       const result = await this.terminalControl(memberId, { action: request.action, leaseId: lease?.leaseId ?? request.claimId, ...(request.action === "input" ? { text: request.text } : request.action === "key" ? { key: request.key } : {}) });
       return this.store.finishOperation({ ...receipt, status: "applied", result: { memberId, action: request.action, claimId: request.claimId, sessionGeneration: generation, ...result, ...((request.action === "input" || request.action === "key") ? { inputSequence: request.inputSequence } : {}) } }) as OperationReceipt<"terminal_control">;
     } catch (error) {
       const unknown = attempted && !(error instanceof ApiError && error.code === "TERMINAL_REFUSED");
-      return this.store.finishOperation({ ...receipt, status: unknown ? "unknown" : "refused", code: unknown ? "TERMINAL_UNKNOWN" : "TERMINAL_REFUSED", error: (error as Error).message.slice(0, 500) }) as OperationReceipt<"terminal_control">;
+      return this.store.finishOperation({ ...receipt, status: unknown ? "unknown" : "refused", code: unknown ? "TERMINAL_UNKNOWN" : "TERMINAL_REFUSED", error: (error as Error).message.slice(0, 500), ...receiptReason(error, "TERMINAL_REFUSED") }) as OperationReceipt<"terminal_control">;
     }
   }
 
   async patchMemberConfigV2(memberId: string, patch: PatchMemberReq, precondition: RevisionPrecondition): Promise<MemberConfigWriteResult> {
     this.store.requireMember(memberId);
-    if (this.configWrites.has(memberId)) throw new ApiError(409, "팀원 설정을 적용하는 중입니다");
+    if (this.configWrites.has(memberId)) throw new ApiError(409, "팀원 설정을 적용하는 중입니다", "member_config_busy");
     if (this.store.memberRevisions(memberId).configRevision !== precondition.expectedRevision) throw new ApiError(409, "팀원 설정이 변경되었습니다", "REVISION_CONFLICT");
     this.configWrites.add(memberId);
     try {
@@ -1770,7 +1772,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   async updateSettingsV2(patch: SettingsPatch, precondition: RevisionPrecondition): Promise<SettingsWriteResult> {
-    if (this.settingsWriting) throw new ApiError(409, "설정을 적용하는 중입니다");
+    if (this.settingsWriting) throw new ApiError(409, "설정을 적용하는 중입니다", "settings_busy");
     if (this.store.settingsRevision() !== precondition.expectedRevision) throw new ApiError(409, "설정이 변경되었습니다", "REVISION_CONFLICT");
     this.settingsWriting = true;
     try {
@@ -1831,7 +1833,7 @@ export class Orchestrator implements OrchestratorApi {
         }
         if (this.watchesCore(member, project)) {
           this.coreSupervisor?.watch(this.runnerMember(member, project));
-          if (!this.coreSupervisor && member.paneId) this.store.patchMember(member.id, { lastError: "core 재연결 보류: 읽기 재결합을 지원하지 않습니다" });
+          if (!this.coreSupervisor && member.paneId) this.store.patchMember(member.id, { lastError: CORE_RECONNECT_HELD_NOTE, fenceCode: "core_reconnect_held" });
         }
       });
       await this.coreSupervisor?.tick();
@@ -2045,7 +2047,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private controlFenced(member: Member): boolean {
-    return !!member.lastError?.startsWith("control_unknown:") ||
+    return member.fenceCode === "control_unknown" ||
       this.store.deferredMemberConfig(member.id)?.signature === `parallel_unknown:${this.store.memberRevisions(member.id).sessionGeneration}`;
   }
 
@@ -2199,9 +2201,9 @@ export class Orchestrator implements OrchestratorApi {
   async tidyBoard(projectId: string): Promise<TidyResult> {
     const project = this.store.requireProject(projectId);
     this.requireActive(project);
-    if (!project.runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다. 총괄을 먼저 시작하세요");
+    if (!project.runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다. 총괄을 먼저 시작하세요", "runner_disabled");
     const lead = this.store.getConductor(projectId) ?? (await this.ensureConductor(projectId));
-    if (lead.origin === "adopted") throw new ApiError(409, `${josa(lead.name, "은")} 이전 실행기에서 넘겨받은 세션이라 도구가 없어 판을 정리할 수 없습니다`);
+    if (lead.origin === "adopted") throw new ApiError(409, `${josa(lead.name, "은")} 이전 실행기에서 넘겨받은 세션이라 도구가 없어 판을 정리할 수 없습니다`, "board_tidy_legacy_lead");
     if (this.tidyPending(lead.id)) return { already: true };
     this.queueBoardReview(projectId, lead, true);
     await this.pump(lead.id);
@@ -2281,13 +2283,13 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   async patchProject(projectId: string, patch: PatchProjectReq): Promise<Project> {
-    if (this.projectPatches.has(projectId) || this.archiving.has(projectId)) throw new ApiError(409, "프로젝트 변경을 처리하는 중입니다. 잠시 뒤 다시 하세요");
+    if (this.projectPatches.has(projectId) || this.archiving.has(projectId)) throw new ApiError(409, "프로젝트 변경을 처리하는 중입니다. 잠시 뒤 다시 하세요", "project_busy");
     this.projectPatches.add(projectId);
     const awake = new Set(this.store.listMembers(projectId).filter(m => m.status !== "asleep").map(m => m.id));
     try {
       const project = this.store.requireProject(projectId);
       const validated = this.store.validateProjectPatch(projectId, patch);
-      if (project.archived && patch.archived !== false && this.store.listMembers(projectId).some(m => m.origin !== "manual" && m.status !== "asleep" && (m.sessionId || m.paneId))) throw new ApiError(409, "보관된 프로젝트의 세션 종료 상태를 확인해야 합니다");
+      if (project.archived && patch.archived !== false && this.store.listMembers(projectId).some(m => m.origin !== "manual" && m.status !== "asleep" && (m.sessionId || m.paneId))) throw new ApiError(409, "보관된 프로젝트의 세션 종료 상태를 확인해야 합니다", "archive_stop_unverified");
       if (Object.entries(validated).every(([key, value]) => project[key as keyof Project] === value)) return project;
       await this.beforeProjectPatch(project, patch);
       const saved = this.store.patchProject(projectId, validated);
@@ -2308,7 +2310,7 @@ export class Orchestrator implements OrchestratorApi {
   /** v1 HTTP hook 호환. W9에서 HTTP도 patchProject 한 곳으로 옮긴다. */
   async beforeProjectPatch(project: Project, patch: PatchProjectReq): Promise<void> {
     this.store.validateProjectPatch(project.id, patch);
-    if (this.archiving.has(project.id)) throw new ApiError(409, "프로젝트 변경을 처리하는 중입니다. 잠시 뒤 다시 하세요");
+    if (this.archiving.has(project.id)) throw new ApiError(409, "프로젝트 변경을 처리하는 중입니다. 잠시 뒤 다시 하세요", "project_busy");
     if (patch.runnerEnabled === true && (patch.archived ?? project.archived)) this.requireActive(project);
     if (patch.archived !== true || project.archived) return;
     this.archiving.add(project.id);
@@ -2318,7 +2320,7 @@ export class Orchestrator implements OrchestratorApi {
       const managed = this.store.listMembers(project.id).filter(m => m.origin !== "manual" && m.status !== "asleep" && (m.sessionId || m.paneId));
       for (const m of managed) {
         const rt = this.runtime(m.id);
-        if (rt.starting || rt.reopening || rt.pumping || rt.closing || this.configWrites.has(m.id) || this.terminalMutations.has(m.id) || this.pendingLifecycle(m.id) || this.store.inputState(m.id).lease) throw new ApiError(409, `${m.name}의 세션을 처리하는 중입니다`);
+        if (rt.starting || rt.reopening || rt.pumping || rt.closing || this.configWrites.has(m.id) || this.terminalMutations.has(m.id) || this.pendingLifecycle(m.id) || this.store.inputState(m.id).lease) throw new ApiError(409, `${m.name}의 세션을 처리하는 중입니다`, "session_busy");
         try {
           await this.verifyArchiveSession(m);
           await this.runnerOf(m).checkStop?.(this.runnerMember(m, project), { whileWorking: false });
@@ -2335,7 +2337,7 @@ export class Orchestrator implements OrchestratorApi {
         } catch (e) {
           if (this.backendOf(m) !== "core" && this.skipsArchiveRefusal(m, e)) continue;
           const refusal = this.archiveRefusal(m, e);
-          throw new ApiError(refusal.status, `${refusal.message}${slept.length ? ` (${slept.map(s => s.name).join(", ")}의 칸은 이미 끝나 잠든 채로 둡니다)` : ""}`);
+          throw new ApiError(refusal.status, `${refusal.message}${slept.length ? ` (${slept.map(s => s.name).join(", ")}의 칸은 이미 끝나 잠든 채로 둡니다)` : ""}`, refusal.code);
         }
       }
       this.checkArchivable(project);
@@ -2349,25 +2351,25 @@ export class Orchestrator implements OrchestratorApi {
 
   private async verifyArchiveSession(member: Member): Promise<void> {
     const runner = this.runnerOf(member);
-    if (this.store.inputState(member.id).lease) throw new ApiError(409, "직접 조작권을 해제한 뒤 보관하세요");
+    if (this.store.inputState(member.id).lease) throw new ApiError(409, "직접 조작권을 해제한 뒤 보관하세요", "archive_terminal_lease");
     if (runner instanceof CoreRunner && !member.sessionId) {
       // 읽기 poll은 기존 terminal의 nonce만 탐색한다. 식별용 업무를 보내지 않는다.
       await runner.screen(this.runnerMember(member, this.store.requireProject(member.projectId)));
       await Promise.all([...this.eventQueues.values()]);
       member = this.store.requireMember(member.id);
     }
-    if (!member.sessionId) throw new ApiError(409, "이어갈 native 세션 기록을 확인하는 중입니다");
+    if (!member.sessionId) throw new ApiError(409, "이어갈 native 세션 기록을 확인하는 중입니다", "resume_record_checking");
     // 한 번도 턴을 돌지 않은 세션은 이어갈 기록이 없는 것이 정상이다. 잃을 대화가 없으니 보관을 막지 않는다(꺼내서 깨우면 새 세션으로 열린다).
     if (this.neverRan(member, runner)) return;
-    if ((runner as Runner).sessionExists?.(this.runnerMember(member, this.store.requireProject(member.projectId))) === false) throw new ApiError(409, "이어갈 native 세션 기록을 확인할 수 없습니다");
+    if ((runner as Runner).sessionExists?.(this.runnerMember(member, this.store.requireProject(member.projectId))) === false) throw new ApiError(409, "이어갈 native 세션 기록을 확인할 수 없습니다", "resume_record_missing");
     if (runner instanceof CoreRunner) {
       const log = this.contextLog(member);
-      if (!log) throw new ApiError(409, "이어갈 native 세션 기록을 확인할 수 없습니다");
+      if (!log) throw new ApiError(409, "이어갈 native 세션 기록을 확인할 수 없습니다", "resume_record_missing");
       const records = readJsonlRange(join(log.home, member.cli === "codex" ? "sessions" : "projects"), log.path).records;
       if (member.cli !== "codex" && !records.some(record => {
         const entry = jsonObject(record.value);
         return entry?.sessionId === member.sessionId && entry.cwd === member.cwd && !entry.isSidechain;
-      })) throw new ApiError(409, "현재 native 세션과 일치하는 주 세션 기록을 확인할 수 없습니다");
+      })) throw new ApiError(409, "현재 native 세션과 일치하는 주 세션 기록을 확인할 수 없습니다", "resume_record_mismatch");
     }
   }
 
@@ -2397,7 +2399,7 @@ export class Orchestrator implements OrchestratorApi {
 
   private archiveRefusal(m: Member, e: unknown): ApiError {
     const why = (e as Error).message;
-    return this.isCannotExit(e) ? new ApiError(409, `${m.name}의 칸을 끝내지 못해 보관할 수 없습니다: ${why}`) : new ApiError(503, `${m.name}의 칸을 확인하지 못해 보관할 수 없습니다: ${why}`);
+    return this.isCannotExit(e) ? new ApiError(409, `${m.name}의 칸을 끝내지 못해 보관할 수 없습니다: ${why}`, "archive_stop_failed") : new ApiError(503, `${m.name}의 칸을 확인하지 못해 보관할 수 없습니다: ${why}`, "archive_stop_unknown");
   }
 
   async createMember(projectId: string, req: CreateMemberReq): Promise<Member> {
@@ -2406,7 +2408,7 @@ export class Orchestrator implements OrchestratorApi {
 
   async freshMemberSession(memberId: string): Promise<Member> {
     const member = this.store.requireMember(memberId);
-    if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 새로 열 수 없습니다");
+    if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 새로 열 수 없습니다", "manual_session_unsupported");
     return this.switchProvider(member, { cli: member.cli }, false, true);
   }
 
@@ -2422,10 +2424,10 @@ export class Orchestrator implements OrchestratorApi {
     this.requireActive(project);
     const rt = this.runtime(member.id);
     if (rt.closing || rt.starting || (!fromPump && rt.pumping) || rt.reopening || rt.turn || this.isBusy(member) || member.status === "working" || (member.status === "blocked" && !usage)) {
-      throw new ApiError(409, "일하거나 세션을 처리하는 중입니다. 턴이 끝난 뒤 CLI를 바꾸세요");
+      throw new ApiError(409, "일하거나 세션을 처리하는 중입니다. 턴이 끝난 뒤 CLI를 바꾸세요", "cli_switch_busy");
     }
     if (this.store.listDelivering().some((d) => d.memberId === member.id) || this.store.listPending(member.id).some((d) => d.holdReason === "delivery_unknown")) {
-      throw new ApiError(409, "전달 여부가 확인되지 않은 입력이 있어 CLI를 바꿀 수 없습니다");
+      throw new ApiError(409, "전달 여부가 확인되지 않은 입력이 있어 CLI를 바꿀 수 없습니다", "cli_switch_delivery_unknown");
     }
     rt.closing = true;
     let changedSession = false;
@@ -2440,9 +2442,9 @@ export class Orchestrator implements OrchestratorApi {
       const target = { ...member, ...patch, cli: patch.cli!, sessionId: resumable ? member.sessionId : null, paneId: null };
       if (targetRunner instanceof CoreRunner) {
         const model = this.desiredConfig(target).model;
-        if (target.cli === "codex" && model && /^(?:claude[-:]|opus(?:-|$)|sonnet(?:-|$)|haiku(?:-|$))/i.test(model)) throw new ApiError(400, "Codex용 모델을 고르거나 팀원 모델 지정을 기본값으로 되돌리세요");
+        if (target.cli === "codex" && model && /^(?:claude[-:]|opus(?:-|$)|sonnet(?:-|$)|haiku(?:-|$))/i.test(model)) throw new ApiError(400, "Codex용 모델을 고르거나 팀원 모델 지정을 기본값으로 되돌리세요", "cli_switch_model_mismatch");
         try { providerLaunch(this.runnerMember(target, project), this.writeRunFiles(target, project, !!target.sessionId), this.config); }
-        catch (e) { throw new ApiError(400, `CLI 설정을 적용할 수 없습니다: ${(e as Error).message}`); }
+        catch (e) { throw new ApiError(400, `CLI 설정을 적용할 수 없습니다: ${(e as Error).message}`, "cli_config_failed"); }
       }
       // 사용 한도 메뉴가 떠 있으면 Esc 로만 닫는다. 끝내는 동안(closing) 온 턴 끝 이벤트는 버려지므로, 닫으며 끝난 턴이 한도 보류를 다시 걸지 않는다.
       const menuClosed = usage ? await this.closeUsageMenu(member) : false;
@@ -2510,12 +2512,12 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 보관한 프로젝트는 화면에 없어 멈출 수 없다. 세션을 새로 띄우거나 깨우는 길은 모두 여기서 막는다. */
   private requireActive(project: Project): void {
-    if (project.archived || this.archiving.has(project.id)) throw new ApiError(409, "보관된 프로젝트이거나 보관을 처리하는 중입니다. 꺼낸 뒤 다시 하세요");
+    if (project.archived || this.archiving.has(project.id)) throw new ApiError(409, "보관된 프로젝트이거나 보관을 처리하는 중입니다. 꺼낸 뒤 다시 하세요", "project_archived");
   }
 
   /** 전체 설정을 고친다. 실행 방식(backend)은 core 하나라 다른 값은 400 으로 거절한다. */
   async updateSettings(patch: SettingsPatch): Promise<Settings> {
-    if (this.settingsWriting) throw new ApiError(409, "설정을 적용하는 중입니다");
+    if (this.settingsWriting) throw new ApiError(409, "설정을 적용하는 중입니다", "settings_busy");
     this.settingsWriting = true;
     try { return await this.updateSettingsOnce(patch); }
     finally { this.settingsWriting = false; this.resumePumps(); }
@@ -2525,9 +2527,9 @@ export class Orchestrator implements OrchestratorApi {
     const normalized = this.models.settingsPatch(patch, this.store.getSettings());
     patch = normalized.patch;
     const response = (settings: Settings): Settings => normalized.resetEfforts.length ? { ...settings, resetEfforts: normalized.resetEfforts } : settings;
-    if (this.archiving.size) throw new ApiError(409, "프로젝트 보관을 처리하는 중입니다");
+    if (this.archiving.size) throw new ApiError(409, "프로젝트 보관을 처리하는 중입니다", "archive_busy");
     // 실행기는 core 하나다. 설정의 backend 값은 출시된 앱이 읽는 칸이라 "core" 로 고정해 둔다.
-    if (patch.backend && patch.backend !== "core") throw new ApiError(400, "실행기는 herdr-core 하나입니다");
+    if (patch.backend && patch.backend !== "core") throw new ApiError(400, "실행기는 herdr-core 하나입니다", "backend_fixed");
     const settings = this.store.patchSettings({ ...patch, backend: "core" });
     await this.refreshConnection();
     // 쉬고 있는 세션은 곧바로 새 설정으로 맞춘다. 응답을 터미널 여는 시간만큼 붙잡지 않는다.
@@ -2538,7 +2540,7 @@ export class Orchestrator implements OrchestratorApi {
   /** 직원별 모델·effort. null 이면 직급 기본으로 돌아간다. outcome: 실제로 한 일(총괄의 team_model 답에 쓴다). */
   async patchMemberConfig(memberId: string, patch: PatchMemberReq, outcome?: ConfigOutcome): Promise<Member> {
     this.requireActive(this.store.requireProject(this.store.requireMember(memberId).projectId));
-    if (this.configWrites.has(memberId)) throw new ApiError(409, "팀원 설정을 적용하는 중입니다");
+    if (this.configWrites.has(memberId)) throw new ApiError(409, "팀원 설정을 적용하는 중입니다", "member_config_busy");
     this.configWrites.add(memberId);
     try { return await this.patchMemberConfigOnce(memberId, patch, outcome); }
     finally { this.releaseConfigWrite(memberId); }
@@ -2552,8 +2554,8 @@ export class Orchestrator implements OrchestratorApi {
   private async patchMemberConfigOnce(memberId: string, patch: PatchMemberReq, outcome?: ConfigOutcome): Promise<Member> {
     const member = this.store.requireMember(memberId);
     this.requireActive(this.store.requireProject(member.projectId));
-    if (this.runtime(memberId).closing || this.runtime(memberId).starting || this.runtime(memberId).reopening || this.pendingLifecycle(memberId)) throw new ApiError(409, "세션을 처리하는 중입니다");
-    if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 설정을 바꿀 수 없습니다");
+    if (this.runtime(memberId).closing || this.runtime(memberId).starting || this.runtime(memberId).reopening || this.pendingLifecycle(memberId)) throw new ApiError(409, "세션을 처리하는 중입니다", "session_busy");
+    if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 설정을 바꿀 수 없습니다", "manual_session_unsupported");
     const normalized = this.models.memberPatch(member, patch, this.store.getSettings());
     patch = normalized.patch;
     if (patch.cli && patch.cli !== member.cli) {
@@ -2600,10 +2602,10 @@ export class Orchestrator implements OrchestratorApi {
     const before = this.store.requireMember(memberId);
     const limited = this.apiRecovery.usageLimited(before.id);
     const same = (patch.modelOverride === undefined || patch.modelOverride === before.modelOverride) && (patch.effortOverride === undefined || patch.effortOverride === before.effortOverride);
-    if (same) throw new ApiError(400, `${josa(before.name, "은")} 이미 그 모델·effort 입니다${limited ? ". 사용 한도로 멈춘 직원은 다른 모델로 바꿔야 이어 갑니다" : ""}`);
+    if (same) throw new ApiError(400, `${josa(before.name, "은")} 이미 그 모델·effort 입니다${limited ? ". 사용 한도로 멈춘 직원은 다른 모델로 바꿔야 이어 갑니다" : ""}`, "model_unchanged");
     // 세션 ID 를 모르면 같은 대화를 이어 열 수 없어 보류도 풀지 않는다(설정만 미뤄진다). '다음에 열 때 새 모델로'라고 답하면 총괄은 바뀐 줄 알고 기다리는데
     // 그 팀장은 한도가 풀릴 때까지 멈춰 있다. 아무것도 바꾸지 않고 그대로 알린다.
-    if (limited && !before.sessionId) throw new ApiError(409, `${before.name}의 세션 ID를 확인하지 못해 한도 보류를 풀 수 없습니다. 한도가 풀리면 서버가 이어 갑니다`);
+    if (limited && !before.sessionId) throw new ApiError(409, `${before.name}의 세션 ID를 확인하지 못해 한도 보류를 풀 수 없습니다. 한도가 풀리면 서버가 이어 갑니다`, "usage_resume_session_unknown");
     const outcome: ConfigOutcome = { usage: false, continued: false, opened: null };
     const member = await this.patchMemberConfig(memberId, patch, outcome);
     // 답은 서버가 실제로 한 일로만 정한다(잠듦·꺼짐이거나 다시 여는 데 실패했으면 later, 이어가기 글을 넣었을 때만 continued).
@@ -2633,9 +2635,9 @@ export class Orchestrator implements OrchestratorApi {
     catch (e) {
       // 이 서버가 지켜보지 않는 터미널이다(끝났거나 없다). 닫을 메뉴도 없다. 끝내기 쪽이 그대로 판정한다.
       if (e instanceof CoreError && e.kind === "not_found" && !e.uncertain) return false;
-      throw new ApiError(409, `한도 창을 확인하지 못했습니다: ${(e as Error).message}. 잠시 뒤 다시 해 주세요`);
+      throw new ApiError(409, `한도 창을 확인하지 못했습니다: ${(e as Error).message}. 잠시 뒤 다시 해 주세요`, "usage_menu_unreadable");
     }
-    if (!result.ok) throw new ApiError(409, `한도 창을 Esc로 닫지 못했습니다(${result.note ?? "창을 닫지 못했습니다"}). 터미널을 확인한 뒤 다시 해 주세요`);
+    if (!result.ok) throw new ApiError(409, `한도 창을 Esc로 닫지 못했습니다(${result.note ?? "창을 닫지 못했습니다"}). 터미널을 확인한 뒤 다시 해 주세요`, "usage_menu_close_failed");
     return !!result.closed;
   }
 
@@ -2753,7 +2755,7 @@ export class Orchestrator implements OrchestratorApi {
   private async switchUsageCard(card: Decision, choice: string, model: string): Promise<Decision> {
     const ids = (card.usageLimit?.memberIds ?? []).filter(id => this.apiRecovery.usageLimited(id));
     // 카드의 팀장이 모두 이어가기 결과를 기다리는 중이다(보류가 아니다). 아무것도 하지 않고 200 을 주면 앱은 바꾼 줄 안다.
-    if (!ids.length) throw new ApiError(409, "카드의 팀장이 모두 이어가기 결과를 기다리는 중입니다. 잠시 뒤 카드를 다시 확인해 주세요");
+    if (!ids.length) throw new ApiError(409, "카드의 팀장이 모두 이어가기 결과를 기다리는 중입니다. 잠시 뒤 카드를 다시 확인해 주세요", "usage_notice_pending");
     const failures: string[] = [];
     let noted = false;
     for (const id of ids) {
@@ -2770,24 +2772,24 @@ export class Orchestrator implements OrchestratorApi {
         if (this.store.getMember(id) && this.apiRecovery.usageLimited(id)) this.apiRecovery.noteFailure(id, `모델을 바꾸지 못했습니다(${why})`);
       }
     }
-    if (failures.length === ids.length) throw new ApiError(409, `모델을 바꾸지 못했습니다. ${failures.join(" / ")}`);
+    if (failures.length === ids.length) throw new ApiError(409, `모델을 바꾸지 못했습니다. ${failures.join(" / ")}`, "model_switch_failed");
     return this.store.requireDecision(card.id);
   }
 
   /** 보관하면 화면에서 사라진다. 답을 기다리는 세션이나 일하는 세션을 두고 사라지면 아무도 풀어 줄 수 없다. */
   private checkArchivable(project: Project): void {
     const members = this.store.listMembers(project.id);
-    if (this.settingsWriting) throw new ApiError(409, "실행 설정을 처리하는 중입니다");
+    if (this.settingsWriting) throw new ApiError(409, "실행 설정을 처리하는 중입니다", "runner_settings_busy");
     for (const member of members) {
       const rt = this.runtime(member.id);
-      if (rt.starting || rt.reopening || rt.pumping || rt.closing || this.configWrites.has(member.id) || this.terminalMutations.has(member.id)) throw new ApiError(409, `${member.name}의 세션을 처리하는 중입니다`);
+      if (rt.starting || rt.reopening || rt.pumping || rt.closing || this.configWrites.has(member.id) || this.terminalMutations.has(member.id)) throw new ApiError(409, `${member.name}의 세션을 처리하는 중입니다`, "session_busy");
     }
     const busy = members.find((m) => m.status === "working" || m.status === "blocked" || (m.origin !== "manual" && this.isBusy(m)));
-    if (busy) throw new ApiError(409, `${josa(busy.name, "이")} 일하는 중이라 보관할 수 없습니다`);
+    if (busy) throw new ApiError(409, `${josa(busy.name, "이")} 일하는 중이라 보관할 수 없습니다`, "archive_member_working");
     const open = this.store.listDecisions(project.id).filter((d) => d.status === "open").length;
-    if (open > 0) throw new ApiError(409, `열린 결재 ${open}건에 답한 뒤 보관하세요`);
+    if (open > 0) throw new ApiError(409, `열린 결재 ${open}건에 답한 뒤 보관하세요`, "archive_open_decisions");
     const todos = this.store.listTodos(project.id).filter((t) => !t.done).length;
-    if (todos > 0) throw new ApiError(409, `안 한 할 일 ${todos}건을 처리한 뒤 보관하세요`);
+    if (todos > 0) throw new ApiError(409, `안 한 할 일 ${todos}건을 처리한 뒤 보관하세요`, "archive_open_todos");
   }
 
   async onProjectPatched(project: Project, patch: PatchProjectReq): Promise<void> {
@@ -2813,9 +2815,9 @@ export class Orchestrator implements OrchestratorApi {
     // 먼저 본다. 실행기가 없는데 켜 두면 연결된 것처럼 보인다.
     const backend = this.store.effectiveBackend();
     const runner = this.runners.get(backend);
-    if (!runner) throw new ApiError(503, `실행기가 없습니다: ${backend}`);
+    if (!runner) throw new ApiError(503, `실행기가 없습니다: ${backend}`, "backend_missing");
     const available = await runner.available();
-    if (!available.ok) throw new ApiError(503, available.detail ?? "실행기를 쓸 수 없습니다");
+    if (!available.ok) throw new ApiError(503, available.detail ?? "실행기를 쓸 수 없습니다", "backend_unavailable");
     this.requireActive(this.store.requireProject(projectId));
     if (!project.runnerEnabled) this.store.patchProject(projectId, { runnerEnabled: true });
     const conductor = await this.ensureConductor(projectId);
@@ -2910,7 +2912,7 @@ export class Orchestrator implements OrchestratorApi {
     const current = this.store.requireMessage(existing.id);
     if (current.delivery !== "failed") return current;
     const target = current.targetMemberId ? this.store.getMember(current.targetMemberId) : null;
-    if (current.targetMemberId && !target) throw new ApiError(409, "그 팀원이 닫혀 다시 보낼 수 없습니다. 새 글로 보내세요");
+    if (current.targetMemberId && !target) throw new ApiError(409, "그 팀원이 닫혀 다시 보낼 수 없습니다. 새 글로 보내세요", "resend_member_closed");
     await this.refreshHealth();
     this.store.requireReachable(current.projectId, target);
     let deliveries = this.store.listDeliveries(current.projectId).filter(d => d.refType === "message" && d.refId === current.id);
@@ -2931,10 +2933,10 @@ export class Orchestrator implements OrchestratorApi {
   async sendUserMessage(projectId: string, req: SendMessageReq): Promise<Message> {
     const project = this.store.requireProject(projectId);
     this.requireActive(project);
-    if (req.contextFileId && this.store.getFile(req.contextFileId)?.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 자료가 아닙니다");
+    if (req.contextFileId && this.store.getFile(req.contextFileId)?.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 자료가 아닙니다", "file_other_project");
     const attachments = (req.attachmentIds ?? []).map(id => this.store.getAttachment(id)).filter((a): a is Attachment => a !== null);
     const target = req.targetMemberId ? this.store.requireMember(req.targetMemberId) : null;
-    if (target && target.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 팀원이 아닙니다");
+    if (target && target.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 팀원이 아닙니다", "member_not_in_project");
     let recipient = target ?? this.store.getConductor(projectId);
     let booting: Promise<void> | null = null;
     const { value: message, deliveries } = this.store.withDeliveryIntents(() => {
@@ -2989,24 +2991,24 @@ export class Orchestrator implements OrchestratorApi {
       const card = this.store.requireDecision(decisionId);
       this.requireActive(this.store.requireProject(card.projectId));
       const choice = req.choice ?? "";
-      if (choice !== "resume" && !choice.startsWith(USAGE_MODEL_PREFIX)) throw new ApiError(400, "이어가기나 다른 모델만 선택할 수 있습니다");
+      if (choice !== "resume" && !choice.startsWith(USAGE_MODEL_PREFIX)) throw new ApiError(400, "이어가기나 다른 모델만 선택할 수 있습니다", "usage_choice_invalid");
       // 이 카드에 답한 것이 아직 도는 중이다(모델을 바꾸는 데는 팀장마다 Esc·끝내기·다시 열기가 차례로 걸린다). 같은 답은 그 결과를 함께 받고,
       // 다른 답(다른 기기, 다시 누른 다른 버튼)은 앞 답의 결과를 성공으로 받아 가지 않게 409 로 돌려보낸다. 두 전환이 같은 팀장들을 함께 바꾸지도 않는다.
       const running = this.usageAnswers.get(decisionId);
       if (running) {
         if (running.choice === choice) return running.task;
-        throw new ApiError(409, "다른 선택을 처리하는 중입니다. 잠시 뒤 카드를 다시 확인해 주세요");
+        throw new ApiError(409, "다른 선택을 처리하는 중입니다. 잠시 뒤 카드를 다시 확인해 주세요", "usage_choice_busy");
       }
       const model = choice.startsWith(USAGE_MODEL_PREFIX) ? choice.slice(USAGE_MODEL_PREFIX.length) : null;
       // 그 CLI 의 모델 목록에 없는 값(다른 CLI 의 모델 포함)은 거절한다.
-      if (model !== null && !this.models.read()[card.usageLimit?.cli ?? "claude"].models.some(option => option.value === model)) throw new ApiError(400, "이 CLI의 모델 목록에 없는 모델입니다");
+      if (model !== null && !this.models.read()[card.usageLimit?.cli ?? "claude"].models.some(option => option.value === model)) throw new ApiError(400, "이 CLI의 모델 목록에 없는 모델입니다", "model_unknown");
       // 같은 모델 답이 다시 왔다(응답을 잃은 앱의 재시도 등). 이미 바꿔 카드가 닫혔으면 한 번만 한 것으로 답한다.
       if (model !== null && card.status !== "open" && this.apiRecovery.answeredWith(decisionId) === choice) return card;
-      if (card.status !== "open" || req.expectedVersion && req.expectedVersion !== card.updatedAt) throw new ApiError(409, "알림 상태가 바뀌었습니다. 다시 확인해 주세요");
+      if (card.status !== "open" || req.expectedVersion && req.expectedVersion !== card.updatedAt) throw new ApiError(409, "알림 상태가 바뀌었습니다. 다시 확인해 주세요", "usage_notice_changed");
       // 카드의 판은 푸시 알림에 묶여 팀장이 붙거나 빠져도 오르지 않는다. 앱이 본 팀장을 함께 보냈으면 그것으로 확인한다:
       // 대표가 A 만 보이는 카드에서 고른 모델로 그 사이 붙은 B 까지 바꾸지 않는다.
-      if (model !== null && req.memberIds && !sameMembers(req.memberIds, card.usageLimit?.memberIds ?? [])) throw new ApiError(409, "카드의 팀장이 바뀌었습니다. 카드를 다시 확인해 주세요");
-      if (model !== null && !card.options.some(option => option.k === choice)) throw new ApiError(400, "한도에 걸린 모델이거나 선택지에 없는 모델입니다. 카드를 다시 확인해 주세요");
+      if (model !== null && req.memberIds && !sameMembers(req.memberIds, card.usageLimit?.memberIds ?? [])) throw new ApiError(409, "카드의 팀장이 바뀌었습니다. 카드를 다시 확인해 주세요", "usage_notice_member_changed");
+      if (model !== null && !card.options.some(option => option.k === choice)) throw new ApiError(400, "한도에 걸린 모델이거나 선택지에 없는 모델입니다. 카드를 다시 확인해 주세요", "usage_model_unavailable");
       const task = model === null ? this.apiRecovery.resumeUsage(decisionId) : this.switchUsageCard(card, choice, model);
       this.usageAnswers.set(decisionId, { choice, task });
       const done = () => { if (this.usageAnswers.get(decisionId)?.task === task) this.usageAnswers.delete(decisionId); };
@@ -3055,13 +3057,13 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private async writeTodo(todoId: string, done: boolean, completion: { note?: string; fileIds?: string[] }, dropReason?: string): Promise<Todo> {
-    for (const id of completion.fileIds ?? []) if (!this.store.getAttachment(id)) throw new ApiError(400, "업로드된 첨부를 찾을 수 없습니다");
-    if (!done && (completion.note !== undefined || completion.fileIds?.length)) throw new ApiError(400, "완료할 때만 답과 첨부를 붙일 수 있습니다");
+    for (const id of completion.fileIds ?? []) if (!this.store.getAttachment(id)) throw new ApiError(400, "업로드된 첨부를 찾을 수 없습니다", "upload_not_found");
+    if (!done && (completion.note !== undefined || completion.fileIds?.length)) throw new ApiError(400, "완료할 때만 답과 첨부를 붙일 수 있습니다", "todo_answer_requires_done");
     let targetId: string | null = null;
     const { todo, changed } = this.store.transaction(() => {
       const before = this.store.requireTodo(todoId);
       if (before.done !== done) this.store.setTodoCompletion(todoId, done ? completion.note ?? null : null, done ? completion.fileIds ?? [] : []);
-      if (dropReason !== undefined && before.done && before.outcome !== "dropped") throw new ApiError(409, "이미 끝났거나 정리된 할 일입니다");
+      if (dropReason !== undefined && before.done && before.outcome !== "dropped") throw new ApiError(409, "이미 끝났거나 정리된 할 일입니다", "todo_finished");
       const result = dropReason !== undefined && !before.done
         ? { todo: this.store.closeTodo(todoId, { outcome: "dropped", reason: dropReason, by: "대표" }), changed: true }
         : this.store.setTodoDone(todoId, done);
@@ -3144,7 +3146,7 @@ export class Orchestrator implements OrchestratorApi {
     const project = this.store.requireProject(member.projectId);
     this.requireActive(project);
     const runner = this.runners.get(this.backendOf(member));
-    if (member.origin === "manual" || !runner) throw new ApiError(400, "실행기가 관리하지 않는 세션입니다");
+    if (member.origin === "manual" || !runner) throw new ApiError(400, "실행기가 관리하지 않는 세션입니다", "member_not_runner_managed");
     if (rt.turn) rt.turn.interrupted = true;
     await runner.interrupt(this.runnerMember(member, project));
     this.interruptCoreCompaction(member);
@@ -3158,7 +3160,7 @@ export class Orchestrator implements OrchestratorApi {
   /** 화면의 '명부에서 빼기'. 직접 띄운 세션만. 실행기 세션은 총괄이 team_close 로 닫는다. */
   async memberClose(memberId: string): Promise<void> {
     const member = this.store.requireMember(memberId);
-    if (member.origin !== "manual") throw new ApiError(400, "직접 띄운 세션만 여기서 뺄 수 있습니다");
+    if (member.origin !== "manual") throw new ApiError(400, "직접 띄운 세션만 여기서 뺄 수 있습니다", "member_not_manual");
     const { projectId, name } = member;
     const dropped = await this.closeMember(memberId);
     const conductor = this.store.getConductor(projectId);
@@ -3195,7 +3197,7 @@ export class Orchestrator implements OrchestratorApi {
   async answerApproval(memberId: string, req: AnswerApprovalReq): Promise<void> {
     const member = this.store.requireMember(memberId);
     const runner = this.runners.get(this.backendOf(member));
-    if (!runner?.answerApproval) throw new ApiError(501, "이 실행 방식에는 승인 창이 없습니다");
+    if (!runner?.answerApproval) throw new ApiError(501, "이 실행 방식에는 승인 창이 없습니다", "approval_unsupported");
     const project = this.store.requireProject(member.projectId);
     this.requireActive(project);
     const r = await runner.answerApproval(this.runnerMember(member, project), req.fingerprint, req.option);
@@ -3209,7 +3211,7 @@ export class Orchestrator implements OrchestratorApi {
         gone: "칸을 찾지 못했습니다",
         input_busy: "수동 조작 중이거나 터미널 입력 상태가 바뀌었습니다. 조작을 끝내고 창을 다시 확인하세요",
       }[r.reason];
-      throw new ApiError(r.reason === "no_option" ? 400 : 409, why);
+      throw new ApiError(r.reason === "no_option" ? 400 : 409, why, `approval_${r.reason}`);
     }
     this.store.appendActivity(member.id, "system", `대표가 승인 창에서 ${r.chosen.n}번 '${r.chosen.label}' 을 골랐습니다 · ${approvalSummary(r.prompt, 200)}`);
     const note = req.note?.trim();
@@ -3241,8 +3243,8 @@ export class Orchestrator implements OrchestratorApi {
   /** 영속 예약을 먼저 커밋한다. 프로세스가 죽으면 미확인 결과를 반환하며 효과를 재생하지 않는다. */
   async handleAgentOperation(member: Member, name: string, args: Record<string, unknown>, context: AgentOperationContext, signal?: AbortSignal): Promise<AgentToolResult> {
     const current = this.store.requireMember(member.id);
-    if (current.projectId !== member.projectId) throw new ApiError(404, "팀원을 찾을 수 없습니다");
-    if (!/^[A-Za-z0-9_-]{1,128}$/.test(context.operationId)) throw new ApiError(400, "operationId가 잘못되었습니다");
+    if (current.projectId !== member.projectId) throw new ApiError(404, "팀원을 찾을 수 없습니다", "member_not_found");
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(context.operationId)) throw new ApiError(400, "operationId가 잘못되었습니다", "invalid_operation_id");
     let reserved = false;
     const previous = this.store.agentOperation(current.id, name, context.operationId, args, () => {
       reserved = true;
@@ -3288,7 +3290,7 @@ export class Orchestrator implements OrchestratorApi {
     const ready = (): AskWaitResult | null => {
       const current = this.store.requireMember(member.id);
       const decision = this.store.requireDecision(decisionId);
-      if (decision.projectId !== current.projectId || decision.memberId !== member.id) throw new ApiError(403, "자신이 올린 결재만 기다릴 수 있습니다");
+      if (decision.projectId !== current.projectId || decision.memberId !== member.id) throw new ApiError(403, "자신이 올린 결재만 기다릴 수 있습니다", "decision_not_own");
       if (signal?.aborted || this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId) || decision.status === "open") return null;
       const answered = decision.status === "answered" || decision.status === "delivered";
       if (decision.status === "answered") {
@@ -3352,9 +3354,9 @@ export class Orchestrator implements OrchestratorApi {
   async addMember(projectId: string, input: NewMemberInput, assignedBy?: Member): Promise<{ member: Member; assigned: AssignResult | null }> {
     this.models.requireModel(input.cli ?? "claude", input.modelOverride);
     const project = this.store.requireProject(projectId);
-    if (!project.runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다");
+    if (!project.runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다", "runner_disabled");
     const name = input.name.trim();
-    if (!name) throw new ApiError(400, "이름이 필요합니다");
+    if (!name) throw new ApiError(400, "이름이 필요합니다", "name_required");
     const source = input.userQuote?.trim() ? this.findQuoteSource(projectId, input.userQuote) : null;
     const quote = input.userQuote?.trim() ? { text: input.userQuote, verified: source !== null, source } : null;
     const { value: { member, ready }, deliveries } = this.store.transaction(() => {
@@ -3407,7 +3409,7 @@ export class Orchestrator implements OrchestratorApi {
               for (const d of this.store.listPending(member.id)) this.hold(d, "backend_down");
             } else if (this.backendOf(member) !== "core" || (e instanceof CoreError && !e.uncertain && !["starting_unknown", "conflict", "unknown"].includes(e.kind))) this.abandonSpawn(member.id);
           } catch (cleanup) { console.error("세션 기동 실패 정리 오류:", member.id, cleanup); }
-          finally { reject(new ApiError(502, `세션을 띄우지 못했습니다: ${(e as Error).message}`)); }
+          finally { reject(new ApiError(502, `세션을 띄우지 못했습니다: ${(e as Error).message}`, "session_start_failed")); }
         });
       });
     });
@@ -3452,7 +3454,7 @@ export class Orchestrator implements OrchestratorApi {
     const runner = this.runnerOf(this.store.requireMember(memberId));
     const currentError = runner instanceof CoreRunner ? runner.observationState(memberId)?.lastError : null;
     const stored = this.store.requireMember(memberId);
-    this.store.patchMember(memberId, { sessionId: started.sessionId, paneId: started.paneId, ...(!currentError && !(started.rejoined && stored.lastError?.startsWith("control_unknown:")) && !this.keepsUsageNote(stored) ? { lastError: null } : {}) });
+    this.store.patchMember(memberId, { sessionId: started.sessionId, paneId: started.paneId, ...(!currentError && !(started.rejoined && stored.fenceCode === "control_unknown") && !this.keepsUsageNote(stored) ? { lastError: null } : {}) });
     if (!started.rejoined) this.runtime(memberId).launchedAt = Date.now();
     // 이미 떠 있던 칸에 붙었으면 이번 인자가 들어간 것이 아니다.
     if (!started.rejoined && sent) {
@@ -3470,7 +3472,7 @@ export class Orchestrator implements OrchestratorApi {
     } catch {
       // 없는 경로는 아래에서 같은 오류로 처리한다.
     }
-    if (!isDir) throw new ApiError(400, `폴더가 없습니다: ${path}`);
+    if (!isDir) throw new ApiError(400, `폴더가 없습니다: ${path}`, "folder_missing");
     return path;
   }
 
@@ -3491,7 +3493,7 @@ export class Orchestrator implements OrchestratorApi {
         ["queued", "delivering", "delivered"].includes(d.status))) {
         const reason = `대표가 이미 ${target.name}에게 직접 보낸 지시입니다(#${message.id}). 다시 보내지 마세요. 더할 일이 있으면 인용 없이 그 부분만 쓰세요.`;
         this.store.appendActivity(target.id, "system", reason);
-        throw new ApiError(409, reason);
+        throw new ApiError(409, reason, "owner_direct_repeat");
       }
     }
   }
@@ -3508,7 +3510,7 @@ export class Orchestrator implements OrchestratorApi {
     const busy = this.isBusy(target);
     const attachments = (input.attachmentIds ?? []).map((id) => {
       const attachment = this.store.getAttachment(id);
-      if (!attachment || !this.store.isProjectAttachment(projectId, id)) throw new ApiError(404, `이 프로젝트에서 대표가 보낸 첨부가 아닙니다: ${id}`);
+      if (!attachment || !this.store.isProjectAttachment(projectId, id)) throw new ApiError(404, `이 프로젝트에서 대표가 보낸 첨부가 아닙니다: ${id}`, "attachment_not_found");
       return attachment;
     });
     const delivery = this.store.transaction(() => {
@@ -3563,24 +3565,24 @@ export class Orchestrator implements OrchestratorApi {
   /** team_compact·화면 압축. 실행 중이어도 안전 조건을 우회하지 않고 예약한다. */
   async compactMember(memberId: string, focus?: string): Promise<Member> {
     const member = this.store.requireMember(memberId);
-    if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 압축할 수 없습니다");
+    if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 압축할 수 없습니다", "manual_session_unsupported");
     const project = this.store.requireProject(member.projectId);
     this.requireActive(project);
-    if (!project.runnerEnabled || ["asleep", "offline"].includes(member.status)) throw new ApiError(409, "깨어 있고 실행이 켜진 팀원만 압축할 수 있습니다");
-    if (!member.sessionId) throw new ApiError(this.backendOf(member) === "core" ? 409 : 400, "아직 native 세션을 확인하지 못했습니다");
+    if (!project.runnerEnabled || ["asleep", "offline"].includes(member.status)) throw new ApiError(409, "깨어 있고 실행이 켜진 팀원만 압축할 수 있습니다", "compact_not_awake");
+    if (!member.sessionId) throw new ApiError(this.backendOf(member) === "core" ? 409 : 400, "아직 native 세션을 확인하지 못했습니다", "session_id_unknown");
     const normalized = (focus ? normalizeSpace(focus) : "") || this.compactFocus(member);
     if (this.backendOf(member) === "core") {
-      if (!member.paneId) throw new ApiError(409, "세션 터미널이 없습니다");
-      if (this.runnerOf(member) instanceof CoreRunner && !this.contextLog(member)) throw new ApiError(409, "압축 완료를 관찰할 native 세션 기록이 없습니다");
+      if (!member.paneId) throw new ApiError(409, "세션 터미널이 없습니다", "session_terminal_missing");
+      if (this.runnerOf(member) instanceof CoreRunner && !this.contextLog(member)) throw new ApiError(409, "압축 완료를 관찰할 native 세션 기록이 없습니다", "compact_record_missing");
       this.coreCompactFenced(member); // 손상된 영속 상태도 새 예약으로 덮지 않는다.
       const state = this.store.ensureContextState(memberId);
       if (state.compaction && ["queued", "sending", "running", "uncertain"].includes(state.compaction.phase)) return this.store.requireMember(memberId);
       const generation = this.store.memberRevisions(memberId).sessionGeneration;
       const available = await this.runnerOf(member).available();
       this.requireActive(this.store.requireProject(project.id));
-      if (!available.ok) throw new ApiError(409, "실행기에 연결할 수 없습니다");
+      if (!available.ok) throw new ApiError(409, "실행기에 연결할 수 없습니다", "backend_unreachable");
       const current = this.store.requireMember(memberId);
-      if (this.store.memberRevisions(memberId).sessionGeneration !== generation || current.sessionId !== member.sessionId || current.paneId !== member.paneId || ["asleep", "offline"].includes(current.status)) throw new ApiError(409, "압축을 예약하는 동안 세션이 변경되었습니다");
+      if (this.store.memberRevisions(memberId).sessionGeneration !== generation || current.sessionId !== member.sessionId || current.paneId !== member.paneId || ["asleep", "offline"].includes(current.status)) throw new ApiError(409, "압축을 예약하는 동안 세션이 변경되었습니다", "compact_session_changed");
       this.queueCoreCompact(this.store.requireMember(memberId), "manual", normalized);
     } else this.runtime(memberId).compactRequest = normalized;
     await this.pump(memberId);
@@ -3685,7 +3687,7 @@ export class Orchestrator implements OrchestratorApi {
     if (this.backendOf(member) !== "core") return false;
     this.releaseOrphanCompact(member.id);
     const compact = this.store.getContextState(member.id)?.compaction;
-    if (compact && !["queued", "sending", "running", "uncertain", "succeeded", "failed"].includes(compact.phase)) throw new ApiError(409, "압축 상태를 읽을 수 없어 자동 입력을 보류합니다");
+    if (compact && !["queued", "sending", "running", "uncertain", "succeeded", "failed"].includes(compact.phase)) throw new ApiError(409, "압축 상태를 읽을 수 없어 자동 입력을 보류합니다", "compact_state_unreadable");
     return !!compact && ["sending", "running", "uncertain"].includes(compact.phase);
   }
 
@@ -3721,23 +3723,23 @@ export class Orchestrator implements OrchestratorApi {
   async sleepMember(memberId: string, opts: { force?: boolean; holdAs?: "archived"; recovering?: boolean } = {}): Promise<Member> {
     const member = this.store.requireMember(memberId);
     if (member.status === "asleep" && !this.pendingLifecycle(memberId)) return member;
-    if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 잠재울 수 없습니다");
+    if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 잠재울 수 없습니다", "manual_session_unsupported");
     const project = this.store.requireProject(member.projectId);
     if (!opts.holdAs) this.requireActive(project);
     const rt = this.runtime(memberId);
     const pending = this.store.listPending(memberId);
     if (!opts.force) {
-      if (this.store.inputState(memberId).lease) throw new ApiError(409, "직접 조작권이 남아 있어 잠재울 수 없습니다. 조작을 끝내고 조작권을 놓아 주세요");
-      if (this.deliveryRecovery.fenced(memberId)) throw new ApiError(409, "전달 결과가 확인되지 않은 입력이 있어 잠재울 수 없습니다. 전달 확인을 먼저 끝내세요");
-      if (this.coreCompactFenced(member)) throw new ApiError(409, "문맥 압축을 처리하고 있어 잠재울 수 없습니다. 압축 결과를 확인해 주세요");
-      if (this.isBusy(member)) throw new ApiError(409, `${josa(member.name, "은")} 일하는 중입니다`);
+      if (this.store.inputState(memberId).lease) throw new ApiError(409, "직접 조작권이 남아 있어 잠재울 수 없습니다. 조작을 끝내고 조작권을 놓아 주세요", "sleep_terminal_lease");
+      if (this.deliveryRecovery.fenced(memberId)) throw new ApiError(409, "전달 결과가 확인되지 않은 입력이 있어 잠재울 수 없습니다. 전달 확인을 먼저 끝내세요", "sleep_delivery_unknown");
+      if (this.coreCompactFenced(member)) throw new ApiError(409, "문맥 압축을 처리하고 있어 잠재울 수 없습니다. 압축 결과를 확인해 주세요", "sleep_compacting");
+      if (this.isBusy(member)) throw new ApiError(409, `${josa(member.name, "은")} 일하는 중입니다`, "member_working");
       // 미확정 종료가 열려 있는 동안 전달 펌프는 멈춘다. 그 사이 온 입력으로 복구까지 거부하면 서로 영영 물린다.
       if (!opts.recovering) {
-        if (this.store.listOpenDecisionsByMember(memberId).length > 0) throw new ApiError(409, `${member.name}에게 열린 결재가 있습니다`);
-        if (pending.some(d => d.wake) || this.store.listUnreceivedAnswers(memberId).length > 0) throw new ApiError(409, `${member.name}의 대기열이 남아 있습니다`);
+        if (this.store.listOpenDecisionsByMember(memberId).length > 0) throw new ApiError(409, `${member.name}에게 열린 결재가 있습니다`, "member_open_decision");
+        if (pending.some(d => d.wake) || this.store.listUnreceivedAnswers(memberId).length > 0) throw new ApiError(409, `${member.name}의 대기열이 남아 있습니다`, "member_queue_pending");
       }
     }
-    if (rt.closing || rt.starting || rt.reopening) throw new ApiError(409, "세션을 처리하는 중입니다");
+    if (rt.closing || rt.starting || rt.reopening) throw new ApiError(409, "세션을 처리하는 중입니다", "session_busy");
     // 재우기 시작한 뒤에 온 깨움을 가린다: 지금 대기열에 없던 것, 또는 앞선 미확정 종료가 시작된 뒤에 생긴 것.
     const queuedBefore = new Set(pending.map(d => d.id));
     const prior = this.pendingLifecycle(memberId);
@@ -3795,16 +3797,16 @@ export class Orchestrator implements OrchestratorApi {
   /** --resume 으로 다시 연다. 실패하면 같은 핸들로 새 세션을 띄우고 마지막 일을 첫 지시에 넣는다. */
   async resumeMember(memberId: string, firstInstruction?: string, assignedBy?: Member): Promise<Member> {
     let member = this.store.requireMember(memberId);
-    if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 다시 열 수 없습니다");
+    if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 다시 열 수 없습니다", "manual_session_unsupported");
     this.requireActive(this.store.requireProject(member.projectId));
-    if (member.backend !== "core" && (member.sessionId || member.paneId)) throw new ApiError(409, "이전 실행기의 세션은 자동으로 다시 열지 않습니다");
+    if (member.backend !== "core" && (member.sessionId || member.paneId)) throw new ApiError(409, "이전 실행기의 세션은 자동으로 다시 열지 않습니다", "legacy_session");
     // 깨우기가 성공으로 답하고 아무 일도 하지 않는 경우를 남기지 않는다.
     // 결과를 모르는 끝내기가 남아 있으면 지금 확인해 본다(터미널이 사라졌으면 여기서 닫힌다). 그래도 남으면 그 사실을 답한다.
     if (this.pendingLifecycle(memberId) && this.pendingLifecycle(memberId)!.intent !== "start") {
       await this.recoverStops();
       member = this.store.requireMember(memberId);
       const stop = this.pendingLifecycle(memberId);
-      if (stop && stop.intent !== "start") throw new ApiError(409, `${member.name}의 세션을 끝내던 작업의 결과를 아직 확인하지 못했습니다. 실행 엔진이 답하면 스스로 정리합니다. 잠시 뒤 다시 깨워 주세요`);
+      if (stop && stop.intent !== "start") throw new ApiError(409, `${member.name}의 세션을 끝내던 작업의 결과를 아직 확인하지 못했습니다. 실행 엔진이 답하면 스스로 정리합니다. 잠시 뒤 다시 깨워 주세요`, "stop_unverified");
     }
     const rt = this.runtime(memberId);
     if (rt.starting) { await rt.starting; member = this.store.requireMember(memberId); }
@@ -3812,12 +3814,12 @@ export class Orchestrator implements OrchestratorApi {
     const unopened = member.origin === "runner" && member.backend === "core" && !member.paneId && !this.pendingLifecycle(memberId);
     if (member.status === "asleep" || member.status === "offline" || unopened) {
       // 가져온 프로젝트는 총괄을 시작하기 전에는 어떤 세션도 움직이지 않는다고 약속했다.
-      if (!this.store.requireProject(member.projectId).runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다. 총괄을 먼저 시작하세요");
+      if (!this.store.requireProject(member.projectId).runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다. 총괄을 먼저 시작하세요", "runner_disabled");
       rt.quickExits = 0; rt.quickExitNotified = false;
       const reopened = await this.reopen(member);
       if (!reopened) {
         const why = this.store.requireMember(memberId).lastError;
-        throw new ApiError(502, `${josa(member.name, "을")} 다시 열지 못했습니다${why ? `: ${why}` : ""}`);
+        throw new ApiError(502, `${josa(member.name, "을")} 다시 열지 못했습니다${why ? `: ${why}` : ""}`, "reopen_failed");
       }
       this.checkAwakeLimit(member.projectId);
     }
@@ -3941,10 +3943,10 @@ export class Orchestrator implements OrchestratorApi {
   /** 세션을 끝내고 명부에서 뺀다. 대화·결재 기록은 남는다. 나가지 않고 사라진 입력의 요약을 돌려준다. */
   async closeMember(memberId: string): Promise<string[]> {
     const member = this.store.requireMember(memberId);
-    if (this.archiving.has(member.projectId)) throw new ApiError(409, "프로젝트 보관을 처리하는 중입니다");
-    if (member.kind !== "worker") throw new ApiError(400, "총괄은 닫을 수 없습니다");
+    if (this.archiving.has(member.projectId)) throw new ApiError(409, "프로젝트 보관을 처리하는 중입니다", "archive_busy");
+    if (member.kind !== "worker") throw new ApiError(400, "총괄은 닫을 수 없습니다", "lead_close_refused");
     const rt = this.runtime(memberId);
-    if (rt.closing || (this.backendOf(member) === "core" && (rt.starting || rt.reopening || rt.pumping))) throw new ApiError(409, "세션을 처리하는 중입니다");
+    if (rt.closing || (this.backendOf(member) === "core" && (rt.starting || rt.reopening || rt.pumping))) throw new ApiError(409, "세션을 처리하는 중입니다", "session_busy");
     if (this.backendOf(member) !== "core") {
       const starting = this.pendingLifecycle(memberId);
       if (starting?.intent === "start") this.finishLifecycle(starting, "refused", "띄우는 동안 팀원이 닫혔습니다");
@@ -4011,22 +4013,22 @@ export class Orchestrator implements OrchestratorApi {
 
   requireInProject(projectId: string, memberRef: string): Member {
     const member = this.store.findMember(projectId, memberRef);
-    if (!member) throw new ApiError(404, `이 프로젝트에 없는 직원입니다: ${memberRef}`);
+    if (!member) throw new ApiError(404, `이 프로젝트에 없는 직원입니다: ${memberRef}`, "member_not_in_project");
     return member;
   }
 
   // ---- 보고 ----
   async recordPost(member: Member, input: PostInput): Promise<Message & { systemInstruction?: string }> {
     const rt = this.runtime(member.id);
-    if (input.supersedes && input.correctsMessageId && input.supersedes !== input.correctsMessageId) throw new ApiError(400, "정정 대상이 서로 다릅니다");
+    if (input.supersedes && input.correctsMessageId && input.supersedes !== input.correctsMessageId) throw new ApiError(400, "정정 대상이 서로 다릅니다", "correction_target_mismatch");
     input = { ...input, correctsMessageId: input.supersedes ?? input.correctsMessageId };
     const files = (input.fileIds ?? []).map((id) => {
       const file = this.store.getFile(id);
-      if (!file || file.projectId !== member.projectId) throw new ApiError(404, `자료를 찾을 수 없습니다: ${id}`);
+      if (!file || file.projectId !== member.projectId) throw new ApiError(404, `자료를 찾을 수 없습니다: ${id}`, "file_not_found");
       return file;
     });
     if (input.decisionId && this.store.getDecision(input.decisionId)?.projectId !== member.projectId) {
-      throw new ApiError(404, `결재를 찾을 수 없습니다: ${input.decisionId}`);
+      throw new ApiError(404, `결재를 찾을 수 없습니다: ${input.decisionId}`, "decision_not_found");
     }
     // 거부된 호출은 보고가 아니다. 턴 마지막 글의 자동 보고를 막으면 안 된다.
     // v1 웹은 첫 자료와 본문 링크를 계속 사용한다. 전체 목록은 Message.fileIds에도 projection한다.
@@ -4036,7 +4038,7 @@ export class Orchestrator implements OrchestratorApi {
       .join("\n\n");
     if (input.correctsMessageId) {
       const previous = this.store.requireMessage(input.correctsMessageId);
-      if (previous.projectId !== member.projectId || previous.memberId !== member.id || previous.mine) throw new ApiError(400, "자신이 작성한 보고만 정정할 수 있습니다");
+      if (previous.projectId !== member.projectId || previous.memberId !== member.id || previous.mine) throw new ApiError(400, "자신이 작성한 보고만 정정할 수 있습니다", "report_not_own");
     }
     const conductor = member.kind === "worker" ? this.store.getConductor(member.projectId) : null;
     let systemInstruction: string | undefined;
@@ -4074,7 +4076,7 @@ export class Orchestrator implements OrchestratorApi {
 
   reportReferences(projectId: string, messageId: string): ReportReferences {
     const message = this.store.requireMessage(messageId);
-    if (message.projectId !== projectId || message.mine || !message.memberId) throw new ApiError(404, "보고를 찾을 수 없습니다");
+    if (message.projectId !== projectId || message.mine || !message.memberId) throw new ApiError(404, "보고를 찾을 수 없습니다", "report_not_found");
     return this.store.getReportReferences(projectId, messageId) ?? { sourceMessageId: message.id, fileIds: message.fileId ? [message.fileId] : [], decisionIds: message.decisionId ? [message.decisionId] : [], authoredAt: message.at, sequence: 0, correctsMessageId: null };
   }
 
@@ -4093,7 +4095,7 @@ export class Orchestrator implements OrchestratorApi {
   /** ask. blocking 이면(manual) 호출자가 askWait 로 기다리고, 아니면 text 를 도구 결과로 돌려준다. */
   async registerAsk(member: Member, input: AskInput): Promise<{ decision: Decision; blocking: boolean; text: string }> {
     // 보관한 프로젝트의 카드는 화면에 없고 답도 409 다. 올리면 세션이 답 없는 대기에 묶인다.
-    if (this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId)) throw new ApiError(409, "프로젝트가 보관되어 대표가 답할 수 없습니다. 묻지 말고 턴을 끝내세요");
+    if (this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId)) throw new ApiError(409, "프로젝트가 보관되어 대표가 답할 수 없습니다. 묻지 말고 턴을 끝내세요", "ask_project_archived");
     const { value: decision, deliveries } = this.store.withDeliveryIntents(() => {
       const decision = this.store.createDecision({
         projectId: member.projectId,
@@ -4141,44 +4143,44 @@ export class Orchestrator implements OrchestratorApi {
    * 닫으면 물은 직원에게 깨우지 않고 알리고, ask 를 기다리던 직접 띄운 CLI 는 풀어 준다.
    */
   async closeDecision(member: Member, request: { id: string; kind: "decided" | "obsolete"; reason: string; userQuote?: string; answeredDecisionId?: string; sameIssue?: string; followUp: DecisionCloseFollowUp }): Promise<Decision> {
-    if (this.store.requireDecision(request.id).kind === "usage_limit") throw new ApiError(403, "사용 한도 알림은 대표만 닫을 수 있습니다");
+    if (this.store.requireDecision(request.id).kind === "usage_limit") throw new ApiError(403, "사용 한도 알림은 대표만 닫을 수 있습니다", "usage_notice_owner_only");
     return this.closeAsk(member, request);
   }
 
   async closeAsk(member: Member, input: { id: string; kind: DecisionCloseKind; reason: string; userQuote?: string; answeredDecisionId?: string; sameIssue?: string; followUp?: DecisionCloseFollowUp }): Promise<Decision> {
     const decision = this.store.getDecision(input.id);
-    if (!decision || decision.projectId !== member.projectId) throw new ApiError(404, `결재를 찾을 수 없습니다: ${input.id}`);
-    if (member.kind === "worker" && decision.memberId !== member.id) throw new ApiError(403, "직원은 자기가 올린 결재만 닫을 수 있습니다");
-    if (decision.status !== "open") throw new ApiError(409, decision.status === "closed" ? "이미 닫힌 결재입니다" : "대표가 이미 답한 결재입니다. 닫지 않습니다");
+    if (!decision || decision.projectId !== member.projectId) throw new ApiError(404, `결재를 찾을 수 없습니다: ${input.id}`, "decision_not_found");
+    if (member.kind === "worker" && decision.memberId !== member.id) throw new ApiError(403, "직원은 자기가 올린 결재만 닫을 수 있습니다", "decision_not_own");
+    if (decision.status !== "open") throw new ApiError(409, decision.status === "closed" ? "이미 닫힌 결재입니다" : "대표가 이미 답한 결재입니다. 닫지 않습니다", "decision_closed");
     const reason = normalizeSpace(input.reason);
     let quote: string | null = null;
     let sourceId: string | null = null;
     let answered: Decision | null = null;
     if (input.answeredDecisionId) {
-      if (input.kind !== "decided") throw new ApiError(400, "answered_decision_id는 decided에만 쓸 수 있습니다");
+      if (input.kind !== "decided") throw new ApiError(400, "answered_decision_id는 decided에만 쓸 수 있습니다", "decision_close_invalid");
       answered = this.store.requireDecision(input.answeredDecisionId);
-      if (answered.projectId !== member.projectId || !["answered", "delivered"].includes(answered.status) || !answered.answeredAt) throw new ApiError(409, "같은 프로젝트에서 대표가 실제로 답한 결재만 근거로 쓸 수 있습니다");
-      if (!(decision.group?.trim() && decision.group === answered.group) && (member.kind === "worker" || !input.sameIssue?.trim())) throw new ApiError(409, "같은 그룹이거나 총괄이 same_issue에 같은 안건인 이유를 명시해야 합니다");
+      if (answered.projectId !== member.projectId || !["answered", "delivered"].includes(answered.status) || !answered.answeredAt) throw new ApiError(409, "같은 프로젝트에서 대표가 실제로 답한 결재만 근거로 쓸 수 있습니다", "decision_close_evidence_invalid");
+      if (!(decision.group?.trim() && decision.group === answered.group) && (member.kind === "worker" || !input.sameIssue?.trim())) throw new ApiError(409, "같은 그룹이거나 총괄이 same_issue에 같은 안건인 이유를 명시해야 합니다", "decision_close_group_mismatch");
       quote = formatAnswer(answered);
     } else if (input.kind === "decided") {
       const raw = input.userQuote?.trim();
-      if (!raw) throw new ApiError(400, "decided 로 닫으려면 user_quote 에 대표가 정한 말을 글자 그대로 실어야 합니다. 대표가 아직 정하지 않았으면 닫지 마세요");
+      if (!raw) throw new ApiError(400, "decided 로 닫으려면 user_quote 에 대표가 정한 말을 글자 그대로 실어야 합니다. 대표가 아직 정하지 않았으면 닫지 마세요", "decision_close_quote_required");
       const source = this.findQuoteSource(member.projectId, raw);
-      if (!source) throw new ApiError(409, "인용을 대표 글에서 찾지 못해 닫지 않았습니다. 대표가 정하지 않았으면 그대로 두세요");
-      if (quoteNeedsContext({ text: raw, verified: true, source })) throw new ApiError(409, "버튼 글이나 아주 짧은 글은 이 결재를 정했다는 근거가 못 되어 닫지 않았습니다. 대표가 이 일을 정한 문장을 인용하세요");
+      if (!source) throw new ApiError(409, "인용을 대표 글에서 찾지 못해 닫지 않았습니다. 대표가 정하지 않았으면 그대로 두세요", "decision_close_quote_not_found");
+      if (quoteNeedsContext({ text: raw, verified: true, source })) throw new ApiError(409, "버튼 글이나 아주 짧은 글은 이 결재를 정했다는 근거가 못 되어 닫지 않았습니다. 대표가 이 일을 정한 문장을 인용하세요", "decision_close_quote_weak");
       quote = normalizeSpace(raw);
       sourceId = source.id;
     }
     const followUp = input.followUp;
     if (followUp?.kind === "instruction") {
       const target = this.store.requireMember(followUp.memberId);
-      if (target.projectId !== member.projectId || !followUp.text.trim()) throw new ApiError(400, "후속 지시의 대상·내용을 확인하세요");
+      if (target.projectId !== member.projectId || !followUp.text.trim()) throw new ApiError(400, "후속 지시의 대상·내용을 확인하세요", "follow_up_invalid");
       if ("sourceDecisionId" in followUp) {
-        if (!answered || followUp.sourceDecisionId !== answered.id) throw new ApiError(409, "후속 지시의 대표 답이 닫기 근거와 다릅니다");
+        if (!answered || followUp.sourceDecisionId !== answered.id) throw new ApiError(409, "후속 지시의 대표 답이 닫기 근거와 다릅니다", "follow_up_mismatch");
       } else {
         const source = this.store.requireMessage(followUp.sourceMessageId);
-        if (answered || source.projectId !== member.projectId || !source.mine) throw new ApiError(400, "후속 지시의 대표 원문을 확인하세요");
-        if (input.kind === "decided" && source.id !== sourceId) throw new ApiError(409, "후속 지시의 대표 원문이 닫기 근거와 다릅니다");
+        if (answered || source.projectId !== member.projectId || !source.mine) throw new ApiError(400, "후속 지시의 대표 원문을 확인하세요", "follow_up_invalid");
+        if (input.kind === "decided" && source.id !== sourceId) throw new ApiError(409, "후속 지시의 대표 원문이 닫기 근거와 다릅니다", "follow_up_mismatch");
         this.refuseOwnerDirectRepeat(target, { text: input.userQuote ?? source.body, verified: true,
           source: { id: source.id, text: source.body, at: source.at } });
       }
@@ -4221,8 +4223,8 @@ export class Orchestrator implements OrchestratorApi {
   /** todo_close. 대표의 할 일을 끝남·필요 없어짐으로 정리한다. 직원은 자기가 부탁한 할 일만. 부탁한 직원에게 깨우지 않고 알린다. */
   async closeTodo(member: Member, input: { id: string; outcome: TodoOutcome; reason: string }): Promise<Todo> {
     const todo = this.store.getTodo(input.id);
-    if (!todo || todo.projectId !== member.projectId) throw new ApiError(404, `할 일을 찾을 수 없습니다: ${input.id}`);
-    if (member.kind === "worker" && todo.memberId !== member.id) throw new ApiError(403, "직원은 자기가 부탁한 할 일만 정리할 수 있습니다");
+    if (!todo || todo.projectId !== member.projectId) throw new ApiError(404, `할 일을 찾을 수 없습니다: ${input.id}`, "todo_not_found");
+    if (member.kind === "worker" && todo.memberId !== member.id) throw new ApiError(403, "직원은 자기가 부탁한 할 일만 정리할 수 있습니다", "todo_not_own");
     const reason = normalizeSpace(input.reason);
     const closed = this.store.closeTodo(todo.id, { outcome: input.outcome, reason, by: member.name });
     const label = input.outcome === "done" ? "끝남" : "필요 없어짐";
@@ -4242,7 +4244,7 @@ export class Orchestrator implements OrchestratorApi {
   async reopenDecision(decisionId: string): Promise<Decision> {
     const decision = this.store.requireDecision(decisionId);
     this.requireActive(this.store.requireProject(decision.projectId));
-    if (decision.status !== "closed" || !decision.closeKind) throw new ApiError(409, "AI가 닫은 결재만 다시 열 수 있습니다");
+    if (decision.status !== "closed" || !decision.closeKind) throw new ApiError(409, "AI가 닫은 결재만 다시 열 수 있습니다", "decision_reopen_refused");
     const reopened = this.store.reopenDecision(decisionId, `${josa(decision.closedBy ?? "AI", "이")} 닫았던 결재를 대표가 다시 열었습니다${decision.closeReason ? `(닫은 이유: ${normalizeSpace(decision.closeReason)})` : ""}`);
     const asker = decision.memberId ? this.store.getMember(decision.memberId) : null;
     const note = `대표가 결재 #${decision.id} 를 다시 열었습니다(질문 '${quotedInline(decision.title)}'). 닫은 것은 취소이며 답이 오면 전달됩니다`;
@@ -4307,7 +4309,7 @@ export class Orchestrator implements OrchestratorApi {
   async manualInbox(memberId: string, timeoutMs: number, signal?: AbortSignal): Promise<ManualInboxBatch | null> {
     const take = () => {
       const member = this.store.requireMember(memberId);
-      if (member.origin !== "manual") throw new ApiError(409, "직접 띄운 직원만 수신함을 사용할 수 있습니다");
+      if (member.origin !== "manual") throw new ApiError(409, "직접 띄운 직원만 수신함을 사용할 수 있습니다", "manual_inbox_only");
       if (signal?.aborted || this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId)) return null;
       this.materializeManualAnswers(member);
       return this.store.manualInbox(memberId);
@@ -4322,7 +4324,7 @@ export class Orchestrator implements OrchestratorApi {
   async acknowledgeManualInbox(memberId: string, request: ManualInboxAckRequest): Promise<ManualInboxAckResult> {
     const member = this.store.requireMember(memberId);
     this.requireActive(this.store.requireProject(member.projectId));
-    if (member.origin !== "manual") throw new ApiError(409, "직접 띄운 직원만 수신함을 사용할 수 있습니다");
+    if (member.origin !== "manual") throw new ApiError(409, "직접 띄운 직원만 수신함을 사용할 수 있습니다", "manual_inbox_only");
     const result = this.store.acknowledgeManualInbox(memberId, request.batchId);
     this.reconcileTodoCorrections();
     for (const item of this.store.getManualInboxBatch(memberId, request.batchId)!.items) if (item.ref?.type === "decision") this.wakeAll(this.askWaiters, item.ref.id);
@@ -4520,7 +4522,7 @@ export class Orchestrator implements OrchestratorApi {
       if (Date.now() < retryAt) {
         for (const d of pending) if (!(d.status === "held" && d.holdReason === "asleep")) {
           if (!(d.status === "held" && d.holdReason === "offline")) this.store.markHeld(d.id, "offline");
-          if (d.refType === "message" && d.refId) this.store.setMessageDelivery(d.refId, "held", "새 설정으로 다시 여는 데 실패해 잠시 뒤 다시 엽니다");
+          if (d.refType === "message" && d.refId) this.store.setMessageDelivery(d.refId, "held", REOPEN_RETRY_NOTE);
         }
         if (pending.some(d => d.wake)) this.scheduleRetry(memberId, rt, retryAt);
         return;
@@ -4696,7 +4698,8 @@ export class Orchestrator implements OrchestratorApi {
       const review = this.store.getBoardReview(project.id) ?? this.store.requestBoardReview(project.id);
       turn.boardReview = { requestedRevision: review.requestedRevision, reviewedRevision: null };
     }
-    rt.direct = ordered.some((d) => d.kind === "user_message" && d.text.startsWith("[대표 직접]"));
+    // 대표가 이 팀장을 골라 보낸 글이 있는가. 전달 글의 '[대표 직접]' 표지(사람과 AI가 읽는 글)가 아니라 원본 메시지의 받는 사람으로 가른다.
+    rt.direct = ordered.some((d) => d.kind === "user_message" && d.refType === "message" && !!d.refId && this.store.getMessage(d.refId)?.targetMemberId === d.memberId);
     turn.deliveries = ordered;
     const current = this.store.requireMember(memberId);
     let result: SendResult;
@@ -4938,7 +4941,7 @@ export class Orchestrator implements OrchestratorApi {
     if (!["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown")) {
       this.store.transaction(() => {
         this.store.deferMemberConfig(member.id, `parallel_unknown:${this.store.memberRevisions(member.id).sessionGeneration}`, true);
-        this.store.patchMember(member.id, { lastError: "control_unknown: 병렬 설정 결과를 확인하지 못했습니다. 자동 입력을 보류합니다" });
+        this.store.patchMember(member.id, { lastError: CONTROL_UNKNOWN_NOTE, fenceCode: "control_unknown" });
       });
       rt.wantParallel = null;
       return false;
@@ -5264,7 +5267,7 @@ export class Orchestrator implements OrchestratorApi {
         // 관측을 명부에 적기 전에, 저장돼 있던 막힘의 까닭을 이미 알린 것으로 잇는다.
         if (e.status === "blocked") this.recallBlockedNotice(member);
         if (this.apiRecovery.holdReason(member.id) === "api_outage" && this.store.requireMember(member.id).statusObservation?.error?.code === "network_outage" && e.status === "idle") return;
-        if (["idle", "working"].includes(e.status) && (!e.observation || e.observation.freshness === "fresh") && member.lastError && !member.lastError.startsWith("control_unknown:") && !this.keepsUsageNote(member)) this.store.patchMember(member.id, { lastError: null });
+        if (["idle", "working"].includes(e.status) && (!e.observation || e.observation.freshness === "fresh") && member.lastError && member.fenceCode !== "control_unknown" && !this.keepsUsageNote(member)) this.store.patchMember(member.id, { lastError: null });
         if (e.status === "working" || e.observation?.freshness === "stale") this.invalidateCoreMeasurement(member);
         if (e.status === "idle" && e.turn !== undefined && e.turn !== null && pending.some(run => run.turn !== null && e.turn! > run.turn)) {
           this.endExecution(member, "success", "서버 부재 중 더 뒤의 종결 turn을 확인했습니다");
@@ -5730,18 +5733,18 @@ export class Orchestrator implements OrchestratorApi {
   private runnerOf(member: Member): Runner {
     const backend = this.backendOf(member);
     const runner = this.runners.get(backend);
-    if (!runner) throw new ApiError(503, `실행기가 없습니다: ${backend}`);
+    if (!runner) throw new ApiError(503, `실행기가 없습니다: ${backend}`, "backend_missing");
     return runner;
   }
 
   /** 세션을 새로 띄우거나 다시 열 때. 전역 실행 방식을 따르고 그것을 기억한다. */
   private openRunner(member: Member): Runner {
     if (member.backend !== "core" && (member.sessionId || member.paneId)) {
-      throw new ApiError(409, "이전 실행기의 세션은 자동 전환하지 않습니다. 새 팀장을 만들거나 CLI 전환으로 새 세션을 시작하세요");
+      throw new ApiError(409, "이전 실행기의 세션은 자동 전환하지 않습니다. 새 팀장을 만들거나 CLI 전환으로 새 세션을 시작하세요", "legacy_session");
     }
     const backend = this.store.effectiveBackend();
     const runner = this.runners.get(backend);
-    if (!runner) throw new ApiError(503, `실행기가 없습니다: ${backend}`);
+    if (!runner) throw new ApiError(503, `실행기가 없습니다: ${backend}`, "backend_missing");
     if (backend === "core" && this.store.getMember(member.id)) this.store.ensureContextState(member.id);
     if (this.store.getMember(member.id) && member.backend !== backend) {
       this.store.patchMember(member.id, { backend });

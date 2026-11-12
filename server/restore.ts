@@ -6,6 +6,8 @@ import { z } from "zod";
 import { backupFile, backupPath, checkBackupDatabase, readBackupJson, syncBackupDirectory, verifyBackup } from "./backup.ts";
 import type { BackupManifest } from "./backup.ts";
 import { openDb } from "./db.ts";
+import { generateAccessCode } from "./config.ts";
+import { revokeAllDeviceKeys } from "./devices.ts";
 import { acquireHomeOwner, normalizeHome } from "./home-owner.ts";
 import { toStorageError } from "./storage-errors.ts";
 
@@ -170,6 +172,8 @@ function quarantine(db: Database, manifest: BackupManifest, mode: "same-host" | 
       ON CONFLICT(id) DO UPDATE SET server_id=excluded.server_id`).run(randomUUID(), at);
     db.query(`UPDATE push_devices SET enabled=0,token=NULL,state='revoked',revoked_at=?,
       registration_generation=registration_generation+1`).run(at);
+    // G(C3): 복제본은 원본 Mac 에 붙어 있던 기기의 열쇠를 받아들이지 않는다(공용 접속 코드도 새로 만든다: restoreBackup).
+    revokeAllDeviceKeys(db, at, "clone");
   }
   const serverId = db.query<{ server_id: string }, []>("SELECT server_id FROM push_meta WHERE id=1").get()?.server_id ?? null;
   db.query("INSERT OR REPLACE INTO settings (key,value) VALUES ('restoreReconciliation',?)").run(JSON.stringify({
@@ -219,6 +223,9 @@ export function restoreBackup(options: RestoreOptions): RestoreResult {
     for (const key of ["claudeBin", "codexBin", "coreBin", "coreSocket"]) {
       if (typeof config[key] === "string") config[key] = relocatePath(config[key], snapshot.manifest.sourceHome, destination);
     }
+    // G(C3): 복제본은 원본과 함께 쓰는 별개의 서버다. 원본의 공용 접속 코드로 붙은 기기가 복제본에도 붙지 않게 새 코드를 준다.
+    // 같은 Mac 복원(same-host)은 코드와 기기 열쇠를 그대로 둔다(그 Mac 의 기기가 다시 연결하지 않아도 된다).
+    if (mode === "clone") config.accessCode = generateAccessCode();
     writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
     const files = ["iamceo.db", ...snapshot.manifest.configs.map((entry) => entry.path), ...snapshot.manifest.attachments.map((entry) => join("uploads", entry.path.slice("attachments/".length)))];
     const state = { format: 1, snapshotId: snapshot.manifest.id, restoredAt: at, mode, destinationHome: destination,

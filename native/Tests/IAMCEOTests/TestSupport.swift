@@ -107,13 +107,17 @@ final class IsolatedTestNetwork: @unchecked Sendable {
         APIClient(endpoint: endpoint, accessCode: accessCode, session: session)
     }
     func close() async {
-        session.invalidateAndCancel()
-        IsolatedTestHTTPRegistry.shared.remove(id)
+        Self.stop(session, id: id)
         await webSockets.close()
     }
-    deinit {
-        session.invalidateAndCancel()
+    deinit { Self.stop(session, id: id) }
+    /// 시험이 끝난 뒤에도 AppStore 가 띄운 작업(예: 연결을 끊을 때 터미널 조작권 놓기)이 이 세션으로 요청할 수 있다.
+    /// 무효화(invalidateAndCancel)한 세션에 새 요청을 만들면 NSException 으로 시험 프로세스가 죽는다(iPhone 시뮬레이터에서
+    /// 실제로 났다). 그래서 무효화하지 않고 진행 중인 요청만 끊고 등록을 지운다. 늦은 요청은 IsolatedTestURLProtocol 에서
+    /// 실패하고, 바깥 네트워크로는 여전히 나가지 않는다.
+    private static func stop(_ session: URLSession, id: String) {
         IsolatedTestHTTPRegistry.shared.remove(id)
+        session.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
     }
 }
 

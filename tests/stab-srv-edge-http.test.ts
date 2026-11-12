@@ -93,7 +93,7 @@ test("store-7: 디스크 가득·저장소 I/O 오류는 분류한 코드와 안
     store.listMessagePage = () => { throw new Error("그 밖의 오류"); };
     const other = await get(`/api/projects/${projectId}/messages/page`);
     expect(other.status).toBe(500);
-    expect(await other.json()).toEqual({ error: "그 밖의 오류" });
+    expect(await other.json()).toEqual({ error: "그 밖의 오류", code: "internal_error" });
   } finally { store.listMessagePage = original; console.error = log; }
   expect(errors.some(args => args.includes("storage_full"))).toBe(true);
 });

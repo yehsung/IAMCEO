@@ -1873,6 +1873,8 @@ struct SettingsView: View {
                 }
             }
             #endif
+            // G(C3): 연결된 기기(QR로 받은 기기별 열쇠·공용 접속 코드)와 최근 실패한 시도. 옛 서버(404)면 그리지 않는다.
+            if online && !store.isDemo { ConnectedDevicesGroup() }
             if canLeave || Self.connectionSample {
                 SettingsGroup {
                     SettingsRow("이 기기에서 나가기", hint: "키체인에 저장한 접속 코드를 지웁니다") {

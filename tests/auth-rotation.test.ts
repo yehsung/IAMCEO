@@ -83,11 +83,14 @@ describe("global access code rotation", () => {
       const fresh = await (await f.request("/api/pair/start", accessCode, "POST")).json() as { code: string };
       const claim = await f.request("/pair/claim", "", "POST", JSON.stringify({ code: fresh.code }));
       expect(claim.headers.get("cache-control")).toBe("no-store");
-      expect(await claim.json()).toMatchObject({ accessCode });
+      // G(C3): 새 QR 은 그 기기만의 열쇠를 준다(공용 코드가 아니다). 열쇠도 새 공용 코드도 통한다.
+      const { accessCode: deviceKey } = await claim.json() as { accessCode: string };
+      expect(deviceKey).not.toBe(accessCode);
+      expect((await f.request("/api/capabilities", deviceKey)).status).toBe(200);
       const reconnected = socket(f.base, accessCode, true);
       await reconnected.hello;
       const output = JSON.stringify(logs.flatMap(log => log.mock.calls));
-      for (const secret of [oldCode, accessCode, fresh.code, qr.code]) expect(output).not.toContain(secret);
+      for (const secret of [oldCode, accessCode, fresh.code, qr.code, deviceKey]) expect(output).not.toContain(secret);
     } finally { for (const log of logs) log.mockRestore(); }
   });
 

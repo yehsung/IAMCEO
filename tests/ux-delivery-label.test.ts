@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { Bus } from "../server/bus.ts";
-import { MIGRATIONS, openDb } from "../server/db.ts";
+import { ensureErrorCodeColumns, MIGRATIONS, openDb } from "../server/db.ts";
 import { Store } from "../server/store.ts";
 import type { Message, WsEvent } from "../shared/types.ts";
 
@@ -95,6 +95,8 @@ describe("message delivery snapshot revisions", () => {
     const db = new Database(":memory:");
     databases.push(db);
     for (const sql of MIGRATIONS.slice(0, migration)) db.exec(sql);
+    // 판 번호 없이 더하는 열(오류·보류 코드). 실제로는 openDb 가 이주 뒤에 더하지만, 이 시험은 이주 도중의 DB 에 지금 Store 를 쓴다.
+    ensureErrorCodeColumns(db);
     const store = new Store(db, new Bus());
     const project = store.createProject({ name: "이전 판", cwd: "/fixture", runnerEnabled: false });
     db.query("INSERT INTO messages (id, project_id, at, kind, body, delivery, delivery_note) VALUES (?, ?, ?, ?, ?, ?, ?)")

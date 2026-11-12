@@ -1,4 +1,5 @@
 // IAMCEO 공유 계약: 서버·웹·MCP가 함께 쓰는 타입. 바꾸려면 docs/spec.md 와 같이 바꾼다.
+import type { ErrorCode } from "./error-codes.ts";
 
 /**
  * 실행기 종류. 지금 쓰는 것은 "core" 하나다. "herdr"·"headless" 는 지워진 옛 실행기의 값으로,
@@ -176,6 +177,11 @@ export interface Member {
   parallel: boolean; // ultracode 켬
   queuedCount: number; // 전달 대기 중 입력 수
   lastError: string | null;
+  /**
+   * lastError 가 '자동 입력을 멈춘 보류'일 때 그 보류의 코드(shared/error-codes.ts). 보류가 아니면 싣지 않는다.
+   * 서버는 이 코드로만 가르고, lastError 문장은 표시와 이전 판 서버를 위해 그대로 둔다.
+   */
+  fenceCode?: ErrorCode;
   /** CLI가 마지막으로 일한 시각(활동 turn_start/turn_end/tool/tool_result의 최신 ISO 시각). 기록이 없으면 null. */
   lastActiveAt: string | null;
   updatedAt: string;
@@ -302,6 +308,8 @@ export interface Message {
   /** Additive terminal disposition. v1 delivery remains held; native reads this as dismissed. */
   deliveryDisposition?: "dismissed";
   deliveryNote: string | null;
+  /** deliveryNote 가 정해진 보류 문장일 때 그 코드(예: held_delivery_unknown). 없으면 옛 서버이거나 코드가 없는 글이다. 앱은 이 코드로 가른다. */
+  deliveryCode?: ErrorCode;
   /** Persisted per-message delivery snapshot revision; increases on every setMessageDelivery, including retries. */
   deliveryRevision?: number;
   /** 보고에 연결된 자료 전체. fileId는 첫 자료의 호환 필드다. */
@@ -768,3 +776,52 @@ export interface ServerVersionInfo { version: string; apiLevel: number }
 export interface CompatNotice { state: "app_outdated" | "server_outdated"; message: string }
 /** GET /api/readiness 의 apps: 이 서버 프로세스가 켜진 뒤 버전 머리글을 보낸 앱들(최근 것부터, 많아야 8개). */
 export interface SeenAppClient extends AppClientInfo { lastSeenAt: string }
+
+// ---- G(C3): 연결된 기기와 접속 기록(GET /api/devices, DELETE /api/devices/:id) ----
+/**
+ * 공용 접속 코드로 들어온 쪽의 갈래. 앱 머리글(APP_HEADERS)을 보낸 앱이면 그 플랫폼,
+ * 머리글 없이 이 Mac 안에서 온 요청(명령줄·이전 Mac 앱)은 local, 그 밖(이전 iPhone 앱 등)은 other.
+ */
+export type AccessPlatform = AppPlatform | "local" | "other";
+/** 짝 맺기(QR)로 받은 기기 열쇠 하나. 열쇠 값은 어디에도 싣지 않는다. */
+export interface ConnectedDevice {
+  id: string;
+  /** 짝 맺을 때 앱이 보낸 기기 이름(예: iPhone 이름). */
+  name: string;
+  /** 머리글을 보낸 앱에서 배운 플랫폼. 이전 앱이면 null. */
+  platform: AppPlatform | null;
+  pairedAt: string;
+  lastSeenAt: string | null;
+  /** 이 목록을 부른 요청이 이 기기의 열쇠로 들어왔다. */
+  current: boolean;
+}
+/** 공용 접속 코드로 붙은 접속 한 줄. 끊으려면 이 Mac 에서 접속 코드를 바꾼다(iamceo auth rotate). */
+export interface SharedCodeAccess {
+  lastSeenAt: string | null;
+  platforms: { platform: AccessPlatform; lastSeenAt: string }[];
+  /** 이 목록을 부른 요청이 공용 접속 코드로 들어왔다. */
+  current: boolean;
+  /** 마지막으로 접속 코드를 바꾼 때(기록이 남아 있는 동안만). */
+  rotatedAt: string | null;
+}
+export type AccessEventKind = "auth_failed" | "pair_failed" | "paired" | "device_revoked" | "code_rotated";
+/** 접속 기록 한 줄. 같은 주소의 실패는 몇 분씩 한 줄로 묶고 count 로 센다. 코드·열쇠 값은 없다. */
+export interface AccessEvent {
+  kind: AccessEventKind;
+  at: string;
+  lastAt: string;
+  count: number;
+  address: string | null;
+  deviceName: string | null;
+  /** auth_failed: wrong(틀린 코드·열쇠) | revoked(끊은 기기의 열쇠). device_revoked: owner | clone | unused. */
+  reason: string | null;
+}
+export interface DeviceAccessList {
+  shared: SharedCodeAccess;
+  devices: ConnectedDevice[];
+  /** 최근 days 일 동안 틀린 코드·열쇠, 끊은 기기의 열쇠, 맞지 않는 QR 로 들어오려 한 횟수. */
+  failures: { count: number; days: number; lastAt: string | null };
+  /** 최근 기록(새 것부터, 많아야 50줄). 기록은 90일·2,000줄까지 둔다. */
+  events: AccessEvent[];
+}
+export interface DeviceRevokeResult { ok: true; device: ConnectedDevice }

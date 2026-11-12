@@ -9,10 +9,10 @@ Mac 앱과 iPhone 앱을 내보내는 순서를 한 장에 적었습니다. 스�
 | 버전 올리기 | 같은 커밋 | 같은 커밋 | 사람 |
 | 태그 만들고 올리기 | `git tag`, `git push` | 필요 없음 | 사람 |
 | CLI 자산과 초안 릴리스 | `release.yml` | 해당 없음 | 자동 |
-| 빌드·서명·올리기 | `scripts/release-mac.ts` | `scripts/release-ios.ts upload` | 스크립트 |
+| 빌드·서명·올리기 | `scripts/release-mac.ts` (공증한 DMG 안의 서버를 실제로 띄워 본 뒤에만 올림) | `scripts/release-ios.ts upload` | 스크립트 |
 | 실제로 깔아서 확인 | DMG 설치 | TestFlight 설치 | 사람 |
 | 공개 | `gh release edit` 또는 `--publish` | App Store Connect에서 버전 만들기 → `release-ios.ts submit` → 심사 → 출시 | 사람 + 스크립트 |
-| 공개 뒤 | Homebrew tap에 cask 올리기 | README 링크 확인 | 사람 |
+| 공개 뒤 | Homebrew tap: `--publish`가 git으로 함께 올림(실패하면 `--tap-only`) | README 링크 확인 | 스크립트 + 사람 |
 
 두 스크립트 모두 **커밋된 내용만** 빌드합니다(`git archive`). 작업 폴더에만 있는 변경은 들어가지 않으니 먼저 커밋합니다.
 
@@ -28,6 +28,8 @@ Mac 앱과 iPhone 앱을 내보내는 순서를 한 장에 적었습니다. 스�
 
 한 곳이라도 다르면 `tests/w1-tooling-version.test.ts`가 실패합니다. 바꾼 뒤 바로 확인합니다.
 
+실행 파일을 컴파일하는 Bun의 버전은 `.bun-version` 한 곳에 적습니다. CI(서버 시험, CLI 자산을 만드는 `release.yml`)는 이 파일로 Bun을 설치하고, `release-mac.ts`는 이 파일과 지금 Bun이 다르면 빌드하지 않습니다. 그래서 한 릴리스의 CLI 자산과 DMG 안 서버가 같은 Bun으로 만들어집니다. Bun을 올릴 때는 이 파일만 바꾸고, 감독자 Mac의 Bun도 같은 버전으로 맞춥니다.
+
 ```sh
 bash scripts/check.sh server tests/w1-tooling-version.test.ts
 ```
@@ -40,7 +42,8 @@ bash scripts/check.sh server tests/w1-tooling-version.test.ts
 
 ### 준비물
 
-- Apple Silicon Mac, Xcode, XcodeGen, `gh`(GitHub 로그인 상태), Bun
+- Apple Silicon Mac, Xcode, XcodeGen, `gh`(GitHub 로그인 상태), `.bun-version`과 같은 버전의 Bun
+- `--publish`로 Homebrew tap까지 올릴 때: tap 저장소에 `git push`할 수 있는 상태(HTTPS면 `gh auth setup-git` 한 번)
 - 환경 변수
 
 | 이름 | 내용 |
@@ -49,10 +52,12 @@ bash scripts/check.sh server tests/w1-tooling-version.test.ts
 | `NOTARY_KEY_PATH` | 공증용 App Store Connect API 키 파일(.p8) 경로 |
 | `NOTARY_KEY_ID` | 그 키의 ID |
 | `NOTARY_ISSUER` | 발급자 ID |
+| `TAP_GIT_NAME`, `TAP_GIT_EMAIL` | (선택) tap 커밋의 작성자. 주지 않으면 릴리스 커밋의 작성자를 씁니다. 주소는 GitHub noreply 주소(`…@users.noreply.github.com`)만 받습니다 |
+| `TAP_REMOTE` | (선택) tap 저장소 주소. 기본은 `https://github.com/yehsung/homebrew-tap.git` |
 
 ### 순서
 
-1. **(사람)** 버전을 올린 커밋을 `main`에 올리고 CI가 통과했는지 확인합니다. CI는 서버 시험(`server`)과 앱 시험(`native`) 두 작업이고, 둘 다 통과해야 초록입니다. 앱 시험은 릴리스를 빌드하는 것과 같은 Xcode 27.2로 돕니다(GitHub의 `xcode-27` 이미지).
+1. **(사람)** 버전을 올린 커밋을 `main`에 올리고 CI가 통과했는지 확인합니다. CI는 서버 시험(`server`), 앱 시험(`native`), 앱 빌드(`apps`) 세 작업이고, 모두 통과해야 초록입니다(§6). 앱 시험과 앱 빌드는 릴리스를 빌드하는 것과 같은 Xcode 27.2로 돕니다(GitHub의 `xcode-27` 이미지).
 2. **(사람)** 태그를 만들어 올립니다.
    ```sh
    git tag v0.0.0 && git push origin v0.0.0
@@ -69,6 +74,8 @@ bash scripts/check.sh server tests/w1-tooling-version.test.ts
    ```
    - 그 커밋의 CI(`ci` 또는 `release`)가 성공해 있어야 올립니다. `--allow-untested`로 건너뛸 수 있지만, 실패 원인이 코드가 아니라는 것을 확인했을 때만 쓰고 릴리스 기록에 남깁니다.
    - 앱 시험(`check.sh swift`)을 빌드 전에 돌립니다. `--skip-tests`는 같은 조건에서만 씁니다.
+   - 지금 Bun이 그 커밋의 `.bun-version`과 다르면 빌드하지 않습니다.
+   - 공증·스테이플을 마친 DMG를 읽기 전용으로 마운트하고, 그 안의 서버(`IAMCEO.app/Contents/Resources/runtime/iamceo`)를 launchd가 띄우는 방식 그대로(감독 프로세스와 로그) 띄워 봅니다. 임시 홈, 포트 0, 가짜 CLI를 쓰고 실행 엔진은 없습니다. `/api/readiness`가 그 파일의 SHA-256을 build ID로, 릴리스 버전을 버전으로 알리고, 인증된 읽기가 되고, SIGTERM에 깨끗이 멈춰야 합니다. 하나라도 어긋나면 아무것도 올리지 않고 멈춥니다. 결과는 단계마다 한 줄씩 찍힙니다.
    - 결과물은 `dist/release/`에 남습니다: `IAMCEO-버전-arm64.dmg`, `SHA256SUMS`, `iamceo.rb`.
 6. **(사람)** 초안에 올라간 DMG를 받아 직접 깔아 봅니다. 기존 데이터 위에 올리기 전에는 DB 사본으로 먼저 띄워 봅니다.
    ```sh
@@ -79,7 +86,14 @@ bash scripts/check.sh server tests/w1-tooling-version.test.ts
    gh release edit v0.0.0 --repo yehsung/IAMCEO --draft=false --latest
    ```
    확인을 이미 마쳤다면 5번에서 `--upload --publish`를 함께 줘도 됩니다. 한번 공개한 릴리스의 파일은 스크립트가 덮어쓰지 않습니다.
-8. **(사람)** Homebrew tap에 cask를 올립니다. `dist/release/iamceo.rb`(버전과 SHA-256이 채워진 파일)를 tap 저장소의 `Casks/iamceo.rb`로 복사해 커밋하고 올립니다. 저장소 안의 `packaging/homebrew/Casks/iamceo.rb`는 틀이라서 그대로 올리면 안 됩니다.
+8. **(스크립트)** Homebrew tap에 cask를 올립니다. `--publish`는 공개한 뒤 이어서 tap 저장소를 받아 `Casks/iamceo.rb`를 `dist/release/iamceo.rb`(버전과 SHA-256이 채워진 파일)로 바꾸고, GitHub noreply 주소로 커밋해 `git push`합니다. 이미 같은 cask가 있으면 아무것도 올리지 않습니다.
+   - GitHub contents API(`gh api … /contents/…`)로 올리지 않습니다. 작성자를 주지 않으면 계정의 실제 메일 주소가 공개 커밋에 찍힙니다.
+   - 7번처럼 `gh release edit`로 직접 공개했거나 tap 단계만 실패했다면 그 단계만 다시 합니다. 릴리스가 공개 상태이고 `dist/release/iamceo.rb`의 SHA-256이 릴리스의 `SHA256SUMS`와 같아야 올립니다.
+     ```sh
+     bun scripts/release-mac.ts --ref v0.0.0 --tap-only --dry-run
+     bun scripts/release-mac.ts --ref v0.0.0 --tap-only
+     ```
+   - 저장소 안의 `packaging/homebrew/Casks/iamceo.rb`는 틀이라서 그대로 올리면 안 됩니다. 스크립트가 만든 cask에는 틀의 머리 주석이 없습니다.
 9. **(사람)** 공개 뒤 두 경로를 각각 확인합니다.
    ```sh
    brew upgrade --cask yehsung/tap/iamceo
@@ -173,3 +187,13 @@ bun scripts/release-ios.ts api GET '/v1/apps?fields[apps]=bundleId'
 - 새 앱을 출시하면 그 태그를 `scripts/compat-decoders/releases.json`에 더합니다(그 태그에서 따로 빌드할 해석 코드 파일 목록과 함께).
 - 앱은 모든 요청에 `X-IAMCEO-App-Version`, `X-IAMCEO-App-Build`, `X-IAMCEO-App-Platform`(macos|ios), `X-IAMCEO-Api-Level`을 붙입니다. 서버는 머리글을 보낸 앱에만 Bootstrap의 `server`(버전·API 단계)를 싣고, 실제로 맞지 않을 때만 `compat`을 싣습니다. 붙은 앱 목록은 `/api/readiness`의 `apps`에 보입니다.
 - 서버와 앱이 서로 알아야 하는 것이 바뀌어 API 단계를 올릴 때는 `shared/types.ts`의 `API_LEVEL`(필요하면 `MIN_APP_API_LEVEL`)과 앱의 `AppVersion.apiLevel`을 함께 올립니다. `MIN_APP_API_LEVEL`을 올리면 그보다 낮은 앱에 '앱을 업데이트하세요'가 뜨므로, 출시된 앱이 실제로 깨질 때만 올립니다.
+
+## 6. 시험과 CI
+
+- CI(`.github/workflows/ci.yml`)는 `main`·`native-redesign`에 올릴 때와 그 두 가지로 가는 PR마다 돕니다. 작업은 서버 시험(`server`), 앱 시험(`native`, `check.sh swift`), 앱 빌드(`apps`, `check.sh build`: Mac·iPhone 앱을 서명 없이 컴파일) 셋이고, 모두 통과해야 초록입니다.
+- **iPhone 시험은 로컬에서만 돕니다.** `bash scripts/check.sh ios`가 같은 앱 시험(`native/Tests`)을 iPhone 시뮬레이터에서 돌립니다(`native/project.yml`의 `IAMCEO-iOS-Tests`). Mac에서만 되는 시험은 `#if os(macOS)` 안에 두고, iPhone 전용 경로(입력칸, 배경 복귀, 알림 탭)는 `IPhoneOnlyTests.swift`가 봅니다. `bash scripts/check.sh`(전체)에도 들어 있고, iPhone 시뮬레이터가 없는 Mac에서는 건너뛰었다고 알립니다.
+  - 시뮬레이터는 이 Mac에 있는 것에서 고릅니다. `IAMCEO_IOS_SIMULATOR`(이름이나 UDID)를 주면 그것을, 아니면 이름이 `iPhone `으로 시작하는 기기 중 꺼져 있는 것(쓰는 중일 수 있는 켜진 기기는 뒤로)을 가장 새 iOS부터 고릅니다.
+  - 부팅은 `xcodebuild`가 합니다. 이미 켜져 있던 시뮬레이터는 끄거나 지우지 않고, 이 단계가 켠 기기만 끝나면 끕니다.
+  - 시험을 품는 앱은 출시 앱과 소스가 같고 번들 ID만 다른 시험 전용 앱입니다. 시뮬레이터에 깔린 출시 앱의 저장된 연결이나 키체인을 건드리지 않습니다.
+  - 실패한 시험만 한 번 더 돌려 통과하면 FLAKY로 남깁니다(`IAMCEO_TEST_RETRY=0`이면 다시 돌리지 않습니다).
+  - CI에 넣지 않은 이유: CI의 `xcode-27` 이미지에 어떤 iPhone 시뮬레이터가 있는지 확인하지 못했습니다. 넣으려면 그 이미지에서 `xcrun simctl list devices available`을 먼저 확인하고, 로컬에서 세 번 연속 통과하는지 본 뒤 막는 작업으로 더합니다.

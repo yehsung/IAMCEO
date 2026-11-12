@@ -31,7 +31,7 @@ const USAGE = `쓰는 법: iamceo <명령>
   restore reconcile      서버가 꺼진 IAMCEO_HOME의 큐·푸시를 보수적으로 조정한다
   restore resume         조정 완료 후 발신을 허용한다. 이후 serve로 시작한다
   readiness              인증·복구 완료·실행 build ID를 확인한다
-  auth rotate            이 Mac의 접속 코드를 교체하고 모든 연결·QR을 만료시킨다
+  auth rotate            이 Mac의 공용 접속 코드를 교체하고 그 코드로 붙은 연결·QR을 만료시킨다(QR로 연결한 기기는 그대로)
   build-id               실행 파일의 build ID를 보여 준다
   service install [--restart] [--dry-run] | uninstall [--dry-run]
                          launchd 서비스(com.iamceo.server)를 등록·해제한다
@@ -66,7 +66,7 @@ const USAGE_EN = `Usage: iamceo <command>
   restore reconcile      reconcile the queue and push of a stopped IAMCEO_HOME, conservatively
   restore resume         allow outgoing delivery after reconcile; then start it with serve
   readiness              check authentication, recovery and the running build ID
-  auth rotate            replace this Mac's access code; every connection and QR stops working
+  auth rotate            replace this Mac's shared access code; connections on it and QRs stop working (devices paired by QR stay)
   build-id               show the build ID of this executable
   service install [--restart] [--dry-run] | uninstall [--dry-run]
                          register or remove the launchd service (com.iamceo.server)
@@ -994,8 +994,8 @@ async function main(argv: string[]): Promise<void> {
       if (rest.length !== 1 || rest[0] !== "rotate") throw new CliError(say("쓰는 법: iamceo auth rotate", "Usage: iamceo auth rotate"));
       // say 는 두 문구를 모두 만든다. 교체는 문구 밖에서 한 번만 한다.
       const code = await rotateAccessCode(loadConfig());
-      return console.log(say(`접속 코드를 교체했습니다. 모든 기기에서 다시 연결하세요.\n접속 코드: ${code}`,
-        `The access code is replaced. Connect again from every device.\nAccess code: ${code}`));
+      return console.log(say(`접속 코드를 교체했습니다. 옛 코드로 붙어 있던 기기는 다시 연결하세요(QR로 연결해 기기 열쇠를 받은 기기는 그대로입니다).\n접속 코드: ${code}`,
+        `The access code is replaced. Connect again from devices that used the old code (devices paired by QR keep their own key).\nAccess code: ${code}`));
     }
     case "build-id":
       return console.log(await buildId());

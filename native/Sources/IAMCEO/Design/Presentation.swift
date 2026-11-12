@@ -514,7 +514,7 @@ func newestFirst(_ decisions: [Decision]) -> [Decision] {
 /// The server's `delivery_unknown` hold. It is never retried automatically and it freezes every later delivery to
 /// that member (decision answers and todo notices included) until someone checks the terminal.
 func isDeliveryUnknownHold(_ message: Message) -> Bool {
-    message.delivery == "held" && (message.deliveryNote ?? "").hasPrefix("전달 여부를 확인할 수 없어")
+    ServerCode.deliveryUnknownHold(message)
 }
 
 /// My messages whose delivery still needs the CEO, newest first.

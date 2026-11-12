@@ -104,11 +104,11 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   private record(id: string): DeliveryRecoveryRecord {
     this.store.requireDelivery(id);
     const record = this.store.getDeliveryRecovery(id);
-    if (!record) throw new ApiError(409, "전달 복구 상태가 없습니다");
+    if (!record) throw new ApiError(409, "전달 복구 상태가 없습니다", "delivery_recovery_missing");
     return record;
   }
   private activeProject(id: string): void {
-    if (this.store.requireProject(id).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+    if (this.store.requireProject(id).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다", "project_not_found");
   }
   private latest(delivery: Delivery): DeliveryDispatch | null {
     return this.store.listDispatches(delivery.memberId).filter(d => d.items.some(item => item.deliveryId === delivery.id)).at(-1) ?? null;
@@ -167,18 +167,18 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
 
   prepareDispatch(deliveryIds: string[], identity: RunnerTerminalIdentity, baseline: DeliveryBaseline): DeliveryDispatch {
     return this.store.transaction(() => {
-      if (!deliveryIds.length || new Set(deliveryIds).size !== deliveryIds.length) throw new ApiError(400, "봉투 항목이 올바르지 않습니다");
+      if (!deliveryIds.length || new Set(deliveryIds).size !== deliveryIds.length) throw new ApiError(400, "봉투 항목이 올바르지 않습니다", "envelope_invalid");
       const deliveries = deliveryIds.map(id => this.store.requireDelivery(id));
       const first = deliveries[0];
       this.activeProject(first.projectId);
       const member = this.store.requireMember(first.memberId);
-      if (this.closed || !this.store.requireProject(member.projectId).runnerEnabled || this.fenced(member.id) || member.origin === "manual" || identity.terminalId !== member.paneId || identity.sessionId !== member.sessionId || identity.sessionGeneration !== this.store.memberRevisions(member.id).sessionGeneration) throw new ApiError(409, "입력 안전 상태가 바뀌었습니다");
+      if (this.closed || !this.store.requireProject(member.projectId).runnerEnabled || this.fenced(member.id) || member.origin === "manual" || identity.terminalId !== member.paneId || identity.sessionId !== member.sessionId || identity.sessionGeneration !== this.store.memberRevisions(member.id).sessionGeneration) throw new ApiError(409, "입력 안전 상태가 바뀌었습니다", "input_safety_changed");
       for (const d of deliveries) {
         const previous = this.latest(d), phase = this.record(d.id).phase;
         const admissible = previous
           ? previous.transportState === "rejected" && (["none", "resolved"].includes(phase) || phase === "waiting" && this.record(d.id).reason === "input_busy")
           : d.attempts === 0 && phase === "none";
-        if (d.memberId !== first.memberId || d.projectId !== first.projectId || d.kind === "compact" || !["queued", "held"].includes(d.status) || !admissible || this.sourceRevision(d) === null) throw new ApiError(409, "새 전달 봉투를 만들 수 없습니다");
+        if (d.memberId !== first.memberId || d.projectId !== first.projectId || d.kind === "compact" || !["queued", "held"].includes(d.status) || !admissible || this.sourceRevision(d) === null) throw new ApiError(409, "새 전달 봉투를 만들 수 없습니다", "envelope_create_refused");
       }
       const dispatch = this.saveEnvelope(deliveries, identity, baseline, "prepared");
       for (const d of deliveries) {
@@ -199,7 +199,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       cli: member.cli, backend: member.backend ?? "core", identity, baseline, markers, bundleMarker, wireText,
       wireSha256: createHash("sha256").update(wireText).digest("hex"), items: deliveries.map((d, ordinal) => ({ deliveryId: d.id, ordinal, sourceRevision: this.sourceRevision(d) })),
       transportState, submitAttempts: 0, createdAt, updatedAt: this.iso() };
-    if (!this.validDispatch(dispatch)) throw new ApiError(409, "전달 봉투의 기준선이나 신원을 확인할 수 없습니다");
+    if (!this.validDispatch(dispatch)) throw new ApiError(409, "전달 봉투의 기준선이나 신원을 확인할 수 없습니다", "envelope_identity_unverified");
     this.store.saveDispatch(dispatch);
     for (const item of dispatch.items) this.store.patchDeliveryRetry(item.deliveryId, { sourceRevision: item.sourceRevision });
     return dispatch;
@@ -274,7 +274,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   recordResult(dispatchId: string, result: SendResult): void {
     this.store.transaction(() => {
       const dispatch = this.store.getDispatch(dispatchId);
-      if (!dispatch) throw new ApiError(404, "전달 봉투를 찾을 수 없습니다");
+      if (!dispatch) throw new ApiError(404, "전달 봉투를 찾을 수 없습니다", "envelope_not_found");
       const receipt = result.ok && result.receipt?.dispatchId === dispatchId;
       if (receipt) {
         this.store.updateDispatch(dispatchId, dispatch.transportState, "accepted");
@@ -334,13 +334,13 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   }
 
   async recover(deliveryId: string, request: DeliveryRecoveryRequest): Promise<DeliveryRecoveryResult> {
-    if (!requestSchema.safeParse(request).success) throw new ApiError(400, "전달 복구 요청이 올바르지 않습니다");
+    if (!requestSchema.safeParse(request).success) throw new ApiError(400, "전달 복구 요청이 올바르지 않습니다", "delivery_recovery_invalid");
     const d = this.store.requireDelivery(deliveryId);
     this.activeProject(d.projectId);
     return this.store.deliveryRecoveryOperation(deliveryId, request.operationId, request, () => {
       const r = this.record(deliveryId);
       if (["recheck", "stop_retry"].includes(request.action) && ["queued", "held"].includes(d.status) && r.phase !== "stopped" && (!this.latest(d) || this.latest(d)?.transportState === "rejected")) {
-        if (this.closed || r.version !== request.expectedVersion || this.mutations.has(d.memberId)) throw new ApiError(409, "전달 상태가 바뀌었습니다. 다시 확인해 주세요");
+        if (this.closed || r.version !== request.expectedVersion || this.mutations.has(d.memberId)) throw new ApiError(409, "전달 상태가 바뀌었습니다. 다시 확인해 주세요", "delivery_state_changed");
         const next = this.store.updateDeliveryRecovery(d.id, r.version, { phase: request.action === "stop_retry" ? "stopped" : this.latest(d) ? "resolved" : "none", reason: this.latest(d) ? "not_received" : null, lastCheckedAt: this.iso(), nextCheckAt: null });
         if (request.action === "stop_retry") {
           this.projectStatus(d, "failed", STOP_NOTE);
@@ -351,8 +351,8 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
         }
         return { operationId: request.operationId, deliveryId, outcome: request.action === "stop_retry" ? "stopped" : "check_scheduled", committedVersion: next.version };
       }
-      if (this.closed || r.version !== request.expectedVersion || ["resolved", "stopped"].includes(r.phase) || r.phase === "none" || this.mutations.has(d.memberId)) throw new ApiError(409, "전달 상태가 바뀌었습니다. 다시 확인해 주세요");
-      if (request.action !== "recheck" && !this.actions(d, r).includes(request.action)) throw new ApiError(409, "전달 상태가 바뀌었습니다. 다시 확인해 주세요");
+      if (this.closed || r.version !== request.expectedVersion || ["resolved", "stopped"].includes(r.phase) || r.phase === "none" || this.mutations.has(d.memberId)) throw new ApiError(409, "전달 상태가 바뀌었습니다. 다시 확인해 주세요", "delivery_state_changed");
+      if (request.action !== "recheck" && !this.actions(d, r).includes(request.action)) throw new ApiError(409, "전달 상태가 바뀌었습니다. 다시 확인해 주세요", "delivery_state_changed");
       const next = this.store.updateDeliveryRecovery(d.id, r.version, request.action === "stop_retry"
         ? { phase: "stopped", nextCheckAt: null }
         : { phase: request.action === "recheck" && r.phase === "needs_owner" ? "needs_owner" : "checking", reason: request.action === "retry_with_risk" ? "risk_approved" : r.reason, nextCheckAt: this.iso() });
@@ -744,7 +744,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       const existing = this.store.listDeliveries(m.projectId).filter(d => d.refType === "message" && d.refId === m.id).at(-1);
       if (existing) return existing;
       const member = m.targetMemberId && this.store.getMember(m.targetMemberId);
-      if (!m.mine || m.delivery !== "failed" || !member || member.projectId !== m.projectId) throw new ApiError(409, "옛 메시지의 수신자를 확정할 수 없습니다");
+      if (!m.mine || m.delivery !== "failed" || !member || member.projectId !== m.projectId) throw new ApiError(409, "옛 메시지의 수신자를 확정할 수 없습니다", "legacy_message_recipient_unknown");
       const d = this.store.enqueue({ projectId: m.projectId, memberId: member.id, kind: "user_message", text: m.body, refType: "message", refId: m.id, status: "held", holdReason: "delivery_unknown" });
       this.beginRecovery(d.id, "legacy_unknown");
       return this.store.requireDelivery(d.id);
@@ -754,21 +754,21 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   /** Explicit owner choice: never infer a recipient while reading legacy failures. */
   recoverUnassignedMessage(messageId: string, request: UnassignedRecoveryRequest): UnassignedRecoveryResult {
     if (!z.strictObject({ operationId: z.uuid(), expectedVersion: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-      action: z.enum(["send_to_conductor", "dismiss"]) }).safeParse(request).success) throw new ApiError(400, "메시지 정리 요청이 올바르지 않습니다");
+      action: z.enum(["send_to_conductor", "dismiss"]) }).safeParse(request).success) throw new ApiError(400, "메시지 정리 요청이 올바르지 않습니다", "message_cleanup_invalid");
     return this.store.transaction(() => {
       const m = this.store.requireMessage(messageId);
-      if (this.store.requireProject(m.projectId).archived) throw new ApiError(409, "보관 중인 프로젝트의 메시지는 정리할 수 없습니다");
+      if (this.store.requireProject(m.projectId).archived) throw new ApiError(409, "보관 중인 프로젝트의 메시지는 정리할 수 없습니다", "message_cleanup_archived");
       return this.store.unassignedMessageOperation<UnassignedRecoveryResult>(messageId, request.operationId, request, request.action, () => {
         if (this.closed || request.expectedVersion !== 0 || !m.mine || m.delivery !== "failed" ||
-          this.store.listDeliveries(m.projectId).some(d => d.refType === "message" && d.refId === m.id)) throw new ApiError(409, "메시지 상태가 바뀌었습니다. 다시 확인해 주세요");
+          this.store.listDeliveries(m.projectId).some(d => d.refType === "message" && d.refId === m.id)) throw new ApiError(409, "메시지 상태가 바뀌었습니다. 다시 확인해 주세요", "message_state_changed");
         const target = m.targetMemberId && this.store.getMember(m.targetMemberId);
         if (request.action === "dismiss") {
           this.store.setMessageDelivery(m.id, "dismissed");
           return { memberId: null, result: { operationId: request.operationId, messageId, deliveryId: null, outcome: "dismissed" as const, committedVersion: 1 } };
         }
-        if (target && target.projectId === m.projectId) throw new ApiError(409, "이미 수신자가 지정된 메시지입니다");
+        if (target && target.projectId === m.projectId) throw new ApiError(409, "이미 수신자가 지정된 메시지입니다", "message_recipient_set");
         const member = this.store.getConductor(m.projectId);
-        if (!member) throw new ApiError(409, "프로젝트에 현재 총괄이 없습니다");
+        if (!member) throw new ApiError(409, "프로젝트에 현재 총괄이 없습니다", "project_no_lead");
         const d = this.store.enqueue({ projectId: m.projectId, memberId: member.id, kind: "user_message", text: this.options.legacyMessageText?.(m) ?? m.body,
           refType: "message", refId: m.id });
         this.store.setMessageDelivery(m.id, "queued");
@@ -865,7 +865,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       const member = this.store.requireMember(memberId);
       this.activeProject(member.projectId);
       const limit = opts.limit ?? 50;
-      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new ApiError(400, "조회 개수가 올바르지 않습니다");
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new ApiError(400, "조회 개수가 올바르지 않습니다", "invalid_limit");
       let before: { createdAt: string; id: string } | null = null;
       if (opts.before !== undefined) {
         try {
@@ -874,7 +874,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
           if (bytes.toString("base64url") !== opts.before) throw new Error("cursor");
           const cursor = z.strictObject({ v: z.literal(1), memberId: z.literal(memberId), createdAt: z.string().min(1).max(128), id: z.string().min(1).max(512) }).parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
           before = cursor;
-        } catch { throw new ApiError(400, "전달 조회 위치가 올바르지 않습니다"); }
+        } catch { throw new ApiError(400, "전달 조회 위치가 올바르지 않습니다", "invalid_delivery_cursor"); }
       }
       const all = this.items(member.projectId);
       const sorted = all.filter(item => item.memberId === memberId).sort((a, b) => compare(b.createdAt, a.createdAt) || compare(b.id, a.id));

@@ -162,6 +162,8 @@ import UserNotifications
 @MainActor protocol MacNotificationDelivering {
     func requestPermission() async throws -> Bool
     func deliver(identifier: String, title: String, metadata: Data) async throws
+    /// An operating notice with its own fixed text (Tailscale is off). It opens nothing in particular.
+    func deliverNotice(identifier: String, title: String, body: String) async throws
     func clear()
 }
 
@@ -176,6 +178,14 @@ import UserNotifications
         content.sound = .default
         // Fixed copy only: no report text, project names, paths, credentials or terminal contents.
         content.userInfo = ["iamceoMac": metadata]
+        try await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
+    }
+    func deliverNotice(identifier: String, title: String, body: String) async throws {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.userInfo = [MacNotificationService.noticeKey: identifier]
         try await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
     }
     func clear() {
@@ -211,7 +221,10 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
     @ObservationIgnored private var pendingHome: MacNotificationEnvelope?
     @ObservationIgnored private var openingHome = false
     @ObservationIgnored private var foreignHomeNoticeShown = false
+    @ObservationIgnored private var tailnetOff = TailnetOffTracker()
     private static let enabledKey = "iamceo.macNotifications.enabled.v1"
+    /// userInfo key of an operating notice (not tied to a decision, report or member).
+    nonisolated static let noticeKey = "iamceoNotice"
 
     init(defaults: UserDefaults? = .standard, delivery: (any MacNotificationDelivering)? = nil) {
         self.defaults = defaults; self.delivery = delivery ?? SystemMacNotifications()
@@ -264,8 +277,34 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
         NSApp.dockTile.badgeLabel = nil
     }
 
+    /// Tailscale went off on this Mac. The server posts the notification itself while script notifications are on
+    /// (and then says so with `macNotified`); once this app owns Mac notifications (`macScriptNotifications` is
+    /// false) it posts the same words here, once per off period. Returns the delivery when one was started.
+    @discardableResult
+    func noteTailnet(_ tailnet: TailnetState?, serverID: String, appOwnsNotifications: Bool) -> Task<Void, Never>? {
+        guard tailnetOff.shouldNotify(tailnet, serverID: serverID, appOwnsNotifications: enabled && appOwnsNotifications) else { return nil }
+        return Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.delivery.deliverNotice(identifier: "\(serverID):tailnet_off", title: TailnetNotice.notificationTitle,
+                                                      body: TailnetNotice.notificationBody)
+            } catch { self.permissionNotice = friendlyLoadError(error, what: "Mac 알림", verb: "띄우지") }
+        }
+    }
+
+    /// The main window is in front, so its status strips are being read.
+    private var mainWindowInFront: Bool {
+        NSApp.isActive && NSApp.keyWindow?.identifier?.rawValue == "IAMCEO.MainWindow"
+    }
+
     private func reconcile(store: AppStore) {
         processPendingHome(store: store)
+        if let serverID = store.serverID {
+            // Only the app on the server's own Mac, and only while the server's word is current.
+            noteTailnet(store.bootstrap?.tailnet, serverID: serverID,
+                        appOwnsNotifications: store.serverIsThisMac && store.connectionStatus == .connected && !store.showsOffline
+                            && !store.isRestarting && store.bootstrap?.settings.macScriptNotifications == false)
+        }
         let badgeSignature = store.projects.map { "\($0.id):\($0.needsCount ?? -1):\($0.inboxCount):\($0.blockedCount)" }.joined(separator: ",")
         if badgeSignature != storeBadgeSignature {
             storeBadgeSignature = badgeSignature
@@ -413,6 +452,10 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        if notification.request.content.userInfo[Self.noticeKey] != nil {
+            // The strip in the main window says the same; a banner on top of it would only repeat it.
+            return await MainActor.run { self.enabled && !self.mainWindowInFront ? [.banner, .sound] : [] }
+        }
         guard let data = notification.request.content.userInfo["iamceoMac"] as? Data,
               let envelope = try? JSONDecoder().decode(MacNotificationEnvelope.self, from: data) else { return [] }
         return await MainActor.run {

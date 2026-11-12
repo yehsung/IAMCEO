@@ -375,6 +375,9 @@ export const DEFAULT_SETTINGS: Settings = {
 /** 대표가 새 프로젝트를 만들며 신뢰한다고 답한 폴더(프로젝트 id → 그때의 폴더). settings 표의 별도 키라 스키마를 바꾸지 않는다. */
 const FOLDER_TRUST_KEY = "folderTrust";
 
+/** 이 설치가 Tailscale 주소를 연 적이 있다는 기록({ address, at }). 같은 표의 별도 키라 설정 응답에는 나가지 않는다. */
+const TAILNET_SEEN_KEY = "tailnetSeen";
+
 /** 막힘의 까닭은 관측 기록의 오류 코드에서 읽는다. 막힘이 아니면 싣지 않는다. */
 function blockedCodeOf(status: string, observation: Member["statusObservation"]): BlockedCode | undefined {
   if (status !== "blocked") return undefined;
@@ -1137,6 +1140,20 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {};
       return Object.fromEntries(Object.entries(saved).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
     } catch { return {}; }
+  }
+
+  /** 이 설치가 전에 연 Tailscale 주소와 그 시각. 연 적이 없으면 null. */
+  tailnetSeen(): { address: string; at: string } | null {
+    const row = this.row("SELECT value FROM settings WHERE key = ?", TAILNET_SEEN_KEY);
+    if (!row) return null;
+    try {
+      const saved = JSON.parse(row.value) as { address?: unknown; at?: unknown } | null;
+      return saved && typeof saved.address === "string" && saved.address && typeof saved.at === "string" ? { address: saved.address, at: saved.at } : null;
+    } catch { return null; }
+  }
+
+  rememberTailnetSeen(seen: { address: string; at: string }): void {
+    this.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", TAILNET_SEEN_KEY, JSON.stringify({ address: seen.address, at: seen.at }));
   }
 
   loadApiRecovery<T>(key: string): T | null {

@@ -51,7 +51,7 @@ brew install --cask yehsung/tap/iamceo
    > 총괄: 접수했습니다 — 화면 문구 팀장에게 맡겼습니다.
 4. 결정할 일은 **결재함**, 결과물은 **자료**, 내가 직접 할 일은 **홈**에 모입니다.
 
-**iPhone:** Mac과 iPhone을 [Tailscale](https://tailscale.com)에 연결한 뒤 Mac 앱의 **iPhone 연결** QR을 찍습니다. iPhone 앱은 [App Store에서 받습니다](https://apps.apple.com/app/id6831782194).
+**iPhone:** Mac과 iPhone을 [Tailscale](https://tailscale.com)에 연결한 뒤 Mac 앱의 **iPhone 연결** QR을 찍습니다. iPhone 앱은 [App Store에서 받습니다](https://apps.apple.com/app/id6831782194). 쓰던 iPhone이 연결되지 않으면 Mac의 Tailscale이 켜져 있는지 확인해 주세요. 꺼져 있으면 Mac 앱이 알려 줍니다.
 
 ### 알림
 

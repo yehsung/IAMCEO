@@ -186,6 +186,46 @@ struct EngineNotice: Sendable, Equatable {
     }
 }
 
+/// Tailscale is off on the server's Mac: the iPhone cannot reach it while this Mac still can (over 127.0.0.1).
+/// Only the Mac app on that Mac says so, as a status strip and as one Mac notification per off period. An iPhone
+/// that reaches the server has a working path, so it stays silent. Only "off" speaks.
+struct TailnetNotice: Sendable, Equatable {
+    static let stripText = "Tailscale이 꺼져 있어 iPhone에서 연결할 수 없습니다. 이 Mac의 Tailscale을 켜 주세요."
+    /// The Mac notification. The server's own script notification says the same with an "IAMCEO · " prefix
+    /// (server/tailnet.ts); the app's banner already carries the app name.
+    static let notificationTitle = "Tailscale이 꺼져 있습니다"
+    static let notificationBody = "iPhone에서 연결할 수 없습니다. 이 Mac의 Tailscale을 켜 주세요."
+
+    let text: String
+    init?(_ tailnet: TailnetState?, onThisMac: Bool) {
+        guard onThisMac, tailnet?.state == "off" else { return nil }
+        text = Self.stripText
+    }
+}
+
+/// One Mac notification per off period. A period is named by the server and the time its address went missing,
+/// so a reconnect or a re-read of the same period stays quiet; a period with no time ends when "ok" is heard.
+struct TailnetOffTracker: Sendable, Equatable {
+    private var notified: String?
+
+    /// `appOwnsNotifications`: the Mac app posts notifications itself right now. While it does not, the period
+    /// stays open, so it is announced once the app does (unless the server already announced it).
+    mutating func shouldNotify(_ tailnet: TailnetState?, serverID: String, appOwnsNotifications: Bool) -> Bool {
+        switch tailnet?.state {
+        case "off":
+            let period = serverID + "|" + (tailnet?.since ?? "")
+            guard appOwnsNotifications, tailnet?.macNotified != true, notified != period else { return false }
+            notified = period
+            return true
+        case "ok":
+            notified = nil
+            return false
+        default:
+            return false
+        }
+    }
+}
+
 /// How sessions may run commands. Settings and the first-run choice use the same three names.
 struct PermissionModeChoice: Identifiable, Sendable, Equatable {
     let id: String

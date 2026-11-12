@@ -1166,6 +1166,12 @@ struct StatusStrips: View {
         if !offline, !store.isRestarting, store.connectionStatus == .connected, let engine = EngineNotice(store.bootstrap?.engine) {
             items.append(Strip(id: "engine", tone: .attention, icon: "exclamationmark.triangle", text: engine.text, lines: 3))
         }
+        // Tailscale is off on this Mac: the app here still reaches the server, the iPhone does not. Mac only
+        // (TailnetNotice), and like the engine line only while the server's word is current.
+        if !offline, !store.isRestarting, !store.isDemo, store.connectionStatus == .connected,
+           let tailnet = TailnetNotice(store.bootstrap?.tailnet, onThisMac: store.serverIsThisMac) {
+            items.append(Strip(id: "tailnet", tone: .attention, icon: "iphone.slash", text: tailnet.text, lines: 3))
+        }
         if let notice = store.connectionNotice {
             items.append(Strip(id: "connection-check", tone: .neutral, icon: "arrow.triangle.2.circlepath", text: notice, busy: true))
         }

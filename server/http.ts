@@ -7,7 +7,7 @@ import { MIGRATIONS } from "./db.ts";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { z } from "zod";
-import { fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type EngineStatus, type HerdrInfo, type Member, type MessagePageOptions, type SyncSnapshot, type FileDoc, type WsEvent } from "../shared/types.ts";
+import { fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type EngineStatus, type HerdrInfo, type TailnetStatus, type Member, type MessagePageOptions, type SyncSnapshot, type FileDoc, type WsEvent } from "../shared/types.ts";
 import type { OperationReceipt, ServerCapabilities } from "../shared/operations.ts";
 import type { DeliveryRecoveryService } from "./service-contracts.ts";
 import { ARTIFACT_CSP, buildArtifactSrcdoc } from "../shared/artifact-kit.ts";
@@ -28,6 +28,7 @@ import { checkLocalImportPath, readLocalFile } from "./local-files.ts";
 import { createStorageReferences } from "./storage-maintenance.ts";
 import { GitHub } from "./github.ts";
 import { LoopMonitor } from "./loop-monitor.ts";
+import { TailnetWatch } from "./tailnet.ts";
 
 export interface ServerContext {
   config: Config;
@@ -39,6 +40,8 @@ export interface ServerContext {
   push?: PushRoutesContext;
   /** 시험용. 기본은 Tailscale 주소 감지. */
   detectHosts?: () => string[];
+  /** 시험용. Tailscale 꺼짐 판정의 시계와 유예 시간. 기본은 Date.now 와 60초. */
+  tailnetWatch?: { now?: () => number; graceMs?: number };
   /** Isolated folder/API tests use a fake user home; production uses homedir(). */
   folderHome?: string;
   /** Isolated fake-clone tests need not depend on host disk availability. */
@@ -545,7 +548,10 @@ function engineField(orch: OrchestratorApi): { engine?: EngineStatus } {
   return engine ? { engine } : {};
 }
 
-function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, monitor: LoopMonitor): Route[] {
+/** Tailscale 상태. 그 주소를 연 적이 없거나 주소를 직접 정한 설치에서는 싣지 않는다. */
+type TailnetField = () => { tailnet?: TailnetStatus };
+
+function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, monitor: LoopMonitor, tailnetField: TailnetField): Route[] {
   const { config, store, orch, bus } = ctx;
   const models = new ModelCatalogReader(config);
   const folders = new Folders(ctx.folderHome);
@@ -758,7 +764,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       if (requestedProjectId !== null && (!requestedProjectId.trim() || Buffer.byteLength(requestedProjectId) > 256)) throw new ApiError(400, "프로젝트 ID가 잘못되었습니다");
       return monitor.run("GET /api/sync build", () => {
         // No await from the generation check through serialization. Concurrent readers share these bytes.
-        const generation = JSON.stringify([bus.epoch, bus.seq, urls()]);
+        const generation = JSON.stringify([bus.epoch, bus.seq, urls(), tailnetField()]);
         if (syncGeneration !== generation) { syncCache.clear(); syncGeneration = generation; }
         const key = JSON.stringify([requestedProjectId, lite]);
         const cached = syncCache.get(key);
@@ -772,7 +778,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
           apiOutage: store.apiOutage(),
           protocol: 2, requestedProjectId, projectStatus,
           bootstrap: { apiOutage: store.apiOutage(), version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr: HERDR_UNUSED,
-            home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides, ...engineField(orch) },
+            home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides, ...engineField(orch), ...tailnetField() },
           state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!), ...snapshotNotices(requestedProjectId!) } : null,
           revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },
           cursor: bus.cursor,
@@ -801,6 +807,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
         cli: orch.cliCommand?.() ?? "iamceo",
         rankOverrides,
         ...engineField(orch),
+        ...tailnetField(),
       };
       return Response.json(body);
     }),
@@ -1265,7 +1272,17 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   let boundPort = 0;
   const pairing = new Pairing();
   const terminalStreams = new TerminalStreams(config, store, ctx.orch);
-  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, monitor);
+  // 꺼짐 판정이 바뀌는 것은 따로 이벤트가 없는 변화다. 엔진 상태와 같이 기존 신호로 화면이 스냅샷을 다시 읽게 한다.
+  const tailnet = new TailnetWatch({
+    auto: config.hostsAuto === true,
+    seen: () => store.tailnetSeen(),
+    remember: seen => store.rememberTailnetSeen(seen),
+    notify: (title, body) => ctx.orch.notifyOperations?.(title, body) ?? false,
+    changed: () => store.touchSnapshot(),
+    ...ctx.tailnetWatch,
+  });
+  const tailnetField: TailnetField = () => { const status = tailnet.status(); return status ? { tailnet: status } : {}; };
+  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, monitor, tailnetField);
   const pushHandler = ctx.push ? createPushHandler(ctx.push) : null;
   const sockets = new Set<ServerWebSocket<SocketData>>();
   const v2Sockets = new Set<ServerWebSocket<SocketData>>();
@@ -1346,7 +1363,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     const schemaVersion = store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
     const ok = daemon?.ready === true && schemaVersion === MIGRATIONS.length;
     return Response.json({ ok, version: VERSION, daemon, schema: { version: schemaVersion, supportedVersion: MIGRATIONS.length },
-      core: runtime?.core ?? null, ...engineField(ctx.orch), hosts: [...bindings.values()].map(binding => ({ ...binding })) }, { status: ok ? 200 : 503 });
+      core: runtime?.core ?? null, ...engineField(ctx.orch), ...tailnetField(), hosts: [...bindings.values()].map(binding => ({ ...binding })) }, { status: ok ? 200 : 503 });
   };
 
   const rotate = async (req: Request, url: URL, server: Server<SocketData>): Promise<Response> => {
@@ -1522,10 +1539,14 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   });
   const syncHosts = () => {
     if (stopPromise) return;
-    const desired = [...new Set([...otherHosts, ...(config.hostsAuto ? detect() : [])])];
+    const detected = config.hostsAuto ? detect() : [];
+    const desired = [...new Set([...otherHosts, ...detected])];
     for (const host of desired) if (!hosts.includes(host)) open(host);
     if (hosts.some(host => host === "0.0.0.0" || host === "::")) refreshTailnet();
+    tailnet.observe(detected, hosts);
   };
+  // 켜진 채로 뜬 서버는 여기서 '연 적 있음'을 남긴다. 꺼진 채로 뜬 서버는 이때부터 유예 시간을 센다.
+  if (config.hostsAuto) tailnet.observe(detect(), hosts);
   const hostTimer = setInterval(() => monitor.run("timer:syncHosts", syncHosts), HOST_SYNC_MS);
   hostTimer.unref?.();
   // 화면이 조용히 죽은 소켓을 알아채는 신호. 망이 바뀌면 소켓은 닫히지 않고 그냥 멈춘다.

@@ -559,6 +559,8 @@ struct Bootstrap: Codable, Sendable, Equatable {
     var rankOverrides: [String: Int] = [:]
     /// Health of the execution engine (herdr-core); nil from older servers.
     var engine: EngineState? = nil
+    /// Tailscale on the server's Mac; nil from older servers and from installs that never opened a Tailscale address.
+    var tailnet: TailnetState? = nil
 }
 extension Bootstrap {
     init(from decoder: Decoder) throws {
@@ -575,6 +577,7 @@ extension Bootstrap {
         cli = try c.decodeIfPresent(String.self, forKey: ModelKey("cli")) ?? "iamceo"
         rankOverrides = try c.decodeIfPresent([String: Int].self, forKey: ModelKey("rankOverrides")) ?? [:]
         engine = c.lenient(EngineState.self, forKey: ModelKey("engine"))
+        tailnet = c.lenient(TailnetState.self, forKey: ModelKey("tailnet"))
     }
 }
 
@@ -590,6 +593,26 @@ extension EngineState {
         state = try c.decode(String.self, forKey: ModelKey("state"))
         version = c.lenient(String.self, forKey: ModelKey("version"))
         expectedVersion = c.lenient(String.self, forKey: ModelKey("expectedVersion"))
+    }
+}
+
+/// `state` stays a plain string: only "off" (Tailscale is off on the server's Mac, so the iPhone cannot reach it)
+/// shows anything; "ok" and values this app does not know are silent.
+struct TailnetState: Codable, Sendable, Equatable {
+    var state: String = "ok"
+    var lastAddress: String? = nil
+    /// When the address went missing (ISO). It also tells one off period from the next.
+    var since: String? = nil
+    /// The server already posted the Mac notification for this off period, so the app must not post its own.
+    var macNotified: Bool? = nil
+}
+extension TailnetState {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: ModelKey.self)
+        state = try c.decode(String.self, forKey: ModelKey("state"))
+        lastAddress = c.lenient(String.self, forKey: ModelKey("lastAddress"))
+        since = c.lenient(String.self, forKey: ModelKey("since"))
+        macNotified = c.lenient(Bool.self, forKey: ModelKey("macNotified"))
     }
 }
 

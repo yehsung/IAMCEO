@@ -545,6 +545,20 @@ export interface EngineStatus {
   expectedVersion?: string;
 }
 
+/**
+ * 이 Mac 의 Tailscale 상태. 서버가 Tailscale 주소를 스스로 찾는 설치이고 전에 그 주소를 연 적이 있을 때만 싣는다.
+ * off: 확인된 Tailscale 주소가 60초 넘게 잡히지 않는다(iPhone 에서 닿지 못한다). Mac 앱이 안내 한 줄을 보인다.
+ */
+export interface TailnetStatus {
+  state: "ok" | "off";
+  /** 이 설치가 마지막으로 연 Tailscale 주소. */
+  lastAddress?: string;
+  /** off 일 때, 주소가 잡히지 않기 시작한 시각(ISO). 같은 꺼짐을 가리는 값이기도 하다. */
+  since?: string;
+  /** off 를 판정하면서 서버가 Mac 알림을 이미 띄웠다. 이때 Mac 앱은 자기 알림을 또 띄우지 않는다. */
+  macNotified?: boolean;
+}
+
 export interface RuntimeInfo { backend: "core"; core: { installed: boolean; available: boolean; version: string | null; detail: string | null }; providers: Record<CliProvider, { installed: boolean }> }
 
 /** 옛 herdr 실행기의 상태 칸. 서버는 herdr 를 보지 않는다: 출시된 앱(0.2.2)이 풀어 읽는 칸이라 '쓰지 않음' 고정값으로만 내려간다. */
@@ -566,6 +580,8 @@ export interface Bootstrap {
   rankOverrides: Record<Exclude<Rank, "staff">, number>;
   /** 없으면 구형 서버이거나 이 실행 방식에 엔진이 없다. */
   engine?: EngineStatus;
+  /** 없으면 구형 서버이거나, Tailscale 주소를 연 적이 없는(또는 주소를 직접 정한) 설치다. */
+  tailnet?: TailnetStatus;
 }
 
 export interface ProjectState {

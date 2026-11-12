@@ -82,6 +82,7 @@ private final class UXMemoryDefaults: UserDefaults, @unchecked Sendable {
     var metadata: Data?
     func requestPermission() async throws -> Bool { permissions += 1; return permitted }
     func deliver(identifier: String, title: String, metadata: Data) async throws { delivered += 1; self.metadata = metadata }
+    func deliverNotice(identifier: String, title: String, body: String) async throws { delivered += 1 }
     func clear() { clears += 1 }
 }
 #endif

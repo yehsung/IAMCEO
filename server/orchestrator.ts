@@ -3572,6 +3572,16 @@ export class Orchestrator implements OrchestratorApi {
     this.notifier(`IAMCEO · ${normalizeSpace(title).slice(0, 60)}`, normalizeSpace(body).slice(0, 200));
   }
 
+  /**
+   * 운영 안내(예: Tailscale 꺼짐). 결재 알림(notifyMac)을 꺼 두었어도 띄운다. 스크립트 알림 자체를 끈 설치
+   * (macScriptNotifications=false: Mac 앱이 알림을 직접 맡는다)에서는 띄우지 않고 false 를 돌려준다.
+   */
+  notifyOperations(title: string, body: string): boolean {
+    if (!this.notifier || this.store.getSettings().macScriptNotifications === false) return false;
+    this.notifier(normalizeSpace(title).slice(0, 60), normalizeSpace(body).slice(0, 200));
+    return true;
+  }
+
   setMemberStatus(member: Member, now: string, next?: string): Member {
     return this.store.patchMember(member.id, { now: normalizeSpace(now), ...(next !== undefined ? { next: normalizeSpace(next) } : {}) });
   }

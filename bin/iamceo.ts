@@ -31,7 +31,10 @@ const USAGE = `쓰는 법: iamceo <명령>
   restore reconcile      서버가 꺼진 IAMCEO_HOME의 큐·푸시를 보수적으로 조정한다
   restore resume         조정 완료 후 발신을 허용한다. 이후 serve로 시작한다
   readiness              인증·복구 완료·실행 build ID를 확인한다
-  auth rotate            이 Mac의 공용 접속 코드를 교체하고 그 코드로 붙은 연결·QR을 만료시킨다(QR로 연결한 기기는 그대로)
+  auth rotate [--all-devices]
+                         이 Mac의 공용 접속 코드를 교체하고 그 코드로 붙은 연결·QR을 만료시킨다(QR로 연결한 기기는 그대로,
+                         --all-devices 면 QR로 연결한 기기의 열쇠도 모두 끊는다. 코드가 새었을 때)
+  auth revoke-devices    QR로 연결한 기기의 열쇠를 모두 끊는다(공용 접속 코드와 그 코드로 붙은 기기는 그대로)
   build-id               실행 파일의 build ID를 보여 준다
   service install [--restart] [--dry-run] | uninstall [--dry-run]
                          launchd 서비스(com.iamceo.server)를 등록·해제한다
@@ -66,7 +69,10 @@ const USAGE_EN = `Usage: iamceo <command>
   restore reconcile      reconcile the queue and push of a stopped IAMCEO_HOME, conservatively
   restore resume         allow outgoing delivery after reconcile; then start it with serve
   readiness              check authentication, recovery and the running build ID
-  auth rotate            replace this Mac's shared access code; connections on it and QRs stop working (devices paired by QR stay)
+  auth rotate [--all-devices]
+                         replace this Mac's shared access code; connections on it and QRs stop working (devices paired by QR stay;
+                         with --all-devices their keys are revoked too, for when the code may have leaked)
+  auth revoke-devices    revoke the keys of every device paired by QR (the shared access code and devices on it stay)
   build-id               show the build ID of this executable
   service install [--restart] [--dry-run] | uninstall [--dry-run]
                          register or remove the launchd service (com.iamceo.server)
@@ -515,36 +521,72 @@ async function status(): Promise<void> {
   }
 }
 
-/** Only a local peer may rotate. A lost response is recovered by explicit local `open`, never replayed. */
-export async function rotateAccessCode(config: Config, request: typeof fetch = fetch): Promise<string> {
+/** 이 Mac 의 서버에 loopback 으로 닿는 주소. 코드 교체·모두 끊기는 서버가 실제 상대 주소로 이 Mac 인지 본다. */
+function localServerUrl(config: Config, path: string): string {
   const host = config.hosts.find(host => host === "::1" || host === "localhost" || /^127(?:\.\d{1,3}){3}$/.test(host)) ??
     (config.hosts.includes("0.0.0.0") ? "127.0.0.1" : config.hosts.includes("::") ? "::1" : null);
   if (!host || config.port === 0) throw new CliError(say("로컬 접속 주소와 실행 포트가 필요합니다. loopback host 설정을 확인하세요.",
     "A local address and a running port are needed. Check that a loopback host is in the settings."));
+  return `http://${host.includes(":") ? `[${host}]` : host}:${config.port}${path}`;
+}
+
+/** Only a local peer may rotate. A lost response is recovered by explicit local `open`, never replayed. */
+export async function rotateAccessCode(config: Config, request: typeof fetch = fetch, options: { allDevices?: boolean } = {}): Promise<string> {
+  return (await rotateAccess(config, request, options)).accessCode;
+}
+
+/** rotateAccessCode 와 같고, --all-devices 면 함께 끊은 기기 열쇠 수도 돌려준다. */
+export async function rotateAccess(config: Config, request: typeof fetch = fetch, options: { allDevices?: boolean } = {}): Promise<{ accessCode: string; revokedDevices: number | null }> {
+  const url = localServerUrl(config, "/api/auth/rotate");
   let response: Response;
   try {
-    response = await request(`http://${host.includes(":") ? `[${host}]` : host}:${config.port}/api/auth/rotate`, {
+    response = await request(url, {
       method: "POST", headers: { Authorization: `Bearer ${config.accessCode}`, "Content-Type": "application/json" },
-      body: "{}", redirect: "error", signal: AbortSignal.timeout(5_000),
+      body: options.allDevices ? JSON.stringify({ allDevices: true }) : "{}", redirect: "error", signal: AbortSignal.timeout(5_000),
     });
   } catch { throw new CliError(say("접속 코드 교체 결과를 확인하지 못했습니다. 자동 재시도하지 않았습니다. 이 Mac에서 iamceo open으로 현재 코드를 확인하세요.",
-    "Could not confirm whether the access code was replaced. It was not retried. Run iamceo open on this Mac to see the current code.")); }
+    "Could not confirm whether the access code was replaced. It was not retried. Run iamceo open on this Mac to see the current code.")
+    + (options.allDevices ? say("\n기기 열쇠가 끊겼는지도 모릅니다. 확실히 하려면 iamceo auth revoke-devices 를 실행하세요(다시 실행해도 됩니다).",
+      "\nThe device keys may or may not be revoked. To be sure, run iamceo auth revoke-devices (safe to run again).") : "")); }
+  // 옛 서버는 { allDevices } 를 모르는 본문으로 400 을 낸다. 그때는 아무것도 바뀌지 않았다.
+  if (options.allDevices && response.status === 400) throw new CliError(say("이 서버는 --all-devices 를 모릅니다(옛 버전). 기기마다 다른 열쇠가 없으므로 iamceo auth rotate 만으로 모든 연결이 끊깁니다. 접속 코드는 바뀌지 않았습니다.",
+    "This server does not know --all-devices (an older version). It has no per-device keys, so iamceo auth rotate alone disconnects everything. The access code was not replaced."));
   if (!response.ok) throw new CliError(say(`접속 코드 교체 실패 (HTTP ${response.status}). 이 Mac에서 iamceo open으로 현재 코드를 확인하세요.`,
     `Replacing the access code failed (HTTP ${response.status}). Run iamceo open on this Mac to see the current code.`));
-  let result: { accessCode: string };
+  let result: { accessCode: string; revokedDevices: number | null };
   try { result = parseRotationResult(await response.json()); }
   catch { throw new CliError(say("교체 응답을 확인하지 못했습니다. 이 Mac에서 iamceo open으로 현재 코드를 확인하세요.",
     "Could not read the reply. Run iamceo open on this Mac to see the current code.")); }
+  // 옛 서버는 allDevices 를 모르고(400 으로 거절) 새 서버는 끊은 수를 싣는다. 수가 없으면 끊었다고 말하지 않는다.
+  if (options.allDevices && result.revokedDevices === null) throw new CliError(say("서버가 기기 열쇠 끊기를 확인해 주지 않았습니다. iamceo auth revoke-devices 로 다시 끊으세요.",
+    "The server did not confirm that the device keys were revoked. Run iamceo auth revoke-devices."));
   config.accessCode = result.accessCode;
-  return result.accessCode;
+  return result;
 }
 
-function parseRotationResult(value: unknown): { accessCode: string } {
+function parseRotationResult(value: unknown): { accessCode: string; revokedDevices: number | null } {
   // Network input is untrusted even though the public helper returns a typed value.
   if (!value || typeof value !== "object" || !("accessCode" in value) || typeof value.accessCode !== "string" || !value.accessCode.trim()) {
     throw new CliError(say("접속 코드 교체 응답이 잘못되었습니다", "The reply to the access code replacement is invalid"));
   }
-  return { accessCode: value.accessCode };
+  const revoked = "revokedDevices" in value && Number.isSafeInteger(value.revokedDevices) && (value.revokedDevices as number) >= 0 ? value.revokedDevices as number : null;
+  return { accessCode: value.accessCode, revokedDevices: revoked };
+}
+
+/** QR 로 받은 기기 열쇠를 모두 끊는다(DELETE /api/devices, 이 Mac 에서만). 공용 접속 코드는 그대로다. 다시 실행해도 된다. */
+export async function revokeDeviceKeys(config: Config, request: typeof fetch = fetch): Promise<number> {
+  const url = localServerUrl(config, "/api/devices");
+  let response: Response;
+  try {
+    response = await request(url, { method: "DELETE", headers: { Authorization: `Bearer ${config.accessCode}` }, redirect: "error", signal: AbortSignal.timeout(5_000) });
+  } catch { throw new CliError(say("기기 끊기 결과를 확인하지 못했습니다. 서버가 켜져 있는지 확인하고 다시 실행하세요(다시 실행해도 됩니다).",
+    "Could not confirm that the devices were disconnected. Check that the server is running and run it again (safe to repeat).")); }
+  if (response.status === 404) throw new CliError(say("이 서버는 기기 열쇠를 모릅니다(옛 버전). 기기마다 다른 열쇠가 없으므로 iamceo auth rotate 로 접속 코드를 바꾸세요.",
+    "This server does not know device keys (an older version). Run iamceo auth rotate to replace the access code instead."));
+  if (!response.ok) throw new CliError(say(`기기 끊기 실패 (HTTP ${response.status}). 다시 실행하세요.`, `Disconnecting the devices failed (HTTP ${response.status}). Run it again.`));
+  const body = await response.json().catch(() => null) as { revoked?: unknown } | null;
+  if (!body || !Number.isSafeInteger(body.revoked)) throw new CliError(say("기기 끊기 응답이 잘못되었습니다. 다시 실행하세요.", "The reply is invalid. Run it again."));
+  return body.revoked as number;
 }
 
 // ---- join ----
@@ -991,11 +1033,24 @@ async function main(argv: string[]): Promise<void> {
       await waitForReadiness(loadConfig());
       return console.log(say("인증·복구·build ID 준비 확인 완료", "Authentication, recovery and build ID are ready"));
     case "auth": {
-      if (rest.length !== 1 || rest[0] !== "rotate") throw new CliError(say("쓰는 법: iamceo auth rotate", "Usage: iamceo auth rotate"));
-      // say 는 두 문구를 모두 만든다. 교체는 문구 밖에서 한 번만 한다.
-      const code = await rotateAccessCode(loadConfig());
-      return console.log(say(`접속 코드를 교체했습니다. 옛 코드로 붙어 있던 기기는 다시 연결하세요(QR로 연결해 기기 열쇠를 받은 기기는 그대로입니다).\n접속 코드: ${code}`,
-        `The access code is replaced. Connect again from devices that used the old code (devices paired by QR keep their own key).\nAccess code: ${code}`));
+      const [sub, ...flags] = rest;
+      // say 는 두 문구를 모두 만든다. 교체·끊기는 문구 밖에서 한 번만 한다.
+      if (sub === "rotate" && flags.length === 0) {
+        const code = await rotateAccessCode(loadConfig());
+        return console.log(say(`접속 코드를 교체했습니다. 옛 코드로 붙어 있던 기기는 다시 연결하세요(QR로 연결해 기기 열쇠를 받은 기기는 그대로입니다. 그 열쇠까지 끊으려면 --all-devices).\n접속 코드: ${code}`,
+          `The access code is replaced. Connect again from devices that used the old code (devices paired by QR keep their own key; add --all-devices to revoke those too).\nAccess code: ${code}`));
+      }
+      if (sub === "rotate" && flags.length === 1 && flags[0] === "--all-devices") {
+        const { accessCode, revokedDevices } = await rotateAccess(loadConfig(), fetch, { allDevices: true });
+        return console.log(say(`접속 코드를 교체하고 QR로 연결한 기기 ${revokedDevices}대의 열쇠도 끊었습니다. 모든 기기에서 다시 연결하세요(이 Mac의 앱은 '이 Mac에서 시작', iPhone은 Mac 앱에서 만든 새 QR로).\n접속 코드: ${accessCode}`,
+          `The access code is replaced and the keys of ${revokedDevices} device(s) paired by QR are revoked. Connect again from every device (the app on this Mac with "Start on this Mac", iPhones with a new QR from the Mac app).\nAccess code: ${accessCode}`));
+      }
+      if (sub === "revoke-devices" && flags.length === 0) {
+        const revoked = await revokeDeviceKeys(loadConfig());
+        return console.log(say(`QR로 연결한 기기 ${revoked}대의 열쇠를 끊었습니다. 계속 쓸 기기는 Mac 앱에서 새 QR을 만들어 다시 연결하세요. 공용 접속 코드로 붙은 기기(이 Mac의 앱 등)는 그대로입니다.`,
+          `Revoked the keys of ${revoked} device(s) paired by QR. Pair the devices you keep again with a new QR from the Mac app. Devices on the shared access code (such as the app on this Mac) stay connected.`));
+      }
+      throw new CliError(say("쓰는 법: iamceo auth rotate [--all-devices] | iamceo auth revoke-devices", "Usage: iamceo auth rotate [--all-devices] | iamceo auth revoke-devices"));
     }
     case "build-id":
       return console.log(await buildId());

@@ -2050,11 +2050,15 @@ final class AppStore: ProjectManagementStore {
     }
     /// Without force the daemon refuses while the member works, waits on a decision or has queued input.
     @discardableResult func sleepMember(_ member: Member, force: Bool = false) async -> Bool {
+        await sleepMemberOutcome(member, force: force).ok
+    }
+    /// 재우기와 서버의 거절(코드 포함). 화면은 그 코드로 '그래도 재우기'를 띄울지 고른다(ServerCode.sleepForceable).
+    func sleepMemberOutcome(_ member: Member, force: Bool = false) async -> (ok: Bool, refusal: APIError?) {
         struct Request: Encodable, Sendable { let force: Bool }
-        let result: Member? = await mutate("member:\(member.id)") { api in
+        let result: (value: Member?, error: Error?) = await perform("member:\(member.id)") { api in
             try await api.send("/api/members/\(APIClient.segment(member.id))/sleep", body: Request(force: force), timeout: 150)
         }
-        return result != nil
+        return (result.value != nil, result.error as? APIError)
     }
     /// Removes a manually joined worker from the roster (the only action available for manual sessions).
     @discardableResult func closeMember(_ member: Member) async -> Bool {

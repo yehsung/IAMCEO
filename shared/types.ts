@@ -813,7 +813,7 @@ export interface AccessEvent {
   count: number;
   address: string | null;
   deviceName: string | null;
-  /** auth_failed: wrong(틀린 코드·열쇠) | revoked(끊은 기기의 열쇠). device_revoked: owner | clone | unused. */
+  /** auth_failed: wrong(틀린 코드·열쇠) | revoked(끊은 기기의 열쇠). device_revoked: owner | all(모두 끊기) | clone | unused. */
   reason: string | null;
 }
 export interface DeviceAccessList {
@@ -825,3 +825,7 @@ export interface DeviceAccessList {
   events: AccessEvent[];
 }
 export interface DeviceRevokeResult { ok: true; device: ConnectedDevice }
+/** DELETE /api/devices(이 Mac 에서만): QR 로 받은 열쇠를 모두 끊었다. 공용 접속 코드는 그대로다. */
+export interface DeviceRevokeAllResult { ok: true; revoked: number }
+/** POST /api/auth/rotate. revokedDevices 는 { allDevices: true } 로 부를 때만 싣는다(함께 끊은 기기 열쇠 수). */
+export interface AuthRotateResult { accessCode: string; version: string; revokedDevices?: number }

@@ -53,4 +53,4 @@ On a tailnet shared with a company or family, other people's devices can reach y
 
 ## Leaving and lost devices
 
-나가기 (Leave) in the iPhone's settings removes only the access code stored on that iPhone; the server's code and keys stay the same. If you lose the iPhone, remove it from Tailscale and press **끊기** (Disconnect) next to it under **연결된 기기** (Connected devices) in the Mac app. If it is not listed on its own because it uses the shared access code, replace the access code on the Mac → [Security](../security.en.md#if-you-lose-a-device)
+나가기 (Leave) in the iPhone's settings removes only the access code stored on that iPhone; the server's code and keys stay the same. If you lose the iPhone, remove it from Tailscale and press **끊기** (Disconnect) next to it under **연결된 기기** (Connected devices) in the Mac app. If you cannot tell which row it is, run `iamceo auth revoke-devices` on the Mac to disconnect every device paired by QR, then pair the ones you keep again with a new QR. If it is not listed on its own because it uses the shared access code, replace the access code on the Mac → [Security](../security.en.md#if-you-lose-a-device)

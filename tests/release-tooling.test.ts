@@ -283,14 +283,16 @@ esac`);
   const put = (name: "test" | "retry", output: string, code: number) => { writeFileSync(join(dir, `${name}.out`), output); writeFileSync(join(dir, `${name}.code`), String(code)); };
   put("test", line("StoreTests testOne", "passed") + "\t Executed 1 test, with 0 failures (0 unexpected) in 0.01 (0.01) seconds\n", 0);
   put("retry", "", 1);
+  // 진짜 실행과 겹치지 않게 시험마다 자기 잠금 경로를 쓴다(TMPDIR 밖).
+  const lock = join(dir, "ios.lock");
+  const env = (extra: Record<string, string>) => ({ PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch, HOME: dir, FIXTURE: dir, IAMCEO_IOS_LOCK: lock, ...extra });
   const check = (extra: Record<string, string> = {}) => {
-    const result = Bun.spawnSync(["/bin/bash", join(repo, "scripts/check.sh"), "ios"], {
-      env: { PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch, HOME: dir, FIXTURE: dir, ...extra }, stdin: "ignore", stdout: "pipe", stderr: "pipe",
-    });
+    const result = Bun.spawnSync(["/bin/bash", join(repo, "scripts/check.sh"), "ios"], { env: env(extra), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     return { code: result.exitCode, output: result.stdout.toString() + result.stderr.toString() };
   };
+  const spawn = (extra: Record<string, string> = {}) => Bun.spawn(["/bin/bash", join(repo, "scripts/check.sh"), "ios"], { env: env(extra), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const calls = () => existsSync(join(dir, "calls.log")) ? readFileSync(join(dir, "calls.log"), "utf8").trim().split("\n") : [];
-  return { check, calls, put, scratch };
+  return { check, spawn, calls, put, scratch, lock, dir, script };
 }
 
 test("check.sh ios: 꺼져 있는 가장 새 iOS 의 iPhone 을 고르고(이름 붙인 기기·켜진 기기·iPad 는 피한다), 끝나면 자기가 띄운 것만 끈다", () => {
@@ -307,6 +309,8 @@ test("check.sh ios: 꺼져 있는 가장 새 iOS 의 iPhone 을 고르고(이름
   // 켜져 있던 기기와 다른 기기는 건드리지 않는다. 지우기(erase)·부팅(boot)은 부르지 않는다.
   expect(f.calls().filter(call => /simctl (shutdown|erase|boot|delete)/.test(call))).toEqual(["xcrun simctl shutdown IPHONE-27"]);
   expect(readdirSync(f.scratch)).toEqual([]);
+  // 끝나면 이 Mac 전체의 잠금을 푼다.
+  expect(existsSync(f.lock)).toBe(false);
 });
 
 test("check.sh ios: IAMCEO_IOS_SIMULATOR 로 고른 켜진 기기는 쓰기만 하고 끄지 않는다", () => {
@@ -366,6 +370,61 @@ test("check.sh ios: 실패한 시험만 같은 기기에서 다시 돌려 통과
   expect(compile.output).toContain("did not finish");
   expect(compile.output).toContain("cannot find 'Process' in scope");
   expect(h.calls().some(call => call.includes("test-without-building"))).toBe(false);
+});
+
+test("check.sh ios: 이름 있는 실패는 시험 이름만이 아니라 오류 줄(assert 문구·file:line)을 보이고 전체 기록을 남긴다", () => {
+  const f = iosFixture(MANY);
+  const assertLine = "/repo/native/Tests/IAMCEOTests/WriteConflictTests.swift:42: error: -[IAMCEOTests.WriteConflictTests testSlow] : XCTAssertEqual failed: (\"1\") is not equal to (\"2\")\n";
+  f.put("test", line("StoreTests testOne", "passed") + assertLine + line("WriteConflictTests testSlow", "failed") + "\t Executed 2 tests, with 1 failure (0 unexpected) in 0.1 (0.1) seconds\n", 65);
+  f.put("retry", assertLine + line("WriteConflictTests testSlow", "failed") + "\t Executed 1 test, with 1 failure (0 unexpected) in 0.1 (0.1) seconds\n", 65);
+  const result = f.check();
+  expect(result.code).not.toBe(0);
+  expect(result.output).toContain("WriteConflictTests.swift:42: error:");
+  expect(result.output).toContain("XCTAssertEqual failed");
+  const kept = /iPhone test log: (\S+)/.exec(result.output)?.[1];
+  expect(kept).toBeDefined();
+  expect(readFileSync(kept!, "utf8")).toContain("XCTAssertEqual failed");
+  // 통과한 시험 줄은 까닭에 섞지 않는다.
+  expect(result.output).not.toContain("testOne]' passed");
+});
+
+test("check.sh ios: 다른 실행이 잠금을 쥐고 있으면 기다리고(시간이 넘으면 실패), 주인이 없는 잠금은 치운다", () => {
+  const f = iosFixture(MANY);
+  mkdirSync(f.lock);
+  writeFileSync(join(f.lock, "owner"), `${process.pid}\n`);
+  const busy = f.check({ IAMCEO_IOS_LOCK_WAIT_S: "0" });
+  expect(busy.code).toBe(1);
+  expect(busy.output).toContain(`still holds ${f.lock} (pid ${process.pid})`);
+  expect(f.calls().some(call => call.startsWith("xcodebuild") || call.includes("simctl"))).toBe(false);
+  expect(readFileSync(join(f.lock, "owner"), "utf8").trim()).toBe(String(process.pid));
+  // 강제로 끝난 실행(주인 프로세스가 없음)이 남긴 잠금은 치우고 진행한다.
+  const ended = Bun.spawnSync(["/bin/sh", "-c", "echo $$"]).stdout.toString().trim();
+  writeFileSync(join(f.lock, "owner"), `${ended}\n`);
+  const result = f.check({ IAMCEO_IOS_LOCK_WAIT_S: "0" });
+  expect(result.code, result.output).toBe(0);
+  expect(result.output).toContain(`removed a lock left by an ended run (pid ${ended})`);
+  expect(existsSync(f.lock)).toBe(false);
+  expect(existsSync(`${f.lock}.takeover`)).toBe(false);
+});
+
+test("check.sh ios: 시험 도중 종료 신호를 받으면 xcodebuild 를 멈추고 이 단계가 켠 기기를 끄고 잠금을 푼다", async () => {
+  const f = iosFixture(MANY);
+  // xcodebuild 가 오래 도는 것처럼: 시작을 알리고 기다린다.
+  f.script("xcodebuild", `printf 'xcodebuild %s\\n' "$*" >> "$FIXTURE/calls.log"
+trap 'printf "xcodebuild stopped\\n" >> "$FIXTURE/calls.log"; exit 143' TERM
+: > "$FIXTURE/started"
+while :; do sleep 0.1; done`);
+  const child = f.spawn();
+  const started = join(f.dir, "started");
+  for (let i = 0; i < 200 && !existsSync(started); i++) await Bun.sleep(50);
+  expect(existsSync(started)).toBe(true);
+  expect(existsSync(f.lock)).toBe(true);
+  child.kill("SIGTERM");
+  expect(await child.exited).toBe(143);
+  expect(f.calls()).toContain("xcodebuild stopped");
+  expect(f.calls()).toContain("xcrun simctl shutdown IPHONE-27");
+  expect(existsSync(f.lock)).toBe(false);
+  expect(readdirSync(f.scratch)).toEqual([]);
 });
 
 // ---- project.yml 과 시험 파일 ----

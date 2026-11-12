@@ -77,7 +77,7 @@ Stated plainly.
 - **The default permission mode is "don't ask".** In that mode the CLI shows no approval prompt and uses no sandbox. An agent can do what your user can do. The HQ agent's working folder is your home folder. If you want the CLI to hold back, choose "ask only when risky" or "ask every time" in Settings.
 - **"Ask before committing, pushing, deleting or sending anything outside" is an instruction.** It is a promise the agents follow. The server does not intercept those commands.
 - **Devices on the shared access code cannot be cut off one at a time.** That covers the app on this Mac, any device you connected by typing the code, and an iPhone connected with a QR code before devices had their own keys. To cut them off you change the code, which cuts off all of them. To make an iPhone removable on its own, reconnect it with a new QR code so it gets its own key.
-- **Device keys do not split permissions.** Any device can read, answer decisions and use terminals, and can disconnect other devices. Only changing the shared access code is limited to this Mac.
+- **Device keys do not split permissions.** Any device can read, answer decisions and use terminals, and can disconnect other devices. Only the app on this Mac (on the shared access code) can make a new connection QR, so a device key cannot be used to collect more keys. Changing the shared access code and revoking every device key are limited to this Mac.
 - **The default connection is not HTTPS.** Encryption between iPhone and Mac relies on Tailscale. If you connect through an HTTPS address made with Tailscale Serve, the app's own traffic is encrypted as well.
 - **The iPhone app has no lock of its own.** Someone holding your unlocked iPhone can open the app, give instructions, answer decisions and type into a terminal.
 - **Backups contain the shared access code as it is.** Device keys are stored only as hashes. Files in `~/.iamceo/backups` are readable only by you, but file permissions are not encryption. A backup cloned to another Mac (`iamceo restore --clone`) refuses the original devices' keys and uses a new access code.
@@ -88,7 +88,13 @@ First remove that device from your tailnet in the Tailscale admin console. It ca
 
 **If it was connected with a QR code**, open Settings → 연결 (Connection) → **연결된 기기** (Connected devices) on another device (the Mac app, for example) and press **끊기** (Disconnect) on that device. Its connections close at once and every other device stays connected. If it tries to come back, the attempt shows under 최근 실패한 시도 (Recent failed attempts).
 
-**If it uses the shared access code** (the 공용 접속 코드 row in that list), or you think the code has leaked, change the code:
+If you cannot tell which row it is (for example, every row is called "iPhone"), revoke the keys of every device paired by QR from a terminal on the Mac that runs the server. The shared access code and the devices on it (such as the app on this Mac) stay connected; pair the devices you keep again with a new QR from the Mac app. It is safe to run again.
+
+```sh
+/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo auth revoke-devices
+```
+
+**If it uses the shared access code** (the 공용 접속 코드 row in that list), change the code. **If you think the code has leaked**, whoever has it may have collected a device key without a QR code, so add `--all-devices` in step 1 to revoke every device key as well:
 
 1. Change the access code in a terminal on the Mac that runs the server. The server must be running, and this works only from that Mac.
 
@@ -96,9 +102,9 @@ First remove that device from your tailnet in the Tailscale admin console. It ca
    /Applications/IAMCEO.app/Contents/Resources/runtime/iamceo auth rotate
    ```
 
-   If you installed from source and have the `iamceo` command, `iamceo auth rotate` is the same thing. The new code is printed.
-2. At that moment every connection made with the old code, and every unused connection QR, is cut off. Devices that got their own key from a QR code stay connected. Reconnect the Mac app with **이 Mac에서 시작** (Start on this Mac) and an iPhone that used the shared code with a new QR.
-3. If the command fails or the reply is lost, the code may already have changed. Do not rotate again; check the current code on the same Mac.
+   If you installed from source and have the `iamceo` command, `iamceo auth rotate` is the same thing. The new code is printed. If the code has leaked, run `iamceo auth rotate --all-devices` instead.
+2. At that moment every connection made with the old code, and every unused connection QR, is cut off. Devices that got their own key from a QR code stay connected (with `--all-devices` they are cut off too). Reconnect the Mac app with **이 Mac에서 시작** (Start on this Mac) and any iPhone that was cut off with a new QR.
+3. If the command fails or the reply is lost, the code may already have changed. Do not rotate again; check the current code on the same Mac. If you used `--all-devices`, also run `iamceo auth revoke-devices` once more to be sure the device keys are revoked.
 
    ```sh
    /Applications/IAMCEO.app/Contents/Resources/runtime/iamceo open

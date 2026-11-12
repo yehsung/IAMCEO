@@ -57,6 +57,61 @@ final class ServerCodeTests: XCTestCase {
         XCTAssertNil(try message(#"{"id":"e","delivery":"held","deliveryCode":7}"#).deliveryCode)
     }
 
+    /// 늦게 온 옛 판(rev 4, 잠듦 보류)을 새 판(rev 5, 전달 미확인 보류) 위에 합쳐도 문장과 코드가 같은 판에서 온다.
+    func testMergingDeliveryKeepsCodeWithTheNewestRevision() throws {
+        func message(_ json: String) throws -> Message { try JSONDecoder().decode(Message.self, from: Data(json.utf8)) }
+        let newer = try message(#"{"id":"m1","projectId":"p","delivery":"held","deliveryNote":"전달 여부를 확인할 수 없어 보류했습니다","deliveryCode":"held_delivery_unknown","deliveryRevision":5}"#)
+        let older = try message(#"{"id":"m1","projectId":"p","delivery":"held","deliveryNote":"잠든 팀장이라 보류했습니다","deliveryCode":"held_asleep","deliveryRevision":4}"#)
+        let merged = older.mergingDelivery(from: newer)
+        XCTAssertEqual(merged.deliveryRevision, 5)
+        XCTAssertEqual(merged.deliveryNote, newer.deliveryNote)
+        XCTAssertEqual(merged.deliveryCode, "held_delivery_unknown")
+        XCTAssertTrue(isDeliveryUnknownHold(merged))
+        // 반대로 풀린 판이 새것이면, 옛 판의 '전달 미확인' 코드가 남지 않는다.
+        let released = try message(#"{"id":"m1","projectId":"p","delivery":"queued","deliveryNote":null,"deliveryRevision":6}"#)
+        let stale = newer.mergingDelivery(from: released)
+        XCTAssertNil(stale.deliveryCode)
+        XCTAssertFalse(isDeliveryUnknownHold(stale))
+        // 같은 판이면 새로 온 행(페이지)이 그대로다.
+        XCTAssertEqual(newer.mergingDelivery(from: newer).deliveryCode, "held_delivery_unknown")
+    }
+
+    /// '그래도 재우기'는 코드로 가른다. 서버 문장에는 팀장 이름이 들어가서 '승인 창 정리' 같은 이름이면 문장 검사가 틀린다.
+    func testSleepForceableUsesCodeBeforeText() {
+        XCTAssertTrue(ServerCode.sleepForceable(code: "member_working", message: "승인 창 정리는 일하는 중입니다"))
+        XCTAssertTrue(ServerCode.sleepForceable(code: "member_open_decision", message: "입력칸 개선에게 열린 결재가 있습니다"))
+        XCTAssertTrue(ServerCode.sleepForceable(code: "member_queue_pending", message: "Queue is not empty"))
+        for code in ["sleep_terminal_lease", "sleep_delivery_unknown", "sleep_compacting", "session_busy", "manual_session_unsupported"] {
+            XCTAssertFalse(ServerCode.sleepForceable(code: code, message: "결제 연동은 일하는 중입니다"), code)
+        }
+        // 옛 서버(코드 없음)는 예전 문장 검사 그대로다.
+        XCTAssertTrue(ServerCode.sleepForceable(code: nil, message: "결제 연동은 일하는 중입니다"))
+        XCTAssertTrue(ServerCode.sleepForceable(code: nil, message: "결제 연동의 대기열이 남아 있습니다"))
+        XCTAssertFalse(ServerCode.sleepForceable(code: nil, message: "승인 창 정리는 일하는 중입니다"))
+        XCTAssertFalse(ServerCode.sleepForceable(code: nil, message: "직접 조작권이 남아 있어 잠재울 수 없습니다"))
+    }
+
+    /// 재우기 거절의 코드가 화면까지 온다(AppStore.sleepMemberOutcome).
+    @MainActor func testSleepRefusalCarriesServerCode() async throws {
+        let network = try IsolatedTestNetwork { request in
+            let path = request.url!.path
+            var status = 200, text = "{}"
+            if path == "/api/bootstrap" { text = #"{"projects":[{"id":"p","name":"Project"}],"settings":{}}"# }
+            else if path == "/api/projects/p/state" { text = #"{"project":{"id":"p","connection":{"ok":true}},"messages":[]}"# }
+            else if path.hasSuffix("/sleep") { status = 409; text = #"{"error":"승인 창 정리는 일하는 중입니다","code":"member_working"}"# }
+            return IsolatedTestHTTPReply(status: status, data: Data(text.utf8))
+        }
+        let store = AppStore(session: network.session, persistCredentials: false)
+        store.endpoint = network.endpoint.url.absoluteString; store.accessCode = "x"
+        await store.connect(); store.setForeground(false)
+        defer { store.disconnect() }
+        let member = try JSONDecoder().decode(Member.self, from: Data(#"{"id":"m","name":"승인 창 정리"}"#.utf8))
+        let outcome = await store.sleepMemberOutcome(member)
+        XCTAssertFalse(outcome.ok)
+        XCTAssertEqual(outcome.refusal?.code, "member_working")
+        XCTAssertTrue(ServerCode.sleepForceable(code: outcome.refusal?.code, message: store.errorMessage ?? ""))
+    }
+
     /// 놓기 요청이 '조작권이 이미 없다'로 거절되면 놓기는 이미 이뤄진 것이다. 새 서버는 문장 대신 reason 으로 알린다.
     @MainActor func testReleaseRefusedByReasonCodeEndsLease() async throws {
         final class Reply: @unchecked Sendable {

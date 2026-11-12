@@ -23,6 +23,9 @@ function fixture() {
   const project = store.createProject({ name: "비밀프로젝트", cwd: dir });
   store.createMessage({ projectId: project.id, mine: true, who: "나", kind: "나", body: "SECRET-BODY 본문" });
   store.patchProject(store.createProject({ name: "보관이름", cwd: dir }).id, { archived: true });
+  // 저장소가 쥔 문장 때문에 close 가 미뤄지면(좀비 연결) 그 연결이 GC 때 WAL 을 본 파일로 옮겨 아래 원본 해시가
+  // 시험 과정 스스로 바뀐다(예행과 상관없이 4번에 1번꼴로 실패하던 까닭). 미리 본 파일로 다 옮겨 두어 원본의 '바뀌지 않음'만 본다.
+  db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   db.close();
   const digest = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
   return { dir, scratch, path, digest };

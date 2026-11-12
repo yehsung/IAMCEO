@@ -49,6 +49,18 @@ enum ServerCode {
         return receipt.error == legacyLeaseExpired
     }
 
+    /// 재우기 거절 가운데 '그래도 재우기'로 넘을 수 있는 것: 일하는 중, 열린 결재, 남은 대기열.
+    /// 조작권·전달 미확인·압축 중·세션 처리 중(sleep_terminal_lease 등)은 대표가 먼저 풀어야 해서 넘지 않는다.
+    static let sleepForceableCodes: Set<String> = ["member_working", "member_open_decision", "member_queue_pending"]
+
+    /// 재우기 거절 뒤 '그래도 재우기' 버튼을 띄울까. 코드가 있으면 코드만 본다(서버 문장에는 팀장 이름이 들어가서
+    /// '승인 창 정리' 같은 이름이면 문장 검사가 틀린다). 코드가 없는 옛 서버에서는 예전처럼 문장으로 가른다.
+    static func sleepForceable(code: String?, message: String) -> Bool {
+        if let code { return sleepForceableCodes.contains(code) }
+        return ["일하는 중", "열린 결재", "대기열"].contains(where: { message.contains($0) })
+            && !message.contains("입력칸") && !message.contains("승인 창")
+    }
+
     /// 대표 글이 '전달 여부를 확인할 수 없어' 보류되었는가. 그 뒤의 모든 전달을 막으므로 터미널을 확인해야 한다.
     static func deliveryUnknownHold(_ message: Message) -> Bool {
         guard message.delivery == "held" else { return false }

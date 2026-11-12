@@ -770,7 +770,7 @@ export const AUTH_TABLES: readonly string[] = [
   `CREATE INDEX IF NOT EXISTS auth_events_last_at ON auth_events(last_at)`,
 ];
 
-/** 만들지 못해도 서버는 뜬다. 그때 짝 맺기는 예전처럼 공용 접속 코드를 건네고 기록은 남기지 않는다(server/devices.ts). */
+/** 만들지 못해도 서버는 뜬다. 그때 공용 접속 코드는 그대로 통하고, 짝 맺기는 열쇠를 저장하지 못해 503 으로 답하며 기록은 남기지 않는다(server/devices.ts). */
 export function ensureAuthTables(db: Database): boolean {
   try {
     db.transaction(() => { for (const sql of AUTH_TABLES) db.exec(sql); })();

@@ -420,6 +420,16 @@ export const ERROR_CODES = {
   rotate_local_only: { ko: "접속 코드 회전은 이 Mac에서만 할 수 있습니다" },
   AUTH_ROTATION_SAVE_FAILED: { ko: "접속 코드를 저장하지 못했습니다. 로컬 설정을 확인하세요" },
   AUTH_ROTATION_OUTCOME_UNKNOWN: { ko: "교체된 설정의 디스크 동기화를 확인하지 못했습니다. 이 Mac에서 iamceo open으로 현재 코드를 확인하세요" },
+  /** 기기 열쇠로 QR 을 만들려 했다. QR 은 공용 접속 코드(이 Mac 의 앱)로만 만든다. 403. */
+  pair_start_shared_only: { ko: "연결 QR은 Mac 앱에서만 만들 수 있습니다" },
+  /** 짝 맺기에서 기기 열쇠를 저장하지 못했다. 503. 그 QR 은 버리므로 새 QR 로 다시 한다. */
+  device_key_save_failed: { ko: "이 기기의 열쇠를 저장하지 못했습니다. Mac의 저장 공간을 확인한 뒤 Mac에서 새 QR을 만들어 다시 연결해 주세요" },
+  /** 기기 열쇠를 모두 끊는 것을 저장하지 못했다. 503. 아무것도 바뀌지 않았다. */
+  device_revoke_failed: { ko: "기기 연결을 끊지 못했습니다. 저장소를 확인한 뒤 다시 시도해 주세요" },
+  /** v2 실시간 연결 주소에 접속 코드(t)를 넣었다. 400. */
+  realtime_code_in_url: { ko: "실시간 연결 주소에 접속 코드를 넣지 마세요" },
+  /** 팀장 통로(/agent/*)에 맞지 않는 팀장 토큰. 401. */
+  agent_token_invalid: { ko: "인증이 필요합니다" },
 
   // ---- 끝 ----
 } as const satisfies Record<string, ErrorCodeText>;

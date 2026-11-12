@@ -39,8 +39,8 @@ import { compatFields, readAppClient, SeenApps } from "./app-version.ts";
 import { CliVersionMonitor, type CliVersionInfo, type CliVersionSource } from "./cli-version.ts";
 import { exportProjectZip, removeDeletedProjectFiles } from "./lifecycle/project-data.ts";
 import type { ProjectDeleteResult } from "../shared/types.ts";
-import { authenticate, DeviceKeys, safeEqual, type AuthOutcome, type Principal } from "./devices.ts";
-import type { AccessPlatform, DeviceRevokeResult } from "../shared/types.ts";
+import { ACCESS_LOG_LIMITS, authenticate, DeviceKeys, principalKey, safeEqual, type AuthOutcome, type Principal } from "./devices.ts";
+import type { AccessPlatform, AuthRotateResult, DeviceRevokeAllResult, DeviceRevokeResult } from "../shared/types.ts";
 import { ERROR_CODES } from "../shared/error-codes.ts";
 export { safeEqual };
 
@@ -488,9 +488,12 @@ interface Route {
   handler: Handler;
 }
 
-/** 오류 응답 몸 `{ error, code?, reason? }`. 동작을 가르는 것은 code·reason 이고 error 는 표시용 문장이다(출시된 앱이 읽으므로 이름은 그대로). */
-function fail(status: number, message: string, code?: ErrorCode, reason?: ErrorCode): Response {
-  return Response.json({ error: message, ...(code ? { code } : {}), ...(reason ? { reason } : {}) }, { status });
+/**
+ * 오류 응답 몸 `{ error, code, reason? }`. 동작을 가르는 것은 code·reason 이고 error 는 표시용 문장이다(출시된 앱이 읽으므로 이름은 그대로).
+ * code 는 필수다: 코드 없이 나가는 오류가 다시 생기지 않게.
+ */
+function fail(status: number, message: string, code: ErrorCode, reason?: ErrorCode): Response {
+  return Response.json({ error: message, code, ...(reason ? { reason } : {}) }, { status });
 }
 
 function decodeParams(match: RegExpExecArray): string[] {
@@ -579,8 +582,10 @@ type TailnetField = () => { tailnet?: TailnetStatus };
 
 /** G: 요청의 자격(공용 접속 코드·기기 열쇠)이 지금도 통하는가. 기다리는 사이 코드가 바뀌었거나 그 기기를 끊었으면 거짓. */
 type StillAuthorized = (req: Request) => boolean;
+/** G: 인증을 통과한 요청의 자격. 인증 전 요청이면 null. */
+type PrincipalOf = (req: Request) => Principal | null;
 
-function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, monitor: LoopMonitor, tailnetField: TailnetField, stillAuthorized: StillAuthorized): Route[] {
+function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, monitor: LoopMonitor, tailnetField: TailnetField, stillAuthorized: StillAuthorized, principalOf: PrincipalOf): Route[] {
   const { config, store, orch, bus } = ctx;
   const models = new ModelCatalogReader(config);
   const folders = new Folders(ctx.folderHome);
@@ -849,10 +854,14 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
     }),
     // 폰 짝 맺기: Mac 화면이 QR 로 보여 줄 일회용 코드와 폰이 닿을 Tailscale 주소.
     route("POST", "/api/pair/start", async (req) => {
+      // G: QR 은 공용 접속 코드(이 Mac 의 앱)로만 만든다. 기기 열쇠로도 만들 수 있으면 그 열쇠를 쥔 쪽이 새 열쇠를 스스로 만들어 두어
+      // 그 기기를 끊거나 코드를 바꿔도 쫓아낼 수 없다. QR 만들기 화면은 Mac 앱에만 있고(출시된 0.2.2·0.2.3 도 같다) Mac 앱은 공용 코드를 쓴다.
+      const principal = principalOf(req);
+      if (principal?.kind !== "shared") throw new ApiError(403, ERROR_CODES.pair_start_shared_only.ko, "pair_start_shared_only");
       const availableUrls = await withMagicDnsNames(tailnetUrls(urls()));
       // 이름을 찾는 사이 코드가 바뀌었거나 이 기기를 끊었으면 QR 을 만들지 않는다.
       if (!stillAuthorized(req)) throw new ApiError(401, "접속 코드가 바뀌었습니다. 다시 연결하세요", "auth_changed");
-      const { code, expiresAt } = pairing.start();
+      const { code, expiresAt } = pairing.start(principalKey(principal));
       return Response.json({ code, expiresAt: new Date(expiresAt).toISOString(), ttlSeconds: PAIR_CODE_TTL_MS / 1000, urls: availableUrls, version: VERSION });
     }),
     route("GET", "/api/pair/status", (_req, url) => {
@@ -1231,9 +1240,11 @@ function agentRoutes({ store, orch }: ServerContext, member: Member): Route[] {
  * 끊은 기기의 열쇠는 device_revoked. 그 문장도 '인증이 필요'로 시작해 출시된 앱이 같은 안내(새 QR 로 다시 연결)를 고른다.
  */
 function refuseAuth(outcome: AuthOutcome): Response {
-  return !outcome.ok && outcome.reason === "revoked"
-    ? fail(401, ERROR_CODES.device_revoked.ko, "device_revoked")
-    : fail(401, "인증이 필요합니다", "unauthorized");
+  if (outcome.ok) return fail(500, "서버 오류", "internal_error");
+  if (outcome.reason === "revoked") return fail(401, ERROR_CODES.device_revoked.ko, "device_revoked");
+  // 열쇠를 읽다가 저장소 오류가 났다. 401 이면 출시된 앱이 저장한 열쇠를 지우므로, 다시 시도하는 503 으로 답한다.
+  if (outcome.reason === "error") return fail(503, ERROR_CODES.storage_io.ko, "storage_io");
+  return fail(401, "인증이 필요합니다", "unauthorized");
 }
 
 /** 직접 띄운 CLI 의 합류. 멤버 토큰이면 이어 붙이고, 접속 코드(또는 기기 열쇠)면 origin=manual 직원으로 등록한다. */
@@ -1371,17 +1382,30 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     const address = peerAddress(req, server);
     if (outcome.ok) {
       grants.set(req, { principal: outcome.principal, generation: authGeneration });
+      // 메모리에만 남긴다. 조회 요청은 DB 를 쓰지 않는다(accessLogTimer 가 1분마다 쓴다).
       deviceKeys.touch(outcome.principal, accessPlatform(req, address), address);
-    } else if (outcome.reason !== "missing") {
-      // 자격을 내밀었는데 틀린 것만 센다(주소·시각만). 자격 없이 두드린 요청은 세지 않는다.
+    } else if (outcome.reason === "wrong" || outcome.reason === "revoked") {
+      // 자격을 내밀었는데 틀린 것만 센다(주소·시각만). 자격 없이 두드린 요청과 저장소 오류는 세지 않는다.
       deviceKeys.recordFailure("auth_failed", address, outcome);
     }
     return outcome;
   };
+  /** 실제 연결의 상대가 이 Mac(loopback)인가. 프록시 머리글이나 Host 는 증거로 쓰지 않는다(코드 교체·모두 끊기). */
+  const fromLoopback = (req: Request, server: Server<SocketData>): boolean => {
+    const peer = peerAddress(req, server);
+    const v4 = peer ? v4ToInt(peer) : null;
+    return peer === "::1" || (v4 !== null && inSubnet(v4, LOOPBACK_V4.base, LOOPBACK_V4.mask));
+  };
+  /** 기기 열쇠를 모두 끊은 뒤: 그 열쇠로 연 실시간 연결·터미널 스트림을 닫고 열려 있는 QR 도 무른다. */
+  const afterRevokeAll = (): void => {
+    pairing.invalidate();
+    dropSockets(data => !!data.deviceId, "이 기기의 연결이 끊겼습니다. 다시 연결하세요");
+  };
   const grantIsCurrent = (grant: { principal: Principal; generation: number } | undefined): boolean =>
     !!grant && (grant.principal.kind === "device" ? deviceKeys.isActive(grant.principal.id) : grant.generation === authGeneration);
   const stillAuthorized: StillAuthorized = req => grantIsCurrent(grants.get(req));
-  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, monitor, tailnetField, stillAuthorized);
+  const principalOf: PrincipalOf = req => grants.get(req)?.principal ?? null;
+  const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, monitor, tailnetField, stillAuthorized, principalOf);
   const pushHandler = ctx.push ? createPushHandler(ctx.push) : null;
   const sockets = new Set<ServerWebSocket<SocketData>>();
   const v2Sockets = new Set<ServerWebSocket<SocketData>>();
@@ -1421,7 +1445,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       if (version !== null && version !== "2") return fail(400, "실시간 연결 버전이 잘못되었습니다", "realtime_version_invalid");
       const auth = authorize(req, server);
       if (!auth.ok) return refuseAuth(auth);
-      if (version === "2" && url.searchParams.has("t")) return fail(400, "실시간 연결 주소에 접속 코드를 넣지 마세요");
+      if (version === "2" && url.searchParams.has("t")) return fail(400, "실시간 연결 주소에 접속 코드를 넣지 마세요", "realtime_code_in_url");
       // G: 기기 열쇠로 연 연결은 그 기기를 끊을 때 닫는다. 공용 코드로 연 연결은 지금처럼 코드 세대로 닫는다.
       const deviceId = auth.principal.kind === "device" ? auth.principal.id : undefined;
       return server.upgrade(req, { data: { kind: "realtime", protocol: version === "2" ? 2 : 1, authGeneration, deviceId, lite: wantsLite(url) } }) ? undefined : fail(400, "WebSocket 요청이 아닙니다", "websocket_required");
@@ -1473,7 +1497,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     if (path.startsWith("/agent/")) {
       const token = bearer(req);
       const member = token ? store.getMemberByToken(token) : null;
-      if (!member) return fail(401, "인증이 필요합니다");
+      if (!member) return fail(401, "인증이 필요합니다", "agent_token_invalid");
       return dispatch(agentRoutes(ctx, member), req, url);
     }
     if (path === "/") return new Response("IAMCEO: Mac·iPhone 앱으로 연결하세요.\n", { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
@@ -1556,12 +1580,20 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
     strictQuery(url, []);
     // 요청의 실제 peer만 사용한다. 프록시 헤더나 Host는 로컬 접근의 증거가 아니다.
-    const peer = server.requestIP(req)?.address.toLowerCase().replace(/^::ffff:/, "");
-    const v4 = peer ? v4ToInt(peer) : null;
-    if (peer !== "::1" && (v4 === null || !inSubnet(v4, LOOPBACK_V4.base, LOOPBACK_V4.mask))) return fail(403, "접속 코드 회전은 이 Mac에서만 할 수 있습니다", "rotate_local_only");
-    if (req.body !== null) await parseBody(req, z.strictObject({}));
+    const peer = peerAddress(req, server);
+    if (!fromLoopback(req, server)) return fail(403, "접속 코드 회전은 이 Mac에서만 할 수 있습니다", "rotate_local_only");
+    // G: { allDevices: true } 면 QR 로 받은 기기 열쇠도 모두 끊는다(iamceo auth rotate --all-devices, 코드가 새었을 때).
+    const body: { allDevices?: true } = req.body !== null ? await parseBody(req, z.strictObject({ allDevices: z.literal(true).optional() })) : {};
     // body를 읽는 동안 다른 회전이 완료됐거나 이 요청을 낸 기기를 끊었을 수 있다.
     if (!stillAuthorized(req)) return fail(401, "인증이 필요합니다", "unauthorized");
+    // 열쇠를 먼저 끊는다. 끊지 못하면 코드도 바꾸지 않는다(반쯤 된 상태를 '다 됐다'로 알리지 않는다).
+    let revokedDevices: number | undefined;
+    if (body.allDevices) {
+      const revoked = deviceKeys.revokeAll(peer);
+      if (!revoked) return fail(503, ERROR_CODES.device_revoke_failed.ko, "device_revoke_failed");
+      revokedDevices = revoked.length;
+      afterRevokeAll();
+    }
     const accessCode = generateAccessCode();
     let durabilityUnknown = false;
     try { updateConfigFile({ accessCode }, { IAMCEO_HOME: config.home }); }
@@ -1576,8 +1608,9 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     pairing.invalidate();
     // G: 공용 코드로 연 연결만 닫는다. 기기 열쇠로 붙은 기기(새 QR 로 연결한 iPhone)는 그대로다.
     dropSockets(data => !data.deviceId, "접속 코드가 바뀌었습니다. 다시 연결하세요");
-    deviceKeys.recordRotation(peer ?? null);
-    return durabilityUnknown ? fail(500, "교체된 설정의 디스크 동기화를 확인하지 못했습니다. 이 Mac에서 iamceo open으로 현재 코드를 확인하세요", "AUTH_ROTATION_OUTCOME_UNKNOWN") : Response.json({ accessCode, version: VERSION });
+    deviceKeys.recordRotation(peer);
+    const result: AuthRotateResult = { accessCode, version: VERSION, ...(revokedDevices !== undefined ? { revokedDevices } : {}) };
+    return durabilityUnknown ? fail(500, "교체된 설정의 디스크 동기화를 확인하지 못했습니다. 이 Mac에서 iamceo open으로 현재 코드를 확인하세요", "AUTH_ROTATION_OUTCOME_UNKNOWN") : Response.json(result);
   };
 
   const handlePairClaim = async (req: Request, server: Server<SocketData>): Promise<Response> => {
@@ -1591,17 +1624,33 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     if (result === "limited") { deviceKeys.recordFailure("pair_failed", from); return fail(429, "너무 많이 시도했습니다. 잠시 뒤 Mac에서 새 QR을 만들어 다시 찍어 주세요", "pair_limited"); }
     if (result === "invalid") { deviceKeys.recordFailure("pair_failed", from); return fail(401, "QR이 맞지 않거나 시간이 지났습니다. Mac에서 새 QR을 만들어 주세요", "pair_expired"); }
     // G: 그 기기만의 열쇠를 accessCode 칸에 담는다. 출시된 앱도 이 값을 접속 코드로 알고 그대로 쓴다.
-    // 열쇠를 저장하지 못하면(표 없음·디스크 가득) 예전처럼 공용 접속 코드를 준다. 짝 맺기 자체는 막지 않는다.
     const issued = deviceKeys.issue({ name: body.device, address: from, platform: readAppClient(req.headers)?.platform ?? null });
-    return Response.json({ accessCode: issued?.key ?? config.accessCode, confirmationToken: pairing.confirmationToken(body.code), version: VERSION }, { headers: { "Cache-Control": "no-store" } });
+    if (!issued) {
+      // 열쇠를 저장하지 못했다(표 없음·디스크 가득). 공용 코드를 대신 주면 목록에 없고 한 대만 끊을 수도 없는 기기가 생긴다.
+      // 이 QR 은 버리고 503 으로 답한다(앱은 그 문장과 함께 'Mac에서 새 QR을 만들어 주세요'를 보인다).
+      pairing.discard(body.code);
+      return fail(503, ERROR_CODES.device_key_save_failed.ko, "device_key_save_failed");
+    }
+    return Response.json({ accessCode: issued.key, confirmationToken: pairing.confirmationToken(body.code), version: VERSION }, { headers: { "Cache-Control": "no-store" } });
   };
 
-  /** G(C3): GET /api/devices(연결된 기기·공용 코드 접속·최근 실패·기록), DELETE /api/devices/:id(한 대만 끊기). */
+  /**
+   * G(C3): GET /api/devices(연결된 기기·공용 코드 접속·최근 실패·기록), DELETE /api/devices/:id(한 대만 끊기),
+   * DELETE /api/devices(QR 로 받은 열쇠를 모두 끊기. 이 Mac 에서만. 공용 접속 코드는 그대로).
+   */
   const devicesRoute = (req: Request, url: URL, server: Server<SocketData>): Response => {
     strictQuery(url, []);
     const grant = grants.get(req);
     if (!grant) return fail(401, "인증이 필요합니다", "unauthorized");
     if (url.pathname === "/api/devices") {
+      if (req.method === "DELETE") {
+        if (!fromLoopback(req, server)) return fail(403, "모든 기기 끊기는 이 Mac에서만 할 수 있습니다", "LOCAL_ONLY");
+        const revoked = deviceKeys.revokeAll(peerAddress(req, server));
+        if (!revoked) return fail(503, ERROR_CODES.device_revoke_failed.ko, "device_revoke_failed");
+        afterRevokeAll();
+        const result: DeviceRevokeAllResult = { ok: true, revoked: revoked.length };
+        return Response.json(result);
+      }
       if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
       return Response.json(deviceKeys.list(grant.principal));
     }
@@ -1613,6 +1662,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     if (!device) return fail(404, ERROR_CODES.device_not_found.ko, "device_not_found");
     // 그 기기의 실시간 연결과 터미널 스트림을 바로 닫는다. HTTP 는 다음 요청부터 401 device_revoked.
     dropSockets(data => data.deviceId === id, "이 기기의 연결이 끊겼습니다. 다시 연결하세요");
+    // 그 기기가 만든 QR 도 무른다(지금은 QR 을 공용 코드로만 만들 수 있지만, 그 약속이 바뀌어도 끊은 기기의 QR 이 남지 않게).
+    pairing.invalidateOwner(principalKey({ kind: "device", id: id! }));
     const result: DeviceRevokeResult = { ok: true, device: { ...device, current: grant.principal.kind === "device" && grant.principal.id === id } };
     return Response.json(result);
   };
@@ -1755,6 +1806,9 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   const hostTimer = setInterval(() => monitor.run("timer:syncHosts", syncHosts), HOST_SYNC_MS);
   hostTimer.unref?.();
   // 화면이 조용히 죽은 소켓을 알아채는 신호. 망이 바뀌면 소켓은 닫히지 않고 그냥 멈춘다.
+  // G: 메모리에 모은 마지막 접속 시각과 묶인 실패 수를 1분마다 DB 에 쓴다(요청 안에서는 쓰지 않는다). 멈출 때도 쓴다.
+  const accessLogTimer = setInterval(() => monitor.run("timer:accessLog", () => deviceKeys.flush()), ACCESS_LOG_LIMITS.touchEveryMs);
+  accessLogTimer.unref?.();
   const pingTimer = setInterval(() => monitor.run("timer:wsPing", () => {
     const payload = JSON.stringify({ type: "ping" });
     const v2Payload = JSON.stringify({ type: "ping", ...bus.cursor });
@@ -1800,6 +1854,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
         stopping = true;
         clearInterval(hostTimer);
         clearInterval(pingTimer);
+        clearInterval(accessLogTimer);
         unsubscribe();
         // Queue notice before the close frame, including legacy and lite realtime sockets.
         closedEpochSockets ||= sockets.size > 0;
@@ -1816,6 +1871,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
         // Bun 1.3.14는 서버가 먼저 닫은 WS를 pendingWebSockets에 남긴다.
         // force stop은 한 번만 호출하고 실제 요청/소켓의 종료를 직접 기다린다.
         await (closedEpochSockets ? Promise.all([...requests]) : Promise.all(stopped));
+        // 남은 요청까지 끝난 뒤 모아 둔 접속 기록을 쓴다(DB 는 부르는 쪽이 이 뒤에 닫는다. 이미 닫혔으면 조용히 넘어간다).
+        deviceKeys.flush();
         if (!ctx.loopMonitor) monitor.stop();
       })();
     },

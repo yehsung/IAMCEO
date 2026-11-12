@@ -8,12 +8,14 @@ import { createBackup } from "../server/backup.ts";
 import { Bus } from "../server/bus.ts";
 import { loadConfig, updateConfigFile } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
-import { ACCESS_LOG_LIMITS, type AccessLogLimits, authenticate, DEVICE_KEY_PREFIX, DeviceKeys, deviceDisplayName, revokeAllDeviceKeys, SHARED_PRINCIPAL } from "../server/devices.ts";
+import { ACCESS_LOG_LIMITS, type AccessLogLimits, authenticate, DEVICE_KEY_PREFIX, DeviceKeys, deviceDisplayName, principalKey, revokeAllDeviceKeys, SHARED_PRINCIPAL } from "../server/devices.ts";
 import { startServer } from "../server/http.ts";
 import type { OrchestratorApi } from "../server/orchestrator-api.ts";
+import { Pairing } from "../server/pairing.ts";
+import { revokeDeviceKeys, rotateAccess } from "../bin/iamceo.ts";
 import { restoreBackup } from "../server/restore.ts";
 import { Store } from "../server/store.ts";
-import type { DeviceAccessList, DeviceRevokeResult } from "../shared/types.ts";
+import type { AuthRotateResult, DeviceAccessList, DeviceRevokeAllResult, DeviceRevokeResult } from "../shared/types.ts";
 import { APP_HEADERS } from "../shared/types.ts";
 import { createIsolatedRuntime, type IsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
@@ -74,23 +76,35 @@ describe("판정 함수와 열쇠 저장", () => {
     expect(deviceDisplayName("\u0000\t")).toBe("이름 없는 기기");
   });
 
-  test("마지막 접속은 1분에 한 번만 DB 에 쓰고, 목록은 메모리의 더 최근 값을 보인다. 플랫폼은 머리글로 배운다", () => {
-    const { db, keys, advance } = memoryKeys();
+  test("마지막 접속은 메모리에만 남기고(조회는 DB 를 쓰지 않는다) flush 때 한꺼번에 쓴다. 목록은 메모리의 최신 값, 플랫폼은 머리글로 배운다", () => {
+    const { db, keys, advance, at } = memoryKeys();
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const changes = () => db.query<{ n: number }, []>("SELECT total_changes() AS n").get()!.n;
     const issued = keys.issue({ name: "iPad", address: "100.64.0.3", platform: null })!;
     const device = { kind: "device" as const, id: issued.id };
+    const start = at();
+    const before = changes();
     keys.touch(device, "other", "100.64.0.3");
-    const first = db.query<{ last_seen_at: string; platform: string | null }, []>("SELECT last_seen_at, platform FROM auth_devices").get()!;
-    expect(first.platform).toBeNull();
     advance(30_000);
-    keys.touch(device, "other", "100.64.0.3");
-    expect(db.query<{ last_seen_at: string }, []>("SELECT last_seen_at FROM auth_devices").get()!.last_seen_at).toBe(first.last_seen_at);
-    expect(keys.list(device).devices[0]!.lastSeenAt).toBe(new Date(Date.parse(first.last_seen_at) + 30_000).toISOString());
-    // 처음 머리글을 보낸 요청은 1분을 기다리지 않고 플랫폼을 남긴다.
     keys.touch(device, "ios", "100.64.0.3");
-    expect(db.query<{ platform: string }, []>("SELECT platform FROM auth_devices").get()!.platform).toBe("ios");
+    keys.touch(SHARED_PRINCIPAL, "macos", "127.0.0.1");
+    // 요청 안에서는 DB 를 쓰지 않는다. 목록(조회)도 쓰지 않고 메모리의 값을 보인다.
+    expect(changes()).toBe(before);
+    expect(db.query("SELECT last_seen_at, platform FROM auth_devices").get()).toEqual({ last_seen_at: null, platform: null });
+    expect(keys.list(device).devices[0]).toMatchObject({ platform: "ios", lastSeenAt: iso(start + 30_000), current: true });
+    expect(changes()).toBe(before);
+    // flush(서버 타이머·멈출 때)가 한꺼번에 쓴다. 새로 바뀐 것이 없으면 다시 쓰지 않는다.
+    keys.flush();
+    expect(db.query("SELECT last_seen_at, platform FROM auth_devices").get()).toEqual({ last_seen_at: iso(start + 30_000), platform: "ios" });
+    expect(db.query("SELECT platform FROM auth_shared_seen").all()).toEqual([{ platform: "macos" }]);
+    const flushed = changes();
+    keys.flush();
+    expect(changes()).toBe(flushed);
+    // 머리글 없는 요청은 배운 플랫폼을 지우지 않는다.
     advance(61_000);
     keys.touch(device, "other", "100.64.0.4");
-    expect(db.query<{ last_seen_at: string; platform: string }, []>("SELECT last_seen_at, platform FROM auth_devices").get()).toEqual({ last_seen_at: new Date(Date.parse(first.last_seen_at) + 91_000).toISOString(), platform: "ios" });
+    keys.flush();
+    expect(db.query("SELECT last_seen_at, platform, last_address FROM auth_devices").get()).toEqual({ last_seen_at: iso(start + 91_000), platform: "ios", last_address: "100.64.0.4" });
 
     keys.touch(SHARED_PRINCIPAL, "macos", "127.0.0.1");
     keys.touch(SHARED_PRINCIPAL, "local", "127.0.0.1");
@@ -151,23 +165,60 @@ describe("판정 함수와 열쇠 저장", () => {
     expect(db.query("SELECT id FROM auth_devices ORDER BY id").all().map(row => (row as { id: string }).id).sort()).toEqual([used.id].sort());
   });
 
-  test("표를 만들지 못한 DB 에서는 열쇠를 주지 않고(부르는 쪽이 공용 코드를 준다) 기록 실패도 삼킨다", () => {
+  test("표를 만들지 못한 DB 에서는 열쇠를 주지 않고(부르는 쪽이 503 으로 답한다) 기록 실패도 삼킨다. 그 DB 의 열쇠는 없으므로 '틀림'이다", () => {
     const db = openDb(":memory:");
     cleanups.push(() => db.close());
     for (const table of ["auth_events", "auth_devices", "auth_shared_seen"]) db.exec(`DROP TABLE ${table}`);
     const keys = new DeviceKeys(db);
     expect(keys.issue({ name: "iPhone", address: null, platform: null })).toBeNull();
+    expect(keys.revokeAll(null)).toBeNull();
     expect(() => keys.recordFailure("auth_failed", "100.64.0.2", { ok: false, reason: "wrong" })).not.toThrow();
     expect(() => keys.touch(SHARED_PRINCIPAL, "local", "127.0.0.1")).not.toThrow();
+    expect(() => keys.flush()).not.toThrow();
     expect(keys.list(SHARED_PRINCIPAL)).toMatchObject({ devices: [], events: [], failures: { count: 0 } });
     expect(authenticate(SHARED, SHARED, keys).ok).toBe(true);
+    expect(authenticate(`${DEVICE_KEY_PREFIX}devAAAAAAAAAAAAAAAA.${"A".repeat(43)}`, SHARED, keys)).toEqual({ ok: false, reason: "wrong" });
+  });
+
+  test("열쇠를 읽다가 난 저장소 오류는 '틀림'이 아니라 오류다(출시된 앱은 401 이면 열쇠를 지운다). 열린 연결 확인은 오류면 살아 있다고 둔다", () => {
+    const { db, keys } = memoryKeys();
+    const issued = keys.issue({ name: "iPhone", address: null, platform: "ios" })!;
+    const original = db.query.bind(db);
+    const broken = spyOn(db, "query").mockImplementation(((sql: string) => {
+      if (/FROM auth_devices/.test(sql)) throw new Error("disk I/O error");
+      return original(sql);
+    }) as typeof db.query);
+    try {
+      expect(authenticate(issued.key, SHARED, keys)).toEqual({ ok: false, reason: "error" });
+      // 공용 코드는 DB 를 보지 않으므로 그대로 통한다. 열쇠 모양이 아닌 틀린 값은 그대로 '틀림'.
+      expect(authenticate(SHARED, SHARED, keys).ok).toBe(true);
+      expect(authenticate("wrong", SHARED, keys)).toEqual({ ok: false, reason: "wrong" });
+      expect(keys.isActive(issued.id)).toBe(true);
+    } finally { broken.mockRestore(); }
+    expect(authenticate(issued.key, SHARED, keys)).toEqual({ ok: true, principal: { kind: "device", id: issued.id } });
+  });
+
+  test("QR 은 만든 자격을 기억하고, 기기를 끊을 때 그 기기가 만든 QR 만 무른다", () => {
+    const pairing = new Pairing();
+    const fromDevice = pairing.start(principalKey({ kind: "device", id: "devAAAAAAAAAAAAAAAA" })).code;
+    const fromOther = pairing.start(principalKey({ kind: "device", id: "devBBBBBBBBBBBBBBBB" })).code;
+    const fromShared = pairing.start(principalKey(SHARED_PRINCIPAL)).code;
+    pairing.invalidateOwner(principalKey({ kind: "device", id: "devAAAAAAAAAAAAAAAA" }));
+    expect(pairing.status(fromDevice).status).toBe("expired");
+    expect(pairing.claim(fromDevice, "x")).toBe("invalid");
+    expect(pairing.status(fromOther).status).toBe("pending");
+    expect(pairing.status(fromShared).status).toBe("pending");
+    // 교환 뒤 이어 가지 못한 코드는 버린다(Mac 화면은 '시간이 지남'으로 보고 새 QR 을 만든다).
+    expect(pairing.claim(fromShared, "x")).toBe("ok");
+    pairing.discard(fromShared.toLowerCase());
+    expect(pairing.status(fromShared).status).toBe("expired");
   });
 });
 
-async function serverFixture() {
+async function serverFixture(hosts = ["127.0.0.1"]) {
   const isolated = createIsolatedRuntime();
   const env = isolated.childEnv();
-  updateConfigFile({ accessCode: SHARED, hosts: ["127.0.0.1"] }, env);
+  updateConfigFile({ accessCode: SHARED, hosts }, env);
   const config = loadConfig(env);
   const bus = new Bus();
   const store = new Store(openDb(config.dbPath), bus);
@@ -368,13 +419,152 @@ describe("짝 맺기·목록·끊기(HTTP)", () => {
     expect(await (await join(paired.accessCode)).json()).toMatchObject({ code: "device_revoked" });
   });
 
-  test("기기 열쇠 표가 없으면 짝 맺기는 예전처럼 공용 접속 코드를 준다", async () => {
+  test("열쇠를 저장하지 못하면 공용 접속 코드를 대신 주지 않고 503 이다. 그 QR 은 버리고, 공용 코드 기기는 그대로다", async () => {
+    // 예전에는 공용 코드를 건넸다. 그러면 목록에 없고 한 대만 끊을 수도 없는 기기가 아무도 모르게 생긴다(리뷰 auth-3).
     const f = await serverFixture();
     for (const table of ["auth_events", "auth_devices", "auth_shared_seen"]) f.store.db.exec(`DROP TABLE ${table}`);
-    const paired = await f.pair();
-    expect(paired.accessCode).toBe(SHARED);
-    expect((await f.request("/api/capabilities", paired.accessCode)).status).toBe(200);
+    const { code } = await (await f.request("/api/pair/start", SHARED, { method: "POST" })).json() as { code: string };
+    const response = await fetch(`${f.base}/pair/claim`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, device: "iPhone" }) });
+    expect(response.status).toBe(503);
+    const body = await response.json() as Record<string, unknown>;
+    expect(body).toMatchObject({ code: "device_key_save_failed" });
+    expect(body.accessCode).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain(SHARED);
+    expect(await (await f.request(`/api/pair/status?code=${code}`)).json()).toEqual({ code, status: "expired" });
+    expect((await f.request("/api/capabilities")).status).toBe(200);
     expect(await (await f.request("/api/devices")).json()).toMatchObject({ devices: [], failures: { count: 0 } });
+  });
+
+  test("열쇠를 읽다가 저장소 오류가 나면 401 이 아니라 503 storage_io 이고 실패한 시도로 세지 않는다. 공용 코드는 그대로다", async () => {
+    const f = await serverFixture();
+    const paired = await f.pair();
+    // 열쇠 행을 읽는 SQL 이 실패하게 한다(표는 있으나 열 이름이 맞지 않음 → 저장소 오류. 표가 없는 것과 다르다).
+    f.store.db.exec("ALTER TABLE auth_devices RENAME COLUMN secret_hash TO secret_hash_broken");
+    try {
+      const refused = await f.request("/api/capabilities", paired.accessCode);
+      expect(refused.status).toBe(503);
+      expect(await refused.json()).toMatchObject({ code: "storage_io" });
+      expect((await f.request("/ws?v=2", paired.accessCode)).status).toBe(503);
+      expect((await f.request("/api/capabilities")).status).toBe(200);
+    } finally { f.store.db.exec("ALTER TABLE auth_devices RENAME COLUMN secret_hash_broken TO secret_hash"); }
+    expect((await f.request("/api/capabilities", paired.accessCode)).status).toBe(200);
+    expect((await (await f.request("/api/devices")).json() as DeviceAccessList).failures.count).toBe(0);
+  });
+
+  test("인증된 조회(GET)는 공용 코드든 기기 열쇠든 DB 를 쓰지 않는다. 마지막 접속은 메모리에서 보이고 서버가 멈출 때 쓴다", async () => {
+    const f = await serverFixture();
+    const paired = await f.pair("민수의 iPhone");
+    const changes = () => f.store.db.query<{ n: number }, []>("SELECT total_changes() AS n").get()!.n;
+    const before = changes();
+    const app = { [APP_HEADERS.version]: "0.2.4", [APP_HEADERS.platform]: "ios", [APP_HEADERS.apiLevel]: "1" };
+    for (const code of [SHARED, paired.accessCode]) {
+      expect((await f.request("/api/capabilities", code, { headers: app })).status).toBe(200);
+      expect((await f.request("/api/devices", code)).status).toBe(200);
+      expect((await f.request("/files/missing/file.txt", code)).status).toBe(404);
+    }
+    const live = socket(f.base, paired.accessCode);
+    await live.hello;
+    expect(changes()).toBe(before);
+    const list = await (await f.request("/api/devices")).json() as DeviceAccessList;
+    expect(list.devices[0]).toMatchObject({ name: "민수의 iPhone", platform: "ios" });
+    expect(list.devices[0]!.lastSeenAt).not.toBeNull();
+    expect(list.shared.platforms.map(entry => entry.platform)).toContain("ios");
+    expect(changes()).toBe(before);
+    await f.server.stop();
+    expect(f.store.db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM auth_devices WHERE last_seen_at IS NOT NULL AND platform = 'ios'").get()!.n).toBe(1);
+    expect(f.store.db.query("SELECT platform FROM auth_shared_seen ORDER BY platform").all()).toEqual([{ platform: "ios" }, { platform: "local" }]);
+  });
+
+  test("QR 은 공용 접속 코드로만 만든다: 기기 열쇠로는 403 이라, 끊긴 기기가 미리 열쇠를 늘려 둘 수 없다", async () => {
+    const f = await serverFixture();
+    const lost = await f.pair("잃어버린 iPhone");
+    const minted = await f.request("/api/pair/start", lost.accessCode, { method: "POST" });
+    expect(minted.status).toBe(403);
+    expect(await minted.json()).toMatchObject({ code: "pair_start_shared_only" });
+    const { devices } = await (await f.request("/api/devices")).json() as DeviceAccessList;
+    expect(devices).toHaveLength(1);
+    expect((await f.request(`/api/devices/${devices[0]!.id}`, SHARED, { method: "DELETE" })).status).toBe(200);
+    expect((await f.request("/api/capabilities", lost.accessCode)).status).toBe(401);
+    // 공용 코드(이 Mac 의 앱)는 계속 QR 을 만든다.
+    expect((await f.request("/api/pair/start", SHARED, { method: "POST" })).status).toBe(200);
+  });
+
+  test("코드가 새었을 때: rotate { allDevices } 는 공용 코드를 바꾸고 기기 열쇠도 모두 끊는다(그 소켓·열린 QR 까지). 잘못된 본문은 아무것도 바꾸지 않는다", async () => {
+    const f = await serverFixture();
+    // 공용 코드를 가진 쪽이 QR 없이 스스로 받아 둔 열쇠(리뷰 auth-1 의 재현)와 대표의 iPad.
+    const leaked = await f.pair("iPhone");
+    const ipad = await f.pair("대표의 iPad");
+    const leakedSocket = socket(f.base, leaked.accessCode);
+    await leakedSocket.hello;
+    const { code: openQr } = await (await f.request("/api/pair/start", SHARED, { method: "POST" })).json() as { code: string };
+    const json = { "Content-Type": "application/json" };
+    expect((await f.request("/api/auth/rotate", SHARED, { method: "POST", headers: json, body: JSON.stringify({ allDevices: false }) })).status).toBe(400);
+    expect((await f.request("/api/capabilities", leaked.accessCode)).status).toBe(200);
+    expect((await f.request("/api/capabilities")).status).toBe(200);
+    const rotated = await f.request("/api/auth/rotate", SHARED, { method: "POST", headers: json, body: JSON.stringify({ allDevices: true }) });
+    expect(rotated.status).toBe(200);
+    const result = await rotated.json() as AuthRotateResult;
+    expect(result.revokedDevices).toBe(2);
+    expect(await leakedSocket.closed).toBe(4001);
+    for (const key of [leaked.accessCode, ipad.accessCode]) {
+      const refused = await f.request("/api/capabilities", key);
+      expect(refused.status).toBe(401);
+      expect(await refused.json()).toMatchObject({ code: "device_revoked" });
+    }
+    expect((await f.request("/api/capabilities")).status).toBe(401);
+    expect((await f.request("/api/capabilities", result.accessCode)).status).toBe(200);
+    const late = await fetch(`${f.base}/pair/claim`, { method: "POST", headers: json, body: JSON.stringify({ code: openQr, device: "iPhone" }) });
+    expect(late.status).toBe(401);
+    const list = await (await f.request("/api/devices", result.accessCode)).json() as DeviceAccessList;
+    expect(list.devices).toEqual([]);
+    expect(list.events.filter(event => event.kind === "device_revoked").map(event => event.reason)).toEqual(["all", "all"]);
+    // 열쇠 없이 바꾸는 예전 방식은 revokedDevices 를 싣지 않는다.
+    const plain = await f.request("/api/auth/rotate", result.accessCode, { method: "POST" });
+    expect(Object.keys(await plain.json() as object).sort()).toEqual(["accessCode", "version"]);
+  });
+
+  test("모두 끊기(DELETE /api/devices)는 이 Mac 에서만, 기기 열쇠만 끊고 공용 코드는 그대로다. 명령줄 두 명령이 이 경로를 쓴다", async () => {
+    const f = await serverFixture();
+    const a = await f.pair("iPhone"), b = await f.pair("iPad");
+    const sharedSocket = socket(f.base, SHARED);
+    const keySocket = socket(f.base, b.accessCode);
+    await Promise.all([sharedSocket.hello, keySocket.hello]);
+    const client = { ...f.config, port: f.server.port };
+    expect(await revokeDeviceKeys(client)).toBe(2);
+    expect(await keySocket.closed).toBe(4001);
+    for (const key of [a.accessCode, b.accessCode]) expect((await f.request("/api/capabilities", key)).status).toBe(401);
+    expect((await f.request("/api/capabilities")).status).toBe(200);
+    f.bus.emit({ type: "projects", projects: [] });
+    await Bun.sleep(50);
+    expect(sharedSocket.closeCode).toBeUndefined();
+    // 다시 해도 된다(끊을 열쇠가 없으면 0).
+    const again = await f.request("/api/devices", SHARED, { method: "DELETE" });
+    expect(await again.json() as DeviceRevokeAllResult).toEqual({ ok: true, revoked: 0 });
+    // 명령줄 rotate --all-devices: 새 코드와 끊은 수.
+    const c = await f.pair("새 iPhone");
+    const rotated = await rotateAccess(client, fetch, { allDevices: true });
+    expect(rotated.revokedDevices).toBe(1);
+    expect(client.accessCode).toBe(rotated.accessCode);
+    expect((await f.request("/api/capabilities", c.accessCode)).status).toBe(401);
+    expect((await f.request("/api/capabilities", rotated.accessCode)).status).toBe(200);
+  });
+
+  test("모두 끊기는 이 Mac 이 아닌 주소에서 오면 403 이고 아무것도 끊지 않는다", async () => {
+    let handle: ((req: Request, server: unknown) => Promise<Response>) | undefined;
+    const original = Bun.serve;
+    const spy = spyOn(Bun, "serve").mockImplementation(((options: Parameters<typeof Bun.serve>[0]) => {
+      handle ??= (options as { fetch: typeof handle }).fetch;
+      return original(options);
+    }) as typeof Bun.serve);
+    let f: Awaited<ReturnType<typeof serverFixture>>;
+    // 이 Mac 에 없는 주소를 하나 더 두어 그 대역의 상대를 받게 한다(묶기는 실패하고 넘어간다). 그래야 주소 거절이 아니라 '이 Mac 에서만'을 본다.
+    try { f = await serverFixture(["127.0.0.1", "192.168.77.1"]); } finally { spy.mockRestore(); }
+    const paired = await f.pair();
+    const remote = { requestIP: () => ({ address: "192.168.77.5" }) };
+    const response = await handle!(new Request(`${f.base}/api/devices`, { method: "DELETE", headers: { Authorization: `Bearer ${SHARED}`, Host: new URL(f.base).host, "X-Forwarded-For": "127.0.0.1" } }), remote);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ code: "LOCAL_ONLY" });
+    expect((await f.request("/api/capabilities", paired.accessCode)).status).toBe(200);
   });
 });
 

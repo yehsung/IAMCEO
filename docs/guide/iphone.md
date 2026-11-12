@@ -53,4 +53,4 @@ Mac에서 `iamceo doctor`를 실행하면 Tailscale 항목이 지금 상태를 �
 
 ## 나가기와 잃어버린 기기
 
-iPhone 설정의 **나가기**는 그 iPhone에 저장된 접속 코드만 지웁니다. 서버의 코드와 열쇠는 그대로입니다. iPhone을 잃어버렸다면 Tailscale에서 그 기기를 빼고, Mac 앱의 **연결된 기기**에서 그 iPhone을 **끊기** 합니다. 목록에 따로 없고 공용 접속 코드로 붙어 있던 iPhone이면 Mac에서 접속 코드를 바꿉니다 → [보안 설명서](../security.md#기기를-잃어버렸을-때)
+iPhone 설정의 **나가기**는 그 iPhone에 저장된 접속 코드만 지웁니다. 서버의 코드와 열쇠는 그대로입니다. iPhone을 잃어버렸다면 Tailscale에서 그 기기를 빼고, Mac 앱의 **연결된 기기**에서 그 iPhone을 **끊기** 합니다. 목록에서 어느 줄인지 모르겠으면 Mac에서 `iamceo auth revoke-devices`로 QR로 연결한 기기를 모두 끊고 쓸 기기만 새 QR로 다시 연결합니다. 목록에 따로 없고 공용 접속 코드로 붙어 있던 iPhone이면 Mac에서 접속 코드를 바꿉니다 → [보안 설명서](../security.md#기기를-잃어버렸을-때)

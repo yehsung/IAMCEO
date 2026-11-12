@@ -13,6 +13,8 @@ extension Message {
         var merged = self
         merged.delivery = current.delivery
         merged.deliveryNote = current.deliveryNote
+        // 보류 코드는 문장과 같은 판에서 온다(서버는 둘을 함께 쓰고 판 번호를 올린다). 옛 판의 코드를 남기면 문장과 갈라진다.
+        merged.deliveryCode = current.deliveryCode
         merged.deliveryRevision = revision
         if deliveryRevision == nil || deliveryRevision! < revision { merged.deliveryInfo = current.deliveryInfo }
         return merged

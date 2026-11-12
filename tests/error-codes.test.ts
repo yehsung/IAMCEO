@@ -99,6 +99,31 @@ describe("HTTP 오류 응답", () => {
     expect(await body.json()).toEqual({ error: "JSON 본문이 필요합니다", code: "invalid_json" });
   });
 
+  test("코드가 없던 두 응답(실시간 연결 주소의 접속 코드, 팀장 통로의 틀린 토큰)에도 코드가 있고, fail() 은 코드 없이 부를 수 없다", async () => {
+    const ws = await fetch(`${base}/ws?v=2&t=${CODE}`, { headers });
+    expect(ws.status).toBe(400);
+    expect(await ws.json()).toEqual({ error: "실시간 연결 주소에 접속 코드를 넣지 마세요", code: "realtime_code_in_url" });
+    const agent = await fetch(`${base}/agent/tool`, { method: "POST", headers: { Authorization: "Bearer not-a-member-token", "Content-Type": "application/json" }, body: "{}" });
+    expect(agent.status).toBe(401);
+    expect(await agent.json()).toEqual({ error: "인증이 필요합니다", code: "agent_token_invalid" });
+    // 원문 검사: http.ts 의 모든 fail(…) 호출이 코드(세 번째 인자)를 갖는다. 글자로 쓴 코드는 목록에 있다.
+    const file = join(ROOT, "server/http.ts");
+    const src = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+    const missing: string[] = [], unknown: string[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "fail") {
+        const where = `http.ts:${src.getLineAndCharacterOfPosition(node.getStart()).line + 1}`;
+        const code = node.arguments[2];
+        if (!code) missing.push(where);
+        else if (ts.isStringLiteral(code) && !isErrorCode(code.text)) unknown.push(`${where} ${code.text}`);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(src);
+    expect(missing).toEqual([]);
+    expect(unknown).toEqual([]);
+  });
+
   test("넓은 옛 코드 아래의 좁은 사유는 reason 으로 더해진다", async () => {
     const id = store.createProject({ name: "터미널", cwd: tempDir(), runnerEnabled: false }).id;
     const member = store.createMember({ projectId: id, handle: "worker", name: "결제 연동", kind: "worker" });

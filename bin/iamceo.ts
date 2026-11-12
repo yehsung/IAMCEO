@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // IAMCEO CLI. mcp 는 세션마다 뜨므로 서버 코드를 끌어오지 않게 명령별로 늦게 불러온다.
-import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { connect } from "node:net";
 import { homedir, networkInterfaces, userInfo } from "node:os";
@@ -710,7 +710,9 @@ async function restoreNow(args: string[]): Promise<void> {
 
 /** 복원 홈이 앱이 쓰는 기본 자리(~/.iamceo)인가. 아니면 앱의 '이 Mac에서 시작'이 그 홈을 쓰지 않는다. */
 function isDefaultHome(home: string): boolean {
-  return resolve(home) === resolve(join(homedir(), ".iamceo"));
+  // /var 와 /private/var 처럼 링크로 갈리는 같은 자리도 같은 홈으로 본다(있는 경로는 실제 경로로 비교).
+  const real = (path: string) => { try { return realpathSync(resolve(path)); } catch { return resolve(path); } };
+  return real(home) === real(join(homedir(), ".iamceo"));
 }
 
 /** 복원한 홈으로 서버를 켜는 법 한 줄. 기본 홈이면 앱 버튼, 아니면 그 홈을 지정한 서비스 등록. */

@@ -1,6 +1,6 @@
 // bin/iamceo.ts 와 가져오기. 시험 소켓·임시 폴더만 쓰고 launchctl·claude 는 부르지 않는다.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import pkg from "../package.json";
@@ -506,10 +506,11 @@ describe("운영 CLI readiness·등록·복원", () => {
     // 다른 자리: 앱이 쓰지 않는 홈이라 그 홈을 지정한 service install 을 안내한다.
     const other = join(newHome(), "restored");
     const elsewhere = await cli(home, ["restore", snapshot, "--destination", other], { env: { HOME: user } });
-    expect(elsewhere.stdout).toContain(`IAMCEO_HOME=${other}`);
+    // 복원은 실제 경로(/var → /private/var 처럼 링크를 푼 경로)를 알린다.
+    expect(elsewhere.stdout).toContain(`IAMCEO_HOME=${realpathSync(other)}`);
     expect(elsewhere.stdout).toContain("iamceo service install");
     expect((await cli(other, ["restore", "reconcile"], { env: { HOME: user } })).code).toBe(0);
-    expect((await cli(other, ["restore", "resume"], { env: { HOME: user } })).stdout).toContain(`IAMCEO_HOME=${other} iamceo service install`);
+    expect((await cli(other, ["restore", "resume"], { env: { HOME: user } })).stdout).toContain(`IAMCEO_HOME=${realpathSync(other)} iamceo service install`);
     // 서버가 꺼져 있을 때의 안내도 같은 말이다.
     const down = await cli(home, ["status"]);
     expect(down.stderr).toContain("‘이 Mac에서 시작’");

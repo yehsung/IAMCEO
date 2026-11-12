@@ -27,7 +27,7 @@ jobs:
           swift --version
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.14
+          bun-version-file: .bun-version
       - run: bun install --frozen-lockfile
       - name: 출시 앱 호환
         run: bash scripts/check.sh compat

@@ -8,6 +8,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { z } from "zod";
 import { fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type EngineStatus, type HerdrInfo, type TailnetStatus, type Member, type MessagePageOptions, type SyncSnapshot, type FileDoc, type WsEvent } from "../shared/types.ts";
+import { REPORT_LANGUAGES } from "../shared/types.ts";
 import type { OperationReceipt, ServerCapabilities } from "../shared/operations.ts";
 import type { DeliveryRecoveryService } from "./service-contracts.ts";
 import { ARTIFACT_CSP, buildArtifactSrcdoc } from "../shared/artifact-kit.ts";
@@ -29,6 +30,14 @@ import { createStorageReferences } from "./storage-maintenance.ts";
 import { GitHub } from "./github.ts";
 import { LoopMonitor } from "./loop-monitor.ts";
 import { TailnetWatch } from "./tailnet.ts";
+import { doctorReport, serverDoctorFacts, type DoctorLang, type DoctorProbes } from "./doctor.ts";
+import { createDiagnostics, type DiagnoseInput } from "./diagnose.ts";
+import { readVitals } from "./vitals.ts";
+import type { DiagnoseResult } from "../shared/types.ts";
+import { compatFields, readAppClient, SeenApps } from "./app-version.ts";
+import { CliVersionMonitor, type CliVersionInfo, type CliVersionSource } from "./cli-version.ts";
+import { exportProjectZip, removeDeletedProjectFiles } from "./lifecycle/project-data.ts";
+import type { ProjectDeleteResult } from "../shared/types.ts";
 
 export interface ServerContext {
   config: Config;
@@ -48,6 +57,12 @@ export interface ServerContext {
   githubFreeBytes?: (path: string) => Promise<number>;
   daemon?: () => { ready: boolean; buildId: string; version: string };
   loopMonitor?: LoopMonitor;
+  /** B3 점검(GET /api/doctor)의 사실 모으기. 시험이 launchctl·디스크·로그인 기록 대신 넣는다. */
+  doctorProbes?: Partial<DoctorProbes>;
+  /** D8 진단 파일(POST /api/diagnose). 시험이 서비스 요약·로그 폴더·충돌 보고 폴더·시계를 넣는다. */
+  diagnose?: Partial<Pick<DiagnoseInput, "service" | "logDir" | "crashReportsDir" | "now" | "keep">>;
+  /** D9: CLI 버전 캐시. 없으면 서버가 만든다. 시험(IAMCEO_TEST)에서는 넣은 것만 쓴다: 진짜 CLI 를 부르지 않는다. */
+  cliVersions?: CliVersionSource;
 }
 
 export interface HostBinding {
@@ -304,6 +319,8 @@ const SettingsSchema = z
     boardTidyHours: z.number().int().min(0).max(168),
     // 확인은 되돌리지 않는다. 받은 설정을 통째로 돌려보내는 화면이 있어 false 도 받되, 바꾸지는 않는다(acknowledged).
     permissionAcknowledged: z.boolean(),
+    // B1: 대표에게 쓰는 글의 언어. 서버 머리말([대표]·[총괄])은 언어와 상관없이 그대로다.
+    reportLanguage: z.enum(REPORT_LANGUAGES),
   })
   .partial()
   .strict();
@@ -379,7 +396,7 @@ function operationResponse(receipt: OperationReceipt): Response {
       const { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt } = receipt.result;
       result = { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt }; break;
     }
-    case "settings": result = { settings: publicFields(receipt.result.settings, ["backend", "permissionMode", "ranks", "codexRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault", "contextWindows", "maxAwakeWorkers", "notifyMac", "macScriptNotifications", "boardTidyHours", "permissionAcknowledged"]), revision: receipt.result.revision }; break;
+    case "settings": result = { settings: publicFields(receipt.result.settings, ["backend", "permissionMode", "ranks", "codexRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault", "contextWindows", "maxAwakeWorkers", "notifyMac", "macScriptNotifications", "boardTidyHours", "permissionAcknowledged", "reportLanguage"]), revision: receipt.result.revision }; break;
     case "member_config": result = { member: receiptMember(receipt.result.member), configRevision: receipt.result.configRevision, sessionGeneration: receipt.result.sessionGeneration }; break;
     case "todo_done": result = { todo: publicFields(receipt.result.todo, ["id", "projectId", "memberId", "who", "title", "detail", "done", "doneAt", "createdAt", "outcome", "closeReason", "closedBy"]), revision: receipt.result.revision }; break;
   }
@@ -546,6 +563,14 @@ function acknowledged<T extends { permissionAcknowledged?: boolean }>(body: T): 
 function engineField(orch: OrchestratorApi): { engine?: EngineStatus } {
   const engine = orch.engineStatus?.() ?? null;
   return engine ? { engine } : {};
+}
+
+/** D9: 마지막으로 읽은 CLI 버전. 아직 못 읽었으면 싣지 않는다. 기다리지 않는다(낡았으면 뒤에서 다시 읽는다). */
+function cliVersionsField(ctx: ServerContext): { cliVersions?: CliVersionInfo[] } {
+  try {
+    const infos = ctx.cliVersions?.snapshot();
+    return infos ? { cliVersions: infos } : {};
+  } catch { return {}; }
 }
 
 /** Tailscale 상태. 그 주소를 연 적이 없거나 주소를 직접 정한 설치에서는 싣지 않는다. */
@@ -757,16 +782,18 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       strictQuery(url, []);
       return Response.json(models.read());
     }),
-    route("GET", "/api/sync", async (_req, url) => {
+    route("GET", "/api/sync", async (req, url) => {
       strictQuery(url, ["projectId", "lite"]);
       const lite = wantsLite(url);
       const requestedProjectId = url.searchParams.get("projectId");
       if (requestedProjectId !== null && (!requestedProjectId.trim() || Buffer.byteLength(requestedProjectId) > 256)) throw new ApiError(400, "프로젝트 ID가 잘못되었습니다");
+      // D5: 버전 머리글을 보낸 앱에만 server·compat 을 싣는다. 앱마다 답이 다르니 캐시 열쇠에도 넣는다.
+      const versionFields = compatFields(readAppClient(req.headers), VERSION);
       return monitor.run("GET /api/sync build", () => {
         // No await from the generation check through serialization. Concurrent readers share these bytes.
         const generation = JSON.stringify([bus.epoch, bus.seq, urls(), tailnetField()]);
         if (syncGeneration !== generation) { syncCache.clear(); syncGeneration = generation; }
-        const key = JSON.stringify([requestedProjectId, lite]);
+        const key = JSON.stringify([requestedProjectId, lite, versionFields]);
         const cached = syncCache.get(key);
         if (cached !== undefined) return new Response(cached, { headers: { "Content-Type": "application/json" } });
         // 이 뒤 직렬화까지 await가 없다. 도메인 쓰기는 이 데몬의 Store가 소유한다.
@@ -778,7 +805,8 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
           apiOutage: store.apiOutage(),
           protocol: 2, requestedProjectId, projectStatus,
           bootstrap: { apiOutage: store.apiOutage(), version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr: HERDR_UNUSED,
-            home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides, ...engineField(orch), ...tailnetField() },
+            home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides, ...engineField(orch), ...tailnetField(), ...versionFields,
+            ...cliVersionsField(ctx) },
           state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!), ...snapshotNotices(requestedProjectId!) } : null,
           revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },
           cursor: bus.cursor,
@@ -790,7 +818,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
         return new Response(serialized, { headers: { "Content-Type": "application/json" } });
       });
     }),
-    route("GET", "/api/bootstrap", async () => {
+    route("GET", "/api/bootstrap", async (req) => {
       // 앱의 첫 연결 확인(제한 3초)이다. 실행기 정리나 느린 조회를 기다리지 않고 마지막으로 아는 값으로 답한다.
       const runtime = await Promise.resolve((orch.refreshHealth ?? orch.refreshConnection)?.call(orch)).then(() => orch.runtimeInfo?.());
       const rankOverrides = { manager: 0, lead: 0 };
@@ -808,6 +836,10 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
         rankOverrides,
         ...engineField(orch),
         ...tailnetField(),
+        // D5: 버전 머리글을 보낸 앱에만. 머리글 없는 출시 앱의 응답은 그대로다.
+        ...compatFields(readAppClient(req.headers), VERSION),
+        // D9: 선택 필드. 출시된 앱은 모르는 칸을 건너뛴다.
+        ...cliVersionsField(ctx),
       };
       return Response.json(body);
     }),
@@ -878,6 +910,22 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       return Response.json(await orch.createProject({ ...body, cwd: expandDir(body.cwd) }));
     }),
     route("GET", "/api/projects/archived", () => Response.json(store.listArchivedProjects())),
+    // B 묶음(설치 수명): 보관한 프로젝트 지우기와 프로젝트 내보내기. 내보내기의 '이 Mac 에서만' 판정은 startServer 의 경로 앞에서 한다.
+    route("DELETE", "/api/projects/:id", (_req, url, [id]) => {
+      strictQuery(url, []);
+      const deleted = store.deleteArchivedProject(id!);
+      const removed = removeDeletedProjectFiles(config, deleted);
+      const body: ProjectDeleteResult = { id: deleted.project.id, deleted: true, removedAttachments: removed.attachments };
+      return Response.json(body);
+    }),
+    route("GET", "/api/projects/:id/export", async (_req, url, [id]) => {
+      strictQuery(url, []);
+      const exported = await exportProjectZip(store, config, id!);
+      return new Response(exported.stream, { headers: {
+        "Content-Type": "application/zip", "Content-Length": String(exported.size), "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": `attachment; filename="iamceo-export.zip"; filename*=UTF-8''${encodeURIComponent(exported.filename)}`,
+      } });
+    }),
     route("GET", "/api/projects/:id/decisions", (_req, url, [id]) => {
       store.requireProject(id!);
       const status = url.searchParams.get("status") ?? "done";
@@ -1282,6 +1330,15 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     ...ctx.tailnetWatch,
   });
   const tailnetField: TailnetField = () => { const status = tailnet.status(); return status ? { tailnet: status } : {}; };
+  // D9: 시작할 때 CLI 버전을 한 번 읽어 기록하고(처음 본 버전은 로그 한 줄), 실행 파일이 바뀌면 다시 읽는다. 바뀌면 앱이 스냅샷을 다시 읽게 한다.
+  // 문맥은 복사하지 않고 그 자리에 붙인다: 경로들은 같은 문맥 객체를 읽는다(시험이 뒤에 포트를 바꾼다).
+  if (!ctx.cliVersions && process.env.IAMCEO_TEST !== "1") {
+    const watcher = new CliVersionMonitor({ home: config.home, claudeBin: config.claudeBin, codexBin: config.codexBin, onUpdate: () => store.touchSnapshot() });
+    ctx.cliVersions = watcher;
+    void watcher.refresh().catch(() => undefined);
+  }
+  /** 점검(A, cli_version)도 이 캐시를 쓴다: 실행 파일이 그대로면 --version 을 다시 부르지 않는다. 시험에서 넣지 않았으면 없다. */
+  const cliVersions = ctx.cliVersions;
   const routes = apiRoutes(ctx, () => reachableUrls(hosts, boundPort), pairing, monitor, tailnetField);
   const pushHandler = ctx.push ? createPushHandler(ctx.push) : null;
   const sockets = new Set<ServerWebSocket<SocketData>>();
@@ -1295,6 +1352,9 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     const given = bearer(req);
     return given !== null && safeEqual(given, config.accessCode);
   };
+  /** D5: 버전 머리글을 보낸 앱들(인증된 요청만). /api/readiness 의 apps 로 보인다. */
+  const seenApps = new SeenApps();
+  const seenAppsField = () => { const apps = seenApps.list(); return apps.length ? { apps } : {}; };
 
   const route = (req: Request, url: URL, server: Server<SocketData>): Response | Promise<Response | undefined> | undefined => {
     const path = url.pathname;
@@ -1314,6 +1374,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     }
     if (path.startsWith("/api/")) {
       if (!hasAccessCode(req)) return fail(401, "인증이 필요합니다");
+      seenApps.note(readAppClient(req.headers));
       if (ctx.daemon?.().ready === false && (path === "/api/sync" || path === "/api/readiness" || path === "/api/runtime" || path === "/api/bootstrap" || /^\/api\/projects\/[^/]+\/state$/.test(path) || path === "/api/push/status")) return starting();
       const terminal = /^\/api\/members\/([^/]+)\/terminal\/stream$/.exec(path);
       if (terminal) {
@@ -1332,6 +1393,10 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       }
       if (path === "/api/auth/rotate") return rotate(req, url, server);
       if (path === "/api/readiness") return readiness(req, url);
+      if (path === "/api/doctor") return doctor(req, url);
+      if (path === "/api/diagnose") return diagnose(req, url, server);
+      // B 묶음: 프로젝트 내보내기는 이 Mac 에서 온 요청만(대화 전체와 첨부 원본이 한 파일로 나간다).
+      if (/^\/api\/projects\/[^/]+\/export$/.test(path) && !isLocalRequest(server.requestIP(req)?.address, req.headers)) return fail(403, "프로젝트 내보내기는 이 Mac 에서만 할 수 있습니다", "LOCAL_ONLY");
       if (path === "/api/push" || path.startsWith("/api/push/")) {
         return pushHandler ? pushHandler(req, url) : fail(501, "푸시를 지원하지 않습니다");
       }
@@ -1363,7 +1428,68 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     const schemaVersion = store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
     const ok = daemon?.ready === true && schemaVersion === MIGRATIONS.length;
     return Response.json({ ok, version: VERSION, daemon, schema: { version: schemaVersion, supportedVersion: MIGRATIONS.length },
-      core: runtime?.core ?? null, ...engineField(ctx.orch), ...tailnetField(), hosts: [...bindings.values()].map(binding => ({ ...binding })) }, { status: ok ? 200 : 503 });
+      core: runtime?.core ?? null, ...engineField(ctx.orch), ...tailnetField(), hosts: [...bindings.values()].map(binding => ({ ...binding })),
+      ...seenAppsField() }, { status: ok ? 200 : 503 });
+  };
+
+  // ---- A(B3·D8): 점검표와 진단 파일 ----
+  /** 서버가 이미 아는 값(실행 엔진·Tailscale 꺼짐·백업)에 이 Mac 에서 읽은 사실(자동 시작·로그인 기록·저장 공간)을 더한다. */
+  const doctorFacts = async () => {
+    const runtime = await Promise.resolve(ctx.orch.runtimeInfo?.()).catch(() => null) ?? null;
+    const activeProjects = new Set(store.listProjects().map(project => project.id));
+    const facts = await serverDoctorFacts({
+      config, ready: ctx.daemon?.().ready ?? true,
+      runtime: runtime as Parameters<typeof serverDoctorFacts>[0]["runtime"],
+      engine: ctx.orch.engineStatus?.() ?? null,
+      tailnet: tailnet.status() ?? null,
+      tailnetSeen: store.tailnetSeen() !== null,
+      detectedTailnet: (() => { try { return detect(); } catch { return []; } })(),
+      codexInUse: store.listAllMembers().some(member => activeProjects.has(member.projectId) && member.cli === "codex"),
+      // D9 의 CLI 버전 캐시를 쓴다(실행 파일이 그대로면 --version 을 다시 부르지 않는다). 없으면(시험) 모른다.
+      probes: { cliVersions: async () => (cliVersions ? await cliVersions.refresh() : null), ...ctx.doctorProbes },
+    });
+    return { facts, runtime };
+  };
+
+  const doctor = async (req: Request, url: URL): Promise<Response> => {
+    if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다");
+    strictQuery(url, ["lang"]);
+    if (ctx.daemon?.().ready === false) return fail(503, "서버를 시작하는 중입니다", "STARTING");
+    const lang: DoctorLang = url.searchParams.get("lang") === "en" ? "en" : "ko";
+    return Response.json(doctorReport((await doctorFacts()).facts, lang));
+  };
+
+  // 겹친 요청은 하나로 합친다. 같은 순간에 두 번 눌러도 묶음은 하나다.
+  let diagnosing: Promise<DiagnoseResult> | null = null;
+  const diagnose = async (req: Request, url: URL, server: Server<SocketData>): Promise<Response> => {
+    if (req.method !== "POST") return fail(405, "허용되지 않는 메서드입니다");
+    strictQuery(url, []);
+    // 진단 파일은 이 Mac 의 폴더에 남는다. 팀장용 통로와 같은 판정으로 이 Mac 안에서 온 요청만 받는다.
+    if (!isLocalRequest(server.requestIP(req)?.address, req.headers)) return fail(403, "이 Mac 안에서만 쓸 수 있는 경로입니다", "LOCAL_ONLY");
+    if (req.body !== null) await parseBody(req, z.strictObject({}));
+    if (ctx.daemon?.().ready === false) return fail(503, "서버를 시작하는 중입니다", "STARTING");
+    diagnosing ??= (async () => {
+      const { facts, runtime } = await doctorFacts();
+      const daemon = ctx.daemon?.() ?? null;
+      const extra = runtime as { backup?: unknown } | null;
+      return createDiagnostics({
+        home: config.home, dbPath: config.dbPath, config, db: store.db, source: "server",
+        versions: { server: VERSION, buildId: daemon?.buildId ?? null },
+        doctor: doctorReport(facts, "ko"),
+        server: {
+          ready: daemon?.ready ?? null, pid: process.pid, uptimeSec: Math.round(process.uptime()),
+          // 진단을 부른 앱의 버전(버전 머리글을 보내는 앱만). 명령줄이 부르면 null.
+          requestedBy: readAppClient(req.headers),
+          schema: { version: store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? null, supportedVersion: MIGRATIONS.length },
+          core: runtime?.core ?? null, engine: ctx.orch.engineStatus?.() ?? null, tailnet: tailnet.status() ?? null,
+          hosts: [...bindings.values()].map(binding => ({ host: binding.host, state: binding.state, attempts: binding.attempts, error: binding.error })),
+          backup: extra?.backup ?? null, apiOutage: store.apiOutage(),
+          vitals: (() => { try { return readVitals(store.db, config.dbPath); } catch { return null; } })(),
+        },
+        ...ctx.diagnose,
+      });
+    })().finally(() => { diagnosing = null; });
+    return Response.json(await diagnosing);
   };
 
   const rotate = async (req: Request, url: URL, server: Server<SocketData>): Promise<Response> => {

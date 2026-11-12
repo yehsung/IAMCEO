@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Public, isolated checks. Usage: bash scripts/check.sh all|ts|server [test files...]|swift|build
+# Public, isolated checks. Usage: bash scripts/check.sh all|ts|server [test files...]|compat|swift|build
 set -euo pipefail
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 CHECK_TMP=${TMPDIR:-/tmp}
@@ -124,13 +124,23 @@ build() {
     -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
     -derivedDataPath "$CHECK_ROOT/dd-ios" CODE_SIGNING_ALLOWED=NO build
 }
+# 출시 앱 호환(D5): 서버가 실제 응답과 실시간 사건을 파일로 남기고(tests/compat-dump.test.ts),
+# 출시 태그에서 꺼낸 그 앱의 해석 코드가 그것을 풀어 본다(scripts/compat-decoders/run.ts).
+# 출시 태그(git fetch --tags, CI 는 checkout 에 fetch-depth: 0)와 Swift 도구가 있어야 한다.
+compat() {
+  local out="$CHECK_ROOT/compat"
+  mkdir -p "$out/dump"
+  IAMCEO_COMPAT_OUT="$out/dump" bun test --timeout=60000 ./tests/compat-dump.test.ts
+  bun scripts/compat-decoders/run.ts "$out/dump" "$out/work"
+}
 mode=${1:-all}
 if [ "$#" -gt 0 ]; then shift; fi
 case "$mode" in
-  all) ts; server; swift_check; build ;;
+  all) ts; server; compat; swift_check; build ;;
   ts) ts ;;
   server) server "$@" ;;
+  compat) compat ;;
   swift) swift_check ;;
   build) build ;;
-  *) printf 'Usage: bash scripts/check.sh all|ts|server [files...]|swift|build\n' >&2; exit 2 ;;
+  *) printf 'Usage: bash scripts/check.sh all|ts|server [files...]|compat|swift|build\n' >&2; exit 2 ;;
 esac

@@ -1,0 +1,12 @@
+╭──────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.166.0)                   │
+│                                              │
+│ model:     gpt-6-astra high   /model to change │
+│ directory: ~/workspace/trust-api             │
+╰──────────────────────────────────────────────╯
+
+  To get started, describe a task or try one of these commands:
+
+› Ask Codex to do anything
+
+  ? for shortcuts

@@ -1172,6 +1172,12 @@ struct StatusStrips: View {
            let tailnet = TailnetNotice(store.bootstrap?.tailnet, onThisMac: store.serverIsThisMac) {
             items.append(Strip(id: "tailnet", tone: .attention, icon: "iphone.slash", text: tailnet.text, lines: 3))
         }
+        // D5: 앱과 서버가 실제로 맞지 않을 때만(서버가 compat 을 실었거나, 머리글을 모르는 옛 서버가 이 앱의 단계보다 낮을 때).
+        // '앱을 업데이트하세요'와 '서버가 옛 버전입니다'를 나눠 말한다. 서버의 말이 지금 것일 때만 보인다.
+        if !offline, !store.isRestarting, !store.isDemo, store.connectionStatus == .connected,
+           let compat = CompatNotice(store.bootstrap, onThisMac: store.serverIsThisMac) {
+            items.append(Strip(id: "compat", tone: .attention, icon: "arrow.up.circle", text: compat.text, lines: 3))
+        }
         if let notice = store.connectionNotice {
             items.append(Strip(id: "connection-check", tone: .neutral, icon: "arrow.triangle.2.circlepath", text: notice, busy: true))
         }

@@ -1,0 +1,43 @@
+{
+  "provider": "claude",
+  "version": "2.1.316",
+  "source": "tests/fixtures/approval/*.ansi.txt 실측(haiku, default 모드). 시험 폴더 경로만 /tmp/proj 로 바꿨다.",
+  "fixtures": [
+    {
+      "file": "approval-bash1.ansi.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/tmp/proj",
+      "bannerVersion": true,
+      "expect": {
+        "inputEmpty": null,
+        "folderTrustLike": false,
+        "folderTrust": null
+      }
+    },
+    {
+      "file": "approval-bash2.ansi.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/tmp/proj",
+      "bannerVersion": true,
+      "expect": {
+        "inputEmpty": null,
+        "folderTrustLike": false,
+        "folderTrust": null
+      }
+    },
+    {
+      "file": "approval-write1.ansi.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/tmp/proj",
+      "bannerVersion": true,
+      "expect": {
+        "inputEmpty": null,
+        "folderTrustLike": false,
+        "folderTrust": null
+      }
+    }
+  ]
+}

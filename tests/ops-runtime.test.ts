@@ -286,7 +286,8 @@ describe("operations runtime", () => {
     let finish!: () => void;
     const pending = new Promise<void>((resolve) => { finish = resolve; });
     const started = Date.now();
-    await expect(shutdownWithinBudget(() => pending, 30)).rejects.toThrow("종료 예산");
+    // 명령줄 문구는 실행 환경의 언어를 따른다(server/cli-text.ts).
+    await expect(shutdownWithinBudget(() => pending, 30)).rejects.toThrow(/종료 예산|15-second budget/);
     expect(Date.now() - started).toBeLessThan(500);
     finish();
     await expect(shutdownWithinBudget(async () => { throw new Error("cleanup failed"); })).rejects.toThrow("cleanup failed");

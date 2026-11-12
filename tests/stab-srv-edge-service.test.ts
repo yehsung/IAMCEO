@@ -82,7 +82,8 @@ test("ops-4: 진짜 bootout 실패는 바로 알리고, 끝내 못 올리면 서
   await f.run(["install"]);
   f.state.bootout = () => ({ ok: false, output: "Boot-out failed: 1: Operation not permitted" });
   f.calls.length = 0;
-  await expect(f.run(["install", "--restart"])).rejects.toThrow("서비스 재시작 실패");
+  // 명령줄 문구는 실행 환경의 언어(LANG)를 따른다(server/cli-text.ts). 시험은 두 언어 모두 받는다.
+  await expect(f.run(["install", "--restart"])).rejects.toThrow(/서비스 재시작 실패|Restarting the service failed/);
   expect(f.calls).toEqual(["print", "bootout"]);
   expect(f.sleeps).toEqual([]);
 
@@ -90,8 +91,8 @@ test("ops-4: 진짜 bootout 실패는 바로 알리고, 끝내 못 올리면 서
   f.state.bootstrap = () => ({ ok: false, output: "Bootstrap failed: 5: Input/output error" });
   f.calls.length = 0;
   const failure = await f.run(["install", "--restart"]).then(() => null, (error: Error) => error);
-  expect(failure?.message).toContain("launchd 등록 실패");
-  expect(failure?.message).toContain("서비스가 내려가 있습니다");
+  expect(failure?.message).toMatch(/launchd 등록 실패|Registering with launchd failed/);
+  expect(failure?.message).toMatch(/서비스가 내려가 있습니다|The service is down now/);
   expect(failure?.message).toContain("iamceo service install");
   // 처음 한 번 + 다시 걸기 5회, 그 뒤에는 멈춘다.
   expect(f.calls.filter(call => call === "bootstrap")).toHaveLength(6);

@@ -9,6 +9,19 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ### 아직 내지 않은 것
 
+- **실행 환경을 스스로 점검합니다.** 설정 → AI 모델 → 실행 환경이 점검표가 됩니다. 서버, 실행 엔진, Claude Code·Codex의 설치와 로그인, CLI 버전, Tailscale, 자동 시작, 백업, 저장 공간을 항목마다 보여 주고 고치는 법을 한 줄씩 붙입니다. 안내는 일반 사용자가 할 수 있는 동작(앱 버튼, 설치 명령)만 가리킵니다. 같은 점검을 `iamceo doctor`로도 하며, 서버가 꺼져 있어도 됩니다.
+- **진단 파일.** 설정의 '진단 파일 만들기'(서버가 도는 Mac에서)와 `iamceo diagnose`가 버전, 서비스 상태, 점검표, 로그 끝부분, 멈춤 기록, 백업 상태를 `~/.iamceo/diagnostics`의 폴더 하나와 zip으로 모읍니다. 대화·자료의 본문, 첨부, 접속 코드, 팀장 열쇠, 알림 토큰, 환경 변수의 값은 넣지 않습니다.
+- **`iamceo upgrade`와 `iamceo rollback`.** 설치판에서 새 버전을 받아 체크섬·서명·공증을 확인하고, 지금 DB의 사본으로 미리 돌려 본 뒤 바꿉니다. 직전 버전을 기록해 두고, 새 버전이 정해진 시간 안에 뜨지 않으면 스스로 되돌립니다. `iamceo rollback`은 마지막 업그레이드 전의 버전으로 돌아갑니다.
+- **이 Mac에서 완전히 멈추기.** 앱과 `iamceo uninstall`이 IAMCEO가 관리하는 팀장을 모두 재우고, 로그인 서비스를 해제하고, 실행 엔진을 끕니다. 앱을 지운 뒤에도 묻지 않기 권한의 AI 세션이 화면 없이 남던 일을 막습니다. 데이터는 기본으로 남기며, 지우려면(`--purge`) 한 번 더 확인합니다.
+- **보관한 프로젝트를 지우고 내보냅니다.** 보관함의 프로젝트를 지우거나(보관한 프로젝트만), 대화·결재·할 일·업무·자료와 첨부 원본을 zip 하나로 내보냅니다. 내보내기는 서버가 도는 Mac에서만 됩니다.
+- **앱을 올리면 서버도 새 버전으로.** Mac 앱을 새 버전으로 바꿨는데 서버가 옛 버전으로 돌고 있으면 서버를 새 버전으로 다시 시작할지 한 번 묻습니다. 팀장 세션은 이어집니다. 앱이 직접 관리하는 설치에서만 묻습니다.
+- **앱과 서버가 맞지 않을 때만 안내합니다.** 이번 앱부터 자기 버전을 서버에 알리고, 실제로 맞지 않을 때만 '앱을 업데이트하세요'와 '서버가 옛 버전입니다'를 구분해 보여 줍니다. 출시된 iPhone 0.2.2·0.2.3 앱이 받는 응답은 그대로이며, 그 앱이 새 서버의 응답을 실제로 풀어 읽는지 출시 전 검사에서 확인합니다.
+- **Mac 새 버전 알림.** Mac 앱이 하루에 한 번 GitHub의 최신 릴리스를 확인해, 새 버전이 있으면 설정 → 연결 → 앱에 '새 버전 있음'을 띄웁니다. 알리기만 하고 설치하지는 않습니다. 이 확인 요청을 개인정보 처리방침에 적었습니다.
+- **CLI 버전을 기록하고 처음 보는 버전을 알립니다.** 서버가 시작할 때 Claude Code·Codex의 버전을 읽어 처음 본 시각과 함께 `~/.iamceo/cli-versions.json`에 남기고, IAMCEO가 시험해 보지 않은 버전이면 점검표와 서버 로그에 '확인되지 않은 CLI 버전'으로 알립니다. CLI 화면과 기록을 버전별 견본으로 저장해 시험에 씁니다.
+- **안쪽 기록의 보존 기한.** AI 세션에 넣은 글의 사본은 전달이 끝나고 30일 뒤에 비우고, 실행 기록과 처리 영수증은 끝나고 90일 뒤에 지웁니다. 대화·결재·할 일·자료는 지우지 않습니다. 살아 있는 기록만 빨리 찾도록 색인을 더했습니다.
+- **보고 언어.** 설정 → 일반 → 운영 → 보고 언어에서 English를 고르면 총괄·팀장이 보고, 결재 카드, 할 일을 영어로 씁니다. 서버가 붙이는 출처 표시(`[대표]`, `[총괄]` 등)는 그대로 두고 그 뜻을 역할 지침에 영어로 설명합니다. 새 세션부터 적용됩니다.
+- **설치 스크립트와 명령줄이 영어로도 말합니다.** 터미널의 언어(`LANG`)가 한국어가 아니면 안내와 오류를 영어로 씁니다. `IAMCEO_LANG=ko` 또는 `IAMCEO_LANG=en`으로 정할 수 있습니다.
+- **사용자 문서.** [시작하기, 문제 해결, iPhone 연결, 업그레이드·백업·제거](docs/guide/README.md)를 한국어와 영어로 더했습니다. 새 Mac에서 백업으로 시작하는 절차, 역할 지침을 고치는 실제 절차, 백업에 들어가는 것과 빠지는 것을 적었습니다. 개인정보 처리방침에 새 버전 확인, 진단 파일, 보존 기한, 프로젝트 내보내기·삭제를 적었습니다.
 - **사용 한도로 멈춘 팀장은 모델만 바꾸면 같은 대화로 바로 이어 갑니다.** 결재함의 사용 한도 카드에서 다른 모델을 고르거나, 팀장 설정에서 모델을 바꾸거나, 총괄에게 바꾸라고 하면(새 도구 `team_model`), 한도 창은 Esc로만 닫고 같은 세션을 새 모델로 이어 연 뒤 멈춘 곳부터 이어서 하게 합니다. 새 팀장을 띄우지 않으므로 오류 표시가 남은 팀장도 생기지 않습니다. 카드는 계정이 하나인 사람도 기준으로 삼아, 기다리면 저절로 이어 간다는 것과 어느 모델의 크레딧이 떨어졌는지를 먼저 알려 줍니다. 한도로 멈춘 팀장도 이제 재우거나 닫을 수 있습니다.
 - **Mac을 다시 시작한 뒤 지시를 못 받던 팀장이 풀립니다.** 자동 압축의 결과를 확인하지 못한 채 Mac이 꺼지면, 그 팀장은 다시 열어도 지시를 받지 못했습니다(압축을 받은 터미널이 사라져 아무도 결과를 확정하지 못했습니다). 이제 그 터미널이 없으면 압축을 닫고 밀린 지시를 이어서 넣습니다.
 - **재시작으로 꺼진 세션을 오류처럼 보이지 않게.** Mac이나 실행 엔진이 다시 시작되어 꺼진 팀장에게 내부 용어(`holder_lost`) 대신 무슨 일이고 어떻게 되는지를 적습니다.
@@ -67,6 +80,7 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - **Mac·iPhone 네이티브 앱.** 브라우저 대신 SwiftUI 앱으로 홈·결재함·팀·대화·자료를 씁니다.
 - **한 줄 설치.** 서명하고 Apple 공증을 받은 Mac 앱을 Homebrew, 설치 스크립트, DMG로 받습니다. 앱에서 **이 Mac에서 시작**을 누르면 서버가 등록됩니다.
 - **Codex CLI 지원.** 팀장을 Claude Code나 Codex로 고릅니다.
+- **모델은 CLI가 알려 준 목록에서.** 직급별 모델을 CLI가 알려 준 목록에서 고르고, Codex 팀장의 직급별 모델과 effort를 따로 정합니다.
 - **세션이 앱과 서버보다 오래 삽니다.** herdr-core가 터미널을 붙잡고 있어, 앱을 닫거나 서버를 다시 켜도 일이 이어집니다.
 - **전달 확인.** 보낸 말이 CLI에 들어갔는지 CLI의 세션 기록으로 확인하고, 확실하지 않으면 다시 넣지 않습니다.
 - **앱 안의 실시간 터미널.** 팀장의 실제 터미널을 보고 직접 입력합니다.
@@ -86,6 +100,19 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 
 ### Unreleased
 
+- **IAMCEO checks its own setup.** 설정 → AI 모델 → 실행 환경 (Settings → AI models → Runtime) becomes a checklist: the server, the engine, Claude Code and Codex installs and sign-ins, CLI versions, Tailscale, start at login, backups and disk space, each with a one-line fix that points to something a normal user can do (an app button, an install command). `iamceo doctor` runs the same checks, even while the server is down.
+- **Diagnostic file.** "진단 파일 만들기" (make a diagnostic file) in Settings, on the Mac that runs the server, and `iamceo diagnose` collect versions, the service state, the checklist, the end of the logs, stall records and the backup state into one folder and a zip under `~/.iamceo/diagnostics`. The text of conversations and files, attachments, the access code, staff keys, push tokens and environment variable values are left out.
+- **`iamceo upgrade` and `iamceo rollback`.** On an installed app, upgrade downloads the new version, checks its checksum, signature and notarization, rehearses it on a copy of the current database, then replaces the app. It records the previous version and rolls back by itself if the new one is not ready in time. `iamceo rollback` returns to the version before the last upgrade.
+- **Stop completely on this Mac.** The app and `iamceo uninstall` put every managed staff session to sleep, remove the login service and stop the engine, so no "don't ask" AI session is left running without a screen after the app is deleted. Data is kept by default; deleting it (`--purge`) asks once more.
+- **Archived projects can be deleted and exported.** Delete a project from the archive (archived projects only), or export its conversations, decisions, to-dos, work and files with the original attachments as one zip. Export works only on the Mac that runs the server.
+- **Updating the app updates the server too.** When the Mac app is replaced with a new version while the server still runs the old one, the app asks once whether to restart the server on the new version. Staff sessions continue. It asks only on an installation the app manages itself.
+- **A notice only when the app and the server really do not match.** From this app on, the app tells the server its version, and it shows "update the app" or "the server is an older version" only when they actually do not match. Responses to the released iPhone apps 0.2.2 and 0.2.3 are unchanged, and a pre-release check confirms that those apps still decode the new server's responses.
+- **New version notice on the Mac.** Once a day the Mac app checks GitHub's latest release and, when there is a newer one, shows "새 버전 있음" (new version) under Settings → Connection → App. It only tells you; it does not install. This check is described in the privacy policy.
+- **CLI versions are recorded, and an unfamiliar one is flagged.** When it starts, the server reads the Claude Code and Codex versions, records them with the time it first saw each in `~/.iamceo/cli-versions.json`, and flags a version IAMCEO has not been tested against as "unverified CLI version" in the checklist and the server log. CLI screens and records are kept as per-version samples for the tests.
+- **Retention for internal records.** The copy of the text typed into an AI session is cleared 30 days after the delivery finished; run records and receipts are deleted 90 days after they finished. Conversations, decisions, to-dos and files are never deleted by this. New indexes find live records quickly.
+- **Report language.** Choose English in 설정 → 일반 → 운영 → 보고 언어 (Settings → General → Operation → Report language) and the lead and staff write their reports, decision cards and to-dos in English. The source labels the server adds (`[대표]`, `[총괄]` and so on) stay as they are, and the role instructions explain them in English. It applies to new sessions.
+- **The installer and the command line speak English too.** When the terminal's language (`LANG`) is not Korean, messages and errors are in English. Set `IAMCEO_LANG=en` or `IAMCEO_LANG=ko` to choose.
+- **User guides.** Added [Getting started, Troubleshooting, Connecting an iPhone, and Upgrade, backup and uninstall](docs/guide/README.md) in English and Korean, including how to start a new Mac from a backup, the real procedure for changing the role rules, and what a backup does and does not contain. The privacy policy now covers the update check, diagnostic files, retention, and project export and deletion.
 - **Staff stopped by a usage limit continue the same conversation once you change their model.** Pick another model on the usage-limit card in the inbox, change it in the staff member's settings, or ask the lead to (new tool `team_model`): the limit menu is closed with Esc only, the same session is reopened on the new model, and the work picks up where it stopped. No replacement staff member is started, so no one is left showing an error. The card no longer assumes you have a second account: it says waiting continues on its own and names the model whose credits ran out. Staff stopped by a usage limit can now also be put to sleep or closed.
 - **Staff that stopped receiving work after a Mac restart recover.** If the Mac went down while an automatic compaction was still unconfirmed, that staff member received nothing after being reopened (the terminal that took the compaction was gone, so nobody could confirm it). The server now closes that compaction when its terminal no longer exists and delivers the queued work.
 - **A session ended by a restart no longer looks like an error.** Staff switched off by a Mac or engine restart show what happened and what to do instead of an internal term (`holder_lost`).
@@ -144,6 +171,7 @@ The iPhone app reached the App Store on 2026-11-11.
 - **Native Mac and iPhone apps.** Home, Inbox, Team, Conversation and Files in a SwiftUI app instead of a browser.
 - **One-line install.** A signed and notarized Mac app through Homebrew, the install script or a DMG. Choosing **이 Mac에서 시작** in the app registers the server.
 - **Codex CLI support.** Staff can run on Claude Code or Codex.
+- **Models from the CLI's own list.** Rank models are picked from the list the CLI reports, and Codex staff get their own model and effort per rank.
 - **Sessions outlive the app and the server.** herdr-core holds the terminals, so closing the app or restarting the server does not stop the work.
 - **Delivery checking.** Whether your words reached the CLI is confirmed from the CLI's own session record; when unsure, nothing is typed twice.
 - **A live terminal inside the app.** Watch a staff member's real terminal and type into it.

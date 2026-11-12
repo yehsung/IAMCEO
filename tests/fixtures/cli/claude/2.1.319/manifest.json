@@ -1,0 +1,70 @@
+{
+  "provider": "claude",
+  "version": "2.1.319",
+  "source": "폴더 신뢰 창: tests/orchestrator.test.ts trustScreen(실측 2.1.319). 감싼 창: tests/fixtures/folder-trust-160.ts(실측 구조로 만든 160칸 합성). 세션 기록: tests/delivery-evidence.test.ts 의 2.1.319 실측 배열(경로·식별자만 바꿈).",
+  "fixtures": [
+    {
+      "file": "folder-trust.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "expect": {
+        "folderTrustLike": true,
+        "trustDialogLike": true,
+        "folderTrust": {
+          "selected": 0,
+          "options": [
+            "No, exit",
+            "Yes, I trust this folder"
+          ]
+        }
+      }
+    },
+    {
+      "file": "folder-trust-wrapped.txt",
+      "kind": "screen",
+      "origin": "synthetic",
+      "cwd": "/private/tmp/iamceo-wrap-test/workspace-00-long project-path/workspace-01-long project-path/workspace-02-long project-path/workspace-03-long project-path/workspace-04-long project-path/member-work",
+      "note": "경로가 줄을 넘기면 정확 해석기는 일부러 읽지 않는다(상태 확인 불가로 터미널에서 푼다).",
+      "expect": {
+        "folderTrustLike": true,
+        "trustDialogLike": true,
+        "folderTrust": null
+      }
+    },
+    {
+      "file": "transcript-received.jsonl",
+      "kind": "log",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "sessionId": "session",
+      "markers": {
+        "d1": "#iamceo_abcdefghijklmnopqrstuv",
+        "d2": "#iamceo_ABCDEFGHIJKLMNOPQRSTUV"
+      },
+      "expect": {
+        "received": [
+          "d1"
+        ],
+        "verdict": "present",
+        "code": "marker_in_user_input"
+      }
+    },
+    {
+      "file": "transcript-absent.jsonl",
+      "kind": "log",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "sessionId": "session",
+      "markers": {
+        "d1": "#iamceo_abcdefghijklmnopqrstuv",
+        "d2": "#iamceo_ABCDEFGHIJKLMNOPQRSTUV"
+      },
+      "expect": {
+        "received": [],
+        "verdict": "absent",
+        "code": "complete_range_without_marker"
+      }
+    }
+  ]
+}

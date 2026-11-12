@@ -20,7 +20,8 @@ test("CLI SIGTERM announces restarting to v1/v2/lite sockets then closes 1012", 
       const { done, value } = await reader.read();
       if (done) break;
       output += decoder.decode(value, { stream: true });
-      const match = /IAMCEO 서버: (http:\/\/127\.0\.0\.1:\d+)/.exec(output);
+      // 명령줄 문구는 실행 환경의 언어(LANG)를 따른다(server/cli-text.ts). 두 언어를 모두 받는다.
+      const match = /IAMCEO (?:서버|server): (http:\/\/127\.0\.0\.1:\d+)/.exec(output);
       if (match) ready(match[1]);
     }
     failed(new Error(`CLI exited before listening: ${output}`));

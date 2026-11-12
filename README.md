@@ -13,13 +13,13 @@ then give instructions and approve decisions from one Mac and iPhone app.
 [![Platform](https://img.shields.io/badge/macOS%2014%2B%20%C2%B7%20iOS%2017%2B-1f1633?style=flat-square&logo=apple)](#install)
 [![License](https://img.shields.io/badge/license-Sustainable%20Use%201.0-6d28d9?style=flat-square)](LICENSE)
 
-[Install](#install) · [Quick start](#quick-start) · [Terms](#terms) · [What is different](#what-is-different) · [How it works](#how-it-works) · [Security](docs/security.en.md) · [Changelog](CHANGELOG.md) · [한국어](README.ko.md)
+[Install](#install) · [Quick start](#quick-start) · [User guides](docs/guide/README.md) · [Terms](#terms) · [What is different](#what-is-different) · [How it works](#how-it-works) · [Security](docs/security.en.md) · [Changelog](CHANGELOG.md) · [한국어](README.ko.md)
 
 <img src="docs/assets/hero.jpg" alt="IAMCEO home screen on Mac and iPhone" />
 
 </div>
 
-> **Language:** the app's screens and the instructions given to the agents are in Korean today. English support is in progress.
+> **Language:** the app's screens are in Korean today. The lead and staff can write their reports, decision cards and to-dos to you in English (설정 → 일반 → 보고 언어, Settings → General → Report language), and the installer and the command-line tool speak English. The [user guides](docs/guide/README.md) are in English and Korean.
 
 - **Stop babysitting terminals** — who is working, who is done and who is stuck at a permission prompt, on one Home screen.
 - **One Inbox for every decision** — staff questions and approvals arrive as cards with background, the outcome of each option and a recommendation.
@@ -53,12 +53,24 @@ Or `curl -fsSL https://raw.githubusercontent.com/yehsung/IAMCEO/main/install.sh 
    > Lead: Got it — assigned to Screen copy.
 4. Decisions collect in the **Inbox**, deliverables in **Files**, and your own to-dos on **Home**.
 
-**iPhone:** join your Mac and iPhone to [Tailscale](https://tailscale.com), then scan the **iPhone 연결** (Connect iPhone) QR in the Mac app. Get the iPhone app [on the App Store](https://apps.apple.com/app/id6831782194). If an iPhone that used to connect no longer does, check that Tailscale is on on the Mac; the Mac app tells you when it is off.
+**iPhone:** join your Mac and iPhone to [Tailscale](https://tailscale.com), then scan the **iPhone 연결** (Connect iPhone) QR in the Mac app. Get the iPhone app [on the App Store](https://apps.apple.com/app/id6831782194). If an iPhone that used to connect no longer does, check that Tailscale is on on the Mac; the Mac app tells you when it is off. → [Connecting an iPhone](docs/guide/iphone.en.md)
+
+**When stuck:** 설정 → AI 모델 → 실행 환경 (Settings → AI models → Runtime) checks the engine, the Claude Code and Codex sign-ins, Tailscale, start at login and backups, item by item, with a fix for each. `iamceo doctor` does the same from the command line. → [Troubleshooting](docs/guide/troubleshooting.en.md)
 
 ### Notifications
 
 - **Mac:** works. Turn on **Mac 알림** (Mac notifications) in the Mac app's Settings.
 - **iPhone:** a push notification is sent only when your Mac's server holds the Apple push key (APNs) that belongs to the iPhone app. IAMCEO runs no server of its own, so nothing else can send it for you. The iPhone app from the App Store therefore **cannot receive notifications today**. They work only with an iPhone app you build yourself and your own key → [native guide](native/README.md#iphone-apns-and-signing).
+
+### User guides
+
+| Guide | What it covers |
+|---|---|
+| [Getting started](docs/guide/getting-started.en.md) | Checklist, install, first project, report language, the command-line tool |
+| [Troubleshooting](docs/guide/troubleshooting.en.md) | The self-check, common problems, the diagnostic file, changing the role rules |
+| [Connecting an iPhone](docs/guide/iphone.en.md) | Tailscale and MagicDNS, the pairing QR, when notifications work |
+| [Upgrade, backup and uninstall](docs/guide/upgrade-backup-uninstall.en.md) | Updating and rolling back, backups and a new Mac, retention, exporting and deleting projects, stopping everything |
+| [Security](docs/security.en.md) | What IAMCEO trusts, blocks and does not block |
 
 ## Terms
 
@@ -177,7 +189,7 @@ You do. But part of that is enforced by the server and part is a promise the age
 
 The server marks what you said; stopping at that mark is up to the agent. An agent that ignores its instructions can still run `git push`, because it runs as your user. Choose "ask only when risky" or "ask every time" if you want the CLI itself to stop first.
 
-Components are in [architecture](docs/architecture.md) and every rule in the [operating model](docs/operating-model.md) (both in Korean). The trust model is in [Security](docs/security.en.md).
+Components are in [architecture](docs/architecture.md) and every rule in the [operating model](docs/operating-model.md) (both in Korean). The trust model is in [Security](docs/security.en.md), and the guides for using IAMCEO are in [docs/guide](docs/guide/README.md).
 
 <details>
 <summary><b>Build from source</b></summary>

@@ -1,0 +1,8 @@
+ ▐▛███▜▌   Claude Code v2.1.322
+▝▜█████▛▘  Fable 5.2 · Claude Max
+  ▘▘ ▝▝    /private/tmp/iamceo-cli-fixture/work
+
+──────────────────────────────
+❯ 
+──────────────────────────────
+  ? for shortcuts

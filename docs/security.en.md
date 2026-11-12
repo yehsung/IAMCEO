@@ -52,11 +52,19 @@ In one line: **the ways into the server on your Mac from outside are guarded. Th
 - A file an agent uploads is accepted only when its real location, after following symbolic links, is inside the working folder. Secret folders such as `~/.ssh`, `.env` files, private keys, shell history and IAMCEO's own settings and database are refused wherever they are. Hard-linked files are refused too.
 - HTML pages made by agents open in an isolated frame inside the app: a web view that keeps no storage, with outside requests, cookies, access to the server and navigation to other pages blocked. Attachment responses carry the same isolation marking, so an uploaded HTML file cannot run as script on the server's address.
 
+**Diagnostic files and project exports**
+
+- Making a diagnostic file and exporting a project are accepted only from this Mac. Other devices on the tailnet, the iPhone included, cannot use them.
+- A diagnostic file leaves out the text of conversations, reports, decisions, to-dos and files, attachments, the access code, staff keys, push tokens and environment variable values. From the database it copies only listed columns (IDs, states, times, counts), and from the logs only the end, with known secrets masked. Logs can still contain file paths and project names.
+- A project export zip contains that project's conversations and original attachments as they are (without the access code, staff keys or internal delivery records). Store and share it with care.
+
 **Install and update**
 
 - The Mac app is signed with a Developer ID and notarized by Apple.
 - The install script compares the download with the release's SHA-256 value. It then checks that the app is signed by the IAMCEO publisher and notarized by Apple, and installs nothing if either check fails.
 - The bundled herdr-core is used only when it matches the pinned version's SHA-256 value and its maker's signature.
+- `iamceo upgrade` uses only an app that passes the same checks as the install script (checksum, publisher signature, Apple notarization). Before replacing anything it rehearses the new version on a copy of the current database, and it returns to the previous version if the new one does not start.
+- Once a day the Mac app asks GitHub for the latest release. It only asks; it never downloads or installs.
 - The push key (`.p8`) is never put into a backup.
 
 ## What is not blocked

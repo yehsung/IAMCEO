@@ -191,6 +191,8 @@ actor APIClient {
         req.httpShouldHandleCookies = false
         req.setValue("Bearer \(accessCode)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
+        // D5: 앱 버전·API 단계. 서버는 이것으로 앱과 맞지 않는지 판단한다(없으면 출시된 옛 앱으로 본다).
+        AppVersion.apply(to: &req)
         if let ifMatch { req.setValue("\"\(ifMatch)\"", forHTTPHeaderField: "If-Match") }
         if let contractVersion { req.setValue(String(contractVersion), forHTTPHeaderField: "X-IAMCEO-Contract") }
         if let contentType { req.setValue(contentType, forHTTPHeaderField: "Content-Type") }
@@ -244,6 +246,8 @@ actor APIClient {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.httpShouldHandleCookies = false
         request.setValue("Bearer \(accessCode)", forHTTPHeaderField: "Authorization")
+        // 실시간 연결·첨부 올리기·받기도 이 요청을 바탕으로 만든다. 같은 버전 머리글을 싣는다.
+        AppVersion.apply(to: &request)
         return request
     }
     func attachmentData(_ attachment: Attachment) async throws -> Data { try await raw(attachment.url).0 }
@@ -304,6 +308,33 @@ extension APIClient: MessageHistoryService, ProjectManagementService, SyncServic
         try await request("/api/projects/\(Self.segment(projectID))/messages?around=\(Self.segment(messageID))&limit=\(limit)")
     }
     func archivedProjects() async throws -> [Project] { try await request("/api/projects/archived") }
+    // B 묶음(설치 수명): 보관한 프로젝트 지우기와 프로젝트 내보내기. 옛 서버는 지우기에 405, 내보내기에 404 를 준다.
+    func deleteProject(id: String) async throws -> ProjectDeleteResult {
+        try await request("/api/projects/\(Self.segment(id))", method: "DELETE")
+    }
+    /// 서버가 도는 Mac 에서만 된다(다른 기기는 403 LOCAL_ONLY). zip 을 임시 파일로 받아 그 자리를 돌려준다. 큰 프로젝트도 메모리에 올리지 않는다.
+    func exportProject(id: String) async throws -> URL {
+        var req = URLRequest(url: try authorizedURL("/api/projects/\(Self.segment(id))/export"))
+        req.httpMethod = "GET"
+        req.timeoutInterval = 150
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.httpShouldHandleCookies = false
+        req.setValue("Bearer \(accessCode)", forHTTPHeaderField: "Authorization")
+        let (file, response) = try await session.download(for: req)
+        try Task.checkCancellation()
+        guard let http = response as? HTTPURLResponse else {
+            try? FileManager.default.removeItem(at: file)
+            throw APIError(status: 0, message: "서버 응답이 올바르지 않습니다.")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let object = (try? JSONSerialization.jsonObject(with: Data(contentsOf: file))) as? [String: Any]
+            try? FileManager.default.removeItem(at: file)
+            throw APIError(status: http.statusCode, message: object?["error"] as? String ?? "Request failed (\(http.statusCode)).", code: object?["code"] as? String)
+        }
+        let target = FileManager.default.temporaryDirectory.appendingPathComponent("iamceo-export-\(UUID().uuidString).zip")
+        try FileManager.default.moveItem(at: file, to: target)
+        return target
+    }
     func patchProject(id: String, request: PatchProjectRequest) async throws -> Project {
         try await send("/api/projects/\(Self.segment(id))", method: "PATCH", body: request, timeout: 150)
     }
@@ -392,6 +423,8 @@ struct CreateProjectRequest: Encodable, Sendable {
     var trustFolder: Bool? = nil
 }
 struct CreateMemberRequest: Encodable, Sendable { let name: String; let role: String; let cli: String; let modelOverride: String? }
+/// DELETE /api/projects/:id 의 답(B 묶음). 지운 첨부 수는 선택 필드로 읽는다.
+struct ProjectDeleteResult: Decodable, Sendable { let id: String; let deleted: Bool; var removedAttachments: Int? = nil }
 struct PatchMemberRequest: Encodable, Sendable {
     let cli: String; let modelOverride: String?; let effortOverride: String?
     enum CodingKeys: String, CodingKey { case cli, modelOverride, effortOverride }

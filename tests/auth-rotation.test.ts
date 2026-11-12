@@ -203,7 +203,8 @@ describe("global access code rotation", () => {
     const [output, error, status] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     expect(status).toBe(0);
     expect(f.config.accessCode).not.toBe(oldCode);
-    expect(output).toContain(`접속 코드: ${f.config.accessCode}`);
+    // 명령줄 문구는 실행 환경의 언어를 따른다(server/cli-text.ts).
+    expect(output).toMatch(new RegExp(`(접속 코드|Access code): ${f.config.accessCode}`));
     expect(error).toBe("");
     expect(JSON.parse(readFileSync(f.config.configPath, "utf8")).accessCode).toBe(f.config.accessCode);
   });

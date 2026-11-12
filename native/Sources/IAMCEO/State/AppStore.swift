@@ -3499,6 +3499,40 @@ final class AppStore: ProjectManagementStore {
             if (error as? APIError)?.status == 401 { handle(error) }
         }
     }
+    /// B 묶음: 보관한 프로젝트를 지운다. 성공하면 보관함 목록에서 빼고, 그 기록을 보고 있었으면 본사로 돌아간다.
+    /// 서버가 지우기를 모르면(옛 서버의 405) 화면은 그대로 두고 까닭만 알린다. 응답을 잃으면 목록을 다시 읽어 결과를 본다(다시 보내지 않는다).
+    @discardableResult func deleteArchivedProject(id: String) async -> Bool {
+        guard !isDemo, foreground, !isRevalidating, connectionStatus == .connected, let api else {
+            errorMessage = "서버에 연결된 뒤에 프로젝트를 지울 수 있습니다."; return false
+        }
+        let key = "project:\(id)"
+        guard !pendingActions.contains(key) else { return false }
+        let epoch = generation
+        pendingActions.insert(key)
+        defer { if epoch == generation { pendingActions.remove(key) } }
+        do {
+            _ = try await api.deleteProject(id: id)
+            guard epoch == generation else { return false }
+        } catch {
+            guard epoch == generation else { return false }
+            let status = (error as? APIError)?.status
+            errorMessage = status == 405 ? "서버가 옛 버전이라 프로젝트를 지울 수 없습니다. 서버를 업데이트한 뒤 다시 해 주세요." : error.localizedDescription
+            if status == 401 { handle(error) }
+            if foreground { await loadArchivedProjects() }
+            return false
+        }
+        archivedProjects.removeAll { $0.id == id }
+        if selectedProjectID == id {
+            state = nil; histories.invalidate(projectID: id)
+            for item in routers { item.value?.resetForProjectChange() }
+            if let next = projects.first(where: { $0.id == "hq" || $0.isHq }) ?? projects.first { await selectProject(id: next.id) }
+            else { selectedProjectID = nil; isArchive = false; projectGeneration = UUID() }
+        }
+        projectNotice = "프로젝트를 지웠습니다."
+        if foreground { await loadArchivedProjects() }
+        return true
+    }
+
     @discardableResult func patchProject(id: String, request: PatchProjectRequest) async -> Bool {
         guard !isDemo, foreground, !isRevalidating, connectionStatus == .connected, let api else {
             errorMessage = "서버에 연결된 뒤에 프로젝트를 관리할 수 있습니다."; return false
@@ -3958,6 +3992,8 @@ final class AppStore: ProjectManagementStore {
         if base.maxAwakeWorkers != draft.maxAwakeWorkers { patch.maxAwakeWorkers = draft.maxAwakeWorkers }
         if base.notifyMac != draft.notifyMac { patch.notifyMac = draft.notifyMac }
         if base.boardTidyHours != draft.boardTidyHours { patch.boardTidyHours = draft.boardTidyHours }
+        // An older server has no such setting (nil); never send it there, the strict schema would refuse the whole save.
+        if base.reportLanguage != nil, base.reportLanguage != draft.reportLanguage { patch.reportLanguage = draft.reportLanguage }
         var ranks: [String: RankConfigPatch] = [:]
         for key in Set(base.ranks.keys).union(draft.ranks.keys) {
             let before = base.ranks[key], after = draft.ranks[key]

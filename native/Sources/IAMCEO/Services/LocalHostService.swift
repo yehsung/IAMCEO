@@ -6,6 +6,14 @@ struct LocalHostConnection: Sendable, Equatable {
     let accessCode: String
 }
 
+/// D1: 이 Mac 에서 앱이 직접 관리하는 서버가 앱에 든 서버보다 옛 버전이다. 한 번 묻고 다시 시작한다.
+struct ServerUpgradeOffer: Sendable, Equatable {
+    let runningVersion: String
+    let bundledVersion: String
+    /// 앱에 든 서버 실행 파일의 build ID. 같은 앱 빌드에는 다시 묻지 않는 기준이다.
+    let bundledBuildID: String
+}
+
 /// Starting the local host is an explicit onboarding action, never an app-start side effect.
 @MainActor @Observable
 final class LocalHostService {
@@ -88,6 +96,124 @@ final class LocalHostService {
         throw LocalHostError("로컬 실행은 Mac 앱에서 시작할 수 있습니다. iPhone에서는 실행 중인 Mac에 연결하세요.")
         #endif
     }
+
+    // MARK: D1 앱을 올리면 서버도
+
+    #if os(macOS)
+    private static var bundledIdentity: (path: String, buildID: String, version: String)?
+    /// 이 Mac 서비스(com.iamceo.server)의 설정 파일.
+    nonisolated static var servicePlistURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/com.iamceo.server.plist")
+    }
+    #endif
+
+    /// '옛 버전 서버를 앱의 새 서버로 다시 시작'을 물어도 되는지 정한다. 모두 맞을 때만 제안한다.
+    /// - 연결한 주소가 이 Mac(127.0.0.1)이고, 포트가 이 데이터 홈의 설정과 같다.
+    /// - 등록된 서비스가 **이 앱 안의 실행 파일**을 `serve` 로 돌리고 같은 데이터 홈을 쓴다(앱이 직접 관리하는 설치판).
+    ///   git 체크아웃에서 도는 서버(bun 과 소스 경로로 등록된 서비스)는 여기서 걸러져 절대 묻지도 다시 시작하지도 않는다.
+    /// - 도는 서버의 build ID 가 앱에 든 것과 다르고, 버전이 정식 번호로 **더 낮다**(같거나 높으면 되돌림이 될 수 있어 묻지 않는다).
+    nonisolated static func upgradeOffer(endpoint: String, configuredPort: Int, plist: [String: Any]?, daemonPath: String, dataHome: URL,
+                                         defaultHome: URL, running: (buildID: String, version: String)?,
+                                         bundled: (buildID: String, version: String)) -> ServerUpgradeOffer? {
+        guard managesService(endpoint: endpoint, configuredPort: configuredPort, plist: plist, daemonPath: daemonPath,
+                             dataHome: dataHome, defaultHome: defaultHome) else { return nil }
+        guard let running, !running.buildID.isEmpty, running.buildID != bundled.buildID,
+              let from = ReleaseVersion(running.version), let to = ReleaseVersion(bundled.version), from < to else { return nil }
+        return ServerUpgradeOffer(runningVersion: running.version, bundledVersion: bundled.version, bundledBuildID: bundled.buildID)
+    }
+
+    /// 연결한 주소가 이 Mac 의 그 데이터 홈 서버이고, 그 서비스가 이 앱 안의 실행 파일로 등록돼 있는가.
+    nonisolated static func managesService(endpoint: String, configuredPort: Int, plist: [String: Any]?, daemonPath: String,
+                                           dataHome: URL, defaultHome: URL) -> Bool {
+        guard let parts = URLComponents(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines)),
+              ["http", "https"].contains(parts.scheme?.lowercased() ?? ""),
+              ["127.0.0.1", "localhost", "::1", "[::1]"].contains(parts.host?.lowercased() ?? ""),
+              (parts.port ?? (parts.scheme?.lowercased() == "https" ? 443 : 80)) == configuredPort else { return false }
+        guard let plist, plist["Label"] as? String == "com.iamceo.server",
+              plist["ProgramArguments"] as? [String] == [daemonPath, "serve"] else { return false }
+        let environment = plist["EnvironmentVariables"] as? [String: String]
+        let ownerHome = environment?["IAMCEO_HOME"].map { URL(fileURLWithPath: $0).standardizedFileURL } ?? defaultHome.standardizedFileURL
+        return ownerHome.path == dataHome.standardizedFileURL.path
+    }
+
+    #if os(macOS)
+    /// 지금 붙은 서버가 이 앱이 관리하는 옛 버전 서버인지 본다. 하나라도 확인하지 못하면 nil(묻지 않는다).
+    /// 서비스·파일·서버를 바꾸지 않는다(읽기만).
+    static func checkServerUpgrade(endpoint: String) async -> ServerUpgradeOffer? {
+        let environment = ProcessInfo.processInfo.environment
+        let dataHome = dataHome(environment: environment)
+        guard let resources = try? runtimeResources(environment: environment),
+              let connection = try? readConnection(dataHome: dataHome, environment: environment),
+              let configuredPort = connection.url.port,
+              let data = try? Data(contentsOf: servicePlistURL),
+              let plist = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any] else { return nil }
+        let defaultHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".iamceo", isDirectory: true)
+        // 실행 파일을 부르기 전에 주소·서비스 소유부터 거른다(git 체크아웃 서버면 여기서 끝난다).
+        guard managesService(endpoint: endpoint, configuredPort: configuredPort, plist: plist, daemonPath: resources.daemon.path,
+                             dataHome: dataHome, defaultHome: defaultHome) else { return nil }
+        // 앱에 든 실행 파일은 이 앱이 떠 있는 동안 바뀌지 않는다. 다시 연결할 때마다 수십 MB 를 다시 읽지 않는다.
+        if bundledIdentity?.path != resources.daemon.path {
+            guard let build = try? await buildID(resources.daemon, environment: environment),
+                  let version = await output(resources.daemon, arguments: ["version"], environment: environment) else { return nil }
+            bundledIdentity = (resources.daemon.path, build, version)
+        }
+        guard let bundledBuild = bundledIdentity?.buildID, let bundledVersion = bundledIdentity?.version,
+              let readiness: Readiness = try? await client(connection).request("/api/readiness", timeout: 5),
+              let daemon = readiness.daemon, daemon.ready else { return nil }
+        // 서비스가 실제로 올라와 있어야 '다시 시작'이 뜻이 있다.
+        guard (try? await run(URL(fileURLWithPath: "/bin/launchctl"), arguments: ["print", "gui/\(getuid())/com.iamceo.server"], environment: environment, timeout: 10)) == 0 else { return nil }
+        return upgradeOffer(endpoint: endpoint, configuredPort: configuredPort, plist: plist, daemonPath: resources.daemon.path, dataHome: dataHome,
+                            defaultHome: defaultHome, running: (buildID: daemon.buildId, version: daemon.version),
+                            bundled: (buildID: bundledBuild, version: bundledVersion))
+    }
+
+    /// 앱에 든 서버로 서비스를 다시 시작한다(`iamceo service install --restart`). 팀장 세션은 실행 엔진이 쥐고 있어 이어진다.
+    /// 바로 앞에서 조건을 다시 확인하고, 그사이 달라졌으면 아무것도 하지 않는다.
+    func restartWithBundledServer(endpoint: String, expected: ServerUpgradeOffer) async throws {
+        guard !isStarting else { throw LocalHostError("이미 이 Mac의 서버를 준비하고 있습니다.") }
+        isStarting = true
+        defer { isStarting = false }
+        statusText = "서버를 다시 확인하는 중"
+        guard let current = await Self.checkServerUpgrade(endpoint: endpoint), current.bundledBuildID == expected.bundledBuildID else {
+            throw LocalHostError("서버 상태가 바뀌어 다시 시작하지 않았습니다. 설정에서 다시 확인해 주세요.")
+        }
+        let environment = ProcessInfo.processInfo.environment
+        let resources = try Self.runtimeResources(environment: environment)
+        var launchEnvironment = environment
+        launchEnvironment["IAMCEO_HOME"] = Self.dataHome(environment: environment).path
+        launchEnvironment["IAMCEO_CORE_BIN"] = resources.core.path
+        statusText = "서버를 새 버전으로 다시 시작하는 중"
+        // service install --restart 는 내리고, 새 설정으로 올리고, 새 build 가 준비될 때까지(최대 30초) 기다린다.
+        let status = try await Self.run(resources.daemon, arguments: ["service", "install", "--restart"], environment: launchEnvironment, timeout: 150)
+        guard status == 0 else {
+            throw LocalHostError("서버를 다시 시작하지 못했습니다(종료 코드 \(status)). 잠시 뒤 다시 시도하거나 ~/.iamceo/logs의 서버 로그를 확인하세요.")
+        }
+        statusText = "서버를 새 버전으로 다시 시작했습니다"
+    }
+
+    /// 실행 파일 한 줄 출력(버전 등). 실패하면 nil.
+    private nonisolated static func output(_ executable: URL, arguments: [String], environment: [String: String]) async -> String? {
+        await Task.detached { () -> String? in
+            let process = Process()
+            let pipe = Pipe()
+            process.executableURL = executable
+            process.arguments = arguments
+            process.environment = environment
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+            do { try process.run() } catch { return nil }
+            let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: timeout)
+            defer { timeout.cancel() }
+            let data: Data = (try? pipe.fileHandleForReading.readToEnd()) ?? Data()
+            process.waitUntilExit()
+            let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard process.terminationStatus == 0, (1...32).contains(text.count), !text.contains("\n") else { return nil }
+            return text
+        }.value
+    }
+    #endif
 
     #if os(macOS)
     /// 준비될 때까지 0.5초 간격으로 확인한다. 점검 한 번이 길어질 수 있어 횟수와 함께 전체 시간도 묶는다. nil 은 시간 안에 준비되지 않았다는 뜻이다.

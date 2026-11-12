@@ -1039,6 +1039,8 @@ struct SettingsView: View {
     @State private var baseMacAlerts = false
     @State private var savingLocal = false
     @State private var highlightRuntime = false
+    /// B3·D8: the runtime check list and the diagnostics file of the connected server.
+    @State private var doctor = DoctorPanel()
     #if os(macOS)
     @State private var settingsWindow: NSWindow?
     #endif
@@ -1073,6 +1075,11 @@ struct SettingsView: View {
         RankRow(key: "staff", title: "서브에이전트", scope: "팀장이 나눠 맡기는 일", cli: cli)
     ] }
     private static let tidyChoices = [0, 3, 6, 12, 24]
+    /// B1: languages the lead and staff can write to the owner in (server `Settings.reportLanguage`).
+    static let reportLanguages = ["ko", "en"]
+    static let reportLanguageHint = "총괄·팀장이 보고·결재 카드·할 일을 쓰는 언어입니다. 새 세션부터 적용됩니다."
+    /// Each language in its own name, so a reader of either language finds theirs.
+    static func reportLanguageLabel(_ code: String) -> String { code == "ko" ? "한국어" : code == "en" ? "English" : code }
     /// Mac rank rows: the model and effort columns (the group caption lines up with them).
     private static let modelWidth: CGFloat = 176
     private static let effortWidth: CGFloat = 116
@@ -1423,6 +1430,11 @@ struct SettingsView: View {
                 }
                 RowDivider(inset: 0)
                 SettingsRow("판 정리 주기", hint: "총괄이 쉬고 바뀐 게 있을 때만 판을 맞춥니다", hintBelowOnPhone: true) { tidyMenu }
+                // B1: only on a server that reports the setting; an older server would refuse the key.
+                if showsReportLanguage {
+                    RowDivider(inset: 0)
+                    SettingsRow("보고 언어", hint: Self.reportLanguageHint, hintBelowOnPhone: true) { reportLanguageMenu }
+                }
             }
             .disabled(!editable || saving)
             SettingsProjectsGroup(editable: editable)
@@ -1454,6 +1466,21 @@ struct SettingsView: View {
     }
 
     private func tidyLabel(_ hours: Int) -> String { hours == 0 ? "끔" : hours == 24 ? "매일" : "\(hours)시간" }
+
+    /// B1: shown when the server reports the value (older servers send nothing), and in the sample.
+    private var showsReportLanguage: Bool { store.isDemo || base.reportLanguage != nil }
+
+    private var reportLanguageMenu: some View {
+        let current = draft.reportLanguage ?? "ko"
+        // A value the server holds that this app does not know is shown, not silently replaced.
+        let options = Self.reportLanguages + (Self.reportLanguages.contains(current) ? [] : [current])
+        return SetupMenu(Self.reportLanguageLabel(current), compact: true, label: "보고 언어") {
+            ForEach(options, id: \.self) { code in
+                Toggle(Self.reportLanguageLabel(code), isOn: menuCheck(current == code) { draft.reportLanguage = code })
+            }
+        }
+        .frame(width: isMac ? 120 : 128)
+    }
 
     /// A typed number with its unit and a stepper, at the right of a row.
     private func numberControl(_ title: String, unit: String, value: Binding<Int>, range: ClosedRange<Int>, step: Int = 1) -> some View {
@@ -1492,28 +1519,82 @@ struct SettingsView: View {
         }
     }
 
+    /// B3: the server's check list (GET /api/doctor), one row per item with how to fix it. An older server does not
+    /// know the list; then the three rows from /api/runtime stay as they were.
     private var runtimeGroup: some View {
         let runtime = store.runtime
+        let report = store.isDemo ? nil : doctor.report.flatMap { $0.checks.isEmpty ? nil : $0 }
         let needsSetup = runtime != nil && (runtime?.core.available != true || runtime?.providers.values.contains { !$0.installed } == true)
         let footnote: String = store.isDemo ? "샘플에는 연결된 실행 환경이 없습니다."
-            : needsSetup ? "서버 컴퓨터의 IAMCEO 저장소에서 bun\u{00A0}run\u{00A0}setup:core 로 준비한 뒤 다시 확인하세요."
+            : report != nil ? "\(store.serverIsThisMac ? "이 Mac" : "연결된 Mac")의 서버가 확인한 결과입니다. 로그인은 CLI가 남긴 기록으로 봅니다."
+            : needsSetup ? "Claude Code를 설치하고 로그인한 뒤 다시 확인하세요. 실행 엔진이 없으면 IAMCEO 앱을 다시 설치하세요."
             : "로그인은 세션을 열 때 확인합니다."
         return VStack(alignment: .leading, spacing: 10) {
-            SettingsGroup("실행 환경", footnote: footnote, footnoteTone: needsSetup && !store.isDemo ? CE.attention : CE.ink2, accessory: {
+            SettingsGroup("실행 환경", footnote: footnote, footnoteTone: report == nil && needsSetup && !store.isDemo ? CE.attention : CE.ink2, accessory: {
                 if !store.isDemo {
-                    SettingsRefreshButton(label: "실행 환경 다시 확인", busy: busy == .runtime) { Task { await refresh(.runtime) } }
+                    SettingsRefreshButton(label: "실행 환경 다시 확인", busy: busy == .runtime || doctor.loading) { Task { await refresh(.runtime) } }
                         .disabled(store.connectionStatus != .connected || store.isLoading || busy != nil)
                 }
             }) {
-                SettingsRow("실행 엔진", hint: runtime?.core.detail, monoHint: true) { DotValue(tone: coreState(runtime).tone, text: coreState(runtime).text) }
-                    .help("모든 팀원은 이 실행 엔진(herdr-core) 위에서 일합니다. 팀원마다 Claude Code 또는 Codex를 고릅니다.")
-                RowDivider(inset: 0)
-                SettingsRow("Claude Code") { DotValue(tone: providerState(runtime, "claude").tone, text: providerState(runtime, "claude").text) }
-                RowDivider(inset: 0)
-                SettingsRow("Codex CLI") { DotValue(tone: providerState(runtime, "codex").tone, text: providerState(runtime, "codex").text) }
+                if let report {
+                    ForEach(Array(report.checks.enumerated()), id: \.element.id) { index, check in
+                        if index > 0 { RowDivider(inset: 0) }
+                        DoctorCheckRow(check: check)
+                    }
+                } else {
+                    SettingsRow("실행 엔진", hint: runtime?.core.detail, monoHint: true) { DotValue(tone: coreState(runtime).tone, text: coreState(runtime).text) }
+                        .help("모든 팀원은 이 실행 엔진(herdr-core) 위에서 일합니다. 팀원마다 Claude Code 또는 Codex를 고릅니다.")
+                    RowDivider(inset: 0)
+                    SettingsRow("Claude Code") { DotValue(tone: providerState(runtime, "claude").tone, text: providerState(runtime, "claude").text) }
+                    RowDivider(inset: 0)
+                    SettingsRow("Codex CLI") { DotValue(tone: providerState(runtime, "codex").tone, text: providerState(runtime, "codex").text) }
+                }
+                if showsDiagnostics {
+                    RowDivider(inset: 0)
+                    diagnosticsRow
+                }
             }
             if let runtimeError { SetupError("진단을 읽지 못했습니다. \(runtimeError)").padding(.horizontal, SetupMetrics.groupInset) }
+            else if !store.isDemo, let error = doctor.error { SetupError("점검표를 읽지 못했습니다. \(error)").padding(.horizontal, SetupMetrics.groupInset) }
         }
+        // A new connection reads its own list; coming back to this part keeps the last one while it re-reads.
+        .task(id: store.isDemo ? nil : store.api.map { ObjectIdentifier($0) }) {
+            guard !store.isDemo else { return }
+            await doctor.attach(store.api)
+        }
+    }
+
+    /// D8: only the Mac app on the server's own Mac makes the file (the server takes the request from this Mac only).
+    private var showsDiagnostics: Bool {
+        #if os(macOS)
+        !store.isDemo && store.serverIsThisMac && store.api != nil && !doctor.unsupported
+        #else
+        false
+        #endif
+    }
+
+    private var diagnosticsHint: String {
+        if let error = doctor.diagnoseError { return error }
+        if let file = doctor.diagnostics { return "\(file.path) · \(file.sizeText)" }
+        return "문제를 알릴 때 보낼 파일을 만듭니다. 버전·상태·로그 끝부분을 담고, 대화 내용과 접속 코드는 넣지 않습니다."
+    }
+
+    @ViewBuilder private var diagnosticsRow: some View {
+        #if os(macOS)
+        let file = doctor.diagnostics
+        SettingsRow("진단 파일", hint: diagnosticsHint, hintTone: doctor.diagnoseError != nil ? CE.danger : CE.ink2,
+                    monoHint: doctor.diagnoseError == nil && file != nil) {
+            HStack(spacing: 8) {
+                if let file {
+                    Button("Finder에서 보기") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file.path)]) }
+                        .ceSecondaryButton().controlSize(.small)
+                }
+                Button(doctor.diagnosing ? "만드는 중" : file == nil ? "진단 파일 만들기" : "다시 만들기") { Task { await doctor.makeDiagnostics(store.api) } }
+                    .ceSecondaryButton().controlSize(.small)
+                    .disabled(doctor.diagnosing || store.connectionStatus != .connected)
+            }
+        }
+        #endif
     }
 
     private struct RuntimeState { let tone: Tone; let text: String }
@@ -1529,6 +1610,32 @@ struct SettingsView: View {
     private func providerState(_ runtime: RuntimeDiagnostics?, _ cli: String) -> RuntimeState {
         guard let provider = runtime?.providers[cli] else { return RuntimeState(tone: .neutral, text: "확인 전") }
         return provider.installed ? RuntimeState(tone: .success, text: "설치됨") : RuntimeState(tone: .attention, text: "설치 필요")
+    }
+
+    /// One item of the check list, laid out like a settings row: the item, what was found and how to fix it at the
+    /// left (hint type), the state at the right. The fix is in the attention colour only when something needs doing.
+    private struct DoctorCheckRow: View {
+        let check: DoctorCheck
+        var body: some View {
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(check.title).font(SetupFont.row).foregroundStyle(CE.ink)
+                    if let detail = check.detail, !detail.isEmpty { line(detail, tone: CE.ink2) }
+                    if let fix = check.fix, !fix.isEmpty { line(fix, tone: check.needsAction ? CE.attention : CE.ink2) }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                DotValue(tone: check.tone, text: check.stateLabel)
+            }
+            .padding(.vertical, 12)
+            .frame(minHeight: isMac ? 56 : 52)
+            .accessibilityElement(children: .combine)
+        }
+        private func line(_ text: String, tone: Color) -> some View {
+            Text(text).font(SetupFont.hint).foregroundStyle(tone)
+                .lineSpacing(SetupFont.hintLeading)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
     }
 
     private func rankGroup(_ cli: RankSettingsCLI) -> some View {
@@ -1733,8 +1840,9 @@ struct SettingsView: View {
                         }
                         if let version = store.bootstrap?.version, !version.isEmpty {
                             RowDivider(inset: 0)
-                            SettingsRow("버전") { Text(version).font(SetupFont.code).foregroundStyle(CE.ink).textSelection(.enabled) }
+                            SettingsRow("서버 버전") { Text(version).font(SetupFont.code).foregroundStyle(CE.ink).textSelection(.enabled) }
                         }
+                        serverUpgradeRow
                     } else if let date = store.lastSuccessfulSyncAt {
                         RowDivider(inset: 0)
                         SettingsRow("마지막 데이터 확인") { Text(koDateTime(date)).font(SetupFont.value).foregroundStyle(CE.ink) }
@@ -1751,6 +1859,7 @@ struct SettingsView: View {
                 }
                 if let syncError { SetupError(syncError).padding(.horizontal, SetupMetrics.groupInset) }
             }
+            appVersionGroup
             #if os(macOS)
             if !store.isDemo || Self.connectionSample {
                 SettingsGroup {
@@ -1775,6 +1884,10 @@ struct SettingsView: View {
                     }
                 }
             }
+            #if os(macOS)
+            // B 묶음: 이 Mac에서 완전히 멈추기(앱에 든 iamceo uninstall). 앱 묶음 안에 서버가 있을 때만 보인다.
+            if !store.isDemo && FullStopRunner.available { FullStopGroup(onDataDeleted: { leave() }) }
+            #endif
         }
         .confirmationDialog("이 기기에서 나갈까요?", isPresented: $confirmLeave, titleVisibility: .visible) {
             Button("나가기", role: .destructive) { leave() }
@@ -1980,7 +2093,12 @@ struct SettingsView: View {
         if kind == .sync { syncError = nil } else { runtimeError = nil }
         defer { busy = nil }
         let before = store.lastUpdated
-        if kind == .runtime { await store.refreshDiagnostics() } else { await store.refresh() }
+        if kind == .runtime {
+            // B3: the check list is read beside the runtime diagnostics; its own failure shows under the card.
+            async let checks: Void = doctor.load(store.api)
+            await store.refreshDiagnostics()
+            await checks
+        } else { await store.refresh() }
         guard store.lastUpdated == before, let error = store.errorMessage else { return }
         if kind == .sync { syncError = friendlyError(error) } else { runtimeError = friendlyError(error) }
     }
@@ -2546,6 +2664,61 @@ private struct FolderSourceTileStyle: ButtonStyle {
                 .animation(.spring(response: 0.3, dampingFraction: 0.6), value: configuration.isPressed)
                 .opacity(isEnabled ? 1 : 0.5)
                 .onHover { hovering = $0 }
+        }
+    }
+}
+
+// MARK: - C: 버전(D1·D6)
+
+extension SettingsView {
+    /// D1: 이 Mac 서버가 앱에 든 서버보다 옛 버전일 때만 보이는 줄. 앱이 직접 관리하는 설치판에서만 생긴다.
+    @ViewBuilder var serverUpgradeRow: some View {
+        #if os(macOS)
+        let watch = ServerUpgradeWatch.shared
+        if !store.isDemo, store.serverIsThisMac, let offer = watch.offer {
+            RowDivider(inset: 0)
+            SettingsRow("새 버전으로 다시 시작", hint: watch.error ?? ServerUpgradeText.settingsHint(offer),
+                        hintTone: watch.error == nil ? CE.ink2 : CE.danger) {
+                Button { Task { await watch.restart(store: store) } } label: {
+                    HStack(spacing: 6) {
+                        if watch.isRestarting { ProgressView().controlSize(.small) }
+                        Text(watch.isRestarting ? "다시 시작하는 중" : "다시 시작")
+                    }
+                }
+                .ceSecondaryButton()
+                .ceCompactControl()
+                .fixedSize()
+                .disabled(watch.isRestarting || store.connectionStatus != .connected)
+            }
+        }
+        #endif
+    }
+
+    /// D6: 이 앱의 버전. Mac 은 하루 한 번 GitHub 의 최신 릴리스와 견줘 새 버전이 있으면 한 줄을 더한다(알리기만 한다).
+    var appVersionGroup: some View {
+        let version = AppVersion.version == "dev" ? "개발 빌드" : AppVersion.version + (AppVersion.build.map { " (\($0))" } ?? "")
+        #if os(macOS)
+        let checker = UpdateChecker.shared
+        let hint: String? = switch checker.state {
+        case .current: checker.checkedAt.map { "최신 버전입니다 · \(koDateTime($0)) 확인" } ?? "최신 버전입니다"
+        default: nil
+        }
+        #else
+        let hint: String? = nil
+        #endif
+        return SettingsGroup("앱") {
+            SettingsRow("앱 버전", hint: hint) { Text(version).font(SetupFont.code).foregroundStyle(CE.ink).textSelection(.enabled) }
+            #if os(macOS)
+            if case .available(let latest, let page) = checker.state {
+                RowDivider(inset: 0)
+                SettingsRow("새 버전 있음", hint: "IAMCEO \(latest) · GitHub 릴리스 페이지에서 받습니다. 자동으로 설치하지는 않습니다.") {
+                    Button { NSWorkspace.shared.open(page) } label: { Text("받기") }
+                        .ceSecondaryButton()
+                        .ceCompactControl()
+                        .fixedSize()
+                }
+            }
+            #endif
         }
     }
 }

@@ -371,6 +371,8 @@ export const DEFAULT_SETTINGS: Settings = {
   boardTidyHours: 6,
   // 저장된 값이 없는 DB 는 이 Store 를 처음 열 때 정한다(initPermissionAcknowledged). 여기 값은 그 전의 안전한 기본이다.
   permissionAcknowledged: true,
+  // B1: 늘 내려 보내 앱이 '이 서버는 보고 언어를 안다'고 알게 한다. settings 표의 키 하나라 옛 판으로 되돌려도 무시된다.
+  reportLanguage: "ko",
 };
 
 /** 대표가 새 프로젝트를 만들며 신뢰한다고 답한 폴더(프로젝트 id → 그때의 폴더). settings 표의 별도 키라 스키마를 바꾸지 않는다. */
@@ -2334,6 +2336,94 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.rows("SELECT * FROM projects WHERE archived = 1 ORDER BY created_at, rowid").map((r) => this.projectFrom(r));
   }
 
+  // ---- B 묶음(설치 수명): 보관한 프로젝트 지우기·내보내기 ----
+
+  /**
+   * 보관한 프로젝트를 지운다. 보관되지 않았으면 409 project_not_archived. 보관은 모든 팀장의 안전한 종료를 확인한 뒤에만 되므로
+   * 지울 때 띄워 둔 세션은 없다. 대화·결재·할 일·업무·자료와 그 팀장들의 실행 기록·전달·푸시 사건을 한 트랜잭션에서 지운다.
+   * 다른 프로젝트가 가리키지 않는 첨부의 행도 지우고 그 파일 경로를 돌려준다(디스크의 파일은 커밋 뒤 호출하는 쪽이 지운다).
+   */
+  deleteArchivedProject(id: string): { project: Project; memberIds: string[]; attachments: { id: string; path: string }[] } {
+    return this.transaction(() => {
+      const project = this.requireProject(id);
+      if (!project.archived || project.isHq) throw new ApiError(409, "보관한 프로젝트만 지울 수 있습니다", "project_not_archived");
+      const memberIds = this.rows("SELECT id FROM members WHERE project_id = ?", id).map(r => r.id as string);
+      const candidates = new Set<string>();
+      const collect = (raw: unknown) => {
+        let refs: unknown;
+        try { refs = JSON.parse(typeof raw === "string" ? raw : "[]"); } catch { return; }
+        if (!Array.isArray(refs)) return;
+        for (const ref of refs) {
+          if (typeof ref === "string") candidates.add(ref);
+          else if (ref && typeof ref === "object" && typeof (ref as { id?: unknown }).id === "string") candidates.add((ref as { id: string }).id);
+        }
+      };
+      for (const r of this.rows("SELECT attachments AS v FROM messages WHERE project_id = ?", id)) collect(r.v);
+      for (const r of this.rows("SELECT attachments AS v FROM files WHERE project_id = ?", id)) collect(r.v);
+      for (const r of this.rows("SELECT images AS v FROM decisions WHERE project_id = ?", id)) collect(r.v);
+      for (const r of this.rows("SELECT completion_file_ids AS v FROM todos WHERE project_id = ?", id)) collect(r.v);
+      // 다른 프로젝트의 기록이 같은 첨부를 가리키면 남긴다.
+      const elsewhere = (attachmentId: string) => !!this.row(`SELECT 1 FROM messages WHERE project_id != ?1 AND instr(attachments, ?2) > 0
+        UNION ALL SELECT 1 FROM files WHERE project_id != ?1 AND instr(attachments, ?2) > 0
+        UNION ALL SELECT 1 FROM decisions WHERE project_id != ?1 AND instr(images, ?2) > 0
+        UNION ALL SELECT 1 FROM todos WHERE project_id != ?1 AND instr(completion_file_ids, ?2) > 0
+        UNION ALL SELECT 1 FROM deliveries WHERE project_id != ?1 AND instr(text, ?2) > 0 LIMIT 1`, id, attachmentId);
+      const attachments = [...candidates].filter(attachmentId => !elsewhere(attachmentId))
+        .map(attachmentId => this.row("SELECT id, path FROM attachments WHERE id = ?", attachmentId))
+        .filter((r): r is Row => !!r).map(r => ({ id: r.id as string, path: r.path as string }));
+      // 프로젝트 행에 외래 키로 묶이지 않은 기록부터 지운다. 나머지는 ON DELETE CASCADE 가 지운다.
+      this.run(`DELETE FROM decision_close_audit WHERE decision_id IN (SELECT id FROM decisions WHERE project_id = ?1)
+        OR answered_decision_id IN (SELECT id FROM decisions WHERE project_id = ?1)`, id);
+      this.run("DELETE FROM operation_receipts WHERE project_id = ?1 OR member_id IN (SELECT id FROM members WHERE project_id = ?1)", id);
+      this.run("DELETE FROM agent_operation_receipts WHERE project_id = ?1 OR member_id IN (SELECT id FROM members WHERE project_id = ?1)", id);
+      this.run("DELETE FROM push_report_groups WHERE project_id = ?1 OR member_id IN (SELECT id FROM members WHERE project_id = ?1)", id);
+      this.run("DELETE FROM push_events WHERE project_id = ?1 OR member_id IN (SELECT id FROM members WHERE project_id = ?1)", id);
+      this.run("DELETE FROM lifecycle_journal WHERE project_id = ?1 OR member_id IN (SELECT id FROM members WHERE project_id = ?1)", id);
+      this.run("DELETE FROM execution_journal WHERE project_id = ?1 OR member_id IN (SELECT id FROM members WHERE project_id = ?1)", id);
+      if (this.row("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'project_settings_v4'")) this.run("DELETE FROM project_settings_v4 WHERE project_id = ?", id);
+      this.run("DELETE FROM projects WHERE id = ?", id);
+      for (const attachment of attachments) this.run("DELETE FROM attachments WHERE id = ?", attachment.id);
+      const trust = this.folderTrust();
+      if (id in trust) {
+        delete trust[id];
+        this.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", FOLDER_TRUST_KEY, JSON.stringify(trust));
+      }
+      for (const memberId of memberIds) this.setRestartWake(memberId, null);
+      this.lastConnections.delete(id);
+      this.emitProjects();
+      return { project, memberIds, attachments };
+    }, "immediate");
+  }
+
+  /** 프로젝트 내보내기용 읽기. 토큰·전달 내부 기록은 싣지 않는다. 대화는 오래된 것부터 묶음으로 읽는다(큰 프로젝트도 메모리에 다 올리지 않는다). */
+  projectExport(id: string): { project: Project; members: Member[]; decisions: Decision[]; todos: Todo[]; work: WorkItem[];
+    files: (FileDoc & { html: string | null })[]; messageCount: number; messages(batch?: number): Generator<Message[]> } {
+    const project = this.requireProject(id);
+    const read = (sql: string, ...params: SQLQueryBindings[]) => this.rows(sql, ...params);
+    return {
+      project,
+      members: this.listMembers(id),
+      decisions: this.rows("SELECT * FROM decisions WHERE project_id = ? ORDER BY created_at, rowid", id).map(toDecision),
+      todos: this.listTodos(id),
+      work: this.listWork(id),
+      files: this.rows("SELECT * FROM files WHERE project_id = ? ORDER BY sort_order, rowid", id).map(r => ({ ...toFile(r), html: (r.html as string | null) ?? null })),
+      messageCount: (this.row("SELECT COUNT(*) AS n FROM messages WHERE project_id = ?", id)?.n as number) ?? 0,
+      *messages(batch = 500) {
+        let after: { at: string; id: string } | null = null;
+        for (;;) {
+          const rows: Row[] = after
+            ? read("SELECT * FROM messages WHERE project_id = ? AND (at, id) > (?, ?) ORDER BY at COLLATE BINARY, id COLLATE BINARY LIMIT ?", id, after.at, after.id, batch)
+            : read("SELECT * FROM messages WHERE project_id = ? ORDER BY at COLLATE BINARY, id COLLATE BINARY LIMIT ?", id, batch);
+          if (!rows.length) return;
+          yield rows.map(toMessage);
+          const last = rows.at(-1)!;
+          after = { at: last.at as string, id: last.id as string };
+          if (rows.length < batch) return;
+        }
+      },
+    };
+  }
+
   listMessagesAround(projectId: string, messageId: string, limit = 41): Message[] {
     this.requireProject(projectId);
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new ApiError(400, "대화 조회 조건이 잘못되었습니다", "INVALID_MESSAGE_PAGE_QUERY");
@@ -3267,6 +3357,79 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     });
   }
 
+  // ---- E4: 안쪽 기록의 보존 기한. 대화·결재·할 일·자료·전달 행·활동은 여기서 지우지 않는다 ----
+  /**
+   * 끝난 지 오래된 안쪽 기록만 정리한다. storage-maintenance 가 한 시간마다 부른다.
+   * - 보낸 글 사본(delivery_dispatches.wire_text): 전송이 끝났고(accepted·rejected) 봉투에 든 전달이 모두 끝난(delivered·failed,
+   *   복구 none·resolved·stopped) 지 wireTextMs 가 지난 것만 비운다. 봉투 행과 해시는 남긴다: 무엇을 보냈는지의 증거,
+   *   재전송 판정(전송 상태·원문 판), 수신 표지는 그대로다. 복구가 사본 글자를 다시 읽는 것은 끝나지 않은 봉투뿐이다.
+   * - 실행 기록·생명주기 기록: 끝난(ended·interrupted / confirmed·refused) 지 recordMs 가 지난 것을 지운다. 단 아래는 남긴다.
+   *   직원 상태가 읽는 세대별 마지막 행, 전달 대기 판정이 읽는 직원별 마지막 시작 실행, 사용 한도 판정이 읽는 세대별 마지막 입력 실행,
+   *   결과 보고 누락 안내가 걸린 실행, 표에서 rowid 가 가장 큰 행(다음 rowid 가 줄어들지 않게).
+   * - 영수증: 끝난 operation_receipts, agent_operation_receipts, delivery_recovery_operations 중 recordMs 가 지난 것.
+   * 한 번에 batch 행씩 짧은 트랜잭션으로 하고, budgetMs 를 넘기면 남은 것은 다음 정리로 미룬다(complete=false).
+   */
+  pruneInternalRecords(options: { now?: number; wireTextMs?: number; recordMs?: number; batch?: number; budgetMs?: number; clock?: () => number } = {}): RecordPruneResult {
+    const now = options.now ?? Date.now();
+    const wireTextMs = options.wireTextMs ?? 30 * 86_400_000, recordMs = options.recordMs ?? 90 * 86_400_000;
+    if (!Number.isFinite(now) || now < 0 || !(wireTextMs > 0) || !(recordMs > 0)) throw new Error("Invalid retention time");
+    const wireCutoff = new Date(now - wireTextMs).toISOString(), recordCutoff = new Date(now - recordMs).toISOString();
+    const batch = Math.max(1, Math.floor(options.batch ?? 500));
+    const clock = options.clock ?? (() => performance.now());
+    const started = clock(), budgetMs = options.budgetMs ?? 250;
+    const result: RecordPruneResult = { wireTexts: 0, executions: 0, lifecycles: 0, receipts: 0, agentReceipts: 0, recoveryOperations: 0, complete: true };
+    const steps: [keyof Omit<RecordPruneResult, "complete">, string, SQLQueryBindings[]][] = [
+      // 복구 기록이 기한 안에 바뀐 전달(다시 확인·대표 판단)이 든 봉투도 아직 끝난 지 오래된 것이 아니다.
+      ["wireTexts", `UPDATE delivery_dispatches SET wire_text = '' WHERE rowid IN (
+        SELECT x.rowid FROM delivery_dispatches x
+        WHERE x.transport_state IN ('accepted','rejected') AND x.updated_at < ? AND x.wire_text != ''
+          AND NOT EXISTS (SELECT 1 FROM delivery_dispatch_items i JOIN deliveries d ON d.id = i.delivery_id
+            LEFT JOIN delivery_recovery r ON r.delivery_id = d.id
+            WHERE i.dispatch_id = x.id AND (d.status NOT IN ('delivered','failed') OR COALESCE(r.phase, 'none') NOT IN ('none','resolved','stopped')
+              OR COALESCE(r.updated_at, '') >= ?))
+        ORDER BY x.updated_at LIMIT ?)`, [wireCutoff, wireCutoff]],
+      ["executions", `DELETE FROM execution_journal WHERE rowid IN (
+        SELECT e.rowid FROM execution_journal e
+        WHERE e.phase IN ('ended','interrupted') AND e.updated_at < ?
+          AND e.rowid < (SELECT MAX(rowid) FROM execution_journal)
+          AND EXISTS (SELECT 1 FROM execution_journal n WHERE n.member_id = e.member_id AND n.project_id = e.project_id AND n.generation = e.generation
+            AND (n.created_at > e.created_at OR (n.created_at = e.created_at AND n.rowid > e.rowid)))
+          AND (e.started_at IS NULL OR EXISTS (SELECT 1 FROM execution_journal n
+            WHERE n.project_id = e.project_id AND n.member_id = e.member_id AND n.started_at IS NOT NULL AND n.rowid > e.rowid))
+          AND NOT ((e.input_received_at IS NOT NULL OR e.started_at IS NOT NULL
+              OR EXISTS (SELECT 1 FROM delivery_dispatches d WHERE d.id = e.run_id AND d.transport_state = 'accepted'))
+            AND NOT EXISTS (SELECT 1 FROM execution_journal n LEFT JOIN delivery_dispatches d ON d.id = n.run_id
+              WHERE n.member_id = e.member_id AND n.generation = e.generation
+                AND (n.input_received_at IS NOT NULL OR n.started_at IS NOT NULL OR d.transport_state = 'accepted')
+                AND (n.created_at > e.created_at OR (n.created_at = e.created_at AND n.rowid > e.rowid))))
+          AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = 'msg_missing_report_' || e.run_id)
+        ORDER BY e.updated_at LIMIT ?)`, [recordCutoff]],
+      ["lifecycles", `DELETE FROM lifecycle_journal WHERE rowid IN (
+        SELECT l.rowid FROM lifecycle_journal l
+        WHERE l.phase IN ('confirmed','refused') AND l.updated_at < ?
+          AND l.rowid < (SELECT MAX(rowid) FROM lifecycle_journal)
+          AND EXISTS (SELECT 1 FROM lifecycle_journal n WHERE n.member_id = l.member_id AND n.project_id = l.project_id AND n.generation = l.generation
+            AND (n.created_at > l.created_at OR (n.created_at = l.created_at AND n.rowid > l.rowid)))
+        ORDER BY l.updated_at LIMIT ?)`, [recordCutoff]],
+      ["receipts", `DELETE FROM operation_receipts WHERE rowid IN (
+        SELECT rowid FROM operation_receipts WHERE status != 'pending' AND updated_at < ? ORDER BY updated_at LIMIT ?)`, [recordCutoff]],
+      ["agentReceipts", `DELETE FROM agent_operation_receipts WHERE rowid IN (
+        SELECT rowid FROM agent_operation_receipts WHERE created_at < ? ORDER BY created_at LIMIT ?)`, [recordCutoff]],
+      ["recoveryOperations", `DELETE FROM delivery_recovery_operations WHERE rowid IN (
+        SELECT rowid FROM delivery_recovery_operations WHERE created_at < ? ORDER BY created_at LIMIT ?)`, [recordCutoff]],
+    ];
+    for (const [key, sql, params] of steps) {
+      const statement = this.db.query(sql);
+      for (;;) {
+        if (clock() - started > budgetMs) { result.complete = false; return result; }
+        const changes = this.transaction(() => statement.run(...params, batch).changes, "immediate");
+        result[key] += changes;
+        if (changes < batch) break;
+      }
+    }
+    return result;
+  }
+
   // ---- 문맥: nonce는 같은 세대에서 재사용하고 늦은 세대 갱신은 거부한다 ----
   getContextState(memberId: string): StoredContextState | null {
     const r = this.row("SELECT c.* FROM member_context_state c JOIN members m ON m.id = c.member_id AND m.session_generation = c.generation WHERE c.member_id = ?", memberId);
@@ -3414,4 +3577,16 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       return { batchId, acknowledged: true };
     });
   }
+}
+
+/** E4: 보존 기한 정리 한 번의 결과. complete=false 면 시간 예산을 다 써서 남은 것은 다음 정리 때 한다. */
+export interface RecordPruneResult {
+  /** 비운 보낸 글 사본(봉투 행은 남는다). */
+  wireTexts: number;
+  executions: number;
+  lifecycles: number;
+  receipts: number;
+  agentReceipts: number;
+  recoveryOperations: number;
+  complete: boolean;
 }

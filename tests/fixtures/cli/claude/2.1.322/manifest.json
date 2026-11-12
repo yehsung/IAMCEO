@@ -1,0 +1,38 @@
+{
+  "provider": "claude",
+  "version": "2.1.322",
+  "source": "tests/w1-server-core.test.ts 의 claudeTrust322·claudeBanner(2026-11-11 실측). 폴더 경로만 바꿨다.",
+  "fixtures": [
+    {
+      "file": "idle.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "expect": {
+        "inputEmpty": true,
+        "folderTrustLike": false,
+        "trustDialogLike": false,
+        "folderTrust": null
+      }
+    },
+    {
+      "file": "folder-trust.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "expect": {
+        "inputEmpty": null,
+        "folderTrustLike": true,
+        "trustDialogLike": true,
+        "folderTrust": {
+          "selected": 0,
+          "options": [
+            "No, exit",
+            "Yes, I trust this folder"
+          ]
+        }
+      }
+    }
+  ]
+}

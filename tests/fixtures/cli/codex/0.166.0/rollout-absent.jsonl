@@ -1,0 +1,9 @@
+{"type":"session_meta","payload":{"id":"session","cwd":"/private/tmp/iamceo-cli-fixture/work","source":"cli","session_id":"session","context_window":258400,"cli_version":"0.166.0"}}
+{"type":"world_state","payload":{}}
+{"type":"token_usage_record","payload":{}}
+{"type":"event_msg","payload":{"type":"thread_settings_applied"}}
+{"type":"event_msg","payload":{"type":"item_completed"}}
+{"type":"response_item","payload":{"type":"additional_tools"}}
+{"type":"response_item","payload":{"type":"custom_tool_call"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"other work"}]}}

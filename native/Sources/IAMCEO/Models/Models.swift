@@ -508,6 +508,8 @@ struct Settings: Codable, Sendable, Equatable {
     /// false only on a server that has not been told how sessions may run commands yet (a brand-new install).
     /// nil from older servers, which is read as "already chosen": the first-run choice is never shown for them.
     var permissionAcknowledged: Bool? = nil
+    /// Language the lead and staff write to the owner in ("ko" | "en"). nil from older servers: the row is hidden there.
+    var reportLanguage: String? = nil
 }
 extension Settings {
     init(from decoder: Decoder) throws {
@@ -525,6 +527,7 @@ extension Settings {
         contextWindowDefault = try c.decodeIfPresent(Int.self, forKey: ModelKey("contextWindowDefault"))
         contextWindows = try c.decodeIfPresent([String: Int].self, forKey: ModelKey("contextWindows"))
         permissionAcknowledged = c.lenient(Bool.self, forKey: ModelKey("permissionAcknowledged"))
+        reportLanguage = c.lenient(String.self, forKey: ModelKey("reportLanguage"))
     }
 }
 
@@ -561,6 +564,10 @@ struct Bootstrap: Codable, Sendable, Equatable {
     var engine: EngineState? = nil
     /// Tailscale on the server's Mac; nil from older servers and from installs that never opened a Tailscale address.
     var tailnet: TailnetState? = nil
+    /// D5: 서버 버전과 API 단계. 버전 머리글을 받은 서버만 싣는다(옛 서버는 nil).
+    var server: ServerVersionInfo? = nil
+    /// D5: 앱과 서버가 실제로 맞지 않을 때만 실린다.
+    var compat: CompatState? = nil
 }
 extension Bootstrap {
     init(from decoder: Decoder) throws {
@@ -578,6 +585,8 @@ extension Bootstrap {
         rankOverrides = try c.decodeIfPresent([String: Int].self, forKey: ModelKey("rankOverrides")) ?? [:]
         engine = c.lenient(EngineState.self, forKey: ModelKey("engine"))
         tailnet = c.lenient(TailnetState.self, forKey: ModelKey("tailnet"))
+        server = c.lenient(ServerVersionInfo.self, forKey: ModelKey("server"))
+        compat = c.lenient(CompatState.self, forKey: ModelKey("compat"))
     }
 }
 

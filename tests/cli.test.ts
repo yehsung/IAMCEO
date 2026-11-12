@@ -18,7 +18,8 @@ const CLI = resolve(import.meta.dir, "..", "bin", "iamceo.ts");
 
 function cliEnv(home: string, extra: Record<string, string> = {}): Record<string, string> {
   for (const dir of ["claude", "codex"]) mkdirSync(join(home, dir), { recursive: true, mode: 0o700 });
-  return { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "en_US.UTF-8",
+  // 명령줄 문구는 IAMCEO_LANG → LC_ALL → LANG 으로 고른다. 이 파일의 단언은 한국어 문구를 본다(영어는 cli-language 시험).
+  return { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "en_US.UTF-8", IAMCEO_LANG: "ko",
     IAMCEO_HOME: home, IAMCEO_PORT: "0", IAMCEO_HERDR_SOCKET: join(home, "no-herdr.sock"),
     IAMCEO_CORE_SOCKET: join(home, "no-core.sock"), IAMCEO_CORE_BIN: "/usr/bin/false",
     IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false",
@@ -522,7 +523,8 @@ describe("운영 CLI readiness·등록·복원", () => {
     expect(calls).toEqual(["print", "bootout", "print", "bootstrap", "readiness"]);
     expect(readFileSync(join(home, "Library/LaunchAgents/com.iamceo.server.plist"), "utf8")).toContain("service-run");
     calls.length = 0; fail = true;
-    await expect(service(["install", "--restart"], dependencies)).rejects.toThrow("등록 실패");
+    // 프로세스 안에서 부르는 함수라 문구는 시험 실행 환경의 언어를 따른다(server/cli-text.ts).
+    await expect(service(["install", "--restart"], dependencies)).rejects.toThrow(/등록 실패|Registering with launchd failed/);
     // 마지막 print 는 실패 안내에 서비스가 내려가 있는지 적기 위한 확인이다.
     expect(calls).toEqual(["print", "bootout", "print", "bootstrap", "print"]);
   });

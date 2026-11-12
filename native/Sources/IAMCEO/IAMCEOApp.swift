@@ -68,6 +68,8 @@ struct IAMCEOApp: App {
                 // The app's own notifications and Dock badge (A-82, A-101): started once with the first window, kept
                 // for the app's life (it only posts when the owner turned Mac notifications on in 설정).
                 .task { MacNotificationService.shared.start(store: store, router: sharedRouter) }
+                // D6 새 버전 확인(하루 한 번)과 D1 '옛 버전 서버를 새 버전으로 다시 시작' 질문(앱 빌드마다 한 번).
+                .modifier(VersionWatchHooks(store: store))
             #else
             MainWindow(store: store, drafts: drafts, sharedRouter: session.router)
                 .environment(\.appSession, session)

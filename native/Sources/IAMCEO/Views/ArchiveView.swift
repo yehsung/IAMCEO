@@ -1,14 +1,29 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+import UniformTypeIdentifiers
+#endif
 
 struct ArchiveLibraryView: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
     @Environment(\.dismiss) private var dismiss
     @State private var management: ProjectManagementSelection?
+    /// B 묶음: 지우기 확인을 기다리는 프로젝트와 내보내기 상태.
+    @State private var pendingDelete: Project?
+    @State private var deleting: String?
+    @State private var exporting: String?
+    @State private var exportResult: ArchiveExportResult?
 
     var body: some View {
         CESheet("보관함", subtitle: "보관한 프로젝트는 읽기 전용으로 열립니다. 꺼내면 다시 일할 수 있습니다.", icon: "archivebox", width: 560) {
             VStack(alignment: .leading, spacing: CESpace.s) {
+                if let exportResult {
+                    InlineNotice(tone: exportResult.failed ? .danger : .success, icon: exportResult.failed ? "exclamationmark.circle" : "checkmark.circle",
+                                 title: exportResult.title, detail: exportResult.detail,
+                                 actionTitle: exportResult.file == nil ? nil : "Finder에서 보기",
+                                 action: exportResult.file.map { file in { ArchiveExport.reveal(file) } })
+                }
                 if store.isLoadingArchive && store.archivedProjects.isEmpty {
                     EmptyTile(loading: true, title: "보관함을 불러오는 중입니다")
                 }
@@ -23,7 +38,37 @@ struct ArchiveLibraryView: View {
         }
         .sheet(item: $management) { ProjectManageView(selection: $0, onOpen: { dismiss() }).id($0.id) }
         .task { await store.loadArchivedProjects() }
+        .confirmationDialog(pendingDelete.map { "‘\($0.name)’을 지울까요?" } ?? "프로젝트를 지울까요?",
+                            isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+                            titleVisibility: .visible, presenting: pendingDelete) { project in
+            Button("지우기", role: .destructive) {
+                deleting = project.id
+                Task { await store.deleteArchivedProject(id: project.id); deleting = nil }
+            }
+            Button("취소", role: .cancel) {}
+        } message: { _ in
+            Text(ArchiveExport.deleteMessage)
+        }
     }
+
+    #if os(macOS)
+    /// 저장할 자리를 먼저 고르고, 서버가 만든 zip 을 받아 그 자리에 둔다.
+    private func export(_ project: Project) {
+        guard let api = store.api, let target = ArchiveExport.chooseDestination(for: project) else { return }
+        exporting = project.id
+        exportResult = nil
+        Task {
+            defer { exporting = nil }
+            do {
+                let file = try await api.exportProject(id: project.id)
+                try ArchiveExport.place(file, at: target)
+                exportResult = ArchiveExportResult(title: "내보냈습니다", detail: target.lastPathComponent, file: target, failed: false)
+            } catch {
+                exportResult = ArchiveExportResult(title: "내보내지 못했습니다", detail: ArchiveExport.friendly(error), file: nil, failed: true)
+            }
+        }
+    }
+    #endif
 
     /// Centred quiet empty state: the sheet stays small instead of a tall empty window.
     private var emptyState: some View {
@@ -69,15 +114,25 @@ struct ArchiveLibraryView: View {
                 .accessibilityLabel("\(project.name) 다시 꺼내기")
             Menu {
                 Button("이름 바꾸기…") { management = ProjectManagementSelection(projectID: project.id, mode: .rename) }
+                #if os(macOS)
+                Button("내보내기…") { export(project) }
+                    .disabled(exporting != nil)
+                #endif
+                Divider()
+                Button("지우기…", role: .destructive) { pendingDelete = project }
+                    .disabled(deleting != nil)
             } label: {
-                Image(systemName: "ellipsis").font(.system(size: 13, weight: .semibold)).foregroundStyle(canManage ? CE.ink2 : CE.ink3)
+                Group {
+                    if exporting == project.id || deleting == project.id { ProgressView().controlSize(.small) }
+                    else { Image(systemName: "ellipsis").font(.system(size: 13, weight: .semibold)).foregroundStyle(canManage ? CE.ink2 : CE.ink3) }
+                }
                     .frame(width: 30, height: 30)
                     .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
                     .contentShape(Rectangle())
             }
             .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
             .disabled(!canManage)
-            .help("이름 바꾸기")
+            .help(isMac ? "이름 바꾸기·내보내기·지우기" : "이름 바꾸기·지우기")
             .accessibilityLabel("\(project.name) 관리")
         }
         .padding(.leading, 4).padding(.trailing, 8).padding(.vertical, 4)
@@ -232,5 +287,57 @@ struct ArchiveView: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
         }
+    }
+}
+
+/// B 묶음: 보관함의 내보내기 결과 한 줄.
+struct ArchiveExportResult: Equatable {
+    let title: String
+    let detail: String
+    let file: URL?
+    let failed: Bool
+}
+
+/// B 묶음: 보관함의 내보내기·지우기 도우미. 내보내기는 서버가 도는 Mac 에서만 된다.
+enum ArchiveExport {
+    static let deleteMessage = "대화·결재·업무·자료와 첨부 파일을 모두 지우고 되돌릴 수 없습니다. 필요하면 먼저 Mac 앱에서 ‘내보내기…’로 사본을 받아 두세요. 매일 만드는 백업에는 최대 4주 동안 남습니다."
+
+    /// IAMCEO-<프로젝트 이름>-<날짜>.zip. 파일 이름에 못 쓰는 글자는 바꾼다.
+    static func suggestedName(for project: Project, now: Date = Date()) -> String {
+        let cleaned = project.name.map { "/:\\\n\r\t".contains($0) ? "_" : $0 == " " ? "-" : $0 }
+        let name = String(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
+        let day = ISO8601DateFormatter.string(from: now, timeZone: .current, formatOptions: [.withFullDate])
+        return "IAMCEO-\(name.isEmpty ? "project" : String(name.prefix(80)))-\(day).zip"
+    }
+
+    static func friendly(_ error: any Error) -> String {
+        guard let api = error as? APIError else { return error.localizedDescription }
+        if api.code == "LOCAL_ONLY" || api.status == 403 { return "내보내기는 서버가 도는 Mac에서만 할 수 있습니다." }
+        // 옛 서버에는 이 경로가 없다(경로 404). 프로젝트가 없을 때의 404 와는 문구로 가른다.
+        if api.status == 404 && api.message == "없는 경로입니다" { return "서버가 옛 버전이라 내보낼 수 없습니다. 서버를 업데이트한 뒤 다시 해 주세요." }
+        return api.message
+    }
+
+    #if os(macOS)
+    @MainActor static func chooseDestination(for project: Project) -> URL? {
+        let panel = NSSavePanel()
+        panel.title = "프로젝트 내보내기"
+        panel.nameFieldStringValue = suggestedName(for: project)
+        panel.allowedContentTypes = [.zip]
+        panel.canCreateDirectories = true
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    static func place(_ file: URL, at target: URL) throws {
+        let manager = FileManager.default
+        if manager.fileExists(atPath: target.path) { _ = try manager.replaceItemAt(target, withItemAt: file) }
+        else { try manager.moveItem(at: file, to: target) }
+    }
+    #endif
+
+    @MainActor static func reveal(_ file: URL) {
+        #if os(macOS)
+        NSWorkspace.shared.activateFileViewerSelecting([file])
+        #endif
     }
 }

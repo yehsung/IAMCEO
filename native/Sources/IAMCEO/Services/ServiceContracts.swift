@@ -99,6 +99,8 @@ struct SettingsPatchRequest: Encodable, Sendable {
     var boardTidyHours: Double? = nil
     /// Sent as true once, with the mode the owner picked on the first-run choice. Never sent as false.
     var permissionAcknowledged: Bool? = nil
+    /// "ko" | "en". Only sent when changed, which the settings screen allows only on a server that reports it.
+    var reportLanguage: String? = nil
 }
 
 struct TodoPatchRequest: Encodable, Sendable { let done: Bool }

@@ -166,3 +166,10 @@ bun scripts/release-ios.ts api GET '/v1/apps?fields[apps]=bundleId'
 
 - iPhone 심사는 며칠 걸릴 수 있고, 사용자는 앱을 제때 올리지 않습니다. 서버(=Mac 앱에 들어 있는 것)는 출시된 이전 iPhone 앱과도 맞아야 합니다. 서버 응답에는 선택 항목을 더하기만 하고 기존 항목의 이름과 형식은 바꾸지 않습니다.
 - 새 iPhone 앱이 새 서버 기능에 기대면, Mac 릴리스를 먼저 공개하고 iPhone 출시를 그 뒤에 합니다(수동 출시로 두면 순서를 맞추기 쉽습니다).
+
+## 5. 출시된 앱과의 호환 확인
+
+- `bash scripts/check.sh compat`은 새 서버의 실제 응답을 출시된 앱(태그마다)의 해석 코드로 풀어 봅니다. `bash scripts/check.sh`(전체)에도 들어 있습니다. 출시 태그를 git에서 읽으므로 태그가 있는 저장소에서 돌립니다.
+- 새 앱을 출시하면 그 태그를 `scripts/compat-decoders/releases.json`에 더합니다(그 태그에서 따로 빌드할 해석 코드 파일 목록과 함께).
+- 앱은 모든 요청에 `X-IAMCEO-App-Version`, `X-IAMCEO-App-Build`, `X-IAMCEO-App-Platform`(macos|ios), `X-IAMCEO-Api-Level`을 붙입니다. 서버는 머리글을 보낸 앱에만 Bootstrap의 `server`(버전·API 단계)를 싣고, 실제로 맞지 않을 때만 `compat`을 싣습니다. 붙은 앱 목록은 `/api/readiness`의 `apps`에 보입니다.
+- 서버와 앱이 서로 알아야 하는 것이 바뀌어 API 단계를 올릴 때는 `shared/types.ts`의 `API_LEVEL`(필요하면 `MIN_APP_API_LEVEL`)과 앱의 `AppVersion.apiLevel`을 함께 올립니다. `MIN_APP_API_LEVEL`을 올리면 그보다 낮은 앱에 '앱을 업데이트하세요'가 뜨므로, 출시된 앱이 실제로 깨질 때만 올립니다.

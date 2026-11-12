@@ -1,0 +1,7 @@
+ Accessing workspace:
+ /private/tmp/iamceo-wrap-test/workspace-00-long project-path/workspace-01-long project-path/workspace-02-long project-path/workspace-03-long project-path/works
+pace-04-long project-path/member-work
+ Quick safety check: Is this a project you created or one you trust?
+ ❯ No, exit
+   Yes, I trust this folder
+ Enter to confirm · Esc to cancel

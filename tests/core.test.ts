@@ -405,7 +405,9 @@ describe("store", () => {
     const { store: s, bus, db, events: ev } = makeStore();
     expect(s.getSettings()).toEqual({ backend: "core", permissionMode: "bypassPermissions", ranks: DEFAULT_RANKS, codexRanks: DEFAULT_CODEX_RANKS, maxConcurrentTurns: 4, compactAtPct: 70, contextWindowDefault: 1_000_000, contextWindows: { "gpt-6-astra": 475_000 }, maxAwakeWorkers: 8, notifyMac: false, macScriptNotifications: true, boardTidyHours: 6,
       // w1: 새로 만든 DB 는 대표가 권한 방식을 확인하기 전이다.
-      permissionAcknowledged: false });
+      permissionAcknowledged: false,
+      // w2 B1: 보고 언어는 늘 내려간다(앱이 이 값이 있을 때만 설정 줄을 보인다).
+      reportLanguage: "ko" });
     expect(s.patchSettings({ compactAtPct: 60 }).compactAtPct).toBe(60);
     expect(ev.at(-1)).toMatchObject({ type: "settings" });
     expect(new Store(db, bus).getSettings().compactAtPct).toBe(60);

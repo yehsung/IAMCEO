@@ -2,16 +2,26 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmdirSync, u
 import { join, resolve } from "node:path";
 import { readBackupJson } from "./backup.ts";
 import { publicationManifestSchema, writePublicationManifest, type FileReferences, type PublicationManifest } from "./files.ts";
-import type { Store } from "./store.ts";
+import type { RecordPruneResult, Store } from "./store.ts";
 
 export const STAGING_GRACE_MS = 7 * 86_400_000;
 export const QUARANTINE_GRACE_MS = 86_400_000;
+/** E4: 끝난 봉투의 보낸 글 사본을 비우기까지. */
+export const WIRE_TEXT_RETENTION_MS = 30 * 86_400_000;
+/** E4: 끝난 실행·생명주기 기록과 영수증을 지우기까지. 대화·결재·할 일·자료는 기한이 없다. */
+export const RECORD_RETENTION_MS = 90 * 86_400_000;
+/** 정리 한 번이 서버를 붙잡는 최대 시간. 남은 것은 다음 정리(한 시간 뒤) 때 이어 한다. */
+export const RECORD_PRUNE_BUDGET_MS = 250;
 export interface StorageUsage { bytes: number; files: number; symlinks: number }
 export interface StorageMaintenanceOptions {
   uploadsDir: string;
   inboxDir: string;
   backupDir: string;
   references: FileReferences;
+  /** E4: 안쪽 기록의 보존 기한 정리. 없으면 파일 정리만 한다. */
+  records?: Pick<Store, "pruneInternalRecords">;
+  /** 시험용. 기본은 위 기한. */
+  retention?: { wireTextMs?: number; recordMs?: number; budgetMs?: number; batch?: number };
 }
 
 /** Logical bytes per area (hard-linked inbox copies count in each area); never follows links. */
@@ -78,9 +88,28 @@ export class StorageMaintenance {
     };
   }
 
-  sweep(now = Date.now()): { quarantined: string[]; removed: string[]; retained: string[]; errors: string[] } {
+  /**
+   * E4: 끝난 지 오래된 안쪽 기록(보낸 글 사본 30일, 실행 기록·영수증 90일)을 정리한다.
+   * 정리 대상과 남기는 것의 정의는 Store.pruneInternalRecords 에 있다. 실패해도 파일 정리는 이어 간다.
+   */
+  pruneRecords(now = Date.now()): RecordPruneResult | null {
+    if (!this.options.records) return null;
+    const retention = this.options.retention ?? {};
+    const result = this.options.records.pruneInternalRecords({ now, wireTextMs: retention.wireTextMs ?? WIRE_TEXT_RETENTION_MS,
+      recordMs: retention.recordMs ?? RECORD_RETENTION_MS, budgetMs: retention.budgetMs ?? RECORD_PRUNE_BUDGET_MS, ...(retention.batch ? { batch: retention.batch } : {}) });
+    const total = result.wireTexts + result.executions + result.lifecycles + result.receipts + result.agentReceipts + result.recoveryOperations;
+    if (total) console.info(`[storage] 오래된 안쪽 기록 정리: 보낸 글 사본 ${result.wireTexts}, 실행 기록 ${result.executions}, 생명주기 기록 ${result.lifecycles}, 영수증 ${result.receipts + result.agentReceipts + result.recoveryOperations}${result.complete ? "" : " (남은 것은 다음 정리 때)"}`);
+    return result;
+  }
+
+  sweep(now = Date.now()): { quarantined: string[]; removed: string[]; retained: string[]; errors: string[]; records?: RecordPruneResult } {
     if (!Number.isFinite(now) || now < 0) throw new Error("Invalid maintenance time");
-    const result = { quarantined: [] as string[], removed: [] as string[], retained: [] as string[], errors: [] as string[] };
+    const result: { quarantined: string[]; removed: string[]; retained: string[]; errors: string[]; records?: RecordPruneResult } =
+      { quarantined: [] as string[], removed: [] as string[], retained: [] as string[], errors: [] as string[] };
+    if (this.options.records) {
+      try { result.records = this.pruneRecords(now)!; }
+      catch { result.errors.push("records"); }
+    }
     if (!existsSync(this.uploadsDir)) return result;
     if (!lstatSync(this.uploadsDir).isDirectory() || lstatSync(this.uploadsDir).isSymbolicLink()) throw new Error("Uploads must be a real directory");
     // Process old quarantine first: a single sweep can never skip the 24-hour hold.

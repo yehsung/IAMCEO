@@ -534,7 +534,16 @@ export interface Settings {
    * true 로만 바꿀 수 있다. 없으면 구형 서버이며 앱은 true 로 읽는다.
    */
   permissionAcknowledged?: boolean;
+  /**
+   * B1: 총괄·팀장이 대표에게 쓰는 글(보고·결재 카드·할 일)의 언어. 없으면 ko 로 읽는다(구형 서버·구형 DB).
+   * en 이면 역할 지침 끝에 영어로 쓰라는 줄이 붙는다. [대표]·[총괄] 같은 서버 머리말은 바뀌지 않는다.
+   */
+  reportLanguage?: ReportLanguage;
 }
+
+/** B1: 대표에게 쓰는 글의 언어. */
+export type ReportLanguage = "ko" | "en";
+export const REPORT_LANGUAGES = ["ko", "en"] as const satisfies readonly ReportLanguage[];
 
 /** 실행 엔진(herdr-core) 상태. ok 가 아니면 앱이 안내 한 줄을 보인다. */
 export interface EngineStatus {
@@ -582,7 +591,17 @@ export interface Bootstrap {
   engine?: EngineStatus;
   /** 없으면 구형 서버이거나, Tailscale 주소를 연 적이 없는(또는 주소를 직접 정한) 설치다. */
   tailnet?: TailnetStatus;
+  /** D9: 이 Mac 의 Claude Code·Codex 버전과 견본 확인 여부. 아직 읽지 못했으면 없다.
+   * 이름이 cli 가 아닌 것은 위의 cli(문자열)를 출시된 앱이 문자열로 풀기 때문이다. */
+  cliVersions?: CliVersionInfo[];
+  /** D5: 이 서버의 버전과 API 단계. 버전 머리글(APP_HEADERS)을 보낸 앱에만 싣는다. 머리글이 없는 출시 앱(0.2.2·0.2.3)에는 없다. */
+  server?: ServerVersionInfo;
+  /** D5: 앱과 서버가 실제로 맞지 않을 때만 싣는다(업데이트 피로를 막는다). 버전 머리글이 없으면 싣지 않는다. */
+  compat?: CompatNotice;
 }
+
+/** D9: 서버가 읽은 CLI 하나의 버전. known 은 그 버전의 화면·기록 견본이 tests/fixtures/cli 에 있어 시험을 거쳤다는 뜻이다. */
+export interface CliVersionInfo { provider: CliProvider; installed: boolean; version: string | null; known: boolean; firstSeenAt?: string }
 
 export interface ProjectState {
   project: Project;
@@ -598,6 +617,8 @@ export interface ProjectState {
 
 /** 보관함 GET 전용 DTO. 늦은 manual 기록이 가능하므로 불변 DB snapshot은 아니다. */
 export interface ArchiveProjectState extends ProjectState { project: Project & { archived: true } }
+/** B 묶음: DELETE /api/projects/:id 의 답. 보관한 프로젝트만 지운다(아니면 409 project_not_archived). */
+export interface ProjectDeleteResult { id: string; deleted: true; removedAttachments: number }
 /** 일반 page와 같은 strict query 4개/정렬. 없는/활성 프로젝트는 404. */
 export type ArchiveMessagePage = MessagePage;
 
@@ -704,3 +725,42 @@ export const WORKER_TOOLS = ["status", "ask", "post", "file", "todo", "ask_close
 export const CONDUCTOR_TOOLS = ["withdraw", "team_add", "team_assign", "team_compact", "team_sleep", "team_resume", "team_close", "team_model", "roster", "project_now", "work_set", "work_list", "work_remove", "board"] as const;
 export const ROOT_TOOLS = ["project_create", "project_list", "board"] as const;
 export const MANUAL_TOOLS = ["wait"] as const;
+
+// ---- A: 점검·진단(B3·D8) ----
+/** 점검 항목 id. 고정 목록이다(묶음 사이 약속 1). 앱·명령줄·문서가 이 이름으로 항목을 가리킨다. */
+export const DOCTOR_CHECK_IDS = ["server", "engine", "claude", "codex", "cli_version", "tailscale", "service", "backup", "disk"] as const;
+export type DoctorCheckId = (typeof DOCTOR_CHECK_IDS)[number];
+/**
+ * 점검 한 항목. ok 정상, warn 확인 필요(돌기는 한다), fail 문제(이대로는 안 된다), unknown 확인하지 못했거나 해당 없음(쓰지 않는 선택 기능).
+ * title 은 항목 이름, detail 은 찾은 것, fix 는 일반 사용자가 할 수 있는 고치는 법 한 줄(앱 버튼 이름·설치 명령). 개발자 명령은 쓰지 않는다.
+ */
+export interface DoctorCheck { id: string; state: "ok" | "warn" | "fail" | "unknown"; title: string; detail?: string; fix?: string }
+/** GET /api/doctor 의 답이자 `iamceo doctor --json` 의 출력. */
+export interface DoctorReport { checkedAt: string; serverVersion: string; checks: DoctorCheck[] }
+/** POST /api/diagnose 의 답. path 는 만든 .zip 의 절대 경로(같은 이름의 폴더가 옆에 있다). */
+export interface DiagnoseResult { path: string; sizeBytes: number; createdAt: string }
+
+// ---- C: 버전·호환(D5·D1·D6) ----
+/**
+ * 이 서버가 지키는 앱 계약의 단계. 새 앱이 이 서버에만 있는 동작에 **기대게 될 때만** 1 올린다.
+ * 선택 필드를 더하는 것처럼 옛 서버에서도 앱이 그대로 도는 변경은 올리지 않는다. 그래야 '서버가 옛 버전' 안내가
+ * 실제로 안 맞을 때만 뜬다. 올릴 때는 앱의 AppVersion.apiLevel(native/Sources/IAMCEO/Services/AppVersion.swift)도 같이 올린다.
+ */
+export const API_LEVEL = 1;
+/** 이 서버가 아직 맞춰 주는 가장 낮은 앱 단계. 옛 앱을 정말로 더 받을 수 없을 때만 올린다(올리면 그 앱에 '앱을 업데이트하세요'). */
+export const MIN_APP_API_LEVEL = 1;
+/** 앱이 모든 요청에 붙이는 머리글(묶음 사이 약속 4). 머리글이 없는 요청은 출시된 옛 앱으로 본다. */
+export const APP_HEADERS = {
+  version: "X-IAMCEO-App-Version",
+  build: "X-IAMCEO-App-Build",
+  platform: "X-IAMCEO-App-Platform",
+  apiLevel: "X-IAMCEO-Api-Level",
+} as const;
+export type AppPlatform = "macos" | "ios";
+/** 머리글에서 읽은 앱 하나. build 는 없을 수 있다. */
+export interface AppClientInfo { version: string; build: string | null; platform: AppPlatform; apiLevel: number }
+export interface ServerVersionInfo { version: string; apiLevel: number }
+/** app_outdated: 앱이 서버보다 낮은 단계라 업데이트해야 한다. server_outdated: 서버가 앱보다 낮은 단계다. */
+export interface CompatNotice { state: "app_outdated" | "server_outdated"; message: string }
+/** GET /api/readiness 의 apps: 이 서버 프로세스가 켜진 뒤 버전 머리글을 보낸 앱들(최근 것부터, 많아야 8개). */
+export interface SeenAppClient extends AppClientInfo { lastSeenAt: string }

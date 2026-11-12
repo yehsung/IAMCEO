@@ -1,0 +1,86 @@
+{
+  "provider": "codex",
+  "version": "0.166.0",
+  "source": "첫 화면: tests/w1-server-core.test.ts codexBanner. 폴더 신뢰 창: tests/core-runner.test.ts codexTrustScreen(실측 0.166). 감싼 창: tests/fixtures/folder-trust-160.ts(합성). 세션 기록: tests/delivery-evidence.test.ts 의 0.166 메타 배열.",
+  "fixtures": [
+    {
+      "file": "idle.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "note": "폴더 이름의 trust·workspace 때문에 느슨한 검사는 신뢰 창 같다고 보지만, 입력칸이 보여 trustDialogLike 가 막는다.",
+      "expect": {
+        "draft": "",
+        "folderTrustLike": true,
+        "trustDialogLike": false,
+        "folderTrust": null
+      }
+    },
+    {
+      "file": "folder-trust.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "expect": {
+        "draft": null,
+        "folderTrustLike": true,
+        "trustDialogLike": true,
+        "folderTrust": {
+          "selected": 0,
+          "options": [
+            "Trust and continue",
+            "Quit"
+          ]
+        }
+      }
+    },
+    {
+      "file": "folder-trust-wrapped.txt",
+      "kind": "screen",
+      "origin": "synthetic",
+      "cwd": "/private/tmp/iamceo-wrap-test/workspace-00-long project-path/workspace-01-long project-path/workspace-02-long project-path/workspace-03-long project-path/workspace-04-long project-path/member-work",
+      "note": "경로가 줄을 넘기면 정확 해석기는 일부러 읽지 않는다(상태 확인 불가로 터미널에서 푼다).",
+      "expect": {
+        "folderTrustLike": true,
+        "trustDialogLike": true,
+        "folderTrust": null
+      }
+    },
+    {
+      "file": "rollout-received.jsonl",
+      "kind": "log",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "sessionId": "session",
+      "markers": {
+        "d1": "#iamceo_abcdefghijklmnopqrstuv",
+        "d2": "#iamceo_ABCDEFGHIJKLMNOPQRSTUV"
+      },
+      "bannerVersion": true,
+      "expect": {
+        "received": [
+          "d1"
+        ],
+        "verdict": "present",
+        "sessionMeta": true
+      }
+    },
+    {
+      "file": "rollout-absent.jsonl",
+      "kind": "log",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "sessionId": "session",
+      "markers": {
+        "d1": "#iamceo_abcdefghijklmnopqrstuv",
+        "d2": "#iamceo_ABCDEFGHIJKLMNOPQRSTUV"
+      },
+      "expect": {
+        "received": [],
+        "verdict": "absent",
+        "complete": true
+      }
+    }
+  ]
+}

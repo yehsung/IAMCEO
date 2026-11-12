@@ -1,0 +1,29 @@
+{
+  "about": "출시한 앱의 해석 코드. 출시 태그마다 하나씩 더한다. files 는 그 태그에서 Harness.swift 와 함께 따로 빌드되는 최소 묶음이다.",
+  "releases": [
+    {
+      "tag": "v0.2.2",
+      "files": [
+        "native/Sources/IAMCEO/Models/Models.swift",
+        "native/Sources/IAMCEO/Models/RealtimeModels.swift",
+        "native/Sources/IAMCEO/Models/PushModels.swift",
+        "native/Sources/IAMCEO/Models/CLIApproval.swift",
+        "native/Sources/IAMCEO/Models/FileSearch.swift",
+        "native/Sources/IAMCEO/Models/ModelCatalog.swift",
+        "native/Sources/IAMCEO/State/RankSettings.swift"
+      ]
+    },
+    {
+      "tag": "v0.2.3",
+      "files": [
+        "native/Sources/IAMCEO/Models/Models.swift",
+        "native/Sources/IAMCEO/Models/RealtimeModels.swift",
+        "native/Sources/IAMCEO/Models/PushModels.swift",
+        "native/Sources/IAMCEO/Models/CLIApproval.swift",
+        "native/Sources/IAMCEO/Models/FileSearch.swift",
+        "native/Sources/IAMCEO/Models/ModelCatalog.swift",
+        "native/Sources/IAMCEO/State/RankSettings.swift"
+      ]
+    }
+  ]
+}

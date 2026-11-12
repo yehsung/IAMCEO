@@ -33,7 +33,11 @@ SwiftUI macOS / iOS ── REST sync + WS v2 ─┐
 | `server/delivery-recovery.ts`, `server/runner/delivery-evidence.ts` | 전달 증거 수집, 상태 정정, 안전한 재전송과 전체 데이터 집계 |
 | `server/push/` | APNs 알림 대기열·기기 설정·완료 보고 묶음·발신 |
 | `server/home-owner.ts`, `server/backup.ts`, `server/restore.ts` | 데이터 홈 잠금, 검증된 백업과 별도 홈 복원 |
-| `server/storage-maintenance.ts`, `server/log-writer.ts` | 참조를 보존하는 저장소 정리, 크기 제한 로그 회전 |
+| `server/storage-maintenance.ts`, `server/log-writer.ts` | 참조를 보존하는 저장소 정리, 안쪽 기록의 보존 기한(보낸 글 사본 30일, 끝난 실행 기록·영수증 90일), 크기 제한 로그 회전 |
+| `server/doctor.ts`, `server/diagnose.ts` | 실행 환경 점검표(`GET /api/doctor`, `iamceo doctor`), 진단 파일(`POST /api/diagnose`·`iamceo diagnose`, 이 Mac에서만) |
+| `server/lifecycle/` | `iamceo upgrade`·`rollback`(DB 사본 예행, 직전 판 기록, 기동 실패 시 되돌리기)·`uninstall`, 보관 프로젝트 삭제와 프로젝트 내보내기 |
+| `server/app-version.ts`, `server/cli-version.ts` | 앱 버전 머리글과 실제로 어긋날 때만의 호환 안내, Claude·Codex 버전 기록과 견본 확인 |
+| `server/cli-text.ts` | 명령줄 문구의 언어(`IAMCEO_LANG` → `LC_ALL` → `LANG`) |
 | `bin/iamceo.ts`, `bin/mcp-bridge.ts` | 서비스·attach·MCP CLI와 표준 입출력 브리지 |
 | `native/` | SwiftUI 앱, 동기화·대화 이력·초안, iPhone 알림과 Keychain |
 | `shared/types.ts` | 서버 도메인 타입과 네이티브 모델의 기준 |
@@ -129,6 +133,10 @@ APNs 발신 대기열은 CLI 입력 대기열과 별개다. 새 기기는 알림
 | `uploads/`, `inbox/<member>/` | 첨부 원본과 멤버에게 전달할 파일 |
 | `roles/`, `run/`, `logs/` | 역할 템플릿, 호출별 규칙·MCP 설정·core 소켓, 서비스 로그 |
 | `core-state/`, `core-config/` | IAMCEO 전용 core 상태·설정 |
+| `backups/` | 정기 백업(일별 7개·주별 4개) |
+| `diagnostics/` | 진단 파일 폴더와 zip, 최근 5개 |
+| `cli-versions.json` | 서버가 읽은 Claude·Codex 버전과 처음 본 시각(비밀 없음) |
+| `upgrades/<id>/` | `iamceo upgrade`가 남긴 직전 판 기록(plist·DB 사본·이전 앱 또는 커밋) |
 
 데몬은 DB를 열거나 복구하기 전에 홈 단위 OS 잠금을 잡는다. 설정은 권한 0600의 임시 파일에 쓰고 디스크 동기화·이름 교체·디렉터리 동기화를 거쳐 저장한다. 지원하지 않는 미래 DB 버전은 쓰기 전에 거부한다. 기존 DB 마이그레이션 전에는 `VACUUM INTO` 백업을 만들며 실패하면 중단한다.
 

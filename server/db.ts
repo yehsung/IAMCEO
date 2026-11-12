@@ -693,6 +693,44 @@ export const MIGRATIONS: string[] = [
    ALTER TABLE deliveries ADD COLUMN delay_notified_at TEXT;`,
 ];
 
+/**
+ * E4: 살아 있는 것만 빨리 찾는 색인과 오래된 안쪽 기록을 정리할 때 쓰는 색인.
+ * MIGRATIONS 에 넣지 않는다: 이주 한 단계는 user_version 을 올리고, 옛 서버는 자기보다 높은 판의 DB 를 열지 않는다(supportedVersion).
+ * 색인은 옛 서버가 몰라도 그대로 쓰고 지나가므로, 판 번호를 두지 않고 열 때마다 IF NOT EXISTS 로 만든다.
+ * 부분 색인의 WHERE 는 store.ts 의 쿼리 조건과 글자까지 같아야 SQLite 가 고른다(tests/record-retention.test.ts 가 쿼리 계획으로 본다).
+ * 표·열은 여기서 만들거나 바꾸지 않는다.
+ */
+export const LIVE_INDEXES: readonly string[] = [
+  // listPendingExecutions: 끝나지 않은 실행만. 실행기 사건마다 불린다.
+  `CREATE INDEX IF NOT EXISTS execution_journal_open ON execution_journal(created_at) WHERE phase NOT IN ('ended','interrupted')`,
+  // 직원 목록(MEMBER_SELECT)이 세대별 마지막 실행 하나를 고른다.
+  `CREATE INDEX IF NOT EXISTS execution_journal_member_recent ON execution_journal(member_id, generation, created_at)`,
+  // 전달 읽기 묶음(withDeliveryRead)의 직원별 마지막 시작 실행과 결과 보고 누락 안내. 이 색인이 없으면 실행 기록 전체를 훑었다.
+  `CREATE INDEX IF NOT EXISTS execution_journal_project ON execution_journal(project_id, member_id)`,
+  // 전달 읽기 묶음이 프로젝트의 전달을 읽는다. 이 색인이 없으면 모든 프로젝트의 전달을 훑었다.
+  `CREATE INDEX IF NOT EXISTS deliveries_project ON deliveries(project_id)`,
+  // 재시작 복구가 아직 쓰지 않은 봉투만 찾는다.
+  `CREATE INDEX IF NOT EXISTS delivery_dispatches_prepared ON delivery_dispatches(created_at) WHERE transport_state = 'prepared'`,
+  // 시작할 때 결과를 모르는 영수증만 찾는다.
+  `CREATE INDEX IF NOT EXISTS operation_receipts_pending ON operation_receipts(created_at) WHERE status = 'pending'`,
+  // 보존 기한 정리(Store.pruneInternalRecords)가 끝난 것만 시각 순으로 찾는다.
+  `CREATE INDEX IF NOT EXISTS delivery_dispatches_settled ON delivery_dispatches(updated_at) WHERE transport_state IN ('accepted','rejected')`,
+  `CREATE INDEX IF NOT EXISTS operation_receipts_settled ON operation_receipts(updated_at) WHERE status != 'pending'`,
+  `CREATE INDEX IF NOT EXISTS agent_operation_receipts_created ON agent_operation_receipts(created_at)`,
+  `CREATE INDEX IF NOT EXISTS delivery_recovery_operations_created ON delivery_recovery_operations(created_at)`,
+];
+
+/** 색인이 하나 실패해도(디스크 부족 등) 서버는 뜬다. 색인은 빠르게 할 뿐 결과를 바꾸지 않는다. */
+export function ensureLiveIndexes(db: Database): string[] {
+  const failed: string[] = [];
+  for (const sql of LIVE_INDEXES) {
+    try { db.exec(sql); }
+    catch { failed.push(/INDEX IF NOT EXISTS (\S+)/.exec(sql)?.[1] ?? sql); }
+  }
+  if (failed.length) console.warn(`[db] 보조 색인을 만들지 못했습니다(다음 시작 때 다시 합니다): ${failed.join(", ")}`);
+  return failed;
+}
+
 const PRE_MIGRATION_KEEP = 3;
 const PRE_MIGRATION_KEEP_MS = 86_400_000;
 
@@ -774,6 +812,8 @@ export function openDb(path: string): Database {
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA synchronous = NORMAL");
     migrate(db);
+    // E4: 판 번호를 올리지 않는 보조 색인. 이전 판 서버도 이 DB 를 그대로 연다.
+    ensureLiveIndexes(db);
     // 이주가 끝났으면 최근 사본 몇 개만 남긴다. 하루 안에 만든 것은 개수와 상관없이 둔다.
     if (backup) removePreMigrationBackups(path, all => all.slice(PRE_MIGRATION_KEEP).filter(entry => Date.now() - entry.at > PRE_MIGRATION_KEEP_MS));
     // Source parsing/index failures cannot roll back the schema or delay server startup.

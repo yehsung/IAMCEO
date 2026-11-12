@@ -87,6 +87,8 @@ esac`);
     IAMCEO_HOME: join(path, "iamceo"), IAMCEO_PORT: "0", IAMCEO_CORE_BIN: "/usr/bin/false",
     IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false",
     IAMCEO_CORE_SOCKET: join(path, "no-core.sock"), IAMCEO_HERDR_SOCKET: join(path, "no-herdr.sock"),
+    // 문구는 이 값으로 고른다(없으면 LANG). 아래 단언은 한국어 문구를 본다. 영어는 'installer: English' 시험이 본다.
+    IAMCEO_LANG: "ko",
   };
   const run = (extra: NodeJS.ProcessEnv = {}) => {
     const result = Bun.spawnSync(["/bin/sh", join(root, "install.sh")], { env: { ...env, ...extra }, stdout: "pipe", stderr: "pipe" });
@@ -106,6 +108,23 @@ test("installer: latest checksummed DMG installs in a path with spaces, detaches
     `file://${f.release}/SHA256SUMS`, `file://${f.release}/${f.dmgName}`,
   ]);
   expect(new Bun.Glob("*").scanSync({ cwd: f.env.TMPDIR }).next().done).toBe(true);
+});
+
+test("installer: English messages when IAMCEO_LANG or LANG is not Korean, Korean when LANG starts with ko", () => {
+  const english = fixture().run({ IAMCEO_LANG: "en", LANG: "ko_KR.UTF-8" });
+  expect(english.code, english.output).toBe(0);
+  expect(english.output).toContain("Installed:");
+  expect(english.output).toContain("Start on this Mac");
+  expect(english.output).not.toMatch(/설치했습니다|받는 중/);
+  const byLang = fixture().run({ IAMCEO_LANG: "", LANG: "ko_KR.UTF-8" });
+  expect(byLang.code, byLang.output).toBe(0);
+  expect(byLang.output).toContain("설치했습니다:");
+  const plain = fixture().run({ IAMCEO_LANG: "", LANG: "C" });
+  expect(plain.output).toContain("Installed:");
+  const refused = fixture().run({ IAMCEO_LANG: "en", IAMCEO_INSTALL_DIR: "relative/path" });
+  expect(refused.code).not.toBe(0);
+  expect(refused.output).toContain("IAMCEO install failed: IAMCEO_INSTALL_DIR must be an absolute path.");
+  expect(refused.output).not.toContain("설치 실패");
 });
 
 test("installer: pinned version replaces an existing stopped app", () => {
@@ -161,7 +180,8 @@ test("service update: fake launchctl success cannot hide authenticated readiness
   };
   await service(["install"], dependencies);
   calls.length = 0; ready = false;
-  await expect(service(["install", "--restart"], dependencies)).rejects.toThrow("복구 완료 대기");
+  // 명령줄 문구는 실행 환경의 언어(LANG)를 따른다(server/cli-text.ts). 시험은 두 언어 모두 받는다.
+  await expect(service(["install", "--restart"], dependencies)).rejects.toThrow(/복구 완료 대기|waiting for recovery to finish/);
   expect(calls).toEqual(["print", "bootout", "print", "bootstrap", "readiness"]);
 });
 

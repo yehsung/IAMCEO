@@ -13,7 +13,7 @@ Mac과 iPhone 한 화면에서 지시하고 결재합니다.
 [![플랫폼](https://img.shields.io/badge/macOS%2014%2B%20%C2%B7%20iOS%2017%2B-1f1633?style=flat-square&logo=apple)](#설치)
 [![라이선스](https://img.shields.io/badge/license-Sustainable%20Use%201.0-6d28d9?style=flat-square)](LICENSE)
 
-[설치](#설치) · [빠른 시작](#빠른-시작) · [용어](#용어) · [무엇이 다른가](#무엇이-다른가) · [어떻게 돌아가나](#어떻게-돌아가나) · [보안](docs/security.md) · [변경 기록](CHANGELOG.md) · [English](README.md)
+[설치](#설치) · [빠른 시작](#빠른-시작) · [사용자 문서](docs/guide/README.md) · [용어](#용어) · [무엇이 다른가](#무엇이-다른가) · [어떻게 돌아가나](#어떻게-돌아가나) · [보안](docs/security.md) · [변경 기록](CHANGELOG.md) · [English](README.md)
 
 <img src="docs/assets/hero.jpg" alt="IAMCEO Mac 앱과 iPhone 앱의 홈 화면" />
 
@@ -51,12 +51,24 @@ brew install --cask yehsung/tap/iamceo
    > 총괄: 접수했습니다 — 화면 문구 팀장에게 맡겼습니다.
 4. 결정할 일은 **결재함**, 결과물은 **자료**, 내가 직접 할 일은 **홈**에 모입니다.
 
-**iPhone:** Mac과 iPhone을 [Tailscale](https://tailscale.com)에 연결한 뒤 Mac 앱의 **iPhone 연결** QR을 찍습니다. iPhone 앱은 [App Store에서 받습니다](https://apps.apple.com/app/id6831782194). 쓰던 iPhone이 연결되지 않으면 Mac의 Tailscale이 켜져 있는지 확인해 주세요. 꺼져 있으면 Mac 앱이 알려 줍니다.
+**iPhone:** Mac과 iPhone을 [Tailscale](https://tailscale.com)에 연결한 뒤 Mac 앱의 **iPhone 연결** QR을 찍습니다. iPhone 앱은 [App Store에서 받습니다](https://apps.apple.com/app/id6831782194). 쓰던 iPhone이 연결되지 않으면 Mac의 Tailscale이 켜져 있는지 확인해 주세요. 꺼져 있으면 Mac 앱이 알려 줍니다. → [iPhone 연결](docs/guide/iphone.md)
+
+**막히면:** 설정 → AI 모델 → 실행 환경이 실행 엔진, Claude Code·Codex 로그인, Tailscale, 자동 시작, 백업을 항목마다 점검하고 고치는 법을 알려 줍니다. 명령줄의 `iamceo doctor`도 같은 점검을 합니다. → [문제 해결](docs/guide/troubleshooting.md)
 
 ### 알림
 
 - **Mac:** 됩니다. Mac 앱의 설정에서 **Mac 알림**을 켭니다.
 - **iPhone:** 알림은 내 Mac의 서버에 그 iPhone 앱의 Apple 알림 키가 있을 때만 갑니다. IAMCEO가 운영하는 서버가 없어서 대신 보내 줄 곳이 없습니다. 그래서 App Store에서 받은 iPhone 앱은 **지금 알림을 받을 수 없습니다.** 직접 빌드한 iPhone 앱과 자신의 키가 있을 때만 됩니다 → [네이티브 안내](native/README.md#iphone-apns-and-signing)
+
+### 사용자 문서
+
+| 문서 | 무엇을 |
+|---|---|
+| [시작하기](docs/guide/getting-started.md) | 준비물 점검표, 설치, 첫 프로젝트, 보고 언어, 명령줄 도구 |
+| [문제 해결](docs/guide/troubleshooting.md) | 실행 환경 점검, 자주 막히는 곳, 진단 파일, 역할 지침 고치기 |
+| [iPhone 연결](docs/guide/iphone.md) | Tailscale·MagicDNS, 연결 QR, 알림의 조건 |
+| [업그레이드·백업·제거](docs/guide/upgrade-backup-uninstall.md) | 새 버전과 되돌리기, 백업과 새 Mac, 보존 기한, 프로젝트 내보내기·삭제, 완전히 멈추기 |
+| [보안 설명서](docs/security.md) | 무엇을 믿고, 막고, 막지 못하는지 |
 
 ## 용어
 

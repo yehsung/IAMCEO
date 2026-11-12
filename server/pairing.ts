@@ -16,7 +16,7 @@ export type PairStatus = "pending" | "claimed" | "connected" | "expired";
  * 서버가 다시 켜지면 코드는 사라진다(화면에서 새 QR 을 만들면 된다).
  */
 export class Pairing {
-  private readonly codes = new Map<string, { expiresAt: number; status: PairStatus; confirmationToken?: string }>();
+  private readonly codes = new Map<string, { expiresAt: number; status: PairStatus; confirmationToken?: string; owner?: string }>();
   private readonly failures = new Map<string, number[]>();
 
   constructor(private readonly now: () => number = Date.now) {}
@@ -26,7 +26,17 @@ export class Pairing {
     this.codes.clear();
   }
 
-  start(): { code: string; expiresAt: number } {
+  /** 그 자격이 만든 QR 만 폐기한다(기기 하나를 끊을 때). owner 는 start 에 준 이름이다. */
+  invalidateOwner(owner: string): void {
+    for (const [code, entry] of this.codes) if (entry.owner === owner) this.codes.delete(code);
+  }
+
+  /** 교환은 됐지만 그 뒤를 잇지 못한 코드(열쇠 저장 실패)를 버린다. Mac 화면은 '시간이 지남'으로 보고 새 QR 을 만든다. */
+  discard(raw: string): void {
+    this.codes.delete(normalizePairCode(raw));
+  }
+
+  start(owner?: string): { code: string; expiresAt: number } {
     this.prune();
     while ([...this.codes.values()].filter((entry) => entry.status === "pending").length >= MAX_OPEN_CODES || this.codes.size >= 128) {
       const oldest = this.codes.size >= 128 ? this.codes.keys().next().value
@@ -39,7 +49,7 @@ export class Pairing {
       code = Array.from({ length: PAIR_CODE_LENGTH }, () => ALPHABET[randomInt(ALPHABET.length)]).join("");
     } while (this.codes.has(code));
     const expiresAt = this.now() + PAIR_CODE_TTL_MS;
-    this.codes.set(code, { expiresAt, status: "pending" });
+    this.codes.set(code, { expiresAt, status: "pending", ...(owner ? { owner } : {}) });
     return { code, expiresAt };
   }
 

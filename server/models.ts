@@ -81,7 +81,7 @@ export class ModelCatalogReader {
     const list = this.read()[cli].models;
     if (list.some(model => model.value === value) ||
         (cli === "claude" && value === "fable" && list.some(model => model.label.toLowerCase() === "fable"))) return;
-    throw new ApiError(400, "목록에 없는 모델입니다");
+    throw new ApiError(400, "목록에 없는 모델입니다", "model_unknown");
   }
 
   efforts(cli: CliProvider, value?: string | null): readonly string[] {
@@ -92,7 +92,7 @@ export class ModelCatalogReader {
   }
 
   requireEffort(cli: CliProvider, model: string | null | undefined, effort: string | null | undefined): void {
-    if (effort != null && !this.efforts(cli, model).includes(effort)) throw new ApiError(400, `${cli}에서 지원하지 않는 effort입니다`);
+    if (effort != null && !this.efforts(cli, model).includes(effort)) throw new ApiError(400, `${cli}에서 지원하지 않는 effort입니다`, "effort_unsupported");
   }
 
   memberPatch(member: Member, input: PatchMemberReq, settings: Settings): { patch: PatchMemberReq; resetOverrides: NonNullable<Member["resetOverrides"]> } {

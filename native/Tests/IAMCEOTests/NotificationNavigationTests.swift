@@ -96,7 +96,8 @@ import XCTest
         XCTAssertNil(first.decisionID, "The pending route is consumed once")
     }
     func testResetDeliveredDuringSelectionAndUserNavigationCancelsPendingRoute() async throws {
-        let router = Router()
+        // Mac 의 옆 칸 선택(memberID)으로 본다. iPhone 의 탭 안 쌓기는 IPhoneOnlyTests 가 본다.
+        let router = Router(usesPhoneNavigation: false)
         let reset = router.projectResetRevision
         router.resetForProjectChange()
         router.applyNotification(NotificationRoute(target: .team(projectId: "q", memberId: "m")), afterProjectChange: true, resetRevision: reset)

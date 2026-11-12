@@ -59,13 +59,20 @@ import { DEFAULT_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOWS, exactSource } from "./
 import { MAX_PROJECT_NAME, MAX_ROLE, nameProblem, oneLineProblem, RESERVED_HANDLES, workerNameProblem } from "./text.ts";
 import { cleanName, cleanText, conductorName } from "./text.ts";
 import { parseRestartWake, type RestartWake } from "./restart-wake.ts";
+import type { ErrorCode } from "../shared/error-codes.ts";
+import { deliveryNoteCode } from "./hold-codes.ts";
 
-/** status 가 그대로 HTTP 응답 코드가 되는 오류. */
+/**
+ * status 가 그대로 HTTP 응답 코드가 되는 오류. 응답 몸은 `{ error: message, code, reason? }`.
+ * 동작은 code(·reason)로만 가른다. message 는 표시용이라 문구를 다듬어도 동작이 바뀌지 않아야 한다(shared/error-codes.ts).
+ */
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
-    readonly code?: string,
+    readonly code: ErrorCode,
+    /** 이미 내보낸 넓은 코드(TERMINAL_REFUSED 등) 아래의 좁은 사유. 넓은 코드 이름은 출시된 앱이 보므로 바꾸지 않고 이 칸으로 더한다. */
+    readonly reason?: ErrorCode,
   ) {
     super(message);
     this.name = "ApiError";
@@ -110,7 +117,10 @@ export type MemberPatch = Partial<
     Member,
     "name" | "role" | "cli" | "origin" | "backend" | "modelOverride" | "effortOverride" | "status" | "now" | "next" | "cwd" | "sessionId" | "paneId" | "contextPct" | "contextWindow" | "contextWindowSource" | "subagents" | "parallel" | "lastError" | "statusObservation" | "blockedReason" | "subagentState" | "nowAt" | "manualActivityAt"
   >
->;
+> & {
+  /** lastError 가 뜻하는 보류의 코드(server/hold-codes.ts). lastError 를 바꾸면서 이 칸을 주지 않으면 지운다(보류가 아닌 글로 덮였다). */
+  fenceCode?: ErrorCode | null;
+};
 
 
 /** 지금 세션에 실제로 들어간 설정. 값이 달라지면 쉴 때 세션을 다시 연다. */
@@ -353,8 +363,8 @@ export interface DeliveryUpdate {
   attempt?: boolean;
 }
 
-/** 가져온 프로젝트의 못 읽은 말에 붙는 표시. 재시작 정리가 이 말을 실패로 바꾸지 않게 가른다. */
-export const IMPORT_HOLD_NOTE = "총괄을 시작하면 전달됩니다";
+/** 가져온 프로젝트의 못 읽은 말에 붙는 표시. 재시작 정리는 이 표시의 코드(held_import)로 이 말을 실패로 바꾸지 않게 가른다. */
+export { IMPORT_HOLD_NOTE } from "./hold-codes.ts";
 
 export const DEFAULT_SETTINGS: Settings = {
   backend: "core",
@@ -500,6 +510,7 @@ function toMember(r: Row): Member {
     parallel: !!r.parallel,
     queuedCount: r.queued_count,
     lastError: r.last_error,
+    ...(r.fence_code ? { fenceCode: r.fence_code } : {}),
     lastActiveAt: r.last_active_at ?? null,
     updatedAt: r.updated_at,
     createdAt: r.created_at,
@@ -625,6 +636,7 @@ function toMessage(r: Row): Message {
     delivery: r.delivery === "dismissed" ? "held" : r.delivery,
     ...(r.delivery === "dismissed" ? { deliveryDisposition: "dismissed" as const } : {}),
     deliveryNote: r.delivery_note,
+    ...(r.delivery_code ? { deliveryCode: r.delivery_code } : {}),
     deliveryRevision: r.delivery_revision,
     contextFileId: r.context_file_id ?? null,
   };
@@ -739,6 +751,7 @@ const MEMBER_COLUMNS: Record<keyof MemberPatch, string> = {
   subagents: "subagents",
   parallel: "parallel",
   lastError: "last_error",
+  fenceCode: "fence_code",
   statusObservation: "status_observation_json",
   blockedReason: "blocked_reason",
   subagentState: "subagent_state_json",
@@ -749,14 +762,14 @@ const MEMBER_COLUMNS: Record<keyof MemberPatch, string> = {
 function checkMemberText(name: string | undefined, role: string | undefined, kind: MemberKind): void {
   // 총괄·본사 AI 의 이름은 서버가 정한다. 직원만 대표·총괄처럼 보이는 이름을 못 쓴다.
   const problem = (name !== undefined && (kind === "worker" ? workerNameProblem(name) : nameProblem(name))) || null;
-  if (problem) throw new ApiError(400, `이름이 잘못되었습니다: ${problem}`);
+  if (problem) throw new ApiError(400, `이름이 잘못되었습니다: ${problem}`, "name_invalid");
   const roleProblem = role !== undefined ? oneLineProblem(role, MAX_ROLE) : null;
-  if (roleProblem) throw new ApiError(400, `역할이 잘못되었습니다: ${roleProblem}`);
+  if (roleProblem) throw new ApiError(400, `역할이 잘못되었습니다: ${roleProblem}`, "role_invalid");
 }
 
 function checkProjectName(name: string | undefined): void {
   const problem = name !== undefined ? oneLineProblem(name, MAX_PROJECT_NAME) : null;
-  if (problem) throw new ApiError(400, `프로젝트 이름이 잘못되었습니다: ${problem}`);
+  if (problem) throw new ApiError(400, `프로젝트 이름이 잘못되었습니다: ${problem}`, "project_name_invalid");
 }
 
 /** 실행기가 지금 쓸 수 있는가. 모르면(아직 안 물어봄) 쓸 수 있는 것으로 친다. */
@@ -1205,8 +1218,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   withdrawInstruction(id: string, actor: Member): void {
     this.transaction(() => {
       const d = this.requireDelivery(id);
-      if (actor.kind !== "conductor" || actor.projectId !== d.projectId || d.kind !== "instruction" || this.row("SELECT assigned_by FROM deliveries WHERE id = ?", id)?.assigned_by !== actor.id) throw new ApiError(403, "자신이 보낸 지시만 거둘 수 있습니다");
-      if (!["queued", "held"].includes(d.status) || this.listDispatches(d.memberId).some(x => x.items.some(i => i.deliveryId === id) && ["write_started", "unknown", "accepted"].includes(x.transportState))) throw new ApiError(409, "이미 쓰기 시작한 지시는 거둘 수 없습니다");
+      if (actor.kind !== "conductor" || actor.projectId !== d.projectId || d.kind !== "instruction" || this.row("SELECT assigned_by FROM deliveries WHERE id = ?", id)?.assigned_by !== actor.id) throw new ApiError(403, "자신이 보낸 지시만 거둘 수 있습니다", "instruction_not_own");
+      if (!["queued", "held"].includes(d.status) || this.listDispatches(d.memberId).some(x => x.items.some(i => i.deliveryId === id) && ["write_started", "unknown", "accepted"].includes(x.transportState))) throw new ApiError(409, "이미 쓰기 시작한 지시는 거둘 수 없습니다", "instruction_started");
       for (const dispatch of this.listDispatches(d.memberId)) if (dispatch.transportState === "prepared" && dispatch.items.some(i => i.deliveryId === id)) this.updateDispatch(dispatch.dispatchId, "prepared", "rejected");
       const r = this.getDeliveryRecovery(id)!;
       this.updateDeliveryRecovery(id, r.version, { phase: "stopped", reason: "withdrawn", nextCheckAt: null });
@@ -1391,10 +1404,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
    */
   requireReachable(projectId: string, target: Member | null): void {
     const project = this.requireProject(projectId);
-    if (!project.connection.ok) throw new ApiError(409, project.connection.detail ?? "연결되어야 쓸 수 있습니다");
+    if (!project.connection.ok) throw new ApiError(409, project.connection.detail ?? "연결되어야 쓸 수 있습니다", "project_disconnected");
     if (this.runnerUsable(project.runnerEnabled)) return;
     if (target?.origin === "manual" && !["offline", "asleep", "error"].includes(target.status)) return;
-    throw new ApiError(409, "실행기가 연결되지 않아 직접 띄운 세션에게만 보낼 수 있습니다. 받을 세션을 @로 골라 주세요");
+    throw new ApiError(409, "실행기가 연결되지 않아 직접 띄운 세션에게만 보낼 수 있습니다. 받을 세션을 @로 골라 주세요", "runner_disconnected_manual_only");
   }
 
   /**
@@ -1439,7 +1452,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     // 총괄이 없어 전달 항목 없이 보류된 말과, 받을 사람이 없어 멈춘 답.
     for (const p of this.rows("SELECT id FROM projects WHERE runner_enabled = 0")) {
       const linked = new Set(this.rows("SELECT ref_id FROM deliveries WHERE project_id = ? AND status IN ('queued','held','delivering')", p.id).map((r) => r.ref_id));
-      for (const r of this.rows("SELECT id FROM messages WHERE project_id = ? AND mine = 1 AND delivery IN ('held','queued') AND target_member_id IS NULL AND COALESCE(delivery_note, '') != ?", p.id, IMPORT_HOLD_NOTE)) {
+      for (const r of this.rows("SELECT id FROM messages WHERE project_id = ? AND mine = 1 AND delivery IN ('held','queued') AND target_member_id IS NULL AND COALESCE(delivery_code, '') != 'held_import'", p.id)) {
         if (linked.has(r.id)) continue;
         this.setMessageDelivery(r.id, "failed", note);
         out.messages++;
@@ -1463,7 +1476,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   requireProject(id: string): Project {
     const p = this.getProject(id);
-    if (!p) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+    if (!p) throw new ApiError(404, "프로젝트를 찾을 수 없습니다", "project_not_found");
     return p;
   }
 
@@ -1506,19 +1519,19 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   validateProjectPatch(id: string, patch: ProjectPatch): ProjectPatch {
     const project = this.requireProject(id);
-    if (patch.archived === true && patch.runnerEnabled === true) throw new ApiError(400, "보관과 실행 켜기를 함께 요청할 수 없습니다");
-    if (project.isHq && patch.archived === true) throw new ApiError(400, "본사는 보관할 수 없습니다");
+    if (patch.archived === true && patch.runnerEnabled === true) throw new ApiError(400, "보관과 실행 켜기를 함께 요청할 수 없습니다", "project_archive_and_run");
+    if (project.isHq && patch.archived === true) throw new ApiError(400, "본사는 보관할 수 없습니다", "root_project_archive");
     if (patch.name !== undefined) {
       // trim 전에도 줄바꿈/제어문자는 거부한다.
       const problem = oneLineProblem(patch.name, Number.MAX_SAFE_INTEGER);
-      if (problem) throw new ApiError(400, problem);
+      if (problem) throw new ApiError(400, problem, "project_name_invalid");
       patch = { ...patch, name: patch.name.trim() };
       checkProjectName(patch.name);
-      if (!patch.name) throw new ApiError(400, "프로젝트 이름이 필요합니다");
+      if (!patch.name) throw new ApiError(400, "프로젝트 이름이 필요합니다", "project_name_required");
       const lead = this.getConductor(id);
       const name = this.projectConductorName(patch.name);
       if (lead?.kind === "conductor" && (lead.name === conductorName(project.name) || lead.name === this.projectConductorName(project.name)) && this.row("SELECT 1 FROM members WHERE project_id = ? AND id != ? AND name = ?", id, lead.id, name)) {
-        throw new ApiError(409, "새 총괄 이름과 같은 팀장이 있습니다");
+        throw new ApiError(409, "새 총괄 이름과 같은 팀장이 있습니다", "lead_name_taken");
       }
     }
     return { ...patch };
@@ -1632,7 +1645,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   requireMember(id: string): Member {
     const m = this.getMember(id);
-    if (!m) throw new ApiError(404, "팀원을 찾을 수 없습니다");
+    if (!m) throw new ApiError(404, "팀원을 찾을 수 없습니다", "member_not_found");
     return m;
   }
 
@@ -1646,7 +1659,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   /** MCP 설정 파일을 쓸 때만 쓴다. 화면으로 보내지 않는다. */
   getMemberToken(id: string): string {
     const r = this.row("SELECT token FROM members WHERE id = ?", id);
-    if (!r) throw new ApiError(404, "팀원을 찾을 수 없습니다");
+    if (!r) throw new ApiError(404, "팀원을 찾을 수 없습니다", "member_not_found");
     return r.token;
   }
 
@@ -1679,11 +1692,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.transaction(() => {
       const project = this.requireProject(input.projectId);
       checkMemberText(input.name, input.role, input.kind);
-      if (input.kind === "worker" && RESERVED_HANDLES.has(input.handle)) throw new ApiError(400, `총괄 자리의 핸들이라 팀장에게 쓸 수 없습니다: ${input.handle}`);
-      if (!HANDLE_RE.test(input.handle)) throw new ApiError(400, "핸들은 영문 소문자로 시작하고 영문 소문자·숫자·_·- 만 쓸 수 있습니다(32자 이내)");
-      if (this.getMemberByHandle(input.projectId, input.handle)) throw new ApiError(409, `이미 있는 핸들입니다: ${input.handle}`);
+      if (input.kind === "worker" && RESERVED_HANDLES.has(input.handle)) throw new ApiError(400, `총괄 자리의 핸들이라 팀장에게 쓸 수 없습니다: ${input.handle}`, "handle_reserved");
+      if (!HANDLE_RE.test(input.handle)) throw new ApiError(400, "핸들은 영문 소문자로 시작하고 영문 소문자·숫자·_·- 만 쓸 수 있습니다(32자 이내)", "handle_invalid");
+      if (this.getMemberByHandle(input.projectId, input.handle)) throw new ApiError(409, `이미 있는 핸들입니다: ${input.handle}`, "handle_taken");
       if (this.row("SELECT 1 FROM members WHERE project_id = ? AND name = ?", input.projectId, input.name)) {
-        throw new ApiError(409, `이미 있는 이름입니다: ${input.name}`);
+        throw new ApiError(409, `이미 있는 이름입니다: ${input.name}`, "name_taken");
       }
       const id = newId("m_");
       const at = nowIso();
@@ -1736,6 +1749,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const usageMark = patch.blockedReason === "usage_limit" || (patch.blockedReason === undefined && before.blockedReason === "usage_limit");
       if (patch.status !== undefined && patch.status !== "blocked" && !usageMark) patch = { ...patch, blockedReason: null };
       else if (patch.status === "blocked" && before.status !== "blocked" && patch.blockedReason === undefined) patch = { ...patch, blockedReason: "status_unknown" };
+      // 보류 코드는 lastError 와 짝이다. lastError 를 바꾸면서 코드를 주지 않으면 보류가 아닌 글로 덮인 것이라 지운다(옛 앞머리 판정과 같은 결과).
+      if (patch.lastError !== undefined && patch.fenceCode === undefined) patch = { ...patch, fenceCode: null };
+      if (patch.fenceCode === null && !before.fenceCode) { const { fenceCode: _, ...rest } = patch; patch = rest; }
       const at = nowIso();
       if (patch.now !== undefined && patch.nowAt === undefined) patch = { ...patch, nowAt: at };
       const changed = Object.entries(patch).filter(([key, value]) => value !== undefined && JSON.stringify(value) !== JSON.stringify(before[key as keyof MemberPatch]));
@@ -1823,7 +1839,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   requireDecision(id: string): Decision {
     const d = this.getDecision(id);
-    if (!d) throw new ApiError(404, "결재를 찾을 수 없습니다");
+    if (!d) throw new ApiError(404, "결재를 찾을 수 없습니다", "decision_not_found");
     return d;
   }
 
@@ -1901,8 +1917,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     const batch = !!req.batch;
     const choice = req.choice?.trim() || (batch ? d.rec : null);
     const note = req.note?.trim() || null;
-    if (!choice && !note) throw new ApiError(400, "선택지나 메모가 필요합니다");
-    if (choice && !d.options.some((o) => o.k === choice)) throw new ApiError(400, `없는 선택지입니다: ${choice}`);
+    if (!choice && !note) throw new ApiError(400, "선택지나 메모가 필요합니다", "decision_answer_empty");
+    if (choice && !d.options.some((o) => o.k === choice)) throw new ApiError(400, `없는 선택지입니다: ${choice}`, "decision_option_unknown");
     return { choice, note, batch };
   }
 
@@ -1914,11 +1930,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     const d = this.requireDecision(id);
     const a = this.normalizeAnswer(d, req);
     if (d.status === "open") {
-      if (req.expectedVersion && req.expectedVersion !== d.updatedAt) throw new ApiError(409, "결재가 변경되었습니다. 새로 불러온 뒤 다시 답하세요");
+      if (req.expectedVersion && req.expectedVersion !== d.updatedAt) throw new ApiError(409, "결재가 변경되었습니다. 새로 불러온 뒤 다시 답하세요", "decision_changed");
       return null;
     }
     if (d.choice === a.choice && d.note === a.note && d.batch === a.batch) return d;
-    throw new ApiError(409, "이미 처리한 결재입니다");
+    throw new ApiError(409, "이미 처리한 결재입니다", "decision_already_answered");
   }
 
   /** 멱등: changed=false 면 같은 답이 이미 기록되어 있어 아무것도 안 했다. 다른 답이면 409. */
@@ -1975,7 +1991,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   closeDecision(id: string, input: { kind: DecisionCloseKind | null; reason: string; by: string; quote?: string | null }): Decision {
     return this.transaction(() => {
       const before = this.requireDecision(id);
-      if (before.status !== "open") throw new ApiError(409, before.status === "closed" ? "이미 닫힌 결재입니다" : "대표가 이미 답한 결재입니다");
+      if (before.status !== "open") throw new ApiError(409, before.status === "closed" ? "이미 닫힌 결재입니다" : "대표가 이미 답한 결재입니다", "decision_closed");
       const at = nowIso();
       if (before.usageLimit) this.run("UPDATE decisions SET usage_limit_json = ? WHERE id = ?", JSON.stringify({ ...before.usageLimit, stillLimited: false }), id);
       this.run(
@@ -2033,7 +2049,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   requireTodo(id: string): Todo {
     const t = this.getTodo(id);
-    if (!t) throw new ApiError(404, "할 일을 찾을 수 없습니다");
+    if (!t) throw new ApiError(404, "할 일을 찾을 수 없습니다", "todo_not_found");
     return t;
   }
 
@@ -2130,7 +2146,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   closeTodo(id: string, input: { outcome: TodoOutcome; reason: string; by: string }): Todo {
     return this.transaction(() => {
       const before = this.requireTodo(id);
-      if (before.done) throw new ApiError(409, "이미 끝났거나 정리된 할 일입니다");
+      if (before.done) throw new ApiError(409, "이미 끝났거나 정리된 할 일입니다", "todo_finished");
       const at = nowIso();
       this.run(
         "UPDATE todos SET revision = revision + 1, done = 1, done_at = ?, outcome = ?, close_reason = ?, closed_by = ?, updated_at = ? WHERE id = ? AND done = 0",
@@ -2193,7 +2209,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const doneAt = input.sec === "done" ? at : null;
       if (input.id) {
         const existing = this.getWork(input.id);
-        if (!existing || existing.projectId !== input.projectId) throw new ApiError(404, `일 항목을 찾을 수 없습니다: ${input.id}`);
+        if (!existing || existing.projectId !== input.projectId) throw new ApiError(404, `일 항목을 찾을 수 없습니다: ${input.id}`, "board_item_not_found");
         this.run(
           "UPDATE work SET sec = ?, title = ?, detail = ?, who = ?, done_at = ?, updated_at = ? WHERE id = ?",
           input.sec,
@@ -2244,7 +2260,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   requireMessage(id: string): Message {
     const m = this.getMessage(id);
-    if (!m) throw new ApiError(404, "메시지를 찾을 수 없습니다");
+    if (!m) throw new ApiError(404, "메시지를 찾을 수 없습니다", "message_not_found");
     return m;
   }
 
@@ -2271,7 +2287,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   private messagePage(projectId: string, opts: MessagePageOptions, archived: boolean): MessagePage {
     const project = this.requireProject(projectId);
-    if (project.archived !== archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+    if (project.archived !== archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다", "project_not_found");
     const limit = opts.limit ?? 200;
     if (!Number.isInteger(limit) || limit < 1 || limit > 500 || !projectId || Buffer.byteLength(projectId) > 256) throw new ApiError(400, "대화 조회 조건이 잘못되었습니다", "INVALID_MESSAGE_PAGE_QUERY");
     const scope = this.messageScope(projectId, opts.scope);
@@ -2316,7 +2332,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     const hasOlder = rows.length > limit;
     const items = this.messagesFrom(projectId, rows.slice(0, limit).reverse());
     const first = items[0];
-    if (hasOlder && first && (Buffer.byteLength(first.at) > 128 || Buffer.byteLength(first.id) > 256 || !first.at || !first.id)) throw new ApiError(500, "저장된 메시지의 위치 정보가 올바르지 않습니다");
+    if (hasOlder && first && (Buffer.byteLength(first.at) > 128 || Buffer.byteLength(first.id) > 256 || !first.at || !first.id)) throw new ApiError(500, "저장된 메시지의 위치 정보가 올바르지 않습니다", "message_cursor_corrupt");
     return { projectId, scope, items, hasOlder, nextCursor: hasOlder && first ? Buffer.from(JSON.stringify({ v: 1, projectId, scope, before: { at: first.at, id: first.id } })).toString("base64url") : null };
   }
 
@@ -2331,7 +2347,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   archiveState(projectId: string): ArchiveProjectState {
     return this.transaction(() => {
       const state = this.projectState(projectId);
-      if (!state.project.archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+      if (!state.project.archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다", "project_not_found");
       return { ...state, project: { ...state.project, archived: true } };
     });
   }
@@ -2432,7 +2448,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     this.requireProject(projectId);
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new ApiError(400, "대화 조회 조건이 잘못되었습니다", "INVALID_MESSAGE_PAGE_QUERY");
     const anchor = this.requireMessage(messageId);
-    if (anchor.projectId !== projectId) throw new ApiError(404, "메시지를 찾을 수 없습니다");
+    if (anchor.projectId !== projectId) throw new ApiError(404, "메시지를 찾을 수 없습니다", "message_not_found");
     const older = this.rows("SELECT * FROM messages WHERE project_id = ? AND (at, id) < (?, ?) ORDER BY at COLLATE BINARY DESC, id COLLATE BINARY DESC LIMIT ?", projectId, anchor.at, anchor.id, Math.floor((limit - 1) / 2));
     const newer = this.rows("SELECT * FROM messages WHERE project_id = ? AND (at, id) > (?, ?) ORDER BY at COLLATE BINARY, id COLLATE BINARY LIMIT ?", projectId, anchor.at, anchor.id, limit - 1 - older.length);
     const around = this.messagesFrom(projectId, [...older.reverse(), ...newer]);
@@ -2453,15 +2469,15 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         const row = this.row("SELECT * FROM messages WHERE id = ?", input.id);
         const existing = row ? this.messageFrom(row, false) : null;
         if (existing) {
-          if (existing.projectId !== input.projectId) throw new ApiError(409, "다른 프로젝트에서 사용된 메시지 ID입니다");
+          if (existing.projectId !== input.projectId) throw new ApiError(409, "다른 프로젝트에서 사용된 메시지 ID입니다", "message_id_conflict");
           return existing;
         }
       }
       this.requireProject(input.projectId);
       const id = input.id ?? newId("msg_");
       this.run(
-        `INSERT INTO messages (id, project_id, at, mine, member_id, who, kind, title, body, target_member_id, target_name, decision_id, file_id, attachments, delivery, delivery_note)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (id, project_id, at, mine, member_id, who, kind, title, body, target_member_id, target_name, decision_id, file_id, attachments, delivery, delivery_note, delivery_code)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id,
         input.projectId,
         input.at ?? this.nextMessageAt(),
@@ -2478,6 +2494,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         JSON.stringify(input.attachments ?? []),
         input.delivery ?? null,
         input.deliveryNote ?? null,
+        deliveryNoteCode(input.deliveryNote),
       );
       if (input.contextFileId) this.run("UPDATE messages SET context_file_id = ? WHERE id = ?", input.contextFileId, id);
       const message = this.messageFrom(this.row("SELECT * FROM messages WHERE id = ?", id)!, false);
@@ -2497,7 +2514,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.transaction(() => {
       const current = this.requireMessage(id);
       if ((current.deliveryDisposition ?? current.delivery) === delivery && current.deliveryNote === note) return current;
-      this.run("UPDATE messages SET delivery = ?, delivery_note = ?, delivery_revision = delivery_revision + 1 WHERE id = ?", delivery, note, id);
+      // 정해진 보류 문장이면 그 코드를 함께 쓴다(앱은 코드로 가른다). 문장은 출시된 앱의 표시와 이전 판 서버를 위해 그대로 둔다.
+      this.run("UPDATE messages SET delivery = ?, delivery_note = ?, delivery_code = ?, delivery_revision = delivery_revision + 1 WHERE id = ?", delivery, note, deliveryNoteCode(note), id);
       const message = this.requireMessage(id);
       this.bumpBoard(message.projectId);
       this.emit({ type: "message", message });
@@ -2526,13 +2544,13 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   searchFiles(projectId: string, query: string, limit = 50, archived = false): FileSearchResult[] {
-    if (this.requireProject(projectId).archived !== archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다");
+    if (this.requireProject(projectId).archived !== archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다", "project_not_found");
     const term = query.trim().normalize("NFC").toLowerCase();
     if (term.length > 512 || term.includes("\0")) throw new ApiError(400, "검색어는 512자 이하여야 합니다", "INVALID_FILE_SEARCH_QUERY");
     if (!Number.isInteger(limit)) throw new ApiError(400, "limit 값이 잘못되었습니다", "INVALID_FILE_SEARCH_QUERY");
     const count = Math.min(Math.max(limit, 0), 200);
     if (!term || !count) return [];
-    if (!this.row("SELECT 1 FROM sqlite_schema WHERE name='file_search_documents'")) throw new ApiError(501, "자료 검색 색인 마이그레이션이 필요합니다");
+    if (!this.row("SELECT 1 FROM sqlite_schema WHERE name='file_search_documents'")) throw new ApiError(501, "자료 검색 색인 마이그레이션이 필요합니다", "file_search_index_missing");
     return this.transaction(() => {
       refreshFileSearchIndex(this.db, { projectId });
       const trigram = Array.from(term).length >= 3;
@@ -2625,7 +2643,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   requireDelivery(id: string): Delivery {
     const d = this.getDelivery(id);
-    if (!d) throw new ApiError(404, "전달 항목을 찾을 수 없습니다");
+    if (!d) throw new ApiError(404, "전달 항목을 찾을 수 없습니다", "delivery_not_found");
     return d;
   }
 
@@ -2637,7 +2655,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   enqueue(input: NewDelivery): Delivery {
     return this.transaction(() => {
       const member = this.requireMember(input.memberId);
-      if (member.projectId !== input.projectId) throw new ApiError(400, "다른 프로젝트의 팀원입니다");
+      if (member.projectId !== input.projectId) throw new ApiError(400, "다른 프로젝트의 팀원입니다", "member_other_project");
       const id = newId("dl_");
       this.run(
         `INSERT INTO deliveries (id, project_id, member_id, kind, text, wake, urgent, status, hold_reason, ref_type, ref_id, created_at)
@@ -2821,7 +2839,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       if (eventKey !== undefined) {
         const before = this.row("SELECT * FROM activity WHERE delivery_event_key = ?", eventKey);
         if (before) {
-          if (before.member_id !== memberId) throw new ApiError(409, "다른 팀원의 활동 표식입니다");
+          if (before.member_id !== memberId) throw new ApiError(409, "다른 팀원의 활동 표식입니다", "activity_marker_other_member");
           return toActivity(before);
         }
       }
@@ -3017,7 +3035,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   private checkRevision(actual: number, expected: number): void {
-    if (!Number.isSafeInteger(expected) || expected < 0) throw new ApiError(400, "revision이 올바르지 않습니다");
+    if (!Number.isSafeInteger(expected) || expected < 0) throw new ApiError(400, "revision이 올바르지 않습니다", "invalid_revision_value");
     if (actual !== expected) throw new ApiError(409, "내용이 변경되었습니다. 다시 검토해 주세요", "REVISION_CONFLICT");
   }
 
@@ -3050,13 +3068,13 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     const r = this.row("SELECT * FROM operation_receipts WHERE operation_id = ?", operationId);
     if (!r) return null;
     const base = { operationId: r.operation_id, kind: r.kind, projectId: r.project_id, memberId: r.member_id, status: r.status, createdAt: r.created_at, updatedAt: r.updated_at };
-    return { ...base, ...(r.status === "applied" ? { result: json(r.result_json) } : r.status === "pending" ? {} : { code: r.code, error: r.error }) } as OperationReceipt;
+    return { ...base, ...(r.status === "applied" ? { result: json(r.result_json) } : r.status === "pending" ? {} : { code: r.code, error: r.error, ...(r.reason ? { reason: r.reason } : {}) }) } as OperationReceipt;
   }
 
   beginOperation(input: { operationId: string; kind: OperationKind; projectId: string | null; memberId: string | null; request: unknown }): OperationReceipt {
     return this.transaction(() => {
       if (input.projectId !== null) this.requireProject(input.projectId);
-      if (input.memberId !== null && this.requireMember(input.memberId).projectId !== input.projectId) throw new ApiError(400, "다른 프로젝트의 팀원입니다");
+      if (input.memberId !== null && this.requireMember(input.memberId).projectId !== input.projectId) throw new ApiError(400, "다른 프로젝트의 팀원입니다", "member_other_project");
       const r = this.row("SELECT * FROM operation_receipts WHERE operation_id = ?", input.operationId);
       if (r) {
         if (r.kind !== input.kind || r.project_id !== input.projectId || r.member_id !== input.memberId || r.request_json !== stableJson(input.request)) throw new ApiError(409, "다른 요청에 사용된 operationId입니다", "OPERATION_CONFLICT");
@@ -3071,10 +3089,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   finishOperation(receipt: OperationReceipt, expectedStatus: OperationStatus = "pending"): OperationReceipt {
     return this.transaction(() => {
       const before = this.getOperation(receipt.operationId);
-      if (!before) throw new ApiError(404, "작업을 찾을 수 없습니다");
-      if (before.kind !== receipt.kind || before.projectId !== receipt.projectId || before.memberId !== receipt.memberId) throw new ApiError(409, "작업 범위가 다릅니다");
+      if (!before) throw new ApiError(404, "작업을 찾을 수 없습니다", "operation_not_found");
+      if (before.kind !== receipt.kind || before.projectId !== receipt.projectId || before.memberId !== receipt.memberId) throw new ApiError(409, "작업 범위가 다릅니다", "operation_scope_mismatch");
       if (before.status !== expectedStatus || before.status === "applied" || before.status === "refused") throw new ApiError(409, "작업 결과가 변경되었습니다", "OPERATION_CONFLICT");
-      this.run("UPDATE operation_receipts SET status = ?, result_json = ?, code = ?, error = ?, updated_at = ? WHERE operation_id = ? AND status = ?", receipt.status, receipt.status === "applied" ? JSON.stringify(receipt.result) : null, receipt.status === "unknown" || receipt.status === "refused" ? receipt.code : null, receipt.status === "unknown" || receipt.status === "refused" ? receipt.error : null, nowIso(), receipt.operationId, expectedStatus);
+      const failed = receipt.status === "unknown" || receipt.status === "refused";
+      this.run("UPDATE operation_receipts SET status = ?, result_json = ?, code = ?, error = ?, reason = ?, updated_at = ? WHERE operation_id = ? AND status = ?", receipt.status, receipt.status === "applied" ? JSON.stringify(receipt.result) : null, failed ? receipt.code : null, failed ? receipt.error : null, failed ? receipt.reason ?? null : null, nowIso(), receipt.operationId, expectedStatus);
       return this.getOperation(receipt.operationId)!;
     });
   }
@@ -3104,8 +3123,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       this.checkRevision(this.memberRevisions(lease.memberId).sessionGeneration, lease.identity.sessionGeneration);
       // 지금 터미널이 아닌 터미널에 묶인 줄은 조작권이 아니다(leaseRow). 남아 있어도 새 조작권을 막지 않고 덮어쓴다.
       const r = this.leaseRow(lease.memberId, false);
-      if (r && r.expires_at > Date.now() && (r.claim_id !== lease.claimId || r.lease_id !== lease.leaseId || r.terminal_identity_json !== stableJson(lease.identity))) throw new ApiError(409, "다른 조작권이 있습니다");
-      if (r && r.claim_id === lease.claimId && lease.lastInputSequence < r.last_input_sequence) throw new ApiError(409, "입력 순번이 오래되었습니다");
+      if (r && r.expires_at > Date.now() && (r.claim_id !== lease.claimId || r.lease_id !== lease.leaseId || r.terminal_identity_json !== stableJson(lease.identity))) throw new ApiError(409, "다른 조작권이 있습니다", "terminal_lease_other");
+      if (r && r.claim_id === lease.claimId && lease.lastInputSequence < r.last_input_sequence) throw new ApiError(409, "입력 순번이 오래되었습니다", "terminal_input_sequence_stale");
       this.run(`INSERT INTO terminal_leases (member_id, claim_id, lease_id, generation, terminal_identity_json, expires_at, last_input_sequence) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(member_id) DO UPDATE SET claim_id = excluded.claim_id, lease_id = excluded.lease_id, generation = excluded.generation, terminal_identity_json = excluded.terminal_identity_json, expires_at = excluded.expires_at, last_input_sequence = excluded.last_input_sequence`, lease.memberId, lease.claimId, lease.leaseId, lease.identity.sessionGeneration, stableJson(lease.identity), lease.expiresAt, lease.lastInputSequence);
     });
@@ -3162,9 +3181,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.transaction(() => {
       this.requireDelivery(deliveryId);
       const before = this.getDeliveryRecovery(deliveryId);
-      if (!before) throw new ApiError(404, "전달 복구 상태를 찾을 수 없습니다");
+      if (!before) throw new ApiError(404, "전달 복구 상태를 찾을 수 없습니다", "delivery_recovery_missing");
       this.checkRevision(before.version, expectedVersion);
-      if (before.marker !== null && patch.marker !== undefined && patch.marker !== before.marker) throw new ApiError(409, "저장된 전달 표식은 바꿀 수 없습니다");
+      if (before.marker !== null && patch.marker !== undefined && patch.marker !== before.marker) throw new ApiError(409, "저장된 전달 표식은 바꿀 수 없습니다", "delivery_marker_immutable");
       const { set, values } = buildSet({ ...patch, evidence: patch.evidence === undefined ? undefined : JSON.stringify(patch.evidence) }, { marker: "marker", phase: "phase", reason: "reason", autoAttempts: "auto_attempts", checkCount: "check_count", activeCheckMs: "active_check_ms", nextCheckAt: "next_check_at", lastCheckedAt: "last_checked_at", evidence: "evidence_json" });
       this.run(`UPDATE delivery_recovery SET ${[...set, "version = version + 1", "updated_at = ?"].join(", ")} WHERE delivery_id = ? AND version = ?`, ...values, nowIso(), deliveryId, expectedVersion);
       const phaseChanged = patch.phase !== undefined && patch.phase !== before.phase;
@@ -3196,17 +3215,17 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   saveDispatch(dispatch: DeliveryDispatch): void {
     this.transaction(() => {
-      if (this.requireMember(dispatch.memberId).projectId !== dispatch.projectId) throw new ApiError(400, "다른 프로젝트의 팀원입니다");
+      if (this.requireMember(dispatch.memberId).projectId !== dispatch.projectId) throw new ApiError(400, "다른 프로젝트의 팀원입니다", "member_other_project");
       this.checkRevision(this.memberRevisions(dispatch.memberId).sessionGeneration, dispatch.identity.sessionGeneration);
-      if (this.getDispatch(dispatch.dispatchId)) throw new ApiError(409, "이미 저장된 봉투입니다");
-      if (!dispatch.items.length || dispatch.items.length !== dispatch.markers.length) throw new ApiError(400, "봉투 항목이 올바르지 않습니다");
-      if (createHash("sha256").update(dispatch.wireText).digest("hex") !== dispatch.wireSha256) throw new ApiError(400, "봉투의 해시가 다릅니다");
+      if (this.getDispatch(dispatch.dispatchId)) throw new ApiError(409, "이미 저장된 봉투입니다", "envelope_exists");
+      if (!dispatch.items.length || dispatch.items.length !== dispatch.markers.length) throw new ApiError(400, "봉투 항목이 올바르지 않습니다", "envelope_invalid");
+      if (createHash("sha256").update(dispatch.wireText).digest("hex") !== dispatch.wireSha256) throw new ApiError(400, "봉투의 해시가 다릅니다", "envelope_hash_mismatch");
       const at = dispatch.createdAt;
       this.run(`INSERT INTO delivery_dispatches (id, project_id, member_id, bundle_marker, cli, backend, generation, native_session_id, terminal_identity_json, baseline_json, wire_text, wire_sha256, transport_state, submit_attempts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, dispatch.dispatchId, dispatch.projectId, dispatch.memberId, dispatch.bundleMarker, dispatch.cli, dispatch.backend, dispatch.identity.sessionGeneration, dispatch.identity.sessionId, JSON.stringify(dispatch.identity), JSON.stringify(dispatch.baseline), dispatch.wireText, dispatch.wireSha256, dispatch.transportState, dispatch.submitAttempts, at, dispatch.updatedAt);
       for (const item of dispatch.items) {
         const delivery = this.requireDelivery(item.deliveryId);
         const marker = dispatch.markers.find((m) => m.deliveryId === item.deliveryId)?.marker;
-        if (delivery.memberId !== dispatch.memberId || delivery.projectId !== dispatch.projectId || !marker) throw new ApiError(400, "봉투 항목의 대상이 다릅니다");
+        if (delivery.memberId !== dispatch.memberId || delivery.projectId !== dispatch.projectId || !marker) throw new ApiError(400, "봉투 항목의 대상이 다릅니다", "envelope_target_mismatch");
         this.run("INSERT INTO delivery_dispatch_items (dispatch_id, delivery_id, ordinal, source_revision) VALUES (?, ?, ?, ?)", dispatch.dispatchId, item.deliveryId, item.ordinal, item.sourceRevision);
         this.updateDeliveryRecovery(item.deliveryId, this.getDeliveryRecovery(item.deliveryId)!.version, { marker });
       }
@@ -3245,7 +3264,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   updateDispatch(id: string, expected: DeliveryDispatch["transportState"], state: DeliveryDispatch["transportState"], submit = false): DeliveryDispatch {
     return this.transaction(() => {
       const result = this.db.query("UPDATE delivery_dispatches SET transport_state = ?, submit_attempts = submit_attempts + ?, updated_at = ? WHERE id = ? AND transport_state = ? AND submit_attempts + ? <= 1").run(state, submit ? 1 : 0, nowIso(), id, expected, submit ? 1 : 0);
-      if (result.changes !== 1) throw new ApiError(409, "봉투 상태가 변경되었습니다");
+      if (result.changes !== 1) throw new ApiError(409, "봉투 상태가 변경되었습니다", "envelope_state_changed");
       return this.getDispatch(id)!;
     });
   }
@@ -3255,7 +3274,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       this.requireDelivery(deliveryId);
       const r = this.row("SELECT * FROM delivery_recovery_operations WHERE operation_id = ?", operationId);
       if (r) {
-        if (r.delivery_id !== deliveryId || r.request_json !== stableJson(request)) throw new ApiError(409, "다른 요청에 사용된 operationId입니다");
+        if (r.delivery_id !== deliveryId || r.request_json !== stableJson(request)) throw new ApiError(409, "다른 요청에 사용된 operationId입니다", "OPERATION_CONFLICT");
         return json<T>(r.result_json);
       }
       const result = execute();
@@ -3272,11 +3291,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       this.requireMessage(messageId);
       const reused = this.row("SELECT * FROM unassigned_message_recoveries WHERE operation_id = ?", operationId);
       if (reused) {
-        if (reused.message_id !== messageId || reused.request_json !== stableJson(request)) throw new ApiError(409, "다른 요청에 사용된 operationId입니다");
+        if (reused.message_id !== messageId || reused.request_json !== stableJson(request)) throw new ApiError(409, "다른 요청에 사용된 operationId입니다", "OPERATION_CONFLICT");
         return json<T>(reused.result_json);
       }
       const existing = this.row("SELECT * FROM unassigned_message_recoveries WHERE message_id = ? ORDER BY rowid LIMIT 1", messageId);
-      if (existing && existing.request_json !== stableJson({ ...request, operationId: existing.operation_id })) throw new ApiError(409, "이미 다른 동작으로 정리했거나 검토 버전이 바뀐 메시지입니다");
+      if (existing && existing.request_json !== stableJson({ ...request, operationId: existing.operation_id })) throw new ApiError(409, "이미 다른 동작으로 정리했거나 검토 버전이 바뀐 메시지입니다", "message_already_resolved");
       const { result, memberId } = existing
         ? { result: { ...json<T>(existing.result_json), operationId }, memberId: existing.member_id }
         : execute();
@@ -3306,8 +3325,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   saveLifecycleJournal(entry: LifecycleJournal): void {
     this.transaction(() => {
       const before = this.getLifecycleJournal(entry.operationId);
-      if (before && (before.memberId !== entry.memberId || before.projectId !== entry.projectId || before.intent !== entry.intent || before.identity.sessionGeneration !== entry.identity.sessionGeneration)) throw new ApiError(409, "종료/생성 의도의 신원이 다릅니다");
-      if (before && ["confirmed", "refused"].includes(before.phase) && stableJson(before) !== stableJson(entry)) throw new ApiError(409, "이미 끝난 생성/종료 의도입니다");
+      if (before && (before.memberId !== entry.memberId || before.projectId !== entry.projectId || before.intent !== entry.intent || before.identity.sessionGeneration !== entry.identity.sessionGeneration)) throw new ApiError(409, "종료/생성 의도의 신원이 다릅니다", "lifecycle_intent_mismatch");
+      if (before && ["confirmed", "refused"].includes(before.phase) && stableJson(before) !== stableJson(entry)) throw new ApiError(409, "이미 끝난 생성/종료 의도입니다", "lifecycle_intent_finished");
       this.run(`INSERT INTO lifecycle_journal (operation_id, member_id, project_id, intent, phase, generation, terminal_identity_json, run_id, delivery_ids_json, baseline_json, reason, exit_code, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(operation_id) DO UPDATE SET phase = excluded.phase, terminal_identity_json = excluded.terminal_identity_json, run_id = excluded.run_id, delivery_ids_json = excluded.delivery_ids_json, baseline_json = excluded.baseline_json, reason = excluded.reason, exit_code = excluded.exit_code, updated_at = excluded.updated_at`, entry.operationId, entry.memberId, entry.projectId, entry.intent, entry.phase, entry.identity.sessionGeneration, JSON.stringify(entry.identity), entry.runId, JSON.stringify(entry.deliveryIds), entry.baseline === null ? null : JSON.stringify(entry.baseline), entry.reason, entry.exitCode, entry.createdAt, entry.updatedAt);
     });
@@ -3325,8 +3344,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   saveExecutionJournal(entry: ExecutionJournal): void {
     this.transaction(() => {
       const before = this.getExecutionJournal(entry.runId);
-      if (before && (before.memberId !== entry.memberId || before.projectId !== entry.projectId || before.identity.sessionGeneration !== entry.identity.sessionGeneration)) throw new ApiError(409, "실행 신원이 다릅니다");
-      if (before && (before.phase === "ended" || before.phase === "interrupted") && stableJson(before) !== stableJson(entry)) throw new ApiError(409, "이미 끝난 실행입니다");
+      if (before && (before.memberId !== entry.memberId || before.projectId !== entry.projectId || before.identity.sessionGeneration !== entry.identity.sessionGeneration)) throw new ApiError(409, "실행 신원이 다릅니다", "execution_identity_mismatch");
+      if (before && (before.phase === "ended" || before.phase === "interrupted") && stableJson(before) !== stableJson(entry)) throw new ApiError(409, "이미 끝난 실행입니다", "execution_finished");
       this.run(`INSERT INTO execution_journal (run_id, member_id, project_id, generation, terminal_identity_json, turn, delivery_ids_json, phase, input_received_at, started_at, last_progress_at, ended_at, result, reason, exit_code, interruption_notified_at, report_requested_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET terminal_identity_json = excluded.terminal_identity_json, turn = excluded.turn, delivery_ids_json = excluded.delivery_ids_json, phase = excluded.phase, input_received_at = excluded.input_received_at, started_at = excluded.started_at, last_progress_at = excluded.last_progress_at, ended_at = excluded.ended_at, result = excluded.result, reason = excluded.reason, exit_code = excluded.exit_code, updated_at = excluded.updated_at`, entry.runId, entry.memberId, entry.projectId, entry.identity.sessionGeneration, JSON.stringify(entry.identity), entry.turn, JSON.stringify(entry.deliveryIds), entry.phase, entry.inputReceivedAt, entry.startedAt, entry.lastProgressAt, entry.endedAt, entry.result, entry.reason, entry.exitCode, entry.interruptionNotifiedAt, entry.reportRequestedAt, entry.createdAt, entry.updatedAt);
     });
@@ -3463,7 +3482,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     this.transaction(() => {
       this.checkRevision(this.memberRevisions(state.memberId).sessionGeneration, state.generation);
       const before = this.ensureContextState(state.memberId);
-      if (before.bindingNonce !== state.bindingNonce || (state.measurement && state.measurement.sessionGeneration !== state.generation)) throw new ApiError(409, "문맥 세대가 변경되었습니다");
+      if (before.bindingNonce !== state.bindingNonce || (state.measurement && state.measurement.sessionGeneration !== state.generation)) throw new ApiError(409, "문맥 세대가 변경되었습니다", "context_generation_changed");
       this.run("UPDATE member_context_state SET rollout_path = ?, rollout_offset = ?, measurement_json = ?, compaction_json = ?, baseline_json = ?, updated_at = ? WHERE member_id = ? AND generation = ? AND binding_nonce = ?", state.rolloutPath, state.rolloutOffset, state.measurement === null ? null : JSON.stringify(state.measurement), state.compaction === null ? null : JSON.stringify(state.compaction), state.baseline === null ? null : JSON.stringify(state.baseline), nowIso(), state.memberId, state.generation, state.bindingNonce);
       if (Object.keys(memberPatch).length) this.patchMember(state.memberId, memberPatch);
       else this.emitMember(state.memberId);
@@ -3481,10 +3500,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const decision = this.requireDecision(id);
       if (followUp.kind === "instruction") {
         const source = "sourceMessageId" in followUp ? this.requireMessage(followUp.sourceMessageId) : this.requireDecision(followUp.sourceDecisionId);
-        if (this.requireMember(followUp.memberId).projectId !== decision.projectId || source.projectId !== decision.projectId) throw new ApiError(400, "후속 지시의 프로젝트가 다릅니다");
+        if (this.requireMember(followUp.memberId).projectId !== decision.projectId || source.projectId !== decision.projectId) throw new ApiError(400, "후속 지시의 프로젝트가 다릅니다", "follow_up_project_mismatch");
       }
       const before = this.getDecisionFollowUp(id);
-      if (before !== null && stableJson(before) !== stableJson(followUp)) throw new ApiError(409, "이미 기록된 후속 지시가 다릅니다");
+      if (before !== null && stableJson(before) !== stableJson(followUp)) throw new ApiError(409, "이미 기록된 후속 지시가 다릅니다", "follow_up_conflict");
       this.run("UPDATE decisions SET follow_up_json = ? WHERE id = ?", JSON.stringify(followUp), id);
     });
   }
@@ -3514,25 +3533,25 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   completeBoardReview(projectId: string, requestedRevision: number, reviewedRevision: number, at = nowIso()): void {
     this.transaction(() => {
       const review = this.getBoardReview(projectId);
-      if (!review || review.requestedRevision !== requestedRevision || reviewedRevision < 0 || reviewedRevision > requestedRevision || !Number.isSafeInteger(reviewedRevision)) throw new ApiError(409, "검토한 업무판이 변경되었습니다");
+      if (!review || review.requestedRevision !== requestedRevision || reviewedRevision < 0 || reviewedRevision > requestedRevision || !Number.isSafeInteger(reviewedRevision)) throw new ApiError(409, "검토한 업무판이 변경되었습니다", "board_changed");
       this.run("UPDATE projects SET board_completed_revision = ?, board_reviewed_revision = ?, board_completed_at = ? WHERE id = ?", requestedRevision, reviewedRevision, at, projectId);
     });
   }
 
   saveReportReferences(projectId: string, refs: ReportReferences): void {
     this.transaction(() => {
-      if (this.requireMessage(refs.sourceMessageId).projectId !== projectId || (refs.correctsMessageId && this.requireMessage(refs.correctsMessageId).projectId !== projectId)) throw new ApiError(400, "다른 프로젝트의 메시지입니다");
-      for (const id of refs.fileIds) if (this.fileProjectId(id) !== projectId) throw new ApiError(400, "자료의 프로젝트가 다릅니다");
-      for (const id of refs.decisionIds) if (this.requireDecision(id).projectId !== projectId) throw new ApiError(400, "결재의 프로젝트가 다릅니다");
+      if (this.requireMessage(refs.sourceMessageId).projectId !== projectId || (refs.correctsMessageId && this.requireMessage(refs.correctsMessageId).projectId !== projectId)) throw new ApiError(400, "다른 프로젝트의 메시지입니다", "message_other_project");
+      for (const id of refs.fileIds) if (this.fileProjectId(id) !== projectId) throw new ApiError(400, "자료의 프로젝트가 다릅니다", "file_other_project");
+      for (const id of refs.decisionIds) if (this.requireDecision(id).projectId !== projectId) throw new ApiError(400, "결재의 프로젝트가 다릅니다", "decision_other_project");
       const before = this.getReportReferences(projectId, refs.sourceMessageId);
       if (before) {
-        if (stableJson(before) !== stableJson(refs)) throw new ApiError(409, "이미 기록된 보고 출처가 다릅니다");
+        if (stableJson(before) !== stableJson(refs)) throw new ApiError(409, "이미 기록된 보고 출처가 다릅니다", "report_source_conflict");
         return;
       }
       if (refs.correctsMessageId) {
         const original = this.requireMessage(refs.correctsMessageId), replacement = this.requireMessage(refs.sourceMessageId);
-        if (!replacement.memberId || original.memberId !== replacement.memberId || original.mine || replacement.mine || original.id === replacement.id) throw new ApiError(400, "자신이 작성한 보고만 정정할 수 있습니다");
-        if (original.supersededBy) throw new ApiError(409, "이미 정정된 보고입니다. 최신 보고를 정정하세요");
+        if (!replacement.memberId || original.memberId !== replacement.memberId || original.mine || replacement.mine || original.id === replacement.id) throw new ApiError(400, "자신이 작성한 보고만 정정할 수 있습니다", "report_not_own");
+        if (original.supersededBy) throw new ApiError(409, "이미 정정된 보고입니다. 최신 보고를 정정하세요", "report_already_corrected");
       }
       this.run("INSERT INTO report_references (source_message_id, project_id, file_ids_json, decision_ids_json, authored_at, sequence, corrects_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)", refs.sourceMessageId, projectId, JSON.stringify(refs.fileIds), JSON.stringify(refs.decisionIds), refs.authoredAt, refs.sequence, refs.correctsMessageId);
       if (refs.correctsMessageId) this.afterCommit(() => this.bus.emit({ type: "message", message: this.requireMessage(refs.correctsMessageId!) }));
@@ -3556,7 +3575,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const id = newId("batch_");
       this.run("INSERT INTO manual_inbox_batches (id, member_id, created_at) VALUES (?, ?, ?)", id, memberId, nowIso());
       for (const [ordinal, d] of deliveries.entries()) {
-        if (d.memberId !== memberId || d.projectId !== member.projectId || !["queued", "held"].includes(d.status)) throw new ApiError(409, "받을 전달 항목이 변경되었습니다");
+        if (d.memberId !== memberId || d.projectId !== member.projectId || !["queued", "held"].includes(d.status)) throw new ApiError(409, "받을 전달 항목이 변경되었습니다", "inbox_items_changed");
         this.run("INSERT INTO manual_inbox_items (batch_id, delivery_id, ordinal) VALUES (?, ?, ?)", id, d.id, ordinal);
       }
       return this.getManualInboxBatch(memberId, id);
@@ -3572,9 +3591,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   acknowledgeManualInbox(memberId: string, batchId: string): { batchId: string; acknowledged: true } {
     return this.transaction(() => {
       const member = this.requireMember(memberId);
-      if (this.requireProject(member.projectId).archived) throw new ApiError(409, "보관 중에는 지시를 소비할 수 없습니다");
+      if (this.requireProject(member.projectId).archived) throw new ApiError(409, "보관 중에는 지시를 소비할 수 없습니다", "inbox_archived");
       const batch = this.getManualInboxBatch(memberId, batchId);
-      if (!batch) throw new ApiError(404, "수신 묶음을 찾을 수 없습니다");
+      if (!batch) throw new ApiError(404, "수신 묶음을 찾을 수 없습니다", "inbox_batch_not_found");
       const r = this.row("SELECT acknowledged_at FROM manual_inbox_batches WHERE id = ?", batchId)!;
       if (r.acknowledged_at !== null) return { batchId, acknowledged: true };
       for (const item of batch.items) {

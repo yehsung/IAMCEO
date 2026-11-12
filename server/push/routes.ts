@@ -30,7 +30,7 @@ const testRequest = z.strictObject({ requestId: uuid });
 function parse<T>(value: unknown, schema: z.ZodType<T>): T {
   const result = schema.safeParse(value);
   // Zod diagnostics may include a device token. Never pass them to the HTTP catch/log.
-  if (!result.success) throw new ApiError(400, "푸시 요청 값이 올바르지 않습니다");
+  if (!result.success) throw new ApiError(400, "푸시 요청 값이 올바르지 않습니다", "push_invalid_request");
   return result.data;
 }
 
@@ -38,8 +38,8 @@ function parse<T>(value: unknown, schema: z.ZodType<T>): T {
 async function body(req: Request): Promise<string> {
   const length = req.headers.get("content-length");
   if (length !== null) {
-    if (!/^\d+$/.test(length)) throw new ApiError(400, "본문 길이가 올바르지 않습니다");
-    if (Number(length) > MAX_BODY_BYTES) throw new ApiError(413, "푸시 요청 본문은 8KiB 이하여야 합니다");
+    if (!/^\d+$/.test(length)) throw new ApiError(400, "본문 길이가 올바르지 않습니다", "push_invalid_length");
+    if (Number(length) > MAX_BODY_BYTES) throw new ApiError(413, "푸시 요청 본문은 8KiB 이하여야 합니다", "push_body_too_large");
   }
   if (!req.body) return "";
   const reader = req.body.getReader();
@@ -52,26 +52,26 @@ async function body(req: Request): Promise<string> {
       size += value.byteLength;
       if (size > MAX_BODY_BYTES) {
         void reader.cancel().catch(() => {});
-        throw new ApiError(413, "푸시 요청 본문은 8KiB 이하여야 합니다");
+        throw new ApiError(413, "푸시 요청 본문은 8KiB 이하여야 합니다", "push_body_too_large");
       }
       chunks.push(value);
     }
     return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, size));
   } catch (error) {
     if (error instanceof ApiError) throw error;
-    throw new ApiError(400, "푸시 요청 본문을 읽을 수 없습니다");
+    throw new ApiError(400, "푸시 요청 본문을 읽을 수 없습니다", "push_body_unreadable");
   } finally { reader.releaseLock(); }
 }
 
 function json<T>(text: string, schema: z.ZodType<T>): T {
   let value: unknown;
-  try { value = JSON.parse(text); } catch { throw new ApiError(400, "JSON 본문이 올바르지 않습니다"); }
+  try { value = JSON.parse(text); } catch { throw new ApiError(400, "JSON 본문이 올바르지 않습니다", "invalid_json"); }
   return parse(value, schema);
 }
 
 function deleteRevision(req: Request): number {
   const match = /^"([1-9]\d*)"$/.exec(req.headers.get("if-match") ?? "");
-  if (!match) throw new ApiError(400, "If-Match revision이 필요합니다");
+  if (!match) throw new ApiError(400, "If-Match revision이 필요합니다", "push_revision_required");
   return parse(Number(match[1]), revision);
 }
 
@@ -80,22 +80,22 @@ export function createPushHandler(ctx: PushRoutesContext): (req: Request, url: U
   const response = (value: unknown, status = 200): Response => Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
   return async (req, url) => {
     try {
-      if (url.search) throw new ApiError(400, "푸시 요청에는 query를 사용할 수 없습니다");
+      if (url.search) throw new ApiError(400, "푸시 요청에는 query를 사용할 수 없습니다", "push_query_not_allowed");
       const devicePath = /^\/api\/push\/devices\/([^/]+)(\/test)?$/.exec(url.pathname);
       const targetPath = /^\/api\/push\/events\/([^/]+)\/target$/.exec(url.pathname);
       const statusPath = url.pathname === "/api/push/status";
       const listPath = url.pathname === "/api/push/devices";
-      if (!devicePath && !targetPath && !statusPath && !listPath) throw new ApiError(404, "없는 푸시 경로입니다");
+      if (!devicePath && !targetPath && !statusPath && !listPath) throw new ApiError(404, "없는 푸시 경로입니다", "push_route_not_found");
       const methods = devicePath ? devicePath[2] ? ["POST"] : ["GET", "PUT", "PATCH", "DELETE"] : ["GET"];
-      if (!methods.includes(req.method)) throw new ApiError(405, "허용되지 않는 메서드입니다");
+      if (!methods.includes(req.method)) throw new ApiError(405, "허용되지 않는 메서드입니다", "method_not_allowed");
       let id = "";
       if (devicePath || targetPath) {
         let decoded: string;
-        try { decoded = decodeURIComponent((devicePath ?? targetPath)![1]); } catch { throw new ApiError(400, "경로가 올바르지 않습니다"); }
+        try { decoded = decodeURIComponent((devicePath ?? targetPath)![1]); } catch { throw new ApiError(400, "경로가 올바르지 않습니다", "invalid_path"); }
         id = parse(decoded, uuid);
       }
       const text = await body(req);
-      if (["GET", "DELETE"].includes(req.method) && text.length) throw new ApiError(400, "본문이 없는 요청이어야 합니다");
+      if (["GET", "DELETE"].includes(req.method) && text.length) throw new ApiError(400, "본문이 없는 요청이어야 합니다", "push_body_not_allowed");
       const push = ctx.store;
       if (statusPath) {
         // Project only public fields, even when a provider object also holds credentials.
@@ -128,20 +128,20 @@ export function createPushHandler(ctx: PushRoutesContext): (req: Request, url: U
         const existing = push.eventBySource(sourceKey);
         if (existing) return { notificationId: existing.id, state: "queued" };
         const registration = push.getRegistration(id);
-        if (!registration) throw new ApiError(404, "기기를 찾을 수 없습니다");
+        if (!registration) throw new ApiError(404, "기기를 찾을 수 없습니다", "push_device_not_found");
         const { device, deviceToken } = registration;
         const at = push.timestamp();
         if (!device.enabled || device.state !== "active" || !deviceToken ||
             !["authorized", "provisional", "ephemeral"].includes(device.authorization) || device.expiresAt <= at ||
             !ctx.providers().some((provider) => provider.environment === device.environment && provider.bundleId === device.bundleId && providerUsable(provider))) {
-          throw new ApiError(409, "이 기기에서 시험 알림을 보낼 수 없습니다");
+          throw new ApiError(409, "이 기기에서 시험 알림을 보낼 수 없습니다", "push_test_unavailable");
         }
         const cutoff = new Date(Date.parse(at) - 60_000).toISOString();
         if (push.db.query("SELECT 1 FROM push_events WHERE kind='test' AND source_key LIKE ? AND occurred_at>? LIMIT 1")
-          .get(`test:${id}:%`, cutoff)) throw new ApiError(429, "시험 알림은 기기당 분당 한 번 보낼 수 있습니다");
+          .get(`test:${id}:%`, cutoff)) throw new ApiError(429, "시험 알림은 기기당 분당 한 번 보낼 수 있습니다", "push_test_rate_limited");
         const event = push.recordEvent({ sourceKey, kind: "test", projectId: null, memberId: null,
           target: { screen: "home" }, occurredAt: at }, [{ deviceId: id, registrationGeneration: registration.registrationGeneration }]);
-        if (push.listDeliveries(event.id).length !== 1) throw new ApiError(409, "이 기기에서 시험 알림을 보낼 수 없습니다");
+        if (push.listDeliveries(event.id).length !== 1) throw new ApiError(409, "이 기기에서 시험 알림을 보낼 수 없습니다", "push_test_unavailable");
         created = true;
         return { notificationId: event.id, state: "queued" };
       });
@@ -150,9 +150,9 @@ export function createPushHandler(ctx: PushRoutesContext): (req: Request, url: U
       }
       return response(result, 202);
     } catch (error) {
-      if (error instanceof ApiError) return response({ error: error.message }, error.status);
+      if (error instanceof ApiError) return response({ error: error.message, code: error.code }, error.status);
       // SQLite/provider exceptions can contain tokens, paths or credential objects.
-      return response({ error: "푸시 요청을 처리하지 못했습니다" }, 500);
+      return response({ error: "푸시 요청을 처리하지 못했습니다", code: "internal_error" }, 500);
     }
   };
 }

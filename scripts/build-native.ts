@@ -15,6 +15,9 @@ function run(command: string[]): void {
   if (result.exitCode !== 0) throw new Error(`Command failed (${result.exitCode}): ${command[0]}`);
 }
 for (const tool of ["xcodegen", "xcodebuild", "codesign"]) if (!Bun.which(tool)) throw new Error(`Install ${tool} before building the macOS app.`);
+// The release (scripts/release-mac.ts) refuses any Bun but .bun-version; a local build only says so.
+const pinnedBun = readFileSync(join(root, ".bun-version"), "utf8").trim();
+if (Bun.version !== pinnedBun) console.warn(`Note: this Bun is ${Bun.version}; releases are compiled with Bun ${pinnedBun} (.bun-version).`);
 run([process.execPath, "run", "setup:core"]);
 const coreSource = join(root, ".runtime", "herdr-core", lock.version);
 const coreApp = join(coreSource, "Herdr Core.app");

@@ -26,7 +26,7 @@ function status(fn: () => unknown, expected: number, code?: string) {
   try { fn(); } catch (error) {
     expect(error).toBeInstanceOf(ApiError);
     expect((error as ApiError).status).toBe(expected);
-    if (code) expect((error as ApiError).code).toBe(code);
+    if (code) expect((error as ApiError).code as string).toBe(code);
     return;
   }
   throw new Error(`Expected ApiError ${expected}`);

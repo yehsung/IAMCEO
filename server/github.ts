@@ -7,9 +7,9 @@ import { ApiError } from "./store.ts";
 
 export function githubRepo(input: string): string {
   const match = /^(?:https:\/\/github\.com\/)?([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9_.-]{1,100})$/.exec(input);
-  if (!match || match[0] !== input) throw new ApiError(400, "GitHub의 owner/name 또는 HTTPS 저장소 주소를 입력하세요");
+  if (!match || match[0] !== input) throw new ApiError(400, "GitHub의 owner/name 또는 HTTPS 저장소 주소를 입력하세요", "github_repo_invalid");
   const name = match[2]!.replace(/\.git$/, "");
-  if (!name || name === "." || name === "..") throw new ApiError(400, "저장소 이름이 잘못되었습니다");
+  if (!name || name === "." || name === "..") throw new ApiError(400, "저장소 이름이 잘못되었습니다", "github_repo_name_invalid");
   return `${match[1]}/${name}`;
 }
 interface Repo { nameWithOwner: string; description: string | null; visibility: string; updatedAt: string; url: string }
@@ -82,12 +82,12 @@ export class GitHub {
   }
   private async freeSpace(path: string): Promise<void> {
     const bytes = this.options.freeBytes ? await this.options.freeBytes(path) : await statfs(path).then(s => s.bavail * s.bsize);
-    if (bytes < MIN_FREE) throw new ApiError(403, "디스크 여유 공간이 부족합니다(5GB 필요)");
+    if (bytes < MIN_FREE) throw new ApiError(403, "디스크 여유 공간이 부족합니다(5GB 필요)", "disk_space_low");
   }
   private async absent(path: string): Promise<void> {
     try { await lstat(path); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-    throw new ApiError(409, "같은 이름의 폴더가 있습니다");
+    throw new ApiError(409, "같은 이름의 폴더가 있습니다", "folder_exists");
   }
   private async stagingRoot(): Promise<string> {
     const home = this.options.stateHome ?? this.env.IAMCEO_HOME ?? process.env.IAMCEO_HOME ?? join(homedir(), ".iamceo");
@@ -95,7 +95,7 @@ export class GitHub {
     const root = join(canonical, "clone-staging");
     await mkdir(root, { mode: 0o700 }).catch(error => { if (error.code !== "EEXIST") throw error; });
     const item = await lstat(root);
-    if (!item.isDirectory() || item.isSymbolicLink() || (item.mode & 0o077) || await realpath(root) !== root) throw new ApiError(403, "스테이징 폴더를 사용할 수 없습니다");
+    if (!item.isDirectory() || item.isSymbolicLink() || (item.mode & 0o077) || await realpath(root) !== root) throw new ApiError(403, "스테이징 폴더를 사용할 수 없습니다", "clone_staging_unavailable");
     return root;
   }
   private async makeStage(parent: string, name: string, local: boolean): Promise<Stage> {
@@ -103,7 +103,7 @@ export class GitHub {
     await mkdir(path, { mode: 0o700 });
     const identity = await lstat(path);
     const stage = { path, identity, parent, local };
-    if (!await this.owned(stage)) throw new ApiError(403, "스테이징 폴더가 변경되었습니다");
+    if (!await this.owned(stage)) throw new ApiError(403, "스테이징 폴더가 변경되었습니다", "clone_staging_unavailable");
     return stage;
   }
   private async owned(stage: Stage): Promise<boolean> {
@@ -206,11 +206,11 @@ export class GitHub {
   async clone(input: { repo: string; parent: string; name?: string }): Promise<{ jobId: string }> {
     const repo = githubRepo(input.repo), name = folderName(input.name ?? repo.split("/")[1]!);
     const parent = await this.folders.directory(input.parent);
-    if (this.active >= 3) throw new ApiError(429, "동시에 3개까지 가져올 수 있습니다. 잠시 뒤 다시 시도하세요");
+    if (this.active >= 3) throw new ApiError(429, "동시에 3개까지 가져올 수 있습니다. 잠시 뒤 다시 시도하세요", "clone_limit");
     const gh = this.executable("gh"), git = gh ? null : this.executable("git");
-    if (!gh && !git) throw new ApiError(503, "서버에 GitHub CLI 또는 git이 필요합니다");
+    if (!gh && !git) throw new ApiError(503, "서버에 GitHub CLI 또는 git이 필요합니다", "github_cli_missing");
     const path = join(parent, name);
-    if (this.targets.has(path)) throw new ApiError(409, "같은 이름의 폴더가 있습니다");
+    if (this.targets.has(path)) throw new ApiError(409, "같은 이름의 폴더가 있습니다", "folder_exists");
     this.prune();
     this.active++; this.targets.add(path);
     const jobId = crypto.randomUUID();
@@ -261,7 +261,7 @@ export class GitHub {
   job(id: string): Job {
     this.prune();
     const job = this.jobs.get(id);
-    if (!job) throw new ApiError(404, "가져오기 작업을 찾을 수 없습니다");
+    if (!job) throw new ApiError(404, "가져오기 작업을 찾을 수 없습니다", "clone_job_not_found");
     const { finishedAt, ...result } = job;
     return result;
   }

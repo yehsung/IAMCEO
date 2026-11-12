@@ -17,8 +17,8 @@ export interface LocalFile {
 
 function checkPath(home: string, path: string, protectedRoots: readonly string[]): void {
   const rel = relative(home, path);
-  if (rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) throw new ApiError(403, "서버 사용자 홈 밖의 파일은 열 수 없습니다");
-  if (isSecretPath(path, home, protectedRoots)) throw new ApiError(403, "인증 정보가 있는 민감한 파일이나 위치는 열 수 없습니다");
+  if (rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) throw new ApiError(403, "서버 사용자 홈 밖의 파일은 열 수 없습니다", "local_file_outside_home");
+  if (isSecretPath(path, home, protectedRoots)) throw new ApiError(403, "인증 정보가 있는 민감한 파일이나 위치는 열 수 없습니다", "local_file_sensitive");
 }
 
 /** Also validate the canonical source used by the attachment publication. */
@@ -35,7 +35,7 @@ export type LocalFileFS = typeof localFileFS;
 export function readLocalFile(store: Store, projectId: string, input: string, userHome = homedir(), protectedRoots: readonly string[] = [], fs: LocalFileFS = localFileFS): LocalFile {
   const { closeSync, fstatSync, openSync, readSync, realpathSync, statSync } = fs;
   const project = store.requireProject(projectId);
-  if (!input.trim() || input.includes("\0") || input.length > 8192) throw new ApiError(400, "파일 경로가 올바르지 않습니다");
+  if (!input.trim() || input.includes("\0") || input.length > 8192) throw new ApiError(400, "파일 경로가 올바르지 않습니다", "local_file_invalid_path");
   const home = realpathSync(userHome);
   const paths = input.startsWith("~/") ? [resolve(home, input.slice(2))] : isAbsolute(input) ? [resolve(input)] : [project.cwd, ...store.listMembers(projectId).map(m => m.cwd)].map(cwd => resolve(cwd, input));
   for (const path of [...new Set(paths)]) {
@@ -43,12 +43,12 @@ export function readLocalFile(store: Store, projectId: string, input: string, us
     let real: string;
     try { real = realpathSync(path); } catch (error) {
       if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) continue;
-      throw new ApiError(403, "파일을 읽을 권한이 없습니다");
+      throw new ApiError(403, "파일을 읽을 권한이 없습니다", "local_file_permission");
     }
     checkPath(home, real, protectedRoots);
-    if (!statSync(real).isFile()) throw new ApiError(403, "디렉터리나 특수 파일은 열 수 없습니다");
+    if (!statSync(real).isFile()) throw new ApiError(403, "디렉터리나 특수 파일은 열 수 없습니다", "local_file_not_regular");
     let fd: number;
-    try { fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { throw new ApiError(403, "파일을 읽을 수 없습니다"); }
+    try { fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { throw new ApiError(403, "파일을 읽을 수 없습니다", "local_file_unreadable"); }
     try {
       const stat = fstatSync(fd);
       rejectHardLink(stat);
@@ -56,7 +56,7 @@ export function readLocalFile(store: Store, projectId: string, input: string, us
       const currentPath = realpathSync(path);
       checkPath(home, currentPath, protectedRoots);
       const current = statSync(currentPath);
-      if (!stat.isFile() || stat.ino !== current.ino || stat.dev !== current.dev) throw new ApiError(403, "검사 중 파일이 바뀌었습니다. 다시 열어 주세요");
+      if (!stat.isFile() || stat.ino !== current.ino || stat.dev !== current.dev) throw new ApiError(403, "검사 중 파일이 바뀌었습니다. 다시 열어 주세요", "local_file_changed");
       const identity = { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs };
       const ext = extname(real).toLowerCase();
       const image = imageMimes[ext];
@@ -68,14 +68,14 @@ export function readLocalFile(store: Store, projectId: string, input: string, us
       if (xlsx) { info.previewAvailable = false; info.previewNote = "미리보기 불가 · 파일을 열어 확인해 주세요"; }
       if (!text && !image && !pdf) return { info, identity };
       const limit = pdf ? 50 * 1024 * 1024 : image ? LOCAL_IMAGE_MAX : LOCAL_TEXT_MAX;
-      if (stat.size > limit) throw new ApiError(413, pdf ? "PDF는 50MB 까지 미리 볼 수 있습니다" : image ? "이미지는 20MB 까지 미리 볼 수 있습니다" : "텍스트는 2MB 까지 열 수 있습니다");
+      if (stat.size > limit) throw new ApiError(413, pdf ? "PDF는 50MB 까지 미리 볼 수 있습니다" : image ? "이미지는 20MB 까지 미리 볼 수 있습니다" : "텍스트는 2MB 까지 열 수 있습니다", "local_file_too_large");
       // Read at most limit+1 even when a file grows after stat.
       const bytes = Buffer.alloc(Math.min(stat.size + 1, limit + 1));
       let count = 0, n = 0;
       while (count < bytes.length && (n = readSync(fd, bytes, count, bytes.length - count, null)) > 0) count += n;
       const after = fstatSync(fd);
       rejectHardLink(after);
-      if (count !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) throw new ApiError(409, "읽는 중 파일이 바뀌었습니다. 다시 열어 주세요");
+      if (count !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) throw new ApiError(409, "읽는 중 파일이 바뀌었습니다. 다시 열어 주세요", "local_file_changed");
       const content = bytes.subarray(0, count);
       if (image || pdf) return { info, bytes: content, identity };
       try {

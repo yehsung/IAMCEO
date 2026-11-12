@@ -114,7 +114,7 @@ function databaseSummary(db: Database): Record<string, unknown> {
       pick(row, ["id", "is_hq", "backend", "runner_enabled", "archived", "chief_cli", "created_at", "updated_at", "board_tidied_at"])), []),
     members: safeRows(() => all("SELECT * FROM members ORDER BY project_id, created_at").map(row => ({
       ...pick(row, ["id", "project_id", "kind", "origin", "cli", "status", "backend", "session_generation", "config_revision", "context_pct",
-        "context_window", "subagents", "parallel", "created_at", "updated_at", "now_at"]),
+        "context_window", "subagents", "parallel", "created_at", "updated_at", "now_at", "fence_code"]),
       hasSession: row.session_id != null, hasTerminal: row.pane_id != null,
       errorCode: codeOf(row.last_error), blockedCode: codeOf(row.blocked_reason),
     })), []),

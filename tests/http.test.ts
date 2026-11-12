@@ -83,7 +83,7 @@ function fakeOrch(store: Store) {
     },
     async answerApproval(id, req) {
       log("answerApproval", id, req);
-      if (req.fingerprint !== "abcdef0123456789abcdef01") throw new ApiError(409, "창이 바뀌었습니다. 새 창을 보고 다시 고르세요");
+      if (req.fingerprint !== "abcdef0123456789abcdef01") throw new ApiError(409, "창이 바뀌었습니다. 새 창을 보고 다시 고르세요", "approval_changed");
     },
     cliCommand() {
       return "iamceo-시험";
@@ -94,7 +94,7 @@ function fakeOrch(store: Store) {
     async handleAgentTool(member, name, args) {
       log("handleAgentTool", member.id, name, args);
       if (name === "boom") throw new Error("도구 터짐");
-      if (name === "denied") throw new ApiError(403, "거부");
+      if (name === "denied") throw new ApiError(403, "거부", "decision_not_own");
       return { text: `ok:${name}` };
     },
     async askWait(member, decisionId, timeoutMs) {
@@ -504,13 +504,13 @@ describe("REST", () => {
     const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
     const denied = await fetch(`${base}/agent/tool`, { method: "POST", headers, body: JSON.stringify({ name: "denied" }) });
     expect(denied.status).toBe(403);
-    expect(await denied.json()).toEqual({ error: "거부" });
+    expect(await denied.json()).toEqual({ error: "거부", code: "decision_not_own" });
     const original = console.error;
     console.error = () => {};
     const boom = await fetch(`${base}/agent/tool`, { method: "POST", headers, body: JSON.stringify({ name: "boom" }) });
     console.error = original;
     expect(boom.status).toBe(500);
-    expect(await boom.json()).toEqual({ error: "도구 터짐" });
+    expect(await boom.json()).toEqual({ error: "도구 터짐", code: "internal_error" });
   });
 });
 

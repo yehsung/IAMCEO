@@ -376,7 +376,7 @@ test("한도가 아닌 이유로 일하는 팀장의 모델 변경은 예전처�
   await t.orch.assign(t.project.id, w.handle, { text: "오래 걸리는 일 @fake:post=오래끝 @fake:hold" });
   await t.waitFor("일하는 중", () => t.core.held(w.id));
   const refused = await t.api("PATCH", `/api/members/${w.id}`, { cli: "claude", modelOverride: "opus", effortOverride: null });
-  expect({ status: refused.status, body: await refused.json() }).toEqual({ status: 409, body: { error: "일하거나 세션을 처리하는 중입니다. 턴이 끝난 뒤 CLI를 바꾸세요" } });
+  expect({ status: refused.status, body: await refused.json() }).toEqual({ status: 409, body: { error: "일하거나 세션을 처리하는 중입니다. 턴이 끝난 뒤 CLI를 바꾸세요", code: "cli_switch_busy" } });
   expect(t.member(w.id).modelOverride).toBe(FABLE);
   expect(t.runs(w.id)).toHaveLength(1);
   t.core.release(w.id);
@@ -450,7 +450,7 @@ describe("사용 한도 카드에서 다른 모델 고르기", () => {
       // F6: 앱은 '사용 한도'가 든 글을 모두 "…다른 모델로 바꾸면 바로 이어 갑니다"로 바꿔 보여 준다. 거절 까닭이 덮이지 않게 그 낱말을 쓰지 않는다.
       expect(body.error).not.toContain("사용 한도");
     }
-    expect(await (await answer(t, limitCard.id, "model:nope", limitCard.updatedAt)).json()).toEqual({ error: "이 CLI의 모델 목록에 없는 모델입니다" });
+    expect(await (await answer(t, limitCard.id, "model:nope", limitCard.updatedAt)).json()).toEqual({ error: "이 CLI의 모델 목록에 없는 모델입니다", code: "model_unknown" });
     expect(t.store.requireDecision(limitCard.id)).toMatchObject({ status: "open", updatedAt: limitCard.updatedAt });
     expect(t.runs(w.id)).toHaveLength(1);
     expect(t.member(w.id).modelOverride).toBe(FABLE);
@@ -532,7 +532,7 @@ describe("사용 한도 카드에서 다른 모델 고르기", () => {
     const same = answer(t, limitCard.id, "model:opus", limitCard.updatedAt);
     const other = await answer(t, limitCard.id, "model:sonnet", limitCard.updatedAt);
     const resume = await answer(t, limitCard.id, "resume", limitCard.updatedAt);
-    expect({ status: other.status, body: await other.json() }).toEqual({ status: 409, body: { error: "다른 선택을 처리하는 중입니다. 잠시 뒤 카드를 다시 확인해 주세요" } });
+    expect({ status: other.status, body: await other.json() }).toEqual({ status: 409, body: { error: "다른 선택을 처리하는 중입니다. 잠시 뒤 카드를 다시 확인해 주세요", code: "usage_choice_busy" } });
     expect(resume.status).toBe(409);
     closeMenu!();
     expect((await first).status).toBe(200);
@@ -555,7 +555,7 @@ describe("사용 한도 카드에서 다른 모델 고르기", () => {
     expect(open).toMatchObject({ id: limitCard.id, status: "open", usageLimit: { memberIds: [w.id] } });
     const runs = t.runs(w.id).length;
     const res = await answer(t, open.id, "model:opus", open.updatedAt);
-    expect({ status: res.status, body: await res.json() }).toEqual({ status: 409, body: { error: "카드의 팀장이 모두 이어가기 결과를 기다리는 중입니다. 잠시 뒤 카드를 다시 확인해 주세요" } });
+    expect({ status: res.status, body: await res.json() }).toEqual({ status: 409, body: { error: "카드의 팀장이 모두 이어가기 결과를 기다리는 중입니다. 잠시 뒤 카드를 다시 확인해 주세요", code: "usage_notice_pending" } });
     expect(t.member(w.id).modelOverride).toBe(FABLE);
     expect(t.runs(w.id)).toHaveLength(runs);
     // 적어 두지 않았다: 카드가 닫힌 뒤 같은 답이 와도 '이미 바꿨다'로 받지 않는다.
@@ -573,7 +573,7 @@ describe("사용 한도 카드에서 다른 모델 고르기", () => {
     // 카드의 판(updatedAt)은 푸시 알림에 묶여 팀장이 붙어도 그대로다. 그래서 판으로는 걸러지지 않는다.
     expect({ id: now.id, updatedAt: now.updatedAt, members: now.usageLimit!.memberIds.length }).toEqual({ id: seen.id, updatedAt: seen.updatedAt, members: 2 });
     const refused = await t.api("POST", `/api/decisions/${now.id}/answer`, { choice: "model:opus", expectedVersion: seen.updatedAt, memberIds: seen.usageLimit!.memberIds });
-    expect({ status: refused.status, body: await refused.json() }).toEqual({ status: 409, body: { error: "카드의 팀장이 바뀌었습니다. 카드를 다시 확인해 주세요" } });
+    expect({ status: refused.status, body: await refused.json() }).toEqual({ status: 409, body: { error: "카드의 팀장이 바뀌었습니다. 카드를 다시 확인해 주세요", code: "usage_notice_member_changed" } });
     for (const w of [a, b]) expect(t.member(w.id).modelOverride).toBe(FABLE);
     const ok = await t.api("POST", `/api/decisions/${now.id}/answer`, { choice: "model:opus", expectedVersion: now.updatedAt, memberIds: [...now.usageLimit!.memberIds].reverse() });
     expect(ok.status).toBe(200);

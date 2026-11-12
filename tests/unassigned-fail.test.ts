@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import { Bus } from "../server/bus.ts";
-import { MIGRATIONS, openDb } from "../server/db.ts";
+import { ensureErrorCodeColumns, MIGRATIONS, openDb } from "../server/db.ts";
 import { DeliveryRecovery } from "../server/delivery-recovery.ts";
 import { ApiError, Store } from "../server/store.ts";
 import type { UnassignedRecoveryRequest } from "../shared/types.ts";
@@ -112,6 +112,8 @@ test("migration from live v30 keeps historical messages and adds the durable own
   const db = new Database(":memory:"); close.push(() => db.close());
   for (const sql of MIGRATIONS.slice(0, 30)) db.exec(sql);
   db.exec("PRAGMA user_version = 30");
+  // 판 번호 없이 더하는 열(오류·보류 코드). 실제로는 openDb 가 이주 뒤에 더하지만, 이 시험은 이주 도중의 DB 에 지금 Store 를 쓴다.
+  ensureErrorCodeColumns(db);
   const store = new Store(db, new Bus());
   const project = store.createProject({ name: "v30 fixture", cwd: "/private/tmp/iamceo-v30-fixture" });
   const message = store.createMessage({ projectId: project.id, mine: true, kind: "나", body: "v30 원본", delivery: "failed" });

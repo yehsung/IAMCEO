@@ -49,5 +49,5 @@ export function isSecretPath(path: string, home: string, protectedRoots: readonl
 }
 
 export function rejectHardLink(stat: { isFile(): boolean; nlink: number }): void {
-  if (stat.isFile() && stat.nlink > 1) throw new ApiError(403, "다른 이름으로 연결된 파일(하드 링크)은 열지 않습니다");
+  if (stat.isFile() && stat.nlink > 1) throw new ApiError(403, "다른 이름으로 연결된 파일(하드 링크)은 열지 않습니다", "local_file_hard_link");
 }

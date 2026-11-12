@@ -397,6 +397,8 @@ struct Message: Codable, Sendable, Identifiable, Equatable {
     var attachments: [Attachment] = []
     var delivery: String? = nil
     var deliveryNote: String? = nil
+    /// deliveryNote 가 정해진 보류 문장일 때 서버가 함께 주는 코드(예: held_delivery_unknown). 옛 서버는 싣지 않는다.
+    var deliveryCode: String? = nil
     var deliveryRevision: Int? = nil
 }
 extension Message {
@@ -424,6 +426,7 @@ extension Message {
         delivery = try c.decodeIfPresent(String.self, forKey: ModelKey("delivery"))
         if try c.decodeIfPresent(String.self, forKey: ModelKey("deliveryDisposition")) == "dismissed" { delivery = "dismissed" }
         deliveryNote = try c.decodeIfPresent(String.self, forKey: ModelKey("deliveryNote"))
+        deliveryCode = try? c.decodeIfPresent(String.self, forKey: ModelKey("deliveryCode"))
         deliveryRevision = try c.decodeIfPresent(Int.self, forKey: ModelKey("deliveryRevision"))
     }
 }
@@ -837,9 +840,11 @@ struct OperationReceipt: Codable, Sendable {
     var code: String? = nil
     var error: String? = nil
     var result: OperationResult? = nil
+    /// 넓은 code(TERMINAL_REFUSED 등) 아래의 좁은 사유 코드. 옛 서버의 영수증과 이 앱이 예전에 저장한 영수증에는 없다.
+    var reason: String? = nil
 
     private enum CodingKeys: String, CodingKey {
-        case operationId, kind, projectId, memberId, createdAt, updatedAt, status, code, error, result
+        case operationId, kind, projectId, memberId, createdAt, updatedAt, status, code, error, result, reason
     }
 }
 extension OperationReceipt {
@@ -854,6 +859,7 @@ extension OperationReceipt {
         status = try c.decodeIfPresent(OperationStatus.self, forKey: .status) ?? .unknown
         code = try c.decodeIfPresent(String.self, forKey: .code)
         error = try c.decodeIfPresent(String.self, forKey: .error)
+        reason = try? c.decodeIfPresent(String.self, forKey: .reason)
         // Unrecognized operations cannot authorize success or replay.
         if kind == .unknown { status = .unknown }
         if status == .applied {

@@ -1042,7 +1042,7 @@ export class CoreRunner implements FullRunner {
     const track = this.tracks.get(member.id);
     if (track) { this.assertMember(track, member); return this.refresh(track); }
     const address = this.tracks.get(member.id)?.terminal.address || member.paneId;
-    if (!address) throw new CoreError("not_found", "No core terminal for member");
+    if (!address) throw new CoreError("not_found", "No core terminal for member", false, "rejected", undefined, "core_terminal_missing");
     const terminal = await this.call<CoreTerminal>("terminal.get", { terminal: address });
     if (!this.owns(terminal, member)) throw new CoreError("conflict", "Refusing to control a core terminal without matching IAMCEO ownership labels");
     return terminal;
@@ -1311,7 +1311,7 @@ export class CoreRunner implements FullRunner {
         const track = this.tracks.get(member.id);
         if (track) this.assertMember(track, member);
         if (!lease || action.leaseId !== lease.leaseId || lease.identity.sessionGeneration !== (member.sessionGeneration ?? -1) ||
-            lease.identity.terminalId !== (member.paneId ?? track?.terminal.address)) throw new CoreError("conflict", "A matching active terminal control lease is required");
+            lease.identity.terminalId !== (member.paneId ?? track?.terminal.address)) throw new CoreError("conflict", "A matching active terminal control lease is required", false, "rejected", undefined, "core_lease_required");
         this.deps.recoveryStore?.removeLease(member.id, lease.claimId); this.leases.delete(member.id);
         if (track) this.bump(track);
         return {};
@@ -1320,7 +1320,7 @@ export class CoreRunner implements FullRunner {
       const track = this.tracks.get(member.id);
       if (!track) throw new CoreError("not_found", "Reattach the owned terminal before claiming control");
       if (action.action === "claim") {
-        if (lease && action.leaseId !== lease.leaseId && action.leaseId !== lease.claimId) throw new CoreError("conflict", "Another terminal control lease is active");
+        if (lease && action.leaseId !== lease.leaseId && action.leaseId !== lease.claimId) throw new CoreError("conflict", "Another terminal control lease is active", false, "rejected", undefined, "core_lease_other");
         // Expired rows can also survive a restart, when there is no cached
         // lease left for manualLease to remove. Only clear this claim's row
         // after the store confirms there is no live holder.
@@ -1333,8 +1333,8 @@ export class CoreRunner implements FullRunner {
         this.deps.recoveryStore?.saveLease(next); this.leases.set(member.id, next); this.bump(track);
         return { leaseId: next.leaseId, expiresAt: next.expiresAt };
       }
-      if (!lease || action.leaseId !== lease.leaseId) throw new CoreError("conflict", "A matching active terminal control lease is required");
-      if (terminal.state !== "live") throw new CoreError("finished", "Terminal has finished");
+      if (!lease || action.leaseId !== lease.leaseId) throw new CoreError("conflict", "A matching active terminal control lease is required", false, "rejected", undefined, "core_lease_required");
+      if (terminal.state !== "live") throw new CoreError("finished", "Terminal has finished", false, "rejected", undefined, "core_terminal_finished");
       if (action.action === "input" && (!action.text?.length || Buffer.byteLength(action.text) > 128 * 1024)) throw new CoreError("invalid_params", "Terminal input must contain 1–131072 bytes");
       if (action.action === "key" && !this.methods.has("terminal.keys")) throw new CoreError("unsupported", "Core does not support terminal.keys");
       if (action.action === "key" && (!action.key || !["enter", "up", "down", "esc", "tab", "ctrl+c", "backspace"].includes(action.key))) throw new CoreError("invalid_params", "Unsupported terminal control key");

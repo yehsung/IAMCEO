@@ -90,7 +90,8 @@ describe("명령줄 도움말과 오류", () => {
     expect(attach.code).toBe(1);
     expect(attach.stderr.trim()).toBe("Usage: iamceo attach <staffID>");
     const auth = await cli(["auth"], "ko");
-    expect(auth.stderr.trim()).toBe("쓰는 법: iamceo auth rotate");
+    // C3(G 리뷰 auth-1): auth 에 rotate --all-devices 와 revoke-devices 가 생겨 쓰는 법 줄이 늘었다.
+    expect(auth.stderr.trim()).toBe("쓰는 법: iamceo auth rotate [--all-devices] | iamceo auth revoke-devices");
     const service = await cli(["service", "install"], "en");
     expect(service.code).toBe(1);
     expect(service.stderr).toContain("With IAMCEO_TEST=1 nothing is registered with launchd");

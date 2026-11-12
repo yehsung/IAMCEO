@@ -1530,11 +1530,16 @@ struct MemberDetailView: View {
     }
 
     private func sleep(_ m: Member) async {
-        await run("sleep", success: "잠재웠습니다. 깨우거나 지시를 보내면 다시 엽니다.") { await store.sleepMember(m) }
+        var refusal: APIError?
+        await run("sleep", success: "잠재웠습니다. 깨우거나 지시를 보내면 다시 엽니다.") {
+            let outcome = await store.sleepMemberOutcome(m)
+            refusal = outcome.refusal
+            return outcome.ok
+        }
         // The daemon refuses a plain sleep while the member works, waits on a decision or has queued input.
         // An input-box or approval-window refusal cannot be overridden: the CEO has to clear it first.
-        if let failure, ["일하는 중", "열린 결재", "대기열"].contains(where: { failure.contains($0) }),
-           !failure.contains("입력칸"), !failure.contains("승인 창") {
+        // 새 서버는 코드로 가른다(문장에는 팀장 이름이 들어간다). 옛 서버는 예전처럼 문장으로.
+        if let failure, ServerCode.sleepForceable(code: refusal?.code, message: failure) {
             sleepRefusal = failure
         }
     }

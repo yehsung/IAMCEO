@@ -86,8 +86,8 @@ function requireReadable(orch: Orchestrator, member: Member, raw: string): strin
   const homeDot = covering.length > 0 && covering.every((root) => isInside(home, root)) && isInside(path, home) && path !== home && path.slice(home.length + 1).startsWith(".");
   const protectedRoots = orch.protectedFileRoots;
   const secret = isSecretPath(given, home, protectedRoots) || isSecretPath(path, home, protectedRoots, homeDot);
-  if (secret) throw new ApiError(403, `이 경로는 자료로 올릴 수 없습니다(비밀이 있는 곳): ${path}`);
-  if (covering.length === 0) throw new ApiError(403, `작업 폴더 밖의 파일은 올릴 수 없습니다: ${path}. 작업 폴더로 옮긴 뒤 올리세요`);
+  if (secret) throw new ApiError(403, `이 경로는 자료로 올릴 수 없습니다(비밀이 있는 곳): ${path}`, "agent_path_secret");
+  if (covering.length === 0) throw new ApiError(403, `작업 폴더 밖의 파일은 올릴 수 없습니다: ${path}. 작업 폴더로 옮긴 뒤 올리세요`, "agent_path_outside_workdir");
   // 하드 링크는 진짜 경로를 따라가도 원본을 알 수 없다. 작업 폴더 안의 이름으로 비밀을 읽는 길이 된다.
   const stat = statOrNull(path);
   if (stat) rejectHardLink(stat);
@@ -107,18 +107,18 @@ function requireMemberCwd(orch: Orchestrator, member: Member, raw: string, quote
   const home = realOrSelf(homedir());
   const data = realOrSelf(orch.dataDir);
   const secret = isInside(path, data) || (path !== root && isInside(data, path)) || SECRET_DIRS.some((d) => isInside(path, join(home, d)));
-  if (secret) throw new ApiError(403, `작업 폴더로 쓸 수 없습니다(비밀이 있는 곳): ${path}`);
+  if (secret) throw new ApiError(403, `작업 폴더로 쓸 수 없습니다(비밀이 있는 곳): ${path}`, "agent_path_secret");
   if (isInside(path, root)) return path;
   const said = quote?.trim() && (quote.includes(raw.trim()) || quote.includes(path)) && orch.findQuoteSource(member.projectId, quote) !== null;
   if (said) return path;
-  throw new ApiError(403, `프로젝트 폴더 밖입니다: ${path}. 필요하면 ask 로 대표에게 묻고, 대표가 그 경로를 글로 답하면 그 글을 user_quote 에 실어 다시 부르세요`);
+  throw new ApiError(403, `프로젝트 폴더 밖입니다: ${path}. 필요하면 ask 로 대표에게 묻고, 대표가 그 경로를 글로 답하면 그 글을 user_quote 에 실어 다시 부르세요`, "agent_path_outside_project");
 }
 
 function prepareAttachment(orch: Orchestrator, member: Member, raw: string): PreparedImport {
   const path = requireReadable(orch, member, raw);
   const stat = statOrNull(path);
-  if (!stat?.isFile()) throw new ApiError(400, `파일이 없습니다: ${path}`);
-  if (stat.size > MAX_UPLOAD_BYTES) throw new ApiError(413, `파일은 50MB 까지 올릴 수 있습니다: ${path}`);
+  if (!stat?.isFile()) throw new ApiError(400, `파일이 없습니다: ${path}`, "agent_file_missing");
+  if (stat.size > MAX_UPLOAD_BYTES) throw new ApiError(413, `파일은 50MB 까지 올릴 수 있습니다: ${path}`, "file_too_large");
   return prepareImport(path);
 }
 
@@ -130,7 +130,7 @@ async function attach(orch: Orchestrator, member: Member, raw: string): Promise<
 /** 다른 직원에게 시키는 도구가 자기 자신을 가리키면 턴이 안 끝나는 대기열이나 자기 종료가 된다. */
 function requireOther(orch: Orchestrator, self: Member, ref: string): Member {
   const target = orch.requireInProject(self.projectId, ref);
-  if (target.id === self.id) throw new ApiError(400, "자기 자신은 지정할 수 없습니다");
+  if (target.id === self.id) throw new ApiError(400, "자기 자신은 지정할 수 없습니다", "agent_self_target");
   return target;
 }
 
@@ -189,13 +189,13 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     }),
     async (orch, member, a) => {
       const keys = (a.options ?? []).map((o: { k: string }) => o.k);
-      if (new Set(keys).size !== keys.length) throw new ApiError(400, "선택지 k 가 겹칩니다");
-      if (a.rec && !keys.includes(a.rec)) throw new ApiError(400, `권장 선택지가 선택지에 없습니다: ${a.rec}`);
-      if (a.file_id && orch.store.getFile(a.file_id)?.projectId !== member.projectId) throw new ApiError(404, `자료를 찾을 수 없습니다: ${a.file_id}`);
+      if (new Set(keys).size !== keys.length) throw new ApiError(400, "선택지 k 가 겹칩니다", "decision_option_duplicate");
+      if (a.rec && !keys.includes(a.rec)) throw new ApiError(400, `권장 선택지가 선택지에 없습니다: ${a.rec}`, "decision_rec_missing");
+      if (a.file_id && orch.store.getFile(a.file_id)?.projectId !== member.projectId) throw new ApiError(404, `자료를 찾을 수 없습니다: ${a.file_id}`, "file_not_found");
       const images: Attachment[] = [];
       for (const image of a.images ?? []) {
         const attachment = await attach(orch, member, image);
-        if (!attachment.isImage) throw new ApiError(400, `이미지가 아닙니다: ${image}`);
+        if (!attachment.isImage) throw new ApiError(400, `이미지가 아닙니다: ${image}`, "not_an_image");
         images.push(attachment);
       }
       const { decision, blocking, text } = await orch.registerAsk(member, { title: a.title, detail: a.detail, options: a.options, rec: a.rec, group: a.group, fileId: a.file_id, images });
@@ -222,18 +222,18 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     }),
     async (orch, member, a) => {
       if (a.report_id !== undefined) {
-        if (!orch.reportReferences) throw new ApiError(501, "보고 참조 조회를 지원하지 않습니다");
+        if (!orch.reportReferences) throw new ApiError(501, "보고 참조 조회를 지원하지 않습니다", "report_lookup_unsupported");
         const refs = orch.reportReferences(member.projectId, a.report_id);
         const source = orch.store.requireMessage(refs.sourceMessageId);
-        if (source.projectId !== member.projectId) throw new ApiError(404, "보고를 찾을 수 없습니다");
+        if (source.projectId !== member.projectId) throw new ApiError(404, "보고를 찾을 수 없습니다", "report_not_found");
         const files = refs.fileIds.map(id => {
           const file = orch.store.getFile(id);
-          if (!file || file.projectId !== member.projectId) throw new ApiError(404, `자료를 찾을 수 없습니다: ${id}`);
+          if (!file || file.projectId !== member.projectId) throw new ApiError(404, `자료를 찾을 수 없습니다: ${id}`, "file_not_found");
           return { id: file.id, title: file.title, summary: file.summary, body: file.body, kind: file.kind, attachments: file.attachments, ...(file.kind === "artifact" ? { html: orch.store.getFileHtml(file.id) } : {}) };
         });
         return reply(JSON.stringify({ ...refs, source, files }));
       }
-      if (a.kind === undefined || a.title === undefined) throw new ApiError(400, "보고 게시에는 kind와 title이 필요합니다");
+      if (a.kind === undefined || a.title === undefined) throw new ApiError(400, "보고 게시에는 kind와 title이 필요합니다", "report_fields_required");
       const message = await orch.recordPost(member, { kind: a.kind, title: a.title, body: a.body, fileIds: a.file_ids, decisionId: a.decision_id, group: a.group, correctsMessageId: a.corrects_message_id, supersedes: a.supersedes });
       return reply(`보고했습니다 #${message.id}${message.systemInstruction ? `\n${message.systemInstruction}` : ""}`);
     },
@@ -250,10 +250,10 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       images: z.array(z.string()).optional().describe("이미지 파일 경로(작업 폴더 안)"),
     }),
     async (orch, member, a) => {
-      if ([a.path, a.content, a.html].filter((v) => v !== undefined).length > 1) throw new ApiError(400, "path·content·html 은 하나만 줍니다");
-      if (a.html !== undefined && !a.html.trim()) throw new ApiError(400, "html 이 비어 있습니다");
-      if (!a.path && a.content === undefined && a.html === undefined && !a.images?.length) throw new ApiError(400, "path·content·html·images 중 하나가 필요합니다");
-      if (a.html !== undefined && artifactBytes(a.html) > MAX_ARTIFACT_BYTES) throw new ApiError(413, "html 은 2MB 까지 올릴 수 있습니다");
+      if ([a.path, a.content, a.html].filter((v) => v !== undefined).length > 1) throw new ApiError(400, "path·content·html 은 하나만 줍니다", "file_source_ambiguous");
+      if (a.html !== undefined && !a.html.trim()) throw new ApiError(400, "html 이 비어 있습니다", "html_empty");
+      if (!a.path && a.content === undefined && a.html === undefined && !a.images?.length) throw new ApiError(400, "path·content·html·images 중 하나가 필요합니다", "file_source_required");
+      if (a.html !== undefined && artifactBytes(a.html) > MAX_ARTIFACT_BYTES) throw new ApiError(413, "html 은 2MB 까지 올릴 수 있습니다", "html_too_large");
       // Validate and read all inputs before creating a staging directory or attachment row.
       const inputs: PreparedImport[] = [];
       let body: string = a.content ?? "";
@@ -264,12 +264,12 @@ const TOOLS: Record<ToolName, Tool<any>> = {
         const real = requireReadable(orch, member, a.path);
         path = expandPath(a.path, member.cwd);
         const stat = statOrNull(real);
-        if (!stat?.isFile()) throw new ApiError(400, `파일이 없습니다: ${real}`);
+        if (!stat?.isFile()) throw new ApiError(400, `파일이 없습니다: ${real}`, "agent_file_missing");
         kind = fileKindOf(basename(real));
         if (kind === "artifact") {
-          if (stat.size > MAX_ARTIFACT_BYTES) throw new ApiError(413, `html 은 2MB 까지 올릴 수 있습니다: ${real}`);
+          if (stat.size > MAX_ARTIFACT_BYTES) throw new ApiError(413, `html 은 2MB 까지 올릴 수 있습니다: ${real}`, "html_too_large");
           html = readFileSync(real, "utf8");
-          if (artifactBytes(html) > MAX_ARTIFACT_BYTES) throw new ApiError(413, "html 은 2MB 까지 올릴 수 있습니다");
+          if (artifactBytes(html) > MAX_ARTIFACT_BYTES) throw new ApiError(413, "html 은 2MB 까지 올릴 수 있습니다", "html_too_large");
         } else if (MARKDOWN_EXT.has(extname(real).toLowerCase()) && stat.size <= MARKDOWN_BODY_MAX_BYTES) {
           body = readFileSync(real, "utf8");
         } else {
@@ -282,7 +282,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       }
       for (const image of a.images ?? []) {
         const input = prepareAttachment(orch, member, image);
-        if (!input.mime.startsWith("image/")) throw new ApiError(400, `이미지가 아닙니다: ${image}`);
+        if (!input.mime.startsWith("image/")) throw new ApiError(400, `이미지가 아닙니다: ${image}`, "not_an_image");
         inputs.push(input);
       }
       kind ??= "image";
@@ -335,7 +335,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       if (a.follow_up?.kind === "instruction" && !a.follow_up.source_message_id && !a.answered_decision_id) ctx.addIssue({ code: "custom", message: "후속 지시의 대표 원문 또는 답한 결재가 필요합니다" });
     }),
     async (orch, member, a) => {
-      if (a.follow_up && !orch.closeDecision) throw new ApiError(501, "결재 후속 저장을 지원하지 않습니다");
+      if (a.follow_up && !orch.closeDecision) throw new ApiError(501, "결재 후속 저장을 지원하지 않습니다", "decision_follow_up_unsupported");
       const closed = a.follow_up
         ? await orch.closeDecision!(member, { id: a.id, kind: a.kind, reason: a.reason, userQuote: a.user_quote, ...(a.answered_decision_id ? { answeredDecisionId: a.answered_decision_id } : {}), ...(a.same_issue ? { sameIssue: a.same_issue } : {}),
           followUp: a.follow_up.kind === "none" ? { kind: "none" } : { kind: "instruction", memberId: a.follow_up.member_id, text: a.follow_up.text, ...(a.follow_up.source_message_id ? { sourceMessageId: a.follow_up.source_message_id } : { sourceDecisionId: a.answered_decision_id! }) } })
@@ -479,7 +479,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     "낡거나 겹친 일 항목을 지운다.",
     z.strictObject({ id: text }),
     (orch, member, a) => {
-      if (orch.store.getWork(a.id)?.projectId !== member.projectId) throw new ApiError(404, `일 항목을 찾을 수 없습니다: ${a.id}`);
+      if (orch.store.getWork(a.id)?.projectId !== member.projectId) throw new ApiError(404, `일 항목을 찾을 수 없습니다: ${a.id}`, "board_item_not_found");
       orch.store.removeWork(a.id);
       return reply("지웠습니다");
     },
@@ -513,10 +513,10 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     }),
     async (orch, member, a) => {
       const cwd = expandPath(a.cwd, member.cwd);
-      if (!statOrNull(cwd)?.isDirectory()) throw new ApiError(400, `폴더가 없습니다: ${cwd}`);
+      if (!statOrNull(cwd)?.isDirectory()) throw new ApiError(400, `폴더가 없습니다: ${cwd}`, "folder_missing");
       // 총괄 띄우기가 실패해도 프로젝트는 남는다. 다시 불렀을 때 둘이 되지 않게 한다.
       const same = orch.store.listProjects().find((p) => p.name === a.name && p.cwd === cwd);
-      if (same) throw new ApiError(409, `같은 이름·폴더의 프로젝트가 이미 있습니다 #${same.id}`);
+      if (same) throw new ApiError(409, `같은 이름·폴더의 프로젝트가 이미 있습니다 #${same.id}`, "project_exists");
       const project = await orch.createProject({ name: a.name, cwd, goal: a.goal, startConductor: a.start_conductor, chiefCli: a.chief_cli });
       return reply(`프로젝트를 만들었습니다 #${project.id} '${project.name}' (${project.cwd})${a.start_conductor ? ", 총괄을 띄웠습니다" : ""}`);
     },
@@ -536,12 +536,12 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     }).refine(a => a.ack_batch_id === undefined || a.timeout_sec === undefined, "ACK와 조회는 따로 호출합니다"),
     async (orch, member, a, signal) => {
       if (a.ack_batch_id !== undefined) {
-        if (!orch.acknowledgeManualInbox) throw new ApiError(501, "수신함 ACK를 지원하지 않습니다");
+        if (!orch.acknowledgeManualInbox) throw new ApiError(501, "수신함 ACK를 지원하지 않습니다", "inbox_ack_unsupported");
         return reply(JSON.stringify(await orch.acknowledgeManualInbox(member.id, { batchId: a.ack_batch_id })));
       }
       // 기존 v1 HTTP 도구 호출은 문자열/즉시 소비 계약을 유지한다.
       if (!a.batch) return reply((await orch.waitInbox(member, (a.timeout_sec ?? WAIT_DEFAULT_SEC) * 1000, signal)) ?? "새 지시가 없습니다. 계속 기다리려면 다시 wait 를 부르세요");
-      if (!orch.manualInbox) throw new ApiError(501, "수신함 batch 조회를 지원하지 않습니다");
+      if (!orch.manualInbox) throw new ApiError(501, "수신함 batch 조회를 지원하지 않습니다", "inbox_batch_unsupported");
       const batch = await orch.manualInbox(member.id, (a.timeout_sec ?? WAIT_DEFAULT_SEC) * 1000, signal);
       return reply(batch ? JSON.stringify(batch) : "새 지시가 없습니다. 계속 기다리려면 다시 wait 를 부르세요");
     },

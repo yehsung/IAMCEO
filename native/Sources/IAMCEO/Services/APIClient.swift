@@ -5,10 +5,13 @@ struct APIError: LocalizedError, Sendable {
     let status: Int
     let message: String
     let code: String?
-    init(status: Int, message: String, code: String? = nil) {
+    /// 넓은 옛 코드(TERMINAL_REFUSED 등) 아래의 좁은 사유 코드. 옛 서버는 싣지 않는다(그때는 문장으로 가른다, ServerCode).
+    let reason: String?
+    init(status: Int, message: String, code: String? = nil, reason: String? = nil) {
         self.status = status
         self.message = message
         self.code = code
+        self.reason = reason
     }
     var errorDescription: String? { message }
 }
@@ -204,7 +207,7 @@ actor APIClient {
         guard (200..<300).contains(http.statusCode) else {
             let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             let message = object?["error"] as? String ?? object?["message"] as? String ?? "Request failed (\(http.statusCode))."
-            throw APIError(status: http.statusCode, message: message, code: object?["code"] as? String)
+            throw APIError(status: http.statusCode, message: message, code: object?["code"] as? String, reason: object?["reason"] as? String)
         }
         return (data, http)
     }

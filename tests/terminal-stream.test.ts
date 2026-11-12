@@ -760,6 +760,28 @@ describe("terminal stream", () => {
     const response = await fetch(`${f.origin}/api/auth/rotate`,{method:"POST",headers:f.headers}); expect(response.status).toBe(200);
     await until(()=>stream.closed&&realtimeClosed); await until(()=>f.pids().every(p=>!alive(p.pid)));
   });
+  test("G: a device-key terminal stream survives code rotation and closes when that one device is revoked", async () => {
+    const f = await fixture();
+    const { code } = await (await fetch(`${f.origin}/api/pair/start`, { method: "POST", headers: f.headers })).json() as { code: string };
+    const { accessCode: key } = await (await fetch(`${f.origin}/pair/claim`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, device: "iPhone" }) })).json() as { accessCode: string };
+    expect(key.startsWith("dk1.")).toBe(true);
+    const ws = new NativeWebSocket(`${f.origin.replace("http", "ws")}/api/members/${f.member.id}/terminal/stream?mode=observe`, { headers: { Authorization: `Bearer ${key}` } });
+    ws.binaryType = "arraybuffer";
+    const output: Buffer[] = []; let closed = false;
+    ws.addEventListener("message", e => { if (typeof e.data !== "string") output.push(Buffer.from(e.data)); });
+    ws.addEventListener("close", () => { closed = true; });
+    await until(() => Buffer.concat(output).toString().includes("hello"));
+    // 공용 코드를 바꿔도 기기 열쇠로 연 스트림은 그대로다.
+    expect((await fetch(`${f.origin}/api/auth/rotate`, { method: "POST", headers: f.headers })).status).toBe(200);
+    await Bun.sleep(100);
+    expect(closed).toBe(false);
+    // 그 기기를 끊으면 스트림이 바로 닫히고 관찰 프로세스도 거둔다.
+    const { devices } = await (await fetch(`${f.origin}/api/devices`, { headers: { Authorization: `Bearer ${key}` } })).json() as { devices: { id: string }[] };
+    expect((await fetch(`${f.origin}/api/devices/${devices[0]!.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${key}` } })).status).toBe(200);
+    await until(() => closed);
+    await until(() => f.pids().every(p => !alive(p.pid)));
+    expect((await fetch(`${f.origin}/api/members/${f.member.id}/terminal/stream?mode=observe`, { headers: { Authorization: `Bearer ${key}` } })).status).toBe(401);
+  });
   test("a dropped control socket releases its lease after the grace period and queued delivery resumes", async () => {
     const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });
     const manager = new TerminalStreams(f.config, f.store, f.orch, { orphanLeaseMs: 40 }); cleanups.push(() => manager.close());

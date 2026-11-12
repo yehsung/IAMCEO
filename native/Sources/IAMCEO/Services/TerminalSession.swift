@@ -198,7 +198,8 @@ final class TerminalSession {
                     return attempt.namespace == namespace && attempt.action == .claim
                 }
                 let refusal = refusals.first { previousResults[$0.operationId] == nil } ?? refusals.first
-                fallback(store: store, member: member, message: refusal?.error ?? store.terminalWindowNotice(memberID: member.id) ?? store.rawErrorMessage ?? "조작권을 받지 못했습니다. 다른 기기나 세션 상태를 확인해 주세요.")
+                fallback(store: store, member: member, message: refusal?.error ?? store.terminalWindowNotice(memberID: member.id) ?? store.rawErrorMessage ?? "조작권을 받지 못했습니다. 다른 기기나 세션 상태를 확인해 주세요.",
+                         reason: refusal?.error != nil ? refusal?.reason : nil)
                 return
             }
             ownedLeaseID = lease
@@ -242,8 +243,9 @@ final class TerminalSession {
         return await store.releaseTerminalSession(member, owner: owner)
     }
 
-    private func fallback(store: AppStore, member: Member, message: String, release: Bool = false) {
-        if message.contains("No core terminal for member"), TerminalAvailability.supportsTerminal(member) {
+    /// reason: 서버가 준 좁은 사유 코드(있으면 문장 대신 그것으로 가른다, ServerCode).
+    private func fallback(store: AppStore, member: Member, message: String, reason: String? = nil, release: Bool = false) {
+        if ServerCode.terminalMissing(reason: reason, message: message), TerminalAvailability.supportsTerminal(member) {
             terminalDisappeared(store: store, member: member)
             return
         }

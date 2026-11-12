@@ -6,6 +6,10 @@ import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const out = join(root, "dist", "release");
+// 한 릴리스의 실행 파일은 모두 같은 Bun 으로 만든다: CI 의 CLI 자산(여기)과 감독자 Mac 의 DMG 안 데몬(release-mac.ts) 모두 .bun-version.
+const pinned = readFileSync(join(root, ".bun-version"), "utf8").trim();
+const bun = Bun.spawnSync(["bun", "--version"], { cwd: root, stdout: "pipe", stderr: "pipe" }).stdout.toString().trim();
+if (Bun.version !== pinned || bun !== pinned) throw new Error(`Bun ${pinned}(.bun-version)으로 만들어야 합니다: 이 Bun ${Bun.version}, PATH 의 bun ${bun || "없음"}`);
 const TARGETS = ["darwin-arm64", "darwin-x64"] as const;
 
 function run(cmd: string[]): void {

@@ -199,10 +199,11 @@ test("release: CI 판정은 release·ci 워크플로의 성공만 통과로 본�
 function releaseFixture() {
   const f = fixture();
   const sha = "0".repeat(39) + "1";
+  // show 는 커밋의 package.json 과 .bun-version(이 Bun, release-mac 이 빌드 전에 대조한다)만 답한다.
   f.script("git", `printf 'git %s\\n' "$1" >> "$FIXTURE/calls.log"
 case "$1" in
   rev-parse) printf '%s\\n' ${sha} ;;
-  show) printf '{"version":"${pkg.version}"}\\n' ;;
+  show) case "$2" in *:.bun-version) printf '%s\\n' ${Bun.version} ;; *) printf '{"version":"${pkg.version}"}\\n' ;; esac ;;
   *) echo forbidden >&2; exit 91 ;;
 esac`);
   f.script("gh", `printf 'gh %s %s\\n' "$1" "$2" >> "$FIXTURE/calls.log"

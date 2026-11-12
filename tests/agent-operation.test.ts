@@ -27,7 +27,7 @@ function fixture() {
   // Any accidental orchestration/runner call fails instead of starting a CLI.
   const host = {
     store, dataDir: runtime.paths.iamceoHome, uploadsDir: join(runtime.paths.iamceoHome, "uploads"),
-    closeAsk: async () => { legacyCloses++; throw new ApiError(409, "legacy close"); },
+    closeAsk: async () => { legacyCloses++; throw new ApiError(409, "legacy close", "decision_closed"); },
     waitInbox: async () => { legacyWaits++; return "v1 inbox"; },
   } as unknown as Orchestrator & Partial<AgentWorkflowService> & {
     manualInbox?: (id: string, timeout: number, signal?: AbortSignal) => ReturnType<ManualInboxService["inbox"]>;

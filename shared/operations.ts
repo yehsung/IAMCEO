@@ -86,7 +86,8 @@ export type OperationReceipt<K extends OperationKind = OperationKind> = {
   } & (
     | { status: "pending"; result?: never; code?: never; error?: never }
     | { status: "applied"; result: OperationResults[P]; code?: never; error?: never }
-    | { status: "refused" | "unknown"; result?: never; code: string; error: string }
+    /** reason: 넓은 code(TERMINAL_REFUSED 등) 아래의 좁은 사유 코드(shared/error-codes.ts). 옛 서버의 영수증에는 없다. */
+    | { status: "refused" | "unknown"; result?: never; code: string; error: string; reason?: string }
   )
 }[K];
 

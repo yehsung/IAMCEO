@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ApiOutageState, CliProvider, Decision, DecisionOption, Delivery, Member } from "../shared/types.ts";
 import { ApiError, type Store } from "./store.ts";
+import { API_OUTAGE_NOTE, USAGE_WAIT_NOTE } from "./hold-codes.ts";
 
 function usageLimitTitle(text: string): boolean {
   return /(?:you['’]ve hit your (?:weekly limit|5-hour limit|Opus limit|Sonnet limit|Fable limit|usage credit limit|monthly spend limit|team['’]s shared budget|channel['’]s monthly spend limit)\b|you['’]ve reached your .+?\blimit\b|you['’]re out of usage credits\b|your org is out of usage\b)/i.test(text);
@@ -84,8 +85,8 @@ export function networkRetryScreen(screen: string): boolean {
 }
 export const API_RESUME_TEXT = "[시스템] 인터넷 연결이 끊겨 하던 턴이 중단됐습니다. 연결이 돌아왔습니다. 중단된 일을 이어서 하세요. 이미 끝낸 부분은 다시 하지 말고, 다 끝났으면 결과만 post 하세요.";
 export const USAGE_RESUME_TEXT = "[시스템] 사용 한도로 하던 턴이 멈췄습니다. 이제 이어서 할 수 있습니다. 중단된 일을 이어서 하세요. 이미 끝낸 부분은 다시 하지 말고, 다 끝났으면 결과만 post 하세요.";
-/** 사용 한도로 보류한 직원의 lastError. 한도가 풀리면 이 글일 때만 지운다. */
-export const USAGE_WAIT_NOTE = "사용 한도 해제를 기다립니다";
+/** 사용 한도로 보류한 직원의 lastError. 한도가 풀리면 이 보류(fenceCode usage_wait)일 때만 지운다. 정의는 server/hold-codes.ts. */
+export { USAGE_WAIT_NOTE } from "./hold-codes.ts";
 /**
  * 사용 한도 카드의 '이어가기' 선택지. 키는 출시된 iPhone(0.2.2·0.2.3)이 이 값으로 답하므로 바꾸지 않는다.
  * 계정이 하나뿐인 사람도 있으니 계정을 바꿨다고 가정하지 않는다. 기다리기는 버튼이 아니라 기본 동작이다(풀리면 저절로 이어 간다).
@@ -283,7 +284,7 @@ export class ApiRecovery {
   private holdPending(memberId: string, reason: string): void {
     for (const d of this.options.store.listPending(memberId)) {
       this.options.store.markHeld(d.id, reason);
-      if (d.refType === "message" && d.refId) this.options.store.setMessageDelivery(d.refId, "held", reason === "api_outage" ? "인터넷 연결 복구를 기다립니다" : USAGE_WAIT_NOTE);
+      if (d.refType === "message" && d.refId) this.options.store.setMessageDelivery(d.refId, "held", reason === "api_outage" ? API_OUTAGE_NOTE : USAGE_WAIT_NOTE);
     }
   }
   /** 이 직원이 사용 한도로 보류 중인가(한도가 풀려 이어가기를 넣고 결과를 기다리는 중이면 아니다). */
@@ -310,7 +311,7 @@ export class ApiRecovery {
         if (d.refType === "message" && d.refId) store.setMessageDelivery(d.refId, "queued");
       }
       const member = store.getMember(memberId);
-      if (member) store.patchMember(member.id, { blockedReason: null, ...(member.lastError === USAGE_WAIT_NOTE ? { lastError: null } : {}),
+      if (member) store.patchMember(member.id, { blockedReason: null, ...(member.fenceCode === "usage_wait" ? { lastError: null } : {}),
         ...(member.statusObservation?.error?.code === "usage_limit" ? { statusObservation: { ...member.statusObservation, error: null } } : {}) });
       this.save();
     });
@@ -416,7 +417,7 @@ export class ApiRecovery {
       const blocked = this.options.limitedModels?.(member, raw) ?? [];
       if (blocked.length) group.blockedModels = [...new Set([...(group.blockedModels ?? []), ...blocked.map(m => m.toLowerCase())])];
       store.appendActivity(member.id, "error", raw, `usage:${group.decisionId}:${member.id}:${createHash("sha256").update(raw).digest("hex")}`);
-      store.patchMember(member.id, { status: menu ? "blocked" : "error", lastError: USAGE_WAIT_NOTE, blockedReason: "usage_limit", statusObservation: { source: member.backend ?? "core", observedAt: new Date(this.now()).toISOString(), freshness: "fresh", ownership: member.statusObservation?.ownership ?? "verified", consecutiveFailures: 0, error: { code: "usage_limit", note: raw } } });
+      store.patchMember(member.id, { status: menu ? "blocked" : "error", lastError: USAGE_WAIT_NOTE, fenceCode: "usage_wait", blockedReason: "usage_limit", statusObservation: { source: member.backend ?? "core", observedAt: new Date(this.now()).toISOString(), freshness: "fresh", ownership: member.statusObservation?.ownership ?? "verified", consecutiveFailures: 0, error: { code: "usage_limit", note: raw } } });
       this.holdPending(member.id, "usage_limit");
       this.updateCard(group);
       this.save();
@@ -506,9 +507,9 @@ export class ApiRecovery {
     return task;
   }
   private async resumeUsageOnce(decisionId: string, automatic: boolean): Promise<Decision> {
-    if (this.closed) throw new ApiError(503, "서버가 종료 중입니다");
+    if (this.closed) throw new ApiError(503, "서버가 종료 중입니다", "server_shutting_down");
     const group = this.state.limits.find(g => g.decisionId === decisionId);
-    if (!group) throw new ApiError(404, "사용 한도 알림을 찾을 수 없습니다");
+    if (!group) throw new ApiError(404, "사용 한도 알림을 찾을 수 없습니다", "usage_notice_not_found");
     if (this.resuming.has(group.cli)) return this.options.store.requireDecision(decisionId);
     this.resuming.add(group.cli);
     try {
@@ -581,7 +582,7 @@ export class ApiRecovery {
       if (!mine.length) continue;
       g.members = g.members.filter(m => m.memberId !== memberId);
       const member = mine.some(m => !m.awaitingResult) ? this.options.store.getMember(memberId) : null;
-      if (member) this.options.store.patchMember(member.id, { blockedReason: null, ...(member.lastError === USAGE_WAIT_NOTE ? { lastError: null } : {}),
+      if (member) this.options.store.patchMember(member.id, { blockedReason: null, ...(member.fenceCode === "usage_wait" ? { lastError: null } : {}),
         ...(member.statusObservation?.error?.code === "usage_limit" ? { statusObservation: { ...member.statusObservation, error: null } } : {}) });
       this.updateCard(g);
     }

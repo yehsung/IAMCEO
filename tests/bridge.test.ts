@@ -45,7 +45,7 @@ beforeAll(async () => {
       const request = JSON.stringify([member.id, name, args]);
       const previous = pending.get(context.operationId);
       if (previous) {
-        if (previous.request !== request) throw new ApiError(409, "다른 요청에 사용된 operationId입니다");
+        if (previous.request !== request) throw new ApiError(409, "다른 요청에 사용된 operationId입니다", "OPERATION_CONFLICT");
         return previous.result;
       }
       const result = orch.handleAgentTool(member, name, args, signal);

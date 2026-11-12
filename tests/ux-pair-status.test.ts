@@ -87,8 +87,10 @@ describe("UX-T10 authenticated pairing status and ACK", () => {
   });
   const start = async () => (await (await fetch(`${base}/api/pair/start`, { method: "POST", headers })).json()) as { code: string };
   const status = (code: string) => fetch(`${base}/api/pair/status?code=${encodeURIComponent(code)}`, { headers });
-  const ack = (code: string, confirmationToken: string, authenticated = true) => fetch(`${base}/api/pair/ack`, {
-    method: "POST", headers: authenticated ? headers : { "Content-Type": "application/json" }, body: JSON.stringify({ code, confirmationToken }),
+  // ACK 는 교환한 폰이 받은 자격으로 부른다(출시된 앱: claim → 그 자격으로 connect → acknowledgePairing).
+  const ack = (code: string, confirmationToken: string, credentialForAck: string | null = credential) => fetch(`${base}/api/pair/ack`, {
+    method: "POST", headers: credentialForAck === null ? { "Content-Type": "application/json" } : { Authorization: `Bearer ${credentialForAck}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ code, confirmationToken }),
   });
 
   test("status requires Bearer, rejects malformed query, and does not expose exchange proof", async () => {
@@ -109,13 +111,16 @@ describe("UX-T10 authenticated pairing status and ACK", () => {
     expect((await ack(code, "x".repeat(64))).status).toBe(409);
     const exchange = await fetch(`${base}/pair/claim`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) });
     const body = await exchange.json() as { accessCode: string; confirmationToken: string };
-    expect(body.accessCode).toBe(credential);
+    // C3(G): 교환은 공용 접속 코드가 아니라 그 폰만의 기기 열쇠를 accessCode 칸에 준다(출시된 앱은 그 값을 그대로 쓴다).
+    expect(body.accessCode).not.toBe(credential);
+    expect(body.accessCode).toMatch(/^dk1\.dev[A-Za-z0-9]{16}\.[A-Za-z0-9_-]{43}$/);
     expect(body.confirmationToken).toHaveLength(64);
     expect(await (await status(code)).json()).toEqual({ code, status: "claimed" });
-    expect((await ack(code, body.confirmationToken, false)).status).toBe(401);
-    expect((await ack(code, "x".repeat(64))).status).toBe(409);
-    expect((await ack(code, "bad")).status).toBe(400);
-    expect(await (await ack(code, body.confirmationToken)).json()).toEqual({ code, status: "connected" });
+    expect((await ack(code, body.confirmationToken, null)).status).toBe(401);
+    expect((await ack(code, "x".repeat(64), body.accessCode)).status).toBe(409);
+    expect((await ack(code, "bad", body.accessCode)).status).toBe(400);
+    expect(await (await ack(code, body.confirmationToken, body.accessCode)).json()).toEqual({ code, status: "connected" });
+    // 같은 증거의 ACK 를 다시 해도(어느 자격이든) 그대로 연결됨이다.
     const repeated = await ack(code, body.confirmationToken);
     expect(repeated.headers.get("cache-control")).toBe("no-store");
     expect(await repeated.json()).toEqual({ code, status: "connected" });

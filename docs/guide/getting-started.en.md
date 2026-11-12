@@ -86,7 +86,8 @@ alias iamceo=/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo
 | `iamceo backup` | A backup right now, with the server stopped (while it runs, use the backups it makes every day) → [Upgrade, backup and uninstall](upgrade-backup-uninstall.en.md) |
 | `iamceo upgrade` · `iamceo rollback` | Move to a new version, go back to the previous one |
 | `iamceo uninstall` | Stop IAMCEO completely on this Mac |
-| `iamceo auth rotate` | Replace the access code → [Security](../security.en.md#if-you-lose-a-device) |
+| `iamceo auth rotate` | Replace the access code (with `--all-devices`, also disconnect every device paired by QR) → [Security](../security.en.md#if-you-lose-a-device) |
+| `iamceo auth revoke-devices` | Disconnect every device paired by QR (the shared access code stays) |
 
 ## Good to know: your terminal environment does not carry over
 

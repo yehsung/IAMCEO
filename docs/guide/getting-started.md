@@ -84,7 +84,8 @@ alias iamceo=/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo
 | `iamceo backup` | 서버를 끈 상태에서 지금 바로 백업(켜져 있으면 서버가 매일 만드는 백업을 씁니다) → [업그레이드·백업·제거](upgrade-backup-uninstall.md) |
 | `iamceo upgrade` · `iamceo rollback` | 새 버전으로 올리기, 직전 버전으로 되돌리기 |
 | `iamceo uninstall` | 이 Mac에서 IAMCEO를 완전히 멈추기 |
-| `iamceo auth rotate` | 접속 코드 바꾸기 → [보안 설명서](../security.md#기기를-잃어버렸을-때) |
+| `iamceo auth rotate` | 접속 코드 바꾸기(`--all-devices`면 QR로 연결한 기기도 모두 끊기) → [보안 설명서](../security.md#기기를-잃어버렸을-때) |
+| `iamceo auth revoke-devices` | QR로 연결한 기기를 모두 끊기(공용 접속 코드는 그대로) |
 
 ## 알아 둘 것: 터미널 환경은 넘어가지 않습니다
 

@@ -385,6 +385,8 @@ struct AnswerRequest: Encodable, Sendable {
     let note: String?
     let batch: Bool
     let expectedVersion: String
+    /// Only on a usage card's `model:` answer: the staff the person saw on the card. Left out (nil) otherwise, so older servers never see it.
+    var memberIds: [String]? = nil
 }
 struct CreateProjectRequest: Encodable, Sendable {
     let name: String; let cwd: String; let goal: String; let startConductor: Bool; let chiefCli: String

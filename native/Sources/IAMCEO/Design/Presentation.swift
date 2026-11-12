@@ -767,6 +767,8 @@ struct UsageLimitInfo: Sendable {
     /// Used only when the server sends no options. Does not assume the person has another account.
     static let resumeLabel = "계정을 바꿨거나 한도를 늘렸어요 · 이어가기"
     static let stillLimitedText = "아직 한도가 남아 있지 않습니다. 기다리거나 다른 모델을 고르세요."
+    /// Still limited and no model to pick (an account-wide limit, every model already limited, or an older server): waiting is the way.
+    static let stillLimitedWaitText = "아직 한도가 남아 있지 않습니다. 한도가 풀리면 자동으로 이어 갑니다."
     let resumesText: String?
     let memberNames: [String]
     let warning: String?
@@ -784,7 +786,9 @@ struct UsageLimitInfo: Sendable {
         memberNames = (decision.usageLimit?.memberIds ?? []).filter { seen.insert($0).inserted }.map { id in
             members.first { $0.id == id }.map { $0.name.isEmpty ? id : $0.name } ?? id
         }
-        warning = decision.usageLimit?.stillLimited == true ? Self.stillLimitedText : nil
+        // Say "pick another model" only when the card offers one: an account-wide limit (5-hour, weekly) has no model choices.
+        let offersModel = Self.buttons(decision).contains { $0.choice.hasPrefix(Self.modelChoicePrefix) }
+        warning = decision.usageLimit?.stillLimited == true ? (offersModel ? Self.stillLimitedText : Self.stillLimitedWaitText) : nil
     }
 
     /// The card's buttons in the server's order (models first, then `resume`). Waiting is not a button: the server continues on its own
@@ -803,7 +807,15 @@ struct UsageLimitInfo: Sendable {
     /// which the card's push notification is keyed to. A shown card whose options differ from the latest is redrawn.
     static func optionsChanged(_ shown: Decision, latest: Decision?) -> Bool {
         guard shown.kind == "usage_limit", let latest else { return false }
-        return latest.options != shown.options
+        return latest.options != shown.options || latest.usageLimit?.memberIds != shown.usageLimit?.memberIds
+    }
+
+    /// What the inbox watches to redraw while it stays on screen (the Mac keeps the inbox tab up, so onAppear does not come back).
+    /// A usage card's choices and staff change without `updatedAt`, so they are part of its signature; other cards are `id@updatedAt` as before.
+    static func syncSignature(_ decision: Decision) -> String {
+        let base = "\(decision.id)@\(decision.updatedAt)"
+        guard decision.kind == "usage_limit" else { return base }
+        return base + "/" + decision.options.map(\.k).joined(separator: ",") + "/" + (decision.usageLimit?.memberIds ?? []).joined(separator: ",")
     }
 
     /// A choice this card can be answered with: `resume`, or one of the model choices the server offered on it.
@@ -816,4 +828,15 @@ struct UsageLimitInfo: Sendable {
     static func prioritized(_ decisions: [Decision]) -> [Decision] {
         decisions.filter { $0.kind == "usage_limit" } + decisions.filter { $0.kind != "usage_limit" }
     }
+}
+
+/// Why the member settings must not reopen the session now (the server refuses with 409 mid-turn or at an approval window).
+/// A member stopped by a usage-limit menu is not at an approval window: the server closes that menu with Esc only and continues the
+/// same conversation on the new model, and the status line tells the person to change the model. `reopens`: the change restarts the session.
+func memberReopenBlock(_ member: Member, reopens: Bool) -> String? {
+    guard reopens else { return nil }
+    if member.status == "working" || (member.status == "blocked" && member.blockedReason != "usage_limit") {
+        return "일하거나 승인 창 앞이면 세션을 다시 열 수 없습니다. 턴이 끝난 뒤 적용하세요."
+    }
+    return nil
 }

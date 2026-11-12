@@ -282,6 +282,8 @@ const AnswerSchema = z.object({
   choice: z.string().nullable().optional(),
   note: z.string().nullable().optional(),
   batch: z.boolean().optional(),
+  // 사용 한도 카드의 모델 답에 앱이 본 카드의 팀장을 싣는다(AnswerReq.memberIds).
+  memberIds: z.array(z.string().min(1).max(200)).max(500).optional(),
 });
 const TodoDropSchema = z.object({ reason: z.string().max(100_000).optional() });
 const TodoDoneSchema = z.object({ done: z.boolean(), note: z.string().max(100_000).optional(), fileIds: z.array(z.string().min(1)).max(50).optional() });
@@ -957,7 +959,9 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       store.requireDecision(id!);
       const body = await parseBody(req, contractV2(req) ? AnswerV2Schema : AnswerSchema);
       if (store.requireDecision(id!).kind === "usage_limit") {
-        return Response.json(await once(`decision:${id}`, () => orch.answerDecision(id!, body)));
+        // 같은 답의 재전송만 앞 요청의 결과를 함께 받는다. 다른 답은 총괄이 판정한다(도는 답이 있으면 409): 결재 id 하나로만 묶으면
+        // 모델을 바꾸는 동안 온 다른 선택이 앞 답의 결과를 200 으로 받아 갔다.
+        return Response.json(await once(`decision:${id}:${body.choice ?? ""}`, () => orch.answerDecision(id!, body)));
       }
       const duplicate = store.checkAnswer(id!, body);
       if (duplicate) return Response.json(duplicate);

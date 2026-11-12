@@ -127,6 +127,15 @@ export function limitedModelName(raw: string): string | null {
   return modelCreditLimit(raw)?.model ?? /you['’]ve hit your (Opus|Sonnet|Fable|Haiku) limit\b/i.exec(raw)?.[1] ?? null;
 }
 /**
+ * 그 모델에만 걸린 한도인가(다른 모델로 바꾸면 바로 된다): 모델 크레딧 소진, 또는 'You've hit your Opus limit' 처럼 모델 이름이 붙은 한도.
+ * 5시간·주간·이름 없는 한도와 Codex 의 한도는 계정 전체의 한도라 다른 모델로 바꿔도 곧바로 다시 걸린다. 그런 카드에는 모델 선택지를 내지 않는다.
+ */
+export function modelScopedLimit(raw: string): boolean {
+  return modelCreditLimit(raw) !== null || limitedModelName(raw) !== null;
+}
+/** 카드 글의 모델 안내 뒤에 붙인다. 출시된 iPhone(0.2.2·0.2.3)에는 모델 버튼이 없어, 앱 판과 상관없이 되는 길도 알린다. */
+const MODEL_ELSEWHERE = "(고를 버튼이 없으면 팀장 설정에서 모델을 바꾸거나 총괄에게 모델을 바꿔 이어 가라고 하세요)";
+/**
  * 사용 한도로 일하던 도중 멈춘 직원의 모델을 바꿔 같은 대화를 이어 열었을 때, 멈춘 실행마다 한 번 넣는 글(재시작 이어가기와 같은 꼴).
  * 원래 지시를 다시 넣지 않는다(세션 기록에 멈춘 턴이 그대로 있다). 이 글로 시작한 턴에도 평소의 보고 의무와 보고 보완이 그대로 적용된다.
  */
@@ -160,7 +169,12 @@ interface Limited { memberId: string; fingerprint: string | null; raw: string; r
   limitedAt?: string; autoAttempts?: number; autoNextAt?: string | null; relimits?: number }
 interface LimitGroup { cli: CliProvider; decisionId: string; stillLimited: boolean; members: Limited[]; rawEvidence?: string[];
   /** 대표가 카드에서 고른 마지막 모델 선택지(`model:<값>`). 같은 답이 다시 오면 한 번만 한다. */
-  answered?: string }
+  answered?: string;
+  /**
+   * 이 카드에서 한 번이라도 한도에 걸린 모델(모델 목록의 값, 소문자). 그 팀장이 모델을 바꿔 카드에서 빠져도 그 모델의 한도는 그대로라,
+   * 다시 선택지로 내지 않는다(모델을 바꿔 또 걸린 팀장이 앞서 걸린 모델을 다시 보게 되던 것).
+   */
+  blockedModels?: string[] }
 interface RecoveryState { outage: Outage | null; limits: LimitGroup[]; resumeOrder?: string[]; continuations?: Record<string, string> }
 export interface ApiRecoveryOptions {
   store: Store;
@@ -173,10 +187,13 @@ export interface ApiRecoveryOptions {
   inspect: (member: Member) => Promise<{ menu: UsageMenu | null; state: string | null }>;
   dismiss: (member: Member, fingerprint: string) => Promise<{ ok: boolean; note?: string }>;
   /**
-   * 카드의 모델 선택지(`model:<값>`): 그 CLI 의 모델 목록에서 카드의 팀장들이 한도에 걸린 모델을 뺀 것. 없으면 '이어가기'만 둔다.
+   * 카드의 모델 선택지(`model:<값>`): 그 CLI 의 모델 목록에서 카드의 팀장들이 한도에 걸린 모델과 이 카드에서 이미 걸린 모델(blocked)을 뺀 것.
+   * 없으면 '이어가기'만 둔다. 모델에 한정된 한도가 하나도 없는 카드에는 부르지 않는다(modelScopedLimit).
    * 모델 목록과 팀장의 설정은 총괄이 안다(ModelCatalogReader·desiredConfig).
    */
-  choices?: (cli: CliProvider, limited: { memberId: string; raw: string }[]) => DecisionOption[];
+  choices?: (cli: CliProvider, limited: { memberId: string; raw: string }[], blocked: string[]) => DecisionOption[];
+  /** 이 팀장이 이 글로 한도에 걸렸을 때 막힌 모델 값들(쓰던 모델, 글에 이름이 나온 모델). 카드가 blockedModels 로 기억한다. */
+  limitedModels?: (member: Member, raw: string) => string[];
 }
 
 /** A single host-owned tick; all intent/attempt receipts are committed before external input. */
@@ -186,6 +203,11 @@ export class ApiRecovery {
   private running: Promise<void> | null = null;
   private readonly resuming = new Set<CliProvider>();
   private readonly resumeTasks = new Set<Promise<Decision>>();
+  /**
+   * 재우기·모델 변경 전에 한도 메뉴를 Esc 로 닫고 있는 팀장. 메모리에만 둔다: 저장되는 dismissStarted('대표가 누른 이어가기가 진행 중')와
+   * 섞이면, 틱이 그 카드 전체를 수동 이어가기로 돌려 다른 팀장에게까지 Esc·이어가기 글을 넣었다(서버가 그 사이 죽으면 다시 뜬 뒤 첫 틱이 그랬다).
+   */
+  private readonly menuClosing = new Set<string>();
   private started = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastUsageCheck = 0;
@@ -304,25 +326,25 @@ export class ApiRecovery {
   /**
    * 이 직원 화면의 사용 한도 메뉴를 Esc 로만 닫는다(재우기·모델 변경으로 세션을 끝내기 전에). Enter·숫자·화살표는 보내지 않는다:
    * 메뉴의 선택지가 유료 크레딧 구매일 수 있다(dismiss 가 지문을 다시 확인하고 Esc 한 번만 보낸다). 메뉴가 없으면 할 일이 없다.
-   * 닫는 동안과 닫은 뒤에, 메뉴가 사라진 것을 '대표가 터미널에서 직접 풀었다'로 읽어 보류를 풀지 않게 적어 둔다.
+   * 닫는 동안(menuClosing, 메모리에만)과 닫은 뒤(지문을 지운다)에, 메뉴가 사라진 것을 '대표가 터미널에서 직접 풀었다'로 읽어 보류를 풀지 않게 한다.
+   * closed: 메뉴가 떠 있었고 Esc 로 닫았다(닫는 동안 온 상태 이벤트는 버려졌다. 뒤에 끝내기가 실패하면 부른 쪽이 상태를 다시 적는다).
    */
-  async closeMenu(member: Member): Promise<{ ok: boolean; note?: string }> {
+  async closeMenu(member: Member): Promise<{ ok: boolean; note?: string; closed?: boolean }> {
     const snapshot = await this.options.inspect(member).catch((error: unknown) => {
       if (error instanceof NoTerminalError) return { menu: null, state: null };
       throw error;
     });
-    if (!snapshot.menu) return { ok: true };
-    const limited = this.state.limits.flatMap(g => g.members).filter(m => m.memberId === member.id);
-    for (const m of limited) m.dismissStarted = true;
-    if (limited.length) this.save();
+    if (!snapshot.menu) return { ok: true, closed: false };
+    this.menuClosing.add(member.id);
     try {
       const result = await this.options.dismiss(member, snapshot.menu.fingerprint);
-      if (result.ok) for (const m of limited) m.fingerprint = null;
-      return result;
-    } finally {
-      for (const m of limited) m.dismissStarted = false;
-      if (limited.length) this.save();
-    }
+      if (result.ok) {
+        const limited = this.state.limits.flatMap(g => g.members).filter(m => m.memberId === member.id);
+        for (const m of limited) m.fingerprint = null;
+        if (limited.length) this.save();
+      }
+      return { ...result, closed: result.ok };
+    } finally { this.menuClosing.delete(member.id); }
   }
   preservesOrder(memberId: string): boolean { return this.state.resumeOrder?.includes(memberId) ?? false; }
   finishNetwork(memberId: string): void {
@@ -390,6 +412,9 @@ export class ApiRecovery {
         if (!group.rawEvidence.includes(raw)) group.rawEvidence.push(raw);
       }
       if (errorKey) limited.errorKey = errorKey;
+      // 이 팀장이 걸린 모델을 카드가 기억한다. 그 팀장이 모델을 바꿔 카드에서 빠져도 다시 선택지로 내지 않는다.
+      const blocked = this.options.limitedModels?.(member, raw) ?? [];
+      if (blocked.length) group.blockedModels = [...new Set([...(group.blockedModels ?? []), ...blocked.map(m => m.toLowerCase())])];
       store.appendActivity(member.id, "error", raw, `usage:${group.decisionId}:${member.id}:${createHash("sha256").update(raw).digest("hex")}`);
       store.patchMember(member.id, { status: menu ? "blocked" : "error", lastError: USAGE_WAIT_NOTE, blockedReason: "usage_limit", statusObservation: { source: member.backend ?? "core", observedAt: new Date(this.now()).toISOString(), freshness: "fresh", ownership: member.statusObservation?.ownership ?? "verified", consecutiveFailures: 0, error: { code: "usage_limit", note: raw } } });
       this.holdPending(member.id, "usage_limit");
@@ -404,7 +429,9 @@ export class ApiRecovery {
     const resetsAt = times.at(-1) ?? null;
     const card = this.options.store.requireDecision(group.decisionId);
     // 선택지: 한도에 걸리지 않은 모델마다 하나(먼저), 그다음 이어가기. 팀장이 빠지거나 모델 목록이 바뀌면 다시 계산한다(틱마다 이 함수가 돈다).
-    const models = waiting.length ? this.options.choices?.(group.cli, waiting.map(m => ({ memberId: m.memberId, raw: m.raw }))) ?? [] : card.options.filter(o => o.k.startsWith(USAGE_MODEL_PREFIX));
+    // 모델에 한정된 한도가 하나도 없으면(5시간·주간·Codex 등 계정 전체의 한도) 모델을 바꿔도 곧바로 다시 걸리므로 모델 선택지를 내지 않는다.
+    const models = !waiting.length ? card.options.filter(o => o.k.startsWith(USAGE_MODEL_PREFIX))
+      : waiting.some(m => modelScopedLimit(m.raw)) ? this.options.choices?.(group.cli, waiting.map(m => ({ memberId: m.memberId, raw: m.raw })), group.blockedModels ?? []) ?? [] : [];
     const first = this.cardLead(group, waiting, resetsAt, models.length > 0);
     const names = waiting.map(m => `${this.options.store.getMember(m.memberId)?.name ?? m.memberId}${m.failure ? ` — ${m.failure}` : ""}`).join("\n");
     const raw = (group.rawEvidence ?? group.members.filter(m => !m.resetsAt).map(m => m.raw)).join("\n\n");
@@ -417,12 +444,12 @@ export class ApiRecovery {
    * 다른 계정으로 로그인했거나 한도를 늘렸으면 '이어가기'를 누르면 된다는 것을 차례로 적는다.
    */
   private cardLead(group: LimitGroup, waiting: Limited[], resetsAt: string | null, hasModels: boolean): string {
-    if (group.stillLimited) return hasModels ? "아직 한도가 남아 있지 않습니다. 기다리거나 다른 모델을 고르세요." : "아직 한도가 남아 있지 않습니다. 한도가 풀리면 자동으로 이어 갑니다.";
+    if (group.stillLimited) return hasModels ? `아직 한도가 남아 있지 않습니다. 기다리거나 다른 모델을 고르세요${MODEL_ELSEWHERE}.` : "아직 한도가 남아 있지 않습니다. 한도가 풀리면 자동으로 이어 갑니다.";
     const credit = waiting.map(m => modelCreditLimit(m.raw)).find(c => c !== null) ?? null;
     const when = resetsAt ? `${formatUsageReset(resetsAt)}에 ` : "";
     const lead = credit ? `${credit.model ? `${credit.model} ` : "이 모델의 "}사용 크레딧이 떨어졌습니다. 다른 모델로 바꾸면 바로 이어 갑니다. 기다리면 ${when}크레딧이 채워질 때 자동으로 이어 갑니다.`
       : resetsAt ? `${when}한도가 풀리면 자동으로 이어 갑니다. 기다리셔도 됩니다.` : "한도가 풀렸는지 가끔 다시 확인해 자동으로 이어 갑니다. 기다리셔도 됩니다.";
-    return `${lead} ${hasModels ? "바로 이어 가려면 다른 모델을 고르세요. " : ""}다른 계정으로 로그인했거나 한도를 늘렸다면 '이어가기'를 누르세요.`;
+    return `${lead} ${hasModels ? `바로 이어 가려면 다른 모델을 고르세요${MODEL_ELSEWHERE}. ` : ""}다른 계정으로 로그인했거나 한도를 늘렸다면 '이어가기'를 누르세요.`;
   }
   /** 이 카드에서 대표가 고른 마지막 모델 선택지. */
   answeredWith(decisionId: string): string | null {
@@ -487,9 +514,13 @@ export class ApiRecovery {
     try {
       for (const limited of [...group.members]) {
         if (this.closed || limited.awaitingResult) continue;
+        // 재우기·모델 변경이 이 팀장의 메뉴를 닫는 중이다. 그쪽이 끝낸다(Esc 를 두 번 보내거나 이어가기 글을 끼워 넣지 않는다).
+        if (this.menuClosing.has(limited.memberId)) continue;
         const member = this.options.store.getMember(limited.memberId);
         if (!member) { group.members = group.members.filter(m => m !== limited); continue; }
         if (this.options.store.requireProject(member.projectId).archived || this.state.outage?.active) continue;
+        // 잠든 팀장(대표나 총괄이 재운 것)은 스스로 깨우지 않는다(재시작 깨우기와 같은 원칙). 카드에 남아 있어 '이어가기'·모델 변경으로 깨울 수 있다.
+        if (automatic && member.status === "asleep") continue;
         if (automatic && !this.autoDue(limited)) continue;
         if (automatic) {
           // 시도 전에 다음 시각을 적어 둔다. 이번에 못 하면(화면 읽기 실패 등) 그때 다시 한다.
@@ -627,7 +658,8 @@ export class ApiRecovery {
         try {
           const snapshot = await this.options.inspect(member);
           if (!group.members.includes(limited)) continue;
-          if (!snapshot.menu && snapshot.state !== "blocked" && !limited.dismissStarted) {
+          // 메뉴가 사라진 것이 서버가 Esc 로 닫는 중이라서면(menuClosing) '대표가 직접 풀었다'가 아니다.
+          if (!snapshot.menu && snapshot.state !== "blocked" && !limited.dismissStarted && !this.menuClosing.has(limited.memberId)) {
             group.members = group.members.filter(m => m !== limited);
             this.clearUsage(member, snapshot.state);
           }
@@ -635,6 +667,8 @@ export class ApiRecovery {
       }
       this.updateCard(group);
       this.save();
+      // 한 팀장의 메뉴를 재우기·모델 변경이 닫는 중이면 이번 틱에는 이 카드를 이어 가지 않는다. 수동인지 자동인지는 저장된 dismissStarted 로만 정한다.
+      if (group.members.some(m => this.menuClosing.has(m.memberId))) continue;
       await this.resumeUsage(group.decisionId, !group.members.some(m => m.dismissStarted));
     }
   }

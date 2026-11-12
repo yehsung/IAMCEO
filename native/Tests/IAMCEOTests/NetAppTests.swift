@@ -139,8 +139,10 @@ private actor NetAppGate {
         XCTAssertEqual(card.options.map(\.k), ["resume"])
         XCTAssertEqual(info.resumesText, "11월 13일 오전 10시에 자동으로 이어 갑니다")
         XCTAssertEqual(info.memberNames, ["민지", "missing"])
-        // 계정이 하나인 사람도 있다: 계정을 바꿨다고 가정하지 않는다(2026-11-13).
-        XCTAssertEqual(info.warning, "아직 한도가 남아 있지 않습니다. 기다리거나 다른 모델을 고르세요.")
+        // 계정이 하나인 사람도 있다: 계정을 바꿨다고 가정하지 않는다(2026-11-13). 고를 모델이 없는 카드(계정 전체의 한도, 옛 서버)는 기다리면 된다고 한다.
+        XCTAssertEqual(info.warning, "아직 한도가 남아 있지 않습니다. 한도가 풀리면 자동으로 이어 갑니다.")
+        var withModel = card; withModel.options.insert(DecisionOption(k: "model:opus", label: "Opus로 바꿔 이어가기"), at: 0)
+        XCTAssertEqual(UsageLimitInfo(withModel, members: []).warning, "아직 한도가 남아 있지 않습니다. 기다리거나 다른 모델을 고르세요.")
         XCTAssertEqual(UsageLimitInfo.resumeLabel, "계정을 바꿨거나 한도를 늘렸어요 · 이어가기")
         card.usageLimit?.resetsAt = "invalid"; card.usageLimit?.stillLimited = false
         XCTAssertNil(UsageLimitInfo(card, members: []).resumesText)
@@ -178,11 +180,45 @@ private actor NetAppGate {
         XCTAssertFalse(UsageLimitInfo.optionsChanged(card, latest: card))
         XCTAssertFalse(UsageLimitInfo.optionsChanged(card, latest: nil))
         XCTAssertFalse(UsageLimitInfo.optionsChanged(Decision(id: "regular", options: [DecisionOption(k: "a")]), latest: Decision(id: "regular", options: [])))
+        // 그 사이 다른 팀장이 붙어도(판은 그대로) 다시 그린다.
+        var staffed = card; staffed.usageLimit = UsageLimit(cli: "claude", memberIds: ["m"])
+        var joined = staffed; joined.usageLimit?.memberIds = ["m", "n"]
+        XCTAssertTrue(UsageLimitInfo.optionsChanged(staffed, latest: joined))
         var review = DecisionReview(decision: card)
         review.choice = "model:opus"
         XCTAssertTrue(review.canSubmit(comparedTo: card))
         review.choice = "model:haiku"
         XCTAssertFalse(review.canSubmit(comparedTo: card))
+    }
+
+    /// a176ecf review F9: the Mac keeps the inbox up, so the open card redraws only when this signature moves. A usage card's choices and
+    /// staff change without updatedAt (its push is keyed to it); before, a stale 'Opus로 바꿔 이어가기' stayed until a 400 forced a redraw.
+    func testInboxSignatureMovesWhenUsageCardChoicesOrStaffChange() {
+        let card = Decision(id: "limit", kind: "usage_limit", usageLimit: UsageLimit(cli: "claude", memberIds: ["m"]),
+                            options: [DecisionOption(k: "model:opus"), DecisionOption(k: "resume")], updatedAt: "v1")
+        var fewer = card; fewer.options.removeFirst()
+        var joined = card; joined.usageLimit?.memberIds = ["m", "n"]
+        XCTAssertNotEqual(UsageLimitInfo.syncSignature(card), UsageLimitInfo.syncSignature(fewer))
+        XCTAssertNotEqual(UsageLimitInfo.syncSignature(card), UsageLimitInfo.syncSignature(joined))
+        XCTAssertEqual(UsageLimitInfo.syncSignature(card), UsageLimitInfo.syncSignature(card))
+        // Other cards keep the old signature: id@updatedAt.
+        let regular = Decision(id: "d", options: [DecisionOption(k: "a")], updatedAt: "v3")
+        var reworded = regular; reworded.options = [DecisionOption(k: "b")]
+        XCTAssertEqual(UsageLimitInfo.syncSignature(regular), "d@v3")
+        XCTAssertEqual(UsageLimitInfo.syncSignature(reworded), "d@v3")
+    }
+
+    /// a176ecf review F9: a member at a usage-limit menu (blocked + usage_limit) can change model from the member settings: the server closes
+    /// the menu with Esc only and continues the same conversation. Working members and real approval windows stay blocked.
+    func testMemberSettingsDoNotBlockAUsageLimitMenu() {
+        XCTAssertNil(memberReopenBlock(Member(id: "m", status: "blocked", blockedReason: "usage_limit"), reopens: true))
+        XCTAssertNil(memberReopenBlock(Member(id: "m", status: "error", blockedReason: "usage_limit"), reopens: true))
+        XCTAssertNil(memberReopenBlock(Member(id: "m", status: "idle"), reopens: true))
+        let refusal = "일하거나 승인 창 앞이면 세션을 다시 열 수 없습니다. 턴이 끝난 뒤 적용하세요."
+        XCTAssertEqual(memberReopenBlock(Member(id: "m", status: "blocked", blockedReason: "permission"), reopens: true), refusal)
+        XCTAssertEqual(memberReopenBlock(Member(id: "m", status: "blocked"), reopens: true), refusal)
+        XCTAssertEqual(memberReopenBlock(Member(id: "m", status: "working"), reopens: true), refusal)
+        XCTAssertNil(memberReopenBlock(Member(id: "m", status: "working"), reopens: false))
     }
 
     func testUsageLimitIsFirstAndIncludedInBadge() {
@@ -252,6 +288,9 @@ private actor NetAppGate {
         XCTAssertEqual(body["expectedVersion"] as? String, "v1")
         XCTAssertEqual(body["batch"] as? Bool, false)
         XCTAssertNil(body["note"])
+        // Shipped servers know only these keys (v2 is strict): 'resume' never carries the card's staff, and keeps the default write time.
+        XCTAssertNil(body["memberIds"])
+        XCTAssertEqual(requests.first?.timeoutInterval, 20)
         XCTAssertEqual(requests.first?.httpMethod, "POST")
         await network.close()
     }
@@ -275,6 +314,10 @@ private actor NetAppGate {
         XCTAssertEqual(body["choice"] as? String, "model:opus")
         XCTAssertEqual(body["expectedVersion"] as? String, "v1")
         XCTAssertNil(body["note"])
+        // a176ecf review F5: the server answers after stopping and reopening each staff member in turn (20 s timed out with three), and
+        // refuses (409) when the card's staff changed since the person saw it.
+        XCTAssertEqual(body["memberIds"] as? [String], ["m", "n"])
+        XCTAssertEqual(requests.first?.timeoutInterval, 150)
         await network.close()
     }
 

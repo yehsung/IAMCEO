@@ -3,12 +3,13 @@
 // 앱의 설정 변경도, 재우기도 "실행 중인 일이나 미해결 입력이 있어 닫지 않았습니다"(409)로 거절됐다. 총괄은 오푸스 팀장을 새로 띄웠고 원래 셋은 오류 표시를 단 채 남았다.
 // 실제 CoreRunner 틀(tests/fixtures/core-harness.ts)로 본다: 가짜 core + 실제 CoreRunner + 실제 총괄 + 실제 HTTP 서버.
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleAgentTool } from "../server/agent-tools.ts";
-import { usageModelResumeText } from "../server/api-outage.ts";
+import { handleAgentTool, listAgentTools } from "../server/agent-tools.ts";
+import { USAGE_RESUME_TEXT, USAGE_WAIT_NOTE, usageModelResumeText } from "../server/api-outage.ts";
 import type { AgentToolsImpl, PostInput } from "../server/orchestrator.ts";
+import { transcriptPath } from "../server/runner/transcript.ts";
 import type { DecisionOption, Member } from "../shared/types.ts";
 import { coreSetup, type CoreEnv, type CoreSetupOptions, type FakeRun } from "./fixtures/core-harness.ts";
 
@@ -38,6 +39,8 @@ const MENU = [
 const FABLE = "claude-fable-5-2";
 /** 계정 전체의 한도(모델 한정이 아니다). */
 const WEEKLY = "You've hit your weekly limit";
+/** Sonnet 만의 한도(모델 한정). */
+const SONNET_LIMIT = "You've hit your Sonnet limit";
 /** 새 모델로 이어 연 뒤 첫 글. 모델 목록의 표시 이름이 들어간다. */
 const RESUME = usageModelResumeText("Opus");
 const RESUME_LEAD = "사용 한도로 하던 일이 중간에 멈췄습니다";
@@ -57,6 +60,7 @@ async function setup(opts: CoreSetupOptions = {}): Promise<CoreEnv> {
     onTurn: ({ prompt }) => {
       if (prompt.includes("한도일")) throw Object.assign(new Error(LIMIT), { fake: "error" });
       if (prompt.includes("주간한도")) throw Object.assign(new Error(WEEKLY), { fake: "error" });
+      if (prompt.includes("소네트한도")) throw Object.assign(new Error(SONNET_LIMIT), { fake: "error" });
     },
     script: [{ when: RESUME_LEAD, tools: [{ name: "post", args: { kind: "완료", title: "이어서끝" } }] }],
   });
@@ -160,6 +164,8 @@ describe("사용 한도로 멈춘 팀장의 모델을 바꾸면 같은 세션을
     await t.idle(w.id);
     await Bun.sleep(QUIET_MS);
     expect(resumeTurns(t, w.id)).toHaveLength(1);
+    // S2: 이어가기 글이 모델을 바꿨다고 이미 알린다. 설정 변경 인계 글('CLI 설정 변경: claude → claude. … 현재 상황: …')을 다음 턴에 붙이지 않는다.
+    expect(t.store.listDeliveries(t.project.id).filter((d) => d.memberId === w.id && /설정 변경|모델 변경|같은 세션을 새 설정으로/.test(d.text)).map((d) => d.text)).toEqual([]);
 
     // 오류 표시가 사라지고 카드도 닫혔다(남은 팀장이 없다).
     expect(noLimitMark(t, w.id)).toEqual(CLEAR);
@@ -379,6 +385,11 @@ test("한도가 아닌 이유로 일하는 팀장의 모델 변경은 예전처�
   expect({ resume: t.runs(w.id).at(-1)!.resumeFlag, model: flag(t.runs(w.id).at(-1)!, "--model") }).toEqual({ resume: w.sessionId, model: "opus" });
   expect(t.store.listDeliveries(t.project.id).filter((d) => d.text.includes(RESUME_LEAD))).toHaveLength(0);
   expect(t.core.keys).toEqual([]);
+  // S2: 일반 설정 변경의 인계 글은 그대로 넣되, 같은 CLI 면 'claude → claude' 가 아니라 바뀐 것을 사실대로 적는다.
+  const handoff = t.store.listDeliveries(t.project.id).filter((d) => d.memberId === w.id && d.text.includes("같은 세션을 새 설정으로 이어 열었습니다"));
+  expect(handoff).toHaveLength(1);
+  expect(handoff[0]!.text).toContain("모델 변경: Fable 5.2 → Opus. 같은 세션을 새 설정으로 이어 열었습니다.");
+  expect(handoff[0]!.text).not.toContain("claude → claude");
 }, 40_000);
 
 // 2026-11-13 대표 지적: 카드가 '계정을 바꿨어요 · 모두 이어가기' 하나뿐이었다. 계정이 하나인 사람도 있고, 이번처럼 한 모델의 크레딧만 떨어졌으면
@@ -401,7 +412,7 @@ describe("사용 한도 카드에서 다른 모델 고르기", () => {
       { k: "model:haiku", label: "Haiku로 바꿔 이어가기" },
       RESUME_OPTION,
     ]);
-    expect(limitCard.detail.split("\n\n")[0]).toBe("Fable 5.2 사용 크레딧이 떨어졌습니다. 다른 모델로 바꾸면 바로 이어 갑니다. 기다리면 크레딧이 채워질 때 자동으로 이어 갑니다. 바로 이어 가려면 다른 모델을 고르세요. 다른 계정으로 로그인했거나 한도를 늘렸다면 '이어가기'를 누르세요.");
+    expect(limitCard.detail.split("\n\n")[0]).toBe("Fable 5.2 사용 크레딧이 떨어졌습니다. 다른 모델로 바꾸면 바로 이어 갑니다. 기다리면 크레딧이 채워질 때 자동으로 이어 갑니다. 바로 이어 가려면 다른 모델을 고르세요(고를 버튼이 없으면 팀장 설정에서 모델을 바꾸거나 총괄에게 모델을 바꿔 이어 가라고 하세요). 다른 계정으로 로그인했거나 한도를 늘렸다면 '이어가기'를 누르세요.");
     const runs = { a: t.runs(a.id).length, b: t.runs(b.id).length };
 
     const res = await answer(t, limitCard.id, "model:opus", limitCard.updatedAt);
@@ -434,8 +445,12 @@ describe("사용 한도 카드에서 다른 모델 고르기", () => {
     const limitCard = card(t)!;
     for (const choice of ["model:nope", "model:gpt-6-luna", `model:${FABLE}`, "approve"]) {
       const res = await answer(t, limitCard.id, choice, limitCard.updatedAt);
+      const body = await res.json() as { error: string };
       expect({ choice, status: res.status }).toEqual({ choice, status: 400 });
+      // F6: 앱은 '사용 한도'가 든 글을 모두 "…다른 모델로 바꾸면 바로 이어 갑니다"로 바꿔 보여 준다. 거절 까닭이 덮이지 않게 그 낱말을 쓰지 않는다.
+      expect(body.error).not.toContain("사용 한도");
     }
+    expect(await (await answer(t, limitCard.id, "model:nope", limitCard.updatedAt)).json()).toEqual({ error: "이 CLI의 모델 목록에 없는 모델입니다" });
     expect(t.store.requireDecision(limitCard.id)).toMatchObject({ status: "open", updatedAt: limitCard.updatedAt });
     expect(t.runs(w.id)).toHaveLength(1);
     expect(t.member(w.id).modelOverride).toBe(FABLE);
@@ -465,5 +480,281 @@ describe("사용 한도 카드에서 다른 모델 고르기", () => {
     expect(t.runs(w.id)).toHaveLength(1);
     expect(t.member(w.id).modelOverride).toBe(FABLE);
     expect(resumeTurns(t, w.id)).toHaveLength(0);
+  }, 40_000);
+
+  // a176ecf 리뷰 F1: 주간·5시간 한도는 모든 모델이 같이 쓴다. 모델을 바꿔도 곧바로 다시 걸리고, 바꾼 모델 지정만 낮아진 채 남는다.
+  test("계정 전체의 한도(주간)에 걸린 카드는 모델 선택지 없이 '이어가기'만 내고, 모델 답은 400 이다", async () => {
+    const t = await setup();
+    const w = await worker(t, "발표 준비", "deck");
+    await t.orch.assign(t.project.id, w.handle, { text: "주간한도" });
+    await t.waitFor("한도 보류", () => t.orch.apiRecovery.usageLimited(w.id));
+    const limitCard = card(t)!;
+    expect(limitCard.options).toEqual([RESUME_OPTION]);
+    expect(limitCard.detail).not.toContain("다른 모델");
+    expect((await answer(t, limitCard.id, "model:opus", limitCard.updatedAt)).status).toBe(400);
+    expect(t.member(w.id).modelOverride).toBe(FABLE);
+    expect(t.runs(w.id)).toHaveLength(1);
+  }, 40_000);
+
+  test("카드에서 한 번 걸린 모델은 그 팀장이 카드에서 빠진 뒤에도 다시 내지 않는다", async () => {
+    const t = await setup();
+    const a = await worker(t, "발표 준비", "deck");
+    const b = await worker(t, "인스타 2", "insta");
+    await t.orch.patchMemberConfig(b.id, { modelOverride: "sonnet" });
+    await t.idle(b.id);
+    await limitByError(t, a); // Fable 크레딧 소진
+    await t.orch.assign(t.project.id, b.handle, { text: "소네트한도" }); // Sonnet 만의 한도
+    await t.waitFor("둘째 한도 보류", () => t.orch.apiRecovery.usageLimited(b.id));
+    expect(card(t)!.options.map((o) => o.k)).toEqual(["model:opus", "model:haiku", "resume"]);
+    // A 만 팀장 설정에서 Opus 로 바꾼다. 카드에는 B 만 남는다. A 가 걸렸던 Fable 은 여전히 크레딧이 없다.
+    expect((await changeModel(t, a.id, "opus")).status).toBe(200);
+    await t.waitFor("A 이어가기 턴", () => resumeTurns(t, a.id).find((x) => x.outcome === "done"));
+    expect(card(t)).toMatchObject({ status: "open", usageLimit: { memberIds: [b.id] } });
+    expect(card(t)!.options.map((o) => o.k)).toEqual(["model:opus", "model:haiku", "resume"]);
+  }, 40_000);
+
+  // a176ecf 리뷰 F5: 한도 카드의 답은 결재 id 하나로만 합쳐져, 모델을 바꾸는 동안 온 다른 선택(다른 기기, 다시 누름)이 앞 답의 결과를 200 으로 받았다.
+  test("모델 답이 도는 동안 다른 선택이 오면 409 이고(앞 답의 결과를 성공으로 받지 않는다), 같은 선택은 같은 결과를 받는다", async () => {
+    const t = await setup();
+    const w = await worker(t, "B2B 랜딩", "b2b");
+    await limitByMenu(t, w);
+    // Esc 로 메뉴는 사라졌지만 CLI 는 한동안 막힘을 알린다: 서버가 닫혔는지 확인하는 동안 다른 선택이 온다.
+    let closeMenu: (() => void) | null = null;
+    t.core.onKeys((terminal, pressed) => {
+      if (!pressed.includes("esc")) return;
+      const id = terminal.labels["iamceo.member"]!;
+      t.core.setScreen(id, null);
+      closeMenu = () => { if (!t.core.release(id, { error: LIMIT })) t.core.setStatus(id, { state: "error", msg: LIMIT }); };
+    });
+    const limitCard = card(t)!;
+    const first = answer(t, limitCard.id, "model:opus", limitCard.updatedAt);
+    await t.waitFor("Esc", () => closeMenu);
+    const same = answer(t, limitCard.id, "model:opus", limitCard.updatedAt);
+    const other = await answer(t, limitCard.id, "model:sonnet", limitCard.updatedAt);
+    const resume = await answer(t, limitCard.id, "resume", limitCard.updatedAt);
+    expect({ status: other.status, body: await other.json() }).toEqual({ status: 409, body: { error: "다른 선택을 처리하는 중입니다. 잠시 뒤 카드를 다시 확인해 주세요" } });
+    expect(resume.status).toBe(409);
+    closeMenu!();
+    expect((await first).status).toBe(200);
+    expect((await same).status).toBe(200);
+    expect(t.member(w.id).modelOverride).toBe("opus");
+    expect(t.runs(w.id).filter((r) => flag(r, "--model") === "sonnet")).toHaveLength(0);
+    expect(keysOf(t, w.id)).toEqual([["esc"]]);
+  }, 40_000);
+
+  test("카드의 팀장이 모두 이어가기 결과를 기다리는 중이면 모델 답은 409 이고 아무것도 바꾸거나 적어 두지 않는다", async () => {
+    const t = await setup();
+    const w = await worker(t, "발표 준비", "deck");
+    await limitByError(t, w);
+    // 입력칸에 대표가 쓰던 글이 있어 이어가기 글이 들어가지 못한다(결과를 기다리는 채로 카드에 남는다).
+    t.core.setDraft(w.id, "대표가 쓰던 글");
+    const limitCard = card(t)!;
+    expect((await answer(t, limitCard.id, "resume", limitCard.updatedAt)).status).toBe(200);
+    await t.waitFor("이어가기 대기", () => !t.orch.apiRecovery.usageLimited(w.id));
+    const open = card(t)!;
+    expect(open).toMatchObject({ id: limitCard.id, status: "open", usageLimit: { memberIds: [w.id] } });
+    const runs = t.runs(w.id).length;
+    const res = await answer(t, open.id, "model:opus", open.updatedAt);
+    expect({ status: res.status, body: await res.json() }).toEqual({ status: 409, body: { error: "카드의 팀장이 모두 이어가기 결과를 기다리는 중입니다. 잠시 뒤 카드를 다시 확인해 주세요" } });
+    expect(t.member(w.id).modelOverride).toBe(FABLE);
+    expect(t.runs(w.id)).toHaveLength(runs);
+    // 적어 두지 않았다: 카드가 닫힌 뒤 같은 답이 와도 '이미 바꿨다'로 받지 않는다.
+    expect(t.orch.apiRecovery.answeredWith(open.id)).toBeNull();
+  }, 40_000);
+
+  test("앱이 본 팀장과 카드의 팀장이 다르면(그 사이 다른 팀장이 붙었다) 모델 답은 409 이고 아무도 바꾸지 않는다", async () => {
+    const t = await setup();
+    const a = await worker(t, "발표 준비", "deck");
+    const b = await worker(t, "인스타 2", "insta");
+    await limitByError(t, a);
+    const seen = card(t)!;
+    await limitByError(t, b);
+    const now = card(t)!;
+    // 카드의 판(updatedAt)은 푸시 알림에 묶여 팀장이 붙어도 그대로다. 그래서 판으로는 걸러지지 않는다.
+    expect({ id: now.id, updatedAt: now.updatedAt, members: now.usageLimit!.memberIds.length }).toEqual({ id: seen.id, updatedAt: seen.updatedAt, members: 2 });
+    const refused = await t.api("POST", `/api/decisions/${now.id}/answer`, { choice: "model:opus", expectedVersion: seen.updatedAt, memberIds: seen.usageLimit!.memberIds });
+    expect({ status: refused.status, body: await refused.json() }).toEqual({ status: 409, body: { error: "카드의 팀장이 바뀌었습니다. 카드를 다시 확인해 주세요" } });
+    for (const w of [a, b]) expect(t.member(w.id).modelOverride).toBe(FABLE);
+    const ok = await t.api("POST", `/api/decisions/${now.id}/answer`, { choice: "model:opus", expectedVersion: now.updatedAt, memberIds: [...now.usageLimit!.memberIds].reverse() });
+    expect(ok.status).toBe(200);
+    for (const w of [a, b]) expect(t.member(w.id).modelOverride).toBe("opus");
+  }, 40_000);
+});
+
+// ───────── a176ecf 리뷰 반영: CLI 교체·총괄 도구의 답·끝내기 가장자리·재시작 깨우기 ─────────
+describe("a176ecf 리뷰 반영", () => {
+  // F3: 한도로 멈춘 팀장의 CLI 교체가 통과하게 됐는데 보류는 풀리지 않아, 새 Codex 세션에 대표의 말이 '사용 한도 해제를 기다립니다'로 붙잡혔다.
+  test("한도로 멈춘 팀장의 CLI 를 Codex 로 바꾸면 한도 보류가 풀리고 카드에서 빠진다. 새 CLI 는 같은 대화가 아니므로 이어가기 글은 없다", async () => {
+    const t = await setup();
+    const w = await worker(t, "발표 준비", "deck");
+    await limitByError(t, w);
+    const waiting = (await t.orch.assign(t.project.id, w.handle, { text: "새 일 @fake:post=새일끝" })).delivery.id;
+    expect(t.store.requireDelivery(waiting)).toMatchObject({ status: "held", holdReason: "usage_limit" });
+    const limitCard = card(t)!;
+    const res = await t.api("PATCH", `/api/members/${w.id}`, { cli: "codex", modelOverride: null, effortOverride: null });
+    expect({ status: res.status, body: res.status === 200 ? "" : await res.text() }).toEqual({ status: 200, body: "" });
+    expect(t.member(w.id).cli).toBe("codex");
+    expect(t.runs(w.id).at(-1)!.cli).toBe("codex");
+    expect(t.orch.apiRecovery.holdReason(w.id)).toBeNull();
+    expect(t.store.requireDecision(limitCard.id).status).toBe("closed");
+    // 대표의 말은 더 이상 한도로 붙잡혀 있지 않다(새 Codex 세션으로 나간다).
+    expect(t.store.requireDelivery(waiting).holdReason).not.toBe("usage_limit");
+    await Bun.sleep(QUIET_MS);
+    expect(t.orch.apiRecovery.holdReason(w.id)).toBeNull();
+    expect(t.store.requireDelivery(waiting).holdReason).not.toBe("usage_limit");
+    expect(t.store.listDeliveries(t.project.id).filter((d) => d.text === USAGE_RESUME_TEXT || d.text.includes(RESUME_LEAD))).toEqual([]);
+    expect(t.member(w.id)).toMatchObject({ blockedReason: null });
+    expect(t.member(w.id).lastError).not.toBe(USAGE_WAIT_NOTE);
+    // 멈춘 일은 대화에 '중단'으로 남는다(새 CLI 에는 그 대화가 없다).
+    expect(t.texts().filter((m) => m.body?.includes("중단 — 사용 한도로 멈췄습니다. CLI를 Codex로 바꿔"))).toHaveLength(1);
+  }, 40_000);
+
+  // F8: 총괄이 받는 team_model 의 설명과 답이 서버가 실제로 한 일과 맞아야 한다.
+  test("team_model 설명은 대표가 바꾸라고 했을 때만 쓰라고 하고, 그 전에는 기다리라고 한다(team_add·roster 도 같다)", async () => {
+    const t = await setup();
+    const lead = await t.orch.ensureConductor(t.project.id);
+    const tools = Object.fromEntries(listAgentTools(t.store.requireMember(lead.id)).map((x) => [x.name, x.description]));
+    expect(tools.team_model).toStartWith("대표가 모델을 바꾸라고 했을 때만 쓴다.");
+    expect(tools.team_model).toContain("사용 한도로 멈춘 직원은 대표가 정할 때까지 기다린다");
+    expect(tools.team_add).toContain("대표가 모델을 바꾸라고 하면 team_model");
+    expect(tools.roster).toContain("대표가 바꾸라고 할 때만 team_model");
+  }, 40_000);
+
+  test("team_model: 옛 터미널을 끝낸 뒤 새 터미널 기동이 실패해도 보류를 풀었으면 실패로 답하지 않고 '곧 다시 연다'고 답한다. 곧 새 모델로 이어 연다", async () => {
+    const t = await setup({ timings: { configRetryMs: 300 } });
+    const lead = await t.orch.ensureConductor(t.project.id);
+    const w = await worker(t, "인스타 2", "insta");
+    await limitByError(t, w);
+    let refuse = true;
+    t.core.intercept((call) => refuse && call.method === "terminal.run" && call.params.labels?.["iamceo.member"] === w.id ? { error: { kind: "invalid", message: "터미널을 만들지 못함" } } : undefined);
+    const result = await handleAgentTool(t.orch, t.store.requireMember(lead.id), "team_model", { member: "인스타 2", model: "opus" });
+    expect(result.isError).toBeUndefined();
+    expect(result.text).toBe("인스타 2의 모델을 Opus로 바꿨습니다. 사용 한도로 멈춘 일을 이어서 하도록 새 모델로 다시 엽니다. 같은 일을 다시 맡기거나 새 직원에게 넘기지 마세요");
+    expect(t.orch.apiRecovery.usageLimited(w.id)).toBe(false);
+    expect(t.member(w.id)).toMatchObject({ status: "offline", modelOverride: "opus" });
+    refuse = false;
+    const resumed = await t.waitFor("새 모델로 이어 엶", () => resumeTurns(t, w.id).find((x) => x.outcome === "done"), 20_000);
+    expect({ resume: resumed.run.resumeFlag, model: flag(resumed.run, "--model") }).toEqual({ resume: w.sessionId, model: "opus" });
+    t.core.intercept(null);
+  }, 40_000);
+
+  test("team_model: 잠든 한도 팀장의 세션 기록이 없으면 '넘기지 마세요'라고 하지 않는다(총괄에게 간 중단 알림과 어긋나지 않는다)", async () => {
+    const t = await setup();
+    const lead = await t.orch.ensureConductor(t.project.id);
+    const w = await worker(t, "인스타 2", "insta");
+    await limitByError(t, w);
+    expect(await t.orch.sleepMember(w.id)).toMatchObject({ status: "asleep" });
+    rmSync(transcriptPath(t.member(w.id).cwd, w.sessionId!, join(t.home, "claude-home")));
+    const result = await handleAgentTool(t.orch, t.store.requireMember(lead.id), "team_model", { member: "인스타 2", model: "opus" });
+    expect(result.isError).toBeUndefined();
+    expect(result.text).not.toContain("넘기지 마세요");
+    expect(result.text).toBe("인스타 2의 모델을 Opus로 바꿨습니다. 사용 한도 보류를 풀었습니다. 다음에 열 때 새 모델로 엽니다");
+    // 총괄은 깨우는 중단 알림을 받았다: 후속 지시는 총괄이 정한다.
+    expect(t.store.listDeliveries(t.project.id).filter((d) => d.memberId === lead.id && d.text.includes("중단되었습니다") && d.wake)).toHaveLength(1);
+  }, 40_000);
+
+  test("team_model: 세션 ID 를 모르는 한도 팀장은 409 로 알리고 아무것도 바꾸지 않는다", async () => {
+    const t = await setup();
+    const lead = await t.orch.ensureConductor(t.project.id);
+    const w = await worker(t, "인스타 2", "insta");
+    await limitByError(t, w);
+    t.store.patchMember(w.id, { sessionId: null });
+    const result = await handleAgentTool(t.orch, t.store.requireMember(lead.id), "team_model", { member: "인스타 2", model: "opus" });
+    expect(result).toEqual({ isError: true, text: "인스타 2의 세션 ID를 확인하지 못해 한도 보류를 풀 수 없습니다. 한도가 풀리면 서버가 이어 갑니다" });
+    expect(t.member(w.id).modelOverride).toBe(FABLE);
+    expect(t.orch.apiRecovery.usageLimited(w.id)).toBe(true);
+  }, 40_000);
+
+  // F10(a): Esc 로 메뉴를 닫은 뒤 끝내기가 거절되면, 닫는 동안 버려진 상태 이벤트 때문에 명부가 blocked 로 굳어 팀 설정이 막혔다.
+  test("한도 메뉴를 Esc 로 닫은 뒤 끝내기가 거절되면 막힘 표시가 남지 않는다: 오류(한도) 상태로 고쳐 적는다", async () => {
+    const t = await setup();
+    const w = await worker(t, "B2B 랜딩", "b2b");
+    await limitByMenu(t, w);
+    // Esc 로 메뉴가 닫히면서 입력칸에 대표가 쓰던 글이 드러난다.
+    t.core.onKeys((terminal, pressed) => {
+      if (!pressed.includes("esc")) return;
+      const id = terminal.labels["iamceo.member"]!;
+      t.core.setScreen(id, null);
+      t.core.setDraft(id, "대표가 쓰던 글");
+      if (!t.core.release(id, { error: LIMIT })) t.core.setStatus(id, { state: "error", msg: LIMIT });
+    });
+    await expect(t.orch.sleepMember(w.id)).rejects.toMatchObject({ status: 409 });
+    expect(t.core.terminalOf(w.id)!.state).toBe("live");
+    expect(t.member(w.id)).toMatchObject({ status: "error", blockedReason: "usage_limit", lastError: USAGE_WAIT_NOTE });
+    expect(t.orch.apiRecovery.usageLimited(w.id)).toBe(true);
+    expect(keysOf(t, w.id)).toEqual([["esc"]]);
+  }, 40_000);
+
+  // F10(b): 닫기·강제 재우기는 마지막 탈출구다. 오류로 끝난 팀장의 입력칸을 알아보지 못했다고 막지 않는다(쓰던 글이 보이면 지킨다).
+  test("오류로 끝난 팀장은 입력칸을 알아볼 수 없는 화면(오류 배너)이어도 닫힌다. 쓰던 글이 보이면 지금처럼 거절한다", async () => {
+    const t = await setup();
+    const a = await worker(t, "발표 준비", "deck");
+    const b = await worker(t, "인스타 2", "insta");
+    await limitByError(t, a);
+    await limitByError(t, b);
+    t.core.setScreen(a.id, "API Error: You're out of usage credits.\n(오류 배너가 입력칸을 가렸다)");
+    await closeWhenSettled(t, a.id);
+    expect(t.store.getMember(a.id)).toBeNull();
+    expect(t.core.terminalOf(a.id)!.state).toBe("finished");
+    t.core.setDraft(b.id, "대표가 쓰던 글");
+    await expect(closeWhenSettled(t, b.id)).rejects.toMatchObject({ status: 409 });
+    expect(t.core.terminalOf(b.id)!.state).toBe("live");
+  }, 40_000);
+
+  // S1: 라이브 DB 사본(터미널이 모두 사라진 상태)에서 재시작 자동 깨우기가 한도로 멈춘 팀장 셋을 다시 열어 status idle, 막힘 사유·오류 글이 비었는데
+  // 한도 카드와 보류는 남았다. 화면(쉬는 중)과 실제(한도 보류)가 어긋났다.
+  test.each(["엔진이 터미널을 모른다고 답함", "엔진이 재시작으로 끝났다고 알림"] as const)("한도로 멈춘 팀장의 터미널이 재시작으로 사라지면(%s) 다시 뜬 서버는 그 팀장을 스스로 열지 않고 한도 표시·카드·보류를 그대로 둔다. 카드에서 모델을 고르면 같은 세션을 새 모델로 연다", async (how) => {
+    const t = await setup();
+    const a = await worker(t, "발표 준비", "deck");
+    const b = await worker(t, "검색 개선", "search");
+    await limitByError(t, a);
+    const waiting = (await t.orch.assign(t.project.id, a.handle, { text: "새 일 @fake:post=새일끝" })).delivery.id;
+    const limitCard = card(t)!;
+    const runsA = t.runs(a.id).length, runsB = t.runs(b.id).length;
+    await t.stopServer();
+    if (how === "엔진이 재시작으로 끝났다고 알림") { t.core.exit(a.id, 1, "holder_lost"); t.core.exit(b.id, 1, "holder_lost"); }
+    else {
+      const lost = new Set([t.core.terminalOf(a.id)!.address, t.core.terminalOf(b.id)!.address]);
+      t.core.intercept((call) => call.method === "terminal.list" ? { result: { terminals: t.core.terminals().filter((x) => !lost.has(x.address)) } }
+        : lost.has(String(call.params.terminal)) ? { error: { kind: "not_found", message: "no such terminal" } } : undefined);
+    }
+    const next = await t.restart();
+    cleanups.push(() => next.close());
+    // 한도가 아닌 팀장은 평소처럼 스스로 다시 열린다(깨우기가 돈 것을 확인한다).
+    await next.waitFor("B 다시 열림", () => next.runs(b.id).length === runsB + 1 && next.member(b.id).status === "idle");
+    await Bun.sleep(QUIET_MS);
+    expect(next.runs(a.id)).toHaveLength(runsA);
+    expect(next.store.getRestartWake(a.id)).toBeNull();
+    expect(next.member(a.id)).toMatchObject({ status: "offline", paneId: null, blockedReason: "usage_limit", lastError: USAGE_WAIT_NOTE, statusObservation: { error: { code: "usage_limit" } } });
+    expect(next.orch.apiRecovery.usageLimited(a.id)).toBe(true);
+    expect(next.store.requireDecision(limitCard.id)).toMatchObject({ status: "open", usageLimit: { memberIds: [a.id] } });
+    expect(next.store.requireDelivery(waiting)).toMatchObject({ status: "held", holdReason: "usage_limit" });
+    // 대표가 카드에서 모델을 고르면 그 팀장만 같은 세션을 새 모델로 연다. 멈춘 일의 이어가기 글이 먼저, 기다리던 지시는 그 뒤.
+    const now = next.store.requireDecision(limitCard.id);
+    const res = await next.api("POST", `/api/decisions/${now.id}/answer`, { choice: "model:opus", expectedVersion: now.updatedAt });
+    expect({ status: res.status, body: res.status === 200 ? "" : await res.text() }).toEqual({ status: 200, body: "" });
+    const resumed = await next.waitFor("이어가기 턴", () => resumeTurns(next, a.id).find((x) => x.outcome === "done"));
+    expect({ resume: resumed.run.resumeFlag, model: flag(resumed.run, "--model") }).toEqual({ resume: a.sessionId, model: "opus" });
+    await next.waitFor("기다리던 지시 전달", () => next.store.requireDelivery(waiting).status === "delivered");
+    expect(next.turns(a.id).findIndex((x) => x.prompt.includes("새 일"))).toBeGreaterThan(next.turns(a.id).indexOf(resumed));
+    expect(noLimitMark(next, a.id)).toEqual(CLEAR);
+    next.core.intercept(null);
+  }, 40_000);
+
+  // S1 의 다른 반쪽: 다시 열기(대표의 깨우기 등)는 한도 보류 중인 팀장의 표시를 지우지 않는다. 한도 그룹에서 실제로 풀릴 때만 지운다.
+  test("한도로 멈춘 뒤 재운 팀장을 대표가 직접 깨워도 한도 표시(막힘 사유·오류 글·관측)와 보류는 남는다", async () => {
+    const t = await setup();
+    const a = await worker(t, "발표 준비", "deck");
+    await limitByError(t, a);
+    expect(await t.orch.sleepMember(a.id)).toMatchObject({ status: "asleep" });
+    const waiting = (await t.orch.assign(t.project.id, a.handle, { text: "새 일 @fake:post=새일끝" })).delivery.id;
+    const reopened = await t.orch.resumeMember(a.id);
+    expect(reopened.sessionId).toBe(a.sessionId);
+    expect(t.runs(a.id).at(-1)!.resumeFlag).toBe(a.sessionId);
+    await Bun.sleep(QUIET_MS);
+    expect(t.member(a.id)).toMatchObject({ blockedReason: "usage_limit", lastError: USAGE_WAIT_NOTE, statusObservation: { error: { code: "usage_limit" } } });
+    expect(t.orch.apiRecovery.usageLimited(a.id)).toBe(true);
+    expect(t.store.requireDelivery(waiting)).toMatchObject({ status: "held", holdReason: "usage_limit" });
+    expect(card(t)).toMatchObject({ status: "open", usageLimit: { memberIds: [a.id] } });
   }, 40_000);
 });

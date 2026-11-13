@@ -114,7 +114,8 @@ import UIKit
         XCTAssertFalse(applied)
         anchor.observe(frames: ["m:1": CGRect(x: 0, y: -73, width: 300, height: 200)], scope: "a")
         NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: scroll)
-        try await Task.sleep(for: .milliseconds(60))
+        // 보류된 응답은 16ms 간격으로 손을 뗀 것을 확인한 뒤 붙는다. 느린 CI 러너에서는 고정 60ms 로 모자라서 조건을 기다린다(최대 3초).
+        for _ in 0..<300 where !applied { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertTrue(applied)
         anchor.observe(frames: ["m:1": CGRect(x: 0, y: 427, width: 300, height: 200)], scope: "a")
         anchor.observe(frames: ["m:1": CGRect(x: 0, y: -73, width: 300, height: 200)], scope: "a")
@@ -123,7 +124,8 @@ import UIKit
         XCTAssertTrue(anchor.prepend(scope: "a") { XCTFail("jump must cancel queued response") })
         anchor.cancelPreservation()
         NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: scroll)
-        try await Task.sleep(for: .milliseconds(40))
+        // 취소된 응답이 붙지 않는지 보는 쪽이라 넉넉히 기다린다(붙으면 위의 XCTFail).
+        try await Task.sleep(for: .milliseconds(200))
         XCTAssertFalse(anchor.isPreservingPosition)
         probe.disconnect()
     }

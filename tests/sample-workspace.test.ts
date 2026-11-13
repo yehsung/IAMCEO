@@ -23,7 +23,7 @@ import { PushStore } from "../server/push/store.ts";
 import type { Runner, RunnerMember, SendResult } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
 import { UsageLedger } from "../server/usage.ts";
-import type { ActivityKind, MemberStatus } from "../shared/types.ts";
+import type { ActivityKind, MemberOrigin, MemberStatus } from "../shared/types.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
 const OUTPUT = resolve(import.meta.dir, "../native/Sources/IAMCEO/State/SampleWorkspaceData.swift");
@@ -510,8 +510,13 @@ test("샘플 모드의 자료를 실제 서버 응답으로 만든다(앱에 든
     const json = JSON.stringify(data, null, 1);
 
     // 사용자 홈·계정 이름·임시 경로·실제 포트가 남지 않는다.
-    const leaks = [homedir(), "/private/tmp", `:${server.port}`, "127.0.0.1", ...(userInfo().username.length >= 4 ? [userInfo().username] : [])];
+    const leaks = [homedir(), "/private/tmp", `:${server.port}`, "127.0.0.1"];
     expect(leaks.filter(leak => json.includes(leak))).toEqual([]);
+    // 계정 이름은 제품 어휘와 겹칠 수 있어 자리를 보고 찾는다(accountNameLeaks). 겹치는 이름으로도 진짜 새는 자리는 잡는지 먼저 확인한다.
+    expect(accountNameLeaks({ origin: "runner", runnerEnabled: true, cwd: "/Users/runner/work/x", host: "runners-MacBook-Pro", owner: "runner", runner: 1 }, "runner"))
+      .toEqual(["$.cwd", "$.host", "$.owner", "$.runner (키)"]);
+    const account = userInfo().username;
+    if (account.length >= 4) expect(accountNameLeaks(data, account)).toEqual([]);
     // 화면이 보여 줄 것이 실제로 실렸다.
     const main = data.projects["sample-pay"];
     expect(main.state.members.length).toBe(9);
@@ -540,6 +545,28 @@ test("샘플 모드의 자료를 실제 서버 응답으로 만든다(앱에 든
     restoreTime = false;
   }
 }, 60_000);
+
+/** 닫힌 목록인 값 자리. 이 자리의 값은 서버가 정한 낱말이라 기계에서 온 값이 아니다. */
+const PRODUCT_VALUES: Record<string, readonly string[]> = { origin: ["runner", "adopted", "manual"] satisfies MemberOrigin[] };
+
+/**
+ * 자료에서 계정 이름이 든 자리(JSON 경로). 이름은 제품 어휘와 겹칠 수 있다: GitHub macOS 러너의 계정은 'runner' 이고, 자료에는 직원 출처
+ * "origin": "runner" 와 키 "runnerEnabled" 가 늘 있다. 그래서 글 전체에서 낱말을 찾지 않고, 키와 글 값마다 찾되 두 자리만 뺀다:
+ * 낙타 표기의 합성 필드 이름(runnerEnabled 처럼 이름 + 다른 낱말인 키)과 닫힌 목록 값 자리(PRODUCT_VALUES)의 목록 안 값.
+ * 그 밖에는 이름이 어디에 들어 있어도(경로 /Users/<이름>/…, 호스트 <이름>s-MacBook-Pro, 값 자체, 키 자체) 잡는다.
+ */
+function accountNameLeaks(value: unknown, name: string, path = "$"): string[] {
+  if (typeof value === "string") return value.includes(name) ? [path] : [];
+  if (Array.isArray(value)) return value.flatMap((item, index) => accountNameLeaks(item, name, `${path}[${index}]`));
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, item]) => {
+    const child = `${path}.${key}`;
+    const fieldName = key !== name && /^[a-z]+(?:[A-Z][a-z0-9]*)+$/.test(key);
+    const keyLeak = key.includes(name) && !fieldName ? [`${child} (키)`] : [];
+    if (typeof item === "string" && PRODUCT_VALUES[key]?.includes(item)) return keyLeak;
+    return [...keyLeak, ...accountNameLeaks(item, name, child)];
+  });
+}
 
 /** 진단 값에서 이 Mac 의 실행 파일 경로·버전 같은 것을 뺀다. 화면은 실행 엔진이 '준비됨'인지만 읽는다. */
 function scrubRuntime(runtime: Record<string, any>): Record<string, any> {

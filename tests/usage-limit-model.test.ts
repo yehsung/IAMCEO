@@ -11,7 +11,7 @@ import { USAGE_RESUME_TEXT, USAGE_WAIT_NOTE, usageModelResumeText } from "../ser
 import type { AgentToolsImpl, PostInput } from "../server/orchestrator.ts";
 import { transcriptPath } from "../server/runner/transcript.ts";
 import type { DecisionOption, Member } from "../shared/types.ts";
-import { coreSetup, type CoreEnv, type CoreSetupOptions, type FakeRun } from "./fixtures/core-harness.ts";
+import { coreSetup, rejection, type CoreEnv, type CoreSetupOptions, type FakeRun } from "./fixtures/core-harness.ts";
 
 const TOOLS: AgentToolsImpl = {
   listAgentTools: () => [],
@@ -310,7 +310,7 @@ describe("사용 한도로 멈춘 팀장의 재우기·닫기", () => {
     expect(t.store.getMember(a.id)).toBeNull();
     expect(t.core.terminalOf(a.id)!.state).toBe("finished");
     t.core.setDraft(b.id, "대표가 쓰던 글");
-    await expect(t.orch.sleepMember(b.id)).rejects.toMatchObject({ status: 409, message: expect.stringContaining("입력칸에 글이 남아") });
+    expect(await rejection(t.orch.sleepMember(b.id))).toMatchObject({ status: 409, message: expect.stringContaining("입력칸에 글이 남아") });
     expect(t.core.terminalOf(b.id)!.state).toBe("live");
   }, 40_000);
 });
@@ -678,7 +678,7 @@ describe("a176ecf 리뷰 반영", () => {
       t.core.setDraft(id, "대표가 쓰던 글");
       if (!t.core.release(id, { error: LIMIT })) t.core.setStatus(id, { state: "error", msg: LIMIT });
     });
-    await expect(t.orch.sleepMember(w.id)).rejects.toMatchObject({ status: 409 });
+    expect(await rejection(t.orch.sleepMember(w.id))).toMatchObject({ status: 409 });
     expect(t.core.terminalOf(w.id)!.state).toBe("live");
     expect(t.member(w.id)).toMatchObject({ status: "error", blockedReason: "usage_limit", lastError: USAGE_WAIT_NOTE });
     expect(t.orch.apiRecovery.usageLimited(w.id)).toBe(true);
@@ -697,7 +697,7 @@ describe("a176ecf 리뷰 반영", () => {
     expect(t.store.getMember(a.id)).toBeNull();
     expect(t.core.terminalOf(a.id)!.state).toBe("finished");
     t.core.setDraft(b.id, "대표가 쓰던 글");
-    await expect(closeWhenSettled(t, b.id)).rejects.toMatchObject({ status: 409 });
+    expect(await rejection(closeWhenSettled(t, b.id))).toMatchObject({ status: 409 });
     expect(t.core.terminalOf(b.id)!.state).toBe("live");
   }, 40_000);
 

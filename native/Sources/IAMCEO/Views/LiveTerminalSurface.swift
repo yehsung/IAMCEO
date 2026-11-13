@@ -248,7 +248,8 @@ final class TerminalCanvas: SwiftTerm.TerminalView {
         // Wait out the second press so word selection never takes a lease.
         inputClick = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval)) } catch { return }
-            guard let self, let surface = self.surface, surface.window != nil else { return }
+            // 두 번째 누름이 잠이 끝난 뒤·실행 전에 와서 취소했으면 입력 요청을 보내지 않는다.
+            guard !Task.isCancelled, let self, let surface = self.surface, surface.window != nil else { return }
             surface.coordinator.parent.onRequestInput(Data())
         }
     }

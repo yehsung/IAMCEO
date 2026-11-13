@@ -278,8 +278,13 @@ function freshConfig(): Config {
   const home = temp("iamceo-doctor-http-");
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
   updateConfigFile({ accessCode: "code" }, env);
+  // Claude Code 는 설치된 Mac 으로 둔다: 이 시험 홈에 둔 실행 파일 자리다(부르지 않는다). 기본 설정은 PATH·/opt/homebrew/bin 에서 진짜 claude 를
+  // 찾으므로, 그대로 두면 Claude 가 깔린 Mac 에서만 'ok' 이고 Claude 가 없는 CI(GitHub macOS 러너)에서는 '찾지 못함'(fail)이 된다.
+  const claudeBin = join(home, "bin", "claude");
+  mkdirSync(join(home, "bin"));
+  writeFileSync(claudeBin, "#!/bin/sh\nexit 97\n", { mode: 0o755 });
   // Codex 는 설치되지 않은 Mac 으로 둔다(쓰는 팀장이 있을 때만 문제인지 본다).
-  return { ...loadConfig(env), hosts: ["127.0.0.1"], hostsAuto: true, codexBin: join(home, "no-such-codex") };
+  return { ...loadConfig(env), hosts: ["127.0.0.1"], hostsAuto: true, claudeBin, codexBin: join(home, "no-such-codex") };
 }
 
 async function boot(options: { ready?: boolean } = {}) {

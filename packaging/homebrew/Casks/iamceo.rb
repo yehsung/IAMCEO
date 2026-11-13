@@ -1,7 +1,7 @@
 # Release template: scripts/release-mac.ts writes the real version and digest to dist/release/iamceo.rb.
 # Do not publish this template to a tap before generating the notarized DMG.
 cask "iamceo" do
-  version "0.2.4"
+  version "0.2.5"
   sha256 "@SHA256@"
 
   url "https://github.com/yehsung/IAMCEO/releases/download/v#{version}/IAMCEO-#{version}-arm64.dmg"

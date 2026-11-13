@@ -58,7 +58,7 @@ brew install --cask yehsung/tap/iamceo
 ### 알림
 
 - **Mac:** 됩니다. Mac 앱의 설정에서 **Mac 알림**을 켭니다.
-- **iPhone(다음 판부터):** App Store 앱에서 됩니다. 꺼져 있는 iPhone 앱을 깨울 수 있는 것은 Apple의 알림 서비스(APNs)뿐이고, App Store 앱의 알림 키는 개발자만 가집니다. 그래서 내 Mac에 자신의 키가 없으면, 서버가 알림 한 건마다 개발자가 운영하는 작은 **알림 중계**에 넘기고 중계가 Apple로 보냅니다. 중계는 푸시 토큰, 알림 종류, 무작위 ID, 유효 시각만 받고 대화 내용이나 문구는 받지 않으며, 받은 값을 저장하지 않습니다 → [개인정보 처리방침](PRIVACY.md), 중계 코드와 운영 방법 → [relay/README.md](relay/README.md). Mac은 iPhone에서 알림을 켠 뒤에야 중계에 처음 연락합니다. 중계를 끄려면 `~/.iamceo/config.json`에 `"pushRelay": false`를 넣고 서버를 다시 시작합니다(그러면 App Store 앱은 iPhone 알림을 받지 못합니다). 직접 빌드한 앱은 자신의 키로 보낼 수 있고, 키가 있는 Mac은 중계를 쓰지 않습니다 → [네이티브 안내](native/README.md#iphone-apns-and-signing)
+- **iPhone(0.2.5부터):** App Store 앱에서 됩니다. 꺼져 있는 iPhone 앱을 깨울 수 있는 것은 Apple의 알림 서비스(APNs)뿐이고, App Store 앱의 알림 키는 개발자만 가집니다. 그래서 내 Mac에 자신의 키가 없으면, 서버가 알림 한 건마다 개발자가 운영하는 작은 **알림 중계**에 넘기고 중계가 Apple로 보냅니다. 중계는 푸시 토큰, 알림 종류, 무작위 ID, 유효 시각만 받고 대화 내용이나 문구는 받지 않으며, 받은 값을 저장하지 않습니다 → [개인정보 처리방침](PRIVACY.md), 중계 코드와 운영 방법 → [relay/README.md](relay/README.md). Mac은 iPhone에서 알림을 켠 뒤에야 중계에 처음 연락합니다. 중계를 끄려면 `~/.iamceo/config.json`에 `"pushRelay": false`를 넣고 서버를 다시 시작합니다(그러면 App Store 앱은 iPhone 알림을 받지 못합니다). 직접 빌드한 앱은 자신의 키로 보낼 수 있고, 키가 있는 Mac은 중계를 쓰지 않습니다 → [네이티브 안내](native/README.md#iphone-apns-and-signing)
 - **알림 중계는 개발자가 무료로 운영하는 최선 노력 서비스입니다.** 가동을 보장하지 않으며, 한도(지금은 iPhone 한 대에 하루 200건, Mac 한 대에 하루 300건)는 바뀔 수 있습니다. 바꾸거나 멈출 때는 GitHub에 미리 알립니다. 알림은 알려 주는 것일 뿐이고, 기록의 원본은 결재함과 대화입니다.
 
 ### 사용자 문서

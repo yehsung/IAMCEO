@@ -1,6 +1,6 @@
 {
   "name": "iamceo",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "description": "AI 팀을 운영하는 사람의 창구 — CLI AI 세션을 홈·결재함·팀·대화·자료로 지휘한다",
   "license": "SEE LICENSE IN LICENSE",

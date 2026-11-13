@@ -13,7 +13,7 @@ export type { CliVersionInfo } from "../shared/types.ts";
  * 새 버전을 넣을 때는 그 폴더에 실제 화면·기록을 함께 넣는다(tests/cli-fixtures.test.ts 가 둘이 맞는지 본다).
  */
 export const VERIFIED_CLI_VERSIONS: Record<"claude" | "codex", string[]> = {
-  claude: ["2.1.316", "2.1.319", "2.1.322"],
+  claude: ["2.1.316", "2.1.319", "2.1.322", "2.1.323"],
   codex: ["0.166.0"],
 };
 

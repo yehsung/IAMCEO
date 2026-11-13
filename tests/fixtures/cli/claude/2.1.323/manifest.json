@@ -1,0 +1,20 @@
+{
+  "provider": "claude",
+  "version": "2.1.323",
+  "source": "2026-11-13 17:56 실측(빈 DB 시험 서버, 갓 띄운 팀장의 첫 화면). 폴더 경로만 바꿨다. 폴더 신뢰 창은 이 실측에서 뜨지 않아 견본이 없다.",
+  "fixtures": [
+    {
+      "file": "idle.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "expect": {
+        "inputEmpty": true,
+        "folderTrustLike": false,
+        "trustDialogLike": false,
+        "folderTrust": null
+      }
+    }
+  ]
+}

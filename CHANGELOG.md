@@ -7,7 +7,7 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
-### 아직 내지 않은 것
+### 0.2.4 — 2026-11-13
 
 - **앱 화면을 영어로도 봅니다.** 앱 문구를 번역 파일(Localizable.xcstrings)로 옮기고 영어를 넣었습니다. 앱은 기기 언어를 따라, 한국어 기기는 지금과 글자 하나 다르지 않은 한국어로, 그 밖의 기기는 영어로 보입니다(iPhone 설정 → IAMCEO → 언어, Mac 시스템 설정 → 일반 → 언어 및 지역에서 앱만 따로 고를 수 있습니다). 날짜·시각은 영어 화면에서 기기 지역의 형식을 따르고, 서버 오류는 코드마다 정한 영어 문장으로 보입니다(이름이 들어간 문장과 옛 서버의 문장은 받은 그대로). 서버가 만들어 보내는 글(시스템 메시지, 결재 카드, 보류 메모 일부)은 아직 한국어입니다. 총괄·팀장이 쓰는 글의 언어는 따로 '보고 언어'로 고릅니다.
 - **팀원별 사용량을 봅니다.** 설정 → AI 모델 → **사용량**에서 오늘·7일·30일 동안 총괄과 팀장이 쓴 양을 팀원별, 프로젝트별, 날짜별로 봅니다. 숫자는 CLI가 보고한 값 그대로입니다: Claude Code는 비용(달러)과 토큰을, Codex는 토큰만 보고하며 IAMCEO는 계산하거나 짐작하지 않습니다(구독 요금제라면 이 금액은 실제 청구액과 다를 수 있습니다). CLI가 알려 준 계정 한도의 사용률(5시간·주간)도 함께 보입니다. 서버가 1분마다 모으고 90일 동안 보관하며, 닫은 팀장의 사용량은 남고 프로젝트를 지우면 함께 지워집니다. 새 표만 더해 이전 판으로 되돌려도 DB가 그대로 열리고, 출시된 iPhone 0.2.2·0.2.3 앱이 받는 응답은 바뀌지 않습니다.
@@ -116,7 +116,7 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 
 ## English
 
-### Unreleased
+### 0.2.4 — 2026-11-13
 
 - **The app in English.** The app's text moved into a string catalog (Localizable.xcstrings) with an English translation. The app follows the device language: a Korean device shows exactly the same Korean as before, and any other device shows English (choose for the app alone in iPhone Settings → IAMCEO → Language, or System Settings → General → Language & Region on the Mac). In English, dates and times follow the device's region, and server errors show the English sentence set for each error code (a sentence with a name in it, or one from an older server, is shown as received). Text the server writes and sends (system messages, decision cards, some hold notes) is still Korean. The language the lead and staff write in is chosen separately with Report language.
 - **See usage per member.** Settings → AI models → **사용량** (Usage) shows how much the lead and staff used today, over 7 days or over 30 days, by member, by project and by day. The numbers are exactly what the CLIs reported: Claude Code reports a cost (in US dollars) and tokens, Codex reports tokens only, and IAMCEO never calculates or estimates them (on a subscription plan, the amount can differ from your actual bill). The account limit usage the CLIs report (5-hour and weekly) appears alongside. The server collects every minute and keeps 90 days; usage of staff you closed stays, and deleting a project deletes its usage. Only new tables are added, so the database still opens after rolling back to an earlier version, and the responses the released iPhone 0.2.2 and 0.2.3 apps receive are unchanged.

@@ -756,7 +756,7 @@ private struct ChatConversation: View {
             guard let api else { throw APIError(status: 404, message: "대화를 찾을 수 없습니다.") }
             return try await api.chatMessagesAround(projectID: projectID, messageID: id, archived: key.archived)
         }
-        guard let destination, !Task.isCancelled, isVisible, store.api === api,
+        guard let destination, !Task.isCancelled, isVisible, store.stillCurrent(api),
               store.selectedProjectID?.utf8.elementsEqual(projectID.utf8) == true, store.isArchive == key.archived,
               router.navigationRevision == navigationRevision, router.projectResetRevision == projectRevision,
               router.chatMessageID?.utf8.elementsEqual(id.utf8) == true,

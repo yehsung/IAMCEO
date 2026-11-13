@@ -9,6 +9,8 @@ import { writeStatuslineWrapper } from "./runner/statusline.ts";
 import { emptyBunfig } from "./runner/bun-script.ts";
 import { endedByRestart, RESTART_EXIT_NOTE, RESTART_REOPENED_NOTE, RESTART_RESUME_TEXT, RESTART_WAKE_MAX_ATTEMPTS, RESTART_WAKE_PACING, restartNoteIn, type RestartWake, type RestartWakePacing } from "./restart-wake.ts";
 // Orchestrator: 전달 펌프, 턴 종료 처리, 압축 판단, 띄우기·잠재우기·다시 열기, 승인 근거 확인(spec §4·§6·§7).
+// 다음은 떼어 낸 모듈이 맡고, 이 클래스는 같은 이름의 공개 메서드로 넘겨준다:
+//   전달 글 delivery-text.ts · 판 정리 board-hygiene.ts · 대표 쪽 흐름 flows/owner.ts · 직원 쪽 흐름 flows/member.ts · 터미널 조작 terminal-control.ts
 //
 // server/agent-tools.ts 가 쓰는 공개 메서드:
 //   팀       addMember · assign · compactMember · sleepMember · resumeMember · closeMember · changeMemberModel · roster
@@ -21,14 +23,13 @@ import { endedByRestart, RESTART_EXIT_NOTE, RESTART_REOPENED_NOTE, RESTART_RESUM
 //   handleAgentTool(orch, member, name, args): Promise<AgentToolResult>
 //
 // 조립 순서: createOrchestrator(config, store) → startServer(ctx) → setServerUrl(url) → recover() · 끝낼 때 shutdown().
-import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type {
   AnswerApprovalReq,
   ApprovalPrompt,
   AnswerReq,
-  Attachment,
   Backend,
   BlockedCode,
   CliProvider,
@@ -37,15 +38,12 @@ import type {
   RuntimeInfo,
   CreateProjectReq,
   Decision,
-  DecisionCloseKind,
-  DecisionCloseFollowUp,
   DecisionOption,
   Delivery,
   Effort,
   Member,
   MemberKind,
   Message,
-  MessageKind,
   PatchProjectReq,
   Project,
   PatchMemberReq,
@@ -56,18 +54,15 @@ import type {
   Todo,
   TodoOutcome,
   WorkItem,
-  WorkSec,
 } from "../shared/types.ts";
 import { memberConfig } from "../shared/types.ts";
-import { CORE_VERSION, type Config } from "./config.ts";
+import type { Config } from "./config.ts";
 import { briefly, type AgentToolDef, type AgentToolResult, type AskWaitResult, type OrchestratorApi } from "./orchestrator-api.ts";
-import { sanitizeName } from "./files.ts";
 import { josa, renderRole } from "./roles.ts";
 import { CoreError, coreRpc, type CoreHello, type CoreTerminal } from "./runner/core-client.ts";
 import { CoreSupervisor } from "./core-supervisor.ts";
 import type { DeliveryDispatch, ReportReferences, LifecycleJournal } from "./service-contracts.ts";
 import type { DeliveryRecoveryRequest, DeliveryRecoveryResult } from "../shared/types.ts";
-import type { ErrorCode } from "../shared/error-codes.ts";
 import type { AgentOperationContext, ManualInboxBatch, ManualInboxAckRequest, ManualInboxAckResult, FreshSessionRequest, MemberConfigWriteResult, OperationReceipt, RevisionPrecondition, SettingsWriteResult, TerminalControlRequestV2, TodoDoneRequest, TodoWriteResult } from "../shared/operations.ts";
 import { coreContextMeasurement, observeCompactBoundary, type CompactBoundaryBaseline } from "./runner/core-context.ts";
 import { readJsonlRange, parseCodexSessionMeta, jsonObject } from "./runner/delivery-evidence.ts";
@@ -79,172 +74,19 @@ import { ToolPermissions, type ToolPermissionPoll, type ToolPermissionRequest } 
 import { exactSource, measureContext } from "./runner/context.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, RunnerStartResult, RunnerTerminalIdentity, RunnerReattachResult, DeliveryRepair } from "./runner/types.ts";
 import { ApiError, type AppliedConfig, type ExecutionJournal, type NewDelivery, type Store } from "./store.ts";
-import { cleanText, RESERVED_HANDLES } from "./text.ts";
+import { RESERVED_HANDLES } from "./text.ts";
+import { BoardHygiene } from "./board-hygiene.ts";
+import { TerminalControl } from "./terminal-control.ts";
+import { OwnerFlows } from "./flows/owner.ts";
+import { MemberFlows, type AskInput, type AssignInput, type AssignResult, type PostInput } from "./flows/member.ts";
+// 지시·보고·ask 의 입력 모양은 flows/member.ts 에 있다. 예전처럼 이 파일에서 가져가는 곳(agent-tools.ts·시험)을 위해 내보낸다.
+export type { AskInput, AssignInput, AssignResult, PostInput } from "./flows/member.ts";
 import { conductorHandle, conductorName } from "./text.ts";
 
-// ---- 전달 글(§4). 서버만 만든다 ----
-const SHORT_QUOTE = 4;
-const QUOTE_SCAN_PAGES = 10;
-
-export function normalizeSpace(text: string): string {
-  return cleanText(text).replace(/\s+/g, " ").trim();
-}
-
-// 묶음 전달에서 글 안의 한 줄이 출처 접두어처럼 보이면 위조가 된다. 그런 줄의 맨 앞을 막는다.
-// 목록·강조·표 기호를 씌우거나 다른 괄호로 바꿔도 같은 줄로 본다. 전각 괄호·호환 글자는 정규화해서 보고, 글자 사이 공백도 뺀다.
-const LINE_NOISE = /^[\s\-*+#|`~_=:.,·•◦‣▪■□▶▷►●○※"'“”‘’«»]*(?:\d+[.)]\s*)?[\s*_`"'“”‘’]*/;
-const OPENING = /^[\s*_`"'“”‘’\[({<【〔〖〘〚⟦「『〈《❲❴｟⟨⟪]+/;
-const WITH_BRACKET = /^(?:대표|代表|총괄|보고|시스템)/;
-const BARE_PREFIX = /^(?:대표(?:직접|답|글전문)|代表|사용자요청\(|총괄인용\(|(?:대표|총괄|보고|시스템):)/;
-
-function looksForged(line: string): boolean {
-  const head = line.normalize("NFKC").replace(LINE_NOISE, "");
-  const opened = OPENING.exec(head);
-  const rest = (opened ? head.slice(opened[0].length) : head).replace(/\s+/g, "");
-  if (opened && /[\[({<【〔〖〘〚⟦「『〈《❲❴｟⟨⟪]/.test(opened[0]) && WITH_BRACKET.test(rest)) return true;
-  return BARE_PREFIX.test(rest);
-}
-
-/** CR·U+2028 같은 숨은 줄바꿈과 제로폭 글자를 먼저 없앤 뒤 줄 머리를 본다. */
-export function guardLines(text: string): string {
-  return cleanText(text)
-    .split("\n")
-    .map((line) => (!line.trimStart().startsWith(">") && looksForged(line) ? `> ${line}` : line))
-    .join("\n");
-}
-
-/** 직원·총괄이 쓴 여러 줄 글은 목록으로 막는 대신 줄마다 인용 표시를 붙인다. 어떤 모양을 지어내도 접두어 없는 입력으로 보이지 않는다. */
-function quoteBlock(text: string): string {
-  return cleanText(text)
-    .split("\n")
-    .map((line) => (line.trim() ? `> ${line}` : ">"))
-    .join("\n");
-}
-
-/** 직원이 쓴 값(카드 제목·버튼 글·설명·할 일 제목)을 따옴표 안에 넣는다. 따옴표를 닫아 대표 답을 지어내지 못하게 한다. */
-function quotedInline(text: string): string {
-  return normalizeSpace(text).replace(/[\\'"]/g, "\\$&");
-}
-
-function humanSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
-}
-
-/** 경로와 형식은 바깥에서 온 값이 섞인다. 한 줄이어야 줄을 끊어 접두어를 지어내지 못한다. */
-function attachmentLines(attachments: Attachment[]): string[] {
-  return attachments.map((a) => `첨부: ${normalizeSpace(a.path)} (${normalizeSpace(a.mime)}, ${humanSize(a.size)})`);
-}
-
-export function formatUserMessage(text: string, attachments: Attachment[], id: string, direct: boolean): string {
-  const lines = [`[대표${direct ? " 직접" : ""}] "${guardLines(text)}"`];
-  lines.push(...attachmentLines(attachments));
-  lines.push(`#${id}`);
-  return lines.join("\n");
-}
-
-export function formatAnswer(d: Decision): string {
-  const option: DecisionOption | undefined = d.options.find((o) => o.k === d.choice);
-  const head = `[대표 답(원문) '${quotedInline(d.title)}']`;
-  const note = d.note ? guardLines(d.note) : null;
-  const parts = [head];
-  if (option) {
-    parts.push(`"${quotedInline(option.label)}"${option.desc ? `(${quotedInline(option.desc)})` : ""}`);
-    if (note) parts.push(`메모 "${note}"`);
-  } else if (note) {
-    parts.push(`"${note}"`);
-  }
-  if (d.batch) parts.push("(묶음 추천대로)");
-  parts.push(`#${d.id}`);
-  return parts.join(" ");
-}
-
-export function formatTodoDone(t: Todo): string {
-  if (t.outcome === "dropped") return `[대표] '${quotedInline(t.title)}' 필요 없음 #${t.id}\n${t.closeReason ?? "대표가 필요 없음으로 정리"}`;
-  return `[대표] '${quotedInline(t.title)}' 했음 #${t.id}${t.completionNote != null ? `\n[대표 완료 답 원문]\n${t.completionNote}\n[대표 완료 답 끝]` : ""}${t.completionFileIds?.length ? `\n대표가 올린 첨부: ${t.completionFileIds.join(", ")}` : ""}`;
-}
-
-export function formatTodoUndone(t: Todo): string {
-  return `[대표] '${quotedInline(t.title)}' 아직 안 했음(체크를 풀었습니다) #${t.id}`;
-}
-
-export interface QuoteSource {
-  id: string;
-  text: string;
-  /** 대표가 쓰거나 고른 시각 */
-  at?: string | null;
-  /** 버튼 글이면 그 결재 카드의 제목. 버튼 글만으로는 무엇에 대한 답인지 알 수 없다. */
-  card?: string | null;
-}
-
-export interface VerifiedQuote {
-  text: string;
-  verified: boolean;
-  /** 맞은 대표 글. 일부 인용이면 전문을, 전체 인용이면 #id 와 시각을 함께 보내 판단 재료를 준다. */
-  source?: QuoteSource | null;
-}
-
-/** '진행' 같은 버튼 글·짧은 글은 다른 안건의 답일 수 있다. 맞더라도 승인으로 바로 치지 말라고 표시한다. */
-export function quoteNeedsContext(quote: VerifiedQuote): boolean {
-  if (!quote.verified || !quote.source) return false;
-  return quote.source.card != null || normalizeSpace(quote.text).length < SHORT_QUOTE;
-}
-
-const QUOTE_SOURCE_MAX = 1000;
-
-export function formatInstruction(name: string, text: string, quote: VerifiedQuote | null): string {
-  const lines = [`[총괄] ${name}에게`];
-  if (quote) {
-    const cited = normalizeSpace(quote.text);
-    const label = !quote.verified ? "총괄 인용(미확인)" : quoteNeedsContext(quote) ? "사용자 요청(문맥 확인 필요)" : "사용자 요청(원문, 서버 확인)";
-    const source = quote.source ? normalizeSpace(quote.source.text) : "";
-    const whole = !!quote.source && source === cited;
-    const stamp = quote.source?.at ? ` ${quote.source.at}` : "";
-    const origin = !whole || !quote.source ? "" : quote.source.card != null ? ` 결재 #${quote.source.id} '${quotedInline(quote.source.card)}'에서 고른 답${stamp}` : ` #${quote.source.id}${stamp}`;
-    lines.push(`${label}: "${cited}"${origin}`);
-    if (quote.source && !whole) {
-      lines.push(`대표 글 전문 #${quote.source.id}: "${source.length > QUOTE_SOURCE_MAX ? `${source.slice(0, QUOTE_SOURCE_MAX)}…` : source}"`);
-    }
-  }
-  // 첫 줄 뒤는 총괄이 쓴 글이다. 어떤 모양이어도 줄 머리가 접두어처럼 보이지 않게 인용 표시를 붙인다.
-  const [first, ...rest] = cleanText(text).split("\n");
-  lines.push(`할 일: ${first}`);
-  if (rest.length > 0) lines.push(quoteBlock(rest.join("\n")));
-  return lines.join("\n");
-}
-
-export function formatReport(name: string, kind: string, title: string, body: string): string {
-  const head = `[보고 ${name}] ${kind}: ${normalizeSpace(title)}`;
-  return body ? `${head}\n${quoteBlock(body)}` : head;
-}
-
-export function formatSystem(text: string): string {
-  return `[시스템] ${text}`;
-}
-
-/** 판 정리 지시의 머리. 대기열에 이미 있는지, 이번 턴이 판 정리였는지 이것으로 가린다. */
-export const TIDY_HEAD = formatSystem("판 정리");
-
-/** 총괄(본사는 본사 AI)에게 넣는 판 정리 지시. 본사 AI 에게는 진행판·지금 상황 도구가 없다. */
-export function formatTidy(kind: MemberKind, manual: boolean): string {
-  const tools =
-    kind === "root"
-      ? "이미 정해졌거나 필요 없어진 결재는 `ask_close`, 끝났거나 필요 없어진 할 일은 `todo_close`."
-      : "이미 정해졌거나 필요 없어진 결재는 `ask_close`, 끝났거나 필요 없어진 할 일은 `todo_close`, 진행판은 `work_set`·`work_remove`, 전체 그림은 `project_now`.";
-  return [
-    `${TIDY_HEAD}${manual ? "(대표가 눌렀습니다)" : ""}: 열린 결재·내 할 일·진행판·지금 상황을 지금 상태에 맞춰라.`,
-    "- `board` 로 판을 보고, 대화·보고·세션 기록으로 판단한다.",
-    `- ${tools}`,
-    "- 3일 넘은 열린 할 일은 직접 확인할 수 있으면 확인 결과를 이유로 todo_close(done), 필요 없어졌으면 dropped로 닫는다. 대표 브라우저를 여는 확인(Aside 등)은 하지 않는다. 확인할 수 없으면 그대로 둔다. 부탁한 직원(없으면 총괄)에게 깨우지 않는 자동 안내가 가며 다음에 그 일을 할 때 확인한다.",
-    "- 대표가 아직 정하지 않은 결재는 대신 닫지 않는다. 확실하지 않으면 그대로 둔다. 직원은 깨우지 않는다.",
-    "- 바뀐 게 있으면 `post`(알림) 한 줄로 무엇을 정리했는지 알린다. 없으면 아무것도 올리지 말고 턴을 끝낸다.",
-  ].join("\n");
-}
-
-function isTidy(d: Pick<Delivery, "kind" | "text">): boolean {
-  return d.kind === "system" && d.text.startsWith(TIDY_HEAD);
-}
+// 전달 글(§4)은 delivery-text.ts 가 만든다. 예전처럼 이 파일에서 가져가는 곳(시험)을 위해 같은 이름으로 내보낸다.
+import { formatAnswer, formatInstruction, formatReport, formatSystem, formatTodoUndone, formatUserMessage, guardLines, isTidy, normalizeSpace, quoteNeedsContext, type QuoteSource } from "./delivery-text.ts";
+export { formatAnswer, formatInstruction, formatReport, formatSystem, formatTidy, formatTodoDone, formatTodoUndone, formatUserMessage, guardLines, normalizeSpace, quoteNeedsContext, TIDY_HEAD } from "./delivery-text.ts";
+export type { QuoteSource, VerifiedQuote } from "./delivery-text.ts";
 
 // ---- 공개 타입 ----
 export interface AgentToolsImpl {
@@ -320,11 +162,6 @@ const TRUST_OPTION_LABELS = ["Yes, I trust this folder", "Trust and continue"];
 /** 한 세션에서 폴더 신뢰 창에 자동으로 답해 보는 횟수의 상한. 넘으면 대표에게 맡긴다. */
 const MAX_AUTO_TRUST_ATTEMPTS = 2;
 
-/** "hc 1.2.3" 같은 글에서 버전만 고른다. 버전 꼴이 없으면 글자 그대로 비교한다. */
-function versionIn(raw: string): string {
-  return /\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/.exec(raw)?.[0] ?? raw.trim();
-}
-
 class MissingSessionError extends Error {
   constructor() { super("이어갈 세션 기록이 없습니다"); }
 }
@@ -358,68 +195,6 @@ export interface NewMemberInput {
   firstInstruction?: string;
   userQuote?: string;
   parallel?: boolean;
-}
-
-export interface AssignInput {
-  text: string;
-  userQuote?: string;
-  parallel?: boolean;
-  urgent?: boolean;
-  /** 대표 메시지의 첨부 id. 그 직원 폴더로 이어 경로를 알린다. */
-  attachmentIds?: string[];
-}
-
-export interface AssignResult {
-  delivery: Delivery;
-  /** 앞에 일이 있어 기다리면 대기열 위치(1부터), 곧바로 들어가면 0. */
-  position: number;
-  verified: boolean | null;
-  /** 맞았지만 버튼 글·짧은 글이라 '문맥 확인 필요'로 나갔다. */
-  needsContext: boolean;
-}
-
-export interface PostInput {
-  kind: Extract<MessageKind, "완료" | "진행" | "막힘" | "알림" | "질문">;
-  title: string;
-  body?: string;
-  fileIds?: string[];
-  decisionId?: string | null;
-  group?: string | null;
-  correctsMessageId?: string | null;
-  supersedes?: string | null;
-}
-
-export interface AskInput {
-  title: string;
-  detail?: string;
-  options?: DecisionOption[];
-  rec?: string | null;
-  group?: string | null;
-  fileId?: string | null;
-  images?: Attachment[];
-}
-
-const APPROVAL_CARD_INSTRUCTION = "보고에 대표 승인이 필요하다고 썼는데 열린 결재 카드가 없다. 지금 ask 로 카드를 올리거나, 필요 없으면 보고를 정정하라.";
-
-/** 단어만으로 막지 않는다. 앞으로 받을 판단과 이미 받은 판단·불필요·CLI 승인을 구분한다. */
-function needsApprovalCard(text: string): boolean {
-  const prose = text.replace(/```[^]*?```|~~~[^]*?~~~/g, "").replace(/^\s*>.*$/gm, "");
-  return prose.split(/[\n.!?;,。]|(?:하지만|그러나|지만)/).some(part => {
-    const clause = part
-      .replace(/(?:터미널|CLI|cli|명령(?:어)?|도구|실행|권한|샌드박스)\s*(?:승인|허락)(?:\s*창)?/g, "")
-      .replace(/승인\s*창/g, "")
-      .replace(/(?:승인|결재|허락)\s*(?:요청\s*)?(?:기능|로직|문구|테스트|시험|규칙|카드\s*UI)/g, "")
-      .replace(/(?:승인|허락|결재)\s*요청(?:은|을)?\s*(?:하지\s*않|안\s*했)/g, "")
-      .replace(/(?:대표(?:님)?(?:의)?\s*)?(?:승인|허락|결재|확인|결정)(?:은|는|이|가|을|를)?\s*(?:불필요|필요\s*(?:없|하지\s*않)|요청하지\s*않|받지\s*않아도|(?:이미\s*)?(?:받았|받음|완료|끝났|끝남))/g, "")
-      .replace(/(?:대표(?:님)?(?:이|께서)?\s*)?(?:승인|허락|결재|확인|결정)(?:을|를)?\s*(?:해\s*주셨|하셨|했습|했음)/g, "")
-      .replace(/(?:여쭙|여쭈|여쭤)(?:지\s*않|지\s*말|지\s*않아도|었|봤)/g, "");
-    if (/(?:승인|허락|결재|대표(?:님)?(?:의)?\s*(?:확인|결정))\s*(?:후|뒤).*(?:했습니다|했음|끝냈습니다|마쳤습니다)\s*$/.test(clause)
-      && !/(?:필요|대기|여쭙|여쭈|여쭤)/.test(clause)) return false;
-    return /(?:승인|허락|결재)(?:을|를|이|가|은|는)?\s*(?:뒤|후|전|대기|필요|요청|받아야|받으면|받고|받은\s*(?:뒤|후)|받기\s*전|부탁|올려야|올릴)/.test(clause)
-      || /대표(?:님)?(?:의)?\s*(?:확인|결정)(?:을|를|이|가|은|는)?\s*(?:필요|대기|기다|요청|뒤|후|전|받아야|받으면|받고|부탁|바랍니다|해\s*주)/.test(clause)
-      || /(?:대표(?:님)?(?:의)?\s*(?:확인|결정)|승인|허락|결재)\s*$/.test(clause)
-      || /(?:여쭙|여쭘|여쭈|여쭤|정해\s*주시면)/.test(clause);
-  });
 }
 
 export interface RosterEntry {
@@ -511,18 +286,6 @@ interface Runtime {
 
 /** 턴 오류·전달 오류가 이어질 때 ref 없는 전달(보고·지시·완료)을 다시 보내는 간격의 배수. 잃지 않되 사용량을 태우지 않게 멀리 둔다. */
 const HELD_RETRY_FACTOR = 5;
-
-const WAKE_POST_KINDS = new Set<string>(["완료", "막힘", "질문"]);
-
-/**
- * 작업 영수증의 좁은 사유(reason). 영수증의 code 는 넓은 옛 이름(TERMINAL_REFUSED 등)이라 앱이 사유를 가를 수 없다.
- * ApiError 면 그 reason 이나(넓은 이름과 다르면) 자기 코드, 실행 엔진 거절이면 그 reason. 모르면 싣지 않는다(앱은 그때 옛 방식대로 문장을 본다).
- */
-function receiptReason(error: unknown, family: ErrorCode): { reason?: ErrorCode } {
-  const reason = error instanceof ApiError ? error.reason ?? (error.code !== family ? error.code : undefined)
-    : error instanceof CoreError ? error.reason : undefined;
-  return reason ? { reason } : {};
-}
 
 /** Domain references also include orphan answers and todo correction notices. */
 class OrchestratorDeliveryRecovery extends DeliveryRecovery {
@@ -677,13 +440,10 @@ export class Orchestrator implements OrchestratorApi {
   private readonly config: OrchestratorDeps["config"];
   private readonly runners: Map<Backend, Runner>;
   private readonly timings: OrchestratorTimings;
-  private agentTools: AgentToolsImpl | null;
   private serverUrl: string;
   private runtimes = new Map<string, Runtime>();
   /** 동시 턴 상한에 걸려 기다리는 직원. 턴이 끝나면 차례로 다시 민다. */
   private waiting = new Set<string>();
-  private askWaiters = new Map<string, Set<() => void>>();
-  private inboxWaiters = new Map<string, Set<() => void>>();
   private tick: ReturnType<typeof setInterval> | null = null;
   private closed = false;
   private lastDeliveryNoticeCheck = 0;
@@ -710,11 +470,17 @@ export class Orchestrator implements OrchestratorApi {
   readonly toolPermissions: ToolPermissions;
   private settingsWriting = false;
   private readonly projectPatches = new Set<string>();
-  private readonly terminalMutations = new Set<string>();
-  private readonly agentOperations = new Map<string, Promise<AgentToolResult>>();
   private readonly providerHomes: OrchestratorDeps["providerHomes"];
 
   private readonly models: ModelCatalogReader;
+  /** 판 정리·묵은 할 일 알림·직접 띄운 CLI 의 상태(board-hygiene.ts). */
+  private readonly boardHygiene: BoardHygiene;
+  /** 대표 쪽 업무 흐름: 메시지·결재 답·할 일, 받을 사람 없이 멈춘 대표의 글(flows/owner.ts). */
+  private readonly ownerFlows: OwnerFlows;
+  /** 직원 쪽 업무 흐름: MCP 도구·지시·보고·ask·결재 닫기·수신함(flows/member.ts). */
+  private readonly memberFlows: MemberFlows;
+  /** 터미널 직접 조작·실행 엔진 상태·런타임 정보·v2 작업 영수증(terminal-control.ts). */
+  private readonly terminal: TerminalControl;
 
   constructor(deps: OrchestratorDeps) {
     this.models = new ModelCatalogReader(deps.config);
@@ -736,7 +502,69 @@ export class Orchestrator implements OrchestratorApi {
     });
     this.deliveryRecovery = deps.deliveryRecovery ?? new OrchestratorDeliveryRecovery(this.store, member => this.recoveryRunner(member), dispatch => this.writerDone(dispatch), memberId => this.repairAdmitted(memberId), dispatch => this.writing(dispatch));
     this.timings = { ...DEFAULT_TIMINGS, ...deps.timings };
-    this.agentTools = deps.agentTools ?? null;
+    this.boardHygiene = new BoardHygiene({
+      store: this.store,
+      timings: this.timings,
+      closed: () => this.closed,
+      archiving: projectId => this.archiving.has(projectId),
+      leadBusy: lead => { const rt = this.runtime(lead.id); return this.isBusy(lead) || !!rt.starting || !!rt.reopening || !!rt.pumping || rt.closing; },
+      turnDeliveries: memberId => this.runtimes.get(memberId)?.turn?.deliveries,
+      requireActive: project => this.requireActive(project),
+      ensureConductor: projectId => this.ensureConductor(projectId),
+      pump: memberId => this.pump(memberId),
+    });
+    this.ownerFlows = new OwnerFlows({
+      store: this.store,
+      deliveryRecovery: this.deliveryRecovery,
+      home: this.config.home,
+      closed: () => this.closed,
+      pump: memberId => this.pump(memberId),
+      deliver: input => this.deliver(input),
+      requireActive: project => this.requireActive(project),
+      beginConductor: (project, retainOnFailure) => this.beginConductor(project, retainOnFailure),
+      ensureConductor: projectId => this.ensureConductor(projectId),
+      enableProject: projectId => this.enableProject(projectId),
+      refreshHealth: () => this.refreshHealth(),
+      refreshWaiting: memberId => this.refreshWaiting(memberId),
+      isBusy: member => this.isBusy(member),
+      settle: member => this.settle(member),
+      wakeAsk: decisionId => this.memberFlows.wakeAsk(decisionId),
+      wakeInbox: memberId => this.memberFlows.wakeInbox(memberId),
+      reportText: message => this.memberFlows.reportText(message),
+    });
+    this.memberFlows = new MemberFlows({
+      store: this.store,
+      host: this,
+      closed: () => this.closed,
+      archiving: projectId => this.archiving.has(projectId),
+      pump: memberId => this.pump(memberId),
+      deliver: input => this.deliver(input),
+      requireActive: project => this.requireActive(project),
+      requireInProject: (projectId, memberRef) => this.requireInProject(projectId, memberRef),
+      turnContext: memberId => this.runtime(memberId),
+      isBusy: member => this.isBusy(member),
+      interjects: member => this.interjects(this.runners.get(this.backendOf(member))),
+      settle: member => this.settle(member),
+      refreshWaiting: memberId => this.refreshWaiting(memberId),
+      notifyInbox: (title, body) => this.notifyInbox(title, body),
+      reconcileTodoCorrections: () => this.ownerFlows.reconcileTodoCorrections(),
+      attachmentsFor: (member, attachments) => this.ownerFlows.attachmentsFor(member, attachments),
+    }, deps.agentTools ?? null);
+    this.terminal = new TerminalControl({
+      store: this.store,
+      config: this.config,
+      timings: this.timings,
+      closed: () => this.closed,
+      coreRunner: () => this.runners.get("core"),
+      session: memberId => this.runtime(memberId),
+      pendingLifecycle: memberId => this.pendingLifecycle(memberId),
+      runnerOf: member => this.runnerOf(member),
+      runnerMember: (member, project) => this.runnerMember(member, project),
+      invalidateCoreMeasurement: member => this.invalidateCoreMeasurement(member),
+      requireActive: project => this.requireActive(project),
+      freshMemberSession: memberId => this.freshMemberSession(memberId),
+      pump: memberId => this.pump(memberId),
+    });
     this.notifier = deps.notifier ?? null;
     // K(E2): 허용하며 남긴 메모는 훅의 답에 실을 수 없어 팀장의 다음 입력으로 보낸다(결재와 묶지 않는다: 전달 실패가 카드를 다시 열지 않게).
     this.toolPermissions = new ToolPermissions({ store: this.store, notify: (title, body) => this.notifyInbox(title, body),
@@ -768,12 +596,12 @@ export class Orchestrator implements OrchestratorApi {
         if (!(core instanceof CoreRunner)) return (await core.available()).ok ? "owned" : "unknown";
         try {
           const hello = await coreRpc<CoreHello>(this.coreSocket(), "hello", { generation: 1 }, 1000);
-          this.coreRefusedSince = null;
-          this.noteEngine(hello);
+          this.terminal.coreRefusedSince = null;
+          this.terminal.noteEngine(hello);
           return hello.generation === 1 ? "owned" : "conflict";
         } catch (error) {
-          this.noteEngine(null);
-          this.noteCoreRefused(error instanceof CoreError && error.causeCode === "ECONNREFUSED");
+          this.terminal.noteEngine(null);
+          this.terminal.noteCoreRefused(error instanceof CoreError && error.causeCode === "ECONNREFUSED");
           return error instanceof CoreError && error.causeCode === "ENOENT" && error.deliveryEffect === "not_written" ? "absent" : "unknown";
         }
       },
@@ -865,183 +693,42 @@ export class Orchestrator implements OrchestratorApi {
 
   private coreSocket(): string { return this.config.coreSocket ?? join(this.config.home, "run", "core.sock"); }
 
-  private coreRefusedSince: number | null = null;
-  private coreRefusedLogged = false;
-  /**
-   * 소켓 파일은 있는데 아무도 받지 않는 상태가 이어지면 죽은 core 가 남긴 소켓일 수 있다. 살아 있는 core 를 둘로 만들 위험이 있어
-   * 자동으로 지우거나 새로 띄우지는 않는다. 왜 실행기가 안 닿는지는 로그에 한 번 남긴다.
-   */
-  private noteCoreRefused(refused: boolean): void {
-    if (!refused) { this.coreRefusedSince = null; this.coreRefusedLogged = false; return; }
-    this.coreRefusedSince ??= Date.now();
-    if (this.coreRefusedLogged || Date.now() - this.coreRefusedSince < 60_000) return;
-    this.coreRefusedLogged = true;
-    console.error("[core] herdr-core 소켓 파일은 있지만 1분 넘게 아무도 받지 않습니다. 죽은 core 가 남긴 소켓일 수 있습니다. 자동으로 지우거나 새로 띄우지 않습니다: core 가 정말 내려갔는지 확인한 뒤 소켓 파일을 지우면 다시 띄웁니다");
-  }
-
-  private engine: EngineStatus | null = null;
-  private engineSilentSince: number | null = null;
-  /**
-   * 실행 엔진이 답했는지(hello)와 그 버전을 적는다. 잠깐의 끊김(다시 띄우는 몇 초)에는 상태를 바꾸지 않고,
-   * engineUnresponsiveMs 넘게 이어서 답이 없을 때만 '응답 없음'으로 바꾼다. 달라지면 화면이 다시 읽게 알린다.
-   */
-  private noteEngine(hello: CoreHello | null): void {
-    let next = this.engine;
-    if (hello) {
-      this.engineSilentSince = null;
-      const version = typeof hello.version === "string" && hello.version.trim() ? versionIn(hello.version) : undefined;
-      next = { state: hello.generation === 1 && version === CORE_VERSION ? "ok" : "version_mismatch", ...(version ? { version } : {}), expectedVersion: CORE_VERSION };
-    } else {
-      this.engineSilentSince ??= Date.now();
-      if (Date.now() - this.engineSilentSince >= this.timings.engineUnresponsiveMs) next = { state: "unresponsive", expectedVersion: CORE_VERSION };
-    }
-    if (JSON.stringify(next) === JSON.stringify(this.engine)) return;
-    const before = this.engine;
-    this.engine = next;
-    if (next && next.state !== "ok") console.warn(next.state === "unresponsive"
-      ? `[core] 실행 엔진(herdr-core)이 ${Math.round(this.timings.engineUnresponsiveMs / 1000)}초 넘게 답하지 않습니다`
-      : `[core] 떠 있는 실행 엔진의 버전(${next.version ?? "알 수 없음"})이 고정 버전(${CORE_VERSION})과 다릅니다`);
-    else if (before && before.state !== "ok") console.warn("[core] 실행 엔진 상태가 정상으로 돌아왔습니다");
-    // 따로 이벤트가 없는 변화다. 화면이 스냅샷을 다시 읽게 기존 신호를 보낸다.
-    if (!this.closed) this.store.touchSnapshot();
-  }
-
+  // ---- 터미널 직접 조작·실행 엔진 상태·런타임 정보: terminal-control.ts 가 맡는다 ----
   /** 실행 엔진 상태. 아직 한 번도 확인하지 못했거나 엔진이 없는 실행 방식이면 null. */
   engineStatus(): EngineStatus | null {
-    return this.engine ? { ...this.engine } : null;
+    return this.terminal.engineStatus();
   }
 
-  private readonly terminalStreamClosers = new Set<() => Promise<void>>();
-  private readonly terminalLeaseListeners = new Set<(memberId: string, leaseId: string | null) => Promise<void>>();
   onTerminalLeaseEnded(ended: (memberId: string, leaseId: string | null) => Promise<void>): () => void {
-    this.terminalLeaseListeners.add(ended);
-    return () => { this.terminalLeaseListeners.delete(ended); };
+    return this.terminal.onTerminalLeaseEnded(ended);
   }
+
   onTerminalStreamShutdown(close: () => Promise<void>): () => void {
-    this.terminalStreamClosers.add(close);
-    return () => { this.terminalStreamClosers.delete(close); };
+    return this.terminal.onTerminalStreamShutdown(close);
   }
-  private requireTerminalStream(memberId: string): Member {
-    const member = this.store.requireMember(memberId);
-    const project = this.store.requireProject(member.projectId);
-    const rt = this.runtime(memberId);
-    if (this.closed || member.backend !== "core" || !member.paneId || member.origin === "manual" || project.archived || !project.runnerEnabled ||
-        this.pendingLifecycle(memberId) || rt.closing || rt.starting || rt.reopening) {
-      throw new ApiError(409, "세션을 처리하는 중이거나 터미널을 열 수 없습니다", "TERMINAL_REFUSED");
-    }
-    return member;
+
+  terminalStreamInfo(memberId: string): Promise<{ cols: number; rows: number }> {
+    return this.terminal.terminalStreamInfo(memberId);
   }
-  async terminalStreamInfo(memberId: string): Promise<{ cols: number; rows: number }> {
-    const member = this.requireTerminalStream(memberId);
-    const generation = this.store.memberRevisions(memberId).sessionGeneration;
-    const runner = this.runnerOf(member);
-    if (!runner.terminalInfo) throw new ApiError(409, "core 터미널을 확인할 수 없습니다", "TERMINAL_REFUSED");
-    try {
-      const size = await runner.terminalInfo(this.runnerMember(member, this.store.requireProject(member.projectId)));
-      const latest = this.requireTerminalStream(memberId);
-      if (latest.paneId !== member.paneId || this.store.memberRevisions(memberId).sessionGeneration !== generation) {
-        throw new ApiError(409, "세션이 바뀌었습니다", "TERMINAL_REFUSED");
-      }
-      return size;
-    } catch (error) {
-      if (error instanceof CoreError && !error.uncertain && ["finished", "not_found"].includes(error.kind)) {
-        throw new ApiError(409, "터미널이 끝났거나 없습니다", "TERMINAL_GONE");
-      }
-      throw new ApiError(409, "터미널 소유와 크기를 확인할 수 없습니다", "TERMINAL_REFUSED");
-    }
+
+  terminalStreamLease(memberId: string): ReturnType<TerminalControl["terminalStreamLease"]> {
+    return this.terminal.terminalStreamLease(memberId);
   }
-  terminalStreamLease(memberId: string) {
-    const member = this.requireTerminalStream(memberId);
-    const lease = this.runnerOf(member).terminalLease?.(memberId) ?? null;
-    return lease && lease.identity.terminalId === member.paneId && lease.identity.sessionGeneration === this.store.memberRevisions(memberId).sessionGeneration ? lease : null;
-  }
+
   renewTerminalStreamLease(memberId: string, leaseId: string): number {
-    const member = this.requireTerminalStream(memberId);
-    if (this.terminalStreamLease(memberId)?.leaseId !== leaseId) throw new ApiError(409, "조작권이 없습니다", "TERMINAL_REFUSED");
-    const expiresAt = this.runnerOf(member).renewLease?.(memberId, leaseId);
-    if (!expiresAt) throw new ApiError(409, "조작권이 없습니다", "TERMINAL_REFUSED");
-    return expiresAt;
-  }
-  async terminalStreamInput(memberId: string, write: () => void): Promise<void> {
-    const member = this.requireTerminalStream(memberId);
-    this.invalidateCoreMeasurement(member);
-    const runner = this.runnerOf(member);
-    if (runner.noteTerminalInput) await runner.noteTerminalInput(memberId, write);
-    else write();
+    return this.terminal.renewTerminalStreamLease(memberId, leaseId);
   }
 
-  async terminalControl(memberId: string, action: TerminalControlAction): Promise<TerminalControlResult> {
-    const member = this.store.requireMember(memberId);
-    if (member.backend !== "core") throw new ApiError(409, "core 터미널만 조작할 수 있습니다", "TERMINAL_REFUSED");
-    if (action.action !== "release") {
-      this.requireActive(this.store.requireProject(member.projectId));
-      if (this.pendingLifecycle(memberId)) throw new ApiError(409, "미확정 세션 작업을 확인하는 중입니다", "TERMINAL_REFUSED");
-    }
-    const rt = this.runtime(memberId);
-    if (rt.closing || rt.starting || rt.reopening || rt.pumping) throw new ApiError(409, "세션을 처리하는 중입니다. 잠시 뒤 다시 여세요", "TERMINAL_REFUSED");
-    const runner = this.runnerOf(member);
-    if (!runner.terminalControl) throw new ApiError(501, "터미널 조작을 지원하지 않습니다", "TERMINAL_REFUSED");
-    if (this.terminalMutations.has(memberId)) throw new ApiError(409, "터미널 입력을 처리하는 중입니다", "terminal_busy");
-    this.terminalMutations.add(memberId);
-    try {
-      if (action.action === "input" || action.action === "key") this.invalidateCoreMeasurement(member);
-      const previousLease = runner.terminalLease?.(memberId);
-      const result = await runner.terminalControl(this.runnerMember(member, this.store.requireProject(member.projectId)), action);
-      if (previousLease && (action.action === "release" || (action.action === "claim" && result.leaseId !== previousLease.leaseId))) {
-        await Promise.all([...this.terminalLeaseListeners].map(ended => ended(memberId, previousLease.leaseId)));
-      }
-      return result;
-    } catch (e) {
-      // 넓은 코드 TERMINAL_REFUSED 는 출시된 앱이 보므로 그대로 두고, 실행 엔진의 좁은 사유(core_terminal_missing 등)를 reason 으로 더한다.
-      if (e instanceof CoreError && !e.uncertain) throw new ApiError(409, e.message, "TERMINAL_REFUSED", e.reason);
-      throw e;
-    } finally {
-      this.terminalMutations.delete(memberId);
-      if (action.action === "release" && this.store.listPending(memberId).length > 0) void this.pump(memberId);
-    }
+  terminalStreamInput(memberId: string, write: () => void): Promise<void> {
+    return this.terminal.terminalStreamInput(memberId, write);
   }
 
-  /** 실행 파일이 바뀌지 않는 한 버전은 한 번만 묻는다. 요청마다 프로세스를 띄우면 앱의 연결 확인이 그만큼 늦어진다. */
-  private coreVersion: { key: string; value: Promise<string | null> } | null = null;
-  private coreVersionOf(binary: string): Promise<string | null> {
-    const path = Bun.which(binary);
-    if (!path) return Promise.resolve(null);
-    let key = path;
-    try { const stat = statSync(path); key = `${path}:${stat.mtimeMs}:${stat.size}`; } catch {}
-    if (this.coreVersion?.key === key) return this.coreVersion.value;
-    const value = (async () => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const result = Bun.spawn([path, "--version"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-        timer = setTimeout(() => result.kill(), 2000);
-        const output = await new Response(result.stdout).text();
-        return await result.exited === 0 ? output.trim().slice(0, 200) || null : null;
-      } catch { return null; }
-      finally { if (timer) clearTimeout(timer); }
-    })();
-    this.coreVersion = { key, value };
-    // 실패한 조회는 기억하지 않는다. 다음에 다시 묻는다.
-    void value.then(found => { if (found === null && this.coreVersion?.value === value) this.coreVersion = null; });
-    return value;
+  terminalControl(memberId: string, action: TerminalControlAction): Promise<TerminalControlResult> {
+    return this.terminal.terminalControl(memberId, action);
   }
 
-  /** 겹친 요청은 한 번만 묻고, 답이 늦으면 마지막으로 아는 상태로 답한다(앱의 연결 확인은 3~4초 제한이다). */
-  private coreAvailability: Promise<{ ok: boolean; detail?: string }> | null = null;
-  private lastCoreAvailability: { ok: boolean; detail?: string } | null = null;
-  async runtimeInfo(): Promise<RuntimeInfo> {
-    const runner = this.runners.get("core");
-    if (runner) this.coreAvailability ??= runner.available().catch((e: Error) => ({ ok: false, detail: e.message }))
-      .then(state => { this.lastCoreAvailability = state; return state; }).finally(() => { this.coreAvailability = null; });
-    const configured = this.config as OrchestratorDeps["config"] & Partial<Config>;
-    const binary = configured.coreBin ?? "herdr-core";
-    const installed = !!Bun.which(binary);
-    const [available, version] = await Promise.all([
-      runner ? briefly(this.coreAvailability!, this.timings.screenWaitMs, () => this.lastCoreAvailability ?? { ok: false, detail: "실행기 응답을 기다리는 중입니다" }) : { ok: false, detail: "core 실행기가 없습니다" },
-      installed ? briefly(this.coreVersionOf(binary), this.timings.screenWaitMs, () => null) : null,
-    ]);
-    return { backend: "core", core: { installed, available: available.ok, version, detail: available.ok ? null : available.detail ?? null }, providers: {
-      claude: { installed: !!Bun.which(configured.claudeBin ?? "claude") }, codex: { installed: !!Bun.which(configured.codexBin ?? "codex") },
-    } };
+  runtimeInfo(): Promise<RuntimeInfo> {
+    return this.terminal.runtimeInfo();
   }
 
   /** 접속 코드·토큰이 있는 폴더. file 도구가 읽지 못하게 막는다. */
@@ -1349,7 +1036,7 @@ export class Orchestrator implements OrchestratorApi {
     if (!leaseId) return;
     this.store.appendActivity(member.id, "system", "직접 조작하던 터미널이 끝나 그 조작권을 거뒀습니다. 밀린 전달을 이어 갑니다", `${leaseId}:gone_lease`);
     // 그 조작권으로 붙어 있던 화면 연결을 닫게 한다. 터미널이 이미 없으니 결과를 기다리지 않는다.
-    for (const ended of this.terminalLeaseListeners) void ended(member.id, leaseId).catch(() => {});
+    for (const ended of this.terminal.terminalLeaseListeners) void ended(member.id, leaseId).catch(() => {});
   }
 
   private async reconcileExecutions(memberId?: string): Promise<void> {
@@ -1720,50 +1407,17 @@ export class Orchestrator implements OrchestratorApi {
     });
   }
 
-  async operation(operationId: string): Promise<OperationReceipt> {
-    const receipt = this.store.getOperation(operationId);
-    if (!receipt) throw new ApiError(404, "작업을 찾을 수 없습니다", "operation_not_found");
-    if (receipt.projectId) this.store.requireProject(receipt.projectId);
-    if (receipt.memberId && this.store.requireMember(receipt.memberId).projectId !== receipt.projectId) throw new ApiError(404, "작업을 찾을 수 없습니다", "operation_not_found");
-    return receipt;
+  /** v2 작업 영수증(새 세션·터미널 조작)은 terminal-control.ts 가 맡는다. */
+  operation(operationId: string): Promise<OperationReceipt> {
+    return this.terminal.operation(operationId);
   }
 
-  async freshMemberSessionV2(memberId: string, request: FreshSessionRequest): Promise<OperationReceipt<"fresh_session">> {
-    const member = this.store.requireMember(memberId);
-    const existing = this.store.getOperation(request.operationId);
-    const receipt = this.store.beginOperation({ operationId: request.operationId, kind: "fresh_session", projectId: member.projectId, memberId, request }) as OperationReceipt<"fresh_session">;
-    if (existing || receipt.status !== "pending") return receipt;
-    try {
-      if (this.store.memberRevisions(memberId).sessionGeneration !== request.expectedSessionGeneration) throw new ApiError(409, "세션 세대가 변경되었습니다", "SESSION_CONFLICT");
-      const updated = await this.freshMemberSession(memberId);
-      return this.store.finishOperation({ ...receipt, status: "applied", result: { member: updated, sessionGeneration: this.store.memberRevisions(memberId).sessionGeneration } }) as OperationReceipt<"fresh_session">;
-    } catch (error) {
-      const unknown = this.pendingLifecycle(memberId)?.phase === "unknown" || (error instanceof CoreError && error.uncertain);
-      return this.store.finishOperation({ ...receipt, status: unknown ? "unknown" : "refused", code: unknown ? "SESSION_UNKNOWN" : "SESSION_REFUSED", error: (error as Error).message.slice(0, 500), ...receiptReason(error, "SESSION_REFUSED") }) as OperationReceipt<"fresh_session">;
-    }
+  freshMemberSessionV2(memberId: string, request: FreshSessionRequest): Promise<OperationReceipt<"fresh_session">> {
+    return this.terminal.freshMemberSessionV2(memberId, request);
   }
 
-  async terminalControlV2(memberId: string, request: TerminalControlRequestV2): Promise<OperationReceipt<"terminal_control">> {
-    const member = this.store.requireMember(memberId);
-    const existing = this.store.getOperation(request.operationId);
-    const receipt = this.store.beginOperation({ operationId: request.operationId, kind: "terminal_control", projectId: member.projectId, memberId, request }) as OperationReceipt<"terminal_control">;
-    if (existing || receipt.status !== "pending") return receipt;
-    let attempted = false;
-    try {
-      if (request.action !== "release") this.requireActive(this.store.requireProject(member.projectId));
-      const generation = this.store.memberRevisions(memberId).sessionGeneration;
-      if (generation !== request.expectedSessionGeneration) throw new ApiError(409, "세션 세대가 변경되었습니다", "session_generation_changed");
-      const lease = this.store.inputState(memberId).lease;
-      if (request.action === "claim" && lease && lease.claimId !== request.claimId) throw new ApiError(409, "다른 조작권이 있습니다", "terminal_lease_other");
-      if (request.action !== "claim" && (!lease || lease.claimId !== request.claimId || lease.identity.terminalId !== member.paneId)) throw new ApiError(409, "조작권이 만료되었거나 바뀌었습니다", "terminal_lease_expired");
-      if ((request.action === "input" || request.action === "key") && request.inputSequence !== lease!.lastInputSequence + 1) throw new ApiError(409, "입력 순번이 변경되었습니다", "terminal_input_sequence_stale");
-      attempted = true;
-      const result = await this.terminalControl(memberId, { action: request.action, leaseId: lease?.leaseId ?? request.claimId, ...(request.action === "input" ? { text: request.text } : request.action === "key" ? { key: request.key } : {}) });
-      return this.store.finishOperation({ ...receipt, status: "applied", result: { memberId, action: request.action, claimId: request.claimId, sessionGeneration: generation, ...result, ...((request.action === "input" || request.action === "key") ? { inputSequence: request.inputSequence } : {}) } }) as OperationReceipt<"terminal_control">;
-    } catch (error) {
-      const unknown = attempted && !(error instanceof ApiError && error.code === "TERMINAL_REFUSED");
-      return this.store.finishOperation({ ...receipt, status: unknown ? "unknown" : "refused", code: unknown ? "TERMINAL_UNKNOWN" : "TERMINAL_REFUSED", error: (error as Error).message.slice(0, 500), ...receiptReason(error, "TERMINAL_REFUSED") }) as OperationReceipt<"terminal_control">;
-    }
+  terminalControlV2(memberId: string, request: TerminalControlRequestV2): Promise<OperationReceipt<"terminal_control">> {
+    return this.terminal.terminalControlV2(memberId, request);
   }
 
   async patchMemberConfigV2(memberId: string, patch: PatchMemberReq, precondition: RevisionPrecondition): Promise<MemberConfigWriteResult> {
@@ -1785,21 +1439,6 @@ export class Orchestrator implements OrchestratorApi {
       const settings = await this.updateSettingsOnce(patch);
       return { settings, revision: this.store.settingsRevision() };
     } finally { this.settingsWriting = false; this.resumePumps(); }
-  }
-
-  async setTodoDoneV2(todoId: string, request: TodoDoneRequest, precondition: RevisionPrecondition): Promise<TodoWriteResult> {
-    if (this.store.todoRevision(todoId) !== precondition.expectedRevision) throw new ApiError(409, "할 일이 변경되었습니다", "REVISION_CONFLICT");
-    const writing = this.setTodoDone(todoId, request.done, request);
-    const revision = this.store.todoRevision(todoId);
-    const todo = await writing;
-    return { todo, revision };
-  }
-
-  async dropTodoV2(todoId: string, request: { reason?: string }, precondition: RevisionPrecondition): Promise<TodoWriteResult> {
-    if (this.store.todoRevision(todoId) !== precondition.expectedRevision) throw new ApiError(409, "할 일이 변경되었습니다", "REVISION_CONFLICT");
-    const writing = this.dropTodo(todoId, request.reason);
-    const revision = this.store.todoRevision(todoId);
-    return { todo: await writing, revision };
   }
 
   // ---- 시작·종료 ----
@@ -1857,7 +1496,7 @@ export class Orchestrator implements OrchestratorApi {
     const checking = this.settleInFlight();
     const ids = new Set(this.store.listUndelivered().map((d) => d.memberId));
     await Promise.all([checking, ...[...ids].map(id => this.pump(id))]);
-    await this.retryOrphans();
+    await this.ownerFlows.retryOrphans();
   }
 
   /** 읽을 수 없는 행 하나가 서버 시작 전체를 막지 않게 한다. 그 항목은 건너뛰고 기록만 남긴다(다음 틱·점검이 다시 본다). */
@@ -1869,7 +1508,7 @@ export class Orchestrator implements OrchestratorApi {
   private async settleInFlight(): Promise<void> {
     try {
       await this.deliveryRecovery.tick();
-      this.reconcileTodoCorrections();
+      this.ownerFlows.reconcileTodoCorrections();
       this.reconcileRejectedExecutions();
       this.releaseSlots();
     } finally { this.scheduleRecoveryCheck(); }
@@ -2088,7 +1727,7 @@ export class Orchestrator implements OrchestratorApi {
     const runner = this.runners.get(backend);
     const state = runner ? await runner.available().catch((e: Error) => ({ ok: false, detail: e.message })) : { ok: false, detail: "실행기가 없습니다" };
     if (this.closed) return;
-    if (backend === "core") this.lastCoreAvailability = state;
+    if (backend === "core") this.terminal.lastCoreAvailability = state;
     const changed = this.store.setRunnerHealth(backend, { ok: state.ok, detail: state.ok ? null : state.detail });
     known?.();
     await this.recoverStops();
@@ -2106,7 +1745,7 @@ export class Orchestrator implements OrchestratorApi {
     if (!changed) return;
     if (!state.ok) return;
     for (const id of new Set(this.store.listUndelivered().map((d) => d.memberId))) void this.pump(id);
-    void this.retryOrphans().catch((e) => console.warn("보류된 말 전달 재시도 실패:", (e as Error).message));
+    void this.ownerFlows.retryOrphans().catch((e) => console.warn("보류된 말 전달 재시도 실패:", (e as Error).message));
   }
 
   /**
@@ -2138,12 +1777,12 @@ export class Orchestrator implements OrchestratorApi {
       if (this.store.getContextState(member.id)?.compaction?.phase === "queued") void this.pump(member.id);
     });
     this.tickStep("in_flight", () => void this.settleInFlight().catch(e => console.warn("전달 확인 실패:", e)));
-    this.tickStep("manual_members", () => this.checkManualMembers());
+    this.tickStep("manual_members", () => this.boardHygiene.checkManualMembers());
     // 입력칸을 못 찾았거나(선택 창 등) 소켓이 끊겨 못 맞춘 새 설정을 다시 시도한다.
     for (const m of members) this.tickStep(`config:${m.id}`, () => {
       if ((m.status === "idle" || m.status === "waiting") && this.configPending(m)) void this.pump(m.id);
     });
-    this.tickStep("orphans", () => void this.retryOrphans().catch((e) => console.warn("보류된 말 전달 재시도 실패:", (e as Error).message)));
+    this.tickStep("orphans", () => void this.ownerFlows.retryOrphans().catch((e) => console.warn("보류된 말 전달 재시도 실패:", (e as Error).message)));
     this.tickStep("pump", () => {
       const ids = new Set(
         this.store
@@ -2159,101 +1798,21 @@ export class Orchestrator implements OrchestratorApi {
     });
   }
 
-  /** Passive reminders never pump, start a session, or wake a sleeping member. */
+  /** Passive reminders never pump, start a session, or wake a sleeping member. 판 정리는 board-hygiene.ts 가 맡는다. */
   checkStaleTodos(now = Date.now()): string[] {
-    const queued: string[] = [];
-    if (this.closed) return queued;
-    for (const project of this.store.listProjects()) {
-      if (this.archiving.has(project.id)) continue;
-      for (const todo of this.store.listStaleTodos(project.id, now)) {
-        const requester = todo.memberId ? this.store.getMember(todo.memberId) : null;
-        const target = requester?.kind === "worker" ? requester : this.store.getConductor(project.id);
-        if (!target) continue;
-        const days = Math.floor((now - Date.parse(todo.createdAt)) / 86_400_000);
-        if (this.store.remindStaleTodo(todo, target.id, formatSystem(`네가 부탁한 대표의 할 일 #${todo.id} '${quotedInline(todo.title)}' 이 ${days}일째 열려 있다. 다음에 그 일을 할 때 됐는지 직접 확인하고 그 결과를 근거로 todo_close 로 정리해라. 필요 없어졌으면 dropped.`), now)) queued.push(todo.id);
-      }
-    }
-    return queued;
+    return this.boardHygiene.checkStaleTodos(now);
   }
 
-  /**
-   * 주기 판 정리: 활성·연결·총괄 idle·중복 방지 조건을 유지한다.
-   * 변경+설정 간격 또는 묵은 할 일+24시간 경과 시 요청한다. 정리만 하려고 세션을 띄우지 않는다.
-   */
   checkBoardTidy(now = Date.now()): string[] {
-    const hours = this.store.getSettings().boardTidyHours;
-    if (!(hours > 0) || this.closed) return [];
-    const queued: string[] = [];
-    for (const project of this.store.listProjects()) {
-      if (!project.runnerEnabled || !project.connection.ok || this.archiving.has(project.id)) continue;
-      const lead = this.store.getConductor(project.id);
-      if (!lead || lead.origin !== "runner" || (!lead.sessionId && !lead.paneId)) continue;
-      if (lead.status !== "idle" && lead.status !== "waiting") continue;
-      const rt = this.runtime(lead.id);
-      if (this.isBusy(lead) || rt.starting || rt.reopening || rt.pumping || rt.closing) continue;
-      if (this.tidyPending(lead.id)) continue;
-      // 한 번도 정리하지 않았으면 총괄이 뜬 때부터 센다.
-      const review = this.store.getBoardReview(project.id);
-      const since = review?.requestedAt ?? project.tidiedAt ?? lead.createdAt;
-      const staleDue = this.store.listStaleTodos(project.id, now).length > 0 && this.store.staleReviewDue(project.id, now);
-      if (!staleDue && now - Date.parse(since) < hours * 3_600_000) continue;
-      const changed = this.store.lastBoardChangeAt(project.id);
-      if (!staleDue && (review?.completedAt ? this.store.boardRevision(project.id) <= (review.reviewedRevision ?? -1) : !review && (!changed || changed <= since))) continue;
-      this.queueBoardReview(project.id, lead, false, new Date(now).toISOString());
-      void this.pump(lead.id);
-      queued.push(project.id);
-    }
-    return queued;
+    return this.boardHygiene.checkBoardTidy(now);
   }
 
-  private queueBoardReview(projectId: string, lead: Member, manual: boolean, at = new Date().toISOString()): void {
-    this.store.transaction(() => {
-      this.store.requestBoardReview(projectId, at);
-      if (this.store.listStaleTodos(projectId, Date.parse(at)).length) this.store.markStaleReview(projectId, at);
-      this.store.enqueue({ projectId, memberId: lead.id, kind: "system", text: formatTidy(lead.kind, manual) });
-    });
+  tidyBoard(projectId: string): Promise<TidyResult> {
+    return this.boardHygiene.tidyBoard(projectId);
   }
 
-  /** 판 정리 지시가 줄 서 있거나 지금 그 턴이 돈다. */
-  private tidyPending(memberId: string): boolean {
-    if (this.runtimes.get(memberId)?.turn?.deliveries?.some(isTidy)) return true;
-    if (this.store.listPendingExecutions().some(run => run.memberId === memberId && run.deliveryIds.some(id => { const delivery = this.store.getDelivery(id); return delivery && isTidy(delivery); }))) return true;
-    return this.store.listPending(memberId).some(isTidy);
-  }
-
-  /**
-   * 대표의 '지금 판 정리'. 간격·바뀐 것을 따지지 않는다. 총괄이 없거나 잠들었으면 띄운다. 연결은 http 가 먼저 본다(409).
-   * 이미 기다리거나 도는 판 정리가 있으면 새로 넣지 않는다.
-   */
-  async tidyBoard(projectId: string): Promise<TidyResult> {
-    const project = this.store.requireProject(projectId);
-    this.requireActive(project);
-    if (!project.runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다. 총괄을 먼저 시작하세요", "runner_disabled");
-    const lead = this.store.getConductor(projectId) ?? (await this.ensureConductor(projectId));
-    if (lead.origin === "adopted") throw new ApiError(409, `${josa(lead.name, "은")} 이전 실행기에서 넘겨받은 세션이라 도구가 없어 판을 정리할 수 없습니다`, "board_tidy_legacy_lead");
-    if (this.tidyPending(lead.id)) return { already: true };
-    this.queueBoardReview(projectId, lead, true);
-    await this.pump(lead.id);
-    return { already: false };
-  }
-
-  /** 직접 띄운 CLI 는 실행기가 없어 도구 호출 시각으로만 상태를 안다. */
-  private checkManualMembers(): void {
-    const now = Date.now();
-    for (const m of this.store.listAllMembers()) {
-      if (m.origin !== "manual") continue;
-      const quiet = now - new Date(m.updatedAt).getTime();
-      // 답을 기다리는 세션은 브리지가 롱폴을 다시 걸 때마다 시각이 새로워진다. 그것마저 끊겼으면 죽은 것이다.
-      if (quiet >= this.timings.manualOfflineMs && (m.status === "idle" || m.status === "working" || m.status === "waiting")) this.store.patchMember(m.id, { status: "offline" });
-      else if (quiet >= this.timings.manualIdleMs && m.status === "working") this.store.patchMember(m.id, { status: "idle" });
-    }
-  }
-
-  /** 도구를 부르면 살아 있고 일하는 중이다. wait 는 지시를 기다리는 것이니 대기다. */
   noteManualCall(member: Member, tool: string): void {
-    if (member.origin !== "manual") return;
-    const next = tool === "wait" ? "idle" : tool === "ask_wait" || member.status === "waiting" ? "waiting" : "working";
-    if (member.status !== next) this.store.patchMember(member.id, { status: next });
+    this.boardHygiene.noteManualCall(member, tool);
   }
 
   /**
@@ -2275,7 +1834,7 @@ export class Orchestrator implements OrchestratorApi {
   async shutdown(): Promise<void> {
     this.closed = true;
     await this.drainPumps();
-    await Promise.all([...this.terminalStreamClosers].map(close => close()));
+    await Promise.all([...this.terminal.terminalStreamClosers].map(close => close()));
     await this.coreSupervisor?.shutdown();
     await Promise.all([...this.eventQueues.values()]);
     if (this.tick) clearInterval(this.tick);
@@ -2288,9 +1847,7 @@ export class Orchestrator implements OrchestratorApi {
       if (rt.compactTimer) clearTimeout(rt.compactTimer);
       if (rt.retryTimer) clearTimeout(rt.retryTimer);
     }
-    for (const waiters of [...this.askWaiters.values(), ...this.inboxWaiters.values()]) {
-      for (const wake of waiters) wake();
-    }
+    this.memberFlows.wakeEveryone();
     await this.apiRecovery.shutdown();
     await this.deliveryRecovery.shutdown();
     await Promise.all([...this.runners.values()].map((r) => r.shutdown()));
@@ -2348,7 +1905,7 @@ export class Orchestrator implements OrchestratorApi {
       const managed = this.store.listMembers(project.id).filter(m => m.origin !== "manual" && m.status !== "asleep" && (m.sessionId || m.paneId));
       for (const m of managed) {
         const rt = this.runtime(m.id);
-        if (rt.starting || rt.reopening || rt.pumping || rt.closing || this.configWrites.has(m.id) || this.terminalMutations.has(m.id) || this.pendingLifecycle(m.id) || this.store.inputState(m.id).lease) throw new ApiError(409, `${m.name}의 세션을 처리하는 중입니다`, "session_busy");
+        if (rt.starting || rt.reopening || rt.pumping || rt.closing || this.configWrites.has(m.id) || this.terminal.terminalMutations.has(m.id) || this.pendingLifecycle(m.id) || this.store.inputState(m.id).lease) throw new ApiError(409, `${m.name}의 세션을 처리하는 중입니다`, "session_busy");
         try {
           await this.verifyArchiveSession(m);
           await this.runnerOf(m).checkStop?.(this.runnerMember(m, project), { whileWorking: false });
@@ -2810,7 +2367,7 @@ export class Orchestrator implements OrchestratorApi {
     if (this.settingsWriting) throw new ApiError(409, "실행 설정을 처리하는 중입니다", "runner_settings_busy");
     for (const member of members) {
       const rt = this.runtime(member.id);
-      if (rt.starting || rt.reopening || rt.pumping || rt.closing || this.configWrites.has(member.id) || this.terminalMutations.has(member.id)) throw new ApiError(409, `${member.name}의 세션을 처리하는 중입니다`, "session_busy");
+      if (rt.starting || rt.reopening || rt.pumping || rt.closing || this.configWrites.has(member.id) || this.terminal.terminalMutations.has(member.id)) throw new ApiError(409, `${member.name}의 세션을 처리하는 중입니다`, "session_busy");
     }
     const busy = members.find((m) => m.status === "working" || m.status === "blocked" || (m.origin !== "manual" && this.isBusy(m)));
     if (busy) throw new ApiError(409, `${josa(busy.name, "이")} 일하는 중이라 보관할 수 없습니다`, "archive_member_working");
@@ -2857,162 +2414,37 @@ export class Orchestrator implements OrchestratorApi {
 
   private async enableProject(projectId: string): Promise<void> {
     this.requireActive(this.store.requireProject(projectId));
-    await this.adoptOrphans(projectId);
+    await this.ownerFlows.adoptOrphans(projectId);
     await Promise.all(this.store.listMembers(projectId).map((m) => this.pump(m.id)));
   }
 
-  /** 받을 사람이 없어 멈춘 대표의 말·답·완료를 총괄에게 넘긴다. */
-  private async adoptOrphans(projectId: string): Promise<void> {
-    if (this.orphanMessages(projectId).length + this.orphanAnswers(projectId).length + this.orphanTodos(projectId).length === 0) return;
-    const conductor = await this.ensureConductor(projectId);
-    // 기다리는 사이 겹친 호출이 이미 넘겼을 수 있다. 여기부터 줄 세우기까지 await 가 없어야 두 번 넘기지 않는다.
-    const messages = this.orphanMessages(projectId);
-    const answers = this.orphanAnswers(projectId);
-    const todos = this.orphanTodos(projectId);
-    for (const message of messages) {
-      this.store.enqueue({
-        projectId,
-        memberId: conductor.id,
-        kind: "user_message",
-        text: formatUserMessage(message.body, this.attachmentsFor(conductor, message.attachments), message.id, false) + this.messageContext(message),
-        refType: "message",
-        refId: message.id,
-      });
-    }
-    for (const d of answers) this.store.enqueue({ projectId, memberId: conductor.id, kind: "answer", text: formatAnswer(d), refType: "decision", refId: d.id });
-    for (const t of todos) {
-      this.store.enqueue({ projectId, memberId: conductor.id, kind: "todo_done", text: this.todoDoneText(t, conductor), refType: "todo", refId: t.id });
-      this.store.setTodoNoticePending(t.id, false);
-    }
+  // ---- 대표 쪽 업무 흐름(메시지·결재 답·할 일): flows/owner.ts 가 맡는다 ----
+  resendMessage(existing: Message): Promise<Message> {
+    return this.ownerFlows.resendMessage(existing);
   }
 
-  /** 실행이 켜진 프로젝트에서 총괄을 못 띄워 멈춘 말이 있으면 다시 시도한다. 실행기가 돌아오면 저절로 풀린다. */
-  private repairSourceIntents(projectId: string): void {
-    this.store.transaction(() => {
-      for (const message of this.store.listMessagesMissingDeliveries(projectId)) {
-        const member = message.targetMemberId ? this.store.getMember(message.targetMemberId) : null;
-        if (member) this.store.enqueue({ projectId, memberId: member.id, kind: "user_message", text: formatUserMessage(message.body, this.attachmentsFor(member, message.attachments), message.id, true) + this.messageContext(message), refType: "message", refId: message.id });
-      }
-      for (const decision of this.store.listAnswersMissingDeliveries(projectId)) {
-        const member = decision.memberId ? this.store.getMember(decision.memberId) : null;
-        if (member && member.origin !== "manual") this.store.enqueue({ projectId, memberId: member.id, kind: "answer", text: formatAnswer(decision), refType: "decision", refId: decision.id });
-      }
-      const lead = this.store.getConductor(projectId);
-      if (lead) for (const message of this.store.listReportsMissingDeliveries(projectId)) {
-        const author = message.memberId ? this.store.getMember(message.memberId) : null;
-        if (author?.kind === "worker" && author.id !== lead.id) this.store.enqueue({ projectId, memberId: lead.id, kind: "report", text: this.reportText(message), wake: WAKE_POST_KINDS.has(message.kind), refType: "message", refId: message.id });
-      }
-    });
+  sendUserMessage(projectId: string, req: SendMessageReq): Promise<Message> {
+    return this.ownerFlows.sendUserMessage(projectId, req);
   }
 
-  private async retryOrphans(): Promise<void> {
-    if (this.closed) return;
-    for (const project of this.store.listProjects()) {
-      if (!project.runnerEnabled) continue;
-      this.repairSourceIntents(project.id);
-      if (this.store.getConductor(project.id)) {
-        await this.adoptOrphans(project.id);
-        for (const id of new Set(this.store.listUndelivered(project.id).map(d => d.memberId))) void this.pump(id);
-        continue;
-      }
-      // 편입은 세션 하나를 넘겨준 것이다. 대표가 시키지 않은 총괄을 띄워 옛 지시를 실행하지 않는다.
-      if (this.store.runnerByAdopt(project.id)) continue;
-      if (this.orphanMessages(project.id).length + this.orphanAnswers(project.id).length + this.orphanTodos(project.id).length === 0) continue;
-      await this.enableProject(project.id).catch((e) => console.warn(`${project.name} 총괄 띄우기 재시도 실패:`, (e as Error).message));
-    }
+  dropTodo(todoId: string, reason?: string): Promise<Todo> {
+    return this.ownerFlows.dropTodo(todoId, reason);
   }
 
-  /** 전달 항목이 없는 대표 메시지: 총괄이 없을 때 보류됐거나, 총괄을 띄우다 실패해 항목째 사라졌다. */
-  private orphanMessages(projectId: string): Message[] {
-    return this.store.listMessagesMissingDeliveries(projectId).filter(m => !m.targetMemberId);
+  setTodoDone(todoId: string, done: boolean, completion?: { note?: string; fileIds?: string[] }): Promise<Todo> {
+    return this.ownerFlows.setTodoDone(todoId, done, completion);
   }
 
-  /** 답했는데 물은 직원이 없어(가져온 카드, 닫힌 직원) 아무에게도 가지 않은 결재. */
-  private orphanAnswers(projectId: string): Decision[] {
-    return this.store.listAnswersMissingDeliveries(projectId).filter(d => !d.memberId || !this.store.getMember(d.memberId));
+  setTodoDoneV2(todoId: string, request: TodoDoneRequest, precondition: RevisionPrecondition): Promise<TodoWriteResult> {
+    return this.ownerFlows.setTodoDoneV2(todoId, request, precondition);
   }
 
-  private orphanTodos(projectId: string): Todo[] {
-    return this.store.listTodoNoticesPending(projectId);
+  dropTodoV2(todoId: string, request: { reason?: string }, precondition: RevisionPrecondition): Promise<TodoWriteResult> {
+    return this.ownerFlows.dropTodoV2(todoId, request, precondition);
   }
 
-  /** Legacy retry requests schedule evidence collection and never bypass a fence. */
-  async resendMessage(existing: Message): Promise<Message> {
-    const current = this.store.requireMessage(existing.id);
-    if (current.delivery !== "failed") return current;
-    const target = current.targetMemberId ? this.store.getMember(current.targetMemberId) : null;
-    if (current.targetMemberId && !target) throw new ApiError(409, "그 팀원이 닫혀 다시 보낼 수 없습니다. 새 글로 보내세요", "resend_member_closed");
-    await this.refreshHealth();
-    this.store.requireReachable(current.projectId, target);
-    let deliveries = this.store.listDeliveries(current.projectId).filter(d => d.refType === "message" && d.refId === current.id);
-    if (!deliveries.length) deliveries = [this.deliveryRecovery.materializeLegacyMessage(current.id)];
-    for (const d of deliveries) {
-      if (d.status !== "delivered") this.deliveryRecovery.beginRecovery(d.id);
-    }
-    await this.deliveryRecovery.tick();
-    return this.store.requireMessage(current.id);
-  }
-
-  private messageContext(message: Message): string {
-    if (!message.contextFileId) return "";
-    const file = this.store.getFile(message.contextFileId);
-    return file && file.projectId === message.projectId ? `\n[시스템 자료 맥락 · 대표 원문 아님]\n대표가 보던 자료: ${file.title.replace(/[\r\n]+/g, " ")} (${file.id})` : "";
-  }
-
-  async sendUserMessage(projectId: string, req: SendMessageReq): Promise<Message> {
-    const project = this.store.requireProject(projectId);
-    this.requireActive(project);
-    if (req.contextFileId && this.store.getFile(req.contextFileId)?.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 자료가 아닙니다", "file_other_project");
-    const attachments = (req.attachmentIds ?? []).map(id => this.store.getAttachment(id)).filter((a): a is Attachment => a !== null);
-    const target = req.targetMemberId ? this.store.requireMember(req.targetMemberId) : null;
-    if (target && target.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 팀원이 아닙니다", "member_not_in_project");
-    let recipient = target ?? this.store.getConductor(projectId);
-    let booting: Promise<void> | null = null;
-    const { value: message, deliveries } = this.store.withDeliveryIntents(() => {
-      const message = this.store.createMessage({ id: req.id, projectId, mine: true, who: "나", kind: "나", body: req.text,
-        targetMemberId: target?.id ?? null, targetName: target?.name ?? null, attachments, contextFileId: req.contextFileId, delivery: "queued" });
-      if (!recipient && project.runnerEnabled) {
-        const spawn = this.beginConductor(project, true);
-        recipient = spawn.member;
-        booting = spawn.ready;
-      }
-      if (!recipient) return this.store.setMessageDelivery(message.id, "held", HOLD_NOTES.runner_disabled);
-      return message;
-    }, message => {
-      if (!recipient) return [];
-      const intents: NewDelivery[] = [{ projectId, memberId: recipient.id, kind: "user_message",
-        text: formatUserMessage(message.body, this.attachmentsFor(recipient, attachments), message.id, !!target) + this.messageContext(message), refType: "message", refId: message.id }];
-      const conductor = this.store.getConductor(projectId);
-      if (target && conductor && conductor.id !== target.id) intents.push({ projectId, memberId: conductor.id, kind: "system",
-        text: formatSystem(`대표가 ${target.name}에게 직접 지시했습니다 #${message.id}. 이미 ${target.name}에게 전달했습니다. 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.`) + this.messageContext(message), wake: false });
-      return intents;
-    });
-    if (booting) void (booting as Promise<void>).catch(e => console.warn(`${project.name} 총괄을 띄우지 못했습니다:`, (e as Error).message));
-    for (const id of new Set(deliveries.map(d => d.memberId))) void this.pump(id);
-    return this.store.requireMessage(message.id);
-  }
-
-  /** 첨부를 그 직원의 폴더로 잇는다. CLI 는 이 폴더만 승인 없이 읽고, 다른 프로젝트의 첨부는 열지 않는다. */
-  private attachmentsFor(member: Member, attachments: Attachment[]): Attachment[] {
-    if (attachments.length === 0) return attachments;
-    const dir = join(this.config.home, "inbox", member.id);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    return attachments.map((a) => {
-      // 전에 올라온 첨부의 이름에는 위험한 글자가 남아 있을 수 있다. 전달 글에 들어가는 경로는 이 이름으로 만든다.
-      const dest = join(dir, `${a.id}-${sanitizeName(a.name)}`);
-      try {
-        if (!existsSync(dest)) {
-          try {
-            linkSync(a.path, dest);
-          } catch {
-            copyFileSync(a.path, dest);
-          }
-        }
-        return { ...a, path: dest };
-      } catch {
-        return a; // 원본이 사라졌으면 그대로 알린다. 읽는 쪽에서 오류가 보인다.
-      }
-    });
+  reopenDecision(decisionId: string): Promise<Decision> {
+    return this.ownerFlows.reopenDecision(decisionId);
   }
 
   /** K(E2): 팀장의 CLI 가 도구 승인 창 앞에서 올린 요청(/agent/permission). 결재 카드를 띄우고 한 번 기다린다. */
@@ -3055,117 +2487,7 @@ export class Orchestrator implements OrchestratorApi {
       void task.then(done, done);
       return task;
     }
-    let booting: Promise<void> | null = null;
-    const { value: { decision, changed }, deliveries } = this.store.withDeliveryIntents(() => this.store.answerDecision(decisionId, req), ({ decision, changed }) => {
-      if (!changed) return [];
-      const asker = decision.memberId ? this.store.getMember(decision.memberId) : null;
-      let conductor = this.store.getConductor(decision.projectId);
-      const project = this.store.requireProject(decision.projectId);
-      if (!asker && !conductor && project.runnerEnabled && !this.store.runnerByAdopt(project.id)) {
-        const spawn = this.beginConductor(project, true);
-        conductor = spawn.member;
-        booting = spawn.ready;
-      }
-      const recipient = asker ?? conductor;
-      const intents: NewDelivery[] = [];
-      if (recipient && asker?.origin !== "manual") intents.push({ projectId: project.id, memberId: recipient.id, kind: "answer", text: formatAnswer(decision), refType: "decision", refId: decision.id });
-      if (conductor && recipient && conductor.id !== recipient.id) intents.push({ projectId: project.id, memberId: conductor.id, kind: "system",
-        text: formatSystem(`대표가 ${decision.who}의 결재에 답했습니다. 이미 ${decision.who}에게 전달했습니다. 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.\n${formatAnswer(decision)}`), wake: false });
-      return intents;
-    });
-    if (!changed) return decision;
-    if (booting) void (booting as Promise<void>).catch(e => console.warn("결재 답을 받을 총괄을 띄우지 못했습니다:", (e as Error).message));
-    this.wakeAll(this.askWaiters, decisionId);
-    if (decision.memberId) this.wakeAll(this.inboxWaiters, decision.memberId);
-    for (const id of new Set(deliveries.map(d => d.memberId))) void this.pump(id);
-    const asker = decision.memberId ? this.store.getMember(decision.memberId) : null;
-    if (asker && asker.origin !== "manual") this.refreshWaiting(asker.id);
-    return this.store.requireDecision(decisionId);
-  }
-
-  private todoDoneText(todo: Todo, member: Member): string {
-    const attachments = (todo.completionFileIds ?? []).map(id => this.store.getAttachment(id)).filter((a): a is Attachment => a !== null);
-    return [formatTodoDone(todo), ...attachmentLines(this.attachmentsFor(member, attachments))].join("\n");
-  }
-
-  async dropTodo(todoId: string, reason?: string): Promise<Todo> {
-    return this.writeTodo(todoId, true, {}, reason?.trim() || "대표가 필요 없음으로 정리");
-  }
-
-  async setTodoDone(todoId: string, done: boolean, completion: { note?: string; fileIds?: string[] } = {}): Promise<Todo> {
-    return this.writeTodo(todoId, done, completion);
-  }
-
-  private async writeTodo(todoId: string, done: boolean, completion: { note?: string; fileIds?: string[] }, dropReason?: string): Promise<Todo> {
-    for (const id of completion.fileIds ?? []) if (!this.store.getAttachment(id)) throw new ApiError(400, "업로드된 첨부를 찾을 수 없습니다", "upload_not_found");
-    if (!done && (completion.note !== undefined || completion.fileIds?.length)) throw new ApiError(400, "완료할 때만 답과 첨부를 붙일 수 있습니다", "todo_answer_requires_done");
-    let targetId: string | null = null;
-    const { todo, changed } = this.store.transaction(() => {
-      const before = this.store.requireTodo(todoId);
-      if (before.done !== done) this.store.setTodoCompletion(todoId, done ? completion.note ?? null : null, done ? completion.fileIds ?? [] : []);
-      if (dropReason !== undefined && before.done && before.outcome !== "dropped") throw new ApiError(409, "이미 끝났거나 정리된 할 일입니다", "todo_finished");
-      const result = dropReason !== undefined && !before.done
-        ? { todo: this.store.closeTodo(todoId, { outcome: "dropped", reason: dropReason, by: "대표" }), changed: true }
-        : this.store.setTodoDone(todoId, done);
-      if (!result.changed) return result;
-      const todo = result.todo;
-      const target = (todo.memberId ? this.store.getMember(todo.memberId) : null) ?? this.store.getConductor(todo.projectId);
-      targetId = target?.id ?? null;
-      if (!done) {
-        this.store.setTodoNoticePending(todo.id, false);
-        this.store.cancelPendingFor("todo", todo.id);
-        this.reconcileTodoCorrections(todo.id);
-      } else if (target) {
-        const delivery = this.store.enqueue({ projectId: todo.projectId, memberId: target.id, kind: "todo_done", text: this.todoDoneText(todo, target), refType: "todo", refId: todo.id });
-        this.store.patchDeliveryRetry(delivery.id, { correctionRevision: this.store.todoRevision(todo.id) });
-        const conductor = this.store.getConductor(todo.projectId);
-        if (conductor && conductor.id !== target.id) {
-          const notice = this.store.enqueue({ projectId: todo.projectId, memberId: conductor.id, kind: "todo_done", text: this.todoDoneText(todo, conductor), refType: "todo", refId: todo.id });
-          this.store.patchDeliveryRetry(notice.id, { correctionRevision: this.store.todoRevision(todo.id) });
-          this.store.afterCommit(() => { void this.pump(conductor.id); });
-        } else if (!conductor && target.kind === "worker") {
-          this.store.setTodoNoticePending(todo.id, true);
-        }
-      } else this.store.setTodoNoticePending(todo.id, true);
-      return result;
-    });
-    if (changed && done && !targetId && this.store.requireProject(todo.projectId).runnerEnabled && !this.store.runnerByAdopt(todo.projectId)) {
-      await this.ensureConductor(todo.projectId).catch(e => console.warn("할 일 완료를 받을 총괄을 띄우지 못했습니다:", (e as Error).message));
-      await this.adoptOrphans(todo.projectId);
-      const conductor = this.store.getConductor(todo.projectId);
-      if (conductor && targetId && conductor.id !== targetId) void this.pump(conductor.id);
-      targetId ??= conductor?.id ?? null;
-    }
-    if (changed && targetId) {
-      if (done) await this.pump(targetId);
-      else void this.pump(targetId);
-    }
-    return todo;
-  }
-
-  /** A successful old send is an external fact. Compensate only after it settles. */
-  private reconcileTodoCorrections(todoId?: string): void {
-    this.store.transaction(() => {
-      const groups = new Map<string, Delivery[]>();
-      for (const delivery of this.store.listDeliveries()) if (delivery.refType === "todo" && delivery.refId && (!todoId || delivery.refId === todoId)) {
-        const key = `${delivery.refId}:${delivery.memberId}`;
-        groups.set(key, [...(groups.get(key) ?? []), delivery]);
-      }
-      for (const deliveries of groups.values()) {
-        const delivered = deliveries.filter(d => d.status === "delivered").at(-1);
-        if (!delivered?.refId) continue;
-        const todo = this.store.getTodo(delivered.refId);
-        if (!todo || todo.done) continue;
-        const text = formatTodoUndone(todo);
-        const revision = this.store.todoRevision(todo.id);
-        if (delivered.text === text || deliveries.some(d => d.text === text && this.store.getDeliveryRetry(d.id).correctionRevision === revision)) continue;
-        // A still unresolved older write can land after the correction. Wait for evidence.
-        if (deliveries.some(d => d.status === "delivering" || this.store.inputState(d.memberId).unresolvedDispatches.some(dispatch => dispatch.items.some(item => item.deliveryId === d.id)))) continue;
-        const correction = this.store.enqueue({ projectId: todo.projectId, memberId: delivered.memberId, kind: "todo_done", text, refType: "todo", refId: todo.id });
-        this.store.patchDeliveryRetry(correction.id, { correctionRevision: revision });
-        this.store.afterCommit(() => { void this.pump(correction.memberId); });
-      }
-    });
+    return this.ownerFlows.answerDecision(decisionId, req);
   }
 
   async memberSleep(memberId: string, opts: { force?: boolean } = {}): Promise<Member> {
@@ -3260,99 +2582,6 @@ export class Orchestrator implements OrchestratorApi {
 
   cliCommand(): string {
     return cliCommand();
-  }
-
-  async listAgentTools(member: Member): Promise<AgentToolDef[]> {
-    return (await this.tools()).listAgentTools(member);
-  }
-
-  async handleAgentTool(member: Member, name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<AgentToolResult> {
-    const tools = await this.tools();
-    const boardRevision = name === "board" ? this.store.boardRevision(member.projectId) : null;
-    const result = await tools.handleAgentTool(this, member, name, args, signal);
-    if (!result.isError) {
-      if (boardRevision !== null) this.noteBoardReview(member, boardRevision);
-      if (["team_assign", "team_add", "team_resume"].includes(name) && this.runtime(member.id).turn) {
-        this.runtime(member.id).delegated = true;
-        for (const run of this.store.listPendingExecutions().filter(run => run.memberId === member.id)) this.store.saveExecutionJournal({ ...run, reason: "awaiting_delegation", updatedAt: new Date().toISOString() });
-      }
-    }
-    return result;
-  }
-
-  /** 영속 예약을 먼저 커밋한다. 프로세스가 죽으면 미확인 결과를 반환하며 효과를 재생하지 않는다. */
-  async handleAgentOperation(member: Member, name: string, args: Record<string, unknown>, context: AgentOperationContext, signal?: AbortSignal): Promise<AgentToolResult> {
-    const current = this.store.requireMember(member.id);
-    if (current.projectId !== member.projectId) throw new ApiError(404, "팀원을 찾을 수 없습니다", "member_not_found");
-    if (!/^[A-Za-z0-9_-]{1,128}$/.test(context.operationId)) throw new ApiError(400, "operationId가 잘못되었습니다", "invalid_operation_id");
-    let reserved = false;
-    const previous = this.store.agentOperation(current.id, name, context.operationId, args, () => {
-      reserved = true;
-      return { text: "이 작업의 결과를 확인할 수 없습니다. 같은 작업은 자동 재실행하지 않습니다", isError: true };
-    });
-    const running = this.agentOperations.get(context.operationId);
-    if (running) return running;
-    // 동기 Store 포트의 두 불변 receipt로 예약과 비동기 결과를 나눈다.
-    // ':'는 외부 operation ID에 허용하지 않아 결과 namespace와 충돌하지 않는다.
-    const resultId = `agent-result:${context.operationId}`;
-    if (!reserved) {
-      const missing = Symbol("result_pending");
-      try { return this.store.agentOperation(current.id, name, resultId, args, () => { throw missing; }); }
-      catch (error) { if (error !== missing) throw error; }
-      return previous;
-    }
-    const execution = this.handleAgentTool(current, name, args, signal).then(result =>
-      this.store.agentOperation(current.id, name, resultId, args, () => result),
-    ).finally(() => { this.agentOperations.delete(context.operationId); });
-    this.agentOperations.set(context.operationId, execution);
-    return execution;
-  }
-
-  /** Called at the board read boundary; completion only covers the requested revision. */
-  noteBoardReview(member: Member, revision = this.store.boardRevision(member.projectId)): void {
-    const turn = this.runtime(member.id).turn;
-    const runs = this.store.listPendingExecutions().filter(run => run.memberId === member.id);
-    const tidy = runs.some(run => run.deliveryIds.some(id => { const delivery = this.store.getDelivery(id); return delivery && isTidy(delivery); }));
-    const requestedRevision = turn?.boardReview?.requestedRevision ?? (tidy ? this.store.getBoardReview(member.projectId)?.requestedRevision : undefined);
-    if (requestedRevision === undefined) return;
-    const reviewedRevision = Math.min(requestedRevision, revision);
-    if (turn?.boardReview) turn.boardReview.reviewedRevision = reviewedRevision;
-    for (const run of runs) this.store.saveExecutionJournal({ ...run, reason: `board_review:${requestedRevision}:${reviewedRevision}`, updatedAt: new Date().toISOString() });
-  }
-
-  private async tools(): Promise<AgentToolsImpl> {
-    // agent-tools.ts 가 이 파일의 타입을 쓰므로 정적 import 로 순환시키지 않는다.
-    this.agentTools ??= await import("./agent-tools.ts");
-    return this.agentTools;
-  }
-
-  async askWait(member: Member, decisionId: string, timeoutMs: number, signal?: AbortSignal): Promise<AskWaitResult> {
-    const ready = (): AskWaitResult | null => {
-      const current = this.store.requireMember(member.id);
-      const decision = this.store.requireDecision(decisionId);
-      if (decision.projectId !== current.projectId || decision.memberId !== member.id) throw new ApiError(403, "자신이 올린 결재만 기다릴 수 있습니다", "decision_not_own");
-      if (signal?.aborted || this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId) || decision.status === "open") return null;
-      const answered = decision.status === "answered" || decision.status === "delivered";
-      if (decision.status === "answered") {
-        this.materializeManualAnswers(current);
-        // An unacknowledged wait batch owns its items. askWait must not consume it.
-        if (this.store.manualInbox(member.id, [])?.items.some(item => item.ref?.type === "decision" && item.ref.id === decisionId)) return null;
-        const delivery = this.store.listPending(member.id).find(d => d.refType === "decision" && d.refId === decisionId);
-        if (delivery) {
-          const batch = this.store.manualInbox(member.id, [delivery.id]);
-          if (!batch?.items.some(item => item.deliveryId === delivery.id)) return null;
-          this.store.acknowledgeManualInbox(member.id, batch.id);
-        } else this.store.setDecisionStatus(decisionId, "delivered");
-      }
-      const text = answered ? formatAnswer(decision) : formatSystem(`결재가 닫혔습니다${decision.closeReason ? `: ${normalizeSpace(decision.closeReason)}` : ""}. 이 질문의 답은 오지 않습니다 #${decision.id}`);
-      this.settle(current);
-      return { done: true, text, decision: this.store.requireDecision(decisionId) };
-    };
-    if (signal?.aborted) return { done: false };
-    const now = ready();
-    if (now) return now;
-    await this.waitOn(this.askWaiters, decisionId, Math.min(Math.max(timeoutMs, 0), 50_000), signal);
-    return ready() ?? { done: false };
   }
 
   // ---- 팀 ----
@@ -3525,83 +2754,6 @@ export class Orchestrator implements OrchestratorApi {
       const handle = `w${n}`;
       if (!this.store.getMemberByHandle(projectId, handle)) return handle;
     }
-  }
-
-  private refuseOwnerDirectRepeat(target: Member, quote: VerifiedQuote | null): void {
-    if (quote?.verified && quote.source) {
-      const message = this.store.getMessage(quote.source.id);
-      if (message?.mine && message.targetMemberId === target.id && this.store.listDeliveries(target.projectId).some(d =>
-        d.memberId === target.id && d.kind === "user_message" && d.refType === "message" && d.refId === message.id &&
-        ["queued", "delivering", "delivered"].includes(d.status))) {
-        const reason = `대표가 이미 ${target.name}에게 직접 보낸 지시입니다(#${message.id}). 다시 보내지 마세요. 더할 일이 있으면 인용 없이 그 부분만 쓰세요.`;
-        this.store.appendActivity(target.id, "system", reason);
-        throw new ApiError(409, reason, "owner_direct_repeat");
-      }
-    }
-  }
-
-  /** team_assign. member 는 핸들 또는 화면 이름. 다른 프로젝트 직원은 찾지 못한다. */
-  async assign(projectId: string, memberRef: string, input: AssignInput, assignedBy?: Member): Promise<AssignResult> {
-    const target = this.requireInProject(projectId, memberRef);
-    const source = input.userQuote?.trim() ? this.findQuoteSource(projectId, input.userQuote) : null;
-    const quote = input.userQuote?.trim() ? { text: input.userQuote, verified: source !== null, source } : null;
-    this.refuseOwnerDirectRepeat(target, quote);
-    // 마지막 지시가 이긴다. 거절된 지시는 병렬 설정도 바꾸지 않는다.
-    if (input.parallel !== undefined) this.runtime(target.id).wantParallel = input.parallel;
-    const project = this.store.requireProject(projectId);
-    const busy = this.isBusy(target);
-    const attachments = (input.attachmentIds ?? []).map((id) => {
-      const attachment = this.store.getAttachment(id);
-      if (!attachment || !this.store.isProjectAttachment(projectId, id)) throw new ApiError(404, `이 프로젝트에서 대표가 보낸 첨부가 아닙니다: ${id}`, "attachment_not_found");
-      return attachment;
-    });
-    const delivery = this.store.transaction(() => {
-      const delivery = this.store.enqueue({
-        projectId,
-        memberId: target.id,
-        kind: "instruction",
-        text: [formatInstruction(target.name, input.text, quote), ...attachmentLines(this.attachmentsFor(target, attachments))].join("\n"),
-        urgent: input.urgent,
-      });
-      // 끼워 넣을 수 없는 실행기에서는 긴급도 턴이 끝나야 나간다. 지시한 쪽에 '대기'로 알린다.
-      if (assignedBy) { this.store.setDeliveryAuthor(delivery.id, assignedBy.id); this.store.noteDelegation(assignedBy.id, delivery, busy && !(input.urgent && this.interjects(this.runners.get(this.backendOf(target))))); }
-      return delivery;
-    });
-    const position = busy ? this.store.listPending(target.id).length : 0;
-    await this.pump(target.id);
-    return { delivery: this.store.requireDelivery(delivery.id), position, verified: quote?.verified ?? null, needsContext: quote ? quoteNeedsContext(quote) : false };
-  }
-
-  /**
-   * 인용이 이 프로젝트의 대표 메시지·결재 답에 (공백 정규화 후) 그대로 있으면 그 글. 총괄의 말은 승인이 아니다.
-   * 직원에게 전문·시각·카드 제목을 함께 보내 잘린 인용이나 다른 안건의 답으로 뜻이 뒤집히지 않게 한다.
-   */
-  findQuoteSource(projectId: string, rawQuote: string): QuoteSource | null {
-    const quote = normalizeSpace(rawQuote).replace(/^["'“”‘’](.*)["'“”‘’]$/, "$1").trim();
-    if (!quote) return null;
-    // "네" 같은 짧은 인용은 다른 글의 일부로 우연히 맞는다. 글 전체가 같아야 한다.
-    const matches = (source: string): boolean => {
-      const text = normalizeSpace(source);
-      return quote.length < SHORT_QUOTE ? text === quote : includesWhole(text, quote);
-    };
-    for (const d of this.store.listAllDoneDecisions(projectId)) {
-      const option = d.options.find((o) => o.k === d.choice);
-      // 버튼 글은 대표가 보고 누른 그대로만 친다. 설명·버튼 글의 일부는 직원이 쓴 글이라 대표의 말이 아니다.
-      if (option && normalizeSpace(option.label) === quote) return { id: d.id, text: option.label, at: d.answeredAt, card: d.title };
-      if (d.note && matches(d.note)) return { id: d.id, text: d.note, at: d.answeredAt };
-    }
-    for (const todo of this.store.listTodos(projectId)) if (todo.done && todo.completionNote && matches(todo.completionNote)) return { id: todo.id, text: todo.completionNote, at: todo.doneAt, card: todo.title };
-    const project = this.store.requireProject(projectId);
-    if (project.creationGoal && matches(project.creationGoal)) return { id: project.id, text: project.creationGoal, at: project.createdAt };
-    let before: string | undefined;
-    for (let page = 0; page < QUOTE_SCAN_PAGES; page++) {
-      const messages = this.store.listMessages(projectId, { before, limit: 500 });
-      const found = [...messages].reverse().find((m) => m.mine && matches(m.body));
-      if (found) return { id: found.id, text: found.body, at: found.at };
-      if (messages.length < 500) return null;
-      before = messages[0]!.at;
-    }
-    return null;
   }
 
   /** team_compact·화면 압축. 실행 중이어도 안전 조건을 우회하지 않고 예약한다. */
@@ -4017,7 +3169,7 @@ export class Orchestrator implements OrchestratorApi {
       }
       for (const d of this.store.listOpenDecisionsByMember(memberId)) {
         this.store.closeDecision(d.id, { kind: null, reason: `${josa(member.name, "이")} 명부에서 빠져 함께 닫혔습니다`, by: "시스템" });
-        this.wakeAll(this.askWaiters, d.id);
+        this.memberFlows.wakeAsk(d.id);
       }
       this.settleRestartWake(memberId, "dropped");
       this.clearRuntime(memberId, rt);
@@ -4026,7 +3178,7 @@ export class Orchestrator implements OrchestratorApi {
       // 대표가 체크한 '했음'은 받을 직원이 사라져도 잃으면 안 된다. 총괄에게 넘긴다.
       const conductor = this.store.getConductor(member.projectId);
       for (const todo of doneTodos) {
-        if (conductor) await this.deliver({ projectId: member.projectId, memberId: conductor.id, kind: "todo_done", text: this.todoDoneText(todo, conductor), refType: "todo", refId: todo.id, wake: false });
+        if (conductor) await this.deliver({ projectId: member.projectId, memberId: conductor.id, kind: "todo_done", text: this.ownerFlows.todoDoneText(todo, conductor), refType: "todo", refId: todo.id, wake: false });
         else this.store.setTodoNoticePending(todo.id, true);
       }
       return dropped;
@@ -4061,247 +3213,89 @@ export class Orchestrator implements OrchestratorApi {
     return member;
   }
 
-  // ---- 보고 ----
-  async recordPost(member: Member, input: PostInput): Promise<Message & { systemInstruction?: string }> {
-    const rt = this.runtime(member.id);
-    if (input.supersedes && input.correctsMessageId && input.supersedes !== input.correctsMessageId) throw new ApiError(400, "정정 대상이 서로 다릅니다", "correction_target_mismatch");
-    input = { ...input, correctsMessageId: input.supersedes ?? input.correctsMessageId };
-    const files = (input.fileIds ?? []).map((id) => {
-      const file = this.store.getFile(id);
-      if (!file || file.projectId !== member.projectId) throw new ApiError(404, `자료를 찾을 수 없습니다: ${id}`, "file_not_found");
-      return file;
-    });
-    if (input.decisionId && this.store.getDecision(input.decisionId)?.projectId !== member.projectId) {
-      throw new ApiError(404, `결재를 찾을 수 없습니다: ${input.decisionId}`, "decision_not_found");
-    }
-    // 거부된 호출은 보고가 아니다. 턴 마지막 글의 자동 보고를 막으면 안 된다.
-    // v1 웹은 첫 자료와 본문 링크를 계속 사용한다. 전체 목록은 Message.fileIds에도 projection한다.
-    const extra = files
-      .slice(1)
-      .map((f) => `[자료: ${f.title.replace(/[\[\]\\]/g, "\\$&")}](#/p/${encodeURIComponent(member.projectId)}/files/${encodeURIComponent(f.id)})`)
-      .join("\n\n");
-    if (input.correctsMessageId) {
-      const previous = this.store.requireMessage(input.correctsMessageId);
-      if (previous.projectId !== member.projectId || previous.memberId !== member.id || previous.mine) throw new ApiError(400, "자신이 작성한 보고만 정정할 수 있습니다", "report_not_own");
-    }
-    const conductor = member.kind === "worker" ? this.store.getConductor(member.projectId) : null;
-    let systemInstruction: string | undefined;
-    const { value: message, deliveries } = this.store.withDeliveryIntents(() => this.store.createMessage({
-      projectId: member.projectId, memberId: member.id, who: member.name, kind: input.kind,
-      title: rt.direct ? `(직접) ${input.title}` : input.title,
-      body: [input.body ?? "", extra].filter(Boolean).join("\n\n"), decisionId: input.decisionId ?? null, fileId: files[0]?.id ?? null,
-    }), message => {
-      this.store.noteDelegationPost(member.id, `${message.title}\n${message.body}`);
-      this.store.saveReportReferences(member.projectId, { sourceMessageId: message.id, fileIds: files.map(file => file.id), decisionIds: input.decisionId ? [input.decisionId] : [], authoredAt: message.at, sequence: this.store.boardRevision(member.projectId), correctsMessageId: input.correctsMessageId ?? null });
-      if (this.missingApprovalCard(member, input)) {
-        systemInstruction = formatSystem(APPROVAL_CARD_INSTRUCTION);
-        // post 응답으로 한 번만 돌려준다. 업무 입력을 enqueue하거나 직원을 깨우지 않는다.
-        this.store.appendActivity(member.id, "system", systemInstruction, `approval-card:${message.id}`);
-      }
-      return conductor && conductor.id !== member.id ? [{ projectId: member.projectId, memberId: conductor.id, kind: "report", text: this.reportText(message), wake: WAKE_POST_KINDS.has(input.kind), refType: "message", refId: message.id }] : [];
-    });
-    rt.posted = true;
-    await Promise.all(deliveries.map(d => this.pump(d.memberId)));
-    return { ...this.store.requireMessage(message.id), ...(systemInstruction ? { systemInstruction } : {}) };
+  // ---- 직원 쪽 업무 흐름(MCP 도구·지시·보고·ask·결재 닫기·수신함): flows/member.ts 가 맡는다 ----
+  listAgentTools(member: Member): Promise<AgentToolDef[]> {
+    return this.memberFlows.listAgentTools(member);
   }
 
-  private missingApprovalCard(member: Member, input: PostInput): boolean {
-    const report = `${input.title}\n${input.body ?? ""}`;
-    if (!needsApprovalCard(report) || this.runtime(member.id).turn?.askedDecisionIds?.size) return false;
-    const group = input.group?.trim() || (input.decisionId ? this.store.getDecision(input.decisionId)?.group?.trim() : null);
-    const normalizedReport = normalizeSpace(report);
-    return !this.store.listOpenDecisions(member.projectId).some(decision =>
-      decision.memberId === member.id
-      || decision.id === input.decisionId
-      || new RegExp(`(?<![\\w-])${decision.id}(?![\\w-])`).test(report)
-      || (normalizeSpace(decision.title).length >= 2 && normalizedReport.includes(normalizeSpace(decision.title)))
-      || (!!group && decision.group?.trim() === group));
+  handleAgentTool(member: Member, name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<AgentToolResult> {
+    return this.memberFlows.handleAgentTool(member, name, args, signal);
+  }
+
+  handleAgentOperation(member: Member, name: string, args: Record<string, unknown>, context: AgentOperationContext, signal?: AbortSignal): Promise<AgentToolResult> {
+    return this.memberFlows.handleAgentOperation(member, name, args, context, signal);
+  }
+
+  /** Called at the board read boundary; completion only covers the requested revision. */
+  noteBoardReview(member: Member, revision?: number): void {
+    this.memberFlows.noteBoardReview(member, revision);
+  }
+
+  askWait(member: Member, decisionId: string, timeoutMs: number, signal?: AbortSignal): Promise<AskWaitResult> {
+    return this.memberFlows.askWait(member, decisionId, timeoutMs, signal);
+  }
+
+  assign(projectId: string, memberRef: string, input: AssignInput, assignedBy?: Member): Promise<AssignResult> {
+    return this.memberFlows.assign(projectId, memberRef, input, assignedBy);
+  }
+
+  findQuoteSource(projectId: string, rawQuote: string): QuoteSource | null {
+    return this.memberFlows.findQuoteSource(projectId, rawQuote);
+  }
+
+  recordPost(member: Member, input: PostInput): Promise<Message & { systemInstruction?: string }> {
+    return this.memberFlows.recordPost(member, input);
   }
 
   reportReferences(projectId: string, messageId: string): ReportReferences {
-    const message = this.store.requireMessage(messageId);
-    if (message.projectId !== projectId || message.mine || !message.memberId) throw new ApiError(404, "보고를 찾을 수 없습니다", "report_not_found");
-    return this.store.getReportReferences(projectId, messageId) ?? { sourceMessageId: message.id, fileIds: message.fileId ? [message.fileId] : [], decisionIds: message.decisionId ? [message.decisionId] : [], authoredAt: message.at, sequence: 0, correctsMessageId: null };
+    return this.memberFlows.reportReferences(projectId, messageId);
   }
 
-  private reportText(message: Message): string {
-    const refs = this.reportReferences(message.projectId, message.id);
-    const direct = message.title.startsWith("(직접) ");
-    return `${formatReport(message.who, direct ? `(직접) ${message.kind}` : message.kind, direct ? message.title.slice(5) : message.title, message.body)}\n보고 원본 #${refs.sourceMessageId} · 작성 ${refs.authoredAt} · 순번 ${refs.sequence}\n자료: ${refs.fileIds.join(", ") || "없음"} · 결재: ${refs.decisionIds.join(", ") || "없음"}${refs.correctsMessageId ? ` · 정정 대상 #${refs.correctsMessageId}` : ""}`;
+  registerAsk(member: Member, input: AskInput): Promise<{ decision: Decision; blocking: boolean; text: string }> {
+    return this.memberFlows.registerAsk(member, input);
   }
 
+  closeDecision(member: Member, request: Parameters<MemberFlows["closeDecision"]>[1]): Promise<Decision> {
+    return this.memberFlows.closeDecision(member, request);
+  }
+
+  closeAsk(member: Member, input: Parameters<MemberFlows["closeAsk"]>[1]): Promise<Decision> {
+    return this.memberFlows.closeAsk(member, input);
+  }
+
+  closeTodo(member: Member, input: { id: string; outcome: TodoOutcome; reason: string }): Promise<Todo> {
+    return this.memberFlows.closeTodo(member, input);
+  }
+
+  setMemberStatus(member: Member, now: string, next?: string): Member {
+    return this.memberFlows.setMemberStatus(member, now, next);
+  }
+
+  setProjectNow(projectId: string, text: string): Project {
+    return this.memberFlows.setProjectNow(projectId, text);
+  }
+
+  setWork(projectId: string, input: Parameters<MemberFlows["setWork"]>[1]): WorkItem {
+    return this.memberFlows.setWork(projectId, input);
+  }
+
+  waitInbox(member: Member, timeoutMs: number, signal?: AbortSignal): Promise<string | null> {
+    return this.memberFlows.waitInbox(member, timeoutMs, signal);
+  }
+
+  manualInbox(memberId: string, timeoutMs: number, signal?: AbortSignal): Promise<ManualInboxBatch | null> {
+    return this.memberFlows.manualInbox(memberId, timeoutMs, signal);
+  }
+
+  acknowledgeManualInbox(memberId: string, request: ManualInboxAckRequest): Promise<ManualInboxAckResult> {
+    return this.memberFlows.acknowledgeManualInbox(memberId, request);
+  }
+
+  // ---- 보고 ----
   private async reportToConductor(member: Member, kind: string, title: string, body: string, wake: boolean): Promise<void> {
     const conductor = this.store.getConductor(member.projectId);
     if (!conductor || conductor.id === member.id) return;
     await this.deliver({ projectId: member.projectId, memberId: conductor.id, kind: "report", text: formatReport(member.name, kind, title, body), wake });
-  }
-
-  /** ask. blocking 이면(manual) 호출자가 askWait 로 기다리고, 아니면 text 를 도구 결과로 돌려준다. */
-  async registerAsk(member: Member, input: AskInput): Promise<{ decision: Decision; blocking: boolean; text: string }> {
-    // 보관한 프로젝트의 카드는 화면에 없고 답도 409 다. 올리면 세션이 답 없는 대기에 묶인다.
-    if (this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId)) throw new ApiError(409, "프로젝트가 보관되어 대표가 답할 수 없습니다. 묻지 말고 턴을 끝내세요", "ask_project_archived");
-    const { value: decision, deliveries } = this.store.withDeliveryIntents(() => {
-      const decision = this.store.createDecision({
-        projectId: member.projectId,
-        memberId: member.id,
-        who: member.name,
-        title: input.title,
-        detail: input.detail,
-        options: input.options,
-        rec: input.rec,
-        group: input.group,
-        fileId: input.fileId,
-        images: input.images,
-      });
-      this.store.createMessage({
-        projectId: member.projectId,
-        memberId: member.id,
-        who: member.name,
-        kind: "질문",
-        title: input.title,
-        body: input.detail ?? "",
-        decisionId: decision.id,
-        fileId: input.fileId ?? null,
-        attachments: input.images,
-      });
-      this.store.patchMember(member.id, { status: "waiting" });
-      return decision;
-    }, decision => {
-      const conductor = member.kind === "worker" ? this.store.getConductor(member.projectId) : null;
-      return conductor ? [{ projectId: member.projectId, memberId: conductor.id, kind: "system",
-        text: formatSystem(`${josa(member.name, "이")} 대표에게 질문했습니다: ${normalizeSpace(input.title)} #${decision.id}`), wake: false }] : [];
-    });
-    const rt = this.runtime(member.id);
-    rt.posted = true;
-    if (rt.turn) (rt.turn.askedDecisionIds ??= new Set()).add(decision.id);
-    this.notifyInbox(`${member.name}의 결재`, input.title);
-    await Promise.all(deliveries.map(d => this.pump(d.memberId)));
-    if (member.origin === "manual") return { decision, blocking: true, text: `질문 #${decision.id} 등록됨. 답을 기다립니다` };
-    return { decision, blocking: false, text: `질문 #${decision.id} 등록됨. 턴을 끝내세요. 답은 다음 입력으로 옵니다` };
-  }
-
-  // ---- 판 정리: 결재 닫기·할 일 정리 ----
-  /**
-   * ask_close. decided는 검증된 대표 글 또는 같은 안건에서 실제 답한 결재의 원문으로만 닫는다.
-   * 짧은 버튼 글만으로는 닫지 않는다. 답한 결재 ID·안건 연결·실제 답을 함께 검증하고 감사 기록을 남긴다.
-   * 닫으면 물은 직원에게 깨우지 않고 알리고, ask 를 기다리던 직접 띄운 CLI 는 풀어 준다.
-   */
-  async closeDecision(member: Member, request: { id: string; kind: "decided" | "obsolete"; reason: string; userQuote?: string; answeredDecisionId?: string; sameIssue?: string; followUp: DecisionCloseFollowUp }): Promise<Decision> {
-    if (this.store.requireDecision(request.id).kind === "usage_limit") throw new ApiError(403, "사용 한도 알림은 대표만 닫을 수 있습니다", "usage_notice_owner_only");
-    // K(E2): 도구 승인 카드는 대표만 답한다. AI 가 닫으면 대표가 볼 승인 요청이 사라진다.
-    if (this.store.requireDecision(request.id).kind === "tool_permission") throw new ApiError(403, "도구 승인 요청은 대표만 답할 수 있습니다", "tool_permission_owner_only");
-    return this.closeAsk(member, request);
-  }
-
-  async closeAsk(member: Member, input: { id: string; kind: DecisionCloseKind; reason: string; userQuote?: string; answeredDecisionId?: string; sameIssue?: string; followUp?: DecisionCloseFollowUp }): Promise<Decision> {
-    const decision = this.store.getDecision(input.id);
-    if (!decision || decision.projectId !== member.projectId) throw new ApiError(404, `결재를 찾을 수 없습니다: ${input.id}`, "decision_not_found");
-    if (member.kind === "worker" && decision.memberId !== member.id) throw new ApiError(403, "직원은 자기가 올린 결재만 닫을 수 있습니다", "decision_not_own");
-    if (decision.status !== "open") throw new ApiError(409, decision.status === "closed" ? "이미 닫힌 결재입니다" : "대표가 이미 답한 결재입니다. 닫지 않습니다", "decision_closed");
-    const reason = normalizeSpace(input.reason);
-    let quote: string | null = null;
-    let sourceId: string | null = null;
-    let answered: Decision | null = null;
-    if (input.answeredDecisionId) {
-      if (input.kind !== "decided") throw new ApiError(400, "answered_decision_id는 decided에만 쓸 수 있습니다", "decision_close_invalid");
-      answered = this.store.requireDecision(input.answeredDecisionId);
-      if (answered.projectId !== member.projectId || !["answered", "delivered"].includes(answered.status) || !answered.answeredAt) throw new ApiError(409, "같은 프로젝트에서 대표가 실제로 답한 결재만 근거로 쓸 수 있습니다", "decision_close_evidence_invalid");
-      if (!(decision.group?.trim() && decision.group === answered.group) && (member.kind === "worker" || !input.sameIssue?.trim())) throw new ApiError(409, "같은 그룹이거나 총괄이 same_issue에 같은 안건인 이유를 명시해야 합니다", "decision_close_group_mismatch");
-      quote = formatAnswer(answered);
-    } else if (input.kind === "decided") {
-      const raw = input.userQuote?.trim();
-      if (!raw) throw new ApiError(400, "decided 로 닫으려면 user_quote 에 대표가 정한 말을 글자 그대로 실어야 합니다. 대표가 아직 정하지 않았으면 닫지 마세요", "decision_close_quote_required");
-      const source = this.findQuoteSource(member.projectId, raw);
-      if (!source) throw new ApiError(409, "인용을 대표 글에서 찾지 못해 닫지 않았습니다. 대표가 정하지 않았으면 그대로 두세요", "decision_close_quote_not_found");
-      if (quoteNeedsContext({ text: raw, verified: true, source })) throw new ApiError(409, "버튼 글이나 아주 짧은 글은 이 결재를 정했다는 근거가 못 되어 닫지 않았습니다. 대표가 이 일을 정한 문장을 인용하세요", "decision_close_quote_weak");
-      quote = normalizeSpace(raw);
-      sourceId = source.id;
-    }
-    const followUp = input.followUp;
-    if (followUp?.kind === "instruction") {
-      const target = this.store.requireMember(followUp.memberId);
-      if (target.projectId !== member.projectId || !followUp.text.trim()) throw new ApiError(400, "후속 지시의 대상·내용을 확인하세요", "follow_up_invalid");
-      if ("sourceDecisionId" in followUp) {
-        if (!answered || followUp.sourceDecisionId !== answered.id) throw new ApiError(409, "후속 지시의 대표 답이 닫기 근거와 다릅니다", "follow_up_mismatch");
-      } else {
-        const source = this.store.requireMessage(followUp.sourceMessageId);
-        if (answered || source.projectId !== member.projectId || !source.mine) throw new ApiError(400, "후속 지시의 대표 원문을 확인하세요", "follow_up_invalid");
-        if (input.kind === "decided" && source.id !== sourceId) throw new ApiError(409, "후속 지시의 대표 원문이 닫기 근거와 다릅니다", "follow_up_mismatch");
-        this.refuseOwnerDirectRepeat(target, { text: input.userQuote ?? source.body, verified: true,
-          source: { id: source.id, text: source.body, at: source.at } });
-      }
-    }
-    const closed = this.store.transaction(() => {
-      const closed = this.store.closeDecision(decision.id, { kind: input.kind, reason, by: member.name, quote });
-      if (answered) {
-        this.store.auditDecisionClose(decision.id, answered.id, member.id, input.sameIssue?.trim() ?? null, quote!);
-        this.store.appendActivity(member.id, "system", `결재 #${decision.id}를 대표 답 #${answered.id}에 따라 닫았습니다${input.sameIssue ? `: ${input.sameIssue}` : " (같은 그룹)"}`, `decision-close:${decision.id}:${decision.updatedAt}`);
-        const target = decision.memberId ? this.store.getMember(decision.memberId) : null;
-        if (target) this.store.enqueue({ projectId: decision.projectId, memberId: target.id, kind: "system", text: formatSystem(`같은 안건의 결재 #${decision.id}는 대표가 답한 결재 #${answered.id}에 따라 닫혔습니다. 대표 답 원문:\n${quote}`), wake: false });
-      }
-      if (followUp) {
-        this.store.setDecisionFollowUp(decision.id, followUp);
-        if (followUp.kind === "instruction") {
-          const source = "sourceMessageId" in followUp ? this.store.requireMessage(followUp.sourceMessageId) : null;
-          const original = source ? { id: source.id, text: source.body, at: source.at } : { id: answered!.id, text: quote!, at: answered!.answeredAt! };
-          const delivery = this.store.enqueue({ projectId: member.projectId, memberId: followUp.memberId, kind: "instruction", text: formatInstruction(member.name, `${followUp.text}\n결재 #${decision.id} 닫기의 후속 지시`, { text: source ? input.userQuote ?? source.body : quote!, verified: true, source: original }) });
-          this.store.noteDelegation(member.id, delivery, this.isBusy(this.store.requireMember(followUp.memberId)));
-          this.store.afterCommit(() => { void this.pump(followUp.memberId); });
-        }
-      }
-      return closed;
-    });
-    const why = `${reason}${sourceId ? ` (대표가 이미 정함, 대표 글 #${sourceId})` : answered ? ` (대표 답 #${answered.id})` : ""}`;
-    const asker = decision.memberId ? this.store.getMember(decision.memberId) : null;
-    if (asker?.origin === "manual") this.wakeAll(this.askWaiters, decision.id);
-    if (asker && asker.id !== member.id && asker.origin !== "manual" && !answered) {
-      await this.deliver({ projectId: decision.projectId, memberId: asker.id, kind: "system", text: formatSystem(`결재 #${decision.id} 가 닫혔습니다: ${why}. 질문 '${quotedInline(decision.title)}' 의 답은 오지 않습니다`), wake: false });
-    }
-    if (asker && asker.origin !== "manual") this.refreshWaiting(asker.id);
-    // 직원이 스스로 닫았으면 총괄의 판도 맞춘다.
-    const lead = this.store.getConductor(decision.projectId);
-    if (lead && lead.id !== member.id && lead.id !== asker?.id) {
-      await this.deliver({ projectId: decision.projectId, memberId: lead.id, kind: "system", text: formatSystem(`${josa(member.name, "이")} 결재 #${decision.id} 를 닫았습니다: ${why} (질문 '${quotedInline(decision.title)}')`), wake: false });
-    }
-    return closed;
-  }
-
-  /** todo_close. 대표의 할 일을 끝남·필요 없어짐으로 정리한다. 직원은 자기가 부탁한 할 일만. 부탁한 직원에게 깨우지 않고 알린다. */
-  async closeTodo(member: Member, input: { id: string; outcome: TodoOutcome; reason: string }): Promise<Todo> {
-    const todo = this.store.getTodo(input.id);
-    if (!todo || todo.projectId !== member.projectId) throw new ApiError(404, `할 일을 찾을 수 없습니다: ${input.id}`, "todo_not_found");
-    if (member.kind === "worker" && todo.memberId !== member.id) throw new ApiError(403, "직원은 자기가 부탁한 할 일만 정리할 수 있습니다", "todo_not_own");
-    const reason = normalizeSpace(input.reason);
-    const closed = this.store.closeTodo(todo.id, { outcome: input.outcome, reason, by: member.name });
-    const label = input.outcome === "done" ? "끝남" : "필요 없어짐";
-    const requester = todo.memberId ? this.store.getMember(todo.memberId) : null;
-    if (requester && requester.id !== member.id) {
-      // 대표가 체크를 풀면 '아직 안 했음'이 이 글을 바로잡도록 할 일에 잇는다.
-      await this.deliver({ projectId: todo.projectId, memberId: requester.id, kind: "system", text: formatSystem(`${josa(member.name, "이")} 대표의 할 일 #${todo.id} 를 정리했습니다(${label}): ${reason} (할 일 '${quotedInline(todo.title)}')`), wake: false, refType: "todo", refId: todo.id });
-    }
-    const lead = this.store.getConductor(todo.projectId);
-    if (lead && lead.id !== member.id && lead.id !== requester?.id) {
-      await this.deliver({ projectId: todo.projectId, memberId: lead.id, kind: "system", text: formatSystem(`${josa(member.name, "이")} 대표의 할 일 #${todo.id} 를 정리했습니다(${label}): ${reason} (할 일 '${quotedInline(todo.title)}')`), wake: false });
-    }
-    return closed;
-  }
-
-  /** 대표가 AI 가 닫은 결재를 다시 연다. 결재할 항목으로 돌아가고, 물은 직원과 총괄에게 깨우지 않고 알린다. */
-  async reopenDecision(decisionId: string): Promise<Decision> {
-    const decision = this.store.requireDecision(decisionId);
-    this.requireActive(this.store.requireProject(decision.projectId));
-    if (decision.status !== "closed" || !decision.closeKind) throw new ApiError(409, "AI가 닫은 결재만 다시 열 수 있습니다", "decision_reopen_refused");
-    const reopened = this.store.reopenDecision(decisionId, `${josa(decision.closedBy ?? "AI", "이")} 닫았던 결재를 대표가 다시 열었습니다${decision.closeReason ? `(닫은 이유: ${normalizeSpace(decision.closeReason)})` : ""}`);
-    const asker = decision.memberId ? this.store.getMember(decision.memberId) : null;
-    const note = `대표가 결재 #${decision.id} 를 다시 열었습니다(질문 '${quotedInline(decision.title)}'). 닫은 것은 취소이며 답이 오면 전달됩니다`;
-    if (asker && asker.origin !== "manual") {
-      await this.deliver({ projectId: decision.projectId, memberId: asker.id, kind: "system", text: formatSystem(note), wake: false });
-      const fresh = this.store.getMember(asker.id);
-      if (fresh?.status === "idle" && !this.isBusy(fresh)) this.settle(fresh);
-    }
-    const lead = this.store.getConductor(decision.projectId);
-    if (lead && lead.id !== asker?.id) await this.deliver({ projectId: decision.projectId, memberId: lead.id, kind: "system", text: formatSystem(note), wake: false });
-    return this.store.requireDecision(reopened.id);
   }
 
   /** 대표가 다른 창에 있어도 결정할 일을 알게 한다. 설정에서 켠 때만. */
@@ -4318,96 +3312,6 @@ export class Orchestrator implements OrchestratorApi {
     if (!this.notifier || this.store.getSettings().macScriptNotifications === false) return false;
     this.notifier(normalizeSpace(title).slice(0, 60), normalizeSpace(body).slice(0, 200));
     return true;
-  }
-
-  setMemberStatus(member: Member, now: string, next?: string): Member {
-    return this.store.patchMember(member.id, { now: normalizeSpace(now), ...(next !== undefined ? { next: normalizeSpace(next) } : {}) });
-  }
-
-  setProjectNow(projectId: string, text: string): Project {
-    return this.store.patchProject(projectId, { now: text });
-  }
-
-  setWork(projectId: string, input: { id?: string; sec: WorkSec; title: string; detail?: string; who?: string }): WorkItem {
-    return this.store.upsertWork({ projectId, ...input });
-  }
-
-  /** 직접 띄운 CLI 의 wait. 밀린 지시를 한 글로 묶어 돌려준다. 없으면 null. */
-  async waitInbox(member: Member, timeoutMs: number, signal?: AbortSignal): Promise<string | null> {
-    if (signal?.aborted) return null;
-    const first = this.takeInbox(member);
-    if (first) return first;
-    await this.waitOn(this.inboxWaiters, member.id, timeoutMs, signal);
-    // 끊긴 연결로 응답을 보내면 지시가 받은 것으로 표시된 채 사라진다.
-    if (signal?.aborted) return null;
-    return this.takeInbox(member);
-  }
-
-  private materializeManualAnswers(member: Member): void {
-    if (this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId)) return;
-    this.store.transaction(() => {
-      for (const decision of this.store.listUnreceivedAnswers(member.id)) {
-        if (!this.store.listDeliveries(member.projectId).some(d => d.refType === "decision" && d.refId === decision.id && d.memberId === member.id)) this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "answer", text: formatAnswer(decision), refType: "decision", refId: decision.id });
-      }
-    });
-  }
-
-  async manualInbox(memberId: string, timeoutMs: number, signal?: AbortSignal): Promise<ManualInboxBatch | null> {
-    const take = () => {
-      const member = this.store.requireMember(memberId);
-      if (member.origin !== "manual") throw new ApiError(409, "직접 띄운 직원만 수신함을 사용할 수 있습니다", "manual_inbox_only");
-      if (signal?.aborted || this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId)) return null;
-      this.materializeManualAnswers(member);
-      return this.store.manualInbox(memberId);
-    };
-    if (signal?.aborted) return null;
-    const first = take();
-    if (first) return first;
-    await this.waitOn(this.inboxWaiters, memberId, Math.min(Math.max(timeoutMs, 0), 50_000), signal);
-    return take();
-  }
-
-  async acknowledgeManualInbox(memberId: string, request: ManualInboxAckRequest): Promise<ManualInboxAckResult> {
-    const member = this.store.requireMember(memberId);
-    this.requireActive(this.store.requireProject(member.projectId));
-    if (member.origin !== "manual") throw new ApiError(409, "직접 띄운 직원만 수신함을 사용할 수 있습니다", "manual_inbox_only");
-    const result = this.store.acknowledgeManualInbox(memberId, request.batchId);
-    this.reconcileTodoCorrections();
-    for (const item of this.store.getManualInboxBatch(memberId, request.batchId)!.items) if (item.ref?.type === "decision") this.wakeAll(this.askWaiters, item.ref.id);
-    return result;
-  }
-
-  /** v1 compatibility: delivery and ACK are inseparable in the old string response. */
-  private takeInbox(member: Member): string | null {
-    if (this.store.requireProject(member.projectId).archived || this.archiving.has(member.projectId)) return null;
-    this.materializeManualAnswers(member);
-    const batch = this.store.manualInbox(member.id);
-    if (!batch) return null;
-    this.store.acknowledgeManualInbox(member.id, batch.id);
-    this.reconcileTodoCorrections();
-    return batch.items.map(item => item.text).join("\n\n");
-  }
-
-  private waitOn(table: Map<string, Set<() => void>>, key: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
-    return new Promise((done) => {
-      if (this.closed || signal?.aborted) return done();
-      const waiters = table.get(key) ?? new Set<() => void>();
-      table.set(key, waiters);
-      const finish = () => {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", finish);
-        waiters.delete(finish);
-        if (waiters.size === 0 && table.get(key) === waiters) table.delete(key);
-        done();
-      };
-      const timer = setTimeout(finish, timeoutMs);
-      signal?.addEventListener("abort", finish, { once: true });
-      waiters.add(finish);
-    });
-  }
-
-  private wakeAll(table: Map<string, Set<() => void>>, key: string): void {
-    for (const wake of [...(table.get(key) ?? [])]) wake();
   }
 
   // ---- 전달 펌프 ----
@@ -4546,7 +3450,7 @@ export class Orchestrator implements OrchestratorApi {
     if (member.origin === "manual") {
       const pending = this.store.listPending(memberId);
       if (pending.some((d) => d.wake) || this.store.listUnreceivedAnswers(memberId).length > 0) {
-        this.wakeAll(this.inboxWaiters, memberId);
+        this.memberFlows.wakeInbox(memberId);
       }
       // 서버가 넣어 줄 수 없는 세션이다. 왜 안 가는지 화면에 보여 준다.
       for (const d of this.store.listPending(memberId)) {
@@ -4569,15 +3473,15 @@ export class Orchestrator implements OrchestratorApi {
     // Previously attempted entries must be inspected, including legacy held rows.
     for (const d of pending) if (d.attempts > 0 && !this.deliveryRecovery.requeueRejected(d.id) && this.store.getDeliveryRecovery(d.id)?.phase === "none") this.deliveryRecovery.beginRecovery(d.id);
     pending = this.sendablePending(memberId);
-    if (this.recovering || this.configWrites.has(memberId) || this.terminalMutations.has(memberId) || this.pendingLifecycle(memberId)) return this.judged(memberId, "session_busy");
+    if (this.recovering || this.configWrites.has(memberId) || this.terminal.terminalMutations.has(memberId) || this.pendingLifecycle(memberId)) return this.judged(memberId, "session_busy");
     if (this.store.inputState(memberId).lease) { this.deferCoreCompact(member, "manual_control"); return this.judged(memberId, "manual_control"); }
     // Expiry/replacement can be discovered by the runner/store before the socket timer.
     // Fence every delivery until old control attaches have detached and restored core.
-    if (member.backend === "core" && this.terminalLeaseListeners.size) {
-      await this.pumpWait(memberId, "lease_cleanup", () => Promise.all([...this.terminalLeaseListeners].map(ended => ended(memberId, null))));
+    if (member.backend === "core" && this.terminal.terminalLeaseListeners.size) {
+      await this.pumpWait(memberId, "lease_cleanup", () => Promise.all([...this.terminal.terminalLeaseListeners].map(ended => ended(memberId, null))));
     }
     if (this.store.inputState(memberId).lease) return this.judged(memberId, "manual_control");
-    if (this.terminalMutations.has(memberId)) return this.judged(memberId, "session_busy");
+    if (this.terminal.terminalMutations.has(memberId)) return this.judged(memberId, "session_busy");
     if (member.backend === "core" && member.statusObservation && member.statusObservation.ownership !== "verified" && !(member.status === "offline" && member.statusObservation.error?.code === "no_owned_terminal")) return this.judged(memberId, "ownership_unverified");
     const openRuns = member.backend === "core" ? this.store.listPendingExecutions().filter(run => run.memberId === memberId && run.identity.sessionGeneration === this.store.memberRevisions(memberId).sessionGeneration) : [];
     // 끝나지 않은 실행 기록이 남았다. 받았는지 모르는 봉투(넣는 중·결과 모름)면 수신 확인 중이고, 받은 뒤면 일하는 중이다.
@@ -4925,7 +3829,7 @@ export class Orchestrator implements OrchestratorApi {
     // 단계 제한이 먼저 끝났어도 호출은 계속 돈다. 그 확정 결과가 뒤에 오면 버리지 않는다.
     const pending = original as Promise<SendResult> | null;
     if (!result.ok && !["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown") && pending) void pending.then(late => { if (late !== first) this.lateSendResult(member.id, dispatch, late); }, () => {});
-    this.reconcileTodoCorrections();
+    this.ownerFlows.reconcileTodoCorrections();
     const current = this.store.getExecutionJournal(run.runId)!;
     if (!["ended", "interrupted"].includes(current.phase)) {
       const updatedAt = new Date().toISOString();
@@ -5896,20 +4800,6 @@ export class Orchestrator implements OrchestratorApi {
     }
     return { systemPromptFile, mcpConfigFile, resume, settingsFile };
   }
-}
-
-/**
- * 인용이 낱말 경계에 맞게 들어 있는가. '삭제는 하지 마'에서 '삭제'만 잘라 오면 조사에서 끊겨 맞지 않는다.
- * 공백·문장 부호에서 시작하고 끝나야 한다.
- */
-function includesWhole(text: string, quote: string): boolean {
-  const boundary = /[\s.,!?;:…·"'“”‘’()[\]{}<>~\-—–/]/;
-  for (let at = text.indexOf(quote); at >= 0; at = text.indexOf(quote, at + 1)) {
-    const before = at === 0 ? " " : text[at - 1]!;
-    const after = at + quote.length >= text.length ? " " : text[at + quote.length]!;
-    if (boundary.test(before) && boundary.test(after)) return true;
-  }
-  return false;
 }
 
 /** 깨움 없는 것을 앞에 묶는다(§6). */

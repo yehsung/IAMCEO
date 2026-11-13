@@ -398,14 +398,14 @@ struct FilesView: View {
         guard !query.isEmpty, let api = store.api, let project = store.selectedProjectID, !store.isDemo else { searchingBodies = false; return }
         let term = query, archived = store.isArchive
         searchingBodies = true
-        defer { if !Task.isCancelled, query == term, store.api === api, store.selectedProjectID == project, store.isArchive == archived { searchingBodies = false } }
+        defer { if !Task.isCancelled, query == term, store.stillCurrent(api, project: project, archived: archived) { searchingBodies = false } }
         do {
             try await Task.sleep(for: .milliseconds(200))
             let results = try await api.searchFilesWithFallback(projectID: project, query: term, files: allFiles, archived: archived)
-            guard !Task.isCancelled, query == term, store.api === api, store.selectedProjectID == project, store.isArchive == archived else { return }
+            guard !Task.isCancelled, query == term, store.stillCurrent(api, project: project, archived: archived) else { return }
             searchResults = results
         } catch {
-            guard !Task.isCancelled, query == term, store.api === api, store.selectedProjectID == project, store.isArchive == archived else { return }
+            guard !Task.isCancelled, query == term, store.stillCurrent(api, project: project, archived: archived) else { return }
             searchError = friendlyLoadError(error, what: "자료", verb: "검색하지")
         }
     }
@@ -423,10 +423,10 @@ struct FilesView: View {
 
     #if os(macOS)
     private func reveal(path: String, projectID: String) async {
-        guard let host, store.api === host.api else { return }
+        guard let host, store.stillCurrent(host.api) else { return }
         do {
             guard let url = try await host.validatedURL(path: path, projectID: projectID),
-                  store.api === host.api, store.selectedProjectID == projectID else { return }
+                  store.stillCurrent(host.api, project: projectID) else { return }
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } catch { listActionError = friendlyLoadError(error, what: "원본", verb: "읽지") }
     }
@@ -441,9 +441,9 @@ struct FilesView: View {
                 result = try FileResource(api: api, data: Data(try await FileResources.artifact(full.id, api: api).utf8), name: full.title + ".html")
             } else if let first = full.attachments.first { result = try await FileResources.attachment(first, api: api) }
             else { result = try FileResource(api: api, data: Data(full.body.utf8), name: full.title + ".txt") }
-            guard store.api === api, store.selectedProjectID == full.projectId else { return }
+            guard store.stillCurrent(api, project: full.projectId) else { return }
             listSharing = result
-        } catch { if store.api === api, store.selectedProjectID == file.projectId { listActionError = friendlyLoadError(error, what: "자료", verb: "읽지") } }
+        } catch { if store.stillCurrent(api, project: file.projectId) { listActionError = friendlyLoadError(error, what: "자료", verb: "읽지") } }
     }
 
     private func quickLook(_ file: FileDoc) async {
@@ -456,9 +456,9 @@ struct FilesView: View {
                 resource = try FileResource(api: api, data: Data(try await FileResources.artifact(full.id, api: api).utf8), name: full.title + ".html.txt")
             } else if let attachment = full.attachments.first { resource = try await FileResources.attachment(attachment, api: api) }
             else { resource = try FileResource(api: api, data: Data(full.body.utf8), name: full.title + ".txt") }
-            guard store.api === api, store.selectedProjectID == file.projectId else { return }
+            guard store.stillCurrent(api, project: file.projectId) else { return }
             listPreviewResource = resource; listPreview = resource.url
-        } catch { if store.api === api, store.selectedProjectID == file.projectId { listActionError = friendlyLoadError(error, what: "자료", verb: "읽지") } }
+        } catch { if store.stillCurrent(api, project: file.projectId) { listActionError = friendlyLoadError(error, what: "자료", verb: "읽지") } }
     }
 
     private var noMatch: some View {
@@ -559,7 +559,7 @@ private struct RowThumb: View {
         guard let api = store.api, !store.isDemo,
               let resource = try? await FileResources.attachment(attachment, api: api),
               let decoded = await PreviewImages.image(resource, maxPixel: 160) else { return }
-        guard store.api === api, !Task.isCancelled else { return }
+        guard store.stillCurrent(api), !Task.isCancelled else { return }
         thumbAPI = api; thumb = Image(decorative: decoded, scale: 1)
     }
 }
@@ -627,9 +627,9 @@ private struct FileBodyReader: View {
             guard let api = store.api else { failure = "연결한 뒤 자료를 열어 주세요."; return }
             do {
                 let result = try await store.fileBody(id: file.id)
-                guard !Task.isCancelled, store.api === api, result.projectId == store.selectedProjectID else { return }
+                guard !Task.isCancelled, store.stillCurrent(api, project: result.projectId) else { return }
                 FileBodyMemory.shared.insert(result, api: api); full = result
-            } catch { if !Task.isCancelled, store.api === api { failure = friendlyLoadError(error, what: "자료", verb: "읽지") } }
+            } catch { if !Task.isCancelled, store.stillCurrent(api) { failure = friendlyLoadError(error, what: "자료", verb: "읽지") } }
         }
     }
 }
@@ -906,10 +906,10 @@ private struct FileReaderContent: View {
             if host?.localURL(path, current: store.api) != nil {
                 Button("Finder에서 보기") {
                     Task {
-                        guard let host, store.api === host.api else { return }
+                        guard let host, store.stillCurrent(host.api) else { return }
                         do {
                             guard let url = try await host.validatedURL(path: path, projectID: file.projectId),
-                                  store.api === host.api, store.selectedProjectID == file.projectId else { return }
+                                  store.stillCurrent(host.api, project: file.projectId) else { return }
                             NSWorkspace.shared.activateFileViewerSelecting([url])
                         } catch { pathFailure = friendlyLoadError(error, what: "원본", verb: "읽지") }
                     }
@@ -1079,18 +1079,6 @@ private struct RawTextSource<Content: View>: View {
     }
 }
 
-private func decodeText(_ data: Data, truncated: Bool) -> String {
-    let bytes = Data(data)
-    if bytes.starts(with: [0xFF, 0xFE]) { return String(data: bytes.dropFirst(2), encoding: .utf16LittleEndian) ?? "" }
-    if bytes.starts(with: [0xFE, 0xFF]) { return String(data: bytes.dropFirst(2), encoding: .utf16BigEndian) ?? "" }
-    // A cut head can end inside a UTF-8 sequence; drop up to three trailing bytes before giving up on UTF-8.
-    for cut in 0...(truncated ? 3 : 0) where bytes.count >= cut {
-        if let text = String(data: bytes.dropLast(cut), encoding: .utf8) { return text }
-    }
-    let cp949 = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.dosKorean.rawValue)))
-    return String(data: bytes, encoding: cp949) ?? String(decoding: bytes, as: UTF8.self)
-}
-
 // MARK: Code
 
 private let codeLineLimit = 5000
@@ -1256,16 +1244,8 @@ private struct CodeBlock: View {
 
 // MARK: Table (csv / tsv)
 
-private let tableColumnLimit = 30
 /// Rows drawn at once (web TABLE_ROW_LIMIT). Sorting uses every row read, then draws the first of them.
 private let tableRowLimit = 500
-
-private struct ParsedTable {
-    var header: [String]
-    var rows: [[String]]
-    var hiddenColumns: Int
-    var numeric: [Bool]
-}
 
 /// web .vw-table: 13.5 cells at 1.45, 13/650 header. iPhone follows the text size setting.
 @MainActor private var tableCellSize: CGFloat {
@@ -1518,144 +1498,6 @@ private func measureTableColumns(header: [String], rows: [[String]], numeric: [B
     }
 }
 
-/// RFC 4180 (quotes, doubled quotes, newlines inside quotes). A cut file drops its unfinished last line.
-private func parseTable(_ input: String, tab: Bool, truncated: Bool) -> ParsedTable {
-    let scalars = Array((input.hasPrefix("\u{FEFF}") ? String(input.dropFirst()) : input).unicodeScalars)
-    let delimiter: Unicode.Scalar = tab ? "\t" : sniffDelimiter(scalars)
-    var rows: [[String]] = []
-    var row: [String] = []
-    var cell = String.UnicodeScalarView()
-    var quoted = false
-    var cells = 0
-    var maxCells = 0
-    func endCell() {
-        if cells < tableColumnLimit { row.append(String(cell)) }
-        cells += 1
-        cell = String.UnicodeScalarView()
-    }
-    func endRow() {
-        endCell()
-        maxCells = max(maxCells, cells)
-        cells = 0
-        if row.count > 1 || row.first != "" { rows.append(row) }
-        row = []
-    }
-    var index = 0
-    while index < scalars.count {
-        let c = scalars[index]
-        if quoted {
-            if c == "\"" {
-                if index + 1 < scalars.count, scalars[index + 1] == "\"" { cell.append("\""); index += 2; continue }
-                quoted = false
-            } else {
-                cell.append(c)
-            }
-            index += 1
-            continue
-        }
-        if c == "\"" && cell.isEmpty { quoted = true }
-        else if c == delimiter { endCell() }
-        else if c == "\n" || c == "\r" {
-            if c == "\r", index + 1 < scalars.count, scalars[index + 1] == "\n" { index += 1 }
-            endRow()
-        } else { cell.append(c) }
-        index += 1
-    }
-    if !truncated && (!cell.isEmpty || !row.isEmpty) { endRow() }
-    var header = rows.isEmpty ? [] : rows.removeFirst()
-    let width = min(maxCells, tableColumnLimit)
-    while header.count < width { header.append("") }
-    if header.count > width { header = Array(header.prefix(width)) }
-    let numeric = (0..<header.count).map { column in isNumericColumn(rows, column) }
-    return ParsedTable(header: header, rows: rows, hiddenColumns: max(0, maxCells - width), numeric: numeric)
-}
-
-/// The delimiter seen most often on the first unquoted line (Excel's ; csv included).
-private func sniffDelimiter(_ scalars: [Unicode.Scalar]) -> Unicode.Scalar {
-    var counts: [Unicode.Scalar: Int] = [",": 0, "\t": 0, ";": 0]
-    var quoted = false
-    for c in scalars.prefix(8192) {
-        if c == "\"" { quoted.toggle() }
-        else if !quoted && (c == "\n" || c == "\r") { break }
-        else if !quoted, counts[c] != nil { counts[c, default: 0] += 1 }
-    }
-    let candidates: [Unicode.Scalar] = [",", "\t", ";"]
-    let best = candidates.max { (counts[$0] ?? 0) < (counts[$1] ?? 0) } ?? ","
-    return (counts[best] ?? 0) > 0 ? best : ","
-}
-
-/// 표 정렬: 빈 칸은 항상 뒤, 같은 값은 원래 순서. 비교 키(다듬은 글자, 숫자)는 행마다 한 번만 만든다
-/// (비교할 때마다 만들면 수천 행 숫자 열 정렬이 몇 초씩 메인 스레드를 막는다).
-func sortedTableRows(_ rows: [[String]], column: Int, numeric: Bool, ascending: Bool) -> [[String]] {
-    struct Key { let offset: Int; let text: String; let number: Double? }
-    let keys = rows.enumerated().map { offset, row in
-        let text = column < row.count ? row[column].trimmingCharacters(in: .whitespaces) : ""
-        return Key(offset: offset, text: text, number: numeric && !text.isEmpty ? cellNumber(text) : nil)
-    }
-    return keys.sorted { a, b in
-        let x = a.text, y = b.text
-        if x.isEmpty || y.isEmpty { return x.isEmpty == y.isEmpty ? a.offset < b.offset : !x.isEmpty }
-        let order: ComparisonResult
-        if numeric, let nx = a.number, let ny = b.number {
-            order = nx == ny ? .orderedSame : nx < ny ? .orderedAscending : .orderedDescending
-        } else {
-            order = x.localizedStandardCompare(y)
-        }
-        if order == .orderedSame { return a.offset < b.offset }
-        return ascending ? order == .orderedAscending : order == .orderedDescending
-    }
-    .map { rows[$0.offset] }
-}
-
-/// 1,234 · -3.5 · 12% count as numbers; long numbers starting with 0 (phone numbers) do not.
-/// 문법은 `[-+]?(\d{1,3}(,\d{3})+|\d+)?(\.\d+)?%?` 이고 숫자가 하나는 있어야 한다. 정규식 리터럴은 부를 때마다
-/// 다시 컴파일되어 칸 하나에 수십 µs가 들므로(수천 행 표에서 몇 초) 손으로 읽는다.
-func cellNumber(_ cell: String) -> Double? {
-    let s = cell.trimmingCharacters(in: .whitespaces)
-    var digits = [UInt8]()
-    digits.reserveCapacity(s.utf8.count)
-    var bytes = s.utf8.makeIterator()
-    var next = bytes.next()
-    func isDigit(_ byte: UInt8?) -> Bool { byte.map { $0 >= 48 && $0 <= 57 } ?? false }
-    if next == 45 || next == 43 { digits.append(next!); next = bytes.next() }
-    let signLength = digits.count
-    var lead = 0
-    while isDigit(next) { digits.append(next!); lead += 1; next = bytes.next() }
-    if next == 44 {
-        // 천 단위 쉼표: 앞 묶음은 1~3자리, 뒤 묶음은 모두 정확히 3자리.
-        guard (1...3).contains(lead) else { return nil }
-        while next == 44 {
-            next = bytes.next()
-            var group = 0
-            while isDigit(next) { digits.append(next!); group += 1; next = bytes.next() }
-            guard group == 3 else { return nil }
-        }
-    }
-    let wholeLength = digits.count - signLength
-    if next == 46 {
-        digits.append(46); next = bytes.next()
-        var fraction = 0
-        while isDigit(next) { digits.append(next!); fraction += 1; next = bytes.next() }
-        guard fraction > 0 else { return nil }
-    }
-    if next == 37 { next = bytes.next() }
-    guard next == nil, digits.count - signLength > 0 else { return nil }
-    // 0으로 시작하는 긴 숫자(전화번호, 우편번호)는 글자다.
-    if wholeLength >= 2, digits[signLength] == 48, s.utf8.dropFirst(signLength).dropFirst().first.map({ $0 >= 48 && $0 <= 57 }) == true { return nil }
-    return Double(String(decoding: digits, as: UTF8.self))
-}
-
-private func isNumericColumn(_ rows: [[String]], _ column: Int) -> Bool {
-    var seen = false
-    for row in rows {
-        let value = column < row.count ? row[column] : ""
-        if value.trimmingCharacters(in: .whitespaces).isEmpty { continue }
-        if cellNumber(value) == nil { return false }
-        seen = true
-    }
-    return seen
-}
-
 // MARK: - Artifact
 
 private struct ArtifactViewer: View {
@@ -1801,7 +1643,7 @@ private struct ArtifactViewer: View {
         }
         do {
             let html = try await FileResources.artifact(file.id, api: api)
-            guard store.api === api, store.selectedProjectID == file.projectId, !Task.isCancelled else { return }
+            guard store.stillCurrent(api, project: file.projectId), !Task.isCancelled else { return }
             loaded = LoadedArtifact(html: html, rule: rule)
         } catch {
             self.error = friendlyLoadError(error, what: "페이지")
@@ -2042,12 +1884,12 @@ private struct AttachmentView: View {
         loading = true; defer { loading = false }
         do {
             let loaded = try await FileResources.attachment(attachment, api: api)
-            guard store.api === api, !Task.isCancelled else { return }
+            guard store.stillCurrent(api), !Task.isCancelled else { return }
             let result = try loaded.read()
             resource = loaded
             let destination = loaded.url
             if attachment.isImage, let decoded = await PreviewImages.image(loaded, maxPixel: 1400) {
-                guard store.api === api, !Task.isCancelled else { return }
+                guard store.stillCurrent(api), !Task.isCancelled else { return }
                 image = Image(decorative: decoded, scale: 1); pixelSize = CGSize(width: decoded.width, height: decoded.height)
             }
             data = result; fileURL = destination; error = nil
@@ -2090,14 +1932,14 @@ private extension Attachment {
                 || ["pdf", "mp4", "mov", "m4v", "webm"].contains((attachment.name as NSString).pathExtension.lowercased())
             let report: @Sendable (Double?) -> Void = { [weak self] value in Task { @MainActor in self?.progress = value } }
             let result = try await FileResources.attachment(attachment, api: api, progress: trackProgress ? report : nil)
-            guard store.api === api, store.selectedProjectID == project, !Task.isCancelled else { return }
+            guard store.stillCurrent(api, project: project), !Task.isCancelled else { return }
             if attachment.isImage, let decoded = await PreviewImages.image(result, maxPixel: maxPixel) {
-                guard store.api === api, store.selectedProjectID == project, !Task.isCancelled else { return }
+                guard store.stillCurrent(api, project: project), !Task.isCancelled else { return }
                 image = Image(decorative: decoded, scale: 1); pixelSize = CGSize(width: decoded.width, height: decoded.height)
             }
             resource = result; url = result.url; error = nil
         } catch {
-            if store.api === api, store.selectedProjectID == project, !Task.isCancelled { self.error = friendlyLoadError(error, what: "파일", verb: "받지") }
+            if store.stillCurrent(api, project: project), !Task.isCancelled { self.error = friendlyLoadError(error, what: "파일", verb: "받지") }
         }
     }
 }
@@ -2767,7 +2609,7 @@ private struct SaveButton: View {
                     Task { @MainActor in progress = value }
                 })
             } else { resource = try FileResource(api: api, data: Data((text ?? "").utf8), name: name) }
-            guard store.api === api, store.selectedProjectID == project else { return }
+            guard store.stillCurrent(api, project: project) else { return }
             #if os(macOS)
             try await saveWithPanel(resource.read(), name: name)
             #else
@@ -3070,392 +2912,7 @@ private struct PDFPreview: UIViewRepresentable {
 #endif
 
 // MARK: - Sandboxed artifact web view (security settings must not change)
-
-/// WebKit's URL-filter regex subset does not support disjunction. Keep each scheme family separate.
-/// CSP still limits resources to inline styles and data images/fonts; these rules also block FTP(S).
-func artifactBlockRuleJSON() -> String {
-    #"""
-    [
-        {"trigger":{"url-filter":"^https?:"},"action":{"type":"block"}},
-        {"trigger":{"url-filter":"^wss?:"},"action":{"type":"block"}},
-        {"trigger":{"url-filter":"^file:"},"action":{"type":"block"}},
-        {"trigger":{"url-filter":"^ftps?:"},"action":{"type":"block"}}
-    ]
-    """#
-}
-
-/// Compiled once per app run. Stays nil when WebKit refuses the rule, and then no artifact is shown.
-@MainActor private var compiledArtifactRule: WKContentRuleList?
-
-/// The HTTP(S)/WS(S)/file/FTP(S) block layer. nil means compilation failed: callers must not render.
-@MainActor
-func artifactBlockRule() async -> WKContentRuleList? {
-    if let compiledArtifactRule { return compiledArtifactRule }
-    let rules = artifactBlockRuleJSON()
-    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-        WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "IAMCEOIsolatedArtifact", encodedContentRuleList: rules) { rule, error in
-            if let error {
-                NSLog("[IAMCEO] Artifact content rule compilation failed: %@", error as NSError)
-            } else if rule == nil {
-                NSLog("[IAMCEO] Artifact content rule compilation returned neither a rule nor an error")
-            }
-            if let rule { compiledArtifactRule = rule }
-            continuation.resume()
-        }
-    }
-    return compiledArtifactRule
-}
-
-/// Only loadHTMLString's first main-frame document may navigate. No URL is opened by this policy.
-func artifactAllowsNavigation(firstAction: Bool, url: URL?, mainFrame: Bool, type: WKNavigationType) -> Bool {
-    firstAction && mainFrame && type == .other && url?.absoluteString == "about:blank"
-}
-
-func artifactAllowsChildNavigation(loaded: Bool, url: URL?, type: WKNavigationType) -> Bool {
-    guard let value = url?.absoluteString else { return false }
-    return (!loaded && value == "about:srcdoc" && type == .other)
-        || (loaded && value.hasPrefix("about:srcdoc#") && type == .linkActivated)
-}
-
-/// 맞춤 높이 미리보기의 수렴 감시. 측정한 높이에 프레임(=페이지의 뷰포트)을 맞추므로, 높이가 뷰포트에 따라
-/// 정해지는 페이지(`min-height:100vh` 등)는 측정→맞춤→재측정이 끝없이 돌며 계속 커진다.
-/// 맞추자마자 다시 커지는 보고가 연달아 오면 더 따라가지 않고 그 높이에 묶어 둔다.
-struct ArtifactHeightFit: Equatable {
-    enum Step: Equatable {
-        case ignore
-        /// 프레임과 미리보기를 이 높이에 맞춘다.
-        case fit(CGFloat)
-    }
-    /// 연달아 이만큼 커지면 뷰포트를 따라 커지는 페이지로 본다.
-    static let growthLimit = 4
-    /// 맞춘 뒤 이 시간 안에 온 증가만 '연달아'로 센다(되먹임은 수십 ms 간격, 사람의 조작은 그보다 느리다).
-    static let quick: TimeInterval = 1
-    private var applied: CGFloat?
-    private var appliedAt: TimeInterval = 0
-    /// 처음 측정한 높이. 폭이 바뀌면 여기서부터 다시 맞춘다.
-    private var floor: CGFloat?
-    private var growths = 0
-    private var ceiling: CGFloat = 0
-    private var escapes = 0
-    /// 묶은 뒤 조용해졌을 때 한 걸음 따라가 보는 중인지.
-    private var trial = false
-    /// 따라가 보자마자 또 커져, 뷰포트를 따라 커지는 페이지로 확인했는지.
-    private var confirmed = false
-    /// 지금 묶여 있는지.
-    private(set) var held = false
-    /// 뷰포트를 따라 커지는 페이지로 판정된 적이 있는지.
-    private(set) var viewportBound = false
-    /// 묶었지만 아직 확인하지 못했다. 조용해진 뒤(`quick` 뒤) 한 번 다시 재야 한다.
-    var needsRecheck: Bool { held && !confirmed }
-
-    mutating func report(_ height: CGFloat, at time: TimeInterval) -> Step {
-        guard let applied else {
-            self.applied = height; appliedAt = time; floor = height
-            return .fit(height)
-        }
-        if held {
-            // 뷰포트보다 작아질 수 없는 페이지가 줄었다면 내용이 줄어든 것이다.
-            if height < applied - 0.5 { return follow(height, at: time, growths: 0) }
-            guard height > applied + 0.5 else { return .ignore }
-            let late = time - appliedAt > Self.quick
-            if late, !confirmed {
-                // 조용해진 뒤에도 프레임보다 크다. 자라다 멈춘 내용일 수 있으니 한 걸음만 따라가 본다.
-                // 뷰포트를 따라 커지는 페이지라면 맞추자마자 또 커지므로, 아래에서 확인하고 다시 묶는다.
-                viewportBound = false; trial = true
-                return follow(height, at: time, growths: 0)
-            }
-            guard height > ceiling + 0.5 else { return .ignore }
-            // 묶은 뒤에는 프레임이 그대로라 되먹임 보고는 한 번(이미 오던 것)으로 끝난다.
-            // 한참 뒤에 오거나 계속 커지면 내용이 스스로 자라는 것이다.
-            ceiling = height; escapes += 1
-            if escapes >= 2 || late {
-                viewportBound = false
-                return follow(height, at: time, growths: 0)
-            }
-            return .ignore
-        }
-        if abs(height - applied) <= 0.5 { return .ignore }
-        let rapid = height > applied && time - appliedAt <= Self.quick
-        if trial {
-            trial = false
-            if rapid {
-                // 따라가 보자마자 또 커졌다. 뷰포트를 따라 커지는 페이지다. 더 따라가지 않고, 다시 확인하지도 않는다.
-                held = true; viewportBound = true; confirmed = true; ceiling = height; escapes = 1
-                return .ignore
-            }
-        }
-        let next = rapid ? growths + 1 : 0
-        let step = follow(height, at: time, growths: next)
-        if next >= Self.growthLimit {
-            held = true; viewportBound = true; ceiling = height; escapes = 0
-        }
-        return step
-    }
-
-    /// 폭이 바뀌면 높이도 달라진다. 묶였던 페이지는 처음 높이에서 다시 맞춰, 폭이 바뀔 때마다 높이가 쌓이지 않게 한다.
-    mutating func widthChanged(at time: TimeInterval) -> Step {
-        growths = 0; trial = false
-        guard viewportBound, let floor else { return .ignore }
-        return follow(floor, at: time, growths: 0)
-    }
-
-    private mutating func follow(_ height: CGFloat, at time: TimeInterval, growths: Int) -> Step {
-        applied = height; appliedAt = time; self.growths = growths
-        held = false; escapes = 0
-        return .fit(height)
-    }
-}
-
-@MainActor
-final class ArtifactNavigationDelegate: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
-    private var childLoaded = false
-    private(set) var childFrame: WKFrameInfo?
-    var onLink: ((String) -> Void)?
-    private(set) var heightFit = ArtifactHeightFit()
-    /// 뷰포트를 따라 커지는 페이지로 판정되거나 풀렸을 때. 그런 페이지의 높이는 다음에 열 때 쓸 값으로 기억하지 않는다.
-    var onViewportBound: ((Bool) -> Void)?
-    /// 높이 보고 시각(시험에서 바꾼다).
-    var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
-    /// 묶은 뒤 다시 재기까지의 시간. `quick`보다 길어야 한다.
-    var recheckDelay: TimeInterval = ArtifactHeightFit.quick + 0.2
-    /// 웹 콘텐츠 프로세스가 종료됐을 때 같은 문서를 다시 넣기 위한 것.
-    var sandboxDocument: (() -> String)?
-    private(set) var processReloads = 0
-    static let processReloadLimit = 2
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard !message.frameInfo.isMainFrame, message.frameInfo.request.url?.absoluteString.hasPrefix("about:srcdoc") == true else { return }
-        if message.name == "artifactHeight", let number = message.body as? NSNumber {
-            let height = number.doubleValue
-            guard height.isFinite, height > 0 else { return }
-            childFrame = message.frameInfo
-            report(CGFloat(height), in: message.webView)
-        } else if message.name == "artifactLink", let value = message.body as? String { onLink?(value) }
-        else if message.name == "artifactAnchor", let value = message.body as? NSNumber,
-                value.doubleValue.isFinite, value.doubleValue >= 0,
-                let view = message.webView as? ArtifactWebView, view.fitted {
-            view.scrollToAnchor(CGFloat(value.doubleValue))
-        }
-    }
-
-    /// 측정된 페이지 높이를 반영한다. 맞춤 미리보기는 수렴 감시를 거친다.
-    private func report(_ height: CGFloat, in webView: WKWebView?) {
-        guard let view = webView as? ArtifactWebView, view.fitted else { onHeight?(height); return }
-        let bound = heightFit.viewportBound, waiting = heightFit.needsRecheck
-        let step = heightFit.report(height, at: uptime())
-        if heightFit.viewportBound != bound { onViewportBound?(heightFit.viewportBound) }
-        apply(step, to: view)
-        if heightFit.needsRecheck, !waiting { recheck(view) }
-    }
-
-    /// 묶은 직후의 증가는 되먹임인지 내용이 자란 것인지 알 수 없어 무시한다. 조용해진 뒤 한 번 다시 재서,
-    /// 자라다 멈춘 페이지의 마지막 한 걸음이 잘린 채 남지 않게 한다.
-    private func recheck(_ view: ArtifactWebView) {
-        let delay = recheckDelay
-        Task { @MainActor [weak self, weak view] in
-            try? await Task.sleep(for: .seconds(delay))
-            guard let self, let view, self.heightFit.needsRecheck else { return }
-            self.measure(view)
-        }
-    }
-
-    private func apply(_ step: ArtifactHeightFit.Step, to view: ArtifactWebView) {
-        guard case .fit(let height) = step else { return }
-        onHeight?(height)
-        view.evaluateJavaScript("document.getElementById('artifact').style.height='" + String(Double(height)) + "px'", in: nil, in: .defaultClient, completionHandler: { _ in })
-    }
-
-    /// 폭이 바뀐 뒤(WebKit이 새 폭으로 배치한 다음) 다시 잰다.
-    fileprivate func widthChanged(_ view: ArtifactWebView) {
-        apply(heightFit.widthChanged(at: uptime()), to: view)
-        measure(view)
-    }
-    private var firstAction = true
-    /// Reports the page's content height (fitted previews only).
-    var onHeight: ((CGFloat) -> Void)?
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                 decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
-        let url = navigationAction.request.url
-        let main = navigationAction.targetFrame?.isMainFrame == true
-        var allow = artifactAllowsNavigation(firstAction: firstAction, url: url, mainFrame: main, type: navigationAction.navigationType)
-        if !main, navigationAction.targetFrame != nil,
-           artifactAllowsChildNavigation(loaded: childLoaded, url: url, type: navigationAction.navigationType) {
-            childLoaded = true; allow = true
-        }
-        if main { firstAction = false }
-        decisionHandler(allow ? .allow : .cancel)
-    }
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { measure(webView) }
-
-    /// 웹 콘텐츠 프로세스가 종료되면(iPhone이 뒤에 있는 앱의 프로세스를 거둘 때 등) 페이지가 빈 상자로 남는다.
-    /// 앱이 만든 같은 문서를 처음 여는 것과 똑같은 규칙으로 다시 넣는다. 반복 종료에 대비해 횟수를 제한한다.
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        guard let sandboxDocument, processReloads < Self.processReloadLimit else { return }
-        processReloads += 1
-        firstAction = true; childLoaded = false; childFrame = nil
-        if heightFit.viewportBound { onViewportBound?(false) }
-        heightFit = ArtifactHeightFit()
-        webView.loadHTMLString(sandboxDocument(), baseURL: nil)
-    }
-
-    /// The page height as the web measures it (the body's scroll height plus its margins), read from the app's own
-    /// isolated script world: page scripts run inside the opaque sandbox, and nothing the page defines can answer for it.
-    func measure(_ webView: WKWebView) {
-        guard onHeight != nil else { return }
-        let script = "(function(){var b=document.body;if(!b)return 0;var c=getComputedStyle(b);return Math.ceil(b.scrollHeight+(parseFloat(c.marginTop)||0)+(parseFloat(c.marginBottom)||0))})()"
-        guard let childFrame else { return }
-        webView.evaluateJavaScript(script, in: childFrame, in: .defaultClient) { [weak self, weak webView] result in
-            if case .success(let value) = result, let height = (value as? NSNumber)?.doubleValue, height.isFinite, height > 0 {
-                self?.report(CGFloat(height), in: webView)
-            }
-        }
-    }
-}
-
-/// The artifact web view. A fitted preview is as tall as its page, like the web's frame: it re-measures when its width
-/// changes, and on Mac hands vertical scrolling to the page around it (a sideways swipe still scrolls a wide table).
-private final class ArtifactWebView: WKWebView {
-    var fitted = false
-    weak var measurer: ArtifactNavigationDelegate?
-    private var measuredWidth: CGFloat = -1
-
-    #if os(macOS)
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        widthChanged(newSize.width)
-    }
-    override func scrollWheel(with event: NSEvent) {
-        if fitted && abs(event.scrollingDeltaY) >= abs(event.scrollingDeltaX) { nextResponder?.scrollWheel(with: event) }
-        else { super.scrollWheel(with: event) }
-    }
-    #else
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        widthChanged(bounds.width)
-    }
-    #endif
-
-    func scrollToAnchor(_ top: CGFloat) {
-        var ancestor = superview
-        while let current = ancestor {
-            #if os(macOS)
-            if let scroll = current as? NSScrollView, let document = scroll.documentView {
-                document.scrollToVisible(convert(CGRect(x: 0, y: top, width: 1, height: 44), to: document))
-                return
-            }
-            #else
-            if let scroll = current as? UIScrollView {
-                scroll.scrollRectToVisible(convert(CGRect(x: 0, y: top, width: 1, height: 44), to: scroll), animated: false)
-                return
-            }
-            #endif
-            ancestor = current.superview
-        }
-    }
-
-    private func widthChanged(_ width: CGFloat) {
-        guard fitted, abs(width - measuredWidth) > 0.5 else { return }
-        measuredWidth = width
-        // After WebKit has laid the page out at the new width.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            guard let self, !self.isLoading else { return }
-            self.measurer?.widthChanged(self)
-        }
-    }
-}
-
-/// Requires the compiled block layer before loading any artifact HTML. The page gets the web's artifact kit (dark page,
-/// type scale, cards, grids, callouts) under the same protected policy; page scripts run inside the opaque sandbox.
-@MainActor
-func makeArtifactWebView(html: String, title: String?, rule: WKContentRuleList, delegate: ArtifactNavigationDelegate,
-                                 fitted: Bool) -> WKWebView {
-    let configuration = WKWebViewConfiguration()
-    configuration.websiteDataStore = .nonPersistent()
-    configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-    configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
-    let controller = configuration.userContentController
-    controller.add(delegate, contentWorld: .defaultClient, name: "artifactHeight")
-    controller.add(delegate, contentWorld: .defaultClient, name: "artifactLink")
-    controller.add(delegate, contentWorld: .defaultClient, name: "artifactAnchor")
-    controller.addUserScript(WKUserScript(source: artifactObservationScript, injectionTime: .atDocumentStart,
-                                        forMainFrameOnly: false, in: .defaultClient))
-    configuration.userContentController.add(rule)
-    let view = ArtifactWebView(frame: .zero, configuration: configuration)
-    view.fitted = fitted
-    view.measurer = delegate
-    view.navigationDelegate = delegate
-    view.uiDelegate = delegate
-    // No white flash before the kit's dark page paints.
-    #if os(macOS)
-    // 공개되지 않은 KVC 키다. 없어지면 예외가 나는데, 앱은 AppKit 예외를 즉시 종료로 다루므로 여기서 막는다
-    // (실패하면 배경만 불투명하게 남는다).
-    if IAMCEOCatchException({ view.setValue(false, forKey: "drawsBackground") }) != nil {
-        NSLog("[IAMCEO] Artifact web view background could not be made clear")
-    }
-    #else
-    view.isOpaque = false
-    view.backgroundColor = .clear
-    view.scrollView.backgroundColor = .clear
-    if fitted { view.scrollView.isScrollEnabled = false }
-    #endif
-    let document = { ArtifactKit.sandboxDocument(html, title: title, fitted: fitted) }
-    delegate.sandboxDocument = document
-    view.loadHTMLString(document(), baseURL: nil)
-    return view
-}
-#if os(macOS)
-private struct SandboxedHTMLSurface: NSViewRepresentable {
-    let html: String
-    let rule: WKContentRuleList
-    var title: String? = nil
-    /// Fitted: as tall as the page (reported here); otherwise the page scrolls inside the view.
-    var height: Binding<CGFloat>? = nil
-    var viewportBound: Binding<Bool>? = nil
-    var onLink: (String) -> Void
-    func makeCoordinator() -> ArtifactNavigationDelegate {
-        let delegate = ArtifactNavigationDelegate(); delegate.onLink = onLink; return delegate
-    }
-    func makeNSView(context: Context) -> WKWebView {
-        if let height { context.coordinator.onHeight = { value in if abs(height.wrappedValue - value) > 0.5 { height.wrappedValue = value } } }
-        if let viewportBound { context.coordinator.onViewportBound = { value in if viewportBound.wrappedValue != value { viewportBound.wrappedValue = value } } }
-        return makeArtifactWebView(html: html, title: title, rule: rule, delegate: context.coordinator, fitted: height != nil)
-    }
-    func updateNSView(_ nsView: WKWebView, context: Context) {}
-    static func dismantleNSView(_ view: WKWebView, coordinator: ArtifactNavigationDelegate) {
-        view.stopLoading(); view.configuration.userContentController.removeAllScriptMessageHandlers(from: .defaultClient)
-        coordinator.onHeight = nil; coordinator.onLink = nil; coordinator.sandboxDocument = nil; coordinator.onViewportBound = nil
-    }
-}
-#else
-private struct SandboxedHTMLSurface: UIViewRepresentable {
-    let html: String
-    let rule: WKContentRuleList
-    var title: String? = nil
-    var height: Binding<CGFloat>? = nil
-    var viewportBound: Binding<Bool>? = nil
-    var onLink: (String) -> Void
-    func makeCoordinator() -> ArtifactNavigationDelegate {
-        let delegate = ArtifactNavigationDelegate(); delegate.onLink = onLink; return delegate
-    }
-    func makeUIView(context: Context) -> WKWebView {
-        if let height { context.coordinator.onHeight = { value in if abs(height.wrappedValue - value) > 0.5 { height.wrappedValue = value } } }
-        if let viewportBound { context.coordinator.onViewportBound = { value in if viewportBound.wrappedValue != value { viewportBound.wrappedValue = value } } }
-        return makeArtifactWebView(html: html, title: title, rule: rule, delegate: context.coordinator, fitted: height != nil)
-    }
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
-    static func dismantleUIView(_ view: WKWebView, coordinator: ArtifactNavigationDelegate) {
-        view.stopLoading(); view.configuration.userContentController.removeAllScriptMessageHandlers(from: .defaultClient)
-        coordinator.onHeight = nil; coordinator.onLink = nil; coordinator.sandboxDocument = nil; coordinator.onViewportBound = nil
-    }
-}
-#endif
-
-
-/// App-only, isolated-world observation. Page scripts cannot call these message handlers.
-private let artifactObservationScript = #"""
-(function(){if(window.top===window)return;function measure(){var b=document.body;if(!b)return;var c=getComputedStyle(b);window.webkit.messageHandlers.artifactHeight.postMessage(Math.ceil(b.scrollHeight+(parseFloat(c.marginTop)||0)+(parseFloat(c.marginBottom)||0)))}var observer=new ResizeObserver(measure);addEventListener('DOMContentLoaded',function(){if(document.body)observer.observe(document.body);measure()});addEventListener('load',measure);addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;var h=a.getAttribute('href')||'';if(h.charAt(0)==='#'){try{var id=decodeURIComponent(h.slice(1)),target=id?document.getElementById(id)||document.getElementsByName(id)[0]:document.body;if(target){window.webkit.messageHandlers.artifactAnchor.postMessage(target.getBoundingClientRect().top+window.scrollY)}}catch(x){}return}e.preventDefault();if(!e.isTrusted)return;window.webkit.messageHandlers.artifactLink.postMessage(a.href)},true)})()
-"""#
+// 격리 규칙·차단 규칙·탐색 정책·웹뷰는 Services/ArtifactSandbox.swift 에 있다. 여기는 바깥 링크를 열지 묻는 화면이다.
 
 struct SandboxedHTML: View {
     let html: String
@@ -3534,7 +2991,7 @@ private struct AttachmentActions: ViewModifier {
             let loaded = try await FileResources.attachment(attachment, api: api, progress: { value in
                 Task { @MainActor in progress = value }
             })
-            guard store.api === api, store.selectedProjectID == project else { return }
+            guard store.stillCurrent(api, project: project) else { return }
             resource = loaded
             #if os(macOS)
             if save { try await saveWithPanel(loaded.read(), name: attachment.name); return }
@@ -3561,7 +3018,7 @@ private struct AttachmentShareButton: View {
                     let loaded = try await FileResources.attachment(attachment, api: api, progress: { value in
                         Task { @MainActor in progress = value }
                     })
-                    guard store.api === api, store.selectedProjectID == project else { return }
+                    guard store.stillCurrent(api, project: project) else { return }
                     sharing = loaded
                 } catch { failure = friendlyLoadError(error, what: "파일", verb: "받지") }
             }

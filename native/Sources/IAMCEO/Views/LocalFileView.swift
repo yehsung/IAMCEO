@@ -187,15 +187,15 @@ struct LocalFileView: View {
             host = await FileHostConnection.current(api)
             do {
                 let loaded = try await api.localFile(projectID: projectID, path: path)
-                guard store.api === api, store.selectedProjectID == projectID, !Task.isCancelled else { return }
+                guard store.stillCurrent(api, project: projectID), !Task.isCancelled else { return }
                 preview = loaded
                 if loaded.info.kind == "html" {
                     guard let compiled = await artifactBlockRule() else { throw APIError(status: 0, message: "안전한 미리보기를 준비하지 못했습니다") }
                     let rendered = try await api.localFileHTML(projectID: projectID, path: path)
-                    guard store.api === api, store.selectedProjectID == projectID, !Task.isCancelled else { return }
+                    guard store.stillCurrent(api, project: projectID), !Task.isCancelled else { return }
                     rule = compiled; html = rendered
                 }
-            } catch { if store.api === api, !Task.isCancelled { failure = friendlyLoadError(error, what: "파일", verb: "읽지") } }
+            } catch { if store.stillCurrent(api), !Task.isCancelled { failure = friendlyLoadError(error, what: "파일", verb: "읽지") } }
         }
         .alert("바뀐 내용이 없어 기존 자료를 엽니다", isPresented: Binding(get: { reusedFileID != nil }, set: { if !$0 { reusedFileID = nil } })) {
             Button("자료 열기") { if let id = reusedFileID { dismiss(); router.openFile(id) }; reusedFileID = nil }
@@ -290,10 +290,10 @@ struct LocalFileView: View {
 
     #if os(macOS)
     @MainActor private func openLocal(reveal: Bool) async {
-        guard let host, store.api === host.api else { return }
+        guard let host, store.stillCurrent(host.api) else { return }
         do {
             guard let url = try await host.validatedURL(path: preview?.info.path ?? path, projectID: projectID),
-                  store.api === host.api, store.selectedProjectID == projectID else { return }
+                  store.stillCurrent(host.api, project: projectID) else { return }
             if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
             else { NSWorkspace.shared.open(url) }
         } catch { failure = friendlyLoadError(error, what: "파일", verb: "읽지") }
@@ -307,10 +307,10 @@ struct LocalFileView: View {
         do {
             let file = try await api.publishLocalFile(projectID: projectID, path: path)
             await store.refresh()
-            guard store.selectedProjectID == projectID, store.api === api else { return }
+            guard store.stillCurrent(api, project: projectID) else { return }
             if file.reused == true { reusedFileID = file.id }
             else { dismiss(); router.openFile(file.id) }
-        } catch { if store.api === api, store.selectedProjectID == projectID { failure = friendlyLoadError(error, what: "자료", verb: "올리지") } }
+        } catch { if store.stillCurrent(api, project: projectID) { failure = friendlyLoadError(error, what: "자료", verb: "올리지") } }
     }
 }
 

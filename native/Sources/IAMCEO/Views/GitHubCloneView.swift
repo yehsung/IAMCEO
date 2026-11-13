@@ -221,10 +221,10 @@ struct GitHubCloneView: View {
                 try Task.checkCancellation()
                 // 서버의 단계별 제한(10분 × 2)보다 넉넉한 상한. 넘으면 '결과 확인'으로 다시 물을 수 있다.
                 guard ContinuousClock.now < deadline else { throw APIError(status: 0, message: "가져오기가 오래 걸리고 있습니다. 잠시 뒤 '결과 확인'을 눌러 주세요.") }
-                guard cloneServerKey == serverKey, store.api === client else { throw APIError(status: 0, message: "서버 연결이 바뀌었습니다. 원래 서버에서 가져오기 결과를 확인해 주세요.") }
+                guard cloneServerKey == serverKey, store.stillCurrent(client) else { throw APIError(status: 0, message: "서버 연결이 바뀌었습니다. 원래 서버에서 가져오기 결과를 확인해 주세요.") }
                 let job = try await client.cloneJob(jobID)
                 try Task.checkCancellation()
-                guard cloneServerKey == serverKey, store.api === client else { throw APIError(status: 0, message: "서버 연결이 바뀌었습니다.") }
+                guard cloneServerKey == serverKey, store.stillCurrent(client) else { throw APIError(status: 0, message: "서버 연결이 바뀌었습니다.") }
                 switch job.status {
                 case .running: try await Task.sleep(for: .seconds(1))
                 case .done:

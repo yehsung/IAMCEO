@@ -668,7 +668,7 @@ describe("terminal stream", () => {
     f.orch.terminalStreamInput = async (_id, write) => { pendingWrite = write; await gate; write(); };
     stream.ws.send(Buffer.from("queued-before-release"));
     await until(() => !!pendingWrite);
-    const manager = (f.orch as any).terminalLeaseListeners as Set<(id: string, leaseId: string) => void>;
+    const manager = (f.orch as any).terminal.terminalLeaseListeners as Set<(id: string, leaseId: string) => void>;
     expect(manager.size).toBeGreaterThan(0);
     await f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId });
     const next = await f.orch.terminalControl(f.member.id, { action: "claim", leaseId: claimId });

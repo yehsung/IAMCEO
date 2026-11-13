@@ -1426,7 +1426,7 @@ extension AppStore {
     /// Writes need a live connection and a healthy project runner connection. In-flight requests are not a global
     /// lock: each control checks its own `pendingActions` key (mutate() already de-duplicates per key), so a
     /// 150 s member respawn never blocks instructions to everyone else.
-    var uiCanWrite: Bool { canWrite && state?.project.connection.ok == true }
+    var uiCanWrite: Bool { canWrite && projectConnectionOK == true }
 
     var localizedSyncDescription: String {
         if isDemo { return "샘플 데이터 · 읽기 전용" }
@@ -1455,7 +1455,7 @@ extension AppStore {
     }
 
     func projectNeedsCount(_ project: ProjectSummary) -> Int {
-        if project.id == selectedProjectID, state?.project.id == project.id { return navBadge(for: .home) }
+        if project.id == selectedProjectID, stateProjectID == project.id { return navBadge(for: .home) }
         return InboxHomePolicy.projectCount(project)
     }
 
@@ -1464,7 +1464,7 @@ extension AppStore {
     }
 
     func projectNeedsDanger(_ project: ProjectSummary) -> Bool {
-        if project.id == selectedProjectID, state?.project.id == project.id { return navBadgeDanger(for: .home) }
+        if project.id == selectedProjectID, stateProjectID == project.id { return navBadgeDanger(for: .home) }
         return project.needsDanger ?? (project.errorCount > 0)
     }
 

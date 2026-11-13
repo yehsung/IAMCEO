@@ -1850,7 +1850,7 @@ final class MemberCreationNotice {
         message = "팀장을 만드는 중입니다. 창을 닫아도 계속됩니다."
         defer { running = false }
         let before = Set(store.members.map(\.id))
-        let sameHost = { self.namespace == ProjectCreationNotice.scope(store) && store.api === client }
+        let sameHost = { self.namespace == ProjectCreationNotice.scope(store) && store.stillCurrent(client) }
         func hostChanged() -> Outcome {
             failed = true
             message = "연결이 바뀌었습니다. 원래 Mac에 연결해 팀장 만들기 결과를 확인해 주세요."
@@ -1892,7 +1892,7 @@ final class MemberCreationNotice {
               let client = store.api else { return false }
         let navigation = router.navigationRevision
         if store.selectedProjectID != projectID { await store.selectProject(id: projectID) }
-        guard namespace == ProjectCreationNotice.scope(store), store.api === client,
+        guard namespace == ProjectCreationNotice.scope(store), store.stillCurrent(client),
               router.navigationRevision == navigation else { return false }
         guard store.state?.project.id == projectID, store.members.contains(where: { $0.id == memberID }) else {
             router.navigationNotice = "팀장을 열지 못했습니다. 팀에서 준비 상태를 확인해 주세요."

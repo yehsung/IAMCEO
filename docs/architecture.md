@@ -24,7 +24,11 @@ SwiftUI macOS / iOS ── REST sync + WS v2 ─┐
 
 | 경로 | 역할 |
 |---|---|
-| `server/orchestrator.ts` | 전달 대기열, 멤버 수명, 제공자·설정 교체, MCP 업무 흐름 |
+| `server/orchestrator.ts` | 전달 대기열과 펌프, 멤버 수명(띄우기·잠재우기·다시 열기·닫기), 실행기 이벤트·턴 종료, 문맥 압축, 제공자·설정 교체. 아래 네 모듈을 조립한다 |
+| `server/delivery-text.ts` | 전달 글의 머리(`[대표]`·`[총괄]`·`[보고]`·`[시스템]`)와 인용 표시, 출처 접두어 위조 방지. 상태 없는 함수만 둔다 |
+| `server/flows/owner.ts`, `server/flows/member.ts` | 대표 쪽 업무 흐름(메시지·결재 답·할 일, 받을 사람 없이 멈춘 대표의 글 넘기기)과 총괄·팀장 쪽 업무 흐름(MCP 도구·지시·보고·ask·결재 닫기·수신함). 원본 저장 → 전달 의도 → 펌프만 하고, 세션 수명과 턴 상태는 포트로 부른다 |
+| `server/board-hygiene.ts` | 주기 판 정리, 묵은 할 일 알림, 대표의 '지금 판 정리', 직접 띄운 CLI 의 상태 추정 |
+| `server/terminal-control.ts` | 터미널 직접 조작(스트림·조작권·입력), 실행 엔진 상태와 런타임 정보, 새 세션·터미널 조작의 v2 작업 영수증 |
 | `server/runner/core-client.ts` | core와 JSON-RPC 통신, 제한 시간과 오류 처리 |
 | `server/runner/core.ts` | 터미널 소유권·재연결, 상태 관측, 입력과 직접 조작 |
 | `server/runner/providers.ts` | 공식 CLI의 인자·환경과 호출별 MCP 설정 |
@@ -92,6 +96,8 @@ core 자동 압축은 같은 세션·세대·모델의 완료 턴에서 최근�
 SwiftUI 앱은 홈·결재함·팀·대화·자료·설정을 제공한다. macOS 14+/iOS 17+와 Swift 6을 대상으로 한다. 지원 OS에서는 Liquid Glass를 쓰고 이전 OS에서는 material 효과를 쓴다.
 
 AppStore의 한 동기화 조정자가 WS v2 변경 알림과 REST 상태 조회를 관리한다. 정상 연결에서는 상태·대화 이력을 3초마다 조회하지 않는다. 변경을 250ms 동안 모아 최대 초당 2회, 동시 1개씩 조회한다. 서버가 느리면 이벤트가 부르는 조회는 직전 조회에 걸린 시간의 2배(최대 5초)만큼 간격을 벌린다. 대표가 누른 새로고침, 쓰기 뒤 조회, 재연결은 기다리지 않는다. 순번이 이어진 message·activity 이벤트는 실린 내용을 그대로 반영하고 대화 페이지·활동 목록을 다시 읽지 않는다. 본문을 읽지 못한 프레임은 연결을 끊지 않고 전체를 다시 읽는다. 순번 누락·서버 세대 변경·재접속 때 상태를 다시 읽는다. WS만 실패하면 REST를 3초마다 조회하고 전체 연결 실패 때는 간격을 최대 30초로 늘린다. iPhone은 앱 비활성·잠금 중에, Mac은 창이 없는 배경 상태와 잠자기 중에 소켓·읽기·재시도를 멈춘다. Mac 앱이 맨 앞이 아니기만 한 경우에는 계속 동기화한다. 열린 터미널 화면은 앱이 활성 상태일 때 별도로 2초마다 읽는다.
+
+앱 상태는 AppStore 하나지만 파일은 맡은 일별로 나뉜다(`native/Sources/IAMCEO/State/`). `AppStore.swift`는 저장 값 전부와 연결·프로젝트 선택·쓰기 공통 경로·보내기·결재·할 일·설정을, `AppStore+Connection.swift`와 값 타입 `ConnectionHealth`는 끊김·재시작·망 변화 판정을, `AppStore+Sync.swift`는 동기화 조정자와 실시간 소켓을, `AppStore+WriteRecovery.swift`와 `AppWriteJournal.swift`는 쓰기 저널과 복구를, `AppStore+Terminal.swift`는 터미널 조작권을, `AppStore+Notifications.swift`는 알림 이동을 맡는다. 화면은 AppStore가 내놓는 값만 읽는다. 쓰기 가능 여부·프로젝트 이름·전달 안내는 프로젝트 상태 전체가 아니라 바뀔 때만 갱신되는 머리 값에서 읽어, 팀원 한 명의 상태가 바뀌어도 그 값을 읽는 화면은 다시 계산되지 않는다. 화면이 서버에서 직접 받는 읽기는 받은 뒤 `AppStore.stillCurrent`로 같은 연결·프로젝트(필요하면 보관함 보기)인지 확인하고 반영한다. 아티팩트 격리 규칙(차단 규칙·탐색 정책·웹뷰 구성)은 `Services/ArtifactSandbox.swift`에, 표(CSV·TSV) 해석과 원문 디코딩은 `Models/TableParsing.swift`에 있다.
 
 접속 코드는 서버 주소별 Keychain에, 주소와 비밀이 아닌 설정은 UserDefaults에 저장한다. HTTPS/WSS를 권장하며 같은 Mac의 loopback HTTP와 기존 Tailscale HTTP 호환도 허용한다. iPhone의 loopback은 Mac 주소가 아니므로 Mac의 Tailscale Serve HTTPS 주소를 사용한다. API 인증을 다른 출처나 HTTP 리디렉션에 넘기지 않는다.
 

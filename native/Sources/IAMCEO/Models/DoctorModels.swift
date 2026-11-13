@@ -117,6 +117,9 @@ struct DiagnosticsFile: Codable, Sendable, Equatable {
     }
 
     /// 다시 읽는 동안에도 마지막 점검표는 그대로 둔다.
+    /// 점검표 글(항목 이름·찾은 것·고치는 법)은 서버가 짓는다. 영어 화면이면 영어로 받는다(서버의 ?lang=en, B3). 한국어는 예전 그대로.
+    static func path(for language: AppLanguage) -> String { language == .en ? "/api/doctor?lang=en" : "/api/doctor" }
+
     func load(_ api: APIClient?) async {
         guard let api else { return }
         token &+= 1
@@ -124,7 +127,7 @@ struct DiagnosticsFile: Codable, Sendable, Equatable {
         loading = true
         defer { if mine == token { loading = false } }
         do {
-            let result: DoctorReport = try await api.request("/api/doctor")
+            let result: DoctorReport = try await api.request(Self.path(for: AppLanguage.current))
             guard mine == token else { return }
             report = result; unsupported = false; error = nil
         } catch let failure as APIError where [404, 405, 501].contains(failure.status) {

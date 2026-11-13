@@ -168,3 +168,11 @@ private final class DoctorReplyBox: @unchecked Sendable {
     var reply: (Int, String) { lock.withLock { (status, body) } }
     func set(_ status: Int, _ body: String) { lock.withLock { self.status = status; self.body = body } }
 }
+
+/// 영어 화면에서는 서버가 영어로 지은 점검표를 받는다(GET /api/doctor?lang=en). 한국어 화면은 예전 경로 그대로.
+final class DoctorPanelLanguageTests: XCTestCase {
+    @MainActor func testDoctorPathFollowsTheAppLanguage() {
+        XCTAssertEqual(DoctorPanel.path(for: .en), "/api/doctor?lang=en")
+        XCTAssertEqual(DoctorPanel.path(for: .ko), "/api/doctor")
+    }
+}

@@ -57,7 +57,7 @@ Delivery panels show automatic checking separately from owner intervention. Only
 
 ## iPhone APNs and signing
 
-**The App Store build cannot receive push notifications today.** The server sends a push only when the host’s `apns.json` holds an APNs key for the app’s bundle ID, and only the Apple Developer account that owns that bundle ID can create one. There is no relay. Push works for an app you build under your own bundle ID with your own key, as described below.
+**The App Store build receives push notifications through the developer's relay** (from the next server release) when the host has no APNs key of its own: the server sends the relay only the push token, kind, random IDs and expiry, and the relay builds the fixed-sentence payload and sends it with the IAMCEO production key (`server/push/relay.ts`, `relay/`). A host whose `apns.json` has a `production` entry always sends directly and never uses the relay; `"pushRelay": false` in `config.json` turns the relay off. The relay is production only, so a Debug (sandbox) build needs a sandbox key in `apns.json`. An app you build under your own bundle ID needs your own key, as described below.
 
 To install on your own iPhone, set the iOS bundle ID and `DEVELOPMENT_TEAM` in `native/project.yml` to your own (Push Notifications needs a paid Apple Developer account; otherwise remove the capability). Configure your own APNs key ID, team ID and the absolute path of the `.p8` file in the host’s `apns.json`. Never copy key contents into the repository, app bundle, chat or logs. Server credentials live in the host’s protected `apns.json`/external p8 file, not the app. See the configuration example and operational boundary in [the runbook](../docs/operating-model.md).
 

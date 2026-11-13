@@ -337,7 +337,7 @@ test("check.sh ios: iPhone 시뮬레이터가 없으면 실패하고, check.sh a
   // 이름을 지정했는데 없으면 건너뛰지 않고 실패한다.
   expect(f.check({ IAMCEO_IOS_OPTIONAL: "1", IAMCEO_IOS_SIMULATOR: "iPhone 99" }).code).toBe(1);
   expect(f.calls().some(call => call.startsWith("xcodebuild"))).toBe(false);
-  expect(text("scripts/check.sh")).toMatch(/all\) ts; server; compat; swift_check; IAMCEO_IOS_OPTIONAL=1 ios_check; build ;;/);
+  expect(text("scripts/check.sh")).toMatch(/all\) ts; server; relay_check; compat; swift_check; IAMCEO_IOS_OPTIONAL=1 ios_check; build ;;/);
 });
 
 test("check.sh ios: 실패한 시험만 같은 기기에서 다시 돌려 통과하면 FLAKY, 또 실패하면 막는다. 어느 쪽이든 띄운 기기는 끈다", () => {

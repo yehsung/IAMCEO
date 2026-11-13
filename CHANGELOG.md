@@ -7,6 +7,10 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
+### 아직 내지 않은 것
+
+- **App Store iPhone 앱이 알림을 받습니다(알림 중계).** 꺼져 있는 iPhone 앱을 깨울 수 있는 것은 Apple의 알림 서비스뿐이고 App Store 앱의 알림 키는 개발자만 가지므로, 내 Mac에 자신의 키가 없으면 서버가 알림을 개발자가 운영하는 작은 중계에 넘기고 중계가 Apple로 보냅니다. 출시된 iPhone 0.2.2~0.2.4 앱은 고치지 않고, Mac 서버만 이 판으로 올리면 됩니다. Mac은 문구를 보내지 않고 푸시 토큰·알림 종류·무작위 ID·유효 시각만 보내며, 중계가 정해진 문구로 알림을 만듭니다. 중계는 받은 값을 저장하지 않습니다 → [개인정보 처리방침](PRIVACY.md). 서버가 뜰 때는 중계에 연락하지 않고, 처음 보낼 알림이 생기면 계정 없이 설치를 한 번 등록해 `~/.iamceo/push-relay.json`(본인만 읽는 파일, 백업에는 넣지 않음)에 둡니다. 키가 있는 Mac은 지금처럼 직접 보내고 중계를 쓰지 않습니다. 중계를 끄려면 `~/.iamceo/config.json`에 `"pushRelay": false`를 넣고 서버를 다시 시작합니다. 중계가 잠시 받지 않으면 알림 설정에 '알림 서버를 잠시 쓸 수 없습니다'가 보이고, 정해진 시간 뒤 서버를 다시 켜지 않아도 이어서 보냅니다. Apple이 더는 쓸 수 없다고 한 iPhone의 등록은 지웁니다. **예전에 iPhone에서 알림을 켜려다 실패했다면 설정에서 스위치를 다시 켜 주세요.** 중계는 무료로 운영하는 최선 노력 서비스이며 한도(iPhone 한 대에 하루 200건, Mac 한 대에 하루 300건)가 있습니다.
+
 ### 0.2.4 — 2026-11-13
 
 - **앱 화면을 영어로도 봅니다.** 앱 문구를 번역 파일(Localizable.xcstrings)로 옮기고 영어를 넣었습니다. 앱은 기기 언어를 따라, 한국어 기기는 지금과 글자 하나 다르지 않은 한국어로, 그 밖의 기기는 영어로 보입니다(iPhone 설정 → IAMCEO → 언어, Mac 시스템 설정 → 일반 → 언어 및 지역에서 앱만 따로 고를 수 있습니다). 날짜·시각은 영어 화면에서 기기 지역의 형식을 따르고, 서버 오류는 코드마다 정한 영어 문장으로 보입니다(이름이 들어간 문장과 옛 서버의 문장은 받은 그대로). 서버가 만들어 보내는 글(시스템 메시지, 결재 카드, 보류 메모 일부)은 아직 한국어입니다. 총괄·팀장이 쓰는 글의 언어는 따로 '보고 언어'로 고릅니다.
@@ -115,6 +119,10 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - 첫 공개. 내 Mac에서 서버를 켜고 브라우저로 Claude Code 세션 여럿을 총괄과 팀으로 부립니다. 홈·결재함·팀·대화·자료 다섯 화면. Claude Code 전용, AGPL-3.0-only.
 
 ## English
+
+### Unreleased
+
+- **The App Store iPhone app gets notifications (notification relay).** Only Apple's push service can wake an iPhone app, and only the developer holds the App Store app's push key, so when your Mac has no key of its own the server hands each notification to a small relay run by the developer, which sends it to Apple. The released iPhone apps 0.2.2 to 0.2.4 need no change; only the Mac server has to be updated. Your Mac sends no text, only the push token, the notification type, random IDs and an expiry time, and the relay builds the notification from fixed sentences. The relay does not store what it receives → [Privacy](PRIVACY.md). The server does not contact the relay when it starts; the first notification registers an installation once, without an account, kept in `~/.iamceo/push-relay.json` (readable only by you, not put into backups). A Mac with its own key keeps sending directly and never uses the relay. To turn the relay off, put `"pushRelay": false` in `~/.iamceo/config.json` and restart the server. While the relay is not accepting, notification settings show "The notification service is temporarily unavailable", and sending resumes after the given time without restarting the server. iPhones that Apple says can no longer be reached are removed. **If turning on notifications on an iPhone failed before, turn the switch on again in Settings.** The relay is a free, best-effort service with limits (200 notifications per iPhone and 300 per Mac a day).
 
 ### 0.2.4 — 2026-11-13
 

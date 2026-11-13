@@ -31,6 +31,20 @@ jobs:
       - run: bun run check:ts
       - name: 단위 시험
         run: bun run test:server
+  relay:
+    # 알림 중계(relay/, Firebase 함수)의 타입 검사와 시험. 배포 런타임과 같은 Node 22 로 묶음을 불러 보는 시험이 있다.
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 중계 시험
+        run: bash scripts/check.sh relay
   native:
     # macos-latest 에는 Xcode 26.6(Swift 6.3)까지만 있고 그 컴파일러는 이 코드에서 죽는다. 릴리스를 빌드하는 Xcode 27 이미지를 쓴다.
     # 이 이미지는 GitHub 의 공개 미리보기다. 이미지가 사라지거나 이름이 바뀌어 이 작업이 뜨지 않으면 runs-on 을 고친다.

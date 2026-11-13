@@ -1679,6 +1679,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
           tailnetHttps: facts.tailscale.https ? { state: facts.tailscale.https.state, problem: facts.tailscale.https.problem?.code ?? null, checkedAt: facts.tailscale.https.checkedAt } : null,
           hosts: [...bindings.values()].map(binding => ({ host: binding.host, state: binding.state, attempts: binding.attempts, error: binding.error })),
           backup: extra?.backup ?? null, apiOutage: store.apiOutage(),
+          // iPhone 알림 발신 수단의 상태(환경·상태·마지막 오류 코드·키/중계)만. 키·토큰·중계 자격은 넣지 않는다.
+          push: (() => { try { return ctx.push?.providers().map(p => ({ environment: p.environment, state: p.state, lastError: p.lastError, via: p.via ?? null })) ?? null; } catch { return null; } })(),
           vitals: (() => { try { return readVitals(store.db, config.dbPath); } catch { return null; } })(),
         },
         ...ctx.diagnose,

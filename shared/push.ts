@@ -59,6 +59,8 @@ export interface PushProviderStatus {
   bundleId: string;
   state: "ready" | "unconfigured" | "configuration_error" | "temporarily_unavailable";
   lastError: "key_unreadable" | "invalid_key" | "auth_failed" | "network_error" | null;
+  /** 선택(옛 서버엔 없음): 이 Mac 의 키로 직접 보내는지(key), 개발자의 알림 중계로 보내는지(relay). 설정이 없으면 싣지 않는다. */
+  via?: "key" | "relay";
 }
 export interface PushStatus { serverId: string; supported: boolean; providers: PushProviderStatus[] }
 export type PushTarget =

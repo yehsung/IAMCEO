@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Public, isolated checks. Usage: bash scripts/check.sh all|ts|server [test files...]|compat|swift|ios|build
+# Public, isolated checks. Usage: bash scripts/check.sh all|ts|server [test files...]|relay|compat|swift|ios|build
 set -euo pipefail
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 CHECK_TMP=${TMPDIR:-/tmp}
@@ -136,6 +136,11 @@ build() {
   # 한국어 기기가 영어 문구 파일을 읽지 않게: en.lproj 의 파일은 모두 ko.lproj 에도 있어야 한다(4차 lang-6).
   bash scripts/check-app-languages.sh "$CHECK_ROOT/dd-mac/Build/Products/Debug/IAMCEO.app" \
     "$CHECK_ROOT/dd-ios/Build/Products/Debug-iphonesimulator/IAMCEO.app"
+}
+# 알림 중계(relay/, Firebase 함수): 자기 의존성(relay/functions/package.json, 잠금 파일 그대로)으로 타입 검사와 시험.
+# 배포 런타임 확인 시험이 node(22)를 부른다. 진짜 Apple·Firebase 에는 닿지 않는다(가짜 APNs). 설치는 npm 레지스트리에서 받는다.
+relay_check() {
+  (cd relay/functions && bun install --frozen-lockfile && bun run typecheck && bun test)
 }
 # 출시 앱 호환(D5): 서버가 실제 응답과 실시간 사건을 파일로 남기고(tests/compat-dump.test.ts),
 # 출시 태그에서 꺼낸 그 앱의 해석 코드가 그것을 풀어 본다(scripts/compat-decoders/run.ts).
@@ -296,12 +301,13 @@ EOF_FLAKY
 mode=${1:-all}
 if [ "$#" -gt 0 ]; then shift; fi
 case "$mode" in
-  all) ts; server; compat; swift_check; IAMCEO_IOS_OPTIONAL=1 ios_check; build ;;
+  all) ts; server; relay_check; compat; swift_check; IAMCEO_IOS_OPTIONAL=1 ios_check; build ;;
   ts) ts ;;
   server) server "$@" ;;
+  relay) relay_check ;;
   compat) compat ;;
   swift) swift_check ;;
   ios) ios_check ;;
   build) build ;;
-  *) printf 'Usage: bash scripts/check.sh all|ts|server [files...]|compat|swift|ios|build\n' >&2; exit 2 ;;
+  *) printf 'Usage: bash scripts/check.sh all|ts|server [files...]|relay|compat|swift|ios|build\n' >&2; exit 2 ;;
 esac

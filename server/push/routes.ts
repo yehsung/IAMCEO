@@ -103,7 +103,9 @@ export function createPushHandler(ctx: PushRoutesContext): (req: Request, url: U
         const providers = (["sandbox", "production"] as const).map((environment) => {
           const provider = configured.find((entry) => entry.environment === environment);
           return { environment, bundleId: provider?.bundleId ?? DEFAULT_PUSH_BUNDLE_ID,
-            state: provider?.state ?? "unconfigured", lastError: provider?.lastError ?? null };
+            state: provider?.state ?? "unconfigured", lastError: provider?.lastError ?? null,
+            // 선택 필드: 출시된 앱은 모르는 키를 무시한다. 중계 주소·설치 ID 같은 값은 싣지 않는다.
+            ...(provider?.via === "key" || provider?.via === "relay" ? { via: provider.via } : {}) };
         });
         return response({ serverId: push.serverId, supported: true, providers });
       }

@@ -237,16 +237,17 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
   options.signal?.addEventListener("abort", stopIngress, { once: true });
   try {
     const [{ Bus }, { openDb }, http, orchestration, { Store }, { PushStore }, { PushEventRecorder }, { PushWorker },
-      { APNsClient }, { loadAPNsConfig }, { BackupManager }, { StorageMaintenance, createStorageReferences }, { requireRestoreOutboundEnabled }] = await Promise.all([
+      { createPushClient }, { BackupManager }, { StorageMaintenance, createStorageReferences }, { requireRestoreOutboundEnabled }] = await Promise.all([
       import("../server/bus.ts"), import("../server/db.ts"), import("../server/http.ts"), import("../server/orchestrator.ts"),
       import("../server/store.ts"), import("../server/push/store.ts"), import("../server/push/events.ts"), import("../server/push/worker.ts"),
-      import("../server/push/apns.ts"), import("../server/push/config.ts"), import("../server/backup.ts"), import("../server/storage-maintenance.ts"),
+      import("../server/push/relay.ts"), import("../server/backup.ts"), import("../server/storage-maintenance.ts"),
       import("../server/restore.ts"),
     ]);
     const identity = await buildId();
     db = openDb(config.dbPath);
     requireRestoreOutboundEnabled(db, config.home);
-    client ??= new APNsClient(loadAPNsConfig(config.home));
+    // 이 Mac 의 키(apns.json)가 있으면 직접, production 키가 없으면 알림 중계(config.json 의 pushRelay:false 로 끔). 뜰 때는 중계에 접속하지 않는다.
+    client ??= createPushClient({ home: config.home, relay: config.pushRelay !== false, relayUrl: config.pushRelayUrl ?? null });
     const push = new PushStore(db, { providers: () => client!.status() });
     const bus = new Bus();
     const store = new Store(db, bus, new PushEventRecorder(push));

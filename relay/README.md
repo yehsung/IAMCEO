@@ -44,7 +44,10 @@ Mac 서버는 이 주소를 상수 하나(`server/push/relay-url.ts`)로 갖고,
 |---|---|
 | `POST /v1/installations` | `201 {installationId, secret}` (계정·메일 없음, 본문은 보지 않음) · 그 IP 의 하루 몫을 넘으면 `429` · 전체 시간 한도면 `503 relay_busy` |
 | `POST /v1/push` `Authorization: Bearer <installationId>.<secret>` 본문 `{token, kind, id, eventId, serverId, target, expiresAt?, summary?}` | `200` 보냄 · `400` 틀린 요청(`expired` 포함) · `401` 자격 없음 · `403` 막힘/허용 목록 밖 · `410` 토큰이 더는 유효하지 않음(Mac 이 지움) · `413` 너무 큼 · `429` 한도(`scope: installation`=이 Mac, `token`=그 iPhone) · `503` 보내지 않음/잠시 못 받음(다시 시도) · `504` 보냈는지 모름(다시 보내지 않음) |
-| `GET /healthz` | `200`/`503` `{ok, mode, apns:{suspended, reason, last, lastAt}}` — 사용자 정보 없음 |
+| `GET /v1/health` (= `/healthz`) | `200`/`503` `{ok, mode, apns:{suspended, reason, last, lastAt}}` — 사용자 정보 없음 |
+
+> Cloud Run 주소(`*.run.app`)는 `z` 로 끝나는 경로(`/healthz`)를 앞단에서 막습니다. 상태 확인은 `/v1/health` 로 합니다(같은 응답). / The Cloud Run address blocks paths ending in `z`; use `/v1/health`.
+
 
 설치 만들기의 IP 한도는 Google 앞단이 `X-Forwarded-For` 맨 끝에 붙인 값만 씁니다. 보낸 쪽이 넣은 앞쪽 값은 꾸밀 수 있어 보지 않습니다(`functions/src/settings.ts` 의 `RELAY_CLIENT_IP`). 이 자리는 공식 문서에 없어 배포 9단계에서 확인합니다.
 자세한 규칙은 `functions/src/relay.ts` 첫머리에 있습니다. 한도·시간 값은 `functions/src/settings.ts` 한 곳에 있습니다.
@@ -120,7 +123,7 @@ bun run typecheck        # 타입 검사
    끝나면 `Function URL (relay(us-central1)): https://relay-…run.app` 이 나옵니다. 이것이 중계 주소입니다(나중에 `firebase functions:list` 로도 봅니다). 아래 첫 줄에 넣습니다.
    ```sh
    RELAY='https://relay-….run.app'
-   curl -s "$RELAY/healthz"
+   curl -s "$RELAY/v1/health"
    curl -s -o /dev/null -D - -X POST "$RELAY/v1/installations" | grep -i x-relay-forwarded-count
    ```
    첫 줄이 `"ok":true,"mode":"allowlist"` 이고, 둘째 줄이 `x-relay-forwarded-count: 1` 이면 됩니다(Google 앞단이 손님 IP 를 하나 붙인다는 뜻. 그대로 둡니다).
@@ -131,9 +134,9 @@ bun run typecheck        # 타입 검사
     알림 켜기, 시험 알림이 오고 누르면 홈, 결재 알림이 오고 누르면 결재함, 완료 보고 묶음, 알림 끄기.
     중계를 `off` 로 바꿔 배포하면 앱의 알림 설정에 '알림 서버를 잠시 쓸 수 없습니다'가 보입니다. 다시 `allowlist` 로 바꿔 배포한 뒤에는 **시험 서버를 다시 시작합니다**(다시 시작하지 않으면 Mac 은 중계가 알려 준 대로 최대 1시간 쉬었다가 이어 보냅니다).
     Google Cloud 콘솔 → Logging → 로그 탐색기에서 `resource.labels.service_name="relay"` 로 보아 요청 로그(접속 IP)가 없고, 함수 로그에 토큰·IP 가 없는지 봅니다.
-11. **열기**: `functions/.env` 의 `RELAY_MODE=open` → `firebase deploy --only functions`. `/healthz` 가 `"mode":"open"` 이면 끝입니다.
+11. **열기**: `functions/.env` 의 `RELAY_MODE=open` → `firebase deploy --only functions`. `/v1/health` 가 `"mode":"open"` 이면 끝입니다.
     며칠 뒤 로그 탐색기에서 `jsonPayload.message="relay_hourly"` 줄을 봅니다. `create_xff_1` 이 아닌 `create_xff_…` 가 대부분이거나, `created`(새 설치 수)가 2 이상인데 `create_ip_groups`(서로 다른 IP 묶음 수)가 늘 1이면 손님 IP 자리가 틀린 것이니 지휘자에게 알립니다.
-12. **(선택) 살아 있는지 감시**: Google Cloud Monitoring 의 가동 시간 확인으로 중계 주소의 `/healthz` 를 확인하고 실패하면 메일을 받게 합니다(요금은 콘솔에서 확인). `/healthz` 는 키가 거절돼 쉬는 중이거나 `off` 면 503 입니다.
+12. **(선택) 살아 있는지 감시**: Google Cloud Monitoring 의 가동 시간 확인으로 중계 주소의 `/v1/health` 를 확인하고 실패하면 메일을 받게 합니다(요금은 콘솔에서 확인). `/v1/health` 는 키가 거절돼 쉬는 중이거나 `off` 면 503 입니다.
 
 ### 운영
 
@@ -230,10 +233,10 @@ Never put key content or `RELAY_MASTER` on screen, in a chat, in the repository 
 6. Create the APNs key in the Apple developer portal: APNs, environment **Production**, restriction **Topic Specific**, topic **com.yehsung.iamceo**. Download the `.p8` once, note the Key ID, keep the original offline. Never upload a team-scoped key: if this key leaks it must only reach this app's production notifications. Optionally create a related backup key.
 7. `cd relay && cp .firebaserc.example .firebaserc` (set the project ID), `cp functions/.env.example functions/.env` (Key ID, Team ID, `RELAY_MODE=allowlist`), `firebase login`.
 8. Secrets, generated and handed over in one pipe: `openssl rand -base64 48 | tr -d '\n' | firebase functions:secrets:set RELAY_MASTER`, then `firebase functions:secrets:set APNS_KEY_P8 --data-file /path/AuthKey_<KeyID>.p8`. If the first command stops at a prompt for the value, press Ctrl-C and ask; never paste the value by hand.
-9. `firebase deploy --only functions`. Accept enabling the APIs; choose the shortest image retention if asked. The output's `Function URL (relay(us-central1))` is the relay address (`firebase functions:list` shows it later). Check `curl -s <address>/healthz` (`"ok":true,"mode":"allowlist"`) and `curl -s -o /dev/null -D - -X POST <address>/v1/installations | grep -i x-relay-forwarded-count`: `1` means Google appends one client IP (keep the setting); `2` means set `RELAY_CLIENT_IP` to `{ forwardedForFromEnd: 2 }` and redeploy; `0` means ask (until then only the hourly limit applies). This check creates one installation from this Mac's IP (one of the day's five).
+9. `firebase deploy --only functions`. Accept enabling the APIs; choose the shortest image retention if asked. The output's `Function URL (relay(us-central1))` is the relay address (`firebase functions:list` shows it later). Check `curl -s <address>/v1/health` (`"ok":true,"mode":"allowlist"`) and `curl -s -o /dev/null -D - -X POST <address>/v1/installations | grep -i x-relay-forwarded-count`: `1` means Google appends one client IP (keep the setting); `2` means set `RELAY_CLIENT_IP` to `{ forwardedForFromEnd: 2 }` and redeploy; `0` means ask (until then only the hourly limit applies). This check creates one installation from this Mac's IP (one of the day's five).
 10. Real iPhone test (after approval): a test Mac server without `apns.json`, with `pushRelayUrl` in `config.json` set to the address. Copy only the `installationId` from its `push-relay.json` into `RELAY_ALLOWED_INSTALLATIONS`, redeploy functions, restart the test server, then check enabling, the test notification, a decision notification and its tap target, report grouping and turning notifications off. Switch the relay to `off` and redeploy: the app's notification settings show "The notification service is temporarily unavailable". After switching back and redeploying, **restart the test server** (otherwise the Mac waits up to an hour, as the relay told it, before sending again). Check that Logs Explorer shows no request logs and no tokens or IPs.
 11. Open it: `RELAY_MODE=open`, `firebase deploy --only functions`. A few days later check the `relay_hourly` lines: if most creations are counted under a `create_xff_…` other than `create_xff_1`, or `created` is above 1 while `create_ip_groups` stays 1, the client IP position is wrong; ask before changing anything.
-12. Optional: a Cloud Monitoring uptime check on `<address>/healthz` (503 while the key is rejected or the relay is off).
+12. Optional: a Cloud Monitoring uptime check on `<address>/v1/health` (503 while the key is rejected or the relay is off).
 
 ### Operations
 

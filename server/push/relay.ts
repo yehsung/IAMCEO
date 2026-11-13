@@ -526,6 +526,16 @@ export class PushRouter {
   }
 }
 
+/**
+ * 서버가 뜰 때 쓰는 중계 설정. 시험 모드(IAMCEO_TEST=1)에서는 config.json 에 pushRelayUrl 을 직접 적었을 때만 중계를 쓴다:
+ * 라이브 DB 사본으로 띄운 시험 서버에는 대표의 실제 기기 토큰이 들어 있어, 기본 주소로 보내면 진짜 iPhone 에 알림이 간다.
+ */
+export function serverPushRelayOptions(config: { pushRelay?: boolean; pushRelayUrl?: string }, env: Record<string, string | undefined> = process.env): Pick<PushClientOptions, "relay" | "relayUrl"> {
+  if (config.pushRelay === false) return { relay: false };
+  if (env.IAMCEO_TEST === "1" && !config.pushRelayUrl) return { relay: false };
+  return { relay: true, relayUrl: config.pushRelayUrl ?? null };
+}
+
 export function createPushClient(options: PushClientOptions): PushRouter {
   const config = options.apnsConfig ?? loadAPNsConfig(options.home);
   const direct = options.direct ?? new APNsClient(config);

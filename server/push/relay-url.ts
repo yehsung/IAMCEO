@@ -5,9 +5,10 @@
  * (Cloud Run 주소 "https://relay-….run.app", 끝의 /v1/… 은 빼고)로 채운다. Firebase Hosting 주소(*.web.app)는 쓰지 않는다:
  * Hosting 은 요청한 Mac 의 IP 를 몇 달 보관한다(relay/README.md).
  * 비어 있는(null) 동안에는 config.json 의 pushRelayUrl 이 없으면 중계를 쓰지 않는다(지금처럼 '푸시 키 없음').
- * 아직 만들지 않은 프로젝트 이름을 미리 적어 두면 남이 그 이름을 먼저 차지해 토큰을 받을 수 있어 비워 둔다.
+ * 2026-11-14 배포: Firebase 프로젝트 iamceo-relay(us-central1)의 함수 relay. Cloud Run 의 고정 주소(서비스-프로젝트 번호.지역.run.app)다.
+ * 이 주소에서는 z 로 끝나는 경로(/healthz)를 앞단이 막으므로 상태 확인은 /v1/health 로 한다.
  */
-export const DEFAULT_PUSH_RELAY_URL: string | null = null;
+export const DEFAULT_PUSH_RELAY_URL: string | null = "https://relay-480267814589.us-central1.run.app";
 
 /** 중계 주소 검사. https 만, 시험용으로 이 Mac(127.0.0.1·localhost·::1)의 http 만 받는다. 끝의 / 는 뗀다. */
 export function normalizePushRelayUrl(value: unknown): string {

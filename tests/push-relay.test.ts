@@ -13,7 +13,7 @@ import { loadAPNsConfig } from "../server/push/config.ts";
 import { PushStore } from "../server/push/store.ts";
 import { PushWorker } from "../server/push/worker.ts";
 import { createPushHandler } from "../server/push/routes.ts";
-import { DEFAULT_PUSH_RELAY_URL, PUSH_RELAY_FILE, PushRouter, RelayClient, createPushClient, normalizePushRelayUrl,
+import { DEFAULT_PUSH_RELAY_URL, PUSH_RELAY_FILE, PushRouter, RelayClient, createPushClient, normalizePushRelayUrl, serverPushRelayOptions,
   pushRelaySecrets, pushRelaySummary, readPushRelayCredential, relayPushBody, writePushRelayCredential } from "../server/push/relay.ts";
 import { loadConfig, pushRelaySettings, updateConfigFile } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
@@ -113,9 +113,10 @@ describe("relay address and settings", () => {
       expect(() => normalizePushRelayUrl(bad)).toThrow();
     }
   });
-  test("the default address stays empty until the relay is actually deployed", () => {
-    // 아직 만들지 않은 Firebase 프로젝트 이름을 박아 두면 남이 먼저 차지할 수 있다. 채우는 것은 배포 뒤의 한 줄 변경이다.
-    expect(DEFAULT_PUSH_RELAY_URL).toBeNull();
+  test("the default address is the deployed relay (https, Cloud Run, no path)", () => {
+    // 2026-11-14 배포한 iamceo-relay 의 Cloud Run 주소. Firebase Hosting(*.web.app)·cloudfunctions.net 이 아니다.
+    expect(DEFAULT_PUSH_RELAY_URL).toBe("https://relay-480267814589.us-central1.run.app");
+    expect(normalizePushRelayUrl(DEFAULT_PUSH_RELAY_URL)).toBe(DEFAULT_PUSH_RELAY_URL!);
   });
   test("config.json: false turns it off, a wrong value turns it off instead of stopping the server", () => {
     const warnings: string[] = [];
@@ -163,12 +164,27 @@ describe("which way each environment sends", () => {
       { environment: "production", bundleId: DEFAULT_PUSH_BUNDLE_ID, state: "ready", lastError: null, via: "relay" },
     ]);
   });
-  test("turned off, or no address: exactly as before (unconfigured)", () => {
+  test("server start: test mode never uses the default relay (a live DB copy holds the owner's real device tokens)", () => {
+    expect(serverPushRelayOptions({}, {})).toEqual({ relay: true, relayUrl: null });
+    expect(serverPushRelayOptions({ pushRelay: false }, {})).toEqual({ relay: false });
+    expect(serverPushRelayOptions({}, { IAMCEO_TEST: "1" })).toEqual({ relay: false });
+    expect(serverPushRelayOptions({ pushRelayUrl: "http://127.0.0.1:5001/relay" }, { IAMCEO_TEST: "1" })).toEqual({ relay: true, relayUrl: "http://127.0.0.1:5001/relay" });
+    expect(serverPushRelayOptions({ pushRelay: false, pushRelayUrl: "https://relay.example.com" }, { IAMCEO_TEST: "1" })).toEqual({ relay: false });
     const dir = home();
-    for (const router of [createPushClient({ home: dir, relay: false, relayUrl: url }), createPushClient({ home: dir, relayUrl: null })]) {
+    const router = createPushClient({ home: dir, ...serverPushRelayOptions({}, { IAMCEO_TEST: "1" }) });
+    cleanups.push(() => router.close());
+    expect(router.relay).toBeNull();
+  });
+  test("turned off: exactly as before (unconfigured); no address given: the deployed default", () => {
+    const dir = home();
+    for (const router of [createPushClient({ home: dir, relay: false, relayUrl: url }), createPushClient({ home: dir, relay: false })]) {
       cleanups.push(() => router.close());
       expect(router.relay).toBeNull();
       expect(router.status().map((p) => [p.state, p.via])).toEqual([["unconfigured", undefined], ["unconfigured", undefined]]);
+    }
+    for (const router of [createPushClient({ home: dir }), createPushClient({ home: dir, relayUrl: null })]) {
+      cleanups.push(() => router.close());
+      expect(router.relay?.url).toBe(DEFAULT_PUSH_RELAY_URL!);
     }
   });
   test("a production key on this Mac wins: sent directly, never to the relay", () => {

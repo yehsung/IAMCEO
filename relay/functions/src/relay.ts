@@ -15,7 +15,7 @@
 //     429 { reason, scope }                        + Retry-After. scope: installation(이 Mac)·token(그 iPhone 알림만 늦춤)
 //     503 { reason }                               (+ Retry-After) 보내지 않았다·APNs 가 잠시 못 받는다. 다시 보내도 된다
 //     504 { state:"unknown" }                      보냈는지 모른다. 다시 보내지 않는다
-//   GET /healthz                                   200/503 { ok, mode, apns:{ suspended, reason, last, lastAt } } — 사용자 정보 없음
+//   GET /v1/health (= /healthz)                    200/503 { ok, mode, apns:{ suspended, reason, last, lastAt } } — 사용자 정보 없음
 //
 // 기록하지 않는 것: 토큰, IP, Authorization, 본문, serverId·eventId·대상 ID. 오류 기록은 설치 ID·사유 코드·시각만.
 import { createInstallation, validMaster, verifyAuthorization } from "./credentials.ts";
@@ -116,7 +116,8 @@ export class Relay {
       this.roll(now);
       const path = normalizePath(request.path);
       const method = request.method.toUpperCase();
-      if (path === "/healthz") return method === "GET" || method === "HEAD" ? this.health() : json(405, { reason: "method_not_allowed" }, { allow: "GET, HEAD" });
+      // Cloud Run 주소(run.app)는 z 로 끝나는 경로를 앞단이 막는다(예약 경로). 같은 응답을 /v1/health 로도 준다.
+      if (path === "/healthz" || path === "/v1/health") return method === "GET" || method === "HEAD" ? this.health() : json(405, { reason: "method_not_allowed" }, { allow: "GET, HEAD" });
       if (path === "/v1/installations") return method === "POST" ? this.create(request, now) : json(405, { reason: "method_not_allowed" }, { allow: "POST" });
       if (path === "/v1/push") return method === "POST" ? await this.push(request, now) : json(405, { reason: "method_not_allowed" }, { allow: "POST" });
       return json(404, { reason: "not_found" });

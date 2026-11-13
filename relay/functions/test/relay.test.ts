@@ -61,6 +61,9 @@ describe("경로와 설치", () => {
     expect(get.status).toBe(405); expect(get.headers.allow).toBe("POST");
     expect((await relay.handle(request("DELETE", "/v1/installations"))).status).toBe(405);
     expect((await relay.handle(request("POST", "/healthz", {}))).status).toBe(405);
+    // run.app 에서는 /healthz 가 앞단에서 막혀 같은 응답을 /v1/health 로 준다.
+    expect((await relay.handle(request("GET", "/v1/health"))).status).toBe(200);
+    expect((await relay.handle(request("POST", "/v1/health", {}))).status).toBe(405);
   });
   test("자격이 없거나 틀리면 401(APNs 로 보내지 않는다)", async () => {
     const { relay, transport } = setup();

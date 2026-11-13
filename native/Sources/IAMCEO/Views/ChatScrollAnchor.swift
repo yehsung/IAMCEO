@@ -153,6 +153,8 @@ extension View {
         highlightedMessageID = messageID
         highlightTask = Task { [weak self] in
             do { try await Task.sleep(for: duration) } catch { return }
+            // 잠을 다 잔 뒤 메인 액터를 기다리는 사이에 새 강조로 바뀌었으면(취소됨) 새 강조를 지우지 않는다.
+            guard !Task.isCancelled else { return }
             self?.highlightedMessageID = nil
             self?.highlightTask = nil
         }
@@ -275,7 +277,7 @@ extension View {
         let quiet = looseScrollQuiet
         looseScrollEnd = Task { [weak self] in
             do { try await Task.sleep(for: quiet) } catch { return }
-            guard let self, !self.macBracketedScroll else { return }
+            guard !Task.isCancelled, let self, !self.macBracketedScroll else { return }
             self.looseScrollEnd = nil
             self.macLiveScrolling = false
         }

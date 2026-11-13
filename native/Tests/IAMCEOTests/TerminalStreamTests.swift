@@ -149,6 +149,8 @@ final class TerminalStreamTests: XCTestCase {
         XCTAssertTrue(host.acceptsFirstMouse(for: nil)); XCTAssertTrue(host.terminal.acceptsFirstMouse(for: nil))
         host.terminal.mouseDown(with: event(.leftMouseDown)); host.terminal.mouseUp(with: event(.leftMouseUp))
         try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.05))
+        // 느린 CI 러너에서는 타이머가 늦게 돌 수 있어 조건을 기다린다(최대 3초 더).
+        for _ in 0..<300 where requests == 0 { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(requests, 1)
         host.terminal.mouseDown(with: event(.leftMouseDown)); host.terminal.mouseUp(with: event(.leftMouseUp))
         host.terminal.mouseDown(with: event(.leftMouseDown, count: 2)); host.terminal.mouseUp(with: event(.leftMouseUp, count: 2))

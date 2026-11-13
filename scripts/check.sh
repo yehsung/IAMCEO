@@ -133,6 +133,9 @@ build() {
   xcodebuild -quiet -project "$CHECK_ROOT/native/IAMCEO.xcodeproj" -scheme IAMCEO-iOS -configuration Debug \
     -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
     -derivedDataPath "$CHECK_ROOT/dd-ios" CODE_SIGNING_ALLOWED=NO build
+  # 한국어 기기가 영어 문구 파일을 읽지 않게: en.lproj 의 파일은 모두 ko.lproj 에도 있어야 한다(4차 lang-6).
+  bash scripts/check-app-languages.sh "$CHECK_ROOT/dd-mac/Build/Products/Debug/IAMCEO.app" \
+    "$CHECK_ROOT/dd-ios/Build/Products/Debug-iphonesimulator/IAMCEO.app"
 }
 # 출시 앱 호환(D5): 서버가 실제 응답과 실시간 사건을 파일로 남기고(tests/compat-dump.test.ts),
 # 출시 태그에서 꺼낸 그 앱의 해석 코드가 그것을 풀어 본다(scripts/compat-decoders/run.ts).

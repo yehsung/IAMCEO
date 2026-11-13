@@ -136,6 +136,33 @@ private final class OfflineSwitches: @unchecked Sendable {
         XCTAssertNotNil(store.lastSeen)
     }
 
+    /// 4차 확인 새 문제 3: 마지막 상태를 보는 채 다시 붙다가 서버가 답한 실패(접속 코드 거절·응답 오류)로 끝나면, 앞선 망 실패의
+    /// 까닭을 남기지 않는다(Mac 사이드바의 '눌러서 다시 연결 · 까닭'이 옛 까닭을 보이지 않게).
+    func testAnsweredFailureAfterAnUnreachableOneDropsTheOldReason() async throws {
+        for answered in [401, 500] {
+            let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+            let switches = OfflineSwitches(); switches.down = true
+            let server = WriteTestServer()
+            let net = try IsolatedTestNetwork { request in
+                if switches.down { throw URLError(.cannotConnectToHost) }
+                if switches.unauthorized { return IsolatedTestHTTPReply(status: answered, data: Data(#"{"error":"거절"}"#.utf8)) }
+                return try server.handle(request)
+            }
+            let offline = OfflineStateStore(directory: root)
+            await seed(offline, net)
+            let store = try store(net, offline: offline)
+            store.restoreLastSeen()
+            await store.connect()
+            XCTAssertNotNil(store.connectionIssue, "\(answered)")
+            switches.down = false; switches.unauthorized = true
+            await store.connect()
+            XCTAssertEqual(store.connectionStatus, .failed, "\(answered)")
+            XCTAssertNil(store.lastSeen, "\(answered)")
+            XCTAssertNil(store.connectionIssue, "\(answered): 서버가 답한 실패가 옛 망 실패의 까닭을 대신한다")
+            XCTAssertNotNil(store.errorMessage, "\(answered): 연결 화면이 지금 까닭을 보인다")
+        }
+    }
+
     func testSavesOnlyServerConfirmedStateAsProtectedFile() async throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let server = WriteTestServer(), net = try network(server, OfflineSwitches())
@@ -264,6 +291,115 @@ private final class OfflineSwitches: @unchecked Sendable {
         XCTAssertEqual(server.read { server in server.sentIDs.map { server.messages[$0]?.body ?? "" } }, ["이 서버에 갈 글"])
         XCTAssertTrue(OfflineStateStore(directory: root).outbox.items.isEmpty, "기기의 파일에서도 사라진다")
         store.disconnect()
+    }
+
+    /// 4차 확인 새 문제 2: 같은 서버를 다른 주소로 다시 붙으면(401 뒤 QR 다시 연결에서 *.ts.net 이름 대신 HTTPS 주소가 앞에 오는 등)
+    /// 그 주소 몫의 글을 지우지 않고 이 주소 몫으로 옮겨 순서대로 보낸다. 같은 서버 = 같은 데이터 폴더(home) + 같은 기기
+    /// (같은 호스트, 또는 서버가 알려 준 Tailscale 주소). 같은 Mac 의 다른 폴더(시험 서버)와 다른 서버 몫은 예전처럼 지운다.
+    func testReconnectingToTheSameServerThroughAnotherAddressKeepsTheQueue() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let server = WriteTestServer()
+        let net = try network(server, OfflineSwitches())
+        let here = DraftStore.endpointNamespace(net.endpoint)
+        let home = "/Users/owner/.iamceo"
+        server.change { $0.bootstrap.home = home; $0.bootstrap.urls = ["http://127.0.0.1:7878", "http://100.64.0.9:7878"] }
+        let owner = QueueOwner(home: home, addresses: ["http://127.0.0.1:7878", "http://100.64.0.9:7878"])
+        // 같은 호스트의 다른 주소(이름 ↔ HTTPS 처럼 포트·http/https 만 다름)
+        let sameHost = "https://127.0.0.1", tailnetIP = "http://100.64.0.9:7878"
+        let testServer = "https://127.0.0.1:8443", otherServer = "http://100.64.0.10:7878"
+        let offline = OfflineStateStore(directory: root)
+        _ = try offline.enqueue(namespace: sameHost, projectID: "p", targetMemberID: nil, targetName: nil, text: "옛 주소로 둔 글 1", owner: owner)
+        _ = try offline.enqueue(namespace: testServer, projectID: "p", targetMemberID: nil, targetName: nil, text: "시험 서버 글",
+                                owner: QueueOwner(home: "/private/tmp/iamceo-test-home", addresses: []))
+        _ = try offline.enqueue(namespace: tailnetIP, projectID: "p", targetMemberID: nil, targetName: nil, text: "옛 주소로 둔 글 2", owner: owner)
+        _ = try offline.enqueue(namespace: otherServer, projectID: "p", targetMemberID: nil, targetName: nil, text: "다른 서버 글",
+                                owner: QueueOwner(home: home, addresses: [otherServer]))
+        _ = try offline.enqueue(namespace: sameHost, projectID: "p", targetMemberID: nil, targetName: nil, text: "옛 주소로 둔 글 3", owner: owner)
+        let store = try store(net, offline: offline)
+        await store.connect()
+        try await waitWhile { server.read { $0.sentIDs.count } < 3 || store.outboxFlushing }
+        XCTAssertEqual(server.read { server in server.sentIDs.map { server.messages[$0]?.body ?? "" } },
+                       ["옛 주소로 둔 글 1", "옛 주소로 둔 글 2", "옛 주소로 둔 글 3"], "같은 서버의 다른 주소 몫은 지우지 않고 쓴 순서대로 보낸다")
+        XCTAssertTrue(offline.items(namespace: sameHost).isEmpty)
+        XCTAssertTrue(offline.items(namespace: tailnetIP).isEmpty)
+        XCTAssertTrue(offline.items(namespace: testServer).isEmpty, "같은 Mac 이어도 데이터 폴더가 다른 서버(시험 서버) 몫은 지운다")
+        XCTAssertTrue(offline.items(namespace: otherServer).isEmpty, "자기 주소로 알려 주지 않은 서버 몫은 예전처럼 지운다")
+        XCTAssertNil(store.outboxPausedReason)
+        XCTAssertNil(OfflineStateStore(directory: root).outbox.owners, "글이 남지 않은 주소의 표지도 남기지 않는다")
+        store.disconnect()
+    }
+
+    /// 옛 주소로 보낸 글의 결과를 모르는 채 주소가 바뀌었으면, 옮긴 글은 멈춰 두고 대표가 확인한 뒤 이어서 보낸다
+    /// (그 결과는 옛 주소의 전송 기록이 맡아 새 주소로는 확인할 수 없다. 순서를 지킨다).
+    func testMovedQueueWaitsForTheOwnerWhenAnEarlierResultIsUnknown() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let server = WriteTestServer()
+        let net = try network(server, OfflineSwitches())
+        let home = "/Users/owner/.iamceo", before = "https://127.0.0.1"
+        server.change { $0.bootstrap.home = home }
+        let owner = QueueOwner(home: home, addresses: [])
+        let offline = OfflineStateStore(directory: root)
+        let left = try offline.enqueue(namespace: before, projectID: "p", targetMemberID: nil, targetName: nil, text: "결과를 모르는 글", owner: owner)
+        try offline.markSent(id: left.id, attemptID: "attempt-before")
+        _ = try offline.enqueue(namespace: before, projectID: "p", targetMemberID: nil, targetName: nil, text: "다음 글", owner: owner)
+        let store = try store(net, offline: offline)
+        await store.connect()
+        await store.refresh()
+        XCTAssertEqual(store.queuedMessages.map(\.text), ["다음 글"])
+        XCTAssertEqual(store.outboxPausedReason, "앞서 보낸 글의 접수를 확인하기 전에 서버 주소가 바뀌었습니다. 대화에서 그 글이 들어갔는지 확인한 뒤 이어서 보내 주세요.")
+        XCTAssertTrue(server.read { $0.sentIDs.isEmpty }, "멈춘 동안에는 보내지 않는다")
+        XCTAssertTrue(offline.sent(namespace: before).isEmpty)
+        XCTAssertEqual(offline.owner(namespace: store.writeNamespace)?.home, home, "옮긴 글은 지금 서버의 표지를 단다(다음에 또 주소가 바뀌어도 옮긴다)")
+        store.resumeOutbox()
+        try await waitWhile { !store.queuedMessages.isEmpty || store.outboxFlushing }
+        XCTAssertEqual(server.read { server in server.sentIDs.map { server.messages[$0]?.body ?? "" } }, ["다음 글"])
+        store.disconnect()
+    }
+
+    /// 입력칸에서 넣은 글은 그때 보던 서버의 표지(데이터 폴더·자기 주소)를 함께 남긴다.
+    func testQueuedMessagesRememberWhichServerTheyAreFor() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let switches = OfflineSwitches(); switches.down = true
+        let net = try network(WriteTestServer(), switches)
+        let offline = OfflineStateStore(directory: root)
+        await offline.saveLastSeen(LastSeenSnapshot(namespace: DraftStore.endpointNamespace(net.endpoint), savedAt: Date(timeIntervalSinceNow: -60),
+                                                    serverID: nil,
+                                                    bootstrap: Bootstrap(projects: [ProjectSummary(id: "p")], home: "/Users/owner/.iamceo",
+                                                                         urls: ["http://100.64.0.9:7878"]),
+                                                    state: lastState()))
+        let drafts = DraftStore(persist: false)
+        let store = try store(net, offline: offline, drafts: drafts)
+        store.restoreLastSeen()
+        drafts.setText("연결되면 보낼 글", for: leadKey)
+        XCTAssertTrue(store.queueMessage(targetMemberID: nil))
+        XCTAssertEqual(OfflineStateStore(directory: root).owner(namespace: store.writeNamespace),
+                       QueueOwner(home: "/Users/owner/.iamceo", addresses: ["http://100.64.0.9:7878"]))
+    }
+
+    /// 같은 서버 판정: 같은 데이터 폴더 + 같은 기기(같은 호스트, 또는 서버가 알려 준 Tailscale 주소. 포트까지).
+    func testSameServerIsJudgedByTheFolderAndTheAddressesTheServerReports() {
+        let home = "/Users/owner/.iamceo"
+        let name = "http://office-mac.tail1234.ts.net:7878", https = "https://office-mac.tail1234.ts.net", ip = "http://100.64.0.9:7878"
+        let owner = QueueOwner(home: home, addresses: ["http://127.0.0.1:7878", ip])
+        let server = Bootstrap(home: home, urls: ["http://127.0.0.1:7878", ip])
+        func same(_ old: String, _ current: String, owner: QueueOwner? = owner, server: Bootstrap = server) -> Bool {
+            AppStore.sameServer(old, owner: owner, as: current, server: server)
+        }
+        XCTAssertTrue(same(name, "http://office-mac.tail1234.ts.net:7878/", owner: nil), "같은 주소(끝의 / 만 다름)는 표지가 없어도 같다")
+        XCTAssertTrue(same(name, https), "iPhone 의 흔한 경우: 이름 주소 → HTTPS 주소(같은 호스트)")
+        XCTAssertTrue(same(https, name), "HTTPS 를 끈 뒤 이름 주소로")
+        XCTAssertTrue(same(ip, https), "지금 서버가 옛 주소(100.x)를 자기 주소로 알려 준다")
+        XCTAssertTrue(same(https, ip), "옛 서버가 지금 주소(100.x)를 자기 주소로 알려 주었다")
+        XCTAssertFalse(same(name, https, owner: QueueOwner(home: "/private/tmp/test-home", addresses: [])), "같은 Mac 의 다른 폴더(시험 서버)는 다른 서버")
+        XCTAssertFalse(same(name, https, owner: nil), "표지가 없는 글은 예전처럼 다른 서버로 본다")
+        XCTAssertFalse(same(name, https, owner: QueueOwner(home: "", addresses: []), server: Bootstrap(home: "", urls: [])), "폴더를 모르면 같다고 하지 않는다")
+        XCTAssertFalse(same(ip, "https://other-mac.tail1234.ts.net", server: Bootstrap(home: home, urls: ["http://100.64.0.10:7878"])),
+                       "다른 기기는 폴더 이름이 같아도 다른 서버")
+        XCTAssertFalse(same(ip, https, server: Bootstrap(home: home, urls: ["http://100.64.0.9:7879"])), "알려 준 주소는 포트까지 맞아야 한다")
+        XCTAssertFalse(same("http://127.0.0.1:7878", https, server: Bootstrap(home: home, urls: ["http://127.0.0.1:7878"])),
+                       "어느 Mac 에서나 자기 자신인 127.0.0.1 은 알려 줘도 세지 않는다")
+        XCTAssertFalse(same(https, "http://127.0.0.1:7878", owner: QueueOwner(home: home, addresses: ["http://127.0.0.1:7878"])))
+        XCTAssertFalse(same("주소 아님", https))
     }
 
     /// 4차 리뷰 data-5: 보관했거나 지운 프로젝트에 둔 글은 보낼 곳이 없다. '다른 프로젝트를 열면 보낸다'고 세지 않고,

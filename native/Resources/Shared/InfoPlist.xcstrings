@@ -13,7 +13,7 @@
         },
         "ko" : {
           "stringUnit" : {
-            "state" : "new",
+            "state" : "translated",
             "value" : "연결 QR을 읽고, 대화에 붙일 사진을 찍습니다."
           }
         }
@@ -31,7 +31,7 @@
         },
         "ko" : {
           "stringUnit" : {
-            "state" : "new",
+            "state" : "translated",
             "value" : "내 Mac의 IAMCEO 서버에 연결합니다."
           }
         }
@@ -49,7 +49,7 @@
         },
         "ko" : {
           "stringUnit" : {
-            "state" : "new",
+            "state" : "translated",
             "value" : "받은 이미지를 사진 앱에 저장합니다."
           }
         }

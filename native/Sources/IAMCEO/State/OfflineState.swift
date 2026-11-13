@@ -45,6 +45,12 @@ struct QueuedMessage: Codable, Sendable, Identifiable, Equatable {
 
     var draftGeneration: UUID { UUID(uuidString: id) ?? UUID() }
     @MainActor var draftKey: String { DraftStore.key(project: projectID, target: targetMemberID) }
+
+    /// 같은 글을 다른 주소 몫으로(ID·만든 때·고친 때 그대로). 같은 서버를 다른 주소로 다시 붙었을 때만 쓴다.
+    func moved(to namespace: String) -> QueuedMessage {
+        QueuedMessage(id: id, namespace: namespace, projectID: projectID, targetMemberID: targetMemberID, targetName: targetName,
+                      text: text, createdAt: createdAt, editedAt: editedAt)
+    }
 }
 
 /// 대기열에서 나가 서버로 간 글. 결과가 정해질 때까지 다음 글을 보내지 않는다(순서를 지킨다).
@@ -58,6 +64,20 @@ struct OutboxState: Codable, Sendable, Equatable {
     var sent: [SentQueuedMessage] = []
     /// 서버별로 보내기를 멈춘 까닭(앞선 글이 접수되지 않았을 때). 대표가 '이어서 보내기'를 누르면 지운다.
     var paused: [String: String] = [:]
+    /// 주소마다 그 글을 쓸 때 보던 서버(같은 서버를 다른 주소로 다시 붙었는지 가릴 때만 쓴다). 이 칸이 없던 파일도 읽힌다.
+    var owners: [String: QueueOwner]? = nil
+}
+
+/// 글을 쓸 때 보던 서버의 표지: 그 서버의 데이터 폴더(Bootstrap.home)와 서버가 알려 준 자기 주소(Bootstrap.urls).
+struct QueueOwner: Codable, Sendable, Equatable {
+    let home: String
+    let addresses: [String]
+
+    init(home: String, addresses: [String]) {
+        self.home = home
+        self.addresses = Array(addresses.prefix(16))
+    }
+    init(_ bootstrap: Bootstrap) { self.init(home: bootstrap.home, addresses: bootstrap.urls) }
 }
 
 enum OutboxError: Error, Equatable, LocalizedError {
@@ -229,8 +249,9 @@ final class OfflineStateStore {
     func sent(namespace: String) -> [SentQueuedMessage] { outbox.sent.filter { $0.namespace == namespace } }
 
     /// 기기에 남은 뒤에야 돌려준다(남기지 못하면 던지고, 입력칸의 글은 그대로 둔다).
+    /// `owner` 는 그 글을 쓸 때 보던 서버(같은 서버를 다른 주소로 다시 붙으면 이 글을 옮겨 보내려고 남긴다).
     @discardableResult func enqueue(namespace: String, projectID: String, targetMemberID: String?, targetName: String?,
-                                    text: String, now: Date = Date()) throws -> QueuedMessage {
+                                    text: String, owner: QueueOwner? = nil, now: Date = Date()) throws -> QueuedMessage {
         if let persistenceError { throw OutboxError.unavailable(persistenceError) }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw OutboxError.empty }
         guard text.count <= Self.textLimit else { throw OutboxError.tooLong }
@@ -238,9 +259,14 @@ final class OfflineStateStore {
         guard items(namespace: namespace).count < Self.itemLimit else { throw OutboxError.full }
         let item = QueuedMessage(id: UUID().uuidString, namespace: namespace, projectID: projectID, targetMemberID: targetMemberID,
                                  targetName: targetName, text: text, createdAt: now)
-        try update { $0.items.append(item) }
+        try update { state in
+            state.items.append(item)
+            if let owner { state.owners = (state.owners ?? [:]).merging([namespace: owner]) { _, new in new } }
+        }
         return item
     }
+
+    func owner(namespace: String) -> QueueOwner? { outbox.owners?[namespace] }
 
     /// 고친 글은 같은 자리에서 새 ID 로 바뀐다. 이미 보내기 시작한 글이면 `missing`.
     @discardableResult func replaceText(id: String, with text: String, now: Date = Date()) throws -> QueuedMessage {
@@ -301,8 +327,32 @@ final class OfflineStateStore {
         }
     }
 
+    /// 글·기다리던 결과·멈춤이 남아 있는 주소(namespace)들.
+    var namespaces: Set<String> {
+        Set(outbox.items.map(\.namespace) + outbox.sent.map(\.namespace) + outbox.paused.keys)
+    }
+
+    /// 같은 서버를 다른 주소로 다시 붙었을 때(100.x ↔ *.ts.net ↔ HTTPS. 4차 확인 새 문제 2): `from` 주소 몫의 아직 보내지 않은
+    /// 글을 `to` 주소 몫으로 옮긴다. 순서는 그대로다. 옛 주소로 보낸 글의 결과를 아직 몰랐으면(그 확인은 옛 주소의 전송 기록이
+    /// 맡아 새 주소로는 할 수 없다) 옮긴 글을 `waitingReason` 으로 멈춰 두어 대표가 확인한 뒤 '이어서 보내기'로 보낸다.
+    /// 옛 주소의 멈춤도 따라온다. 옛 주소의 기다리던 결과는 지운다.
+    /// `owner` 는 지금 붙은 서버(옮긴 글의 새 표지).
+    func moveQueue(from: String, to: String, owner: QueueOwner, waitingReason: String) throws {
+        guard from != to, namespaces.contains(from) else { return }
+        try update { state in
+            if state.items.contains(where: { $0.namespace == from }) { state.owners = (state.owners ?? [:]).merging([to: owner]) { _, new in new } }
+            let moving = state.items.contains { $0.namespace == from }
+            let waited = state.sent.contains { $0.namespace == from }
+            state.items = state.items.map { $0.namespace == from ? $0.moved(to: to) : $0 }
+            state.sent.removeAll { $0.namespace == from }
+            let reason = state.paused.removeValue(forKey: from) ?? (waited ? waitingReason : nil)
+            if moving, let reason, state.paused[to] == nil { state.paused[to] = reason }
+        }
+    }
+
     /// 다른 서버에 연결했을 때: 그 서버 몫만 남기고 이전 서버들에 보내려던 글·기다리던 결과·멈춤을 지운다(4차 리뷰 data-4).
     /// 다른 서버에 붙은 동안에는 옛 몫을 보거나 지울 화면이 없고, 옛 서버에 다시 붙으면 묻지 않고 나가기 때문이다.
+    /// 같은 서버의 다른 주소 몫은 먼저 `moveQueue` 로 옮겨 둔다(AppStore.carryOutboxFromOtherAddresses).
     func removeAll(except namespace: String) throws {
         guard outbox.items.contains(where: { $0.namespace != namespace }) || outbox.sent.contains(where: { $0.namespace != namespace })
                 || outbox.paused.keys.contains(where: { $0 != namespace }) else { return }
@@ -317,6 +367,12 @@ final class OfflineStateStore {
         if let persistenceError { throw OutboxError.unavailable(persistenceError) }
         var next = outbox
         change(&next)
+        // 글·결과·멈춤이 남지 않은 주소의 표지는 지운다.
+        if let owners = next.owners {
+            let live = Set(next.items.map(\.namespace) + next.sent.map(\.namespace) + next.paused.keys)
+            let kept = owners.filter { live.contains($0.key) }
+            next.owners = kept.isEmpty ? nil : kept
+        }
         if enabled {
             guard let url = outboxURL else { throw OutboxError.unavailable(String(localized: "기기에 저장할 폴더를 찾지 못했습니다")) }
             do {

@@ -72,7 +72,7 @@ On the Mac, `iamceo doctor` shows the current state in its Tailscale item → [T
 - If the server did not accept one, the rest pause. Resend it, put it back in the composer or discard it from "Unsent message" above the composer, then press **Continue sending** in the list.
 - While the App is still confirming whether an earlier message from the same composer arrived, you can queue a new one only after that check ends (so the same message is never sent twice).
 - Messages left for an archived or deleted project have nowhere to go; they appear separately at the bottom of the list. Copy anything you need, then delete them.
-- Connecting to another server deletes the messages that were waiting for the previous server. Up to 50 messages can wait for one server.
+- Connecting to another server deletes the messages that were waiting for the previous server. Reconnecting to the same Mac through another address (its Tailscale address, Mac name or HTTPS address) keeps them and sends them. Up to 50 messages can wait for one server.
 
 Neither leaves the iPhone or goes into device backups, and both are kept in files that cannot be read while the iPhone is locked → [Privacy Policy](../../PRIVACY.md#english)
 

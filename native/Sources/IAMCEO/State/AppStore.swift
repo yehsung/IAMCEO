@@ -610,8 +610,10 @@ final class AppStore: ProjectManagementStore {
             connectedCredentials = (endpoint, accessCode.trimmingCharacters(in: .whitespacesAndNewlines))
             // F1: 새로 붙은 서버다. 앞서 남긴 다른 연결의 마지막 상태는 지운다(이 서버의 상태는 곧 다시 남긴다).
             // 다른 서버에 보내려던 대기열도 지운다. 이 서버 몫은 그대로 둔다(접속 코드가 바뀌어 같은 서버에 다시 붙은 경우).
+            // 같은 서버를 다른 주소로 붙었으면 그 주소 몫은 이 주소 몫으로 옮겨 보낸다(4차 확인 새 문제 2).
             if !sameServer {
                 offline.clearLastSeen()
+                carryOutboxFromOtherAddresses(server: initial)
                 try? offline.removeAll(except: writeNamespace)
             }
             rememberServerAddresses()
@@ -659,6 +661,9 @@ final class AppStore: ProjectManagementStore {
                 retryableConnect = (endpoint, accessCode)
                 scheduleConnectRetry()
             }
+            // 서버가 답한 실패(접속 코드 거절·응답 오류)면, 마지막 상태를 보는 채 남겨 둔 앞선 망 실패의 까닭은 지운다.
+            // 남기면 Mac 사이드바의 '눌러서 다시 연결 · 까닭'이 옛 까닭을 보인다(4차 확인 새 문제 3).
+            if !ConnectionHealth.isUnreachable(error) { connectionIssue = nil }
             // F1: 마지막 상태를 띄운 채였다면, 서버에 닿지 않은 실패는 그 상태를 두고 줄에 까닭을 보인다.
             lastSeenConnectFailed(error)
         }

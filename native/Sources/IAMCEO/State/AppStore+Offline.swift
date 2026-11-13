@@ -265,7 +265,7 @@ extension AppStore {
         let name = targetMemberID.flatMap { id in members.first { $0.id == id }?.name }
         do {
             try offline.enqueue(namespace: writeNamespace, projectID: projectID, targetMemberID: targetMemberID,
-                                targetName: name, text: snapshot.text)
+                                targetName: name, text: snapshot.text, owner: bootstrap.map { QueueOwner($0) })
         } catch {
             explainMessageSendBlock(error.localizedDescription, targetMemberID: targetMemberID, whileBlocked: false)
             return false
@@ -290,6 +290,37 @@ extension AppStore {
             dismissPreparedQueueAttempts(generation: UUID(uuidString: id))
             return nil
         } catch { return error.localizedDescription }
+    }
+
+    /// 연결되면 보낼 글은 주소별로 둔다. 같은 서버를 다른 주소(*.ts.net 이름 ↔ HTTPS ↔ 100.x)로 다시 붙으면 예전에는 '다른 서버'로
+    /// 보고 그 글을 말없이 지웠다(4차 확인 새 문제 2. 401 뒤 QR 다시 연결에서 HTTPS 주소가 앞에 오면 흔하다). 이제 그 주소 몫을
+    /// 이 주소 몫으로 옮겨 순서대로 보낸다. 연결이 성공한 뒤 `removeAll(except:)` 앞에서 부른다.
+    func carryOutboxFromOtherAddresses(server: Bootstrap) {
+        let here = writeNamespace
+        guard here != "unassigned" else { return }
+        for namespace in offline.namespaces.sorted() where namespace != here
+            && Self.sameServer(namespace, owner: offline.owner(namespace: namespace), as: here, server: server) {
+            try? offline.moveQueue(from: namespace, to: here, owner: QueueOwner(server),
+                                   waitingReason: String(localized: "앞서 보낸 글의 접수를 확인하기 전에 서버 주소가 바뀌었습니다. 대화에서 그 글이 들어갔는지 확인한 뒤 이어서 보내 주세요."))
+        }
+    }
+
+    /// `old` 주소 몫의 글(그 글을 쓸 때 보던 서버 `owner`)이 지금 `current` 주소로 붙은 `server` 의 것인가.
+    /// - 같은 데이터 폴더(Bootstrap.home)를 쓰는 서버여야 한다. 같은 Mac 의 시험 서버처럼 폴더가 다른 서버는 다른 서버다.
+    /// - 그리고 같은 기기여야 한다: 주소의 호스트가 같거나(포트·http/https 만 다름: *.ts.net 이름 ↔ HTTPS),
+    ///   한쪽 서버가 다른 쪽 주소를 자기 주소로 알려 주었다(Bootstrap.urls 는 100.x 처럼 IP 만 싣는다). 알려 준 주소는
+    ///   Tailscale 주소만 센다: 127.0.0.1 은 어느 Mac 에서나 그 Mac 자신이라 기기를 가리지 못한다(PairingRequest.knownHosts 와 같다).
+    /// - 표지가 없는 글(표지를 남기기 전 판)은 예전처럼 다른 서버로 본다.
+    static func sameServer(_ old: String, owner: QueueOwner?, as current: String, server: Bootstrap) -> Bool {
+        func endpoint(_ address: String) -> ServerEndpoint? { try? ServerEndpoint(address) }
+        func origin(_ address: String) -> String? { endpoint(address).map(DraftStore.endpointNamespace) }
+        func onTailnet(_ address: String) -> Bool { endpoint(address)?.url.host.map(Tailnet.isTailnetHost) ?? false }
+        guard let oldOrigin = origin(old), let currentOrigin = origin(current) else { return false }
+        if oldOrigin == currentOrigin { return true }
+        guard let owner, !owner.home.isEmpty, owner.home == server.home else { return false }
+        if let a = endpoint(old)?.url.host?.lowercased(), a == endpoint(current)?.url.host?.lowercased() { return true }
+        return (onTailnet(old) && server.urls.contains { origin($0) == oldOrigin })
+            || (onTailnet(current) && owner.addresses.contains { origin($0) == currentOrigin })
     }
 
     /// '이어서 보내기': 멈춘 까닭을 대표가 확인했다.

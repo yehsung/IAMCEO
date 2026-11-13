@@ -155,21 +155,118 @@ final class KoreanTextFreezeTests: XCTestCase {
     }
 
     /// 4차 리뷰 lang-6: 한국어도 영어도 고르지 않은 기기(일본어만 등)는 영어로 떨어진다(앱의 대체 언어 en).
-    /// 한국어 기기는 ko 표가 있어야 한국어를 고른다: 한국어 값을 가진 항목(id 열쇠)이 있어 빌드가 늘 ko.lproj 를 만든다.
+    /// 대체 언어가 en 이라, 문구 파일이 ko.lproj 에 없으면 한국어 기기도 그 파일만은 en.lproj 에서 읽는다(파일 단위로 대체한다).
+    /// 그래서 영어 쪽에만 생기던 두 파일 — 복수형(Localizable.stringsdict)과 권한 안내(InfoPlist.strings) — 이 ko.lproj 에도
+    /// 생기도록, 그 항목에 원문과 같은 한국어 값을 둔다(4차 확인: 한국어 기기에서 '5 decisions'·영어 권한 창이 나왔다).
     func testOtherLanguagesFallBackToEnglishWhileKoreanStaysAvailable() throws {
         let project = try String(contentsOf: nativeRoot.appendingPathComponent("project.yml"), encoding: .utf8)
         XCTAssertEqual(project.components(separatedBy: "CFBundleDevelopmentRegion: en").count - 1, 2, "Mac·iPhone 앱 둘 다")
         XCTAssertFalse(project.contains("CFBundleDevelopmentRegion: ko"))
         XCTAssertEqual(project.components(separatedBy: "CFBundleLocalizations: [ko, en]").count - 1, 2)
         XCTAssertTrue(project.contains("developmentLanguage: ko"), "문구 표의 원문 언어는 한국어 그대로")
+        var korean: [String: String] = [:]
         for plist in ["Configuration/macOS-Info.plist", "Configuration/iOS-Info.plist"] {
             let info = try XCTUnwrap(NSDictionary(contentsOf: nativeRoot.appendingPathComponent(plist)) as? [String: Any])
             XCTAssertEqual(info["CFBundleDevelopmentRegion"] as? String, "en", plist)
             XCTAssertEqual(info["CFBundleLocalizations"] as? [String], ["ko", "en"], plist)
+            for (key, value) in info where key.hasSuffix("UsageDescription") { korean[key] = value as? String }
         }
+
+        // 복수형·끼워 넣기로 나뉜 영어 항목은 모두 한국어 값(원문 그대로)을 가진다. 하나라도 한국어 복수형이 있어야 ko.lproj 에 stringsdict 가 생긴다.
+        let raw = try rawCatalog("Resources/Shared/Localizable.xcstrings")
         let catalog = try Catalog.load()
-        XCTAssertGreaterThan(catalog.strings.values.filter { $0.localizations?["ko"] != nil }.count, 0, "ko 표가 생길 항목이 있어야 한다")
+        var split: [String] = [], missing: [String] = [], koreanPlurals = 0
+        for (key, entry) in raw {
+            let localizations = entry["localizations"] as? [String: Any] ?? [:]
+            guard let english = localizations["en"] as? [String: Any], english["variations"] != nil || english["substitutions"] != nil else { continue }
+            split.append(key)
+            guard let ko = localizations["ko"] as? [String: Any] else { missing.append(key); continue }
+            if (ko["variations"] as? [String: Any])?["plural"] != nil { koreanPlurals += 1 }
+            XCTAssertEqual(catalog.strings[key]?.localizations?["ko"]?.values.allSatisfy { $0 == key }, true, "한국어 값은 원문 그대로: \(key)")
+        }
+        XCTAssertGreaterThan(split.count, 30)
+        XCTAssertEqual(missing, [], "영어가 복수형으로 나뉜 항목은 한국어 값(원문 그대로)도 둔다. 없으면 한국어 기기가 그 문구를 영어로 본다")
+        XCTAssertGreaterThan(koreanPlurals, 0)
+
+        // 권한 안내: 한국어 값이 Info.plist 원문과 같고 'translated' 다(빌드는 'new' 상태의 값을 넣지 않아 ko.lproj 에 파일이 생기지 않았다).
+        let info = try rawCatalog("Resources/Shared/InfoPlist.xcstrings")
+        XCTAssertEqual(Set(info.keys), Set(korean.keys), "권한 안내마다 표 항목이 있다")
+        for (key, entry) in info {
+            let localizations = entry["localizations"] as? [String: Any] ?? [:]
+            let ko = (localizations["ko"] as? [String: Any])?["stringUnit"] as? [String: Any]
+            let en = (localizations["en"] as? [String: Any])?["stringUnit"] as? [String: Any]
+            XCTAssertEqual(ko?["state"] as? String, "translated", key)
+            XCTAssertEqual(ko?["value"] as? String, korean[key], key)
+            XCTAssertEqual(en?["state"] as? String, "translated", key)
+        }
+        // 두 표 어디서든 한국어 값은 'translated' 여야 빌드에 들어간다.
+        for (path, table) in [("Localizable", raw), ("InfoPlist", info)] {
+            let untranslated = table.filter { _, entry in
+                guard let ko = (entry["localizations"] as? [String: Any])?["ko"] else { return false }
+                return Self.states(in: ko).contains { $0 != "translated" }
+            }.map(\.key)
+            XCTAssertEqual(untranslated, [], path)
+        }
     }
+
+    private func rawCatalog(_ path: String) throws -> [String: [String: Any]] {
+        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: nativeRoot.appendingPathComponent(path)))
+        return try XCTUnwrap((object as? [String: Any])?["strings"] as? [String: [String: Any]])
+    }
+
+    /// 한 언어 값 안의 모든 stringUnit 상태(복수형·끼워 넣기 안쪽까지).
+    private static func states(in value: Any) -> [String] {
+        guard let object = value as? [String: Any] else { return [] }
+        var found: [String] = []
+        if let unit = object["stringUnit"] as? [String: Any] { found.append(unit["state"] as? String ?? "") }
+        for (key, child) in object where key != "stringUnit" { found += states(in: child) }
+        return found
+    }
+
+    #if os(macOS)
+    /// 빌드가 쓰는 컴파일러(xcstringstool)로 두 표를 직접 컴파일해 본다: ko.lproj 에 en.lproj 의 파일이 모두 있고,
+    /// 한국어 복수형은 원문 그대로 풀리며, 한국어 권한 안내는 Info.plist 의 원문이다.
+    /// 빌드된 앱 번들 자체는 scripts/check-app-languages.sh(check.sh build, CI)가 같은 조건으로 본다.
+    func testCompiledKoreanTablesHaveEveryFileTheEnglishOnesHave() throws {
+        let find = Process()
+        find.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        find.arguments = ["--find", "xcstringstool"]
+        find.standardOutput = FileHandle.nullDevice; find.standardError = FileHandle.nullDevice
+        try find.run(); find.waitUntilExit()
+        guard find.terminationStatus == 0 else { throw XCTSkip("xcstringstool 이 없는 환경") }
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("iamceo-l10n-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: out) }
+        for table in ["Localizable", "InfoPlist"] {
+            let compile = Process()
+            compile.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            compile.arguments = ["xcstringstool", "compile", nativeRoot.appendingPathComponent("Resources/Shared/\(table).xcstrings").path,
+                                 "--output-directory", out.path]
+            let errors = Pipe()
+            compile.standardOutput = FileHandle.nullDevice; compile.standardError = errors
+            try compile.run()
+            let message = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            compile.waitUntilExit()
+            XCTAssertEqual(compile.terminationStatus, 0, "\(table): \(message)")
+        }
+        let files = { (language: String) in
+            Set((try? FileManager.default.contentsOfDirectory(atPath: out.appendingPathComponent("\(language).lproj").path)) ?? [])
+        }
+        XCTAssertEqual(files("en"), ["Localizable.strings", "Localizable.stringsdict", "InfoPlist.strings"])
+        XCTAssertEqual(files("ko"), files("en"), "ko.lproj 에 없는 파일은 한국어 기기도 en.lproj 에서 읽는다")
+
+        let plurals = try XCTUnwrap(NSDictionary(contentsOf: out.appendingPathComponent("ko.lproj/Localizable.stringsdict")) as? [String: [String: Any]])
+        XCTAssertGreaterThan(plurals.count, 30)
+        for (key, rule) in plurals {
+            XCTAssertEqual(rule["NSStringLocalizedFormatKey"] as? String, "%#@value@", key)
+            XCTAssertEqual((rule["value"] as? [String: Any])?["other"] as? String, key, "한국어 복수형은 원문 그대로: \(key)")
+            XCTAssertEqual(Set(((rule["value"] as? [String: Any]) ?? [:]).keys.filter { !$0.hasPrefix("NSString") }), ["other"], key)
+        }
+        let permissions = try XCTUnwrap(NSDictionary(contentsOf: out.appendingPathComponent("ko.lproj/InfoPlist.strings")) as? [String: String])
+        let iOS = try XCTUnwrap(NSDictionary(contentsOf: nativeRoot.appendingPathComponent("Configuration/iOS-Info.plist")) as? [String: Any])
+        XCTAssertEqual(permissions.keys.sorted(), ["NSCameraUsageDescription", "NSLocalNetworkUsageDescription", "NSPhotoLibraryAddUsageDescription"])
+        for (key, value) in permissions { XCTAssertEqual(value, iOS[key] as? String, key) }
+    }
+    #endif
 
     /// 시험(패키지·iPhone 시험 앱)에는 문구 표가 없어 열쇠 = 한국어 원문이 나온다. 그래서 기존 시험의 한국어 기대값이 그대로 통한다.
     func testTestsSeeTheKoreanSource() {

@@ -50,6 +50,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : " · %lld열"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -158,6 +170,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : " · %lld deliveries to check · see evidence in details"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : " · 전달 확인 %lld건 · 상세에서 근거 확인"
                 }
               }
             }
@@ -393,6 +417,12 @@
                 }
               }
             }
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ · %lld일째"
           }
         }
       }
@@ -1502,6 +1532,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld명"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -1597,6 +1639,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld일"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -1635,6 +1689,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "Waiting %lld days"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld일째 기다림"
                 }
               }
             }
@@ -2539,6 +2605,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "iPhone %lld대로는 보낼 수 없습니다"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -3289,6 +3367,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "결재 %lld건"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -3307,6 +3397,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "%lld decisions waiting"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "결재 %lld건 대기"
                 }
               }
             }
@@ -4709,6 +4811,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "다른 프로젝트에 보낼 글 %lld개는 그 프로젝트를 열면 보냅니다."
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -5192,6 +5306,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "답하지 않은 결재 %lld건"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -5280,6 +5406,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "You can switch after %lld queued messages go into the CLI. The queue goes in with the next instruction."
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "대기열 %lld건이 CLI에 들어간 뒤 바꿀 수 있습니다. 대기열은 다음 지시와 함께 들어갑니다."
                 }
               }
             }
@@ -6294,6 +6432,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "먼저 보낸 글 %lld건이 차례를 기다립니다"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -7037,6 +7187,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "미완료 할 일 %lld건"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -7725,6 +7887,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "보내기를 멈춘 글 %lld개 · 확인이 필요합니다"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -7836,6 +8010,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "%lld messages have nowhere to go · Needs your check"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "보낼 곳이 없는 글 %lld개 · 확인이 필요합니다"
                 }
               }
             }
@@ -8344,6 +8530,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "Costs are exactly what Claude Code reported and may differ from your actual bill on a subscription plan. Codex reports token counts only. Days follow when the server received the numbers, which are kept for %lld days."
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "비용은 Claude Code가 보고한 금액 그대로이며, 구독 요금제라면 실제 청구액과 다를 수 있습니다. Codex는 토큰 수만 보고합니다. 날짜는 서버가 수치를 받은 때로 나누고, %lld일 동안 보관합니다."
                 }
               }
             }
@@ -8979,6 +9177,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "%lld new files"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "새 자료 %lld"
                 }
               }
             }
@@ -10137,6 +10347,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "서브에이전트 %lld개"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -10185,6 +10407,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "About %lld sub-agents"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "서브에이전트 약 %lld개"
                 }
               }
             }
@@ -10687,6 +10921,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "%lld members waiting for approval"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "승인을 기다리는 팀원 %lld명"
                 }
               }
             }
@@ -11666,6 +11912,17 @@
         }
       }
     },
+    "앞서 보낸 글의 접수를 확인하기 전에 서버 주소가 바뀌었습니다. 대화에서 그 글이 들어갔는지 확인한 뒤 이어서 보내 주세요." : {
+      "comment" : "S(F1) 연결되면 보낼 글. 같은 서버를 다른 주소로 다시 붙었을 때 옮긴 글을 멈춘 까닭(4차 확인 새 문제 2)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The server address changed before the earlier message was confirmed. Check in the conversation whether it arrived, then continue sending."
+          }
+        }
+      }
+    },
     "앞서 보낸 글의 접수를 확인하는 중입니다" : {
       "comment" : "S(F1) 마지막으로 본 상태·연결되면 보낼 글. 대기열 창 안내 제목",
       "localizations" : {
@@ -12174,6 +12431,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "연결되면 보내려던 글 %lld개도 지웁니다."
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -12208,6 +12477,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "연결되면 보낼 글 %lld개 · 보내는 중"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -12227,6 +12508,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "%lld messages to send when connected · Go out in order"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "연결되면 보낼 글 %lld개 · 연결되면 순서대로 보냅니다"
                 }
               }
             }
@@ -12577,6 +12870,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "열린 결재 %lld건"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -12890,6 +13195,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "완료한 할 일 %lld개 보기"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -12908,6 +13225,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "Hide %lld done to-dos"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "완료한 할 일 %lld개 접기"
                 }
               }
             }
@@ -14188,6 +14517,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "이전 글 %lld개를 불러왔습니다"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -14470,6 +14811,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "인터넷 연결이 불안정합니다 · 팀원 %lld명 대기 중 · 돌아오면 자동으로 이어 갑니다"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -14572,6 +14925,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "일하는 팀원 %lld명"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -14590,6 +14955,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "View %lld more working members"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "일하는 팀원 %lld명 더 보기"
                 }
               }
             }
@@ -15637,6 +16014,18 @@
               }
             }
           }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "전달 확인 %lld건, 상세에서 근거 확인"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -15675,6 +16064,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "%lld items need a delivery check."
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "전달 확인이 필요한 항목 %lld건입니다."
                 }
               }
             }
@@ -15958,6 +16359,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "access code and %lld unsent drafts and notes"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "접속 코드와 쓰던 초안·메모 %lld건을"
                 }
               }
             }
@@ -16321,6 +16734,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "Ready · %lld iPhones"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "준비됨 · iPhone %lld대"
                 }
               }
             }
@@ -17174,6 +17599,18 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "%lld attachments"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "첨부 %lld개"
                 }
               }
             }

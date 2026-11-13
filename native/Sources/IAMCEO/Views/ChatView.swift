@@ -575,7 +575,7 @@ private struct ChatConversation: View {
                     .chatScrollRow(id: "history-bottom", coordinateSpace: scopeID)
                     .accessibilityHidden(true)
             }
-            .defaultScrollAnchor(.bottom)
+            .modifier(ChatThreadBottomAnchor())
             .chatScrollAnchoring(anchor, scope: scopeID)
             .background(GeometryReader { geometry in
                 Color.clear.onAppear { viewportHeight = geometry.size.height }
@@ -924,6 +924,28 @@ private struct ChatConversation: View {
         .controlSize(.small)
         .padding(.bottom, 16)
         .accessibilityLabel(count > 0 ? "새 글 \(count)개, 맨 아래로 이동" : "맨 아래로 이동")
+    }
+}
+
+/// 대화 목록은 맨 아래(최신 글)에서 시작하고, 화면보다 짧은 대화는 입력칸 쪽(아래)에 붙는다.
+/// '내용이 커질 때 아래를 붙잡는' 역할(.sizeChanges)은 쓰지 않는다. iOS 26 의 LazyVStack 은 그 역할 아래에서 첫 페이지가
+/// '불러오는 중' 줄 자리에 한꺼번에 들어올 때 행 높이 어림이 실제와 어긋나면, 맨 아래에 머문 채 보이는 자리에 행을 하나도 그리지
+/// 않았다(0.2.5 iPhone 영어 샘플의 빈 대화 화면. 글 높이에 따라 나서 한국어도 큰 글자에서 같았다. ChatThreadScrollTests).
+/// 맨 아래에 붙어 있을 때 새 글을 따라가는 일은 이 화면이 스스로 한다(present·observe 의 scrollTo, 앞에 붙일 때는 ChatScrollAnchor).
+/// 역할을 나눌 수 없는 iOS 17 과, 같은 시험에서 빈 화면이 나지 않은 Mac 은 예전 그대로다.
+private struct ChatThreadBottomAnchor: ViewModifier {
+    func body(content: Content) -> some View {
+        #if os(iOS)
+        if #available(iOS 18, *) {
+            content
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(.bottom, for: .alignment)
+        } else {
+            content.defaultScrollAnchor(.bottom)
+        }
+        #else
+        content.defaultScrollAnchor(.bottom)
+        #endif
     }
 }
 

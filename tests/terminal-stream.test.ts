@@ -11,6 +11,7 @@ import { CoreRunner } from "../server/runner/core.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
 import { startServer } from "../server/http.ts";
 import { terminalSize, TerminalStreams, type SocketData } from "../server/terminal-stream.ts";
+import { rejection } from "./fixtures/settle.ts";
 
 const VT = "\x1bc\x1b[31mhello 터미널\x1b[0m\r\n";
 // These are real shell/PTY/Bun processes. Startup scheduling is not a stream
@@ -540,7 +541,7 @@ describe("terminal stream", () => {
     const terminal = f.terminals.get(f.member.paneId!);
     terminal.state = "finished";
     if (ending === "not_found") f.terminals.delete(f.member.paneId!);
-    if (ending !== "terminal_gone") await expect(f.orch.terminalStreamInfo(f.member.id)).rejects.toMatchObject({ code: "TERMINAL_GONE" });
+    if (ending !== "terminal_gone") expect(await rejection(f.orch.terminalStreamInfo(f.member.id))).toMatchObject({ code: "TERMINAL_GONE" });
     await stream.close(ending === "terminal_gone" ? "terminal_gone" : undefined);
     f.store.patchMember(f.member.id, { status: "offline" });
     const start = performance.now();
@@ -548,7 +549,7 @@ describe("terminal stream", () => {
       // 엔진이 그 터미널이 끝났다고 알렸다(위의 조회가 종료를 관측했다): 사라진 것이 확정된 터미널의 조작권은 서버가 스스로 거둔다.
       // 놓기나 만료(5분)를 기다리지 않는다. 이미 거둔 조작권을 놓으려 하면 만료된 조작권과 같은 거절이다.
       await until(() => f.store.inputState(f.member.id).lease === null);
-      await expect(f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId })).rejects.toMatchObject({ status: 409, code: "TERMINAL_REFUSED" });
+      expect(await rejection(f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId }))).toMatchObject({ status: 409, code: "TERMINAL_REFUSED" });
       expect(f.store.listActivity(f.member.id).some(a => a.text.includes("직접 조작하던 터미널이 끝나 그 조작권을 거뒀습니다"))).toBe(true);
     } else {
       // 엔진이 종료를 알리지 않았다(화면 연결만 끊겼거나, 조회가 그 터미널을 찾지 못했을 뿐이다): 조작권은 놓거나 만료될 때까지 그대로다.
@@ -618,8 +619,8 @@ describe("terminal stream", () => {
       expect(res.status).toBe(200);
       const body = await res.json(); expect((v2 ? body.member : body).effortOverride).toBe("ultra");
     }
-    await expect(f.orch.patchMemberConfig(f.member.id, { effortOverride: "tiny" })).rejects.toMatchObject({ status: 400 });
-    await expect(f.orch.updateSettings({ codexRanks: { lead: { effort: "tiny" } } })).rejects.toMatchObject({ status: 400 });
+    expect(await rejection(f.orch.patchMemberConfig(f.member.id, { effortOverride: "tiny" }))).toMatchObject({ status: 400 });
+    expect(await rejection(f.orch.updateSettings({ codexRanks: { lead: { effort: "tiny" } } }))).toMatchObject({ status: 400 });
     expect((await f.orch.patchMemberConfig(f.member.id, { effortOverride: "ultra" })).effortOverride).toBe("ultra");
     expect((await f.orch.updateSettings({ codexRanks: { lead: { effort: "ultra" } } })).codexRanks.lead.effort).toBe("ultra");
     expect(f.store.requireMember(f.member.id).effortOverride).toBe("ultra");
@@ -800,7 +801,7 @@ describe("terminal stream", () => {
     expect(f.store.listPending(f.member.id)).toHaveLength(0);
     expect(f.store.listActivity(f.member.id).some(a => a.text.includes("직접 조작을 자동으로 끝냈습니다"))).toBe(true);
     // A late client release is the already-released refusal the app treats as done.
-    await expect(f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId })).rejects.toMatchObject({ status: 409 });
+    expect(await rejection(f.orch.terminalControl(f.member.id, { action: "release", leaseId: lease.leaseId }))).toMatchObject({ status: 409 });
   });
   test("an orphaned lease is kept while its holder reattached, renewed it elsewhere, or was replaced", async () => {
     const f = await fixture(), lease = await f.orch.terminalControl(f.member.id, { action: "claim" });

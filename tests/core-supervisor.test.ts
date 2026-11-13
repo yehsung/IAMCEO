@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CoreError } from "../server/runner/core-client.ts";
 import type { RunnerMember, RunnerReattachResult } from "../server/runner/types.ts";
+import { rejection, thrower } from "./fixtures/settle.ts";
 
 const member = (id = "worker"): RunnerMember => ({ id, projectId: "project", sessionGeneration: 1, handle: id, name: id, cwd: "/private/tmp", sessionId: null, paneId: "existing", model: null, effort: null, subagentModel: null, permissionMode: "default", kind: "worker" });
 function fixture(overrides: Partial<CoreSupervisorDeps> = {}) {
@@ -58,8 +59,8 @@ describe("core runtime supervisor", () => {
     expect(f.supervisor.observations()[0]).toMatchObject({ lastObservedAt: null, outcome: "unknown" }); await f.supervisor.shutdown();
   });
   test("startup rejects implicit and nonabsolute configuration before touching any endpoint", async () => {
-    await expect(ensureCoreServer({})).rejects.toThrow("explicit");
-    await expect(ensureCoreServer({ socketPath: "relative.sock", session: "iamceo", configDir: "/private/tmp/config", stateDir: "/private/tmp/state" })).rejects.toThrow("absolute");
+    expect(await thrower(ensureCoreServer({}))).toThrow("explicit");
+    expect(await thrower(ensureCoreServer({ socketPath: "relative.sock", session: "iamceo", configDir: "/private/tmp/config", stateDir: "/private/tmp/state" }))).toThrow("absolute");
   });
 });
 
@@ -82,7 +83,7 @@ test("a connected hello timeout never invokes the startup executable", async () 
   writeFileSync(bin, '#!/bin/sh\nprintf started > "' + marker + '"\n'); chmodSync(bin, 0o700);
   await new Promise<void>(resolve => server.listen(path, resolve));
   try {
-    await expect(ensureCoreServer({ coreBin: bin, socketPath: path, session: "iamceo-test", stateDir: join(dir, "state"), configDir: join(dir, "config") })).rejects.toMatchObject({ kind: "timeout" });
+    expect(await rejection(ensureCoreServer({ coreBin: bin, socketPath: path, session: "iamceo-test", stateDir: join(dir, "state"), configDir: join(dir, "config") }))).toMatchObject({ kind: "timeout" });
     expect(existsSync(marker)).toBe(false);
   } finally { for (const socket of sockets) socket.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true }); }
 });

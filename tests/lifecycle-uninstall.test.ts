@@ -398,7 +398,7 @@ describe("명령줄", () => {
     const f = fixture();
     const run = (args: string[]) => {
       const result = Bun.spawnSync([process.execPath, entry, ...args], { env: { ...f.env, HOME: f.userHome, IAMCEO_LANG: "ko" }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-      return { code: result.exitCode, out: result.stdout.toString() + result.stderr.toString() };
+      return { code: result.exitCode, signal: result.signalCode ?? null, out: result.stdout.toString() + result.stderr.toString() };
     };
     const dry = run(["uninstall", "--dry-run", "--purge"]);
     expect(dry.code, dry.out).toBe(0);
@@ -414,6 +414,8 @@ describe("명령줄", () => {
     expect(upgradeDry.code).toBe(1);
     expect(upgradeDry.out).toContain("실행 파일이 버전을 답하지 않습니다");
     expect(run(["rollback", "--dry-run"]).out).toContain("되돌릴 업그레이드 기록이 없습니다");
-    expect(run(["upgrade", "--timeout", "3"]).out).toContain("--timeout");
+    // 2026-11-14 전체 실행 한 번에서 이 자식이 아무것도 쓰지 않고 끝났다(다시 돌리면 통과, 5번 재현 안 됨). 다음에 나면 까닭이 보이게 종료 코드·신호를 함께 남긴다.
+    const badTimeout = run(["upgrade", "--timeout", "3"]);
+    expect(badTimeout.out, `exit=${badTimeout.code} signal=${badTimeout.signal}`).toContain("--timeout");
   });
 });

@@ -180,7 +180,8 @@ describe("영속 확인과 안전 fence", () => {
     let release!: () => void; const blocked = new Promise<void>(resolve => { release = resolve; });
     f.inspect = async (m, q) => { if (m.id === f.member.id) await blocked; return f.observation(q, { finding: "received", receivedDeliveryIds: q.markers.map(x => x.deliveryId) }); };
     const first = f.service.tick(); const second = f.service.tick(); expect(first).toBe(second);
-    await new Promise(resolve => setTimeout(resolve, 0));
+    // 한 번 쉬는 것 대신 다른 직원 몫이 끝날 때까지 기다린다(첫 직원은 그동안 느린 조회에 묶여 있다).
+    for (const end = Date.now() + 5_000; f.store.requireDelivery(b.id).status !== "delivered" && Date.now() < end;) await Bun.sleep(1);
     expect(f.store.requireDelivery(b.id).status).toBe("delivered");
     expect(f.store.requireDelivery(a.id).status).toBe("held");
     release(); await first; expect(f.calls).toHaveLength(2);

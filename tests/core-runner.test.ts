@@ -20,6 +20,7 @@ import { Orchestrator } from "../server/orchestrator.ts";
 import { USAGE_RESUME_TEXT, usageLimitMenu } from "../server/api-outage.ts";
 import { claudeFolderTrust, codexFolderTrust } from "../server/runner/core-approval.ts";
 import { wrappedTrustScreens } from "./fixtures/folder-trust-160.ts";
+import { rejection, thrower } from "./fixtures/settle.ts";
 
 const methods = ["terminal.run", "terminal.list", "terminal.get", "terminal.read", "terminal.send", "terminal.interrupt", "terminal.kill", "terminal.keys"];
 const composer = (draft = "") => `prior output\n${"─".repeat(30)}\n❯ ${draft}\n${"─".repeat(30)}\n`;
@@ -264,7 +265,7 @@ describe("herdr-core client and lifecycle", () => {
   });
   test("explicit stop kills only owned terminal; changed labels refuse control", async () => {
     const f = await fixture(); const runner = f.runner(); const start = await runner.start(member(), f.opts); const terminal = f.terminals.get(start.paneId)!;
-    terminal.labels["iamceo.member"] = "someone-else"; await expect(runner.stop(member())).rejects.toThrow("ownership"); expect(f.calls.some((request) => request.method === "terminal.kill")).toBe(false);
+    terminal.labels["iamceo.member"] = "someone-else"; expect(await thrower(runner.stop(member()))).toThrow("ownership"); expect(f.calls.some((request) => request.method === "terminal.kill")).toBe(false);
     terminal.labels["iamceo.member"] = member().id; await runner.stop(member()); expect(terminal.state).toBe("finished");
   });
   test("transport timeout marks uncertain delivery and never replays", async () => {
@@ -277,7 +278,7 @@ describe("herdr-core client and lifecycle", () => {
     const f = await fixture(); f.setHook((request, socket) => { socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32000, message: "blocked", data: { kind: "blocked", hint: "use attach" } } }) + "\n"); return true; });
     try { await coreRpc(f.socketPath, "terminal.send", {}, 100); throw new Error("expected failure"); } catch (error) { expect(error).toBeInstanceOf(CoreError); expect(error).toMatchObject({ kind: "blocked", uncertain: false }); }
   });
-  test("startup helper refuses implicit or user-global daemon configuration", async () => { await expect(ensureCoreServer({})).rejects.toThrow("explicit"); });
+  test("startup helper refuses implicit or user-global daemon configuration", async () => { expect(await thrower(ensureCoreServer({}))).toThrow("explicit"); });
 });
 
 describe("delivery safety and OSC7501 turns", () => {
@@ -426,8 +427,8 @@ describe("manual terminal control", () => {
     const lease = await runner.terminalControl(member(), { action: "claim" });
     f.terminals.delete(started.paneId);
     const calls = f.calls.length;
-    await expect(runner.terminalControl(member(), { action: "release", leaseId: "foreign" })).rejects.toThrow("lease");
-    await expect(runner.terminalControl(member({ sessionGeneration: 2 }), { action: "release", leaseId: lease.leaseId })).rejects.toThrow();
+    expect(await thrower(runner.terminalControl(member(), { action: "release", leaseId: "foreign" }))).toThrow("lease");
+    expect(await thrower(runner.terminalControl(member({ sessionGeneration: 2 }), { action: "release", leaseId: lease.leaseId }))).toThrow();
     expect(runner.terminalLease(member().id)?.leaseId).toBe(lease.leaseId);
     await runner.terminalControl(member(), { action: "release", leaseId: lease.leaseId });
     expect(runner.terminalLease(member().id)).toBeNull();
@@ -437,9 +438,9 @@ describe("manual terminal control", () => {
     const f = await fixture(); const runner = f.runner(10000); const start = await runner.start(member(), f.opts);
     const lease = await runner.terminalControl(member(), { action: "claim" }); expect(lease.leaseId).toBeString();
     expect(await runner.send(member(), "automatic", f.opts)).toMatchObject({ ok: false, reason: "input_busy", retryable: true });
-    await expect(runner.terminalControl(member(), { action: "claim" })).rejects.toThrow("lease");
-    await expect(runner.terminalControl(member(), { action: "key", key: "enter", leaseId: "wrong" })).rejects.toThrow("lease");
-    await expect(runner.terminalControl(member(), { action: "key", key: "f5", leaseId: lease.leaseId })).rejects.toThrow("Unsupported");
+    expect(await thrower(runner.terminalControl(member(), { action: "claim" }))).toThrow("lease");
+    expect(await thrower(runner.terminalControl(member(), { action: "key", key: "enter", leaseId: "wrong" }))).toThrow("lease");
+    expect(await thrower(runner.terminalControl(member(), { action: "key", key: "f5", leaseId: lease.leaseId }))).toThrow("Unsupported");
     f.terminals.get(start.paneId)!.status = { state: "blocked" };
     await runner.terminalControl(member(), { action: "key", key: "down", leaseId: lease.leaseId });
     await runner.terminalControl(member(), { action: "input", text: "explicit user reply", leaseId: lease.leaseId });
@@ -487,7 +488,7 @@ describe("provider configuration and recovery guards", () => {
   });
   test("a native session already held by another member refuses duplicate launch", async () => {
     const f = await fixture(); const runner = f.runner(10000); const first = await runner.start(member(), f.opts);
-    await expect(runner.start(member({ id: "other-member", sessionId: first.sessionId }), { ...f.opts, resume: true })).rejects.toThrow("already owned"); expect(f.calls.filter((request) => request.method === "terminal.run")).toHaveLength(1);
+    expect(await thrower(runner.start(member({ id: "other-member", sessionId: first.sessionId }), { ...f.opts, resume: true }))).toThrow("already owned"); expect(f.calls.filter((request) => request.method === "terminal.run")).toHaveLength(1);
   });
 });
 
@@ -505,12 +506,12 @@ test("Claude parallel mode confirms native command reply before reporting succes
 
 test("persisted Codex terminal loss refuses an automatic fresh conversation", async () => {
   const f = await fixture(); const runner = f.runner(10000);
-  await expect(runner.start(member({ cli: "codex", paneId: "t-missing", sessionId: null }), f.opts)).rejects.toThrow("native session id is unknown"); expect(f.calls.some((request) => request.method === "terminal.run")).toBe(false);
+  expect(await thrower(runner.start(member({ cli: "codex", paneId: "t-missing", sessionId: null }), f.opts))).toThrow("native session id is unknown"); expect(f.calls.some((request) => request.method === "terminal.run")).toBe(false);
 });
 
 test("stop and provider switch preserve a visible user draft", async () => {
   const f = await fixture(); const runner = f.runner(10000); await runner.start(member(), f.opts); f.setScreen(composer("unsaved message"));
-  await expect(runner.checkStop(member())).rejects.toThrow("draft"); await expect(runner.stop(member())).rejects.toThrow("draft"); expect(f.calls.some((request) => request.method === "terminal.kill")).toBe(false);
+  expect(await thrower(runner.checkStop(member()))).toThrow("draft"); expect(await thrower(runner.stop(member()))).toThrow("draft"); expect(f.calls.some((request) => request.method === "terminal.kill")).toBe(false);
 });
 
 test("Claude turn end reports context usage from the transcript and status line; the server picks the window", async () => {
@@ -612,7 +613,7 @@ describe("serialized observations and generation protection", () => {
     const terminal = f.terminals.get(started.paneId)!; terminal.turn = 9; terminal.status = { state: "idle" };
     pending!.socket.write(JSON.stringify({ jsonrpc: "2.0", id: pending!.request.id, result: terminal }) + "\n"); await Promise.all(screens);
     expect(events.filter(e => e.type === "turn_end")).toHaveLength(1);
-    f.setHook(null); terminal.turn = 8; terminal.status = { state: "working" }; await expect(runner.screen(member())).rejects.toThrow("older");
+    f.setHook(null); terminal.turn = 8; terminal.status = { state: "working" }; expect(await thrower(runner.screen(member()))).toThrow("older");
     terminal.turn = 9; terminal.status = { state: "idle" }; await runner.screen(member());
     expect(events.filter(e => e.type === "turn_end")).toHaveLength(1);
     expect(events.find(e => e.type === "turn_end")).toMatchObject({ terminalId: started.paneId, turn: 9, sessionGeneration: 1 });
@@ -645,7 +646,7 @@ describe("serialized observations and generation protection", () => {
   test("lost Codex session stays fenced after caller drops paneId", async () => {
     const f = await fixture(), runner = f.runner(10000), codex = member({ cli: "codex" }); const started = await runner.start(codex, f.opts);
     f.terminals.get(started.paneId)!.state = "finished"; await runner.screen(codex);
-    await expect(runner.start({ ...codex, paneId: null }, f.opts)).rejects.toThrow("native session id is unknown");
+    expect(await thrower(runner.start({ ...codex, paneId: null }, f.opts))).toThrow("native session id is unknown");
     expect(f.calls.filter(c => c.method === "terminal.run")).toHaveLength(1);
   });
 });
@@ -691,11 +692,11 @@ describe("persistent input safety and transport effects", () => {
   test("claim cannot race through a send, and safe stop rechecks working state", async () => {
     const f = await fixture(), runner = f.runner(10000); const started = await runner.start(member(), f.opts);
     f.setHook(request => request.method === "terminal.send"); const sending = runner.send(member(), "in flight", f.opts); await until(() => f.calls.some(c => c.method === "terminal.send"));
-    await expect(runner.terminalControl(member(), { action: "claim" })).rejects.toThrow("mutation"); await sending; f.setHook(null);
-    f.terminals.get(started.paneId)!.status = { state: "working" }; await expect(runner.stop(member(), { whileWorking: false })).rejects.toThrow(); expect(f.calls.some(c => c.method === "terminal.kill")).toBe(false);
+    expect(await thrower(runner.terminalControl(member(), { action: "claim" }))).toThrow("mutation"); await sending; f.setHook(null);
+    f.terminals.get(started.paneId)!.status = { state: "working" }; expect(await thrower(runner.stop(member(), { whileWorking: false }))).toThrow(); expect(f.calls.some(c => c.method === "terminal.kill")).toBe(false);
   });
   test("pre-connect failure is not_written; JSON-RPC denial is rejected; started:false is received", async () => {
-    const f = await fixture(); await expect(coreRpc(join(f.dir, "missing.sock"), "terminal.send", {}, 30)).rejects.toMatchObject({ deliveryEffect: "not_written", uncertain: false, causeCode: "ENOENT" });
+    const f = await fixture(); expect(await rejection(coreRpc(join(f.dir, "missing.sock"), "terminal.send", {}, 30))).toMatchObject({ deliveryEffect: "not_written", uncertain: false, causeCode: "ENOENT" });
     const runner = f.runner(10000); await runner.start(member(), f.opts);
     f.setHook((request, socket) => { if (request.method !== "terminal.send") return false; socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { turn: 0, started: false } }) + "\n"); return true; });
     expect(await runner.send(member(), "received", f.opts)).toMatchObject({ ok: true, started: false, turn: 0 });
@@ -973,7 +974,7 @@ describe("compact control and shared native binding", () => {
     const d = await uncertainCompactFixture();
     await d.runner.noteTerminalInput(member().id, () => {});
     await d.runner.screen(member()); expect(d.store.states.get(member().id)?.phase).toBe("uncertain");
-    await expect(d.runner.noteTerminalInput(member().id, () => { throw new Error("write failed"); })).rejects.toThrow("write failed");
+    expect(await thrower(d.runner.noteTerminalInput(member().id, () => { throw new Error("write failed"); }))).toThrow("write failed");
     expect(d.store.states.get(member().id)?.manualResolution).toBeUndefined();
     d.terminal.turn = 1; await d.runner.screen(member());
     expect(d.store.states.get(member().id)?.phase).toBe("uncertain");
@@ -1043,7 +1044,7 @@ describe("compact control and shared native binding", () => {
       else socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32000, message: "refused", data: { kind: "blocked" } } }) + "\n");
       return true;
     });
-    await expect(d.runner.terminalControl(member(), { action: "key", key: "esc", leaseId: lease.leaseId })).rejects.toThrow(); d.f.setHook(null);
+    expect(await thrower(d.runner.terminalControl(member(), { action: "key", key: "esc", leaseId: lease.leaseId }))).toThrow(); d.f.setHook(null);
     d.terminal.turn = 2; d.terminal.status = { state: "idle" }; await d.runner.screen(member());
     await d.runner.terminalControl(member(), { action: "release", leaseId: lease.leaseId }); await d.runner.screen(member());
     expect(d.store.states.get(member().id)?.phase).toBe("uncertain"); expect(d.runner.isBusy(member().id)).toBe(true);
@@ -1053,7 +1054,7 @@ describe("compact control and shared native binding", () => {
     await d.runner.terminalControl(member(), { action: "key", key: "esc", leaseId: lease.leaseId });
     expect(d.store.states.get(member().id)?.manualResolution).toBeDefined();
     d.f.setHook((request, socket) => { if (request.method !== "terminal.keys") return false; socket.destroy(); return true; });
-    await expect(d.runner.terminalControl(member(), { action: "key", key: "enter", leaseId: lease.leaseId })).rejects.toThrow(); d.f.setHook(null);
+    expect(await thrower(d.runner.terminalControl(member(), { action: "key", key: "enter", leaseId: lease.leaseId }))).toThrow(); d.f.setHook(null);
     d.terminal.turn = 1; d.terminal.status = { state: "idle" }; await d.runner.screen(member());
     expect(d.store.states.get(member().id)?.manualResolution).toBeUndefined(); expect(d.runner.isBusy(member().id)).toBe(true);
     // A fresh, acknowledged intervention may resolve compact, while the
@@ -1071,9 +1072,9 @@ describe("compact control and shared native binding", () => {
     d.terminal.turn = 1; d.terminal.status = { state: "idle" };
     let fail = true;
     const runner = d.f.runner(10000, { compactStore: { load: d.store.port.load, save: (id, state) => { if (fail && state.reason === "user_resolved") throw new Error("disk full"); d.store.port.save(id, state); } } });
-    await expect(runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts)).rejects.toThrow("disk full");
+    expect(await thrower(runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts))).toThrow("disk full");
     expect(runner.isBusy(member().id)).toBe(true); expect(d.store.states.get(member().id)?.phase).toBe("uncertain");
-    fail = false; d.terminal.labels["iamceo.generation"] = "2"; await expect(runner.screen(member())).rejects.toThrow("ownership");
+    fail = false; d.terminal.labels["iamceo.generation"] = "2"; expect(await thrower(runner.screen(member()))).toThrow("ownership");
     expect(runner.isBusy(member().id)).toBe(true);
     d.terminal.labels["iamceo.generation"] = "1"; await runner.screen(member());
     expect(d.store.states.get(member().id)).toMatchObject({ phase: "failed", reason: "user_resolved" }); expect(runner.isBusy(member().id)).toBe(false);
@@ -1108,7 +1109,7 @@ test("stale caller generation cannot send or compact into an older live terminal
 test("terminal.run response loss reattaches by stable labels without a second launch", async () => {
   const f = await fixture(), runner = f.runner(10000);
   f.setHook((request, socket) => { if (request.method !== "terminal.run") return false; f.terminals.set("late-holder", { address: "late-holder", argv: request.params.argv, cwd: request.params.cwd, labels: request.params.labels, state: "live", turn: 0, status: { state: "idle" } }); socket.destroy(); return true; });
-  await expect(runner.start(member(), { ...f.opts, operationId: "stable-operation" })).rejects.toMatchObject({ uncertain: true }); f.setHook(null);
+  expect(await rejection(runner.start(member(), { ...f.opts, operationId: "stable-operation" }))).toMatchObject({ uncertain: true }); f.setHook(null);
   expect(await runner.reattachOwned(member())).toMatchObject({ outcome: "rejoined", started: { paneId: "late-holder" } }); expect(f.calls.filter(c => c.method === "terminal.run")).toHaveLength(1);
 });
 
@@ -1124,8 +1125,8 @@ test("stale send cannot clear a live pending turn, and empty input cannot launch
 test("malformed creation receipt leaves a start fence instead of authorizing a second CLI", async () => {
   const f = await fixture(), runner = f.runner(10000);
   f.setHook((request, socket) => { if (request.method !== "terminal.run") return false; socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: null }) + "\n"); return true; });
-  await expect(runner.start(member(), f.opts)).rejects.toMatchObject({ uncertain: true, kind: "protocol" }); f.setHook(null);
-  await expect(runner.start(member(), f.opts)).rejects.toMatchObject({ kind: "starting_unknown" });
+  expect(await rejection(runner.start(member(), f.opts))).toMatchObject({ uncertain: true, kind: "protocol" }); f.setHook(null);
+  expect(await rejection(runner.start(member(), f.opts))).toMatchObject({ kind: "starting_unknown" });
   expect(f.calls.filter(c => c.method === "terminal.run")).toHaveLength(1);
 });
 

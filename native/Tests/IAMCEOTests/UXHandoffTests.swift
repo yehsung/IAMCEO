@@ -68,10 +68,9 @@ private final class HandoffServer: @unchecked Sendable {
         await store.connect(); store.setForeground(false)
         return store
     }
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
     private func eventually(_ predicate: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
-        let clock = ContinuousClock(), deadline = clock.now + .seconds(4)
-        while !predicate(), clock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertTrue(predicate(), file: file, line: line)
+        await pollUntil(file: file, line: line) { predicate() }
     }
     private func temporaryDirectory() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

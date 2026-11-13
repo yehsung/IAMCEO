@@ -12,6 +12,7 @@ import type { AgentToolsImpl, PostInput } from "../server/orchestrator.ts";
 import type { RunnerMember, StartOpts } from "../server/runner/types.ts";
 import { coreRpc, type CoreHello } from "../server/runner/core-client.ts";
 import { coreSetup, type CoreEnv, type CoreSetupOptions } from "./fixtures/core-harness.ts";
+import { rejection } from "./fixtures/settle.ts";
 
 // orchestrator.test.ts 와 같은 최소 도구: HTTP → Orchestrator 경로만 재현한다.
 const TOOLS: AgentToolsImpl = {
@@ -111,7 +112,7 @@ describe("엔진이 닿지 않는 두 가지 모양", () => {
     // 받고 끊음: 요청은 엔진에 닿았다(calls 에 남는다). 보낸 쪽은 됐는지 모른다.
     t.core.setDown(true);
     const received = t.core.count("hello");
-    await expect(hello()).rejects.toMatchObject({ name: "CoreError", kind: "closed", uncertain: true, deliveryEffect: "unknown" });
+    expect(await rejection(hello())).toMatchObject({ name: "CoreError", kind: "closed", uncertain: true, deliveryEffect: "unknown" });
     expect(t.core.count("hello")).toBeGreaterThan(received);
     t.core.setDown(false);
     expect((await hello()).generation).toBe(1);
@@ -119,7 +120,7 @@ describe("엔진이 닿지 않는 두 가지 모양", () => {
     // 연결 거절: 소켓이 없다. 요청은 엔진에 닿지 않았고(calls 에 남지 않는다) 보낸 쪽은 보내지 못했음을 안다.
     await t.core.setRefusing(true);
     const before = t.core.calls.length;
-    await expect(hello()).rejects.toMatchObject({ name: "CoreError", kind: "down", uncertain: false, deliveryEffect: "not_written", causeCode: "ENOENT" });
+    expect(await rejection(hello())).toMatchObject({ name: "CoreError", kind: "down", uncertain: false, deliveryEffect: "not_written", causeCode: "ENOENT" });
     expect(t.core.calls.length).toBe(before);
     expect((await t.runner.available()).ok).toBe(false);
     await t.core.setRefusing(false);
@@ -182,7 +183,7 @@ describe("옛 실행기의 흔적", () => {
     await conductor(t);
     const m = t.store.createMember({ projectId: t.project.id, handle: "im", name: "가져옴", kind: "worker", origin: "adopted", status: "offline" });
     // 실행기 자체는 넘겨받은 명부를 여전히 거절한다. 바뀐 것은 총괄이 넘기는 값이다.
-    await expect(t.runner.start({ ...t.member(m.id), cli: "claude" } as unknown as RunnerMember, {} as StartOpts)).rejects.toMatchObject({ name: "CoreError", kind: "unsupported", message: "Core does not adopt terminals without IAMCEO ownership labels" });
+    expect(await rejection(t.runner.start({ ...t.member(m.id), cli: "claude" } as unknown as RunnerMember, {} as StartOpts))).toMatchObject({ name: "CoreError", kind: "unsupported", message: "Core does not adopt terminals without IAMCEO ownership labels" });
     expect(t.runs(m.id)).toHaveLength(0);
 
     const woken = await t.orch.resumeMember(m.id);
@@ -217,12 +218,12 @@ describe("옛 실행기의 흔적", () => {
     // 세션 ID 가 남은 넘겨받은 행은 서버 세션으로 바꿔 띄우지 않는다: 대표의 터미널에서 그 세션이 살아 있는지 서버가 확인할 수 없다.
     // (backend 가 비었거나 옛 값이면 아래 legacy 행처럼 깨우기 전에 409 로 막힌다. 여기서는 실행기까지 가는 행으로 거절이 그대로임을 본다.)
     const kept = t.store.createMember({ projectId: t.project.id, handle: "keep", name: "세션남음", kind: "worker", origin: "adopted", backend: "core", status: "offline", sessionId: "33333333-3333-4333-8333-333333333333" });
-    await expect(t.orch.resumeMember(kept.id)).rejects.toMatchObject({ name: "ApiError", status: 502, message: expect.stringContaining("Core does not adopt terminals") });
+    expect(await rejection(t.orch.resumeMember(kept.id))).toMatchObject({ name: "ApiError", status: 502, message: expect.stringContaining("Core does not adopt terminals") });
     expect(t.runs(kept.id)).toHaveLength(0);
     expect(t.member(kept.id)).toMatchObject({ origin: "adopted", status: "offline", paneId: null, sessionId: "33333333-3333-4333-8333-333333333333" });
     // 옛 backend 값과 세션이 함께 남은 행은 띄우려 들지도 않는다(legacy_session).
     const legacy = t.store.createMember({ projectId: t.project.id, handle: "old", name: "옛팀장", kind: "worker", origin: "adopted", backend: "herdr", status: "offline", paneId: "old:p1", sessionId: "11111111-1111-4111-8111-111111111111" });
-    await expect(t.orch.resumeMember(legacy.id)).rejects.toMatchObject({ status: 409, message: "이전 실행기의 세션은 자동으로 다시 열지 않습니다" });
+    expect(await rejection(t.orch.resumeMember(legacy.id))).toMatchObject({ status: 409, message: "이전 실행기의 세션은 자동으로 다시 열지 않습니다" });
     const sent = await t.orch.assign(t.project.id, legacy.handle, { text: "일 @fake:post=끝" });
     await t.waitFor("보류", () => t.store.requireDelivery(sent.delivery.id).status === "held");
     expect(t.store.requireDelivery(sent.delivery.id).holdReason).toBe("legacy_session");

@@ -356,10 +356,7 @@ private actor NetAppGate {
         defer { store.disconnect() }
         let card = try XCTUnwrap(store.decisions.first)
         let first = Task { await store.resumeUsageLimit(card) }
-        let deadline = ContinuousClock.now + .seconds(3)
-        while !network.requests.contains(where: { $0.url?.path.hasSuffix("/answer") == true }), ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(5))
-        }
+        await pollUntil("답 요청이 나감") { network.requests.contains(where: { $0.url?.path.hasSuffix("/answer") == true }) }
         XCTAssertTrue(store.pendingActions.contains("decision:limit"))
         let duplicate = await store.resumeUsageLimit(card)
         XCTAssertFalse(duplicate)

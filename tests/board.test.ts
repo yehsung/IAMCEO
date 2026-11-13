@@ -15,6 +15,7 @@ import { formatTidy, Orchestrator, TIDY_HEAD } from "../server/orchestrator.ts";
 import type { Runner, RunnerEvent, SendResult } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
 import { isReportNudge } from "./fixtures/core-harness.ts";
+import { thrower } from "./fixtures/settle.ts";
 
 /** 서버가 스스로 붙인 '보고 보완'만 든 턴인가. 다른 전달과 묶여 나간 턴은 일하는 턴이다(전달마다 표식 줄이 하나씩 붙는다). */
 const nudgeOnly = (text: string) => isReportNudge({ prompt: text }) && text.split("\n").filter((line) => /^#iamceo_[A-Za-z0-9_-]{22}$/.test(line)).length === 1;
@@ -236,7 +237,7 @@ describe("ask_close", () => {
     expect(t.store.projectSummaries().find((p) => p.id === t.project.id)!.decisionCount).toBe(0);
     // 다시 닫거나 답할 수 없다.
     expect((await t.call(t.lead, "ask_close", { id: d.id, kind: "obsolete", reason: "또" })).text).toContain("이미 닫힌");
-    await expect(t.orch.answerDecision(d.id, { choice: "a" })).rejects.toThrow();
+    expect(await thrower(t.orch.answerDecision(d.id, { choice: "a" }))).toThrow();
   });
 
   test("obsolete: 이유만으로 닫는다. 이유가 없거나 이미 답한 카드는 거부", async () => {

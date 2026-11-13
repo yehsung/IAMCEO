@@ -17,6 +17,7 @@ import { childEnv } from "../server/runner/env.ts";
 import type { StartOpts } from "../server/runner/types.ts";
 import { ApiError, Store } from "../server/store.ts";
 import { coreSetup, type FakeRun } from "./fixtures/core-harness.ts";
+import { rejection, thrower } from "./fixtures/settle.ts";
 
 const closers: (() => Promise<void> | void)[] = [];
 // 시험마다 닫는다. 실제 CoreRunner 는 터미널마다 짧은 간격으로 상태를 읽어서, 파일 끝까지 두면 서른 벌이 함께 돈다.
@@ -209,7 +210,7 @@ describe("연결 상태", () => {
     // 재전송도 연결이 있어야 한다.
     const again = await t.api("POST", `/api/projects/${pid}/messages`, { id: m1.id, text: "총괄에게" });
     expect(again.status).toBe(409);
-    await expect(t.orch.resendMessage(t.store.requireMessage(m1.id))).rejects.toThrow("연결");
+    expect(await thrower(t.orch.resendMessage(t.store.requireMessage(m1.id)))).toThrow("연결");
     await t.api("PATCH", `/api/projects/${pid}`, { runnerEnabled: true });
     // 달라진 점: 세션도 터미널도 없는 넘겨받은 총괄(origin adopted)은 실행을 켜면 보류돼 있던 보고로 깨어나 서버가 띄운 새 세션이 된다
     // (전에는 실행기가 넘겨받은 명부를 거절해 깨워지지 않았다). 그 뒤에는 서버 세션처럼 재울 수 있다.
@@ -433,7 +434,7 @@ describe("설정 통일", () => {
     expect(t.runs()).toHaveLength(0);
     expect(t.turns()).toHaveLength(0);
     t.store.patchMember(old.id, { status: "asleep" });
-    await expect(t.orch.resumeMember(old.id)).rejects.toMatchObject({ status: 409 });
+    expect(await rejection(t.orch.resumeMember(old.id))).toMatchObject({ status: 409 });
     expect(t.store.requireMember(old.id)).toMatchObject({ backend: "headless", sessionId: "22222222-2222-4222-8222-222222222222" });
     expect(t.runs()).toHaveLength(0);
   });

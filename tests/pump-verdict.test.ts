@@ -213,7 +213,8 @@ describe("기한을 넘긴 판정과 정체 알림", () => {
     // 턴이 끝났는데 사건이 오지 않았다: 실행기는 쉬는 중으로 관측하지만 서버의 턴 표시는 남았다.
     f.core.busy.delete(w.id); f.core.observed.set(w.id, "idle");
     f.stallCheck();
-    await Bun.sleep(5);
+    // 정체 점검이 띄운 펌프의 다시 판정을 기다린다(고정 5ms 대신).
+    for (const end = Date.now() + 5_000; f.verdictRow(w.id)?.code !== "busy_unconfirmed" && Date.now() < end;) await Bun.sleep(5);
     expect(f.verdictRow(w.id)).toMatchObject({ code: "busy_unconfirmed", wait_reason: "member_busy" });
     const since = Date.parse(f.verdictRow(w.id)!.since!);
     expect(f.store.deliveryWait(f.store.requireDelivery(next.id)).waitReason).toBe("member_busy");

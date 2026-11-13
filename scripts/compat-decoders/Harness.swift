@@ -7,6 +7,8 @@
 // - 알 수 없는 값으로 바뀐 열거값: 옛 앱의 SafeStringEnum 이 모르는 값을 unknown 으로 읽는다(화면이 조용히 비거나 기능이 꺼진다).
 // - 건너뛴 부가 정보: 0.2.3 부터의 lenient 해석이 형이 어긋난 칸을 '없음'으로 읽고 넘어간다.
 // - 출시 앱의 조건: contractVersion 2, 전달 안내 version 2, hello 의 고정 간격 등. 어긋나면 기능이 조용히 꺼진다.
+// - 0.2.4 부터(COMPAT_SINCE_0_2_4): 버전 머리글을 보낸 앱이 받는 server 칸과 어긋남 안내, 연결된 기기 목록,
+//   다른 기기 끊기 거절(403)이 그 앱 화면에 어떻게 보이는지.
 // 의도한 변경이면 allow.json 에 이유와 함께 적는다.
 import Foundation
 
@@ -36,36 +38,108 @@ enum CompatProbe {
     }
 }
 
-struct Entry { let file: String; let type: String; let checks: [String]; let note: String }
+/// status 는 그 응답의 HTTP 상태(덤프 목록에 없으면 200). 오류 답(APIError)을 읽을 때만 쓴다.
+struct Entry { let file: String; let type: String; let checks: [String]; let note: String; let status: Int }
 struct Allow { let release: String?; let file: String?; let contains: String; let reason: String }
 
-func decode<T: Decodable>(_ type: T.Type, _ data: Data) throws -> Any { try JSONDecoder().decode(T.self, from: data) }
+func decode<T: Decodable>(_ type: T.Type) -> (Data, Entry) throws -> Any { { data, _ in try JSONDecoder().decode(T.self, from: data) } }
 
 /// 출시 앱이 받는 형. 이름은 tests/compat-dump.test.ts 의 CompatType 과 같다.
-let decoders: [String: (Data) throws -> Any] = [
-    "ServerCapabilities": { try decode(ServerCapabilities.self, $0) },
-    "Bootstrap": { try decode(Bootstrap.self, $0) },
-    "SyncSnapshot": { try decode(SyncSnapshot.self, $0) },
-    "ProjectState": { try decode(ProjectState.self, $0) },
-    "[Project]": { try decode([Project].self, $0) },
-    "MessagePage": { try decode(MessagePage.self, $0) },
-    "Message": { try decode(Message.self, $0) },
-    "[Message]": { try decode([Message].self, $0) },
-    "Decision": { try decode(Decision.self, $0) },
-    "[Activity]": { try decode([Activity].self, $0) },
-    "DeliveryNoticePage": { try decode(DeliveryNoticePage.self, $0) },
-    "DeliveryNotices": { try decode(DeliveryNotices.self, $0) },
-    "ModelCatalog": { try decode(ModelCatalog.self, $0) },
-    "PushStatus": { try decode(PushStatus.self, $0) },
-    "PushDeviceList": { try decode(PushDeviceList.self, $0) },
-    "[FileSearchResult]": { try decode([FileSearchResult].self, $0) },
-    "SettingsWriteResult": { try decode(SettingsWriteResult.self, $0) },
-    "RealtimeEvent": { try decode(RealtimeEvent.self, $0) },
-]
+func makeDecoders() -> [String: (Data, Entry) throws -> Any] {
+    var table: [String: (Data, Entry) throws -> Any] = [
+        "ServerCapabilities": decode(ServerCapabilities.self),
+        "Bootstrap": decode(Bootstrap.self),
+        "SyncSnapshot": decode(SyncSnapshot.self),
+        "ProjectState": decode(ProjectState.self),
+        "[Project]": decode([Project].self),
+        "MessagePage": decode(MessagePage.self),
+        "Message": decode(Message.self),
+        "[Message]": decode([Message].self),
+        "Decision": decode(Decision.self),
+        "[Activity]": decode([Activity].self),
+        "DeliveryNoticePage": decode(DeliveryNoticePage.self),
+        "DeliveryNotices": decode(DeliveryNotices.self),
+        "ModelCatalog": decode(ModelCatalog.self),
+        "PushStatus": decode(PushStatus.self),
+        "PushDeviceList": decode(PushDeviceList.self),
+        "[FileSearchResult]": decode([FileSearchResult].self),
+        "SettingsWriteResult": decode(SettingsWriteResult.self),
+        "RealtimeEvent": decode(RealtimeEvent.self),
+    ]
+    #if COMPAT_SINCE_0_2_4
+    // 0.2.4: 설정 → 연결의 '연결된 기기'(ConnectedDevicesView.swift 에서 꺼낸 해석부)와 2xx 가 아닌 답.
+    table["DeviceAccessList"] = decode(DeviceAccessList.self)
+    table["APIError"] = { data, entry in apiError(data, status: entry.status) }
+    #endif
+    return table
+}
+let decoders = makeDecoders()
+
+#if COMPAT_SINCE_0_2_4
+/// 0.2.4 APIClient 가 2xx 가 아닌 답에서 APIError 를 만드는 세 줄을 그대로 옮겼다(원문은 요청 함수 한가운데라 꺼낼 수 없다).
+/// run.ts 가 이 세 줄이 태그의 APIClient.swift 에 그대로 있는지 본다(releases.json 의 mirrored). APIError 형 자체는 태그에서 꺼낸 원문이다.
+func apiError(_ data: Data, status: Int) -> APIError {
+    let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    let message = object?["error"] as? String ?? object?["message"] as? String ?? "Request failed (\(status))."
+    return APIError(status: status, message: message, code: object?["code"] as? String, reason: object?["reason"] as? String)
+}
+
+/// 버전 머리글을 보낸 0.2.4 앱이 Bootstrap 을 받고 하는 일(AppStore → CompatNotice, 태그의 AppVersion.swift 원문).
+func checkServerInfo(_ value: Any) -> String? {
+    let bootstrap: Bootstrap
+    if let direct = value as? Bootstrap { bootstrap = direct }
+    else if let snapshot = value as? SyncSnapshot { bootstrap = snapshot.bootstrap }
+    else { return "형이 맞지 않음" }
+    guard bootstrap.server != nil else { return "server 칸을 읽지 못했다(버전 머리글을 보낸 앱이 서버 버전과 API 단계를 모른다)" }
+    for onThisMac in [false, true] {
+        if let notice = CompatNotice(bootstrap, onThisMac: onThisMac) { return "단계가 맞는데 어긋남 안내가 뜬다: \(notice.text)" }
+    }
+    return nil
+}
+
+/// 실제로 어긋났을 때(compat 칸이 실린 응답) 0.2.4 가 안내를 띄우는가. 칸을 못 읽거나 모르는 종류에 문장이 없으면 조용히 사라진다.
+func checkCompatShown(_ value: Any) -> String? {
+    let bootstrap: Bootstrap
+    if let direct = value as? Bootstrap { bootstrap = direct }
+    else if let snapshot = value as? SyncSnapshot { bootstrap = snapshot.bootstrap }
+    else { return "형이 맞지 않음" }
+    guard bootstrap.compat != nil else { return "compat 칸을 읽지 못했다" }
+    guard CompatNotice(bootstrap, onThisMac: false) != nil else { return "compat 칸을 읽었지만 안내가 뜨지 않는다(모르는 종류에 문장이 없다)" }
+    return nil
+}
+
+/// 0.2.4 DevicesPanel.revoke 의 갈래: 2xx 는 끊김, code device_not_found 는 '이미 끊김'으로 줄을 조용히 지움, 그 밖은 빨간 한 줄.
+/// 빨간 한 줄은 message 가 비지 않았으면 localizedDescription(ServerErrorText.display) 이다. 영어 화면이면 영어 문장이어야 한다.
+func checkRevokeRefused(_ value: Any, language: AppLanguage) -> String? {
+    guard let error = value as? APIError else { return "형이 맞지 않음" }
+    guard !(200..<300).contains(error.status) else { return "성공(\(error.status))으로 답해 0.2.4 가 끊은 것으로 안다" }
+    guard error.code != "device_not_found" else { return "code device_not_found: 0.2.4 가 '이미 끊김'으로 읽고 그 줄을 조용히 지운다" }
+    guard !error.message.isEmpty, error.message != "Request failed (\(error.status))." else { return "거절 문장(error)을 읽지 못했다" }
+    let shown = AppLanguage.withOverride(language) { error.localizedDescription }
+    let korean = shown.range(of: #"\p{Hangul}"#, options: .regularExpression) != nil
+    if language == .en, korean { return "영어 화면에 한국어 문장이 보인다: \(shown)" }
+    if language == .ko, !korean { return "한국어 화면에 한국어가 아닌 문장이 보인다: \(shown)" }
+    return nil
+}
+
+/// 연결된 기기 목록이 실제로 실렸는가(원소를 모두 버리거나 빈 목록이면 이 덤프가 아무것도 지키지 않는다).
+func checkDevices(_ value: Any) -> String? {
+    guard let list = value as? DeviceAccessList else { return "형이 맞지 않음" }
+    guard !list.devices.isEmpty else { return "연결된 기기 목록이 비었다" }
+    return nil
+}
+#endif
 
 /// 해석은 되지만 출시 앱이 따로 거는 조건. 어긋나면 그 기능이 조용히 꺼진다(AppStore 의 같은 판정을 옮겨 왔다).
 func check(_ name: String, _ value: Any) -> String? {
     switch name {
+    #if COMPAT_SINCE_0_2_4
+    case "server-info": return checkServerInfo(value)
+    case "compat-shown": return checkCompatShown(value)
+    case "devices": return checkDevices(value)
+    case "revoke-refused-ko": return checkRevokeRefused(value, language: .ko)
+    case "revoke-refused-en": return checkRevokeRefused(value, language: .en)
+    #endif
     case "contract-v2":
         // AppStore: contractVersion == 2 && operations/realtime == true 가 아니면 v1 쓰기와 3초 조회로 내려간다.
         guard let caps = value as? ServerCapabilities else { return "형이 맞지 않음" }
@@ -126,7 +200,7 @@ func check(_ name: String, _ value: Any) -> String? {
     }
     let entries = rawEntries.compactMap { raw -> Entry? in
         guard let file = raw["file"] as? String, let type = raw["type"] as? String else { return nil }
-        return Entry(file: file, type: type, checks: raw["checks"] as? [String] ?? [], note: raw["note"] as? String ?? "")
+        return Entry(file: file, type: type, checks: raw["checks"] as? [String] ?? [], note: raw["note"] as? String ?? "", status: raw["status"] as? Int ?? 200)
     }
     var allows: [Allow] = []
     if let data = try? Data(contentsOf: URL(fileURLWithPath: arguments[2])),
@@ -148,7 +222,7 @@ func check(_ name: String, _ value: Any) -> String? {
         }
         CompatProbe.records.removeAll()
         let value: Any
-        do { value = try decoder(data) }
+        do { value = try decoder(data, entry) }
         catch {
             print("실패 [\(release)] \(entry.file) (\(entry.note)): \(entry.type) 해석 실패 — \(CompatProbe.describe(error))")
             failures += 1; continue

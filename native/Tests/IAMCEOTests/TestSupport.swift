@@ -272,12 +272,12 @@ final class TestDeadlineContinuation<Value: Sendable, Failure: Error>: @unchecke
     private var continuation: CheckedContinuation<Value, Failure>?
     private var watchdog: Task<Void, Never>?
     init(_ continuation: CheckedContinuation<Value, Failure>, timeout: Result<Value, Failure>,
-         file: StaticString, line: UInt) {
+         after limit: Duration = .seconds(10), file: StaticString, line: UInt) {
         self.continuation = continuation
         watchdog = Task { [self] in
-            do { try await Task.sleep(for: .seconds(10)) } catch { return }
+            do { try await Task.sleep(for: limit) } catch { return }
             if let continuation = take() {
-                XCTFail("Fixture continuation timed out after 10 seconds", file: file, line: line)
+                XCTFail("Fixture continuation timed out after \(limit)", file: file, line: line)
                 continuation.resume(with: timeout)
             }
         }
@@ -302,26 +302,39 @@ func withTestDeadline<Value: Sendable>(fallback: Value, isolation: isolated (any
         body(TestDeadlineContinuation(continuation, timeout: .success(fallback), file: file, line: line))
     }
 }
-func withThrowingTestDeadline<Value: Sendable>(isolation: isolated (any Actor)? = #isolation,
+func withThrowingTestDeadline<Value: Sendable>(after limit: Duration = .seconds(10), isolation: isolated (any Actor)? = #isolation,
     file: StaticString = #filePath, line: UInt = #line,
     _ body: (TestDeadlineContinuation<Value, Error>) -> Void) async throws -> Value {
     try await withCheckedThrowingContinuation(isolation: isolation) { continuation in
-        body(TestDeadlineContinuation(continuation, timeout: .failure(TestDeadlineError.expired), file: file, line: line))
+        body(TestDeadlineContinuation(continuation, timeout: .failure(TestDeadlineError.expired), after: limit, file: file, line: line))
     }
+}
+
+/// 시험 공용 조건 기다림. 타이머·비동기 일이 '이미 일어났다'를 단정하기 전에 고정 `Task.sleep` 대신 쓴다.
+/// 짧은 간격으로 조건을 다시 보고 풀리면 바로 돌아온다(빠른 기계에서는 느려지지 않는다). 기한(기본 10초)을 넘기면
+/// 조용히 다음 줄로 넘어가지 않고 그 자리에서 실패를 남기고 false 를 돌려준다.
+/// 느린 GitHub CI 러너(xcode-27)에서 고정 대기가 모자라 흔들리던 시험들 때문에, 파일마다 따로 있던 eventually·waitUntil 류를
+/// 이것 하나로 모았다(그 이름들은 이것을 부르는 얇은 껍데기로 남는다). 새 시험도 파일마다 도우미를 새로 만들지 말고 이것을 쓴다.
+/// '일어나지 않았다'를 보는 부정 단정에는 쓰지 않는다. 조건이 처음부터 참이라 아무것도 기다리지 않는다. 그때는 넉넉한 고정 대기를 둔다.
+@MainActor @discardableResult
+func pollUntil(_ what: String = "", timeout: Duration = .seconds(10), every interval: Duration = .milliseconds(5),
+               file: StaticString = #filePath, line: UInt = #line, _ condition: () async -> Bool) async -> Bool {
+    let deadline = ContinuousClock.now + timeout
+    while !(await condition()) {
+        guard ContinuousClock.now < deadline, !Task.isCancelled else {
+            XCTFail("Condition did not settle within \(timeout)" + (what.isEmpty ? "" : ": \(what)"), file: file, line: line)
+            return false
+        }
+        try? await Task.sleep(for: interval)
+    }
+    return true
 }
 
 /// 조건이 풀릴 때까지 기다린다. 기한을 넘기면 조용히 다음 줄로 넘어가지 않고 그 자리에서 실패한다
 /// (예전 `for _ in 0..<200 where 조건 { sleep 10ms }`는 2초 뒤 그냥 지나가 엉뚱한 단언에서 실패했다).
 @MainActor func waitWhile(_ busy: @MainActor () -> Bool, timeout: Duration = .seconds(10),
                           file: StaticString = #filePath, line: UInt = #line) async throws {
-    let deadline = ContinuousClock.now + timeout
-    while busy() {
-        guard ContinuousClock.now < deadline else {
-            XCTFail("Condition did not settle within \(timeout)", file: file, line: line)
-            throw TestDeadlineError.expired
-        }
-        try await Task.sleep(for: .milliseconds(5))
-    }
+    guard await pollUntil(timeout: timeout, file: file, line: line, { !busy() }) else { throw TestDeadlineError.expired }
 }
 
 /// 대기 시간을 실제로 흘려보내지 않는 가짜 대기. 요청된 시간을 기록하고, 시험이 fire() 할 때 깨어난다.

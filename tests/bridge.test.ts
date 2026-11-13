@@ -14,6 +14,7 @@ import type { AgentToolResult } from "../server/orchestrator-api.ts";
 import type { AgentOperationService } from "../server/service-contracts.ts";
 import { coreSetup, type CoreEnv } from "./fixtures/core-harness.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
+import { thrower } from "./fixtures/settle.ts";
 
 // 브리지 프로세스의 환경과 가짜 HTTP 서버만 이 격리 틀에서 받는다. 서버·실행기는 시험용 core 틀이 만든다.
 const runtime = createIsolatedRuntime();
@@ -182,7 +183,7 @@ describe("브리지 왕복", () => {
 describe("잘못된 호출", () => {
   test("잘못된 토큰: 목록은 프로토콜 오류, 호출은 도구 오류, 둘 다 원인을 말한다", async () => {
     const client = await connect("tk_wrong_token");
-    await expect(client.listTools()).rejects.toThrow("토큰");
+    expect(await thrower(client.listTools())).toThrow("토큰");
     const r = await callText(client, "status", { now: "x" });
     expect(r.isError).toBe(true);
     expect(r.text).toContain("토큰을 거부");
@@ -198,7 +199,7 @@ describe("잘못된 호출", () => {
     const dead = "http://127.0.0.1:9";
     // 재시도 창을 짧게 둔다. 기본값은 서버 재시작을 넘기려고 수십 초를 버틴다.
     const client = await connect(store.getMemberToken(lead.id), { url: dead, env: { IAMCEO_CONNECT_RETRY_MS: "50" } });
-    await expect(client.listTools()).rejects.toThrow("연결할 수 없습니다");
+    expect(await thrower(client.listTools())).toThrow("연결할 수 없습니다");
     const r = await callText(client, "status", { now: "x" });
     expect(r.isError).toBe(true);
     expect(r.text).toContain(`IAMCEO 서버(${dead})에 연결할 수 없습니다`);

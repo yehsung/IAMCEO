@@ -16,18 +16,21 @@ final class TerminalStreamTests: XCTestCase {
         client.activity(windowIsKey: true, now: now.addingTimeInterval(29.999))
         client.activity(windowIsKey: false, now: now.addingTimeInterval(30))
         client.activity(windowIsKey: true, now: now.addingTimeInterval(30))
-        for _ in 0..<20 { await Task.yield() }
+        // 보내기는 작업으로 돈다. 정해진 양보 횟수 대신 두 번이 실제로 나갈 때까지 기다린다(느린 CI 러너).
+        await pollUntil("활동 신호 두 번") { texts.count >= 2 }
         XCTAssertEqual(texts, [#"{"type":"activity"}"#, #"{"type":"activity"}"#])
         client.accept(.ready(mode: .observe, cols: 100, rows: 30, expiresAt: nil))
         client.activity(windowIsKey: true, now: now.addingTimeInterval(60))
-        for _ in 0..<10 { await Task.yield() }
+        // 보내면 안 되는 쪽이라 넉넉히 기다린다.
+        try await Task.sleep(for: .milliseconds(150))
         XCTAssertEqual(texts.count, 2)
     }
 
     @MainActor func testInputCoalescesInOrderAndSerializesLaterFrames() async throws {
-        var frames: [Data] = []
+        var frames: [Data] = [], sending = 0
         let client = TerminalStreamClient(messageSender: { message in
             if case let .data(bytes) = message {
+                sending += 1
                 if frames.isEmpty { try await Task.sleep(for: .milliseconds(35)) }
                 frames.append(bytes)
             }
@@ -35,15 +38,15 @@ final class TerminalStreamTests: XCTestCase {
         defer { client.dispose() }
         client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
         client.send(Data("a".utf8)); client.send(Data("b".utf8)); client.send(Data([27, 91, 65]))
-        try await Task.sleep(for: .milliseconds(15))
+        // 첫 묶음(8ms 묶음 창)이 보내는 중이 된 뒤에 다음 글을 친다. 고정 15ms 는 느린 CI 러너에서 묶음 창보다 먼저 끝날 수 있다.
+        await pollUntil("첫 입력 묶음을 보내기 시작함") { sending >= 1 }
         client.send(Data("c".utf8)); client.send(Data("d".utf8))
         // Wait for the second frame rather than a fixed time: a loaded machine (CI) takes longer than the sender's 35 ms.
-        let arrived = Date().addingTimeInterval(3)
-        while frames.count < 2 && Date() < arrived { try await Task.sleep(for: .milliseconds(10)) }
-        try await Task.sleep(for: .milliseconds(40)) // a third frame would be a failure: give it time to show up
+        await pollUntil("두 번째 입력 묶음") { frames.count >= 2 }
+        try await Task.sleep(for: .milliseconds(200)) // a third frame would be a failure: give it ample time to show up
         XCTAssertEqual(frames, [Data([97, 98, 27, 91, 65]), Data("cd".utf8)])
         client.send(Data("must not leak".utf8)); client.close()
-        try await Task.sleep(for: .milliseconds(20))
+        try await Task.sleep(for: .milliseconds(200)) // 닫은 뒤에는 나가면 안 되는 쪽이라 넉넉히 기다린다.
         XCTAssertEqual(frames.count, 2)
     }
 
@@ -149,16 +152,17 @@ final class TerminalStreamTests: XCTestCase {
         XCTAssertTrue(host.acceptsFirstMouse(for: nil)); XCTAssertTrue(host.terminal.acceptsFirstMouse(for: nil))
         host.terminal.mouseDown(with: event(.leftMouseDown)); host.terminal.mouseUp(with: event(.leftMouseUp))
         try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.05))
-        // 느린 CI 러너에서는 타이머가 늦게 돌 수 있어 조건을 기다린다(최대 3초 더).
-        for _ in 0..<300 where requests == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        // 느린 CI 러너에서는 타이머가 늦게 돌 수 있어 조건을 기다린다.
+        await pollUntil("한 번 클릭의 입력 요청") { requests >= 1 }
         XCTAssertEqual(requests, 1)
         host.terminal.mouseDown(with: event(.leftMouseDown)); host.terminal.mouseUp(with: event(.leftMouseUp))
         host.terminal.mouseDown(with: event(.leftMouseDown, count: 2)); host.terminal.mouseUp(with: event(.leftMouseUp, count: 2))
-        try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.05))
+        // 입력 요청이 '나가지 않는지' 보는 쪽이라 두 번 누름 간격보다 넉넉히 기다린다.
+        try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.3))
         XCTAssertEqual(requests, 1); XCTAssertTrue(host.terminal.selectionActive)
         host.terminal.mouseDown(with: event(.leftMouseDown))
         host.terminal.mouseDragged(with: event(.leftMouseDragged, x: 110)); host.terminal.mouseUp(with: event(.leftMouseUp, x: 110))
-        try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.05))
+        try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.3))
         XCTAssertEqual(requests, 1); XCTAssertTrue(host.terminal.selectionActive)
         host.feed(Data("new output".utf8))
         XCTAssertTrue(host.terminal.selectionActive, "Output preserves selection when mouse mode is off")
@@ -206,7 +210,8 @@ final class TerminalStreamTests: XCTestCase {
         coordinator.performUserScroll { host.terminal.scroll(toPosition: 0.5) }
         let newAnchor = host.scrollLocation.historyRow
         host.feed(Data("\u{1b}[?2026l".utf8))
-        try await Task.sleep(for: .milliseconds(60))
+        // 되돌림은 feed 안에서 바로 끝난다. 뒤따르는 따라가기 작업이 자리를 옮기지 '않는지' 보는 쪽이라 넉넉히 기다린다.
+        try await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(host.scrollLocation.historyRow, newAnchor)
         coordinator.performUserScroll { host.followCursor() }
         XCTAssertTrue(host.isAtBottom); XCTAssertTrue(following)
@@ -507,7 +512,8 @@ final class TerminalStreamTests: XCTestCase {
             client.onControlEnded = { [client] in client.close() }
             client.dispose()
         }
-        for _ in 0..<100 { if weakSession == nil { break }; await Task.yield() }
+        // URLSession 은 무효화한 뒤 제 큐에서 놓인다. 정해진 양보 횟수 대신 실제로 풀릴 때까지 기다린다(느린 CI 러너).
+        await pollUntil("터미널 클라이언트와 세션이 풀림") { weakClient == nil && weakSession == nil }
         XCTAssertNil(weakClient); XCTAssertNil(weakSession)
     }
     @MainActor func testDemoBoxHasEqualTerminalCellWidths() {
@@ -560,7 +566,8 @@ final class TerminalStreamTests: XCTestCase {
         XCTAssertFalse(following)
         let position = host.terminal.getTerminal().getTopVisibleRow()
         host.feed(Data("new output\r\n".utf8))
-        try? await Task.sleep(for: .milliseconds(60))
+        // 자리를 '옮기지 않는지' 보는 쪽이라 화면 갱신·따라가기 타이머가 넉넉히 돌 만큼 기다린다.
+        try? await Task.sleep(for: .milliseconds(200))
         XCTAssertFalse(following)
         XCTAssertEqual(host.terminal.getTerminal().getTopVisibleRow(), position)
         #endif
@@ -630,12 +637,13 @@ final class TerminalStreamTests: XCTestCase {
                 XCTAssertFalse(following, "User scrolling must pause following in \(mode)")
                 let paused = host.scrollLocation
                 host.feed(Data("new output\r\n".utf8))
-                try? await Task.sleep(for: .milliseconds(60))
+                // 자리를 '옮기지 않는지' 보는 쪽이라 넉넉히 기다린다(아래 두 곳도 같다).
+                try? await Task.sleep(for: .milliseconds(200))
                 XCTAssertFalse(following)
                 XCTAssertEqual(host.scrollLocation.historyRow, paused.historyRow)
                 XCTAssertEqual(host.scrollLocation.viewportY, paused.viewportY, accuracy: 0.5)
                 host.feed(Data("more output\r\n".utf8))
-                try? await Task.sleep(for: .milliseconds(60))
+                try? await Task.sleep(for: .milliseconds(200))
                 XCTAssertFalse(following)
                 XCTAssertEqual(host.scrollLocation.historyRow, paused.historyRow)
                 XCTAssertEqual(host.scrollLocation.viewportY, paused.viewportY, accuracy: 0.5)
@@ -684,7 +692,7 @@ final class TerminalStreamTests: XCTestCase {
                 for range in [initialLines..<(initialLines + 100), (initialLines + 100)..<(initialLines + 127),
                               (initialLines + 127)..<(initialLines + 187)] {
                     output(range)
-                    try? await Task.sleep(for: .milliseconds(60))
+                    try? await Task.sleep(for: .milliseconds(200))
                     XCTAssertFalse(following)
                     XCTAssertEqual(visibleText(), text, "Visible content must survive recycling in \(mode), initial=\(initialLines)")
                     XCTAssertEqual(host.scrollLocation.historyRow, paused.historyRow - (engine.buffer.totalLinesTrimmed - trimmed))
@@ -719,25 +727,27 @@ final class TerminalStreamTests: XCTestCase {
                 defer { host.teardown(); client.dispose() }
                 host.feed(Data("\u{1b}[50;1H".utf8))
                 host.followCursor()
+                // 조건으로 볼 수 없는 자리: 이 격자에서 마지막 행의 커서 표시 자리는 SwiftTerm 의 처음 자리(0,0)와 같다.
+                // 화면 갱신이 늦게 와도 아래는 흔들리지 않는다(동기 출력 중에는 표시가 멈추고, 끝나면 1행으로 옮겨 달라진다).
                 try? await Task.sleep(for: .milliseconds(60))
                 let displayedCaret = host.terminal.caretFrame
                 let displayed = host.scrollLocation.viewportY
                 if mode == .observe { XCTAssertGreaterThan(displayed, 0) }
                 host.feed(Data("\u{1b}[?2026h\u{1b}[1;1H".utf8))
                 host.followCursor() // All callers must honor the synchronized-output guard.
-                try? await Task.sleep(for: .milliseconds(80))
+                // 동기 출력 중에는 화면이 '움직이지 않는지' 보는 쪽이라 넉넉히 기다린다(SwiftTerm 의 1초 시간 제한보다는 짧게).
+                try? await Task.sleep(for: .milliseconds(200))
                 XCTAssertTrue(host.terminal.getTerminal().synchronizedOutputActive)
                 XCTAssertEqual(host.scrollLocation.viewportY, displayed, accuracy: 0.5)
                 XCTAssertEqual(host.terminal.caretFrame, displayedCaret, "The displayed cursor stays at the last completed frame")
-                if timeout { try? await Task.sleep(for: .milliseconds(1150)) }
-                else {
-                    host.feed(Data("\u{1b}[?2026l".utf8))
-                    try? await Task.sleep(for: .milliseconds(80))
-                }
+                // timeout 이면 SwiftTerm 의 실제 시간 제한(1초)이 풀어 준다. 아니면 끝 신호를 보낸다.
+                if !timeout { host.feed(Data("\u{1b}[?2026l".utf8)) }
                 // The catch-up runs on the main run loop after the guard lifts. A loaded machine (CI) can need more than
-                // the fixed wait above, so allow it time; the viewport must still arrive at the cursor.
-                let settled = Date().addingTimeInterval(3)
-                while abs(host.scrollLocation.viewportY) > 0.5 && Date() < settled { try? await Task.sleep(for: .milliseconds(20)) }
+                // a fixed wait, so wait for it; the viewport and the displayed cursor must still arrive at the cursor.
+                await pollUntil("동기 출력이 끝나고 화면이 커서를 따라잡음") {
+                    !host.terminal.getTerminal().synchronizedOutputActive && abs(host.scrollLocation.viewportY) <= 0.5
+                        && host.terminal.caretFrame != displayedCaret
+                }
                 XCTAssertFalse(host.terminal.getTerminal().synchronizedOutputActive)
                 XCTAssertEqual(host.scrollLocation.viewportY, 0, accuracy: 0.5)
                 XCTAssertNotEqual(host.terminal.caretFrame, displayedCaret, "Display and viewport catch up after synchronization")
@@ -782,7 +792,10 @@ final class TerminalStreamTests: XCTestCase {
             host.feed(Data((prefix + "\u{1b}[?2026hhello").utf8))
             XCTAssertTrue(host.terminal.getTerminal().synchronizedOutputActive)
             XCTAssertTrue(following)
-            try? await Task.sleep(for: .milliseconds(1250))
+            // SwiftTerm 의 실제 시간 제한(1초)이 풀어 줄 때까지 기다린다(느린 CI 러너에서는 고정 1.25초로 모자랄 수 있다).
+            await pollUntil("SwiftTerm 동기 출력 시간 제한") { !host.terminal.getTerminal().synchronizedOutputActive }
+            // 풀린 뒤의 화면 갱신까지 지나도 따라가기가 꺼지지 '않는지' 보는 쪽이라 넉넉히 기다린다.
+            try? await Task.sleep(for: .milliseconds(250))
             XCTAssertFalse(host.terminal.getTerminal().synchronizedOutputActive, "Exercise SwiftTerm's real timeout")
             XCTAssertTrue(following, "Timeout notifications in normal, scrollback and alternate buffers are output")
             host.feed(Data("more output\r\n".utf8))

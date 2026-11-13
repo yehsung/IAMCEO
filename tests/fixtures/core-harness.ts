@@ -35,16 +35,10 @@ export const composerScreen = (history = "", draft = "") => `${history}\n${RULE}
 export const isReportNudge = (turn: Pick<FakeTurn, "prompt">) => turn.prompt.startsWith("[시스템] 보고 보완:");
 
 /**
- * 약속이 거절한 값. 성공하면 던진다. 가짜 core 를 거치는 동작(재우기·닫기 등)의 거절은 `await expect(p).rejects` 대신 이것으로 받아 단정한다.
- * bun:test 의 expect(p).rejects·resolves 는 약속이 풀릴 때까지 그 자리에서 이벤트 루프를 한 겹 더 돌리고 돌아온다(돌려주는 값이 Promise 가 아니다).
- * 그 안쪽 루프 동안 이 틀의 가짜 core 가 요청을 하나도 받지 못하는 때가 있다: 2초 동안 타이머·HTTP 왕복·다른 node:net 서버 왕복은 38번씩 돌았는데
- * 가짜 core 가 받은 요청은 0건이었고, CoreRunner 의 RPC 가 "terminal.get: no reply within 2000ms" 로 끝났다. 바로 앞의 await 가 어디서 풀렸는지에 따라
- * 갈려(앞에 await 하나를 더 두면 지나간다) 느린 CI 에서는 거의 늘, 이 Mac 에서도 자주 났다. 보통의 await 는 바깥 루프에서 기다려 이 일이 없다.
+ * 가짜 core 를 거치는 동작(재우기·닫기 등)의 거절은 `await expect(p).rejects` 대신 rejection·thrower 로 받아 단정한다.
+ * 까닭(bun:test 의 안쪽 이벤트 루프에서 가짜 core 가 요청을 못 받음)은 ./settle.ts 머리말.
  */
-export async function rejection(promise: Promise<unknown>): Promise<unknown> {
-  try { await promise; } catch (error) { return error; }
-  throw new Error("거절되어야 할 동작이 성공했습니다");
-}
+export { rejection, thrower } from "./settle.ts";
 
 export interface FakeCoreCall { id: string | number; method: string; params: Record<string, any> }
 /** RPC 하나를 가로챈 결과. 돌려주지 않으면(undefined) 평소대로 처리한다. */

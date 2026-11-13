@@ -35,12 +35,9 @@ private final class ReviewFlag: @unchecked Sendable {
 
 /// 배포 전 검토(review:native-state, review:native-views)에서 찾은 문제의 회귀 시험.
 @MainActor final class StabreviewNativeTests: XCTestCase {
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
     private func eventually(_ condition: () async -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
-        for _ in 0..<1500 {
-            if await condition() { return }
-            try? await Task.sleep(for: .milliseconds(2))
-        }
-        XCTFail("State did not settle", file: file, line: line)
+        await pollUntil("State did not settle", file: file, line: line, condition)
     }
     private func settle() async { for _ in 0..<30 { await Task.yield() }; try? await Task.sleep(for: .milliseconds(10)) }
     private func frame(_ socket: IsolatedTestWebSocket, _ text: String) async throws { try await socket.enqueue(.success(Data(text.utf8))) }

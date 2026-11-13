@@ -1,7 +1,7 @@
 import { PushStore } from "../server/push/store.ts";
 import { PushEventRecorder } from "../server/push/events.ts";
 import { API_RESUME_TEXT, type UsageMenu, type ApiRecoveryOptions } from "../server/api-outage.ts";
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -25,6 +25,7 @@ import {
 import type { ApprovalAnswer, Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "../server/runner/types.ts";
 import { ApiError, Store } from "../server/store.ts";
 import { coreSetup, isReportNudge, type CoreEnv, type CoreSetupOptions } from "./fixtures/core-harness.ts";
+import { rejection, thrower } from "./fixtures/settle.ts";
 
 // agent-tools.ts 는 다음 작업자의 몫. 여기서는 HTTP→Orchestrator 경로를 재현하는 최소 도구만 쓴다.
 const TOOLS: AgentToolsImpl = {
@@ -43,8 +44,10 @@ const TOOLS: AgentToolsImpl = {
 };
 
 const cleanups: (() => Promise<void>)[] = [];
-afterAll(async () => {
-  await Promise.all(cleanups.map((c) => c()));
+// 시험마다 닫는다(regress.test.ts 와 같다). 파일 끝까지 두면 앞 시험들의 틱·관측·서버가 쌓여, 느린 러너(taskpolicy -c background)에서
+// 뒤 시험이 제한 시간(40초)을 넘기거나 상태 판정이 밀렸다(usage-limit-model 한 파일이 375초).
+afterEach(async () => {
+  for (const close of cleanups.splice(0).reverse()) await close();
 });
 
 async function waitFor<T>(what: string, read: () => T | null | undefined | false, ms = 10_000): Promise<T> {
@@ -249,7 +252,10 @@ describe("턴 종료 처리", () => {
     const notice = await waitFor("총괄에게 누락 알림", () => t.turns(lead.id).find((c) => c.prompt.startsWith("[시스템] 철수의 결과 보고가 보완 요청 뒤에도 없습니다(실행 ")));
     const source = /^\[시스템\] 보고 보완: 실행 (\S+)의 결과만/.exec(t.turns(w.id)[1]!.prompt)![1]!;
     expect(notice.prompt).toStartWith(`[시스템] 철수의 결과 보고가 보완 요청 뒤에도 없습니다(실행 ${source}). 기존 업무를 다시 시키기 전에 기존 변경과 진행 상태를 확인한 뒤 후속 지시를 결정하세요.\n#iamceo_`);
-    expect(t.store.listDeliveries(t.project.id).find((d) => d.memberId === lead.id && d.text.includes("보완 요청 뒤에도 없습니다"))).toMatchObject({ kind: "system", wake: true, status: "delivered" });
+    // 총괄의 턴은 가짜 core 가 글을 받을 때 생기고, 전달 확정(delivered)은 그 답과 수신 확인 뒤다. 느린 러너에서는 그 사이(delivering)에 단정이 닿았다.
+    const leadNotice = () => t.store.listDeliveries(t.project.id).find((d) => d.memberId === lead.id && d.text.includes("보완 요청 뒤에도 없습니다"));
+    await waitFor("총괄 알림 전달 확정", () => leadNotice()?.status === "delivered");
+    expect(leadNotice()).toMatchObject({ kind: "system", wake: true, status: "delivered" });
     // 알림은 실행마다 한 번이고, 알림으로 깬 총괄이 보고 없이 끝내도 총괄에게 보고 보완을 묻지 않는다.
     await t.idle(lead.id);
     await Bun.sleep(60); // '없음'을 보는 대기.
@@ -535,7 +541,7 @@ describe("자동 압축", () => {
     const t = await setup();
     const w = await worker(t);
     t.store.patchMember(w.id, { sessionId: null });
-    await expect(t.orch.memberCompact(w.id)).rejects.toThrow("세션");
+    expect(await thrower(t.orch.memberCompact(w.id))).toThrow("세션");
   });
 });
 
@@ -607,7 +613,7 @@ describe("runnerEnabled=false 와 총괄 시작", () => {
     expect(t.store.requireMessage(m.id).deliveryNote).toBe("실행이 꺼져 있음");
     expect(t.store.listPending(w.id)[0]).toMatchObject({ status: "held", holdReason: "runner_disabled" });
     expect(t.turns().length).toBe(0);
-    await expect(t.orch.addMember(t.project.id, { name: "영희", handle: "yh" })).rejects.toThrow("실행이 꺼져");
+    expect(await thrower(t.orch.addMember(t.project.id, { name: "영희", handle: "yh" }))).toThrow("실행이 꺼져");
 
     project = t.store.patchProject(t.project.id, { runnerEnabled: true });
     await t.orch.onProjectPatched(project, { runnerEnabled: true });
@@ -646,7 +652,7 @@ describe("잠재우기·다시 열기", () => {
     await t.orch.assign(t.project.id, w.handle, { text: "@fake:hang @fake:silent" });
     await waitFor("일하는 중", () => t.member(w.id).status === "working" && t.turns().length === 1);
     const terminal = t.member(w.id).paneId!;
-    await expect(t.orch.sleepMember(w.id)).rejects.toThrow("일하는 중");
+    expect(await thrower(t.orch.sleepMember(w.id))).toThrow("일하는 중");
     t.store.enqueue({ projectId: t.project.id, memberId: w.id, kind: "instruction", text: "[총괄] 철수에게\n할 일: 남은 일 @fake:silent" });
     const slept = await t.orch.sleepMember(w.id, { force: true });
     expect(slept.status).toBe("asleep");
@@ -664,10 +670,10 @@ describe("잠재우기·다시 열기", () => {
 
     const other = await worker(t, "영희", "yh");
     t.store.createDecision({ projectId: t.project.id, memberId: other.id, who: "영희", title: "물음" });
-    await expect(t.orch.sleepMember(other.id)).rejects.toThrow("열린 결재");
+    expect(await thrower(t.orch.sleepMember(other.id))).toThrow("열린 결재");
     const third = await worker(t, "민수", "ms");
     t.store.enqueue({ projectId: t.project.id, memberId: third.id, kind: "system", text: "[시스템] 새 업무", wake: true });
-    await expect(t.orch.sleepMember(third.id)).rejects.toThrow("대기열이 남아 있습니다");
+    expect(await thrower(t.orch.sleepMember(third.id))).toThrow("대기열이 남아 있습니다");
   });
 
   test("잠든 직원에게 깨우는 입력이 오면 자동으로 이어서 연다. wake=false 는 깨우지 않는다", async () => {
@@ -740,7 +746,7 @@ describe("잠재우기·다시 열기", () => {
   test("team_close: 끝내고 명부에서 빼되 기록은 남긴다. 총괄은 닫지 못한다", async () => {
     const t = await setup();
     const lead = await conductor(t);
-    await expect(t.orch.closeMember(lead.id)).rejects.toThrow("총괄");
+    expect(await thrower(t.orch.closeMember(lead.id))).toThrow("총괄");
     const w = await worker(t);
     await t.orch.assign(t.project.id, w.handle, { text: "@fake:hang" });
     await waitFor("일하는 중", () => t.member(w.id).status === "working" && t.turns().length === 1);
@@ -760,13 +766,13 @@ describe("잠재우기·다시 열기", () => {
     const t = await setup();
     const other = t.store.createProject({ name: "남", cwd: t.home });
     await t.orch.addMember(other.id, { name: "남직원", handle: "nam" });
-    await expect(t.orch.assign(t.project.id, "nam", { text: "x" })).rejects.toThrow("없는 직원");
+    expect(await thrower(t.orch.assign(t.project.id, "nam", { text: "x" }))).toThrow("없는 직원");
     await worker(t);
-    await expect(t.orch.addMember(t.project.id, { name: "철수", handle: "x" })).rejects.toThrow("이름");
-    await expect(t.orch.addMember(t.project.id, { name: "다른", handle: "chulsu" })).rejects.toThrow("핸들");
+    expect(await thrower(t.orch.addMember(t.project.id, { name: "철수", handle: "x" }))).toThrow("이름");
+    expect(await thrower(t.orch.addMember(t.project.id, { name: "다른", handle: "chulsu" }))).toThrow("핸들");
     const auto = await t.orch.addMember(t.project.id, { name: "한글이름" });
     expect(auto.member.handle).toBe("w1");
-    await expect(t.orch.addMember(t.project.id, { name: "폴더없음", cwd: "/없는/폴더" })).rejects.toThrow("폴더");
+    expect(await thrower(t.orch.addMember(t.project.id, { name: "폴더없음", cwd: "/없는/폴더" }))).toThrow("폴더");
   });
 });
 
@@ -803,7 +809,7 @@ describe("ask", () => {
     // 총괄의 다른 턴에 묶여 이미 나갔을 수 있어 대기 목록이 아니라 전달 기록 전체를 본다.
     const notices = t.store.db.query<{ text: string; wake: number }, [string]>("SELECT text, wake FROM deliveries WHERE member_id = ?").all(lead.id);
     expect(notices.some((d) => d.text.includes("결재에 답했습니다") && !d.wake)).toBe(true);
-    await expect(t.orch.answerDecision(decision.id, { choice: "b" })).rejects.toMatchObject({ status: 409 });
+    expect(await rejection(t.orch.answerDecision(decision.id, { choice: "b" }))).toMatchObject({ status: 409 });
     await t.idle(w.id);
   });
 
@@ -1486,7 +1492,7 @@ describe("전달 실패 사유", () => {
     // 이어 열기도 새로 열기도 안 되면 502 로 알린다.
     await t.orch.sleepMember(w.id, { force: true });
     t.core.intercept((call) => call.method === "terminal.run" ? { error: { kind: "invalid", message: "터미널을 만들지 못함" } } : undefined);
-    await expect(t.orch.resumeMember(w.id)).rejects.toMatchObject({ status: 502 });
+    expect(await rejection(t.orch.resumeMember(w.id))).toMatchObject({ status: 502 });
     expect(t.member(w.id).status).toBe("asleep");
     t.core.intercept(null);
   });
@@ -1495,7 +1501,7 @@ describe("전달 실패 사유", () => {
     const t = await setup();
     let refused = 0;
     t.core.intercept((call) => call.method === "terminal.run" && !refused++ ? { error: { kind: "invalid", message: "터미널을 만들지 못함" } } : undefined);
-    await expect(t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).rejects.toMatchObject({ status: 502 });
+    expect(await rejection(t.orch.addMember(t.project.id, { name: "철수", handle: "cs" }))).toMatchObject({ status: 502 });
     expect(t.store.findMember(t.project.id, "cs")).toBeNull();
     const again = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs" })).member;
     expect(again.paneId).toBe(t.core.terminalOf(again.id)!.address);
@@ -1526,7 +1532,7 @@ describe("전달 실패 사유", () => {
     const screen = await next.api("GET", `/api/members/${w.id}/screen`);
     expect(screen.status).toBe(200);
     expect(await screen.json()).toEqual({ text: "" });
-    await expect(next.runner.screen({ ...next.member(w.id), cli: "claude" } as unknown as RunnerMember)).rejects.toMatchObject({ name: "CoreError", kind: "not_found", message: "No core terminal for member" });
+    expect(await rejection(next.runner.screen({ ...next.member(w.id), cli: "claude" } as unknown as RunnerMember))).toMatchObject({ name: "CoreError", kind: "not_found", message: "No core terminal for member" });
     expect((await (await next.api("GET", `/api/projects/${next.project.id}/messages`)).json() as { title: string }[]).some((m) => m.title === "중간보고")).toBe(true);
     // 서버는 herdr 를 보지 않는다. 0.2.2 앱이 읽는 필드는 '쓰지 않음' 고정값이다.
     expect(((await (await next.api("GET", "/api/bootstrap")).json()) as Bootstrap).herdr).toEqual({ installed: false, running: false, version: null, protocol: null, compatible: false, warning: null });

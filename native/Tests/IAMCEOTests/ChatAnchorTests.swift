@@ -114,8 +114,8 @@ import UIKit
         XCTAssertFalse(applied)
         anchor.observe(frames: ["m:1": CGRect(x: 0, y: -73, width: 300, height: 200)], scope: "a")
         NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: scroll)
-        // 보류된 응답은 16ms 간격으로 손을 뗀 것을 확인한 뒤 붙는다. 느린 CI 러너에서는 고정 60ms 로 모자라서 조건을 기다린다(최대 3초).
-        for _ in 0..<300 where !applied { try await Task.sleep(for: .milliseconds(10)) }
+        // 보류된 응답은 16ms 간격으로 손을 뗀 것을 확인한 뒤 붙는다. 느린 CI 러너에서는 고정 60ms 로 모자라서 조건을 기다린다.
+        await pollUntil("보류된 응답이 붙음") { applied }
         XCTAssertTrue(applied)
         anchor.observe(frames: ["m:1": CGRect(x: 0, y: 427, width: 300, height: 200)], scope: "a")
         anchor.observe(frames: ["m:1": CGRect(x: 0, y: -73, width: 300, height: 200)], scope: "a")
@@ -131,12 +131,7 @@ import UIKit
     }
 
     private func eventually(_ what: String, timeout: Duration = .seconds(10), _ condition: () -> Bool) async {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
-        while !condition() {
-            guard clock.now < deadline else { XCTFail("기다린 상태가 오지 않았습니다: \(what)"); return }
-            try? await Task.sleep(for: .milliseconds(5))
-        }
+        await pollUntil(what, timeout: timeout) { condition() }
     }
 
     /// 휠 마우스·키보드 스크롤은 willStart/didEnd 없이 didLiveScroll 만 온다. 그것도 사용자의 스크롤이다.
@@ -158,7 +153,8 @@ import UIKit
         NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: scroll)
         NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: scroll)
         for _ in 0..<20 { await Task.yield() }
-        try? await Task.sleep(for: .milliseconds(30))
+        // 1ms 조용함 타이머가 상호작용을 '끝내지 않는지' 보는 쪽이라 넉넉히 기다린다.
+        try? await Task.sleep(for: .milliseconds(100))
         XCTAssertTrue(anchor.isInteracting)
         NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: scroll)
         XCTAssertFalse(anchor.isInteracting)
@@ -228,11 +224,12 @@ import UIKit
         window.contentView = hosting
         defer { window.orderOut(nil); window.contentView = nil }
         hosting.layoutSubtreeIfNeeded()
-        try await Task.sleep(for: .milliseconds(100))
+        // SwiftUI 의 갱신·프레임 보고는 런루프를 돌며 온다. 고정 100ms 대신 실제로 올 때까지 기다린다(느린 CI 러너).
+        await pollUntil("SwiftUI 탐지기가 스크롤 뷰를 찾음") { hosting.layoutSubtreeIfNeeded(); return anchor.hostFound }
         XCTAssertTrue(anchor.hostFound, "SwiftUI's probe must find its actual ancestor")
         anchor.adjustOffset(by: 127.25)
         hosting.layoutSubtreeIfNeeded()
-        try await Task.sleep(for: .milliseconds(100))
+        await pollUntil("옮긴 자리의 반쯤 보이는 행") { hosting.layoutSubtreeIfNeeded(); return (anchor.visibleAnchor?.top ?? 0) < 0 }
         let before = try XCTUnwrap(anchor.visibleAnchor)
         XCTAssertLessThan(before.top, 0, "The prototype must actually expose a partial row")
         XCTAssertTrue(anchor.prepend(scope: "prototype") {
@@ -240,7 +237,7 @@ import UIKit
             messages.ids.append(20) // Simultaneous tail append must not enter the anchor delta.
         })
         hosting.layoutSubtreeIfNeeded()
-        try await Task.sleep(for: .milliseconds(200))
+        await pollUntil("앞에 붙인 뒤 자리 되돌림이 끝남") { hosting.layoutSubtreeIfNeeded(); return !anchor.isPreservingPosition }
         hosting.layoutSubtreeIfNeeded()
         let after = try XCTUnwrap(anchor.visibleAnchor)
         XCTAssertEqual(after.messageID, before.messageID)

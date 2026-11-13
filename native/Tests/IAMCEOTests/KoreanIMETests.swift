@@ -268,15 +268,10 @@ final class KoreanIMETests: XCTestCase {
         try await waitUntil { hosting.layoutSubtreeIfNeeded(); return editor.string.isEmpty }
     }
 
-    private func waitUntil(timeout: Duration = .seconds(2), _ condition: () -> Bool) async throws {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
-        while !condition() {
-            guard clock.now < deadline else {
-                XCTFail("IME host update exceeded its deadline")
-                throw NSError(domain: "KoreanIMETests.Timeout", code: 1)
-            }
-            try await Task.sleep(for: .milliseconds(10))
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
+    private func waitUntil(timeout: Duration = .seconds(10), _ condition: () -> Bool) async throws {
+        guard await pollUntil("IME host update exceeded its deadline", timeout: timeout, every: .milliseconds(10), { condition() }) else {
+            throw NSError(domain: "KoreanIMETests.Timeout", code: 1)
         }
     }
 

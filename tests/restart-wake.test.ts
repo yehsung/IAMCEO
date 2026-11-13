@@ -2,7 +2,7 @@
 // 2026-11-12 실측: Mac 을 다시 시작하자 깨어 있던 팀장 19명이 모두 꺼졌고, 대표나 총괄이 말을 걸 때까지 꺼진 채였다.
 // 운영과 같은 틀로 돈다: 가짜 엔진 소켓 + 실제 CoreRunner + 운영 배선의 총괄 + 실제 HTTP 서버.
 import { Database } from "bun:sqlite";
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { AgentToolsImpl, PostInput } from "../server/orchestrator.ts";
 import { RESTART_REOPENED_NOTE, RESTART_RESUME_TEXT } from "../server/restart-wake.ts";
 import type { DecisionOption, Member } from "../shared/types.ts";
@@ -20,8 +20,10 @@ const TOOLS: AgentToolsImpl = {
 };
 
 const cleanups: (() => Promise<void>)[] = [];
-afterAll(async () => {
-  await Promise.all(cleanups.map((c) => c()));
+// 시험마다 닫는다(regress.test.ts 와 같다). 파일 끝까지 두면 앞 시험들의 틱·관측·서버가 쌓여, 느린 러너(taskpolicy -c background)에서
+// 뒤 시험이 제한 시간(40초)을 넘기거나 상태 판정이 밀렸다(usage-limit-model 한 파일이 375초).
+afterEach(async () => {
+  for (const close of cleanups.splice(0).reverse()) await close();
 });
 
 async function setup(opts: CoreSetupOptions = {}) {
@@ -494,7 +496,8 @@ describe("갓 깨운 팀장은 준비를 알리기 전에도 막힘이 아니다
   });
 
   test("끝내 준비를 알리지 않으면 예전처럼 막힘으로 보이고 알린다", async () => {
-    const { t, w, notices } = await woken({ runnerDeps: { startQuietMs: 150 } });
+    // 조용한 시간은 '아직 막힘이 아님'을 보는 동안 느린 러너에서도 끝나지 않을 만큼 둔다(150ms 였을 때는 깨우기부터 이 단정까지가 넘칠 수 있었다).
+    const { t, w, notices } = await woken({ runnerDeps: { startQuietMs: 1_500 } });
     await Bun.sleep(60);
     expect(t.member(w.id).status).toBe("idle");
     await t.waitFor("막힘", () => t.member(w.id).status === "blocked");

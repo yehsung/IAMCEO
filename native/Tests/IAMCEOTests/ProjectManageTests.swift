@@ -310,7 +310,7 @@ final class ManagementNavigationServer: @unchecked Sendable {
         server.change { $0.bootstrapStateRace = true }
         let store = await connected(network); defer { store.disconnect() }
         // Fallback selection is scheduled outside the snapshot single flight.
-        for _ in 0..<30 where store.selectedProjectID != "hq" { await Task.yield() }
+        await pollUntil("본부로 돌아감") { store.selectedProjectID == "hq" }
         XCTAssertEqual(store.selectedProjectID, "hq")
         XCTAssertFalse(store.projects.contains { $0.id == "p" })
     }

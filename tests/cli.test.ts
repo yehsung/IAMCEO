@@ -13,6 +13,7 @@ import { renderRole } from "../server/roles.ts";
 import { Store } from "../server/store.ts";
 import { importArtifact, normalizeCollection, parseWhen } from "../scripts/import-artifact.ts";
 import { coreSetup } from "./fixtures/core-harness.ts";
+import { thrower } from "./fixtures/settle.ts";
 
 const CLI = resolve(import.meta.dir, "..", "bin", "iamceo.ts");
 
@@ -35,7 +36,7 @@ async function cli(home: string, args: string[], opts: { stdin?: string; env?: R
     env: cliEnv(home, opts.env),
   });
   const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-  return { stdout, stderr, code };
+  return { stdout, stderr, code, signal: p.signalCode ?? null };
 }
 
 const newHome = () => mkdtempSync(join(tmpdir(), "iamceo-cli-"));
@@ -513,7 +514,8 @@ describe("운영 CLI readiness·등록·복원", () => {
     expect((await cli(other, ["restore", "resume"], { env: { HOME: user } })).stdout).toContain(`IAMCEO_HOME=${realpathSync(other)} iamceo service install`);
     // 서버가 꺼져 있을 때의 안내도 같은 말이다.
     const down = await cli(home, ["status"]);
-    expect(down.stderr).toContain("‘이 Mac에서 시작’");
+    // 2026-11-14 전체 실행 한 번에서 이 자식의 stderr 가 비었다(다시 돌리면 통과). 다음에 나면 까닭이 보이게 종료 코드·신호·stdout 을 함께 남긴다.
+    expect(down.stderr, `exit=${down.code} signal=${down.signal} stdout=${JSON.stringify(down.stdout.slice(0, 400))}`).toContain("‘이 Mac에서 시작’");
     expect(down.stderr).not.toContain("iamceo serve 로 켜세요");
   }, 30_000);
 
@@ -536,7 +538,7 @@ describe("운영 CLI readiness·등록·복원", () => {
       const settings = { ...config, port: server.port! };
       for (const value of ["old", "old-version", "mismatch", "recovering", "auth"]) {
         mode = value;
-        await expect(waitForReadiness(settings, { expectedBuildId: expected, timeoutMs: 25, pollMs: 1 })).rejects.toThrow();
+        expect(await thrower(waitForReadiness(settings, { expectedBuildId: expected, timeoutMs: 25, pollMs: 1 }))).toThrow();
       }
       mode = "ready";
       await waitForReadiness(settings, { expectedBuildId: expected, timeoutMs: 100 });
@@ -558,7 +560,7 @@ describe("운영 CLI readiness·등록·복원", () => {
       },
       readiness: async () => { calls.push("readiness"); if (!ready) throw new Error("mock build mismatch"); },
     };
-    await expect(service(["install"], dependencies)).rejects.toThrow("build mismatch");
+    expect(await thrower(service(["install"], dependencies))).toThrow("build mismatch");
     expect(calls).toEqual(["print", "bootstrap", "readiness"]);
     calls.length = 0; ready = true;
     await service(["install"], dependencies);
@@ -570,7 +572,7 @@ describe("운영 CLI readiness·등록·복원", () => {
     expect(readFileSync(join(home, "Library/LaunchAgents/com.iamceo.server.plist"), "utf8")).toContain("service-run");
     calls.length = 0; fail = true;
     // 프로세스 안에서 부르는 함수라 문구는 시험 실행 환경의 언어를 따른다(server/cli-text.ts).
-    await expect(service(["install", "--restart"], dependencies)).rejects.toThrow(/등록 실패|Registering with launchd failed/);
+    expect(await thrower(service(["install", "--restart"], dependencies))).toThrow(/등록 실패|Registering with launchd failed/);
     // 마지막 print 는 실패 안내에 서비스가 내려가 있는지 적기 위한 확인이다.
     expect(calls).toEqual(["print", "bootout", "print", "bootstrap", "print"]);
   });

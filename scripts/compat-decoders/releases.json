@@ -1,5 +1,5 @@
 {
-  "about": "출시한 앱의 해석 코드. 출시 태그마다 하나씩 더한다. files 는 그 태그에서 Harness.swift 와 함께 따로 빌드되는 최소 묶음이다.",
+  "about": "출시한 앱의 해석 코드. 출시 태그마다 하나씩 더한다. files 는 그 태그에서 Harness.swift 와 함께 따로 빌드되는 최소 묶음이다. 객체 항목은 그 파일에서 from 줄부터 to 줄 앞까지(원문 그대로)만 꺼낸다. appHeaders 는 그 앱이 모든 요청에 싣는 버전 머리글(있으면 그 머리글로 받은 응답만 읽는다), defines 는 Harness.swift 의 #if 조건이다.",
   "releases": [
     {
       "tag": "v0.2.2",
@@ -23,6 +23,50 @@
         "native/Sources/IAMCEO/Models/FileSearch.swift",
         "native/Sources/IAMCEO/Models/ModelCatalog.swift",
         "native/Sources/IAMCEO/State/RankSettings.swift"
+      ]
+    },
+    {
+      "tag": "v0.2.4",
+      "appHeaders": { "version": "0.2.4", "platform": "ios", "apiLevel": 1 },
+      "defines": ["COMPAT_SINCE_0_2_4"],
+      "files": [
+        "native/Sources/IAMCEO/Models/Models.swift",
+        "native/Sources/IAMCEO/Models/RealtimeModels.swift",
+        "native/Sources/IAMCEO/Models/PushModels.swift",
+        "native/Sources/IAMCEO/Models/CLIApproval.swift",
+        "native/Sources/IAMCEO/Models/FileSearch.swift",
+        "native/Sources/IAMCEO/Models/ModelCatalog.swift",
+        "native/Sources/IAMCEO/State/RankSettings.swift",
+        "native/Sources/IAMCEO/Services/AppVersion.swift",
+        "native/Sources/IAMCEO/Models/ServerErrorText.swift",
+        "native/Sources/IAMCEO/Services/ServerErrorDisplay.swift",
+        {
+          "path": "native/Sources/IAMCEO/Services/AppLanguage.swift",
+          "from": "enum AppLanguage",
+          "to": "// MARK: - 날짜",
+          "imports": ["Foundation", "os"]
+        },
+        {
+          "path": "native/Sources/IAMCEO/Services/APIClient.swift",
+          "from": "struct APIError",
+          "to": "struct ServerEndpoint",
+          "imports": ["Foundation"],
+          "mirrored": [
+            "let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]",
+            "let message = object?[\"error\"] as? String ?? object?[\"message\"] as? String ?? \"Request failed (\\(http.statusCode)).\"",
+            "throw APIError(status: http.statusCode, message: message, code: object?[\"code\"] as? String, reason: object?[\"reason\"] as? String)"
+          ]
+        },
+        {
+          "path": "native/Sources/IAMCEO/Views/ConnectedDevicesView.swift",
+          "from": "/// QR 로 연결한 기기 하나.",
+          "to": "/// 화면 글자.",
+          "imports": ["Foundation"],
+          "mirrored": [
+            "} catch let failure as APIError where failure.code == \"device_not_found\" {",
+            "if let failure = error as? APIError, !failure.message.isEmpty { return failure.localizedDescription }"
+          ]
+        }
       ]
     }
   ]

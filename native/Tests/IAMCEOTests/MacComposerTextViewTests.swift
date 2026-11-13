@@ -78,8 +78,8 @@ final class MacComposerTextViewTests: XCTestCase {
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = hosting
         defer { window.orderOut(nil); window.contentView = nil }
-        hosting.layoutSubtreeIfNeeded()
-        try await Task.sleep(for: .milliseconds(20))
+        // SwiftUI 가 입력칸을 만드는 것은 런루프를 돌며 온다. 고정 20ms 대신 생길 때까지 기다린다(느린 CI 러너).
+        await pollUntil("입력칸이 생김") { hosting.layoutSubtreeIfNeeded(); return findEditor(in: hosting) != nil }
         let editor = try XCTUnwrap(findEditor(in: hosting))
         let container = try XCTUnwrap(editor.textContainer)
         let containerSize = container.containerSize
@@ -101,7 +101,8 @@ final class MacComposerTextViewTests: XCTestCase {
             hosting.layoutSubtreeIfNeeded()
             _ = hosting.hitTest(NSPoint(x: 20, y: 10))
             window.displayIfNeeded()
-            try await Task.sleep(for: .milliseconds(20))
+            // 초안이 '사라지지 않는지' 보는 쪽이라 넉넉히 기다린다.
+            try await Task.sleep(for: .milliseconds(100))
             XCTAssertEqual(editor.string, draft)
         }
     }

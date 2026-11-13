@@ -205,15 +205,12 @@ import XCTest
         let before = network.requests.count
         store.disconnect()
         // 끊을 때 남은 옛 방식 조작권은 놓아 달라고 한 번 보낸다(답은 기다리지 않는다).
-        let deadline = Date().addingTimeInterval(2)
-        var releaseSent = false
-        while !releaseSent, Date() < deadline {
-            releaseSent = network.requests.dropFirst(before).contains {
+        let releaseSent = await pollUntil("옛 방식 조작권 놓기 요청") {
+            network.requests.dropFirst(before).contains {
                 $0.url?.path == "/api/members/m/terminal/control"
                     && (try? WriteTestServer.body($0))?["action"] as? String == "release"
                     && (try? WriteTestServer.body($0))?["leaseId"] as? String == "legacy"
             }
-            if !releaseSent { try await Task.sleep(for: .milliseconds(20)) }
         }
         XCTAssertTrue(releaseSent)
         await network.close()
@@ -248,8 +245,8 @@ import XCTest
         let again = await late.claimTerminal(late.members[0]); XCTAssertTrue(again)
         await second.close()
         late.disconnect()
-        // 끊은 뒤에 도는 일이 남아 있었다면 이 사이에 프로세스가 죽는다.
-        for _ in 0..<10 { await Task.yield(); try await Task.sleep(for: .milliseconds(20)) }
+        // 끊은 뒤에 도는 일이 남아 있었다면 이 사이에 프로세스가 죽는다('일어나지 않는지' 보는 쪽이라 넉넉히).
+        for _ in 0..<20 { await Task.yield(); try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertTrue(store.terminalLeases.isEmpty)
         XCTAssertTrue(late.terminalLeases.isEmpty)
     }

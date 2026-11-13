@@ -62,12 +62,9 @@ private actor DelayedRealtimeFactory: RealtimeTransportFactory {
 final class RealtimeTests: XCTestCase {
     private let hello = #"{"type":"hello","protocol":2,"epoch":"epoch","seq":0,"heartbeatMs":15000,"staleAfterMs":45000}"#
     private func api() throws -> APIClient { APIClient(endpoint: try ServerEndpoint("https://fixture.invalid:4443"), accessCode: "fixture-code") }
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
     private func eventually(_ predicate: () async -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
-        for _ in 0..<1000 {
-            if await predicate() { return }
-            try? await Task.sleep(for: .milliseconds(1))
-        }
-        XCTFail("Condition did not settle", file: file, line: line)
+        await pollUntil(every: .milliseconds(1), file: file, line: line, predicate)
     }
 
     func testSingleReceiveAndHeaderOnlyFactoryRequest() async throws {
@@ -99,7 +96,8 @@ final class RealtimeTests: XCTestCase {
         await socket.send(#"{"type":"ping","epoch":"epoch","seq":0}"#)
         _ = try await iterator.next()
         await clock.advance(44)
-        try await Task.sleep(for: .milliseconds(5))
+        // 아직 '끊지 않는지' 보는 쪽이라 감시 반복이 넉넉히 돌 만큼 기다린다.
+        try await Task.sleep(for: .milliseconds(50))
         let before = await socket.closes; XCTAssertEqual(before, 0)
         await clock.advance(1)
         do { _ = try await iterator.next(); XCTFail("Stale socket must fail") }

@@ -19,6 +19,7 @@ import { Store } from "../server/store.ts";
 import { cleanName, workerNameProblem } from "../server/text.ts";
 import { sanitizeName } from "../server/files.ts";
 import { coreSetup, isReportNudge } from "./fixtures/core-harness.ts";
+import { rejection, thrower } from "./fixtures/settle.ts";
 
 const SID = "11111111-1111-4111-8111-111111111111";
 
@@ -476,7 +477,8 @@ describe("턴 정리", () => {
     const w = (await t.orch.addMember(t.project.id, { name: "철수", handle: "cs", role: "개발" })).member;
     await t.orch.assign(t.project.id, "cs", { text: "일" });
     t.runner.end(w.id, { isError: true, errorText: "도중 오류" });
-    await Bun.sleep(40);
+    await until(() => t.store.requireMember(w.id).status === "error", "오류로 끝남");
+    await Bun.sleep(40); // '없음'을 보는 대기: 다시 시도 간격(5ms)이 여러 번 지나도 다시 넣지 않는다.
     expect(t.runner.sent).toHaveLength(1);
     expect(t.store.requireMember(w.id).status).toBe("error");
   });
@@ -560,18 +562,21 @@ describe("직접 띄운 CLI", () => {
   }
   const tool = (t: Awaited<ReturnType<typeof setup>>, token: string, name: string, args: unknown, signal?: AbortSignal) =>
     fetch(`${t.base}/agent/tool`, { method: "POST", signal, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ name, args }) });
+  /** 서버에 걸려 있는 롱폴 수(wait 는 팀장 id, ask/wait 는 결재 id). 고정 대기 대신 서버가 기다림을 걸었는지·끊김을 알아챘는지를 본다. */
+  const waiting = (t: Awaited<ReturnType<typeof setup>>, table: "inboxWaiters" | "askWaiters", key: string) =>
+    (t.orch as unknown as { memberFlows: Record<typeof table, Map<string, Set<unknown>>> }).memberFlows[table].get(key)?.size ?? 0;
 
   test("끊긴 wait 는 지시를 가져가지 않는다. 다음 wait 가 받고, 새 wait 를 가로채지도 않는다", async () => {
     const t = await setup({ serve: true });
     const { member, token } = await joined(t);
     const aborter = new AbortController();
     const hanging = tool(t, token, "wait", { timeout_sec: 30 }, aborter.signal).catch((e: Error) => e.name);
-    await Bun.sleep(100);
+    await until(() => waiting(t, "inboxWaiters", member.id) === 1, "wait 걸림");
     aborter.abort();
     await hanging;
-    await Bun.sleep(100);
+    await until(() => waiting(t, "inboxWaiters", member.id) === 0, "끊긴 wait 풀림");
     const live = tool(t, token, "wait", { timeout_sec: 5 });
-    await Bun.sleep(100);
+    await until(() => waiting(t, "inboxWaiters", member.id) === 1, "새 wait 걸림");
     const msg = await t.orch.sendUserMessage(t.project.id, { text: "대조 지시", targetMemberId: member.id });
     const got = (await (await live).json()) as { text: string };
     expect(got.text).toContain("대조 지시");
@@ -579,10 +584,10 @@ describe("직접 띄운 CLI", () => {
 
     const a2 = new AbortController();
     const hanging2 = tool(t, token, "wait", { timeout_sec: 30 }, a2.signal).catch((e: Error) => e.name);
-    await Bun.sleep(100);
+    await until(() => waiting(t, "inboxWaiters", member.id) === 1, "둘째 wait 걸림");
     a2.abort();
     await hanging2;
-    await Bun.sleep(100);
+    await until(() => waiting(t, "inboxWaiters", member.id) === 0, "끊긴 둘째 wait 풀림");
     const later = await t.orch.sendUserMessage(t.project.id, { text: "끊긴 뒤 지시", targetMemberId: member.id });
     expect(t.store.requireMessage(later.id).delivery).toBe("queued");
     const next = (await (await tool(t, token, "wait", { timeout_sec: 1 })).json()) as { text: string };
@@ -596,10 +601,10 @@ describe("직접 띄운 CLI", () => {
     const id = ask.wait.decisionId;
     const aborter = new AbortController();
     const hanging = fetch(`${t.base}/agent/ask/wait`, { method: "POST", signal: aborter.signal, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ decisionId: id, timeoutMs: 30000 }) }).catch((e: Error) => e.name);
-    await Bun.sleep(100);
+    await until(() => waiting(t, "askWaiters", id) === 1, "ask/wait 걸림");
     aborter.abort();
     await hanging;
-    await Bun.sleep(100);
+    await until(() => waiting(t, "askWaiters", id) === 0, "끊긴 ask/wait 풀림");
     await t.orch.answerDecision(id, { choice: "a" });
     expect(t.store.requireDecision(id).status).toBe("answered");
     const next = (await (await tool(t, token, "wait", { timeout_sec: 1 })).json()) as { text: string };
@@ -740,7 +745,7 @@ describe("일 목록·알림·자료·보관", () => {
     closers.push(() => server.stop());
     const boot = async () => (await (await fetch(`http://127.0.0.1:${server.port}/api/bootstrap`, { headers: { Authorization: "Bearer code" } })).json()) as { urls: string[] };
     expect((await boot()).urls).toEqual([`http://127.0.0.1:${server.port}`]);
-    await expect(fetch(`http://[::1]:${server.port}/api/health`)).rejects.toThrow();
+    expect(await thrower(fetch(`http://[::1]:${server.port}/api/health`))).toThrow();
     detected = ["::1"];
     server.syncHosts();
     expect((await fetch(`http://[::1]:${server.port}/api/health`)).status).toBe(200);
@@ -836,8 +841,8 @@ describe("2차 검수 회귀: 입력 위조", () => {
     for (const name of ["대표", "대표 답(원문)", "대표 직접", "대 표", "代表", "총괄", "시스템", "서버", "보고", "본사 AI"]) expect(workerNameProblem(name)).not.toBeNull();
     for (const name of ["서버 담당", "보고서 담당", "시스템 설계", "총괄 보조", "철수"]) expect(workerNameProblem(name)).toBeNull();
     const t = await setup();
-    await expect(t.orch.addMember(t.project.id, { name: "대표", role: "x" })).rejects.toMatchObject({ status: 400 });
-    await expect(t.orch.addMember(t.project.id, { name: "철수", handle: "lead" })).rejects.toMatchObject({ status: 400 });
+    expect(await rejection(t.orch.addMember(t.project.id, { name: "대표", role: "x" }))).toMatchObject({ status: 400 });
+    expect(await rejection(t.orch.addMember(t.project.id, { name: "철수", handle: "lead" }))).toMatchObject({ status: 400 });
     // 핸들을 안 주면 이름에서 만든다. 예약 핸들은 피한다.
     expect((await t.orch.addMember(t.project.id, { name: "root", role: "x" })).member.handle).not.toBe("root");
   });
@@ -1144,7 +1149,7 @@ describe("2차 검수 회귀: 전달", () => {
     t.store.patchMember(w.id, { sessionId: SID, status: "asleep" });
     t.runner.failStarts = 1;
     t.runner.startError = "session.snapshot: 8000ms 안에 답 없음";
-    await expect(t.orch.resumeMember(w.id)).rejects.toMatchObject({ status: 502 });
+    expect(await rejection(t.orch.resumeMember(w.id))).toMatchObject({ status: 502 });
     expect(t.store.requireMember(w.id).sessionId).toBe(SID);
     expect(t.store.requireMember(w.id).lastError).toContain("8000ms");
     // 달라진 점: 옛 실행기는 이어 열기가 "No conversation found" 로 실패해야 세션이 없는 줄 알았다.
@@ -1195,7 +1200,7 @@ describe("2차 검수 회귀: 전달", () => {
     const opening = t.orch.resumeMember(w2.id);
     await Bun.sleep(5);
     t.runner.startDelay = 0;
-    await expect(t.orch.closeMember(w2.id)).rejects.toMatchObject({ status: 409 });
+    expect(await rejection(t.orch.closeMember(w2.id))).toMatchObject({ status: 409 });
     await opening;
     expect(t.store.requireMember(w2.id).status).toBe("idle");
     const stopsBefore = t.runner.stops.filter((id) => id === w2.id).length;
@@ -1240,7 +1245,7 @@ describe("2차 검수 회귀: 전달", () => {
     const t = await setup({ runnerEnabled: false });
     const m = t.store.createMember({ projectId: t.project.id, handle: "im", name: "가져옴", kind: "worker", origin: "adopted", status: "offline" });
     const starts = t.runner.starts.length;
-    await expect(t.orch.memberResume(m.id)).rejects.toMatchObject({ status: 409 });
+    expect(await rejection(t.orch.memberResume(m.id))).toMatchObject({ status: 409 });
     expect(t.runner.starts.length).toBe(starts);
     expect(t.store.requireMember(m.id)).toMatchObject({ origin: "adopted", status: "offline", sessionId: null });
   });
@@ -1345,7 +1350,7 @@ describe("2차 검수 회귀: 전달", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "pic.png"), "1");
     const att = t.store.createAttachment({ id: "a_pic", name: "pic.png", mime: "image/png", size: 1, path: join(dir, "pic.png") });
-    await expect(t.orch.assign(t.project.id, "cs", { text: "봐", attachmentIds: [att.id] })).rejects.toMatchObject({ status: 404 });
+    expect(await rejection(t.orch.assign(t.project.id, "cs", { text: "봐", attachmentIds: [att.id] }))).toMatchObject({ status: 404 });
     t.store.createMessage({ projectId: t.project.id, mine: true, who: "나", kind: "나", body: "사진", attachments: [att] });
     await t.orch.assign(t.project.id, "cs", { text: "봐", attachmentIds: [att.id] });
     const text = t.runner.sent.filter((s) => s.memberId === w.id).at(-1)!.text;
@@ -1535,7 +1540,7 @@ describe("W5 전달 통합", () => {
       kind === "answer" ? () => t.orch.answerDecision(decision.id, { choice: "a" }) :
       kind === "report" ? () => t.orch.recordPost(worker, { kind: "완료", title: "원자 보고" }) :
       () => t.orch.registerAsk(worker, { title: "원자 질문" });
-    try { await expect(action()).rejects.toThrow("주입 outbox 실패"); }
+    try { expect(await thrower(action())).toThrow("주입 outbox 실패"); }
     finally { t.store.enqueue = enqueue; }
     expect(t.store.listMessages(t.project.id)).toHaveLength(before);
     expect(t.store.listDecisions(t.project.id)).toHaveLength(decisions);

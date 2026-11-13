@@ -336,7 +336,7 @@ import XCTest
             let session = TerminalSession(platform: .mac) { _, _, _, _, _, _, _ in }
             session.appear(store: store, member: member, active: true)
             session.beginInput(store: store, member: member)
-            for _ in 0..<200 where session.starting { try await Task.sleep(for: .milliseconds(10)) }
+            await pollUntil("조작 시작이 끝남") { !session.starting }
             XCTAssertTrue(session.missingTerminal, "The window offers its existing wake guidance")
             XCTAssertNil(store.errorMessage)
             if mode != 2 { XCTAssertEqual(store.operationResults.values.first?.error, raw) }

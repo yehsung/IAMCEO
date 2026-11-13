@@ -14,9 +14,9 @@ import XCTest
         return store
     }
 
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
     private func eventually(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
-        for _ in 0..<400 where !condition() { try? await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertTrue(condition(), file: file, line: line)
+        await pollUntil(file: file, line: line) { condition() }
     }
 
     // MARK: 입력칸 — UIKit 입력칸(IOSComposerTextView)이 IME 와 커서를 쥔다

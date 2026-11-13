@@ -2,7 +2,7 @@
 // Fable 을 쓰던 팀장 셋이 한도에 걸린 뒤 대표가 "모델 오푸스로 바꿔서 이어서 해"라고 했다. 총괄에게는 있는 팀장의 모델을 바꾸는 도구가 없었고,
 // 앱의 설정 변경도, 재우기도 "실행 중인 일이나 미해결 입력이 있어 닫지 않았습니다"(409)로 거절됐다. 총괄은 오푸스 팀장을 새로 띄웠고 원래 셋은 오류 표시를 단 채 남았다.
 // 실제 CoreRunner 틀(tests/fixtures/core-harness.ts)로 본다: 가짜 core + 실제 CoreRunner + 실제 총괄 + 실제 HTTP 서버.
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,7 +23,9 @@ const TOOLS: AgentToolsImpl = {
 };
 
 const cleanups: (() => Promise<void>)[] = [];
-afterAll(async () => { await Promise.all(cleanups.map((c) => c().catch(() => {}))); });
+// 시험마다 닫는다(regress.test.ts 와 같다). 파일 끝까지 두면 앞 시험들의 틱·관측·서버가 쌓여, 느린 러너(taskpolicy -c background)에서
+// 뒤 시험이 제한 시간(40초)을 넘기거나 상태 판정이 밀렸다(usage-limit-model 한 파일이 375초).
+afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close().catch(() => {}); });
 
 /** 라이브에서 CLI 가 턴을 끝낸 글 그대로. */
 const LIMIT = "You're out of usage credits. Run /usage-credits to keep using Fable 5.2 or /model to switch models.";

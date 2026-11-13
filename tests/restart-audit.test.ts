@@ -5,12 +5,13 @@
 // 원칙은 하나다: 터미널의 사라짐이 확정되면(엔진이 끝났다고 알렸거나, 그 터미널을 모른다고 확정해 답함) 그 터미널에 묶인 미확정 상태를
 // 한곳에서 정리한다(Orchestrator.releaseGoneTerminal). 엔진이 답하지 않는 동안과 세션 기록을 읽지 못한 전달은 예전처럼 보수적으로 둔다.
 // 시험이 실패하면 그 팀장이 무엇에 막혀 있는지(보류 상태)를 실패 글에 싣는다.
-import { afterAll, describe, expect, test } from "bun:test";
-import type { AgentToolsImpl, PostInput } from "../server/orchestrator.ts";
+import { afterEach, describe, expect, test } from "bun:test";
+import type { AgentToolsImpl, OrchestratorTimings, PostInput } from "../server/orchestrator.ts";
 import type { DecisionOption, Member } from "../shared/types.ts";
 import { appendFileSync } from "node:fs";
 import { transcriptPath } from "../server/runner/transcript.ts";
 import { coreSetup, type CoreEnv, type CoreSetupOptions } from "./fixtures/core-harness.ts";
+import { rejection, thrower } from "./fixtures/settle.ts";
 
 const TOOLS: AgentToolsImpl = {
   listAgentTools: () => [],
@@ -22,7 +23,9 @@ const TOOLS: AgentToolsImpl = {
 };
 
 const cleanups: (() => Promise<void>)[] = [];
-afterAll(async () => { await Promise.all(cleanups.map((c) => c().catch(() => {}))); });
+// 시험마다 닫는다(regress.test.ts 와 같다). 파일 끝까지 두면 앞 시험들의 틱·관측·서버가 쌓여, 느린 러너(taskpolicy -c background)에서
+// 뒤 시험이 제한 시간(40초)을 넘기거나 상태 판정이 밀렸다(usage-limit-model 한 파일이 375초).
+afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close().catch(() => {}); });
 
 /** 틱·점검·재시도를 시험 시간 안에 여러 번 돌게 줄인 값. 판정 기준(확인 120초 등 코드에 박힌 값)은 그대로다. */
 const FAST = { tickMs: 150, healthMs: 40, retryMs: 30, inputBusyRetryMs: 30, writeSettleMs: 40, startGraceMs: 200 };
@@ -340,7 +343,7 @@ describe("설정 변경으로 세션을 다시 열다 끊긴 뒤", () => {
     await Bun.sleep(QUIET_MS);
     expect(pendingLifecycle(next, w.id)).toEqual(["fresh_session/unknown"]);
     expect(next.member(w.id).paneId).not.toBeNull();
-    await expect(next.orch.resumeMember(w.id)).rejects.toMatchObject({ status: 409 });
+    expect(await rejection(next.orch.resumeMember(w.id))).toMatchObject({ status: 409 });
     await t.core.setRefusing(false);
     await next.waitFor("엔진이 답한 뒤 의도를 닫음", () => pendingLifecycle(next, w.id).length === 0, 20_000);
     const d = await instruct(next, w, "새 일 @fake:post=새일끝");
@@ -407,7 +410,7 @@ describe("띄우기·끝내기 결과 모름 뒤", () => {
     const w = await worker(t);
     await warm(t, w);
     t.core.intercept((call) => { if (call.method === "terminal.kill") { t.core.setDown(true); return "drop"; } return undefined; });
-    await expect(t.orch.sleepMember(w.id)).rejects.toThrow();
+    expect(await thrower(t.orch.sleepMember(w.id))).toThrow();
     t.core.intercept(null); t.core.setDown(false);
     expect(pendingLifecycle(t, w.id)).toEqual(["sleep/unknown"]);
     const next = await macRestart(t, [w.id]);
@@ -420,7 +423,7 @@ describe("띄우기·끝내기 결과 모름 뒤", () => {
   test("띄우기 결과를 모르는 채(터미널은 끝내 안 생김) 서버가 다시 뜨면, 유예 뒤 기동을 취소하고 다시 띄워 첫 지시를 전달한다", async () => {
     const t = await setup({ runnerDeps: QUICK_RPC });
     t.core.intercept((call) => call.method === "terminal.run" ? "drop" : undefined);
-    await expect(t.orch.addMember(t.project.id, { name: "영희", handle: "younghee", role: "개발", firstInstruction: "첫 지시 @fake:post=첫지시끝" })).rejects.toThrow();
+    expect(await thrower(t.orch.addMember(t.project.id, { name: "영희", handle: "younghee", role: "개발", firstInstruction: "첫 지시 @fake:post=첫지시끝" }))).toThrow();
     t.core.intercept(null);
     const w = t.store.findMember(t.project.id, "younghee")!;
     expect(pendingLifecycle(t, w.id)).toEqual(["start/unknown"]);
@@ -440,7 +443,7 @@ describe("띄우기·끝내기 결과 모름 뒤", () => {
     await t.idle(a.id); await t.idle(b.id);
     let kills = 0;
     t.core.intercept((call) => { if (call.method === "terminal.kill" && ++kills === 2) { t.core.setDown(true); return "drop"; } return undefined; });
-    await expect(t.orch.patchProject(t.project.id, { archived: true })).rejects.toThrow();
+    expect(await thrower(t.orch.patchProject(t.project.id, { archived: true }))).toThrow();
     t.core.intercept(null); t.core.setDown(false);
     expect(pendingLifecycle(t, b.id)).toEqual(["archive/unknown"]);
     const next = await macRestart(t, [a.id, b.id]);
@@ -554,13 +557,18 @@ describe("압축 상태가 사라진 터미널에 묶인 뒤", () => {
 
   test("넣기 전에 단계 제한이 걸린 압축은 불확실로 남지 않고 다시 예약돼, 엔진이 답하면 한 번 돌고 뒤따르는 지시가 나간다", async () => {
     // 압축 명령을 넣기 전의 확인 읽기(terminal.get)가 답하지 않는 사이 전달 단계 제한(300ms)이 먼저 걸린다. 실행기는 기준선을 저장하기 전이다.
-    const t = await setup({ timings: { pumpStageTimeoutMs: 300 }, runnerDeps: { rpcTimeoutMs: 700 } });
+    // 단계 제한은 그 압축 동안만 300ms 로 줄인다. 팀장 띄우기·지시 전달 같은 정상 경로까지 300ms 에 묶으면 느린 러너에서
+    // "Pump stage start_session:terminal.list exceeded 300ms" 로 시험 준비부터 실패했다(taskpolicy -c background 에서 재현).
+    const t = await setup({ runnerDeps: { rpcTimeoutMs: 700 } });
+    const timings = (t.orch as unknown as { timings: OrchestratorTimings }).timings;
     const w = await worker(t);
     await warm(t, w);
     let hang = true;
     t.core.intercept((call) => hang && call.method === "terminal.get" ? "drop" : undefined);
     await Bun.sleep(80); // 주기 관측 하나가 답 없는 조회에 걸려 있게 한다. 압축의 확인 읽기는 그 조회에 얹혀 기다린다.
-    await t.orch.compactMember(w.id).catch(() => {});
+    const stageLimit = timings.pumpStageTimeoutMs;
+    timings.pumpStageTimeoutMs = 300; // 단계 제한(300ms)이 확인 읽기의 RPC 제한(700ms)보다 먼저 걸린다.
+    try { await t.orch.compactMember(w.id).catch(() => {}); } finally { timings.pumpStageTimeoutMs = stageLimit; }
     const state = t.store.getContextState(w.id)!;
     expect(state.compaction).toMatchObject({ phase: "queued", reason: "backend_down" });
     expect(state.baseline?.coreCompact ?? null).toBeNull();

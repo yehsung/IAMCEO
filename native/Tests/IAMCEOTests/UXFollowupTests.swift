@@ -98,12 +98,9 @@ private final class FollowupMessagePosts: @unchecked Sendable {
         task.cancel()
         return result
     }
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
     private func waitUntil(_ condition: () async -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(3)
-        while !(await condition()) {
-            guard ContinuousClock.now < deadline else { XCTFail("Followup condition timed out"); throw TestDeadlineError.expired }
-            try await Task.sleep(for: .milliseconds(2))
-        }
+        guard await pollUntil("Followup condition timed out", condition) else { throw TestDeadlineError.expired }
     }
     private func connect(_ network: IsolatedTestNetwork, drafts: DraftStore? = nil,
                          submissions: SubmissionStore? = nil) async -> AppStore {

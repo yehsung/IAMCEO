@@ -189,11 +189,9 @@ private final class UXDeliveryLabelServer: @unchecked Sendable {
         task.cancel()
         return value
     }
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
     private func eventually(_ predicate: () async -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(3)
-        while !(await predicate()), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
-        let settled = await predicate()
-        XCTAssertTrue(settled)
+        await pollUntil { await predicate() }
     }
 
     func testSocketEventBeforePOSTResponseAndStaleStateKeepsChatHomeAndSubmissionDelivered() async throws {

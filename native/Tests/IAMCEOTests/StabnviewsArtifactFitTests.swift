@@ -273,15 +273,10 @@ final class StabnviewsArtifactRuntimeTests: XCTestCase {
         XCTAssertEqual(last, page, "자라다 멈춘 페이지의 아래가 잘렸다 (묶임: \(wasHeld))")
     }
 
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. WebKit 은 느려 기한을 20초로 둔다.
     @MainActor private func waitUntil(_ what: String, timeout: Duration = .seconds(20), _ condition: () async -> Bool) async throws {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
-        while !(await condition()) {
-            guard clock.now < deadline else {
-                XCTFail("기다린 상태가 오지 않았습니다: \(what)")
-                throw NSError(domain: "StabnviewsArtifactRuntimeTests.Timeout", code: 1)
-            }
-            try await Task.sleep(for: .milliseconds(20))
+        guard await pollUntil(what, timeout: timeout, every: .milliseconds(20), condition) else {
+            throw NSError(domain: "StabnviewsArtifactRuntimeTests.Timeout", code: 1)
         }
     }
 }

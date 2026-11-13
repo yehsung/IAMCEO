@@ -106,10 +106,7 @@ final class MacAttachmentUploadTests: XCTestCase {
     }
 
     private func drain(_ store: AppStore) async throws {
-        let deadline = Date().addingTimeInterval(3)
-        while !store.composerUploads.pending.isEmpty && Date() < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        await pollUntil("올리기 대기열이 빔") { store.composerUploads.pending.isEmpty }
         XCTAssertTrue(store.composerUploads.pending.isEmpty)
     }
 
@@ -169,8 +166,7 @@ final class MacAttachmentUploadTests: XCTestCase {
         defer { files.forEach { $0.cleanup() } }
         let task = store.composerUploads.loadMedia(names: files.map { $0.url.lastPathComponent },
                                                    context: captured, store: store) { [files[$0]] }
-        let deadline = Date().addingTimeInterval(3)
-        while !(await gate.held) && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        await pollUntil("올리기 요청이 문에 걸림") { await gate.held }
         let held = await gate.held
         XCTAssertTrue(held)
         responses.stopRunner()
@@ -178,10 +174,7 @@ final class MacAttachmentUploadTests: XCTestCase {
         XCTAssertTrue(store.canWrite)
         XCTAssertFalse(store.uiCanWrite)
         await gate.release()
-        let firstDeadline = Date().addingTimeInterval(3)
-        while store.drafts.files(for: captured.token.key).isEmpty && Date() < firstDeadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        await pollUntil("첫 첨부가 초안에 붙음") { !store.drafts.files(for: captured.token.key).isEmpty }
         XCTAssertEqual(store.drafts.files(for: captured.token.key).count, 1)
         XCTAssertTrue(store.drafts.uploadFailures(for: captured.token.key).isEmpty)
         XCTAssertEqual(net.requests.filter { $0.url?.path == "/api/uploads" }.count, 1)
@@ -287,7 +280,7 @@ final class MacAttachmentUploadTests: XCTestCase {
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = host
         defer { window.contentView = nil }
-        try await settle()
+        await pollUntil("입력칸이 첨부 수신자를 등록함") { intake.receive != nil }
         XCTAssertNotNil(intake.receive)
         let (board, sources) = try pasteboard()
         defer { board.releaseGlobally(); sources.forEach { $0.cleanup() } }
@@ -328,11 +321,13 @@ final class MacAttachmentUploadTests: XCTestCase {
         window.contentView = container
         defer { window.contentView = nil }
         container.addSubview(old)
-        try await settle()
+        await pollUntil("앞 입력칸이 첨부 수신자를 등록함") { intake.receive != nil }
         container.addSubview(replacement)
         try await settle()
         old.removeFromSuperview()
+        // 떠나는 입력칸이 새 수신자를 '지우지 않는지' 보는 쪽이라 넉넉히 기다린 뒤, 새 입력칸의 등록이 늦게 와도 흔들리지 않게 조건으로 본다.
         try await settle()
+        await pollUntil("새 입력칸의 첨부 수신자") { intake.receive != nil }
         XCTAssertNotNil(intake.receive, "The departing host must not erase the replacement's receiver")
         let (board, files) = try pasteboard()
         defer { board.releaseGlobally(); files.forEach { $0.cleanup() } }
@@ -531,7 +526,8 @@ final class MacAttachmentUploadTests: XCTestCase {
         let blockedContext = context(blocked)
         blocked.composerUploads.sessionConfiguration = readOnly.session.configuration
         let queued = blocked.composerUploads.upload([file.url], context: blockedContext, store: blocked)
-        try await Task.sleep(for: .milliseconds(100))
+        // 쓸 수 없는 동안 '올리지 않는지' 보는 쪽이라 넉넉히 기다린다(대기열에는 바로 들어간다).
+        try await Task.sleep(for: .milliseconds(300))
         XCTAssertFalse(readOnly.requests.contains { $0.url?.path == "/api/uploads" })
         XCTAssertTrue(blocked.drafts.uploadFailures(for: blockedContext.token.key).isEmpty)
         XCTAssertEqual(blocked.composerUploads.pending.count, 1)

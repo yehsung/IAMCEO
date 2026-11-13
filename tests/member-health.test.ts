@@ -1,14 +1,23 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
 import { createServer, type Socket } from "node:net";
 import { Bus } from "../server/bus.ts";
 import { loadConfig } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
-import { Orchestrator } from "../server/orchestrator.ts";
+import { Orchestrator, type OrchestratorTimings } from "../server/orchestrator.ts";
 import { CoreRunner, type CoreRunnerDeps } from "../server/runner/core.ts";
 import type { CoreTerminal } from "../server/runner/core-client.ts";
 import type { Runner, SendResult } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
+
+// 시간 제한. 정상 경로(다른 팀장의 전달, 멈추기 전까지의 단계와 RPC)는 느린 CI 러너에서도 넉넉하게 둔다.
+// 예전에는 모든 RPC 30ms·모든 단계 35~150ms 라, 러너가 느리면 멈추게 만든 곳에 닿기도 전에 정상 RPC·단계가 끊겼다
+// (0.2.4 CI: 다른 팀장 전달이 "terminal.get: pump deadline expired before RPC" 로 보류, 이 Mac 에서도 taskpolicy -c background 로 매번 1~3개 실패).
+// - 답하지 않는 RPC(f.hang)는 RPC 제한(RPC_MS)이 다 지나서 끝난다. 정상 RPC 는 로컬 소켓 왕복이라 그 안에 넉넉히 끝난다.
+// - 끝나지 않는 실행기 동작·정리(never)와 자기 제한이 긴 RPC(terminal.kill 15초)는 단계 제한으로만 풀린다. 그 단계 하나만 f.stall(팀장, 단계)로
+//   짧게(STALL_MS) 하고 나머지 단계는 STAGE_MS 다. STALL_MS 도 그 단계 안에서 멈추기 전의 정상 RPC 가 끝날 만큼은 둔다.
+const RPC_MS = 1_000, STAGE_MS = 10_000, STALL_MS = 1_000;
+setDefaultTimeout(30_000);
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -19,9 +28,11 @@ type Internals = {
   coreSupervisor: { observations(): Array<{ memberId: string }> };
   runtime(id: string): { pumping: Promise<void> | null; pumpStage: string | null; wantParallel: boolean | null; again: boolean; holdUntil: number };
   queueCoreCompact(member: ReturnType<Store["requireMember"]>, trigger: "manual", focus: string): void;
+  timings: OrchestratorTimings;
+  pumpWait(memberId: string, stage: string, ...rest: unknown[]): Promise<unknown>;
 };
 
-async function fixture(deps: Partial<CoreRunnerDeps> = {}, stageTimeoutMs = 150) {
+async function fixture(deps: Partial<CoreRunnerDeps> = {}) {
   const isolated = createIsolatedRuntime();
   const config = loadConfig({ IAMCEO_HOME: isolated.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: isolated.socketPath,
     IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin });
@@ -60,9 +71,18 @@ async function fixture(deps: Partial<CoreRunnerDeps> = {}, stageTimeoutMs = 150)
     });
   });
   await new Promise<void>(resolve => server.listen(isolated.socketPath, resolve));
-  const runner = new CoreRunner(isolated.runnerOptions(isolated.providerHomes), { recoveryStore: store, pollMs: 60_000, rpcTimeoutMs: 30, sendTimeoutMs: 30, ...deps });
-  const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]), timings: { tickMs: 60_000, healthMs: 60_000, retryMs: 60_000, pumpStageTimeoutMs: stageTimeoutMs, stuckPumpMs: 60_000 } });
+  const runner = new CoreRunner(isolated.runnerOptions(isolated.providerHomes), { recoveryStore: store, pollMs: 60_000, rpcTimeoutMs: RPC_MS, sendTimeoutMs: RPC_MS, ...deps });
+  const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]), timings: { tickMs: 60_000, healthMs: 60_000, retryMs: 60_000, pumpStageTimeoutMs: STAGE_MS, stuckPumpMs: 60_000 } });
   const internal = orch as unknown as Internals;
+  // 단계 제한은 pumpWait 가 시작할 때(첫 await 전) 한 번 읽는다. 고른 팀장의 고른 단계만 그 순간 짧은 제한을 보게 한다.
+  const stalls = new Set<string>();
+  const pumpWait = internal.pumpWait;
+  internal.pumpWait = function (this: unknown, memberId: string, stage: string, ...rest: unknown[]) {
+    if (!stalls.has(`${memberId} ${stage}`)) return pumpWait.call(this, memberId, stage, ...rest);
+    const timings = internal.timings;
+    internal.timings = { ...timings, pumpStageTimeoutMs: STALL_MS };
+    try { return pumpWait.call(this, memberId, stage, ...rest); } finally { internal.timings = timings; }
+  };
   cleanups.push(async () => {
     hang = null;
     await orch.shutdown();
@@ -74,10 +94,18 @@ async function fixture(deps: Partial<CoreRunnerDeps> = {}, stageTimeoutMs = 150)
   const enqueue = (id: string, urgent = false) => store.enqueue({ projectId: project.id, memberId: id, kind: "system", text: "Do this once", wake: true, urgent });
   const count = (method: string, id?: string) => calls.filter(c => c.method === method && (!id || c.params.terminal === id)).length;
   return { isolated, store, project, runner, orch, internal, calls, terminals, create, enqueue, count,
-    hang(fn: typeof hang) { hang = fn; } };
+    hang(fn: typeof hang) { hang = fn; },
+    /** 이 팀장의 이 단계(pumpWait 의 stage 이름)만 단계 제한을 STALL_MS 로. 끝나지 않는 동작이 단계 제한으로 풀리는 것을 볼 때 쓴다. */
+    stall(memberId: string, stage: string) { stalls.add(`${memberId} ${stage}`); } };
 }
 
-async function bounded(promise: Promise<void>, ms = 600) {
+/** 조건이 참이 될 때까지 기다린다. 끝내 거짓이면 그대로 돌아오고, 뒤의 단정이 실패를 알린다. */
+async function until(condition: () => boolean, ms = 10_000) {
+  for (const end = Date.now() + ms; !condition() && Date.now() < end;) await Bun.sleep(5);
+}
+
+/** 펌프가 풀리기를 기다리는 상한. 풀리는 데는 멈춘 RPC 의 RPC_MS 나 고른 단계의 STALL_MS 가 걸리고, 이 값은 실패를 알리는 상한일 뿐이다. */
+async function bounded(promise: Promise<void>, ms = 15_000) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try { await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("pump did not release")), ms); })]); }
   finally { if (timer) clearTimeout(timer); }
@@ -189,7 +217,8 @@ for (const method of ["hello", "terminal.list", "terminal.run"] as const) {
 }
 
 test("lease cleanup never settles: no input is admitted, other employee delivers, later tick retries cleanup", async () => {
-  const f = await fixture({}, 35), member = await f.create(), other = await f.create("Other");
+  const f = await fixture(), member = await f.create(), other = await f.create("Other");
+  f.stall(member.id, "lease_cleanup");
   const remove = f.orch.onTerminalLeaseEnded(id => id === member.id ? never<void>() : Promise.resolve());
   f.enqueue(member.id); const blocked = f.orch.pump(member.id);
   await otherMemberDelivers(f, other.id); await bounded(blocked);
@@ -217,9 +246,11 @@ test("context file promise never settles: shared refresh releases and late compl
 
 for (const method of ["terminal.get", "terminal.read", "terminal.kill"] as const) {
   test(`sync_config ${method} never replies: no lifecycle continuation or work input after timeout`, async () => {
-    const f = await fixture({}, 50), member = await f.create(), other = await f.create("Other");
+    const f = await fixture(), member = await f.create(), other = await f.create("Other");
     f.store.patchMember(member.id, { modelOverride: "claude-sonnet-4-5" });
     f.hang((m, p) => m === method && p.terminal === member.paneId);
+    // get·read 는 RPC 제한으로 끝난다. kill 은 15초 제한으로 불러 단계의 남은 시간에 잘리므로 그 단계만 짧게 둔다.
+    if (method === "terminal.kill") f.stall(member.id, "sync_config.stop");
     f.enqueue(member.id); const blocked = f.orch.pump(member.id);
     await otherMemberDelivers(f, other.id); await bounded(blocked);
     expect(f.internal.runtime(member.id).pumping).toBeNull();
@@ -237,7 +268,8 @@ for (const method of ["terminal.get", "terminal.read", "terminal.kill"] as const
 
 for (const operation of ["send", "send_urgent", "parallel", "compact", "start_session"] as const) {
   test(`runner ${operation} never settles: pump releases and side effects are fenced`, async () => {
-    const f = await fixture({}, 35), member = await f.create(), other = await f.create("Other");
+    const f = await fixture(), member = await f.create(), other = await f.create("Other");
+    f.stall(member.id, operation);
     if (operation === "send" || operation === "send_urgent") f.runner.send = () => never<SendResult>();
     // core 는 일하는 턴에 끼워 넣지 못해 긴급을 시도하지 않는다(delivery-1). 끼워 넣는 실행기의 긴급 경로가 멈춰도 펌프가 풀리는지는 계속 본다.
     if (operation === "send_urgent") { f.store.patchMember(member.id, { status: "working" }); f.runner.isBusy = id => id === member.id; (f.runner as { interjects: boolean }).interjects = true; }
@@ -274,7 +306,7 @@ for (const operation of ["send", "send_urgent", "parallel", "compact", "start_se
       f.terminals.get(member.paneId!)!.state = "finished";
       const observer = f.runner as unknown as { tracks: Map<string, unknown>; refresh(track: unknown): Promise<unknown> };
       await observer.refresh(observer.tracks.get(member.id)); // 실행기가 종료를 관측해 알린다(주기 관측을 기다리지 않는다).
-      for (let i = 0; i < 100 && f.store.requireMember(member.id).status !== "offline"; i++) await Bun.sleep(5);
+      await until(() => f.store.requireMember(member.id).status === "offline");
       expect(f.store.requireMember(member.id).status).toBe("offline");
       expect(f.store.deferredMemberConfig(member.id)).toBeNull();
       expect(f.store.requireMember(member.id).lastError ?? "").not.toContain("control_unknown");
@@ -290,7 +322,8 @@ for (const operation of ["send", "send_urgent", "parallel", "compact", "start_se
 }
 
 test("late preflight completion after cancellation cannot issue another RPC or send input", async () => {
-  const f = await fixture({}, 35), member = await f.create();
+  const f = await fixture(), member = await f.create();
+  f.stall(member.id, "send");
   let finish!: (terminal: CoreTerminal) => void;
   const runner = f.runner as unknown as { refresh(track: unknown): Promise<CoreTerminal> };
   const original = runner.refresh;
@@ -305,9 +338,10 @@ test("late preflight completion after cancellation cannot issue another RPC or s
 });
 
 test("late session creation result after timeout cannot apply identity or send the queued job", async () => {
-  const f = await fixture({}, 35);
+  const f = await fixture();
   const member = f.store.createMember({ projectId: f.project.id, name: "Late", handle: "late", kind: "worker" });
   f.store.patchMember(member.id, { backend: "core", status: "offline" });
+  f.stall(member.id, "reopen");
   let finish!: (result: Awaited<ReturnType<CoreRunner["start"]>>) => void;
   f.runner.start = () => new Promise(resolve => { finish = resolve; });
   f.enqueue(member.id); await bounded(f.orch.pump(member.id));

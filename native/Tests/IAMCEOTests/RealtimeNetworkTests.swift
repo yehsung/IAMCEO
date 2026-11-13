@@ -12,7 +12,9 @@ actor CoordinatorClock: RealtimeClock {
         guard duration > .zero else { return }
         let id = UUID(), deadline = time + duration
         try await withTaskCancellationHandler {
-            try await withThrowingTestDeadline { continuation in
+            // 가짜 시계의 대기는 시험 끝까지 밀지 않는 것이 정상일 수 있다(실시간 연결의 45초 끊김 감시 등. 끝날 때 취소된다).
+            // 실제 시간 10초 감시를 그대로 두면 느린 CI 러너에서 시험 전체가 10초를 넘기는 것만으로 거짓 실패가 난다. 멈춤만 잡도록 넉넉히 둔다.
+            try await withThrowingTestDeadline(after: .seconds(60)) { continuation in
                 sleepers[id] = (deadline, continuation)
             }
         } onCancel: { Task { await self.cancel(id) } }
@@ -25,6 +27,9 @@ actor CoordinatorClock: RealtimeClock {
         }
     }
     var deadlines: [Duration] { sleepers.values.map(\.0) }
+    /// 지금부터 `window` 안에 깨어날 대기가 등록돼 있는가. 시계를 밀기 전에 `pollUntil` 로 기다릴 때 쓴다:
+    /// 대기가 등록되기 전에 밀면 그 대기는 민 시각부터 다시 세어 이번 밀기로 깨지 않는다(느린 CI 러너에서 흔들린 까닭).
+    func hasSleeper(dueWithin window: Duration) -> Bool { sleepers.values.contains { $0.0 > time && $0.0 <= time + window } }
 }
 
 actor CoordinatorSockets: RealtimeTransportFactory {
@@ -109,12 +114,9 @@ final class CoordinatorServer: @unchecked Sendable {
 }
 
 @MainActor final class RealtimeNetworkTests: XCTestCase {
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
     func eventually(_ predicate: () async -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
-        for _ in 0..<1000 {
-            if await predicate() { return }
-            try? await Task.sleep(for: .milliseconds(1))
-        }
-        XCTFail("Coordinator did not settle", file: file, line: line)
+        await pollUntil("Coordinator did not settle", every: .milliseconds(1), file: file, line: line, predicate)
     }
     func settle() async { for _ in 0..<30 { await Task.yield() }; try? await Task.sleep(for: .milliseconds(10)) }
     func frame(_ socket: IsolatedTestWebSocket, _ text: String) async throws { try await socket.enqueue(.success(Data(text.utf8))) }

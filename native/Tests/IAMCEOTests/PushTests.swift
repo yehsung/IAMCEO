@@ -133,12 +133,9 @@ final class PushTests: XCTestCase {
     private func host(_ api: MockPushAPI, demo: Bool = false) throws -> PushHostContext {
         PushHostContext(serverID: server, endpoint: try ServerEndpoint("https://fixture.invalid"), service: api, isDemo: demo)
     }
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
     private func eventually(_ predicate: () async -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
-        for _ in 0..<1000 {
-            if await predicate() { return }
-            try? await Task.sleep(for: .milliseconds(1))
-        }
-        XCTFail("Condition did not settle", file: file, line: line)
+        await pollUntil(every: .milliseconds(1), file: file, line: line, predicate)
     }
 
     func testExplicitOptInVariableLengthHexAndSixDefaults() async throws {

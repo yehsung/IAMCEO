@@ -94,15 +94,12 @@ private final class Wave1Bodies: @unchecked Sendable {
         try JSONDecoder().decode(type, from: Data(json.utf8))
     }
     /// 스토어가 띄운 작업이 조건에 닿을 때까지 잠깐 기다린다.
+    /// 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
     private func settle(_ condition: () async -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
-        for _ in 0..<400 {
-            if await condition() { return }
-            try? await Task.sleep(for: .milliseconds(5))
-        }
-        XCTFail("조건에 닿지 않았다", file: file, line: line)
+        await pollUntil("조건에 닿지 않았다", file: file, line: line, condition)
     }
-    /// 일어나면 안 되는 일이 일어날 틈을 준다.
-    private func pause() async { try? await Task.sleep(for: .milliseconds(40)) }
+    /// 일어나면 안 되는 일이 일어날 틈을 준다(부정 단정이라 넉넉히).
+    private func pause() async { try? await Task.sleep(for: .milliseconds(150)) }
 
     // MARK: 1. 첫 실행의 권한 방식 선택
 

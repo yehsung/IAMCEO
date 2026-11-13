@@ -257,8 +257,9 @@ private final class DeliveryNoticeServer: @unchecked Sendable {
         // Each pass is paced on the manual clock. Stay under the 3s fallback interval in total.
         func refresh() async {
             let task = Task { await store.refresh() }
-            for _ in 0..<30 { await Task.yield() }
-            try? await Task.sleep(for: .milliseconds(10))
+            // 새로고침이 가짜 시계의 간격 대기(500ms)에 들어간 뒤에 민다. 고정 양보·10ms 는 느린 CI 러너에서 대기 등록보다
+            // 먼저 끝나, 민 시간이 그 대기에 닿지 않고 task.value 가 멈출 수 있었다.
+            await pollUntil("새로고침이 시계의 간격 대기에 들어감") { await clock.hasSleeper(dueWithin: .milliseconds(600)) }
             await clock.advance(.milliseconds(600))
             await task.value
         }

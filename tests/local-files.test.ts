@@ -205,11 +205,15 @@ test("attachment staging wait coalesces concurrent imports and rejects an archiv
       publication = this; entered(); await waiting; return original.call(this, input);
     });
     const send = () => f.request(`/api/projects/${project.id}/files/from-path`, { path });
+    // 둘째 요청은 activeProject 와 readLocalFile 에서 이 프로젝트를 두 번 읽고, 곧바로(같은 틱에) once() 로 간다. 첫 요청은 그동안 stagePath 에 멈춰 있다.
+    const reads = spyOn(f.store, "requireProject");
+    const projectReads = () => reads.mock.calls.filter(([id]) => id === project.id).length;
     try {
       const first = send(); await started;
+      const readsBefore = projectReads();
       const second = send();
-      // Let the second request reach once() while staging is still waiting.
-      await new Promise(resolve => setTimeout(resolve, 30));
+      // Let the second request reach once() while staging is still waiting (고정 30ms 대신 그 요청이 프로젝트를 다 읽을 때까지).
+      for (const end = Date.now() + 5_000; projectReads() < readsBefore + 2 && Date.now() < end;) await Bun.sleep(5);
       expect(stage).toHaveBeenCalledTimes(1);
       if (archive) f.store.patchProject(project.id, { archived: true });
       release();
@@ -229,7 +233,7 @@ test("attachment staging wait coalesces concurrent imports and rejects an archiv
         expect(docs[0].id).toBe(docs[1].id); expect(f.store.listFiles(project.id)).toHaveLength(1);
         expect(await Bun.file(docs[0].attachments[0].path).text()).toBe("small fixture video");
       }
-    } finally { release(); stage.mockRestore(); }
+    } finally { release(); stage.mockRestore(); reads.mockRestore(); }
   }
 }, 5000);
 

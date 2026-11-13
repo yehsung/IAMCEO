@@ -243,7 +243,8 @@ import SwiftUI
         session.endInputIfInactive(store: store, member: member, now: now.addingTimeInterval(180))
         XCTAssertNil(session.inputEndedStatus)
         session.setActive(false, store: store, member: member, immediately: true)
-        for _ in 0..<20 { await Task.yield() }
+        // 닫기는 작업으로 돈다. 정해진 양보 횟수 대신 실제로 닫힐 때까지 기다린다(느린 CI 러너).
+        await pollUntil("보기 연결이 닫힘") { session.client.state == .closed(reason: "client_closed", message: nil) }
         XCTAssertEqual(session.client.state, .closed(reason: "client_closed", message: nil))
         session.disappear(store: store, member: member); store.disconnect()
     }
@@ -549,9 +550,8 @@ import SwiftUI
         await fulfillment(of: [entered], timeout: 3)
         session.disappear(store: store, member: member)
         server.change { $0.gate = nil; $0.entered = nil }; gate.signal()
-        for _ in 0..<200 {
-            if server.read({ $0.terminalBodies.last?["action"] as? String }) == "release", store.terminalLeases[member.id] == nil { break }
-            try await Task.sleep(for: .milliseconds(10))
+        await pollUntil("늦은 조작권이 풀림") {
+            server.read({ $0.terminalBodies.last?["action"] as? String }) == "release" && store.terminalLeases[member.id] == nil
         }
         XCTAssertEqual(server.read { $0.terminalBodies.map { $0["action"] as? String } }, ["claim", "release"])
         XCTAssertNil(store.terminalLeases[member.id]); XCTAssertFalse(session.starting)
@@ -596,7 +596,8 @@ import SwiftUI
         let observer = TerminalSession(platform: .iPhone) { _, _, _, _, _, _, _ in }
         observer.appear(store: store, member: member, active: true)
         first.disappear(store: store, member: member); observer.disappear(store: store, member: member)
-        try await Task.sleep(for: .milliseconds(100))
+        // 옛 창·보는 창이 새 조작권을 '풀지 않는지' 보는 쪽이라 넉넉히 기다린다.
+        try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(store.terminalLeases[member.id]?.leaseId, second.ownedLeaseID)
         XCTAssertTrue(second.controlling)
         XCTAssertEqual(server.read { $0.terminalBodies.map { $0["action"] as? String } }, ["claim", "release", "claim"])
@@ -620,7 +621,8 @@ import SwiftUI
         second.sizeChanged(cols: 120, rows: 40); second.appear(store: store, member: member, active: true); second.beginInput(store: store, member: member)
         server.change { $0.gate = nil; $0.entered = nil }; gate.signal()
         await fulfillment(of: [secondReady], timeout: 3)
-        try await Task.sleep(for: .milliseconds(100))
+        // 세 요청은 새 창이 붙기 전에 차례로 끝난다. 그 뒤에 더 '나가지 않는지' 보는 쪽이라 넉넉히 기다린다.
+        try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(server.read { $0.terminalBodies.map { $0["action"] as? String } }, ["claim", "release", "claim"])
         let claims = server.read { $0.terminalBodies.filter { $0["action"] as? String == "claim" }.compactMap { $0["claimId"] as? String } }
         XCTAssertEqual(Set(claims).count, 2)
@@ -646,7 +648,9 @@ import SwiftUI
             try await waitWhile { controlAttaches == 0 }
             session.client.accept(.ready(mode: .control, cols: 100, rows: 30, expiresAt: nil))
             session.setActive(false, store: store, member: member, immediately: true)
-            try await waitWhile { store.terminalLeases[member.id] != nil }
+            // 조작권이 지워진 뒤에도 입력 끝내기(finishInput)는 몇 번 더 기다렸다 끝난다. 그 사이 beginInput 은 무시되므로
+            // 느린 CI 러너에서는 아래 '시작 중' 단정이 흔들렸다. 끝내기까지 끝난 뒤에 다음 단계로 간다.
+            try await waitWhile { store.terminalLeases[member.id] != nil || session.ending }
             let gate = DispatchSemaphore(value: 0), entered = expectation(description: "sync held")
             server.change { $0.gate = gate; $0.entered = entered }
             store.setForeground(true); session.setActive(true, store: store, member: member); session.beginInput(store: store, member: member)
@@ -657,7 +661,8 @@ import SwiftUI
             if closeDuringWait { session.disappear(store: store, member: member) }
             server.change { $0.gate = nil; $0.entered = nil }; gate.signal()
             try await waitWhile { store.isRevalidating || (!closeDuringWait && controlAttaches < 2) }
-            try await Task.sleep(for: .milliseconds(100))
+            // 더 붙지 '않는지' 보는 쪽이라 넉넉히 기다린다.
+            try await Task.sleep(for: .milliseconds(300))
             XCTAssertEqual(controlAttaches, closeDuringWait ? 1 : 2)
             if !closeDuringWait {
                 XCTAssertFalse(session.readOnly); XCTAssertNil(session.notice)
@@ -686,9 +691,8 @@ import SwiftUI
         try await Task.sleep(for: .milliseconds(50))
         server.change { $0.dropTerminal = false }
         await store.recoverWrites()
-        for _ in 0..<200 {
-            if server.read({ $0.terminalBodies.last?["action"] as? String }) == "release", store.terminalLeases[member.id] == nil { break }
-            try await Task.sleep(for: .milliseconds(10))
+        await pollUntil("늦은 조작권이 풀림") {
+            server.read({ $0.terminalBodies.last?["action"] as? String }) == "release" && store.terminalLeases[member.id] == nil
         }
         XCTAssertEqual(server.read { $0.terminalBodies.last?["action"] as? String }, "release")
         XCTAssertNil(store.terminalLeases[member.id]); store.disconnect()
@@ -714,9 +718,8 @@ import SwiftUI
         try await Task.sleep(for: .milliseconds(100)); store.disconnect()
         server.change { $0.dropTerminal = false }
         let restarted = await connectedStore(network, submissions: try SubmissionStore(storageURL: submissionURL), journal: journal)
-        for _ in 0..<200 {
-            if server.read({ $0.terminalBodies.last?["action"] as? String }) == "release", restarted.terminalLeases[member.id] == nil { break }
-            try await Task.sleep(for: .milliseconds(10))
+        await pollUntil("다시 시작한 뒤 늦은 조작권이 풀림") {
+            server.read({ $0.terminalBodies.last?["action"] as? String }) == "release" && restarted.terminalLeases[member.id] == nil
         }
         XCTAssertEqual(server.read { $0.terminalBodies.last?["action"] as? String }, "release")
         XCTAssertNil(restarted.terminalLeases[member.id]); restarted.disconnect()
@@ -777,8 +780,7 @@ import SwiftUI
             if let host = view as? TerminalSurfaceHost { return host }
             return view.subviews.lazy.compactMap { surface(in: $0) }.first
         }
-        hosting.layoutSubtreeIfNeeded()
-        for _ in 0..<100 where surface(in: hosting) == nil { try await Task.sleep(for: .milliseconds(10)); hosting.layoutSubtreeIfNeeded() }
+        await pollUntil("터미널 표면이 붙음") { hosting.layoutSubtreeIfNeeded(); return surface(in: hosting) != nil }
         XCTAssertEqual(constructions, 1, "The first mount must create exactly one session")
         let session = try XCTUnwrap(createdSession)
         let first = try XCTUnwrap(surface(in: hosting)), canvas = first.terminal, engine = canvas.getTerminal()
@@ -788,7 +790,9 @@ import SwiftUI
         let oldBuffer = engine.buffer
         session.client.accept(.ready(mode: .observe, cols: 80, rows: 24, expiresAt: nil))
         session.client.onOutput?(Data("new screen".utf8))
-        try await Task.sleep(for: .milliseconds(60)); hosting.layoutSubtreeIfNeeded()
+        // 새 세대의 화면 초기화는 SwiftUI 갱신을 거쳐 온다. 고정 60ms 대신 새 버퍼가 될 때까지 기다린다(느린 CI 러너).
+        await pollUntil("새 세대의 화면 버퍼") { hosting.layoutSubtreeIfNeeded(); return !(oldBuffer === engine.buffer) }
+        hosting.layoutSubtreeIfNeeded()
         XCTAssertTrue(first === surface(in: hosting)); XCTAssertTrue(canvas === first.terminal)
         XCTAssertTrue(engine === canvas.getTerminal()); XCTAssertFalse(oldBuffer === engine.buffer)
         for width: CGFloat in [900, 1000, 800, 1100, 900] {
@@ -796,7 +800,8 @@ import SwiftUI
             updatedMember.now = "Parent refresh at width \(width)"
             hosting.rootView = root(updatedMember)
             window.setContentSize(CGSize(width: width, height: 600)); hosting.layoutSubtreeIfNeeded()
-            try await Task.sleep(for: .milliseconds(60))
+            // 세션·표면을 '다시 만들지 않는지' 보는 쪽이라 넉넉히 기다린다.
+            try await Task.sleep(for: .milliseconds(150))
             XCTAssertEqual(constructions, 1, "Parent recomputation must retain the mounted session")
             XCTAssertTrue(createdSession === session); XCTAssertTrue(first === surface(in: hosting))
             XCTAssertTrue(canvas === first.terminal); XCTAssertTrue(engine === canvas.getTerminal())
@@ -821,15 +826,21 @@ import SwiftUI
             if let host = view as? TerminalSurfaceHost { return host }
             return view.subviews.lazy.compactMap { surface(in: $0) }.first
         }
-        hosting.layoutSubtreeIfNeeded()
-        try await Task.sleep(for: .milliseconds(100))
+        await pollUntil("터미널 표면이 붙음") { hosting.layoutSubtreeIfNeeded(); return surface(in: hosting) != nil }
         session.appear(store: store, member: member, active: true); session.beginInput(store: store, member: member)
         try await waitWhile { session.ownedLeaseID == nil }
         session.client.accept(.ready(mode: .control, cols: session.naturalCols, rows: session.naturalRows, expiresAt: nil))
         var previousWidth: CGFloat = 0, previousCols = 0
         for width: CGFloat in [720, 960, 1120] {
             window.setContentSize(CGSize(width: width, height: 650)); hosting.layoutSubtreeIfNeeded()
-            try await Task.sleep(for: .milliseconds(200))
+            // 새 폭은 SwiftUI 갱신을 거쳐 표면·터미널 열 수·세션에 닿는다. 고정 200ms 대신 닿을 때까지 기다린다(느린 CI 러너).
+            await pollUntil("창 폭 \(Int(width)) 이 터미널 열 수에 닿음") {
+                hosting.layoutSubtreeIfNeeded()
+                guard let host = surface(in: hosting) else { return false }
+                host.layoutSubtreeIfNeeded(); host.layout()
+                let cols = host.terminal.getTerminal().cols
+                return host.contentSize.width > previousWidth && cols > previousCols && session.naturalCols == cols
+            }
             let host = try XCTUnwrap(surface(in: hosting))
             host.layoutSubtreeIfNeeded(); host.layout()
             XCTAssertLessThanOrEqual(host.bounds.width, hosting.bounds.width)
@@ -839,8 +850,7 @@ import SwiftUI
             XCTAssertEqual(session.naturalCols, host.terminal.getTerminal().cols)
             // The resize leaves through a debounced sender on the main run loop. A loaded machine (CI) needs more than
             // the fixed wait above, so wait for the packet; it must still carry this width's columns.
-            let sent = Date().addingTimeInterval(3)
-            while resizePackets.last?["cols"] != session.naturalCols && Date() < sent { try await Task.sleep(for: .milliseconds(20)) }
+            await pollUntil("크기 바꿈 신호") { resizePackets.last?["cols"] == session.naturalCols }
             XCTAssertEqual(resizePackets.last?["cols"], session.naturalCols, "Real sheet geometry reaches the debounced wire sender")
             previousWidth = host.contentSize.width; previousCols = host.terminal.getTerminal().cols
         }

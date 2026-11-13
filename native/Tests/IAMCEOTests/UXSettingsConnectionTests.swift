@@ -88,12 +88,9 @@ private final class UXMemoryDefaults: UserDefaults, @unchecked Sendable {
 #endif
 
 @MainActor final class UXSettingsConnectionTests: XCTestCase {
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
     private func eventually(_ condition: () -> Bool) async {
-        for _ in 0..<1000 {
-            if condition() { return }
-            try? await Task.sleep(for: .milliseconds(2))
-        }
-        XCTFail("Fixture did not settle")
+        await pollUntil("Fixture did not settle") { condition() }
     }
     private func event<T: Encodable>(_ type: String, _ value: T) throws -> RealtimeEvent {
         let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))

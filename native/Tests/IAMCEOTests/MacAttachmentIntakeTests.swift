@@ -168,7 +168,8 @@ final class MacAttachmentIntakeTests: XCTestCase {
         await Task.yield()
         receiver.emit(name: "a.txt")
         receiver.emit(name: "a.txt") // Duplicate must not satisfy the missing b.txt callback.
-        try await Task.sleep(for: .milliseconds(10))
+        // 끝났다고 '보지 않는지'(폴더를 지우지 않는지) 보는 쪽이라 넉넉히 기다린다.
+        try await Task.sleep(for: .milliseconds(100))
         XCTAssertTrue(FileManager.default.fileExists(atPath: receipt.directory.path))
         receiver.emit(name: "b.txt")
         let files = try await one.value

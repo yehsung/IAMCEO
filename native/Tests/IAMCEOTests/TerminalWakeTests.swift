@@ -14,12 +14,9 @@ import XCTest
         return store
     }
 
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
     private func eventually(_ predicate: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
-        for _ in 0..<200 {
-            if predicate() { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        XCTFail("Condition did not become true", file: file, line: line)
+        await pollUntil("Condition did not become true", file: file, line: line) { predicate() }
     }
 
     func testWakeEligibilityAndPlatformTitles() {

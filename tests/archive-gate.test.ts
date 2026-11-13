@@ -6,6 +6,7 @@ import type { OrchestratorTimings } from "../server/orchestrator.ts";
 import type { RunnerMember } from "../server/runner/types.ts";
 import { IMPORT_HOLD_NOTE } from "../server/store.ts";
 import { coreSetup, type CoreSetupOptions } from "./fixtures/core-harness.ts";
+import { rejection, thrower } from "./fixtures/settle.ts";
 
 const closers: (() => Promise<void> | void)[] = [];
 // 시험마다 닫는다. 파일 끝까지 두면 15ms 틱이 스무 개 넘게 쌓여 뒤 시험의 시간 판정을 민다.
@@ -279,8 +280,8 @@ describe("보관: 턴이 없던 세션과 터미널이 없는 팀장", () => {
     expect(next.member(w.id).sessionId).toBe(w.sessionId);
     // 실행기는 이 팀장의 터미널을 모른다. 실제 종료(stop)는 이것을 '끝낼 것이 없다'로 보고, 미리 보는 검사(checkStop)도 이제 같다.
     const target = { ...next.member(w.id), cli: "claude" } as unknown as RunnerMember;
-    await expect(next.runner.screen(target)).rejects.toMatchObject({ kind: "not_found", message: "No core terminal for member" });
-    await expect(next.runner.checkStop(target, { whileWorking: false })).resolves.toBeUndefined();
+    expect(await rejection(next.runner.screen(target))).toMatchObject({ kind: "not_found", message: "No core terminal for member" });
+    expect(await next.runner.checkStop(target, { whileWorking: false })).toBeUndefined();
     const kills = next.core.count("terminal.kill");
 
     const archived = await next.api("PATCH", `/api/projects/${t.project.id}`, { archived: true });
@@ -303,7 +304,7 @@ describe("보관: 턴이 없던 세션과 터미널이 없는 팀장", () => {
     const t = await setup({ timings: { tickMs: 60_000, healthMs: 60_000 } });
     const w = await t.managed("worker");
     t.core.setDown(true);
-    await expect(t.runner.checkStop({ ...t.member(w.id), cli: "claude" } as unknown as RunnerMember, { whileWorking: false })).rejects.toMatchObject({ name: "CoreError" });
+    expect(await rejection(t.runner.checkStop({ ...t.member(w.id), cli: "claude" } as unknown as RunnerMember, { whileWorking: false }))).toMatchObject({ name: "CoreError" });
     const refused = await t.api("PATCH", `/api/projects/${t.project.id}`, { archived: true });
     expect(refused.status).toBe(503);
     expect(((await refused.json()) as { error: string }).error).toContain("worker의 칸을 확인하지 못해 보관할 수 없습니다");
@@ -318,10 +319,10 @@ describe("단일 프로젝트 변경 장벽", () => {
   test("전체 patch/HQ 검증이 종료보다 먼저이며 같은 값은 부작용이 없다", async () => {
     const t = await setup(); await t.managed("worker");
     for (const patch of [{ name: "  ", archived: true }, { archived: true, runnerEnabled: true }]) {
-      await expect(t.orch.patchProject(t.project.id, patch)).rejects.toMatchObject({ status: 400 });
+      expect(await rejection(t.orch.patchProject(t.project.id, patch))).toMatchObject({ status: 400 });
     }
     await t.orch.patchProject(t.project.id, { name: t.project.name });
-    await expect(t.orch.patchProject("hq", { archived: true })).rejects.toMatchObject({ status: 400 });
+    expect(await rejection(t.orch.patchProject("hq", { archived: true }))).toMatchObject({ status: 400 });
     expect(t.stopped).toHaveLength(0); expect(t.checks).toHaveLength(0);
     expect(t.core.count("terminal.kill")).toBe(0);
   });
@@ -333,14 +334,14 @@ describe("단일 프로젝트 변경 장벽", () => {
     expect(t.turns(b.id)).toHaveLength(0);
     // 옛 시험은 가짜 실행기가 HerdrError("cannot_exit") 를 던졌다. core 에서는 입력칸에 사람이 쓰던 글이 있으면 실제 CoreRunner 가 종료를 거절한다.
     t.core.setDraft(b.id, "초안 보존");
-    await expect(t.orch.patchProject(t.project.id, { archived: true, name: "새 이름" })).rejects.toMatchObject({ status: 409, message: expect.stringContaining("user draft") });
+    expect(await rejection(t.orch.patchProject(t.project.id, { archived: true, name: "새 이름" }))).toMatchObject({ status: 409, message: expect.stringContaining("user draft") });
     await until(() => t.checks.length === 2, "전원 검사");
     expect(t.stopped).toHaveLength(0);
     expect(t.store.requireProject(t.project.id)).toMatchObject({ archived: false, name: "시험" });
     t.core.setDraft(b.id, ""); t.checks.length = 0;
     // 검사 뒤 초안 변경: 첫 직원의 두 번째 검사(종료 직전) 때 입력칸에 글이 생겼다.
     t.hooks.beforeCheck = member => { if (member.id === a.id && t.checks.filter(c => c.id === a.id).length === 2) t.core.setDraft(a.id, "검사 뒤 초안 변경"); };
-    await expect(t.orch.patchProject(t.project.id, { archived: true })).rejects.toMatchObject({ status: 409 });
+    expect(await rejection(t.orch.patchProject(t.project.id, { archived: true }))).toMatchObject({ status: 409 });
     await until(() => t.checks.length === 3, "종료 직전 검사");
     expect(t.checks.every(c => c.whileWorking === false)).toBe(true);
     expect(t.stopped).toHaveLength(0);
@@ -356,11 +357,11 @@ describe("단일 프로젝트 변경 장벽", () => {
     t.hooks.beforeStop = () => Bun.sleep(80);
     const changing = t.orch.patchProject(t.project.id, { archived: true });
     await until(() => t.checks.length >= 2, "장벽");
-    await expect(t.orch.patchProject(t.project.id, { name: "경합" })).rejects.toMatchObject({ status: 409 });
-    await expect(t.orch.sendUserMessage(t.project.id, { text: "경합", targetMemberId: a.id })).rejects.toMatchObject({ status: 409 });
-    await expect(t.orch.resumeMember(a.id)).rejects.toMatchObject({ status: 409 });
-    await expect(t.orch.addMember(t.project.id, { name: "추가" })).rejects.toMatchObject({ status: 409 });
-    await expect(t.orch.patchMemberConfig(a.id, { modelOverride: "other" })).rejects.toMatchObject({ status: 409 });
+    expect(await rejection(t.orch.patchProject(t.project.id, { name: "경합" }))).toMatchObject({ status: 409 });
+    expect(await rejection(t.orch.sendUserMessage(t.project.id, { text: "경합", targetMemberId: a.id }))).toMatchObject({ status: 409 });
+    expect(await rejection(t.orch.resumeMember(a.id))).toMatchObject({ status: 409 });
+    expect(await rejection(t.orch.addMember(t.project.id, { name: "추가" }))).toMatchObject({ status: 409 });
+    expect(await rejection(t.orch.patchMemberConfig(a.id, { modelOverride: "other" }))).toMatchObject({ status: 409 });
     expect(await t.orch.manualInbox(manual.member.id, 0)).toBeNull();
     await t.orch.pump(a.id);
     const archived = await changing;
@@ -376,7 +377,7 @@ describe("단일 프로젝트 변경 장벽", () => {
     t.runner.start = async (member, opts) => { await gate; return original(member, opts); };
     const spawning = t.orch.ensureConductor(t.project.id);
     await until(() => t.store.getConductor(t.project.id) !== null, "생성 의도");
-    await expect(t.orch.patchProject(t.project.id, { archived: true })).rejects.toMatchObject({ status: 409 });
+    expect(await rejection(t.orch.patchProject(t.project.id, { archived: true }))).toMatchObject({ status: 409 });
     expect(t.store.requireProject(t.project.id).archived).toBe(false);
     finish(); await spawning;
   });
@@ -388,7 +389,7 @@ describe("단일 프로젝트 변경 장벽", () => {
     const delivery = t.store.enqueue({ projectId: t.project.id, memberId: member.id, kind: "instruction", text: "보존", nextAttemptAt: new Date(Date.now() + 600_000).toISOString() });
     const patch = t.store.patchProject.bind(t.store);
     t.store.patchProject = () => { throw new Error("injected DB write failure"); };
-    await expect(t.orch.patchProject(t.project.id, { archived: true })).rejects.toThrow("DB write failure");
+    expect(await thrower(t.orch.patchProject(t.project.id, { archived: true }))).toThrow("DB write failure");
     t.store.patchProject = patch;
     expect(t.store.requireProject(t.project.id).archived).toBe(false);
     expect(t.store.requireDelivery(delivery.id)).toMatchObject({ status: "held", holdReason: "asleep" });
@@ -406,7 +407,7 @@ describe("단일 프로젝트 변경 장벽", () => {
     // 종료가 됐는지 모른다(확인하러 다시 읽는 것도 닿지 않는다).
     const bTerminal = t.core.terminalOf(b.id)!.address;
     t.core.intercept(call => { if (call.method === "terminal.kill" && call.params.terminal === bTerminal) { t.core.setDown(true); return "drop"; } return undefined; });
-    await expect(t.orch.patchProject(t.project.id, { archived: true, name: "반영 금지" })).rejects.toMatchObject({ status: 503 });
+    expect(await rejection(t.orch.patchProject(t.project.id, { archived: true, name: "반영 금지" }))).toMatchObject({ status: 503 });
     expect(t.store.requireProject(t.project.id)).toMatchObject({ archived: false, name: "시험" });
     expect(t.store.requireMember(a.id)).toMatchObject({ status: "asleep", paneId: null, sessionId: a.sessionId });
     expect(t.store.requireDelivery(first.id)).toMatchObject({ status: "held", holdReason: "asleep" });

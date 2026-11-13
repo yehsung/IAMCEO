@@ -458,8 +458,8 @@ private actor UXChatAroundGate {
         let anchor = ChatScrollAnchor(scope: "p")
         anchor.highlight(messageID: "a", duration: .milliseconds(20))
         XCTAssertEqual(anchor.highlightedMessageID, "a")
-        // 느린 CI 러너에서는 20ms 타이머가 60ms 안에 안 돌 수 있어 조건을 기다린다(최대 3초).
-        for _ in 0..<300 where anchor.highlightedMessageID != nil { try await Task.sleep(for: .milliseconds(10)) }
+        // 느린 CI 러너에서는 20ms 타이머가 60ms 안에 안 돌 수 있어 조건을 기다린다.
+        await pollUntil("강조가 풀림") { anchor.highlightedMessageID == nil }
         XCTAssertNil(anchor.highlightedMessageID)
         anchor.highlight(messageID: "old", duration: .milliseconds(20))
         anchor.highlight(messageID: "new", duration: .seconds(30))

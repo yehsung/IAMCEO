@@ -270,6 +270,7 @@ final class TerminalStreamClient {
         let token = connection
         inputFlushTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(8)) } catch { return }
+            guard !Task.isCancelled else { return } // 잠이 끝난 뒤 같은 연결의 재시도(cancelPendingInput)가 취소했으면 새 입력·새 타이머를 건드리지 않는다.
             guard let self, self.connection == token else { return }
             let bytes = self.inputBytes
             self.inputBytes.removeAll(); self.inputFlushTask = nil

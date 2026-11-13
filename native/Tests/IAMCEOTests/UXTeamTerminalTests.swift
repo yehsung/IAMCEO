@@ -13,14 +13,10 @@ import XCTest
         return store
     }
 
-    private func eventually(timeout: Duration = .seconds(3), _ predicate: () -> Bool,
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
+    private func eventually(timeout: Duration = .seconds(10), _ predicate: () -> Bool,
                             file: StaticString = #filePath, line: UInt = #line) async throws {
-        let deadline = ContinuousClock.now + timeout
-        while ContinuousClock.now < deadline {
-            if predicate() { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        XCTAssertTrue(predicate(), "Expected terminal state was not reached", file: file, line: line)
+        await pollUntil("Expected terminal state was not reached", timeout: timeout, every: .milliseconds(10), file: file, line: line) { predicate() }
     }
 
     func testOpeningObservesWithoutLeaseOrKeyboardAndOnlyExplicitInputClaims() async throws {
@@ -191,13 +187,18 @@ import XCTest
         host.layoutSubtreeIfNeeded()
         try await eventually { store.activities[member.id]?.map(\.id) == [3] }
         XCTAssertEqual(reads(), 1)
+        // 3초 주기 읽기가 다시 가짜 시계에 잠든 뒤에 민다. 앞 읽기가 끝나기 전에 밀면 그 대기는 민 시각부터 다시 세어
+        // 이번 밀기로 깨지 않는다(느린 CI 러너에서 흔들림). 아래 두 곳도 같다.
+        await pollUntil("주기 읽기가 시계에 잠듦") { await clock.hasSleeper(dueWithin: .seconds(3)) }
         await clock.advance(.seconds(3))
         try await eventually { reads() == 2 }
         host.rootView = AnyView(EmptyView()); host.layoutSubtreeIfNeeded()
         try await eventually { store.activities[member.id] == nil }
         let before = syncs()
+        await pollUntil("주기 읽기가 시계에 잠듦") { await clock.hasSleeper(dueWithin: .seconds(3)) }
         await clock.advance(.seconds(3))
         try await eventually { syncs() > before }
+        await pollUntil("주기 읽기가 시계에 잠듦") { await clock.hasSleeper(dueWithin: .seconds(3)) }
         await clock.advance(.seconds(3))
         try await eventually { syncs() > before + 1 }
         XCTAssertEqual(reads(), 2, "A list that left the screen is not read again")

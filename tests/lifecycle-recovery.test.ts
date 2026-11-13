@@ -12,6 +12,7 @@ import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 import { transcriptPath } from "../server/runner/transcript.ts";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { rejection, thrower } from "./fixtures/settle.ts";
 
 interface Rpc {
   id: string;
@@ -121,7 +122,7 @@ async function fixture(healthMs = 60_000, rpcTimeoutMs = 100) {
 
 test("lost creation reply preserves intent/member and restart rejoins labels with no additional run", async () => {
   const f = await fixture(); f.loseRun(true);
-  await expect(f.orch.createMember(f.project.id, { name: "Worker" })).rejects.toThrow();
+  expect(await thrower(f.orch.createMember(f.project.id, { name: "Worker" }))).toThrow();
   const member = f.store.listMembers(f.project.id)[0]!;
   expect(member.lastError).toStartWith("starting_unknown:");
   expect(f.store.listPendingLifecycleJournals()[0]).toMatchObject({ memberId: member.id, intent: "start", phase: "unknown" });
@@ -144,8 +145,8 @@ test("a sleeping member whose wake reply was lost and whose terminal never appea
   await next.orch.assign(f.project.id, member.handle, { text: "깨어나서 할 일" });
   expect(f.store.listPendingLifecycleJournals()[0]).toMatchObject({ memberId: member.id, intent: "start", phase: "unknown" });
   expect(f.store.requireMember(member.id)).toMatchObject({ status: "asleep", paneId: null });
-  await expect(next.orch.resumeMember(member.id)).rejects.toThrow();
-  await expect(next.orch.sleepMember(member.id, { force: true })).rejects.toThrow("미확정 세션 작업");
+  expect(await thrower(next.orch.resumeMember(member.id))).toThrow();
+  expect(await thrower(next.orch.sleepMember(member.id, { force: true }))).toThrow("미확정 세션 작업");
   const runs = f.count("terminal.run");
   f.dropRun(false);
   for (let i = 0; i < 200 && f.count("terminal.send") === 0; i++) { await next.orch.refreshConnection(); await Bun.sleep(5); }
@@ -234,7 +235,7 @@ test("a start that fails before anything is sent to the runner is refused, not l
   const internals = f.orch as unknown as { writeRunFiles: () => never };
   const original = internals.writeRunFiles;
   internals.writeRunFiles = () => { throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" }); };
-  await expect(f.orch.resumeMember(member.id)).rejects.toThrow();
+  expect(await thrower(f.orch.resumeMember(member.id))).toThrow();
   expect(f.store.listPendingLifecycleJournals()).toHaveLength(0);
   expect(f.count("terminal.run")).toBe(runs);
   internals.writeRunFiles = original;
@@ -245,7 +246,7 @@ test("a start that fails before anything is sent to the runner is refused, not l
 
 test("uncertain creation with duplicate owners is quarantined without run or kill", async () => {
   const f = await fixture(); f.loseRun(true);
-  await expect(f.orch.createMember(f.project.id, { name: "Worker" })).rejects.toThrow();
+  expect(await thrower(f.orch.createMember(f.project.id, { name: "Worker" }))).toThrow();
   const first = f.terminals.get("t1")!;
   f.terminals.set("t2", { ...first, address: "t2" });
   await f.orch.shutdown();
@@ -272,9 +273,9 @@ test("initial bind failure with empty queue recovers through read-only superviso
 test("sleep and close refusals preserve live state and always release closing guard", async () => {
   const f = await fixture(); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
   f.draft("human draft");
-  await expect(f.orch.sleepMember(member.id)).rejects.toThrow();
+  expect(await thrower(f.orch.sleepMember(member.id))).toThrow();
   expect(f.store.requireMember(member.id)).toMatchObject({ status: "idle", paneId: member.paneId });
-  await expect(f.orch.closeMember(member.id)).rejects.toThrow();
+  expect(await thrower(f.orch.closeMember(member.id))).toThrow();
   expect(f.store.requireMember(member.id).status).toBe("idle");
   f.draft(""); await f.orch.closeMember(member.id);
   expect(f.store.getMember(member.id)).toBeNull();
@@ -284,7 +285,7 @@ test("sleep and close refusals preserve live state and always release closing gu
 test("unknown stop stays live in DB and restart confirms termination before asleep", async () => {
   const f = await fixture(); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
   f.loseKill(true);
-  await expect(f.orch.sleepMember(member.id)).rejects.toThrow();
+  expect(await thrower(f.orch.sleepMember(member.id))).toThrow();
   expect(f.store.requireMember(member.id).status).toBe("idle");
   expect(f.store.listPendingLifecycleJournals()[0]).toMatchObject({ intent: "sleep", phase: "unknown" });
   f.terminals.get(member.paneId!)!.state = "finished";
@@ -353,7 +354,7 @@ test("fresh-session receipt returns before generation recheck and conflicting re
   const receipt = await f.orch.freshMemberSessionV2(member.id, request);
   expect(receipt.status).toBe("applied");
   expect(await f.orch.freshMemberSessionV2(member.id, request)).toEqual(receipt);
-  await expect(f.orch.freshMemberSessionV2(member.id, { ...request, expectedSessionGeneration: 9 })).rejects.toMatchObject({ status: 409 });
+  expect(await rejection(f.orch.freshMemberSessionV2(member.id, { ...request, expectedSessionGeneration: 9 }))).toMatchObject({ status: 409 });
   expect(f.count("terminal.run")).toBe(2); expect(f.count("terminal.kill")).toBe(1);
 });
 
@@ -552,7 +553,7 @@ test("a second claim cannot take over a live claim and preflight refusals are de
 test("pending stop recovery respects a persisted lease before the runner binds", async () => {
   const f = await fixture(); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
   f.loseKill(true);
-  await expect(f.orch.sleepMember(member.id)).rejects.toThrow();
+  expect(await thrower(f.orch.sleepMember(member.id))).toThrow();
   const identity = f.runner.observationState(member.id)!.identity;
   f.store.saveLease({ memberId: member.id, claimId: "restored-owner", leaseId: "restored-owner", identity, expiresAt: Date.now() + 300_000, lastInputSequence: 0 });
   const kills = f.count("terminal.kill");
@@ -570,7 +571,7 @@ test("pending stop recovery respects a persisted lease before the runner binds",
 test("recovery of an idle-only sleep cannot force-stop newly observed work", async () => {
   const f = await fixture(); const member = await f.orch.createMember(f.project.id, { name: "Worker" });
   f.loseKill(true);
-  await expect(f.orch.sleepMember(member.id)).rejects.toThrow();
+  expect(await thrower(f.orch.sleepMember(member.id))).toThrow();
   const kills = f.count("terminal.kill");
   f.terminals.get(member.paneId!)!.status = { state: "working" };
   await f.orch.shutdown(); f.loseKill(false);
@@ -619,7 +620,7 @@ test("unknown send keeps its fence and tells sleep refusal's real cause", async 
   const d = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "report", text: "보고", wake: true });
   await f.orch.pump(member.id); await f.orch.pump(member.id);
   expect(f.count("terminal.send")).toBe(1); expect(f.store.getDeliveryRecovery(d.id)?.phase).toBe("checking");
-  await expect(f.orch.sleepMember(member.id)).rejects.toThrow("전달 결과가 확인되지");
+  expect(await thrower(f.orch.sleepMember(member.id))).toThrow("전달 결과가 확인되지");
 });
 
 test("force sleep preserves a draft with a Korean 409 and restart clears old execution error", async () => {
@@ -747,7 +748,7 @@ test("a turn end dropped while the member was closing is replayed from the next 
 test("an unknown stop is finished by recovery even though a wake arrived meanwhile, and that wake reopens the member", async () => {
   const f = await fixture(), member = await f.orch.createMember(f.project.id, { name: "Worker" });
   f.loseKill(true);
-  await expect(f.orch.sleepMember(member.id)).rejects.toThrow();
+  expect(await thrower(f.orch.sleepMember(member.id))).toThrow();
   expect(f.store.listPendingLifecycleJournals()[0]).toMatchObject({ intent: "sleep", phase: "unknown" });
   // The open journal fences the pump; the queued wake used to make every recovery attempt refuse ("대기열이 남아 있습니다").
   const d = f.store.enqueue({ projectId: f.project.id, memberId: member.id, kind: "report", text: "잠드는 사이 온 보고", wake: true });

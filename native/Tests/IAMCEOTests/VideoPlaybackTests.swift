@@ -90,7 +90,8 @@ final class VideoPlaybackTests: XCTestCase {
         let pauses = first.pauseCount
         hosting.rootView = AnyView(MediaPlayerView(player: first))
         hosting.layoutSubtreeIfNeeded()
-        try await Task.sleep(for: .milliseconds(30))
+        // 같은 재생기는 '멈추지 않는지' 보는 쪽이라 넉넉히 기다린다.
+        try await Task.sleep(for: .milliseconds(150))
         XCTAssertTrue(findPlayer(in: hosting) === native)
         XCTAssertEqual(first.pauseCount, pauses, "An unchanged player must keep playback state")
 
@@ -121,13 +122,12 @@ final class VideoPlaybackTests: XCTestCase {
         XCTAssertNil(view.player)
     }
 
+    // 공용 pollUntil(TestSupport)을 부르는 얇은 껍데기. 기한은 느린 CI 러너에 맞춘 공용 기본값(10초)을 쓴다.
     private func waitFor(_ hosting: NSView, _ condition: () -> Bool) async throws {
-        for _ in 0..<100 {
+        await pollUntil("Native player lifecycle did not settle", every: .milliseconds(10)) {
             hosting.layoutSubtreeIfNeeded()
-            if condition() { return }
-            try await Task.sleep(for: .milliseconds(10))
+            return condition()
         }
-        XCTFail("Native player lifecycle did not settle within one second")
     }
 
     private func findPlayer(in view: NSView) -> AVPlayerView? {

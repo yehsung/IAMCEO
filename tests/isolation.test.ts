@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { CoreError, coreRpc, type CoreTerminal } from "../server/runner/core-client";
 import { createIsolatedRuntime, type IsolatedRuntime, type ProviderHomes } from "./fixtures/isolated-runtime";
 import { startBrowserCore } from "./fixtures/core-browser-harness";
+import { rejection, thrower } from "./fixtures/settle.ts";
 
 const runtimes: IsolatedRuntime[] = [];
 const cores: Awaited<ReturnType<typeof startBrowserCore>>[] = [];
@@ -85,7 +86,7 @@ test("fallback binaries fail closed and only fixture children are stopped", asyn
 test("core counts effects, filters labels, and observes kill only for its own terminal", async () => {
   const { f, core } = await fixture(); const terminal = await launch(f, core);
   expect((await coreRpc<{ terminals: CoreTerminal[] }>(core.socketPath, "terminal.list", { labels: { "iamceo.member": "other" } })).terminals).toEqual([]);
-  await expect(coreRpc(core.socketPath, "terminal.kill", { terminal: "foreign" })).rejects.toMatchObject({ kind: "not_found" });
+  expect(await rejection(coreRpc(core.socketPath, "terminal.kill", { terminal: "foreign" }))).toMatchObject({ kind: "not_found" });
   expect(core.kills).toHaveLength(0);
   await coreRpc(core.socketPath, "terminal.kill", { terminal: terminal.address });
   expect(core.count("terminal.run")).toBe(1); expect(core.count("terminal.kill")).toBe(2);
@@ -96,14 +97,14 @@ test("core counts effects, filters labels, and observes kill only for its own te
 test("core refuses arbitrary executables, cwd and inherited provider credentials", async () => {
   const { f, core } = await fixture();
   for (const extra of [{ argv: ["claude"] }, { cwd: "/outside" }, { env: { OPENAI_API_KEY: "canary" } }, { env: { HERDR_SOCKET_PATH: "/outside.sock" } }]) {
-    await expect(launch(f, core, extra)).rejects.toMatchObject({ kind: "fixture_refused", uncertain: false });
+    expect(await rejection(launch(f, core, extra))).toMatchObject({ kind: "fixture_refused", uncertain: false });
   }
   expect(core.holders.size).toBe(0); expect(core.kills).toHaveLength(0);
 });
 
 test("lost launch response leaves exactly one reattachable holder", async () => {
   const { f, core } = await fixture(); core.faultNext("terminal.run", { dropResponse: true });
-  await expect(coreRpc(core.socketPath, "terminal.run", { argv: [f.bins.claudeBin], cwd: f.paths.work, labels: { member: "stable" }, env: f.childEnv() }, 30)).rejects.toMatchObject({ kind: "timeout", uncertain: true });
+  expect(await rejection(coreRpc(core.socketPath, "terminal.run", { argv: [f.bins.claudeBin], cwd: f.paths.work, labels: { member: "stable" }, env: f.childEnv() }, 30))).toMatchObject({ kind: "timeout", uncertain: true });
   const result = await coreRpc<{ terminals: CoreTerminal[] }>(core.socketPath, "terminal.list", { labels: { member: "stable" } });
   expect(result.terminals).toHaveLength(1); expect(core.count("terminal.run")).toBe(1);
   expect(core.calls[0]).toMatchObject({ applied: true, replied: false });
@@ -112,7 +113,7 @@ test("lost launch response leaves exactly one reattachable holder", async () => 
 test("lost send response applies once without implicit send or Enter replay", async () => {
   const { f, core } = await fixture(); const terminal = await launch(f, core);
   core.faultNext("terminal.send", { dropResponse: true });
-  await expect(coreRpc(core.socketPath, "terminal.send", { terminal: terminal.address, text: "once", if: "idle" }, 30)).rejects.toBeInstanceOf(CoreError);
+  expect(await rejection(coreRpc(core.socketPath, "terminal.send", { terminal: terminal.address, text: "once", if: "idle" }, 30))).toBeInstanceOf(CoreError);
   expect(core.holders.get(terminal.address)?.terminal.status?.state).toBe("working");
   expect(core.count("terminal.send")).toBe(1); expect(core.count("terminal.keys")).toBe(0);
 });
@@ -120,7 +121,7 @@ test("lost send response applies once without implicit send or Enter replay", as
 test("late original write can execute after its caller times out", async () => {
   const { f, core } = await fixture(); const terminal = await launch(f, core);
   core.faultNext("terminal.send", { applyDelayMs: 70 });
-  await expect(coreRpc(core.socketPath, "terminal.send", { terminal: terminal.address, text: "late" }, 20)).rejects.toMatchObject({ uncertain: true });
+  expect(await rejection(coreRpc(core.socketPath, "terminal.send", { terminal: terminal.address, text: "late" }, 20))).toMatchObject({ uncertain: true });
   expect(core.holders.get(terminal.address)?.terminal.status?.state).toBe("idle");
   await until(() => core.calls.find((call) => call.method === "terminal.send")?.applied === true);
   expect(core.holders.get(terminal.address)?.terminal.status?.state).toBe("working");
@@ -148,13 +149,13 @@ test("delayed replies and explicit refusal differ from a lost applied mutation",
   core.faultNext("terminal.get", { delayMs: 25 });
   expect(await coreRpc(core.socketPath, "terminal.get", { terminal: terminal.address }, 500)).toMatchObject({ address: terminal.address });
   core.faultNext("terminal.kill", { error: { kind: "ownership", message: "changed holder" } });
-  await expect(coreRpc(core.socketPath, "terminal.kill", { terminal: terminal.address })).rejects.toMatchObject({ kind: "ownership", uncertain: false });
+  expect(await rejection(coreRpc(core.socketPath, "terminal.kill", { terminal: terminal.address }))).toMatchObject({ kind: "ownership", uncertain: false });
   expect(core.kills).toHaveLength(0); expect(core.holders.get(terminal.address)?.terminal.state).toBe("live");
 });
 
 test("occupied fixture socket is refused and malformed RPC cannot crash the peer", async () => {
   const { core, f } = await fixture();
-  await expect(startBrowserCore({ runtime: f, providerTurns: false })).rejects.toThrow("occupied");
+  expect(await thrower(startBrowserCore({ runtime: f, providerTurns: false }))).toThrow("occupied");
   const socket = new Socket();
   await new Promise<void>((resolve, reject) => { socket.once("error", reject); socket.once("close", resolve); socket.connect(core.socketPath, () => socket.end("bad json\n")); });
   expect(await coreRpc(core.socketPath, "hello")).toMatchObject({ generation: 1 });

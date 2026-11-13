@@ -14,6 +14,7 @@ import { createOrchestrator } from "../server/orchestrator.ts";
 import { Store } from "../server/store.ts";
 import type { Bootstrap, Message, MessagePage, Project } from "../shared/types.ts";
 import { startFakeCore } from "./fixtures/core-harness.ts";
+import { thrower } from "./fixtures/settle.ts";
 
 const entry = resolve(import.meta.dir, "../bin/iamceo.ts");
 const cleanups: (() => void | Promise<void>)[] = [];
@@ -57,7 +58,7 @@ test("백업 → 새 Mac 의 빈 홈에 복원 → 조정 → 재개 → 서버 
   expect(restored.out).toContain("복원 검증 완료");
   // 조정·재개 전에는 서버가 뜨지 않는다.
   const fence = loadConfig({ IAMCEO_HOME: newHome, IAMCEO_PORT: "0" });
-  await expect(startOpsRuntime(fence, { maintenanceDelayMs: 2_000_000_000 })).rejects.toThrow("복원 발신 꺼짐");
+  expect(await thrower(startOpsRuntime(fence, { maintenanceDelayMs: 2_000_000_000 }))).toThrow("복원 발신 꺼짐");
   const reconciled = iamceo(["restore", "reconcile"], newHome);
   expect(reconciled.code, reconciled.out).toBe(0);
   const resumed = iamceo(["restore", "resume"], newHome);

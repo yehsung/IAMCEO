@@ -15,6 +15,7 @@ import { Store } from "../server/store.ts";
 import { FilePublication } from "../server/files.ts";
 import { StorageError } from "../server/storage-errors.ts";
 import { isReportNudge } from "./fixtures/core-harness.ts";
+import { rejection, thrower } from "./fixtures/settle.ts";
 
 /** 서버가 스스로 붙인 '보고 보완'만 든 턴인가. 다른 전달과 묶여 나간 턴은 일하는 턴이다(전달마다 표식 줄이 하나씩 붙는다). */
 const nudgeOnly = (text: string) => isReportNudge({ prompt: text }) && text.split("\n").filter((line) => /^#iamceo_[A-Za-z0-9_-]{22}$/.test(line)).length === 1;
@@ -177,14 +178,14 @@ test("team_add and config writes accept catalog models/null and reject unlisted 
       // core 는 살아 있는 세션의 모델 지정을 바꾸면 세션을 새 설정으로 다시 연다. 전달 펌프가 도는 순간에는 409 로 거절하므로
       // (설정 쓰기가 끝날 때마다 펌프를 한 번 민다) 펌프가 끝난 뒤에 바꾼다.
       await f.orch.pump(member.id);
-      await expect(f.orch.patchMemberConfig(member.id, { modelOverride: "unlisted" })).rejects.toMatchObject({ status: 400, message: "목록에 없는 모델입니다" });
+      expect(await rejection(f.orch.patchMemberConfig(member.id, { modelOverride: "unlisted" }))).toMatchObject({ status: 400, message: "목록에 없는 모델입니다" });
       await f.orch.pump(member.id);
       await f.orch.patchMemberConfig(member.id, { modelOverride: valid });
       await f.orch.pump(member.id);
       await f.orch.patchMemberConfig(member.id, { modelOverride: null });
     }
     const key = cli === "claude" ? "ranks" : "codexRanks";
-    await expect(f.orch.updateSettings({ [key]: { lead: { model: "unlisted" } } })).rejects.toMatchObject({ status: 400, message: "목록에 없는 모델입니다" });
+    expect(await rejection(f.orch.updateSettings({ [key]: { lead: { model: "unlisted" } } }))).toMatchObject({ status: 400, message: "목록에 없는 모델입니다" });
     expect((await f.orch.updateSettings({ [key]: { lead: { model: valid } } }))[key].lead.model).toBe(valid);
     expect((await f.orch.updateSettings({ [key]: { lead: { model: null } } }))[key].lead.model).toBeNull();
   }
@@ -367,7 +368,7 @@ describe("공통 도구", () => {
       if (++count === 1) unlinkSync(images[1]!);
       return saved;
     });
-    try { await expect(handleAgentTool(orch, lead, "file", { title: "실패", images })).rejects.toThrow(); }
+    try { expect(await thrower(handleAgentTool(orch, lead, "file", { title: "실패", images }))).toThrow(); }
     finally { stage.mockRestore(); }
     expect(store.listFiles(project.id)).toHaveLength(0);
     expect(store.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
@@ -388,7 +389,7 @@ describe("공통 도구", () => {
     const events: unknown[] = [];
     const emit = spyOn(bus, "emit").mockImplementation((event) => { events.push(event); });
     store.db.exec("CREATE TRIGGER fail_file BEFORE INSERT ON files BEGIN SELECT RAISE(ABORT, 'publication failure'); END");
-    try { await expect(handleAgentTool(orch, lead, "file", { title: "실패", images })).rejects.toThrow("publication failure"); }
+    try { expect(await thrower(handleAgentTool(orch, lead, "file", { title: "실패", images }))).toThrow("publication failure"); }
     finally { emit.mockRestore(); }
     expect(events).toEqual([]);
     expect(store.listFiles(project.id)).toHaveLength(0);
@@ -403,7 +404,7 @@ describe("공통 도구", () => {
     const images = [join(home, "one.png"), join(home, "two.png")];
     for (const path of images) writeFileSync(path, "image");
     store.db.exec("CREATE TRIGGER fail_second_attachment BEFORE INSERT ON attachments WHEN (SELECT COUNT(*) FROM attachments) > 0 BEGIN SELECT RAISE(ABORT, 'second attachment failure'); END");
-    await expect(handleAgentTool(orch, lead, "file", { title: "실패", images })).rejects.toThrow("second attachment failure");
+    expect(await thrower(handleAgentTool(orch, lead, "file", { title: "실패", images }))).toThrow("second attachment failure");
     expect(store.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
     expect(readdirSync(join(home, "..", "state", "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
   });
@@ -414,7 +415,7 @@ describe("공통 도구", () => {
     writeFileSync(path, "image");
     const insert = spyOn(store, "createFile").mockImplementation(() => { throw Object.assign(new Error("full"), { code: "SQLITE_FULL" }); });
     try {
-      await expect(handleAgentTool(orch, lead, "file", { title: "실패", path })).rejects.toBeInstanceOf(StorageError);
+      expect(await rejection(handleAgentTool(orch, lead, "file", { title: "실패", path }))).toBeInstanceOf(StorageError);
     } finally { insert.mockRestore(); }
     expect(store.db.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
     expect(readdirSync(join(home, "..", "state", "uploads")).filter((name) => !name.startsWith("."))).toEqual([]);
@@ -690,6 +691,6 @@ describe("handleAgentTool", () => {
   test("ApiError 가 아닌 오류는 숨기지 않는다", async () => {
     const { lead, store } = await setup();
     const broken = { store, recordPost: async () => { throw new Error("버그"); } } as unknown as Orchestrator;
-    await expect(handleAgentTool(broken, lead, "post", { kind: "완료", title: "t" })).rejects.toThrow("버그");
+    expect(await thrower(handleAgentTool(broken, lead, "post", { kind: "완료", title: "t" }))).toThrow("버그");
   });
 });

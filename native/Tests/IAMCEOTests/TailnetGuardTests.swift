@@ -109,7 +109,8 @@ final class TailnetGuardTests: XCTestCase {
         catch { XCTAssertTrue(Tailnet.isOffError(error)) }
         do { _ = try await off.authorizedURL("/files/a/b.png"); XCTFail("첨부 주소를 내줬다") } catch { XCTAssertTrue(Tailnet.isOffError(error)) }
         off.releaseTerminalLeaseNow(memberID: "m", leaseId: "lease")
-        try await Task.sleep(for: .milliseconds(100))
+        // '나가지 않는지' 보는 쪽이라 넉넉히 기다린다.
+        try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(stub.recorder.requests.count, 0, "아무것도 나가지 않는다")
 
         let on = APIClient(endpoint: plain, accessCode: "fixture", session: stub.session, tailnetConnected: { true })

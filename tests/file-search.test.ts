@@ -356,7 +356,8 @@ test("whole backfill failure does not prevent startup/version commit; pending re
     const server = await startServer({ config, store, bus, orch: {} as OrchestratorApi, detectHosts: () => [] });
     cleanups.push(() => server.stop());
     if (server.port === 7878) throw new Error("live port forbidden");
-    await Bun.sleep(40);
+    // 기동 뒤에 도는 채우기가 한 번 실패해 알릴 때까지 기다린다(고정 40ms 는 느린 러너에서 모자랄 수 있다).
+    for (const end = performance.now() + 5000; warnings.mock.calls.length === 0 && performance.now() < end;) await Bun.sleep(10);
     expect((await fetch(`http://127.0.0.1:${server.port}/api/health`, { redirect: "error" })).status).toBe(200);
     expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: MIGRATIONS.length });
     expect(db.query("SELECT file_id FROM file_search_pending").all()).toEqual([{ file_id: "f" }]);
@@ -367,7 +368,8 @@ test("whole backfill failure does not prevent startup/version commit; pending re
     await server.stop(); db.close();
     const reopened = openDb(path);
     cleanups.push(() => reopened.close());
-    await Bun.sleep(40);
+    // 다시 열면 남은 채우기가 이어서 돈다. 다 채울 때까지 기다린다(고정 40ms 대신).
+    for (const end = performance.now() + 5000; reopened.query("SELECT 1 FROM file_search_pending LIMIT 1").get() && performance.now() < end;) await Bun.sleep(10);
     expect(reopened.query("SELECT file_id FROM file_search_documents").all()).toEqual([{ file_id: "f" }]);
     expect(new Store(reopened, new Bus()).searchFiles("p", "결제 실패")).toHaveLength(1);
     expect(readdirSync(dir).filter(name => name.includes(".pre-v"))).toHaveLength(1);

@@ -14,6 +14,7 @@ import type { Runner, RunnerEvent, RunnerMember, SendResult } from "../server/ru
 import { transcriptPath } from "../server/runner/transcript.ts";
 import { Store } from "../server/store.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
+import { rejection } from "./fixtures/settle.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterAll(async () => { for (const cleanup of cleanups.reverse()) await cleanup(); });
@@ -262,7 +263,7 @@ describe("실제 CoreRunner와 Store 압축 포트", () => {
     const accepted = await orch.compactMember(member.id, "실제 연결");
     expect(accepted.contextState?.compaction?.phase).toBe("running");
     expect(sends).toHaveLength(2);
-    await expect(orch.patchProject(f.project.id, { archived: true })).rejects.toMatchObject({ status: 409 });
+    expect(await rejection(orch.patchProject(f.project.id, { archived: true }))).toMatchObject({ status: 409 });
     writeFileSync(path, JSON.stringify({ type: "system", subtype: "compact_boundary", sessionId: member.sessionId, cwd: member.cwd }) + "\n", { flag: "a" });
     await until(() => f.store.listActivity(member.id).some(a => a.text === "압축 완료"));
     expect(f.store.requireMember(member.id).contextState?.compaction?.phase).toBe("succeeded");
@@ -298,7 +299,7 @@ describe("실제 Orchestrator MCP receipt", () => {
     expect(f.store.listMessages(f.project.id)).toHaveLength(1);
     await orch.handleAgentOperation(member, "post", args, { operationId: crypto.randomUUID() });
     expect(f.store.listMessages(f.project.id)).toHaveLength(2);
-    await expect(orch.handleAgentOperation(member, "post", { ...args, title: "다른 보고" }, context)).rejects.toMatchObject({ status: 409 });
+    expect(await rejection(orch.handleAgentOperation(member, "post", { ...args, title: "다른 보고" }, context))).toMatchObject({ status: 409 });
     const unknownId = crypto.randomUUID();
     f.store.agentOperation(member.id, "post", unknownId, args, () => ({ text: "crash: unknown", isError: true }));
     expect(await orch.handleAgentOperation(member, "post", args, { operationId: unknownId })).toMatchObject({ text: "crash: unknown", isError: true });

@@ -14,6 +14,7 @@ import { Store } from "../server/store";
 import type { Member, Message, MessagePage } from "../shared/types";
 import type { OperationReceipt } from "../shared/operations";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime";
+import { thrower } from "./fixtures/settle.ts";
 
 /** Real runner/orchestrator/SQLite/HTTP; only the generation-1 core peer is fake.
  * The peer NEVER executes argv or reads provider credentials. Used by Swift too. */
@@ -263,7 +264,7 @@ if (process.argv[2] === "--crash-write") {
 
   test("release: lost launch ACK rejoins the same durable member after a real DB reopen", async () => {
     const f = await fixture(); f.fault("terminal.run", "drop");
-    await expect(f.orch.createMember(f.project.id, { name: "Codex", cli: "codex" })).rejects.toThrow();
+    expect(await thrower(f.orch.createMember(f.project.id, { name: "Codex", cli: "codex" }))).toThrow();
     const pending = f.store.listMembers(f.project.id).find(m => m.name === "Codex")!;
     expect(pending).toBeDefined(); expect(pending.paneId).toBeNull();
     const before = f.info().calls["terminal.run"];

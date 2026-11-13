@@ -370,7 +370,8 @@ describe("짝 맺기·목록·끊기(HTTP)", () => {
       expect((await f.request("/api/capabilities", accessCode)).status).toBe(200);
       expect((await f.request("/api/capabilities", paired.accessCode)).status).toBe(200);
       f.bus.emit({ type: "projects", projects: [] });
-      await Bun.sleep(50);
+      // 고정 대기 대신 그 사건이 기기 연결에 닿을 때까지(느린 러너에서는 50ms 를 넘었다).
+      for (const end = Date.now() + 5_000; !deviceSocket.messages.some(message => message.type === "projects") && Date.now() < end;) await Bun.sleep(5);
       expect(deviceSocket.closeCode).toBeUndefined();
       expect(deviceSocket.messages.some(message => message.type === "projects")).toBe(true);
       const output = JSON.stringify(logs.flatMap(log => log.mock.calls));

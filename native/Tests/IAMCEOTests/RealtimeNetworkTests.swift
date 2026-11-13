@@ -32,6 +32,17 @@ actor CoordinatorClock: RealtimeClock {
     func hasSleeper(dueWithin window: Duration) -> Bool { sleepers.values.contains { $0.0 > time && $0.0 <= time + window } }
 }
 
+/// 가짜 시계를 밀기 전에 앱이 할 일을 마치게 한다(settle 과 같은 양보·10ms). 밀 시간 안에 깨어날 대기가 아직 등록되지 않았으면
+/// 실제 시간으로 최대 0.3초 더 기다렸다가 민다. 대기가 등록되기 전에 밀면 그 대기는 민 시각부터 다시 세어 이번 밀기로 깨지 않는다:
+/// 느린 러너·시뮬레이터에서 시험이 흔들린 까닭이다. 대기가 없어야 하는 자리에서는 0.3초를 더 쓸 뿐 결과는 같다.
+func settleAndAdvance(_ clock: CoordinatorClock, _ duration: Duration) async {
+    for _ in 0..<30 { await Task.yield() }
+    try? await Task.sleep(for: .milliseconds(10))
+    let limit = ContinuousClock.now.advanced(by: .milliseconds(300))
+    while ContinuousClock.now < limit, !(await clock.hasSleeper(dueWithin: duration)) { try? await Task.sleep(for: .milliseconds(5)) }
+    await clock.advance(duration)
+}
+
 actor CoordinatorSockets: RealtimeTransportFactory {
     private(set) var sockets: [IsolatedTestWebSocket] = []
     private(set) var requests: [URLRequest] = []
@@ -140,7 +151,7 @@ final class CoordinatorServer: @unchecked Sendable {
         XCTAssertEqual(query?.filter { $0.name == "lite" }, [URLQueryItem(name: "lite", value: "1")])
         try await hello(socket)
         await eventually { store.realtimeStatus == .syncing || store.realtimeStatus == .live }
-        await settle(); await clock.advance(lowPower ? .seconds(1) : .milliseconds(500))
+        await settleAndAdvance(clock, lowPower ? .seconds(1) : .milliseconds(500))
         await eventually { store.realtimeStatus == .live }
         XCTAssertTrue(store.canWrite)
         return store
@@ -159,7 +170,7 @@ final class CoordinatorServer: @unchecked Sendable {
             try await frame(socket, "{\"type\":\"future\",\"epoch\":\"E\",\"seq\":\(n)}")
         }
         await eventually { store.receivedCursor?.seq == 30 }
-        await settle(); await clock.advance(.milliseconds(249)); await settle()
+        await settleAndAdvance(clock, .milliseconds(249)); await settle()
         XCTAssertEqual(server.read { $0.syncs }, before)
         let gate = DispatchSemaphore(value: 0), entered = expectation(description: "snapshot in flight")
         server.change { $0.gate = gate; $0.entered = entered }
@@ -173,7 +184,7 @@ final class CoordinatorServer: @unchecked Sendable {
         gate.signal()
         await eventually { store.appliedSnapshotCursor?.seq == 30 }
         XCTAssertEqual(server.read { $0.syncs }, before + 1)
-        await settle(); await clock.advance(.milliseconds(499)); await settle()
+        await settleAndAdvance(clock, .milliseconds(499)); await settle()
         XCTAssertEqual(server.read { $0.syncs }, before + 1)
         await clock.advance(.milliseconds(1))
         await eventually { store.appliedSnapshotCursor?.seq == 50 }
@@ -216,16 +227,16 @@ final class CoordinatorServer: @unchecked Sendable {
         server.change { $0.seq = 3 }
         try await frame(socket, #"{"type":"work","epoch":"E","seq":3,"projectId":"q","work":[]}"#)
         await eventually { store.receivedCursor?.seq == 3 }
-        await settle(); await clock.advance(.milliseconds(250))
+        await settleAndAdvance(clock, .milliseconds(250))
         await eventually { store.appliedSnapshotCursor?.seq == 3 }
         let afterGap = server.read { $0.syncs }
         try await frame(socket, #"{"type":"future","epoch":"E","seq":2}"#)
-        await settle(); await clock.advance(.seconds(1)); await settle()
+        await settleAndAdvance(clock, .seconds(1)); await settle()
         XCTAssertEqual(server.read { $0.syncs }, afterGap)
         server.change { $0.seq = 7 }
         try await frame(socket, #"{"type":"ping","epoch":"E","seq":7}"#)
         await eventually { store.receivedCursor?.seq == 7 }
-        await settle(); await clock.advance(.milliseconds(250))
+        await settleAndAdvance(clock, .milliseconds(250))
         await eventually { store.appliedSnapshotCursor?.seq == 7 }
     }
 
@@ -242,7 +253,7 @@ final class CoordinatorServer: @unchecked Sendable {
         let before = server.read { ($0.syncs, $0.activityReads, $0.pageReads) }
         try await frame(socket, #"{"type":"activity","epoch":"E","seq":1,"projectId":"p","activity":{"id":7,"memberId":"m","text":"pushed"}}"#)
         await eventually { store.activityRevisions["m"] == 1 }
-        await settle(); await clock.advance(.milliseconds(250)); await settle()
+        await settleAndAdvance(clock, .milliseconds(250)); await settle()
         XCTAssertEqual(store.activities["m"]?.map(\.id), [7, 1])
         XCTAssertEqual(server.read { $0.activityReads }, before.1)
         XCTAssertEqual(server.read { $0.syncs }, before.0)
@@ -253,13 +264,13 @@ final class CoordinatorServer: @unchecked Sendable {
         store.deactivateActivity(memberID: "m")
         XCTAssertNil(store.activities["m"])
         try await frame(socket, #"{"type":"activity","epoch":"E","seq":3,"projectId":"p","activity":{"id":8,"memberId":"m"}}"#)
-        await settle(); await clock.advance(.seconds(1)); await settle()
+        await settleAndAdvance(clock, .seconds(1)); await settle()
         XCTAssertEqual(server.read { $0.activityReads }, before.1)
         XCTAssertNil(store.activities["m"])
         server.change { $0.seq = 4 }
         try await frame(socket, #"{"type":"message","epoch":"E","seq":4,"message":{"id":"new","projectId":"p","body":"hello"}}"#)
         await eventually { store.receivedCursor?.seq == 4 }
-        await settle(); await clock.advance(.milliseconds(250))
+        await settleAndAdvance(clock, .milliseconds(250))
         await eventually { store.appliedSnapshotCursor?.seq == 4 }
         await settle()
         XCTAssertEqual(store.historyMessages.last?.id, "new")
@@ -271,7 +282,7 @@ final class CoordinatorServer: @unchecked Sendable {
         server.change { $0.seq = 9 }
         try await frame(socket, #"{"type":"activity","epoch":"E","seq":9,"projectId":"p","activity":{"id":20,"memberId":"m"}}"#)
         await eventually { store.receivedCursor?.seq == 9 }
-        await settle(); await clock.advance(.milliseconds(250))
+        await settleAndAdvance(clock, .milliseconds(250))
         await eventually { server.read { $0.activityReads } == reopened.0 + 1 && server.read { $0.pageReads } == reopened.1 + 1 }
     }
 
@@ -289,7 +300,7 @@ final class CoordinatorServer: @unchecked Sendable {
         server.change { $0.gate = gate; $0.entered = entered; $0.seq = 1 }
         try await frame(socket, #"{"type":"decision","epoch":"E","seq":1,"decision":{"id":"d","projectId":"p"}}"#)
         await eventually { store.receivedCursor?.seq == 1 }
-        await settle(); await clock.advance(.milliseconds(250))
+        await settleAndAdvance(clock, .milliseconds(250))
         await fulfillment(of: [entered], timeout: 2)
         await clock.advance(.seconds(2))
         gate.signal()
@@ -300,7 +311,7 @@ final class CoordinatorServer: @unchecked Sendable {
         server.change { $0.seq = 2 }
         try await frame(socket, #"{"type":"decision","epoch":"E","seq":2,"decision":{"id":"d","projectId":"p"}}"#)
         await eventually { store.receivedCursor?.seq == 2 }
-        await settle(); await clock.advance(.milliseconds(250)); await settle()
+        await settleAndAdvance(clock, .milliseconds(250)); await settle()
         await clock.advance(.milliseconds(3500)); await settle()
         XCTAssertEqual(server.read { $0.syncs }, slow, "An event-driven read must wait out the back-off")
         XCTAssertEqual(store.appliedSnapshotCursor?.seq, 1)
@@ -310,14 +321,14 @@ final class CoordinatorServer: @unchecked Sendable {
         server.change { $0.seq = 3 }
         try await frame(socket, #"{"type":"decision","epoch":"E","seq":3,"decision":{"id":"d","projectId":"p"}}"#)
         await eventually { store.receivedCursor?.seq == 3 }
-        await settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await eventually { store.appliedSnapshotCursor?.seq == 3 }
         // Slow again, then an explicit refresh: it reads without waiting for the event back-off.
         let again = DispatchSemaphore(value: 0), reentered = expectation(description: "second slow read")
         server.change { $0.gate = again; $0.entered = reentered; $0.seq = 4 }
         try await frame(socket, #"{"type":"decision","epoch":"E","seq":4,"decision":{"id":"d","projectId":"p"}}"#)
         await eventually { store.receivedCursor?.seq == 4 }
-        await settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await fulfillment(of: [reentered], timeout: 2)
         await clock.advance(.seconds(2))
         again.signal()
@@ -327,7 +338,7 @@ final class CoordinatorServer: @unchecked Sendable {
         server.change { $0.seq = 5 }
         try await frame(socket, #"{"type":"decision","epoch":"E","seq":5,"decision":{"id":"d","projectId":"p"}}"#)
         await eventually { store.receivedCursor?.seq == 5 }
-        await settle(); await clock.advance(.milliseconds(250)); await settle()
+        await settleAndAdvance(clock, .milliseconds(250)); await settle()
         XCTAssertEqual(server.read { $0.syncs }, before)
         await store.refresh()
         XCTAssertEqual(server.read { $0.syncs }, before + 1)
@@ -348,7 +359,7 @@ final class CoordinatorServer: @unchecked Sendable {
         // A member row without its id cannot be decoded; the envelope (type, epoch, seq) is intact.
         try await frame(socket, #"{"type":"member","epoch":"E","seq":1,"member":{"projectId":"p","status":7}}"#)
         await eventually { store.receivedCursor?.seq == 1 }
-        await settle(); await clock.advance(.milliseconds(250))
+        await settleAndAdvance(clock, .milliseconds(250))
         await eventually { store.appliedSnapshotCursor?.seq == 1 }
         await eventually { server.read { $0.pageReads } == before.1 + 1 }
         XCTAssertEqual(server.read { $0.syncs }, before.0 + 1)
@@ -367,7 +378,7 @@ final class CoordinatorServer: @unchecked Sendable {
         guard let store = try await connected(server, network, clock, factory) else { return }
         defer { store.disconnect() }
         let switchProject = Task { await store.selectProject(id: "q") }
-        await settle(); await clock.advance(.milliseconds(500)); await switchProject.value
+        await settleAndAdvance(clock, .milliseconds(500)); await switchProject.value
         XCTAssertEqual(store.state?.project.id, "q")
         let sockets = await factory.sockets.count; XCTAssertEqual(sockets, 1)
         store.setForeground(false); await settle()
@@ -419,7 +430,7 @@ final class CoordinatorServer: @unchecked Sendable {
         let gate = DispatchSemaphore(value: 0), entered = expectation(description: "pre-write read")
         server.change { $0.gate = gate; $0.entered = entered }
         let refresh = Task { await store.refresh() }
-        await settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await fulfillment(of: [entered], timeout: 2)
         let write = Task { await store.answerDecision(Decision(id: "d", projectId: "p", updatedAt: "reviewed"), choice: nil, note: "answer") }
         // URLProtocol's synchronous handler serializes replies. Release the held read after
@@ -429,7 +440,7 @@ final class CoordinatorServer: @unchecked Sendable {
         try await frame(socket, #"{"type":"decision","epoch":"E","seq":1,"decision":{"id":"d","projectId":"p"}}"#)
         await eventually { store.receivedCursor?.seq == 1 }
         XCTAssertEqual(server.read { $0.syncs }, before + 1)
-        await settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await refresh.value
         let accepted = await write.value
         XCTAssertTrue(accepted)
@@ -446,7 +457,7 @@ final class CoordinatorServer: @unchecked Sendable {
         let gate = DispatchSemaphore(value: 0), entered = expectation(description: "old project read")
         server.change { $0.gate = gate; $0.entered = entered }
         let refresh = Task { await store.refresh() }
-        await settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await fulfillment(of: [entered], timeout: 2)
         let selection = Task { await store.selectProject(id: "q") }
         // Selection first encodes the departing state off MainActor. Wait for that
@@ -474,14 +485,14 @@ final class CoordinatorServer: @unchecked Sendable {
         server.change { $0.seq = 1 }
         try await frame(socket, #"{"type":"future","epoch":"E","seq":1}"#)
         await eventually { store.receivedCursor?.seq == 1 }
-        await settle(); await clock.advance(.milliseconds(499)); await settle()
+        await settleAndAdvance(clock, .milliseconds(499)); await settle()
         XCTAssertEqual(server.read { $0.syncs }, before)
         await clock.advance(.milliseconds(1))
         await eventually { store.appliedSnapshotCursor?.seq == 1 }
         server.change { $0.seq = 2 }
         try await frame(socket, #"{"type":"future","epoch":"E","seq":2}"#)
         await eventually { store.receivedCursor?.seq == 2 }
-        await settle(); await clock.advance(.milliseconds(999)); await settle()
+        await settleAndAdvance(clock, .milliseconds(999)); await settle()
         XCTAssertEqual(server.read { $0.syncs }, before + 1)
         await clock.advance(.milliseconds(1))
         await eventually { store.appliedSnapshotCursor?.seq == 2 }
@@ -495,25 +506,25 @@ final class CoordinatorServer: @unchecked Sendable {
         guard var socket = await factory.sockets.first else { XCTFail("Expected the initial coordinator socket"); return }
         try await socket.enqueue(.failure(URLError(.networkConnectionLost)))
         await eventually { store.realtimeStatus == .fallback }
-        await settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await eventually { await factory.sockets.count == 2 }
         guard let nextSocket1 = await factory.sockets.dropFirst(1).first else { XCTFail("Expected coordinator socket 2"); return }
         socket = nextSocket1
         try await hello(socket)
-        await settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await eventually { store.realtimeStatus == .live }
         XCTAssertEqual(store.socketFailures, 0)
         XCTAssertEqual(store.restFailures, 0)
         try await socket.enqueue(.failure(URLError(.networkConnectionLost)))
         await eventually { store.realtimeStatus == .fallback }
-        await settle(); await clock.advance(.milliseconds(499)); await settle()
+        await settleAndAdvance(clock, .milliseconds(499)); await settle()
         let before = await factory.sockets.count; XCTAssertEqual(before, 2)
         await clock.advance(.milliseconds(1))
         await eventually { await factory.sockets.count == 3 }
         guard let nextSocket2 = await factory.sockets.dropFirst(2).first else { XCTFail("Expected coordinator socket 3"); return }
         socket = nextSocket2
         try await hello(socket)
-        await settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await eventually { store.realtimeStatus == .live }
         for _ in 0..<2 {
             await clock.advance(.seconds(15))
@@ -522,7 +533,7 @@ final class CoordinatorServer: @unchecked Sendable {
         }
         try await socket.enqueue(.failure(URLError(.networkConnectionLost)))
         await eventually { store.realtimeStatus == .fallback }
-        await settle(); await clock.advance(.milliseconds(499)); await settle()
+        await settleAndAdvance(clock, .milliseconds(499)); await settle()
         let stillWaiting = await factory.sockets.count; XCTAssertEqual(stillWaiting, 3)
         await clock.advance(.milliseconds(1))
         await eventually { await factory.sockets.count == 4 }

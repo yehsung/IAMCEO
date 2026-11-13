@@ -99,12 +99,12 @@ final class ConnectionLossTests: XCTestCase {
         await helper.eventually { store.realtimeStatus == .fallback }
         XCTAssertTrue(store.canWrite)
         XCTAssertEqual(store.accessCode, "fixture")
-        await helper.settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await helper.eventually { await factory.sockets.count == 2 }
         XCTAssertTrue(store.canWrite)
         server.change { $0.syncStatus = 401 }
         let refresh = Task { await store.refresh() }
-        await helper.settle(); await clock.advance(.milliseconds(500)); await refresh.value
+        await settleAndAdvance(clock, .milliseconds(500)); await refresh.value
         XCTAssertNil(store.api)
         XCTAssertEqual(store.connectionStatus, .failed)
         XCTAssertEqual(store.accessCode, "")
@@ -115,7 +115,7 @@ final class ConnectionLossTests: XCTestCase {
 
     @MainActor func refresh(_ store: AppStore, _ clock: CoordinatorClock, _ helper: RealtimeNetworkTests) async {
         let task = Task { await store.refresh() }
-        await helper.settle(); await clock.advance(.milliseconds(500)); await task.value
+        await settleAndAdvance(clock, .milliseconds(500)); await task.value
         await helper.settle()
     }
 
@@ -222,7 +222,7 @@ final class ConnectionLossTests: XCTestCase {
         await helper.eventually { store.restFailures >= 2 }
         XCTAssertFalse(store.showsOffline)
         XCTAssertEqual(store.writeBlockedReason, "잠시 연결을 확인하는 중")
-        await helper.settle(); await clock.advance(.milliseconds(1999)); await helper.settle()
+        await settleAndAdvance(clock, .milliseconds(1999)); await helper.settle()
         XCTAssertFalse(store.showsOffline)
         await clock.advance(.milliseconds(1))
         await helper.eventually { store.showsOffline }
@@ -257,14 +257,14 @@ final class ConnectionLossTests: XCTestCase {
             XCTAssertEqual(store.socketFailures, 0)
             XCTAssertEqual(store.restFailures, 0)
             let reads = server.read { $0.syncs }
-            await helper.settle(); await clock.advance(.milliseconds(500))
+            await settleAndAdvance(clock, .milliseconds(500))
             await helper.eventually { server.read { $0.syncs } > reads }
             if signal != "503" { await helper.eventually { await factory.sockets.count == 2 } }
             XCTAssertEqual(store.socketFailures, 0)
             XCTAssertEqual(store.restFailures, 0)
-            await helper.settle(); await clock.advance(.seconds(30))
+            await settleAndAdvance(clock, .seconds(30))
             await helper.eventually { !store.isRestarting }
-            await helper.settle(); await clock.advance(.seconds(1))
+            await settleAndAdvance(clock, .seconds(1))
             await helper.eventually { store.restFailures > 0 }
             XCTAssertFalse(store.isRestarting)
             store.disconnect()
@@ -286,12 +286,12 @@ final class ConnectionLossTests: XCTestCase {
         XCTAssertEqual(server.read { $0.syncs }, before)
         await clock.advance(.milliseconds(1))
         await helper.eventually { store.restFailures == 2 }
-        await helper.settle(); await clock.advance(.seconds(1))
+        await settleAndAdvance(clock, .seconds(1))
         await helper.eventually { store.restFailures >= 3 }
-        await helper.settle(); await clock.advance(.seconds(2))
+        await settleAndAdvance(clock, .seconds(2))
         await helper.eventually { store.restFailures >= 4 }
         XCTAssertFalse(store.showsOffline)
-        await helper.settle(); await clock.advance(.milliseconds(1699)); await helper.settle()
+        await settleAndAdvance(clock, .milliseconds(1699)); await helper.settle()
         XCTAssertFalse(store.showsOffline)
         await clock.advance(.milliseconds(1))
         await helper.eventually { store.showsOffline }
@@ -311,7 +311,7 @@ final class ConnectionLossTests: XCTestCase {
             let gate = DispatchSemaphore(value: 0), entered = expectation(description: "pre-hello snapshot")
             server.change { $0.gate = gate; $0.entered = entered }
             let read = Task { await store.refresh() }
-            await helper.settle(); await clock.advance(.milliseconds(500))
+            await settleAndAdvance(clock, .milliseconds(500))
             await fulfillment(of: [entered], timeout: 2)
             server.change { $0.seq = helloSeq }
             try await helper.hello(socket, seq: helloSeq)
@@ -341,11 +341,11 @@ final class ConnectionLossTests: XCTestCase {
         defer { store.disconnect() }
         server.change { $0.syncError = .timedOut }
         await refresh(store, clock, helper)
-        await helper.settle(); await clock.advance(.seconds(1))
+        await settleAndAdvance(clock, .seconds(1))
         await helper.eventually { store.restFailures >= 2 }
         await clock.advance(.seconds(16))
         try await helper.frame(socket, #"{"type":"ping","epoch":"E","seq":0}"#)
-        await helper.settle(); await clock.advance(.seconds(3)); await helper.settle()
+        await settleAndAdvance(clock, .seconds(3)); await helper.settle()
         XCTAssertFalse(store.showsOffline)
         XCTAssertEqual(store.realtimeStatus, .live)
         await clock.advance(.seconds(17))
@@ -377,12 +377,12 @@ final class ConnectionLossTests: XCTestCase {
         let gate = DispatchSemaphore(value: 0), entered = expectation(description: "old epoch read")
         server.change { $0.seq = 1; $0.gate = gate; $0.entered = entered }
         let refresh = Task { await store.refresh() }
-        await helper.settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await fulfillment(of: [entered], timeout: 2)
         server.change { $0.epoch = "F"; $0.seq = 0 }
         try await helper.frame(old, #"{"type":"ping","epoch":"F","seq":0}"#)
         await helper.eventually { store.realtimeStatus == .fallback }
-        await helper.settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await helper.eventually { await factory.sockets.count == 2 }
         guard let current = await factory.sockets.dropFirst().first else {
             XCTFail("Expected the replacement coordinator socket")
@@ -391,7 +391,7 @@ final class ConnectionLossTests: XCTestCase {
         }
         try await helper.hello(current, epoch: "F")
         gate.signal(); await refresh.value
-        await helper.settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await helper.eventually { store.appliedSnapshotCursor?.epoch == "F" && store.realtimeStatus == .live }
         XCTAssertEqual(store.state?.project.name, "seq-0")
         XCTAssertEqual(server.read { $0.runtimeReads }, 2)

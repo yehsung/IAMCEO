@@ -200,7 +200,7 @@ final class StabSwitch: @unchecked Sendable {
         // The socket drops, the fallback reads, and the server moves on before the next hello.
         try await first.enqueue(.failure(URLError(.networkConnectionLost)))
         await helper.eventually { server.read { $0.syncs } == 2 }
-        await helper.settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await helper.eventually { await factory.sockets.count == 2 }
         guard let second = await factory.sockets.dropFirst().first else { XCTFail("Missing socket 2"); return }
         server.change { $0.seq = 3 }
@@ -223,7 +223,7 @@ final class StabSwitch: @unchecked Sendable {
         server.change { $0.syncStatus = 504 }
         mode.hold("/api/sync", held)
         let read = Task { await store.refresh() }
-        await helper.settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await helper.eventually { await held.entered == 1 }
         try await socket.enqueue(.failure(URLError(.networkConnectionLost)))
         await helper.eventually { store.socketFailures == 1 }
@@ -249,7 +249,7 @@ final class StabSwitch: @unchecked Sendable {
         let held = StabGate()
         mode.hold("/api/sync", held)
         let read = Task { await store.refresh() }
-        await helper.settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await helper.eventually { await held.entered == 1 }
         try await socket.enqueue(.failure(URLError(.networkConnectionLost)))
         await helper.eventually { store.socketFailures == 1 }

@@ -22,7 +22,7 @@ The iPhone app's App Store listing, one file per language. The release owner upl
 | `whatsNew` | 버전 → 이 버전의 새로운 기능 · What's New | `appStoreVersionLocalizations.whatsNew` | 4,000 |
 
 - 지원 URL·개인정보 처리방침 URL은 한국어 지역에 등록된 주소를 영어 지역에도 그대로 씁니다(처리방침 [PRIVACY.md](../../PRIVACY.md)는 한·영이 한 문서에 있습니다). Use the same Support URL and Privacy Policy URL as the Korean locale; PRIVACY.md has both languages in one document.
-- `tests/appstore-listing.test.ts`가 두 파일의 칸이 모두 있는지, 한도를 넘지 않는지, 영어 파일에 한글이 없는지, 키워드에 상표·앱 이름이 없는지, iPhone 알림을 약속하지 않는지(App Store 판은 알림을 받지 못합니다)를 확인합니다. The test checks that every field is present and within its limit, that the English file has no Korean, that keywords carry no trademarks, and that neither file promises iPhone notifications (the App Store build can't receive them).
+- `tests/appstore-listing.test.ts`가 두 파일의 칸이 모두 있는지, 한도를 넘지 않는지, 영어 파일에 한글이 없는지, 키워드에 상표·앱 이름이 없는지, iPhone 알림을 말할 때 Mac 서버 0.2.5 이상이라는 조건과 알림 중계를 함께 밝히는지를 확인합니다. The test checks that every field is present and within its limit, that the English file has no Korean, that keywords carry no trademarks, and that any mention of iPhone notifications states the condition (a Mac server on 0.2.5 or later) and the notification relay.
 - 새 버전마다 `whatsNew`를 고칩니다. 0.2.5의 글은 V(대기열)·X(기기 끊기)·W(언어) 세 묶음을 합친 것으로, 마무리에서 실제 동작(새 설치와 업데이트의 첫 언어, 연결 전 언어 메뉴, 연결된 기기 목록)에 맞췄습니다. Update `whatsNew` for every version.
 
 ## 영어 스크린샷 · English screenshots

@@ -60,7 +60,7 @@ private final class ReviewFlag: @unchecked Sendable {
         }
         try await frame(socket, #"{"type":"hello","protocol":2,"epoch":"E","seq":0,"heartbeatMs":15000,"staleAfterMs":45000}"#)
         await eventually { store.realtimeStatus == .syncing || store.realtimeStatus == .live }
-        await settle(); await clock.advance(.milliseconds(500))
+        await settleAndAdvance(clock, .milliseconds(500))
         await eventually { store.realtimeStatus == .live }
         XCTAssertTrue(store.canWrite)
         return (store, socket)
@@ -105,7 +105,7 @@ private final class ReviewFlag: @unchecked Sendable {
             await eventually { store.receivedCursor?.seq == seq }
             // 이벤트가 부르는 읽기는 묶음 창(250ms)과 직전 읽기와의 간격을 기다린다. 조정자의 시계를 그만큼 민다.
             for _ in 0..<20 where store.appliedSnapshotCursor?.seq != seq {
-                await settle(); await clock.advance(.milliseconds(250))
+                await settleAndAdvance(clock, .milliseconds(250))
                 for _ in 0..<50 where store.appliedSnapshotCursor?.seq != seq { try? await Task.sleep(for: .milliseconds(2)) }
             }
             XCTAssertEqual(store.appliedSnapshotCursor?.seq, seq)

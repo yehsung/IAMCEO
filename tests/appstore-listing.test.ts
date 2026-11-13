@@ -43,11 +43,14 @@ describe("App Store 등록 정보", () => {
       expect(Buffer.byteLength(listing.keywords!, "utf8")).toBeLessThanOrEqual(100);
     });
 
-    test(`${lang}: 키워드에 상표·다른 앱 이름이 없고, iPhone 알림을 약속하지 않는다`, () => {
+    test(`${lang}: 키워드에 상표·다른 앱 이름이 없고, iPhone 알림은 조건(Mac 서버 0.2.5 이상)과 중계를 함께 밝힌다`, () => {
       // 심사 지침 2.3.7: 키워드에 상표나 다른 앱의 이름을 넣지 않는다.
       expect(listing.keywords!).not.toMatch(/claude|codex|anthropic|openai|tailscale|github|chatgpt|cursor/i);
-      // App Store 판은 iPhone 알림을 받지 못한다(PRIVACY.md 2절). 알림을 내세우지 않는다.
-      for (const field of FIELDS) expect(listing[field]!, `${lang}.${field}`).not.toMatch(/notification|push|알림/i);
+      // 0.2.5 부터 App Store 판도 알림 중계로 알림을 받는다(PRIVACY.md 1·2절). 새로운 기능은 Mac 서버 판 조건을, 설명은 중계를 밝힌다.
+      expect(listing.whatsNew!).toMatch(lang === "ko" ? /알림[^\n]*0\.2\.5/ : /notifications[^\n]*0\.2\.5/i);
+      expect(listing.description!).toMatch(lang === "ko" ? /중계/ : /relay/);
+      // "운영하는 서버가 없다"는 말은 중계와 어긋난다.
+      expect(listing.description!).not.toMatch(/IAMCEO가 운영하는 서버도 없|no IAMCEO cloud/);
       // 이름은 두 언어가 같다.
       expect(listing.name).toBe("IAMCEO");
     });

@@ -22,15 +22,15 @@ import UIKit
 /// Server FileKind → the same Korean words the web uses.
 func fileKindName(_ kind: String) -> String {
     switch kind {
-    case "document": "문서"
-    case "artifact": "아티팩트"
-    case "image": "이미지"
-    case "table": "표"
+    case "document": String(localized: "문서")
+    case "artifact": String(localized: "아티팩트")
+    case "image": String(localized: "이미지")
+    case "table": String(localized: "표")
     case "pdf": "PDF"
-    case "code": "코드"
-    case "video": "영상"
-    case "audio": "오디오"
-    default: "파일"
+    case "code": String(localized: "코드")
+    case "video": String(localized: "영상")
+    case "audio": String(localized: "오디오")
+    default: String(localized: "파일")
     }
 }
 
@@ -146,7 +146,7 @@ struct FilesView: View {
         .quickLookPreview($listPreview)
         .modifier(ResourceSharing(resource: $listSharing))
         .alert("자료를 열 수 없습니다", isPresented: Binding(get: { listActionError != nil }, set: { if !$0 { listActionError = nil } })) {
-            Button("확인", role: .cancel) {}
+            Button(String(localized: "alert.ok", defaultValue: "확인"), role: .cancel) {}
         } message: { Text(listActionError ?? "") }
         #if os(macOS)
         .background {
@@ -172,9 +172,9 @@ struct FilesView: View {
         ScrollView {
             Group {
                 if store.isLoading {
-                    EmptyTile(loading: true, title: "자료를 불러오는 중입니다")
+                    EmptyTile(loading: true, title: String(localized: "자료를 불러오는 중입니다"))
                 } else {
-                    EmptyTile(icon: "folder", title: "열린 프로젝트가 없습니다", detail: "연결과 프로젝트를 확인한 뒤 다시 동기화하세요.")
+                    EmptyTile(icon: "folder", title: String(localized: "열린 프로젝트가 없습니다"), detail: String(localized: "연결과 프로젝트를 확인한 뒤 다시 동기화하세요."))
                 }
             }
             .ceContentColumn()
@@ -183,7 +183,7 @@ struct FilesView: View {
 
     private var emptyLibrary: some View {
         ScrollView {
-            EmptyTile(icon: "folder", title: "아직 올린 자료가 없습니다", detail: "팀원이 자료를 올리면 여기에 모입니다.")
+            EmptyTile(icon: "folder", title: String(localized: "아직 올린 자료가 없습니다"), detail: String(localized: "팀원이 자료를 올리면 여기에 모입니다."))
                 .ceContentColumn()
         }
         #if os(iOS)
@@ -292,9 +292,9 @@ struct FilesView: View {
                     // Nothing to read: a quiet note in the middle of the pane, not a line stuck in its corner.
                     Group {
                         if router.fileID != nil {
-                            EmptyTile(icon: "questionmark.folder", title: "찾을 수 없는 자료입니다", detail: "목록에서 다시 골라 주세요.", framed: false)
+                            EmptyTile(icon: "questionmark.folder", title: String(localized: "찾을 수 없는 자료입니다"), detail: String(localized: "목록에서 다시 골라 주세요."), framed: false)
                         } else {
-                            EmptyTile(icon: "doc.text.magnifyingglass", title: "고른 자료가 없습니다", detail: "왼쪽 목록에서 자료를 고르세요.", framed: false)
+                            EmptyTile(icon: "doc.text.magnifyingglass", title: String(localized: "고른 자료가 없습니다"), detail: String(localized: "왼쪽 목록에서 자료를 고르세요."), framed: false)
                         }
                     }
                     .frame(maxWidth: 360)
@@ -368,7 +368,7 @@ struct FilesView: View {
 
     @ViewBuilder private var chipButtons: some View {
         let counts = kindCounts
-        chip(nil, title: "전체", count: store.files.count)
+        chip(nil, title: String(localized: "전체"), count: store.files.count)
         ForEach(presentKinds, id: \.self) { value in
             chip(value, title: fileKindName(value), count: counts[value] ?? 0)
         }
@@ -389,13 +389,13 @@ struct FilesView: View {
     }
 
     @ViewBuilder private var searchStatus: some View {
-        if searchingBodies { ViewerNote(text: "본문에서도 찾는 중입니다", loading: true) }
+        if searchingBodies { ViewerNote(text: String(localized: "본문에서도 찾는 중입니다"), loading: true) }
         if let searchError { ViewerNote(text: searchError, bad: true) }
     }
 
     private func searchBodies() async {
         searchResults = nil; searchError = nil
-        guard !query.isEmpty, let api = store.api, let project = store.selectedProjectID, !store.isDemo else { searchingBodies = false; return }
+        guard !query.isEmpty, let api = store.api, let project = store.selectedProjectID else { searchingBodies = false; return }
         let term = query, archived = store.isArchive
         searchingBodies = true
         defer { if !Task.isCancelled, query == term, store.stillCurrent(api, project: project, archived: archived) { searchingBodies = false } }
@@ -449,7 +449,7 @@ struct FilesView: View {
     private func quickLook(_ file: FileDoc) async {
         guard let api = store.api else { return }
         do {
-            let full = store.isDemo || store.isArchive ? file : try await store.fileBody(id: file.id)
+            let full = store.isArchive ? file : try await store.fileBody(id: file.id)
             let resource: FileResource
             if full.kind == "artifact" {
                 // Quick Look receives source text. Executable HTML stays inside SandboxedHTML.
@@ -462,7 +462,7 @@ struct FilesView: View {
     }
 
     private var noMatch: some View {
-        CompactEmpty(icon: "magnifyingglass", title: "맞는 자료가 없습니다", detail: "검색어나 종류를 바꿔 보세요.")
+        CompactEmpty(icon: "magnifyingglass", title: String(localized: "맞는 자료가 없습니다"), detail: String(localized: "검색어나 종류를 바꿔 보세요."))
     }
 }
 
@@ -478,7 +478,7 @@ private struct FileRow: View {
     var chevron = false
     var searchResult: FileSearchResult?
 
-    private var title: String { file.title.isEmpty ? "제목 없는 자료" : file.title }
+    private var title: String { file.title.isEmpty ? String(localized: "제목 없는 자료") : file.title }
     private var imageAttachment: Attachment? { file.attachments.first(where: \.isImage) }
     private var byline: String { [file.who, fileTime(file.createdAt)].filter { !$0.isEmpty }.joined(separator: " · ") }
 
@@ -504,7 +504,7 @@ private struct FileRow: View {
                         KindTag(kind: file.kind)
                         Text(byline).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1)
                         if let label = searchResult?.bodyLabel { Text(label).font(CEFont.meta).foregroundStyle(CE.ink2) }
-                        if openDecisions > 0 { Tag("결재 \(openDecisions)", tone: .attention) }
+                        if openDecisions > 0 { Tag(String(localized: "결재 \(openDecisions)"), tone: .attention) }
                     }
                     .padding(.top, 2)
                 }
@@ -527,7 +527,7 @@ private struct FileRow: View {
     private var accessibilityText: String {
         var parts = [fileKindName(file.kind), title, file.summary, file.who, relativeTime(file.createdAt)]
         if let searchResult { parts += [searchResult.bodyLabel ?? "", searchResult.excerpt] }
-        if openDecisions > 0 { parts.append("결재 \(openDecisions)건 대기") }
+        if openDecisions > 0 { parts.append(String(localized: "결재 \(openDecisions)건 대기")) }
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 }
@@ -556,7 +556,7 @@ private struct RowThumb: View {
     }
 
     private func loadThumb() async {
-        guard let api = store.api, !store.isDemo,
+        guard let api = store.api,
               let resource = try? await FileResources.attachment(attachment, api: api),
               let decoded = await PreviewImages.image(resource, maxPixel: 160) else { return }
         guard store.stillCurrent(api), !Task.isCancelled else { return }
@@ -578,14 +578,14 @@ private struct FileDetailScreen: View {
                 FileReader(file: file, framed: true)
             } else {
                 ScrollView {
-                    EmptyTile(icon: "questionmark.folder", title: "찾을 수 없는 자료입니다", detail: "목록에서 다시 골라 주세요.")
+                    EmptyTile(icon: "questionmark.folder", title: String(localized: "찾을 수 없는 자료입니다"), detail: String(localized: "목록에서 다시 골라 주세요."))
                         .ceContentColumn()
                 }
             }
         }
         .background { AmbientBackground() }
         // The reader shows the full, selectable title itself; the bar names the kind so it is not said twice.
-        .navigationTitle(file.map { fileKindName($0.kind) } ?? "자료")
+        .navigationTitle(file.map { fileKindName($0.kind) } ?? String(localized: "자료"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -615,7 +615,7 @@ private struct FileBodyReader: View {
     @State private var failure: String?
     @State private var retry = 0
     var body: some View {
-        let direct = store.isDemo || store.isArchive
+        let direct = store.isArchive
         let cached = store.api.flatMap { FileBodyMemory.shared.get(file.id, api: $0) }
         let resolved = direct ? file : full ?? cached ?? file
         FileReaderContent(file: resolved, framed: framed,
@@ -624,7 +624,7 @@ private struct FileBodyReader: View {
         .task(id: "\(store.api.map { String(describing: ObjectIdentifier($0)) } ?? ""):\(file.id):\(retry)") {
             full = nil; failure = nil
             guard !direct else { return }
-            guard let api = store.api else { failure = "연결한 뒤 자료를 열어 주세요."; return }
+            guard let api = store.api else { failure = String(localized: "연결한 뒤 자료를 열어 주세요."); return }
             do {
                 let result = try await store.fileBody(id: file.id)
                 guard !Task.isCancelled, store.stillCurrent(api, project: result.projectId) else { return }
@@ -714,7 +714,7 @@ private struct FileReaderContent: View {
         .environment(\.readerViewport, viewport)
         .task(id: store.api.map(ObjectIdentifier.init)) { host = await FileHostConnection.current(store.api) }
         .alert("원본을 읽지 못했습니다", isPresented: Binding(get: { pathFailure != nil }, set: { if !$0 { pathFailure = nil } })) {
-            Button("확인", role: .cancel) {}
+            Button(String(localized: "alert.ok", defaultValue: "확인"), role: .cancel) {}
         } message: { Text(pathFailure ?? "") }
     }
 
@@ -723,7 +723,7 @@ private struct FileReaderContent: View {
             header
             if !relatedDecisions.isEmpty || !relatedMessages.isEmpty { related.padding(.horizontal, isArtifact ? 6 : 0) }
             if let path, !isArtifact { pathBox(path) }
-            if bodyLoading && !isArtifact { ViewerNote(text: "본문을 읽는 중입니다", loading: true) }
+            if bodyLoading && !isArtifact { ViewerNote(text: String(localized: "본문을 읽는 중입니다"), loading: true) }
             else if let bodyFailure, !isArtifact { ViewerNote(text: bodyFailure, bad: true, retry: retryBody) }
             else { content }
             // An artifact leads with its page (web hides the path); where it lives on the host comes last.
@@ -752,7 +752,7 @@ private struct FileReaderContent: View {
                 Spacer(minLength: 0)
             }
             .padding(.trailing, enlargeReserve)
-            Text(file.title.isEmpty ? "제목 없는 자료" : file.title)
+            Text(file.title.isEmpty ? String(localized: "제목 없는 자료") : file.title)
                 .font(titleFont).tracking(isArtifact ? -0.34 : -0.4).foregroundStyle(CE.ink)
                 .lineSpacing(CELeading.spacing(isArtifact ? 19 : 22, 1.3))
                 .textSelection(.enabled)
@@ -803,7 +803,7 @@ private struct FileReaderContent: View {
 
     /// A document with text gets 복사 and 받기/공유 in the header.
     private var documentActions: Bool { file.kind == "document" && !file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    private var documentTitle: String { file.title.isEmpty ? "제목 없는 자료" : file.title }
+    private var documentTitle: String { file.title.isEmpty ? String(localized: "제목 없는 자료") : file.title }
     /// The whole document as written: its title as the heading, then the text (the body already repeats the title
     /// when it starts with it).
     private var documentText: String { markdownBody == file.body && !file.body.hasPrefix("# ") ? "# \(documentTitle)\n\n\(file.body)" : file.body }
@@ -869,13 +869,13 @@ private struct FileReaderContent: View {
             ForEach(relatedDecisions) { decision in
                 let state = DecisionStateInfo(decision)
                 let open = decision.status == "open"
-                let action = open ? "결재함에서 답하기" : decision.status == "closed" ? "닫힌 결재 보기" : "답한 결재 보기"
-                LinkChip(dot: state.tone, label: "결재", title: decision.title, highlighted: open, help: "\(state.label) · \(action)") {
+                let action = open ? String(localized: "결재함에서 답하기") : decision.status == "closed" ? String(localized: "닫힌 결재 보기") : String(localized: "답한 결재 보기")
+                LinkChip(dot: state.tone, label: String(localized: "결재"), title: decision.title, highlighted: open, help: "\(state.label) · \(action)") {
                     router.openDecision(decision.id)
                 }
             }
             ForEach(relatedMessages) { message in
-                LinkChip(icon: "bubble.left", label: message.kind.isEmpty ? "대화" : message.kind, title: messageHeadline(message), help: "대화 보기") {
+                LinkChip(icon: "bubble.left", label: message.kind.isEmpty ? String(localized: "대화") : messageKindLabel(message.kind), title: messageHeadline(message), help: String(localized: "대화 보기")) {
                     FileLinks.openRelated(message, router: router)
                 }
             }
@@ -950,7 +950,7 @@ private struct FileReaderContent: View {
             prose
         case "code":
             if !file.body.isEmpty || !mainAttachments.isEmpty {
-                RawTextSource(file: file, attachment: mainAttachments.first, loadingText: "내용을 불러오는 중입니다") { text, truncated in
+                RawTextSource(file: file, attachment: mainAttachments.first, loadingText: String(localized: "내용을 불러오는 중입니다")) { text, truncated in
                     CodeBlock(file: file, attachment: mainAttachments.first, text: text, truncated: truncated)
                 }
             }
@@ -958,7 +958,7 @@ private struct FileReaderContent: View {
             AttachmentGroup(items: extraAttachments)
         case "table":
             if !file.body.isEmpty || !mainAttachments.isEmpty {
-                RawTextSource(file: file, attachment: mainAttachments.first, loadingText: "표를 불러오는 중입니다") { text, truncated in
+                RawTextSource(file: file, attachment: mainAttachments.first, loadingText: String(localized: "표를 불러오는 중입니다")) { text, truncated in
                     TableBlock(file: file, attachment: mainAttachments.first, text: text, truncated: truncated, tabSeparated: isTabSeparated)
                 }
             }
@@ -986,15 +986,14 @@ private struct FileReaderContent: View {
         }
         if !hasContent {
             CompactEmpty(icon: fileKindIcon(file.kind),
-                         title: ["document", "code", "table"].contains(file.kind) ? "본문이 없는 자료입니다" : "원본을 찾을 수 없습니다",
+                         title: ["document", "code", "table"].contains(file.kind) ? String(localized: "본문이 없는 자료입니다") : String(localized: "원본을 찾을 수 없습니다"),
                          detail: emptyDetail)
         }
     }
 
     private var emptyDetail: String {
-        if store.isDemo { return "샘플 자료에는 원본 파일이 없습니다." }
-        if let path { return "작업하는 컴퓨터의 원본 위치: \(path)" }
-        return "올린 팀원에게 원본을 다시 올려 달라고 요청할 수 있습니다."
+        if let path { return String(localized: "작업하는 컴퓨터의 원본 위치: \(path)") }
+        return String(localized: "올린 팀원에게 원본을 다시 올려 달라고 요청할 수 있습니다.")
     }
 
     private var isTabSeparated: Bool {
@@ -1063,9 +1062,9 @@ private struct RawTextSource<Content: View>: View {
     }
 
     private func fetch() async {
-        guard let attachment else { failure = "원본을 찾을 수 없습니다"; return }
+        guard let attachment else { failure = String(localized: "원본을 찾을 수 없습니다"); return }
         guard let api = store.api else {
-            failure = store.isDemo ? "샘플 자료에는 원본 파일이 없습니다." : "서버에 연결되면 원본을 불러올 수 있습니다."
+            failure = String(localized: "서버에 연결되면 원본을 불러올 수 있습니다.")
             return
         }
         do {
@@ -1154,7 +1153,7 @@ private struct CodeBlock: View {
                 if let model {
                     if wrap { wrapped(model) } else { scrolling(model) }
                 } else {
-                    ViewerNote(text: "내용을 정리하는 중입니다", loading: true).padding(.horizontal, 12)
+                    ViewerNote(text: String(localized: "내용을 정리하는 중입니다"), loading: true).padding(.horizontal, 12)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1164,22 +1163,22 @@ private struct CodeBlock: View {
     }
 
     private func countLine(_ model: CodeLines) -> String {
-        var line = "\(truncated ? "앞부분 " : "")\(model.total.formatted())줄"
-        if model.total > model.lines.count { line += " · 앞 \(model.lines.count.formatted())줄만 표시" }
+        var line = String(localized: "\(truncated ? String(localized: "앞부분 ") : "")\(model.total.formatted())줄")
+        if model.total > model.lines.count { line += String(localized: " · 앞 \(model.lines.count.formatted())줄만 표시") }
         return line
     }
 
     /// The original's name, or the title as a .txt when the source came only as text (web saveText).
     private var saveName: String {
         if let attachment, !attachment.name.isEmpty { return attachment.name }
-        let title = file.title.isEmpty ? "코드" : file.title
+        let title = file.title.isEmpty ? String(localized: "코드") : file.title
         return title.replacing(#/[\\/:*?"<>|]/#, with: " ") + ".txt"
     }
 
     private func saveLabel(_ model: CodeLines?) -> String {
-        guard let attachment else { return "받기" }
+        guard let attachment else { return String(localized: "받기") }
         let cut = truncated || (model.map { $0.total > $0.lines.count } ?? false)
-        return cut ? "전체 받기 (\(fileSizeText(attachment.size)))" : "받기"
+        return cut ? String(localized: "전체 받기 (\(fileSizeText(attachment.size)))") : String(localized: "받기")
     }
 
     /// Sideways scrolling; the number column stays put beside it (web: a sticky column).
@@ -1287,18 +1286,18 @@ private struct TableBlock: View {
                 ViewerBar(text: summary(table)) {
                     if let attachment {
                         SaveButton(attachment: attachment, name: attachment.name,
-                                   label: cut(table) ? "전체 받기 (\(fileSizeText(attachment.size)))" : "받기")
+                                   label: cut(table) ? String(localized: "전체 받기 (\(fileSizeText(attachment.size)))") : String(localized: "받기"))
                     }
                 }
                 if table.header.isEmpty {
-                    ViewerNote(text: "비어 있는 표입니다")
+                    ViewerNote(text: String(localized: "비어 있는 표입니다"))
                 } else if let widths {
                     grid(table, widths: fill(widths))
                 } else {
-                    ViewerNote(text: "표를 정리하는 중입니다", loading: true)
+                    ViewerNote(text: String(localized: "표를 정리하는 중입니다"), loading: true)
                 }
             } else if text.utf8.count > Self.backgroundParseBytes {
-                ViewerNote(text: "표를 정리하는 중입니다", loading: true)
+                ViewerNote(text: String(localized: "표를 정리하는 중입니다"), loading: true)
             }
         }
         .task(id: text.utf8.count) { await prepare() }
@@ -1334,10 +1333,10 @@ private struct TableBlock: View {
     }
 
     private func summary(_ table: ParsedTable) -> String {
-        var line = truncated ? "앞부분 \(table.rows.count.formatted())행" : "\(table.rows.count.formatted())행"
-        line += " · \(table.header.count)열"
-        if table.rows.count > tableRowLimit { line += " · 앞 \(tableRowLimit.formatted())행만 표시" }
-        if table.hiddenColumns > 0 { line += " · 전체 \(table.header.count + table.hiddenColumns)열 중 앞 \(table.header.count)열만 표시" }
+        var line = truncated ? String(localized: "앞부분 \(table.rows.count.formatted())행") : String(localized: "\(table.rows.count.formatted())행")
+        line += String(localized: " · \(table.header.count)열")
+        if table.rows.count > tableRowLimit { line += String(localized: " · 앞 \(tableRowLimit.formatted())행만 표시") }
+        if table.hiddenColumns > 0 { line += String(localized: " · 전체 \(table.header.count + table.hiddenColumns)열 중 앞 \(table.header.count)열만 표시") }
         return line
     }
 
@@ -1388,7 +1387,7 @@ private struct TableBlock: View {
     private func headerRow(_ table: ParsedTable, widths: [CGFloat]) -> some View {
         HStack(spacing: 0) {
             ForEach(table.header.indices, id: \.self) { index in
-                let title = table.header[index].isEmpty ? "열 \(index + 1)" : table.header[index]
+                let title = table.header[index].isEmpty ? String(localized: "열 \(index + 1)") : table.header[index]
                 let numeric = table.numeric[index]
                 let sorted = sort?.column == index ? sort?.ascending : nil
                 Button { toggleSort(index, table: table) } label: {
@@ -1485,7 +1484,7 @@ private func measureTableColumns(header: [String], rows: [[String]], numeric: [B
     }
     return header.indices.map { column in
         let number = column < numeric.count && numeric[column]
-        let title = header[column].isEmpty ? "열 \(column + 1)" : header[column]
+        let title = header[column].isEmpty ? String(localized: "열 \(column + 1)") : header[column]
         // label · 5 · 13 arrow slot · 12 + 12 padding
         let head = width(title, headFont) + 5 + 13 + 24
         var widest: CGFloat = 0
@@ -1521,8 +1520,7 @@ private struct ArtifactViewer: View {
     private static let coverTimeout: Duration = .seconds(10)
 
     private var unavailableReason: String? {
-        if store.isDemo { return "샘플 자료라 페이지를 열 수 없습니다." }
-        if store.api == nil { return "서버에 연결되면 미리보기를 열 수 있습니다." }
+        if store.api == nil { return String(localized: "서버에 연결되면 미리보기를 열 수 있습니다.") }
         return nil
     }
 
@@ -1633,12 +1631,12 @@ private struct ArtifactViewer: View {
     }
 
     private func load() async {
-        guard let api = store.api, !store.isDemo, !loading else { return }
+        guard let api = store.api, !loading else { return }
         loading = true; error = nil
         defer { loading = false }
         // Fail closed: without the block rule the page is not fetched or shown at all.
         guard let rule = await artifactBlockRule() else {
-            error = "페이지를 안전하게 열 준비가 되지 않았습니다. 다시 시도해 주세요."
+            error = String(localized: "페이지를 안전하게 열 준비가 되지 않았습니다. 다시 시도해 주세요.")
             return
         }
         do {
@@ -1676,7 +1674,7 @@ private struct ArtifactFullView: View {
     }
 
     private func sheet(width: CGFloat) -> some View {
-        CESheet(title.isEmpty ? "제목 없는 자료" : title, icon: "macwindow", width: width, scrolls: false) {
+        CESheet(title.isEmpty ? String(localized: "제목 없는 자료") : title, icon: "macwindow", width: width, scrolls: false) {
             SandboxedHTML(html: artifact.html, rule: artifact.rule, title: title)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CE.line) }
@@ -1739,7 +1737,7 @@ private struct AttachmentView: View {
 
     private var kind: String { attachmentKind(attachment) }
     private var isTextual: Bool { attachment.mime.hasPrefix("text/") || attachment.mime.contains("json") }
-    private var displayName: String { attachment.name.isEmpty ? "이름 없는 첨부" : attachment.name }
+    private var displayName: String { attachment.name.isEmpty ? String(localized: "이름 없는 첨부") : attachment.name }
 
     var body: some View {
         Group {
@@ -1878,7 +1876,7 @@ private struct AttachmentView: View {
     private func load() async {
         guard data == nil, !loading else { return }
         guard let api = store.api else {
-            error = store.isDemo ? "샘플에는 원본 파일이 없습니다." : "서버 연결 후 원본을 불러올 수 있습니다."
+            error = String(localized: "서버 연결 후 원본을 불러올 수 있습니다.")
             return
         }
         loading = true; defer { loading = false }
@@ -1900,7 +1898,7 @@ private struct AttachmentView: View {
 // MARK: - Reader viewers (web components/viewers)
 
 private extension Attachment {
-    var displayName: String { name.isEmpty ? "이름 없는 첨부" : name }
+    var displayName: String { name.isEmpty ? String(localized: "이름 없는 첨부") : name }
 }
 
 /// One attachment's original, fetched through the connected daemon (access code in a header, same origin only) into a
@@ -1920,7 +1918,7 @@ private extension Attachment {
     func load(_ store: AppStore, maxPixel: Int = 1400) async {
         guard !loading else { return }
         guard let api = store.api else {
-            error = store.isDemo ? "샘플에는 원본 파일이 없습니다." : "서버 연결 후 원본을 불러올 수 있습니다."
+            error = String(localized: "서버 연결 후 원본을 불러올 수 있습니다.")
             return
         }
         // 며칠 켜 둔 앱에서는 시스템이 오래된 임시 파일을 지웠을 수 있다. 파일이 없으면 다시 받는다.
@@ -2101,7 +2099,7 @@ private struct AttachmentChip: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help(source.error ?? "\(attachment.displayName) 미리 보기")
+        .help(source.error ?? String(localized: "\(attachment.displayName) 미리 보기"))
         .accessibilityLabel("\(attachment.displayName) \(fileSizeText(attachment.size)) 열기")
         .quickLookPreview($preview)
         .modifier(AttachmentActions(attachment: attachment))
@@ -2341,7 +2339,7 @@ private struct PDFBlock: View {
                     }
                 }
             } else {
-                FileDownloadStatus(title: "PDF를 받는 중입니다", progress: source.progress)
+                FileDownloadStatus(title: String(localized: "PDF를 받는 중입니다"), progress: source.progress)
             }
         }
         .quickLookPreview($preview)
@@ -2424,7 +2422,7 @@ private struct MediaBlock: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if unplayable {
-                ViewerNote(text: "여기서 재생할 수 없는 형식입니다. 받아서 열어 주세요.", bad: true)
+                ViewerNote(text: String(localized: "여기서 재생할 수 없는 형식입니다. 받아서 열어 주세요."), bad: true)
             } else if let player, video {
                 MediaPlayerView(player: player)
                     .frame(maxWidth: .infinity)
@@ -2442,7 +2440,7 @@ private struct MediaBlock: View {
                     }
                 }
             } else {
-                FileDownloadStatus(title: video ? "영상을 받는 중입니다" : "오디오를 받는 중입니다", progress: source.progress)
+                FileDownloadStatus(title: video ? String(localized: "영상을 받는 중입니다") : String(localized: "오디오를 받는 중입니다"), progress: source.progress)
             }
             ViewerBar(text: "\(attachment.displayName) · \(fileSizeText(attachment.size))") {
                 SaveButton(attachment: attachment, name: attachment.name)
@@ -2572,21 +2570,21 @@ private struct SaveButton: View {
     let attachment: Attachment?
     var text: String? = nil
     let name: String
-    var label = "받기"
+    var label = String(localized: "받기")
     @State private var busy = false
     @State private var failure: String?
     @State private var shareResource: FileResource?
     @State private var progress: Double?
 
     var body: some View {
-        Button { Task { await save() } } label: { Text(busy ? progress.map { "받는 중 \(Int($0 * 100))%" } ?? "받는 중" : label) }
+        Button { Task { await save() } } label: { Text(busy ? progress.map { String(localized: "받는 중 \(Int($0 * 100))%") } ?? String(localized: "받는 중") : label) }
             .buttonStyle(ViewerButtonStyle())
             .disabled(busy || unavailable != nil)
-            .help(unavailable ?? (isMac ? "원본을 내려받아 저장합니다" : "원본을 열어 저장하거나 공유합니다"))
+            .help(unavailable ?? (isMac ? String(localized: "원본을 내려받아 저장합니다") : String(localized: "원본을 열어 저장하거나 공유합니다")))
             .accessibilityLabel("\(name) \(label)")
             .modifier(ResourceSharing(resource: $shareResource))
             .alert("받지 못했습니다", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
-                Button("확인", role: .cancel) {}
+                Button(String(localized: "alert.ok", defaultValue: "확인"), role: .cancel) {}
             } message: {
                 Text(failure ?? "")
             }
@@ -2594,7 +2592,7 @@ private struct SaveButton: View {
 
     private var unavailable: String? {
         guard attachment != nil, store.api == nil else { return nil }
-        return store.isDemo ? "샘플에는 원본 파일이 없습니다." : "서버에 연결되면 받을 수 있습니다."
+        return String(localized: "서버에 연결되면 받을 수 있습니다.")
     }
 
     private func save() async {
@@ -2728,8 +2726,9 @@ private func fileTime(_ iso: String, now: Date = Date()) -> String {
     let calendar = Calendar.current
     let clock = koTime(date)
     if calendar.isDateInToday(date) { return clock }
-    if calendar.isDateInYesterday(date) { return "어제 \(clock)" }
-    let day = koFormatted(date, calendar.component(.year, from: date) == calendar.component(.year, from: now) ? "M월 d일" : "yyyy년 M월 d일")
+    if calendar.isDateInYesterday(date) { return String(localized: "어제 \(clock)") }
+    let day = calendar.component(.year, from: date) == calendar.component(.year, from: now)
+        ? appFormatted(date, ko: "M월 d일", en: "MMMd") : appFormatted(date, ko: "yyyy년 M월 d일", en: "yMMMd")
     return "\(day) \(clock)"
 }
 
@@ -2924,7 +2923,7 @@ struct SandboxedHTML: View {
     @State private var pendingLink: String?
     var body: some View {
         SandboxedHTMLSurface(html: html, rule: rule, title: title, height: height, viewportBound: viewportBound, onLink: { pendingLink = $0 })
-            .alert("바깥 링크를 엽니다: " + (pendingLink ?? ""),
+            .alert(String(localized: "바깥 링크를 엽니다: ") + (pendingLink ?? ""),
                    isPresented: Binding(get: { pendingLink != nil }, set: { if !$0 { pendingLink = nil } })) {
                 if let pendingLink, let url = ArtifactKit.externalURL(pendingLink) {
                     Button("브라우저에서 열기") {
@@ -2975,12 +2974,12 @@ private struct AttachmentActions: ViewModifier {
             Button("이름 복사") { copyToPasteboard(attachment.displayName) }
         }
         .overlay(alignment: .bottomLeading) {
-            if busy { FileDownloadStatus(title: "파일을 받는 중입니다", progress: progress).padding(8).background(CE.bg) }
+            if busy { FileDownloadStatus(title: String(localized: "파일을 받는 중입니다"), progress: progress).padding(8).background(CE.bg) }
         }
         .quickLookPreview($preview)
         .modifier(ResourceSharing(resource: $sharing))
         .alert("파일을 받지 못했습니다", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
-            Button("확인", role: .cancel) {}
+            Button(String(localized: "alert.ok", defaultValue: "확인"), role: .cancel) {}
         } message: { Text(failure ?? "") }
     }
     private func perform(share: Bool, save: Bool) async {
@@ -3026,7 +3025,7 @@ private struct AttachmentShareButton: View {
         .buttonStyle(ViewerButtonStyle()).disabled(busy || store.api == nil)
         .modifier(ResourceSharing(resource: $sharing))
         .alert("파일을 받지 못했습니다", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
-            Button("확인", role: .cancel) {}
+            Button(String(localized: "alert.ok", defaultValue: "확인"), role: .cancel) {}
         } message: { Text(failure ?? "") }
     }
 }
@@ -3059,7 +3058,7 @@ private struct FileActivitySheet: View {
     let url: URL
     // Mac 시트는 닫는 버튼(Esc)이 없으면 창 전체를 막은 채 닫을 수 없다.
     var body: some View {
-        CESheet("공유", subtitle: url.lastPathComponent, icon: "square.and.arrow.up", width: 360) {
+        CESheet(String(localized: "공유"), subtitle: url.lastPathComponent, icon: "square.and.arrow.up", width: 360) {
             ShareLink(item: url) { Label("공유", systemImage: "square.and.arrow.up") }
         } footer: {
             Button("닫기") { dismiss() }.ceSecondaryButton()

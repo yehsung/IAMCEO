@@ -153,7 +153,7 @@ import XCTest
         store.disconnect()
     }
 
-    func testConfirmed401EndsAuthenticationAndSampleCannotWrite() async throws {
+    func testConfirmed401EndsAuthenticationAndSampleWritesStayInTheSample() async throws {
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connect(network)
         server.change { $0.rejectAll = true }
@@ -162,11 +162,14 @@ import XCTest
         XCTAssertFalse(store.canWrite)
         XCTAssertNil(store.api)
         XCTAssertEqual(store.connectionStatus, .failed)
+        // F8: 샘플의 쓰기는 샘플 서버에서만 받는다. 넘겨받은 세션으로는 하나도 가지 않는다.
         let demo = AppStore(demo: true, session: network.session, persistCredentials: false)
+        defer { demo.prepareForReplacement() }
         let before = network.requests.count
+        try await waitWhile({ !demo.canWrite }, timeout: .seconds(15))
         let sent = await demo.sendMessage(text: "no")
-        let settings = await demo.updateSettings(Settings())
-        XCTAssertFalse(sent); XCTAssertFalse(settings)
+        let settings = await demo.updateSettings(try XCTUnwrap(demo.bootstrap?.settings))
+        XCTAssertTrue(sent); XCTAssertTrue(settings)
         XCTAssertEqual(network.requests.count, before)
         store.disconnect()
     }

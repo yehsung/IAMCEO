@@ -206,7 +206,7 @@ flowchart LR
 git clone https://github.com/yehsung/IAMCEO.git && cd IAMCEO
 bun install
 bun run build:native            # dist/native/IAMCEO.app
-open -n dist/native/IAMCEO.app --args --demo   # 연결 없는 샘플 화면
+open -n dist/native/IAMCEO.app --args --demo   # 앱 안의 샘플 서버로 둘러보기(바깥에 연결하지 않음)
 ```
 
 시험은 임시 데이터 홈·자동 포트·가짜 CLI로 격리해 돕니다.

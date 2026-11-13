@@ -13,15 +13,15 @@ import SwiftUI
 
 /// Help text of the 팀장 추가 button (office header, and the bare button when there is no team yet).
 @MainActor func teamAddMemberHelp(_ store: AppStore, _ project: Project) -> String {
-    if store.isDemo { return "샘플은 읽기 전용입니다" }
-    if !store.canWrite { return "서버에 연결되면 추가할 수 있습니다" }
-    if !project.runnerEnabled { return "총괄을 시작한 뒤 추가할 수 있습니다" }
-    return "새 CLI 세션을 띄워 팀장으로 등록합니다"
+    if store.isDemo { return String(localized: "샘플에서는 팀장을 추가할 수 없습니다") }
+    if !store.canWrite { return String(localized: "서버에 연결되면 추가할 수 있습니다") }
+    if !project.runnerEnabled { return String(localized: "총괄을 시작한 뒤 추가할 수 있습니다") }
+    return String(localized: "새 CLI 세션을 띄워 팀장으로 등록합니다")
 }
 
 /// State label. In the office an idle CLI reads as a break, not as "대기".
 private func officeStateLabel(_ status: String) -> String {
-    status == "unknown" ? "상태 확인 불가" : status == "idle" ? "쉬는 중" : MemberStatusInfo(status).label
+    status == "unknown" ? String(localized: "상태 확인 불가") : status == "idle" ? String(localized: "쉬는 중") : MemberStatusInfo(status).label
 }
 
 private func officeStateKey(_ member: Member) -> String {
@@ -76,15 +76,15 @@ private func officeDetail(_ member: Member) -> String {
     let now = plainOneLine(member.now)
     switch member.status {
     case "error":
-        if let error = member.lastError, !error.isEmpty { return plainOneLine(friendlyError(error)) }
+        if let error = member.lastError, !error.isEmpty { return plainOneLine(friendlyError(error, code: member.fenceCode)) }
     case "idle", "asleep":
-        return now.isEmpty ? (member.status == "idle" ? "맡은 일 없음" : "세션을 내려 두었습니다") : "마지막: \(now)"
+        return now.isEmpty ? (member.status == "idle" ? String(localized: "맡은 일 없음") : String(localized: "세션을 내려 두었습니다")) : String(localized: "마지막: \(now)")
     case "offline":
-        return "세션을 찾지 못했습니다"
+        return String(localized: "세션을 찾지 못했습니다")
     default:
         break
     }
-    return now.isEmpty ? "맡은 일 없음" : now
+    return now.isEmpty ? String(localized: "맡은 일 없음") : now
 }
 
 // MARK: - Cache
@@ -198,12 +198,12 @@ struct OfficeView: View {
         Plate(padding: 0, radius: CERadius.card) {
             VStack(alignment: .leading, spacing: 12) {
                 OfficeHeader(counts: Self.counts(list), showsAdd: !project.isHq,
-                             canAdd: store.canWrite && project.runnerEnabled, help: teamAddMemberHelp(store, project)) {
+                             canAdd: !store.isDemo && store.canWrite && project.runnerEnabled, help: teamAddMemberHelp(store, project)) {
                     router.showNewMember = true
                 }
                 .padding(.horizontal, isMac ? 2 : 4)
                 #if os(iOS)
-                CESegmentPill(selection: listSelection, items: [(false, "사무실"), (true, "목록")])
+                CESegmentPill(selection: listSelection, items: [(false, String(localized: "사무실")), (true, String(localized: "목록"))])
                     .accessibilityLabel("팀 보기")
                 if showsList {
                     OfficeNowList(members: list, decisions: openDecisions, selected: router.memberID,
@@ -528,21 +528,21 @@ struct OfficeView: View {
     }
 
     private func deskHelp(_ member: Member, decisions: Int, due: Int?) -> String {
-        var title = decisions > 0 ? "\(member.name) · 결재 \(decisions)건 · 대화방 정보 보기" : "\(member.name) · 대화방 정보 보기"
+        var title = decisions > 0 ? String(localized: "\(member.name) · 결재 \(decisions)건 · 대화방 정보 보기") : String(localized: "\(member.name) · 대화방 정보 보기")
         if let summary = store.deliverySummary(memberID: member.id), summary.needsOwnerCount > 0 {
-            title += " · 전달 확인 \(summary.needsOwnerCount)건 · 상세에서 근거 확인"
+            title += String(localized: " · 전달 확인 \(summary.needsOwnerCount)건 · 상세에서 근거 확인")
         }
         title += "\n\(officeStateLabel(member)) · \(MemberStatusInfo(member).explanation)"
-        return due.map { "\(title)\n문맥 \($0)% 사용 — 상세에서 '문맥 압축'" } ?? title
+        return due.map { String(localized: "\(title)\n문맥 \($0)% 사용 — 상세에서 '문맥 압축'") } ?? title
     }
 
     private func accessibilityText(_ member: Member, decisions: Int) -> String {
         var parts = [member.name, officeStateLabel(member), officeDetail(member)]
-        if decisions > 0 { parts.append("결재 \(decisions)건") }
+        if decisions > 0 { parts.append(String(localized: "결재 \(decisions)건")) }
         if let summary = store.deliverySummary(memberID: member.id), summary.needsOwnerCount > 0 {
-            parts.append("전달 확인 \(summary.needsOwnerCount)건, 상세에서 근거 확인")
+            parts.append(String(localized: "전달 확인 \(summary.needsOwnerCount)건, 상세에서 근거 확인"))
         }
-        if let due = contextDue(member) { parts.append("문맥 \(due)퍼센트 사용, 상세에서 문맥 압축") }
+        if let due = contextDue(member) { parts.append(String(localized: "문맥 \(due)퍼센트 사용, 상세에서 문맥 압축")) }
         return parts.joined(separator: ", ")
     }
 
@@ -909,7 +909,7 @@ private struct OfficeBench: View {
     let decisions: [String: Int]
     let open: (String) -> Void
 
-    private static let explanation = "오래 쉬어 책상을 비운 팀장입니다. 일을 맡기면 다시 자리에 앉습니다."
+    private static let explanation = String(localized: "오래 쉬어 책상을 비운 팀장입니다. 일을 맡기면 다시 자리에 앉습니다.")
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -920,7 +920,7 @@ private struct OfficeBench: View {
             .fixedSize()
             .help(Self.explanation)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("자리 비움 \(members.count)명. " + Self.explanation)
+            .accessibilityLabel(String(localized: "자리 비움 \(members.count)명. ") + Self.explanation)
             TeamWrapLayout(spacing: 8, lineSpacing: 8) {
                 ForEach(members) { member in plate(member) }
             }
@@ -956,8 +956,8 @@ private struct OfficeBench: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("\(member.name) · \(officeStateLabel(member))" + (when.map { " · 마지막 작업 \($0)" } ?? "") + "\n" + Self.explanation)
-        .accessibilityLabel([member.name, officeStateLabel(member), when.map { "마지막 작업 \($0)" }, count > 0 ? "결재 \(count)건" : nil]
+        .help("\(member.name) · \(officeStateLabel(member))" + (when.map { String(localized: " · 마지막 작업 \($0)") } ?? "") + "\n" + Self.explanation)
+        .accessibilityLabel([member.name, officeStateLabel(member), when.map { String(localized: "마지막 작업 \($0)") }, count > 0 ? String(localized: "결재 \(count)건") : nil]
             .compactMap { $0 }.joined(separator: ", "))
         .accessibilityHint("대화방 정보 보기")
     }
@@ -982,7 +982,7 @@ private struct OfficeMessageBox: View {
 
     var body: some View {
         let member = member
-        let line = member.map(officeDetail) ?? "모두 쉬는 중입니다."
+        let line = member.map(officeDetail) ?? String(localized: "모두 쉬는 중입니다.")
         let key = (member?.id ?? "-") + "|" + (member?.status ?? "") + "|" + line
         let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
         Button {
@@ -1076,8 +1076,8 @@ private struct OfficeMessageBox: View {
 
     private func extras(count: Int, due: Int?, long: Bool) -> String? {
         var parts: [String] = []
-        if count > 0 { parts.append("결재 \(count)건") }
-        if let due { parts.append(long ? "문맥 \(due)% 사용 · 압축 권장" : "문맥 \(due)%") }
+        if count > 0 { parts.append(String(localized: "결재 \(count)건")) }
+        if let due { parts.append(long ? String(localized: "문맥 \(due)% 사용 · 압축 권장") : String(localized: "문맥 \(due)%")) }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
@@ -1167,7 +1167,7 @@ private struct OfficeNowList: View {
         .onHover { hover(member.id, $0) }
         .help(info.explanation)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([member.name, officeStateLabel(member), detail, count > 0 ? "결재 \(count)건" : "", time]
+        .accessibilityLabel([member.name, officeStateLabel(member), detail, count > 0 ? String(localized: "결재 \(count)건") : "", time]
             .filter { !$0.isEmpty }.joined(separator: ", "))
         .accessibilityHint("대화방 정보 보기")
         .accessibilityAddTraits(selected == member.id ? [.isSelected] : [])

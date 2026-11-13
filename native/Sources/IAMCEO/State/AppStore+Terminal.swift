@@ -39,7 +39,7 @@ extension AppStore {
                 try await api.request("/api/members/\(APIClient.segment(member.id))/resume", method: "POST", timeout: 20)
             }
             if result.value != nil { return nil }
-            return result.error?.localizedDescription ?? self.errorMessage ?? "요청을 보낼 수 없습니다"
+            return result.error?.localizedDescription ?? self.errorMessage ?? String(localized: "요청을 보낼 수 없습니다")
         }, current: {
             self.members.first { $0.id == member.id }
         }, allowed: {
@@ -62,7 +62,7 @@ extension AppStore {
         guard member.projectId == selectedProjectID,
               members.first(where: { $0.id == member.id })?.canReadCLIApproval == true,
               !manualControl else {
-            errorMessage = "현재 승인 창을 확인할 수 없습니다. 직접 조작을 끝내고 다시 읽어 주세요."
+            errorMessage = String(localized: "현재 승인 창을 확인할 수 없습니다. 직접 조작을 끝내고 다시 읽어 주세요.")
             return false
         }
         struct Result: Decodable, Sendable { let ok: Bool }
@@ -231,7 +231,7 @@ extension AppStore {
         if strictWriteContract {
             let success = await terminalOperation(member, action: .release)
             if !success, terminalLeases[member.id] != nil {
-                errorMessage = "\(member.name)의 조작권을 놓지 못했습니다. 결과 확인 중이며 서버의 lease가 유지될 수 있습니다."
+                errorMessage = String(localized: "\(member.name)의 조작권을 놓지 못했습니다. 결과 확인 중이며 서버의 lease가 유지될 수 있습니다.")
             }
             return success || terminalLeases[member.id] == nil
         }
@@ -251,8 +251,8 @@ extension AppStore {
         // Not released: the server keeps the lease (up to 5 min) and holds automatic delivery. Keep it so the UI
         // still shows manual control and the release can be retried; say so where the strip shows it after the sheet closes.
         let reason = outcome.error?.localizedDescription
-            ?? (!canWrite ? "서버에 연결되지 않음" : pendingActions.contains("terminal:\(member.id)") ? "다른 터미널 요청을 처리하는 중" : nil)
-        errorMessage = "\(member.name)의 조작권을 놓지 못했습니다. 서버가 최대 5분 뒤 풀 때까지 자동 전달이 멈춰 있습니다. 조작을 다시 끝내 주세요." + (reason.map { " (\($0))" } ?? "")
+            ?? (!canWrite ? String(localized: "서버에 연결되지 않음") : pendingActions.contains("terminal:\(member.id)") ? String(localized: "다른 터미널 요청을 처리하는 중") : nil)
+        errorMessage = String(localized: "\(member.name)의 조작권을 놓지 못했습니다. 서버가 최대 5분 뒤 풀 때까지 자동 전달이 멈춰 있습니다. 조작을 다시 끝내 주세요.") + (reason.map { " (\($0))" } ?? "")
         return false
     }
     @discardableResult func terminalInput(_ member: Member, text: String) async -> Bool {
@@ -260,18 +260,18 @@ extension AppStore {
         return await terminalControl(member, action: "input", text: text)
     }
     @discardableResult func terminalKey(_ member: Member, key: String) async -> Bool {
-        guard ["enter", "up", "down", "esc", "tab", "ctrl+c", "backspace"].contains(key) else { errorMessage = "지원하지 않는 키입니다."; return false }
+        guard ["enter", "up", "down", "esc", "tab", "ctrl+c", "backspace"].contains(key) else { errorMessage = String(localized: "지원하지 않는 키입니다."); return false }
         if strictWriteContract { return await terminalOperation(member, action: .key, key: TerminalKey(rawValue: key)) }
         return await terminalControl(member, action: "key", key: key)
     }
     private func terminalControl(_ member: Member, action: String, text: String? = nil, key: String? = nil) async -> Bool {
-        guard let current = terminalLeases[member.id], let lease = current.leaseId else { errorMessage = "직접 조작을 시작한 뒤에 입력하세요."; return false }
+        guard let current = terminalLeases[member.id], let lease = current.leaseId else { errorMessage = String(localized: "직접 조작을 시작한 뒤에 입력하세요."); return false }
         if let expiresAt = current.expiresAt, expiresAt <= Date().timeIntervalSince1970 * 1000 {
             // Keep the id: a new claim passes it and renews the lease if the server extended it after a lost reply.
-            errorMessage = "직접 조작 시간이 끝났습니다. 다시 시작하세요."
+            errorMessage = String(localized: "직접 조작 시간이 끝났습니다. 다시 시작하세요.")
             return false
         }
-        if let text, text.utf8.count > 131072 { errorMessage = "터미널 입력은 128KB까지입니다."; return false }
+        if let text, text.utf8.count > 131072 { errorMessage = String(localized: "터미널 입력은 128KB까지입니다."); return false }
         let outcome: (value: TerminalLease?, error: Error?) = await perform("terminal:\(member.id)", refreshAfter: false) { api in
             try await api.terminalControl(memberID: member.id, request: TerminalControlRequest(action: action, leaseId: lease, text: text, key: key))
         }
@@ -309,7 +309,7 @@ extension AppStore {
     private func terminalOperation(_ member: Member, action: TerminalAction, text: String? = nil, key: TerminalKey? = nil, claimID: String? = nil) async -> Bool {
         guard canWrite, let submissions, let version = writeRevisions?.members?[member.id],
               !pendingActions.contains("terminal:\(member.id)") else { return false }
-        if let text, text.utf8.count > 131072 { errorMessage = "터미널 입력은 128KB까지입니다."; return false }
+        if let text, text.utf8.count > 131072 { errorMessage = String(localized: "터미널 입력은 128KB까지입니다."); return false }
         let epoch = generation
         if let text {
             do { try submissions.setTerminalInput(text, namespace: writeNamespace, memberID: member.id) }
@@ -345,7 +345,7 @@ extension AppStore {
                     return operationResults[previous.id]?.status == .applied && sent?.input?.text == text && sent?.key == key
                 }
                 guard let status = operationResults[previous.id]?.status, status == .applied || status == .refused else {
-                    errorMessage = "직접 조작 결과 확인 중입니다. 미확인 입력을 다시 보내지 않습니다."; return false
+                    errorMessage = String(localized: "직접 조작 결과 확인 중입니다. 미확인 입력을 다시 보내지 않습니다."); return false
                 }
             }
         }
@@ -354,10 +354,10 @@ extension AppStore {
         }
         if action == .input || action == .key || action == .release {
             guard let lease = terminalLeases[member.id], lease.leaseId != nil else {
-                errorMessage = "직접 조작을 시작한 뒤에 입력하세요."; return false
+                errorMessage = String(localized: "직접 조작을 시작한 뒤에 입력하세요."); return false
             }
             if action != .release, let expires = lease.expiresAt, expires <= Date().timeIntervalSince1970 * 1000 {
-                errorMessage = "직접 조작 시간이 끝났습니다. 다시 시작하세요."; return false
+                errorMessage = String(localized: "직접 조작 시간이 끝났습니다. 다시 시작하세요."); return false
             }
         }
         do {

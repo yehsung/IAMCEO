@@ -255,22 +255,22 @@ struct MacComposerTextView: NSViewRepresentable {
         }
         private func attachmentPreflight() -> Bool {
             guard canReceive?() == true else {
-                intake?.reportRejection(rejectionReason?() ?? "지금은 이 입력칸에 첨부할 수 없습니다")
+                intake?.reportRejection(rejectionReason?() ?? String(localized: "지금은 이 입력칸에 첨부할 수 없습니다"))
                 return false
             }
             guard receive != nil else {
-                intake?.reportRejection("입력칸을 준비 중이라 첨부하지 못했습니다. 다시 놓아 주세요")
+                intake?.reportRejection(String(localized: "입력칸을 준비 중이라 첨부하지 못했습니다. 다시 놓아 주세요"))
                 return false
             }
             return true
         }
         private func acceptAttachments(_ items: [MacAttachmentItem]) -> Bool {
             guard !items.isEmpty else {
-                intake?.reportRejection("파일이나 이미지를 읽지 못했습니다")
+                intake?.reportRejection(String(localized: "파일이나 이미지를 읽지 못했습니다"))
                 return false
             }
             guard let receive else {
-                intake?.reportRejection("입력칸을 준비 중이라 첨부하지 못했습니다. 다시 놓아 주세요")
+                intake?.reportRejection(String(localized: "입력칸을 준비 중이라 첨부하지 못했습니다. 다시 놓아 주세요"))
                 return false
             }
             return receive(items)

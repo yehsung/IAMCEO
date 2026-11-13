@@ -338,7 +338,7 @@ struct SettingsRefreshButton: View {
         }
         .buttonStyle(.plain)
         .help(label)
-        .accessibilityLabel(busy ? "\(label), 확인하는 중" : label)
+        .accessibilityLabel(busy ? String(localized: "\(label), 확인하는 중") : label)
     }
 }
 
@@ -702,7 +702,7 @@ struct ConnectionView: View {
         #if os(macOS)
         nil
         #else
-        "Mac의 Tailscale 주소(100.x 또는 HTTPS)입니다. iPhone의 127.0.0.1은 Mac이 아닙니다."
+        String(localized: "Mac의 Tailscale 주소(100.x 또는 HTTPS)입니다. iPhone의 127.0.0.1은 Mac이 아닙니다.")
         #endif
     }
 
@@ -806,7 +806,7 @@ struct ConnectionView: View {
                 }
                 .ceSecondaryButton()
                 .accessibilityLabel("샘플로 둘러보기")
-                Text("Mac 없이 화면을 둘러봅니다. 예시 데이터이며 읽기 전용입니다.")
+                Text("Mac 없이 화면을 둘러봅니다. 예시 데이터이며, 보내기·결재 같은 변경은 이 기기 안에서만 반영됩니다.")
                     .font(CEFont.meta).foregroundStyle(CE.ink3)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -833,7 +833,7 @@ struct ConnectionView: View {
 
     @ViewBuilder private var manualFields: some View {
         @Bindable var store = store
-                SetupField("서버 주소", hint: endpointHint) {
+                SetupField(String(localized: "서버 주소"), hint: endpointHint) {
                     TextField("서버 주소", text: $store.endpoint, prompt: Text(isMac ? "http://127.0.0.1:7878" : "https://your-mac.tailnet.ts.net"))
                         .labelsHidden()
                         .font(SetupFont.input)
@@ -847,7 +847,7 @@ struct ConnectionView: View {
                         #endif
                         .ceField(focused: focus == .endpoint)
                 }
-                SetupField("접속 코드") {
+                SetupField(String(localized: "접속 코드")) {
                     HStack(spacing: 6) {
                         // web .t-code: the code itself in the code face; the placeholder stays in the text face.
                         Group {
@@ -879,7 +879,7 @@ struct ConnectionView: View {
                     .ceField(focused: focus == .code)
                 }
                 if codeHasNonASCII {
-                    SetupError("접속 코드는 영문·숫자로 되어 있습니다. 한글 입력 상태인지 확인해 주세요.")
+                    SetupError(String(localized: "접속 코드는 영문·숫자로 되어 있습니다. 한글 입력 상태인지 확인해 주세요."))
                 } else if let connectionError {
                     SetupError(connectionError)
                 }
@@ -926,7 +926,7 @@ struct ConnectionView: View {
             .keyboardShortcut(.defaultAction)
             .controlSize(.large)
             .disabled(localHost.isStarting || connecting)
-            Text(localHost.isStarting && !localHost.statusText.isEmpty ? localHost.statusText : "이 Mac의 서버를 찾아 바로 연결합니다. 없으면 새로 준비합니다.")
+            Text(localHost.isStarting && !localHost.statusText.isEmpty ? localHost.statusText : String(localized: "이 Mac의 서버를 찾아 바로 연결합니다. 없으면 새로 준비합니다."))
                 .font(SetupFont.hint).foregroundStyle(CE.ink2)
                 .lineSpacing(SetupFont.hintLeading)
                 .multilineTextAlignment(.center)
@@ -1007,11 +1007,11 @@ struct ConnectionView: View {
 
     /// The server's 401 text says nothing about what to do next.
     private func friendlyConnectionError(_ raw: String) -> String {
-        if raw == "인증이 필요합니다" {
+        if raw == "인증이 필요합니다" || ServerErrorText.matches(raw, code: "unauthorized") {
             // The chip under the card carries the exact command (the app's own path for an app install).
             return ServerAccessCommand.isLong(accessCommand)
-                ? "접속 코드가 맞지 않거나 바뀌었습니다. 서버 컴퓨터의 터미널에서 아래 명령으로 확인해 다시 넣어 주세요."
-                : "접속 코드가 맞지 않거나 바뀌었습니다. 서버 컴퓨터에서 iamceo\u{00A0}open 으로 확인해 다시 넣어 주세요."
+                ? String(localized: "접속 코드가 맞지 않거나 바뀌었습니다. 서버 컴퓨터의 터미널에서 아래 명령으로 확인해 다시 넣어 주세요.")
+                : String(localized: "접속 코드가 맞지 않거나 바뀌었습니다. 서버 컴퓨터에서 iamceo\u{00A0}open 으로 확인해 다시 넣어 주세요.")
         }
         return ConnectionRecovery.reason(raw)
     }
@@ -1025,10 +1025,10 @@ private enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .general: "일반"
-        case .ai: "AI 모델"
-        case .notifications: "알림"
-        case .connection: "연결"
+        case .general: String(localized: "일반")
+        case .ai: String(localized: "AI 모델")
+        case .notifications: String(localized: "settings.tab.notifications", defaultValue: "알림")
+        case .connection: String(localized: "settings.tab.connection", defaultValue: "연결")
         }
     }
     var icon: String {
@@ -1044,7 +1044,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
 struct SettingsView: View {
     /// What the server does at this percentage: the bar on 팀 marks it, and a member past it is compacted by the
     /// server before its next piece of work (orchestrator `autoCompact`).
-    static let compactAtHint = "이 비율을 넘으면 팀 화면에 표시하고, 다음 업무 전에 자동으로 압축합니다."
+    static let compactAtHint = String(localized: "이 비율을 넘으면 팀 화면에 표시하고, 다음 업무 전에 자동으로 압축합니다.")
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
     @Environment(DraftStore.self) private var drafts
@@ -1099,14 +1099,14 @@ struct SettingsView: View {
         var showsEffort: Bool { cli != .codex || key != "staff" }
     }
     private static let rankRows = RankSettingsCLI.allCases.flatMap { cli in [
-        RankRow(key: "manager", title: "총괄", scope: "본사 AI도 같음", cli: cli),
-        RankRow(key: "lead", title: "팀장", scope: "총괄이 일을 맡기는 팀원", cli: cli),
-        RankRow(key: "staff", title: "서브에이전트", scope: "팀장이 나눠 맡기는 일", cli: cli)
+        RankRow(key: "manager", title: String(localized: "총괄"), scope: String(localized: "본사 AI도 같음"), cli: cli),
+        RankRow(key: "lead", title: String(localized: "팀장"), scope: String(localized: "총괄이 일을 맡기는 팀원"), cli: cli),
+        RankRow(key: "staff", title: String(localized: "서브에이전트"), scope: String(localized: "팀장이 나눠 맡기는 일"), cli: cli)
     ] }
     private static let tidyChoices = [0, 3, 6, 12, 24]
     /// B1: languages the lead and staff can write to the owner in (server `Settings.reportLanguage`).
     static let reportLanguages = ["ko", "en"]
-    static let reportLanguageHint = "총괄·팀장이 보고·결재 카드·할 일을 쓰는 언어입니다. 새 세션부터 적용됩니다."
+    static let reportLanguageHint = String(localized: "총괄·팀장이 보고·결재 카드·할 일을 쓰는 언어입니다. 새 세션부터 적용됩니다.")
     /// Each language in its own name, so a reader of either language finds theirs.
     static func reportLanguageLabel(_ code: String) -> String { code == "ko" ? "한국어" : code == "en" ? "English" : code }
     /// Mac rank rows: the model and effort columns (the group caption lines up with them).
@@ -1147,8 +1147,7 @@ struct SettingsView: View {
     }
 
     private var lockNotice: (title: String, detail: String)? {
-        if store.isDemo { return ("샘플 설정입니다", "읽기 전용이라 바꿀 수 없습니다. 실제 Mac에 연결하면 바꿀 수 있습니다.") }
-        if store.connectionStatus != .connected { return ("서버에 연결되지 않았습니다", "보이는 값은 마지막 동기화 기준이며 지금은 바꿀 수 없습니다.") }
+        if store.connectionStatus != .connected { return (String(localized: "서버에 연결되지 않았습니다"), String(localized: "보이는 값은 마지막 동기화 기준이며 지금은 바꿀 수 없습니다.")) }
         return nil
     }
 
@@ -1310,22 +1309,22 @@ struct SettingsView: View {
 
     /// One line under each part on the iPhone list: its current value at a glance (nothing made up before the first load).
     private func summary(_ item: SettingsSection) -> String {
-        if item != .connection && !loaded { return "연결 후 표시" }
+        if item != .connection && !loaded { return String(localized: "연결 후 표시") }
         switch item {
         case .general:
-            return "\(permissionChoice.title) · 동시 실행 \(draft.maxConcurrentTurns)개"
+            return String(localized: "\(permissionChoice.title) · 동시 실행 \(draft.maxConcurrentTurns)개")
         case .ai:
             func name(_ rank: String) -> String {
                 let value = settingsTrim(draft.rankConfig(rank, cli: .claude)?.model ?? "")
-                return value.isEmpty ? "기본값" : value
+                return value.isEmpty ? String(localized: "기본값") : value
             }
-            return "총괄 \(name("manager")) · 팀장 \(name("lead"))"
+            return String(localized: "총괄 \(name("manager")) · 팀장 \(name("lead"))")
         case .notifications:
-            var parts = ["Mac \(draft.notifyMac ? "켬" : "끔")"]
+            var parts = ["Mac \(draft.notifyMac ? String(localized: "켬") : String(localized: "끔"))"]
             if let service = store.pushNotifications {
                 // The same rule as the switch on the 알림 page. This phone's own state comes first.
                 let on = PhonePushSwitch.isOn(service.state, device: store.pushSettings.device(id: service.installationID))
-                parts.insert("iPhone \(on ? "켬" : "끔")", at: 0)
+                parts.insert("iPhone \(on ? String(localized: "켬") : String(localized: "끔"))", at: 0)
             }
             return parts.joined(separator: " · ")
         case .connection:
@@ -1358,7 +1357,7 @@ struct SettingsView: View {
 
     /// What the dot says to VoiceOver.
     private func unsavedLabel(_ item: SettingsSection) -> String {
-        hasInvalidEdit(item) ? "고쳐야 저장할 수 있는 변경 있음" : "저장하지 않은 변경 있음"
+        hasInvalidEdit(item) ? String(localized: "고쳐야 저장할 수 있는 변경 있음") : String(localized: "저장하지 않은 변경 있음")
     }
 
     /// One part of settings, scrolling under the save bar.
@@ -1390,11 +1389,11 @@ struct SettingsView: View {
     @ViewBuilder private var notices: some View {
         if store.bootstrap != nil {
             if let lockNotice {
-                InlineNotice(tone: store.isDemo ? .accent : .attention, icon: store.isDemo ? "eye" : "wifi.slash", title: lockNotice.title, detail: lockNotice.detail)
+                InlineNotice(tone: .attention, icon: "wifi.slash", title: lockNotice.title, detail: lockNotice.detail)
             }
             if store.settingsConflict != nil {
                 VStack(alignment: .leading, spacing: 8) {
-                    InlineNotice(title: "다른 기기에서 설정이 바뀌었습니다", detail: "적은 내용은 남아 있습니다. 새 설정을 확인한 뒤 저장해 주세요.")
+                    InlineNotice(title: String(localized: "다른 기기에서 설정이 바뀌었습니다"), detail: String(localized: "적은 내용은 남아 있습니다. 새 설정을 확인한 뒤 저장해 주세요."))
                     HStack(spacing: 8) {
                         Button("새 설정 불러오기") { revert() }.ceSecondaryButton().controlSize(.small)
                         Button("내 변경 다시 검토") { reviewChanges() }.ceSecondaryButton().controlSize(.small)
@@ -1407,8 +1406,8 @@ struct SettingsView: View {
     @ViewBuilder private func sectionContent(_ item: SettingsSection) -> some View {
         if store.bootstrap == nil && item != .connection {
             // web .empty: 16/600 title, 14 ink-2 line, generous room; no tile, the page itself is the surface.
-            EmptyTile(icon: "wifi.slash", title: "서버에 연결하면 볼 수 있습니다",
-                      detail: isMac ? "메인 창에서 서버에 연결하세요." : "서버에 연결하면 설정을 볼 수 있습니다.", framed: false)
+            EmptyTile(icon: "wifi.slash", title: String(localized: "서버에 연결하면 볼 수 있습니다"),
+                      detail: isMac ? String(localized: "메인 창에서 서버에 연결하세요.") : String(localized: "서버에 연결하면 설정을 볼 수 있습니다."), framed: false)
                 .padding(.vertical, 16)
         } else {
             switch item {
@@ -1437,29 +1436,29 @@ struct SettingsView: View {
 
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 22) {
-            SettingsGroup("운영", footnote: "세션은 샌드박스 없이 실행됩니다. 권한은 새 세션부터 적용됩니다.") {
+            SettingsGroup(String(localized: "운영"), footnote: String(localized: "세션은 샌드박스 없이 실행됩니다. 권한은 새 세션부터 적용됩니다.")) {
                 // web .st-perms: three explained choices, the server default marked 기본.
-                SettingsRow("권한", stacked: true) {
-                    SettingsChoiceTiles(options: permissionOptions, selection: draft.permissionMode, label: "권한") { draft.permissionMode = $0 }
+                SettingsRow(String(localized: "권한"), stacked: true) {
+                    SettingsChoiceTiles(options: permissionOptions, selection: draft.permissionMode, label: String(localized: "권한")) { draft.permissionMode = $0 }
                 }
                 RowDivider(inset: 0)
-                SettingsRow("동시 실행", hint: "넘치면 차례를 기다립니다", hintBelowOnPhone: true) {
-                    numberControl("동시 실행", unit: "개", value: $draft.maxConcurrentTurns, range: 1...64)
+                SettingsRow(String(localized: "동시 실행"), hint: String(localized: "넘치면 차례를 기다립니다"), hintBelowOnPhone: true) {
+                    numberControl(String(localized: "동시 실행"), unit: String(localized: "개"), value: $draft.maxConcurrentTurns, range: 1...64)
                 }
                 RowDivider(inset: 0)
-                SettingsRow("팀장 수 경보", hint: "넘으면 총괄에게 잠재울 후보를 알립니다", hintBelowOnPhone: true) {
-                    numberControl("팀장 수 경보", unit: "명", value: $draft.maxAwakeWorkers, range: 1...256)
+                SettingsRow(String(localized: "팀장 수 경보"), hint: String(localized: "넘으면 총괄에게 잠재울 후보를 알립니다"), hintBelowOnPhone: true) {
+                    numberControl(String(localized: "팀장 수 경보"), unit: String(localized: "명"), value: $draft.maxAwakeWorkers, range: 1...256)
                 }
                 RowDivider(inset: 0)
-                SettingsRow("문맥 기준", hint: Self.compactAtHint, hintBelowOnPhone: true) {
-                    numberControl("문맥 기준", unit: "%", value: $draft.compactAtPct, range: 1...100, step: 5)
+                SettingsRow(String(localized: "문맥 기준"), hint: Self.compactAtHint, hintBelowOnPhone: true) {
+                    numberControl(String(localized: "문맥 기준"), unit: "%", value: $draft.compactAtPct, range: 1...100, step: 5)
                 }
                 RowDivider(inset: 0)
-                SettingsRow("판 정리 주기", hint: "총괄이 쉬고 바뀐 게 있을 때만 판을 맞춥니다", hintBelowOnPhone: true) { tidyMenu }
+                SettingsRow(String(localized: "판 정리 주기"), hint: String(localized: "총괄이 쉬고 바뀐 게 있을 때만 판을 맞춥니다"), hintBelowOnPhone: true) { tidyMenu }
                 // B1: only on a server that reports the setting; an older server would refuse the key.
                 if showsReportLanguage {
                     RowDivider(inset: 0)
-                    SettingsRow("보고 언어", hint: Self.reportLanguageHint, hintBelowOnPhone: true) { reportLanguageMenu }
+                    SettingsRow(String(localized: "보고 언어"), hint: Self.reportLanguageHint, hintBelowOnPhone: true) { reportLanguageMenu }
                 }
             }
             .disabled(!editable || saving)
@@ -1471,14 +1470,14 @@ struct SettingsView: View {
     private var permissionOptions: [SettingsChoiceTiles.Option] {
         var options = Self.permissionChoices.map { SettingsChoiceTiles.Option(id: $0.id, title: $0.title, detail: $0.detail, badge: $0.badge) }
         if !Self.permissionChoices.contains(where: { $0.id == draft.permissionMode }) {
-            options.append(SettingsChoiceTiles.Option(id: draft.permissionMode, title: draft.permissionMode, detail: "서버에 저장된 값입니다"))
+            options.append(SettingsChoiceTiles.Option(id: draft.permissionMode, title: draft.permissionMode, detail: String(localized: "서버에 저장된 값입니다")))
         }
         return options
     }
 
     private var tidyMenu: some View {
         let current = Int(draft.boardTidyHours.rounded())
-        return SetupMenu(tidyLabel(current), compact: true, label: "판 정리 주기") {
+        return SetupMenu(tidyLabel(current), compact: true, label: String(localized: "판 정리 주기")) {
             ForEach(tidyOptions, id: \.self) { hours in
                 Toggle(tidyLabel(hours), isOn: menuCheck(current == hours) { draft.boardTidyHours = Double(hours) })
             }
@@ -1491,16 +1490,16 @@ struct SettingsView: View {
         Array(Set(Self.tidyChoices + [Int(base.boardTidyHours.rounded()), Int(draft.boardTidyHours.rounded())])).sorted()
     }
 
-    private func tidyLabel(_ hours: Int) -> String { hours == 0 ? "끔" : hours == 24 ? "매일" : "\(hours)시간" }
+    private func tidyLabel(_ hours: Int) -> String { hours == 0 ? String(localized: "끔") : hours == 24 ? String(localized: "매일") : String(localized: "\(hours)시간") }
 
     /// B1: shown when the server reports the value (older servers send nothing), and in the sample.
-    private var showsReportLanguage: Bool { store.isDemo || base.reportLanguage != nil }
+    private var showsReportLanguage: Bool { base.reportLanguage != nil }
 
     private var reportLanguageMenu: some View {
         let current = draft.reportLanguage ?? "ko"
         // A value the server holds that this app does not know is shown, not silently replaced.
         let options = Self.reportLanguages + (Self.reportLanguages.contains(current) ? [] : [current])
-        return SetupMenu(Self.reportLanguageLabel(current), compact: true, label: "보고 언어") {
+        return SetupMenu(Self.reportLanguageLabel(current), compact: true, label: String(localized: "보고 언어")) {
             ForEach(options, id: \.self) { code in
                 Toggle(Self.reportLanguageLabel(code), isOn: menuCheck(current == code) { draft.reportLanguage = code })
             }
@@ -1542,6 +1541,8 @@ struct SettingsView: View {
             ForEach(RankSettingsCLI.allCases, id: \.self) { cli in
                 rankGroup(cli).disabled(!editable || saving)
             }
+            // T(F6): 팀원·프로젝트·날짜별 사용량(Views/UsageView.swift). 옛 서버면 그리지 않는다.
+            UsageGroup()
         }
     }
 
@@ -1551,14 +1552,14 @@ struct SettingsView: View {
         let runtime = store.runtime
         let report = store.isDemo ? nil : doctor.report.flatMap { $0.checks.isEmpty ? nil : $0 }
         let needsSetup = runtime != nil && (runtime?.core.available != true || runtime?.providers.values.contains { !$0.installed } == true)
-        let footnote: String = store.isDemo ? "샘플에는 연결된 실행 환경이 없습니다."
-            : report != nil ? "\(store.serverIsThisMac ? "이 Mac" : "연결된 Mac")의 서버가 확인한 결과입니다. 로그인은 CLI가 남긴 기록으로 봅니다."
-            : needsSetup ? "Claude Code를 설치하고 로그인한 뒤 다시 확인하세요. 실행 엔진이 없으면 IAMCEO 앱을 다시 설치하세요."
-            : "로그인은 세션을 열 때 확인합니다."
+        let footnote: String = store.isDemo ? String(localized: "샘플에는 연결된 실행 환경이 없습니다.")
+            : report != nil ? String(localized: "\(store.serverIsThisMac ? String(localized: "이 Mac") : String(localized: "연결된 Mac"))의 서버가 확인한 결과입니다. 로그인은 CLI가 남긴 기록으로 봅니다.")
+            : needsSetup ? String(localized: "Claude Code를 설치하고 로그인한 뒤 다시 확인하세요. 실행 엔진이 없으면 IAMCEO 앱을 다시 설치하세요.")
+            : String(localized: "로그인은 세션을 열 때 확인합니다.")
         return VStack(alignment: .leading, spacing: 10) {
-            SettingsGroup("실행 환경", footnote: footnote, footnoteTone: report == nil && needsSetup && !store.isDemo ? CE.attention : CE.ink2, accessory: {
+            SettingsGroup(String(localized: "실행 환경"), footnote: footnote, footnoteTone: report == nil && needsSetup && !store.isDemo ? CE.attention : CE.ink2, accessory: {
                 if !store.isDemo {
-                    SettingsRefreshButton(label: "실행 환경 다시 확인", busy: busy == .runtime || doctor.loading) { Task { await refresh(.runtime) } }
+                    SettingsRefreshButton(label: String(localized: "실행 환경 다시 확인"), busy: busy == .runtime || doctor.loading) { Task { await refresh(.runtime) } }
                         .disabled(store.connectionStatus != .connected || store.isLoading || busy != nil)
                 }
             }) {
@@ -1568,7 +1569,7 @@ struct SettingsView: View {
                         DoctorCheckRow(check: check)
                     }
                 } else {
-                    SettingsRow("실행 엔진", hint: runtime?.core.detail, monoHint: true) { DotValue(tone: coreState(runtime).tone, text: coreState(runtime).text) }
+                    SettingsRow(String(localized: "실행 엔진"), hint: runtime?.core.detail, monoHint: true) { DotValue(tone: coreState(runtime).tone, text: coreState(runtime).text) }
                         .help("모든 팀원은 이 실행 엔진(herdr-core) 위에서 일합니다. 팀원마다 Claude Code 또는 Codex를 고릅니다.")
                     RowDivider(inset: 0)
                     SettingsRow("Claude Code") { DotValue(tone: providerState(runtime, "claude").tone, text: providerState(runtime, "claude").text) }
@@ -1580,8 +1581,8 @@ struct SettingsView: View {
                     diagnosticsRow
                 }
             }
-            if let runtimeError { SetupError("진단을 읽지 못했습니다. \(runtimeError)").padding(.horizontal, SetupMetrics.groupInset) }
-            else if !store.isDemo, let error = doctor.error { SetupError("점검표를 읽지 못했습니다. \(error)").padding(.horizontal, SetupMetrics.groupInset) }
+            if let runtimeError { SetupError(String(localized: "진단을 읽지 못했습니다. \(runtimeError)")).padding(.horizontal, SetupMetrics.groupInset) }
+            else if !store.isDemo, let error = doctor.error { SetupError(String(localized: "점검표를 읽지 못했습니다. \(error)")).padding(.horizontal, SetupMetrics.groupInset) }
         }
         // A new connection reads its own list; coming back to this part keeps the last one while it re-reads.
         .task(id: store.isDemo ? nil : store.api.map { ObjectIdentifier($0) }) {
@@ -1602,13 +1603,13 @@ struct SettingsView: View {
     private var diagnosticsHint: String {
         if let error = doctor.diagnoseError { return error }
         if let file = doctor.diagnostics { return "\(file.path) · \(file.sizeText)" }
-        return "문제를 알릴 때 보낼 파일을 만듭니다. 버전·상태·로그 끝부분을 담고, 대화 내용과 접속 코드는 넣지 않습니다."
+        return String(localized: "문제를 알릴 때 보낼 파일을 만듭니다. 버전·상태·로그 끝부분을 담고, 대화 내용과 접속 코드는 넣지 않습니다.")
     }
 
     @ViewBuilder private var diagnosticsRow: some View {
         #if os(macOS)
         let file = doctor.diagnostics
-        SettingsRow("진단 파일", hint: diagnosticsHint, hintTone: doctor.diagnoseError != nil ? CE.danger : CE.ink2,
+        SettingsRow(String(localized: "진단 파일"), hint: diagnosticsHint, hintTone: doctor.diagnoseError != nil ? CE.danger : CE.ink2,
                     monoHint: doctor.diagnoseError == nil && file != nil) {
             HStack(spacing: 8) {
                 if let file {
@@ -1626,16 +1627,16 @@ struct SettingsView: View {
     private struct RuntimeState { let tone: Tone; let text: String }
 
     private func coreState(_ runtime: RuntimeDiagnostics?) -> RuntimeState {
-        guard let core = runtime?.core else { return RuntimeState(tone: .neutral, text: "확인 전") }
-        if core.available { return RuntimeState(tone: .success, text: core.version.map { "사용 가능 · \($0)" } ?? "사용 가능") }
-        if core.installed { return RuntimeState(tone: .danger, text: "설치됨 · 사용할 수 없음") }
-        return RuntimeState(tone: .attention, text: "설치 필요")
+        guard let core = runtime?.core else { return RuntimeState(tone: .neutral, text: String(localized: "확인 전")) }
+        if core.available { return RuntimeState(tone: .success, text: core.version.map { String(localized: "사용 가능 · \($0)") } ?? String(localized: "사용 가능")) }
+        if core.installed { return RuntimeState(tone: .danger, text: String(localized: "설치됨 · 사용할 수 없음")) }
+        return RuntimeState(tone: .attention, text: String(localized: "설치 필요"))
     }
 
     /// The daemon only reports whether the CLI is installed; login is checked when a session starts (the footnote says so).
     private func providerState(_ runtime: RuntimeDiagnostics?, _ cli: String) -> RuntimeState {
-        guard let provider = runtime?.providers[cli] else { return RuntimeState(tone: .neutral, text: "확인 전") }
-        return provider.installed ? RuntimeState(tone: .success, text: "설치됨") : RuntimeState(tone: .attention, text: "설치 필요")
+        guard let provider = runtime?.providers[cli] else { return RuntimeState(tone: .neutral, text: String(localized: "확인 전")) }
+        return provider.installed ? RuntimeState(tone: .success, text: String(localized: "설치됨")) : RuntimeState(tone: .attention, text: String(localized: "설치 필요"))
     }
 
     /// One item of the check list, laid out like a settings row: the item, what was found and how to fix it at the
@@ -1667,7 +1668,7 @@ struct SettingsView: View {
     private func rankGroup(_ cli: RankSettingsCLI) -> some View {
         let rows = Self.rankRows.filter { $0.cli == cli }
         let last = cli == RankSettingsCLI.allCases.last
-        return SettingsGroup(cli.title, footnote: last ? "팀원별로 지정한 값이 먼저입니다. 바꾼 값은 세션을 다시 열 때 적용됩니다." : nil, accessory: {
+        return SettingsGroup(cli.title, footnote: last ? String(localized: "팀원별로 지정한 값이 먼저입니다. 바꾼 값은 세션을 다시 열 때 적용됩니다.") : nil, accessory: {
             // web .st-ranks thead th: 13/600 ink-2, over the value in each select.
             #if os(macOS)
             HStack(spacing: 8) {
@@ -1690,7 +1691,7 @@ struct SettingsView: View {
     private func rankRow(_ rank: RankRow) -> some View {
         let overrides = rank.cli == .claude && rank.key != "staff" ? (store.bootstrap?.rankOverrides[rank.key] ?? 0) : 0
         let invalid = modelError(for: rank)
-        let scope = overrides > 0 ? "\(rank.scope) · 팀원별 지정 \(overrides)명" : rank.scope
+        let scope = overrides > 0 ? String(localized: "\(rank.scope) · 팀원별 지정 \(overrides)명") : rank.scope
         #if os(macOS)
         // web .st-ranks: 8 above and below a 44pt line (min-height 60); the rank 14.5/620, its scope 12.5 ink-2.
         return HStack(alignment: invalid != nil ? .top : .center, spacing: 16) {
@@ -1750,10 +1751,10 @@ struct SettingsView: View {
         let value = model(of: rank)
         let list = store.modelCatalog.list(for: rank.cli)
         let selected = list.option(for: value)
-        let defaultLabel = "기본값"
+        let defaultLabel = String(localized: "기본값")
         let label = list.unknownCurrent(value) ?? selected?.label ?? defaultLabel
         // Sans like the web select, so 'CLI 기본' and a model name sit at the same size in the column.
-        return SetupMenu(label, compact: true, label: "\(rank.title) 모델") {
+        return SetupMenu(label, compact: true, label: String(localized: "\(rank.title) 모델")) {
             Toggle(defaultLabel, isOn: menuCheck(value.isEmpty) { customRanks.remove(rank.id); setModel(nil, for: rank) })
             Divider()
             ForEach(list.models) { option in
@@ -1766,8 +1767,8 @@ struct SettingsView: View {
     private func effortMenu(_ rank: RankRow) -> some View {
         let current = draft.rankConfig(rank.key, cli: rank.cli)?.effort
         let options = store.modelCatalog.list(for: rank.cli).efforts(for: model(of: rank), cli: rank.cli)
-        let defaultLabel = "기본값"
-        return SetupMenu(current ?? defaultLabel, compact: true, label: "\(rank.title) 생각 깊이") {
+        let defaultLabel = String(localized: "기본값")
+        return SetupMenu(current ?? defaultLabel, compact: true, label: String(localized: "\(rank.title) 생각 깊이")) {
             Toggle(defaultLabel, isOn: menuCheck(current == nil) { setEffort(nil, for: rank) })
             Divider()
             ForEach(options, id: \.self) { effort in
@@ -1792,7 +1793,7 @@ struct SettingsView: View {
     /// Same rule as the daemon: the name goes straight after `--model`, so no flags or spaces.
     private func modelError(for rank: RankRow) -> String? {
         if store.modelCatalog.list(for: rank.cli).unknownCurrent(model(of: rank)) != nil {
-            return "\(rank.title): 목록에서 모델을 선택해 주세요"
+            return String(localized: "\(rank.title): 목록에서 모델을 선택해 주세요")
         }
         return RankSettingsEditing.modelError(model(of: rank), custom: customRanks.contains(rank.id), title: rank.title)
     }
@@ -1815,7 +1816,7 @@ struct SettingsView: View {
     private var macNotifyGroup: some View {
         SettingsGroup("Mac") {
             #if os(macOS)
-            SettingsRow("Mac 알림", hint: "새 결재, 승인·선택 대기, 완료·막힘 보고, 대표 할 일을 알립니다") {
+            SettingsRow(String(localized: "Mac 알림"), hint: String(localized: "새 결재, 승인·선택 대기, 완료·막힘 보고, 대표 할 일을 알립니다")) {
                 Toggle("Mac 알림", isOn: $macAlerts).labelsHidden().settingsSwitch()
             }
             if let message = MacNotificationService.shared.permissionNotice { MetaText([message]) }
@@ -1832,17 +1833,18 @@ struct SettingsView: View {
         let summary = connectionSummary()
         let online = store.bootstrap != nil && (!store.isDemo || Self.connectionSample)
         let notConnected: String? = store.bootstrap == nil && !store.isDemo
-            ? (isMac ? "메인 창에서 서버에 연결하세요." : "서버에 연결하면 설정을 볼 수 있습니다.") : nil
+            ? (isMac ? String(localized: "메인 창에서 서버에 연결하세요.") : String(localized: "서버에 연결하면 설정을 볼 수 있습니다.")) : nil
         let urls = online ? (store.bootstrap?.urls ?? []) : []
         return VStack(alignment: .leading, spacing: 24) {
             VStack(alignment: .leading, spacing: 10) {
-                SettingsGroup("접속", footnote: notConnected) {
-                    SettingsRow("상태", hint: store.lastHeartbeatAt.map { "마지막 연결 신호 \(koTime($0, seconds: true))" }) {
+                SettingsGroup(String(localized: "접속"), footnote: notConnected) {
+                    SettingsRow(String(localized: "상태"), hint: store.lastHeartbeatAt.map { String(localized: "마지막 연결 신호 \(koTime($0, seconds: true))") }) {
                         DotValue(tone: summary.tone, text: summary.text)
                     }
                     if online {
                         RowDivider(inset: 0)
-                        SettingsRow("동기화", hint: store.lastSuccessfulSyncAt.map { "마지막 데이터 확인 \(koDateTime($0))" }) {
+                        // F1: 마지막 상태를 보는 동안은 이번 실행에 확인한 때가 없다. 그 상태를 서버가 확인해 준 때를 보인다(4차 리뷰 ui-5).
+                        SettingsRow(String(localized: "동기화"), hint: store.lastDataCheckAt.map { String(localized: "마지막 데이터 확인 \(koDateTime($0))") }) {
                             Button { Task { await refresh(.sync) } } label: {
                                 HStack(spacing: 6) {
                                     if busy == .sync { ProgressView().controlSize(.small) }
@@ -1855,10 +1857,10 @@ struct SettingsView: View {
                             .disabled(store.connectionStatus != .connected || store.isLoading || busy != nil)
                         }
                         RowDivider(inset: 0)
-                        SettingsRow("서버 주소", stacksOnPhone: true) { addressText(store.endpoint) }
+                        SettingsRow(String(localized: "서버 주소"), stacksOnPhone: true) { addressText(store.endpoint) }
                         if !urls.isEmpty {
                             RowDivider(inset: 0)
-                            SettingsRow("밖에서 접속할 주소", stacksOnPhone: true) {
+                            SettingsRow(String(localized: "밖에서 접속할 주소"), stacksOnPhone: true) {
                                 VStack(alignment: isMac ? .trailing : .leading, spacing: 4) {
                                     ForEach(urls, id: \.self) { addressText($0) }
                                 }
@@ -1866,12 +1868,13 @@ struct SettingsView: View {
                         }
                         if let version = store.bootstrap?.version, !version.isEmpty {
                             RowDivider(inset: 0)
-                            SettingsRow("서버 버전") { Text(version).font(SetupFont.code).foregroundStyle(CE.ink).textSelection(.enabled) }
+                            SettingsRow(String(localized: "서버 버전")) { Text(version).font(SetupFont.code).foregroundStyle(CE.ink).textSelection(.enabled) }
                         }
                         serverUpgradeRow
-                    } else if let date = store.lastSuccessfulSyncAt {
+                    } else if let date = store.lastDataCheckAt {
+                        // F1: 연결 전 마지막 상태를 보는 중이면 그 상태를 서버가 확인해 준 때.
                         RowDivider(inset: 0)
-                        SettingsRow("마지막 데이터 확인") { Text(koDateTime(date)).font(SetupFont.value).foregroundStyle(CE.ink) }
+                        SettingsRow(String(localized: "마지막 데이터 확인")) { Text(koDateTime(date)).font(SetupFont.value).foregroundStyle(CE.ink) }
                     }
                 }
                 // web: how phones reach the server, under the facts (.su-hint with the command as a code chip).
@@ -1889,7 +1892,7 @@ struct SettingsView: View {
             #if os(macOS)
             if !store.isDemo || Self.connectionSample {
                 SettingsGroup {
-                    SettingsRow("iPhone 연결", hint: "iPhone으로 QR을 찍으면 Tailscale로 연결됩니다") {
+                    SettingsRow(String(localized: "iPhone 연결"), hint: String(localized: "iPhone으로 QR을 찍으면 Tailscale로 연결됩니다")) {
                         Button { router.showPairing = true } label: { Label("QR 보기", systemImage: "qrcode") }
                             .ceSecondaryButton()
                             .ceCompactControl()
@@ -1905,7 +1908,7 @@ struct SettingsView: View {
             if online && !store.isDemo { ConnectedDevicesGroup() }
             if canLeave || Self.connectionSample {
                 SettingsGroup {
-                    SettingsRow("이 기기에서 나가기", hint: "키체인에 저장한 접속 코드를 지웁니다") {
+                    SettingsRow(String(localized: "이 기기에서 나가기"), hint: String(localized: "키체인에 저장한 접속 코드를 지웁니다")) {
                         Button { confirmLeave = true } label: { Text("나가기").foregroundStyle(store.isDemo ? CE.ink3 : CE.danger) }
                             .ceSecondaryButton()
                             .ceCompactControl()
@@ -1942,8 +1945,8 @@ struct SettingsView: View {
         command.font = SetupFont.code
         command.foregroundColor = CE.ink
         command.backgroundColor = Color.white.opacity(0.08)
-        return AttributedString("폰에서는 Tailscale 주소(100.으로 시작)로 들어옵니다. 같은 망의 기기까지 열려면 서버 컴퓨터에서 ")
-            + command + AttributedString(" 뒤 서버를 다시 켭니다.")
+        return AttributedString(String(localized: "폰에서는 Tailscale 주소(100.으로 시작)로 들어옵니다. 같은 망의 기기까지 열려면 서버 컴퓨터에서 "))
+            + command + AttributedString(String(localized: " 뒤 서버를 다시 켭니다."))
     }
 
     /// Review hook (DEBUG, sample only): `--connection-sample` lays out the rows a connected Mac shows (all disabled).
@@ -1959,18 +1962,25 @@ struct SettingsView: View {
 
     private var leaveMessage: String {
         let count = drafts.pendingCount
-        let what = count > 0 ? "접속 코드와 쓰던 초안·메모 \(count)건을" : "접속 코드를"
-        return "이 기기의 \(what) 지웁니다. 다시 들어오려면 서버 컴퓨터에서 iamceo\u{00A0}open 으로 코드를 확인해야 합니다."
+        let what = count > 0 ? String(localized: "접속 코드와 쓰던 초안·메모 \(count)건을") : String(localized: "접속 코드를")
+        let message = String(localized: "이 기기의 \(what) 지웁니다. 다시 들어오려면 서버 컴퓨터에서 iamceo\u{00A0}open 으로 코드를 확인해야 합니다.")
+        // F1: 이 서버에 보내려던 대기열도 함께 지운다. 그 수를 미리 알린다.
+        let queued = store.writeNamespace == "unassigned" ? 0 : store.offline.items(namespace: store.writeNamespace).count
+        return queued > 0 ? message + " " + String(localized: "연결되면 보내려던 글 \(queued)개도 지웁니다.") : message
     }
 
     private func connectionSummary() -> (tone: Tone, text: String) {
-        if store.isDemo { return (.accent, "샘플 · 읽기 전용") }
+        if store.isDemo { return (.accent, String(localized: "샘플 작업 공간")) }
+        // F1: 연결하지 못해 기기에 남긴 마지막 상태를 보는 중.
+        if store.lastSeen != nil, store.connectionStatus == .failed || store.connectionStatus == .disconnected {
+            return (.attention, String(localized: "마지막으로 본 상태"))
+        }
         switch store.connectionStatus {
-        case .connecting: return (.live, "연결하는 중")
+        case .connecting: return (.live, String(localized: "연결하는 중"))
         case .connected:
             return (store.realtimeStatus == .fallback || store.realtimeStatus == .blocked ? .attention : .success, store.localizedSyncDescription)
-        case .failed: return (.danger, "연결 실패")
-        case .disconnected, .demo: return (.danger, "연결 끊김")
+        case .failed: return (.danger, String(localized: "연결 실패"))
+        case .disconnected, .demo: return (.danger, String(localized: "연결 끊김"))
         }
     }
 
@@ -2066,7 +2076,7 @@ struct SettingsView: View {
         if mine.reportLanguage != previous.reportLanguage { next.reportLanguage = mine.reportLanguage }
         next = RankSettingsEditing.rebase(previous: previous, mine: mine, onto: next)
         base = edit.base; draft = next; store.setSettingsDraft(next)
-        saveError = "새 설정과 내 변경을 확인한 뒤 저장해 주세요."
+        saveError = String(localized: "새 설정과 내 변경을 확인한 뒤 저장해 주세요.")
     }
 
     private func save() async {
@@ -2094,7 +2104,7 @@ struct SettingsView: View {
                 let configured = await MacNotificationService.shared.setEnabled(macAlerts, api: store.api)
                 guard namespace == store.writeNamespace else { return }
                 if !configured {
-                    saveError = MacNotificationService.shared.permissionNotice ?? "Mac 알림 설정을 저장하지 못했습니다."
+                    saveError = MacNotificationService.shared.permissionNotice ?? String(localized: "Mac 알림 설정을 저장하지 못했습니다.")
                     base = store.bootstrap?.settings ?? next; draft = base
                     return
                 }
@@ -2114,7 +2124,7 @@ struct SettingsView: View {
                 if !Task.isCancelled { savedNotice = false }
             }
         } else {
-            saveError = store.errorMessage.map(friendlyError) ?? "저장하지 못했습니다."
+            saveError = store.errorMessage.map(friendlyError) ?? String(localized: "저장하지 못했습니다.")
         }
     }
 
@@ -2239,7 +2249,7 @@ private struct SettingsProjectsGroup: View {
     @State private var showArchive = false
 
     var body: some View {
-        SettingsGroup("프로젝트", accessory: {
+        SettingsGroup(String(localized: "프로젝트"), accessory: {
             Button { showArchive = true } label: {
                 Label("보관함", systemImage: "archivebox")
             }
@@ -2331,11 +2341,11 @@ struct PermissionChoiceSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
                 SettingsChoiceTiles(options: PermissionModeChoice.firstRun.map {
                     SettingsChoiceTiles.Option(id: $0.id, title: $0.title, detail: $0.detail, badge: $0.badge)
-                }, selection: mode, label: "권한", stacked: true) { mode = $0 }
+                }, selection: mode, label: String(localized: "권한"), stacked: true) { mode = $0 }
                     .disabled(working)
                 // Only a real loss of connection is said out loud: right after connecting, writes open a moment later.
                 if store.showsOffline || store.connectionStatus != .connected {
-                    InlineNotice(tone: .attention, icon: "wifi.slash", title: "서버에 연결되지 않았습니다", detail: "연결된 뒤에 고를 수 있습니다.")
+                    InlineNotice(tone: .attention, icon: "wifi.slash", title: String(localized: "서버에 연결되지 않았습니다"), detail: String(localized: "연결된 뒤에 고를 수 있습니다."))
                 }
                 if let error { SetupError(error) }
             }
@@ -2363,7 +2373,7 @@ struct PermissionChoiceSheet: View {
         defer { working = false }
         if await store.acknowledgePermission(mode: mode) { return }
         if store.needsPermissionChoice {
-            error = store.errorMessage.map(friendlyError) ?? "선택을 저장하지 못했습니다. 잠시 뒤 다시 눌러 주세요."
+            error = store.errorMessage.map(friendlyError) ?? String(localized: "선택을 저장하지 못했습니다. 잠시 뒤 다시 눌러 주세요.")
         }
     }
 }
@@ -2395,11 +2405,11 @@ struct NewProjectView: View {
     private struct Partial { let id: String; var detail: String }
 
     private var canCreate: Bool {
-        store.canWrite && !working && !ProjectCreationNotice.shared.running && partial == nil && createdID == nil && !store.pendingActions.contains("create-project") && !settingsTrim(name).isEmpty && !settingsTrim(cwd).isEmpty
+        !store.isDemo && store.canWrite && !working && !ProjectCreationNotice.shared.running && partial == nil && createdID == nil && !store.pendingActions.contains("create-project") && !settingsTrim(name).isEmpty && !settingsTrim(cwd).isEmpty
     }
     private var lockNotice: (title: String, detail: String)? {
-        if store.isDemo { return ("샘플은 읽기 전용입니다", "실제 Mac에 연결하면 프로젝트를 만들 수 있습니다.") }
-        if !store.canWrite { return ("서버에 연결되지 않았습니다", "연결된 뒤에 만들 수 있습니다. 적은 내용은 이 창을 닫기 전까지 남아 있습니다.") }
+        if store.isDemo { return (String(localized: "샘플에서는 새 프로젝트를 만들 수 없습니다"), String(localized: "실제 Mac에 연결하면 프로젝트를 만들 수 있습니다.")) }
+        if !store.canWrite { return (String(localized: "서버에 연결되지 않았습니다"), String(localized: "연결된 뒤에 만들 수 있습니다. 적은 내용은 이 창을 닫기 전까지 남아 있습니다.")) }
         return nil
     }
     private var coreUnavailable: CoreRuntime? {
@@ -2407,10 +2417,10 @@ struct NewProjectView: View {
         return core
     }
 
-    static let trustFolderLabel = "이 폴더를 신뢰하고 AI가 이 안에서 명령을 실행하게 합니다"
+    static let trustFolderLabel = String(localized: "이 폴더를 신뢰하고 AI가 이 안에서 명령을 실행하게 합니다")
     /// Servers that know the folder-trust field are the ones that also report the permission choice; an older
     /// server would ignore the switch, so it is not shown there. The sample shows it (nothing is sent).
-    private var showsFolderTrust: Bool { store.isDemo || store.bootstrap?.settings.permissionAcknowledged != nil }
+    private var showsFolderTrust: Bool { store.bootstrap?.settings.permissionAcknowledged != nil }
 
     var body: some View {
         // How sessions run commands is chosen once before the first project, on whichever device makes it.
@@ -2422,7 +2432,7 @@ struct NewProjectView: View {
     }
 
     private var projectSheet: some View {
-        CESheet("새 프로젝트", subtitle: "작업 폴더를 고르면 총괄이 바로 일을 시작합니다.", icon: "folder.badge.plus", width: 520,
+        CESheet(String(localized: "새 프로젝트"), subtitle: String(localized: "작업 폴더를 고르면 총괄이 바로 일을 시작합니다."), icon: "folder.badge.plus", width: 520,
                 onClose: { dismiss() }) {
             form
         } footer: {
@@ -2431,12 +2441,12 @@ struct NewProjectView: View {
             if let createdID {
                 Button("총괄에게 첫 일 맡기기") { Task { await openCreated(createdID) } }.ceProminentButton()
             } else if partial != nil {
-                Button { Task { await retryConductor() } } label: { busyLabel(working ? "띄우는 중" : "다시 시도") }
+                Button { Task { await retryConductor() } } label: { busyLabel(working ? String(localized: "띄우는 중") : String(localized: "다시 시도")) }
                     .ceProminentButton()
                     .keyboardShortcut(.defaultAction)
                     .disabled(working || !store.canWrite)
             } else {
-                Button { Task { await create() } } label: { busyLabel(working ? "만드는 중" : "만들기") }
+                Button { Task { await create() } } label: { busyLabel(working ? String(localized: "만드는 중") : String(localized: "만들기")) }
                     .ceProminentButton()
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canCreate)
@@ -2474,7 +2484,7 @@ struct NewProjectView: View {
                 InlineNotice(tone: store.isDemo ? .accent : .attention, icon: store.isDemo ? "eye" : "wifi.slash", title: lockNotice.title, detail: lockNotice.detail)
             }
             Group {
-                SetupField("이름") {
+                SetupField(String(localized: "이름")) {
                     TextField("이름", text: $name, prompt: Text("랜딩 리뉴얼"))
                         .labelsHidden()
                         .font(SetupFont.input)
@@ -2482,7 +2492,7 @@ struct NewProjectView: View {
                         .onSubmit { if legacyFolderInput { focus = .cwd } }
                         .ceField(focused: focus == .name)
                 }
-                SetupField("폴더") {
+                SetupField(String(localized: "폴더")) {
                     if legacyFolderInput {
                         TextField("폴더", text: $cwd, prompt: Text(verbatim: "~/code/landing"))
                             .labelsHidden().font(SetupFont.codeInput).focused($focus, equals: .cwd).autocorrectionDisabled()
@@ -2493,8 +2503,8 @@ struct NewProjectView: View {
                     } else if cwd.isEmpty {
                         // Two ways in, side by side: an existing/new server folder, or a GitHub repository cloned for it.
                         HStack(spacing: 10) {
-                            FolderSourceTile(icon: "folder", title: "폴더 고르기", detail: "서버 컴퓨터의 폴더를 고르거나 새로 만듭니다") { showFolderPicker = true }
-                            FolderSourceTile(icon: "arrow.down.circle", title: "GitHub에서 가져오기", detail: "내 저장소를 받아 그 폴더로 엽니다") { showGitHubClone = true }
+                            FolderSourceTile(icon: "folder", title: String(localized: "폴더 고르기"), detail: String(localized: "서버 컴퓨터의 폴더를 고르거나 새로 만듭니다")) { showFolderPicker = true }
+                            FolderSourceTile(icon: "arrow.down.circle", title: String(localized: "GitHub에서 가져오기"), detail: String(localized: "내 저장소를 받아 그 폴더로 엽니다")) { showGitHubClone = true }
                         }
                     } else {
                         chosenFolder
@@ -2502,30 +2512,30 @@ struct NewProjectView: View {
                     // One line for every way a folder gets here (picked, newly made, cloned from GitHub).
                     if showsFolderTrust { folderTrustRow }
                 }
-                SetupField("총괄이 쓸 AI") {
+                SetupField(String(localized: "총괄이 쓸 AI")) {
                     SettingsSegments(options: ["claude", "codex"].map { SettingsSegments.Option(id: $0, title: providerLabel($0)) },
-                                     selection: provider, label: "총괄이 쓸 AI", fill: true) { provider = $0 }
+                                     selection: provider, label: String(localized: "총괄이 쓸 AI"), fill: true) { provider = $0 }
                 }
             }
             .disabled(partial != nil || createdID != nil || working)
             if working {
-                InlineNotice(title: "프로젝트를 만드는 중입니다", detail: "이 창을 닫아도 만들기는 계속됩니다. 결과는 안내 띠로 알려 드립니다.")
+                InlineNotice(title: String(localized: "프로젝트를 만드는 중입니다"), detail: String(localized: "이 창을 닫아도 만들기는 계속됩니다. 결과는 안내 띠로 알려 드립니다."))
             }
             if createdID != nil {
-                InlineNotice(tone: .success, title: "프로젝트를 만들었습니다", detail: "총괄에게 첫 일을 맡겨 보세요.")
+                InlineNotice(tone: .success, title: String(localized: "프로젝트를 만들었습니다"), detail: String(localized: "총괄에게 첫 일을 맡겨 보세요."))
             }
             if let core = coreUnavailable, partial == nil {
                 InlineNotice(tone: .attention, icon: "exclamationmark.triangle",
-                             title: core.installed ? "실행 엔진을 쓸 수 없습니다" : "실행 엔진(herdr-core)이 설치되지 않았습니다",
-                             detail: [core.detail, "지금 만들면 프로젝트만 생기고 총괄은 뜨지 않을 수 있습니다. 설정 › AI 모델의 실행 환경을 확인하세요."].compactMap { $0 }.joined(separator: " "),
-                             actionTitle: "실행 환경 보기", action: {
+                             title: core.installed ? String(localized: "실행 엔진을 쓸 수 없습니다") : String(localized: "실행 엔진(herdr-core)이 설치되지 않았습니다"),
+                             detail: [core.detail, String(localized: "지금 만들면 프로젝트만 생기고 총괄은 뜨지 않을 수 있습니다. 설정 › AI 모델의 실행 환경을 확인하세요.")].compactMap { $0 }.joined(separator: " "),
+                             actionTitle: String(localized: "실행 환경 보기"), action: {
                     SettingsView.showRuntime(); dismiss(); router.showSettings = true
                 })
             }
             if let partial {
-                InlineNotice(tone: .danger, icon: "exclamationmark.triangle", title: "프로젝트는 만들었지만 총괄을 띄우지 못했습니다",
-                             detail: partial.detail + " 다시 시도하면 같은 프로젝트에 총괄만 다시 띄웁니다.",
-                             actionTitle: "프로젝트로 가기", action: { Task { await openPartial() } }, actionDisabled: working)
+                InlineNotice(tone: .danger, icon: "exclamationmark.triangle", title: String(localized: "프로젝트는 만들었지만 총괄을 띄우지 못했습니다"),
+                             detail: partial.detail + String(localized: " 다시 시도하면 같은 프로젝트에 총괄만 다시 띄웁니다."),
+                             actionTitle: String(localized: "프로젝트로 가기"), action: { Task { await openPartial() } }, actionDisabled: working)
             }
             if let error { SetupError(error) }
         }
@@ -2566,7 +2576,7 @@ struct NewProjectView: View {
                 Button { showFolderPicker = true } label: { Label("다른 폴더 고르기…", systemImage: "folder") }
                 Button { showGitHubClone = true } label: { Label("GitHub에서 가져오기…", systemImage: "arrow.down.circle") }
             } label: {
-                QuietMenuLabel(title: "바꾸기")
+                QuietMenuLabel(title: String(localized: "바꾸기"))
             }
             .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
             .fixedSize()
@@ -2576,7 +2586,7 @@ struct NewProjectView: View {
         .background(Color.white.opacity(0.04), in: shape)
         .overlay { shape.strokeBorder(Color.white.opacity(0.1)) }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("선택한 폴더: " + cwd)
+        .accessibilityLabel(String(localized: "선택한 폴더: ") + cwd)
     }
 
     private func busyLabel(_ text: String) -> some View {
@@ -2587,7 +2597,7 @@ struct NewProjectView: View {
     }
 
     private func providerLabel(_ cli: String) -> String {
-        providerFullName(cli) + (store.runtime?.providers[cli]?.installed == false ? " · 설치 필요" : "")
+        providerFullName(cli) + (store.runtime?.providers[cli]?.installed == false ? String(localized: " · 설치 필요") : "")
     }
 
     private func create() async {
@@ -2601,7 +2611,7 @@ struct NewProjectView: View {
         case .created(let id): createdID = id
         case .partial(let id, let detail): partial = Partial(id: id, detail: detail)
         case .failed(let detail): error = detail
-        case .hostChanged: error = "연결이 바뀌었습니다. 원래 Mac에서 만들기 결과를 확인해 주세요."
+        case .hostChanged: error = String(localized: "연결이 바뀌었습니다. 원래 Mac에서 만들기 결과를 확인해 주세요.")
         }
     }
 
@@ -2615,9 +2625,9 @@ struct NewProjectView: View {
         if await store.startConductor() {
             guard namespace == store.writeNamespace else { return }
             createdID = target.id; partial = nil
-            ProjectCreationNotice.shared.finish(projectID: target.id, message: "총괄이 준비되었습니다. 첫 일을 맡겨 보세요.")
+            ProjectCreationNotice.shared.finish(projectID: target.id, message: String(localized: "총괄이 준비되었습니다. 첫 일을 맡겨 보세요."))
         } else {
-            partial?.detail = store.errorMessage.map(friendlyError) ?? "총괄을 띄우지 못했습니다."
+            partial?.detail = store.errorMessage.map(friendlyError) ?? String(localized: "총괄을 띄우지 못했습니다.")
         }
     }
 
@@ -2717,7 +2727,7 @@ extension SettingsView {
         let watch = ServerUpgradeWatch.shared
         if !store.isDemo, store.serverIsThisMac, let offer = watch.offer {
             RowDivider(inset: 0)
-            SettingsRow("새 버전으로 다시 시작", hint: watch.error ?? ServerUpgradeText.settingsHint(offer),
+            SettingsRow(String(localized: "새 버전으로 다시 시작"), hint: watch.error ?? ServerUpgradeText.settingsHint(offer),
                         hintTone: watch.error == nil ? CE.ink2 : CE.danger) {
                 Button { Task { await watch.restart(store: store) } } label: {
                     HStack(spacing: 6) {
@@ -2736,22 +2746,22 @@ extension SettingsView {
 
     /// D6: 이 앱의 버전. Mac 은 하루 한 번 GitHub 의 최신 릴리스와 견줘 새 버전이 있으면 한 줄을 더한다(알리기만 한다).
     var appVersionGroup: some View {
-        let version = AppVersion.version == "dev" ? "개발 빌드" : AppVersion.version + (AppVersion.build.map { " (\($0))" } ?? "")
+        let version = AppVersion.version == "dev" ? String(localized: "개발 빌드") : AppVersion.version + (AppVersion.build.map { " (\($0))" } ?? "")
         #if os(macOS)
         let checker = UpdateChecker.shared
         let hint: String? = switch checker.state {
-        case .current: checker.checkedAt.map { "최신 버전입니다 · \(koDateTime($0)) 확인" } ?? "최신 버전입니다"
+        case .current: checker.checkedAt.map { String(localized: "최신 버전입니다 · \(koDateTime($0)) 확인") } ?? String(localized: "최신 버전입니다")
         default: nil
         }
         #else
         let hint: String? = nil
         #endif
-        return SettingsGroup("앱") {
-            SettingsRow("앱 버전", hint: hint) { Text(version).font(SetupFont.code).foregroundStyle(CE.ink).textSelection(.enabled) }
+        return SettingsGroup(String(localized: "앱")) {
+            SettingsRow(String(localized: "앱 버전"), hint: hint) { Text(version).font(SetupFont.code).foregroundStyle(CE.ink).textSelection(.enabled) }
             #if os(macOS)
             if case .available(let latest, let page) = checker.state {
                 RowDivider(inset: 0)
-                SettingsRow("새 버전 있음", hint: "IAMCEO \(latest) · GitHub 릴리스 페이지에서 받습니다. 자동으로 설치하지는 않습니다.") {
+                SettingsRow(String(localized: "새 버전 있음"), hint: String(localized: "IAMCEO \(latest) · GitHub 릴리스 페이지에서 받습니다. 자동으로 설치하지는 않습니다.")) {
                     Button { NSWorkspace.shared.open(page) } label: { Text("받기") }
                         .ceSecondaryButton()
                         .ceCompactControl()

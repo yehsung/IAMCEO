@@ -65,11 +65,11 @@ struct TerminalMirrorView: View {
 
     /// Why direct control cannot start right now (nil = it can).
     private var controlBlock: String? {
-        if store.isDemo { return "샘플에는 실제 터미널이 없습니다. 실제 Mac에 연결하면 조작할 수 있습니다." }
-        if !store.canWrite { return "서버에 연결되지 않아 조작할 수 없습니다." }
-        if current.origin == "manual" { return "직접 띄운 세션입니다. 그 세션을 띄운 터미널에서 조작하세요." }
-        if let backend = current.backend, backend != "core" { return "이전 실행기의 세션은 여기서 조작할 수 없습니다. 기존 터미널에서 확인하세요." }
-        if ["asleep", "offline"].contains(current.status) { return "열린 세션이 없습니다. 팀 화면에서 깨운 뒤 조작하세요." }
+        if store.isDemo { return String(localized: "샘플에는 실제 터미널이 없습니다. 실제 Mac에 연결하면 조작할 수 있습니다.") }
+        if !store.canWrite { return String(localized: "서버에 연결되지 않아 조작할 수 없습니다.") }
+        if current.origin == "manual" { return String(localized: "직접 띄운 세션입니다. 그 세션을 띄운 터미널에서 조작하세요.") }
+        if let backend = current.backend, backend != "core" { return String(localized: "이전 실행기의 세션은 여기서 조작할 수 없습니다. 기존 터미널에서 확인하세요.") }
+        if ["asleep", "offline"].contains(current.status) { return String(localized: "열린 세션이 없습니다. 팀 화면에서 깨운 뒤 조작하세요.") }
         return nil
     }
 
@@ -169,9 +169,9 @@ struct TerminalMirrorView: View {
 
     @ViewBuilder private var controlTag: some View {
         if controlling {
-            Tag("직접 입력 중 · 보낸 지시는 잠시 대기", tone: .approval, icon: "hand.raised.fill")
+            Tag(String(localized: "직접 입력 중 · 보낸 지시는 잠시 대기"), tone: .approval, icon: "hand.raised.fill")
         } else {
-            Tag("보는 중", tone: .neutral, icon: "eye")
+            Tag(String(localized: "보는 중"), tone: .neutral, icon: "eye")
                 .help("CLI 화면을 그대로 보여 줍니다. 승인 창이나 선택 창은 직접 조작으로 처리합니다.")
         }
     }
@@ -220,14 +220,14 @@ struct TerminalMirrorView: View {
             EmptyView()
         } else if current.canReadCLIApproval {
             CLIApprovalCard(member: current)
-            TermNotice(tone: .approval, icon: "hand.raised.fill", title: "승인·선택 창 앞에서 멈췄습니다",
-                       detail: "화면을 확인하고 직접 조작을 시작해 승인하거나 거절하세요. 끝나면 조작을 끝내 자동 전달을 다시 켜세요.")
+            TermNotice(tone: .approval, icon: "hand.raised.fill", title: String(localized: "승인·선택 창 앞에서 멈췄습니다"),
+                       detail: String(localized: "화면을 확인하고 직접 조작을 시작해 승인하거나 거절하세요. 끝나면 조작을 끝내 자동 전달을 다시 켜세요."))
         } else if current.status == "blocked" {
             let info = MemberStatusInfo(current)
             TermNotice(tone: info.tone, icon: info.icon, title: info.label, detail: info.explanation)
         } else if leaseExpired {
-            TermNotice(tone: .attention, icon: "clock.badge.exclamationmark", title: "조작권이 끝났습니다",
-                       detail: "5분 동안 입력이 없어 자동 전달이 다시 켜졌을 수 있습니다. 계속하려면 직접 조작을 다시 시작하세요.")
+            TermNotice(tone: .attention, icon: "clock.badge.exclamationmark", title: String(localized: "조작권이 끝났습니다"),
+                       detail: String(localized: "5분 동안 입력이 없어 자동 전달이 다시 켜졌을 수 있습니다. 계속하려면 직접 조작을 다시 시작하세요."))
         }
     }
 
@@ -297,13 +297,13 @@ struct TerminalMirrorView: View {
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
-                        key("↑", code: "up", label: "위 방향키")
-                        key("↓", code: "down", label: "아래 방향키")
-                        key("Enter", code: "enter", label: "엔터")
-                        key("Esc", code: "esc", label: "이스케이프")
-                        key("Tab", code: "tab", label: "탭")
-                        key("⌫", code: "backspace", label: "백스페이스")
-                        key("Ctrl+C", code: "ctrl+c", label: "컨트롤 C, 현재 CLI 작업 중단")
+                        key("↑", code: "up", label: String(localized: "위 방향키"))
+                        key("↓", code: "down", label: String(localized: "아래 방향키"))
+                        key("Enter", code: "enter", label: String(localized: "엔터"))
+                        key("Esc", code: "esc", label: String(localized: "이스케이프"))
+                        key("Tab", code: "tab", label: String(localized: "탭"))
+                        key("⌫", code: "backspace", label: String(localized: "백스페이스"))
+                        key("Ctrl+C", code: "ctrl+c", label: String(localized: "컨트롤 C, 현재 CLI 작업 중단"))
                     }
                     .padding(.vertical, 1)
                 }
@@ -334,7 +334,7 @@ struct TerminalMirrorView: View {
                 .ceProminentButton()
                 .disabled(!store.canWrite || pending || controlBlock != nil || (unresolved && !claimCanBeRecovered))
                 // web .tm-note: 13.5 ink-2 at line-height 1.5.
-                Text(controlBlock ?? "시작하면 \(current.name)에게 가는 자동 전달이 멈춥니다. 끝내면 다시 이어집니다.")
+                Text(controlBlock ?? String(localized: "시작하면 \(current.name)에게 가는 자동 전달이 멈춥니다. 끝내면 다시 이어집니다."))
                     .font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.spacing(13.5, 1.5)).lineLimit(3)
                     .layoutPriority(1)
                 Spacer(minLength: 0)
@@ -351,7 +351,7 @@ struct TerminalMirrorView: View {
                 Button("작업 결과 다시 확인") { Task { await checkResult() } }
                     .ceSecondaryButton().controlSize(.small).disabled(!store.canWrite || pending)
             } else if let receipt = receipts.first {
-                Text(receipt.status == .applied ? "직접 조작 적용 확인 · 업무 완료를 뜻하지 않습니다." : friendlyError(TerminalPresentation.message(receipt.error ?? "직접 조작이 거부됐습니다.")))
+                Text(receipt.status == .applied ? String(localized: "직접 조작 적용 확인 · 업무 완료를 뜻하지 않습니다.") : friendlyError(TerminalPresentation.message(receipt.error ?? String(localized: "직접 조작이 거부됐습니다."), reason: receipt.reason)))
                     .font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.note)
             }
             if let inputSaveError {
@@ -433,23 +433,23 @@ struct TerminalMirrorView: View {
     }
 
     private var displayText: String {
-        if store.isDemo { return "샘플에는 실제 CLI 화면이 없습니다." }
+        if store.isDemo { return String(localized: "샘플에는 실제 CLI 화면이 없습니다.") }
         if !screen.isEmpty { return screen }
-        if loading && lastRead == nil { return "화면을 읽는 중입니다" }
-        if error != nil { return "화면을 읽지 못했습니다" }
-        return lastRead == nil ? "화면을 읽는 중입니다" : "화면이 비어 있습니다"
+        if loading && lastRead == nil { return String(localized: "화면을 읽는 중입니다") }
+        if error != nil { return String(localized: "화면을 읽지 못했습니다") }
+        return lastRead == nil ? String(localized: "화면을 읽는 중입니다") : String(localized: "화면이 비어 있습니다")
     }
 
     private func leaseRemaining(_ expiresAt: Double) -> String {
         let seconds = Int((expiresAt - tick.timeIntervalSince1970 * 1000) / 1000)
-        guard seconds > 0 else { return "조작권이 곧 끝납니다" }
-        return seconds >= 60 ? "조작권 \(seconds / 60)분 남음" : "조작권 \(seconds)초 남음"
+        guard seconds > 0 else { return String(localized: "조작권이 곧 끝납니다") }
+        return seconds >= 60 ? String(localized: "조작권 \(seconds / 60)분 남음") : String(localized: "조작권 \(seconds)초 남음")
     }
 
     private func readScreen() async {
         guard !loading else { return }
         guard !store.isDemo else { return }
-        guard let api = store.api else { error = "연결된 실행 호스트가 필요합니다."; return }
+        guard let api = store.api else { error = String(localized: "연결된 실행 호스트가 필요합니다."); return }
         let scope = inputScope
         loading = true; defer { loading = false }
         do {

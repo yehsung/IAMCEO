@@ -344,8 +344,10 @@ private final class UXStateServer: @unchecked Sendable {
     }
 
     func testWriteBlockReasonsCoverDemoLoadingRevalidationConnectionAndRunner() async throws {
+        // F8: 샘플은 읽기 전용이 아니다. 샘플 서버에 붙으면 쓰기를 막는 까닭이 없다.
         let demo = AppStore(demo: true, persistCredentials: false)
-        XCTAssertEqual(demo.writeBlockedReason, "샘플은 읽기 전용입니다")
+        defer { demo.prepareForReplacement() }
+        try await waitWhile({ demo.writeBlockedReason != nil }, timeout: .seconds(15))
         let server = UXStateServer(), network = try IsolatedTestNetwork(handler: server.handle), store = makeStore(network)
         defer { store.disconnect() }
         XCTAssertFalse(store.showsOffline)

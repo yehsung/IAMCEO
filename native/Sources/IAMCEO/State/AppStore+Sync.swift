@@ -29,7 +29,7 @@ extension AppStore {
     /// Manual refreshes and all post-write invalidations share the event single flight.
     func refresh() async { await refresh(onSnapshot: nil) }
     func refresh(onSnapshot: (@MainActor () -> Void)?) async {
-        guard !isDemo, api != nil, connectionStatus == .connected || connectionLost else { return }
+        guard api != nil, connectionStatus == .connected || connectionLost else { return }
         if realtimeStatus == .blocked, foreground {
             restFailures = 0; startSocket(); startFallback()
         }
@@ -64,7 +64,7 @@ extension AppStore {
 
     func enqueueRefresh(_ scope: RefreshScope, immediate: Bool = false, allowPaused: Bool = false,
                                 onSnapshot: (@MainActor () -> Void)? = nil) async {
-        guard !isDemo, api != nil, foreground || allowPaused else { return }
+        guard api != nil, foreground || allowPaused else { return }
         dirty.formUnion(scope); dirtyRevision &+= 1
         if scope.contains(.history) { historyInvalidationRevision &+= 1 }
         if immediate { urgentRefresh = true; pacingTask?.cancel() }
@@ -299,11 +299,13 @@ extension AppStore {
             if projectID != nil, result.state == nil {
                 // /sync explicitly distinguishes a missing/archived selection from a missing route.
                 selectedProjectID = nil
-                projectNotice = "보던 프로젝트를 사용할 수 없어 본사로 돌아갑니다."
+                projectNotice = String(localized: "보던 프로젝트를 사용할 수 없어 본사로 돌아갑니다.")
                 if let first = result.bootstrap.projects.first(where: { $0.id == "hq" }) ?? result.bootstrap.projects.first {
                     Task { [weak self] in await self?.selectProject(id: first.id) }
                 } else { projectGeneration = UUID() }
             }
+            // F1: 서버가 확인해 준 상태가 들어왔다. '마지막으로 본 상태' 표지를 내리고 기기에 남길 차례를 잡는다.
+            didApplyLiveSnapshot()
             // 스냅샷이 화면에 반영됐다. 쓰기 뒤 잠금은 여기서 풀어 아래 복구 조회가 붙잡지 않게 한다.
             if let activePassRevision { releaseSnapshotWaiters(through: activePassRevision) }
             let recovery = UUID()
@@ -313,6 +315,8 @@ extension AppStore {
                 await recoverWrites()
             }
             if activeRecoveryPass == recovery { activeRecoveryPass = nil }
+            // F1: 앞선 글의 접수 확인이 끝난 뒤, 연결되면 보낼 글을 이어서 보낸다.
+            if epoch == generation, projectEpoch == projectGeneration { flushOutboxSoon() }
         } catch {
             // 읽는 사이 소켓이 다시 붙었어도 이 요청의 실패는 버리지 않는다. 버리면 끊김 판정이 영영 시작되지 않는다.
             guard !Task.isCancelled, epoch == generation, projectEpoch == projectGeneration, phase == foregroundGeneration,
@@ -342,7 +346,7 @@ extension AppStore {
                 health.transportFailures = 0; health.firstTransportFailure = nil
                 offlineTask?.cancel(); offlineTask = nil
                 isRevalidating = true; isCheckingConnection = true
-                connectionIssue = "동기화 다시 시도 중"
+                connectionIssue = String(localized: "동기화 다시 시도 중")
                 clearReadError()
             }
             let now = await syncClock.now()

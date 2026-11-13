@@ -7,11 +7,11 @@ struct MacNotificationEvent: Sendable, Equatable {
     let target: PushTarget
     var title: String {
         switch kind {
-        case "decision": "새 결재가 있습니다"
-        case "approval_wait": "팀원이 승인·선택을 기다립니다"
-        case "report_complete": "완료 보고가 도착했습니다"
-        case "report_blocked": "막힘 보고가 도착했습니다"
-        default: "대표님이 할 일이 있습니다"
+        case "decision": String(localized: "새 결재가 있습니다")
+        case "approval_wait": String(localized: "팀원이 승인·선택을 기다립니다")
+        case "report_complete": String(localized: "완료 보고가 도착했습니다")
+        case "report_blocked": String(localized: "막힘 보고가 도착했습니다")
+        default: String(localized: "대표님이 할 일이 있습니다")
         }
     }
 }
@@ -174,7 +174,7 @@ import UserNotifications
     func deliver(identifier: String, title: String, metadata: Data) async throws {
         let content = UNMutableNotificationContent()
         content.title = title
-        content.body = "IAMCEO에서 확인해 주세요."
+        content.body = String(localized: "IAMCEO에서 확인해 주세요.")
         content.sound = .default
         // Fixed copy only: no report text, project names, paths, credentials or terminal contents.
         content.userInfo = ["iamceoMac": metadata]
@@ -246,7 +246,7 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
             if !value { delivery.clear() }
             else if monitor != nil { hostKey = nil }
             if !allowed {
-                permissionNotice = "Mac의 시스템 설정 → 알림에서 IAMCEO 알림을 허용해 주세요."
+                permissionNotice = String(localized: "Mac의 시스템 설정 → 알림에서 IAMCEO 알림을 허용해 주세요.")
             }
             return true
         } catch {
@@ -423,7 +423,7 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
         guard let envelope = pendingHome, !openingHome, let router, let serverID = store.serverID,
               store.connectionStatus == .connected, !store.isRevalidating else { return }
         guard serverID.lowercased() == envelope.serverID.lowercased() else {
-            if !foreignHomeNoticeShown { router.navigationNotice = "이 알림의 Mac에 연결해 주세요."; foreignHomeNoticeShown = true }
+            if !foreignHomeNoticeShown { router.navigationNotice = String(localized: "이 알림의 Mac에 연결해 주세요."); foreignHomeNoticeShown = true }
             return
         }
         pendingHome = nil; openingHome = true
@@ -436,7 +436,7 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
                 guard store.writeNamespace == generation, store.api === api, store.serverID?.lowercased() == envelope.serverID.lowercased(),
                       router.navigationRevision == revision else { return }
                 guard context.state?.project.id == project, context.state?.project.archived == false else {
-                    router.navigationNotice = "알림의 프로젝트가 없거나 보관되었습니다."; return
+                    router.navigationNotice = String(localized: "알림의 프로젝트가 없거나 보관되었습니다."); return
                 }
                 let changed = store.selectedProjectID != project
                 await store.selectProject(id: project)

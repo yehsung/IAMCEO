@@ -72,8 +72,8 @@ final class FullStopRunner {
     /// 멈춘 뒤의 안내. '이 Mac에서 시작'으로 다시 켤 수 있다는 말은 이 앱의 서비스를 지웠을 때만 한다.
     nonisolated static func stoppedMessage(removedAppService: Bool) -> String {
         removedAppService
-            ? "모두 멈췄습니다. 대화와 자료는 그대로 남아 있고, ‘이 Mac에서 시작’으로 다시 켤 수 있습니다. 앱을 지우려면 응용 프로그램 폴더의 IAMCEO를 휴지통으로 옮기세요."
-            : "모두 멈췄습니다. 대화와 자료는 그대로 남아 있습니다. 앱을 지우려면 응용 프로그램 폴더의 IAMCEO를 휴지통으로 옮기세요."
+            ? String(localized: "모두 멈췄습니다. 대화와 자료는 그대로 남아 있고, ‘이 Mac에서 시작’으로 다시 켤 수 있습니다. 앱을 지우려면 응용 프로그램 폴더의 IAMCEO를 휴지통으로 옮기세요.")
+            : String(localized: "모두 멈췄습니다. 대화와 자료는 그대로 남아 있습니다. 앱을 지우려면 응용 프로그램 폴더의 IAMCEO를 휴지통으로 옮기세요.")
     }
 
     /// 명령줄 인자. 앱에서 이미 확인했으므로 --yes 로 묻지 않게 한다.
@@ -86,7 +86,7 @@ final class FullStopRunner {
         // 줄을 보인 뒤에 서비스가 바뀌었을 수 있다. 누른 순간 다시 보고, 이 앱의 것이 아니면 아무것도 하지 않는다.
         guard Self.daemon() == nil || Self.offered() else {
             failed = true
-            message = "이 앱이 등록하지 않은 IAMCEO 서비스(소스에서 도는 서버나 옛 설치)가 있어 멈추지 않았습니다. 그 서버는 그 설치의 방법으로 멈추세요."
+            message = String(localized: "이 앱이 등록하지 않은 IAMCEO 서비스(소스에서 도는 서버나 옛 설치)가 있어 멈추지 않았습니다. 그 서버는 그 설치의 방법으로 멈추세요.")
             return
         }
         let removedAppService = Self.registeredService() != nil
@@ -96,7 +96,7 @@ final class FullStopRunner {
             message = Self.stoppedMessage(removedAppService: removedAppService)
         } else {
             failed = true
-            message = result.reason ?? "완전히 멈추지 못했습니다(종료 코드 \(result.status)). 잠시 뒤 다시 해 보세요."
+            message = result.reason ?? String(localized: "완전히 멈추지 못했습니다(종료 코드 \(result.status)). 잠시 뒤 다시 해 보세요.")
         }
     }
 
@@ -107,17 +107,17 @@ final class FullStopRunner {
         let result = await Self.run(Self.arguments(purge: true))
         if result.status == 0 {
             purged = true
-            message = "이 Mac의 IAMCEO 데이터를 지웠습니다."
+            message = String(localized: "이 Mac의 IAMCEO 데이터를 지웠습니다.")
             return true
         }
         failed = true
-        message = result.reason ?? "데이터를 지우지 못했습니다(종료 코드 \(result.status))."
+        message = result.reason ?? String(localized: "데이터를 지우지 못했습니다(종료 코드 \(result.status)).")
         return false
     }
 
     /// 명령줄의 마지막 오류 줄을 사람에게 보일 까닭으로 쓴다(명령줄 오류는 사람이 읽는 한 문장이다).
     private nonisolated static func run(_ arguments: [String]) async -> (status: Int32, reason: String?) {
-        guard let daemon = daemon() else { return (-1, "실행 파일이 들어 있는 IAMCEO 앱에서만 할 수 있습니다.") }
+        guard let daemon = daemon() else { return (-1, String(localized: "실행 파일이 들어 있는 IAMCEO 앱에서만 할 수 있습니다.")) }
         let childEnvironment = Self.childEnvironment(ProcessInfo.processInfo.environment, daemon: daemon)
         return await Task.detached { () -> (status: Int32, reason: String?) in
             let process = Process()
@@ -128,7 +128,7 @@ final class FullStopRunner {
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = output
             process.standardError = output
-            do { try process.run() } catch { return (-1, "멈추기 명령을 실행하지 못했습니다. 앱을 다시 설치해 보세요.") }
+            do { try process.run() } catch { return (-1, String(localized: "멈추기 명령을 실행하지 못했습니다. 앱을 다시 설치해 보세요.")) }
             // 팀장이 많으면 재우기에 몇 분 걸릴 수 있다. 그보다 길면 끊는다.
             let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
             DispatchQueue.global().asyncAfter(deadline: .now() + 600, execute: timeout)
@@ -159,12 +159,12 @@ struct FullStopGroup: View {
     /// 다른 Mac 의 서버에 붙어 있어도 멈추기·지우기는 이 Mac 의 IAMCEO 만 다룬다. 그 서버와의 연결은 그대로 둔다.
     nonisolated static func leavesConnection(afterPurgeOnThisMac serverIsThisMac: Bool) -> Bool { serverIsThisMac }
     nonisolated static func stopHint(serverIsThisMac: Bool) -> String {
-        serverIsThisMac ? "모든 팀장과 실행 엔진을 끄고 로그인할 때 저절로 켜지지 않게 합니다. 데이터는 남습니다"
-            : "이 Mac의 IAMCEO만 멈춥니다. 지금 연결한 다른 Mac의 서버는 그대로입니다. 데이터는 남습니다"
+        serverIsThisMac ? String(localized: "모든 팀장과 실행 엔진을 끄고 로그인할 때 저절로 켜지지 않게 합니다. 데이터는 남습니다")
+            : String(localized: "이 Mac의 IAMCEO만 멈춥니다. 지금 연결한 다른 Mac의 서버는 그대로입니다. 데이터는 남습니다")
     }
     nonisolated static func purgeHint(serverIsThisMac: Bool) -> String {
-        serverIsThisMac ? "대화·결재·자료·첨부와 백업을 이 Mac에서 지웁니다. 되돌릴 수 없습니다"
-            : "이 Mac의 데이터만 지웁니다. 지금 연결한 다른 Mac의 서버와 데이터는 그대로입니다. 되돌릴 수 없습니다"
+        serverIsThisMac ? String(localized: "대화·결재·자료·첨부와 백업을 이 Mac에서 지웁니다. 되돌릴 수 없습니다")
+            : String(localized: "이 Mac의 데이터만 지웁니다. 지금 연결한 다른 Mac의 서버와 데이터는 그대로입니다. 되돌릴 수 없습니다")
     }
 
     var body: some View {
@@ -174,7 +174,7 @@ struct FullStopGroup: View {
 
     private var group: some View {
         SettingsGroup(footnote: runner.message, footnoteTone: runner.failed ? CE.danger : CE.ink2) {
-            SettingsRow("이 Mac에서 완전히 멈추기", hint: Self.stopHint(serverIsThisMac: store.serverIsThisMac)) {
+            SettingsRow(String(localized: "이 Mac에서 완전히 멈추기"), hint: Self.stopHint(serverIsThisMac: store.serverIsThisMac)) {
                 Button { confirmStop = true } label: {
                     HStack(spacing: 6) {
                         if runner.busy == .stop { ProgressView().controlSize(.small) }
@@ -188,7 +188,7 @@ struct FullStopGroup: View {
             }
             if runner.stopped && !runner.purged {
                 RowDivider(inset: 0)
-                SettingsRow("데이터도 지우기", hint: Self.purgeHint(serverIsThisMac: store.serverIsThisMac)) {
+                SettingsRow(String(localized: "데이터도 지우기"), hint: Self.purgeHint(serverIsThisMac: store.serverIsThisMac)) {
                     Button { confirmPurge = true } label: {
                         HStack(spacing: 6) {
                             if runner.busy == .purge { ProgressView().controlSize(.small) }

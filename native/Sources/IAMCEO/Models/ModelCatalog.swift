@@ -22,7 +22,7 @@ struct ModelList: Decodable, Sendable, Equatable {
     }
 
     func unknownCurrent(_ value: String) -> String? {
-        !value.isEmpty && option(for: value) == nil ? "\(value) · 목록에 없음" : nil
+        !value.isEmpty && option(for: value) == nil ? String(localized: "\(value) · 목록에 없음") : nil
     }
 
     func efforts(for value: String, cli: RankSettingsCLI) -> [String] {
@@ -44,10 +44,5 @@ struct ModelCatalog: Decodable, Sendable, Equatable {
         codex: ModelList(models: RankSettingsCLI.codex.models.map {
             ModelOption(value: $0, label: $0, efforts: RankSettingsCLI.codex.efforts)
         }, source: "default")
-    )
-    static let demo = ModelCatalog(
-        claude: ModelList(models: fallback.claude.models + [
-            ModelOption(value: "claude-fable-5-1[1m]", label: "Fable", description: "샘플 모델", efforts: RankSettingsCLI.claude.efforts)
-        ], source: "default"), codex: fallback.codex
     )
 }

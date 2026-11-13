@@ -146,7 +146,7 @@ struct AppShell: View {
             guard let link = PairingLink(url: url) else { store.errorMessage = PairingLink.rejectedMessage; return }
             Task { await store.receivePairingLink(link, device: UIDevice.current.name, external: true) }
             #else
-            store.errorMessage = "이 링크는 iPhone에서 여는 연결 QR입니다."
+            store.errorMessage = String(localized: "이 링크는 iPhone에서 여는 연결 QR입니다.")
             #endif
         }
         #if os(iOS)
@@ -184,7 +184,9 @@ struct AppShell: View {
         // The store is shared by every window: a window that appears later (a second Mac window, or one reopened
         // after ⌘W) must not tear down a live or in-progress connection.
         .task {
-            guard !store.isDemo, store.bootstrap == nil, store.connectionStatus != .connecting,
+            // F1: 마지막으로 본 상태를 띄운 채 시작했어도(bootstrap 이 그 상태) 연결은 평소대로 시작한다.
+            guard !store.isDemo, store.bootstrap == nil || (store.lastSeen != nil && store.api == nil),
+                  store.connectionStatus != .connecting,
                   !store.endpoint.isEmpty, !store.accessCode.isEmpty else { return }
             await store.connect()
         }
@@ -339,8 +341,8 @@ struct AppShell: View {
                             Image(systemName: attachmentPolicy.canAccept ? "paperclip.circle" : "lock.circle")
                                 .font(.system(size: 32))
                             Text(attachmentPolicy.reason ?? (attachmentIntake.receive == nil
-                                ? "입력칸을 준비 중입니다. 잠시 뒤 다시 놓아 주세요"
-                                : "여기에 놓으면 \(attachmentRecipient)에게 보낼 첨부로 올립니다"))
+                                ? String(localized: "입력칸을 준비 중입니다. 잠시 뒤 다시 놓아 주세요")
+                                : String(localized: "여기에 놓으면 \(attachmentRecipient)에게 보낼 첨부로 올립니다")))
                                 .font(.system(size: 15, weight: .semibold))
                                 .multilineTextAlignment(.center)
                         }
@@ -362,7 +364,7 @@ struct AppShell: View {
 
     private var attachmentPolicy: MacAttachmentPolicy {
         MacAttachmentPolicy(archived: store.isArchive || store.state?.project.archived == true,
-                            demo: store.isDemo, connected: store.connectionStatus == .connected,
+                            connected: store.connectionStatus == .connected,
                             writable: store.uiCanWrite && store.selectedProjectID != nil,
                             missingTarget: router.chatTarget != nil && !store.members.contains { $0.id == router.chatTarget },
                             composerCovered: router.memberID != nil)
@@ -473,9 +475,10 @@ struct AppShell: View {
     }
 
     private var connectionLabel: String {
-        if store.isDemo { return "샘플 데이터 · 읽기 전용" }
+        if store.isDemo { return String(localized: "샘플 작업 공간") }
         if let notice = store.connectionNotice { return notice }
-        return store.showsOffline ? "서버 끊김" : store.connectionStatus == .connected ? "서버 연결됨" : "잠시 연결을 확인하는 중"
+        if store.lastSeen != nil { return String(localized: "마지막으로 본 상태 · 읽기 전용") }
+        return store.showsOffline ? String(localized: "서버 끊김") : store.connectionStatus == .connected ? String(localized: "서버 연결됨") : String(localized: "잠시 연결을 확인하는 중")
     }
 
     /// Title = project switcher (web phone header). What waits in the *other* projects (which the tab badges, selected
@@ -517,7 +520,7 @@ struct AppShell: View {
             .contentShape(Rectangle())
         }
         .accessibilityLabel("프로젝트 \(name). 바꾸기")
-        .accessibilityValue(others.count > 0 ? "다른 프로젝트에 확인할 일 \(others.count)건" : "")
+        .accessibilityValue(others.count > 0 ? String(localized: "다른 프로젝트에 확인할 일 \(others.count)건") : "")
     }
 
     @ViewBuilder private var projectMenuItems: some View {
@@ -530,7 +533,6 @@ struct AppShell: View {
                     if project.id == store.selectedProjectID { Image(systemName: "checkmark") }
                 }
             }
-            .disabled(store.isDemo && project.id != store.selectedProjectID)
         }
         Divider()
         if let id = store.selectedProjectID {
@@ -553,7 +555,7 @@ struct AppShell: View {
     /// projectLine.
     private func projectMenuLine(_ project: ProjectSummary) -> String {
         let needs = store.projectNeedsCount(project)
-        return (needs > 0 ? ["내 차례 \(needs)건"] : []).appending(projectRailLine(project)).joined(separator: " · ")
+        return (needs > 0 ? [String(localized: "내 차례 \(needs)건")] : []).appending(projectRailLine(project)).joined(separator: " · ")
     }
     #endif
 
@@ -572,13 +574,13 @@ struct AppShell: View {
 
 /// Web `projectLine`: one sub-line per project, the state the CEO has to resolve first.
 func projectRailLine(_ project: ProjectSummary) -> String {
-    if project.blockedCount > 0 { return "승인 창 앞 \(project.blockedCount)명" }
-    if project.errorCount > 0 { return "오류 \(project.errorCount)명" }
-    if project.workingCount > 0 { return "\(project.workingCount)명 일하는 중" }
-    if !project.isHq && !project.runnerEnabled { return "총괄 시작 전" }
+    if project.blockedCount > 0 { return String(localized: "승인 창 앞 \(project.blockedCount)명") }
+    if project.errorCount > 0 { return String(localized: "오류 \(project.errorCount)명") }
+    if project.workingCount > 0 { return String(localized: "\(project.workingCount)명 일하는 중") }
+    if !project.isHq && !project.runnerEnabled { return String(localized: "총괄 시작 전") }
     // "N명 대기" read as N people waiting on the CEO; idle members are simply resting (the status label's wording).
-    if project.memberCount > 0 { return "모두 쉬는 중" }
-    return "아직 팀원 없음"
+    if project.memberCount > 0 { return String(localized: "모두 쉬는 중") }
+    return String(localized: "아직 팀원 없음")
 }
 
 // MARK: - Mac rail
@@ -621,7 +623,7 @@ struct ProjectSidebar: View {
                 }
                 ForEach(others) { row($0) }
                 // web .pj--add: 42 tall, 14/500 ink-2, ink-1 on hover.
-                Button { router.showNewProject = true } label: { quietRow("새 프로젝트", icon: "plus", minHeight: 42) }
+                Button { router.showNewProject = true } label: { quietRow(String(localized: "새 프로젝트"), icon: "plus", minHeight: 42) }
                     .buttonStyle(RailRowStyle(quiet: true))
                     .padding(.top, 6)
                     .disabled(!store.canWrite)
@@ -665,7 +667,6 @@ struct ProjectSidebar: View {
             .frame(minHeight: 48)
         }
         .buttonStyle(RailRowStyle(selected: selected))
-        .disabled(store.isDemo && !selected)
         .contextMenu {
             Button("이름 바꾸기…") { router.manageProject(id: project.id, mode: .rename) }
                 .disabled(store.isDemo || store.connectionStatus != .connected)
@@ -675,7 +676,7 @@ struct ProjectSidebar: View {
         }
         .help(projectStatusLine(project))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(project.name), \(line)\(count > 0 ? ", 확인할 일 \(count)건" : "")")
+        .accessibilityLabel("\(project.name), \(line)\(count > 0 ? String(localized: ", 확인할 일 \(count)건") : "")")
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 
@@ -693,12 +694,12 @@ struct ProjectSidebar: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 2) {
             Rectangle().fill(CE.line).frame(height: 1).padding(.horizontal, 4).padding(.bottom, 4)
-            Button { showArchive = true } label: { quietRow("보관함", icon: "archivebox") }
+            Button { showArchive = true } label: { quietRow(String(localized: "보관함"), icon: "archivebox") }
                 .buttonStyle(RailRowStyle(quiet: true))
-            SettingsLink { quietRow("설정", icon: "gearshape") }
+            SettingsLink { quietRow(String(localized: "설정"), icon: "gearshape") }
                 .buttonStyle(RailRowStyle(quiet: true))
                 .help("설정 (⌘,)")
-            Button { router.showPairing = true } label: { quietRow("iPhone 연결", icon: "iphone") }
+            Button { router.showPairing = true } label: { quietRow(String(localized: "iPhone 연결"), icon: "iphone") }
                 .buttonStyle(RailRowStyle(quiet: true))
                 .help("QR로 iPhone을 이 Mac에 연결합니다")
             connectionMark
@@ -724,27 +725,30 @@ struct ProjectSidebar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(store.isDemo)
         .help(connectionHelp)
         .accessibilityLabel(state.text)
-        .accessibilityHint(store.isDemo ? "" : store.connectionStatus == .connected ? "지금 동기화" : "다시 연결")
+        .accessibilityHint(store.connectionStatus == .connected ? "지금 동기화" : "다시 연결")
     }
 
     private var connectionState: (text: String, color: Color, glow: Bool, danger: Bool) {
-        if store.isDemo { return ("샘플 데이터 · 읽기 전용", CE.accent, true, false) }
+        if store.isDemo { return (String(localized: "샘플 작업 공간"), CE.accent, true, false) }
         if let notice = store.connectionNotice { return (notice, CE.ink2, false, false) }
-        if store.showsOffline { return ("서버 끊김", CE.danger, false, true) }
+        if store.showsOffline { return (String(localized: "서버 끊김"), CE.danger, false, true) }
+        // F1: 연결하지 못해 기기에 남긴 마지막 상태를 보는 중.
+        if store.lastSeen != nil, store.connectionStatus != .connecting, store.connectionStatus != .connected {
+            return (String(localized: "마지막으로 본 상태"), CE.attention, false, false)
+        }
         switch store.connectionStatus {
         case .connected: return (store.localizedSyncDescription, store.realtimeStatus == .fallback ? CE.attention : CE.success, store.realtimeStatus == .live, false)
-        case .connecting: return ("서버 연결 중", CE.warn, false, false)
-        default: return ("잠시 연결을 확인하는 중", CE.ink2, false, false)
+        case .connecting: return (String(localized: "서버 연결 중"), CE.warn, false, false)
+        default: return (String(localized: "잠시 연결을 확인하는 중"), CE.ink2, false, false)
         }
     }
 
     private var connectionHelp: String {
-        if store.isDemo { return "샘플 데이터는 실제 서버에 연결되지 않습니다." }
-        guard store.connectionStatus == .connected else { return "눌러서 다시 연결" + (store.connectionIssue.map { " · \($0)" } ?? "") }
-        return "눌러서 지금 동기화 (⌘R)" + (store.lastUpdated.map { " · 마지막 \(koTime($0, seconds: true))" } ?? "")
+        if store.isDemo { return String(localized: "샘플은 실제 서버에 연결하지 않습니다. 바꾼 내용은 이 기기 안에서만 반영되고 샘플을 나가면 처음으로 돌아갑니다.") }
+        guard store.connectionStatus == .connected else { return String(localized: "눌러서 다시 연결") + (store.connectionIssue.map { " · \($0)" } ?? "") }
+        return String(localized: "눌러서 지금 동기화 (⌘R)") + (store.lastUpdated.map { String(localized: " · 마지막 \(koTime($0, seconds: true))") } ?? "")
     }
 }
 
@@ -879,7 +883,7 @@ struct DestinationSwitcher: View {
             if inside { hovered = tab } else if hovered == tab { hovered = nil }
         }
         .help("\(tab.title)\(detail.map { " · \($0)" } ?? "") (⌘\(position + 1))")
-        .accessibilityLabel(count > 0 ? "\(tab.title), \(detail ?? "\(count)건")" : tab.title)
+        .accessibilityLabel(count > 0 ? "\(tab.title), \(detail ?? String(localized: "\(count)건"))" : tab.title)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 
@@ -1126,7 +1130,7 @@ struct StatusStrips: View {
     @State private var fallbackShown = false
 
     private var offline: Bool { store.showsOffline }
-    private var fallback: Bool { store.connectionStatus == .connected && !store.isDemo && store.realtimeStatus == .fallback }
+    private var fallback: Bool { store.connectionStatus == .connected && store.realtimeStatus == .fallback }
 
     private struct Strip: Identifiable {
         let id: String
@@ -1142,22 +1146,41 @@ struct StatusStrips: View {
         var lines = 2
     }
 
+    /// F1: '마지막으로 본 상태 · 12분 전'. 연결하는 동안은 돌림표만, 연결하지 못했으면 읽기 전용임과 다시 연결.
+    /// 연결 줄(offline)과 같은 따뜻한 판을 쓴다. 'n분 전'은 1분마다 다시 읽는다.
+    private var lastSeenStrip: Strip? {
+        guard store.lastSeen != nil, store.lastSeenAnnounced, let age = store.lastSeenAgeText else { return nil }
+        _ = MinuteClock.shared.minute
+        // 앞선 실패의 까닭이 남아 있으면(자동 재시도 중) 판을 바꾸지 않는다. 대표가 '다시 연결'을 누르면 까닭을 비우고 이 판이 된다.
+        if (store.connectionStatus == .connecting || store.connectionStatus == .connected) && store.connectionIssue == nil {
+            return Strip(id: "last-seen", tone: .neutral, icon: "clock.arrow.circlepath",
+                         text: String(localized: "마지막으로 본 상태 · \(age) · 최신 상태를 받는 중입니다"), busy: true)
+        }
+        return Strip(id: "last-seen", tone: .attention, icon: "clock.arrow.circlepath",
+                     text: isMac ? String(localized: "마지막으로 본 상태 · \(age). 지금과 다를 수 있어 읽기만 됩니다.")
+                                 : String(localized: "마지막으로 본 상태 · \(age). 지금과 다를 수 있어 읽기만 됩니다. Wi-Fi·Tailscale과 Mac의 IAMCEO를 확인해 주세요."),
+                     detail: store.connectionIssue.map(ConnectionRecovery.reason), actionTitle: String(localized: "다시 연결"),
+                     action: { Task { await store.reconnectFromLastSeen() } }, lines: 3)
+    }
+
     private var strips: [Strip] {
         var items: [Strip] = []
         // Mac shows sample mode in the rail's connection mark and on the composer, so no strip there.
         if store.isDemo && !isMac {
-            items.append(Strip(id: "demo", tone: .neutral, icon: "eye", text: "샘플 둘러보기 · 읽기 전용",
-                               actionTitle: "Mac과 연결", action: { appSession?.connectToMac() }))
+            items.append(Strip(id: "demo", tone: .neutral, icon: "eye", text: String(localized: "샘플 둘러보기 · 바꾼 내용은 이 기기에만 남습니다"),
+                               actionTitle: String(localized: "Mac과 연결"), action: { appSession?.connectToMac() }))
         }
         if offline && !store.isRestarting {
             // A-90: what to check, not the system's raw error (that stays in the Mac tooltip). The iPhone usually
             // reaches the Mac over Wi-Fi or Tailscale, so say which two things to look at.
             items.append(Strip(id: "offline", tone: .attention, icon: "wifi.slash",
-                               text: isMac ? "서버와 연결이 끊겼습니다. 다시 잇는 중입니다."
-                                           : "Mac과 연결이 끊겼습니다. Wi-Fi·Tailscale과 Mac의 IAMCEO가 켜져 있는지 확인해 주세요.",
-                               detail: store.connectionIssue.map(ConnectionRecovery.reason), actionTitle: "다시 연결",
+                               text: isMac ? String(localized: "서버와 연결이 끊겼습니다. 다시 잇는 중입니다.")
+                                           : String(localized: "Mac과 연결이 끊겼습니다. Wi-Fi·Tailscale과 Mac의 IAMCEO가 켜져 있는지 확인해 주세요."),
+                               detail: store.connectionIssue.map(ConnectionRecovery.reason), actionTitle: String(localized: "다시 연결"),
                                action: { Task { await store.restartRealtime() } }, lines: 3))
         }
+        // F1: 기기에 남긴 마지막 상태를 보는 중. 지금 상태로 오해하지 않게 언제 것인지와 읽기 전용임을 함께 말한다.
+        if let lastSeen = lastSeenStrip { items.append(lastSeen) }
         if let outage = APIOutageInfo(store.apiOutage, showsOffline: offline) {
             items.append(Strip(id: "api-outage", tone: outage.tone, icon: "wifi.exclamationmark", text: outage.text, lines: 3))
         }
@@ -1168,13 +1191,13 @@ struct StatusStrips: View {
         }
         // Tailscale is off on this Mac: the app here still reaches the server, the iPhone does not. Mac only
         // (TailnetNotice), and like the engine line only while the server's word is current.
-        if !offline, !store.isRestarting, !store.isDemo, store.connectionStatus == .connected,
+        if !offline, !store.isRestarting, store.connectionStatus == .connected,
            let tailnet = TailnetNotice(store.bootstrap?.tailnet, onThisMac: store.serverIsThisMac) {
             items.append(Strip(id: "tailnet", tone: .attention, icon: "iphone.slash", text: tailnet.text, lines: 3))
         }
         // D5: 앱과 서버가 실제로 맞지 않을 때만(서버가 compat 을 실었거나, 머리글을 모르는 옛 서버가 이 앱의 단계보다 낮을 때).
         // '앱을 업데이트하세요'와 '서버가 옛 버전입니다'를 나눠 말한다. 서버의 말이 지금 것일 때만 보인다.
-        if !offline, !store.isRestarting, !store.isDemo, store.connectionStatus == .connected,
+        if !offline, !store.isRestarting, store.connectionStatus == .connected,
            let compat = CompatNotice(store.bootstrap, onThisMac: store.serverIsThisMac) {
             items.append(Strip(id: "compat", tone: .attention, icon: "arrow.up.circle", text: compat.text, lines: 3))
         }
@@ -1182,27 +1205,27 @@ struct StatusStrips: View {
             items.append(Strip(id: "connection-check", tone: .neutral, icon: "arrow.triangle.2.circlepath", text: notice, busy: true))
         }
         if store.isArchive {
-            items.append(Strip(id: "archive", tone: .neutral, icon: "archivebox", text: "보관한 프로젝트 · 읽기 전용",
-                               actionTitle: "관리", action: {
+            items.append(Strip(id: "archive", tone: .neutral, icon: "archivebox", text: String(localized: "보관한 프로젝트 · 읽기 전용"),
+                               actionTitle: String(localized: "관리"), action: {
                 if let id = store.selectedProjectID { router.manageProject(id: id, mode: .restore) }
             }))
         }
         if fallback && fallbackShown && !offline && store.connectionNotice == nil {
             items.append(Strip(id: "fallback", tone: .neutral, icon: "arrow.triangle.2.circlepath",
-                               text: "실시간 연결을 다시 잇는 중입니다. 그동안 몇 초마다 새 소식을 확인합니다.",
-                               actionTitle: "다시 연결", action: { Task { await store.restartRealtime() } }))
+                               text: String(localized: "실시간 연결을 다시 잇는 중입니다. 그동안 몇 초마다 새 소식을 확인합니다."),
+                               actionTitle: String(localized: "다시 연결"), action: { Task { await store.restartRealtime() } }))
         }
         if router.isOpeningNotification {
-            items.append(Strip(id: "notification-opening", tone: .neutral, icon: "bell", text: "알림을 여는 중입니다…", busy: true))
+            items.append(Strip(id: "notification-opening", tone: .neutral, icon: "bell", text: String(localized: "알림을 여는 중입니다…"), busy: true))
         }
         if let notice = router.navigationNotice ?? store.notificationNotice ?? store.projectNotice {
             // Closing clears the notice itself, so it is gone on every tab and pushed screen (each has its own strips).
             items.append(Strip(id: "notice", tone: .neutral, icon: "info.circle", text: notice,
-                               actionTitle: "닫기", action: { router.navigationNotice = nil; store.dismissNotices() }))
+                               actionTitle: String(localized: "닫기"), action: { router.navigationNotice = nil; store.dismissNotices() }))
         }
         if let error = store.errorMessage {
             items.append(Strip(id: "error", tone: .danger, icon: "exclamationmark.circle", text: error,
-                               actionTitle: "닫기", action: { store.errorMessage = nil }))
+                               actionTitle: String(localized: "닫기"), action: { store.errorMessage = nil }))
         }
         return items
     }
@@ -1388,7 +1411,7 @@ private struct PhoneDockedComposer: View {
             Button { expanded = true } label: {
                 HStack(spacing: 7) {
                     Image(systemName: "square.and.pencil").font(.system(size: 14, weight: .semibold))
-                    Text(hasDraft ? "\(name)에게 쓰던 글" : "\(name)에게 쓰기").font(CEFont.secondary.weight(.semibold)).lineLimit(1)
+                    Text(hasDraft ? String(localized: "\(name)에게 쓰던 글") : String(localized: "\(name)에게 쓰기")).font(CEFont.secondary.weight(.semibold)).lineLimit(1)
                     if hasDraft { Circle().fill(CE.accent).frame(width: 6, height: 6) }
                 }
                 .foregroundStyle(CE.ink)
@@ -1398,8 +1421,7 @@ private struct PhoneDockedComposer: View {
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .disabled(store.isDemo && !LaunchOptions.reviewTyping)
-            .accessibilityLabel(hasDraft ? "\(name)에게 쓰던 글 이어 쓰기" : "\(name)에게 지시나 질문 쓰기")
+            .accessibilityLabel(hasDraft ? String(localized: "\(name)에게 쓰던 글 이어 쓰기") : String(localized: "\(name)에게 지시나 질문 쓰기"))
         }
         .padding(.horizontal, CESpace.m).padding(.top, 2).padding(.bottom, CESpace.s)
     }
@@ -1429,20 +1451,20 @@ extension AppStore {
     var uiCanWrite: Bool { canWrite && projectConnectionOK == true }
 
     var localizedSyncDescription: String {
-        if isDemo { return "샘플 데이터 · 읽기 전용" }
+        if isDemo { return String(localized: "샘플 작업 공간") }
         switch realtimeStatus {
-        case .paused: return "앱이 비활성 상태여서 동기화를 쉬고 있습니다"
-        case .connecting: return "실시간 연결 중…"
-        case .syncing: return "최신 상태를 불러오는 중…"
-        case .live: return "실시간으로 연결됨"
-        case .legacy: return "연결됨 · 이전 방식으로 변경 확인"
-        case .fallback: return "실시간 연결이 끊겨 주기적으로 확인하고 있습니다"
-        case .blocked: return "서버 주소나 접근 허용 설정을 확인해 주세요"
+        case .paused: return String(localized: "앱이 비활성 상태여서 동기화를 쉬고 있습니다")
+        case .connecting: return String(localized: "실시간 연결 중…")
+        case .syncing: return String(localized: "최신 상태를 불러오는 중…")
+        case .live: return String(localized: "실시간으로 연결됨")
+        case .legacy: return String(localized: "연결됨 · 이전 방식으로 변경 확인")
+        case .fallback: return String(localized: "실시간 연결이 끊겨 주기적으로 확인하고 있습니다")
+        case .blocked: return String(localized: "서버 주소나 접근 허용 설정을 확인해 주세요")
         }
     }
 
     /// Rank name of the member who receives messages with no explicit target (총괄, or 본사 AI on HQ).
-    var leadRankName: String { members.first { $0.kind == "conductor" || $0.kind == "root" }.map { rankName($0.kind) } ?? "총괄" }
+    var leadRankName: String { members.first { $0.kind == "conductor" || $0.kind == "root" }.map { rankName($0.kind) } ?? String(localized: "총괄") }
 
     /// Counts are shared with the destination's list/header, including CLI approval filtering.
     func navBadge(for tab: Destination) -> Int {
@@ -1472,8 +1494,8 @@ extension AppStore {
         let count = navBadge(for: tab)
         guard count > 0 else { return nil }
         switch tab {
-        case .inbox: return "결재할 항목 \(count)건"
-        case .home: return "내 차례 \(count)건"
+        case .inbox: return String(localized: "결재할 항목 \(count)건")
+        case .home: return String(localized: "내 차례 \(count)건")
         default: return nil
         }
     }

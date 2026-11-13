@@ -43,6 +43,8 @@ import type { ProjectDeleteResult } from "../shared/types.ts";
 import { ACCESS_LOG_LIMITS, authenticate, DeviceKeys, principalKey, safeEqual, type AuthOutcome, type Principal } from "./devices.ts";
 import type { AccessPlatform, AuthRotateResult, DeviceRevokeAllResult, DeviceRevokeResult } from "../shared/types.ts";
 import { ERROR_CODES } from "../shared/error-codes.ts";
+import { USAGE_MAX_DAYS } from "../shared/types.ts";
+import { UsageCollector, usageReport, type UsageSource } from "./usage.ts";
 export { safeEqual };
 
 export interface ServerContext {
@@ -71,6 +73,8 @@ export interface ServerContext {
   cliVersions?: CliVersionSource;
   /** N(C8): HTTPS 주소(tailscale serve)의 명령 실행기·시계. 시험이 가짜 tailscale 을 넣는다. */
   tailnetHttps?: Partial<Pick<TailnetHttpsDeps, "run" | "now" | "log">>;
+  /** T(F6): 사용량 모으기. 없으면 서버가 만들어 1분마다 모은다. 시험(IAMCEO_TEST)에서는 넣은 것만 쓴다(진짜 Codex 기록을 읽지 않는다). */
+  usage?: UsageSource;
 }
 
 export interface HostBinding {
@@ -808,6 +812,17 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       strictQuery(url, []);
       return Response.json(models.read());
     }),
+    // T(F6): 팀장·프로젝트·날짜별 사용량(CLI 가 보고한 값 그대로). 새 경로라 옛 앱은 부르지 않고, 옛 서버는 404 를 준다(앱은 그 묶음을 숨긴다).
+    route("GET", "/api/usage", (_req, url) => {
+      strictQuery(url, ["days", "projectId"]);
+      const rawDays = url.searchParams.get("days");
+      if (rawDays !== null && (!/^[0-9]{1,3}$/.test(rawDays) || Number(rawDays) < 1 || Number(rawDays) > USAGE_MAX_DAYS)) throw new ApiError(400, `조회 기간은 1~${USAGE_MAX_DAYS}일입니다`, "invalid_query");
+      const projectId = url.searchParams.get("projectId");
+      if (projectId !== null) store.requireProject(projectId);
+      // 열 때 한 번 모은다(5초 안에 다시 모으지는 않는다). 모으다 실패해도 이미 모은 것은 보인다.
+      try { ctx.usage?.refresh(); } catch { /* 다음 정기 모으기 때 다시 한다 */ }
+      return Response.json(usageReport(store.db, { days: rawDays === null ? 7 : Number(rawDays), projectId }), { headers: { "Cache-Control": "no-store" } });
+    }),
     route("GET", "/api/sync", async (req, url) => {
       strictQuery(url, ["projectId", "lite"]);
       const lite = wantsLite(url);
@@ -1423,6 +1438,13 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   }
   /** 점검(A, cli_version)도 이 캐시를 쓴다: 실행 파일이 그대로면 --version 을 다시 부르지 않는다. 시험에서 넣지 않았으면 없다. */
   const cliVersions = ctx.cliVersions;
+  // T(F6): 상태줄 기록과 Codex 세션 기록에서 CLI 가 보고한 사용량을 1분마다 모은다. 멈출 때 이 서버가 만든 것만 멈춘다.
+  let ownUsage: UsageCollector | null = null;
+  if (!ctx.usage && process.env.IAMCEO_TEST !== "1") {
+    ownUsage = new UsageCollector({ db: store.db, home: config.home, wrap: (name, work) => monitor.run(name, work) });
+    ctx.usage = ownUsage;
+    ownUsage.start();
+  }
   // ---- G(C3): 기기 열쇠와 접속 기록. 접속 코드를 보는 모든 자리(HTTP·실시간·터미널 스트림·첨부·합류)가 authorize 하나를 쓴다 ----
   const deviceKeys = new DeviceKeys(store.db);
   /** 인증된 요청의 자격과 그때의 공용 코드 세대. 기다린 뒤 다시 볼 때(짝 맺기 시작·코드 교체·터미널 스트림) 쓴다. */
@@ -1947,6 +1969,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
         clearInterval(hostTimer);
         clearInterval(pingTimer);
         clearInterval(accessLogTimer);
+        if (ownUsage) { ownUsage.stop(); if (ctx.usage === ownUsage) ctx.usage = undefined; }
         unsubscribe();
         // Queue notice before the close frame, including legacy and lite realtime sockets.
         closedEpochSockets ||= sockets.size > 0;

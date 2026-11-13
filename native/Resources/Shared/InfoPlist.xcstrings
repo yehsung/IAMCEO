@@ -1,0 +1,60 @@
+{
+  "sourceLanguage" : "ko",
+  "strings" : {
+    "NSCameraUsageDescription" : {
+      "comment" : "iPhone 카메라 권한 안내",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Scans the pairing QR code and takes photos to attach to a conversation."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "연결 QR을 읽고, 대화에 붙일 사진을 찍습니다."
+          }
+        }
+      }
+    },
+    "NSLocalNetworkUsageDescription" : {
+      "comment" : "로컬 네트워크 권한 안내",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connects to the IAMCEO server on your Mac."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "내 Mac의 IAMCEO 서버에 연결합니다."
+          }
+        }
+      }
+    },
+    "NSPhotoLibraryAddUsageDescription" : {
+      "comment" : "사진 앱에 저장 권한 안내",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Saves images you received to the Photos app."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "받은 이미지를 사진 앱에 저장합니다."
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

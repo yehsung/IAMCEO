@@ -17,7 +17,7 @@ import UIKit
 enum InboxSegment: Hashable { case open, done }
 
 /// Why answers are locked. All are global states, explained once rather than on every card.
-private enum AnswerLock { case demo, disconnected, runner }
+private enum AnswerLock { case disconnected, runner }
 
 /// A request to scroll a card's confirm bar into view; the nonce makes a repeat request for the same bar fire again.
 private struct RevealRequest: Equatable {
@@ -172,18 +172,18 @@ struct InboxView: View {
     private var uncertainMembers: [Member] { store.members.filter { MemberStatusInfo.isUncertain($0) && !MemberStatusInfo.isNetworkPause($0.statusObservation?.error?.code) } }
     private var gateOpen: Bool { store.canWrite && store.state?.project.connection.ok == true }
     /// Why answers are impossible right now (nil = open). Every reason is global, so it is explained once:
-    /// demo and disconnection by the pinned StatusStrips, plus one notice above the list (disconnected / runner).
+    /// disconnection by the pinned StatusStrips, plus one notice above the list (disconnected / runner).
     private var answerLock: AnswerLock? {
-        if store.isDemo { return .demo }
-        if store.showsOffline { return .disconnected }
+        // F1: 기기에 남긴 마지막 상태를 보는 중이면 끊긴 것과 같다(메모는 남고, 연결되면 답할 수 있다).
+        if store.showsOffline || store.lastSeen != nil { return .disconnected }
         if store.state?.project.connection.ok != true { return .runner }
         return nil
     }
     /// Fallback for the per-card lock explanation. Draft fields remain available while disconnected.
     private var lockHint: String? {
         if let notice = store.connectionNotice { return notice }
-        guard let answerLock, answerLock != .demo else { return nil }
-        return "연결 문제로 지금은 답할 수 없습니다"
+        guard answerLock != nil else { return nil }
+        return String(localized: "연결 문제로 지금은 답할 수 없습니다")
     }
     private var versionSignature: String {
         // A usage card's choices and staff change without updatedAt (its push is keyed to it): include them so the open card redraws.
@@ -238,9 +238,9 @@ struct InboxView: View {
     @ViewBuilder private var content: some View {
         if store.state == nil {
             if store.isLoading {
-                EmptyTile(loading: true, title: "결재를 불러오는 중입니다")
+                EmptyTile(loading: true, title: String(localized: "결재를 불러오는 중입니다"))
             } else {
-                emptyCard(icon: "tray", title: "열린 프로젝트가 없습니다", detail: isMac ? "사이드바에서 프로젝트를 고르거나 새로 만드세요." : "위 제목을 눌러 프로젝트를 고르거나 새로 만드세요.")
+                emptyCard(icon: "tray", title: String(localized: "열린 프로젝트가 없습니다"), detail: isMac ? String(localized: "사이드바에서 프로젝트를 고르거나 새로 만드세요.") : String(localized: "위 제목을 눌러 프로젝트를 고르거나 새로 만드세요."))
             }
         } else if session.segment == .open {
             openView
@@ -260,9 +260,9 @@ struct InboxView: View {
                     disconnectedNotice
                     if linkMissing { missingLinkNotice }
                     if !uncertainMembers.isEmpty {
-                        InlineNotice(tone: .neutral, icon: "questionmark.circle", title: "상태 확인 불가 \(uncertainMembers.count)명",
-                                     detail: "승인 창이 확인되지 않았습니다. 팀 화면에서 상태 근거를 볼 수 있습니다.",
-                                     actionTitle: "팀 화면으로", action: { router.go(.team) })
+                        InlineNotice(tone: .neutral, icon: "questionmark.circle", title: String(localized: "상태 확인 불가 \(uncertainMembers.count)명"),
+                                     detail: String(localized: "승인 창이 확인되지 않았습니다. 팀 화면에서 상태 근거를 볼 수 있습니다."),
+                                     actionTitle: String(localized: "팀 화면으로"), action: { router.go(.team) })
                     }
                 }
             }
@@ -275,7 +275,7 @@ struct InboxView: View {
             }
             if !blocked.isEmpty { approvalSection }
             if blocks.isEmpty && blocked.isEmpty {
-                emptyCard(title: "결재할 항목이 없습니다", detail: emptyDetail)
+                emptyCard(title: String(localized: "결재할 항목이 없습니다"), detail: emptyDetail)
             }
             if blocks.contains(where: { $0.decisions.first?.kind != "usage_limit" }) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -287,7 +287,7 @@ struct InboxView: View {
 
     /// Notices above the open list, grouped so the section rhythm (22) does not open up between them.
     private var hasOpenNotices: Bool {
-        let runnerDown = !store.isDemo && store.connectionStatus == .connected && store.state?.project.connection.ok == false
+        let runnerDown = store.connectionStatus == .connected && store.state?.project.connection.ok == false
         return runnerDown || (answerLock == .disconnected && !openDecisions.isEmpty) || linkMissing || !uncertainMembers.isEmpty
     }
 
@@ -300,15 +300,15 @@ struct InboxView: View {
     }
 
     private var emptyDetail: String {
-        guard store.members.contains(where: { $0.status == "working" }) else { return "새 결재가 오면 여기에 나타납니다." }
-        return store.state?.project.isHq == true ? "본사 AI가 일하는 중입니다. 대화에서 상황을 볼 수 있습니다." : "팀원들이 일하는 중입니다. 대화나 팀에서 상황을 볼 수 있습니다."
+        guard store.members.contains(where: { $0.status == "working" }) else { return String(localized: "새 결재가 오면 여기에 나타납니다.") }
+        return store.state?.project.isHq == true ? String(localized: "본사 AI가 일하는 중입니다. 대화에서 상황을 볼 수 있습니다.") : String(localized: "팀원들이 일하는 중입니다. 대화나 팀에서 상황을 볼 수 있습니다.")
     }
 
     @ViewBuilder private var connectionNotice: some View {
-        if !store.isDemo, store.connectionStatus == .connected, let connection = store.state?.project.connection, !connection.ok {
-            InlineNotice(tone: .attention, icon: "bolt.horizontal.circle", title: "지금은 결재에 답할 수 없습니다",
-                         detail: connection.ownerDetail ?? "이 프로젝트의 실행 연결에 문제가 있습니다. 연결되면 답할 수 있습니다.",
-                         actionTitle: connection.reason == "runner_off" ? "팀 화면으로" : nil,
+        if store.connectionStatus == .connected, let connection = store.state?.project.connection, !connection.ok {
+            InlineNotice(tone: .attention, icon: "bolt.horizontal.circle", title: String(localized: "지금은 결재에 답할 수 없습니다"),
+                         detail: connection.ownerDetail ?? String(localized: "이 프로젝트의 실행 연결에 문제가 있습니다. 연결되면 답할 수 있습니다."),
+                         actionTitle: connection.reason == "runner_off" ? String(localized: "팀 화면으로") : nil,
                          action: connection.reason == "runner_off" ? { router.go(.team) } : nil)
         }
     }
@@ -316,14 +316,14 @@ struct InboxView: View {
     /// Once above the list (the pinned strip says the link dropped; this says what happens to the CEO's memos).
     @ViewBuilder private var disconnectedNotice: some View {
         if answerLock == .disconnected, !store.isRestarting, !openDecisions.isEmpty {
-            InlineNotice(tone: .attention, icon: "wifi.slash", title: "지금은 결재에 답할 수 없습니다",
-                         detail: "쓰던 메모는 이 기기에 남아 있고, 다시 연결되면 보낼 수 있습니다.")
+            InlineNotice(tone: .attention, icon: "wifi.slash", title: String(localized: "지금은 결재에 답할 수 없습니다"),
+                         detail: String(localized: "쓰던 메모는 이 기기에 남아 있고, 다시 연결되면 보낼 수 있습니다."))
         }
     }
 
     private var missingLinkNotice: some View {
-        InlineNotice(tone: .neutral, icon: "questionmark.circle", title: "찾을 수 없는 결재입니다",
-                     detail: "지워졌거나 다른 프로젝트의 결재일 수 있습니다.", actionTitle: "닫기", action: { linkMissing = false })
+        InlineNotice(tone: .neutral, icon: "questionmark.circle", title: String(localized: "찾을 수 없는 결재입니다"),
+                     detail: String(localized: "지워졌거나 다른 프로젝트의 결재일 수 있습니다."), actionTitle: String(localized: "닫기"), action: { linkMissing = false })
     }
 
     // MARK: Approval windows (CLI menus, not decisions)
@@ -347,7 +347,7 @@ struct InboxView: View {
         Plate(padding: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 approvalHeader(member)
-                CLIApprovalCard(member: member, fallback: "여기서 답할 수 없는 창입니다. 화면을 보고 터미널에서 승인하거나 거절하세요.")
+                CLIApprovalCard(member: member, fallback: String(localized: "여기서 답할 수 없는 창입니다. 화면을 보고 터미널에서 승인하거나 거절하세요."))
             }
             .padding(.vertical, 16).padding(.horizontal, wide ? 18 : 14)
         }
@@ -377,7 +377,7 @@ struct InboxView: View {
             }
             .buttonStyle(RowButtonStyle(radius: CERadius.control))
             .help(MemberStatusInfo(member).explanation)
-            .accessibilityLabel("\(member.name), 승인 창 앞" + (now.isEmpty ? "" : ", \(now)"))
+            .accessibilityLabel(String(localized: "\(member.name), 승인 창 앞") + (now.isEmpty ? "" : ", \(now)"))
             .accessibilityHint("팀원 상세를 엽니다")
             Button { copyCommand(command, member: member.id) } label: {
                 Image(systemName: copied ? "checkmark" : "doc.on.doc")
@@ -450,7 +450,7 @@ struct InboxView: View {
                     if armed {
                         // While sending, the armed cards are in flight and no longer targets; keep showing what was confirmed.
                         let armedIDs = session.batchArmed[group] ?? []
-                        ConfirmBar(quoted: nil, verb: "묶음 \(armedIDs.count)건 결정", hint: "각 카드의 권장안으로 결정합니다", busy: busy,
+                        ConfirmBar(quoted: nil, verb: String(localized: "묶음 \(armedIDs.count)건 결정"), hint: String(localized: "각 카드의 권장안으로 결정합니다"), busy: busy,
                                    disabled: !gateOpen, stretch: !wide, shiftedAt: shiftedAt,
                                    onConfirm: { Task { await runBatch(group, ids: armedIDs) } },
                                    onCancel: { session.batchArmed[group] = nil })
@@ -521,16 +521,16 @@ struct InboxView: View {
 
     private var doneView: some View {
         let list = doneList
-        let moreAvailable = (store.state?.doneDecisionCount ?? 0) > list.count && store.api != nil && !store.isDemo && !olderExhausted
+        let moreAvailable = (store.state?.doneDecisionCount ?? 0) > list.count && store.api != nil && !olderExhausted
         return VStack(alignment: .leading, spacing: 10) {
             if linkMissing { missingLinkNotice }
             if let notice = reopenedNotice {
-                InlineNotice(tone: .accent, icon: "arrow.uturn.backward.circle", title: "다시 열었습니다",
+                InlineNotice(tone: .accent, icon: "arrow.uturn.backward.circle", title: String(localized: "다시 열었습니다"),
                              detail: "'\(notice.title)'",
-                             actionTitle: "결재할 항목 보기", action: { reopenedNotice = nil; router.decisionID = notice.id })
+                             actionTitle: String(localized: "결재할 항목 보기"), action: { reopenedNotice = nil; router.decisionID = notice.id })
             }
             if list.isEmpty {
-                emptyCard(title: "결재된 항목이 없습니다", detail: "결정한 결재가 여기에 쌓입니다.")
+                emptyCard(title: String(localized: "결재된 항목이 없습니다"), detail: String(localized: "결정한 결재가 여기에 쌓입니다."))
             } else {
                 // Web .glass.ibx-done: padding 4 16; rows 12 above and below, a hairline between them.
                 Plate(padding: 0) {
@@ -579,8 +579,8 @@ struct InboxView: View {
             }
             if let error = reopenErrors[id] { ErrorLine(text: error) }
             if hasMore {
-                DisclosureLink(title: expanded ? "배경 접기" : "배경 보기", expanded: expanded,
-                               accessibilityLabel: expanded ? "\(decision.title) 배경 접기" : "\(decision.title) 배경 보기") {
+                DisclosureLink(title: expanded ? String(localized: "배경 접기") : String(localized: "배경 보기"), expanded: expanded,
+                               accessibilityLabel: expanded ? String(localized: "\(decision.title) 배경 접기") : String(localized: "\(decision.title) 배경 보기")) {
                     withAnimation(.easeOut(duration: 0.18)) {
                         if expanded { session.expandedDone.remove(id) } else { session.expandedDone.insert(id) }
                     }
@@ -745,8 +745,8 @@ struct InboxView: View {
             if session.memoRevisions[id, default: 0] == revision { session.reviews[id]?.note = "" }
         } else {
             session.cardErrors[id] = latest(id).map({ $0.status != "open" }) == true
-                ? "이미 처리된 결재입니다. 내 요청의 수락은 확인하지 못해 메모를 남겼습니다."
-                : store.errorMessage.map(friendlyError) ?? "답변 결과를 확인하지 못했습니다. 내 메모는 남겼습니다."
+                ? String(localized: "이미 처리된 결재입니다. 내 요청의 수락은 확인하지 못해 메모를 남겼습니다.")
+                : store.errorMessage.map(friendlyError) ?? String(localized: "답변 결과를 확인하지 못했습니다. 내 메모는 남겼습니다.")
             sync()
         }
     }
@@ -791,18 +791,18 @@ struct InboxView: View {
                 session.memoOnly.remove(id)
                 if session.memoRevisions[id, default: 0] == revisions[id, default: 0] { session.reviews[id]?.note = "" }
             case .conflict:
-                session.cardErrors[id] = "다른 곳에서 바뀌었습니다. 내 메모는 남겼습니다. 최신 내용을 확인하세요."
+                session.cardErrors[id] = String(localized: "다른 곳에서 바뀌었습니다. 내 메모는 남겼습니다. 최신 내용을 확인하세요.")
             case .unknown:
-                session.cardErrors[id] = "답변 결과 확인 중입니다. 내 메모는 남겼습니다."
+                session.cardErrors[id] = String(localized: "답변 결과 확인 중입니다. 내 메모는 남겼습니다.")
             case .refused:
-                session.cardErrors[id] = "답변을 반영하지 않았습니다. 내 메모는 남겼습니다."
+                session.cardErrors[id] = String(localized: "답변을 반영하지 않았습니다. 내 메모는 남겼습니다.")
             case .notSent:
-                session.cardErrors[id] = "보내지 않았습니다. 내 메모는 남겼습니다."
+                session.cardErrors[id] = String(localized: "보내지 않았습니다. 내 메모는 남겼습니다.")
             }
         }
         session.batchArmed[group] = nil
         let remaining = ids.filter { results[$0] != .accepted }.count
-        if remaining > 0 { session.batchErrors[group] = "\(remaining)건은 카드별 결과를 확인하세요. 메모는 남겼습니다." }
+        if remaining > 0 { session.batchErrors[group] = String(localized: "\(remaining)건은 카드별 결과를 확인하세요. 메모는 남겼습니다.") }
         sync()
     }
 
@@ -832,7 +832,7 @@ struct InboxView: View {
         guard session.contextID == context else { return }
         reopening.remove(decision.id)
         guard ok else {
-            reopenErrors[decision.id] = store.errorMessage ?? "다시 열지 못했습니다."
+            reopenErrors[decision.id] = store.errorMessage ?? String(localized: "다시 열지 못했습니다.")
             return
         }
         if inPlace, latest(decision.id)?.status == "open" {
@@ -906,7 +906,7 @@ struct InboxView: View {
     /// The payload holds every open card and the 50 newest done ones; older links are fetched one by one.
     private func resolveMissingLink(_ id: String) {
         guard resolvingLink != id else { return }
-        guard let api = store.api, let projectID = store.selectedProjectID, !store.isDemo else {
+        guard let api = store.api, let projectID = store.selectedProjectID else {
             linkMissing = true; router.decisionID = nil; return
         }
         resolvingLink = id
@@ -965,7 +965,7 @@ private struct DecisionCard: View {
 
     private var decision: Decision { review.decision }
     private var stale: Bool { !busy && review.isStale(comparedTo: latest) }
-    private var whoName: String { decision.who.isEmpty ? "담당자" : decision.who }
+    private var whoName: String { decision.who.isEmpty ? String(localized: "담당자") : decision.who }
     private var free: Bool { decision.options.isEmpty }
     private var typed: Bool { !review.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     private var picked: DecisionOption? { decision.options.first { $0.k == review.choice } }
@@ -1007,7 +1007,7 @@ private struct DecisionCard: View {
         }
         .overlay { FlashRing(on: flash) }
         .modifier(ApprovalKeyboardShortcuts(
-            enabled: decision.kind != "usage_limit" && !busy && !stale && !store.isDemo && !store.isArchive && decision.status == "open",
+            enabled: decision.kind != "usage_limit" && !busy && !stale && !store.isArchive && decision.status == "open",
             onNumber: { number in
                 guard decision.options.indices.contains(number - 1) else { return false }
                 review.choice = decision.options[number - 1].k; memoOnly = false
@@ -1027,8 +1027,8 @@ private struct DecisionCard: View {
         let state = asker.map { MemberStatusInfo($0) }
         // Web .ibx-top: who 13 / 600 ink-1, time 12.5 ink-2 at the far end.
         return HStack(alignment: .center, spacing: 8) {
-            if decision.kind == "usage_limit" { Tag("사용 한도", tone: .attention) }
-            if decision.isToolPermission { Tag("도구 승인", tone: .attention) }
+            if decision.kind == "usage_limit" { Tag(String(localized: "사용 한도"), tone: .attention) }
+            if decision.isToolPermission { Tag(String(localized: "도구 승인"), tone: .attention) }
             StatusDot(tone: state?.tone ?? .attention)
             Text(whoName).font(CEFont.secondary.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
             Spacer(minLength: 6)
@@ -1037,7 +1037,7 @@ private struct DecisionCard: View {
         }
         .help(state.map { "\(whoName) · \($0.label)" } ?? whoName)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([decision.kind == "usage_limit" ? "사용 한도" : decision.isToolPermission ? "도구 승인" : nil, whoName, state?.label, relativeTime(decision.createdAt)].compactMap { $0 }.joined(separator: ", "))
+        .accessibilityLabel([decision.kind == "usage_limit" ? String(localized: "사용 한도") : decision.isToolPermission ? String(localized: "도구 승인") : nil, whoName, state?.label, relativeTime(decision.createdAt)].compactMap { $0 }.joined(separator: ", "))
     }
 
     @ViewBuilder private var reopenLine: some View {
@@ -1045,7 +1045,7 @@ private struct DecisionCard: View {
             let last = decision.lastChoice.map { key in decision.options.first { $0.k == key }?.label ?? key }
             // Web .ibx-reopened: 13.5 at 1.45, danger.
             Label {
-                Text(last.map { "\(note) · 직전 답: \($0)" } ?? note)
+                Text(last.map { String(localized: "\(note) · 직전 답: \($0)") } ?? note)
                     .lineSpacing(CELeading.note)
                     .fixedSize(horizontal: false, vertical: true)
             } icon: {
@@ -1056,12 +1056,12 @@ private struct DecisionCard: View {
     }
 
     private var staleNotice: some View {
-        let detail = latest.map { "지금은 '\(DecisionStateInfo($0).label)' 상태입니다. 선택은 지우고 메모는 남겼습니다." }
-            ?? "더 불러올 수 없습니다. 결재된 항목이나 대화에서 확인하세요. 메모는 남겼습니다."
+        let detail = latest.map { String(localized: "지금은 '\(DecisionStateInfo($0).label)' 상태입니다. 선택은 지우고 메모는 남겼습니다.") }
+            ?? String(localized: "더 불러올 수 없습니다. 결재된 항목이나 대화에서 확인하세요. 메모는 남겼습니다.")
         let reopenable = latest.map { $0.status == "closed" && $0.closeKind != nil } ?? false
         return VStack(alignment: .leading, spacing: 6) {
-            InlineNotice(tone: .attention, icon: "arrow.triangle.2.circlepath", title: "결재 내용이 바뀌었습니다", detail: detail,
-                         actionTitle: latest == nil ? nil : "최신 내용 검토", action: latest == nil ? nil : onReviewLatest)
+            InlineNotice(tone: .attention, icon: "arrow.triangle.2.circlepath", title: String(localized: "결재 내용이 바뀌었습니다"), detail: detail,
+                         actionTitle: latest == nil ? nil : String(localized: "최신 내용 검토"), action: latest == nil ? nil : onReviewLatest)
             if reopenable {
                 Button(reopenBusy ? "여는 중" : "다시 열기", action: onReopen)
                     .ceSecondaryButton().ceCompactControl()
@@ -1139,7 +1139,7 @@ private struct DecisionCard: View {
     @ViewBuilder private var answerArea: some View {
         let typed = self.typed
         let picked = self.picked
-        if !free { options(disabled: busy || stale || store.isDemo || store.isArchive) }
+        if !free { options(disabled: busy || stale || store.isArchive) }
         // Web .ibx-memo: a 44pt .input (15px at 1.5, up to 160 tall) with a 44pt glass button beside it.
         HStack(alignment: .bottom, spacing: 8) {
             TextField(free ? "답을 적어 주세요" : "메모 (선택) — 다른 생각이나 조건", text: $review.note, axis: .vertical)
@@ -1149,7 +1149,7 @@ private struct DecisionCard: View {
                 .onChange(of: memoFocused) { _, focused in router.inlineFieldFocused = focused }
                 .onDisappear { if memoFocused { router.inlineFieldFocused = false } }
                 .ceField(focused: memoFocused)
-                .disabled(busy || store.isDemo || store.isArchive)
+                .disabled(busy || store.isArchive)
                 .onSubmit { if free && typed && !locked && !busy && !stale { memoOnly = true; review.freeConfirmationCancelled = false } }
                 .accessibilityLabel(free ? "답" : "메모")
             if free && typed && review.freeConfirmationCancelled && !stale {
@@ -1158,15 +1158,15 @@ private struct DecisionCard: View {
                 // 도구 승인 카드는 허용·거절 가운데 하나를 고른다(메모만 보내면 서버가 거절로 본다).
                 Button("메모만 보내기") { memoOnly = true }
                     .ceSecondaryButton().controlSize(.regular).fixedSize()
-                    .disabled(busy || store.isDemo || store.isArchive)
+                    .disabled(busy || store.isArchive)
             }
         }
         if showsConfirm {
             let quoted = picked?.label ?? (free ? plainOneLine(review.note) : nil)
             ConfirmBar(
                 quoted: quoted,
-                verb: free ? "답 보내기" : quoted.map { "\(particleRo($0)) 결정" } ?? "메모만 보내기",
-                hint: picked != nil && typed ? "메모도 함께 보냅니다" : nil,
+                verb: free ? String(localized: "답 보내기") : quoted.map { String(localized: "\(particleRo($0)) 결정") } ?? String(localized: "메모만 보내기"),
+                hint: picked != nil && typed ? String(localized: "메모도 함께 보냅니다") : nil,
                 busy: busy,
                 disabled: locked,
                 stretch: !wide,
@@ -1243,7 +1243,7 @@ struct OptionTile: View {
                         .lineSpacing(CELeading.spacing(15, 1.4))
                         .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
                     if recommended { RecommendedBadge() }
-                    if wasLastChoice { Tag("직전 답") }
+                    if wasLastChoice { Tag(String(localized: "직전 답")) }
                     Spacer(minLength: 0)
                     if picked {
                         Image(systemName: "checkmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
@@ -1347,8 +1347,14 @@ struct ConfirmBar: View {
                             Text("보내는 중")
                         } else {
                             // A long quote truncates; the verb always stays visible.
-                            if let quoted { Text("'\(quoted)'").lineLimit(1).truncationMode(.tail) }
-                            Text(verb).lineLimit(1).fixedSize()
+                            // 영어는 동사가 앞에 온다("Decide 'A'"). 한국어는 예전 그대로 인용 뒤에 동사("'A'로 결정").
+                            if AppLanguage.current == .en {
+                                Text(verb).lineLimit(1).fixedSize()
+                                if let quoted { Text(" '\(quoted)'").lineLimit(1).truncationMode(.tail) }
+                            } else {
+                                if let quoted { Text("'\(quoted)'").lineLimit(1).truncationMode(.tail) }
+                                Text(verb).lineLimit(1).fixedSize()
+                            }
                         }
                     }
                     .frame(maxWidth: stretch ? .infinity : nil)
@@ -1370,7 +1376,7 @@ private struct AnsweredBody: View {
     let asker: Member?
 
     private var closed: Bool { decision.status == "closed" }
-    private var who: String { decision.who.isEmpty ? "담당자" : decision.who }
+    private var who: String { decision.who.isEmpty ? String(localized: "담당자") : decision.who }
 
     var body: some View {
         // Web .ibx-answered (gap 4): title 14.5 / 600 at 1.4; answer, memo and close reason 13.5 at 1.5; meta 12.5 at 1.45.
@@ -1378,9 +1384,9 @@ private struct AnsweredBody: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .center, spacing: 8) {
                 Text(who).font(CEFont.secondary.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
-                if decision.kind == "usage_limit" { Tag("사용 한도", tone: .attention) }
-                if decision.isToolPermission { Tag("도구 승인") }
-                if closed { Tag("닫힘") } else { AnswerFlow(decision: decision) }
+                if decision.kind == "usage_limit" { Tag(String(localized: "사용 한도"), tone: .attention) }
+                if decision.isToolPermission { Tag(String(localized: "도구 승인")) }
+                if closed { Tag(String(localized: "닫힘")) } else { AnswerFlow(decision: decision) }
                 Spacer(minLength: 6)
                 Text(relativeTime(decision.answeredAt ?? decision.closedAt ?? decision.createdAt))
                     .font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink2).fixedSize()
@@ -1389,10 +1395,10 @@ private struct AnsweredBody: View {
                 .lineSpacing(CELeading.spacing(14.5, 1.4))
                 .fixedSize(horizontal: false, vertical: true)
             if closed {
-                Text("닫힘" + (decision.closeReason.map { " · \($0)" } ?? ""))
+                Text(String(localized: "닫힘") + (decision.closeReason.map { " · \($0)" } ?? ""))
                     .font(CEFont.note).foregroundStyle(CE.ink).lineSpacing(textLeading)
                     .fixedSize(horizontal: false, vertical: true)
-                let meta = [closeKindName(decision.closeKind), decision.closedBy.map { "닫은 이: \($0)" }].compactMap { $0 }
+                let meta = [closeKindName(decision.closeKind), decision.closedBy.map { String(localized: "닫은 이: \($0)") }].compactMap { $0 }
                 if !meta.isEmpty {
                     Text(meta.joined(separator: " · ")).font(CEFont.meta).foregroundStyle(CE.ink2).lineSpacing(metaLeading)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1426,8 +1432,8 @@ private struct AnsweredBody: View {
 
     private var answerLabel: String? {
         let chosen = decision.choice.map { key in decision.options.first { $0.k == key }?.label ?? key }
-        guard let chosen else { return (decision.note ?? "").isEmpty ? "답 없음" : nil }
-        return decision.batch ? "\(chosen) (묶음 추천대로)" : chosen
+        guard let chosen else { return (decision.note ?? "").isEmpty ? String(localized: "답 없음") : nil }
+        return decision.batch ? String(localized: "\(chosen) (묶음 추천대로)") : chosen
     }
 }
 
@@ -1436,7 +1442,7 @@ private struct AnswerFlow: View {
     let decision: Decision
     var body: some View {
         let received = decision.status == "delivered"
-        let who = decision.who.isEmpty ? "담당자" : decision.who
+        let who = decision.who.isEmpty ? String(localized: "담당자") : decision.who
         // Web .ibx-flow: 12.5 / 600, gap 5, a 12×8 arrow.
         HStack(spacing: 5) {
             Text("보냄").foregroundStyle(CE.success)
@@ -1464,9 +1470,9 @@ private struct InboxSegmentBar: View {
 
     var body: some View {
         HStack(spacing: 2) {
-            InboxSegmentItem(title: "결재할 항목", count: openCount, highlightCount: true, selected: segment == .open,
+            InboxSegmentItem(title: String(localized: "결재할 항목"), count: openCount, highlightCount: true, selected: segment == .open,
                              stretch: stretch, drop: drop) { segment = .open }
-            InboxSegmentItem(title: "결재된 항목", count: doneCount, highlightCount: false, selected: segment == .done,
+            InboxSegmentItem(title: String(localized: "결재된 항목"), count: doneCount, highlightCount: false, selected: segment == .done,
                              stretch: stretch, drop: drop) { segment = .done }
         }
         // Scoped to the pill: only the drop slides; the list below swaps without animating every card.
@@ -1597,7 +1603,7 @@ private struct ClampedDetail: View {
                     }
                 }
             if clamps {
-                DisclosureLink(title: expanded ? "접기" : "더 보기", expanded: expanded, action: onToggle)
+                DisclosureLink(title: expanded ? String(localized: "접기") : String(localized: "더 보기"), expanded: expanded, action: onToggle)
             }
         }
     }
@@ -1663,7 +1669,7 @@ private struct DecisionThumb: View {
     @State private var hovering = false
 
     private var height: CGFloat { isMac ? 128 : 112 }
-    private var name: String { attachment.name.isEmpty ? "이름 없는 그림" : attachment.name }
+    private var name: String { attachment.name.isEmpty ? String(localized: "이름 없는 그림") : attachment.name }
     /// The image's own shape at the thumbnail height, kept within sensible bounds.
     private var width: CGFloat {
         guard pixelSize.width > 0, pixelSize.height > 0 else { return height }
@@ -1702,7 +1708,7 @@ private struct DecisionThumb: View {
         .buttonStyle(.plain)
         .disabled(loading)
         .onHover { hovering = $0 }
-        .help(failure ?? "\(name) 크게 보기")
+        .help(failure ?? String(localized: "\(name) 크게 보기"))
         .accessibilityLabel("\(name) 크게 보기")
         .quickLookPreview($quickLook)
         .task(id: attachment.id) { await load() }
@@ -1712,7 +1718,7 @@ private struct DecisionThumb: View {
     private func load() async {
         guard fileURL == nil, !loading else { return }
         guard let api = store.api else {
-            failure = store.isDemo ? "샘플에는 원본 파일이 없습니다." : "서버 연결 후 원본을 불러올 수 있습니다."
+            failure = String(localized: "서버 연결 후 원본을 불러올 수 있습니다.")
             return
         }
         loading = true
@@ -1792,12 +1798,14 @@ private func finalConsonant(_ word: String) -> UInt32? {
 
 /// "로" / "으로" for the word, "(으)로" when it cannot be decided.
 private func particleRo(_ word: String) -> String {
+    guard appUsesParticles else { return "" }
     guard let jong = finalConsonant(word) else { return "(으)로" }
     return jong == 0 || jong == 8 ? "로" : "으로"
 }
 
 /// "이" / "가" for the word, "이(가)" when it cannot be decided.
 private func particleIGa(_ word: String) -> String {
+    guard appUsesParticles else { return "" }
     guard let jong = finalConsonant(word) else { return "이(가)" }
     return jong == 0 ? "가" : "이"
 }

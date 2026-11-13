@@ -14,7 +14,7 @@ struct ProjectConnection: Codable, Sendable, Equatable {
         guard let detail, !detail.isEmpty else { return nil }
         guard reason == "backend_down", let open = detail.range(of: " (", options: .backwards), detail.hasSuffix(")") else { return detail }
         let head = detail[..<open.lowerBound].trimmingCharacters(in: .whitespaces)
-        return head.isEmpty ? detail : head + " · 원인은 실행 환경 보기에서 확인할 수 있습니다"
+        return head.isEmpty ? detail : head + String(localized: " · 원인은 실행 환경 보기에서 확인할 수 있습니다")
     }
 }
 extension ProjectConnection {
@@ -124,6 +124,8 @@ struct Member: Codable, Sendable, Identifiable, Equatable {
     var parallel: Bool = false
     var queuedCount: Int = 0
     var lastError: String? = nil
+    /// lastError 와 짝인 보류 코드(서버 members.fence_code, 예: starting_unknown). 옛 서버는 싣지 않는다. 보일 문장을 고를 때만 쓴다.
+    var fenceCode: String? = nil
     var updatedAt: String = ""
     var createdAt: String = ""
     var contextWindow: Int? = nil
@@ -170,6 +172,7 @@ extension Member {
         parallel = try c.decodeIfPresent(Bool.self, forKey: ModelKey("parallel")) ?? false
         queuedCount = try c.decodeIfPresent(Int.self, forKey: ModelKey("queuedCount")) ?? 0
         lastError = try c.decodeIfPresent(String.self, forKey: ModelKey("lastError"))
+        fenceCode = try? c.decodeIfPresent(String.self, forKey: ModelKey("fenceCode"))
         updatedAt = try c.decodeIfPresent(String.self, forKey: ModelKey("updatedAt")) ?? ""
         createdAt = try c.decodeIfPresent(String.self, forKey: ModelKey("createdAt")) ?? ""
         contextWindow = try c.decodeIfPresent(Int.self, forKey: ModelKey("contextWindow"))
@@ -1074,8 +1077,8 @@ struct DeliveryNoticeItem: Codable, Sendable, Identifiable {
         return (allowedActions ?? []).filter { $0 != .unknown }
     }
     var reasonDescription: String {
-        guard let reason, Self.knownReasons.contains(reason) else { return "상세 내용을 확인해 주세요" }
-        return note ?? recommendation?.text ?? "상세 내용을 확인해 주세요"
+        guard let reason, Self.knownReasons.contains(reason) else { return String(localized: "상세 내용을 확인해 주세요") }
+        return note ?? recommendation?.text ?? String(localized: "상세 내용을 확인해 주세요")
     }
     private static let knownReasons: Set<String> = [
         "blocked", "input_busy", "asleep", "offline", "backend_down", "runner_disabled",

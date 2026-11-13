@@ -19,11 +19,11 @@ struct FolderPickerView: View {
 
     private var selectable: Bool { !loading && !newFolder && (legacy ? !manualPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : listing.map { $0.path != $0.home } == true) }
     var body: some View {
-        CESheet("폴더 고르기", icon: "folder", width: 560, scrolls: false, onClose: { if !creating { dismiss() } }) {
+        CESheet(String(localized: "폴더 고르기"), icon: "folder", width: 560, scrolls: false, onClose: { if !creating { dismiss() } }) {
             VStack(alignment: .leading, spacing: 12) {
                 if legacy {
                     // An older server cannot list folders: the path is typed in the app's ordinary input well.
-                    SetupField("폴더 경로", hint: "이 서버에서는 경로를 직접 입력해 주세요. 서버 컴퓨터의 폴더입니다.") {
+                    SetupField(String(localized: "폴더 경로"), hint: String(localized: "이 서버에서는 경로를 직접 입력해 주세요. 서버 컴퓨터의 폴더입니다.")) {
                         TextField("폴더 경로", text: $manualPath, prompt: Text(verbatim: "~/code/project"))
                             .labelsHidden()
                             .font(SetupFont.codeInput)
@@ -135,7 +135,7 @@ struct FolderPickerView: View {
         .frame(minHeight: 32)
         .background(CE.bgDeep.opacity(0.45), in: Capsule())
         .overlay { Capsule().strokeBorder(Color.white.opacity(0.1)) }
-        .accessibilityLabel("현재 폴더: " + listing.path)
+        .accessibilityLabel(String(localized: "현재 폴더: ") + listing.path)
     }
 
     /// The "/" between crumbs, in the crumbs' own face.

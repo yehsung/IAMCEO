@@ -145,7 +145,7 @@ extension AppStore {
             if (error as? APIError)?.status == 404 { absentOperations.insert(tracked.id) } else { absentOperations.remove(tracked.id) }
             if (error as? APIError)?.status == 401 { handle(error) }
             else if announce, tracked.status == .unknown || tracked.status == .pending {
-                errorMessage = "작업 결과 확인 중입니다. 미확인 작업은 재실행하지 않습니다."
+                errorMessage = String(localized: "작업 결과 확인 중입니다. 미확인 작업은 재실행하지 않습니다.")
             }
         }
     }
@@ -168,7 +168,7 @@ extension AppStore {
         // 조작권은 서버에서 5분이면 끝난다. 그 두 배가 지나도 결과가 없으면 더 기다리지 않는다.
         guard sessionGone || notArrived || age >= 600 else { return false }
         let receipt = OperationReceipt(operationId: id, kind: tracked.kind, memberId: tracked.memberID, status: .refused,
-                                       error: "결과를 확인하지 못해 닫았습니다. 필요하면 다시 시도해 주세요.")
+                                       error: String(localized: "결과를 확인하지 못해 닫았습니다. 필요하면 다시 시도해 주세요."))
         do {
             if tracked.kind == .terminalControl, submissions?.terminalAttempt(id: id) == nil {
                 try saveJournal { $0.operations[id]?.status = .refused }
@@ -226,11 +226,11 @@ extension AppStore {
         }
         operationResults[tracked.id] = receipt
         if receipt.status == .unknown || receipt.status == .pending {
-            if announce { errorMessage = "작업 결과 확인 중입니다. 미확인 작업은 재실행하지 않습니다." }
+            if announce { errorMessage = String(localized: "작업 결과 확인 중입니다. 미확인 작업은 재실행하지 않습니다.") }
         } else if receipt.status == .refused, previousStatus != .refused {
             if tracked.kind == .terminalControl && terminalRefusalIsLocal(memberID: tracked.memberID, error: receipt.refusalError()) {
                 terminalWindowNotices[tracked.memberID] = receipt.error
-            } else { errorMessage = receipt.error ?? "서버가 작업을 거부했습니다." }
+            } else { errorMessage = receipt.error ?? String(localized: "서버가 작업을 거부했습니다.") }
         }
     }
 

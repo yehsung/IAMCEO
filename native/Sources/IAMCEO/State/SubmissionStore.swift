@@ -34,8 +34,8 @@ struct MessageSubmission: Codable, Sendable, Identifiable {
         failureDisposition == .retained || (failureDisposition == nil && (status == .refused || status == .notAccepted))
     }
     var failureText: String {
-        "보내지 못했습니다: \(failureReason ?? "서버가 접수하지 않았습니다")"
-            + (failureDisposition == .restored ? ". 글은 입력칸에 되돌려 두었습니다" : "")
+        String(localized: "보내지 못했습니다: \(failureReason ?? String(localized: "서버가 접수하지 않았습니다"))")
+            + (failureDisposition == .restored ? String(localized: ". 글은 입력칸에 되돌려 두었습니다") : "")
     }
     var failurePreview: String { String(draft.text.prefix(while: { !$0.isNewline })) }
 
@@ -183,7 +183,7 @@ final class SubmissionStore {
         catch let error as APIError where error.status == 404 {
             if var current = state.messages[id], current.status != .accepted, current.status != .refused {
                 current.status = .notAccepted
-                current.failureReason = "서버가 접수하지 않았습니다"
+                current.failureReason = String(localized: "서버가 접수하지 않았습니다")
                 try update { $0.messages[id] = current }
             }
         }

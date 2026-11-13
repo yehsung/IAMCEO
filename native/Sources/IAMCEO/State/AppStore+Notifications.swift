@@ -109,6 +109,8 @@ extension AppStore {
     func processNotifications(router: Router, inbox: NotificationInbox? = nil) async {
         let inbox = inbox ?? .shared
         registerRouter(router)
+        // F1: 연결 전 마지막 상태를 보는 중이면 그 화면으로만 옮긴다(알림은 남겨 두고 연결되면 평소대로 연다).
+        if lastSeen != nil, api == nil { peekNotificationInLastSeen(router: router, inbox: inbox); return }
         guard !isDemo, foreground, connectionStatus == .connected || connectionLost, let api, let serverID,
               !notificationFlight else { return }
         notificationFlight = true
@@ -122,7 +124,7 @@ extension AppStore {
                 notificationRefreshRevision = inbox.refreshRevision
                 await enqueueRefresh(.all, immediate: true)
             }
-            if let first = inbox.pending.first, first.serverID != serverID { notificationNotice = "이 알림의 호스트에 연결해 주세요." }
+            if let first = inbox.pending.first, first.serverID != serverID { notificationNotice = String(localized: "이 알림의 호스트에 연결해 주세요.") }
             return
         }
         guard link.serverID == serverID else { pendingNotification = nil; return }
@@ -162,19 +164,19 @@ extension AppStore {
             let snapshot = context.state
             if let projectID {
                 guard snapshot?.project.id == projectID, snapshot?.project.archived == false else {
-                    throw APIError(status: 404, message: "보관되었거나 없는 프로젝트입니다.")
+                    throw APIError(status: 404, message: String(localized: "보관되었거나 없는 프로젝트입니다."))
                 }
             }
             switch target {
             case .inbox(let project, let id):
                 guard let decision = context.decision, decision.id == id, decision.projectId == project else { throw SubmissionError.mismatchedResult }
-                if decision.status != "open" { route.notice = "이미 처리된 결재입니다." }
+                if decision.status != "open" { route.notice = String(localized: "이미 처리된 결재입니다.") }
             case .team(let project, let id):
                 guard snapshot?.members.contains(where: { $0.id == id && $0.projectId == project }) == true else {
-                    throw APIError(status: 404, message: "팀원을 찾을 수 없습니다.")
+                    throw APIError(status: 404, message: String(localized: "팀원을 찾을 수 없습니다."))
                 }
             case .chat(let project, _, let id, _):
-                if context.missingReport { route.notice = "보고를 찾을 수 없습니다." }
+                if context.missingReport { route.notice = String(localized: "보고를 찾을 수 없습니다.") }
                 else {
                     guard context.messages.allSatisfy({ $0.projectId == project }), let anchor = context.messages.first(where: { $0.id == id }) else {
                         throw SubmissionError.mismatchedResult
@@ -211,13 +213,13 @@ extension AppStore {
             guard epoch == generation else { return }
             if !valid() || projectEpoch != projectGeneration { pendingNotification = nil; return }
             if error is SubmissionError || error is DecodingError {
-                pendingNotification = nil; notificationNotice = "지원하지 않거나 올바르지 않은 알림 목적지입니다."
+                pendingNotification = nil; notificationNotice = String(localized: "지원하지 않거나 올바르지 않은 알림 목적지입니다.")
             } else if let error = error as? APIError, [400, 401, 403, 404, 410, 422, 501].contains(error.status) {
                 pendingNotification = nil
-                notificationNotice = error.status == 404 ? "알림의 항목이 없거나 프로젝트가 보관되었습니다." : "알림의 목적지를 열 수 없습니다."
+                notificationNotice = error.status == 404 ? String(localized: "알림의 항목이 없거나 프로젝트가 보관되었습니다.") : String(localized: "알림의 목적지를 열 수 없습니다.")
                 if error.status == 401 { inbox.discardPending(); handle(error) }
             } else {
-                notificationNotice = "알림의 최신 상태를 확인하지 못했습니다. 연결 후 다시 확인합니다."
+                notificationNotice = String(localized: "알림의 최신 상태를 확인하지 못했습니다. 연결 후 다시 확인합니다.")
             }
         }
     }

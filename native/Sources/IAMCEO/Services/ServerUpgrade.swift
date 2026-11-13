@@ -126,10 +126,10 @@ struct VersionWatchHooks: ViewModifier {
 /// D1 의 사용자 문구. 설정 줄과 질문이 같은 말을 쓴다.
 enum ServerUpgradeText {
     static func question(_ offer: ServerUpgradeOffer) -> String {
-        "이 Mac의 서버는 옛 버전(\(offer.runningVersion))으로 돌고 있습니다. 설치한 앱에 든 새 버전(\(offer.bundledVersion))으로 다시 시작합니다. "
-            + "몇 초 동안 연결이 끊기지만 팀장 세션은 그대로 이어집니다."
+        String(localized: "이 Mac의 서버는 옛 버전(\(offer.runningVersion))으로 돌고 있습니다. 설치한 앱에 든 새 버전(\(offer.bundledVersion))으로 다시 시작합니다. ")
+            + String(localized: "몇 초 동안 연결이 끊기지만 팀장 세션은 그대로 이어집니다.")
     }
     static func settingsHint(_ offer: ServerUpgradeOffer) -> String {
-        "도는 서버 \(offer.runningVersion) · 앱에 든 서버 \(offer.bundledVersion). 팀장 세션은 그대로 이어집니다."
+        String(localized: "도는 서버 \(offer.runningVersion) · 앱에 든 서버 \(offer.bundledVersion). 팀장 세션은 그대로 이어집니다.")
     }
 }

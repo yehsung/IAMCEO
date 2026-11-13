@@ -6,7 +6,7 @@
 
 ## Knowing when a new version is out
 
-- **Mac app:** while it runs, it asks GitHub for the latest release once a day. When there is a newer one, a "새 버전 있음" (new version) row appears under **설정 → 연결 → 앱** (Settings → Connection → App), and **받기** (get) opens the release page. It only tells you; nothing is downloaded or installed on its own. What that request carries is in the [privacy policy](../../PRIVACY.md).
+- **Mac app:** while it runs, it asks GitHub for the latest release once a day. When there is a newer one, a "새 버전 있음" (New version available) row appears under **설정 → 연결 → 앱** (Settings → Connection → App), and **받기** (Download) opens the release page. It only tells you; nothing is downloaded or installed on its own. What that request carries is in the [privacy policy](../../PRIVACY.md).
 - **iPhone app:** the App Store handles updates.
 
 ## Moving to a new version
@@ -42,7 +42,7 @@ If you run the server from source (a git checkout), upgrade to a commit instead 
 ### The server after you replace the app
 
 - **Homebrew:** `brew upgrade` and `brew reinstall` stop the server and remove the login item before replacing the app. When they finish, open the IAMCEO app and press 이 Mac에서 시작 (Start on this Mac) once to register the new version's server. Staff sessions continue, because the engine holds them.
-- **The install script or a DMG:** when you replace only the app, the server keeps running the old version until it restarts. The Mac app notices and asks once: **서버를 새 버전으로 다시 시작할까요?** (restart the server on the new version?). **다시 시작** (restart) switches to the server inside the new app. To do it later, use the "새 버전으로 다시 시작" row under **설정 → 연결 → 접속** (Settings → Connection → Connection). Staff sessions continue through the restart, because the engine holds them.
+- **The install script or a DMG:** when you replace only the app, the server keeps running the old version until it restarts. The Mac app notices and asks once: **서버를 새 버전으로 다시 시작할까요?** (Restart the server on the new version?). **다시 시작** (Restart) switches to the server inside the new app. To do it later, use the "새 버전으로 다시 시작" row under **설정 → 연결 → 접속** (Settings → Connection → Server). Staff sessions continue through the restart, because the engine holds them.
 
 The question appears only for an installation the app manages itself (installed as an app and registered with 이 Mac에서 시작). A server you run from source is never asked about or restarted.
 
@@ -121,7 +121,7 @@ An archived project can be exported or deleted, one project at a time.
 
 Moving the app to the Trash alone can leave a running server and AI sessions behind. Stop IAMCEO completely first, then delete the app.
 
-- **In the app:** **이 Mac에서 완전히 멈추기** (Stop completely on this Mac) at the bottom of **설정 → 연결** (Settings → Connection) in the Mac app. It appears only when you installed the app and no login service is registered, or the registered one is the app's own (it is hidden when a server run from source or an older command-line install is registered). After it stops, a **데이터도 지우기** (delete the data too) row lets you delete the data as well, after one more confirmation. While the app is connected to another Mac's server, it deals only with IAMCEO and the data on this Mac and keeps the connection to that server.
+- **In the app:** **이 Mac에서 완전히 멈추기** (Stop completely on this Mac) at the bottom of **설정 → 연결** (Settings → Connection) in the Mac app. It appears only when you installed the app and no login service is registered, or the registered one is the app's own (it is hidden when a server run from source or an older command-line install is registered). After it stops, a **데이터도 지우기** (Delete the data too) row lets you delete the data as well, after one more confirmation. While the app is connected to another Mac's server, it deals only with IAMCEO and the data on this Mac and keeps the connection to that server.
 - **On the command line:** `iamceo uninstall` (`--dry-run` shows what it would do first; `--yes` skips the questions)
 
 In this order:

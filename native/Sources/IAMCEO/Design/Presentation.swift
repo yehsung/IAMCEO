@@ -12,7 +12,7 @@ func providerFullName(_ cli: String) -> String {
 }
 
 func rankName(_ kind: String) -> String {
-    switch kind { case "conductor": "총괄"; case "root": "본사 AI"; case "worker": "팀장"; default: kind }
+    switch kind { case "conductor": String(localized: "총괄"); case "root": String(localized: "본사 AI"); case "worker": String(localized: "팀장"); default: kind }
 }
 
 /// CLI execution state of a member. Never a statement about task completion — only a `완료` report says that.
@@ -27,41 +27,41 @@ struct MemberStatusInfo: Sendable {
     init(_ status: String) {
         switch status {
         case "network_outage":
-            label = "인터넷 끊김으로 멈춤"; tone = .attention; icon = "wifi.slash"; live = false; needsMe = false
-            explanation = "인터넷 연결이 돌아오면 자동으로 이어 갑니다."
+            label = String(localized: "인터넷 끊김으로 멈춤"); tone = .attention; icon = "wifi.slash"; live = false; needsMe = false
+            explanation = String(localized: "인터넷 연결이 돌아오면 자동으로 이어 갑니다.")
         case "network_retry":
-            label = "네트워크 재시도 중"; tone = .attention; icon = "arrow.clockwise"; live = false; needsMe = false
-            explanation = "네트워크 연결을 다시 확인하고 있습니다."
+            label = String(localized: "네트워크 재시도 중"); tone = .attention; icon = "arrow.clockwise"; live = false; needsMe = false
+            explanation = String(localized: "네트워크 연결을 다시 확인하고 있습니다.")
         case "usage_limit":
-            label = "사용 한도 도달"; tone = .attention; icon = "hourglass"; live = false; needsMe = true
-            explanation = "한도가 풀리면 자동으로 이어 갑니다. 다른 모델로 바꾸면 바로 이어 갑니다."
+            label = String(localized: "사용 한도 도달"); tone = .attention; icon = "hourglass"; live = false; needsMe = true
+            explanation = String(localized: "한도가 풀리면 자동으로 이어 갑니다. 다른 모델로 바꾸면 바로 이어 갑니다.")
         case "unknown":
-            label = "상태 확인 불가"; tone = .attention; icon = "questionmark.circle"; live = false; needsMe = false
-            explanation = "지금 상태를 확인하지 못했습니다."
+            label = String(localized: "상태 확인 불가"); tone = .attention; icon = "questionmark.circle"; live = false; needsMe = false
+            explanation = String(localized: "지금 상태를 확인하지 못했습니다.")
         case "working":
-            label = "일하는 중"; tone = .live; icon = "bolt.fill"; live = true; needsMe = false
-            explanation = "지금 일을 처리하고 있습니다. 뒤에서 도는 작업을 기다리는 동안도 일하는 중으로 봅니다."
+            label = String(localized: "일하는 중"); tone = .live; icon = "bolt.fill"; live = true; needsMe = false
+            explanation = String(localized: "지금 일을 처리하고 있습니다. 뒤에서 도는 작업을 기다리는 동안도 일하는 중으로 봅니다.")
         case "waiting":
-            label = "내 답 기다림"; tone = .attention; icon = "hourglass"; live = false; needsMe = true
-            explanation = "답하지 않은 결재가 있습니다. 답을 기다리는 동안 다른 일을 계속할 수도 있습니다."
+            label = String(localized: "내 답 기다림"); tone = .attention; icon = "hourglass"; live = false; needsMe = true
+            explanation = String(localized: "답하지 않은 결재가 있습니다. 답을 기다리는 동안 다른 일을 계속할 수도 있습니다.")
         case "blocked":
-            label = "승인 창 앞"; tone = .approval; icon = "hand.raised.fill"; live = false; needsMe = true
-            explanation = "승인이나 선택을 묻는 창 앞에서 멈췄습니다. 결재함이나 터미널에서 골라 주세요."
+            label = String(localized: "승인 창 앞"); tone = .approval; icon = "hand.raised.fill"; live = false; needsMe = true
+            explanation = String(localized: "승인이나 선택을 묻는 창 앞에서 멈췄습니다. 결재함이나 터미널에서 골라 주세요.")
         case "idle":
-            label = "쉬는 중"; tone = .neutral; icon = "pause.circle"; live = false; needsMe = false
-            explanation = "다음 지시를 기다립니다. 맡은 일이 끝났는지는 보고로 확인하세요."
+            label = String(localized: "쉬는 중"); tone = .neutral; icon = "pause.circle"; live = false; needsMe = false
+            explanation = String(localized: "다음 지시를 기다립니다. 맡은 일이 끝났는지는 보고로 확인하세요.")
         case "asleep":
-            label = "잠듦"; tone = .dim; icon = "moon.zzz"; live = false; needsMe = false
-            explanation = "세션을 내려 두었습니다. 기록은 남아 있고, 깨우거나 지시를 보내면 다시 엽니다."
+            label = String(localized: "잠듦"); tone = .dim; icon = "moon.zzz"; live = false; needsMe = false
+            explanation = String(localized: "세션을 내려 두었습니다. 기록은 남아 있고, 깨우거나 지시를 보내면 다시 엽니다.")
         case "offline":
-            label = "안 보임"; tone = .dim; icon = "eye.slash"; live = false; needsMe = false
-            explanation = "실행 중인 화면을 찾지 못했습니다. 새 지시가 오면 다시 엽니다."
+            label = String(localized: "안 보임"); tone = .dim; icon = "eye.slash"; live = false; needsMe = false
+            explanation = String(localized: "실행 중인 화면을 찾지 못했습니다. 새 지시가 오면 다시 엽니다.")
         case "error":
-            label = "오류"; tone = .danger; icon = "exclamationmark.triangle.fill"; live = false; needsMe = true
-            explanation = "일을 시작하거나 이어 가다 실패했습니다. 오류 내용을 보고 깨우거나 새로 시작하세요."
+            label = String(localized: "오류"); tone = .danger; icon = "exclamationmark.triangle.fill"; live = false; needsMe = true
+            explanation = String(localized: "일을 시작하거나 이어 가다 실패했습니다. 오류 내용을 보고 깨우거나 새로 시작하세요.")
         default:
             label = status; tone = .neutral; icon = "questionmark.circle"; live = false; needsMe = false
-            explanation = "알 수 없는 상태입니다."
+            explanation = String(localized: "알 수 없는 상태입니다.")
         }
     }
 
@@ -105,34 +105,34 @@ struct MemberStatusInfo: Sendable {
         let date = parseISODate(since)
         if let date {
             let minutes = max(0, Int(now.timeIntervalSince(date) / 60))
-            return "화면 출력 없이 \(minutes)분째 진행 중"
+            return String(localized: "화면 출력 없이 \(minutes)분째 진행 중")
         }
-        return "화면 출력 없이 진행 중입니다. 일하는 중인 것은 확인됩니다."
+        return String(localized: "화면 출력 없이 진행 중입니다. 일하는 중인 것은 확인됩니다.")
     }
 
     /// Prefer this overload when the server supplies observation metadata.
     init(_ member: Member) {
         let observation = member.statusObservation
         if observation?.ownership == "conflict" {
-            self.init(label: "소유 관계 확인 필요", tone: .attention, icon: "lock.trianglebadge.exclamationmark",
-                      explanation: "이 팀원의 화면을 다른 곳에서도 잡고 있어 마지막 상태만 보여 줍니다. 자동 전달은 멈춰 둡니다.", needsMe: true)
+            self.init(label: String(localized: "소유 관계 확인 필요"), tone: .attention, icon: "lock.trianglebadge.exclamationmark",
+                      explanation: String(localized: "이 팀원의 화면을 다른 곳에서도 잡고 있어 마지막 상태만 보여 줍니다. 자동 전달은 멈춰 둡니다."), needsMe: true)
         } else if let code = observation?.error?.code, Self.isNetworkPause(code) {
             self = Self(code)
         } else if let guide = BlockedGuide(member), !member.hasFolderTrustApproval {
             // The server said why it is stuck: say that and point at the terminal, instead of "상태 확인 불가".
             self.init(label: guide.label, tone: .attention, icon: "terminal", explanation: guide.explanation, needsMe: true)
         } else if Self.observationUnavailable(member) {
-            self.init(label: "상태 확인 불가", tone: .attention, icon: "questionmark.circle",
-                      explanation: observation?.error?.note ?? "지금 상태를 읽지 못했습니다. 마지막으로 본 상태를 보여 주며 다시 확인하고 있습니다.")
+            self.init(label: String(localized: "상태 확인 불가"), tone: .attention, icon: "questionmark.circle",
+                      explanation: observation?.error?.note ?? String(localized: "지금 상태를 읽지 못했습니다. 마지막으로 본 상태를 보여 주며 다시 확인하고 있습니다."))
         } else if member.status == "blocked", !["permission", "selection"].contains(member.blockedReason ?? ""), !member.hasFolderTrustApproval {
-            self.init(label: member.blockedReason == "setup" ? "상태 설정 확인 중" : "상태 확인 불가",
-                      tone: .attention, icon: "questionmark.circle", explanation: "승인 창인지 아직 확인하지 못했습니다. 다시 확인하는 동안 자동 전달은 멈춰 둡니다.")
+            self.init(label: member.blockedReason == "setup" ? String(localized: "상태 설정 확인 중") : String(localized: "상태 확인 불가"),
+                      tone: .attention, icon: "questionmark.circle", explanation: String(localized: "승인 창인지 아직 확인하지 못했습니다. 다시 확인하는 동안 자동 전달은 멈춰 둡니다."))
         } else if member.origin == "manual" {
             let base = Self(member.status)
-            self.init(label: "\(base.label) · 추정", tone: base.tone, icon: base.icon,
-                      explanation: "마지막 활동으로 짐작한 상태입니다. 실제로 일하는지는 확인하지 못했습니다.", needsMe: base.needsMe)
+            self.init(label: String(localized: "\(base.label) · 추정"), tone: base.tone, icon: base.icon,
+                      explanation: String(localized: "마지막 활동으로 짐작한 상태입니다. 실제로 일하는지는 확인하지 못했습니다."), needsMe: base.needsMe)
         } else if !Self.order.contains(member.status) {
-            self.init(label: "상태 확인 불가", tone: .neutral, icon: "questionmark.circle", explanation: "알 수 없는 상태입니다. 잠시 뒤 다시 확인합니다.")
+            self.init(label: String(localized: "상태 확인 불가"), tone: .neutral, icon: "questionmark.circle", explanation: String(localized: "알 수 없는 상태입니다. 잠시 뒤 다시 확인합니다."))
         } else {
             let base = Self(member.status)
             self.init(label: base.label, tone: base.tone, icon: base.icon,
@@ -149,7 +149,7 @@ struct MemberStatusInfo: Sendable {
 /// A blocked member whose server gave a reason code this app knows: what to tell the owner and what the terminal
 /// button says. Unknown or missing codes give nil, and the member is shown exactly as before.
 struct BlockedGuide: Sendable, Equatable {
-    static let openTerminal = "터미널 열기"
+    static let openTerminal = String(localized: "터미널 열기")
     let label: String
     let explanation: String
     let actionTitle: String
@@ -158,16 +158,16 @@ struct BlockedGuide: Sendable, Equatable {
         guard member.status == "blocked" else { return nil }
         switch member.blockedCode {
         case "trust_dialog_unrecognized":
-            label = "폴더 신뢰 확인 필요"
+            label = String(localized: "폴더 신뢰 확인 필요")
             // Named after the session's own CLI, as the first-run choice names them; an unknown kind is left unnamed
             // rather than called Claude Code.
             let cli = ["claude": "Claude Code", "codex": "Codex"][member.cli]
-            explanation = (cli.map { "\($0)\(subjectParticle($0)) 이 폴더를 신뢰할지 묻고 있습니다." } ?? "이 폴더를 신뢰할지 묻는 창이 떠 있습니다.")
-                + " 터미널에서 직접 답해 주세요."
-            actionTitle = "터미널 열어 직접 답하기"
+            explanation = (cli.map { String(localized: "\($0)\(subjectParticle($0)) 이 폴더를 신뢰할지 묻고 있습니다.") } ?? String(localized: "이 폴더를 신뢰할지 묻는 창이 떠 있습니다."))
+                + String(localized: " 터미널에서 직접 답해 주세요.")
+            actionTitle = String(localized: "터미널 열어 직접 답하기")
         case "start_not_ready":
-            label = "시작 지연"
-            explanation = "시작이 늦어지고 있습니다. 터미널을 열어 상태를 확인해 주세요."
+            label = String(localized: "시작 지연")
+            explanation = String(localized: "시작이 늦어지고 있습니다. 터미널을 열어 상태를 확인해 주세요.")
             actionTitle = Self.openTerminal
         default: return nil
         }
@@ -179,8 +179,8 @@ struct EngineNotice: Sendable, Equatable {
     let text: String
     init?(_ engine: EngineState?) {
         switch engine?.state {
-        case "unresponsive": text = "실행 엔진이 응답하지 않습니다. Mac에서 IAMCEO를 다시 시작해 주세요."
-        case "version_mismatch": text = "실행 엔진 버전이 맞지 않습니다. IAMCEO를 최신 버전으로 다시 설치해 주세요."
+        case "unresponsive": text = String(localized: "실행 엔진이 응답하지 않습니다. Mac에서 IAMCEO를 다시 시작해 주세요.")
+        case "version_mismatch": text = String(localized: "실행 엔진 버전이 맞지 않습니다. IAMCEO를 최신 버전으로 다시 설치해 주세요.")
         default: return nil
         }
     }
@@ -190,11 +190,11 @@ struct EngineNotice: Sendable, Equatable {
 /// Only the Mac app on that Mac says so, as a status strip and as one Mac notification per off period. An iPhone
 /// that reaches the server has a working path, so it stays silent. Only "off" speaks.
 struct TailnetNotice: Sendable, Equatable {
-    static let stripText = "Tailscale이 꺼져 있어 iPhone에서 연결할 수 없습니다. 이 Mac의 Tailscale을 켜 주세요."
+    static let stripText = String(localized: "Tailscale이 꺼져 있어 iPhone에서 연결할 수 없습니다. 이 Mac의 Tailscale을 켜 주세요.")
     /// The Mac notification. The server's own script notification says the same with an "IAMCEO · " prefix
     /// (server/tailnet.ts); the app's banner already carries the app name.
-    static let notificationTitle = "Tailscale이 꺼져 있습니다"
-    static let notificationBody = "iPhone에서 연결할 수 없습니다. 이 Mac의 Tailscale을 켜 주세요."
+    static let notificationTitle = String(localized: "Tailscale이 꺼져 있습니다")
+    static let notificationBody = String(localized: "iPhone에서 연결할 수 없습니다. 이 Mac의 Tailscale을 켜 주세요.")
 
     let text: String
     init?(_ tailnet: TailnetState?, onThisMac: Bool) {
@@ -236,23 +236,23 @@ struct PermissionModeChoice: Identifiable, Sendable, Equatable {
     static let bypass = "bypassPermissions"
     /// Settings › 일반 › 권한.
     static let settings = [
-        PermissionModeChoice(id: bypass, title: "묻지 않기", detail: "팀장이 승인 창 없이 명령을 실행합니다", badge: "기본"),
-        PermissionModeChoice(id: "auto", title: "위험할 때만 묻기", detail: "위험해 보이는 작업만 멈추고 묻습니다"),
-        PermissionModeChoice(id: "default", title: "매번 묻기", detail: "도구를 쓸 때마다 승인을 기다립니다")
+        PermissionModeChoice(id: bypass, title: String(localized: "묻지 않기"), detail: String(localized: "팀장이 승인 창 없이 명령을 실행합니다"), badge: String(localized: "기본")),
+        PermissionModeChoice(id: "auto", title: String(localized: "위험할 때만 묻기"), detail: String(localized: "위험해 보이는 작업만 멈추고 묻습니다")),
+        PermissionModeChoice(id: "default", title: String(localized: "매번 묻기"), detail: String(localized: "도구를 쓸 때마다 승인을 기다립니다"))
     ]
     /// The first-run choice: the same three, with 묻지 않기 spelled out because it is the one picked to begin with.
     static let firstRun = settings.map { choice in
         choice.id == bypass
             ? PermissionModeChoice(id: choice.id, title: choice.title,
-                                   detail: "승인 창에서 멈추지 않고 맡긴 일을 끝까지 합니다. 잘못된 명령도 묻지 않고 실행됩니다.", badge: choice.badge)
+                                   detail: String(localized: "승인 창에서 멈추지 않고 맡긴 일을 끝까지 합니다. 잘못된 명령도 묻지 않고 실행됩니다."), badge: choice.badge)
             : choice
     }
-    static let firstRunTitle = "팀장이 명령을 실행하는 방식"
+    static let firstRunTitle = String(localized: "팀장이 명령을 실행하는 방식")
     /// `onThisMac`: the Mac app on the server's own Mac. An iPhone or a remote Mac says "연결된 Mac".
     static func firstRunLead(onThisMac: Bool) -> String {
-        "팀장은 \(onThisMac ? "이 Mac" : "연결된 Mac")에서 Claude Code·Codex로 명령을 실행합니다. 파일을 고치고 지우는 일, 프로그램 설치, git 명령이 포함됩니다. 어떻게 실행할지 골라 주세요. 설정에서 언제든 바꿀 수 있습니다."
+        String(localized: "팀장은 \(onThisMac ? String(localized: "이 Mac") : String(localized: "연결된 Mac"))에서 Claude Code·Codex로 명령을 실행합니다. 파일을 고치고 지우는 일, 프로그램 설치, git 명령이 포함됩니다. 어떻게 실행할지 골라 주세요. 설정에서 언제든 바꿀 수 있습니다.")
     }
-    static let firstRunConfirm = "이대로 시작"
+    static let firstRunConfirm = String(localized: "이대로 시작")
 }
 
 extension Member {
@@ -291,21 +291,21 @@ struct SubagentInfo: Sendable {
         case "exact", "estimated":
             if let value = member.subagentState?.count, value >= 0 {
                 count = value
-                label = "서브에이전트 \(value)개" + (member.subagentState?.quality == "estimated" ? " · 추정" : "")
-            } else { count = nil; label = "서브에이전트 수 확인 불가" }
-        case "unsupported": count = nil; label = "서브에이전트 수 미지원"
-        default: count = nil; label = "서브에이전트 수 미수집"
+                label = String(localized: "서브에이전트 \(value)개") + (member.subagentState?.quality == "estimated" ? String(localized: " · 추정") : "")
+            } else { count = nil; label = String(localized: "서브에이전트 수 확인 불가") }
+        case "unsupported": count = nil; label = String(localized: "서브에이전트 수 미지원")
+        default: count = nil; label = String(localized: "서브에이전트 수 미수집")
         }
     }
 }
 
 struct LastReportInfo: Sendable {
-    let label = "마지막 보고"
+    let label = String(localized: "마지막 보고")
     let text: String
     let reportedAt: String?
     let next: String
     init(_ member: Member) {
-        text = member.now.isEmpty ? "아직 보고가 없습니다" : member.now
+        text = member.now.isEmpty ? String(localized: "아직 보고가 없습니다") : member.now
         reportedAt = member.nowAt
         next = member.next
     }
@@ -322,23 +322,23 @@ struct DeliveryInfo: Sendable {
         guard let delivery else { return nil }
         switch delivery {
         case "queued":
-            label = "전달 대기"; tone = .neutral; icon = "clock"
-            explanation = "저장했습니다. 받는 사람 차례가 되면 넣습니다."
+            label = String(localized: "전달 대기"); tone = .neutral; icon = "clock"
+            explanation = String(localized: "저장했습니다. 받는 사람 차례가 되면 넣습니다.")
         case "held":
-            label = "보류"; tone = .attention; icon = "pause.circle"
-            explanation = "자동 전달을 멈췄습니다. 이유를 확인하고 해결하면 다시 전달합니다."
+            label = String(localized: "보류"); tone = .attention; icon = "pause.circle"
+            explanation = String(localized: "자동 전달을 멈췄습니다. 이유를 확인하고 해결하면 다시 전달합니다.")
         case "delivering":
-            label = "넣는 중"; tone = .neutral; icon = "arrow.up.circle"
-            explanation = "받는 사람 입력칸에 넣는 중입니다."
+            label = String(localized: "넣는 중"); tone = .neutral; icon = "arrow.up.circle"
+            explanation = String(localized: "받는 사람 입력칸에 넣는 중입니다.")
         case "delivered":
-            label = "받음"; tone = .success; icon = "checkmark.circle"
-            explanation = "받는 사람에게 들어갔습니다. 일을 끝냈다는 뜻은 아닙니다."
+            label = String(localized: "받음"); tone = .success; icon = "checkmark.circle"
+            explanation = String(localized: "받는 사람에게 들어갔습니다. 일을 끝냈다는 뜻은 아닙니다.")
         case "failed":
-            label = "실패"; tone = .danger; icon = "exclamationmark.circle"
-            explanation = "받는 사람에게 넣지 못했습니다. 같은 글을 다시 보낼 수 있습니다."
+            label = String(localized: "실패"); tone = .danger; icon = "exclamationmark.circle"
+            explanation = String(localized: "받는 사람에게 넣지 못했습니다. 같은 글을 다시 보낼 수 있습니다.")
         case "dismissed":
-            label = "정리함"; tone = .dim; icon = "minus.circle"
-            explanation = "보내지 않고 정리했습니다. 필요하면 새로 써서 보내 주세요."
+            label = String(localized: "정리함"); tone = .dim; icon = "minus.circle"
+            explanation = String(localized: "보내지 않고 정리했습니다. 필요하면 새로 써서 보내 주세요.")
         default:
             label = delivery; tone = .neutral; icon = "questionmark.circle"; explanation = ""
         }
@@ -347,36 +347,36 @@ struct DeliveryInfo: Sendable {
     init(_ item: DeliveryNoticeItem) {
         switch item.phase {
         case .checking:
-            self.init(label: "전달 확인 중", tone: .neutral, icon: "magnifyingglass", explanation: "받았는지 시스템이 확인하고 있습니다.")
+            self.init(label: String(localized: "전달 확인 중"), tone: .neutral, icon: "magnifyingglass", explanation: String(localized: "받았는지 시스템이 확인하고 있습니다."))
         case .retryWait:
-            self.init(label: "자동 재전송 대기", tone: .neutral, icon: "arrow.clockwise", explanation: "안전한지 다시 확인한 뒤 자동으로 넣습니다. 아직 받은 것은 아닙니다.")
+            self.init(label: String(localized: "자동 재전송 대기"), tone: .neutral, icon: "arrow.clockwise", explanation: String(localized: "안전한지 다시 확인한 뒤 자동으로 넣습니다. 아직 받은 것은 아닙니다."))
         case .needsOwner:
-            self.init(label: "전달 확인 필요", tone: .attention, icon: "exclamationmark.circle", explanation: item.reasonDescription)
+            self.init(label: String(localized: "전달 확인 필요"), tone: .attention, icon: "exclamationmark.circle", explanation: item.reasonDescription)
         case .waiting:
-            self.init(label: "전달 대기", tone: .neutral, icon: "clock", explanation: item.reasonDescription)
+            self.init(label: String(localized: "전달 대기"), tone: .neutral, icon: "clock", explanation: item.reasonDescription)
         case .stopped:
-            self.init(label: "추가 전달 중지", tone: .dim, icon: "pause.circle", explanation: "추가 전달을 중지했습니다. 과거 수신 여부는 알 수 없습니다.")
+            self.init(label: String(localized: "추가 전달 중지"), tone: .dim, icon: "pause.circle", explanation: String(localized: "추가 전달을 중지했습니다. 과거 수신 여부는 알 수 없습니다."))
         case .resolved where item.status == "delivered":
-            self.init(label: "받음", tone: .success, icon: "checkmark.circle", explanation: "받는 사람에게 들어갔습니다. 일을 끝냈다는 뜻은 아닙니다.")
+            self.init(label: String(localized: "받음"), tone: .success, icon: "checkmark.circle", explanation: String(localized: "받는 사람에게 들어갔습니다. 일을 끝냈다는 뜻은 아닙니다."))
         case .some(.none) where item.reason == "not_received":
-            self.init(label: item.status == "held" ? "입력 확인 대기" : "전달 대기", tone: .neutral, icon: "clock", explanation: item.reasonDescription)
+            self.init(label: item.status == "held" ? String(localized: "입력 확인 대기") : String(localized: "전달 대기"), tone: .neutral, icon: "clock", explanation: item.reasonDescription)
         case .some(.none):
-            self = Self(item.status) ?? Self(label: "전달 상태 확인 불가", tone: .neutral, icon: "questionmark.circle", explanation: "최신 전달 근거를 다시 확인해 주세요.")
+            self = Self(item.status) ?? Self(label: String(localized: "전달 상태 확인 불가"), tone: .neutral, icon: "questionmark.circle", explanation: String(localized: "최신 전달 근거를 다시 확인해 주세요."))
         default:
-            self.init(label: "전달 상태 확인 불가", tone: .neutral, icon: "questionmark.circle", explanation: "최신 전달 근거를 다시 확인해 주세요.")
+            self.init(label: String(localized: "전달 상태 확인 불가"), tone: .neutral, icon: "questionmark.circle", explanation: String(localized: "최신 전달 근거를 다시 확인해 주세요."))
         }
     }
 
     init(_ summary: MemberDeliverySummary) {
         if summary.needsOwnerCount > 0 {
-            self.init(label: "전달 확인 \(Self.badgeCount(summary.needsOwnerCount))", tone: .attention,
-                      icon: "exclamationmark.circle", explanation: "전달 확인이 필요한 항목 \(summary.needsOwnerCount)건입니다.")
+            self.init(label: String(localized: "전달 확인 \(Self.badgeCount(summary.needsOwnerCount))"), tone: .attention,
+                      icon: "exclamationmark.circle", explanation: String(localized: "전달 확인이 필요한 항목 \(summary.needsOwnerCount)건입니다."))
         } else if summary.checkingCount > 0 || summary.unknownCount > 0 {
-            self.init(label: "전달 확인 중", tone: .neutral, icon: "magnifyingglass", explanation: "시스템이 수신 근거를 확인하고 있습니다. 대표의 수신 판정은 필요하지 않습니다.")
+            self.init(label: String(localized: "전달 확인 중"), tone: .neutral, icon: "magnifyingglass", explanation: String(localized: "시스템이 수신 근거를 확인하고 있습니다. 대표의 수신 판정은 필요하지 않습니다."))
         } else if summary.deliveringCount > 0 {
-            self.init(label: "전달 중", tone: .neutral, icon: "arrow.up.circle", explanation: "넣는 중입니다. 아직 받은 것은 아닙니다.")
+            self.init(label: String(localized: "전달 중"), tone: .neutral, icon: "arrow.up.circle", explanation: String(localized: "넣는 중입니다. 아직 받은 것은 아닙니다."))
         } else {
-            self.init(label: summary.undeliveredCount > 0 ? "전달 대기" : "전달 문제 없음", tone: .neutral, icon: "clock", explanation: "미전달 \(max(0, summary.undeliveredCount))건 · 뒤에서 대기 \(max(0, summary.waitingBehindCount))건")
+            self.init(label: summary.undeliveredCount > 0 ? String(localized: "전달 대기") : String(localized: "전달 문제 없음"), tone: .neutral, icon: "clock", explanation: String(localized: "미전달 \(max(0, summary.undeliveredCount))건 · 뒤에서 대기 \(max(0, summary.waitingBehindCount))건"))
         }
     }
 
@@ -389,9 +389,9 @@ struct DeliveryInfo: Sendable {
 
 /// Home shows only nonzero delivery details; full recovery counts stay in member details.
 func homeDeliverySummary(_ summary: MemberDeliverySummary) -> String? {
-    let parts = [("미확인", summary.unknownCount),
-                 ("미전달", summary.undeliveredCount),
-                 ("뒤에서 대기", summary.waitingBehindCount)]
+    let parts = [(String(localized: "미확인"), summary.unknownCount),
+                 (String(localized: "미전달"), summary.undeliveredCount),
+                 (String(localized: "뒤에서 대기"), summary.waitingBehindCount)]
         .filter { $0.1 > 0 }
         .map { "\($0.0) \($0.1)" }
     return parts.isEmpty ? nil : parts.joined(separator: " · ")
@@ -403,22 +403,22 @@ struct DeliveryEvidenceInfo: Sendable {
     let detail: String
     init(_ evidence: DeliveryEvidence) {
         switch evidence.source {
-        case "claude_log": sourceLabel = "Claude 주 세션 입력 기록"
-        case "codex_log": sourceLabel = "Codex 주 세션 입력 기록"
-        case "transport": sourceLabel = "터미널 응답"
-        case "core_screen", "herdr_screen": sourceLabel = evidence.location == "composer" ? "입력칸" : "터미널 화면"
-        default: sourceLabel = "전달 근거"
+        case "claude_log": sourceLabel = String(localized: "Claude 주 세션 입력 기록")
+        case "codex_log": sourceLabel = String(localized: "Codex 주 세션 입력 기록")
+        case "transport": sourceLabel = String(localized: "터미널 응답")
+        case "core_screen", "herdr_screen": sourceLabel = evidence.location == "composer" ? String(localized: "입력칸") : String(localized: "터미널 화면")
+        default: sourceLabel = String(localized: "전달 근거")
         }
         switch evidence.verdict {
         case .present:
-            label = "확인됨"
+            label = String(localized: "확인됨")
             if evidence.location == "composer" {
-                detail = "입력칸의 내용을 확인했습니다. CLI가 입력을 받았다는 뜻은 아닙니다."
+                detail = String(localized: "입력칸의 내용을 확인했습니다. CLI가 입력을 받았다는 뜻은 아닙니다.")
             } else {
-                detail = "해당 위치에서 근거를 확인했습니다. 업무 완료를 뜻하지 않습니다."
+                detail = String(localized: "해당 위치에서 근거를 확인했습니다. 업무 완료를 뜻하지 않습니다.")
             }
-        case .absent where evidence.complete: label = "해당 없음"; detail = "완전하게 확인한 범위에 근거가 없습니다. 이것만으로 미수신을 확정하지 않습니다."
-        default: label = "취득 불가"; detail = "근거를 완전하게 확인하지 못했습니다. 미수신을 뜻하지 않습니다."
+        case .absent where evidence.complete: label = String(localized: "해당 없음"); detail = String(localized: "완전하게 확인한 범위에 근거가 없습니다. 이것만으로 미수신을 확정하지 않습니다.")
+        default: label = String(localized: "취득 불가"); detail = String(localized: "근거를 완전하게 확인하지 못했습니다. 미수신을 뜻하지 않습니다.")
         }
     }
 }
@@ -443,13 +443,13 @@ struct DecisionStateInfo: Sendable {
     init(_ decision: Decision) {
         switch decision.status {
         case "open":
-            label = decision.options.isEmpty ? "답변 요청" : "선택 요청"; tone = .attention
+            label = decision.options.isEmpty ? String(localized: "답변 요청") : String(localized: "선택 요청"); tone = .attention
         case "answered":
-            label = "답함 · 전달 대기"; tone = .neutral
+            label = String(localized: "답함 · 전달 대기"); tone = .neutral
         case "delivered":
-            label = "답함 · 담당자가 받음"; tone = .success
+            label = String(localized: "답함 · 담당자가 받음"); tone = .success
         case "closed":
-            label = "닫힘"; tone = .dim
+            label = String(localized: "닫힘"); tone = .dim
         default:
             label = decision.status; tone = .neutral
         }
@@ -458,8 +458,8 @@ struct DecisionStateInfo: Sendable {
 
 func closeKindName(_ kind: String?) -> String? {
     switch kind {
-    case "decided": "대표가 이미 정함"
-    case "obsolete": "필요 없어짐"
+    case "decided": String(localized: "대표가 이미 정함")
+    case "obsolete": String(localized: "필요 없어짐")
     default: nil
     }
 }
@@ -476,8 +476,8 @@ func messageKindTone(_ kind: String) -> Tone {
 
 func activityKindName(_ kind: String) -> String {
     switch kind {
-    case "text": "글"; case "tool": "도구"; case "tool_result": "결과"; case "turn_start": "시작"
-    case "turn_end": "끝"; case "compact": "압축"; case "error": "오류"; case "system": "알림"
+    case "text": String(localized: "글"); case "tool": String(localized: "도구"); case "tool_result": String(localized: "결과"); case "turn_start": String(localized: "시작")
+    case "turn_end": String(localized: "끝"); case "compact": String(localized: "압축"); case "error": String(localized: "오류"); case "system": String(localized: "알림")
     default: kind
     }
 }
@@ -485,7 +485,7 @@ func activityKindName(_ kind: String) -> String {
 enum WorkSection: String, CaseIterable, Identifiable, Sendable {
     case doing, next, hold, done
     var id: String { rawValue }
-    var title: String { switch self { case .doing: "진행 중"; case .next: "예정"; case .hold: "보류"; case .done: "완료" } }
+    var title: String { switch self { case .doing: String(localized: "진행 중"); case .next: String(localized: "예정"); case .hold: String(localized: "보류"); case .done: String(localized: "완료") } }
     var tone: Tone { switch self { case .doing: .live; case .next: .neutral; case .hold: .attention; case .done: .success } }
 }
 
@@ -551,13 +551,13 @@ func unresolvedDeliveries(_ messages: [Message], status: String) -> [Message] {
 /// What one project needs from the CEO, for project menus: "결재 2 · 할 일 1 · 승인 창 앞 1명 · 2명 일하는 중".
 func projectStatusLine(_ project: ProjectSummary) -> String {
     var parts: [String] = []
-    if !project.connection.ok { parts.append("연결 문제") }
-    if project.decisionCount > 0 { parts.append("결재 \(project.decisionCount)") }
-    if project.todoCount > 0 { parts.append("할 일 \(project.todoCount)") }
-    if project.blockedCount > 0 { parts.append("승인 창 앞 \(project.blockedCount)명") }
-    if project.errorCount > 0 { parts.append("오류 \(project.errorCount)명") }
-    if project.workingCount > 0 { parts.append("\(project.workingCount)명 일하는 중") }
-    return parts.isEmpty ? "개입할 일 없음" : parts.joined(separator: " · ")
+    if !project.connection.ok { parts.append(String(localized: "연결 문제")) }
+    if project.decisionCount > 0 { parts.append(String(localized: "결재 \(project.decisionCount)")) }
+    if project.todoCount > 0 { parts.append(String(localized: "할 일 \(project.todoCount)")) }
+    if project.blockedCount > 0 { parts.append(String(localized: "승인 창 앞 \(project.blockedCount)명")) }
+    if project.errorCount > 0 { parts.append(String(localized: "오류 \(project.errorCount)명")) }
+    if project.workingCount > 0 { parts.append(String(localized: "\(project.workingCount)명 일하는 중")) }
+    return parts.isEmpty ? String(localized: "개입할 일 없음") : parts.joined(separator: " · ")
 }
 
 /// Items in a project that wait on the CEO: open decisions, open todos, members at an approval prompt or in error.
@@ -601,34 +601,41 @@ func recentReports(_ messages: [Message], limit: Int = 4) -> [Message] {
 
 /// Raw CLI / runner errors in words the CEO can act on. Known provider messages become one Korean sentence with the
 /// next step; anything unknown passes through unchanged (never hide the original when we do not understand it).
-func friendlyError(_ raw: String) -> String {
-    var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+/// `code`: 그 문장과 짝인 서버 코드(팀장의 fenceCode, 응답의 code·reason). 코드가 있으면 코드로 고르고(4차 R),
+/// 없는 옛 서버에서는 예전처럼 문장으로 가른다. 한국어 화면의 결과는 예전과 같다.
+func friendlyError(_ raw: String) -> String { friendlyError(raw, code: nil) }
+func friendlyError(_ raw: String, code: String?) -> String {
+    if code == "starting_unknown" { return String(localized: "세션을 시작했는지 아직 확인하지 못했습니다. 상태를 다시 확인하고 있습니다.") }
+    var text = ServerErrorText.display(raw.trimmingCharacters(in: .whitespacesAndNewlines), code: code)
     // The server appends the raw socket detail, e.g. "(hello: connect ENOENT /private/…/core.sock)". The Korean lead says it all.
     if let range = text.range(of: #"\s*\([^()]*(ENOENT|ECONNREFUSED|ETIMEDOUT|hello:|connect )[^()]*\)\s*$"#, options: [.regularExpression, .caseInsensitive]) {
         text.removeSubrange(range)
     }
+    // 접속 코드 거절(401)의 서버 대표 문장은 그대로 둔다. 영어 문장 "Authentication required…"가 아래의 AI 로그인 판정에
+    // 걸리지 않게 한다(4차 리뷰 ui-6). 한국어 문장은 원래 어느 판정에도 걸리지 않아 결과가 같다.
+    if ConnectionRecovery.unauthorizedCodes.contains(where: { ServerErrorText.matches(text, code: $0) }) { return text }
     let lower = text.lowercased()
     func has(_ needle: String) -> Bool { lower.contains(needle.lowercased()) }
     if has("can't use your claude subscription") || has("payment is past due") {
-        return "Claude 구독 결제에 문제가 있어 일을 할 수 없습니다. claude.ai 설정에서 결제를 확인해 주세요."
+        return String(localized: "Claude 구독 결제에 문제가 있어 일을 할 수 없습니다. claude.ai 설정에서 결제를 확인해 주세요.")
     }
     if has("no response from api") || has("overloaded") || has("api error: 5") {
-        return "AI 서버가 응답하지 않습니다. 잠시 뒤 다시 시도합니다."
+        return String(localized: "AI 서버가 응답하지 않습니다. 잠시 뒤 다시 시도합니다.")
     }
     if has("usage limit") || has("rate limit") || has("사용 한도") || has("limit reached") {
-        return "사용 한도에 닿았습니다. 한도가 풀리면 자동으로 이어 갑니다. 다른 모델로 바꾸면 바로 이어 갑니다."
+        return String(localized: "사용 한도에 닿았습니다. 한도가 풀리면 자동으로 이어 갑니다. 다른 모델로 바꾸면 바로 이어 갑니다.")
     }
     if has("not logged in") || has("please run /login") || has("authentication") || has("unauthorized") {
-        return "AI 계정 로그인이 풀렸습니다. Mac 터미널에서 다시 로그인해 주세요."
+        return String(localized: "AI 계정 로그인이 풀렸습니다. Mac 터미널에서 다시 로그인해 주세요.")
     }
-    if has("starting_unknown") { return "세션을 시작했는지 아직 확인하지 못했습니다. 상태를 다시 확인하고 있습니다." }
-    if has("cli reported an error") { return "AI 프로그램이 오류를 알렸습니다. 터미널에서 내용을 확인해 주세요." }
+    if has("starting_unknown") { return String(localized: "세션을 시작했는지 아직 확인하지 못했습니다. 상태를 다시 확인하고 있습니다.") }
+    if has("cli reported an error") { return String(localized: "AI 프로그램이 오류를 알렸습니다. 터미널에서 내용을 확인해 주세요.") }
     if text.contains("턴이 시작되지 않았습니다") { return text.replacingOccurrences(of: "턴이 시작되지 않았습니다", with: "일을 시작하지 않았습니다") }
     if let range = text.range(of: #"\(?exit(_code)?[ =]?(\d+)\)?"#, options: .regularExpression) {
         let code = text[range].filter(\.isNumber)
         let rest = text.replacingCharacters(in: range, with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let lead = rest.isEmpty ? "프로그램이 비정상 종료됐습니다" : rest
-        return "\(lead) (종료 코드 \(code))"
+        let lead = rest.isEmpty ? String(localized: "프로그램이 비정상 종료됐습니다") : rest
+        return String(localized: "\(lead) (종료 코드 \(code))")
     }
     return text
 }
@@ -636,25 +643,34 @@ func friendlyError(_ raw: String) -> String {
 /// Why a file, page or preview could not be fetched, in words the CEO can act on (A-78): never "Request failed (502)."
 /// or an English system string. `what` names the thing ("원본", "페이지"), `verb` the action ("받지", "읽지", "올리지").
 /// A Korean server message is kept as is.
+/// 영어 화면: `what`·`verb` 조각은 loadErrorNoun·loadErrorVerb 가 영어 낱말로 바꾸고, 문장 틀은 문구 표의 번역을 쓴다.
 func friendlyLoadError(_ error: Error, what: String = "원본", verb: String = "받지") -> String {
+    let what = loadErrorNoun(what)
+    let verb = loadErrorVerb(verb)
     let object = "\(what)\(objectParticle(what))"
     let subject = "\(what)\(subjectParticle(what))"
     if let failure = error as? ChatHistoryFailure {
         switch failure {
-        case .invalidPage: return "대화 기록을 확인하지 못했습니다. 다시 불러오기를 눌러 주세요."
-        case .storeChanged: return "서버의 대화 기록이 변경되었습니다"
+        case .invalidPage: return String(localized: "대화 기록을 확인하지 못했습니다. 다시 불러오기를 눌러 주세요.")
+        case .storeChanged: return String(localized: "서버의 대화 기록이 변경되었습니다")
         }
     }
     if let api = error as? APIError {
         switch api.status {
-        case 401, 403: return "접근이 거절됐습니다. 설정에서 연결을 다시 확인해 주세요."
-        case 404, 410: return "\(subject) 서버에 없습니다. 지워졌거나 옮겨졌을 수 있습니다."
-        case 413: return "\(subject) 너무 커서 앱에서 열 수 없습니다."
-        case 500...599: return "서버 문제로 \(object) \(verb) 못했습니다. 잠시 뒤 다시 시도해 주세요."
+        case 401, 403: return String(localized: "접근이 거절됐습니다. 설정에서 연결을 다시 확인해 주세요.")
+        case 404, 410: return String(localized: "\(subject) 서버에 없습니다. 지워졌거나 옮겨졌을 수 있습니다.")
+        case 413: return String(localized: "\(subject) 너무 커서 앱에서 열 수 없습니다.")
+        case 500...599: return String(localized: "서버 문제로 \(object) \(verb) 못했습니다. 잠시 뒤 다시 시도해 주세요.")
         default:
             let message = api.message.trimmingCharacters(in: .whitespacesAndNewlines)
+            // 영어 화면: 코드의 영어 문장이 있으면 그것(ServerErrorDisplay). 한국어 화면은 아래 줄 그대로.
+            let shown = ServerErrorText.display(message, code: api.code, reason: api.reason)
+            if shown != message { return shown }
             if !message.contains("IAMCEO."), message.range(of: #"\p{Hangul}"#, options: .regularExpression) != nil { return message }
-            return "\(object) \(verb) 못했습니다."
+            // 영어 화면: 앱이 지은 영어 문장(주소 형식 안내 등)이나 이미 다듬은 까닭은 그대로 둔다(4차 리뷰 lang-1).
+            // 상태 번호만 있는 "Request failed (…)"와 내부 형식 이름은 아래의 일반 문장으로.
+            if keepsEnglishReason(message) { return message }
+            return String(localized: "\(object) \(verb) 못했습니다.")
         }
     }
     if let url = error as? URLError {
@@ -662,23 +678,33 @@ func friendlyLoadError(_ error: Error, what: String = "원본", verb: String = "
         if Tailnet.isOffError(url) { return Tailnet.offMessage }
         switch url.code {
         case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
-            return "서버와 연결이 끊겨 \(object) \(verb) 못했습니다."
-        case .timedOut: return "시간이 너무 오래 걸려 \(object) \(verb) 못했습니다. 다시 시도해 주세요."
-        case .cancelled: return "멈췄습니다."
-        default: return "\(object) \(verb) 못했습니다."
+            return String(localized: "서버와 연결이 끊겨 \(object) \(verb) 못했습니다.")
+        case .timedOut: return String(localized: "시간이 너무 오래 걸려 \(object) \(verb) 못했습니다. 다시 시도해 주세요.")
+        case .cancelled: return String(localized: "멈췄습니다.")
+        default: return String(localized: "\(object) \(verb) 못했습니다.")
         }
     }
-    if error is DecodingError { return "\(what) 내용을 읽지 못했습니다. 형식이 맞지 않습니다." }
+    if error is DecodingError { return String(localized: "\(what) 내용을 읽지 못했습니다. 형식이 맞지 않습니다.") }
     // Foundation's synthesized description can contain a Korean wrapper around an internal type name.
     if let text = (error as? LocalizedError)?.errorDescription, !text.contains("IAMCEO."),
-       text.range(of: #"\p{Hangul}"#, options: .regularExpression) != nil { return friendlyError(text) }
-    return "\(object) \(verb) 못했습니다."
+       text.range(of: #"\p{Hangul}"#, options: .regularExpression) != nil || keepsEnglishReason(text) { return friendlyError(text) }
+    return String(localized: "\(object) \(verb) 못했습니다.")
+}
+
+/// 영어 화면에서 오류 문장을 그대로 보일까(4차 리뷰 lang-1). 한국어 화면은 늘 false 라 예전 판정 그대로다.
+private func keepsEnglishReason(_ raw: String) -> Bool {
+    guard AppLanguage.current == .en else { return false }
+    let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return !text.isEmpty && !text.hasPrefix("Request failed (") && !text.contains("IAMCEO.")
+        // Foundation 이 지어낸 "The operation couldn’t be completed. (X error 1.)" 는 읽을 수 없는 문장이다.
+        && text.range(of: #"\([^()]* error -?\d+\.?\)"#, options: .regularExpression) == nil
 }
 
 /// 을/를 after a Korean word (by its last syllable's final consonant).
-func objectParticle(_ word: String) -> String { hasFinalConsonant(word) ? "을" : "를" }
+/// 영어 화면에는 조사가 없다(빈 글자).
+func objectParticle(_ word: String) -> String { !appUsesParticles ? "" : hasFinalConsonant(word) ? "을" : "를" }
 /// 이/가 — the subject form, same rule.
-func subjectParticle(_ word: String) -> String { hasFinalConsonant(word) ? "이" : "가" }
+func subjectParticle(_ word: String) -> String { !appUsesParticles ? "" : hasFinalConsonant(word) ? "이" : "가" }
 private func hasFinalConsonant(_ word: String) -> Bool {
     guard let scalar = word.unicodeScalars.last, (0xAC00...0xD7A3).contains(scalar.value) else { return false }
     return (scalar.value - 0xAC00) % 28 != 0
@@ -694,29 +720,29 @@ func waitReasonLabel(_ reason: String?, since: String? = nil, used: Int? = nil, 
     let base: String
     switch reason {
     case "run_limit":
-        if let used, let limit, limit > 0 { base = "동시에 일하는 팀원이 다 차서 차례를 기다리는 중(\(used)/\(limit))" }
-        else { base = "동시에 일하는 팀원이 다 차서 차례를 기다리는 중" }
-    case "member_busy": base = "지금 하던 일이 끝나면 전달"
+        if let used, let limit, limit > 0 { base = String(localized: "동시에 일하는 팀원이 다 차서 차례를 기다리는 중(\(used)/\(limit))") }
+        else { base = String(localized: "동시에 일하는 팀원이 다 차서 차례를 기다리는 중") }
+    case "member_busy": base = String(localized: "지금 하던 일이 끝나면 전달")
     // A report or note that does not wake its reader: it goes in with that member's next turn, by design.
-    case "next_turn": base = "다음에 일할 때 함께 전달"
-    case "waking": base = "깨우는 중"
-    case "receipt_check": base = "앞 지시를 받았는지 확인하는 중"
-    case "approval": base = "승인 창 앞이라 대기 중"
-    case "manual_control": base = "터미널에서 직접 조작 중이라 대기"
-    case "runner_off": base = "이 프로젝트 실행이 꺼져 있어 대기"
-    case "archived": base = "보관한 프로젝트라 보내지 않음"
+    case "next_turn": base = String(localized: "다음에 일할 때 함께 전달")
+    case "waking": base = String(localized: "깨우는 중")
+    case "receipt_check": base = String(localized: "앞 지시를 받았는지 확인하는 중")
+    case "approval": base = String(localized: "승인 창 앞이라 대기 중")
+    case "manual_control": base = String(localized: "터미널에서 직접 조작 중이라 대기")
+    case "runner_off": base = String(localized: "이 프로젝트 실행이 꺼져 있어 대기")
+    case "archived": base = String(localized: "보관한 프로젝트라 보내지 않음")
     // 서버가 일부러 붙잡아 둔 전달이다. 이유가 풀리면 저절로 나간다.
-    case "api_outage": base = "인터넷 연결이 돌아오면 전달"
-    case "usage_limit": base = "사용 한도가 풀리면 전달"
-    case "retry_wait": base = "잠시 뒤 다시 보내는 중"
-    default: base = "전달을 기다리는 중"
+    case "api_outage": base = String(localized: "인터넷 연결이 돌아오면 전달")
+    case "usage_limit": base = String(localized: "사용 한도가 풀리면 전달")
+    case "retry_wait": base = String(localized: "잠시 뒤 다시 보내는 중")
+    default: base = String(localized: "전달을 기다리는 중")
     }
     guard let since, let start = parseISODate(since) else { return base }
     let minutes = Int(now.timeIntervalSince(start) / 60)
     if minutes < 1 { return base }
-    if minutes < 60 { return "\(base) · \(minutes)분째" }
+    if minutes < 60 { return String(localized: "\(base) · \(minutes)분째") }
     let hours = minutes / 60
-    return hours < 24 ? "\(base) · \(hours)시간째" : "\(base) · \(hours / 24)일째"
+    return hours < 24 ? String(localized: "\(base) · \(hours)시간째") : String(localized: "\(base) · \(hours / 24)일째")
 }
 
 /// The tone for a waiting reason: the CEO can act on approval and manual control; the rest resolve on their own.
@@ -730,12 +756,15 @@ func waitReasonTone(_ reason: String?) -> Tone {
 
 /// The server's delivery note in plain words (the chat footer and its explanation). The server writes these for the
 /// web too, so the app rewrites only the phrases that read like a system log; anything else is shown as is.
-func plainDeliveryNote(_ note: String) -> String {
-    let text = note.trimmingCharacters(in: .whitespacesAndNewlines)
-    let exhausted = "몇 번 다시 넣어 봤지만 들어가지 않았습니다. '다시 보내기'를 눌러 주세요."
+/// `code`: 서버가 메모와 함께 주는 보류 코드(Message.deliveryCode, held_*). 영어 화면은 코드의 영어 문장을 쓴다(4차 R).
+/// 재전송·미전달 확인 메모에는 아직 코드가 없어 예전처럼 문장 머리로 가른다.
+func plainDeliveryNote(_ note: String) -> String { plainDeliveryNote(note, code: nil) }
+func plainDeliveryNote(_ note: String, code: String?) -> String {
+    let text = ServerErrorText.display(note.trimmingCharacters(in: .whitespacesAndNewlines), code: code)
+    let exhausted = String(localized: "몇 번 다시 넣어 봤지만 들어가지 않았습니다. '다시 보내기'를 눌러 주세요.")
     if text.hasPrefix("자동 재전송 상한에 도달") || text.hasPrefix("자동 재시도로 해결 안 됨") { return exhausted }
-    if text.hasPrefix("미전달을 확인했습니다") { return "아직 들어가지 않은 것을 확인했습니다. 안전한지 확인한 뒤 다시 넣습니다." }
-    if text.hasPrefix("입력 제출을 확인 중") { return "입력칸에 넣은 글이 제출됐는지 확인하는 중입니다." }
+    if text.hasPrefix("미전달을 확인했습니다") { return String(localized: "아직 들어가지 않은 것을 확인했습니다. 안전한지 확인한 뒤 다시 넣습니다.") }
+    if text.hasPrefix("입력 제출을 확인 중") { return String(localized: "입력칸에 넣은 글이 제출됐는지 확인하는 중입니다.") }
     return text
         .replacingOccurrences(of: "CLI의 대화 연결", with: "AI 프로그램의 대화 연결")
         .replacingOccurrences(of: "이 실행기에서는", with: "이 실행 방식에서는")
@@ -750,7 +779,7 @@ struct APIOutageInfo: Sendable {
 
     init?(_ outage: APIOutage?, showsOffline: Bool) {
         guard let outage, !showsOffline else { return nil }
-        text = "인터넷 연결이 불안정합니다 · 팀원 \(Set(outage.affectedMemberIds).count)명 대기 중 · 돌아오면 자동으로 이어 갑니다"
+        text = String(localized: "인터넷 연결이 불안정합니다 · 팀원 \(Set(outage.affectedMemberIds).count)명 대기 중 · 돌아오면 자동으로 이어 갑니다")
     }
 }
 
@@ -767,10 +796,10 @@ struct UsageLimitInfo: Sendable {
     /// `model:<value>`: switch the card's staff to that model and continue the same conversations.
     static let modelChoicePrefix = "model:"
     /// Used only when the server sends no options. Does not assume the person has another account.
-    static let resumeLabel = "계정을 바꿨거나 한도를 늘렸어요 · 이어가기"
-    static let stillLimitedText = "아직 한도가 남아 있지 않습니다. 기다리거나 다른 모델을 고르세요."
+    static let resumeLabel = String(localized: "계정을 바꿨거나 한도를 늘렸어요 · 이어가기")
+    static let stillLimitedText = String(localized: "아직 한도가 남아 있지 않습니다. 기다리거나 다른 모델을 고르세요.")
     /// Still limited and no model to pick (an account-wide limit, every model already limited, or an older server): waiting is the way.
-    static let stillLimitedWaitText = "아직 한도가 남아 있지 않습니다. 한도가 풀리면 자동으로 이어 갑니다."
+    static let stillLimitedWaitText = String(localized: "아직 한도가 남아 있지 않습니다. 한도가 풀리면 자동으로 이어 갑니다.")
     let resumesText: String?
     let memberNames: [String]
     let warning: String?
@@ -778,11 +807,16 @@ struct UsageLimitInfo: Sendable {
     init(_ decision: Decision, members: [Member], timeZone: TimeZone = .current) {
         if let date = parseISODate(decision.usageLimit?.resetsAt) {
             let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "ko_KR")
+            let onTheHour = Calendar(identifier: .gregorian).dateComponents(in: timeZone, from: date).minute == 0
+            formatter.locale = AppLanguage.current.dateLocale
             formatter.calendar = Calendar(identifier: .gregorian)
             formatter.timeZone = timeZone
-            formatter.dateFormat = "M월 d일 a h시" + (Calendar(identifier: .gregorian).dateComponents(in: timeZone, from: date).minute == 0 ? "" : " m분")
-            resumesText = "\(formatter.string(from: date))에 자동으로 이어 갑니다"
+            if AppLanguage.current == .en {
+                formatter.setLocalizedDateFormatFromTemplate(onTheHour ? "MMMdj" : "MMMdjmm")
+            } else {
+                formatter.dateFormat = "M월 d일 a h시" + (onTheHour ? "" : " m분")
+            }
+            resumesText = String(localized: "\(formatter.string(from: date))에 자동으로 이어 갑니다")
         } else { resumesText = nil }
         var seen = Set<String>()
         memberNames = (decision.usageLimit?.memberIds ?? []).filter { seen.insert($0).inserted }.map { id in
@@ -838,7 +872,7 @@ struct UsageLimitInfo: Sendable {
 func memberReopenBlock(_ member: Member, reopens: Bool) -> String? {
     guard reopens else { return nil }
     if member.status == "working" || (member.status == "blocked" && member.blockedReason != "usage_limit") {
-        return "일하거나 승인 창 앞이면 세션을 다시 열 수 없습니다. 턴이 끝난 뒤 적용하세요."
+        return String(localized: "일하거나 승인 창 앞이면 세션을 다시 열 수 없습니다. 턴이 끝난 뒤 적용하세요.")
     }
     return nil
 }

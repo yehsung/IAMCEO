@@ -39,7 +39,7 @@ struct PushSettingsView: View {
     #endif
 
     /// What is sent, in one line.
-    static let coverage = "새 결재, 승인·선택 대기, 오류 멈춤, 완료·막힘 보고, 대표 할 일을 알립니다."
+    static let coverage = String(localized: "새 결재, 승인·선택 대기, 오류 멈춤, 완료·막힘 보고, 대표 할 일을 알립니다.")
     /// Where the push key goes on the server computer (docs/operating-model.md › APNs 호스트 설정).
     private static let keyFile = "~/.iamceo/apns.json"
 
@@ -183,37 +183,37 @@ struct PushSettingsView: View {
     }
 
     private var hostStatus: HostStatus {
-        if store.isDemo && status == nil { return HostStatus(tone: .neutral, text: "샘플에서는 쓸 수 없습니다") }
-        if store.pushConnectionError == .unsupported { return HostStatus(tone: .attention, text: "이 서버는 iPhone 알림을 지원하지 않습니다") }
+        if store.isDemo && status == nil { return HostStatus(tone: .neutral, text: String(localized: "샘플에서는 쓸 수 없습니다")) }
+        if store.pushConnectionError == .unsupported { return HostStatus(tone: .attention, text: String(localized: "이 서버는 iPhone 알림을 지원하지 않습니다")) }
         if let refreshError { return HostStatus(tone: .attention, text: refreshError) }
         guard let status else {
-            return HostStatus(tone: .neutral, text: connected ? "확인하는 중" : "서버에 연결되면 확인합니다")
+            return HostStatus(tone: .neutral, text: connected ? String(localized: "확인하는 중") : String(localized: "서버에 연결되면 확인합니다"))
         }
         let providers = status.providers
         let ready = Set(providers.filter { $0.state == .ready }.map(\.environment))
         if ready.isEmpty {
             if providers.contains(where: { $0.state == .configurationError }) {
-                return HostStatus(tone: .attention, text: isMac ? "푸시 키 설정에 오류가 있어 iPhone으로 보낼 수 없습니다" : "푸시 키 설정에 오류가 있습니다", hasDetails: true,
-                                  step: KeyStep(lead: "서버 컴퓨터의 ", tail: "에 적은 키 경로와 파일 권한을 확인하고 서버를 다시 시작합니다."))
+                return HostStatus(tone: .attention, text: isMac ? String(localized: "푸시 키 설정에 오류가 있어 iPhone으로 보낼 수 없습니다") : String(localized: "푸시 키 설정에 오류가 있습니다"), hasDetails: true,
+                                  step: KeyStep(lead: String(localized: "서버 컴퓨터의 "), tail: String(localized: "에 적은 키 경로와 파일 권한을 확인하고 서버를 다시 시작합니다.")))
             }
             if providers.contains(where: { $0.state == .temporarilyUnavailable }) {
-                return HostStatus(tone: .attention, text: "알림 서버를 잠시 쓸 수 없습니다", hasDetails: true)
+                return HostStatus(tone: .attention, text: String(localized: "알림 서버를 잠시 쓸 수 없습니다"), hasDetails: true)
             }
             if providers.contains(where: { $0.state == .unknown }) {
-                return HostStatus(tone: .attention, text: "알림을 보낼 수 있는지 확인하지 못했습니다", hasDetails: true)
+                return HostStatus(tone: .attention, text: String(localized: "알림을 보낼 수 있는지 확인하지 못했습니다"), hasDetails: true)
             }
-            return HostStatus(tone: .attention, text: isMac ? "푸시 키가 설정되지 않아 iPhone으로 보낼 수 없습니다" : "푸시 키가 설정되지 않았습니다", hasDetails: !providers.isEmpty,
-                              step: KeyStep(lead: "서버 컴퓨터의 ", tail: "에 푸시 키(.p8) 경로를 적고 서버를 다시 시작합니다."))
+            return HostStatus(tone: .attention, text: isMac ? String(localized: "푸시 키가 설정되지 않아 iPhone으로 보낼 수 없습니다") : String(localized: "푸시 키가 설정되지 않았습니다"), hasDetails: !providers.isEmpty,
+                              step: KeyStep(lead: String(localized: "서버 컴퓨터의 "), tail: String(localized: "에 푸시 키(.p8) 경로를 적고 서버를 다시 시작합니다.")))
         }
         let sending = devices.filter { $0.state == .active && $0.enabled == true }
         let missing = Set(sending.compactMap(\.environment).filter { $0 != .unknown && !ready.contains($0) })
         let blocked = sending.filter { device in device.environment.map { missing.contains($0) } ?? false }.count
         if blocked > 0 {
             let kinds = missing.sorted { $0.rawValue < $1.rawValue }.map(environmentName).joined(separator: "·")
-            return HostStatus(tone: .attention, text: "iPhone \(blocked)대로는 보낼 수 없습니다", hasDetails: true,
-                              step: KeyStep(lead: "서버 컴퓨터의 ", tail: "에 \(kinds) 키를 더하고 서버를 다시 시작합니다."))
+            return HostStatus(tone: .attention, text: String(localized: "iPhone \(blocked)대로는 보낼 수 없습니다"), hasDetails: true,
+                              step: KeyStep(lead: String(localized: "서버 컴퓨터의 "), tail: String(localized: "에 \(kinds) 키를 더하고 서버를 다시 시작합니다.")))
         }
-        return HostStatus(tone: .success, text: sending.isEmpty ? "준비됨" : "준비됨 · iPhone \(sending.count)대", ready: true)
+        return HostStatus(tone: .success, text: sending.isEmpty ? String(localized: "준비됨") : String(localized: "준비됨 · iPhone \(sending.count)대"), ready: true)
     }
 
     private var hostGroup: some View {
@@ -244,7 +244,7 @@ struct PushSettingsView: View {
                 if line.hasDetails { detailsToggle }
                 if !store.isDemo {
                     // Not disabled by the poll itself (it would blink every 10 seconds); a tap during it is a no-op.
-                    SettingsRefreshButton(label: "iPhone 알림 다시 확인", busy: busy && manualRefresh) {
+                    SettingsRefreshButton(label: String(localized: "iPhone 알림 다시 확인"), busy: busy && manualRefresh) {
                         Task { manualRefresh = true; await refresh(); manualRefresh = false }
                     }
                     .disabled(!connected)
@@ -259,7 +259,7 @@ struct PushSettingsView: View {
                 details.padding(.bottom, 14)
             }
             if !store.pendingPushRevocations.isEmpty {
-                InlineNotice(title: "해지 미완료", detail: "이전에 연결한 서버에서 해지를 마치지 못했습니다. 그 서버에 다시 연결해 확인해 주세요.")
+                InlineNotice(title: String(localized: "해지 미완료"), detail: String(localized: "이전에 연결한 서버에서 해지를 마치지 못했습니다. 그 서버에 다시 연결해 확인해 주세요."))
                     .padding(.bottom, 14)
             }
             ForEach(others) { device in
@@ -335,19 +335,19 @@ struct PushSettingsView: View {
 
     private func environmentName(_ environment: PushEnvironment) -> String {
         switch environment {
-        case .sandbox: "개발 빌드용"
-        case .production: "배포 빌드용"
-        case .unknown: "알 수 없는 빌드"
+        case .sandbox: String(localized: "개발 빌드용")
+        case .production: String(localized: "배포 빌드용")
+        case .unknown: String(localized: "알 수 없는 빌드")
         }
     }
 
     private func providerLabel(_ state: PushProviderState) -> String {
         switch state {
-        case .ready: "준비됨"
-        case .unconfigured: "푸시 키 없음"
-        case .configurationError: "푸시 키 오류"
-        case .temporarilyUnavailable: "잠시 사용할 수 없음"
-        case .unknown: "확인 필요"
+        case .ready: String(localized: "준비됨")
+        case .unconfigured: String(localized: "푸시 키 없음")
+        case .configurationError: String(localized: "푸시 키 오류")
+        case .temporarilyUnavailable: String(localized: "잠시 사용할 수 없음")
+        case .unknown: String(localized: "확인 필요")
         }
     }
 
@@ -360,8 +360,8 @@ struct PushSettingsView: View {
         let on = pendingChoice ?? PhonePushSwitch.isOn(state, device: mine)
         let line = phoneLine(phone, mine: mine, on: on)
         let blocked = !connected || pendingChoice != nil || [.requestingPermission, .registering].contains(state)
-        return SettingsGroup("이 iPhone", footnote: Self.coverage) {
-            SettingsRow("이 iPhone에서 알림 받기", hint: line.text, hintTone: line.attention ? CE.attention : CE.ink2) {
+        return SettingsGroup(String(localized: "이 iPhone"), footnote: Self.coverage) {
+            SettingsRow(String(localized: "이 iPhone에서 알림 받기"), hint: line.text, hintTone: line.attention ? CE.attention : CE.ink2) {
                 Toggle("이 iPhone에서 알림 받기", isOn: Binding(get: { on }, set: { turn($0, phone) }))
                     .labelsHidden()
                     .settingsSwitch()
@@ -410,24 +410,24 @@ struct PushSettingsView: View {
 
     /// The line under the switch: what is happening, or why nothing arrives (attention colour).
     private func phoneLine(_ phone: PhoneControl, mine: PushDevice?, on: Bool) -> (text: String, attention: Bool) {
-        if let pendingChoice { return (pendingChoice ? "켜는 중" : "끄는 중", false) }
+        if let pendingChoice { return (pendingChoice ? String(localized: "켜는 중") : String(localized: "끄는 중"), false) }
         switch phone.state {
-        case .denied: return ("iPhone 설정에서 알림이 꺼져 있습니다", true)
-        case .failed: return (lastChoice == false ? "끄지 못했습니다. 다시 꺼 주세요." : "등록하지 못했습니다", true)
-        case .requiresOptIn: return ("다시 켜야 받습니다", true)
-        case .revocationPending: return ("이전 해지가 끝나지 않았습니다", true)
-        case .unsupported: return ("이 iPhone에서는 알림을 쓸 수 없습니다", true)
-        case .needsHost: return ("서버에 연결해야 켤 수 있습니다", false)
-        case .requestingPermission: return ("알림 권한을 묻는 중", false)
-        case .registering: return ("등록하는 중", false)
-        case .awaitingHost: return ("서버 등록을 기다리는 중", false)
+        case .denied: return (String(localized: "iPhone 설정에서 알림이 꺼져 있습니다"), true)
+        case .failed: return (lastChoice == false ? String(localized: "끄지 못했습니다. 다시 꺼 주세요.") : String(localized: "등록하지 못했습니다"), true)
+        case .requiresOptIn: return (String(localized: "다시 켜야 받습니다"), true)
+        case .revocationPending: return (String(localized: "이전 해지가 끝나지 않았습니다"), true)
+        case .unsupported: return (String(localized: "이 iPhone에서는 알림을 쓸 수 없습니다"), true)
+        case .needsHost: return (String(localized: "서버에 연결해야 켤 수 있습니다"), false)
+        case .requestingPermission: return (String(localized: "알림 권한을 묻는 중"), false)
+        case .registering: return (String(localized: "등록하는 중"), false)
+        case .awaitingHost: return (String(localized: "서버 등록을 기다리는 중"), false)
         case .enabled, .disabled: break
         }
         if let blocker = serverBlocker(for: mine) { return (blocker, true) }
-        if !on { return (phone.state == .enabled ? "다른 기기에서 꺼 두었습니다" : "꺼져 있습니다", false) }
-        var line = "받는 중"
+        if !on { return (phone.state == .enabled ? String(localized: "다른 기기에서 꺼 두었습니다") : String(localized: "꺼져 있습니다"), false) }
+        var line = String(localized: "받는 중")
         if let settings = phone.systemSettings {
-            line += " · 배너 \(settings.alertsEnabled ? "켬" : "끔") · 소리 \(settings.soundsEnabled ? "켬" : "끔")"
+            line += String(localized: " · 배너 \(settings.alertsEnabled ? String(localized: "켬") : String(localized: "끔")) · 소리 \(settings.soundsEnabled ? String(localized: "켬") : String(localized: "끔"))")
         }
         return (line, false)
     }
@@ -436,9 +436,9 @@ struct PushSettingsView: View {
     private func serverBlocker(for mine: PushDevice?) -> String? {
         guard let status, !status.providers.isEmpty else { return nil }
         let ready = Set(status.providers.filter { $0.state == .ready }.map(\.environment))
-        if ready.isEmpty { return "서버에 푸시 키가 없어 지금은 받을 수 없습니다" }
+        if ready.isEmpty { return String(localized: "서버에 푸시 키가 없어 지금은 받을 수 없습니다") }
         if let environment = mine?.environment, environment != .unknown, !ready.contains(environment) {
-            return "서버에 이 iPhone용 푸시 키가 없어 받을 수 없습니다"
+            return String(localized: "서버에 이 iPhone용 푸시 키가 없어 받을 수 없습니다")
         }
         return nil
     }
@@ -522,7 +522,7 @@ private struct PushDeviceRow: View {
                 HStack(spacing: 6) {
                     Text(name).font(SetupFont.row).foregroundStyle(CE.ink).lineLimit(1)
                     if device.state != .active {
-                        Tag(device.state == .revoked ? "해지됨" : "등록 확인 필요", tone: .attention)
+                        Tag(device.state == .revoked ? String(localized: "해지됨") : String(localized: "등록 확인 필요"), tone: .attention)
                     }
                 }
                 meta
@@ -555,8 +555,8 @@ private struct PushDeviceRow: View {
     /// Last contact and last notification. iPhone: each part keeps its words together and the pair may wrap once.
     @ViewBuilder private var meta: some View {
         let parts = [
-            relativeTime(device.lastSeenAt).isEmpty ? nil : "최근 접속 \(relativeTime(device.lastSeenAt))",
-            relativeTime(device.lastAcceptedAt).isEmpty ? nil : "마지막 알림 \(relativeTime(device.lastAcceptedAt))"
+            relativeTime(device.lastSeenAt).isEmpty ? nil : String(localized: "최근 접속 \(relativeTime(device.lastSeenAt))"),
+            relativeTime(device.lastAcceptedAt).isEmpty ? nil : String(localized: "마지막 알림 \(relativeTime(device.lastAcceptedAt))")
         ]
         #if os(macOS)
         MetaText(parts)
@@ -610,12 +610,12 @@ private struct PushDeviceRow: View {
     }
 
     @ViewBuilder private var preferenceToggles: some View {
-        preference("새 결재", value: device.preferences?.decision, patch: { PushPreferencesPatch(decision: $0) })
-        preference("승인 창 앞 멈춤", value: device.preferences?.approvalWait, patch: { PushPreferencesPatch(approvalWait: $0) })
-        preference("오류 멈춤", value: device.preferences?.error, patch: { PushPreferencesPatch(error: $0) })
-        preference("완료 보고", value: device.preferences?.reportComplete, patch: { PushPreferencesPatch(reportComplete: $0) })
-        preference("대표 할 일 생김", value: device.preferences?.todoCreated, patch: { PushPreferencesPatch(todoCreated: $0) })
-        preference("막힘 보고", value: device.preferences?.reportBlocked, patch: { PushPreferencesPatch(reportBlocked: $0) })
+        preference(String(localized: "새 결재"), value: device.preferences?.decision, patch: { PushPreferencesPatch(decision: $0) })
+        preference(String(localized: "승인 창 앞 멈춤"), value: device.preferences?.approvalWait, patch: { PushPreferencesPatch(approvalWait: $0) })
+        preference(String(localized: "오류 멈춤"), value: device.preferences?.error, patch: { PushPreferencesPatch(error: $0) })
+        preference(String(localized: "완료 보고"), value: device.preferences?.reportComplete, patch: { PushPreferencesPatch(reportComplete: $0) })
+        preference(String(localized: "대표 할 일 생김"), value: device.preferences?.todoCreated, patch: { PushPreferencesPatch(todoCreated: $0) })
+        preference(String(localized: "막힘 보고"), value: device.preferences?.reportBlocked, patch: { PushPreferencesPatch(reportBlocked: $0) })
     }
 
     private func preference(_ title: String, value: Bool?, patch: @escaping (Bool) -> PushPreferencesPatch) -> some View {
@@ -630,7 +630,7 @@ private struct PushDeviceRow: View {
     private func sendTest() {
         Task { await change {
             let result = try await store.pushSettings.sendTest(id: device.id, requestID: UUID().uuidString.lowercased())
-            notice = result.state == .accepted ? "시험 알림을 보냈습니다. iPhone에서 확인해 주세요." : "시험 알림을 요청했습니다. iPhone에서 확인해 주세요."
+            notice = result.state == .accepted ? String(localized: "시험 알림을 보냈습니다. iPhone에서 확인해 주세요.") : String(localized: "시험 알림을 요청했습니다. iPhone에서 확인해 주세요.")
         } }
     }
 
@@ -655,10 +655,10 @@ private struct PushDeviceRow: View {
 
 private func pushSettingsError(_ error: any Error) -> String {
     switch error as? PushSettingsError {
-    case .conflict: "다른 기기에서 설정이 바뀌었습니다. 새 설정을 확인해 주세요."
-    case .unsupported: "이 서버는 iPhone 알림을 지원하지 않습니다."
-    case .hostChanged: "연결한 서버가 바뀌었습니다."
-    case .busy: "이 기기의 변경을 처리하고 있습니다."
-    default: "알림 설정을 확인하지 못했습니다. 다시 확인해 주세요."
+    case .conflict: String(localized: "다른 기기에서 설정이 바뀌었습니다. 새 설정을 확인해 주세요.")
+    case .unsupported: String(localized: "이 서버는 iPhone 알림을 지원하지 않습니다.")
+    case .hostChanged: String(localized: "연결한 서버가 바뀌었습니다.")
+    case .busy: String(localized: "이 기기의 변경을 처리하고 있습니다.")
+    default: String(localized: "알림 설정을 확인하지 못했습니다. 다시 확인해 주세요.")
     }
 }

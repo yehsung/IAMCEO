@@ -3,7 +3,7 @@ import SwiftUI
 import AppKit
 #endif
 
-/// Launch arguments: `--demo` (read-only sample workspace), `--screen <destination>` and, in demo only, `--open <id>`.
+/// Launch arguments: `--demo` (sample workspace on the in-app sample server), `--screen <destination>` and, in demo only, `--open <id>`.
 enum LaunchOptions {
     static let arguments = ProcessInfo.processInfo.arguments
     static let demo = arguments.contains("--demo")
@@ -54,7 +54,13 @@ struct IAMCEOApp: App {
         #if os(macOS)
         UserDefaults.standard.register(defaults: ["NSApplicationCrashOnExceptions": true])
         #endif
+        #if DEBUG
+        // 화면 견본(F1): `--last-seen-preview` 는 마지막으로 본 상태와 연결되면 보낼 글을 띄운다. 연결·파일을 쓰지 않는다.
+        let store = LaunchOptions.arguments.contains("--last-seen-preview") ? AppStore.lastSeenPreview()
+            : AppStore(demo: LaunchOptions.demo, persistCredentials: !LaunchOptions.demo)
+        #else
         let store = AppStore(demo: LaunchOptions.demo, persistCredentials: !LaunchOptions.demo)
+        #endif
         _session = State(initialValue: AppSession(store: store, router: LaunchOptions.makeRouter()))
         // 지난 실행이 임시 폴더에 남긴 첨부 캐시를 치운다. 화면 준비를 기다리게 하지 않는다.
         Task.detached(priority: .utility) { TemporaryFiles.sweepStale() }
@@ -224,7 +230,7 @@ private struct MacCommands: Commands {
 
     private func neighbour(_ step: Int) -> ProjectSummary? {
         let list = projects
-        guard !store.isDemo, list.count > 1,
+        guard list.count > 1,
               let index = list.firstIndex(where: { $0.id == store.selectedProjectID }) else { return nil }
         let next = index + step
         return list.indices.contains(next) ? list[next] : nil
@@ -240,16 +246,16 @@ private struct MacCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("새 프로젝트…") { router.showInMainWindow(router.destination); router.showNewProject = true }
                 .keyboardShortcut("n", modifiers: .command)
-                .disabled(!store.canWrite)
+                .disabled(store.isDemo || !store.canWrite)
             Button("팀장 추가…") { router.showInMainWindow(router.destination); router.showNewMember = true }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
-                .disabled(!store.uiCanWrite || store.isArchive || store.selectedProjectID == nil)
+                .disabled(store.isDemo || !store.uiCanWrite || store.isArchive || store.selectedProjectID == nil)
         }
         CommandMenu("이동") {
             ForEach(Array(Destination.allCases.enumerated()), id: \.element) { index, tab in
                 Button(tab.title) { router.showInMainWindow(tab) }
                     .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
-                    .disabled(store.bootstrap == nil && !store.isDemo)
+                    .disabled(store.bootstrap == nil)
             }
             Divider()
             Button("이전 프로젝트") { switchTo(neighbour(-1)) }
@@ -261,10 +267,10 @@ private struct MacCommands: Commands {
             Divider()
             Button("입력칸으로") { router.showInMainWindow(router.destination); router.focusComposer &+= 1 }
                 .keyboardShortcut("l", modifiers: .command)
-                .disabled(store.isArchive || (store.bootstrap == nil && !store.isDemo))
+                .disabled(store.isArchive || store.bootstrap == nil)
             Button("지금 동기화") { Task { await store.refresh() } }
                 .keyboardShortcut("r", modifiers: .command)
-                .disabled(store.isDemo || store.bootstrap == nil)
+                .disabled(store.bootstrap == nil)
         }
     }
 }

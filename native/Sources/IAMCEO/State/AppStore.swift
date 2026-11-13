@@ -100,7 +100,7 @@ final class AppStore: ProjectManagementStore {
     private(set) var projectArchived: Bool?
     private(set) var projectConnectionOK: Bool?
     private(set) var projectName: String?
-    var canWrite: Bool { capabilitiesLoaded && hasFreshProject && !showsOffline && !isRestarting && connectionStatus == .connected && !isRevalidating && !isDemo && !isArchive && projectArchived != true
+    var canWrite: Bool { capabilitiesLoaded && hasFreshProject && !showsOffline && !isRestarting && connectionStatus == .connected && !isRevalidating && !isArchive && projectArchived != true
         && selectedProjectID.map { projectResults[$0] != .checking } != false }
     /// A cached snapshot is for reading only. Realtime hosts need an atomic sync for this selection.
     /// Operations-only hosts validate revisions per write; an optional sync failure cannot lock all writes.
@@ -113,16 +113,17 @@ final class AppStore: ProjectManagementStore {
             ?? archivedProjects.first { $0.id == selectedProjectID }?.name ?? "IAMCEO"
     }
     var writeBlockedReason: String? {
-        if isDemo { return "샘플은 읽기 전용입니다" }
-        if isArchive || projectArchived == true { return "보관한 프로젝트는 읽기 전용입니다" }
+        if isArchive || projectArchived == true { return String(localized: "보관한 프로젝트는 읽기 전용입니다") }
+        // F1: 기기에 남겨 둔 마지막 상태를 보는 중(연결 전). 지금 상태가 아닐 수 있어 바꾸지 않는다.
+        if lastSeen != nil { return String(localized: "마지막으로 본 상태라 지금은 바꿀 수 없습니다") }
         if let connectionNotice { return connectionNotice }
-        if showsOffline { return "서버와 연결이 끊겼습니다" }
-        if connectionStatus != .connected { return "잠시 연결을 확인하는 중" }
-        if !hasFreshProject || (selectedProjectID != nil && stateProjectID == nil) { return "프로젝트를 불러오는 중입니다" }
+        if showsOffline { return String(localized: "서버와 연결이 끊겼습니다") }
+        if connectionStatus != .connected { return String(localized: "잠시 연결을 확인하는 중") }
+        if !hasFreshProject || (selectedProjectID != nil && stateProjectID == nil) { return String(localized: "프로젝트를 불러오는 중입니다") }
         if isRevalidating || !capabilitiesLoaded || selectedProjectID.map({ projectResults[$0] == .checking }) == true {
-            return "최신 상태를 다시 확인하는 중입니다"
+            return String(localized: "최신 상태를 다시 확인하는 중입니다")
         }
-        if projectConnectionOK == false { return "프로젝트의 실행 연결을 확인해 주세요" }
+        if projectConnectionOK == false { return String(localized: "프로젝트의 실행 연결을 확인해 주세요") }
         return nil
     }
     /// Consumers can check one recipient instead of treating all send actions as a global lock.
@@ -176,7 +177,8 @@ final class AppStore: ProjectManagementStore {
         if notificationMessageID != nil, notificationScope == ChatHistoryKey.normalizedScope(targetMemberID: historyTarget, members: members) {
             return notificationMessages
         }
-        if isDemo || (!isArchive && pagingSupport == .unsupported) {
+        // F1: 마지막으로 본 상태에는 이력 쪽이 없다. 그 상태에 든 최근 글만 보인다.
+        if lastSeen != nil || (!isArchive && pagingSupport == .unsupported) {
             let scope = ChatHistoryKey.normalizedScope(targetMemberID: historyTarget, members: members)
             return messages.filter { row in
                 if case .member(let id) = scope { return row.memberId == id || row.targetMemberId == id }
@@ -211,10 +213,10 @@ final class AppStore: ProjectManagementStore {
     var isRestarting = false
     var isCheckingConnection = false
     var connectionNotice: String? {
-        if isRestarting { return "서버를 다시 시작하는 중" }
+        if isRestarting { return String(localized: "서버를 다시 시작하는 중") }
         // 연결은 되는데 응답을 거듭 해석하지 못하는 것은 '연결 확인'이 아니다. 기다려도 풀리지 않으니 사실대로 알린다.
-        if !showsOffline, isCheckingConnection, unreadableFailures >= 3 { return "앱과 서버 버전이 맞지 않아 최신 상태를 읽지 못했습니다" }
-        if !showsOffline, isCheckingConnection { return "잠시 연결을 확인하는 중" }
+        if !showsOffline, isCheckingConnection, unreadableFailures >= 3 { return String(localized: "앱과 서버 버전이 맞지 않아 최신 상태를 읽지 못했습니다") }
+        if !showsOffline, isCheckingConnection { return String(localized: "잠시 연결을 확인하는 중") }
         return nil
     }
     /// Why the last sync failed while `connectionLost` (system wording, e.g. no internet vs. server not answering).
@@ -234,7 +236,7 @@ final class AppStore: ProjectManagementStore {
     private(set) var activityEpoch = 0
     var activityErrors: [String: String] = [:]
     var syncDescription: String {
-        if isDemo { return "Sample workspace · read-only" }
+        if isDemo { return "Sample workspace" }
         switch realtimeStatus {
         case .paused: return "Updates paused in background"
         case .connecting: return "Connecting to live updates…"
@@ -246,6 +248,8 @@ final class AppStore: ProjectManagementStore {
         }
     }
     @ObservationIgnored private let injectedSession: URLSession?
+    /// F8: 샘플 모드의 가짜 서버. 샘플이 아니면 nil.
+    @ObservationIgnored let sampleServer: SampleServer?
     /// C8: 이 기기의 Tailscale 이 켜져 있는가. 연결(APIClient)과 QR 교환이 Tailscale 주소로 평문을 보내기 전에 본다.
     /// 시험은 시험 기기의 Tailscale 상태에 기대지 않게 바꿔 넣는다. 바꾼 값은 다음 연결부터 쓴다.
     @ObservationIgnored var tailnetConnected: @Sendable () -> Bool = { Tailnet.isConnected() }
@@ -310,13 +314,29 @@ final class AppStore: ProjectManagementStore {
     let drafts: DraftStore
     let composerUploads = ComposerAttachmentUploads()
     let submissions: SubmissionStore?
+    /// F1(4차 S): 마지막으로 본 상태와 연결되면 보낼 글(AppStore+Offline.swift, OfflineState.swift).
+    let offline: OfflineStateStore
+    /// 지금 화면의 상태가 기기에 남겨 둔 마지막 상태인가(연결 전, 읽기 전용). 서버가 새 상태를 주면 nil.
+    var lastSeen: LastSeenInfo?
+    /// '마지막으로 본 상태' 줄을 띄울 때가 됐는가(잠깐 기다렸거나 연결이 실패했다).
+    var lastSeenAnnounced = false
+    /// 연결되면 보낼 글을 지금 보내는 중.
+    var outboxFlushing = false
+    @ObservationIgnored var lastSeenSaveTask: Task<Void, Never>?
+    @ObservationIgnored var lastSeenSavedAt: Date?
+    @ObservationIgnored var lastSeenNoticeTask: Task<Void, Never>?
+    @ObservationIgnored var lastSeenPeek: NotificationLink?
+    /// Mac 앱이 이 Mac 의 서버(127.0.0.1)에 붙을 때는 마지막 상태를 쓰지 않는다(서버가 꺼져 있으면 연결 화면의
+    /// '이 Mac에서 시작'이 답이다). 시험은 시험 서버가 127.0.0.1 이라 켠다.
+    @ObservationIgnored var lastSeenOnThisMac = false
     var writeRevisions: SyncRevisions?
     var settingsEdit: SettingsEdit?
     private(set) var settingsConflict: Settings?
     var todoWrites: [String: TodoWriteState] = [:]
     var operationResults: [String: OperationReceipt] = [:]
     private(set) var batchResults: [String: CardWriteStatus] = [:]
-    private(set) var writeNamespace = "unassigned"
+    /// F1 의 마지막 상태 복원(AppStore+Offline.swift)도 바꾼다. 화면은 바꾸지 않는다.
+    var writeNamespace = "unassigned"
     @ObservationIgnored let writeStorage: LocalStateStorage
     @ObservationIgnored var journal = AppWriteJournal()
     @ObservationIgnored var persistenceFailure: String?
@@ -367,12 +387,16 @@ final class AppStore: ProjectManagementStore {
          retryJitter: @escaping @Sendable (Double) -> Double = { $0 * Double.random(in: 0.8...1.2) },
          lowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled,
          pushNotifications: PushNotificationService? = nil, navigationDefaults: UserDefaults? = nil,
-         restoreCredentials: Bool = true) {
+         restoreCredentials: Bool = true, offline: OfflineStateStore? = nil) {
         self.navigationDefaults = demo ? nil : (navigationDefaults ?? (persistCredentials ? .standard : nil))
-        injectedSession = session
+        // F8: 샘플은 기기 안의 가짜 서버에 실제 연결과 같은 길로 붙는다. 넘겨받은 세션·실시간 연결은 쓰지 않는다
+        // (샘플의 요청은 어떤 경우에도 그 서버 밖으로 나가지 않는다).
+        let sample = demo ? SampleServer() : nil
+        sampleServer = sample
+        injectedSession = sample?.session ?? session
         // URLProtocol cannot intercept a WebSocket upgrade. Injected HTTP sessions must also
         // inject a socket transport to opt in; tests can never escape to the real network.
-        self.realtime = demo ? nil : (realtime ?? (session == nil ? RealtimeClient() : nil))
+        self.realtime = sample.map { RealtimeClient(factory: $0.realtimeFactory, clock: clock) } ?? (realtime ?? (session == nil ? RealtimeClient() : nil))
         syncClock = clock; self.retryJitter = retryJitter; self.lowPowerMode = lowPowerMode
         self.persistCredentials = persistCredentials && !demo
         isDemo = demo
@@ -387,6 +411,8 @@ final class AppStore: ProjectManagementStore {
         pushSettings = self.pushNotifications?.settingsStore ?? PushSettingsStore()
         let composerDrafts = drafts ?? DraftStore(persist: persistCredentials && !demo, persistMigration: restoreCredentials)
         self.drafts = composerDrafts
+        // F1: 샘플과 기기에 남기지 않는 실행(시험)은 마지막 상태도 대기열도 파일로 남기지 않는다.
+        self.offline = offline ?? OfflineStateStore(persist: persistCredentials && !demo)
         writeStorage = LocalStateStorage(enabled: !demo && (persistCredentials || writeStorageURL != nil),
                                          url: writeStorageURL, defaults: .standard, key: "iamceo.appWrites.v1")
         do {
@@ -411,15 +437,15 @@ final class AppStore: ProjectManagementStore {
         accessCode = self.persistCredentials && restoreCredentials ? (KeychainStore.accessCode(for: savedEndpoint) ?? "") : ""
         restoredCredentials = ConnectionRecovery.showsSavedConnection(endpoint: endpoint, accessCode: accessCode, useQR: false)
         retriesSavedConnection = restoredCredentials && !demo
-        if demo {
-            modelCatalog = .demo
-            let fixture = DemoFixtures.workspace()
-            bootstrap = fixture.0
-            state = fixture.1
-            selectedProjectID = fixture.1.project.id
-            connectionStatus = .demo
+        if let sample {
+            endpoint = SampleServer.endpoint
+            accessCode = SampleServer.accessCode
+            composerUploads.sessionConfiguration = sample.configuration
+            Task { [weak self] in await self?.connect() }
         }
         updateStateCollections()
+        // F1: 저장한 연결의 마지막 상태가 있으면 빈 연결 화면 대신 그것을 읽기 전용으로 띄운다(연결은 화면이 평소대로 시작한다).
+        if restoreCredentials && restoredCredentials { restoreLastSeen() }
         // Injected test sessions never subscribe to the machine's network or application lifecycle.
         if session == nil, !demo {
             let monitor = NWPathMonitor()
@@ -463,7 +489,6 @@ final class AppStore: ProjectManagementStore {
     }
 
     func connect() async {
-        guard !isDemo else { return }
         connectRetryAttempt = 0
         // Returning from a sample must not write saved state until the owner actually connects.
         if pendingDraftRecovery {
@@ -487,9 +512,15 @@ final class AppStore: ProjectManagementStore {
     }
 
     private func establishConnection() async {
-        let sameServer = connectedCredentials.flatMap { try? ServerEndpoint($0.endpoint) }.map { previous in
+        let reconnecting = connectedCredentials.flatMap { try? ServerEndpoint($0.endpoint) }.map { previous in
             (try? ServerEndpoint(endpoint)).map { DraftStore.endpointNamespace($0) == DraftStore.endpointNamespace(previous) } ?? false
         } ?? false
+        // F1: 마지막으로 본 상태를 띄운 채 같은 서버에 붙으면 그 상태와 초안 자리를 이어 쓴다(같은 서버로 다시 붙는 것과 같다).
+        // 다른 서버로 바꾸면 그 상태는 지운다.
+        let keepsLastSeen = lastSeenMatches(endpoint)
+        if lastSeen != nil, !keepsLastSeen { forgetLastSeen() }
+        let sameServer = reconnecting || keepsLastSeen
+        let idleNamespace = keepsLastSeen ? (lastSeen?.namespace ?? "unassigned") : "unassigned"
         retryableConnect = nil
         guard foreground else {
             // A requested host change invalidates writes/uploads now, even though networking
@@ -499,7 +530,7 @@ final class AppStore: ProjectManagementStore {
             if !sameServer { clearHostNavigation(); projectCache.removeAll() }
             pushNotifications?.setHost(nil); pushSettings.setHost(nil)
             api = nil; connectionStatus = .disconnected; isLoading = false; isRevalidating = true
-            drafts.selectNamespace("unassigned"); writeNamespace = "unassigned"
+            drafts.selectNamespace(idleNamespace); writeNamespace = idleNamespace
             return
         }
         resetConnectionEvidence()
@@ -523,7 +554,7 @@ final class AppStore: ProjectManagementStore {
         guard connectionEpoch == generation else { return }
         pushLogoutTask = nil
         pushNotifications?.setHost(nil); pushSettings.setHost(nil)
-        drafts.selectNamespace("unassigned")
+        drafts.selectNamespace(idleNamespace)
         writeRevisions = nil; reviewedSettings = nil; reviewedMembers = [:]; reviewedTodos = [:]
         settingsEdit = nil; settingsConflict = nil; todoWrites = [:]; operationResults = [:]; batchResults = [:]
         leaseReceiptOrder = [:]; absentOperations = []; announcedUnresolved = []; writeContextGeneration = UUID()
@@ -536,7 +567,10 @@ final class AppStore: ProjectManagementStore {
         lastReadError = nil
         connectionStatus = .connecting
         api = nil
-        connectedCredentials = nil; health.transportFailures = 0; connectionIssue = nil
+        connectedCredentials = nil; health.transportFailures = 0
+        // F1: 마지막 상태를 보는 채 같은 서버에 다시 붙는 동안(자동 재시도)은 앞선 실패의 까닭을 지우지 않는다.
+        // 지우면 재시도마다 줄이 '받는 중' 한 줄과 까닭 석 줄 사이를 오가며 높이가 바뀐다(4차 리뷰 ui-4).
+        if !keepsLastSeen { connectionIssue = nil }
         pendingActions.removeAll()
         errorMessage = nil
         if sameServer {
@@ -547,7 +581,7 @@ final class AppStore: ProjectManagementStore {
         defer { if epoch == generation { isLoading = false } }
         do {
             let validated = try ServerEndpoint(endpoint)
-            guard !accessCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw APIError(status: 0, message: "접속 코드를 넣어 주세요.") }
+            guard !accessCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw APIError(status: 0, message: String(localized: "접속 코드를 넣어 주세요.")) }
             let client = APIClient(endpoint: validated, accessCode: accessCode.trimmingCharacters(in: .whitespacesAndNewlines), session: injectedSession, liteStateEnabled: true,
                                    tailnetConnected: tailnetConnected)
             let task = Task { try await client.request("/api/bootstrap") as Bootstrap }
@@ -574,16 +608,24 @@ final class AppStore: ProjectManagementStore {
             do { if persistCredentials { try KeychainStore.save(accessCode, for: endpoint) } }
             catch { errorMessage = error.localizedDescription }
             connectedCredentials = (endpoint, accessCode.trimmingCharacters(in: .whitespacesAndNewlines))
+            // F1: 새로 붙은 서버다. 앞서 남긴 다른 연결의 마지막 상태는 지운다(이 서버의 상태는 곧 다시 남긴다).
+            // 다른 서버에 보내려던 대기열도 지운다. 이 서버 몫은 그대로 둔다(접속 코드가 바뀌어 같은 서버에 다시 붙은 경우).
+            if !sameServer {
+                offline.clearLastSeen()
+                try? offline.removeAll(except: writeNamespace)
+            }
             rememberServerAddresses()
             rememberServerCLI()
+            connectionIssue = nil
             connectionStatus = .connected
             connectRetryAttempt = 0
             // Reading the workspace never waits for the model catalog, and waits for the capability probe only briefly.
             catalogDiscoveryTask = Task { [weak self] in await self?.refreshModels() }
             // 구형 순서로 읽게 되더라도 방금 받은 bootstrap을 다시 받지 않는다.
             if !capabilitiesLoaded || !syncSupported { seededBootstrap = initial }
-            if !sameServer { restoreNavigation() }
-            let saved = sameServer ? (previousProject ?? savedProjectID()) : savedProjectID()
+            // 샘플은 저장해 둔 화면이 없다. 실행 인자로 연 화면을 지키고 본사 말고 첫 프로젝트를 연다.
+            if !sameServer, !isDemo { restoreNavigation() }
+            let saved = isDemo ? initial.projects.first(where: { !$0.isHq })?.id : sameServer ? (previousProject ?? savedProjectID()) : savedProjectID()
             if sameServer, previousArchive, let saved {
                 await selectArchivedProject(id: saved)
             } else if let project = initial.projects.first(where: { $0.id == saved })
@@ -617,6 +659,8 @@ final class AppStore: ProjectManagementStore {
                 retryableConnect = (endpoint, accessCode)
                 scheduleConnectRetry()
             }
+            // F1: 마지막 상태를 띄운 채였다면, 서버에 닿지 않은 실패는 그 상태를 두고 줄에 까닭을 보인다.
+            lastSeenConnectFailed(error)
         }
     }
 
@@ -653,7 +697,6 @@ final class AppStore: ProjectManagementStore {
 
     /// Restart transport and revalidate without changing project, drafts, windows, or route.
     func restartRealtime() async {
-        guard !isDemo else { return }
         guard api != nil, bootstrap != nil else { await establishConnection(); return }
         socketFailures = 0; restFailures = 0; health.transportFailures = 0; nextSnapshotAt = .zero
         isRevalidating = true
@@ -675,7 +718,7 @@ final class AppStore: ProjectManagementStore {
         navigationDefaults?.dictionary(forKey: navigationKey)?["projectID"] as? String
     }
     func saveNavigation(destination: Destination? = nil) {
-        guard !isDemo, writeNamespace != "unassigned" else { return }
+        guard writeNamespace != "unassigned" else { return }
         var saved = navigationDefaults?.dictionary(forKey: navigationKey) ?? [:]
         if let selectedProjectID { saved["projectID"] = selectedProjectID }
         if let destination { saved["destination"] = destination.rawValue }
@@ -702,6 +745,7 @@ final class AppStore: ProjectManagementStore {
         lifecycleObservers.forEach(NotificationCenter.default.removeObserver)
         lifecycleObservers.removeAll()
         api = nil
+        sampleServer?.shutdown()
     }
 
     func disconnect() {
@@ -716,6 +760,9 @@ final class AppStore: ProjectManagementStore {
         releaseAllTerminals()
         stopRequests()
         resetReadCollections()
+        // F1: 이 기기에서 나간다. 마지막 상태와 이 서버에 보내려던 대기열을 지운다(나가기 확인 창이 그 수를 알린다).
+        forgetLastSeen()
+        if writeNamespace != "unassigned" { try? offline.removeAll(namespace: writeNamespace) }
         projectCache.removeAll(); validatedProjectGeneration = nil; validatedWriteGeneration = nil
         generation = UUID(); projectGeneration = UUID()
         if persistCredentials { KeychainStore.remove(for: endpoint) }
@@ -742,8 +789,10 @@ final class AppStore: ProjectManagementStore {
     func selectArchivedProject(id: String) async { await selectProject(id: id, archived: true) }
 
     func selectProject(id: String, archived: Bool, navigationToken: UUID? = nil) async {
-        if isDemo { return }
-        guard api != nil, connectionStatus == .connected else { return }
+        guard api != nil, connectionStatus == .connected else {
+            if id != selectedProjectID || archived != isArchive { explainLastSeenSelection() }
+            return
+        }
         let selectionRequestID = UUID()
         self.selectionRequestID = selectionRequestID
         if selectedProjectID == id, isArchive == archived, navigationToken == nil {
@@ -784,7 +833,7 @@ final class AppStore: ProjectManagementStore {
     }
 
     func refreshModels() async {
-        guard !isDemo, let api else { return }
+        guard let api else { return }
         let epoch = generation
         if let modelsTask {
             let requestID = modelsRequestID
@@ -809,10 +858,12 @@ final class AppStore: ProjectManagementStore {
     func setForeground(_ active: Bool) {
         #if os(iOS)
         // SwiftUI sends false for .inactive (Control Center, permission dialogs). Only background pauses.
-        if !active, injectedSession == nil, UIApplication.shared.applicationState != .background { return }
+        if !active, injectedSession == nil || sampleServer != nil, UIApplication.shared.applicationState != .background { return }
         #endif
         guard foreground != active else { return }
         foreground = active; foregroundGeneration = UUID()
+        // F1: 앞으로 나오면 잠긴 동안 못 읽은 대기열을 다시 읽고, 뒤로 가면 서버가 확인해 준 마지막 상태를 남긴다.
+        if active { offline.reloadIfNeeded() } else { Task { [weak self] in await self?.saveLastSeenNow() } }
         if active {
             if pendingConnect {
                 Task { [weak self] in await self?.connect() }
@@ -862,13 +913,14 @@ final class AppStore: ProjectManagementStore {
         }
     }
 
-    private func holdAction(_ key: String) -> UUID {
+    /// F1 의 대기열 보내기(AppStore+Offline.swift)도 같은 잠금을 쓴다.
+    func holdAction(_ key: String) -> UUID {
         let owner = UUID()
         pendingActions.insert(key); actionOwners[key] = owner
         return owner
     }
     /// 잠금을 건 쪽만 푼다. 먼저 풀린 뒤 같은 키로 시작한 다음 동작의 잠금은 건드리지 않는다.
-    private func releaseAction(_ key: String, owner: UUID) {
+    func releaseAction(_ key: String, owner: UUID) {
         guard actionOwners[key] == owner else { return }
         actionOwners.removeValue(forKey: key); pendingActions.remove(key)
     }
@@ -898,6 +950,8 @@ final class AppStore: ProjectManagementStore {
             resetConnectionEvidence()
             beginPushLogout(); clearHostNavigation()
             NotificationInbox.shared.discardPending()
+            // F1: 접속 코드가 거절됐다. 그 연결로 남긴 마지막 상태는 지운다(대기열은 같은 서버에 다시 들어오면 보낸다).
+            forgetLastSeen()
             stopRequests(); resetReadCollections(); projectCache.removeAll(); validatedProjectGeneration = nil; validatedWriteGeneration = nil
             generation = UUID(); projectGeneration = UUID()
             realtimeStatus = .blocked; isRevalidating = true
@@ -917,8 +971,7 @@ final class AppStore: ProjectManagementStore {
     /// Like `mutate`, but also returns the server/transport error so callers can tell "the server refused" from
     /// "we never heard back". `error == nil` with no value means the request was not sent.
     func perform<T: Sendable>(_ key: String, refreshAfter: Bool = true, allowArchived: Bool = false, cancellationAware: Bool = false, deferRefusalToReceipt: Bool = false, ownsPendingAction: Bool = false, operation: (APIClient) async throws -> T) async -> (value: T?, error: Error?) {
-        guard !isDemo else { errorMessage = "샘플은 읽기 전용입니다. 실제 Mac에 연결하면 바꿀 수 있습니다."; return (nil, nil) }
-        guard let api, canWrite || (allowArchived && connectionStatus == .connected && !isRevalidating && !isDemo) else { errorMessage = isArchive ? "보관한 프로젝트는 읽기 전용입니다." : "서버에 연결된 뒤에 바꿀 수 있습니다."; return (nil, nil) }
+        guard let api, canWrite || (allowArchived && connectionStatus == .connected && !isRevalidating) else { errorMessage = isArchive ? String(localized: "보관한 프로젝트는 읽기 전용입니다.") : String(localized: "서버에 연결된 뒤에 바꿀 수 있습니다."); return (nil, nil) }
         guard ownsPendingAction || !pendingActions.contains(key) else { return (nil, nil) }
         let epoch = generation
         let owner: UUID? = ownsPendingAction ? nil : holdAction(key)
@@ -967,7 +1020,7 @@ final class AppStore: ProjectManagementStore {
         var completed = false
         var explainedFailure = false
         var blockedOnly = true
-        var failureReason = "연결이나 초안이 바뀌어 보내지 않았습니다. 글을 확인하고 다시 보내 주세요."
+        var failureReason = String(localized: "연결이나 초안이 바뀌어 보내지 않았습니다. 글을 확인하고 다시 보내 주세요.")
         defer {
             // A persisted refusal already explains the failure. Every other false result also
             // gets a composer-scoped explanation, including early guards and local errors.
@@ -976,15 +1029,14 @@ final class AppStore: ProjectManagementStore {
             if explainedFailure { messageSendNotices.removeValue(forKey: noticeKey) }
             else if !completed { messageSendNotices[noticeKey] = SendNotice(text: failureReason, whileBlocked: blockedOnly) }
         }
-        guard !isDemo else { failureReason = "샘플은 읽기 전용입니다."; errorMessage = failureReason; return false }
-        guard canWrite else { failureReason = writeBlockedReason ?? "최신 상태를 확인한 뒤 보내 주세요."; return false }
-        guard let projectID = selectedProjectID else { failureReason = "프로젝트를 고른 뒤 보내 주세요."; return false }
-        guard let submissions else { failureReason = "전송 기록을 준비하지 못했습니다. 다시 연결해 주세요."; return false }
+        guard canWrite else { failureReason = writeBlockedReason ?? String(localized: "최신 상태를 확인한 뒤 보내 주세요."); return false }
+        guard let projectID = selectedProjectID else { failureReason = String(localized: "프로젝트를 고른 뒤 보내 주세요."); return false }
+        guard let submissions else { failureReason = String(localized: "전송 기록을 준비하지 못했습니다. 다시 연결해 주세요."); return false }
         guard !isSending(projectID: projectID, targetMemberID: targetMemberID) else {
-            failureReason = "앞선 글을 보내는 중입니다. 끝난 뒤 다시 보내 주세요."; return false
+            failureReason = String(localized: "앞선 글을 보내는 중입니다. 끝난 뒤 다시 보내 주세요."); return false
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachmentIDs.isEmpty else {
-            failureReason = "보낼 글이나 첨부를 넣어 주세요."; return false
+            failureReason = String(localized: "보낼 글이나 첨부를 넣어 주세요."); return false
         }
         let epoch = generation
         let actionKey = sendActionKey(projectID: projectID, targetMemberID: targetMemberID)
@@ -997,10 +1049,10 @@ final class AppStore: ProjectManagementStore {
             for attempt in submissions.messages(namespace: writeNamespace) where attempt.draft.key == key
                 && (attempt.status == .checking || (attempt.status == .accepted && !attempt.draftConsumed)) {
                 if attempt.status == .checking, strictWriteContract {
-                    failureReason = "접수 확인 중입니다. 결과를 확인한 뒤 다시 보내 주세요."
+                    failureReason = String(localized: "접수 확인 중입니다. 결과를 확인한 뒤 다시 보내 주세요.")
                     guard await reconcileMessage(attempt.id), epoch == generation else { return false }
                     if let current = submissions.messageAttempt(id: attempt.id), current.restoredDraft != nil {
-                        failureReason = "접수 확인 뒤 입력칸의 글이 바뀌었습니다. 확인하고 다시 보내 주세요."
+                        failureReason = String(localized: "접수 확인 뒤 입력칸의 글이 바뀌었습니다. 확인하고 다시 보내 주세요.")
                         guard drafts.text(for: key) == text, drafts.files(for: key).map(\.id) == attachmentIDs else { return false }
                     }
                 }
@@ -1019,14 +1071,14 @@ final class AppStore: ProjectManagementStore {
             if retry == nil { drafts.setText(text, for: key) }
             let files = retry?.draft.attachments ?? drafts.files(for: key)
             guard Set(files.map(\.id)) == Set(attachmentIDs), files.count == attachmentIDs.count else {
-                throw APIError(status: 0, message: "첨부 초안을 확인해 주세요. 누락된 첨부를 빼고 보내지 않습니다.")
+                throw APIError(status: 0, message: String(localized: "첨부 초안을 확인해 주세요. 누락된 첨부를 빼고 보내지 않습니다."))
             }
             if let error = drafts.persistenceError { throw APIError(status: 0, message: error) }
             let attempt = try retry ?? submissions.prepareMessage(projectID: projectID, targetMemberID: targetMemberID, draft: drafts.snapshot(for: key), contextFileID: contextFileID, clearsDraft: true)
             // No suspension between the durable intent, snapshot and durable clear. Both platforms share this path.
             let detached = try submissions.detachMessage(id: attempt.id, drafts: drafts)
             if retry == nil, attempt.handoffID != nil, !detached {
-                throw APIError(status: 0, message: "초안이 바뀌어 보내지 않았습니다. 입력칸을 확인하고 다시 보내 주세요.")
+                throw APIError(status: 0, message: String(localized: "초안이 바뀌어 보내지 않았습니다. 입력칸을 확인하고 다시 보내 주세요."))
             }
             if detached { draftDidDetach?() }
             let outcome: (value: Message?, error: Error?) = await perform(actionKey, refreshAfter: false, deferRefusalToReceipt: true, ownsPendingAction: true) { api in
@@ -1038,7 +1090,7 @@ final class AppStore: ProjectManagementStore {
             if Self.definiteRefusal(outcome.error)
                 || submissions.messageAttempt(id: attempt.id)?.status == .prepared
                 || submissions.messageAttempt(id: attempt.id)?.status == .notAccepted {
-                try submissions.refuseMessage(id: attempt.id, reason: outcome.error?.localizedDescription ?? "서버가 접수하지 않았습니다")
+                try submissions.refuseMessage(id: attempt.id, reason: outcome.error?.localizedDescription ?? String(localized: "서버가 접수하지 않았습니다"))
                 try submissions.restoreMessage(id: attempt.id, drafts: drafts)
                 explainedFailure = true
                 return false
@@ -1055,13 +1107,13 @@ final class AppStore: ProjectManagementStore {
                 return true
             }
             if outcome.error != nil {
-                failureReason = "접수 확인 중입니다. 같은 전송 ID로 조회합니다."
+                failureReason = String(localized: "접수 확인 중입니다. 같은 전송 ID로 조회합니다.")
                 errorMessage = failureReason
             } else { failureReason = errorMessage ?? failureReason }
         } catch {
             guard epoch == generation else { return false }
             if case SubmissionError.unresolvedAttempt = error {
-                failureReason = "이전 글의 접수 결과를 먼저 확인해 주세요. 글은 입력칸에 남아 있습니다."
+                failureReason = String(localized: "이전 글의 접수 결과를 먼저 확인해 주세요. 글은 입력칸에 남아 있습니다.")
                 errorMessage = failureReason
             } else { failureReason = error.localizedDescription; handle(error) }
         }
@@ -1071,14 +1123,14 @@ final class AppStore: ProjectManagementStore {
     /// Explicit retry sends the retained immutable attempt and never detaches the user's next draft.
     @discardableResult func retryFailedMessage(id: String) async -> Bool {
         guard let attempt = submissions?.messageAttempt(id: id) else {
-            explainMessageSendBlock("보내지 못한 글의 기록을 찾지 못했습니다.", targetMemberID: nil, whileBlocked: false)
+            explainMessageSendBlock(String(localized: "보내지 못한 글의 기록을 찾지 못했습니다."), targetMemberID: nil, whileBlocked: false)
             return false
         }
         let noticeKey = Self.scoped(attempt.namespace, attempt.draft.key)
         messageSendNotices.removeValue(forKey: noticeKey)
         var completed = false
         var blockedOnly = true
-        var failureReason = "지금은 다시 보낼 수 없습니다. 연결과 이전 전송 결과를 확인해 주세요."
+        var failureReason = String(localized: "지금은 다시 보낼 수 없습니다. 연결과 이전 전송 결과를 확인해 주세요.")
         defer {
             // 끝난 글의 안내는 끝난 자리에서 지운다(sendMessage와 같다).
             if !completed { messageSendNotices[noticeKey] = SendNotice(text: failureReason, whileBlocked: blockedOnly) }
@@ -1116,7 +1168,7 @@ final class AppStore: ProjectManagementStore {
                 await refresh()
                 return true
             }
-            failureReason = outcome.error == nil ? (errorMessage ?? failureReason) : "접수 확인 중입니다. 같은 전송 ID로 조회합니다."
+            failureReason = outcome.error == nil ? (errorMessage ?? failureReason) : String(localized: "접수 확인 중입니다. 같은 전송 ID로 조회합니다.")
         } catch {
             failureReason = error.localizedDescription
             if epoch == generation { handle(error) }
@@ -1139,7 +1191,10 @@ final class AppStore: ProjectManagementStore {
             if let attempt = submissions.messageAttempt(id: id), attempt.status == .accepted || attempt.status == .notAccepted {
                 // 결과가 확정됐다. '접수 확인 중' 안내를 입력칸 아래와 위쪽 오류 줄에 남기지 않는다.
                 messageSendNotices.removeValue(forKey: Self.scoped(attempt.namespace, attempt.draft.key))
-                if rawErrorMessage?.hasPrefix("접수 확인 중입니다") == true { errorMessage = nil }
+                // 영어 화면의 같은 안내도 같은 머리로 시작한다(Localizable.xcstrings 의 번역이 지킨다).
+                if let raw = rawErrorMessage, raw.hasPrefix("접수 확인 중입니다") || raw.hasPrefix(String(localized: "접수 확인 중입니다")) {
+                    errorMessage = nil
+                }
             }
             return true
         } catch {
@@ -1148,7 +1203,7 @@ final class AppStore: ProjectManagementStore {
             if canWrite {
                 // A missing lookup endpoint, malformed response or transport failure is not
                 // proof of absence. Keep the immutable attempt and make the pending result explicit.
-                errorMessage = "접수 확인 중입니다. 같은 전송 ID로 조회합니다. (\(error.localizedDescription))"
+                errorMessage = String(localized: "접수 확인 중입니다. 같은 전송 ID로 조회합니다. (\(error.localizedDescription))")
             }
             return false
         }
@@ -1288,7 +1343,7 @@ final class AppStore: ProjectManagementStore {
     /// Every pairing link or QR comes in here. A link opened from outside the app always waits for a yes; a QR the
     /// owner scanned inside the app waits only when it would replace a Mac that is already connected or saved.
     func receivePairingLink(_ link: PairingLink, device: String, external: Bool) async {
-        guard !isDemo else { errorMessage = "샘플 모드에서는 연결하지 않습니다."; return }
+        guard !isDemo else { errorMessage = String(localized: "샘플 모드에서는 연결하지 않습니다."); return }
         let current = currentServerEndpoint
         let replaces = PairingRequest.replaces(currentEndpoint: current, serverAddresses: current.map { serverAddresses(for: $0) } ?? [], link: link)
         if external || replaces {
@@ -1377,7 +1432,7 @@ final class AppStore: ProjectManagementStore {
 
     /// Phone: trades the QR's one-time code for the access code over Tailscale, then connects like a manual login.
     @discardableResult func pair(with link: PairingLink, device: String) async -> Bool {
-        guard !isDemo else { errorMessage = "샘플 모드에서는 연결하지 않습니다."; return false }
+        guard !isDemo else { errorMessage = String(localized: "샘플 모드에서는 연결하지 않습니다."); return false }
         guard !isPairing else { return false }
         errorMessage = nil
         isPairing = true
@@ -1405,9 +1460,9 @@ final class AppStore: ProjectManagementStore {
 
     /// T8 loads this before reading body; returned data remains bound to the current API actor.
     func fileBody(id: String, forceRefresh: Bool = false) async throws -> FileDoc {
-        guard let api else { throw APIError(status: 0, message: "연결한 뒤 자료를 열어 주세요.") }
+        guard let api else { throw APIError(status: 0, message: String(localized: "연결한 뒤 자료를 열어 주세요.")) }
         let file = try await api.fileBody(id: id, forceRefresh: forceRefresh)
-        guard stillCurrent(api, project: file.projectId) else { throw APIError(status: 0, message: "현재 프로젝트의 자료를 선택해 주세요.") }
+        guard stillCurrent(api, project: file.projectId) else { throw APIError(status: 0, message: String(localized: "현재 프로젝트의 자료를 선택해 주세요.")) }
         return file
     }
 
@@ -1432,7 +1487,7 @@ final class AppStore: ProjectManagementStore {
         guard canWrite, let revision = writeRevisions?.todos?[todo.id],
               reviewedTodos[todo.id].map({ Self.same($0, todo) }) == true,
               todoWrites[todo.id] != .checking, todoWrites[todo.id] != .sending else {
-            errorMessage = "최신 업무 상태를 확인한 뒤 변경하세요."; return false
+            errorMessage = String(localized: "최신 업무 상태를 확인한 뒤 변경하세요."); return false
         }
         return await submitTodoCompletion(PendingTodo(id: todo.id, namespace: writeNamespace, revision: revision,
                                                       done: done, note: note, fileIds: fileIDs))
@@ -1448,7 +1503,7 @@ final class AppStore: ProjectManagementStore {
         guard canWrite, let revision = writeRevisions?.todos?[todo.id],
               reviewedTodos[todo.id].map({ Self.same($0, todo) }) == true,
               todoWrites[todo.id] != .checking, todoWrites[todo.id] != .sending else {
-            errorMessage = "최신 업무 상태를 확인한 뒤 변경하세요."; return false
+            errorMessage = String(localized: "최신 업무 상태를 확인한 뒤 변경하세요."); return false
         }
         return await submitTodoCompletion(PendingTodo(id: todo.id, namespace: writeNamespace, revision: revision,
                                                       done: true, note: nil, fileIds: nil, dropReason: reason, dropped: true))
@@ -1491,7 +1546,7 @@ final class AppStore: ProjectManagementStore {
         if todoWrites[id] == .conflict {
             do { try saveJournal { $0.todos.removeValue(forKey: Self.scoped(namespace, id)) } }
             catch { handle(error) }
-        } else { errorMessage = "업무 변경 결과 확인 중입니다." }
+        } else { errorMessage = String(localized: "업무 변경 결과 확인 중입니다.") }
         await refreshWriteContext()
         return false
     }
@@ -1510,7 +1565,7 @@ final class AppStore: ProjectManagementStore {
         return result != nil
     }
     @discardableResult func memberAction(_ member: Member, action: String) async -> Bool {
-        guard ["interrupt", "resume", "sleep", "compact", "fresh-session"].contains(action) else { errorMessage = "지원하지 않는 팀원 조작입니다."; return false }
+        guard ["interrupt", "resume", "sleep", "compact", "fresh-session"].contains(action) else { errorMessage = String(localized: "지원하지 않는 팀원 조작입니다."); return false }
         if action == "fresh-session" { return await freshSession(member) }
         if action == "compact" { return await compactMember(member) }
         let result: Member? = await mutate("member:\(member.id)") { api in try await api.request("/api/members/\(APIClient.segment(member.id))/\(action)", method: "POST", timeout: 150) }
@@ -1526,7 +1581,7 @@ final class AppStore: ProjectManagementStore {
         }
         guard let revision = writeRevisions?.members?[member.id]?.configRevision,
               let reviewed = reviewedMembers[member.id], Self.same(reviewed, member) else {
-            errorMessage = "최신 팀원 설정을 확인한 뒤 변경하세요."; return false
+            errorMessage = String(localized: "최신 팀원 설정을 확인한 뒤 변경하세요."); return false
         }
         let result = await mutate("member:\(member.id)") { api in
             try await api.patchMember(id: member.id, request: req, revision: revision)
@@ -1539,7 +1594,7 @@ final class AppStore: ProjectManagementStore {
     /// True while a freshly installed server says nobody has chosen how sessions run commands yet. Older servers
     /// (no such field) and the sample never ask.
     var needsPermissionChoice: Bool {
-        !isDemo && bootstrap?.settings.permissionAcknowledged == false && permissionChosenNamespace != writeNamespace
+        bootstrap?.settings.permissionAcknowledged == false && permissionChosenNamespace != writeNamespace
     }
 
     /// Right after connecting, on whichever device connects: true once per connection, so one window opens the
@@ -1578,7 +1633,7 @@ final class AppStore: ProjectManagementStore {
             return true
         }
         guard let revision = writeRevisions?.settings else {
-            errorMessage = "설정을 아직 읽지 못했습니다. 잠시 뒤 다시 눌러 주세요."; return false
+            errorMessage = String(localized: "설정을 아직 읽지 못했습니다. 잠시 뒤 다시 눌러 주세요."); return false
         }
         let result = await perform("settings", refreshAfter: false) { api in
             try await api.patchSettings(request: SettingsPatchRequest(permissionMode: mode, permissionAcknowledged: true), revision: revision)
@@ -1626,7 +1681,7 @@ final class AppStore: ProjectManagementStore {
             return result != nil
         }
         if settingsEdit == nil { _ = beginSettingsEditing() }
-        guard var edit = settingsEdit else { errorMessage = "이 호스트의 설정 revision을 확인할 수 없습니다."; return false }
+        guard var edit = settingsEdit else { errorMessage = String(localized: "이 호스트의 설정 revision을 확인할 수 없습니다."); return false }
         edit.draft = settings; settingsEdit = edit
         let patch = Self.settingsPatch(base: edit.base, draft: settings)
         guard !Self.empty(patch) else { return true }
@@ -1667,7 +1722,7 @@ final class AppStore: ProjectManagementStore {
         guard canWrite, let version = writeRevisions?.members?[member.id],
               !pendingActions.contains("member:\(member.id)"),
               reviewedMembers[member.id].map({ Self.same($0, member) }) == true else {
-            errorMessage = "최신 세션 세대를 확인한 뒤 변경하세요."; return false
+            errorMessage = String(localized: "최신 세션 세대를 확인한 뒤 변경하세요."); return false
         }
         let epoch = generation
         if let existing = journal.operations.values.first(where: {
@@ -1718,7 +1773,7 @@ final class AppStore: ProjectManagementStore {
     }
 
     private func historyKey(targetMemberID: String?) -> ChatHistoryKey? {
-        guard !isDemo, let projectID = selectedProjectID, state != nil else { return nil }
+        guard let projectID = selectedProjectID, state != nil else { return nil }
         return ChatHistoryKey(namespace: writeNamespace, connectionGeneration: generation, projectID: projectID,
                               scope: ChatHistoryKey.normalizedScope(targetMemberID: targetMemberID, members: members), archived: isArchive)
     }
@@ -1833,7 +1888,7 @@ final class AppStore: ProjectManagementStore {
         // Cache cancellation/range tokens reject its late completion.
     }
     private func loadHistory(_ kind: ChatHistoryLoad) async {
-        guard !isDemo, foreground, historyVisible, connectionStatus == .connected, let api,
+        guard foreground, historyVisible, connectionStatus == .connected, let api,
               let key = histories.activeKey, key.projectID == selectedProjectID, key.archived == isArchive,
               key.connectionGeneration == generation, key.archived || pagingSupport != .unsupported else { return }
         while let flight = historyFlight, flight.key == key {
@@ -1897,7 +1952,7 @@ final class AppStore: ProjectManagementStore {
     // MARK: Delivery notices
 
     func loadUnassignedDeliveries() async {
-        guard !isDemo, !isArchive, connectionStatus == .connected, let api, let projectID = selectedProjectID,
+        guard !isArchive, connectionStatus == .connected, let api, let projectID = selectedProjectID,
               deliveryFlights[""] == nil else { return }
         let epoch = generation, projectEpoch = projectGeneration, phase = foregroundGeneration, token = UUID()
         deliveryFlights[""] = token; deliveryErrors[""] = nil
@@ -1933,7 +1988,7 @@ final class AppStore: ProjectManagementStore {
         let previous = journal.unassignedRecoveries?[scope]
         let unresolved = previous.flatMap { $0.result == nil && !$0.refused ? $0 : nil }
         guard unresolved == nil || unresolved?.action == action else {
-            errorMessage = "이전 전달 작업의 결과를 먼저 확인해 주세요."; return false
+            errorMessage = String(localized: "이전 전달 작업의 결과를 먼저 확인해 주세요."); return false
         }
         if unresolved == nil && !unassignedDeliveries.contains(where: { $0.messageId == messageID }) {
             await loadUnassignedDeliveries()
@@ -1991,7 +2046,7 @@ final class AppStore: ProjectManagementStore {
     }
 
     func loadDeliveryNotices(memberID: String, older: Bool = false) async {
-        guard !isDemo, !isArchive, connectionStatus == .connected, let api, let projectID = selectedProjectID,
+        guard !isArchive, connectionStatus == .connected, let api, let projectID = selectedProjectID,
               members.contains(where: { $0.id == memberID }) else { return }
         if deliveryFlights[memberID] != nil {
             if !older { deliveryRefreshPending.insert(memberID) }
@@ -2046,7 +2101,7 @@ final class AppStore: ProjectManagementStore {
         let previous = journal.deliveryRecoveries?[Self.scoped(namespace, deliveryID)]
         // Do not turn an unresolved operation into a different action/version.
         guard previous == nil || previous?.result != nil || previous?.refused == true || previous?.action == action else {
-            errorMessage = "이전 전달 작업의 결과를 먼저 확인해 주세요."; return false
+            errorMessage = String(localized: "이전 전달 작업의 결과를 먼저 확인해 주세요."); return false
         }
         var tracked = previous.flatMap { $0.result == nil && !$0.refused ? $0 : nil }
             ?? PendingDeliveryRecovery(id: UUID().uuidString, namespace: namespace, projectID: projectID,
@@ -2098,7 +2153,7 @@ final class AppStore: ProjectManagementStore {
     }
 
     func loadArchivedProjects() async {
-        guard !isDemo, foreground, let api, connectionStatus == .connected else { return }
+        guard foreground, let api, connectionStatus == .connected else { return }
         archiveObserved = true
         let epoch = generation, phase = foregroundGeneration, token = UUID()
         archiveLoad = token; archiveError = nil; isLoadingArchive = true
@@ -2118,7 +2173,7 @@ final class AppStore: ProjectManagementStore {
     /// 서버가 지우기를 모르면(옛 서버의 405) 화면은 그대로 두고 까닭만 알린다. 응답을 잃으면 목록을 다시 읽어 결과를 본다(다시 보내지 않는다).
     @discardableResult func deleteArchivedProject(id: String) async -> Bool {
         guard !isDemo, foreground, !isRevalidating, connectionStatus == .connected, let api else {
-            errorMessage = "서버에 연결된 뒤에 프로젝트를 지울 수 있습니다."; return false
+            errorMessage = String(localized: "서버에 연결된 뒤에 프로젝트를 지울 수 있습니다."); return false
         }
         let key = "project:\(id)"
         guard !pendingActions.contains(key) else { return false }
@@ -2131,7 +2186,7 @@ final class AppStore: ProjectManagementStore {
         } catch {
             guard epoch == generation else { return false }
             let status = (error as? APIError)?.status
-            errorMessage = status == 405 ? "서버가 옛 버전이라 프로젝트를 지울 수 없습니다. 서버를 업데이트한 뒤 다시 해 주세요." : error.localizedDescription
+            errorMessage = status == 405 ? String(localized: "서버가 옛 버전이라 프로젝트를 지울 수 없습니다. 서버를 업데이트한 뒤 다시 해 주세요.") : error.localizedDescription
             if status == 401 { handle(error) }
             if foreground { await loadArchivedProjects() }
             return false
@@ -2143,21 +2198,21 @@ final class AppStore: ProjectManagementStore {
             if let next = projects.first(where: { $0.id == "hq" || $0.isHq }) ?? projects.first { await selectProject(id: next.id) }
             else { selectedProjectID = nil; isArchive = false; projectGeneration = UUID() }
         }
-        projectNotice = "프로젝트를 지웠습니다."
+        projectNotice = String(localized: "프로젝트를 지웠습니다.")
         if foreground { await loadArchivedProjects() }
         return true
     }
 
     @discardableResult func patchProject(id: String, request: PatchProjectRequest) async -> Bool {
         guard !isDemo, foreground, !isRevalidating, connectionStatus == .connected, let api else {
-            errorMessage = "서버에 연결된 뒤에 프로젝트를 관리할 수 있습니다."; return false
+            errorMessage = String(localized: "서버에 연결된 뒤에 프로젝트를 관리할 수 있습니다."); return false
         }
         let key = "project:\(id)", journalKey = Self.scoped(writeNamespace, id)
         guard !pendingActions.contains(key), journal.projectChanges?[journalKey] == nil else {
-            errorMessage = "이전 프로젝트 변경 결과를 먼저 확인해 주세요."; return false
+            errorMessage = String(localized: "이전 프로젝트 변경 결과를 먼저 확인해 주세요."); return false
         }
         guard !(request.archived == true && (id == "hq" || projects.first { $0.id == id }?.isHq == true)) else {
-            errorMessage = "본사는 보관할 수 없습니다."; return false
+            errorMessage = String(localized: "본사는 보관할 수 없습니다."); return false
         }
         let epoch = generation
         var tracked = PendingProjectChange(namespace: writeNamespace, projectID: id, request: request)
@@ -2190,7 +2245,7 @@ final class AppStore: ProjectManagementStore {
                 await refresh(); await loadArchivedProjects()
                 guard epoch == generation else { return false }
                 if !refused { await recheckProject(id: id) }
-                errorMessage = refused ? error.localizedDescription : "프로젝트 변경 결과를 확인해 주세요. 요청은 다시 보내지 않았습니다."
+                errorMessage = refused ? error.localizedDescription : String(localized: "프로젝트 변경 결과를 확인해 주세요. 요청은 다시 보내지 않았습니다.")
             }
             return false
         }
@@ -2221,7 +2276,7 @@ final class AppStore: ProjectManagementStore {
             } else if now - (tracked.createdAt ?? now) >= Self.projectChangeLimit {
                 // 요청 제한 시간(150초)을 한참 넘겨도 서버 상태가 요청과 다르면 반영되지 않은 것이다.
                 // 계속 '확인 중'으로 두면 이 프로젝트의 모든 쓰기가 이 기기에서 막힌 채 남는다.
-                try endProjectChange(id: id, key: key, notice: "프로젝트 변경이 반영되지 않아 확인을 끝냈습니다. 필요하면 다시 시도해 주세요.")
+                try endProjectChange(id: id, key: key, notice: String(localized: "프로젝트 변경이 반영되지 않아 확인을 끝냈습니다. 필요하면 다시 시도해 주세요."))
             } else { projectResults[id] = .checking }
         } catch {
             guard epoch == generation, journal.projectChanges?[key]?.id == tracked.id else { return }
@@ -2270,7 +2325,7 @@ final class AppStore: ProjectManagementStore {
         if project.archived && !isArchive {
             state = nil; histories.invalidate(projectID: project.id)
             for item in routers { item.value?.resetForProjectChange() }
-            projectNotice = "프로젝트를 보관했습니다."
+            projectNotice = String(localized: "프로젝트를 보관했습니다.")
             if let next = projects.first(where: { $0.id == "hq" || $0.isHq }) ?? projects.first {
                 if foreground { await selectProject(id: next.id) }
                 else { selectedProjectID = next.id; isArchive = false; projectGeneration = UUID(); isRevalidating = true }
@@ -2286,11 +2341,11 @@ final class AppStore: ProjectManagementStore {
               current.projectId == selectedProjectID, current.origin != "manual", current.paneId != nil,
               !["asleep", "offline", "gone"].contains(current.status),
               (current.backend ?? bootstrap?.settings.backend) != "core" || (current.contextState != nil && current.sessionId != nil) else {
-            errorMessage = "현재 세션은 문맥 압축을 지원하지 않거나 사용할 수 없습니다."; return false
+            errorMessage = String(localized: "현재 세션은 문맥 압축을 지원하지 않거나 사용할 수 없습니다."); return false
         }
         let key = "member:\(member.id)", trackedKey = Self.scoped(writeNamespace, member.id)
         guard !pendingActions.contains(key), journal.contextRequests?[trackedKey] == nil else {
-            errorMessage = "압축 결과 확인 중입니다. 다시 전송하지 않습니다."; return false
+            errorMessage = String(localized: "압축 결과 확인 중입니다. 다시 전송하지 않습니다."); return false
         }
         if let phase = current.contextState?.compaction?.phase, [.queued, .sending, .running, .uncertain, .unknown].contains(phase) { return false }
         let epoch = generation, projectEpoch = projectGeneration
@@ -2326,7 +2381,7 @@ final class AppStore: ProjectManagementStore {
             }
             handle(error)
             if foreground { await refresh() }
-            if contextChecking.contains(member.id) { errorMessage = "압축 결과 확인 중입니다. 다시 전송하지 않습니다." }
+            if contextChecking.contains(member.id) { errorMessage = String(localized: "압축 결과 확인 중입니다. 다시 전송하지 않습니다.") }
             return false
         }
     }
@@ -2409,12 +2464,12 @@ extension AppStore {
     }
     func folderBrowser() async throws -> FolderBrowserResult {
         if isDemo { return .listing(try demoFolderContents(path: nil)) }
-        guard let api else { throw APIError(status: 0, message: "서버에 연결해 주세요.") }
+        guard let api else { throw APIError(status: 0, message: String(localized: "서버에 연결해 주세요.")) }
         return try await api.folderBrowser()
     }
     func folderContents(path: String) async throws -> FolderListing {
         if isDemo { return try demoFolderContents(path: path) }
-        guard let api else { throw APIError(status: 0, message: "서버에 연결해 주세요.") }
+        guard let api else { throw APIError(status: 0, message: String(localized: "서버에 연결해 주세요.")) }
         return try await api.folderContents(path: path)
     }
     func preferredFolder(forClone: Bool = false) async throws -> FolderBrowserResult {
@@ -2425,7 +2480,7 @@ extension AppStore {
         return .listing(home)
     }
     func createServerFolder(parent: String, name: String) async throws -> ServerFolder {
-        guard !isDemo, canWrite, let api else { throw APIError(status: 0, message: "폴더 만들기는 연결된 서버에서만 할 수 있습니다.") }
+        guard !isDemo, canWrite, let api else { throw APIError(status: 0, message: String(localized: "폴더 만들기는 연결된 서버에서만 할 수 있습니다.")) }
         if let message = ServerFolderPaths.nameError(name) { throw APIError(status: 400, message: message) }
         return try await api.createFolder(parent: parent, name: name.trimmingCharacters(in: .whitespacesAndNewlines))
     }
@@ -2436,15 +2491,15 @@ extension AppStore {
                 GitHubRepository(nameWithOwner: "iamceo/workspace", description: "우리 팀의 작업 공간", visibility: "PRIVATE", updatedAt: "2026-11-05T09:00:00Z", url: "https://github.com/iamceo/workspace")
             ])
         }
-        guard let api else { throw APIError(status: 0, message: "서버에 연결해 주세요.") }
+        guard let api else { throw APIError(status: 0, message: String(localized: "서버에 연결해 주세요.")) }
         return try await api.githubRepositories()
     }
     func startRepositoryClone(repo: String, parent: String) async throws -> String {
-        guard !isDemo, canWrite, let api else { throw APIError(status: 0, message: "가져오기는 연결된 서버에서만 할 수 있습니다.") }
+        guard !isDemo, canWrite, let api else { throw APIError(status: 0, message: String(localized: "가져오기는 연결된 서버에서만 할 수 있습니다.")) }
         return try await api.cloneRepository(repo: repo, parent: parent)
     }
     func repositoryCloneJob(_ id: String) async throws -> GitHubCloneJob {
-        guard !isDemo, let api else { throw APIError(status: 0, message: "서버에 연결해 주세요.") }
+        guard !isDemo, let api else { throw APIError(status: 0, message: String(localized: "서버에 연결해 주세요.")) }
         return try await api.cloneJob(id)
     }
     private func demoFolderContents(path: String?) throws -> FolderListing {

@@ -41,10 +41,10 @@ enum PhotoAttachmentError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidImage: "사진을 읽을 수 없습니다"
-        case .encodingFailed: "사진을 변환하지 못했습니다"
-        case .tooLarge: "파일은 50MB까지 올릴 수 있습니다"
-        case .unavailable: "사진 또는 동영상을 불러오지 못했습니다"
+        case .invalidImage: String(localized: "사진을 읽을 수 없습니다")
+        case .encodingFailed: String(localized: "사진을 변환하지 못했습니다")
+        case .tooLarge: String(localized: "파일은 50MB까지 올릴 수 있습니다")
+        case .unavailable: String(localized: "사진 또는 동영상을 불러오지 못했습니다")
         }
     }
 }
@@ -66,7 +66,7 @@ enum PhotoAttachment {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return "\(video ? "동영상" : "사진")-\(formatter.string(from: date))-\(index).\(ext)"
+        return "\(video ? String(localized: "동영상") : String(localized: "사진"))-\(formatter.string(from: date))-\(index).\(ext)"
     }
 
     /// Pixel paste/drop representations follow exactly the same rules as library photos.

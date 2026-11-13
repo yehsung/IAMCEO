@@ -42,6 +42,7 @@ SwiftUI macOS / iOS ── REST sync + WS v2 ─┐
 | `server/lifecycle/` | `iamceo upgrade`·`rollback`(DB 사본 예행, 직전 판 기록, 기동 실패 시 되돌리기)·`uninstall`, 보관 프로젝트 삭제와 프로젝트 내보내기 |
 | `server/app-version.ts`, `server/cli-version.ts` | 앱 버전 머리글과 실제로 어긋날 때만의 호환 안내, Claude·Codex 버전 기록과 견본 확인 |
 | `server/cli-text.ts` | 명령줄 문구의 언어(`IAMCEO_LANG` → `LC_ALL` → `LANG`) |
+| `server/usage.ts` | 사용량 보기: 상태줄 기록(Claude Code 의 비용·누적 토큰·한도)과 Codex rollout(누적 토큰·한도)의 CLI 보고값을 팀원·프로젝트·날짜별로 모은다(늘어난 몫만, 90일 보관). `GET /api/usage` |
 | `bin/iamceo.ts`, `bin/mcp-bridge.ts` | 서비스·attach·MCP CLI와 표준 입출력 브리지 |
 | `native/` | SwiftUI 앱, 동기화·대화 이력·초안, iPhone 알림과 Keychain |
 | `shared/types.ts` | 서버 도메인 타입과 네이티브 모델의 기준 |

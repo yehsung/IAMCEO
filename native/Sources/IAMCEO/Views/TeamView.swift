@@ -38,9 +38,9 @@ struct TeamView: View {
                 if let state = store.state {
                     sections(state)
                 } else if store.isLoading {
-                    EmptyTile(loading: true, title: "팀을 불러오는 중입니다")
+                    EmptyTile(loading: true, title: String(localized: "팀을 불러오는 중입니다"))
                 } else {
-                    EmptyTile(icon: "person.2", title: "팀을 불러오지 못했습니다", detail: "연결 상태를 확인한 뒤 다시 동기화하세요.")
+                    EmptyTile(icon: "person.2", title: String(localized: "팀을 불러오지 못했습니다"), detail: String(localized: "연결 상태를 확인한 뒤 다시 동기화하세요."))
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -53,11 +53,11 @@ struct TeamView: View {
     @ViewBuilder private func sections(_ state: ProjectState) -> some View {
         let project = state.project
         let members = state.members
-        let needsStart = !store.isDemo && (!project.runnerEnabled || project.connection.reason == "runner_off" || members.isEmpty)
+        let needsStart = !project.runnerEnabled || project.connection.reason == "runner_off" || members.isEmpty
 
-        if !store.isDemo, !project.connection.ok, project.connection.reason != "runner_off" {
-            InlineNotice(tone: .attention, icon: "bolt.horizontal.circle", title: "실행 연결에 문제가 있습니다",
-                         detail: project.connection.ownerDetail ?? "이 프로젝트의 실행 연결을 확인하세요.")
+        if !project.connection.ok, project.connection.reason != "runner_off" {
+            InlineNotice(tone: .attention, icon: "bolt.horizontal.circle", title: String(localized: "실행 연결에 문제가 있습니다"),
+                         detail: project.connection.ownerDetail ?? String(localized: "이 프로젝트의 실행 연결을 확인하세요."))
         }
         if needsStart {
             TeamStartPanel(project: project, hasMembers: !members.isEmpty)
@@ -76,7 +76,7 @@ struct TeamView: View {
                 Button { router.showNewMember = true } label: { Label("팀장 추가", systemImage: "plus") }
                     .ceSecondaryButton()
                     .controlSize(.regular)
-                    .disabled(!store.canWrite || !project.runnerEnabled)
+                    .disabled(store.isDemo || !store.canWrite || !project.runnerEnabled)
                     .help(teamAddMemberHelp(store, project))
             }
         }
@@ -109,19 +109,18 @@ private struct TeamStartPanel: View {
 
     private var runtimeBlock: String? {
         guard let core = store.runtime?.core, !core.available else { return nil }
-        let base = core.installed ? "herdr-core가 설치돼 있지만 지금 쓸 수 없습니다." : "herdr-core가 설치돼 있지 않습니다."
-        return [core.detail ?? base, "설정의 실행 환경에서 확인하세요."].joined(separator: " ")
+        let base = core.installed ? String(localized: "herdr-core가 설치돼 있지만 지금 쓸 수 없습니다.") : String(localized: "herdr-core가 설치돼 있지 않습니다.")
+        return [core.detail ?? base, String(localized: "설정의 실행 환경에서 확인하세요.")].joined(separator: " ")
     }
 
     private var message: String {
         if let runtimeBlock { return runtimeBlock }
         if !project.connection.ok, project.connection.reason != "runner_off", let detail = project.connection.ownerDetail, !detail.isEmpty { return detail }
-        return hasMembers ? "총괄을 시작하면 팀이 다시 일을 이어갑니다." : "총괄이 일을 받아 Claude Code와 Codex 팀장을 꾸립니다."
+        return hasMembers ? String(localized: "총괄을 시작하면 팀이 다시 일을 이어갑니다.") : String(localized: "총괄이 일을 받아 Claude Code와 Codex 팀장을 꾸립니다.")
     }
 
     private var lockReason: String? {
-        if store.isDemo { return "샘플은 읽기 전용입니다." }
-        if !store.canWrite { return "서버에 연결되면 시작할 수 있습니다." }
+        if !store.canWrite { return String(localized: "서버에 연결되면 시작할 수 있습니다.") }
         return nil
     }
 
@@ -141,7 +140,7 @@ private struct TeamStartPanel: View {
                     Button {
                         Task {
                             failure = nil
-                            if !(await store.startConductor()) { failure = store.errorMessage ?? "총괄을 시작하지 못했습니다." }
+                            if !(await store.startConductor()) { failure = store.errorMessage ?? String(localized: "총괄을 시작하지 못했습니다.") }
                         }
                     } label: {
                         HStack(spacing: 6) {
@@ -187,7 +186,7 @@ private struct TeamWorkList: View {
                 Text("업무").font(CEFont.section).foregroundStyle(CE.ink2).accessibilityAddTraits(.isHeader)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
-                        TeamFilterChip(title: "전체", count: nil, selected: active == nil) { select(nil) }
+                        TeamFilterChip(title: String(localized: "전체"), count: nil, selected: active == nil) { select(nil) }
                         ForEach(WorkSection.allCases) { section in
                             let n = count(section)
                             if n > 0 {
@@ -202,7 +201,7 @@ private struct TeamWorkList: View {
             Plate(padding: 0, radius: CERadius.card) {
                 VStack(spacing: 0) {
                     if shown.isEmpty {
-                        teamEmptyNote("없음")
+                        teamEmptyNote(String(localized: "없음"))
                     }
                     ForEach(Array(shown.enumerated()), id: \.element.id) { index, item in
                         if index > 0 { RowDivider(inset: 0) }
@@ -306,7 +305,7 @@ private struct TeamFilterChip: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .accessibilityLabel(count.map { "\(title) \($0)건" } ?? title)
+        .accessibilityLabel(count.map { String(localized: "\(title) \($0)건") } ?? title)
         .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 }
@@ -365,7 +364,7 @@ struct MemberDetailView: View {
         }
         // Pushed (iOS): the app background. In the Mac drawer the shell's glass is the surface.
         .background { if onClose == nil { AmbientBackground() } }
-        .modifier(TeamPushTitle(title: member?.name ?? "팀원", enabled: onClose == nil))
+        .modifier(TeamPushTitle(title: member?.name ?? String(localized: "팀원"), enabled: onClose == nil))
         .onAppear { if let member { loadConfig(member) } }
         .task(id: "\(store.writeNamespace)|\(memberID)") { await store.recoverWrites() }
         .onChange(of: store.writeNamespace) { _, _ in
@@ -419,7 +418,7 @@ struct MemberDetailView: View {
                         })
                     if store.deliveryErrors[m.id] != nil {
                         Button("전달 안내 다시 읽기") { Task { await store.loadDeliveryNotices(memberID: m.id) } }
-                            .ceGhostButton().controlSize(.small).disabled(store.connectionStatus != .connected || store.isDemo)
+                            .ceGhostButton().controlSize(.small).disabled(store.connectionStatus != .connected)
                     }
                 }
             }
@@ -448,13 +447,13 @@ struct MemberDetailView: View {
             VStack(alignment: .leading, spacing: 6) {
                 switch receipt.status {
                 case .pending, .unknown:
-                    teamNote("새 세션 결과 확인 중 · 같은 작업을 다시 실행하지 않습니다.")
+                    teamNote(String(localized: "새 세션 결과 확인 중 · 같은 작업을 다시 실행하지 않습니다."))
                     Button("결과 다시 확인") { Task { await store.recoverWrites() } }
                         .ceSecondaryButton().controlSize(.small).disabled(!store.canWrite || running != nil)
                 case .refused:
-                    teamNote(receipt.error ?? "새 세션 요청이 거부됐습니다. 최신 상태를 검토하세요.")
+                    teamNote(receipt.error ?? String(localized: "새 세션 요청이 거부됐습니다. 최신 상태를 검토하세요."))
                 case .applied:
-                    teamNote("새 세션 요청이 적용됐습니다. 업무 완료를 뜻하지 않습니다.")
+                    teamNote(String(localized: "새 세션 요청이 적용됐습니다. 업무 완료를 뜻하지 않습니다."))
                 }
             }
         }
@@ -465,38 +464,38 @@ struct MemberDetailView: View {
     private func lastActivity(_ m: Member) -> (at: String, date: Date, label: String)? {
         if m.origin == "manual" {
             guard let at = m.manualActivityAt, let date = parseISODate(at) else { return nil }
-            return (at, date, "도구 활동")
+            return (at, date, String(localized: "도구 활동"))
         }
         guard let execution = m.executionState else { return nil }
         let stamps = [execution.endedAt, execution.lastProgressAt, execution.startedAt, execution.inputReceivedAt]
             .compactMap { at in at.flatMap { value in parseISODate(value).map { (value, $0) } } }
         guard let latest = stamps.max(by: { $0.1 < $1.1 }) else { return nil }
         var label = executionLabel(execution)
-        if let code = execution.exitCode { label += " · 종료 코드 \(code)" }
+        if let code = execution.exitCode { label += String(localized: " · 종료 코드 \(code)") }
         if let reason = execution.reason, !reason.isEmpty { label += "\n\(reason)" }
         return (latest.0, latest.1, label)
     }
 
     private func executionLabel(_ execution: MemberExecutionState) -> String {
         switch execution.phase {
-        case "received": "입력 수신 · 턴 시작 확인 중"
-        case "starting": "입력 전달 중 · 턴 시작 확인 중"
-        case "running", "working": "턴 진행 중 · 업무 완료는 보고로 확인합니다"
-        case "ended", "finished": execution.result == "error" ? "턴 오류 · 입력 수신과 구분합니다" : "턴 종료 · 업무 완료는 보고로 확인합니다"
-        case "interrupted": "턴 중단 · 자동으로 다시 입력하지 않습니다"
-        default: "실행 상태 확인 중 · 자동으로 다시 입력하지 않습니다"
+        case "received": String(localized: "입력 수신 · 턴 시작 확인 중")
+        case "starting": String(localized: "입력 전달 중 · 턴 시작 확인 중")
+        case "running", "working": String(localized: "턴 진행 중 · 업무 완료는 보고로 확인합니다")
+        case "ended", "finished": execution.result == "error" ? String(localized: "턴 오류 · 입력 수신과 구분합니다") : String(localized: "턴 종료 · 업무 완료는 보고로 확인합니다")
+        case "interrupted": String(localized: "턴 중단 · 자동으로 다시 입력하지 않습니다")
+        default: String(localized: "실행 상태 확인 중 · 자동으로 다시 입력하지 않습니다")
         }
     }
 
     private func compactBlock(_ m: Member) -> String? {
         if let reason = readOnlyReason { return reason }
-        if m.origin == "manual" { return "직접 띄운 세션은 원래 터미널에서 압축하세요." }
-        if store.state?.project.runnerEnabled != true { return "실행이 꺼져 있어 압축할 수 없습니다." }
-        if m.paneId == nil || ["asleep", "offline", "gone"].contains(m.status) { return "열린 세션이 있어야 압축할 수 있습니다." }
+        if m.origin == "manual" { return String(localized: "직접 띄운 세션은 원래 터미널에서 압축하세요.") }
+        if store.state?.project.runnerEnabled != true { return String(localized: "실행이 꺼져 있어 압축할 수 없습니다.") }
+        if m.paneId == nil || ["asleep", "offline", "gone"].contains(m.status) { return String(localized: "열린 세션이 있어야 압축할 수 있습니다.") }
         if (m.backend ?? store.bootstrap?.settings.backend) == "core", m.contextState == nil || m.sessionId == nil {
-            return "세션 기록 확인 중 · 문맥 압축 대기"
+            return String(localized: "세션 기록 확인 중 · 문맥 압축 대기")
         }
-        if store.contextChecking.contains(m.id) { return "압축 결과 확인 중 · 다시 전송하지 않습니다." }
+        if store.contextChecking.contains(m.id) { return String(localized: "압축 결과 확인 중 · 다시 전송하지 않습니다.") }
         if let phase = m.contextState?.compaction?.phase, [.queued, .sending, .running, .uncertain, .unknown].contains(phase) {
             return compactionLabel(m.contextState?.compaction)
         }
@@ -504,20 +503,20 @@ struct MemberDetailView: View {
     }
 
     private func compactionLabel(_ compact: ContextCompaction?) -> String {
-        guard let compact else { return "압축 결과 확인 중 · 다시 전송하지 않습니다." }
+        guard let compact else { return String(localized: "압축 결과 확인 중 · 다시 전송하지 않습니다.") }
         switch compact.phase {
         case .queued:
             switch compact.reason {
-            case "working": return "압축 예약됨 · 지금 턴이 끝난 뒤 진행합니다."
-            case "manual_control": return "직접 조작 중 · 압축 대기"
-            case "draft": return "작성 중인 입력이 있어 압축을 기다립니다."
-            case "blocked": return "CLI 화면을 먼저 확인하세요 · 압축 대기"
-            default: return "압축 예약됨 · 안전한 실행 조건을 기다립니다."
+            case "working": return String(localized: "압축 예약됨 · 지금 턴이 끝난 뒤 진행합니다.")
+            case "manual_control": return String(localized: "직접 조작 중 · 압축 대기")
+            case "draft": return String(localized: "작성 중인 입력이 있어 압축을 기다립니다.")
+            case "blocked": return String(localized: "CLI 화면을 먼저 확인하세요 · 압축 대기")
+            default: return String(localized: "압축 예약됨 · 안전한 실행 조건을 기다립니다.")
             }
-        case .sending, .running: return "문맥 압축 중"
-        case .succeeded: return "문맥 압축 완료 · 사용량 갱신 중"
-        case .failed: return compact.reason == "user_resolved" ? "사용자 확인으로 압축 대기를 해제했습니다." : "문맥 압축이 끝나지 않았습니다. 터미널을 확인하세요."
-        default: return "압축 결과를 확인할 수 없습니다. 다시 보내지 말고 터미널을 확인하세요."
+        case .sending, .running: return String(localized: "문맥 압축 중")
+        case .succeeded: return String(localized: "문맥 압축 완료 · 사용량 갱신 중")
+        case .failed: return compact.reason == "user_resolved" ? String(localized: "사용자 확인으로 압축 대기를 해제했습니다.") : String(localized: "문맥 압축이 끝나지 않았습니다. 터미널을 확인하세요.")
+        default: return String(localized: "압축 결과를 확인할 수 없습니다. 다시 보내지 말고 터미널을 확인하세요.")
         }
     }
 
@@ -526,7 +525,7 @@ struct MemberDetailView: View {
     private func contextRow(_ m: Member) -> some View {
         let pct = contextPercent(m)
         return VStack(alignment: .leading, spacing: 4) {
-            TeamFactRow(label: "문맥", alignment: .center) {
+            TeamFactRow(label: String(localized: "문맥"), alignment: .center) {
                 Group {
                     if let pct {
                         TeamContextBar(pct: pct, compactAt: compactAt)
@@ -547,7 +546,7 @@ struct MemberDetailView: View {
 
     /// Compaction status worth a line: in flight, unconfirmed, or failed (not a finished one, not a user release).
     private func compactionStatus(_ m: Member) -> String? {
-        if store.contextChecking.contains(m.id) { return "압축 결과 확인 중 · 다시 전송하지 않습니다." }
+        if store.contextChecking.contains(m.id) { return String(localized: "압축 결과 확인 중 · 다시 전송하지 않습니다.") }
         guard let compact = m.contextState?.compaction else { return nil }
         switch compact.phase {
         case .succeeded?: return nil
@@ -558,12 +557,12 @@ struct MemberDetailView: View {
 
     /// Tooltip of the context meter: how the number was measured, the window and when.
     private func contextHelp(_ m: Member) -> String {
-        guard contextPercent(m) != nil else { return "문맥 사용량을 아직 측정하지 못했습니다." }
+        guard contextPercent(m) != nil else { return String(localized: "문맥 사용량을 아직 측정하지 못했습니다.") }
         let measurement = contextMeasurement(m)
         var lines = [contextSource(m)]
-        if let window = measurement?.window ?? m.contextWindow, window > 0 { lines.append("문맥 창 \(window.formatted()) 토큰") }
-        if let date = parseISODate(measurement?.measuredAt) { lines.append("측정 \(koDateTime(date))") }
-        lines.append("압축 기준 \(compactAt)%")
+        if let window = measurement?.window ?? m.contextWindow, window > 0 { lines.append(String(localized: "문맥 창 \(window.formatted()) 토큰")) }
+        if let date = parseISODate(measurement?.measuredAt) { lines.append(String(localized: "측정 \(koDateTime(date))")) }
+        lines.append(String(localized: "압축 기준 \(compactAt)%"))
         return lines.joined(separator: "\n")
     }
 
@@ -588,23 +587,23 @@ struct MemberDetailView: View {
 
     private func contextSource(_ m: Member) -> String {
         let measurement = contextMeasurement(m)
-        guard measurement?.fresh == true else { return "마지막 측정 · 갱신 대기" }
+        guard measurement?.fresh == true else { return String(localized: "마지막 측정 · 갱신 대기") }
         if measurement?.quality == "estimated" {
             let source: String
             switch measurement?.source {
-            case "screen": source = "화면 기준"
-            case "model": source = "모델 기준"
-            case "default": source = "기본 창 기준"
-            case "stored": source = "이전 측정 기준"
-            default: source = "사용량 기준"
+            case "screen": source = String(localized: "화면 기준")
+            case "model": source = String(localized: "모델 기준")
+            case "default": source = String(localized: "기본 창 기준")
+            case "stored": source = String(localized: "이전 측정 기준")
+            default: source = String(localized: "사용량 기준")
             }
-            return "약 \(Int((contextPercent(m) ?? 0).rounded()))% · \(source) 추정"
+            return String(localized: "약 \(Int((contextPercent(m) ?? 0).rounded()))% · \(source) 추정")
         }
-        guard measurement?.quality == "exact" else { return "측정 정확도 확인 중" }
+        guard measurement?.quality == "exact" else { return String(localized: "측정 정확도 확인 중") }
         switch measurement?.source {
-        case "statusline", "codex": return "CLI 측정"
-        case "stored": return "이전 CLI 측정"
-        default: return "측정 출처 확인 중"
+        case "statusline", "codex": return String(localized: "CLI 측정")
+        case "stored": return String(localized: "이전 CLI 측정")
+        default: return String(localized: "측정 출처 확인 중")
         }
     }
 
@@ -647,9 +646,9 @@ struct MemberDetailView: View {
                     guard let reviewed = freshMember, let latest = current, latest.id == reviewed.id,
                           latest.projectId == reviewed.projectId, TeamConfigSnapshot(latest) == TeamConfigSnapshot(reviewed),
                           freshGeneration == store.writeRevisions?.members?[m.id]?.sessionGeneration else {
-                        failure = "세션이 바뀌었습니다. 최신 상태를 확인하고 다시 선택하세요."; return
+                        failure = String(localized: "세션이 바뀌었습니다. 최신 상태를 확인하고 다시 선택하세요."); return
                     }
-                    await run("fresh", success: Self.handoffQueuedNote("새 세션을 열었습니다.")) { await store.freshSession(latest) }
+                    await run("fresh", success: Self.handoffQueuedNote(String(localized: "새 세션을 열었습니다."))) { await store.freshSession(latest) }
                 }
             }
             Button("취소", role: .cancel) {}
@@ -666,7 +665,7 @@ struct MemberDetailView: View {
         }
         .confirmationDialog("그래도 재울까요?", isPresented: $confirmForceSleep, titleVisibility: .visible) {
             Button("그래도 재우기", role: .destructive) {
-                Task { await run("sleep", success: "잠재웠습니다. 대기열은 깨울 때까지 멈춥니다.") { await store.sleepMember(m, force: true) } }
+                Task { await run("sleep", success: String(localized: "잠재웠습니다. 대기열은 깨울 때까지 멈춥니다.")) { await store.sleepMember(m, force: true) } }
             }
             Button("취소", role: .cancel) {}
         } message: {
@@ -681,7 +680,7 @@ struct MemberDetailView: View {
                     if ok {
                         router.memberID = nil
                         if router.chatTarget == m.id { router.chatTarget = nil }
-                    } else { failure = store.errorMessage ?? "명부에서 빼지 못했습니다." }
+                    } else { failure = store.errorMessage ?? String(localized: "명부에서 빼지 못했습니다.") }
                 }
             }
             Button("취소", role: .cancel) {}
@@ -698,7 +697,7 @@ struct MemberDetailView: View {
             if store.state == nil && store.isLoading {
                 HStack(spacing: 8) { ProgressView().controlSize(.small); Text("불러오는 중입니다").font(CEFont.note).foregroundStyle(CE.ink2) }
             } else {
-                CompactEmpty(icon: "person.crop.circle.badge.questionmark", title: "찾을 수 없는 팀원입니다", detail: "명부에서 빠졌거나 다른 프로젝트의 팀원입니다.")
+                CompactEmpty(icon: "person.crop.circle.badge.questionmark", title: String(localized: "찾을 수 없는 팀원입니다"), detail: String(localized: "명부에서 빠졌거나 다른 프로젝트의 팀원입니다."))
             }
             Spacer(minLength: 0)
         }
@@ -715,7 +714,7 @@ struct MemberDetailView: View {
                     .accessibilityAddTraits(.isHeader)
                 TeamMemberStatusBadge(member: m).fixedSize()
                 if m.kind != "worker" { Tag(rankName(m.kind), tone: .accent) }
-                if m.origin == "manual" { Tag("직접 띄움") }
+                if m.origin == "manual" { Tag(String(localized: "직접 띄움")) }
                 Spacer(minLength: 8)
                 CECloseButton(escapeCloses: false, action: onClose)
             }
@@ -732,7 +731,7 @@ struct MemberDetailView: View {
             HStack(spacing: 8) {
                 TeamMemberStatusBadge(member: m).fixedSize()
                 if m.kind != "worker" { Tag(rankName(m.kind), tone: .accent) }
-                if m.origin == "manual" { Tag("직접 띄움") }
+                if m.origin == "manual" { Tag(String(localized: "직접 띄움")) }
             }
             headerDetails(m)
         }
@@ -772,11 +771,11 @@ struct MemberDetailView: View {
         }
         let subagents = SubagentInfo(m)
         let subagentText: String? = subagents.count.flatMap { count in
-            count > 0 ? (m.subagentState?.quality == "estimated" ? "서브에이전트 약 \(count)개" : "서브에이전트 \(count)개") : nil
+            count > 0 ? (m.subagentState?.quality == "estimated" ? String(localized: "서브에이전트 약 \(count)개") : String(localized: "서브에이전트 \(count)개")) : nil
         }
         let activity = lastActivity(m)
         var help: [String] = []
-        if let pending { help.append("요청한 모델 \(pending) · 세션을 다시 열 때 적용") }
+        if let pending { help.append(String(localized: "요청한 모델 \(pending) · 세션을 다시 열 때 적용")) }
         if let activity { help.append("\(activity.label)\n\(koDateTime(activity.date))") }
         return HStack(alignment: .center, spacing: 8) {
             Tag(providerName(m.cli))
@@ -815,7 +814,7 @@ struct MemberDetailView: View {
         let readable = m.canReadCLIApproval
         // A stuck start the server named (an unread folder-trust window, a slow start): the terminal is the way through.
         let terminalTitle = readable ? BlockedGuide.openTerminal : (BlockedGuide(m)?.actionTitle ?? BlockedGuide.openTerminal)
-        return stateBox(tone: info.tone, icon: info.icon, title: "CLI 화면에서 처리가 필요합니다") {
+        return stateBox(tone: info.tone, icon: info.icon, title: String(localized: "CLI 화면에서 처리가 필요합니다")) {
             if readable {
                 CLIApprovalCard(member: m)
             } else {
@@ -842,7 +841,7 @@ struct MemberDetailView: View {
     /// The last error the session reported, in the same box as the approval window.
     @ViewBuilder private func errorBox(_ m: Member) -> some View {
         if let error = m.lastError?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
-            stateBox(tone: .danger, icon: "exclamationmark.triangle.fill", title: "마지막 오류") {
+            stateBox(tone: .danger, icon: "exclamationmark.triangle.fill", title: String(localized: "마지막 오류")) {
                 // Web .tm-error: the error itself in the danger colour, 13.5 / 1.45.
                 Text(error)
                     .font(CEFont.note).foregroundStyle(CE.danger.opacity(0.92)).lineSpacing(CELeading.note)
@@ -889,7 +888,7 @@ struct MemberDetailView: View {
         let talk = recentTalk(m)
         return DetailPlate {
             VStack(alignment: .leading, spacing: 4) {
-                DetailSectionTitle("최근 대화")
+                DetailSectionTitle(String(localized: "최근 대화"))
                 if talk.isEmpty {
                     Text("아직 주고받은 말이 없습니다").font(CEFont.note).foregroundStyle(CE.ink2)
                         .lineSpacing(CELeading.note).fixedSize(horizontal: false, vertical: true)
@@ -951,16 +950,16 @@ struct MemberDetailView: View {
                 if !m.next.isEmpty || queued > 0 || decisions > 0 {
                     VStack(alignment: .leading, spacing: 8) {
                         if !m.next.isEmpty {
-                            TeamFactRow(label: "다음") {
+                            TeamFactRow(label: String(localized: "다음")) {
                                 Text(teamInlineMarkdown(m.next)).foregroundStyle(CE.ink).fixedSize(horizontal: false, vertical: true)
                             }
                         }
                         if queued > 0 {
-                            TeamFactRow(label: "대기열") {
+                            TeamFactRow(label: String(localized: "대기열")) {
                                 let summary = store.deliverySummary(memberID: m.id)
                                 let reason = waitReasonLabel(summary?.waitReason, since: summary?.waitingSince,
                                                              used: summary?.runLimit?.used, limit: summary?.runLimit?.limit)
-                                Text(["\(queued)건", reason].compactMap { $0 }.joined(separator: " · "))
+                                Text([String(localized: "\(queued)건"), reason].compactMap { $0 }.joined(separator: " · "))
                                     .foregroundStyle(summary?.waitReason.map { waitReasonTone($0) == .attention } == true ? CE.attention : CE.ink)
                                     .monospacedDigit()
                                     .fixedSize(horizontal: false, vertical: true)
@@ -968,7 +967,7 @@ struct MemberDetailView: View {
                             }
                         }
                         if decisions > 0 {
-                            TeamFactRow(label: "결재") {
+                            TeamFactRow(label: String(localized: "결재")) {
                                 // Web .tm-inlink: decisions waiting for me pull the eye (wait colour, semibold, underlined).
                                 Button { goInbox(m) } label: {
                                     Text("\(decisions)건 대기 · 결재함으로").fontWeight(.semibold).foregroundStyle(CE.attention)
@@ -1024,28 +1023,28 @@ struct MemberDetailView: View {
                     .help("\(m.name)와 주고받은 대화")
                 if showsTerminal {
                     Button { openTerminal(m) } label: {
-                        Label(TerminalAvailability.title(m, waking: store.terminalWake.members.contains(m.id), normal: isMac ? "터미널 보기" : "터미널"), systemImage: "terminal")
+                        Label(TerminalAvailability.title(m, waking: store.terminalWake.members.contains(m.id), normal: isMac ? String(localized: "터미널 보기") : String(localized: "터미널")), systemImage: "terminal")
                     }
                         .ceSecondaryButton().controlSize(.small)
                         .disabled(!store.canOpenTerminal(m))
-                        .help(isMac ? "이 CLI 터미널을 봅니다. 입력 시작을 누를 때만 자동 전달이 멈춥니다." : terminalHelp(m))
+                        .help(isMac ? String(localized: "이 CLI 터미널을 봅니다. 입력 시작을 누를 때만 자동 전달이 멈춥니다.") : terminalHelp(m))
                         .accessibilityLabel("\(m.name) \(TerminalAvailability.title(m, waking: store.terminalWake.members.contains(m.id)))")
                 }
                 if !manual && busyTurn {
-                    actionButton("중단", icon: "stop.circle", busyTitle: "멈추는 중", name: "interrupt", enabled: canAct,
-                                 help: "지금 턴을 멈추라고 보냅니다") {
-                        Task { await run("interrupt", success: "멈추라고 보냈습니다. 지금 턴이 끊기면 대기로 바뀝니다.") { await store.memberAction(m, action: "interrupt") } }
+                    actionButton(String(localized: "중단"), icon: "stop.circle", busyTitle: String(localized: "멈추는 중"), name: "interrupt", enabled: canAct,
+                                 help: String(localized: "지금 턴을 멈추라고 보냅니다")) {
+                        Task { await run("interrupt", success: String(localized: "멈추라고 보냈습니다. 지금 턴이 끊기면 대기로 바뀝니다.")) { await store.memberAction(m, action: "interrupt") } }
                     }
                 }
                 if !manual && wakeable {
-                    actionButton("깨우기", icon: "sunrise", busyTitle: "깨우는 중", name: "resume", enabled: canAct && runnerOn && !legacy && !store.terminalWake.members.contains(m.id),
-                                 help: runnerOn ? "세션을 다시 엽니다" : "실행이 꺼져 있어 깨울 수 없습니다") {
-                        Task { await run("resume", success: "다시 열라고 보냈습니다. 세션이 열리면 상태가 바뀝니다.") { await store.memberAction(m, action: "resume") } }
+                    actionButton(String(localized: "깨우기"), icon: "sunrise", busyTitle: String(localized: "깨우는 중"), name: "resume", enabled: canAct && runnerOn && !legacy && !store.terminalWake.members.contains(m.id),
+                                 help: runnerOn ? String(localized: "세션을 다시 엽니다") : String(localized: "실행이 꺼져 있어 깨울 수 없습니다")) {
+                        Task { await run("resume", success: String(localized: "다시 열라고 보냈습니다. 세션이 열리면 상태가 바뀝니다.")) { await store.memberAction(m, action: "resume") } }
                     }
                 }
                 // Right after the server refused a plain 잠재우기 (failure line below): the follow-up stays in reach.
                 if !manual && sleepRefusal != nil && !["asleep", "offline"].contains(m.status) {
-                    actionButton("그래도 재우기…", icon: "moon.zzz.fill", enabled: canAct, help: "돌던 턴을 끊고 재웁니다. 먼저 확인을 받습니다.") {
+                    actionButton(String(localized: "그래도 재우기…"), icon: "moon.zzz.fill", enabled: canAct, help: String(localized: "돌던 턴을 끊고 재웁니다. 먼저 확인을 받습니다.")) {
                         confirmForceSleep = true
                     }
                 }
@@ -1063,14 +1062,14 @@ struct MemberDetailView: View {
             }
             freshReceipt(m)
             if let reason = readOnlyReason {
-                teamStatus(reason, icon: store.isDemo ? "eye" : "wifi.slash")
+                teamStatus(reason, icon: "wifi.slash")
             }
             if manual {
-                teamNote("직접 띄운 세션입니다. 압축하거나 재울 수 없고, 보낸 말은 그 세션이 wait를 부를 때 전달됩니다.")
+                teamNote(String(localized: "직접 띄운 세션입니다. 압축하거나 재울 수 없고, 보낸 말은 그 세션이 wait를 부를 때 전달됩니다."))
             } else if legacy {
                 teamNote(teamLegacyNote)
             } else if wakeable && !runnerOn {
-                teamNote("실행이 꺼져 있어 깨울 수 없습니다. 팀 화면에서 총괄을 시작하세요.")
+                teamNote(String(localized: "실행이 꺼져 있어 깨울 수 없습니다. 팀 화면에서 총괄을 시작하세요."))
             }
             if let note {
                 teamStatus(note, icon: "paperplane")
@@ -1087,10 +1086,10 @@ struct MemberDetailView: View {
     /// Progress of an action started from the "…" menu, which closes as soon as it is chosen.
     private var menuBusyTitle: String? {
         switch running {
-        case "sleep": "재우는 중"
-        case "fresh": "새 세션을 준비하는 중"
-        case "compact": "압축을 요청하는 중"
-        case "close": "명부에서 빼는 중"
+        case "sleep": String(localized: "재우는 중")
+        case "fresh": String(localized: "새 세션을 준비하는 중")
+        case "compact": String(localized: "압축을 요청하는 중")
+        case "close": String(localized: "명부에서 빼는 중")
         default: nil
         }
     }
@@ -1107,7 +1106,8 @@ struct MemberDetailView: View {
         let busyTurn = ["working", "blocked"].contains(m.status)
         let down = ["asleep", "offline"].contains(m.status)
         let compact = compactBlock(m)
-        let freshReason: String? = busyTurn ? "일하거나 승인 창 앞이면 끝난 뒤 시작하세요" : (freshUnresolved(m) ? "새 세션 결과를 확인하는 중입니다" : nil)
+        let freshReason: String? = store.isDemo ? String(localized: "샘플에서는 새 세션을 열 수 없습니다")
+            : busyTurn ? String(localized: "일하거나 승인 창 앞이면 끝난 뒤 시작하세요") : (freshUnresolved(m) ? String(localized: "새 세션 결과를 확인하는 중입니다") : nil)
         let command = terminalCommand(m)
         return Menu {
             if manual {
@@ -1129,13 +1129,13 @@ struct MemberDetailView: View {
                     confirmFresh = true
                 } label: { Label("새 세션으로 이어가기…", systemImage: "arrow.triangle.2.circlepath") }
                     .disabled(!canAct || freshReason != nil)
-                    .help(freshReason ?? "역할·현재 일·다음을 새 세션에 인계합니다")
+                    .help(freshReason ?? String(localized: "역할·현재 일·다음을 새 세션에 인계합니다"))
                 if let freshReason, canAct { Text(freshReason) }
                 Button {
-                    Task { await run("compact", success: "압축 요청을 접수했습니다. 끝나면 문맥 사용량에 반영됩니다.") { await store.compactMember(m) } }
+                    Task { await run("compact", success: String(localized: "압축 요청을 접수했습니다. 끝나면 문맥 사용량에 반영됩니다.")) { await store.compactMember(m) } }
                 } label: { Label("문맥 압축", systemImage: "arrow.down.right.and.arrow.up.left") }
                     .disabled(compact != nil || running != nil || store.pendingActions.contains("member:\(m.id)"))
-                    .help(compact ?? "CLI에 문맥 압축을 요청합니다")
+                    .help(compact ?? String(localized: "CLI에 문맥 압축을 요청합니다"))
                 if let compact, compact != readOnlyReason { Text(compact) }
             }
             if let command {
@@ -1166,12 +1166,12 @@ struct MemberDetailView: View {
         teamCopy(command.text)
         if !command.attached && !["asleep", "offline"].contains(m.status) {
             // The warning stays until the next action: running the copy now would drive one session from two places.
-            copyNote = "터미널 명령을 복사했습니다. 지금 도는 세션입니다. 두 곳에서 함께 쓰면 꼬이니 먼저 잠재우고 여세요."
+            copyNote = String(localized: "터미널 명령을 복사했습니다. 지금 도는 세션입니다. 두 곳에서 함께 쓰면 꼬이니 먼저 잠재우고 여세요.")
             return
         }
         let shown = command.attached
-            ? "터미널 명령을 복사했습니다. 서버 컴퓨터에서 실행하면 같은 CLI 터미널을 엽니다."
-            : "터미널 명령을 복사했습니다."
+            ? String(localized: "터미널 명령을 복사했습니다. 서버 컴퓨터에서 실행하면 같은 CLI 터미널을 엽니다.")
+            : String(localized: "터미널 명령을 복사했습니다.")
         copyNote = shown
         // A plain confirmation clears itself, like the old 복사함.
         Task {
@@ -1180,7 +1180,7 @@ struct MemberDetailView: View {
         }
     }
 
-    private func terminalHelp(_ m: Member) -> String { "이 CLI의 터미널을 엽니다" }
+    private func terminalHelp(_ m: Member) -> String { String(localized: "이 CLI의 터미널을 엽니다") }
 
     /// Folded: the session's folder, then (sessions IAMCEO started) the CLI, model and effort.
     private func configPlate(_ m: Member) -> some View {
@@ -1188,7 +1188,7 @@ struct MemberDetailView: View {
             DisclosureGroup(isExpanded: $configOpen) {
                 VStack(alignment: .leading, spacing: 10) {
                     if !m.cwd.isEmpty {
-                        TeamFactRow(label: "폴더") {
+                        TeamFactRow(label: String(localized: "폴더")) {
                             Text(m.cwd).font(CEFont.mono).foregroundStyle(CE.ink2)
                                 .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
                                 .help(m.cwd)
@@ -1199,7 +1199,7 @@ struct MemberDetailView: View {
                 .padding(.bottom, 14)
             } label: {
                 HStack(spacing: 8) {
-                    DetailSectionTitle("실행 설정", fold: true)
+                    DetailSectionTitle(String(localized: "실행 설정"), fold: true)
                     Spacer(minLength: 8)
                     Text(configSummary(m)).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
                 }
@@ -1224,10 +1224,10 @@ struct MemberDetailView: View {
         let list = store.modelCatalog.list(for: cli)
         let selected = list.option(for: trimmed)
         let efforts = list.efforts(for: trimmed.isEmpty ? (rankConfig?.model ?? "") : trimmed, cli: cli)
-        let modelDefault = rankConfig?.model.map { "직급 기본값 (\($0))" } ?? "직급 기본값"
-        let effortDefault = rankConfig?.effort.map { "직급 기본값 (\($0))" } ?? "직급 기본값"
+        let modelDefault = rankConfig?.model.map { String(localized: "직급 기본값 (\($0))") } ?? String(localized: "직급 기본값")
+        let effortDefault = rankConfig?.effort.map { String(localized: "직급 기본값 (\($0))") } ?? String(localized: "직급 기본값")
         let modelShown = trimmed.isEmpty ? modelDefault : (selected?.label ?? list.unknownCurrent(trimmed) ?? trimmed)
-        let effortShown = effort.isEmpty ? effortDefault : (efforts.contains(effort) ? effort : "현재: \(effort)")
+        let effortShown = effort.isEmpty ? effortDefault : (efforts.contains(effort) ? effort : String(localized: "현재: \(effort)"))
         return VStack(alignment: .leading, spacing: 10) {
             // Web .field__label 13/600 ink-2 next to .input-sized controls (the fact rows above keep 13 ink-3).
             TeamFactRow(label: "AI CLI", alignment: .center, strong: true) {
@@ -1244,8 +1244,8 @@ struct MemberDetailView: View {
                 .disabled(!switchAllowed || !store.canWrite)
             }
             if let reason = switchBlockReason(m) { teamNote(reason) }
-            TeamFactRow(label: "모델", alignment: .center, strong: true) {
-                TeamSelect(value: modelShown, mono: !trimmed.isEmpty, accessibility: "모델") {
+            TeamFactRow(label: String(localized: "모델"), alignment: .center, strong: true) {
+                TeamSelect(value: modelShown, mono: !trimmed.isEmpty, accessibility: String(localized: "모델")) {
                     Picker("모델", selection: $model) {
                         Text(modelDefault).tag("")
                         ForEach(list.models) { option in
@@ -1276,7 +1276,7 @@ struct MemberDetailView: View {
             }
             teamNote(configHelp(m))
             if configChanged(m) {
-                teamNote("서버 설정이 바뀌었습니다. 내 편집은 보존했습니다. 현재 값 · \(configSummary(m))")
+                teamNote(String(localized: "서버 설정이 바뀌었습니다. 내 편집은 보존했습니다. 현재 값 · \(configSummary(m))"))
                 Button("내 편집 유지하고 다시 검토") {
                     configRevision = store.writeRevisions?.members?[m.id]?.configRevision
                     baseline = TeamConfigSnapshot(m); configFailure = nil
@@ -1323,7 +1323,7 @@ struct MemberDetailView: View {
                 ActivityList(memberID: m.id).padding(.bottom, 10)
             } label: {
                 HStack {
-                    DetailSectionTitle("활동", fold: true)
+                    DetailSectionTitle(String(localized: "활동"), fold: true)
                     Spacer(minLength: 0)
                 }
             }
@@ -1391,16 +1391,15 @@ struct MemberDetailView: View {
     // MARK: Logic
 
     private var readOnlyReason: String? {
-        if store.isDemo { return "샘플은 읽기 전용입니다. 실제 Mac에 연결하면 조작할 수 있습니다." }
-        if store.isArchive { return "보관함은 읽기 전용입니다." }
-        if store.connectionStatus != .connected { return "서버에 연결되지 않아 조작할 수 없습니다." }
+        if store.isArchive { return String(localized: "보관함은 읽기 전용입니다.") }
+        if store.connectionStatus != .connected { return String(localized: "서버에 연결되지 않아 조작할 수 없습니다.") }
         return nil
     }
 
     private var forceSleepMessage: String {
         var reason = (sleepRefusal ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         while reason.hasSuffix(".") { reason.removeLast() }
-        let tail = "그래도 재우면 돌던 턴이 끊기고 대기열은 깨울 때까지 멈춥니다."
+        let tail = String(localized: "그래도 재우면 돌던 턴이 끊기고 대기열은 깨울 때까지 멈춥니다.")
         return reason.isEmpty ? tail : "\(reason). \(tail)"
     }
 
@@ -1425,7 +1424,7 @@ struct MemberDetailView: View {
 
     private func providerOption(_ cli: String) -> String {
         let name = providerFullName(cli)
-        return store.runtime?.providers[cli]?.installed == false ? "\(name) · 설치 필요" : name
+        return store.runtime?.providers[cli]?.installed == false ? String(localized: "\(name) · 설치 필요") : name
     }
 
     private func canSwitchProvider(_ m: Member) -> Bool {
@@ -1433,10 +1432,10 @@ struct MemberDetailView: View {
     }
 
     private func switchBlockReason(_ m: Member) -> String? {
-        if teamIsLegacy(m) { return "이전 실행기의 세션은 여기서 CLI를 전환할 수 없습니다. 새 세션으로 이어가기를 쓰세요." }
-        if ["working", "blocked"].contains(m.status) { return "일이나 전달 대기가 끝나면 CLI를 바꿀 수 있습니다." }
+        if teamIsLegacy(m) { return String(localized: "이전 실행기의 세션은 여기서 CLI를 전환할 수 없습니다. 새 세션으로 이어가기를 쓰세요.") }
+        if ["working", "blocked"].contains(m.status) { return String(localized: "일이나 전달 대기가 끝나면 CLI를 바꿀 수 있습니다.") }
         // Held notes (e.g. a handoff, wake:false) leave the queue only together with the next instruction.
-        if m.queuedCount > 0 { return "대기열 \(m.queuedCount)건이 CLI에 들어간 뒤 바꿀 수 있습니다. 대기열은 다음 지시와 함께 들어갑니다." }
+        if m.queuedCount > 0 { return String(localized: "대기열 \(m.queuedCount)건이 CLI에 들어간 뒤 바꿀 수 있습니다. 대기열은 다음 지시와 함께 들어갑니다.") }
         return nil
     }
 
@@ -1460,31 +1459,31 @@ struct MemberDetailView: View {
     }
 
     private func reopenTitle(_ m: Member, target: String) -> String {
-        target != m.cli ? "적용하면 \(providerFullName(target)) 새 세션으로 인계합니다" : "적용하면 지금 세션을 닫고 새 설정으로 다시 엽니다"
+        target != m.cli ? String(localized: "적용하면 \(providerFullName(target)) 새 세션으로 인계합니다") : String(localized: "적용하면 지금 세션을 닫고 새 설정으로 다시 엽니다")
     }
 
     private func reopenDetail(_ m: Member, target: String) -> String {
         var parts: [String] = []
         if resumesClaude(m, target: target) {
-            parts.append("같은 Claude 대화를 새 모델·effort로 이어 엽니다.")
+            parts.append(String(localized: "같은 Claude 대화를 새 모델·effort로 이어 엽니다."))
         } else {
-            parts.append("새 \(providerFullName(target)) 세션을 엽니다. 이전 대화는 이어지지 않고 역할·현재 일·다음만 인계합니다.")
+            parts.append(String(localized: "새 \(providerFullName(target)) 세션을 엽니다. 이전 대화는 이어지지 않고 역할·현재 일·다음만 인계합니다."))
         }
-        if m.status == "asleep" { parts.append("잠든 팀원도 바로 깨워서 엽니다.") }
-        parts.append("인계 메모는 대기열에 들어가 다음 지시와 함께 전달됩니다.")
+        if m.status == "asleep" { parts.append(String(localized: "잠든 팀원도 바로 깨워서 엽니다.")) }
+        parts.append(String(localized: "인계 메모는 대기열에 들어가 다음 지시와 함께 전달됩니다."))
         return parts.joined(separator: " ")
     }
 
     private func configHelp(_ m: Member) -> String {
         hasLiveCoreSession(m)
-            ? "CLI를 바꾸면 새 세션을 열어 인계합니다. 세션이 있어서 모델·effort를 바꿔도 지금 세션을 닫고 다시 엽니다. 빈 모델은 직급 기본값을 씁니다."
-            : "CLI를 바꾸면 새 세션을 열어 인계합니다. 모델·effort 변경은 세션을 열 때 적용됩니다. 빈 모델은 직급 기본값을 씁니다."
+            ? String(localized: "CLI를 바꾸면 새 세션을 열어 인계합니다. 세션이 있어서 모델·effort를 바꿔도 지금 세션을 닫고 다시 엽니다. 빈 모델은 직급 기본값을 씁니다.")
+            : String(localized: "CLI를 바꾸면 새 세션을 열어 인계합니다. 모델·effort 변경은 세션을 열 때 적용됩니다. 빈 모델은 직급 기본값을 씁니다.")
     }
 
     private func configBlock(_ m: Member, target: String, reopens: Bool) -> String? {
-        if !effort.isEmpty && !(target == "codex" ? RankSettingsCLI.codex : .claude).efforts.contains(effort) { return "선택한 CLI에서 지원하지 않는 effort입니다. 다른 값을 고르세요." }
+        if !effort.isEmpty && !(target == "codex" ? RankSettingsCLI.codex : .claude).efforts.contains(effort) { return String(localized: "선택한 CLI에서 지원하지 않는 effort입니다. 다른 값을 고르세요.") }
         if target != m.cli, store.runtime?.providers[target]?.installed == false {
-            return "\(providerFullName(target))가 실행 호스트에 설치돼 있지 않습니다. 설정의 실행 환경을 확인하세요."
+            return String(localized: "\(providerFullName(target))가 실행 호스트에 설치돼 있지 않습니다. 설정의 실행 환경을 확인하세요.")
         }
         // The server refuses to close a session mid-turn or at an approval window (409). A usage-limit menu is not one (memberReopenBlock).
         return memberReopenBlock(m, reopens: reopens)
@@ -1492,7 +1491,7 @@ struct MemberDetailView: View {
 
     /// "Opened" is not "handed over": the handoff note waits in the queue until a wake message goes out.
     private static func handoffQueuedNote(_ opened: String) -> String {
-        "\(opened) 인계 메모는 대기열에 있고, 다음 지시를 보내면 함께 들어갑니다."
+        String(localized: "\(opened) 인계 메모는 대기열에 있고, 다음 지시를 보내면 함께 들어갑니다.")
     }
 
     private func loadConfig(_ m: Member) {
@@ -1518,12 +1517,12 @@ struct MemberDetailView: View {
         guard namespace == store.writeNamespace, id == memberID else { return }
         running = nil
         guard ok else {
-            failure = store.errorMessage ?? "요청을 처리하지 못했습니다."
+            failure = store.errorMessage ?? String(localized: "요청을 처리하지 못했습니다.")
             return
         }
         // A start failure after a handoff leaves the member in error: say so instead of claiming success.
         if ["fresh", "resume"].contains(name), let latest = current, latest.status == "error" {
-            failure = latest.lastError ?? "세션을 열지 못했습니다."
+            failure = latest.lastError ?? String(localized: "세션을 열지 못했습니다.")
         } else {
             note = success
         }
@@ -1531,7 +1530,7 @@ struct MemberDetailView: View {
 
     private func sleep(_ m: Member) async {
         var refusal: APIError?
-        await run("sleep", success: "잠재웠습니다. 깨우거나 지시를 보내면 다시 엽니다.") {
+        await run("sleep", success: String(localized: "잠재웠습니다. 깨우거나 지시를 보내면 다시 엽니다.")) {
             let outcome = await store.sleepMemberOutcome(m)
             refusal = outcome.refusal
             return outcome.ok
@@ -1546,7 +1545,7 @@ struct MemberDetailView: View {
 
     private func applyConfig(_ m: Member) async {
         guard !configChanged(m) else {
-            configFailure = "서버 설정이 바뀌었습니다. 내 편집을 유지하고 다시 검토하세요."; return
+            configFailure = String(localized: "서버 설정이 바뀌었습니다. 내 편집을 유지하고 다시 검토하세요."); return
         }
         let target = configTarget(m)
         let switching = target != m.cli
@@ -1559,7 +1558,7 @@ struct MemberDetailView: View {
         guard namespace == store.writeNamespace, id == memberID else { return }
         running = nil
         guard ok else {
-            configFailure = store.errorMessage ?? "설정을 바꾸지 못했습니다."
+            configFailure = store.errorMessage ?? String(localized: "설정을 바꾸지 못했습니다.")
             return
         }
         if let latest = current {
@@ -1570,18 +1569,18 @@ struct MemberDetailView: View {
             }
             // Any apply that rotated the session can leave the member in error ("새 세션 시작 실패: …").
             if reopens && latest.status == "error" {
-                configFailure = latest.lastError ?? "새 세션을 시작하지 못했습니다."
+                configFailure = latest.lastError ?? String(localized: "새 세션을 시작하지 못했습니다.")
                 return
             }
         }
         guard reopens else {
-            configNote = "저장했습니다. 세션을 열 때 적용됩니다."
+            configNote = String(localized: "저장했습니다. 세션을 열 때 적용됩니다.")
             return
         }
         configHandoff = true
         let opened = switching
-            ? "\(providerFullName(target)) 새 세션을 열었습니다."
-            : (resumesClaude(m, target: target) ? "같은 Claude 대화를 새 설정으로 다시 열었습니다." : "새 설정으로 \(providerFullName(target)) 새 세션을 열었습니다.")
+            ? String(localized: "\(providerFullName(target)) 새 세션을 열었습니다.")
+            : (resumesClaude(m, target: target) ? String(localized: "같은 Claude 대화를 새 설정으로 다시 열었습니다.") : String(localized: "새 설정으로 \(providerFullName(target)) 새 세션을 열었습니다."))
         configNote = Self.handoffQueuedNote(opened)
     }
 }
@@ -1614,7 +1613,7 @@ private struct TeamTalkRow: View {
         if message.mine {
             Text("나").font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.accent)
         } else if !message.kind.isEmpty {
-            Tag(message.kind, tone: messageKindTone(message.kind))
+            Tag(messageKindLabel(message.kind), tone: messageKindTone(message.kind))
         } else {
             Text(message.who).font(CEFont.meta).foregroundStyle(CE.ink3).lineLimit(1)
         }
@@ -1624,7 +1623,7 @@ private struct TeamTalkRow: View {
         if message.mine {
             let body = plainOneLine(message.body)
             if !body.isEmpty { return body }
-            return message.attachments.isEmpty ? "—" : "첨부 \(message.attachments.count)개"
+            return message.attachments.isEmpty ? "—" : String(localized: "첨부 \(message.attachments.count)개")
         }
         let title = plainOneLine(message.title)
         if !title.isEmpty { return title }
@@ -1672,10 +1671,10 @@ private struct TeamContextBar: View {
                     Capsule().fill(due ? CE.attention : CE.live).frame(width: 72 * CGFloat(value) / 100, height: 5)
                 }
             Text("\(value)%").font(CEFont.secondary).monospacedDigit().foregroundStyle(CE.ink)
-            if due { Tag("압축 기준 도달", tone: .attention) }
+            if due { Tag(String(localized: "압축 기준 도달"), tone: .attention) }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("문맥 사용 \(value)퍼센트" + (due ? ", 압축 기준 도달" : ""))
+        .accessibilityLabel(String(localized: "문맥 사용 \(value)퍼센트") + (due ? String(localized: ", 압축 기준 도달") : ""))
     }
 }
 
@@ -1713,7 +1712,7 @@ struct ActivityList: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(CE.ink2)
-                .disabled(loading || store.isDemo || store.api == nil)
+                .disabled(loading || store.api == nil)
                 .help("활동 새로 고침")
                 .accessibilityLabel("활동 새로 고침")
             }
@@ -1729,7 +1728,7 @@ struct ActivityList: View {
             defer { if registered { store.deactivateActivity(memberID: id, epoch: epoch) } }
             request &+= 1
             let mine = request
-            loading = !store.isDemo && store.api != nil
+            loading = store.api != nil
             registered = await store.activateActivity(memberID: id)
             if request == mine { loading = false }
             while !Task.isCancelled { do { try await Task.sleep(for: .seconds(3600)) } catch { break } }
@@ -1738,14 +1737,12 @@ struct ActivityList: View {
 
     @ViewBuilder private var list: some View {
         // Empty and loading states are the web .tm-note: centred, 14 above and below.
-        if store.isDemo {
-            teamEmptyNote("샘플에는 활동 기록이 없습니다.")
-        } else if let error, items.isEmpty {
+        if let error, items.isEmpty {
             teamFailure(error)
         } else if !loaded {
-            teamEmptyNote(loading ? "불러오는 중입니다" : "서버에 연결되면 활동을 불러옵니다.")
+            teamEmptyNote(loading ? String(localized: "불러오는 중입니다") : String(localized: "서버에 연결되면 활동을 불러옵니다."))
         } else if items.isEmpty {
-            teamEmptyNote("아직 활동이 없습니다")
+            teamEmptyNote(String(localized: "아직 활동이 없습니다"))
         } else {
             if let error { teamFailure(error) }
             LazyVStack(alignment: .leading, spacing: 0) {
@@ -1812,7 +1809,7 @@ struct ActivityList: View {
     }
 
     private func reload() async {
-        guard !store.isDemo, store.api != nil else { return }
+        guard store.api != nil else { return }
         request &+= 1
         let mine = request
         loading = true
@@ -1844,16 +1841,16 @@ final class MemberCreationNotice {
     func create(store: AppStore, name: String, role: String, provider: String, model: String?) async -> Outcome {
         guard !running, store.canWrite, !store.pendingActions.contains("create-member"),
               let client = store.api, let project = store.state?.project,
-              !project.isHq, project.runnerEnabled else { return .failed("지금은 팀장을 추가할 수 없습니다.") }
+              !project.isHq, project.runnerEnabled else { return .failed(String(localized: "지금은 팀장을 추가할 수 없습니다.")) }
         namespace = ProjectCreationNotice.scope(store)
         projectID = project.id; memberID = nil; failed = false; running = true
-        message = "팀장을 만드는 중입니다. 창을 닫아도 계속됩니다."
+        message = String(localized: "팀장을 만드는 중입니다. 창을 닫아도 계속됩니다.")
         defer { running = false }
         let before = Set(store.members.map(\.id))
         let sameHost = { self.namespace == ProjectCreationNotice.scope(store) && store.stillCurrent(client) }
         func hostChanged() -> Outcome {
             failed = true
-            message = "연결이 바뀌었습니다. 원래 Mac에 연결해 팀장 만들기 결과를 확인해 주세요."
+            message = String(localized: "연결이 바뀌었습니다. 원래 Mac에 연결해 팀장 만들기 결과를 확인해 주세요.")
             return .hostChanged
         }
         do {
@@ -1862,7 +1859,7 @@ final class MemberCreationNotice {
             guard sameHost() else { return hostChanged() }
             guard member.projectId == project.id, !member.id.isEmpty else { throw URLError(.badServerResponse) }
             memberID = member.id
-            message = "팀장을 만들었습니다. 이 팀장에게 첫 일을 맡겨 보세요."
+            message = String(localized: "팀장을 만들었습니다. 이 팀장에게 첫 일을 맡겨 보세요.")
             await store.refresh()
             guard sameHost() else { memberID = nil; return hostChanged() }
             return .created(member.id)
@@ -1877,12 +1874,12 @@ final class MemberCreationNotice {
                 ? snapshot?.members.filter { !before.contains($0.id) && $0.name == name && $0.cli == provider } ?? [] : []
             if matches.count == 1, let member = matches.first {
                 memberID = member.id
-                message = "팀장은 등록됐습니다. 준비 상태를 확인해 주세요. \(detail)"
+                message = String(localized: "팀장은 등록됐습니다. 준비 상태를 확인해 주세요. \(detail)")
                 await store.refresh()
                 guard sameHost() else { memberID = nil; return hostChanged() }
                 return .partial(member.id, message!)
             }
-            message = "\(detail) 팀에서 등록 여부를 확인해 주세요. 자동으로 다시 요청하지 않습니다."
+            message = String(localized: "\(detail) 팀에서 등록 여부를 확인해 주세요. 자동으로 다시 요청하지 않습니다.")
             return .failed(message!)
         }
     }
@@ -1895,7 +1892,7 @@ final class MemberCreationNotice {
         guard namespace == ProjectCreationNotice.scope(store), store.stillCurrent(client),
               router.navigationRevision == navigation else { return false }
         guard store.state?.project.id == projectID, store.members.contains(where: { $0.id == memberID }) else {
-            router.navigationNotice = "팀장을 열지 못했습니다. 팀에서 준비 상태를 확인해 주세요."
+            router.navigationNotice = String(localized: "팀장을 열지 못했습니다. 팀에서 준비 상태를 확인해 주세요.")
             return false
         }
         router.openChat(memberID)
@@ -1914,8 +1911,8 @@ struct MemberCreationBanner: View {
         let notice = MemberCreationNotice.shared
         if notice.namespace == ProjectCreationNotice.scope(store), let message = notice.message {
             InlineNotice(tone: notice.failed ? .attention : notice.running ? .neutral : .success,
-                         title: notice.running ? "팀장 준비 중" : "팀장 만들기 결과", detail: message,
-                         actionTitle: notice.memberID == nil || notice.running ? "닫기" : "이 팀장에게 첫 일 맡기기") {
+                         title: notice.running ? String(localized: "팀장 준비 중") : String(localized: "팀장 만들기 결과"), detail: message,
+                         actionTitle: notice.memberID == nil || notice.running ? String(localized: "닫기") : String(localized: "이 팀장에게 첫 일 맡기기")) {
                 if notice.memberID != nil, !notice.running {
                     Task { if await notice.openMember(store: store, router: router) { onOpen?() } }
                 } else { notice.clear() }
@@ -1942,18 +1939,18 @@ struct NewMemberView: View {
     private var busy: Bool { MemberCreationNotice.shared.running || store.pendingActions.contains("create-member") }
     private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var blockReason: String? {
-        if store.isDemo { return "샘플은 읽기 전용입니다. 실제 Mac에 연결하면 팀장을 추가할 수 있습니다." }
-        if !store.canWrite { return "서버에 연결되지 않아 추가할 수 없습니다." }
-        guard let project = store.state?.project else { return "프로젝트를 불러온 뒤 추가할 수 있습니다." }
-        if project.isHq { return "본사에는 팀장을 추가하지 않습니다." }
-        if !project.runnerEnabled { return "이 프로젝트는 실행이 꺼져 있습니다. 팀 화면에서 총괄을 먼저 시작하세요." }
+        if store.isDemo { return String(localized: "샘플에서는 팀장을 추가할 수 없습니다. 실제 Mac에 연결하면 추가할 수 있습니다.") }
+        if !store.canWrite { return String(localized: "서버에 연결되지 않아 추가할 수 없습니다.") }
+        guard let project = store.state?.project else { return String(localized: "프로젝트를 불러온 뒤 추가할 수 있습니다.") }
+        if project.isHq { return String(localized: "본사에는 팀장을 추가하지 않습니다.") }
+        if !project.runnerEnabled { return String(localized: "이 프로젝트는 실행이 꺼져 있습니다. 팀 화면에서 총괄을 먼저 시작하세요.") }
         return nil
     }
 
     /// The shared popup frame: what it does in the header, the form, 취소 / 추가 in the footer band.
     var body: some View {
         // One line; the wait hint only while the session is being prepared.
-        CESheet("팀장 추가", subtitle: busy ? "세션을 준비하는 중입니다. 잠시 걸릴 수 있습니다." : "새 CLI 세션을 띄워 팀장으로 등록합니다.",
+        CESheet(String(localized: "팀장 추가"), subtitle: busy ? String(localized: "세션을 준비하는 중입니다. 잠시 걸릴 수 있습니다.") : String(localized: "새 CLI 세션을 띄워 팀장으로 등록합니다."),
                 icon: "person.badge.plus", width: 520, onClose: { dismiss() }) {
             form
         } footer: {
@@ -1996,9 +1993,9 @@ struct NewMemberView: View {
             } else if let blockReason {
                 InlineNotice(tone: .attention, icon: "info.circle", title: blockReason)
             }
-            field("이름", text: $name, prompt: "개발 담당", plain: false, id: .name)
-            field("역할 · 선택", text: $role, prompt: "결제 화면 구현", plain: false, id: .role)
-            SetupField("팀장이 쓸 AI") {
+            field(String(localized: "이름"), text: $name, prompt: String(localized: "개발 담당"), plain: false, id: .name)
+            field(String(localized: "역할 · 선택"), text: $role, prompt: String(localized: "결제 화면 구현"), plain: false, id: .role)
+            SetupField(String(localized: "팀장이 쓸 AI")) {
                 Picker("AI CLI", selection: $selection.provider) {
                     Text(providerOption("claude")).tag("claude")
                     Text(providerOption("codex")).tag("codex")
@@ -2010,7 +2007,7 @@ struct NewMemberView: View {
                 #endif
                 .frame(maxWidth: .infinity)
             }
-            SetupField("모델") {
+            SetupField(String(localized: "모델")) {
                 let cli: RankSettingsCLI = selection.provider == "codex" ? .codex : .claude
                 let list = store.modelCatalog.list(for: cli)
                 let defaultModel = store.bootstrap?.settings.rankConfig("lead", cli: cli)?.model
@@ -2020,8 +2017,8 @@ struct NewMemberView: View {
                 }.labelsHidden()
             }
             if store.runtime?.providers[selection.provider]?.installed == false {
-                InlineNotice(tone: .attention, icon: "exclamationmark.triangle", title: "\(providerFullName(selection.provider))가 설치돼 있지 않습니다",
-                             detail: "설정의 실행 환경을 확인하세요.")
+                InlineNotice(tone: .attention, icon: "exclamationmark.triangle", title: String(localized: "\(providerFullName(selection.provider))가 설치돼 있지 않습니다"),
+                             detail: String(localized: "설정의 실행 환경을 확인하세요."))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2054,15 +2051,15 @@ struct NewMemberView: View {
 
     private func providerOption(_ cli: String) -> String {
         let name = providerFullName(cli)
-        return store.runtime?.providers[cli]?.installed == false ? "\(name) · 설치 필요" : name
+        return store.runtime?.providers[cli]?.installed == false ? String(localized: "\(name) · 설치 필요") : name
     }
 
     private func add() async {
-        guard !trimmedName.isEmpty else { failure = "팀장 이름을 넣어 주세요"; return }
+        guard !trimmedName.isEmpty else { failure = String(localized: "팀장 이름을 넣어 주세요"); return }
         guard blockReason == nil, !busy else { return }
         failure = nil
         guard selection.isValid(in: store.modelCatalog) else {
-            failure = "모델 목록이 바뀌었습니다. 사용할 모델을 다시 골라 주세요."
+            failure = String(localized: "모델 목록이 바뀌었습니다. 사용할 모델을 다시 골라 주세요.")
             return
         }
         let trimmedModel = selection.model
@@ -2295,7 +2292,7 @@ private extension View {
     }
 }
 
-private let teamLegacyNote = "이전 실행기의 세션이라 여기서 이어 쓸 수 없습니다. … 메뉴의 새 세션으로 이어가기로 옮기세요."
+private let teamLegacyNote = String(localized: "이전 실행기의 세션이라 여기서 이어 쓸 수 없습니다. … 메뉴의 새 세션으로 이어가기로 옮기세요.")
 
 /// Web .tm-note--left: 13.5 / 1.5, ink-2.
 private func teamNote(_ text: String) -> some View {
@@ -2331,7 +2328,7 @@ private func teamIsLegacy(_ member: Member) -> Bool {
 
 /// "마지막 일" only when the session is down. idle only means the CLI turn settled, never that the work is done.
 private func teamNowLabel(_ member: Member) -> String {
-    ["asleep", "offline"].contains(member.status) && !member.now.isEmpty ? "마지막 일" : "지금"
+    ["asleep", "offline"].contains(member.status) && !member.now.isEmpty ? String(localized: "마지막 일") : String(localized: "지금")
 }
 
 private func teamInlineMarkdown(_ value: String) -> AttributedString { markdownInline(value) }

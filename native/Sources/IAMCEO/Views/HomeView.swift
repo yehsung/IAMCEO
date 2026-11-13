@@ -51,7 +51,7 @@ struct HomeView: View {
     static func waitedLabel(_ decision: Decision, now: Date = Date(), waitingSince: Date? = nil) -> String? {
         guard waitedLong(decision, now: now, waitingSince: waitingSince), let created = waitingSince ?? parseISODate(decision.createdAt) else { return nil }
         let hours = Int(now.timeIntervalSince(created) / 3600)
-        return hours >= 48 ? "\(hours / 24)일째 기다림" : "\(hours)시간째 기다림"
+        return hours >= 48 ? String(localized: "\(hours / 24)일째 기다림") : String(localized: "\(hours)시간째 기다림")
     }
     private static let topMembers = 5
     /// Web TOP_WORK: up to five work rows.
@@ -63,10 +63,9 @@ struct HomeView: View {
     private static let rowTitleLeading = CELeading.spacing(14.5, 1.4)
     /// 팀 summary: fixed order, zero counts dropped. 승인 창 앞 and 오류 are not counted here: they are in 내 차례.
     private static let summaryParts: [(status: String, label: String)] = [
-        ("working", "일하는 중"), ("waiting", "내 답 기다림"), ("idle", "쉬는 중"), ("asleep", "잠듦"), ("offline", "안 보임"),
+        ("working", String(localized: "일하는 중")), ("waiting", String(localized: "내 답 기다림")), ("idle", String(localized: "쉬는 중")), ("asleep", String(localized: "잠듦")), ("offline", String(localized: "안 보임")),
     ]
-    private static let tidyHint = "결재·할 일·진행판을 지금 상태로 맞춥니다"
-    private static let readOnlyHelp = "샘플은 읽기 전용입니다"
+    private static let tidyHint = String(localized: "결재·할 일·진행판을 지금 상태로 맞춥니다")
 
     var body: some View {
         if let state = store.state {
@@ -94,7 +93,7 @@ struct HomeView: View {
     /// Web: auto-fit columns of at least 320.
     private var twoColumn: Bool { wide && contentWidth >= 652 }
     private var isHq: Bool { store.state?.project.isHq == true }
-    private var leadLabel: String { isHq ? "본사 AI" : "총괄" }
+    private var leadLabel: String { isHq ? String(localized: "본사 AI") : String(localized: "총괄") }
     /// Web .hm-row / .hm-check: 44 on every platform.
     private var rowMinHeight: CGFloat { 44 }
     /// 내 차례: every row has the same 22pt leading column (glyph or checkbox), so titles start here
@@ -199,17 +198,17 @@ struct HomeView: View {
     @ViewBuilder private var placeholder: some View {
         Group {
             if store.isLoading || store.connectionStatus == .connecting {
-                EmptyTile(loading: true, title: "프로젝트를 불러오는 중입니다")
+                EmptyTile(loading: true, title: String(localized: "프로젝트를 불러오는 중입니다"))
             } else if store.projects.isEmpty {
-                EmptyTile(icon: "folder.badge.plus", title: "아직 프로젝트가 없습니다",
-                          detail: "새 프로젝트를 만들면 총괄이 팀을 꾸리고 지금 상황을 여기에 정리합니다.") {
+                EmptyTile(icon: "folder.badge.plus", title: String(localized: "아직 프로젝트가 없습니다"),
+                          detail: String(localized: "새 프로젝트를 만들면 총괄이 팀을 꾸리고 지금 상황을 여기에 정리합니다.")) {
                     Button("새 프로젝트") { router.showNewProject = true }
                         .ceProminentButton()
                         .disabled(!store.canWrite)
                 }
             } else {
-                EmptyTile(icon: "exclamationmark.circle", title: "프로젝트를 불러오지 못했습니다",
-                          detail: store.connectionStatus == .connected ? "다시 불러오거나 다른 프로젝트를 고르세요." : "서버에 다시 연결되면 불러올 수 있습니다.") {
+                EmptyTile(icon: "exclamationmark.circle", title: String(localized: "프로젝트를 불러오지 못했습니다"),
+                          detail: store.connectionStatus == .connected ? String(localized: "다시 불러오거나 다른 프로젝트를 고르세요.") : String(localized: "서버에 다시 연결되면 불러올 수 있습니다.")) {
                     Button("다시 불러오기") {
                         Task { if let id = store.selectedProjectID ?? store.projects.first?.id { await store.selectProject(id: id) } }
                     }
@@ -226,7 +225,7 @@ struct HomeView: View {
 
     /// Web ConnectGate: the reason in bold and the one step that fixes it. Server-down is the global status strip's.
     @ViewBuilder private func gateCard(_ project: Project) -> some View {
-        if !store.isDemo && !project.connection.ok {
+        if !project.connection.ok {
             let reason = project.connection.reason
             // Web .gate: radius 20, padding 10 10 10 16, gap 8 × 14, text 14/1.5 (650 ink-1 for the reason),
             // the action a glass size m button (44pt, 15/600).
@@ -266,10 +265,10 @@ struct HomeView: View {
 
     private func gateFallback(_ reason: String?) -> String {
         switch reason {
-        case "runner_off": "AI가 아직 연결되지 않았습니다"
-        case "backend_down": "실행 환경에 연결할 수 없습니다"
-        case "archived": "보관된 프로젝트입니다"
-        default: "연결을 확인해 주세요"
+        case "runner_off": String(localized: "AI가 아직 연결되지 않았습니다")
+        case "backend_down": String(localized: "실행 환경에 연결할 수 없습니다")
+        case "archived": String(localized: "보관된 프로젝트입니다")
+        default: String(localized: "연결을 확인해 주세요")
         }
     }
 
@@ -281,7 +280,7 @@ struct HomeView: View {
                 Task {
                     startError = nil
                     if !(await store.startConductor()) {
-                        startError = "\(leadLabel) 시작에 실패했습니다." + (store.errorMessage.map { " \($0)" } ?? "")
+                        startError = String(localized: "\(leadLabel) 시작에 실패했습니다.") + (store.errorMessage.map { " \($0)" } ?? "")
                     }
                 }
             }
@@ -312,14 +311,14 @@ struct HomeView: View {
     /// last tidy time beside it (web TidyBar: "마지막 판 정리 3분 전 · 지금 판 정리").
     private func nowCard(_ project: Project) -> some View {
         let hasNow = !project.now.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return HomeCard(title: "지금 상황", meta: hasNow ? relativeTime(project.nowAt) : nil) {
+        return HomeCard(title: String(localized: "지금 상황"), meta: hasNow ? relativeTime(project.nowAt) : nil) {
             tidyAccessory(project)
         } content: {
             VStack(alignment: .leading, spacing: 6) {
                 if hasNow {
                     nowBody(project.now)
                 } else {
-                    Text("아직 요약이 없습니다 — 판 정리를 맡기면 \(isHq ? "본사 AI가" : "총괄이") 정리합니다")
+                    Text("아직 요약이 없습니다 — 판 정리를 맡기면 \(isHq ? String(localized: "본사 AI가") : String(localized: "총괄이")) 정리합니다")
                         .font(CEFont.note).foregroundStyle(CE.ink2)
                         .lineSpacing(CELeading.note)
                         .fixedSize(horizontal: false, vertical: true)
@@ -338,7 +337,7 @@ struct HomeView: View {
         let last = relativeTime(project.tidiedAt)
         return ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
-                Text(last.isEmpty ? Self.tidyHint : "마지막 판 정리 \(last)")
+                Text(last.isEmpty ? Self.tidyHint : String(localized: "마지막 판 정리 \(last)"))
                     .font(CEFont.meta).monospacedDigit().foregroundStyle(CE.ink2)
                     .lineLimit(1).fixedSize()
                     // The button's hint already says it.
@@ -352,7 +351,7 @@ struct HomeView: View {
                 .disabled(!store.uiCanWrite)
             Button("취소", role: .cancel) {}
         } message: {
-            Text("\(isHq ? "본사 AI가" : "총괄이") \(Self.tidyHint)." + (last.isEmpty ? "" : "\n마지막 판 정리 \(last)"))
+            Text((isHq ? String(localized: "본사 AI가 \(Self.tidyHint).") : String(localized: "총괄이 \(Self.tidyHint).")) + (last.isEmpty ? "" : String(localized: "\n마지막 판 정리 \(last)")))
         }
         // Offered the header's room before the spacer, so the time shows whenever it fits.
         .layoutPriority(1)
@@ -364,14 +363,14 @@ struct HomeView: View {
     private func tidyButton(_ project: Project) -> some View {
         let busy = store.pendingActions.contains("tidy")
         let last = relativeTime(project.tidiedAt)
-        let detail = Self.tidyHint + (last.isEmpty ? "" : " · 마지막 판 정리 \(last)")
-        return HomeIconButton(icon: "arrow.triangle.2.circlepath", title: busy ? "맡기는 중" : "판 정리", busy: busy) {
+        let detail = Self.tidyHint + (last.isEmpty ? "" : String(localized: " · 마지막 판 정리 \(last)"))
+        return HomeIconButton(icon: "arrow.triangle.2.circlepath", title: busy ? String(localized: "맡기는 중") : String(localized: "판 정리"), busy: busy) {
             if isMac { Task { await tidy() } } else { confirmTidy = true }
         }
         .disabled(!store.uiCanWrite || busy)
-        .help(store.isDemo ? Self.readOnlyHelp : busy ? "판 정리를 맡기는 중입니다" : "지금 판 정리 — \(detail)")
+        .help(busy ? String(localized: "판 정리를 맡기는 중입니다") : String(localized: "지금 판 정리 — \(detail)"))
         .accessibilityLabel(busy ? "판 정리를 맡기는 중" : "지금 판 정리")
-        .accessibilityHint(store.isDemo ? Self.readOnlyHelp : detail)
+        .accessibilityHint(detail)
     }
 
     private func tidy() async {
@@ -379,9 +378,9 @@ struct HomeView: View {
         tidyNote = nil
         let note: HomeNote
         if let already = await store.tidyBoard() {
-            note = HomeNote(text: already ? "판 정리 지시가 이미 기다리고 있습니다" : "\(lead)에게 판 정리를 맡겼습니다. 바뀐 게 있으면 대화에 알립니다", tone: .neutral)
+            note = HomeNote(text: already ? String(localized: "판 정리 지시가 이미 기다리고 있습니다") : String(localized: "\(lead)에게 판 정리를 맡겼습니다. 바뀐 게 있으면 대화에 알립니다"), tone: .neutral)
         } else {
-            note = HomeNote(text: "판 정리를 맡기지 못했습니다." + (store.errorMessage.map { " \($0)" } ?? ""), tone: .danger)
+            note = HomeNote(text: String(localized: "판 정리를 맡기지 못했습니다.") + (store.errorMessage.map { " \($0)" } ?? ""), tone: .danger)
         }
         withAnimation(.easeOut(duration: 0.2)) { tidyNote = note }
         // Like the web, a failure stays until the next try; the confirmation fades after 6 s.
@@ -419,7 +418,7 @@ struct HomeView: View {
                 .onChange(of: collapsed) { _, isCollapsed in if !isCollapsed { setNowCursor(false) } }
                 .onDisappear { setNowCursor(false) }
             if overflows {
-                HomeFoldButton(title: nowExpanded ? "접기" : "더 보기", open: nowExpanded) {
+                HomeFoldButton(title: nowExpanded ? String(localized: "접기") : String(localized: "더 보기"), open: nowExpanded) {
                     withAnimation(.easeOut(duration: 0.2)) { nowExpanded.toggle() }
                 }
                 .accessibilityLabel(nowExpanded ? "지금 상황 접기" : "지금 상황 더 보기")
@@ -494,7 +493,7 @@ struct HomeView: View {
 
     @ViewBuilder private var missingReports: some View {
         if let notices = store.deliveryNotices?.reportNotices, !notices.isEmpty {
-            HomeCard(title: "결과 보고 누락", count: notices.count) {
+            HomeCard(title: String(localized: "결과 보고 누락"), count: notices.count) {
                 ForEach(notices) { notice in
                     HStack {
                         HomeRowButton(action: {
@@ -502,7 +501,7 @@ struct HomeView: View {
                         }) {
                             Text(notice.title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
                         }
-                        Button(memberName(notice.memberId) ?? "팀원 보기") { router.openMember(notice.memberId) }
+                        Button(memberName(notice.memberId) ?? String(localized: "팀원 보기")) { router.openMember(notice.memberId) }
                             .ceSecondaryButton().ceCompactControl()
                     }
                 }
@@ -542,7 +541,7 @@ struct HomeView: View {
     }
 
     private func turnCard(_ turn: HomeTurn) -> some View {
-        HomeCard(title: "내 차례", count: turn.count, more: openDecisions.isEmpty ? nil : "결재함", onMore: { router.go(.inbox) }) {
+        HomeCard(title: String(localized: "내 차례"), count: turn.count, more: openDecisions.isEmpty ? nil : String(localized: "결재함"), onMore: { router.go(.inbox) }) {
             ForEach(Array(turn.rows.enumerated()), id: \.element.id) { index, row in
                 if index > 0 && row.dividerAbove { HomeDivider() }
                 turnRow(row)
@@ -554,7 +553,7 @@ struct HomeView: View {
         switch row {
         case .member(let member, let delivery): attentionRow(member, delivery: delivery)
         case .delivery(let summary):
-            deliveryAttentionRow(title: "담당자 확인 필요", count: summary.needsOwnerCount,
+            deliveryAttentionRow(title: String(localized: "담당자 확인 필요"), count: summary.needsOwnerCount,
                                  detail: homeDeliverySummary(summary))
         case .unassigned(let count): unassignedRows(count)
         case .failedMessage(let message):
@@ -563,7 +562,7 @@ struct HomeView: View {
                     turnLine("exclamationmark.bubble", tint: CE.danger) {
                         Text(homePlainLine(message.body)).font(CEFont.rowTitle).foregroundStyle(CE.ink)
                             .lineSpacing(Self.rowTitleLeading).lineLimit(2).multilineTextAlignment(.leading)
-                        Text(["전달 실패", message.deliveryNote.map(plainDeliveryNote)].compactMap { $0 }.joined(separator: " · "))
+                        Text([String(localized: "전달 실패"), message.deliveryNote.map { plainDeliveryNote($0, code: message.deliveryCode) }].compactMap { $0 }.joined(separator: " · "))
                             .font(CEFont.secondary).foregroundStyle(CE.ink2).lineSpacing(CELeading.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -572,11 +571,11 @@ struct HomeView: View {
                 Button("다시 보내기") { Task { await store.resend(message) } }
                 .ceSecondaryButton().ceCompactControl()
                 .disabled(!store.uiCanWrite || store.isSending(projectID: message.projectId, targetMemberID: message.targetMemberId))
-                .help(store.isDemo ? Self.readOnlyHelp : "같은 글·대상·첨부의 전달 근거를 다시 확인합니다")
+                .help(String(localized: "같은 글·대상·첨부의 전달 근거를 다시 확인합니다"))
             }
         case .decision(let decision): decisionRow(decision)
         case .moreDecisions(let count):
-            HomeQuietLink(text: "결재함에서 \(count)건 더") { router.go(.inbox) }
+            HomeQuietLink(text: String(localized: "결재함에서 \(count)건 더")) { router.go(.inbox) }
                 .padding(.leading, titleInset)
                 .accessibilityLabel("결재함에서 \(count)건 더 보기")
         case .todo(let todo): todoRow(todo)
@@ -592,7 +591,7 @@ struct HomeView: View {
 
     private func doneFoldButton(_ count: Int) -> some View {
         // A 내 차례 row: the full 44pt (web .hm-more-btn).
-        HomeFoldButton(title: "완료한 할 일 \(count)", open: showDoneTodos, minHeight: 44) {
+        HomeFoldButton(title: String(localized: "완료한 할 일 \(count)"), open: showDoneTodos, minHeight: 44) {
             withAnimation(.easeOut(duration: 0.2)) { showDoneTodos.toggle() }
         }
         .accessibilityLabel(showDoneTodos ? "완료한 할 일 \(count)개 접기" : "완료한 할 일 \(count)개 보기")
@@ -612,7 +611,7 @@ struct HomeView: View {
     private func attentionRow(_ member: Member, delivery: MemberDeliverySummary?) -> some View {
         let info = MemberStatusInfo(member)
         let approval = info.tone == .approval
-        let error = member.status == "error" ? member.lastError.map(friendlyError) : nil
+        let error = member.status == "error" ? member.lastError.map { friendlyError($0, code: member.fenceCode) } : nil
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 HomeRowButton(bleedTrailing: !approval, action: { router.openMember(member.id) }) {
@@ -651,7 +650,7 @@ struct HomeView: View {
     @ViewBuilder private func unassignedRows(_ count: Int) -> some View {
         let items = store.unassignedDeliveries
         if items.isEmpty {
-            deliveryAttentionRow(title: "담당 미배정", count: count, detail: "받을 팀원이 정해지지 않았습니다")
+            deliveryAttentionRow(title: String(localized: "담당 미배정"), count: count, detail: String(localized: "받을 팀원이 정해지지 않았습니다"))
                 .task(id: count) { await store.loadUnassignedDeliveries() }
         } else {
             VStack(alignment: .leading, spacing: 0) {
@@ -670,7 +669,7 @@ struct HomeView: View {
                 turnLine("exclamationmark.bubble", tint: CE.attention) {
                     Text(homePlainLine(item.preview)).font(CEFont.rowTitle).foregroundStyle(CE.ink)
                         .lineSpacing(Self.rowTitleLeading).lineLimit(2).multilineTextAlignment(.leading)
-                    HomeSub(text: ["받을 팀원이 없어 전달하지 못함", relativeTime(item.createdAt)].filter { !$0.isEmpty }.joined(separator: " · "))
+                    HomeSub(text: [String(localized: "받을 팀원이 없어 전달하지 못함"), relativeTime(item.createdAt)].filter { !$0.isEmpty }.joined(separator: " · "))
                 }
             }
             .accessibilityHint("프로젝트 대화에서 원문 보기")
@@ -678,12 +677,12 @@ struct HomeView: View {
                 if item.allowedActions.contains(.sendToConductor) {
                     Button("\(leadLabel)에게 보내기") { resolveUnassigned(item, send: true) }
                         .ceSecondaryButton().ceCompactControl()
-                        .help(store.isDemo ? Self.readOnlyHelp : "지금 \(leadLabel)을 받을 사람으로 정해 이 글을 보냅니다")
+                        .help(String(localized: "지금 \(leadLabel)을 받을 사람으로 정해 이 글을 보냅니다"))
                 }
                 if item.allowedActions.contains(.dismiss) {
                     Button("정리") { resolveUnassigned(item, send: false) }
                         .ceSecondaryButton().ceCompactControl()
-                        .help(store.isDemo ? Self.readOnlyHelp : "보내지 않고 정리합니다. 대화에는 '정리함'으로 남습니다")
+                        .help(String(localized: "보내지 않고 정리합니다. 대화에는 '정리함'으로 남습니다"))
                 }
             }
             .disabled(!store.canWrite || busy)
@@ -701,7 +700,7 @@ struct HomeView: View {
                           : await store.dismissUndelivered(messageID: item.messageId)
             unassignedBusy.remove(item.messageId)
             guard contextID == context, !ok else { return }
-            todoError = "'\(homePlainLine(item.preview))' \(send ? "보내기" : "정리")를 반영하지 않았습니다. " + (store.errorMessage ?? "최신 상태를 확인하세요.")
+            todoError = String(localized: "'\(homePlainLine(item.preview))' \(send ? String(localized: "보내기") : String(localized: "정리"))를 반영하지 않았습니다. ") + (store.errorMessage ?? String(localized: "최신 상태를 확인하세요."))
         }
     }
 
@@ -714,7 +713,7 @@ struct HomeView: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel((["\(title) \(count)건"] + [detail].compactMap { $0 }).joined(separator: ", "))
+        .accessibilityLabel(([String(localized: "\(title) \(count)건")] + [detail].compactMap { $0 }).joined(separator: ", "))
         .accessibilityHint("프로젝트 대화에서 원문 보기")
     }
 
@@ -749,9 +748,9 @@ struct HomeView: View {
                 // The 22pt box lines up with the card's text edge; the hit area extends past it.
                 .padding(.leading, -(hit - 22) / 2)
                 .disabled(!store.canWrite || todoBusy(todo.id))
-                .help(store.isDemo ? Self.readOnlyHelp : checked ? "했음 표시 지우기" : "했음으로 표시 (결재 답이 아닙니다)")
+                .help(checked ? String(localized: "했음 표시 지우기") : String(localized: "했음으로 표시 (결재 답이 아닙니다)"))
                 .accessibilityLabel("\(todo.title) 했음")
-                .accessibilityValue([checked ? "표시함" : "표시 안 함", todoWriteNotice(todo.id)?.text].compactMap { $0 }.joined(separator: ", "))
+                .accessibilityValue([checked ? String(localized: "표시함") : String(localized: "표시 안 함"), todoWriteNotice(todo.id)?.text].compactMap { $0 }.joined(separator: ", "))
 
                 Button {
                     withAnimation(.easeOut(duration: 0.2)) {
@@ -798,7 +797,7 @@ struct HomeView: View {
         let closedBy = checked ? (todo.closedBy ?? "") : ""
         let reason = todo.closeReason ?? ""
         // Done rows: the AI closed it ("{who}의 요청"), or I checked it and {who} gets a notice.
-        let whoLine = todo.who.isEmpty ? "" : checked && closedBy.isEmpty ? "\(todo.who)에게 알림" : "\(todo.who)의 요청"
+        let whoLine = todo.who.isEmpty ? "" : checked && closedBy.isEmpty ? String(localized: "\(todo.who)에게 알림") : String(localized: "\(todo.who)의 요청")
         let time = relativeTime(checked ? (todo.doneAt ?? todo.createdAt) : todo.createdAt)
         return VStack(alignment: .leading, spacing: 6) {
             if !todo.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -826,7 +825,7 @@ struct HomeView: View {
                     .fixedSize()
                     .disabled(!store.canWrite || todoBusy(todo.id))
                     .opacity(!store.canWrite || todoBusy(todo.id) ? 0.45 : 1)
-                    .help(store.isDemo ? Self.readOnlyHelp : "하지 않았지만 이제 필요 없는 일로 정리")
+                    .help(String(localized: "하지 않았지만 이제 필요 없는 일로 정리"))
                 }
             }
             .font(CEFont.secondary).foregroundStyle(CE.ink2)
@@ -838,12 +837,12 @@ struct HomeView: View {
 
     private func todoWriteNotice(_ id: String) -> (text: String, tone: Tone)? {
         switch store.todoWrites[id] {
-        case .sending: ("보내는 중", .neutral)
-        case nil where store.pendingActions.contains("todo:\(id)"): ("보내는 중", .neutral)
-        case .checking: ("결과 확인 중 · 확인이 끝나면 다시 바꿀 수 있습니다", .attention)
-        case .conflict: ("이전 상태의 변경은 반영하지 않았습니다. 최신 내용과 정리 이유를 확인하세요.", .attention)
-        case .notApplied: ("변경이 서버에 닿지 않았습니다. 다시 바꿔 주세요.", .attention)
-        case .confirmedCurrent: ("최신 상태를 확인했습니다", .neutral)
+        case .sending: (String(localized: "보내는 중"), .neutral)
+        case nil where store.pendingActions.contains("todo:\(id)"): (String(localized: "보내는 중"), .neutral)
+        case .checking: (String(localized: "결과 확인 중 · 확인이 끝나면 다시 바꿀 수 있습니다"), .attention)
+        case .conflict: (String(localized: "이전 상태의 변경은 반영하지 않았습니다. 최신 내용과 정리 이유를 확인하세요."), .attention)
+        case .notApplied: (String(localized: "변경이 서버에 닿지 않았습니다. 다시 바꿔 주세요."), .attention)
+        case .confirmedCurrent: (String(localized: "최신 상태를 확인했습니다"), .neutral)
         default: nil
         }
     }
@@ -865,7 +864,7 @@ struct HomeView: View {
             guard contextID == context, store.selectedProjectID == projectID, store.drafts.namespace == namespace else { return }
             let status = store.todoWrites[todo.id]
             if !ok && ![.sending, .checking, .conflict].contains(status) {
-                todoError = "'\(todo.title)' 정리를 반영하지 않았습니다. " + (store.errorMessage ?? "최신 상태를 확인하세요.")
+                todoError = String(localized: "'\(todo.title)' 정리를 반영하지 않았습니다. ") + (store.errorMessage ?? String(localized: "최신 상태를 확인하세요."))
             }
         }
     }
@@ -882,7 +881,7 @@ struct HomeView: View {
             let status = store.todoWrites[todo.id]
             let confirmedCurrent = status == .confirmedCurrent && store.todos.first(where: { $0.id == todo.id })?.done == done
             if !ok && ![.sending, .checking, .conflict].contains(status) && !confirmedCurrent {
-                todoError = "'\(todo.title)' 변경을 반영하지 않았습니다. " + (store.errorMessage ?? "최신 상태를 확인하세요.")
+                todoError = String(localized: "'\(todo.title)' 변경을 반영하지 않았습니다. ") + (store.errorMessage ?? String(localized: "최신 상태를 확인하세요."))
             }
         }
     }
@@ -898,7 +897,7 @@ struct HomeView: View {
     private var teamSummary: [(status: String, label: String, count: Int)] {
         let counts = MemberStatusInfo.summaryCounts(store.members)
         let paused: [(status: String, label: String)] = MemberStatusInfo.networkPauseCodes.map { (status: $0, label: MemberStatusInfo($0).label) }
-        return (Self.summaryParts + paused + [("unknown", "상태 확인 불가")]).compactMap { part in
+        return (Self.summaryParts + paused + [("unknown", String(localized: "상태 확인 불가"))]).compactMap { part in
             let count = counts[part.status] ?? 0
             return count > 0 ? (part.status, part.label, count) : nil
         }
@@ -909,12 +908,12 @@ struct HomeView: View {
             if isHq {
                 // HQ has one AI: its row is the card.
                 let lead = store.members.first { $0.kind == "root" } ?? first
-                HomeCard(title: "본사 AI") { memberRow(lead, showsState: true) }
+                HomeCard(title: String(localized: "본사 AI")) { memberRow(lead, showsState: true) }
             } else {
                 let active = activeMembers
                 let shown = Array(active.prefix(Self.topMembers))
                 let summary = teamSummary
-                HomeCard(title: "팀", more: "사무실 보기", onMore: { router.go(.team) }) {
+                HomeCard(title: String(localized: "팀"), more: String(localized: "사무실 보기"), onMore: { router.go(.team) }) {
                     if summary.isEmpty {
                         Text("지금 일하는 팀원이 없습니다").font(CEFont.secondary).foregroundStyle(CE.ink2)
                             .padding(.top, 2).padding(.bottom, 6)
@@ -927,7 +926,7 @@ struct HomeView: View {
                         activeRow(member)
                     }
                     if active.count > shown.count {
-                        HomeQuietLink(text: "외 \(active.count - shown.count)명") { router.go(.team) }
+                        HomeQuietLink(text: String(localized: "외 \(active.count - shown.count)명")) { router.go(.team) }
                             .padding(.leading, 18)
                             .accessibilityLabel("일하는 팀원 \(active.count - shown.count)명 더 보기")
                     }
@@ -983,17 +982,17 @@ struct HomeView: View {
                 }
             }
         }
-        .help([info.explanation, now.isEmpty ? "" : "마지막 보고 · \(now)"].filter { !$0.isEmpty }.joined(separator: "\n"))
+        .help([info.explanation, now.isEmpty ? "" : String(localized: "마지막 보고 · \(now)")].filter { !$0.isEmpty }.joined(separator: "\n"))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([member.name, info.label, now.isEmpty ? "" : "마지막 보고 \(now)", time].filter { !$0.isEmpty }.joined(separator: ", "))
+        .accessibilityLabel([member.name, info.label, now.isEmpty ? "" : String(localized: "마지막 보고 \(now)"), time].filter { !$0.isEmpty }.joined(separator: ", "))
         .accessibilityHint("팀원 보기")
     }
 
     /// HQ's single AI with its state label.
     private func memberRow(_ member: Member, showsState: Bool = false) -> some View {
         let info = MemberStatusInfo(member)
-        let error = member.lastError.flatMap { $0.isEmpty ? nil : friendlyError($0) }
-        let sub = member.status == "error" ? (error ?? info.label) : member.now.isEmpty ? "" : "마지막 보고 · \(member.now)"
+        let error = member.lastError.flatMap { $0.isEmpty ? nil : friendlyError($0, code: member.fenceCode) }
+        let sub = member.status == "error" ? (error ?? info.label) : member.now.isEmpty ? "" : String(localized: "마지막 보고 · \(member.now)")
         return HomeRowButton(action: { router.openMember(member.id) }) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 StatusDot(tone: info.tone, pulsing: info.live, size: 8)
@@ -1029,7 +1028,7 @@ struct HomeView: View {
                 let items = rows.filter { $0.sec == section.rawValue }
                 return items.isEmpty ? nil : (section: section, items: items, rest: total - items.count)
             }
-            HomeCard(title: "진척", more: isHq ? nil : "일 목록", onMore: isHq ? nil : { router.go(.team) }) {
+            HomeCard(title: String(localized: "진척"), more: isHq ? nil : String(localized: "일 목록"), onMore: isHq ? nil : { router.go(.team) }) {
                 VStack(alignment: .leading, spacing: 9) {
                     HomeProgressBar(segments: [
                         (done.count, Self.workColor(.done)), (doing.count, Self.workColor(.doing)),
@@ -1054,7 +1053,7 @@ struct HomeView: View {
                                     Text("외 \(group.rest)건").font(CEFont.secondary).monospacedDigit().foregroundStyle(CE.ink2)
                                         .padding(.top, 4).padding(.bottom, 2)
                                 } else {
-                                    HomeQuietLink(text: "외 \(group.rest)건") { router.go(.team) }
+                                    HomeQuietLink(text: String(localized: "외 \(group.rest)건")) { router.go(.team) }
                                         .accessibilityLabel("\(group.section.title) \(group.rest)건 더 보기")
                                 }
                             }
@@ -1117,9 +1116,9 @@ struct HomeView: View {
     }
 
     private func progressLabel(done: Int, total: Int, parts: [(WorkSection, Int)], today: Int) -> String {
-        var text = "진척: 전체 \(total)건 중 완료 \(done)건"
-        for (section, count) in parts { text += ", \(section.title) \(count)건" }
-        if today > 0 { text += ", 오늘 끝냄 \(today)건" }
+        var text = String(localized: "진척: 전체 \(total)건 중 완료 \(done)건")
+        for (section, count) in parts { text += String(localized: ", \(section.title) \(count)건") }
+        if today > 0 { text += String(localized: ", 오늘 끝냄 \(today)건") }
         return text
     }
 
@@ -1172,9 +1171,9 @@ struct HomeView: View {
     @ViewBuilder private var recentCard: some View {
         let items = recentItems
         if !items.isEmpty {
-            HomeCard(title: "최근", links: [
-                HomeLink(title: "대화") { router.openChat(nil) },
-                HomeLink(title: "자료") { router.go(.files) },
+            HomeCard(title: String(localized: "최근"), links: [
+                HomeLink(title: String(localized: "대화")) { router.openChat(nil) },
+                HomeLink(title: String(localized: "tab.files", defaultValue: "자료")) { router.go(.files) },
             ]) {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                     if index > 0 { HomeDivider() }
@@ -1194,8 +1193,8 @@ struct HomeView: View {
             let mark = reportMark(message.kind)
             icon = mark.icon; tint = mark.tint
             title = message.title.isEmpty ? homePlainLine(message.body) : message.title
-            who = message.who; at = message.at; kind = "\(message.kind) 보고"
-            badge = message.kind.isEmpty ? nil : (message.kind, Self.reportTone(message.kind))
+            who = message.who; at = message.at; kind = String(localized: "\(messageKindLabel(message.kind)) 보고")
+            badge = message.kind.isEmpty ? nil : (messageKindLabel(message.kind), Self.reportTone(message.kind))
             action = { router.openChat(chatTarget(for: message.memberId)) }
         case .file(let file):
             icon = fileKindIcon(file.kind); tint = CE.ink3
@@ -1875,14 +1874,14 @@ final class TodoCompletionReview: Identifiable {
     func submit(store: AppStore) async -> Bool {
         guard !sending, !uploading, isCurrent(in: store), store.uiCanWrite else { return false }
         guard let current = store.todos.first(where: { $0.id == todo.id }), !current.done, current.outcome != "dropped" else {
-            error = "이미 완료되었거나 정리된 할 일입니다. 답과 첨부는 남겨 두었습니다."
+            error = String(localized: "이미 완료되었거나 정리된 할 일입니다. 답과 첨부는 남겨 두었습니다.")
             return false
         }
         sending = true; error = nil
         defer { sending = false }
         let accepted = await store.setTodoDone(todo, done: true, note: note.isEmpty ? nil : note, fileIDs: files.map(\.id))
         guard isCurrent(in: store) else { return false }
-        if !accepted { error = store.errorMessage.map(friendlyError) ?? "완료 답을 보내지 못했습니다. 답과 첨부는 남겨 두었습니다." }
+        if !accepted { error = store.errorMessage.map(friendlyError) ?? String(localized: "완료 답을 보내지 못했습니다. 답과 첨부는 남겨 두었습니다.") }
         return accepted
     }
 
@@ -1927,7 +1926,7 @@ private struct TodoCompletionEditor: View {
             Text("비밀번호·인증 코드 같은 비밀은 쓰거나 첨부하지 마세요.").font(CEFont.meta).foregroundStyle(CE.ink2)
             ForEach(review.files) { file in
                 HStack {
-                    Text(file.name.isEmpty ? "첨부" : file.name).font(CEFont.note)
+                    Text(file.name.isEmpty ? String(localized: "첨부") : file.name).font(CEFont.note)
                     Button("빼기") { review.files.removeAll { $0.id == file.id } }
                         .ceGhostButton().disabled(review.sending)
                 }

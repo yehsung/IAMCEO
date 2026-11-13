@@ -77,7 +77,7 @@ enum ComposerPasteIntake {
     static func receive(_ providers: [NSItemProvider], context: ComposerUploadContext, store: AppStore) {
         let date = Date()
         store.composerUploads.loadMedia(names: providers.enumerated().map {
-            $0.element.suggestedName ?? "붙여넣은 첨부 \($0.offset + 1)"
+            $0.element.suggestedName ?? String(localized: "붙여넣은 첨부 \($0.offset + 1)")
         }, context: context, store: store) { index in
             let provider = providers[index]
             let original = try await copy(provider)
@@ -124,7 +124,7 @@ enum ComposerPasteIntake {
             }
         } catch {
             // Pixel-only paste providers can offer data without a file representation.
-            let name = provider.suggestedName.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "붙여넣은 파일"
+            let name = provider.suggestedName.map { URL(fileURLWithPath: $0).lastPathComponent } ?? String(localized: "붙여넣은 파일")
             let filename = URL(fileURLWithPath: name).pathExtension.isEmpty
                 ? name + "." + (UTType(identifier)?.preferredFilenameExtension ?? "bin") : name
             return try await withCheckedThrowingContinuation { continuation in

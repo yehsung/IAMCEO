@@ -16,7 +16,7 @@ enum TerminalPlatform: Sendable {
     var controlSizePolicy: TerminalSizePolicy { .fit }
     var openingMode: TerminalStreamMode { .observe }
     var buffersStartingInput: Bool { true }
-    var observeHint: String { "읽기 전용 · 클릭하거나 입력하면 입력을 시작합니다" }
+    var observeHint: String { String(localized: "읽기 전용 · 클릭하거나 입력하면 입력을 시작합니다") }
     func usesCoreGrid(mode: TerminalStreamMode) -> Bool { mode == .observe || controlSizePolicy == .core }
     func acceptsKeyboard(mode: TerminalStreamMode) -> Bool { mode == .control }
 }
@@ -203,7 +203,7 @@ final class TerminalStreamClient {
                         return
                     }
                     if case .closed = self.state {} else {
-                        self.state = .closed(reason: "disconnected", message: refusal?.message ?? (status == 401 ? "접속 코드를 확인해 주세요" : status == 409 ? "세션을 처리 중이거나 조작권이 없습니다" : "터미널 연결이 끊겼습니다"))
+                        self.state = .closed(reason: "disconnected", message: refusal?.message ?? (status == 401 ? String(localized: "접속 코드를 확인해 주세요") : status == 409 ? String(localized: "세션을 처리 중이거나 조작권이 없습니다") : String(localized: "터미널 연결이 끊겼습니다")))
                     }
                     if mode == .control {
                         // A transport failure gets one attach with the original lease.
@@ -224,7 +224,7 @@ final class TerminalStreamClient {
                     if let next = retry.failed(status: status, code: refusal?.code, stable: stable) { delay = next }
                     else {
                         // 거절이 이어져도 보기 연결을 죽이지 않는다. 안내를 보인 채 느리게 다시 붙어 본다.
-                        self.state = .closed(reason: "refused", message: refusal?.message ?? "터미널 연결이 계속 거절되었습니다")
+                        self.state = .closed(reason: "refused", message: refusal?.message ?? String(localized: "터미널 연결이 계속 거절되었습니다"))
                     }
                     do {
                         if let pause = self.retryPause { try await pause(delay) }
@@ -344,24 +344,27 @@ struct TerminalReconnectPolicy {
 }
 
 struct TerminalPresentation {
-    static let inactiveStatus = "자리를 비운 사이 입력을 끝냈습니다 · 클릭하면 다시 시작합니다"
-    static let disconnectedStatus = "연결이 끊겨 입력을 끝냈습니다 · 클릭하면 다시 시작합니다"
+    static let inactiveStatus = String(localized: "자리를 비운 사이 입력을 끝냈습니다 · 클릭하면 다시 시작합니다")
+    static let disconnectedStatus = String(localized: "연결이 끊겨 입력을 끝냈습니다 · 클릭하면 다시 시작합니다")
     /// Display only: APIError.message, stream state and receipts retain the server's original text.
-    static func message(_ raw: String) -> String {
+    /// `reason`: 실행 엔진의 거절 사유 코드(core_*). 있으면 코드로 문장을 고르고(4차 R), 없는 옛 서버는 아래 영어 문장 표로 바꾼다.
+    static func message(_ raw: String) -> String { message(raw, reason: nil) }
+    static func message(_ raw: String, reason: String?) -> String {
+        if let reason, ServerErrorText.alwaysFromCode.contains(reason), let text = ServerErrorText.text(reason) { return text }
         let translations = [
-            ("No core terminal for member", "이 팀원은 잠들어 있어 터미널이 없습니다"),
-            ("Terminal has finished", "터미널이 종료되었습니다"),
-            ("A matching active terminal control lease is required", "직접 조작 시간이 끝났습니다. 다시 시작하세요"),
-            ("Another terminal control lease is active", "다른 기기에서 터미널을 조작하고 있습니다")
+            ("No core terminal for member", String(localized: "이 팀원은 잠들어 있어 터미널이 없습니다")),
+            ("Terminal has finished", String(localized: "터미널이 종료되었습니다")),
+            ("A matching active terminal control lease is required", String(localized: "직접 조작 시간이 끝났습니다. 다시 시작하세요")),
+            ("Another terminal control lease is active", String(localized: "다른 기기에서 터미널을 조작하고 있습니다"))
         ]
         return translations.reduce(raw) { text, pair in text.replacingOccurrences(of: pair.0, with: pair.1) }
     }
 
     static func controlStatus(expiresAt: Double?, now: Date) -> String {
-        let status = "직접 입력 중 · 보낸 지시는 잠시 기다립니다"
+        let status = String(localized: "직접 입력 중 · 보낸 지시는 잠시 기다립니다")
         guard let expiresAt else { return status }
         let seconds = max(0, Int(ceil(expiresAt / 1000 - now.timeIntervalSince1970)))
-        return seconds < 60 ? "\(status) · \(seconds)초 남음" : status
+        return seconds < 60 ? String(localized: "\(status) · \(seconds)초 남음") : status
     }
     static func holdsLease(_ lease: TerminalLease?, now: Date = Date()) -> Bool {
         lease?.leaseId != nil && (lease?.expiresAt.map { $0 > now.timeIntervalSince1970 * 1000 } ?? true)

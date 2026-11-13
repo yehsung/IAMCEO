@@ -13,7 +13,9 @@ struct APIError: LocalizedError, Sendable {
         self.code = code
         self.reason = reason
     }
-    var errorDescription: String? { message }
+    /// 화면에 보일 문장. 한국어 화면은 서버 문장 그대로, 영어 화면은 코드의 영어 문장(대표 문장과 같을 때만, ServerErrorDisplay).
+    /// 판정은 이 값이 아니라 `message`·`code`·`reason` 으로 한다.
+    var errorDescription: String? { ServerErrorText.display(message, code: code, reason: reason) }
 }
 
 struct ServerEndpoint: Sendable {
@@ -24,12 +26,12 @@ struct ServerEndpoint: Sendable {
               let host = parts.host?.lowercased(), !host.isEmpty,
               parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
               parts.path.isEmpty || parts.path == "/", let url = parts.url else {
-            throw APIError(status: 0, message: "https://your-mac.tailnet.ts.net 같은 서버 주소를 넣어 주세요.")
+            throw APIError(status: 0, message: String(localized: "https://your-mac.tailnet.ts.net 같은 서버 주소를 넣어 주세요."))
         }
         let loopback = host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
         // Tailscale addresses are already end-to-end encrypted (WireGuard) and only reachable inside the tailnet.
         guard scheme == "https" || loopback || Tailnet.isTailnetHost(host) else {
-            throw APIError(status: 0, message: "원격 연결은 HTTPS 주소나 Tailscale 주소(100.x)여야 합니다. 같은 Mac이면 127.0.0.1을 쓰세요.")
+            throw APIError(status: 0, message: String(localized: "원격 연결은 HTTPS 주소나 Tailscale 주소(100.x)여야 합니다. 같은 Mac이면 127.0.0.1을 쓰세요."))
         }
         self.url = url
     }
@@ -73,6 +75,19 @@ actor APIClient {
     // 무효화하지 않은 URLSession은 delegate와 유휴 연결을 앱이 꺼질 때까지 붙잡는다.
     deinit { if ownsSession { session.finishTasksAndInvalidate() } }
 
+    /// 진행률을 보이는 첨부 받기가 따로 만드는 세션의 설정. 넘겨받은 세션(샘플 서버·시험)이면 그 설정을 이어받아
+    /// 같은 곳으로만 간다(4차 리뷰 data-2: 샘플의 PDF·영상 받기가 실제 망으로 나가던 결함). 직접 만든 연결은 예전 설정 그대로.
+    func transferConfiguration(resourceTimeout: TimeInterval) -> URLSessionConfiguration {
+        // URLSession.configuration 은 사본을 돌려준다. 고쳐도 원래 세션은 그대로다.
+        let configuration = ownsSession ? URLSessionConfiguration.ephemeral : session.configuration
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        configuration.urlCache = nil
+        configuration.timeoutIntervalForResource = resourceTimeout
+        return configuration
+    }
+
     func acknowledgePairing(code: String, confirmationToken: String) async throws -> PairingCompletion {
         struct Acknowledgement: Encodable, Sendable { let code: String; let confirmationToken: String }
         return try await send("/api/pair/ack", body: Acknowledgement(code: code, confirmationToken: confirmationToken))
@@ -83,7 +98,7 @@ actor APIClient {
     func fileBody(id: String, forceRefresh: Bool = false) async throws -> FileDoc {
         if !forceRefresh, let cached = fileBodyCache[id] { return cached }
         let file: FileDoc = try await request("/api/files/\(Self.segment(id))")
-        guard file.id == id else { throw APIError(status: 0, message: "자료를 다시 확인해 주세요.") }
+        guard file.id == id else { throw APIError(status: 0, message: String(localized: "자료를 다시 확인해 주세요.")) }
         fileBodyCache[id] = file
         fileBodyOrder.removeAll { $0 == id }; fileBodyOrder.append(id)
         while fileBodyOrder.count > 32 { fileBodyCache.removeValue(forKey: fileBodyOrder.removeFirst()) }
@@ -170,7 +185,7 @@ actor APIClient {
         catch {
             // 어느 응답의 어느 필드가 어긋났는지 남긴다(값·본문·쿼리는 남기지 않는다).
             ContractLog.unreadable("\(method) \(URLComponents(string: path)?.path ?? "?")", error)
-            throw APIError(status: 0, message: "서버 응답이 이 앱과 호환되지 않습니다. 앱과 서버 버전을 확인해 주세요.", code: Self.unreadableCode)
+            throw APIError(status: 0, message: String(localized: "서버 응답이 이 앱과 호환되지 않습니다. 앱과 서버 버전을 확인해 주세요."), code: Self.unreadableCode)
         }
     }
     /// 서버는 답했지만 이 앱이 응답을 해석하지 못했다는 표시. 서버가 주는 code와 겹치지 않는다.
@@ -181,7 +196,7 @@ actor APIClient {
     func raw(_ path: String, method: String = "GET", body: Data? = nil, contentType: String? = nil, timeout: TimeInterval? = nil, ifMatch: Int? = nil, contractVersion: Int? = nil) async throws -> (Data, HTTPURLResponse) {
         try Task.checkCancellation()
         if let ifMatch, !(0...9_007_199_254_740_991).contains(ifMatch) {
-            throw APIError(status: 0, message: "올바른 revision이 필요합니다.")
+            throw APIError(status: 0, message: String(localized: "올바른 revision이 필요합니다."))
         }
         var readPath = path
         if liteStateEnabled, method == "GET", var parts = URLComponents(string: path),
@@ -207,7 +222,7 @@ actor APIClient {
         req.httpBody = body
         let (data, response) = try await session.data(for: req)
         try Task.checkCancellation()
-        guard let http = response as? HTTPURLResponse else { throw APIError(status: 0, message: "서버 응답이 올바르지 않습니다.") }
+        guard let http = response as? HTTPURLResponse else { throw APIError(status: 0, message: String(localized: "서버 응답이 올바르지 않습니다.")) }
         guard (200..<300).contains(http.statusCode) else {
             let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             let message = object?["error"] as? String ?? object?["message"] as? String ?? "Request failed (\(http.statusCode))."
@@ -219,7 +234,7 @@ actor APIClient {
         guard let url = URL(string: path, relativeTo: endpoint.url)?.absoluteURL,
               url.scheme == endpoint.url.scheme, url.host == endpoint.url.host, url.port == endpoint.url.port,
               url.user == nil, url.password == nil, url.fragment == nil else {
-            throw APIError(status: 0, message: "연결된 서버 밖의 파일 주소는 열지 않습니다.")
+            throw APIError(status: 0, message: String(localized: "연결된 서버 밖의 파일 주소는 열지 않습니다."))
         }
         // C8: 모든 요청(REST·실시간·터미널 스트림·첨부 올리기와 받기·내보내기)이 여기서 주소를 얻는다.
         // Tailscale 주소로 가는 평문 요청은 이 기기의 Tailscale 이 꺼져 있으면 보내지 않는다.
@@ -229,7 +244,7 @@ actor APIClient {
     /// Credentials are sent only in the header, including when using the legacy protocol.
     func webSocketRequest(version: Int = 2) throws -> URLRequest {
         guard version == 1 || version == 2 else {
-            throw APIError(status: 0, message: "지원하지 않는 실시간 프로토콜입니다.")
+            throw APIError(status: 0, message: String(localized: "지원하지 않는 실시간 프로토콜입니다."))
         }
         var query = version == 2 ? [URLQueryItem(name: "v", value: "2")] : []
         if liteStateEnabled { query.append(URLQueryItem(name: "lite", value: "1")) }
@@ -251,7 +266,7 @@ actor APIClient {
         var components = URLComponents(url: try authorizedURL(path), resolvingAgainstBaseURL: false)!
         components.scheme = endpoint.url.scheme == "https" ? "wss" : "ws"
         components.queryItems = query.isEmpty ? nil : query
-        guard let url = components.url else { throw APIError(status: 0, message: "실시간 연결 주소가 올바르지 않습니다.") }
+        guard let url = components.url else { throw APIError(status: 0, message: String(localized: "실시간 연결 주소가 올바르지 않습니다.")) }
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
         request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -278,7 +293,7 @@ actor APIClient {
         return result.text
     }
     func upload(data: Data, filename: String, mime: String, projectID: String, targetMemberID: String? = nil) async throws -> Attachment {
-        guard data.count <= 50 * 1024 * 1024 else { throw APIError(status: 0, message: "첨부파일은 50MB까지 올릴 수 있습니다.") }
+        guard data.count <= 50 * 1024 * 1024 else { throw APIError(status: 0, message: String(localized: "첨부파일은 50MB까지 올릴 수 있습니다.")) }
         let boundary = "IAMCEO-\(UUID().uuidString)"
         let safeName = filename.replacingOccurrences(of: "\"", with: "_").replacingOccurrences(of: "\r", with: "_").replacingOccurrences(of: "\n", with: "_")
         let safeMime = mime.contains("\n") || mime.contains("\r") ? "application/octet-stream" : mime
@@ -301,7 +316,7 @@ extension APIClient: MessageHistoryService, ProjectManagementService, SyncServic
         switch scope {
         case .project: query.append("scope=project")
         case .member(let memberID): query.append("scope=member&memberId=\(Self.segment(memberID))")
-        case .unknown: throw APIError(status: 0, message: "지원하지 않는 대화 범위입니다.")
+        case .unknown: throw APIError(status: 0, message: String(localized: "지원하지 않는 대화 범위입니다."))
         }
         if let cursor { query.append("cursor=\(Self.segment(cursor))") }
         return "/api/projects/\(Self.segment(projectID))/\(archived ? "archive/" : "")messages/page?\(query.joined(separator: "&"))"
@@ -335,7 +350,7 @@ extension APIClient: MessageHistoryService, ProjectManagementService, SyncServic
         try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse else {
             try? FileManager.default.removeItem(at: file)
-            throw APIError(status: 0, message: "서버 응답이 올바르지 않습니다.")
+            throw APIError(status: 0, message: String(localized: "서버 응답이 올바르지 않습니다."))
         }
         guard (200..<300).contains(http.statusCode) else {
             let object = (try? JSONSerialization.jsonObject(with: Data(contentsOf: file))) as? [String: Any]
@@ -405,7 +420,7 @@ extension APIClient: MessageHistoryService, ProjectManagementService, SyncServic
     func revokePushDevice(id: String, revision: Int) async throws {
         struct Result: Decodable, Sendable { let ok: Bool }
         let result: Result = try await request("/api/push/devices/\(Self.segment(id))", method: "DELETE", ifMatch: revision)
-        guard result.ok else { throw APIError(status: 0, message: "기기 해지 결과를 확인하지 못했습니다.") }
+        guard result.ok else { throw APIError(status: 0, message: String(localized: "기기 해지 결과를 확인하지 못했습니다.")) }
     }
     func testPushDevice(id: String, request: PushTestRequest) async throws -> PushTestResult {
         try await send("/api/push/devices/\(Self.segment(id))/test", body: request)
@@ -522,7 +537,7 @@ enum ServerFolderPaths {
     static func appending(_ name: String, to parent: String) -> String { parent.hasSuffix("/") ? parent + name : parent + "/" + name }
     static func breadcrumbs(path: String, home: String) -> [FolderCrumb] {
         guard path == home || path.hasPrefix(home + "/") else { return [] }
-        var result = [FolderCrumb(name: "홈", path: home)]
+        var result = [FolderCrumb(name: String(localized: "홈"), path: home)]
         var current = home
         for name in path.dropFirst(home.count).split(separator: "/").map(String.init) {
             current = appending(name, to: current)
@@ -534,7 +549,7 @@ enum ServerFolderPaths {
         let name = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.unicodeScalars.count <= 100, !name.hasPrefix("."),
               !name.contains("/"), !name.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else {
-            return "점으로 시작하지 않는 1~100자 이름을 입력하세요. /와 제어문자는 쓸 수 없습니다."
+            return String(localized: "점으로 시작하지 않는 1~100자 이름을 입력하세요. /와 제어문자는 쓸 수 없습니다.")
         }
         return nil
     }

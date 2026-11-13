@@ -875,3 +875,70 @@ export interface DeviceRevokeResult { ok: true; device: ConnectedDevice }
 export interface DeviceRevokeAllResult { ok: true; revoked: number }
 /** POST /api/auth/rotate. revokedDevices 는 { allDevices: true } 로 부를 때만 싣는다(함께 끊은 기기 열쇠 수). */
 export interface AuthRotateResult { accessCode: string; version: string; revokedDevices?: number }
+
+// ---- 4차 T(F6): 사용량 보기 — GET /api/usage(새 경로). 기존 응답에는 아무것도 더하지 않는다 ----
+/** 한 번에 볼 수 있는 가장 긴 기간. 사용량은 안쪽 기록과 같은 90일 동안 둔다. */
+export const USAGE_MAX_DAYS = 90;
+/**
+ * CLI 가 보고한 값의 합. 추정하지 않는다: Claude Code 는 비용과 토큰을, Codex 는 토큰만 보고한다.
+ * 그 범위에서 그 값을 보고한 기록이 하나도 없으면 null 이다(0 과 다르다).
+ */
+export interface UsageAmounts {
+  /** Claude Code 가 보고한 세션 누적 비용(미국 달러)의 늘어난 몫. 구독 요금제라면 실제 청구액과 다를 수 있다. */
+  costUsd: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+}
+export interface UsageMemberRow extends UsageAmounts {
+  memberId: string;
+  projectId: string;
+  /** 지금 이름. 팀장을 닫았으면 마지막으로 기록할 때의 이름. */
+  name: string;
+  kind: MemberKind;
+  /** 그 기간에 쓴 CLI(도중에 CLI 를 바꾸면 둘). */
+  providers: CliProvider[];
+  /** 팀장을 닫아 명부에 없다. */
+  removed: boolean;
+  /** 마지막으로 수치가 늘어난 때. */
+  lastAt: string;
+}
+export interface UsageProjectRow extends UsageAmounts {
+  projectId: string;
+  name: string;
+  archived: boolean;
+  /** 그 기간에 수치가 있는 팀장 수(닫은 팀장 포함). */
+  members: number;
+}
+export interface UsageDayRow extends UsageAmounts {
+  /** 서버가 도는 Mac 의 날짜(YYYY-MM-DD, timeZone 기준). 수치가 있는 날만 싣는다. */
+  day: string;
+}
+/** 계정 한도의 마지막 사용률. 계정 전체의 값이라 팀장별로 나누지 않는다. 초기화 시각이 지났거나 7일 넘게 못 본 값은 싣지 않는다. */
+export interface UsageLimitWindow {
+  provider: CliProvider;
+  /** Claude: five_hour·seven_day(·seven_day_opus 등), Codex: primary·secondary. */
+  window: string;
+  /** 한도 창의 길이(분). 모르면 null. */
+  windowMinutes: number | null;
+  usedPct: number;
+  resetsAt: string | null;
+  observedAt: string;
+}
+export interface UsageReport {
+  generatedAt: string;
+  /** 날짜를 나눈 시간대(서버가 도는 Mac). */
+  timeZone: string;
+  days: number;
+  /** 포함하는 첫날과 끝날(오늘). */
+  from: string;
+  to: string;
+  projectId: string | null;
+  retentionDays: number;
+  totals: UsageAmounts;
+  /** 비용 → 토큰 순으로 큰 것부터. */
+  members: UsageMemberRow[];
+  projects: UsageProjectRow[];
+  /** 오래된 날부터. */
+  daily: UsageDayRow[];
+  limits: UsageLimitWindow[];
+}

@@ -7,8 +7,8 @@ enum MacAttachmentReadError: LocalizedError {
     case dropped, pasted
     var errorDescription: String? {
         switch self {
-        case .dropped: "끌어다 놓은 이미지를 받지 못했습니다. 저장한 뒤 첨부하거나 복사해서 붙여 넣어 주세요"
-        case .pasted: "붙여 넣은 항목을 읽지 못했습니다. 파일로 저장한 뒤 첨부해 주세요"
+        case .dropped: String(localized: "끌어다 놓은 이미지를 받지 못했습니다. 저장한 뒤 첨부하거나 복사해서 붙여 넣어 주세요")
+        case .pasted: String(localized: "붙여 넣은 항목을 읽지 못했습니다. 파일로 저장한 뒤 첨부해 주세요")
         }
     }
 }
@@ -207,7 +207,7 @@ enum MacAttachmentItem {
 
     var name: String {
         if case .file(let url) = self { return url.lastPathComponent }
-        return "사진"
+        return String(localized: "사진")
     }
 
     func prepare(date: Date, index: Int) async throws -> [PhotoAttachmentFile] {
@@ -247,14 +247,15 @@ struct MacAttachmentPolicy {
     let reason: String?
     var canAccept: Bool { reason == nil }
 
-    init(archived: Bool, demo: Bool, connected: Bool, writable: Bool, missingTarget: Bool,
+    /// demo: 옛 읽기 전용 샘플의 거절. 샘플 모드는 이제 기기 안의 가짜 서버로 첨부를 받으므로 화면은 넘기지 않는다.
+    init(archived: Bool, demo: Bool = false, connected: Bool, writable: Bool, missingTarget: Bool,
          composerCovered: Bool = false) {
         // Keep the shell's connected/writable arguments source-compatible. Local intake is independent of freshness;
         // the installed composer validates the selected project and upload waits for write readiness.
-        reason = archived ? "보관한 프로젝트는 첨부할 수 없습니다"
-            : demo ? "샘플 프로젝트는 읽기 전용입니다"
-            : missingTarget ? "명부에 없는 대상에게는 첨부할 수 없습니다"
-            : composerCovered ? "구성원 상세를 닫은 뒤 첨부해 주세요"
+        reason = archived ? String(localized: "보관한 프로젝트는 첨부할 수 없습니다")
+            : demo ? String(localized: "샘플 프로젝트는 읽기 전용입니다")
+            : missingTarget ? String(localized: "명부에 없는 대상에게는 첨부할 수 없습니다")
+            : composerCovered ? String(localized: "구성원 상세를 닫은 뒤 첨부해 주세요")
             : nil
     }
 }
@@ -286,9 +287,9 @@ final class MacAttachmentIntake {
     }
     func accept(_ items: [MacAttachmentItem], policy: MacAttachmentPolicy) -> Bool {
         guard preflight(policy: policy) else { return false }
-        guard !items.isEmpty else { reportRejection("놓은 파일이나 이미지를 읽지 못했습니다"); return false }
+        guard !items.isEmpty else { reportRejection(String(localized: "놓은 파일이나 이미지를 읽지 못했습니다")); return false }
         guard receive?(items) == true else {
-            reportRejection("파일이나 이미지를 첨부하지 못했습니다. 입력칸의 상태를 확인해 주세요")
+            reportRejection(String(localized: "파일이나 이미지를 첨부하지 못했습니다. 입력칸의 상태를 확인해 주세요"))
             return false
         }
         rejection = nil
@@ -297,7 +298,7 @@ final class MacAttachmentIntake {
     func preflight(policy: MacAttachmentPolicy) -> Bool {
         if let reason = policy.reason { reportRejection(reason); return false }
         guard receive != nil else {
-            reportRejection("입력칸을 준비 중이라 첨부하지 못했습니다. 다시 놓아 주세요")
+            reportRejection(String(localized: "입력칸을 준비 중이라 첨부하지 못했습니다. 다시 놓아 주세요"))
             return false
         }
         return canReceive?() ?? true

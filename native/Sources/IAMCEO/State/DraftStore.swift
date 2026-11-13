@@ -284,7 +284,7 @@ final class DraftStore {
     }
 
     private func updateSubmission<Value>(_ change: () -> Value) throws -> Value {
-        guard canPersist else { throw APIError(status: 0, message: persistenceError ?? "초안을 저장하지 못했습니다") }
+        guard canPersist else { throw APIError(status: 0, message: persistenceError ?? String(localized: "초안을 저장하지 못했습니다")) }
         let previous = hosts
         let result = change()
         do { try storage.write(hosts); persistenceError = nil; return result }

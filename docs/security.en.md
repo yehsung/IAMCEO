@@ -111,7 +111,7 @@ If you cannot tell which row it is (for example, every row is called "iPhone"), 
    /Applications/IAMCEO.app/Contents/Resources/runtime/iamceo open
    ```
 
-나가기 (Leave) in the iPhone's settings only deletes the code stored on that iPhone. The server's code and keys stay the same, so it is not a way to cut off a lost device.
+나가기 (Sign out) in the iPhone's settings only deletes the code stored on that iPhone. The server's code and keys stay the same, so it is not a way to cut off a lost device.
 
 ## On a shared tailnet
 

@@ -38,10 +38,10 @@ final class SystemPushAuthorizationProvider: PushAuthorizationProvider {
         return await withCheckedContinuation { continuation in
             // 버튼 없이 닫히면 어느 핸들러도 불리지 않는다. 그때는 choice 가 풀리며 nil 로 끝낸다.
             let choice = PendingSetupChoice(continuation)
-            let alert = UIAlertController(title: "iPhone 알림을 켤까요?", message: nil, preferredStyle: .alert)
-            alert.message = "새 결재와 승인 대기, 완료·막힘 보고, 대표 할 일을 알려 드립니다. 설정에서 언제든 바꿀 수 있습니다."
-            alert.addAction(UIAlertAction(title: "지금 켜기", style: .default) { _ in choice.resolve(true) })
-            alert.addAction(UIAlertAction(title: "나중에", style: .cancel) { _ in choice.resolve(false) })
+            let alert = UIAlertController(title: String(localized: "iPhone 알림을 켤까요?"), message: nil, preferredStyle: .alert)
+            alert.message = String(localized: "새 결재와 승인 대기, 완료·막힘 보고, 대표 할 일을 알려 드립니다. 설정에서 언제든 바꿀 수 있습니다.")
+            alert.addAction(UIAlertAction(title: String(localized: "지금 켜기"), style: .default) { _ in choice.resolve(true) })
+            alert.addAction(UIAlertAction(title: String(localized: "나중에"), style: .cancel) { _ in choice.resolve(false) })
             presenter.present(alert, animated: true)
         }
     }

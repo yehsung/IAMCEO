@@ -289,7 +289,7 @@ struct ChatHistory: Sendable {
     /// An interrupted initial read must expose the existing retry control, never an idle spinner.
     mutating func finishInitialLoadIfIdle() {
         guard !initialized, loading == nil, error == nil else { return }
-        error = "대화 불러오기가 중단되었습니다. 다시 불러오기를 눌러 주세요."
+        error = String(localized: "대화 불러오기가 중단되었습니다. 다시 불러오기를 눌러 주세요.")
     }
     mutating func jumpToLatest() { anchor = nil; pinnedToBottom = true; unreadCount = 0 }
 
@@ -304,7 +304,7 @@ struct ChatHistory: Sendable {
     }
 
     private mutating func markStoreChanged() {
-        storeChanged = true; error = "서버의 대화 기록이 변경되었습니다"
+        storeChanged = true; error = String(localized: "서버의 대화 기록이 변경되었습니다")
     }
     private mutating func countNew(oldIDs: Set<Data>, oldTail: Message?) {
         let count = confirmed.filter { id, row in !oldIDs.contains(id) && (oldTail.map { Self.ordered($0, row) } ?? true) }.count
@@ -365,7 +365,7 @@ final class ChatMessageFocus {
             }
             guard let message = rows.first(where: { $0.id.utf8.elementsEqual(id.utf8) }) else {
                 context = nil; loading = false
-                error = "이 글은 다른 대화에 있습니다"
+                error = String(localized: "이 글은 다른 대화에 있습니다")
                 return nil
             }
             if !range.contains(message) {

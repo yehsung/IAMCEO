@@ -161,7 +161,7 @@ actor RealtimeClient {
             }
         } catch {
             // Never expose URLSession errors containing authenticated requests or URLs.
-            let safe = (error as? RealtimeClientError) ?? APIError(status: (error as? APIError)?.status ?? 0, message: "실시간 연결이 끊겼습니다.") as any Error
+            let safe = (error as? RealtimeClientError) ?? APIError(status: (error as? APIError)?.status ?? 0, message: String(localized: "실시간 연결이 끊겼습니다.")) as any Error
             await stop(id: id, error: safe)
         }
     }

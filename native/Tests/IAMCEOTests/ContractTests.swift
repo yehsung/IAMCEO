@@ -69,15 +69,18 @@ final class ContractTests: XCTestCase {
         do { _ = try await api.authorizedURL("https://foreign.example/file"); XCTFail("Foreign origin accepted") } catch {}
         do { _ = try await api.authorizedURL("https://mac.tailnet.ts.net:444/file"); XCTFail("Foreign port accepted") } catch {}
     }
-    @MainActor func testDemoIsExplicitAndReadOnly() async {
+    /// F8: 샘플은 읽기 전용 화면이 아니라 기기 안의 가짜 서버에 붙은 작업 공간이다. 보내기가 되고, 그 글은 샘플 서버에만 간다.
+    @MainActor func testDemoIsExplicitAndSendsOnlyToTheSampleServer() async throws {
         let store = AppStore(demo: true, persistCredentials: false)
+        defer { store.prepareForReplacement() }
         XCTAssertTrue(store.isDemo)
-        XCTAssertEqual(store.connectionStatus, .demo)
-        XCTAssertFalse(store.canWrite)
-        XCTAssertNil(store.api)
+        try await waitWhile({ !(store.connectionStatus == .connected && store.canWrite) }, timeout: .seconds(15))
+        let host = await store.api?.endpoint.url.host
+        XCTAssertEqual(host, SampleServer.host)
         let sent = await store.sendMessage(text: "Test")
-        XCTAssertFalse(sent)
-        XCTAssertTrue(store.errorMessage?.contains("읽기 전용") == true)
+        XCTAssertTrue(sent)
+        XCTAssertNil(store.errorMessage)
+        XCTAssertTrue(store.sampleServer?.requests.contains { $0.httpMethod == "POST" && $0.url?.path == "/api/projects/sample-pay/messages" } == true)
     }
 
     @MainActor func testSampleSessionReplacesNavigationAndDraftsWithoutChangingOriginalCredentials() throws {
@@ -133,30 +136,34 @@ final class ContractTests: XCTestCase {
         let network = try IsolatedTestNetwork()
         // Deliberately omit persistCredentials: demo must override its default true value.
         let demo = AppStore(demo: true)
+        defer { demo.prepareForReplacement() }
         let fields = Dictionary(uniqueKeysWithValues: Mirror(reflecting: demo).children.compactMap { child in
             child.label.map { ($0, child.value) }
         })
         XCTAssertEqual(fields["persistCredentials"] as? Bool, false)
-        for field in ["realtime", "pathMonitor", "pushNotifications", "navigationDefaults"] {
+        for field in ["pathMonitor", "pushNotifications", "navigationDefaults"] {
             let value = try XCTUnwrap(fields[field], field)
             XCTAssertTrue(Mirror(reflecting: value).children.isEmpty, field)
         }
+        // F8: 실시간 연결은 있지만 샘플 서버의 것이다(소켓을 열지 않는다).
+        XCTAssertNotNil(demo.sampleServer)
+        try await waitWhile({ demo.state == nil }, timeout: .seconds(15))
         XCTAssertFalse(demo.members.isEmpty)
         XCTAssertFalse(demo.decisions.isEmpty)
         XCTAssertFalse(demo.messages.isEmpty)
         XCTAssertFalse(demo.files.isEmpty)
         XCTAssertFalse(demo.projects.isEmpty)
-        await demo.connect()
         await demo.refresh()
         demo.setForeground(false)
         demo.setForeground(true)
-        XCTAssertNil(demo.api)
-        XCTAssertEqual(demo.connectionStatus, .demo)
-        XCTAssertFalse(demo.canWrite)
+        let demoHost = await demo.api?.endpoint.url.host
+        XCTAssertEqual(demoHost, SampleServer.host)
         let injectedDemo = AppStore(demo: true, session: network.session, persistCredentials: false)
-        await injectedDemo.connect()
+        defer { injectedDemo.prepareForReplacement() }
+        try await waitWhile({ injectedDemo.state == nil }, timeout: .seconds(15))
         await injectedDemo.refresh()
-        XCTAssertNil(injectedDemo.api)
+        let injectedHost = await injectedDemo.api?.endpoint.url.host
+        XCTAssertEqual(injectedHost, SampleServer.host)
         XCTAssertTrue(network.requests.isEmpty)
         await network.close()
     }

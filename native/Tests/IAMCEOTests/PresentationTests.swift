@@ -107,19 +107,21 @@ final class PresentationTests: XCTestCase {
         XCTAssertTrue(HomeAttention(members: [member], notices: nil, messages: [failed]).failedMessages.isEmpty)
     }
 
-    @MainActor func testDemoDeliveryStaysReadOnly() async {
+    /// F8: 샘플에는 전달 실패 글이 없다. 실패한 글을 다시 보내도 샘플 서버는 같은 id 의 글(이미 전달됨)을 돌려줄 뿐 새 글을 만들지 않는다.
+    @MainActor func testDemoResendStaysInsideTheSample() async throws {
         let store = AppStore(demo: true, persistCredentials: false)
-        XCTAssertFalse(store.canWrite)
-        XCTAssertFalse(store.uiCanWrite)
-        // 샘플에는 전달 실패 글이 없다. 실패한 글이 있었다 해도 다시 보내기는 샘플에서 아무것도 보내거나 바꾸지 않는다.
+        defer { store.prepareForReplacement() }
+        try await waitWhile({ !store.uiCanWrite }, timeout: .seconds(15))
         guard let message = store.messages.first(where: { $0.id == "x7" }) else {
             return XCTFail("샘플에 대표가 팀장에게 보낸 지시가 없습니다")
         }
         XCTAssertEqual(message.delivery, "delivered")
+        let count = store.messages.count
         var failed = message; failed.delivery = "failed"
         let sent = await store.resend(failed)
-        XCTAssertFalse(sent)
-        XCTAssertTrue(store.errorMessage?.contains("읽기 전용") == true)
+        XCTAssertTrue(sent)
+        XCTAssertNil(store.errorMessage)
+        XCTAssertEqual(store.messages.count, count)
         XCTAssertEqual(store.messages.first(where: { $0.id == message.id })?.delivery, "delivered")
     }
 

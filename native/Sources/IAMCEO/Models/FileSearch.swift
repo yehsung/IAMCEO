@@ -6,7 +6,7 @@ struct FileSearchResult: Codable, Sendable, Equatable, Identifiable {
     let excerpt: String
     let rank: Int
 
-    var bodyLabel: String? { match == "body" ? "본문에서 찾음" : nil }
+    var bodyLabel: String? { match == "body" ? String(localized: "본문에서 찾음") : nil }
 }
 
 /// The view uses these same results for visibility, body badges and excerpts.

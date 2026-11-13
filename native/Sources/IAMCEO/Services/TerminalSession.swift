@@ -62,7 +62,7 @@ final class TerminalSession {
             self.starting = false
             if self.platform.buffersStartingInput {
                 if let bytes = self.startBuffer.take(), !bytes.isEmpty { self.send(bytes) }
-                else if self.startBuffer.discarded { self.notice = "입력 준비가 길어져 친 키를 버렸습니다. 다시 입력해 주세요." }
+                else if self.startBuffer.discarded { self.notice = String(localized: "입력 준비가 길어져 친 키를 버렸습니다. 다시 입력해 주세요.") }
                 // The viewport may have changed while the attach was in flight.
                 self.client.resize(cols: self.naturalCols, rows: self.naturalRows)
             }
@@ -73,10 +73,10 @@ final class TerminalSession {
         }
         client.onControlEnded = { [weak self] in
             guard let self else { return }
-            var message = "직접 입력 연결이 끝났습니다."
+            var message = String(localized: "직접 입력 연결이 끝났습니다.")
             if case let .closed(reason, serverMessage) = self.client.state {
                 if reason == "lease_ended", let id = self.ownedLeaseID, store.terminalLeases[member.id]?.leaseId == id { store.terminalStreamLeaseEnded(memberID: member.id) }
-                message = serverMessage ?? (reason == "lease_ended" ? "조작권이 끝났습니다." : message)
+                message = serverMessage ?? (reason == "lease_ended" ? String(localized: "조작권이 끝났습니다.") : message)
             }
             if case .closed(reason: "disconnected", message: _) = self.client.state {
                 self.inputEndedStatus = TerminalPresentation.disconnectedStatus
@@ -116,7 +116,7 @@ final class TerminalSession {
 
     func pendingInput(_ bytes: Data) {
         guard platform.buffersStartingInput, starting, !readOnly else { return }
-        if !startBuffer.append(bytes) { notice = "입력 준비 중에는 4KB·3초까지만 보관합니다. 다시 입력해 주세요." }
+        if !startBuffer.append(bytes) { notice = String(localized: "입력 준비 중에는 4KB·3초까지만 보관합니다. 다시 입력해 주세요.") }
     }
 
     /// All human input uses the same claim/refusal path as the input button.
@@ -142,7 +142,7 @@ final class TerminalSession {
         guard visible, active, !starting, !ending, !controlling else { return }
         if !store.isDemo, !store.canWrite, store.isRevalidating, store.api != nil,
            store.connectionStatus == .connected || store.connectionLost {
-            starting = true; readOnly = false; notice = "서버 연결을 확인하고 있습니다."
+            starting = true; readOnly = false; notice = String(localized: "서버 연결을 확인하고 있습니다.")
             if platform.buffersStartingInput, startBuffer.startedAt == nil { startBuffer.begin() }
             let token = UUID(); requestID = token
             revalidationTask?.cancel()
@@ -157,13 +157,13 @@ final class TerminalSession {
             return
         }
         guard !store.isDemo, store.canWrite else {
-            fallback(store: store, member: member, message: store.isDemo ? "샘플은 읽기 전용입니다." : "서버에 연결되지 않아 조작할 수 없습니다.")
+            fallback(store: store, member: member, message: store.isDemo ? String(localized: "샘플의 터미널은 예시 화면이라 입력할 수 없습니다.") : String(localized: "서버에 연결되지 않아 조작할 수 없습니다."))
             return
         }
         // 메인 창이 다른 프로젝트를 보는 동안에는 이 직원의 조작권을 받을 수 없다. 보기 연결은 건드리지 않고 이유만 알린다.
         guard Self.canControl(member, in: store) else {
             starting = false
-            notice = "메인 창이 다른 프로젝트를 보고 있어 입력할 수 없습니다. 이 팀원의 프로젝트로 돌아온 뒤 다시 시도하세요."
+            notice = String(localized: "메인 창이 다른 프로젝트를 보고 있어 입력할 수 없습니다. 이 팀원의 프로젝트로 돌아온 뒤 다시 시도하세요.")
             return
         }
         starting = true; readOnly = false; notice = nil; inputEndedStatus = nil
@@ -198,7 +198,7 @@ final class TerminalSession {
                     return attempt.namespace == namespace && attempt.action == .claim
                 }
                 let refusal = refusals.first { previousResults[$0.operationId] == nil } ?? refusals.first
-                fallback(store: store, member: member, message: refusal?.error ?? store.terminalWindowNotice(memberID: member.id) ?? store.rawErrorMessage ?? "조작권을 받지 못했습니다. 다른 기기나 세션 상태를 확인해 주세요.",
+                fallback(store: store, member: member, message: refusal?.error ?? store.terminalWindowNotice(memberID: member.id) ?? store.rawErrorMessage ?? String(localized: "조작권을 받지 못했습니다. 다른 기기나 세션 상태를 확인해 주세요."),
                          reason: refusal?.error != nil ? refusal?.reason : nil)
                 return
             }
@@ -249,13 +249,13 @@ final class TerminalSession {
             terminalDisappeared(store: store, member: member)
             return
         }
-        starting = false; readOnly = true; pendingControl = nil; startBuffer.clear(); notice = TerminalPresentation.message(message)
+        starting = false; readOnly = true; pendingControl = nil; startBuffer.clear(); notice = TerminalPresentation.message(message, reason: reason)
         if release {
             // Disable retry and invalidate the old attach before yielding to the release.
             ending = true; requestID = UUID(); client.close()
             let owner = takeOwner()
             Task {
-                if !(await self.release(store: store, member: member, owner: owner)) { notice = store.errorMessage ?? "조작권을 놓지 못했습니다. 다시 닫아 주세요." }
+                if !(await self.release(store: store, member: member, owner: owner)) { notice = store.errorMessage ?? String(localized: "조작권을 놓지 못했습니다. 다시 닫아 주세요.") }
                 ending = false
                 observe(store: store, member: member)
             }
@@ -305,7 +305,7 @@ final class TerminalSession {
         let owner = takeOwner()
         client.close(); starting = false; startBuffer.clear()
         readOnly = true
-        if !(await release(store: store, member: member, owner: owner)) { notice = store.errorMessage ?? "조작권을 놓지 못했습니다. 다시 닫아 주세요." }
+        if !(await release(store: store, member: member, owner: owner)) { notice = store.errorMessage ?? String(localized: "조작권을 놓지 못했습니다. 다시 닫아 주세요.") }
         ending = false
         if resume { observe(store: store, member: member) }
         else if visible && active { open(store: store, member: member) }

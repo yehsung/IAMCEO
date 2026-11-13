@@ -17,7 +17,7 @@ enum KeychainStore {
         value[kSecValueData as String] = Data(code.utf8)
         value[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(value as CFDictionary, nil)
-        guard status == errSecSuccess else { throw APIError(status: 0, message: "접속 코드를 키체인에 저장하지 못했습니다 (\(status)).") }
+        guard status == errSecSuccess else { throw APIError(status: 0, message: String(localized: "접속 코드를 키체인에 저장하지 못했습니다 (\(status)).")) }
     }
     static func remove(for endpoint: String) { SecItemDelete(base(endpoint) as CFDictionary) }
     private static func base(_ endpoint: String) -> [String: Any] {

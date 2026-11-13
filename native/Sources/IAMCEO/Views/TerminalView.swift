@@ -92,7 +92,7 @@ struct TerminalView: View {
     }
 
     private var liveSheet: some View {
-        CESheet("\(current.name) 터미널", icon: "terminal", width: sheetWidth, scrolls: false, flexibleWidth: true, escapeCloses: false,
+        CESheet(String(localized: "\(current.name) 터미널"), icon: "terminal", width: sheetWidth, scrolls: false, flexibleWidth: true, escapeCloses: false,
                 onClose: { dismiss() }) {
             VStack(alignment: .leading, spacing: 10) {
                 TimelineView(.periodic(from: .now, by: 1)) { context in statusRow(now: context.date) }
@@ -154,14 +154,14 @@ struct TerminalView: View {
         .accessibilityLabel(statusText(now: now))
     }
     private func statusText(now: Date) -> String {
-        if missingTerminal { return waking ? "깨우는 중…" : "터미널 준비 필요" }
-        if session.ending { return "입력 끝내는 중…" }
-        if session.starting { return "입력 준비 중…" }
+        if missingTerminal { return waking ? String(localized: "깨우는 중…") : String(localized: "터미널 준비 필요") }
+        if session.ending { return String(localized: "입력 끝내는 중…") }
+        if session.starting { return String(localized: "입력 준비 중…") }
         if controlling { return TerminalPresentation.controlStatus(expiresAt: store.terminalLeases[member.id]?.expiresAt, now: now) }
         if let status = session.inputEndedStatus { return status }
         switch client.state {
-        case .connecting: return "보기 연결 중…"
-        case let .closed(_, message): return friendlyError(TerminalPresentation.message(message ?? "연결이 끊겼습니다"))
+        case .connecting: return String(localized: "보기 연결 중…")
+        case let .closed(_, message): return friendlyError(TerminalPresentation.message(message ?? String(localized: "연결이 끊겼습니다")))
         default: return TerminalPlatform.current.observeHint
         }
     }
@@ -172,7 +172,7 @@ struct TerminalView: View {
                 ProgressView("깨우는 중…")
                 Text("터미널이 준비되면 이어서 연결합니다").font(CEFont.note).foregroundStyle(CE.ink2)
             } else {
-                Text(wakeNotice ?? "터미널을 준비하고 있습니다").font(CEFont.note).foregroundStyle(CE.ink2)
+                Text(wakeNotice ?? String(localized: "터미널을 준비하고 있습니다")).font(CEFont.note).foregroundStyle(CE.ink2)
                     .multilineTextAlignment(.center)
                 Button("다시 시도") { Task { await wake() } }
                     .ceProminentButton().disabled(!store.canWrite || session.ending)
@@ -186,7 +186,7 @@ struct TerminalView: View {
         wakeNotice = nil
         let namespace = store.writeNamespace
         let outcome = await store.terminalWake.wake(memberID: member.id, resume: {
-            await store.memberAction(current, action: "resume") ? nil : (store.errorMessage ?? "팀원을 깨우지 못했습니다")
+            await store.memberAction(current, action: "resume") ? nil : (store.errorMessage ?? String(localized: "팀원을 깨우지 못했습니다"))
         }, current: {
             store.members.first { $0.id == member.id }
         }, allowed: {
@@ -238,11 +238,11 @@ struct TerminalWindowContent: View {
         Group {
             if let retained, store.members.first(where: { $0.id == memberID }) == nil, store.state?.project.id == retained.projectId {
                 // 같은 프로젝트를 보고 있는데 명부에 없다: 직원이 빠진 것이다. 옛 서버용 화면으로 바꿔 실패하는 조회를 되풀이하지 않는다.
-                EmptyTile(icon: "terminal", title: "팀원이 명부에서 빠졌습니다", detail: "이 터미널은 닫혔습니다. 팀에서 팀원을 다시 선택해 주세요.")
+                EmptyTile(icon: "terminal", title: String(localized: "팀원이 명부에서 빠졌습니다"), detail: String(localized: "이 터미널은 닫혔습니다. 팀에서 팀원을 다시 선택해 주세요."))
             } else if let member = store.members.first(where: { $0.id == memberID }) ?? retained {
                 TerminalSessionContent(member: member).environment(\.terminalWindow, true)
             } else {
-                EmptyTile(icon: "terminal", title: "팀원을 찾을 수 없습니다", detail: "팀에서 팀원을 다시 선택해 주세요.")
+                EmptyTile(icon: "terminal", title: String(localized: "팀원을 찾을 수 없습니다"), detail: String(localized: "팀에서 팀원을 다시 선택해 주세요."))
             }
         }
         .onAppear { retained = store.members.first { $0.id == memberID } }

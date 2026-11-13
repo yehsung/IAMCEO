@@ -155,9 +155,9 @@ private struct DeliveryNoticeRow: View {
         let last = parseISODate(item.lastCheckedAt)
         let next = parseISODate(item.nextCheckAt)
         if last != nil || next != nil {
-            MetaText([last.map { _ in "마지막 확인 \(relativeTime(item.lastCheckedAt))" },
-                      next.map { "다음 확인 \(deliveryShortTime($0))" }])
-                .help([last.map { "마지막 확인 · \(koDateTime($0))" }, next.map { "다음 확인 · \(koDateTime($0))" }]
+            MetaText([last.map { _ in String(localized: "마지막 확인 \(relativeTime(item.lastCheckedAt))") },
+                      next.map { String(localized: "다음 확인 \(deliveryShortTime($0))") }])
+                .help([last.map { String(localized: "마지막 확인 · \(koDateTime($0))") }, next.map { String(localized: "다음 확인 · \(koDateTime($0))") }]
                     .compactMap { $0 }.joined(separator: "\n"))
         }
     }
@@ -174,10 +174,10 @@ private struct DeliveryNoticeRow: View {
 
     private func actionName(_ action: DeliveryRecoveryAction) -> String {
         switch action {
-        case .recheck: "다시 확인"
-        case .retryWithRisk: "위험 동의 후 재전송"
-        case .stopRetry: "추가 전달 중지"
-        case .unknown: "지원하지 않는 행동"
+        case .recheck: String(localized: "다시 확인")
+        case .retryWithRisk: String(localized: "위험 동의 후 재전송")
+        case .stopRetry: String(localized: "delivery.action.stop_retry", defaultValue: "추가 전달 중지")
+        case .unknown: String(localized: "지원하지 않는 행동")
         }
     }
 }
@@ -188,9 +188,10 @@ private func deliveryShortTime(_ date: Date, now: Date = Date()) -> String {
     let calendar = Calendar.current
     let time = koTime(date)
     if calendar.isDateInToday(date) { return time }
-    if calendar.isDateInYesterday(date) { return "어제 \(time)" }
-    if calendar.isDateInTomorrow(date) { return "내일 \(time)" }
+    if calendar.isDateInYesterday(date) { return String(localized: "어제 \(time)") }
+    if calendar.isDateInTomorrow(date) { return String(localized: "내일 \(time)") }
     guard calendar.component(.year, from: date) == calendar.component(.year, from: now) else { return koDateTime(date) }
+    if AppLanguage.current == .en { return "\(appFormatted(date, ko: "", en: "MMMd")) \(time)" }
     let parts = calendar.dateComponents([.month, .day], from: date)
     return "\(parts.month ?? 0)월 \(parts.day ?? 0)일 \(time)"
 }
@@ -204,7 +205,7 @@ struct DeliveryWaitReasonView: View {
             ForEach(Array(reasons.enumerated()), id: \.offset) { _, reason in
                 if let label = waitReasonLabel(reason.waitReason, since: reason.waitingSince,
                                               used: reason.runLimit?.used, limit: reason.runLimit?.limit) {
-                    Text(label + (reason.count > 1 ? " · \(reason.count)건" : ""))
+                    Text(label + (reason.count > 1 ? String(localized: " · \(reason.count)건") : ""))
                         .font(CEFont.meta).foregroundStyle(waitReasonTone(reason.waitReason).color)
                         .fixedSize(horizontal: false, vertical: true)
                 }

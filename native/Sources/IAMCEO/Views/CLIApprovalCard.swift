@@ -28,7 +28,7 @@ struct CLIApprovalCard: View {
             if member.canReadCLIApproval {
                 VStack(alignment: .leading, spacing: 10) {
                     if !loaded {
-                        statusLine("승인 창을 읽는 중입니다", color: CE.ink2)
+                        statusLine(String(localized: "승인 창을 읽는 중입니다"), color: CE.ink2)
                     } else if let prompt, !sent {
                         head
                         window(prompt)
@@ -42,7 +42,7 @@ struct CLIApprovalCard: View {
                             }
                         }
                         if let option = prompt.options.first(where: { $0.n == picked }) {
-                            ConfirmBar(quoted: nil, verb: option.reject ? "거절 확인" : "확인", hint: confirmHint(option), busy: busy,
+                            ConfirmBar(quoted: nil, verb: option.reject ? String(localized: "거절 확인") : String(localized: "확인"), hint: confirmHint(option), busy: busy,
                                        disabled: !store.canWrite, stretch: !isMac, shiftedAt: .distantPast,
                                        onConfirm: { Task { await answer(prompt, option: option.n) } }, onCancel: { picked = nil })
                         }
@@ -54,10 +54,10 @@ struct CLIApprovalCard: View {
                         statusLine(fallback, color: CE.ink2)
                         HStack {
                             Spacer(minLength: 0)
-                            rereadButton("다시 읽기")
+                            rereadButton(String(localized: "다시 읽기"))
                         }
                     } else {
-                        rereadButton("승인 창 다시 읽기")
+                        rereadButton(String(localized: "승인 창 다시 읽기"))
                     }
                     if let error { statusLine(error, color: CE.danger) }
                     if let readError { statusLine(readError, color: CE.danger) }
@@ -92,13 +92,13 @@ struct CLIApprovalCard: View {
             Text("승인 창").font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.approval)
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 0)
-            rereadButton("다시 읽기")
+            rereadButton(String(localized: "다시 읽기"))
                 .padding(.vertical, -6)
         }
     }
 
     private func rereadButton(_ title: String) -> some View {
-        Button(reading ? "읽는 중" : title) { Task { await read() } }
+        Button(reading ? String(localized: "읽는 중") : title) { Task { await read() } }
             .ceGhostButton().ceCompactControl()
             .disabled(reading || busy || !store.canWrite)
             .accessibilityLabel(reading ? "승인 창 읽는 중" : "승인 창 다시 읽기")
@@ -146,7 +146,7 @@ struct CLIApprovalCard: View {
 
     /// Web .apv-sent: what was pressed, in the ok colour; the session state is still being confirmed.
     private var sentStatus: some View {
-        let pressed = Text(sentLine ?? "선택을 보냈습니다").foregroundStyle(CE.success)
+        let pressed = Text(sentLine ?? String(localized: "선택을 보냈습니다")).foregroundStyle(CE.success)
         let checking = Text(" · 세션 상태를 확인하고 있습니다").foregroundStyle(CE.ink2)
         return Text("\(pressed)\(checking)")
             .font(CEFont.note)
@@ -161,8 +161,8 @@ struct CLIApprovalCard: View {
     }
 
     private func confirmHint(_ option: CLIApprovalOption) -> String {
-        if option.reject { return "칸에서 이 거절을 누릅니다." }
-        return option.persists ? "칸에서 이 선택지를 누릅니다. 이번 한 번이 아니라 이후에도 적용됩니다." : "칸에서 이 선택지를 누릅니다."
+        if option.reject { return String(localized: "칸에서 이 거절을 누릅니다.") }
+        return option.persists ? String(localized: "칸에서 이 선택지를 누릅니다. 이번 한 번이 아니라 이후에도 적용됩니다.") : String(localized: "칸에서 이 선택지를 누릅니다.")
     }
 
     // MARK: Reading and answering
@@ -210,10 +210,10 @@ struct CLIApprovalCard: View {
         busy = true; error = nil
         defer { busy = false }
         if await store.answerCLIApproval(member, prompt: prompt, option: option) {
-            sentLine = prompt.options.first(where: { $0.n == option }).map { "눌렀습니다: \($0.n). \($0.label)" }
+            sentLine = prompt.options.first(where: { $0.n == option }).map { String(localized: "눌렀습니다: \($0.n). \($0.label)") }
             sent = true; self.prompt = nil; picked = nil
         } else {
-            error = store.errorMessage.map(friendlyError) ?? "선택 결과를 확인하지 못했습니다. 창을 다시 확인하세요."
+            error = store.errorMessage.map(friendlyError) ?? String(localized: "선택 결과를 확인하지 못했습니다. 창을 다시 확인하세요.")
             picked = nil
             await read()
         }
@@ -276,7 +276,7 @@ private struct CLIOptionTile: View {
                         .fixedSize(horizontal: false, vertical: true)
                     if option.reject || option.approves || option.persists {
                         HStack(spacing: 8) {
-                            if option.reject { Tag("거절", tone: .danger) } else if option.approves { Tag("승인", tone: .success) }
+                            if option.reject { Tag(String(localized: "거절"), tone: .danger) } else if option.approves { Tag(String(localized: "승인"), tone: .success) }
                             if option.persists { Text("이후에도 적용").font(CEFont.meta).foregroundStyle(CE.ink3) }
                         }
                     }
@@ -303,8 +303,8 @@ private struct CLIOptionTile: View {
 
     private var accessibilityText: String {
         var parts = ["\(option.n). \(option.label)"]
-        if option.reject { parts.append("거절") } else if option.approves { parts.append("승인") }
-        if option.persists { parts.append("이후에도 적용") }
+        if option.reject { parts.append(String(localized: "거절")) } else if option.approves { parts.append(String(localized: "승인")) }
+        if option.persists { parts.append(String(localized: "이후에도 적용")) }
         return parts.joined(separator: ", ")
     }
 

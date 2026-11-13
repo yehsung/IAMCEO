@@ -510,7 +510,7 @@ struct BrandMark: View {
 /// The one quiet round close button (×) of drawers and sheets: 26pt white-tint circle, no focus ring, Esc closes.
 /// iPhone keeps a 44pt hit target around the visible circle.
 struct CECloseButton: View {
-    var label = "닫기"
+    var label = String(localized: "닫기")
     var escapeCloses = true
     /// The tooltip; nil = the label with its shortcut.
     var help: String? = nil
@@ -1328,6 +1328,20 @@ final class ISODateCache: @unchecked Sendable {
         formatters[format] = formatter
         return formatter.string(from: date)
     }
+
+    /// 영어 화면의 날짜 글자(완성도 4차 R): 템플릿을 영어 로케일과 기기 지역에 맞춰 푼다. 한국어 형식과 따로 기억한다.
+    func english(_ date: Date, template: String) -> String {
+        let locale = AppLanguage.en.dateLocale
+        let key = "en|\(locale.identifier)|\(template)"
+        lock.lock(); defer { lock.unlock() }
+        if let formatter = formatters[key] { return formatter.string(from: date) }
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate(template)
+        formatters[key] = formatter
+        return formatter.string(from: date)
+    }
 }
 
 func parseISODate(_ value: String?) -> Date? {
@@ -1339,8 +1353,11 @@ func parseISODate(_ value: String?) -> Date? {
 func koFormatted(_ date: Date, _ format: String) -> String { ISODateCache.shared.korean(date, format: format) }
 
 /// 24-hour Korean clock ("14:20"), independent of the system locale so the UI never mixes "PM" into Korean text.
-func koTime(_ date: Date, seconds: Bool = false) -> String { koFormatted(date, seconds ? "HH:mm:ss" : "HH:mm") }
-func koDateTime(_ date: Date) -> String { koFormatted(date, "yyyy년 M월 d일 HH:mm") }
+/// 영어 화면은 기기 지역의 시각 관례를 따른다("2:20 PM").
+func koTime(_ date: Date, seconds: Bool = false) -> String {
+    appFormatted(date, ko: seconds ? "HH:mm:ss" : "HH:mm", en: seconds ? "jmmss" : "jmm")
+}
+func koDateTime(_ date: Date) -> String { appFormatted(date, ko: "yyyy년 M월 d일 HH:mm", en: "yMMMdjmm") }
 
 func clockTime(_ value: String?) -> String {
     guard let date = parseISODate(value) else { return "" }
@@ -1351,16 +1368,16 @@ func clockTime(_ value: String?) -> String {
 func relativeTime(_ value: String?, now: Date = Date()) -> String {
     guard let date = parseISODate(value) else { return "" }
     let seconds = now.timeIntervalSince(date)
-    if seconds < 60 { return "방금" }
-    if seconds < 3600 { return "\(Int(seconds / 60))분 전" }
-    if seconds < 6 * 3600 { return "\(Int(seconds / 3600))시간 전" }
+    if seconds < 60 { return String(localized: "방금") }
+    if seconds < 3600 { return String(localized: "\(Int(seconds / 60))분 전") }
+    if seconds < 6 * 3600 { return String(localized: "\(Int(seconds / 3600))시간 전") }
     let calendar = Calendar.current
     if calendar.isDateInToday(date) { return koTime(date) }
-    if calendar.isDateInYesterday(date) { return "어제 \(koTime(date))" }
+    if calendar.isDateInYesterday(date) { return String(localized: "어제 \(koTime(date))") }
     if calendar.component(.year, from: date) == calendar.component(.year, from: now) {
-        return koFormatted(date, "M월 d일")
+        return appFormatted(date, ko: "M월 d일", en: "MMMd")
     }
-    return koFormatted(date, "yyyy년 M월 d일")
+    return appFormatted(date, ko: "yyyy년 M월 d일", en: "yMMMd")
 }
 
 // MARK: - Lean list helpers (iteration 2)

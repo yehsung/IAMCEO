@@ -52,7 +52,7 @@ struct ChatView: View {
             .toolbar {
                 if !store.isArchive, let member = ChatScope(store: store, router: router).currentMember {
                     ToolbarItem(placement: .topBarTrailing) {
-                        let title = member.kind == "worker" ? "\(member.name) 팀원 보기" : "\(chatLeadLabel(member)) 보기"
+                        let title = member.kind == "worker" ? String(localized: "\(member.name) 팀원 보기") : String(localized: "\(chatLeadLabel(member)) 보기")
                         Button { router.openMember(member.id) } label: { Image(systemName: "person.crop.circle") }
                             .help(title)
                             .accessibilityLabel(title)
@@ -99,7 +99,7 @@ struct ChatMineRow: View {
     private var waits: [ChatDeliveryWait] { ChatDeliveryWait.lines(message, target: target) }
     private var note: String? {
         let value = message.deliveryNote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return value.isEmpty ? nil : plainDeliveryNote(value)
+        return value.isEmpty ? nil : plainDeliveryNote(value, code: message.deliveryCode)
     }
     private var lead: Member? { store.members.first { $0.kind == "conductor" || $0.kind == "root" } }
     /// Who the message waits on: the targeted member, or the lead for a project message.
@@ -110,18 +110,17 @@ struct ChatMineRow: View {
     private var targetName: String? {
         guard showsTarget, message.targetMemberId != nil || message.targetName != nil else { return nil }
         if let name = message.targetName, !name.isEmpty { return name }
-        return message.targetMemberId.flatMap { id in store.members.first { $0.id == id }?.name } ?? "명부에 없는 대상"
+        return message.targetMemberId.flatMap { id in store.members.first { $0.id == id }?.name } ?? String(localized: "명부에 없는 대상")
     }
     /// Why a resend cannot go out right now (shown as the button's tooltip, not as a line).
     private var lockReason: String? {
-        if store.isDemo { return "샘플은 읽기 전용입니다" }
         if let notice = store.connectionNotice { return notice }
-        if store.showsOffline { return "서버에 연결되지 않아 지금은 다시 보낼 수 없습니다" }
-        if store.connectionStatus != .connected { return "잠시 연결을 확인하는 중" }
+        if store.showsOffline { return String(localized: "서버에 연결되지 않아 지금은 다시 보낼 수 없습니다") }
+        if store.connectionStatus != .connected { return String(localized: "잠시 연결을 확인하는 중") }
         if let connection = store.state?.project.connection, !connection.ok {
-            return connection.ownerDetail ?? "이 프로젝트의 실행 연결에 문제가 있어 지금은 다시 보낼 수 없습니다"
+            return connection.ownerDetail ?? String(localized: "이 프로젝트의 실행 연결에 문제가 있어 지금은 다시 보낼 수 없습니다")
         }
-        if store.isSending(projectID: message.projectId, targetMemberID: message.targetMemberId) { return "보내는 중입니다" }
+        if store.isSending(projectID: message.projectId, targetMemberID: message.targetMemberId) { return String(localized: "보내는 중입니다") }
         return nil
     }
 
@@ -247,16 +246,16 @@ struct ChatMineRow: View {
         .buttonStyle(.plain)
         .disabled(locked || busy || resending)
         .fixedSize()
-        .help(lockReason ?? "같은 글·대상·첨부로 다시 보냅니다.")
+        .help(lockReason ?? String(localized: "같은 글·대상·첨부로 다시 보냅니다."))
     }
 
     /// A held delivery waits on something only the CEO can clear; point at the place to clear it.
     @ViewBuilder private func heldAction(_ member: Member) -> some View {
         if MemberStatusInfo(member).tone == .approval {
-            ChatFooterLink(title: "터미널 열기") { router.openTerminal(member.id) }
+            ChatFooterLink(title: String(localized: "터미널 열기")) { router.openTerminal(member.id) }
                 .help("승인 창을 터미널에서 처리하면 보류된 글이 다시 전달됩니다.")
         } else {
-            ChatFooterLink(title: member.kind == "worker" ? "팀원 보기" : "\(rankName(member.kind)) 보기") { router.openMember(member.id) }
+            ChatFooterLink(title: member.kind == "worker" ? String(localized: "팀원 보기") : String(localized: "\(rankName(member.kind)) 보기")) { router.openMember(member.id) }
         }
     }
 
@@ -265,7 +264,7 @@ struct ChatMineRow: View {
         resendError = nil
         let ok = await store.resend(message)
         resending = false
-        if !ok { resendError = "다시 보내지 못했습니다" + (store.errorMessage.map { ": \(friendlyError($0))" } ?? ".") }
+        if !ok { resendError = String(localized: "다시 보내지 못했습니다") + (store.errorMessage.map { ": \(friendlyError($0))" } ?? ".") }
     }
 }
 
@@ -326,7 +325,7 @@ struct ChatReportRow: View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    if !message.kind.isEmpty { Tag(message.kind, tone: messageKindTone(message.kind)) }
+                    if !message.kind.isEmpty { Tag(messageKindLabel(message.kind), tone: messageKindTone(message.kind)) }
                     Text(message.who).font(ChatFont.who).foregroundStyle(CE.ink).lineLimit(1)
                     Spacer(minLength: 6)
                     Text(clockTime(message.at)).font(CEFont.meta).foregroundStyle(CE.ink2).monospacedDigit()
@@ -429,8 +428,8 @@ struct ChatReportRow: View {
         if let id = message.decisionId {
             let decision = store.decisions.first { $0.id == id }
             let link = chatDecisionLink(decision)
-            ChatJumpChip(title: store.isArchive ? "결재 기록 보기" : link.title, prominent: !store.isArchive && link.open) { router.openDecision(id) }
-                .help(decision.map { DecisionStateInfo($0).label } ?? "결재함에서 찾아 엽니다")
+            ChatJumpChip(title: store.isArchive ? String(localized: "결재 기록 보기") : link.title, prominent: !store.isArchive && link.open) { router.openDecision(id) }
+                .help(decision.map { DecisionStateInfo($0).label } ?? String(localized: "결재함에서 찾아 엽니다"))
         }
     }
 
@@ -519,7 +518,8 @@ private struct ChatConversation: View {
     }
     private var baseItems: [Message] {
         if notificationAnchor != nil { return store.historyMessages }
-        if store.isDemo || (!store.isArchive && store.pagingSupport == .unsupported) { return scope.messages }
+        // F1: 마지막으로 본 상태에는 그 상태에 든 최근 글만 있다.
+        if store.lastSeen != nil || (!store.isArchive && store.pagingSupport == .unsupported) { return scope.messages }
         return history?.items ?? []
     }
     private var items: [Message] {
@@ -528,10 +528,10 @@ private struct ChatConversation: View {
         return context.map { updates[Data($0.id.utf8)] ?? $0 }
     }
     private var showingContext: Bool { focus.context != nil || notificationAnchor != nil }
-    private var loaded: Bool { store.isDemo || (!store.isArchive && store.pagingSupport == .unsupported)
+    private var loaded: Bool { store.lastSeen != nil || (!store.isArchive && store.pagingSupport == .unsupported)
         || history?.initialized == true || showingContext }
     private var canPage: Bool {
-        !store.isDemo && store.connectionStatus == .connected && !showingContext && !focus.loading
+        store.connectionStatus == .connected && !showingContext && !focus.loading
             && history?.hasOlder == true && history?.loading == nil && history?.isBridging == false
             && history?.storeChanged == false && !anchor.isPreservingPosition
     }
@@ -546,7 +546,7 @@ private struct ChatConversation: View {
                     historyControls
                         .chatScrollRow(id: "history-top", coordinateSpace: scopeID)
                     if displayed.isEmpty && loaded {
-                        ChatEmpty(title: "아직 대화가 없습니다", detail: emptyDetail)
+                        ChatEmpty(title: String(localized: "아직 대화가 없습니다"), detail: emptyDetail)
                             .padding(.top, 10)
                     }
                     ForEach(chatThreadRows(displayed)) { row in
@@ -626,7 +626,7 @@ private struct ChatConversation: View {
                 if !interacting { wasInteracting = false }
             }
             .onChange(of: history?.error) { _, error in
-                if error != nil { autoPaused = true; chatAnnounce("대화를 불러오지 못했습니다. 다시 불러오기를 눌러 주세요.") }
+                if error != nil { autoPaused = true; chatAnnounce(String(localized: "대화를 불러오지 못했습니다. 다시 불러오기를 눌러 주세요.")) }
             }
             .onChange(of: history?.loading, initial: true) { _, request in
                 if let request { lastLoad = request.kind }
@@ -647,16 +647,17 @@ private struct ChatConversation: View {
     /// .th-older__error (errors in danger); paging is a ghost .gbtn--s, recovery actions a glass .gbtn--s.
     @ViewBuilder private var historyControls: some View {
         VStack(spacing: 4) {
-            if store.isArchive { Tag("보관한 대화 · 읽기 전용", tone: .dim) }
+            if store.isArchive { Tag(String(localized: "보관한 대화 · 읽기 전용"), tone: .dim) }
             if let notice = router.navigationNotice { Text(notice).foregroundStyle(CE.attention) }
             if showingContext {
                 Text("해당 글의 앞뒤를 보고 있습니다").foregroundStyle(CE.ink2)
                 Button("최신 대화로") { returnToLatest() }
                     .ceSecondaryButton()
-            } else if store.isDemo {
-                Text("샘플 대화 · 읽기 전용").foregroundStyle(CE.ink3)
             } else if let notice = store.connectionNotice {
                 Text(notice).foregroundStyle(CE.ink2)
+            } else if store.lastSeen != nil {
+                // F1: 기기에 남긴 최근 글만 보인다. 연결되면 이전 글도 불러온다.
+                Text("마지막으로 본 대화입니다. 연결되면 이전 글도 불러옵니다").foregroundStyle(CE.attention)
             } else if store.showsOffline {
                 Text("연결이 끊겼습니다. 다시 연결하면 이전 글을 불러올 수 있습니다").foregroundStyle(CE.attention)
             } else if history?.storeChanged == true {
@@ -715,7 +716,7 @@ private struct ChatConversation: View {
                 .padding(12).background(CE.plateSolid)
         } else if let error = focus.error {
             VStack(spacing: 4) {
-                InlineNotice(tone: .attention, title: error, actionTitle: "다시 불러오기",
+                InlineNotice(tone: .attention, title: error, actionTitle: String(localized: "다시 불러오기"),
                              action: { Task { await openMessage() } })
                 Button("최신 대화로") { returnToLatest() }.ceGhostButton()
             }
@@ -724,16 +725,16 @@ private struct ChatConversation: View {
     }
 
     private var emptyDetail: String {
-        if store.isArchive { return "보관된 기록은 여기서 읽을 수 있습니다." }
-        if let member = scope.recipient { return "\(member.name)에게 보낸 지시와 보고가 여기에 이어집니다." }
-        return "아래 입력칸에 지시를 적으면 여기에 이어집니다."
+        if store.isArchive { return String(localized: "보관된 기록은 여기서 읽을 수 있습니다.") }
+        if let member = scope.recipient { return String(localized: "\(member.name)에게 보낸 지시와 보고가 여기에 이어집니다.") }
+        return String(localized: "아래 입력칸에 지시를 적으면 여기에 이어집니다.")
     }
 
     private func loadOlder() {
         guard canPage else { return }
         guard anchor.hostFound, anchor.visibleAnchor != nil else { positionError = true; return }
         positionError = false; autoPaused = false; intentUsed = true
-        chatAnnounce("이전 글을 불러오는 중입니다")
+        chatAnnounce(String(localized: "이전 글을 불러오는 중입니다"))
         Task { await store.loadOlderMessages() }
     }
 
@@ -750,10 +751,10 @@ private struct ChatConversation: View {
                                  projectID: projectID,
                                  scope: ChatHistoryKey.normalizedScope(targetMemberID: targetMemberID, members: store.members),
                                  archived: store.isArchive)
-        let api = store.isDemo ? nil : store.api
+        let api = store.api
         let navigationRevision = router.navigationRevision, projectRevision = router.projectResetRevision
         let destination = await focus.open(id, key: key, available: baseItems, members: store.members) {
-            guard let api else { throw APIError(status: 404, message: "대화를 찾을 수 없습니다.") }
+            guard let api else { throw APIError(status: 404, message: String(localized: "대화를 찾을 수 없습니다.")) }
             return try await api.chatMessagesAround(projectID: projectID, messageID: id, archived: key.archived)
         }
         guard let destination, !Task.isCancelled, isVisible, store.stillCurrent(api),
@@ -821,7 +822,7 @@ private struct ChatConversation: View {
                 if let queued {
                     let count = max(0, queued.count - displayed.count)
                     displayed = queued; self.queued = nil
-                    if hasPrepend && count > 0 { chatAnnounce("이전 글 \(count)개를 불러왔습니다") }
+                    if hasPrepend && count > 0 { chatAnnounce(String(localized: "이전 글 \(count)개를 불러왔습니다")) }
                 }
             }) { return }
             // Keep the old viewport rather than applying a page without a proven host/anchor.
@@ -1053,8 +1054,11 @@ private func chatMessageRowID(_ id: String) -> String { "m:" + Data(id.utf8).bas
     static func parse(_ value: String) -> Date? { parseISODate(value) }
     static func dayLabel(_ date: Date, now: Date = Date()) -> String {
         let calendar = Calendar.current
-        if calendar.isDateInToday(date) { return "오늘" }
-        if calendar.isDateInYesterday(date) { return "어제" }
+        if calendar.isDateInToday(date) { return String(localized: "오늘") }
+        if calendar.isDateInYesterday(date) { return String(localized: "어제") }
+        if AppLanguage.current == .en {
+            return appFormatted(date, ko: "", en: calendar.component(.year, from: date) == calendar.component(.year, from: now) ? "EEEMMMd" : "yEEEMMMd")
+        }
         let weekdays = ["일", "월", "화", "수", "목", "금", "토"]
         let parts = calendar.dateComponents([.year, .month, .day, .weekday], from: date)
         let weekday = weekdays[max(0, min(6, (parts.weekday ?? 1) - 1))]
@@ -1241,7 +1245,7 @@ private struct ChatThreadHeader: View {
                     .help("먼저 보낸 글 \(member.queuedCount)건이 차례를 기다립니다")
             }
         } else if scope.missingTarget {
-            title("명부에 없는 대화 상대")
+            title(String(localized: "명부에 없는 대화 상대"))
                 .help("이 대상에게는 보낼 수 없습니다")
         } else {
             title(scope.threadTitle)
@@ -1259,7 +1263,7 @@ private struct ChatThreadHeader: View {
 
     @ViewBuilder private func action(_ scope: ChatScope) -> some View {
         if store.isArchive {
-            Tag("읽기 전용", tone: .dim)
+            Tag(String(localized: "읽기 전용"), tone: .dim)
         } else if scope.missingTarget {
             Button("프로젝트 대화로") { router.chatTarget = nil }.ceSecondaryButton().controlSize(.small)
         } else if let member = scope.currentMember {
@@ -1283,8 +1287,8 @@ private struct ChatCompactNotes: View {
             VStack(alignment: .leading, spacing: 6) {
                 if scope.missingTarget {
                     ChatNoteStrip(note: ChatNote(tone: .attention, icon: "person.crop.circle.badge.questionmark",
-                                                 text: "명부에 없는 대화 상대 · 보낼 수 없습니다",
-                                                 actionTitle: "프로젝트 대화로", action: { router.chatTarget = nil }))
+                                                 text: String(localized: "명부에 없는 대화 상대 · 보낼 수 없습니다"),
+                                                 actionTitle: String(localized: "프로젝트 대화로"), action: { router.chatTarget = nil }))
                 }
                 if let runner { ChatNoteStrip(note: runner) }
                 if let note { ChatNoteStrip(note: note) }
@@ -1322,15 +1326,15 @@ private struct ChatPlaceholder: View {
             if store.isLoading {
                 ProgressView().controlSize(.small)
                 Text("대화를 불러오는 중입니다").font(ChatFont.emptyBody).foregroundStyle(CE.ink2)
-            } else if !store.isDemo && store.bootstrap != nil && store.projects.isEmpty {
-                ChatEmpty(title: "아직 프로젝트가 없습니다", detail: "새 프로젝트를 만들면 총괄과 대화할 수 있습니다.")
+            } else if store.bootstrap != nil && store.projects.isEmpty {
+                ChatEmpty(title: String(localized: "아직 프로젝트가 없습니다"), detail: String(localized: "새 프로젝트를 만들면 총괄과 대화할 수 있습니다."))
                 Button("새 프로젝트") { router.showNewProject = true }
                     .ceProminentButton()
                     .disabled(!store.canWrite)
             } else {
-                ChatEmpty(title: "대화를 불러오지 못했습니다",
-                          detail: store.connectionStatus == .connected ? "잠시 뒤 다시 동기화하세요." : "서버 연결을 확인한 뒤 다시 연결하세요.")
-                if store.connectionStatus == .connected && !store.isDemo {
+                ChatEmpty(title: String(localized: "대화를 불러오지 못했습니다"),
+                          detail: store.connectionStatus == .connected ? String(localized: "잠시 뒤 다시 동기화하세요.") : String(localized: "서버 연결을 확인한 뒤 다시 연결하세요."))
+                if store.connectionStatus == .connected {
                     Button("지금 동기화") { Task { await store.refresh() } }.ceSecondaryButton()
                 }
             }
@@ -1381,10 +1385,10 @@ func chatReportFileIDs(_ message: Message) -> [String] {
 func chatReportCorrections(_ message: Message) -> [(title: String, messageID: String)] {
     var links: [(title: String, messageID: String)] = []
     if let id = message.supersededBy, !id.isEmpty, !id.utf8.elementsEqual(message.id.utf8) {
-        links.append(("정정됨 · 최신 보고 보기", id))
+        links.append((String(localized: "정정됨 · 최신 보고 보기"), id))
     }
     if let id = message.supersedes, !id.isEmpty, !id.utf8.elementsEqual(message.id.utf8) {
-        links.append(("앞 보고 정정", id))
+        links.append((String(localized: "앞 보고 정정"), id))
     }
     return links
 }
@@ -1404,9 +1408,9 @@ func chatReportCorrections(_ message: Message) -> [(title: String, messageID: St
     }
     var currentMember: Member? { isProjectThread ? lead : recipient }
     var missingTarget: Bool { !isProjectThread && recipient == nil }
-    var leadTitle: String { lead.map { rankName($0.kind) } ?? "총괄" }
+    var leadTitle: String { lead.map { rankName($0.kind) } ?? String(localized: "총괄") }
     /// The all-messages thread: "본사 대화" on HQ, "프로젝트 대화" elsewhere.
-    var threadTitle: String { store.state?.project.isHq == true ? "본사 대화" : "프로젝트 대화" }
+    var threadTitle: String { store.state?.project.isHq == true ? String(localized: "본사 대화") : String(localized: "프로젝트 대화") }
     var threadKey: String { DraftStore.key(project: store.selectedProjectID, target: isProjectThread ? nil : router.chatTarget) }
 
     /// Project thread = everything; a member thread = their reports and what I sent them.
@@ -1437,7 +1441,7 @@ func chatReportCorrections(_ message: Message) -> [(title: String, messageID: St
     func note(for member: Member, wide: Bool) -> ChatNote? {
         let router = router
         let id = member.id
-        let detailTitle = member.kind == "worker" ? "팀원 보기" : "\(rankName(member.kind)) 보기"
+        let detailTitle = member.kind == "worker" ? String(localized: "팀원 보기") : String(localized: "\(rankName(member.kind)) 보기")
         if MemberStatusInfo.isUncertain(member) {
             let info = MemberStatusInfo(member)
             return ChatNote(tone: info.tone, icon: info.icon, text: info.label,
@@ -1445,41 +1449,41 @@ func chatReportCorrections(_ message: Message) -> [(title: String, messageID: St
         }
         if MemberStatusInfo(member).tone == .approval {
             return ChatNote(tone: .approval, icon: "hand.raised.fill",
-                            text: "승인 창 앞 · 처리할 때까지 보낸 글은 보류됩니다",
-                            actionTitle: "터미널 열기", action: { router.openTerminal(id) })
+                            text: String(localized: "승인 창 앞 · 처리할 때까지 보낸 글은 보류됩니다"),
+                            actionTitle: String(localized: "터미널 열기"), action: { router.openTerminal(id) })
         }
         if member.status == "error" {
             let error = member.lastError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return ChatNote(tone: .danger, icon: "exclamationmark.triangle.fill",
-                            text: error.isEmpty ? "오류 · 일을 시작하거나 이어 가다 실패했습니다" : "오류: \(friendlyError(error))",
+                            text: error.isEmpty ? String(localized: "오류 · 일을 시작하거나 이어 가다 실패했습니다") : String(localized: "오류: \(friendlyError(error, code: member.fenceCode))"),
                             actionTitle: wide ? nil : detailTitle, action: wide ? nil : { router.openMember(id) })
         }
         if let backend = member.backend, backend != "core" {
             return ChatNote(tone: .attention, icon: "arrow.triangle.2.circlepath",
-                            text: "이전 실행기 세션 · 새 세션으로 이어가야 합니다",
+                            text: String(localized: "이전 실행기 세션 · 새 세션으로 이어가야 합니다"),
                             actionTitle: wide ? nil : detailTitle, action: wide ? nil : { router.openMember(id) })
         }
         if member.origin == "manual" {
             return ChatNote(tone: .neutral, icon: "terminal",
-                            text: "직접 띄운 세션 · 그 세션이 wait를 부를 때 전달됩니다")
+                            text: String(localized: "직접 띄운 세션 · 그 세션이 wait를 부를 때 전달됩니다"))
         }
         if member.status == "waiting" {
             let open = newestFirst(store.decisions.filter { $0.status == "open" && $0.memberId == id })
             let decisionID = open.first?.id
             return ChatNote(tone: .attention, icon: "hourglass",
-                            text: open.isEmpty ? "답을 기다리는 결재가 있습니다" : "답하지 않은 결재 \(open.count)건",
-                            actionTitle: "결재함으로", action: { if let decisionID { router.openDecision(decisionID) } else { router.go(.inbox) } })
+                            text: open.isEmpty ? String(localized: "답을 기다리는 결재가 있습니다") : String(localized: "답하지 않은 결재 \(open.count)건"),
+                            actionTitle: String(localized: "결재함으로"), action: { if let decisionID { router.openDecision(decisionID) } else { router.go(.inbox) } })
         }
         return nil
     }
 
     /// The composer footer already shows the connection detail; this adds the way out for a stopped runner.
     var runnerOffNote: ChatNote? {
-        guard !store.isDemo, let connection = store.state?.project.connection, !connection.ok, connection.reason == "runner_off" else { return nil }
+        guard let connection = store.state?.project.connection, !connection.ok, connection.reason == "runner_off" else { return nil }
         let router = router
         return ChatNote(tone: .attention, icon: "power",
-                        text: "총괄이 꺼져 있어 지금은 보낼 수 없습니다 · 쓰던 글은 남아 있습니다",
-                        actionTitle: "팀 화면으로", action: { router.go(.team) })
+                        text: String(localized: "총괄이 꺼져 있어 지금은 보낼 수 없습니다 · 쓰던 글은 남아 있습니다"),
+                        actionTitle: String(localized: "팀 화면으로"), action: { router.go(.team) })
     }
 
     func accessibilityText(_ member: Member?, problem: String?, draft: Bool) -> String {
@@ -1489,8 +1493,8 @@ func chatReportCorrections(_ message: Message) -> [(title: String, messageID: St
         } else if let lead {
             parts.append("\(rankName(lead.kind)) \(MemberStatusInfo(lead).label)")
         }
-        if problem == "failed" { parts.append("전달 실패한 글 있음") } else if problem == "held" { parts.append("보류된 전달 있음") }
-        if draft { parts.append("쓰던 글 있음") }
+        if problem == "failed" { parts.append(String(localized: "전달 실패한 글 있음")) } else if problem == "held" { parts.append(String(localized: "보류된 전달 있음")) }
+        if draft { parts.append(String(localized: "쓰던 글 있음")) }
         return parts.joined(separator: ", ")
     }
 }
@@ -1869,7 +1873,7 @@ private struct ChatAttachmentItem: View {
     @State private var hovering = false
 
     private static let thumbSize = CGSize(width: 208, height: 148)
-    private var displayName: String { attachment.name.isEmpty ? "이름 없는 첨부" : attachment.name }
+    private var displayName: String { attachment.name.isEmpty ? String(localized: "이름 없는 첨부") : attachment.name }
     private var isTextual: Bool { attachment.mime.hasPrefix("text/") || attachment.mime.contains("json") }
     private var sizeText: String { chatFileSize(attachment.size) }
 
@@ -1924,7 +1928,7 @@ private struct ChatAttachmentItem: View {
         .buttonStyle(.plain)
         .disabled(loading)
         .onHover { hovering = $0 }
-        .help(fileURL == nil ? displayName : "\(displayName) · 크게 보기")
+        .help(fileURL == nil ? displayName : String(localized: "\(displayName) · 크게 보기"))
         .accessibilityLabel(fileURL == nil ? "\(displayName) 불러오기" : "\(displayName) 크게 보기")
         .contextMenu {
             if let fileURL {
@@ -2011,7 +2015,7 @@ private struct ChatAttachmentItem: View {
     private func load() async {
         guard resource == nil, !loading else { return }
         guard let api = store.api else {
-            error = store.isDemo ? "샘플에는 원본 파일이 없습니다." : "서버 연결 후 원본을 불러올 수 있습니다."
+            error = String(localized: "서버 연결 후 원본을 불러올 수 있습니다.")
             return
         }
         loading = true; defer { loading = false }
@@ -2060,14 +2064,14 @@ private func chatDeliveryColor(_ delivery: String?) -> Color {
 
 /// Link text for a report's decision (web decisionLinkText) and whether it is the open, highlighted one.
 private func chatDecisionLink(_ decision: Decision?) -> (title: String, open: Bool) {
-    guard let decision else { return ("결재함에서 보기", false) }
+    guard let decision else { return (String(localized: "결재함에서 보기"), false) }
     switch decision.status {
-    case "open": return ("결재함에서 답하기", true)
-    case "closed": return ("닫힌 결재 보기", false)
+    case "open": return (String(localized: "결재함에서 답하기"), true)
+    case "closed": return (String(localized: "닫힌 결재 보기"), false)
     default:
         let chosen = decision.options.first { $0.k == decision.choice }?.label
         let label = (chosen ?? decision.note)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return (label.isEmpty ? "답한 결재 보기" : "답함: \(plainOneLine(label))", false)
+        return (label.isEmpty ? String(localized: "답한 결재 보기") : String(localized: "답함: \(plainOneLine(label))"), false)
     }
 }
 

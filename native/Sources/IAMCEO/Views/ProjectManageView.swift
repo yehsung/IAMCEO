@@ -17,7 +17,7 @@ final class ProjectCreationNotice {
 
     func begin(id: UUID, namespace: String) {
         self.id = id; self.namespace = namespace; projectID = nil
-        message = "프로젝트를 만드는 중입니다. 창을 닫아도 계속됩니다."; running = true; failed = false
+        message = String(localized: "프로젝트를 만드는 중입니다. 창을 닫아도 계속됩니다."); running = true; failed = false
     }
     func finish(id: UUID? = nil, projectID: String?, message: String, failed: Bool = false) {
         guard id == nil || id == self.id else { return }
@@ -28,22 +28,22 @@ final class ProjectCreationNotice {
     static func scope(_ store: AppStore) -> String { store.writeNamespace + ":" + (store.serverID ?? "") }
 
     func create(store: AppStore, name: String, cwd: String, provider: String, trustFolder: Bool = false) async -> Outcome {
-        guard !running, !store.pendingActions.contains("create-project") else { return .failed("이미 프로젝트를 만드는 중입니다.") }
+        guard !running, !store.pendingActions.contains("create-project") else { return .failed(String(localized: "이미 프로젝트를 만드는 중입니다.")) }
         let namespace = Self.scope(store), id = UUID(), before = Set(store.projects.map(\.id))
         begin(id: id, namespace: namespace)
         let accepted = await store.createProject(name: name, cwd: cwd, goal: "", provider: provider, trustFolder: trustFolder)
         guard namespace == Self.scope(store) else {
-            finish(id: id, projectID: nil, message: "연결이 바뀌었습니다. 원래 Mac에 연결해 만들기 결과를 확인해 주세요.", failed: true)
+            finish(id: id, projectID: nil, message: String(localized: "연결이 바뀌었습니다. 원래 Mac에 연결해 만들기 결과를 확인해 주세요."), failed: true)
             return .hostChanged
         }
         if accepted, let project = store.selectedProjectID {
-            finish(id: id, projectID: project, message: "프로젝트를 만들었습니다. 총괄에게 첫 일을 맡겨 보세요.")
+            finish(id: id, projectID: project, message: String(localized: "프로젝트를 만들었습니다. 총괄에게 첫 일을 맡겨 보세요."))
             return .created(project)
         }
-        let message = store.errorMessage.map(friendlyError) ?? "프로젝트를 만들지 못했습니다."
+        let message = store.errorMessage.map(friendlyError) ?? String(localized: "프로젝트를 만들지 못했습니다.")
         await store.refresh()
         guard namespace == Self.scope(store) else {
-            finish(id: id, projectID: nil, message: "연결이 바뀌었습니다. 원래 Mac에 연결해 만들기 결과를 확인해 주세요.", failed: true)
+            finish(id: id, projectID: nil, message: String(localized: "연결이 바뀌었습니다. 원래 Mac에 연결해 만들기 결과를 확인해 주세요."), failed: true)
             return .hostChanged
         }
         // The server canonicalizes ~ and symlinks; the returned cwd need not equal the typed path.
@@ -61,7 +61,7 @@ final class ProjectCreationNotice {
         if store.selectedProjectID != id { await store.selectProject(id: id) }
         guard namespace == scope(store), router.navigationRevision == navigation else { return false }
         guard store.selectedProjectID == id, store.state?.project.id == id else {
-            router.navigationNotice = "프로젝트를 열지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요."
+            router.navigationNotice = String(localized: "프로젝트를 열지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.")
             return false
         }
         router.openChat(nil)
@@ -108,18 +108,18 @@ struct ProjectManageView: View {
         let blocked = snapshot.members.filter { $0.status == "blocked" }
         let decisions = snapshot.decisions.filter { $0.status == "open" }
         let todos = snapshot.todos.filter { !$0.done }
-        if !working.isEmpty { rows.append(("일하는 팀원 \(working.count)명", working.map(\.name).joined(separator: ", "), .team)) }
-        if !blocked.isEmpty { rows.append(("승인을 기다리는 팀원 \(blocked.count)명", blocked.map(\.name).joined(separator: ", "), .team)) }
-        if !decisions.isEmpty { rows.append(("열린 결재 \(decisions.count)건", decisions.map(\.title).joined(separator: ", "), .inbox)) }
-        if !todos.isEmpty { rows.append(("미완료 할 일 \(todos.count)건", todos.map(\.title).joined(separator: ", "), .home)) }
+        if !working.isEmpty { rows.append((String(localized: "일하는 팀원 \(working.count)명"), working.map(\.name).joined(separator: ", "), .team)) }
+        if !blocked.isEmpty { rows.append((String(localized: "승인을 기다리는 팀원 \(blocked.count)명"), blocked.map(\.name).joined(separator: ", "), .team)) }
+        if !decisions.isEmpty { rows.append((String(localized: "열린 결재 \(decisions.count)건"), decisions.map(\.title).joined(separator: ", "), .inbox)) }
+        if !todos.isEmpty { rows.append((String(localized: "미완료 할 일 \(todos.count)건"), todos.map(\.title).joined(separator: ", "), .home)) }
         return rows
     }
     private var title: String {
         switch selection.mode {
-        case .rename: "프로젝트 이름 바꾸기"
-        case .settings: "프로젝트 설정"
-        case .archive: "프로젝트를 보관할까요?"
-        case .restore: "프로젝트 꺼내기"
+        case .rename: String(localized: "프로젝트 이름 바꾸기")
+        case .settings: String(localized: "프로젝트 설정")
+        case .archive: String(localized: "프로젝트를 보관할까요?")
+        case .restore: String(localized: "프로젝트 꺼내기")
         }
     }
     private var icon: String {
@@ -138,9 +138,9 @@ struct ProjectManageView: View {
     }
     private var actionTitle: String {
         switch selection.mode {
-        case .rename, .settings: working ? "저장하는 중…" : "저장"
-        case .archive: working ? "보관하는 중…" : "보관"
-        case .restore: working ? "꺼내는 중…" : "꺼내기"
+        case .rename, .settings: working ? String(localized: "저장하는 중…") : String(localized: "저장")
+        case .archive: working ? String(localized: "보관하는 중…") : String(localized: "보관")
+        case .restore: working ? String(localized: "꺼내는 중…") : String(localized: "꺼내기")
         }
     }
     private var canSubmit: Bool {
@@ -161,24 +161,24 @@ struct ProjectManageView: View {
                         Text("확인하는 중입니다").font(CEFont.note).foregroundStyle(CE.ink2)
                     }
                 }
-                if store.isDemo { InlineNotice(tone: .accent, icon: "eye", title: "샘플은 읽기 전용입니다") }
+                if store.isDemo { InlineNotice(tone: .accent, icon: "eye", title: String(localized: "샘플에서는 프로젝트 이름을 바꾸거나 보관할 수 없습니다")) }
                 switch selection.mode {
                 case .rename, .settings: form
                 case .archive: archiveBody
                 case .restore:
-                    explanation("프로젝트 목록에 다시 표시합니다. 보관 때문에 멈춘 전달이 있으면 기존 지시가 이어질 수 있습니다.")
+                    explanation(String(localized: "프로젝트 목록에 다시 표시합니다. 보관 때문에 멈춘 전달이 있으면 기존 지시가 이어질 수 있습니다."))
                 }
                 if let error {
                     // Archive: a failed check (or a refused archive) is retried right here; the footer stays 취소 + 보관.
                     if selection.mode == .archive && blockers.isEmpty {
-                        InlineNotice(tone: .danger, title: error, actionTitle: "다시 확인", action: recheck,
+                        InlineNotice(tone: .danger, title: error, actionTitle: String(localized: "다시 확인"), action: recheck,
                                      actionDisabled: !canRecheck)
                     } else {
                         InlineNotice(tone: .danger, title: error)
                     }
                 }
                 if checking {
-                    InlineNotice(title: "변경 결과를 확인 중입니다", detail: "같은 요청은 다시 보내지 않습니다.", actionTitle: "결과 확인", action: {
+                    InlineNotice(title: String(localized: "변경 결과를 확인 중입니다"), detail: String(localized: "같은 요청은 다시 보내지 않습니다."), actionTitle: String(localized: "결과 확인"), action: {
                         Task { await store.recheckProject(id: selection.projectID) }
                     })
                     // 응답을 잃은 변경이 끝내 반영되지 않았을 때 직접 푸는 출구. 5분이 지나면 저절로도 풀린다.
@@ -186,7 +186,7 @@ struct ProjectManageView: View {
                         .ceGhostButton().controlSize(.small)
                 }
                 if succeeded {
-                    InlineNotice(tone: .success, icon: "checkmark.circle", title: selection.mode == .restore ? "프로젝트를 보관함에서 꺼냈습니다" : "저장했습니다")
+                    InlineNotice(tone: .success, icon: "checkmark.circle", title: selection.mode == .restore ? String(localized: "프로젝트를 보관함에서 꺼냈습니다") : String(localized: "저장했습니다"))
                 }
             }
         } footer: {
@@ -219,7 +219,7 @@ struct ProjectManageView: View {
     /// new-project sheet (web .field / .input, accent ring on the focused one).
     private var form: some View {
         VStack(alignment: .leading, spacing: 14) {
-            SetupField("이름") {
+            SetupField(String(localized: "이름")) {
                 TextField("프로젝트 이름", text: $name)
                     .labelsHidden()
                     .font(SetupFont.input)
@@ -228,7 +228,7 @@ struct ProjectManageView: View {
                     .ceField(focused: nameFocused)
             }
             if selection.mode == .settings {
-                SetupField("폴더", hint: "새로 뜨는 세션부터 적용됩니다.") {
+                SetupField(String(localized: "폴더"), hint: String(localized: "새로 뜨는 세션부터 적용됩니다.")) {
                     HStack {
                         Text(cwd).font(CEFont.mono).lineLimit(2).textSelection(.enabled)
                         Spacer()
@@ -254,7 +254,7 @@ struct ProjectManageView: View {
     /// What archiving does, then anything that stops it: one amber box, a row per reason, each with a quiet link to the
     /// screen where it is settled (instead of a stack of separate warning boxes).
     @ViewBuilder private var archiveBody: some View {
-        explanation("목록에서 숨기고 IAMCEO가 관리하는 세션을 잠재웁니다. 기록은 남으며 보관함에서 꺼낼 수 있습니다. 직접 실행한 CLI는 종료하지 않습니다.")
+        explanation(String(localized: "목록에서 숨기고 IAMCEO가 관리하는 세션을 잠재웁니다. 기록은 남으며 보관함에서 꺼낼 수 있습니다. 직접 실행한 CLI는 종료하지 않습니다."))
         let rows = blockers
         if !rows.isEmpty {
             let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
@@ -269,7 +269,7 @@ struct ProjectManageView: View {
                     .accessibilityAddTraits(.isHeader)
                     Spacer(minLength: 8)
                     // Settled it on another screen? Check again here (quiet, next to the list it refreshes).
-                    quietLink("다시 확인", icon: "arrow.clockwise", action: recheck)
+                    quietLink(String(localized: "다시 확인"), icon: "arrow.clockwise", action: recheck)
                         .disabled(!canRecheck)
                         .help("정리한 뒤 다시 확인합니다")
                 }
@@ -297,7 +297,7 @@ struct ProjectManageView: View {
                     .help(row.1)
             }
             Spacer(minLength: 8)
-            quietLink("\(row.2.title)에서 확인", trailingChevron: true) {
+            quietLink(String(localized: "\(row.2.title)에서 확인"), trailingChevron: true) {
                 Task { await store.selectProject(id: selection.projectID); router.showInMainWindow(row.2); dismiss() }
             }
         }
@@ -342,14 +342,14 @@ struct ProjectManageView: View {
             await store.loadArchivedProjects()
             guard !Task.isCancelled, namespace == store.writeNamespace else { return }
             if let project = project { name = project.name; cwd = project.cwd; loaded = true }
-            else { error = store.archiveError ?? "프로젝트를 찾을 수 없습니다" }
+            else { error = store.archiveError ?? String(localized: "프로젝트를 찾을 수 없습니다") }
             return
         }
         if store.isDemo {
             if store.state?.project.id == selection.projectID { snapshot = store.state; name = project?.name ?? ""; cwd = project?.cwd ?? "" }
             return
         }
-        guard let api = store.api else { error = "서버에 연결해 주세요"; return }
+        guard let api = store.api else { error = String(localized: "서버에 연결해 주세요"); return }
         do {
             let result: ProjectState = try await api.request("/api/projects/\(APIClient.segment(selection.projectID))/state")
             guard !Task.isCancelled, namespace == store.writeNamespace, result.project.id == selection.projectID else { return }
@@ -382,7 +382,7 @@ struct ProjectManageView: View {
             else { dismiss() }
         } else {
             guard namespace == store.writeNamespace else { return }
-            error = store.errorMessage.map(friendlyError) ?? "변경하지 못했습니다. 다시 확인해 주세요."
+            error = store.errorMessage.map(friendlyError) ?? String(localized: "변경하지 못했습니다. 다시 확인해 주세요.")
             if selection.mode == .archive { loaded = false }
         }
     }
@@ -427,9 +427,9 @@ private struct ProjectManagementSheets: ViewModifier {
                     let notice = ProjectCreationNotice.shared
                     if notice.namespace == ProjectCreationNotice.scope(store), let message = notice.message {
                         InlineNotice(tone: notice.failed ? .attention : notice.running ? .neutral : .success,
-                                     title: notice.running ? "프로젝트 준비 중" : notice.failed ? "프로젝트 만들기 결과" : "프로젝트를 만들었습니다",
+                                     title: notice.running ? String(localized: "프로젝트 준비 중") : notice.failed ? String(localized: "프로젝트 만들기 결과") : String(localized: "프로젝트를 만들었습니다"),
                                      detail: message,
-                                     actionTitle: notice.projectID == nil ? "닫기" : notice.failed ? "프로젝트 확인" : "총괄에게 첫 일 맡기기") {
+                                     actionTitle: notice.projectID == nil ? String(localized: "닫기") : notice.failed ? String(localized: "프로젝트 확인") : String(localized: "총괄에게 첫 일 맡기기")) {
                             if let id = notice.projectID {
                                 Task { await ProjectCreationNotice.openProject(id, store: store, router: router) }
                             } else { notice.clear() }

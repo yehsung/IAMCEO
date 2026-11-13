@@ -66,6 +66,8 @@ struct ComposerBar: View {
     @State private var dropTargeted = false
     /// Mac: the recipient list (web .cmp-menu) is open.
     @State private var showTargets = false
+    /// F1: 연결되면 보낼 글 목록(고치기·지우기)이 열려 있다.
+    @State private var showOutbox = false
     #if os(macOS)
     @State private var focused = false
     @State private var attachmentReceiverID = UUID()
@@ -82,7 +84,7 @@ struct ComposerBar: View {
     private var missingTarget: Bool { target != nil && store.state != nil && recipient == nil }
     /// The project lead (총괄, or 본사 AI on HQ) receives messages with no explicit target.
     private var leadName: String { store.leadRankName }
-    private var recipientName: String { missingTarget ? "명부에 없는 대상" : recipient?.name ?? leadName }
+    private var recipientName: String { missingTarget ? String(localized: "명부에 없는 대상") : recipient?.name ?? leadName }
     private var sending: Bool { store.selectedProjectID.map { store.isSending(projectID: $0, targetMemberID: target) } ?? false }
     private var draftText: String { drafts.text(for: key) }
     private var files: [Attachment] { drafts.files(for: key) }
@@ -91,7 +93,8 @@ struct ComposerBar: View {
     private var attempt: MessageSubmission? {
         Self.pendingAttempt(in: store, key: key)
     }
-    @MainActor private static func pendingAttempt(in store: AppStore, key: String) -> MessageSubmission? {
+    /// 이 입력칸 키의 아직 끝나지 않은 전송 기록. 보내기와 '연결되면 보내기'(AppStore.queueBlockReason)가 같이 본다.
+    @MainActor static func pendingAttempt(in store: AppStore, key: String) -> MessageSubmission? {
         store.submissions?.messages(namespace: store.drafts.namespace).first {
             $0.draft.key == key && $0.status != .refused && $0.failureDisposition != .retained
                 && $0.failureDisposition != .dismissed && $0.failureDisposition != .restored
@@ -126,21 +129,21 @@ struct ComposerBar: View {
     @MainActor static func sendBlockReason(in store: AppStore, targetMemberID: String?) -> String? {
         let drafts = store.drafts
         let key = DraftStore.key(project: store.selectedProjectID, target: targetMemberID)
-        guard store.canWrite else { return store.writeBlockedReason ?? "최신 상태를 확인한 뒤 보내 주세요." }
-        guard let project = store.selectedProjectID else { return "프로젝트를 고른 뒤 보내 주세요." }
-        if store.isSending(projectID: project, targetMemberID: targetMemberID) { return "앞선 글을 보내는 중입니다. 끝난 뒤 다시 보내 주세요." }
+        guard store.canWrite else { return store.writeBlockedReason ?? String(localized: "최신 상태를 확인한 뒤 보내 주세요.") }
+        guard let project = store.selectedProjectID else { return String(localized: "프로젝트를 고른 뒤 보내 주세요.") }
+        if store.isSending(projectID: project, targetMemberID: targetMemberID) { return String(localized: "앞선 글을 보내는 중입니다. 끝난 뒤 다시 보내 주세요.") }
         let attempt = pendingAttempt(in: store, key: key)
         let failures = store.submissions?.failureNotices(namespace: drafts.namespace, key: key, drafts: drafts) ?? []
         if attempt?.status == .checking || attempt?.status == .accepted || failures.contains(where: { $0.status == .checking }) {
-            return "접수 확인 중입니다. 결과를 확인한 뒤 다시 보내 주세요."
+            return String(localized: "접수 확인 중입니다. 결과를 확인한 뒤 다시 보내 주세요.")
         }
         if let attempt, (attempt.restoredDraft ?? attempt.draft).revision != drafts.revision(for: key) {
-            return "이전 글의 접수 결과를 확인하고 편집한 글 사용을 눌러 주세요."
+            return String(localized: "이전 글의 접수 결과를 확인하고 편집한 글 사용을 눌러 주세요.")
         }
-        if !store.composerUploads.pending(for: key, drafts: drafts).isEmpty { return "첨부를 올리는 중입니다. 끝난 뒤 보내 주세요." }
-        if !drafts.uploadFailures(for: key).isEmpty { return "올리지 못한 첨부를 확인하거나 빼고 보내 주세요." }
-        if let error = drafts.persistenceError { return "초안을 저장하지 못했습니다: \(error)" }
-        if let targetMemberID, !store.members.contains(where: { $0.id == targetMemberID }) { return "명부에서 빠진 대상입니다. 보낼 대상을 바꿔 주세요." }
+        if !store.composerUploads.pending(for: key, drafts: drafts).isEmpty { return String(localized: "첨부를 올리는 중입니다. 끝난 뒤 보내 주세요.") }
+        if !drafts.uploadFailures(for: key).isEmpty { return String(localized: "올리지 못한 첨부를 확인하거나 빼고 보내 주세요.") }
+        if let error = drafts.persistenceError { return String(localized: "초안을 저장하지 못했습니다: \(error)") }
+        if let targetMemberID, !store.members.contains(where: { $0.id == targetMemberID }) { return String(localized: "명부에서 빠진 대상입니다. 보낼 대상을 바꿔 주세요.") }
         // A refused restoration is proven absent. A refreshed runner-down hint must not turn
         // Return into a no-op: the reachable server can give the new send its definitive result.
         let restoredRefusal = store.submissions?.messages(namespace: drafts.namespace).contains {
@@ -148,9 +151,9 @@ struct ComposerBar: View {
                 && ($0.status == .refused || $0.status == .notAccepted)
                 && $0.restoredDraft.map(drafts.isCurrentGeneration) == true
         } == true
-        if !store.uiCanWrite && !restoredRefusal { return store.writeBlockedReason ?? "프로젝트의 실행 연결을 확인해 주세요." }
+        if !store.uiCanWrite && !restoredRefusal { return store.writeBlockedReason ?? String(localized: "프로젝트의 실행 연결을 확인해 주세요.") }
         if drafts.text(for: key).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && drafts.files(for: key).isEmpty {
-            return "보낼 글이나 첨부를 넣어 주세요."
+            return String(localized: "보낼 글이나 첨부를 넣어 주세요.")
         }
         return nil
     }
@@ -169,15 +172,15 @@ struct ComposerBar: View {
 
     /// Web placeholders.
     private var placeholder: String {
-        if missingTarget { return "명부에 없는 대상에게는 보낼 수 없습니다" }
-        if let recipient { return "\(recipient.name)에게 직접 지시" }
-        if store.state?.project.isHq == true { return "본사 AI에게 — 새 프로젝트 만들기 등" }
-        return namesLead ? "\(leadName)에게 지시나 질문" : "지시나 질문"
+        if missingTarget { return String(localized: "명부에 없는 대상에게는 보낼 수 없습니다") }
+        if let recipient { return String(localized: "\(recipient.name)에게 직접 지시") }
+        if store.state?.project.isHq == true { return String(localized: "본사 AI에게 — 새 프로젝트 만들기 등") }
+        return namesLead ? String(localized: "\(leadName)에게 지시나 질문") : String(localized: "지시나 질문")
     }
 
     private var blockedReason: (text: String, tone: Tone)? {
         guard !canSend, let reason = store.writeBlockedReason else { return nil }
-        return (friendlyError(reason), store.isDemo ? .dim : .attention)
+        return (friendlyError(reason), .attention)
     }
 
     @State private var omittedContextFileID: String?
@@ -206,7 +209,32 @@ struct ComposerBar: View {
     /// Why sending is off (sample, offline, runner connection), shown quietly beside the target chip. Errors and a
     /// removed target take their own line instead.
     private var quietBlock: (text: String, tone: Tone)? {
-        blockedReason
+        queueHint ?? blockedReason
+    }
+
+    // MARK: F1 연결되면 보내기
+
+    /// 지금 보낼 수 없는 까닭이 '서버에 연결되지 않음'뿐이다. 보내기가 '연결되면 보내기'로 바뀐다.
+    private var queueMode: Bool { !canSend && store.waitsForConnection }
+    private var canQueue: Bool { queueMode && store.queueBlockReason(targetMemberID: target) == nil }
+    /// 연결을 기다리는 동안 대상 옆의 조용한 안내. 첨부처럼 대기열에 둘 수 없는 글이면 그 까닭을 말한다.
+    private var queueHint: (text: String, tone: Tone)? {
+        guard queueMode else { return nil }
+        if hasDraftContent, let reason = store.queueBlockReason(targetMemberID: target) { return (reason, .attention) }
+        return (String(localized: "연결되지 않음 · 보내면 연결된 뒤 보냅니다"), .dim)
+    }
+    /// 이 프로젝트의 연결되면 보낼 글. 멈췄으면 확인이 필요하다고만 짧게(까닭은 목록에서).
+    private var outboxLine: (text: String, paused: Bool)? {
+        let count = store.queuedMessages.count
+        // 보관했거나 지운 프로젝트에 둔 글만 남았으면 그것을 확인하고 지울 길을 연다(4차 리뷰 data-5).
+        if count == 0 {
+            let orphans = store.orphanQueuedMessages.count
+            if orphans > 0 { return (String(localized: "보낼 곳이 없는 글 \(orphans)개 · 확인이 필요합니다"), true) }
+        }
+        guard count > 0 else { return nil }
+        if store.outboxPausedReason != nil { return (String(localized: "보내기를 멈춘 글 \(count)개 · 확인이 필요합니다"), true) }
+        if store.outboxFlushing { return (String(localized: "연결되면 보낼 글 \(count)개 · 보내는 중"), false) }
+        return (String(localized: "연결되면 보낼 글 \(count)개 · 연결되면 순서대로 보냅니다"), false)
     }
 
     var body: some View {
@@ -257,10 +285,12 @@ struct ComposerBar: View {
             switch result {
             case .success(let urls):
                 if let context = importContext { store.composerUploads.upload(urls, context: context, store: store) }
-                else if !urls.isEmpty { recordUploadError("파일을 받을 초안을 확인하지 못했습니다") }
+                else if !urls.isEmpty { recordUploadError(String(localized: "파일을 받을 초안을 확인하지 못했습니다")) }
             case .failure(let error): recordUploadError(friendlyLoadError(error, what: "첨부", verb: "받지"), context: importContext)
             }
         }
+        // F1: 연결되면 보낼 글(고치기·지우기·이어서 보내기).
+        .sheet(isPresented: $showOutbox) { OutboxSheet() }
         #if os(iOS)
         .photosPicker(isPresented: $choosingPhotos, selection: $photoSelection, maxSelectionCount: 10,
                       selectionBehavior: .ordered, matching: .any(of: [.images, .videos]),
@@ -268,7 +298,7 @@ struct ComposerBar: View {
         .onChange(of: photoSelection) { _, items in
             guard !items.isEmpty else { return }
             photoSelection = []
-            guard let context = photoContext else { recordUploadError("사진을 받을 초안을 확인하지 못했습니다"); return }
+            guard let context = photoContext else { recordUploadError(String(localized: "사진을 받을 초안을 확인하지 못했습니다")); return }
             loadPhotos(items, context: context)
         }
         .fullScreenCover(isPresented: $takingPhoto) {
@@ -337,7 +367,7 @@ struct ComposerBar: View {
             }
             if let block = quietBlock {
                 HStack(spacing: 5) {
-                    Image(systemName: store.isDemo ? "eye" : "wifi.exclamationmark").font(.system(size: 10.5, weight: .semibold))
+                    Image(systemName: queueMode ? "clock" : "wifi.exclamationmark").font(.system(size: 10.5, weight: .semibold))
                     Text(block.text).lineLimit(1).truncationMode(.tail)
                 }
                 .font(hintFont).foregroundStyle(block.tone.color)
@@ -369,7 +399,7 @@ struct ComposerBar: View {
     private var targetEntries: [ComposerTargetEntry] {
         let lead = store.members.first { $0.kind == "conductor" || $0.kind == "root" }
         let workers = store.members.filter { $0.kind == "worker" }
-        return [ComposerTargetEntry(memberID: nil, name: leadName, sub: "기본", status: lead?.status)]
+        return [ComposerTargetEntry(memberID: nil, name: leadName, sub: String(localized: "기본"), status: lead?.status)]
             + workers.map { member in
                 let sub = [member.handle.isEmpty ? nil : "@\(member.handle)", member.role.isEmpty ? nil : member.role]
                     .compactMap { $0 }.joined(separator: " · ")
@@ -381,7 +411,7 @@ struct ComposerBar: View {
     /// list (name, @handle · role, status); iPhone keeps the system menu with the same lines.
     @ViewBuilder private var targetChip: some View {
         let direct = recipient != nil && !missingTarget
-        let label = missingTarget ? "명부에 없는 대상" : recipient.map { "@\($0.name)" } ?? leadName
+        let label = missingTarget ? String(localized: "명부에 없는 대상") : recipient.map { "@\($0.name)" } ?? leadName
         #if os(macOS)
         Button { showTargets.toggle() } label: {
             HStack(spacing: 5) {
@@ -529,19 +559,19 @@ struct ComposerBar: View {
             notice(reason, icon: "exclamationmark.circle", color: CE.attention)
         }
         if checkingAttempt {
-            notice("접수 확인 중 · 글과 첨부는 보관했습니다", icon: "clock", color: CE.attention,
-                   actionTitle: "접수 확인", action: { Task { await store.recoverWrites() } })
+            notice(String(localized: "접수 확인 중 · 글과 첨부는 보관했습니다"), icon: "clock", color: CE.attention,
+                   actionTitle: String(localized: "접수 확인"), action: { Task { await store.recoverWrites() } })
         } else if let error = drafts.persistenceError {
             notice(friendlyLoadError(APIError(status: 0, message: error), what: "초안", verb: "저장하지"), icon: "exclamationmark.circle", color: CE.danger)
         } else if pendingUploads.isEmpty, let missing = missingUploads.first {
-            notice("첨부 \(missingUploads.count)개를 확인하지 못했습니다: \(missing.name): \(friendlyLoadError(APIError(status: 0, message: missing.detail), what: "첨부", verb: "올리지"))", icon: "exclamationmark.circle", color: CE.danger,
-                   actionTitle: "빠진 첨부 빼기", action: {
+            notice(String(localized: "첨부 \(missingUploads.count)개를 확인하지 못했습니다: \(missing.name): \(friendlyLoadError(APIError(status: 0, message: missing.detail), what: "첨부", verb: "올리지"))"), icon: "exclamationmark.circle", color: CE.danger,
+                   actionTitle: String(localized: "빠진 첨부 빼기"), action: {
                        for failure in missingUploads { store.composerUploads.cancel(failure.id, drafts: drafts) }
                        drafts.dismissUploadFailures(for: key)
                    })
         } else if let attempt, editedAttempt {
-            notice("이전 글은 접수되지 않았습니다. 편집한 글과 첨부는 남아 있습니다.", icon: "clock", color: CE.attention,
-                   actionTitle: "편집한 글 사용", action: {
+            notice(String(localized: "이전 글은 접수되지 않았습니다. 편집한 글과 첨부는 남아 있습니다."), icon: "clock", color: CE.attention,
+                   actionTitle: String(localized: "편집한 글 사용"), action: {
                        guard attempt.status == .notAccepted || attempt.status == .prepared else { return }
                        do { try store.submissions?.refuseMessage(id: attempt.id) }
                        catch { store.errorMessage = friendlyLoadError(error, what: "이전 전송", verb: "정리하지") }
@@ -549,8 +579,13 @@ struct ComposerBar: View {
         } else if let intakeNotice = store.composerUploads.notice {
             notice(intakeNotice, icon: "paperclip", color: CE.attention)
         } else if missingTarget {
-            notice("명부에서 빠진 대상입니다. 쓰던 글은 그대로 있습니다.", icon: "person.crop.circle.badge.xmark", color: CE.attention,
-                   actionTitle: "\(leadName)에게 보내기로 바꾸기", action: { target = nil })
+            notice(String(localized: "명부에서 빠진 대상입니다. 쓰던 글은 그대로 있습니다."), icon: "person.crop.circle.badge.xmark", color: CE.attention,
+                   actionTitle: String(localized: "\(leadName)에게 보내기로 바꾸기"), action: { target = nil })
+        }
+        // F1: 이 프로젝트에 연결되면 보낼 글이 있다. '보기'에서 고치거나 지운다.
+        if let outbox = outboxLine {
+            notice(outbox.text, icon: "clock", color: outbox.paused ? CE.attention : CE.ink2,
+                   actionTitle: String(localized: "보기"), action: { showOutbox = true })
         }
     }
 
@@ -558,7 +593,7 @@ struct ComposerBar: View {
     /// Kept beside newer text: what was not sent, why, and three actions on their own row.
     private func failureNotice(_ failure: MessageSubmission) -> some View {
         let retained = failure.failureDisposition == .retained
-        let reason = friendlyError(failure.failureReason ?? "서버가 접수하지 않았습니다")
+        let reason = friendlyError(failure.failureReason ?? String(localized: "서버가 접수하지 않았습니다"))
         return HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: "exclamationmark.circle")
                 .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(CE.danger)
@@ -570,22 +605,22 @@ struct ComposerBar: View {
                     Text(reason).foregroundStyle(CE.ink2)
                         .lineLimit(isMac ? 1 : 2).truncationMode(.tail)
                     HStack(spacing: 16) {
-                        failureAction("다시 보내기", disabled: !store.canWrite || sending || checkingAttempt || missingTarget) {
+                        failureAction(String(localized: "다시 보내기"), disabled: !store.canWrite || sending || checkingAttempt || missingTarget) {
                             Task { await store.retryFailedMessage(id: failure.id) }
                         }
-                        failureAction("입력칸에 넣기", disabled: sending || checkingAttempt) {
+                        failureAction(String(localized: "입력칸에 넣기"), disabled: sending || checkingAttempt) {
                             do { try store.submissions?.insertFailedMessage(id: failure.id, drafts: drafts) }
                             catch { store.errorMessage = friendlyLoadError(error, what: "글", verb: "되돌리지") }
                         }
-                        failureAction("버리기", color: CE.ink2, disabled: sending || checkingAttempt) {
+                        failureAction(String(localized: "버리기"), color: CE.ink2, disabled: sending || checkingAttempt) {
                             do { try store.submissions?.dismissMessageFailure(id: failure.id) }
                             catch { store.errorMessage = friendlyLoadError(error, what: "글", verb: "정리하지") }
                         }
                     }
                     .padding(.top, 1)
                 } else {
-                    Text("보내지 못했습니다: \(reason)"
-                         + (failure.failureDisposition == .restored ? (reason.hasSuffix(".") ? " " : ". ") + "글은 입력칸에 되돌려 두었습니다" : ""))
+                    Text(String(localized: "보내지 못했습니다: \(reason)")
+                         + (failure.failureDisposition == .restored ? (reason.hasSuffix(".") ? " " : ". ") + String(localized: "글은 입력칸에 되돌려 두었습니다") : ""))
                         .foregroundStyle(CE.danger)
                         .lineLimit(isMac ? 1 : 3).truncationMode(.tail)
                 }
@@ -661,11 +696,11 @@ struct ComposerBar: View {
 
             #if os(macOS)
             MacComposerTextView(text: text, focused: Binding(get: { focused }, set: { focused = $0 }),
-                                placeholder: "\(recipientName)에게 보낼 글", intake: attachmentIntake,
+                                placeholder: String(localized: "\(recipientName)에게 보낼 글"), intake: attachmentIntake,
                                 canReceive: { macAttachmentPolicy.canAccept && attachmentIntake.receive != nil && store.selectedProjectID != nil },
                                 receive: { attachmentIntake.accept($0, policy: macAttachmentPolicy) },
                                 submit: { Task { await send() } },
-                                rejectionReason: { macAttachmentPolicy.reason ?? "입력칸을 준비 중이라 첨부하지 못했습니다" },
+                                rejectionReason: { macAttachmentPolicy.reason ?? String(localized: "입력칸을 준비 중이라 첨부하지 못했습니다") },
                                 textRevision: { drafts.revision(for: draftKey) }, drafts: drafts, draftKey: draftKey)
                 .id([drafts.namespace, draftKey])
                 .overlay(alignment: .topLeading) {
@@ -676,10 +711,9 @@ struct ComposerBar: View {
                 }
                 .padding(.horizontal, 6).padding(.vertical, 11)
                 .frame(maxWidth: .infinity, minHeight: 44)
-                .disabled(store.isDemo)
             #else
             IOSComposerTextView(text: text, focused: Binding(get: { focused }, set: { focused = $0 }),
-                                placeholder: "\(recipientName)에게 보낼 글",
+                                placeholder: String(localized: "\(recipientName)에게 보낼 글"),
                                 textRevision: { drafts.revision(for: draftKey) }, drafts: drafts, draftKey: draftKey)
                 .id([drafts.namespace, draftKey])
                 .overlay(alignment: .topLeading) {
@@ -689,19 +723,20 @@ struct ComposerBar: View {
                 }
                 .padding(.horizontal, 6).padding(.vertical, 11)
                 .frame(minHeight: 44)
-                .disabled(store.isDemo && !LaunchOptions.reviewTyping)
             #endif
 
             Button { Task { await send() } } label: {
                 Group {
                     if sending { ProgressView().controlSize(.small).tint(.white) }
-                    else { Image(systemName: "arrow.up").font(.system(size: 16, weight: .bold)) }
+                    // F1: 연결을 기다리는 동안은 '연결되면 보내기'(시계).
+                    else { Image(systemName: queueMode ? "clock" : "arrow.up").font(.system(size: 16, weight: .bold)) }
                 }
             }
-            .buttonStyle(ComposerSendStyle(active: canSend || sending))
-            .disabled(!canSend)
-            .help(isMac ? "보내기 (↩) · 줄바꿈 ⇧↩" : "보내기")
-            .accessibilityLabel("\(recipientName)에게 보내기")
+            .buttonStyle(ComposerSendStyle(active: canSend || sending || canQueue))
+            .disabled(!canSend && !canQueue)
+            .help(queueMode ? (isMac ? String(localized: "연결되면 보내기 (↩)") : String(localized: "연결되면 보내기"))
+                            : (isMac ? String(localized: "보내기 (↩) · 줄바꿈 ⇧↩") : String(localized: "보내기")))
+            .accessibilityLabel(queueMode ? String(localized: "연결되면 \(recipientName)에게 보내기") : String(localized: "\(recipientName)에게 보내기"))
         }
     }
 
@@ -747,7 +782,7 @@ struct ComposerBar: View {
         Task {
             let allowed = await AVCaptureDevice.requestAccess(for: .video)
             guard allowed else {
-                recordUploadError("설정에서 카메라 접근을 허용해 주세요", context: context)
+                recordUploadError(String(localized: "설정에서 카메라 접근을 허용해 주세요"), context: context)
                 return
             }
             guard uploadIsCurrent(context) else { return }
@@ -800,7 +835,7 @@ struct ComposerBar: View {
     #if os(macOS)
     private var macAttachmentPolicy: MacAttachmentPolicy {
         MacAttachmentPolicy(archived: store.isArchive || store.state?.project.archived == true,
-                            demo: store.isDemo, connected: store.connectionStatus == .connected,
+                            connected: store.connectionStatus == .connected,
                             writable: canAttach && store.selectedProjectID != nil,
                             missingTarget: missingTarget, composerCovered: router.memberID != nil)
     }
@@ -814,7 +849,7 @@ struct ComposerBar: View {
 
     private func receiveMacAttachments(_ items: [MacAttachmentItem]) -> Bool {
         guard router.memberID == nil else {
-            recordUploadError("구성원 상세를 닫은 뒤 첨부해 주세요")
+            recordUploadError(String(localized: "구성원 상세를 닫은 뒤 첨부해 주세요"))
             return false
         }
         guard let context = uploadContext() else { return false }
@@ -833,6 +868,14 @@ struct ComposerBar: View {
 
     private func send() async {
         drafts.commitEditors(for: key)
+        // F1: 연결을 기다리는 동안 보내면 '연결되면 보낼 글'로 둔다(기기에 남긴 뒤에 입력칸을 비운다).
+        if queueMode {
+            sentTo = nil; acceptedMessage = nil
+            if store.queueMessage(targetMemberID: target) {
+                outboxAnnounce(String(localized: "연결되면 \(recipientName)에게 보냅니다"))
+            }
+            return
+        }
         let snapshot = drafts.snapshot(for: key)
         let connection = drafts.connectionGeneration
         let project = store.selectedProjectID
@@ -869,7 +912,7 @@ struct ComposerBar: View {
             return nil
         }
         guard let project = store.selectedProjectID else {
-            recordUploadError("프로젝트를 고른 뒤 첨부해 주세요")
+            recordUploadError(String(localized: "프로젝트를 고른 뒤 첨부해 주세요"))
             return nil
         }
         return ComposerUploadContext(projectID: project, targetMemberID: target, token: drafts.uploadToken(for: key))
@@ -1270,7 +1313,7 @@ private struct ComposerChipThumb: View {
 
     private func load() async {
         if let cached = composerThumbCache[file.id] { image = cached; return }
-        guard !store.isDemo, file.size <= 20 * 1024 * 1024, let api = store.api,
+        guard file.size <= 20 * 1024 * 1024, let api = store.api,
               let data = try? await api.attachmentData(file),
               let source = CGImageSourceCreateWithData(data as CFData, nil) else { return }
         let options: [CFString: Any] = [

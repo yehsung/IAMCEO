@@ -71,7 +71,7 @@ private struct LocalMarkdownBody: View {
     var body: some View {
         let head = LocalTextPreview.markdownHead(text)
         MarkdownText(text: head.text)
-        if head.cut { MetaText(["긴 문서라 앞부분만 표시합니다", "전체는 '내용 복사'"]) }
+        if head.cut { MetaText([String(localized: "긴 문서라 앞부분만 표시합니다"), String(localized: "전체는 '내용 복사'")]) }
     }
 }
 
@@ -116,7 +116,7 @@ private struct LocalCodeBody: View {
             if !Task.isCancelled { prepared = model }
         }
         if let model, model.cut {
-            MetaText(["미리보기는 앞 \(model.shownLines.formatted())줄까지 표시합니다", "전체 \(model.totalLines.formatted())줄"])
+            MetaText([String(localized: "미리보기는 앞 \(model.shownLines.formatted())줄까지 표시합니다"), String(localized: "전체 \(model.totalLines.formatted())줄")])
         }
     }
 }
@@ -146,7 +146,7 @@ struct LocalFileView: View {
         CESheet((path as NSString).lastPathComponent, subtitle: path, icon: "doc.text.magnifyingglass", width: 760) {
             VStack(alignment: .leading, spacing: 14) {
                 if let failure {
-                    InlineNotice(title: "파일을 열 수 없습니다", detail: failure)
+                    InlineNotice(title: String(localized: "파일을 열 수 없습니다"), detail: failure)
                 }
                 if let preview {
                     MetaText([kindLabel(preview.info), fileSize(preview.info.size), modified(preview.info.modifiedAt)])
@@ -183,14 +183,14 @@ struct LocalFileView: View {
         .task(id: "\(projectID):\(path):\(store.api.map { String(describing: ObjectIdentifier($0)) } ?? "")") {
             preview = nil; html = nil; rule = nil; host = nil; failure = nil
             if let sample { preview = sample; return }
-            guard let api = store.api else { failure = "서버에 연결된 뒤에 열 수 있습니다"; return }
+            guard let api = store.api else { failure = String(localized: "서버에 연결된 뒤에 열 수 있습니다"); return }
             host = await FileHostConnection.current(api)
             do {
                 let loaded = try await api.localFile(projectID: projectID, path: path)
                 guard store.stillCurrent(api, project: projectID), !Task.isCancelled else { return }
                 preview = loaded
                 if loaded.info.kind == "html" {
-                    guard let compiled = await artifactBlockRule() else { throw APIError(status: 0, message: "안전한 미리보기를 준비하지 못했습니다") }
+                    guard let compiled = await artifactBlockRule() else { throw APIError(status: 0, message: String(localized: "안전한 미리보기를 준비하지 못했습니다")) }
                     let rendered = try await api.localFileHTML(projectID: projectID, path: path)
                     guard store.stillCurrent(api, project: projectID), !Task.isCancelled else { return }
                     rule = compiled; html = rendered
@@ -220,11 +220,11 @@ struct LocalFileView: View {
                     }
                 }
             }.frame(maxHeight: 520)
-            if rows.count > 1000 || rows.contains(where: { $0.count > 50 }) { MetaText(["미리보기는 1,000행·50열까지 표시합니다"]) }
+            if rows.count > 1000 || rows.contains(where: { $0.count > 50 }) { MetaText([String(localized: "미리보기는 1,000행·50열까지 표시합니다")]) }
         } else if let data = preview.pdfData {
             LocalPDFPreview(data: data).frame(height: 520)
         } else if preview.info.kind == "xlsx" || preview.info.previewAvailable == false {
-            CompactEmpty(icon: "tablecells", title: "미리보기 불가", detail: preview.info.previewNote ?? "파일을 열어 내용을 확인해 주세요")
+            CompactEmpty(icon: "tablecells", title: String(localized: "미리보기 불가"), detail: preview.info.previewNote ?? String(localized: "파일을 열어 내용을 확인해 주세요"))
             Button("열기") { Task { await openOriginal() } }.ceSecondaryButton().disabled(publishing)
         } else if let text = preview.info.content {
             if ["md", "markdown"].contains((preview.info.name as NSString).pathExtension.lowercased()) {
@@ -240,8 +240,8 @@ struct LocalFileView: View {
                 .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(CE.line) }
         } else {
             CompactEmpty(icon: preview.imageData == nil ? "doc" : "photo",
-                         title: preview.imageData == nil ? "여기서는 미리 볼 수 없는 형식입니다" : "이미지를 표시할 수 없습니다",
-                         detail: "자료에 올리면 자료 화면에서 열거나 받을 수 있습니다")
+                         title: preview.imageData == nil ? String(localized: "여기서는 미리 볼 수 없는 형식입니다") : String(localized: "이미지를 표시할 수 없습니다"),
+                         detail: String(localized: "자료에 올리면 자료 화면에서 열거나 받을 수 있습니다"))
         }
     }
 
@@ -266,7 +266,7 @@ struct LocalFileView: View {
 
     private func modified(_ value: String) -> String? {
         let text = relativeTime(value)
-        return text.isEmpty ? nil : "수정 \(text)"
+        return text.isEmpty ? nil : String(localized: "수정 \(text)")
     }
 
     private func copy(_ text: String) {

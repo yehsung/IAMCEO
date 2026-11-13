@@ -701,7 +701,8 @@ private final class Wave1Bodies: @unchecked Sendable {
             XCTAssertNil(message.deliveryNote, message.id)
         }
         XCTAssertEqual(state.deliveryNotices?.version, 2)
-        XCTAssertEqual(state.deliveryNotices?.members.count, 0)
+        // 서버는 팀장마다 줄을 싣는다. 모두 0이다.
+        XCTAssertTrue(state.deliveryNotices?.members.allSatisfy { $0.needsOwnerCount == 0 && $0.undeliveredCount == 0 && $0.unknownCount == 0 } == true)
         XCTAssertEqual(state.deliveryNotices?.unassigned.needsOwnerCount, 0)
         let attention = HomeAttention(members: state.members, notices: state.deliveryNotices, messages: state.messages)
         XCTAssertTrue(attention.members.isEmpty)
@@ -724,7 +725,8 @@ private final class Wave1Bodies: @unchecked Sendable {
             XCTAssertFalse(projectRailLine(project).contains("오류"), project.id)
         }
         XCTAssertNil(EngineNotice(bootstrap.engine))
-        XCTAssertNil(bootstrap.settings.permissionAcknowledged)
+        // 샘플은 권한 방식 첫 질문을 띄우지 않는다(이미 정해 둔 팀).
+        XCTAssertNotEqual(bootstrap.settings.permissionAcknowledged, false)
         // 글이 가리키는 자료·결재·팀원이 모두 있다.
         for message in state.messages {
             if let id = message.fileId { XCTAssertTrue(state.files.contains { $0.id == id }, message.id) }

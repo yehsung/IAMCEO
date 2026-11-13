@@ -114,7 +114,7 @@ extension APIClient {
             }
             return LocalFilePreview(info: try JSONDecoder().decode(LocalFileInfo.self, from: data))
         } catch let error as APIError where error.status == 404 && error.code != "LOCAL_FILE_NOT_FOUND" {
-            throw APIError(status: 404, message: "이 서버는 파일 보기를 지원하지 않습니다")
+            throw APIError(status: 404, message: String(localized: "이 서버는 파일 보기를 지원하지 않습니다"))
         }
     }
     func localFileHTML(projectID: String, path: String) async throws -> String {
@@ -123,7 +123,7 @@ extension APIClient {
         let (data, response) = try await raw("/api/projects/\(Self.segment(projectID))/local-file?\(query.percentEncodedQuery ?? "")")
         guard response.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("text/html") == true,
               response.value(forHTTPHeaderField: "Content-Security-Policy")?.contains("sandbox allow-scripts") == true,
-              let html = String(data: data, encoding: .utf8) else { throw APIError(status: 0, message: "안전한 HTML 미리보기를 받을 수 없습니다") }
+              let html = String(data: data, encoding: .utf8) else { throw APIError(status: 0, message: String(localized: "안전한 HTML 미리보기를 받을 수 없습니다")) }
         return html
     }
     func publishLocalFile(projectID: String, path: String) async throws -> FileDoc {
@@ -244,19 +244,14 @@ extension APIClient {
         return request
     }
     func downloadAttachment(_ attachment: Attachment, progress: @escaping @Sendable (Double?) -> Void) async throws -> FileResource {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpShouldSetCookies = false
-        configuration.httpCookieStorage = nil
-        configuration.urlCredentialStorage = nil
-        configuration.urlCache = nil
-        configuration.timeoutIntervalForResource = TransferTimeout.resource(bytes: attachment.size)
+        let configuration = transferConfiguration(resourceTimeout: TransferTimeout.resource(bytes: attachment.size))
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         let (url, response) = try await session.download(for: attachmentDownloadRequest(attachment), delegate: FileDownloadProgress(progress))
         defer { try? FileManager.default.removeItem(at: url) }
         try Task.checkCancellation()
         guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
-            throw APIError(status: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "파일을 받지 못했습니다. 다시 시도해 주세요.")
+            throw APIError(status: (response as? HTTPURLResponse)?.statusCode ?? 0, message: String(localized: "파일을 받지 못했습니다. 다시 시도해 주세요."))
         }
         progress(1)
         return try FileResource(api: self, downloadedURL: url, name: attachment.name)
@@ -266,7 +261,7 @@ extension APIClient {
         guard response.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("text/html") == true,
               response.value(forHTTPHeaderField: "Content-Security-Policy")?.contains("sandbox allow-scripts") == true,
               let html = String(data: data, encoding: .utf8) else {
-            throw APIError(status: 0, message: "페이지를 안전하게 열 수 없습니다. 앱과 서버 버전을 확인해 주세요.")
+            throw APIError(status: 0, message: String(localized: "페이지를 안전하게 열 수 없습니다. 앱과 서버 버전을 확인해 주세요."))
         }
         return html
     }

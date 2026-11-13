@@ -32,9 +32,9 @@ enum RankSettingsEditing {
 
     static func modelError(_ value: String, custom: Bool, title: String) -> String? {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return custom ? "\(title) 모델 이름을 넣어 주세요" : nil }
+        guard !value.isEmpty else { return custom ? String(localized: "\(title) 모델 이름을 넣어 주세요") : nil }
         if value.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,127}$"#, options: .regularExpression) == nil {
-            return "\(title) 모델 이름이 잘못되었습니다. 영문·숫자와 . _ : - [ ] 만 씁니다."
+            return String(localized: "\(title) 모델 이름이 잘못되었습니다. 영문·숫자와 . _ : - [ ] 만 씁니다.")
         }
         return nil
     }

@@ -16,20 +16,20 @@ struct ArchiveLibraryView: View {
     @State private var exportResult: ArchiveExportResult?
 
     var body: some View {
-        CESheet("보관함", subtitle: "보관한 프로젝트는 읽기 전용으로 열립니다. 꺼내면 다시 일할 수 있습니다.", icon: "archivebox", width: 560) {
+        CESheet(String(localized: "보관함"), subtitle: String(localized: "보관한 프로젝트는 읽기 전용으로 열립니다. 꺼내면 다시 일할 수 있습니다."), icon: "archivebox", width: 560) {
             VStack(alignment: .leading, spacing: CESpace.s) {
                 if let exportResult {
                     InlineNotice(tone: exportResult.failed ? .danger : .success, icon: exportResult.failed ? "exclamationmark.circle" : "checkmark.circle",
                                  title: exportResult.title, detail: exportResult.detail,
-                                 actionTitle: exportResult.file == nil ? nil : "Finder에서 보기",
+                                 actionTitle: exportResult.file == nil ? nil : String(localized: "Finder에서 보기"),
                                  action: exportResult.file.map { file in { ArchiveExport.reveal(file) } })
                 }
                 if store.isLoadingArchive && store.archivedProjects.isEmpty {
-                    EmptyTile(loading: true, title: "보관함을 불러오는 중입니다")
+                    EmptyTile(loading: true, title: String(localized: "보관함을 불러오는 중입니다"))
                 }
                 if let error = store.archiveError {
-                    InlineNotice(tone: .danger, title: "보관함을 불러오지 못했습니다", detail: error,
-                                 actionTitle: "다시 시도", action: { Task { await store.loadArchivedProjects() } })
+                    InlineNotice(tone: .danger, title: String(localized: "보관함을 불러오지 못했습니다"), detail: error,
+                                 actionTitle: String(localized: "다시 시도"), action: { Task { await store.loadArchivedProjects() } })
                 } else if !store.isLoadingArchive && store.archivedProjects.isEmpty {
                     emptyState
                 }
@@ -68,9 +68,9 @@ struct ArchiveLibraryView: View {
             do {
                 let file = try await api.exportProject(id: project.id)
                 try ArchiveExport.place(file, at: target)
-                exportResult = ArchiveExportResult(title: "내보냈습니다", detail: target.lastPathComponent, file: target, failed: false)
+                exportResult = ArchiveExportResult(title: String(localized: "내보냈습니다"), detail: target.lastPathComponent, file: target, failed: false)
             } catch {
-                exportResult = ArchiveExportResult(title: "내보내지 못했습니다", detail: ArchiveExport.friendly(error), file: nil, failed: true)
+                exportResult = ArchiveExportResult(title: String(localized: "내보내지 못했습니다"), detail: ArchiveExport.friendly(error), file: nil, failed: true)
             }
         }
     }
@@ -78,8 +78,8 @@ struct ArchiveLibraryView: View {
 
     /// Centred quiet empty state: the sheet stays small instead of a tall empty window.
     private var emptyState: some View {
-        EmptyTile(icon: "archivebox", title: "보관한 프로젝트가 없습니다",
-                  detail: "프로젝트 메뉴의 ‘보관…’으로 끝난 프로젝트를 여기로 옮길 수 있습니다.")
+        EmptyTile(icon: "archivebox", title: String(localized: "보관한 프로젝트가 없습니다"),
+                  detail: String(localized: "프로젝트 메뉴의 ‘보관…’으로 끝난 프로젝트를 여기로 옮길 수 있습니다."))
     }
 
     /// One archived project: name and folder open its read-only record (hover-lit like a list row); 꺼내기 sits in sight
@@ -227,10 +227,10 @@ struct ArchiveView: View {
                     VStack(alignment: .leading, spacing: CESpace.m) {
                         if let state = store.state {
                             if destination == .inbox {
-                                if state.decisions.isEmpty { empty("결재 기록이 없습니다") }
+                                if state.decisions.isEmpty { empty(String(localized: "결재 기록이 없습니다")) }
                                 ForEach(state.decisions) { decision in
                                     record(decision.title, detail: decision.detail,
-                                           status: decision.status == "open" ? "미처리" : "처리됨",
+                                           status: decision.status == "open" ? String(localized: "미처리") : String(localized: "처리됨"),
                                            result: [decision.choice, decision.note, decision.closeReason].compactMap { $0 }.joined(separator: "\n"))
                                         .id(decision.id)
                                 }
@@ -239,29 +239,29 @@ struct ArchiveView: View {
                                         .padding(.horizontal, 4)
                                 }
                             } else if destination == .team {
-                                if state.members.isEmpty { empty("팀원 기록이 없습니다") }
+                                if state.members.isEmpty { empty(String(localized: "팀원 기록이 없습니다")) }
                                 ForEach(state.members) { member in
                                     record(member.name, detail: member.now, status: rankName(member.kind), result: nil)
                                         .id(member.id)
                                 }
                             } else {
-                                if !state.project.now.isEmpty { record("마지막 상황", detail: state.project.now, status: "기록", result: nil) }
+                                if !state.project.now.isEmpty { record(String(localized: "마지막 상황"), detail: state.project.now, status: String(localized: "기록"), result: nil) }
                                 Text("업무 기록").font(CEFont.title).tracking(isMac ? -0.2 : 0).foregroundStyle(CE.ink)
                                     .padding(.top, 8).padding(.horizontal, 4)
                                     .accessibilityAddTraits(.isHeader)
-                                if state.todos.isEmpty && state.work.isEmpty { empty("업무 기록이 없습니다") }
+                                if state.todos.isEmpty && state.work.isEmpty { empty(String(localized: "업무 기록이 없습니다")) }
                                 ForEach(state.todos) { todo in
-                                    record(todo.title, detail: todo.detail, status: todo.done ? "완료" : "미완료", result: todo.closeReason)
+                                    record(todo.title, detail: todo.detail, status: todo.done ? String(localized: "완료") : String(localized: "미완료"), result: todo.closeReason)
                                 }
                                 ForEach(state.work) { work in
                                     record(work.title, detail: work.detail,
-                                           status: ["todo": "할 일", "doing": "진행", "done": "완료"][work.sec] ?? "업무", result: nil)
+                                           status: ["todo": String(localized: "할 일"), "doing": String(localized: "진행"), "done": String(localized: "완료")][work.sec] ?? String(localized: "업무"), result: nil)
                                 }
                             }
                         } else {
-                            if store.isLoading { EmptyTile(loading: true, title: "기록을 불러오는 중입니다") }
+                            if store.isLoading { EmptyTile(loading: true, title: String(localized: "기록을 불러오는 중입니다")) }
                             else {
-                                InlineNotice(title: "기록을 불러오지 못했습니다", actionTitle: "다시 확인", action: { Task { await store.refresh() } })
+                                InlineNotice(title: String(localized: "기록을 불러오지 못했습니다"), actionTitle: String(localized: "다시 확인"), action: { Task { await store.refresh() } })
                             }
                         }
                     }
@@ -277,7 +277,7 @@ struct ArchiveView: View {
     }
 
     private func empty(_ title: String) -> some View {
-        EmptyTile(icon: "archivebox", title: title, detail: "보관한 프로젝트는 읽기 전용입니다.")
+        EmptyTile(icon: "archivebox", title: title, detail: String(localized: "보관한 프로젝트는 읽기 전용입니다."))
     }
     private func record(_ title: String, detail: String, status: String, result: String?) -> some View {
         Plate(padding: isMac ? 18 : CESpace.l) {
@@ -309,7 +309,7 @@ struct ArchiveExportResult: Equatable {
 
 /// B 묶음: 보관함의 내보내기·지우기 도우미. 내보내기는 서버가 도는 Mac 에서만 된다.
 enum ArchiveExport {
-    static let deleteMessage = "대화·결재·업무·자료와 첨부 파일을 모두 지우고 되돌릴 수 없습니다. 필요하면 먼저 Mac 앱에서 ‘내보내기…’로 사본을 받아 두세요. 매일 만드는 백업에는 최대 4주 동안 남습니다."
+    static let deleteMessage = String(localized: "대화·결재·업무·자료와 첨부 파일을 모두 지우고 되돌릴 수 없습니다. 필요하면 먼저 Mac 앱에서 ‘내보내기…’로 사본을 받아 두세요. 매일 만드는 백업에는 최대 4주 동안 남습니다.")
 
     /// IAMCEO-<프로젝트 이름>-<날짜>.zip. 파일 이름에 못 쓰는 글자는 바꾼다.
     static func suggestedName(for project: Project, now: Date = Date()) -> String {
@@ -324,21 +324,21 @@ enum ArchiveExport {
 
     /// 지우기에 실패했을 때 시트 안에 보일 한 줄. 이유는 저장소가 남긴 문장(옛 서버 405 포함)을 그대로 쓴다.
     static func deleteFailure(_ reason: String?) -> ArchiveExportResult {
-        ArchiveExportResult(title: "지우지 못했습니다", detail: reason ?? "잠시 뒤 다시 해 주세요.", file: nil, failed: true)
+        ArchiveExportResult(title: String(localized: "지우지 못했습니다"), detail: reason ?? String(localized: "잠시 뒤 다시 해 주세요."), file: nil, failed: true)
     }
 
     static func friendly(_ error: any Error) -> String {
         guard let api = error as? APIError else { return error.localizedDescription }
-        if api.code == "LOCAL_ONLY" || api.status == 403 { return "내보내기는 서버가 도는 Mac에서만 할 수 있습니다." }
+        if api.code == "LOCAL_ONLY" || api.status == 403 { return String(localized: "내보내기는 서버가 도는 Mac에서만 할 수 있습니다.") }
         // 옛 서버에는 이 경로가 없다(경로 404). 프로젝트가 없을 때의 404 와는 문구로 가른다.
-        if api.status == 404 && api.message == "없는 경로입니다" { return "서버가 옛 버전이라 내보낼 수 없습니다. 서버를 업데이트한 뒤 다시 해 주세요." }
+        if api.status == 404 && api.message == "없는 경로입니다" { return String(localized: "서버가 옛 버전이라 내보낼 수 없습니다. 서버를 업데이트한 뒤 다시 해 주세요.") }
         return api.message
     }
 
     #if os(macOS)
     @MainActor static func chooseDestination(for project: Project) -> URL? {
         let panel = NSSavePanel()
-        panel.title = "프로젝트 내보내기"
+        panel.title = String(localized: "프로젝트 내보내기")
         panel.nameFieldStringValue = suggestedName(for: project)
         panel.allowedContentTypes = [.zip]
         panel.canCreateDirectories = true

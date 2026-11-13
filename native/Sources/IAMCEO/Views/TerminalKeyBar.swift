@@ -63,11 +63,11 @@ final class TerminalKeyBar: UIInputView, UIInputViewAudioFeedback {
             [chip("esc") { [weak self] in self?.send([0x1b]) },
              chip("tab") { [weak self] in self?.send([0x09]) },
              controlToggle(),
-             chip("⌃C", accessibility: "컨트롤 C, 중단") { [weak self] in self?.send([0x03]) }],
-            [arrow("arrow.up", "위") { [weak self] in self?.sendCursor(up: true) },
-             arrow("arrow.down", "아래") { [weak self] in self?.sendCursor(up: false) },
-             arrow("arrow.left", "왼쪽") { [weak self] in self?.sendHorizontal(left: true) },
-             arrow("arrow.right", "오른쪽") { [weak self] in self?.sendHorizontal(left: false) }],
+             chip("⌃C", accessibility: String(localized: "컨트롤 C, 중단")) { [weak self] in self?.send([0x03]) }],
+            [arrow("arrow.up", String(localized: "위")) { [weak self] in self?.sendCursor(up: true) },
+             arrow("arrow.down", String(localized: "아래")) { [weak self] in self?.sendCursor(up: false) },
+             arrow("arrow.left", String(localized: "왼쪽")) { [weak self] in self?.sendHorizontal(left: true) },
+             arrow("arrow.right", String(localized: "오른쪽")) { [weak self] in self?.sendHorizontal(left: false) }],
             ["/", "-", "|", "~"].map { text in chip(text) { [weak self] in self?.insert(text) } },
         ]
         for (index, group) in groups.enumerated() {
@@ -80,7 +80,7 @@ final class TerminalKeyBar: UIInputView, UIInputViewAudioFeedback {
         divider.backgroundColor = UIColor.white.withAlphaComponent(0.1)
         divider.translatesAutoresizingMaskIntoConstraints = false
         addSubview(divider)
-        let lower = chip(symbol: "keyboard.chevron.compact.down", accessibility: "키보드 내리기") { [weak self] in
+        let lower = chip(symbol: "keyboard.chevron.compact.down", accessibility: String(localized: "키보드 내리기")) { [weak self] in
             self?.terminal?.resignFirstResponder()
         }
         lower.translatesAutoresizingMaskIntoConstraints = false
@@ -170,7 +170,7 @@ final class TerminalKeyBar: UIInputView, UIInputViewAudioFeedback {
     private func arrow(_ symbol: String, _ name: String, action: @escaping () -> Void) -> UIButton {
         let button = UIButton(type: .custom)
         style(button, title: nil, symbol: symbol, mono: false)
-        button.accessibilityLabel = "\(name) 화살표"
+        button.accessibilityLabel = String(localized: "\(name) 화살표")
         button.addAction(UIAction { [weak self] _ in
             guard let self else { return }
             self.tick(); action()
@@ -189,13 +189,13 @@ final class TerminalKeyBar: UIInputView, UIInputViewAudioFeedback {
     private func controlToggle() -> UIButton {
         let button = UIButton(type: .custom)
         style(button, title: "ctrl", symbol: nil, mono: false)
-        button.accessibilityLabel = "컨트롤 키"
+        button.accessibilityLabel = String(localized: "컨트롤 키")
         button.addAction(UIAction { [weak self, weak button] _ in
             guard let self, let button else { return }
             self.tick()
             button.isSelected.toggle()
             self.terminal?.controlModifier = button.isSelected
-            button.accessibilityValue = button.isSelected ? "켜짐" : "꺼짐"
+            button.accessibilityValue = button.isSelected ? String(localized: "켜짐") : String(localized: "꺼짐")
         }, for: .touchUpInside)
         controlChip = button
         return button
@@ -205,7 +205,7 @@ final class TerminalKeyBar: UIInputView, UIInputViewAudioFeedback {
         DispatchQueue.main.async { [weak self] in
             guard let self, let chip = self.controlChip, self.terminal?.controlModifier != true else { return }
             chip.isSelected = false
-            chip.accessibilityValue = "꺼짐"
+            chip.accessibilityValue = String(localized: "꺼짐")
         }
     }
 

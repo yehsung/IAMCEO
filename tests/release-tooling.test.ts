@@ -440,7 +440,9 @@ test("project: iPhone 시험 타깃은 같은 시험 폴더를 쓰고, 시험을
   expect(tests.dependencies?.map(dependency => dependency.target)).toContain("IAMCEO-iOS-TestHost");
   expect(tests.settings?.base?.PRODUCT_MODULE_NAME).toBe("IAMCEOTests");
   // 시험 앱은 출시 앱과 같은 소스, 같은 모듈 이름(@testable import IAMCEO), 다른 번들 ID.
-  expect(host.sources).toEqual(app.sources);
+  // 다만 문구 표(Resources/Shared 의 xcstrings)는 출시 앱에만 넣는다: 시뮬레이터가 영어여도 시험은 한국어 원문을 본다(4차 R).
+  expect(app.sources).toContain("Resources/Shared");
+  expect(host.sources).toEqual(app.sources.filter(source => source !== "Resources/Shared"));
   expect(host.settings?.base?.PRODUCT_MODULE_NAME).toBe("IAMCEO");
   expect(host.settings?.base?.PRODUCT_BUNDLE_IDENTIFIER).not.toBe(app.settings?.base?.PRODUCT_BUNDLE_IDENTIFIER);
   expect(host.settings?.base?.PRODUCT_BUNDLE_IDENTIFIER).not.toMatch(/^com\.yehsung\.iamceo$/);

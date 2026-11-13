@@ -13,6 +13,9 @@ settings:
     CODE_SIGN_STYLE: Automatic
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     SWIFT_STRICT_CONCURRENCY: complete
+    # 앱 문구: Resources/Shared/Localizable.xcstrings(한국어 원문이 열쇠, 영어 번역). 빌드가 Swift 의 문구를 뽑아 둔다.
+    SWIFT_EMIT_LOC_STRINGS: YES
+    LOCALIZATION_PREFERS_STRING_CATALOGS: YES
 packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
@@ -55,12 +58,13 @@ targets:
         embed: false
     type: application
     platform: macOS
-    sources: [Sources/IAMCEO, Resources/macOS]
+    sources: [Sources/IAMCEO, Resources/macOS, Resources/Shared]
     info:
       path: Configuration/macOS-Info.plist
       properties:
-        CFBundleDevelopmentRegion: ko
-        CFBundleLocalizations: [ko]
+        # 한국어도 영어도 고르지 않은 기기(일본어만 등)는 영어로(4차 리뷰 lang-6). 문구 표의 원문 언어는 한국어 그대로다.
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations: [ko, en]
         CFBundleDisplayName: IAMCEO
         CFBundleURLTypes:
           - CFBundleURLName: com.iamceo.open
@@ -92,12 +96,13 @@ targets:
       SystemCapabilities:
         com.apple.Push:
           enabled: 1
-    sources: [Sources/IAMCEO, Resources/iOS]
+    sources: [Sources/IAMCEO, Resources/iOS, Resources/Shared]
     info:
       path: Configuration/iOS-Info.plist
       properties:
-        CFBundleDevelopmentRegion: ko
-        CFBundleLocalizations: [ko]
+        # 한국어도 영어도 고르지 않은 기기(일본어만 등)는 영어로(4차 리뷰 lang-6). 문구 표의 원문 언어는 한국어 그대로다.
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations: [ko, en]
         CFBundleDisplayName: IAMCEO
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
@@ -146,6 +151,7 @@ targets:
         embed: false
     type: application
     platform: iOS
+    # 문구 표(Resources/Shared)는 넣지 않는다: 시험은 한국어 원문(열쇠)을 그대로 본다. 시뮬레이터가 영어여도 같다.
     sources: [Sources/IAMCEO, Resources/iOS]
     settings:
       base:

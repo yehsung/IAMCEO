@@ -35,9 +35,9 @@ The sign-in check looks for the sign-in record a CLI leaves, so it can say "not 
 
 ### "폴더 신뢰 확인 창을 읽지 못했습니다" (could not read the folder-trust prompt)
 
-The folder-trust prompt the CLI showed did not match the text IAMCEO knows, so nothing was pressed. Press 터미널 열어 직접 답하기 (open the terminal and answer) on the card and answer with the arrow keys and Enter. This often follows a CLI update (see "Unverified CLI version").
+The folder-trust prompt the CLI showed did not match the text IAMCEO knows, so nothing was pressed. Press 터미널 열어 직접 답하기 (Open the terminal and answer) on the card and answer with the arrow keys and Enter. This often follows a CLI update (see "Unverified CLI version").
 
-### "시작이 늦어지고 있습니다" (the start is taking long)
+### "시작이 늦어지고 있습니다" (The start is taking long)
 
 More than 60 seconds have passed since the staff member was started and the CLI has not reported ready. It is not waiting for an approval. Open the terminal and see what is there; a sign-in screen, an update notice or an unfamiliar prompt are the usual causes.
 
@@ -47,7 +47,7 @@ When it starts, the server reads the installed Claude Code and Codex versions, r
 
 ### A tool-approval card closed
 
-With the permission mode set to "ask only when risky" or "ask every time", a staff member's tool-permission prompt also appears in 결재함 (Inbox) as a "도구 승인" (tool approval) card. **허용** (Allow) runs it this one time; **거절** (Deny) does not run it and tells the staff member, with your note. Pick one of the two. A note sent without choosing counts as **거절** (Deny). The card closes when you have not answered within 10 minutes, when the prompt was answered in the terminal first, or when the server stops or restarts. A closed card cannot be reopened: if the staff member is still stopped, open that staff member's terminal from the team screen and answer the prompt there. If no card appears at all, check whether that staff member runs in "don't ask" mode or is a Codex staff member (cards appear for Claude Code staff only).
+With the permission mode set to "ask only when risky" or "ask every time", a staff member's tool-permission prompt also appears in 결재함 (Inbox) as a "도구 승인" (Tool approval) card. **허용** (Allow) runs it this one time; **거절** (Deny) does not run it and tells the staff member, with your note. Pick one of the two. A note sent without choosing counts as **거절** (Deny). The card closes when you have not answered within 10 minutes, when the prompt was answered in the terminal first, or when the server stops or restarts. A closed card cannot be reopened: if the staff member is still stopped, open that staff member's terminal from the team screen and answer the prompt there. If no card appears at all, check whether that staff member runs in "don't ask" mode or is a Codex staff member (cards appear for Claude Code staff only).
 
 ### A usage limit was hit
 
@@ -60,9 +60,9 @@ A usage-limit card arrives in 결재함 (Inbox). If you wait, work continues on 
 
 The app shows a waiting banner. Nothing you sent is lost; it is delivered once the outage clears. While the server believes an AI service is down, it sends an empty check request to see whether it is back.
 
-### A delivery is left at "전달 확인 필요" (delivery needs checking)
+### A delivery is left at "전달 확인 필요" (Delivery needs checking)
 
-The server could not confirm whether your message reached the CLI. Press 다시 확인 (check again) first. When unsure, the server never types the same message twice. To resend anyway, accept the duplicate risk and resend.
+The server could not confirm whether your message reached the CLI. Press 다시 확인 (Check again) first. When unsure, the server never types the same message twice. To resend anyway, accept the duplicate risk and resend.
 
 ### A notice that the engine has a problem
 
@@ -79,15 +79,15 @@ If you replaced the Mac app with a new version through the install script or a D
 
 ### The iPhone does not connect
 
-First check that Tailscale is on on the Mac; the Mac app tells you when it is off. The rest is in [Connecting an iPhone](iphone.en.md#when-it-does-not-connect).
+First check that Tailscale is on on the Mac; the Mac app tells you when it is off. The rest is in [Connecting an iPhone](iphone.en.md#when-it-does-not-connect). If a **Last seen · n min ago** line shows at the top while it is not connected, what you see is the last state the server confirmed, and it is read-only. Messages you send meanwhile go out once connected → [While it is not connected](iphone.en.md#while-it-is-not-connected)
 
-If the iPhone app says "이 iPhone의 Tailscale이 꺼져 있어 보내지 않았습니다" (Tailscale is off on this iPhone, nothing was sent), turn Tailscale on in the iPhone's Tailscale app; it reconnects by itself. If the Mac app says the **HTTPS 주소** (HTTPS address) cannot be turned on, follow the row's message (usually: turn on HTTPS certificates in the Tailscale admin console) → [Connecting an iPhone](iphone.en.md#https-address-optional)
+If the iPhone app says "이 iPhone의 Tailscale이 꺼져 있어 보내지 않았습니다" (Tailscale is off on this iPhone, so nothing was sent), turn Tailscale on in the iPhone's Tailscale app; it reconnects by itself. If the Mac app says the **HTTPS 주소** (HTTPS address) cannot be turned on, follow the row's message (usually: turn on HTTPS certificates in the Tailscale admin console) → [Connecting an iPhone](iphone.en.md#https-address-optional)
 
 ## Making a diagnostic file
 
 A diagnostic file attached to a question or an issue makes the cause much easier to find.
 
-- **In the app:** 진단 파일 만들기 (make a diagnostic file) under 설정 → AI 모델 → 실행 환경 (when connected on this Mac)
+- **In the app:** 진단 파일 만들기 (Make a diagnostic file) under 설정 → AI 모델 → 실행 환경 (when connected on this Mac)
 - **On the command line:** `iamceo diagnose`
 
 It creates a folder `~/.iamceo/diagnostics/<time>/` and a `.zip` of the same name. The five most recent are kept.

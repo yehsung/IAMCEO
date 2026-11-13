@@ -14,20 +14,20 @@ The iPhone app reaches the IAMCEO server on your Mac through [Tailscale](https:/
 ## Connecting
 
 1. In the Mac app, open **설정 → 연결 → iPhone 연결** (Settings → Connection → Connect iPhone). A pairing QR appears.
-2. In the iPhone app's first screen press **QR 스캔** (scan QR), or point the iPhone's own Camera at the QR and tap the banner.
+2. In the iPhone app's first screen press **QR 스캔** (Scan QR), or point the iPhone's own Camera at the QR and tap the banner.
 3. The iPhone app shows the address it is about to connect to. Confirm when it is your Mac. If it is already connected to another Mac, it says this would replace it.
 
-The pairing QR does not contain the access code. It holds a code that works once within five minutes, and **a key for that device alone** goes only to the device that used it. When it runs out, press **새 QR 만들기** (new QR). A link whose address is not a Tailscale address is not opened.
+The pairing QR does not contain the access code. It holds a code that works once within five minutes, and **a key for that device alone** goes only to the device that used it. When it runs out, press **새 QR 만들기** (New QR). A link whose address is not a Tailscale address is not opened.
 
 ## Connected devices
 
 **설정 → 연결 → 연결된 기기** (Settings → Connection → Connected devices) lists what is connected to the server. It looks the same in the Mac app and the iPhone app.
 
-- Each device connected with a QR code has its own row: its name, when it last connected and when it was paired. The device you are using is marked **이 기기** (this device). **끊기** (Disconnect) cuts off that device alone, at once; the others stay connected. To use a disconnected device again, connect it with a new QR.
-- The **공용 접속 코드** (shared access code) row is the app on this Mac, any device where the code was typed in, and an iPhone paired before devices had their own keys. That row cannot be cut off one device at a time; changing the access code on the Mac cuts it off. Reconnecting an older iPhone once with a new QR moves it to a row of its own.
-- **최근 실패한 시도** (recent failed attempts) counts tries in the last 7 days with a wrong code or the key of a disconnected device. Only the address and time are kept, never the code.
+- Each device connected with a QR code has its own row: its name, when it last connected and when it was paired. The device you are using is marked **이 기기** (This device). **끊기** (Disconnect) cuts off that device alone, at once; the others stay connected. To use a disconnected device again, connect it with a new QR.
+- The **공용 접속 코드** (Shared access code) row is the app on this Mac, any device where the code was typed in, and an iPhone paired before devices had their own keys. That row cannot be cut off one device at a time; changing the access code on the Mac cuts it off. Reconnecting an older iPhone once with a new QR moves it to a row of its own.
+- **최근 실패한 시도** (Recent failed attempts) counts tries in the last 7 days with a wrong code or the key of a disconnected device. Only the address and time are kept, never the code.
 
-Instead of the QR you can type the address and the access code (**주소와 접속 코드를 직접 입력**, enter the address and access code, on the iPhone's first screen). Copy the command at the bottom of the connection screen and run it in a terminal on the Mac: it prints the address and the access code. When the app knows that Mac's server runs from inside the app (it connected to it before, or it is the Mac app on that same Mac), the command uses the path inside the app (`/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo open`); otherwise it reads `iamceo open`. Unless you set up a short name for `iamceo`, run it with the path inside the app → [Getting started](getting-started.en.md#the-command-line-tool)
+Instead of the QR you can type the address and the access code (**주소와 접속 코드를 직접 입력**, Enter the address and access code, on the iPhone's first screen). Copy the command at the bottom of the connection screen and run it in a terminal on the Mac: it prints the address and the access code. When the app knows that Mac's server runs from inside the app (it connected to it before, or it is the Mac app on that same Mac), the command uses the path inside the app (`/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo open`); otherwise it reads `iamceo open`. Unless you set up a short name for `iamceo`, run it with the path inside the app → [Getting started](getting-started.en.md#the-command-line-tool)
 
 ## HTTPS address (optional)
 
@@ -39,7 +39,7 @@ By default Tailscale encrypts the link between the iPhone and the Mac, and the a
 - **Turning it off:** press **끄기** (Turn off) in the same place. Only the Tailscale setting the server made is removed. iPhones connected through the HTTPS address are cut off; pair them again with a new QR.
 - Turning it on and off works only from the app on the Mac that runs the server.
 
-**Nothing is sent while the iPhone's Tailscale is off (from the next iPhone app).** A plain address is encrypted only while Tailscale is on, so before sending a request to a plain address the iPhone app checks that this iPhone's Tailscale is on (by the tailnet address on the Tailscale tunnel; a 100.x address from a carrier or another VPN alone does not count). If it is off, the app sends nothing and says so ("이 iPhone의 Tailscale이 꺼져 있어 보내지 않았습니다", Tailscale is off on this iPhone, nothing was sent). It reconnects by itself once Tailscale is on. An iPhone connected through the HTTPS address is protected by HTTPS and does not need this check.
+**Nothing is sent while the iPhone's Tailscale is off (from the next iPhone app).** A plain address is encrypted only while Tailscale is on, so before sending a request to a plain address the iPhone app checks that this iPhone's Tailscale is on (by the tailnet address on the Tailscale tunnel; a 100.x address from a carrier or another VPN alone does not count). If it is off, the app sends nothing and says so ("이 iPhone의 Tailscale이 꺼져 있어 보내지 않았습니다", Tailscale is off on this iPhone, so nothing was sent). It reconnects by itself once Tailscale is on. An iPhone connected through the HTTPS address is protected by HTTPS and does not need this check.
 
 ## Notifications
 
@@ -61,10 +61,25 @@ Check these in order.
 
 On the Mac, `iamceo doctor` shows the current state in its Tailscale item → [Troubleshooting](troubleshooting.en.md)
 
+## While it is not connected
+
+**The last seen state.** The App keeps the last state the server confirmed (the project list, and the team, decisions, to-dos, files and recent conversation of the project you were on) on the iPhone. If you open the App and the server is out of reach, you see that state with a **Last seen · 12 min ago** line instead of an empty connection screen. It may differ from now, so it is read-only: you cannot answer decisions or control staff. **Reconnect** on that line tries again, and as soon as the server answers the screen switches to the current state. Tapping a notification also takes you to its screen (the Inbox, for example) and opens the notification properly once connected. To change the server address, choose **Sign out** in Settings and connect again.
+
+**Messages that wait for the connection.** While disconnected, the composer's send button turns into a clock. Pressing it keeps the message on the iPhone and clears the composer; once connected, the messages are sent one at a time, oldest first. Under the composer, **n messages to send when connected · View** lets you edit or delete them until they go. Send messages with attachments after you reconnect.
+
+- Only messages that have never been sent wait there. A message leaves the list the moment it starts sending.
+- If a message was sent but its result is unknown (the connection dropped before the answer), it is not sent again; the App asks the server whether it arrived. The next message waits meanwhile.
+- If the server did not accept one, the rest pause. Resend it, put it back in the composer or discard it from "Unsent message" above the composer, then press **Continue sending** in the list.
+- While the App is still confirming whether an earlier message from the same composer arrived, you can queue a new one only after that check ends (so the same message is never sent twice).
+- Messages left for an archived or deleted project have nowhere to go; they appear separately at the bottom of the list. Copy anything you need, then delete them.
+- Connecting to another server deletes the messages that were waiting for the previous server. Up to 50 messages can wait for one server.
+
+Neither leaves the iPhone or goes into device backups, and both are kept in files that cannot be read while the iPhone is locked → [Privacy Policy](../../PRIVACY.md#english)
+
 ## On a shared tailnet
 
 On a tailnet shared with a company or family, other people's devices can reach your Mac's server port (7878 by default). They cannot use it without the access code, but it is safer to narrow who can reach it to your own devices with Tailscale's access controls (ACLs) → [Security](../security.en.md#on-a-shared-tailnet)
 
 ## Leaving and lost devices
 
-나가기 (Leave) in the iPhone's settings removes only the access code stored on that iPhone; the server's code and keys stay the same. If you lose the iPhone, remove it from Tailscale and press **끊기** (Disconnect) next to it under **연결된 기기** (Connected devices) in the Mac app. If you cannot tell which row it is, run `iamceo auth revoke-devices` on the Mac to disconnect every device paired by QR, then pair the ones you keep again with a new QR. If it is not listed on its own because it uses the shared access code, replace the access code on the Mac → [Security](../security.en.md#if-you-lose-a-device)
+나가기 (Sign out) in the iPhone's settings removes the access code stored on that iPhone, along with that server's last seen state and the messages waiting for the connection (the confirmation says how many); the server's code and keys stay the same. If you lose the iPhone, remove it from Tailscale and press **끊기** (Disconnect) next to it under **연결된 기기** (Connected devices) in the Mac app. If you cannot tell which row it is, run `iamceo auth revoke-devices` on the Mac to disconnect every device paired by QR, then pair the ones you keep again with a new QR. If it is not listed on its own because it uses the shared access code, replace the access code on the Mac → [Security](../security.en.md#if-you-lose-a-device)

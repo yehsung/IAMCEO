@@ -71,12 +71,15 @@ final class ModelCatalogTests: XCTestCase {
         await fixture.close()
     }
 
-    @MainActor func testDemoUsesFixedSampleWithoutRequests() async throws {
+    /// F8: 샘플은 모델 목록도 샘플 서버(실제 서버가 만든 응답)에서 읽는다. 넘겨받은 세션으로는 묻지 않는다.
+    @MainActor func testDemoReadsModelsFromTheSampleServerOnly() async throws {
         let fixture = try IsolatedTestNetwork { _ in XCTFail("Demo must not request models"); throw URLError(.badURL) }
         let store = AppStore(demo: true, session: fixture.session, persistCredentials: false)
+        defer { store.prepareForReplacement() }
+        try await waitWhile({ store.api == nil }, timeout: .seconds(15))
         await store.refreshModels()
-        XCTAssertEqual(store.modelCatalog, .demo)
-        XCTAssertEqual(store.modelCatalog.claude.option(for: "fable")?.label, "Fable")
+        XCTAssertNotNil(store.modelCatalog.claude.option(for: "opus"))
+        XCTAssertTrue(store.sampleServer?.requests.contains { $0.url?.path == "/api/models" } == true)
         XCTAssertTrue(fixture.requests.isEmpty)
         await fixture.close()
     }

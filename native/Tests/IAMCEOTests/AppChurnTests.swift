@@ -248,8 +248,10 @@ private struct ChurnEncodingProbe: Encodable, Sendable {
         XCTAssertEqual(try JSONDecoder().decode(ProjectState.self, from: XCTUnwrap(encoded)), state)
     }
 
-    func testDemoCollectionsAreInitializedAndNestedValuesParticipateInEquality() throws {
+    func testDemoCollectionsAreInitializedAndNestedValuesParticipateInEquality() async throws {
         let store = AppStore(demo: true, persistCredentials: false)
+        defer { store.prepareForReplacement() }
+        try await waitWhile({ store.state == nil }, timeout: .seconds(15))
         XCTAssertFalse(store.members.isEmpty)
         XCTAssertEqual(store.members, store.state?.members)
         let original = DemoFixtures.workspace().1

@@ -17,12 +17,12 @@ struct ComposerUploadContext {
     let token: DraftUploadToken
 
     @MainActor func invalidationReason(in store: AppStore) -> String? {
-        if Task.isCancelled { return "첨부 올리기를 취소했습니다" }
+        if Task.isCancelled { return String(localized: "첨부 올리기를 취소했습니다") }
         if token.namespace != store.drafts.namespace || token.connectionGeneration != store.drafts.connectionGeneration {
-            return "서버 연결이 바뀌어 첨부 올리기를 취소했습니다"
+            return String(localized: "서버 연결이 바뀌어 첨부 올리기를 취소했습니다")
         }
-        if projectID != store.selectedProjectID { return "프로젝트가 바뀌어 첨부 올리기를 취소했습니다" }
-        if !store.drafts.isCurrentUpload(token) { return "초안이 지워지거나 바뀌어 첨부 올리기를 취소했습니다" }
+        if projectID != store.selectedProjectID { return String(localized: "프로젝트가 바뀌어 첨부 올리기를 취소했습니다") }
+        if !store.drafts.isCurrentUpload(token) { return String(localized: "초안이 지워지거나 바뀌어 첨부 올리기를 취소했습니다") }
         return ComposerAttachmentUploads.blockedReason(in: store, target: targetMemberID)
     }
 }
@@ -45,10 +45,9 @@ final class ComposerAttachmentUploads {
 
     /// Local intake does not require network freshness or an active runner.
     static func blockedReason(in store: AppStore, target: String?) -> String? {
-        if store.isArchive || store.state?.project.archived == true { return "보관한 프로젝트는 첨부할 수 없습니다" }
-        if store.isDemo { return "샘플 프로젝트는 읽기 전용입니다" }
-        if store.selectedProjectID == nil { return "프로젝트를 고른 뒤 첨부해 주세요" }
-        if let target, store.state != nil, !store.members.contains(where: { $0.id == target }) { return "명부에 없는 대상에게는 첨부할 수 없습니다" }
+        if store.isArchive || store.state?.project.archived == true { return String(localized: "보관한 프로젝트는 첨부할 수 없습니다") }
+        if store.selectedProjectID == nil { return String(localized: "프로젝트를 고른 뒤 첨부해 주세요") }
+        if let target, store.state != nil, !store.members.contains(where: { $0.id == target }) { return String(localized: "명부에 없는 대상에게는 첨부할 수 없습니다") }
         return nil
     }
 
@@ -261,7 +260,7 @@ final class ComposerAttachmentUploads {
     #if os(macOS)
     @discardableResult
     func receive(_ items: [MacAttachmentItem], context: ComposerUploadContext, store: AppStore) -> Bool {
-        guard !items.isEmpty else { reportRejection("놓은 파일이나 이미지를 읽지 못했습니다"); return false }
+        guard !items.isEmpty else { reportRejection(String(localized: "놓은 파일이나 이미지를 읽지 못했습니다")); return false }
         if let reason = context.invalidationReason(in: store) { reportRejection(reason); return false }
         let date = Date()
         loadMedia(names: items.map(\.name), sourceIDs: items.map {
@@ -313,7 +312,7 @@ final class ComposerUploadTransport: NSObject, URLSessionTaskDelegate, Sendable 
         try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard (200..<300).contains(http.statusCode) else {
-            throw APIError(status: http.statusCode, message: "첨부를 올리지 못했습니다")
+            throw APIError(status: http.statusCode, message: String(localized: "첨부를 올리지 못했습니다"))
         }
         return try JSONDecoder().decode(Attachment.self, from: data)
     }

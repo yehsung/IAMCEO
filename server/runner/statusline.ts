@@ -42,6 +42,25 @@ try {
       const record = { session_id: id, model: typeof input.model?.id === 'string' ? input.model.id : null,
         context_window_size: ctx.context_window_size, used_percentage: typeof pct === 'number' && Number.isFinite(pct) && pct >= 0 && pct <= 100 ? pct : null,
         tokens, at: Date.now() };
+      // T(F6): CLI 가 보고한 세션 누적 비용·토큰과 계정 한도 사용률. 고치거나 추정하지 않고 모양만 확인해 옮긴다(없으면 넣지 않는다).
+      const amount = n => typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : undefined;
+      const count = n => Number.isSafeInteger(n) && n >= 0 ? n : undefined;
+      const cost = amount(input.cost?.total_cost_usd);
+      if (cost !== undefined) record.cost_usd = cost;
+      const inTotal = count(ctx.total_input_tokens), outTotal = count(ctx.total_output_tokens);
+      if (inTotal !== undefined) record.input_tokens_total = inTotal;
+      if (outTotal !== undefined) record.output_tokens_total = outTotal;
+      const limits = input.rate_limits;
+      if (limits && typeof limits === 'object' && !Array.isArray(limits)) {
+        const windows = {};
+        for (const [name, w] of Object.entries(limits).slice(0, 8)) {
+          const used = w?.used_percentage ?? w?.used_percent ?? w?.utilization;
+          if (!/^[a-z0-9_]{1,40}$/.test(name) || typeof used !== 'number' || !Number.isFinite(used) || used < 0 || used > 100) continue;
+          const resets = w.resets_at;
+          windows[name] = { used_percentage: used, resets_at: (typeof resets === 'number' && Number.isFinite(resets) && resets > 0) || (typeof resets === 'string' && resets.length <= 40) ? resets : null };
+        }
+        if (Object.keys(windows).length) record.rate_limits = windows;
+      }
       const tmp = join(dir, id + '.' + process.pid + '.' + crypto.randomUUID() + '.tmp');
       try { writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 }); renameSync(tmp, join(dir, id + '.json')); }
       finally { try { unlinkSync(tmp); } catch {} }
@@ -97,7 +116,9 @@ export function writeStatuslineWrapper(home: string, options: { execPath?: strin
   return { type: "command", command: `${bunScriptCommand(options.execPath ?? process.execPath, dir, path)} ${quote(home)}` };
 }
 
-interface ContextRecord { session_id: string; model: string | null; context_window_size: number; used_percentage: number | null; tokens: number | null; at: number }
+interface ContextRecord { session_id: string; model: string | null; context_window_size: number; used_percentage: number | null; tokens: number | null; at: number;
+  /** T(F6): 래퍼가 함께 옮기는 CLI 보고값. 이전 판 래퍼가 쓴 기록에는 없다. 사용량 모으기(server/usage.ts)만 읽는다. */
+  cost_usd?: number; input_tokens_total?: number; output_tokens_total?: number; rate_limits?: Record<string, { used_percentage: number; resets_at: number | string | null }> }
 export function readContextRecord(home: string | undefined, sessionId: string): ContextRecord | null {
   if (!home || !CONTEXT_SESSION_RE.test(sessionId)) return null;
   try {

@@ -95,14 +95,15 @@ struct CompatNotice: Sendable, Equatable {
 
     static func appOutdated(platform: String) -> String {
         platform == "ios"
-            ? "이 앱이 서버보다 오래된 버전이라 맞지 않습니다. App Store에서 IAMCEO를 업데이트해 주세요."
-            : "이 앱이 서버보다 오래된 버전이라 맞지 않습니다. IAMCEO를 최신 버전으로 업데이트해 주세요."
+            ? String(localized: "이 앱이 서버보다 오래된 버전이라 맞지 않습니다. App Store에서 IAMCEO를 업데이트해 주세요.")
+            : String(localized: "이 앱이 서버보다 오래된 버전이라 맞지 않습니다. IAMCEO를 최신 버전으로 업데이트해 주세요.")
     }
     static func serverOutdated(_ version: String?, onThisMac: Bool) -> String {
-        let named = version.map { "(\($0))" } ?? ""
+        // 영어 문장은 "server (0.2.3)" 처럼 띄어 쓴다. 한국어는 예전 그대로 붙여 쓴다("서버(0.2.3)가").
+        let named = version.map { AppLanguage.current == .en ? " (\($0))" : "(\($0))" } ?? ""
         return onThisMac
-            ? "이 Mac의 서버\(named)가 앱보다 오래된 버전이라 맞지 않습니다. 서버를 새 버전으로 다시 시작하거나 업데이트해 주세요."
-            : "Mac의 서버\(named)가 이 앱보다 오래된 버전이라 맞지 않습니다. 서버가 도는 Mac에서 IAMCEO를 업데이트해 주세요."
+            ? String(localized: "이 Mac의 서버\(named)가 앱보다 오래된 버전이라 맞지 않습니다. 서버를 새 버전으로 다시 시작하거나 업데이트해 주세요.")
+            : String(localized: "Mac의 서버\(named)가 이 앱보다 오래된 버전이라 맞지 않습니다. 서버가 도는 Mac에서 IAMCEO를 업데이트해 주세요.")
     }
 }
 

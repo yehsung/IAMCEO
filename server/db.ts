@@ -841,6 +841,64 @@ export function ensureToolPermissionColumn(db: Database): void {
   if (!columns.some(c => c.name === "tool_permission_json")) db.exec("ALTER TABLE decisions ADD COLUMN tool_permission_json TEXT");
 }
 
+/**
+ * T(F6): 사용량 보기. 팀장별·날짜별로 모은 CLI 보고값(usage_daily), 세션마다 마지막으로 본 누적값(usage_sessions, 다음 증가분을 셀 기준),
+ * 계정 한도의 마지막 사용률(usage_limits). 모으고 읽는 것은 server/usage.ts 가 한다.
+ * 색인과 같은 까닭으로 MIGRATIONS 에 넣지 않는다: 판 번호를 올리면 이전 판 서버가 이 DB 를 열지 못한다. 이전 판은 이 표들을 모른 채 지나간다.
+ * 팀장 행을 지워도(닫기) 사용량은 남긴다(이름을 함께 적어 둔다). 프로젝트를 지우면 ON DELETE CASCADE 가 그 프로젝트의 사용량도 지운다.
+ * 보존 기한은 안쪽 기록과 같은 90일(storage-maintenance.ts RECORD_RETENTION_MS)이다.
+ */
+export const USAGE_TABLES: readonly string[] = [
+  `CREATE TABLE IF NOT EXISTS usage_daily (
+     day TEXT NOT NULL,
+     member_id TEXT NOT NULL,
+     provider TEXT NOT NULL,
+     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     member_name TEXT NOT NULL,
+     member_kind TEXT NOT NULL,
+     cost_usd REAL,
+     input_tokens INTEGER,
+     output_tokens INTEGER,
+     samples INTEGER NOT NULL DEFAULT 0,
+     last_at TEXT NOT NULL,
+     PRIMARY KEY (day, member_id, provider)
+   )`,
+  `CREATE INDEX IF NOT EXISTS usage_daily_project ON usage_daily(project_id, day)`,
+  `CREATE TABLE IF NOT EXISTS usage_sessions (
+     provider TEXT NOT NULL,
+     session_id TEXT NOT NULL,
+     member_id TEXT NOT NULL,
+     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     cost_usd REAL,
+     input_tokens INTEGER,
+     output_tokens INTEGER,
+     sample_at INTEGER NOT NULL,
+     updated_at TEXT NOT NULL,
+     PRIMARY KEY (provider, session_id)
+   )`,
+  `CREATE INDEX IF NOT EXISTS usage_sessions_project ON usage_sessions(project_id)`,
+  `CREATE TABLE IF NOT EXISTS usage_limits (
+     provider TEXT NOT NULL,
+     window_id TEXT NOT NULL,
+     window_minutes INTEGER,
+     used_pct REAL NOT NULL,
+     resets_at TEXT,
+     observed_at TEXT NOT NULL,
+     PRIMARY KEY (provider, window_id)
+   )`,
+];
+
+/** 만들지 못해도 서버는 뜬다. 그때 사용량은 모으지 않고, GET /api/usage 는 빈 보고를 준다(server/usage.ts). */
+export function ensureUsageTables(db: Database): boolean {
+  try {
+    db.transaction(() => { for (const sql of USAGE_TABLES) db.exec(sql); })();
+    return true;
+  } catch {
+    console.warn("[db] 사용량 표를 만들지 못했습니다(다음 시작 때 다시 합니다)");
+    return false;
+  }
+}
+
 const PRE_MIGRATION_KEEP = 3;
 const PRE_MIGRATION_KEEP_MS = 86_400_000;
 
@@ -932,6 +990,8 @@ export function openDb(path: string): Database {
     ensureDeliveryVerdicts(db);
     // K: 도구 승인 카드 열. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
     ensureToolPermissionColumn(db);
+    // T: 사용량 표. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
+    ensureUsageTables(db);
     // 이주가 끝났으면 최근 사본 몇 개만 남긴다. 하루 안에 만든 것은 개수와 상관없이 둔다.
     if (backup) removePreMigrationBackups(path, all => all.slice(PRE_MIGRATION_KEEP).filter(entry => Date.now() - entry.at > PRE_MIGRATION_KEEP_MS));
     // Source parsing/index failures cannot roll back the schema or delay server startup.

@@ -32,7 +32,7 @@ struct GitHubCloneView: View {
         (repositories?.repos ?? []).filter { search.isEmpty || $0.nameWithOwner.localizedCaseInsensitiveContains(search) }
     }
     var body: some View {
-        CESheet("GitHub에서 가져오기", subtitle: "저장소를 서버 컴퓨터에 받아 그 폴더로 프로젝트를 만듭니다.", icon: "arrow.down.circle",
+        CESheet(String(localized: "GitHub에서 가져오기"), subtitle: String(localized: "저장소를 서버 컴퓨터에 받아 그 폴더로 프로젝트를 만듭니다."), icon: "arrow.down.circle",
                 width: 580, maxBodyHeight: 600, onClose: { cloneTask?.cancel(); dismiss() }) {
             VStack(alignment: .leading, spacing: 18) {
                 repositorySection
@@ -70,7 +70,7 @@ struct GitHubCloneView: View {
 
     /// My repositories: a search field and a bordered list; the chosen row is lit and ticked.
     @ViewBuilder private var repositorySection: some View {
-        SetupField("내 저장소") {
+        SetupField(String(localized: "내 저장소")) {
             if loading && repositories == nil {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -107,8 +107,8 @@ struct GitHubCloneView: View {
                     .overlay { shape.strokeBorder(CE.line) }
                 }
             } else {
-                InlineNotice(tone: .accent, icon: "info.circle", title: "내 저장소 목록을 볼 수 없습니다",
-                             detail: "서버 컴퓨터에서 GitHub CLI(gh)로 로그인하면 여기에 목록이 보입니다. 아래에 주소를 직접 넣어 가져올 수 있습니다.")
+                InlineNotice(tone: .accent, icon: "info.circle", title: String(localized: "내 저장소 목록을 볼 수 없습니다"),
+                             detail: String(localized: "서버 컴퓨터에서 GitHub CLI(gh)로 로그인하면 여기에 목록이 보입니다. 아래에 주소를 직접 넣어 가져올 수 있습니다."))
             }
         }
     }
@@ -116,9 +116,9 @@ struct GitHubCloneView: View {
     /// A repository that is not in the list (any public one): owner/name or its github.com address.
     private var addressSection: some View {
         let invalid = !address.isEmpty && repo == nil
-        return SetupField(repositories?.available == true ? "목록에 없는 저장소" : "저장소 주소",
-                          hint: invalid ? "GitHub 저장소 주소 형식이 아닙니다" : nil, hintTone: CE.danger) {
-            TextField("저장소 주소", text: $address, prompt: Text(verbatim: "owner/name 또는 https://github.com/owner/name").font(SetupFont.input))
+        return SetupField(repositories?.available == true ? String(localized: "목록에 없는 저장소") : String(localized: "저장소 주소"),
+                          hint: invalid ? String(localized: "GitHub 저장소 주소 형식이 아닙니다") : nil, hintTone: CE.danger) {
+            TextField("저장소 주소", text: $address, prompt: Text(verbatim: String(localized: "owner/name 또는 https://github.com/owner/name")).font(SetupFont.input))
                 .labelsHidden().font(SetupFont.codeInput).autocorrectionDisabled()
                 #if os(iOS)
                 .textInputAutocapitalization(.never)
@@ -131,14 +131,14 @@ struct GitHubCloneView: View {
     /// Where it lands: the final folder path as a tile, with the place to change it.
     private var destinationSection: some View {
         let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
-        return SetupField("받을 위치") {
+        return SetupField(String(localized: "받을 위치")) {
             HStack(spacing: 12) {
                 Image(systemName: "folder.fill").font(.system(size: 14, weight: .semibold)).foregroundStyle(CE.accent)
                     .frame(width: 30, height: 30)
                     .background(CE.violet.opacity(0.16), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(preview.isEmpty ? (parent.isEmpty ? "받을 위치를 골라 주세요" : parent) : preview)
+                    Text(preview.isEmpty ? (parent.isEmpty ? String(localized: "받을 위치를 골라 주세요") : parent) : preview)
                         .font(SetupFont.codeInput).foregroundStyle(parent.isEmpty ? CE.ink3 : CE.ink)
                         .lineLimit(1).truncationMode(.middle)
                     if preview.isEmpty && !parent.isEmpty {
@@ -158,7 +158,7 @@ struct GitHubCloneView: View {
             .background(Color.white.opacity(0.04), in: shape)
             .overlay { shape.strokeBorder(Color.white.opacity(0.1)) }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel(preview.isEmpty ? "받을 위치: \(parent)" : "최종 폴더: " + preview)
+            .accessibilityLabel(preview.isEmpty ? String(localized: "받을 위치: \(parent)") : String(localized: "최종 폴더: ") + preview)
         }
     }
 
@@ -173,7 +173,7 @@ struct GitHubCloneView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 7) {
                         Text(repository.nameWithOwner).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
-                        if repository.visibility == "PRIVATE" { Tag("비공개", icon: "lock") }
+                        if repository.visibility == "PRIVATE" { Tag(String(localized: "비공개"), icon: "lock") }
                     }
                     if let description = repository.description, !description.isEmpty {
                         Text(description).font(CEFont.secondary).foregroundStyle(CE.ink2).lineLimit(2)
@@ -188,7 +188,7 @@ struct GitHubCloneView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .buttonStyle(RepoRowStyle(selected: selected))
-        .accessibilityLabel("\(repository.nameWithOwner)\(repository.visibility == "PRIVATE" ? ", 비공개" : "")")
+        .accessibilityLabel("\(repository.nameWithOwner)\(repository.visibility == "PRIVATE" ? String(localized: ", 비공개") : "")")
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
     private func load() async {
@@ -214,32 +214,32 @@ struct GitHubCloneView: View {
                 cloneServerKey = serverKey
                 jobID = try await store.startRepositoryClone(repo: repo, parent: parent)
             }
-            guard cloneServerKey == serverKey else { throw APIError(status: 0, message: "원래 서버에 다시 연결한 뒤 결과를 확인해 주세요.") }
+            guard cloneServerKey == serverKey else { throw APIError(status: 0, message: String(localized: "원래 서버에 다시 연결한 뒤 결과를 확인해 주세요.")) }
             guard let jobID else { return }
             let deadline = ContinuousClock.now.advanced(by: Self.pollLimit)
             while true {
                 try Task.checkCancellation()
                 // 서버의 단계별 제한(10분 × 2)보다 넉넉한 상한. 넘으면 '결과 확인'으로 다시 물을 수 있다.
-                guard ContinuousClock.now < deadline else { throw APIError(status: 0, message: "가져오기가 오래 걸리고 있습니다. 잠시 뒤 '결과 확인'을 눌러 주세요.") }
-                guard cloneServerKey == serverKey, store.stillCurrent(client) else { throw APIError(status: 0, message: "서버 연결이 바뀌었습니다. 원래 서버에서 가져오기 결과를 확인해 주세요.") }
+                guard ContinuousClock.now < deadline else { throw APIError(status: 0, message: String(localized: "가져오기가 오래 걸리고 있습니다. 잠시 뒤 '결과 확인'을 눌러 주세요.")) }
+                guard cloneServerKey == serverKey, store.stillCurrent(client) else { throw APIError(status: 0, message: String(localized: "서버 연결이 바뀌었습니다. 원래 서버에서 가져오기 결과를 확인해 주세요.")) }
                 let job = try await client.cloneJob(jobID)
                 try Task.checkCancellation()
-                guard cloneServerKey == serverKey, store.stillCurrent(client) else { throw APIError(status: 0, message: "서버 연결이 바뀌었습니다.") }
+                guard cloneServerKey == serverKey, store.stillCurrent(client) else { throw APIError(status: 0, message: String(localized: "서버 연결이 바뀌었습니다.")) }
                 switch job.status {
                 case .running: try await Task.sleep(for: .seconds(1))
                 case .done:
-                    guard let path = job.path else { throw APIError(status: 0, message: "서버가 폴더 경로를 보내지 않았습니다.") }
+                    guard let path = job.path else { throw APIError(status: 0, message: String(localized: "서버가 폴더 경로를 보내지 않았습니다.")) }
                     onClone(path, name); dismiss(); return
                 case .failed:
                     self.jobID = nil
-                    throw APIError(status: 0, message: job.error ?? "저장소를 가져오지 못했습니다.")
+                    throw APIError(status: 0, message: job.error ?? String(localized: "저장소를 가져오지 못했습니다."))
                 }
             }
         } catch is CancellationError { }
         catch let issue as APIError where jobID != nil && (issue.status == 404 || issue.status == 410) {
             // 서버가 다시 시작되면 작업 기록이 사라진다. 같은 작업을 계속 묻지 않고 처음부터 다시 할 수 있게 한다.
             jobID = nil
-            error = "서버가 다시 시작되어 가져오기 결과를 알 수 없습니다. 받을 위치의 폴더를 확인한 뒤 다시 시도해 주세요."
+            error = String(localized: "서버가 다시 시작되어 가져오기 결과를 알 수 없습니다. 받을 위치의 폴더를 확인한 뒤 다시 시도해 주세요.")
         }
         catch { self.error = friendlyLoadError(error, what: "저장소", verb: "읽지") }
     }

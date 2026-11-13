@@ -11,8 +11,8 @@ struct ConnectionRecoveryNotice: View {
     var rawError: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            InlineNotice(tone: .attention, title: "Mac에 연결하지 못했습니다",
-                         detail: (rawError.map(ConnectionRecovery.reason) ?? "연결을 확인해 주세요.") + " " + ConnectionRecovery.checklist)
+            InlineNotice(tone: .attention, title: String(localized: "Mac에 연결하지 못했습니다"),
+                         detail: (rawError.map(ConnectionRecovery.reason) ?? String(localized: "연결을 확인해 주세요.")) + " " + ConnectionRecovery.checklist)
             if let rawError, !rawError.isEmpty {
                 DisclosureGroup("자세히") { Text(rawError).font(CEFont.mono).textSelection(.enabled) }
             }
@@ -63,14 +63,14 @@ struct MacPairingSheet: View {
 
     private static let qrSide: CGFloat = 216
     private static let steps = [
-        "iPhone과 이 Mac 모두 Tailscale을 켭니다.",
-        "iPhone 카메라로 QR을 비추고 뜨는 알림을 누릅니다.",
+        String(localized: "iPhone과 이 Mac 모두 Tailscale을 켭니다."),
+        String(localized: "iPhone 카메라로 QR을 비추고 뜨는 알림을 누릅니다."),
         // Says "if": the iPhone app released before the confirmation (0.2.2) connects without asking.
-        "IAMCEO 앱이 열립니다. 확인 창이 뜨면 주소를 보고 연결을 누릅니다.",
+        String(localized: "IAMCEO 앱이 열립니다. 확인 창이 뜨면 주소를 보고 연결을 누릅니다."),
     ]
 
     var body: some View {
-        CESheet("iPhone 연결", subtitle: "한 번만 쓰는 연결 QR입니다.", icon: "iphone", width: 440) {
+        CESheet(String(localized: "iPhone 연결"), subtitle: String(localized: "한 번만 쓰는 연결 QR입니다."), icon: "iphone", width: 440) {
             VStack(spacing: 20) {
                 content
                     .frame(maxWidth: .infinity)
@@ -100,16 +100,16 @@ struct MacPairingSheet: View {
 
     @ViewBuilder private var content: some View {
         if connected {
-            InlineNotice(tone: .success, icon: "checkmark.circle", title: "연결됨", detail: "iPhone이 연결되었습니다.")
+            InlineNotice(tone: .success, icon: "checkmark.circle", title: String(localized: "연결됨"), detail: String(localized: "iPhone이 연결되었습니다."))
         } else if loading && start == nil {
             qrTile { ProgressView().controlSize(.small) }
                 .accessibilityLabel("QR을 만드는 중입니다")
         } else if let failure {
-            InlineNotice(tone: .danger, title: "QR을 만들지 못했습니다", detail: failure, actionTitle: "다시 시도") { Task { await make() } }
+            InlineNotice(tone: .danger, title: String(localized: "QR을 만들지 못했습니다"), detail: failure, actionTitle: String(localized: "다시 시도")) { Task { await make() } }
         } else if start != nil, link == nil {
-            InlineNotice(tone: .attention, icon: "network.slash", title: "이 Mac의 Tailscale이 꺼져 있습니다",
-                         detail: "iPhone이 닿을 Tailscale 주소가 없습니다. 이 Mac에서 Tailscale을 켠 뒤 다시 만드세요.",
-                         actionTitle: "다시 만들기") { Task { await make() } }
+            InlineNotice(tone: .attention, icon: "network.slash", title: String(localized: "이 Mac의 Tailscale이 꺼져 있습니다"),
+                         detail: String(localized: "iPhone이 닿을 Tailscale 주소가 없습니다. 이 Mac에서 Tailscale을 켠 뒤 다시 만드세요."),
+                         actionTitle: String(localized: "다시 만들기")) { Task { await make() } }
         } else if let link, let expiry {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let left = Int(expiry.timeIntervalSince(context.date).rounded(.down))
@@ -218,9 +218,9 @@ struct MacPairingSheet: View {
             return
         }
         #endif
-        if store.isDemo { failure = "샘플 모드에서는 QR을 만들지 않습니다."; return }
+        if store.isDemo { failure = String(localized: "샘플 모드에서는 QR을 만들지 않습니다."); return }
         if let result = await store.startPairing() { start = result }
-        else { failure = store.errorMessage.map(friendlyError) ?? "서버에 연결된 뒤 다시 시도하세요." }
+        else { failure = store.errorMessage.map(friendlyError) ?? String(localized: "서버에 연결된 뒤 다시 시도하세요.") }
     }
 }
 #endif
@@ -241,9 +241,9 @@ struct PhonePairingSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if !tailnetUp {
-                InlineNotice(tone: .attention, icon: "network.slash", title: "Tailscale을 켜 주세요",
-                             detail: "이 iPhone과 Mac이 같은 Tailscale에 로그인되어 있어야 연결됩니다. Tailscale 앱에서 연결을 켠 뒤 돌아오세요.",
-                             actionTitle: "다시 확인") { tailnetUp = Tailnet.isConnected() }
+                InlineNotice(tone: .attention, icon: "network.slash", title: String(localized: "Tailscale을 켜 주세요"),
+                             detail: String(localized: "이 iPhone과 Mac이 같은 Tailscale에 로그인되어 있어야 연결됩니다. Tailscale 앱에서 연결을 켠 뒤 돌아오세요."),
+                             actionTitle: String(localized: "다시 확인")) { tailnetUp = Tailnet.isConnected() }
             }
             Text("Mac의 IAMCEO에서 설정 → iPhone 연결을 누르고, 나온 QR을 이 iPhone 카메라로 비추세요.")
                 .font(CEFont.note).foregroundStyle(CE.ink2)
@@ -252,7 +252,7 @@ struct PhonePairingSection: View {
             Button { scanning = true } label: {
                 HStack(spacing: 7) {
                     if store.isPairing { ProgressView().tint(.white) } else { Image(systemName: "qrcode.viewfinder") }
-                    Text(store.isPairing ? "연결하는 중" : "QR 스캔")
+                    Text(store.isPairing ? String(localized: "연결하는 중") : String(localized: "QR 스캔"))
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 5)
@@ -272,7 +272,7 @@ struct PhonePairingSection: View {
             guard let text = scanned else { return }
             scanned = nil
             guard let url = URL(string: text), PairingLink.isPairingURL(url) else {
-                store.errorMessage = "IAMCEO 연결 QR이 아닙니다. Mac의 설정 → iPhone 연결에서 나온 QR을 찍어 주세요."
+                store.errorMessage = String(localized: "IAMCEO 연결 QR이 아닙니다. Mac의 설정 → iPhone 연결에서 나온 QR을 찍어 주세요.")
                 return
             }
             guard let link = PairingLink(url: url) else { store.errorMessage = PairingLink.rejectedMessage; return }
@@ -291,7 +291,7 @@ struct PhonePairingSection: View {
 struct QRScannerSheet: View {
     let onScan: (String) -> Void
     var body: some View {
-        CESheet("QR 스캔", scrolls: false) {
+        CESheet(String(localized: "QR 스캔"), scrolls: false) {
             VStack(spacing: CESpace.m) {
                 QRScannerView(onScan: onScan)
                     .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))

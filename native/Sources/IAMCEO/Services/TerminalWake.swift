@@ -18,9 +18,9 @@ enum TerminalAvailability {
     }
 
     static func title(_ member: Member, waking: Bool, platform: TerminalPlatform = .current,
-                      normal: String = "터미널 열기") -> String {
-        if waking { return "깨우는 중…" }
-        return needsWake(member) ? (platform == .mac ? "깨워서 터미널 열기" : "깨워서 터미널") : normal
+                      normal: String = String(localized: "터미널 열기")) -> String {
+        if waking { return String(localized: "깨우는 중…") }
+        return needsWake(member) ? (platform == .mac ? String(localized: "깨워서 터미널 열기") : String(localized: "깨워서 터미널")) : normal
     }
 }
 
@@ -31,8 +31,8 @@ final class TerminalWake {
         case ready, failed(String), timedOut, duplicate, cancelled
         var message: String? {
             switch self {
-            case .failed(let reason): "깨우지 못했습니다: \(TerminalPresentation.message(reason))"
-            case .timedOut: "깨우는 데 시간이 걸립니다. 잠시 뒤 다시 여세요"
+            case .failed(let reason): String(localized: "깨우지 못했습니다: \(TerminalPresentation.message(reason))")
+            case .timedOut: String(localized: "깨우는 데 시간이 걸립니다. 잠시 뒤 다시 여세요")
             default: nil
             }
         }
@@ -81,8 +81,8 @@ final class TerminalWake {
                 }
                 attempt.updates = Task {
                     while !Task.isCancelled {
-                        guard allowed() else { attempt.finish(.failed("서버 연결 또는 프로젝트 상태를 확인해 주세요")); return }
-                        guard let member = current() else { attempt.finish(.failed("팀원을 찾을 수 없습니다")); return }
+                        guard allowed() else { attempt.finish(.failed(String(localized: "서버 연결 또는 프로젝트 상태를 확인해 주세요"))); return }
+                        guard let member = current() else { attempt.finish(.failed(String(localized: "팀원을 찾을 수 없습니다"))); return }
                         if TerminalAvailability.isReady(member) { attempt.finish(.ready); return }
                         do { try await pause(.milliseconds(50)) } catch { return }
                     }

@@ -4,7 +4,7 @@
 
 IAMCEO is a server that runs on your Mac plus native Mac and iPhone apps. The server starts the official Claude Code and Codex CLIs as a lead and staff, and you give instructions and make decisions in the app. There is no server run by IAMCEO.
 
-> The app's screens are in Korean today. This guide gives the Korean label next to its meaning, so you can find each button.
+> The app's screens follow your device language: English, or Korean on a Korean device. This guide gives each label in Korean with the English label in parentheses, so you can find each button either way.
 
 ## Before you start
 
@@ -35,16 +35,16 @@ The install script checks the download against the release's SHA-256, then check
 ## First start
 
 1. **Open IAMCEO and press 이 Mac에서 시작 (Start on this Mac).** The server registers as a login item and the app connects. The server starts on its own whenever the Mac starts.
-2. **Choose how staff run commands.** 묻지 않기 (don't ask, preselected), 위험할 때만 묻기 (ask only when risky) or 매번 묻기 (ask every time). Change it later in 설정 → 일반 → 권한 (Settings → General → Permissions). A change applies to sessions opened after it.
-3. **Create a project.** Press 새 프로젝트 (New project) and pick a working folder; you can also make a new folder or bring in a GitHub repository. With "이 폴더를 신뢰하고 AI가 이 안에서 명령을 실행하게 합니다" (trust this folder and let the AI run commands in it) on, which is the default, the server answers the folder-trust prompt that the CLI shows the first time in that folder.
-4. **Write what you want in 대화 (Conversation).** The lead picks the right staff member, hands the work over and tells you in a line or two.
+2. **Choose how staff run commands.** 묻지 않기 (Don't ask, preselected), 위험할 때만 묻기 (Ask only when risky) or 매번 묻기 (Ask every time). Change it later in 설정 → 일반 → 권한 (Settings → General → Permissions). A change applies to sessions opened after it.
+3. **Create a project.** Press 새 프로젝트 (New project) and pick a working folder; you can also make a new folder or bring in a GitHub repository. With "이 폴더를 신뢰하고 AI가 이 안에서 명령을 실행하게 합니다" (Trust this folder and let the AI run commands in it) on, which is the default, the server answers the folder-trust prompt that the CLI shows the first time in that folder.
+4. **Write what you want in 대화 (Chat).** The lead picks the right staff member, hands the work over and tells you in a line or two.
 5. **Decisions collect in 결재함 (Inbox), deliverables in 자료 (Files), and your own to-dos on 홈 (Home).** 팀 (Team) shows each staff member as working, idle, waiting for approval or asleep, and opens their real terminal so you can type into it.
 
-To look around before setting up a Mac, press 샘플로 둘러보기 (Look around with a sample) on the iPhone app's first screen.
+To look around before setting up a Mac, press 샘플로 둘러보기 (Explore the sample) on the iPhone app's first screen. In an example company you can send instructions, answer decisions and open files. Changes stay on this iPhone and reset when you leave the sample, and the sample connects to no server. Things that need a real Mac, such as new projects, adding staff and the terminal, are not available in the sample.
 
 ## Terms
 
-| Here | In the app | What it is |
+| Here | Korean label | What it is |
 |---|---|---|
 | Lead | 총괄 | One per project. Splits the work, hands it to staff and gathers their reports. It does not edit code itself. |
 | Staff | 팀장 | A session that does the actual work, one per kind of job. |
@@ -57,9 +57,23 @@ To look around before setting up a Mac, press 샘플로 둘러보기 (Look aroun
 You can choose the language the lead and staff write to you in — reports, decision cards and to-dos. In **설정 → 일반 → 운영 → 보고 언어** (Settings → General → Operation → Report language), pick 한국어 or English.
 
 - The choice applies to sessions opened after it. A staff member that is already working switches once you put it to sleep and wake it.
-- The app's buttons and screens are still in Korean.
+- This changes only what the lead and staff write. The app's buttons and screens follow the device language: Korean on a Korean device, English elsewhere. To choose for this app alone, use Settings → IAMCEO → Language on the iPhone, or System Settings → General → Language & Region → Applications on the Mac.
 - The source labels the server puts on what agents receive (`[대표]`, `[총괄]` and the like) stay as they are in either language. With English, a line explaining what each label means goes into the role instructions.
 - The row appears only on a server that has this setting; connected to an older server, it is hidden.
+
+## Usage
+
+See how much the lead and staff have used in **설정 → AI 모델 → 사용량** (Settings → AI models → Usage).
+
+- **Period**: pick today, 7 days or 30 days. **Total** at the top covers the whole period.
+- **Break down**: by member, by project or by day. Staff you have closed stay in the list, marked as closed.
+- **Claude usage limits · Codex usage limits**: how much of your account's limits (5-hour and weekly) the CLI last reported as used. These are account-wide, so they are not split by member. After a limit resets, it is hidden until a new value arrives.
+- The numbers are exactly what the CLIs reported. IAMCEO does not calculate or estimate them.
+  - Claude Code reports a cost (in US dollars) and tokens. On a subscription plan, that amount can differ from what you are actually billed.
+  - Codex reports tokens only, so tokens appear instead of a cost.
+- The server collects the numbers every minute and files them under the day it received them (usage near midnight can land on the next day). Usage older than 90 days is deleted.
+- For a session that was already running before this feature, its running total up to that point lands on the day it is first collected.
+- This group appears only on a server that collects usage; connected to an older server, it is hidden.
 
 ## The command-line tool
 

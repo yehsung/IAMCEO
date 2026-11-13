@@ -26,7 +26,7 @@ struct ConnectedDevice: Decodable, Sendable, Equatable, Identifiable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
-        name = c.lenient(String.self, forKey: .name) ?? "이름 없는 기기"
+        name = c.lenient(String.self, forKey: .name) ?? String(localized: "이름 없는 기기")
         platform = c.lenient(String.self, forKey: .platform)
         pairedAt = c.lenient(String.self, forKey: .pairedAt) ?? ""
         lastSeenAt = c.lenient(String.self, forKey: .lastSeenAt)
@@ -96,9 +96,9 @@ enum ConnectedDevicesText {
     static func platformLabel(_ platform: String) -> String {
         switch platform {
         case "ios": "iPhone"
-        case "macos": "Mac 앱"
-        case "local": "이 Mac"
-        default: "기타"
+        case "macos": String(localized: "Mac 앱")
+        case "local": String(localized: "이 Mac")
+        default: String(localized: "기타")
         }
     }
 
@@ -106,36 +106,36 @@ enum ConnectedDevicesText {
         var parts: [String] = []
         if let platform = device.platform { parts.append(platformLabel(platform)) }
         let seen = relativeTime(device.lastSeenAt, now: now)
-        parts.append(seen.isEmpty ? "아직 접속하지 않음" : "마지막 접속 \(seen)")
+        parts.append(seen.isEmpty ? String(localized: "아직 접속하지 않음") : String(localized: "마지막 접속 \(seen)"))
         let paired = relativeTime(device.pairedAt, now: now)
-        if !paired.isEmpty { parts.append("연결 \(paired)") }
+        if !paired.isEmpty { parts.append(String(localized: "연결 \(paired)")) }
         return parts.joined(separator: " · ")
     }
 
     static func sharedHint(_ shared: SharedCodeAccess, now: Date = Date()) -> String {
         let seen = relativeTime(shared.lastSeenAt, now: now)
-        guard !seen.isEmpty else { return "최근 접속 기록이 없습니다" }
+        guard !seen.isEmpty else { return String(localized: "최근 접속 기록이 없습니다") }
         var seenLabels: Set<String> = []
         let labels = shared.platforms.map { platformLabel($0.platform) }.filter { seenLabels.insert($0).inserted }
-        return (["마지막 접속 \(seen)"] + (labels.isEmpty ? [] : [labels.joined(separator: ", ")])).joined(separator: " · ")
+        return ([String(localized: "마지막 접속 \(seen)")] + (labels.isEmpty ? [] : [labels.joined(separator: ", ")])).joined(separator: " · ")
     }
 
     static func failureValue(_ failures: AccessFailures) -> String {
-        failures.count == 0 ? "없음" : "\(failures.days)일간 \(failures.count)번"
+        failures.count == 0 ? String(localized: "없음") : String(localized: "\(failures.days)일간 \(failures.count)번")
     }
 
     static func failureHint(_ failures: AccessFailures, now: Date = Date()) -> String {
         let last = relativeTime(failures.lastAt, now: now)
-        return last.isEmpty ? "틀린 코드나 끊은 기기로 들어오려 한 횟수" : "틀린 코드나 끊은 기기로 들어오려 한 횟수 · 마지막 \(last)"
+        return last.isEmpty ? String(localized: "틀린 코드나 끊은 기기로 들어오려 한 횟수") : String(localized: "틀린 코드나 끊은 기기로 들어오려 한 횟수 · 마지막 \(last)")
     }
 
-    static let footnote = "공용 접속 코드로 붙은 기기를 끊으려면 서버 컴퓨터에서 접속 코드를 바꿉니다(iamceo auth rotate). QR로 연결한 기기는 그대로입니다."
+    static let footnote = String(localized: "공용 접속 코드로 붙은 기기를 끊으려면 서버 컴퓨터에서 접속 코드를 바꿉니다(iamceo auth rotate). QR로 연결한 기기는 그대로입니다.")
 
-    static func confirmTitle(_ device: ConnectedDevice) -> String { "‘\(device.name)’ 연결을 끊을까요?" }
+    static func confirmTitle(_ device: ConnectedDevice) -> String { String(localized: "‘\(device.name)’ 연결을 끊을까요?") }
     static func confirmMessage(_ device: ConnectedDevice) -> String {
         device.current
-            ? "지금 쓰는 이 기기입니다. 바로 연결이 끊기고, 다시 쓰려면 Mac에서 새 QR을 만들어 연결해야 합니다."
-            : "그 기기는 바로 연결이 끊기고, 다시 쓰려면 Mac에서 새 QR을 만들어 연결해야 합니다. 다른 기기는 그대로입니다."
+            ? String(localized: "지금 쓰는 이 기기입니다. 바로 연결이 끊기고, 다시 쓰려면 Mac에서 새 QR을 만들어 연결해야 합니다.")
+            : String(localized: "그 기기는 바로 연결이 끊기고, 다시 쓰려면 Mac에서 새 QR을 만들어 연결해야 합니다. 다른 기기는 그대로입니다.")
     }
 }
 
@@ -179,7 +179,7 @@ enum ConnectedDevicesText {
         } catch is CancellationError {
         } catch {
             guard mine == token, !Task.isCancelled else { return }
-            self.error = Self.message(error, fallback: "연결된 기기를 읽지 못했습니다.")
+            self.error = Self.message(error, fallback: String(localized: "연결된 기기를 읽지 못했습니다."))
         }
     }
 
@@ -206,14 +206,14 @@ enum ConnectedDevicesText {
             return false
         } catch {
             guard mine == token, !Task.isCancelled else { return false }
-            revokeError = Self.message(error, fallback: "연결을 끊지 못했습니다.")
+            revokeError = Self.message(error, fallback: String(localized: "연결을 끊지 못했습니다."))
             return false
         }
     }
 
     private static func message(_ error: Error, fallback: String) -> String {
-        if let failure = error as? APIError, !failure.message.isEmpty { return failure.message }
-        if error is URLError { return "서버에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요." }
+        if let failure = error as? APIError, !failure.message.isEmpty { return failure.localizedDescription }
+        if error is URLError { return String(localized: "서버에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요.") }
         return fallback
     }
 }
@@ -246,15 +246,15 @@ struct ConnectedDevicesGroup: View {
         if !panel.unsupported, store.api != nil {
             // 읽기·끊기 실패는 묶음 아래 한 줄(위험 색)로, 평소에는 공용 코드를 끊는 법을 적는다.
             let problem = panel.revokeError ?? panel.error
-            SettingsGroup("연결된 기기", footnote: problem ?? (panel.list == nil ? nil : ConnectedDevicesText.footnote),
+            SettingsGroup(String(localized: "연결된 기기"), footnote: problem ?? (panel.list == nil ? nil : ConnectedDevicesText.footnote),
                           footnoteTone: problem == nil ? CE.ink2 : CE.danger, accessory: {
-                SettingsRefreshButton(label: "연결된 기기 다시 확인", busy: panel.loading) { Task { await panel.load(store.api) } }
+                SettingsRefreshButton(label: String(localized: "연결된 기기 다시 확인"), busy: panel.loading) { Task { await panel.load(store.api) } }
                     .disabled(store.connectionStatus != .connected)
             }) {
                 if let list = panel.list {
                     rows(list)
                 } else {
-                    SettingsRow("연결된 기기", hint: panel.loading ? "불러오는 중" : "연결한 뒤 볼 수 있습니다") {
+                    SettingsRow(String(localized: "연결된 기기"), hint: panel.loading ? String(localized: "불러오는 중") : String(localized: "연결한 뒤 볼 수 있습니다")) {
                         if panel.loading { ProgressView().controlSize(.small) }
                     }
                 }
@@ -263,14 +263,14 @@ struct ConnectedDevicesGroup: View {
     }
 
     @ViewBuilder private func rows(_ list: DeviceAccessList) -> some View {
-        SettingsRow("공용 접속 코드", hint: ConnectedDevicesText.sharedHint(list.shared)) {
-            if list.shared.current { Tag("이 기기", tone: .accent) }
+        SettingsRow(String(localized: "공용 접속 코드"), hint: ConnectedDevicesText.sharedHint(list.shared)) {
+            if list.shared.current { Tag(String(localized: "이 기기"), tone: .accent) }
         }
         ForEach(list.devices) { device in
             RowDivider(inset: 0)
             SettingsRow(device.name, hint: ConnectedDevicesText.deviceHint(device)) {
                 HStack(spacing: 8) {
-                    if device.current { Tag("이 기기", tone: .accent) }
+                    if device.current { Tag(String(localized: "이 기기"), tone: .accent) }
                     Button { confirming = device } label: {
                         HStack(spacing: 6) {
                             if panel.revoking == device.id { ProgressView().controlSize(.small) }
@@ -286,7 +286,7 @@ struct ConnectedDevicesGroup: View {
             }
         }
         RowDivider(inset: 0)
-        SettingsRow("최근 실패한 시도", hint: ConnectedDevicesText.failureHint(list.failures)) {
+        SettingsRow(String(localized: "최근 실패한 시도"), hint: ConnectedDevicesText.failureHint(list.failures)) {
             Text(ConnectedDevicesText.failureValue(list.failures))
                 .font(SetupFont.value)
                 .foregroundStyle(list.failures.count > 0 ? CE.attention : CE.ink)

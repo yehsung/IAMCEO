@@ -45,10 +45,10 @@ struct DoctorCheck: Codable, Sendable, Equatable, Identifiable {
     /// 줄 오른쪽에 점과 함께 보이는 짧은 말.
     var stateLabel: String {
         switch state {
-        case "ok": "정상"
-        case "warn": "확인 필요"
-        case "fail": "문제 있음"
-        default: "확인 못 함"
+        case "ok": String(localized: "정상")
+        case "warn": String(localized: "확인 필요")
+        case "fail": String(localized: "문제 있음")
+        default: String(localized: "확인 못 함")
         }
     }
 
@@ -133,7 +133,7 @@ struct DiagnosticsFile: Codable, Sendable, Equatable {
         } catch is CancellationError {
         } catch {
             guard mine == token, !Task.isCancelled else { return }
-            self.error = Self.message(error, fallback: "점검표를 읽지 못했습니다.")
+            self.error = Self.message(error, fallback: String(localized: "점검표를 읽지 못했습니다."))
         }
     }
 
@@ -149,20 +149,20 @@ struct DiagnosticsFile: Codable, Sendable, Equatable {
             diagnostics = result
         } catch let failure as APIError where [404, 405, 501].contains(failure.status) {
             guard mine == diagnoseToken else { return }
-            diagnoseError = "이 서버 버전은 진단 파일을 만들 수 없습니다. IAMCEO를 새 버전으로 올려 주세요."
+            diagnoseError = String(localized: "이 서버 버전은 진단 파일을 만들 수 없습니다. IAMCEO를 새 버전으로 올려 주세요.")
         } catch let failure as APIError where failure.code == "LOCAL_ONLY" {
             guard mine == diagnoseToken else { return }
-            diagnoseError = "진단 파일은 서버가 있는 Mac에서만 만들 수 있습니다."
+            diagnoseError = String(localized: "진단 파일은 서버가 있는 Mac에서만 만들 수 있습니다.")
         } catch is CancellationError {
         } catch {
             guard mine == diagnoseToken, !Task.isCancelled else { return }
-            diagnoseError = Self.message(error, fallback: "진단 파일을 만들지 못했습니다.")
+            diagnoseError = Self.message(error, fallback: String(localized: "진단 파일을 만들지 못했습니다."))
         }
     }
 
     private static func message(_ error: Error, fallback: String) -> String {
-        if let failure = error as? APIError, !failure.message.isEmpty { return failure.message }
-        if error is URLError { return "서버에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요." }
+        if let failure = error as? APIError, !failure.message.isEmpty { return failure.localizedDescription }
+        if error is URLError { return String(localized: "서버에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요.") }
         return fallback
     }
 }

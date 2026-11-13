@@ -19,7 +19,7 @@ then give instructions and approve decisions from one Mac and iPhone app.
 
 </div>
 
-> **Language:** the app's screens are in Korean today. The lead and staff can write their reports, decision cards and to-dos to you in English (설정 → 일반 → 보고 언어, Settings → General → Report language), and the installer and the command-line tool speak English. The [user guides](docs/guide/README.md) are in English and Korean.
+> **Language:** the app's screens follow your device language: English, or Korean on a Korean device. The lead and staff can write their reports, decision cards and to-dos to you in English (Settings → General → Report language), and the installer and the command-line tool speak English. The [user guides](docs/guide/README.md) are in English and Korean.
 
 - **Stop babysitting terminals** — who is working, who is done and who is stuck at a permission prompt, on one Home screen.
 - **One Inbox for every decision** — staff questions and approvals arrive as cards with background, the outcome of each option and a recommendation.
@@ -83,7 +83,7 @@ The full order is in [Upgrade, backup and uninstall](docs/guide/upgrade-backup-u
 
 ## Terms
 
-The English text here says *lead* and *staff*. The app's screens are Korean, so this is what you will see there.
+The English app says *Lead* and *Staff*. On a Korean device the app shows the Korean names in the second column.
 
 | Here | In the app | What it is |
 |---|---|---|
@@ -210,7 +210,7 @@ Requires Xcode 26, [XcodeGen](https://github.com/yonaskolb/XcodeGen) and [Bun](h
 git clone https://github.com/yehsung/IAMCEO.git && cd IAMCEO
 bun install
 bun run build:native            # dist/native/IAMCEO.app
-open -n dist/native/IAMCEO.app --args --demo   # read-only sample, no connection
+open -n dist/native/IAMCEO.app --args --demo   # sample workspace on an in-app stand-in server, no connection
 ```
 
 Tests run isolated, with a temporary data home, automatic ports and fake CLIs:

@@ -22,14 +22,14 @@ final class LocalHostService {
 
     func start() async throws -> LocalHostConnection {
         #if os(macOS)
-        guard !isStarting else { throw LocalHostError("이미 이 Mac의 실행 환경을 준비하고 있습니다.") }
+        guard !isStarting else { throw LocalHostError(String(localized: "이미 이 Mac의 실행 환경을 준비하고 있습니다.")) }
         isStarting = true
         defer { isStarting = false }
         let environment = ProcessInfo.processInfo.environment
         let dataHome = Self.dataHome(environment: environment)
         let resources = try Self.runtimeResources(environment: environment)
         let expectedBuildID = try await Self.buildID(resources.daemon, environment: environment)
-        statusText = "기존 로컬 연결을 확인하는 중"
+        statusText = String(localized: "기존 로컬 연결을 확인하는 중")
         var hadConnection = false
         if let current = try Self.readConnection(dataHome: dataHome, environment: environment) {
             hadConnection = true
@@ -38,7 +38,7 @@ final class LocalHostService {
             existing: while true {
                 do {
                     let coreAvailable = try await Self.checkHealth(client, expectedBuildID: expectedBuildID, readinessTimeout: 15, bootstrapTimeout: 30)
-                    statusText = coreAvailable ? "이 Mac에 연결했습니다" : "이 Mac에 연결했습니다 · core 연결을 확인하세요"
+                    statusText = coreAvailable ? String(localized: "이 Mac에 연결했습니다") : String(localized: "이 Mac에 연결했습니다 · core 연결을 확인하세요")
                     return current
                 } catch let error as URLError where error.code == .cannotConnectToHost {
                     // Only a refused connection means it is safe to attempt a new local host.
@@ -47,20 +47,20 @@ final class LocalHostService {
                     // 응답이 늦을 뿐 서버는 떠 있다. 서비스를 건드리지 않고 한 번 더 기다린다.
                     slowAnswers += 1
                     guard slowAnswers < 2 else {
-                        throw LocalHostError("이 Mac의 서버가 바빠 응답이 늦습니다. 실행 중인 서비스는 바꾸지 않았습니다. 잠시 뒤 다시 시도하세요.")
+                        throw LocalHostError(String(localized: "이 Mac의 서버가 바빠 응답이 늦습니다. 실행 중인 서비스는 바꾸지 않았습니다. 잠시 뒤 다시 시도하세요."))
                     }
                     try Task.checkCancellation()
-                    statusText = "서버 응답을 기다리는 중"
+                    statusText = String(localized: "서버 응답을 기다리는 중")
                 } catch let error as APIError where error.status == 503 {
                     // 서버가 뜨는 중이다(STARTING). 서비스는 건드리지 않고 준비될 때까지 기다린다.
-                    statusText = "서버가 준비되기를 기다리는 중"
+                    statusText = String(localized: "서버가 준비되기를 기다리는 중")
                     if let connection = try await awaitReady(dataHome: dataHome, environment: environment, expectedBuildID: expectedBuildID, attempts: 60, within: .seconds(30)) {
                         return connection
                     }
-                    throw LocalHostError("이 Mac의 서버가 아직 준비 중입니다. 실행 중인 서비스는 바꾸지 않았습니다. 잠시 뒤 다시 시도하세요.")
+                    throw LocalHostError(String(localized: "이 Mac의 서버가 아직 준비 중입니다. 실행 중인 서비스는 바꾸지 않았습니다. 잠시 뒤 다시 시도하세요."))
                 } catch let error as LocalHostError { throw error }
                 catch {
-                    throw LocalHostError("기존 로컬 서버에 응답 또는 인증 문제가 있습니다. 실행 중인 서비스를 바꾸지 않았습니다. 연결 설정을 확인하세요.")
+                    throw LocalHostError(String(localized: "기존 로컬 서버에 응답 또는 인증 문제가 있습니다. 실행 중인 서비스를 바꾸지 않았습니다. 연결 설정을 확인하세요."))
                 }
             }
         } else {
@@ -70,30 +70,30 @@ final class LocalHostService {
         if try await Self.run(URL(fileURLWithPath: "/bin/launchctl"), arguments: ["print", target], environment: environment, timeout: 15) == 0 {
             // 등록된 서비스가 다시 뜨는 중(재시작·배포 직후)일 수 있다. 서비스는 건드리지 않고 잠시 기다려 본다.
             if hadConnection {
-                statusText = "서버가 다시 뜨기를 기다리는 중"
+                statusText = String(localized: "서버가 다시 뜨기를 기다리는 중")
                 if let connection = try await awaitReady(dataHome: dataHome, environment: environment, expectedBuildID: expectedBuildID, attempts: 60, within: .seconds(30)) {
                     return connection
                 }
             }
-            throw LocalHostError("이미 등록된 IAMCEO 서비스가 있습니다. 기존 서비스의 연결 문제를 먼저 확인하세요. 실행 중인 서비스는 교체하지 않았습니다.")
+            throw LocalHostError(String(localized: "이미 등록된 IAMCEO 서비스가 있습니다. 기존 서비스의 연결 문제를 먼저 확인하세요. 실행 중인 서비스는 교체하지 않았습니다."))
         }
         try Self.requireOwnedPlist(daemon: resources.daemon, dataHome: dataHome)
         var launchEnvironment = environment
         launchEnvironment["IAMCEO_HOME"] = dataHome.path
         launchEnvironment["IAMCEO_CORE_BIN"] = resources.core.path
-        statusText = "이 Mac의 실행 서비스를 준비하는 중"
+        statusText = String(localized: "이 Mac의 실행 서비스를 준비하는 중")
         // service install 은 서버 준비를 30초까지 기다린 뒤 끝난다.
         let status = try await Self.run(resources.daemon, arguments: ["service", "install"], environment: launchEnvironment, timeout: 90)
         guard status == 0 else {
-            throw LocalHostError("로컬 서비스 등록을 완료하지 못했습니다 (종료 코드 \(status)). 기존 설치의 서비스 설정을 확인하세요.")
+            throw LocalHostError(String(localized: "로컬 서비스 등록을 완료하지 못했습니다 (종료 코드 \(status)). 기존 설치의 서비스 설정을 확인하세요."))
         }
-        statusText = "서버가 준비되기를 기다리는 중"
+        statusText = String(localized: "서버가 준비되기를 기다리는 중")
         if let connection = try await awaitReady(dataHome: dataHome, environment: environment, expectedBuildID: expectedBuildID, attempts: 60, within: .seconds(120)) {
             return connection
         }
-        throw LocalHostError("로컬 서버가 아직 준비되지 않았습니다. 잠시 뒤 다시 시도하거나 ~/.iamceo/logs의 서버 로그를 확인하세요.")
+        throw LocalHostError(String(localized: "로컬 서버가 아직 준비되지 않았습니다. 잠시 뒤 다시 시도하거나 ~/.iamceo/logs의 서버 로그를 확인하세요."))
         #else
-        throw LocalHostError("로컬 실행은 Mac 앱에서 시작할 수 있습니다. iPhone에서는 실행 중인 Mac에 연결하세요.")
+        throw LocalHostError(String(localized: "로컬 실행은 Mac 앱에서 시작할 수 있습니다. iPhone에서는 실행 중인 Mac에 연결하세요."))
         #endif
     }
 
@@ -170,25 +170,25 @@ final class LocalHostService {
     /// 앱에 든 서버로 서비스를 다시 시작한다(`iamceo service install --restart`). 팀장 세션은 실행 엔진이 쥐고 있어 이어진다.
     /// 바로 앞에서 조건을 다시 확인하고, 그사이 달라졌으면 아무것도 하지 않는다.
     func restartWithBundledServer(endpoint: String, expected: ServerUpgradeOffer) async throws {
-        guard !isStarting else { throw LocalHostError("이미 이 Mac의 서버를 준비하고 있습니다.") }
+        guard !isStarting else { throw LocalHostError(String(localized: "이미 이 Mac의 서버를 준비하고 있습니다.")) }
         isStarting = true
         defer { isStarting = false }
-        statusText = "서버를 다시 확인하는 중"
+        statusText = String(localized: "서버를 다시 확인하는 중")
         guard let current = await Self.checkServerUpgrade(endpoint: endpoint), current.bundledBuildID == expected.bundledBuildID else {
-            throw LocalHostError("서버 상태가 바뀌어 다시 시작하지 않았습니다. 설정에서 다시 확인해 주세요.")
+            throw LocalHostError(String(localized: "서버 상태가 바뀌어 다시 시작하지 않았습니다. 설정에서 다시 확인해 주세요."))
         }
         let environment = ProcessInfo.processInfo.environment
         let resources = try Self.runtimeResources(environment: environment)
         var launchEnvironment = environment
         launchEnvironment["IAMCEO_HOME"] = Self.dataHome(environment: environment).path
         launchEnvironment["IAMCEO_CORE_BIN"] = resources.core.path
-        statusText = "서버를 새 버전으로 다시 시작하는 중"
+        statusText = String(localized: "서버를 새 버전으로 다시 시작하는 중")
         // service install --restart 는 내리고, 새 설정으로 올리고, 새 build 가 준비될 때까지(최대 30초) 기다린다.
         let status = try await Self.run(resources.daemon, arguments: ["service", "install", "--restart"], environment: launchEnvironment, timeout: 150)
         guard status == 0 else {
-            throw LocalHostError("서버를 다시 시작하지 못했습니다(종료 코드 \(status)). 잠시 뒤 다시 시도하거나 ~/.iamceo/logs의 서버 로그를 확인하세요.")
+            throw LocalHostError(String(localized: "서버를 다시 시작하지 못했습니다(종료 코드 \(status)). 잠시 뒤 다시 시도하거나 ~/.iamceo/logs의 서버 로그를 확인하세요."))
         }
-        statusText = "서버를 새 버전으로 다시 시작했습니다"
+        statusText = String(localized: "서버를 새 버전으로 다시 시작했습니다")
     }
 
     /// 실행 파일 한 줄 출력(버전 등). 실패하면 nil.
@@ -229,10 +229,10 @@ final class LocalHostService {
                     if let reused, reused.connection == connection { client = reused.client }
                     else { client = try Self.client(connection); reused = (connection, client) }
                     let coreAvailable = try await Self.checkHealth(client, expectedBuildID: expectedBuildID, readinessTimeout: 4, bootstrapTimeout: 30)
-                    statusText = coreAvailable ? "이 Mac에 연결했습니다" : "이 Mac에 연결했습니다 · core 연결을 확인하세요"
+                    statusText = coreAvailable ? String(localized: "이 Mac에 연결했습니다") : String(localized: "이 Mac에 연결했습니다 · core 연결을 확인하세요")
                     return connection
                 } catch let error as APIError where error.status == 401 {
-                    throw LocalHostError("로컬 서버의 접속 코드가 설정과 다릅니다. 연결 설정을 확인하세요.")
+                    throw LocalHostError(String(localized: "로컬 서버의 접속 코드가 설정과 다릅니다. 연결 설정을 확인하세요."))
                 } catch {
                     // Startup can expose health before its first bootstrap is ready.
                 }
@@ -262,7 +262,7 @@ final class LocalHostService {
         guard readiness.ok, let daemon = readiness.daemon, daemon.ready,
               daemon.buildId == expectedBuildID, daemon.version == readiness.version,
               readiness.schema.version > 0, readiness.schema.version == readiness.schema.supportedVersion else {
-            throw LocalHostError("로컬 서버의 준비 상태·실행 build·DB 스키마가 앱과 맞지 않습니다. 설치와 실행 중인 서비스를 확인하세요.")
+            throw LocalHostError(String(localized: "로컬 서버의 준비 상태·실행 build·DB 스키마가 앱과 맞지 않습니다. 설치와 실행 중인 서비스를 확인하세요."))
         }
         let _: Bootstrap = try await client.request("/api/bootstrap", timeout: bootstrapTimeout)
         return readiness.core?.available == true
@@ -290,7 +290,7 @@ final class LocalHostService {
             let identity = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard process.terminationStatus == 0, identity.count == 64,
                   identity.allSatisfy({ $0.isASCII && $0.isHexDigit }) else {
-                throw LocalHostError("앱에 포함된 서버의 build ID를 확인하지 못했습니다.")
+                throw LocalHostError(String(localized: "앱에 포함된 서버의 build ID를 확인하지 못했습니다."))
             }
             return identity
         }.value
@@ -311,7 +311,7 @@ final class LocalHostService {
            manager.isExecutableFile(atPath: daemonPath), manager.isExecutableFile(atPath: corePath) {
             return RuntimeResources(daemon: URL(fileURLWithPath: daemonPath), core: URL(fileURLWithPath: corePath))
         }
-        throw LocalHostError("실행 파일이 포함된 IAMCEO.app이 필요합니다. 소스 개발 환경에서는 bun run build:native로 앱을 만들거나, QA용 IAMCEO_DAEMON_BIN과 IAMCEO_CORE_BIN에 실행 파일의 절대 경로를 지정하세요.")
+        throw LocalHostError(String(localized: "실행 파일이 포함된 IAMCEO.app이 필요합니다. 소스 개발 환경에서는 bun run build:native로 앱을 만들거나, QA용 IAMCEO_DAEMON_BIN과 IAMCEO_CORE_BIN에 실행 파일의 절대 경로를 지정하세요."))
     }
 
     private struct LocalConfig: Decodable { let accessCode: String; let port: Int? }
@@ -322,10 +322,10 @@ final class LocalHostService {
     private static func port(environment: [String: String], configured: Int?) throws -> Int {
         let value: Int
         if let raw = environment["IAMCEO_PORT"], !raw.isEmpty {
-            guard let parsed = Int(raw) else { throw LocalHostError("로컬 서버 포트 설정을 확인하세요.") }
+            guard let parsed = Int(raw) else { throw LocalHostError(String(localized: "로컬 서버 포트 설정을 확인하세요.")) }
             value = parsed
         } else { value = configured ?? 7878 }
-        guard (1...65535).contains(value) else { throw LocalHostError("로컬 서버 포트 설정을 확인하세요.") }
+        guard (1...65535).contains(value) else { throw LocalHostError(String(localized: "로컬 서버 포트 설정을 확인하세요.")) }
         return value
     }
     private static func readConnection(dataHome: URL, environment: [String: String]) throws -> LocalHostConnection? {
@@ -333,8 +333,8 @@ final class LocalHostService {
         guard FileManager.default.fileExists(atPath: configURL.path) else { return nil }
         let config: LocalConfig
         do { config = try JSONDecoder().decode(LocalConfig.self, from: Data(contentsOf: configURL)) }
-        catch { throw LocalHostError("IAMCEO 로컬 설정을 읽지 못했습니다. 기존 config.json을 확인하세요.") }
-        guard !config.accessCode.isEmpty else { throw LocalHostError("IAMCEO 로컬 설정에 접속 코드가 없습니다.") }
+        catch { throw LocalHostError(String(localized: "IAMCEO 로컬 설정을 읽지 못했습니다. 기존 config.json을 확인하세요.")) }
+        guard !config.accessCode.isEmpty else { throw LocalHostError(String(localized: "IAMCEO 로컬 설정에 접속 코드가 없습니다.")) }
         let configuredPort = try port(environment: environment, configured: config.port)
         return LocalHostConnection(url: URL(string: "http://127.0.0.1:\(configuredPort)")!, accessCode: config.accessCode)
     }
@@ -348,8 +348,8 @@ final class LocalHostService {
         request.timeoutInterval = 2
         do { let _ = try await session.data(for: request) }
         catch let error as URLError where error.code == .cannotConnectToHost { return }
-        catch { throw LocalHostError("로컬 포트 \(port)의 상태를 확인하지 못했습니다. 기존 프로그램은 변경하지 않았습니다.") }
-        throw LocalHostError("다른 프로그램이 로컬 포트 \(port)를 사용 중입니다. 기존 프로그램을 바꾸지 않았습니다.")
+        catch { throw LocalHostError(String(localized: "로컬 포트 \(port)의 상태를 확인하지 못했습니다. 기존 프로그램은 변경하지 않았습니다.")) }
+        throw LocalHostError(String(localized: "다른 프로그램이 로컬 포트 \(port)를 사용 중입니다. 기존 프로그램을 바꾸지 않았습니다."))
     }
     private static func requireOwnedPlist(daemon: URL, dataHome: URL) throws {
         let path = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/com.iamceo.server.plist")
@@ -359,7 +359,7 @@ final class LocalHostService {
         let environment = object?["EnvironmentVariables"] as? [String: String]
         let ownerHome = environment?["IAMCEO_HOME"].map { URL(fileURLWithPath: $0).standardizedFileURL } ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".iamceo")
         guard object?["Label"] as? String == "com.iamceo.server", object?["ProgramArguments"] as? [String] == [daemon.path, "serve"], ownerHome == dataHome else {
-            throw LocalHostError("다른 설치의 서비스 설정이 있어 자동 교체하지 않았습니다. 기존 IAMCEO 설치의 서비스 설정을 확인하세요.")
+            throw LocalHostError(String(localized: "다른 설치의 서비스 설정이 있어 자동 교체하지 않았습니다. 기존 IAMCEO 설치의 서비스 설정을 확인하세요."))
         }
     }
     /// No shell, no command output, and no access code in logs or arguments.
@@ -399,11 +399,11 @@ private final class ChildRun: @unchecked Sendable {
         do { try process.run(); launched = true; lock.unlock() }
         catch {
             lock.unlock()
-            finish(.failure(LocalHostError("로컬 실행 서비스를 시작할 수 없습니다. 앱의 실행 파일과 macOS 권한을 확인하세요.")), terminate: false)
+            finish(.failure(LocalHostError(String(localized: "로컬 실행 서비스를 시작할 수 없습니다. 앱의 실행 파일과 macOS 권한을 확인하세요."))), terminate: false)
             return
         }
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
-            self?.stop(LocalHostError("이 Mac의 실행 서비스 준비가 제한 시간 안에 끝나지 않았습니다. 잠시 뒤 다시 시도하세요."))
+            self?.stop(LocalHostError(String(localized: "이 Mac의 실행 서비스 준비가 제한 시간 안에 끝나지 않았습니다. 잠시 뒤 다시 시도하세요.")))
         }
     }
     func stop(_ error: any Error) { finish(.failure(error), terminate: true) }

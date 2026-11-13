@@ -9,8 +9,8 @@ struct FileChips: View {
         ChipFlow(spacing: 6) {
             ForEach(FileLinks.unique(fileIDs), id: \.self) { id in
                 let file = store.files.first { $0.id == id }
-                LinkChip(icon: fileKindIcon(file?.kind ?? "file"), label: "자료",
-                         title: file?.title ?? "자료 열기", help: "자료 열기") {
+                LinkChip(icon: fileKindIcon(file?.kind ?? "file"), label: String(localized: "자료"),
+                         title: file?.title ?? String(localized: "자료 열기"), help: String(localized: "자료 열기")) {
                     router.openFile(id)
                 }
             }
@@ -99,7 +99,7 @@ struct LinkChip: View {
 
     /// Chips sit in a wrapping row, so long titles are cut by length (the full title is in the tooltip).
     private var shortTitle: String {
-        let value = title.isEmpty ? "제목 없음" : title
+        let value = title.isEmpty ? String(localized: "제목 없음") : title
         return value.count > 26 ? String(value.prefix(25)) + "…" : value
     }
 }
@@ -136,7 +136,7 @@ struct ViewedFileContextChip: View {
     let remove: () -> Void
     var body: some View {
         HStack(spacing: 5) {
-            Text("보던 자료: " + (file.title.isEmpty ? "제목 없는 자료" : file.title)).lineLimit(1)
+            Text(String(localized: "보던 자료: ") + (file.title.isEmpty ? String(localized: "제목 없는 자료") : file.title)).lineLimit(1)
             Button(action: remove) { Image(systemName: "xmark.circle.fill") }
                 .buttonStyle(.plain).accessibilityLabel("보던 자료 빼기")
         }

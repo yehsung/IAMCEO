@@ -4,7 +4,7 @@ import Observation
 enum Destination: String, CaseIterable, Identifiable {
     case home, inbox, team, chat, files
     var id: String { rawValue }
-    var title: String { switch self { case .home: "홈"; case .inbox: "결재함"; case .team: "팀"; case .chat: "대화"; case .files: "자료" } }
+    var title: String { switch self { case .home: String(localized: "홈"); case .inbox: String(localized: "결재함"); case .team: String(localized: "팀"); case .chat: String(localized: "대화"); case .files: String(localized: "tab.files", defaultValue: "자료") } }
     var icon: String { switch self { case .home: "square.grid.2x2"; case .inbox: "tray"; case .team: "person.2"; case .chat: "bubble.left.and.bubble.right"; case .files: "folder" } }
 }
 

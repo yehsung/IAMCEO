@@ -1,6 +1,122 @@
 {
   "sourceLanguage" : "ko",
   "strings" : {
+    "앱의 메뉴와 안내 글에 쓰는 언어로, 이 기기에만 저장됩니다. 총괄·팀장이 쓰는 보고의 언어는 '보고 언어'에서 따로 정합니다." : {
+      "comment" : "W(0.2.5) 앱 화면 언어(설정 → 일반 → 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The language of the app's menus and messages, saved on this device only. The language your lead and staff write reports in is set separately under Report language."
+          }
+        }
+      }
+    },
+    "언어" : {
+      "comment" : "W(0.2.5) 앱 화면 언어(설정 → 일반 → 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Language"
+          }
+        }
+      }
+    },
+    "자동" : {
+      "comment" : "W(0.2.5) 앱 화면 언어(설정 → 일반 → 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Automatic"
+          }
+        }
+      }
+    },
+    "다시 열면 바뀝니다" : {
+      "comment" : "W(0.2.5) 앱 화면 언어(설정 → 일반 → 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Takes effect when you reopen the app"
+          }
+        }
+      }
+    },
+    "지금 다시 열기" : {
+      "comment" : "W(0.2.5) 앱 화면 언어(설정 → 일반 → 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reopen now"
+          }
+        }
+      }
+    },
+    "자동은 App Store 국가를 따릅니다. 한국은 한국어, 그 밖은 English입니다." : {
+      "comment" : "W(0.2.5) 앱 화면 언어(설정 → 일반 → 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Automatic follows your App Store country: Korean in Korea, English everywhere else."
+          }
+        }
+      }
+    },
+    "자동은 기기 언어를 따릅니다. 한국어 기기는 한국어, 그 밖은 English입니다." : {
+      "comment" : "W(0.2.5) 앱 화면 언어(설정 → 일반 → 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Automatic follows your device language: Korean on a Korean device, English otherwise."
+          }
+        }
+      }
+    },
+    "앱을 다시 열어야 화면이 %@로 바뀝니다." : {
+      "comment" : "W(0.2.5) 앱 화면 언어(설정 → 일반 → 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reopen the app to switch to %@."
+          }
+        }
+      }
+    },
+    "앱을 완전히 닫았다가 다시 열면 화면이 %@로 바뀝니다." : {
+      "comment" : "W(0.2.5) 앱 화면 언어(설정 → 일반 → 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Close the app completely and open it again to switch to %@."
+          }
+        }
+      }
+    },
+    "language.name.ko" : {
+      "comment" : "W(0.2.5) 앱 화면 언어(설정 → 일반 → 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Korean"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "한국어"
+          }
+        }
+      }
+    },
     "\n마지막 판 정리 %@" : {
       "localizations" : {
         "en" : {
@@ -4687,6 +4803,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "It changed elsewhere. Your note is kept. Check the latest content."
+          }
+        }
+      }
+    },
+    "다른 기기는 서버가 도는 Mac에서 끊을 수 있습니다." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Other devices can be disconnected on the Mac that runs the server."
           }
         }
       }
@@ -12523,6 +12649,166 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "다른 서버에 보내려던 글 %lld개 · 이 서버로는 보내지 않습니다" : {
+      "comment" : "V(0.2.5) 대기열 서버 신원·하루 지난 글·30일 정리",
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld message meant for another server · Not sent to this one"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld messages meant for another server · Not sent to this one"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "다른 서버에 보내려던 글 %lld개 · 이 서버로는 보내지 않습니다"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "하루가 지난 글 %lld개 · 확인이 필요합니다" : {
+      "comment" : "V(0.2.5) 대기열 서버 신원·하루 지난 글·30일 정리",
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld message over a day old · Needs your review"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld messages over a day old · Need your review"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "하루가 지난 글 %lld개 · 확인이 필요합니다"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "쓴 지 하루가 지난 글은 저절로 보내지 않습니다" : {
+      "comment" : "V(0.2.5) 대기열 서버 신원·하루 지난 글·30일 정리",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Messages written over a day ago aren't sent automatically"
+          }
+        }
+      }
+    },
+    "지금 상황에 맞는지 보고 글마다 보내기·고치기·지우기를 골라 주세요. 뒤의 글은 앞의 글을 정한 다음 순서대로 보냅니다." : {
+      "comment" : "V(0.2.5) 대기열 서버 신원·하루 지난 글·30일 정리",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Check that each one still fits, then choose Send, Edit or Delete. Later messages wait, then go out in order once the earlier ones are settled."
+          }
+        }
+      }
+    },
+    "곧 지워짐" : {
+      "comment" : "V(0.2.5) 대기열 서버 신원·하루 지난 글·30일 정리",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Deleted soon"
+          }
+        }
+      }
+    },
+    "다른 서버에 보내려던 글 %lld개" : {
+      "comment" : "V(0.2.5) 대기열 서버 신원·하루 지난 글·30일 정리",
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld message meant for another server"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld messages meant for another server"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "다른 서버에 보내려던 글 %lld개"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "지금 서버로는 보내지 않습니다. 그 서버에 다시 연결하면 순서대로 보냅니다. 쓴 지 30일이 지나면 지워지니 필요한 내용은 복사해 두세요." : {
+      "comment" : "V(0.2.5) 대기열 서버 신원·하루 지난 글·30일 정리",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "These aren't sent to the server you're on now. They go out in order when you reconnect to that server. They're deleted 30 days after they were written, so copy anything you need."
+          }
+        }
+      }
+    },
+    "%@ · 같은 주소의 이전 서버" : {
+      "comment" : "V(0.2.5) 대기열 서버 신원·하루 지난 글·30일 정리",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ · Previous server at this address"
           }
         }
       }

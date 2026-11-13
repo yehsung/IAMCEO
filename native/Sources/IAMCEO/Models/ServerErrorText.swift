@@ -380,5 +380,6 @@ enum ServerErrorText {
         "tool_permission_gone": (ko: "승인 요청이 이미 끝났습니다. 터미널의 승인 창에서 답해 주세요", en: "The approval request has already ended. Answer it at the approval prompt in the terminal"),
         "tool_permission_owner_only": (ko: "도구 승인 요청은 대표만 답할 수 있습니다", en: "Only the owner can answer a tool-approval request"),
         "tool_permission_unsupported": (ko: "도구 승인 요청을 지원하지 않습니다", en: "Tool-approval requests are not supported"),
+        "device_revoke_local_only": (ko: "다른 기기는 서버가 도는 Mac에서 끊을 수 있습니다", en: "Other devices can be disconnected on the Mac that runs the server"),
     ]
 }

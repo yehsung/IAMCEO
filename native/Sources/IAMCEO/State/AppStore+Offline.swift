@@ -66,7 +66,7 @@ extension AppStore {
 
     /// 스냅샷 뒤 접수 확인까지 끝난 다음(readSnapshot 이 부른다). 보낼 글이 있을 때만 따로 돈다.
     func flushOutboxSoon() {
-        guard !outboxFlushing, !queuedMessages.isEmpty || !offline.sent(namespace: writeNamespace).isEmpty else { return }
+        guard !outboxFlushing, !queuedMessages.isEmpty || outboxAwaitingResult else { return }
         Task { [weak self] in await self?.flushOutbox() }
     }
 
@@ -193,26 +193,89 @@ extension AppStore {
 
     // MARK: Outbox
 
+    /// V: 지금 붙은(또는 마지막 상태로 보는) 서버의 신원. 0.2.4 이하 서버는 nil.
+    var currentServerID: String? { ServerVersionInfo.normalizedID(bootstrap?.server?.id) }
+    /// 리뷰 safety-1: 지금 서버의 데이터 폴더(Bootstrap.home). 모르면 nil.
+    var currentServerHome: String? { bootstrap.flatMap { $0.home.isEmpty ? nil : $0.home } }
+
+    /// 리뷰 safety-3: 전송 기록이 지금 서버로 보낸 것인가(신원으로 가릴 수 없으면 예전처럼 그렇다고 본다).
+    /// 다른 서버로 보낸 글의 결과는 지금 서버에 묻지 않는다(그 서버의 404 로 '접수 안 됨'을 정하지 않는다).
+    func sentToCurrentServer(_ attempt: MessageSubmission) -> Bool {
+        ServerIdentity.same(id: attempt.serverID, home: attempt.serverHome, as: currentServerID, home: currentServerHome) != false
+    }
+
+    /// V: 대기열을 지금 서버의 몫(here)과 다른 서버의 몫(elsewhere)으로 가른다. 쓴 순서는 그대로다. 서버를 모르면(연결 전) 둘 다 비었다.
+    var outboxSplit: (here: [QueuedMessage], elsewhere: [QueuedMessage]) {
+        guard writeNamespace != "unassigned", let bootstrap else { return ([], []) }
+        return Self.splitOutbox(offline.outbox.items, at: writeNamespace, server: bootstrap)
+    }
+
+    /// V: 글 하나가 `current` 주소로 붙은 `server` 의 것인가. 글마다 남긴 표지(서버 ID·데이터 폴더·자기 주소)로 가린다.
+    /// - 신원으로 가릴 수 있으면 그것으로(ServerIdentity): 글과 서버의 ID 를 다 알면 ID 로(주소가 같아도 ID 가 다르면 다른 서버,
+    ///   주소가 달라도 ID 가 같으면 같은 서버). 다만 두 데이터 폴더를 다 알고 서로 다르면 ID 가 같아도 다른 서버다(같은 곳 복원한
+    ///   사본·DB 를 복사한 시험 서버. 리뷰 safety-1).
+    /// - 가릴 수 없으면(옛 서버, 이 칸이 없던 판의 글) 예전처럼 주소와 데이터 폴더로(sameServer).
+    /// 주소마다 하나인 표지(OutboxState.owners)는 보지 않는다: 같은 주소에 다른 서버가 붙으면 덮여 옛 글의 판정이 뒤집힌다(리뷰 safety-2).
+    static func splitOutbox(_ items: [QueuedMessage], at current: String,
+                            server: Bootstrap) -> (here: [QueuedMessage], elsewhere: [QueuedMessage]) {
+        let serverID = ServerVersionInfo.normalizedID(server.server?.id)
+        let home: String? = server.home.isEmpty ? nil : server.home
+        struct Mark: Hashable { let namespace: String; let owner: QueueOwner? }
+        var judged: [Mark: Bool] = [:]
+        var here: [QueuedMessage] = [], elsewhere: [QueuedMessage] = []
+        for item in items {
+            let mine: Bool
+            if let known = ServerIdentity.same(id: item.serverID, home: item.owner?.home, as: serverID, home: home) { mine = known }
+            else if let known = judged[Mark(namespace: item.namespace, owner: item.owner)] { mine = known }
+            else {
+                mine = sameServer(item.namespace, owner: item.owner, as: current, server: server)
+                judged[Mark(namespace: item.namespace, owner: item.owner)] = mine
+            }
+            if mine { here.append(item) } else { elsewhere.append(item) }
+        }
+        return (here, elsewhere)
+    }
+
     /// 지금 고른 프로젝트에서 연결되면 보낼 글(오래된 것부터).
     var queuedMessages: [QueuedMessage] {
-        guard let selectedProjectID, writeNamespace != "unassigned" else { return [] }
-        return offline.items(namespace: writeNamespace, projectID: selectedProjectID)
+        guard let selectedProjectID else { return [] }
+        return outboxSplit.here.filter { $0.projectID == selectedProjectID }
     }
     /// 같은 서버의 다른 프로젝트에 둔 글 수(그 프로젝트를 열면 보낸다). 보낼 곳이 없는 글(아래)은 세지 않는다.
     var queuedElsewhereCount: Int {
-        guard writeNamespace != "unassigned" else { return 0 }
-        return offline.items(namespace: writeNamespace).count - queuedMessages.count - orphanQueuedMessages.count
+        guard let bootstrap else { return 0 }
+        let active = Set(bootstrap.projects.map(\.id))
+        return outboxSplit.here.filter { $0.projectID != selectedProjectID && active.contains($0.projectID) }.count
     }
     /// 보관했거나 지운 프로젝트에 둔 글(이 서버 몫, 지금 고른 프로젝트 말고). 그 프로젝트가 프로젝트 목록에 없어 보낼 수 없다.
     /// 대기열 목록에 따로 보이고 지울 수 있다(4차 리뷰 data-5: 예전에는 보낼 수도, 볼 수도, 지울 수도 없었다).
     var orphanQueuedMessages: [QueuedMessage] {
-        guard writeNamespace != "unassigned", let bootstrap else { return [] }
+        guard let bootstrap else { return [] }
         let active = Set(bootstrap.projects.map(\.id))
-        return offline.items(namespace: writeNamespace).filter { !active.contains($0.projectID) && $0.projectID != selectedProjectID }
+        return outboxSplit.here.filter { !active.contains($0.projectID) && $0.projectID != selectedProjectID }
+    }
+    /// V: 다른 서버에 보내려던 글(쓴 서버가 지금 서버가 아니다). 보내지 않고 대기열 화면에 따로 보이며 읽기·복사·지우기만 된다.
+    /// 그 서버에 다시 붙으면 그 서버의 몫이 되어 순서대로 보낸다.
+    var otherServerQueuedMessages: [QueuedMessage] { outboxSplit.elsewhere }
+    /// '나가기'가 지우는 이 서버의 글 수(확인 창이 미리 알린다).
+    var queuedForThisServerCount: Int { outboxSplit.here.count }
+    /// V: 이 프로젝트에서 쓴 지 하루가 넘어 저절로 보내지 않는 글. 대표가 보내기·고치기·지우기를 고른다.
+    var queuedNeedingReview: [QueuedMessage] {
+        let now = Date()
+        return queuedMessages.filter { $0.needsReview(now: now) }
     }
     var outboxPausedReason: String? {
-        writeNamespace == "unassigned" ? nil : offline.pausedReason(namespace: writeNamespace)
+        writeNamespace == "unassigned" ? nil : offline.pausedReason(namespace: writeNamespace, serverID: currentServerID)
     }
+    /// 이 서버로 앞서 보낸 글의 결과를 기다린다(같은 주소의 다른 서버로 보낸 기록은 빼고). 결과가 정해질 때까지 다음 글을 보내지 않는다.
+    private var currentSent: [SentQueuedMessage] {
+        guard writeNamespace != "unassigned" else { return [] }
+        let serverID = currentServerID, home = currentServerHome
+        return offline.sent(namespace: writeNamespace).filter {
+            ServerIdentity.same(id: $0.serverID, home: $0.home, as: serverID, home: home) != false
+        }
+    }
+    var outboxAwaitingResult: Bool { !currentSent.isEmpty }
 
     /// 지금 바로 보낼 수 없고, 그 까닭이 '서버에 연결되지 않음'뿐인가. 이때 입력칸의 보내기는 '연결되면 보내기'가 된다.
     var waitsForConnection: Bool {
@@ -245,7 +308,7 @@ extension AppStore {
             return String(localized: "첨부가 있는 글은 연결된 뒤에 보내 주세요.")
         }
         if let error = offline.persistenceError { return OutboxError.unavailable(error).localizedDescription }
-        if offline.items(namespace: writeNamespace).count >= OfflineStateStore.itemLimit { return OutboxError.full.localizedDescription }
+        if offline.count(namespace: writeNamespace, serverID: currentServerID) >= OfflineStateStore.itemLimit { return OutboxError.full.localizedDescription }
         let text = drafts.text(for: key)
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return OutboxError.empty.localizedDescription }
         if text.count > OfflineStateStore.textLimit { return OutboxError.tooLong.localizedDescription }
@@ -265,7 +328,7 @@ extension AppStore {
         let name = targetMemberID.flatMap { id in members.first { $0.id == id }?.name }
         do {
             try offline.enqueue(namespace: writeNamespace, projectID: projectID, targetMemberID: targetMemberID,
-                                targetName: name, text: snapshot.text, owner: bootstrap.map { QueueOwner($0) })
+                                targetName: name, text: snapshot.text, owner: bootstrap.map { QueueOwner($0) }, serverID: currentServerID)
         } catch {
             explainMessageSendBlock(error.localizedDescription, targetMemberID: targetMemberID, whileBlocked: false)
             return false
@@ -292,31 +355,51 @@ extension AppStore {
         } catch { return error.localizedDescription }
     }
 
-    /// 연결되면 보낼 글은 주소별로 둔다. 같은 서버를 다른 주소(*.ts.net 이름 ↔ HTTPS ↔ 100.x)로 다시 붙으면 예전에는 '다른 서버'로
-    /// 보고 그 글을 말없이 지웠다(4차 확인 새 문제 2. 401 뒤 QR 다시 연결에서 HTTPS 주소가 앞에 오면 흔하다). 이제 그 주소 몫을
-    /// 이 주소 몫으로 옮겨 순서대로 보낸다. 연결이 성공한 뒤 `removeAll(except:)` 앞에서 부른다.
-    func carryOutboxFromOtherAddresses(server: Bootstrap) {
+    /// V: '확인 필요'인 글에서 대표가 보내기를 골랐다. 연결돼 있으면 바로 순서대로 이어 보내고, 아니면 연결되면 보낸다.
+    /// 돌려주는 값은 실패 까닭(nil = 골랐다).
+    @discardableResult func confirmQueuedMessage(id: String) -> String? {
+        do { try offline.confirm(id: id) } catch { return error.localizedDescription }
+        if canWrite { Task { [weak self] in await self?.flushOutbox() } }
+        return nil
+    }
+
+    /// V: 연결이 성공할 때마다(같은 서버에 다시 붙어도) 부른다. 30일이 지난 글을 지우고, 지금 서버의 몫으로 판정한 글을 이 주소
+    /// 몫으로 모아 서버 ID 를 단다. 다른 서버의 몫은 지우지도 보내지도 않는다(대기열 화면에 따로 보이고, 그 서버에 다시 붙으면 보낸다).
+    /// 예전(4차)에는 다른 서버에 붙으면 옛 서버 몫을 말없이 지웠고, 같은 서버를 다른 주소로 붙은 것만 옮겨 보냈다.
+    func reconcileOutbox(server: Bootstrap) {
+        offline.purgeExpired()
         let here = writeNamespace
         guard here != "unassigned" else { return }
-        for namespace in offline.namespaces.sorted() where namespace != here
-            && Self.sameServer(namespace, owner: offline.owner(namespace: namespace), as: here, server: server) {
-            try? offline.moveQueue(from: namespace, to: here, owner: QueueOwner(server),
-                                   waitingReason: String(localized: "앞서 보낸 글의 접수를 확인하기 전에 서버 주소가 바뀌었습니다. 대화에서 그 글이 들어갔는지 확인한 뒤 이어서 보내 주세요."))
-        }
+        let mine = Self.splitOutbox(offline.outbox.items, at: here, server: server).here
+        guard !mine.isEmpty else { return }
+        try? offline.adopt(Set(mine.map(\.id)), into: here, serverID: ServerVersionInfo.normalizedID(server.server?.id), owner: QueueOwner(server),
+                           waitingReason: String(localized: "앞서 보낸 글의 접수를 확인하기 전에 서버 주소가 바뀌었습니다. 대화에서 그 글이 들어갔는지 확인한 뒤 이어서 보내 주세요."))
+    }
+
+    /// '나가기': 이 서버의 글과 이 주소의 기다리던 결과·멈춤을 지운다. 다른 서버 몫은 남긴다(그 서버에 다시 붙으면 보낸다).
+    func forgetOutboxForLeaving() {
+        guard writeNamespace != "unassigned" else { return }
+        try? offline.removeForLeaving(ids: Set(outboxSplit.here.map(\.id)), namespace: writeNamespace, serverID: currentServerID,
+                                      home: currentServerHome)
     }
 
     /// `old` 주소 몫의 글(그 글을 쓸 때 보던 서버 `owner`)이 지금 `current` 주소로 붙은 `server` 의 것인가.
-    /// - 같은 데이터 폴더(Bootstrap.home)를 쓰는 서버여야 한다. 같은 Mac 의 시험 서버처럼 폴더가 다른 서버는 다른 서버다.
+    /// V: 글과 서버의 ID 를 다 알면 이 판정은 쓰지 않는다(splitOutbox). 옛 서버나 ID 를 남기기 전 판의 글에만 쓴다.
+    /// - 같은 주소면 같은 서버다. 다만 둘의 데이터 폴더(Bootstrap.home)를 다 알고 서로 다르면 다른 서버다(같은 Mac 에 다른 폴더로 띄운 서버).
+    /// - 다른 주소면 같은 데이터 폴더를 쓰는 서버여야 한다. 같은 Mac 의 시험 서버처럼 폴더가 다른 서버는 다른 서버다.
     /// - 그리고 같은 기기여야 한다: 주소의 호스트가 같거나(포트·http/https 만 다름: *.ts.net 이름 ↔ HTTPS),
     ///   한쪽 서버가 다른 쪽 주소를 자기 주소로 알려 주었다(Bootstrap.urls 는 100.x 처럼 IP 만 싣는다). 알려 준 주소는
     ///   Tailscale 주소만 센다: 127.0.0.1 은 어느 Mac 에서나 그 Mac 자신이라 기기를 가리지 못한다(PairingRequest.knownHosts 와 같다).
-    /// - 표지가 없는 글(표지를 남기기 전 판)은 예전처럼 다른 서버로 본다.
+    /// - 표지가 없는 글(표지를 남기기 전 판)은 예전처럼 다른 서버로 본다(같은 주소면 같은 서버).
     static func sameServer(_ old: String, owner: QueueOwner?, as current: String, server: Bootstrap) -> Bool {
         func endpoint(_ address: String) -> ServerEndpoint? { try? ServerEndpoint(address) }
         func origin(_ address: String) -> String? { endpoint(address).map(DraftStore.endpointNamespace) }
         func onTailnet(_ address: String) -> Bool { endpoint(address)?.url.host.map(Tailnet.isTailnetHost) ?? false }
         guard let oldOrigin = origin(old), let currentOrigin = origin(current) else { return false }
-        if oldOrigin == currentOrigin { return true }
+        if oldOrigin == currentOrigin {
+            guard let owner, !owner.home.isEmpty, !server.home.isEmpty else { return true }
+            return owner.home == server.home
+        }
         guard let owner, !owner.home.isEmpty, owner.home == server.home else { return false }
         if let a = endpoint(old)?.url.host?.lowercased(), a == endpoint(current)?.url.host?.lowercased() { return true }
         return (onTailnet(old) && server.urls.contains { origin($0) == oldOrigin })
@@ -326,25 +409,27 @@ extension AppStore {
     /// '이어서 보내기': 멈춘 까닭을 대표가 확인했다.
     func resumeOutbox() {
         guard writeNamespace != "unassigned" else { return }
-        do { try offline.resume(namespace: writeNamespace) } catch { errorMessage = error.localizedDescription; return }
+        do { try offline.resume(namespace: writeNamespace, serverID: currentServerID) } catch { errorMessage = error.localizedDescription; return }
         Task { [weak self] in await self?.flushOutbox() }
     }
 
     /// 연결되면 고른 프로젝트의 글을 오래된 것부터 하나씩 보낸다. 한 번에 한 줄만 돈다.
+    /// V: 이 서버의 몫만 보낸다(다른 서버 몫은 그대로 둔다). 맨 앞의 글이 쓴 지 하루가 넘었으면 거기서 멈추고 대표의 선택을 기다린다
+    /// (순서를 지킨다: 뒤의 글이 앞의 글을 앞질러 가지 않는다).
     func flushOutbox() async {
-        guard !outboxFlushing, canWrite, submissions != nil, let projectID = selectedProjectID else { return }
+        guard !outboxFlushing, canWrite, submissions != nil, selectedProjectID != nil else { return }
         let namespace = writeNamespace
         outboxFlushing = true
         defer { outboxFlushing = false }
         settleSentQueue(namespace: namespace)
         // 앞서 보낸 글의 결과를 아직 모르면 기다린다(순서를 지킨다). 접수 확인이 결과를 정하면 다음 스냅샷에서 이어 간다.
-        guard offline.pausedReason(namespace: namespace) == nil, offline.sent(namespace: namespace).isEmpty else { return }
+        guard outboxPausedReason == nil, !outboxAwaitingResult else { return }
         dismissPreparedQueueAttempts(generation: nil)
         let epoch = generation, projectEpoch = projectGeneration
         var accepted = false
-        while let item = offline.items(namespace: namespace, projectID: projectID).first {
-            guard epoch == generation, projectEpoch == projectGeneration, canWrite,
-                  offline.pausedReason(namespace: namespace) == nil else { break }
+        while let item = queuedMessages.first {
+            guard epoch == generation, projectEpoch == projectGeneration, canWrite, namespace == writeNamespace,
+                  outboxPausedReason == nil, !item.needsReview() else { break }
             guard await sendQueuedMessage(item) == .accepted else { break }
             accepted = true
         }
@@ -358,7 +443,7 @@ extension AppStore {
         guard canWrite, let submissions, item.namespace == writeNamespace, item.projectID == selectedProjectID else { return .blocked }
         let who = item.targetName ?? leadRankName
         if let target = item.targetMemberID, !members.contains(where: { $0.id == target }) {
-            try? offline.pause(namespace: item.namespace,
+            try? offline.pause(namespace: item.namespace, serverID: currentServerID,
                                reason: String(localized: "받는 사람(\(who))이 명부에서 빠져 보내지 않았습니다. 그 글을 지운 뒤 이어서 보내 주세요."))
             return .blocked
         }
@@ -388,7 +473,7 @@ extension AppStore {
         }
         let outcome: (value: Message?, error: Error?) = await perform(actionKey, refreshAfter: false, deferRefusalToReceipt: true,
                                                                        ownsPendingAction: true) { api in
-            let request = try submissions.beginMessage(id: attempt.id)
+            let request = try submissions.beginMessage(id: attempt.id, serverID: self.currentServerID, serverHome: self.currentServerHome)
             do { try self.offline.markSent(id: item.id, attemptID: attempt.id) }
             catch {
                 // 대기열에서 빼지 못했으면 보내지 않는다. 시작한 기록은 접어 두고 글은 대기열에 남긴다.
@@ -409,7 +494,7 @@ extension AppStore {
             // 입력칸 위의 '보내지 못한 글'(다시 보내기·입력칸에 넣기·버리기)로 남긴다.
             try? submissions.restoreMessage(id: attempt.id, drafts: drafts)
             try? offline.settle(attemptID: attempt.id)
-            try? offline.pause(namespace: item.namespace,
+            try? offline.pause(namespace: item.namespace, serverID: currentServerID,
                                reason: String(localized: "\(who)에게 보낼 글이 접수되지 않아 나머지는 멈춰 두었습니다. 입력칸의 안내를 확인한 뒤 이어서 보내 주세요."))
             return .refused
         }
@@ -427,12 +512,12 @@ extension AppStore {
 
     /// 대기열에서 나간 글의 결과를 본다. 접수됐으면 놓고, 접수되지 않았으면 나머지를 멈춘다.
     private func settleSentQueue(namespace: String) {
-        for sent in offline.sent(namespace: namespace) {
+        for sent in currentSent where sent.namespace == namespace {
             switch submissions?.messageAttempt(id: sent.attemptID)?.status {
             case .checking?: continue
             case .refused?, .notAccepted?:
                 try? offline.settle(attemptID: sent.attemptID)
-                try? offline.pause(namespace: namespace,
+                try? offline.pause(namespace: namespace, serverID: currentServerID,
                                    reason: String(localized: "앞서 보낸 글이 접수되지 않아 나머지는 멈춰 두었습니다. 입력칸의 안내를 확인한 뒤 이어서 보내 주세요."))
             case .accepted?, .prepared?, nil:
                 try? offline.settle(attemptID: sent.attemptID)
@@ -458,22 +543,44 @@ extension AppStore {
     /// 화면 견본(DEBUG, `--last-seen-preview`): 샘플 자료를 '12분 전에 본 마지막 상태'로 띄우고, Tailscale 이 꺼진 기기처럼
     /// 연결이 실패하게 한다. 요청은 기기를 떠나지 않는다(Tailscale 확인이 보내기 전에 막는다). 연결되면 보낼 글 두 개를
     /// 메모리에만 둔다. 파일·키체인·알림 등록은 쓰지 않는다.
-    static func lastSeenPreview(now: Date = Date()) -> AppStore {
+    /// V(`--outbox-preview` 를 함께 주면): 서버 ID 를 싣고, 맨 앞에 쓴 지 하루가 넘은 글(확인 필요)을, 맨 아래에 다른 서버에
+    /// 보내려던 글 둘(하나는 곧 지워짐)을 더한다. `--screen chat --open-outbox` 로 대기열 화면을 바로 연다.
+    static func lastSeenPreview(now: Date = Date(), outbox: Bool = LaunchOptions.arguments.contains("--outbox-preview")) -> AppStore {
         let store = AppStore(persistCredentials: false, restoreCredentials: false, offline: OfflineStateStore(persist: false))
         store.tailnetConnected = { false }
         store.endpoint = "http://100.64.0.1:7878"; store.accessCode = "preview"
         guard let endpoint = try? ServerEndpoint(store.endpoint) else { return store }
-        let (bootstrap, state) = DemoFixtures.workspace(now: now)
+        let (sample, state) = DemoFixtures.workspace(now: now)
+        var bootstrap = sample
+        let serverID: String? = outbox ? "7f3c2a10-5b6e-4d2f-9a81-0c4e5d6f7a80" : nil
+        if let serverID { bootstrap.server = ServerVersionInfo(version: bootstrap.version, apiLevel: AppVersion.apiLevel, id: serverID) }
         let namespace = DraftStore.endpointNamespace(endpoint)
         store.showLastSeen(LastSeenSnapshot(namespace: namespace, savedAt: now.addingTimeInterval(-12 * 60), serverID: nil,
                                             bootstrap: bootstrap, state: state))
         let worker = state.members.first { $0.kind == "worker" }
+        let english = AppLanguage.current == .en
+        if outbox {
+            _ = try? store.offline.enqueue(namespace: namespace, projectID: state.project.id, targetMemberID: nil, targetName: nil,
+                                           text: english ? "Let's move yesterday's release to Friday." : "어제 말한 배포는 금요일로 미뤄 주세요.",
+                                           serverID: serverID, now: now.addingTimeInterval(-26 * 3600))
+        }
         _ = try? store.offline.enqueue(namespace: namespace, projectID: state.project.id, targetMemberID: nil, targetName: nil,
-                                       text: "결제 실패 화면 문구를 오늘 안에 정리해 주세요.", now: now.addingTimeInterval(-300))
+                                       text: english ? "Please finish the payment failure screen copy today." : "결제 실패 화면 문구를 오늘 안에 정리해 주세요.",
+                                       serverID: serverID, now: now.addingTimeInterval(-300))
         if let worker {
             _ = try? store.offline.enqueue(namespace: namespace, projectID: state.project.id, targetMemberID: worker.id,
-                                           targetName: worker.name, text: "테스트 카드로 한 번 더 확인해 주세요.",
-                                           now: now.addingTimeInterval(-60))
+                                           targetName: worker.name, text: english ? "Check it once more with a test card." : "테스트 카드로 한 번 더 확인해 주세요.",
+                                           serverID: serverID, now: now.addingTimeInterval(-60))
+        }
+        if outbox {
+            let other = "http://100.64.0.2:7878", otherID = "c1d2e3f4-0a1b-4c2d-8e3f-112233445566"
+            _ = try? store.offline.enqueue(namespace: other, projectID: "p-other", targetMemberID: nil, targetName: nil,
+                                           text: english ? "Please send me the March invoice draft." : "3월 청구서 초안을 보내 주세요.",
+                                           serverID: otherID, now: now.addingTimeInterval(-25 * 24 * 3600))
+            _ = try? store.offline.enqueue(namespace: other, projectID: "p-other", targetMemberID: "m-other",
+                                           targetName: english ? "Design review" : "디자인 검토",
+                                           text: english ? "Keep the old logo on the login screen for now." : "로그인 화면의 옛 로고는 당분간 그대로 둬 주세요.",
+                                           serverID: otherID, now: now.addingTimeInterval(-2 * 24 * 3600))
         }
         return store
     }

@@ -4,7 +4,7 @@
 
 IAMCEO is a server that runs on your Mac plus native Mac and iPhone apps. The server starts the official Claude Code and Codex CLIs as a lead and staff, and you give instructions and make decisions in the app. There is no server run by IAMCEO.
 
-> The app's screens follow your device language: English, or Korean on a Korean device. This guide gives each label in Korean with the English label in parentheses, so you can find each button either way.
+> The app's screens are in English or Korean (see [App language](#app-language)). This guide gives each label in Korean with the English label in parentheses, so you can find each button either way.
 
 ## Before you start
 
@@ -40,7 +40,7 @@ The install script checks the download against the release's SHA-256, then check
 4. **Write what you want in 대화 (Chat).** The lead picks the right staff member, hands the work over and tells you in a line or two.
 5. **Decisions collect in 결재함 (Inbox), deliverables in 자료 (Files), and your own to-dos on 홈 (Home).** 팀 (Team) shows each staff member as working, idle, waiting for approval or asleep, and opens their real terminal so you can type into it.
 
-To look around before setting up a Mac, press 샘플로 둘러보기 (Explore the sample) on the iPhone app's first screen. In an example company you can send instructions, answer decisions and open files. Changes stay on this iPhone and reset when you leave the sample, and the sample connects to no server. Things that need a real Mac, such as new projects, adding staff and the terminal, are not available in the sample.
+To look around before setting up a Mac, press 샘플로 둘러보기 (Explore the sample) on the iPhone app's first screen. In an example company you can send instructions, answer decisions and open files. Changes stay on this iPhone and reset when you leave the sample, and the sample connects to no server. Things that need a real Mac, such as new projects, adding staff and the terminal, are not available in the sample. The sample company appears in English or Korean, following the app's language.
 
 ## Terms
 
@@ -52,12 +52,22 @@ To look around before setting up a Mac, press 샘플로 둘러보기 (Explore th
 | HQ | 본사 | The entry that belongs to no project. Its agent (본사 AI) creates projects and handles one-off jobs. Its working folder is your home folder. |
 | Inbox | 결재함 | Where questions and approvals wait for your answer. |
 
+## App language
+
+Choose the language of the app's buttons and screens in **설정 → 일반 → 이 기기 → 언어** (Settings → General → This device → Language). It works before you connect to a server, too. On the iPhone, before you connect, use the **언어 · 자동** (Language) menu at the bottom of the first screen.
+
+- **Automatic** (the starting setting): the first time you open the iPhone app from the App Store, it opens in Korean if your App Store country is Korea and in English otherwise. The Mac app, and an iPhone whose App Store country can't be read, follow the device language (Korean on a Korean device, English otherwise). A device updated from 0.2.4 or earlier keeps the language it already shows. The hint under the row says which one Automatic follows: an App Store-country Automatic stays in that language even if you later change the device language, and a device-language Automatic follows the device language.
+- **한국어** or **English**: that language, whatever the device language is.
+- The new language shows when the app opens again. On the Mac, press **Reopen now**, which appears in the same place; the app closes and opens again (the server and staff keep working). On the iPhone, swipe the app up in the app switcher to close it, then open it again.
+- It is the same setting as iPhone Settings → IAMCEO → Language and, on the Mac, System Settings → General → Language & Region → Applications. Whichever you change last wins.
+- It is saved on this device only and never sent to the server; the App Store country is read on the device only, too. The language the lead and staff write in is chosen separately in Report language below.
+
 ## Report language
 
 You can choose the language the lead and staff write to you in — reports, decision cards and to-dos. In **설정 → 일반 → 운영 → 보고 언어** (Settings → General → Operation → Report language), pick 한국어 or English.
 
 - The choice applies to sessions opened after it. A staff member that is already working switches once you put it to sleep and wake it.
-- This changes only what the lead and staff write. The app's buttons and screens follow the device language: Korean on a Korean device, English elsewhere. To choose for this app alone, use Settings → IAMCEO → Language on the iPhone, or System Settings → General → Language & Region → Applications on the Mac.
+- This changes only what the lead and staff write. The app's buttons and screens follow [App language](#app-language) above.
 - The source labels the server puts on what agents receive (`[대표]`, `[총괄]` and the like) stay as they are in either language. With English, a line explaining what each label means goes into the role instructions.
 - The row appears only on a server that has this setting; connected to an older server, it is hidden.
 
@@ -102,6 +112,7 @@ alias iamceo=/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo
 | `iamceo uninstall` | Stop IAMCEO completely on this Mac |
 | `iamceo auth rotate` | Replace the access code (with `--all-devices`, also disconnect every device paired by QR) → [Security](../security.en.md#if-you-lose-a-device) |
 | `iamceo auth revoke-devices` | Disconnect every device paired by QR (the shared access code stays) |
+| `iamceo auth devices` · `iamceo auth revoke-device <ID>` | List the devices paired by QR with their IDs, and disconnect one of them (other devices can only be disconnected on the Mac that runs the server) |
 
 ## Good to know: your terminal environment does not carry over
 

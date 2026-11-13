@@ -432,6 +432,9 @@ export const ERROR_CODES = {
   /** AI 가 도구 승인 카드를 닫으려 했다. 대표만 답한다. 403. */
   tool_permission_owner_only: { ko: "도구 승인 요청은 대표만 답할 수 있습니다", en: "Only the owner can answer a tool-approval request" },
   tool_permission_unsupported: { ko: "도구 승인 요청을 지원하지 않습니다", en: "Tool-approval requests are not supported" },
+  // ---- 기기 끊기 권한(0.2.5 X) — DELETE /api/devices/:id ----
+  /** 다른 기기를 끊으려 했는데 서버가 도는 Mac 에서 온 요청이 아니다. 각 기기는 자기 연결만 끊을 수 있다. 403. */
+  device_revoke_local_only: { ko: "다른 기기는 서버가 도는 Mac에서 끊을 수 있습니다", en: "Other devices can be disconnected on the Mac that runs the server" },
   // ---- 끝 ----
 } as const satisfies Record<string, ErrorCodeText>;
 

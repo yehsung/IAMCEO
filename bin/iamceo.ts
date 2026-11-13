@@ -35,6 +35,9 @@ const USAGE = `쓰는 법: iamceo <명령>
                          이 Mac의 공용 접속 코드를 교체하고 그 코드로 붙은 연결·QR을 만료시킨다(QR로 연결한 기기는 그대로,
                          --all-devices 면 QR로 연결한 기기의 열쇠도 모두 끊는다. 코드가 새었을 때)
   auth revoke-devices    QR로 연결한 기기의 열쇠를 모두 끊는다(공용 접속 코드와 그 코드로 붙은 기기는 그대로)
+  auth devices           QR로 연결한 기기와 그 ID를 보여 준다
+  auth revoke-device <ID>
+                         QR로 연결한 기기 한 대만 끊는다(다른 기기는 그대로. 다른 기기 끊기는 서버가 도는 Mac에서만 된다)
   build-id               실행 파일 식별값(build ID)을 보여 준다
   service install [--restart] [--dry-run] | uninstall [--dry-run]
                          launchd 서비스(com.iamceo.server)를 등록·해제한다
@@ -74,6 +77,10 @@ const USAGE_EN = `Usage: iamceo <command>
                          replace this Mac's shared access code; connections on it and QRs stop working (devices paired by QR stay;
                          with --all-devices their keys are revoked too, for when the code may have leaked)
   auth revoke-devices    revoke the keys of every device paired by QR (the shared access code and devices on it stay)
+  auth devices           list the devices paired by QR with their IDs
+  auth revoke-device <ID>
+                         disconnect one device paired by QR (the others stay; other devices can only be
+                         disconnected on the Mac that runs the server)
   build-id               show the build ID of this executable
   service install [--restart] [--dry-run] | uninstall [--dry-run]
                          register or remove the launchd service (com.iamceo.server)
@@ -593,6 +600,73 @@ export async function revokeDeviceKeys(config: Config, request: typeof fetch = f
   return body.revoked as number;
 }
 
+// ---- 0.2.5 X: 한 대만 끊기(iamceo auth revoke-device <ID>)와 그 ID 를 찾는 목록(iamceo auth devices) ----
+/** 명령줄이 보이는 기기 한 줄. 열쇠 값은 서버가 싣지 않는다. */
+export interface CliDevice { id: string; name: string; platform: string | null; pairedAt: string; lastSeenAt: string | null }
+
+async function readErrorCode(response: Response): Promise<string | null> {
+  const body = await response.json().catch(() => null) as { code?: unknown } | null;
+  return typeof body?.code === "string" ? body.code : null;
+}
+
+/** QR 로 연결한 기기 목록(GET /api/devices). 이 Mac 의 서버에 loopback 으로 묻는다. */
+export async function listDeviceKeys(config: Config, request: typeof fetch = fetch): Promise<CliDevice[]> {
+  const url = localServerUrl(config, "/api/devices");
+  let response: Response;
+  try {
+    response = await request(url, { headers: { Authorization: `Bearer ${config.accessCode}` }, redirect: "error", signal: AbortSignal.timeout(5_000) });
+  } catch { throw new CliError(say("기기 목록을 읽지 못했습니다. 서버가 켜져 있는지 확인하고 다시 실행하세요.",
+    "Could not read the device list. Check that the server is running and run it again.")); }
+  if (response.status === 404) throw new CliError(say("이 서버는 기기 열쇠를 모릅니다(옛 버전). 기기마다 다른 열쇠가 없으므로 iamceo auth rotate 로 접속 코드를 바꾸세요.",
+    "This server does not know device keys (an older version). Run iamceo auth rotate to replace the access code instead."));
+  if (!response.ok) throw new CliError(say(`기기 목록 읽기 실패 (HTTP ${response.status}). 다시 실행하세요.`, `Reading the device list failed (HTTP ${response.status}). Run it again.`));
+  const body = await response.json().catch(() => null) as { devices?: unknown } | null;
+  if (!body || !Array.isArray(body.devices)) throw new CliError(say("기기 목록 응답이 잘못되었습니다. 다시 실행하세요.", "The reply is invalid. Run it again."));
+  const text = (value: unknown): string | null => typeof value === "string" ? value : null;
+  return body.devices.flatMap((raw): CliDevice[] => {
+    const device = raw as Record<string, unknown> | null;
+    const id = text(device?.id);
+    return id ? [{ id, name: text(device?.name) ?? "", platform: text(device?.platform), pairedAt: text(device?.pairedAt) ?? "", lastSeenAt: text(device?.lastSeenAt) }] : [];
+  });
+}
+
+/**
+ * 한 대만 끊는다(DELETE /api/devices/:id). 다른 기기를 끊는 것은 서버가 도는 Mac 에서만 되므로 loopback 으로 보낸다.
+ * 끊은 기기의 이름을 돌려준다. 이미 끊었거나 없는 ID 면 그렇다고 알린다(다시 실행해도 된다).
+ */
+export async function revokeDeviceKey(config: Config, id: string, request: typeof fetch = fetch): Promise<string> {
+  const url = localServerUrl(config, `/api/devices/${encodeURIComponent(id)}`);
+  let response: Response;
+  try {
+    response = await request(url, { method: "DELETE", headers: { Authorization: `Bearer ${config.accessCode}` }, redirect: "error", signal: AbortSignal.timeout(5_000) });
+  } catch { throw new CliError(say("기기 끊기 결과를 확인하지 못했습니다. 서버가 켜져 있는지 확인하고 다시 실행하세요(다시 실행해도 됩니다).",
+    "Could not confirm that the device was disconnected. Check that the server is running and run it again (safe to repeat).")); }
+  if (response.status === 404) {
+    const code = await readErrorCode(response);
+    if (code === "device_not_found") throw new CliError(say(`연결된 기기 중에 ${id} 가 없습니다(이미 끊었을 수 있습니다). 연결된 기기와 그 ID 는 iamceo auth devices 로 봅니다.`,
+      `No connected device has the ID ${id} (it may already be disconnected). See the connected devices and their IDs with iamceo auth devices.`));
+    throw new CliError(say("이 서버는 기기 열쇠를 모릅니다(옛 버전). 기기마다 다른 열쇠가 없으므로 iamceo auth rotate 로 접속 코드를 바꾸세요.",
+      "This server does not know device keys (an older version). Run iamceo auth rotate to replace the access code instead."));
+  }
+  if (response.status === 403) throw new CliError(say("서버가 이 요청을 이 Mac 에서 온 것으로 보지 않았습니다. 서버가 도는 Mac 의 터미널에서 다시 실행하세요.",
+    "The server did not treat this request as coming from this Mac. Run it again in Terminal on the Mac that runs the server."));
+  if (!response.ok) throw new CliError(say(`기기 끊기 실패 (HTTP ${response.status}). 다시 실행하세요.`, `Disconnecting the device failed (HTTP ${response.status}). Run it again.`));
+  const body = await response.json().catch(() => null) as { ok?: unknown; device?: { name?: unknown } } | null;
+  if (body?.ok !== true) throw new CliError(say("기기 끊기 응답이 잘못되었습니다. iamceo auth devices 로 확인하세요.", "The reply is invalid. Check with iamceo auth devices."));
+  return typeof body.device?.name === "string" ? body.device.name : id;
+}
+
+/** iamceo auth devices 의 출력. 마지막 접속이 없으면 '아직 접속하지 않음'. */
+export function formatDeviceList(devices: CliDevice[]): string {
+  if (devices.length === 0) return say("QR로 연결한 기기가 없습니다. 공용 접속 코드로 붙은 기기는 iamceo auth rotate 로 끊습니다.",
+    "No device is paired by QR. Devices on the shared access code are disconnected with iamceo auth rotate.");
+  const platform = (value: string | null): string => value === "ios" ? "iPhone" : value === "macos" ? "Mac" : say("모름", "unknown");
+  const lines = devices.map(device => `  ${device.id}  ${device.name}  (${platform(device.platform)}, `
+    + (device.lastSeenAt ? say(`마지막 접속 ${device.lastSeenAt}`, `last seen ${device.lastSeenAt}`) : say("아직 접속하지 않음", "not connected yet")) + ")");
+  return [say("QR로 연결한 기기:", "Devices paired by QR:"), ...lines,
+    say("한 대만 끊으려면 iamceo auth revoke-device <ID>", "To disconnect one of them: iamceo auth revoke-device <ID>")].join("\n");
+}
+
 // ---- join ----
 async function join_(args: string[]): Promise<void> {
   const { values } = parseArgs({
@@ -1099,7 +1173,15 @@ async function main(argv: string[]): Promise<void> {
         return console.log(say(`QR로 연결한 기기 ${revoked}대의 열쇠를 끊었습니다. 계속 쓸 기기는 Mac 앱에서 새 QR을 만들어 다시 연결하세요. 공용 접속 코드로 붙은 기기(이 Mac의 앱 등)는 그대로입니다.`,
           `Revoked the keys of ${revoked} device(s) paired by QR. Pair the devices you keep again with a new QR from the Mac app. Devices on the shared access code (such as the app on this Mac) stay connected.`));
       }
-      throw new CliError(say("쓰는 법: iamceo auth rotate [--all-devices] | iamceo auth revoke-devices", "Usage: iamceo auth rotate [--all-devices] | iamceo auth revoke-devices"));
+      // 0.2.5 X: 한 대만 끊기와 그 ID 를 찾는 목록. 다른 기기를 끊는 것은 서버가 도는 Mac 에서만 된다.
+      if (sub === "devices" && flags.length === 0) return console.log(formatDeviceList(await listDeviceKeys(loadConfig())));
+      if (sub === "revoke-device" && flags.length === 1 && flags[0] && !flags[0].startsWith("-")) {
+        const name = await revokeDeviceKey(loadConfig(), flags[0]);
+        return console.log(say(`‘${name}’의 연결을 끊었습니다. 그 기기를 다시 쓰려면 Mac 앱에서 새 QR을 만들어 연결하세요. 다른 기기는 그대로입니다.`,
+          `Disconnected "${name}". To use that device again, pair it with a new QR from the Mac app. Other devices stay connected.`));
+      }
+      throw new CliError(say("쓰는 법: iamceo auth rotate [--all-devices] | iamceo auth revoke-devices | iamceo auth devices | iamceo auth revoke-device <ID>",
+        "Usage: iamceo auth rotate [--all-devices] | iamceo auth revoke-devices | iamceo auth devices | iamceo auth revoke-device <ID>"));
     }
     case "build-id":
       return console.log(await buildId());

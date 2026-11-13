@@ -5,6 +5,9 @@ import SwiftUI
 // G(C3): 설정 → 연결의 '연결된 기기'. GET /api/devices 로 읽고 DELETE /api/devices/:id 로 한 대만 끊는다.
 // QR 로 연결한 기기는 기기마다 따로 열쇠를 받는다. 공용 접속 코드로 붙은 쪽은 한 줄('공용 접속 코드')로 보이고,
 // 그 줄을 끊는 것은 서버 컴퓨터에서 접속 코드를 바꾸는 것이다. 옛 서버는 경로를 모른다(404): 그때 이 묶음은 보이지 않는다.
+// 0.2.5 X: 다른 기기를 끊는 것은 서버가 도는 Mac 에서만 된다. 서버가 목록에 canRevokeOthers 로 알려 주고, false 면
+// 남의 줄에는 끊기 단추가 없고 '다른 기기는 서버가 도는 Mac에서 끊을 수 있습니다' 한 줄을 보인다. 자기 줄은 언제나 끊을 수 있고,
+// 끊으면 이 기기에 저장한 열쇠를 지우고 나간다. 옛 서버(칸 없음)는 어디서나 끊었으므로 지금처럼 단추를 둔다.
 
 /// QR 로 연결한 기기 하나. 열쇠 값은 서버가 싣지 않는다.
 struct ConnectedDevice: Decodable, Sendable, Equatable, Identifiable {
@@ -77,10 +80,12 @@ struct DeviceAccessList: Decodable, Sendable, Equatable {
     var shared: SharedCodeAccess
     var devices: [ConnectedDevice]
     var failures: AccessFailures
+    /// 0.2.5 X: 이 기기가 서버가 도는 Mac 이라 다른 기기도 끊을 수 있다. 옛 서버는 싣지 않는다(nil, 지금처럼 끊기 단추를 둔다).
+    var canRevokeOthers: Bool?
 
-    enum CodingKeys: String, CodingKey { case shared, devices, failures }
-    init(shared: SharedCodeAccess = SharedCodeAccess(), devices: [ConnectedDevice] = [], failures: AccessFailures = AccessFailures()) {
-        self.shared = shared; self.devices = devices; self.failures = failures
+    enum CodingKeys: String, CodingKey { case shared, devices, failures, canRevokeOthers }
+    init(shared: SharedCodeAccess = SharedCodeAccess(), devices: [ConnectedDevice] = [], failures: AccessFailures = AccessFailures(), canRevokeOthers: Bool? = nil) {
+        self.shared = shared; self.devices = devices; self.failures = failures; self.canRevokeOthers = canRevokeOthers
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -88,7 +93,11 @@ struct DeviceAccessList: Decodable, Sendable, Equatable {
         devices = try c.requiredLossyArray(ConnectedDevice.self, forKey: .devices)
         shared = c.lenient(SharedCodeAccess.self, forKey: .shared) ?? SharedCodeAccess()
         failures = c.lenient(AccessFailures.self, forKey: .failures) ?? AccessFailures()
+        canRevokeOthers = c.lenient(Bool.self, forKey: .canRevokeOthers)
     }
+
+    /// 이 줄에 끊기 단추를 둘까. 자기 줄은 언제나, 남의 줄은 서버가 도는 Mac 에서만(옛 서버는 어디서나).
+    func canRevoke(_ device: ConnectedDevice) -> Bool { device.current || canRevokeOthers != false }
 }
 
 /// 화면 글자. 시험이 같은 함수를 부른다.
@@ -130,6 +139,12 @@ enum ConnectedDevicesText {
     }
 
     static let footnote = String(localized: "공용 접속 코드로 붙은 기기를 끊으려면 서버 컴퓨터에서 접속 코드를 바꿉니다(iamceo auth rotate). QR로 연결한 기기는 그대로입니다.")
+
+    /// 0.2.5 X: 서버가 도는 Mac 이 아닌 기기(iPhone 등)의 목록 아래 한 줄. 남의 줄에는 끊기 단추가 없다.
+    static let othersOnServerMac = String(localized: "다른 기기는 서버가 도는 Mac에서 끊을 수 있습니다.")
+
+    /// 묶음 아래 글. 서버가 도는 Mac(또는 옛 서버)이면 공용 코드를 끊는 법, 아니면 위 한 줄.
+    static func footnoteText(for list: DeviceAccessList) -> String { list.canRevokeOthers == false ? othersOnServerMac : footnote }
 
     static func confirmTitle(_ device: ConnectedDevice) -> String { String(localized: "‘\(device.name)’ 연결을 끊을까요?") }
     static func confirmMessage(_ device: ConnectedDevice) -> String {
@@ -183,7 +198,7 @@ enum ConnectedDevicesText {
         }
     }
 
-    /// 한 대만 끊는다. 끊은 뒤 목록을 다시 읽는다(이 기기를 끊었으면 다음 요청부터 연결이 끊긴다).
+    /// 한 대만 끊는다. 끊은 뒤 목록을 다시 읽는다(이 기기를 끊었으면 부르는 쪽이 이 기기의 열쇠를 지우고 나간다).
     @discardableResult func revoke(_ device: ConnectedDevice, api: APIClient?) async -> Bool {
         guard let api, revoking == nil else { return false }
         let mine = token
@@ -202,6 +217,12 @@ enum ConnectedDevicesText {
             guard mine == token else { return false }
             list?.devices.removeAll { $0.id == device.id }
             return true
+        } catch let failure as APIError where failure.code == "device_revoke_local_only" {
+            // 0.2.5 X: 서버가 이 기기를 서버가 도는 Mac 으로 보지 않았다(목록을 읽은 뒤 연결이 바뀌었다). 까닭을 보이고 목록을 다시 읽어 단추를 맞춘다.
+            guard mine == token, !Task.isCancelled else { return false }
+            revokeError = Self.message(failure, fallback: ConnectedDevicesText.othersOnServerMac)
+            await load(api)
+            return false
         } catch is CancellationError {
             return false
         } catch {
@@ -222,6 +243,7 @@ enum ConnectedDevicesText {
 struct ConnectedDevicesGroup: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
+    @Environment(\.dismiss) private var dismiss
     @State private var panel = DevicesPanel()
     @State private var confirming: ConnectedDevice?
 
@@ -230,11 +252,20 @@ struct ConnectedDevicesGroup: View {
             .task(id: reloadKey) { await panel.attach(store.api) }
             .confirmationDialog(confirming.map(ConnectedDevicesText.confirmTitle) ?? "", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
                                 titleVisibility: .visible, presenting: confirming) { device in
-                Button("끊기", role: .destructive) { Task { await panel.revoke(device, api: store.api) } }
+                Button("끊기", role: .destructive) { Task { await revoke(device) } }
                 Button("취소", role: .cancel) {}
             } message: { device in
                 Text(ConnectedDevicesText.confirmMessage(device))
             }
+    }
+
+    /// 0.2.5 X: 이 기기를 끊었으면 다음 요청의 401 을 기다리지 않고 바로 이 기기의 열쇠를 지우고 나간다
+    /// (401 device_revoked 를 받은 것과 같은 길: 저장한 열쇠를 지우고 연결 화면으로. 초안과 보낼 글은 그대로 둔다).
+    private func revoke(_ device: ConnectedDevice) async {
+        let api = store.api
+        guard await panel.revoke(device, api: api), device.current, let api, store.api === api else { return }
+        store.handle(APIError(status: 401, message: ServerErrorText.table["device_revoked"]?.ko ?? "", code: "device_revoked"))
+        dismiss()
     }
 
     /// 연결이 바뀌거나 Mac 의 QR 창이 닫히면(새 기기가 붙었을 수 있다) 다시 읽는다.
@@ -246,7 +277,7 @@ struct ConnectedDevicesGroup: View {
         if !panel.unsupported, store.api != nil {
             // 읽기·끊기 실패는 묶음 아래 한 줄(위험 색)로, 평소에는 공용 코드를 끊는 법을 적는다.
             let problem = panel.revokeError ?? panel.error
-            SettingsGroup(String(localized: "연결된 기기"), footnote: problem ?? (panel.list == nil ? nil : ConnectedDevicesText.footnote),
+            SettingsGroup(String(localized: "연결된 기기"), footnote: problem ?? panel.list.map { ConnectedDevicesText.footnoteText(for: $0) },
                           footnoteTone: problem == nil ? CE.ink2 : CE.danger, accessory: {
                 SettingsRefreshButton(label: String(localized: "연결된 기기 다시 확인"), busy: panel.loading) { Task { await panel.load(store.api) } }
                     .disabled(store.connectionStatus != .connected)
@@ -271,17 +302,20 @@ struct ConnectedDevicesGroup: View {
             SettingsRow(device.name, hint: ConnectedDevicesText.deviceHint(device)) {
                 HStack(spacing: 8) {
                     if device.current { Tag(String(localized: "이 기기"), tone: .accent) }
-                    Button { confirming = device } label: {
-                        HStack(spacing: 6) {
-                            if panel.revoking == device.id { ProgressView().controlSize(.small) }
-                            Text(panel.revoking == device.id ? "끊는 중" : "끊기").foregroundStyle(CE.danger)
+                    // 0.2.5 X: 남의 줄은 서버가 도는 Mac 에서만 끊는다(묶음 아래 한 줄이 그 뜻을 알린다).
+                    if list.canRevoke(device) {
+                        Button { confirming = device } label: {
+                            HStack(spacing: 6) {
+                                if panel.revoking == device.id { ProgressView().controlSize(.small) }
+                                Text(panel.revoking == device.id ? "끊는 중" : "끊기").foregroundStyle(CE.danger)
+                            }
                         }
+                        .ceSecondaryButton()
+                        .ceCompactControl()
+                        .fixedSize()
+                        .disabled(panel.revoking != nil || store.connectionStatus != .connected)
+                        .accessibilityLabel("\(device.name) 연결 끊기")
                     }
-                    .ceSecondaryButton()
-                    .ceCompactControl()
-                    .fixedSize()
-                    .disabled(panel.revoking != nil || store.connectionStatus != .connected)
-                    .accessibilityLabel("\(device.name) 연결 끊기")
                 }
             }
         }

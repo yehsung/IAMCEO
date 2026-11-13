@@ -37,11 +37,12 @@ import { createDiagnostics, type DiagnoseInput } from "./diagnose.ts";
 import { readVitals } from "./vitals.ts";
 import type { DiagnoseResult } from "../shared/types.ts";
 import { compatFields, readAppClient, SeenApps } from "./app-version.ts";
+import { serverIdentity } from "./server-identity.ts";
 import { CliVersionMonitor, type CliVersionInfo, type CliVersionSource } from "./cli-version.ts";
 import { exportProjectZip, removeDeletedProjectFiles } from "./lifecycle/project-data.ts";
 import type { ProjectDeleteResult } from "../shared/types.ts";
 import { ACCESS_LOG_LIMITS, authenticate, DeviceKeys, principalKey, safeEqual, type AuthOutcome, type Principal } from "./devices.ts";
-import type { AccessPlatform, AuthRotateResult, DeviceRevokeAllResult, DeviceRevokeResult } from "../shared/types.ts";
+import type { AccessPlatform, AuthRotateResult, DeviceAccessList, DeviceRevokeAllResult, DeviceRevokeResult } from "../shared/types.ts";
 import { ERROR_CODES } from "../shared/error-codes.ts";
 import { USAGE_MAX_DAYS } from "../shared/types.ts";
 import { UsageCollector, usageReport, type UsageSource } from "./usage.ts";
@@ -221,6 +222,14 @@ export function isHostAllowed(rawHost: string | null, configured: string[]): boo
   if (v4ToInt(name) !== null || name === "localhost") return true;
   if (!name.includes(".") || name.endsWith(".local") || name.endsWith(".ts.net")) return true;
   return configured.some((h) => h.toLowerCase() === name);
+}
+
+/** 0.2.5 리뷰 lang-5: 요청이 한국어가 아닌 언어를 바라는가(Accept-Language 의 첫 언어). URLSession 은 앱 화면 언어로 이 머리글을
+ *  붙인다. 머리글이 없거나 비었거나 `*` 이면(명령줄, 옛 클라이언트) 예전처럼 한국어로 본다. 코드마다 영어 문장을 모르는 출시 앱이
+ *  받은 문장을 그대로 보일 때 쓴다. */
+export function prefersEnglish(req: Request): boolean {
+  const first = req.headers.get("accept-language")?.split(",")[0]?.split(";")[0]?.trim().toLowerCase() ?? "";
+  return first !== "" && first !== "*" && first.split(/[-_]/)[0] !== "ko";
 }
 
 function bearer(req: Request): string | null {
@@ -829,7 +838,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       const requestedProjectId = url.searchParams.get("projectId");
       if (requestedProjectId !== null && (!requestedProjectId.trim() || Buffer.byteLength(requestedProjectId) > 256)) throw new ApiError(400, "프로젝트 ID가 잘못되었습니다", "invalid_project_id");
       // D5: 버전 머리글을 보낸 앱에만 server·compat 을 싣는다. 앱마다 답이 다르니 캐시 열쇠에도 넣는다.
-      const versionFields = compatFields(readAppClient(req.headers), VERSION);
+      const versionFields = compatFields(readAppClient(req.headers), VERSION, { serverId: serverIdentity(ctx) });
       return monitor.run("GET /api/sync build", () => {
         // No await from the generation check through serialization. Concurrent readers share these bytes.
         const generation = JSON.stringify([bus.epoch, bus.seq, urls(), tailnetField()]);
@@ -878,7 +887,8 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
         ...engineField(orch),
         ...tailnetField(),
         // D5: 버전 머리글을 보낸 앱에만. 머리글 없는 출시 앱의 응답은 그대로다.
-        ...compatFields(readAppClient(req.headers), VERSION),
+        // V: 같은 머리글을 보낸 앱에만 서버 신원(server.id)도 싣는다.
+        ...compatFields(readAppClient(req.headers), VERSION, { serverId: serverIdentity(ctx) }),
         // D9: 선택 필드. 출시된 앱은 모르는 칸을 건너뛴다.
         ...cliVersionsField(ctx),
       };
@@ -1763,12 +1773,22 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
         return Response.json(result);
       }
       if (req.method !== "GET") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
-      return Response.json(deviceKeys.list(grant.principal));
+      // 0.2.5 X: 다른 기기를 끊을 수 있는 자리인지(서버가 도는 Mac)를 함께 싣는다. 앱은 false 면 남의 줄에서 끊기 단추를 뺀다.
+      const list: DeviceAccessList = { ...deviceKeys.list(grant.principal), canRevokeOthers: fromLoopback(req, server) };
+      return Response.json(list);
     }
     const match = /^\/api\/devices\/([^/]+)$/.exec(url.pathname);
     if (!match) return fail(404, "없는 경로입니다", "route_not_found");
     if (req.method !== "DELETE") return fail(405, "허용되지 않는 메서드입니다", "method_not_allowed");
     const [id] = decodeParams(match);
+    // 0.2.5 X: 각 기기는 자기 열쇠만 끊는다. 다른 기기는 서버가 도는 Mac 에서만(코드 교체·모두 끊기와 같은 판정, tailscale serve 를 거친 요청은 아니다).
+    // 기기 열쇠는 가진 사람이면 누구나 쓰는 열쇠라, 잃어버린 기기 하나가 나머지 기기를 끊어 잠그지 못하게 한다. 없는 ID 인지는 그 전에 알려 주지 않는다.
+    const ownKey = grant.principal.kind === "device" && grant.principal.id === id;
+    // 출시된 0.2.4 앱의 오류 표에는 이 코드가 없어 받은 문장을 그대로 보인다: 영어 화면(Accept-Language)이면 영어 문장을 보낸다(리뷰 lang-5).
+    if (!ownKey && !fromLoopback(req, server)) {
+      const refusal = ERROR_CODES.device_revoke_local_only;
+      return fail(403, prefersEnglish(req) ? refusal.en : refusal.ko, "device_revoke_local_only");
+    }
     // 접속 기록의 주소: HTTPS 주소를 거친 iPhone 이 끊으면 127.0.0.1 이 아니라 그 기기 주소를 남긴다(N 의 clientAddress, 위 인증·QR 교환과 같다).
     const device = deviceKeys.revoke(id!, clientAddress(req, server));
     if (!device) return fail(404, ERROR_CODES.device_not_found.ko, "device_not_found");

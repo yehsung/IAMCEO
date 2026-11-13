@@ -29,6 +29,10 @@ struct MessageSubmission: Codable, Sendable, Identifiable {
     var restoredDraft: DraftSnapshot?
     var failureReason: String?
     var failureDisposition: MessageFailureDisposition?
+    /// 리뷰 safety-3(0.2.5): 마지막으로 보낸 서버의 신원(Bootstrap.server.id·home). 결과를 모를 때 다른 서버(같은 주소에 다른 서버가
+    /// 떴다)에 조회해 그 서버의 404 로 '접수 안 됨'을 정하지 않게 한다. 이 칸이 없던 판의 기록이면 nil(예전처럼 조회한다).
+    var serverID: String?
+    var serverHome: String?
 
     var retainsFailedMessage: Bool {
         failureDisposition == .retained || (failureDisposition == nil && (status == .refused || status == .notAccepted))
@@ -146,13 +150,15 @@ final class SubmissionStore {
 
     /// Call immediately before sending the returned immutable body. A crash from here requires a receipt query.
     /// Only an explicit v1 retry may bypass the query; it still returns the original ID and body.
-    func beginMessage(id: String, allowUnconfirmedRetry: Bool = false) throws -> SendMessageRequest {
+    /// `serverID`·`serverHome` 은 보내는 서버의 신원(아는 것만 남긴다).
+    func beginMessage(id: String, allowUnconfirmedRetry: Bool = false, serverID: String? = nil, serverHome: String? = nil) throws -> SendMessageRequest {
         guard var attempt = state.messages[id], [.prepared, .notAccepted].contains(attempt.status)
                 || (attempt.status == .refused && attempt.retainsFailedMessage)
                 || (allowUnconfirmedRetry && attempt.status == .checking) else {
             throw SubmissionError.invalidTransition
         }
         attempt.status = .checking
+        if serverID != nil || serverHome != nil { attempt.serverID = serverID; attempt.serverHome = serverHome }
         try update { $0.messages[id] = attempt }
         return attempt.request
     }

@@ -91,7 +91,11 @@ describe("명령줄 도움말과 오류", () => {
     expect(attach.stderr.trim()).toBe("Usage: iamceo attach <staffID>");
     const auth = await cli(["auth"], "ko");
     // C3(G 리뷰 auth-1): auth 에 rotate --all-devices 와 revoke-devices 가 생겨 쓰는 법 줄이 늘었다.
-    expect(auth.stderr.trim()).toBe("쓰는 법: iamceo auth rotate [--all-devices] | iamceo auth revoke-devices");
+    // 0.2.5 X: 한 대만 끊기(revoke-device <ID>)와 그 ID 를 보는 목록(devices)이 더해졌다.
+    expect(auth.stderr.trim()).toBe("쓰는 법: iamceo auth rotate [--all-devices] | iamceo auth revoke-devices | iamceo auth devices | iamceo auth revoke-device <ID>");
+    const revokeWithoutId = await cli(["auth", "revoke-device"], "en");
+    expect(revokeWithoutId.code).toBe(1);
+    expect(revokeWithoutId.stderr.trim()).toBe("Usage: iamceo auth rotate [--all-devices] | iamceo auth revoke-devices | iamceo auth devices | iamceo auth revoke-device <ID>");
     const service = await cli(["service", "install"], "en");
     expect(service.code).toBe(1);
     expect(service.stderr).toContain("With IAMCEO_TEST=1 nothing is registered with launchd");

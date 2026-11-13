@@ -413,12 +413,17 @@ describe("HTTPS 주소 HTTP 경로", () => {
     // 같은 HTTPS 주소를 거친 다른 기기는 막히지 않는다.
     const ok = await claim(code, "100.64.0.10");
     expect(ok.status).toBe(200);
+    const deviceKey = ((await ok.json()) as { accessCode: string }).accessCode;
     const devices = (await (await fetch(`${base}/api/devices`, { headers: auth })).json()) as { events: { kind: string; address: string | null }[] };
     expect(devices.events.find(event => event.kind === "paired")?.address).toBe("100.64.0.10");
     expect(devices.events.some(event => event.kind === "pair_failed" && event.address === "100.64.0.9")).toBe(true);
     // 합치기: HTTPS 주소를 거쳐 한 대만 끊어도 접속 기록에는 127.0.0.1 이 아니라 그 기기 주소가 남는다.
+    // 0.2.5 X: HTTPS 주소를 거쳐 온 요청은 서버가 도는 Mac 이 아니라 다른 기기는 끊지 못한다(403). 그 기기가 자기 열쇠로 자기를 끊는다.
     const paired = ((await (await fetch(`${base}/api/devices`, { headers: auth })).json()) as { devices: { id: string }[] }).devices[0]!;
-    const revoke = await fetch(`${base}/api/devices/${paired.id}`, { method: "DELETE", headers: { ...auth, ...viaServe, "X-Forwarded-For": "100.64.0.10" } });
+    const refused = await fetch(`${base}/api/devices/${paired.id}`, { method: "DELETE", headers: { ...auth, ...viaServe, "X-Forwarded-For": "100.64.0.11" } });
+    expect(refused.status).toBe(403);
+    expect(((await refused.json()) as { code: string }).code).toBe("device_revoke_local_only");
+    const revoke = await fetch(`${base}/api/devices/${paired.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${deviceKey}`, ...viaServe, "X-Forwarded-For": "100.64.0.10" } });
     expect(revoke.status).toBe(200);
     const after = (await (await fetch(`${base}/api/devices`, { headers: auth })).json()) as { events: { kind: string; address: string | null }[] };
     expect(after.events.find(event => event.kind === "device_revoked")?.address).toBe("100.64.0.10");

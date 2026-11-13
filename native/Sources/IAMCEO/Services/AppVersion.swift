@@ -49,6 +49,26 @@ enum AppVersion {
 struct ServerVersionInfo: Codable, Sendable, Equatable {
     var version: String
     var apiLevel: Int
+    /// V(0.2.5): 서버 신원(서버가 처음 뜰 때 만든 무작위 ID. 알림의 serverId 와 같다). 0.2.4 이하 서버는 없다.
+    /// '연결되면 보낼 글'을 쓴 서버에 묶는 데 쓴다. 모양이 어긋난 값은 없는 것으로 읽는다(버전 정보는 그대로).
+    var id: String? = nil
+}
+extension ServerVersionInfo {
+    private enum CodingKeys: String, CodingKey { case version, apiLevel, id }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decode(String.self, forKey: .version)
+        apiLevel = try c.decode(Int.self, forKey: .apiLevel)
+        id = Self.normalizedID((try? c.decodeIfPresent(String.self, forKey: .id)) ?? nil)
+    }
+
+    /// 비교할 수 있는 모양으로(소문자, 글자·숫자·-·_ 만, 64자까지). 아니면 nil.
+    static func normalizedID(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !value.isEmpty, value.count <= 64,
+              value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) && $0.isASCII || $0 == "-" || $0 == "_" })
+        else { return nil }
+        return value
+    }
 }
 
 /// 서버가 '앱과 실제로 맞지 않을 때만' 싣는 안내. state 는 이 앱이 모르는 값이 와도 읽히게 글자로 둔다.

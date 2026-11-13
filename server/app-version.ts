@@ -37,11 +37,15 @@ export function compatNotice(client: AppClientInfo, serverVersion: string, level
 /**
  * Bootstrap 에 덧붙일 선택 필드. 머리글이 없으면 빈 객체라 옛 앱의 응답은 한 글자도 바뀌지 않는다.
  * 머리글이 있으면 server 는 늘, compat 은 실제로 어긋날 때만.
+ * V(0.2.5): `serverId` 를 주면 server.id 로 싣는다(server/server-identity.ts). 출시된 0.2.4 앱은 server 의 모르는 칸을 건너뛴다.
  */
-export function compatFields(client: AppClientInfo | null, serverVersion: string, levels: CompatLevels = LEVELS): Pick<Bootstrap, "server" | "compat"> {
+export function compatFields(client: AppClientInfo | null, serverVersion: string,
+  options: { levels?: CompatLevels; serverId?: string } = {}): Pick<Bootstrap, "server" | "compat"> {
   if (!client) return {};
+  const levels = options.levels ?? LEVELS;
   const compat = compatNotice(client, serverVersion, levels);
-  return { server: { version: serverVersion, apiLevel: levels.apiLevel }, ...(compat ? { compat } : {}) };
+  return { server: { version: serverVersion, apiLevel: levels.apiLevel, ...(options.serverId ? { id: options.serverId } : {}) },
+    ...(compat ? { compat } : {}) };
 }
 
 /**

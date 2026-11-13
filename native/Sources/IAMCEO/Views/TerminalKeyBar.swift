@@ -250,7 +250,7 @@ struct TerminalKeyBarPreview: UIViewRepresentable {
                                           font: .monospacedSystemFont(ofSize: 11, weight: .regular))
         view.nativeBackgroundColor = UIColor(red: 11 / 255, green: 9 / 255, blue: 24 / 255, alpha: 1)
         view.nativeForegroundColor = UIColor(red: 245 / 255, green: 242 / 255, blue: 255 / 255, alpha: 1)
-        view.feed(text: "Claude Code\r\n\r\n> 다음 작업을 입력하세요\r\n")
+        view.feed(text: AppLanguage.current == .en ? "Claude Code\r\n\r\n> Type your next task\r\n" : "Claude Code\r\n\r\n> 다음 작업을 입력하세요\r\n")
         view.inputAccessoryView = TerminalKeyBar(terminal: view)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { _ = view.becomeFirstResponder() }
         return view

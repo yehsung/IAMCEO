@@ -1295,7 +1295,16 @@ private enum OfficeDebug {
     private static func pad(_ list: [Member]) -> [Member] {
         guard let count, count > 0, !list.isEmpty else { return list }
         if count <= list.count { return Array(list.prefix(count)) }
-        let extra: [(String, String, String)] = [
+        // 예시 팀원의 이름·하는 일은 샘플 자료처럼 앱 화면 언어를 따른다(W).
+        let extra: [(String, String, String)] = AppLanguage.current == .en ? [
+            ("Coupons", "working", "Ordering how discount coupons apply"), ("Refunds", "idle", "Checking the partial refund flow"),
+            ("Shipping Fees", "working", "Adding the shipping fee table by region"), ("Reward Points", "asleep", "Drafting the points rules"),
+            ("Order History", "waiting", "Filters for the order history screen"), ("Notifications", "working", "Payment complete notification text"),
+            ("Log Analysis", "idle", "Grouping payment failure logs"), ("Security Review", "blocked", "Checking how keys are stored"),
+            ("Performance", "asleep", "First load of the checkout page"), ("Docs", "idle", "Integration docs outline"),
+            ("Accessibility", "working", "Screen reader order for the pay button"), ("Pricing Display", "working", "Prices shown with tax"),
+            ("Receipt Layout", "error", "Receipt PDF layout"),
+        ] : [
             ("쿠폰 적용", "working", "할인 쿠폰 적용 순서 정리"), ("환불 처리", "idle", "부분 환불 흐름 점검"),
             ("배송비 계산", "working", "지역별 배송비 표 반영"), ("포인트 적립", "asleep", "적립 규칙 초안"),
             ("주문 내역", "waiting", "주문 내역 화면 필터"), ("알림 발송", "working", "결제 완료 알림 문구"),

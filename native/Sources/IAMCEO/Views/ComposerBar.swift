@@ -230,9 +230,15 @@ struct ComposerBar: View {
         if count == 0 {
             let orphans = store.orphanQueuedMessages.count
             if orphans > 0 { return (String(localized: "보낼 곳이 없는 글 \(orphans)개 · 확인이 필요합니다"), true) }
+            // V: 다른 서버에 보내려던 글만 남았다. 이 서버로는 보내지 않는다. '보기'에서 읽고 복사하거나 지운다.
+            let elsewhere = store.otherServerQueuedMessages.count
+            if elsewhere > 0 { return (String(localized: "다른 서버에 보내려던 글 \(elsewhere)개 · 이 서버로는 보내지 않습니다"), false) }
         }
         guard count > 0 else { return nil }
         if store.outboxPausedReason != nil { return (String(localized: "보내기를 멈춘 글 \(count)개 · 확인이 필요합니다"), true) }
+        // V: 쓴 지 하루가 넘은 글은 저절로 보내지 않는다. 대표가 목록에서 보내기·고치기·지우기를 고른다.
+        let stale = store.queuedNeedingReview.count
+        if stale > 0 { return (String(localized: "하루가 지난 글 \(stale)개 · 확인이 필요합니다"), true) }
         if store.outboxFlushing { return (String(localized: "연결되면 보낼 글 \(count)개 · 보내는 중"), false) }
         return (String(localized: "연결되면 보낼 글 \(count)개 · 연결되면 순서대로 보냅니다"), false)
     }
@@ -291,6 +297,10 @@ struct ComposerBar: View {
         }
         // F1: 연결되면 보낼 글(고치기·지우기·이어서 보내기).
         .sheet(isPresented: $showOutbox) { OutboxSheet() }
+        #if DEBUG
+        // 화면 견본(V): `--last-seen-preview --outbox-preview --screen chat --open-outbox` 는 대기열 화면을 바로 연다.
+        .task { if LaunchOptions.arguments.contains("--open-outbox"), store.lastSeen != nil { showOutbox = true } }
+        #endif
         #if os(iOS)
         .photosPicker(isPresented: $choosingPhotos, selection: $photoSelection, maxSelectionCount: 10,
                       selectionBehavior: .ordered, matching: .any(of: [.images, .videos]),

@@ -19,7 +19,7 @@ then give instructions and approve decisions from one Mac and iPhone app.
 
 </div>
 
-> **Language:** the app's screens follow your device language: English, or Korean on a Korean device. The lead and staff can write their reports, decision cards and to-dos to you in English (Settings → General → Report language), and the installer and the command-line tool speak English. The [user guides](docs/guide/README.md) are in English and Korean.
+> **Language:** the app's screens are in English or Korean. By default the iPhone app follows your App Store country (Korean in Korea, English elsewhere) and the Mac app follows your device language; pick one in Settings → General → Language. The lead and staff can write their reports, decision cards and to-dos to you in English (Settings → General → Report language), and the installer and the command-line tool speak English. The [user guides](docs/guide/README.md) are in English and Korean.
 
 - **Stop babysitting terminals** — who is working, who is done and who is stuck at a permission prompt, on one Home screen.
 - **One Inbox for every decision** — staff questions and approvals arrive as cards with background, the outcome of each option and a recommendation.

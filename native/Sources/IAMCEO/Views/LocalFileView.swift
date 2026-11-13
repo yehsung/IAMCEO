@@ -343,10 +343,12 @@ struct LocalFileSample: Identifiable {
         switch kind {
         case "code": "~/project/scripts/sync_rows.py"
         case "image": "~/project/output/screens/home@2x.png"
-        case "other": "~/project/output/결과보고서.docx"
-        default: "~/project/docs/리포트/주간-진행-보고.md"
+        case "other": english ? "~/project/output/final-report.docx" : "~/project/output/결과보고서.docx"
+        default: english ? "~/project/docs/reports/weekly-progress.md" : "~/project/docs/리포트/주간-진행-보고.md"
         }
     }
+    /// 견본의 글은 샘플 자료처럼 앱 화면 언어를 따른다(W).
+    private var english: Bool { AppLanguage.current == .en }
     var preview: LocalFilePreview {
         let name = (path as NSString).lastPathComponent
         let modified = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-42 * 60))
@@ -370,6 +372,24 @@ struct LocalFileSample: Identifiable {
             return LocalFilePreview(info: LocalFileInfo(name: name, path: path, size: 482_113, modifiedAt: modified, mime: "image/png", kind: "image", content: nil), imageData: Self.sampleImage)
         case "other":
             return LocalFilePreview(info: LocalFileInfo(name: name, path: path, size: 1_284_551, modifiedAt: modified, mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", kind: "file", content: nil))
+        case _ where english:
+            let text = """
+            # Weekly progress report
+
+            This week we finished the **payment integration** and the home screen redesign. What's left is in the table below.
+
+            | Option | What it means | Effort | Freeze | DB |
+            |---|---|---|---|---|
+            | ① Leave as is | Only add the button | None | No impact | Not needed |
+            | ② Just unlock it (recommended) | Keep the prompt practice slot first, but make it open any time. The first lesson becomes the current slot | Small. A few lines in `prompt-lab-path.ts` and 1–2 tests | Plenty of time before the freeze | Not needed (app only) |
+            | ③ Change the order | New users start with the first lesson; prompt practice moves to the next slot | Small to medium | Tighter than ② | Not needed |
+
+            ## Next week
+
+            - Send payment receipt emails
+            - Measure home screen speed (`output/perf.json`)
+            """
+            return LocalFilePreview(info: LocalFileInfo(name: name, path: path, size: Int64(text.utf8.count), modifiedAt: modified, mime: "text/markdown", kind: "markdown", content: text))
         default:
             let text = """
             # 주간 진행 보고

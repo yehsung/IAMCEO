@@ -38,6 +38,7 @@ In one line: **the ways into the server on your Mac from outside are guarded. Th
 - A connection link opened from outside the app first shows the address it leads to and connects only after you confirm. If a Mac is already connected, it says that this would replace it. A link whose address is not a Tailscale address is not opened.
 - The iPhone keeps the access code in a Keychain item that stays on that device. The code is never sent to an attachment on another address or along a redirect.
 - A notification carries only a fixed sentence and identifiers. Tapping one never answers, approves or types into a terminal for you.
+- **Other devices are disconnected only on the Mac that runs the server.** Each device can disconnect only itself; on any other device the 연결된 기기 (Connected devices) list is read-only. A device key works for whoever holds it, so the Mac you actually have in hand is the root of trust: a lost or stolen device cannot disconnect your other devices and lock you out. "The Mac that runs the server" means the request came directly from inside that Mac; a request that arrives through the HTTPS address (`tailscale serve`) does not count. If the released iPhone app 0.2.4 or earlier tries to disconnect another device, it only gets the note "Other devices can be disconnected on the Mac that runs the server" and nothing is disconnected.
 
 **The channel AI sessions use to reach the server**
 
@@ -78,7 +79,7 @@ Stated plainly.
 - **The default permission mode is "don't ask".** In that mode the CLI shows no approval prompt and uses no sandbox. An agent can do what your user can do. The HQ agent's working folder is your home folder. If you want the CLI to hold back, choose "ask only when risky" or "ask every time" in Settings.
 - **"Ask before committing, pushing, deleting or sending anything outside" is an instruction.** It is a promise the agents follow. The server does not intercept those commands.
 - **Devices on the shared access code cannot be cut off one at a time.** That covers the app on this Mac, any device you connected by typing the code, and an iPhone connected with a QR code before devices had their own keys. To cut them off you change the code, which cuts off all of them. To make an iPhone removable on its own, reconnect it with a new QR code so it gets its own key.
-- **Device keys do not split permissions.** Any device can read, answer decisions and use terminals, and can disconnect other devices. Only the app on this Mac (on the shared access code) can make a new connection QR, so a device key cannot be used to collect more keys. Changing the shared access code and revoking every device key are limited to this Mac.
+- **Device keys do not split reading, decisions and terminals.** Any device can do all of them. Only the app on this Mac (on the shared access code) can make a new connection QR, so a device key cannot be used to collect more keys. Changing the shared access code, revoking every device key and disconnecting another device are limited to this Mac.
 - **The default connection is not HTTPS.** Encryption between iPhone and Mac relies on Tailscale. Turn on the **HTTPS address** under Settings → Connection → Connect iPhone in the Mac app (the server makes it with `tailscale serve`) and iPhones paired by QR after that have the app's own traffic encrypted as well. iPhones already connected move over only when paired again with a new QR. From the next iPhone app, nothing is sent to a plain address while Tailscale is off; the released iPhone apps 0.2.2 and 0.2.3 do not have this check → [Connecting an iPhone](guide/iphone.en.md#https-address-optional)
 - **The iPhone app has no lock of its own.** Someone holding your unlocked iPhone can open the app, give instructions, answer decisions and type into a terminal.
 - **Backups contain the shared access code as it is.** Device keys are stored only as hashes. Files in `~/.iamceo/backups` are readable only by you, but file permissions are not encryption. A backup cloned to another Mac (`iamceo restore --clone`) refuses the original devices' keys and uses a new access code.
@@ -87,7 +88,12 @@ Stated plainly.
 
 First remove that device from your tailnet in the Tailscale admin console. It can no longer reach the server's port.
 
-**If it was connected with a QR code**, open Settings → 연결 (Connection) → **연결된 기기** (Connected devices) on another device (the Mac app, for example) and press **끊기** (Disconnect) on that device. Its connections close at once and every other device stays connected. If it tries to come back, the attempt shows under 최근 실패한 시도 (Recent failed attempts).
+**If it was connected with a QR code**, open Settings → 연결 (Connection) → **연결된 기기** (Connected devices) in the app on the Mac that runs the server and press **끊기** (Disconnect) on that device. Its connections close at once and every other device stays connected. If it tries to come back, the attempt shows under 최근 실패한 시도 (Recent failed attempts). Another iPhone or another Mac cannot do this (see "Other devices are disconnected only on the Mac that runs the server" above). You can also disconnect just that device from a terminal on that Mac: list the devices to find its ID, then disconnect it by that ID.
+
+```sh
+/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo auth devices
+/Applications/IAMCEO.app/Contents/Resources/runtime/iamceo auth revoke-device <ID>
+```
 
 If you cannot tell which row it is (for example, every row is called "iPhone"), revoke the keys of every device paired by QR from a terminal on the Mac that runs the server. The shared access code and the devices on it (such as the app on this Mac) stay connected; pair the devices you keep again with a new QR from the Mac app. It is safe to run again.
 

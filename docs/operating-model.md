@@ -252,7 +252,7 @@ IAMCEO_HOME="<별도 빈 복원 홈>" iamceo restore resume
 
 ## 접속 코드 교체와 준비 확인
 
-사용자 자격은 호스트 공용 접속 코드와 QR로 받은 기기 열쇠 두 가지다(계약은 [구현 계약](spec.md#기기-열쇠와-접속-기록c3)). 기기 하나에서 Keychain을 지우거나 연결을 해제해도 서버의 코드·열쇠는 바뀌지 않는다. QR로 연결한 기기는 설정 → 연결 → 연결된 기기(`DELETE /api/devices/:id`)에서 한 대만 끊는다. QR로 받은 열쇠를 한꺼번에 끊으려면 해당 호스트에서 `iamceo auth revoke-devices`(`DELETE /api/devices`, 공용 코드는 그대로). 공용 코드로 붙은 접근을 회수하려면 해당 호스트에서 접속 코드를 교체하고, 코드가 새었으면 `iamceo auth rotate --all-devices`로 기기 열쇠까지 끊는다(코드를 가진 쪽은 QR 없이 열쇠를 받아 둘 수 있다). 새 연결 QR은 공용 코드 자격(Mac 앱)으로만 만든다. 시험할 때는 반드시 별도 시험 홈을 지정한다.
+사용자 자격은 호스트 공용 접속 코드와 QR로 받은 기기 열쇠 두 가지다(계약은 [구현 계약](spec.md#기기-열쇠와-접속-기록c3)). 기기 하나에서 Keychain을 지우거나 연결을 해제해도 서버의 코드·열쇠는 바뀌지 않는다. QR로 연결한 기기는 설정 → 연결 → 연결된 기기(`DELETE /api/devices/:id`)에서 한 대만 끊는다. 다른 기기를 끊는 것은 서버가 도는 Mac의 앱이나 그 호스트의 `iamceo auth revoke-device <ID>`(ID는 `iamceo auth devices`)로만 되고, 다른 기기에서는 자기 연결만 끊는다. QR로 받은 열쇠를 한꺼번에 끊으려면 해당 호스트에서 `iamceo auth revoke-devices`(`DELETE /api/devices`, 공용 코드는 그대로). 공용 코드로 붙은 접근을 회수하려면 해당 호스트에서 접속 코드를 교체하고, 코드가 새었으면 `iamceo auth rotate --all-devices`로 기기 열쇠까지 끊는다(코드를 가진 쪽은 QR 없이 열쇠를 받아 둘 수 있다). 새 연결 QR은 공용 코드 자격(Mac 앱)으로만 만든다. 시험할 때는 반드시 별도 시험 홈을 지정한다.
 
 ```sh
 IAMCEO_HOME="<시험 홈>" iamceo auth rotate

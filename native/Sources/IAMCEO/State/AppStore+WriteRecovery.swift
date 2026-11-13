@@ -57,6 +57,8 @@ extension AppStore {
             || (attempt.status == .accepted && !attempt.draftConsumed)
             || (attempt.status == .notAccepted && attempt.failureDisposition == nil) {
             guard !isSending(projectID: attempt.projectID, targetMemberID: attempt.targetMemberID) else { continue }
+            // 리뷰 safety-3: 같은 주소에 다른 서버가 떠 있으면 그 서버로 보낸 글이 아니다. 묻지도 정리하지도 않고 '확인 중'으로 둔다.
+            guard sentToCurrentServer(attempt) else { continue }
             _ = await reconcileMessage(attempt.id)
             guard epoch == generation, canWrite else { return }
         }

@@ -5,6 +5,8 @@ import Foundation
 ///
 /// - 자료: `SampleWorkspaceData.json`(서버 시험 tests/sample-workspace.test.ts 가 실제 서버 응답으로 만든다). 불러올 때 모든 시각을
 ///   '지금' 기준으로 옮겨, 언제 열어도 방금 일하던 팀으로 보인다.
+/// - 언어(0.2.5 W): 앱 화면이 영어면 같은 회사·같은 흐름의 영어 자료(`SampleWorkspaceData.english`)로 답하고, 샘플 서버가 지어내는
+///   글(팀장의 답글, 활동 줄, 다시 연 결재의 메모)도 영어로 쓴다. 언어는 샘플을 열 때 정해 샘플을 나갈 때까지 그대로다.
 /// - 쓰기: 보내기, 결재 답, 할 일 끝내기·정리, 설정, 팀장 모델, 첨부 올리기를 메모리에서만 받는다. 앱을 끄거나 샘플을 나가면 사라진다.
 /// - 바깥으로 나가는 길이 없다: 요청은 `SampleURLProtocol`(이 세션의 유일한 프로토콜)이 모두 받고, 다른 주소는 거절한다.
 ///   주소는 예약된 `.invalid` 이름이라 잘못 새어도 어디에도 닿지 않는다. 실시간 연결도 소켓을 열지 않고 이 서버가 직접 프레임을 넣는다.
@@ -19,6 +21,8 @@ final class SampleServer: @unchecked Sendable {
     struct Reply { var status = 200; var headers = ["Content-Type": "application/json"]; var body = Data() }
 
     let id = UUID().uuidString
+    /// 이 샘플의 자료와 지어내는 글의 언어(W). 샘플을 열 때의 앱 화면 언어.
+    let language: AppLanguage
     private let lock = NSLock()
     private let epoch = "sample"
     private var seq = 1
@@ -73,8 +77,9 @@ final class SampleServer: @unchecked Sendable {
     /// 이 서버가 받은 요청(시험이 '바깥으로 나가지 않았다'를 확인한다).
     var requests: [URLRequest] { lock.withLock { captured } }
 
-    init(now: Date = Date()) {
-        let data = SampleWorkspace.load(now: now)
+    init(now: Date = Date(), language: AppLanguage = .current) {
+        self.language = language
+        let data = SampleWorkspace.load(now: now, language: language)
         bootstrap = data["bootstrap"] as? Object ?? [:]
         capabilities = data["capabilities"] ?? [:]
         models = data["models"] ?? [:]
@@ -360,23 +365,34 @@ final class SampleServer: @unchecked Sendable {
         if let recipientID, var members = project.state["members"] as? [Object], let at = members.firstIndex(where: { $0["id"] as? String == recipientID }) {
             let now = Self.timestamp()
             members[at]["status"] = "working"
-            members[at]["now"] = "대표 지시: " + Self.oneLine(text, limit: 40)
+            members[at]["now"] = (language == .en ? "Your instruction: " : "대표 지시: ") + Self.oneLine(text, limit: 40)
             members[at]["nowAt"] = now; members[at]["updatedAt"] = now; members[at]["lastActiveAt"] = now
             project.state["members"] = members
             activitySeq += 1
             project.activity[recipientID, default: []].append(["id": activitySeq, "memberId": recipientID, "at": now, "kind": "turn_start",
-                                                               "text": "지시를 받았습니다: " + Self.oneLine(text, limit: 60)])
+                                                               "text": (language == .en ? "Got the instruction: " : "지시를 받았습니다: ") + Self.oneLine(text, limit: 60)])
         }
         projects[projectID] = project
         changed()
+    }
+
+    /// 영어 샘플 팀장의 답글. 인용한 지시가 문장 끝에 오지 않게 하고, 지시 끝의 마침표·물음표·느낌표는 뗀다
+    /// (리뷰 lang-3: “….”. 처럼 문장 부호가 겹치지 않게). 60자를 넘어 줄인 지시의 … 는 남긴다.
+    static func englishAcknowledgement(_ text: String) -> String {
+        var quote = oneLine(text, limit: 60)
+        while let last = quote.last, ".?!。".contains(last) { quote.removeLast() }
+        quote = quote.trimmingCharacters(in: .whitespaces)
+        return "Got it. I'll wrap up what I'm doing and start right away on “\(quote)”, then report back when it's done."
     }
 
     private func acknowledge(projectID: String, memberID: String, name: String, text: String) {
         guard var project = projects[projectID] else { return }
         let reply: Object = [
             "id": "sample-" + UUID().uuidString.lowercased(), "projectId": projectID, "at": Self.timestamp(), "mine": false,
-            "memberId": memberID, "who": name, "kind": "진행", "title": "지시를 받았습니다",
-            "body": "‘\(Self.oneLine(text, limit: 60))’ 지시를 받았습니다. 하던 일을 정리하고 바로 이어서 하겠습니다. 끝나면 결과를 보고드리겠습니다.",
+            "memberId": memberID, "who": name, "kind": "진행", "title": language == .en ? "Instruction received" : "지시를 받았습니다",
+            "body": language == .en
+                ? Self.englishAcknowledgement(text)
+                : "‘\(Self.oneLine(text, limit: 60))’ 지시를 받았습니다. 하던 일을 정리하고 바로 이어서 하겠습니다. 끝나면 결과를 보고드리겠습니다.",
             "targetMemberId": NSNull(), "targetName": NSNull(), "decisionId": NSNull(), "fileId": NSNull(), "attachments": [Any](),
             "delivery": NSNull(), "deliveryNote": NSNull(), "deliveryRevision": 0, "contextFileId": NSNull(), "fileIds": [Any](),
             "supersedes": NSNull(), "supersededBy": NSNull(),
@@ -423,8 +439,12 @@ final class SampleServer: @unchecked Sendable {
         }
         let closer = decision["closedBy"] as? String ?? "AI"
         let reason = (decision["closeReason"] as? String).map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") } ?? ""
-        let particle = closer.unicodeScalars.last.map { (0xAC00...0xD7A3).contains($0.value) && ($0.value - 0xAC00) % 28 != 0 } == true ? "이" : "가"
-        decision["reopenNote"] = "\(closer)\(particle) 닫았던 결재를 대표가 다시 열었습니다" + (reason.isEmpty ? "" : "(닫은 이유: \(reason))")
+        if language == .en {
+            decision["reopenNote"] = "You reopened a decision closed by \(closer)" + (reason.isEmpty ? "" : " (reason it was closed: \(reason))")
+        } else {
+            let particle = closer.unicodeScalars.last.map { (0xAC00...0xD7A3).contains($0.value) && ($0.value - 0xAC00) % 28 != 0 } == true ? "이" : "가"
+            decision["reopenNote"] = "\(closer)\(particle) 닫았던 결재를 대표가 다시 열었습니다" + (reason.isEmpty ? "" : "(닫은 이유: \(reason))")
+        }
         if let choice = decision["choice"] as? String { decision["lastChoice"] = choice }
         if let note = decision["note"] as? String { decision["lastNote"] = note }
         decision["status"] = "open"
@@ -466,7 +486,7 @@ final class SampleServer: @unchecked Sendable {
             todo["done"] = done
             todo["doneAt"] = done ? now : NSNull()
             todo["outcome"] = done ? (drop ? "dropped" : "done") : NSNull()
-            if drop { todo["closeReason"] = input["reason"] ?? NSNull(); todo["closedBy"] = "나" }
+            if drop { todo["closeReason"] = input["reason"] ?? NSNull(); todo["closedBy"] = language == .en ? "you" : "나" }
             if !drop, done, let note = input["note"] as? String, !note.isEmpty { todo["completionNote"] = note }
             if !done { todo["completionNote"] = NSNull(); todo["closeReason"] = NSNull(); todo["closedBy"] = NSNull() }
             todos[index] = todo
@@ -651,8 +671,11 @@ final class SampleServer: @unchecked Sendable {
 
 /// 샘플 자료를 불러와 시각을 '지금'으로 옮긴다.
 enum SampleWorkspace {
-    static func load(now: Date = Date()) -> [String: Any] {
-        guard let object = try? JSONSerialization.jsonObject(with: Data(SampleWorkspaceData.json.utf8)) as? [String: Any] else { return [:] }
+    /// 그 언어의 자료(W): 영어는 같은 회사·같은 흐름의 영어 벌, 그 밖은 한국어 벌.
+    static func source(_ language: AppLanguage) -> String { language == .en ? SampleWorkspaceData.english : SampleWorkspaceData.json }
+
+    static func load(now: Date = Date(), language: AppLanguage = .current) -> [String: Any] {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(source(language).utf8)) as? [String: Any] else { return [:] }
         let base = (object["baseTime"] as? String).flatMap(parse) ?? now
         let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         // 날짜만 적힌 값(사용량의 날짜 칸, 자료는 UTC 로 만든다)은 기준일에서 이 기기의 오늘까지 날 수만큼 옮긴다.
@@ -696,8 +719,8 @@ enum SampleWorkspace {
     }
 
     /// 샘플의 첫 화면(본사 말고 첫 프로젝트)을 앱의 모델로 읽는다. 시험과 화면 견본이 쓴다.
-    static func decoded(now: Date = Date()) throws -> (Bootstrap, ProjectState) {
-        let data = load(now: now)
+    static func decoded(now: Date = Date(), language: AppLanguage = .current) throws -> (Bootstrap, ProjectState) {
+        let data = load(now: now, language: language)
         let bootstrap = try JSONDecoder().decode(Bootstrap.self, from: JSONSerialization.data(withJSONObject: data["bootstrap"] ?? [:]))
         let projects = data["projects"] as? [String: [String: Any]] ?? [:]
         guard let main = bootstrap.projects.first(where: { !$0.isHq }), var state = projects[main.id]?["state"] as? [String: Any] else {

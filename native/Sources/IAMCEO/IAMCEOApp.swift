@@ -36,7 +36,17 @@ enum LaunchOptions {
     }
 }
 
+/// The entry point. W(0.2.5): the app's display language is settled before anything reads a localized string
+/// (`AppLanguageLaunch`: the owner's choice in Settings, the system per-app language, or — on a first launch — the App
+/// Store country on iPhone and the device language on Mac). The bundle picks its string table once per launch.
 @main
+enum IAMCEOLauncher {
+    @MainActor static func main() {
+        AppLanguageLaunch.prepare()
+        IAMCEOApp.main()
+    }
+}
+
 struct IAMCEOApp: App {
     /// App-level scene phase includes the settings window and every main window.
     @Environment(\.scenePhase) private var scenePhase

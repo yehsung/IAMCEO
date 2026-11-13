@@ -609,13 +609,10 @@ final class AppStore: ProjectManagementStore {
             catch { errorMessage = error.localizedDescription }
             connectedCredentials = (endpoint, accessCode.trimmingCharacters(in: .whitespacesAndNewlines))
             // F1: 새로 붙은 서버다. 앞서 남긴 다른 연결의 마지막 상태는 지운다(이 서버의 상태는 곧 다시 남긴다).
-            // 다른 서버에 보내려던 대기열도 지운다. 이 서버 몫은 그대로 둔다(접속 코드가 바뀌어 같은 서버에 다시 붙은 경우).
-            // 같은 서버를 다른 주소로 붙었으면 그 주소 몫은 이 주소 몫으로 옮겨 보낸다(4차 확인 새 문제 2).
-            if !sameServer {
-                offline.clearLastSeen()
-                carryOutboxFromOtherAddresses(server: initial)
-                try? offline.removeAll(except: writeNamespace)
-            }
+            if !sameServer { offline.clearLastSeen() }
+            // V: 대기열은 서버 신원으로 가린다. 이 서버의 몫은 이 주소 몫으로 모아 보내고(같은 서버를 다른 주소로 붙은 경우 포함),
+            // 다른 서버의 몫은 지우지 않고 대기열 화면에 따로 둔다. 같은 주소에 다시 붙어도 서버가 바뀌었을 수 있어 늘 본다.
+            reconcileOutbox(server: initial)
             rememberServerAddresses()
             rememberServerCLI()
             connectionIssue = nil
@@ -766,8 +763,9 @@ final class AppStore: ProjectManagementStore {
         stopRequests()
         resetReadCollections()
         // F1: 이 기기에서 나간다. 마지막 상태와 이 서버에 보내려던 대기열을 지운다(나가기 확인 창이 그 수를 알린다).
+        // V: 다른 서버에 보내려던 글은 남긴다(그 서버에 다시 붙으면 보내고, 30일이 지나면 지워진다).
         forgetLastSeen()
-        if writeNamespace != "unassigned" { try? offline.removeAll(namespace: writeNamespace) }
+        forgetOutboxForLeaving()
         projectCache.removeAll(); validatedProjectGeneration = nil; validatedWriteGeneration = nil
         generation = UUID(); projectGeneration = UUID()
         if persistCredentials { KeychainStore.remove(for: endpoint) }
@@ -1087,7 +1085,8 @@ final class AppStore: ProjectManagementStore {
             }
             if detached { draftDidDetach?() }
             let outcome: (value: Message?, error: Error?) = await perform(actionKey, refreshAfter: false, deferRefusalToReceipt: true, ownsPendingAction: true) { api in
-                let request = try submissions.beginMessage(id: attempt.id, allowUnconfirmedRetry: !strictWriteContract)
+                let request = try submissions.beginMessage(id: attempt.id, allowUnconfirmedRetry: !strictWriteContract,
+                                                           serverID: currentServerID, serverHome: currentServerHome)
                 return try await api.sendMessage(projectID: projectID, request: request, contractVersion: strictWriteContract ? 2 : nil)
             }
             // A 401 can invalidate the connection inside perform. Restore its proven refusal
@@ -1153,7 +1152,7 @@ final class AppStore: ProjectManagementStore {
         do {
             let outcome: (value: Message?, error: Error?) = await perform(actionKey, refreshAfter: false,
                 deferRefusalToReceipt: true, ownsPendingAction: true) { api in
-                let request = try submissions.beginMessage(id: id)
+                let request = try submissions.beginMessage(id: id, serverID: currentServerID, serverHome: currentServerHome)
                 return try await api.sendMessage(projectID: attempt.projectID, request: request,
                                                  contractVersion: strictWriteContract ? 2 : nil)
             }
@@ -1183,6 +1182,8 @@ final class AppStore: ProjectManagementStore {
 
     func reconcileMessage(_ id: String) async -> Bool {
         guard canWrite, let api, let submissions else { return false }
+        // 리뷰 safety-3: 다른 서버(같은 주소에 다른 서버가 떴다)로 보낸 글은 지금 서버에 묻지 않는다. 그 서버에 다시 붙을 때 확인한다.
+        if let attempt = submissions.messageAttempt(id: id), !sentToCurrentServer(attempt) { return false }
         let epoch = generation
         do {
             _ = try await submissions.reconcileMessage(id: id, using: api)
@@ -2492,8 +2493,10 @@ extension AppStore {
     func githubRepositories() async throws -> GitHubRepositories {
         if isDemo {
             return GitHubRepositories(available: true, repos: [
-                GitHubRepository(nameWithOwner: "iamceo/landing", description: "새로운 브랜드와 제품을 소개하는 페이지", visibility: "PUBLIC", updatedAt: "2026-11-06T10:00:00Z", url: "https://github.com/iamceo/landing"),
-                GitHubRepository(nameWithOwner: "iamceo/workspace", description: "우리 팀의 작업 공간", visibility: "PRIVATE", updatedAt: "2026-11-05T09:00:00Z", url: "https://github.com/iamceo/workspace")
+                GitHubRepository(nameWithOwner: "iamceo/landing", description: AppLanguage.current == .en ? "A page that introduces our new brand and products" : "새로운 브랜드와 제품을 소개하는 페이지",
+                                 visibility: "PUBLIC", updatedAt: "2026-11-06T10:00:00Z", url: "https://github.com/iamceo/landing"),
+                GitHubRepository(nameWithOwner: "iamceo/workspace", description: AppLanguage.current == .en ? "Our team's workspace" : "우리 팀의 작업 공간",
+                                 visibility: "PRIVATE", updatedAt: "2026-11-05T09:00:00Z", url: "https://github.com/iamceo/workspace")
             ])
         }
         guard let api else { throw APIError(status: 0, message: String(localized: "서버에 연결해 주세요.")) }
@@ -2511,7 +2514,7 @@ extension AppStore {
         let home = "/Users/demo"
         let tree = [home: ["code", "Documents"], home + "/code": ["landing", "workspace"], home + "/Documents": [], home + "/code/landing": ["assets", "src"], home + "/code/workspace": [], home + "/code/landing/assets": [], home + "/code/landing/src": []]
         let path = path ?? home
-        guard let children = tree[path] else { throw APIError(status: 404, message: "샘플 폴더가 없습니다.") }
+        guard let children = tree[path] else { throw APIError(status: 404, message: AppLanguage.current == .en ? "That folder isn't in the sample." : "샘플 폴더가 없습니다.") }
         return FolderListing(path: path, parent: path == home ? nil : ServerFolderPaths.parent(path), home: home,
                              entries: children.sorted { $0.localizedCompare($1) == .orderedAscending }.map { ServerFolder(name: $0, path: ServerFolderPaths.appending($0, to: path)) })
     }

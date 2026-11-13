@@ -817,7 +817,12 @@ export const APP_HEADERS = {
 export type AppPlatform = "macos" | "ios";
 /** 머리글에서 읽은 앱 하나. build 는 없을 수 있다. */
 export interface AppClientInfo { version: string; build: string | null; platform: AppPlatform; apiLevel: number }
-export interface ServerVersionInfo { version: string; apiLevel: number }
+export interface ServerVersionInfo {
+  version: string; apiLevel: number;
+  /** V(0.2.5): 서버 신원. 서버가 처음 뜰 때 DB 에 만드는 무작위 ID(알림의 serverId 와 같다). `iamceo restore --clone` 은 새 ID,
+   * 같은 곳 복원은 그대로다. 앱은 '연결되면 보낼 글'을 이 ID 에 묶어, 다른 서버에 붙은 동안 그 글을 보내지 않는다. 옛 서버는 없다. */
+  id?: string;
+}
 /** app_outdated: 앱이 서버보다 낮은 단계라 업데이트해야 한다. server_outdated: 서버가 앱보다 낮은 단계다. */
 export interface CompatNotice { state: "app_outdated" | "server_outdated"; message: string }
 /** GET /api/readiness 의 apps: 이 서버 프로세스가 켜진 뒤 버전 머리글을 보낸 앱들(최근 것부터, 많아야 8개). */
@@ -869,6 +874,11 @@ export interface DeviceAccessList {
   failures: { count: number; days: number; lastAt: string | null };
   /** 최근 기록(새 것부터, 많아야 50줄). 기록은 90일·2,000줄까지 둔다. */
   events: AccessEvent[];
+  /**
+   * 0.2.5 X: 이 목록을 부른 요청이 서버가 도는 Mac 에서 왔다(실제 loopback 연결, 대리 전달 머리글 없음).
+   * true 면 다른 기기도 끊을 수 있고, false 면 자기 기기(current)만 끊을 수 있다. 옛 서버는 싣지 않는다(그때는 어디서나 끊었다).
+   */
+  canRevokeOthers?: boolean;
 }
 export interface DeviceRevokeResult { ok: true; device: ConnectedDevice }
 /** DELETE /api/devices(이 Mac 에서만): QR 로 받은 열쇠를 모두 끊었다. 공용 접속 코드는 그대로다. */

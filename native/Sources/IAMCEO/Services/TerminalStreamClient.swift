@@ -254,6 +254,11 @@ final class TerminalStreamClient {
     func showDemo() {
         close(); grid = (100, 30); outputGeneration = UUID()
         state = .live(mode: .observe, cols: 100, rows: 30)
+        // 샘플 화면의 글은 샘플 자료처럼 앱 화면 언어를 따른다(W).
+        if AppLanguage.current == .en {
+            output(Data("\u{1b}c\u{1b}[38;5;141m╭─ Claude Code ──────────────────────────────╮\r\n│ IAMCEO · Sample project                    │\r\n╰────────────────────────────────────────────╯\u{1b}[0m\r\n\r\n\u{1b}[32m●\u{1b}[0m Checked the change you asked for.\r\n  You can see the CLI screen and its colors right in the app.\r\n\r\n\u{1b}[38;5;141m❯\u{1b}[0m Type your next task\r\n".utf8))
+            return
+        }
         output(Data("\u{1b}c\u{1b}[38;5;141m╭─ Claude Code ──────────────────────────────╮\r\n│ IAMCEO · 샘플 프로젝트                     │\r\n╰────────────────────────────────────────────╯\u{1b}[0m\r\n\r\n\u{1b}[32m●\u{1b}[0m 요청한 변경을 확인했습니다.\r\n  앱 안에서 CLI 화면과 색을 확인할 수 있습니다.\r\n\r\n\u{1b}[38;5;141m❯\u{1b}[0m 다음 작업을 입력하세요\r\n".utf8))
     }
     func send(_ bytes: Data) {

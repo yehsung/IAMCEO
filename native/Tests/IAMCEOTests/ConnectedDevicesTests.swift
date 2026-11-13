@@ -88,6 +88,58 @@ import XCTest
         XCTAssertNil(panel.error)
     }
 
+    /// 0.2.5 X: 다른 기기는 서버가 도는 Mac 에서만 끊는다. 서버가 canRevokeOthers 로 알려 주고, 옛 서버(칸 없음)는 지금처럼 단추를 둔다.
+    func testOnlyTheServerMacOffersToDisconnectOtherDevices() throws {
+        let fromPhone = try decode(DeviceAccessList.self, Self.list.replacingOccurrences(of: #""failures":"#, with: #""canRevokeOthers":false,"failures":"#))
+        XCTAssertEqual(fromPhone.canRevokeOthers, false)
+        var mine = fromPhone.devices[0]; mine.current = true
+        XCTAssertTrue(fromPhone.canRevoke(mine), "자기 줄은 언제나 끊을 수 있다")
+        XCTAssertFalse(fromPhone.canRevoke(fromPhone.devices[1]), "남의 줄은 서버가 도는 Mac 에서만")
+        XCTAssertEqual(ConnectedDevicesText.footnoteText(for: fromPhone), "다른 기기는 서버가 도는 Mac에서 끊을 수 있습니다.")
+
+        let onServerMac = try decode(DeviceAccessList.self, Self.list.replacingOccurrences(of: #""failures":"#, with: #""canRevokeOthers":true,"failures":"#))
+        XCTAssertEqual(onServerMac.canRevokeOthers, true)
+        XCTAssertTrue(onServerMac.devices.allSatisfy(onServerMac.canRevoke))
+        XCTAssertEqual(ConnectedDevicesText.footnoteText(for: onServerMac), ConnectedDevicesText.footnote)
+
+        // 옛 서버는 칸을 싣지 않는다(어디서나 끊었다). 어긋난 값도 모른다로 읽는다.
+        let older = try decode(DeviceAccessList.self, Self.list)
+        XCTAssertNil(older.canRevokeOthers)
+        XCTAssertTrue(older.devices.allSatisfy(older.canRevoke))
+        XCTAssertEqual(ConnectedDevicesText.footnoteText(for: older), ConnectedDevicesText.footnote)
+        let odd = try decode(DeviceAccessList.self, #"{"devices":[],"canRevokeOthers":"yes"}"#)
+        XCTAssertNil(odd.canRevokeOthers)
+    }
+
+    /// 0.2.5 X: 목록을 읽은 뒤 서버가 '서버가 도는 Mac 이 아니다'(403 device_revoke_local_only)로 거절하면 그 한 줄을 보이고 목록을 다시 읽어 단추를 맞춘다.
+    func testARefusalFromAnotherDeviceShowsTheLineAndRereadsTheList() async throws {
+        let box = DevicesReplyBox(status: 200, body: Self.list)
+        let network = try IsolatedTestNetwork { request in
+            if request.httpMethod == "DELETE" {
+                box.deleted()
+                return IsolatedTestHTTPReply(status: 403, data: Data(#"{"error":"다른 기기는 서버가 도는 Mac에서 끊을 수 있습니다","code":"device_revoke_local_only"}"#.utf8))
+            }
+            let (status, body) = box.reply
+            return IsolatedTestHTTPReply(status: status, data: Data(body.utf8))
+        }
+        defer { Task { await network.close() } }
+        let api = network.makeAPIClient()
+        let panel = DevicesPanel()
+        await panel.attach(api)
+        XCTAssertNil(panel.list?.canRevokeOthers)
+        let device = try XCTUnwrap(panel.list?.devices.first)
+        box.set(200, Self.list.replacingOccurrences(of: #""failures":"#, with: #""canRevokeOthers":false,"failures":"#))
+        let revoked = await panel.revoke(device, api: api)
+        XCTAssertFalse(revoked)
+        XCTAssertEqual(box.deletes, 1)
+        XCTAssertEqual(panel.revokeError, "다른 기기는 서버가 도는 Mac에서 끊을 수 있습니다")
+        XCTAssertEqual(panel.list?.devices.count, 2, "아무것도 끊지 않았다")
+        XCTAssertEqual(panel.list?.canRevokeOthers, false)
+        XCTAssertNil(panel.revoking)
+        XCTAssertEqual(ServerErrorText.display("다른 기기는 서버가 도는 Mac에서 끊을 수 있습니다", code: "device_revoke_local_only", language: .en),
+                       "Other devices can be disconnected on the Mac that runs the server")
+    }
+
     func testRevokeOfADeviceAlreadyGoneOnlyTidiesTheList() async throws {
         let network = try IsolatedTestNetwork { request in
             if request.httpMethod == "DELETE" {

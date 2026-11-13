@@ -817,8 +817,14 @@ struct ConnectionView: View {
             #endif
             foot
             #if os(iOS)
-            Link("개인정보 처리방침", destination: URL(string: "https://github.com/yehsung/IAMCEO/blob/main/PRIVACY.md")!)
-                .font(CEFont.meta).foregroundStyle(CE.ink3)
+            HStack(alignment: .center, spacing: 12) {
+                Link("개인정보 처리방침", destination: URL(string: "https://github.com/yehsung/IAMCEO/blob/main/PRIVACY.md")!)
+                    .font(CEFont.meta).foregroundStyle(CE.ink3)
+                Spacer(minLength: 0)
+                // W(0.2.5, 리뷰 lang-1): iPhone 은 연결 전에 설정에 들어갈 길이 없다. 앱 화면 언어를 여기서도 바꾼다.
+                AppLanguageQuickMenu(settings: AppLanguageSettings.shared)
+            }
+            AppLanguageRelaunchNote(settings: AppLanguageSettings.shared)
             #endif
         }
         .padding(.horizontal, 22).padding(.top, 26).padding(.bottom, 20)
@@ -1405,6 +1411,8 @@ struct SettingsView: View {
 
     @ViewBuilder private func sectionContent(_ item: SettingsSection) -> some View {
         if store.bootstrap == nil && item != .connection {
+            // W(0.2.5, 리뷰 lang-1): 앱 화면 언어는 이 기기의 설정이라 연결 전에도 바꾼다(서버 설정은 연결한 뒤에).
+            if item == .general { appLanguageGroup }
             // web .empty: 16/600 title, 14 ink-2 line, generous room; no tile, the page itself is the surface.
             EmptyTile(icon: "wifi.slash", title: String(localized: "서버에 연결하면 볼 수 있습니다"),
                       detail: isMac ? String(localized: "메인 창에서 서버에 연결하세요.") : String(localized: "서버에 연결하면 설정을 볼 수 있습니다."), framed: false)
@@ -1436,6 +1444,8 @@ struct SettingsView: View {
 
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 22) {
+            // W(0.2.5): 이 기기의 앱 화면 언어. 서버 설정이 아니라 연결 없이도, 샘플에서도 바꾼다.
+            appLanguageGroup
             SettingsGroup(String(localized: "운영"), footnote: String(localized: "세션은 샌드박스 없이 실행됩니다. 권한은 새 세션부터 적용됩니다.")) {
                 // web .st-perms: three explained choices, the server default marked 기본.
                 SettingsRow(String(localized: "권한"), stacked: true) {
@@ -1965,7 +1975,8 @@ struct SettingsView: View {
         let what = count > 0 ? String(localized: "접속 코드와 쓰던 초안·메모 \(count)건을") : String(localized: "접속 코드를")
         let message = String(localized: "이 기기의 \(what) 지웁니다. 다시 들어오려면 서버 컴퓨터에서 iamceo\u{00A0}open 으로 코드를 확인해야 합니다.")
         // F1: 이 서버에 보내려던 대기열도 함께 지운다. 그 수를 미리 알린다.
-        let queued = store.writeNamespace == "unassigned" ? 0 : store.offline.items(namespace: store.writeNamespace).count
+        // V: 이 서버의 글만 센다(다른 서버에 보내려던 글은 나가도 남는다).
+        let queued = store.queuedForThisServerCount
         return queued > 0 ? message + " " + String(localized: "연결되면 보내려던 글 \(queued)개도 지웁니다.") : message
     }
 
@@ -2772,3 +2783,123 @@ extension SettingsView {
         }
     }
 }
+
+// MARK: - W: 앱 화면 언어(0.2.5)
+
+extension SettingsView {
+    /// W: 이 기기의 앱 화면 언어(자동 / 한국어 / English). 서버 설정인 '운영 → 보고 언어'와 따로 있고, 연결 없이도 바꾼다.
+    var appLanguageGroup: some View { AppLanguageGroup(settings: AppLanguageSettings.shared) }
+}
+
+/// '이 기기' 묶음: 언어 줄 하나와, 바꾼 언어가 아직 화면에 없을 때만 '다시 열면 바뀝니다' 줄.
+private struct AppLanguageGroup: View {
+    let settings: AppLanguageSettings
+
+    var body: some View {
+        SettingsGroup(String(localized: "이 기기"),
+                      footnote: String(localized: "앱의 메뉴와 안내 글에 쓰는 언어로, 이 기기에만 저장됩니다. 총괄·팀장이 쓰는 보고의 언어는 '보고 언어'에서 따로 정합니다.")) {
+            SettingsRow(String(localized: "언어"), hint: hint, hintBelowOnPhone: true) { menu }
+            if settings.needsRelaunch {
+                RowDivider(inset: 0)
+                SettingsRow(String(localized: "다시 열면 바뀝니다"), hint: relaunchHint) {
+                    #if os(macOS)
+                    Button { AppRelaunch.relaunch() } label: { Text("지금 다시 열기") }
+                        .ceSecondaryButton()
+                        .ceCompactControl()
+                        .fixedSize()
+                    #else
+                    EmptyView()
+                    #endif
+                }
+            }
+        }
+    }
+
+    /// '자동'일 때만: 무엇을 따르는지 한 줄.
+    private var hint: String? {
+        guard settings.choice == .auto else { return nil }
+        return settings.automaticFollowsStore
+            ? String(localized: "자동은 App Store 국가를 따릅니다. 한국은 한국어, 그 밖은 English입니다.")
+            : String(localized: "자동은 기기 언어를 따릅니다. 한국어 기기는 한국어, 그 밖은 English입니다.")
+    }
+
+    private var relaunchHint: String {
+        let name = settings.next.displayName
+        #if os(macOS)
+        return String(localized: "앱을 다시 열어야 화면이 \(name)로 바뀝니다.")
+        #else
+        return String(localized: "앱을 완전히 닫았다가 다시 열면 화면이 \(name)로 바뀝니다.")
+        #endif
+    }
+
+    /// 언어 이름은 그 언어로 적는다(보고 언어 선택지와 같은 규칙). '자동'만 화면 언어로.
+    private func label(_ choice: AppLanguageChoice) -> String { AppLanguageMenuItems.label(choice) }
+
+    private var menu: some View {
+        SetupMenu(label(settings.choice), compact: true, label: String(localized: "언어")) {
+            AppLanguageMenuItems(settings: settings)
+        }
+        .frame(width: isMac ? 120 : 128)
+    }
+}
+
+/// 언어 메뉴의 항목(자동 / 한국어 / English). 언어 이름은 그 언어로, '자동'만 화면 언어로.
+/// 이미 고른 항목을 다시 누르면 아무것도 하지 않는다(리뷰 lang-2: 체크된 '자동'을 다시 눌러 언어가 바뀌지 않게).
+private struct AppLanguageMenuItems: View {
+    let settings: AppLanguageSettings
+
+    static func label(_ choice: AppLanguageChoice) -> String {
+        switch choice {
+        case .auto: String(localized: "자동")
+        case .ko: "한국어"
+        case .en: "English"
+        }
+    }
+
+    var body: some View {
+        ForEach(AppLanguageChoice.allCases) { choice in
+            Toggle(Self.label(choice), isOn: menuCheck(settings.choice == choice) {
+                if settings.choice != choice { settings.select(choice) }
+            })
+        }
+    }
+}
+
+#if os(iOS)
+/// iPhone 연결 화면 맨 아래(개인정보 처리방침 옆)의 작은 언어 메뉴. 연결 전에는 설정에 들어갈 수 없어 여기 둔다(리뷰 lang-1).
+private struct AppLanguageQuickMenu: View {
+    let settings: AppLanguageSettings
+
+    var body: some View {
+        Menu { AppLanguageMenuItems(settings: settings) } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "globe").font(.system(size: 11, weight: .medium))
+                Text(verbatim: String(localized: "언어") + " · " + AppLanguageMenuItems.label(settings.choice))
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold))
+            }
+            .font(CEFont.meta).foregroundStyle(CE.ink2)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(String(localized: "언어"))
+        .accessibilityValue(AppLanguageMenuItems.label(settings.choice))
+    }
+}
+
+/// 바꾼 언어가 아직 화면에 없을 때만: 설정과 같은 '다시 열면 바뀝니다' 한 줄(연결 화면의 다른 안내 글과 같은 모양).
+private struct AppLanguageRelaunchNote: View {
+    let settings: AppLanguageSettings
+
+    var body: some View {
+        if settings.needsRelaunch {
+            Text("앱을 완전히 닫았다가 다시 열면 화면이 \(settings.next.displayName)로 바뀝니다.")
+                .font(CEFont.meta).foregroundStyle(CE.ink3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+#endif

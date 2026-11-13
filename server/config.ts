@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import pkg from "../package.json";
 import coreLock from "../vendor/herdr-core/release-lock.json";
 import { withHomeOwner } from "./home-owner.ts";
+import { normalizePushRelayUrl } from "./push/relay-url.ts";
 import { toStorageError } from "./storage-errors.ts";
 
 export const VERSION: string = pkg.version;
@@ -25,6 +26,10 @@ export interface ConfigFile {
   coreSocket?: string;
   /** false 면 서버가 Mac 의 유휴 잠자기를 막지 않는다. 없으면 막는다. */
   keepAwake?: boolean;
+  /** false 면 이 Mac 에 production 알림 키가 없어도 개발자의 알림 중계로 보내지 않는다. 없으면 켬. */
+  pushRelay?: boolean;
+  /** 알림 중계 주소를 바꾼다(https, 시험용으로 이 Mac 의 http). 없으면 코드의 기본 주소. */
+  pushRelayUrl?: string;
 }
 
 export interface Config {
@@ -47,6 +52,10 @@ export interface Config {
   coreSocket?: string;
   /** 서버가 떠 있는 동안 Mac 의 유휴 잠자기를 막는다. config.json 에서 false 로만 끈다. */
   keepAwake?: boolean;
+  /** config.json 에서 false 로만 끈다(알림 중계). */
+  pushRelay?: boolean;
+  /** config.json 의 알림 중계 주소(검사를 거친 값). */
+  pushRelayUrl?: string;
 }
 
 // 폰에서 손으로 칠 수 있게 헷갈리는 글자(0 O 1 l I)를 뺀다.
@@ -178,6 +187,7 @@ function validateConfig(value: unknown, path: string): Partial<ConfigFile> {
     throw new Error(`설정 파일 hosts가 잘못되었습니다: ${path}`);
   }
   if (file.keepAwake !== undefined && typeof file.keepAwake !== "boolean") throw new Error(`설정 파일 필드가 잘못되었습니다(keepAwake): ${path}`);
+  // pushRelay·pushRelayUrl 은 여기서 거절하지 않는다: 알림 설정 하나 때문에 서버가 뜨지 않으면 안 된다(pushRelaySettings 가 끈다).
   return file as Partial<ConfigFile>;
 }
 
@@ -287,6 +297,25 @@ export function defaultCoreBin(execPath: string = process.execPath, sourceDir: s
   return candidates.find((path) => fs.existsSync(path)) ?? "herdr-core";
 }
 
+/**
+ * config.json 의 알림 중계 설정. pushRelay:false 면 끈다. 값이 잘못됐으면(불리언이 아님, https 가 아닌 주소)
+ * 서버는 그대로 띄우고 중계만 끈다. 잘못 적은 주소 대신 기본 주소로 토큰을 보내지 않는다.
+ */
+export function pushRelaySettings(file: Partial<ConfigFile>, warn: (line: string) => void = console.warn): Pick<Config, "pushRelay" | "pushRelayUrl"> {
+  const raw = file as Record<string, unknown>;
+  if (raw.pushRelay !== undefined && typeof raw.pushRelay !== "boolean") {
+    warn("[push] config.json 의 pushRelay 는 true 나 false 여야 합니다. 알림 중계를 끕니다");
+    return { pushRelay: false };
+  }
+  if (raw.pushRelay === false) return { pushRelay: false };
+  if (raw.pushRelayUrl === undefined) return {};
+  try { return { pushRelayUrl: normalizePushRelayUrl(raw.pushRelayUrl) }; }
+  catch {
+    warn("[push] config.json 의 pushRelayUrl 이 https 주소가 아닙니다. 알림 중계를 끕니다");
+    return { pushRelay: false };
+  }
+}
+
 /** 폴더를 만들고 설정을 읽는다. 접속 코드가 없으면 만들어 저장한다. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const home = homeDir(env);
@@ -348,5 +377,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     coreBin: env.IAMCEO_CORE_BIN || file.coreBin || defaultCoreBin(),
     coreSocket: env.IAMCEO_CORE_SOCKET || file.coreSocket || join(home, "run", "core.sock"),
     ...(file.keepAwake === false ? { keepAwake: false } : {}),
+    ...pushRelaySettings(file),
   };
 }

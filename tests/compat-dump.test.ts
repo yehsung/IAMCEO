@@ -79,7 +79,10 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
   const orch = new Orchestrator({ config, store, runners: new Map([["core", new FakeRunner()]]), providerHomes: isolated.providerHomes,
     timings: { tickMs: 60_000, healthMs: 60_000 } });
   const context: ServerContext = { config, store, bus, orch, delivery: orch.deliveryRecovery,
-    push: { store: new PushStore(store.db), providers: () => [] },
+    // 알림 중계: 새 서버는 상태에 선택 필드 via 를 싣는다(키 없는 Mac 의 production = 중계). 출시 앱이 그대로 푸는지 본다.
+    push: { store: new PushStore(store.db), providers: () => [
+      { environment: "sandbox", bundleId: "com.yehsung.iamceo", state: "unconfigured", lastError: null },
+      { environment: "production", bundleId: "com.yehsung.iamceo", state: "ready", lastError: null, via: "relay" }] },
     daemon: () => ({ ready: true, buildId: "compat-dump-build", version: VERSION }) };
   let server: RunningServer | undefined;
   const sockets: WebSocket[] = [];

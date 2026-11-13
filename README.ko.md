@@ -23,7 +23,7 @@ Mac과 iPhone 한 화면에서 지시하고 결재합니다.
 - **결정은 결재함 하나로** — 팀장의 질문과 승인 요청이 배경·선택지별 결과·추천과 함께 카드로 옵니다.
 - **일 하나에 팀장 하나** — 총괄이 일을 나눠 맞는 팀장에게 맡깁니다. 일마다 세션이 따로라 맥락이 섞이지 않습니다.
 - **결과물은 자료에** — 문서·표·이미지·영상·HTML 페이지를 경로가 아니라 앱 안에서 바로 엽니다.
-- **자리를 떠도 계속** — iPhone으로 지시하고 결재합니다. Mac이 깨어 있는 동안 일은 멈추지 않습니다. iPhone 알림에는 조건이 있습니다 → [알림](#알림)
+- **자리를 떠도 계속** — iPhone으로 지시하고 결재합니다. Mac이 깨어 있는 동안 일은 멈추지 않습니다. iPhone 알림은 개발자가 운영하는 작은 중계를 거칩니다 → [알림](#알림)
 - **기록은 내 Mac에** — 대화·결재·자료는 내 Mac의 SQLite에 남습니다. AI 계정을 바꿔도 그대로입니다.
 - **해 둔 설정을 그대로 이어 씁니다** — 공식 Claude Code·Codex CLI가 내 로그인으로 그대로 돕니다. 설정 파일에 적어 둔 설정, MCP 서버, 스킬, `CLAUDE.md`는 그대로 적용됩니다. → [무엇이 다른가](#무엇이-다른가)
 - **바퀴를 다시 만들지 않았습니다** — 공식 CLI·herdr-core·MCP·SQLite·Tailscale은 그대로 쓰고, 그 위에서 '회사처럼 일하게 하는' 부분만 만들었습니다. → [설계](#어떻게-돌아가나)
@@ -58,7 +58,8 @@ brew install --cask yehsung/tap/iamceo
 ### 알림
 
 - **Mac:** 됩니다. Mac 앱의 설정에서 **Mac 알림**을 켭니다.
-- **iPhone:** 알림은 내 Mac의 서버에 그 iPhone 앱의 Apple 알림 키가 있을 때만 갑니다. IAMCEO가 운영하는 서버가 없어서 대신 보내 줄 곳이 없습니다. 그래서 App Store에서 받은 iPhone 앱은 **지금 알림을 받을 수 없습니다.** 직접 빌드한 iPhone 앱과 자신의 키가 있을 때만 됩니다 → [네이티브 안내](native/README.md#iphone-apns-and-signing)
+- **iPhone(다음 판부터):** App Store 앱에서 됩니다. 꺼져 있는 iPhone 앱을 깨울 수 있는 것은 Apple의 알림 서비스(APNs)뿐이고, App Store 앱의 알림 키는 개발자만 가집니다. 그래서 내 Mac에 자신의 키가 없으면, 서버가 알림 한 건마다 개발자가 운영하는 작은 **알림 중계**에 넘기고 중계가 Apple로 보냅니다. 중계는 푸시 토큰, 알림 종류, 무작위 ID, 유효 시각만 받고 대화 내용이나 문구는 받지 않으며, 받은 값을 저장하지 않습니다 → [개인정보 처리방침](PRIVACY.md), 중계 코드와 운영 방법 → [relay/README.md](relay/README.md). Mac은 iPhone에서 알림을 켠 뒤에야 중계에 처음 연락합니다. 중계를 끄려면 `~/.iamceo/config.json`에 `"pushRelay": false`를 넣고 서버를 다시 시작합니다(그러면 App Store 앱은 iPhone 알림을 받지 못합니다). 직접 빌드한 앱은 자신의 키로 보낼 수 있고, 키가 있는 Mac은 중계를 쓰지 않습니다 → [네이티브 안내](native/README.md#iphone-apns-and-signing)
+- **알림 중계는 개발자가 무료로 운영하는 최선 노력 서비스입니다.** 가동을 보장하지 않으며, 한도(지금은 iPhone 한 대에 하루 200건, Mac 한 대에 하루 300건)는 바뀔 수 있습니다. 바꾸거나 멈출 때는 GitHub에 미리 알립니다. 알림은 알려 주는 것일 뿐이고, 기록의 원본은 결재함과 대화입니다.
 
 ### 사용자 문서
 
@@ -162,8 +163,8 @@ flowchart LR
 | AI와 주고받기 | [MCP](https://modelcontextprotocol.io) 표준 규약 | 화면 글자를 긁지 않습니다. 보고와 요청이 도구 호출로 와서 전부 기록으로 남습니다. |
 | 서버와 데이터 | [Bun](https://bun.sh) · SQLite | DB 서버를 따로 설치하지 않습니다. 데이터는 내 Mac의 폴더 하나(`~/.iamceo`: SQLite DB와 첨부 파일)에 있고, 서버가 하루에 한 번 검증한 백업을 만듭니다. 실행에 필요한 외부 패키지는 2개뿐입니다. |
 | 터미널 화면 | [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) | 앱 안에서 팀장의 실제 터미널을 그대로 보고 직접 칠 수 있습니다. |
-| 밖에서 접속 | [Tailscale](https://tailscale.com) | 포트를 열지 않고 중계 서버도 두지 않습니다. IAMCEO가 운영하는 서버는 없습니다. |
-| 알림 · 비밀 보관 · 상시 실행 | macOS 알림 · APNs · Keychain · launchd | macOS와 iOS가 원래 하는 방식 그대로입니다. iPhone 알림에는 자신의 키가 필요합니다 → [알림](#알림) |
+| 밖에서 접속 | [Tailscale](https://tailscale.com) | 포트를 열지 않고, 밖에서 접속할 때 중계 서버도 거치지 않습니다. 개발자가 운영하는 서버는 iPhone 알림 중계 하나뿐이며, 중계는 내 Mac에 접속할 수 없습니다. |
+| 알림 · 비밀 보관 · 상시 실행 | macOS 알림 · APNs · Keychain · launchd | macOS와 iOS가 원래 하는 방식 그대로입니다. iPhone 알림은 개발자의 중계나 자신의 키로 보냅니다 → [알림](#알림) |
 
 ### 직접 만든 것
 

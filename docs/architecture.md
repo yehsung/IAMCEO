@@ -110,7 +110,7 @@ AppStore의 한 동기화 조정자가 WS v2 변경 알림과 REST 상태 조회
 
 ## iPhone 알림
 
-서버는 데이터 홈의 `apns.json`에 그 앱 번들 ID의 Apple 알림 키가 설정돼 있을 때만 iPhone 알림을 보낸다(`server/push/config.ts`). 키가 없으면 상태는 `unconfigured`이고 아무것도 보내지 않는다. 중계 서버는 없다. 그래서 App Store에서 받은 iPhone 앱은 지금 알림을 받을 수 없고, 직접 빌드한 앱과 자신의 키가 있을 때만 받는다. Mac 앱의 알림은 이와 별개로 Mac 앱이 실행 중에 직접 띄운다.
+서버는 환경마다 발신 수단을 고른다(`server/push/relay.ts`의 `createPushClient`). 데이터 홈의 `apns.json`에 그 환경 항목이 있으면 그 키로 직접 보낸다(`server/push/config.ts`, 항목이 깨졌으면 오류로 두고 중계로 돌리지 않는다). production 항목이 없으면 개발자가 운영하는 알림 중계(`relay/`, Firebase Cloud Functions)로 보낸다. 중계에는 문구 없이 토큰·종류·무작위 ID·유효 시각만 보내고 중계가 고정 문구 페이로드를 만든다. `config.json`의 `pushRelay:false`나 비어 있는 중계 주소면 지금처럼 `unconfigured`다. sandbox는 중계로 보내지 않는다. 중계 설치 자격은 `push-relay.json`(0600)에 두고 백업하지 않는다. Mac 앱의 알림은 이와 별개로 Mac 앱이 실행 중에 직접 띄운다.
 
 APNs 발신 대기열은 CLI 입력 대기열과 별개다. 새 기기는 알림이 꺼진 상태이며 사용자가 알림을 켠 뒤 OS 권한·토큰 등록·서버 저장을 확인한다. 새 결재·확인된 승인/선택 대기·오류·완료 보고·대표 할 일·막힘 보고 여섯 종류의 개별 기본값은 모두 켜짐이다. 할 일·막힘 종류가 생기기 전에 등록한 기기는 이 두 종류를 직접 켜기 전까지 꺼짐으로 읽는다.
 

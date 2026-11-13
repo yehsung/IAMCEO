@@ -1,0 +1,11 @@
+# 프로젝트 ID 는 대표의 Mac 에만 둔다(예시는 .firebaserc.example). Keep the project ID local.
+.firebaserc
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+functions/lib/
+functions/*.local
+# 설정 값(Key ID·Team ID·모드). 비밀은 Secret Manager 에만 있다. Settings stay local; secrets live in Secret Manager.
+functions/.env
+functions/.env.*
+!functions/.env.example

@@ -2,7 +2,7 @@
 
 [한국어](iphone.md) · [All user guides](README.md)
 
-The iPhone app reaches the IAMCEO server on your Mac through [Tailscale](https://tailscale.com). No ports are opened and there is no relay. There is no server run by IAMCEO.
+The iPhone app reaches the IAMCEO server on your Mac through [Tailscale](https://tailscale.com). No ports are opened and the connection goes through no relay. The only server the developer runs is the notification relay that hands iPhone notifications to Apple (see [Notifications](#notifications)).
 
 ## What you need
 
@@ -47,7 +47,9 @@ By default Tailscale encrypts the link between the iPhone and the Mac, and the a
 ## Notifications
 
 - **Mac:** works. Turn on **설정 → 알림 → Mac 알림** (Settings → Notifications → Mac notifications) in the Mac app. It tells you about new decisions, approval or choice waits, finished and blocked reports, and to-dos for you.
-- **iPhone:** a push notification is sent only when your Mac's server holds the **Apple push key that belongs to that iPhone app**. IAMCEO runs no server of its own, so nothing else can send it for you. The iPhone app from the App Store therefore **cannot receive notifications today**. They work only with an iPhone app you build yourself and your own key → [native guide](../../native/README.md#iphone-apns-and-signing)
+- **iPhone (from the next release):** works with the App Store app; turn notifications on in the iPhone app's settings. When your Mac has no Apple push key for the app, the server hands each notification to the **notification relay** run by the developer, which sends it to Apple. The relay receives only the push token, the notification type, random IDs and an expiry time, and stores none of them → [Privacy](../../PRIVACY.md). To turn the relay off, put `"pushRelay": false` in `~/.iamceo/config.json` and restart the server (the App Store app then gets no iPhone notifications). An app you build yourself sends with your own key → [native guide](../../native/README.md#iphone-apns-and-signing)
+- **If turning notifications on failed before**, update the server and then turn the notification switch on again in the iPhone app's settings (the first prompt does not come back).
+- If notification settings say "The notification service is temporarily unavailable", the relay cannot be reached for now. The server sends again on its own; just wait.
 
 A notification carries a fixed sentence and identifiers only, never conversation content. Tapping it never answers, approves or types anything for you.
 

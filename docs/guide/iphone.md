@@ -2,7 +2,7 @@
 
 [English](iphone.en.md) · [사용자 문서 목록](README.md)
 
-iPhone 앱은 내 Mac의 IAMCEO 서버에 [Tailscale](https://tailscale.com)을 거쳐 붙습니다. 포트를 열거나 중계 서버를 두지 않습니다. IAMCEO가 운영하는 서버도 없습니다.
+iPhone 앱은 내 Mac의 IAMCEO 서버에 [Tailscale](https://tailscale.com)을 거쳐 붙습니다. 포트를 열지 않고, 접속에 중계 서버를 거치지 않습니다. 개발자가 운영하는 서버는 iPhone 알림을 Apple에 넘기는 알림 중계 하나뿐입니다(아래 [알림](#알림)).
 
 ## 준비
 
@@ -47,7 +47,9 @@ iPhone과 Mac 사이는 기본으로 Tailscale이 암호화하고, 앱은 그 �
 ## 알림
 
 - **Mac:** 됩니다. Mac 앱의 **설정 → 알림 → Mac 알림**을 켭니다. 새 결재, 승인·선택 대기, 완료·막힘 보고, 대표 할 일을 알립니다.
-- **iPhone:** iPhone 알림은 내 Mac의 서버에 **그 iPhone 앱의 Apple 알림 키**가 있을 때만 갑니다. IAMCEO가 운영하는 서버가 없어서 대신 보내 줄 곳이 없습니다. 그래서 App Store에서 받은 iPhone 앱은 **지금 알림을 받을 수 없습니다.** 직접 빌드한 iPhone 앱과 자신의 키가 있을 때만 됩니다 → [네이티브 안내](../../native/README.md#iphone-apns-and-signing)
+- **iPhone(다음 판부터):** App Store 앱에서 됩니다. iPhone 앱의 설정에서 알림을 켜면 끝입니다. 내 Mac에 그 앱의 Apple 알림 키가 없으면 서버가 알림을 개발자가 운영하는 **알림 중계**에 넘기고, 중계가 Apple로 보냅니다. 중계는 푸시 토큰·알림 종류·무작위 ID·유효 시각만 받고 저장하지 않습니다 → [개인정보 처리방침](../../PRIVACY.md). 중계를 끄려면 `~/.iamceo/config.json`에 `"pushRelay": false`를 넣고 서버를 다시 시작합니다(그러면 App Store 앱은 iPhone 알림을 받지 못합니다). 직접 빌드한 앱은 자신의 키로 보냅니다 → [네이티브 안내](../../native/README.md#iphone-apns-and-signing)
+- **예전에 알림을 켜려다 실패했다면** 서버를 새 판으로 올린 뒤 iPhone 앱의 설정에서 알림 스위치를 다시 켭니다(처음 안내창은 다시 뜨지 않습니다).
+- 알림 설정에 '알림 서버를 잠시 쓸 수 없습니다'가 보이면 중계에 잠시 닿지 않는 것입니다. 기다리면 서버가 알아서 다시 보냅니다.
 
 알림에는 정해진 문구와 식별자만 실리고 대화 내용은 실리지 않습니다. 알림을 눌러도 답·승인·터미널 입력을 대신하지 않습니다.
 

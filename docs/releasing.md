@@ -191,7 +191,7 @@ bun scripts/release-ios.ts api GET '/v1/apps?fields[apps]=bundleId'
 
 ## 6. 시험과 CI
 
-- CI(`.github/workflows/ci.yml`)는 `main`·`native-redesign`에 올릴 때와 그 두 가지로 가는 PR마다 돕니다. 작업은 서버 시험(`server`), 앱 시험(`native`, `check.sh swift`), 앱 빌드(`apps`, `check.sh build`: Mac·iPhone 앱을 서명 없이 컴파일) 셋이고, 모두 통과해야 초록입니다.
+- CI(`.github/workflows/ci.yml`)는 `main`·`native-redesign`에 올릴 때와 그 두 가지로 가는 PR마다 돕니다. 작업은 서버 시험(`server`), 알림 중계 시험(`relay`, `check.sh relay`: `relay/functions`의 타입 검사와 시험, Node 22), 앱 시험(`native`, `check.sh swift`), 앱 빌드(`apps`, `check.sh build`: Mac·iPhone 앱을 서명 없이 컴파일) 넷이고, 모두 통과해야 초록입니다.
 - **iPhone 시험은 로컬에서만 돕니다.** `bash scripts/check.sh ios`가 같은 앱 시험(`native/Tests`)을 iPhone 시뮬레이터에서 돌립니다(`native/project.yml`의 `IAMCEO-iOS-Tests`). Mac에서만 되는 시험은 `#if os(macOS)` 안에 두고, iPhone 전용 경로(입력칸, 배경 복귀, 알림 탭)는 `IPhoneOnlyTests.swift`가 봅니다. `bash scripts/check.sh`(전체)에도 들어 있고, iPhone 시뮬레이터가 없는 Mac에서는 건너뛰었다고 알립니다.
   - 시뮬레이터는 이 Mac에 있는 것에서 고릅니다. `IAMCEO_IOS_SIMULATOR`(이름이나 UDID)를 주면 그것을, 아니면 이름이 `iPhone `으로 시작하는 기기 중 꺼져 있는 것(쓰는 중일 수 있는 켜진 기기는 뒤로)을 가장 새 iOS부터 고릅니다.
   - 부팅은 `xcodebuild`가 합니다. 이미 켜져 있던 시뮬레이터는 끄거나 지우지 않고, 이 단계가 켠 기기만 끝나면 끕니다. 도중에 Ctrl-C나 종료 신호로 끊겨도 `xcodebuild`를 멈추고 켠 기기를 끕니다.

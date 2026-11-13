@@ -25,7 +25,7 @@ then give instructions and approve decisions from one Mac and iPhone app.
 - **One Inbox for every decision** — staff questions and approvals arrive as cards with background, the outcome of each option and a recommendation.
 - **One job per staff member** — the lead splits the work and hands it to the right staff, so contexts never mix.
 - **Deliverables, not paths** — documents, tables, images, videos and HTML pages open right in the app, under Files.
-- **Keep going away from the desk** — instruct and approve from your iPhone while your Mac keeps the work running. iPhone notifications have a condition → [Notifications](#notifications).
+- **Keep going away from the desk** — instruct and approve from your iPhone while your Mac keeps the work running. iPhone notifications go through a small relay run by the developer → [Notifications](#notifications).
 - **Your records, on your Mac** — conversations, decisions and files live in SQLite on your Mac and survive AI account changes.
 - **Your CLI setup carries over** — agents run the official Claude Code and Codex CLIs under your own log-in, so what you keep in the CLIs' settings files — settings, MCP servers, skills, `CLAUDE.md` — keeps working. → [What is different](#what-is-different)
 - **No reinvented wheels** — the official CLIs, herdr-core, MCP, SQLite and Tailscale are used as they are; IAMCEO builds only the layer that makes them work like a company. → [Design](#how-it-works)
@@ -60,7 +60,8 @@ Or `curl -fsSL https://raw.githubusercontent.com/yehsung/IAMCEO/main/install.sh 
 ### Notifications
 
 - **Mac:** works. Turn on **Mac 알림** (Mac notifications) in the Mac app's Settings.
-- **iPhone:** a push notification is sent only when your Mac's server holds the Apple push key (APNs) that belongs to the iPhone app. IAMCEO runs no server of its own, so nothing else can send it for you. The iPhone app from the App Store therefore **cannot receive notifications today**. They work only with an iPhone app you build yourself and your own key → [native guide](native/README.md#iphone-apns-and-signing).
+- **iPhone (in the next release):** works with the App Store app. Only Apple's push service (APNs) can wake an iPhone, and only the developer holds the push key for the App Store app, so when your Mac has no key of its own, your server hands each notification to a small **notification relay** run by the developer, which sends it to Apple. The relay receives only the push token, the notification type, random IDs and an expiry time — never your conversations or any text — and does not store them → [Privacy](PRIVACY.md); its code and how it is run → [relay/README.md](relay/README.md). Your Mac contacts the relay only once you turn on notifications on an iPhone. To turn the relay off, put `"pushRelay": false` in `~/.iamceo/config.json` and restart the server (the App Store app then gets no iPhone notifications). An iPhone app you build yourself can use your own key instead; a Mac with a key never uses the relay → [native guide](native/README.md#iphone-apns-and-signing).
+- **The relay is a free, best-effort service.** There is no uptime guarantee, and its limits (now 200 notifications per iPhone and 300 per Mac a day) may change; changes and any shutdown will be announced on GitHub in advance. Notifications are a nudge: the Inbox and the conversation remain the record.
 
 ### User guides
 
@@ -166,8 +167,8 @@ flowchart LR
 | Talking to the agents | The [MCP](https://modelcontextprotocol.io) standard | No screen scraping. Reports and requests arrive as tool calls, so everything is recorded. |
 | Server and data | [Bun](https://bun.sh) and SQLite | No database server to install. Your data sits in one folder on your Mac (`~/.iamceo`: a SQLite database and the attachments), and the server makes a checked backup of it once a day. Only two runtime packages. |
 | Terminal view | [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) | See a staff member's real terminal inside the app, and type into it. |
-| Remote access | [Tailscale](https://tailscale.com) | No open ports and no relay. There is no server run by IAMCEO. |
-| Notifications, secrets, always-on | macOS notifications, APNs, Keychain, launchd | The way macOS and iOS already do it. iPhone push needs your own key → [Notifications](#notifications). |
+| Remote access | [Tailscale](https://tailscale.com) | No open ports and no relay for remote access. The only server the developer runs is the iPhone notification relay, which cannot reach your Mac. |
+| Notifications, secrets, always-on | macOS notifications, APNs, Keychain, launchd | The way macOS and iOS already do it. iPhone push goes through the developer's relay, or your own key → [Notifications](#notifications). |
 
 ### Built here
 

@@ -2,7 +2,7 @@
 
 [English](getting-started.en.md) · [사용자 문서 목록](README.md)
 
-IAMCEO는 내 Mac에서 도는 서버와 Mac·iPhone 앱으로 이루어집니다. 서버가 공식 Claude Code·Codex CLI를 총괄과 팀장으로 띄우고, 나는 앱에서 지시하고 결재합니다. IAMCEO가 운영하는 서버는 없습니다.
+IAMCEO는 내 Mac에서 도는 서버와 Mac·iPhone 앱으로 이루어집니다. 서버가 공식 Claude Code·Codex CLI를 총괄과 팀장으로 띄우고, 나는 앱에서 지시하고 결재합니다. 개발자가 운영하는 서버는 iPhone 알림 중계 하나뿐입니다.
 
 ## 시작하기 전에 확인할 것
 

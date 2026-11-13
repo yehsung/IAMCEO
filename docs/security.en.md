@@ -8,7 +8,7 @@ In one line: **the ways into the server on your Mac from outside are guarded. Th
 
 ## The shape of it
 
-- The IAMCEO server runs on your Mac as your macOS user. There is no server run by IAMCEO.
+- The IAMCEO server runs on your Mac as your macOS user. The only server the developer runs is the iPhone notification relay (used only when your Mac has no push key of its own), and the relay cannot reach your Mac.
 - The lead, the staff and the HQ agent are the official Claude Code and Codex CLIs, running as the **same macOS user** as the server.
 - The app on this Mac and any device you connect by typing the code use the shared access code. A device connected with a QR code gets a key of its own. The iPhone connects over Tailscale.
 
@@ -19,6 +19,7 @@ In one line: **the ways into the server on your Mac from outside are guarded. Th
 | Devices on the same tailnet | The server accepts requests from Tailscale addresses. A device that is in your tailnet is assumed to be able to reach the server's port. What stands behind that is the access code. |
 | The same macOS user | The server, herdr-core (which holds the terminals), the AI CLIs and the Mac app all run as one user. Any program running as that user can read IAMCEO's data folder (`~/.iamceo`). |
 | The AI providers' CLIs, Tailscale, Apple | The CLI handles command permissions and approval prompts, Tailscale handles encryption between devices, Apple handles app signing and notification delivery. |
+| The notification relay (run by the developer on Google Cloud) | Hands iPhone notifications to Apple when your Mac has no push key. It can: send a fixed-sentence notification to a registered iPhone, and see when notifications go and your Mac's IP address. It cannot: reach your Mac, read conversations or run commands. |
 
 ## What is blocked
 
@@ -39,6 +40,7 @@ In one line: **the ways into the server on your Mac from outside are guarded. Th
 - The iPhone keeps the access code in a Keychain item that stays on that device. The code is never sent to an attachment on another address or along a redirect.
 - A notification carries only a fixed sentence and identifiers. Tapping one never answers, approves or types into a terminal for you.
 - **Other devices are disconnected only on the Mac that runs the server.** Each device can disconnect only itself; on any other device the 연결된 기기 (Connected devices) list is read-only. A device key works for whoever holds it, so the Mac you actually have in hand is the root of trust: a lost or stolen device cannot disconnect your other devices and lock you out. "The Mac that runs the server" means the request came directly from inside that Mac; a request that arrives through the HTTPS address (`tailscale serve`) does not count. If the released iPhone app 0.2.4 or earlier tries to disconnect another device, it only gets the note "Other devices can be disconnected on the Mac that runs the server" and nothing is disconnected.
+- When the notification relay is used, your Mac sends no text: only the push token, the notification type, random identifiers and an expiry time. The relay builds the notification from fixed sentences, so it cannot be used to send anything but IAMCEO's fixed sentences. The relay address must be https (plain http only to this Mac, for testing), and redirects are not followed. The installation secret from the relay is sent only to that address, kept in `~/.iamceo/push-relay.json` (readable only by you), and never put into backups or diagnostic files.
 
 **The channel AI sessions use to reach the server**
 
@@ -69,7 +71,7 @@ In one line: **the ways into the server on your Mac from outside are guarded. Th
 - The bundled herdr-core is used only when it matches the pinned version's SHA-256 value and its maker's signature.
 - `iamceo upgrade` uses only an app that passes the same checks as the install script (checksum, publisher signature, Apple notarization). Before replacing anything it rehearses the new version on a copy of the current database, and it returns to the previous version if the new one does not start.
 - Once a day the Mac app asks GitHub for the latest release. It only asks; it never downloads or installs.
-- The push key (`.p8`) is never put into a backup.
+- The push key (`.p8`) and the notification relay's installation secret (`push-relay.json`) are never put into a backup. A backup restored on another Mac registers with the relay as a new installation.
 
 ## What is not blocked
 
@@ -81,6 +83,7 @@ Stated plainly.
 - **Devices on the shared access code cannot be cut off one at a time.** That covers the app on this Mac, any device you connected by typing the code, and an iPhone connected with a QR code before devices had their own keys. To cut them off you change the code, which cuts off all of them. To make an iPhone removable on its own, reconnect it with a new QR code so it gets its own key.
 - **Device keys do not split reading, decisions and terminals.** Any device can do all of them. Only the app on this Mac (on the shared access code) can make a new connection QR, so a device key cannot be used to collect more keys. Changing the shared access code, revoking every device key and disconnecting another device are limited to this Mac.
 - **The default connection is not HTTPS.** Encryption between iPhone and Mac relies on Tailscale. Turn on the **HTTPS address** under Settings → Connection → Connect iPhone in the Mac app (the server makes it with `tailscale serve`) and iPhones paired by QR after that have the app's own traffic encrypted as well. iPhones already connected move over only when paired again with a new QR. From the next iPhone app, nothing is sent to a plain address while Tailscale is off; the released iPhone apps 0.2.2 and 0.2.3 do not have this check → [Connecting an iPhone](guide/iphone.en.md#https-address-optional)
+- **Whoever runs or breaks into the notification relay can send a fixed-sentence notification to a registered iPhone, and can see when notifications go and your Mac's IP address.** A tap still makes the app check the target on your Mac, so nothing runs because of such a notification. If you do not want the relay, put `"pushRelay": false` in `~/.iamceo/config.json` (the App Store app then gets no iPhone notifications).
 - **The iPhone app has no lock of its own.** Someone holding your unlocked iPhone can open the app, give instructions, answer decisions and type into a terminal.
 - **Backups contain the shared access code as it is.** Device keys are stored only as hashes. Files in `~/.iamceo/backups` are readable only by you, but file permissions are not encryption. A backup cloned to another Mac (`iamceo restore --clone`) refuses the original devices' keys and uses a new access code.
 

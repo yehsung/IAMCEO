@@ -11,6 +11,7 @@ import type { DiagnoseResult, DoctorReport } from "../shared/types.ts";
 import { formatDoctorReport, SERVICE_LABEL } from "./doctor.ts";
 import type { Config } from "./config.ts";
 import { HOOK_COMPARE_FILE, hookEventsDir } from "./runner/hooks.ts";
+import { pushRelaySecrets, pushRelaySummary } from "./push/relay.ts";
 
 export const DIAGNOSTICS_DIR = "diagnostics";
 /** 진단 묶음을 몇 개까지 남기나. 오래된 것부터 지운다. */
@@ -23,7 +24,7 @@ const ROW_LIMIT = 300;
 const MASK = "[가림]";
 
 type DiagnoseConfig = Pick<Config, "accessCode" | "port" | "hosts" | "claudeBin"> &
-  Partial<Pick<Config, "hostsAuto" | "keepAwake" | "codexBin" | "coreBin" | "coreSocket" | "claudeHome" | "codexHome">>;
+  Partial<Pick<Config, "hostsAuto" | "keepAwake" | "codexBin" | "coreBin" | "coreSocket" | "claudeHome" | "codexHome" | "pushRelay" | "pushRelayUrl">>;
 
 export interface DiagnoseInput {
   home: string;
@@ -55,6 +56,8 @@ function collectSecrets(input: DiagnoseInput): string[] {
   const secrets = new Set<string>();
   if (input.config?.accessCode) secrets.add(input.config.accessCode);
   for (const value of input.extraSecrets ?? []) secrets.add(value);
+  // 알림 중계 설치 비밀(push-relay.json). 파일 자체는 넣지 않지만 로그에 섞였을 때를 대비해 가린다.
+  for (const value of pushRelaySecrets(input.home)) secrets.add(value);
   if (input.db) {
     for (const sql of ["SELECT token AS v FROM members", "SELECT token AS v FROM push_devices WHERE token IS NOT NULL"]) {
       try { for (const row of input.db.query<{ v: string | null }, []>(sql).all()) if (row.v) secrets.add(row.v); } catch { /* 옛 스키마 */ }
@@ -364,6 +367,8 @@ export async function createDiagnostics(input: DiagnoseInput): Promise<DiagnoseR
       claudeBin: config.claudeBin, codexBin: config.codexBin ?? null, coreBin: config.coreBin ?? null, coreSocket: config.coreSocket ?? null,
       claudeHome: config.claudeHome ?? null, codexHome: config.codexHome ?? null,
     } : null,
+    // 알림 중계: 켜고 끈 설정과 설치 파일이 있는지·만든 날·중계 호스트만. 설치 ID·비밀은 넣지 않는다.
+    pushRelay: { setting: config?.pushRelay === false ? "off" : "auto", customUrl: config?.pushRelayUrl !== undefined, ...pushRelaySummary(input.home) },
     // 값은 넣지 않는다. 어떤 IAMCEO 환경 변수가 정해져 있는지만.
     environmentNames: Object.keys(process.env).filter(name => /^(IAMCEO_|CLAUDE_CONFIG_DIR$|CODEX_HOME$)/.test(name)).sort(),
   }));

@@ -2,7 +2,7 @@
 
 [한국어](getting-started.md) · [All user guides](README.md)
 
-IAMCEO is a server that runs on your Mac plus native Mac and iPhone apps. The server starts the official Claude Code and Codex CLIs as a lead and staff, and you give instructions and make decisions in the app. There is no server run by IAMCEO.
+IAMCEO is a server that runs on your Mac plus native Mac and iPhone apps. The server starts the official Claude Code and Codex CLIs as a lead and staff, and you give instructions and make decisions in the app. The only server the developer runs is the iPhone notification relay.
 
 > The app's screens are in English or Korean (see [App language](#app-language)). This guide gives each label in Korean with the English label in parentheses, so you can find each button either way.
 

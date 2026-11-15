@@ -1,0 +1,18 @@
+• Called iamceo.post
+  └ 보고했습니다 #msg_000000000000
+    + Show details
+
+• 미리보기를 띄우고 결과를 보고했습니다.
+
+  • 가짜 요점 하나
+  • 가짜 요점 둘
+
+  Worked for 8m 22s • 12:51 PM
+
+  1 background terminal running · /ps to view · /stop to close
+
+
+› Ask Codex to do anything
+
+  GPT-6-Astra high Fast · ~/workspace/sample-app
+  ? for shortcuts                                                                                                                                                      ⚠ 2 warnings · f2 to view

@@ -2,6 +2,8 @@ import { classifyTurnError, usageLimitMenu, networkRetryScreen } from "../api-ou
 import { AsyncLocalStorage } from "node:async_hooks";
 import { capturedContext } from "./statusline.ts";
 import { readCodexContextFile } from "./codex-context.ts";
+import { readCodexTurnEnd, type CodexTurnCursor } from "./codex-turn.ts";
+import { textRef } from "../../shared/server-text.ts";
 import { createHash } from "node:crypto";
 import { constants, closeSync, existsSync, fstatSync, openSync, readdirSync, readSync } from "node:fs";
 import { homedir } from "node:os";
@@ -72,6 +74,11 @@ export interface CoreRunnerDeps {
   compactStore?: { load(memberId: string): CoreCompactState | null; save(memberId: string, state: CoreCompactState): void };
   /** E1: 훅 기록과 지금 판정을 맞대어 세기만 한다. 없으면 contextHome 이 있고 훅을 넣을 때 만든다. false 면 끈다. */
   hookShadow?: HookShadow | false;
+  /**
+   * Codex 가 남긴 백그라운드 터미널 때문에 working 으로 보이는데 그 턴의 끝을 Codex 기록으로 확인하지 못한 상태가 같은 까닭으로
+   * 이만큼(pollNow) 이어지면 팀장 활동에 까닭을 한 번 남긴다. 판정은 바꾸지 않는다. 기본 30초.
+   */
+  backgroundNoticeMs?: number;
 }
 interface Track {
   composerEmpty: boolean | null;
@@ -163,6 +170,19 @@ export function eofLogBaseline(root: string, path: string): DeliveryLogBaseline 
   finally { closeSync(fd); }
 }
 
+/**
+ * 턴은 끝났는데 Codex 가 띄운 백그라운드 터미널이 살아 있어 core 가 working 을 알리는 상태(CoreRunner.codexBackground).
+ * turn: 그동안의 core turn 번호(working 이 이어지는 동안 오르지 않는다). runEnded: 그 턴을 연 실행 기록이 이미 끝났다.
+ * reported: 이 상태로 턴 끝과 활동 줄을 이미 냈다.
+ */
+interface CodexBackground { turn: number; terminals: number; runEnded: boolean; reported: boolean }
+interface CodexBackgroundWatch {
+  state: CodexBackground | null;
+  cursor: CodexTurnCursor | null;
+  /** 화면은 백그라운드 터미널만 남은 모양인데 Codex 기록으로 턴 끝을 확인하지 못한 까닭과 그 시작(pollNow). 턴마다 한 번 알린다. */
+  unverified: { turn: number; code: string; since: number; noted: boolean } | null;
+}
+
 /** Terminals belong to core's holders. IAMCEO shutdown only detaches. */
 export class CoreRunner implements FullRunner {
   readonly kind: Backend = "core";
@@ -181,6 +201,8 @@ export class CoreRunner implements FullRunner {
   private readonly unknownStarts = new Set<string>();
   private readonly sending = new Set<string>();
   private readonly starts = new Map<string, Promise<{ sessionId: string | null; paneId: string; rejoined?: boolean }>>();
+  /** Codex 가 남긴 백그라운드 터미널의 관측(track 마다). 새 track 은 처음부터 다시 본다. */
+  private readonly codexWatch = new WeakMap<Track, CodexBackgroundWatch>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly polling = new Set<Track>();
   private readonly inputRefreshes = new Map<Track, ReturnType<typeof setTimeout>>();
@@ -487,6 +509,8 @@ export class CoreRunner implements FullRunner {
     // not consume that attempt's deadline or hide its pre-write timeout boundary.
     const screen = terminal.state === "live" && (!this.operation.getStore() || status === "blocked") ? await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 }).then(r => r.text, () => null) : null;
     this.validateTrack(track);
+    // 11-16: Codex 가 남긴 백그라운드 터미널로 core 가 working 을 알려도, 화면과 Codex 자기 기록이 그 턴의 끝을 보이면 끝난 턴이다.
+    const background = this.codexBackground(track, terminal, screen, initial);
     // A CLI that has run turns, cleared its status report and shows its normal composer has finished its turn.
     // Real 2026-11-09/10 runs: after a turn ended with an API error the report vanished; the CLI reports again only
     // after input and IAMCEO typed only after a report, so the member was dead until slept by hand.
@@ -495,8 +519,8 @@ export class CoreRunner implements FullRunner {
     const silent = track.silentSince !== null && terminal.reported !== false && (terminal.turn ?? 0) > 0 && screen !== null &&
       (providerFor(track.member) === "claude" ? inputText(screen) : codexDraft(screen)) !== null;
     track.lost = silent && ((terminal.turn ?? 0) <= track.endedTurn || this.pollNow() - track.silentSince! >= SILENT_SETTLE_MS);
-    const state = track.lost ? "done" : reported;
-    if (track.lost) status = "idle";
+    const state = track.lost || background ? "done" : reported;
+    if (track.lost || background) status = "idle";
     const usage = screen !== null && state !== "working" ? usageLimitMenu(screen) : null;
     const retry = state === "working" && (screen === null ? track.setupError?.code === "network_retry" : networkRetryScreen(screen));
     if (initial && state === "error" && !track.compact) {
@@ -505,6 +529,7 @@ export class CoreRunner implements FullRunner {
     }
     // A compact OSC turn belongs exclusively to its control operation.
     if (track.compact && !["failed", "succeeded"].includes(track.compact.phase)) { await this.checkCompact(track); track.endedTurn = Math.max(track.endedTurn, terminal.turn ?? 0); }
+    else if (background && !background.reported) await this.endCodexBackgroundTurn(track, terminal, background, initial);
     else if (!initial && ["idle", "done", "error"].includes(state || "") && (terminal.turn ?? 0) > track.endedTurn) {
       track.completing = true;
       try { if (!this.manualLease(track.member.id)) await this.reportContext(track); } finally { track.completing = false; }
@@ -538,7 +563,8 @@ export class CoreRunner implements FullRunner {
       if (track.statusTimer) clearTimeout(track.statusTimer);
       track.statusTimer = null; track.pendingStatus = null;
     }
-    const statusKey = JSON.stringify([status, blockedReason, setup?.prompt.fingerprint ?? null, usage?.fingerprint ?? null, retry, trustLike ? "trust_dialog_unrecognized" : notReady ? "start_not_ready" : null]);
+    // 백그라운드 터미널 상태에 들고 날 때도 쉬는 중을 다시 알린다: 나올 때의 알림이 미뤄 둔 전달을 곧바로 다시 밀게 한다.
+    const statusKey = JSON.stringify([status, blockedReason, setup?.prompt.fingerprint ?? null, usage?.fingerprint ?? null, retry, trustLike ? "trust_dialog_unrecognized" : notReady ? "start_not_ready" : null, ...(background ? ["codex_background"] : [])]);
     // While the end of a silent turn is being watched (SILENT_SETTLE_MS) nothing is blocked yet: publishing it sent the
     // owner an approval alert for a dialog that does not exist. The next observation decides.
     if (silent && !track.lost && !track.failure && blockedReason === "status_unknown") return;
@@ -652,7 +678,22 @@ export class CoreRunner implements FullRunner {
   }
   isBusy(memberId: string): boolean {
     const track = this.tracks.get(memberId);
-    return !!track && (track.pending || track.uncertain || track.restorePending || track.completing || track.status === "working" || !!track.compact && !["failed", "succeeded"].includes(track.compact.phase));
+    return !!track && (this.turnBusy(track) ||
+      // 턴은 끝났어도 Codex 의 백그라운드 터미널이 남아 core 가 working 인 동안은 입력을 넣지 않는다(codexBackground).
+      !!this.codexWatch.get(track)?.state);
+  }
+  /**
+   * 턴은 끝났고 Codex 가 남긴 백그라운드 터미널 때문에만 바쁜 팀장(codexBackground)이면 그 터미널 수, 아니면 null.
+   * 다른 까닭(입력 중·결과 모름·압축·정말 일하는 중)으로도 바쁘면 null 이다. 총괄이 잠재우기·보관·CLI 바꾸기 거절의 까닭과
+   * 잠재울 후보를 가를 때 쓴다(바쁨 판정 자체는 isBusy 그대로).
+   */
+  backgroundTerminals(memberId: string): number | null {
+    const track = this.tracks.get(memberId);
+    const state = track ? this.codexWatch.get(track)?.state : null;
+    return track && state && !this.turnBusy(track) ? state.terminals : null;
+  }
+  private turnBusy(track: Track): boolean {
+    return track.pending || track.uncertain || track.restorePending || track.completing || track.status === "working" || !!track.compact && !["failed", "succeeded"].includes(track.compact.phase);
   }
   occupiesTurnSlot(memberId: string): boolean {
     const track = this.tracks.get(memberId);
@@ -757,6 +798,101 @@ export class CoreRunner implements FullRunner {
       track.sessionId = result.sessionId;
       this.event(track, { type: "session", memberId: track.member.id, sessionId: result.sessionId });
     }
+  }
+  /**
+   * 11-16 라이브: Codex 는 턴을 끝냈어도 자기가 띄운 백그라운드 터미널(exec 세션)이 살아 있으면 core 에 working 으로 보인다.
+   * 화면이 빈 입력칸·진행 줄 없음·'N background terminal(s) running'(codexBackgroundTerminals)이고, Codex 자기 기록이 지금 업무의 턴이
+   * 끝났다고 보이면(codex-turn.ts) 그 상태를 돌려준다. 그 밖에는 null 이고 지금처럼 core 의 working 을 따른다. 시간만으로는 정하지 않는다.
+   * 이 상태에서도 입력은 넣지 않는다(isBusy): core 의 turn 번호는 working 이 끝날 때에야 올라, 넣은 다음 턴의 끝을 가려낼 수 없다.
+   * 백그라운드 프로그램을 끄지도 않는다. 그것이 끝나 core 가 쉬는 중을 알리면 평소대로 이어 간다.
+   */
+  private codexBackground(track: Track, terminal: CoreTerminal, screen: string | null, initial: boolean): CodexBackground | null {
+    if (providerFor(track.member) !== "codex") return null;
+    let watch = this.codexWatch.get(track);
+    if (!watch) this.codexWatch.set(track, watch = { state: null, cursor: null, unverified: null });
+    const turn = terminal.turn ?? 0;
+    if (terminal.state !== "live" || terminal.status?.state !== "working" || !!track.compact && !["failed", "succeeded"].includes(track.compact.phase)) {
+      watch.unverified = null;
+      return watch.state = null;
+    }
+    const previous = watch.state?.turn === turn ? watch.state : null;
+    // 입력 직전의 관측은 화면을 읽지 않는다(그 시도의 기한을 쓰지 않게). 같은 working·같은 turn 번호면 앞 판정을 잇는다.
+    if (screen === null) return watch.state = previous;
+    const terminals = codexBackgroundTerminals(screen);
+    if (terminals === null) { watch.unverified = null; return watch.state = null; }
+    // 사람이 터미널을 쥐고 있으면 기록을 새로 읽지 않는다(inspectLocked 와 같다). 화면이 그 모양 그대로면 앞 판정을 잇는다.
+    if (this.manualLease(track.member.id)) return watch.state = previous && { ...previous, terminals };
+    const verdict = this.codexTurnEnd(track, watch);
+    if (verdict.outcome === "ended") {
+      watch.unverified = null;
+      // 붙는 순간의 첫 관측에서는 아직 닫지 않은 업무의 턴 끝을 내지 않는다. 다음 관측이 턴 끝을 먼저 내고 쉬는 중을 알린다
+      // (쉬는 중을 먼저 알리면 열린 업무 때문에 '진전 없음' 표시가 쉬는 팀장에 붙는다). 이미 닫힌 업무면(재시작) 곧바로 쉬는 중이다.
+      if (initial && !verdict.runEnded) return watch.state = null;
+      return watch.state = { turn, terminals, runEnded: verdict.runEnded, reported: previous?.reported ?? false };
+    }
+    // 열린 턴(running)은 정말 일하는 중이다. 아직 읽는 중이거나 덜 쓴 줄이면 다음 관측이 이어 읽는다.
+    if (verdict.outcome === "unknown" && !["scan_pending", "partial_log"].includes(verdict.code)) this.noteCodexBackground(track, watch, terminal, terminals, verdict.code);
+    else watch.unverified = null;
+    return watch.state = null;
+  }
+  /** 지금 업무(이 세대에서 입력이 들어간 마지막 실행)의 턴이 Codex 기록에서 끝났는가. 같은 세대·같은 터미널·같은 세션의 기록만 본다. */
+  private codexTurnEnd(track: Track, watch: CodexBackgroundWatch): { outcome: "ended" | "running" | "unknown"; code: string; runEnded: boolean } {
+    const unknown = (code: string) => ({ outcome: "unknown" as const, code, runEnded: false });
+    const generation = track.member.sessionGeneration;
+    if (!track.sessionId) return unknown("session_unbound");
+    const path = this.logPath(track);
+    if (!path) return unknown("log_missing");
+    let run: { dispatch: DeliveryDispatch | null; ended: boolean } | null;
+    try { run = generation === undefined ? null : this.deps.recoveryStore?.lastWrittenRun?.(track.member.id, generation) ?? null; }
+    catch { return unknown("store_unreadable"); }
+    const dispatch = run?.dispatch;
+    if (!run || !dispatch || dispatch.memberId !== track.member.id || dispatch.cli !== "codex" || dispatch.backend !== "core") return unknown("no_dispatch");
+    if (dispatch.identity.sessionGeneration !== generation || dispatch.identity.terminalId !== track.terminal.address || (dispatch.identity.sessionId !== null && dispatch.identity.sessionId !== track.sessionId)) return unknown("other_terminal");
+    const home = this.providerHome(track.member), root = join(home, "sessions"), target = providerLogPath(root, path);
+    // 봉투를 쓸 때 세션을 몰랐으면(첫 전달) 기록 기준선이 없다. 그때는 그 전달의 표지가 든 사용자 글부터 센다.
+    const log = target ? dispatch.baseline.logs.find(item => providerLogPath(root, item.path) === target) : undefined;
+    const result = readCodexTurnEnd({ home, path, sessionId: track.sessionId, cwd: track.member.cwd, baseline: log ? { offset: log.offset, fileIdentity: log.fileIdentity } : null,
+      markers: [dispatch.bundleMarker, ...dispatch.markers.map(item => item.marker)] }, watch.cursor);
+    watch.cursor = result.cursor;
+    return { outcome: result.outcome, code: result.code, runEnded: run.ended };
+  }
+  /** 백그라운드 터미널 상태로 끝난 턴을 평소의 턴 끝(성공)으로 알리고, 팀장 활동에 그 프로그램이 남아 있다는 줄을 한 번 남긴다. */
+  private async endCodexBackgroundTurn(track: Track, terminal: CoreTerminal, background: CodexBackground, initial: boolean): Promise<void> {
+    background.reported = true;
+    // core 의 turn 번호는 이 working 이 끝날 때 하나 오른다. 그것은 이 턴의 끝이므로 그때 다시 알리지 않는다.
+    track.endedTurn = Math.max(track.endedTurn, (terminal.turn ?? 0) + 1);
+    track.pending = false;
+    // 붙는 순간(재시작 뒤)에는 이미 닫힌 업무만 여기 온다. 활동 줄도 이미 남았다.
+    if (initial) return;
+    if (!background.runEnded) {
+      // 이 끝의 문맥 측정(reportContext 의 context_usage)은 지금 core turn 번호(working 이 이어지는 동안의 번호)를 싣는다. 직접 조작 중이면 재지 않는다.
+      const leased = !!this.manualLease(track.member.id);
+      const measuredTurn = leased ? null : track.terminal.turn ?? null;
+      track.completing = true;
+      try { if (!leased) await this.reportContext(track); } finally { track.completing = false; }
+      this.validateTrack(track);
+      track.lastError = null;
+      // turn 번호는 비운다. 끝을 나타낼 번호(위의 +1)는 core 가 아직 내지 않았다. 미리 쓰면 같은 working 의 다음 관측들이 지난 turn 으로 버려진다.
+      // 대신 측정의 번호를 contextTurn 으로 실어, 총괄이 '방금 끝난 턴의 측정'으로 알아보게 한다(자동 압축, orchestrator pump 의 exact).
+      this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: false, reason: "codex_background_terminal", turn: null, ...(measuredTurn !== null ? { contextTurn: measuredTurn } : {}) });
+    }
+    this.event(track, { type: "activity", memberId: track.member.id, kind: "system", notice: true,
+      text: textRef("activity.codex_background_left", { count: String(background.terminals) }), eventKey: this.codexBackgroundKey(track, terminal, "left") });
+  }
+  /** 턴 끝을 확인하지 못한 까닭이 같은 working 에서 backgroundNoticeMs 동안 이어지면 서버 기록과 팀장 활동에 한 번 남긴다. 판정은 그대로다. */
+  private noteCodexBackground(track: Track, watch: CodexBackgroundWatch, terminal: CoreTerminal, terminals: number, code: string): void {
+    const turn = terminal.turn ?? 0, now = this.pollNow();
+    if (watch.unverified?.turn !== turn || watch.unverified.code !== code) watch.unverified = { turn, code, since: now, noted: watch.unverified?.turn === turn && watch.unverified.noted };
+    if (watch.unverified.noted || now - watch.unverified.since < (this.deps.backgroundNoticeMs ?? 30_000)) return;
+    watch.unverified.noted = true;
+    const why = ["session_unbound", "log_missing", "path_unavailable"].includes(code) ? "why.codex_log_unbound" as const
+      : ["no_dispatch", "other_terminal", "marker_missing", "no_turn_complete", "turn_aborted"].includes(code) ? "why.codex_turn_unconfirmed" as const : "why.codex_log_unreadable" as const;
+    console.warn(`[codex] ${track.member.id}: 백그라운드 터미널 ${terminals}개가 남아 실행 엔진이 일하는 중으로 알립니다. 턴 끝을 Codex 기록으로 확인하지 못해 그대로 둡니다 (${code})`);
+    this.event(track, { type: "activity", memberId: track.member.id, kind: "system", notice: true,
+      text: textRef("activity.codex_background_unverified", { count: String(terminals), why: textRef(why) }), eventKey: this.codexBackgroundKey(track, terminal, "unverified") });
+  }
+  private codexBackgroundKey(track: Track, terminal: CoreTerminal, kind: "left" | "unverified"): string {
+    return `codex_background_${kind}:${track.member.id}:${track.member.sessionGeneration ?? -1}:${terminal.address}:${terminal.turn ?? 0}`;
   }
   private logPath(track: Track): string | null {
     if (!track.sessionId) return null;
@@ -1502,6 +1638,29 @@ export function codexDraft(screen: string): string | null {
     if (below.some((line) => !/^\s*(?:\? for shortcuts|← for agents · \? for shortcuts|\d+% context left|(?:GPT-|gpt-|o\d|codex)[^·]* · [/~]|\S+\s+\d+% context left)/i.test(line))) return null;
     const draft = match[1]?.trim() || "";
     return draft === "Ask Codex to do anything" ? "" : draft;
+  }
+  return null;
+}
+
+/** Codex 의 진행 줄: '• Working (12s • esc to interrupt)', 요약 제목이 붙은 '• Inspecting files (1m 02s • esc to interrupt)'. */
+const CODEX_PROGRESS = /esc to interrupt|\bWorking \(|\(\s*\d+[hms]\b[^)]*•/i;
+/** 0.166.0: '  1 background terminal running · /ps to view · /stop to close', 여럿이면 terminals. */
+const CODEX_BACKGROUND = /^\s*(\d{1,4}) background terminals? running(?=\s|·|$)/i;
+/**
+ * 턴은 끝났지만 Codex 가 띄운 백그라운드 터미널이 살아 있는 화면이면 그 수, 아니면 null. 빈 입력칸(codexDraft 가 "")이고, 화면 어디에도
+ * 진행 줄이 없고, 입력칸 바로 위의 글 줄이 'N background terminal(s) running …' 이어야 한다. 조금이라도 다르면 null 이다.
+ * 화면만으로 턴 끝을 정하지 않는다(Codex 기록과 함께 본다. CoreRunner.codexBackground).
+ */
+export function codexBackgroundTerminals(screen: string): number | null {
+  if (codexDraft(screen) !== "") return null;
+  const lines = screen.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").split("\n");
+  if (lines.some(line => CODEX_PROGRESS.test(line))) return null;
+  const composer = lines.findLastIndex(line => /^\s*›(?: (.*))?$/.test(line));
+  for (let i = composer - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (!line.trim()) continue;
+    const count = Number(CODEX_BACKGROUND.exec(line)?.[1] ?? 0);
+    return count > 0 ? count : null;
   }
   return null;
 }

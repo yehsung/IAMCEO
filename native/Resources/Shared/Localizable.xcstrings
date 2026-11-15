@@ -22600,6 +22600,91 @@
         }
       }
     },
+    "server.text.activity.codex_background_left" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The turn ended. Background programs that Codex started ({count}) are still running, so the next delivery waits until they finish. IAMCEO doesn't stop them. In the terminal, /ps lists them and /stop closes them"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "턴은 끝났습니다. Codex가 띄운 백그라운드 프로그램({count}개)이 아직 돌고 있어, 다음 전달은 그 프로그램이 끝날 때까지 기다립니다. IAMCEO는 그 프로그램을 끄지 않습니다. 터미널에서 /ps 로 보고 /stop 으로 닫을 수 있습니다"
+          }
+        }
+      }
+    },
+    "server.text.activity.codex_background_unverified" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "It shows as working because of background programs that Codex started ({count}). Couldn't confirm the turn ended, so it is left as is: {why}"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Codex가 띄운 백그라운드 프로그램({count}개) 때문에 일하는 중으로 보입니다. 턴이 끝났는지 확인하지 못해 그대로 둡니다: {why}"
+          }
+        }
+      }
+    },
+    "server.text.why.codex_log_unbound" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "the Codex session record isn't linked to this staff member yet"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Codex 세션 기록을 아직 이 팀장과 연결하지 못했습니다"
+          }
+        }
+      }
+    },
+    "server.text.why.codex_turn_unconfirmed" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "the Codex session record doesn't show that this turn finished"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Codex 세션 기록에서 이 턴이 끝났다는 기록을 찾지 못했습니다"
+          }
+        }
+      }
+    },
+    "server.text.why.codex_log_unreadable" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "couldn't read the Codex session record to the end"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Codex 세션 기록을 끝까지 읽지 못했습니다"
+          }
+        }
+      }
+    },
     "server.text.card.tool_permission.title" : {
       "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
       "localizations" : {

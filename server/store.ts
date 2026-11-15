@@ -3834,6 +3834,12 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return r ? this.getExecutionJournal(r.run_id) : null;
   }
 
+  /** RunnerRecoveryStore.lastWrittenRun: lastWrittenExecution 의 봉투와 그 실행이 끝났는가. */
+  lastWrittenRun(memberId: string, generation: number): { dispatch: DeliveryDispatch | null; ended: boolean } | null {
+    const run = this.lastWrittenExecution(memberId, generation);
+    return run ? { dispatch: this.getDispatch(run.runId), ended: run.phase === "ended" || run.phase === "interrupted" } : null;
+  }
+
   claimExecutionNotice(runId: string, kind: "interruption" | "report", write: () => void): boolean {
     return this.transaction(() => {
       const column = kind === "interruption" ? "interruption_notified_at" : "report_requested_at";

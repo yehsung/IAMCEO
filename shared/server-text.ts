@@ -131,6 +131,12 @@ export const SERVER_TEXTS = {
   "activity.tool_allowed_plain": { ko: "대표가 결재함에서 도구 승인 요청을 허용했습니다", en: "You allowed the tool approval request in the Inbox" },
   "activity.tool_denied_plain": { ko: "대표가 결재함에서 도구 승인 요청을 거절했습니다", en: "You denied the tool approval request in the Inbox" },
   "activity.tool_card_closed": { ko: "도구 승인 카드를 닫았습니다 · {reason}", en: "Closed the tool approval card · {reason}" },
+  // Codex 가 띄우고 남겨 둔 백그라운드 터미널: 그동안 실행 엔진은 일하는 중으로 알린다(CoreRunner.codexBackground, server/runner/codex-turn.ts).
+  "activity.codex_background_left": { ko: "턴은 끝났습니다. Codex가 띄운 백그라운드 프로그램({count}개)이 아직 돌고 있어, 다음 전달은 그 프로그램이 끝날 때까지 기다립니다. IAMCEO는 그 프로그램을 끄지 않습니다. 터미널에서 /ps 로 보고 /stop 으로 닫을 수 있습니다", en: "The turn ended. Background programs that Codex started ({count}) are still running, so the next delivery waits until they finish. IAMCEO doesn't stop them. In the terminal, /ps lists them and /stop closes them" },
+  "activity.codex_background_unverified": { ko: "Codex가 띄운 백그라운드 프로그램({count}개) 때문에 일하는 중으로 보입니다. 턴이 끝났는지 확인하지 못해 그대로 둡니다: {why}", en: "It shows as working because of background programs that Codex started ({count}). Couldn't confirm the turn ended, so it is left as is: {why}" },
+  "why.codex_log_unbound": { ko: "Codex 세션 기록을 아직 이 팀장과 연결하지 못했습니다", en: "the Codex session record isn't linked to this staff member yet" },
+  "why.codex_turn_unconfirmed": { ko: "Codex 세션 기록에서 이 턴이 끝났다는 기록을 찾지 못했습니다", en: "the Codex session record doesn't show that this turn finished" },
+  "why.codex_log_unreadable": { ko: "Codex 세션 기록을 끝까지 읽지 못했습니다", en: "couldn't read the Codex session record to the end" },
 
   // ---- 서버가 만드는 결재 카드 ----
   "card.tool_permission.title": { ko: "{action}: {titleTarget}", en: "{action}: {titleTarget}" },

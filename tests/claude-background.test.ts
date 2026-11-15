@@ -604,17 +604,23 @@ describe("쉬는 동안의 자동 압축", () => {
     const t = await setup();
     const w = await worker(t);
     const { path, runId } = await atWork(t, w, "압축이 끼는 일");
+    // 그 턴 안에서 결과를 보고한다. 보고 없이 끝나면 서버가 곧바로 '보고 보완' 턴을 붙이고, 그 턴이 lastRun 을 차지하고
+    // 잰 문맥(9,000 추정)을 제 턴 끝의 값(정확한 값)으로 덮는다. 부하 아래에서는 그 턴이 이 시험의 대기보다 먼저 끝나 흔들렸다.
+    await t.orch.recordPost(t.member(w.id), { kind: "완료", title: "압축이 끼는 일 끝" });
+    const turns = t.core.turns(w.id).length;
     // 그 업무의 턴이 끝나고 core 가 끝을 알리기 전에 CLI 가 스스로 압축했다(그동안 화면은 압축 중의 상태 줄).
     t.core.setScreen(w.id, WORKING_SCREEN);
     appendFileSync(path, rows(stopSummary(w.sessionId!), turnDuration(w.sessionId!), boundary(w.sessionId!, "auto", 9_000), summary(w.sessionId!), idleNotice(w.sessionId!)));
     await Bun.sleep(QUIET_MS);
-    expect(lastRun(t, w.id)?.phase).toBe("running");
+    expect(t.store.getExecutionJournal(runId)?.phase).toBe("running");
     // core 가 끝을 알린다(평소의 턴 끝 경로).
     t.core.release(w.id);
-    const run = await t.waitFor("업무 닫힘", () => { const r = lastRun(t, w.id); return r?.runId === runId && r.phase === "ended" ? r : null; });
+    // 그 실행을 id 로 기다린다(lastRun 은 그 뒤 들어간 다른 실행으로 바뀔 수 있다).
+    const run = await t.waitFor("업무 닫힘", () => { const r = t.store.getExecutionJournal(runId); return r?.phase === "ended" ? r : null; });
     expect(run.result).toBe("success");
     await t.waitFor("압축 뒤 문맥", () => t.store.getContextState(w.id)?.measurement?.tokens === 9_000);
     expect(t.store.getContextState(w.id)!.measurement).toMatchObject({ quality: "estimated", fresh: false });
+    expect(t.core.turns(w.id)).toHaveLength(turns);
     expect(activityCodes(t, w.id)).not.toContain("activity.claude_idle_compacted");
   }, 40_000);
 });

@@ -5,11 +5,11 @@
 // 1. Claude Code 는 Bash 의 cd 를 다음 명령까지 유지하고 기록의 줄마다 그때의 폴더를 cwd 로 적는다. 하위 폴더에 들어가 있던 팀장의 압축 경계 줄은
 //    cwd 가 팀장 시작 폴더와 달라, 예전 서버는 경계를 못 알아보고 10분 뒤 압축을 '결과 모름'으로 남겼다(커서는 파일 끝까지 읽은 채 boundary=false).
 //    고친 서버는 그 저장 상태를 이어받아도 옛 커서를 버리고 기준선부터 다시 읽어 압축을 닫고, 막혀 있던 전달을 내보낸다.
-// 2. 세션 기록에 경계가 보이지 않아도, 그 압축을 넣은 뒤 같은 세션에서 온 '압축 끝' 훅(PostCompact)과 쉬는 CLI 가 있으면 압축을 닫는다.
+// 2. 세션 기록에 경계가 보이지 않아도, 그 압축을 넣은 뒤(넣기 직전의 사건 파일 자리 뒤에 덧붙은) 같은 세션의 '압축 끝' 훅과 쉬는 CLI 가 있으면 압축을 닫는다.
 //
 // 견본의 폴더 이름·글은 모두 지어낸 것이다(실제 프로젝트 내용 없음).
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentToolsImpl, PostInput } from "../server/orchestrator.ts";
 import type { CoreCompactState } from "../server/runner/core.ts";
@@ -186,6 +186,39 @@ describe("세션 기록에 경계가 없어도 압축 끝 훅이 온 압축", ()
     expect(state.baseline?.coreCompact).toMatchObject({ phase: "succeeded", evidence: "hook" });
     expect(t.store.listActivity(w.id).filter((a) => a.text === "압축 완료")).toHaveLength(1);
     expect(compactTurns(t, w)).toHaveLength(0); // 압축 명령은 가로챘다: 가짜 CLI 의 기록에는 경계가 없다.
+    await t.waitFor("뒤 일 보고", () => t.texts().some((m) => m.title === "압축뒤끝"));
+  }, 40_000);
+
+  // 줄이 적은 시각은 그 줄을 쓴 프로세스가 정한다. 압축을 넣기 직전의 사건 파일 자리(coreCompact.hookMark) 뒤에 덧붙은 줄만 본다.
+  test("압축 전에 사건 파일에 미리 넣어 둔 줄(한 시간 뒤 시각)은, 넣은 직후 core 가 앞 턴의 '끝남'을 알려도 압축을 닫지 않는다", async () => {
+    const t = await setup();
+    const w = await worker(t);
+    const events = hookEventsDir(t.home);
+    mkdirSync(events, { recursive: true, mode: 0o700 });
+    const file = hookEventsFile(events, w.id);
+    const hook = (record: Record<string, unknown>) => appendFileSync(file, line({ v: 1, at: Date.now(), event: "PostCompact", trigger: "manual", sessionId: w.sessionId, ...record }), { mode: 0o600 });
+    hook({ at: Date.now() + 3_600_000 });
+    hook({ event: "SessionStart", source: "compact", at: Date.now() + 3_600_000 });
+    const planted = statSync(file);
+    // 압축 명령은 받았지만 core 는 아직 앞 턴의 '끝남'을 알린다(정착한 CLI 로 보인다). 기록에는 경계가 없다.
+    t.core.intercept((call) => {
+      if (call.method !== "terminal.send" || !String(call.params.text).startsWith("/compact")) return undefined;
+      const terminal = t.core.terminalOf(w.id)!;
+      terminal.status = { state: "done" };
+      return { result: { turn: terminal.turn ?? 0, started: true } };
+    });
+    await t.orch.compactMember(w.id, "가짜 초점");
+    await eventually(t, w.id, "압축 넣음", () => running(t, w));
+    t.core.intercept(null);
+    expect((t.store.getContextState(w.id)!.baseline?.coreCompact as CoreCompactState).hookMark).toEqual({ identity: `${planted.dev}:${planted.ino}`, offset: planted.size });
+    const d = await instruct(t, w, "압축 뒤 일 @fake:post=압축뒤끝");
+    await Bun.sleep(QUIET_MS);
+    expect(running(t, w)).toBe(true);
+    expect(delivered(t, d)).toBe(false);
+    // 넣은 뒤에 덧붙은 같은 세션의 압축 끝 훅으로는 닫힌다.
+    hook({});
+    await eventually(t, w.id, "넣은 뒤의 훅으로 압축이 닫히고 전달이 나감", () => delivered(t, d));
+    expect(t.store.getContextState(w.id)!.baseline?.coreCompact).toMatchObject({ phase: "succeeded", evidence: "hook" });
     await t.waitFor("뒤 일 보고", () => t.texts().some((m) => m.title === "압축뒤끝"));
   }, 40_000);
 

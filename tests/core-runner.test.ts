@@ -869,6 +869,99 @@ describe("compact control and shared native binding", () => {
     expect(events.filter(e => e.type === "compacted")).toHaveLength(1);
     expect(runner.isBusy(member().id)).toBe(false);
   });
+  // 훅 줄이 적은 시각은 그 줄을 쓴 프로세스가 정한다. 압축 끝 훅은 압축을 넣기 직전의 사건 파일 자리(hookMark) 뒤에 덧붙은 줄에서만 찾는다.
+  test("hook lines already in the event file before the compact are not evidence, even when dated after it, also after a restart; lines appended after the mark are", async () => {
+    const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
+    const dir = join(d.f.dir, "run", "events"), file = join(dir, `${member().id}.jsonl`);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const hook = (record: Record<string, unknown>) => writeFileSync(file, JSON.stringify({ v: 1, at: Date.now(), event: "PostCompact", trigger: "manual", sessionId: d.started.sessionId, ...record }) + "\n", { flag: "a", mode: 0o600 });
+    // 미리 넣어 둔 줄: 한 시간 뒤 시각(검토가 든 꾸민 줄), 그리고 압축을 넣은 직후 시각이라 시각으로는 거를 수 없는 줄.
+    const planted = Date.now() + 1000;
+    hook({ at: Date.now() + 3_600_000 }); hook({ event: "SessionStart", source: "compact", at: Date.now() + 3_600_000 }); hook({ at: planted });
+    const before = statSync(file);
+    const first = d.f.runner(10000, { compactStore: store.port }); await first.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    expect(await first.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: true });
+    const saved = store.states.get(member().id)!;
+    expect(saved.hookMark).toEqual({ identity: `${before.dev}:${before.ino}`, offset: before.size });
+    expect(saved.startedAt).toBeLessThanOrEqual(planted); // 앞의 준비가 1초 안에 끝났다(아니면 이 시험의 전제가 깨진다)
+    for (let i = 0; i < 300 && Date.now() <= planted; i++) await Bun.sleep(10);
+    expect(Date.now()).toBeGreaterThan(planted); // 이제 그 줄의 시각은 startedAt 뒤이고 지금보다 앞이다.
+    // 넣은 직후 core 가 아직 앞 턴의 '끝남'을 알린다: 정착한 CLI 로 보인다.
+    const terminal = d.f.terminals.get(d.started.paneId)!; terminal.status = { state: "done" };
+    await first.screen(member());
+    expect(store.states.get(member().id)!.phase).toBe("running");
+    await first.shutdown();
+    // 재시작해도 저장된 자리부터 읽는다(처음부터 읽지 않는다).
+    terminal.turn = 1; terminal.status = { state: "idle" };
+    const second = d.f.runner(10000, { compactStore: store.port }), events: RunnerEvent[] = []; second.on(e => events.push(e));
+    await second.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    await second.screen(member());
+    expect(second.isBusy(member().id)).toBe(true); expect(events.some(e => e.type === "compacted")).toBe(false);
+    hook({});
+    await second.screen(member());
+    expect(store.states.get(member().id)).toMatchObject({ phase: "succeeded", evidence: "hook" });
+    expect(events.filter(e => e.type === "compacted")).toHaveLength(1);
+  });
+  test("the event file mark follows a rotation to .1: the end hook appended to the rotated file after the mark closes the compact", async () => {
+    const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
+    const dir = join(d.f.dir, "run", "events"), file = join(dir, `${member().id}.jsonl`);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const hook = (path: string, record: Record<string, unknown> = {}) => writeFileSync(path, JSON.stringify({ v: 1, at: Date.now(), event: "PostCompact", trigger: "manual", sessionId: d.started.sessionId, ...record }) + "\n", { flag: "a", mode: 0o600 });
+    hook(file, { event: "Stop" });
+    const runner = d.f.runner(10000, { compactStore: store.port }), events: RunnerEvent[] = []; runner.on(e => events.push(e));
+    await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: true });
+    // 압축 중에 기록 스크립트가 파일을 .1 로 돌렸다. 압축 끝 훅은 돌아간 파일의 그 자리 뒤에 있다.
+    hook(file, { event: "Stop" }); hook(file);
+    renameSync(file, join(dir, `${member().id}.1.jsonl`)); hook(file, { event: "Stop" });
+    const terminal = d.f.terminals.get(d.started.paneId)!; terminal.turn = 1; terminal.status = { state: "idle" };
+    await runner.screen(member());
+    expect(store.states.get(member().id)).toMatchObject({ phase: "succeeded", evidence: "hook" });
+    expect(events.filter(e => e.type === "compacted")).toHaveLength(1);
+  });
+  test("a compact whose event file mark could not be read never closes on hooks, only on a log boundary", async () => {
+    const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
+    const first = d.f.runner(10000, { compactStore: store.port }); await first.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    expect(await first.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: true });
+    store.states.set(member().id, { ...store.states.get(member().id)!, hookMark: null });
+    await first.shutdown();
+    const dir = join(d.f.dir, "run", "events"); mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, `${member().id}.jsonl`), JSON.stringify({ v: 1, at: Date.now(), event: "PostCompact", trigger: "manual", sessionId: d.started.sessionId }) + "\n", { flag: "a", mode: 0o600 });
+    const terminal = d.f.terminals.get(d.started.paneId)!; terminal.turn = 1; terminal.status = { state: "idle" };
+    const second = d.f.runner(10000, { compactStore: store.port }); await second.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    await second.screen(member()); await second.screen(member());
+    expect(second.isBusy(member().id)).toBe(true);
+    writeFileSync(d.path, JSON.stringify({ type: "system", subtype: "compact_boundary", sessionId: d.started.sessionId, cwd: member().cwd }) + "\n", { flag: "a" });
+    await second.screen(member());
+    expect(store.states.get(member().id)!.phase).toBe("succeeded");
+    expect(store.states.get(member().id)!.evidence).toBeUndefined();
+  });
+  // 이 칸(hookMark)을 모르던 서버가 넣은 압축(2026-11-15 라이브에 남은 것): 사건 파일을 처음부터 읽고 시각으로만 거르되, 지금보다 뒤 시각은 버린다.
+  test("a compact saved without a hook mark reads the event file from the start and drops lines dated after now", async () => {
+    const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
+    const first = d.f.runner(10000, { compactStore: store.port }); await first.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    expect(await first.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: true });
+    await first.shutdown();
+    const { hookMark: _mark, ...legacy } = store.states.get(member().id)!;
+    store.states.set(member().id, { ...legacy, phase: "uncertain" });
+    const dir = join(d.f.dir, "run", "events"), file = join(dir, `${member().id}.jsonl`);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const hook = (record: Record<string, unknown>) => writeFileSync(file, JSON.stringify({ v: 1, at: Date.now(), event: "PostCompact", trigger: "manual", sessionId: d.started.sessionId, ...record }) + "\n", { flag: "a", mode: 0o600 });
+    hook({ at: Date.now() + 3_600_000 }); hook({ event: "SessionStart", source: "compact", at: Date.now() + 3_600_000 });
+    const terminal = d.f.terminals.get(d.started.paneId)!; terminal.turn = 1; terminal.status = { state: "idle" };
+    const second = d.f.runner(10000, { compactStore: store.port }); await second.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    await second.screen(member());
+    expect(second.isBusy(member().id)).toBe(true);
+    await second.shutdown();
+    // 서버가 없는 동안 온 진짜 압축 끝 훅(라이브: 압축은 끝났고 서버만 몰랐다). 새 서버는 파일을 처음부터 읽어 찾는다.
+    hook({});
+    const third = d.f.runner(10000, { compactStore: store.port }), events: RunnerEvent[] = []; third.on(e => events.push(e));
+    await third.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    await third.screen(member());
+    expect(store.states.get(member().id)).toMatchObject({ phase: "succeeded", evidence: "hook" });
+    expect(store.states.get(member().id)!.hookMark).toBeUndefined();
+    expect(events.filter(e => e.type === "compacted")).toHaveLength(1);
+  });
   test("a compact whose send was acknowledged and whose boundary never arrives is saved as completion_timeout, not send_uncertain", async () => {
     const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
     const runner = d.f.runner(10000, { compactStore: store.port, compactTimeoutMs: 0 }); await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);

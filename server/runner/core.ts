@@ -19,7 +19,7 @@ import { readDeliveryEvidence, readJsonlRange, parseCodexSessionMeta, providerLo
 import type { DeliveryDispatch, RunnerRecoveryStore, TerminalLease } from "../service-contracts.ts";
 import { readTranscriptTail, transcriptPath } from "./transcript.ts";
 import { HookShadow } from "./hook-compare.ts";
-import { HookEventReader, hookEventsTrusted, isCompactEndHook } from "./hook-events.ts";
+import { HookEventReader, hookEventsMark, hookEventsTrusted, isCompactEndHook, isHookEventsMark, type HookEventsMark } from "./hook-events.ts";
 import { hookEventsDir } from "./hooks.ts";
 import type { FullRunner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, DeliveryProbe, DeliveryInspection, DeliveryRepair, DeliveryLogBaseline, RunnerTerminalIdentity, RunnerReattachResult, RunnerObservation } from "./types.ts";
 import { ERROR_CODES } from "../../shared/error-codes.ts";
@@ -31,11 +31,17 @@ export interface CoreCompactState {
   startedAt: number; cursor: CompactBoundaryCursor | null;
   /**
    * user_resolved: 대표의 확인으로 닫음. completion_timeout: 넣은 것이 확인된(running) 압축의 완료를 기한 안에 확인하지 못함
-   * (넣기가 불확실한 send_uncertain 과 구별한다. 저장소가 compaction.reason 으로 옮긴다).
+   * (기한 전에 기록을 읽을 수 없어 관측이 '모름'이 된 경우도 같다. 넣기가 불확실한 send_uncertain 과 구별한다. 저장소가 compaction.reason 으로 옮긴다).
    */
   reason?: "user_resolved" | "completion_timeout";
   /** 무엇으로 완료를 확인했나. hook: 세션 기록의 경계 대신 CLI 의 압축 끝 훅(같은 세션, 넣은 뒤)과 정착한 CLI. 없으면 기록 경계. */
   evidence?: "hook";
+  /**
+   * 압축을 넣기 직전의 훅 사건 파일 자리(Claude). 압축 끝 훅은 이 뒤에 덧붙은 줄에서만 찾는다(세션 기록의 baseline.offset 과 같은 뜻).
+   * null: 그때 자리를 읽지 못해 이 압축에는 훅을 근거로 쓰지 않는다. 없음: 이 칸을 모르던 서버가 넣은 압축이다. 그때는 사건 파일을 처음부터
+   * 읽고 줄이 적은 시각으로만 거르며, 지금보다 뒤 시각을 적은 줄은 버린다.
+   */
+  hookMark?: HookEventsMark | null;
   /** Only acknowledged human input can arm resolution; idle alone is insufficient. */
   manualResolution?: { turn: number | null; unsettled: boolean };
 }
@@ -964,8 +970,11 @@ export class CoreRunner implements FullRunner {
       // The read above may have been shared with the poller and so outlived this attempt's deadline. Once the caller
       // gave up (stage limit) nothing is persisted or written: it has already recorded this attempt as not started.
       this.validateTrack(track);
+      // 훅 사건 파일의 지금 끝. startedAt 보다 먼저 읽어, 이 자리 뒤의 줄은 모두 압축 명령을 넣기로 한 뒤에 덧붙은 것이다.
+      const hookMark = providerFor(member) === "claude" ? (this.hookEvents ? hookEventsMark(this.hookEvents, member.id) : null) : undefined;
       this.saveCompact(track, { id: crypto.randomUUID(), phase: "sending", startedAt: Date.now(), cursor: null, baseline: { path, fileIdentity: baseline.fileIdentity, offset: baseline.offset,
-        sessionId: track.sessionId, terminalId: current.address, generation: member.sessionGeneration, turn: current.turn ?? null, model: member.model } });
+        sessionId: track.sessionId, terminalId: current.address, generation: member.sessionGeneration, turn: current.turn ?? null, model: member.model },
+        ...(hookMark !== undefined ? { hookMark } : {}) });
       this.bump(track); track.pending = true; attempted = true;
       const command = providerFor(member) === "codex" ? "/compact" : `/compact ${cleanText(focus).replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim()}`.trim();
       const result = await this.call<{ turn: number; started?: boolean }>("terminal.send", { terminal: current.address, text: command, ...(currentState === "idle" ? { if: "idle" } : {}), force: false, wait: false }, this.sendTimeoutMs);
@@ -1025,24 +1034,28 @@ export class CoreRunner implements FullRunner {
     } else operation.cursor = result.cursor;
   }
   /**
-   * 이 압축의 끝을 알리는 훅이 왔는가. 같은 팀장(사건 파일), 압축을 넣은 그 세션·세대·터미널이 지금 것과 같고, 넣은 뒤(startedAt 이후)의
-   * PostCompact(manual)·SessionStart(compact) 기록이어야 한다(isCompactEndHook). 사건 폴더·파일이 이 사용자 것이 아니거나 남이 쓸 수 있으면 읽지 않는다.
+   * 이 압축의 끝을 알리는 훅이 왔는가. 같은 팀장(사건 파일), 압축을 넣은 그 세션·세대·터미널이 지금 것과 같고, 압축을 넣기 직전의 사건 파일 자리
+   * (hookMark) 뒤에 덧붙은, 넣은 뒤(startedAt 이후) 시각의 PostCompact(manual)·SessionStart(compact) 기록이어야 한다(isCompactEndHook).
+   * 자리로 묶으므로 압축 전에 미리 넣어 둔 줄(앞으로의 시각을 적은 것 포함)·앞선 압축의 훅은 시계와 상관없이 근거가 아니다. 자리를 모르던 서버가
+   * 넣은 압축(hookMark 없음)은 처음부터 읽되 지금보다 뒤 시각의 줄은 버린다. 사건 폴더·파일이 이 사용자 것이 아니거나 남이 쓸 수 있으면 읽지 않는다.
    * 훅은 Claude 에만 있다. 정착한 CLI(쉼·끝남)는 부르는 쪽이 따로 요구한다.
    */
   private compactEndHook(track: Track, operation: CoreCompactState, code: string): boolean {
     if (!this.hookEvents || providerFor(track.member) !== "claude" || ["session_changed", "session_conflict"].includes(code)) return false;
-    const { baseline } = operation;
+    const { baseline, hookMark } = operation;
+    if (hookMark !== undefined && !isHookEventsMark(hookMark)) return false; // 넣을 때 자리를 읽지 못했거나 저장값이 망가졌다.
     if (!track.sessionId || baseline.sessionId !== track.sessionId || baseline.generation !== (track.member.sessionGeneration ?? -1) || baseline.terminalId !== track.terminal.address) return false;
     let watch = track.compactHook;
     if (!watch || watch.id !== operation.id) {
-      try { watch = track.compactHook = { id: operation.id, reader: new HookEventReader(this.hookEvents, track.member.id), seen: false }; }
+      try { watch = track.compactHook = { id: operation.id, reader: new HookEventReader(this.hookEvents, track.member.id, undefined, hookMark), seen: false }; }
       catch { return false; }
     }
     if (watch.seen) return true;
     if (!hookEventsTrusted(this.hookEvents, track.member.id)) return false;
     let records: ReturnType<HookEventReader["read"]>["records"];
     try { records = watch.reader.read().records; } catch { return false; }
-    watch.seen = records.some(record => isCompactEndHook(record, baseline.sessionId, operation.startedAt));
+    const until = hookMark === undefined ? Date.now() : Number.POSITIVE_INFINITY;
+    watch.seen = records.some(record => isCompactEndHook(record, baseline.sessionId, operation.startedAt, until));
     return watch.seen;
   }
   async setParallel(member: RunnerMember, on: boolean, opts: StartOpts): Promise<SendResult> {

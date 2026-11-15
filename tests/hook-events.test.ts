@@ -6,7 +6,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HOOK_EVENTS, HOOK_TIMEOUT_SEC, hookEventsDir, hookEventsFile, hookSettings, mergeHooks, HOOK_COMPARE_FILE } from "../server/runner/hooks.ts";
-import { HookEventReader, parseHookEventLine } from "../server/runner/hook-events.ts";
+import { HookEventReader, hookEventsMark, isCompactEndHook, isHookEventsMark, parseHookEventLine } from "../server/runner/hook-events.ts";
 import { HookShadow, hookErrorKind, summaryLine } from "../server/runner/hook-compare.ts";
 import { providerLaunch } from "../server/runner/providers.ts";
 import { CoreRunner } from "../server/runner/core.ts";
@@ -232,6 +232,53 @@ describe("HookEventReader", () => {
     writeFileSync(join(dir, "elsewhere.jsonl"), rec("Stop"));
     symlinkSync(join(dir, "elsewhere.jsonl"), hookEventsFile(eventsDir, "m_one"));
     expect(new HookEventReader(eventsDir, "m_one").read().records).toEqual([]);
+  });
+  // 압축 끝 훅은 압축을 넣기 직전의 자리 뒤에 덧붙은 줄에서만 찾는다(줄이 적은 시각은 쓴 프로세스가 정한다).
+  test("hookEventsMark: 지금 파일의 끝 자리, 없으면 identity null, 링크면 모른다(null)", () => {
+    const dir = temp(), eventsDir = join(dir, "events");
+    expect(hookEventsMark(eventsDir, "m_one")).toEqual({ identity: null, offset: 0 }); // 폴더도 없다
+    mkdirSync(eventsDir);
+    expect(hookEventsMark(eventsDir, "m_one")).toEqual({ identity: null, offset: 0 });
+    const file = hookEventsFile(eventsDir, "m_one");
+    writeFileSync(file, rec("Stop") + rec("Stop"));
+    const stat = statSync(file);
+    expect(hookEventsMark(eventsDir, "m_one")).toEqual({ identity: `${stat.dev}:${stat.ino}`, offset: stat.size });
+    expect(hookEventsMark(eventsDir, "../m_one")).toBeNull();
+    writeFileSync(join(dir, "elsewhere.jsonl"), rec("Stop"));
+    symlinkSync(join(dir, "elsewhere.jsonl"), hookEventsFile(eventsDir, "m_two"));
+    expect(hookEventsMark(eventsDir, "m_two")).toBeNull();
+    expect(isHookEventsMark({ identity: "1:2", offset: 3 })).toBe(true);
+    expect(isHookEventsMark({ identity: null, offset: 0 })).toBe(true);
+    for (const bad of [null, {}, { identity: null, offset: 5 }, { identity: "x", offset: 0 }, { identity: "1:2", offset: -1 }, { identity: "1:2", offset: 1.5 }, { identity: "1:2" }]) expect(isHookEventsMark(bad)).toBe(false);
+  });
+  test("자리부터 읽는다: 그 앞의 줄은 시각과 상관없이 보지 않고, 그 파일이 .1 로 돌았으면 .1 의 그 자리부터 마저 읽는다", () => {
+    const eventsDir = join(temp(), "events"); mkdirSync(eventsDir);
+    const file = hookEventsFile(eventsDir, "m_one");
+    writeFileSync(file, rec("PostCompact", { at: 9_999_999_999_999, trigger: "manual" }));
+    const mark = hookEventsMark(eventsDir, "m_one")!;
+    appendFileSync(file, rec("Stop", { at: 2 }));
+    renameSync(file, hookEventsFile(eventsDir, "m_one", true));
+    writeFileSync(file, rec("Stop", { at: 3 }));
+    const reader = new HookEventReader(eventsDir, "m_one", undefined, mark);
+    expect(reader.read().records.map(r => r.at)).toEqual([2, 3]);
+    expect(reader.gaps).toBe(0);
+    // 그때 파일이 없었으면 뒤에 생긴 파일은 처음부터 읽는다.
+    const fresh = join(temp(), "events"); mkdirSync(fresh);
+    const none = hookEventsMark(fresh, "m_one")!;
+    writeFileSync(hookEventsFile(fresh, "m_one"), rec("Stop", { at: 7 }));
+    expect(new HookEventReader(fresh, "m_one", undefined, none).read().records.map(r => r.at)).toEqual([7]);
+  });
+  test("isCompactEndHook: 같은 세션, since 이후·until 이하, PostCompact manual 또는 SessionStart compact", () => {
+    const hook = (extra: Record<string, unknown>) => parseHookEventLine(JSON.stringify({ v: 1, at: 100, sessionId: "s1", ...extra }))!;
+    expect(isCompactEndHook(hook({ event: "PostCompact", trigger: "manual" }), "s1", 100)).toBe(true);
+    expect(isCompactEndHook(hook({ event: "PostCompact", trigger: "manual" }), "s1", 101)).toBe(false);
+    expect(isCompactEndHook(hook({ event: "PostCompact", trigger: "manual" }), "s1", 50, 99)).toBe(false); // 지금보다 뒤 시각(옛 압축의 거르기)
+    expect(isCompactEndHook(hook({ event: "PostCompact", trigger: "manual" }), "s2", 50)).toBe(false);
+    expect(isCompactEndHook(hook({ event: "PostCompact", trigger: "manual" }), "", 50)).toBe(false);
+    expect(isCompactEndHook(hook({ event: "PostCompact", trigger: "auto" }), "s1", 50)).toBe(false);
+    expect(isCompactEndHook(hook({ event: "SessionStart", source: "resume" }), "s1", 50)).toBe(false);
+    // SessionStart(compact)는 trigger 를 싣지 않아 CLI 스스로의 자동 압축 뒤에도 같은 모양으로 온다. 구별하지 않는다(세션 기록의 경계와 같다).
+    expect(isCompactEndHook(hook({ event: "SessionStart", source: "compact", trigger: "auto" }), "s1", 50)).toBe(true);
   });
   test("parseHookEventLine 은 엄격하다", () => {
     expect(parseHookEventLine(JSON.stringify({ v: 2, at: 1, event: "Stop" }))).toBeNull();

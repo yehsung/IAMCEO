@@ -376,6 +376,108 @@ describe("뒤 작업을 남기고 턴을 끝낸 Claude 팀장", () => {
     await t.orch.sleepMember(w.id, { force: true });
     expect(t.member(w.id).status).toBe("asleep");
   }, 40_000);
+
+  test("미룬 결과 보고 확인은 뒤 작업 동안 넣은 다른 업무의 보고로 채우지 않는다(그 업무가 돈 구간의 글은 그 업무의 것)", async () => {
+    const t = await setup();
+    const w = await worker(t);
+    const first = await atWork(t, w);
+    appendFileSync(first.path, rows(stopSummary(w.sessionId!), turnDuration(w.sessionId!)));
+    t.core.setScreen(w.id, WAIT_SCREEN);
+    await t.waitFor("업무 닫힘", () => lastRun(t, w.id)?.runId === first.runId && lastRun(t, w.id)?.phase === "ended" && t.member(w.id).status === "idle");
+    // 뒤 작업 동안 다른 일(Y)이 들어가고, Y 의 턴에서 Y 의 완료를 보고한다.
+    await t.orch.assign(t.project.id, w.handle, { text: "다른 작은 일 @fake:hold" });
+    const second = await t.waitFor("둘째 업무", () => { const r = lastRun(t, w.id); return r && r.runId !== first.runId && t.member(w.id).status === "working" ? r : null; });
+    await t.orch.recordPost(t.member(w.id), { kind: "완료", title: "작은 일 끝" });
+    appendFileSync(first.path, rows(stopSummary(w.sessionId!), turnDuration(w.sessionId!)));
+    await t.waitFor("둘째 닫힘", () => lastRun(t, w.id)?.runId === second.runId && lastRun(t, w.id)?.phase === "ended" && t.member(w.id).status === "idle");
+    // 뒤 작업이 끝나 알림 턴이 돌지만 X 의 결과는 보고하지 않는다. core 가 working 을 마친다.
+    appendFileSync(first.path, rows(dequeue(w.sessionId!), notification(w.sessionId!), answer(w.sessionId!), stopSummary(w.sessionId!), turnDuration(w.sessionId!)));
+    t.core.setScreen(w.id, IDLE_SCREEN);
+    t.core.release(w.id);
+    // X 의 보고 보완은 한 번 요구한다. Y 는 제 턴에서 보고했으니 묻지 않는다.
+    await t.waitFor("X 보고 보완", () => nudges(t, w.id).length >= 1);
+    await Bun.sleep(QUIET_MS);
+    expect(nudges(t, w.id)).toHaveLength(1);
+    expect(nudges(t, w.id)[0]!.text).toContain(first.runId);
+    expect(nudges(t, w.id)[0]!.text).not.toContain(second.runId);
+  }, 40_000);
+
+  test("대표 글을 받은 턴이 뒤 작업을 남기고 끝나면 답 상태는 '답 쓰는 중'이고, 그사이 넣은 무관한 일은 답 창을 닫지 않으며 그 일의 글은 답이 아니다", async () => {
+    const t = await setup();
+    const w = await worker(t);
+    const before = lastRun(t, w.id)?.runId;
+    const sent = await t.orch.sendUserMessage(t.project.id, { text: "가짜 자료를 정리해 알려 주세요 @fake:hold", targetMemberId: w.id });
+    const first = await t.waitFor("일하는 중", () => { const r = lastRun(t, w.id); return r && r.runId !== before && r.phase === "running" && r.lastProgressAt && t.member(w.id).status === "working" ? r : null; });
+    const path = transcript(t, w);
+    const reply = () => t.store.requireMessage(sent.id).reply;
+    appendFileSync(path, rows(stopSummary(w.sessionId!), turnDuration(w.sessionId!)));
+    t.core.setScreen(w.id, WAIT_SCREEN);
+    await t.waitFor("업무 닫힘", () => lastRun(t, w.id)?.runId === first.runId && lastRun(t, w.id)?.phase === "ended" && t.member(w.id).status === "idle");
+    // 결과는 뒤 작업 뒤에 온다: '답 없이 끝남'이 아니라 '답 쓰는 중'이다.
+    expect(reply()).toMatchObject({ state: "working", memberId: w.id });
+    // 뒤 작업 동안 총괄의 다른 지시(Y)가 들어가고, Y 의 턴에서 Y 의 일을 보고한다. 그 글은 대표 글의 답이 아니고 창도 닫지 않는다.
+    await t.orch.assign(t.project.id, w.handle, { text: "그사이 다른 지시 @fake:hold" });
+    const second = await t.waitFor("둘째 업무", () => { const r = lastRun(t, w.id); return r && r.runId !== first.runId && t.member(w.id).status === "working" ? r : null; });
+    await t.orch.recordPost(t.member(w.id), { kind: "완료", title: "다른 지시 끝" });
+    appendFileSync(path, rows(stopSummary(w.sessionId!), turnDuration(w.sessionId!)));
+    await t.waitFor("둘째 닫힘", () => lastRun(t, w.id)?.runId === second.runId && lastRun(t, w.id)?.phase === "ended" && t.member(w.id).status === "idle");
+    expect(reply()).toMatchObject({ state: "working" });
+    // 뒤 작업이 끝나 Claude 가 스스로 연 턴에서 대표 글에 답한다: 그 글이 답이다.
+    appendFileSync(path, rows(dequeue(w.sessionId!), notification(w.sessionId!)));
+    await t.waitFor("알림 턴", () => t.member(w.id).status === "working");
+    const answered = await t.orch.recordPost(t.member(w.id), { kind: "완료", title: "정리한 결과입니다" });
+    appendFileSync(path, rows(answer(w.sessionId!), stopSummary(w.sessionId!), turnDuration(w.sessionId!)));
+    await t.waitFor("답함", () => reply()?.state === "replied");
+    expect(reply()).toMatchObject({ state: "replied", since: answered.at });
+    // core 가 working 을 마치고 미룬 보고 확인을 해도(답이 있으니 보고 보완 없음) 답함은 그대로다.
+    t.core.setScreen(w.id, IDLE_SCREEN);
+    t.core.release(w.id);
+    await t.waitFor("확인 자리", () => !!t.store.getExecutionJournal(first.runId)?.reportRequestedAt);
+    await Bun.sleep(QUIET_MS);
+    expect(nudges(t, w.id)).toHaveLength(0);
+    expect(reply()).toMatchObject({ state: "replied", since: answered.at });
+  }, 40_000);
+
+  test("뒤 작업을 기다리는 동안 대표의 다음 글이 들어가도 앞 글의 답 창은 닫히지 않는다. 그 작업 뒤 스스로 연 턴의 답은 두 글 모두의 답이다", async () => {
+    const t = await setup();
+    const w = await worker(t);
+    const before = lastRun(t, w.id)?.runId;
+    const sent = await t.orch.sendUserMessage(t.project.id, { text: "가짜 목록을 모아 주세요 @fake:hold", targetMemberId: w.id });
+    const first = await t.waitFor("일하는 중", () => { const r = lastRun(t, w.id); return r && r.runId !== before && r.phase === "running" && r.lastProgressAt && t.member(w.id).status === "working" ? r : null; });
+    const path = transcript(t, w);
+    appendFileSync(path, rows(stopSummary(w.sessionId!), turnDuration(w.sessionId!)));
+    t.core.setScreen(w.id, WAIT_SCREEN);
+    await t.waitFor("업무 닫힘", () => lastRun(t, w.id)?.runId === first.runId && lastRun(t, w.id)?.phase === "ended" && t.member(w.id).status === "idle");
+    // 대표의 다음 글. 그 턴도 뒤 작업을 기다리며 닫힌다(그 턴의 글 없음).
+    const next = await t.orch.sendUserMessage(t.project.id, { text: "하나 더 부탁합니다 @fake:hold", targetMemberId: w.id });
+    const second = await t.waitFor("둘째 업무", () => { const r = lastRun(t, w.id); return r && r.runId !== first.runId && t.member(w.id).status === "working" ? r : null; });
+    appendFileSync(path, rows(stopSummary(w.sessionId!), turnDuration(w.sessionId!)));
+    await t.waitFor("둘째 닫힘", () => lastRun(t, w.id)?.runId === second.runId && lastRun(t, w.id)?.phase === "ended" && t.member(w.id).status === "idle");
+    expect(t.store.requireMessage(sent.id).reply).toMatchObject({ state: "working" });
+    expect(t.store.requireMessage(next.id).reply).toMatchObject({ state: "working" });
+    appendFileSync(path, rows(dequeue(w.sessionId!), notification(w.sessionId!)));
+    await t.waitFor("알림 턴", () => t.member(w.id).status === "working");
+    const answered = await t.orch.recordPost(t.member(w.id), { kind: "완료", title: "두 가지를 모두 정리했습니다" });
+    await t.waitFor("두 글 모두 답함", () => t.store.requireMessage(sent.id).reply?.state === "replied" && t.store.requireMessage(next.id).reply?.state === "replied");
+    expect(t.store.requireMessage(sent.id).reply).toMatchObject({ since: answered.at });
+  }, 40_000);
+
+  test("대표 글을 받은 턴이 뒤 작업을 남기고 끝난 뒤 그래도 잠재우면(터미널이 없어져 그 작업도 끝난다) 더는 기다리지 않아 '답 없이 끝남'이다", async () => {
+    const t = await setup();
+    const w = await worker(t);
+    const before = lastRun(t, w.id)?.runId;
+    const sent = await t.orch.sendUserMessage(t.project.id, { text: "가짜 표를 만들어 주세요 @fake:hold", targetMemberId: w.id });
+    const first = await t.waitFor("일하는 중", () => { const r = lastRun(t, w.id); return r && r.runId !== before && r.phase === "running" && r.lastProgressAt && t.member(w.id).status === "working" ? r : null; });
+    const reply = () => t.store.requireMessage(sent.id).reply;
+    appendFileSync(transcript(t, w), rows(stopSummary(w.sessionId!), turnDuration(w.sessionId!)));
+    t.core.setScreen(w.id, WAIT_SCREEN);
+    await t.waitFor("업무 닫힘", () => lastRun(t, w.id)?.runId === first.runId && lastRun(t, w.id)?.phase === "ended" && t.member(w.id).status === "idle");
+    expect(reply()).toMatchObject({ state: "working" });
+    // 그래도 잠재우면(그 작업도 끝난다) 터미널이 없어져 더는 기다리지 않는다: 답 없이 끝남.
+    await t.orch.sleepMember(w.id, { force: true });
+    await t.waitFor("잠듦", () => t.member(w.id).status === "asleep");
+    expect(reply()).toMatchObject({ state: "no_reply" });
+  }, 40_000);
 });
 
 describe("로그인 오류로 끝난 Claude 턴", () => {
@@ -432,7 +534,40 @@ describe("로그인 밖의 API 오류로 끝난 Claude 턴", () => {
     expect(t.member(w.id)).toMatchObject({ status: "error", lastError: "invalid_request: API Error: 400 가짜 잘못된 요청" });
     expect(activityCodes(t, w.id)).not.toContain("activity.claude_background_left");
     expect(activityCodes(t, w.id)).not.toContain("activity.claude_login_required");
+    // core 의 error 보고처럼 입력을 받는 CLI 다(뒤 작업 상태가 아니다). 잠재우기는 뒤 작업 까닭으로 거절하지 않고 그대로 된다.
+    expect(t.runner.claudeBackground(w.id)).toBe(false);
+    expect(t.runner.isBusy(w.id)).toBe(false);
+    expect(t.runner.observationState(w.id)?.state).toBe("error");
+    const sleep = await t.api("POST", `/api/members/${w.id}/sleep`);
+    expect(sleep.status).toBe(200);
+    expect(t.member(w.id).status).toBe("asleep");
   }, 40_000);
+
+  for (const [code, text] of [["invalid_request", "API Error: 400 가짜 잘못된 요청"], ["billing_error", "Credit balance is too low · 가짜 결제 오류"]] as const) {
+    test(`${code} 로 끝난 뒤 다음 전달은 core 가 working 이어도 if:"working" 으로 한 번 넣는다(막지 않는다)`, async () => {
+      const t = await setup();
+      const w = await worker(t);
+      const { path, runId } = await atWork(t, w, "오류가 나는 일");
+      const failure = JSON.parse(JSON.stringify(apiError(w.sessionId!)).replace("authentication_failed", code).replace("Please run /login · API Error: 403 Attention Required! | Cloudflare", text));
+      appendFileSync(path, rows(failure, turnDuration(w.sessionId!)));
+      t.core.setScreen(w.id, WAIT_SCREEN);
+      const run = await t.waitFor("오류로 닫힘", () => { const r = lastRun(t, w.id); return r?.runId === runId && r.phase === "ended" ? r : null; });
+      expect(run).toMatchObject({ result: "error", reason: `${code}: ${text}` });
+      await t.waitFor("오류", () => t.member(w.id).status === "error");
+      // 로그인 필요 막힘이 아니다(결제를 고쳐도 /login 이 없어 Claude 가 스스로 새 턴을 열지 않는다).
+      expect(t.member(w.id).blockedCode).toBeUndefined();
+      expect(activityCodes(t, w.id)).not.toContain("activity.claude_login_required");
+      const sendsBefore = t.core.calls.filter(c => c.method === "terminal.send").length;
+      const next = (await t.orch.assign(t.project.id, w.handle, { text: "이어서 해 주세요 @fake:hold" })).delivery.id;
+      await t.waitFor("넣음", () => t.core.turns(w.id).some(turn => turn.prompt.includes("이어서 해 주세요")));
+      const sent = t.core.calls.filter(c => c.method === "terminal.send").slice(sendsBefore);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.params).toMatchObject({ if: "working", force: false });
+      await t.waitFor("전달됨", () => t.store.requireDelivery(next).status === "delivered");
+      expect(t.store.listDispatches(w.id).filter(d => d.transportState === "rejected")).toHaveLength(0);
+      await t.waitFor("새 업무 일하는 중", () => { const r = lastRun(t, w.id); return r && r.runId !== runId && t.member(w.id).status === "working" ? r : null; });
+    }, 40_000);
+  }
 });
 
 describe("쉬는 동안의 자동 압축", () => {

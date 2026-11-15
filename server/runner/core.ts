@@ -188,11 +188,13 @@ interface CodexBackgroundWatch {
  * 11-16: Claude 가 자기 근거(세션 기록의 턴 끝, 또는 봉투 자리 뒤의 Stop·StopFailure 훅)로 턴을 끝냈고 화면도 입력을 받을 수 있는데, core 는
  * working 을 알리는 상태(CoreRunner.claudeQuiet).
  * background: 뒤 작업(Workflow·백그라운드 에이전트·셸·Monitor)이 남았다. 쉬는 중으로 보이고 입력을 받는다.
+ * error: 그 턴이 로그인 밖의 API 오류(invalid_request·overloaded·rate_limit·billing_error 등)로 끝났다. core 의 error 보고와 같게 본다:
+ *   오류 상태로 두고 입력을 받으며(넣을 때는 if:"working"), 끝내도 일이 끊기지 않는다. core 가 working 인 까닭은 대개 끝을 못 본 것(StopFailure)이다.
  * login: 그 턴이 로그인(계정) 오류로 끝났다(CLAUDE_LOGIN_ERRORS). '로그인 필요' 막힘으로 보이고 전달은 보류한다.
  * turn: 그동안의 core turn 번호(working 이 이어지는 동안 오르지 않는다). runId·runEnded: 지금 업무(이 세대에서 입력이 들어간 마지막 실행)와 그것이 이미 끝났는가.
  * reported: 이 상태로 그 업무의 턴 끝을 이미 냈다. error: 끝난 턴의 API 오류. label: 화면에 적힌 뒤 작업.
  */
-interface ClaudeQuiet { kind: "background" | "login"; turn: number; runId: string; runEnded: boolean; reported: boolean; error: ClaudeTurnError | null; label: string | null }
+interface ClaudeQuiet { kind: "background" | "error" | "login"; turn: number; runId: string; runEnded: boolean; reported: boolean; error: ClaudeTurnError | null; label: string | null }
 interface ClaudeWatch {
   state: ClaudeQuiet | null;
   /** 지금 업무의 세션 기록 읽기 자리(질문이 바뀌면 처음부터, readClaudeTurn). */
@@ -376,15 +378,31 @@ export class CoreRunner implements FullRunner {
   /**
    * A terminal whose report vanished after a finished turn reads as done. 11-16: so does a Claude whose own record ended the turn while
    * core still reports working for its background work (claudeQuiet background): it takes input (send guards it with if:"working").
+   * A Claude turn that its own record ended with a non-login API error (claudeQuiet error) reads as core's error report.
    */
   private stateOf(track: Track | undefined, terminal: CoreTerminal): string | undefined {
     if (track?.lost && track.terminal === terminal && !terminal.status) return "done";
-    if (track && this.claudeLingers(track, terminal)) return "done";
+    const quiet = track ? this.claudeQuietOn(track, terminal) : null;
+    if (quiet?.kind === "background") return "done";
+    if (quiet?.kind === "error") return "error";
     return terminal.status?.state;
   }
-  /** 뒤 작업만 남은 Claude(claudeQuiet background)인가. 그 track 의 지금 터미널이고 core 가 아직 working 이어야 한다. */
+  /** claudeQuiet 의 지금 판정. 그 track 의 지금 터미널이고 core 가 아직 working 이어야 한다. */
+  private claudeQuietOn(track: Track, terminal: CoreTerminal = track.terminal): ClaudeQuiet | null {
+    if (track.terminal !== terminal || terminal.state !== "live" || terminal.status?.state !== "working") return null;
+    return this.claudeWatch.get(track)?.state ?? null;
+  }
+  /** 뒤 작업만 남은 Claude(claudeQuiet background)인가. 끝내거나 다시 열면 그 작업이 죽는다. */
   private claudeLingers(track: Track, terminal: CoreTerminal = track.terminal): boolean {
-    return track.terminal === terminal && terminal.state === "live" && terminal.status?.state === "working" && this.claudeWatch.get(track)?.state?.kind === "background";
+    return this.claudeQuietOn(track, terminal)?.kind === "background";
+  }
+  /**
+   * core 에게는 working 이지만 Claude 자기 근거로 턴이 끝나 입력을 받는 Claude 인가: 뒤 작업만 남았거나(background), 로그인 밖의 API 오류로
+   * 끝났다(error). 넣을 때는 넣기 직전에 다시 보고(stillClaudeQuiet) if:"working" 을 건다. 로그인 오류(login)는 받지 않는다(보류).
+   */
+  private claudeTakesInput(track: Track, terminal: CoreTerminal = track.terminal): boolean {
+    const kind = this.claudeQuietOn(track, terminal)?.kind;
+    return kind === "background" || kind === "error";
   }
   private validateTrack(track: Track): void {
     this.operation.getStore()?.signal.throwIfAborted();
@@ -553,7 +571,8 @@ export class CoreRunner implements FullRunner {
       (providerFor(track.member) === "claude" ? inputText(screen) : codexDraft(screen)) !== null;
     track.lost = silent && ((terminal.turn ?? 0) <= track.endedTurn || this.pollNow() - track.silentSince! >= SILENT_SETTLE_MS);
     const state = track.lost || background || claude ? "done" : reported;
-    if (track.lost || background || claude?.kind === "background") status = "idle";
+    // 로그인 밖의 API 오류로 끝난 턴은 core 의 error 보고처럼 쉬는 CLI 다(관측 상태 error, stateOf).
+    if (track.lost || background || claude?.kind === "background" || claude?.kind === "error") status = "idle";
     // 로그인(계정) 오류로 끝난 턴: 다시 로그인해 다음 턴이 돌 때까지 막힘으로 보이고 전달은 보류한다.
     if (claude?.kind === "login") status = "blocked";
     const usage = screen !== null && state !== "working" ? usageLimitMenu(screen) : null;
@@ -599,7 +618,7 @@ export class CoreRunner implements FullRunner {
       : notReady ? { code: "start_not_ready", note: ERROR_CODES.observation_start_not_ready.ko } : null;
     if (usage) { status = "blocked"; track.pending = false; }
     const blockedReason = usage ? "usage_limit" : setup || claude?.kind === "login" ? "setup" : state === "blocked" ? BLOCKED_KINDS[terminal.status?.kind || ""] ?? "status_unknown" : status === "blocked" ? "status_unknown" : null;
-    if (state === "error") {
+    if (state === "error" || claude?.kind === "error") {
       if (track.statusTimer) clearTimeout(track.statusTimer);
       track.statusTimer = null; track.pendingStatus = null;
     }
@@ -619,7 +638,7 @@ export class CoreRunner implements FullRunner {
       track.statusKey = statusKey;
       if (state === "error" && !usage) return; // Keep the error result from being overwritten by an earlier queued status.
       // Claude 자기 근거로 닫은 턴이 (로그인 밖의) API 오류로 끝났으면 core 의 error 보고와 같게 다룬다: 그 오류 결과를 쉬는 중으로 덮지 않는다.
-      if (claude?.kind === "background" && claude.error && !usage) return;
+      if (claude?.kind === "error" && !usage) return;
       this.publishStatus(track, { type: "status", memberId: track.member.id, status, blockedReason, ...(usage ? { usageLimit: usage } : {}), observation: { source: "core", observedAt: track.observedAt, freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: track.setupError }, ...(status === "gone" ? { exit: { reason: terminal.reason ?? null, exitCode: terminal.exit_code ?? null } } : {}) });
     }
   }
@@ -798,10 +817,11 @@ export class CoreRunner implements FullRunner {
       const draft = providerFor(member) === "claude" ? inputText(screen.text) : codexDraft(screen.text);
       track.composerEmpty = draft === "";
       if (draft !== "") return { ok: false, reason: "input_busy", retryable: false, deliveryEffect: "not_written", detail: draft === null ? "Cannot identify an empty CLI composer" : "A user draft is present; IAMCEO leaves it untouched" };
-      // 11-16: 뒤 작업만 남은 Claude 에는 넣는다. 넣기 직전에 화면(일하는 중의 상태 줄 없음)과 Claude 자기 기록(지금 업무의 턴이 닫혀 있음)으로 다시 본다.
-      // 그 사이 뒤 작업 알림으로 Claude 가 스스로 새 턴을 열었으면 넣지 않는다(다음 관측이 다시 정한다).
-      const lingering = this.claudeLingers(track, terminal);
-      if (lingering && !this.stillClaudeQuiet(track, screen.text)) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written", detail: "Claude started a turn of its own; waiting for it to end" };
+      // 11-16: 뒤 작업만 남은 Claude, 로그인 밖의 API 오류로 턴을 끝낸 Claude 에는 넣는다(core 에게는 working). 넣기 직전에 화면(일하는 중의
+      // 상태 줄 없음)과 Claude 자기 기록(지금 업무의 턴이 닫혀 있음)으로 다시 본다. 그 사이 뒤 작업 알림으로 Claude 가 스스로 새 턴을 열었으면
+      // 넣지 않는다(다음 관측이 다시 정한다).
+      const quietInput = this.claudeTakesInput(track, terminal);
+      if (quietInput && !this.stillClaudeQuiet(track, screen.text)) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written", detail: "Claude started a turn of its own; waiting for it to end" };
       const preference = this.parallelPreferences.get(member.id) ?? member.parallel;
       const prefix = providerFor(member) === "codex" && preference !== undefined
         ? (preference ? "IAMCEO execution preference: Use native subagents for independent work in parallel when useful; retain your normal approvals and tool access.\n\n" : "IAMCEO execution preference: Work sequentially for this task; do not spawn subagents.\n\n") : "";
@@ -819,8 +839,8 @@ export class CoreRunner implements FullRunner {
       if (current.state !== "live" || this.stateOf(track, current) !== state || track.epoch !== inputEpoch) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
       track.pending = true; this.bump(track);
       deliveryAttempted = true;
-      // 뒤 작업만 남은 Claude 는 core 에게 working 이다. if:"working" 으로 그 사이 승인 창(blocked)·끝남(idle)으로 바뀌었으면 넣지 않게 한다.
-      const result = await this.call<{ turn: number; started?: boolean | null }>("terminal.send", { terminal: terminal.address, text: cleaned, ...(state === "idle" ? { if: "idle" } : lingering ? { if: "working" } : {}), force: false, wait: false }, this.sendTimeoutMs);
+      // 그런 Claude 는 core 에게 working 이다. if:"working" 으로 그 사이 승인 창(blocked)·끝남(idle)으로 바뀌었으면 넣지 않게 한다.
+      const result = await this.call<{ turn: number; started?: boolean | null }>("terminal.send", { terminal: terminal.address, text: cleaned, ...(state === "idle" ? { if: "idle" } : quietInput ? { if: "working" } : {}), force: false, wait: false }, this.sendTimeoutMs);
       if (!Number.isSafeInteger(result.turn)) throw new CoreError("protocol", "Send reply has no valid turn counter", true);
       this.hookShadow?.sent(member.id, providerFor(member), { sessionId: track.sessionId, text: cleaned });
       // started:false still means paste+Enter was delivered. Never resend it.
@@ -963,7 +983,8 @@ export class CoreRunner implements FullRunner {
    * core 가 working 이라도 화면이 입력을 받을 수 있고(claudeQuietScreen: 빈 입력칸, 일하는 중의 상태 줄 없음), 지금 업무(이 세대에서 입력이 들어간
    * 마지막 실행)의 봉투 기준선 뒤 Claude 자기 기록(같은 세션의 stop_hook_summary·turn_duration)이 그 턴을 닫았으면 끝난 턴이다. 기록으로 정하지 못하면
    * 봉투를 쓰기 직전의 훅 자리 뒤에 덧붙은 같은 세션의 Stop·StopFailure 를 본다(핫픽스 A 의 자리 묶기·신뢰 검사). 시간만으로는 정하지 않는다.
-   * 그 턴이 로그인(계정) 오류로 끝났으면 login, 아니면 background 다. 그 밖에는 null 이고 지금처럼 core 의 working 을 따른다.
+   * 그 턴이 로그인(계정) 오류로 끝났으면 login, 로그인 밖의 API 오류로 끝났으면 error, 아니면 background 다. 그 밖에는 null 이고 지금처럼 core 의
+   * working 을 따른다.
    * 업무가 이미 끝났어도(재시작 뒤, 스스로 연 턴 뒤) 같은 판정으로 쉬는 중을 보인다. 열린 턴(뒤 작업 알림으로 Claude 가 스스로 연 턴)이면 null(일하는 중).
    */
   private claudeQuiet(track: Track, terminal: CoreTerminal, screen: string | null, initial: boolean): ClaudeQuiet | null {
@@ -983,7 +1004,7 @@ export class CoreRunner implements FullRunner {
     if (verdict.outcome !== "ended" || !verdict.runId) return watch.state = null;
     // 붙는 순간의 첫 관측에서는 아직 닫지 않은 업무를 닫지 않는다. 다음 관측이 턴 끝을 먼저 내고 쉬는 중을 알린다(Codex 와 같다).
     if (initial && !verdict.runEnded) return watch.state = null;
-    const kind = verdict.error && CLAUDE_LOGIN_ERRORS.has(verdict.error.error) ? "login" : "background";
+    const kind = !verdict.error ? "background" : CLAUDE_LOGIN_ERRORS.has(verdict.error.error) ? "login" : "error";
     const same = previous?.kind === kind && previous.runId === verdict.runId ? previous : null;
     return watch.state = { kind, turn, runId: verdict.runId, runEnded: verdict.runEnded, reported: !!same?.reported || verdict.runEnded || watch.closedRun === verdict.runId, error: verdict.error, label: quiet.label };
   }
@@ -1030,16 +1051,20 @@ export class CoreRunner implements FullRunner {
     const verdict = claudeHookTurn(watch.hook.state, records, track.sessionId, markers);
     return verdict.outcome === "unknown" ? null : { outcome: verdict.outcome, code: verdict.code, error: verdict.error };
   }
-  /** 넣기 직전: 지금도 뒤 작업만 남은 Claude 인가(화면에 일하는 중의 상태 줄이 없고, 지금 업무의 턴이 기록에서 닫혀 있다). */
+  /**
+   * 넣기 직전: 지금도 입력을 받는 Claude 인가(화면에 일하는 중의 상태 줄이 없고, 지금 업무의 턴이 기록에서 닫혀 있다). 그 턴이 로그인 오류로
+   * 끝났으면 아니다(보류할 차례). 로그인 밖의 API 오류로 끝난 턴은 받는다(core 의 error 보고처럼 다음 글이 새 턴을 연다).
+   */
   private stillClaudeQuiet(track: Track, screen: string): boolean {
     const watch = this.claudeWatch.get(track);
     if (!watch || !claudeQuietScreen(screen)) return false;
     const verdict = this.claudeTurnVerdict(track, watch);
-    return verdict.outcome === "ended" && !verdict.error;
+    return verdict.outcome === "ended" && !(verdict.error && CLAUDE_LOGIN_ERRORS.has(verdict.error.error));
   }
   /**
    * claudeQuiet 으로 끝난 턴을 알린다. 뒤 작업이면 평소의 턴 끝(성공, 실행 기록 사유 claude_background_task)이고 팀장 활동에 뒤 작업이 남았다는 줄을
    * 그 working 구간에 한 번 남긴다. 로그인 오류면 오류 턴 끝(사유 claude_login_required)이고 '로그인 필요' 줄을 그 업무에 한 번 남긴다.
+   * 로그인 밖의 API 오류면 core 의 error 보고처럼 오류 턴 끝만 낸다(실행 기록 사유는 그 오류 글).
    * turn 번호는 비운다(core 가 working 을 마칠 때에야 오른다. Codex 백그라운드와 같다). 그때 core 가 쉬는 중을 알리면 평소의 턴 끝이 한 번 더 나는데,
    * 그것은 그 사이 Claude 가 스스로 연 턴(뒤 작업 알림)의 끝이고 열린 실행 기록이 없으면 업무를 닫지 않는다(그 사이 넣은 업무가 그때 끝났으면 그것을 닫는다).
    */
@@ -1061,11 +1086,11 @@ export class CoreRunner implements FullRunner {
       const errorText = quiet.error ? `${quiet.error.error}${quiet.error.text ? `: ${quiet.error.text}` : ""}` : null;
       track.lastError = errorText;
       this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: !!errorText, ...(errorText ? { errorText } : {}),
-        reason: quiet.kind === "login" ? CLAUDE_LOGIN_REASON : CLAUDE_BACKGROUND_REASON, turn: null, ...(measuredTurn !== null ? { contextTurn: measuredTurn } : {}) });
+        ...(quiet.kind === "error" ? {} : { reason: quiet.kind === "login" ? CLAUDE_LOGIN_REASON : CLAUDE_BACKGROUND_REASON }), turn: null, ...(measuredTurn !== null ? { contextTurn: measuredTurn } : {}) });
     }
     const key = `${track.member.id}:${track.member.sessionGeneration ?? -1}:${terminal.address}`;
     if (quiet.kind === "login") this.event(track, { type: "activity", memberId: track.member.id, kind: "system", notice: true, text: textRef("activity.claude_login_required"), eventKey: `claude_login_required:${key}:${quiet.runId}` });
-    else if (!quiet.error) this.event(track, { type: "activity", memberId: track.member.id, kind: "system", notice: true, text: textRef("activity.claude_background_left"), eventKey: `claude_background_left:${key}:${terminal.turn ?? 0}` });
+    else if (quiet.kind === "background") this.event(track, { type: "activity", memberId: track.member.id, kind: "system", notice: true, text: textRef("activity.claude_background_left"), eventKey: `claude_background_left:${key}:${terminal.turn ?? 0}` });
   }
   /**
    * 11-16(D2-2·D4-8): 실행 기록이 없는데 Claude 가 쉬는 동안 스스로 압축(Compacted while idle, compact_boundary trigger auto)하면 core 는 그 1~2분을

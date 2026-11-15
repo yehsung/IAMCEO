@@ -1379,14 +1379,14 @@ export class Orchestrator implements OrchestratorApi {
     this.store.setBoardTidiedAt(member.projectId, new Date().toISOString());
   }
 
-  private requestMissingReport(member: Member, run: ExecutionJournal): void {
+  private requestMissingReport(member: Member, run: ExecutionJournal, opts: { ownTurnsOnly?: boolean } = {}): void {
     if (this.store.requireProject(member.projectId).archived || this.backendOf(member) !== "core" || run.reason === "awaiting_delegation" || this.runtime(member.id).delegated) return;
     const deliveries = run.deliveryIds.map(id => this.store.getDelivery(id)).filter((d): d is Delivery => !!d);
     if (!deliveries.some(d => d.wake) || deliveries.every(isTidy)) return;
     const supplementOnly = deliveries.some(d => d.text.startsWith(formatSystem("보고 보완")));
     // 총괄의 직원 보고 확인 턴에는 대표에게 다시 최종 보고를 요구하지 않는다.
     if (!supplementOnly && member.kind !== "worker" && !deliveries.some(d => d.wake && ["user_message", "answer"].includes(d.kind))) return;
-    if (this.store.hasExecutionReport(run)) return;
+    if (this.store.hasExecutionReport(run, opts)) return;
     this.store.claimExecutionNotice(run.runId, "report", () => {
       if (supplementOnly) {
         this.store.createMessage({ id: `msg_missing_report_${run.runId}`, projectId: member.projectId, who: "시스템", kind: "시스템", text: textRef("chat.missing_report", { name: member.name }) });
@@ -1410,12 +1410,12 @@ export class Orchestrator implements OrchestratorApi {
   /**
    * 핫픽스 C: 뒤 작업을 남기고 Claude 자기 근거로 닫은 업무(사유 claude_background_task) 가운데 아직 결과 보고를 확인하지 않은 것. 그 작업이 끝나 core 가
    * 쉬는 중을 알린 턴 끝(또는 그 뒤의 다른 업무 끝)에서 평소처럼 확인한다: 그 사이 Claude 가 스스로 연 턴에서 보고했으면 아무것도 하지 않는다.
-   * 뒤 작업이 아직 돌면(그 팀장이 여전히 그 상태면) 미룬다.
+   * 그 사이 넣은 다른 업무가 돈 구간에 쓴 보고는 그 업무의 것이라 세지 않는다(ownTurnsOnly). 뒤 작업이 아직 돌면(그 팀장이 여전히 그 상태면) 미룬다.
    */
   private requestDeferredReports(member: Member): void {
     if (this.claudeLingering(this.store.requireMember(member.id))) return;
     for (const run of this.store.listUnreportedRuns(member.id, this.store.memberRevisions(member.id).sessionGeneration, CLAUDE_BACKGROUND_REASON)) {
-      this.requestMissingReport(member, run);
+      this.requestMissingReport(member, run, { ownTurnsOnly: true });
       // 보고가 이미 있었거나 확인할 대상이 아니었으면 그 자리만 채운다(확인한 것으로 남겨 다음 턴 끝마다 다시 보지 않는다).
       this.store.claimExecutionNotice(run.runId, "report", () => {});
     }

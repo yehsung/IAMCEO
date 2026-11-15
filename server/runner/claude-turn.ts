@@ -15,8 +15,12 @@ import { join } from "node:path";
 import type { HookEventRecord } from "./hook-events.ts";
 import { hasExactMarker, jsonObject, parseProviderUserText, providerLogPath, readJsonlRange, type JsonlCursor } from "./delivery-evidence.ts";
 
-/** 이 오류로 끝난 턴은 로그인(계정)을 고쳐야 다시 돈다. StopFailure·기록의 error 분류값. */
-export const CLAUDE_LOGIN_ERRORS: ReadonlySet<string> = new Set(["authentication_failed", "billing_error"]);
+/**
+ * 이 오류로 끝난 턴은 다시 로그인해야 다시 돈다. StopFailure·기록의 error 분류값. 라이브에서 /login 뒤 Claude 가 같은 일을 스스로 이어 간 것은
+ * authentication_failed 뿐이다. billing_error(크레딧 부족 등)는 결제를 고쳐도 /login 이 없어 Claude 가 스스로 새 턴을 열지 않으므로 여기에 넣지 않는다:
+ * 로그인 밖의 API 오류처럼 오류로 닫고 막지 않는다(다음 전달이 새 턴을 연다).
+ */
+export const CLAUDE_LOGIN_ERRORS: ReadonlySet<string> = new Set(["authentication_failed"]);
 /** 실행 기록의 사유(진단 코드): 뒤 작업이 남은 채 Claude 자기 근거로 닫은 턴. 결과 보고 확인은 그 작업이 끝난 뒤로 미룬다. */
 export const CLAUDE_BACKGROUND_REASON = "claude_background_task";
 /** 실행 기록의 사유(진단 코드): 로그인(계정) 오류로 끝난 턴. */

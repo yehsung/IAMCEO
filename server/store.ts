@@ -69,6 +69,7 @@ import { judgeReply, replySettled, type ReplyFacts } from "./reply-state.ts";
 import { formatSystem } from "./delivery-text.ts";
 import { API_RESUME_TEXT, USAGE_RESUME_TEXT } from "./api-outage.ts";
 import { RESTART_RESUME_TEXT } from "./restart-wake.ts";
+import { CLAUDE_BACKGROUND_REASON } from "./runner/claude-turn.ts";
 
 // Z(0.2.6): 답 상태가 '이 실행을 잇는 서버 글'을 가려내는 규칙.
 /** 끊긴 턴을 잇는 서버 글(사용 한도·인터넷이 풀림, 재시작 뒤 다시 엶). api-outage.ts 가 이 모듈을 불러오므로 모듈을 읽을 때가 아니라 부를 때 본다. */
@@ -465,6 +466,8 @@ const MEMBER_SELECT = `SELECT m.*, (SELECT COUNT(*) FROM deliveries d WHERE d.me
 
 // SQL 행은 컬럼 이름이 곧 스키마(db.ts)다. 아래 toX 함수가 타입 경계다.
 type Row = Record<string, any>;
+/** 답 창 안이지만 그 글과 무관한 실행이 돈 구간(만든 때 ~ 끝난 때, 끝나지 않았으면 null). 핫픽스 C. */
+type ReplySpan = { from: string; to: string | null };
 
 function json<T>(raw: string): T {
   return JSON.parse(raw) as T;
@@ -1153,7 +1156,12 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     }
   }
 
-  hasExecutionReport(run: ExecutionJournal): boolean {
+  /**
+   * 그 실행의 결과 보고(완료·답변·막힘·질문 글, 또는 열린 결재)가 있는가. 그 실행(과 그것이 잇는 앞 실행)이 만들어진 뒤의 글을 본다.
+   * ownTurnsOnly(핫픽스 C, 미룬 결과 보고 확인): 그 뒤에 들어간 다른 실행이 돈 구간([만든 때, 끝난 때])에 쓴 글은 그 실행의 보고라 세지 않는다.
+   * 뒤 작업을 기다리는 동안 넣은 다른 업무의 보고가 이 실행의 보고 누락을 가리지 않게 한다.
+   */
+  hasExecutionReport(run: ExecutionJournal, opts: { ownTurnsOnly?: boolean } = {}): boolean {
     if (this.row("SELECT 1 FROM decisions WHERE project_id = ? AND member_id = ? AND status = 'open' LIMIT 1", run.projectId, run.memberId)) return true;
     let since = run.createdAt;
     const pending = [run], seen = new Set<string>();
@@ -1175,6 +1183,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         if (source && source.projectId === run.projectId && source.memberId === run.memberId && source.createdAt <= current.createdAt) pending.push(source);
       }
     }
+    if (opts.ownTurnsOnly) return !!this.row(`SELECT 1 FROM messages m WHERE m.project_id = ? AND m.member_id = ? AND m.mine = 0
+      AND m.at >= ? AND m.kind IN ('완료', '답변', '막힘', '질문')
+      AND NOT EXISTS (SELECT 1 FROM execution_journal e WHERE e.project_id = m.project_id AND e.member_id = m.member_id AND e.created_at > ?
+        AND e.run_id NOT IN (SELECT value FROM json_each(?)) AND e.created_at <= m.at AND (e.ended_at IS NULL OR m.at <= e.ended_at)) LIMIT 1`,
+      run.projectId, run.memberId, since, run.createdAt, JSON.stringify([...seen]));
     return !!this.row(`SELECT 1 FROM messages WHERE project_id = ? AND member_id = ? AND mine = 0
       AND at >= ? AND kind IN ('완료', '답변', '막힘', '질문') LIMIT 1`, run.projectId, run.memberId, since);
   }
@@ -1239,16 +1252,20 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const own = run?.deliveryIds ?? [delivery.id];
       let end = this.replyWindowEnd(delivery, own, start);
       // 이 실행을 잇는 실행들. 이 글과 무관한 실행이 만들어졌으면 답 창이 거기서 닫힌다(그 턴에서 쓴 글은 이 글의 답이 아니다).
+      // 핫픽스 C: 뒤 작업을 남기고 닫힌 실행이 그 작업을 기다리는 동안 들어간 무관한 실행은 창을 닫지 않고 그 구간만 뺀다(skipped).
       const chain = run ? this.replyChain(member.id, run, own, end) : null;
+      if (chain) end = chain.end;
       if (chain?.closedAt && (end === null || chain.closedAt < end)) end = chain.closedAt;
-      const reply = this.firstReply(message.projectId, member.id, start, end);
+      const reply = this.firstReply(message.projectId, member.id, start, end, chain?.skipped ?? []);
       const runs = !reply && run && (run.phase === "ended" || run.phase === "interrupted") ? chain!.runs : [];
       const tail = runs.at(-1);
       const tailEnded = !!tail && (tail.phase === "ended" || tail.phase === "interrupted");
+      // 핫픽스 C: 그 실행이 뒤 작업을 남기고 닫혀 아직 그 작업의 끝(미룬 결과 보고 확인)을 보지 못했다. 답은 그 작업 뒤에 Claude 가 스스로 연 턴에서 온다.
+      const awaiting = tailEnded && this.backgroundAwaiting(tail!, nowIso(), member.paneId ?? null);
       const result = judgeReply({ ...facts, run, reply,
         later: runs.length > 1 ? tail : null,
         delegatedAt: runs.find(r => r.result === "success" && this.runDelegated(r.runId))?.endedAt ?? null,
-        continuing: tailEnded && end === null && this.continuationPending(member.id, runs) });
+        continuing: tailEnded && end === null && (awaiting || this.continuationPending(member.id, runs)) });
       if (!this.db.inTransaction && replySettled(result, end !== null)) Store.remember(this.replySettledCache, message.id, result!);
       return result;
     });
@@ -1289,12 +1306,26 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return (row?.delivered_at as string | null | undefined) ?? null;
   }
 
-  /** 답 창 안에서 그 팀장이 대화에 쓴 첫 글. 서버가 만든 알림(시스템 글, '대표 전달 지연')은 답이 아니다. */
-  private firstReply(projectId: string, memberId: string, start: string, end: string | null): { id: string; at: string } | null {
-    const row = this.row(`SELECT id, at FROM messages WHERE project_id = ? AND member_id = ? AND mine = 0 AND at >= ?
-        AND (? IS NULL OR at < ?) AND kind <> '시스템' AND who <> '시스템'
-      ORDER BY at, id LIMIT 1`, projectId, memberId, start, end, end);
+  /**
+   * 답 창 안에서 그 팀장이 대화에 쓴 첫 글. 서버가 만든 알림(시스템 글, '대표 전달 지연')은 답이 아니다.
+   * skipped: 창 안이지만 이 글과 무관한 실행이 돈 구간([만든 때, 끝난 때], 끝나지 않았으면 끝없음). 그 구간에 쓴 글은 그 실행의 것이다.
+   */
+  private firstReply(projectId: string, memberId: string, start: string, end: string | null, skipped: ReplySpan[] = []): { id: string; at: string } | null {
+    const row = this.row(`SELECT m.id, m.at FROM messages m WHERE m.project_id = ? AND m.member_id = ? AND m.mine = 0 AND m.at >= ?
+        AND (? IS NULL OR m.at < ?) AND m.kind <> '시스템' AND m.who <> '시스템'
+        AND NOT EXISTS (SELECT 1 FROM json_each(?) s WHERE m.at >= json_extract(s.value, '$[0]') AND (json_extract(s.value, '$[1]') IS NULL OR m.at <= json_extract(s.value, '$[1]')))
+      ORDER BY m.at, m.id LIMIT 1`, projectId, memberId, start, end, end, JSON.stringify(skipped.map(span => [span.from, span.to])));
     return row ? { id: row.id, at: row.at } : null;
+  }
+
+  /**
+   * 핫픽스 C: 그 실행은 Claude 가 뒤 작업(워크플로·백그라운드 에이전트·셸)을 남기고 끝낸 턴으로 닫혔고(사유 claude_background_task), at 시각에 아직 그
+   * 작업의 끝을 보지 못했다: 미룬 결과 보고 확인(report_requested_at, 그 작업이 끝난 뒤의 첫 성공 턴 끝에 채운다)이 그 뒤이고, 같은 터미널이다.
+   * 잠재우기·새 세션·다시 띄움으로 터미널이 바뀌었으면 그 작업은 없다. 판정은 DB 기록만으로 하므로 서버를 다시 띄워도 같다.
+   */
+  private backgroundAwaiting(run: ExecutionJournal, at: string, terminalId: string | null): boolean {
+    return run.reason === CLAUDE_BACKGROUND_REASON && run.result === "success" && run.endedAt !== null && run.endedAt <= at &&
+      (run.reportRequestedAt === null || at < run.reportRequestedAt) && !!terminalId && terminalId === run.identity.terminalId;
   }
 
   /** 그 실행에서 총괄이 다른 팀장에게 일을 맡겼다(배정 확인 기록). */
@@ -1307,22 +1338,40 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
    * 이 글을 실은 실행과 그 실행을 잇는 그 팀장의 뒤 실행들(만든 차례), 그리고 이 글과 무관한 실행이 만들어진 때(답 창이 거기서 닫힌다).
    * 잇는 실행은 앞 실행을 잇는 서버 글을 실은 것뿐이다(continuesReplyRun). 팀장 보고로 깬 총괄의 턴, 총괄의 다른 지시, 중단 알림·할 일 완료·
    * 판 정리로 깬 턴, 대표의 다음 글은 잇지 않는다. 판정은 DB 기록만으로 하므로 서버를 다시 띄워도 같다.
+   * 핫픽스 C: 이은 마지막 실행이 뒤 작업을 남기고 닫혀 그 작업을 기다리는 동안(backgroundAwaiting) 같은 터미널에 들어간 무관한 실행은 창을 닫지 않고
+   * 그 구간(skipped)만 뺀다. 대표의 다음 글(end)이 그 구간에 들었으면 그 글로도 닫지 않는다(end 를 비워 돌려준다).
    */
-  private replyChain(memberId: string, first: ExecutionJournal, own: string[], end: string | null): { runs: ExecutionJournal[]; closedAt: string | null } {
+  private replyChain(memberId: string, first: ExecutionJournal, own: string[], end: string | null): { runs: ExecutionJournal[]; closedAt: string | null; skipped: ReplySpan[]; end: string | null } {
     const runs = [first];
+    const skipped: ReplySpan[] = [];
+    // 핫픽스 C: 대표의 다음 글(end)이 뒤 작업을 기다리는 동안 건너뛴 실행으로 들어갔으면 그 글로는 창을 닫지 않는다(그 실행 구간만 뺀다).
+    const inSkipped = (at: string) => skipped.some(span => span.from <= at && (span.to === null || at <= span.to));
     let seq = this.row("SELECT rowid AS seq FROM execution_journal WHERE run_id = ?", first.runId)?.seq as number | undefined;
     // 이어가기가 거듭되는 일(한도에 다시 걸림)은 있어도 끝없이 이어지지는 않는다. 계산이 길어지지 않게 한도를 둔다.
     for (let i = 0; seq !== undefined && i < 32; i++) {
       const next = this.row("SELECT rowid AS seq, run_id, created_at FROM execution_journal WHERE member_id = ? AND rowid > ? ORDER BY rowid LIMIT 1", memberId, seq);
-      if (!next || (end !== null && next.created_at >= end)) break;
+      if (!next) break;
+      if (end !== null && next.created_at >= end) {
+        if (!inSkipped(end)) break;
+        end = null;
+      }
       const carried = this.rows("SELECT d.id, d.kind, d.text FROM delivery_dispatch_items i JOIN deliveries d ON d.id = i.delivery_id WHERE i.dispatch_id = ?", next.run_id);
-      if (!carried.some(d => continuesReplyRun({ id: d.id, kind: d.kind, text: d.text }, own, runs))) return { runs, closedAt: next.created_at as string };
       const entry = this.getExecutionJournal(next.run_id);
+      if (!carried.some(d => continuesReplyRun({ id: d.id, kind: d.kind, text: d.text }, own, runs))) {
+        // 핫픽스 C: 이은 마지막 실행이 뒤 작업을 남기고 닫혀 그 작업을 기다리는 동안 들어간 무관한 실행(그사이 온 지시·알림)은 창을 닫지 않는다.
+        // 그 작업 뒤에 Claude 가 스스로 연 턴에서 쓴 답을 세야 한다. 그 실행이 돈 구간에 쓴 글은 그 실행의 것이라 답으로 세지 않는다.
+        if (entry && this.backgroundAwaiting(runs.at(-1)!, entry.createdAt, entry.identity.terminalId)) {
+          skipped.push({ from: entry.createdAt, to: entry.endedAt });
+          seq = next.seq as number;
+          continue;
+        }
+        return { runs, closedAt: next.created_at as string, skipped, end: end !== null && inSkipped(end) ? null : end };
+      }
       if (!entry) break;
       runs.push(entry);
       seq = next.seq as number;
     }
-    return { runs, closedAt: null };
+    return { runs, closedAt: null, skipped, end: end !== null && inSkipped(end) ? null : end };
   }
 
   /**
@@ -3851,6 +3900,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const column = kind === "interruption" ? "interruption_notified_at" : "report_requested_at";
       if (this.db.query(`UPDATE execution_journal SET ${column} = ? WHERE run_id = ? AND ${column} IS NULL`).run(nowIso(), runId).changes !== 1) return false;
       write();
+      // 핫픽스 C: 뒤 작업을 남기고 닫힌 실행의 답 상태는 결과 보고 확인 시각으로 '답 쓰는 중'이 끝난다(backgroundAwaiting).
+      if (kind === "report") this.noteReply(this.row("SELECT member_id FROM execution_journal WHERE run_id = ?", runId)?.member_id);
       return true;
     });
   }

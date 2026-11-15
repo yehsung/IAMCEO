@@ -14,6 +14,8 @@
 //   그 서버 글이 아직 들어가기 전이면 '답 쓰는 중'으로 둔다('답 없이 끝남'·'멈춤'을 띄웠다가 곧 지우지 않는다).
 //   이 글과 무관한 실행(팀장 보고로 깬 총괄 턴, 총괄의 다른 지시, 알림·판 정리로 깬 턴)이 시작되면 답 창이 거기서 닫힌다(저장소가 정한다).
 //   그동안 이 글은 끝난 상태 그대로이고, 그 턴에서 쓴 글은 이 글의 답이 아니다.
+// - 핫픽스 C: Claude 가 뒤 작업을 남기고 끝낸 턴(실행 기록 사유 claude_background_task)은 그 작업이 끝나 결과 보고를 확인할 때까지 '잇는 중'(continuing)이다.
+//   그동안 들어간 무관한 실행은 창을 닫지 않고 그 실행이 돈 구간만 창에서 뺀다(저장소가 정한다).
 import type { DeliveryStatus, DeliveryWaitInfo, DeliveryWaitReason, Member, MessageReply, ReplyReason, ReplyState } from "../shared/types.ts";
 
 /** 실행 기록에서 판정에 쓰는 칸. */

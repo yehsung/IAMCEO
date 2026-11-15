@@ -1,6 +1,7 @@
 // E1: 훅이 남긴 사건 기록($IAMCEO_HOME/run/events/<팀장>.jsonl)을 읽기만 한다. 쓰는 쪽은 hooks.ts 의 기록 스크립트다.
 // 파일이 상한을 넘으면 기록 스크립트가 <팀장>.1.jsonl 로 돌린다. 읽던 파일이 돌아갔으면 .1 에서 남은 부분을 마저 읽고 새 파일로 넘어간다.
-import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
+import { dirname } from "node:path";
 import { HOOK_EVENTS, hookEventsFile, type HookEventName } from "./hooks.ts";
 
 export interface HookEventRecord {
@@ -121,4 +122,31 @@ export class HookEventReader {
     }
     return { records, invalid };
   }
+}
+
+/**
+ * 압축 끝을 알리는 훅 기록인가(CoreRunner 가 압축 완료의 근거로 쓴다). 그 세션에서, since(서버가 압축 명령을 넣기 직전에 적은 시각, 같은 Mac 의 시계)
+ * 뒤에 온 PostCompact(trigger=manual: 서버가 넣는 `/compact` 는 CLI 에게 수동 압축이다) 또는 SessionStart(source=compact).
+ * 앞선 압축(since 전), 다른 세션·세션 ID 없는 기록, CLI 스스로의 자동 압축(trigger=auto)은 아니다.
+ */
+export function isCompactEndHook(record: HookEventRecord, sessionId: string, since: number): boolean {
+  if (!sessionId || record.sessionId !== sessionId || !(record.at >= since)) return false;
+  return (record.event === "PostCompact" && record.trigger === "manual") || (record.event === "SessionStart" && record.source === "compact");
+}
+
+/**
+ * 판정 근거로 읽어도 되는 사건 파일인가: run 폴더·사건 폴더·그 팀장의 파일이 링크가 아니고 이 사용자의 것이며 그룹·다른 사용자가 쓸 수 없다.
+ * 훅 기록에는 서명이 없다. 이 사용자로 도는 프로세스(그 팀장의 CLI 자신 포함)는 쓸 수 있으니, 세션 기록(JSONL)과 같은 신뢰 수준이다.
+ * 비교 기록(HookShadow)은 이것을 보지 않는다(판정에 쓰지 않으므로).
+ */
+export function hookEventsTrusted(eventsDir: string, memberId: string): boolean {
+  if (!MEMBER_RE.test(memberId)) return false;
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  try {
+    for (const path of [dirname(eventsDir), eventsDir, hookEventsFile(eventsDir, memberId)]) {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink() || (uid !== null && stat.uid !== uid) || (stat.mode & 0o022) !== 0) return false;
+    }
+    return true;
+  } catch { return false; }
 }

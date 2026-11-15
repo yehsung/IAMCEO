@@ -113,16 +113,24 @@ export function coreContextMeasurement(reading: ContextReading, observed: CoreCo
 }
 
 export interface CompactBoundaryBaseline extends CoreContextIdentity { path: string; fileIdentity: string; offset: number }
-export interface CompactBoundaryCursor { baseline: CompactBoundaryBaseline; queryKey: string; log: JsonlCursor | null; boundary: boolean; invalid: boolean }
+/**
+ * 경계 판정 규칙의 판. 2: Claude 경계 줄의 cwd 를 보지 않는다. 그 값은 Bash 의 cd 를 따라 바뀌는 지금 폴더일 뿐이고(2026-11-15 실측:
+ * 하위 폴더에 들어가 있던 팀장의 경계 줄을 못 알아봐 압축이 '결과 모름'으로 13시간 남음), 세션은 파일(세션 ID 이름)과 줄의 sessionId 로 묶는다.
+ * 판이 다른 커서(옛 규칙으로 이미 지나 읽은 것)는 버리고 기준선부터 다시 읽는다.
+ */
+export const COMPACT_BOUNDARY_RULES = 2;
+export interface CompactBoundaryCursor { baseline: CompactBoundaryBaseline; queryKey: string; log: JsonlCursor | null; boundary: boolean; invalid: boolean; rules?: number }
 export interface CompactBoundaryResult { outcome: "succeeded" | "pending" | "unknown"; code: string; cursor: CompactBoundaryCursor | null }
 /** Boundary is a candidate; success additionally requires same-owner settled CLI and no provider error. */
 export function observeCompactBoundary(options: { cli: CliProvider; home: string; cwd: string; baseline: CompactBoundaryBaseline; current: CoreContextIdentity; settled: boolean; providerError: boolean; cursor?: CompactBoundaryCursor | null }): CompactBoundaryResult {
   const { baseline, current } = options;
   const queryKey = JSON.stringify([options.cli, options.home, options.cwd, baseline]);
-  const unknown = (code: string): CompactBoundaryResult => ({ outcome: "unknown", code, cursor: options.cursor ?? null });
+  // 옛 규칙의 커서는 그 위치까지 읽은 줄을 지금 규칙으로 다시 보지 못하게 한다. 버리고 기준선(baseline.offset)부터 읽는다.
+  const cursor = options.cursor?.rules === COMPACT_BOUNDARY_RULES ? options.cursor : null;
+  const unknown = (code: string): CompactBoundaryResult => ({ outcome: "unknown", code, cursor });
   if (baseline.sessionId !== current.sessionId || baseline.generation !== current.generation || baseline.terminalId !== current.terminalId || baseline.model !== current.model ||
     (baseline.turn !== null && (current.turn === null || current.turn < baseline.turn)) || !baseline.fileIdentity ||
-    (options.cursor && options.cursor.queryKey !== queryKey)) return unknown("session_changed");
+    (cursor && cursor.queryKey !== queryKey)) return unknown("session_changed");
   const root = options.cli === "codex" ? join(options.home, "sessions") : join(options.home, "projects");
   if (!providerLogPath(root, baseline.path)) return unknown("path_unavailable");
   if (options.cli === "codex") {
@@ -130,15 +138,16 @@ export function observeCompactBoundary(options: { cli: CliProvider; home: string
     const meta = parseCodexSessionMeta(head.records[0]?.value);
     if (meta?.sessionId !== current.sessionId || meta.cwd !== options.cwd || head.records[0]?.start !== 0) return unknown("session_conflict");
   }
-  const range = readJsonlRange(root, baseline.path, options.cursor?.log, { startOffset: baseline.offset, fileIdentity: baseline.fileIdentity, maxBytes: 1024 * 1024 });
+  const range = readJsonlRange(root, baseline.path, cursor?.log, { startOffset: baseline.offset, fileIdentity: baseline.fileIdentity, maxBytes: 1024 * 1024 });
   if (!range.cursor || !["complete_range", "corrupt_log", "partial_log", "scan_pending"].includes(range.code)) return unknown(range.code);
-  const state: CompactBoundaryCursor = { baseline: { ...baseline }, queryKey, log: range.cursor, boundary: options.cursor?.boundary ?? false, invalid: options.cursor?.invalid ?? false };
+  const state: CompactBoundaryCursor = { baseline: { ...baseline }, queryKey, log: range.cursor, boundary: cursor?.boundary ?? false, invalid: cursor?.invalid ?? false, rules: COMPACT_BOUNDARY_RULES };
   for (const record of range.records) {
     const entry = jsonObject(record.value);
     if (!entry) { state.invalid = true; continue; }
     if (entry.isSidechain || entry.isMeta || entry.isReplay || entry.is_replay) continue;
     if (options.cli === "codex" && entry.type === "session_meta") state.invalid = true;
-    if (options.cli === "claude" && entry.type === "system" && entry.subtype === "compact_boundary" && entry.sessionId === current.sessionId && entry.cwd === options.cwd) state.boundary = true;
+    // Claude 줄의 cwd 는 비교하지 않는다(COMPACT_BOUNDARY_RULES). 다른 세션·사이드체인 줄은 위·여기서 거른다.
+    if (options.cli === "claude" && entry.type === "system" && entry.subtype === "compact_boundary" && entry.sessionId === current.sessionId) state.boundary = true;
     if (options.cli === "codex" && entry.type === "compacted" && (entry.sessionId === undefined || entry.sessionId === current.sessionId)) state.boundary = true;
   }
   if (options.providerError) return { outcome: "unknown", code: "provider_error", cursor: state };

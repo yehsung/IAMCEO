@@ -7,6 +7,10 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
+### 아직 내지 않은 것
+
+- **하위 폴더에서 일하던 팀장의 압축이 '결과 모름'으로 멈추지 않습니다.** Claude 팀장이 작업 폴더 안의 하위 폴더로 들어가 일하던 중에 문맥을 압축하면, 압축은 끝났는데 서버가 그 끝을 알아보지 못해 그 팀장에게 가는 글이 모두 멈춰 있었습니다. 이제 세션 기록의 압축 표시를 폴더와 상관없이 알아보고, 기록에서 찾지 못해도 Claude가 직접 남기는 '압축 끝' 알림과 쉬는 CLI로 끝을 확인합니다. 이미 이렇게 멈춰 있던 팀장도 새 서버가 뜨면 곧바로 풀려 기다리던 글이 나갑니다. 같은 까닭으로 그런 팀장이 받은 글을 '전달됐는지 확인하는 중'으로 오래 두거나 보관을 막던 것도 고쳤습니다.
+
 ### 0.2.6 — 2026-11-14
 
 - **대화에서 '답 쓰는 중'이 보입니다.** 총괄이나 팀장에게 글을 보내면 대화 맨 아래(내 마지막 글 아래)에 받은 이의 이름과 함께 지금 어떻게 하고 있는지 한 줄로 보입니다. 그 글을 받아 턴을 돌리는 동안은 움직이는 점 세 개와 '결제 총괄이 답을 쓰는 중…'이, 1분이 넘으면 '읽고 일하는 중 · 3분째'가 보이고, 답이 오면 사라집니다. 이 글과 무관한 앞 일을 하던 중이면 '앞 일을 마치는 중', 잠들어 있으면 '깨우는 중', 넣은 결과를 모르면 '전달됐는지 확인하는 중', 승인 창·사용 한도·인터넷·오류로 멈췄으면 그 까닭을 짧게 보입니다. 답 없이 턴이 끝났으면(서버가 결과 보고를 한 번 더 부탁한 뒤에도) 내 글 아래에 '읽었지만 답하지 않았습니다', 턴이 끊겼으면 '답하기 전에 멈췄습니다'가 남습니다. 여러 팀장에게 보냈으면 팀장마다 한 줄입니다. 판정은 서버가 전달 기록·턴 시작과 끝·대화로 하고 앱은 그대로 그립니다(Claude Code·Codex 같음). '동작 줄이기'를 켜면 점이 움직이지 않습니다. 대화 화면에만 보이고 대화 목록·홈에는 없습니다. 서버와 앱이 모두 이 판이어야 보이며, 출시된 0.2.5 이하 앱은 지금과 같이 보입니다. 샘플에서 지시를 보내도 답이 오기 전 잠깐 보입니다.
@@ -136,6 +140,10 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - 첫 공개. 내 Mac에서 서버를 켜고 브라우저로 Claude Code 세션 여럿을 총괄과 팀으로 부립니다. 홈·결재함·팀·대화·자료 다섯 화면. Claude Code 전용, AGPL-3.0-only.
 
 ## English
+
+### Unreleased
+
+- **A lead's context compaction no longer gets stuck as "result unknown" when the lead was working in a subfolder.** When a Claude lead had moved into a subfolder of its working folder, the server could not tell that its compaction had finished, so every message to that lead stayed on hold. The server now recognizes the compaction mark in the session record whatever folder the lead is in, and when the record doesn't show it, confirms the end from Claude's own end-of-compaction signal together with an idle CLI. A lead already stuck this way is released as soon as the new server starts, and the waiting messages go out. Messages such a lead received are also no longer left as "checking whether it was delivered", and archiving is no longer refused for it.
 
 ### 0.2.6 — 2026-11-14
 

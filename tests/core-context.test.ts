@@ -241,6 +241,8 @@ describe("실제 CoreRunner와 Store 압축 포트", () => {
     expect(persistedBeforeInput).toBe(true);
     expect(sends).toMatchObject([{ text: "/compact 초점 다음", if: "idle", force: false, wait: false }]);
     await until(() => f.store.getContextState(member.id)?.compaction?.phase === "uncertain");
+    // 넣기는 영수증으로 확인됐다. 기한 안에 경계를 못 본 것은 '완료 미확인'이지 '넣기 불확실'(send_uncertain)이 아니다.
+    expect(f.store.getContextState(member.id)?.compaction?.reason).toBe("completion_timeout");
     await runner.shutdown();
     const recovered = new CoreRunner(options, deps); runners.push(recovered);
     const events: RunnerEvent[] = []; recovered.on(e => events.push(e));

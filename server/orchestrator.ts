@@ -362,7 +362,8 @@ export function coreCompactStore(store: Store): NonNullable<CoreRunnerDeps["comp
         measurement: compact.phase === "sending" || compact.phase === "succeeded" ? null : state.measurement,
         baseline: { ...state.baseline, coreCompact: compact },
         compaction: { id: compact.id, trigger: before?.trigger ?? "manual", phase: compact.phase,
-          reason: compact.phase === "uncertain" ? "send_uncertain" : compact.phase === "failed" ? "provider_error" : null,
+          // 실행기가 넣은 것을 확인한 뒤의 '결과 모름'은 완료 미확인(completion_timeout)이다. 그 밖의 uncertain 은 예전처럼 넣기 불확실이다.
+          reason: compact.phase === "uncertain" ? (compact.reason === "completion_timeout" ? "completion_timeout" : "send_uncertain") : compact.phase === "failed" ? "provider_error" : null,
           requestedAt: before?.requestedAt ?? at, startedAt: new Date(compact.startedAt).toISOString(),
           finishedAt: ["succeeded", "failed"].includes(compact.phase) ? at : null },
       }, compact.phase === "sending" || compact.phase === "succeeded" ? { contextPct: null } : {});
@@ -1946,9 +1947,10 @@ export class Orchestrator implements OrchestratorApi {
       const log = this.contextLog(member);
       if (!log) throw new ApiError(409, "이어갈 native 세션 기록을 확인할 수 없습니다", "resume_record_missing");
       const records = readJsonlRange(join(log.home, member.cli === "codex" ? "sessions" : "projects"), log.path).records;
+      // Claude 줄의 cwd 는 Bash 의 cd 를 따라 바뀌는 지금 폴더라 보지 않는다. 기록 파일은 세션 ID 로 찾았고 줄의 sessionId 로 확인한다.
       if (member.cli !== "codex" && !records.some(record => {
         const entry = jsonObject(record.value);
-        return entry?.sessionId === member.sessionId && entry.cwd === member.cwd && !entry.isSidechain;
+        return entry?.sessionId === member.sessionId && !entry.isSidechain;
       })) throw new ApiError(409, "현재 native 세션과 일치하는 주 세션 기록을 확인할 수 없습니다", "resume_record_mismatch");
     }
   }

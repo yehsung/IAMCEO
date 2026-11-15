@@ -1,5 +1,6 @@
 // E1: Claude Code 의 공식 훅으로 CLI 가 직접 사건(입력 접수, 턴 끝, 오류 종류, 압축, 세션 시작)을 파일에 남기게 한다.
 // 이번 단계는 '나란히 모으기'다. 서버의 판정은 지금 근거(OSC 상태 보고, 세션 기록, 화면) 그대로이고, 이 기록은 비교에만 쓴다(hook-compare.ts).
+// 예외 하나: 압축 끝 훅(PostCompact manual·SessionStart compact)은 CoreRunner 가 압축 완료의 근거로도 읽는다(hook-events.ts isCompactEndHook).
 //
 // 지키는 것
 // - 전역 설정(~/.claude/settings.json 등)은 건드리지 않는다. 훅은 statusLine 과 같은 --settings 하나에 호출마다 넣는다(providers.ts).

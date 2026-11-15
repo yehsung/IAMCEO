@@ -19,6 +19,7 @@ import { readDeliveryEvidence, readJsonlRange, parseCodexSessionMeta, providerLo
 import type { DeliveryDispatch, RunnerRecoveryStore, TerminalLease } from "../service-contracts.ts";
 import { readTranscriptTail, transcriptPath } from "./transcript.ts";
 import { HookShadow } from "./hook-compare.ts";
+import { HookEventReader, hookEventsTrusted, isCompactEndHook } from "./hook-events.ts";
 import { hookEventsDir } from "./hooks.ts";
 import type { FullRunner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, DeliveryProbe, DeliveryInspection, DeliveryRepair, DeliveryLogBaseline, RunnerTerminalIdentity, RunnerReattachResult, RunnerObservation } from "./types.ts";
 import { ERROR_CODES } from "../../shared/error-codes.ts";
@@ -28,7 +29,13 @@ export interface CoreRunnerOptions extends ProviderBins { coreBin?: string; sock
 export interface CoreCompactState {
   id: string; baseline: CompactBoundaryBaseline; phase: "sending" | "running" | "uncertain" | "succeeded" | "failed";
   startedAt: number; cursor: CompactBoundaryCursor | null;
-  reason?: "user_resolved";
+  /**
+   * user_resolved: 대표의 확인으로 닫음. completion_timeout: 넣은 것이 확인된(running) 압축의 완료를 기한 안에 확인하지 못함
+   * (넣기가 불확실한 send_uncertain 과 구별한다. 저장소가 compaction.reason 으로 옮긴다).
+   */
+  reason?: "user_resolved" | "completion_timeout";
+  /** 무엇으로 완료를 확인했나. hook: 세션 기록의 경계 대신 CLI 의 압축 끝 훅(같은 세션, 넣은 뒤)과 정착한 CLI. 없으면 기록 경계. */
+  evidence?: "hook";
   /** Only acknowledged human input can arm resolution; idle alone is insufficient. */
   manualResolution?: { turn: number | null; unsettled: boolean };
 }
@@ -84,6 +91,8 @@ interface Track {
   settledAt: number; settleTries: number;
   epoch: number; endedTurn: number; completing: boolean; refresh: Promise<CoreTerminal> | null;
   nonce: string | null; bindingSince: string; binding: CodexBindingCursor | null; compact: CoreCompactState | null;
+  /** 이 압축(id)의 끝을 알리는 훅을 찾는 읽기. 한 번 찾으면 seen 이 남는다. */
+  compactHook: { id: string; reader: HookEventReader; seen: boolean } | null;
   dispatches: DeliveryDispatch[]; evidence: Map<string, DeliveryEvidenceCursor>; lastError: string | null;
   nextPollAt: number; pollDelay: number;
   observedAt: string; failures: number; failure: string | null;
@@ -173,13 +182,16 @@ export class CoreRunner implements FullRunner {
   private methods = new Set<string>();
   /** E1 나란히 모으기. 판정에는 쓰지 않는다. */
   private readonly hookShadow: HookShadow | null;
+  /** 훅 사건 폴더. 압축 끝 훅을 완료의 근거로 읽을 때만 쓴다(checkCompact). 훅을 넣지 않는 환경이면 null. */
+  private readonly hookEvents: string | null;
 
   constructor(private readonly options: CoreRunnerOptions = {}, private readonly deps: CoreRunnerDeps = {}) {
     this.socketPath = options.socketPath || coreSocketPath(options.session);
     this.rpcTimeoutMs = deps.rpcTimeoutMs ?? 8000;
     this.sendTimeoutMs = deps.sendTimeoutMs ?? 20_000;
     // 훅은 contextHome 이 있을 때만 넣는다(providers.ts). 같은 조건에서만 비교한다.
-    this.hookShadow = deps.hookShadow === false ? null : deps.hookShadow ?? (options.contextHome && (options.hookEvents ?? process.env.IAMCEO_HOOK_EVENTS !== "0") ? new HookShadow({ eventsDir: hookEventsDir(options.contextHome) }) : null);
+    this.hookEvents = options.contextHome && (options.hookEvents ?? process.env.IAMCEO_HOOK_EVENTS !== "0") ? hookEventsDir(options.contextHome) : null;
+    this.hookShadow = deps.hookShadow === false ? null : deps.hookShadow ?? (this.hookEvents ? new HookShadow({ eventsDir: this.hookEvents }) : null);
   }
   /** Scope cancellation to this attempt; a late read must never initiate another input. */
   withSignal<T>(signal: AbortSignal, waiting: (stage: string) => void, action: () => Promise<T>, deadline: number): Promise<T> {
@@ -332,7 +344,7 @@ export class CoreRunner implements FullRunner {
     const launch = terminal.labels["iamceo.operation"] ? this.deps.recoveryStore?.getLifecycleJournal?.(terminal.labels["iamceo.operation"]) : null;
     const launchedAt = launch?.memberId === member.id && launch.intent === "start" ? launch.createdAt : null;
     const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, controlUncertain: false, restorePending: false, lost: false, silentSince: null, settledAt: -Infinity, settleTries: 0, status: null, statusKey: null, composerEmpty: null, statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
-      epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, bindingSince: terminal.labels["iamceo.startedAt"] || launchedAt || new Date().toISOString(), binding: null, compact: null,
+      epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, bindingSince: terminal.labels["iamceo.startedAt"] || launchedAt || new Date().toISOString(), binding: null, compact: null, compactHook: null,
       dispatches: [], evidence: new Map(), logFile: null, lastError: null, nextPollAt: 0, pollDelay: this.pollMs, observedAt: new Date().toISOString(), failures: 0, failure: null };
     // The terminal exists whether or not the persisted input state can be read. Throwing here left a terminal that
     // nobody tracked (terminal.run had already succeeded) and a start whose result read as unknown: every later
@@ -989,11 +1001,15 @@ export class CoreRunner implements FullRunner {
       }
     }
     if (this.manualLease(track.member.id) || operation.phase === "sending") return;
+    const settled = track.terminal.state === "live" && ["idle", "done"].includes(state || "");
     const result = observeCompactBoundary({ cli: providerFor(track.member), home: this.providerHome(track.member), cwd: track.member.cwd, baseline: operation.baseline,
       current: { sessionId: track.sessionId!, generation: track.member.sessionGeneration ?? -1, terminalId: track.terminal.address, turn: track.terminal.turn ?? null, model: track.member.model },
-      settled: track.terminal.state === "live" && ["idle", "done"].includes(state || ""), providerError: state === "error", cursor: operation.cursor });
-    if (result.outcome === "succeeded") {
-      this.saveCompact(track, { ...operation, cursor: result.cursor, phase: "succeeded" });
+      settled, providerError: state === "error", cursor: operation.cursor });
+    // 세션 기록에 경계가 없어도(기록 모양이 바뀜, 읽지 못함) CLI 가 압축 끝을 훅으로 알렸고 쉬고 있으면 끝난 것이다. 시간만으로는 닫지 않는다.
+    const hook = result.outcome !== "succeeded" && state !== "error" && settled && this.compactEndHook(track, operation, result.code);
+    if (result.outcome === "succeeded" || hook) {
+      this.saveCompact(track, { ...operation, cursor: result.cursor, phase: "succeeded", ...(hook ? { evidence: "hook" as const } : {}) });
+      if (hook) console.warn(`[hooks] ${track.member.id}: 세션 기록에서 압축 경계를 확인하지 못했지만(${result.code}) 압축 끝 훅과 쉬는 CLI 로 압축을 닫았습니다`);
       track.pending = false; track.controlUncertain = false; track.uncertain = track.dispatches.length > 0; track.endedTurn = Math.max(track.endedTurn, track.terminal.turn ?? 0);
       this.event(track, { type: "compacted", memberId: track.member.id, runId: operation.id });
       // Post-compact usage is collected by the next fresh provider sample; never emit 0%.
@@ -1003,8 +1019,31 @@ export class CoreRunner implements FullRunner {
       track.lastError = track.terminal.status?.msg || "CLI reported a compact error";
       this.event(track, { type: "activity", memberId: track.member.id, kind: "error", text: "CLI reported that context compaction failed", runId: operation.id });
     } else if (Date.now() - operation.startedAt >= (this.deps.compactTimeoutMs ?? 600_000) || result.outcome === "unknown") {
-      this.saveCompact(track, { ...operation, cursor: result.cursor, phase: "uncertain" }); track.uncertain = true;
+      // 넣은 것이 확인된(running) 압축이 여기서 '결과 모름'이 되면 완료를 확인하지 못한 것이다. 예전에는 저장소가 모든 uncertain 을
+      // send_uncertain(넣기가 불확실)으로 적어, 넣기는 성공한 2026-11-15 압축도 그렇게 보였다.
+      this.saveCompact(track, { ...operation, cursor: result.cursor, phase: "uncertain", ...(operation.phase === "running" ? { reason: "completion_timeout" as const } : {}) }); track.uncertain = true;
     } else operation.cursor = result.cursor;
+  }
+  /**
+   * 이 압축의 끝을 알리는 훅이 왔는가. 같은 팀장(사건 파일), 압축을 넣은 그 세션·세대·터미널이 지금 것과 같고, 넣은 뒤(startedAt 이후)의
+   * PostCompact(manual)·SessionStart(compact) 기록이어야 한다(isCompactEndHook). 사건 폴더·파일이 이 사용자 것이 아니거나 남이 쓸 수 있으면 읽지 않는다.
+   * 훅은 Claude 에만 있다. 정착한 CLI(쉼·끝남)는 부르는 쪽이 따로 요구한다.
+   */
+  private compactEndHook(track: Track, operation: CoreCompactState, code: string): boolean {
+    if (!this.hookEvents || providerFor(track.member) !== "claude" || ["session_changed", "session_conflict"].includes(code)) return false;
+    const { baseline } = operation;
+    if (!track.sessionId || baseline.sessionId !== track.sessionId || baseline.generation !== (track.member.sessionGeneration ?? -1) || baseline.terminalId !== track.terminal.address) return false;
+    let watch = track.compactHook;
+    if (!watch || watch.id !== operation.id) {
+      try { watch = track.compactHook = { id: operation.id, reader: new HookEventReader(this.hookEvents, track.member.id), seen: false }; }
+      catch { return false; }
+    }
+    if (watch.seen) return true;
+    if (!hookEventsTrusted(this.hookEvents, track.member.id)) return false;
+    let records: ReturnType<HookEventReader["read"]>["records"];
+    try { records = watch.reader.read().records; } catch { return false; }
+    watch.seen = records.some(record => isCompactEndHook(record, baseline.sessionId, operation.startedAt));
+    return watch.seen;
   }
   async setParallel(member: RunnerMember, on: boolean, opts: StartOpts): Promise<SendResult> {
     if (providerFor(member) === "codex") {

@@ -264,9 +264,10 @@ export function readDeliveryEvidence(options: DeliveryEvidenceOptions): Delivery
   if (cli === "claude" && !state.recognized && baseline?.offset) {
     const head = readJsonlRange(root, path, null, { maxBytes: Math.min(1024 * 1024, budget), fileIdentity: baseline.fileIdentity });
     headerBytes += head.bytesRead;
+    // Claude 줄의 cwd 는 Bash 의 cd 를 따라 바뀌는 지금 폴더다. 세션은 파일 이름(세션 ID)과 줄의 sessionId 로 확인한다.
     state.recognized = head.records.some(({ value }) => {
       const entry = jsonObject(value);
-      return entry?.sessionId === sessionId && entry.cwd === cwd && !entry.isSidechain;
+      return entry?.sessionId === sessionId && !entry.isSidechain;
     });
   }
   const range = readJsonlRange(root, path, state.log, { maxBytes: Math.max(0, budget - headerBytes), startOffset: baseline?.offset, fileIdentity: baseline?.fileIdentity });
@@ -277,7 +278,7 @@ export function readDeliveryEvidence(options: DeliveryEvidenceOptions): Delivery
     const entry = jsonObject(record.value);
     if (!entry || typeof entry.type !== "string") { state.unsupported = true; continue; }
     if (!supportedUserTextLayout(cli, entry)) state.unsupported = true;
-    if (cli === "claude" && entry.sessionId === sessionId && entry.cwd === cwd && !entry.isSidechain) state.recognized = true;
+    if (cli === "claude" && entry.sessionId === sessionId && !entry.isSidechain) state.recognized = true;
     if (cli === "claude" && !CLAUDE_RECORD_TYPES.includes(entry.type)) {
       // Claude Code keeps adding bookkeeping record types (2.1.319 wrote "cost-state" on /exit). An unknown type is
       // only harmless when it cannot be received input: no user-shaped message and none of our markers anywhere.
@@ -321,7 +322,8 @@ export function readDeliveryEvidence(options: DeliveryEvidenceOptions): Delivery
     if ((user.eventId && (seen.has(user.eventId) || user.eventId === baseline?.eventId)) ||
       (options.since && user.timestamp && Date.parse(user.timestamp) < Date.parse(options.since))) continue;
     if (user.eventId) seen.add(user.eventId);
-    const correct = cli === "claude" ? user.sessionId === sessionId && user.cwd === cwd :
+    // Claude: 하위 폴더로 cd 한 팀장이 받은 글도 그 세션의 글이다(줄의 cwd 는 보지 않는다). Codex 는 session_meta 의 시작 폴더로 묶는다.
+    const correct = cli === "claude" ? user.sessionId === sessionId :
       state.meta?.sessionId === sessionId && state.meta.cwd === cwd && (user.sessionId === null || user.sessionId === sessionId) && (user.cwd === null || user.cwd === cwd);
     const bundle = options.bundleMarker && user.texts.some((text) => hasExactMarker(text, options.bundleMarker!));
     const matches = markers.filter(({ marker }) => bundle || user.texts.some((text) => hasExactMarker(text, marker)));

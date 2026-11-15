@@ -57,12 +57,24 @@ describe("direct user evidence", () => {
     expect(hasExactMarker(marker, "")).toBe(false);
     expect(readDeliveryEvidence({ ...fixture("claude", [claude()]), markers: [{ deliveryId: "d1", marker: "#msg_old" }] }).evidence.verdict).toBe("unknown");
   });
-  test("other native session/cwd produces conflict, never target receipt or absence", () => {
-    for (const row of [claude(marker, { sessionId: "other" }), claude(marker, { cwd: "/other" })]) {
-      expect(readDeliveryEvidence(fixture("claude", [row]))).toMatchObject({ receivedDeliveryIds: [], evidence: { verdict: "unknown", code: "session_conflict" } });
-    }
+  test("other native session produces conflict, never target receipt or absence", () => {
+    expect(readDeliveryEvidence(fixture("claude", [claude(marker, { sessionId: "other" })]))).toMatchObject({ receivedDeliveryIds: [], evidence: { verdict: "unknown", code: "session_conflict" } });
     expect(readDeliveryEvidence(fixture("codex", [meta("other"), codex()])).evidence.code).toBe("session_conflict");
     expect(readDeliveryEvidence(fixture("codex", [meta("session", { session_id: "other" }), codex()])).receivedDeliveryIds).toEqual([]);
+  });
+  // 2026-11-15 라이브: Claude 는 줄마다 Bash 의 cd 를 따른 지금 폴더를 cwd 로 적는다. 하위 폴더(또는 다른 폴더)에 들어가 있던 팀장이 받은 글도
+  // 그 세션의 글이다. 예전에는 이것을 '다른 세션'으로 보아 받은 전달을 충돌(session_conflict)로, 받지 않은 것을 '모름'으로 남겼다.
+  test("Claude records written after the leader changed directory are this session's records", () => {
+    for (const cwd of [join(runtime.paths.work, "drafts", "chapter-2"), "/other"]) {
+      expect(readDeliveryEvidence(fixture("claude", [claude(marker, { cwd })]))).toMatchObject({ receivedDeliveryIds: ["d1"], evidence: { verdict: "present", code: "marker_in_user_input" } });
+      // 표지 없는 하위 폴더 줄만 있어도 그 세션의 기록으로 알아보고 '없음'을 판정한다.
+      expect(readDeliveryEvidence(fixture("claude", [claude("an unrelated input", { cwd })])).evidence).toMatchObject({ verdict: "absent", complete: true });
+      // 기준선 뒤만 읽을 때 앞부분으로 세션을 알아보는 확인도 같다.
+      const opts = fixture("claude", [claude("an earlier input", { cwd, uuid: "first" })]);
+      const log = readJsonlRange(join(opts.home, "projects"), opts.path).cursor!;
+      appendFileSync(opts.path, line(claude(marker, { cwd, uuid: "second" })));
+      expect(readDeliveryEvidence({ ...opts, baseline: { path: opts.path, fileIdentity: log.fileIdentity, offset: log.offset, eventId: null } })).toMatchObject({ receivedDeliveryIds: ["d1"], evidence: { complete: true } });
+    }
   });
   test("no metadata/unknown records and subagent metadata cannot prove target absence", () => {
     for (const rows of [[codex()], [meta("session", { source: { subagent: "parent" } }), codex()], [{ type: "new_provider_format", text: marker }]]) {

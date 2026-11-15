@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, type Server, type Socket } from "node:net";
-import { mkdirSync, mkdtempSync, renameSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CoreRunner, codexDraft, ensureCoreServer, type CoreRunnerDeps, type CoreCompactState } from "../server/runner/core.ts";
@@ -839,6 +839,41 @@ describe("compact control and shared native binding", () => {
     await until(() => events.some(e => e.type === "compacted")); expect(events.filter(e => e.type === "compacted")).toHaveLength(1);
     await Bun.sleep(40); expect(events.filter(e => e.type === "turn_end")).toHaveLength(0); expect(runner.isBusy(member().id)).toBe(false);
     expect(store.states.get(member().id)?.phase).toBe("succeeded");
+  });
+  // 압축 끝 훅(PostCompact manual·SessionStart compact)은 그 압축을 넣은 뒤, 같은 세션에서, 정착한 CLI 와 함께일 때만 완료의 근거다.
+  test.each([["PostCompact", { trigger: "manual" }], ["SessionStart", { source: "compact" }]] as const)("a %s hook from this session after the compact closes it without a log boundary; stale, foreign and untrusted hooks do not", async (event, extra) => {
+    const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
+    const runner = d.f.runner(10000, { compactStore: store.port }), events: RunnerEvent[] = []; runner.on(e => events.push(e));
+    await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: true });
+    const startedAt = store.states.get(member().id)!.startedAt;
+    const dir = join(d.f.dir, "run", "events"), file = join(dir, `${member().id}.jsonl`);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const hook = (record: Record<string, unknown>) => writeFileSync(file, JSON.stringify({ v: 1, at: startedAt + 1, event, sessionId: d.started.sessionId, ...extra, ...record }) + "\n", { flag: "a", mode: 0o600 });
+    const terminal = d.f.terminals.get(d.started.paneId)!;
+    const check = async () => { await runner.screen(member()); return store.states.get(member().id)!.phase; };
+    // 정착하지 않은 CLI: 훅이 와도 아직 닫지 않는다.
+    hook({});
+    expect(await check()).toBe("running");
+    // 쉬는 CLI 이지만 앞선 압축·다른 세션·세션 없는·자동 압축의 훅만 있는 파일, 남이 쓸 수 있는 파일은 근거가 아니다.
+    writeFileSync(file, ""); terminal.turn = 1; terminal.status = { state: "idle" };
+    hook({ at: startedAt - 1 }); hook({ sessionId: "other-session" }); hook({ sessionId: null });
+    if (event === "PostCompact") hook({ trigger: "auto" }); else hook({ source: "resume" });
+    expect(await check()).toBe("running");
+    hook({}); chmodSync(file, 0o620); // 그룹이 쓸 수 있다
+    expect(await check()).toBe("running");
+    expect(events.some(e => e.type === "compacted")).toBe(false);
+    chmodSync(file, 0o600);
+    expect(await check()).toBe("succeeded");
+    expect(store.states.get(member().id)).toMatchObject({ phase: "succeeded", evidence: "hook" });
+    expect(events.filter(e => e.type === "compacted")).toHaveLength(1);
+    expect(runner.isBusy(member().id)).toBe(false);
+  });
+  test("a compact whose send was acknowledged and whose boundary never arrives is saved as completion_timeout, not send_uncertain", async () => {
+    const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);
+    const runner = d.f.runner(10000, { compactStore: store.port, compactTimeoutMs: 0 }); await runner.start(member({ paneId: d.started.paneId, sessionId: d.started.sessionId }), d.f.opts);
+    expect(await runner.compact(member(), "focus", d.f.opts)).toMatchObject({ ok: true }); await runner.screen(member());
+    expect(store.states.get(member().id)).toMatchObject({ phase: "uncertain", reason: "completion_timeout" });
   });
   test("large Claude history captures EOF, ignores historical boundaries and resumes after restart", async () => {
     const d = await deliveryFixture(), store = compactStore(); await d.runner.shutdown(); d.recovery.dispatches([]);

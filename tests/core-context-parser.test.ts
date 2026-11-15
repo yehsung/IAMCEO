@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, renameSync, symlinkSync, writeFileSync } fro
 import { dirname, join } from "node:path";
 import { createIsolatedRuntime, type IsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 import { readCodexContext, readCodexContextFile, parseCodexTokenCount } from "../server/runner/codex-context.ts";
-import { codexBindingMarker, coreContextMeasurement, discoverCodexSession, observeCompactBoundary, type CompactBoundaryBaseline } from "../server/runner/core-context.ts";
+import { codexBindingMarker, COMPACT_BOUNDARY_RULES, coreContextMeasurement, discoverCodexSession, observeCompactBoundary, type CompactBoundaryBaseline } from "../server/runner/core-context.ts";
 import { readDeliveryEvidence, readJsonlRange } from "../server/runner/delivery-evidence.ts";
 
 let runtime: IsolatedRuntime;
@@ -194,6 +194,38 @@ describe("compact boundary observation", () => {
       expect(observeCompactBoundary({ ...opts, current: { ...opts.current, generation: 5 }, settled: true }).outcome).toBe("unknown");
       expect(observeCompactBoundary({ ...opts, cwd: "/other", cursor: pending.cursor, settled: true }).outcome).toBe("unknown");
     }
+  });
+  // 2026-11-15 라이브: Bash 로 하위 폴더에 들어가 있던 팀장의 경계 줄은 cwd 가 그 하위 폴더다. 줄의 cwd 는 세션의 증거가 아니다.
+  test("Claude boundary written from a subfolder or any other folder (Bash cd) is this session's boundary", () => {
+    for (const cwd of [join(runtime.paths.work, "drafts", "chapter-2"), "/somewhere/else"]) {
+      const opts = setup("claude");
+      appendFileSync(opts.baseline.path, line({ type: "system", subtype: "compact_boundary", sessionId: "session", cwd, isSidechain: false }));
+      const pending = observeCompactBoundary(opts);
+      expect(pending).toMatchObject({ outcome: "pending", code: "awaiting_settled" });
+      expect(observeCompactBoundary({ ...opts, cursor: pending.cursor, settled: true })).toMatchObject({ outcome: "succeeded", code: "boundary_and_settled" });
+    }
+  });
+  test("a cursor saved under the old cwd rule is dropped and the baseline is read again in one check, without session_changed", () => {
+    const opts = setup("claude");
+    const sub = join(runtime.paths.work, "drafts");
+    // Claude Code 2.1.323 이 남긴 바이트 순서: 경계, 압축 요약, 그 뒤에 더 앞선 시각의 /compact 명령 줄, 명령 출력. 글은 지어낸 것이다.
+    appendFileSync(opts.baseline.path, line({ type: "system", subtype: "compact_boundary", sessionId: "session", cwd: sub, isSidechain: false, parentUuid: null, timestamp: "2026-11-15T14:44:17.484Z", compactMetadata: { trigger: "manual" } }) +
+      line({ type: "user", isCompactSummary: true, sessionId: "session", cwd: sub, timestamp: "2026-11-15T14:44:16.904Z", message: { role: "user", content: "가짜 요약" } }) +
+      line({ type: "user", isMeta: true, sessionId: "session", cwd: sub, timestamp: "2026-11-15T14:42:11.730Z", message: { role: "user", content: "<local-command-caveat>가짜</local-command-caveat>" } }) +
+      line({ type: "user", sessionId: "session", cwd: sub, timestamp: "2026-11-15T14:42:11.730Z", message: { role: "user", content: "<command-name>/compact</command-name>" } }) +
+      line({ type: "user", sessionId: "session", cwd: sub, timestamp: "2026-11-15T14:44:17.600Z", message: { role: "user", content: "<local-command-stdout>가짜 출력</local-command-stdout>" } }));
+    // 옛 규칙의 커서: 파일 끝까지 읽었고 경계는 못 봤다(규칙 판 없음).
+    const read = readJsonlRange(join(opts.home, "projects"), opts.baseline.path, null, { startOffset: opts.baseline.offset, fileIdentity: opts.baseline.fileIdentity });
+    expect(read.complete).toBe(true);
+    const old = { baseline: opts.baseline, queryKey: JSON.stringify([opts.cli, opts.home, opts.cwd, opts.baseline]), log: read.cursor, boundary: false, invalid: false };
+    const result = observeCompactBoundary({ ...opts, settled: true, cursor: old });
+    expect(result).toMatchObject({ outcome: "succeeded", code: "boundary_and_settled", cursor: { boundary: true, rules: COMPACT_BOUNDARY_RULES } });
+    expect(result.cursor!.log!.offset).toBe(read.cursor!.offset);
+    // 옛 커서는 queryKey 가 달라도 버려진다(session_changed 로 빠지지 않는다). 지금 규칙의 커서는 예전처럼 queryKey 로 묶인다.
+    expect(observeCompactBoundary({ ...opts, settled: true, cursor: { ...old, queryKey: "old-shape" } }).outcome).toBe("succeeded");
+    expect(observeCompactBoundary({ ...opts, settled: true, cursor: { ...result.cursor!, queryKey: "other" } })).toMatchObject({ outcome: "unknown", code: "session_changed" });
+    // 지금 규칙의 커서는 이어 읽는다: 경계를 본 커서는 다시 읽지 않아도 성공이다.
+    expect(observeCompactBoundary({ ...opts, settled: true, cursor: result.cursor })).toMatchObject({ outcome: "succeeded" });
   });
   test("wrong Claude session, sidechain, compatibility compact text and replaced file are not success", () => {
     const opts = setup("claude");

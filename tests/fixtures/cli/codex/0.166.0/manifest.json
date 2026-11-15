@@ -1,7 +1,7 @@
 {
   "provider": "codex",
   "version": "0.166.0",
-  "source": "첫 화면: tests/w1-server-core.test.ts codexBanner. 폴더 신뢰 창: tests/core-runner.test.ts codexTrustScreen(실측 0.166). 감싼 창: tests/fixtures/folder-trust-160.ts(합성). 세션 기록: tests/delivery-evidence.test.ts 의 0.166 메타 배열.",
+  "source": "첫 화면: tests/w1-server-core.test.ts codexBanner. 폴더 신뢰 창: tests/core-runner.test.ts codexTrustScreen(실측 0.166). 감싼 창: tests/fixtures/folder-trust-160.ts(합성). 세션 기록: tests/delivery-evidence.test.ts 의 0.166 메타 배열. 백그라운드 터미널 화면·기록: 2026-11-15 라이브 화면과 rollout 의 줄 모양·기호·간격·사건 순서를 옮기고 글은 가짜로 바꿈(합성).",
   "fixtures": [
     {
       "file": "idle.txt",
@@ -14,7 +14,8 @@
         "draft": "",
         "folderTrustLike": true,
         "trustDialogLike": false,
-        "folderTrust": null
+        "folderTrust": null,
+        "backgroundTerminals": null
       }
     },
     {
@@ -80,6 +81,60 @@
         "received": [],
         "verdict": "absent",
         "complete": true
+      }
+    },
+    {
+      "file": "background-idle.txt",
+      "kind": "screen",
+      "origin": "synthetic",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "턴을 끝냈지만 Codex 가 띄운 백그라운드 터미널(미리보기 서버)이 남은 화면. 이때 core 는 working 을 알린다.",
+      "expect": {
+        "draft": "",
+        "backgroundTerminals": 1,
+        "trustDialogLike": false,
+        "folderTrust": null
+      }
+    },
+    {
+      "file": "background-idle-plural.txt",
+      "kind": "screen",
+      "origin": "synthetic",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "백그라운드 터미널이 둘이면 terminals(복수).",
+      "expect": {
+        "draft": "",
+        "backgroundTerminals": 2
+      }
+    },
+    {
+      "file": "background-working.txt",
+      "kind": "screen",
+      "origin": "synthetic",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "진행 줄(Working (… • esc to interrupt))이 보이면 백그라운드 줄이 있어도 일하는 중이다. 입력칸은 일하는 동안에도 비어 보인다.",
+      "expect": {
+        "draft": "",
+        "backgroundTerminals": null
+      }
+    },
+    {
+      "file": "rollout-background.jsonl",
+      "kind": "log",
+      "origin": "synthetic",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "sessionId": "session",
+      "markers": {
+        "d1": "#iamceo_abcdefghijklmnopqrstuv"
+      },
+      "note": "실측 0.166.0 rollout 의 사건 순서(task_started → 개발자·사용자 글 → … → token_count → task_complete → item_completed). 전달 기준선이 없을 때 표지가 든 사용자 글 뒤의 task_complete 로 턴 끝을 읽는다.",
+      "expect": {
+        "received": [
+          "d1"
+        ],
+        "verdict": "present",
+        "sessionMeta": true,
+        "turnEnd": "ended"
       }
     }
   ]

@@ -660,7 +660,7 @@ describe("iPhone 알림의 언어", () => {
 describe("영어 문장의 쓸모", () => {
   test("서버가 만든 글 코드는 모두 어딘가에서 쓴다(죽은 항목이 없다)", () => {
     const sources = ["server/orchestrator.ts", "server/store.ts", "server/api-outage.ts", "server/tool-permission.ts", "server/delivery-recovery.ts",
-      "server/terminal-stream.ts", "server/flows/owner.ts", "server/flows/member.ts", "server/agent-tools.ts", "server/text-refs.ts"].map(p => readFileSync(new URL(`../${p}`, import.meta.url), "utf8")).join("\n");
+      "server/terminal-stream.ts", "server/flows/owner.ts", "server/flows/member.ts", "server/agent-tools.ts", "server/text-refs.ts", "server/runner/core.ts"].map(p => readFileSync(new URL(`../${p}`, import.meta.url), "utf8")).join("\n");
     // 대화 글·카드의 제목(`<코드>.title`)은 코드에서 저절로 고른다. 나머지는 textRef("코드") 나 표(ACTION_CODES)로 쓴다.
     const unused = Object.keys(SERVER_TEXTS).filter(code => !code.endsWith(".title") && !sources.includes(`"${code}"`));
     expect(unused).toEqual([]);

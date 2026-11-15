@@ -1,5 +1,6 @@
 import type { ActivityKind, ApprovalOption, ApprovalPrompt, Backend, BlockedReason, CliProvider, DeliveryEvidence, DeliveryFinding, Effort, MemberKind, MemberOrigin, PermissionMode, StatusObservation } from "../../shared/types.ts";
 import type { ContextReading } from "./context.ts";
+import type { ServerTextRef } from "../../shared/server-text.ts";
 
 // 실행기 계약. 운영이 등록하는 실행기는 core 하나다(server/runner/core.ts 의 CoreRunner).
 // 옛 herdr·headless 실행기는 지웠다. 그 실행기만 내던 이벤트(context·subagents·background)와 전용 옵션도 함께 없앴다.
@@ -153,7 +154,11 @@ export type RunnerEvent = RunnerObservation & (
   | { type: "turn_end"; memberId: string; finalText: string; isError: boolean; errorText?: string; exitCode?: number | null; reason?: string | null;
       /** 상태 보고가 사라져 끝난 것으로 읽은 턴. 끝난 것은 맞지만 성공했다는 증거는 아니다. */
       inferred?: boolean }
-  | { type: "activity"; memberId: string; kind: ActivityKind; text: string }
+  | { type: "activity"; memberId: string; kind: ActivityKind; text: string | ServerTextRef;
+      /** 같은 줄을 한 번만 남기는 열쇠(재시작 뒤에도). Store.appendActivity 의 eventKey. */
+      eventKey?: string;
+      /** 서버가 남기는 알림 줄이다. CLI 가 일한 근거가 아니므로 실행 기록의 마지막 진전 시각을 바꾸지 않는다. */
+      notice?: true }
   /**
    * 턴 끝 실측 창·사용량 또는 화면 추정. 서버가 출처와 함께 저장하고 문맥 % 를 정한다.
    */

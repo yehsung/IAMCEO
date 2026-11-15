@@ -132,6 +132,11 @@ export interface RunnerRecoveryStore {
   inputState(memberId: string): RunnerRecoveryState;
   /** An inspection may be asked about an envelope that is no longer unresolved; its stored state then answers. */
   getDispatch?(dispatchId: string): DeliveryDispatch | null;
+  /**
+   * 이 세션 세대에서 입력이 CLI 에 들어간 마지막 실행(Store.lastWrittenExecution)의 봉투와, 그 실행이 이미 끝났는가.
+   * Codex 가 남긴 백그라운드 터미널로 core 가 일하는 중이라고 알릴 때, 그 턴이 끝났는지 Codex 기록에서 읽을 기준선이다. 없으면 null.
+   */
+  lastWrittenRun?(memberId: string, generation: number): { dispatch: DeliveryDispatch | null; ended: boolean } | null;
   saveLease(lease: TerminalLease): void;
   removeLease(memberId: string, claimId: string): void;
 }

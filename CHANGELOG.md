@@ -7,6 +7,10 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
+### 아직 내지 않은 것
+
+- **백그라운드 프로그램을 남긴 Codex 팀장이 '일하는 중'에 멈춰 있지 않습니다.** Codex는 미리보기 서버처럼 자기가 띄운 프로그램이 살아 있으면 턴을 끝냈어도 실행 엔진에 '일하는 중'으로 보여, 그 팀장이 몇 시간씩 '일하는 중'에 머물고 맡은 일이 끝나지 않았습니다. 이제 화면(빈 입력칸, 진행 표시 없음, 'background terminal running' 줄)과 Codex 자기 기록이 함께 그 턴의 끝을 보이면 일을 끝난 것으로 닫고 '쉬는 중'으로 보이며, 팀장 상세 › 활동에 백그라운드 프로그램이 아직 돌고 있다는 줄을 남깁니다. 그 프로그램은 IAMCEO가 끄지 않습니다. 다음 전달은 그 프로그램이 끝날 때까지 기다리고(터미널에서 `/stop`으로 닫으면 곧바로 이어 갑니다), 기록으로 끝을 확인하지 못하면 예전처럼 '일하는 중'으로 두고 까닭을 활동에 한 번 남깁니다. 그 턴의 문맥 %도 함께 채워집니다.
+
 ### 0.2.6 — 2026-11-14
 
 - **대화에서 '답 쓰는 중'이 보입니다.** 총괄이나 팀장에게 글을 보내면 대화 맨 아래(내 마지막 글 아래)에 받은 이의 이름과 함께 지금 어떻게 하고 있는지 한 줄로 보입니다. 그 글을 받아 턴을 돌리는 동안은 움직이는 점 세 개와 '결제 총괄이 답을 쓰는 중…'이, 1분이 넘으면 '읽고 일하는 중 · 3분째'가 보이고, 답이 오면 사라집니다. 이 글과 무관한 앞 일을 하던 중이면 '앞 일을 마치는 중', 잠들어 있으면 '깨우는 중', 넣은 결과를 모르면 '전달됐는지 확인하는 중', 승인 창·사용 한도·인터넷·오류로 멈췄으면 그 까닭을 짧게 보입니다. 답 없이 턴이 끝났으면(서버가 결과 보고를 한 번 더 부탁한 뒤에도) 내 글 아래에 '읽었지만 답하지 않았습니다', 턴이 끊겼으면 '답하기 전에 멈췄습니다'가 남습니다. 여러 팀장에게 보냈으면 팀장마다 한 줄입니다. 판정은 서버가 전달 기록·턴 시작과 끝·대화로 하고 앱은 그대로 그립니다(Claude Code·Codex 같음). '동작 줄이기'를 켜면 점이 움직이지 않습니다. 대화 화면에만 보이고 대화 목록·홈에는 없습니다. 서버와 앱이 모두 이 판이어야 보이며, 출시된 0.2.5 이하 앱은 지금과 같이 보입니다. 샘플에서 지시를 보내도 답이 오기 전 잠깐 보입니다.
@@ -136,6 +140,10 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - 첫 공개. 내 Mac에서 서버를 켜고 브라우저로 Claude Code 세션 여럿을 총괄과 팀으로 부립니다. 홈·결재함·팀·대화·자료 다섯 화면. Claude Code 전용, AGPL-3.0-only.
 
 ## English
+
+### Unreleased
+
+- **A Codex staff member that leaves a background program running no longer sticks at 'Working'.** While a program Codex started (such as a preview server) kept running, the engine reported Codex as working even after its turn ended, so the staff member stayed 'Working' for hours and its task never closed. Now, when the screen (empty input box, no progress line, a 'background terminal running' line) and Codex's own session record both show that the turn ended, the task is closed as finished, the staff member shows as 'Idle', and the staff member's details › Activity notes that a background program is still running. IAMCEO doesn't stop that program. The next delivery waits until it finishes (closing it with `/stop` in the terminal lets it continue right away). If the record can't confirm the end, it stays 'Working' as before and the reason is noted once in Activity. The context % for that turn is filled in as well.
 
 ### 0.2.6 — 2026-11-14
 

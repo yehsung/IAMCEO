@@ -1,0 +1,17 @@
+{"timestamp": "2026-11-15T03:43:14.400Z", "ordinal": 0, "type": "session_meta", "payload": {"id": "session", "session_id": "session", "cwd": "/private/tmp/iamceo-cli-fixture/work", "source": "cli", "cli_version": "0.166.0", "context_window": 258400, "timestamp": "2026-11-15T03:43:14.400Z"}}
+{"timestamp": "2026-11-15T03:43:14.488Z", "ordinal": 1, "type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-0001", "root_turn_id": "turn-0001", "started_at": 1794714194, "model_context_window": 258400, "collaboration_mode_kind": "default", "turn_attribution": {"turn_id": "turn-0001", "turn_trigger": "user", "parent_turn_id": null, "initiating_agent_path": null, "root_turn_id": "turn-0001"}}}
+{"timestamp": "2026-11-15T03:43:14.490Z", "ordinal": 2, "type": "response_item", "metadata": {}, "payload": {"type": "additional_tools", "role": "developer"}}
+{"timestamp": "2026-11-15T03:43:14.491Z", "ordinal": 3, "type": "response_item", "payload": {"type": "message", "role": "developer", "id": "item-dev", "content": [{"type": "input_text", "text": "fake developer instructions"}]}}
+{"timestamp": "2026-11-15T03:43:14.492Z", "ordinal": 4, "type": "response_item", "payload": {"type": "message", "role": "user", "id": "item-env", "content": [{"type": "input_text", "text": "<environment_context>fake</environment_context>"}]}}
+{"timestamp": "2026-11-15T03:43:14.493Z", "ordinal": 5, "type": "world_state", "payload": {}}
+{"timestamp": "2026-11-15T03:43:14.494Z", "ordinal": 6, "type": "turn_context", "payload": {"model": "gpt-6-astra"}}
+{"timestamp": "2026-11-15T03:43:14.495Z", "ordinal": 7, "type": "event_msg", "payload": {"type": "thread_settings_applied"}}
+{"timestamp": "2026-11-15T03:43:14.496Z", "ordinal": 8, "type": "response_item", "metadata": {"client_authored": true, "user_input_order": 0}, "payload": {"type": "message", "role": "user", "id": "item-user", "content": [{"type": "input_text", "text": "[IAMCEO session binding: abcdefabcdefabcdefabcdef]\n\n가짜 업무: 미리보기를 띄우고 보고하세요\n#iamceo_abcdefghijklmnopqrstuv"}]}}
+{"timestamp": "2026-11-15T03:43:20.000Z", "ordinal": 9, "type": "response_item", "payload": {"type": "custom_tool_call"}}
+{"timestamp": "2026-11-15T03:43:21.000Z", "ordinal": 10, "type": "response_item", "payload": {"type": "custom_tool_call_output"}}
+{"timestamp": "2026-11-15T03:43:21.100Z", "ordinal": 11, "type": "event_msg", "payload": {"type": "item_completed"}}
+{"timestamp": "2026-11-15T03:51:37.000Z", "ordinal": 12, "type": "response_item", "metadata": {}, "payload": {"type": "message", "role": "assistant", "id": "item-answer", "content": [{"type": "output_text", "text": "가짜 답"}]}}
+{"timestamp": "2026-11-15T03:51:37.100Z", "ordinal": 13, "type": "token_usage_record", "payload": {}}
+{"timestamp": "2026-11-15T03:51:37.200Z", "ordinal": 14, "type": "event_msg", "payload": {"type": "token_count", "info": {"model_context_window": 258400, "last_token_usage": {"total_tokens": 42000}}}}
+{"timestamp": "2026-11-15T03:51:37.300Z", "ordinal": 15, "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-0001", "root_turn_id": "turn-0001", "last_agent_message": "가짜 답", "started_at": 1794714194, "completed_at": 1794714697, "duration_ms": 502812, "time_to_first_token_ms": 1200}}
+{"timestamp": "2026-11-15T03:51:37.400Z", "ordinal": 16, "type": "event_msg", "payload": {"type": "item_completed"}}

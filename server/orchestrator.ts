@@ -4254,7 +4254,8 @@ export class Orchestrator implements OrchestratorApi {
     }
     const pending = this.store.listPendingExecutions().filter(r => r.memberId === member.id && r.identity.sessionGeneration === generation && (!e.terminalId || !r.identity.terminalId || e.terminalId === r.identity.terminalId));
     const at = e.observedAt ?? new Date().toISOString();
-    if (e.type === "activity" || (e.type === "status" && e.status === "working" && (!e.observation || e.observation.freshness === "fresh"))) for (const run of pending) {
+    // 실행기가 남기는 알림 줄(notice)은 CLI 가 일한 근거가 아니다. 마지막 진전 시각을 바꾸면 멈춘 업무의 '진전 없음' 표시가 지워진다.
+    if ((e.type === "activity" && !e.notice) || (e.type === "status" && e.status === "working" && (!e.observation || e.observation.freshness === "fresh"))) for (const run of pending) {
       this.store.saveExecutionJournal({ ...run, turn: e.turn ?? run.turn, phase: "running", startedAt: run.startedAt ?? at, lastProgressAt: at, updatedAt: at });
     }
     switch (e.type) {
@@ -4314,7 +4315,7 @@ export class Orchestrator implements OrchestratorApi {
         if (e.isError && !pending.length && member.status === "error" && member.lastError === (e.errorText ?? "오류")) return;
         return this.onTurnEnd(member, e);
       case "activity":
-        this.store.appendActivity(member.id, e.kind, e.text);
+        this.store.appendActivity(member.id, e.kind, e.text, e.eventKey);
         return;
       case "context_usage":
         this.onContextUsage(member, e);

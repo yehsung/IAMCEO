@@ -1,0 +1,10 @@
+• 미리보기 서버를 띄우고 화면을 확인합니다.
+
+• Working (12s • esc to interrupt)
+  1 background terminal running · /ps to view · /stop to close
+
+
+› Ask Codex to do anything
+
+  GPT-6-Astra high Fast · ~/workspace/sample-app
+  ? for shortcuts

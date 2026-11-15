@@ -89,6 +89,52 @@ function inputBox(lines: string[]): { top: number; bottom: number; prefix: numbe
   return null;
 }
 
+/** Claude 의 상태 줄 머리(도는 별). 일할 때는 모양이 바뀌며 돌고, 끝난 턴의 줄과 뒤 작업 기다림 줄에도 붙는다. */
+const SPINNER_HEAD = /^\s*[·✢✳✶✻✽]\s+\S/;
+/** 입력칸 아래 뒤 작업 표시: 이름과 진행 막대(2.1.316 실측 "◯ 이름  ▰▰▰▰▰▰▱▱"). */
+const BACKGROUND_BAR = /^\s*\S\s+(\S.*?)\s+[▰▱]{3,}\s*$/;
+/** 입력칸 위를 이만큼(빈 줄 제외) 본다. 할 일 목록 같은 칸이 상태 줄과 입력칸 사이에 끼어도 상태 줄까지 닿는다. */
+const QUIET_LOOKBACK = 14;
+
+/**
+ * 11-16: Claude 가 턴을 끝내고 입력을 받을 수 있는 화면인가(빈 입력칸, 입력칸 위에 일하는 중의 상태 줄이 없음). 아니면 null.
+ * 뒤 작업(워크플로·백그라운드 에이전트·셸·Monitor)이 남아 있으면 실행 엔진은 working 을 알리지만, 화면은 이 모양이고 넣은 글은 곧바로 처리된다
+ * (옛 herdr 실행기의 2.1.316 실측). label 은 화면에 적힌 뒤 작업(입력칸 위 "✻ Waiting for 1 dynamic workflow to finish", 또는 입력칸 아래 막대)이고
+ * 없으면 null 이다. 이 화면만으로 턴 끝을 정하지 않는다(세션 기록·훅과 함께 본다. CoreRunner.claudeQuiet).
+ * 아닌 화면: 입력칸 위 가까운 줄들 가운데 일하는 중의 상태 줄(`esc to interrupt`, `Thinking… (12s` 꼴)이 있다, 또는 입력칸에 가장 가까운 글 줄이
+ * 방금 넣은 글의 되풀이(❯)다(곧 일을 시작한다). 오른쪽 끝에 붙은 짧은 표시(`● high · /effort`)는 글 줄로 치지 않는다.
+ */
+export function claudeQuietScreen(screen: string): { label: string | null } | null {
+  if (inputText(screen) !== "") return null;
+  const lines = scanDim(screen).map((l) => l.text);
+  const box = inputBox(lines);
+  if (!box) return null;
+  let label: string | null = null;
+  let nearest = true;
+  for (let i = box.top - 1, seen = 0; i >= 0 && seen < QUIET_LOOKBACK; i--) {
+    const line = lines[i]!;
+    if (!line.trim() || /^\s{24,}\S/.test(line)) continue;
+    seen++;
+    if (nearest && /^\s*[❯>]/.test(line)) return null;
+    nearest = false;
+    if (/esc to interrupt/i.test(line)) return null;
+    if (!SPINNER_HEAD.test(line)) continue;
+    // 좁은 칸에서는 상태 줄이 다음 줄로 접힌다.
+    const joined = lines.slice(i, Math.min(box.top, i + 3)).map((l) => l.trim()).filter(Boolean).join(" ");
+    const wait = /^[·✢✳✶✻✽]\s+Waiting for (\d+ .+?) to finish\b/.exec(joined);
+    if (wait) { label ??= wait[1]!.replace(/\s+/g, " "); continue; }
+    // 도는 상태 줄(Thinking… (12s …)이다. 끝난 턴의 줄(Worked for 3m · Cogitated for 13s …)은 그대로 둔다.
+    if (/…\s*\(|\.\.\.\s*\(/.test(joined)) return null;
+  }
+  if (label === null) {
+    for (const line of lines.slice(box.bottom + 1)) {
+      const bar = BACKGROUND_BAR.exec(line);
+      if (bar) { label = bar[1]!.replace(/\s+/g, " "); break; }
+    }
+  }
+  return { label };
+}
+
 /** Claude 입력칸이 비었는가. null 은 입력칸을 못 찾음(승인 창·선택 창·다른 프로그램). */
 export function inputLooksEmpty(screen: string): boolean | null {
   const text = inputText(screen);

@@ -70,6 +70,7 @@ import { defaultClaudeHome, findSessionFile, isMissingSessionError } from "./run
 import { providerLaunch } from "./runner/providers.ts";
 import { CoreRunner, ensureCoreServer, eofLogBaseline, type CoreCompactState, type CoreRunnerDeps, type CoreRunnerOptions } from "./runner/core.ts";
 import { approvalSummary } from "./runner/core-approval.ts";
+import { CLAUDE_BACKGROUND_REASON } from "./runner/claude-turn.ts";
 import { ToolPermissions, type ToolPermissionPoll, type ToolPermissionRequest } from "./tool-permission.ts";
 import { exactSource, measureContext } from "./runner/context.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, RunnerStartResult, RunnerTerminalIdentity, RunnerReattachResult, DeliveryRepair } from "./runner/types.ts";
@@ -1141,7 +1142,8 @@ export class Orchestrator implements OrchestratorApi {
         if (result === "error" && ["network", "usage_limit"].includes(classifyTurnError(reason ?? ""))) continue;
         if (outcome === "success") {
           this.completeExecutionReview(member, run);
-          this.requestMissingReport(member, run);
+          // 핫픽스 C: 뒤 작업을 남기고 끝난 Claude 턴은 결과가 그 작업 뒤에 온다. 결과 보고 확인은 그 작업이 끝난 뒤의 턴 끝으로 미룬다(requestDeferredReports).
+          if (reason !== CLAUDE_BACKGROUND_REASON) this.requestMissingReport(member, run);
         } else if (run.deliveryIds.some(id => this.store.getDelivery(id)?.text.startsWith(formatSystem("보고 보완")))) {
           this.requestMissingReport(member, run);
         }
@@ -1403,6 +1405,20 @@ export class Orchestrator implements OrchestratorApi {
       this.store.appendActivity(member.id, "system", textRef("activity.missing_report_requested"), `${run.runId}:missing_report`);
       this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "system", ...(this.recovering ? { nextAttemptAt: new Date(Date.now() + this.timings.retryMs).toISOString() } : {}), text: formatSystem(`보고 보완: 실행 ${run.runId}의 결과만 post로 알려 주세요. 기존 업무를 다시 실행하지 마세요. 완료·막힘 또는 질문/위임 대기 상태를 명시하세요.`) });
     });
+  }
+
+  /**
+   * 핫픽스 C: 뒤 작업을 남기고 Claude 자기 근거로 닫은 업무(사유 claude_background_task) 가운데 아직 결과 보고를 확인하지 않은 것. 그 작업이 끝나 core 가
+   * 쉬는 중을 알린 턴 끝(또는 그 뒤의 다른 업무 끝)에서 평소처럼 확인한다: 그 사이 Claude 가 스스로 연 턴에서 보고했으면 아무것도 하지 않는다.
+   * 뒤 작업이 아직 돌면(그 팀장이 여전히 그 상태면) 미룬다.
+   */
+  private requestDeferredReports(member: Member): void {
+    if (this.claudeLingering(this.store.requireMember(member.id))) return;
+    for (const run of this.store.listUnreportedRuns(member.id, this.store.memberRevisions(member.id).sessionGeneration, CLAUDE_BACKGROUND_REASON)) {
+      this.requestMissingReport(member, run);
+      // 보고가 이미 있었거나 확인할 대상이 아니었으면 그 자리만 채운다(확인한 것으로 남겨 다음 턴 끝마다 다시 보지 않는다).
+      this.store.claimExecutionNotice(run.runId, "report", () => {});
+    }
   }
 
   /** v2 작업 영수증(새 세션·터미널 조작)은 terminal-control.ts 가 맡는다. */
@@ -2008,6 +2024,7 @@ export class Orchestrator implements OrchestratorApi {
     const rt = this.runtime(member.id);
     const handling = rt.closing || rt.starting || (!fromPump && rt.pumping) || rt.reopening || !!rt.turn || member.status === "working" || (member.status === "blocked" && !usage);
     if (!handling && this.isBusy(member) && this.lingering(member) !== null) throw new ApiError(409, ERROR_CODES.cli_switch_background_program.ko, "cli_switch_busy", "cli_switch_background_program");
+    if (!handling && this.claudeLingering(member)) throw new ApiError(409, ERROR_CODES.cli_switch_background_task.ko, "cli_switch_busy", "cli_switch_background_task");
     if (handling || this.isBusy(member)) {
       throw new ApiError(409, "일하거나 세션을 처리하는 중입니다. 턴이 끝난 뒤 CLI를 바꾸세요", "cli_switch_busy");
     }
@@ -2371,10 +2388,11 @@ export class Orchestrator implements OrchestratorApi {
       const rt = this.runtime(member.id);
       if (rt.starting || rt.reopening || rt.pumping || rt.closing || this.configWrites.has(member.id) || this.terminal.terminalMutations.has(member.id)) throw new ApiError(409, `${member.name}의 세션을 처리하는 중입니다`, "session_busy");
     }
-    const busyNow = (m: Member) => m.status === "working" || m.status === "blocked" || (m.origin !== "manual" && this.isBusy(m));
-    // 정말 일하는 팀장을 먼저 알린다. 백그라운드 프로그램만 남은 팀장(쉬는 중으로 보인다)은 그 까닭을 따로 알린다(핫픽스 B).
-    const busy = members.find((m) => busyNow(m) && this.lingering(m) === null) ?? members.find(busyNow);
+    const busyNow = (m: Member) => m.status === "working" || m.status === "blocked" || (m.origin !== "manual" && (this.isBusy(m) || this.claudeLingering(m)));
+    // 정말 일하는 팀장을 먼저 알린다. 백그라운드 프로그램·뒤 작업만 남은 팀장(쉬는 중으로 보인다)은 그 까닭을 따로 알린다(핫픽스 B·C).
+    const busy = members.find((m) => busyNow(m) && this.lingering(m) === null && !this.claudeLingering(m)) ?? members.find(busyNow);
     if (busy && this.lingering(busy) !== null) throw new ApiError(409, `${josa(busy.name, "이")} 턴은 끝냈지만 Codex가 띄운 백그라운드 프로그램이 아직 돌고 있어 보관할 수 없습니다. 터미널에서 /stop 으로 닫은 뒤 보관하세요`, "archive_member_working", "archive_background_program");
+    if (busy && this.claudeLingering(busy)) throw new ApiError(409, `${josa(busy.name, "이")} 턴은 끝냈지만 Claude가 띄운 뒤 작업이 아직 돌고 있어 보관할 수 없습니다. 그 작업이 끝난 뒤 보관하세요`, "archive_member_working", "archive_background_task");
     if (busy) throw new ApiError(409, `${josa(busy.name, "이")} 일하는 중이라 보관할 수 없습니다`, "archive_member_working");
     const open = this.store.listDecisions(project.id).filter((d) => d.status === "open").length;
     if (open > 0) throw new ApiError(409, `열린 결재 ${open}건에 답한 뒤 보관하세요`, "archive_open_decisions");
@@ -2935,6 +2953,7 @@ export class Orchestrator implements OrchestratorApi {
       if (this.coreCompactFenced(member)) throw new ApiError(409, "문맥 압축을 처리하고 있어 잠재울 수 없습니다. 압축 결과를 확인해 주세요", "sleep_compacting");
       // 백그라운드 프로그램만 남은 팀장은 쉬는 중으로 보여 '일하는 중'이 맞지 않는다. 코드는 그대로(출시된 앱의 '그래도 잠재우기'), 까닭을 reason 으로 싣는다.
       if (this.isBusy(member) && this.lingering(member) !== null) throw new ApiError(409, ERROR_CODES.sleep_background_program.ko, "member_working", "sleep_background_program");
+      if (this.claudeLingering(member)) throw new ApiError(409, ERROR_CODES.sleep_background_task.ko, "member_working", "sleep_background_task");
       if (this.isBusy(member)) throw new ApiError(409, `${josa(member.name, "은")} 일하는 중입니다`, "member_working");
       // 미확정 종료가 열려 있는 동안 전달 펌프는 멈춘다. 그 사이 온 입력으로 복구까지 거부하면 서로 영영 물린다.
       if (!opts.recovering) {
@@ -3583,8 +3602,10 @@ export class Orchestrator implements OrchestratorApi {
       return;
     }
 
+    // 뒤 작업만 남은 Claude(핫픽스 C)는 전달은 받지만, 다시 열거나(설정 적용) 압축하면 그 작업이 죽거나 끝을 확인할 수 없다. 그 작업이 끝난 뒤로 미룬다.
+    const lingering = this.claudeLingering(member);
     // 쉬는 동안 바뀐 설정을 먼저 맞춘다. 일을 넣고 나면 턴이 끝날 때까지 못 맞춘다.
-    if (runner.applyConfig && this.configPending(member)) {
+    if (runner.applyConfig && this.configPending(member) && !lingering) {
       rt.pumpStage = "sync_config";
       this.judged(memberId, "session_busy");
       if (!(await this.syncConfig(member, rt))) return this.judged(memberId, rt.holdUntil > Date.now() ? "retry_wait" : "config_failed");
@@ -3659,9 +3680,9 @@ export class Orchestrator implements OrchestratorApi {
       measurement.sessionGeneration === this.store.memberRevisions(memberId).sessionGeneration && measurement.turn !== null &&
       state?.baseline?.completedTurn === measurement.turn && state.baseline.autoTurn !== measurement.turn &&
       state.baseline.configRevision === this.store.memberRevisions(memberId).configRevision;
-    const autoCompact = hasWake && !rt.skipCompact && member.contextPct !== null && member.contextPct >= compactAt && !!exact;
+    const autoCompact = hasWake && !rt.skipCompact && member.contextPct !== null && member.contextPct >= compactAt && !!exact && !lingering;
     if (autoCompact) this.queueCoreCompact(member, "auto", this.compactFocus(member));
-    if (rt.compactRequest !== null || autoCompact) {
+    if ((rt.compactRequest !== null && !lingering) || autoCompact) {
       rt.pumpStage = "compact";
       this.judged(memberId, "compacting");
       await this.beginCompact(member, project, runner, rt, rt.compactRequest ?? this.compactFocus(member));
@@ -3671,7 +3692,7 @@ export class Orchestrator implements OrchestratorApi {
 
     const turn: Turn = { kind: "work", text: "", interrupted: false };
     rt.turn = turn;
-    if (rt.wantParallel !== null) {
+    if (rt.wantParallel !== null && !lingering) {
       rt.pumpStage = "parallel";
       const go = await this.applyParallel(member, project, runner, rt, this.store.listPending(memberId));
       if (!go || this.store.requireMember(memberId).status === "asleep") {
@@ -3802,7 +3823,9 @@ export class Orchestrator implements OrchestratorApi {
     const dispatch = this.deliveryRecovery.prepareDispatch(deliveries.map(d => d.id), observed?.identity ?? {
       terminalId: member.paneId, sessionId: member.sessionId, sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration, process: null,
     // 세션 기록의 지금 끝 위치를 함께 적는다. 수신 확인이 이 봉투 뒤에 덧붙은 부분만 읽게 된다.
-    }, { serverEpoch: this.deliveryEpoch, turn: observed?.turn ?? null, inputEpoch: observed?.inputEpoch ?? null, logs: runner instanceof CoreRunner ? runner.deliveryBaseline(this.runnerMember(member, project)) : [], capturedAt: new Date().toISOString() });
+    // 11-16(Claude): 훅 사건 파일의 지금 끝 자리도 적는다. 그 전달의 턴 끝 훅(Stop·StopFailure)은 이 뒤에 덧붙은 줄에서만 찾는다(CoreRunner.claudeQuiet).
+    }, { serverEpoch: this.deliveryEpoch, turn: observed?.turn ?? null, inputEpoch: observed?.inputEpoch ?? null, logs: runner instanceof CoreRunner ? runner.deliveryBaseline(this.runnerMember(member, project)) : [], capturedAt: new Date().toISOString(),
+      ...(() => { const hookMark = runner instanceof CoreRunner ? runner.deliveryHookMark(this.runnerMember(member, project)) : undefined; return hookMark !== undefined ? { hookMark } : {}; })() });
     this.store.transaction(() => {
       this.store.updateDispatch(dispatch.dispatchId, "prepared", "write_started");
       for (const d of deliveries) this.store.setDeliveryStatus(d.id, "delivering", { attempt: true });
@@ -4123,6 +4146,16 @@ export class Orchestrator implements OrchestratorApi {
     if (member.origin === "manual" || member.status === "working" || member.status === "blocked" || this.coreCompactFenced(member) || this.runtime(member.id).turn !== null) return null;
     const runner = this.runners.get(this.backendOf(member));
     return runner instanceof CoreRunner ? runner.backgroundTerminals(member.id) : null;
+  }
+
+  /**
+   * 핫픽스 C: 턴은 끝났고 Claude 가 띄운 뒤 작업 때문에만 core 가 working 인 팀장인가(CoreRunner.claudeBackground). 쉬는 중으로 보이고 전달은 받지만
+   * (isBusy false), 끝내거나 다시 열면 그 작업이 죽으므로 잠재우기·보관·CLI 바꾸기는 그 까닭으로 거절하고 설정 적용·병렬 바꾸기·압축은 그 작업이 끝난 뒤로 미룬다.
+   */
+  private claudeLingering(member: Member): boolean {
+    if (member.origin === "manual" || member.status === "working" || member.status === "blocked" || this.coreCompactFenced(member) || this.runtime(member.id).turn !== null) return false;
+    const runner = this.runners.get(this.backendOf(member));
+    return runner instanceof CoreRunner && runner.claudeBackground(member.id);
   }
 
   /** Count persisted executions before admitting new work, including unknown/received turns. */
@@ -4485,6 +4518,8 @@ export class Orchestrator implements OrchestratorApi {
     // 승인 창이 아닌 막힘은 승인 대기라고 알리지 않는다.
     if (member.blockedCode === "start_not_ready") return this.notifyInbox(textRef("notice.start_slow.title", { name: member.name }), textRef("notice.start_slow"));
     if (member.blockedCode === "trust_dialog_unrecognized") return this.notifyInbox(textRef("notice.check_needed.title", { name: member.name }), textRef("notice.trust_unreadable"));
+    // 핫픽스 C: 로그인(계정) 오류로 막힌 팀장은 승인 창이 아니다. 오류 턴 끝이 이미 기존 오류 알림(대화의 오류 글, 오류 푸시)으로 알렸다.
+    if (member.blockedCode === "login_required") return;
     // K(E2): 이 승인 창은 도구 승인 카드로 이미 알렸다(또는 방금 답했다). 같은 일을 두 번 알리지 않는다.
     if (this.toolPermissions.covers(member.id)) return;
     let body: ServerTextRef = textRef("notice.approval_prompt");
@@ -4576,6 +4611,8 @@ export class Orchestrator implements OrchestratorApi {
     } else if (e.isError) {
       await this.onTurnError(member, e.errorText ?? "오류", errorKey);
     } else {
+      // 핫픽스 C: 뒤 작업이 끝나 core 가 쉬는 중을 알린 턴 끝(그 사이 Claude 가 스스로 연 턴의 끝)에서, 그 작업을 남기고 닫았던 업무의 결과 보고를 확인한다.
+      if (e.reason !== CLAUDE_BACKGROUND_REASON) this.requestDeferredReports(member);
       // 상태 보고가 사라져 끝난 것으로 읽은 턴은 성공의 증거가 아니다(주로 API 오류 뒤다). 장애·한도 보류를 풀지 않는다.
       if (!e.inferred) this.apiRecovery.completed(member.id);
       // 턴을 잘 마쳤으니 입력을 받을 수 있다. '아직 못 받음'으로 미뤄 둔 재시도 간격을 지금 푼다(한도·인증 간격은 그대로).
@@ -4713,7 +4750,7 @@ export class Orchestrator implements OrchestratorApi {
     if (!conductor) return;
     const candidates = awake
       // 백그라운드 프로그램만 남은 팀장은 쉬는 중으로 보여도 잠재우기가 거절된다(sleep_background_program). 후보로 권하지 않는다.
-      .filter((m) => (m.status === "idle" || m.status === "waiting") && m.queuedCount === 0 && this.store.listOpenDecisionsByMember(m.id).length === 0 && this.lingering(m) === null)
+      .filter((m) => (m.status === "idle" || m.status === "waiting") && m.queuedCount === 0 && this.store.listOpenDecisionsByMember(m.id).length === 0 && this.lingering(m) === null && !this.claudeLingering(m))
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
       .map((m) => m.name);
     const list = candidates.length ? `잠재울 후보(오래된 순): ${candidates.join(", ")}` : "지금 잠재울 수 있는 직원이 없습니다";

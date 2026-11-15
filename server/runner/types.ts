@@ -90,6 +90,11 @@ export interface DeliveryBaseline {
   logs: DeliveryLogBaseline[];
   /** native ID 미확정 후보 탐색도 재시작 때 같은 기준선을 사용한다. */
   capturedAt: string;
+  /**
+   * 11-16(Claude): 봉투를 쓰기 직전의 훅 사건 파일 자리. 그 전달의 턴 끝(Stop·StopFailure)은 이 뒤에 덧붙은 줄에서만 찾는다
+   * (CoreRunner.claudeQuiet, 핫픽스 A 의 압축 hookMark 와 같은 뜻). null: 그때 자리를 읽지 못해 훅을 근거로 쓰지 않는다. 없음: 이 칸을 모르던 서버가 쓴 봉투.
+   */
+  hookMark?: import("./hook-events.ts").HookEventsMark | null;
 }
 export interface DeliveryProbe {
   dispatchId: string;

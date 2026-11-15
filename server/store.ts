@@ -3834,6 +3834,12 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return r ? this.getExecutionJournal(r.run_id) : null;
   }
 
+  /** 핫픽스 C: 이 세대에서 그 사유로 성공으로 끝났고 결과 보고 확인(report_requested_at)을 아직 하지 않은 실행. 오래된 것부터. */
+  listUnreportedRuns(memberId: string, generation: number, reason: string): ExecutionJournal[] {
+    return this.rows(`SELECT run_id FROM execution_journal WHERE member_id = ? AND generation = ? AND phase = 'ended' AND result = 'success' AND reason = ? AND report_requested_at IS NULL
+      ORDER BY created_at, rowid`, memberId, generation, reason).map(r => this.getExecutionJournal(r.run_id)!).filter(Boolean);
+  }
+
   /** RunnerRecoveryStore.lastWrittenRun: lastWrittenExecution 의 봉투와 그 실행이 끝났는가. */
   lastWrittenRun(memberId: string, generation: number): { dispatch: DeliveryDispatch | null; ended: boolean } | null {
     const run = this.lastWrittenExecution(memberId, generation);

@@ -280,7 +280,9 @@ export async function startFakeCore(options: FakeCoreOptions) {
     if (call.method === "terminal.send") {
       if (terminal.state !== "live") return { error: { kind: "finished", message: "터미널이 끝났습니다" } };
       if (p.if && terminal.status?.state !== p.if) return { error: { kind: "status_mismatch", message: "status changed" } };
-      if (terminal.status?.state === "working") return { error: { kind: "busy", message: "CLI is working" } };
+      // 실제 core 는 working 에도 넣는다(force:false 는 승인 창만 거절). 이 틀은 조건 없는 넣기만 막고, if:"working" 은 받는다
+      // (뒤 작업만 남은 Claude 에 넣는 길, CoreRunner.send). 받은 글은 새 턴으로 처리하고 turn 번호는 그 턴이 끝날 때 오른다.
+      if (terminal.status?.state === "working" && p.if !== "working") return { error: { kind: "busy", message: "CLI is working" } };
       if (terminal.status?.state === "blocked" && !p.force) return { error: { kind: "blocked", message: "CLI dialog is open" } };
       const before = terminal.turn ?? 0;
       begin(holder, String(p.text ?? ""));

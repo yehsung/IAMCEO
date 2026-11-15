@@ -6,20 +6,27 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseCliVersion, VERIFIED_CLI_VERSIONS } from "../server/cli-version.ts";
-import { inputLooksEmpty } from "../server/runner/claude-screen.ts";
+import { claudeQuietScreen, inputLooksEmpty } from "../server/runner/claude-screen.ts";
+import { readClaudeTurn } from "../server/runner/claude-turn.ts";
+import { parseTranscriptTail } from "../server/runner/transcript.ts";
 import { claudeFolderTrust, codexFolderTrust, looksLikeFolderTrust } from "../server/runner/core-approval.ts";
 import { codexBackgroundTerminals, codexDraft, trustDialogLike } from "../server/runner/core.ts";
 import { readCodexTurnEnd } from "../server/runner/codex-turn.ts";
 import { parseCodexSessionMeta, readDeliveryEvidence } from "../server/runner/delivery-evidence.ts";
 
 type Provider = "claude" | "codex";
-interface ScreenExpect { inputEmpty?: boolean | null; draft?: string | null; folderTrustLike?: boolean; trustDialogLike?: boolean; folderTrust?: { selected: number; options: string[] } | null; backgroundTerminals?: number | null }
-/** turnEnd: Codex 기록에서 표지가 든 사용자 글 뒤의 턴이 끝났는가(codex-turn.ts, 기준선 없이). */
-interface LogExpect { received: string[]; verdict?: string; code?: string; complete?: boolean; sessionMeta?: boolean; turnEnd?: string }
+/** quiet: Claude 가 턴을 끝내고 입력을 받을 수 있는 화면인가(claudeQuietScreen, 아니면 null). */
+interface ScreenExpect { inputEmpty?: boolean | null; draft?: string | null; folderTrustLike?: boolean; trustDialogLike?: boolean; folderTrust?: { selected: number; options: string[] } | null; backgroundTerminals?: number | null; quiet?: { label: string | null } | null }
+/**
+ * turnEnd: Codex 기록에서 표지가 든 사용자 글 뒤의 턴이 끝났는가(codex-turn.ts, 기준선 없이).
+ * claudeTurn·claudeTurnError: Claude 기록의 처음(기준선 0)부터 표지가 든 받은 글 뒤의 턴이 닫혔는가와 그 오류(claude-turn.ts).
+ * idleCompaction·tailTokens: 기록 꼬리가 쉬는 동안 압축으로 끝나는가와 그때의 문맥 토큰(transcript.ts).
+ */
+interface LogExpect { received: string[]; verdict?: string; code?: string; complete?: boolean; sessionMeta?: boolean; turnEnd?: string; claudeTurn?: string; claudeTurnError?: string | null; idleCompaction?: boolean; tailTokens?: number | null }
 interface Fixture {
   /** observed: 실제 CLI 화면·기록을 옮김. synthetic: 실측 구조로 만든 화면(그것만으로는 버전을 확인했다고 하지 않는다). */
   file: string; kind: "screen" | "log"; origin: "observed" | "synthetic"; cwd: string; bannerVersion?: boolean; note?: string;
-  sessionId?: string; markers?: Record<string, string>; expect: ScreenExpect | LogExpect;
+  sessionId?: string; markers?: Record<string, string>; bundleMarker?: string; expect: ScreenExpect | LogExpect;
 }
 interface Manifest { provider: Provider; version: string; source: string; fixtures: Fixture[] }
 
@@ -56,7 +63,7 @@ describe("확인된 버전 목록과 견본 폴더", () => {
 function screenResults(provider: Provider, screen: string, cwd: string) {
   const trust = provider === "claude" ? claudeFolderTrust(screen, cwd) : codexFolderTrust(screen, cwd);
   return {
-    ...(provider === "claude" ? { inputEmpty: inputLooksEmpty(screen) } : { draft: codexDraft(screen), backgroundTerminals: codexBackgroundTerminals(screen) }),
+    ...(provider === "claude" ? { inputEmpty: inputLooksEmpty(screen), quiet: claudeQuietScreen(screen) } : { draft: codexDraft(screen), backgroundTerminals: codexBackgroundTerminals(screen) }),
     folderTrustLike: looksLikeFolderTrust(screen),
     trustDialogLike: trustDialogLike(screen, provider),
     folderTrust: trust ? { selected: trust.selected, options: trust.prompt.options.map(option => option.label) } : null,
@@ -72,8 +79,11 @@ function logResults(provider: Provider, fixture: Fixture, text: string) {
     markers: Object.entries(fixture.markers ?? {}).map(([deliveryId, marker]) => ({ deliveryId, marker })) });
   const first = JSON.parse(text.split("\n")[0]!) as unknown;
   const turnEnd = provider === "codex" ? readCodexTurnEnd({ home, path, sessionId: fixture.sessionId!, cwd: fixture.cwd, baseline: null, markers: Object.values(fixture.markers ?? {}) }).outcome : undefined;
+  const claude = provider === "claude" ? readClaudeTurn({ home, path, sessionId: fixture.sessionId!, baseline: { offset: 0, fileIdentity: null }, markers: [...(fixture.bundleMarker ? [fixture.bundleMarker] : []), ...Object.values(fixture.markers ?? {})] }) : null;
+  const tail = provider === "claude" ? parseTranscriptTail(text) : null;
   return { received: result.receivedDeliveryIds, verdict: result.evidence.verdict, code: result.evidence.code, complete: result.evidence.complete,
-    sessionMeta: provider === "codex" ? parseCodexSessionMeta(first) !== null : undefined, turnEnd };
+    sessionMeta: provider === "codex" ? parseCodexSessionMeta(first) !== null : undefined, turnEnd,
+    claudeTurn: claude?.outcome, claudeTurnError: claude ? claude.error?.error ?? null : undefined, idleCompaction: tail ? !!tail.idleCompaction : undefined, tailTokens: tail?.contextTokens };
 }
 
 describe.each(all)("$provider $version 견본을 지금 해석기로 읽는다", ({ provider, version }) => {

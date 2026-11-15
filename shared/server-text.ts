@@ -137,6 +137,10 @@ export const SERVER_TEXTS = {
   "why.codex_log_unbound": { ko: "Codex 세션 기록을 아직 이 팀장과 연결하지 못했습니다", en: "the Codex session record isn't linked to this staff member yet" },
   "why.codex_turn_unconfirmed": { ko: "Codex 세션 기록에서 이 턴이 끝났다는 기록을 찾지 못했습니다", en: "the Codex session record doesn't show that this turn finished" },
   "why.codex_log_unreadable": { ko: "Codex 세션 기록을 끝까지 읽지 못했습니다", en: "couldn't read the Codex session record to the end" },
+  // Claude 가 자기 근거(세션 기록의 턴 끝·훅)로 끝낸 턴인데 실행 엔진은 working 을 알린다(CoreRunner.claudeQuiet, server/runner/claude-turn.ts).
+  "activity.claude_background_left": { ko: "턴은 끝났습니다. Claude가 띄운 뒤 작업(워크플로·백그라운드 에이전트·셸 등)이 아직 돌고 있어 쉬는 중으로 둡니다. 그동안 온 전달은 바로 넣고, 잠재우기·CLI 바꾸기·설정 적용·문맥 압축은 그 작업이 끝난 뒤에 합니다. 작업이 끝나면 Claude가 그 알림을 받아 스스로 이어 갑니다", en: "The turn ended. Background work that Claude started (workflows, background agents, shells and so on) is still running, so it shows as idle. New deliveries go in right away; sleep, CLI switch, settings changes and context compaction wait until that work ends. When it ends, Claude gets notified and continues on its own" },
+  "activity.claude_login_required": { ko: "Claude 로그인(계정) 오류로 이 턴이 끝났습니다. 터미널에서 /login 으로 다시 로그인하세요. 다음 턴이 정상으로 돌 때까지 이 팀장에게 가는 전달은 보류합니다", en: "This turn ended with a Claude sign-in (account) error. Run /login in the terminal to sign in again. Deliveries to this staff member are held until the next turn runs normally" },
+  "activity.claude_idle_compacted": { ko: "쉬는 동안 Claude가 스스로 대화를 압축했습니다(턴이 아닙니다). 문맥 사용량은 압축 뒤 값으로 다시 잽니다", en: "Claude compacted the conversation on its own while idle (not a turn). Context usage is measured again after compaction" },
 
   // ---- 서버가 만드는 결재 카드 ----
   "card.tool_permission.title": { ko: "{action}: {titleTarget}", en: "{action}: {titleTarget}" },

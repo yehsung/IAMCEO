@@ -1,7 +1,7 @@
 {
   "provider": "claude",
   "version": "2.1.323",
-  "source": "2026-11-13 17:56 실측(빈 DB 시험 서버, 갓 띄운 팀장의 첫 화면). 폴더 경로만 바꿨다. 폴더 신뢰 창은 이 실측에서 뜨지 않아 견본이 없다.",
+  "source": "2026-11-13 17:56 실측(빈 DB 시험 서버, 갓 띄운 팀장의 첫 화면). 폴더 경로만 바꿨다. 폴더 신뢰 창은 이 실측에서 뜨지 않아 견본이 없다. 뒤 작업 화면·기록, 로그인 오류 기록(합성, 11-16 핫픽스 C): 2026-11-15 라이브 세션 기록의 줄 종류·키·순서(stop_hook_summary → turn_duration(pendingWorkflowCount) → queue-operation → compact_boundary(auto, postTokens) → isCompactSummary → informational, 그리고 isApiErrorMessage(authentication_failed) → turn_duration)와 관측 화면(idle.txt)의 아래쪽을 옮기고 글은 가짜로 바꿈. 'Waiting for N … to finish' 줄은 옛 herdr 실행기의 2.1.316 실측 모양이다.",
   "fixtures": [
     {
       "file": "idle.txt",
@@ -13,7 +13,86 @@
         "inputEmpty": true,
         "folderTrustLike": false,
         "trustDialogLike": false,
-        "folderTrust": null
+        "folderTrust": null,
+        "quiet": {
+          "label": null
+        }
+      }
+    },
+    {
+      "file": "background-wait.txt",
+      "kind": "screen",
+      "origin": "synthetic",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "note": "턴을 끝내고 뒤 작업(워크플로)만 기다리는 화면. core 는 이 동안 working 을 알린다.",
+      "expect": {
+        "inputEmpty": true,
+        "folderTrustLike": false,
+        "trustDialogLike": false,
+        "folderTrust": null,
+        "quiet": {
+          "label": "1 dynamic workflow"
+        }
+      }
+    },
+    {
+      "file": "background-working.txt",
+      "kind": "screen",
+      "origin": "synthetic",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "note": "뒤 작업 알림으로 Claude 가 스스로 새 턴을 연 화면(일하는 중의 상태 줄).",
+      "expect": {
+        "inputEmpty": true,
+        "folderTrustLike": false,
+        "trustDialogLike": false,
+        "folderTrust": null,
+        "quiet": null
+      }
+    },
+    {
+      "file": "transcript-background.jsonl",
+      "kind": "log",
+      "origin": "synthetic",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "sessionId": "session",
+      "markers": {
+        "d1": "#iamceo_abcdefghijklmnopqrstuv"
+      },
+      "bundleMarker": "#iamceo_b_ABCDEFGHIJKLMNOPQRSTUV",
+      "note": "뒤 작업을 띄우고 끝낸 턴 뒤 쉬는 동안 압축(Compacted while idle).",
+      "expect": {
+        "received": [
+          "d1"
+        ],
+        "verdict": "present",
+        "claudeTurn": "ended",
+        "claudeTurnError": null,
+        "idleCompaction": true,
+        "tailTokens": 20000
+      }
+    },
+    {
+      "file": "transcript-login.jsonl",
+      "kind": "log",
+      "origin": "synthetic",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "sessionId": "session",
+      "markers": {
+        "d1": "#iamceo_abcdefghijklmnopqrstuv"
+      },
+      "bundleMarker": "#iamceo_b_ABCDEFGHIJKLMNOPQRSTUV",
+      "note": "로그인 오류로 끝난 턴(stop_hook_summary 없이 turn_duration).",
+      "expect": {
+        "received": [
+          "d1"
+        ],
+        "verdict": "present",
+        "claudeTurn": "ended",
+        "claudeTurnError": "authentication_failed",
+        "idleCompaction": false,
+        "tailTokens": null
       }
     }
   ]

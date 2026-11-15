@@ -73,9 +73,11 @@ export type BlockedReason = "permission" | "selection" | "setup" | "usage_limit"
 /**
  * 승인 창으로 확인하지 못한 막힘(status_unknown)의 까닭. 앱은 이 값이 있으면 '터미널 열어 직접 답하기'를 보인다.
  * trust_dialog_unrecognized: 폴더 신뢰 창으로 보이지만 정확히 읽지 못했다. start_not_ready: 띄운 뒤 60초 넘게 준비를 알리지 않았다.
+ * login_required(11-16): Claude 의 턴이 로그인(계정) 오류로 끝났다(blockedReason setup). 터미널에서 /login 으로 다시 로그인해 다음 턴이 돌면 풀린다.
+ * 이 값을 모르는 출시 앱은 막힘을 예전처럼 보이고 설명에 관측 메모(statusObservation.error.note)를 쓴다.
  */
-export type BlockedCode = "trust_dialog_unrecognized" | "start_not_ready";
-export const BLOCKED_CODES: readonly BlockedCode[] = ["trust_dialog_unrecognized", "start_not_ready"];
+export type BlockedCode = "trust_dialog_unrecognized" | "start_not_ready" | "login_required";
+export const BLOCKED_CODES: readonly BlockedCode[] = ["trust_dialog_unrecognized", "start_not_ready", "login_required"];
 export interface StatusObservation {
   source: Backend | "manual";
   observedAt: string | null;

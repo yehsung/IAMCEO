@@ -153,7 +153,12 @@ export type RunnerEvent = RunnerObservation & (
   | { type: "input_ready"; memberId: string }
   | { type: "turn_end"; memberId: string; finalText: string; isError: boolean; errorText?: string; exitCode?: number | null; reason?: string | null;
       /** 상태 보고가 사라져 끝난 것으로 읽은 턴. 끝난 것은 맞지만 성공했다는 증거는 아니다. */
-      inferred?: boolean }
+      inferred?: boolean;
+      /**
+       * turn 을 비운 끝(core 의 번호가 아직 오르지 않았다. Codex 백그라운드 터미널, CoreRunner.endCodexBackgroundTurn)에서 그 끝의
+       * 문맥 측정(context_usage)이 실은 core turn 번호. 총괄은 '방금 끝난 턴'(completedTurn)을 적을 때만 쓴다.
+       */
+      contextTurn?: number }
   | { type: "activity"; memberId: string; kind: ActivityKind; text: string | ServerTextRef;
       /** 같은 줄을 한 번만 남기는 열쇠(재시작 뒤에도). Store.appendActivity 의 eventKey. */
       eventKey?: string;

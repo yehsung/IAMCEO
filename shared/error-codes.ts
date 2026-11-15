@@ -483,6 +483,11 @@ export const ERROR_CODES = {
   observation_folder_trust: { ko: "폴더 신뢰 확인 창에서 멈췄습니다", en: "Stopped at the folder trust prompt" },
   observation_trust_dialog_unrecognized: { ko: "폴더 신뢰 확인 창으로 보이지만 정확히 읽지 못했습니다. 터미널을 열어 직접 답해 주세요", en: "This looks like the folder trust prompt but couldn't be read exactly. Open the terminal and answer it yourself" },
   observation_start_not_ready: { ko: "띄운 뒤 60초 넘게 준비를 알리지 않았습니다. 터미널을 열어 화면을 확인해 주세요", en: "It hasn't reported ready for over 60 seconds after starting. Open the terminal and check the screen" },
+  // ---- 11-16 핫픽스 B: 턴은 끝났지만 Codex 가 띄운 백그라운드 프로그램이 남은 팀장(쉬는 중으로 보이지만 입력을 넣지 않는다) ----
+  // 넓은 코드(member_working·archive_member_working·cli_switch_busy)는 출시된 앱이 보므로 그대로 두고 reason 칸으로 싣는다.
+  sleep_background_program: { ko: "턴은 끝났지만 Codex가 띄운 백그라운드 프로그램이 아직 돌고 있어 잠재우지 않았습니다. 터미널에서 /stop 으로 닫은 뒤 잠재우거나, 그래도 잠재우면 그 프로그램도 함께 끝납니다", en: "The turn ended, but a background program that Codex started is still running, so the staff member wasn't put to sleep. Close it with /stop in the terminal first, or put the staff member to sleep anyway and that program ends too" },
+  archive_background_program: { ko: "팀장이 턴은 끝냈지만 Codex가 띄운 백그라운드 프로그램이 아직 돌고 있어 보관할 수 없습니다. 터미널에서 /stop 으로 닫은 뒤 보관하세요", en: "A staff member's turn ended, but a background program that Codex started is still running, so the project can't be archived. Close it with /stop in the terminal, then archive" },
+  cli_switch_background_program: { ko: "턴은 끝났지만 Codex가 띄운 백그라운드 프로그램이 아직 돌고 있어 CLI를 바꿀 수 없습니다. 터미널에서 /stop 으로 닫은 뒤 바꾸세요", en: "The turn ended, but a background program that Codex started is still running, so the CLI can't be switched. Close it with /stop in the terminal, then switch the CLI" },
   // ---- 끝 ----
 } as const satisfies Record<string, ErrorCodeText>;
 

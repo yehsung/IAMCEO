@@ -660,9 +660,22 @@ export class CoreRunner implements FullRunner {
   }
   isBusy(memberId: string): boolean {
     const track = this.tracks.get(memberId);
-    return !!track && (track.pending || track.uncertain || track.restorePending || track.completing || track.status === "working" || !!track.compact && !["failed", "succeeded"].includes(track.compact.phase) ||
+    return !!track && (this.turnBusy(track) ||
       // 턴은 끝났어도 Codex 의 백그라운드 터미널이 남아 core 가 working 인 동안은 입력을 넣지 않는다(codexBackground).
       !!this.codexWatch.get(track)?.state);
+  }
+  /**
+   * 턴은 끝났고 Codex 가 남긴 백그라운드 터미널 때문에만 바쁜 팀장(codexBackground)이면 그 터미널 수, 아니면 null.
+   * 다른 까닭(입력 중·결과 모름·압축·정말 일하는 중)으로도 바쁘면 null 이다. 총괄이 잠재우기·보관·CLI 바꾸기 거절의 까닭과
+   * 잠재울 후보를 가를 때 쓴다(바쁨 판정 자체는 isBusy 그대로).
+   */
+  backgroundTerminals(memberId: string): number | null {
+    const track = this.tracks.get(memberId);
+    const state = track ? this.codexWatch.get(track)?.state : null;
+    return track && state && !this.turnBusy(track) ? state.terminals : null;
+  }
+  private turnBusy(track: Track): boolean {
+    return track.pending || track.uncertain || track.restorePending || track.completing || track.status === "working" || !!track.compact && !["failed", "succeeded"].includes(track.compact.phase);
   }
   occupiesTurnSlot(memberId: string): boolean {
     const track = this.tracks.get(memberId);
@@ -834,12 +847,16 @@ export class CoreRunner implements FullRunner {
     // 붙는 순간(재시작 뒤)에는 이미 닫힌 업무만 여기 온다. 활동 줄도 이미 남았다.
     if (initial) return;
     if (!background.runEnded) {
+      // 이 끝의 문맥 측정(reportContext 의 context_usage)은 지금 core turn 번호(working 이 이어지는 동안의 번호)를 싣는다. 직접 조작 중이면 재지 않는다.
+      const leased = !!this.manualLease(track.member.id);
+      const measuredTurn = leased ? null : track.terminal.turn ?? null;
       track.completing = true;
-      try { if (!this.manualLease(track.member.id)) await this.reportContext(track); } finally { track.completing = false; }
+      try { if (!leased) await this.reportContext(track); } finally { track.completing = false; }
       this.validateTrack(track);
       track.lastError = null;
       // turn 번호는 비운다. 끝을 나타낼 번호(위의 +1)는 core 가 아직 내지 않았다. 미리 쓰면 같은 working 의 다음 관측들이 지난 turn 으로 버려진다.
-      this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: false, reason: "codex_background_terminal", turn: null });
+      // 대신 측정의 번호를 contextTurn 으로 실어, 총괄이 '방금 끝난 턴의 측정'으로 알아보게 한다(자동 압축, orchestrator pump 의 exact).
+      this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: false, reason: "codex_background_terminal", turn: null, ...(measuredTurn !== null ? { contextTurn: measuredTurn } : {}) });
     }
     this.event(track, { type: "activity", memberId: track.member.id, kind: "system", notice: true,
       text: textRef("activity.codex_background_left", { count: String(background.terminals) }), eventKey: this.codexBackgroundKey(track, terminal, "left") });

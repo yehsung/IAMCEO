@@ -10,8 +10,10 @@ import { join } from "node:path";
 import { codexBackgroundTerminals } from "../server/runner/core.ts";
 import { readCodexTurnEnd, type CodexTurnQuery } from "../server/runner/codex-turn.ts";
 import type { RunnerEvent } from "../server/runner/types.ts";
+import { ERROR_CODES } from "../shared/error-codes.ts";
 import type { Member } from "../shared/types.ts";
 import { coreSetup, type CoreEnv, type CoreSetupOptions } from "./fixtures/core-harness.ts";
+import { rejection } from "./fixtures/settle.ts";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "cli", "codex", "0.166.0");
 const screen = (name: string) => readFileSync(join(FIXTURES, name), "utf8");
@@ -27,7 +29,9 @@ const started = (turn: string | null) => ({ type: "event_msg", payload: { type: 
 const complete = (turn: string | null) => ({ type: "event_msg", payload: { type: "task_complete", ...(turn ? { turn_id: turn } : {}), last_agent_message: "가짜 답" } });
 const aborted = (turn: string) => ({ type: "event_msg", payload: { type: "turn_aborted", turn_id: turn } });
 const user = (text: string) => ({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text }] } });
-const tokens = { type: "event_msg", payload: { type: "token_count", info: { model_context_window: 258_400, last_token_usage: { total_tokens: 42_000 } } } };
+const tokenCount = (total: number) => ({ type: "event_msg", payload: { type: "token_count", info: { model_context_window: 258_400, last_token_usage: { total_tokens: total } } } });
+const tokens = tokenCount(42_000);
+const itemCompleted = { type: "event_msg", payload: { type: "item_completed" } };
 const MARKER = "#iamceo_" + "a".repeat(22), BUNDLE = "#iamceo_b_" + "b".repeat(22);
 
 describe("화면: 백그라운드 터미널만 남은 Codex", () => {
@@ -66,7 +70,7 @@ describe("Codex 기록: 전달 뒤의 턴이 끝났는가", () => {
     const at = Buffer.byteLength(head);
     const open = readCodexTurnEnd(query({ baseline: baseline(at) }));
     expect(open).toMatchObject({ outcome: "running", code: "turn_open" });
-    appendFileSync(path, rows(complete("t2"), { type: "event_msg", payload: { type: "item_completed" } }));
+    appendFileSync(path, rows(complete("t2"), itemCompleted));
     // 앞 읽기 자리에서 이어 읽는다.
     expect(readCodexTurnEnd(query({ baseline: baseline(at) }), open.cursor)).toMatchObject({ outcome: "ended", code: "turn_complete" });
     expect(readCodexTurnEnd(query({ baseline: baseline(at) }))).toMatchObject({ outcome: "ended" });
@@ -125,22 +129,23 @@ async function codexAtWork(t: CoreEnv): Promise<{ m: Member; prompt: string }> {
   await t.waitFor("일하는 중", () => lastRun(t, m.id)?.phase === "running" && !!lastRun(t, m.id)?.lastProgressAt && t.member(m.id).status === "working");
   return { m: t.member(m.id), prompt: turn.prompt };
 }
-/** Codex 가 그 세션 기록에 남겼을 rollout. complete=false 면 턴이 아직 열려 있다. */
-function writeRollout(t: CoreEnv, m: Member, prompt: string, opts: { complete?: boolean } = {}): string {
+/** Codex 가 그 세션 기록에 남겼을 rollout. complete=false 면 턴이 아직 열려 있다(completeRollout 으로 끝낸다). */
+function writeRollout(t: CoreEnv, m: Member, prompt: string, opts: { complete?: boolean; tokens?: number } = {}): { id: string; path: string } {
   const id = randomUUID(), dir = join(t.home, "codex-home", "sessions", "2026", "11", "16");
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `rollout-test-${id}.jsonl`);
-  writeFileSync(path, rows(meta(id, m.cwd), started("turn-1"), user(prompt), { type: "turn_context", payload: { model: "gpt-6-astra" } }, tokens,
-    ...(opts.complete === false ? [] : [complete("turn-1"), { type: "event_msg", payload: { type: "item_completed" } }])));
-  return id;
+  writeFileSync(path, rows(meta(id, m.cwd), started("turn-1"), user(prompt), { type: "turn_context", payload: { model: "gpt-6-astra" } }, tokenCount(opts.tokens ?? 42_000),
+    ...(opts.complete === false ? [] : [complete("turn-1"), itemCompleted])));
+  return { id, path };
 }
+const completeRollout = (path: string) => appendFileSync(path, rows(complete("turn-1"), itemCompleted));
 
 describe("백그라운드 터미널만 남은 Codex 팀장", () => {
   test("Codex 기록이 턴 끝을 보이면 업무를 성공으로 닫고 쉬는 중으로 보이며, 남은 프로그램을 활동에 알린다. 다음 전달은 그 프로그램이 끝난 뒤에 넣는다", async () => {
     const t = await setup();
     const events: RunnerEvent[] = []; t.runner.on(event => events.push(event));
     const { m, prompt } = await codexAtWork(t);
-    const sessionId = writeRollout(t, m, prompt);
+    const sessionId = writeRollout(t, m, prompt).id;
     t.core.setScreen(m.id, BACKGROUND);
     const run = await t.waitFor("업무 닫힘", () => { const r = lastRun(t, m.id); return r?.phase === "ended" ? r : null; });
     expect(run).toMatchObject({ result: "success", reason: "codex_background_terminal" });
@@ -228,5 +233,103 @@ describe("백그라운드 터미널만 남은 Codex 팀장", () => {
     expect(activityCodes(t2, m.id).filter(code => code === "activity.turn_end")).toHaveLength(turnEnds);
     expect(activityCodes(t2, m.id).filter(code => code === "activity.codex_background_left")).toHaveLength(1);
     expect(t2.core.turns(m.id)).toHaveLength(1);
+  }, 30_000);
+
+  // 검토 지적 3: 배포 경로. 라이브 DB 처럼 실행 기록은 running, 팀장은 일하는 중('진전 없음' 표시), 세션은 연결된 채로 새 코드의 서버가 뜬다.
+  test("실행 기록이 running 인 채로 서버가 다시 뜨면 붙는 순간에는 닫지 않고, 다음 관측에서 성공으로 닫아 쉬는 중이 된다('진전 없음' 표시도 지운다)", async () => {
+    const t = await setup();
+    const { m, prompt } = await codexAtWork(t);
+    // 옛 서버는 끝을 보지 못한다: 그때 Codex 기록의 턴은 아직 열려 있었다.
+    const { path } = writeRollout(t, m, prompt, { complete: false });
+    t.core.setScreen(m.id, BACKGROUND);
+    await t.waitFor("세션 연결", () => !!t.member(m.id).sessionId);
+    const run = lastRun(t, m.id)!;
+    expect(run.phase).toBe("running");
+    // 라이브처럼 오래 진전이 없던 업무와 그 표시.
+    const old = new Date(Date.now() - 3_600_000).toISOString();
+    t.store.saveExecutionJournal({ ...run, lastProgressAt: old });
+    t.store.patchMember(m.id, { statusObservation: { ...t.member(m.id).statusObservation!, error: { code: "progress_stalled", note: "가짜 진전 없음" } } });
+    await t.stopServer();
+    // 서버가 꺼진 사이 Codex 기록에 턴 끝이 붙었다(라이브에서는 옛 서버가 이 근거를 읽지 않았다).
+    completeRollout(path);
+    const t2 = await t.restart();
+    cleanups.push(() => t2.close());
+    const ended = await t2.waitFor("업무 닫힘", () => { const r = lastRun(t2, m.id); return r?.phase === "ended" ? r : null; });
+    expect(ended).toMatchObject({ runId: run.runId, result: "success", reason: "codex_background_terminal" });
+    await t2.waitFor("쉬는 중·표시 지움", () => t2.member(m.id).status === "idle" && t2.member(m.id).statusObservation?.error === null);
+    await Bun.sleep(300);
+    expect(t2.member(m.id)).toMatchObject({ status: "idle", statusObservation: { error: null } });
+    expect(activityCodes(t2, m.id).filter(code => code === "activity.turn_end")).toHaveLength(1);
+    expect(activityCodes(t2, m.id).filter(code => code === "activity.codex_background_left")).toHaveLength(1);
+    // core 는 여전히 working 이라 입력은 넣지 않는다.
+    expect(t2.runner.isBusy(m.id)).toBe(true);
+    expect(t2.runner.backgroundTerminals(m.id)).toBe(1);
+    expect(t2.core.turns(m.id)).toHaveLength(1);
+  }, 30_000);
+
+  // 검토 지적 1: turn 번호를 비운 턴 끝도 '방금 끝난 턴'의 측정(같은 core turn 번호)으로 적어, 다음 전달 전의 자동 압축을 건너뛰지 않는다.
+  test("백그라운드로 닫은 턴의 문맥 측정이 압축 기준을 넘으면, 그 프로그램이 끝난 뒤 다음 전달보다 압축을 먼저 한다", async () => {
+    const t = await setup();
+    expect(t.store.getSettings().compactAtPct).toBe(70);
+    const { m, prompt } = await codexAtWork(t);
+    // 258,400 칸 가운데 230,000(89%).
+    writeRollout(t, m, prompt, { tokens: 230_000 });
+    t.core.setScreen(m.id, BACKGROUND);
+    await t.waitFor("업무 닫힘", () => lastRun(t, m.id)?.phase === "ended");
+    await t.waitFor("활동 줄", () => activityCodes(t, m.id).includes("activity.codex_background_left"));
+    const state = t.store.getContextState(m.id)!;
+    expect(state.measurement).toMatchObject({ tokens: 230_000, quality: "exact", fresh: true });
+    expect(state.measurement!.turn).not.toBeNull();
+    expect(state.baseline?.completedTurn).toBe(state.measurement!.turn);
+    expect(t.member(m.id).contextPct).toBeGreaterThanOrEqual(70);
+    const waiting = (await t.orch.assign(t.project.id, m.handle, { text: "다음 일" })).delivery.id;
+    t.core.setDirectives("@fake:hold");
+    t.core.setScreen(m.id, CODEX_IDLE);
+    t.core.release(m.id);
+    await t.waitFor("다음 턴", () => t.core.turns(m.id).length === 2);
+    expect(t.core.turns(m.id)[1]!.prompt.startsWith("/compact")).toBe(true);
+    expect(t.store.getContextState(m.id)!.compaction).toMatchObject({ trigger: "auto" });
+    expect(t.store.requireDelivery(waiting).status).not.toBe("delivered");
+  }, 30_000);
+
+  // 검토 지적 2: 쉬는 중으로 보이지만 입력을 넣지 않는 팀장. 거절은 그 까닭으로 하고(넓은 코드는 그대로), 상한 알림의 잠재울 후보로 권하지 않는다.
+  test("백그라운드 프로그램만 남은 팀장은 잠재우기·보관·CLI 바꾸기를 그 까닭으로 거절하고, 잠재울 후보로 권하지 않는다. 그래도 잠재우기는 된다", async () => {
+    const t = await setup();
+    const lead = await t.orch.ensureConductor(t.project.id);
+    const { m, prompt } = await codexAtWork(t);
+    // 보고하고 끝낸 턴이라 '보고 보완' 글이 붙지 않는다(대기열이 비어 있어야 잠재울 후보가 될 수 있다).
+    await t.orch.recordPost(t.member(m.id), { kind: "완료", title: "미리보기 보고" });
+    writeRollout(t, m, prompt);
+    t.core.setScreen(m.id, BACKGROUND);
+    await t.waitFor("업무 닫힘", () => lastRun(t, m.id)?.phase === "ended");
+    await t.waitFor("쉬는 중", () => t.member(m.id).status === "idle" && t.runner.backgroundTerminals(m.id) === 1);
+    await t.idle(lead.id);
+    expect(t.member(m.id).queuedCount).toBe(0);
+
+    // 잠재우기: 출시된 앱은 code(member_working)로 '그래도 잠재우기'를 띄우고, 새 앱은 reason 으로 영어 문장을 고른다.
+    const sleep = await t.api("POST", `/api/members/${m.id}/sleep`);
+    expect(sleep.status).toBe(409);
+    expect(await sleep.json()).toEqual({ error: ERROR_CODES.sleep_background_program.ko, code: "member_working", reason: "sleep_background_program" });
+    expect(await rejection(t.orch.patchProject(t.project.id, { archived: true }))).toMatchObject({ status: 409, code: "archive_member_working", reason: "archive_background_program",
+      message: `미리보기가 턴은 끝냈지만 Codex가 띄운 백그라운드 프로그램이 아직 돌고 있어 보관할 수 없습니다. 터미널에서 /stop 으로 닫은 뒤 보관하세요` });
+    expect(t.store.requireProject(t.project.id).archived).toBe(false);
+    expect(await rejection(t.orch.patchMemberConfig(m.id, { cli: "claude" }))).toMatchObject({ status: 409, code: "cli_switch_busy", reason: "cli_switch_background_program", message: ERROR_CODES.cli_switch_background_program.ko });
+    expect(t.member(m.id).cli).toBe("codex");
+
+    // 깨어 있는 팀장 상한 알림: 이 팀장은 쉬는 중이지만 잠재우기가 거절되므로 후보가 아니다.
+    t.store.patchSettings({ maxAwakeWorkers: 0 });
+    (t.orch as unknown as { checkAwakeLimit(projectId: string): void }).checkAwakeLimit(t.project.id);
+    const notice = t.store.listPending(lead.id).filter(d => d.text.includes("상한")).at(-1)!;
+    expect(notice.text).toContain("지금 잠재울 수 있는 직원이 없습니다");
+    expect(notice.text).not.toContain("잠재울 후보");
+
+    // 답이 끝난 '결재 기다림'을 지금 하는 대로 고칠 때도 일하는 중이 아니라 쉬는 중으로 돌린다.
+    t.store.patchMember(m.id, { status: "waiting" });
+    (t.orch as unknown as { refreshWaiting(memberId: string): void }).refreshWaiting(m.id);
+    expect(t.member(m.id).status).toBe("idle");
+
+    // '그래도 잠재우기'(force)는 지금처럼 된다. 터미널과 함께 그 프로그램도 끝난다.
+    await t.orch.sleepMember(m.id, { force: true });
+    expect(t.member(m.id).status).toBe("asleep");
   }, 30_000);
 });

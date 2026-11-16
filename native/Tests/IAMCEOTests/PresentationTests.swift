@@ -277,7 +277,9 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(busy.subagentsAtWorkLine, "서브에이전트 2개")
         XCTAssertEqual(officeDetail(busy), "서브에이전트 2개")
         XCTAssertEqual(officeDetail(Member(status: "idle", subagentState: SubagentState(quality: "estimated", count: 3))), "서브에이전트 약 3개")
-        XCTAssertEqual(officeDetail(Member(status: "idle", now: "가짜 조사 맡김", subagentState: SubagentState(quality: "exact", count: 2))), "가짜 조사 맡김")
+        XCTAssertEqual(officeDetail(Member(status: "idle", now: "가짜 조사 맡김", subagentState: SubagentState(quality: "exact", count: 2))), "서브에이전트 2개 · 마지막: 가짜 조사 맡김")
+        // 일하는 팀장(턴이 도는 중)은 서브에이전트가 있어도 지금처럼 '지금' 글 그대로다.
+        XCTAssertEqual(officeDetail(Member(status: "working", now: "가짜 일", subagentState: SubagentState(quality: "exact", count: 2))), "가짜 일")
         XCTAssertNil(Member(status: "idle").subagentsAtWorkLine)
         XCTAssertEqual(officeDetail(Member(status: "idle")), "맡은 일 없음")
         XCTAssertEqual(officeDetail(Member(status: "working")), "맡은 일 없음")

@@ -85,8 +85,8 @@ func officeDetail(_ member: Member) -> String {
     default:
         break
     }
-    // 0.2.7: 서브에이전트만 일하는 팀장은 맡은 일 글이 없어도 '맡은 일 없음'이 아니다: 그 수를 쓴다.
-    if now.isEmpty, let line = member.subagentsAtWorkLine { return line }
+    // 0.2.7: 서브에이전트만 일하는 팀장(턴은 끝남)은 그 수를 먼저 쓰고, 맡은 일 글은 '마지막:'으로 쓴다(홈 줄과 같은 말).
+    if let line = member.subagentsAtWorkLine { return now.isEmpty ? line : "\(line) · " + String(localized: "마지막: \(now)") }
     return now.isEmpty ? String(localized: "맡은 일 없음") : now
 }
 

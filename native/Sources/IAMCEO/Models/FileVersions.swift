@@ -18,6 +18,15 @@ enum FileVersions {
         return current
     }
 
+    /// 이 판의 번호(처음 판이 1). 앞 판을 목록에서 따라 센다(서버의 versions 와 같은 셈). 판 갈이가 없는 자료는 nil.
+    static func number(of file: FileDoc, in files: [FileDoc]) -> Int? {
+        let count = previous(of: file, in: files).count + 1
+        if count > 1 { return count }
+        // 처음 판: 새 판이 목록에 있을 때만 '판 1'(새 판을 아직 못 받았으면 판 갈이를 모른다).
+        guard let next = file.replacedBy, files.contains(where: { $0.id == next }) else { return nil }
+        return 1
+    }
+
     /// 이 판보다 앞선 판들(가까운 것부터).
     static func previous(of file: FileDoc, in files: [FileDoc]) -> [FileDoc] {
         let byID = Dictionary(files.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })

@@ -499,7 +499,7 @@ struct HomeView: View {
                         HomeRowButton(action: {
                             Self.openReport(notice, members: store.members, router: router)
                         }) {
-                            Text(notice.title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
+                            Text(notice.displayTitle()).font(CEFont.rowTitle).foregroundStyle(CE.ink)
                         }
                         Button(memberName(notice.memberId) ?? String(localized: "팀원 보기")) { router.openMember(notice.memberId) }
                             .ceSecondaryButton().ceCompactControl()
@@ -964,12 +964,20 @@ struct HomeView: View {
         }
     }
 
+    /// 팀 카드 줄의 둘째 줄(무엇을 하는지). The dot already says working / waiting; a state the dot cannot say (확인 불가)
+    /// keeps its words. 0.2.7: 서브에이전트만 일하는 팀장(턴은 끝남)은 그 수를 먼저 쓰고, 맡은 일 글은 지금 일이 아니라
+    /// '마지막:'으로 쓴다(어제 쓴 '지금' 글이 지금 하는 일처럼 보이던 것. 사무실·팀장 상세와 같은 '서브에이전트 N개').
+    static func activeRowDoing(_ member: Member, info: MemberStatusInfo) -> String {
+        let now = plainOneLine(member.now)
+        if let line = member.subagentsAtWorkLine { return now.isEmpty ? line : "\(line) · " + String(localized: "마지막: \(now)") }
+        return now.isEmpty ? info.label : (info.icon == "questionmark.circle" ? "\(info.label) · " : "") + now
+    }
+
     /// Web .hm-row__main--stack: the name line (with when, on the right), then what it is doing on the full width.
     private func activeRow(_ member: Member) -> some View {
         let info = MemberStatusInfo(member)
         let now = plainOneLine(member.now)
-        // The dot already says working / waiting; a state the dot cannot say (확인 불가) keeps its words.
-        let doing = now.isEmpty ? info.label : (info.icon == "questionmark.circle" ? "\(info.label) · " : "") + now
+        let doing = Self.activeRowDoing(member, info: info)
         let time = relativeTime(member.nowAt)
         return HomeRowButton(action: { router.openMember(member.id) }) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -991,7 +999,7 @@ struct HomeView: View {
         }
         .help([info.explanation, now.isEmpty ? "" : String(localized: "마지막 보고 · \(now)")].filter { !$0.isEmpty }.joined(separator: "\n"))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([member.name, info.label, now.isEmpty ? "" : String(localized: "마지막 보고 \(now)"), time].filter { !$0.isEmpty }.joined(separator: ", "))
+        .accessibilityLabel([member.name, info.label, member.subagentsAtWorkLine ?? "", now.isEmpty ? "" : String(localized: "마지막 보고 \(now)"), time].filter { !$0.isEmpty }.joined(separator: ", "))
         .accessibilityHint("팀원 보기")
     }
 
@@ -1937,7 +1945,7 @@ final class TodoCompletionReview: Identifiable {
     }
 }
 
-private struct TodoCompletionEditor: View {
+struct TodoCompletionEditor: View {
     @Bindable var review: TodoCompletionReview
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -1970,7 +1978,7 @@ private struct TodoCompletionEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: CESpace.m) {
-            Text(review.todo.title).font(CEFont.section)
+            Text(review.todo.title).font(CEFont.section).layoutProbe("todo.title")
             // 0.2.7: 했음 · 필요 없음 · 팀장에게 맡김. 결과에 맞는 글로 팀장에게 간다.
             // 옛 서버는 결과를 몰라 '했음'으로 보낸다: 그때는 고르지 않게 한다(capabilities.revisions).
             if store.serverTakesRevisions {
@@ -1997,16 +2005,25 @@ private struct TodoCompletionEditor: View {
             } else if let reason = store.writeBlockedReason {
                 Text(reason).font(CEFont.meta).foregroundStyle(CE.ink2)
             }
-            HStack {
+            // 한 줄에 다 들어가면 전과 같은 한 줄(단추 사이 8). 좁은 iPhone·긴 팀장 이름·큰 글자에서는 단추를 자르지 않고
+            // 다음 줄로 넘긴다(영어 iPhone 에서 'Mark as not nee…'로 잘리던 것, 0.2.7 배포 전 확인).
+            ChipFlow(spacing: 8, lineSpacing: 8) {
                 Button("파일 붙이기") { importing = true }.ceSecondaryButton()
                     .disabled(review.sending || review.uploading || !store.uiCanWrite || !review.isCurrent(in: store))
+                    .layoutProbe("todo.attach")
                 Button(submitTitle) {
                     Task { if await review.submit(store: store) { dismiss() } }
                 }.ceProminentButton().disabled(review.sending || review.uploading || !store.uiCanWrite || !review.isCurrent(in: store))
+                    .layoutProbe("todo.submit")
                 Button("취소") { dismiss() }.ceGhostButton().disabled(review.sending || review.uploading)
+                    .layoutProbe("todo.cancel")
             }
         }
         .padding(CESpace.l)
+        #if os(iOS)
+        // iPhone 시트는 화면 높이를 다 쓴다: 내용을 위에 붙인다(가운데에 놓여 위가 크게 비던 것).
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        #endif
         .frame(minWidth: isMac ? 380 : nil, idealWidth: 440)
         .interactiveDismissDisabled(review.sending || review.uploading)
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in

@@ -754,7 +754,10 @@ private struct FileReaderContent: View {
     @ViewBuilder private var versionBlock: some View {
         let newest = FileVersions.newest(of: file, in: store.files)
         if newest.id != file.id {
-            InlineNotice(tone: .attention, icon: "clock.arrow.circlepath", title: String(localized: "옛 판입니다"),
+            // 몇 번째 판인지도 밝힌다('이전 판' 줄의 '판 N'과 같은 번호).
+            let number = FileVersions.number(of: file, in: store.files)
+            InlineNotice(tone: .attention, icon: "clock.arrow.circlepath",
+                         title: number.map { String(localized: "옛 판입니다 · 판 \($0)") } ?? String(localized: "옛 판입니다"),
                          detail: String(localized: "고친 판이 있습니다: \(newest.title.isEmpty ? String(localized: "제목 없는 자료") : newest.title)"),
                          actionTitle: String(localized: "새 판 보기"), action: { router.openFile(newest.id) })
         } else {
@@ -762,12 +765,17 @@ private struct FileReaderContent: View {
             if !older.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("이전 판 \(older.count)개").font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink2)
-                    ForEach(older) { version in
+                    // 판마다 번호와 올린 때(시각)를 먼저: 제목은 판마다 같은 일이 많아 그것만으로는 가를 수 없었다(배포 전 확인 문제 4).
+                    ForEach(Array(older.enumerated()), id: \.element.id) { index, version in
                         Button { router.openFile(version.id) } label: {
-                            Text([version.title.isEmpty ? String(localized: "제목 없는 자료") : version.title, version.who, fileTime(version.createdAt)]
-                                .filter { !$0.isEmpty }.joined(separator: " · "))
-                                .font(CEFont.secondary).foregroundStyle(CE.accent).lineLimit(1).truncationMode(.middle)
-                                .frame(minHeight: isMac ? nil : 44, alignment: .leading).contentShape(Rectangle())
+                            HStack(spacing: 8) {
+                                Tag(String(localized: "판 \(older.count - index)"))
+                                Text([fileTime(version.createdAt, relative: false), version.who,
+                                      version.title.isEmpty ? String(localized: "제목 없는 자료") : version.title]
+                                    .filter { !$0.isEmpty }.joined(separator: " · "))
+                                    .font(CEFont.secondary).foregroundStyle(CE.accent).lineLimit(1).truncationMode(.tail)
+                            }
+                            .frame(minHeight: isMac ? nil : 44, alignment: .leading).contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .accessibilityHint("이전 판 열기")
@@ -2756,9 +2764,10 @@ private func fileSizeText(_ size: Int) -> String {
 
 /// When a file was posted (web Time / formatTime): 방금 · N분 전 · N시간 전 within six hours, then 14:20 · 어제 14:20 ·
 /// 11월 4일 14:20 · 2025년 3월 2일 14:20 — the clock never drops off an older date.
-private func fileTime(_ iso: String, now: Date = Date()) -> String {
+/// 자료의 올린 때. 6시간 안은 '5분 전'처럼, 그 뒤는 시각. `relative: false` 는 늘 시각이다(판 목록: 몇 분 사이에 고친 판도 가르게).
+private func fileTime(_ iso: String, now: Date = Date(), relative: Bool = true) -> String {
     guard let date = parseISODate(iso) else { return "" }
-    if now.timeIntervalSince(date) < 6 * 3600 { return relativeTime(iso, now: now) }
+    if relative, now.timeIntervalSince(date) < 6 * 3600 { return relativeTime(iso, now: now) }
     let calendar = Calendar.current
     let clock = koTime(date)
     if calendar.isDateInToday(date) { return clock }

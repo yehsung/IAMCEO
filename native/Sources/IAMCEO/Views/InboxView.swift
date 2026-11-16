@@ -1263,7 +1263,8 @@ private struct DecisionCard: View {
                 AttachmentPickerButton(context: uploadContext)
                     .disabled(busy || stale || store.isArchive || !store.uiCanWrite)
             }
-            TextField(free ? "답을 적어 주세요" : picked?.needsNote == true ? "메모 (꼭 적어 주세요)" : "메모 (선택) — 다른 생각이나 조건", text: $review.note, axis: .vertical)
+            // 0.2.7: '메모 필요' 선택지도 첨부를 붙였으면 이미 보낼 수 있다(서버도 같다): 그때는 보통 메모칸 글로.
+            TextField(free ? "답을 적어 주세요" : review.noteRequired(hasAttachments: !answerFiles.isEmpty) ? "메모 (꼭 적어 주세요)" : "메모 (선택) — 다른 생각이나 조건", text: $review.note, axis: .vertical)
                 .lineLimit(1...6)
                 .lineSpacing(CELeading.spacing(15, 1.5))
                 .focused($memoFocused)
@@ -1554,10 +1555,10 @@ private struct AnsweredBody: View {
                     Text("메모: \(note)").font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(textLeading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                // 0.2.7: 답에 붙인 첨부.
+                // 0.2.7: 답에 붙인 첨부. 대화의 첨부와 같은 부품(그림은 미리보기, 파일은 칩)이라 눌러 연다.
+                // 대화처럼 글 선택 밖에 둔다: 이 카드 본문은 글 선택이 켜져 있어, 칩의 이름 글자가 누름 대신 선택을 받지 않게.
                 if !decision.answerAttachments.isEmpty {
-                    Text("첨부: \(decision.answerAttachments.map(\.name).joined(separator: ", "))").font(CEFont.note).foregroundStyle(CE.ink2)
-                        .lineSpacing(textLeading).fixedSize(horizontal: false, vertical: true)
+                    ChatAttachments(items: decision.answerAttachments).padding(.top, 2).textSelection(.disabled)
                 }
                 if decision.status == "answered", let asker, ["blocked", "error", "asleep", "offline"].contains(asker.status) {
                     let info = MemberStatusInfo(asker.status)
@@ -1984,10 +1985,13 @@ struct DecisionReview {
         // 0.2.7: '메모에 적음' 같은 선택지는 메모(또는 첨부)가 있어야 보낸다(서버도 400 으로 막는다).
         return !noteMissing(hasAttachments: hasAttachments)
     }
+    /// 0.2.7: 고른 선택지가 메모를 요구하고 첨부도 없다(메모칸이 '메모 (꼭 적어 주세요)'). 첨부가 있으면 이미 보낼 수 있다.
+    func noteRequired(hasAttachments: Bool = false) -> Bool {
+        decision.options.first(where: { $0.k == choice })?.needsNote == true && !hasAttachments
+    }
     /// 0.2.7: 고른 선택지가 메모를 요구하는데 메모도 첨부도 없다.
     func noteMissing(hasAttachments: Bool = false) -> Bool {
-        decision.options.first(where: { $0.k == choice })?.needsNote == true && !hasAttachments
-            && note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        noteRequired(hasAttachments: hasAttachments) && note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     mutating func reviewLatest(_ latest: Decision) {
         guard latest.id == decision.id else { return }

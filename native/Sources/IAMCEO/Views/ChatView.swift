@@ -1978,7 +1978,8 @@ private extension View {
 
 /// Web .atv: 208×148 image thumbnails and file chips in one wrapping row, 8 apart. A fixed thumbnail size, so nothing
 /// below moves while an image loads. `onBubble` keeps the chip text readable on my violet bubble.
-private struct ChatAttachments: View {
+/// 글·카드에 붙은 첨부 묶음. 대화 글·보고 카드, 그리고 결재된 카드의 답 첨부(0.2.7)가 같이 쓴다.
+struct ChatAttachments: View {
     let items: [Attachment]
     var onBubble = false
     var body: some View {

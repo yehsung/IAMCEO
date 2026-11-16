@@ -170,13 +170,13 @@ struct ComposerBar: View {
                                        attachmentIDs: snapshot.attachments.map(\.id), contextFileID: contextFileID)
     }
 
-    /// Web placeholders.
-    private var placeholder: String {
-        if missingTarget { return String(localized: "명부에 없는 대상에게는 보낼 수 없습니다") }
-        if store.state?.project.isHq == true { return String(localized: "본사 AI에게 — 새 프로젝트 만들기 등") }
+    /// Web placeholders: the receiving project (0.2.7 D5-10) and who gets it. Drawn by `ComposerPlaceholderText`.
+    private var placeholder: (project: String?, text: String) {
+        if missingTarget { return (nil, String(localized: "명부에 없는 대상에게는 보낼 수 없습니다")) }
+        if store.state?.project.isHq == true { return (nil, String(localized: "본사 AI에게 — 새 프로젝트 만들기 등")) }
         let base = recipient.map { String(localized: "\($0.name)에게 직접 지시") }
             ?? (namesLead ? String(localized: "\(leadName)에게 지시나 질문") : String(localized: "지시나 질문"))
-        return projectName.map { String(localized: "composer.project_prefix", defaultValue: "\($0) · \(base)") } ?? base
+        return (projectName, base)
     }
 
     /// 0.2.7(D5-10): 이 입력칸이 보내는 프로젝트. 다른 프로젝트 칸에 쓰는 실수를 막으려고 빈 입력칸과 Mac 의 보내기 안내에 밝힌다. 본사는 없다.
@@ -660,7 +660,7 @@ struct ComposerBar: View {
                 .id([drafts.namespace, draftKey])
                 .overlay(alignment: .topLeading) {
                     if draftText.isEmpty {
-                        Text(placeholder).font(.system(size: 15)).foregroundStyle(CE.ink2)
+                        ComposerPlaceholderText(project: placeholder.project, text: placeholder.text).font(.system(size: 15)).foregroundStyle(CE.ink2)
                             .allowsHitTesting(false)
                     }
                 }
@@ -673,7 +673,7 @@ struct ComposerBar: View {
                 .id([drafts.namespace, draftKey])
                 .overlay(alignment: .topLeading) {
                     if draftText.isEmpty {
-                        Text(placeholder).font(CEFont.body).foregroundStyle(CE.ink2).allowsHitTesting(false)
+                        ComposerPlaceholderText(project: placeholder.project, text: placeholder.text).font(CEFont.body).foregroundStyle(CE.ink2).allowsHitTesting(false)
                     }
                 }
                 .padding(.horizontal, 6).padding(.vertical, 11)
@@ -1134,7 +1134,9 @@ private struct ComposerTargetMenu: View {
 
     var body: some View {
         let height = CGFloat(entries.count) * Self.rowHeight + 12
-        Group {
+        // 0.2.7: 웹과 같은 340 이 기본이고, 상태 글('서브에이전트 일하는 중' 등)에 밀려 '@handle · 역할' 줄이 잘리면 다 들어가는
+        // 너비까지(520) 넓힌다. 다 들어가는 목록은 전과 같은 340 이다.
+        ClampedWidthLayout(minWidth: 340, maxWidth: 520) {
             if height > Self.maxHeight {
                 ScrollViewReader { reader in
                     ScrollView { list }
@@ -1145,7 +1147,6 @@ private struct ComposerTargetMenu: View {
                 list
             }
         }
-        .frame(width: 340)
         .background(Color(red: 18 / 255, green: 14 / 255, blue: 38 / 255).opacity(0.98))
         .focusable()
         .focused($focused)
@@ -1214,6 +1215,46 @@ private struct ComposerTargetMenu: View {
     private func pick(_ position: Int) {
         guard entries.indices.contains(position) else { return }
         onPick(entries[position].memberID)
+    }
+}
+#endif
+
+/// 빈 입력칸의 안내 '프로젝트 · 받는 이에게 …'(0.2.7 D5-10). 한 줄에 다 들어가면 전과 같은 한 글(composer.project_prefix)이고,
+/// 모자라면 받는 이 쪽을 먼저 다 보이고 프로젝트 이름을 줄인다(영어 iPhone 에서 받는 이가 'to L…'로 잘리던 것, 배포 전 확인 문제 2).
+struct ComposerPlaceholderText: View {
+    let project: String?
+    let text: String
+
+    var body: some View {
+        if let project {
+            ViewThatFits(in: .horizontal) {
+                Text(String(localized: "composer.project_prefix", defaultValue: "\(project) · \(text)")).lineLimit(1)
+                HStack(spacing: 0) {
+                    Text(project).lineLimit(1).truncationMode(.tail).layoutProbe("composer.hint.project")
+                    Text(verbatim: " · ").lineLimit(1).fixedSize()
+                    Text(text).lineLimit(1).truncationMode(.tail).layoutProbe("composer.hint.recipient").layoutPriority(1)
+                }
+            }
+        } else {
+            Text(text)
+        }
+    }
+}
+
+#if os(macOS)
+/// 내용이 바라는 너비(한 줄로 다 들어가는 너비)를 `minWidth`~`maxWidth` 안에서 쓴다. 넘치면 `maxWidth` 에서 줄인다.
+struct ClampedWidthLayout: Layout {
+    let minWidth: CGFloat
+    let maxWidth: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let view = subviews.first else { return .zero }
+        let width = min(max(view.sizeThatFits(.unspecified).width, minWidth), maxWidth)
+        return CGSize(width: width, height: view.sizeThatFits(ProposedViewSize(width: width, height: proposal.height)).height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
     }
 }
 #endif

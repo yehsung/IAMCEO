@@ -209,6 +209,17 @@ extension Decision {
     }
 }
 
+extension MissingReportNotice {
+    /// 홈 '결과 보고 누락' 줄의 제목. 서버(0.2.6~)는 이 제목을 코드 없이 한국어 '결과 보고 누락' 한 가지로만 싣는다
+    /// (server/store.ts listMissingReportNotices). 그 글이면 서버 글 틀(chat.missing_report.title)로 화면 언어에 맞춰 그린다.
+    /// 한국어 화면, 다른 종류, 다른 제목은 받은 그대로다(뜻을 지어내지 않는다).
+    func displayTitle(language: AppLanguage = AppLanguage.current) -> String {
+        guard language != .ko, kind == "missing_report", title == "결과 보고 누락",
+              let shown = ServerText.render(ServerTextRef(code: "chat.missing_report.title"), language: language) else { return title }
+        return shown
+    }
+}
+
 /// 결재 카드 선택지 하나의 이름·설명 코드.
 struct ServerOptionTexts: Codable, Sendable, Equatable {
     var label: ServerTextRef

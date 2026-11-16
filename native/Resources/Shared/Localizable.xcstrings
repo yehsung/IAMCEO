@@ -1433,7 +1433,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Instruction or question to %@"
+            "value" : "Instruct or ask %@"
           }
         }
       }
@@ -1463,7 +1463,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Instruction directly to %@"
+            "value" : "Instruct %@ directly"
           }
         }
       }
@@ -13427,7 +13427,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Send completion answer"
+            "value" : "Mark done"
           }
         }
       }
@@ -20432,7 +20432,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Mark as not needed"
+            "value" : "Mark not needed"
           }
         }
       }
@@ -21269,17 +21269,6 @@
         }
       }
     },
-    "첨부: %@" : {
-      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Attachments: %@"
-          }
-        }
-      }
-    },
     "했음" : {
       "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
       "localizations" : {
@@ -21408,6 +21397,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "This is an older version"
+          }
+        }
+      }
+    },
+    "옛 판입니다 · 판 %lld" : {
+      "comment" : "0.2.7 배포 전 확인: 옛 판 안내에 그 판의 번호(이전 판 줄의 '판 N'과 같은 번호)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Older version · Version %lld"
           }
         }
       }

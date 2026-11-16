@@ -103,6 +103,20 @@ final class ServerTextTests: XCTestCase {
         XCTAssertEqual(ServerText.particleRo("팀"), "으로")
     }
 
+    /// 0.2.7 배포 전 확인(문제 10): 홈 '결과 보고 누락' 줄 제목. 서버는 코드 없이 한국어 '결과 보고 누락'만 싣는다.
+    func testMissingReportRowTitleFollowsTheScreenLanguage() throws {
+        let notice = try JSONDecoder().decode(MissingReportNotice.self, from: Data(#"""
+        {"kind":"missing_report","runId":"r1","memberId":"m1","messageId":"msg_missing_report_r1","createdAt":"2026-11-16T06:00:00.000Z","title":"결과 보고 누락"}
+        """#.utf8))
+        XCTAssertEqual(notice.displayTitle(language: .ko), "결과 보고 누락", "한국어 화면은 받은 그대로")
+        XCTAssertEqual(notice.displayTitle(language: .en), "Missing result report")
+        // 모르는 종류·다른 제목(뒤의 서버가 바꾼 글)은 지어내지 않고 받은 그대로.
+        let other = MissingReportNotice(kind: "missing_report", runId: "r2", memberId: "m1", messageId: "x", createdAt: "", title: "보고 없음(새 글)")
+        XCTAssertEqual(other.displayTitle(language: .en), "보고 없음(새 글)")
+        let future = MissingReportNotice(kind: "late_report", runId: "r3", memberId: "m1", messageId: "x", createdAt: "", title: "결과 보고 누락")
+        XCTAssertEqual(future.displayTitle(language: .en), "결과 보고 누락")
+    }
+
     func testUnknownCodeMissingParamOrUnknownLanguageKeepTheText() throws {
         let unknown = try message(#"{"id":"m3","projectId":"p","kind":"시스템","body":"새 판의 글","textCode":"chat.from_the_future","textLang":"ko"}"#, language: .en)
         XCTAssertEqual(unknown.body, "새 판의 글")

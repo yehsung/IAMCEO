@@ -303,6 +303,93 @@ import UIKit
     }
     #endif
 
+    // MARK: 화면 확인 뒤 대응(verify/live-copy-3.md) 7 — 페이지 '크게 보기' 자리, N8 — 두 줄 머리일 때 제목 자리
+
+    #if os(macOS)
+    private let readerSize = CGSize(width: 360, height: 700)
+    #else
+    private let readerSize = CGSize(width: 390, height: 844)
+    #endif
+    private let headerIDs = ["file.meta", "file.meta.kind", "file.meta.who", "file.meta.time", "file.actions", "file.title"]
+
+    private func reader(_ file: FileDoc, _ store: AppStore) -> some View {
+        FileReader(file: file, framed: !isMac).environment(store).environment(Router()).environment(\.ceWide, isMac)
+    }
+
+    /// 실제 페이지(가짜 서버의 a1)를 열어 '크게 보기'가 나온 머리를 잰다. 한국어 '크게 보기'는 기본 자리(106) 안이라 머리 줄 끝이
+    /// 전과 같은 자리(단추 오른쪽 끝 − 페이지 좌우 6 − 106)이고, 머리 줄이 한 줄이면 제목도 같은 자리를 비운다(N8 의 '한 줄은 그대로').
+    func testRealPageHeaderKeepsTheKoreanEnlargeRoom() async throws {
+        let (store, network) = try await fileVersionsStore()
+        defer { store.disconnect() }
+        let page = try XCTUnwrap(store.files.first { $0.id == "a1" }, "가짜 서버의 페이지")
+        let frames = try await probeFrames(reader(page, store), size: readerSize, waitFor: headerIDs)
+        let line = try XCTUnwrap(frames["file.meta"]), button = try XCTUnwrap(frames["file.actions"]), title = try XCTUnwrap(frames["file.title"])
+        XCTAssertLessThanOrEqual(button.width + CESpace.s - 6, 106, "한국어 '크게 보기'는 기본 자리 안")
+        XCTAssertEqual(fileHeaderReserve(base: 106, actionsWidth: button.width, sidePadding: 6), 106)
+        XCTAssertEqual(line.maxX, button.maxX - 6 - 106, accuracy: 0.5, "머리 줄 끝이 전과 같은 자리")
+        XCTAssertEqual(try XCTUnwrap(frames["file.meta.kind"]).midY, try XCTUnwrap(frames["file.meta.time"]).midY, accuracy: 1, "한 줄 머리")
+        for id in ["file.meta.kind", "file.meta.who", "file.meta.time"] {
+            XCTAssertLessThanOrEqual(try XCTUnwrap(frames[id], id).maxX, button.minX - CESpace.s + 0.5, "\(id): 단추 앞에서 끝난다")
+        }
+        XCTAssertGreaterThan(title.height, 30, "긴 제목이어야 시험이 뜻이 있다(여러 줄)")
+        XCTAssertLessThanOrEqual(title.maxX, line.maxX + 0.5, "한 줄 머리면 제목도 단추 자리를 비운다(전과 같음)")
+        XCTAssertGreaterThan(title.maxX, line.maxX - 40, "긴 제목은 그 자리까지 찬다")
+        await network.close()
+    }
+
+    /// 영어 'View larger'(약 119~125pt)는 기본 자리 106 + 좌우 6 보다 넓어, 고치기 전에는 머리 줄 끝(시각)이 단추 밑으로 들어갔다
+    /// (영어 Mac 좁은 칸 '33 min ago', iPhone '26 min ago'). 실제 단추 모양·문구 표의 영어 글로 너비를 재어, 머리 자리 규칙이
+    /// 머리 줄을 단추 앞 8 에서 끝나게 하는지 본다. 같은 규칙을 실제 화면이 쓰는 것은 아래 큰 글자 시험(iPhone)과 한국어 시험이 지킨다.
+    func testEnglishViewLargerButtonGetsRoomBeforeIt() throws {
+        let label = try english("크게 보기")
+        XCTAssertEqual(label, "View larger")
+        let width = idealSize(Button {} label: { Label(label, systemImage: "arrow.up.left.and.arrow.down.right") }
+            .buttonStyle(ViewerButtonStyle())).width
+        XCTAssertLessThan(106 + 6 - width, CESpace.s, "고치기 전(106 고정)에는 단추 앞 8 이 남지 않았다 — 시험이 뜻이 있다")
+        let room = fileHeaderReserve(base: 106, actionsWidth: width, sidePadding: 6)
+        XCTAssertEqual(room + 6 - width, CESpace.s, accuracy: 0.5, "머리 줄은 단추 앞 8 에서 끝난다")
+        XCTAssertEqual(fileHeaderReserve(base: 106, actionsWidth: 0, sidePadding: 6), 106, "아직 못 쟀으면 기본 자리")
+    }
+
+    #if os(iOS)
+    /// 실제 페이지 머리: '크게 보기'가 기본 자리보다 넓으면(영어, 한국어도 큰 글자) 머리 줄이 단추 앞 8 에서 끝난다.
+    /// 시험은 한국어 열쇠라 큰 글자로 넓힌다. 페이지 자리를 106 고정으로 되돌리면 실패한다.
+    func testRealPageHeaderLeavesRoomForAnEnlargeButtonWiderThanTheDefault() async throws {
+        let (store, network) = try await fileVersionsStore()
+        defer { store.disconnect() }
+        let page = try XCTUnwrap(store.files.first { $0.id == "a1" }, "가짜 서버의 페이지")
+        let frames = try await probeFrames(reader(page, store).environment(\.dynamicTypeSize, .xxxLarge), size: readerSize, waitFor: headerIDs)
+        let line = try XCTUnwrap(frames["file.meta"]), button = try XCTUnwrap(frames["file.actions"])
+        XCTAssertGreaterThan(button.width + CESpace.s - 6, 106, "기본 자리보다 넓은 단추여야 시험이 뜻이 있다")
+        XCTAssertEqual(line.maxX, button.minX - CESpace.s, accuracy: 0.5, "머리 줄은 단추 앞 8 에서 끝난다")
+        for id in ["file.meta.kind", "file.meta.who", "file.meta.time"] {
+            XCTAssertLessThanOrEqual(try XCTUnwrap(frames[id], id).maxX, button.minX, "\(id): 단추 밑으로 들어가지 않는다")
+        }
+        await network.close()
+    }
+    #endif
+
+    /// N8: 머리 줄이 두 줄로 넘어가면 제목은 단추보다 아래에서 시작하므로 단추 자리를 비우지 않는다(긴 제목이 좁은 칸에 갇혀
+    /// 1→2줄, 5→7줄이 되던 것). 같은 자료도 넉넉해 한 줄 머리면 전처럼 비운다. 제목 자리를 늘 비우게 되돌리면 실패한다.
+    func testRealFileHeaderGivesTheTitleTheWholeWidthOnlyWhenTheMetaWraps() async throws {
+        let (store, network) = try await fileVersionsStore()
+        defer { store.disconnect() }
+        let doc = try XCTUnwrap(store.files.first { $0.id == "d1" }, "가짜 서버의 긴 제목 문서")
+        let frames = try await probeFrames(reader(doc, store), size: readerSize, waitFor: headerIDs)
+        let line = try XCTUnwrap(frames["file.meta"]), actions = try XCTUnwrap(frames["file.actions"]), title = try XCTUnwrap(frames["file.title"])
+        let who = try XCTUnwrap(frames["file.meta.who"]), time = try XCTUnwrap(frames["file.meta.time"])
+        XCTAssertGreaterThan(time.minY, who.maxY - 1, "두 줄 머리여야 시험이 뜻이 있다")
+        XCTAssertGreaterThan(title.maxX, line.maxX + 1, "두 줄 머리면 제목은 단추 자리까지 쓴다(자리를 비우면 머리 줄 끝을 넘지 못한다)")
+        XCTAssertLessThanOrEqual(title.maxX, actions.maxX + 0.5, "글 칸 안")
+        XCTAssertGreaterThanOrEqual(title.minY, actions.maxY, "제목은 단추보다 아래에서 시작한다(겹치지 않음)")
+
+        let wide = try await probeFrames(reader(doc, store), size: CGSize(width: 1200, height: 700), waitFor: headerIDs)
+        let wideLine = try XCTUnwrap(wide["file.meta"]), wideTitle = try XCTUnwrap(wide["file.title"])
+        XCTAssertEqual(try XCTUnwrap(wide["file.meta.kind"]).midY, try XCTUnwrap(wide["file.meta.time"]).midY, accuracy: 1, "넉넉하면 한 줄 머리")
+        XCTAssertLessThanOrEqual(wideTitle.maxX, wideLine.maxX + 0.5, "한 줄 머리면 제목도 단추 자리를 비운다(전과 같음)")
+        await network.close()
+    }
+
     /// 가짜 판 서버에 붙은 상점.
     private func fileVersionsStore() async throws -> (AppStore, IsolatedTestNetwork) {
         let server = FileVersionsServer(author: "가짜 결제 연동 담당 팀장"), network = try IsolatedTestNetwork(handler: server.handle)
@@ -412,17 +499,23 @@ private final class ProbeWindow {
     #endif
 }
 
-/// 판 두 개(옛 판 f1 → 새 판 f2)를 가진 문서 하나를 주는 가짜 서버(NetAppServer 와 같은 방식). 글은 가짜다.
+/// 판 두 개(옛 판 f1 → 새 판 f2)를 가진 문서, 제목이 긴 문서 d1, 제목이 긴 페이지 a1 을 주는 가짜 서버(NetAppServer 와 같은
+/// 방식). 글은 가짜다.
 private final class FileVersionsServer: @unchecked Sendable {
     private let state: ProjectState
     private let bootstrap = Bootstrap(projects: [ProjectSummary(id: "p")])
+    static let longTitle = "가짜 자료: 출시 전 마지막 점검표와 스토어 설명 문구, 심사 메모를 한곳에 모은 정리"
     init(author: String) {
         let member = Member(id: "m", name: author, status: "idle")
         let old = FileDoc(id: "f1", kind: "document", projectId: "p", title: "가짜 자료: 출시 점검표", who: author, memberId: "m",
                           body: "# 출시 점검표\n\n판 1(시험용 가짜 글)", createdAt: "2026-11-14T09:00:00.000Z", replacedBy: "f2")
         let new = FileDoc(id: "f2", kind: "document", projectId: "p", title: "가짜 자료: 출시 점검표", who: author, memberId: "m",
                           body: "# 출시 점검표\n\n판 2(시험용 가짜 글)", createdAt: "2026-11-14T09:05:00.000Z", replaces: "f1", versions: 2)
-        state = ProjectState(project: Project(id: "p", connection: ProjectConnection(ok: true)), members: [member], files: [new, old])
+        let long = FileDoc(id: "d1", kind: "document", projectId: "p", title: Self.longTitle, who: author, memberId: "m",
+                           body: "시험용 가짜 글", createdAt: "2026-11-14T09:10:00.000Z")
+        let page = FileDoc(id: "a1", kind: "artifact", projectId: "p", title: Self.longTitle, who: "총괄",
+                           createdAt: "2026-11-14T09:15:00.000Z")
+        state = ProjectState(project: Project(id: "p", connection: ProjectConnection(ok: true)), members: [member], files: [new, old, long, page])
     }
     func handle(_ request: URLRequest) throws -> IsolatedTestHTTPReply {
         func reply<T: Encodable>(_ value: T) throws -> IsolatedTestHTTPReply { IsolatedTestHTTPReply(data: try JSONEncoder().encode(value)) }
@@ -435,8 +528,13 @@ private final class FileVersionsServer: @unchecked Sendable {
             return try reply(SyncSnapshot(protocolVersion: 2, cursor: SyncCursor(epoch: "file-versions", seq: 1),
                 requestedProjectId: id, projectStatus: id == nil ? .none : .ok, bootstrap: bootstrap,
                 state: id == nil ? nil : state, revisions: nil, apiOutage: nil))
-        case "/api/files/f1": return try reply(state.files[1])
-        case "/api/files/f2": return try reply(state.files[0])
+        case "/api/files/a1/artifact":
+            return IsolatedTestHTTPReply(data: Data("<p>가짜 페이지</p>".utf8),
+                                         headers: ["Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "sandbox allow-scripts; default-src 'none'"])
+        case let path? where path.hasPrefix("/api/files/"):
+            let id = String(path.dropFirst("/api/files/".count))
+            guard let file = state.files.first(where: { $0.id == id }) else { return IsolatedTestHTTPReply(status: 404) }
+            return try reply(file)
         default: return IsolatedTestHTTPReply(status: 404)
         }
     }

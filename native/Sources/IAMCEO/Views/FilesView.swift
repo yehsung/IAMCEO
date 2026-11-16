@@ -654,6 +654,19 @@ private func viewportLimit(_ viewport: CGFloat, _ fraction: CGFloat, cap: CGFloa
     min(cap, max(floor, (viewport > 0 ? viewport : 760) * fraction))
 }
 
+/// 자료 머리 오른쪽 단추 자리. 기본 자리(`base`)이되, 단추가 그보다 넓으면 머리 줄이 단추 앞 8 에서 끝나게 넓힌다.
+/// `sidePadding` 은 머리 안쪽 좌우 여백(페이지 6)으로, 단추는 그 바깥 끝에 붙어 그만큼은 이미 떨어져 있다. 아직 못 쟀으면(0) 기본 자리.
+func fileHeaderReserve(base: CGFloat, actionsWidth: CGFloat, sidePadding: CGFloat) -> CGFloat {
+    guard actionsWidth > 0 else { return base }
+    return max(base, actionsWidth + CESpace.s - sidePadding)
+}
+
+/// 자료 머리 줄이 두 줄 갈래(ChipFlow)로 그려졌는가(N8).
+private struct FileMetaWrappedKey: PreferenceKey {
+    static let defaultValue = false
+    static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
+}
+
 /// Web .fl-doc: meta (kind tag · who · time), title 22 (artifact 19), summary 15, links, path box, then the viewer,
 /// every block 12 apart (artifact 8, with a tighter frame so the page gets the width).
 private struct FileReaderContent: View {
@@ -674,8 +687,11 @@ private struct FileReaderContent: View {
     @State private var artifact: LoadedArtifact?
     @State private var enlarged = false
     @State private var viewport: CGFloat = 0
-    /// 처음 잰 복사·공유(받기) 단추 줄의 너비. 영어처럼 단추 글이 기본 자리보다 길 때만 그만큼 비운다(`enlargeReserve`).
-    @State private var documentActionsWidth: CGFloat = 0
+    /// 처음 잰 머리 단추(복사·공유/받기, 페이지는 크게 보기)의 너비. 영어처럼 단추 글이 기본 자리보다 길 때만 그만큼 비운다
+    /// (`enlargeReserve`).
+    @State private var headerActionsWidth: CGFloat = 0
+    /// 머리 줄(종류 · 작성자 · 시각)이 두 줄 갈래로 그려졌는가. 그러면 제목은 단추보다 아래에서 시작해 단추 자리를 비우지 않는다.
+    @State private var metaWrapped = false
 
     /// Attachments that are the file itself (web `split`); `file` kind owns all of them.
     private var mainAttachments: [Attachment] {
@@ -799,7 +815,10 @@ private struct FileReaderContent: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 ChipFlow(spacing: 8, lineSpacing: 4) { kindTag; whoLabel; timeLabel }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    // 그려진 갈래가 알린다(높이 어림이 아니라): 두 줄이면 제목은 단추 아래에서 시작한다.
+                    .preference(key: FileMetaWrappedKey.self, value: true)
             }
+            .onPreferenceChange(FileMetaWrappedKey.self) { metaWrapped = $0 }
             .layoutProbe("file.meta")
             .padding(.trailing, enlargeReserve)
             Text(file.title.isEmpty ? String(localized: "제목 없는 자료") : file.title)
@@ -807,7 +826,9 @@ private struct FileReaderContent: View {
                 .lineSpacing(CELeading.spacing(isArtifact ? 19 : 22, 1.3))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.trailing, enlargeReserve)
+                .layoutProbe("file.title")
+                // 머리 줄이 두 줄이면 제목은 단추보다 아래라 단추 자리를 비우지 않는다(N8). 한 줄이면 전과 같다.
+                .padding(.trailing, metaWrapped ? 0 : enlargeReserve)
                 .accessibilityAddTraits(.isHeader)
             if !file.summary.isEmpty {
                 Text(file.summary)
@@ -826,6 +847,10 @@ private struct FileReaderContent: View {
                 .buttonStyle(ViewerButtonStyle())
                 .help("이 페이지를 크게 엽니다")
                 .accessibilityHint("이 페이지를 크게 엽니다")
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                    if headerActionsWidth == 0 { headerActionsWidth = width }
+                }
+                .layoutProbe("file.actions")
                 .offset(y: isMac ? -4 : -8)
             } else if documentActions {
                 // A-76: a report goes on whole (to a message, a file, another app), in the same place 크게 보기 sits.
@@ -848,7 +873,7 @@ private struct FileReaderContent: View {
                 }
                 // 처음 너비만: '복사됨'·'받는 중' 동안 머리 줄이 움직이지 않게.
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
-                    if documentActionsWidth == 0 { documentActionsWidth = width }
+                    if headerActionsWidth == 0 { headerActionsWidth = width }
                 }
                 .layoutProbe("file.actions")
                 .offset(y: isMac ? -4 : -8)
@@ -868,12 +893,12 @@ private struct FileReaderContent: View {
     }
 
     /// Room beside the meta line and title for the 크게 보기 button (web padding-right 112), or 복사 · 받기.
-    /// 복사 · 받기(공유) 글이 그 자리보다 길면(영어 'Copy' · 'Share') 단추 줄 너비 + 8 을 비워, 머리 줄의 시각이 단추 밑으로
-    /// 들어가지 않게 한다(0.2.7 화면 재확인 N1). 한국어 단추는 기본 자리 안이라 전과 같다.
+    /// 단추 글이 그 자리보다 길면(영어 'Copy' · 'Share', 'View larger') 머리 줄이 단추 앞 8 에서 끝나게 단추 너비만큼 비운다
+    /// (0.2.7 화면 재확인 N1·7). 페이지 머리는 좌우 6 이 단추 쪽에도 있어 그만큼 덜 비운다. 한국어 단추는 기본 자리 안이라 전과 같다.
     private var enlargeReserve: CGFloat {
-        if isArtifact && artifact != nil { return 106 }
-        guard documentActions else { return 0 }
-        return max(isMac ? 118 : 112, documentActionsWidth > 0 ? documentActionsWidth + CESpace.s : 0)
+        let base: CGFloat
+        if isArtifact && artifact != nil { base = 106 } else if documentActions { base = isMac ? 118 : 112 } else { return 0 }
+        return fileHeaderReserve(base: base, actionsWidth: headerActionsWidth, sidePadding: isArtifact ? 6 : 0)
     }
 
     private var metaFont: Font { isMac ? .system(size: 13) : CEFont.secondary }
@@ -2869,7 +2894,7 @@ private extension View {
 
 /// Web .vw-btn: rounded button in a viewer bar (Mac 34 tall, 13.5/600, radius 11, white .07 → .13 on hover);
 /// `on` draws a toggle that is on as a violet drop.
-private struct ViewerButtonStyle: ButtonStyle {
+struct ViewerButtonStyle: ButtonStyle {
     var on = false
     func makeBody(configuration: Configuration) -> some View { ViewerBody(configuration: configuration, on: on) }
     private struct ViewerBody: View {

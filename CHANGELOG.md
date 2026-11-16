@@ -7,7 +7,7 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
-### 아직 내지 않은 것
+### 0.2.7 — 2026-11-16
 
 - **하위 폴더에서 일하던 팀장의 압축이 '결과 모름'으로 멈추지 않습니다.** Claude 팀장이 작업 폴더 안의 하위 폴더로 들어가 일하던 중에 문맥을 압축하면, 압축은 끝났는데 서버가 그 끝을 알아보지 못해 그 팀장에게 가는 글이 모두 멈춰 있었습니다. 이제 세션 기록의 압축 표시를 폴더와 상관없이 알아보고, 기록에서 찾지 못해도 Claude가 직접 남기는 '압축 끝' 알림과 쉬는 CLI로 끝을 확인합니다. 이미 이렇게 멈춰 있던 팀장도 새 서버가 뜨면 곧바로 풀려 기다리던 글이 나갑니다. 같은 까닭으로 그런 팀장이 받은 글을 '전달됐는지 확인하는 중'으로 오래 두거나 보관을 막던 것도 고쳤습니다.
 - **백그라운드 프로그램을 남긴 Codex 팀장이 '일하는 중'에 멈춰 있지 않습니다.** Codex는 미리보기 서버처럼 자기가 띄운 프로그램이 살아 있으면 턴을 끝냈어도 실행 엔진에 '일하는 중'으로 보여, 그 팀장이 몇 시간씩 '일하는 중'에 머물고 맡은 일이 끝나지 않았습니다. 이제 화면(빈 입력칸, 진행 표시 없음, 'background terminal running' 줄)과 Codex 자기 기록이 함께 그 턴의 끝을 보이면 일을 끝난 것으로 닫고 '쉬는 중'으로 보이며, 팀장 상세 › 활동에 백그라운드 프로그램이 아직 돌고 있다는 줄을 남깁니다. 그 프로그램은 IAMCEO가 끄지 않습니다. 다음 전달은 그 프로그램이 끝날 때까지 기다리고(터미널에서 `/stop`으로 닫으면 곧바로 이어 갑니다), 기록으로 끝을 확인하지 못하면 예전처럼 '일하는 중'으로 두고 까닭을 활동에 한 번 남깁니다. 그 턴의 문맥 %도 함께 채워지고, 그 %가 압축 기준을 넘었으면 프로그램이 끝난 뒤 다음 일보다 압축을 먼저 합니다. 그동안 그 팀장을 잠재우거나 프로젝트를 보관하거나 CLI를 바꾸려 하면 '일하는 중' 대신 백그라운드 프로그램이 남아 있다는 까닭과 할 일(`/stop`)을 알리고, 깨어 있는 팀장이 많을 때 총괄에게 잠재울 후보로 권하지 않습니다. '그래도 잠재우기'는 지금처럼 되고, 그러면 그 프로그램도 함께 끝납니다.
@@ -166,7 +166,7 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 
 ## English
 
-### Unreleased
+### 0.2.7 — 2026-11-16
 
 - **A lead's context compaction no longer gets stuck as "result unknown" when the lead was working in a subfolder.** When a Claude lead had moved into a subfolder of its working folder, the server could not tell that its compaction had finished, so every message to that lead stayed on hold. The server now recognizes the compaction mark in the session record whatever folder the lead is in, and when the record doesn't show it, confirms the end from Claude's own end-of-compaction signal together with an idle CLI. A lead already stuck this way is released as soon as the new server starts, and the waiting messages go out. Messages such a lead received are also no longer left as "checking whether it was delivered", and archiving is no longer refused for it.
 - **A Codex staff member that leaves a background program running no longer sticks at 'Working'.** While a program Codex started (such as a preview server) kept running, the engine reported Codex as working even after its turn ended, so the staff member stayed 'Working' for hours and its task never closed. Now, when the screen (empty input box, no progress line, a 'background terminal running' line) and Codex's own session record both show that the turn ended, the task is closed as finished, the staff member shows as 'Idle', and the staff member's details › Activity notes that a background program is still running. IAMCEO doesn't stop that program. The next delivery waits until it finishes (closing it with `/stop` in the terminal lets it continue right away). If the record can't confirm the end, it stays 'Working' as before and the reason is noted once in Activity. The context % for that turn is filled in as well, and if it is over the compaction threshold the context is compacted before the next task once the program ends. Meanwhile, trying to put that staff member to sleep, archive the project, or switch the CLI explains that a background program is still running and what to do (`/stop`) instead of saying 'working', and the lead isn't told to put that staff member to sleep when too many are awake. 'Sleep anyway' still works as before, and it ends that program too.

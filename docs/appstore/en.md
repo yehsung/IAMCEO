@@ -73,11 +73,14 @@ AI agent,coding agent,AI team,developer,remote,approval,inbox,CLI,terminal,autom
 
 ## whatsNew
 
-What's New in 0.2.6 (up to 4,000 characters). The new features need a Mac server on 0.2.6 or later, so each item says so.
+What's New in 0.2.7 (up to 4,000 characters). The new features need a Mac server on 0.2.7 or later, so each item says so.
 
 ```text
-• Chat shows when someone is replying. After you send a message to your lead or a staff member, a line at the bottom of the conversation shows whether they are replying (three animated dots), finishing earlier work, waking up, or ended without replying. It needs the IAMCEO server 0.2.6 or later on your Mac.
-• Text the server writes itself (system lines in the chat, the decision cards it posts and their options, staff activity, delivery notes) now shows in the app language. Requires Mac server 0.2.6 or later.
-• iPhone notifications use this iPhone's app language. Requires Mac server 0.2.6 or later, including through the notification relay.
-• Fixed the time and kind wrapping onto two lines in the activity list in English.
+• Attach photos and files when you answer a decision. When a staff member revises a decision card and asks again, the new card replaces the old one and keeps the note and attachments you had started. Requires the IAMCEO server 0.2.7 or later on your Mac.
+• When you close a to-do, choose Done, Not needed or Hand to staff. Requires Mac server 0.2.7 or later.
+• When a file is uploaded again as a revision, only the latest shows, with "Version N", and older ones open from "Earlier versions". Requires Mac server 0.2.7 or later.
+• A lead waiting on its sub-agents shows as "Sub-agents working" instead of Idle. Requires Mac server 0.2.7 or later.
+• Fixed "Blocked report" and "A to-do for you" notifications never reaching iPhones paired earlier (kinds you turned off stay off). Update the Mac server to 0.2.7 or later.
+• If Tailscale on your Mac stays off for more than 3 minutes, your iPhone is notified too. Requires Mac server 0.2.7 or later, including through the notification relay.
+• Polished buttons and hints that were cut off on narrow and English screens.
 ```

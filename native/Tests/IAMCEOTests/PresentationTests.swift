@@ -215,6 +215,80 @@ final class PresentationTests: XCTestCase {
         XCTAssertNil(SubagentInfo(Member(subagentState: SubagentState(quality: "exact", count: -1))).count)
     }
 
+    /// 0.2.7(묶음 6): 서버 status 는 쉬는 중(새 지시를 받음) 그대로이고, 서버가 잰 서브에이전트가 돌면 화면은 '서브에이전트 일하는 중'이다.
+    @MainActor func testIdleLeadWithWorkingSubagentsReadsAsWorkingEverywhere() {
+        let busy = Member(id: "busy", status: "idle", subagentState: SubagentState(quality: "exact", count: 2))
+        XCTAssertEqual(busy.subagentsAtWork, 2)
+        XCTAssertEqual(busy.presentedStatus, "working")
+        let info = MemberStatusInfo(busy)
+        XCTAssertEqual(info.label, "서브에이전트 일하는 중")
+        XCTAssertEqual(info.tone, MemberStatusInfo("working").tone)
+        XCTAssertEqual(info.icon, MemberStatusInfo("working").icon)
+        XCTAssertTrue(info.live)
+        XCTAssertFalse(info.needsMe)
+        XCTAssertEqual(info.explanation, "턴은 끝났고 서브에이전트 2개가 뒤에서 일하고 있습니다. 새 지시는 바로 받습니다.")
+        XCTAssertEqual(MemberStatusInfo(Member(status: "idle", subagentState: SubagentState(quality: "estimated", count: 3))).explanation,
+                       "턴은 끝났고 서브에이전트 약 3개가 뒤에서 일하고 있습니다. 새 지시는 바로 받습니다.")
+        // 홈의 요약·사무실의 수: 일하는 중으로 센다. 사무실 글도 같은 말.
+        let rest = Member(id: "rest", status: "idle")
+        XCTAssertEqual(MemberStatusInfo.summaryCounts([busy, rest]), ["working": 1, "idle": 1])
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: OfficeView.counts([busy, rest]).map { ($0.status, $0.count) }), ["working": 1, "idle": 1])
+        XCTAssertEqual(officeStateLabel(busy), "서브에이전트 일하는 중")
+        XCTAssertEqual(officeStateLabel(rest), "쉬는 중")
+        // 모르거나(unknown·unsupported·옛 subagents 칸만) 0 이면 쉬는 중 그대로다.
+        for quiet in [Member(status: "idle"), Member(status: "idle", subagents: 3), Member(status: "idle", subagentState: SubagentState(quality: "unknown", count: nil)),
+                      Member(status: "idle", subagentState: SubagentState(quality: "exact", count: 0)), Member(status: "idle", subagentState: SubagentState(quality: "unsupported", count: 4))] {
+            XCTAssertNil(quiet.subagentsAtWork)
+            XCTAssertEqual(quiet.presentedStatus, "idle")
+            XCTAssertEqual(MemberStatusInfo(quiet).label, "쉬는 중")
+        }
+        // 다른 상태는 그 상태가 먼저다(일하는 중·내 답 기다림·승인 창 앞·오류·잠듦).
+        for status in ["working", "waiting", "blocked", "error", "asleep", "offline"] {
+            let other = Member(status: status, blockedReason: status == "blocked" ? "permission" : nil, subagentState: SubagentState(quality: "exact", count: 2))
+            XCTAssertNil(other.subagentsAtWork, status)
+            XCTAssertEqual(other.presentedStatus, status)
+            XCTAssertEqual(MemberStatusInfo(other).label, MemberStatusInfo(status).label, status)
+        }
+        // 관측이 낡았으면 '상태 확인 불가'가 먼저다.
+        let stale = Member(status: "idle", statusObservation: StatusObservation(freshness: "stale", ownership: "verified"), subagentState: SubagentState(quality: "exact", count: 2))
+        XCTAssertEqual(MemberStatusInfo(stale).label, "상태 확인 불가")
+        XCTAssertEqual(MemberStatusInfo.summaryCounts([stale]), ["unknown": 1])
+        // 프로젝트 줄의 '일하는 중' 수: 서버가 따로 보내는 수를 더한다(구형 서버는 0).
+        let project = ProjectSummary(id: "p", workingCount: 1, memberCount: 3, subagentWorkingCount: 2)
+        XCTAssertEqual(project.presentedWorkingCount, 3)
+        XCTAssertEqual(projectRailLine(project), "3명 일하는 중")
+        XCTAssertTrue(projectStatusLine(project).contains("3명 일하는 중"))
+        XCTAssertEqual(projectRailLine(ProjectSummary(id: "q", memberCount: 2, subagentWorkingCount: 1)), "1명 일하는 중")
+    }
+
+    /// 0.2.7(묶음 6 검토): 받는 이 목록과 사무실 글도 팀 배지·대화 머리와 같은 말이다. 받는 이 목록의 다른 상태는 지금처럼 서버 status 의 글.
+    @MainActor func testRecipientListAndOfficeLineSayWhatSubagentsDo() {
+        let busy = Member(id: "busy", status: "idle", subagentState: SubagentState(quality: "exact", count: 2))
+        // 받는 이 목록: 그냥 '일하는 중'(보낸 지시가 기다린다고 읽힘)이 아니라 '서브에이전트 일하는 중'.
+        XCTAssertEqual(MemberStatusInfo.presented(busy).label, "서브에이전트 일하는 중")
+        XCTAssertEqual(MemberStatusInfo.presented(busy).explanation, MemberStatusInfo(busy).explanation)
+        XCTAssertTrue(MemberStatusInfo.presented(busy).live)
+        XCTAssertEqual(MemberStatusInfo.presented(Member(status: "idle")).label, "쉬는 중")
+        XCTAssertEqual(MemberStatusInfo.presented(Member(status: "working", subagentState: SubagentState(quality: "exact", count: 2))).label, "일하는 중")
+        // 서브에이전트가 없으면 지금처럼 status 의 글이다(관측 갈래를 새로 보지 않는다).
+        let stale = Member(status: "idle", statusObservation: StatusObservation(freshness: "stale", ownership: "verified"))
+        XCTAssertEqual(MemberStatusInfo.presented(stale).label, MemberStatusInfo("idle").label)
+        // 사무실 글: 맡은 일 글이 없으면 '맡은 일 없음' 대신 서브에이전트 수(추정이면 '약').
+        XCTAssertEqual(busy.subagentsAtWorkLine, "서브에이전트 2개")
+        XCTAssertEqual(officeDetail(busy), "서브에이전트 2개")
+        XCTAssertEqual(officeDetail(Member(status: "idle", subagentState: SubagentState(quality: "estimated", count: 3))), "서브에이전트 약 3개")
+        XCTAssertEqual(officeDetail(Member(status: "idle", now: "가짜 조사 맡김", subagentState: SubagentState(quality: "exact", count: 2))), "가짜 조사 맡김")
+        XCTAssertNil(Member(status: "idle").subagentsAtWorkLine)
+        XCTAssertEqual(officeDetail(Member(status: "idle")), "맡은 일 없음")
+        XCTAssertEqual(officeDetail(Member(status: "working")), "맡은 일 없음")
+    }
+
+    func testProjectSummaryDecodesSubagentWorkingCountAndOldServersMeanZero() throws {
+        let decoder = JSONDecoder()
+        XCTAssertEqual(try decoder.decode(ProjectSummary.self, from: Data(#"{"id":"p","workingCount":1,"subagentWorkingCount":2}"#.utf8)).subagentWorkingCount, 2)
+        XCTAssertEqual(try decoder.decode(ProjectSummary.self, from: Data(#"{"id":"p","workingCount":1}"#.utf8)).subagentWorkingCount, 0)
+    }
+
     private func summary(needsOwner: Int = 0, checking: Int = 0, unknown: Int = 0) -> MemberDeliverySummary {
         MemberDeliverySummary(memberId: "m", undeliveredCount: 123, unknownCount: unknown, deliveringCount: 0,
                               checkingCount: checking, needsOwnerCount: needsOwner, waitingBehindCount: 100,

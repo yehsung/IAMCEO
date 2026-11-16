@@ -15,6 +15,7 @@ import { childEnv } from "./env.ts";
 import { claudeQuietScreen, inputText, screenContextPct } from "./claude-screen.ts";
 import { CLAUDE_BACKGROUND_REASON, CLAUDE_LOGIN_ERRORS, CLAUDE_LOGIN_REASON, claudeHookTurn, readClaudeTurn, type ClaudeHookTurnState, type ClaudeTurnCursor, type ClaudeTurnError } from "./claude-turn.ts";
 import { defaultClaudeHome, findSessionFile } from "./session-files.ts";
+import { readClaudeSubagents, readCodexSubagents, type ClaudeSubagentCursor, type CodexSubagentState, type SubagentReading } from "./subagents.ts";
 import { CoreError, coreRpc, coreSocketPath, type CoreHello, type CoreTerminal } from "./core-client.ts";
 import { providerFor, providerLaunch, isProviderArgv, type ProviderBins } from "./providers.ts";
 import { codexBindingMarker, discoverCodexSession, observeCompactBoundary, type CodexBindingCursor, type CompactBoundaryBaseline, type CompactBoundaryCursor } from "./core-context.ts";
@@ -210,6 +211,12 @@ interface ClaudeWatch {
   closedRun: string | null;
 }
 
+/**
+ * 0.2.7(묶음 6): 지금 돌고 있는 서브에이전트 수의 관측(track 마다, observeSubagents). 바뀔 때만 subagents 사건을 낸다.
+ * path: 찾아 둔 Claude 주 대화 기록. key: 마지막으로 낸 값(quality:count).
+ */
+interface SubagentWatch { claude: ClaudeSubagentCursor | null; codex: CodexSubagentState | null; path: string | null; key: string | null }
+
 /** Terminals belong to core's holders. IAMCEO shutdown only detaches. */
 export class CoreRunner implements FullRunner {
   readonly kind: Backend = "core";
@@ -232,6 +239,8 @@ export class CoreRunner implements FullRunner {
   private readonly codexWatch = new WeakMap<Track, CodexBackgroundWatch>();
   /** Claude 가 자기 근거로 끝낸 턴의 관측(track 마다, claudeQuiet). */
   private readonly claudeWatch = new WeakMap<Track, ClaudeWatch>();
+  /** 서브에이전트 수의 관측(track 마다). 새 track(다시 띄운 CLI)은 처음부터 다시 잰다. */
+  private readonly subagentWatch = new WeakMap<Track, SubagentWatch>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly polling = new Set<Track>();
   private readonly inputRefreshes = new Map<Track, ReturnType<typeof setTimeout>>();
@@ -563,6 +572,8 @@ export class CoreRunner implements FullRunner {
     // not consume that attempt's deadline or hide its pre-write timeout boundary.
     const screen = terminal.state === "live" && (!this.operation.getStore() || status === "blocked") ? await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 }).then(r => r.text, () => null) : null;
     this.validateTrack(track);
+    // 0.2.7: 서브에이전트 수. 붙는 순간의 첫 관측에서는 내지 않는다(아직 pane 사건 전이라 총괄이 이 터미널을 모른다). 다음 관측이 낸다.
+    if (!initial) this.observeSubagents(track, terminal);
     // 11-16: Codex 가 남긴 백그라운드 터미널로 core 가 working 을 알려도, 화면과 Codex 자기 기록이 그 턴의 끝을 보이면 끝난 턴이다.
     const background = this.codexBackground(track, terminal, screen, initial);
     // 11-16: Claude 가 뒤 작업을 남기고(또는 로그인 오류로) 턴을 끝냈는데 core 가 working 을 알린다. 화면과 Claude 자기 기록(또는 훅)이 함께 그 끝을 보이면 끝난 턴이다.
@@ -1049,6 +1060,43 @@ export class CoreRunner implements FullRunner {
     const kind = !verdict.error ? "background" : CLAUDE_LOGIN_ERRORS.has(verdict.error.error) ? "login" : "error";
     const same = previous?.kind === kind && previous.runId === verdict.runId ? previous : null;
     return watch.state = { kind, turn, runId: verdict.runId, runEnded: verdict.runEnded, reported: !!same?.reported || verdict.runEnded || watch.closedRun === verdict.runId, error: verdict.error, label: quiet.label };
+  }
+  /**
+   * 0.2.7(묶음 6): 이 팀장에게서 지금 돌고 있는 서브에이전트 수를 CLI 자기 기록으로 잰다(server/runner/subagents.ts). 읽기만 하고,
+   * 값(quality·count)이 바뀔 때만 subagents 사건을 낸다. 판정(상태·전달)은 바꾸지 않는다. 읽지 못하면 unknown 이다(시간만으로 0 으로 두지 않는다).
+   */
+  private observeSubagents(track: Track, terminal: CoreTerminal): void {
+    let watch = this.subagentWatch.get(track);
+    if (!watch) this.subagentWatch.set(track, watch = { claude: null, codex: null, path: null, key: null });
+    let reading: SubagentReading;
+    try { reading = this.readSubagents(track, terminal, watch); }
+    catch { reading = { quality: "unknown", count: null, code: "read_failed" }; }
+    const key = `${reading.quality}:${reading.count}`;
+    if (key === watch.key) return;
+    watch.key = key;
+    this.event(track, { type: "subagents", memberId: track.member.id, quality: reading.quality, count: reading.quality === "unknown" ? null : reading.count });
+  }
+  private readSubagents(track: Track, terminal: CoreTerminal, watch: SubagentWatch): SubagentReading {
+    const unknown = (code: string): SubagentReading => ({ quality: "unknown", count: null, code });
+    if (terminal.state !== "live") return unknown("terminal_gone");
+    if (!track.sessionId) return unknown("session_unbound");
+    // 이 CLI 를 띄운 시각(터미널 라벨 iamceo.startedAt, 0.2.0 부터 모든 터미널에 있다). 앞 프로세스의 뒤 작업은 그 프로세스와 함께 끝났다.
+    // 라벨이 없으면 붙은 시각(bindingSince)으로 대신하지 않는다: 그 앞의 띄움을 앞 프로세스의 것으로 버려 0 을 정확한 값처럼 낼 수 있다.
+    const started = terminal.labels?.["iamceo.startedAt"];
+    if (!started) return unknown("since_unknown");
+    const since = Date.parse(started);
+    const home = this.providerHome(track.member);
+    if (providerFor(track.member) === "codex") {
+      const read = readCodexSubagents({ home, sessionId: track.sessionId, since, now: Date.now() }, watch.codex);
+      watch.codex = read.state;
+      return read;
+    }
+    // 세션 안에서 cd 하면 기록이 다른 폴더 아래에 있다(findSessionFile 이 projects 를 훑는다). 찾은 자리는 기억해 둔다.
+    if (!watch.path || !watch.path.endsWith(`${track.sessionId}.jsonl`) || !existsSync(watch.path)) { watch.path = this.logPath(track); watch.claude = null; }
+    if (!watch.path) return unknown("log_missing");
+    const read = readClaudeSubagents({ home, path: watch.path, sessionId: track.sessionId, since }, watch.claude);
+    watch.claude = read.cursor;
+    return read;
   }
   /** 지금 업무의 턴이 Claude 자기 기록(없으면 훅)에서 닫혔는가. 같은 세대·같은 터미널·같은 세션의 봉투와 기록만 본다. */
   private claudeTurnVerdict(track: Track, watch: ClaudeWatch): { outcome: "ended" | "running" | "unknown"; code: string; error: ClaudeTurnError | null; runId: string | null; runEnded: boolean } {

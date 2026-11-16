@@ -541,7 +541,8 @@ describe("CoreRunner 연결", () => {
     expect(snap.categories.session.mismatched).toBe(0);
     expect(snap.categories.session.matched).toBeGreaterThanOrEqual(3);
     // 판정 쪽 사건 모양은 비교가 없을 때와 같다(비교는 사건을 더하거나 바꾸지 않는다).
-    expect(events.map(e => e.type).filter(type => !["status", "input_ready", "context_usage"].includes(type))).toEqual(["pane", "session", "turn_end"]);
+    // subagents(0.2.7): 서브에이전트 수의 관측. status 처럼 관측마다(바뀔 때) 나는 사건이라 훅과 무관하다.
+    expect(events.map(e => e.type).filter(type => !["status", "input_ready", "context_usage", "subagents"].includes(type))).toEqual(["pane", "session", "turn_end"]);
     await runner.shutdown();
     expect(existsSync(join(eventsDir, HOOK_COMPARE_FILE))).toBe(true);
   });

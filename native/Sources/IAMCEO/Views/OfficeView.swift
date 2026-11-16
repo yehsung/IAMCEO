@@ -25,12 +25,13 @@ private func officeStateLabel(_ status: String) -> String {
 }
 
 private func officeStateKey(_ member: Member) -> String {
-    MemberStatusInfo.isUncertain(member) ? "unknown" : member.status
+    MemberStatusInfo.isUncertain(member) ? "unknown" : member.presentedStatus
 }
 
 /// Keep observation failures and quiet-run guidance consistent with Home and member detail.
 func officeStateLabel(_ member: Member) -> String {
-    MemberStatusInfo.isUncertain(member) ? MemberStatusInfo(member).label : officeStateLabel(member.status)
+    // 0.2.7: 서브에이전트만 일하는 팀장은 그 말 그대로('서브에이전트 일하는 중').
+    MemberStatusInfo.isUncertain(member) || member.subagentsAtWork != nil ? MemberStatusInfo(member).label : officeStateLabel(member.status)
 }
 
 /// The office's state colour: the body colour of a resident in that state (its base tone), so the header legend and
@@ -71,10 +72,10 @@ private func officeAllowsTerminal(_ member: Member) -> Bool {
 }
 
 /// What the message box (and accessibility) says a member is doing.
-private func officeDetail(_ member: Member) -> String {
+func officeDetail(_ member: Member) -> String {
     if MemberStatusInfo.isUncertain(member) { return MemberStatusInfo(member).explanation }
     let now = plainOneLine(member.now)
-    switch member.status {
+    switch member.presentedStatus {
     case "error":
         if let error = member.lastError, !error.isEmpty { return plainOneLine(friendlyError(error, code: member.errorTextCode)) }
     case "idle", "asleep":
@@ -84,6 +85,8 @@ private func officeDetail(_ member: Member) -> String {
     default:
         break
     }
+    // 0.2.7: 서브에이전트만 일하는 팀장은 맡은 일 글이 없어도 '맡은 일 없음'이 아니다: 그 수를 쓴다.
+    if now.isEmpty, let line = member.subagentsAtWorkLine { return line }
     return now.isEmpty ? String(localized: "맡은 일 없음") : now
 }
 
@@ -333,7 +336,7 @@ struct OfficeView: View {
         return awake.sorted { a, b in
             let la = a.element.kind != "worker", lb = b.element.kind != "worker"
             if la != lb { return la }
-            let ra = rank[a.element.status] ?? 6, rb = rank[b.element.status] ?? 6
+            let ra = rank[a.element.presentedStatus] ?? 6, rb = rank[b.element.presentedStatus] ?? 6
             return ra != rb ? ra < rb : a.offset < b.offset
         }.map(\.element)
     }
@@ -381,7 +384,7 @@ struct OfficeView: View {
         var result: [Int: OfficeScreen] = [:]
         for member in list {
             guard let d = map.desks.firstIndex(where: { $0.memberID == member.id }) else { continue }
-            result[d] = switch member.status {
+            result[d] = switch member.presentedStatus {
             case "working": .working
             case "waiting": .waiting
             case "blocked": .blocked
@@ -565,7 +568,7 @@ struct OfficeView: View {
 
     /// Who needs the CEO first (승인 창 앞, 오류, 내 답 기다림), then who is working.
     private func boxQueue(_ list: [Member]) -> [Member] {
-        ["blocked", "error", "waiting", "working"].flatMap { status in list.filter { $0.status == status } }
+        ["blocked", "error", "waiting", "working"].flatMap { status in list.filter { $0.presentedStatus == status } }
     }
 
     // MARK: Walks
@@ -887,7 +890,7 @@ private struct OfficeContextPreview: View {
                     .alignmentGuide(.firstTextBaseline) { $0.height / 2 + 5 }
                 Text(member.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
                 Text(officeStateLabel(member)).font(CEFont.meta.weight(.semibold))
-                    .foregroundStyle(member.status == "idle" ? CE.ink3 : MemberStatusInfo(member).tone.color)
+                    .foregroundStyle(member.presentedStatus == "idle" ? CE.ink3 : MemberStatusInfo(member).tone.color)
                     .lineLimit(1).fixedSize()
             }
             Text(officeDetail(member)).font(CEFont.note).foregroundStyle(member.status == "error" ? CE.danger : CE.ink2)
@@ -1064,7 +1067,7 @@ private struct OfficeMessageBox: View {
             Text(member.name).font(.system(size: isMac ? 14 : 15, weight: .semibold)).foregroundStyle(CE.ink).lineLimit(1)
             Text("·").font(.system(size: 13)).foregroundStyle(CE.ink3)
             Text(officeStateLabel(member)).font(.system(size: isMac ? 12.5 : 13, weight: .semibold))
-                .foregroundStyle(member.status == "idle" ? CE.ink3 : info.tone.color)
+                .foregroundStyle(member.presentedStatus == "idle" ? CE.ink3 : info.tone.color)
                 .lineLimit(1).fixedSize()
             if let extra {
                 Text(extra).font(.system(size: isMac ? 12.5 : 13, weight: .semibold)).foregroundStyle(CE.attention).lineLimit(1).fixedSize()
@@ -1121,7 +1124,7 @@ private struct OfficeNowList: View {
         let count = decisions[member.id] ?? 0
         let time = relativeTime(member.nowAt)
         let detail = officeDetail(member)
-        let quiet = ["idle", "offline"].contains(member.status)
+        let quiet = ["idle", "offline"].contains(member.presentedStatus)
         let urgent = ["waiting", "blocked", "error"].contains(member.status)
         // Who needs the CEO says so before what it is doing; the error itself is the line for a failed session.
         let lead = urgent && member.status != "error" ? Text("\(officeStateLabel(member)) · ").foregroundStyle(info.tone.color).fontWeight(.semibold) : Text("")

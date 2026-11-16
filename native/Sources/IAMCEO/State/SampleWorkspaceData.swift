@@ -208,6 +208,7 @@ enum SampleWorkspaceData {
     "needsDanger": false,
     "inboxCount": 0,
     "workingCount": 0,
+    "subagentWorkingCount": 0,
     "blockedCount": 0,
     "errorCount": 0,
     "memberCount": 1
@@ -230,6 +231,7 @@ enum SampleWorkspaceData {
     "needsDanger": false,
     "inboxCount": 5,
     "workingCount": 3,
+    "subagentWorkingCount": 0,
     "blockedCount": 0,
     "errorCount": 0,
     "memberCount": 9
@@ -252,6 +254,7 @@ enum SampleWorkspaceData {
     "needsDanger": false,
     "inboxCount": 1,
     "workingCount": 1,
+    "subagentWorkingCount": 0,
     "blockedCount": 0,
     "errorCount": 0,
     "memberCount": 3
@@ -4281,6 +4284,7 @@ enum SampleWorkspaceData {
     "needsDanger": false,
     "inboxCount": 0,
     "workingCount": 0,
+    "subagentWorkingCount": 0,
     "blockedCount": 0,
     "errorCount": 0,
     "memberCount": 1
@@ -4303,6 +4307,7 @@ enum SampleWorkspaceData {
     "needsDanger": false,
     "inboxCount": 5,
     "workingCount": 3,
+    "subagentWorkingCount": 0,
     "blockedCount": 0,
     "errorCount": 0,
     "memberCount": 9
@@ -4325,6 +4330,7 @@ enum SampleWorkspaceData {
     "needsDanger": false,
     "inboxCount": 1,
     "workingCount": 1,
+    "subagentWorkingCount": 0,
     "blockedCount": 0,
     "errorCount": 0,
     "memberCount": 3

@@ -414,11 +414,11 @@ struct ComposerBar: View {
     private var targetEntries: [ComposerTargetEntry] {
         let lead = store.members.first { $0.kind == "conductor" || $0.kind == "root" }
         let workers = store.members.filter { $0.kind == "worker" }
-        return [ComposerTargetEntry(memberID: nil, name: leadName, sub: String(localized: "기본"), status: lead?.status)]
+        return [ComposerTargetEntry(memberID: nil, name: leadName, sub: String(localized: "기본"), status: lead.map(MemberStatusInfo.presented))]
             + workers.map { member in
                 let sub = [member.handle.isEmpty ? nil : "@\(member.handle)", member.role.isEmpty ? nil : member.role]
                     .compactMap { $0 }.joined(separator: " · ")
-                return ComposerTargetEntry(memberID: member.id, name: member.name, sub: sub, status: member.status)
+                return ComposerTargetEntry(memberID: member.id, name: member.name, sub: sub, status: MemberStatusInfo.presented(member))
             }
     }
 
@@ -453,7 +453,7 @@ struct ComposerBar: View {
                 Button { target = entry.memberID } label: {
                     Label {
                         Text(entry.name)
-                        Text(([entry.sub.isEmpty ? nil : entry.sub] + [entry.status.map { MemberStatusInfo($0).label }]).compactMap { $0 }.joined(separator: " · "))
+                        Text(([entry.sub.isEmpty ? nil : entry.sub] + [entry.status?.label]).compactMap { $0 }.joined(separator: " · "))
                     } icon: {
                         if !missingTarget && target == entry.memberID { Image(systemName: "checkmark") }
                     }
@@ -1113,7 +1113,8 @@ private struct ComposerTargetEntry: Identifiable {
     let memberID: String?
     let name: String
     let sub: String
-    let status: String?
+    /// 표시용 상태(MemberStatusInfo.presented): 서브에이전트만 일하는 팀장은 '서브에이전트 일하는 중'(팀 배지와 같은 말)이다.
+    let status: MemberStatusInfo?
     var id: String { memberID ?? "lead" }
 }
 
@@ -1171,7 +1172,7 @@ private struct ComposerTargetMenu: View {
     private func row(_ entry: ComposerTargetEntry, position: Int) -> some View {
         let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
         let selected = entry.memberID == current
-        let info = entry.status.map { MemberStatusInfo($0) }
+        let info = entry.status
         return Button { onPick(entry.memberID) } label: {
             HStack(spacing: 12) {
                 // web: name and sub at line-height 1.3, 1px apart.

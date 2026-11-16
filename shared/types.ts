@@ -60,6 +60,11 @@ export interface ProjectSummary extends Pick<Project, "id" | "name" | "isHq" | "
   /** decisionCount + todoCount. 호환용으로 남겨 두었다. 새 화면은 위 둘을 쓴다. */
   inboxCount: number;
   workingCount: number;
+  /**
+   * 0.2.7(묶음 6): 턴은 끝났지만(쉬는 중) 서브에이전트가 돌고 있는 팀장 수(subagents > 0). workingCount 에는 들지 않는다.
+   * 새 앱은 '일하는 중' 수에 더해 보인다. 없으면 0 으로 본다(구형 서버).
+   */
+  subagentWorkingCount?: number;
   /** 승인 창 앞에서 멈춘 세션. 대표가 풀어 줘야 움직인다. */
   blockedCount: number;
   errorCount: number;
@@ -87,6 +92,7 @@ export interface StatusObservation {
   error: { code: string; note: string } | null;
 }
 /** 미수집/추정은 기존 subagents=0과 다르며 실제 자식 lifecycle 수집을 약속하지 않는다. */
+/** 0.2.7: core 실행기가 CLI 자기 기록으로 잰다(server/runner/subagents.ts, docs/spec.md §5 넷째). unknown 이면 count 는 null 이다. */
 export interface SubagentState {
   quality: "exact" | "estimated" | "unknown" | "unsupported";
   count: number | null;

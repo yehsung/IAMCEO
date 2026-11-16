@@ -10552,6 +10552,16 @@
         }
       }
     },
+    "서브에이전트 일하는 중" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sub-agents working"
+          }
+        }
+      }
+    },
     "선택 결과를 확인하지 못했습니다. 창을 다시 확인하세요." : {
       "localizations" : {
         "en" : {
@@ -19011,6 +19021,74 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Turn in progress · completion is confirmed by reports"
+          }
+        }
+      }
+    },
+    "턴은 끝났고 서브에이전트 %lld개가 뒤에서 일하고 있습니다. 새 지시는 바로 받습니다." : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Its turn is over and %lld sub-agent is working in the background. New instructions go in right away."
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Its turn is over and %lld sub-agents are working in the background. New instructions go in right away."
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "턴은 끝났고 서브에이전트 %lld개가 뒤에서 일하고 있습니다. 새 지시는 바로 받습니다."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "턴은 끝났고 서브에이전트 약 %lld개가 뒤에서 일하고 있습니다. 새 지시는 바로 받습니다." : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Its turn is over and about %lld sub-agent is working in the background. New instructions go in right away."
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Its turn is over and about %lld sub-agents are working in the background. New instructions go in right away."
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "턴은 끝났고 서브에이전트 약 %lld개가 뒤에서 일하고 있습니다. 새 지시는 바로 받습니다."
+                }
+              }
+            }
           }
         }
       }

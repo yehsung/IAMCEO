@@ -64,7 +64,7 @@ const CHUNK_BYTES = 4 * 1024 * 1024;
 /** 받은 글이지만 모델 턴을 열지 않는 것(로컬 명령, ! 셸). */
 const LOCAL_INPUT = /^\s*<(?:command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|bash-input|bash-stdout|bash-stderr)>/;
 
-function isTurnInput(entry: Record<string, unknown>): boolean {
+export function isTurnInput(entry: Record<string, unknown>): boolean {
   if (entry.type !== "user" || entry.isMeta || entry.isCompactSummary || entry.isVisibleInTranscriptOnly) return false;
   const message = jsonObject(entry.message);
   if (!message || message.role !== "user") return false;

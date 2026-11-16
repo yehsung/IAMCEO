@@ -964,7 +964,7 @@ export class Orchestrator implements OrchestratorApi {
       if (!(await this.reconcileAbsentTerminal(current, probe))) return;
       const after = this.store.getMember(member.id);
       if (after && after.paneId === member.paneId && !rt.reopening && !rt.starting) {
-        this.store.patchMember(member.id, { status: "offline", paneId: null, subagents: 0 });
+        this.store.patchMember(member.id, { status: "offline", paneId: null, ...this.subagentsDown(member.id) });
         rt.turn = null;
         this.releaseSlots();
       }
@@ -1663,7 +1663,8 @@ export class Orchestrator implements OrchestratorApi {
       this.recoverStep("도구 승인 카드", () => this.toolPermissions.closeLeftovers());
       await this.refreshConnection();
       for (const member of this.store.listAllMembers()) this.recoverStep(`${member.id} 세션 복구`, () => {
-        if (member.subagents !== 0 || !member.subagentState) this.store.patchMember(member.id, { subagents: 0, subagentState: { quality: "unknown", count: null, observedAt: null, sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration } });
+        // 지난 서버가 잰 서브에이전트 수는 믿지 않는다. 다시 붙은 실행기가 CLI 기록으로 다시 잰다(0.2.7).
+        if (member.subagents !== 0 || member.subagentState?.quality !== "unknown") this.store.patchMember(member.id, this.subagentsDown(member.id));
         if (member.origin === "manual") return;
         const project = this.store.requireProject(member.projectId);
         // 지워진 옛 실행기(herdr·headless)가 띄운 세션이다. 이어 열지도 넘겨받지도 않고, 대표가 새 세션으로 바꿀 때까지 전달을 세워 둔다.
@@ -2272,6 +2273,8 @@ export class Orchestrator implements OrchestratorApi {
       this.store.transaction(() => {
         this.endExecution(member, "interrupted", textRef(freshSession ? "why.fresh_session" : "why.settings_changed"));
         this.confirmStop(member.id);
+        // 0.2.7: 옛 CLI 와 함께 그 서브에이전트도 끝났다. 수를 모름으로 둔다(요약의 '일하는 중' 수도 다시 낸다). 새 CLI 는 실행기가 다시 잰다.
+        this.store.patchMember(member.id, this.subagentsDown(member.id));
         this.store.archiveAndRotateSession(member.id, patch.cli!, freshSession ? "fresh_session" : sameProvider ? "settings_change" : "provider_switch");
         // 옛 터미널은 끝났다. 새 터미널을 띄우기 전에 보류를 풀고 이어가기 글을 줄에 세운다: 띄우기가 실패해도 다음 기동이 그 글부터 넣는다.
         if (usage) continued = this.resumeAfterUsageStop(member, usage, resumable, sameProvider ? { kind: "model", label: this.modelLabel(target) } : { kind: "cli", label: patch.cli === "codex" ? "Codex" : "Claude" });
@@ -3339,7 +3342,7 @@ export class Orchestrator implements OrchestratorApi {
       rt.compactRequest = null;
       this.store.transaction(() => {
         this.interruptCoreCompaction(member);
-        this.store.patchMember(memberId, { status: "asleep", subagents: 0, paneId: null });
+        this.store.patchMember(memberId, { status: "asleep", ...this.subagentsDown(memberId), paneId: null });
         // 재시작으로 꺼진 팀장을 재웠다: 스스로 다시 열지 않는다. 잠든 팀장은 그대로 잔다.
         this.settleRestartWake(memberId, "dropped");
         for (const d of this.store.listPending(memberId)) {
@@ -4760,6 +4763,11 @@ export class Orchestrator implements OrchestratorApi {
     this.releaseSlots();
   }
 
+  /** 0.2.7: 세션이 내려가면 그 서브에이전트도 함께 끝난다. 수는 모름으로 둔다(다음에 띄운 CLI 를 실행기가 다시 잰다). */
+  private subagentsDown(memberId: string): Pick<Member, "subagents" | "subagentState"> {
+    return { subagents: 0, subagentState: { quality: "unknown", count: null, observedAt: null, sessionGeneration: this.store.memberRevisions(memberId).sessionGeneration } };
+  }
+
   private afterCompacted(member: Member): void {
     if (this.backendOf(member) !== "core") this.store.patchMember(member.id, { contextPct: null });
     this.store.appendActivity(member.id, "compact", textRef("activity.compact_done"));
@@ -4875,6 +4883,15 @@ export class Orchestrator implements OrchestratorApi {
           if (e.sessionId) this.registerUsageSession(member, e.sessionId);
         }
         return;
+      case "subagents": {
+        // 0.2.7(묶음 6): 지금 돌고 있는 서브에이전트 수. 상태(status)·전달은 바꾸지 않는다. 내려간 세션의 늦은 사건은 버린다.
+        if (!member.paneId || ["asleep", "offline"].includes(member.status)) return;
+        const count = e.quality === "unknown" ? null : e.count;
+        const current = member.subagentState;
+        if (member.subagents === (count ?? 0) && current?.quality === e.quality && current.count === count && current.sessionGeneration === generation) return;
+        this.store.patchMember(member.id, { subagents: count ?? 0, subagentState: { quality: e.quality, count, observedAt: at, sessionGeneration: generation } });
+        return;
+      }
       case "compacted": {
         const rt = this.runtime(member.id);
         if (this.backendOf(member) === "core") {
@@ -5053,7 +5070,7 @@ export class Orchestrator implements OrchestratorApi {
         this.interruptCoreCompaction(member);
         if (rt.compactTimer) clearTimeout(rt.compactTimer);
         rt.compactTimer = null;
-        this.store.patchMember(member.id, { status: "offline", ...(this.backendOf(member) === "core" ? {} : { paneId: null }), subagents: 0 });
+        this.store.patchMember(member.id, { status: "offline", ...(this.backendOf(member) === "core" ? {} : { paneId: null }), ...this.subagentsDown(member.id) });
         rt.turn = null;
         this.releaseSlots();
         return;
@@ -5099,7 +5116,7 @@ export class Orchestrator implements OrchestratorApi {
     }
     this.store.finishDelegationAck(member.id);
     this.store.appendActivity(member.id, e.isError ? "error" : "turn_end", e.isError ? (e.errorText ?? "오류") : textRef("activity.turn_end"));
-    if (member.subagents !== 0) this.store.patchMember(member.id, { subagents: 0 });
+    // 0.2.7: 턴이 끝나도 서브에이전트(뒤로 띄운 에이전트·워크플로)는 돌 수 있다. 그 수는 실행기가 CLI 기록으로 재어 subagents 사건으로 알린다.
 
     if (member.status === "asleep") {
       this.releaseSlots();

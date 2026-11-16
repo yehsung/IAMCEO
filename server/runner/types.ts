@@ -4,6 +4,7 @@ import type { ServerTextRef } from "../../shared/server-text.ts";
 
 // 실행기 계약. 운영이 등록하는 실행기는 core 하나다(server/runner/core.ts 의 CoreRunner).
 // 옛 herdr·headless 실행기는 지웠다. 그 실행기만 내던 이벤트(context·subagents·background)와 전용 옵션도 함께 없앴다.
+// subagents 사건은 0.2.7 에 core 실행기의 것으로 다시 생겼다(모양이 다르다: quality·count).
 
 /**
  * not_blocked: 승인 창 앞이 아니다. unrecognized: 창은 있으나 승인 창으로 못 읽었다. changed: 보여 준 창과 지금 창이 다르다(current 에 새 창).
@@ -174,6 +175,11 @@ export type RunnerEvent = RunnerObservation & (
    */
   | ({ type: "context_usage"; memberId: string } & ContextReading)
   | { type: "session"; memberId: string; sessionId: string }
+  /**
+   * 0.2.7(묶음 6): 지금 돌고 있는 서브에이전트 수(CoreRunner 가 CLI 자기 기록으로 잰 값, server/runner/subagents.ts). 값이 바뀔 때만 낸다.
+   * exact: CLI 자기 셈 그대로. estimated: 그 뒤의 띄움·끝 알림을 더하고 뺀 값. unknown: 근거가 없다(count null).
+   */
+  | { type: "subagents"; memberId: string; quality: "exact" | "estimated" | "unknown"; count: number | null }
   | { type: "compacted"; memberId: string }
   | { type: "pane"; memberId: string; paneId: string }
 );

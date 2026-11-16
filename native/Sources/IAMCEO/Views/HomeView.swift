@@ -485,7 +485,7 @@ struct HomeView: View {
     }
 
     private var clearText: Text {
-        let working = store.members.contains { $0.status == "working" }
+        let working = store.members.contains { $0.presentedStatus == "working" }
         let lead = Text("지금 하실 일이 없습니다.").fontWeight(.semibold).foregroundStyle(CE.ink)
         let rest = Text(working ? "AI가 일하는 중입니다." : "새 일이 생기면 여기에 나타납니다.").foregroundStyle(CE.ink2)
         return Text("\(lead) \(rest)")
@@ -898,7 +898,7 @@ struct HomeView: View {
     /// Active members and observations that cannot be confirmed, in team order.
     /// 승인 창 앞 and 오류 are listed in 내 차례, not here.
     private var activeMembers: [Member] {
-        store.members.filter { ["working", "waiting"].contains($0.status) || MemberStatusInfo.isUncertain($0) }
+        store.members.filter { ["working", "waiting"].contains($0.presentedStatus) || MemberStatusInfo.isUncertain($0) }
     }
 
     private var teamSummary: [(status: String, label: String, count: Int)] {

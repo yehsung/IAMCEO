@@ -94,7 +94,8 @@ struct MemberStatusInfo: Sendable {
     static func summaryCounts(_ members: [Member]) -> [String: Int] {
         Dictionary(grouping: members, by: { member in
             if member.statusObservation?.ownership != "conflict", let code = member.statusObservation?.error?.code, isNetworkPause(code) { return code }
-            return isUncertain(member) ? "unknown" : member.status
+            // 0.2.7: 서브에이전트만 일하는 팀장은 '일하는 중'으로 센다(presentedStatus).
+            return isUncertain(member) ? "unknown" : member.presentedStatus
         }).mapValues(\.count)
     }
 
@@ -133,11 +134,25 @@ struct MemberStatusInfo: Sendable {
                       explanation: String(localized: "마지막 활동으로 짐작한 상태입니다. 실제로 일하는지는 확인하지 못했습니다."), needsMe: base.needsMe)
         } else if !Self.order.contains(member.status) {
             self.init(label: String(localized: "상태 확인 불가"), tone: .neutral, icon: "questionmark.circle", explanation: String(localized: "알 수 없는 상태입니다. 잠시 뒤 다시 확인합니다."))
+        } else if let count = member.subagentsAtWork {
+            // 0.2.7: 팀장은 턴을 마쳤고(서버 status 는 쉬는 중 그대로, 새 지시를 받는다) 서버가 잰 서브에이전트가 뒤에서 일한다.
+            let base = Self("working")
+            self.init(label: String(localized: "서브에이전트 일하는 중"), tone: base.tone, icon: base.icon,
+                      explanation: member.subagentState?.quality == "estimated"
+                        ? String(localized: "턴은 끝났고 서브에이전트 약 \(count)개가 뒤에서 일하고 있습니다. 새 지시는 바로 받습니다.")
+                        : String(localized: "턴은 끝났고 서브에이전트 \(count)개가 뒤에서 일하고 있습니다. 새 지시는 바로 받습니다."),
+                      live: base.live, needsMe: false)
         } else {
             let base = Self(member.status)
             self.init(label: base.label, tone: base.tone, icon: base.icon,
                       explanation: Self.progressNote(member) ?? base.explanation, live: base.live, needsMe: base.needsMe)
         }
+    }
+
+    /// 상태 글만 그리는 곳(받는 이 목록)의 상태: 서버 status 의 글 그대로이고, 서브에이전트만 일하는 팀장은 팀 배지·대화 머리와 같은
+    /// '서브에이전트 일하는 중'이다(그냥 '일하는 중'이면 보낸 지시가 기다린다고 읽힌다). 0.2.7.
+    static func presented(_ member: Member) -> MemberStatusInfo {
+        member.subagentsAtWork != nil ? MemberStatusInfo(member) : MemberStatusInfo(member.status)
     }
 
     private init(label: String, tone: Tone, icon: String, explanation: String, live: Bool = false, needsMe: Bool = false) {
@@ -256,6 +271,21 @@ struct PermissionModeChoice: Identifiable, Sendable, Equatable {
 }
 
 extension Member {
+    /// 0.2.7: 턴을 마쳤지만(서버 status idle) 서버가 CLI 기록으로 잰 서브에이전트가 돌고 있으면 그 수. 모르면(unknown·unsupported) nil.
+    /// 서버의 status 는 바꾸지 않는다(쉬는 중 = 새 지시를 받음). 화면만 '서브에이전트 일하는 중'으로 보인다.
+    var subagentsAtWork: Int? {
+        guard status == "idle", ["exact", "estimated"].contains(subagentState?.quality ?? ""), let count = subagentState?.count, count > 0 else { return nil }
+        return count
+    }
+    /// 표시용 상태: 서브에이전트만 일하는 동안은 "working", 그 밖에는 서버 status 그대로. 전달·버튼 같은 판단에는 쓰지 않는다(status 를 쓴다).
+    var presentedStatus: String { subagentsAtWork != nil ? "working" : status }
+    /// 0.2.7: 서브에이전트만 일하는 팀장의 수 한 줄('서브에이전트 N개', 추정이면 '약 N개'). 그 밖에는 nil.
+    var subagentsAtWorkLine: String? {
+        subagentsAtWork.map { count in
+            subagentState?.quality == "estimated" ? String(localized: "서브에이전트 약 \(count)개") : String(localized: "서브에이전트 \(count)개")
+        }
+    }
+
     var hasFolderTrustApproval: Bool {
         status == "blocked" && backend == "core" && blockedReason == "setup" &&
         statusObservation?.source == "core" && statusObservation?.freshness == "fresh" &&
@@ -556,8 +586,13 @@ func projectStatusLine(_ project: ProjectSummary) -> String {
     if project.todoCount > 0 { parts.append(String(localized: "할 일 \(project.todoCount)")) }
     if project.blockedCount > 0 { parts.append(String(localized: "승인 창 앞 \(project.blockedCount)명")) }
     if project.errorCount > 0 { parts.append(String(localized: "오류 \(project.errorCount)명")) }
-    if project.workingCount > 0 { parts.append(String(localized: "\(project.workingCount)명 일하는 중")) }
+    if project.presentedWorkingCount > 0 { parts.append(String(localized: "\(project.presentedWorkingCount)명 일하는 중")) }
     return parts.isEmpty ? String(localized: "개입할 일 없음") : parts.joined(separator: " · ")
+}
+
+extension ProjectSummary {
+    /// 0.2.7: '일하는 중' 수. 서브에이전트만 일하는 팀장(subagentWorkingCount)도 일하는 중으로 센다.
+    var presentedWorkingCount: Int { workingCount + subagentWorkingCount }
 }
 
 /// Items in a project that wait on the CEO: open decisions, open todos, members at an approval prompt or in error.

@@ -300,7 +300,7 @@ struct InboxView: View {
     }
 
     private var emptyDetail: String {
-        guard store.members.contains(where: { $0.status == "working" }) else { return String(localized: "새 결재가 오면 여기에 나타납니다.") }
+        guard store.members.contains(where: { $0.presentedStatus == "working" }) else { return String(localized: "새 결재가 오면 여기에 나타납니다.") }
         return store.state?.project.isHq == true ? String(localized: "본사 AI가 일하는 중입니다. 대화에서 상황을 볼 수 있습니다.") : String(localized: "팀원들이 일하는 중입니다. 대화나 팀에서 상황을 볼 수 있습니다.")
     }
 

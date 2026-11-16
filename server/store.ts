@@ -2051,6 +2051,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
          (SELECT COUNT(*) FROM decisions d WHERE d.project_id = p.id AND d.status = 'open') AS decision_count,
          (SELECT COUNT(*) FROM todos t WHERE t.project_id = p.id AND t.done = 0) AS todo_count,
          (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id AND m.status = 'working') AS working_count,
+         (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id AND m.status = 'idle' AND m.subagents > 0) AS subagent_working_count,
          (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id AND m.status = 'blocked' AND m.blocked_reason = 'permission') AS blocked_count,
          (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id AND m.status = 'blocked' AND m.blocked_reason IN ('permission', 'selection')) AS attention_blocked_count,
          (SELECT COUNT(*) FROM members m WHERE m.project_id = p.id AND m.status = 'error') AS error_count,
@@ -2070,6 +2071,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       needsDanger: r.error_count > 0,
       inboxCount: r.decision_count + r.todo_count,
       workingCount: r.working_count,
+      subagentWorkingCount: r.subagent_working_count,
       blockedCount: r.blocked_count,
       errorCount: r.error_count,
       memberCount: r.member_count,
@@ -2243,7 +2245,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       // D2-4·D4-2: 재시작으로 꺼져 서버가 스스로 다시 여는 중인 팀장의 오류는 그 묶음이 끝날 때 한 번만 알린다(restartOwned).
       if (!["network_outage", "network_retry", "usage_limit"].includes(member.statusObservation?.error?.code ?? "")) this.recorder?.member(before, member, { restartOwned: this.restartOwned(id) });
       this.emit({ type: "member", member });
-      if (member.status !== before.status || member.blockedReason !== before.blockedReason) this.emitProjects();
+      // 0.2.7: 서브에이전트가 일하기 시작하거나 다 끝나면 프로젝트 요약의 subagentWorkingCount 가 바뀐다.
+      if (member.status !== before.status || member.blockedReason !== before.blockedReason || (member.subagents > 0) !== (before.subagents > 0)) this.emitProjects();
       // Z: 턴 도중 승인 창·한도·오류로 멈추거나 풀리면 그 팀장이 받은 대표 글의 답 상태가 바뀐다.
       if (member.status !== before.status || member.blockedReason !== before.blockedReason || member.fenceCode !== before.fenceCode
         || member.statusObservation?.error?.code !== before.statusObservation?.error?.code) this.noteReply(id);

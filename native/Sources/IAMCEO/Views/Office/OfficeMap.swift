@@ -522,9 +522,9 @@ enum OfficeSeating {
         return (seated, benched)
     }
 
-    /// 0: needs the CEO or is working, so it must be seen at a desk. 1: everyone else.
+    /// 0: needs the CEO or is working (0.2.7: also while only its sub-agents work), so it must be seen at a desk. 1: everyone else.
     private static func priority(_ member: Member) -> Int {
-        ["working", "waiting", "blocked", "error"].contains(member.status) ? 0 : 1
+        ["working", "waiting", "blocked", "error"].contains(member.presentedStatus) ? 0 : 1
     }
 
     /// An ISO-8601 time that sorts as text (older servers: when the member last said what it was doing). "" = never.

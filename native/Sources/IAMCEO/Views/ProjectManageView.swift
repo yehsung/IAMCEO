@@ -104,7 +104,8 @@ struct ProjectManageView: View {
     private var blockers: [(String, String, Destination)] {
         guard let snapshot else { return [] }
         var rows: [(String, String, Destination)] = []
-        let working = snapshot.members.filter { $0.status == "working" }
+        // 0.2.7: 서브에이전트만 일하는 팀장도 일하는 팀원이다(서버도 그 작업을 죽이는 보관을 거절한다).
+        let working = snapshot.members.filter { $0.presentedStatus == "working" }
         let blocked = snapshot.members.filter { $0.status == "blocked" }
         let decisions = snapshot.decisions.filter { $0.status == "open" }
         let todos = snapshot.todos.filter { !$0.done }

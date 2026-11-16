@@ -29,7 +29,8 @@ struct OfficeCast: Equatable {
         for member in members {
             guard let desk = map.desks.firstIndex(where: { $0.memberID == member.id }) else { continue }
             let placement: OfficePlacement
-            switch member.status {
+            // 0.2.7: 턴을 마쳤어도 서브에이전트가 일하는 동안은 책상에서 일하는 모습이다(presentedStatus).
+            switch member.presentedStatus {
             case "working": placement = .seat(desk, .working)
             case "waiting": placement = .seat(desk, .waiting)
             case "error": placement = .seat(desk, .error)
@@ -39,7 +40,7 @@ struct OfficeCast: Equatable {
             default: placement = .hidden
             }
             cast.placements[member.id] = placement
-            if let tone = OfficeTone(status: member.status) { cast.tones[member.id] = tone }
+            if let tone = OfficeTone(status: member.presentedStatus) { cast.tones[member.id] = tone }
         }
         return cast
     }

@@ -75,6 +75,8 @@ struct ProjectSummary: Codable, Sendable, Identifiable, Equatable {
     var blockedCount: Int = 0
     var errorCount: Int = 0
     var memberCount: Int = 0
+    /// 0.2.7: 턴을 마쳤지만 서브에이전트가 일하는 팀장 수(서버의 workingCount 에는 들지 않는다). 구형 서버는 보내지 않는다(0).
+    var subagentWorkingCount: Int = 0
 }
 extension ProjectSummary {
     init(from decoder: Decoder) throws {
@@ -95,6 +97,7 @@ extension ProjectSummary {
         blockedCount = try c.decodeIfPresent(Int.self, forKey: ModelKey("blockedCount")) ?? 0
         errorCount = try c.decodeIfPresent(Int.self, forKey: ModelKey("errorCount")) ?? 0
         memberCount = try c.decodeIfPresent(Int.self, forKey: ModelKey("memberCount")) ?? 0
+        subagentWorkingCount = try c.decodeIfPresent(Int.self, forKey: ModelKey("subagentWorkingCount")) ?? 0
     }
 }
 

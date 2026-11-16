@@ -586,7 +586,7 @@ struct AppShell: View {
 func projectRailLine(_ project: ProjectSummary) -> String {
     if project.blockedCount > 0 { return String(localized: "승인 창 앞 \(project.blockedCount)명") }
     if project.errorCount > 0 { return String(localized: "오류 \(project.errorCount)명") }
-    if project.workingCount > 0 { return String(localized: "\(project.workingCount)명 일하는 중") }
+    if project.presentedWorkingCount > 0 { return String(localized: "\(project.presentedWorkingCount)명 일하는 중") }
     if !project.isHq && !project.runnerEnabled { return String(localized: "총괄 시작 전") }
     // "N명 대기" read as N people waiting on the CEO; idle members are simply resting (the status label's wording).
     if project.memberCount > 0 { return String(localized: "모두 쉬는 중") }

@@ -651,6 +651,12 @@ for (const started of [false, true]) test(`${started ? "progress" : "start"} adv
   await f.orch.refreshConnection();
   const code = started ? "progress_stalled" : "start_stalled";
   expect(f.store.requireMember(member.id).statusObservation?.error?.code).toBe(code);
+  // 0.2.7(묶음 6): 서브에이전트 수도 같은 기록에서 잰다(server/runner/subagents.ts). 기록의 정체성은 dev:ino:birthtime 인데, macOS(APFS)는
+  // 위처럼 mtime 을 birthtime 앞으로 돌리면 birthtime 도 그리로 당긴다. 그래서 바로 위 관측은 '기록이 바뀜'(file_changed)으로 모름이 되고,
+  // 다음 관측이 기록 끝에서 다시 읽어 0(exact)으로 정한다. 그 한 번의 정당한 변화를 구독 전에 끝낸다. 그 뒤의 되풀이는 사건이 없어야 한다.
+  await f.orch.refreshConnection();
+  expect(f.store.requireMember(member.id).subagentState).toMatchObject({ quality: "exact", count: 0 });
+  expect(f.store.requireMember(member.id).statusObservation?.error?.code).toBe(code);
   const observations: string[] = [];
   const unsubscribe = f.bus.subscribe(event => {
     if (event.type === "member" && event.member.id === member.id) observations.push(event.member.statusObservation?.error?.code ?? "none");

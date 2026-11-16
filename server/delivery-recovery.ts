@@ -14,7 +14,7 @@ export type DeliveryRecoveryStore = Pick<Store,
   "withDeliveryRead" | "deliveryNoticePreviews" | "listUnlinkedFailedMessages" | "listDeliveryRecoveryCandidates" | "hasDeliveryAttention" |
   "getDeliveryRetry" | "patchDeliveryRetry" | "saveDispatch" | "getDispatch" | "listDispatches" | "updateDispatch" | "inputState" |
   "deliveryRecoveryOperation" | "markDelivered" | "markHeld" | "markFailed" | "setDeliveryStatus" | "setMessageDelivery" |
-  "listMissingReportNotices" | "deliveryWait" | "detectDeliveryStalls" | "deliveryStalled" | "recheckPendingDelivery" | "getMessage" | "requireMessage" | "listMessagePage" | "getDecision" | "setDecisionStatus" | "getTodo" | "todoRevision" | "appendActivity">;
+  "listMissingReportNotices" | "deliveryWait" | "detectDeliveryStalls" | "deliveryStalled" | "recheckPendingDelivery" | "getMessage" | "requireMessage" | "listMessagePage" | "getDecision" | "setDecisionStatus" | "reopenDecision" | "getTodo" | "todoRevision" | "appendActivity">;
 
 export type RecoveryRunner = Pick<Runner, "inspectDelivery" | "repairDelivery" | "terminalGone" | "inspectGoneDelivery">;
 /** What settling the envelopes of a gone terminal decided, by delivery id. */
@@ -347,6 +347,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
         if (request.action === "stop_retry") {
           this.projectStatus(d, "failed", STOP_NOTE);
           this.store.patchDeliveryRetry(d.id, { nextAttemptAt: null, retryReason: null });
+          this.stoppedAnswer(d);
         } else {
           this.store.patchDeliveryRetry(d.id, { nextAttemptAt: null, retryReason: null });
           this.store.recheckPendingDelivery(d.memberId);
@@ -359,13 +360,31 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
         ? { phase: "stopped", nextCheckAt: null }
         : { phase: request.action === "recheck" && r.phase === "needs_owner" ? "needs_owner" : "checking", reason: request.action === "retry_with_risk" ? "risk_approved" : r.reason, nextCheckAt: this.iso() });
       if (request.action === "stop_retry") {
-        if (d.status !== "delivered") this.projectStatus(d, "failed", STOP_NOTE);
+        if (d.status !== "delivered") { this.projectStatus(d, "failed", STOP_NOTE); this.stoppedAnswer(d); }
         this.store.patchDeliveryRetry(d.id, { nextAttemptAt: null, retryReason: null });
       } else if (request.action === "retry_with_risk") {
         this.store.patchDeliveryRetry(d.id, { nextAttemptAt: this.iso(), retryReason: `delivery_risk:${request.operationId}` });
       }
       return { operationId: request.operationId, deliveryId, outcome: request.action === "stop_retry" ? "stopped" : request.action === "retry_with_risk" ? "retry_scheduled" : "check_scheduled", committedVersion: next.version };
     });
+  }
+
+  /**
+   * 0.2.7 묶음 1(점검 D3-10): 대표가 결재 답의 전달을 그만두면, 그 결재는 예전에 영영 '답함(미전달)'으로 남고 총괄은 접수 때 받은 '전달했습니다'만 알았다.
+   * 끝내 전달하지 못한 답과 같은 길(store.reopenDecision, 직전 답을 카드에 남김)로 카드를 다시 연다: 물은 팀장은 그 답을 받지 못했을 수 있고 아직 답을
+   * 기다린다. 대표는 같은 답을 한 번에 다시 고르거나 다르게 답할 수 있다. 총괄에게는 깨우지 않는 소식으로 사실을 알린다. 이 전달이 그 결재의 마지막 답 전달일 때만.
+   */
+  private stoppedAnswer(d: Delivery): void {
+    if (d.kind !== "answer" || d.refType !== "decision" || !d.refId) return;
+    const decision = this.store.getDecision(d.refId);
+    if (!decision || decision.status !== "answered" || decision.projectId !== d.projectId) return;
+    const later = this.store.listDeliveries(d.projectId).filter(other => other.refType === "decision" && other.refId === decision.id && other.kind === "answer" && other.id !== d.id && ["queued", "held", "delivering", "delivered"].includes(other.status));
+    if (later.length) return;
+    const asker = this.store.getMember(d.memberId);
+    this.store.reopenDecision(decision.id, textRef("card.reopen_stopped", { name: asker?.name ?? decision.who }));
+    const conductor = this.store.getConductor(d.projectId);
+    if (conductor && conductor.id !== d.memberId) this.store.enqueue({ projectId: d.projectId, memberId: conductor.id, kind: "system", wake: false,
+      text: `[시스템] 대표가 ${decision.who}의 결재 #${decision.id} 답 전달(${d.id})을 그만뒀습니다. ${decision.who}에게 그 답이 들어가지 않았거나 들어갔는지 모릅니다. 결재는 다시 열려 대표의 답을 기다립니다. 앞서 받은 '결재에 답했습니다' 소식은 전달된 것이 아닙니다.` });
   }
 
   tick(): Promise<void> {

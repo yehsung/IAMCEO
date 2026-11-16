@@ -5,7 +5,7 @@ import type { AgentOperationContext, ManualInboxAckRequest, ManualInboxAckResult
 import type { Attachment, Decision, DecisionCloseFollowUp, DecisionCloseKind, DecisionOption, Delivery, Member, Message, MessageKind, Project, Todo, TodoOutcome, WorkItem, WorkSec } from "../../shared/types.ts";
 import { attachmentLines, formatAnswer, formatInstruction, formatReport, formatSystem, isTidy, normalizeSpace, QUOTE_SCAN_PAGES, quotedInline, quoteNeedsContext, SHORT_QUOTE, type QuoteSource, type VerifiedQuote } from "../delivery-text.ts";
 import type { AgentToolDef, AgentToolResult, AskWaitResult } from "../orchestrator-api.ts";
-import type { AgentToolsImpl, Orchestrator } from "../orchestrator.ts";
+import type { AgentToolsImpl, Orchestrator, UrgentOutcome, UrgentWaitReason } from "../orchestrator.ts";
 import { josa } from "../roles.ts";
 import type { ReportReferences } from "../service-contracts.ts";
 import { ApiError, type NewDelivery, type Store } from "../store.ts";
@@ -27,6 +27,10 @@ export interface AssignResult {
   verified: boolean | null;
   /** 맞았지만 버튼 글·짧은 글이라 '문맥 확인 필요'로 나갔다. */
   needsContext: boolean;
+  /** 0.2.7 묶음 1: 급한 지시를 일하는 중인 팀장에게 줄 때 서버가 한 일('하던 턴 멈추고 넣기' 또는 기다림과 그 까닭). 그 밖에는 없다. */
+  urgent?: UrgentOutcome;
+  /** 0.2.7 묶음 1: 받는 팀장이 지금 하던 일을 시작한 때(일하는 중이라 기다릴 때만). */
+  busySince?: string | null;
 }
 
 export interface PostInput {
@@ -112,6 +116,12 @@ export interface MemberFlowPort {
   isBusy(member: Member): boolean;
   /** 이 직원의 실행기가 턴 중에 긴급 입력을 끼워 넣을 수 있다. */
   interjects(member: Member): boolean;
+  /** 0.2.7 묶음 1: 급한 지시로 지금 '하던 턴 멈추고 넣기'를 할 수 없는 까닭(할 수 있으면 null). */
+  urgentBlocker(member: Member, quote: VerifiedQuote | null): UrgentWaitReason | null;
+  /** 0.2.7 묶음 1: 앱의 '중단'과 같은 길로 하던 턴을 멈춘다. 멈춘 것을 확인했으면 interrupted, 멈춤 키는 보냈지만 확인하지 못했으면 unconfirmed, 보내지 못했으면 false. sourceId 는 근거인 대표 글(한 번만 멈추는 표식). */
+  interruptForUrgent(member: Member, delivery: Delivery, sourceId: string): Promise<"interrupted" | "unconfirmed" | false>;
+  /** 0.2.7 묶음 1: 지금 하던 일을 시작한 때. */
+  busySince(memberId: string): string | null;
   /** 턴 밖의 상태로 돌린다(답하지 않은 결재가 있으면 waiting, 없으면 idle). */
   settle(member: Member): void;
   /** waiting 인데 답하지 않은 결재가 남지 않았으면 지금 하는 대로 고친다. */
@@ -274,6 +284,11 @@ export class MemberFlows {
       if (!attachment || !this.store.isProjectAttachment(projectId, id)) throw new ApiError(404, `이 프로젝트에서 대표가 보낸 첨부가 아닙니다: ${id}`, "attachment_not_found");
       return attachment;
     });
+    // 0.2.7 묶음 1(점검 D5-1): 끼워 넣을 수 없는 실행기(core)에서, 대표 원문을 실은 급한 지시는 안전할 때 하던 턴을 멈추고 넣는다('하던 턴 멈추고 넣기').
+    // 그럴 수 없으면 지금처럼 그 턴이 끝나길 기다리고, 그 까닭과 기다림을 도구 응답에 그대로 싣는다(총괄이 '급히 넣었다'고 잘못 말하지 않게).
+    const interjects = this.port.interjects(target);
+    const blocker = input.urgent && busy && !interjects ? this.port.urgentBlocker(target, quote) : undefined;
+    const stopping = blocker === null;
     const delivery = this.store.transaction(() => {
       const delivery = this.store.enqueue({
         projectId,
@@ -282,13 +297,22 @@ export class MemberFlows {
         text: [formatInstruction(target.name, input.text, quote), ...attachmentLines(this.port.attachmentsFor(target, attachments))].join("\n"),
         urgent: input.urgent,
       });
-      // 끼워 넣을 수 없는 실행기에서는 긴급도 턴이 끝나야 나간다. 지시한 쪽에 '대기'로 알린다.
-      if (assignedBy) { this.store.setDeliveryAuthor(delivery.id, assignedBy.id); this.store.noteDelegation(assignedBy.id, delivery, busy && !(input.urgent && this.port.interjects(target))); }
+      // 끼워 넣을 수 없는 실행기에서는 긴급도 턴이 끝나야 나간다. 지시한 쪽에 '대기'로 알린다(하던 턴을 멈추고 넣을 때는 대기가 아니다).
+      if (assignedBy) { this.store.setDeliveryAuthor(delivery.id, assignedBy.id); this.store.noteDelegation(assignedBy.id, delivery, busy && !(input.urgent && interjects) && !stopping); }
       return delivery;
     });
-    const position = busy ? this.store.listPending(target.id).length : 0;
+    const busySince = busy ? this.port.busySince(target.id) : null;
+    let urgent: UrgentOutcome | undefined;
+    if (stopping) {
+      const stopped = await this.port.interruptForUrgent(target, delivery, quote!.source!.id);
+      urgent = stopped === "interrupted" ? { outcome: "interrupted" } : stopped === "unconfirmed" ? { outcome: "unconfirmed", busySince } : { outcome: "waiting", reason: "interrupt_failed", busySince };
+      // 멈춘 것을 확인하지 못했으면 그 턴이 멈추거나 끝나야 들어간다: 배정 기록도 '앞 일 끝나면 시작'으로 고친다(검토 뒤).
+      if (assignedBy && stopped !== "interrupted") this.store.noteDelegation(assignedBy.id, delivery, true);
+    } else if (blocker) urgent = { outcome: "waiting", reason: blocker, busySince };
+    const position = busy && urgent?.outcome !== "interrupted" ? this.store.listPending(target.id).length : 0;
     await this.port.pump(target.id);
-    return { delivery: this.store.requireDelivery(delivery.id), position, verified: quote?.verified ?? null, needsContext: quote ? quoteNeedsContext(quote) : false };
+    return { delivery: this.store.requireDelivery(delivery.id), position, verified: quote?.verified ?? null, needsContext: quote ? quoteNeedsContext(quote) : false,
+      ...(urgent ? { urgent } : {}), ...(busy && urgent?.outcome !== "interrupted" ? { busySince } : {}) };
   }
 
   /**

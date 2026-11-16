@@ -52,6 +52,17 @@ export const SERVER_TEXTS = {
   "chat.delivery_failed": { ko: "{name}에게 전달하지 못했습니다: {detail}", en: "Couldn't deliver to {name}: {detail}" },
   "chat.delivery_stalled": { ko: "{name}에게 전달이 진행되지 않고 있습니다. 전달 정보에서 '다시 확인'을 눌러 주세요. 원래 입력을 중복해서 보내지 않습니다.", en: "Delivery to {name} is not moving. Press 'Check again' in the delivery details. The original input won't be sent twice." },
   "chat.delivery_stalled.title": { ko: "전달 확인 필요", en: "Delivery needs checking" },
+  // 0.2.7 묶음 1(점검 D1-3·D5-2): 대표의 일이 30분 넘게 기다리는 까닭이 '받는 팀장이 하던 일을 마치는 중'이면 막힘이 아니라 이 알림(푸시 없음)이다.
+  "chat.owner_delivery_behind": { ko: "{name:이} {since}부터 하던 일을 마치는 중입니다. 그 일이 끝나면 {what:이} 들어갑니다(전달 #{id}).", en: "{name} has been finishing earlier work since {since}. When it ends, {what} goes in (delivery #{id})." },
+  "chat.owner_delivery_behind.title": { ko: "전달 대기", en: "Delivery waiting" },
+  // 대표 원문을 실은 총괄 지시·할 일 완료 소식이 진짜로 막혔을 때(막힘·푸시). 결재 답·대표 메시지는 위의 예전 글 그대로다.
+  "chat.owner_instruction_late": { ko: "{name}에게 넘긴 대표 요청(총괄 지시)이 30분 넘게 전달되지 않았습니다. 전달 #{id}를 확인해 주세요.", en: "The lead's instruction carrying your request to {name} has not been delivered for over 30 minutes. Check delivery #{id}." },
+  "chat.owner_instruction_late.title": { ko: "대표 전달 지연", en: "Delivery delayed" },
+  "chat.owner_todo_done_late": { ko: "{name}에게 보낸 할 일 완료 소식이 30분 넘게 전달되지 않았습니다. 전달 #{id}를 확인해 주세요.", en: "Your to-do completion for {name} has not been delivered for over 30 minutes. Check delivery #{id}." },
+  "chat.owner_todo_done_late.title": { ko: "대표 전달 지연", en: "Delivery delayed" },
+  // 0.2.7 묶음 1(점검 D1-1): 넣은 압축의 끝을 10분 안에 확인하지 못했다. 그 팀장에게 가는 전달이 모두 멈춰 있다(막힘·푸시).
+  "chat.compact_unconfirmed": { ko: "{name}의 문맥 정리(압축)가 끝났는지 10분 넘게 확인되지 않아 {name}에게 가는 전달을 멈춰 두었습니다. 팀 화면에서 {name}의 터미널을 보고, 압축이 끝나 있으면 '중단'을 눌러 주세요. 기다리던 전달이 이어서 나갑니다.", en: "{name}'s context compaction hasn't been confirmed as finished for over 10 minutes, so deliveries to {name} are on hold. Check {name}'s terminal in Team, and if the compaction has finished, press 'Interrupt'. The waiting deliveries then go out." },
+  "chat.compact_unconfirmed.title": { ko: "압축 확인 필요", en: "Compaction needs a check" },
   "chat.assigned": { ko: "총괄이 {name}에게 맡겼습니다: {summary}", en: "The lead handed {name} a task: {summary}" },
   "chat.assigned_queued": { ko: "총괄이 {name}에게 맡겼습니다: {summary} (앞 일 끝나면 시작)", en: "The lead handed {name} a task: {summary} (starts after the current work)" },
   "chat.api_resume_failed": { ko: "{name}의 인터넷 연결 복구 후 이어가기가 3회 실패했습니다. 터미널을 확인해 주세요.", en: "{name} failed to continue 3 times after the internet connection came back. Check the terminal." },
@@ -109,6 +120,10 @@ export const SERVER_TEXTS = {
   "activity.compact_done": { ko: "압축 완료", en: "Compaction done" },
   "activity.compact_unconfirmed": { ko: "압축 완료를 확인할 수 없어 후속 자동 입력을 보류합니다", en: "Couldn't confirm the compaction finished, so further automatic input is on hold" },
   "activity.compact_uncertain": { ko: "압축 응답을 확인할 수 없어 자동 재전송을 중지했습니다", en: "Couldn't confirm the compaction response, so automatic resending stopped" },
+  // 0.2.7 묶음 1(점검 D5-1): 대표 원문을 실은 급한 지시로 하던 턴을 멈춤('하던 턴 멈추고 넣기').
+  "activity.urgent_interrupt": { ko: "대표의 급한 지시(전달 #{id})를 넣으려고 하던 턴을 멈췄습니다", en: "Stopped the current turn to put in your urgent instruction (delivery #{id})" },
+  "activity.urgent_interrupt_failed": { ko: "대표의 급한 지시(전달 #{id})를 넣으려고 하던 턴을 멈추려 했지만 멈추지 못했습니다. 그 턴이 끝나면 들어갑니다 ({detail})", en: "Tried to stop the current turn for your urgent instruction (delivery #{id}) but couldn't. It goes in when that turn ends ({detail})" },
+  "activity.urgent_interrupt_unconfirmed": { ko: "대표의 급한 지시(전달 #{id})를 넣으려고 하던 턴에 멈춤 키를 보냈지만 바로 멈춘 것은 확인하지 못했습니다. 멈추거나 그 턴이 끝나면 들어갑니다 ({detail})", en: "Sent the stop key to the current turn for your urgent instruction (delivery #{id}) but couldn't confirm it stopped right away. It goes in when the turn stops or ends ({detail})" },
   "activity.compact_failed_engine": { ko: "압축 실패: 실행 엔진이 제때 답하지 않아 압축을 시작하지 못했습니다. 기다리던 전달을 먼저 보냅니다", en: "Compaction failed: the engine didn't answer in time, so compaction couldn't start. Waiting deliveries go first" },
   "activity.compact_failed_busy": { ko: "압축 실패: 입력칸의 글이나 CLI 화면 때문에 압축을 시작하지 못했습니다. 기다리던 전달을 먼저 보냅니다", en: "Compaction failed: text in the input box or the CLI screen kept it from starting. Waiting deliveries go first" },
   "activity.compact_failed": { ko: "압축 실패: {detail}", en: "Compaction failed: {detail}" },
@@ -202,12 +217,19 @@ export const SERVER_TEXTS = {
   "card.closed_member_removed": { ko: "{name:이} 명부에서 빠져 함께 닫혔습니다", en: "Closed along with {name}, who left the team" },
   "card.reopen_undelivered": { ko: "전달하지 못했습니다. 다시 결정해 주세요", en: "It couldn't be delivered. Please decide again" },
   "card.reopen_not_connected": { ko: "연결 전이라 전달되지 않았습니다. 다시 결정해 주세요", en: "It wasn't delivered because nothing was connected yet. Please decide again" },
+  // 0.2.7 묶음 1(점검 D3-10): 대표가 결재 답의 전달을 그만뒀다.
+  "card.reopen_stopped": { ko: "전달을 그만둔 답입니다. {name:이} 받지 못했을 수 있으니 다시 결정해 주세요", en: "You stopped delivering this answer, so {name} may not have it. Please decide again" },
   "card.reopen_by_owner": { ko: "{who:이} 닫았던 결재를 대표가 다시 열었습니다", en: "You reopened the decision {who} had closed" },
   "card.reopen_by_owner_reason": { ko: "{who:이} 닫았던 결재를 대표가 다시 열었습니다(닫은 이유: {reason})", en: "You reopened the decision {who} had closed (reason it was closed: {reason})" },
 
   // ---- 낱말 ----
   "word.unknown": { ko: "알 수 없음", en: "unknown" },
   "word.unknown_cause": { ko: "원인 미확인", en: "unknown cause" },
+  // 0.2.7 묶음 1: chat.owner_delivery_behind 의 {what}
+  "word.owner_answer": { ko: "대표 결재 답", en: "your decision answer" },
+  "word.owner_message": { ko: "대표 메시지", en: "your message" },
+  "word.owner_todo_done": { ko: "할 일 완료 소식", en: "your to-do completion" },
+  "word.owner_instruction": { ko: "대표 요청을 옮긴 총괄 지시", en: "the lead's instruction with your request" },
 
   // ---- 서버의 Mac 스크립트 알림(osascript) 전용. 앱 표에는 넣지 않는다 ----
   "notice.api_usage.title": { ko: "API 연결·사용 한도", en: "Internet connection · usage limit" },

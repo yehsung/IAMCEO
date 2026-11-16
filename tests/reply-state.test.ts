@@ -501,14 +501,18 @@ describe("저장소와 실시간", () => {
     f.store.patchSettings({ reportLanguage: "en" });
     const sent = await f.orch.sendUserMessage(f.project.id, { text: "확인해 주세요" });
     await until(() => f.reply(sent.id)?.state === "working", "일하는 중");
-    // 일하는 동안 보낸 다음 글이 30분 넘게 못 들어가면 서버가 '대표 전달 지연'을 그 팀장 ID 를 붙여 쓴다(실제 경로).
+    // 일하는 동안 보낸 다음 글이 30분 넘게 못 들어가면 서버가 그 팀장 ID 를 붙여 알린다(실제 경로). 0.2.7 묶음 1: 받는 팀장이 하던 일을 마치는 중이면
+    // 막힘('대표 전달 지연')이 아니라 알림('전달 대기')이다. 어느 쪽이든 서버 글이라 답이 아니다.
     const next = await f.orch.sendUserMessage(f.project.id, { text: "이것도요" });
     await until(() => f.reply(next.id)?.state === "behind", "앞 일을 마치는 중");
-    f.orch.notifyDelayedDeliveries(Date.now() + 31 * 60_000);
-    const late = f.store.listMessages(f.project.id).find(m => m.textCode === "chat.owner_message_late")!;
+    // 시계를 31분 앞으로 돌리면 하던 실행도 31분째 진전이 없는 것이 되어 막힘으로 간다(검토 뒤). 전달만 31분 묵힌다.
+    const waiting = f.store.listPending(lead.id).find(d => d.refId === next.id)!;
+    f.store.db.query("UPDATE deliveries SET created_at = ? WHERE id = ?").run(new Date(Date.now() - 31 * 60_000).toISOString(), waiting.id);
+    f.orch.notifyDelayedDeliveries();
+    const late = f.store.listMessages(f.project.id).find(m => m.textCode === "chat.owner_delivery_behind")!;
     // systemMessage 와 같은 모양의 팀장 오류 글(더 엄격하게 팀장 ID 를 붙였다).
     const note = f.store.createMessage({ projectId: f.project.id, memberId: lead.id, who: "시스템", kind: "시스템", text: textRef("chat.member_error", { name: lead.name, error: "boom" }) });
-    expect(late).toMatchObject({ memberId: lead.id, who: "시스템", title: "Delivery delayed", textLang: "en" });
+    expect(late).toMatchObject({ memberId: lead.id, who: "시스템", kind: "알림", title: "Delivery waiting", textLang: "en" });
     expect(note).toMatchObject({ who: "시스템", kind: "시스템", body: `${lead.name} error: boom`, textLang: "en" });
     await Bun.sleep(20);
     expect(f.reply(sent.id)?.state).toBe("working");

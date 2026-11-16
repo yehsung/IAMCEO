@@ -37,6 +37,8 @@ export interface OwnerFlowPort {
   /** waiting 인데 답하지 않은 결재가 남지 않았으면 지금 하는 대로 고친다. */
   refreshWaiting(memberId: string): void;
   isBusy(member: Member): boolean;
+  /** 0.2.7 묶음 1: 지금 이 팀장에게 넣는 전달이 언제 들어가는지(총괄에게 주는 한국어 한 줄). */
+  deliveryOutlook(memberId: string): string;
   /** 턴 밖의 상태로 돌린다(답하지 않은 결재가 있으면 waiting, 없으면 idle). */
   settle(member: Member): void;
   /** 결재 답을 기다리는 직접 띄운 CLI 를 깨운다(flows/member.ts). */
@@ -176,8 +178,9 @@ export class OwnerFlows {
       const intents: NewDelivery[] = [{ projectId, memberId: recipient.id, kind: "user_message",
         text: formatUserMessage(message.body, this.attachmentsFor(recipient, attachments), message.id, !!target) + this.messageContext(message), refType: "message", refId: message.id }];
       const conductor = this.store.getConductor(projectId);
+      // 0.2.7 묶음 1(점검 D1-6과 같은 까닭): 접수한 순간이라 아직 넣기 전이다. '이미 전달했습니다'가 아니라 서버가 맡았다는 것과 지금 상태를 쓴다.
       if (target && conductor && conductor.id !== target.id) intents.push({ projectId, memberId: conductor.id, kind: "system",
-        text: formatSystem(`대표가 ${target.name}에게 직접 지시했습니다 #${message.id}. 이미 ${target.name}에게 전달했습니다. 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.`) + this.messageContext(message), wake: false });
+        text: formatSystem(`대표가 ${target.name}에게 직접 지시했습니다 #${message.id}. 서버가 ${target.name}에게 전달합니다(${this.port.deliveryOutlook(target.id)}). 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.`) + this.messageContext(message), wake: false });
       return intents;
     });
     if (booting) void (booting as Promise<void>).catch(e => console.warn(`${project.name} 총괄을 띄우지 못했습니다:`, (e as Error).message));
@@ -245,7 +248,10 @@ export class OwnerFlows {
         this.store.patchDeliveryRetry(delivery.id, { correctionRevision: this.store.todoRevision(todo.id) });
         const conductor = this.store.getConductor(todo.projectId);
         if (conductor && conductor.id !== target.id) {
-          const notice = this.store.enqueue({ projectId: todo.projectId, memberId: conductor.id, kind: "todo_done", text: this.todoDoneText(todo, conductor), refType: "todo", refId: todo.id });
+          // 0.2.7 묶음 1(점검 D1-5): 총괄 사본은 깨우지 않는다. 깨우면 총괄이 같은 소식을 그 팀장에게 다시 지시했다(11-10 뒤 14건 중 9건).
+          // 소식은 서버가 그 팀장에게 따로 전한다는 것을 글머리에 밝힌다. 총괄은 다음 턴에 함께 읽는다.
+          const relay = formatSystem(`대표가 ${target.name}의 할 일을 닫았습니다. 서버가 이 소식을 ${target.name}에게 따로 전합니다(${this.port.deliveryOutlook(target.id)}). 같은 소식을 다시 전하지 마세요. 대표 메모에 따라 다른 일을 더 시킬 때만 지시하세요.`);
+          const notice = this.store.enqueue({ projectId: todo.projectId, memberId: conductor.id, kind: "todo_done", text: `${relay}\n${this.todoDoneText(todo, conductor)}`, refType: "todo", refId: todo.id, wake: false });
           this.store.patchDeliveryRetry(notice.id, { correctionRevision: this.store.todoRevision(todo.id) });
           this.store.afterCommit(() => { void this.port.pump(conductor.id); });
         } else if (!conductor && target.kind === "worker") {
@@ -344,8 +350,9 @@ export class OwnerFlows {
       const recipient = asker ?? conductor;
       const intents: NewDelivery[] = [];
       if (recipient && asker?.origin !== "manual") intents.push({ projectId: project.id, memberId: recipient.id, kind: "answer", text: formatAnswer(decision), refType: "decision", refId: decision.id });
+      // 0.2.7 묶음 1(점검 D1-6): 이 글은 답을 접수한 순간에 만든다. 그때는 아직 넣기 전이라 '이미 전달했습니다'가 아니라 서버가 맡았다는 것과 지금 상태를 쓴다.
       if (conductor && recipient && conductor.id !== recipient.id) intents.push({ projectId: project.id, memberId: conductor.id, kind: "system",
-        text: formatSystem(`대표가 ${decision.who}의 결재에 답했습니다. 이미 ${decision.who}에게 전달했습니다. 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.\n${formatAnswer(decision)}`), wake: false });
+        text: formatSystem(`대표가 ${decision.who}의 결재에 답했습니다. 서버가 ${decision.who}에게 전달합니다(${this.port.deliveryOutlook(recipient.id)}). 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요. 아직 들어갔는지는 roster 의 대기열로 봅니다.\n${formatAnswer(decision)}`), wake: false });
       return intents;
     });
     if (!changed) return decision;

@@ -62,19 +62,23 @@ test("selection waits notify once across ticks/restart and recur only after reso
   expect(f.push.listDeliveries().map(d => d.state)).toEqual(["cancelled", "queued"]);
 });
 
-test("new defaults are opt-in overall; missing legacy keys stay OFF through PATCH, renewal and restart", async () => {
+// 0.2.7 묶음 1(점검 D4-4): 옛 기기에 없는 새 종류는 그 종류의 기본값(앱과 같은 켬)을 따른다. 예전에는 꺼짐으로 읽어 막힘 보고·대표 할 일 알림이 한 번도 가지 않았다.
+test("new defaults are opt-in overall; missing legacy keys follow the kind default (ON) through PATCH, renewal and restart, and an explicit OFF stays OFF", async () => {
   const f = fixture();
   expect(f.device.enabled).toBe(false);
   expect(f.device.preferences).toEqual(DEFAULT_PUSH_PREFERENCES);
   const legacy = { decision: true, approval_wait: false, error: false, report_complete: true };
   f.db.query("UPDATE push_devices SET preferences=? WHERE id=?").run(JSON.stringify(legacy), f.device.id);
   f.restart();
-  expect(f.push.requireDevice(f.device.id).preferences).toEqual({ ...legacy, todo_created: false, report_blocked: false });
+  expect(f.push.requireDevice(f.device.id).preferences).toEqual({ ...legacy, todo_created: true, report_blocked: true });
   const handler = createPushHandler({ store: f.push, providers: f.options.providers });
   const patch = async (preferences: object) => {
     const url = new URL(`http://localhost/api/push/devices/${f.device.id}`);
     return handler(new Request(url, { method: "PATCH", body: JSON.stringify({ expectedRevision: f.push.requireDevice(f.device.id).revision, preferences }) }), url);
   };
+  expect((await patch({ todo_created: false })).status).toBe(200);
+  f.restart();
+  expect(f.push.requireDevice(f.device.id).preferences).toEqual({ ...legacy, todo_created: false, report_blocked: true });
   expect((await patch({ todo_created: true, report_blocked: true })).status).toBe(200);
   expect((await patch({ error: true })).status).toBe(200);
   expect(f.push.requireDevice(f.device.id).preferences).toEqual({ ...legacy, error: true, todo_created: true, report_blocked: true });
@@ -208,7 +212,8 @@ test("push schema upgrade preserves all delivery fences and group links atomical
   expect(db.query("SELECT name FROM sqlite_master WHERE name='push_events_expiry'").get()).not.toBeNull();
   push.recordTodoChanges();
   expect(push.listEvents()).toHaveLength(1);
-  expect(push.requireDevice(deviceId).preferences).toMatchObject({ todo_created: false, report_blocked: false });
+  // 0.2.7 묶음 1(점검 D4-4): 옛 서버가 등록한 기기의 없는 새 종류는 기본값(켬)이다. 업그레이드는 저장된 설정 글을 고치지 않는다.
+  expect(push.requireDevice(deviceId).preferences).toMatchObject({ todo_created: true, report_blocked: true });
   const again = new PushStore(db);
   expect(again.serverId).toBe(push.serverId);
   expect(again.listDeliveries().map(d => d.state)).toEqual(["queued", "sending", "accepted", "unknown"]);

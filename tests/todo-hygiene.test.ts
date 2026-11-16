@@ -166,7 +166,11 @@ test("drop requires CEO authentication and v2 preconditions; sends existing wake
   expect(await response.json()).toMatchObject({ revision: revision + 1, todo: { id: todo.id, done: true, outcome: "dropped", closedBy: "대표", closeReason: "이미 필요 없음" } });
   const notices = t.store.listDeliveries().filter(d => d.refId === todo.id);
   expect(notices.map(d => d.memberId).sort()).toEqual([t.worker.id, t.lead.id].sort());
-  expect(notices.every(d => d.wake && d.kind === "todo_done" && d.text.includes("필요 없음"))).toBe(true);
+  expect(notices.every(d => d.kind === "todo_done" && d.text.includes("필요 없음"))).toBe(true);
+  // 0.2.7 묶음 1(점검 D1-5): 팀장 몫만 깨운다. 총괄 사본은 깨우지 않고, 서버가 그 팀장에게 따로 전한다는 것을 밝힌다.
+  expect(notices.find(d => d.memberId === t.worker.id)!.wake).toBe(true);
+  expect(notices.find(d => d.memberId === t.lead.id)).toMatchObject({ wake: false });
+  expect(notices.find(d => d.memberId === t.lead.id)!.text).toContain("같은 소식을 다시 전하지 마세요");
   expect((await t.post(path)).status).toBe(200);
   expect(t.store.listDeliveries().filter(d => d.refId === todo.id)).toHaveLength(2);
   expect((await t.post(path, {}, { "X-IAMCEO-Contract": "2", "If-Match": `"${revision}"` })).status).toBe(409);

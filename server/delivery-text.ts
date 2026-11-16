@@ -113,11 +113,17 @@ export function quoteNeedsContext(quote: VerifiedQuote): boolean {
 
 const QUOTE_SOURCE_MAX = 1000;
 
+/**
+ * 총괄 지시에 대표 원문(서버가 대표 글과 맞춰 본 인용)이 실렸다는 줄의 머리. 0.2.7 묶음 1: 30분 지연 알림은 이 줄이 든 지시도 대표의 일로 본다
+ * (store.listDelayedDeliveries). 글자는 formatInstruction 이 쓰는 것과 같아야 한다(AI 에게 가는 글이라 바꾸지 않는다).
+ */
+export const OWNER_QUOTE_LABELS = ["사용자 요청(원문, 서버 확인)", "사용자 요청(문맥 확인 필요)"] as const;
+
 export function formatInstruction(name: string, text: string, quote: VerifiedQuote | null): string {
   const lines = [`[총괄] ${name}에게`];
   if (quote) {
     const cited = normalizeSpace(quote.text);
-    const label = !quote.verified ? "총괄 인용(미확인)" : quoteNeedsContext(quote) ? "사용자 요청(문맥 확인 필요)" : "사용자 요청(원문, 서버 확인)";
+    const label = !quote.verified ? "총괄 인용(미확인)" : quoteNeedsContext(quote) ? OWNER_QUOTE_LABELS[1] : OWNER_QUOTE_LABELS[0];
     const source = quote.source ? normalizeSpace(quote.source.text) : "";
     const whole = !!quote.source && source === cited;
     const stamp = quote.source?.at ? ` ${quote.source.at}` : "";
@@ -137,6 +143,19 @@ export function formatInstruction(name: string, text: string, quote: VerifiedQuo
 export function formatReport(name: string, kind: string, title: string, body: string): string {
   const head = `[보고 ${name}] ${kind}: ${normalizeSpace(title)}`;
   return body ? `${head}\n${quoteBlock(body)}` : head;
+}
+
+/** 0.2.7 묶음 1: AI 에게 주는 글의 시각 'HH:MM'(서버가 도는 Mac 의 시간대). 읽을 수 없으면 '?'. */
+export function clockTime(at: string | number): string {
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return "?";
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+/** 0.2.7 묶음 1: 'HH:MM부터 N분째'(AI 에게 주는 글). 시작을 모르면 빈 글. */
+export function sinceText(at: string | null | undefined, now = Date.now()): string {
+  if (!at || Number.isNaN(Date.parse(at))) return "";
+  return `${clockTime(at)}부터 ${Math.max(0, Math.floor((now - Date.parse(at)) / 60_000))}분째`;
 }
 
 export function formatSystem(text: string): string {

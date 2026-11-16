@@ -12,6 +12,8 @@ import type { DeliveryWaitReason } from "../shared/types.ts";
  * watch:
  * - "busy": 일한다고 보는데 CLI 는 쉬는 중으로 관측된다. 기한(정체 기준, 2분)을 넘기면 '이유 없는 대기'로 다룬다.
  * - "waking": 깨우는 중·세션 처리 중. 기동 제한(45초)과 재결합 유예가 들어 있어 더 넉넉히(정체 기준의 2.5배, 5분) 본다.
+ * - "compact"(0.2.7 묶음 1, 점검 D1-1): 문맥 정리(압축) 중. 넣은 압축의 완료 확인 기한(10분, compactTimeoutMs)을 지나도록(정체 기준의 6배, 12분)
+ *   이어지면 끝을 못 알아본 것이다(하위 폴더 압축이 몇 시간씩 대기열을 막았다). 기한을 넘기면 '이유 없는 대기'로 다뤄 정체 점검·'다시 확인'이 닿게 한다.
  * rejudge: 끝을 알리는 사건이 빠지면 판정이 낡을 수 있어, 정체 점검(10초)마다 펌프가 다시 판정한다(일하는 중의 턴 끝 사건이 빠진 경우 등).
  */
 export const PUMP_VERDICTS = {
@@ -19,11 +21,15 @@ export const PUMP_VERDICTS = {
   busy: { wait: "member_busy", ko: "일하는 중이라 다음 턴을 기다린다", rejudge: true },
   busy_unconfirmed: { wait: "member_busy", ko: "일하는 중으로 보는데 CLI 는 쉬는 중으로 관측된다", watch: "busy", rejudge: true },
   pending_run: { wait: "member_busy", ko: "끝나지 않은 실행 기록이 있다", rejudge: true },
-  compacting: { wait: "member_busy", ko: "문맥 정리 중", rejudge: false },
+  compacting: { wait: "member_busy", ko: "문맥 정리 중", watch: "compact", rejudge: false },
   manual_busy: { wait: "member_busy", ko: "직접 띄운 세션이 일하는 중(wait 를 부르면 전달)", rejudge: true },
   manual_idle: { wait: "unknown", ko: "직접 띄운 세션이 wait 를 부르지 않는다", rejudge: true },
   no_wake: { wait: "unknown", ko: "깨울 전달이 없다(수동 전달은 다음 턴에 함께)", rejudge: false },
   asleep_hold: { wait: "next_turn", ko: "잠들 때 보류된 전달은 다음에 깨울 때 함께 나간다", rejudge: false },
+  // 0.2.7 묶음 1(점검 D1-2·D3-2): 이 팀장이 방금 끝낸 턴에서 올린 결재가 아직 열려 있다. 대표의 답이 다른 긴 턴 뒤로 밀리지 않게
+  // 급하지 않은 다른 일(총괄 지시·시스템 글·보고)을 짧게(3분) 미룬다. 대표의 글·결재 답·할 일 완료와 급한 지시는 미루지 않는다.
+  // 앱에는 새 값 없이 '다음에 일할 때 함께 전달'(next_turn)로 보인다. 답이나 시간이 풀면 사건 없이 낡으므로 다시 판정한다.
+  ask_hold: { wait: "next_turn", ko: "방금 올린 결재의 답을 잠깐 기다린다(급하지 않은 다른 일은 3분까지 미룸)", rejudge: true },
   approval: { wait: "approval", ko: "승인 창 앞에서 멈췄다", rejudge: false },
   // K(E2) 합치기: 도구 승인 카드가 결재함에 열려 있다(앱에는 새 값 없이 approval). 카드가 답·시간 초과로 닫히면 사건 없이 낡으므로 다시 판정한다.
   tool_permission: { wait: "approval", ko: "도구 승인 카드에 대표의 답을 기다린다", rejudge: true },
@@ -47,7 +53,7 @@ export const PUMP_VERDICTS = {
   config_failed: { wait: "unknown", ko: "새 설정을 적용하지 못했다", rejudge: false },
   parallel_failed: { wait: "unknown", ko: "병렬 설정을 바꾸지 못해 일을 미뤘다", rejudge: false },
   pump_error: { wait: "unknown", ko: "전달 처리 오류", rejudge: false },
-} as const satisfies Record<string, { wait: DeliveryWaitReason; ko: string; watch?: "busy" | "waking"; rejudge: boolean }>;
+} as const satisfies Record<string, { wait: DeliveryWaitReason; ko: string; watch?: "busy" | "waking" | "compact"; rejudge: boolean }>;
 
 export type PumpVerdictCode = keyof typeof PUMP_VERDICTS;
 
@@ -89,8 +95,8 @@ export function verdictWait(code: PumpVerdictCode): DeliveryWaitReason {
 /** 정체 점검이 기한을 재는 판정이면 그 기한(ms). 아니면 null. */
 export function verdictPatience(code: string, thresholdMs: number): number | null {
   if (!isPumpVerdictCode(code)) return null;
-  const watch = (PUMP_VERDICTS[code] as { watch?: "busy" | "waking" }).watch;
-  return watch === "waking" ? thresholdMs * 2.5 : watch === "busy" ? thresholdMs : null;
+  const watch = (PUMP_VERDICTS[code] as { watch?: "busy" | "waking" | "compact" }).watch;
+  return watch === "waking" ? thresholdMs * 2.5 : watch === "busy" ? thresholdMs : watch === "compact" ? thresholdMs * 6 : null;
 }
 
 /** 정체 점검 때 펌프가 다시 판정해야 하는 판정인가(끝을 알리는 사건이 빠지면 낡는 판정). */

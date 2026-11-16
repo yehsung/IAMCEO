@@ -66,7 +66,7 @@ import type { ErrorCode } from "../shared/error-codes.ts";
 import { deliveryNoteCode } from "./hold-codes.ts";
 import type { MessageReply } from "../shared/types.ts";
 import { judgeReply, replySettled, type ReplyFacts } from "./reply-state.ts";
-import { formatSystem } from "./delivery-text.ts";
+import { formatSystem, OWNER_QUOTE_LABELS } from "./delivery-text.ts";
 import { API_RESUME_TEXT, USAGE_RESUME_TEXT } from "./api-outage.ts";
 import { RESTART_RESUME_TEXT } from "./restart-wake.ts";
 import { CLAUDE_BACKGROUND_REASON } from "./runner/claude-turn.ts";
@@ -1069,6 +1069,12 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     this.run("UPDATE member_delivery_verdicts SET since = ?, overdue_at = NULL, updated_at = ?", iso, iso);
   }
 
+  /** 0.2.7 묶음 1 검토: 그 판정이 기한을 넘긴 채인 팀장들(정체 점검이 적은 overdue_at). */
+  overdueVerdictMembers(code: string): string[] {
+    if (!this.verdictsReady) return [];
+    return this.rows("SELECT member_id FROM member_delivery_verdicts WHERE code = ? AND overdue_at IS NOT NULL", code).map(row => row.member_id as string);
+  }
+
   /** 정체 점검: 기한을 재는 판정(일한다는데 CLI 는 쉬는 중, 깨우는 중)이 기한을 넘겼으면 그 줄에 적는다. 판정은 펌프가, 기한은 여기서 잰다. */
   private markOverdueVerdicts(memberIds: Iterable<string>, now: number, thresholdMs: number): void {
     if (!this.verdictsReady) return;
@@ -1599,12 +1605,21 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       this.markFailed(id, "총괄이 미전달 지시를 거뒀습니다");
     });
   }
-  claimDelayedDeliveries(at: number): Delivery[] {
-    return this.transaction(() => {
-      const deliveries = this.rows("SELECT * FROM deliveries WHERE status IN ('queued','held') AND kind IN ('answer','user_message') AND delay_notified_at IS NULL AND created_at <= ?", new Date(at - 30 * 60_000).toISOString()).map(toDelivery);
-      for (const d of deliveries) this.run("UPDATE deliveries SET delay_notified_at = ? WHERE id = ?", new Date(at).toISOString(), d.id);
-      return deliveries;
-    });
+  /**
+   * 0.2.7 묶음 1(점검 D1-3·D5-2): 30분 넘게 나가지 않은, 대표에게서 온 깨우는 전달(대표 글·결재 답·할 일 완료, 대표 원문을 실은 총괄 지시) 가운데
+   * '막힘' 알림을 아직 하지 않은 것. 알릴지·어떤 급으로 알릴지는 그 팀장의 지금 대기 사유를 보고 부르는 쪽(Orchestrator.notifyDelayedDeliveries)이 정한다.
+   * 예전에는 사유와 상관없이 고르는 순간 알린 것으로 적어(claimDelayedDeliveries), 정상 대기도 '막힘'으로 알리고 진짜 막힘은 다시 보지 않았다.
+   */
+  listDelayedDeliveries(at: number): Delivery[] {
+    return this.rows(`SELECT * FROM deliveries WHERE status IN ('queued','held') AND wake = 1 AND delay_notified_at IS NULL AND created_at <= ?
+      AND (kind IN ('answer','user_message','todo_done') OR (kind = 'instruction' AND (instr(text, ?) > 0 OR instr(text, ?) > 0))) ORDER BY rowid`,
+      new Date(at - 30 * 60_000).toISOString(), `\n${OWNER_QUOTE_LABELS[0]}: `, `\n${OWNER_QUOTE_LABELS[1]}: `).map(toDelivery);
+  }
+  /** '막힘' 급의 지연 알림을 했다고 적는다. 이미 적힌 것이면 false(같은 전달을 두 번 알리지 않는다). */
+  markDelayNotified(id: string, at: number): boolean {
+    if (!this.row("SELECT 1 FROM deliveries WHERE id = ? AND delay_notified_at IS NULL", id)) return false;
+    this.run("UPDATE deliveries SET delay_notified_at = ? WHERE id = ?", new Date(at).toISOString(), id);
+    return true;
   }
   repairRejectedLimit(at = Date.now()): void {
     this.transaction(() => {
@@ -3292,7 +3307,12 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     const turn = this.row("SELECT * FROM delegation_ack_turns WHERE member_id = ? AND ended = 0 ORDER BY rowid DESC LIMIT 1", memberId);
     if (!turn || JSON.parse(turn.source_ids).length === 0) return;
     const assignments: { deliveryId: string; memberId: string; name: string; summary: string; queued: boolean }[] = JSON.parse(turn.assignments);
-    if (assignments.some(a => a.deliveryId === delivery.id)) return;
+    const known = assignments.find(a => a.deliveryId === delivery.id);
+    if (known) {
+      // 0.2.7 묶음 1 검토: 급한 지시로 하던 턴을 멈추려다 멈춘 것을 확인하지 못했으면 '앞 일 끝나면 시작'으로 고쳐 적는다(같은 전달은 한 줄).
+      if (known.queued !== queued) { known.queued = queued; this.run("UPDATE delegation_ack_turns SET assignments = ? WHERE run_id = ?", JSON.stringify(assignments), turn.run_id); }
+      return;
+    }
     const target = this.requireMember(delivery.memberId);
     const first = delivery.text.split("\n").find(line => line.startsWith("할 일: "))?.slice(5) ?? "";
     const summary = Array.from(cleanText(first).replace(/\s+/g, " ").trim()).slice(0, 60).join("");
@@ -3336,6 +3356,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   // ---- 활동 ----
+  /** 0.2.7 묶음 1 검토: 그 사건 키로 남긴 활동 줄이 있는가(급한 지시로 한 번 멈춘 대표 글의 표식 등). 오래된 줄은 지워질 수 있다(직원당 MAX_ACTIVITY_PER_MEMBER). */
+  hasActivityEvent(eventKey: string): boolean {
+    return !!this.row("SELECT 1 FROM activity WHERE delivery_event_key = ?", eventKey);
+  }
+
   /** 직원당 최근 MAX_ACTIVITY_PER_MEMBER 개만 남긴다. */
   appendActivity(memberId: string, kind: ActivityKind, line: string | ServerTextRef, eventKey?: string): Activity {
     return this.transaction(() => {

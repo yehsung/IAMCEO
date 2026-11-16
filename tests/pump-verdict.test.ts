@@ -73,11 +73,12 @@ describe("판정 코드와 앱의 대기 사유 13개", () => {
     // 0.2.2 가 아는 값 그대로(shared/types.ts DeliveryWaitReason). 이름을 바꾸거나 더하지 않는다.
     expect([...DELIVERY_WAIT_REASONS].sort()).toEqual(["api_outage", "approval", "archived", "manual_control", "member_busy", "next_turn", "receipt_check", "retry_wait", "run_limit", "runner_off", "unknown", "usage_limit", "waking"]);
     for (const [code, verdict] of Object.entries(PUMP_VERDICTS)) expect(DELIVERY_WAIT_REASONS as readonly string[]).toContain(verdict.wait);
-    // 기한을 재는 판정은 일하는 중(확인되지 않음)과 깨우는 중뿐이다.
-    expect(Object.keys(PUMP_VERDICTS).filter(code => verdictPatience(code, 120_000) !== null).sort()).toEqual(["busy_unconfirmed", "session_busy", "waking"]);
+    // 기한을 재는 판정은 일하는 중(확인되지 않음)과 깨우는 중, 그리고 0.2.7 묶음 1(점검 D1-1)의 압축 중이다(넣은 압축의 완료 확인 기한 10분 뒤).
+    expect(Object.keys(PUMP_VERDICTS).filter(code => verdictPatience(code, 120_000) !== null).sort()).toEqual(["busy_unconfirmed", "compacting", "session_busy", "waking"]);
     expect(verdictPatience("busy", 120_000)).toBeNull();
     expect(verdictPatience("busy_unconfirmed", 120_000)).toBe(120_000);
     expect(verdictPatience("waking", 120_000)).toBe(300_000);
+    expect(verdictPatience("compacting", 120_000)).toBe(720_000);
   });
 
   test("pumpOnce 의 return 은 모두 판정을 남긴다(팀장이 지워진 경우만 빼고)", () => {

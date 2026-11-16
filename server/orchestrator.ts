@@ -88,7 +88,7 @@ import { ERROR_CODES } from "../shared/error-codes.ts";
 import { exitActivity, exitDetail, lastErrorParam } from "./text-refs.ts";
 
 // 전달 글(§4)은 delivery-text.ts 가 만든다. 예전처럼 이 파일에서 가져가는 곳(시험)을 위해 같은 이름으로 내보낸다.
-import { formatAnswer, formatInstruction, formatReport, formatSystem, formatTodoUndone, formatUserMessage, guardLines, isTidy, normalizeSpace, quoteNeedsContext, type QuoteSource } from "./delivery-text.ts";
+import { formatAnswer, formatInstruction, formatReport, formatSystem, formatTodoUndone, formatUserMessage, guardLines, isTidy, normalizeSpace, quoteNeedsContext, sinceText, type QuoteSource, type VerifiedQuote } from "./delivery-text.ts";
 export { formatAnswer, formatInstruction, formatReport, formatSystem, formatTidy, formatTodoDone, formatTodoUndone, formatUserMessage, guardLines, normalizeSpace, quoteNeedsContext, TIDY_HEAD } from "./delivery-text.ts";
 export type { QuoteSource, VerifiedQuote } from "./delivery-text.ts";
 
@@ -135,6 +135,8 @@ export interface OrchestratorTimings extends RestartWakePacing {
    * 깨운 직후 CLI 가 준비를 알리기 전의 몇 초가 막힘으로 스쳐, 승인 창이 없는데도 '승인 대기' 알림이 떴다(2026-11-12 실측).
    */
   blockedNoticeMs: number;
+  /** 0.2.7 묶음 1(점검 D1-2·D3-2): 결재를 올리고 턴을 끝낸 팀장에게 급하지 않은 다른 일을 미루는 시간(기본 3분). */
+  askHoldMs: number;
 }
 
 const DEFAULT_TIMINGS: OrchestratorTimings = {
@@ -145,6 +147,7 @@ const DEFAULT_TIMINGS: OrchestratorTimings = {
   retryMs: 5000,
   tickMs: 30_000,
   compactTimeoutMs: 600_000,
+  askHoldMs: 180_000,
   turnErrorRetryMs: 60_000,
   manualIdleMs: 5 * 60_000,
   manualOfflineMs: 30 * 60_000,
@@ -285,7 +288,45 @@ interface Runtime {
   quickExits: number;
   quickExitAt: number;
   quickExitNotified: boolean;
+  /**
+   * 0.2.7 묶음 1(점검 D1-2·D3-2): 방금 끝난 턴에서 올린 결재(ids)가 열려 있는 동안 until 까지 급하지 않은 다른 일을 미룬다.
+   * 메모리에만 있다(재시작하면 평소대로 보낸다). timer 는 미룬 일을 until 에 다시 미는 것.
+   */
+  askHold: { ids: string[]; until: number; timer: ReturnType<typeof setTimeout> | null } | null;
 }
+
+/** 0.2.7 묶음 1: 결재 답을 기다리는 동안에도 미루지 않는 대표 쪽 전달. */
+const OWNER_DELIVERY_KINDS: ReadonlySet<string> = new Set(["user_message", "answer", "todo_done"]);
+/** 0.2.7 묶음 1(점검 D5-1): 하던 턴을 멈추게 할 수 있는 대표 원문의 나이. 그보다 오래된 대표 글을 인용한 급한 지시는 턴이 끝나길 기다린다. */
+export const URGENT_QUOTE_FRESH_MS = 30 * 60_000;
+/** 0.2.7 묶음 1(점검 D1-3): 지연 알림에서 '정상 대기'로 보는 펌프 판정(그 팀장의 CLI 가 일하는 중으로 관측됨). */
+const WORKING_VERDICTS: ReadonlySet<string> = new Set(["busy", "sent", "pending_run", "manual_busy"]);
+/** 0.2.7 묶음 1: 진짜 막힘으로 알리기 전에 그 판정이 이어져야 하는 시간(턴이 막 끝나 수신을 확인하는 몇 초 같은 것은 막힘이 아니다). */
+const DELAY_BLOCK_SETTLE_MS = 120_000;
+
+/**
+ * 0.2.7 묶음 1: 급한 지시로 하던 턴을 멈추지 못하고 기다리는 까닭(총괄 도구 응답에 그대로 싣는다).
+ * 검토 뒤 더함: weak_quote(버튼 글·짧은 글 등 대표가 이 일로 쓴 문장이 아님), other_target(다른 팀장에게 쓴 대표 글), quote_used(그 대표 글로 이 팀장의 턴을
+ * 이미 한 번 멈춤), no_turn(서버가 넣은 일하는 턴이 없는데 CLI 가 바쁨: 백그라운드 프로그램 등), busy_unconfirmed(일한다는데 CLI 는 쉬는 중으로 관측).
+ */
+export type UrgentWaitReason = "no_owner_quote" | "weak_quote" | "other_target" | "stale_quote" | "quote_used" | "approval" | "usage_limit" | "outage" | "compacting" | "manual_control" | "session_busy" | "receipt_check" | "not_managed" | "no_turn" | "busy_unconfirmed" | "interrupt_failed";
+/**
+ * 0.2.7 묶음 1: 급한 지시를 일하는 중인 팀장에게 줄 때 서버가 한 일. interrupted: '하던 턴 멈추고 넣기'(멈춘 것까지 확인).
+ * unconfirmed(검토 뒤 더함): 멈춤 키는 보냈지만 core 가 3초 안에 멈춘 것을 확인하지 못했다(still_working·결과 모름). 뒤늦게 멈출 수 있어 멈춘 턴으로 다룬다.
+ */
+export type UrgentOutcome = { outcome: "interrupted" } | { outcome: "unconfirmed"; busySince: string | null } | { outcome: "waiting"; reason: UrgentWaitReason; busySince: string | null };
+/** 0.2.7 묶음 1 검토: 대표 글 하나로 한 팀장의 턴은 한 번만 멈춘다. 그 표식(활동 줄의 사건 키, DB 라 재시작해도 남는다). */
+const urgentStopKey = (memberId: string, sourceId: string) => `urgent-stop:${memberId}:${sourceId}`;
+/**
+ * 0.2.7 묶음 1 검토(점검 D1-3): 30분 지연 알림에서 '막힘'으로 알리지 않는 대기. 대표가 이미 그 까닭의 알림을 받았거나(사용 한도 카드·인터넷 장애 글·승인 창 푸시)
+ * 대표가 할 일이 없는 대기(동시에 일하는 팀장 수 상한, 대표가 보관한 프로젝트)다. 이것까지 막힘으로 알리면 한도 한 번에 전달 수만큼 막힘 푸시가 갔다.
+ */
+const OWNER_SIGNALED_WAITS: ReadonlySet<string> = new Set(["usage_limit", "api_outage", "approval", "run_limit", "archived"]);
+/**
+ * 0.2.7 묶음 1 검토(점검 D1-3): '하던 일을 마치는 중'이라는 알림급 대기는 진전이 있는 실행 뒤일 때만이다. 그 실행이 이만큼 진전(도구 사용·작업 상태 사건)
+ * 없이 이어지면 정상 대기로 보지 않고 막힘으로 알린다. 알림일 뿐 턴을 끝내거나 입력·중단하지 않는다.
+ */
+const DELAY_SILENT_RUN_MS = 30 * 60_000;
 
 
 /** 턴 오류·전달 오류가 이어질 때 ref 없는 전달(보고·지시·완료)을 다시 보내는 간격의 배수. 잃지 않되 사용량을 태우지 않게 멀리 둔다. */
@@ -524,6 +565,7 @@ export class Orchestrator implements OrchestratorApi {
       refreshHealth: () => this.refreshHealth(),
       refreshWaiting: memberId => this.refreshWaiting(memberId),
       isBusy: member => this.isBusy(member),
+      deliveryOutlook: memberId => this.deliveryOutlook(memberId),
       settle: member => this.settle(member),
       wakeAsk: decisionId => this.memberFlows.wakeAsk(decisionId),
       wakeInbox: memberId => this.memberFlows.wakeInbox(memberId),
@@ -541,6 +583,9 @@ export class Orchestrator implements OrchestratorApi {
       turnContext: memberId => this.runtime(memberId),
       isBusy: member => this.isBusy(member),
       interjects: member => this.interjects(this.runners.get(this.backendOf(member))),
+      urgentBlocker: (member, quote) => this.urgentBlocker(member, quote),
+      interruptForUrgent: (member, delivery, sourceId) => this.interruptForUrgent(member, delivery, sourceId),
+      busySince: memberId => this.busySince(memberId),
       settle: member => this.settle(member),
       refreshWaiting: memberId => this.refreshWaiting(memberId),
       notifyInbox: (title, body) => this.notifyInbox(title, body),
@@ -1380,6 +1425,8 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private requestMissingReport(member: Member, run: ExecutionJournal, opts: { ownTurnsOnly?: boolean } = {}): void {
+    // 0.2.7 묶음 1: 대표의 급한 지시로 멈추게 한 실행이다. 멈춘 일의 결과를 따로 묻지 않는다(그 지시와 함께 넣은 안내가 이어서 할지 정하게 한다).
+    if (this.urgentStopped.delete(run.runId)) return;
     if (this.store.requireProject(member.projectId).archived || this.backendOf(member) !== "core" || run.reason === "awaiting_delegation" || this.runtime(member.id).delegated) return;
     const deliveries = run.deliveryIds.map(id => this.store.getDelivery(id)).filter((d): d is Delivery => !!d);
     if (!deliveries.some(d => d.wake) || deliveries.every(isTidy)) return;
@@ -1552,6 +1599,24 @@ export class Orchestrator implements OrchestratorApi {
     this.lastStallCheck = Date.now();
     this.rejudgeQuietVerdicts();
     this.store.detectDeliveryStalls();
+    this.noticeOverdueCompactions();
+  }
+
+  /**
+   * 0.2.7 묶음 1 검토(점검 D1-1): 압축 중 판정이 지켜보기 기한(pump-verdict watch "compact")을 넘겼다. 완료 확인 타이머가 없는 미확정 압축
+   * (넣기 자체가 불확실했던 send_uncertain, 재시작 뒤 이어 지켜보는 압축)에도 대표에게 '중단' 안내(chat.compact_unconfirmed, 막힘·푸시)를 압축마다 한 번 준다.
+   * 정체 글이 안내하는 '다시 확인'은 압축 펜스를 풀지 않고, 미확정 압축을 닫는 길은 '중단'(memberInterrupt → interruptCoreCompaction)이다.
+   */
+  private noticeOverdueCompactions(): void {
+    let ids: string[] = [];
+    try { ids = this.store.overdueVerdictMembers("compacting"); } catch (e) { console.warn("압축 확인 알림 실패:", (e as Error).message); return; }
+    for (const memberId of ids) {
+      try {
+        const member = this.store.getMember(memberId);
+        const compact = member && this.backendOf(member) === "core" ? this.store.getContextState(memberId)?.compaction : null;
+        if (compact && ["sending", "running", "uncertain"].includes(compact.phase)) this.noticeCompactUnconfirmed(memberId, compact.id);
+      } catch (e) { console.warn("압축 확인 알림 실패:", memberId, (e as Error).message); }
+    }
   }
 
   /**
@@ -1667,6 +1732,9 @@ export class Orchestrator implements OrchestratorApi {
     try {
       const delivery = this.store.getDelivery(deliveryId);
       if (delivery && !this.closed) {
+        // 0.2.7 묶음 1(점검 D3-10): 결재 답의 전달을 그만둬 카드가 다시 열렸으면 쉬던 팀장은 다시 결재를 기다리는 중이다.
+        const asker = delivery.kind === "answer" ? this.store.getMember(delivery.memberId) : null;
+        if (asker?.status === "idle") this.settle(asker);
         // 끝난 쓰기의 펜스와 실행 기록을 닫고, 확인·재전송을 지금 한 번 돌린 뒤 그 직원의 대기열을 민다.
         this.deliveryRecovery.fenced(delivery.memberId);
         void this.settleInFlight().catch(e => console.warn("전달 확인 실패:", e)).then(() => this.pump(delivery.memberId));
@@ -2540,6 +2608,134 @@ export class Orchestrator implements OrchestratorApi {
     rt.compactRequest = null;
     if (rt.turn?.kind === "compact") this.endCompact(memberId, rt, "대표가 압축을 중단했습니다");
     return this.store.requireMember(memberId);
+  }
+
+  /** 0.2.7 묶음 1: 급한 지시로 멈추게 한 실행. 그 실행에는 결과 보고 보완을 묻지 않는다(멈춘 일은 급한 지시 뒤에 이어서 하거나 그만둔다). */
+  private readonly urgentStopped = new Set<string>();
+  /**
+   * 0.2.7 묶음 1 검토: 이미 턴을 멈춘 (팀장, 대표 글) 표식(urgentStopKey). DB 의 활동 줄 사건 키가 재시작 뒤에도 남기고, 이 메모리 표식은
+   * 활동 줄이 직원당 상한(MAX_ACTIVITY_PER_MEMBER)으로 지워져도 남긴다. 둘 다 없어지려면 재시작과 500줄이 함께 일어나야 한다.
+   */
+  private readonly urgentStopSources = new Set<string>();
+
+  /** 0.2.7 묶음 1: 이 팀장이 지금 하던 일을 시작한 때(열린 실행 기록, 없으면 펌프 판정이 이어진 시작). 모르면 null. */
+  busySince(memberId: string): string | null {
+    const generation = this.store.memberRevisions(memberId).sessionGeneration;
+    const run = this.store.listPendingExecutions().filter(r => r.memberId === memberId && r.identity.sessionGeneration === generation).at(-1);
+    if (run) return run.startedAt ?? run.inputReceivedAt ?? run.createdAt;
+    return this.store.pumpVerdict(memberId)?.since ?? null;
+  }
+
+  /**
+   * 0.2.7 묶음 1(점검 D1-6·D3-10): 지금 이 팀장에게 넣는 전달이 언제 들어가는지(총괄에게 주는 한국어 한 줄, AI 에게 가는 글).
+   * 예전에는 결재 답을 접수한 순간 '이미 전달했습니다'라고 써, 대기열에서 몇십 분 기다린 답도 전달된 것처럼 알렸다.
+   */
+  deliveryOutlook(memberId: string): string {
+    const member = this.store.getMember(memberId);
+    if (!member) return "받을 팀장이 없습니다";
+    const name = member.name;
+    if (this.apiRecovery.holdReason(memberId) === "usage_limit") return `${josa(name, "이")} 사용 한도로 멈춰 있어 한도가 풀리면 들어갑니다`;
+    if (this.apiRecovery.holdReason(memberId)) return `${josa(name, "이")} 인터넷 장애로 멈춰 있어 연결이 돌아오면 들어갑니다`;
+    if (member.status === "blocked") return `${josa(name, "이")} 승인 창 앞에서 멈춰 있어 대표가 풀면 들어갑니다`;
+    if (member.status === "asleep" || member.status === "offline") return `${josa(name, "이")} 쉬고 있어 서버가 깨워 넣습니다`;
+    if (this.store.inputState(memberId).lease) return `대표가 ${name}의 터미널을 직접 조작하는 중이라 끝나면 들어갑니다`;
+    let compacting = false;
+    try { compacting = this.coreCompactFenced(member); } catch { compacting = true; }
+    if (compacting || this.runtime(memberId).turn?.kind === "compact") return `${josa(name, "이")} 문맥 정리(압축) 중이라 끝나면 들어갑니다`;
+    if (this.isBusy(member)) {
+      const since = sinceText(this.busySince(memberId));
+      return `${josa(name, "이")} ${since ? `${since} ` : ""}하던 일을 마치는 중이라 그 일이 끝나면 들어갑니다`;
+    }
+    return "곧 들어갑니다";
+  }
+
+  /**
+   * 0.2.7 묶음 1(점검 D5-1·D1-2): 일하는 중인 팀장에게 온 급한 지시로 지금 '하던 턴 멈추고 넣기'를 할 수 없으면 그 까닭, 할 수 있으면 null.
+   * 대표 원문(서버가 대표 글과 맞춰 본 인용, URGENT_QUOTE_FRESH_MS 안에 쓴 글)을 실은 지시만 멈춘다. 그리고 안전한 때만: 승인 창·사용 한도 메뉴·
+   * 인터넷 장애 보류·압축 중·대표의 직접 조작 중·세션 처리 중(띄우기·닫기·설정 적용·재시작 복구)·앞 전달의 수신 확인 중이 아니고, 서버가 넣은 일하는 턴이
+   * CLI 에서도 일하는 중으로 보일 때. 시간만으로 멈추지 않는다: 멈추는 근거는 대표가 '지금 바로'라고 쓴 글이다.
+   * 검토 뒤(같은 도구 답이 '직원은 이 줄만으로 승인으로 치지 않는다'고 하는 인용을 그보다 강한 턴 멈추기의 근거로 쓰고 있었다):
+   * - 버튼 글·짧은 글(quoteNeedsContext)은 근거가 아니다. 다른 결재에서 고른 '진행'이 다른 팀장의 턴을 끊었다.
+   * - 대표가 총괄(또는 받는 팀장 자신)에게 쓴 글, 총괄·받는 팀장의 결재에 쓴 메모만 근거다. 다른 팀장에게 쓴 글·할 일 완료 메모·프로젝트 목표는 아니다.
+   * - 대표 글 하나로 한 팀장의 턴은 한 번만 멈춘다(활동 줄의 사건 키). 같은 인용을 단 보충 지시가 급한 일을 하던 턴을 다시 끊었다.
+   */
+  urgentBlocker(member: Member, quote: VerifiedQuote | null): UrgentWaitReason | null {
+    if (!quote?.verified || !quote.source) return "no_owner_quote";
+    if (quoteNeedsContext(quote)) return "weak_quote";
+    const conductor = this.store.getConductor(member.projectId);
+    const addressed = (id: string | null) => id === null || id === member.id || id === conductor?.id;
+    const message = this.store.getMessage(quote.source.id);
+    const decision = message ? null : this.store.getDecision(quote.source.id);
+    if (message ? !message.mine || !addressed(message.targetMemberId) : decision ? !addressed(decision.memberId) : true) return message || decision ? "other_target" : "weak_quote";
+    if (!(Date.now() - Date.parse(quote.source.at ?? "") <= URGENT_QUOTE_FRESH_MS)) return "stale_quote";
+    const stopKey = urgentStopKey(member.id, quote.source.id);
+    if (this.urgentStopSources.has(stopKey)) return "quote_used";
+    // 재시작 뒤에는 DB 의 활동 표식으로 알아보고 메모리에도 다시 적는다(그 뒤 활동 줄이 상한으로 지워져도 남게).
+    if (this.store.hasActivityEvent(stopKey)) { this.urgentStopSources.add(stopKey); return "quote_used"; }
+    if (member.origin === "manual" || !this.runners.get(this.backendOf(member))) return "not_managed";
+    if (member.status === "blocked" || this.toolPermissions.waiting(member.id)) return "approval";
+    const hold = this.apiRecovery.holdReason(member.id);
+    if (hold === "usage_limit" || member.statusObservation?.error?.code === "usage_limit") return "usage_limit";
+    if (hold) return "outage";
+    const rt = this.runtime(member.id);
+    let compacting = false;
+    try { compacting = this.coreCompactFenced(member) || this.store.getContextState(member.id)?.compaction?.phase === "sending"; } catch { compacting = true; }
+    if (compacting || rt.turn?.kind === "compact") return "compacting";
+    if (this.store.inputState(member.id).lease) return "manual_control";
+    if (this.recovering || this.configWrites.has(member.id) || this.terminal.terminalMutations.has(member.id) || this.pendingLifecycle(member.id) || rt.closing || rt.starting || rt.reopening) return "session_busy";
+    if (this.deliveryRecovery.fenced(member.id)) return "receipt_check";
+    // 서버가 넣은 일하는 턴(재시작 뒤에는 그 턴의 열린 실행 기록)만 멈춘다. 압축·조작 턴, 실행 기록 없이 바쁜 CLI(Codex 백그라운드 터미널 등)는 멈출 턴이 없고,
+    // 일한다는데 CLI 는 쉬는 중으로 관측되는 팀장은 일하는지부터 확인되지 않았다(검토 뒤: 예전에는 둘 다 '세션 처리 중'이라는 틀린 까닭을 줬다).
+    const generation = this.store.memberRevisions(member.id).sessionGeneration;
+    const running = rt.turn ? rt.turn.kind === "work" : this.store.listPendingExecutions().some(run => run.memberId === member.id && run.identity.sessionGeneration === generation);
+    if (!running) return "no_turn";
+    if (this.busyVerdict(member, "busy") === "busy_unconfirmed") return "busy_unconfirmed";
+    return null;
+  }
+
+  /**
+   * 0.2.7 묶음 1: '하던 턴 멈추고 넣기'. 앱의 '중단' 단추와 같은 길(memberInterrupt)로 지금 턴을 멈춘다. 턴이 끝나면 펌프가 급한 지시를 맨 앞에 넣는다
+   * (orderForBundle). 받는 팀장에게는 왜 멈췄는지 깨우지 않는 글을 함께 넣고, 활동에 한 줄 남긴다(그 줄의 사건 키가 '이 대표 글로 이미 멈춤' 표식이다).
+   * - interrupted: core 가 멈춘 것까지 확인했다.
+   * - unconfirmed(검토 뒤): 멈춤 키는 보냈는데 core 가 3초 안에 멈춘 것을 확인하지 못했다(still_working·결과 모름). Esc 가 이미 들어가 CLI 가 몇 초 뒤 멈출 수
+   *   있으므로 앱 '중단'과 같이 멈춘 턴으로 둔다(안내 글·보고 보완 거르기 그대로). 예전에는 '안 멈춤'으로 확정해, 뒤늦게 멈춘 턴에 보고 보완을 묻고
+   *   안내는 이미 거둔 뒤였다. 끝내 멈추지 않고 끝난 턴도 같은 안내('하던 일이 멈췄으면')로 어긋나지 않는다.
+   * - false: 멈춤 키를 보내지 못한 것이 확정이다(터미널 없음·소유 불일치·서버 거절 등). 안내 글을 거두고 턴 표시를 되돌린다: 그 턴이 끝나길 기다린다.
+   */
+  async interruptForUrgent(member: Member, delivery: Delivery, sourceId: string): Promise<"interrupted" | "unconfirmed" | false> {
+    const runs = this.store.listPendingExecutions().filter(run => run.memberId === member.id).map(run => run.runId);
+    for (const id of runs) this.urgentStopped.add(id);
+    // 턴 끝이 멈춤 응답보다 먼저 올 수 있어 안내 글은 멈추기 전에 줄 세운다(급한 지시와 같은 봉투로 나가게). 멈춘 것이 확인되기 전이라 어느 쪽이든 맞는 글로 쓴다.
+    const notice = this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "system", wake: false,
+      text: formatSystem(`대표의 급한 지시(전달 ${delivery.id})를 먼저 넣으려고 하던 턴을 멈추게 했습니다. 그 지시를 먼저 하세요. 하던 일이 멈췄으면, 그 지시와 어긋나지 않을 때 이어서 하고 어긋나면 그만두세요.`) });
+    const rt = this.runtime(member.id), turn = rt.turn, already = turn?.interrupted ?? false;
+    const key = urgentStopKey(member.id, sourceId);
+    try {
+      await this.memberInterrupt(member.id);
+    } catch (e) {
+      const detail = ((e as Error)?.message ?? String(e)).slice(0, 200);
+      // 보내지 못한 것이 확정인 실패만 되돌린다. core 의 not_stopped(멈춤 키는 갔다)·결과 모름·알 수 없는 오류는 멈췄을 수 있다.
+      const definite = e instanceof ApiError || (e instanceof CoreError && !e.uncertain && e.kind !== "not_stopped");
+      if (!definite) {
+        this.urgentStopSources.add(key);
+        this.store.appendActivity(member.id, "system", textRef("activity.urgent_interrupt_unconfirmed", { id: delivery.id, detail }), key);
+        return "unconfirmed";
+      }
+      for (const id of runs) this.urgentStopped.delete(id);
+      if (turn && rt.turn === turn && !already) turn.interrupted = false;
+      this.store.transaction(() => {
+        const current = this.store.getDelivery(notice.id);
+        if (!current || !["queued", "held"].includes(current.status)) return;
+        const r = this.store.getDeliveryRecovery(notice.id);
+        if (r) this.store.updateDeliveryRecovery(notice.id, r.version, { phase: "stopped", reason: "withdrawn", nextCheckAt: null });
+        this.store.markFailed(notice.id, "하던 턴을 멈추지 못해 거뒀습니다");
+      });
+      this.store.appendActivity(member.id, "error", textRef("activity.urgent_interrupt_failed", { id: delivery.id, detail }));
+      return false;
+    }
+    this.urgentStopSources.add(key);
+    this.store.appendActivity(member.id, "system", textRef("activity.urgent_interrupt", { id: delivery.id }), key);
+    return "interrupted";
   }
 
   /** 화면의 '명부에서 빼기'. 직접 띄운 세션만. 실행기 세션은 총괄이 team_close 로 닫는다. */
@@ -3445,19 +3641,109 @@ export class Orchestrator implements OrchestratorApi {
     return pump ? this.pump(memberId) : Promise.resolve();
   }
 
+  /** 0.2.7 묶음 1: '하던 일을 마치는 중' 알림을 이미 한 전달(메모리, 서버가 다시 뜨면 한 번 더 알릴 수 있다). 막힘 알림은 DB(delay_notified_at)에 적는다. */
+  private readonly delayBehindNoticed = new Set<string>();
+
+  /**
+   * 30분 넘게 나가지 않은 대표의 일을 대기 사유에 따라 알린다(0.2.7 묶음 1, 점검 D1-3·D5-2·D1-1).
+   * - 받는 팀장이 하던 일을 마치는 중(CLI 가 일하는 중으로 관측되는 펌프 판정 busy·sent·pending_run·manual_busy, 기한을 넘기지 않음)이면 막힘이 아니라
+   *   '알림' 글('X가 HH:MM부터 하던 일을 마치는 중, 끝나면 들어갑니다')을 한 번 남기고 푸시·Mac 알림은 보내지 않는다. 대표가 할 일이 없다.
+   * - 그 밖의 대기(압축 중·일한다는데 CLI 는 쉬는 중·이유 없는 대기·수신 확인·재시도 대기 등)가 2분 넘게 이어지거나, 일하는 중이라는 실행이 30분 넘게 진전 없으면
+   *   예전처럼 '막힘' 글과 푸시로 알린다(전달마다 한 번). 대표가 이미 알림을 받은 대기(사용 한도·인터넷 장애·승인 창)와 대표가 할 일이 없는 대기(동시 상한·보관)는
+   *   알리지 않는다(검토 뒤: 한도 한 번에 전달 수만큼 막힘 푸시가 갔다).
+   *   잠깐의 사유(턴이 막 끝나 수신을 확인하는 몇 초, 결재 답을 기다리는 3분)는 알리지 않고 다음 점검에서 다시 본다. '알림'을 한 전달도 뒤에 막히면 이렇게 알린다.
+   * - 대상: 대표 글·결재 답·할 일 완료와, 대표 원문을 실은 총괄 지시(점검 D1-1: 인스타 14시간 동안 지시만 막혀 알림이 0건이었다). 깨우지 않는 사본은 뺀다.
+   * - 총괄에게도 깨우지 않는 사본을 넣되, 받는 이가 총괄 자신이면 넣지 않는다(늦은 대표 글과 같은 봉투로 들어가 같은 일을 두 번 읽었다).
+   */
   notifyDelayedDeliveries(now = Date.now()): void {
-    this.store.transaction(() => {
-      for (const d of this.store.claimDelayedDeliveries(now)) {
-        const member = this.store.requireMember(d.memberId);
-        const ref = textRef(d.kind === "answer" ? "chat.owner_answer_late" : "chat.owner_message_late", { name: member.name, id: d.id });
-        // Existing report_blocked path persists one APNs event with the domain message.
-        const message = this.store.createMessage({ projectId: d.projectId, memberId: member.id, who: "시스템", kind: "막힘", text: ref });
-        const conductor = this.store.getConductor(d.projectId);
+    for (const d of this.store.listDelayedDeliveries(now)) {
+      try { this.noticeDelayed(d, now); }
+      catch (e) { console.warn("전달 지연 알림 실패:", d.id, (e as Error).message); }
+    }
+    if (this.delayBehindNoticed.size > 1000) for (const id of this.delayBehindNoticed) if (this.store.getDelivery(id)?.status === "delivered") this.delayBehindNoticed.delete(id);
+  }
+
+  private noticeDelayed(d: Delivery, now: number): void {
+    const member = this.store.getMember(d.memberId);
+    if (!member) return;
+    const verdict = this.store.pumpVerdict(member.id);
+    // 방금 올린 결재의 답을 3분 기다리는 중이다. 곧 풀린다.
+    if (verdict?.code === "ask_hold") return;
+    const wait = this.store.deliveryWait(d).waitReason;
+    // 검토 뒤: 대표가 이미 그 까닭의 알림을 받았거나(한도 카드·장애 글·승인 창) 할 일이 없는 대기(동시 상한·보관)는 막힘으로 알리지 않는다.
+    // 그 대기가 풀린 뒤에도 30분 넘게 막혀 있으면 그때의 사유로 다시 본다(막힘 표시는 알릴 때만 적는다).
+    if (OWNER_SIGNALED_WAITS.has(wait)) return;
+    const conductor = this.store.getConductor(d.projectId);
+    const relay = conductor && conductor.id !== member.id ? conductor : null;
+    const working = wait === "member_busy" && !!verdict && WORKING_VERDICTS.has(verdict.code) && !verdict.overdueAt;
+    // 검토 뒤(D1-3 '진전이 있는 실행 뒤'): 지금 실행이 30분 넘게 진전이 없으면 하던 일을 마치는 중이라고 하지 않고 막힘으로 알린다.
+    const silent = working && this.silentRun(member, now);
+    if (working && !silent) {
+      if (this.delayBehindNoticed.has(d.id)) return;
+      this.delayBehindNoticed.add(d.id);
+      // 글은 고정 id 라 재시작 뒤 다시 생기지 않는다. 총괄 사본도 다시 넣지 않게 글이 있으면 멈춘다(검토 뒤: 재시작마다 사본이 쌓였다).
+      const noticeId = `msg_delivery_behind_${d.id}`;
+      if (this.store.getMessage(noticeId)) return;
+      const since = this.busySince(member.id) ?? verdict!.since;
+      const what = textRef(d.kind === "answer" ? "word.owner_answer" : d.kind === "user_message" ? "word.owner_message" : d.kind === "todo_done" ? "word.owner_todo_done" : "word.owner_instruction");
+      const ref = textRef("chat.owner_delivery_behind", { name: member.name, since: { at: since }, what, id: d.id });
+      this.store.transaction(() => {
+        this.store.createMessage({ id: noticeId, projectId: d.projectId, memberId: member.id, who: "시스템", kind: "알림", text: ref });
         // 총괄에게 주는 글은 AI 에게 주는 글이라 한국어 그대로다(Y: 바꾸지 않는다).
-        if (conductor) this.store.enqueue({ projectId: d.projectId, memberId: conductor.id, kind: "system", text: formatSystem(mustRender(ref, "ko")), wake: false });
-        this.store.afterCommit(() => { if (conductor) void this.pump(conductor.id); this.notifyInbox(message.title, message.body); });
-      }
+        if (relay) this.store.enqueue({ projectId: d.projectId, memberId: relay.id, kind: "system", text: formatSystem(`${mustRender(ref, "ko")} 막힌 것이 아니라 차례를 기다리는 것입니다. 대표가 할 일은 없습니다.`), wake: false });
+      });
+      return;
+    }
+    // 잠깐의 사유는 막힘으로 알리지 않는다(기한을 넘긴 판정·진전 없는 실행은 곧바로 알린다).
+    if (!silent && verdict && !verdict.overdueAt && now - Date.parse(verdict.since) < DELAY_BLOCK_SETTLE_MS) return;
+    const code = d.kind === "answer" ? "chat.owner_answer_late" : d.kind === "user_message" ? "chat.owner_message_late" : d.kind === "todo_done" ? "chat.owner_todo_done_late" : "chat.owner_instruction_late";
+    const ref = textRef(code, { name: member.name, id: d.id });
+    this.store.transaction(() => {
+      if (!this.store.markDelayNotified(d.id, now)) return;
+      // Existing report_blocked path persists one APNs event with the domain message.
+      const message = this.store.createMessage({ projectId: d.projectId, memberId: member.id, who: "시스템", kind: "막힘", text: ref });
+      if (relay) this.store.enqueue({ projectId: d.projectId, memberId: relay.id, kind: "system", text: formatSystem(mustRender(ref, "ko")), wake: false });
+      this.store.afterCommit(() => { if (relay) void this.pump(relay.id); this.notifyInbox(message.title, message.body); });
     });
+  }
+
+  /** 0.2.7 묶음 1 검토: 이 팀장의 지금 실행(이 세션 세대의 열린 실행 기록)이 DELAY_SILENT_RUN_MS 넘게 진전이 없는가. 실행 기록이 없으면 알 수 없어 false. */
+  private silentRun(member: Member, now: number): boolean {
+    const generation = this.store.memberRevisions(member.id).sessionGeneration;
+    const run = this.store.listPendingExecutions().filter(r => r.memberId === member.id && r.identity.sessionGeneration === generation).at(-1);
+    if (!run) return false;
+    const last = Date.parse(run.lastProgressAt ?? run.startedAt ?? run.inputReceivedAt ?? run.createdAt);
+    return Number.isFinite(last) && now - last >= DELAY_SILENT_RUN_MS;
+  }
+
+  /**
+   * 0.2.7 묶음 1(점검 D1-2·D3-2): 결재를 올리고 턴을 끝낸 팀장에게 지금 미룰 전달. 그 턴에서 올린 결재가 아직 열려 있고 기다림 시간이 지나지 않았으면,
+   * 급하지 않은 깨우는 일(총괄 지시·시스템 글·직원 보고)을 미룬다(timings.askHoldMs, 기본 3분). 대표의 글·결재 답·할 일 완료, 급한 지시, 깨우지 않는 글, 압축은 미루지 않는다.
+   * 답이 오면 결재 답이 펌프를 밀어 미룬 일과 함께(답이 앞) 나가고, 시간이 지나면 타이머가 민다. 시간만으로 입력하는 것이 아니라 평소 전달을 늦출 뿐이다.
+   * 막지 못하는 경우: 대표가 3분 뒤에 답하거나, 질문 전에 이미 다른 턴이 돌고 있거나, 쉬는 동안 새 지시가 오면 예전처럼 차례대로 나간다.
+   */
+  private askHeld(memberId: string, rt: Runtime, pending: Delivery[]): Set<string> {
+    const hold = rt.askHold;
+    if (!hold) return new Set();
+    if (Date.now() >= hold.until || !hold.ids.some(id => this.store.getDecision(id)?.status === "open")) {
+      if (hold.timer) clearTimeout(hold.timer);
+      rt.askHold = null;
+      return new Set();
+    }
+    const held = new Set(pending.filter(d => d.wake && !d.urgent && d.kind !== "compact" && !OWNER_DELIVERY_KINDS.has(d.kind)).map(d => d.id));
+    if (held.size && !hold.timer && !this.closed) {
+      hold.timer = setTimeout(() => { hold.timer = null; void this.pump(memberId); }, Math.max(hold.until - Date.now(), 1));
+      hold.timer.unref?.();
+    }
+    return held;
+  }
+
+  /** 0.2.7 묶음 1: 턴이 끝날 때, 그 턴에서 올린 결재가 열려 있으면 다른 일을 잠깐 미루기 시작한다(askHeld). */
+  private beginAskHold(memberId: string, rt: Runtime, turn: Turn | null): void {
+    if (rt.askHold?.timer) clearTimeout(rt.askHold.timer);
+    rt.askHold = null;
+    const open = [...(turn?.askedDecisionIds ?? [])].filter(id => this.store.getDecision(id)?.status === "open");
+    if (open.length) rt.askHold = { ids: open, until: Date.now() + this.timings.askHoldMs, timer: null };
   }
 
   private sendablePending(memberId: string): Delivery[] {
@@ -3598,6 +3884,7 @@ export class Orchestrator implements OrchestratorApi {
       // 도구 승인 카드가 열려 있으면 CLI 는 승인 창 앞이다(창을 blocked 로 알리지 않는 CLI 라도): 일하는 중이 아니라 승인 대기로 보인다. 동작은 같다.
       this.judged(memberId, this.toolPermissions.waiting(memberId) ? "tool_permission" : this.busyVerdict(member, "busy"));
       // core 는 돌고 있는 턴에 끼워 넣을 수 없다(interjects=false). 끝나면 묶어서 나간다.
+      // 0.2.7 묶음 1: 대표 원문을 실은 급한 지시는 넣을 때(flows/member.ts assign) 하던 턴을 멈추게 한다('하던 턴 멈추고 넣기'). 펌프는 턴 끝을 기다린다.
       if (urgent.length > 0 && this.interjects(runner)) { rt.pumpStage = "send_urgent"; await this.sendUrgent(member, project, runner, urgent); }
       return;
     }
@@ -3612,10 +3899,12 @@ export class Orchestrator implements OrchestratorApi {
       member = this.store.requireMember(memberId);
     }
 
-    const hasWake = pending.some((d) => d.wake);
+    // 0.2.7 묶음 1(점검 D1-2·D3-2): 방금 결재를 올리고 턴을 끝낸 팀장이면 급하지 않은 다른 일은 잠깐 미룬다(답이 그 일의 긴 턴 뒤로 밀리지 않게).
+    const asking = this.askHeld(memberId, rt, pending);
+    const hasWake = pending.some((d) => d.wake && !asking.has(d.id));
     if (!hasWake && rt.compactRequest === null) {
       for (const d of pending) if (d.status === "held") this.requeue(d);
-      return this.judged(memberId, "no_wake");
+      return this.judged(memberId, asking.size ? "ask_hold" : "no_wake");
     }
 
     // 상한 검사와 자리 잡기(rt.turn) 사이에 await 가 끼면 상한을 넘을 수 있어 세션부터 마련한다.
@@ -3688,7 +3977,7 @@ export class Orchestrator implements OrchestratorApi {
       await this.beginCompact(member, project, runner, rt, rt.compactRequest ?? this.compactFocus(member));
       return;
     }
-    if (!hasWake) return this.judged(memberId, "no_wake");
+    if (!hasWake) return this.judged(memberId, asking.size ? "ask_hold" : "no_wake");
 
     const turn: Turn = { kind: "work", text: "", interrupted: false };
     rt.turn = turn;
@@ -3705,11 +3994,13 @@ export class Orchestrator implements OrchestratorApi {
       }
     }
 
-    const fresh = this.dropChangedSources(this.sendablePending(memberId));
+    // 병렬 설정을 바꾸는 사이 답이 왔거나 기다림이 끝났을 수 있다. 미룰 것을 다시 본다.
+    const sendable = this.sendablePending(memberId), later = this.askHeld(memberId, rt, sendable);
+    const fresh = this.dropChangedSources(sendable.filter(d => !later.has(d.id)));
     if (!fresh.some(d => d.wake) || this.retryDue(member) > Date.now()) {
       rt.turn = null;
       this.releaseSlots();
-      return this.judged(memberId, fresh.some(d => d.wake) ? "retry_wait" : "no_wake");
+      return this.judged(memberId, fresh.some(d => d.wake) ? "retry_wait" : later.size ? "ask_hold" : "no_wake");
     }
     const ordered = this.apiRecovery.preservesOrder(memberId) ? fresh : orderForBundle(fresh);
     turn.text = ordered.map((d) => d.text).join("\n\n");
@@ -4217,6 +4508,7 @@ export class Orchestrator implements OrchestratorApi {
           if (!current?.compaction || current.compaction.id !== id || !["sending", "running"].includes(current.compaction.phase)) return;
           this.store.saveContextState({ ...current, compaction: { ...current.compaction, phase: "uncertain", reason: "completion_timeout" } });
           this.store.appendActivity(member.id, "error", textRef("activity.compact_unconfirmed"));
+          this.noticeCompactUnconfirmed(member.id, current.compaction.id);
         } catch (e) { console.error("압축 시간 초과 처리 실패:", member.id, e); }
       }, this.timings.compactTimeoutMs);
       return;
@@ -4249,6 +4541,20 @@ export class Orchestrator implements OrchestratorApi {
     }
     this.settle(this.store.requireMember(member.id));
     this.releaseSlots();
+  }
+
+  /**
+   * 0.2.7 묶음 1(점검 D1-1): 넣은 압축의 끝을 기한(compactTimeoutMs) 안에 확인하지 못해 '결과 모름'이 되면 그 팀장에게 가는 전달이 모두 멈춘다
+   * (하위 폴더 압축으로 몇 시간 막혔고 그동안 서버 알림이 0건이었다). 대표에게 '막힘'(푸시)으로 한 번 알리고 할 일('중단')을 적는다. 압축마다 한 번.
+   * 그 팀장의 펌프 판정 compacting 은 지켜보기 기한이 있어(pump-verdict watch "compact") 기한을 넘기면 대기 사유가 '이유 없는 대기'(확인 필요)로 바뀐다.
+   */
+  private noticeCompactUnconfirmed(memberId: string, compactionId: string): void {
+    const member = this.store.getMember(memberId);
+    if (!member) return;
+    // 압축마다 한 번(완료 확인 타이머와 정체 점검 두 길이 부른다). 이미 알렸으면 Mac 알림도 다시 내지 않는다.
+    if (this.store.getMessage(`msg_compact_unconfirmed_${compactionId}`)) return;
+    const message = this.store.createMessage({ id: `msg_compact_unconfirmed_${compactionId}`, projectId: member.projectId, memberId: member.id, who: "시스템", kind: "막힘", text: textRef("chat.compact_unconfirmed", { name: member.name }) });
+    this.store.afterCommit(() => this.notifyInbox(message.title, message.body));
   }
 
   /** 압축 턴 정리. 실패해도 대기열은 멈추지 않는다. */
@@ -4587,6 +4893,7 @@ export class Orchestrator implements OrchestratorApi {
     }
 
     rt.turn = null;
+    if (turn?.kind === "work") this.beginAskHold(member.id, rt, turn);
     const { posted, direct } = rt;
     rt.posted = false;
     rt.direct = false;
@@ -4772,7 +5079,7 @@ export class Orchestrator implements OrchestratorApi {
   private runtime(memberId: string): Runtime {
     let rt = this.runtimes.get(memberId);
     if (!rt) {
-      rt = { contextCandidate: null, turn: null, pumping: null, pumpStage: null, pumpSince: null, pumpReported: false, again: false, posted: false, delegated: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, readySince: null, compactBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, holdUntil: 0, configGaveUp: null, launchedAt: null, quickExits: 0, quickExitAt: 0, quickExitNotified: false };
+      rt = { contextCandidate: null, turn: null, pumping: null, pumpStage: null, pumpSince: null, pumpReported: false, again: false, posted: false, delegated: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, readySince: null, compactBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, holdUntil: 0, configGaveUp: null, launchedAt: null, quickExits: 0, quickExitAt: 0, quickExitNotified: false, askHold: null };
       this.runtimes.set(memberId, rt);
     }
     return rt;
@@ -4781,6 +5088,7 @@ export class Orchestrator implements OrchestratorApi {
   private clearRuntime(memberId: string, rt: Runtime): void {
     if (rt.compactTimer) clearTimeout(rt.compactTimer);
     if (rt.retryTimer) clearTimeout(rt.retryTimer);
+    if (rt.askHold?.timer) clearTimeout(rt.askHold.timer);
     this.waiting.delete(memberId);
     this.absentCoreMembers.delete(memberId);
     this.codexLogs.delete(memberId);
@@ -4867,9 +5175,13 @@ export class Orchestrator implements OrchestratorApi {
   }
 }
 
-/** 깨움 없는 것을 앞에 묶는다(§6). */
+/**
+ * 깨움 없는 것을 앞에 묶는다(§6). 0.2.7 묶음 1: 깨우는 것 가운데서는 급한 지시, 그다음 결재 답(그 팀장이 물은 카드의 답)을 앞에 둔다
+ * (점검 D1-2·D3-2: 자기 카드의 답은 대기열 맨 앞). 나머지는 들어온 차례 그대로다.
+ */
 function orderForBundle(pending: Delivery[]): Delivery[] {
-  return [...pending.filter((d) => !d.wake), ...pending.filter((d) => d.wake)];
+  const wake = pending.filter((d) => d.wake);
+  return [...pending.filter((d) => !d.wake), ...wake.filter((d) => d.urgent), ...wake.filter((d) => !d.urgent && d.kind === "answer"), ...wake.filter((d) => !d.urgent && d.kind !== "answer")];
 }
 
 function shellQuote(value: string): string {

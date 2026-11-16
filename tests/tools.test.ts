@@ -522,17 +522,21 @@ describe("총괄 도구", () => {
     expect(store.listDeliveries(project.id).filter(d => d.memberId === w.id && d.kind === "instruction")).toHaveLength(2);
   });
 
-  test("대표 직접 지시와 결재 답 알림은 이미 전달했으며 결과를 기다리라고 안내", async () => {
+  // 0.2.7 묶음 1(점검 D1-6): 이 안내는 접수한 순간에 만든다. '이미 전달했습니다'가 아니라 서버가 맡았다는 것과 그때의 상태를 쓴다.
+  test("대표 직접 지시와 결재 답 알림은 서버가 전달을 맡았고 결과를 기다리라고 안내(이미 전달했다고 하지 않는다)", async () => {
     const { store, project, orch, lead } = await setup();
     const { member: w } = await orch.addMember(project.id, { name: "메뉴 가격표", handle: "menu" });
     const message = await orch.sendUserMessage(project.id, { text: "가격을 수정해 주세요", targetMemberId: w.id });
     const notices = () => store.listDeliveries(project.id).filter(d => d.memberId === lead.id && d.kind === "system");
     expect(notices().find(d => d.text.includes(`#${message.id}`))).toMatchObject({ wake: false,
-      text: `[시스템] 대표가 메뉴 가격표에게 직접 지시했습니다 #${message.id}. 이미 메뉴 가격표에게 전달했습니다. 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.` });
+      text: `[시스템] 대표가 메뉴 가격표에게 직접 지시했습니다 #${message.id}. 서버가 메뉴 가격표에게 전달합니다(곧 들어갑니다). 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.` });
     const { decision } = await orch.registerAsk(w, { title: "가격을 적용할까요?", options: [{ k: "y", label: "적용하세요" }] });
     await orch.answerDecision(decision.id, { choice: "y" });
     expect(notices().find(d => d.text.includes("결재에 답했습니다"))).toMatchObject({ wake: false });
-    expect(notices().find(d => d.text.includes("결재에 답했습니다"))!.text).toContain("이미 메뉴 가격표에게 전달했습니다. 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.");
+    const answered = notices().find(d => d.text.includes("결재에 답했습니다"))!.text;
+    expect(answered).toContain("서버가 메뉴 가격표에게 전달합니다(");
+    expect(answered).toContain("같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요.");
+    expect(answered).not.toContain("이미 메뉴 가격표에게 전달했습니다");
   });
 
   test("user_quote: 결재 답의 버튼 글은 맞아도 '문맥 확인 필요'이고 카드 제목·id 가 함께 간다", async () => {

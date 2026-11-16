@@ -593,9 +593,11 @@ describe("persistence contracts", () => {
     insertDevice(db, "revoked-b");
     const device = db.query<{ enabled: number; preferences: string; revision: number; registration_generation: number }, []>("SELECT enabled,preferences,revision,registration_generation FROM push_devices WHERE id='device-a'").get()!;
     expect(device.enabled).toBe(0);
-    // Raw migration defaults predate the new kinds; missing keys are not renewed consent.
+    // Raw migration defaults predate the new kinds. 0.2.7 묶음 1(점검 D4-4): a missing kind follows its default (the app's default, ON).
     expect(JSON.parse(device.preferences)).toEqual({ decision: true, approval_wait: true, error: true, report_complete: true });
-    expect(storedPushPreferences(device.preferences)).toEqual({ ...DEFAULT_PUSH_PREFERENCES, todo_created: false, report_blocked: false });
+    expect(storedPushPreferences(device.preferences)).toEqual(DEFAULT_PUSH_PREFERENCES);
+    // A kind the owner switched off is stored and stays off.
+    expect(storedPushPreferences(JSON.stringify({ decision: true, report_blocked: false }))).toEqual({ ...DEFAULT_PUSH_PREFERENCES, report_blocked: false });
     expect(device.revision).toBe(1);
     expect(device.registration_generation).toBe(1);
     expect(() => insertDevice(db, "duplicate", "token")).toThrow();

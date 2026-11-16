@@ -9,7 +9,8 @@ import { createStorageReferences } from "./storage-maintenance.ts";
 import { toStorageError } from "./storage-errors.ts";
 import type { AgentToolDef, AgentToolResult, OrchestratorApi } from "./orchestrator-api.ts";
 import type { AgentWorkflowService } from "./service-contracts.ts";
-import type { AssignResult, Orchestrator } from "./orchestrator.ts";
+import type { AssignResult, Orchestrator, UrgentWaitReason } from "./orchestrator.ts";
+import { sinceText } from "./delivery-text.ts";
 import { josa } from "./roles.ts";
 import { withRo } from "./api-outage.ts";
 import { ApiError } from "./store.ts";
@@ -135,8 +136,36 @@ function requireOther(orch: Orchestrator, self: Member, ref: string): Member {
   return target;
 }
 
+/** 0.2.7 묶음 1: 급한 지시로 하던 턴을 멈추지 못한 까닭(총괄에게 주는 글). */
+const URGENT_WAIT_REASONS: Record<UrgentWaitReason, string> = {
+  no_owner_quote: "대표 원문(user_quote, 서버 확인)이 실리지 않아",
+  weak_quote: "인용이 결재 버튼 글·짧은 글처럼 대표가 이 일로 쓴 문장이 아니라",
+  other_target: "인용한 대표 글이 다른 팀장에게 쓴 글이라",
+  stale_quote: "인용한 대표 글이 30분보다 오래돼",
+  quote_used: "그 대표 글로 이 팀장의 턴을 이미 한 번 멈췄기 때문에(같은 글로 두 번 멈추지 않음)",
+  approval: "그 팀장이 승인 창 앞이라",
+  usage_limit: "그 팀장이 사용 한도로 멈춰 있어",
+  outage: "그 팀장이 인터넷 장애로 멈춰 있어",
+  compacting: "그 팀장이 문맥 정리(압축) 중이라",
+  manual_control: "대표가 그 터미널을 직접 조작하는 중이라",
+  session_busy: "그 세션을 처리하는 중이라(띄우기·닫기·설정 적용 등)",
+  receipt_check: "앞 전달을 받았는지 확인하는 중이라",
+  not_managed: "서버가 다루는 세션이 아니라",
+  no_turn: "서버가 넣은 일하는 턴이 없어(백그라운드 프로그램 등으로 CLI 가 바쁘게 보입니다)",
+  busy_unconfirmed: "일하는 중인지 확인되지 않아(CLI 는 쉬는 중으로 보입니다)",
+  interrupt_failed: "멈춤 키를 보내지 못해",
+};
+/** 0.2.7 묶음 1 검토: 멈출 턴이 없어 기다리는 까닭. '그 턴이 끝나야'가 아니라 '받을 수 있게 되면'이 맞다. */
+const URGENT_NO_TURN: ReadonlySet<UrgentWaitReason> = new Set(["no_turn", "busy_unconfirmed"]);
+
 function assignNote(result: AssignResult): string {
-  const place = (result.position > 0 ? `일하는 중이라 대기열 ${result.position}번째입니다. 끝나면 서버가 넣습니다` : result.delivery.status === "delivered" ? "전달했습니다" : "전달 대기 중입니다. 받을 수 있을 때 서버가 넣습니다") + ` · 전달 ${result.delivery.id}`;
+  const since = sinceText(result.busySince ?? null);
+  const urgent = result.urgent;
+  // 0.2.7 묶음 1(점검 D5-1): 급한 지시에 서버가 실제로 한 일을 그대로 알린다. 총괄이 대표에게 '급히 넣었다'고 잘못 말하지 않게 한다.
+  const place = (urgent?.outcome === "interrupted" ? "대표의 급한 지시라 하던 턴을 멈추게 했습니다. 멈추는 대로 이 지시를 맨 먼저 넣습니다"
+    : urgent?.outcome === "unconfirmed" ? `대표의 급한 지시라 하던 턴에 멈춤 키를 보냈지만, 바로 멈춘 것은 확인하지 못했습니다. 멈추거나 그 턴이 끝나는 대로 이 지시를 맨 먼저 넣습니다${since ? `(${since} 일하는 중)` : ""}. 대표에게 '바로 넣었다'고 하지 말고 이대로 알리세요`
+    : urgent?.outcome === "waiting" ? `급한 지시지만 ${URGENT_WAIT_REASONS[urgent.reason]} 하던 턴을 멈추지 않았습니다. ${URGENT_NO_TURN.has(urgent.reason) ? `그 팀장이 받을 수 있게 되면 맨 먼저 들어갑니다${since ? `(${since} 기다리는 중)` : ""}` : `그 턴이 끝나야 맨 먼저 들어갑니다${since ? `(${since} 일하는 중)` : ""}`}. 대표에게 '바로 넣었다'고 하지 말고 이대로 알리세요`
+    : result.position > 0 ? `일하는 중이라 대기열 ${result.position}번째입니다. 끝나면 서버가 넣습니다${since ? `(${since} 일하는 중)` : ""}` : result.delivery.status === "delivered" ? "전달했습니다" : "전달 대기 중입니다. 받을 수 있을 때 서버가 넣습니다") + ` · 전달 ${result.delivery.id}`;
   if (result.verified === null) return place;
   if (result.needsContext) return `${place}. 인용이 버튼 글이나 짧은 글이라 '문맥 확인 필요'로 전달됩니다. 직원은 이 줄만으로 승인으로 치지 않으니, 승인이 필요한 일이면 대표의 문장을 인용하세요`;
   return result.verified ? `${place}. 인용은 대표 글과 맞아 서버 확인으로 전달됩니다` : `${place}. 인용을 대표 글에서 찾지 못해 미확인으로 전달됩니다. 직원은 이것을 승인으로 치지 않습니다`;
@@ -406,7 +435,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       text: text.describe("할 일. 끝났다고 볼 기준, 참고 파일, 주의점 포함"),
       user_quote: userQuote,
       parallel: z.boolean().optional().describe("이 일에 병렬(ultracode)이 나은지. 지금과 다를 때만 서버가 바꾼다"),
-      urgent: z.boolean().optional().describe("대표가 '지금 바로'라고 했을 때만 true"),
+      urgent: z.boolean().optional().describe("대표가 '지금 바로'·'멈추고'처럼 하던 일을 끊고 넣으라고 했을 때만 true. 일하는 중인 직원이면, 대표가 그렇게 쓴 문장을 user_quote 로 실었고(서버가 대표 글과 맞춰 봄: 30분 안에 총괄이나 그 직원에게 쓴 글, 결재 버튼 글·짧은 글·다른 직원에게 쓴 글은 안 됨) 승인 창·사용 한도·압축·직접 조작 중이 아닐 때만 서버가 하던 턴을 멈추고 이 지시를 맨 먼저 넣는다('하던 턴 멈추고 넣기'). 같은 대표 글로는 한 직원의 턴을 한 번만 멈춘다(보충 지시는 urgent 없이). 그 밖에는 하던 턴이 끝나야 맨 먼저 들어간다. 무엇을 했는지는 이 도구의 답에 나오니 그대로 대표에게 알린다"),
       attachments: z.array(z.string()).max(20).optional().describe("함께 넘길 대표 메시지의 첨부 id(`첨부:` 줄 경로의 파일 이름 앞 a_... 부분). 경로를 글로 옮기지 말고 이것을 쓴다"),
     }),
     async (orch, member, a) => {

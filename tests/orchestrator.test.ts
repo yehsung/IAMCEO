@@ -1324,7 +1324,8 @@ describe("전달 실패 사유", () => {
     const bundle = t.turns(w.id)[1]!.prompt;
     expect(bundle).toContain("보통");
     expect(bundle).toContain("급함");
-    expect(bundle.indexOf("보통")).toBeLessThan(bundle.indexOf("급함"));
+    // 0.2.7 묶음 1: 같은 봉투에서는 급한 지시가 깨우는 글 가운데 맨 앞이다(대표 원문 없이 온 급한 지시는 하던 턴을 멈추지 않고 턴 끝을 기다린다).
+    expect(bundle.indexOf("급함")).toBeLessThan(bundle.indexOf("보통"));
     await t.idle(w.id);
     expect(t.turns(w.id)).toHaveLength(2);
     expect(t.member(w.id).queuedCount).toBe(0);
@@ -1581,7 +1582,8 @@ describe("네트워크 자동 복구와 대표 전달 지연", () => {
     const worker = (await t.orch.addMember(t.project.id, { name: "직원", handle: "late-worker" })).member;
     const lead = t.store.createMember({ projectId: t.project.id, handle: "late-lead", name: "총괄", kind: "conductor" });
     const d = t.store.enqueue({ projectId: t.project.id, memberId: worker.id, kind, text: "대표의 결재 답" });
-    const now = Date.now(); t.store.db.query("UPDATE deliveries SET created_at = ? WHERE id = ?").run(new Date(now - 31 * 60000).toISOString(), d.id);
+    // 0.2.7 묶음 1: 막힘 알림은 그 대기 사유(여기서는 일하지 않는데 나가지 않는 이유 없는 대기)가 2분 넘게 이어진 뒤다.
+    const now = Date.now() + 3 * 60_000; t.store.db.query("UPDATE deliveries SET created_at = ? WHERE id = ?").run(new Date(now - 31 * 60000).toISOString(), d.id);
     t.orch.notifyDelayedDeliveries(now); t.orch.notifyDelayedDeliveries(now + 60000);
     expect(t.store.listMessages(t.project.id).filter(m => m.title === "대표 전달 지연")).toHaveLength(1);
     expect(t.store.listMessages(t.project.id).find(m => m.title === "대표 전달 지연")!.body).toContain(`대표 ${label} 30분 넘게`);

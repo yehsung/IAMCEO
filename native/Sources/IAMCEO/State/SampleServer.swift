@@ -465,6 +465,10 @@ final class SampleServer: @unchecked Sendable {
         decision["choice"] = input["choice"] ?? NSNull()
         decision["note"] = (input["note"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? NSNull()
         decision["batch"] = input["batch"] as? Bool ?? false
+        // 0.2.7: 결재 답 첨부(실제 서버처럼 올린 첨부를 답에 남긴다).
+        let attached = (input["fileIds"] as? [String] ?? []).compactMap { uploads[$0] }
+        if !attached.isEmpty { decision["answerAttachments"] = attached }
+        decision["lastAnswerAttachments"] = nil
         decision["answeredAt"] = now; decision["updatedAt"] = now
         list[index] = decision
         project.state["decisions"] = list
@@ -495,6 +499,8 @@ final class SampleServer: @unchecked Sendable {
         }
         if let choice = decision["choice"] as? String { decision["lastChoice"] = choice }
         if let note = decision["note"] as? String { decision["lastNote"] = note }
+        if let attached = decision["answerAttachments"] as? [Object], !attached.isEmpty { decision["lastAnswerAttachments"] = attached }
+        decision["answerAttachments"] = nil
         decision["status"] = "open"
         for key in ["choice", "note", "answeredAt", "deliveredAt", "closeKind", "closeReason", "closeQuote", "closedBy", "closedAt"] {
             decision[key] = NSNull()
@@ -531,11 +537,20 @@ final class SampleServer: @unchecked Sendable {
             let now = Self.timestamp()
             var todo = todos[index]
             let done = drop ? true : (input["done"] as? Bool ?? true)
+            // 0.2.7: 할 일 닫기 결과(했음·필요 없음·팀장에게 맡김). 실제 서버(flows/owner.ts setTodoDone)와 같게 메모가 까닭이 된다.
+            let outcome = drop ? "dropped" : (input["outcome"] as? String).flatMap { ["dropped", "delegated"].contains($0) ? $0 : nil }
             todo["done"] = done
             todo["doneAt"] = done ? now : NSNull()
-            todo["outcome"] = done ? (drop ? "dropped" : "done") : NSNull()
+            todo["outcome"] = done ? (outcome ?? "done") : NSNull()
             if drop { todo["closeReason"] = input["reason"] ?? NSNull(); todo["closedBy"] = language == .en ? "you" : "나" }
-            if !drop, done, let note = input["note"] as? String, !note.isEmpty { todo["completionNote"] = note }
+            if !drop, done, let outcome {
+                let note = (input["note"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                if let note { todo["closeReason"] = note }
+                else if outcome == "dropped" { todo["closeReason"] = language == .en ? "You marked it not needed" : "대표가 필요 없음으로 정리" }
+                else { todo["closeReason"] = NSNull() }
+                todo["closedBy"] = language == .en ? "you" : "나"
+            }
+            if !drop, done, outcome != "dropped", let note = input["note"] as? String, !note.isEmpty { todo["completionNote"] = note }
             if !done { todo["completionNote"] = NSNull(); todo["closeReason"] = NSNull(); todo["closedBy"] = NSNull() }
             todos[index] = todo
             project.state["todos"] = todos

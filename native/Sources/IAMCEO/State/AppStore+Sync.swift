@@ -162,6 +162,8 @@ extension AppStore {
             guard epoch == generation, phase == foregroundGeneration else { return }
             capabilitiesLoaded = true; capabilityProbeFailed = false
             strictWriteContract = capabilities.contractVersion == 2 && capabilities.capabilities?.operations == true
+            let revisions = capabilities.capabilities?.revisions == true
+            if serverTakesRevisions != revisions { serverTakesRevisions = revisions }
             realtimeSupported = capabilities.contractVersion == 2 && capabilities.capabilities?.realtime == true
             syncSupported = capabilities.contractVersion == 2 && (capabilities.capabilities?.realtime == true || strictWriteContract)
         } catch {

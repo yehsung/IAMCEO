@@ -1,6 +1,6 @@
 // 판 정리(I): 주기 판 정리, 묵은 할 일 알림, 대표의 '지금 판 정리', 직접 띄운 CLI 의 상태 추정.
 // orchestrator.ts 에서 옮겨 왔다(동작은 그대로다). 원본은 저장소에 쓰고 전달은 줄 세운 뒤 펌프만 민다.
-import type { Delivery, Member, Project, TidyResult } from "../shared/types.ts";
+import type { Delivery, Member, Project, TidyResult, Todo } from "../shared/types.ts";
 import { formatSystem, formatTidy, isTidy, quotedInline } from "./delivery-text.ts";
 import { josa } from "./roles.ts";
 import { ApiError, type Store } from "./store.ts";
@@ -24,6 +24,14 @@ export interface BoardHygienePort {
   pump(memberId: string): Promise<void>;
 }
 
+/**
+ * 0.2.7 묶음 4(D3-9): 부탁한 팀장이 없는 대표 본인의 할 일(옛 운영판에서 온 것 등, member_id·who 가 비었다). AI 가 됐는지 확인할 길이 없어
+ * 묵은 할 일 안내도, 묵은 할 일 때문의 매일 판 정리도 하지 않는다. 대표 화면이 'N일째'로 알린다.
+ */
+export function ownerOnlyTodo(todo: Pick<Todo, "memberId" | "who">): boolean {
+  return !todo.memberId && !todo.who.trim();
+}
+
 export class BoardHygiene {
   private readonly store: Store;
 
@@ -38,11 +46,16 @@ export class BoardHygiene {
     for (const project of this.store.listProjects()) {
       if (this.port.archiving(project.id)) continue;
       for (const todo of this.store.listStaleTodos(project.id, now)) {
+        if (ownerOnlyTodo(todo)) continue;
         const requester = todo.memberId ? this.store.getMember(todo.memberId) : null;
         const target = requester?.kind === "worker" ? requester : this.store.getConductor(project.id);
         if (!target) continue;
         const days = Math.floor((now - Date.parse(todo.createdAt)) / 86_400_000);
-        if (this.store.remindStaleTodo(todo, target.id, formatSystem(`네가 부탁한 대표의 할 일 #${todo.id} '${quotedInline(todo.title)}' 이 ${days}일째 열려 있다. 다음에 그 일을 할 때 됐는지 직접 확인하고 그 결과를 근거로 todo_close 로 정리해라. 필요 없어졌으면 dropped.`), now)) queued.push(todo.id);
+        // D3-9: '네가 부탁한'은 받는 이가 부탁한 이일 때만. 부탁한 팀장이 명부에 없으면(닫힘·가져온 할 일) 그렇게 말한다.
+        const text = requester?.id === target.id
+          ? `네가 부탁한 대표의 할 일 #${todo.id} '${quotedInline(todo.title)}' 이 ${days}일째 열려 있다. 다음에 그 일을 할 때 됐는지 직접 확인하고 그 결과를 근거로 todo_close 로 정리해라. 필요 없어졌으면 dropped.`
+          : `대표의 할 일 #${todo.id} '${quotedInline(todo.title)}' 이 ${days}일째 열려 있다. 부탁한 팀장${todo.who.trim() ? `(${quotedInline(todo.who)})` : ""}은 지금 명부에 없다. 그 일을 이어받았거나 됐는지 직접 확인할 수 있으면 그 결과를 근거로 todo_close 로 정리해라. 확인할 길이 없으면 그대로 두고 대표에게 묻지 않는다.`;
+        if (this.store.remindStaleTodo(todo, target.id, formatSystem(text), now)) queued.push(todo.id);
       }
     }
     return queued;
@@ -66,7 +79,7 @@ export class BoardHygiene {
       // 한 번도 정리하지 않았으면 총괄이 뜬 때부터 센다.
       const review = this.store.getBoardReview(project.id);
       const since = review?.requestedAt ?? project.tidiedAt ?? lead.createdAt;
-      const staleDue = this.store.listStaleTodos(project.id, now).length > 0 && this.store.staleReviewDue(project.id, now);
+      const staleDue = this.store.listStaleTodos(project.id, now).some(todo => !ownerOnlyTodo(todo)) && this.store.staleReviewDue(project.id, now);
       if (!staleDue && now - Date.parse(since) < hours * 3_600_000) continue;
       const changed = this.store.lastBoardChangeAt(project.id);
       if (!staleDue && (review?.completedAt ? this.store.boardRevision(project.id) <= (review.reviewedRevision ?? -1) : !review && (!changed || changed <= since))) continue;

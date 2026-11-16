@@ -136,6 +136,8 @@ final class DraftStore {
     private var hosts: [String: Host] = [:]
     @ObservationIgnored private let storage: LocalStateStorage
     @ObservationIgnored private var canPersist = true
+    /// 0.2.7: forwardUploads 의 옛 열쇠 → 새 열쇠(이름 공간별). 저장하지 않는다.
+    @ObservationIgnored private var uploadForwards: [String: String] = [:]
 
     init(persist: Bool = true, namespace: String = "unassigned", storageURL: URL? = nil, defaults: UserDefaults? = nil,
          persistMigration: Bool = true) {
@@ -333,21 +335,44 @@ final class DraftStore {
     }
     func uploadFailures(for key: String) -> [DraftUploadFailure] { hosts[namespace]?.records[key]?.uploadFailures ?? [] }
     func failUpload(name: String, token: DraftUploadToken, id: UUID = UUID(), sourceID: String? = nil, detail: String) {
-        var record = hosts[token.namespace]?.records[token.key] ?? Record()
+        let key = uploadDestination(token)
+        var record = hosts[token.namespace]?.records[key] ?? Record()
         var failures = record.uploadFailures ?? []
         failures.removeAll { $0.id == id }
         failures.append(DraftUploadFailure(id: id, name: name, detail: detail, sourceID: sourceID))
         record.uploadFailures = failures
-        hosts[token.namespace, default: Host()].records[token.key] = record
+        hosts[token.namespace, default: Host()].records[key] = record
         save()
     }
     func resolveUploadFailures(sourceID: String?, token: DraftUploadToken) {
+        let key = uploadDestination(token)
         guard let sourceID, isCurrentUpload(token),
-              let failures = hosts[token.namespace]?.records[token.key]?.uploadFailures,
+              let failures = hosts[token.namespace]?.records[key]?.uploadFailures,
               failures.contains(where: { $0.sourceID == sourceID }) else { return }
-        hosts[token.namespace]?.records[token.key]?.uploadFailures = failures.filter { $0.sourceID != sourceID }
+        hosts[token.namespace]?.records[key]?.uploadFailures = failures.filter { $0.sourceID != sourceID }
         save()
     }
+    /// 0.2.7: 결재 카드가 새 카드로 대체됐다. 옛 카드 열쇠로 올리던 첨부(올리는 중이거나 실패해 다시 올릴 것)를 새 카드 열쇠에서 받는다.
+    /// 옛 열쇠의 세대는 그대로 둔다(비우면 올리던 것이 끝나도 버려진다). 올리기처럼 앱이 켜져 있는 동안만이다.
+    func forwardUploads(from old: String, to new: String) {
+        guard old != new else { return }
+        uploadForwards[Self.forwardKey(namespace, old)] = new
+        guard let failures = hosts[namespace]?.records[old]?.uploadFailures, !failures.isEmpty else { return }
+        var record = hosts[namespace]?.records[new] ?? Record()
+        let present = Set((record.uploadFailures ?? []).map(\.id))
+        record.uploadFailures = (record.uploadFailures ?? []) + failures.filter { !present.contains($0.id) }
+        hosts[namespace, default: Host()].records[new] = record
+        hosts[namespace]?.records[old]?.uploadFailures = nil
+        save()
+    }
+    /// 올린 첨부가 들어갈 열쇠: 대체된 결재 카드의 열쇠면 새 카드 열쇠, 아니면 그 열쇠.
+    func uploadDestination(_ token: DraftUploadToken) -> String {
+        var key = token.key
+        var seen: Set<String> = [key]
+        while let next = uploadForwards[Self.forwardKey(token.namespace, key)], seen.insert(next).inserted { key = next }
+        return key
+    }
+    private static func forwardKey(_ namespace: String, _ key: String) -> String { "\(namespace)\n\(key)" }
     func dismissUploadFailure(_ id: UUID) {
         for key in hosts[namespace]?.records.keys.map({ $0 }) ?? [] {
             hosts[namespace]?.records[key]?.uploadFailures?.removeAll { $0.id == id }
@@ -360,7 +385,7 @@ final class DraftStore {
     }
     @discardableResult func completeUpload(_ file: Attachment, token: DraftUploadToken) -> Bool {
         guard isCurrentUpload(token) else { return false }
-        addFile(file, for: token.key)
+        addFile(file, for: uploadDestination(token))
         return true
     }
 

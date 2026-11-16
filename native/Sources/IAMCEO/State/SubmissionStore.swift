@@ -44,7 +44,8 @@ struct MessageSubmission: Codable, Sendable, Identifiable {
     var failurePreview: String { String(draft.text.prefix(while: { !$0.isNewline })) }
 
     var request: SendMessageRequest {
-        SendMessageRequest(id: id, text: draft.text, targetMemberId: targetMemberID, attachmentIds: draft.attachments.map(\.id), contextFileId: contextFileId)
+        // 0.2.7 (D5-10): 섞여 들어간 제어문자는 보내지 않는다(서버도 지운다).
+        SendMessageRequest(id: id, text: OwnerText.clean(draft.text), targetMemberId: targetMemberID, attachmentIds: draft.attachments.map(\.id), contextFileId: contextFileId)
     }
 }
 

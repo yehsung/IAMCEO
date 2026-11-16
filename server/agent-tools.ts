@@ -172,6 +172,19 @@ function assignNote(result: AssignResult): string {
   return result.verified ? `${place}. 인용은 대표 글과 맞아 서버 확인으로 전달됩니다` : `${place}. 인용을 대표 글에서 찾지 못해 미확인으로 전달됩니다. 직원은 이것을 승인으로 치지 않습니다`;
 }
 
+/**
+ * 0.2.7 묶음 4(D3-7): '메모에 적음'처럼 메모가 있어야 뜻이 되는 선택지. ask 의 needs_note 가 없으면 버튼 글로 정한다.
+ * 켤 때만 needsNote 를 싣는다(보통 선택지의 모양은 그대로). 잘못 켜면 출시 앱의 답이 400 으로 막히므로 좁게 본다:
+ * 대표가 메모에 무엇을 적는다는 꼴('메모에 적음'·'메모로 알려 줄게'·'(메모)'·'메모 참고'·'see my note')만 켜고,
+ * 메모가 필요 없다는 꼴('메모는 필요 없어요'·'메모 안 써도 돼'·'메모 없이')과 앞 메모를 가리키는 꼴('앞 메모 그대로'·'메모대로')은 끈다.
+ * 'notes' 가 다른 뜻인 글('릴리스 notes 확인 뒤 배포')은 켜지 않는다.
+ */
+const MEMO_ON = /메모\s*(?:에|로|란|칸|를|을)|\(\s*메모|메모\s*(?:참고|참조|확인)|^\s*메모\s*$|\b(?:in|see|per|check|read)\s+(?:the|my|a)\s+(?:notes?|memo)\b|\b(?:notes?|memo)\s+(?:below|attached)\b|\b(?:wr(?:ite|ote|itten)|add|leave|left)\b.*\b(?:notes?|memo)\b/i;
+const MEMO_OFF = /메모\s*(?:는|도|를|을)?\s*(?:필요\s*(?:없|하지\s*않)|불필요|안\s*(?:써|쓰|적|남|달)|않아도|없이|생략|대로|그대로)|(?:앞|이전|지난|위)\s*메모|\b(?:no|without|skip)\s+(?:a\s+|the\s+)?(?:notes?|memo)\b|\b(?:notes?|memo)\s+(?:is\s+)?(?:not\s+)?(?:needed|required|optional)\b/i;
+export function needsNoteOf(option: { label: string; needs_note?: boolean }): boolean {
+  return option.needs_note ?? (MEMO_ON.test(option.label) && !MEMO_OFF.test(option.label));
+}
+
 /** 완료 칸은 길어진다. 판을 맞출 때는 최근 것만 보면 된다. */
 const BOARD_DONE_MAX = 10;
 
@@ -210,13 +223,15 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       title: oneLine(200).describe("무엇을 정하는지 한 줄"),
       detail: text.describe("카드만 읽고 고를 수 있는 배경·사실·위험과 왜 지금 정해야 하는지(마크다운). 내부 번호·개발 용어는 풀어 쓴다"),
       options: z
-        .array(z.strictObject({ k: oneLine(64).describe("선택지 키"), label: oneLine(120).describe("버튼 글(한 줄). 그대로 대표 원문이 된다"), desc: oneLineOpt(300).optional().describe("고르면 어떻게 되는지(한 줄)") }))
+        .array(z.strictObject({ k: oneLine(64).describe("선택지 키"), label: oneLine(120).describe("버튼 글(한 줄). 그대로 대표 원문이 된다"), desc: oneLineOpt(300).optional().describe("고르면 어떻게 되는지(한 줄)"),
+          needs_note: z.boolean().optional().describe("이 선택지를 고르면 대표가 메모(또는 첨부)를 꼭 붙여야 할 때 true('메모에 적음' 등). 생략하면 버튼 글이 '메모에 적음'처럼 메모에 적는다는 뜻일 때 켠다") }))
         .optional()
         .describe("비우면 자유 답"),
       rec: z.string().optional().describe("권장 선택지의 k"),
       group: oneLineOpt(80).optional().describe("묶음 이름"),
       file_id: z.string().optional().describe("근거 자료 id(file 도구의 결과)"),
       images: z.array(z.string()).max(10).optional().describe("카드에 바로 보일 이미지 파일 경로(시안 캡처 등). 작업 폴더 안의 파일"),
+      replaces: text.optional().describe("이 카드가 대신할 내 열린 결재 id(d_...). 고쳐 다시 물을 때 쓴다. 앞 카드는 서버가 함께 닫고(대체됨) 새 카드에 잇는다. ask_close 를 따로 부르지 않는다"),
     }),
     async (orch, member, a) => {
       const keys = (a.options ?? []).map((o: { k: string }) => o.k);
@@ -229,7 +244,8 @@ const TOOLS: Record<ToolName, Tool<any>> = {
         if (!attachment.isImage) throw new ApiError(400, `이미지가 아닙니다: ${image}`, "not_an_image");
         images.push(attachment);
       }
-      const { decision, blocking, text } = await orch.registerAsk(member, { title: a.title, detail: a.detail, options: a.options, rec: a.rec, group: a.group, fileId: a.file_id, images });
+      const options = (a.options as { k: string; label: string; desc?: string; needs_note?: boolean }[] | undefined)?.map(({ needs_note, ...option }) => needsNoteOf({ label: option.label, needs_note }) ? { ...option, needsNote: true } : option);
+      const { decision, blocking, text } = await orch.registerAsk(member, { title: a.title, detail: a.detail, options, rec: a.rec, group: a.group, fileId: a.file_id, images, replaces: a.replaces });
       return blocking ? { text, wait: { decisionId: decision.id } } : { text };
     },
   ),
@@ -279,9 +295,16 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       content: z.string().optional().describe("마크다운 전문"),
       html: z.string().optional().describe("한 페이지짜리 자체 완결 HTML(2MB 이하). CDN·일반 외부 요청은 막힌다(iframe·link 는 지워지고, 격리가 완전하지 않으므로 비밀번호·개인정보 같은 민감한 데이터는 싣지 않는다). 대표가 실행을 눌러야 스크립트가 돈다. 스크립트는 인라인만, 이미지는 data: 로. 기본 스타일 키트가 자동으로 깔려 semantic HTML 과 키트 클래스(card, grid, callout, kpi, steps, flow, tabs, tag, compare)만 써도 깔끔하다. kpi 는 <div class=\"kpi\"><b>값</b><small>설명</small></div>"),
       images: z.array(z.string()).optional().describe("이미지 파일 경로(작업 폴더 안)"),
+      replaces: text.optional().describe("이 자료가 대신할 옛 판 id(f_...). 고친 판을 올릴 때 쓴다. 대표 자료 목록에는 최신 판만 보이고(이전 판은 판 목록에서), 옛 판을 근거로 둔 열린 결재는 새 판을 가리킨다"),
     }),
     async (orch, member, a) => {
       if ([a.path, a.content, a.html].filter((v) => v !== undefined).length > 1) throw new ApiError(400, "path·content·html 은 하나만 줍니다", "file_source_ambiguous");
+      if (a.replaces !== undefined) {
+        // 0.2.7 묶음 4(D5-7): 판 갈이. 직원은 자기가 올린 자료만, 총괄·본사 AI 는 프로젝트의 자료를 바꾼다. 이미 새 판이 있으면 store 가 409.
+        const old = orch.store.getFile(a.replaces);
+        if (!old || old.projectId !== member.projectId) throw new ApiError(404, `자료를 찾을 수 없습니다: ${a.replaces}`, "file_not_found");
+        if (member.kind === "worker" && old.memberId !== member.id) throw new ApiError(403, "직원은 자기가 올린 자료만 새 판으로 바꿀 수 있습니다", "file_not_own");
+      }
       if (a.html !== undefined && !a.html.trim()) throw new ApiError(400, "html 이 비어 있습니다", "html_empty");
       if (!a.path && a.content === undefined && a.html === undefined && !a.images?.length) throw new ApiError(400, "path·content·html·images 중 하나가 필요합니다", "file_source_required");
       if (a.html !== undefined && artifactBytes(a.html) > MAX_ARTIFACT_BYTES) throw new ApiError(413, "html 은 2MB 까지 올릴 수 있습니다", "html_too_large");
@@ -328,14 +351,14 @@ const TOOLS: Record<ToolName, Tool<any>> = {
         }
         file = orch.store.transaction(() => {
           const attachments = saved.map((entry) => orch.store.createAttachment(entry));
-          return orch.store.createFile({ projectId: member.projectId, title: a.title, who: member.name, memberId: member.id, summary: a.summary, body, path, attachments, kind, html });
+          return orch.store.createFile({ projectId: member.projectId, title: a.title, who: member.name, memberId: member.id, summary: a.summary, body, path, attachments, kind, html, replaces: a.replaces ?? null });
         });
         publication?.complete();
       } catch (error) {
         try { publication?.fail(createStorageReferences(orch.store, join(orch.dataDir, "inbox"))); } catch { /* Unknown cleanup stays active and protected. */ }
         throw toStorageError(error, "자료 게시");
       }
-      return reply(`자료를 올렸습니다 #${file.id}. post 의 file_ids 에 ${file.id} 를 넣으면 대화에 이어집니다`);
+      return reply(`자료를 올렸습니다 #${file.id}${a.replaces ? ` (옛 판 #${a.replaces} 를 대신합니다)` : ""}. post 의 file_ids 에 ${file.id} 를 넣으면 대화에 이어집니다`);
     },
   ),
 
@@ -346,6 +369,20 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       const todo = orch.store.createTodo({ projectId: member.projectId, memberId: member.id, who: member.name, title: a.title, detail: a.detail });
       orch.notifyInbox(textRef("notice.request.title", { name: member.name }), a.title);
       return reply(`내 할 일에 올렸습니다 #${todo.id}`);
+    },
+  ),
+
+  todo_update: tool(
+    "대표의 열린 할 일을 고친다(제목·내용). 판이 바뀌었다고 todo_close 하고 새로 올리지 않는다(대표에게 같은 알림이 되풀이된다). 고쳐도 새 알림은 가지 않고 대표 화면의 그 할 일이 바뀐다. 직원은 자기가 부탁한 할 일만.",
+    z.strictObject({
+      id: text.describe("할 일 id(t_...). board 로 본다"),
+      title: oneLine(200).optional().describe("새 제목(한 줄). 생략하면 그대로"),
+      detail: z.string().optional().describe("새 내용(마크다운). 생략하면 그대로"),
+    }),
+    (orch, member, a) => {
+      if (a.title === undefined && a.detail === undefined) throw new ApiError(400, "고칠 제목이나 내용이 필요합니다", "todo_update_empty");
+      const { todo, changed } = orch.updateTodo(member, { id: a.id, title: a.title, detail: a.detail });
+      return reply(changed ? `할 일 #${todo.id} 를 고쳤습니다` : `할 일 #${todo.id} 는 이미 그 내용입니다`);
     },
   ),
 

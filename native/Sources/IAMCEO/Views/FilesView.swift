@@ -78,25 +78,27 @@ struct FilesView: View {
     private var allFiles: [FileDoc] {
         store.files.sorted { $0.order != $1.order ? $0.order > $1.order : $0.createdAt > $1.createdAt }
     }
+    /// 0.2.7: 목록에는 최신 판만. 옛 판은 최신 판의 '이전 판'으로, 보고·결재의 링크로는 그대로 열린다(allFiles).
+    private var listedFiles: [FileDoc] { FileVersions.listed(allFiles) }
     /// A kind filter whose files disappeared falls back to 전체.
     private var activeKind: String? {
-        guard let kind, store.files.contains(where: { $0.kind == kind }) else { return nil }
+        guard let kind, listedFiles.contains(where: { $0.kind == kind }) else { return nil }
         return kind
     }
     private var query: String { search.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var shown: [FileDoc] {
         if !query.isEmpty, let searchResults {
-            return FileSearchPresentation(results: searchResults).files(allFiles, kind: activeKind)
+            return FileSearchPresentation(results: searchResults).files(listedFiles, kind: activeKind)
         }
-        return allFiles.filter { file in
+        return listedFiles.filter { file in
             (activeKind == nil || file.kind == activeKind)
                 && FileLinks.matches(file, body: nil, query: query)
         }
     }
-    private var kindCounts: [String: Int] { store.files.reduce(into: [:]) { $0[$1.kind, default: 0] += 1 } }
+    private var kindCounts: [String: Int] { listedFiles.reduce(into: [:]) { $0[$1.kind, default: 0] += 1 } }
     /// Kinds present, in chip order; unknown future kinds go last.
     private var presentKinds: [String] {
-        let kinds = Set(store.files.map(\.kind))
+        let kinds = Set(listedFiles.map(\.kind))
         return fileKindOrder.filter(kinds.contains) + kinds.subtracting(fileKindOrder).sorted()
     }
     /// Filtering by kind only helps when there are two kinds to tell apart (web rule).
@@ -134,7 +136,7 @@ struct FilesView: View {
             search = ""; kind = nil; searchResults = nil; arrivals = FileListArrivalState()
             listPreview = nil; listPreviewResource = nil
         }
-        .onChange(of: allFiles.map(\.id), initial: true) { _, ids in
+        .onChange(of: listedFiles.map(\.id), initial: true) { _, ids in
             arrivals.update(ids)
             if wide { router.fileID = FileLinks.pinnedSelection(current: router.fileID, visibleIDs: shown.map(\.id)) }
         }
@@ -368,7 +370,8 @@ struct FilesView: View {
 
     @ViewBuilder private var chipButtons: some View {
         let counts = kindCounts
-        chip(nil, title: String(localized: "전체"), count: store.files.count)
+        // 0.2.7: 목록처럼 최신 판만 센다(옛 판은 최신 판의 '이전 판'에 있다).
+        chip(nil, title: String(localized: "전체"), count: listedFiles.count)
         ForEach(presentKinds, id: \.self) { value in
             chip(value, title: fileKindName(value), count: counts[value] ?? 0)
         }
@@ -505,6 +508,8 @@ private struct FileRow: View {
                         Text(byline).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1)
                         if let label = searchResult?.bodyLabel { Text(label).font(CEFont.meta).foregroundStyle(CE.ink2) }
                         if openDecisions > 0 { Tag(String(localized: "결재 \(openDecisions)"), tone: .attention) }
+                        // 0.2.7: 고친 판이 있는 자료(이 줄이 최신 판).
+                        if let versions = file.versions, versions > 1 { Tag(String(localized: "판 \(versions)")) }
                     }
                     .padding(.top, 2)
                 }
@@ -528,6 +533,7 @@ private struct FileRow: View {
         var parts = [fileKindName(file.kind), title, file.summary, file.who, relativeTime(file.createdAt)]
         if let searchResult { parts += [searchResult.bodyLabel ?? "", searchResult.excerpt] }
         if openDecisions > 0 { parts.append(String(localized: "결재 \(openDecisions)건 대기")) }
+        if let versions = file.versions, versions > 1 { parts.append(String(localized: "판 \(versions)")) }
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 }
@@ -721,6 +727,7 @@ private struct FileReaderContent: View {
     private var column: some View {
         VStack(alignment: .leading, spacing: isArtifact ? 8 : 12) {
             header
+            versionBlock.padding(.horizontal, isArtifact ? 6 : 0)
             if !relatedDecisions.isEmpty || !relatedMessages.isEmpty { related.padding(.horizontal, isArtifact ? 6 : 0) }
             if let path, !isArtifact { pathBox(path) }
             if bodyLoading && !isArtifact { ViewerNote(text: String(localized: "본문을 읽는 중입니다"), loading: true) }
@@ -740,6 +747,35 @@ private struct FileReaderContent: View {
     private var horizontalPadding: CGFloat { isArtifact ? (wide ? 14 : 8) : (wide ? 26 : 16) }
     private var topPadding: CGFloat { isArtifact ? (wide ? 16 : 14) : (wide ? 22 : 18) }
     private var bottomPadding: CGFloat { isArtifact ? (wide ? 16 : 10) : (wide ? 28 : 22) }
+
+    // MARK: Versions (0.2.7)
+
+    /// 옛 판이면 새 판으로 가는 안내, 최신 판이면 이전 판 목록. 판 갈이가 없으면 아무것도 없다.
+    @ViewBuilder private var versionBlock: some View {
+        let newest = FileVersions.newest(of: file, in: store.files)
+        if newest.id != file.id {
+            InlineNotice(tone: .attention, icon: "clock.arrow.circlepath", title: String(localized: "옛 판입니다"),
+                         detail: String(localized: "고친 판이 있습니다: \(newest.title.isEmpty ? String(localized: "제목 없는 자료") : newest.title)"),
+                         actionTitle: String(localized: "새 판 보기"), action: { router.openFile(newest.id) })
+        } else {
+            let older = FileVersions.previous(of: file, in: store.files)
+            if !older.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("이전 판 \(older.count)개").font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink2)
+                    ForEach(older) { version in
+                        Button { router.openFile(version.id) } label: {
+                            Text([version.title.isEmpty ? String(localized: "제목 없는 자료") : version.title, version.who, fileTime(version.createdAt)]
+                                .filter { !$0.isEmpty }.joined(separator: " · "))
+                                .font(CEFont.secondary).foregroundStyle(CE.accent).lineLimit(1).truncationMode(.middle)
+                                .frame(minHeight: isMac ? nil : 44, alignment: .leading).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("이전 판 열기")
+                    }
+                }
+            }
+        }
+    }
 
     // MARK: Header
 

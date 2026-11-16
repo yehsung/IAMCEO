@@ -61,8 +61,9 @@ final class ComposerAttachmentUploads {
         }
     }
 
+    /// 그 열쇠로 들어갈 올리는 중인 첨부(대체된 결재 카드에서 넘어온 것 포함, DraftStore.forwardUploads).
     func pending(for key: String, drafts: DraftStore) -> [ComposerUpload] {
-        pending.filter { $0.token.key == key && drafts.isCurrentUpload($0.token) }
+        pending.filter { drafts.uploadDestination($0.token) == key && drafts.isCurrentUpload($0.token) }
     }
 
     func canRetry(_ id: UUID, store: AppStore) -> Bool {

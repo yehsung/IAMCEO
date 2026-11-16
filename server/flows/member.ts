@@ -3,7 +3,7 @@
 // 턴 상태는 Orchestrator 의 것을 TurnContext 로만 읽고 쓴다. 세션 수명·펌프는 Orchestrator 가 맡고, 여기서는 포트로만 부른다.
 import type { AgentOperationContext, ManualInboxAckRequest, ManualInboxAckResult, ManualInboxBatch } from "../../shared/operations.ts";
 import type { Attachment, Decision, DecisionCloseFollowUp, DecisionCloseKind, DecisionOption, Delivery, Member, Message, MessageKind, Project, Todo, TodoOutcome, WorkItem, WorkSec } from "../../shared/types.ts";
-import { attachmentLines, formatAnswer, formatInstruction, formatReport, formatSystem, isTidy, normalizeSpace, QUOTE_SCAN_PAGES, quotedInline, quoteNeedsContext, SHORT_QUOTE, type QuoteSource, type VerifiedQuote } from "../delivery-text.ts";
+import { attachmentLines, formatAnswer, formatAnswerFor, formatInstruction, formatReport, formatSystem, isTidy, normalizeSpace, QUOTE_SCAN_PAGES, quotedInline, quoteNeedsContext, SHORT_QUOTE, type QuoteSource, type VerifiedQuote } from "../delivery-text.ts";
 import type { AgentToolDef, AgentToolResult, AskWaitResult } from "../orchestrator-api.ts";
 import type { AgentToolsImpl, Orchestrator, UrgentOutcome, UrgentWaitReason } from "../orchestrator.ts";
 import { josa } from "../roles.ts";
@@ -52,7 +52,12 @@ export interface AskInput {
   group?: string | null;
   fileId?: string | null;
   images?: Attachment[];
+  /** 0.2.7 묶음 4(D3-5): 이 카드가 대신할 자기 열린 카드. 같은 트랜잭션에서 그 카드를 '대체됨'(obsolete)으로 닫고 서로 잇는다. */
+  replaces?: string | null;
 }
+
+/** 0.2.7 묶음 4: detail 이 자기 열린 카드를 대신한다고 쓰고 replaces 를 주지 않았을 때 알린다(점검 D3-5: 옛 카드가 열린 채 남았다). */
+const REPLACE_WORDS = /대신|대체|바꿔|갈음|새 카드|다시 여쭙|replac|supersed/i;
 
 // 0.2.7(D3-3): 지금 카드를 올리라는 것과, 걸린 문장이 나중의 예고·남의 카드·이미 받은 결정이면 아무것도 하지 말라는 것을 함께 말한다.
 // 예전 글('필요 없으면 보고를 정정하라')은 맞는 문장을 지우거나 거의 같은 보고를 1분 안에 다시 올리게 했다(0.2.6 뒤 감지 16번 중 정정만 14번).
@@ -393,7 +398,7 @@ export class MemberFlows {
           this.store.acknowledgeManualInbox(member.id, batch.id);
         } else this.store.setDecisionStatus(decisionId, "delivered");
       }
-      const text = answered ? formatAnswer(decision) : formatSystem(`결재가 닫혔습니다${decision.closeReason ? `: ${normalizeSpace(decision.closeReason)}` : ""}. 이 질문의 답은 오지 않습니다 #${decision.id}`);
+      const text = answered ? formatAnswerFor(decision, this.port.attachmentsFor(current, decision.answerAttachments ?? [])) : formatSystem(`결재가 닫혔습니다${decision.closeReason ? `: ${normalizeSpace(decision.closeReason)}` : ""}. 이 질문의 답은 오지 않습니다 #${decision.id}`);
       this.port.settle(current);
       return { done: true, text, decision: this.store.requireDecision(decisionId) };
     };
@@ -591,6 +596,15 @@ export class MemberFlows {
   async registerAsk(member: Member, input: AskInput): Promise<{ decision: Decision; blocking: boolean; text: string }> {
     // 보관한 프로젝트의 카드는 화면에 없고 답도 409 다. 올리면 세션이 답 없는 대기에 묶인다.
     if (this.store.requireProject(member.projectId).archived || this.port.archiving(member.projectId)) throw new ApiError(409, "프로젝트가 보관되어 대표가 답할 수 없습니다. 묻지 말고 턴을 끝내세요", "ask_project_archived");
+    // 0.2.7 묶음 4(D3-5): 대신할 카드는 자기가 올린, 아직 열린 보통 결재만. 도구 승인·사용 한도 카드는 서버가 연 것이라 대신하지 않는다.
+    const replaced = input.replaces ? this.store.getDecision(input.replaces) : null;
+    if (input.replaces) {
+      if (!replaced || replaced.projectId !== member.projectId) throw new ApiError(404, `결재를 찾을 수 없습니다: ${input.replaces}`, "decision_not_found");
+      if (replaced.memberId !== member.id || replaced.kind) throw new ApiError(403, "자기가 올린 결재 카드만 대신할 수 있습니다", "decision_not_own");
+      if (replaced.status !== "open") throw new ApiError(409, replaced.status === "closed" ? "이미 닫힌 결재입니다. replaces 없이 새로 올리세요" : "대표가 이미 답한 결재입니다. 그 답을 먼저 확인하세요", "decision_closed");
+    }
+    // 0.2.7 묶음 4(D5-7): 근거 자료가 이미 새 판이 있는 옛 판이면 최신 판을 붙인다. 열린 결재는 판을 갈 때만 옮겨지므로, 그 뒤에 옛 id 로 올린 카드가 옛 글을 가리키지 않게.
+    const fileId = input.fileId && this.store.getFile(input.fileId) ? this.store.listFileVersions(input.fileId)[0]!.id : input.fileId;
     const { value: decision, deliveries } = this.store.withDeliveryIntents(() => {
       const decision = this.store.createDecision({
         projectId: member.projectId,
@@ -601,9 +615,15 @@ export class MemberFlows {
         options: input.options,
         rec: input.rec,
         group: input.group,
-        fileId: input.fileId,
+        fileId,
         images: input.images,
+        replaces: replaced?.id ?? null,
       });
+      if (replaced) {
+        // 앞 카드를 새 카드에 잇고 같은 거래에서 닫는다. 대표가 옛 카드에 답하는 일(점검 D3-5)이 없다. 대표는 다시 열 수 있다(obsolete).
+        this.store.setDecisionReplacedBy(replaced.id, decision.id);
+        this.store.closeDecision(replaced.id, { kind: "obsolete", reason: textRef("card.replaced", { id: decision.id }), by: member.name });
+      }
       this.store.createMessage({
         projectId: member.projectId,
         memberId: member.id,
@@ -612,7 +632,7 @@ export class MemberFlows {
         title: input.title,
         body: input.detail ?? "",
         decisionId: decision.id,
-        fileId: input.fileId ?? null,
+        fileId: fileId ?? null,
         attachments: input.images,
       });
       this.store.patchMember(member.id, { status: "waiting" });
@@ -620,15 +640,39 @@ export class MemberFlows {
     }, decision => {
       const conductor = member.kind === "worker" ? this.store.getConductor(member.projectId) : null;
       return conductor ? [{ projectId: member.projectId, memberId: conductor.id, kind: "system",
-        text: formatSystem(`${josa(member.name, "이")} 대표에게 질문했습니다: ${normalizeSpace(input.title)} #${decision.id}`), wake: false }] : [];
+        text: formatSystem(`${josa(member.name, "이")} 대표에게 질문했습니다: ${normalizeSpace(input.title)} #${decision.id}${replaced ? ` (앞 카드 #${replaced.id} 를 대신합니다. 앞 카드는 닫혔습니다)` : ""}`), wake: false }] : [];
     });
+    if (replaced && member.origin === "manual") this.wakeAll(this.askWaiters, replaced.id);
     const rt = this.port.turnContext(member.id);
     rt.posted = true;
     if (rt.turn) (rt.turn.askedDecisionIds ??= new Set()).add(decision.id);
     this.port.notifyInbox(textRef("notice.decision.title", { name: member.name }), input.title);
     await Promise.all(deliveries.map(d => this.port.pump(d.memberId)));
-    if (member.origin === "manual") return { decision, blocking: true, text: `질문 #${decision.id} 등록됨. 답을 기다립니다` };
-    return { decision, blocking: false, text: `질문 #${decision.id} 등록됨. 턴을 끝내세요. 답은 다음 입력으로 옵니다` };
+    const replacedNote = (replaced ? ` 앞 카드 #${replaced.id} 는 닫고 이 카드에 이었습니다.` : this.replaceHint(member, decision, input))
+      + (fileId && fileId !== input.fileId ? ` 근거 자료 #${input.fileId} 는 새 판이 있어 최신 판 #${fileId} 를 붙였습니다.` : "");
+    if (member.origin === "manual") return { decision, blocking: true, text: `질문 #${decision.id} 등록됨.${replacedNote} 답을 기다립니다` };
+    return { decision, blocking: false, text: `질문 #${decision.id} 등록됨.${replacedNote} 턴을 끝내세요. 답은 다음 입력으로 옵니다` };
+  }
+
+  /** detail 이 자기의 다른 열린 카드를 대신한다고 쓰는데 replaces 가 없으면, 그 카드가 열린 채라고 알린다. */
+  private replaceHint(member: Member, decision: Decision, input: AskInput): string {
+    const text = `${input.title}\n${input.detail ?? ""}`;
+    if (!REPLACE_WORDS.test(text)) return "";
+    const mentioned = this.store.listOpenDecisionsByMember(member.id).filter(d => d.id !== decision.id && text.includes(d.id));
+    if (!mentioned.length) return "";
+    return ` 이 카드가 대신한다고 쓴 ${mentioned.map(d => `#${d.id}`).join(", ")} 는 아직 열려 있습니다. 대신하는 카드면 ask_close 로 그 카드를 obsolete 로 닫으세요(다음부터는 ask 의 replaces 에 앞 카드 id 를 넣으면 한 번에 닫힙니다).`;
+  }
+
+  /**
+   * 0.2.7 묶음 4(D3-5): todo_update. 열린 할 일의 제목·내용을 고친다(닫고 새로 올리지 않는다). 직원은 자기가 부탁한 것만.
+   * 새 알림(푸시)은 없다. 대표 화면의 할 일이 그 자리에서 바뀐다.
+   */
+  updateTodo(member: Member, input: { id: string; title?: string; detail?: string }): { todo: Todo; changed: boolean } {
+    const todo = this.store.getTodo(input.id);
+    if (!todo || todo.projectId !== member.projectId) throw new ApiError(404, `할 일을 찾을 수 없습니다: ${input.id}`, "todo_not_found");
+    if (member.kind === "worker" && todo.memberId !== member.id) throw new ApiError(403, "직원은 자기가 부탁한 할 일만 고칠 수 있습니다", "todo_not_own");
+    if (todo.done) throw new ApiError(409, "이미 끝났거나 정리된 할 일입니다. 다시 필요하면 todo 로 새로 부탁하세요", "todo_finished");
+    return this.store.updateTodo(todo.id, { ...(input.title !== undefined ? { title: input.title } : {}), ...(input.detail !== undefined ? { detail: input.detail } : {}) });
   }
 
   /**
@@ -765,7 +809,7 @@ export class MemberFlows {
     if (this.store.requireProject(member.projectId).archived || this.port.archiving(member.projectId)) return;
     this.store.transaction(() => {
       for (const decision of this.store.listUnreceivedAnswers(member.id)) {
-        if (!this.store.listDeliveries(member.projectId).some(d => d.refType === "decision" && d.refId === decision.id && d.memberId === member.id)) this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "answer", text: formatAnswer(decision), refType: "decision", refId: decision.id });
+        if (!this.store.listDeliveries(member.projectId).some(d => d.refType === "decision" && d.refId === decision.id && d.memberId === member.id)) this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "answer", text: formatAnswerFor(decision, this.port.attachmentsFor(member, decision.answerAttachments ?? [])), refType: "decision", refId: decision.id });
       }
     });
   }

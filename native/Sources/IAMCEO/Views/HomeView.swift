@@ -805,7 +805,14 @@ struct HomeView: View {
                 MarkdownText(text: todo.detail, size: 14, lineHeight: 1.55)
             }
             // Web .hm-todo__meta: 13 at 1.45, ink-2.
-            if !closedBy.isEmpty {
+            if checked, todo.outcome == "delegated" {
+                // 0.2.7: 대표가 하지 않고 맡긴 일.
+                let target = todo.who.isEmpty ? leadLabel : todo.who
+                Text(reason.isEmpty ? String(localized: "\(target)에게 맡김") : String(localized: "\(target)에게 맡김: \(reason)"))
+                    .font(CEFont.secondary).foregroundStyle(CE.ink2)
+                    .lineSpacing(CELeading.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if !closedBy.isEmpty {
                 Text(reason.isEmpty ? "\(closedBy) 정리" : "\(closedBy) 정리: \(reason)")
                     .font(CEFont.secondary).foregroundStyle(CE.ink2)
                     .lineSpacing(CELeading.secondary)
@@ -1163,7 +1170,8 @@ struct HomeView: View {
     private var recentItems: [HomeRecent] {
         let reports = recentReports(store.messages, limit: Self.topRecent)
         let linked = Set(reports.compactMap(\.fileId))
-        let files = store.files.filter { !linked.contains($0.id) }.sorted { $0.createdAt > $1.createdAt }.prefix(Self.topRecent)
+        // 0.2.7: 자료는 최신 판만(옛 판은 자료 탭의 '이전 판'에서 연다).
+        let files = FileVersions.listed(store.files).filter { !linked.contains($0.id) }.sorted { $0.createdAt > $1.createdAt }.prefix(Self.topRecent)
         let merged = reports.map(HomeRecent.report) + files.map(HomeRecent.file)
         return Array(merged.sorted { $0.date > $1.date }.prefix(Self.topRecent))
     }
@@ -1845,6 +1853,21 @@ enum InboxHomePolicy {
     }
 }
 
+/// 0.2.7(D1-5·D3-9): 할 일을 닫는 결과. 했음만 있던 때는 '대표가 안 했으니 맡아 달라'는 메모도 '했음'으로 나갔다.
+enum TodoCloseOutcome: String, CaseIterable, Identifiable {
+    case done, dropped, delegated
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .done: String(localized: "했음")
+        case .dropped: String(localized: "필요 없음")
+        case .delegated: String(localized: "팀장에게 맡김")
+        }
+    }
+    /// 서버에 싣는 값. 했음은 싣지 않는다(옛 서버도 그대로 받는다).
+    var wire: String? { self == .done ? nil : rawValue }
+}
+
 /// Separate from the chat composer: completing a todo never consumes or changes its draft attachments.
 @MainActor @Observable
 final class TodoCompletionReview: Identifiable {
@@ -1853,6 +1876,7 @@ final class TodoCompletionReview: Identifiable {
     let namespace: String
     let projectID: String?
     let connectionGeneration: UUID
+    var outcome: TodoCloseOutcome = .done
     var note = ""
     var files: [Attachment] = []
     var sending = false
@@ -1879,7 +1903,8 @@ final class TodoCompletionReview: Identifiable {
         }
         sending = true; error = nil
         defer { sending = false }
-        let accepted = await store.setTodoDone(todo, done: true, note: note.isEmpty ? nil : note, fileIDs: files.map(\.id))
+        let accepted = await store.setTodoDone(todo, done: true, note: note.isEmpty ? nil : note, fileIDs: files.map(\.id),
+                                               outcome: store.serverTakesRevisions ? outcome.wire : nil)
         guard isCurrent(in: store) else { return false }
         if !accepted { error = store.errorMessage.map(friendlyError) ?? String(localized: "완료 답을 보내지 못했습니다. 답과 첨부는 남겨 두었습니다.") }
         return accepted
@@ -1918,10 +1943,44 @@ private struct TodoCompletionEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var importing = false
 
+    private var requester: String { review.todo.who.isEmpty ? store.leadRankName : review.todo.who }
+    private var placeholder: String {
+        switch review.outcome {
+        case .done: String(localized: "짧은 답 (선택)")
+        case .dropped: String(localized: "까닭 (선택)")
+        case .delegated: String(localized: "부탁할 말 (선택) — 예: 아직 못 했어요, 대신 해 주세요")
+        }
+    }
+    private var outcomeNote: String {
+        switch review.outcome {
+        case .done: String(localized: "\(requester)에게 했다고 알립니다.")
+        case .dropped: String(localized: "\(requester)에게 필요 없어졌다고 알리고 내 차례에서 뺍니다.")
+        case .delegated: String(localized: "하지 않았다고 알리고 \(requester)에게 이 일을 맡깁니다.")
+        }
+    }
+    private var submitTitle: String {
+        if review.sending { return String(localized: "보내는 중") }
+        if review.error != nil { return String(localized: "다시 시도") }
+        switch review.outcome {
+        case .done: return String(localized: "완료 답 보내기")
+        case .dropped: return String(localized: "필요 없음으로 정리")
+        case .delegated: return String(localized: "\(requester)에게 맡기기")
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: CESpace.m) {
             Text(review.todo.title).font(CEFont.section)
-            TextField("짧은 답 (선택)", text: $review.note, axis: .vertical)
+            // 0.2.7: 했음 · 필요 없음 · 팀장에게 맡김. 결과에 맞는 글로 팀장에게 간다.
+            // 옛 서버는 결과를 몰라 '했음'으로 보낸다: 그때는 고르지 않게 한다(capabilities.revisions).
+            if store.serverTakesRevisions {
+                Picker("닫는 방법", selection: $review.outcome) {
+                    ForEach(TodoCloseOutcome.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden().disabled(review.sending)
+                Text(outcomeNote).font(CEFont.meta).foregroundStyle(CE.ink2).fixedSize(horizontal: false, vertical: true)
+            }
+            TextField(placeholder, text: $review.note, axis: .vertical)
                 .lineLimit(2...5).ceField().disabled(review.sending)
             Text("비밀번호·인증 코드 같은 비밀은 쓰거나 첨부하지 마세요.").font(CEFont.meta).foregroundStyle(CE.ink2)
             ForEach(review.files) { file in
@@ -1941,7 +2000,7 @@ private struct TodoCompletionEditor: View {
             HStack {
                 Button("파일 붙이기") { importing = true }.ceSecondaryButton()
                     .disabled(review.sending || review.uploading || !store.uiCanWrite || !review.isCurrent(in: store))
-                Button(review.sending ? "보내는 중" : review.error == nil ? "완료 답 보내기" : "다시 시도") {
+                Button(submitTitle) {
                     Task { if await review.submit(store: store) { dismiss() } }
                 }.ceProminentButton().disabled(review.sending || review.uploading || !store.uiCanWrite || !review.isCurrent(in: store))
                 Button("취소") { dismiss() }.ceGhostButton().disabled(review.sending || review.uploading)

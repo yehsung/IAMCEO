@@ -224,6 +224,8 @@ export const SERVER_TEXTS = {
   "card.reopen_stopped": { ko: "전달을 그만둔 답입니다. {name:이} 받지 못했을 수 있으니 다시 결정해 주세요", en: "You stopped delivering this answer, so {name} may not have it. Please decide again" },
   "card.reopen_by_owner": { ko: "{who:이} 닫았던 결재를 대표가 다시 열었습니다", en: "You reopened the decision {who} had closed" },
   "card.reopen_by_owner_reason": { ko: "{who:이} 닫았던 결재를 대표가 다시 열었습니다(닫은 이유: {reason})", en: "You reopened the decision {who} had closed (reason it was closed: {reason})" },
+  // 0.2.7 묶음 4: ask 도구 replaces 로 새 카드가 앞 카드를 대신해 닫힌 이유.
+  "card.replaced": { ko: "새 카드(#{id})로 대신했습니다", en: "Replaced by a newer card (#{id})" },
 
   // ---- 낱말 ----
   "word.unknown": { ko: "알 수 없음", en: "unknown" },

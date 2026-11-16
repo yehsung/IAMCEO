@@ -576,6 +576,7 @@ export class Orchestrator implements OrchestratorApi {
       refreshWaiting: memberId => this.refreshWaiting(memberId),
       isBusy: member => this.isBusy(member),
       deliveryOutlook: memberId => this.deliveryOutlook(memberId),
+      turnEnded: member => !this.isBusy(member) || this.lingering(member) !== null,
       settle: member => this.settle(member),
       wakeAsk: decisionId => this.memberFlows.wakeAsk(decisionId),
       wakeInbox: memberId => this.memberFlows.wakeInbox(memberId),
@@ -2659,7 +2660,7 @@ export class Orchestrator implements OrchestratorApi {
     return this.ownerFlows.dropTodo(todoId, reason);
   }
 
-  setTodoDone(todoId: string, done: boolean, completion?: { note?: string; fileIds?: string[] }): Promise<Todo> {
+  setTodoDone(todoId: string, done: boolean, completion?: { note?: string; fileIds?: string[]; outcome?: "done" | "dropped" | "delegated" }): Promise<Todo> {
     return this.ownerFlows.setTodoDone(todoId, done, completion);
   }
 
@@ -3644,6 +3645,11 @@ export class Orchestrator implements OrchestratorApi {
 
   closeTodo(member: Member, input: { id: string; outcome: TodoOutcome; reason: string }): Promise<Todo> {
     return this.memberFlows.closeTodo(member, input);
+  }
+
+  /** 0.2.7 묶음 4: todo_update(열린 할 일의 제목·내용 고치기). */
+  updateTodo(member: Member, input: Parameters<MemberFlows["updateTodo"]>[1]): ReturnType<MemberFlows["updateTodo"]> {
+    return this.memberFlows.updateTodo(member, input);
   }
 
   setMemberStatus(member: Member, now: string, next?: string): Member {

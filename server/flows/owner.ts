@@ -6,11 +6,12 @@ import { join } from "node:path";
 import type { RevisionPrecondition, TodoDoneRequest, TodoWriteResult } from "../../shared/operations.ts";
 import type { AnswerReq, Attachment, Decision, Delivery, Member, Message, Project, SendMessageReq, Todo } from "../../shared/types.ts";
 import type { DeliveryRecovery } from "../delivery-recovery.ts";
-import { attachmentLines, formatAnswer, formatSystem, formatTodoDone, formatTodoUndone, formatUserMessage, normalizeSpace, quotedInline } from "../delivery-text.ts";
+import { attachmentLines, formatAnswer, formatAnswerFor, formatSystem, formatTodoDone, formatTodoUndone, formatUserMessage, normalizeSpace, quotedInline } from "../delivery-text.ts";
 import { sanitizeName } from "../files.ts";
 import { HOLD_NOTES } from "../hold-codes.ts";
 import { josa } from "../roles.ts";
 import { ApiError, type NewDelivery, type Store } from "../store.ts";
+import { stripControls } from "../text.ts";
 import { WAKE_POST_KINDS } from "./member.ts";
 import { textRef } from "../../shared/server-text.ts";
 
@@ -39,6 +40,11 @@ export interface OwnerFlowPort {
   isBusy(member: Member): boolean;
   /** 0.2.7 묶음 1: 지금 이 팀장에게 넣는 전달이 언제 들어가는지(총괄에게 주는 한국어 한 줄). */
   deliveryOutlook(memberId: string): string;
+  /**
+   * 0.2.7 묶음 4(핫픽스 B 남은 것): 턴이 끝난 팀장인가. 바쁘지 않거나, Codex 가 띄운 백그라운드 프로그램 때문에만 바쁜(명부에 쉬는 중으로 보이는) 팀장.
+   * 없으면(옛 포트) isBusy 만 본다.
+   */
+  turnEnded?(member: Member): boolean;
   /** 턴 밖의 상태로 돌린다(답하지 않은 결재가 있으면 waiting, 없으면 idle). */
   settle(member: Member): void;
   /** 결재 답을 기다리는 직접 띄운 CLI 를 깨운다(flows/member.ts). */
@@ -74,7 +80,7 @@ export class OwnerFlows {
         refId: message.id,
       });
     }
-    for (const d of answers) this.store.enqueue({ projectId, memberId: conductor.id, kind: "answer", text: formatAnswer(d), refType: "decision", refId: d.id });
+    for (const d of answers) this.store.enqueue({ projectId, memberId: conductor.id, kind: "answer", text: this.answerText(d, conductor), refType: "decision", refId: d.id });
     for (const t of todos) {
       this.store.enqueue({ projectId, memberId: conductor.id, kind: "todo_done", text: this.todoDoneText(t, conductor), refType: "todo", refId: t.id });
       this.store.setTodoNoticePending(t.id, false);
@@ -90,7 +96,7 @@ export class OwnerFlows {
       }
       for (const decision of this.store.listAnswersMissingDeliveries(projectId)) {
         const member = decision.memberId ? this.store.getMember(decision.memberId) : null;
-        if (member && member.origin !== "manual") this.store.enqueue({ projectId, memberId: member.id, kind: "answer", text: formatAnswer(decision), refType: "decision", refId: decision.id });
+        if (member && member.origin !== "manual") this.store.enqueue({ projectId, memberId: member.id, kind: "answer", text: this.answerText(decision, member), refType: "decision", refId: decision.id });
       }
       const lead = this.store.getConductor(projectId);
       if (lead) for (const message of this.store.listReportsMissingDeliveries(projectId)) {
@@ -155,6 +161,8 @@ export class OwnerFlows {
   }
 
   async sendUserMessage(projectId: string, req: SendMessageReq): Promise<Message> {
+    // D5-10: 대표 글에 섞인 제어문자(백스페이스 등)는 저장 전에 지운다(http 도 먼저 지운다. 다른 길로 와도 같게).
+    req = { ...req, text: stripControls(req.text) };
     const project = this.store.requireProject(projectId);
     this.port.requireActive(project);
     if (req.contextFileId && this.store.getFile(req.contextFileId)?.projectId !== projectId) throw new ApiError(400, "이 프로젝트의 자료가 아닙니다", "file_other_project");
@@ -216,24 +224,37 @@ export class OwnerFlows {
     return [formatTodoDone(todo), ...attachmentLines(this.attachmentsFor(member, attachments))].join("\n");
   }
 
+  /** 0.2.7 묶음 4(D3-4): 결재 답 전달 글. 대표가 붙인 첨부를 받는 팀장의 폴더로 이어 경로 줄을 붙인다(할 일 완료와 같은 모양). */
+  answerText(decision: Decision, member: Member): string {
+    return formatAnswerFor(decision, this.attachmentsFor(member, decision.answerAttachments ?? []));
+  }
+
   async dropTodo(todoId: string, reason?: string): Promise<Todo> {
-    return this.writeTodo(todoId, true, {}, reason?.trim() || "대표가 필요 없음으로 정리");
+    return this.writeTodo(todoId, true, {}, { outcome: "dropped", reason: (reason === undefined ? "" : stripControls(reason)).trim() || "대표가 필요 없음으로 정리" });
   }
 
-  async setTodoDone(todoId: string, done: boolean, completion: { note?: string; fileIds?: string[] } = {}): Promise<Todo> {
-    return this.writeTodo(todoId, done, completion);
+  /**
+   * 대표의 할 일 체크. 0.2.7 묶음 4(D1-5·D3-9): done 일 때 outcome 으로 닫는 결과를 고른다. 했음(done, 기본)·필요 없음(dropped: 메모가 까닭)·
+   * 팀장에게 맡김(delegated: 메모가 부탁, '했음'으로 보내지 않는다). 셋 다 부탁한 팀장(없으면 총괄)에게 알린다.
+   */
+  async setTodoDone(todoId: string, done: boolean, completion: { note?: string; fileIds?: string[]; outcome?: "done" | "dropped" | "delegated" } = {}): Promise<Todo> {
+    if (!done && completion.outcome !== undefined) throw new ApiError(400, "완료할 때만 답과 첨부를 붙일 수 있습니다", "todo_answer_requires_done");
+    const note = completion.note === undefined ? undefined : stripControls(completion.note);
+    if (done && completion.outcome === "dropped") return this.writeTodo(todoId, true, { fileIds: completion.fileIds }, { outcome: "dropped", reason: note?.trim() || "대표가 필요 없음으로 정리" });
+    if (done && completion.outcome === "delegated") return this.writeTodo(todoId, true, { note, fileIds: completion.fileIds }, { outcome: "delegated", reason: note?.trim() || null });
+    return this.writeTodo(todoId, done, { note, fileIds: completion.fileIds });
   }
 
-  private async writeTodo(todoId: string, done: boolean, completion: { note?: string; fileIds?: string[] }, dropReason?: string): Promise<Todo> {
+  private async writeTodo(todoId: string, done: boolean, completion: { note?: string; fileIds?: string[] }, close?: { outcome: "dropped" | "delegated"; reason: string | null }): Promise<Todo> {
     for (const id of completion.fileIds ?? []) if (!this.store.getAttachment(id)) throw new ApiError(400, "업로드된 첨부를 찾을 수 없습니다", "upload_not_found");
     if (!done && (completion.note !== undefined || completion.fileIds?.length)) throw new ApiError(400, "완료할 때만 답과 첨부를 붙일 수 있습니다", "todo_answer_requires_done");
     let targetId: string | null = null;
     const { todo, changed } = this.store.transaction(() => {
       const before = this.store.requireTodo(todoId);
       if (before.done !== done) this.store.setTodoCompletion(todoId, done ? completion.note ?? null : null, done ? completion.fileIds ?? [] : []);
-      if (dropReason !== undefined && before.done && before.outcome !== "dropped") throw new ApiError(409, "이미 끝났거나 정리된 할 일입니다", "todo_finished");
-      const result = dropReason !== undefined && !before.done
-        ? { todo: this.store.closeTodo(todoId, { outcome: "dropped", reason: dropReason, by: "대표" }), changed: true }
+      if (close && before.done && before.outcome !== close.outcome) throw new ApiError(409, "이미 끝났거나 정리된 할 일입니다", "todo_finished");
+      const result = close && !before.done
+        ? { todo: this.store.closeTodo(todoId, { outcome: close.outcome, reason: close.reason, by: "대표" }), changed: true }
         : this.store.setTodoDone(todoId, done);
       if (!result.changed) return result;
       const todo = result.todo;
@@ -312,7 +333,8 @@ export class OwnerFlows {
     if (asker && asker.origin !== "manual") {
       await this.port.deliver({ projectId: decision.projectId, memberId: asker.id, kind: "system", text: formatSystem(note), wake: false });
       const fresh = this.store.getMember(asker.id);
-      if (fresh?.status === "idle" && !this.port.isBusy(fresh)) this.port.settle(fresh);
+      // 핫픽스 B 남은 것: Codex 백그라운드 프로그램만 남은 팀장도 턴은 끝났다(명부는 쉬는 중). 다시 연 결재를 기다리는 '결재 기다림'으로 바꾼다.
+      if (fresh?.status === "idle" && (this.port.turnEnded ? this.port.turnEnded(fresh) : !this.port.isBusy(fresh))) this.port.settle(fresh);
     }
     const lead = this.store.getConductor(decision.projectId);
     if (lead && lead.id !== asker?.id) await this.port.deliver({ projectId: decision.projectId, memberId: lead.id, kind: "system", text: formatSystem(note), wake: false });
@@ -349,7 +371,7 @@ export class OwnerFlows {
       }
       const recipient = asker ?? conductor;
       const intents: NewDelivery[] = [];
-      if (recipient && asker?.origin !== "manual") intents.push({ projectId: project.id, memberId: recipient.id, kind: "answer", text: formatAnswer(decision), refType: "decision", refId: decision.id });
+      if (recipient && asker?.origin !== "manual") intents.push({ projectId: project.id, memberId: recipient.id, kind: "answer", text: this.answerText(decision, recipient), refType: "decision", refId: decision.id });
       // 0.2.7 묶음 1(점검 D1-6): 이 글은 답을 접수한 순간에 만든다. 그때는 아직 넣기 전이라 '이미 전달했습니다'가 아니라 서버가 맡았다는 것과 지금 상태를 쓴다.
       if (conductor && recipient && conductor.id !== recipient.id) intents.push({ projectId: project.id, memberId: conductor.id, kind: "system",
         text: formatSystem(`대표가 ${decision.who}의 결재에 답했습니다. 서버가 ${decision.who}에게 전달합니다(${this.port.deliveryOutlook(recipient.id)}). 같은 일을 다시 시키지 말고, 결과 보고를 기다려 판만 맞추세요. 아직 들어갔는지는 roster 의 대기열로 봅니다.\n${formatAnswer(decision)}`), wake: false });

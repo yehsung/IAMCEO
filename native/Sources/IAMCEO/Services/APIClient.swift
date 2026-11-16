@@ -105,6 +105,10 @@ actor APIClient {
         return file
     }
     func clearFileBodyCache() { fileBodyCache.removeAll(); fileBodyOrder.removeAll() }
+    /// 0.2.7: 한 자료의 모든 판(최신 판이 먼저, 본문 없이). 옛 서버는 404 다.
+    func fileVersions(id: String) async throws -> [FileDoc] {
+        try await request("/api/files/\(Self.segment(id))/versions?lite=1")
+    }
 
     func searchFiles(projectID: String, query: String, limit: Int = 200, archived: Bool = false) async throws -> [FileSearchResult] {
         var parts = URLComponents()
@@ -135,8 +139,8 @@ actor APIClient {
         if let contextFileID { body.contextFileId = contextFileID }
         return try await send("/api/projects/\(Self.segment(projectID))/messages", body: body, contractVersion: contractVersion)
     }
-    func completeTodo(id: String, done: Bool, note: String? = nil, fileIDs: [String] = [], revision: Int? = nil) async throws -> TodoWriteResult {
-        let body = TodoCompletionRequest(done: done, note: note, fileIds: fileIDs.isEmpty ? nil : fileIDs)
+    func completeTodo(id: String, done: Bool, note: String? = nil, fileIDs: [String] = [], outcome: String? = nil, revision: Int? = nil) async throws -> TodoWriteResult {
+        let body = TodoCompletionRequest(done: done, note: note, fileIds: fileIDs.isEmpty ? nil : fileIDs, outcome: outcome)
         if let revision { return try await send("/api/todos/\(Self.segment(id))/done", body: body, ifMatch: revision, contractVersion: 2) }
         let todo: Todo = try await send("/api/todos/\(Self.segment(id))/done", body: body)
         return TodoWriteResult(todo: todo, revision: 0)
@@ -444,6 +448,8 @@ struct AnswerRequest: Encodable, Sendable {
     let expectedVersion: String
     /// Only on a usage card's `model:` answer: the staff the person saw on the card. Left out (nil) otherwise, so older servers never see it.
     var memberIds: [String]? = nil
+    /// 0.2.7: 결재 답에 붙인 첨부. 없으면 싣지 않는다.
+    var fileIds: [String]? = nil
 }
 struct CreateProjectRequest: Encodable, Sendable {
     let name: String; let cwd: String; let goal: String; let startConductor: Bool; let chiefCli: String

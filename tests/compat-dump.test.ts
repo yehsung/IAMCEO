@@ -22,6 +22,7 @@ import type { Runner, RunnerMember, SendResult } from "../server/runner/types.ts
 import { Store } from "../server/store.ts";
 import { appHeadersDumpDir, loadReleases, type AppHeaders } from "../scripts/compat-decoders/run.ts";
 import { API_LEVEL, APP_HEADERS, type DeviceAccessList } from "../shared/types.ts";
+import { textRef } from "../shared/server-text.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
 /** 해석기가 아는 형 이름(scripts/compat-decoders/Harness.swift 의 표와 같다). */
@@ -141,6 +142,24 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
     store.createTodo({ projectId: project.id, memberId: member.id, title: "할 일" });
     store.upsertWork({ projectId: project.id, sec: "doing", title: "결제 화면" });
     store.createFile({ projectId: project.id, memberId: member.id, who: "결제 연동", title: "결제 설계", summary: "요약", body: "# 결제 설계\n\n본문" });
+    // 0.2.7 묶음 4: 판 갈이(replaces·replacedBy·versions), 앞 카드를 대신한 결재(replaces·replacedBy, 메모가 있어야 하는 선택지 needsNote),
+    // 첨부를 붙인 결재 답(answerAttachments), 팀장에게 맡긴 할 일(outcome delegated). 출시 앱은 모르는 칸·값을 그대로 넘기는지 본다.
+    const draft = store.createFile({ projectId: project.id, memberId: member.id, who: "결제 연동", title: "안내 문구", body: "# 안내 문구" });
+    store.createFile({ projectId: project.id, memberId: member.id, who: "결제 연동", title: "안내 문구(고친 판)", body: "# 안내 문구\n\n고친 판", replaces: draft.id });
+    const earlier = store.createDecision({ projectId: project.id, memberId: member.id, who: "결제 연동", title: "문구를 고를까요?", options: [{ k: "a", label: "가" }] });
+    const revised = store.createDecision({ projectId: project.id, memberId: member.id, who: "결제 연동", title: "문구를 고를까요?(고친 판)", replaces: earlier.id,
+      options: [{ k: "a", label: "가" }, { k: "memo", label: "메모에 적음", needsNote: true }] });
+    store.setDecisionReplacedBy(earlier.id, revised.id);
+    store.closeDecision(earlier.id, { kind: "obsolete", reason: textRef("card.replaced", { id: revised.id }), by: "결제 연동" });
+    const shot = store.createAttachment({ id: "a_compat_shot", name: "캡처.png", mime: "image/png", size: 3, path: join(isolated.paths.work, "캡처.png") });
+    const withFiles = store.createDecision({ projectId: project.id, memberId: member.id, who: "결제 연동", title: "시안을 볼까요?", options: [{ k: "a", label: "가" }] });
+    store.answerDecision(withFiles.id, { choice: "a", note: "그림 참고", fileIds: [shot.id] });
+    // 전달하지 못해 다시 열린 카드의 직전 답 첨부(lastAnswerAttachments).
+    const reopened = store.createDecision({ projectId: project.id, memberId: member.id, who: "결제 연동", title: "색을 바꿀까요?", options: [{ k: "a", label: "가" }] });
+    store.answerDecision(reopened.id, { choice: "a", note: "그림 참고", fileIds: [shot.id] });
+    store.reopenDecision(reopened.id);
+    const handed = store.createTodo({ projectId: project.id, memberId: member.id, title: "맡긴 할 일" });
+    store.closeTodo(handed.id, { outcome: "delegated", reason: null, by: "대표" });
     store.appendActivity(member.id, "text", "설계를 쓰는 중");
     const report = store.createMessage({ projectId: project.id, memberId: member.id, who: "결제 연동", kind: "완료", title: "보고", body: "다 했습니다" });
     store.removeMember(extra.id);
@@ -207,6 +226,10 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
       await capture("messages-around.json", "[Message]", `/api/projects/${project.id}/messages?around=${report.id}&limit=41`, "알림에서 연 대화 주변");
       await capture("decision.json", "Decision", `/api/decisions/${decision.id}`, "결재 한 건");
       await capture("decision-tool-permission.json", "Decision", `/api/decisions/${toolCard.id}`, "도구 승인 카드(K)");
+      await capture("decision-replaced.json", "Decision", `/api/decisions/${earlier.id}`, "새 카드가 대신해 닫힌 결재(0.2.7 replacedBy)");
+      await capture("decision-revised.json", "Decision", `/api/decisions/${revised.id}`, "앞 카드를 대신한 결재(0.2.7 replaces·needsNote)");
+      await capture("decision-answer-files.json", "Decision", `/api/decisions/${withFiles.id}`, "첨부를 붙인 결재 답(0.2.7 answerAttachments)");
+      await capture("decision-reopened-files.json", "Decision", `/api/decisions/${reopened.id}`, "다시 열린 카드의 직전 답 첨부(0.2.7 lastAnswerAttachments)");
       await capture("activity.json", "[Activity]", `/api/members/${member.id}/activity?limit=100`, "팀장 활동");
       await capture("member-delivery-notices.json", "DeliveryNoticePage", `/api/members/${member.id}/delivery-notices?limit=50`, "팀장 전달 안내");
       await capture("project-delivery-notices.json", "DeliveryNotices", `/api/projects/${project.id}/delivery-notices`, "받는 사람 없는 전달", ["notices-v2"]);
@@ -266,17 +289,26 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
     const sync = JSON.parse(readFileSync(join(out, "sync-project.json"), "utf8")) as Record<string, any>;
     const state = sync.state as Record<string, any>;
     expect(state.members.length).toBeGreaterThan(0);
-    expect(state.decisions.length).toBe(2);
+    expect(state.decisions.length).toBe(6);
     expect(state.decisions.some((d: Record<string, unknown>) => d.kind === "tool_permission" && d.toolPermission)).toBe(true);
-    expect(state.todos.length).toBe(1);
+    // 0.2.7 묶음 4 의 새 칸·값이 실제로 실렸다.
+    expect(state.decisions.some((d: Record<string, any>) => d.replacedBy && d.status === "closed")).toBe(true);
+    expect(state.decisions.some((d: Record<string, any>) => d.replaces && d.options.some((o: Record<string, unknown>) => o.needsNote === true))).toBe(true);
+    expect(state.decisions.some((d: Record<string, any>) => d.answerAttachments?.length === 1)).toBe(true);
+    expect(state.decisions.some((d: Record<string, any>) => d.status === "open" && d.lastAnswerAttachments?.length === 1)).toBe(true);
+    expect(state.todos.length).toBe(2);
+    expect(state.todos.some((t: Record<string, unknown>) => t.outcome === "delegated")).toBe(true);
     expect(state.work.length).toBe(1);
-    expect(state.files.length).toBe(1);
+    // 옛 판은 replacedBy 와 함께 남고(출시 앱이 보고의 자료를 연다), 새 판에 판 수가 실린다.
+    expect(state.files.length).toBe(3);
+    expect(state.files.some((f: Record<string, unknown>) => f.versions === 2 && f.replaces)).toBe(true);
+    expect(state.files.some((f: Record<string, unknown>) => f.replacedBy)).toBe(true);
     expect(state.deliveryNotices.version).toBe(2);
-    expect(targets[0]!.entries.length).toBe(28 + EVENT_TYPES.length);
+    expect(targets[0]!.entries.length).toBe(32 + EVENT_TYPES.length);
     // 머리글 없는 응답에는 새 칸이 없고, 머리글을 보낸 앱의 응답에는 server(0.2.5 의 server.id 포함)가 실린다.
     expect("server" in sync.bootstrap).toBe(false);
     for (const target of targets.slice(1)) {
-      expect(target.entries.length).toBe(27 + 4 + EVENT_TYPES.length);
+      expect(target.entries.length).toBe(31 + 4 + EVENT_TYPES.length);
       for (const file of ["bootstrap.json", "sync-project.json"]) {
         const body = JSON.parse(readFileSync(join(target.dir, file), "utf8")) as Record<string, any>;
         const server = (file === "bootstrap.json" ? body : body.bootstrap).server as Record<string, unknown> | undefined;

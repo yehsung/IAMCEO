@@ -965,6 +965,32 @@ export function ensureProjectRules(db: Database): boolean {
   }
 }
 
+/**
+ * 0.2.7 묶음 4: 결재·자료의 판 갈이와 결재 답 첨부. decisions.replaces·replaced_by(ask 도구 replaces 로 잇는 앞뒤 카드),
+ * decisions.answer_attachments(결재 답에 붙인 첨부 Attachment[] JSON)·last_answer_attachments(다시 열린 카드의 직전 답 첨부),
+ * files.replaces·replaced_by(file 도구 replaces 로 잇는 앞뒤 판).
+ * 색인과 같은 까닭으로 MIGRATIONS 에 넣지 않는다: 판 번호를 올리면 이전 판 서버가 이 DB 를 열지 못한다. 열을 더하기만 한다.
+ * 이전 판 서버는 이 열을 모른 채 지나간다(옛 판도 자료 목록에 다시 보이고, 결재 답 첨부는 전달 글에만 남는다).
+ * 실패하면 서버가 뜨지 않는다: 자료·결재 조회가 이 열을 늘 쓴다.
+ */
+export const REVISION_COLUMNS: readonly (readonly [table: string, column: string])[] = [
+  ["decisions", "replaces"],
+  ["decisions", "replaced_by"],
+  ["decisions", "answer_attachments"],
+  ["decisions", "last_answer_attachments"],
+  ["files", "replaces"],
+  ["files", "replaced_by"],
+];
+
+export function ensureRevisionColumns(db: Database): void {
+  db.transaction(() => {
+    for (const [table, column] of REVISION_COLUMNS) {
+      const columns = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
+      if (!columns.some(c => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
+    }
+  })();
+}
+
 const PRE_MIGRATION_KEEP = 3;
 const PRE_MIGRATION_KEEP_MS = 86_400_000;
 
@@ -1062,6 +1088,8 @@ export function openDb(path: string): Database {
     ensureServerTextColumns(db);
     // 0.2.7 묶음 5: 대표 상시 규칙 표. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
     ensureProjectRules(db);
+    // 0.2.7 묶음 4: 결재·자료의 판 갈이와 결재 답 첨부. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
+    ensureRevisionColumns(db);
     // 이주가 끝났으면 최근 사본 몇 개만 남긴다. 하루 안에 만든 것은 개수와 상관없이 둔다.
     if (backup) removePreMigrationBackups(path, all => all.slice(PRE_MIGRATION_KEEP).filter(entry => Date.now() - entry.at > PRE_MIGRATION_KEEP_MS));
     // Source parsing/index failures cannot roll back the schema or delay server startup.

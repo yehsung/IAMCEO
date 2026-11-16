@@ -9,6 +9,15 @@ export function cleanText(text: string): string {
   return text.replace(LINE_BREAKS, "\n").replace(INVISIBLE, "");
 }
 
+/**
+ * 0.2.7 묶음 4(D5-10): 대표가 쓴 글(대화·결재 메모·할 일 답)에 섞여 들어온 C0·C1 제어문자(백스페이스 0x08 등)를 저장 전에 지운다.
+ * 탭·줄바꿈은 남기고 CR·CRLF 는 줄바꿈으로 맞춘다. cleanText 와 달리 제로폭 결합 문자(이모지의 ZWJ 등)는 건드리지 않는다: 대표가 쓴 글 그대로 보여야 한다.
+ */
+const OWNER_CONTROLS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
+export function stripControls(text: string): string {
+  return text.replace(/\r\n?/g, "\n").replace(OWNER_CONTROLS, "");
+}
+
 /** 한 줄 값이 아니면 까닭을 돌려준다. 이름·제목·버튼 글처럼 전달 글의 머리에 들어가는 값에 쓴다. */
 export function oneLineProblem(value: string, max: number): string | null {
   if (value !== cleanText(value) || /[\n\t]/.test(value)) return "줄바꿈이나 제어문자를 넣을 수 없습니다";

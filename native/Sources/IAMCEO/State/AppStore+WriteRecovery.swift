@@ -270,7 +270,8 @@ extension AppStore {
             guard let revision = snapshot.revisions?.todos?[pending.id], let todo = reviewedTodos[pending.id] else { continue }
             if revision > pending.revision {
                 try saveJournal { $0.todos.removeValue(forKey: Self.scoped(pending.namespace, pending.id)) }
-                todoWrites[pending.id] = (todo.done == pending.done && (pending.dropped != true || todo.outcome == "dropped")) ? .confirmedCurrent : .conflict
+                todoWrites[pending.id] = (todo.done == pending.done && (pending.dropped != true || todo.outcome == "dropped")
+                    && pending.outcome.map({ $0 == todo.outcome }) ?? true) ? .confirmedCurrent : .conflict
             } else if !pendingActions.contains("todo:\(pending.id)"), let created = pending.createdAt, wallClock() - created >= Self.lostWriteLimit {
                 // 요청 제한 시간을 한참 넘겨도 revision이 그대로면 도착하지 않은 변경이다. 닫아야 다시 누를 수 있다.
                 try saveJournal { $0.todos.removeValue(forKey: Self.scoped(pending.namespace, pending.id)) }

@@ -436,5 +436,10 @@ enum ServerErrorText {
         "rule_not_found": (ko: "이 프로젝트의 상시 규칙을 찾을 수 없습니다", en: "Standing rule not found in this project"),
         "rule_duplicate": (ko: "같은 상시 규칙이 이미 있습니다", en: "The same standing rule already exists"),
         "rule_limit": (ko: "상시 규칙이 너무 많습니다. 낡은 규칙을 먼저 빼세요", en: "There are too many standing rules. Remove outdated ones first"),
+        "decision_note_required": (ko: "이 선택지는 메모를 함께 적어야 합니다", en: "This option needs a note too"),
+        "decision_attachment_unsupported": (ko: "이 카드의 답에는 첨부를 붙일 수 없습니다", en: "Attachments can't be added to the answer for this card"),
+        "file_not_own": (ko: "직원은 자기가 올린 자료만 새 판으로 바꿀 수 있습니다", en: "Staff can only replace files they uploaded themselves"),
+        "file_already_replaced": (ko: "이미 새 판이 있는 자료입니다. 최신 판의 id 를 replaces 에 넣으세요", en: "This file already has a newer version. Put the latest version's id in replaces"),
+        "todo_update_empty": (ko: "고칠 제목이나 내용이 필요합니다", en: "A new title or detail is needed"),
     ]
 }

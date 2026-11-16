@@ -97,7 +97,8 @@ test("strict three-day boundary, no recipient retry, and sleeping requester keep
   t.store.db.query("UPDATE todos SET created_at = ? WHERE id = ?").run(new Date(now - 3 * DAY).toISOString(), boundary.id);
   expect(t.orch.checkStaleTodos(now)).toEqual([]);
   expect(t.orch.checkStaleTodos(now + 1)).toEqual([boundary.id]);
-  const unowned = t.oldTodo(null);
+  // 0.2.7 묶음 4(D3-9): 부탁한 이가 아예 없는 대표 본인의 할 일은 안내하지 않는다. 부탁한 팀장이 명부에서 빠진 할 일로 '받을 이 없음'을 본다.
+  const unowned = t.oldTodo("m_gone");
   t.store.removeMember(t.lead.id);
   expect(t.orch.checkStaleTodos(now + 2)).toEqual([]);
   expect(t.store.db.query<{ stale_notified_at: string | null }, [string]>("SELECT stale_notified_at FROM todos WHERE id = ?").get(unowned.id)!.stale_notified_at).toBeNull();
@@ -113,14 +114,16 @@ test("strict three-day boundary, no recipient retry, and sleeping requester keep
   expect(t.runner.sent).toHaveLength(sent);
 });
 
-test("missing/deleted/non-worker requesters fall back to lead; archived and closed todos are excluded", async () => {
+test("missing/deleted/non-worker requesters fall back to lead; owner-only, archived and closed todos are excluded", async () => {
   const t = await setup();
-  const missing = t.oldTodo(null), leadMade = t.oldTodo(t.lead.id), deleted = t.oldTodo();
+  // 0.2.7 묶음 4(D3-9): 부탁한 이가 없는 대표 본인의 할 일(member_id·who 가 빔)은 총괄이 확인할 길이 없어 안내하지 않는다.
+  const ownerOnly = t.oldTodo(null), leadMade = t.oldTodo(t.lead.id), deleted = t.oldTodo();
   t.store.db.query("DELETE FROM members WHERE id = ?").run(t.worker.id);
   const closed = t.oldTodo(null);
   t.store.closeTodo(closed.id, { outcome: "done", reason: "확인", by: "대표" });
-  expect(t.orch.checkStaleTodos().sort()).toEqual([missing.id, leadMade.id, deleted.id].sort());
-  expect(t.store.listPending(t.lead.id).filter(d => d.text.includes("일째 열려"))).toHaveLength(3);
+  expect(t.orch.checkStaleTodos().sort()).toEqual([leadMade.id, deleted.id].sort());
+  expect(t.store.listPending(t.lead.id).filter(d => d.text.includes("일째 열려"))).toHaveLength(2);
+  expect(t.store.listPending(t.lead.id).some(d => d.text.includes(ownerOnly.id))).toBe(false);
   const archived = t.store.createProject({ name: "보관", cwd: t.home });
   const todo = t.store.createTodo({ projectId: archived.id, title: "보관 일" });
   t.store.db.query("UPDATE todos SET created_at = ? WHERE id = ?").run(new Date(Date.now() - 5 * DAY).toISOString(), todo.id);

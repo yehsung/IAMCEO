@@ -23,6 +23,11 @@ export interface ServerCapabilities {
     realtime: boolean;
     push: boolean;
     operations: boolean;
+    /**
+     * 0.2.7 묶음 4: 결재 답 첨부(AnswerReq.fileIds)와 할 일 닫기 결과(TodoDoneRequest.outcome)를 받는다. 없으면(옛 서버) 새 앱은 그 단추를 감춘다:
+     * 옛 서버는 v1 몸의 모르는 칸을 버려 '팀장에게 맡김'이 '했음'으로, 첨부가 빠진 답으로 나가고, v2 몸은 400 이다.
+     */
+    revisions?: boolean;
   };
 }
 
@@ -30,7 +35,11 @@ export interface ServerCapabilities {
 export interface RevisionPrecondition { expectedRevision: Revision }
 export type SettingsWriteRequest = SettingsPatch;
 export type MemberConfigWriteRequest = PatchMemberReq;
-export interface TodoDoneRequest { done: boolean; note?: string; fileIds?: string[] }
+/**
+ * outcome(0.2.7 묶음 4): done=true 일 때 닫는 결과. 없으면 done(했음). dropped(필요 없음)·delegated(팀장에게 맡김)는 note 가 까닭·부탁이 된다.
+ * 출시 앱은 보내지 않는다.
+ */
+export interface TodoDoneRequest { done: boolean; note?: string; fileIds?: string[]; outcome?: "done" | "dropped" | "delegated" }
 /** Decision.updatedAt 문자열이다. delivery recovery의 숫자 version과 혼용하지 않는다. */
 export type AnswerRequestV2 = Omit<AnswerReq, "expectedVersion"> & { expectedVersion: string };
 export interface SettingsWriteResult { settings: Settings; revision: Revision }

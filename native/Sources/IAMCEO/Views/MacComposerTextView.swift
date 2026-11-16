@@ -281,8 +281,9 @@ struct MacComposerTextView: NSViewRepresentable {
         override func keyDown(with event: NSEvent) {
             let isReturn = event.keyCode == 36 || event.keyCode == 76
             if isReturn && !hasMarkedText() {
-                if event.modifierFlags.intersection([.shift, .option]).isEmpty { submit?() }
-                else { insertNewline(nil) }
+                if event.modifierFlags.intersection([.shift, .option]).isEmpty {
+                    if !continueList(event) { submit?() }
+                } else { insertNewline(nil) }
                 return
             }
             if isReturn { composingReturn = event }
@@ -297,10 +298,18 @@ struct MacComposerTextView: NSViewRepresentable {
             if selector == #selector(insertNewline(_:)), let event = composingReturn, !hasMarkedText(),
                event.modifierFlags.intersection([.shift, .option]).isEmpty {
                 composingReturn = nil
-                submit?()
+                if !continueList(event) { submit?() }
                 return
             }
             super.doCommand(by: selector)
+        }
+
+        /// 0.2.7(D5-10): '1. 무엇' 줄 끝의 Return 은 보내지 않고 다음 번호 줄을 연다(ComposerReturnRule). ⌘↩ 는 그대로 보낸다.
+        private func continueList(_ event: NSEvent) -> Bool {
+            guard !event.modifierFlags.contains(.command), selectedRange().length == 0,
+                  let insert = ComposerReturnRule.listContinuation(text: string, caret: selectedRange().location) else { return false }
+            insertText(insert, replacementRange: selectedRange())
+            return true
         }
         // Files and images become attachments; anything else (a dragged text snippet) keeps NSTextView's own drop.
         override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {

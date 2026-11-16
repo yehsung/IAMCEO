@@ -473,7 +473,8 @@ struct InboxView: View {
             // Web .ibx-card--answered: 13 above and below, 18 at the sides (14 on iPhone).
             Plate(padding: 0) {
                 VStack(alignment: .leading, spacing: 8) {
-                    AnsweredBody(decision: current, asker: asker(current))
+                    // 0.2.7: 고쳐 다시 올린 카드로 갈 때 이 카드에 쓰던 메모·첨부를 새 카드로 옮긴다.
+                    AnsweredBody(decision: current, asker: asker(current), onOpenReplacement: { next in carryDraft(from: id, to: next); router.openDecision(next) })
                     if let error = session.cardErrors[id] { ErrorLine(text: error) }
                     savedMemo(id)
                     if current.status == "closed", current.closeKind != nil {
@@ -493,7 +494,8 @@ struct InboxView: View {
                 memoOnly: memoOnlyBinding(shown),
                 latest: current,
                 asker: asker(shown),
-                fileTitle: shown.fileId.flatMap { fileID in store.files.first { $0.id == fileID }?.title },
+                // 0.2.7: 근거 자료가 새 판으로 바뀌면 서버가 열린 카드의 fileId 를 옮긴다(카드의 판은 그대로). 지금 값을 쓴다.
+                fileTitle: (current ?? shown).fileId.flatMap { fileID in store.files.first { $0.id == fileID }?.title },
                 wide: wide,
                 locked: !gateOpen,
                 lockHint: lockHint,
@@ -510,6 +512,7 @@ struct InboxView: View {
                 onReviewLatest: { reviewLatest(id) },
                 onReopen: { if let current { Task { await reopen(current, inPlace: true) } } },
                 onOpenFile: { fileID in router.openFile(fileID) },
+                onOpenReplacement: { next in carryDraft(from: id, to: next); router.openDecision(next) },
                 onArm: { revealRequest = RevealRequest(target: confirmBarID(id)) }
             )
             .id(id)
@@ -652,9 +655,20 @@ struct InboxView: View {
             guard let current = latest(card.id), current.status == "open", !session.inFlight.contains(card.id), !session.memoOnly.contains(card.id) else { return nil }
             let review = session.reviews[card.id] ?? makeReview(current)
             guard !review.isStale(comparedTo: current) else { return nil }
-            guard let rec = current.rec, current.options.contains(where: { $0.k == rec }) else { return nil }
+            guard let rec = current.rec, let option = current.options.first(where: { $0.k == rec }) else { return nil }
+            // 0.2.7: 첨부를 올리는 중인 카드는 묶어 보내지 않는다(끝난 첨부는 그 카드의 답과 함께 간다).
+            if answerTakesAttachments(current), !store.composerUploads.pending(for: DecisionAnswerDraft.key(card.id), drafts: drafts).isEmpty { return nil }
+            // 0.2.7: 메모(또는 첨부)가 있어야 하는 권장 선택지는 그것을 붙인 카드만 묶어 보낸다.
+            if option.needsNote && review.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && answerFileIDs(current).isEmpty { return nil }
             return review.choice == nil || review.choice == rec ? review.decision : nil
         }
+    }
+
+    /// 0.2.7: 결재 답 첨부를 받는 카드(보통 결재, 새 서버). 도구 승인·사용 한도 카드는 서버가 거절한다.
+    private func answerTakesAttachments(_ decision: Decision) -> Bool { decision.kind == nil && store.serverTakesRevisions }
+    /// 0.2.7: 이 카드의 답에 실을 첨부(다 올린 것).
+    private func answerFileIDs(_ decision: Decision) -> [String] {
+        answerTakesAttachments(decision) ? drafts.files(for: DecisionAnswerDraft.key(decision.id)).map(\.id) : []
     }
 
     // MARK: - Sync with polling
@@ -663,6 +677,7 @@ struct InboxView: View {
         let byID = Dictionary(store.decisions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         for decision in store.decisions where decision.status == "open" && session.reviews[decision.id] == nil {
             session.reviews[decision.id] = makeReview(decision)
+            restoreLastAnswerAttachments(decision)
         }
         for (id, review) in session.reviews where !session.inFlight.contains(id)
             && (review.isStale(comparedTo: byID[id]) || UsageLimitInfo.optionsChanged(review.decision, latest: byID[id])) {
@@ -675,6 +690,7 @@ struct InboxView: View {
                 session.memoOnly.remove(id)
             } else if let current = byID[id], current.status == "open" {
                 session.reviews[id] = makeReview(current)
+                restoreLastAnswerAttachments(current)
             } else {
                 session.reviews[id] = nil
             }
@@ -708,10 +724,16 @@ struct InboxView: View {
         let current = latest(id)
         let note = review.note.trimmingCharacters(in: .whitespacesAndNewlines)
         let noteOnly = review.decision.kind != "usage_limit" && session.memoOnly.contains(id) && !review.decision.options.isEmpty
+        // 0.2.7: 결재 답 첨부(보통 결재만). 올리는 중이면 보내지 않는다.
+        let attachmentKey = DecisionAnswerDraft.key(id)
+        let fileIDs = answerFileIDs(review.decision)
         if noteOnly {
             guard review.decision.status == "open", !review.isStale(comparedTo: current), !note.isEmpty else { return }
         } else {
-            guard review.canSubmit(comparedTo: current) else { return }
+            guard review.canSubmit(comparedTo: current, hasAttachments: !fileIDs.isEmpty) else { return }
+        }
+        guard review.decision.kind != nil || store.composerUploads.pending(for: attachmentKey, drafts: drafts).isEmpty else {
+            session.cardErrors[id] = String(localized: "첨부를 올리는 중입니다. 끝난 뒤 보내 주세요."); return
         }
         let namespace = drafts.namespace
         let projectID = store.selectedProjectID
@@ -726,12 +748,13 @@ struct InboxView: View {
         if review.decision.kind == "usage_limit" {
             ok = await store.answerUsageLimit(review.decision, choice: review.choice ?? UsageLimitInfo.resumeChoice)
         } else {
-            ok = await store.answerDecision(review.decision, choice: noteOnly ? nil : review.choice, note: note.isEmpty ? nil : note)
+            ok = await store.answerDecision(review.decision, choice: noteOnly ? nil : review.choice, note: note.isEmpty ? nil : note, fileIDs: fileIDs)
         }
         guard session.contextID == context, drafts.namespace == namespace, store.selectedProjectID == projectID else { return }
         if ok, session.visitID == visit, session.memoRevisions[id, default: 0] == revision, drafts.memo(for: id) == memo {
             drafts.clearMemo(id)
         }
+        if ok, !fileIDs.isEmpty, drafts.files(for: attachmentKey).map(\.id) == fileIDs { drafts.clear(attachmentKey) }
         session.inFlight.remove(id)
         guard session.visitID == visit else { return }
         if ok {
@@ -764,15 +787,19 @@ struct InboxView: View {
         }
         let revisions = session.memoRevisions
         var notes: [String: String] = [:]
+        // 0.2.7: 카드에 붙인 첨부도 그 카드의 답과 함께 보낸다(메모처럼. 빼고 보내면 팀장은 첨부 없는 답을 받는다).
+        var files: [String: [String]] = [:]
         for decision in targets {
             let memo = (session.reviews[decision.id]?.note ?? drafts.memo(for: decision.id) ?? decision.lastNote ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if !memo.isEmpty { notes[decision.id] = memo }
+            let attached = answerFileIDs(decision)
+            if !attached.isEmpty { files[decision.id] = attached }
             if session.reviews[decision.id] == nil { session.reviews[decision.id] = makeReview(decision) }
         }
         session.batchBusy.insert(group)
         session.batchErrors[group] = nil
         for id in ids { session.inFlight.insert(id); session.engaged.insert(id); session.cardErrors[id] = nil }
-        let results = await store.answerBatchResults(targets, notes: notes)
+        let results = await store.answerBatchResults(targets, notes: notes, files: files)
         guard session.contextID == context, drafts.namespace == namespace, store.selectedProjectID == projectID else { return }
         for id in ids {
             // A closed card is not proof that this device's request was accepted.
@@ -780,6 +807,8 @@ struct InboxView: View {
                drafts.memo(for: id) == memos[id] {
                 drafts.clearMemo(id)
             }
+            let attachmentKey = DecisionAnswerDraft.key(id)
+            if results[id] == .accepted, let sent = files[id], drafts.files(for: attachmentKey).map(\.id) == sent { drafts.clear(attachmentKey) }
             session.inFlight.remove(id)
         }
         session.batchBusy.remove(group)
@@ -814,11 +843,45 @@ struct InboxView: View {
         }
     }
 
+    /// 0.2.7: 팀장이 카드를 고쳐 다시 올렸다(replacedBy). 이 카드에 쓰던 메모와 첨부를 새 카드로 옮긴다.
+    /// 새 카드에 이미 쓴 메모가 있으면 그 아래에 붙이고, 올리는 중이거나 실패한 첨부도 새 카드에서 끝나게 한다.
+    private func carryDraft(from old: String, to new: String) {
+        let memo = (session.reviews[old]?.note ?? drafts.memo(for: old) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !memo.isEmpty {
+            let existing = session.reviews[new]?.note ?? drafts.memo(for: new) ?? ""
+            let merged = existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? memo
+                : existing.contains(memo) ? existing : existing + "\n\n" + memo
+            drafts.setMemo(merged, for: new)
+            if session.reviews[new] != nil { session.reviews[new]?.note = merged }
+            drafts.clearMemo(old)
+        }
+        let oldKey = DecisionAnswerDraft.key(old), newKey = DecisionAnswerDraft.key(new)
+        let files = drafts.files(for: oldKey)
+        for file in files { drafts.addFile(file, for: newKey) }
+        if store.composerUploads.pending(for: oldKey, drafts: drafts).isEmpty && drafts.uploadFailures(for: oldKey).isEmpty {
+            if !files.isEmpty { drafts.clear(oldKey) }
+        } else {
+            // 옛 열쇠를 비우면 그 열쇠로 올리던 첨부가 끝나도 버려진다. 다 올린 것만 빼고, 올리는 중·실패한 것은 새 카드 열쇠로 받게 한다.
+            for file in files { drafts.removeFile(file.id, for: oldKey) }
+            drafts.forwardUploads(from: oldKey, to: newKey)
+        }
+    }
+
+    /// 0.2.7: 서버가 다시 연 카드(전달하지 못한 답)는 직전 답의 첨부를 돌려준다. 답 첨부 초안이 비었으면 그것으로 채운다
+    /// (직전 메모를 메모칸에 되살리는 것과 같다. 앱은 답이 성공할 때 첨부 초안을 비웠다).
+    private func restoreLastAnswerAttachments(_ decision: Decision) {
+        guard decision.status == "open", answerTakesAttachments(decision), !decision.lastAnswerAttachments.isEmpty else { return }
+        let key = DecisionAnswerDraft.key(decision.id)
+        guard drafts.files(for: key).isEmpty, store.composerUploads.pending(for: key, drafts: drafts).isEmpty else { return }
+        for file in decision.lastAnswerAttachments { drafts.addFile(file, for: key) }
+    }
+
     private func reviewLatest(_ id: String) {
         guard let current = latest(id) else { return }
         if session.reviews[id] == nil { session.reviews[id] = makeReview(current) } else { session.reviews[id]?.reviewLatest(current) }
         // A server reopen brings back the previous note unless the person wrote their own.
         if drafts.memo(for: id) == nil, session.reviews[id]?.note.isEmpty == true { session.reviews[id]?.note = current.lastNote ?? "" }
+        restoreLastAnswerAttachments(current)
         session.memoOnly.remove(id)
         session.cardErrors[id] = nil
     }
@@ -956,12 +1019,16 @@ private struct DecisionCard: View {
     var onReviewLatest: () -> Void
     var onReopen: () -> Void
     var onOpenFile: (String) -> Void
+    /// 0.2.7: 팀장이 고쳐 다시 올린 새 카드로(메모·첨부를 옮긴 뒤).
+    var onOpenReplacement: (String) -> Void = { _ in }
     /// Called when the confirm bar appears because of the person's pick, "답 보내기" or memo-only choice.
     var onArm: () -> Void = {}
     @FocusState private var memoFocused: Bool
+    @State private var attachNotice = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(Router.self) private var router
     @Environment(AppStore.self) private var store
+    @Environment(DraftStore.self) private var drafts
 
     private var decision: Decision { review.decision }
     private var stale: Bool { !busy && review.isStale(comparedTo: latest) }
@@ -972,6 +1039,30 @@ private struct DecisionCard: View {
     private var showsConfirm: Bool {
         review.showsConfirmation(comparedTo: latest, memoOnly: memoOnly, busy: busy)
     }
+    // 0.2.7: 결재 답 첨부. 보통 결재만 받는다(도구 승인·사용 한도 카드는 서버가 거절한다).
+    private var takesAttachments: Bool { decision.kind == nil && store.serverTakesRevisions }
+    private var attachmentKey: String { DecisionAnswerDraft.key(decision.id) }
+    private var answerFiles: [Attachment] { takesAttachments ? drafts.files(for: attachmentKey) : [] }
+    private var uploadingFiles: Bool { takesAttachments && !store.composerUploads.pending(for: attachmentKey, drafts: drafts).isEmpty }
+    private var showsAttachmentChips: Bool {
+        takesAttachments && (!answerFiles.isEmpty || uploadingFiles || !drafts.uploadFailures(for: attachmentKey).isEmpty)
+    }
+    /// 고른 선택지가 메모(또는 첨부)를 요구하는데 비었다(보내기를 막는다).
+    private var noteMissing: Bool { review.noteMissing(hasAttachments: !answerFiles.isEmpty) }
+    /// 답을 받는 이: 물은 팀장, 그 팀장이 명부에서 빠졌으면 총괄(서버 answerDecision 의 recipient = asker ?? conductor).
+    private var answerRecipientID: String? {
+        decision.memberId.flatMap { id in store.members.contains(where: { $0.id == id }) ? id : nil }
+    }
+    private func uploadContext() -> ComposerUploadContext? {
+        attachNotice = true
+        if let reason = ComposerAttachmentUploads.blockedReason(in: store, target: answerRecipientID) {
+            store.composerUploads.reportRejection(reason); return nil
+        }
+        guard let project = store.selectedProjectID else {
+            store.composerUploads.reportRejection(String(localized: "프로젝트를 고른 뒤 첨부해 주세요")); return nil
+        }
+        return ComposerUploadContext(projectID: project, targetMemberID: answerRecipientID, token: drafts.uploadToken(for: attachmentKey))
+    }
 
     var body: some View {
         // Web .ibx-card: padding 16 18 (14 on iPhone), 12 between blocks.
@@ -981,6 +1072,11 @@ private struct DecisionCard: View {
                     header
                     if stale { staleNotice }
                     reopenLine
+                    if decision.replaces != nil {
+                        Label("앞 카드를 대신합니다", systemImage: "arrow.triangle.2.circlepath")
+                            .font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.note)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     // Web .ibx-title: 16.5 / 650, line height 1.4, -.015em.
                     Text(decision.title)
                         .font(CEFont.title).tracking(-0.25)
@@ -993,7 +1089,7 @@ private struct DecisionCard: View {
                         ClampedDetail(text: decision.detail, expanded: detailExpanded, onToggle: onToggleDetail)
                     }
                     if !decision.images.isEmpty { ImageStrip(images: decision.images) }
-                    if let fileID = decision.fileId { FileChip(title: fileTitle) { onOpenFile(fileID) } }
+                    if let fileID = (latest ?? decision).fileId { FileChip(title: fileTitle) { onOpenFile(fileID) } }
                     if decision.kind == "usage_limit" { usageLimitArea } else { answerArea }
                 } else {
                     // The person reviewed the latest version and it is no longer open.
@@ -1013,7 +1109,7 @@ private struct DecisionCard: View {
                 review.choice = decision.options[number - 1].k; memoOnly = false
                 return true
             },
-            onReturn: { if showsConfirm && !locked { onSubmit() } },
+            onReturn: { if showsConfirm && !locked && !noteMissing && !uploadingFiles { onSubmit() } },
             onCancel: { review.choice = nil; memoOnly = false; review.freeConfirmationCancelled = true }))
         // Only transitions caused on screen arm a reveal; a card that appears already armed does not scroll.
         .onChange(of: showsConfirm) { _, shown in if shown { onArm() } }
@@ -1055,7 +1151,18 @@ private struct DecisionCard: View {
         }
     }
 
-    private var staleNotice: some View {
+    @ViewBuilder private var staleNotice: some View {
+        if let next = latest?.replacedBy, latest?.status == "closed" {
+            // 0.2.7: 팀장이 이 카드를 고쳐 다시 올렸다. 옛 카드에 답하지 않게 새 카드로 안내한다.
+            InlineNotice(tone: .attention, icon: "arrow.triangle.2.circlepath", title: String(localized: "새 카드로 바뀌었습니다"),
+                         detail: String(localized: "팀장이 이 카드를 고쳐 다시 올렸습니다. 새 카드에서 답해 주세요. 쓰던 메모와 첨부는 새 카드로 옮깁니다."),
+                         actionTitle: String(localized: "새 카드 보기"), action: { onOpenReplacement(next) })
+        } else {
+            staleRefreshNotice
+        }
+    }
+
+    private var staleRefreshNotice: some View {
         let detail = latest.map { String(localized: "지금은 '\(DecisionStateInfo($0).label)' 상태입니다. 선택은 지우고 메모는 남겼습니다.") }
             ?? String(localized: "더 불러올 수 없습니다. 결재된 항목이나 대화에서 확인하세요. 메모는 남겼습니다.")
         let reopenable = latest.map { $0.status == "closed" && $0.closeKind != nil } ?? false
@@ -1140,9 +1247,23 @@ private struct DecisionCard: View {
         let typed = self.typed
         let picked = self.picked
         if !free { options(disabled: busy || stale || store.isArchive) }
+        // 0.2.7: 답에 붙일 첨부(대화 입력칸과 같은 칩). 많으면 줄 안에서 옆으로 넘긴다.
+        if showsAttachmentChips {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) { DraftAttachmentChips(key: attachmentKey) }
+            }
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        }
+        if attachNotice, let notice = store.composerUploads.notice {
+            Text(notice).font(CEFont.meta).foregroundStyle(CE.attention).fixedSize(horizontal: false, vertical: true)
+        }
         // Web .ibx-memo: a 44pt .input (15px at 1.5, up to 160 tall) with a 44pt glass button beside it.
         HStack(alignment: .bottom, spacing: 8) {
-            TextField(free ? "답을 적어 주세요" : "메모 (선택) — 다른 생각이나 조건", text: $review.note, axis: .vertical)
+            if takesAttachments {
+                AttachmentPickerButton(context: uploadContext)
+                    .disabled(busy || stale || store.isArchive || !store.uiCanWrite)
+            }
+            TextField(free ? "답을 적어 주세요" : picked?.needsNote == true ? "메모 (꼭 적어 주세요)" : "메모 (선택) — 다른 생각이나 조건", text: $review.note, axis: .vertical)
                 .lineLimit(1...6)
                 .lineSpacing(CELeading.spacing(15, 1.5))
                 .focused($memoFocused)
@@ -1163,12 +1284,17 @@ private struct DecisionCard: View {
         }
         if showsConfirm {
             let quoted = picked?.label ?? (free ? plainOneLine(review.note) : nil)
+            let files = answerFiles.count
             ConfirmBar(
                 quoted: quoted,
                 verb: free ? String(localized: "답 보내기") : quoted.map { String(localized: "\(particleRo($0)) 결정") } ?? String(localized: "메모만 보내기"),
-                hint: picked != nil && typed ? String(localized: "메모도 함께 보냅니다") : nil,
+                hint: noteMissing ? (takesAttachments ? String(localized: "이 선택지는 메모나 첨부가 있어야 보낼 수 있습니다") : String(localized: "이 선택지는 메모를 적어야 보낼 수 있습니다"))
+                    : uploadingFiles ? String(localized: "첨부를 올리는 중입니다")
+                    : picked != nil && typed && files > 0 ? String(localized: "메모와 첨부 \(files)개도 함께 보냅니다")
+                    : picked != nil && typed ? String(localized: "메모도 함께 보냅니다")
+                    : files > 0 ? String(localized: "첨부 \(files)개도 함께 보냅니다") : nil,
                 busy: busy,
-                disabled: locked,
+                disabled: locked || noteMissing || uploadingFiles,
                 stretch: !wide,
                 shiftedAt: shiftedAt,
                 onConfirm: onSubmit,
@@ -1244,6 +1370,7 @@ struct OptionTile: View {
                         .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
                     if recommended { RecommendedBadge() }
                     if wasLastChoice { Tag(String(localized: "직전 답")) }
+                    if option.needsNote { Tag(String(localized: "메모 필요")) }
                     Spacer(minLength: 0)
                     if picked {
                         Image(systemName: "checkmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
@@ -1374,6 +1501,9 @@ struct ConfirmBar: View {
 private struct AnsweredBody: View {
     let decision: Decision
     let asker: Member?
+    /// 0.2.7: '새 카드 보기'. 없으면 그 카드만 연다.
+    var onOpenReplacement: ((String) -> Void)? = nil
+    @Environment(Router.self) private var router
 
     private var closed: Bool { decision.status == "closed" }
     private var who: String { decision.who.isEmpty ? String(localized: "담당자") : decision.who }
@@ -1407,6 +1537,14 @@ private struct AnsweredBody: View {
                     Text("근거로 든 대표 말: '\(quote)'").font(CEFont.meta).foregroundStyle(CE.ink2).lineSpacing(metaLeading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                // 0.2.7: 팀장이 고쳐 다시 올린 새 카드.
+                if let next = decision.replacedBy {
+                    Button { if let onOpenReplacement { onOpenReplacement(next) } else { router.openDecision(next) } } label: {
+                        Text("새 카드 보기").font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.accent)
+                            .frame(minHeight: isMac ? nil : 44).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).fixedSize()
+                }
             } else {
                 if let label = answerLabel {
                     Text("답: \(label)").font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(textLeading)
@@ -1415,6 +1553,11 @@ private struct AnsweredBody: View {
                 if let note = decision.note, !note.isEmpty {
                     Text("메모: \(note)").font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(textLeading)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                // 0.2.7: 답에 붙인 첨부.
+                if !decision.answerAttachments.isEmpty {
+                    Text("첨부: \(decision.answerAttachments.map(\.name).joined(separator: ", "))").font(CEFont.note).foregroundStyle(CE.ink2)
+                        .lineSpacing(textLeading).fixedSize(horizontal: false, vertical: true)
                 }
                 if decision.status == "answered", let asker, ["blocked", "error", "asleep", "offline"].contains(asker.status) {
                     let info = MemberStatusInfo(asker.status)
@@ -1832,11 +1975,19 @@ struct DecisionReview {
         return decision.options.contains { $0.k == choice }
             || (typed && (memoOnly || (decision.options.isEmpty && !freeConfirmationCancelled)))
     }
-    func canSubmit(comparedTo latest: Decision?) -> Bool {
+    /// hasAttachments: 이 답에 실을 첨부가 있다(결재 답 첨부. 메모가 있어야 하는 선택지는 첨부로도 답이 된다, 서버와 같다).
+    func canSubmit(comparedTo latest: Decision?, hasAttachments: Bool = false) -> Bool {
         guard decision.status == "open", !isStale(comparedTo: latest) else { return false }
         if decision.kind == "usage_limit" { return UsageLimitInfo.accepts(decision, choice: choice) }
         if decision.options.isEmpty { return !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        return decision.options.contains { $0.k == choice }
+        guard decision.options.contains(where: { $0.k == choice }) else { return false }
+        // 0.2.7: '메모에 적음' 같은 선택지는 메모(또는 첨부)가 있어야 보낸다(서버도 400 으로 막는다).
+        return !noteMissing(hasAttachments: hasAttachments)
+    }
+    /// 0.2.7: 고른 선택지가 메모를 요구하는데 메모도 첨부도 없다.
+    func noteMissing(hasAttachments: Bool = false) -> Bool {
+        decision.options.first(where: { $0.k == choice })?.needsNote == true && !hasAttachments
+            && note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     mutating func reviewLatest(_ latest: Decision) {
         guard latest.id == decision.id else { return }

@@ -332,4 +332,22 @@ describe("백그라운드 터미널만 남은 Codex 팀장", () => {
     await t.orch.sleepMember(m.id, { force: true });
     expect(t.member(m.id).status).toBe("asleep");
   }, 30_000);
+
+  // 0.2.7 묶음 4: 핫픽스 B 검토 대응에서 남긴 곳(server/flows/owner.ts reopenDecision).
+  test("백그라운드 프로그램만 남은 팀장의 결재를 대표가 다시 열면 '결재 기다림'이 된다(쉬는 중으로 남지 않는다)", async () => {
+    const t = await setup();
+    const lead = await t.orch.ensureConductor(t.project.id);
+    const { m, prompt } = await codexAtWork(t);
+    await t.orch.recordPost(t.member(m.id), { kind: "완료", title: "미리보기 보고" });
+    const card = t.store.createDecision({ projectId: t.project.id, memberId: m.id, who: m.name, title: "가짜 질문" });
+    await t.orch.closeAsk(t.member(lead.id), { id: card.id, kind: "obsolete", reason: "필요 없어짐" });
+    writeRollout(t, m, prompt);
+    t.core.setScreen(m.id, BACKGROUND);
+    await t.waitFor("업무 닫힘", () => lastRun(t, m.id)?.phase === "ended");
+    await t.waitFor("쉬는 중", () => t.member(m.id).status === "idle" && t.runner.backgroundTerminals(m.id) === 1);
+    expect(t.runner.isBusy(m.id)).toBe(true);
+    await t.orch.reopenDecision(card.id);
+    expect(t.store.requireDecision(card.id).status).toBe("open");
+    expect(t.member(m.id).status).toBe("waiting");
+  }, 30_000);
 });

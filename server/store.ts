@@ -60,7 +60,7 @@ import { parseTailnetHttpsRecord, TAILNET_HTTPS_KEY } from "./tailnet-https.ts";
 import { isDeliveryWaitReason, MEMBER_GATE_WAITS, verdictPatience, verdictWait, WATCHED_WAITS, type PumpVerdict, type StoredPumpVerdict } from "./pump-verdict.ts";
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOWS, exactSource } from "./runner/context.ts";
 import { MAX_PROJECT_NAME, MAX_ROLE, nameProblem, oneLineProblem, RESERVED_HANDLES, workerNameProblem } from "./text.ts";
-import { cleanName, cleanText, conductorName, DEFAULT_NAMES, firstRunLang } from "./text.ts";
+import { cleanName, cleanText, conductorName, DEFAULT_NAMES, firstRunLang, stripControls } from "./text.ts";
 import { parseRestartWake, type RestartWake } from "./restart-wake.ts";
 import type { ErrorCode } from "../shared/error-codes.ts";
 import { deliveryNoteCode } from "./hold-codes.ts";
@@ -175,6 +175,8 @@ export interface NewDecision {
   images?: Attachment[];
   /** 0.2.6 Y: 서버가 만든 카드의 글 코드. 주면 제목·본문·선택지 이름을 보고 언어로 그려 넣고(위 칸을 덮는다) 코드를 함께 저장한다. */
   texts?: DecisionTextRefs;
+  /** 0.2.7 묶음 4: 이 카드가 대신하는 앞 카드. 앞 카드를 닫고 잇는 것은 replaceDecision 이 한다. */
+  replaces?: string | null;
 }
 
 export interface NewTodo {
@@ -228,6 +230,8 @@ export interface NewFile {
   kind?: FileKind;
   /** kind=artifact 의 원본. 화면 상태에 싣지 않는다. */
   html?: string | null;
+  /** 0.2.7 묶음 4: 이 판이 대신하는 앞 판(같은 프로젝트, 아직 최신 판). 같은 트랜잭션에서 앞 판에 새 판을 잇고 열린 결재의 근거 자료를 새 판으로 옮긴다. */
+  replaces?: string | null;
 }
 
 /** File projection schema, appended by db.ts's versioned migrations. */
@@ -630,6 +634,11 @@ function toDecisionBase(r: Row): Decision {
     closeQuote: r.close_quote ?? null,
     closedBy: r.closed_by ?? null,
     closedAt: r.closed_at ?? null,
+    // 0.2.7 묶음 4: 있을 때만 싣는다(열은 db.ts ensureRevisionColumns).
+    ...(r.replaces ? { replaces: r.replaces as string } : {}),
+    ...(r.replaced_by ? { replacedBy: r.replaced_by as string } : {}),
+    ...(r.answer_attachments && r.answer_attachments !== "[]" ? { answerAttachments: json<Attachment[]>(r.answer_attachments) } : {}),
+    ...(r.last_answer_attachments && r.last_answer_attachments !== "[]" ? { lastAnswerAttachments: json<Attachment[]>(r.last_answer_attachments) } : {}),
   };
 }
 
@@ -722,6 +731,9 @@ function toFile(r: Row): FileDoc {
     attachments,
     createdAt: r.created_at,
     order: r.sort_order,
+    // 0.2.7 묶음 4: 판 갈이. 있을 때만 싣는다.
+    ...(r.replaces ? { replaces: r.replaces as string } : {}),
+    ...(r.replaced_by ? { replacedBy: r.replaced_by as string } : {}),
   };
 }
 
@@ -2078,7 +2090,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       todos: this.listTodos(id),
       work: this.listWork(id),
       messages: this.listMessages(id, { limit: 200 }),
-      files: this.listFiles(id),
+      // 0.2.7 묶음 4: 최신 판에 판 수를 더한다(옛 판은 replacedBy 로 가린다. 모든 판은 GET /api/files/:id/versions 로도).
+      files: this.listFilesWithVersions(id),
     };
   }
 
@@ -2401,6 +2414,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         nowIso(),
       );
       if (texts) this.run("UPDATE decisions SET text_ref = ? WHERE id = ?", texts.stored, id);
+      if (input.replaces) this.run("UPDATE decisions SET replaces = ? WHERE id = ?", input.replaces, id);
       const decision = this.requireDecision(id);
       this.recorder?.decision(null, decision);
       this.bumpBoard(decision.projectId);
@@ -2410,13 +2424,20 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     });
   }
 
-  private normalizeAnswer(d: Decision, req: AnswerReq): { choice: string | null; note: string | null; batch: boolean } {
+  private normalizeAnswer(d: Decision, req: AnswerReq): { choice: string | null; note: string | null; batch: boolean; fileIds: string[] } {
     const batch = !!req.batch;
     const choice = req.choice?.trim() || (batch ? d.rec : null);
-    const note = req.note?.trim() || null;
+    // D5-10: 대표가 쓴 메모에 섞인 제어문자는 저장 전에 지운다.
+    const note = req.note == null ? null : stripControls(req.note).trim() || null;
     if (!choice && !note) throw new ApiError(400, "선택지나 메모가 필요합니다", "decision_answer_empty");
-    if (choice && !d.options.some((o) => o.k === choice)) throw new ApiError(400, `없는 선택지입니다: ${choice}`, "decision_option_unknown");
-    return { choice, note, batch };
+    const option = choice ? d.options.find((o) => o.k === choice) : undefined;
+    if (choice && !option) throw new ApiError(400, `없는 선택지입니다: ${choice}`, "decision_option_unknown");
+    // D3-4: 결재 답 첨부. 같은 id 를 두 번 실어도 한 번으로 친다.
+    const fileIds = [...new Set(req.fileIds ?? [])];
+    // D3-7: '메모에 적음' 같은 선택지는 메모(또는 첨부)가 있어야 답이 된다(출시 앱은 이 표시를 몰라 여기서 막는다. 출시 앱은 첨부를 못 단다).
+    if (option?.needsNote && !note && !fileIds.length) throw new ApiError(400, "이 선택지는 메모를 함께 적어야 합니다", "decision_note_required");
+    if (fileIds.length && (d.kind === "usage_limit" || d.kind === "tool_permission")) throw new ApiError(400, "이 카드의 답에는 첨부를 붙일 수 없습니다", "decision_attachment_unsupported");
+    return { choice, note, batch, fileIds };
   }
 
   /**
@@ -2430,7 +2451,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       if (req.expectedVersion && req.expectedVersion !== d.updatedAt) throw new ApiError(409, "결재가 변경되었습니다. 새로 불러온 뒤 다시 답하세요", "decision_changed");
       return null;
     }
-    if (d.choice === a.choice && d.note === a.note && d.batch === a.batch) return d;
+    const files = (d.answerAttachments ?? []).map((f) => f.id);
+    if (d.choice === a.choice && d.note === a.note && d.batch === a.batch && files.length === a.fileIds.length && files.every((id) => a.fileIds.includes(id))) return d;
     throw new ApiError(409, "이미 처리한 결재입니다", "decision_already_answered");
   }
 
@@ -2441,13 +2463,19 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       if (existing) return { decision: existing, changed: false };
       const before = this.requireDecision(id);
       const a = this.normalizeAnswer(before, req);
+      const attachments = a.fileIds.map((fileId) => {
+        const found = this.getAttachment(fileId);
+        if (!found) throw new ApiError(400, "업로드된 첨부를 찾을 수 없습니다", "upload_not_found");
+        return found;
+      });
       this.run(
-        "UPDATE decisions SET status = 'answered', choice = ?, note = ?, batch = ?, answered_at = ?, updated_at = ?, last_choice = NULL, last_note = NULL, reopen_note = NULL WHERE id = ?",
+        "UPDATE decisions SET status = 'answered', choice = ?, note = ?, batch = ?, answered_at = ?, updated_at = ?, last_choice = NULL, last_note = NULL, last_answer_attachments = NULL, reopen_note = NULL, answer_attachments = ? WHERE id = ?",
         a.choice,
         a.note,
         a.batch ? 1 : 0,
         nowIso(),
         this.nextDecisionStamp(id),
+        attachments.length ? JSON.stringify(attachments) : null,
         id,
       );
       const decision = this.requireDecision(id);
@@ -2512,18 +2540,26 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     });
   }
 
+  /** 0.2.7 묶음 4: 앞 카드에 그것을 대신한 새 카드를 잇는다. 부르는 쪽이 같은 거래에서 앞 카드를 닫는다(closeDecision 이 알린다). */
+  setDecisionReplacedBy(id: string, replacedBy: string): void {
+    this.run("UPDATE decisions SET replaced_by = ? WHERE id = ?", replacedBy, id);
+  }
+
   auditDecisionClose(decisionId: string, answeredDecisionId: string, actorId: string, sameIssue: string | null, quote: string): void {
     this.run("INSERT INTO decision_close_audit (decision_id, answered_decision_id, actor_id, same_issue, answer_quote, created_at) VALUES (?, ?, ?, ?, ?, ?)", decisionId, answeredDecisionId, actorId, sameIssue, quote, nowIso());
   }
 
-  /** 끝내 전달하지 못한 답은 대표가 다시 답할 수 있게 카드를 연다. 메모의 사본은 전달 글뿐이었으니 직전 답을 카드에 남긴다. 닫힌 카드를 다시 열 때도 쓴다(닫은 이유는 지운다). */
+  /**
+   * 끝내 전달하지 못한 답은 대표가 다시 답할 수 있게 카드를 연다. 메모의 사본은 전달 글뿐이었으니 직전 답을 카드에 남긴다. 닫힌 카드를 다시 열 때도 쓴다(닫은 이유는 지운다).
+   * 0.2.7 묶음 4: 직전 답의 첨부도 lastAnswerAttachments 로 남긴다(앱은 답할 때 첨부 초안을 비웠다. 남기지 않으면 다시 보낸 답에 첨부가 빠진다).
+   */
   reopenDecision(id: string, reason: string | ServerTextRef = textRef("card.reopen_undelivered")): Decision {
     return this.transaction(() => {
       const before = this.requireDecision(id);
       // Y: 서버가 정한 다시 연 까닭은 코드로 그린다. 닫힌 이유의 코드는 닫힌 이유와 함께 지워진다(응답에서 문장과 맞춰 보므로 남아도 나가지 않는다).
       const why = typeof reason === "string" ? reason : this.withDecisionText(id, "reopenNote", reason);
       this.run(
-        "UPDATE decisions SET status = 'open', last_choice = COALESCE(choice, last_choice), last_note = COALESCE(note, last_note), reopen_note = ?, choice = NULL, note = NULL, batch = 0, answered_at = NULL, delivered_at = NULL, close_kind = NULL, close_reason = NULL, close_quote = NULL, closed_by = NULL, closed_at = NULL, updated_at = ? WHERE id = ?",
+        "UPDATE decisions SET status = 'open', last_choice = COALESCE(choice, last_choice), last_note = COALESCE(note, last_note), last_answer_attachments = COALESCE(answer_attachments, last_answer_attachments), reopen_note = ?, choice = NULL, note = NULL, batch = 0, answered_at = NULL, delivered_at = NULL, close_kind = NULL, close_reason = NULL, close_quote = NULL, closed_by = NULL, closed_at = NULL, answer_attachments = NULL, updated_at = ? WHERE id = ?",
         why,
         this.nextDecisionStamp(id),
         id,
@@ -2657,6 +2693,25 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     });
   }
 
+  /**
+   * 0.2.7 묶음 4(todo_update): 열린 할 일의 제목·내용을 고친다. 판(revision)은 올리지 않는다: 판은 대표의 끝냄·정리 쓰기를 맞추는 값이라,
+   * 글만 고친 것으로 대표가 고르던 '했음'을 충돌로 돌려보내지 않는다. 화면은 할 일 사건으로 다시 읽는다. 새 알림(푸시)은 없다.
+   */
+  updateTodo(id: string, patch: { title?: string; detail?: string }): { todo: Todo; changed: boolean } {
+    return this.transaction(() => {
+      const before = this.requireTodo(id);
+      if (before.done) throw new ApiError(409, "이미 끝났거나 정리된 할 일입니다", "todo_finished");
+      const title = patch.title ?? before.title, detail = patch.detail ?? before.detail;
+      if (title === before.title && detail === before.detail) return { todo: before, changed: false };
+      this.run("UPDATE todos SET title = ?, detail = ?, updated_at = ? WHERE id = ? AND done = 0", title, detail, nowIso(), id);
+      const todo = this.requireTodo(id);
+      this.bumpBoard(todo.projectId);
+      this.emit({ type: "todo", todo });
+      this.emitProjects();
+      return { todo, changed: true };
+    });
+  }
+
   /** 받을 사람이 없어 '했음'을 못 알린 할 일. 총괄이 뜨면 전한다. */
   setTodoCompletion(id: string, note: string | null, fileIds: string[]): Todo {
     this.run("UPDATE todos SET completion_note = ?, completion_file_ids = ? WHERE id = ?", note, JSON.stringify(fileIds), id);
@@ -2694,7 +2749,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   /** AI 의 todo_close. 안 끝난 할 일만. 끝남·필요 없어짐 모두 안 한 할 일 수에서 빠진다. */
-  closeTodo(id: string, input: { outcome: TodoOutcome; reason: string; by: string }): Todo {
+  closeTodo(id: string, input: { outcome: TodoOutcome; reason: string | null; by: string }): Todo {
     return this.transaction(() => {
       const before = this.requireTodo(id);
       if (before.done) throw new ApiError(409, "이미 끝났거나 정리된 할 일입니다", "todo_finished");
@@ -2932,11 +2987,13 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       for (const r of this.rows("SELECT attachments AS v FROM messages WHERE project_id = ?", id)) collect(r.v);
       for (const r of this.rows("SELECT attachments AS v FROM files WHERE project_id = ?", id)) collect(r.v);
       for (const r of this.rows("SELECT images AS v FROM decisions WHERE project_id = ?", id)) collect(r.v);
+      // 0.2.7 묶음 4: 결재 답 첨부와 다시 열린 카드의 직전 답 첨부.
+      for (const r of this.rows("SELECT answer_attachments AS a, last_answer_attachments AS b FROM decisions WHERE project_id = ?", id)) { collect(r.a); collect(r.b); }
       for (const r of this.rows("SELECT completion_file_ids AS v FROM todos WHERE project_id = ?", id)) collect(r.v);
       // 다른 프로젝트의 기록이 같은 첨부를 가리키면 남긴다.
       const elsewhere = (attachmentId: string) => !!this.row(`SELECT 1 FROM messages WHERE project_id != ?1 AND instr(attachments, ?2) > 0
         UNION ALL SELECT 1 FROM files WHERE project_id != ?1 AND instr(attachments, ?2) > 0
-        UNION ALL SELECT 1 FROM decisions WHERE project_id != ?1 AND instr(images, ?2) > 0
+        UNION ALL SELECT 1 FROM decisions WHERE project_id != ?1 AND (instr(images, ?2) > 0 OR instr(COALESCE(answer_attachments, ''), ?2) > 0 OR instr(COALESCE(last_answer_attachments, ''), ?2) > 0)
         UNION ALL SELECT 1 FROM todos WHERE project_id != ?1 AND instr(completion_file_ids, ?2) > 0
         UNION ALL SELECT 1 FROM deliveries WHERE project_id != ?1 AND instr(text, ?2) > 0 LIMIT 1`, id, attachmentId);
       const attachments = [...candidates].filter(attachmentId => !elsewhere(attachmentId))
@@ -3088,8 +3145,14 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   // ---- 자료 ----
+  private fileSelect?: string;
+  /** 0.2.7 묶음 4: 판 갈이 열(db.ts ensureRevisionColumns)은 openDb 가 늘 더한다. 이주만 돌린 시험 DB 처럼 그 열이 없으면 예전 열만 읽는다. */
+  private get fileColumns(): string {
+    return this.fileSelect ??= this.rows("PRAGMA table_info(files)").some((c) => c.name === "replaced_by") ? `${FILE_COLUMNS}, replaces, replaced_by` : FILE_COLUMNS;
+  }
+
   getFile(id: string): FileDoc | null {
-    const r = this.row(`SELECT ${FILE_COLUMNS} FROM files WHERE id = ?`, id);
+    const r = this.row(`SELECT ${this.fileColumns} FROM files WHERE id = ?`, id);
     return r ? toFile(r) : null;
   }
 
@@ -3104,7 +3167,52 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   listFiles(projectId: string): FileDoc[] {
-    return this.rows(`SELECT ${FILE_COLUMNS} FROM files WHERE project_id = ? ORDER BY sort_order DESC, rowid DESC`, projectId).map(toFile);
+    return this.rows(`SELECT ${this.fileColumns} FROM files WHERE project_id = ? ORDER BY sort_order DESC, rowid DESC`, projectId).map(toFile);
+  }
+
+  /**
+   * 0.2.7 묶음 4: 화면의 자료 목록(프로젝트 상태). 모든 판을 그대로 싣고(옛 판은 replacedBy 가 있다), 최신 판에 판 수(versions, 2 이상)를 더한다.
+   * 옛 판을 빼지 않는다: 출시 앱은 보고·결재의 자료를 이 목록에서 찾아 연다(빼면 옛 판을 가리키는 보고를 열 수 없다).
+   * 새 앱은 replacedBy 가 있는 판을 목록에서 감추고 '이전 판'으로 보인다.
+   */
+  listFilesWithVersions(projectId: string): FileDoc[] {
+    const files = this.listFiles(projectId);
+    const byId = new Map(files.map((file) => [file.id, file]));
+    return files.map((file) => {
+      if (file.replacedBy && byId.has(file.replacedBy)) return file;
+      let versions = 1;
+      const seen = new Set([file.id]);
+      for (let previous = file.replaces; previous && byId.has(previous) && !seen.has(previous); previous = byId.get(previous)!.replaces) {
+        seen.add(previous);
+        versions++;
+      }
+      return versions > 1 ? { ...file, versions } : file;
+    });
+  }
+
+  /** 0.2.7 묶음 4: 이 자료의 모든 판(최신 판이 먼저). 판 갈이가 없으면 그 자료 하나. */
+  listFileVersions(id: string): FileDoc[] {
+    const start = this.getFile(id);
+    if (!start) throw new ApiError(404, "자료를 찾을 수 없습니다", "file_not_found");
+    let newest = start;
+    const seen = new Set([start.id]);
+    for (let next = start.replacedBy; next && !seen.has(next);) {
+      const file = this.getFile(next);
+      if (!file || file.projectId !== start.projectId) break;
+      seen.add(file.id);
+      newest = file;
+      next = file.replacedBy;
+    }
+    const chain = [newest];
+    const walked = new Set([newest.id]);
+    for (let previous = newest.replaces; previous && !walked.has(previous);) {
+      const file = this.getFile(previous);
+      if (!file || file.projectId !== start.projectId) break;
+      walked.add(file.id);
+      chain.push(file);
+      previous = file.replaces;
+    }
+    return chain;
   }
 
   searchFiles(projectId: string, query: string, limit = 50, archived = false): FileSearchResult[] {
@@ -3146,6 +3254,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   createFile(input: NewFile): FileDoc {
     return this.transaction(() => {
       this.requireProject(input.projectId);
+      // 0.2.7 묶음 4: 판 갈이. 같은 프로젝트의, 아직 최신인 판만 대신한다.
+      const replaced = input.replaces ? this.getFile(input.replaces) : null;
+      if (input.replaces && (!replaced || replaced.projectId !== input.projectId)) throw new ApiError(404, `자료를 찾을 수 없습니다: ${input.replaces}`, "file_not_found");
+      if (replaced?.replacedBy) throw new ApiError(409, `이미 새 판(#${replaced.replacedBy})이 있는 자료입니다. 최신 판의 id 를 replaces 에 넣으세요`, "file_already_replaced");
       const id = newId("f_");
       const order = this.row("SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM files WHERE project_id = ?", input.projectId)!.n as number;
       this.run(
@@ -3164,6 +3276,16 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         input.kind ?? null,
         input.html ?? null,
       );
+      if (replaced) {
+        this.run("UPDATE files SET replaces = ? WHERE id = ?", replaced.id, id);
+        this.run("UPDATE files SET replaced_by = ? WHERE id = ?", id, replaced.id);
+        // 열린 결재가 옛 판을 근거 자료로 가리키면 새 판으로 옮긴다(D5-7: 카드가 옛 글을 계속 가리켰다). 결재의 판(updated_at)은 올리지 않는다:
+        // 대표가 고르던 답을 '바뀐 결재'로 돌려보내지 않고, 아직 나가지 않은 결재 알림이 낡은 것으로 지워지지 않게 한다. 화면은 결재 사건으로 다시 읽는다.
+        for (const row of this.rows("SELECT id FROM decisions WHERE project_id = ? AND status = 'open' AND file_id = ?", input.projectId, replaced.id)) {
+          this.run("UPDATE decisions SET file_id = ? WHERE id = ?", id, row.id);
+          this.emit({ type: "decision", decision: this.requireDecision(row.id as string) });
+        }
+      }
       refreshFileSearchIndex(this.db, { fileId: id, limit: 1 });
       const file = this.getFile(id)!;
       this.emit({ type: "file", file });

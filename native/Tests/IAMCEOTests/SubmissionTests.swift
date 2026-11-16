@@ -30,6 +30,9 @@ final class WriteTestServer: @unchecked Sendable {
     var rejectAll = false
     var syncFailure = false
     var decisionStatuses: [String: Int] = [:]
+    /// 0.2.7: 결재 답에 실려 온 첨부(fileIds). dropAnswerAttachments 면 답은 받되 첨부를 빼고 돌려준다.
+    var answerFileIds: [String: [String]] = [:]
+    var dropAnswerAttachments = false
     var gate: DispatchSemaphore?
     var entered: XCTestExpectation?
 
@@ -139,7 +142,11 @@ final class WriteTestServer: @unchecked Sendable {
                     return IsolatedTestHTTPReply(status: status)
                 }
                 let body = try Self.body(request)
-                return try reply(Decision(id: id, projectId: "p", status: "answered", choice: body["choice"] as? String, note: body["note"] as? String))
+                var decision = Decision(id: id, projectId: "p", status: "answered", choice: body["choice"] as? String, note: body["note"] as? String)
+                let files = body["fileIds"] as? [String] ?? []
+                if !files.isEmpty { answerFileIds[id] = files }
+                if !dropAnswerAttachments { decision.answerAttachments = files.map { Attachment(id: $0, name: $0) } }
+                return try reply(decision)
             }
             return IsolatedTestHTTPReply(status: 404)
         }

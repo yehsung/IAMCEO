@@ -85,6 +85,8 @@ struct CapabilityFlags: Codable, Sendable {
     var realtime: Bool? = nil
     var push: Bool? = nil
     var operations: Bool? = nil
+    /// 0.2.7: 결재 답 첨부·할 일 닫기 결과(필요 없음·팀장에게 맡김)를 받는 서버. 옛 서버는 없다.
+    var revisions: Bool? = nil
 }
 
 /// Both legacy invalidations and v2 changes retain the original domain payload.

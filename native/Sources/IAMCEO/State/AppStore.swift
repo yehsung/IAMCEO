@@ -349,6 +349,9 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored var absentOperations: Set<String> = []
     @ObservationIgnored var announcedUnresolved: Set<String> = []
     @ObservationIgnored var strictWriteContract = false
+    /// 0.2.7: 서버가 결재 답 첨부·할 일 닫기 결과를 받는가(capabilities.revisions). 아니면 그 단추를 감춘다:
+    /// 옛 서버는 모르는 칸을 버려 '팀장에게 맡김'이 '했음'으로 나간다. 화면이 읽으므로 관찰한다.
+    var serverTakesRevisions = false
     @ObservationIgnored private var lastReadError: String?
     /// Endpoint and code of the live client, so a reconnect from the offline strip can keep the last snapshot.
     @ObservationIgnored var connectedCredentials: (endpoint: String, code: String)?
@@ -558,7 +561,7 @@ final class AppStore: ProjectManagementStore {
         writeRevisions = nil; reviewedSettings = nil; reviewedMembers = [:]; reviewedTodos = [:]
         settingsEdit = nil; settingsConflict = nil; todoWrites = [:]; operationResults = [:]; batchResults = [:]
         leaseReceiptOrder = [:]; absentOperations = []; announcedUnresolved = []; writeContextGeneration = UUID()
-        strictWriteContract = false; syncSupported = false; realtimeSupported = false; capabilitiesLoaded = false
+        strictWriteContract = false; syncSupported = false; realtimeSupported = false; capabilitiesLoaded = false; serverTakesRevisions = false
         capabilityProbeFailed = false; seededBootstrap = nil; fullPassCursor = nil; lastSnapshotCursor = nil; pushRetryAttempt = 0
         receivedCursor = nil; appliedSnapshotCursor = nil; highestRelevantSeq = 0
         socketFailures = 0; restFailures = 0; nextSnapshotAt = .zero
@@ -1244,8 +1247,9 @@ final class AppStore: ProjectManagementStore {
         return await answerDecision(decision, choice: choice, note: nil)
     }
 
-    @discardableResult func answerDecision(_ decision: Decision, choice: String?, note: String?, memberIds: [String]? = nil, timeout: TimeInterval? = nil) async -> Bool {
-        let req = AnswerRequest(choice: choice, note: note, batch: false, expectedVersion: decision.updatedAt, memberIds: memberIds)
+    @discardableResult func answerDecision(_ decision: Decision, choice: String?, note: String?, fileIDs: [String] = [], memberIds: [String]? = nil, timeout: TimeInterval? = nil) async -> Bool {
+        let req = AnswerRequest(choice: choice, note: note.map(OwnerText.clean), batch: false, expectedVersion: decision.updatedAt, memberIds: memberIds,
+                                fileIds: fileIDs.isEmpty ? nil : fileIDs)
         let result: Decision? = await mutate("decision:\(decision.id)") { api in
             try await api.send("/api/decisions/\(APIClient.segment(decision.id))/answer", body: req, timeout: timeout, contractVersion: strictWriteContract ? 2 : nil)
         }
@@ -1258,7 +1262,8 @@ final class AppStore: ProjectManagementStore {
                 decisions.filter { results[$0.id] != .accepted }.map(\.title))
     }
 
-    func answerBatchResults(_ decisions: [Decision], notes: [String: String] = [:]) async -> [String: CardWriteStatus] {
+    /// files: 카드별 결재 답 첨부(0.2.7). 메모처럼 그 카드의 답에 싣고, 서버가 같은 첨부로 답했는지까지 맞춰 본다.
+    func answerBatchResults(_ decisions: [Decision], notes: [String: String] = [:], files: [String: [String]] = [:]) async -> [String: CardWriteStatus] {
         let epoch = generation, namespace = writeNamespace
         var results: [String: CardWriteStatus] = [:]
         for decision in decisions {
@@ -1268,12 +1273,14 @@ final class AppStore: ProjectManagementStore {
             }
             let memo = drafts.memo(for: decision.id)
             let note = notes[decision.id].flatMap { $0.isEmpty ? nil : $0 }
-            let req = AnswerRequest(choice: rec, note: note, batch: true, expectedVersion: decision.updatedAt)
+            let fileIDs = files[decision.id] ?? []
+            let req = AnswerRequest(choice: rec, note: note, batch: true, expectedVersion: decision.updatedAt, fileIds: fileIDs.isEmpty ? nil : fileIDs)
             let outcome: (value: Decision?, error: Error?) = await perform("decision:\(decision.id)", refreshAfter: false) { api in
                 try await api.send("/api/decisions/\(APIClient.segment(decision.id))/answer", body: req, contractVersion: strictWriteContract ? 2 : nil)
             }
             guard epoch == generation else { results[decision.id] = .unknown; continue }
-            if let value = outcome.value, value.id == decision.id, value.status == "answered", value.choice == rec, value.note == note {
+            if let value = outcome.value, value.id == decision.id, value.status == "answered", value.choice == rec, value.note == note,
+               Set(value.answerAttachments.map(\.id)) == Set(fileIDs) {
                 results[decision.id] = .accepted
                 if drafts.namespace == namespace, drafts.memo(for: decision.id) == memo,
                    memo == note { drafts.clearMemo(decision.id) }
@@ -1483,10 +1490,12 @@ final class AppStore: ProjectManagementStore {
         stillCurrent(api, project: project) && isArchive == archived
     }
 
-    @discardableResult func setTodoDone(_ todo: Todo, done: Bool, note: String? = nil, fileIDs: [String] = []) async -> Bool {
+    /// outcome(0.2.7): nil 이면 했음. "dropped"(필요 없음)·"delegated"(팀장에게 맡김)는 note 가 까닭·부탁이 된다.
+    @discardableResult func setTodoDone(_ todo: Todo, done: Bool, note: String? = nil, fileIDs: [String] = [], outcome: String? = nil) async -> Bool {
+        let note = note.map(OwnerText.clean)
         if !strictWriteContract {
             let result: Todo? = await mutate("todo:\(todo.id)") { api in
-                try await api.completeTodo(id: todo.id, done: done, note: note, fileIDs: fileIDs).todo
+                try await api.completeTodo(id: todo.id, done: done, note: note, fileIDs: fileIDs, outcome: outcome).todo
             }
             return result != nil
         }
@@ -1496,7 +1505,7 @@ final class AppStore: ProjectManagementStore {
             errorMessage = String(localized: "최신 업무 상태를 확인한 뒤 변경하세요."); return false
         }
         return await submitTodoCompletion(PendingTodo(id: todo.id, namespace: writeNamespace, revision: revision,
-                                                      done: done, note: note, fileIds: fileIDs))
+                                                      done: done, note: note, fileIds: fileIDs, outcome: outcome))
     }
 
     @discardableResult func dropTodo(_ todo: Todo, reason: String? = nil) async -> Bool {
@@ -1536,10 +1545,11 @@ final class AppStore: ProjectManagementStore {
         todoWrites[id] = .sending
         let outcome = await perform("todo:\(id)", refreshAfter: false) { api in
             if pending.dropped == true { return try await api.dropTodo(id: id, reason: pending.dropReason, revision: revision) }
-            return try await api.completeTodo(id: id, done: done, note: pending.note, fileIDs: pending.fileIds ?? [], revision: revision)
+            return try await api.completeTodo(id: id, done: done, note: pending.note, fileIDs: pending.fileIds ?? [], outcome: pending.outcome, revision: revision)
         }
         guard epoch == generation else { return false }
-        if let result = outcome.value, result.todo.id == id, result.todo.done == done, (pending.dropped != true || result.todo.outcome == "dropped"), result.revision >= revision {
+        if let result = outcome.value, result.todo.id == id, result.todo.done == done, (pending.dropped != true || result.todo.outcome == "dropped"),
+           pending.outcome.map({ $0 == result.todo.outcome }) ?? true, result.revision >= revision {
             todoWrites[id] = .confirmed
             writeRevisions?.todos?[id] = result.revision
             if let index = state?.todos.firstIndex(where: { $0.id == id }) { state?.todos[index] = result.todo }

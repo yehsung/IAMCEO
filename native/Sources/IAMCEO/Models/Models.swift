@@ -201,6 +201,8 @@ struct DecisionOption: Codable, Sendable, Equatable {
     var k: String = ""
     var label: String = ""
     var desc: String? = nil
+    /// 0.2.7: 이 선택지는 메모가 있어야 보낼 수 있다('메모에 적음' 등). 옛 서버는 보내지 않는다(false).
+    var needsNote: Bool = false
 }
 extension DecisionOption {
     init(from decoder: Decoder) throws {
@@ -208,6 +210,7 @@ extension DecisionOption {
         k = try c.decodeIfPresent(String.self, forKey: ModelKey("k")) ?? ""
         label = try c.decodeIfPresent(String.self, forKey: ModelKey("label")) ?? ""
         desc = try c.decodeIfPresent(String.self, forKey: ModelKey("desc"))
+        needsNote = c.lenient(Bool.self, forKey: ModelKey("needsNote")) ?? false
     }
 }
 
@@ -290,6 +293,13 @@ struct Decision: Codable, Sendable, Identifiable, Equatable {
     var optionTexts: [String: ServerOptionTexts]? = nil
     var closeReasonText: ServerTextRef? = nil
     var reopenNoteText: ServerTextRef? = nil
+    /// 0.2.7: 이 카드가 대신한 앞 카드 / 이 카드를 대신한 새 카드(팀장이 고쳐 다시 물었다).
+    var replaces: String? = nil
+    var replacedBy: String? = nil
+    /// 0.2.7: 대표가 답에 붙인 첨부.
+    var answerAttachments: [Attachment] = []
+    /// 0.2.7: 다시 열린 카드의 직전 답 첨부(lastNote 와 같은 몫). 답 첨부 초안이 비었으면 이것으로 채운다.
+    var lastAnswerAttachments: [Attachment] = []
 }
 extension Decision {
     init(from decoder: Decoder) throws {
@@ -330,6 +340,10 @@ extension Decision {
         optionTexts = c.lenient([String: ServerOptionTexts].self, forKey: ModelKey("optionTexts"))
         closeReasonText = c.lenient(ServerTextRef.self, forKey: ModelKey("closeReasonText"))
         reopenNoteText = c.lenient(ServerTextRef.self, forKey: ModelKey("reopenNoteText"))
+        replaces = c.lenient(String.self, forKey: ModelKey("replaces"))
+        replacedBy = c.lenient(String.self, forKey: ModelKey("replacedBy"))
+        answerAttachments = (try? c.lossyArray(Attachment.self, forKey: ModelKey("answerAttachments"))) ?? []
+        lastAnswerAttachments = (try? c.lossyArray(Attachment.self, forKey: ModelKey("lastAnswerAttachments"))) ?? []
         localizeServerText()
     }
 }
@@ -507,6 +521,10 @@ struct FileDoc: Codable, Sendable, Identifiable, Equatable {
     var createdAt: String = ""
     var order: Int = 0
     var reused: Bool? = nil
+    /// 0.2.7: 판 갈이. replaces 앞 판, replacedBy 새 판(있으면 이 자료는 옛 판), versions 목록의 최신 판이 가진 판 수(2 이상일 때만).
+    var replaces: String? = nil
+    var replacedBy: String? = nil
+    var versions: Int? = nil
 }
 extension FileDoc {
     init(from decoder: Decoder) throws {
@@ -524,6 +542,9 @@ extension FileDoc {
         createdAt = try c.decodeIfPresent(String.self, forKey: ModelKey("createdAt")) ?? ""
         reused = try c.decodeIfPresent(Bool.self, forKey: ModelKey("reused"))
         order = try c.decodeIfPresent(Int.self, forKey: ModelKey("order")) ?? 0
+        replaces = c.lenient(String.self, forKey: ModelKey("replaces"))
+        replacedBy = c.lenient(String.self, forKey: ModelKey("replacedBy"))
+        versions = c.lenient(Int.self, forKey: ModelKey("versions"))
     }
 }
 
@@ -1268,6 +1289,8 @@ struct TodoCompletionRequest: Encodable, Sendable {
     let done: Bool
     var note: String? = nil
     var fileIds: [String]? = nil
+    /// 0.2.7: 닫는 결과(done 했음 · dropped 필요 없음 · delegated 팀장에게 맡김). 했음이면 싣지 않는다(옛 서버도 그대로 받는다).
+    var outcome: String? = nil
 }
 
 struct TodoDropRequest: Encodable, Sendable { let reason: String? }

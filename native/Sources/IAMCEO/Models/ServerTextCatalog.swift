@@ -175,6 +175,7 @@ enum ServerTextCatalog {
         case "card.reopen_stopped": return String(localized: "server.text.card.reopen_stopped", defaultValue: "전달을 그만둔 답입니다. {name:이} 받지 못했을 수 있으니 다시 결정해 주세요")
         case "card.reopen_by_owner": return String(localized: "server.text.card.reopen_by_owner", defaultValue: "{who:이} 닫았던 결재를 대표가 다시 열었습니다")
         case "card.reopen_by_owner_reason": return String(localized: "server.text.card.reopen_by_owner_reason", defaultValue: "{who:이} 닫았던 결재를 대표가 다시 열었습니다(닫은 이유: {reason})")
+        case "card.replaced": return String(localized: "server.text.card.replaced", defaultValue: "새 카드(#{id})로 대신했습니다")
         case "word.unknown": return String(localized: "server.text.word.unknown", defaultValue: "알 수 없음")
         case "word.unknown_cause": return String(localized: "server.text.word.unknown_cause", defaultValue: "원인 미확인")
         case "word.owner_answer": return String(localized: "server.text.word.owner_answer", defaultValue: "대표 결재 답")

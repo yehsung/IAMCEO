@@ -15,7 +15,8 @@ enum SampleWorkspaceData {
    "realtime": true,
    "delivery": true,
    "push": true,
-   "operations": true
+   "operations": true,
+   "revisions": true
   }
  },
  "models": {
@@ -4087,7 +4088,8 @@ enum SampleWorkspaceData {
    "realtime": true,
    "delivery": true,
    "push": true,
-   "operations": true
+   "operations": true,
+   "revisions": true
   }
  },
  "models": {

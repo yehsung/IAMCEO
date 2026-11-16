@@ -575,7 +575,8 @@ describe("새 읽기 계약", () => {
       }
     }
     const capabilities = await json(api("/api/capabilities"));
-    expect(capabilities).toEqual({ contractVersion: 2, capabilities: { paging: true, archive: true, realtime: true, delivery: false, push: false, operations: false } });
+    // revisions(0.2.7 묶음 4): 결재 답 첨부·할 일 닫기 결과를 받는 서버 판이다(포트와 상관없다).
+    expect(capabilities).toEqual({ contractVersion: 2, capabilities: { paging: true, archive: true, realtime: true, delivery: false, push: false, operations: false, revisions: true } });
   });
 
   test("예외 로그에 비밀 query·헤더·오류 본문이 남지 않는다", async () => {

@@ -19,7 +19,7 @@ import type { OrchestratorApi } from "./orchestrator-api.ts";
 import { ApiError, type Store } from "./store.ts";
 import type { ErrorCode } from "../shared/error-codes.ts";
 import { classifyStorageError } from "./storage-errors.ts";
-import { SESSION_ID_RE } from "./text.ts";
+import { SESSION_ID_RE, stripControls } from "./text.ts";
 import { Pairing, PAIR_CODE_TTL_MS, tailnetUrls, withMagicDnsNames } from "./pairing.ts";
 import { createPushHandler, type PushRoutesContext } from "./push/routes.ts";
 import { TerminalStreams, type SocketData as TerminalSocketData } from "./terminal-stream.ts";
@@ -314,9 +314,12 @@ const AnswerSchema = z.object({
   batch: z.boolean().optional(),
   // 사용 한도 카드의 모델 답에 앱이 본 카드의 팀장을 싣는다(AnswerReq.memberIds).
   memberIds: z.array(z.string().min(1).max(200)).max(500).optional(),
+  // 0.2.7 묶음 4(D3-4): 결재 답 첨부. 할 일 완료(TodoDoneSchema.fileIds)와 같은 한도.
+  fileIds: z.array(z.string().min(1)).max(50).optional(),
 });
 const TodoDropSchema = z.object({ reason: z.string().max(100_000).optional() });
-const TodoDoneSchema = z.object({ done: z.boolean(), note: z.string().max(100_000).optional(), fileIds: z.array(z.string().min(1)).max(50).optional() });
+// outcome(0.2.7 묶음 4): 했음(done)·필요 없음(dropped)·팀장에게 맡김(delegated). 없으면 했음.
+const TodoDoneSchema = z.object({ done: z.boolean(), note: z.string().max(100_000).optional(), fileIds: z.array(z.string().min(1)).max(50).optional(), outcome: z.enum(["done", "dropped", "delegated"]).optional() });
 const SleepSchema = z.object({ force: z.boolean().optional() });
 const SettingsSchema = z
   .object({
@@ -815,6 +818,8 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
         // 네이티브는 이 값으로 엄격 쓰기를 켠다. 결과 조회와 모든 쓰기 포트가 있어야 한다.
         operations: (["operation", "updateSettingsV2", "patchMemberConfigV2", "setTodoDoneV2", "freshMemberSessionV2", "terminalControlV2"] as const)
           .every(port => port in orch && !!orch[port]),
+        // 0.2.7 묶음 4: 결재 답 첨부·할 일 닫기 결과를 받는다(새 앱은 이 값이 있을 때만 그 단추를 보인다).
+        revisions: true,
       } };
       return Response.json(body);
     }),
@@ -1036,6 +1041,8 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
           return Response.json(existing);
         }
       }
+      // D5-10: 대표 글에 섞인 제어문자(백스페이스 등)는 저장 전에 지운다. 제어문자뿐인 글은 빈 글이다.
+      body.text = stripControls(body.text);
       if (!body.text.trim() && !body.attachmentIds?.length) throw new ApiError(400, "글이나 첨부가 필요합니다", "message_empty");
       if (body.targetMemberId && store.getMember(body.targetMemberId)?.projectId !== id) {
         throw new ApiError(400, "이 프로젝트의 팀원이 아닙니다", "member_not_in_project");
@@ -1065,6 +1072,9 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
     route("POST", "/api/decisions/:id/answer", async (req, _url, [id]) => {
       store.requireDecision(id!);
       const body = await parseBody(req, contractV2(req) ? AnswerV2Schema : AnswerSchema);
+      // D3-4: 결재 답 첨부는 올린 첨부여야 한다(할 일 완료와 같은 검사).
+      for (const fileId of body.fileIds ?? []) if (!store.getAttachment(fileId)) throw new ApiError(400, "업로드된 첨부를 찾을 수 없습니다", "upload_not_found");
+      if (body.fileIds?.length && store.requireDecision(id!).kind) throw new ApiError(400, "이 카드의 답에는 첨부를 붙일 수 없습니다", "decision_attachment_unsupported");
       if (store.requireDecision(id!).kind === "usage_limit") {
         // 같은 답의 재전송만 앞 요청의 결과를 함께 받는다. 다른 답은 총괄이 판정한다(도는 답이 있으면 409): 결재 id 하나로만 묶으면
         // 모델을 바꾸는 동안 온 다른 선택이 앞 답의 결과를 200 으로 받아 갔다.
@@ -1126,7 +1136,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
         return Response.json(await orch.setTodoDoneV2(id!, body, expected));
       }
       const body = await parseBody(req, TodoDoneSchema);
-      if (!body.done && (body.note !== undefined || body.fileIds?.length)) throw new ApiError(400, "완료할 때만 답과 첨부를 붙일 수 있습니다", "todo_answer_requires_done");
+      if (!body.done && (body.note !== undefined || body.fileIds?.length || body.outcome !== undefined)) throw new ApiError(400, "완료할 때만 답과 첨부를 붙일 수 있습니다", "todo_answer_requires_done");
       for (const fileId of body.fileIds ?? []) if (!store.getAttachment(fileId)) throw new ApiError(400, "업로드된 첨부를 찾을 수 없습니다", "upload_not_found");
       if (todo.done === body.done) return Response.json(todo);
       return Response.json(await orch.setTodoDone(id!, body.done, body));
@@ -1136,6 +1146,13 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       const file = store.getFile(id!);
       if (!file) throw new ApiError(404, "자료를 찾을 수 없습니다", "file_not_found");
       return Response.json(file, { headers: { "Cache-Control": "no-store" } });
+    }),
+    // 0.2.7 묶음 4(D5-7): 한 자료의 모든 판(최신 판이 먼저). 프로젝트 자료 목록도 모든 판을 싣고(출시 앱이 옛 판 링크를 그 목록에서 찾는다)
+    // 옛 판에 replacedBy, 최신 판에 versions 를 단다. 새 앱이 목록에서 옛 판을 감추고 판 보기에서 이 길을 쓴다.
+    route("GET", "/api/files/:id/versions", (_req, url, [id]) => {
+      strictQuery(url, ["lite"]);
+      const versions = store.listFileVersions(id!);
+      return Response.json(wantsLite(url) ? versions.map(liteFile) : versions, { headers: { "Cache-Control": "no-store" } });
     }),
     route("GET", "/api/files/:id/artifact", async (_req, url, [id]) => {
       // 원본은 JSON, 네이티브 render는 sandbox CSP를 보존한 격리 WKWebView에서 연다.

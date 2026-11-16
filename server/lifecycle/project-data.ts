@@ -187,7 +187,12 @@ export async function exportProjectZip(store: Store, config: Pick<Config, "home"
       }
     };
     for (const file of data.files) note(file.attachments);
-    for (const decision of data.decisions) note((decision as { images?: unknown }).images);
+    for (const decision of data.decisions) {
+      note((decision as { images?: unknown }).images);
+      // 0.2.7 묶음 4: 결재 답 첨부와 다시 열린 카드의 직전 답 첨부.
+      note(decision.answerAttachments);
+      note(decision.lastAnswerAttachments);
+    }
     for (const todo of data.todos) note((todo as { completionFileIds?: unknown }).completionFileIds);
     const project = { ...data.project, exportedAt: now.toISOString() };
     await zip.add("README.txt", [README], now);

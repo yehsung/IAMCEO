@@ -26,6 +26,8 @@ struct PendingTodo: Codable {
     let fileIds: [String]?
     var dropReason: String? = nil
     var dropped: Bool? = nil
+    /// 0.2.7: 할 일 닫기의 결과(dropped·delegated). 했음이거나 예전 기록이면 없다.
+    var outcome: String? = nil
     var createdAt: Double? = nil // 예전 기록에는 없다. 응답을 잃은 변경을 닫을 때의 기준 시각(초).
 }
 struct AppWriteJournal: Codable {

@@ -94,6 +94,24 @@ import XCTest
         store.disconnect()
     }
 
+    /// 0.2.7(D3-4): '추천대로' 묶음 결정도 카드에 붙인 첨부를 그 카드의 답에 싣고, 서버가 같은 첨부로 답했을 때만 받아들인 것으로 친다.
+    func testBatchCarriesEachCardsAttachmentsAndAcceptsOnlyWhenTheyWereKept() async throws {
+        let server = WriteTestServer()
+        let network = try IsolatedTestNetwork(handler: server.handle)
+        let store = await connect(network)
+        let cards = ["with", "without"].map {
+            Decision(id: $0, projectId: "p", title: $0, options: [DecisionOption(k: "yes", label: "Yes")], rec: "yes", updatedAt: "reviewed")
+        }
+        let result = await store.answerBatchResults(cards, files: ["with": ["a_1", "a_2"]])
+        XCTAssertEqual(result, ["with": .accepted, "without": .accepted])
+        XCTAssertEqual(server.read { $0.answerFileIds }, ["with": ["a_1", "a_2"]])
+        // 첨부를 빼고 답한 서버(옛 서버가 모르는 칸을 버린 경우)는 받아들인 것으로 치지 않는다.
+        server.change { $0.dropAnswerAttachments = true }
+        let dropped = await store.answerBatchResults([cards[0]], files: ["with": ["a_1"]])
+        XCTAssertNotEqual(dropped["with"], .accepted)
+        store.disconnect()
+    }
+
     func testTodoLostReplyStaysCheckingBlocksOppositeAndConvergesByRevision() async throws {
         let server = WriteTestServer(), network = try IsolatedTestNetwork(handler: server.handle)
         let store = await connect(network)

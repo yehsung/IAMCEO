@@ -173,9 +173,16 @@ struct ComposerBar: View {
     /// Web placeholders.
     private var placeholder: String {
         if missingTarget { return String(localized: "명부에 없는 대상에게는 보낼 수 없습니다") }
-        if let recipient { return String(localized: "\(recipient.name)에게 직접 지시") }
         if store.state?.project.isHq == true { return String(localized: "본사 AI에게 — 새 프로젝트 만들기 등") }
-        return namesLead ? String(localized: "\(leadName)에게 지시나 질문") : String(localized: "지시나 질문")
+        let base = recipient.map { String(localized: "\($0.name)에게 직접 지시") }
+            ?? (namesLead ? String(localized: "\(leadName)에게 지시나 질문") : String(localized: "지시나 질문"))
+        return projectName.map { String(localized: "composer.project_prefix", defaultValue: "\($0) · \(base)") } ?? base
+    }
+
+    /// 0.2.7(D5-10): 이 입력칸이 보내는 프로젝트. 다른 프로젝트 칸에 쓰는 실수를 막으려고 빈 입력칸과 Mac 의 보내기 안내에 밝힌다. 본사는 없다.
+    private var projectName: String? {
+        guard let project = store.state?.project, !project.isHq, !project.name.isEmpty else { return nil }
+        return project.name
     }
 
     private var blockedReason: (text: String, tone: Tone)? {
@@ -367,11 +374,7 @@ struct ComposerBar: View {
             if !files.isEmpty || !pendingUploads.isEmpty || !missingUploads.isEmpty {
                 // Many attachments scroll inside the row instead of growing the panel.
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(files) { fileChip($0) }
-                        ForEach(pendingUploads) { uploadingChip($0) }
-                        ForEach(missingUploads) { failedUploadChip($0) }
-                    }
+                    HStack(spacing: 6) { DraftAttachmentChips(key: key) }
                 }
                 .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
             }
@@ -392,7 +395,9 @@ struct ComposerBar: View {
             if files.isEmpty && pendingUploads.isEmpty { Spacer(minLength: 0) }
             #if os(macOS)
             if focused && quietBlock == nil && sentTo == nil {
-                Text("↩ 보내기 · ⇧↩ 줄바꿈").font(hintFont).foregroundStyle(CE.ink3).lineLimit(1)
+                let keys = String(localized: "↩ 보내기 · ⇧↩ 줄바꿈")
+                Text(projectName.map { String(localized: "composer.project_prefix", defaultValue: "\($0) · \(keys)") } ?? keys)
+                    .font(hintFont).foregroundStyle(CE.ink3).lineLimit(1).truncationMode(.head)
             }
             #endif
         }
@@ -475,66 +480,6 @@ struct ComposerBar: View {
         .help("보낼 대상 바꾸기")
         .accessibilityLabel("보낼 대상: \(recipientName). 눌러서 바꾸기")
         #endif
-    }
-
-    /// web .cmp-chip--file: 28 tall, 12.5/500, an image shows a 20pt round thumbnail at −5, max 260 wide, and the
-    /// 28pt round × sits flush at the trailing end.
-    private func fileChip(_ file: Attachment) -> some View {
-        HStack(spacing: 6) {
-            if file.isImage {
-                ComposerChipThumb(file: file).padding(.leading, -5)
-            } else {
-                Image(systemName: "doc").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(CE.ink2)
-            }
-            Text(file.name).lineLimit(1).truncationMode(.middle).frame(maxWidth: 200, alignment: .leading)
-            Button { drafts.removeFile(file.id, for: key) } label: {
-                Image(systemName: "xmark").font(.system(size: 8.5, weight: .bold))
-            }
-            .buttonStyle(ChipRemoveStyle())
-            .accessibilityLabel("\(file.name) 빼기")
-        }
-        .font(CEFont.meta.weight(.medium))
-        .foregroundStyle(CE.ink)
-        .padding(.leading, 9).frame(height: 28)
-        .background(Color.white.opacity(0.08), in: Capsule())
-        .overlay { Capsule().strokeBorder(Color.white.opacity(0.1)) }
-        .help(file.name)
-    }
-
-    private func uploadingChip(_ upload: ComposerUpload) -> some View {
-        HStack(spacing: 6) {
-            ProgressView().controlSize(.mini)
-            Text(upload.name).lineLimit(1).truncationMode(.middle).frame(maxWidth: 160, alignment: .leading)
-            // web .cmp-chip__state: regular weight, ink-2.
-            Text(upload.waiting ? "연결 뒤 올림" : upload.progress.map { "\(Int($0 * 100))%" } ?? "준비 중")
-                .fontWeight(.regular).foregroundStyle(CE.ink2)
-            Button { store.composerUploads.cancel(upload.id, drafts: drafts) } label: {
-                Image(systemName: "xmark")
-            }
-            .buttonStyle(ChipRemoveStyle()).accessibilityLabel("\(upload.name) 올리기 취소")
-        }
-        .font(CEFont.meta.weight(.medium))
-        .foregroundStyle(CE.ink)
-        .padding(.horizontal, 9).frame(height: 28)
-        .background(Color.white.opacity(0.08), in: Capsule())
-        .overlay { Capsule().strokeBorder(Color.white.opacity(0.1)) }
-        .accessibilityElement(children: .combine)
-    }
-
-    private func failedUploadChip(_ failure: DraftUploadFailure) -> some View {
-        HStack(spacing: 6) {
-            Text(failure.name).lineLimit(1).truncationMode(.middle)
-            Text("실패").foregroundStyle(CE.danger)
-            if store.composerUploads.canRetry(failure.id, store: store) {
-                Button("다시 올리기") { store.composerUploads.retry(failure.id, store: store) }
-                    .buttonStyle(.plain).foregroundStyle(CE.accent)
-            }
-            Button { store.composerUploads.cancel(failure.id, drafts: drafts) } label: { Image(systemName: "xmark") }
-                .buttonStyle(ChipRemoveStyle()).accessibilityLabel("\(failure.name) 빼기")
-        }
-        .font(CEFont.meta).padding(.leading, 9).frame(height: 28)
-        .background(Color.white.opacity(0.08), in: Capsule())
-        .help(friendlyLoadError(APIError(status: 0, message: failure.detail), what: "첨부", verb: "올리지"))
     }
 
     /// "{대상}에게 보냈습니다 · 대화에서 보기". Sent = the server accepted it; whether the CLI received it is the
@@ -802,41 +747,14 @@ struct ComposerBar: View {
     }
 
     private func loadPhotos(_ items: [PhotosPickerItem], context: ComposerUploadContext) {
-        let date = Date()
-        let names = items.enumerated().map { index, item in
-            PhotoAttachment.filename(date: date, index: index + 1, extension: item.supportedContentTypes.contains {
-                $0.conforms(to: .movie)
-            } ? "mov" : "jpg", video: item.supportedContentTypes.contains { $0.conforms(to: .movie) })
-        }
-        loadMedia(names: names, context: context) { index in
-            guard let media = try await items[index].loadTransferable(type: ComposerPickedMedia.self) else {
-                throw PhotoAttachmentError.unavailable
-            }
-            defer { media.file.cleanup() }
-            return try await Task.detached(priority: .userInitiated) {
-                [try PhotoAttachment.prepare(source: media.file.url, video: media.video, date: date, index: index + 1)]
-            }.value
-        }
+        store.composerUploads.loadPhotos(items, context: context, store: store)
     }
 
     private func loadCameraPhoto(_ result: Result<Data, Error>, context: ComposerUploadContext) {
-        let date = Date()
-        loadMedia(names: [PhotoAttachment.filename(date: date, index: 1, extension: "jpg")], context: context) { _ in
-            let data = try result.get()
-            return try await Task.detached(priority: .userInitiated) {
-                let original = try PhotoAttachmentFile.write(data, filename: "capture.jpg")
-                defer { original.cleanup() }
-                return [try PhotoAttachment.prepare(source: original.url, video: false, date: date, index: 1, forceJPEG: true)]
-            }.value
-        }
+        store.composerUploads.loadCameraPhoto(result, context: context, store: store)
     }
 
     #endif
-
-    private func loadMedia(names: [String], context: ComposerUploadContext,
-                           load: @escaping @MainActor (Int) async throws -> [PhotoAttachmentFile]) {
-        store.composerUploads.loadMedia(names: names, context: context, store: store, load: load)
-    }
 
     private func recordUploadError(_ detail: String, context: ComposerUploadContext? = nil) {
         store.composerUploads.reportRejection(detail)
@@ -1078,7 +996,7 @@ struct IOSComposerTextView: UIViewRepresentable {
 #endif
 
 /// Web ghost icon button (paperclip, .gbtn--ghost): ink-2 and no fill; ink-1 on white .07 when hovered.
-private struct ComposerGhostStyle: ButtonStyle {
+struct ComposerGhostStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { GhostBody(configuration: configuration) }
     private struct GhostBody: View {
         let configuration: ButtonStyleConfiguration
@@ -1172,7 +1090,7 @@ private struct TargetChipStyle: ButtonStyle {
 }
 
 /// Web .cmp-chip__x: a 28pt round × in ink-2; ink-1 on white .10 when hovered.
-private struct ChipRemoveStyle: ButtonStyle {
+struct ChipRemoveStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { RemoveBody(configuration: configuration) }
     private struct RemoveBody: View {
         let configuration: ButtonStyleConfiguration
@@ -1301,7 +1219,7 @@ private struct ComposerTargetMenu: View {
 
 /// An image attachment's 20pt round thumbnail in its chip (web .cmp-chip__thumb). Read once per attachment and kept
 /// small; very large files and the sample keep the photo glyph.
-private struct ComposerChipThumb: View {
+struct ComposerChipThumb: View {
     @Environment(AppStore.self) private var store
     let file: Attachment
     @State private var image: Image?

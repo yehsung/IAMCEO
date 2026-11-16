@@ -210,7 +210,11 @@ export type DecisionCloseFollowUp = { kind: "none" }
   | { kind: "instruction"; memberId: string; text: string; sourceMessageId: string }
   | { kind: "instruction"; memberId: string; text: string; sourceDecisionId: string };
 
-export interface DecisionOption { k: string; label: string; desc?: string }
+/**
+ * 0.2.7 묶음 4: needsNote 가 true 면 이 선택지는 메모(또는 첨부)가 있어야 답이 된다('메모에 적음' 같은 선택지). ask 도구가 정하고,
+ * 라벨에 '메모'가 들면 서버가 켠다. 새 앱은 메모가 비면 보내지 못하게 하고, 서버도 400(decision_note_required)으로 막는다. 출시 앱은 모르는 칸이다.
+ */
+export interface DecisionOption { k: string; label: string; desc?: string; needsNote?: boolean }
 export type DecisionStatus = "open" | "answered" | "delivered" | "closed";
 export interface UsageLimit { cli: CliProvider; resetsAt: string | null; memberIds: string[]; stillLimited: boolean }
 export interface ApiOutageState { since: string; affectedMemberIds: string[]; lastProbeAt: string | null }
@@ -282,12 +286,23 @@ export interface Decision {
   optionTexts?: Record<string, { label: ServerTextRef; desc?: ServerTextRef }>;
   closeReasonText?: ServerTextRef;
   reopenNoteText?: ServerTextRef;
+  /** 0.2.7 묶음 4: 이 카드가 대신한 앞 카드(ask 도구 replaces). 그 카드는 같은 트랜잭션에서 obsolete 로 닫혔다. 있을 때만 싣는다. */
+  replaces?: string;
+  /** 0.2.7 묶음 4: 이 카드를 대신한 새 카드. 있을 때만 싣는다. */
+  replacedBy?: string;
+  /** 0.2.7 묶음 4: 대표가 결재 답에 붙인 첨부(AnswerReq.fileIds). 있을 때만 싣는다. 다시 열리면 lastAnswerAttachments 로 옮겨진다. */
+  answerAttachments?: Attachment[];
+  /** 0.2.7 묶음 4: 다시 열린 카드의 직전 답 첨부(lastChoice·lastNote 와 같은 몫). 새 앱은 답 첨부 초안이 비었으면 이것으로 채운다. 새 답이 오면 지운다. 있을 때만 싣는다. */
+  lastAnswerAttachments?: Attachment[];
 }
 /** decided 대표가 대화 등으로 이미 정함(서버가 대표 글로 확인) · obsolete 상황이 바뀌어 필요 없어짐 */
 export type DecisionCloseKind = "decided" | "obsolete";
 
-/** done 끝남 · dropped 필요 없어짐(홈에서 빠진다). 둘 다 done=true 다. */
-export type TodoOutcome = "done" | "dropped";
+/**
+ * done 끝남 · dropped 필요 없어짐(홈에서 빠진다). 둘 다 done=true 다.
+ * 0.2.7 묶음 4: delegated 대표가 하지 않고 부탁한 팀장(없으면 총괄)에게 맡김. 대표만 고른다(앱 할 일 닫기). done=true 이고 홈의 '완료'에 남는다.
+ */
+export type TodoOutcome = "done" | "dropped" | "delegated";
 export interface Todo {
   completionNote?: string | null;
   completionFileIds?: string[];
@@ -405,6 +420,12 @@ export interface FileDoc {
   order: number;
   /** from-path 게시 응답에서만 있다. 같은 내용의 기존 판을 돌려주었는가. */
   reused?: boolean;
+  /** 0.2.7 묶음 4: 이 판이 대신한 앞 판(file 도구 replaces). 있을 때만 싣는다. */
+  replaces?: string;
+  /** 0.2.7 묶음 4: 이 판을 대신한 새 판. 있으면 이 자료는 옛 판이다(새 앱은 자료 목록에서 감추고 '이전 판'으로 보인다. 출시 앱은 예전처럼 다 보인다). */
+  replacedBy?: string;
+  /** 0.2.7 묶음 4: 프로젝트 자료 목록에서, 판이 둘 이상인 자료의 최신 판에만 판 수(이 판 포함). 모든 판은 GET /api/files/:id/versions. */
+  versions?: number;
 }
 
 /** 대기 중인 동안의 연속 대기 시작 시각. runLimit은 run_limit일 때만 있다. */
@@ -790,7 +811,9 @@ export interface SendMessageReq { id?: string; text: string; targetMemberId?: st
  * memberIds: 사용 한도 카드의 `model:<값>` 답에만 앱이 싣는다. 앱이 본 카드의 팀장(usageLimit.memberIds)이다. 지금 카드의 팀장과 다르면 409
  * (카드의 판은 푸시 알림에 묶여 팀장이 붙어도 오르지 않는다). 옛 앱은 보내지 않는다.
  */
-export interface AnswerReq { expectedVersion?: string; choice?: string | null; note?: string | null; batch?: boolean; memberIds?: string[] }
+export interface AnswerReq { expectedVersion?: string; choice?: string | null; note?: string | null; batch?: boolean; memberIds?: string[];
+  /** 0.2.7 묶음 4: 결재 답에 붙인 첨부(POST /api/uploads 의 id, 할 일 완료의 fileIds 와 같은 한도). 없으면 지금처럼. */
+  fileIds?: string[] }
 /** POST /api/projects/:id/tidy. already: 이미 판 정리 지시가 기다리거나 도는 중이라 새로 넣지 않았다. */
 export interface TidyResult { already: boolean }
 
@@ -834,7 +857,8 @@ export function fileKindOf(name: string, mime = ""): FileKind {
 
 // ---- 에이전트 도구 이름 ----
 /** ask_close·todo_close: 직원은 자기가 올린 결재·할 일만, 총괄·본사 AI 는 프로젝트 전체를 정리한다. */
-export const WORKER_TOOLS = ["status", "ask", "post", "file", "todo", "ask_close", "todo_close"] as const;
+/** todo_update(0.2.7 묶음 4): 열린 할 일의 제목·내용 고치기. 직원은 자기가 부탁한 것만. */
+export const WORKER_TOOLS = ["status", "ask", "post", "file", "todo", "ask_close", "todo_close", "todo_update"] as const;
 export const CONDUCTOR_TOOLS = ["withdraw", "team_add", "team_assign", "team_compact", "team_sleep", "team_resume", "team_close", "team_model", "roster", "project_now", "work_set", "work_list", "work_remove", "board", "rule"] as const;
 export const ROOT_TOOLS = ["project_create", "project_list", "board", "rule"] as const;
 export const MANUAL_TOOLS = ["wait"] as const;

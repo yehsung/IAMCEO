@@ -77,11 +77,20 @@ export function formatAnswer(d: Decision): string {
   }
   if (d.batch) parts.push("(묶음 추천대로)");
   parts.push(`#${d.id}`);
-  return parts.join(" ");
+  // 0.2.7 묶음 4(D3-4): 결재 답 첨부. 받는 팀장 폴더의 경로 줄은 부르는 쪽이 answerAttachmentLines 로 붙인다(할 일 완료와 같은 모양).
+  const files = d.answerAttachments ?? [];
+  return files.length ? `${parts.join(" ")}\n대표가 올린 첨부: ${files.map((f) => f.id).join(", ")}` : parts.join(" ");
+}
+
+/** 0.2.7 묶음 4: 결재 답 전달 글. linked 는 받는 팀장 폴더로 이은 첨부(OwnerFlows.attachmentsFor). */
+export function formatAnswerFor(d: Decision, linked: Attachment[]): string {
+  return [formatAnswer(d), ...attachmentLines(linked)].join("\n");
 }
 
 export function formatTodoDone(t: Todo): string {
-  if (t.outcome === "dropped") return `[대표] '${quotedInline(t.title)}' 필요 없음 #${t.id}\n${t.closeReason ?? "대표가 필요 없음으로 정리"}`;
+  if (t.outcome === "dropped") return `[대표] '${quotedInline(t.title)}' 필요 없음 #${t.id}\n${t.closeReason ?? "대표가 필요 없음으로 정리"}${t.completionFileIds?.length ? `\n대표가 올린 첨부: ${t.completionFileIds.join(", ")}` : ""}`;
+  // 0.2.7 묶음 4(D1-5·D3-9): 대표가 하지 않고 맡긴 일. '했음'으로 보내지 않는다. 받는 팀장이 직접 하거나 다른 길을 찾는다.
+  if (t.outcome === "delegated") return `[대표] '${quotedInline(t.title)}' 대표가 하지 않았음 — 이 일을 맡깁니다. 직접 하거나, 대표만 할 수 있는 일이면 그 까닭을 보고하세요 #${t.id}${t.completionNote != null ? `\n[대표 메모 원문]\n${t.completionNote}\n[대표 메모 끝]` : ""}${t.completionFileIds?.length ? `\n대표가 올린 첨부: ${t.completionFileIds.join(", ")}` : ""}`;
   return `[대표] '${quotedInline(t.title)}' 했음 #${t.id}${t.completionNote != null ? `\n[대표 완료 답 원문]\n${t.completionNote}\n[대표 완료 답 끝]` : ""}${t.completionFileIds?.length ? `\n대표가 올린 첨부: ${t.completionFileIds.join(", ")}` : ""}`;
 }
 
@@ -175,7 +184,7 @@ export function formatTidy(kind: MemberKind, manual: boolean): string {
     `${TIDY_HEAD}${manual ? "(대표가 눌렀습니다)" : ""}: 열린 결재·내 할 일·진행판·지금 상황을 지금 상태에 맞춰라.`,
     "- `board` 로 판을 보고, 대화·보고·세션 기록으로 판단한다.",
     `- ${tools}`,
-    "- 3일 넘은 열린 할 일은 직접 확인할 수 있으면 확인 결과를 이유로 todo_close(done), 필요 없어졌으면 dropped로 닫는다. 대표 브라우저를 여는 확인(Aside 등)은 하지 않는다. 확인할 수 없으면 그대로 둔다. 부탁한 직원(없으면 총괄)에게 깨우지 않는 자동 안내가 가며 다음에 그 일을 할 때 확인한다.",
+    "- 3일 넘은 열린 할 일은 직접 확인할 수 있으면 확인 결과를 이유로 todo_close(done), 필요 없어졌으면 dropped로 닫는다. 대표 브라우저를 여는 확인(Aside 등)은 하지 않는다. 확인할 수 없으면 그대로 둔다. 부탁한 직원(없으면 총괄)에게 깨우지 않는 자동 안내가 가며 다음에 그 일을 할 때 확인한다. 부탁한 이가 없는 대표 본인의 할 일은 대표 화면이 알리니 안내하지 않는다.",
     "- 대표가 아직 정하지 않은 결재는 대신 닫지 않는다. 확실하지 않으면 그대로 둔다. 직원은 깨우지 않는다.",
     "- 바뀐 게 있으면 `post`(알림) 한 줄로 무엇을 정리했는지 알린다. 없으면 아무것도 올리지 말고 턴을 끝낸다.",
   ].join("\n");

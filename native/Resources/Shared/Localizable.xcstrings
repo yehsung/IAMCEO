@@ -21070,6 +21070,332 @@
         }
       }
     },
+    "앞 카드를 대신합니다" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Replaces an earlier card"
+          }
+        }
+      }
+    },
+    "새 카드로 바뀌었습니다" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Replaced by a new card"
+          }
+        }
+      }
+    },
+    "팀장이 이 카드를 고쳐 다시 올렸습니다. 새 카드에서 답해 주세요. 쓰던 메모와 첨부는 새 카드로 옮깁니다." : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The staff member revised this card and posted it again. Answer on the new card. Your note and attachments move to it."
+          }
+        }
+      }
+    },
+    "새 카드 보기" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "View new card"
+          }
+        }
+      }
+    },
+    "메모 (꼭 적어 주세요)" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Note (required)"
+          }
+        }
+      }
+    },
+    "이 선택지는 메모나 첨부가 있어야 보낼 수 있습니다" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This option needs a note or an attachment before you can send it"
+          }
+        }
+      }
+    },
+    "이 선택지는 메모를 적어야 보낼 수 있습니다" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This option needs a note before you can send it"
+          }
+        }
+      }
+    },
+    "첨부를 올리는 중입니다" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Uploading attachments"
+          }
+        }
+      }
+    },
+    "메모와 첨부 %lld개도 함께 보냅니다" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Also sends the note and attachments (%lld)"
+          }
+        }
+      }
+    },
+    "첨부 %lld개도 함께 보냅니다" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Also sends attachments (%lld)"
+          }
+        }
+      }
+    },
+    "메모 필요" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Note needed"
+          }
+        }
+      }
+    },
+    "첨부: %@" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Attachments: %@"
+          }
+        }
+      }
+    },
+    "했음" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Done"
+          }
+        }
+      }
+    },
+    "팀장에게 맡김" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hand to staff"
+          }
+        }
+      }
+    },
+    "까닭 (선택)" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reason (optional)"
+          }
+        }
+      }
+    },
+    "부탁할 말 (선택) — 예: 아직 못 했어요, 대신 해 주세요" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Message (optional) — e.g. I haven't done it, please do it for me"
+          }
+        }
+      }
+    },
+    "%@에게 했다고 알립니다." : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tells %@ it's done."
+          }
+        }
+      }
+    },
+    "%@에게 필요 없어졌다고 알리고 내 차례에서 뺍니다." : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tells %@ it's no longer needed and removes it from your turn."
+          }
+        }
+      }
+    },
+    "하지 않았다고 알리고 %@에게 이 일을 맡깁니다." : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tells %@ you didn't do it and hands the task over."
+          }
+        }
+      }
+    },
+    "닫는 방법" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "How to close"
+          }
+        }
+      }
+    },
+    "%@에게 맡김" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Handed to %@"
+          }
+        }
+      }
+    },
+    "%@에게 맡김: %@" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Handed to %1$@: %2$@"
+          }
+        }
+      }
+    },
+    "판 %lld" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Version %lld"
+          }
+        }
+      }
+    },
+    "옛 판입니다" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This is an older version"
+          }
+        }
+      }
+    },
+    "고친 판이 있습니다: %@" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "There is a newer version: %@"
+          }
+        }
+      }
+    },
+    "새 판 보기" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "View newer version"
+          }
+        }
+      }
+    },
+    "이전 판 %lld개" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Earlier versions (%lld)"
+          }
+        }
+      }
+    },
+    "이전 판 열기" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Opens an earlier version"
+          }
+        }
+      }
+    },
+    "composer.project_prefix" : {
+      "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부. 입력칸 안내 앞에 받는 프로젝트 이름(프로젝트 · 안내)",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ · %2$@"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ · %2$@"
+          }
+        }
+      }
+    },
     "server.text.chat.member_error" : {
       "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
       "localizations" : {
@@ -23939,6 +24265,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "{who:이} 닫았던 결재를 대표가 다시 열었습니다(닫은 이유: {reason})"
+          }
+        }
+      }
+    },
+    "server.text.card.replaced" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Replaced by a newer card (#{id})"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "새 카드(#{id})로 대신했습니다"
           }
         }
       }

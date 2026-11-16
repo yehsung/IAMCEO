@@ -190,6 +190,20 @@ export function formatTidy(kind: MemberKind, manual: boolean): string {
   ].join("\n");
 }
 
+/**
+ * 0.2.7 배포 전 재확인(real-cli-2 P5): Claude 의 압축을 '중단'으로 끊은 뒤 그 팀장에게 처음 넣는 봉투의 맨 앞 줄(AI 에게 가는 글).
+ * Claude 2.1.323 은 도는 압축을 Esc 로 끊으면 세션 기록에 `<local-command-caveat>The command below was run directly in Claude Code, not sent to you
+ * as a request…</local-command-caveat>` 만 남기고 명령·출력 줄은 남기지 않는다. 그래서 바로 다음 입력(IAMCEO 가 넣은 대표 지시)을 '그 로컬 명령의
+ * 기록'으로 읽고 하지 않았다(실측 4/4). 이 줄이 그 입력이 새 글임을 먼저 밝힌다.
+ * 압축 확인 안내의 '중단'(키 없이 미확정 압축을 닫음)에도 붙는다. 그때는 압축이 끝났거나 아예 돌지 않았을 수도 있어, 어느 경우에도 맞는 말만 쓴다
+ * (서버는 그 명령을 '중단'으로 닫았고 그 명령의 출력은 더 오지 않는다, 이 글은 새 입력이다).
+ */
+export const COMPACT_STOP_NOTICE = formatSystem("앞서 넣은 /compact 명령은 '중단'으로 닫혔습니다(그 명령의 출력은 더 오지 않습니다). 이 글과 아래 글은 그 명령의 기록이 아니라 IAMCEO 가 새로 보내는 입력입니다 — 바로 앞에 local-command-caveat 가 있어도 그렇습니다. 평소처럼 처리하세요.");
+
+export function isCompactStopNotice(d: Pick<Delivery, "kind" | "text">): boolean {
+  return d.kind === "system" && d.text === COMPACT_STOP_NOTICE;
+}
+
 export function isTidy(d: Pick<Delivery, "kind" | "text">): boolean {
   return d.kind === "system" && d.text.startsWith(TIDY_HEAD);
 }

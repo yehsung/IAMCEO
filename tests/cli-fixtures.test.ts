@@ -12,7 +12,8 @@ import { parseTranscriptTail } from "../server/runner/transcript.ts";
 import { claudeFolderTrust, codexFolderTrust, looksLikeFolderTrust } from "../server/runner/core-approval.ts";
 import { codexBackgroundTerminals, codexDraft, trustDialogLike } from "../server/runner/core.ts";
 import { readCodexTurnEnd } from "../server/runner/codex-turn.ts";
-import { parseCodexSessionMeta, readDeliveryEvidence } from "../server/runner/delivery-evidence.ts";
+import { parseCodexSessionMeta, readDeliveryEvidence, readJsonlRange } from "../server/runner/delivery-evidence.ts";
+import { observeCompactBoundary } from "../server/runner/core-context.ts";
 
 type Provider = "claude" | "codex";
 /** quiet: Claude 가 턴을 끝내고 입력을 받을 수 있는 화면인가(claudeQuietScreen, 아니면 null). */
@@ -21,8 +22,9 @@ interface ScreenExpect { inputEmpty?: boolean | null; draft?: string | null; fol
  * turnEnd: Codex 기록에서 표지가 든 사용자 글 뒤의 턴이 끝났는가(codex-turn.ts, 기준선 없이).
  * claudeTurn·claudeTurnError: Claude 기록의 처음(기준선 0)부터 표지가 든 받은 글 뒤의 턴이 닫혔는가와 그 오류(claude-turn.ts).
  * idleCompaction·tailTokens: 기록 꼬리가 쉬는 동안 압축으로 끝나는가와 그때의 문맥 토큰(transcript.ts).
+ * compactOutcome: 기록 처음(기준선 0)부터 읽어 서버가 넣은 압축의 결과를 어떻게 보는가(core-context.ts observeCompactBoundary, CLI 는 쉬는 중).
  */
-interface LogExpect { received: string[]; verdict?: string; code?: string; complete?: boolean; sessionMeta?: boolean; turnEnd?: string; claudeTurn?: string; claudeTurnError?: string | null; idleCompaction?: boolean; tailTokens?: number | null }
+interface LogExpect { received: string[]; verdict?: string; code?: string; complete?: boolean; sessionMeta?: boolean; turnEnd?: string; claudeTurn?: string; claudeTurnError?: string | null; idleCompaction?: boolean; tailTokens?: number | null; compactOutcome?: string }
 interface Fixture {
   /** observed: 실제 CLI 화면·기록을 옮김. synthetic: 실측 구조로 만든 화면(그것만으로는 버전을 확인했다고 하지 않는다). */
   file: string; kind: "screen" | "log"; origin: "observed" | "synthetic"; cwd: string; bannerVersion?: boolean; note?: string;
@@ -81,7 +83,10 @@ function logResults(provider: Provider, fixture: Fixture, text: string) {
   const turnEnd = provider === "codex" ? readCodexTurnEnd({ home, path, sessionId: fixture.sessionId!, cwd: fixture.cwd, baseline: null, markers: Object.values(fixture.markers ?? {}) }).outcome : undefined;
   const claude = provider === "claude" ? readClaudeTurn({ home, path, sessionId: fixture.sessionId!, baseline: { offset: 0, fileIdentity: null }, markers: [...(fixture.bundleMarker ? [fixture.bundleMarker] : []), ...Object.values(fixture.markers ?? {})] }) : null;
   const tail = provider === "claude" ? parseTranscriptTail(text) : null;
-  return { received: result.receivedDeliveryIds, verdict: result.evidence.verdict, code: result.evidence.code, complete: result.evidence.complete,
+  const log = provider === "claude" ? readJsonlRange(join(home, "projects"), path).cursor : null;
+  const identity = { sessionId: fixture.sessionId!, generation: 1, terminalId: "t1", turn: null, model: null };
+  const compactOutcome = log ? observeCompactBoundary({ cli: "claude", home, cwd: fixture.cwd, baseline: { ...identity, path, fileIdentity: log.fileIdentity, offset: 0 }, current: identity, settled: true, providerError: false }).outcome : undefined;
+  return { compactOutcome, received: result.receivedDeliveryIds, verdict: result.evidence.verdict, code: result.evidence.code, complete: result.evidence.complete,
     sessionMeta: provider === "codex" ? parseCodexSessionMeta(first) !== null : undefined, turnEnd,
     claudeTurn: claude?.outcome, claudeTurnError: claude ? claude.error?.error ?? null : undefined, idleCompaction: tail ? !!tail.idleCompaction : undefined, tailTokens: tail?.contextTokens };
 }

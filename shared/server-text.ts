@@ -141,6 +141,8 @@ export const SERVER_TEXTS = {
   // IAMCEO 가 넣은 그 명령과 글자까지 같을 때만 지운다(대표가 쓴 글은 지우지 않는다). 같다고 확인하지 못하면 지우지 않고 안내만 남긴다.
   "activity.compact_draft_cleared": { ko: "압축을 멈춘 뒤 입력칸에 되살아난 IAMCEO의 압축 명령을 지웠습니다(IAMCEO가 넣은 글과 글자까지 같을 때만 지웁니다). 기다리던 전달을 이어 넣습니다", en: "After the compaction was stopped, the compaction command IAMCEO had typed came back in the input box, so it was cleared (only text identical to what IAMCEO typed is cleared). Waiting deliveries continue" },
   "activity.compact_draft_left": { ko: "압축을 멈춘 뒤 입력칸에 글이 남아 있어 전달을 기다립니다. IAMCEO가 넣은 압축 명령이 되살아난 것이면 터미널에서 지워 주세요(대표가 쓴 글일 수 있어 IAMCEO는 지우지 않습니다)", en: "Text was left in the input box after the compaction was stopped, so deliveries wait. If it is the compaction command IAMCEO typed, clear it in the terminal (IAMCEO doesn't clear it because it may be yours)" },
+  // 0.2.7 배포 전 재확인(real-cli-3 곁 문제): Claude 가 압축할 대화가 적어 압축 명령을 'Not enough messages to compact.' 로 끝냈다. 막힘이 아니다.
+  "activity.compact_nothing": { ko: "압축하지 않았습니다: 압축할 대화가 아직 적다고 Claude가 답했습니다. 기다리던 전달을 이어 넣습니다", en: "Not compacted: Claude said there isn't enough conversation to compact yet. Waiting deliveries continue" },
   "activity.trust_auto": { ko: "프로젝트를 만들 때 대표가 이 폴더를 신뢰한다고 답해, 폴더 신뢰 확인 창에서 '{label}' 을 골랐습니다 · {cwd}", en: "You said you trust this folder when creating the project, so '{label}' was chosen at the folder trust prompt · {cwd}" },
   "activity.tidy": { ko: "판 정리: {text}", en: "Board tidy-up: {text}" },
   "activity.delivery_stalled": { ko: "전달이 진행되지 않고 있습니다. 다시 확인해 주세요", en: "Delivery is not moving. Please check it again" },

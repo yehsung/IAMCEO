@@ -10,6 +10,16 @@ export function cleanText(text: string): string {
 }
 
 /**
+ * 0.2.7 배포 전 재확인 검토(real-cli-2 지적 4): 글을 JS 글자 수(UTF-16 단위) max 이하로 자르되 코드 포인트 경계에서 자른다.
+ * `slice(0, max)` 는 이모지 같은 두 단위 글자(서로게이트 쌍)를 반으로 갈라 짝 없는 반쪽을 남길 수 있다. 그 반쪽은 버린다.
+ */
+export function clipUtf16(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, Math.max(0, max));
+  return /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut;
+}
+
+/**
  * 0.2.7 묶음 4(D5-10): 대표가 쓴 글(대화·결재 메모·할 일 답)에 섞여 들어온 C0·C1 제어문자(백스페이스 0x08 등)를 저장 전에 지운다.
  * 탭·줄바꿈은 남기고 CR·CRLF 는 줄바꿈으로 맞춘다. cleanText 와 달리 제로폭 결합 문자(이모지의 ZWJ 등)는 건드리지 않는다: 대표가 쓴 글 그대로 보여야 한다.
  */

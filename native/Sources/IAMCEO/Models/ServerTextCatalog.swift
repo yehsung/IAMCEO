@@ -95,6 +95,7 @@ enum ServerTextCatalog {
         case "activity.compact_failed": return String(localized: "server.text.activity.compact_failed", defaultValue: "압축 실패: {detail}")
         case "activity.compact_draft_cleared": return String(localized: "server.text.activity.compact_draft_cleared", defaultValue: "압축을 멈춘 뒤 입력칸에 되살아난 IAMCEO의 압축 명령을 지웠습니다(IAMCEO가 넣은 글과 글자까지 같을 때만 지웁니다). 기다리던 전달을 이어 넣습니다")
         case "activity.compact_draft_left": return String(localized: "server.text.activity.compact_draft_left", defaultValue: "압축을 멈춘 뒤 입력칸에 글이 남아 있어 전달을 기다립니다. IAMCEO가 넣은 압축 명령이 되살아난 것이면 터미널에서 지워 주세요(대표가 쓴 글일 수 있어 IAMCEO는 지우지 않습니다)")
+        case "activity.compact_nothing": return String(localized: "server.text.activity.compact_nothing", defaultValue: "압축하지 않았습니다: 압축할 대화가 아직 적다고 Claude가 답했습니다. 기다리던 전달을 이어 넣습니다")
         case "activity.trust_auto": return String(localized: "server.text.activity.trust_auto", defaultValue: "프로젝트를 만들 때 대표가 이 폴더를 신뢰한다고 답해, 폴더 신뢰 확인 창에서 '{label}' 을 골랐습니다 · {cwd}")
         case "activity.tidy": return String(localized: "server.text.activity.tidy", defaultValue: "판 정리: {text}")
         case "activity.delivery_stalled": return String(localized: "server.text.activity.delivery_stalled", defaultValue: "전달이 진행되지 않고 있습니다. 다시 확인해 주세요")

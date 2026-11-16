@@ -490,7 +490,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
 
   team_compact: tool(
     "직원 세션을 압축한다. 보통은 서버가 자동으로 하니 화제가 크게 바뀔 때만. 일하는 중이면 끝난 뒤로 미룬다.",
-    z.strictObject({ member: memberRef, focus: oneLineOpt(1000).optional().describe("요약에 남길 것(한 줄)") }),
+    z.strictObject({ member: memberRef, focus: oneLineOpt(1000).optional().describe("요약에 남길 것(한 줄, 중요한 것부터). Claude 직원의 압축 명령은 400자로 잘린다(넘는 뒤쪽은 버림)") }),
     async (orch, member, a) => {
       const target = await orch.compactMember(orch.requireInProject(member.projectId, a.member).id, a.focus);
       return reply(`${target.name} 압축을 넣었습니다`);

@@ -136,6 +136,15 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
     store.saveContextState({ ...context0, compaction: { id: randomUUID(), trigger: "manual", phase: "failed", reason: "draft", requestedAt: at, startedAt: null, finishedAt: at },
       measurement: { quality: "exact", tokens: 1200, window: 200000, pct: 1, turn: 1, model: "claude-sonnet", sessionId: member.sessionId!, sessionGeneration: generation, terminalId: "fake:worker", fresh: true, measuredAt: at } as never });
     store.patchMember(member.id, { statusObservation: { source: "core", observedAt: at, freshness: "stale", ownership: "unknown", consecutiveFailures: 2, error: { code: "timeout", note: "다시 관측 중" } } });
+    // 0.2.7 배포 전 재확인 검토: Claude 가 압축할 대화가 적다고 끝낸 압축 — 문맥 상태 failed + 새 까닭 nothing_to_compact.
+    // 출시 앱은 reason 을 글자(String?)로 읽는다: 모르는 값이어도 읽고, failed 의 기본 글을 보인다(설계된 대체). 0.2.7 앱은 줄을 보이지 않는다.
+    const notes = store.createMember({ projectId: project.id, handle: "notes", name: "회의록 정리", kind: "worker",
+      backend: "core", status: "idle", sessionId: randomUUID(), paneId: "fake:notes", cwd: isolated.paths.work });
+    const notesGeneration = store.memberRevisions(notes.id).sessionGeneration;
+    store.saveLifecycleJournal({ operationId: randomUUID(), memberId: notes.id, projectId: project.id, intent: "start", phase: "confirmed",
+      identity: { terminalId: "fake:notes", sessionId: notes.sessionId, sessionGeneration: notesGeneration, process: null }, runId: null, deliveryIds: [], baseline: null, reason: null, exitCode: null, createdAt: at, updatedAt: at });
+    const notesContext = store.ensureContextState(notes.id);
+    store.saveContextState({ ...notesContext, compaction: { id: randomUUID(), trigger: "manual", phase: "failed", reason: "nothing_to_compact", requestedAt: at, startedAt: at, finishedAt: at } });
     const request = (path: string, method = "GET", body?: unknown, headers: Record<string, string> = {}) => fetch(base + path, {
       method, headers: { ...auth, "Content-Type": "application/json", ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
@@ -326,6 +335,8 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
     const sync = JSON.parse(readFileSync(join(out, "sync-project.json"), "utf8")) as Record<string, any>;
     const state = sync.state as Record<string, any>;
     expect(state.members.length).toBeGreaterThan(0);
+    // 0.2.7 배포 전 재확인 검토: 새 까닭 값 nothing_to_compact 가 실린 문맥 상태(출시 앱 해석기가 이 덤프를 읽는다).
+    expect(state.members.find((m: Record<string, any>) => m.id === notes.id)?.contextState?.compaction).toMatchObject({ phase: "failed", reason: "nothing_to_compact" });
     expect(state.decisions.length).toBe(6);
     expect(state.decisions.some((d: Record<string, unknown>) => d.kind === "tool_permission" && d.toolPermission)).toBe(true);
     // 0.2.7 묶음 4 의 새 칸·값이 실제로 실렸다.

@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ApprovalPrompt, Backend } from "../../shared/types.ts";
 import { claudeFolderTrust, codexFolderTrust, looksLikeFolderTrust } from "./core-approval.ts";
-import { cleanText } from "../text.ts";
+import { cleanText, clipUtf16 } from "../text.ts";
 import { childEnv } from "./env.ts";
 import { claudeQuietScreen, inputText, screenContextPct } from "./claude-screen.ts";
 import { CLAUDE_BACKGROUND_REASON, CLAUDE_LOGIN_ERRORS, CLAUDE_LOGIN_REASON, claudeHookTurn, readClaudeTurn, type ClaudeHookTurnState, type ClaudeTurnCursor, type ClaudeTurnError } from "./claude-turn.ts";
@@ -36,8 +36,11 @@ export interface CoreCompactState {
   /**
    * user_resolved: 대표의 확인으로 닫음. completion_timeout: 넣은 것이 확인된(running) 압축의 완료를 기한 안에 확인하지 못함
    * (기한 전에 기록을 읽을 수 없어 관측이 '모름'이 된 경우도 같다. 넣기가 불확실한 send_uncertain 과 구별한다. 저장소가 compaction.reason 으로 옮긴다).
+   * nothing_to_compact(phase failed): Claude 가 그 압축 명령을 'Not enough messages to compact.' 로 끝냈다(압축은 일어나지 않았고 CLI 는 쉰다,
+   * CLAUDE_COMPACT_NOTHING). 문맥 상태(compaction)에도 failed/nothing_to_compact 로 옮긴다(지휘자 결정: 출시 앱은 reason 을 글자로 읽어 failed 의
+   * 기본 글을 보이고, 0.2.7 앱은 줄을 보이지 않는다). 총괄은 이 까닭을 보고 '압축 실패' 줄 대신 짧은 활동 줄(activity.compact_nothing)만 남긴다.
    */
-  reason?: "user_resolved" | "completion_timeout";
+  reason?: "user_resolved" | "completion_timeout" | "nothing_to_compact";
   /** 무엇으로 완료를 확인했나. hook: 세션 기록의 경계 대신 CLI 의 압축 끝 훅(같은 세션, 넣은 뒤)과 정착한 CLI. 없으면 기록 경계. */
   evidence?: "hook";
   /**
@@ -127,6 +130,31 @@ const REQUIRED_METHODS = ["terminal.run", "terminal.list", "terminal.get", "term
 const BLOCKED_KINDS: Record<string, "permission" | "selection" | "setup"> = { permission: "permission", selection: "selection", setup: "setup", question: "selection", auth: "setup" };
 const SILENT_SETTLE_MS = 750;
 const unsupported = (detail: string): Extract<SendResult, { ok: false }> => ({ ok: false, reason: "error", retryable: false, deliveryEffect: "not_written", detail });
+
+/**
+ * 0.2.7 배포 전 재확인(real-cli-2 P6): Claude 에게 넣는 압축 명령 전체('/compact …')의 길이 상한(JS 글자 수 = UTF-16 단위).
+ * Claude 2.1.323 은 붙여넣은 글이 800 단위를 넘거나(입력 처리의 `lf.length>h9`, h9=800) 줄바꿈이 3개 이상이면 `[Pasted text #N +M lines]`
+ * 자리표시로 접는다. 그렇게 접힌 '/compact …' 는 슬래시 명령이 아니라 보통 글(<pasted_content>)로 들어가 압축이 돌지 않았다(실측 약 990자,
+ * 60~80자는 매번 돌았다). 그러면 서버는 그 압축을 10분 붙잡고 전달을 막은 뒤 대표에게 '막힘'을 보냈다. 경계를 정확히 재지 못했으니 절반으로 둔다.
+ */
+export const CLAUDE_COMPACT_COMMAND_MAX = 400;
+/**
+ * Claude 의 압축 명령. 초점 글을 한 줄로 만든 뒤 전체가 CLAUDE_COMPACT_COMMAND_MAX 를 넘으면 초점 글 뒤쪽을 낱말 경계에서 자르고 '…'을 붙인다
+ * (초점 글은 중요한 것을 앞에 둔다: Orchestrator.compactFocus). 이 글이 그대로 입력칸에 들어가고 CoreCompactState.command 로 저장된다.
+ */
+export function claudeCompactCommand(focus: string): string {
+  const text = cleanText(focus).replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim();
+  const full = `/compact ${text}`.trim();
+  if (full.length <= CLAUDE_COMPACT_COMMAND_MAX) return full;
+  const head = "/compact ", room = CLAUDE_COMPACT_COMMAND_MAX - head.length - 1; // 끝의 '…' 한 자
+  // 코드 포인트 경계에서 자른다(이모지 같은 두 단위 글자를 가르지 않는다, clipUtf16).
+  let cut = clipUtf16(text, room);
+  // 낱말 경계: 잘린 자리가 낱말 중간이면 앞 칸까지. 앞 칸이 너무 앞이면(긴 낱말 하나) 그대로 자른다.
+  if (text[cut.length] !== " ") { const space = cut.lastIndexOf(" "); if (space >= room / 2) cut = cut.slice(0, space); }
+  // 끝에 남은 구분 기호(' · ', ', ', ' / ', ':')는 뗀다.
+  cut = cut.replace(/[\s·,/:]+$/, "");
+  return `${head}${cut}…`;
+}
 
 /** Capture an EOF baseline, not an exhaustive delivery/absence scan of history. */
 function compactLogBaseline(root: string, path: string): JsonlCursor | null {
@@ -758,9 +786,10 @@ export class CoreRunner implements FullRunner {
     if (!track || track.composerSeen !== false || track.terminal.state !== "live") return false;
     return ["idle", "done", "error"].includes(this.stateOf(track, track.terminal) ?? "");
   }
-  observationState(memberId: string): { observedAt: string; failures: number; failure: string | null; lastError: string | null; identity: RunnerTerminalIdentity; inputEpoch: number; setupError: Track["setupError"]; turn: number | null; state: string | null } | null {
+  observationState(memberId: string): { observedAt: string; failures: number; failure: string | null; lastError: string | null; identity: RunnerTerminalIdentity; inputEpoch: number; setupError: Track["setupError"]; turn: number | null; state: string | null; composerEmpty: boolean | null } | null {
     const track = this.tracks.get(memberId);
-    return track ? { observedAt: track.observedAt, failures: track.failures, failure: track.failure, lastError: track.lastError, identity: this.identity(track), inputEpoch: track.epoch, setupError: track.setupError,
+    // composerEmpty: 마지막으로 본 입력칸이 비었는가(넣기 직전의 확인, 쉬는 CLI 화면 관측). 모르면 null.
+    return track ? { observedAt: track.observedAt, failures: track.failures, failure: track.failure, lastError: track.lastError, identity: this.identity(track), inputEpoch: track.epoch, setupError: track.setupError, composerEmpty: track.composerEmpty,
       // A finished turn whose report vanished reads as done here too, exactly as send() judges it.
       turn: track.terminal.state === "live" ? track.terminal.turn ?? null : null, state: track.terminal.state === "live" ? this.stateOf(track, track.terminal) ?? null : null } : null;
   }
@@ -1463,7 +1492,8 @@ export class CoreRunner implements FullRunner {
       this.validateTrack(track);
       // 훅 사건 파일의 지금 끝. startedAt 보다 먼저 읽어, 이 자리 뒤의 줄은 모두 압축 명령을 넣기로 한 뒤에 덧붙은 것이다.
       const hookMark = providerFor(member) === "claude" ? (this.hookEvents ? hookEventsMark(this.hookEvents, member.id) : null) : undefined;
-      const command = providerFor(member) === "codex" ? "/compact" : `/compact ${cleanText(focus).replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim()}`.trim();
+      // real-cli-2 P6: Claude 의 명령은 400자 안으로 자른다(긴 붙여넣기는 슬래시 명령이 되지 않는다). 잘린 그 글이 넣는 글이고 command 로 저장된다.
+      const command = providerFor(member) === "codex" ? "/compact" : claudeCompactCommand(focus);
       this.saveCompact(track, { id: crypto.randomUUID(), phase: "sending", startedAt: Date.now(), cursor: null, baseline: { path, fileIdentity: baseline.fileIdentity, offset: baseline.offset,
         sessionId: track.sessionId, terminalId: current.address, generation: member.sessionGeneration, turn: current.turn ?? null, model: member.model },
         ...(hookMark !== undefined ? { hookMark } : {}), command });
@@ -1513,6 +1543,12 @@ export class CoreRunner implements FullRunner {
       track.pending = false; track.controlUncertain = false; track.uncertain = track.dispatches.length > 0; track.endedTurn = Math.max(track.endedTurn, track.terminal.turn ?? 0);
       this.event(track, { type: "compacted", memberId: track.member.id, runId: operation.id });
       // Post-compact usage is collected by the next fresh provider sample; never emit 0%.
+    } else if (result.outcome === "nothing" && state !== "error") {
+      // real-cli-3 곁 문제: Claude 가 압축할 것이 없다고 끝냈다(기록에 그 출력, CLI 는 쉰다). 10분 기다릴 것 없이 곧바로 닫고 전달을 잇는다.
+      // 대표에게 막힘을 보내지 않는다(결과 모름이 아니다). '중단'이 아니므로 P5 의 한 줄 표시도 만들지 않는다(그 기록에는 명령·출력 줄이 다 있다).
+      this.saveCompact(track, { ...operation, cursor: result.cursor, phase: "failed", reason: "nothing_to_compact" });
+      track.pending = false; track.controlUncertain = false; track.uncertain = track.dispatches.length > 0; track.endedTurn = Math.max(track.endedTurn, track.terminal.turn ?? 0);
+      this.event(track, { type: "activity", memberId: track.member.id, kind: "system", notice: true, text: textRef("activity.compact_nothing"), eventKey: `compact_nothing:${operation.id}` });
     } else if (state === "error") {
       this.saveCompact(track, { ...operation, cursor: result.cursor, phase: "failed" });
       track.pending = false; track.controlUncertain = false; track.uncertain = track.dispatches.length > 0;

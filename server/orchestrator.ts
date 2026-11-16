@@ -34,6 +34,7 @@ import type {
   Backend,
   BlockedCode,
   CliProvider,
+  ContextCompaction,
   CreateMemberReq,
   EngineStatus,
   RuntimeInfo,
@@ -77,7 +78,7 @@ import { ToolPermissions, type ToolPermissionPoll, type ToolPermissionRequest } 
 import { exactSource, measureContext } from "./runner/context.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, RunnerStartResult, RunnerTerminalIdentity, RunnerReattachResult, DeliveryRepair } from "./runner/types.ts";
 import { ApiError, type AppliedConfig, type ExecutionJournal, type NewDelivery, type Store } from "./store.ts";
-import { RESERVED_HANDLES } from "./text.ts";
+import { clipUtf16, RESERVED_HANDLES } from "./text.ts";
 import { BoardHygiene } from "./board-hygiene.ts";
 import { TerminalControl } from "./terminal-control.ts";
 import { OwnerFlows } from "./flows/owner.ts";
@@ -90,7 +91,7 @@ import { ERROR_CODES } from "../shared/error-codes.ts";
 import { exitActivity, exitDetail, lastErrorParam } from "./text-refs.ts";
 
 // 전달 글(§4)은 delivery-text.ts 가 만든다. 예전처럼 이 파일에서 가져가는 곳(시험)을 위해 같은 이름으로 내보낸다.
-import { formatAnswer, formatInstruction, formatReport, formatSystem, formatTodoUndone, formatUserMessage, guardLines, isTidy, normalizeSpace, quoteNeedsContext, sinceText, type QuoteSource, type VerifiedQuote } from "./delivery-text.ts";
+import { COMPACT_STOP_NOTICE, formatAnswer, formatInstruction, formatReport, formatSystem, formatTodoUndone, formatUserMessage, guardLines, isCompactStopNotice, isTidy, normalizeSpace, quoteNeedsContext, sinceText, type QuoteSource, type VerifiedQuote } from "./delivery-text.ts";
 export { formatAnswer, formatInstruction, formatReport, formatSystem, formatTidy, formatTodoDone, formatTodoUndone, formatUserMessage, guardLines, normalizeSpace, quoteNeedsContext, TIDY_HEAD } from "./delivery-text.ts";
 export type { QuoteSource, VerifiedQuote } from "./delivery-text.ts";
 
@@ -420,12 +421,19 @@ export function coreCompactStore(store: Store): NonNullable<CoreRunnerDeps["comp
       if (before && before.id !== compact.id && (compact.phase !== "sending" || !["queued", "succeeded", "failed"].includes(before.phase))) throw new ApiError(409, "다른 압축 작업의 결과입니다", "compact_result_mismatch");
       if (before?.id === compact.id && ["succeeded", "failed"].includes(before.phase) && compact.phase !== before.phase) return;
       const at = new Date().toISOString();
+      // real-cli-2 검토 지적 1: 압축 중단의 한 줄(compactStopNotice)은 '실행기가 CLI 에 실제로 넣은 마지막 압축'이 그 끊긴 압축일 때만 맞다.
+      // 다른 압축이 넣은 것으로 확인되면(영수증 = running) 그 압축의 기록이 caveat 뒤에 붙으므로 표시를 버린다. 예약만 되거나(queued) 넣기 전에
+      // 실패한(입력칸 글 등) 새 압축은 CLI 에 닿지 않았으니 표시를 남긴다.
+      const { compactStopNotice: stopNote, ...kept } = state.baseline ?? {};
+      const stale = compact.phase === "running" && !!stopNote && (stopNote as { compactionId?: string }).compactionId !== compact.id;
       store.saveContextState({ ...state,
         measurement: compact.phase === "sending" || compact.phase === "succeeded" ? null : state.measurement,
-        baseline: { ...state.baseline, coreCompact: compact },
+        baseline: { ...(stale ? kept : state.baseline), coreCompact: compact },
         compaction: { id: compact.id, trigger: before?.trigger ?? "manual", phase: compact.phase,
           // 실행기가 넣은 것을 확인한 뒤의 '결과 모름'은 완료 미확인(completion_timeout)이다. 그 밖의 uncertain 은 예전처럼 넣기 불확실이다.
-          reason: compact.phase === "uncertain" ? (compact.reason === "completion_timeout" ? "completion_timeout" : "send_uncertain") : compact.phase === "failed" ? "provider_error" : null,
+          // 압축할 것이 없다고 CLI 가 끝낸 압축(실행기 까닭 nothing_to_compact)은 그 까닭 그대로 싣는다(앱이 '터미널을 확인하세요' 줄 대신 아무 줄도 보이지 않는다).
+          reason: compact.phase === "uncertain" ? (compact.reason === "completion_timeout" ? "completion_timeout" : "send_uncertain")
+            : compact.phase === "failed" ? (compact.reason === "nothing_to_compact" ? "nothing_to_compact" : "provider_error") : null,
           requestedAt: before?.requestedAt ?? at, startedAt: new Date(compact.startedAt).toISOString(),
           finishedAt: ["succeeded", "failed"].includes(compact.phase) ? at : null },
       }, compact.phase === "sending" || compact.phase === "succeeded" ? { contextPct: null } : {});
@@ -1323,6 +1331,21 @@ export class Orchestrator implements OrchestratorApi {
    */
   private keepsUsageNote(member: Member): boolean {
     return member.fenceCode === "usage_wait" && !!this.apiRecovery?.usageLimited(member.id);
+  }
+
+  /**
+   * 0.2.7 배포 전 확인 검토(real-cli P3) + 재확인(real-cli-2 P7): '압축을 멈춘 뒤 입력칸에 글이 남아 전달을 기다립니다'(last_error_compact_draft) 상태 줄을
+   * 지금 지우지 않는가. 그 글은 CLI 가 일하기 시작할 때까지(대표가 그 글을 보냈거나 지운 뒤 전달이 들어감) 입력칸에 그대로 있다. 그래서 그 사이의
+   * 쉬는 중 알림(status idle)도, core 감독이 healthMs 마다 같은 터미널에 다시 붙은 것(rejoined → applyStarted)도 그 글이 없어진 근거가 아니다.
+   * 예전에는 감독 길에 이 예외가 없어 상태 줄이 2~6초 만에 지워졌다(실측). cliWorking: 그 관측에서 CLI 가 일하는 중인가.
+   * 검토 지적 6: 할 일이 없어진 뒤에는 남기지 않는다 — 그 글 때문에 기다리는(깨우는) 전달이 더 없거나(거둠·전달됨), 입력칸이 빈 것이 관측되면
+   * (CLI 는 쉬는 중이어도) 지운다. 남기는 것은 '입력칸 글 때문에 기다리는 전달이 있고 입력칸이 아직 비지 않음'일 때뿐이다.
+   */
+  private keepsDraftNote(member: Member, cliWorking: boolean): boolean {
+    if (member.lastError !== ERROR_CODES.last_error_compact_draft.ko || cliWorking) return false;
+    const runner = this.runnerOf(member);
+    if (runner instanceof CoreRunner && runner.observationState(member.id)?.composerEmpty === true) return false;
+    return this.store.listPending(member.id).some((d) => d.wake) || this.store.listDelivering().some((d) => d.memberId === member.id && d.wake);
   }
 
   /**
@@ -2285,7 +2308,10 @@ export class Orchestrator implements OrchestratorApi {
         this.confirmStop(member.id);
         // 0.2.7: 옛 CLI 와 함께 그 서브에이전트도 끝났다. 수를 모름으로 둔다(요약의 '일하는 중' 수도 다시 낸다). 새 CLI 는 실행기가 다시 잰다.
         this.store.patchMember(member.id, this.subagentsDown(member.id));
+        // 검토 지적 2: 압축 중단 표시는 세대의 문맥 상태에 있어 세대를 바꾸면 사라진다. 같은 Claude 세션을 이어 열면 새 세대로 옮긴다.
+        const carryStop = this.rotateCompactStop(member, resumable && sameProvider && member.cli === "claude");
         this.store.archiveAndRotateSession(member.id, patch.cli!, freshSession ? "fresh_session" : sameProvider ? "settings_change" : "provider_switch");
+        carryStop();
         // 옛 터미널은 끝났다. 새 터미널을 띄우기 전에 보류를 풀고 이어가기 글을 줄에 세운다: 띄우기가 실패해도 다음 기동이 그 글부터 넣는다.
         if (usage) continued = this.resumeAfterUsageStop(member, usage, resumable, sameProvider ? { kind: "model", label: this.modelLabel(target) } : { kind: "cli", label: patch.cli === "codex" ? "Codex" : "Claude" });
       });
@@ -2765,6 +2791,10 @@ export class Orchestrator implements OrchestratorApi {
     const turn = rt.turn, already = turn?.interrupted ?? false;
     if (turn) turn.interrupted = true;
     let background: number | null = null;
+    // real-cli-2 P5: 이 '중단'이 끊는 압축(끊기 전 모습). 넣은 Claude 압축이었으면 끊은 뒤 첫 봉투 맨 앞에 한 줄을 싣게 적는다(noteCompactStop).
+    let compacting: ContextCompaction | null = null;
+    try { compacting = this.store.getContextState(memberId)?.compaction ?? null; } catch { compacting = null; }
+    const compactInFlight = rt.turn?.kind === "compact";
     try {
       await runner.interrupt(this.runnerMember(member, project));
     } catch (e) {
@@ -2782,8 +2812,82 @@ export class Orchestrator implements OrchestratorApi {
     const state = this.store.getContextState(memberId);
     if (state?.compaction?.phase === "failed" && rt.turn?.kind === "compact") this.store.saveContextState({ ...state, compaction: { ...state.compaction, reason: "interrupted" } });
     rt.compactRequest = null;
+    this.noteCompactStop(member, compacting, compactInFlight);
     if (rt.turn?.kind === "compact") this.endCompact(memberId, rt, "대표가 압축을 중단했습니다");
     return background;
+  }
+
+  /**
+   * 0.2.7 배포 전 재확인(real-cli-2 P5): Claude 2.1.323 은 도는 압축을 Esc 로 끊으면 세션 기록에 `<local-command-caveat>The command below was run
+   * directly in Claude Code, not sent to you as a request…` 만 남기고 명령·출력 줄은 남기지 않는다. 그래서 바로 다음 입력(IAMCEO 의 대표 지시)을 '그 로컬
+   * 명령의 기록'으로 읽고 하지 않았다(실측 4/4, IAMCEO 의 자동 지우기든 사람이 지우든). 이 '중단'이 IAMCEO 가 넣은 Claude 압축을 닫았으면, 그 팀장에게
+   * 처음 넣는 봉투의 맨 앞에 COMPACT_STOP_NOTICE 한 줄을 싣도록 문맥 상태(baseline.compactStopNotice)에 적는다.
+   * - 저장 자리: 이미 저장되는 그 세대의 문맥 상태 행. 서버가 다시 떠도 남고, 세대가 바뀌면(새 세션) 행이 새로 시작해 함께 없어진다. 그 압축(id)과 세션에 묶어,
+   *   그 뒤 새 압축이 예약·실행되면(compaction 이 바뀜) 쓰지 않는다(takeCompactStopNotice).
+   * - 넣으려 한 압축만: 실행기는 명령을 넣기 전에 그 압축의 기준선(coreCompact)부터 저장한다. 그 기록이 없으면 넣은 적이 없어 로컬 명령 기록도 없다.
+   * - 압축 확인 안내의 '중단'(쉬는 CLI, 키 없이 미확정 압축을 닫음)에도 적는다. 사람이 터미널에서 Esc 로 끊은 압축이면 같은 caveat 가 남아 있고,
+   *   압축이 끝났거나 돌지 않은 경우에도 해가 없는 글이다(COMPACT_STOP_NOTICE 머리말). Codex 는 해당 없음(그런 기록을 남기지 않는다).
+   */
+  private noteCompactStop(member: Member, before: ContextCompaction | null, inFlight: boolean): void {
+    if (!before || member.cli !== "claude" || this.backendOf(member) !== "core") return;
+    if (!["sending", "running", "uncertain"].includes(before.phase) && !(before.phase === "queued" && inFlight)) return;
+    try {
+      this.store.transaction(() => {
+        const state = this.store.getContextState(member.id);
+        const saved = state?.baseline?.coreCompact as CoreCompactState | undefined;
+        if (!state || state.compaction?.id !== before.id || state.compaction.phase !== "failed" || saved?.id !== before.id) return;
+        this.store.saveContextState({ ...state, baseline: { ...state.baseline, compactStopNotice: { compactionId: before.id, sessionId: saved.baseline.sessionId } } });
+      });
+    } catch (e) { console.warn(`[compact] ${member.id}: 압축 중단 표시를 적지 못했습니다:`, (e as Error).message); }
+  }
+
+  /**
+   * 검토 지적 2: 설정 변경(switchProvider → archiveAndRotateSession)은 같은 세션을 --resume 으로 이어 열어도 세대를 바꾸므로, 그 세대의 문맥 상태에 둔
+   * 압축 중단 표시가 함께 사라졌다(압축 중 미뤄진 설정이 같은 펌프의 syncConfig 에서 봉투보다 먼저 도는 길 포함). 세대를 바꾸기 직전에 부르고, 돌려준 함수를
+   * 세대를 바꾼 직후(같은 트랜잭션) 부른다.
+   * - 같은 Claude 세션을 이어 열면(resumedSameClaude) 표시를 새 세대의 문맥 상태로 옮긴다. 이미 대기열에 든 그 한 줄도 그대로 둔다.
+   * - 다른 세션(새 세션)·다른 CLI(Codex 로 바꿈)로 열면 표시는 버리고(옮기지 않음), 대기열에 든 그 한 줄도 거둔다 — 그 caveat 는 새 세션의 기록에 없고,
+   *   Codex 에게는 맞지 않는 글이다.
+   */
+  private rotateCompactStop(member: Member, resumedSameClaude: boolean): () => void {
+    let note: unknown = null;
+    try { note = this.store.getContextState(member.id)?.baseline?.compactStopNotice ?? null; } catch { note = null; }
+    return () => {
+      if (resumedSameClaude) {
+        if (!note || (note as { sessionId?: string | null }).sessionId !== member.sessionId) return;
+        const state = this.store.ensureContextState(member.id);
+        this.store.saveContextState({ ...state, baseline: { ...(state.baseline ?? {}), compactStopNotice: note } });
+        return;
+      }
+      for (const d of this.store.listSendablePending(member.id).filter(isCompactStopNotice)) {
+        const r = this.store.getDeliveryRecovery(d.id);
+        if (r) this.store.updateDeliveryRecovery(d.id, r.version, { phase: "stopped", reason: "withdrawn", nextCheckAt: null });
+        this.store.markFailed(d.id, "새 세션·다른 CLI 로 열어 압축 중단 안내를 거뒀습니다");
+      }
+    };
+  }
+
+  /**
+   * real-cli-2 P5: 적어 둔 압축 중단 표시(noteCompactStop)가 지금 세션의 것이면 지우고, 깨우지 않는 시스템 글(COMPACT_STOP_NOTICE) 한 건을 대기열에 넣는다.
+   * 지우기와 넣기가 한 트랜잭션이라 한 번만 만든다. 그 글은 실제로 들어갈 때까지 대기열에 남아(봉투가 거절되면 다음 봉투로) 늘 봉투 맨 앞에 선다(pumpOnce).
+   * 들어간 뒤의 봉투에는 없다. 세션이 바뀌었으면 표시만 지운다. 그 사이 다른 압축이 CLI 에 실제로 들어갔으면 표시는 이미 지워져 있다(coreCompactStore.save).
+   * 검토 지적 1: 예전에는 '가장 최근에 요청된 압축'(compaction.id)으로 견주어, 새 압축이 넣기 전에 실패하거나 예약(queued)으로 미뤄진 채 봉투가 나가면
+   * 표시를 버렸다. 그 압축은 CLI 에 닿지 않았으니 끊긴 압축의 caveat 가 여전히 기록의 마지막이다.
+   */
+  private takeCompactStopNotice(memberId: string): void {
+    const member = this.store.requireMember(memberId);
+    if (member.cli !== "claude" || this.backendOf(member) !== "core") return;
+    this.store.transaction(() => {
+      const state = this.store.getContextState(memberId);
+      const note = state?.baseline?.compactStopNotice as { compactionId?: string; sessionId?: string | null } | undefined;
+      if (!state || !note) return;
+      const { compactStopNotice: _taken, ...baseline } = state.baseline!;
+      this.store.saveContextState({ ...state, baseline });
+      const sessionId = this.store.requireMember(memberId).sessionId;
+      if (!note.compactionId || !sessionId || sessionId !== note.sessionId) return;
+      if (this.store.listSendablePending(memberId).some(isCompactStopNotice)) return;
+      this.store.enqueue({ projectId: member.projectId, memberId, kind: "system", text: COMPACT_STOP_NOTICE, wake: false });
+    });
   }
 
   /** 0.2.7 묶음 1: 급한 지시로 멈추게 한 실행. 그 실행에는 결과 보고 보완을 묻지 않는다(멈춘 일은 급한 지시 뒤에 이어서 하거나 그만둔다). */
@@ -3172,7 +3276,10 @@ export class Orchestrator implements OrchestratorApi {
     const runner = this.runnerOf(this.store.requireMember(memberId));
     const currentError = runner instanceof CoreRunner ? runner.observationState(memberId)?.lastError : null;
     const stored = this.store.requireMember(memberId);
-    this.store.patchMember(memberId, { sessionId: started.sessionId, paneId: started.paneId, ...(!currentError && !(started.rejoined && stored.fenceCode === "control_unknown") && !this.keepsUsageNote(stored) ? { lastError: null } : {}) });
+    // real-cli-2 P7: 감독이 같은 터미널에 다시 붙은 것(rejoined)은 입력칸에 남은 압축 글이 없어진 근거가 아니다(쉬는 중 알림과 같은 판단, keepsDraftNote).
+    // 새로 띄운 CLI(rejoined 아님)에는 그 글이 없으니 지운다.
+    const draftNote = !!started.rejoined && this.keepsDraftNote(stored, runner instanceof CoreRunner && runner.observationState(memberId)?.state === "working");
+    this.store.patchMember(memberId, { sessionId: started.sessionId, paneId: started.paneId, ...(!currentError && !(started.rejoined && stored.fenceCode === "control_unknown") && !this.keepsUsageNote(stored) && !draftNote ? { lastError: null } : {}) });
     // D4-9: 새로 띄운 세션(이어 연 것·이미 떠 있던 칸에 붙은 것이 아니다)의 사용량은 0 부터 센다.
     if (!started.rejoined && started.sessionId && started.sessionId !== stored.sessionId) this.registerUsageSession(stored, started.sessionId);
     if (!started.rejoined) this.runtime(memberId).launchedAt = Date.now();
@@ -3340,12 +3447,24 @@ export class Orchestrator implements OrchestratorApi {
     const state = this.store.getContextState(member.id);
     const rt = this.runtime(member.id);
     if (state?.compaction?.phase === "queued") rt.compactRequest ??= (state.baseline?.focus as string | undefined) ?? this.compactFocus(member);
-    if (state?.compaction?.phase === "failed" && rt.turn?.kind === "compact") this.endCompact(member.id, rt, "제공자가 압축 종료/실패를 확인했습니다");
+    if (state?.compaction?.phase === "failed" && rt.turn?.kind === "compact") {
+      // real-cli-3 곁 문제: Claude 가 압축할 것이 없다고 끝낸 압축(실행기가 활동에 짧은 한 줄을 남겼다)은 '압축 실패' 줄 없이 조용히 끝낸다.
+      const saved = state.baseline?.coreCompact as CoreCompactState | undefined;
+      if (state.compaction.reason === "nothing_to_compact" || saved?.id === state.compaction.id && saved.reason === "nothing_to_compact") this.endCompact(member.id, rt, null, true);
+      else this.endCompact(member.id, rt, "제공자가 압축 종료/실패를 확인했습니다");
+    }
   }
 
+  /**
+   * 압축 명령의 초점 글. 중요한 것부터: 지금 일 → 다음 일 → 대기 질문 → 대기열 앞부분 → 일 항목. Claude 의 압축 명령은 400자로 잘리므로
+   * (claudeCompactCommand, real-cli-2 P6) 뒤쪽(일 항목·대기열)이 먼저 잘린다. 지금 일·다음 일(각 500자까지 받는다)이 길어도 대기 질문까지
+   * 400자 안에 남게 지금 일 160자, 다음 일 100자, 질문 제목 60자로 자른다.
+   */
   private compactFocus(member: Member): string {
-    const questions = this.store.listOpenDecisionsByMember(member.id).map((d) => normalizeSpace(d.title));
-    const queue = this.store.listPending(member.id).slice(0, 3).map((d) => normalizeSpace(d.text).slice(0, 80));
+    // 검토 지적 4: 자르는 자리는 모두 코드 포인트 경계(clipUtf16) — 이모지 같은 두 단위 글자를 반으로 가르지 않는다.
+    const clip = (text: string | null | undefined, max: number) => { const one = normalizeSpace(text ?? ""); return one.length > max ? `${clipUtf16(one, max - 1)}…` : one; };
+    const questions = this.store.listOpenDecisionsByMember(member.id).map((d) => clip(d.title, 60));
+    const queue = this.store.listPending(member.id).slice(0, 3).map((d) => clipUtf16(normalizeSpace(d.text), 80));
     const board =
       member.kind === "worker"
         ? ""
@@ -3353,9 +3472,9 @@ export class Orchestrator implements OrchestratorApi {
             .listWork(member.projectId)
             .filter((w) => w.sec !== "done")
             .slice(0, 12)
-            .map((w) => `${w.id} ${w.sec} ${normalizeSpace(w.title).slice(0, 40)}`)
+            .map((w) => `${w.id} ${w.sec} ${clipUtf16(normalizeSpace(w.title), 40)}`)
             .join(", ");
-    const parts = [normalizeSpace(member.now), normalizeSpace(member.next), questions.length ? `대기 질문: ${questions.join(", ")}` : "", queue.length ? `대기열 앞부분: ${queue.join(" / ")}` : "", board ? `일 항목: ${board}` : ""].filter(Boolean);
+    const parts = [clip(member.now, 160), clip(member.next, 100), questions.length ? `대기 질문: ${questions.join(", ")}` : "", queue.length ? `대기열 앞부분: ${queue.join(" / ")}` : "", board ? `일 항목: ${board}` : ""].filter(Boolean);
     return `이어갈 일: ${parts.join(" · ") || "대표의 말과 결정, 지금까지 한 일을 빠짐없이 남긴다"}`;
   }
 
@@ -4288,7 +4407,13 @@ export class Orchestrator implements OrchestratorApi {
       const notice = takeRuleNotice(this.store, member);
       if (notice) fresh = [...fresh, notice];
     }
-    const ordered = this.apiRecovery.preservesOrder(memberId) ? fresh : orderForBundle(fresh);
+    // real-cli-2 P5: Claude 의 압축을 '중단'으로 끊은 뒤 처음 넣는 봉투에는 맨 앞에 그 사실을 밝히는 한 줄을 싣는다. 앞 봉투가 거절돼 대기열에 남은 그 글도,
+    // 이어가기 글이 혼자 나가는 봉투(sendablePending)에도 싣는다 — 끊긴 압축 바로 뒤의 입력이 무엇이든 그 앞에 서야 한다.
+    try { this.takeCompactStopNotice(memberId); } catch (e) { console.warn(`[compact] ${memberId}: 압축 중단 안내를 만들지 못했습니다:`, (e as Error).message); }
+    const stopNotices = this.store.listSendablePending(memberId).filter(isCompactStopNotice);
+    if (stopNotices.length) fresh = [...stopNotices, ...fresh.filter((d) => !isCompactStopNotice(d))];
+    const bundled = this.apiRecovery.preservesOrder(memberId) ? fresh : orderForBundle(fresh);
+    const ordered = [...bundled.filter(isCompactStopNotice), ...bundled.filter((d) => !isCompactStopNotice(d))];
     turn.text = ordered.map((d) => d.text).join("\n\n");
     rt.posted = false;
     rt.delegated = false;
@@ -4843,8 +4968,8 @@ export class Orchestrator implements OrchestratorApi {
     this.store.afterCommit(() => this.notifyInbox(message.title, message.body));
   }
 
-  /** 압축 턴 정리. 실패해도 대기열은 멈추지 않는다. */
-  private endCompact(memberId: string, rt: Runtime, error: string | null): void {
+  /** 압축 턴 정리. 실패해도 대기열은 멈추지 않는다. nothing: 압축할 것이 없어 끝남(활동 줄은 실행기가 남겼다, 압축 뒤 처리도 하지 않는다). */
+  private endCompact(memberId: string, rt: Runtime, error: string | null, nothing = false): void {
     rt.turn = null;
     if (rt.compactTimer) clearTimeout(rt.compactTimer);
     rt.compactTimer = null;
@@ -4853,7 +4978,7 @@ export class Orchestrator implements OrchestratorApi {
     if (member) {
       if (error) {
         this.store.appendActivity(memberId, "error", textRef("activity.compact_failed", { detail: error }));
-      } else {
+      } else if (!nothing) {
         this.afterCompacted(member);
       }
       if (member.status !== "asleep") this.settle(this.store.requireMember(memberId));
@@ -4911,7 +5036,10 @@ export class Orchestrator implements OrchestratorApi {
       this.store.saveExecutionJournal({ ...run, turn: e.turn ?? run.turn, phase: "running", startedAt: run.startedAt ?? at, lastProgressAt: at, updatedAt: at });
     }
     switch (e.type) {
-      case "input_ready": this.recheckMemberDelivery(member.id); return;
+      case "input_ready":
+        // 검토 지적 6: 입력칸이 빈 것이 보였다. 압축 글 상태 줄은 더 맞지 않는다(전달이 들어가 CLI 가 일하기 전이라도).
+        if (member.lastError === ERROR_CODES.last_error_compact_draft.ko && !this.keepsDraftNote(member, false)) this.store.patchMember(member.id, { lastError: null });
+        this.recheckMemberDelivery(member.id); return;
       case "status":
         // K(E2): 승인 창 앞이던 팀장이 다른 상태로 가면(터미널에서 먼저 답함) 그 도구 승인 카드를 닫는다.
         this.toolPermissions.memberStatus(member.id, e.status);
@@ -4920,8 +5048,7 @@ export class Orchestrator implements OrchestratorApi {
         if (this.apiRecovery.holdReason(member.id) === "api_outage" && this.store.requireMember(member.id).statusObservation?.error?.code === "network_outage" && e.status === "idle") return;
         // 0.2.7 배포 전 확인 검토(real-cli P3): 압축을 멈춘 뒤 입력칸에 글이 남았다는 상태 줄은 쉬는 중 알림으로 지우지 않는다(그 글은 그대로다. 늦게 온 쉬는 중
         // 알림이 방금 남긴 줄을 지웠다). CLI 가 일하기 시작하면(대표가 그 글을 보냈거나 지운 뒤 전달이 들어감) 지운다.
-        const draftNote = member.lastError === ERROR_CODES.last_error_compact_draft.ko && e.status === "idle";
-        if (["idle", "working"].includes(e.status) && (!e.observation || e.observation.freshness === "fresh") && member.lastError && member.fenceCode !== "control_unknown" && !this.keepsUsageNote(member) && !draftNote) this.store.patchMember(member.id, { lastError: null });
+        if (["idle", "working"].includes(e.status) && (!e.observation || e.observation.freshness === "fresh") && member.lastError && member.fenceCode !== "control_unknown" && !this.keepsUsageNote(member) && !this.keepsDraftNote(member, e.status === "working")) this.store.patchMember(member.id, { lastError: null });
         if (e.status === "working" || e.observation?.freshness === "stale") this.invalidateCoreMeasurement(member);
         if (e.status === "idle" && e.turn !== undefined && e.turn !== null && pending.some(run => run.turn !== null && e.turn! > run.turn)) {
           this.endExecution(member, "success", "서버 부재 중 더 뒤의 종결 turn을 확인했습니다");

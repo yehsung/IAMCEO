@@ -502,23 +502,7 @@ struct MemberDetailView: View {
         return nil
     }
 
-    private func compactionLabel(_ compact: ContextCompaction?) -> String {
-        guard let compact else { return String(localized: "압축 결과 확인 중 · 다시 전송하지 않습니다.") }
-        switch compact.phase {
-        case .queued:
-            switch compact.reason {
-            case "working": return String(localized: "압축 예약됨 · 지금 턴이 끝난 뒤 진행합니다.")
-            case "manual_control": return String(localized: "직접 조작 중 · 압축 대기")
-            case "draft": return String(localized: "작성 중인 입력이 있어 압축을 기다립니다.")
-            case "blocked": return String(localized: "CLI 화면을 먼저 확인하세요 · 압축 대기")
-            default: return String(localized: "압축 예약됨 · 안전한 실행 조건을 기다립니다.")
-            }
-        case .sending, .running: return String(localized: "문맥 압축 중")
-        case .succeeded: return String(localized: "문맥 압축 완료 · 사용량 갱신 중")
-        case .failed: return compact.reason == "user_resolved" ? String(localized: "사용자 확인으로 압축 대기를 해제했습니다.") : String(localized: "문맥 압축이 끝나지 않았습니다. 터미널을 확인하세요.")
-        default: return String(localized: "압축 결과를 확인할 수 없습니다. 다시 보내지 말고 터미널을 확인하세요.")
-        }
-    }
+    private func compactionLabel(_ compact: ContextCompaction?) -> String { CompactionText.label(compact) }
 
     /// One compact row: "문맥" + bar + percentage (how it was measured in the tooltip), and only while a compaction is
     /// pending, running, unconfirmed or failed, its one-line status. Compacting itself lives in the "…" menu.
@@ -547,12 +531,7 @@ struct MemberDetailView: View {
     /// Compaction status worth a line: in flight, unconfirmed, or failed (not a finished one, not a user release).
     private func compactionStatus(_ m: Member) -> String? {
         if store.contextChecking.contains(m.id) { return String(localized: "압축 결과 확인 중 · 다시 전송하지 않습니다.") }
-        guard let compact = m.contextState?.compaction else { return nil }
-        switch compact.phase {
-        case .succeeded?: return nil
-        case .failed?: return compact.reason == "user_resolved" ? nil : compactionLabel(compact)
-        default: return compactionLabel(compact)
-        }
+        return CompactionText.status(m.contextState?.compaction)
     }
 
     /// Tooltip of the context meter: how the number was measured, the window and when.

@@ -8838,6 +8838,16 @@
         }
       }
     },
+    "압축할 대화가 아직 적어 압축하지 않았습니다." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not enough conversation to compact yet."
+          }
+        }
+      }
+    },
     "사이드바에서 프로젝트를 고르거나 새로 만드세요." : {
       "localizations" : {
         "en" : {
@@ -22983,6 +22993,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "압축을 멈춘 뒤 입력칸에 글이 남아 있어 전달을 기다립니다. IAMCEO가 넣은 압축 명령이 되살아난 것이면 터미널에서 지워 주세요(대표가 쓴 글일 수 있어 IAMCEO는 지우지 않습니다)"
+          }
+        }
+      }
+    },
+    "server.text.activity.compact_nothing" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not compacted: Claude said there isn't enough conversation to compact yet. Waiting deliveries continue"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "압축하지 않았습니다: 압축할 대화가 아직 적다고 Claude가 답했습니다. 기다리던 전달을 이어 넣습니다"
           }
         }
       }

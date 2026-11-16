@@ -561,3 +561,46 @@ final class WaitReasonLabelTests: XCTestCase {
         XCTAssertEqual(waitReasonTone("member_busy"), .neutral)
     }
 }
+
+/// 0.2.7 배포 전 재확인 검토: 팀장 상세 '문맥' 줄의 압축 상태 글(CompactionText). Claude 가 압축할 대화가 적다고 끝낸 압축
+/// (서버 문맥 상태 failed + reason nothing_to_compact)은 줄을 보이지 않고(활동 줄이 알린다), 단계 글을 불러도 '터미널을 확인하세요'가 아니다.
+/// 다른 실패·대표가 푼 압축·진행 중인 압축의 한국어 글은 예전 그대로다.
+final class CompactionTextTests: XCTestCase {
+    private static let nativeRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    private func compaction(_ phase: ContextCompactionPhase, _ reason: String?) -> ContextCompaction {
+        ContextCompaction(id: "c", trigger: "manual", phase: phase, reason: reason)
+    }
+
+    func testNothingToCompactShowsNoLineAndNeverAsksToCheckTheTerminal() throws {
+        let nothing = compaction(.failed, "nothing_to_compact")
+        XCTAssertNil(CompactionText.status(nothing))
+        XCTAssertEqual(CompactionText.label(nothing), "압축할 대화가 아직 적어 압축하지 않았습니다.")
+        XCTAssertFalse(CompactionText.label(nothing).contains("터미널"))
+        // 영어 화면의 글(문구 표).
+        let catalog = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: Self.nativeRoot.appendingPathComponent("Resources/Shared/Localizable.xcstrings"))) as? [String: Any])
+        let entry = try XCTUnwrap((catalog["strings"] as? [String: Any])?["압축할 대화가 아직 적어 압축하지 않았습니다."] as? [String: Any])
+        let english = ((entry["localizations"] as? [String: Any])?["en"] as? [String: Any])?["stringUnit"] as? [String: Any]
+        XCTAssertEqual(english?["value"] as? String, "Not enough conversation to compact yet.")
+    }
+
+    func testOtherCompactionStatesKeepTheirKoreanText() {
+        for reason in ["provider_error", "interrupted", "draft", nil, "future_reason"] as [String?] {
+            XCTAssertEqual(CompactionText.status(compaction(.failed, reason)), "문맥 압축이 끝나지 않았습니다. 터미널을 확인하세요.", reason ?? "nil")
+        }
+        XCTAssertNil(CompactionText.status(compaction(.failed, "user_resolved")))
+        XCTAssertEqual(CompactionText.label(compaction(.failed, "user_resolved")), "사용자 확인으로 압축 대기를 해제했습니다.")
+        XCTAssertNil(CompactionText.status(compaction(.succeeded, nil)))
+        XCTAssertEqual(CompactionText.label(compaction(.succeeded, nil)), "문맥 압축 완료 · 사용량 갱신 중")
+        XCTAssertNil(CompactionText.status(nil))
+        XCTAssertEqual(CompactionText.label(nil), "압축 결과 확인 중 · 다시 전송하지 않습니다.")
+        XCTAssertEqual(CompactionText.status(compaction(.running, nil)), "문맥 압축 중")
+        XCTAssertEqual(CompactionText.status(compaction(.sending, nil)), "문맥 압축 중")
+        XCTAssertEqual(CompactionText.status(compaction(.queued, "working")), "압축 예약됨 · 지금 턴이 끝난 뒤 진행합니다.")
+        XCTAssertEqual(CompactionText.status(compaction(.queued, "manual_control")), "직접 조작 중 · 압축 대기")
+        XCTAssertEqual(CompactionText.status(compaction(.queued, "draft")), "작성 중인 입력이 있어 압축을 기다립니다.")
+        XCTAssertEqual(CompactionText.status(compaction(.queued, "blocked")), "CLI 화면을 먼저 확인하세요 · 압축 대기")
+        XCTAssertEqual(CompactionText.status(compaction(.queued, nil)), "압축 예약됨 · 안전한 실행 조건을 기다립니다.")
+        XCTAssertEqual(CompactionText.status(compaction(.uncertain, "completion_timeout")), "압축 결과를 확인할 수 없습니다. 다시 보내지 말고 터미널을 확인하세요.")
+        XCTAssertEqual(CompactionText.status(compaction(.unknown, nil)), "압축 결과를 확인할 수 없습니다. 다시 보내지 말고 터미널을 확인하세요.")
+    }
+}

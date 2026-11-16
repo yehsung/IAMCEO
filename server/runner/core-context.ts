@@ -119,8 +119,21 @@ export interface CompactBoundaryBaseline extends CoreContextIdentity { path: str
  * 판이 다른 커서(옛 규칙으로 이미 지나 읽은 것)는 버리고 기준선부터 다시 읽는다.
  */
 export const COMPACT_BOUNDARY_RULES = 2;
-export interface CompactBoundaryCursor { baseline: CompactBoundaryBaseline; queryKey: string; log: JsonlCursor | null; boundary: boolean; invalid: boolean; rules?: number }
-export interface CompactBoundaryResult { outcome: "succeeded" | "pending" | "unknown"; code: string; cursor: CompactBoundaryCursor | null }
+/**
+ * nothing: 기준선 뒤 같은 세션에 Claude 가 압축 명령을 '할 것 없음'으로 끝낸 출력(CLAUDE_COMPACT_NOTHING)을 적었다.
+ */
+export interface CompactBoundaryCursor { baseline: CompactBoundaryBaseline; queryKey: string; log: JsonlCursor | null; boundary: boolean; invalid: boolean; rules?: number; nothing?: boolean }
+/**
+ * nothing: 압축 경계는 없고, Claude 가 그 압축 명령을 'Not enough messages to compact.' 로 끝냈으며 CLI 가 쉰다(성공도 실패도 아닌 '할 것 없음').
+ */
+export interface CompactBoundaryResult { outcome: "succeeded" | "nothing" | "pending" | "unknown"; code: string; cursor: CompactBoundaryCursor | null }
+/**
+ * 0.2.7 배포 전 재확인(real-cli-3 곁 문제, 0.1.0 부터): Claude 2.1.323 은 압축할 대화가 적으면 수동 압축(/compact)을 곧바로 이 출력으로 끝내고 쉰다.
+ * 세션 기록 줄: `{"type":"system","subtype":"local_command","content":"<local-command-stdout>Not enough messages to compact.</local-command-stdout>",
+ * "commandRun":{"command":"compact","args":…},"isMeta":false,…}`(견본 tests/fixtures/cli/claude/2.1.323/transcript-compact-nothing.jsonl).
+ * 경계도 압축 끝 훅도 오지 않아 서버가 그 압축을 10분 붙잡고 대표에게 막힘을 보냈다. 글자까지 같을 때만 '할 것 없음'으로 본다(다른 출력은 지금처럼).
+ */
+export const CLAUDE_COMPACT_NOTHING = "<local-command-stdout>Not enough messages to compact.</local-command-stdout>";
 /** Boundary is a candidate; success additionally requires same-owner settled CLI and no provider error. */
 export function observeCompactBoundary(options: { cli: CliProvider; home: string; cwd: string; baseline: CompactBoundaryBaseline; current: CoreContextIdentity; settled: boolean; providerError: boolean; cursor?: CompactBoundaryCursor | null }): CompactBoundaryResult {
   const { baseline, current } = options;
@@ -140,7 +153,7 @@ export function observeCompactBoundary(options: { cli: CliProvider; home: string
   }
   const range = readJsonlRange(root, baseline.path, cursor?.log, { startOffset: baseline.offset, fileIdentity: baseline.fileIdentity, maxBytes: 1024 * 1024 });
   if (!range.cursor || !["complete_range", "corrupt_log", "partial_log", "scan_pending"].includes(range.code)) return unknown(range.code);
-  const state: CompactBoundaryCursor = { baseline: { ...baseline }, queryKey, log: range.cursor, boundary: cursor?.boundary ?? false, invalid: cursor?.invalid ?? false, rules: COMPACT_BOUNDARY_RULES };
+  const state: CompactBoundaryCursor = { baseline: { ...baseline }, queryKey, log: range.cursor, boundary: cursor?.boundary ?? false, invalid: cursor?.invalid ?? false, rules: COMPACT_BOUNDARY_RULES, ...(cursor?.nothing ? { nothing: true } : {}) };
   for (const record of range.records) {
     const entry = jsonObject(record.value);
     if (!entry) { state.invalid = true; continue; }
@@ -149,8 +162,14 @@ export function observeCompactBoundary(options: { cli: CliProvider; home: string
     // Claude 줄의 cwd 는 비교하지 않는다(COMPACT_BOUNDARY_RULES). 다른 세션·사이드체인 줄은 위·여기서 거른다.
     if (options.cli === "claude" && entry.type === "system" && entry.subtype === "compact_boundary" && entry.sessionId === current.sessionId) state.boundary = true;
     if (options.cli === "codex" && entry.type === "compacted" && (entry.sessionId === undefined || entry.sessionId === current.sessionId)) state.boundary = true;
+    // 압축 명령을 '할 것 없음'으로 끝낸 출력. 명령 이름이 적혀 있으면 compact 여야 한다(다른 로컬 명령의 출력이 아님).
+    const run = jsonObject(entry.commandRun);
+    if (options.cli === "claude" && entry.type === "system" && entry.subtype === "local_command" && entry.sessionId === current.sessionId &&
+      typeof entry.content === "string" && entry.content.trim() === CLAUDE_COMPACT_NOTHING && (!run || run.command === "compact")) state.nothing = true;
   }
   if (options.providerError) return { outcome: "unknown", code: "provider_error", cursor: state };
   if (state.invalid || !range.complete) return { outcome: "unknown", code: range.code, cursor: state };
+  // 경계가 있으면 그것이 먼저다. 경계 없이 '할 것 없음' 출력만 있고 CLI 가 쉬면 그 압축은 끝났다(압축은 일어나지 않았다).
+  if (!state.boundary && state.nothing) return { outcome: options.settled ? "nothing" : "pending", code: options.settled ? "nothing_to_compact" : "awaiting_settled", cursor: state };
   return { outcome: state.boundary && options.settled ? "succeeded" : "pending", code: state.boundary ? options.settled ? "boundary_and_settled" : "awaiting_settled" : "awaiting_boundary", cursor: state };
 }

@@ -270,6 +270,43 @@ struct PermissionModeChoice: Identifiable, Sendable, Equatable {
     static let firstRunConfirm = String(localized: "이대로 시작")
 }
 
+/// 팀장 상세 '문맥' 줄의 압축 상태 글(TeamView). 서버의 문맥 상태(contextState.compaction)의 단계·까닭으로 고른다.
+enum CompactionText {
+    /// 압축 단계 한 줄.
+    static func label(_ compact: ContextCompaction?) -> String {
+        guard let compact else { return String(localized: "압축 결과 확인 중 · 다시 전송하지 않습니다.") }
+        switch compact.phase {
+        case .queued:
+            switch compact.reason {
+            case "working": return String(localized: "압축 예약됨 · 지금 턴이 끝난 뒤 진행합니다.")
+            case "manual_control": return String(localized: "직접 조작 중 · 압축 대기")
+            case "draft": return String(localized: "작성 중인 입력이 있어 압축을 기다립니다.")
+            case "blocked": return String(localized: "CLI 화면을 먼저 확인하세요 · 압축 대기")
+            default: return String(localized: "압축 예약됨 · 안전한 실행 조건을 기다립니다.")
+            }
+        case .sending, .running: return String(localized: "문맥 압축 중")
+        case .succeeded: return String(localized: "문맥 압축 완료 · 사용량 갱신 중")
+        case .failed:
+            switch compact.reason {
+            case "user_resolved": return String(localized: "사용자 확인으로 압축 대기를 해제했습니다.")
+            // 0.2.7 배포 전 재확인 검토: Claude 가 압축할 대화가 적다고 끝낸 압축. 할 일이 없으니 '터미널을 확인하세요'를 쓰지 않는다.
+            case "nothing_to_compact": return String(localized: "압축할 대화가 아직 적어 압축하지 않았습니다.")
+            default: return String(localized: "문맥 압축이 끝나지 않았습니다. 터미널을 확인하세요.")
+            }
+        default: return String(localized: "압축 결과를 확인할 수 없습니다. 다시 보내지 말고 터미널을 확인하세요.")
+        }
+    }
+    /// 문맥 줄 아래에 따로 보일 압축 상태: 진행 중·미확인·실패. 끝난 것, 대표가 확인으로 푼 것, 압축할 것이 없어 끝난 것(활동 줄이 알린다)은 보이지 않는다.
+    static func status(_ compact: ContextCompaction?) -> String? {
+        guard let compact else { return nil }
+        switch compact.phase {
+        case .succeeded?: return nil
+        case .failed?: return ["user_resolved", "nothing_to_compact"].contains(compact.reason ?? "") ? nil : label(compact)
+        default: return label(compact)
+        }
+    }
+}
+
 extension Member {
     /// 0.2.7: 턴을 마쳤지만(서버 status idle) 서버가 CLI 기록으로 잰 서브에이전트가 돌고 있으면 그 수. 모르면(unknown·unsupported) nil.
     /// 서버의 status 는 바꾸지 않는다(쉬는 중 = 새 지시를 받음). 화면만 '서브에이전트 일하는 중'으로 보인다.

@@ -141,7 +141,7 @@ export interface ContextCompaction {
   id: string;
   trigger: "auto" | "manual";
   phase: "queued" | "sending" | "running" | "succeeded" | "failed" | "uncertain";
-  reason: "working" | "manual_control" | "draft" | "blocked" | "backend_down" | "measurement_pending" | "send_uncertain" | "completion_timeout" | "provider_error" | "interrupted" | "session_changed" | "user_resolved" | null;
+  reason: "working" | "manual_control" | "draft" | "blocked" | "backend_down" | "measurement_pending" | "send_uncertain" | "completion_timeout" | "provider_error" | "interrupted" | "session_changed" | "user_resolved" | "nothing_to_compact" | null;
   requestedAt: string;
   startedAt: string | null;
   finishedAt: string | null;

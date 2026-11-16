@@ -192,10 +192,11 @@ describe("저장소와 실시간", () => {
     const runId = f.store.listPendingExecutions().find(r => r.memberId === lead.id)!.runId;
     await f.orch.recordPost(f.store.requireMember(lead.id), { kind: "진행", title: "확인했습니다" });
     await until(() => f.reply(sent.id)?.state === "replied", "답함");
-    // 진행 글은 최종 보고가 아니라 서버가 보고 보완을 넣고 다음 턴이 돈다. 이미 답했으니 답함 그대로다.
+    // 0.2.7(D3-1): 총괄이 대표 글로 시작한 턴의 진행 글은 그 실행의 보고라 보고 보완이 없다(같은 답이 두 번 오고 거짓 '결과 보고 누락'이 붙던 것).
+    // 답함 그대로다. 보완은 실행을 닫는 같은 트랜잭션에서 전달로 쌓이므로, 닫힌 뒤 전달 목록에 없으면 없는 것이다.
     f.runner.end(f.store, lead.id, 1);
     await until(() => f.store.getExecutionJournal(runId)?.phase === "ended", "턴 끝");
-    await until(() => f.runner.sent.some(s => s.text.includes("보고 보완:")), "보고 보완");
+    expect(f.store.listDeliveries(f.project.id).filter(d => d.text.startsWith("[시스템] 보고 보완:"))).toEqual([]);
     expect(f.reply(sent.id)?.state).toBe("replied");
     expect(f.states(sent.id)).toContain("working");
     expect(f.states(sent.id).at(-1)).toBe("replied");

@@ -5,7 +5,9 @@
 // - receipt   수신 표지: 보내기가 성공(전송 영수증)한 봉투의 묶음 표지 ↔ UserPromptSubmit 에 실린 같은 표지
 // - turn_end  턴 끝: 실행기의 turn_end(OSC 상태 보고·사라진 보고 추정) ↔ Stop·StopFailure
 // - error_kind 오류 분류: turn_end 의 오류 글을 classifyTurnError 로 나눈 것 ↔ StopFailure 의 분류값
-// - compact   압축 경계: 세션 기록에서 찾은 압축 완료(compacted) ↔ PostCompact
+// - compact   압축 경계: 세션 기록에서 찾은 압축 완료(compacted) ↔ PostCompact. 서버는 자기가 시킨 압축만 compacted 로 안다.
+//             CLI 가 스스로 한 자동 압축(PostCompact trigger=auto: 쉬는 동안 압축·턴 도중 자동 압축)은 맞댈 짝이 원래 없어 불일치로 세지 않고
+//             cliAutoCompactions 로 따로 센다(0.2.7 D4-8·D4-10: 0.2.6 실행의 '압축 경계 hook_only_auto' 15건이 모두 이것이었다).
 // - session   세션 ID: 서버가 아는 팀장의 세션 ↔ 훅 기록마다 실린 session_id
 //
 // /clear 판단(기록만): 대표가 터미널에서 /clear 를 치면 SessionStart(source=clear)가 새 세션 ID 로 온다. 서버의 세션 ID 는 바꾸지 않는다.
@@ -38,6 +40,8 @@ export interface HookCompareSnapshot {
   noHookData: number;
   /** 읽지 못한 기록 줄·돌린 파일을 놓친 횟수. */
   unreadable: { lines: number; gaps: number };
+  /** 0.2.7: 서버가 시키지 않은 CLI 자체 자동 압축(PostCompact trigger=auto)의 수. 맞대지 않는다(불일치 아님). 옛 비교 파일에는 없다. */
+  cliAutoCompactions?: number;
   clears: { count: number; lastAt: string | null; decision: "record_only" };
   recentMismatches: { at: string; category: HookCompareCategory; reason: string; memberId: string }[];
 }
@@ -90,7 +94,10 @@ const DEFAULT_WINDOWS = {
   sessionWaitMs: 30_000,
   /** 같은 까닭의 불일치 로그는 이 간격에 한 번. */
   logEveryMs: 10 * 60_000,
+  /** 요약 줄: 불일치가 새로 생겼으면 이 간격에 한 번까지. */
   summaryEveryMs: 30 * 60_000,
+  /** 요약 줄: 일치만 늘었으면(새 불일치 없음) 이 간격에 한 번(0.2.7 D4-10: 30분마다 쌓이던 요약 108줄). */
+  summaryQuietMs: 6 * 3_600_000,
   persistEveryMs: 10_000,
 };
 const MAX_MEMBERS = 500;
@@ -101,6 +108,7 @@ export class HookShadow {
   private readonly members = new Map<string, MemberState>();
   private readonly counts = Object.fromEntries(HOOK_COMPARE_CATEGORIES.map(c => [c, { matched: 0, mismatched: 0, reasons: {} as Record<string, number> }])) as Record<HookCompareCategory, { matched: number; mismatched: number; reasons: Record<string, number> }>;
   private noHookData = 0;
+  private cliAutoCompactions = 0;
   private invalidLines = 0;
   private clears = { count: 0, lastAt: null as string | null };
   private readonly recent: HookCompareSnapshot["recentMismatches"] = [];
@@ -114,6 +122,8 @@ export class HookShadow {
   private persistedAt = 0;
   private summarizedAt: number;
   private summarizedKey = "";
+  private summarizedMismatchKey = "";
+  private summaryLoggedAt = 0;
   private readonly loggedAt = new Map<string, number>();
   private readonly suppressed = new Map<string, number>();
   private stopped = false;
@@ -208,6 +218,7 @@ export class HookShadow {
       membersWatched: this.members.size, membersWithHooks: withHooks,
       overall: { matched, mismatched, rate: rate(matched, mismatched) }, categories, noHookData: this.noHookData,
       unreadable: { lines: this.invalidLines, gaps }, clears: { ...this.clears, decision: "record_only" }, recentMismatches: [...this.recent],
+      cliAutoCompactions: this.cliAutoCompactions,
     };
   }
 
@@ -318,7 +329,8 @@ export class HookShadow {
       const before = r.event === "UserPromptSubmit" ? w.receiptBeforeMs : r.event === "PostCompact" ? w.compactBeforeMs : w.turnBeforeMs;
       if (now - r.at <= before) return true;
       if (r.event === "UserPromptSubmit") this.count("receipt", false, memberId, "hook_only");
-      else if (r.event === "PostCompact") this.count("compact", false, memberId, r.trigger === "auto" ? "hook_only_auto" : "hook_only");
+      else if (r.event === "PostCompact" && r.trigger === "auto") { this.cliAutoCompactions++; this.dirty = true; }
+      else if (r.event === "PostCompact") this.count("compact", false, memberId, "hook_only");
       else this.count("turn_end", false, memberId, r.event === "StopFailure" ? `hook_only_error:${r.error}` : "hook_only");
       return false;
     });
@@ -342,13 +354,21 @@ export class HookShadow {
     this.log(`[hooks] 불일치(판정은 그대로): ${LABEL[category]} · ${reason} · ${memberId}${skipped ? ` (같은 까닭 ${skipped}건 더)` : ""}`);
   }
 
+  /**
+   * 요약 줄. 새 불일치(또는 훅 기록 없는 판정)가 생겼으면 summaryEveryMs(30분)에 한 번까지, 일치만 늘었으면 summaryQuietMs(6시간)에 한 번.
+   * 숫자가 그대로면 남기지 않는다. 비교 파일(compare.json)은 지금처럼 10초마다 최신이다.
+   */
   private summarize(now: number): void {
     if (now - this.summarizedAt < this.windows.summaryEveryMs) return;
-    const s = this.snapshot();
-    const key = JSON.stringify([s.overall, s.noHookData]);
     this.summarizedAt = now;
+    const s = this.snapshot();
+    const key = JSON.stringify([s.overall, s.noHookData, s.cliAutoCompactions]);
     if (key === this.summarizedKey || (s.overall.matched + s.overall.mismatched + s.noHookData === 0)) return;
+    const mismatchKey = JSON.stringify([s.overall.mismatched, s.noHookData]);
+    if (mismatchKey === this.summarizedMismatchKey && now - this.summaryLoggedAt < this.windows.summaryQuietMs) return;
     this.summarizedKey = key;
+    this.summarizedMismatchKey = mismatchKey;
+    this.summaryLoggedAt = now;
     this.log(summaryLine(s));
   }
 
@@ -390,5 +410,5 @@ function rate(matched: number, mismatched: number): number | null {
 export function summaryLine(s: HookCompareSnapshot): string {
   const pct = (r: number | null) => r === null ? "-" : `${r}%`;
   const parts = HOOK_COMPARE_CATEGORIES.map(c => `${LABEL[c]} ${s.categories[c].matched}/${s.categories[c].matched + s.categories[c].mismatched}`);
-  return `[hooks] 훅 기록 비교(판정은 그대로): 일치 ${s.overall.matched}/${s.overall.matched + s.overall.mismatched}(${pct(s.overall.rate)}) · ${parts.join(" · ")} · 훅 기록 없음 ${s.noHookData} · /clear ${s.clears.count}`;
+  return `[hooks] 훅 기록 비교(판정은 그대로): 일치 ${s.overall.matched}/${s.overall.matched + s.overall.mismatched}(${pct(s.overall.rate)}) · ${parts.join(" · ")} · 훅 기록 없음 ${s.noHookData} · /clear ${s.clears.count} · CLI 자체 자동 압축 ${s.cliAutoCompactions ?? 0}(맞대지 않음)`;
 }

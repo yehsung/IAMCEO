@@ -1,4 +1,5 @@
 import { sign } from "node:crypto";
+import { lookup as dnsLookup, type LookupAddress } from "node:dns";
 import { connect, constants } from "node:http2";
 import type { ClientHttp2Session, ClientHttp2Stream, IncomingHttpHeaders, OutgoingHttpHeaders } from "node:http2";
 import type { PushEnvironment, PushProviderStatus } from "../../shared/push.ts";
@@ -148,6 +149,37 @@ export function serializeAPNsPayload(payload: PushPayload): string {
 }
 
 type Connector = (origin: string, options: { servername: string; rejectUnauthorized: true; ALPNProtocols: string[] }) => ClientHttp2Session;
+type LookupCallback = (error: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void;
+export type LookupFunction = (hostname: string, options: { all?: boolean; family?: number }, callback: LookupCallback) => void;
+
+/** 0.2.7(D4-10): 주소 묶음마다 차례로 시도할 주소 수(IPv4·IPv6 각각). */
+export const APNS_ADDRESSES_PER_FAMILY = 3;
+
+/**
+ * 0.2.7(D4-10): api.push.apple.com 은 주소를 열 개 넘게 돌려준다. 런타임의 연결(autoSelectFamily, 주소를 차례로 시도)은 시도마다 같은 소켓에
+ * 'end' 듣개를 하나씩 더해, 연결이 안 되는 동안(인터넷 끊김) 열한 번째 시도에서 MaxListenersExceededWarning 과 소켓 객체 덤프(약 190줄)를
+ * 서버 오류 로그에 남겼다. 실험(Bun 1.3.14): 주소 12개 → 경고, 6개 → 없음. 그래서 IPv4·IPv6 를 섞은 차례를 지키며 각 묶음의 앞 몇 개만 시도한다.
+ * 한 번에 다 막혀도 연결은 실패로 끝나고 지금처럼 backoff 뒤 다시 시도한다(그때 DNS 가 다른 주소를 앞에 둘 수 있다).
+ */
+export function boundedLookup(resolve: LookupFunction = dnsLookup as unknown as LookupFunction, perFamily = APNS_ADDRESSES_PER_FAMILY): LookupFunction {
+  return (hostname, options, callback) => {
+    resolve(hostname, options, (error, address, family) => {
+      if (error || !Array.isArray(address)) { callback(error, address, family); return; }
+      const seen = new Map<number, number>();
+      callback(null, address.filter(entry => {
+        const count = seen.get(entry.family) ?? 0;
+        seen.set(entry.family, count + 1);
+        return count < perFamily;
+      }));
+    });
+  };
+}
+
+/** 운영 연결: 위의 주소 수 제한을 단다. 시험은 resolve 를 갈아 끼워 연결을 실제로 해 본다. */
+export function apnsConnector(resolve?: LookupFunction): Connector {
+  const lookup = boundedLookup(resolve);
+  return (origin, options) => connect(origin, { ...options, lookup } as Parameters<typeof connect>[1]);
+}
 interface Connection { session: ClientHttp2Session; draining: boolean; ready: Promise<boolean>; failed: boolean; usedAt: number; retire: () => void }
 export interface HTTP2APNsTransportOptions {
   /** A session idle at least this long is PINGed before it carries a request. */
@@ -162,7 +194,7 @@ export class HTTP2APNsTransport implements APNsTransport {
   #closed = false;
   private readonly idleProbeMs: number;
   private readonly probeTimeoutMs: number;
-  constructor(private readonly connector: Connector = (origin, options) => connect(origin, options), private readonly now: () => number = Date.now,
+  constructor(private readonly connector: Connector = apnsConnector(), private readonly now: () => number = Date.now,
     options: HTTP2APNsTransportOptions = {}) {
     this.idleProbeMs = Math.max(0, options.idleProbeMs ?? 30_000);
     this.probeTimeoutMs = Math.max(1, options.probeTimeoutMs ?? 3_000);

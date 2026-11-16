@@ -272,6 +272,22 @@ describe("뒤 작업을 남기고 턴을 끝낸 Claude 팀장", () => {
     expect(activityCodes(t, w.id)).toContain("activity.missing_report_requested");
   }, 40_000);
 
+  test("0.2.7(D3-1): 뒤로 돌리기 전에 진행 글('끝나면 결과를 올립니다')을 썼어도 결과를 끝내 보고하지 않았으면 뒤 작업이 끝난 뒤 보고 보완을 한 번 요구한다", async () => {
+    const t = await setup();
+    const w = await worker(t);
+    const first = await atWork(t, w);
+    await t.orch.recordPost(t.member(w.id), { kind: "진행", title: "묶기를 뒤로 돌렸습니다. 끝나면 결과를 올립니다" });
+    appendFileSync(first.path, rows(stopSummary(w.sessionId!), turnDuration(w.sessionId!)));
+    t.core.setScreen(w.id, WAIT_SCREEN);
+    await t.waitFor("업무 닫힘", () => t.store.getExecutionJournal(first.runId)?.phase === "ended" && t.member(w.id).status === "idle");
+    await Bun.sleep(QUIET_MS);
+    expect(nudges(t, w.id)).toHaveLength(0);
+    t.core.setScreen(w.id, IDLE_SCREEN);
+    t.core.release(w.id);
+    await t.waitFor("보고 보완", () => nudges(t, w.id).length === 1);
+    expect(nudges(t, w.id)[0]!.text).toContain(first.runId);
+  }, 40_000);
+
   test("기록에 열린 턴이 있거나 화면에 일하는 중의 상태 줄이 있으면 그대로 일하는 중이다", async () => {
     const t = await setup();
     const w = await worker(t);

@@ -892,3 +892,26 @@ describe("미전달 항목의 수동 제어와 일회성 정리", () => {
     expect(() => f.store.withdrawInstruction(answer.id, actor)).toThrow();
   });
 });
+
+describe("0.2.7 D1-7 '표시를 바로잡았습니다' 활동", () => {
+  test("넣는 중(delivering)의 평소 수신 확정은 활동을 남기지 않는다. 확인 중(held)이던 것이 받은 것으로 확인되면 한 번 남긴다", async () => {
+    const f = setup();
+    const a = f.enqueue();
+    const dispatch = f.service.prepareDispatch([a.id], { terminalId: f.member.paneId, sessionId: f.member.sessionId, sessionGeneration: f.store.memberRevisions(f.member.id).sessionGeneration, process: null },
+      { serverEpoch: "test-epoch", turn: 0, inputEpoch: 0, logs: [], capturedAt: new Date(f.now).toISOString() });
+    // 펌프(orchestrator sendEnvelope)는 쓰기 직전에 넣는 중으로 둔다.
+    f.store.setDeliveryStatus(a.id, "delivering", { attempt: true });
+    f.service.recordResult(dispatch.dispatchId, { ok: true, started: true, receipt: { dispatchId: dispatch.dispatchId, receivedAt: new Date(f.now).toISOString(), source: "transport" } });
+    expect(f.store.requireDelivery(a.id).status).toBe("delivered");
+    expect(f.r(a.id).phase).toBe("resolved");
+    expect(f.store.listActivity(f.member.id)).toEqual([]);
+    // 결과를 모른 채 확인 중으로 보이던 것은 진짜 정정이다.
+    const b = f.enqueue();
+    f.envelope([b]);
+    expect(f.store.requireDelivery(b.id).status).toBe("held");
+    f.inspect = async (_m, q) => f.observation(q, { finding: "received", receivedDeliveryIds: [b.id], quiescence: "settled" });
+    await f.service.tick();
+    expect(f.store.requireDelivery(b.id).status).toBe("delivered");
+    expect(f.store.listActivity(f.member.id).map(item => item.text)).toEqual([`전달 기록에서 수신을 확인해 표시를 바로잡았습니다 (${b.id})`]);
+  });
+});

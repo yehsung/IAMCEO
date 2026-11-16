@@ -1128,12 +1128,46 @@ export class Orchestrator implements OrchestratorApi {
     if (this.apiRecovery?.holdReason(member.id) && ["network_outage", "usage_limit"].includes(member.statusObservation?.error?.code ?? "") && !observation.error) return { ...observation, error: member.statusObservation!.error };
     if (observation.source !== "core" || observation.freshness !== "fresh" || observation.ownership !== "verified" || observation.error || ["blocked", "waiting"].includes(status)) return observation;
     const generation = this.store.memberRevisions(member.id).sessionGeneration;
-    const run = this.store.listPendingExecutions().find(run => run.memberId === member.id && run.identity.sessionGeneration === generation && run.identity.terminalId === member.paneId);
+    let run = this.store.listPendingExecutions().find(run => run.memberId === member.id && run.identity.sessionGeneration === generation && run.identity.terminalId === member.paneId);
     if (!run) return observation;
+    // 0.2.7(D2-5): core 는 상태가 바뀔 때만 알려, 일하는 동안의 진전이 실행 기록에 남지 않았다(20초 넘는 턴 거의 모두에 '화면 출력 없이 N분째').
+    // CLI 가 세션 기록에 줄을 더한 때를 진전으로 적는다. 진전 표시에만 쓰고 턴 끝·입력 판정에는 쓰지 않는다.
+    const runner = this.runners.get(this.backendOf(member));
+    const written = run.startedAt && runner instanceof CoreRunner ? runner.logWrittenAt(member.id) : null;
+    if (written && this.noteRunProgress(member, written)) run = this.store.getExecutionJournal(run.runId) ?? run;
     const since = run.lastProgressAt ?? run.startedAt ?? run.inputReceivedAt ?? run.createdAt;
     if (!(Date.now() - Date.parse(since) >= 20_000)) return observation;
     const code = run.startedAt ? "progress_stalled" : "start_stalled";
     return { ...observation, error: { code, note: `업무 ${run.runId}의 ${run.startedAt ? "진전" : "시작"}을 재관측 중입니다. 마지막 근거 ${since}. 소유 터미널과 업무 기록을 확인하세요. 시간만으로 입력·Enter·중단하지 않습니다` } };
+  }
+
+  /**
+   * 0.2.7(D2-5): 그 팀장의 이 세대에서 이미 시작한(running) 업무의 마지막 진전을 at 으로 앞당긴다(더 앞이거나 시작 전이면 그대로). 바꿨으면 true.
+   * 근거: 그 팀장의 MCP 도구 호출(status·post·file·ask …), 세션 기록이 마지막으로 쓰인 때. 시작(startedAt)은 바꾸지 않는다.
+   */
+  private noteRunProgress(member: Member, at: string): boolean {
+    const generation = this.store.memberRevisions(member.id).sessionGeneration;
+    let changed = false;
+    for (const run of this.store.listPendingExecutions()) {
+      if (run.memberId !== member.id || run.identity.sessionGeneration !== generation || run.phase !== "running" || !run.startedAt) continue;
+      // 5초보다 잘게는 적지 않는다(도구를 몰아 부를 때마다 실행 기록을 쓰지 않는다). '진전 없음'의 기준 20초에는 넉넉하다.
+      if (at < run.startedAt || (run.lastProgressAt && Date.parse(at) - Date.parse(run.lastProgressAt) < 5_000)) continue;
+      this.store.saveExecutionJournal({ ...run, lastProgressAt: at, updatedAt: new Date().toISOString() });
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** 0.2.7(D2-5): 팀장이 MCP 도구를 불렀다(일하는 CLI 의 진전). 마지막 진전을 지금으로 적고, 걸려 있던 '진전 없음' 표시를 곧바로 다시 잰다. */
+  private noteToolProgress(member: Member): void {
+    try {
+      if (!this.noteRunProgress(member, new Date().toISOString())) return;
+      const current = this.store.getMember(member.id);
+      const observation = current?.statusObservation;
+      if (!current || observation?.error?.code !== "progress_stalled") return;
+      const next = this.executionObservation(current, { ...observation, error: null });
+      if (next.error?.code !== "progress_stalled") this.store.patchMember(current.id, { statusObservation: next });
+    } catch (e) { console.error("도구 호출 진전 기록 실패:", member.id, e); }
   }
 
   /**
@@ -3443,10 +3477,12 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   handleAgentTool(member: Member, name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<AgentToolResult> {
+    this.noteToolProgress(member);
     return this.memberFlows.handleAgentTool(member, name, args, signal);
   }
 
   handleAgentOperation(member: Member, name: string, args: Record<string, unknown>, context: AgentOperationContext, signal?: AbortSignal): Promise<AgentToolResult> {
+    this.noteToolProgress(member);
     return this.memberFlows.handleAgentOperation(member, name, args, context, signal);
   }
 

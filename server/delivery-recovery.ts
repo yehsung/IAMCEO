@@ -265,7 +265,9 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       if (sourceValid) this.projectStatus(d, "delivered", null);
       else this.store.markDelivered(d.id);
       if (sourceValid && d.refType === "decision" && d.refId && this.store.getDecision(d.refId)?.status === "answered") this.store.setDecisionStatus(d.refId, "delivered");
-      this.store.appendActivity(d.memberId, "system", textRef("activity.delivery_corrected", { id: d.id }), `${d.id}:received`);
+      // 0.2.7(D1-7): '표시를 바로잡았습니다'는 정말 바로잡았을 때만(확인 중·보류·실패·대기로 보이던 것이 받은 것으로 확인됨). 넣는 중(delivering)의
+      // 평소 수신 확정마다 남아 거의 모든 턴 앞에 붙었다(활동 1,389줄). 수신 확정 자체(상태·복구 기록)는 그대로다.
+      if (d.status !== "delivering") this.store.appendActivity(d.memberId, "system", textRef("activity.delivery_corrected", { id: d.id }), `${d.id}:received`);
     }
     this.store.updateDeliveryRecovery(d.id, r.version, { phase: duplicate ? "needs_owner" : "resolved", reason: duplicate ? "duplicate_draft" : null,
       evidence, nextCheckAt: duplicate ? this.iso(this.now() + 60_000) : null, lastCheckedAt: this.iso() });

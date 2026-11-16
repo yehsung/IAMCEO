@@ -54,27 +54,175 @@ export interface AskInput {
   images?: Attachment[];
 }
 
-const APPROVAL_CARD_INSTRUCTION = "보고에 대표 승인이 필요하다고 썼는데 열린 결재 카드가 없다. 지금 ask 로 카드를 올리거나, 필요 없으면 보고를 정정하라.";
+// 0.2.7(D3-3): 지금 카드를 올리라는 것과, 걸린 문장이 나중의 예고·남의 카드·이미 받은 결정이면 아무것도 하지 말라는 것을 함께 말한다.
+// 예전 글('필요 없으면 보고를 정정하라')은 맞는 문장을 지우거나 거의 같은 보고를 1분 안에 다시 올리게 했다(0.2.6 뒤 감지 16번 중 정정만 14번).
+const APPROVAL_CARD_INSTRUCTION = "보고에 대표 승인·결정을 지금 구하는 문장이 있는데 열린 결재 카드가 없다. 지금 정할 일이면 ask 로 카드를 올려라. 승인이 필요 없는데 잘못 썼으면 그 문장만 정정하라. 나중에 물을 예고·조건부 안내·다른 팀장의 카드·이미 받은 결정을 말한 것이면 아무것도 하지 마라(보고를 다시 올리지 않는다).";
 
-/** 단어만으로 막지 않는다. 앞으로 받을 판단과 이미 받은 판단·불필요·CLI 승인을 구분한다. */
-function needsApprovalCard(text: string): boolean {
-  const prose = text.replace(/```[^]*?```|~~~[^]*?~~~/g, "").replace(/^\s*>.*$/gm, "");
-  return prose.split(/[\n.!?;,。]|(?:하지만|그러나|지만)/).some(part => {
-    const clause = part
+// 승인 뒤에 오는 말 가운데 지금 승인을 구하거나 기다린다는 것(뒤·후·전은 '승인 뒤 진행'처럼 아직 받지 않은 승인을 전제한다).
+const APPROVAL_PENDING = /(?:승인|허락|결재)(?:을|를|이|가|은|는)?\s*(?:뒤|후|전|대기|필요|요청|받아야|받으면|받고|받은\s*(?:뒤|후)|받기\s*전|부탁|올려야|올릴)/;
+const OWNER_PENDING = /대표(?:님)?(?:의)?\s*(?:확인|결정)(?:을|를|이|가|은|는)?\s*(?:필요|대기|기다|요청|뒤|후|전|받아야|받으면|받고|부탁|바랍니다|해\s*주)/;
+/** 대표에게 묻는 말(여쭙다)과 대표에게 고르라고 청하는 말. 이것만 '언제·누가' 묻는지(조건·나중·다른 팀장)를 본다. */
+const ASK_VERB = /여쭙|여쭘|여쭈|여쭤|여쭐|(?:정해|골라|결정해|승인해|허락해)\s*주(?:시면|세요|십시오)/g;
+/** 낱말 끝의 '면'이 조건(-면·-으면·-려면·-다면)이 아니라 이름씨인 것. 이 앞의 '면'은 조건으로 보지 않는다. */
+const NOUN_MYEON = /(?:화|장|측|전|정|표|방|단|국|평|서|당|직|체|안|반|수|후|앞|뒷|윗|옆|겉|양|외|대|도)면$/;
+/** 물음이 지금이 아니라 나중·조건부라는 표지(물음 동사 앞, 같은 문장 안). 부사(LATER)와 때·뒤·후·다음·날(TEMPORAL)은 따로 본다. */
+const DEFERRED = [
+  /경우/,
+  /는\s*대로(?=[\s,]|$)/,
+  /거든(?=[\s,]|$)/,
+  /는\s*것(?:은|이면)(?=[\s,]|$)/,
+];
+/** 물음을 나중으로 미루는 부사. */
+const LATER = /^(?:다시|따로|나중에?|추후|그때|이때|그날|만약|만일|혹시)$/;
+/** 절을 끝내는 이음 꼴(없어서·끝나서·하고·보며·했는데·되도록). 이 앞의 부사는 그 절의 것이지 물음 동사의 것이 아니다. */
+const CONNECTIVE = /(?:[가-힣]서|[가-힣]고|며|면서|니까|는데|은데|지만|도록|려고)$/;
+/** '서'·'고'로 끝나는 이름씨(문서·순서·보고서, 광고·보고 …)와 조사 '에서'·'로서'는 이음 꼴이 아니다. */
+const NOUN_GO = /(?:문|순|획|명|약|각|부|청|관|무|증|의|도|고|에|로)서$|(?:광|보|참|재|신|경|최|창|원|사|공|금|등|제|휴|선|예)고$/;
+/** 때·뒤·후·이후·다음·날(+에·엔·에는·부터·만 …). PLACE_TIME: 그 말이 묻는 때·곳을 꾸미는 조사(다음 카드에서, 점검 뒤에). */
+const TEMPORAL = /^(?:뒤|후|이후|다음|날|때)(?:에|엔|에는|에도|부터|는|만|도|까지|마다)?$/;
+const PLACE_TIME = /(?:에|엔|에는|에도|에서|부터)$/;
+/**
+ * '…전에'·'…와 함께' 는 앞으로 물을 예고(여쭙겠습니다)에서만 나중이다. '내기 전에 방향부터 여쭙니다'는 지금 묻는 말이고,
+ * '적용 보고와 함께 카드로 여쭙겠습니다'는 아직 오지 않은 보고와 함께 물을 예고다.
+ */
+const BEFORE = /(?:^|\s)(?:\S*기\s*)?전(?:에|엔|에는)?(?=[\s,(]|$)|(?:와|과)\s*함께(?=[\s,]|$)/;
+const FUTURE_ASK = /^(?:여쭙|여쭤|여쭈)\S*?(?:\s*보)?겠|^여쭐/;
+/** 물음 내용 절을 여는 물음 낱말(어떤 색이면 좋을지, 어느 것으로 할지). */
+const WH_WORD = /(?:^|\s)(?:어떤|어느|무슨|무엇|뭘|뭐|언제|어디|누가|누구|얼마|몇|왜|어떻게)/;
+/** 다른 팀장 이름 바로 뒤에 와도 그 이름이 여전히 묻는 이인 부사(오늘 끝나서 → '끝나서'가 그 이름의 풀이말). */
+const ADVERB = /^(?:오늘|어제|내일|방금|지금|곧|이미|벌써|아직|다|모두|먼저|따로|직접|바로|다시|함께|같이|이어서|대신)$/;
+
+/** 한글 글자의 받침 번호(없으면 0, ㄴ=4, ㄹ=8). 한글이 아니면 -1. */
+function jong(ch: string | undefined): number {
+  const code = ch ? ch.charCodeAt(0) - 0xac00 : -1;
+  return code >= 0 && code < 11172 ? code % 28 : -1;
+}
+/** 꾸밈 꼴(끝난·만든·할·올리는)로 끝나는 낱말인가: 뒤에 오는 때·뒤·후·날이 '…한 뒤에'라는 절이 된다. */
+function modifier(word: string | undefined): boolean {
+  if (!word) return false;
+  if (/^(?:그|이|저|그런|이런)$/.test(word)) return true;
+  const last = word.at(-1);
+  return jong(last) === 4 || jong(last) === 8;
+}
+/** 물음 내용 절의 끝 낱말(올릴지·넣을지·하는지·무엇인지): ㄹ 받침 글자 또는 는·은·인·던·건 뒤의 '지'(+는·를·도·만·가). */
+function contentEnd(word: string): boolean {
+  const m = /([가-힣])지(?:는|를|도|만|가)?$/.exec(word);
+  return !!m && (jong(m[1]) === 8 || "는은인던건".includes(m[1]!));
+}
+
+/** 낱말로 나누고 앞뒤 꾸밈 글자(**, -, 괄호, 따옴표 …)를 뗀다. */
+function wordsOf(text: string): string[] {
+  return text.split(/[\s,()]+/).map(word => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "")).filter(Boolean);
+}
+
+/**
+ * 물음 동사 앞(scope, 물음 내용 절을 뺀 것)에 그 물음을 나중·조건부로 미루는 표지가 있는가. before 는 빼기 전의 물음 동사 앞 글.
+ * strong(앞으로 물을 예고 '여쭙겠습니다'): 때·뒤·후·다음·날·다시·따로가 어디 있든 나중이다(0.2.7 첫 판의 기준 그대로).
+ * 지금 묻는 현재형('여쭙니다', '골라 주세요')에서는 표지를 약하게 본다(검토 지적):
+ * - 때·뒤·후·날·다음: '…한 뒤', '할 때', '그 다음', '뒤에'처럼 절·부사로 쓰이면 나중이다. 이름씨에 붙은 때·뒤·후·날('출시 후', '회의 때')은
+ *   뒤에 물음 내용 낱말(…할지)이 오면 그 내용이고('출시 후 가격을 올릴지'), 아니면 나중이다('점검 뒤 카드로 여쭙니다'). 꾸미는 '다음'은 '다음 카드에서',
+ *   '다음 판에서'처럼 묻는 곳·때를 꾸밀 때만 나중이다('다음 판에 넣을지', '다음 교대 시각은'은 내용).
+ * - 다시·따로 같은 부사: 마지막 절(이음 꼴·물음 내용 낱말 뒤)에 있을 때만('다시 켤지는'의 '다시'는 켜는 것, '따로 말씀하신 적이 없어서'의
+ *   '따로'는 말씀의 것).
+ */
+function deferred(scope: string, before: string, strong: boolean): boolean {
+  const words = wordsOf(scope);
+  // 조건의 '면': 낱말 끝의 '면'(…하면, 있으면, 원인이면, 바꾸려면). 화면·장면 같은 이름씨는 뺀다.
+  if (words.some(word => /면$/.test(word) && !NOUN_MYEON.test(word))) return true;
+  if (DEFERRED.some(re => re.test(scope))) return true;
+  // 지금 묻는 말에서는 마지막 절(이음 꼴·물음 내용 낱말 뒤)의 부사만 묻는 때를 꾸민다. '다시 켤지는 카드로 여쭙니다'의 '다시'는 켜는 것,
+  // '따로 말씀하신 적이 없어서 여쭙니다'의 '따로'는 말씀의 것이다. 앞으로 물을 예고는 어디 있든 나중이다.
+  const tail = strong ? 0 : words.reduce((at, word, i) => contentEnd(word) || (CONNECTIVE.test(word) && !NOUN_GO.test(word)) ? i + 1 : at, 0);
+  if (words.some((word, i) => i >= tail && LATER.test(word))) return true;
+  const all = wordsOf(before);
+  const contentAfter = (i: number) => all.slice(i + 1).some(contentEnd);
+  return all.some((word, i) => {
+    // 붙여 쓴 '때'(할때·회의때)는 떼어 본다. '때문'은 까닭이다.
+    const attached = /^(.+?)(때(?:에|엔|에는|에도|부터|는|만|도|까지|마다)?)$/.exec(word);
+    const [prev, marker] = TEMPORAL.test(word) ? [all[i - 1], word] : attached && !/때문/.test(word) && !LATER.test(word) ? [attached[1]!, attached[2]!] : [null, null];
+    if (!marker) return false;
+    if (strong || PLACE_TIME.test(marker.slice(marker.startsWith("이후") || marker.startsWith("다음") ? 2 : 1)) || modifier(prev ?? undefined)) return true;
+    if (marker.startsWith("다음")) return !contentAfter(i) && all.slice(i + 1, i + 3).some(next => PLACE_TIME.test(next));
+    return !contentAfter(i);
+  });
+}
+
+/**
+ * 지금 대표 승인·결정을 구하는 문장 조각(쉼표로 나눈 절)들(0.2.7 D3-3). 단어만으로 막지 않는다. 앞으로 받을 판단과 이미 받은 판단·불필요·CLI
+ * 승인을 구분하고, 다음은 걸지 않는다: 인용(따옴표 안·> 줄·코드), 부정('승인이 필요한 일은 없습니다', '필요한 건 없습니다'), 이미 물음
+ * ('카드로 여쭤 두었습니다', '여쭙게 했습니다'), 바깥 심사의 승인(스토어·플랫폼 검토), 조건·나중의 물음('~면 여쭙겠습니다', '다시/따로 여쭙겠습니다',
+ * '올리는 날 여쭙겠습니다'), 다른 팀장이 묻거나 다른 팀장에게 하는 말('디자인 2가 카드로 여쭙습니다', '총괄에게: … 정해 주시면').
+ * others: 이 프로젝트의 다른 팀장 이름.
+ */
+export function approvalRequests(text: string, others: readonly string[] = []): string[] {
+  const prose = text.replace(/```[^]*?```|~~~[^]*?~~~/g, "").replace(/^\s*>.*$/gm, "")
+    // 따옴표 안은 앞 글·남의 말의 인용이다(정정 글이 "'다시 여쭙겠습니다'라고 쓴 줄을 뺐습니다"로 다시 걸렸다).
+    .replace(/'[^'\n]{0,160}'|"[^"\n]{0,160}"|‘[^’\n]{0,160}’|“[^”\n]{0,160}”|「[^」\n]{0,160}」|『[^』\n]{0,160}』/g, " ");
+  const names = others.map(name => name.trim()).filter(name => name.length >= 2).map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  // 받는 이(에게·께·한테)로 쓴 다른 팀장: 그 사람에게 하는 말이다.
+  const toOther = names.length ? new RegExp(`(?:${names.join("|")})\\s*(?:에게|께|한테)(?=[\\s,:]|$)`) : null;
+  // 묻는 이(이·가·께서)로 쓴 다른 팀장. 이름이 흔한 낱말과 겹칠 수 있어('앱 빌드가 끝나서 배포할지 여쭙니다') 물음 동사 바로 앞 주어 자리만 본다.
+  const askerOther = names.length ? new RegExp(`(?:${names.join("|")})\\s*(?:이|가|께서)(?=[\\s,]|$)`, "g") : null;
+  // 그 이름의 풀이말이 따로 있으면('앱 빌드가 끝나서 배포할지') 묻는 이가 아니다: 이름 뒤의 첫 말(부사 건너)이 이음 꼴이거나, 이름과 물음 동사 사이에
+  // 물음 내용 낱말(…할지)이 있으면 그 이름은 내용 안에 있다('디자인 2가 만든 시안을 쓸지').
+  const otherAsks = (before: string) => !!askerOther && [...before.matchAll(askerOther)].some(m => {
+    const between = wordsOf(before.slice(m.index! + m[0].length));
+    const first = between.find(word => !ADVERB.test(word));
+    return !between.some(contentEnd) && !(first && CONNECTIVE.test(first) && !NOUN_GO.test(first));
+  });
+  const found: string[] = [];
+  // 문장 끝의 마침표만 나눈다. '1.2.34 출시를 … 여쭙겠습니다'의 판 번호에서 나누면 앞의 조건('끝나면')을 잃는다.
+  for (const part of prose.split(/\n|[.!?;。](?=\s|$)|(?:하지만|그러나|지만)/)) {
+    const sentence = part
       .replace(/(?:터미널|CLI|cli|명령(?:어)?|도구|실행|권한|샌드박스)\s*(?:승인|허락)(?:\s*창)?/g, "")
       .replace(/승인\s*창/g, "")
       .replace(/(?:승인|결재|허락)\s*(?:요청\s*)?(?:기능|로직|문구|테스트|시험|규칙|카드\s*UI)/g, "")
       .replace(/(?:승인|허락|결재)\s*요청(?:은|을)?\s*(?:하지\s*않|안\s*했)/g, "")
+      // 바깥 심사(스토어·광고 플랫폼)의 승인은 대표 승인이 아니다. 심사 이름과 '승인' 사이의 낱말 둘까지('구글 플레이 승인', 'TestFlight 외부 테스트 승인').
+      .replace(/(?:심사|검수|스토어|앱\s*스토어|App\s*Store|Play|플레이|구글|애플|메타|Google|Apple|Meta|TestFlight|테스트\s*플라이트|Console|콘솔|광고\s*검토|관리형\s*게시\S*)(?:\s+(?!대표)[^\s,]+){0,2}?\s*(?:의\s*)?(?:승인|허가)/gi, "")
       .replace(/(?:대표(?:님)?(?:의)?\s*)?(?:승인|허락|결재|확인|결정)(?:은|는|이|가|을|를)?\s*(?:불필요|필요\s*(?:없|하지\s*않)|요청하지\s*않|받지\s*않아도|(?:이미\s*)?(?:받았|받음|완료|끝났|끝남))/g, "")
+      // 부정: '승인이 필요한 (다음) 단계는 없습니다', '승인이 필요한 일이 아닙니다', '필요한 건 없습니다', '승인 대기 중인 건은 없습니다'.
+      .replace(/(?:대표(?:님)?(?:의)?\s*)?(?:승인|허락|결재|확인|결정)(?:이|가)?\s*(?:필요한|대기\s*중인|대기인|기다리는)\s*(?:[^,]{0,24}?(?:은|는|이|가)|건|게)\s*(?:없|아니|아닙)/g, "")
+      // '따로 받을 결정은 없습니다', '결재 올릴 것은 없습니다', '대표님께 여쭐 건 없습니다'.
+      .replace(/(?:(?:대표(?:님)?(?:의)?\s*)?(?:승인|허락|결재|결정|확인)(?:을|를)?\s*)?(?:정하실|정할|고르실|받으실|받을|여쭐|드릴|올릴|요청할|구할)\s*(?:결정|승인|결재|것|일|사항|건|게|카드)(?:은|는|이|가)?\s*(?:따로\s*)?(?:없|아니|아닙)/g, "")
       .replace(/(?:대표(?:님)?(?:이|께서)?\s*)?(?:승인|허락|결재|확인|결정)(?:을|를)?\s*(?:해\s*주셨|하셨|했습|했음)/g, "")
-      .replace(/(?:여쭙|여쭈|여쭤)(?:지\s*않|지\s*말|지\s*않아도|었|봤)/g, "");
-    if (/(?:승인|허락|결재|대표(?:님)?(?:의)?\s*(?:확인|결정))\s*(?:후|뒤).*(?:했습니다|했음|끝냈습니다|마쳤습니다)\s*$/.test(clause)
-      && !/(?:필요|대기|여쭙|여쭈|여쭤)/.test(clause)) return false;
-    return /(?:승인|허락|결재)(?:을|를|이|가|은|는)?\s*(?:뒤|후|전|대기|필요|요청|받아야|받으면|받고|받은\s*(?:뒤|후)|받기\s*전|부탁|올려야|올릴)/.test(clause)
-      || /대표(?:님)?(?:의)?\s*(?:확인|결정)(?:을|를|이|가|은|는)?\s*(?:필요|대기|기다|요청|뒤|후|전|받아야|받으면|받고|부탁|바랍니다|해\s*주)/.test(clause)
-      || /(?:대표(?:님)?(?:의)?\s*(?:확인|결정)|승인|허락|결재)\s*$/.test(clause)
-      || /(?:여쭙|여쭘|여쭈|여쭤|정해\s*주시면)/.test(clause);
-  });
+      // 이미 물었거나(여쭤 두었습니다·여쭌) 남에게 묻게 했다(여쭙게 했습니다).
+      .replace(/(?:여쭙|여쭈|여쭤)(?:지\s*않|지\s*말|지\s*않아도|었|봤|\s*(?:두었|뒀|둔|놓았|놨|보았|드렸)|게\s*(?:했|하였|시켰|맡겼))|여쭌/g, "");
+    let offset = 0;
+    for (const clause of sentence.split(",")) {
+      const start = offset;
+      offset += clause.length + 1;
+      if (/(?:승인|허락|결재|대표(?:님)?(?:의)?\s*(?:확인|결정))\s*(?:후|뒤).*(?:했습니다|했음|끝냈습니다|마쳤습니다)\s*$/.test(clause)
+        && !/(?:필요|대기|여쭙|여쭈|여쭤)/.test(clause)) continue;
+      if (APPROVAL_PENDING.test(clause) || OWNER_PENDING.test(clause) || /(?:대표(?:님)?(?:의)?\s*(?:확인|결정)|승인|허락|결재)\s*$/.test(clause)) { found.push(clause.trim()); continue; }
+      for (const ask of clause.matchAll(ASK_VERB)) {
+        // 다른 팀장에게 하는 말(총괄에게: … 정해 주시면)이나 다른 팀장이 묻는 말(디자인 2가 카드로 여쭙습니다)은 대표에게 지금 묻는 말이 아니다.
+        if (toOther?.test(sentence) || /(?:총괄|팀장|직원)(?:님)?(?:에게|께|한테)/.test(sentence)) continue;
+        const before = sentence.slice(0, start + ask.index!);
+        if (otherAsks(before)) continue;
+        const future = FUTURE_ASK.test(clause.slice(ask.index!));
+        let scope = before;
+        if (!future) {
+          // 지금 묻는 말이면 물음 내용 절('어떤 색이면 좋을지', '어느 것으로 할지') 안의 표지는 묻는 때가 아니라 묻는 내용이다.
+          const local = clause.slice(0, ask.index!), wh = WH_WORD.exec(local);
+          if (wh) {
+            const words = [...local.slice(wh.index).matchAll(/\S+/g)];
+            const last = words.findLast(w => contentEnd(w[0].replace(/[^\p{L}\p{N}]+$/u, "")));
+            if (last) scope = sentence.slice(0, start) + local.slice(0, wh.index) + local.slice(wh.index + last.index! + last[0].length);
+          }
+        }
+        if (deferred(scope, before, future)) continue;
+        if (future && BEFORE.test(before)) continue;
+        found.push(clause.trim());
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+export function needsApprovalCard(text: string, others: readonly string[] = []): boolean {
+  return approvalRequests(text, others).length > 0;
 }
 
 /** 총괄을 깨우는 보고 종류. 진행·알림은 깨우지 않고 다음 턴에 함께 읽힌다. */
@@ -392,15 +540,39 @@ export class MemberFlows {
 
   private missingApprovalCard(member: Member, input: PostInput): boolean {
     const report = `${input.title}\n${input.body ?? ""}`;
-    if (!needsApprovalCard(report) || this.port.turnContext(member.id).turn?.askedDecisionIds?.size) return false;
+    const others = this.store.listMembers(member.projectId).filter(m => m.id !== member.id);
+    const requests = approvalRequests(report, others.map(m => m.name));
+    if (!requests.length || this.port.turnContext(member.id).turn?.askedDecisionIds?.size) return false;
+    // 0.2.7(D3-3): 이 안내를 받은 보고의 정정(정정의 정정도)에는 다시 안내하지 않는다. 정정 글이 다시 걸려 같은 보고가 서너 번 올라왔다.
+    if (input.correctsMessageId && this.correctionChainNoticed(member.projectId, input.correctsMessageId)) return false;
     const group = input.group?.trim() || (input.decisionId ? this.store.getDecision(input.decisionId)?.group?.trim() : null);
     const normalizedReport = normalizeSpace(report);
+    // 승인을 구하는 그 절이 다른 팀장을 그 승인의 임자로 들면('광고 담당 3 쪽 결재 대기', '디자인 2의 카드') 그 팀장의 열린 카드가 그 절이 말하는 카드다.
+    // 이름이 보고 어디에 나오기만 해서는 아니다(검토 지적: '디자인 2 시안 반영 끝, 배포는 대표님 승인 후'의 배포 승인은 디자인 2 의 카드가 아니다).
+    const owners = others.filter(m => {
+      const name = normalizeSpace(m.name);
+      if (name.length < 2) return false;
+      const owner = new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*(?:이|가|께서|쪽|측|의)(?=[\\s,]|$)`);
+      return requests.some(clause => owner.test(normalizeSpace(clause)));
+    });
+    const mentioned = new Set(owners.map(m => m.id));
     return !this.store.listOpenDecisions(member.projectId).some(decision =>
       decision.memberId === member.id
+      || (!!decision.memberId && mentioned.has(decision.memberId))
       || decision.id === input.decisionId
       || new RegExp(`(?<![\\w-])${decision.id}(?![\\w-])`).test(report)
       || (normalizeSpace(decision.title).length >= 2 && normalizedReport.includes(normalizeSpace(decision.title)))
       || (!!group && decision.group?.trim() === group));
+  }
+
+  /** 정정 사슬(정정 대상 → 그것이 정정한 글 …)의 어느 글이 이미 결재 누락 안내를 받았는가. */
+  private correctionChainNoticed(projectId: string, messageId: string): boolean {
+    const seen = new Set<string>();
+    for (let id: string | null | undefined = messageId; id && !seen.has(id) && seen.size < 32; id = this.store.getReportReferences(projectId, id)?.correctsMessageId) {
+      seen.add(id);
+      if (this.store.hasActivityEvent(`approval-card:${id}`)) return true;
+    }
+    return false;
   }
 
   reportReferences(projectId: string, messageId: string): ReportReferences {

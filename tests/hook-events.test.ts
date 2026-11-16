@@ -325,15 +325,48 @@ describe("HookShadow: 지금 판정과 맞대어 세기만", () => {
     t.s.sent("m_one", "claude", { sessionId: "sess-1", text: `일\n${BUNDLE}` }); // 훅 기록 없음
     t.ev({ type: "turn_end", finalText: "", isError: false, inferred: true }); // Stop 없음
     t.write("UserPromptSubmit", { markers: ["#iamceo_b_ZZZZZZZZZZZZZZZZZZZZZZ"] }); // 보낸 적 없는 봉투
-    t.write("PostCompact", { trigger: "auto" }); // 서버가 모르는 자동 압축
+    t.write("PostCompact", { trigger: "manual" }); // 서버가 모르는 수동 압축(알려진 문제 (1)의 신호)
     t.write("UserPromptSubmit", { markers: [] }); // 대표가 직접 친 글: 맞대지 않음
     t.s.tick(); t.advance(400_000); t.s.tick();
     const snap = t.s.snapshot();
     expect(snap.categories.receipt.reasons).toEqual({ hook_missing: 1, hook_only: 1 });
     expect(snap.categories.turn_end.reasons).toEqual({ hook_missing_inferred: 1 });
-    expect(snap.categories.compact.reasons).toEqual({ hook_only_auto: 1 });
+    expect(snap.categories.compact.reasons).toEqual({ hook_only: 1 });
     expect(t.logs.every(line => line.startsWith("[hooks] 불일치(판정은 그대로)"))).toBe(true);
     expect(t.logs).toHaveLength(4);
+  });
+  test("0.2.7: CLI 가 스스로 한 자동 압축(쉬는 동안·턴 도중)은 서버가 시키지 않아 맞댈 짝이 없다. 불일치로 세지 않고 따로 센다", () => {
+    const t = shadow(); t.begin();
+    t.write("SessionStart", { source: "startup" });
+    t.write("PostCompact", { trigger: "auto" });
+    t.advance(1000); t.write("PostCompact", { trigger: "auto" });
+    t.s.tick(); t.advance(400_000); t.s.tick();
+    const snap = t.s.snapshot();
+    expect(snap.categories.compact).toMatchObject({ matched: 0, mismatched: 0, reasons: {} });
+    expect(snap.cliAutoCompactions).toBe(2);
+    expect(t.logs.filter(line => line.includes("불일치"))).toEqual([]);
+    // 서버가 시킨 압축과 짝이 맞으면 지금처럼 일치다(그 압축의 PostCompact 는 manual 이다).
+    t.write("PostCompact", { trigger: "manual" }); t.ev({ type: "compacted" }); t.s.tick();
+    expect(t.s.snapshot().categories.compact).toMatchObject({ matched: 1, mismatched: 0 });
+    expect(summaryLine(t.s.snapshot())).toEndWith("CLI 자체 자동 압축 2(맞대지 않음)");
+  });
+  test("0.2.7: 요약 줄은 새 불일치가 생겼을 때 30분에 한 번까지, 일치만 늘면 6시간에 한 번", () => {
+    const t = shadow(); t.begin();
+    t.write("SessionStart", { source: "startup" });
+    const match = () => { t.write("Stop"); t.ev({ type: "turn_end", finalText: "", isError: false }); t.s.tick(); };
+    const summaries = () => t.logs.filter(line => line.startsWith("[hooks] 훅 기록 비교"));
+    match(); t.advance(30 * 60_000); t.s.tick();
+    expect(summaries()).toHaveLength(1); // 첫 요약
+    for (let i = 0; i < 6; i++) { match(); t.advance(30 * 60_000); t.s.tick(); }
+    expect(summaries()).toHaveLength(1); // 일치만 늘어난 3시간: 요약 없음
+    t.s.sent("m_one", "claude", { sessionId: "sess-1", text: BUNDLE }); t.advance(61_000); t.s.tick(); // 새 불일치(수신 표지 hook_missing)
+    t.advance(30 * 60_000); t.s.tick();
+    expect(summaries()).toHaveLength(2);
+    expect(summaries().at(-1)).toContain("수신 표지 0/1");
+    for (let i = 0; i < 12; i++) { match(); t.advance(30 * 60_000); t.s.tick(); }
+    expect(summaries()).toHaveLength(3); // 일치만 늘어난 6시간 뒤 한 번
+    t.advance(30 * 60_000); t.s.tick();
+    expect(summaries()).toHaveLength(3); // 숫자가 그대로면 남기지 않는다
   });
   test("오류 분류가 다르거나 한쪽만 오류면 error_kind 불일치", () => {
     const t = shadow(); t.begin();

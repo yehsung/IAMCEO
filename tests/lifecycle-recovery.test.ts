@@ -10,7 +10,7 @@ import type { CoreTerminal } from "../server/runner/core-client.ts";
 import type { RunnerEvent } from "../server/runner/types.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 import { transcriptPath } from "../server/runner/transcript.ts";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { rejection, thrower } from "./fixtures/settle.ts";
 
@@ -645,6 +645,9 @@ for (const started of [false, true]) test(`${started ? "progress" : "start"} adv
   const run = f.store.listPendingExecutions()[0]!;
   const since = new Date(Date.now() - 30 * 60_000).toISOString();
   f.store.saveExecutionJournal({ ...run, inputReceivedAt: since, startedAt: started ? since : null, lastProgressAt: started ? since : null });
+  // 0.2.7(D2-5): 세션 기록에 줄이 더해진 때도 진전이다. 30분 동안 조용한 CLI 라면 기록도 그때 멈춰 있다.
+  const quiet = f.store.requireMember(member.id), log = transcriptPath(quiet.cwd, quiet.sessionId ?? "", f.claudeHome);
+  if (quiet.sessionId && existsSync(log)) utimesSync(log, new Date(since), new Date(since));
   await f.orch.refreshConnection();
   const code = started ? "progress_stalled" : "start_stalled";
   expect(f.store.requireMember(member.id).statusObservation?.error?.code).toBe(code);

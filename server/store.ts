@@ -84,6 +84,12 @@ function supplementFor(text: string, runs: ExecutionJournal[]): boolean {
 function continuesReplyRun(d: { id: string; kind: string; text: string }, own: string[], runs: ExecutionJournal[]): boolean {
   return own.includes(d.id) || (d.kind === "system" && (resumeText(d.text) || supplementFor(d.text, runs)));
 }
+/**
+ * 0.2.7(D3-1): 실행의 결과 보고로 세는 글. 그 팀장이 쓴 완료·답변·막힘·질문, 그리고 progress 가 참이면 SQL 자리표(?)로 넘긴 때부터의 진행·알림.
+ * 서버가 그 팀장 이름으로 남긴 글(who='시스템', 서버 글 코드 text_ref 가 있는 글)은 빼 둔다. 진행·알림을 세는 때는 Store.progressReportFrom.
+ */
+const MEMBER_REPORT_SQL = (alias: string, progress: boolean) => `${alias}who <> '시스템' AND ${alias}text_ref IS NULL AND (${alias}kind IN ('완료', '답변', '막힘', '질문')${
+  progress ? ` OR (${alias}kind IN ('진행', '알림') AND ${alias}at >= ?)` : ""})`;
 import { mustRender, textLang, textRef, type ServerTextRef, type TextLang } from "../shared/server-text.ts";
 import { activityTextFields, decisionTextFields, lastErrorCodeField, messageTextFields, readDecisionTexts, relocalizeDecisionTexts, renderDecisionText, renderOptions, storedDecisionTexts, storedText, type DecisionTextRefs } from "./text-refs.ts";
 
@@ -1163,13 +1169,15 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   /**
-   * 그 실행의 결과 보고(완료·답변·막힘·질문 글, 또는 열린 결재)가 있는가. 그 실행(과 그것이 잇는 앞 실행)이 만들어진 뒤의 글을 본다.
+   * 그 실행의 결과 보고(그 팀장이 쓴 완료·답변·막힘·질문, 정해진 경우의 진행·알림, 또는 열린 결재)가 있는가. 그 실행(과 그것이 잇는 앞 실행)이
+   * 만들어진 뒤의 글을 본다. 서버가 그 팀장 이름으로 남긴 글(대표 전달 지연 같은 시스템 막힘, who='시스템' 또는 서버 글 코드가 있는 글)은
+   * 그 팀장이 쓴 것이 아니라 세지 않는다(0.2.7). 진행·알림을 세는 경우는 progressReportFrom.
    * ownTurnsOnly(핫픽스 C, 미룬 결과 보고 확인): 그 뒤에 들어간 다른 실행이 돈 구간([만든 때, 끝난 때])에 쓴 글은 그 실행의 보고라 세지 않는다.
    * 뒤 작업을 기다리는 동안 넣은 다른 업무의 보고가 이 실행의 보고 누락을 가리지 않게 한다.
    */
   hasExecutionReport(run: ExecutionJournal, opts: { ownTurnsOnly?: boolean } = {}): boolean {
     if (this.row("SELECT 1 FROM decisions WHERE project_id = ? AND member_id = ? AND status = 'open' LIMIT 1", run.projectId, run.memberId)) return true;
-    let since = run.createdAt;
+    let since = run.createdAt, own = run.createdAt;
     const pending = [run], seen = new Set<string>();
     while (pending.length) {
       const current = pending.pop()!;
@@ -1181,6 +1189,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         run.projectId, run.memberId, JSON.stringify(current.deliveryIds))?.at;
       if (original && original < since) since = original;
       if (current.createdAt < since) since = current.createdAt;
+      if (current === run) own = since;
       for (const id of current.deliveryIds) {
         const delivery = this.getDelivery(id);
         if (delivery?.kind !== "system" || delivery.projectId !== run.projectId || delivery.memberId !== run.memberId) continue;
@@ -1189,13 +1198,34 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         if (source && source.projectId === run.projectId && source.memberId === run.memberId && source.createdAt <= current.createdAt) pending.push(source);
       }
     }
+    let progress = this.progressReportFrom(run, own);
+    // 미룬 확인은 뒤 작업을 남기고 닫힌 뒤(Claude 가 그 작업의 끝을 받아 스스로 연 턴)의 진행·알림만 센다. 닫기 전의 '뒤로 돌려 두었습니다'는 결과가 아니다.
+    if (progress && opts.ownTurnsOnly) progress = run.endedAt && run.endedAt > progress ? run.endedAt : progress;
+    const progressArgs = progress ? [progress] : [];
     if (opts.ownTurnsOnly) return !!this.row(`SELECT 1 FROM messages m WHERE m.project_id = ? AND m.member_id = ? AND m.mine = 0
-      AND m.at >= ? AND m.kind IN ('완료', '답변', '막힘', '질문')
+      AND m.at >= ? AND ${MEMBER_REPORT_SQL("m.", !!progress)}
       AND NOT EXISTS (SELECT 1 FROM execution_journal e WHERE e.project_id = m.project_id AND e.member_id = m.member_id AND e.created_at > ?
         AND e.run_id NOT IN (SELECT value FROM json_each(?)) AND e.created_at <= m.at AND (e.ended_at IS NULL OR m.at <= e.ended_at)) LIMIT 1`,
-      run.projectId, run.memberId, since, run.createdAt, JSON.stringify([...seen]));
+      run.projectId, run.memberId, since, ...progressArgs, run.createdAt, JSON.stringify([...seen]));
     return !!this.row(`SELECT 1 FROM messages WHERE project_id = ? AND member_id = ? AND mine = 0
-      AND at >= ? AND kind IN ('완료', '답변', '막힘', '질문') LIMIT 1`, run.projectId, run.memberId, since);
+      AND at >= ? AND ${MEMBER_REPORT_SQL("", !!progress)} LIMIT 1`, run.projectId, run.memberId, since, ...progressArgs);
+  }
+
+  /**
+   * 0.2.7(D3-1·D5-3, 검토 뒤 좁힘): 그 팀장의 진행·알림 글을 이 실행의 결과 보고로 세기 시작하는 때. null 이면 세지 않는다. own 은 이 실행
+   * (과 같은 전달을 다시 넣은 실행)이 처음 만들어진 때.
+   * - 보고 보완 턴: 그 턴에 쓴 진행·알림. 보완 요청 글이 '완료·막힘 또는 질문/위임 대기 상태를 명시'하라고 하므로 상태 글('빌드 중',
+   *   '대표님 답 대기')이 곧 그 답이다(0.2.6 뒤 거짓 '결과 보고 누락' 8건이 모두 이것). 원 턴의 진행 글(일 초반의 확인 글)은 세지 않는다.
+   * - 총괄(root·conductor)이 대표 글·결재 답으로 시작한 턴: 상태 질문에 진행으로 한 답, 일을 맡긴 턴의 확인 글(parts/ack-turn.md).
+   * - 직원의 원 턴(총괄 지시·대표 직접 지시·결재 답)은 세지 않는다. 직원 지침은 일을 받자마자 진행 글로 확인하게 하고(worker.md), core 는 턴
+   *   마지막 글을 올리지 않으므로, 그 글 하나로 보완을 끄면 결과가 끝내 대표·총괄에게 가지 않는다. 서버는 진행 글 뒤에 CLI 가 다른 일을 했는지
+   *   볼 근거가 없다(MCP 밖의 도구 호출은 보이지 않는다). 진행으로 끝낸 직원 턴은 보완을 한 번 받고, 그 보완 턴의 진행 글은 보고로 센다.
+   */
+  private progressReportFrom(run: ExecutionJournal, own: string): string | null {
+    const deliveries = run.deliveryIds.map(id => this.getDelivery(id)).filter((d): d is Delivery => !!d && d.memberId === run.memberId);
+    if (deliveries.some(d => d.kind === "system" && d.text.startsWith(formatSystem("보고 보완: 실행 ")))) return own;
+    if (this.getMember(run.memberId)?.kind === "worker") return null;
+    return deliveries.some(d => d.wake && (d.kind === "user_message" || d.kind === "answer")) ? own : null;
   }
 
   listMissingReportNotices(projectId: string): MissingReportNotice[] {

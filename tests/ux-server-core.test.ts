@@ -314,7 +314,6 @@ test("a supplement notification without a final report creates one owner-visible
   f.runner.end(f.store, member.id);
   await until(() => f.runner.sent.length === 2);
   await until(() => f.store.listActivity(member.id).filter(a => a.kind === "turn_start").length === 2);
-  await f.orch.recordPost(member, { kind: "알림", title: "확인 중이며 아직 결과가 없습니다" });
   f.runner.end(f.store, member.id, 2);
   await until(() => f.store.listMessages(f.project.id).some(m => m.title === "결과 보고 누락"));
   f.runner.end(f.store, member.id, 2); await Bun.sleep(10);

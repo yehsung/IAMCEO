@@ -5,7 +5,7 @@ import { readCodexContextFile } from "./codex-context.ts";
 import { readCodexTurnEnd, type CodexTurnCursor } from "./codex-turn.ts";
 import { textRef } from "../../shared/server-text.ts";
 import { createHash } from "node:crypto";
-import { constants, closeSync, existsSync, fstatSync, openSync, readdirSync, readSync } from "node:fs";
+import { constants, closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ApprovalPrompt, Backend } from "../../shared/types.ts";
@@ -768,6 +768,27 @@ export class CoreRunner implements FullRunner {
   claudeBackground(memberId: string): boolean {
     const track = this.tracks.get(memberId);
     return !!track && this.claudeLingers(track) && !this.turnBusy(track);
+  }
+  /**
+   * 0.2.7(D2-5): 이 팀장의 지금 세션 기록이 마지막으로 쓰인 때(파일 mtime, ISO). CLI 가 일하며 기록에 줄을 더하면 오른다.
+   * 업무의 '마지막 진전'(실행 기록 lastProgressAt)을 앞당기는 데만 쓴다(턴 끝·입력 판정에는 쓰지 않는다). 상태 사건·건강 확인마다 불리므로
+   * 이미 아는 경로만 본다: Claude 는 작업 폴더의 기록 경로, Codex 는 이미 찾아 둔 rollout. 폴더를 훑지 않는다. 모르면 null.
+   */
+  logWrittenAt(memberId: string): string | null {
+    const track = this.tracks.get(memberId);
+    if (!track?.sessionId) return null;
+    let path: string | null = null;
+    if (providerFor(track.member) === "claude") path = transcriptPath(track.member.cwd, track.sessionId, this.providerHome(track.member));
+    else if (track.logFile?.sessionId === track.sessionId) path = track.logFile.path;
+    else {
+      const matches = track.binding?.files.filter(file => file.matched && !file.invalid && file.meta?.sessionId === track.sessionId) ?? [];
+      if (matches.length === 1) path = matches[0]!.path;
+    }
+    if (!path) return null;
+    try {
+      const stat = statSync(path);
+      return stat.isFile() ? new Date(stat.mtimeMs).toISOString() : null;
+    } catch { return null; }
   }
   private turnBusy(track: Track): boolean {
     return track.pending || track.uncertain || track.restorePending || track.completing || track.status === "working" || !!track.compact && !["failed", "succeeded"].includes(track.compact.phase);

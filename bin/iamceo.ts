@@ -680,7 +680,7 @@ async function join_(args: string[]): Promise<void> {
   if (!values.name && !values.handle) throw new CliError(say("--name 또는 --handle 이 필요합니다", "--name or --handle is required"));
   const config = loadConfig();
   const cwd = process.cwd();
-  const joined = await api<{ member: Member; token: string; project: Project }>(config, "/agent/join", {
+  const joined = await api<{ member: Member; token: string; project: Project; ownerRules?: { id: string; text: string; quote: string }[] }>(config, "/agent/join", {
     method: "POST",
     body: { project: values.project, cwd, name: values.name, role: values.role, handle: values.handle, sessionId: values.session },
   });
@@ -693,7 +693,7 @@ async function join_(args: string[]): Promise<void> {
   const runDir = join(config.home, "run");
   mkdirSync(runDir, { recursive: true, mode: 0o700 });
   const rulesFile = join(runDir, `${joined.member.id}.rules.md`);
-  writeFileSync(rulesFile, renderRole(joined.member.kind, { PROJECT: joined.project.name, NAME: joined.member.name, ROLE: joined.member.role, CONDUCTOR: conductor?.name ?? "총괄", REPORT_LANGUAGE: reportLanguage, MANUAL: joined.member.origin === "manual" }, config.rolesDir));
+  writeFileSync(rulesFile, renderRole(joined.member.kind, { PROJECT: joined.project.name, NAME: joined.member.name, ROLE: joined.member.role, CONDUCTOR: conductor?.name ?? "총괄", REPORT_LANGUAGE: reportLanguage, MANUAL: joined.member.origin === "manual", OWNER_RULES: joined.ownerRules ?? [] }, config.rolesDir));
 
   // --env 는 값을 여러 개 받는 옵션이라 서버 이름이 뒤에 오면 그것까지 값으로 먹는다(claude mcp add 가 거부한다, 실측).
   const add = ["claude", "mcp", "add", "iamceo", "--transport", "stdio", "--scope", "local", "--env", `IAMCEO_URL=${localUrl(config)}`, "--env", `IAMCEO_TOKEN=${joined.token}`, "--", ...selfCommand("mcp")];

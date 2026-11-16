@@ -60,6 +60,7 @@ import { memberConfig } from "../shared/types.ts";
 import type { Config } from "./config.ts";
 import { briefly, type AgentToolDef, type AgentToolResult, type AskWaitResult, type OrchestratorApi } from "./orchestrator-api.ts";
 import { josa, renderRole } from "./roles.ts";
+import { noteRulesAfterCompact, projectRules, takeRuleNotice } from "./project-rules.ts";
 import { CoreError, coreRpc, type CoreHello, type CoreTerminal } from "./runner/core-client.ts";
 import { CoreSupervisor } from "./core-supervisor.ts";
 import type { DeliveryDispatch, ReportReferences, LifecycleJournal } from "./service-contracts.ts";
@@ -4166,11 +4167,18 @@ export class Orchestrator implements OrchestratorApi {
 
     // 병렬 설정을 바꾸는 사이 답이 왔거나 기다림이 끝났을 수 있다. 미룰 것을 다시 본다.
     const sendable = this.sendablePending(memberId), later = this.askHeld(memberId, rt, sendable);
-    const fresh = this.dropChangedSources(sendable.filter(d => !later.has(d.id)));
+    let fresh = this.dropChangedSources(sendable.filter(d => !later.has(d.id)));
     if (!fresh.some(d => d.wake) || this.retryDue(member) > Date.now()) {
       rt.turn = null;
       this.releaseSlots();
       return this.judged(memberId, fresh.some(d => d.wake) ? "retry_wait" : later.size ? "ask_hold" : "no_wake");
+    }
+    // 0.2.7 묶음 5 검토: 깨어 있는 동안 바뀐 대표 상시 규칙(압축 뒤 다시 알릴 목록 포함)은 대기열에 미리 두지 않고, 실제로 봉투를 보낼 이때 한 건으로 만들어 싣는다.
+    // 재시작으로 끊긴 일의 이어가기 글은 혼자 나가므로(sendablePending) 그 봉투에는 싣지 않는다.
+    const resumeId = this.store.getRestartWake(memberId)?.resumeId;
+    if (!resumeId || !fresh.some(d => d.id === resumeId)) {
+      const notice = takeRuleNotice(this.store, member);
+      if (notice) fresh = [...fresh, notice];
     }
     const ordered = this.apiRecovery.preservesOrder(memberId) ? fresh : orderForBundle(fresh);
     turn.text = ordered.map((d) => d.text).join("\n\n");
@@ -4749,7 +4757,9 @@ export class Orchestrator implements OrchestratorApi {
   private afterCompacted(member: Member): void {
     if (this.backendOf(member) !== "core") this.store.patchMember(member.id, { contextPct: null });
     this.store.appendActivity(member.id, "compact", textRef("activity.compact_done"));
-    if (member.origin !== "adopted") return;
+    // 0.2.7 묶음 5: 띄운 뒤 바뀐 대표 상시 규칙은 알림 글로만 받았다. 요약에서 흐려지지 않게 지금 목록을 다음 봉투에 다시 싣도록 적는다
+    // (대기열에 미리 두지 않는다 — project-rules.ts 머리말). 넘겨받은 세션은 아래 규칙 전체에 들어 있다.
+    if (member.origin !== "adopted") { noteRulesAfterCompact(this.store, member); return; }
     // 넘겨받은 세션은 규칙이 시스템 프롬프트에 없어 요약에서 흐려진다(스킬 §4).
     const project = this.store.requireProject(member.projectId);
     const text = formatSystem(`압축 뒤 규칙을 다시 보냅니다. 단, 이 세션에는 iamceo 도구(post·ask·status·file·todo)가 연결되어 있지 않으니 찾지 말고, 보고와 질문은 턴 마지막 글로 하세요. 서버가 그 글을 총괄에게 전합니다.\n\n${this.rulesFor(member, project)}`);
@@ -4846,6 +4856,8 @@ export class Orchestrator implements OrchestratorApi {
         return this.onTurnEnd(member, e);
       case "activity":
         this.store.appendActivity(member.id, e.kind, e.text, e.eventKey);
+        // 0.2.7 묶음 5 검토: Claude 가 쉬는 동안 스스로 압축했다(서버가 시킨 압축이 아니라 afterCompacted 를 지나지 않는다). 대표 상시 규칙을 다음 봉투에 다시 싣는다.
+        if (typeof e.text === "object" && e.text.code === "activity.claude_idle_compacted") noteRulesAfterCompact(this.store, member);
         return;
       case "context_usage":
         this.onContextUsage(member, e);
@@ -5324,7 +5336,8 @@ export class Orchestrator implements OrchestratorApi {
     const settings = this.store.getSettings();
     const staffEffort = member.cli === "codex" ? null : settings.ranks.staff.effort;
     // B1: 보고 언어가 en 이면 지침 끝에 영어 보고 줄이 붙는다. 세션을 띄울 때마다(깨우기·재시작·압축 뒤 규칙) 지금 설정을 읽는다.
-    return renderRole(member.kind, { PROJECT: project.name, NAME: member.name, ROLE: member.role, CONDUCTOR: conductor?.name ?? "총괄", SUBAGENT_EFFORT: staffEffort ? `- 서브에이전트·워크플로를 부를 때 effort=${staffEffort} 을 넘긴다.` : "", REPORT_LANGUAGE: settings.reportLanguage }, this.config.rolesDir);
+    // 0.2.7 묶음 5(D5-5): 이 프로젝트의 대표 상시 규칙을 지침 끝에 싣는다. 띄울 때마다 지금 것을 읽는다.
+    return renderRole(member.kind, { PROJECT: project.name, NAME: member.name, ROLE: member.role, CONDUCTOR: conductor?.name ?? "총괄", SUBAGENT_EFFORT: staffEffort ? `- 서브에이전트·워크플로를 부를 때 effort=${staffEffort} 을 넘긴다.` : "", REPORT_LANGUAGE: settings.reportLanguage, OWNER_RULES: projectRules(this.store).list(project.id) }, this.config.rolesDir);
   }
 
   /** 시스템 프롬프트·MCP 설정 파일을 쓴다. MCP 설정에 멤버 토큰이 들어가 본인만 읽게 한다. */

@@ -62,6 +62,27 @@ const REWORDED: { kinds: MemberKind[]; from: string; to: string; why: string }[]
 ];
 
 /**
+ * 0.2.7 묶음 5: 일부러 뜻을 고친 문장. REWORDED 는 '뜻이 같다'는 주장이고, 이것은 사용 기록 점검(11-16) 항목을 고치려고 규칙을 바꾼 것이다.
+ * 각 줄에 점검 번호와 까닭을 붙인다. 대조 시험은 REWORDED 와 똑같이 옛 문장이 기준본에 있고 새 문장이 지금 지침에 있는지 본다.
+ */
+const CHANGED: { kinds: MemberKind[]; from: string; to: string; item: string; why: string }[] = [
+  { kinds: ["worker"], item: "D3-3",
+    from: "\"승인 뒤\", \"다시 여쭙겠다\"라는 예고만 남기지 않는다.",
+    to: "나중에 묻겠다는 예고(조건을 단 것 포함)만 남기지 않는다.",
+    why: "따옴표로 든 낱말을 보고에 그대로 되풀이하고, '~하면 여쭙겠습니다' 같은 조건문은 예고가 아니라고 여겨 결재 누락 감지에 걸렸다. 금지하는 것(예고만 남기기)은 같고 조건문도 예고라고 밝힌다" },
+  { kinds: ["worker"], item: "D3-3",
+    from: "`post` 응답에 결재 누락 시스템 지시가 오면 지금 카드를 올리거나 승인이 불필요한 이유로 보고를 정정한다.",
+    to: "`post` 응답에 결재 누락 시스템 지시가 오면 지금 물을 것은 카드로 올리고, 물을 것이 없으면 그 지시를 따라 보고를 바로잡는다.",
+    why: "'승인이 불필요한 이유'를 쓰게 해 '승인이 필요한 일은 없습니다' 같은 부정문·뺀 문장의 인용이 다시 감지에 걸려 정정이 되풀이됐다. 바로잡는 방식은 서버 지시(묶음 2)를 따른다" },
+  { kinds: ["conductor"], item: "D5-1",
+    from: "`urgent`는 대표가 \"지금 바로\"라고 했을 때만.",
+    to: "`urgent`는 대표가 하던 일을 끊고 지금 바로 넣으라고 했을 때만 쓴다(빨리 해 달라는 재촉에는 쓰지 않는다).",
+    why: "묶음 1 뒤 urgent 는 하던 턴을 실제로 끊는다. '지금 바로'라는 낱말만 기준으로 두면 '지금 바로 해' 같은 재촉에도 켜 작업이 중간에 잘린다. 조각 urgent 와 묶음 1 의 도구 설명('하던 일을 끊고 넣으라고 했을 때만')에 맞춘다" },
+];
+/** 기준본 문장을 지금 지침의 문장으로 바꾸는 표(뜻이 같은 것 + 일부러 고친 것). */
+const REWRITES: { kinds: MemberKind[]; from: string; to: string }[] = [...REWORDED, ...CHANGED];
+
+/**
  * 문장은 그대로인데 줄이 나뉘거나 다른 줄과 합쳐진 곳. 여기 없는 기준본의 줄은 새 지침에 한 줄 그대로 있어야 한다.
  * 나눈 줄의 문장은 같은 절 안에서 같은 순서로 이어져야 한다. reordered 는 공통 조각으로 합치며 같은 절 안에서 자리만 옮긴 문장이다
  * (서로 독립한 규칙이라 순서가 뜻을 바꾸지 않는다). 그 문장도 같은 절 안에는 있어야 한다.
@@ -75,6 +96,8 @@ const RESTRUCTURED: { kind: MemberKind; startsWith: string; why: string; reorder
   { kind: "root", startsWith: "한 번에 끝나는 조사", why: "자료 규칙을 공통 조각(deliverables)으로 옮겼다",
     reordered: ["외부 사이트에 따로 게시하지 않는다."] },
   { kind: "root", startsWith: "대표가 읽거나 복사하거나", why: "자료 규칙을 공통 조각(deliverables)으로 합쳤다" },
+  { kind: "worker", startsWith: "대표 승인·확인·결정이 필요한 다음 단계가 있으면 보고 전에", why: "0.2.7 묶음 5(D3-3): 문장 둘을 CHANGED 대로 고쳤다(나머지 문장과 순서는 그대로)" },
+  { kind: "conductor", startsWith: "일하는 중인 직원에게 끼어들지 않는다.", why: "0.2.7 묶음 5 검토(D5-1): 둘째 문장을 CHANGED 대로 고쳤다(첫 문장과 번호는 그대로)" },
 ];
 
 /**
@@ -133,7 +156,13 @@ function firstOutOfOrder(a: string[], b: string[]): string | null {
  * 이 정리 뒤에 새로 더한 규칙 조각(예: 도구 승인 설명). 이 조각의 문장은 '기준본에 없던 문장' 검사에서 뺀다.
  * 새 규칙은 역할 템플릿에 직접 쓰지 말고 조각으로 만들어 여기에 이름을 더한다.
  */
-const LATER_PARTS: string[] = [];
+const LATER_PARTS: string[] = [
+  // 0.2.7 묶음 5: 사용 기록 점검(11-16) D5-1·D5-5·D5-6·D5-8·D5-9·D3-3·D3-8 과 묶음 4 의 새 도구 짝
+  "urgent", "handoff-lead", "handoff", "report-wording", "approval-wording", "ask-card", "todo-edit", "file-versions",
+  "mac-shared", "owner-rules", "owner-rules-worker", "owner-away", "owner-away-hq", "model-choice",
+  // 묶음 5 검토: 급한 지시로 멈춘 턴을 받은 팀장이 할 일(묶음 1 의 시스템 글)
+  "urgent-worker",
+];
 
 function multiset(items: string[]): Map<string, number> {
   const out = new Map<string, number>();
@@ -157,7 +186,7 @@ describe("규칙 대조: 지금 지침의 규칙이 새 지침에 모두 있다"
   for (const kind of KINDS) {
     test(`${kind}: 기준본의 문장이 하나도 빠지거나 바뀌지 않았고, 없던 문장도 생기지 않았다`, () => {
       const expected = multiset(sentences(baseline(kind)));
-      for (const change of REWORDED.filter(c => c.kinds.includes(kind))) {
+      for (const change of REWRITES.filter(c => c.kinds.includes(kind))) {
         expect({ kind, missing: change.from, found: take(expected, change.from) }).toEqual({ kind, missing: change.from, found: true });
         expected.set(change.to, (expected.get(change.to) ?? 0) + 1);
       }
@@ -170,7 +199,7 @@ describe("규칙 대조: 지금 지침의 규칙이 새 지침에 모두 있다"
 
     test(`${kind}: 서버가 띄우는 세션(MANUAL=false)도 기준본과 대조한다. 빠져도 되는 문장은 직접 붙인 세션의 wait 안내(MANUAL_ONLY)뿐이다`, () => {
       const expected = multiset(sentences(baseline(kind)));
-      for (const change of REWORDED.filter(c => c.kinds.includes(kind))) {
+      for (const change of REWRITES.filter(c => c.kinds.includes(kind))) {
         expect(take(expected, change.from)).toBe(true);
         expected.set(change.to, (expected.get(change.to) ?? 0) + 1);
       }
@@ -211,7 +240,7 @@ describe("규칙 대조: 지금 지침의 규칙이 새 지침에 모두 있다"
       // 4) 나눈 줄(RESTRUCTURED)의 문장은 같은 절 안에서 같은 순서로 이어진다(고친 문장은 고친 뒤의 글로 본다).
       for (const r of restructured) {
         const line = before.find(item => item.text.startsWith(r.startsWith))!;
-        const reworded = (text: string) => REWORDED.find(c => c.kinds.includes(kind) && c.from === text)?.to ?? text;
+        const reworded = (text: string) => REWRITES.find(c => c.kinds.includes(kind) && c.from === text)?.to ?? text;
         const want = sentences(line.text).map(reworded);
         const have = after.filter(item => item.section === line.section).flatMap(item => sentences(item.text));
         for (const moved of r.reordered ?? []) expect({ kind, line: r.startsWith, moved, sameSection: want.includes(moved) && have.includes(moved) }).toMatchObject({ sameSection: true });
@@ -225,7 +254,7 @@ describe("규칙 대조: 지금 지침의 규칙이 새 지침에 모두 있다"
   });
 
   test("고친 문장·나눈 줄 목록에 쓰이지 않는 항목이 없다", () => {
-    for (const change of REWORDED) for (const kind of change.kinds) {
+    for (const change of REWRITES) for (const kind of change.kinds) {
       expect({ kind, from: change.from, inBaseline: sentences(baseline(kind)).includes(change.from) }).toMatchObject({ inBaseline: true });
       expect({ kind, to: change.to, inNew: sentences(assembled(kind)).includes(change.to) }).toMatchObject({ inNew: true });
     }

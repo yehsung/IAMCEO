@@ -8,6 +8,7 @@ import { openDb } from "../server/db.ts";
 import { startServer, type RunningServer } from "../server/http.ts";
 import type { OrchestratorApi } from "../server/orchestrator-api.ts";
 import { Store } from "../server/store.ts";
+import { projectRules } from "../server/project-rules.ts";
 import type { Attachment } from "../shared/types.ts";
 
 const CODE = "delete-export-fixture-code";
@@ -73,6 +74,11 @@ beforeAll(async () => {
   db.query("INSERT INTO execution_journal (run_id,member_id,project_id,generation,terminal_identity_json,phase,created_at,updated_at) VALUES ('ej_a',?,?,0,'{}','ended',?,?)").run(workerId, archivedId, at, at);
   db.query("INSERT INTO member_session_history (id,member_id,cli,generation,archived_at,reason) VALUES ('msh_a',?,'claude',0,?,'fixture')").run(workerId, at);
   db.query("INSERT INTO decision_close_audit (decision_id,answered_decision_id,actor_id,answer_quote,created_at) VALUES (?,?,'lead','원문',?)").run(decision.id, decision.id, at);
+  // 0.2.7 묶음 5: 대표 상시 규칙(뺀 것도 행이 남는다)과 깨어 있는 팀장에게 알릴 것. 내보내기에 실리고, 지우면 함께 지워진다.
+  const rule = projectRules(store).add({ projectId: archivedId, text: "중간 파일은 작업 폴더 안에 둔다", quote: "앞으로 중간 파일은 작업 폴더 안에", source: { id: "m_x", text: "앞으로 중간 파일은 작업 폴더 안에", at }, addedBy: "지울 총괄" });
+  const gone = projectRules(store).add({ projectId: archivedId, text: "소리를 내지 않는다", quote: "앞으로 소리 내지 마", source: { id: "m_y", text: "앞으로 소리 내지 마", at }, addedBy: "지울 총괄" });
+  projectRules(store).remove({ projectId: archivedId, id: gone.id, quote: "소리 규칙은 빼", removedBy: "지울 총괄" });
+  db.query("INSERT INTO project_rule_notices (member_id,project_id,kind,rule_id,created_at) VALUES (?,?,'add',?,?)").run(workerId, archivedId, rule.id, at);
   store.trustProjectFolder(archivedId, home);
   store.setRestartWake(workerId, { generation: 0, reason: "holder_lost", lostAt: at, state: "pending", attempts: 0, runIds: [], resumeId: null });
   mkdirSync(join(config.inboxDir, workerId), { recursive: true });
@@ -107,7 +113,7 @@ describe("프로젝트 내보내기", () => {
     expect(unzip(file, "-tq")).toContain("No errors");
     expect(unzip(file, "-Z1").trim().split("\n").sort()).toEqual([
       "README.txt", "attachments/att_only-only.txt", "attachments/att_shared-shared.txt", "decisions.json", "files.json", "manifest.json",
-      "members.json", "messages.json", "project.json", "todos.json", "work.json"].sort());
+      "members.json", "messages.json", "project.json", "rules.json", "todos.json", "work.json"].sort());
     const messages = JSON.parse(entry(file, "messages.json")) as { body: string }[];
     expect(messages).toHaveLength(31);
     expect(messages[0]!.body).toBe("첫 지시");
@@ -115,7 +121,11 @@ describe("프로젝트 내보내기", () => {
     expect(JSON.parse(entry(file, "decisions.json"))[0]).toMatchObject({ title: "고를 것" });
     expect(entry(file, "attachments/att_only-only.txt")).toBe("지울 프로젝트만 가리키는 첨부");
     expect(JSON.parse(entry(file, "manifest.json"))).toMatchObject({ format: 1, project: { id: archivedId, archived: true },
-      counts: { messages: 31, decisions: 1, todos: 1, files: 1, attachments: 2 }, missingAttachments: [] });
+      counts: { messages: 31, decisions: 1, todos: 1, files: 1, attachments: 2, rules: 2 }, missingAttachments: [] });
+    // 대표 상시 규칙은 뺀 것까지 남긴 순서대로(프로젝트를 지우면 표에서 함께 지워지므로 내보낸 파일이 유일한 기록이다).
+    expect(JSON.parse(entry(file, "rules.json"))).toMatchObject([
+      { text: "중간 파일은 작업 폴더 안에 둔다", quote: "앞으로 중간 파일은 작업 폴더 안에", added_by: "지울 총괄", removed_at: null },
+      { text: "소리를 내지 않는다", removed_by: "지울 총괄", remove_quote: "소리 규칙은 빼" }]);
     const raw = readFileSync(file).toString("latin1") + readFileSync(file).toString("utf8");
     for (const secret of [CODE, store.getMemberToken(leadId), store.getMemberToken(workerId)]) expect(raw).not.toContain(secret);
     // 임시 파일은 응답과 함께 사라진다.

@@ -8,6 +8,7 @@ import type { Config } from "../config.ts";
 import { VERSION } from "../config.ts";
 import { resolveInside } from "../files.ts";
 import { ApiError, type Store } from "../store.ts";
+import { projectRules } from "../project-rules.ts";
 
 const MAX_ZIP_BYTES = 0xffff_fff0;
 const MAX_ENTRIES = 0xfff0;
@@ -150,6 +151,7 @@ messages.json   대화 전체, 오래된 것부터 / every message, oldest first
 decisions.json  결재 / decisions
 todos.json      대표 할 일 / owner to-dos
 work.json       진행판 / work board
+rules.json      대표 상시 규칙(뺀 것 포함) / standing owner rules, removed ones included
 files.json      자료(본문·아티팩트 HTML 포함) / files with their text and artifact HTML
 attachments/    첨부 원본 / original attachments
 manifest.json   개수와 첨부 목록 / counts and the attachment list
@@ -198,6 +200,9 @@ export async function exportProjectZip(store: Store, config: Pick<Config, "home"
     await zip.add("decisions.json", jsonArray([data.decisions]), now);
     await zip.add("todos.json", jsonArray([data.todos]), now);
     await zip.add("work.json", jsonArray([data.work]), now);
+    // 0.2.7 묶음 5 검토: 대표 상시 규칙도 프로젝트 기록이다. 프로젝트를 지우면 표에서 함께 지워지므로(ON DELETE CASCADE) 내보낸 파일에 남긴다.
+    const rules = projectRules(store).exportRows(projectId);
+    await zip.add("rules.json", jsonArray([rules]), now);
     await zip.add("files.json", jsonArray([data.files]), now);
     const included: { id: string; name: string; mime: string; size: number; path: string }[] = [];
     const missing: string[] = [];
@@ -210,7 +215,7 @@ export async function exportProjectZip(store: Store, config: Pick<Config, "home"
     }
     const manifest = {
       format: 1, exportedAt: now.toISOString(), appVersion: VERSION, project: { id: data.project.id, name: data.project.name, archived: data.project.archived },
-      counts: { messages: messageCount, decisions: data.decisions.length, todos: data.todos.length, work: data.work.length, files: data.files.length, attachments: included.length },
+      counts: { messages: messageCount, decisions: data.decisions.length, todos: data.todos.length, work: data.work.length, files: data.files.length, attachments: included.length, rules: rules.length },
       attachments: included, missingAttachments: missing,
     };
     await zip.add("manifest.json", [JSON.stringify(manifest, null, 2) + "\n"], now);

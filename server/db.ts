@@ -921,6 +921,50 @@ export function ensureServerTextColumns(db: Database): void {
   })();
 }
 
+/**
+ * 0.2.7 묶음 5(D5-5): 대표 상시 규칙. 총괄(본사는 본사 AI)이 대표 원문을 실어 `rule` 도구로 프로젝트에 남긴다(server/project-rules.ts).
+ * 뺀 규칙도 행은 남긴다(removed_at). 프로젝트(알림은 팀장도)를 지우면 ON DELETE CASCADE 가 함께 지운다.
+ * 색인과 같은 까닭으로 MIGRATIONS 에 넣지 않는다: 판 번호를 올리면 이전 판 서버가 이 DB 를 열지 못한다. 이전 판은 이 표를 모른 채 지나간다.
+ */
+export const PROJECT_RULES_TABLES: readonly string[] = [
+  `CREATE TABLE IF NOT EXISTS project_rules (
+     id TEXT PRIMARY KEY,
+     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     text TEXT NOT NULL,
+     quote TEXT NOT NULL,
+     source_id TEXT,
+     source_at TEXT,
+     added_by TEXT NOT NULL,
+     created_at TEXT NOT NULL,
+     removed_at TEXT,
+     removed_by TEXT,
+     remove_quote TEXT
+   )`,
+  `CREATE INDEX IF NOT EXISTS project_rules_project ON project_rules(project_id, created_at)`,
+  // 묶음 5 검토: 깨어 있는 세션에 알릴 '바뀐 규칙'·'압축 뒤 다시 알릴 목록'. 대기열(deliveries)에 깨우지 않는 글로 미리 두면 쉬는 팀장마다
+  // 대기열 수가 1로 남아(앱 '대기열 1', AI CLI 전환 막힘, 잠재울 후보에서 빠짐) 여기 적어 두고, 그 팀장에게 실제로 봉투를 보낼 때 한 건으로 만들어 싣는다.
+  `CREATE TABLE IF NOT EXISTS project_rule_notices (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     kind TEXT NOT NULL,
+     rule_id TEXT,
+     created_at TEXT NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS project_rule_notices_member ON project_rule_notices(member_id, id)`,
+];
+
+/** 만들지 못해도 서버는 뜬다. 그때 상시 규칙은 지침에 실리지 않고, `rule` 도구는 저장소 오류로 답한다(server/project-rules.ts). */
+export function ensureProjectRules(db: Database): boolean {
+  try {
+    db.transaction(() => { for (const sql of PROJECT_RULES_TABLES) db.exec(sql); })();
+    return true;
+  } catch {
+    console.warn("[db] 대표 상시 규칙 표를 만들지 못했습니다(다음 시작 때 다시 합니다)");
+    return false;
+  }
+}
+
 const PRE_MIGRATION_KEEP = 3;
 const PRE_MIGRATION_KEEP_MS = 86_400_000;
 
@@ -1016,6 +1060,8 @@ export function openDb(path: string): Database {
     ensureUsageTables(db);
     // Y: 서버가 만든 글의 코드·값. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
     ensureServerTextColumns(db);
+    // 0.2.7 묶음 5: 대표 상시 규칙 표. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
+    ensureProjectRules(db);
     // 이주가 끝났으면 최근 사본 몇 개만 남긴다. 하루 안에 만든 것은 개수와 상관없이 둔다.
     if (backup) removePreMigrationBackups(path, all => all.slice(PRE_MIGRATION_KEEP).filter(entry => Date.now() - entry.at > PRE_MIGRATION_KEEP_MS));
     // Source parsing/index failures cannot roll back the schema or delay server startup.

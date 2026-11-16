@@ -496,6 +496,14 @@ export const ERROR_CODES = {
   archive_background_task: { ko: "팀장이 턴은 끝냈지만 Claude가 띄운 뒤 작업이 아직 돌고 있어 보관할 수 없습니다. 그 작업이 끝난 뒤 보관하세요", en: "A staff member's turn ended, but background work that Claude started is still running, so the project can't be archived. Archive it after that work ends" },
   cli_switch_background_task: { ko: "턴은 끝났지만 Claude가 띄운 뒤 작업이 아직 돌고 있어 CLI를 바꿀 수 없습니다. 그 작업이 끝난 뒤 바꾸세요", en: "The turn ended, but background work that Claude started is still running, so the CLI can't be switched. Switch it after that work ends" },
   // ---- 끝 ----
+  // ---- 0.2.7 묶음 5: 대표 상시 규칙(총괄·본사 AI 의 rule 도구). 도구 응답으로만 나간다 ----
+  rule_quote_required: { ko: "상시 규칙을 더하거나 빼려면 user_quote 에 대표가 그렇게 정한 말을 글자 그대로 실어야 합니다", en: "To add or remove a standing rule, user_quote must carry the owner's words exactly as written" },
+  rule_quote_not_found: { ko: "인용을 대표 글에서 찾지 못해 상시 규칙을 바꾸지 않았습니다", en: "The quote wasn't found in the owner's messages, so the standing rules were not changed" },
+  rule_quote_weak: { ko: "버튼 글이나 아주 짧은 글은 상시 규칙의 근거가 못 되어 바꾸지 않았습니다", en: "A button label or a very short message can't back a standing rule, so the standing rules were not changed" },
+  rule_not_found: { ko: "이 프로젝트의 상시 규칙을 찾을 수 없습니다", en: "Standing rule not found in this project" },
+  rule_duplicate: { ko: "같은 상시 규칙이 이미 있습니다", en: "The same standing rule already exists" },
+  rule_limit: { ko: "상시 규칙이 너무 많습니다. 낡은 규칙을 먼저 빼세요", en: "There are too many standing rules. Remove outdated ones first" },
+  // ---- 끝 ----
 } as const satisfies Record<string, ErrorCodeText>;
 
 export type ErrorCode = keyof typeof ERROR_CODES;

@@ -17,6 +17,7 @@ import { ApiError } from "./store.ts";
 import { oneLineProblem } from "./text.ts";
 import { canonicalPath as realOrSelf, isInside, isSecretPath, rejectHardLink, SECRET_DIRS } from "./secret-paths.ts";
 import { textRef } from "../shared/server-text.ts";
+import { changeProjectRule, listProjectRules, RULE_TEXT_MAX } from "./project-rules.ts";
 
 type ToolName = (typeof WORKER_TOOLS | typeof CONDUCTOR_TOOLS | typeof ROOT_TOOLS | typeof MANUAL_TOOLS)[number];
 type ToolHost = Orchestrator & Partial<AgentWorkflowService> & Pick<OrchestratorApi, "manualInbox" | "acknowledgeManualInbox">;
@@ -207,7 +208,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     "대표의 판단·승인이 필요할 때 결재함에 카드를 올린다. AskUserQuestion 대신 이것을 쓴다. 결과 글이 턴을 끝내라고 하면 바로 턴을 끝낸다. 답은 다음 입력으로 온다.",
     z.strictObject({
       title: oneLine(200).describe("무엇을 정하는지 한 줄"),
-      detail: text.describe("카드만 읽고 고를 수 있는 배경·사실·위험(마크다운)"),
+      detail: text.describe("카드만 읽고 고를 수 있는 배경·사실·위험과 왜 지금 정해야 하는지(마크다운). 내부 번호·개발 용어는 풀어 쓴다"),
       options: z
         .array(z.strictObject({ k: oneLine(64).describe("선택지 키"), label: oneLine(120).describe("버튼 글(한 줄). 그대로 대표 원문이 된다"), desc: oneLineOpt(300).optional().describe("고르면 어떻게 되는지(한 줄)") }))
         .optional()
@@ -238,7 +239,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     z.strictObject({
       report_id: text.optional().describe("조회할 보고 원본 메시지 id. 조회할 때는 이 필드만 준다"),
       kind: z.enum(["완료", "진행", "막힘", "알림"]).optional(),
-      title: oneLine(300).optional().describe("결과 핵심 한 줄"),
+      title: oneLine(300).optional().describe("대표가 읽을 결과 핵심 한 문장(무엇이 어떻게 됐는지). 시각·번호·이름만 이어 붙이지 않는다"),
       body: z.string().optional().describe("결과 핵심, 바뀐 파일·커밋, 대표가 확인하거나 정할 것(마크다운)"),
       file_ids: z.array(z.string()).optional().describe("이어 줄 자료 id"),
       decision_id: z.string().optional().describe("이어 줄 결재 id"),
@@ -397,9 +398,9 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     "직원을 새로 띄운다. 역할이 맞는 직원이 없을 때만. 잠든 직원의 역할이 맞으면 team_resume 을 쓴다. 사용 한도로 멈춘 직원의 일을 넘기려고 새로 띄우지 않는다. 한도가 풀리면 서버가 그 직원을 이어 가게 하니 기다리고, 대표가 모델을 바꾸라고 하면 team_model 로 그 직원의 모델을 바꾼다.",
     z.strictObject({
       name: oneLine(40).describe("화면 이름: 맡은 일(예: 결제 연동). 사람 이름은 쓰지 않는다. 한국어, 프로젝트 안에서 유일, 한 줄. 같은 역할이 더 필요하면 뒤에 2, 3"),
-      role: oneLine(300).describe("맡을 역할(한 줄)"),
+      role: oneLine(300).describe("맡을 역할(한 줄). 모델 이름은 적지 않는다(실제 모델은 roster 에 보인다)"),
       cli: z.enum(["claude", "codex"]).optional().describe("직원이 쓸 CLI, 기본 claude"),
-      model: z.string().nullable().optional().describe("서버 모델 목록의 값. null이면 직급 기본값"),
+      model: z.string().nullable().optional().describe("대표가 바로 이 직원(이 일)의 모델을 말했을 때만 넣는다(서버 모델 목록의 값). 앞 일에 준 모델 지시나 다른 직원의 모델을 이어 쓰지 않는다. 생략하거나 null이면 설정의 직급 기본값"),
       handle: z.string().optional().describe("영문 소문자 핸들"),
       cwd: z.string().optional().describe("작업 폴더. 기본은 프로젝트 폴더. 프로젝트 폴더 안이어야 한다. 밖이 꼭 필요하면 ask 로 묻고, 대표가 그 경로를 쓴 글을 user_quote 에 싣는다"),
       first_instruction: z.string().optional().describe("첫 지시. 끝났다고 볼 기준 포함"),
@@ -523,6 +524,27 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     (orch, member, a) => {
       orch.setProjectNow(member.projectId, a.text);
       return reply("고쳤습니다");
+    },
+  ),
+
+  // 0.2.7 묶음 5(D5-5): 대표 상시 규칙. 저장·지침 싣기·알림은 server/project-rules.ts.
+  rule: tool(
+    "대표가 이 프로젝트에서 앞으로 계속 지킬 일하는 방식으로 정한 상시 규칙을 남기거나(add) 빼거나(remove) 본다(list). 남긴 규칙은 이 프로젝트에서 새로 여는 모든 세션(총괄 포함)의 지침 끝 '대표 상시 규칙'에 실리고, 깨어 있는 다른 세션에는 서버가 다음 입력과 함께 알린다(깨우지 않는다). add·remove 는 그렇게 정한 대표 원문을 user_quote 에 글자 그대로 실어야 한다(서버가 대표 글과 대조한다. 버튼 글·아주 짧은 글은 안 된다). 한 번만 할 일이나 지금 일에 대한 지시는 규칙이 아니다. 규칙은 승인을 대신하지 않는다.",
+    z.strictObject({
+      action: z.enum(["add", "remove", "list"]).describe("add 남기기 · remove 빼기 · list 보기"),
+      text: oneLineOpt(RULE_TEXT_MAX).optional().describe("add: 규칙 한 줄(무엇을 늘 하거나 하지 않는지, 일상어)"),
+      id: text.optional().describe("remove: 뺄 규칙 id(r_...). list 로 본다"),
+      user_quote: z.string().optional().describe("add·remove: 대표가 그렇게 정한 원문을 글자 그대로. 서버가 대조한다"),
+    }).superRefine((a, ctx) => {
+      if (a.action === "add" && !a.text) ctx.addIssue({ code: "custom", message: "add 에는 text(규칙 한 줄)가 필요합니다" });
+      if (a.action === "remove" && !a.id) ctx.addIssue({ code: "custom", message: "remove 에는 id 가 필요합니다" });
+      if (a.action !== "add" && a.text !== undefined) ctx.addIssue({ code: "custom", message: "text 는 add 에만 씁니다" });
+      if (a.action !== "remove" && a.id !== undefined) ctx.addIssue({ code: "custom", message: "id 는 remove 에만 씁니다" });
+      if (a.action === "list" && a.user_quote !== undefined) ctx.addIssue({ code: "custom", message: "list 에는 user_quote 를 주지 않습니다" });
+    }),
+    (orch, member, a) => {
+      if (a.action === "list") return reply(listProjectRules(orch.store, member.projectId));
+      return reply(changeProjectRule(orch, member, a.action === "add" ? { action: "add", text: a.text!, userQuote: a.user_quote } : { action: "remove", id: a.id!, userQuote: a.user_quote }));
     },
   ),
 

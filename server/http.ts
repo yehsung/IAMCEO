@@ -46,6 +46,7 @@ import type { AccessPlatform, AuthRotateResult, DeviceAccessList, DeviceRevokeAl
 import { ERROR_CODES } from "../shared/error-codes.ts";
 import { USAGE_MAX_DAYS } from "../shared/types.ts";
 import { UsageCollector, usageReport, type UsageSource } from "./usage.ts";
+import { projectRules } from "./project-rules.ts";
 export { safeEqual };
 
 export interface ServerContext {
@@ -1337,7 +1338,7 @@ async function handleJoin(req: Request, { store }: ServerContext, authorizeUser:
       ...(revive ? { status: "idle" as const, lastError: null } : {}),
     });
     store.touchMember(member.id);
-    return Response.json({ member, token, project: store.requireProject(member.projectId) });
+    return Response.json({ member, token, project: store.requireProject(member.projectId), ...joinedRules(store, member.projectId) });
   }
 
   const cwd = body.cwd ? resolve(body.cwd) : null;
@@ -1357,7 +1358,7 @@ async function handleJoin(req: Request, { store }: ServerContext, authorizeUser:
       ...(body.sessionId ? { sessionId: body.sessionId } : {}),
       ...(cwd ? { cwd } : {}),
     });
-    return Response.json({ member, token: store.getMemberToken(member.id), project: store.requireProject(projectId) });
+    return Response.json({ member, token: store.getMemberToken(member.id), project: store.requireProject(projectId), ...joinedRules(store, projectId) });
   }
 
   const name = body.name?.trim() || body.handle;
@@ -1373,7 +1374,16 @@ async function handleJoin(req: Request, { store }: ServerContext, authorizeUser:
     cwd: cwd ?? undefined,
     sessionId: body.sessionId ?? null,
   });
-  return Response.json({ member, token: store.getMemberToken(member.id), project: store.requireProject(projectId) });
+  return Response.json({ member, token: store.getMemberToken(member.id), project: store.requireProject(projectId), ...joinedRules(store, projectId) });
+}
+
+/**
+ * 0.2.7 묶음 5 검토: 직접 붙이는 세션(iamceo join)도 이 프로젝트의 대표 상시 규칙을 지침 끝에 싣게 한다(bin/iamceo.ts 가 renderRole 의 OWNER_RULES 로 넘긴다).
+ * 규칙이 있을 때만 싣는 선택 필드다. 붙인 뒤 바뀐 규칙은 wait 로 받는 시스템 글로 온다(server/project-rules.ts).
+ */
+function joinedRules(store: Store, projectId: string): { ownerRules?: { id: string; text: string; quote: string }[] } {
+  const rules = projectRules(store).list(projectId).map(({ id, text, quote }) => ({ id, text, quote }));
+  return rules.length ? { ownerRules: rules } : {};
 }
 
 function deriveHandle(store: Store, projectId: string, name: string): string {

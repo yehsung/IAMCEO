@@ -111,6 +111,8 @@ The server logs are `~/.iamceo/logs/server.log` and `server.err.log`. Each line 
 
 You can add rules to the role instructions the lead, staff and HQ agent receive, or replace them entirely. In file names the lead is `conductor`, staff is `worker` and the HQ agent is `root`.
 
+**Standing rules in conversation.** For a way of working that applies to one project only, you don't need a file. Tell that project's lead (the HQ agent at HQ) something like "from now on, use only the browser tool I picked": the lead records it as a standing rule with your exact words and tells you it did. It goes at the end of the instructions of every session that opens in that project, and staff already at work get it with their next task. Ask the lead what rules there are to see the list, or ask it to drop one. To apply the same rule to every project, use the files below.
+
 **Add rules (recommended).** Write only the rules you want to add in `~/.iamceo/roles/<kind>.extra.md`. They go at the very end of the rules (without a heading of their own they go under "이 Mac에서 더한 규칙", rules added on this Mac), and you keep getting improvements to the defaults when IAMCEO updates. With the report language set to English, these rules still apply as written.
 
 ```sh

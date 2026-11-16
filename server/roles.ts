@@ -2,12 +2,29 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MemberKind, ReportLanguage } from "../shared/types.ts";
+import { normalizeSpace, quotedInline } from "./delivery-text.ts";
 import conductor from "./roles/conductor.md" with { type: "text" };
 import ackTurn from "./roles/parts/ack-turn.md" with { type: "text" };
 import artifactContract from "./roles/parts/artifact-contract.md" with { type: "text" };
 import deliverables from "./roles/parts/deliverables.md" with { type: "text" };
 import manualSession from "./roles/parts/manual-session.md" with { type: "text" };
 import toolRetry from "./roles/parts/tool-retry.md" with { type: "text" };
+// 0.2.7 묶음 5: 사용 기록 점검(11-16)에서 나온 역할 지침. 기준본(tests/fixtures/roles-baseline) 뒤에 더한 규칙이라 조각으로만 둔다.
+import approvalWording from "./roles/parts/approval-wording.md" with { type: "text" };
+import askCard from "./roles/parts/ask-card.md" with { type: "text" };
+import fileVersions from "./roles/parts/file-versions.md" with { type: "text" };
+import handoff from "./roles/parts/handoff.md" with { type: "text" };
+import handoffLead from "./roles/parts/handoff-lead.md" with { type: "text" };
+import macShared from "./roles/parts/mac-shared.md" with { type: "text" };
+import modelChoice from "./roles/parts/model-choice.md" with { type: "text" };
+import ownerAway from "./roles/parts/owner-away.md" with { type: "text" };
+import ownerAwayHq from "./roles/parts/owner-away-hq.md" with { type: "text" };
+import ownerRules from "./roles/parts/owner-rules.md" with { type: "text" };
+import ownerRulesWorker from "./roles/parts/owner-rules-worker.md" with { type: "text" };
+import reportWording from "./roles/parts/report-wording.md" with { type: "text" };
+import todoEdit from "./roles/parts/todo-edit.md" with { type: "text" };
+import urgent from "./roles/parts/urgent.md" with { type: "text" };
+import urgentWorker from "./roles/parts/urgent-worker.md" with { type: "text" };
 import root from "./roles/root.md" with { type: "text" };
 import worker from "./roles/worker.md" with { type: "text" };
 
@@ -25,6 +42,40 @@ export interface RoleVars {
    * `{{MANUAL_SESSION}}` 자리에 넣는다. 서버가 띄우는 세션에는 `wait` 도구가 없어 그 줄을 지운다.
    */
   MANUAL?: boolean;
+  /**
+   * 0.2.7 묶음 5(D5-5): 이 프로젝트의 대표 상시 규칙(server/project-rules.ts). 있으면 기본 규칙·보고 언어 줄 뒤, 사용자 덧붙임 앞에
+   * '대표 상시 규칙' 절로 붙는다(ownerRulesSection). 없거나 비면 지침은 글자 하나 바뀌지 않는다.
+   */
+  OWNER_RULES?: readonly OwnerRuleLine[];
+}
+
+/** 0.2.7 묶음 5: 지침에 싣는 대표 상시 규칙 한 줄의 재료. */
+export interface OwnerRuleLine {
+  id: string;
+  /** 총괄이 정리한 규칙 한 줄. */
+  text: string;
+  /** 서버가 대조한 대표 원문(그렇게 정한 말). */
+  quote: string;
+}
+
+/** 대표 상시 규칙 절의 제목. 보고 언어와 상관없이 같다(서버 머리말처럼 규약 표지로 쓴다). */
+export const OWNER_RULES_HEADING = "## 대표 상시 규칙";
+
+/** 규칙마다 한 줄. 규칙 본문과 대표 원문은 한 줄로 펴고, 원문은 따옴표를 닫지 못하게 막는다. */
+export function ownerRulesLines(rules: readonly OwnerRuleLine[]): string[] {
+  return rules.map((rule) => `- ${normalizeSpace(rule.text)} (대표 원문 "${quotedInline(rule.quote)}" · #${rule.id})`);
+}
+
+/**
+ * 지침 끝의 대표 상시 규칙 절. 규칙이 없으면 빈 글. 규칙 본문은 총괄이 정리한 글이라, 대표 원문을 함께 싣고 승인 규칙을 넓히지 못하게 한 줄 둔다.
+ * 보고 언어가 en 이면 설명 줄만 영어다(규칙 본문·원문은 쓰인 그대로).
+ */
+export function ownerRulesSection(rules: readonly OwnerRuleLine[], language?: ReportLanguage): string {
+  if (!rules.length) return "";
+  const lead = language === "en"
+    ? "Standing rules the owner set in conversation for this project; the lead recorded each with the owner's verbatim words. Follow them at all times. They never widen the approval rules above: anything that needs approval is still asked each time. If a rule and the owner's words differ in meaning, follow the owner's words."
+    : "대표가 대화로 정해 총괄이 남긴, 이 프로젝트에서 늘 지킬 규칙이다. 늘 따른다. 위의 승인 규칙을 넓히지 않는다(승인이 필요한 일은 규칙이 있어도 그때마다 묻는다). 규칙과 대표 원문의 뜻이 다르면 원문을 따른다.";
+  return [OWNER_RULES_HEADING, lead, ...ownerRulesLines(rules)].join("\n");
 }
 
 /**
@@ -47,6 +98,22 @@ export const ROLE_PARTS: Readonly<Record<string, string>> = {
   "artifact-contract": artifactContract,
   deliverables,
   "tool-retry": toolRetry,
+  // 0.2.7 묶음 5
+  "approval-wording": approvalWording,
+  "ask-card": askCard,
+  "file-versions": fileVersions,
+  handoff,
+  "handoff-lead": handoffLead,
+  "mac-shared": macShared,
+  "model-choice": modelChoice,
+  "owner-away": ownerAway,
+  "owner-away-hq": ownerAwayHq,
+  "owner-rules": ownerRules,
+  "owner-rules-worker": ownerRulesWorker,
+  "report-wording": reportWording,
+  "todo-edit": todoEdit,
+  urgent,
+  "urgent-worker": urgentWorker,
 };
 
 const INCLUDE_LINE = /^\{\{>\s*([a-z0-9-]+)\s*\}\}[ \t]*$/gm;
@@ -238,6 +305,7 @@ function readExtra(path: string): string {
  *   '## 이 Mac에서 더한 규칙' 절 아래에 둔다. 읽지 못하면 덧붙임 없이 만든다(로그에 남기고 점검표에 알린다).
  * - 보고 언어 줄은 기본 규칙(또는 통째 교체 파일) 끝, 덧붙임 앞에 온다. 그 줄의 '위의 한국어 요구 규칙은 대체된다'가
  *   대표가 일부러 더한 규칙까지 덮지 않게, 덧붙임이 마지막 말이 된다. 값 안의 {{...}} 는 다시 치환하지 않는다.
+ * - 0.2.7 묶음 5: 이 프로젝트의 대표 상시 규칙(vars.OWNER_RULES)은 보고 언어 줄 뒤, 덧붙임 앞에 '## 대표 상시 규칙' 절로 온다.
  */
 export function renderRole(kind: MemberKind, vars: RoleVars, rolesDir?: string): string {
   const customPath = rolesDir ? join(rolesDir, `${kind}.md`) : null;
@@ -258,6 +326,9 @@ export function renderRole(kind: MemberKind, vars: RoleVars, rolesDir?: string):
   const fill = (text: string) => text.replace(/\{\{(PROJECT|NAME|ROLE|CONDUCTOR|SUBAGENT_EFFORT|MANUAL_SESSION)\}\}/g, (_, key: string) => values[key] ?? "");
   let rendered = fill(template);
   if (vars.REPORT_LANGUAGE === "en") rendered = `${rendered.trimEnd()}\n\n${ENGLISH_REPORT_RULE}\n`;
+  // 0.2.7 묶음 5: 대표 상시 규칙은 보고 언어 줄 뒤(그 줄이 덮지 않게), 이 Mac 의 덧붙임 앞(대표가 손수 쓴 덧붙임이 마지막 말). 자리표시를 다시 치환하지 않는다.
+  const owner = ownerRulesSection(vars.OWNER_RULES ?? [], vars.REPORT_LANGUAGE);
+  if (owner) rendered = `${rendered.trimEnd()}\n\n${owner}\n`;
   if (extra) rendered = `${rendered.trimEnd()}\n\n${fill(extraSection(extra))}\n`;
   return rendered;
 }

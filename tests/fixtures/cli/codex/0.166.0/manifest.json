@@ -1,7 +1,7 @@
 {
   "provider": "codex",
   "version": "0.166.0",
-  "source": "첫 화면: tests/w1-server-core.test.ts codexBanner. 폴더 신뢰 창: tests/core-runner.test.ts codexTrustScreen(실측 0.166). 감싼 창: tests/fixtures/folder-trust-160.ts(합성). 세션 기록: tests/delivery-evidence.test.ts 의 0.166 메타 배열. 백그라운드 터미널 화면·기록: 2026-11-15 라이브 화면과 rollout 의 줄 모양·기호·간격·사건 순서를 옮기고 글은 가짜로 바꿈(합성).",
+  "source": "첫 화면: tests/w1-server-core.test.ts codexBanner. 폴더 신뢰 창: tests/core-runner.test.ts codexTrustScreen(실측 0.166). 감싼 창: tests/fixtures/folder-trust-160.ts(합성). 세션 기록: tests/delivery-evidence.test.ts 의 0.166 메타 배열. 백그라운드 터미널 화면·기록: 2026-11-15 라이브 화면과 rollout 의 줄 모양·기호·간격·사건 순서를 옮기고 글은 가짜로 바꿈(합성). 멈춘 턴과 백그라운드 터미널·기록 보기 화면(합성, 0.2.7 배포 전 확인 real-cli 견본 152424·152938): 실측 화면의 줄 모양·기호·간격을 옮기고 글은 가짜로 바꿈.",
   "fixtures": [
     {
       "file": "idle.txt",
@@ -135,6 +135,34 @@
         "verdict": "present",
         "sessionMeta": true,
         "turnEnd": "ended"
+      }
+    },
+    {
+      "file": "background-interrupted.txt",
+      "kind": "screen",
+      "origin": "synthetic",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "오래 도는 셸 명령을 하던 턴을 Esc 로 멈춘 직후. 턴은 끝났고(turn_aborted) 그 명령은 백그라운드 터미널로 계속 돈다. core 는 working 이다.",
+      "expect": {
+        "draft": "",
+        "folderTrustLike": false,
+        "trustDialogLike": false,
+        "folderTrust": null,
+        "backgroundTerminals": 1
+      }
+    },
+    {
+      "file": "browse-transcript.txt",
+      "kind": "screen",
+      "origin": "synthetic",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "쉬는 Codex 에 Esc 가 두 번 가서 들어간 기록 보기(rewind) 화면. 입력칸을 알아보지 않는다(넣지 않는다). '중단'은 쉬는 CLI 에 키를 보내지 않아 이 화면에 들어가지 않는다.",
+      "expect": {
+        "draft": null,
+        "folderTrustLike": false,
+        "trustDialogLike": false,
+        "folderTrust": null,
+        "backgroundTerminals": null
       }
     }
   ]

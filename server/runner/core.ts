@@ -48,6 +48,11 @@ export interface CoreCompactState {
   hookMark?: HookEventsMark | null;
   /** Only acknowledged human input can arm resolution; idle alone is insufficient. */
   manualResolution?: { turn: number | null; unsettled: boolean };
+  /**
+   * 0.2.7 배포 전 확인(real-cli P3): IAMCEO 가 입력칸에 넣은 압축 명령 그대로('/compact 이어갈 일: …'). 이 압축을 '중단'으로 멈춘 뒤 Claude 가 그 글을
+   * 입력칸에 되돌리면, 입력칸 글이 이것과 글자까지 같을 때만 IAMCEO 의 글로 보고 지운다(CoreRunner.clearCompactDraft). 없으면(옛 서버가 넣은 압축) 지우지 않는다.
+   */
+  command?: string;
 }
 export interface CoreRunnerDeps {
   pollMs?: number; pollConcurrency?: number; rpcTimeoutMs?: number; sendTimeoutMs?: number; compactTimeoutMs?: number;
@@ -182,7 +187,11 @@ export function eofLogBaseline(root: string, path: string): DeliveryLogBaseline 
  * turn: 그동안의 core turn 번호(working 이 이어지는 동안 오르지 않는다). runEnded: 그 턴을 연 실행 기록이 이미 끝났다.
  * reported: 이 상태로 턴 끝과 활동 줄을 이미 냈다.
  */
-interface CodexBackground { turn: number; terminals: number; runEnded: boolean; reported: boolean }
+interface CodexBackground { turn: number; terminals: number; runEnded: boolean; reported: boolean;
+  /** 0.2.7 배포 전 확인(real-cli P1): 그 턴이 중단(turn_aborted)으로 끝났다. 하던 명령이 백그라운드 터미널로 남아 계속 돈다. */
+  aborted: boolean;
+  /** 0.2.7 배포 전 확인 검토: 이 상태를 처음 본 때(벽시계 ms, 같은 working·turn 번호 동안 잇는다). 30분 지연 막힘 알림의 정착 기다림과 '한 상태에 한 번'을 가른다. */
+  since: number }
 interface CodexBackgroundWatch {
   state: CodexBackground | null;
   cursor: CodexTurnCursor | null;
@@ -241,6 +250,8 @@ export class CoreRunner implements FullRunner {
   private readonly claudeWatch = new WeakMap<Track, ClaudeWatch>();
   /** 서브에이전트 수의 관측(track 마다). 새 track(다시 띄운 CLI)은 처음부터 다시 잰다. */
   private readonly subagentWatch = new WeakMap<Track, SubagentWatch>();
+  /** 0.2.7 배포 전 확인(P3): 멈춘 압축(id)의 되살아난 명령을 지웠는가·안내했는가(track 마다, 압축마다 한 번). */
+  private readonly compactDrafts = new WeakMap<Track, { id: string; cleared: boolean; noted: boolean }>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly polling = new Set<Track>();
   private readonly inputRefreshes = new Map<Track, ReturnType<typeof setTimeout>>();
@@ -788,9 +799,16 @@ export class CoreRunner implements FullRunner {
    * 잠재울 후보를 가를 때 쓴다(바쁨 판정 자체는 isBusy 그대로).
    */
   backgroundTerminals(memberId: string): number | null {
+    return this.codexLingering(memberId)?.terminals ?? null;
+  }
+  /** 0.2.7 배포 전 확인 검토: backgroundTerminals 와 같은 상태를 처음 본 때(벽시계 ms). 그 상태가 아니면 null. */
+  backgroundSince(memberId: string): number | null {
+    return this.codexLingering(memberId)?.since ?? null;
+  }
+  private codexLingering(memberId: string): CodexBackground | null {
     const track = this.tracks.get(memberId);
     const state = track ? this.codexWatch.get(track)?.state : null;
-    return track && state && !this.turnBusy(track) ? state.terminals : null;
+    return track && state && !this.turnBusy(track) ? state : null;
   }
   /**
    * 11-16: 턴은 끝났고 Claude 가 띄운 뒤 작업 때문에만 core 가 working 인 팀장(claudeQuiet background)인가. 다른 까닭(입력 중·결과 모름·압축·
@@ -853,8 +871,8 @@ export class CoreRunner implements FullRunner {
       if (state === "working") return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
       if (state === "blocked") return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: `Complete the CLI dialog with iamceo attach ${member.id}` };
       if (!["idle", "done", "error"].includes(state || "")) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written", detail: `No trustworthy idle OSC 7501 status; inspect CLI setup with iamceo attach ${member.id} (status=${JSON.stringify(terminal.status?.state ?? null)}, turn=${terminal.turn ?? null}, reported=${terminal.reported ?? null})` };
-      const inputEpoch = track.epoch;
-      const screen = await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 });
+      let inputEpoch = track.epoch;
+      let screen = await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 });
       const usage = usageLimitMenu(screen.text);
       if (usage) {
         track.status = "blocked";
@@ -866,7 +884,19 @@ export class CoreRunner implements FullRunner {
       }
       // Never erase a person's draft or deliver through an unidentified dialog.
       // An empty composer never establishes readiness; only the OSC gate above can permit input.
-      const draft = providerFor(member) === "claude" ? inputText(screen.text) : codexDraft(screen.text);
+      let draft = providerFor(member) === "claude" ? inputText(screen.text) : codexDraft(screen.text);
+      // 0.2.7 배포 전 확인(real-cli P3): 멈춘 압축의 명령을 Claude 가 입력칸에 되돌렸으면(IAMCEO 가 넣은 글과 글자까지 같을 때만) 지우고 다시 읽는다.
+      // 지운 뒤에는 화면이 빈 입력칸을 보일 때까지만(최대 열 번 읽기) 기다린다. 비지 않으면 지금처럼 넣지 않는다(다음 시도가 다시 본다. 키는 다시 누르지 않는다).
+      if (draft && await this.clearCompactDraft(track, terminal, draft)) {
+        for (let read = 0; read < 10; read++) {
+          if (read) await Bun.sleep(100);
+          this.validateTrack(track);
+          screen = await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 });
+          draft = inputText(screen.text);
+          if (draft === "") break;
+        }
+        inputEpoch = track.epoch;
+      }
       track.composerEmpty = draft === "";
       track.composerSeen = draft !== null;
       if (draft !== "") return { ok: false, reason: "input_busy", retryable: false, deliveryEffect: "not_written", detail: draft === null ? "Cannot identify an empty CLI composer" : "A user draft is present; IAMCEO leaves it untouched" };
@@ -964,7 +994,7 @@ export class CoreRunner implements FullRunner {
       // 붙는 순간의 첫 관측에서는 아직 닫지 않은 업무의 턴 끝을 내지 않는다. 다음 관측이 턴 끝을 먼저 내고 쉬는 중을 알린다
       // (쉬는 중을 먼저 알리면 열린 업무 때문에 '진전 없음' 표시가 쉬는 팀장에 붙는다). 이미 닫힌 업무면(재시작) 곧바로 쉬는 중이다.
       if (initial && !verdict.runEnded) return watch.state = null;
-      return watch.state = { turn, terminals, runEnded: verdict.runEnded, reported: previous?.reported ?? false };
+      return watch.state = { turn, terminals, runEnded: verdict.runEnded, reported: previous?.reported ?? false, aborted: previous?.aborted ?? verdict.code === "turn_aborted", since: previous?.since ?? Date.now() };
     }
     // 열린 턴(running)은 정말 일하는 중이다. 아직 읽는 중이거나 덜 쓴 줄이면 다음 관측이 이어 읽는다.
     if (verdict.outcome === "unknown" && !["scan_pending", "partial_log"].includes(verdict.code)) this.noteCodexBackground(track, watch, terminal, terminals, verdict.code);
@@ -1012,8 +1042,9 @@ export class CoreRunner implements FullRunner {
       // 대신 측정의 번호를 contextTurn 으로 실어, 총괄이 '방금 끝난 턴의 측정'으로 알아보게 한다(자동 압축, orchestrator pump 의 exact).
       this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: false, reason: "codex_background_terminal", turn: null, ...(measuredTurn !== null ? { contextTurn: measuredTurn } : {}) });
     }
+    // 멈춘 턴(중단·급한 지시)이면 '턴은 멈췄지만 실행하던 명령이 계속 돈다'고 쓴다. 그 명령이 끝나거나 /stop 으로 닫아야 다음 전달이 들어간다.
     this.event(track, { type: "activity", memberId: track.member.id, kind: "system", notice: true,
-      text: textRef("activity.codex_background_left", { count: String(background.terminals) }), eventKey: this.codexBackgroundKey(track, terminal, "left") });
+      text: textRef(background.aborted ? "activity.codex_background_after_stop" : "activity.codex_background_left", { count: String(background.terminals) }), eventKey: this.codexBackgroundKey(track, terminal, "left") });
   }
   /** 턴 끝을 확인하지 못한 까닭이 같은 working 에서 backgroundNoticeMs 동안 이어지면 서버 기록과 팀장 활동에 한 번 남긴다. 판정은 그대로다. */
   private noteCodexBackground(track: Track, watch: CodexBackgroundWatch, terminal: CoreTerminal, terminals: number, code: string): void {
@@ -1432,11 +1463,11 @@ export class CoreRunner implements FullRunner {
       this.validateTrack(track);
       // 훅 사건 파일의 지금 끝. startedAt 보다 먼저 읽어, 이 자리 뒤의 줄은 모두 압축 명령을 넣기로 한 뒤에 덧붙은 것이다.
       const hookMark = providerFor(member) === "claude" ? (this.hookEvents ? hookEventsMark(this.hookEvents, member.id) : null) : undefined;
+      const command = providerFor(member) === "codex" ? "/compact" : `/compact ${cleanText(focus).replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim()}`.trim();
       this.saveCompact(track, { id: crypto.randomUUID(), phase: "sending", startedAt: Date.now(), cursor: null, baseline: { path, fileIdentity: baseline.fileIdentity, offset: baseline.offset,
         sessionId: track.sessionId, terminalId: current.address, generation: member.sessionGeneration, turn: current.turn ?? null, model: member.model },
-        ...(hookMark !== undefined ? { hookMark } : {}) });
+        ...(hookMark !== undefined ? { hookMark } : {}), command });
       this.bump(track); track.pending = true; attempted = true;
-      const command = providerFor(member) === "codex" ? "/compact" : `/compact ${cleanText(focus).replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim()}`.trim();
       const result = await this.call<{ turn: number; started?: boolean }>("terminal.send", { terminal: current.address, text: command, ...(currentState === "idle" ? { if: "idle" } : {}), force: false, wait: false }, this.sendTimeoutMs);
       if (!Number.isSafeInteger(result.turn)) throw new CoreError("protocol", "Invalid compact receipt", true);
       this.saveCompact(track, { ...track.compact!, phase: "running" });
@@ -1582,11 +1613,69 @@ export class CoreRunner implements FullRunner {
     try {
       const terminal = await this.owned(member);
       const track = this.tracks.get(member.id);
+      // 0.2.7 배포 전 확인(real-cli P4): 멈출 턴이 없는(쉬는) CLI 에는 멈춤 키를 보내지 않는다. 쉬는 Codex 에 Esc 가 가면 'esc again to edit previous
+      // message' 가 남아 입력칸을 알아보지 못하고, 한 번 더 가면 기록 보기(rewind) 화면에 들어가 전달이 멈췄다(Claude 도 빈 입력칸에서 Esc 두 번은 되감기 창이다).
+      if (track && this.noTurnToStop(track, terminal)) {
+        if (track.compact && !["failed", "succeeded"].includes(track.compact.phase)) {
+          // 압축 확인 안내(chat.compact_unconfirmed)를 보고 누른 '중단': CLI 는 이미 쉬므로 키 없이 그 미확정 압축을 닫는다
+          // (예전에는 Esc 를 보내고 core 가 stopped 로 쉬는 중을 확인했다. 근거는 같은 core 상태다).
+          this.saveCompact(track, { ...track.compact, phase: "failed" }); track.pending = false; track.controlUncertain = false; track.uncertain = track.dispatches.length > 0;
+          return;
+        }
+        throw new CoreError("no_turn", "No turn to stop: the CLI is idle", false, "not_written");
+      }
       if (track) this.bump(track);
       const result = await this.call<{ outcome: string }>("terminal.interrupt", { terminal: terminal.address, timeout: 3 }, 6000);
       if (!["stopped", "exited"].includes(result.outcome)) throw new CoreError("not_stopped", `CLI interrupt outcome: ${result.outcome}`);
       if (track?.compact) { this.saveCompact(track, { ...track.compact, phase: "failed" }); track.pending = false; track.controlUncertain = false; track.uncertain = track.dispatches.length > 0; }
     } finally { release(); }
+  }
+  /**
+   * 0.2.7 배포 전 확인(P4): 이 CLI 에 멈출 턴이 없는가. core 가 쉬는 중(idle·done·error)을 알리거나(Claude 의 뒤 작업만 남은 끝난 턴도 done 이다),
+   * core 는 working 이지만 Codex 의 턴은 끝났고 백그라운드 터미널만 남았다(codexBackground). 방금 넣은 입력이 아직 턴을 열지 않았거나(pending)
+   * 승인 창(blocked)·상태를 모르는 CLI 는 지금처럼 멈춤 키를 보낸다. 미확정 압축은 확인될 때까지 pending 이지만, 그동안 core 가 쉬는 중을 알리면
+   * 도는 압축이 없다(압축 턴은 working 이다): 압축 확인 안내의 '중단'에 키를 보내면 쉬는 Codex 가 'esc again' 상태로 남아 다음 전달이 막혔다.
+   */
+  private noTurnToStop(track: Track, terminal: CoreTerminal): boolean {
+    const compacting = !!track.compact && !["failed", "succeeded"].includes(track.compact.phase);
+    if (terminal.state !== "live" || track.terminal !== terminal || track.completing || track.pending && !compacting) return false;
+    const state = this.stateOf(track, terminal);
+    if (["idle", "done", "error"].includes(state ?? "")) return true;
+    return state === "working" && !!this.codexWatch.get(track)?.state;
+  }
+  /**
+   * 0.2.7 배포 전 확인(real-cli P3): Claude 2.1.323 은 도는 압축을 Esc 로 끊으면 끊긴 명령('/compact 이어갈 일: …')을 입력칸에 되돌린다. 그 글 때문에
+   * 다음 전달이 input_busy 로 거듭 거절됐다(실측 6번, 사람이 터미널에서 지울 때까지). 대표가 쓴 글은 절대 지우지 않으므로, 입력칸 글이 이 터미널·세션·세대의
+   * 멈춘 압축(phase failed)에 IAMCEO 가 넣은 명령(CoreCompactState.command)과 글자까지 같을 때만 IAMCEO 의 글로 보고 지운다(공백은 칸 너비로 접히므로 빼고 견준다).
+   * 지우는 키는 ctrl+c 하나다: Claude 입력칸은 글이 있을 때 ctrl+c 를 '입력 비우기'로 받는다(2.1.323 의 입력 처리, 실측에서도 직접 조작의 ctrl+c 로 지워졌다).
+   * 빈 칸에서는 '한 번 더 누르면 끝냄' 안내만 뜨고, 두 번째 ctrl+c 가 와야 끝나므로 압축마다 한 번만 누른다. CLI 가 쉬는 중(idle·done)이고 뒤 작업이 없고 대표가
+   * 터미널을 쥐고 있지 않을 때만 누른다(일하는 턴에 ctrl+c 는 그 턴을 끊는다). 글자까지 같다고 확인하지 못했지만 압축 명령으로 보이는 글('/compact …'·
+   * 긴 붙여넣기 자리표시)이면 지우지 않고 활동에 안내를 한 번 남긴다. 지웠으면 true(부르는 쪽이 입력칸을 다시 읽는다).
+   */
+  private async clearCompactDraft(track: Track, terminal: CoreTerminal, draft: string): Promise<boolean> {
+    const compact = track.compact;
+    if (providerFor(track.member) !== "claude" || compact?.phase !== "failed" || !compact.command) return false;
+    const { baseline } = compact;
+    if (baseline.terminalId !== terminal.address || baseline.generation !== track.member.sessionGeneration || baseline.sessionId !== track.sessionId) return false;
+    let mark = this.compactDrafts.get(track);
+    if (mark?.id !== compact.id) this.compactDrafts.set(track, mark = { id: compact.id, cleared: false, noted: false });
+    const squash = (text: string) => text.replace(/\s+/g, "");
+    const exact = squash(draft) === squash(compact.command);
+    const safe = exact && !mark.cleared && !this.manualLease(track.member.id) && this.methods.has("terminal.keys") && !this.claudeLingers(track, terminal) &&
+      ["idle", "done"].includes(this.stateOf(track, terminal) ?? "");
+    if (!safe) {
+      if (!mark.noted && (exact || /^\/compact(?:\s|$)|^\[Pasted text #\d+/.test(draft))) {
+        mark.noted = true;
+        this.event(track, { type: "activity", memberId: track.member.id, kind: "system", notice: true, text: textRef("activity.compact_draft_left") });
+      }
+      return false;
+    }
+    mark.cleared = true;
+    this.bump(track);
+    await this.call("terminal.keys", { terminal: terminal.address, keys: ["ctrl+c"] }, this.sendTimeoutMs);
+    console.warn(`[core] ${track.member.id}: 멈춘 압축의 명령이 입력칸에 되살아나 지웠습니다(IAMCEO 가 넣은 글과 같음, ctrl+c 한 번)`);
+    this.event(track, { type: "activity", memberId: track.member.id, kind: "system", notice: true, text: textRef("activity.compact_draft_cleared") });
+    return true;
   }
   async checkStop(member: RunnerMember, opts: { whileWorking?: boolean } = {}): Promise<void> {
     if (member.origin === "adopted") throw new CoreError("unsupported", "Cannot close an adopted user terminal");

@@ -1,0 +1,17 @@
+• 가짜 지시를 받아 긴 명령을 실행합니다.
+
+• Called iamceo.status
+  └ 적었습니다
+    + Show details
+
+• 명령이 끝나기를 기다리고 있습니다.
+
+■ Conversation interrupted - use /feedback if something went wrong
+
+  1 background terminal running · /ps to view · /stop to close
+
+
+› Ask Codex to do anything
+
+  GPT-6-Astra high Fast · ~/workspace/sample-app
+  ? for shortcuts                                                                                                                     ⚠ 2 warnings · f2 to view

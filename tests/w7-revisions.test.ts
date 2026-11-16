@@ -252,8 +252,10 @@ describe("D3-5 결재 카드 대체(ask replaces)", () => {
     const first = (await ask(t, t.worker, { title: "아이디어를 고를까요?" })).decision;
     const { decision: next, text } = await ask(t, t.worker, { title: "아이디어를 고를까요?(고친 판)", replaces: first.id });
     const old = t.store.requireDecision(first.id);
-    expect(old).toMatchObject({ status: "closed", closeKind: "obsolete", closedBy: t.worker.name, replacedBy: next.id, closeReason: `새 카드(#${next.id})로 대신했습니다` });
-    expect(old.closeReasonText).toEqual({ code: "card.replaced", params: { id: next.id } });
+    expect(old).toMatchObject({ status: "closed", closeKind: "obsolete", closedBy: t.worker.name, replacedBy: next.id, closeReason: "새 카드로 대신했습니다" });
+    // 0.2.7 배포 전 확인(문제 3): 대표가 보는 닫힌 이유에 내부 번호(#d_…)를 싣지 않는다. 새 카드는 replacedBy 로 간다.
+    expect(old.closeReasonText).toEqual({ code: "card.replaced" });
+    expect(old.closeReason).not.toContain("#");
     expect(next).toMatchObject({ status: "open", replaces: first.id });
     expect(text).toContain(`앞 카드 #${first.id} 는 닫고 이 카드에 이었습니다`);
     expect(t.store.listOpenDecisions(t.project.id).map(d => d.id)).toEqual([next.id]);

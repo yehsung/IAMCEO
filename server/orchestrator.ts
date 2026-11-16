@@ -70,7 +70,7 @@ import { coreContextMeasurement, observeCompactBoundary, type CompactBoundaryBas
 import { readJsonlRange, parseCodexSessionMeta, jsonObject } from "./runner/delivery-evidence.ts";
 import { defaultClaudeHome, findSessionFile, isMissingSessionError } from "./runner/session-files.ts";
 import { providerLaunch } from "./runner/providers.ts";
-import { CoreRunner, ensureCoreServer, eofLogBaseline, type CoreCompactState, type CoreRunnerDeps, type CoreRunnerOptions } from "./runner/core.ts";
+import { CoreRunner, codexBackgroundTerminals, ensureCoreServer, eofLogBaseline, type CoreCompactState, type CoreRunnerDeps, type CoreRunnerOptions } from "./runner/core.ts";
 import { approvalSummary } from "./runner/core-approval.ts";
 import { CLAUDE_BACKGROUND_REASON } from "./runner/claude-turn.ts";
 import { ToolPermissions, type ToolPermissionPoll, type ToolPermissionRequest } from "./tool-permission.ts";
@@ -85,7 +85,7 @@ import { MemberFlows, type AskInput, type AssignInput, type AssignResult, type P
 // 지시·보고·ask 의 입력 모양은 flows/member.ts 에 있다. 예전처럼 이 파일에서 가져가는 곳(agent-tools.ts·시험)을 위해 내보낸다.
 export type { AskInput, AssignInput, AssignResult, PostInput } from "./flows/member.ts";
 import { conductorHandle, conductorName, DEFAULT_NAMES } from "./text.ts";
-import { mustRender, textRef, type ServerTextRef } from "../shared/server-text.ts";
+import { mustRender, sinceParam, textRef, type ServerTextRef } from "../shared/server-text.ts";
 import { ERROR_CODES } from "../shared/error-codes.ts";
 import { exitActivity, exitDetail, lastErrorParam } from "./text-refs.ts";
 
@@ -313,6 +313,8 @@ export const URGENT_QUOTE_FRESH_MS = 30 * 60_000;
 const WORKING_VERDICTS: ReadonlySet<string> = new Set(["busy", "sent", "pending_run", "manual_busy"]);
 /** 0.2.7 묶음 1: 진짜 막힘으로 알리기 전에 그 판정이 이어져야 하는 시간(턴이 막 끝나 수신을 확인하는 몇 초 같은 것은 막힘이 아니다). */
 const DELAY_BLOCK_SETTLE_MS = 120_000;
+/** 0.2.7 배포 전 확인 검토: 멈춤 키 뒤 Codex 화면이 '턴은 멈췄고 백그라운드 터미널만 남음'을 보이는지 읽는 횟수(0.4초 간격). */
+const BACKGROUND_STOP_READS = 5;
 
 /**
  * 0.2.7 묶음 1: 급한 지시로 하던 턴을 멈추지 못하고 기다리는 까닭(총괄 도구 응답에 그대로 싣는다).
@@ -324,7 +326,14 @@ export type UrgentWaitReason = "no_owner_quote" | "weak_quote" | "other_target" 
  * 0.2.7 묶음 1: 급한 지시를 일하는 중인 팀장에게 줄 때 서버가 한 일. interrupted: '하던 턴 멈추고 넣기'(멈춘 것까지 확인).
  * unconfirmed(검토 뒤 더함): 멈춤 키는 보냈지만 core 가 3초 안에 멈춘 것을 확인하지 못했다(still_working·결과 모름). 뒤늦게 멈출 수 있어 멈춘 턴으로 다룬다.
  */
-export type UrgentOutcome = { outcome: "interrupted" } | { outcome: "unconfirmed"; busySince: string | null } | { outcome: "waiting"; reason: UrgentWaitReason; busySince: string | null };
+export type UrgentOutcome = { outcome: "interrupted" } | { outcome: "unconfirmed"; busySince: string | null } | { outcome: "waiting"; reason: UrgentWaitReason; busySince: string | null }
+  /**
+   * 0.2.7 배포 전 확인(real-cli P1): 멈춤 키로 Codex 의 턴은 멈췄지만 하던 셸 명령이 백그라운드 터미널(terminals 개)로 계속 돈다. 그 명령이 끝나거나
+   * 터미널에서 /stop 으로 닫아야 급한 지시가 들어간다. IAMCEO 는 그 명령을 끄지 않는다(대표가 일부러 띄운 프로그램일 수 있다).
+   */
+  | { outcome: "background"; terminals: number };
+/** 0.2.7 배포 전 확인: '하던 턴 멈추고 넣기'의 결과. no_turn 은 멈출 턴이 없었다(쉬는 CLI, 키를 보내지 않았다). */
+export type UrgentStop = "interrupted" | "unconfirmed" | "no_turn" | false | { background: number };
 /** 0.2.7 묶음 1 검토: 대표 글 하나로 한 팀장의 턴은 한 번만 멈춘다. 그 표식(활동 줄의 사건 키, DB 라 재시작해도 남는다). */
 const urgentStopKey = (memberId: string, sourceId: string) => `urgent-stop:${memberId}:${sourceId}`;
 /**
@@ -596,6 +605,7 @@ export class Orchestrator implements OrchestratorApi {
       interjects: member => this.interjects(this.runners.get(this.backendOf(member))),
       urgentBlocker: (member, quote) => this.urgentBlocker(member, quote),
       interruptForUrgent: (member, delivery, sourceId) => this.interruptForUrgent(member, delivery, sourceId),
+      backgroundPrograms: member => this.lingering(member),
       busySince: memberId => this.busySince(memberId),
       settle: member => this.settle(member),
       refreshWaiting: memberId => this.refreshWaiting(memberId),
@@ -2735,20 +2745,45 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   async memberInterrupt(memberId: string): Promise<Member> {
+    await this.interruptTurn(memberId);
+    return this.store.requireMember(memberId);
+  }
+
+  /**
+   * 앱의 '중단'과 급한 지시가 함께 쓰는 멈추기. core 가 멈춘 것을 확인했으면 null.
+   * 0.2.7 배포 전 확인 검토(real-cli P1, 앱 '중단' 길): core 는 멈춘 것을 확인하지 못했지만(still_working) 화면이 'Codex 의 턴은 멈췄고 실행하던 명령이
+   * 백그라운드 터미널 N개로 남음'이면 N 을 돌려준다. 턴은 멈췄으므로 실패가 아니다(예전에는 앱에 500 'CLI interrupt outcome: still_working'이 떠
+   * 멈춘 턴이 실패로 보였다). 그 명령이 계속 돈다는 것은 실행기의 활동 줄(codex_background_after_stop)과 30분 막힘 알림이 알린다.
+   */
+  private async interruptTurn(memberId: string): Promise<number | null> {
     const member = this.store.requireMember(memberId);
     const rt = this.runtime(memberId);
     const project = this.store.requireProject(member.projectId);
     this.requireActive(project);
     const runner = this.runners.get(this.backendOf(member));
     if (member.origin === "manual" || !runner) throw new ApiError(400, "실행기가 관리하지 않는 세션입니다", "member_not_runner_managed");
-    if (rt.turn) rt.turn.interrupted = true;
-    await runner.interrupt(this.runnerMember(member, project));
+    const turn = rt.turn, already = turn?.interrupted ?? false;
+    if (turn) turn.interrupted = true;
+    let background: number | null = null;
+    try {
+      await runner.interrupt(this.runnerMember(member, project));
+    } catch (e) {
+      // 0.2.7 배포 전 확인(real-cli P4): 멈출 턴이 없는(쉬는) CLI 에는 키를 보내지 않았다. 그 턴은 이미 끝났으니 중단된 턴으로 적지 않는다.
+      if (e instanceof CoreError && e.kind === "no_turn") {
+        if (turn && rt.turn === turn && !already) turn.interrupted = false;
+        const programs = runner instanceof CoreRunner ? runner.backgroundTerminals(memberId) : null;
+        if (programs) throw new ApiError(409, ERROR_CODES.interrupt_background_program.ko, "interrupt_no_turn", "interrupt_background_program");
+        throw new ApiError(409, ERROR_CODES.interrupt_no_turn.ko, "interrupt_no_turn");
+      }
+      if (e instanceof CoreError && e.kind === "not_stopped") background = await this.backgroundAfterStop(member);
+      if (!background) throw e;
+    }
     this.interruptCoreCompaction(member);
     const state = this.store.getContextState(memberId);
     if (state?.compaction?.phase === "failed" && rt.turn?.kind === "compact") this.store.saveContextState({ ...state, compaction: { ...state.compaction, reason: "interrupted" } });
     rt.compactRequest = null;
     if (rt.turn?.kind === "compact") this.endCompact(memberId, rt, "대표가 압축을 중단했습니다");
-    return this.store.requireMember(memberId);
+    return background;
   }
 
   /** 0.2.7 묶음 1: 급한 지시로 멈추게 한 실행. 그 실행에는 결과 보고 보완을 묻지 않는다(멈춘 일은 급한 지시 뒤에 이어서 하거나 그만둔다). */
@@ -2783,6 +2818,9 @@ export class Orchestrator implements OrchestratorApi {
     let compacting = false;
     try { compacting = this.coreCompactFenced(member); } catch { compacting = true; }
     if (compacting || this.runtime(memberId).turn?.kind === "compact") return `${josa(name, "이")} 문맥 정리(압축) 중이라 끝나면 들어갑니다`;
+    // 0.2.7 배포 전 확인(real-cli P2): 턴은 끝났고 Codex 가 띄운 백그라운드 프로그램 때문에만 기다린다. 스스로 끝나지 않을 수 있다(개발 서버 등).
+    const programs = this.lingering(member);
+    if (programs !== null) return `${josa(name, "이")} 턴은 끝냈지만 Codex가 띄운 백그라운드 프로그램(${programs}개)이 남아 있어, 그 프로그램이 끝나거나 대표가 터미널에서 /stop 으로 닫아야 들어갑니다(IAMCEO는 그 프로그램을 끄지 않습니다)`;
     if (this.isBusy(member)) {
       const since = sinceText(this.busySince(memberId));
       return `${josa(name, "이")} ${since ? `${since} ` : ""}하던 일을 마치는 중이라 그 일이 끝나면 들어갑니다`;
@@ -2842,8 +2880,12 @@ export class Orchestrator implements OrchestratorApi {
    *   있으므로 앱 '중단'과 같이 멈춘 턴으로 둔다(안내 글·보고 보완 거르기 그대로). 예전에는 '안 멈춤'으로 확정해, 뒤늦게 멈춘 턴에 보고 보완을 묻고
    *   안내는 이미 거둔 뒤였다. 끝내 멈추지 않고 끝난 턴도 같은 안내('하던 일이 멈췄으면')로 어긋나지 않는다.
    * - false: 멈춤 키를 보내지 못한 것이 확정이다(터미널 없음·소유 불일치·서버 거절 등). 안내 글을 거두고 턴 표시를 되돌린다: 그 턴이 끝나길 기다린다.
+   * - { background }(0.2.7 배포 전 확인, real-cli P1): core 가 멈춘 것을 확인하지 못했는데(still_working) 화면은 Codex 의 턴이 멈추고 백그라운드 터미널만
+   *   남은 모양이다. 실제 Codex 0.166 은 오래 도는 셸 명령을 백그라운드 터미널로 넘긴 채 턴 안에서 기다리고, Esc 로 턴을 끊어도 그 명령은 계속 돈다.
+   *   멈춘 턴으로 다루는 것은 unconfirmed 와 같고, 그 명령이 끝나거나 /stop 으로 닫아야 들어간다고 사실대로 알린다(IAMCEO 는 그 명령을 끄지 않는다).
+   * - no_turn(0.2.7 배포 전 확인, P4): 실행기가 멈출 턴이 없다고 봐(쉬는 CLI) 키를 보내지 않았다. 안내 글을 거두고 받을 수 있게 되면 넣는다.
    */
-  async interruptForUrgent(member: Member, delivery: Delivery, sourceId: string): Promise<"interrupted" | "unconfirmed" | false> {
+  async interruptForUrgent(member: Member, delivery: Delivery, sourceId: string): Promise<UrgentStop> {
     const runs = this.store.listPendingExecutions().filter(run => run.memberId === member.id).map(run => run.runId);
     for (const id of runs) this.urgentStopped.add(id);
     // 턴 끝이 멈춤 응답보다 먼저 올 수 있어 안내 글은 멈추기 전에 줄 세운다(급한 지시와 같은 봉투로 나가게). 멈춘 것이 확인되기 전이라 어느 쪽이든 맞는 글로 쓴다.
@@ -2851,17 +2893,20 @@ export class Orchestrator implements OrchestratorApi {
       text: formatSystem(`대표의 급한 지시(전달 ${delivery.id})를 먼저 넣으려고 하던 턴을 멈추게 했습니다. 그 지시를 먼저 하세요. 하던 일이 멈췄으면, 그 지시와 어긋나지 않을 때 이어서 하고 어긋나면 그만두세요.`) });
     const rt = this.runtime(member.id), turn = rt.turn, already = turn?.interrupted ?? false;
     const key = urgentStopKey(member.id, sourceId);
+    let programs: number | null;
     try {
-      await this.memberInterrupt(member.id);
+      // real-cli P1: 화면이 '턴은 멈췄고 백그라운드 터미널만 남음'이면 interruptTurn 이 그 수를 돌려준다(그 명령이 끝나거나 /stop 해야 들어간다).
+      programs = await this.interruptTurn(member.id);
     } catch (e) {
       const detail = ((e as Error)?.message ?? String(e)).slice(0, 200);
       // 보내지 못한 것이 확정인 실패만 되돌린다. core 의 not_stopped(멈춤 키는 갔다)·결과 모름·알 수 없는 오류는 멈췄을 수 있다.
       const definite = e instanceof ApiError || (e instanceof CoreError && !e.uncertain && e.kind !== "not_stopped");
       if (!definite) {
         this.urgentStopSources.add(key);
-        this.store.appendActivity(member.id, "system", textRef("activity.urgent_interrupt_unconfirmed", { id: delivery.id, detail }), key);
+        this.store.appendActivity(member.id, "system", textRef("activity.urgent_interrupt_unconfirmed", { detail }), key);
         return "unconfirmed";
       }
+      const noTurn = e instanceof ApiError && e.code === "interrupt_no_turn";
       for (const id of runs) this.urgentStopped.delete(id);
       if (turn && rt.turn === turn && !already) turn.interrupted = false;
       this.store.transaction(() => {
@@ -2869,14 +2914,40 @@ export class Orchestrator implements OrchestratorApi {
         if (!current || !["queued", "held"].includes(current.status)) return;
         const r = this.store.getDeliveryRecovery(notice.id);
         if (r) this.store.updateDeliveryRecovery(notice.id, r.version, { phase: "stopped", reason: "withdrawn", nextCheckAt: null });
-        this.store.markFailed(notice.id, "하던 턴을 멈추지 못해 거뒀습니다");
+        this.store.markFailed(notice.id, noTurn ? "멈출 턴이 없어 거뒀습니다" : "하던 턴을 멈추지 못해 거뒀습니다");
       });
-      this.store.appendActivity(member.id, "error", textRef("activity.urgent_interrupt_failed", { id: delivery.id, detail }));
+      // 멈출 턴이 없었다(그 사이 턴이 끝났거나 백그라운드 프로그램만 남음): 실패가 아니다. 받을 수 있게 되면 맨 먼저 들어간다.
+      if (noTurn) return "no_turn";
+      this.store.appendActivity(member.id, "error", textRef("activity.urgent_interrupt_failed", { detail }));
       return false;
     }
     this.urgentStopSources.add(key);
-    this.store.appendActivity(member.id, "system", textRef("activity.urgent_interrupt", { id: delivery.id }), key);
+    if (programs) {
+      this.store.appendActivity(member.id, "system", textRef("activity.urgent_interrupt_background", { count: String(programs) }), key);
+      return { background: programs };
+    }
+    this.store.appendActivity(member.id, "system", textRef("activity.urgent_interrupt"), key);
     return "interrupted";
+  }
+
+  /**
+   * 0.2.7 배포 전 확인(real-cli P1): 멈춤 키 뒤 Codex 화면이 '턴은 멈췄고 백그라운드 터미널 N개만 남음'(빈 입력칸·진행 줄 없음·입력칸 바로 위
+   * 'N background terminal(s) running', 실측 견본 'Conversation interrupted' 아래)이면 N, 아니면 null. 화면만 본다: 도구 답·활동 줄의 문구를 고를 뿐이고
+   * 턴 끝은 실행기가 Codex 기록(turn_aborted)과 함께 따로 정한다(CoreRunner.codexBackground).
+   */
+  private async backgroundAfterStop(member: Member): Promise<number | null> {
+    if (this.store.getMember(member.id)?.cli !== "codex") return null;
+    // 검토 뒤: core 의 3초 기다림이 끝난 순간 Codex 화면에 진행 줄이 아직 남아 있을 수 있다(멈춤이 화면에 늦게 그려짐). 그 모양이 보일 때까지만 몇 번 더 읽는다
+    // (BACKGROUND_STOP_READS 번, 0.4초 간격 — 많아야 1.6초). 근거는 화면이다: 끝내 그 모양이 아니면 예전처럼 null(멈춤을 확인하지 못함).
+    for (let read = 0; read < BACKGROUND_STOP_READS; read++) {
+      if (read) await Bun.sleep(400);
+      if (this.closed) return null;
+      let screen: string;
+      try { screen = await this.memberScreen(member.id); } catch { return null; }
+      const programs = codexBackgroundTerminals(screen);
+      if (programs) return programs;
+    }
+    return null;
   }
 
   /** 화면의 '명부에서 빼기'. 직접 띄운 세션만. 실행기 세션은 총괄이 team_close 로 닫는다. */
@@ -3331,7 +3402,8 @@ export class Orchestrator implements OrchestratorApi {
         const runner = this.runnerOf(member);
         const target = this.runnerMember(member, project);
         await runner.checkStop?.(target, { whileWorking: true });
-        if (member.status !== "blocked") await runner.interrupt(target);
+        // 0.2.7 배포 전 확인(P4): 멈출 턴이 없으면(쉬는 CLI) 실행기는 키를 보내지 않고 no_turn 으로 답한다. 끝낼 턴이 없을 뿐이니 그대로 이어 끝낸다.
+        if (member.status !== "blocked") await runner.interrupt(target).catch((e: unknown) => { if (!(e instanceof CoreError && e.kind === "no_turn")) throw e; });
       }
       // 사용 한도로 멈춘 팀장: 그 턴은 이미 한도 오류로 끝났다. 한도 메뉴가 떠 있으면 Esc 로만 닫은 뒤, 쉬는 CLI 처럼 끝낸다(초안 확인은 그대로).
       const menuClosed = !opts.force && !opts.holdAs && this.apiRecovery.usageLimited(memberId) ? await this.closeUsageMenu(member) : false;
@@ -3807,6 +3879,8 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 0.2.7 묶음 1: '하던 일을 마치는 중' 알림을 이미 한 전달(메모리, 서버가 다시 뜨면 한 번 더 알릴 수 있다). 막힘 알림은 DB(delay_notified_at)에 적는다. */
   private readonly delayBehindNoticed = new Set<string>();
+  /** 0.2.7 배포 전 확인 검토: 백그라운드 프로그램 막힘(chat.owner_delivery_background)을 이미 알린 상태(팀장 → 그 상태를 처음 본 때, CoreRunner.backgroundSince). */
+  private readonly backgroundNoticed = new Map<string, number>();
 
   /**
    * 30분 넘게 나가지 않은 대표의 일을 대기 사유에 따라 알린다(0.2.7 묶음 1, 점검 D1-3·D5-2·D1-1).
@@ -3839,6 +3913,29 @@ export class Orchestrator implements OrchestratorApi {
     if (OWNER_SIGNALED_WAITS.has(wait)) return;
     const conductor = this.store.getConductor(d.projectId);
     const relay = conductor && conductor.id !== member.id ? conductor : null;
+    const what = textRef(d.kind === "answer" ? "word.owner_answer" : d.kind === "user_message" ? "word.owner_message" : d.kind === "todo_done" ? "word.owner_todo_done" : "word.owner_instruction");
+    // 0.2.7 배포 전 확인(real-cli P2): 턴은 끝났고 Codex 가 띄운 백그라운드 프로그램 때문에만 기다린다(핫픽스 B). 그 프로그램은 스스로 끝나지 않을 수 있고
+    // (개발 서버) IAMCEO 는 끄지 않으므로 '하던 일을 마치는 중'(알림)이 아니라 막힘·푸시로, 대표가 할 일(/ps 로 보고 /stop 으로 닫기)을 알린다. 그 상태 하나에 한 번(아래).
+    const programs = this.lingering(member);
+    if (programs !== null) {
+      // 검토 뒤: 그 상태가 막 생겼으면(예: 급한 지시·'중단'으로 턴이 멈추고 20초 남은 시험 명령이 백그라운드로 남음) 곧 저절로 풀릴 수 있다. 다른 막힘 사유와
+      // 같이 정착(DELAY_BLOCK_SETTLE_MS) 뒤에 알린다. 그동안은 '하던 일을 마치는 중'(알림)도 쓰지 않는다(턴은 이미 끝났다). 상태가 언제 생겼는지 모르면 기다린다.
+      const since = (this.runners.get(this.backendOf(member)) as CoreRunner).backgroundSince(member.id);
+      if (since === null || now - since < DELAY_BLOCK_SETTLE_MS) return;
+      // 까닭이 팀장 하나의 상태이므로 그 상태 하나에 한 번만 알린다(예전: 기다리던 대표 일마다 같은 막힘 푸시). 같은 상태의 다른 전달은 알림 표시를 적지 않고
+      // 건너뛴다: 그 프로그램이 끝난 뒤 다른 까닭으로 막히면 그 까닭으로 알린다. 표시는 메모리라 서버가 다시 뜨면 남은 전달로 한 번 더 알릴 수 있다.
+      if (this.backgroundNoticed.get(member.id) === since) return;
+      const ref = textRef("chat.owner_delivery_background", { name: member.name, count: String(programs), what });
+      this.store.transaction(() => {
+        if (!this.store.markDelayNotified(d.id, now)) return;
+        const message = this.store.createMessage({ projectId: d.projectId, memberId: member.id, who: "시스템", kind: "막힘", text: ref });
+        // 총괄에게 주는 글(AI 글)에는 전달 번호를 남긴다.
+        if (relay) this.store.enqueue({ projectId: d.projectId, memberId: relay.id, kind: "system", text: formatSystem(`${mustRender(ref, "ko")} (전달 ${d.id}) IAMCEO는 그 프로그램을 끄지 않습니다. 대표에게 이대로 알리세요.`), wake: false });
+        this.store.afterCommit(() => { if (relay) void this.pump(relay.id); this.notifyInbox(message.title, message.body); });
+      });
+      this.backgroundNoticed.set(member.id, since);
+      return;
+    }
     const working = wait === "member_busy" && !!verdict && WORKING_VERDICTS.has(verdict.code) && !verdict.overdueAt;
     // 검토 뒤(D1-3 '진전이 있는 실행 뒤'): 지금 실행이 30분 넘게 진전이 없으면 하던 일을 마치는 중이라고 하지 않고 막힘으로 알린다.
     const silent = working && this.silentRun(member, now);
@@ -3849,24 +3946,26 @@ export class Orchestrator implements OrchestratorApi {
       const noticeId = `msg_delivery_behind_${d.id}`;
       if (this.store.getMessage(noticeId)) return;
       const since = this.busySince(member.id) ?? verdict!.since;
-      const what = textRef(d.kind === "answer" ? "word.owner_answer" : d.kind === "user_message" ? "word.owner_message" : d.kind === "todo_done" ? "word.owner_todo_done" : "word.owner_instruction");
-      const ref = textRef("chat.owner_delivery_behind", { name: member.name, since: { at: since }, what, id: d.id });
+      // 0.2.7 배포 전 확인(문제 3): 오늘 일이면 시각만('오후 3시 23분부터'), 대표 글에는 내부 번호를 싣지 않는다(총괄 사본에만).
+      const ref = textRef("chat.owner_delivery_behind", { name: member.name, since: sinceParam(since, now), what });
       this.store.transaction(() => {
         this.store.createMessage({ id: noticeId, projectId: d.projectId, memberId: member.id, who: "시스템", kind: "알림", text: ref });
         // 총괄에게 주는 글은 AI 에게 주는 글이라 한국어 그대로다(Y: 바꾸지 않는다).
-        if (relay) this.store.enqueue({ projectId: d.projectId, memberId: relay.id, kind: "system", text: formatSystem(`${mustRender(ref, "ko")} 막힌 것이 아니라 차례를 기다리는 것입니다. 대표가 할 일은 없습니다.`), wake: false });
+        if (relay) this.store.enqueue({ projectId: d.projectId, memberId: relay.id, kind: "system", text: formatSystem(`${mustRender(ref, "ko")} (전달 ${d.id}) 막힌 것이 아니라 차례를 기다리는 것입니다. 대표가 할 일은 없습니다.`), wake: false });
       });
       return;
     }
     // 잠깐의 사유는 막힘으로 알리지 않는다(기한을 넘긴 판정·진전 없는 실행은 곧바로 알린다).
     if (!silent && verdict && !verdict.overdueAt && now - Date.parse(verdict.since) < DELAY_BLOCK_SETTLE_MS) return;
     const code = d.kind === "answer" ? "chat.owner_answer_late" : d.kind === "user_message" ? "chat.owner_message_late" : d.kind === "todo_done" ? "chat.owner_todo_done_late" : "chat.owner_instruction_late";
-    const ref = textRef(code, { name: member.name, id: d.id });
+    const ref = textRef(code, d.kind === "answer" || d.kind === "user_message" ? { name: member.name, id: d.id } : { name: member.name });
     this.store.transaction(() => {
       if (!this.store.markDelayNotified(d.id, now)) return;
       // Existing report_blocked path persists one APNs event with the domain message.
       const message = this.store.createMessage({ projectId: d.projectId, memberId: member.id, who: "시스템", kind: "막힘", text: ref });
-      if (relay) this.store.enqueue({ projectId: d.projectId, memberId: relay.id, kind: "system", text: formatSystem(mustRender(ref, "ko")), wake: false });
+      // 0.2.7 배포 전 확인(문제 3): 새 글(지시·할 일 완료)은 대표 글에 번호가 없으므로 총괄 사본에만 붙인다. 예전 글(대표 글·결재 답)은 문장에 이미 있다.
+      const lead = mustRender(ref, "ko");
+      if (relay) this.store.enqueue({ projectId: d.projectId, memberId: relay.id, kind: "system", text: formatSystem(lead.includes(d.id) ? lead : `${lead} (전달 ${d.id})`), wake: false });
       this.store.afterCommit(() => { if (relay) void this.pump(relay.id); this.notifyInbox(message.title, message.body); });
     });
   }
@@ -4819,7 +4918,10 @@ export class Orchestrator implements OrchestratorApi {
         // 관측을 명부에 적기 전에, 저장돼 있던 막힘의 까닭을 이미 알린 것으로 잇는다.
         if (e.status === "blocked") this.recallBlockedNotice(member);
         if (this.apiRecovery.holdReason(member.id) === "api_outage" && this.store.requireMember(member.id).statusObservation?.error?.code === "network_outage" && e.status === "idle") return;
-        if (["idle", "working"].includes(e.status) && (!e.observation || e.observation.freshness === "fresh") && member.lastError && member.fenceCode !== "control_unknown" && !this.keepsUsageNote(member)) this.store.patchMember(member.id, { lastError: null });
+        // 0.2.7 배포 전 확인 검토(real-cli P3): 압축을 멈춘 뒤 입력칸에 글이 남았다는 상태 줄은 쉬는 중 알림으로 지우지 않는다(그 글은 그대로다. 늦게 온 쉬는 중
+        // 알림이 방금 남긴 줄을 지웠다). CLI 가 일하기 시작하면(대표가 그 글을 보냈거나 지운 뒤 전달이 들어감) 지운다.
+        const draftNote = member.lastError === ERROR_CODES.last_error_compact_draft.ko && e.status === "idle";
+        if (["idle", "working"].includes(e.status) && (!e.observation || e.observation.freshness === "fresh") && member.lastError && member.fenceCode !== "control_unknown" && !this.keepsUsageNote(member) && !draftNote) this.store.patchMember(member.id, { lastError: null });
         if (e.status === "working" || e.observation?.freshness === "stale") this.invalidateCoreMeasurement(member);
         if (e.status === "idle" && e.turn !== undefined && e.turn !== null && pending.some(run => run.turn !== null && e.turn! > run.turn)) {
           this.endExecution(member, "success", "서버 부재 중 더 뒤의 종결 turn을 확인했습니다");
@@ -4872,6 +4974,9 @@ export class Orchestrator implements OrchestratorApi {
         this.store.appendActivity(member.id, e.kind, e.text, e.eventKey);
         // 0.2.7 묶음 5 검토: Claude 가 쉬는 동안 스스로 압축했다(서버가 시킨 압축이 아니라 afterCompacted 를 지나지 않는다). 대표 상시 규칙을 다음 봉투에 다시 싣는다.
         if (typeof e.text === "object" && e.text.code === "activity.claude_idle_compacted") noteRulesAfterCompact(this.store, member);
+        // 0.2.7 배포 전 확인 검토(real-cli P3): 압축을 멈춘 뒤 입력칸에 남은 글을 IAMCEO 가 지우지 못했다(글자까지 같은지 모르는 긴 붙여넣기 자리표시 등).
+        // 활동 줄만으로는 팀장 상태가 그대로 보여, 팀장의 상태 줄(lastError)에도 남긴다. 다른 글(보류·오류)이 있으면 덮지 않는다. 다음 턴이 시작되면 지워진다.
+        if (typeof e.text === "object" && e.text.code === "activity.compact_draft_left" && !this.store.requireMember(member.id).lastError) this.store.patchMember(member.id, { lastError: ERROR_CODES.last_error_compact_draft.ko });
         return;
       case "context_usage":
         this.onContextUsage(member, e);

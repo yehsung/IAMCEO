@@ -21735,13 +21735,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "{name} has been finishing earlier work since {since}. When it ends, {what} goes in (delivery #{id})."
+            "value" : "{name} has been finishing earlier work since {since}. When it ends, {what} goes in."
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "{name:이} {since}부터 하던 일을 마치는 중입니다. 그 일이 끝나면 {what:이} 들어갑니다(전달 #{id})."
+            "value" : "{name:이} {since}부터 하던 일을 마치는 중입니다. 그 일이 끝나면 {what:이} 들어갑니다."
           }
         }
       }
@@ -21769,13 +21769,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "The lead's instruction carrying your request to {name} has not been delivered for over 30 minutes. Check delivery #{id}."
+            "value" : "The lead's instruction carrying your request to {name} has not been delivered for over 30 minutes. Check {name}'s status in Team."
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "{name}에게 넘긴 대표 요청(총괄 지시)이 30분 넘게 전달되지 않았습니다. 전달 #{id}를 확인해 주세요."
+            "value" : "{name}에게 넘긴 대표 요청(총괄 지시)이 30분 넘게 전달되지 않았습니다. 팀 화면에서 {name}의 상태를 확인해 주세요."
           }
         }
       }
@@ -21803,13 +21803,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Your to-do completion for {name} has not been delivered for over 30 minutes. Check delivery #{id}."
+            "value" : "Your to-do completion for {name} has not been delivered for over 30 minutes. Check {name}'s status in Team."
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "{name}에게 보낸 할 일 완료 소식이 30분 넘게 전달되지 않았습니다. 전달 #{id}를 확인해 주세요."
+            "value" : "{name}에게 보낸 할 일 완료 소식이 30분 넘게 전달되지 않았습니다. 팀 화면에서 {name}의 상태를 확인해 주세요."
           }
         }
       }
@@ -21827,6 +21827,40 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "대표 전달 지연"
+          }
+        }
+      }
+    },
+    "server.text.chat.owner_delivery_background" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "{name} finished its turn, but background programs that Codex started ({count}) are still running, so {what} can't go in. In {name}'s terminal, /ps lists them and /stop closes them; then it goes in."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "{name:이} 턴은 끝냈지만 Codex가 띄운 백그라운드 프로그램({count}개)이 남아 있어 {what:이} 들어가지 못합니다. {name}의 터미널에서 /ps 로 보고 /stop 으로 닫으면 들어갑니다."
+          }
+        }
+      }
+    },
+    "server.text.chat.owner_delivery_background.title" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Delivery blocked"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "전달 막힘"
           }
         }
       }
@@ -22806,13 +22840,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Stopped the current turn to put in your urgent instruction (delivery #{id})"
+            "value" : "Stopped the current turn to put in your urgent instruction"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "대표의 급한 지시(전달 #{id})를 넣으려고 하던 턴을 멈췄습니다"
+            "value" : "대표의 급한 지시를 넣으려고 하던 턴을 멈췄습니다"
           }
         }
       }
@@ -22823,13 +22857,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Tried to stop the current turn for your urgent instruction (delivery #{id}) but couldn't. It goes in when that turn ends ({detail})"
+            "value" : "Tried to stop the current turn for your urgent instruction but couldn't. It goes in when that turn ends ({detail})"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "대표의 급한 지시(전달 #{id})를 넣으려고 하던 턴을 멈추려 했지만 멈추지 못했습니다. 그 턴이 끝나면 들어갑니다 ({detail})"
+            "value" : "대표의 급한 지시를 넣으려고 하던 턴을 멈추려 했지만 멈추지 못했습니다. 그 턴이 끝나면 들어갑니다 ({detail})"
           }
         }
       }
@@ -22840,13 +22874,30 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sent the stop key to the current turn for your urgent instruction (delivery #{id}) but couldn't confirm it stopped right away. It goes in when the turn stops or ends ({detail})"
+            "value" : "Sent the stop key to the current turn for your urgent instruction but couldn't confirm it stopped right away. It goes in when the turn stops or ends ({detail})"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "대표의 급한 지시(전달 #{id})를 넣으려고 하던 턴에 멈춤 키를 보냈지만 바로 멈춘 것은 확인하지 못했습니다. 멈추거나 그 턴이 끝나면 들어갑니다 ({detail})"
+            "value" : "대표의 급한 지시를 넣으려고 하던 턴에 멈춤 키를 보냈지만 바로 멈춘 것은 확인하지 못했습니다. 멈추거나 그 턴이 끝나면 들어갑니다 ({detail})"
+          }
+        }
+      }
+    },
+    "server.text.activity.urgent_interrupt_background" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stopped the current turn for your urgent instruction, but the command it was running keeps going in background terminals ({count}). The urgent instruction goes in when that command ends or you close it with /stop in the terminal. IAMCEO doesn't stop it"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "대표의 급한 지시를 넣으려고 하던 턴을 멈췄지만, 실행하던 명령(백그라운드 터미널 {count}개)이 계속 돌고 있습니다. 그 명령이 끝나거나 터미널에서 /stop 으로 닫아야 급한 지시가 들어갑니다. IAMCEO는 그 명령을 끄지 않습니다"
           }
         }
       }
@@ -22898,6 +22949,40 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "압축 실패: {detail}"
+          }
+        }
+      }
+    },
+    "server.text.activity.compact_draft_cleared" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "After the compaction was stopped, the compaction command IAMCEO had typed came back in the input box, so it was cleared (only text identical to what IAMCEO typed is cleared). Waiting deliveries continue"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "압축을 멈춘 뒤 입력칸에 되살아난 IAMCEO의 압축 명령을 지웠습니다(IAMCEO가 넣은 글과 글자까지 같을 때만 지웁니다). 기다리던 전달을 이어 넣습니다"
+          }
+        }
+      }
+    },
+    "server.text.activity.compact_draft_left" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Text was left in the input box after the compaction was stopped, so deliveries wait. If it is the compaction command IAMCEO typed, clear it in the terminal (IAMCEO doesn't clear it because it may be yours)"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "압축을 멈춘 뒤 입력칸에 글이 남아 있어 전달을 기다립니다. IAMCEO가 넣은 압축 명령이 되살아난 것이면 터미널에서 지워 주세요(대표가 쓴 글일 수 있어 IAMCEO는 지우지 않습니다)"
           }
         }
       }
@@ -23238,6 +23323,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "턴은 끝났습니다. Codex가 띄운 백그라운드 프로그램({count}개)이 아직 돌고 있어, 다음 전달은 그 프로그램이 끝날 때까지 기다립니다. IAMCEO는 그 프로그램을 끄지 않습니다. 터미널에서 /ps 로 보고 /stop 으로 닫을 수 있습니다"
+          }
+        }
+      }
+    },
+    "server.text.activity.codex_background_after_stop" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The turn stopped, but the command it was running keeps going in background terminals ({count}). The next delivery goes in when that command ends or you close it with /stop in the terminal. IAMCEO doesn't stop it (/ps lists it)"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "턴은 멈췄지만 실행하던 명령(백그라운드 터미널 {count}개)이 계속 돌고 있습니다. 그 명령이 끝나거나 터미널에서 /stop 으로 닫아야 다음 전달이 들어갑니다. IAMCEO는 그 명령을 끄지 않습니다(/ps 로 볼 수 있습니다)"
           }
         }
       }
@@ -24353,13 +24455,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Replaced by a newer card (#{id})"
+            "value" : "Replaced by a newer card"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "새 카드(#{id})로 대신했습니다"
+            "value" : "새 카드로 대신했습니다"
           }
         }
       }

@@ -245,7 +245,10 @@ describe("30분 지연 알림을 사유별로(D1-3·D5-2·D1-1)", () => {
     const behind = t.store.listMessages(t.project.id).filter(m => m.textCode === "chat.owner_delivery_behind");
     expect(behind).toHaveLength(1);
     expect(behind[0]).toMatchObject({ kind: "알림", who: "시스템", memberId: w.id, title: "전달 대기" });
-    expect(behind[0]!.body).toMatch(/^영상 편집이 .+부터 하던 일을 마치는 중입니다\. 그 일이 끝나면 대표 메시지가 들어갑니다\(전달 #dl_/);
+    // 0.2.7 배포 전 확인(문제 3): 오늘 일이라 시각만, 대표 글에는 내부 번호가 없다(총괄 사본에만).
+    expect(behind[0]!.body).toMatch(/^영상 편집이 (오전|오후) \d{1,2}시( \d{1,2}분)?부터 하던 일을 마치는 중입니다\. 그 일이 끝나면 대표 메시지가 들어갑니다\.$/);
+    expect(behind[0]!.body).not.toContain("#");
+    expect(t.store.listPending(t.lead.id).find(x => x.text.includes("막힌 것이 아니라"))!.text).toContain(`(전달 ${d.id})`);
     expect(t.push.listEvents().filter(e => e.kind === "report_blocked")).toHaveLength(0);
     expect(mac).toHaveLength(0);
     // 총괄에게는 깨우지 않는 사본(막힌 것이 아니라는 말과 함께).
@@ -278,7 +281,9 @@ describe("30분 지연 알림을 사유별로(D1-3·D5-2·D1-1)", () => {
     t.orch.notifyDelayedDeliveries(now);
     const late = t.store.listMessages(t.project.id).filter(m => m.who === "시스템" && m.kind === "막힘").map(m => m.textCode).sort();
     expect(late).toEqual(["chat.owner_instruction_late", "chat.owner_todo_done_late"]);
-    expect(t.store.listMessages(t.project.id).find(m => m.textCode === "chat.owner_instruction_late")!.body).toBe(`영상 편집에게 넘긴 대표 요청(총괄 지시)이 30분 넘게 전달되지 않았습니다. 전달 #${quoted.delivery.id}를 확인해 주세요.`);
+    expect(t.store.listMessages(t.project.id).find(m => m.textCode === "chat.owner_instruction_late")!.body).toBe("영상 편집에게 넘긴 대표 요청(총괄 지시)이 30분 넘게 전달되지 않았습니다. 팀 화면에서 영상 편집의 상태를 확인해 주세요.");
+    // 총괄 사본(AI 글)에는 전달 번호가 남는다.
+    expect(t.store.listPending(t.lead.id).some(x => x.kind === "system" && x.text.includes("대표 요청(총괄 지시)이 30분 넘게") && x.text.includes(`(전달 ${quoted.delivery.id})`))).toBe(true);
   });
 
   test("받는 이가 총괄 자신이면 총괄 사본을 넣지 않는다", async () => {
@@ -565,5 +570,27 @@ describe("검토 대응: 30분 지연 알림", () => {
     await t.orch.memberInterrupt(w.id);
     await until(() => t.runner.textsTo(w.id).some(x => x.includes("압축 뒤 일")) && t.store.requireDelivery(queued.delivery.id).status === "delivered", "압축 뒤 전달");
     expect(t.store.getContextState(w.id)?.compaction?.phase).toBe("failed");
+  });
+});
+
+describe("0.2.7 배포 전 확인(real-cli P4): 멈출 턴이 없다는 실행기의 답", () => {
+  test("급한 지시로 멈추려 했는데 실행기가 멈출 턴이 없다(쉬는 CLI, 키를 보내지 않음)고 하면 실패가 아니다: 안내를 거두고 '받을 수 있게 되면 맨 먼저'로 답하며, 하던 턴을 중단된 턴으로 적지 않는다", async () => {
+    const t = setup();
+    const w = (await t.orch.addMember(t.project.id, { name: "영상 편집", handle: "video" })).member;
+    await t.working(w, "긴 편집 작업");
+    t.ownerSaid("하던 거 멈추고 이것 먼저");
+    t.runner.interruptError = new CoreError("no_turn", "No turn to stop: the CLI is idle", false, "not_written");
+    const reply = await t.call(t.lead, "team_assign", { member: "video", text: "급한 일", user_quote: "하던 거 멈추고 이것 먼저", urgent: true });
+    expect(t.runner.interrupts).toBe(1);
+    expect(reply.text).toContain("서버가 넣은 일하는 턴이 없어");
+    expect(reply.text).toContain("그 팀장이 받을 수 있게 되면 맨 먼저 들어갑니다");
+    expect(reply.text).not.toContain("멈춤 키를 보내지 못해");
+    expect(t.store.listActivity(w.id).some(a => String(a.textCode).startsWith("activity.urgent_interrupt"))).toBe(false);
+    expect(t.store.listPending(w.id).some(d => d.text.includes("하던 턴을 멈추게 했습니다"))).toBe(false);
+    // 턴이 끝나면 급한 지시가 맨 먼저 나간다. 그 턴은 중단된 턴이 아니라 보고 보완 확인도 평소대로다.
+    t.runner.end(w.id);
+    await until(() => t.runner.textsTo(w.id).some(x => x.includes("급한 일")), "턴 끝 뒤 급한 지시");
+    // 같은 대표 글로 다시 멈출 수 있다(멈추지 않았으므로 '이미 멈춤' 표식이 없다).
+    expect(t.store.hasActivityEvent(`urgent-stop:${w.id}:${t.store.listMessages(t.project.id).find(m => m.body === "하던 거 멈추고 이것 먼저")!.id}`)).toBe(false);
   });
 });

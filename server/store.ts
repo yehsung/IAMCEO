@@ -3693,8 +3693,13 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       ORDER BY m.at COLLATE BINARY, m.id COLLATE BINARY`, ...(projectId === undefined ? [] : [projectId])).map(r => this.messageFrom(r));
   }
 
+  /**
+   * 팀장 보고 가운데 총괄에게 넘기는 전달이 없는 글(그 넘김이 사라졌을 때 다시 만든다). 서버가 그 팀장 이름으로 남긴 글(who='시스템': 30분 지연 알림·
+   * 압축 확인 필요 등)은 팀장 보고가 아니다(0.2.7 배포 전 확인 real-cli P2: 총괄이 같은 알림을 '[시스템] …' 사본과 '[보고 시스템] 알림: …'으로 두 번 받았다).
+   * '시스템'은 팀장 이름으로 쓸 수 없다(server/text.ts RESERVED_NAMES).
+   */
   listReportsMissingDeliveries(projectId?: string): Message[] {
-    return this.rows(`SELECT m.* FROM messages m WHERE m.mine = 0 AND m.member_id IS NOT NULL AND m.kind IN ('완료','진행','막힘','알림')
+    return this.rows(`SELECT m.* FROM messages m WHERE m.mine = 0 AND m.member_id IS NOT NULL AND m.who <> '시스템' AND m.kind IN ('완료','진행','막힘','알림')
       AND m.rowid > COALESCE((SELECT legacy_max_rowid FROM report_delivery_tracking WHERE id = 1), 0)
       ${projectId === undefined ? "" : "AND m.project_id = ?"}
       AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.ref_type = 'message' AND d.ref_id = m.id AND d.kind = 'report')

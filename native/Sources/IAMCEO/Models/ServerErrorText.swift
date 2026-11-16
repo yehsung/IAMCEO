@@ -441,5 +441,8 @@ enum ServerErrorText {
         "file_not_own": (ko: "직원은 자기가 올린 자료만 새 판으로 바꿀 수 있습니다", en: "Staff can only replace files they uploaded themselves"),
         "file_already_replaced": (ko: "이미 새 판이 있는 자료입니다. 최신 판의 id 를 replaces 에 넣으세요", en: "This file already has a newer version. Put the latest version's id in replaces"),
         "todo_update_empty": (ko: "고칠 제목이나 내용이 필요합니다", en: "A new title or detail is needed"),
+        "interrupt_no_turn": (ko: "멈출 턴이 없습니다. CLI가 쉬는 중이라 멈춤 키를 보내지 않았습니다", en: "There is no turn to stop. The CLI is idle, so no stop key was sent"),
+        "interrupt_background_program": (ko: "멈출 턴이 없습니다. 턴은 끝났고 Codex가 띄운 백그라운드 프로그램만 돌고 있어 멈춤 키를 보내지 않았습니다. 그 프로그램은 터미널에서 /ps 로 보고 /stop 으로 닫을 수 있습니다", en: "There is no turn to stop. The turn ended and only background programs that Codex started are running, so no stop key was sent. In the terminal, /ps lists them and /stop closes them"),
+        "last_error_compact_draft": (ko: "압축을 멈춘 뒤 입력칸에 글이 남아 전달을 기다립니다. IAMCEO가 넣은 압축 명령이면 터미널에서 지워 주세요", en: "Deliveries wait because text was left in the input box after the compaction was stopped. If it is the compaction command IAMCEO typed, clear it in the terminal"),
     ]
 }

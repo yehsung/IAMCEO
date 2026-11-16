@@ -5,7 +5,7 @@ import type { AgentOperationContext, ManualInboxAckRequest, ManualInboxAckResult
 import type { Attachment, Decision, DecisionCloseFollowUp, DecisionCloseKind, DecisionOption, Delivery, Member, Message, MessageKind, Project, Todo, TodoOutcome, WorkItem, WorkSec } from "../../shared/types.ts";
 import { attachmentLines, formatAnswer, formatAnswerFor, formatInstruction, formatReport, formatSystem, isTidy, normalizeSpace, QUOTE_SCAN_PAGES, quotedInline, quoteNeedsContext, SHORT_QUOTE, type QuoteSource, type VerifiedQuote } from "../delivery-text.ts";
 import type { AgentToolDef, AgentToolResult, AskWaitResult } from "../orchestrator-api.ts";
-import type { AgentToolsImpl, Orchestrator, UrgentOutcome, UrgentWaitReason } from "../orchestrator.ts";
+import type { AgentToolsImpl, Orchestrator, UrgentOutcome, UrgentStop, UrgentWaitReason } from "../orchestrator.ts";
 import { josa } from "../roles.ts";
 import type { ReportReferences } from "../service-contracts.ts";
 import { ApiError, type NewDelivery, type Store } from "../store.ts";
@@ -31,6 +31,11 @@ export interface AssignResult {
   urgent?: UrgentOutcome;
   /** 0.2.7 묶음 1: 받는 팀장이 지금 하던 일을 시작한 때(일하는 중이라 기다릴 때만). */
   busySince?: string | null;
+  /**
+   * 0.2.7 배포 전 확인(real-cli P1·P2): 받는 팀장의 턴은 끝났지만 Codex 가 띄운 백그라운드 프로그램(이 수)이 남아 이 지시가 기다린다.
+   * 그 프로그램이 끝나거나 터미널에서 /stop 으로 닫아야 들어간다(IAMCEO 는 끄지 않는다). 그 밖에는 없다.
+   */
+  backgroundPrograms?: number;
 }
 
 export interface PostInput {
@@ -271,8 +276,14 @@ export interface MemberFlowPort {
   interjects(member: Member): boolean;
   /** 0.2.7 묶음 1: 급한 지시로 지금 '하던 턴 멈추고 넣기'를 할 수 없는 까닭(할 수 있으면 null). */
   urgentBlocker(member: Member, quote: VerifiedQuote | null): UrgentWaitReason | null;
-  /** 0.2.7 묶음 1: 앱의 '중단'과 같은 길로 하던 턴을 멈춘다. 멈춘 것을 확인했으면 interrupted, 멈춤 키는 보냈지만 확인하지 못했으면 unconfirmed, 보내지 못했으면 false. sourceId 는 근거인 대표 글(한 번만 멈추는 표식). */
-  interruptForUrgent(member: Member, delivery: Delivery, sourceId: string): Promise<"interrupted" | "unconfirmed" | false>;
+  /**
+   * 0.2.7 묶음 1: 앱의 '중단'과 같은 길로 하던 턴을 멈춘다. 멈춘 것을 확인했으면 interrupted, 멈춤 키는 보냈지만 확인하지 못했으면 unconfirmed, 보내지 못했으면 false.
+   * sourceId 는 근거인 대표 글(한 번만 멈추는 표식). 0.2.7 배포 전 확인: 턴은 멈췄지만 하던 명령이 Codex 백그라운드 터미널로 남았으면 { background },
+   * 멈출 턴이 없었으면(쉬는 CLI, 키를 보내지 않음) no_turn.
+   */
+  interruptForUrgent(member: Member, delivery: Delivery, sourceId: string): Promise<UrgentStop>;
+  /** 0.2.7 배포 전 확인(real-cli P1·P2): 턴은 끝났고 Codex 가 띄운 백그라운드 프로그램 때문에만 기다리는 팀장이면 그 수, 아니면 null. */
+  backgroundPrograms(member: Member): number | null;
   /** 0.2.7 묶음 1: 지금 하던 일을 시작한 때. */
   busySince(memberId: string): string | null;
   /** 턴 밖의 상태로 돌린다(답하지 않은 결재가 있으면 waiting, 없으면 idle). */
@@ -458,14 +469,18 @@ export class MemberFlows {
     let urgent: UrgentOutcome | undefined;
     if (stopping) {
       const stopped = await this.port.interruptForUrgent(target, delivery, quote!.source!.id);
-      urgent = stopped === "interrupted" ? { outcome: "interrupted" } : stopped === "unconfirmed" ? { outcome: "unconfirmed", busySince } : { outcome: "waiting", reason: "interrupt_failed", busySince };
+      urgent = stopped === "interrupted" ? { outcome: "interrupted" } : stopped === "unconfirmed" ? { outcome: "unconfirmed", busySince }
+        : stopped === "no_turn" ? { outcome: "waiting", reason: "no_turn", busySince }
+        : stopped ? { outcome: "background", terminals: stopped.background } : { outcome: "waiting", reason: "interrupt_failed", busySince };
       // 멈춘 것을 확인하지 못했으면 그 턴이 멈추거나 끝나야 들어간다: 배정 기록도 '앞 일 끝나면 시작'으로 고친다(검토 뒤).
       if (assignedBy && stopped !== "interrupted") this.store.noteDelegation(assignedBy.id, delivery, true);
     } else if (blocker) urgent = { outcome: "waiting", reason: blocker, busySince };
     const position = busy && urgent?.outcome !== "interrupted" ? this.store.listPending(target.id).length : 0;
     await this.port.pump(target.id);
+    // 0.2.7 배포 전 확인(real-cli P1·P2): 턴은 끝났지만 Codex 백그라운드 프로그램 때문에 기다리면 '하던 일이 끝나면'이 아니라 그 사실을 알린다.
+    const programs = urgent?.outcome === "background" || this.store.requireDelivery(delivery.id).status === "delivered" ? null : this.port.backgroundPrograms(this.store.requireMember(target.id));
     return { delivery: this.store.requireDelivery(delivery.id), position, verified: quote?.verified ?? null, needsContext: quote ? quoteNeedsContext(quote) : false,
-      ...(urgent ? { urgent } : {}), ...(busy && urgent?.outcome !== "interrupted" ? { busySince } : {}) };
+      ...(urgent ? { urgent } : {}), ...(busy && urgent?.outcome !== "interrupted" ? { busySince } : {}), ...(programs ? { backgroundPrograms: programs } : {}) };
   }
 
   /**
@@ -622,7 +637,7 @@ export class MemberFlows {
       if (replaced) {
         // 앞 카드를 새 카드에 잇고 같은 거래에서 닫는다. 대표가 옛 카드에 답하는 일(점검 D3-5)이 없다. 대표는 다시 열 수 있다(obsolete).
         this.store.setDecisionReplacedBy(replaced.id, decision.id);
-        this.store.closeDecision(replaced.id, { kind: "obsolete", reason: textRef("card.replaced", { id: decision.id }), by: member.name });
+        this.store.closeDecision(replaced.id, { kind: "obsolete", reason: textRef("card.replaced"), by: member.name });
       }
       this.store.createMessage({
         projectId: member.projectId,

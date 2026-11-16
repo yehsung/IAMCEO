@@ -53,13 +53,17 @@ export const SERVER_TEXTS = {
   "chat.delivery_stalled": { ko: "{name}에게 전달이 진행되지 않고 있습니다. 전달 정보에서 '다시 확인'을 눌러 주세요. 원래 입력을 중복해서 보내지 않습니다.", en: "Delivery to {name} is not moving. Press 'Check again' in the delivery details. The original input won't be sent twice." },
   "chat.delivery_stalled.title": { ko: "전달 확인 필요", en: "Delivery needs checking" },
   // 0.2.7 묶음 1(점검 D1-3·D5-2): 대표의 일이 30분 넘게 기다리는 까닭이 '받는 팀장이 하던 일을 마치는 중'이면 막힘이 아니라 이 알림(푸시 없음)이다.
-  "chat.owner_delivery_behind": { ko: "{name:이} {since}부터 하던 일을 마치는 중입니다. 그 일이 끝나면 {what:이} 들어갑니다(전달 #{id}).", en: "{name} has been finishing earlier work since {since}. When it ends, {what} goes in (delivery #{id})." },
+  // 0.2.7 배포 전 확인(문제 3): 대표 화면에 내부 번호(#dl_…)를 싣지 않는다(총괄 사본에는 서버가 따로 붙인다). {since} 는 오늘이면 시각만(sinceParam).
+  "chat.owner_delivery_behind": { ko: "{name:이} {since}부터 하던 일을 마치는 중입니다. 그 일이 끝나면 {what:이} 들어갑니다.", en: "{name} has been finishing earlier work since {since}. When it ends, {what} goes in." },
   "chat.owner_delivery_behind.title": { ko: "전달 대기", en: "Delivery waiting" },
   // 대표 원문을 실은 총괄 지시·할 일 완료 소식이 진짜로 막혔을 때(막힘·푸시). 결재 답·대표 메시지는 위의 예전 글 그대로다.
-  "chat.owner_instruction_late": { ko: "{name}에게 넘긴 대표 요청(총괄 지시)이 30분 넘게 전달되지 않았습니다. 전달 #{id}를 확인해 주세요.", en: "The lead's instruction carrying your request to {name} has not been delivered for over 30 minutes. Check delivery #{id}." },
+  "chat.owner_instruction_late": { ko: "{name}에게 넘긴 대표 요청(총괄 지시)이 30분 넘게 전달되지 않았습니다. 팀 화면에서 {name}의 상태를 확인해 주세요.", en: "The lead's instruction carrying your request to {name} has not been delivered for over 30 minutes. Check {name}'s status in Team." },
   "chat.owner_instruction_late.title": { ko: "대표 전달 지연", en: "Delivery delayed" },
-  "chat.owner_todo_done_late": { ko: "{name}에게 보낸 할 일 완료 소식이 30분 넘게 전달되지 않았습니다. 전달 #{id}를 확인해 주세요.", en: "Your to-do completion for {name} has not been delivered for over 30 minutes. Check delivery #{id}." },
+  "chat.owner_todo_done_late": { ko: "{name}에게 보낸 할 일 완료 소식이 30분 넘게 전달되지 않았습니다. 팀 화면에서 {name}의 상태를 확인해 주세요.", en: "Your to-do completion for {name} has not been delivered for over 30 minutes. Check {name}'s status in Team." },
   "chat.owner_todo_done_late.title": { ko: "대표 전달 지연", en: "Delivery delayed" },
+  // 0.2.7 배포 전 확인(real-cli P2): 대표의 일이 Codex 가 남긴 백그라운드 프로그램 뒤에서 30분 넘게 기다린다. 스스로 풀리지 않으므로 막힘·푸시다.
+  "chat.owner_delivery_background": { ko: "{name:이} 턴은 끝냈지만 Codex가 띄운 백그라운드 프로그램({count}개)이 남아 있어 {what:이} 들어가지 못합니다. {name}의 터미널에서 /ps 로 보고 /stop 으로 닫으면 들어갑니다.", en: "{name} finished its turn, but background programs that Codex started ({count}) are still running, so {what} can't go in. In {name}'s terminal, /ps lists them and /stop closes them; then it goes in." },
+  "chat.owner_delivery_background.title": { ko: "전달 막힘", en: "Delivery blocked" },
   // 0.2.7 묶음 1(점검 D1-1): 넣은 압축의 끝을 10분 안에 확인하지 못했다. 그 팀장에게 가는 전달이 모두 멈춰 있다(막힘·푸시).
   "chat.compact_unconfirmed": { ko: "{name}의 문맥 정리(압축)가 끝났는지 10분 넘게 확인되지 않아 {name}에게 가는 전달을 멈춰 두었습니다. 팀 화면에서 {name}의 터미널을 보고, 압축이 끝나 있으면 '중단'을 눌러 주세요. 기다리던 전달이 이어서 나갑니다.", en: "{name}'s context compaction hasn't been confirmed as finished for over 10 minutes, so deliveries to {name} are on hold. Check {name}'s terminal in Team, and if the compaction has finished, press 'Interrupt'. The waiting deliveries then go out." },
   "chat.compact_unconfirmed.title": { ko: "압축 확인 필요", en: "Compaction needs a check" },
@@ -124,12 +128,19 @@ export const SERVER_TEXTS = {
   "activity.compact_unconfirmed": { ko: "압축 완료를 확인할 수 없어 후속 자동 입력을 보류합니다", en: "Couldn't confirm the compaction finished, so further automatic input is on hold" },
   "activity.compact_uncertain": { ko: "압축 응답을 확인할 수 없어 자동 재전송을 중지했습니다", en: "Couldn't confirm the compaction response, so automatic resending stopped" },
   // 0.2.7 묶음 1(점검 D5-1): 대표 원문을 실은 급한 지시로 하던 턴을 멈춤('하던 턴 멈추고 넣기').
-  "activity.urgent_interrupt": { ko: "대표의 급한 지시(전달 #{id})를 넣으려고 하던 턴을 멈췄습니다", en: "Stopped the current turn to put in your urgent instruction (delivery #{id})" },
-  "activity.urgent_interrupt_failed": { ko: "대표의 급한 지시(전달 #{id})를 넣으려고 하던 턴을 멈추려 했지만 멈추지 못했습니다. 그 턴이 끝나면 들어갑니다 ({detail})", en: "Tried to stop the current turn for your urgent instruction (delivery #{id}) but couldn't. It goes in when that turn ends ({detail})" },
-  "activity.urgent_interrupt_unconfirmed": { ko: "대표의 급한 지시(전달 #{id})를 넣으려고 하던 턴에 멈춤 키를 보냈지만 바로 멈춘 것은 확인하지 못했습니다. 멈추거나 그 턴이 끝나면 들어갑니다 ({detail})", en: "Sent the stop key to the current turn for your urgent instruction (delivery #{id}) but couldn't confirm it stopped right away. It goes in when the turn stops or ends ({detail})" },
+  // 0.2.7 배포 전 확인(문제 3): 대표가 보는 활동 줄에 내부 번호(#dl_…)를 싣지 않는다.
+  "activity.urgent_interrupt": { ko: "대표의 급한 지시를 넣으려고 하던 턴을 멈췄습니다", en: "Stopped the current turn to put in your urgent instruction" },
+  "activity.urgent_interrupt_failed": { ko: "대표의 급한 지시를 넣으려고 하던 턴을 멈추려 했지만 멈추지 못했습니다. 그 턴이 끝나면 들어갑니다 ({detail})", en: "Tried to stop the current turn for your urgent instruction but couldn't. It goes in when that turn ends ({detail})" },
+  "activity.urgent_interrupt_unconfirmed": { ko: "대표의 급한 지시를 넣으려고 하던 턴에 멈춤 키를 보냈지만 바로 멈춘 것은 확인하지 못했습니다. 멈추거나 그 턴이 끝나면 들어갑니다 ({detail})", en: "Sent the stop key to the current turn for your urgent instruction but couldn't confirm it stopped right away. It goes in when the turn stops or ends ({detail})" },
+  // 0.2.7 배포 전 확인(real-cli P1): Codex 의 턴은 멈췄지만 실행하던 셸 명령이 백그라운드 터미널로 계속 돈다. IAMCEO 는 그 명령을 끄지 않는다.
+  "activity.urgent_interrupt_background": { ko: "대표의 급한 지시를 넣으려고 하던 턴을 멈췄지만, 실행하던 명령(백그라운드 터미널 {count}개)이 계속 돌고 있습니다. 그 명령이 끝나거나 터미널에서 /stop 으로 닫아야 급한 지시가 들어갑니다. IAMCEO는 그 명령을 끄지 않습니다", en: "Stopped the current turn for your urgent instruction, but the command it was running keeps going in background terminals ({count}). The urgent instruction goes in when that command ends or you close it with /stop in the terminal. IAMCEO doesn't stop it" },
   "activity.compact_failed_engine": { ko: "압축 실패: 실행 엔진이 제때 답하지 않아 압축을 시작하지 못했습니다. 기다리던 전달을 먼저 보냅니다", en: "Compaction failed: the engine didn't answer in time, so compaction couldn't start. Waiting deliveries go first" },
   "activity.compact_failed_busy": { ko: "압축 실패: 입력칸의 글이나 CLI 화면 때문에 압축을 시작하지 못했습니다. 기다리던 전달을 먼저 보냅니다", en: "Compaction failed: text in the input box or the CLI screen kept it from starting. Waiting deliveries go first" },
   "activity.compact_failed": { ko: "압축 실패: {detail}", en: "Compaction failed: {detail}" },
+  // 0.2.7 배포 전 확인(real-cli P3): Claude 의 도는 압축을 '중단'하면 Claude 가 끊긴 /compact 명령을 입력칸에 되돌려 전달이 막혔다.
+  // IAMCEO 가 넣은 그 명령과 글자까지 같을 때만 지운다(대표가 쓴 글은 지우지 않는다). 같다고 확인하지 못하면 지우지 않고 안내만 남긴다.
+  "activity.compact_draft_cleared": { ko: "압축을 멈춘 뒤 입력칸에 되살아난 IAMCEO의 압축 명령을 지웠습니다(IAMCEO가 넣은 글과 글자까지 같을 때만 지웁니다). 기다리던 전달을 이어 넣습니다", en: "After the compaction was stopped, the compaction command IAMCEO had typed came back in the input box, so it was cleared (only text identical to what IAMCEO typed is cleared). Waiting deliveries continue" },
+  "activity.compact_draft_left": { ko: "압축을 멈춘 뒤 입력칸에 글이 남아 있어 전달을 기다립니다. IAMCEO가 넣은 압축 명령이 되살아난 것이면 터미널에서 지워 주세요(대표가 쓴 글일 수 있어 IAMCEO는 지우지 않습니다)", en: "Text was left in the input box after the compaction was stopped, so deliveries wait. If it is the compaction command IAMCEO typed, clear it in the terminal (IAMCEO doesn't clear it because it may be yours)" },
   "activity.trust_auto": { ko: "프로젝트를 만들 때 대표가 이 폴더를 신뢰한다고 답해, 폴더 신뢰 확인 창에서 '{label}' 을 골랐습니다 · {cwd}", en: "You said you trust this folder when creating the project, so '{label}' was chosen at the folder trust prompt · {cwd}" },
   "activity.tidy": { ko: "판 정리: {text}", en: "Board tidy-up: {text}" },
   "activity.delivery_stalled": { ko: "전달이 진행되지 않고 있습니다. 다시 확인해 주세요", en: "Delivery is not moving. Please check it again" },
@@ -151,6 +162,8 @@ export const SERVER_TEXTS = {
   "activity.tool_card_closed": { ko: "도구 승인 카드를 닫았습니다 · {reason}", en: "Closed the tool approval card · {reason}" },
   // Codex 가 띄우고 남겨 둔 백그라운드 터미널: 그동안 실행 엔진은 일하는 중으로 알린다(CoreRunner.codexBackground, server/runner/codex-turn.ts).
   "activity.codex_background_left": { ko: "턴은 끝났습니다. Codex가 띄운 백그라운드 프로그램({count}개)이 아직 돌고 있어, 다음 전달은 그 프로그램이 끝날 때까지 기다립니다. IAMCEO는 그 프로그램을 끄지 않습니다. 터미널에서 /ps 로 보고 /stop 으로 닫을 수 있습니다", en: "The turn ended. Background programs that Codex started ({count}) are still running, so the next delivery waits until they finish. IAMCEO doesn't stop them. In the terminal, /ps lists them and /stop closes them" },
+  // 0.2.7 배포 전 확인(real-cli P1): 중단(turn_aborted)으로 끝난 턴의 명령이 백그라운드 터미널로 남았다.
+  "activity.codex_background_after_stop": { ko: "턴은 멈췄지만 실행하던 명령(백그라운드 터미널 {count}개)이 계속 돌고 있습니다. 그 명령이 끝나거나 터미널에서 /stop 으로 닫아야 다음 전달이 들어갑니다. IAMCEO는 그 명령을 끄지 않습니다(/ps 로 볼 수 있습니다)", en: "The turn stopped, but the command it was running keeps going in background terminals ({count}). The next delivery goes in when that command ends or you close it with /stop in the terminal. IAMCEO doesn't stop it (/ps lists it)" },
   "activity.codex_background_unverified": { ko: "Codex가 띄운 백그라운드 프로그램({count}개) 때문에 일하는 중으로 보입니다. 턴이 끝났는지 확인하지 못해 그대로 둡니다: {why}", en: "It shows as working because of background programs that Codex started ({count}). Couldn't confirm the turn ended, so it is left as is: {why}" },
   "why.codex_log_unbound": { ko: "Codex 세션 기록을 아직 이 팀장과 연결하지 못했습니다", en: "the Codex session record isn't linked to this staff member yet" },
   "why.codex_turn_unconfirmed": { ko: "Codex 세션 기록에서 이 턴이 끝났다는 기록을 찾지 못했습니다", en: "the Codex session record doesn't show that this turn finished" },
@@ -225,7 +238,8 @@ export const SERVER_TEXTS = {
   "card.reopen_by_owner": { ko: "{who:이} 닫았던 결재를 대표가 다시 열었습니다", en: "You reopened the decision {who} had closed" },
   "card.reopen_by_owner_reason": { ko: "{who:이} 닫았던 결재를 대표가 다시 열었습니다(닫은 이유: {reason})", en: "You reopened the decision {who} had closed (reason it was closed: {reason})" },
   // 0.2.7 묶음 4: ask 도구 replaces 로 새 카드가 앞 카드를 대신해 닫힌 이유.
-  "card.replaced": { ko: "새 카드(#{id})로 대신했습니다", en: "Replaced by a newer card (#{id})" },
+  // 0.2.7 배포 전 확인(문제 3): 내부 번호(#d_…)를 싣지 않는다. 새 카드는 앱의 '새 카드 보기'(replacedBy)로 간다.
+  "card.replaced": { ko: "새 카드로 대신했습니다", en: "Replaced by a newer card" },
 
   // ---- 낱말 ----
   "word.unknown": { ko: "알 수 없음", en: "unknown" },
@@ -300,6 +314,37 @@ export function formatTextDate(at: string, lang: TextLang): string | null {
   }
   const minute = Number(new Intl.DateTimeFormat("en-US", { timeZone, minute: "numeric" }).format(date));
   return new Intl.DateTimeFormat("en-US", { timeZone, month: "short", day: "numeric", hour: "numeric", ...(minute ? { minute: "2-digit" } : {}), hour12: true }).format(date);
+}
+
+/**
+ * 0.2.7 배포 전 확인(문제 3): 시각만. 한국어 '오후 3시 23분'(정각이면 '오후 3시'), 영어 '3:23 PM'(정각이면 '3 PM'). formatTextDate 의 시각 부분과 같은 꼴이다.
+ */
+export function formatTextTime(at: string, lang: TextLang): string | null {
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return null;
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (lang === "ko") {
+    const parts = new Intl.DateTimeFormat("ko-KR", { timeZone, hour: "numeric", minute: "numeric", hour12: true }).formatToParts(date);
+    const part = (type: Intl.DateTimeFormatPartTypes) => parts.find(p => p.type === type)?.value ?? "";
+    return `${part("dayPeriod")} ${part("hour")}시${Number(part("minute")) ? ` ${Number(part("minute"))}분` : ""}`;
+  }
+  const minute = Number(new Intl.DateTimeFormat("en-US", { timeZone, minute: "numeric" }).format(date));
+  return new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", ...(minute ? { minute: "2-digit" } : {}), hour12: true }).format(date);
+}
+
+/**
+ * 0.2.7 배포 전 확인(문제 3): '…부터' 같은 시각 값. 글을 만드는 지금과 같은 날(서버가 도는 Mac 의 시간대)이면 시각만('오후 3시 23분부터'),
+ * 다른 날이면 날짜까지({ at }: '11월 15일 오후 11시 40분부터'). 같은 날인지는 만들 때 정해 언어별 글자로 싣는다: 앱이 나중에(다음 날) 다시 그려도
+ * 저장된 문장과 같게 나온다(코드로 다시 그린 문장이 저장된 문장과 같을 때만 코드를 싣는 규칙).
+ */
+export function sinceParam(at: string, now: number = Date.now()): ServerTextParam {
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return { at };
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const day = (value: Date) => new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(value);
+  if (day(date) !== day(new Date(now))) return { at };
+  const ko = formatTextTime(at, "ko"), en = formatTextTime(at, "en");
+  return ko && en ? langsParam(ko, en) : { at };
 }
 
 const PLACEHOLDER = /\{([a-zA-Z][a-zA-Z0-9_]*)(?::(이|을|은|으로))?\}/g;

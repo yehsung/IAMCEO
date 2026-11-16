@@ -28,7 +28,7 @@ import { LAST_ERROR_CODES } from "../server/text-refs.ts";
 import { TOOL_PERMISSION_OPTIONS, toolActionRef, toolPermissionCard, toolPermissionCardTexts } from "../server/tool-permission.ts";
 import { appHeadersDumpDir, loadReleases, type AppHeaders } from "../scripts/compat-decoders/run.ts";
 import { API_LEVEL, APP_HEADERS, type DeviceAccessList } from "../shared/types.ts";
-import { textRef } from "../shared/server-text.ts";
+import { sinceParam, textRef } from "../shared/server-text.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
 /** 해석기가 아는 형 이름(scripts/compat-decoders/Harness.swift 의 표와 같다). */
@@ -161,7 +161,7 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
     const revised = store.createDecision({ projectId: project.id, memberId: member.id, who: "결제 연동", title: "문구를 고를까요?(고친 판)", replaces: earlier.id,
       options: [{ k: "a", label: "가" }, { k: "memo", label: "메모에 적음", needsNote: true }] });
     store.setDecisionReplacedBy(earlier.id, revised.id);
-    store.closeDecision(earlier.id, { kind: "obsolete", reason: textRef("card.replaced", { id: revised.id }), by: "결제 연동" });
+    store.closeDecision(earlier.id, { kind: "obsolete", reason: textRef("card.replaced"), by: "결제 연동" });
     const shot = store.createAttachment({ id: "a_compat_shot", name: "캡처.png", mime: "image/png", size: 3, path: join(isolated.paths.work, "캡처.png") });
     const withFiles = store.createDecision({ projectId: project.id, memberId: member.id, who: "결제 연동", title: "시안을 볼까요?", options: [{ k: "a", label: "가" }] });
     store.answerDecision(withFiles.id, { choice: "a", note: "그림 참고", fileIds: [shot.id] });
@@ -179,9 +179,10 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
     store.createMessage({ projectId: project.id, memberId: member.id, who: "시스템", kind: "알림",
       text: textRef("chat.run_interrupted", { name: member.name, run: "r_compat", why: textRef("why.slept") }) });
     store.createMessage({ id: `msg_delivery_behind_${held.id}`, projectId: project.id, memberId: member.id, who: "시스템", kind: "알림",
-      text: textRef("chat.owner_delivery_behind", { name: member.name, since: { at }, what: textRef("word.owner_message"), id: held.id }) });
+      // 0.2.7 배포 전 확인(문제 3): 오늘 일이면 시각만(언어별 글자 값), 대표 글에 내부 번호 없음.
+      text: textRef("chat.owner_delivery_behind", { name: member.name, since: sinceParam(at), what: textRef("word.owner_message") }) });
     store.appendActivity(member.id, "system", textRef("activity.compact_done"));
-    store.appendActivity(member.id, "system", textRef("activity.urgent_interrupt", { id: held.id }));
+    store.appendActivity(member.id, "system", textRef("activity.urgent_interrupt"));
     // 0.2.6 Y: 정해진 문장의 오류 줄(lastErrorCode). 0.2.6 영어 화면은 그 코드의 영어 문장을 쓴다.
     const stalled = store.createMember({ projectId: project.id, handle: "deploy", name: "배포 점검", kind: "worker", origin: "manual", status: "idle" });
     store.patchMember(stalled.id, { status: "error", lastError: [...LAST_ERROR_CODES].find(([, code]) => code === "last_error_api_outage")![0] });

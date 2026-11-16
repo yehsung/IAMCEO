@@ -4,10 +4,13 @@
 // 2026-11-15 라이브에서 미리보기 서버 하나 때문에 팀장이 15시간 '일하는 중'이었다. 그 동안에도 Codex 는 턴 끝을 자기 기록에 남긴다.
 //
 // Codex 0.166.0 실측: 턴마다 event_msg task_started(payload.turn_id) → 개발자·사용자 글 → … → token_count → 같은 turn_id 의 task_complete.
-// 중단된 턴은 turn_aborted 로 끝난다.
+// 중단된 턴은 turn_aborted 로 끝난다. 0.2.7 배포 전 확인(실제 Codex 0.166.0, real-cli P1): 오래 도는 셸 명령을 하던 턴을 Esc 로 멈추면 턴은
+// 곧바로 turn_aborted(interrupted)로 끝나고 Codex 는 입력을 받지만, 그 명령은 백그라운드 터미널로 계속 돌아 core 는 working 이다. 이것도 그 턴의 끝이다
+// (code turn_aborted). 예전에는 '끝났는지 모름'으로 두어 팀장이 그 명령이 끝날 때까지 '일하는 중'이었고 활동 줄은 '끝났다는 기록을 찾지 못했다'고 했다.
 // - 기준선(봉투가 쓰기 직전에 잡은 기록 끝)이 있으면 그 뒤만 읽는다. 없으면(세션을 아직 몰랐던 첫 전달) 처음부터 읽되,
 //   그 전달의 표지(#iamceo_…)가 든 사용자 글 뒤에 끝난 턴만 센다.
-// - 끝났다(ended): 읽은 범위 안에서 시작한 턴이 그 범위에서 task_complete 로 끝났고, 열린 턴이 없고, 마지막 턴 사건이 task_complete 다.
+// - 끝났다(ended): 읽은 범위 안에서 시작한 턴이 그 범위에서 task_complete(또는 turn_aborted)로 끝났고, 열린 턴이 없고, 마지막 턴 사건이
+//   그 끝이다. 마지막이 중단이면 code 는 turn_aborted 다(멈춘 턴: 실행하던 명령이 뒤에 남았을 수 있다).
 // - 열린 턴이 있으면 running. 기록을 끝까지 읽지 못했거나(덜 쓴 줄·망가진 줄·아직 읽는 중) 세션·폴더가 다르거나 표지를 못 찾으면 unknown.
 import { join } from "node:path";
 import { hasExactMarker, jsonObject, parseCodexSessionMeta, parseProviderUserText, providerLogPath, readJsonlRange, type JsonlCursor } from "./delivery-evidence.ts";
@@ -32,7 +35,7 @@ export interface CodexTurnCursor {
   /** 읽은 범위에서 시작해 아직 끝나지 않은 턴(turn_id). turn_id 가 없는 기록은 anonymous 로 센다. */
   open: string[];
   anonymous: number;
-  /** anchored 뒤에 task_complete 로 끝난, 읽은 범위 안에서 시작한 턴 수. */
+  /** anchored 뒤에 task_complete(또는 turn_aborted)로 끝난, 읽은 범위 안에서 시작한 턴 수. */
   completed: number;
   last: "started" | "complete" | "aborted" | null;
 }
@@ -88,7 +91,7 @@ export function readCodexTurnEnd(query: CodexTurnQuery, previous?: CodexTurnCurs
       const begun = id !== null ? next.open.includes(id) : next.anonymous > 0;
       if (id !== null) next.open = next.open.filter(open => open !== id);
       else if (next.anonymous > 0) next.anonymous--;
-      if (payload.type === "task_complete" && begun && next.anchored) next.completed++;
+      if (begun && next.anchored) next.completed++;
       next.last = payload.type === "task_complete" ? "complete" : "aborted";
     }
   }
@@ -97,7 +100,9 @@ export function readCodexTurnEnd(query: CodexTurnQuery, previous?: CodexTurnCurs
   if (!range.complete) return unknown(range.code, next);
   if (!next.anchored) return unknown("marker_missing", next);
   if (next.open.length || next.anonymous || next.last === "started") return { outcome: "running", code: "turn_open", cursor: next };
-  if (next.last === "aborted") return unknown("turn_aborted", next);
-  if (!next.completed || next.last !== "complete") return unknown("no_turn_complete", next);
+  // 범위 밖에서 시작한 턴(기준선 전에 이미 돌던 턴)이 중단으로 끝났을 뿐이면 이 전달의 턴 끝이 아니다.
+  if (!next.completed) return unknown(next.last === "aborted" ? "turn_aborted" : "no_turn_complete", next);
+  if (next.last === "aborted") return { outcome: "ended", code: "turn_aborted", cursor: next };
+  if (next.last !== "complete") return unknown("no_turn_complete", next);
   return { outcome: "ended", code: "turn_complete", cursor: next };
 }

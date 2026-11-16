@@ -4,7 +4,7 @@
 // 응답: text_ref 를 그 언어로 다시 그려 문장 칸과 같을 때만 코드를 싣는다. 다르면(이전 판 서버가 문장만 고쳤거나, 길어서 잘렸거나,
 // 코드 표가 바뀌었으면) 싣지 않는다. 그래서 앱은 받은 코드를 믿고 자기 화면 언어로 다시 그려도 뜻이 어긋나지 않는다.
 import type { Decision, DecisionOption } from "../shared/types.ts";
-import type { ErrorCode } from "../shared/error-codes.ts";
+import { ERROR_CODES, type ErrorCode } from "../shared/error-codes.ts";
 import { isServerTextRef, mustRender, renderServerText, textLang, textRef, titleCodeOf, type ServerTextRef, type TextLang } from "../shared/server-text.ts";
 import { endedByRestart, RESTART_EXIT_NOTE } from "./restart-wake.ts";
 
@@ -179,6 +179,8 @@ export const LAST_ERROR_CODES: ReadonlyMap<string, ErrorCode> = new Map<string, 
   ["실행기에 연결할 수 없습니다", "last_error_backend_unreachable"],
   ["전달 여부를 확인할 수 없습니다", "last_error_delivery_unknown"],
   ["전달 실패", "last_error_delivery_failed"],
+  // 0.2.7 배포 전 확인 검토(real-cli P3).
+  [ERROR_CODES.last_error_compact_draft.ko, "last_error_compact_draft"],
 ]);
 
 export function lastErrorCodeField(lastError: string | null | undefined): { lastErrorCode?: ErrorCode } {

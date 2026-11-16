@@ -90,8 +90,17 @@ describe("Codex 기록: 전달 뒤의 턴이 끝났는가", () => {
     // turn_id 없는 옛 모양도 짝을 맞춘다.
     expect(readCodexTurnEnd(log(rows(meta("sess", "/work"), started(null), user(MARKER), complete(null))).query())).toMatchObject({ outcome: "ended" });
   });
-  test("중단으로 끝났거나, 다른 세션·폴더이거나, 망가진 줄·덜 쓴 줄이 있으면 끝났다고 하지 않는다", () => {
-    expect(readCodexTurnEnd(log(rows(meta("sess", "/work"), started("t1"), user(MARKER), aborted("t1"))).query())).toMatchObject({ outcome: "unknown", code: "turn_aborted" });
+  // 0.2.7 배포 전 확인(real-cli P1): 실제 Codex 0.166 은 오래 도는 셸 명령을 하던 턴을 Esc 로 멈추면 turn_aborted 로 턴을 끝내고, 그 명령은 백그라운드
+  // 터미널로 계속 돈다. 그것도 그 턴의 끝이다(code turn_aborted). 범위 밖에서 시작한 턴이 중단으로 끝났을 뿐이면 이 전달의 끝이 아니다.
+  test("중단(turn_aborted)으로 끝난 이 전달의 턴은 끝났다(code turn_aborted). 앞 턴의 중단뿐이거나 중단 뒤 새 턴이 열렸으면 아니다", () => {
+    expect(readCodexTurnEnd(log(rows(meta("sess", "/work"), started("t1"), user(MARKER), aborted("t1"))).query())).toMatchObject({ outcome: "ended", code: "turn_aborted" });
+    const before = rows(meta("sess", "/work"), started("t1"));
+    expect(readCodexTurnEnd(log(before + rows(aborted("t1"))).query({ baseline: { offset: Buffer.byteLength(before), fileIdentity: null } }))).toMatchObject({ outcome: "unknown", code: "turn_aborted" });
+    expect(readCodexTurnEnd(log(rows(meta("sess", "/work"), started("t1"), user(MARKER), aborted("t1"), started("t2"))).query())).toMatchObject({ outcome: "running", code: "turn_open" });
+    // 중단 뒤 다시 끝난 턴(task_complete)이 마지막이면 평소의 끝이다.
+    expect(readCodexTurnEnd(log(rows(meta("sess", "/work"), started("t1"), user(MARKER), aborted("t1"), started("t2"), complete("t2"))).query())).toMatchObject({ outcome: "ended", code: "turn_complete" });
+  });
+  test("다른 세션·폴더이거나, 망가진 줄·덜 쓴 줄이 있으면 끝났다고 하지 않는다", () => {
     expect(readCodexTurnEnd(log(rows(meta("sess", "/other"), started("t1"), user(MARKER), complete("t1"))).query())).toMatchObject({ outcome: "unknown", code: "session_conflict" });
     expect(readCodexTurnEnd(log(rows(meta("other", "/work"), started("t1"), user(MARKER), complete("t1"))).query())).toMatchObject({ outcome: "unknown", code: "session_conflict" });
     expect(readCodexTurnEnd(log(rows(meta("sess", "/work"), started("t1"), user(MARKER)) + "{broken\n" + rows(complete("t1"))).query())).toMatchObject({ outcome: "unknown", code: "corrupt_log" });

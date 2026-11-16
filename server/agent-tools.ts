@@ -163,7 +163,13 @@ function assignNote(result: AssignResult): string {
   const since = sinceText(result.busySince ?? null);
   const urgent = result.urgent;
   // 0.2.7 묶음 1(점검 D5-1): 급한 지시에 서버가 실제로 한 일을 그대로 알린다. 총괄이 대표에게 '급히 넣었다'고 잘못 말하지 않게 한다.
-  const place = (urgent?.outcome === "interrupted" ? "대표의 급한 지시라 하던 턴을 멈추게 했습니다. 멈추는 대로 이 지시를 맨 먼저 넣습니다"
+  // 0.2.7 배포 전 확인(real-cli P1·P2): Codex 의 턴은 끝났거나 멈췄지만 하던 명령·띄운 프로그램이 백그라운드 터미널로 계속 돌아 기다리는 경우. 그 명령이
+  // 끝나거나 터미널에서 /stop 으로 닫아야 들어간다(IAMCEO 는 끄지 않는다). '그 턴이 끝나면'이라고 하면 총괄이 곧 들어간다고 잘못 알린다.
+  const programs = urgent?.outcome === "background" ? urgent.terminals : result.backgroundPrograms ?? 0;
+  const place = (urgent?.outcome === "background" || urgent?.outcome === "unconfirmed" && programs ? `대표의 급한 지시라 하던 턴을 멈추게 했습니다. 턴은 멈췄지만 실행하던 명령(백그라운드 터미널 ${programs}개)이 계속 돌고 있어, 그 명령이 끝나거나 대표가 터미널에서 /stop 으로 닫아야 이 지시가 맨 먼저 들어갑니다. IAMCEO는 그 명령을 끄지 않습니다. 대표에게 '바로 넣었다'고 하지 말고 이대로 알리세요`
+    : urgent?.outcome === "waiting" && programs ? `급한 지시지만 그 팀장의 턴은 이미 끝났고 Codex가 띄운 백그라운드 프로그램(${programs}개)만 돌고 있어 멈출 턴이 없습니다. 그 프로그램이 끝나거나 대표가 터미널에서 /stop 으로 닫아야 맨 먼저 들어갑니다. IAMCEO는 그 프로그램을 끄지 않습니다. 대표에게 '바로 넣었다'고 하지 말고 이대로 알리세요`
+    : programs && result.delivery.status !== "delivered" ? `턴은 끝났지만 Codex가 띄운 백그라운드 프로그램(${programs}개)이 남아 있어 기다립니다(대기열 ${Math.max(result.position, 1)}번째). 그 프로그램이 끝나거나 대표가 터미널에서 /stop 으로 닫아야 들어갑니다. IAMCEO는 그 프로그램을 끄지 않습니다`
+    : urgent?.outcome === "interrupted" ? "대표의 급한 지시라 하던 턴을 멈추게 했습니다. 멈추는 대로 이 지시를 맨 먼저 넣습니다"
     : urgent?.outcome === "unconfirmed" ? `대표의 급한 지시라 하던 턴에 멈춤 키를 보냈지만, 바로 멈춘 것은 확인하지 못했습니다. 멈추거나 그 턴이 끝나는 대로 이 지시를 맨 먼저 넣습니다${since ? `(${since} 일하는 중)` : ""}. 대표에게 '바로 넣었다'고 하지 말고 이대로 알리세요`
     : urgent?.outcome === "waiting" ? `급한 지시지만 ${URGENT_WAIT_REASONS[urgent.reason]} 하던 턴을 멈추지 않았습니다. ${URGENT_NO_TURN.has(urgent.reason) ? `그 팀장이 받을 수 있게 되면 맨 먼저 들어갑니다${since ? `(${since} 기다리는 중)` : ""}` : `그 턴이 끝나야 맨 먼저 들어갑니다${since ? `(${since} 일하는 중)` : ""}`}. 대표에게 '바로 넣었다'고 하지 말고 이대로 알리세요`
     : result.position > 0 ? `일하는 중이라 대기열 ${result.position}번째입니다. 끝나면 서버가 넣습니다${since ? `(${since} 일하는 중)` : ""}` : result.delivery.status === "delivered" ? "전달했습니다" : "전달 대기 중입니다. 받을 수 있을 때 서버가 넣습니다") + ` · 전달 ${result.delivery.id}`;

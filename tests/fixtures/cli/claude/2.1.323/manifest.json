@@ -1,7 +1,7 @@
 {
   "provider": "claude",
   "version": "2.1.323",
-  "source": "2026-11-13 17:56 실측(빈 DB 시험 서버, 갓 띄운 팀장의 첫 화면). 폴더 경로만 바꿨다. 폴더 신뢰 창은 이 실측에서 뜨지 않아 견본이 없다. 뒤 작업 화면·기록, 로그인 오류 기록(합성, 11-16 핫픽스 C): 2026-11-15 라이브 세션 기록의 줄 종류·키·순서(stop_hook_summary → turn_duration(pendingWorkflowCount) → queue-operation → compact_boundary(auto, postTokens) → isCompactSummary → informational, 그리고 isApiErrorMessage(authentication_failed) → turn_duration)와 관측 화면(idle.txt)의 아래쪽을 옮기고 글은 가짜로 바꿈. 'Waiting for N … to finish' 줄은 옛 herdr 실행기의 2.1.316 실측 모양이다.",
+  "source": "2026-11-13 17:56 실측(빈 DB 시험 서버, 갓 띄운 팀장의 첫 화면). 폴더 경로만 바꿨다. 폴더 신뢰 창은 이 실측에서 뜨지 않아 견본이 없다. 뒤 작업 화면·기록, 로그인 오류 기록(합성, 11-16 핫픽스 C): 2026-11-15 라이브 세션 기록의 줄 종류·키·순서(stop_hook_summary → turn_duration(pendingWorkflowCount) → queue-operation → compact_boundary(auto, postTokens) → isCompactSummary → informational, 그리고 isApiErrorMessage(authentication_failed) → turn_duration)와 관측 화면(idle.txt)의 아래쪽을 옮기고 글은 가짜로 바꿈. 'Waiting for N … to finish' 줄은 옛 herdr 실행기의 2.1.316 실측 모양이다. 압축을 멈춘 뒤 되살아난 압축 명령 화면(합성, 0.2.7 배포 전 확인 real-cli 견본 153145): 관측 화면(idle.txt)의 아래쪽과 실측의 줄 모양을 옮기고 글은 가짜로 바꿈.",
   "fixtures": [
     {
       "file": "idle.txt",
@@ -93,6 +93,20 @@
         "claudeTurnError": "authentication_failed",
         "idleCompaction": false,
         "tailTokens": null
+      }
+    },
+    {
+      "file": "compact-restored.txt",
+      "kind": "screen",
+      "origin": "synthetic",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "도는 압축을 Esc 로 끊으면 Claude 가 끊긴 /compact 명령을 입력칸에 되돌린다. 입력칸이 비지 않아 전달이 막혔다. IAMCEO 가 넣은 명령과 글자까지 같을 때만 지운다.",
+      "expect": {
+        "inputEmpty": false,
+        "folderTrustLike": false,
+        "trustDialogLike": false,
+        "folderTrust": null,
+        "quiet": null
       }
     }
   ]

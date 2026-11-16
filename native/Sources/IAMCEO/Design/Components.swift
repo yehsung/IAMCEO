@@ -465,24 +465,84 @@ struct InlineNotice: View {
     var actionTitle: String? = nil
     var action: (() -> Void)? = nil
     var actionDisabled = false
+    /// 켜면 제목 한 줄과 단추가 나란히 들어갈 때만 단추를 옆에 두고, 아니면(영어 iPhone 처럼 좁을 때) 단추를 글 아래로 내린다
+    /// — 단추 글이 잘리거나 제목이 꺾이지 않게(0.2.7 화면 재확인 N1, 옛 판 안내). 나란히 설 때는 끈 것과 같은 자리다.
+    var wrapsAction = false
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: icon).font(CEFont.rowTitle).foregroundStyle(tone.color).padding(.top, 1)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineSpacing(CELeading.title)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let detail, !detail.isEmpty {
-                    Text(detail).font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.note)
-                        .fixedSize(horizontal: false, vertical: true)
+        row
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(tone.color.opacity(0.09), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(tone.color.opacity(0.22)) }
+    }
+
+    @ViewBuilder private var row: some View {
+        if wrapsAction, let actionTitle, let action {
+            // 웹 .vw-bar 처럼 둘째 갈래는 단추를 글 아래로. 첫 갈래의 맞음 판정에는 설명 글을 넣지 않는다(설명은 단추 옆에서 꺾여도 된다).
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 10) {
+                    iconView
+                    texts(detailFitsAnyWidth: true)
+                    Spacer(minLength: 6)
+                    actionButton(actionTitle, action)
                 }
+                .padding(.vertical, 12).padding(.leading, 14).padding(.trailing, 10)
+                HStack(alignment: .top, spacing: 10) {
+                    iconView
+                    VStack(alignment: .leading, spacing: CESpace.s) {
+                        texts(detailFitsAnyWidth: false)
+                        actionButton(actionTitle, action)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 12).padding(.horizontal, 14)
             }
-            Spacer(minLength: 6)
-            if let actionTitle, let action { Button(actionTitle, action: action).ceSecondaryButton().controlSize(.small).disabled(actionDisabled) }
+        } else {
+            HStack(alignment: .top, spacing: 10) {
+                iconView
+                texts(detailFitsAnyWidth: false)
+                Spacer(minLength: 6)
+                if let actionTitle, let action { actionButton(actionTitle, action) }
+            }
+            .padding(.vertical, 12).padding(.leading, 14).padding(.trailing, actionTitle != nil ? 10 : 14)
         }
-        .padding(.vertical, 12).padding(.leading, 14).padding(.trailing, actionTitle != nil ? 10 : 14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(tone.color.opacity(0.09), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(tone.color.opacity(0.22)) }
+    }
+
+    private var iconView: some View {
+        Image(systemName: icon).font(CEFont.rowTitle).foregroundStyle(tone.color).padding(.top, 1)
+    }
+
+    private func texts(detailFitsAnyWidth: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineSpacing(CELeading.title)
+                .fixedSize(horizontal: false, vertical: true)
+                .layoutProbe("notice.title")
+            if let detail, !detail.isEmpty {
+                let text = Text(detail).font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.note)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .layoutProbe("notice.detail")
+                if detailFitsAnyWidth { NoIdealWidth { text } } else { text }
+            }
+        }
+    }
+
+    private func actionButton(_ title: String, _ action: @escaping () -> Void) -> some View {
+        Button(title, action: action).ceSecondaryButton().controlSize(.small).disabled(actionDisabled)
+            .layoutProbe("notice.action")
+    }
+}
+
+/// 이상적인 너비(너비 없이 묻는 것, ViewThatFits 의 맞음 판정)에만 0 이라 답하고, 실제 배치는 속 부품 그대로 한다.
+/// 꺾여도 되는 긴 글이 '한 줄에 들어가는가' 판정에 끼지 않게 한다(InlineNotice.wrapsAction).
+private struct NoIdealWidth: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let child = subviews.first else { return .zero }
+        guard proposal.width != nil else { return CGSize(width: 0, height: child.sizeThatFits(.unspecified).height) }
+        return child.sizeThatFits(proposal)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, anchor: .topLeading,
+                              proposal: ProposedViewSize(width: proposal.width ?? bounds.width, height: proposal.height))
     }
 }
 

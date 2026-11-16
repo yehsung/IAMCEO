@@ -71,6 +71,15 @@ private func officeAllowsTerminal(_ member: Member) -> Bool {
     TerminalAvailability.supportsTerminal(member)
 }
 
+/// 말풍선의 이름 옆에 상태 글을 쓰는가. 서브에이전트만 일하는 팀장은 쓰지 않는다: 옆 글이 이미 '서브에이전트 N개 · 마지막: …'이라
+/// '서브에이전트'가 두 번 나왔다(0.2.7 화면 재확인 N5). 장면의 점 색이 일하는 중을 보이고, 읽기 도움말에는 상태가 그대로 있다.
+func officeBubbleShowsState(_ member: Member) -> Bool { member.subagentsAtWorkLine == nil }
+
+/// 말풍선의 읽기 도움말: 이름, 상태, 하는 일. 화면에서 상태 글을 뺀 경우(서브에이전트만 일함)에도 상태를 읽는다.
+func officeBubbleAccessibilityLabel(_ member: Member?, line: String) -> String {
+    member.map { "\($0.name), \(officeStateLabel($0)), \(line)" } ?? line
+}
+
 /// What the message box (and accessibility) says a member is doing.
 func officeDetail(_ member: Member) -> String {
     if MemberStatusInfo.isUncertain(member) { return MemberStatusInfo(member).explanation }
@@ -971,7 +980,7 @@ private struct OfficeBench: View {
 /// A flat plate under the scene: name · state, then what the member is doing (one line on Mac, two on iPhone).
 /// Hovered, else selected, else it cycles every ~6s through who needs the CEO, then who works. Tapping it opens
 /// that member's detail.
-private struct OfficeMessageBox: View {
+struct OfficeMessageBox: View {
     let subject: Member?
     let queue: [Member]
     let decisions: [String: Int]
@@ -1007,7 +1016,7 @@ private struct OfficeMessageBox: View {
         .disabled(member == nil)
         .animation(still ? nil : .easeInOut(duration: 0.18), value: key)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(member.map { "\($0.name), \(officeStateLabel($0)), \(line)" } ?? line)
+        .accessibilityLabel(officeBubbleAccessibilityLabel(member, line: line))
         .accessibilityHint(member == nil ? "" : "대화방 정보 보기")
     }
 
@@ -1019,6 +1028,7 @@ private struct OfficeMessageBox: View {
             .lineSpacing(isMac ? 0 : CELeading.spacing(14, 1.45))
             .lineLimit(isMac ? 1 : 2)
             .truncationMode(.tail)
+            .layoutProbe("office.bubble.detail")
         if let member {
             let count = decisions[member.id] ?? 0
             let due: Int? = member.contextPct.flatMap { pct in
@@ -1028,12 +1038,8 @@ private struct OfficeMessageBox: View {
             let time = relativeTime(member.nowAt)
             #if os(macOS)
             ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    title(member, extra: extras(count: count, due: due, long: true)); detail; Spacer(minLength: 0); stamp(time)
-                }
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    title(member, extra: extras(count: count, due: due, long: false)); detail; Spacer(minLength: 0); stamp(time)
-                }
+                macRow(member, extra: extras(count: count, due: due, long: true), detail: detail, time: time)
+                macRow(member, extra: extras(count: count, due: due, long: false), detail: detail, time: time)
             }
             #else
             VStack(alignment: .leading, spacing: 4) {
@@ -1054,6 +1060,23 @@ private struct OfficeMessageBox: View {
         }
     }
 
+    #if os(macOS)
+    /// Mac 한 줄: 이름 · 상태 다음에 하는 일(12 띄움). 상태 글이 없으면(서브에이전트만 일함) '이름 · 서브에이전트 N개 · 마지막: …'으로,
+    /// 점 양옆은 이름 줄과 같은 6 이다(N5).
+    @ViewBuilder private func macRow(_ member: Member, extra: String?, detail: some View, time: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            if officeBubbleShowsState(member) {
+                title(member, extra: extra); detail
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: 6) { title(member, extra: extra); dot; detail }
+            }
+            Spacer(minLength: 0); stamp(time)
+        }
+    }
+    #endif
+
+    private var dot: some View { Text("·").font(.system(size: 13)).foregroundStyle(CE.ink3) }
+
     /// When the member last reported (the web card's time), quiet at the trailing edge.
     @ViewBuilder private func stamp(_ time: String) -> some View {
         if !time.isEmpty {
@@ -1063,15 +1086,22 @@ private struct OfficeMessageBox: View {
 
     private func title(_ member: Member, extra: String?) -> some View {
         let info = MemberStatusInfo(member)
+        let showsState = officeBubbleShowsState(member)
         return HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(member.name).font(.system(size: isMac ? 14 : 15, weight: .semibold)).foregroundStyle(CE.ink).lineLimit(1)
-            Text("·").font(.system(size: 13)).foregroundStyle(CE.ink3)
-            Text(officeStateLabel(member)).font(.system(size: isMac ? 12.5 : 13, weight: .semibold))
-                .foregroundStyle(member.presentedStatus == "idle" ? CE.ink3 : info.tone.color)
-                .lineLimit(1).fixedSize()
+                .layoutProbe("office.bubble.name")
+            if showsState {
+                dot
+                Text(officeStateLabel(member)).font(.system(size: isMac ? 12.5 : 13, weight: .semibold))
+                    .foregroundStyle(member.presentedStatus == "idle" ? CE.ink3 : info.tone.color)
+                    .lineLimit(1).fixedSize()
+                    .layoutProbe("office.bubble.state")
+            }
             if let extra {
+                // 상태 글이 없으면 '이름 · 결재 1건'(N5).
+                if !showsState { dot }
                 Text(extra).font(.system(size: isMac ? 12.5 : 13, weight: .semibold)).foregroundStyle(CE.attention).lineLimit(1).fixedSize()
-                    .padding(.leading, 4)
+                    .padding(.leading, showsState ? 4 : 0)
             }
         }
         .fixedSize(horizontal: true, vertical: false)

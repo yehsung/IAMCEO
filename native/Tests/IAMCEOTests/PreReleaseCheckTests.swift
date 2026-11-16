@@ -171,7 +171,188 @@ import UIKit
         #endif
     }
 
+    // MARK: 0.2.7 화면 재확인(verify/live-copy-2.md) N1 — 자료 › 옛 판 안내: 단추 글·제목을 자르거나 꺾지 않는다
+
+    #if os(macOS)
+    /// Mac 의 가장 좁은 읽기 칸의 글 너비: 창 1040 − 사이드바 320 − 자료 책상(24×2 + 목록 300 + 12) = 360, 그 안 26×2.
+    private let narrowNoticeWidth: CGFloat = 308
+    #else
+    /// iPhone 390: 판 14×2, 글 칸 16×2.
+    private let narrowNoticeWidth: CGFloat = 330
+    #endif
+    private let noticeIDs = ["notice.title", "notice.detail", "notice.action"]
+
+    private func olderVersionNotice(_ title: String, _ detail: String, _ action: String, wraps: Bool, width: CGFloat) -> some View {
+        InlineNotice(tone: .attention, icon: "clock.arrow.circlepath", title: title, detail: detail,
+                     actionTitle: action, action: {}, wrapsAction: wraps)
+            .frame(width: width)
+    }
+
+    /// 영어 iPhone 390(·Mac 가장 좁은 칸)에서 'View newer version'이 'View newer…'로, 제목이 'Older version · / Version 1'로
+    /// 꺾이던 것. 실제 `InlineNotice` 를 문구 표의 영어 글로 그려 잰다. `wrapsAction` 을 되돌리면 단추가 옆에 남아 실패한다.
+    func testOlderVersionNoticePutsItsButtonUnderTheTextWhenTheEnglishDoesNotFit() async throws {
+        let title = String(format: try english("옛 판입니다 · 판 %lld"), 1)
+        let detail = String(format: try english("고친 판이 있습니다: %@"), "가짜 자료: 출시 점검표")
+        let action = try english("새 판 보기")
+        XCTAssertEqual(action, "View newer version")
+        let wide = try await probeFrames(olderVersionNotice(title, detail, action, wraps: true, width: 900),
+                                         size: CGSize(width: 940, height: 300), waitFor: noticeIDs)
+        let fullTitle = try XCTUnwrap(wide["notice.title"]), fullAction = try XCTUnwrap(wide["notice.action"])
+        XCTAssertGreaterThan(fullAction.minX, fullTitle.maxX, "넉넉하면 단추는 글 옆 그대로")
+        // 고치기 전(늘 옆)에는 이 너비에서 단추가 잘리거나 제목이 꺾였다 — 시험이 뜻이 있다.
+        let before = try await probeFrames(olderVersionNotice(title, detail, action, wraps: false, width: narrowNoticeWidth),
+                                           size: CGSize(width: narrowNoticeWidth + 40, height: 400), waitFor: noticeIDs)
+        let cut = try XCTUnwrap(before["notice.action"]).width < fullAction.width - 1
+        let bent = try XCTUnwrap(before["notice.title"]).height > fullTitle.height + 1
+        XCTAssertTrue(cut || bent, "고치기 전 모양이 이 너비에서 잘리지 않는다면 이 시험은 뜻이 없다")
+
+        let frames = try await probeFrames(olderVersionNotice(title, detail, action, wraps: true, width: narrowNoticeWidth),
+                                           size: CGSize(width: narrowNoticeWidth + 40, height: 400), waitFor: noticeIDs)
+        let shownTitle = try XCTUnwrap(frames["notice.title"]), shownDetail = try XCTUnwrap(frames["notice.detail"])
+        let shownAction = try XCTUnwrap(frames["notice.action"])
+        XCTAssertEqual(shownAction.width, fullAction.width, accuracy: 1, "단추 글을 자르지 않는다")
+        XCTAssertEqual(shownTitle.height, fullTitle.height, accuracy: 1, "제목은 한 줄")
+        XCTAssertGreaterThanOrEqual(shownAction.minY, shownDetail.maxY, "단추는 설명 글 아래")
+        XCTAssertEqual(shownAction.minX, shownTitle.minX, accuracy: 1, "글과 같은 왼쪽 선")
+        XCTAssertLessThanOrEqual(max(shownTitle.maxX, shownDetail.maxX, shownAction.maxX), shownTitle.minX + narrowNoticeWidth, "안내 안")
+    }
+
+    /// 한국어(시험은 열쇠 = 한국어 글을 본다)는 iPhone 390·Mac 좁은 칸·넓은 칸 모두 단추가 옆 그대로이고, 자리가 고치기 전
+    /// (`wrapsAction` 끔)과 같다.
+    func testOlderVersionNoticeKeepsTheKoreanLayout() async throws {
+        let title = "옛 판입니다 · 판 1", detail = "고친 판이 있습니다: 가짜 자료: 출시 점검표", action = "새 판 보기"
+        for width in [narrowNoticeWidth, 700] {
+            let size = CGSize(width: width + 40, height: 300)
+            let before = try await probeFrames(olderVersionNotice(title, detail, action, wraps: false, width: width), size: size, waitFor: noticeIDs)
+            let after = try await probeFrames(olderVersionNotice(title, detail, action, wraps: true, width: width), size: size, waitFor: noticeIDs)
+            for id in noticeIDs {
+                let old = try XCTUnwrap(before[id], id), new = try XCTUnwrap(after[id], id)
+                XCTAssertEqual(new.minX, old.minX, accuracy: 0.5, "\(id) @\(width)"); XCTAssertEqual(new.minY, old.minY, accuracy: 0.5, "\(id) @\(width)")
+                XCTAssertEqual(new.width, old.width, accuracy: 0.5, "\(id) @\(width)"); XCTAssertEqual(new.height, old.height, accuracy: 0.5, "\(id) @\(width)")
+            }
+            XCTAssertGreaterThan(try XCTUnwrap(after["notice.action"]).minX, try XCTUnwrap(after["notice.title"]).maxX, "@\(width): 단추는 옆")
+        }
+    }
+
+    // MARK: N1 — 실제 자료 읽기 화면: 머리의 작성자, 옛 판 안내
+
+    /// 실제 `FileReader` 를 가짜 서버의 판 두 개(옛 판을 연다)로 띄운다. 시험은 한국어 열쇠를 보므로, 한 줄에 다 들어가지 않게
+    /// 작성자 이름을 조금 길게(영어 iPhone 의 'Document' + 'check 총괄' + '14 min ago' 와 같은 처지), 옛 판 안내는 한국어도
+    /// 넘치는 좁은 너비(iPhone 화면 확대 320)로 잰다. 머리 줄을 예전 HStack 으로 되돌리면 작성자가 줄어 실패하고,
+    /// 안내에서 `wrapsAction` 을 빼면 단추가 옆에 남아 실패한다.
+    func testRealFileReaderKeepsTheWholeAuthorAndTheNewerVersionButton() async throws {
+        let (store, network) = try await fileVersionsStore()
+        defer { store.disconnect() }
+        let old = try XCTUnwrap(store.files.first { $0.id == "f1" }, "가짜 서버의 옛 판")
+        let router = Router()
+        #if os(macOS)
+        let reader = CGSize(width: 360, height: 700), tight = CGSize(width: 280, height: 700), base: CGFloat = 118
+        #else
+        let reader = CGSize(width: 390, height: 844), tight = CGSize(width: 320, height: 844), base: CGFloat = 112
+        #endif
+        func screen() -> some View {
+            FileReader(file: old, framed: !isMac).environment(store).environment(router).environment(\.ceWide, isMac)
+        }
+        let meta = ["file.meta", "file.meta.kind", "file.meta.who", "file.meta.time", "file.actions"]
+        let wide = try await probeFrames(screen(), size: CGSize(width: 1200, height: 700), waitFor: meta + noticeIDs)
+        let shown = try await probeFrames(screen(), size: reader, waitFor: meta + noticeIDs)
+        let kind = try XCTUnwrap(shown["file.meta.kind"]), who = try XCTUnwrap(shown["file.meta.who"])
+        let time = try XCTUnwrap(shown["file.meta.time"]), line = try XCTUnwrap(shown["file.meta"]), actions = try XCTUnwrap(shown["file.actions"])
+        // 한국어 단추(복사 · 공유/받기)는 기본 자리 안이라 머리 줄 너비가 전과 같다(단추 오른쪽 끝 − 기본 자리).
+        XCTAssertLessThanOrEqual(actions.width + CESpace.s, base)
+        XCTAssertEqual(line.maxX, actions.maxX - base, accuracy: 1)
+        XCTAssertGreaterThan(kind.width + who.width + time.width + 16, line.width, "한 줄에 다 들어가지 않는 머리여야 시험이 뜻이 있다")
+        XCTAssertEqual(who.width, try XCTUnwrap(wide["file.meta.who"]).width, accuracy: 1, "작성자를 줄이지 않는다")
+        XCTAssertEqual(time.width, try XCTUnwrap(wide["file.meta.time"]).width, accuracy: 1, "시각도 줄이지 않는다")
+        XCTAssertGreaterThan(time.minY, who.maxY - 1, "넘치는 시각은 다음 줄로")
+        XCTAssertLessThanOrEqual(max(kind.maxX, who.maxX, time.maxX), actions.minX, "단추 밑으로 들어가지 않는다")
+        XCTAssertLessThanOrEqual(line.maxX, actions.minX - CESpace.s + 0.5, "머리 줄은 단추 앞 8 에서 끝난다")
+        // 넉넉하면 한 줄이다.
+        let wideKind = try XCTUnwrap(wide["file.meta.kind"]), wideTime = try XCTUnwrap(wide["file.meta.time"])
+        XCTAssertEqual(wideKind.midY, wideTime.midY, accuracy: 1, "넉넉하면 한 줄")
+
+        // 옛 판 안내: 한국어가 들어가는 너비는 단추가 옆(전과 같음), 넘치는 너비는 글 아래로 내려 단추 글을 자르지 않는다.
+        let fullAction = try XCTUnwrap(wide["notice.action"])
+        XCTAssertGreaterThan(try XCTUnwrap(shown["notice.action"]).minX, try XCTUnwrap(shown["notice.title"]).maxX, "한국어 390·Mac 좁은 칸: 옆 그대로")
+        let narrow = try await probeFrames(screen(), size: tight, waitFor: noticeIDs)
+        let action = try XCTUnwrap(narrow["notice.action"]), detail = try XCTUnwrap(narrow["notice.detail"])
+        XCTAssertEqual(action.width, fullAction.width, accuracy: 1, "단추 글을 자르지 않는다")
+        XCTAssertGreaterThanOrEqual(action.minY, detail.maxY, "넘치면 단추는 설명 글 아래")
+        XCTAssertEqual(try XCTUnwrap(narrow["notice.title"]).height, try XCTUnwrap(wide["notice.title"]).height, accuracy: 1, "제목은 한 줄")
+        await network.close()
+    }
+
+    #if os(iOS)
+    /// 복사 · 공유 단추가 기본 자리(112)보다 넓으면(영어 'Copy' · 'Share', 한국어도 큰 글자) 그 너비 + 8 을 비워 머리 줄이
+    /// 단추 밑으로 들어가지 않는다. 시험은 한국어 열쇠라 큰 글자로 넓힌다. 기본 자리 112 로 되돌리면 실패한다.
+    func testRealFileReaderLeavesRoomForCopyShareButtonsWiderThanTheDefault() async throws {
+        let (store, network) = try await fileVersionsStore()
+        defer { store.disconnect() }
+        let old = try XCTUnwrap(store.files.first { $0.id == "f1" }, "가짜 서버의 옛 판")
+        let screen = FileReader(file: old, framed: true).environment(store).environment(Router()).environment(\.ceWide, false)
+            .environment(\.dynamicTypeSize, .xxxLarge)
+        let ids = ["file.meta", "file.meta.kind", "file.meta.who", "file.meta.time", "file.actions"]
+        let frames = try await probeFrames(screen, size: CGSize(width: 390, height: 844), waitFor: ids)
+        let line = try XCTUnwrap(frames["file.meta"]), actions = try XCTUnwrap(frames["file.actions"])
+        XCTAssertGreaterThan(actions.width + CESpace.s, 112, "기본 자리보다 넓은 단추여야 시험이 뜻이 있다")
+        XCTAssertLessThanOrEqual(line.maxX, actions.minX - CESpace.s + 0.5, "머리 줄은 단추 앞 8 에서 끝난다")
+        for id in ["file.meta.kind", "file.meta.who", "file.meta.time"] {
+            XCTAssertLessThanOrEqual(try XCTUnwrap(frames[id], id).maxX, actions.minX, "\(id): 단추 밑으로 들어가지 않는다")
+        }
+        await network.close()
+    }
+    #endif
+
+    /// 가짜 판 서버에 붙은 상점.
+    private func fileVersionsStore() async throws -> (AppStore, IsolatedTestNetwork) {
+        let server = FileVersionsServer(author: "가짜 결제 연동 담당 팀장"), network = try IsolatedTestNetwork(handler: server.handle)
+        let store = AppStore(session: network.session, persistCredentials: false)
+        store.endpoint = network.endpoint.url.absoluteString; store.accessCode = "fixture-only"
+        await store.connect()
+        return (store, network)
+    }
+
+    // MARK: 0.2.7 화면 재확인 N5 — 사무실 말풍선: '서브에이전트'를 두 번 쓰지 않는다
+
+    /// 실제 `OfficeMessageBox` 를 그려, 서브에이전트만 일하는 팀장은 상태 글 없이 '이름 · 서브에이전트 2개 · 마지막: …'
+    /// (Mac 한 줄, 점 양옆 6), iPhone 은 이름 줄 아래 같은 글인지 잰다. 다른 팀장은 상태 글이 그대로다.
+    func testOfficeBubbleDropsTheRepeatedStateForSubagentOnlyLeads() async throws {
+        let busy = Member(id: "m", name: "가짜 개발", status: "idle", now: "가짜 판 8 값 넣는 중", subagentState: SubagentState(quality: "exact", count: 2))
+        let working = Member(id: "w", name: "가짜 서버", status: "working", now: "가짜 시험 돌리는 중")
+        #if os(macOS)
+        let size = CGSize(width: 760, height: 120)
+        #else
+        let size = CGSize(width: 390, height: 160)
+        #endif
+        func bubble(_ member: Member) -> some View {
+            OfficeMessageBox(subject: member, queue: [], decisions: [:], compactAt: 90, still: true, open: { _ in })
+        }
+        let other = try await probeFrames(bubble(working), size: size, waitFor: ["office.bubble.name", "office.bubble.state", "office.bubble.detail"])
+        XCTAssertNotNil(other["office.bubble.state"], "다른 팀장은 상태 글 그대로")
+        let frames = try await probeFrames(bubble(busy), size: size, waitFor: ["office.bubble.name", "office.bubble.detail"])
+        XCTAssertNil(frames["office.bubble.state"], "'서브에이전트 일하는 중'을 따로 쓰지 않는다")
+        let name = try XCTUnwrap(frames["office.bubble.name"]), detail = try XCTUnwrap(frames["office.bubble.detail"])
+        #if os(macOS)
+        let dot = idealSize(Text("·").font(.system(size: 13))).width
+        XCTAssertEqual(detail.minX - name.maxX, 6 + dot + 6, accuracy: 1, "이름 · 서브에이전트 2개 — 점 양옆 6")
+        XCTAssertEqual(detail.midY, name.midY, accuracy: 3, "Mac 은 한 줄")
+        #else
+        XCTAssertGreaterThan(detail.minY, name.maxY - 1, "iPhone 은 이름 줄 아래")
+        XCTAssertEqual(detail.minX, name.minX, accuracy: 1)
+        #endif
+    }
+
     // MARK: 도우미
+
+    /// 문구 표의 영어 값. 시험에는 언어 표가 없어 한국어 열쇠를 보므로, 영어 화면은 표를 직접 읽어 같은 글로 그린다.
+    private func english(_ key: String) throws -> String {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("Resources/Shared/Localizable.xcstrings")))
+        let strings = try XCTUnwrap((object as? [String: Any])?["strings"] as? [String: [String: Any]])
+        let localizations = try XCTUnwrap(strings[key]?["localizations"] as? [String: Any], key)
+        let unit = try XCTUnwrap((localizations["en"] as? [String: Any])?["stringUnit"] as? [String: Any], key)
+        return try XCTUnwrap(unit["value"] as? String, key)
+    }
 
     private final class Frames { var value: [String: CGRect] = [:] }
 
@@ -229,4 +410,34 @@ private final class ProbeWindow {
     func layout() { window.layoutIfNeeded() }
     func close() { window.isHidden = true; window.rootViewController = nil }
     #endif
+}
+
+/// 판 두 개(옛 판 f1 → 새 판 f2)를 가진 문서 하나를 주는 가짜 서버(NetAppServer 와 같은 방식). 글은 가짜다.
+private final class FileVersionsServer: @unchecked Sendable {
+    private let state: ProjectState
+    private let bootstrap = Bootstrap(projects: [ProjectSummary(id: "p")])
+    init(author: String) {
+        let member = Member(id: "m", name: author, status: "idle")
+        let old = FileDoc(id: "f1", kind: "document", projectId: "p", title: "가짜 자료: 출시 점검표", who: author, memberId: "m",
+                          body: "# 출시 점검표\n\n판 1(시험용 가짜 글)", createdAt: "2026-11-14T09:00:00.000Z", replacedBy: "f2")
+        let new = FileDoc(id: "f2", kind: "document", projectId: "p", title: "가짜 자료: 출시 점검표", who: author, memberId: "m",
+                          body: "# 출시 점검표\n\n판 2(시험용 가짜 글)", createdAt: "2026-11-14T09:05:00.000Z", replaces: "f1", versions: 2)
+        state = ProjectState(project: Project(id: "p", connection: ProjectConnection(ok: true)), members: [member], files: [new, old])
+    }
+    func handle(_ request: URLRequest) throws -> IsolatedTestHTTPReply {
+        func reply<T: Encodable>(_ value: T) throws -> IsolatedTestHTTPReply { IsolatedTestHTTPReply(data: try JSONEncoder().encode(value)) }
+        switch request.url?.path {
+        case "/api/bootstrap": return try reply(bootstrap)
+        case "/api/capabilities": return IsolatedTestHTTPReply(status: 404)
+        case "/api/projects/p/state": return try reply(state)
+        case "/api/sync":
+            let id = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "projectId" }?.value
+            return try reply(SyncSnapshot(protocolVersion: 2, cursor: SyncCursor(epoch: "file-versions", seq: 1),
+                requestedProjectId: id, projectStatus: id == nil ? .none : .ok, bootstrap: bootstrap,
+                state: id == nil ? nil : state, revisions: nil, apiOutage: nil))
+        case "/api/files/f1": return try reply(state.files[1])
+        case "/api/files/f2": return try reply(state.files[0])
+        default: return IsolatedTestHTTPReply(status: 404)
+        }
+    }
 }

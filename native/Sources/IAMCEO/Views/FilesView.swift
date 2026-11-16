@@ -674,6 +674,8 @@ private struct FileReaderContent: View {
     @State private var artifact: LoadedArtifact?
     @State private var enlarged = false
     @State private var viewport: CGFloat = 0
+    /// 처음 잰 복사·공유(받기) 단추 줄의 너비. 영어처럼 단추 글이 기본 자리보다 길 때만 그만큼 비운다(`enlargeReserve`).
+    @State private var documentActionsWidth: CGFloat = 0
 
     /// Attachments that are the file itself (web `split`); `file` kind owns all of them.
     private var mainAttachments: [Attachment] {
@@ -756,10 +758,11 @@ private struct FileReaderContent: View {
         if newest.id != file.id {
             // 몇 번째 판인지도 밝힌다('이전 판' 줄의 '판 N'과 같은 번호).
             let number = FileVersions.number(of: file, in: store.files)
+            // 좁으면(영어 iPhone) '새 판 보기'를 글 아래로 내려 단추 글·제목을 자르거나 꺾지 않는다(0.2.7 화면 재확인 N1).
             InlineNotice(tone: .attention, icon: "clock.arrow.circlepath",
                          title: number.map { String(localized: "옛 판입니다 · 판 \($0)") } ?? String(localized: "옛 판입니다"),
                          detail: String(localized: "고친 판이 있습니다: \(newest.title.isEmpty ? String(localized: "제목 없는 자료") : newest.title)"),
-                         actionTitle: String(localized: "새 판 보기"), action: { router.openFile(newest.id) })
+                         actionTitle: String(localized: "새 판 보기"), action: { router.openFile(newest.id) }, wrapsAction: true)
         } else {
             let older = FileVersions.previous(of: file, in: store.files)
             if !older.isEmpty {
@@ -789,12 +792,15 @@ private struct FileReaderContent: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: isArtifact ? 8 : 12) {
-            HStack(spacing: 8) {
-                KindTag(kind: file.kind)
-                whoLabel
-                timeLabel
-                Spacer(minLength: 0)
+            // 종류 · 작성자 · 시각. 한 줄에 다 들어가지 않으면(영어 iPhone: 'Document' + 'check 총괄' + '14 min ago') 작성자를
+            // 줄이지 않고 웹 flex-wrap 처럼 다음 줄로 넘긴다(0.2.7 화면 재확인 N1). 들어가면 전과 같은 한 줄이다.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { kindTag; whoLabel; timeLabel }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ChipFlow(spacing: 8, lineSpacing: 4) { kindTag; whoLabel; timeLabel }
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .layoutProbe("file.meta")
             .padding(.trailing, enlargeReserve)
             Text(file.title.isEmpty ? String(localized: "제목 없는 자료") : file.title)
                 .font(titleFont).tracking(isArtifact ? -0.34 : -0.4).foregroundStyle(CE.ink)
@@ -840,6 +846,11 @@ private struct FileReaderContent: View {
                     SaveButton(attachment: nil, text: documentText, name: "\(documentFileName).md")
                     #endif
                 }
+                // 처음 너비만: '복사됨'·'받는 중' 동안 머리 줄이 움직이지 않게.
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                    if documentActionsWidth == 0 { documentActionsWidth = width }
+                }
+                .layoutProbe("file.actions")
                 .offset(y: isMac ? -4 : -8)
             }
         }
@@ -857,12 +868,17 @@ private struct FileReaderContent: View {
     }
 
     /// Room beside the meta line and title for the 크게 보기 button (web padding-right 112), or 복사 · 받기.
+    /// 복사 · 받기(공유) 글이 그 자리보다 길면(영어 'Copy' · 'Share') 단추 줄 너비 + 8 을 비워, 머리 줄의 시각이 단추 밑으로
+    /// 들어가지 않게 한다(0.2.7 화면 재확인 N1). 한국어 단추는 기본 자리 안이라 전과 같다.
     private var enlargeReserve: CGFloat {
         if isArtifact && artifact != nil { return 106 }
-        return documentActions ? (isMac ? 118 : 112) : 0
+        guard documentActions else { return 0 }
+        return max(isMac ? 118 : 112, documentActionsWidth > 0 ? documentActionsWidth + CESpace.s : 0)
     }
 
     private var metaFont: Font { isMac ? .system(size: 13) : CEFont.secondary }
+
+    private var kindTag: some View { KindTag(kind: file.kind).layoutProbe("file.meta.kind") }
 
     /// web Time: "14:20", "11월 4일 14:20", tabular, the full date on hover.
     @ViewBuilder private var timeLabel: some View {
@@ -870,6 +886,7 @@ private struct FileReaderContent: View {
         if !text.isEmpty {
             Text(text).font(metaFont).foregroundStyle(CE.ink2).monospacedDigit().lineLimit(1)
                 .help(parseISODate(file.createdAt).map(koDateTime) ?? "")
+                .layoutProbe("file.meta.time")
         }
     }
 
@@ -895,6 +912,7 @@ private struct FileReaderContent: View {
         if let author {
             Button { router.openMember(author.id) } label: {
                 Text(name).font(metaFont.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
+                    .layoutProbe("file.meta.who")
                     // iPhone: a 44pt touch target without making the meta line taller.
                     .padding(.vertical, isMac ? 0 : 12).contentShape(Rectangle()).padding(.vertical, isMac ? 0 : -12)
             }
@@ -903,6 +921,7 @@ private struct FileReaderContent: View {
             .accessibilityHint("팀에서 엽니다")
         } else if !name.isEmpty {
             Text(name).font(metaFont.weight(.semibold)).foregroundStyle(CE.ink).lineLimit(1)
+                .layoutProbe("file.meta.who")
         }
     }
 

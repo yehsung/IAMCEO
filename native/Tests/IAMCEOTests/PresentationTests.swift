@@ -285,6 +285,25 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(officeDetail(Member(status: "working")), "맡은 일 없음")
     }
 
+    /// 0.2.7 화면 재확인 N5: 말풍선은 서브에이전트만 일하는 팀장에게 상태 글을 따로 쓰지 않는다('서브에이전트'가 두 번 나왔다).
+    /// 그 밖의 팀장은 전과 같고, 읽기 도움말(접근성)에는 상태가 그대로 있다. 화면째 자리는 PreReleaseCheckTests 가 잰다.
+    @MainActor func testOfficeBubbleSaysSubagentsOnceButStillReadsTheState() {
+        let busy = Member(id: "busy", name: "가짜 개발", status: "idle", now: "가짜 판 8 값 넣는 중", subagentState: SubagentState(quality: "exact", count: 2))
+        XCTAssertFalse(officeBubbleShowsState(busy))
+        XCTAssertFalse(officeBubbleShowsState(Member(status: "idle", subagentState: SubagentState(quality: "estimated", count: 3))))
+        for other in [Member(status: "idle"), Member(status: "working", subagentState: SubagentState(quality: "exact", count: 2)),
+                      Member(status: "waiting"), Member(status: "blocked", blockedReason: "permission"), Member(status: "error"),
+                      Member(status: "asleep"), Member(status: "offline"), Member(status: "idle", subagentState: SubagentState(quality: "unknown", count: nil))] {
+            XCTAssertTrue(officeBubbleShowsState(other), other.status)
+        }
+        // 읽기 도움말: 이름, 상태, 하는 일 — 화면에서 뺀 상태도 읽는다.
+        XCTAssertEqual(officeBubbleAccessibilityLabel(busy, line: officeDetail(busy)),
+                       "가짜 개발, 서브에이전트 일하는 중, 서브에이전트 2개 · 마지막: 가짜 판 8 값 넣는 중")
+        let working = Member(id: "w", name: "가짜 서버", status: "working", now: "가짜 시험")
+        XCTAssertEqual(officeBubbleAccessibilityLabel(working, line: officeDetail(working)), "가짜 서버, 일하는 중, 가짜 시험")
+        XCTAssertEqual(officeBubbleAccessibilityLabel(nil, line: "모두 쉬는 중입니다."), "모두 쉬는 중입니다.")
+    }
+
     func testProjectSummaryDecodesSubagentWorkingCountAndOldServersMeanZero() throws {
         let decoder = JSONDecoder()
         XCTAssertEqual(try decoder.decode(ProjectSummary.self, from: Data(#"{"id":"p","workingCount":1,"subagentWorkingCount":2}"#.utf8)).subagentWorkingCount, 2)

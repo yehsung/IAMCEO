@@ -2,6 +2,16 @@
 export const PUSH_KINDS = ["decision", "approval_wait", "error", "report_complete", "todo_created", "report_blocked"] as const;
 /** 자유 답변 ask도 decision 사건 하나이며 질문 메시지는 별도 사건을 만들지 않는다. */
 export type PushKind = (typeof PUSH_KINDS)[number];
+/**
+ * 알림 사건의 종류. 기기 설정 칸(PushKind)에 더해, 설정 칸이 없는 것: test(연결 확인)와
+ * tailnet_off(0.2.7 D4-3: 서버 Mac 의 Tailscale 이 꺼져 iPhone 에서 연결할 수 없다. '실행 문제(error)' 설정을 따른다).
+ * 출시 앱은 모르는 종류의 알림을 눌러도 화면을 옮기지 않을 뿐 배너는 그대로 보인다(문구는 서버·중계가 만든다).
+ */
+export type PushEventKind = PushKind | "test" | "tailnet_off";
+/** 이 종류의 알림을 보낼지 정하는 기기 설정 칸. test 는 늘 보낸다(null). */
+export function pushPreferenceOf(kind: PushEventKind): PushKind | null {
+  return kind === "test" ? null : kind === "tailnet_off" ? "error" : kind;
+}
 export type PushPreferences = Record<PushKind, boolean>;
 /** 종류 기본값과 전체 opt-in은 별개다. 새 기기의 enabled는 false다. */
 export const DEFAULT_PUSH_PREFERENCES: Readonly<PushPreferences> = Object.freeze({
@@ -96,6 +106,6 @@ export interface PushTestRequest { requestId: string }
 export interface PushTestResult { notificationId: string; state: "queued" }
 export interface PushPayload {
   aps: { alert: { title: "IAMCEO"; body: string }; sound: "default"; "thread-id": string };
-  iamceo: { v: 1; serverId: string; eventId: string; kind: PushKind | "test"; target: PushEventTarget };
+  iamceo: { v: 1; serverId: string; eventId: string; kind: PushEventKind; target: PushEventTarget };
 }
 export type PushDeliveryState = "queued" | "sending" | "retry" | "accepted" | "cancelled" | "invalid" | "expired" | "failed" | "unknown";

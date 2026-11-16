@@ -59,7 +59,7 @@ export interface ServerContext {
   /** 시험용. 기본은 Tailscale 주소 감지. */
   detectHosts?: () => string[];
   /** 시험용. Tailscale 꺼짐 판정의 시계와 유예 시간. 기본은 Date.now 와 60초. */
-  tailnetWatch?: { now?: () => number; graceMs?: number };
+  tailnetWatch?: { now?: () => number; graceMs?: number; phoneGraceMs?: number };
   /** Isolated folder/API tests use a fake user home; production uses homedir(). */
   folderHome?: string;
   /** Isolated fake-clone tests need not depend on host disk availability. */
@@ -1427,6 +1427,22 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     remember: seen => store.rememberTailnetSeen(seen),
     notify: (title, body) => ctx.orch.notifyOperations?.(title, body) ?? false,
     changed: () => store.touchSnapshot(),
+    // D4-3: 오래 꺼지면 iPhone 에도(이미 등록된 기기, '실행 문제' 설정을 따른다). 다시 켜지면 아직 나가지 않은 알림을 거둔다.
+    // 냈다는 기록은 settings 에 남겨, 꺼진 채 서버를 다시 띄워도(배포·재시작) 같은 꺼짐에 다시 알리지 않는다.
+    ...(ctx.push ? {
+      phoneAlerted: () => { try { return store.tailnetPhoneAlert(); } catch { return null; } },
+      alertPhone: (since: string) => {
+        try {
+          ctx.push!.store.recordEvent({ sourceKey: `tailnet-off:${since}`, kind: "tailnet_off", projectId: null, memberId: null, target: { screen: "home" }, occurredAt: ctx.push!.store.timestamp() });
+          store.setTailnetPhoneAlert(since);
+          void Promise.resolve(ctx.push!.wake?.()).catch(() => undefined);
+        } catch (error) { console.warn("[hosts] Tailscale 꺼짐 iPhone 알림을 남기지 못했습니다:", (error as Error).message); }
+      },
+      clearPhone: (since: string) => {
+        try { ctx.push!.store.cancelSource(`tailnet-off:${since}`); } catch { /* 이미 나갔거나 사건이 없다 */ }
+        try { store.setTailnetPhoneAlert(null); } catch (error) { console.warn("[hosts] Tailscale 꺼짐 알림 기록을 지우지 못했습니다:", (error as Error).message); }
+      },
+    } : {}),
     ...ctx.tailnetWatch,
   });
   const tailnetField: TailnetField = () => { const status = tailnet.status(); return status ? { tailnet: status } : {}; };

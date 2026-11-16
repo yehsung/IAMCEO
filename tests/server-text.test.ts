@@ -336,7 +336,9 @@ describe("한국어 대조: 보고 언어 한국어로 그린 글은 바꾸기 �
     expect(conductorName("x".repeat(60)).length).toBeLessThanOrEqual(40);
     expect(PUSH_BODIES.ko).toEqual({ decision: "새 결재가 도착했습니다.", approval_wait: "진행을 위해 직접 확인이 필요합니다.", error: "실행 문제를 확인해 주세요.",
       report_complete: "완료 보고가 도착했습니다.", todo_created: "대표 할 일이 생겼습니다.", report_blocked: "막힘 보고를 확인해 주세요.",
-      test: "iPhone 알림 연결을 확인합니다.", report_more: "추가 완료 보고가 도착했습니다." });
+      test: "iPhone 알림 연결을 확인합니다.", report_more: "추가 완료 보고가 도착했습니다.",
+      // 0.2.7(D4-3) 새 종류. 기존 문구는 그대로다.
+      tailnet_off: "서버 Mac의 Tailscale이 꺼져 있어 iPhone에서 연결할 수 없습니다. Mac에서 Tailscale을 켜 주세요." });
     for (const value of Object.values(PUSH_BODIES.en)) expect(HANGUL.test(value)).toBe(false);
   });
 

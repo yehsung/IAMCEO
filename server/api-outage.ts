@@ -157,7 +157,9 @@ export class NoTerminalError extends Error {
   constructor() { super("세션 터미널이 없습니다"); }
 }
 
-interface Affected { memberId: string; ended: boolean; attempts: number; resumeId: string | null; awaitingResult: boolean; exhausted: boolean; errorKey?: string; exhaustedAt?: string | null; slowRetries?: number; exhaustNotified?: boolean }
+interface Affected { memberId: string; ended: boolean; attempts: number; resumeId: string | null; awaitingResult: boolean; exhausted: boolean; errorKey?: string; exhaustedAt?: string | null; slowRetries?: number; exhaustNotified?: boolean;
+  /** 0.2.7(D2-6): 이 장애 뒤에 이 팀장이 턴을 성공으로 끝냈다(마지막 실패 뒤). 영향받은 팀장이 모두 그렇다면 탐침을 기다리지 않고 장애를 닫는다. */
+  succeeded?: boolean }
 interface Outage { id: string; since: string; active: boolean; lastProbeAt: string | null; successes: number; revision?: number; affected: Affected[]; notifiedProjects?: string[]; recoveredProjects?: string[]; recoveryNotified?: boolean }
 interface Limited { memberId: string; fingerprint: string | null; raw: string; resetsAt: string | null; resumeId: string | null; awaitingResult: boolean; autoAttempted: string | null; failure: string | null; dismissStarted?: boolean; errorKey?: string;
   /** 자동 이어가기 일정. 한 번 실패했다고 멈추지 않도록 다음 시도 시각과 횟수를 둔다. */
@@ -208,6 +210,11 @@ export class ApiRecovery {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastUsageCheck = 0;
   private closed = false;
+  /**
+   * 0.2.7(D4-12): 뜰 때의 정리(prune(false))로 팀장이 빠졌지만 아직 다시 쓰지 않은 한도 카드. start()(총괄이 다 만들어진 뒤)가 곧바로 다시 쓴다.
+   * 남은 팀장이 없으면 카드가 닫히고 묶음도 지운다. 남은 팀장이 0명이면 5초 확인 타이머가 켜지지 않아 카드가 영원히 열린 채 남았다(검토).
+   */
+  private readonly staleCards = new Set<string>();
   constructor(private readonly options: ApiRecoveryOptions) {
     this.now = options.now ?? Date.now;
     this.state = options.store.loadApiRecovery<RecoveryState>("api_recovery") ?? { outage: null, limits: [] };
@@ -215,6 +222,45 @@ export class ApiRecovery {
     const at = new Date(this.now()).toISOString();
     for (const a of this.state.outage?.affected ?? []) if (a.exhausted) a.exhaustedAt ??= at;
     for (const g of this.state.limits) for (const m of g.members) m.limitedAt ??= at;
+    // 0.2.7(D4-12): 지난 판들이 남긴 찌꺼기(지운 팀장, 끝난 이어가기 글, 닫힌 빈 한도 카드)를 뜰 때 한 번 지운다.
+    // 카드 글은 여기서 다시 쓰지 않는다(총괄이 다 만들어지기 전이다). 팀장이 빠진 카드는 start() 가 곧바로 다시 쓴다(staleCards).
+    try { if (this.prune(false)) this.save(); } catch (error) { console.warn("API 복구 상태 정리 실패:", (error as Error).message); }
+  }
+  /**
+   * 0.2.7(D4-12): 상태에서 더 쓰이지 않는 것을 지운다. 바뀌었으면 true(저장은 부른 쪽이 한다).
+   * - 지운 팀장: 이어가기 순서(resumeOrder)·이어가기 글(continuations)·장애의 영향 목록·한도 카드의 팀장에서 뺀다(성공한 턴으로만 빠지던 것이라
+   *   지운 팀장은 영원히 남았다). 한도 카드에서 팀장이 빠지면 카드를 다시 쓴다(rewriteCards=false 인 뜰 때는 start() 가 쓴다).
+   * - 이어가기 글이 이미 나갔거나 사라졌으면(전달됨·실패·없음) 그 줄을 지운다(남아 있어도 대기열에 없어 쓰이지 않았다).
+   * - 팀장이 하나도 없는 한도 카드 묶음은 카드가 닫혔거나 없으면 지운다(다음 한도 실패 때만 걸러지던 것).
+   * 이어가기를 포기한 팀장(exhausted)·결과를 기다리는 팀장처럼 살아 있는 항목은 건드리지 않는다.
+   */
+  private prune(rewriteCards = true): boolean {
+    const store = this.options.store;
+    const exists = (id: string) => store.getMember(id) !== null;
+    let changed = false;
+    if (this.state.resumeOrder?.some(id => !exists(id))) { this.state.resumeOrder = this.state.resumeOrder.filter(exists); changed = true; }
+    for (const [memberId, deliveryId] of Object.entries(this.state.continuations ?? {})) {
+      if (exists(memberId) && ["queued", "held", "delivering"].includes(store.getDelivery(deliveryId)?.status ?? "")) continue;
+      delete this.state.continuations![memberId];
+      changed = true;
+    }
+    const o = this.state.outage;
+    if (o?.affected.some(a => !exists(a.memberId))) { o.affected = o.affected.filter(a => exists(a.memberId)); changed = true; }
+    const limits = this.state.limits.filter(group => {
+      if (group.members.some(m => !exists(m.memberId))) {
+        group.members = group.members.filter(m => exists(m.memberId));
+        changed = true;
+        // 카드가 없으면 아래에서 묶음째 지운다.
+        if (store.getDecision(group.decisionId)) { if (rewriteCards) this.updateCard(group); else this.staleCards.add(group.decisionId); }
+      }
+      return group.members.length > 0 || (store.getDecision(group.decisionId)?.status ?? "closed") !== "closed";
+    });
+    if (limits.length !== this.state.limits.length) { this.state.limits = limits; changed = true; }
+    return changed;
+  }
+  /** 팀장을 명부에서 지운 뒤 부른다(Orchestrator.forgetMember). 그 팀장의 장애·한도·이어가기 찌꺼기를 지운다(D4-12). */
+  forget(): void {
+    this.transaction(() => { if (this.prune()) this.save(); });
   }
   private exhaust(a: Affected, member: Member): void {
     a.exhausted = true;
@@ -257,6 +303,7 @@ export class ApiRecovery {
       if (errorKey) a.errorKey = errorKey;
       a.ended ||= ended;
       a.awaitingResult = false;
+      a.succeeded = false;
       if (ended && a.attempts >= 3 && !a.exhausted) this.exhaust(a, member);
       this.state.outage = o;
       if (ended) store.patchMember(member.id, { status: "idle", lastError: "인터넷 연결 문제로 멈춤", statusObservation: { source: member.backend ?? "core", observedAt: new Date(this.now()).toISOString(), freshness: "fresh", ownership: member.statusObservation?.ownership ?? "verified", consecutiveFailures: 0, error: { code: "network_outage", note: "인터넷 연결 문제로 멈춤" } } });
@@ -582,11 +629,15 @@ export class ApiRecovery {
       return this.options.store.requireDecision(decisionId);
     } finally { this.resuming.delete(group.cli); }
   }
-  /** 성공한 턴은 연결도 한도도 풀렸다는 증거다. 서버가 이어가기를 넣지 않았어도(대표가 터미널에서 직접 풀었어도) 그 직원을 놓아준다. */
+  /**
+   * 성공한 턴은 연결도 한도도 풀렸다는 증거다. 서버가 이어가기를 넣지 않았어도(대표가 터미널에서 직접 풀었어도) 그 직원을 놓아준다.
+   * 0.2.7(D2-6): 장애에 걸린 팀장이 모두 그 뒤로 턴을 성공했으면 탐침 두 번을 기다리지 않고 장애를 닫는다(복구 알림도 그때 한 번).
+   * 느린 응답 화면 한 번으로 장애가 열린 팀장이 1분 뒤 턴을 성공했는데도 장애가 12분 이어져 그 팀장의 전달이 보류됐다(11-16 01:52).
+   */
   completed(memberId: string): void {
     const a = this.state.outage?.affected.find(a => a.memberId === memberId);
     if (!a && !this.preservesOrder(memberId) && !this.state.limits.some(g => g.members.some(m => m.memberId === memberId))) return;
-    if (a) { a.awaitingResult = false; a.ended = false; a.exhausted = false; a.exhaustedAt = null; a.attempts = 0; a.slowRetries = 0; a.exhaustNotified = false; }
+    if (a) { a.awaitingResult = false; a.ended = false; a.exhausted = false; a.exhaustedAt = null; a.attempts = 0; a.slowRetries = 0; a.exhaustNotified = false; a.succeeded = true; }
     if (!this.options.store.listPending(memberId).length) this.state.resumeOrder = this.state.resumeOrder?.filter(id => id !== memberId);
     for (const g of this.state.limits) {
       const mine = g.members.filter(m => m.memberId === memberId);
@@ -597,14 +648,64 @@ export class ApiRecovery {
         ...(member.statusObservation?.error?.code === "usage_limit" ? { statusObservation: { ...member.statusObservation, error: null } } : {}) });
       this.updateCard(g);
     }
+    const o = this.state.outage;
+    if (o?.active && a && o.affected.every(x => x.succeeded || !this.options.store.getMember(x.memberId))) {
+      this.transaction(() => this.closeOutage(o));
+      for (const x of o.affected) void this.options.pump(x.memberId);
+      return;
+    }
     this.save();
+  }
+  /**
+   * 장애를 닫는다: 영향받은 팀장의 연결 표시를 지우고, 턴이 끊긴 팀장에게는 이어가기를 넣고(3번 넘게 실패했으면 포기), 알린 프로젝트에 복구를 알린다.
+   * 탐침이 두 번 이어 성공했을 때와(runTick), 영향받은 팀장이 모두 턴을 성공했을 때(completed) 부른다. 트랜잭션 안에서 부르고, 펌프는 부른 쪽이 민다.
+   */
+  private closeOutage(o: Outage): void {
+    o.active = false;
+    for (const a of o.affected) {
+      const member = this.options.store.getMember(a.memberId);
+      if (!member) continue;
+      if (!a.exhausted && ["network_outage", "network_retry"].includes(member.statusObservation?.error?.code ?? "")) this.options.store.patchMember(member.id, { lastError: null, statusObservation: { ...member.statusObservation!, error: null } });
+      if (!a.ended) continue;
+      if (a.attempts >= 3) {
+        if (!a.exhausted) this.exhaust(a, member);
+        continue;
+      }
+      a.resumeId = this.enqueueResume(member);
+      a.attempts++;
+      a.awaitingResult = true;
+      a.ended = false;
+    }
+    o.recoveredProjects ??= [];
+    const notifications = [...new Set([...(o.notifiedProjects ?? []), ...o.affected.map(a => this.options.store.getMember(a.memberId)?.projectId).filter((id): id is string => !!id)])]
+      .filter(id => !o.recoveredProjects!.includes(id))
+      .map(projectId => ({ projectId, count: o.affected.filter(a => this.options.store.getMember(a.memberId)?.projectId === projectId).length, alertOwner: false }))
+      // 그 프로젝트의 영향받은 팀원이 모두 지워졌으면 '팀원 0명이 이어서 일합니다'를 쓰지 않는다(D4-12).
+      .filter(n => n.count > 0);
+    if (notifications.length && !o.recoveryNotified) { notifications[0]!.alertOwner = true; o.recoveryNotified = true; }
+    o.recoveredProjects.push(...notifications.map(n => n.projectId));
+    this.save();
+    for (const n of notifications) this.options.notify(n.projectId, textRef("chat.api_recovered", { count: String(n.count) }), n.alertOwner);
   }
   start(): void {
     this.started = true;
+    if (this.staleCards.size && !this.closed) this.rewriteStaleCards();
     if (this.timer || this.closed || !this.state.outage?.active && !this.state.limits.some(g => g.members.length)) return;
     const interval = this.options.intervalMs ?? Number(process.env.IAMCEO_API_PROBE_INTERVAL_MS ?? 30_000);
     this.timer = setInterval(() => { void this.tick().catch(error => console.warn("API recovery tick failed", error)); }, Math.min(Number.isFinite(interval) && interval > 0 ? interval : 30_000, 5000));
     this.timer.unref?.();
+  }
+  /** D4-12: 뜰 때의 정리로 팀장이 빠진 한도 카드를 다시 쓴다(남은 팀장이 없으면 닫힌다). 닫힌 빈 묶음은 이어서 지운다. */
+  private rewriteStaleCards(): void {
+    const ids = new Set(this.staleCards);
+    this.staleCards.clear();
+    try {
+      this.transaction(() => {
+        for (const group of this.state.limits) if (ids.has(group.decisionId) && this.options.store.getDecision(group.decisionId)) this.updateCard(group);
+        this.prune();
+        this.save();
+      });
+    } catch (error) { console.warn("API 복구 상태의 한도 카드 정리 실패:", (error as Error).message); }
   }
   tick(): Promise<void> {
     if (this.closed) return Promise.resolve();
@@ -627,34 +728,11 @@ export class ApiRecovery {
           return true;
         } catch { return false; } finally { clearTimeout(timer!); }
       }));
-      if (this.closed || o !== this.state.outage || revision !== o.revision) return;
+      // 탐침을 기다리는 사이 영향받은 팀장이 모두 턴을 성공해 이미 닫았다(completed). 다시 닫지 않는다.
+      if (this.closed || o !== this.state.outage || revision !== o.revision || !o.active) return;
       o.successes = results.length > 0 && results.every(Boolean) ? o.successes + 1 : 0;
       if (o.successes >= 2) {
-        this.transaction(() => {
-          o.active = false;
-          for (const a of o.affected) {
-            const member = this.options.store.getMember(a.memberId);
-            if (!member) continue;
-            if (!a.exhausted && ["network_outage", "network_retry"].includes(member.statusObservation?.error?.code ?? "")) this.options.store.patchMember(member.id, { lastError: null, statusObservation: { ...member.statusObservation!, error: null } });
-            if (!a.ended) continue;
-            if (a.attempts >= 3) {
-              if (!a.exhausted) this.exhaust(a, member);
-              continue;
-            }
-            a.resumeId = this.enqueueResume(member);
-            a.attempts++;
-            a.awaitingResult = true;
-            a.ended = false;
-          }
-          o.recoveredProjects ??= [];
-          const notifications = [...new Set([...(o.notifiedProjects ?? []), ...o.affected.map(a => this.options.store.getMember(a.memberId)?.projectId).filter((id): id is string => !!id)])]
-            .filter(id => !o.recoveredProjects!.includes(id))
-            .map(projectId => ({ projectId, count: o.affected.filter(a => this.options.store.getMember(a.memberId)?.projectId === projectId).length, alertOwner: false }));
-          if (notifications.length && !o.recoveryNotified) { notifications[0]!.alertOwner = true; o.recoveryNotified = true; }
-          o.recoveredProjects.push(...notifications.map(n => n.projectId));
-          this.save();
-          for (const n of notifications) this.options.notify(n.projectId, textRef("chat.api_recovered", { count: String(n.count) }), n.alertOwner);
-        });
+        this.transaction(() => this.closeOutage(o));
         for (const a of o.affected) this.options.pump(a.memberId);
       } else this.save();
     }

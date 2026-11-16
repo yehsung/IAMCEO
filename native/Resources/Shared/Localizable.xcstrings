@@ -21546,6 +21546,40 @@
         }
       }
     },
+    "server.text.chat.restart_reopened_summary" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The Mac or the engine restarted; {count} staff whose sessions closed were reopened."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac이나 실행 엔진이 다시 시작되어 꺼졌던 팀원 {count}명을 다시 열었습니다."
+          }
+        }
+      }
+    },
+    "server.text.chat.restart_reopen_failed_summary" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The Mac or the engine restarted; reopened {opened} of {total} staff whose sessions closed. Couldn't reopen: {names}. Wake them from the Team screen."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac이나 실행 엔진이 다시 시작되어 꺼졌던 팀원 {total}명 가운데 {opened}명을 다시 열었습니다. 다시 열지 못한 팀원: {names}. 팀 화면에서 깨워 주세요."
+          }
+        }
+      }
+    },
     "server.text.why.restart_session_off" : {
       "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
       "localizations" : {

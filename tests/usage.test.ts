@@ -140,6 +140,8 @@ describe("늘어난 몫만 날짜별로", () => {
     const f = fixture();
     const ledger = new UsageLedger(f.db);
     const member = { id: f.lead.id, projectId: f.project.id, name: f.lead.name, kind: f.lead.kind };
+    // 서버가 새로 띄운 세션(0 에서 시작으로 적힘). 처음 보는 세션은 아래 'D4-9' 시험.
+    expect(ledger.registerFreshSession("claude", "s1", member, NOW)).toBe(true);
     expect(ledger.ingest(claude("s1", noon(11, 12), 2.0, 1000, 100), member, NOW)).toBe(true);
     expect(ledger.ingest(claude("s1", noon(11, 12) + 60_000, 2.5, 1500, 150), member, NOW)).toBe(true);
     expect(ledger.ingest(claude("s1", noon(11, 12) + 60_000, 9.9, 9999, 999), member, NOW)).toBe(false);
@@ -161,6 +163,7 @@ describe("늘어난 몫만 날짜별로", () => {
     const f = fixture();
     const ledger = new UsageLedger(f.db);
     const member = { id: f.codex.id, projectId: f.project.id, name: f.codex.name, kind: f.codex.kind };
+    for (const id of ["c1", "c2"]) ledger.registerFreshSession("codex", id, member, NOW);
     ledger.ingest({ provider: "codex", sessionId: "c1", at: NOW - 1000, costUsd: null, inputTokens: 900, outputTokens: 100, limits: [{ window: "primary", windowMinutes: 300, usedPct: 30, resetsAt: null }] }, member, NOW);
     ledger.ingest({ provider: "codex", sessionId: "c2", at: NOW - 5000, costUsd: null, inputTokens: 10, outputTokens: 1, limits: [{ window: "primary", windowMinutes: 300, usedPct: 10, resetsAt: null }] }, member, NOW);
     expect(f.db.query("SELECT cost_usd, input_tokens, output_tokens FROM usage_daily").get()).toEqual({ cost_usd: null, input_tokens: 910, output_tokens: 101 });
@@ -185,6 +188,10 @@ describe("모으기", () => {
     writeFileSync(join(dir, `rollout-2026-11-13T09-00-00-${codexId}.jsonl`), [JSON.stringify({ type: "session_meta", payload: { id: codexId, cwd: f.home, source: "cli" } }),
       JSON.stringify({ timestamp: new Date(NOW - 10_000).toISOString(), type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 5000, output_tokens: 700 } },
         rate_limits: { primary: { used_percent: 18, window_minutes: 300 } } } })].join("\n") + "\n");
+    // 서버가 띄운 세션들(lead-old 는 지난 세션이지만 띄울 때 적혔다).
+    const ledger = new UsageLedger(f.db), ref = (m: typeof f.lead) => ({ id: m.id, projectId: m.projectId, name: m.name, kind: m.kind });
+    for (const [id, m] of [["lead-now", f.lead], ["lead-old", f.lead], ["web-now", f.web]] as const) ledger.registerFreshSession("claude", id, ref(m), NOW);
+    ledger.registerFreshSession("codex", codexId, ref(f.codex), NOW);
     const collector = new UsageCollector({ db: f.db, home: f.home, codexHome, now: () => NOW });
     expect(collector.tick(NOW)).toMatchObject({ claude: 3, codex: 1 });
     // 같은 기록은 다시 넣지 않는다.
@@ -209,6 +216,7 @@ describe("모으기", () => {
     const f = fixture();
     f.setSession(f.web.id, "web-now");
     f.context("web-now", { at: NOW - 1000, cost_usd: 0.75 });
+    new UsageLedger(f.db).registerFreshSession("claude", "web-now", { id: f.web.id, projectId: f.other.id, name: f.web.name, kind: f.web.kind }, NOW);
     new UsageCollector({ db: f.db, home: f.home, codexHome: null }).tick(NOW);
     f.store.removeMember(f.web.id);
     const report = usageReport(f.db, { days: 1, now: NOW });
@@ -226,6 +234,7 @@ describe("모으기", () => {
     const ancient = NOW - RECORD_RETENTION_MS - 3 * DAY;
     const ledger = new UsageLedger(f.db);
     const member = { id: f.lead.id, projectId: f.project.id, name: f.lead.name, kind: f.lead.kind };
+    for (const id of ["lead-ancient", "lead-now"]) ledger.registerFreshSession("claude", id, member, NOW - 10 * DAY);
     ledger.ingest(claude("lead-ancient", NOW - 10 * DAY, 3), member, NOW - 10 * DAY);
     ledger.ingest({ ...claude("lead-now", NOW - 10 * DAY, 1), limits: [{ window: "seven_day", windowMinutes: 10_080, usedPct: 50, resetsAt: null }] }, member, NOW - 10 * DAY);
     // 100일 뒤로 간다.
@@ -245,6 +254,7 @@ describe("보고", () => {
     const ledger = new UsageLedger(f.db);
     const lead = { id: f.lead.id, projectId: f.project.id, name: f.lead.name, kind: f.lead.kind };
     const web = { id: f.web.id, projectId: f.other.id, name: f.web.name, kind: f.web.kind };
+    ledger.registerFreshSession("claude", "a", lead, NOW); ledger.registerFreshSession("claude", "b", web, NOW);
     ledger.ingest(claude("a", noon(11, 1), 10), lead, NOW);
     ledger.ingest(claude("a", noon(11, 13), 10.1), lead, NOW);
     ledger.ingest(claude("b", noon(11, 12), 0.3), web, NOW);
@@ -319,7 +329,9 @@ describe("GET /api/usage", () => {
     const t = await boot();
     const project = t.store.createProject({ name: "결제 앱", cwd: t.config.home });
     const member = t.store.createMember({ projectId: project.id, handle: "pay", name: "결제 연동", kind: "worker" });
-    new UsageLedger(t.store.db).ingest(claude("s", Date.now() - 1000, 1.23, 100, 10), { id: member.id, projectId: project.id, name: member.name, kind: member.kind });
+    const ledger = new UsageLedger(t.store.db), ref = { id: member.id, projectId: project.id, name: member.name, kind: member.kind };
+    ledger.registerFreshSession("claude", "s", ref);
+    ledger.ingest(claude("s", Date.now() - 1000, 1.23, 100, 10), ref);
     const response = await t.request("/api/usage?days=7");
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
@@ -345,5 +357,36 @@ describe("GET /api/usage", () => {
     expect(missing.status).toBe(404);
     expect((await missing.json() as { code: string }).code).toBe("project_not_found");
     expect((await t.request("/api/usage", { method: "POST" })).status).toBe(405);
+  });
+});
+
+describe("처음 보는 세션의 지난 사용분은 그날로 몰지 않는다 (D4-9)", () => {
+  test("서버가 띄우지 않은(또는 이 기능 전부터 있던) 세션의 첫 누적값은 기준값일 뿐이고, 그 뒤 늘어난 몫만 그날에 든다. 한도는 첫 표본부터 받는다", () => {
+    const f = fixture();
+    const ledger = new UsageLedger(f.db);
+    const member = { id: f.lead.id, projectId: f.project.id, name: f.lead.name, kind: f.lead.kind };
+    // 오래 잠들었다 깨운 세션의 첫 표본: 출력 토큰은 적은데 비용은 지난 사용분 전체의 누적값이다(값은 같은 모양의 가짜).
+    expect(ledger.ingest({ ...claude("woken", noon(11, 13), 287.4, 900_000, 2_980), limits: [{ window: "seven_day", windowMinutes: 10_080, usedPct: 75, resetsAt: null }] }, member, NOW)).toBe(true);
+    expect(f.db.query("SELECT count(*) AS n FROM usage_daily").get()).toEqual({ n: 0 });
+    expect(f.db.query("SELECT used_pct FROM usage_limits WHERE window_id = 'seven_day'").get()).toEqual({ used_pct: 75 });
+    expect(ledger.ingest(claude("woken", noon(11, 13) + 60_000, 287.9, 901_000, 3_080), member, NOW)).toBe(true);
+    expect(f.db.query("SELECT day, cost_usd, input_tokens, output_tokens, samples FROM usage_daily").all()).toEqual([
+      { day: localDay(noon(11, 13)), cost_usd: expect.closeTo(0.5, 6), input_tokens: 1000, output_tokens: 100, samples: 1 }]);
+  });
+
+  test("서버가 새로 띄운 세션은 적어 둔 기준(0)부터 세어 첫 표본도 그날에 든다. 이미 본 세션은 다시 적지 않는다", () => {
+    const f = fixture();
+    const ledger = new UsageLedger(f.db);
+    const member = { id: f.lead.id, projectId: f.project.id, name: f.lead.name, kind: f.lead.kind };
+    expect(ledger.registerFreshSession("claude", "fresh", member, NOW)).toBe(true);
+    expect(ledger.registerFreshSession("claude", "fresh", member, NOW)).toBe(false);
+    ledger.ingest(claude("fresh", noon(11, 13), 1.25, 2000, 200), member, NOW);
+    expect(f.db.query("SELECT cost_usd, input_tokens, output_tokens FROM usage_daily").get()).toEqual({ cost_usd: 1.25, input_tokens: 2000, output_tokens: 200 });
+    // 이미 본 세션: 기준값을 0 으로 되돌리지 않는다.
+    expect(ledger.registerFreshSession("claude", "fresh", member, NOW + 1000)).toBe(false);
+    expect(f.db.query("SELECT cost_usd FROM usage_sessions WHERE session_id = 'fresh'").get()).toEqual({ cost_usd: 1.25 });
+    // Codex 는 비용을 보고하지 않는다: 비용 기준값은 비워 둔다.
+    ledger.registerFreshSession("codex", "cx-fresh", { id: f.codex.id, projectId: f.project.id, name: f.codex.name, kind: f.codex.kind }, NOW);
+    expect(f.db.query("SELECT cost_usd, input_tokens, sample_at FROM usage_sessions WHERE session_id = 'cx-fresh'").get()).toEqual({ cost_usd: null, input_tokens: 0, sample_at: 0 });
   });
 });

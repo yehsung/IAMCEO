@@ -2,13 +2,13 @@ import { sign } from "node:crypto";
 import { lookup as dnsLookup, type LookupAddress } from "node:dns";
 import { connect, constants } from "node:http2";
 import type { ClientHttp2Session, ClientHttp2Stream, IncomingHttpHeaders, OutgoingHttpHeaders } from "node:http2";
-import type { PushEnvironment, PushProviderStatus } from "../../shared/push.ts";
+import type { PushEnvironment, PushEventKind, PushProviderStatus } from "../../shared/push.ts";
 import type { PushEventTarget, PushKind, PushPayload } from "./contracts.ts";
 import type { APNsConfig, APNsCredential } from "./config.ts";
 import type { TextLang } from "../../shared/server-text.ts";
 
 export const APNS_ORIGINS = Object.freeze({ sandbox: "https://api.sandbox.push.apple.com:443", production: "https://api.push.apple.com:443" });
-export const APNS_TTL_MS = Object.freeze({ decision: 3_600_000, approval_wait: 900_000, error: 900_000, report_complete: 3_600_000, todo_created: 3_600_000, report_blocked: 900_000, test: 300_000 });
+export const APNS_TTL_MS = Object.freeze({ decision: 3_600_000, approval_wait: 900_000, error: 900_000, report_complete: 3_600_000, todo_created: 3_600_000, report_blocked: 900_000, test: 300_000, tailnet_off: 900_000 });
 
 export interface APNsNotification {
   environment: PushEnvironment;
@@ -16,7 +16,7 @@ export interface APNsNotification {
   deliveryId: string;
   eventId: string;
   serverId: string;
-  kind: PushKind | "test";
+  kind: PushEventKind;
   target: PushEventTarget;
   occurredAt: string;
   expiresAt: string;
@@ -97,13 +97,16 @@ function id(value: string): boolean { return /^[A-Za-z0-9_-]{1,200}$/.test(value
  * 중계(relay/functions)도 이 표로 만든다: Mac 이 직접 보낼 때와 중계가 만들 때 같은 언어면 바이트까지 같다.
  * 내용(이름·제목·본문)은 싣지 않는다. 앱이 서버에서 읽어 보여 준다.
  */
-export const PUSH_BODIES: Record<TextLang, Record<PushKind | "test" | "report_more", string>> = {
+export const PUSH_BODIES: Record<TextLang, Record<PushEventKind | "report_more", string>> = {
   ko: { decision: "새 결재가 도착했습니다.", approval_wait: "진행을 위해 직접 확인이 필요합니다.", error: "실행 문제를 확인해 주세요.",
     report_complete: "완료 보고가 도착했습니다.", todo_created: "대표 할 일이 생겼습니다.", report_blocked: "막힘 보고를 확인해 주세요.",
-    test: "iPhone 알림 연결을 확인합니다.", report_more: "추가 완료 보고가 도착했습니다." },
+    test: "iPhone 알림 연결을 확인합니다.", report_more: "추가 완료 보고가 도착했습니다.",
+    // 0.2.7(D4-3)
+    tailnet_off: "서버 Mac의 Tailscale이 꺼져 있어 iPhone에서 연결할 수 없습니다. Mac에서 Tailscale을 켜 주세요." },
   en: { decision: "There is a new decision.", approval_wait: "Your confirmation is needed to continue.", error: "Please check a problem with a run.",
     report_complete: "A completion report arrived.", todo_created: "There is a new to-do for you.", report_blocked: "Please check a blocked report.",
-    test: "Checking iPhone notifications.", report_more: "More completion reports arrived." },
+    test: "Checking iPhone notifications.", report_more: "More completion reports arrived.",
+    tailnet_off: "Tailscale is off on your server Mac, so this iPhone can't connect. Turn Tailscale on on the Mac." },
 };
 
 /** Reconstruct allowlisted fields; extra properties from persisted objects never escape. */
@@ -130,7 +133,7 @@ export function buildAPNsPayload(notification: APNsNotification): PushPayload {
       if (hint.screen !== "home" || !("projectId" in hint) || !id(hint.projectId)) throw new Error("invalid_payload");
       target = { screen: "home", projectId: hint.projectId };
       break;
-    case "test":
+    case "test": case "tailnet_off":
       if (hint.screen !== "home") throw new Error("invalid_payload");
       target = { screen: "home" };
       break;

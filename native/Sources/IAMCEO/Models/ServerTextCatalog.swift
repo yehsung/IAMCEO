@@ -34,6 +34,8 @@ enum ServerTextCatalog {
         case "chat.api_resume_failed": return String(localized: "server.text.chat.api_resume_failed", defaultValue: "{name}의 인터넷 연결 복구 후 이어가기가 3회 실패했습니다. 터미널을 확인해 주세요.")
         case "chat.api_outage": return String(localized: "server.text.chat.api_outage", defaultValue: "인터넷 연결이 불안정해 팀원 {count}명이 멈췄습니다. 연결이 돌아오면 자동으로 이어 갑니다.")
         case "chat.api_recovered": return String(localized: "server.text.chat.api_recovered", defaultValue: "인터넷 연결이 돌아와 팀원 {count}명이 이어서 일합니다.")
+        case "chat.restart_reopened_summary": return String(localized: "server.text.chat.restart_reopened_summary", defaultValue: "Mac이나 실행 엔진이 다시 시작되어 꺼졌던 팀원 {count}명을 다시 열었습니다.")
+        case "chat.restart_reopen_failed_summary": return String(localized: "server.text.chat.restart_reopen_failed_summary", defaultValue: "Mac이나 실행 엔진이 다시 시작되어 꺼졌던 팀원 {total}명 가운데 {opened}명을 다시 열었습니다. 다시 열지 못한 팀원: {names}. 팀 화면에서 깨워 주세요.")
         case "why.restart_session_off": return String(localized: "server.text.why.restart_session_off", defaultValue: "Mac이나 실행 엔진이 다시 시작되어 세션이 꺼졌습니다")
         case "why.session_vanished": return String(localized: "server.text.why.session_vanished", defaultValue: "종료 근거 없이 세션이 사라졌습니다")
         case "why.restart_cut": return String(localized: "server.text.why.restart_cut", defaultValue: "Mac이나 실행 엔진이 다시 시작되어 끊겼습니다")

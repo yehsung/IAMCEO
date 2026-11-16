@@ -4,10 +4,10 @@
 // 0.2.6: 본문의 선택 칸 lang("ko"|"en", 없거나 다른 값이면 "ko")으로 문구의 언어를 고른다. 옛 Mac(칸 없음)은 예전처럼 한국어다.
 // 요청에 문구·제목·소리 같은 필드가 있어도 쓰지 않는다(허용 목록으로 다시 만든다). 모르는 필드는 버린다.
 import { PUSH_KINDS } from "../../../shared/push.ts";
-import type { PushEventTarget, PushKind } from "../../../shared/push.ts";
+import type { PushEventKind, PushEventTarget } from "../../../shared/push.ts";
 import { APNS_TTL_MS, buildAPNsPayload, serializeAPNsPayload } from "../../../server/push/apns.ts";
 
-export type RelayKind = PushKind | "test";
+export type RelayKind = PushEventKind;
 export interface PushRequest {
   /** 소문자 16진. APNs 경로에만 쓰고 저장·기록하지 않는다. */
   token: string;
@@ -25,7 +25,8 @@ export type PushRequestResult = { ok: true; value: PushRequest } | { ok: false; 
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TOKEN = /^(?:[0-9a-fA-F]{2}){1,512}$/;
-const KINDS: readonly string[] = [...PUSH_KINDS, "test"];
+// 0.2.7(D4-3): tailnet_off(서버 Mac 의 Tailscale 꺼짐). 이 판 전의 중계는 모르는 종류라 거절한다(400, 그 전달만 실패. Mac 은 중계를 멈추지 않는다).
+const KINDS: readonly string[] = [...PUSH_KINDS, "test", "tailnet_off"];
 const TARGET_KEYS = new Set(["screen", "projectId", "decisionId", "memberId", "messageId", "groupId"]);
 
 function object(value: unknown): value is Record<string, unknown> {

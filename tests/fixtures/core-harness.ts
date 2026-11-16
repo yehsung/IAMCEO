@@ -21,6 +21,8 @@ import type { CoreTerminal } from "../../server/runner/core-client.ts";
 import { transcriptPath } from "../../server/runner/transcript.ts";
 import type { Runner } from "../../server/runner/types.ts";
 import { Store } from "../../server/store.ts";
+import { PushEventRecorder } from "../../server/push/events.ts";
+import { PushStore } from "../../server/push/store.ts";
 import type { Backend, Member } from "../../shared/types.ts";
 
 const METHODS = ["terminal.run", "terminal.list", "terminal.get", "terminal.read", "terminal.send", "terminal.interrupt", "terminal.kill", "terminal.keys"];
@@ -450,6 +452,8 @@ export interface CoreSetupOptions {
    * false 면 감시와 틱이 한 번도 시작되지 않은 총괄이다. 복구 전의 상태를 손으로 만들고 recover() 를 직접 부르는 시험에만 쓴다.
    */
   live?: boolean;
+  /** 운영처럼 iPhone 알림 사건 기록기(PushEventRecorder)를 붙인다. 붙이면 push 로 그 사건 저장소를 읽는다(기기는 등록하지 않는다). */
+  push?: boolean;
 }
 const FAST_RUNNER: NonNullable<CoreRunnerDeps> = { pollMs: 20, rpcTimeoutMs: 2000, sendTimeoutMs: 2000, contextTimeoutMs: 300 };
 /** 재시작으로 꺼진 팀장을 다시 여는 줄의 빠른 시험용 간격. 한 번에 여는 수와 자리 잡기를 기다리는 상한은 운영 값 그대로다. */
@@ -466,7 +470,7 @@ export async function coreSetup(opts: CoreSetupOptions = {}): Promise<CoreEnv> {
     /** 서버를 내리고 같은 홈·같은 core 에 새 서버를 붙인다. 운영의 재시작처럼 initializeRuntime()·recover() 까지 돈 뒤에 돌아온다(live: false 로 끌 수 있다). */
     async restart(next = {}) {
       await base.stopServer();
-      return coreSetup({ timings: opts.timings, agentTools: opts.agentTools, notifier: opts.notifier, runnerDeps: opts.runnerDeps, herdrSocket: opts.herdrSocket, live: opts.live, ...next, home: base.home, core: base.core, projectId: base.project.id });
+      return coreSetup({ timings: opts.timings, agentTools: opts.agentTools, notifier: opts.notifier, runnerDeps: opts.runnerDeps, herdrSocket: opts.herdrSocket, live: opts.live, push: opts.push, ...next, home: base.home, core: base.core, projectId: base.project.id });
     },
   };
 }
@@ -496,7 +500,8 @@ async function assemble(opts: CoreSetupOptions) {
   const config = loadConfig(env);
   const bus = new Bus();
   const db = openDb(config.dbPath);
-  const store = new Store(db, bus);
+  const push = opts.push ? new PushStore(db) : null;
+  const store = new Store(db, bus, push ? new PushEventRecorder(push) : undefined);
   const orch: Orchestrator = createOrchestrator(config, store, {
     runner: { claudeHome, codexHome },
     runnerDeps: { ...FAST_RUNNER, ...opts.runnerDeps },
@@ -523,7 +528,7 @@ async function assemble(opts: CoreSetupOptions) {
     }
   }
   return {
-    home, config, env, store, bus, db, orch, runner, server, core,
+    home, config, env, store, bus, db, orch, runner, server, core, push,
     /** 시험 서버 주소(http://127.0.0.1:포트). */
     base,
     /** 접속 코드를 붙여 시험 서버의 HTTP API 를 부른다. */

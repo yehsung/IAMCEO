@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // IAMCEO CLI. mcp 는 세션마다 뜨므로 서버 코드를 끌어오지 않게 명령별로 늦게 불러온다.
-import { createReadStream, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, fstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { connect } from "node:net";
 import { homedir, networkInterfaces, userInfo } from "node:os";
@@ -271,6 +271,8 @@ export async function startOpsRuntime(config: Config, options: OpsRuntimeOptions
     const onTick = Reflect.get(orch, "onTick") as () => void;
     const tickOwner = orch;
     Reflect.set(orch, "onTick", () => loopMonitor.run("timer:onTick", () => onTick.call(tickOwner)));
+    // 11-16(D4-5): 틱 안의 단계도 따로 잰다(느린 틱이 다시 나오면 'slow tick:<단계>' 줄이 남는다).
+    orch.measureTickSteps((name, work) => loopMonitor.run(name, work));
     const runtimeInfo = orch.runtimeInfo.bind(orch);
     orch.runtimeInfo = async () => ({ ...await runtimeInfo(), daemon: { ready, buildId: identity, version: VERSION }, ...(backups ? { backup: backups.status() } : {}) });
     const context = { config, store, bus, orch, delivery: orch.deliveryRecovery, loopMonitor,
@@ -828,8 +830,26 @@ export async function waitForReadiness(config: Config, options: {
   throw new CliError(say(`서비스 준비 확인 실패: ${reason}. 로그를 확인하세요.`, `The service did not become ready: ${reason}. Check the logs.`));
 }
 
+/**
+ * 0.2.7(D4-6): 옛 형식의 서비스 설정으로 떴는가. 옛 plist 는 launchd 가 stdout·stderr 를 `<홈>/logs/server.log`·`server.err.log` 로 바로 열고
+ * IAMCEO_LOG_WRITER 가 없다(11-11 배포 때 손으로 쓴 라이브 설정). 그러면 줄에 시각이 없고 파일이 끝없이 자란다(로그 감독자를 거치지 않는다).
+ * launchd 가 띄운 그 서비스(XPC_SERVICE_NAME 이 서비스 이름)이고, 표준 출력이나 표준 오류가 바로 그 로그 파일일 때만 참이다.
+ * 그때 serve 는 스스로 로그 감독자(serviceRun)가 되어 서버를 자식으로 띄운다: plist 를 바꾸지 않아도 줄마다 시각이 붙고 10MiB×5 로 돈다.
+ * IAMCEO_LOG_WRITER 가 적혀 있으면(새 형식의 감독자, 또는 감독자가 띄운 자식) 보지 않는다.
+ */
+export function legacyServiceLogs(env: NodeJS.ProcessEnv = process.env, home = homeDir(),
+  fdStat: (fd: number) => { isFile(): boolean; dev: number; ino: number } = fstatSync, pathStat: (path: string) => { dev: number; ino: number } = statSync): boolean {
+  if (env.IAMCEO_LOG_WRITER !== undefined || env.XPC_SERVICE_NAME !== SERVICE_LABEL) return false;
+  return ([[1, "server.log"], [2, "server.err.log"]] as const).some(([fd, name]) => {
+    try {
+      const open = fdStat(fd), file = pathStat(join(home, "logs", name));
+      return open.isFile() && open.dev === file.dev && open.ino === file.ino;
+    } catch { return false; }
+  });
+}
+
 /** launchd owns only /dev/null FDs. This dedicated supervisor owns and rotates both real log FDs. */
-async function serviceRun(): Promise<void> {
+async function serviceRun(legacy = false): Promise<void> {
   const { BoundedLogWriter, lineStamper } = await import("../server/log-writer.ts");
   const { acquireHomeOwner } = await import("../server/home-owner.ts");
   const logs = join(homeDir(), "logs");
@@ -845,6 +865,8 @@ async function serviceRun(): Promise<void> {
   const term = signalChild("SIGTERM"), interrupt = signalChild("SIGINT"), hup = signalChild("SIGHUP");
   try {
     stderr = new BoundedLogWriter(join(logs, "server.err.log"));
+    // D4-6: 옛 설정으로 떠서 스스로 감독자가 되었다는 것을 한 번 남긴다(설정을 고치는 길도).
+    if (legacy) stderr.write(Buffer.from(`${new Date().toISOString()} [service] 옛 서비스 설정(시각·회전 없는 로그)으로 떠서 로그 감독자로 실행합니다. 설정 갱신: iamceo service install --restart\n`));
     child = Bun.spawn(selfCommand("serve"), { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, IAMCEO_LOG_WRITER: "0" } });
     process.on("SIGTERM", term); process.on("SIGINT", interrupt); process.on("SIGHUP", hup);
     const pump = async (stream: ReadableStream<Uint8Array>, writer: InstanceType<typeof BoundedLogWriter>) => {
@@ -1150,7 +1172,8 @@ async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
   switch (command) {
     case "serve":
-      return process.env.IAMCEO_LOG_WRITER === "1" ? serviceRun() : serve();
+      if (process.env.IAMCEO_LOG_WRITER === "1") return serviceRun();
+      return legacyServiceLogs() ? serviceRun(true) : serve();
     case "service-run":
       return serviceRun();
     case "backup":

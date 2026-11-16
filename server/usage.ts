@@ -9,7 +9,9 @@
 // 어떻게 모으나
 // - 둘 다 세션 누적값이다. 세션마다 마지막으로 본 누적값(usage_sessions)을 기준으로 늘어난 몫만 그 수치를 본 날의 칸(usage_daily)에 더한다.
 //   누적값이 줄었으면(세션을 다시 열어 CLI 가 0 부터 셌다) 새 값 전체를 늘어난 몫으로 본다.
-// - 처음 보는 세션은 그때의 누적값 전체를 그 기록의 시각이 속한 날에 넣는다(이 기능 전에 쓴 몫도 그날로 들어간다).
+// - 서버가 새로 띄운 세션은 띄울 때 '0 에서 시작'으로 적어 둔다(registerFreshSession). 그 세션의 첫 표본부터 늘어난 몫으로 그날에 들어간다.
+// - 처음 보는 세션(이 기능 전부터 있던 세션, 오래 잠들었다가 깨운 세션 등)의 누적값은 언제 쓴 것인지 알 수 없다. 기준값으로만 삼고 날짜 칸에
+//   넣지 않는다(0.2.7 D4-9: 예전에는 그 누적값 전체를 그날에 넣어 하루 비용이 수백~천 달러씩 부풀었다).
 // - 날짜는 서버가 도는 Mac 의 시간대로 나눈다. 1분마다 모으므로 자정 무렵 몫은 다음 날로 넘어갈 수 있다(보고 화면이 그렇게 적는다).
 // - 팀장을 닫아도 사용량은 남긴다(이름을 함께 적어 둔다). 프로젝트를 지우면 함께 지운다(ON DELETE CASCADE, db.ts USAGE_TABLES).
 // - 보존 기한은 안쪽 기록과 같은 90일(RECORD_RETENTION_MS)이다. 그보다 오래된 기록은 모으지도 않는다(지운 뒤 다시 들어오지 않게).
@@ -190,6 +192,7 @@ export class UsageLedger {
     return this.db.transaction(() => {
       const prev = this.db.query("SELECT cost_usd, input_tokens, output_tokens, sample_at FROM usage_sessions WHERE provider = ? AND session_id = ?").get(sample.provider, sample.sessionId) as Row | null;
       if (prev && sample.at <= (prev.sample_at as number)) return false;
+      // 처음 보는 세션: 지금의 누적값은 기준값일 뿐이다(언제 쓴 몫인지 모른다). 날짜 칸에는 넣지 않는다(D4-9).
       const grown = (current: number | null, before: unknown): number | null => {
         if (current === null) return null;
         if (typeof before !== "number") return current;
@@ -198,7 +201,7 @@ export class UsageLedger {
       const cost = grown(sample.costUsd, prev?.cost_usd), input = grown(sample.inputTokens, prev?.input_tokens), output = grown(sample.outputTokens, prev?.output_tokens);
       const at = Math.min(sample.at, now);
       const atIso = new Date(at).toISOString(), nowIso = new Date(now).toISOString();
-      if ([cost, input, output].some(value => value !== null && value > 0)) {
+      if (prev && [cost, input, output].some(value => value !== null && value > 0)) {
         this.db.query(`INSERT INTO usage_daily (day, member_id, provider, project_id, member_name, member_kind, cost_usd, input_tokens, output_tokens, samples, last_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
           ON CONFLICT(day, member_id, provider) DO UPDATE SET
@@ -228,6 +231,17 @@ export class UsageLedger {
       }
       return true;
     })();
+  }
+
+  /**
+   * 0.2.7(D4-9): 서버가 새로 띄운 세션을 '0 에서 시작한 세션'으로 적어 둔다. 그래야 그 세션의 첫 표본이 기준값이 아니라 늘어난 몫으로 그날에 든다.
+   * 이미 적힌 세션(본 적이 있다)은 그대로 둔다. 표가 없으면 아무것도 하지 않는다. 적었으면 참.
+   * 표본 시각은 0 으로 둔다: Codex 는 세션을 늦게 알아내(첫 턴 뒤) 그 전에 남은 token_count 도 이 세션의 몫이다.
+   */
+  registerFreshSession(provider: CliProvider, sessionId: string, member: UsageMemberRef, now = Date.now()): boolean {
+    if (!this.available() || !CONTEXT_SESSION_RE.test(sessionId)) return false;
+    return this.db.query(`INSERT OR IGNORE INTO usage_sessions (provider, session_id, member_id, project_id, cost_usd, input_tokens, output_tokens, sample_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?)`).run(provider, sessionId, member.id, member.projectId, provider === "claude" ? 0 : null, new Date(now).toISOString()).changes > 0;
   }
 
   /**

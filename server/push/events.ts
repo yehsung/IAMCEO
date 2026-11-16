@@ -54,7 +54,12 @@ export class PushEventRecorder implements DomainRecorder {
     else this.push.recordEvent({ sourceKey: `report-blocked:${message.id}`, kind: "report_blocked", projectId: message.projectId,
       memberId: message.memberId, target: { screen: "chat", projectId: message.projectId, memberId: message.memberId, messageId: message.id }, occurredAt: this.push.timestamp() });
   }
-  member(before: Member, after: Member): void {
+  /**
+   * context.restartOwned(D2-4·D4-2): 재시작(Mac·실행 엔진)으로 꺼져 서버가 스스로 다시 여는 중인 팀장이다(재시작 깨우기 표식이 기다림·여는 중).
+   * 그동안의 오류(꺼짐 안내, 다시 열기 실패)는 이 팀장 하나로 알리지 않고 사건 상태만 적는다. 한 번의 재시작으로 팀장 수만큼 '오류' 알림이 갔다
+   * (11-13 두 번, 각 15건 — 1분 안에 모두 다시 열렸다). 다시 열기에 실패한 팀장이 있으면 그 묶음이 끝날 때 한 번만 알린다(restartFailures).
+   */
+  member(before: Member, after: Member, context: { restartOwned?: boolean } = {}): void {
     this.requireDomainTransaction();
     this.push.transaction(() => {
       const episode = this.push.getEpisode(after.id) ?? baseline(before);
@@ -63,7 +68,7 @@ export class PushEventRecorder implements DomainRecorder {
       const digest = pushErrorDigest(after.lastError);
       const error = after.status === "error" || digest !== null;
       const newBlocked = blocked && !episode.blockedActive;
-      const newError = error && (!episode.errorActive || (digest !== null && digest !== episode.errorDigest));
+      const newError = error && (!episode.errorActive || (digest !== null && digest !== episode.errorDigest)) && !context.restartOwned;
       if (newBlocked) episode.blockedGeneration++;
       if (newError) episode.errorGeneration++;
       episode.blockedActive = blocked;
@@ -75,6 +80,24 @@ export class PushEventRecorder implements DomainRecorder {
         projectId: after.projectId, memberId: after.id, target: { screen: "team", projectId: after.projectId, memberId: after.id }, occurredAt: this.push.timestamp() });
       if (newError) this.push.recordEvent({ sourceKey: `error:${after.id}:${episode.errorGeneration}`, kind: "error",
         projectId: after.projectId, memberId: after.id, target: { screen: "team", projectId: after.projectId, memberId: after.id }, occurredAt: this.push.timestamp() });
+      this.push.cancelInvalidPending();
+    });
+  }
+  /**
+   * 재시작으로 꺼진 팀장을 서버가 다시 여는 한 묶음이 끝났고, 그 가운데 다시 열지 못한 팀장이 있다. 오류 알림을 한 번만 낸다
+   * (아직 오류 상태인 첫 팀장의 팀 화면으로. 알림 글은 종류별 고정 문구라 이름·수는 싣지 않는다. 대화의 요약 글에 다 있다).
+   * 이미 다른 길로 깨어나 오류가 풀린 팀장은 빼고, 남은 팀장이 없으면 알리지 않는다.
+   */
+  restartFailures(members: readonly Member[]): void {
+    this.requireDomainTransaction();
+    this.push.transaction(() => {
+      const first = members.find(member => this.push.getEpisode(member.id)?.errorActive);
+      if (!first) return;
+      const episode = this.push.getEpisode(first.id)!;
+      episode.errorGeneration++;
+      this.push.saveEpisode(episode);
+      this.push.recordEvent({ sourceKey: `error:${first.id}:${episode.errorGeneration}`, kind: "error",
+        projectId: first.projectId, memberId: first.id, target: { screen: "team", projectId: first.projectId, memberId: first.id }, occurredAt: this.push.timestamp() });
       this.push.cancelInvalidPending();
     });
   }

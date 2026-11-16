@@ -427,6 +427,8 @@ const RESTART_WAKE_KEY = "restartWake";
 
 /** 이 설치가 Tailscale 주소를 연 적이 있다는 기록({ address, at }). 같은 표의 별도 키라 설정 응답에는 나가지 않는다. */
 const TAILNET_SEEN_KEY = "tailnetSeen";
+/** 0.2.7(D4-3): 지금 이어지는 Tailscale 꺼짐에 iPhone 알림을 이미 냈다는 기록({ since }). 서버를 다시 띄워도 같은 꺼짐에 다시 알리지 않는다. */
+const TAILNET_PHONE_ALERT_KEY = "tailnetPhoneAlert";
 /** C8: 대표가 켠 HTTPS 주소(tailscale serve)의 기록({ url, port, at }). 같은 표의 별도 키라 설정 응답에 나가지 않고 이전 판도 무시한다. */
 
 
@@ -1561,6 +1563,22 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     this.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", TAILNET_SEEN_KEY, JSON.stringify({ address: seen.address, at: seen.at }));
   }
 
+  /** D4-3: 지금 이어지는 Tailscale 꺼짐에 iPhone 알림을 냈으면 그 꺼짐의 시작 시각(알림 열쇠). 없거나 읽을 수 없으면 null. */
+  tailnetPhoneAlert(): string | null {
+    const row = this.row("SELECT value FROM settings WHERE key = ?", TAILNET_PHONE_ALERT_KEY);
+    if (!row) return null;
+    try {
+      const saved = JSON.parse(row.value) as { since?: unknown } | null;
+      return saved && typeof saved.since === "string" && saved.since ? saved.since : null;
+    } catch { return null; }
+  }
+
+  /** D4-3: null 이면 지운다(Tailscale 이 다시 켜짐). */
+  setTailnetPhoneAlert(since: string | null): void {
+    if (since === null) { this.run("DELETE FROM settings WHERE key = ?", TAILNET_PHONE_ALERT_KEY); return; }
+    this.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", TAILNET_PHONE_ALERT_KEY, JSON.stringify({ since }));
+  }
+
   /** C8: 대표가 켠 HTTPS 주소의 기록. 켠 적이 없거나 껐으면 null. 모양이 어긋난 값은 없는 것으로 본다. */
   tailnetHttps(): { url: string; port: number; at: string; home?: string } | null {
     const row = this.row("SELECT value FROM settings WHERE key = ?", TAILNET_HTTPS_KEY);
@@ -2209,7 +2227,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const member = this.requireMember(id);
       if (observationOnly) return member;
       // API incidents and usage cards own their notifications; avoid one generic error push per employee.
-      if (!["network_outage", "network_retry", "usage_limit"].includes(member.statusObservation?.error?.code ?? "")) this.recorder?.member(before, member);
+      // D2-4·D4-2: 재시작으로 꺼져 서버가 스스로 다시 여는 중인 팀장의 오류는 그 묶음이 끝날 때 한 번만 알린다(restartOwned).
+      if (!["network_outage", "network_retry", "usage_limit"].includes(member.statusObservation?.error?.code ?? "")) this.recorder?.member(before, member, { restartOwned: this.restartOwned(id) });
       this.emit({ type: "member", member });
       if (member.status !== before.status || member.blockedReason !== before.blockedReason) this.emitProjects();
       // Z: 턴 도중 승인 창·한도·오류로 멈추거나 풀리면 그 팀장이 받은 대표 글의 답 상태가 바뀐다.
@@ -3471,6 +3490,19 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.restartWakes()[memberId] ?? null;
   }
 
+  /** 재시작으로 꺼져 서버가 스스로 다시 열 차례이거나 여는 중이다(표식이 기다림·여는 중). */
+  private restartOwned(memberId: string): boolean {
+    const state = this.getRestartWake(memberId)?.state;
+    return state === "pending" || state === "opening";
+  }
+
+  /** 재시작 다시 열기 한 묶음에서 열지 못한 팀장들: 오류 알림을 한 번만 낸다(D2-4·D4-2). 지운 팀장은 뺀다. */
+  recordRestartFailures(memberIds: readonly string[]): void {
+    const members = memberIds.map(id => this.getMember(id)).filter((member): member is Member => member !== null);
+    if (!members.length) return;
+    this.transaction(() => this.recorder?.restartFailures?.(members));
+  }
+
   /** null 이면 지운다. 화면에 나가는 값이 아니라 알림(event)은 내지 않는다. */
   setRestartWake(memberId: string, wake: RestartWake | null): void {
     this.transaction(() => {
@@ -3729,7 +3761,35 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   private readInputState(memberId: string): RunnerRecoveryState {
     const r = this.leaseRow(memberId, true);
-    return { lease: r ? { memberId, claimId: r.claim_id, leaseId: r.lease_id, identity: json(r.terminal_identity_json), expiresAt: r.expires_at, lastInputSequence: r.last_input_sequence } : null, unresolvedDispatches: this.listDispatches(memberId).filter((d) => ["prepared", "write_started", "unknown"].includes(d.transportState) || d.items.some((item) => { const recovery = this.getDeliveryRecovery(item.deliveryId); return recovery !== null && !(recovery.phase === "waiting" && recovery.reason === "input_busy" || recovery.phase === "needs_owner" && recovery.reason === "stale_instruction") && !["none", "resolved", "stopped"].includes(recovery.phase); })) };
+    return { lease: r ? { memberId, claimId: r.claim_id, leaseId: r.lease_id, identity: json(r.terminal_identity_json), expiresAt: r.expires_at, lastInputSequence: r.last_input_sequence } : null, unresolvedDispatches: this.unresolvedDispatches(memberId) };
+  }
+
+  /**
+   * 풀리지 않은 봉투: 쓰기 결과를 모르거나(prepared·write_started·unknown), 항목 하나라도 전달 확인이 끝나지 않았다
+   * (none·resolved·stopped 가 아니고, 입력칸 대기·낡은 지시로 대표에게 묻는 중도 아니다). 만든 순서.
+   * 11-16(D4-5): 예전에는 그 팀장의 봉투 이력 전체(바쁜 총괄은 560~632개, 본문·기준선 JSON 포함)를 읽어 걸렀다. 한 번에 5ms 쯤인데,
+   * 봉투마다 이것을 부르는 전달 확인 반복(DeliveryRecovery.checkMember)이 이력 크기의 제곱으로 늘어 총괄 타이머가 CPU 로 3~9초 이벤트 루프를 막았다.
+   * 같은 조건을 SQL 로 걸러 풀리지 않은 봉투만 읽는다.
+   */
+  private unresolvedDispatches(memberId: string): DeliveryDispatch[] {
+    return this.rows(`SELECT d.id FROM delivery_dispatches d WHERE d.member_id = ? AND (d.transport_state IN ('prepared','write_started','unknown') OR EXISTS (
+        SELECT 1 FROM delivery_dispatch_items i JOIN delivery_recovery r ON r.delivery_id = i.delivery_id WHERE i.dispatch_id = d.id
+          AND r.phase NOT IN ('none','resolved','stopped')
+          AND NOT (r.phase = 'waiting' AND COALESCE(r.reason, '') = 'input_busy')
+          AND NOT (r.phase = 'needs_owner' AND COALESCE(r.reason, '') = 'stale_instruction')))
+      ORDER BY d.created_at, d.rowid`, memberId).map(row => this.getDispatch(row.id)).filter((d): d is DeliveryDispatch => d !== null);
+  }
+
+  /**
+   * 이 전달이 들어 있는 마지막 봉투(그 팀장의 봉투 가운데, 만든 순서로 마지막). listDispatches(팀장).filter(이 전달).at(-1) 과 같다.
+   * 11-16(D4-5): 전달마다 그 팀장의 봉투 이력 전체를 읽던 것을 색인(delivery_dispatch_items_delivery)으로 바로 찾는다.
+   */
+  latestDispatchFor(memberId: string, deliveryId: string): DeliveryDispatch | null {
+    return this.deliveryReadMemo(`latest-dispatch:${memberId}:${deliveryId}`, () => {
+      const row = this.row(`SELECT d.id FROM delivery_dispatch_items i JOIN delivery_recovery r ON r.delivery_id = i.delivery_id JOIN delivery_dispatches d ON d.id = i.dispatch_id
+        WHERE i.delivery_id = ? AND d.member_id = ? ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1`, deliveryId, memberId);
+      return row ? this.getDispatch(row.id) : null;
+    });
   }
 
   // ---- 전달 복구 CAS / 봉투 ----

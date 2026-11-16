@@ -8,6 +8,7 @@ import { verdictRejudged, type PumpVerdictCode } from "./pump-verdict.ts";
 import { writeStatuslineWrapper } from "./runner/statusline.ts";
 import { emptyBunfig } from "./runner/bun-script.ts";
 import { endedByRestart, RESTART_RESUME_TEXT, RESTART_WAKE_MAX_ATTEMPTS, RESTART_WAKE_PACING, restartNoteIn, type RestartWake, type RestartWakePacing } from "./restart-wake.ts";
+import { UsageLedger } from "./usage.ts";
 // Orchestrator: 전달 펌프, 턴 종료 처리, 압축 판단, 띄우기·잠재우기·다시 열기, 승인 근거 확인(spec §4·§6·§7).
 // 다음은 떼어 낸 모듈이 맡고, 이 클래스는 같은 이름의 공개 메서드로 넘겨준다:
 //   전달 글 delivery-text.ts · 판 정리 board-hygiene.ts · 대표 쪽 흐름 flows/owner.ts · 직원 쪽 흐름 flows/member.ts · 터미널 조작 terminal-control.ts
@@ -137,6 +138,11 @@ export interface OrchestratorTimings extends RestartWakePacing {
   blockedNoticeMs: number;
   /** 0.2.7 묶음 1(점검 D1-2·D3-2): 결재를 올리고 턴을 끝낸 팀장에게 급하지 않은 다른 일을 미루는 시간(기본 3분). */
   askHoldMs: number;
+  /**
+   * 0.2.7(D2-6): CLI 화면의 '응답 기다림(check your network)'이 이만큼 이어져야 인터넷 장애로 보고 대표에게 알린다.
+   * 66초 늦은 응답 한 번에 '팀원이 멈췄습니다'가 갔고, 그 팀원은 곧 턴을 잘 마쳤다(11-16 01:52). 턴이 실제로 연결 오류로 끝나면 곧바로 알린다.
+   */
+  networkRetryNoticeMs: number;
 }
 
 const DEFAULT_TIMINGS: OrchestratorTimings = {
@@ -161,6 +167,7 @@ const DEFAULT_TIMINGS: OrchestratorTimings = {
   writeSettleMs: 30_000,
   engineUnresponsiveMs: 60_000,
   blockedNoticeMs: 5000,
+  networkRetryNoticeMs: 60_000,
   ...RESTART_WAKE_PACING,
 };
 
@@ -268,6 +275,8 @@ interface Runtime {
   inputBusySince: number | null;
   /** 준비 보고(idle)를 기다리기 시작한 때. */
   readySince: number | null;
+  /** 0.2.7(D2-7): 쉬는 중인데 화면에서 입력칸을 못 알아봐 기다리기 시작한 때. */
+  composerWaitSince: number | null;
   /** 압축을 넣으려다 입력칸·창 때문에 미루기 시작한 시각. 오래 이어지면 압축을 접고 전달을 먼저 보낸다. */
   compactBusySince: number | null;
   wantParallel: boolean | null;
@@ -1239,6 +1248,36 @@ export class Orchestrator implements OrchestratorApi {
     });
   }
 
+  /** 0.2.7(D2-6): 응답 기다림(network_retry) 화면을 처음 본 때와 그 확인 타이머. 팀장마다 하나. */
+  private readonly networkRetries = new Map<string, { since: number; generation: number; timer: ReturnType<typeof setTimeout> }>();
+  /**
+   * CLI 화면의 '응답 기다림 · check your network' 를 보았다(retrying) 또는 사라졌다. 처음 보면 networkRetryNoticeMs 뒤에 다시 보고,
+   * 그때도 같은 세션이 그 화면이면 인터넷 장애로 연다(networkFailure: 대표 알림·그 팀장의 전달 보류). 사라지면 아무것도 하지 않는다.
+   * 판정은 화면 근거다: 시간만으로 장애를 열지 않고(그때 다시 본 관측이 여전히 그 화면이어야 한다), 턴을 끝내거나 입력하지도 않는다.
+   */
+  private noteNetworkRetry(member: Member | null, retrying: boolean, memberId = member?.id ?? ""): void {
+    const known = this.networkRetries.get(memberId);
+    if (!retrying || !member) {
+      if (known) { clearTimeout(known.timer); this.networkRetries.delete(memberId); }
+      return;
+    }
+    const generation = this.store.memberRevisions(memberId).sessionGeneration;
+    if (known && known.generation === generation) return;
+    if (known) clearTimeout(known.timer);
+    const timer = setTimeout(() => {
+      if (this.networkRetries.get(memberId)?.timer !== timer) return;
+      this.networkRetries.delete(memberId);
+      if (this.closed) return;
+      try {
+        const current = this.store.getMember(memberId);
+        if (!current || this.store.memberRevisions(memberId).sessionGeneration !== generation || current.statusObservation?.error?.code !== "network_retry") return;
+        this.apiRecovery.networkFailure(current, false);
+      } catch (e) { console.warn("응답 기다림 확인 실패:", (e as Error).message); }
+    }, Math.max(1, this.timings.networkRetryNoticeMs));
+    timer.unref?.();
+    this.networkRetries.set(memberId, { since: Date.now(), generation, timer });
+  }
+
   /** 끊긴 실행을 대화에 남기고 총괄을 깨워 알린다. 실행마다 한 번이다(claimExecutionNotice 안에서만 부른다). */
   private noticeInterrupted(member: Member, run: ExecutionJournal, why: string | ServerTextRef): void {
     this.systemMessage(member.projectId, textRef("chat.run_interrupted", { name: member.name, run: run.runId, why }));
@@ -1319,6 +1358,8 @@ export class Orchestrator implements OrchestratorApi {
   private settleRestartWake(memberId: string, outcome: "resumed" | "dropped" | "failed"): void {
     const wake = this.store.getRestartWake(memberId);
     if (!wake) return;
+    // 지금 도는 다시 열기 묶음의 실패로 센다(묶음이 끝나면 한 번에 알린다). 이미 실패로 닫힌 표식을 다시 닫는 것은 세지 않는다.
+    if (outcome === "failed" && wake.state !== "failed") this.restartBatch?.failed.add(memberId);
     const member = this.store.getMember(memberId);
     if (!member) { this.store.setRestartWake(memberId, null); return; }
     let wakeConductor: string | null = null;
@@ -1343,7 +1384,8 @@ export class Orchestrator implements OrchestratorApi {
         });
       }
       if (outcome === "resumed" && wake.state !== "resumed") this.store.appendActivity(member.id, "system", textRef("activity.restart_reopened"));
-      this.store.setRestartWake(memberId, outcome === "failed" ? { ...wake, state: "failed", runIds: [] }
+      // D2-4: 열지 못한 것은 묶음이 알릴 때까지 '알리지 않음'으로 둔다(묶음 도중 서버가 내려가면 다음 서버의 묶음이 알린다).
+      this.store.setRestartWake(memberId, outcome === "failed" ? { ...wake, state: "failed", runIds: [], ...(wake.state !== "failed" || wake.unreported ? { unreported: true } : {}) }
         : outcome === "resumed" && resumeId ? { ...wake, state: "resumed", runIds: [], resumeId } : null);
       // 총괄의 전달은 트랜잭션이 끝난 뒤에 민다(재시작 복구 중이면 복구 끝의 펌프가 민다).
       this.store.afterCommit(() => { if (wakeConductor && !this.closed && !this.recovering) void this.pump(wakeConductor); });
@@ -1369,7 +1411,11 @@ export class Orchestrator implements OrchestratorApi {
       if (this.pendingLifecycle(memberId) || rt.closing || rt.reopening || rt.starting) continue;
       // 다른 길(대표의 말, 깨우기, 재결합)로 이미 깨어 있다.
       if (member.status !== "offline") { this.settleRestartWake(memberId, "dropped"); continue; }
-      if (wake.state === "failed") continue;
+      if (wake.state === "failed") {
+        // D2-4: 앞 서버의 묶음이 알리기 전에 내려갔다. 이 묶음의 실패로 이어서 알린다.
+        if (wake.unreported) this.restartBatch?.failed.add(memberId);
+        continue;
+      }
       if (wake.state === "opening") {
         // 여는 중이던 시도가 결과를 남기지 못했다(그사이 서버가 내려갔거나, 뜨지 않은 것으로 정리됐다). 한 번만 더 해 본다.
         if (wake.attempts >= RESTART_WAKE_MAX_ATTEMPTS) { this.settleRestartWake(memberId, "failed"); continue; }
@@ -1386,6 +1432,8 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   private restartWaking: Promise<void> | null = null;
+  /** 지금 도는 다시 열기 한 묶음(kickRestartWakes 한 번). 끝나면 프로젝트마다 한 줄 요약, 실패가 있으면 알림 한 번(D2-4·D4-2). */
+  private restartBatch: { projects: Set<string>; opened: Set<string>; failed: Set<string> } | null = null;
   /**
    * 재시작으로 꺼진 팀장을 차례로 다시 연다. recover 가 끝난 뒤와 실행기 상태를 볼 때마다 부른다(엔진이 늦게 뜨면 그때 이어진다).
    * 한 번에 restartWakeParallel 명씩만 연다. 대표의 말이나 지시로 깨우는 기존 길(전달 펌프, 깨우기)은 이 줄을 기다리지 않고,
@@ -1393,19 +1441,65 @@ export class Orchestrator implements OrchestratorApi {
    */
   private kickRestartWakes(): void {
     if (this.closed || this.recovering || this.restartWaking) return;
-    try { if (!this.restartWakeQueue().length) return; }
-    catch (e) { console.error("재시작으로 꺼진 팀장 확인 실패:", e); return; }
-    const opened = new Set<string>();
+    // 묶음을 먼저 연다: 줄을 고르는 동안 닫히는 실패(앞 서버가 여는 도중 내려가 횟수를 다 쓴 팀장)도 이 묶음의 실패로 센다.
+    const batch = { projects: new Set<string>(), opened: new Set<string>(), failed: new Set<string>() };
+    this.restartBatch = batch;
+    let ready = false;
+    try { ready = this.restartWakeQueue().length > 0; }
+    catch (e) { console.error("재시작으로 꺼진 팀장 확인 실패:", e); }
+    if (!ready) {
+      this.restartBatch = null;
+      // D2-4: 앞 서버가 알리지 못한 실패만 있고, 엔진의 답을 기다리는 표식이 남아 있으면 그 표식을 여는 묶음에 함께 싣는다(요약 한 줄·알림 한 번).
+      const waiting = Object.values(this.store.restartWakes()).some(w => w.state === "pending" || w.state === "opening");
+      if (!waiting) { try { this.reportRestartBatch(batch); } catch (e) { console.error("재시작 다시 열기 요약 실패:", e); } }
+      return;
+    }
     const lanes = Math.max(1, Math.floor(this.timings.restartWakeParallel) || 1);
-    const run: Promise<void> = Promise.all(Array.from({ length: lanes }, () => this.restartWakeLane(opened)))
+    const run: Promise<void> = Promise.all(Array.from({ length: lanes }, () => this.restartWakeLane(batch.projects, batch.opened)))
       // 원래 깨어 있던 팀장들이다. 상한을 넘으면 프로젝트마다 한 번만 총괄에게 알린다.
-      .then(() => { if (!this.closed) for (const projectId of opened) this.checkAwakeLimit(projectId); })
+      .then(() => { if (!this.closed) for (const projectId of batch.projects) this.checkAwakeLimit(projectId); })
       .catch(e => console.error("재시작으로 꺼진 팀장을 다시 여는 중 오류:", e))
-      .finally(() => { if (this.restartWaking === run) this.restartWaking = null; });
+      .finally(() => {
+        if (this.restartBatch === batch) this.restartBatch = null;
+        if (!this.closed) { try { this.reportRestartBatch(batch); } catch (e) { console.error("재시작 다시 열기 요약 실패:", e); } }
+        if (this.restartWaking === run) this.restartWaking = null;
+      });
     this.restartWaking = run;
   }
 
-  private async restartWakeLane(opened: Set<string>): Promise<void> {
+  /**
+   * 다시 열기 한 묶음의 결과를 프로젝트마다 대화에 한 줄로 남기고, 다시 열지 못한 팀장이 있으면 iPhone 알림을 한 번만 낸다(D2-4·D4-2).
+   * 다 열렸으면 알림은 없다: 할 일이 없다. 팀장마다의 꺼짐·다시 엶은 지금처럼 그 팀장의 활동에 남는다.
+   */
+  private reportRestartBatch(batch: { opened: Set<string>; failed: Set<string> }): void {
+    const byProject = new Map<string, { opened: Member[]; failed: Member[] }>();
+    const add = (id: string, key: "opened" | "failed") => {
+      const member = this.store.getMember(id);
+      if (!member || this.store.getProject(member.projectId)?.archived) return;
+      const entry = byProject.get(member.projectId) ?? { opened: [], failed: [] };
+      entry[key].push(member);
+      byProject.set(member.projectId, entry);
+    };
+    for (const id of batch.opened) if (!batch.failed.has(id)) add(id, "opened");
+    for (const id of batch.failed) add(id, "failed");
+    // 요약 글·알림과 '알렸다' 표시를 한 번에 남긴다(그 사이 서버가 내려가 두 번 알리거나 빠뜨리지 않게).
+    this.store.transaction(() => {
+      for (const [projectId, { opened, failed }] of byProject) {
+        this.systemMessage(projectId, failed.length
+          ? textRef("chat.restart_reopen_failed_summary", { total: String(opened.length + failed.length), opened: String(opened.length), names: failed.map(m => m.name).join(", ") })
+          : textRef("chat.restart_reopened_summary", { count: String(opened.length) }));
+      }
+      const failed = [...byProject.values()].flatMap(entry => entry.failed.map(m => m.id));
+      if (failed.length) this.store.recordRestartFailures(failed);
+      // 알렸다(지운 팀장·보관한 프로젝트처럼 알리지 않는 것도). 다음 서버가 다시 알리지 않는다.
+      for (const id of batch.failed) {
+        const wake = this.store.getRestartWake(id);
+        if (wake?.unreported) { const { unreported: _done, ...rest } = wake; this.store.setRestartWake(id, rest); }
+      }
+    });
+  }
+
+  private async restartWakeLane(opened: Set<string>, reopenedMembers: Set<string>): Promise<void> {
     while (!this.closed && !this.recovering) {
       const member = this.restartWakeQueue()[0];
       if (!member) return;
@@ -1418,6 +1512,7 @@ export class Orchestrator implements OrchestratorApi {
       if (this.closed) return;
       if (reopened) {
         opened.add(member.projectId);
+        reopenedMembers.add(member.id);
         void this.pump(member.id);
       } else if (this.store.getMember(member.id) && this.pendingLifecycle(member.id)?.intent !== "start") {
         // 꺼진 채 두고 다음 팀장으로 넘어간다. 오류 안내는 reopen 이 lastError 에 남겼다.
@@ -1868,8 +1963,14 @@ export class Orchestrator implements OrchestratorApi {
    * 타이머 콜백에서 새어 나간 예외는 서버 프로세스를 끝낸다.
    */
   private tickStep(name: string, step: () => void): void {
-    try { step(); } catch (e) { this.tickFailed(name, e); }
+    // 11-16(D4-5): 단계마다 따로 잰다(서버 조립이 지연 감시를 넣었을 때). 1초 넘게 걸린 틱이 다시 나오면 로그에 그 단계 이름이 남는다.
+    // 이름에는 팀장 ID 를 넣지 않는다(compact:<id> → tick:compact).
+    const measured = this.tickMeasure;
+    try { if (measured) measured(`tick:${name.split(":")[0]}`, step); else step(); } catch (e) { this.tickFailed(name, e); }
   }
+  private tickMeasure: (<T>(name: string, work: () => T) => T) | null = null;
+  /** 서버 조립(bin/iamceo.ts)이 지연 감시(LoopMonitor.run)를 넘긴다. 넘기지 않으면 지금처럼 재지 않는다. */
+  measureTickSteps(run: <T>(name: string, work: () => T) => T): void { this.tickMeasure = run; }
   private readonly tickFailures = new Map<string, number>();
   private tickFailed(name: string, error: unknown): void {
     // 같은 실패가 틱마다 되풀이되면 1분에 한 줄만 남긴다.
@@ -1957,6 +2058,7 @@ export class Orchestrator implements OrchestratorApi {
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
     for (const memberId of [...this.blockedNoticeTimers.keys()]) this.cancelBlockedNotices(memberId);
+    for (const memberId of [...this.networkRetries.keys()]) this.noteNetworkRetry(null, false, memberId);
     this.toolPermissions.dispose();
     for (const rt of this.runtimes.values()) {
       if (rt.compactTimer) clearTimeout(rt.compactTimer);
@@ -2967,12 +3069,26 @@ export class Orchestrator implements OrchestratorApi {
     this.cancelBlockedNotices(memberId);
     this.autoTrusts.delete(memberId);
     this.store.setRestartWake(memberId, null);
+    this.noteNetworkRetry(null, false, memberId);
     this.store.removeMember(memberId);
+    // D4-12: 장애·한도 복구 상태에 지운 팀장이 남지 않게 한다.
+    this.apiRecovery?.forget();
     this.store.afterCommit(() => {
       for (const suffix of ["rules.md", "mcp.json", "settings.json"]) {
         try { unlinkSync(join(this.config.home, "run", `${memberId}.${suffix}`)); } catch { /* 만든 적이 없거나 이미 없다 */ }
       }
     });
+  }
+
+  private usageLedger: UsageLedger | null = null;
+  /**
+   * 0.2.7(D4-9): 서버가 새로 띄운 세션을 사용량 장부에 '0 에서 시작'으로 적는다. 처음 보는 세션의 누적값은 기준값으로만 삼으므로(usage.ts),
+   * 적지 않으면 새 세션의 첫 몫이 빠진다. 장부가 없거나 실패해도 띄우기는 그대로다.
+   */
+  private registerUsageSession(member: Member, sessionId: string): void {
+    try {
+      (this.usageLedger ??= new UsageLedger(this.store.db)).registerFreshSession(member.cli === "codex" ? "codex" : "claude", sessionId, { id: member.id, projectId: member.projectId, name: member.name, kind: member.kind });
+    } catch (e) { console.warn("사용량 세션 기록 실패:", (e as Error).message); }
   }
 
   /** sent 는 start 에 실제로 넘긴 설정이다. 띄우는 동안 바뀐 값을 적으면 옛 값으로 돌면서 맞춘 것으로 기록된다. */
@@ -2981,6 +3097,8 @@ export class Orchestrator implements OrchestratorApi {
     const currentError = runner instanceof CoreRunner ? runner.observationState(memberId)?.lastError : null;
     const stored = this.store.requireMember(memberId);
     this.store.patchMember(memberId, { sessionId: started.sessionId, paneId: started.paneId, ...(!currentError && !(started.rejoined && stored.fenceCode === "control_unknown") && !this.keepsUsageNote(stored) ? { lastError: null } : {}) });
+    // D4-9: 새로 띄운 세션(이어 연 것·이미 떠 있던 칸에 붙은 것이 아니다)의 사용량은 0 부터 센다.
+    if (!started.rejoined && started.sessionId && started.sessionId !== stored.sessionId) this.registerUsageSession(stored, started.sessionId);
     if (!started.rejoined) this.runtime(memberId).launchedAt = Date.now();
     // 이미 떠 있던 칸에 붙었으면 이번 인자가 들어간 것이 아니다.
     if (!started.rejoined && sent) {
@@ -3991,6 +4109,22 @@ export class Orchestrator implements OrchestratorApi {
     }
     rt.readySince = null;
 
+    // D2-7: 쉬는 중을 알렸어도 화면에서 입력칸을 아직 알아볼 수 없다(Codex 는 쉬는 중을 알린 뒤 입력칸을 그리기 전이 있다). 지금 넣으면 실행기가
+    // 같은 화면 판독으로 거절해 실패 실행 기록만 쌓이고 시도 수가 는다(11-15 새 팀장: 4번 실패 뒤 18초 만에 전달). 입력칸이 보이면 실행기가
+    // input_ready 로 다시 민다(화면 근거). 오래 이어지면 예전처럼 '입력칸에 넣지 못함'으로 보류한다(입력·Enter 는 보내지 않는다).
+    if (runner instanceof CoreRunner && runner.composerUnidentified(member.id)) {
+      rt.pumpStage = "await_ready";
+      rt.composerWaitSince ??= Date.now();
+      if (Date.now() - rt.composerWaitSince >= this.timings.inputBusyLimitMs) {
+        rt.composerWaitSince = null;
+        for (const d of pending) this.hold(d, "input_busy");
+        return this.judged(memberId, "input_hold");
+      }
+      this.scheduleRetry(memberId, rt, Date.now() + this.timings.inputBusyRetryMs);
+      return this.judged(memberId, "waking");
+    }
+    rt.composerWaitSince = null;
+
     const used = this.activeAutomaticTurns(), limit = this.store.getSettings().maxConcurrentTurns;
     if (used >= limit) {
       this.waiting.add(memberId);
@@ -4687,7 +4821,8 @@ export class Orchestrator implements OrchestratorApi {
           this.apiRecovery.usageFailure(member, e.usageLimit.raw, e.usageLimit);
           this.releaseSlots();
         }
-        if (e.observation?.error?.code === "network_retry") this.apiRecovery.networkFailure(member, false);
+        // D2-6: 응답 기다림 화면 한 번은 장애가 아니다. networkRetryNoticeMs 동안 이어질 때만 장애로 연다(noteNetworkRetry).
+        if (e.observation !== undefined) this.noteNetworkRetry(member, e.observation?.error?.code === "network_retry");
         // 한도로 보류 중인 팀장의 막힘 사유(usage_limit)는 CLI 의 쉬는 중·일하는 중 보고(막힘 사유 없음)로 지우지 않는다. 한도 그룹에서 풀릴 때 지운다.
         const keepUsageReason = e.blockedReason === null && this.store.requireMember(member.id).blockedReason === "usage_limit" && this.apiRecovery.usageLimited(member.id);
         if ((e.blockedReason !== undefined && !keepUsageReason) || e.observation !== undefined) this.store.patchMember(member.id, {
@@ -4716,7 +4851,11 @@ export class Orchestrator implements OrchestratorApi {
         this.onContextUsage(member, e);
         return;
       case "session":
-        if (e.sessionId !== member.sessionId) this.store.patchMember(member.id, { sessionId: e.sessionId });
+        if (e.sessionId !== member.sessionId) {
+          this.store.patchMember(member.id, { sessionId: e.sessionId });
+          // D4-9: 서버가 띄운 세션이 새 ID 를 얻었다(새로 띄운 Claude, Codex 세션을 알아냄). 사용량은 0 부터 센다.
+          if (e.sessionId) this.registerUsageSession(member, e.sessionId);
+        }
         return;
       case "compacted": {
         const rt = this.runtime(member.id);
@@ -5115,7 +5254,7 @@ export class Orchestrator implements OrchestratorApi {
   private runtime(memberId: string): Runtime {
     let rt = this.runtimes.get(memberId);
     if (!rt) {
-      rt = { contextCandidate: null, turn: null, pumping: null, pumpStage: null, pumpSince: null, pumpReported: false, again: false, posted: false, delegated: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, readySince: null, compactBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, holdUntil: 0, configGaveUp: null, launchedAt: null, quickExits: 0, quickExitAt: 0, quickExitNotified: false, askHold: null };
+      rt = { contextCandidate: null, turn: null, pumping: null, pumpStage: null, pumpSince: null, pumpReported: false, again: false, posted: false, delegated: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, readySince: null, composerWaitSince: null, compactBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, holdUntil: 0, configGaveUp: null, launchedAt: null, quickExits: 0, quickExitAt: 0, quickExitNotified: false, askHold: null };
       this.runtimes.set(memberId, rt);
     }
     return rt;

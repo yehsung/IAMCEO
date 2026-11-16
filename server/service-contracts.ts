@@ -160,7 +160,10 @@ export interface LifecycleJournal {
 export interface DomainRecorder {
   decision(before: Decision | null, after: Decision): void;
   message(message: Message): void;
-  member(before: Member, after: Member): void;
+  /** context.restartOwned: 재시작으로 꺼져 서버가 스스로 다시 여는 중인 팀장(그 오류는 묶음으로 알린다, D2-4·D4-2). */
+  member(before: Member, after: Member, context?: { restartOwned?: boolean }): void;
+  /** 재시작 다시 열기 묶음에서 열지 못한 팀장들. 오류 알림을 한 번만 낸다. */
+  restartFailures?(members: readonly Member[]): void;
 }
 export interface PushReportGroupStore {
   /** 같은 project/member의 첫 보고부터 고정 120초, 창 연장/취소 그룹 부활 없음. */

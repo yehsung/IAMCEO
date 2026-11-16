@@ -64,6 +64,11 @@ export interface RestartWake {
   runIds: string[];
   /** 이어가기 글의 전달 ID. 그 팀장에게 기다리던 다른 전달보다 먼저, 혼자 나간다. */
   resumeId: string | null;
+  /**
+   * 0.2.7(D2-4): 열지 못했고(failed) 아직 묶음 요약·알림으로 알리지 않았다. 그 묶음이 끝나기 전에 서버가 내려가면 다음 서버의 묶음이 이어서 알린다.
+   * 이 칸이 없는 지난 판의 failed 표식은 이미 알린 것으로 본다(배포 직후 옛 실패를 다시 알리지 않는다).
+   */
+  unreported?: boolean;
 }
 
 /** 저장된 값 하나를 표식으로 읽는다. 모양이 다르면 null(없는 것으로 본다). */
@@ -81,6 +86,7 @@ export function parseRestartWake(value: unknown): RestartWake | null {
     attempts: Number.isSafeInteger(v.attempts) && (v.attempts as number) >= 0 ? v.attempts as number : 0,
     runIds: Array.isArray(v.runIds) ? v.runIds.filter((id): id is string => typeof id === "string") : [],
     resumeId: typeof v.resumeId === "string" ? v.resumeId : null,
+    ...(v.state === "failed" && v.unreported === true ? { unreported: true } : {}),
   };
 }
 

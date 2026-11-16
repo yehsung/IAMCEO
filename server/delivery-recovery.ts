@@ -12,7 +12,7 @@ export type DeliveryRecoveryStore = Pick<Store,
   "legacyAssignedMember" | "getConductor" | "unassignedMessageOperation" | "setNeedsOwnerCounter" | "transaction" | "afterCommit" | "requireProject" | "listProjects" | "requireMember" | "getMember" | "listMembers" | "memberRevisions" | "getSettings" |
   "listDeliveries" | "requireDelivery" | "getDelivery" | "enqueue" | "getDeliveryRecovery" | "updateDeliveryRecovery" | "listDeliveryRecoveries" |
   "withDeliveryRead" | "deliveryNoticePreviews" | "listUnlinkedFailedMessages" | "listDeliveryRecoveryCandidates" | "hasDeliveryAttention" |
-  "getDeliveryRetry" | "patchDeliveryRetry" | "saveDispatch" | "getDispatch" | "listDispatches" | "updateDispatch" | "inputState" |
+  "getDeliveryRetry" | "patchDeliveryRetry" | "saveDispatch" | "getDispatch" | "listDispatches" | "latestDispatchFor" | "updateDispatch" | "inputState" |
   "deliveryRecoveryOperation" | "markDelivered" | "markHeld" | "markFailed" | "setDeliveryStatus" | "setMessageDelivery" |
   "listMissingReportNotices" | "deliveryWait" | "detectDeliveryStalls" | "deliveryStalled" | "recheckPendingDelivery" | "getMessage" | "requireMessage" | "listMessagePage" | "getDecision" | "setDecisionStatus" | "reopenDecision" | "getTodo" | "todoRevision" | "appendActivity">;
 
@@ -113,7 +113,8 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     if (this.store.requireProject(id).archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다", "project_not_found");
   }
   private latest(delivery: Delivery): DeliveryDispatch | null {
-    return this.store.listDispatches(delivery.memberId).filter(d => d.items.some(item => item.deliveryId === delivery.id)).at(-1) ?? null;
+    // 11-16(D4-5): 전달마다 그 팀장의 봉투 이력 전체를 읽지 않는다(Store.latestDispatchFor 가 같은 답을 색인으로 찾는다).
+    return this.store.latestDispatchFor(delivery.memberId, delivery.id);
   }
   private validDispatch(dispatch: DeliveryDispatch): boolean {
     // JSON columns are a persistence boundary, unlike ordinary typed arguments.
@@ -428,13 +429,18 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     // An older unknown write is still a physical fence even if a later attempt succeeded.
     // Read it by its own identity/barrier; later success cannot settle that earlier RPC.
     const latest = new Set(deliveries.map(d => this.latest(d)?.dispatchId));
+    // 조작권은 기다림(await) 사이에만 바뀔 수 있다. 예전에는 봉투마다 조작권을 다시 읽었고, 그 읽기가 봉투 이력 전체를 거르는
+    // inputState 라 바쁜 총괄(봉투 560개)에서 이 반복 하나가 3초 넘게 이벤트 루프를 막았다(11-16 D4-5). 기다린 뒤에만 다시 읽는다(판정은 같다).
+    let leaseChecked = false;
     for (const dispatch of this.store.listDispatches(deliveries[0].memberId)) {
-      if (this.closed || this.store.inputState(dispatch.memberId).lease) return;
+      if (this.closed) return;
+      if (!leaseChecked) { if (this.store.inputState(dispatch.memberId).lease) return; leaseChecked = true; }
       if (latest.has(dispatch.dispatchId) || !["prepared", "write_started", "unknown"].includes(dispatch.transportState)) continue;
       const member = this.store.requireMember(dispatch.memberId);
       const runner = this.options.runner(member);
       if (!runner?.inspectDelivery || !this.validDispatch(dispatch) || member.sessionId !== dispatch.identity.sessionId || this.store.memberRevisions(member.id).sessionGeneration !== dispatch.identity.sessionGeneration) continue;
       let inspection: DeliveryInspection;
+      leaseChecked = false;
       try { inspection = await runner.inspectDelivery(this.member(member), dispatch); }
       catch { continue; } // Failed reads leave the original physical fence intact.
       if (!this.closed && !this.store.inputState(member.id).lease && !this.store.requireProject(member.projectId).archived) this.settlePhysical(dispatch, inspection);

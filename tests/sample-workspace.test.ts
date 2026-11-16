@@ -484,6 +484,8 @@ async function buildSample(lang: Lang): Promise<string> {
     ];
     for (const [key, cli, weight] of usageSeats) {
       const member = store.requireMember(id(key));
+      // 서버가 띄운 세션이다(0.2.7 D4-9: 처음 보는 세션의 누적값은 기준값일 뿐이라, 띄울 때 0 에서 시작으로 적는다).
+      ledger.registerFreshSession(cli, sessionOf(key), { id: member.id, projectId: member.projectId, name: member.name, kind: member.kind }, BASE - 14 * 86_400_000);
       let cost = 0, input = 0, output = 0;
       for (let daysAgo = 13; daysAgo >= 0; daysAgo--) {
         // 주말(이틀)은 덜 쓴다. 숫자는 정해 두어 자료가 실행마다 같다.

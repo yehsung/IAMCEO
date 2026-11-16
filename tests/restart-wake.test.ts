@@ -368,7 +368,9 @@ describe("재시작으로 끊긴 일 이어가기", () => {
     expect(resumeTurns(next, lead.id)[0]!.run.resumeFlag).toBe(next.member(lead.id).sessionId);
     expect(next.member(lead.id).sessionId).toBe(lead.sessionId);
     expect(next.store.listDeliveries(next.project.id).filter((d) => d.memberId === lead.id).map((d) => d.text === RESTART_RESUME_TEXT || d.kind === "user_message")).not.toContain(false);
-    expect(next.texts().filter((m) => m.kind === "시스템").map((m) => m.body)).toEqual([expect.stringContaining("재시작으로 끊겨 이어서 하게 했습니다")]);
+    // 0.2.7(D2-4): 다시 열기 묶음의 한 줄 요약은 따로 본다(restart-push.test.ts).
+    expect(next.texts().filter((m) => m.kind === "시스템" && m.textCode !== "chat.restart_reopened_summary").map((m) => m.body)).toEqual([expect.stringContaining("재시작으로 끊겨 이어서 하게 했습니다")]);
+    expect(next.texts().filter((m) => m.textCode === "chat.restart_reopened_summary").map((m) => m.body)).toEqual(["Mac이나 실행 엔진이 다시 시작되어 꺼졌던 팀원 1명을 다시 열었습니다."]);
   });
 
   test("스스로 다시 여는 데 실패하면 예전처럼 총괄을 깨워 '실행 중단'을 알린다", async () => {

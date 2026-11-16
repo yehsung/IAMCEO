@@ -1,3 +1,4 @@
+import { pushPreferenceOf } from "../../shared/push.ts";
 import type { PushDeliveryState, PushEnvironment, PushProviderStatus } from "../../shared/push.ts";
 import type { APNsClient, APNsNotification, APNsResult } from "./apns.ts";
 import { PushStore } from "./store.ts";
@@ -100,7 +101,7 @@ export class PushWorker {
           registration.device.state !== "active" || !registration.deviceToken || !registration.device.enabled ||
           !["authorized", "provisional", "ephemeral"].includes(registration.device.authorization) ||
           Date.parse(registration.device.expiresAt) <= this.now() ||
-          (event.kind !== "test" && !registration.device.preferences[event.kind]) || !this.push.isEventCurrent(event)) terminal = "cancelled";
+          (pushPreferenceOf(event.kind) !== null && !registration.device.preferences[pushPreferenceOf(event.kind)!]) || !this.push.isEventCurrent(event)) terminal = "cancelled";
         else if (row.attempts >= 5) terminal = "failed";
         if (terminal) {
           this.push.db.query("UPDATE push_deliveries SET state=?,finished_at=?,lease_until=NULL WHERE id=? AND state IN ('queued','retry')")
@@ -142,7 +143,7 @@ export class PushWorker {
       registration.deviceToken !== claim.notification.deviceToken || registration.device.state !== "active" ||
       !registration.device.enabled || !["authorized", "provisional", "ephemeral"].includes(registration.device.authorization) ||
       Date.parse(registration.device.expiresAt) <= this.now() || !event || !this.push.isEventCurrent(event) ||
-      (event.kind !== "test" && !registration.device.preferences[event.kind])) {
+      (pushPreferenceOf(event.kind) !== null && !registration.device.preferences[pushPreferenceOf(event.kind)!])) {
       this.finish(claim, "cancelled", "cancelled");
       return;
     }
@@ -191,7 +192,7 @@ export class PushWorker {
           registration.device.state !== "active" || !registration.deviceToken ||
           !["authorized", "provisional", "ephemeral"].includes(registration.device.authorization) ||
           Date.parse(registration.device.expiresAt) <= this.now() || !event || !this.push.isEventCurrent(event) ||
-          (event.kind !== "test" && !registration.device.preferences[event.kind])) {
+          (pushPreferenceOf(event.kind) !== null && !registration.device.preferences[pushPreferenceOf(event.kind)!])) {
           this.finish(claim, "cancelled", reason, status); return;
         }
         const delay = [5_000, 15_000, 60_000, 300_000][Math.min(Math.max(claim.attempts - 1, 0), 3)];

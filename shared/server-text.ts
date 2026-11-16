@@ -68,6 +68,9 @@ export const SERVER_TEXTS = {
   "chat.api_resume_failed": { ko: "{name}의 인터넷 연결 복구 후 이어가기가 3회 실패했습니다. 터미널을 확인해 주세요.", en: "{name} failed to continue 3 times after the internet connection came back. Check the terminal." },
   "chat.api_outage": { ko: "인터넷 연결이 불안정해 팀원 {count}명이 멈췄습니다. 연결이 돌아오면 자동으로 이어 갑니다.", en: "The internet connection is unstable, so {count} staff stopped. They continue automatically when it is back." },
   "chat.api_recovered": { ko: "인터넷 연결이 돌아와 팀원 {count}명이 이어서 일합니다.", en: "The internet connection is back, and {count} staff continue working." },
+  // 0.2.7(D2-4·D4-2): 재시작(Mac·실행 엔진)으로 꺼진 팀원을 서버가 다시 연 한 묶음의 요약. 팀원마다 '오류' 알림을 보내던 것을 대신한다.
+  "chat.restart_reopened_summary": { ko: "Mac이나 실행 엔진이 다시 시작되어 꺼졌던 팀원 {count}명을 다시 열었습니다.", en: "The Mac or the engine restarted; {count} staff whose sessions closed were reopened." },
+  "chat.restart_reopen_failed_summary": { ko: "Mac이나 실행 엔진이 다시 시작되어 꺼졌던 팀원 {total}명 가운데 {opened}명을 다시 열었습니다. 다시 열지 못한 팀원: {names}. 팀 화면에서 깨워 주세요.", en: "The Mac or the engine restarted; reopened {opened} of {total} staff whose sessions closed. Couldn't reopen: {names}. Wake them from the Team screen." },
   // 실행이 끊긴 까닭(chat.run_interrupted 의 why)
   "why.restart_session_off": { ko: "Mac이나 실행 엔진이 다시 시작되어 세션이 꺼졌습니다", en: "the Mac or the engine restarted and the session closed" },
   "why.session_vanished": { ko: "종료 근거 없이 세션이 사라졌습니다", en: "the session disappeared without a recorded exit" },

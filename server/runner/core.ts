@@ -83,6 +83,11 @@ export interface CoreRunnerDeps {
 }
 interface Track {
   composerEmpty: boolean | null;
+  /**
+   * 0.2.7(D2-7): 쉬는 CLI 의 화면에서 입력칸을 알아보았는가(빈 칸이든 사람이 쓴 글이든). false 면 입력칸을 아직 못 알아본다:
+   * Codex 는 쉬는 중을 알린 뒤에도 입력칸을 그리기 전이 있다(11-15 새로 띄운 팀장, 넣기 4번 실패). null 은 아직 모른다.
+   */
+  composerSeen: boolean | null;
   statusPublishedAt: number;
   publishedStatus: string | null;
   pendingStatus: Extract<RunnerEvent, { type: "status" }> | null;
@@ -420,7 +425,7 @@ export class CoreRunner implements FullRunner {
     if (this.closed) throw new CoreError("closed", "CoreRunner shut down while starting; terminal remains owned by core");
     const launch = terminal.labels["iamceo.operation"] ? this.deps.recoveryStore?.getLifecycleJournal?.(terminal.labels["iamceo.operation"]) : null;
     const launchedAt = launch?.memberId === member.id && launch.intent === "start" ? launch.createdAt : null;
-    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, controlUncertain: false, restorePending: false, lost: false, silentSince: null, settledAt: -Infinity, settleTries: 0, status: null, statusKey: null, composerEmpty: null, statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
+    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, controlUncertain: false, restorePending: false, lost: false, silentSince: null, settledAt: -Infinity, settleTries: 0, status: null, statusKey: null, composerEmpty: null, composerSeen: null, statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
       epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, bindingSince: terminal.labels["iamceo.startedAt"] || launchedAt || new Date().toISOString(), binding: null, compact: null, compactHook: null,
       dispatches: [], evidence: new Map(), logFile: null, lastError: null, nextPollAt: 0, pollDelay: this.pollMs, observedAt: new Date().toISOString(), failures: 0, failure: null };
     // The terminal exists whether or not the persisted input state can be read. Throwing here left a terminal that
@@ -602,9 +607,15 @@ export class CoreRunner implements FullRunner {
       this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: state === "error" || !!usage || !!failed, ...(state === "error" || usage || failed ? { errorText: track.lastError! } : {}), ...(track.lost ? { inferred: true } : {}) });
     }
     if (status === "gone") track.pending = false;
-    if (screen !== null && track.composerEmpty === false && ["idle", "done", "error"].includes(state ?? "") && !usage && (providerFor(track.member) === "claude" ? inputText(screen) : codexDraft(screen)) === "") {
-      track.composerEmpty = true;
-      this.event(track, { type: "input_ready", memberId: track.member.id });
+    if (screen !== null && ["idle", "done", "error"].includes(state ?? "") && !usage) {
+      const draft = providerFor(track.member) === "claude" ? inputText(screen) : codexDraft(screen);
+      // D2-7: 입력칸을 못 알아보던 CLI 가 빈 입력칸을 그렸으면, 글이 남아 있던 칸이 비었을 때처럼 미뤄 둔 전달을 다시 밀게 한다.
+      const unseen = track.composerSeen === false;
+      track.composerSeen = draft !== null;
+      if (draft === "" && (track.composerEmpty === false || unseen)) {
+        track.composerEmpty = true;
+        this.event(track, { type: "input_ready", memberId: track.member.id });
+      }
     }
     const setup = screen !== null && !usage && status === "blocked" ? (providerFor(track.member) === "claude" ? claudeFolderTrust : codexFolderTrust)(screen, track.member.cwd) : null;
     // Labels for the owner only; neither sends a key. A dialog that merely reads like folder trust is never answered.
@@ -715,6 +726,15 @@ export class CoreRunner implements FullRunner {
     });
     track.refresh = pending;
     return pending;
+  }
+  /**
+   * 0.2.7(D2-7): 쉬는 중을 알렸지만 마지막으로 본 화면에서 입력칸을 알아보지 못했다. 지금 넣으면 send 가 같은 화면 판독으로 거절하고
+   * (input_busy, 'Cannot identify an empty CLI composer') 실패 실행 기록만 남는다. 입력칸이 보이면 input_ready 로 알린다.
+   */
+  composerUnidentified(memberId: string): boolean {
+    const track = this.tracks.get(memberId);
+    if (!track || track.composerSeen !== false || track.terminal.state !== "live") return false;
+    return ["idle", "done", "error"].includes(this.stateOf(track, track.terminal) ?? "");
   }
   observationState(memberId: string): { observedAt: string; failures: number; failure: string | null; lastError: string | null; identity: RunnerTerminalIdentity; inputEpoch: number; setupError: Track["setupError"]; turn: number | null; state: string | null } | null {
     const track = this.tracks.get(memberId);
@@ -837,6 +857,7 @@ export class CoreRunner implements FullRunner {
       // An empty composer never establishes readiness; only the OSC gate above can permit input.
       const draft = providerFor(member) === "claude" ? inputText(screen.text) : codexDraft(screen.text);
       track.composerEmpty = draft === "";
+      track.composerSeen = draft !== null;
       if (draft !== "") return { ok: false, reason: "input_busy", retryable: false, deliveryEffect: "not_written", detail: draft === null ? "Cannot identify an empty CLI composer" : "A user draft is present; IAMCEO leaves it untouched" };
       // 11-16: 뒤 작업만 남은 Claude, 로그인 밖의 API 오류로 턴을 끝낸 Claude 에는 넣는다(core 에게는 working). 넣기 직전에 화면(일하는 중의
       // 상태 줄 없음)과 Claude 자기 기록(지금 업무의 턴이 닫혀 있음)으로 다시 본다. 그 사이 뒤 작업 알림으로 Claude 가 스스로 새 턴을 열었으면

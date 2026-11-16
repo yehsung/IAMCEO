@@ -1,7 +1,7 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import { DEFAULT_PUSH_BUNDLE_ID, PUSH_REPORT_GROUP_WINDOW_MS } from "../../shared/push.ts";
-import type { PushAuthorization, PushDeliveryState, PushEnvironment, PushProviderStatus, PushReportGroup, RegisterPushDeviceRequest } from "../../shared/push.ts";
+import { DEFAULT_PUSH_BUNDLE_ID, PUSH_REPORT_GROUP_WINDOW_MS, pushPreferenceOf } from "../../shared/push.ts";
+import type { PushAuthorization, PushDeliveryState, PushEnvironment, PushEventKind, PushProviderStatus, PushReportGroup, RegisterPushDeviceRequest } from "../../shared/push.ts";
 import type { Message } from "../../shared/types.ts";
 import type { PushReportGroupStore } from "../service-contracts.ts";
 import { ApiError } from "../store.ts";
@@ -23,7 +23,7 @@ export interface PushStoreOptions {
   providers?: () => readonly PushProviderStatus[];
 }
 export interface PushEvent {
-  id: string; sourceKey: string; kind: PushKind | "test"; projectId: string | null; memberId: string | null;
+  id: string; sourceKey: string; kind: PushEventKind; projectId: string | null; memberId: string | null;
   target: PushEventTarget; occurredAt: string; expiresAt: string;
 }
 export interface PushDelivery {
@@ -120,7 +120,7 @@ export class PushStore implements PushReportGroupStore {
   private ready(row: DeviceRow): boolean { return providerUsable(this.provider(row.bundle_id, row.environment)); }
   private eligible(row: DeviceRow, kind: PushEvent["kind"], at: string): boolean {
     return row.state === "active" && !!row.token && !!row.enabled && authorized(row.authorization) && row.expires_at > at &&
-      this.ready(row) && (kind === "test" || storedPushPreferences(row.preferences)[kind]);
+      this.ready(row) && (pushPreferenceOf(kind) === null || storedPushPreferences(row.preferences)[pushPreferenceOf(kind)!]);
   }
   registerDevice(id: string, request: RegisterPushDeviceRequest, language: TextLang | null = null): PushDevice {
     uuid(id);
@@ -261,6 +261,8 @@ export class PushStore implements PushReportGroupStore {
   }
   isEventCurrent(value: PushEvent): boolean {
     if (value.kind === "test") return value.target.screen === "home";
+    // D4-3: Tailscale 이 다시 켜지면 아직 나가지 않은 알림을 cancelSource 로 거둔다. 그 전까지는 유효하다.
+    if (value.kind === "tailnet_off") return value.target.screen === "home";
     if (!this.projectActive(value.projectId)) return false;
     if (value.kind === "decision") {
       if (value.target.screen !== "inbox") return false;
@@ -292,6 +294,11 @@ export class PushStore implements PushReportGroupStore {
     if (!memberId) return false;
     try { return !!this.one("SELECT 1 FROM decisions WHERE member_id=? AND status='open' AND tool_permission_json IS NOT NULL", memberId); }
     catch { return false; }
+  }
+  /** 이 사건(sourceKey)의 아직 나가지 않은 전달을 거둔다. 사건이 없으면 아무것도 하지 않는다(D4-3: Tailscale 이 다시 켜짐). */
+  cancelSource(sourceKey: string): void {
+    const event = this.eventBySource(sourceKey);
+    if (event) this.run("UPDATE push_deliveries SET state='cancelled',finished_at=? WHERE event_id=? AND state IN ('queued','retry')", this.timestamp(), event.id);
   }
   cancelInvalidPending(): void {
     this.transaction(() => {

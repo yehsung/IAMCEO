@@ -12,6 +12,10 @@
 // - 0.2.5 부터(COMPAT_SINCE_0_2_5): server.id 와 home 으로 읽는 서버 신원이 서버의 실제 신원과 같은 서버인지(연결되면 보낼 글을
 //   쓴 서버에 묶는다. 다르면 이 서버에 쓴 글을 보내지 않고 '다른 서버에 보내려던 글'로 둔다), 연결된 기기의 끊기 단추
 //   (canRevokeOthers: 서버가 도는 Mac 은 모든 줄, 다른 기기는 자기 줄만), 끊기 거절을 코드(device_revoke_local_only)로 알아보는지.
+// - 0.2.6 부터(COMPAT_SINCE_0_2_6): 검사 이름과 상관없이 모든 응답에서(scan026) 대표 글의 답 상태(reply: 대화의 '답 쓰는 중' 줄),
+//   서버가 만든 글의 코드(대화 글·활동 줄·결재의 textCode·textParams·textLang, 결재의 optionTexts·closeReasonText·reopenNoteText:
+//   화면 언어가 그린 언어와 다르면 코드로 다시 그린다), 팀장 오류 줄의 코드(lastErrorCode: 영어 화면의 오류 줄)를 그 앱이 그대로 쓰는지.
+//   0.2.6 이 모르는 글·오류 코드는 받은 문장 그대로 보인다(설계된 대체). 새 서버의 새 글이면 기록으로 남겨 allow.json 으로만 넘긴다.
 // 의도한 변경이면 allow.json 에 이유와 함께 적는다.
 import Foundation
 
@@ -197,6 +201,205 @@ func checkRevokeButtons(_ value: Any, onServerMac: Bool) -> String? {
 }
 #endif
 
+#if COMPAT_SINCE_0_2_6
+/// 0.2.6 ChatReplyBoard 가 그리는 답 상태 두 묶음(태그 원문 그대로. releases.json 의 mirrored 가 두 줄이 태그에 그대로 있는지 본다).
+/// 0.2.6 은 대표 글(mine)의 reply 가운데 이 두 묶음에 든 state 만 본다. 모르는 state 는 그 팀장의 답 상태 줄을 그리지 않는다.
+enum ReplyBoard026 {
+    static let open: Set<String> = ["queued", "behind", "waking", "checking", "blocked", "delivered", "working"]
+    static let settled: Set<String> = ["replied", "no_reply", "stopped"]
+}
+
+/// 응답 안에서 0.2.6 이 답 상태를 읽거나 화면 언어로 다시 그리는 항목(앱이 응답의 형마다 꺼내는 자리).
+struct Shown026 {
+    var messages: [Message] = []
+    var decisions: [Decision] = []
+    var activities: [Activity] = []
+    var members: [Member] = []
+}
+
+func shown026(_ value: Any) -> Shown026 {
+    var out = Shown026()
+    func take(_ state: ProjectState?) {
+        guard let state else { return }
+        out.messages += state.messages
+        out.decisions += state.decisions
+        out.members += state.members
+    }
+    switch value {
+    case let snapshot as SyncSnapshot: take(snapshot.state)
+    case let state as ProjectState: take(state)
+    case let page as MessagePage: out.messages = page.items
+    case let message as Message: out.messages = [message]
+    case let list as [Message]: out.messages = list
+    case let decision as Decision: out.decisions = [decision]
+    case let list as [Activity]: out.activities = list
+    case let event as RealtimeEvent:
+        out.messages = event.message.map { [$0] } ?? []
+        out.decisions = event.decision.map { [$0] } ?? []
+        out.activities = event.activity.map { [$0] } ?? []
+        out.members = event.member.map { [$0] } ?? []
+    default: break
+    }
+    return out
+}
+
+/// 원문(JSON)에서 같은 자리의 대화 글. 0.2.6 은 reply 를 try? 로 읽어(모양이 어긋나면 기록 없이 nil) 해석 결과만으로는 버린 것을 알 수 없다.
+func rawMessages026(_ data: Data, type: String) -> [[String: Any]] {
+    guard let root = try? JSONSerialization.jsonObject(with: data) else { return [] }
+    let object = root as? [String: Any]
+    switch type {
+    case "SyncSnapshot": return (object?["state"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+    case "ProjectState": return object?["messages"] as? [[String: Any]] ?? []
+    case "MessagePage": return object?["items"] as? [[String: Any]] ?? []
+    case "Message": return object.map { [$0] } ?? []
+    case "[Message]": return root as? [[String: Any]] ?? []
+    case "RealtimeEvent": return (object?["message"] as? [String: Any]).map { [$0] } ?? []
+    default: return []
+    }
+}
+
+/// 0.2.6 대화의 '답 쓰는 중'(ChatReplyBoard.statuses): 대표 글의 reply 를 읽어 open·settled 의 state 만 그린다.
+/// - reply 를 못 읽으면(모양이 어긋남) 0.2.6 은 기록 없이 없는 것으로 읽는다: 그 글의 답 상태 줄이 조용히 사라진다.
+/// - 모르는 state 는 그리지 않는다. since 를 시각으로 못 읽으면 '· N분째'가 빠지고 화면의 답 글과 견주지 못한다(parseISODate, 태그 원문).
+func replyProblems026(_ shown: Shown026, raw: [[String: Any]]) -> [String] {
+    var problems: [String] = []
+    var byID: [String: Message] = [:]
+    for message in shown.messages where byID[message.id] == nil { byID[message.id] = message }
+    for object in raw {
+        guard let value = object["reply"], !(value is NSNull) else { continue }
+        let id = object["id"] as? String ?? "?"
+        guard let message = byID[id] else { problems.append("답 상태가 실린 글 \(id) 를 읽지 못했다"); continue }
+        guard let reply = message.reply else {
+            problems.append("글 \(id) 의 답 상태(reply)를 읽지 못했다: 0.2.6 대화에서 '답 쓰는 중' 줄이 조용히 사라진다"); continue
+        }
+        guard message.mine else { problems.append("대표 글이 아닌 글 \(id) 에 답 상태가 실렸다: 0.2.6 은 대표 글의 답 상태만 본다"); continue }
+        if !ReplyBoard026.open.contains(reply.state), !ReplyBoard026.settled.contains(reply.state) {
+            problems.append("글 \(id) 의 답 상태 '\(reply.state)' 를 0.2.6 이 모른다: 그 팀장의 답 상태 줄을 그리지 않는다")
+        }
+        if reply.memberId.isEmpty { problems.append("글 \(id) 의 답 상태에 받는 팀장(memberId)이 비었다") }
+        if parseISODate(reply.since) == nil {
+            problems.append("글 \(id) 의 답 상태 since(\(reply.since ?? "없음"))를 시각으로 읽지 못했다: 0.2.6 이 걸린 시간을 붙이지 못하고 화면의 답 글과 견주지 못한다")
+        }
+    }
+    return problems
+}
+
+/// 코드와 값 안의 코드 가운데 0.2.6 표(ServerTextCatalog, 태그 원문)에 없는 것.
+/// ko·en 틀의 값 자리는 같다(0.2.6 의 tests/server-text.test.ts 가 지켰다). 그래서 한국어 틀로 그려 보면 영어 화면도 같은 값으로 그려진다.
+func unknownCodes026(_ ref: ServerTextRef) -> [String] {
+    var out = ServerText.template(ref.code, language: .ko) == nil ? [ref.code] : []
+    let params = ref.params ?? [:]
+    for key in params.keys.sorted() { if case .ref(let inner)? = params[key] { out += unknownCodes026(inner) } }
+    return out
+}
+
+/// 0.2.6 이 이 코드를 그 화면 언어로 다시 그리는가(localizeServerText 가 부르는 태그의 ServerText.render·titleAndBody 그대로).
+/// title 이 있으면 대화 글·카드처럼 제목과 함께 그린다(`<코드>.title` 이 없으면 제목은 비어 있어야 한다).
+/// - 모르는 코드(값 안의 코드 포함)나 모르는 제목 코드: 받은 문장 그대로 보인다. 새 서버의 새 글이면 의도한 일이라 기록(allow.json 으로 넘긴다).
+/// - 아는 코드인데 그리지 못함(값이 빠졌거나 모양이 다름): 서버가 그 코드의 값을 바꿨다. 실패.
+func textProblem026(_ ref: ServerTextRef, title: String?, language: AppLanguage, place: String) -> String? {
+    let unknown = unknownCodes026(ref)
+    if !unknown.isEmpty {
+        for code in unknown { CompatProbe.records.append("모르는 글 코드: '\(code)' 위치 \(place)") }
+        return nil
+    }
+    if let title, !title.isEmpty, ServerText.titleRef(ref) == nil {
+        CompatProbe.records.append("모르는 글 코드: '\(ref.code).title' 위치 \(place)")
+        return nil
+    }
+    let drawn = title.map { ServerText.titleAndBody(ref, title: $0, language: language) != nil } ?? (ServerText.render(ref, language: language) != nil)
+    return drawn ? nil : "\(place) 의 글 코드 '\(ref.code)' 를 0.2.6 이 \(language.rawValue) 화면으로 다시 그리지 못한다(값이 빠졌거나 모양이 다르다): 받은 문장 그대로 보인다"
+}
+
+/// 서버가 만든 글(대화 글·활동 줄·결재 카드)의 코드를, 그린 언어(textLang)가 아닌 화면 언어로 0.2.6 이 다시 그리는가.
+func textProblems026(_ shown: Shown026) -> [String] {
+    var problems: [String] = []
+    /// 0.2.6 은 화면 언어가 그린 언어와 다를 때만 다시 그린다(ServerText.needsLocalizing, 태그 원문). 어느 언어에서도 아니면 그린 언어를 모르는 것이다.
+    func screen(_ textLang: String?, place: String) -> AppLanguage? {
+        if let other = [AppLanguage.en, .ko].first(where: { ServerText.needsLocalizing(textLang, language: $0) }) { return other }
+        problems.append("\(place) 에 글 코드가 있는데 그린 언어(textLang \(textLang ?? "없음"))를 0.2.6 이 몰라 화면 언어로 다시 그리지 않는다")
+        return nil
+    }
+    func draw(_ ref: ServerTextRef, title: String?, language: AppLanguage, place: String) {
+        if let problem = textProblem026(ref, title: title, language: language, place: place) { problems.append(problem) }
+    }
+    for message in shown.messages {
+        guard let code = message.textCode else { continue }
+        let place = "글 \(message.id)"
+        guard let language = screen(message.textLang, place: place) else { continue }
+        draw(ServerTextRef(code: code, params: message.textParams), title: message.title, language: language, place: place)
+    }
+    for activity in shown.activities {
+        guard let code = activity.textCode else { continue }
+        let place = "활동 줄 \(activity.id)"
+        guard let language = screen(activity.textLang, place: place) else { continue }
+        draw(ServerTextRef(code: code, params: activity.textParams), title: nil, language: language, place: place)
+    }
+    for decision in shown.decisions {
+        guard decision.textCode != nil || decision.optionTexts != nil || decision.closeReasonText != nil || decision.reopenNoteText != nil else { continue }
+        let place = "결재 \(decision.id)"
+        guard let language = screen(decision.textLang, place: place) else { continue }
+        if let code = decision.textCode { draw(ServerTextRef(code: code, params: decision.textParams), title: decision.title, language: language, place: place) }
+        for option in decision.options {
+            guard let texts = decision.optionTexts?[option.k] else { continue }
+            draw(texts.label, title: nil, language: language, place: "\(place) 선택지 \(option.k)")
+            if let desc = texts.desc { draw(desc, title: nil, language: language, place: "\(place) 선택지 \(option.k) 설명") }
+        }
+        if let ref = decision.closeReasonText { draw(ref, title: nil, language: language, place: "\(place) 닫힌 이유") }
+        if let ref = decision.reopenNoteText { draw(ref, title: nil, language: language, place: "\(place) 다시 연 까닭") }
+    }
+    return problems
+}
+
+/// 0.2.6 팀장의 오류 줄(ServerErrorText.display(lastError, code: errorTextCode), 태그 원문): 영어 화면은 문장이 그 코드의 대표 문장과 같을 때만 영어다.
+/// 0.2.6 이 모르는 코드는 기록(allow.json), 아는 코드인데 문장이 다르면(서버가 문장만 바꿨다) 실패.
+func lastErrorProblems026(_ shown: Shown026) -> [String] {
+    var problems: [String] = []
+    for member in shown.members {
+        guard let code = member.lastErrorCode else { continue }
+        let place = "팀장 \(member.id) 의 오류 줄"
+        guard ServerErrorText.text(code, language: .en) != nil else {
+            CompatProbe.records.append("모르는 오류 코드: '\(code)' 위치 \(place)"); continue
+        }
+        let error = member.lastError ?? ""
+        if ServerErrorText.display(error, code: member.errorTextCode, language: .en) == error {
+            problems.append("\(place)('\(error)')이 0.2.6 영어 화면에서 영어로 바뀌지 않는다: 코드 \(code) 의 대표 문장과 다르다")
+        }
+    }
+    return problems
+}
+
+/// 0.2.6 해석기는 검사 이름과 상관없이 모든 응답을 본다. 문제는 실패, 0.2.6 이 모르는 코드는 기록(allow.json 으로만 넘긴다).
+func scan026(_ value: Any, data: Data, type: String) -> [String] {
+    let shown = shown026(value)
+    return replyProblems026(shown, raw: rawMessages026(data, type: type)) + textProblems026(shown) + lastErrorProblems026(shown)
+}
+
+/// 견본으로 고른 응답에 0.2.6 이 읽는 칸이 실제로 실렸는가(비어서 통과하는 견본이 아니어야 한다). 서버가 칸을 빼면 여기서 잡힌다.
+func checkPresent026(_ name: String, _ value: Any) -> String? {
+    let shown = shown026(value)
+    switch name {
+    case "reply-shown":
+        guard shown.messages.contains(where: { $0.mine && $0.reply != nil }) else { return "답 상태(reply)가 실린 대표 글이 없다: 0.2.6 대화에서 '답 쓰는 중'이 사라진다" }
+    case "server-text":
+        let coded = shown.messages.contains { $0.textCode != nil } || shown.activities.contains { $0.textCode != nil }
+            || shown.decisions.contains { $0.textCode != nil || $0.optionTexts != nil || $0.closeReasonText != nil || $0.reopenNoteText != nil }
+        guard coded else { return "서버가 만든 글의 코드(textCode 등)가 실린 항목이 없다: 0.2.6 영어 화면이 서버 글을 영어로 다시 그리지 못한다" }
+    case "server-text-card":
+        // 서버가 만든 카드(도구 승인): 제목·본문 코드와 값, 모든 선택지의 이름 코드가 함께 와야 한 카드가 한 언어로 보인다.
+        guard let decision = shown.decisions.first else { return "형이 맞지 않음" }
+        guard decision.textCode != nil, !(decision.textParams ?? [:]).isEmpty else { return "카드의 글 코드·값(textCode·textParams)이 없다: 0.2.6 영어 화면에서 카드가 한국어로 보인다" }
+        let missing = decision.options.filter { decision.optionTexts?[$0.k] == nil }.map(\.k)
+        guard missing.isEmpty else { return "선택지 \(missing.joined(separator: ", ")) 의 이름 코드(optionTexts)가 없다: 0.2.6 영어 화면에서 그 선택지가 한국어로 보인다" }
+    case "last-error-code":
+        guard shown.members.contains(where: { $0.lastErrorCode != nil }) else { return "오류 줄 코드(lastErrorCode)가 실린 팀장이 없다: 0.2.6 영어 화면에서 오류 줄이 한국어로 보인다" }
+    default:
+        return "알 수 없는 검사 '\(name)'"
+    }
+    return nil
+}
+#endif
+
 /// 해석은 되지만 출시 앱이 따로 거는 조건. 어긋나면 그 기능이 조용히 꺼진다(AppStore 의 같은 판정을 옮겨 왔다).
 func check(_ name: String, _ value: Any) -> String? {
     switch name {
@@ -210,6 +413,9 @@ func check(_ name: String, _ value: Any) -> String? {
     #if COMPAT_SINCE_0_2_5
     case "revoke-buttons-mac": return checkRevokeButtons(value, onServerMac: true)
     case "revoke-buttons-remote": return checkRevokeButtons(value, onServerMac: false)
+    #endif
+    #if COMPAT_SINCE_0_2_6
+    case "reply-shown", "server-text", "server-text-card", "last-error-code": return checkPresent026(name, value)
     #endif
     case "contract-v2":
         // AppStore: contractVersion == 2 && operations/realtime == true 가 아니면 v1 쓰기와 3초 조회로 내려간다.
@@ -303,6 +509,9 @@ func check(_ name: String, _ value: Any) -> String? {
             failures += 1; continue
         }
         var problems = entry.checks.compactMap { check($0, value) }
+        #if COMPAT_SINCE_0_2_6
+        problems += scan026(value, data: data, type: entry.type)
+        #endif
         for record in CompatProbe.records {
             if let allow = allows.first(where: { ($0.release ?? release) == release && ($0.file ?? entry.file) == entry.file && record.contains($0.contains) }) {
                 allowed += 1

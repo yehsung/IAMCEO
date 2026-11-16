@@ -1,1 +1,10 @@
-[]
+[
+  { "release": "v0.2.6", "contains": "모르는 글 코드: 'card.replaced'",
+    "reason": "0.2.7 묶음 4 의 새 글 코드(새 카드로 대신해 닫힌 이유). 0.2.6 은 모르는 코드의 글을 받은 문장(보고 언어) 그대로 보인다(ServerText.swift 의 설계된 대체): 뜻은 같고, 보고 언어와 다른 화면 언어에서만 그 언어로 바뀌지 않는다" },
+  { "release": "v0.2.6", "contains": "모르는 글 코드: 'chat.owner_delivery_behind'",
+    "reason": "0.2.7 묶음 1 의 새 글 코드('하던 일을 마치는 중' 30분 지연 알림). 0.2.6 은 받은 문장(보고 언어) 그대로 보인다(설계된 대체)" },
+  { "release": "v0.2.6", "contains": "모르는 글 코드: 'word.owner_message'",
+    "reason": "0.2.7 묶음 1 의 새 낱말 코드(chat.owner_delivery_behind 의 값). 바깥 글 코드도 0.2.6 이 몰라 글 전체가 받은 문장 그대로 보인다" },
+  { "release": "v0.2.6", "contains": "모르는 글 코드: 'activity.urgent_interrupt'",
+    "reason": "0.2.7 묶음 1 의 새 활동 줄 코드(급한 지시로 하던 턴을 멈춤). 0.2.6 은 받은 문장(보고 언어) 그대로 보인다(설계된 대체)" }
+]

@@ -19,6 +19,8 @@
 // mirrorOnly 항목은 빌드하지 않고, Harness.swift 가 옮겨 쓴 줄이 그 태그의 파일에 그대로 있는지만 본다(AppStore 의 확장처럼
 // 따로 빌드할 수 없는 파일에서 해석 뒤의 판정 몇 줄을 옮겨 쓸 때).
 // defines 는 그 태그의 빌드에만 켜는 Swift 조건(Harness.swift 의 #if)이다. 뒤 판은 앞 판의 조건을 함께 켠다(0.2.5 = 0.2.4 + 0.2.5).
+// 0.2.6 부터의 해석기는 모든 응답에서 답 상태·서버 글 코드·오류 줄 코드를 본다. 그 앱이 모르는 새 글 코드는 받은 문장 그대로 보이므로
+// 실패가 아니라 기록으로 남고, allow.json 에 그 판과 이유를 적어야 통과한다(새 서버가 코드를 더할 때마다 그 앱에서 어떻게 보이는지 정한다).
 // iPhone 과 Mac 이 같은 태그로 나가면 해석 코드가 같다(플랫폼 조건은 AppVersion.platform 한 줄). 그래서 태그마다 한 항목이고,
 // appHeaders.platform 은 그 판에서 서버가 다른 기기로 보는 쪽(QR 로 붙은 iPhone)을 적는다. 서버가 도는 Mac 의 앱이 받는 응답은
 // tests/compat-dump.test.ts 가 macos 머리글로 따로 받는다(연결된 기기).
@@ -219,6 +221,17 @@ type Json = Record<string, any>;
  */
 export interface Mutation { name: string; file: string; appHeaders?: true; since?: string; mutate: (body: Json) => boolean }
 const NOT_THIS_SERVER = "00000000-0000-4000-8000-000000000000";
+const SINCE_0_2_6 = "COMPAT_SINCE_0_2_6";
+/** 응답 안의 대화 글(형마다 자리가 다르다: 목록·페이지·동기화·상태·실시간 사건). */
+function messagesIn(body: Json): Json[] {
+  if (Array.isArray(body)) return body;
+  if (Array.isArray(body.items)) return body.items;
+  if (Array.isArray(body.state?.messages)) return body.state.messages;
+  if (Array.isArray(body.messages)) return body.messages;
+  return body.message ? [body.message] : [];
+}
+const withReply = (body: Json) => messagesIn(body).find(message => message.reply && typeof message.reply === "object");
+const withCode = (body: Json, code: string) => messagesIn(body).find(message => message.textCode === code);
 export const MUTATIONS: Mutation[] = [
   { name: "필드의 형이 바뀜(bootstrap.cli 가 배열)", file: "bootstrap.json",
     mutate: body => typeof body.cli === "string" && (body.cli = ["iamceo"], true) },
@@ -260,6 +273,33 @@ export const MUTATIONS: Mutation[] = [
     mutate: body => body.canRevokeOthers === true && (body.canRevokeOthers = false, true) },
   { name: "거절 코드가 바뀜(0.2.5 가 까닭을 알아보지 못해 목록을 다시 읽지 않는다)", file: "devices-revoke-refused.json", appHeaders: true, since: "COMPAT_SINCE_0_2_5",
     mutate: body => body.code === "device_revoke_local_only" && (body.code = "forbidden", true) },
+  // 0.2.6: 대표 글의 답 상태(reply), 서버가 만든 글의 코드(textCode·textParams·textLang·optionTexts·reopenNoteText), 팀장 오류 줄 코드(lastErrorCode).
+  { name: "답 상태의 모양이 어긋남(memberId 빠짐: 0.2.6 이 답 상태를 기록 없이 버린다)", file: "messages-page-project.json", appHeaders: true, since: SINCE_0_2_6,
+    mutate: body => { const message = withReply(body); return !!message && (delete message.reply.memberId, true); } },
+  { name: "0.2.6 이 모르는 답 상태(그 팀장의 답 상태 줄을 그리지 않는다)", file: "sync-project.json", appHeaders: true, since: SINCE_0_2_6,
+    mutate: body => { const message = withReply(body); return !!message && (message.reply.state = "thinking", true); } },
+  { name: "답 상태의 since 가 시각이 아님", file: "state.json", appHeaders: true, since: SINCE_0_2_6,
+    mutate: body => { const message = withReply(body); return typeof message?.reply.since === "string" && (message.reply.since = "어제", true); } },
+  { name: "대표 글의 답 상태가 빠짐(0.2.6 대화에서 '답 쓰는 중'이 사라진다)", file: "ws-message.json", appHeaders: true, since: SINCE_0_2_6,
+    mutate: body => { const message = withReply(body); return !!message && (delete message.reply, true); } },
+  { name: "글 코드의 값이 빠짐(0.2.6 이 영어 화면으로 다시 그리지 못한다)", file: "messages-page-member.json", appHeaders: true, since: SINCE_0_2_6,
+    mutate: body => { const message = withCode(body, "chat.owner_message_late"); return typeof message?.textParams?.name === "string" && (delete message.textParams.name, true); } },
+  { name: "제목 코드가 없는 글에 제목이 실림(0.2.6 이 모르는 제목 코드)", file: "messages-page-project.json", appHeaders: true, since: SINCE_0_2_6,
+    mutate: body => { const message = withCode(body, "chat.run_interrupted"); return message?.title === "" && (message.title = "실행 중단", true); } },
+  { name: "활동 줄의 글 코드가 0.2.6 이 모르는 코드로 바뀜", file: "activity.json", appHeaders: true, since: SINCE_0_2_6,
+    mutate: body => { const line = (body as unknown as Json[]).find(item => item.textCode === "activity.compact_done"); return !!line && (line.textCode = "activity.compaction_done", true); } },
+  { name: "카드의 그린 언어(textLang)가 빠짐(0.2.6 이 다시 그리지 않는다)", file: "decision-tool-permission.json", appHeaders: true, since: SINCE_0_2_6,
+    mutate: body => typeof body.textLang === "string" && (delete body.textLang, true) },
+  { name: "카드의 글 코드가 빠짐", file: "decision-tool-permission.json", appHeaders: true, since: SINCE_0_2_6,
+    mutate: body => typeof body.textCode === "string" && (delete body.textCode, delete body.textParams, true) },
+  { name: "선택지 이름 코드의 형이 바뀜(0.2.6 이 선택지 코드를 모두 버린다)", file: "decision-tool-permission.json", appHeaders: true, since: SINCE_0_2_6,
+    mutate: body => typeof body.optionTexts?.allow?.label === "object" && (body.optionTexts.allow.label = "허용", true) },
+  { name: "다시 연 까닭 코드의 값이 빠짐(아는 코드인데 그리지 못한다)", file: "decision-reopened-files.json", appHeaders: true, since: SINCE_0_2_6,
+    mutate: body => !!body.reopenNoteText && (body.reopenNoteText = { code: "card.reopen_by_owner" }, true) },
+  { name: "오류 줄 코드가 빠짐", file: "sync-project.json", appHeaders: true, since: SINCE_0_2_6,
+    mutate: body => { const coded = (body.state?.members ?? []).filter((member: Json) => member.lastErrorCode); for (const member of coded) delete member.lastErrorCode; return coded.length > 0; } },
+  { name: "오류 줄이 코드의 대표 문장과 다름(0.2.6 영어 화면에 한국어 오류 줄)", file: "sync-project-full.json", appHeaders: true, since: SINCE_0_2_6,
+    mutate: body => { const member = body.state?.members?.find((item: Json) => item.lastErrorCode); return !!member && (member.lastError = "인터넷이 끊겨 멈췄습니다", true); } },
 ];
 
 /** 그 태그의 해석기에 거는 망가뜨리기. */

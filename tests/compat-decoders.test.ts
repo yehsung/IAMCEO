@@ -2,8 +2,11 @@
 // 출시 앱(0.2.4 부터)의 덤프가 그 앱이 실제로 보내는 머리글로 받은 것인지 견주기. git 은 부르지 않는다(가짜 show).
 // 실제 태그로 빌드해 덤프를 읽는 것은 scripts/check.sh compat 이 한다.
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { appHeadersDumpDir, checkAppHeaders, loadReleases, MUTATIONS, mutationsFor, releaseSource, type ReleaseFile, type SliceFile } from "../scripts/compat-decoders/run.ts";
-import { APP_HEADERS } from "../shared/types.ts";
+import { SERVER_TEXTS } from "../shared/server-text.ts";
+import { APP_HEADERS, REPLY_STATES } from "../shared/types.ts";
 
 const VIEW = [
   "import SwiftUI",
@@ -151,11 +154,70 @@ describe("releases.json 과 자체 검사", () => {
     expect(since025.every(mutation => mutation.appHeaders)).toBe(true);
     expect(names("v0.2.3").length).toBe(7);
     expect(names("v0.2.4")).toEqual(MUTATIONS.filter(mutation => !mutation.since).map(mutation => mutation.name));
-    expect(names("v0.2.5")).toEqual(MUTATIONS.map(mutation => mutation.name));
+    expect(names("v0.2.5")).toEqual(MUTATIONS.filter(mutation => !mutation.since || mutation.since === "COMPAT_SINCE_0_2_5").map(mutation => mutation.name));
     // 영어 화면의 한국어 거절 문장은 대표 문장이 아니어야 0.2.5 에서도 잡힌다(대표 문장이면 0.2.5 는 영어로 바꿔 보인다).
     const body = { error: "Other devices can be disconnected on the Mac that runs the server" };
     MUTATIONS.find(mutation => mutation.name === "영어 화면에 한국어 거절 문장")!.mutate(body);
     expect(body.error).not.toBe("다른 기기는 서버가 도는 Mac에서 끊을 수 있습니다");
     expect(body.error).toMatch(/\p{Script=Hangul}/u);
+  });
+});
+
+describe("0.2.6: 답 상태와 서버 글 코드", () => {
+  const releases = new Map(loadReleases().map(release => [release.tag, release]));
+  const v026 = releases.get("v0.2.6")!;
+  const objects = v026.files.filter((file): file is Exclude<ReleaseFile, string> => typeof file !== "string");
+
+  test("v0.2.6 은 앞 판의 조건을 함께 켜고, 서버 글을 그리는 원문(ServerText·코드 표·날짜 읽기)과 답 상태 형을 함께 둔다", () => {
+    expect(v026.appHeaders).toEqual({ version: "0.2.6", platform: "ios", apiLevel: 1 });
+    expect(v026.defines).toEqual(["COMPAT_SINCE_0_2_4", "COMPAT_SINCE_0_2_5", "COMPAT_SINCE_0_2_6"]);
+    const paths = v026.files.map(file => typeof file === "string" ? file : file.path);
+    expect(paths).toEqual(expect.arrayContaining(["native/Sources/IAMCEO/Services/ServerText.swift", "native/Sources/IAMCEO/Models/ServerTextCatalog.swift"]));
+    expect(objects.find(file => file.path.endsWith("Design/Components.swift") && "from" in file && file.from.startsWith("/// 날짜 문자열 파싱"))).toBeDefined();
+    const reply = objects.find(file => file.path.endsWith("Design/ReplyPresentation.swift"));
+    expect(reply && "from" in reply && reply.from).toBe("/// 대표 글 하나의 답 상태.");
+    // 0.2.6 조건은 0.2.6 부터의 태그에만(앞 판 해석기에는 reply·textCode 를 읽는 원문이 없다).
+    for (const tag of ["v0.2.2", "v0.2.3", "v0.2.4", "v0.2.5"]) expect(releases.get(tag)?.defines ?? []).not.toContain("COMPAT_SINCE_0_2_6");
+  });
+
+  test("서버가 보내는 답 상태는 모두 0.2.6 이 그리는 상태다(모르는 state 는 0.2.6 대화에서 그 줄이 사라진다)", () => {
+    // releases.json 의 mirrored(태그 원문과 run.ts 가 견준다)에서 0.2.6 ChatReplyBoard 의 두 묶음을 읽는다.
+    const reply = objects.find(file => file.path.endsWith("Design/ReplyPresentation.swift"));
+    const mirrored = reply && "mirrored" in reply ? reply.mirrored ?? [] : [];
+    const set = (name: string) => {
+      const line = mirrored.find(item => item.startsWith(`static let ${name}: Set<String> = [`));
+      return [...(line ?? "").matchAll(/"([a-z_]+)"/g)].map(match => match[1]!);
+    };
+    const known = [...set("open"), ...set("settled")];
+    expect(set("open").length).toBeGreaterThan(0);
+    expect(set("settled").length).toBeGreaterThan(0);
+    expect(REPLY_STATES.filter(state => !known.includes(state))).toEqual([]);
+  });
+
+  test("0.2.6 몫 망가뜨리기는 0.2.6 해석기 조건이 있는 태그에만 건다", () => {
+    const since026 = MUTATIONS.filter(mutation => mutation.since === "COMPAT_SINCE_0_2_6");
+    expect(since026.length).toBeGreaterThanOrEqual(10);
+    expect(since026.every(mutation => mutation.appHeaders)).toBe(true);
+    // 답 상태·글 코드·카드·활동 줄·오류 줄을 모두 건드린다.
+    expect(since026.map(mutation => mutation.file)).toEqual(expect.arrayContaining(
+      ["messages-page-project.json", "sync-project.json", "state.json", "ws-message.json", "messages-page-member.json", "activity.json",
+        "decision-tool-permission.json", "decision-reopened-files.json", "sync-project-full.json"]));
+    const names = (tag: string) => mutationsFor(releases.get(tag)!).map(mutation => mutation.name);
+    for (const tag of ["v0.2.2", "v0.2.3", "v0.2.4", "v0.2.5"]) expect(names(tag).filter(name => since026.some(mutation => mutation.name === name))).toEqual([]);
+    expect(names("v0.2.6")).toEqual(MUTATIONS.map(mutation => mutation.name));
+    // 답 상태를 지우거나 바꾸는 망가뜨리기는 덤프의 실제 모양(대표 글의 reply)에 걸린다.
+    const page: Record<string, any> = { items: [{ id: "a", mine: false }, { id: "b", mine: true, reply: { state: "queued", memberId: "m", since: "2026-11-16T00:00:00.000Z" } }] };
+    expect(MUTATIONS.find(mutation => mutation.name.startsWith("답 상태의 모양이 어긋남"))!.mutate(page)).toBe(true);
+    expect(page.items[1].reply).toEqual({ state: "queued", since: "2026-11-16T00:00:00.000Z" });
+  });
+
+  test("allow.json 은 지금 서버가 실제로 쓰는 글 코드만, 판과 이유를 붙여 허용한다(지난 기록이 남아 새 어긋남을 덮지 않게)", () => {
+    const allows = JSON.parse(readFileSync(join(import.meta.dir, "../scripts/compat-decoders/allow.json"), "utf8")) as { release?: string; file?: string; contains: string; reason: string }[];
+    for (const allow of allows) {
+      expect(allow.reason.length).toBeGreaterThan(10);
+      expect(releases.has(allow.release ?? "")).toBe(true);
+      const code = /^모르는 글 코드: '([^']+)'$/.exec(allow.contains)?.[1];
+      if (code) expect(Object.keys(SERVER_TEXTS)).toContain(code);
+    }
   });
 });
